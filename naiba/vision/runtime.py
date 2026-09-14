@@ -310,6 +310,9 @@ class VisionRouter:
             "request_timeout_seconds": 15,
             "request_attempts": 1,
             "reasoning_enabled": False,
+            # 本地锁占用者标签：本地视觉能力探测也可能占住全进程唯一的本地锁，
+            # 标上角色后，同一时刻在等锁的主对话能说出「谁在用」。
+            "lock_label": "视觉能力探测",
         }
         try:
             self._runtime.complete({**profile, "reasoning_effort": "off"}, messages, options, None)
@@ -440,6 +443,9 @@ class VisionRouter:
             "temperature": 0.2,
             "max_tokens": max_tokens,
             "stream": False,
+            # 本地锁占用者标签：视觉识别不走对话的 status 通道（下面是 status=None），
+            # 占住本地锁时界面完全看不到它。标上角色，等锁的一方就能指名道姓。
+            "lock_label": "视觉识别",
         }
         if timeout_seconds is None:
             try:
@@ -594,6 +600,9 @@ class VisionRouter:
         纯文本聊天模型不接收图片，改写为明确文本占位（文件路径引用 + 工具提示），
         何时看图、看什么由模型主动调用 vision_analyze 工具决定（与其它工具一致）。
 
+        本地（kind=local）多模态大脑额外走「每请求图片总量上限」，见
+        ``_cap_local_history_images``；在线模型不受影响。
+
         ``cancel_event`` / ``vision_budget`` 为历史兼容参数（自动路由已移除，不再使用）。
 
         返回 (new_history, note)。note 非空表示本轮发生了安全清洗。
@@ -603,7 +612,15 @@ class VisionRouter:
         # 多模态聊天模型始终直接收到原图；占位改写只服务纯文本聊天模型。
         brain_supports = self.brain_supports_images(brain_profile)
         if brain_supports:
-            return history, ""
+            # 本地多模态大脑同样直发原图，但必须有「每请求图片总量上限」：
+            # core.history 的 MODEL_IMAGE_HISTORY_LIMIT=3 是**每条 user 消息**的封顶
+            # （计数在 per-message 循环里重置），全对话没有任何总量约束，而多模态分支
+            # 过去直接 return 原样放行。16 小时会话可累积上百张 ~1MB 图并在每轮全量
+            # 重发 ⇒ 请求体上百 MB、本地视觉塔 prefill 做不完 ⇒ 界面永久停在
+            # 「等待本地模型资源」。在线模型不动（保住 1.6.0 的前缀缓存契约）。
+            if str(brain_profile.get("kind") or "").strip().lower() != "local":
+                return history, ""
+            return self._cap_local_history_images(history)
 
         try:
             max_images = max(1, int(cfg.get("max_images", 4)))
@@ -635,6 +652,96 @@ class VisionRouter:
             new_history.append({**item, "content": [{"type": "text", "text": merged_text}]})
         note = f"已移除 {removed_images} 张图片（纯文本模型，图片仅以路径引用）" if removed_images else ""
         return new_history, note
+
+    # 本地多模态模型单次请求的图片上限：张数 + base64 载荷字节（≈ 原始字节 × 4/3）。
+    # 目的不是「提升效果」，而是把本地视觉塔的 prefill 成本压回常量级：本地后端做不完
+    # prefill 时通常不报错、只是不吐首字节，界面便表现为永久卡死（见模块内注释）。
+    LOCAL_REQUEST_IMAGE_LIMIT = 12
+    LOCAL_REQUEST_IMAGE_BYTES_LIMIT = 8 * 1024 * 1024
+
+    @classmethod
+    def _cap_local_history_images(
+        cls, history: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], str]:
+        """只保留**最近** N 张真图（且不超字节上限），更早的图片改写成路径占位。
+
+        对同一输入结果恒定（保留的是「按位置最后 N 张」），所以同一轮内多次调用一致。
+        被省略的图片仍按文件名列出，模型可随时用 vision_analyze 按路径重新装入，信息不丢。
+        """
+        positions: list[tuple[int, int]] = []
+        total_bytes = 0
+        for message_index, item in enumerate(history):
+            content = item.get("content") if isinstance(item, dict) else None
+            if not isinstance(content, list):
+                continue
+            for part_index, part in enumerate(content):
+                if isinstance(part, dict) and part.get("type") == "image":
+                    positions.append((message_index, part_index))
+                    total_bytes += cls._image_part_bytes(part)
+        if (
+            len(positions) <= cls.LOCAL_REQUEST_IMAGE_LIMIT
+            and total_bytes <= cls.LOCAL_REQUEST_IMAGE_BYTES_LIMIT
+        ):
+            return history, ""
+
+        kept: set[tuple[int, int]] = set()
+        kept_bytes = 0
+        for message_index, part_index in reversed(positions):
+            if len(kept) >= cls.LOCAL_REQUEST_IMAGE_LIMIT:
+                break
+            part = history[message_index]["content"][part_index]
+            part_bytes = cls._image_part_bytes(part)
+            # 至少保留一张：单张就超过字节上限时，不因预算把图片全删。
+            if kept and kept_bytes + part_bytes > cls.LOCAL_REQUEST_IMAGE_BYTES_LIMIT:
+                break
+            kept.add((message_index, part_index))
+            kept_bytes += part_bytes
+
+        capped: list[dict[str, Any]] = []
+        for message_index, item in enumerate(history):
+            content = item.get("content") if isinstance(item, dict) else None
+            has_dropped = isinstance(content, list) and any(
+                isinstance(part, dict)
+                and part.get("type") == "image"
+                and (message_index, part_index) not in kept
+                for part_index, part in enumerate(content)
+            )
+            if not has_dropped:
+                capped.append(item)
+                continue
+            new_content: list[dict[str, Any]] = []
+            dropped: list[str] = []
+            for part_index, part in enumerate(content):
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") != "image":
+                    new_content.append(part)
+                elif (message_index, part_index) in kept:
+                    new_content.append(part)
+                else:
+                    dropped.append(str(part.get("name") or part.get("path") or "（未命名图片）"))
+            new_content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"[已省略 {len(dropped)} 张较早的图片：本地模型单次请求的图片上限]\n"
+                        f"图片文件名：{json.dumps(dropped, ensure_ascii=False)}\n"
+                        "（如需查看请调用 vision_analyze 工具并传入图片路径。）"
+                    ),
+                }
+            )
+            capped.append({**item, "content": new_content})
+        omitted = len(positions) - len(kept)
+        note = (
+            f"本地模型单次请求图片上限：已省略 {omitted} 张较早的图片，"
+            f"保留最近 {len(kept)} 张（被省略的仍可用 vision_analyze 按路径查看）"
+        )
+        return capped, note
+
+    @staticmethod
+    def _image_part_bytes(part: dict[str, Any]) -> int:
+        """图片部件的近似原始字节数（``data`` 是 base64，1 字节 ≈ 4/3 个字符）。"""
+        return len(str(part.get("data") or "")) * 3 // 4
 
     # ---- 工具处理函数（签名与 ToolRegistry 系统处理器一致）----
     def tool_handlers(self) -> dict[str, Any]:

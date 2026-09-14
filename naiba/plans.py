@@ -716,6 +716,8 @@ class PlanManager:
                 except TypeError:
                     raise first_error
         options["stream"] = bool(frozen.get("stream_enabled", conversation.get("stream_enabled", 1)))
+        # 本地锁占用者标签：计划执行也是本地锁的潜在占用方，标上角色便于等锁方归因。
+        options["lock_label"] = "计划执行"
         agent = frozen.get("agent") or self.app.config.get_agent(str(conversation.get("agent_id") or "")) or {}
         # 系统提示词只有一个来源：Agent（会话级系统提示词已移除）。
         combined_prompt = str(agent.get("system_prompt") or "").strip() or str(

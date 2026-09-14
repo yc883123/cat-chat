@@ -93,6 +93,11 @@ a = Analysis(
         # Multipart upload parser is imported lazily by naiba.http.
         "python_multipart",
         "python_multipart.multipart",
+        # PyAV is imported lazily by naiba/video.py (缺依赖时必须走业务文案而不是
+        # 导入期报错) —— 惰性导入对 modulegraph 可见，但显式列出更保险。
+        # 随附的 FFmpeg DLL 由官方 hook（pyinstaller-hooks-contrib 的 hook-av.py）
+        # 把 site-packages/av.libs 按原布局收进产物，这里不要重复收集（会出重复项）。
+        "av",
     ],
     hookspath=[],
     hooksconfig={},

@@ -17,7 +17,8 @@ from typing import Any
 
 from naiba.plans import CraftToolExecutor, ReadOnlyToolExecutor
 from naiba.skills.agent import SkillAgent
-from naiba.skills.context import DEFAULT_CONTEXT_WINDOW
+from naiba.skills.context import fallback_context_window
+from naiba.llm.local_probe import probe_local_context_window
 from naiba.skills.policy import normalize_skill_policy
 from naiba.core.exceptions import TaskCancelled
 from naiba.vision.runtime import VisionBudget
@@ -48,6 +49,29 @@ def _profile_with_model_override(config: Any, model_key: str, model_name: str) -
     if not clean_name:
         raise ValueError("请先在会话中选择模型；请先在设置中检查模型")
     profile["model"] = clean_name
+    # 本地后端的窗口探测：/v1/models 不返回窗口字段，config._infer_context_window() 因此
+    # 恒为 0。不补这一刀，上下文闸门与前端上下文环（含「上下文提醒阈值」）都会按在线的
+    # 256k 兜底，等于对本地模型不设上限——超长会话的请求会被放行，本地后端做不完 prefill，
+    # 界面永久停在「等待本地模型资源」（模块头见 naiba/llm/local_probe.py）。
+    # 探测结果按 (base_url, model) 进程内记忆化；显式配置的 context_window 永远优先。
+    if str(profile.get("kind") or "").strip().lower() == "local":
+        # 「已确定」= 用户/供应商配置里显式写的窗口（来源 local_config / provider_config）；
+        # 这种情况永远不探测也不回写。其余情况（unknown / local_probe）都重新探一次：
+        # 本地后端可能是这次才起来的，或用户换了 n_ctx ——探测本身按 (base_url, model)
+        # 进程内记忆化，重复调用不会增加网络开销。
+        source = str(profile.get("context_window_source") or "")
+        if source not in {"local_config", "provider_config"}:
+            probed = probe_local_context_window(profile)
+            if probed > 0:
+                profile["context_window"] = probed
+                profile["context_size"] = probed
+                profile["context_window_source"] = "local_probe"
+                # 回写 provider 配置。只改本轮 profile 副本的话，探测值仅在「会话路径」
+                # 生效：设置页显示的上下文长度、以及其它所有走 _infer_context_window 的
+                # 读取点仍然拿到 0 → 又退回在线 256k 兜底，等于对本地模型不设上限。
+                remember = getattr(config, "remember_local_context_window", None)
+                if callable(remember):
+                    remember(model_key, probed)
     return profile
 
 
@@ -487,11 +511,15 @@ class ConversationRunMixin:
                 raise TaskCancelled("任务已取消")
             message = str(run.get("message") or "")
             uploads = snapshot.get("attachments") or []
-            # PDF 处理指引只在会话工具集确实含 read_pdf 时出现（系统提示段 + 附件引用行同口径）。
+            # PDF / 视频处理指引只在会话工具集确实含对应工具时出现（系统提示段 + 附件引用行同口径）。
             # 会话工具集首轮固化 → 同一会话内恒定，不会像"本轮是否含图"那样破坏前缀缓存。
-            pdf_tools_enabled = "read_pdf" in {str(item) for item in (snapshot.get("allowed_tools") or [])}
+            allowed_tool_names = {str(item) for item in (snapshot.get("allowed_tools") or [])}
+            pdf_tools_enabled = "read_pdf" in allowed_tool_names
+            video_tools_enabled = "extract_frames" in allowed_tool_names
             # 与历史重放（build_model_history）同一拼接口径：纯附件轮次补固定提示行。
-            effective = compose_user_content(message, uploads, pdf_tools=pdf_tools_enabled)
+            effective = compose_user_content(
+                message, uploads, pdf_tools=pdf_tools_enabled, video_tools=video_tools_enabled
+            )
             model_key = str(snapshot.get("model_key") or "")
             if not model_key and snapshot.get("provider_id"):
                 model_key = f"online:{snapshot['provider_id']}"
@@ -517,7 +545,8 @@ class ConversationRunMixin:
                 )
             reasoning_effort = profile["reasoning_effort"]
             history = build_model_history(
-                snapshot.get("conversation_messages") or [], event, pdf_tools=pdf_tools_enabled,
+                snapshot.get("conversation_messages") or [], event,
+                pdf_tools=pdf_tools_enabled, video_tools=video_tools_enabled,
             )
             # 视觉统一由模型驱动（自动路由已移除）：文本大脑不支持看图时，只把图片改写为
             # 安全文本占位（路径引用 + 工具提示），由模型按需主动调用 vision_analyze；
@@ -612,6 +641,13 @@ class ConversationRunMixin:
                 prompt = (prompt + "\n\nPDF 处理策略：解析 PDF 文本层用 read_pdf；扫描版（无文本层）或需要看图时，先调用 "
                            "pdf_render_pages 渲染页图，再将页图路径传给 vision_analyze；整页图细节看不清（小字/表格/图表）时，"
                            "用 pdf_zoom_region 局部放大后再次 vision_analyze。").strip()
+            # 视频理解策略：条件同 PDF——会话固化工具集含 extract_frames 才注入
+            # （probe_video 是它的前置，同一套抽取参数下两者必然同进同出）。
+            if video_tools_enabled:
+                prompt = (prompt + "\n\n视频理解策略：先用 probe_video 读时长与帧率；再按目标用 extract_frames 抽帧"
+                           "（指定时间点用 mode=times，全面扫一遍用 mode=interval，找画面切换点用 mode=keyframes）；"
+                           "先把返回的**联系表**交给 vision_analyze 概览全片，再对可疑片段抽单帧细看。"
+                           "帧图的局部细节可用 vision_image_ops 裁剪放大。").strip()
             # 上下文重置指引只在会话固化工具集含 reset_context 时注入（规则写系统提示常驻区，
             # 工具描述只留一行钩子；工具集首轮固化 → 同一会话内恒定，不破坏前缀缓存）。
             if "reset_context" in allowed_tools:
@@ -694,13 +730,16 @@ class ConversationRunMixin:
             search_sources = _search_sources(runs)
             display_runs = [display_tool_run(run) for run in runs]
             if usage:
-                # Surface the effective window (provider value or the conservative
-                # DEFAULT_CONTEXT_WINDOW fallback) so the UI can show the real ring
-                # percentage and disable sending at the ceiling.
+                # Surface the effective window (provider value, probed local n_ctx, or
+                # the kind-aware fallback) so the UI can show the real ring percentage
+                # and disable sending at the ceiling.
                 set_window = max(0, int(profile.get("context_window") or 0))
-                usage["context_limit"] = set_window or DEFAULT_CONTEXT_WINDOW
-                usage["context_limit_source"] = str(
-                    profile.get("context_window_source") or "unknown"
+                is_local_profile = str(profile.get("kind") or "").strip().lower() == "local"
+                usage["context_limit"] = set_window or fallback_context_window(profile)
+                usage["context_limit_source"] = (
+                    str(profile.get("context_window_source") or "unknown")
+                    if set_window
+                    else ("local_default" if is_local_profile else "unknown")
                 )
                 usage["model_key"] = model_key
                 usage["lanes"] = {
@@ -735,6 +774,8 @@ class ConversationRunMixin:
                         compile_options = dict(options)
                         compile_options["stream"] = False
                         compile_options.pop("tools", None)
+                        # 本地锁占用者标签：计划整理走 status=None，占住本地锁时不可归因。
+                        compile_options["lock_label"] = "计划整理"
                         response = self.app.models.complete(
                             profile,
                             self.app.plans.plan_compilation_messages(current_plan, response),

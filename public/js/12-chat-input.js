@@ -1147,6 +1147,7 @@ export async function cancelCurrentRun() {
   $('#runtimeStatus').textContent = '正在停止';
 
   let terminalConfirmed = false;
+  let failureMessage = '';
   try {
     let result = null;
     for (const delay of [0, 100, 250, 500, 1000]) {
@@ -1178,9 +1179,14 @@ export async function cancelCurrentRun() {
     if (state.conversationId === conversationId) await openConversation(conversationId);
   } catch (error) {
     console.debug('[naiba] cancel chat failed:', error.message);
-    toast(`停止任务失败：${error.message}`);
+    failureMessage = error.message;
   } finally {
-    if (terminalConfirmed && state.cancelConversationId === conversationId) {
+    // 无论成功与否都必须把界面放回可操作状态：本地模型正在 prefill 时后端可能
+    // 迟迟确认不了停止，而界面一旦停留在「回复进行中」，输入框与「分支 / 重新
+    // 生成 / 新会话」三个救援入口会被永久挡住，用户只能重启应用（2026-09-14）。
+    // 解锁后若后端其实仍在运行，再次发送会被 ACTIVE_RUN 拒绝并给出明确提示，
+    // 比界面永久冻结可诊断得多。
+    if (state.cancelConversationId === conversationId) {
       state.chatRunId = '';
       state.runConversationId = '';
       state.runSequence = 0;
@@ -1190,6 +1196,7 @@ export async function cancelCurrentRun() {
       state.checkRunEligible = false;
       setBusy(false);
     }
+    if (failureMessage) toast(`停止任务失败：${failureMessage}`);
   }
 }
 

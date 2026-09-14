@@ -418,7 +418,12 @@ export async function resumeConversationRun(conversationId) {
   try {
     const result = await api(`/api/runs?conversation_id=${encodeURIComponent(conversationId)}&active_only=1`);
     if (conversationId !== state.conversationId || state.abortController || state.cancelRequested) return;
-    const run = (result.runs || [])[0];
+    // 只认顶层对话 Run：后台子 Job（parent_job_id 非空）不该让整条会话进入
+    // 「运行中」，否则一个卡住的子任务会挡住全部救援入口（后端已过滤，此处防御）。
+    const run = (result.runs || []).find(
+      (item) => !String(item.parent_job_id || '').trim()
+        && ['chat', 'plan_execute'].includes(String(item.kind || '')),
+    );
     if (run) await resumeRun(run);
     else setBusy(false);
   } catch (error) {

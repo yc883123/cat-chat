@@ -92,6 +92,18 @@ def default_config() -> dict[str, Any]:
         "command_timeout": 120,
         # 上下文用量提醒阈值（%）：圆环达到该百分比时前端弹窗提醒一次；0=关闭提醒。
         "context_warning_percent": 80,
+        # 本地模型「首字节超时」（秒）：本地后端在 prefill 期间一个字节都不吐，
+        # 「正在 prefill」和「永远做不完」在界面上无法区分。本地请求总超时是 1800 秒，
+        # 不加这道闸用户要干等半小时才知道这一轮没戏（客户机实测整条会话看似永久卡死）。
+        # 0 = 关闭本层。默认值与 llm.runtime.LOCAL_FIRST_BYTE_TIMEOUT_SECONDS 必须一致。
+        "local_first_byte_timeout_seconds": 120,
+        # 单轮 Agent 的模型调用次数上限（0=不限制）。Agent 循环是 while True，
+        # 模型「一直调工具但拿不到结论」时以前可以无限烧下去（并一直占着本地锁）。
+        # 默认值与 skills.agent.DEFAULT_MAX_STEPS 必须一致。
+        # 键名故意**不叫** max_agent_steps：那是老版本遗留、且在启动时被显式丢弃的键
+        # （见下方 self.data.pop("max_agent_steps")），沿用同名会让老配置里的残值突然生效、
+        # 把用户的步数卡死在一个随手填过的小数字上。
+        "agent_step_limit": 200,
         # 图片缓存：image_upload_original=True 按原尺寸存；False 则超过 image_max_pixels
         # 时用 Lanczos 压缩。缩略图始终从保存后的主图按 thumbnail_max_pixels 生成 WebP（_thumb.webp）。
         "imaging": {
@@ -195,6 +207,7 @@ _TOOL_GROUP = {
     "find_conversations": _LONG_SESSION_GROUP, "recall_history": _LONG_SESSION_GROUP,
     "read_conversation": _LONG_SESSION_GROUP, "reset_context": _LONG_SESSION_GROUP,
     "read_pdf": "读取与检索", "pdf_render_pages": "读取与检索", "pdf_zoom_region": "读取与检索",
+    "probe_video": "读取与检索", "extract_frames": "读取与检索",
     "write_file": "文件写入与编辑", "edit_file": "文件写入与编辑",
     "pwsh": "命令与脚本执行", "run_skill_script": "命令与脚本执行",
     "http_request": _MCP_GROUP, "web_search": _MCP_GROUP,
@@ -218,6 +231,14 @@ def _mcp_subgroup(name: str) -> str:
 # 模型能力映射已随视觉单入口重构移除（vision_analyze 按会话能力换形态，不再按模型裁剪工具集）。
 # 新建 Agent 的默认勾选 = 「标准模式」预设的工具集（守门测试钉死两者一致，
 # 否则新建 Agent 打开时会显示「当前：自定义」而不是「标准模式」）。
+#
+# ⚠️ 视频抽帧两件套（probe_video / extract_frames）**刻意不进** _DEFAULT_SELECTED_TOOLS
+#    与 TOOL_PRESETS——与 PDF 三件套（read_pdf / pdf_render_pages / pdf_zoom_region）
+#    完全对齐：只由「全能模式」的 group:* 覆盖，用户在 Agent 工具集里手动勾。
+#    理由：塞进 standard 会连带三重代价 —— ① 本常量必须与 standard 同步（守门钉死相等）；
+#    ② 守门断言「标准 8」变 10；③ 所有新建 Agent 默认多两个工具 + 多一段系统提示（全局行为变更）。
+#    将来若真要进某个预设，该预设**必须已含依赖闭包**：extract_frames 抽了帧需要
+#    vision_analyze 才能读，否则"抽帧没人看"。
 _DEFAULT_SELECTED_TOOLS = frozenset({
     "read_file", "list_directory", "search_files",
     "write_file", "edit_file", "pwsh", "run_skill_script",
@@ -249,6 +270,7 @@ def tool_catalog_entries(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # 读取与检索
         "read_file", "list_directory", "search_files",
         "read_pdf", "pdf_render_pages", "pdf_zoom_region",
+        "probe_video", "extract_frames",
         # 文件写入与编辑
         "write_file", "edit_file",
         # 命令与脚本执行
@@ -274,7 +296,7 @@ def tool_catalog_entries(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # 每项：name 分类名 / desc 一句话说明 / badge 风险徽标 / tone 徽标配色（safe|warn|danger|info）。
 # 顺序即前端展示顺序；未列出的分组自动追加到末尾。
 TOOL_GROUP_INFO: tuple[dict[str, str], ...] = (
-    {"name": "读取与检索", "desc": "看文件、搜内容、读 PDF、翻历史记录。只读，不改动任何东西",
+    {"name": "读取与检索", "desc": "看文件、搜内容、读 PDF、抽视频帧、翻历史记录。只读，不改动任何东西",
      "badge": "只读", "tone": "safe"},
     {"name": "文件写入与编辑", "desc": "新建、改写、精确替换文件内容。会产生真实改动",
      "badge": "会改文件", "tone": "warn"},
@@ -1531,6 +1553,8 @@ class ConfigStore:
             "agent_tools",
             "command_timeout",
             "context_warning_percent",
+            "local_first_byte_timeout_seconds",
+            "agent_step_limit",
             "context_reset_seed_template",
             "access_token",
             "workspace_dir",
@@ -1665,6 +1689,32 @@ class ConfigStore:
                         if percent < 0 or percent > 100:
                             raise ValueError("上下文提醒阈值必须在 0-100 之间")
                         self.data[key] = percent
+                    elif key == "local_first_byte_timeout_seconds":
+                        # 0 = 关闭；否则 5-1800 秒。留空按默认值处理（避免误清空导致闸门失效）。
+                        raw = values[key]
+                        if raw in (None, ""):
+                            self.data[key] = LOCAL_FIRST_BYTE_TIMEOUT_DEFAULT
+                        else:
+                            try:
+                                seconds = int(raw)
+                            except (TypeError, ValueError):
+                                raise ValueError("本地首字节超时必须是整数秒") from None
+                            if seconds != 0 and not 5 <= seconds <= 1800:
+                                raise ValueError("本地首字节超时必须在 5-1800 秒之间（0 = 关闭）")
+                            self.data[key] = seconds
+                    elif key == "agent_step_limit":
+                        # 0 = 不限制；否则 1-1000 步。留空按默认值处理。
+                        raw = values[key]
+                        if raw in (None, ""):
+                            self.data[key] = AGENT_MAX_STEPS_DEFAULT
+                        else:
+                            try:
+                                steps = int(raw)
+                            except (TypeError, ValueError):
+                                raise ValueError("Agent 最大步数必须是整数") from None
+                            if steps != 0 and not 1 <= steps <= 1000:
+                                raise ValueError("Agent 最大步数必须在 1-1000 之间（0 = 不限制）")
+                            self.data[key] = steps
                     elif key == "context_reset_seed_template":
                         # 种子消息模板：留空 = 用内置默认（前端回退），最长 2000 字符。
                         self.data[key] = str(values[key] or "")[:2000]
@@ -1757,6 +1807,51 @@ class ConfigStore:
                 None,
             )
             return str(provider.get("api_key") or "") if provider else None
+
+    def remember_local_context_window(self, model_key: str, window: int) -> bool:
+        """把本地后端**探测到**的上下文窗口写回 provider 配置。
+
+        为什么必须回写：探测值原先只挂在 `run.chat._profile_with_model_override` 造的
+        profile 副本上，只有会话路径看得到；`public_providers()`（设置页显示）以及其它
+        走 `_infer_context_window()` 的读取点仍然拿 0 → 又退回在线 256k 兜底，等于对
+        本地模型不设上限（正是客户机「永久卡死」的病根）。
+
+        写进独立字段 `context_window_probed`，**绝不覆盖**用户显式填写的
+        `context_window`；取值优先级见 `_infer_context_window`。返回是否真的发生了写入
+        （值没变就不落盘，避免每轮对话都重写一次 config.json）。
+        """
+        try:
+            parsed = int(window)
+        except (TypeError, ValueError):
+            return False
+        if parsed <= 0:
+            return False
+        kind, _, model_id = str(model_key or "").partition(":")
+        if not model_id:
+            return False
+        with self.lock:
+            provider = next(
+                (
+                    item
+                    for item in self.data.get("providers", [])
+                    if item.get("id") == model_id and (not kind or item.get("kind") == kind)
+                ),
+                None,
+            )
+            if provider is None:
+                return False
+            # 显式配置优先：用户填过的值永远不参与探测覆盖。
+            if provider.get("context_window") or provider.get("context_size"):
+                return False
+            try:
+                current = int(provider.get("context_window_probed") or 0)
+            except (TypeError, ValueError):
+                current = 0
+            if current == parsed:
+                return False
+            provider["context_window_probed"] = parsed
+            self.save()
+            return True
 
     # ---- 在线 / 本地模型配置统一层 ----
 
@@ -2044,6 +2139,29 @@ class ConfigStore:
                 result["context_size"] = provider.get("context_window")
             return result
 
+    def runtime_guard_options(self) -> dict[str, Any]:
+        """「别永久卡住」的两道保险，注入每次模型调用的 options。
+
+        - ``first_byte_timeout_seconds``：本地后端首字节超时（0 = 关闭本层）。
+        - ``max_steps``：单轮 Agent 的模型调用次数上限（0 = 不限制）。
+
+        放在 generation_options() 里是因为 chat / 子代理 / 计划执行三处都从它取
+        options（`run.manager.generation_options` 是它的薄封装），一处注入三处生效；
+        它同时随 run 快照持久化，重放时口径一致。
+        """
+        options: dict[str, Any] = {}
+        try:
+            timeout = int(self.data.get("local_first_byte_timeout_seconds", LOCAL_FIRST_BYTE_TIMEOUT_DEFAULT))
+        except (TypeError, ValueError):
+            timeout = LOCAL_FIRST_BYTE_TIMEOUT_DEFAULT
+        options["first_byte_timeout_seconds"] = max(0, timeout)
+        try:
+            steps = int(self.data.get("agent_step_limit", AGENT_MAX_STEPS_DEFAULT))
+        except (TypeError, ValueError):
+            steps = AGENT_MAX_STEPS_DEFAULT
+        options["max_steps"] = max(0, steps)
+        return options
+
     def generation_options(self, selection: str = "") -> dict[str, Any]:
         with self.lock:
             key = self._normalize_model_key(selection) or str(self.data.get("default_model_key") or "")
@@ -2051,7 +2169,8 @@ class ConfigStore:
                 return {
                     "context_size": self._positive_context_size(
                         self.data.get("context_size", 8192), "context_size"
-                    )
+                    ),
+                    **self.runtime_guard_options(),
                 }
             try:
                 profile = self.profile(key)
@@ -2062,6 +2181,7 @@ class ConfigStore:
                 options["temperature"] = float(profile["temperature"])
             if profile.get("max_output_tokens") not in (None, ""):
                 options["max_tokens"] = int(profile["max_output_tokens"])
+            options.update(self.runtime_guard_options())
             return options
 
     @staticmethod
@@ -2234,6 +2354,14 @@ def _infer_supports_images(provider: dict[str, Any]) -> bool:
         return False
 
 
+# 运行设置里两道「别永久卡住」保险的默认值。必须与实现侧常量一致：
+# - LOCAL_FIRST_BYTE_TIMEOUT_SECONDS（naiba/llm/runtime.py）
+# - DEFAULT_MAX_STEPS（naiba/skills/agent.py）
+# 一致性由 tests/test_runtime_guards.py 守门（两份定义漂移会让默认值失效）。
+LOCAL_FIRST_BYTE_TIMEOUT_DEFAULT = 120
+AGENT_MAX_STEPS_DEFAULT = 200
+
+
 def _infer_context_window(provider: dict[str, Any]) -> int:
     """Return a trustworthy context limit, or 0 when the API does not expose one."""
     try:
@@ -2242,6 +2370,16 @@ def _infer_context_window(provider: dict[str, Any]) -> int:
         explicit = 0
     if explicit > 0:
         return explicit
+
+    # 本地后端探测到的真实窗口（llm.local_probe 回写，见 remember_local_context_window）：
+    # 优先级低于显式配置、高于「未知」。不认这个字段的话，探测值就只在会话路径生效，
+    # 设置页与其它读取点仍然拿 0，又退回在线 256k 兜底。
+    try:
+        probed = int(provider.get("context_window_probed") or 0)
+    except (TypeError, ValueError):
+        probed = 0
+    if probed > 0:
+        return probed
 
     hostname = (urllib.parse.urlparse(str(provider.get("base_url") or "")).hostname or "").lower()
     # Do not infer a provider's advertised context from its hostname.  A
@@ -2254,10 +2392,12 @@ def _infer_context_window(provider: dict[str, Any]) -> int:
 def _context_window_source(provider: dict[str, Any]) -> str:
     if not _infer_context_window(provider):
         return "unknown"
-    if str(provider.get("kind") or "online").strip().lower() == "local":
-        return "local_config"
-    if provider.get("context_window"):
+    if provider.get("context_window") or provider.get("context_size"):
+        if str(provider.get("kind") or "online").strip().lower() == "local":
+            return "local_config"
         return "provider_config"
+    if provider.get("context_window_probed"):
+        return "local_probe"
     return "model_capability"
 
 

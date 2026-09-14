@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.3.9-beta
-  RELEASE_TAG: v2.3.9-beta
-  PACKAGE_NAME: naiba-chat-2.3.9-beta-windows-x64
+  RELEASE_VERSION: 2.4.0-beta
+  RELEASE_TAG: v2.4.0-beta
+  PACKAGE_NAME: naiba-chat-2.4.0-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -31,7 +31,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          python -m pip install --disable-pip-version-check --upgrade pyinstaller pywebview pystray "mcp==2.1.1" pymupdf python-multipart
+          python -m pip install --disable-pip-version-check --upgrade pyinstaller pywebview pystray "mcp==2.1.1" pymupdf "av==18.1.0" python-multipart
           python -m pip install --disable-pip-version-check --upgrade --force-reinstall --no-cache-dir pillow
           python -c "from PIL import Image; print('Pillow', Image.__version__)"
 
@@ -87,11 +87,11 @@ jobs:
           Copy-Item -LiteralPath "README.md" -Destination $packageDir
           Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\${{ env.PACKAGE_NAME }}.zip" -Force
 
-      - name: Publish 2.3.9 Beta release
+      - name: Publish 2.4.0 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Naiba Chat 2.3.9 Beta
+          name: Naiba Chat 2.4.0 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -99,12 +99,14 @@ jobs:
             dist/${{ env.PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Naiba Chat 2.3.9 Beta Windows build from `${{ github.sha }}`。
+            Naiba Chat 2.4.0 Beta Windows build from `${{ github.sha }}`。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - 更新检查修复：版本列表归一化（过滤 2.0.0 及更早的大版本迁移版本、按版本号从新到旧排序、同一版本只留一条）——同一版本重复发布不再出现重复项；「是否当前版本」的判定改为「版本相同且提交相同」，同一版本号重发（资产/提交变了）不再被误判为已安装、可正常选择安装；清单指向 2.0.0 时更新面板与安装入口都明确提示「请前往 GitHub Release 手动下载」。
-            - 「目标版本」下拉改为自绘下拉框（原生下拉在桌面内嵌窗口里弹层不可控）：↑/↓ 切换、Enter/空格 开合、Esc 与点击外部关闭，选项带「（当前）」与发布日期。
-            - 出站网络修复：手动代理只接受 HTTP/HTTPS（填错明确提示并回退直连）；任何代理设置变更都会让手动/系统/直连三种连接器全部失效重建（含系统代理捕获的旧环境状态）；幂等请求（GET/HEAD/OPTIONS）遇连接异常时按当前策略重建连接后重试一次——更新检查与下载、联网搜索、模型列表在代理/VPN 抖动时更稳，已拿到 HTTP 状态码的错误不重试、也不会悄悄切换代理模式。
+            - 新增视频抽帧两件套（probe_video / extract_frames）：probe_video 读时长、帧率、分辨率、总帧数与编码；extract_frames 支持按时间点 / 固定间隔 / 画面切换（keyframes）三种模式抽帧，可额外生成拼图联系表，抽出的帧进入消息媒体区、交给 vision_analyze 即可读懂视频画面；上传视频会自动提示模型按「先 probe_video → 再抽帧 → 再视分析」的顺序处理。
+            - 本地模型新增两道「别永久卡住」保险（设置 → 运行设置）：本地首字节超时（默认 120 秒，0 = 关闭）与单轮 Agent 最大步数（默认 200，0 = 不限制）。
+            - 本地上下文窗口自动探测并写回配置：探测到就按真实窗口算，兜底 32k（在线仍 256k），不再对本地模型不设上限；用户手填的窗口永远优先。
+            - 统一「谁算在运行」的状态词表（含 stopping）：启动清理不再漏掉「已取消但线程没退」的僵尸任务；「停止」改为关闭连接打断卡住的读；前端点「停止」不再等服务器确认，超时也复位界面，不再永久停在「回复进行中」。
+            - 出站网络重试修复：连接器「选择」与「重建后重试」两张判定表对齐（此前「代理已开启但未填地址 + 关系统回退」一档重建侧没覆盖，重试只是空转），并杜绝缓存一空就静默退回直连；设置页「目标版本」下拉改挂 popover 宿主进 top layer，不再被面板裁剪或盖住。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

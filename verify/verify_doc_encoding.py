@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import ast
 import pathlib
 import sys
 
@@ -44,15 +45,30 @@ for name in FILES:
 
 # 内容自洽：文档改动的关键表述
 doc = pathlib.Path("项目维护说明（修改代码前必读）.md").read_text(encoding="utf-8")
+
+# 这两个数字会随代码与用例增长而变。历史上它们被写死成 69 文件 / 844 用例，文档早已跑到
+# 70 / 920，于是守门自己成了长期噪声（FAIL 里还看不出该怎么修）。改为**从实际数据推导**后再比对：
+# 文件数口径与 verify/scan_undef_all.py 的 TARGETS 一致（naiba/ 全包 + server.py + launcher.py），
+# 用例数用 AST 静态数 tests/ 下的 def test*（与 unittest discover 实测一致，且不导入任何测试模块）。
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+PKG_FILE_COUNT = len(list(ROOT.joinpath("naiba").rglob("*.py"))) + len(
+    [p for p in (ROOT / "server.py", ROOT / "launcher.py") if p.exists()]
+)
+TEST_CASE_COUNT = 0
+for _test_file in ROOT.joinpath("tests").rglob("test_*.py"):
+    for _node in ast.walk(ast.parse(_test_file.read_text(encoding="utf-8"))):
+        if isinstance(_node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _node.name.startswith("test"):
+            TEST_CASE_COUNT += 1
+
 checks = {
     "§3.1 树含 .venv/": "├── .venv/" in doc,
     "§六 解释器纪律": "**解释器纪律（本机唯一正确用法）**" in doc,
     "§六 编译用 venv": "项目根\\.venv\\Scripts\\python.exe -m PyInstaller" in doc,
     "无 518 残留": "518 用例" not in doc,
-    "§六 检查器 69 文件": "（69 文件 0 候选）" in doc,
+    f"§六 检查器 {PKG_FILE_COUNT} 文件": f"（{PKG_FILE_COUNT} 文件 0 候选）" in doc,
     "§六 不再提 verify_split_merge": "verify_split_merge" not in doc,
     "§六 补工具卡片检查": "_check_tool_cards_compact.cjs" in doc,
-    "§六 718 用例": "（718 用例，" in doc,
+    f"§六 {TEST_CASE_COUNT} 用例": f"（{TEST_CASE_COUNT} 用例，" in doc,
     "§3.4 分区无重复标题": "不再有灰色标题块与固定高度" in doc,
     "§九.50 toast top layer": "底部提示框（`#toast`）是同一个坑" in doc,
     "§3.4 Agent 分区切换": "弹层内改为分区切换" in doc,

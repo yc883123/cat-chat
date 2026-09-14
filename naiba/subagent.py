@@ -84,6 +84,9 @@ def run_subagent_agent(
         except TypeError:
             raise first_error
     options["stream"] = bool(conversation.get("stream_enabled", 1))
+    # 本地锁占用者标签：子代理是本地锁最常见的「隐形占用者」——它跑在自己的后台 Job 里，
+    # 占住全进程唯一的本地锁时主对话只能显示「等待本地模型资源」，无从归因。
+    options["lock_label"] = "子代理"
     agent = app.config.get_agent(str(conversation.get("agent_id") or "")) or {}
     # 系统提示词只有一个来源：Agent（会话级系统提示词已移除）。
     combined_prompt = str(agent.get("system_prompt") or "").strip() or str(

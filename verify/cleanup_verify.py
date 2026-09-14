@@ -63,6 +63,8 @@ KEEP = {
     "_release_check.py",
     # 「重新生成 / 编辑」冒烟（§六 已登记；Python 自编排 + Node 检查）
     "regenerate_smoke.py", "regenerate_smoke.cjs",
+    # 软件更新「目标版本」下拉冒烟（§六 已登记；Python 自编排 + Node 检查）
+    "update_version_smoke.py", "update_version_smoke.cjs",
     # 发版跟踪与 Release 资产核对（本机无 gh：走匿名 GitHub API）
     "release_watch.py",
     # 本脚本自身

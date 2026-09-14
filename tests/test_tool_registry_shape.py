@@ -51,6 +51,7 @@ def _assembled_test_registry() -> Any:
     from naiba.tools.providers import documents as documents_provider
     from naiba.tools.providers import jobs as jobs_provider
     from naiba.tools.providers import search as search_provider
+    from naiba.tools.providers import video as video_provider
     from naiba.tools.providers import vision as vision_provider
 
     def _stub_app() -> SimpleNamespace:
@@ -92,6 +93,19 @@ def _assembled_test_registry() -> Any:
                 mcp_register=None,
             ),
             lambda: Path(tempfile.mkdtemp(prefix="naiba-doc-data-")),
+        )
+    )
+    # video 域（视频抽帧）：与 documents 域同构的桩装配（不加载 av，仅绑 def）。
+    reg.register_provider(
+        video_provider.VideoToolProvider(
+            core_provider.ToolContext(
+                workspace=Path(tempfile.mkdtemp(prefix="naiba-video-ws-")),
+                python_executable=sys.executable,
+                command_timeout=60,
+                mcp_registry=None,
+                mcp_register=None,
+            ),
+            lambda: Path(tempfile.mkdtemp(prefix="naiba-video-data-")),
         )
     )
     return reg

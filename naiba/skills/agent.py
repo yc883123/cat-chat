@@ -28,7 +28,7 @@ from naiba.core.exceptions import TaskCancelled
 from naiba.core.media_types import DEFAULT_MEDIA_DECLARATION
 from naiba.skills.catalog import SkillCatalog
 from naiba.tools.executor import ToolExecutor
-from naiba.skills.context import DEFAULT_CONTEXT_WINDOW
+from naiba.skills.context import fallback_context_window
 from naiba.skills.policy import normalize_skill_policy
 
 
@@ -36,6 +36,36 @@ logger = logging.getLogger("naiba.skills.agent")
 
 # 事件回调签名别名（原 skill_runtime 模块级；仅用于类型标注）
 EventCallback = Callable[[dict[str, Any]], None]
+
+# 单轮 Agent 循环的模型调用次数上限（默认值）。
+#
+# 为什么要有一道天花板：循环体是 `while True`，只有「模型不再调工具（给出最终答复）」、
+# 「工具连续失败/无进展（熔断）」、「用户取消」三种出口。模型进入「一直调工具但拿不到
+# 结论」的循环时，一轮对话可以无限烧下去——既看不到进展也停不下来（本地模型还会一直
+# 占着全进程唯一的本地锁）。参数 `max_steps` 早就存在，但从来没有被读取过。
+#
+# 取值优先级：显式参数 → options["max_steps"]（运行设置 → Agent 最大步数注入）→ 本默认值。
+# 0 表示不限制（保留给确实需要长链路的用户；请自行承担失控风险）。
+DEFAULT_MAX_STEPS = 200
+# 预算将尽时提前提醒模型收尾的余量：max(3 步, 上限的 10%)。
+STEP_LIMIT_WRAPUP_MIN = 3
+STEP_LIMIT_WRAPUP_RATIO = 0.1
+
+
+def _resolve_step_limit(max_steps: Any, options: Any) -> int:
+    """解析本次运行的模型调用次数上限；0 = 不限制。"""
+    candidates = [max_steps]
+    if isinstance(options, dict):
+        candidates.append(options.get("max_steps"))
+    for candidate in candidates:
+        if candidate is None or candidate == "":
+            continue
+        try:
+            value = int(candidate)
+        except (TypeError, ValueError):
+            continue
+        return value if value > 0 else 0
+    return DEFAULT_MAX_STEPS
 
 
 # Mirror of the agent-protocol markers in model_runtime used to decide whether
@@ -549,6 +579,8 @@ class SkillAgent:
             })
             return (
                 "上下文已达到窗口上限，继续回答可能超出模型的上下文窗口或显著降低答案质量。"
+                "建议让模型撰写交接文档，并点本条回复上的「新会话」开始新会话（聊天记录一条不删）；"
+                "若这是本地模型且窗口未被自动探测到，可在 设置 → 模型 里填写真实「上下文窗口」后重试。"
                 "请【新建对话】后继续。",
                 [], [], self._summarize_usage(usages),
             )
@@ -597,6 +629,11 @@ class SkillAgent:
         # model_complete 是 ModelRuntime.complete 的绑定方法，可通过 __self__ 读取 last_reasoning
         model_runtime = getattr(self.model_complete, "__self__", None)
         step = 0
+        # 本轮模型调用次数上限（0 = 不限制）；不再让 while True 无界地跑下去。
+        step_limit = _resolve_step_limit(max_steps, options)
+        # 预算将尽时先提醒模型收尾，避免「最后一步才开始想怎么结束」被硬切。
+        wrapup_margin = max(STEP_LIMIT_WRAPUP_MIN, int(step_limit * STEP_LIMIT_WRAPUP_RATIO)) if step_limit else 0
+        wrapup_sent = False
         repeat_key = ""
         repeat_count = 0
         no_progress_signature = ""
@@ -624,6 +661,20 @@ class SkillAgent:
         while True:
             if cancel_event and cancel_event.is_set():
                 abort_run()
+            if step_limit and step >= step_limit:
+                # 硬上限：模型一直调工具但拿不到结论时不再无限烧下去（也会一直占着本地锁）。
+                # 与「工具连续失败 / 无进展」两条熔断同口径：给出可读原因 + 返回本轮已完成的
+                # 工具结果，让前端能明确看到「为什么停」，而不是像以前那样永不返回。
+                message = (
+                    f"已达到本次运行的步数上限（{step_limit} 步），已停止继续调用工具。"
+                    "如需继续，可把任务拆小后重新提问，"
+                    "或在「设置 → 运行设置 → Agent 最大步数」调大上限。"
+                )
+                logger.warning("Agent 步数达到上限 %s，已停止本轮", step_limit)
+                event({"type": "run_failed", "error": message})
+                if isinstance(run_context, dict):
+                    run_context["trace_messages"] = messages[trace_start:]
+                return message, runs, reasonings, self._summarize_usage(usages)
             step += 1
             event({"type": "status", "message": f"正在思考（第 {step} 轮）"})
             try:
@@ -910,6 +961,20 @@ class SkillAgent:
                 logger.info("[context_reset] 本轮收尾，交接文档=%s", (reset_info or {}).get("handoff_path"))
                 return content, runs, reasonings, self._summarize_usage(usages)
 
+            # 步数预算将尽：先提醒模型收尾（尾部 user 指令，不动 system 前缀，缓存不受影响），
+            # 让它主动给结论，而不是在下一步被硬生生切断。
+            if step_limit and not wrapup_sent and step_limit - step <= wrapup_margin:
+                wrapup_sent = True
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"本次运行已用 {step}/{step_limit} 步，步数将尽。请尽快收敛："
+                        "用现有信息给出最终答复；若任务未完成，明确说明已完成部分与剩余部分，"
+                        "不要再发起不必要的工具调用。"
+                    ),
+                })
+                event({"type": "status", "message": f"已用 {step}/{step_limit} 步，提醒模型收尾"})
+
     @staticmethod
     def _pending_background_jobs(run_context: RunContext | None) -> list[str]:
         ctx = run_context or {}
@@ -1062,16 +1127,18 @@ class SkillAgent:
     ) -> tuple[int, int]:
         """Return (effective_context_limit, history_budget) for a run.
 
-        An unknown window (auto-detection returned 0) falls back to
-        DEFAULT_CONTEXT_WINDOW so the conversation is still bounded. Output
-        capacity and system overhead are reserved separately and are never
-        treated as the window value itself.
+        An unknown window (auto-detection returned 0) falls back to a
+        kind-aware ceiling: local backends get ``LOCAL_DEFAULT_CONTEXT_WINDOW``,
+        online providers get ``DEFAULT_CONTEXT_WINDOW``. Using the online value
+        for a local n_ctx of 8k~32k made this gate effectively never fire.
+        Output capacity, system overhead and the native tool schema are reserved
+        separately and are never treated as the window value itself.
         """
         try:
             window = max(0, int(profile.get("context_window") or 0))
         except (TypeError, ValueError):
             window = 0
-        limit = window or DEFAULT_CONTEXT_WINDOW
+        limit = window or fallback_context_window(profile)
         try:
             configured_output = max(
                 0,
@@ -1080,9 +1147,56 @@ class SkillAgent:
         except (TypeError, ValueError):
             configured_output = 0
         output_reserve = configured_output or min(8192, max(1024, limit // 8))
-        fixed_tokens = cls._estimate_content_tokens(system_prompt) + 512
+        # 固定成本 = 系统提示 + 原生工具 schema。工具 schema 与系统提示一样每轮原样重发
+        # （20+ 个工具可达数万 token），过去完全没进预算——这是闸门系统性低估的主因之一。
+        fixed_tokens = (
+            cls._estimate_content_tokens(system_prompt)
+            + cls._estimate_serialized_tokens(options.get("tools"))
+            + 512
+        )
         history_budget = max(256, limit - output_reserve - fixed_tokens)
         return limit, history_budget
+
+    @classmethod
+    def _estimate_serialized_tokens(cls, value: Any) -> int:
+        """对「要进请求体的结构化载荷」（工具 schema / tool_calls）估 token。
+
+        序列化成 JSON 再按文本估算即可：这些载荷以 ASCII 键名与英文描述为主，
+        ``_estimate_content_tokens`` 的 ASCII 分支（约 4 字符 1 token）够用。
+        """
+        if not value:
+            return 0
+        try:
+            serialized = json.dumps(value, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            return 0
+        return cls._estimate_content_tokens(serialized)
+
+    @classmethod
+    def _replay_footprint_tokens(cls, item: dict[str, Any]) -> int:
+        """一条重放消息在请求体里的真实成本（不只是 ``content``）。
+
+        过去 ``_context_fits`` 只对 ``content`` 求和，于是同样每轮重发的
+        ``reasoning_content``（思考模式的思维链，常比正文长数倍）、assistant 消息上的
+        ``tool_calls`` 参数、以及 ``role: tool`` 的工具结果**全部漏算**。长会话里这三项
+        加起来能让真实请求体积是估算值的数倍 —— 这正是「闸门说还装得下、本地后端却做不完」
+        的机制。
+        """
+        if not isinstance(item, dict):
+            return 0
+        content = item.get("content")
+        content_tokens = cls._estimate_content_tokens(content) if content else 0
+        reasoning = item.get("reasoning_content")
+        if not reasoning:
+            reasoning_tokens = 0
+        elif isinstance(reasoning, str):
+            reasoning_tokens = cls._estimate_content_tokens(reasoning)
+        else:
+            reasoning_tokens = cls._estimate_serialized_tokens(reasoning)
+        tool_call_tokens = cls._estimate_serialized_tokens(item.get("tool_calls"))
+        if not (content_tokens or reasoning_tokens or tool_call_tokens):
+            return 0
+        return content_tokens + reasoning_tokens + tool_call_tokens + 8
 
     @staticmethod
     def _content_text(content: Any) -> str:
@@ -1117,12 +1231,14 @@ class SkillAgent:
 
         ``used``/``budget`` are heuristic estimates (not the real tokenizer),
         used only to decide whether to block with a notice instead of truncating.
+        计数必须覆盖请求体里**全部**每轮重发的载荷（content / reasoning_content /
+        tool_calls / role=tool 结果），只算 content 会让闸门放行远超窗口的请求。
         """
         limit, history_budget = cls._context_budget(profile, options, system_prompt)
         used = sum(
-            cls._estimate_content_tokens(item.get("content")) + 8
+            cls._replay_footprint_tokens(item)
             for item in history
-            if item.get("role") in {"user", "assistant"} and item.get("content")
+            if isinstance(item, dict) and item.get("role") in {"user", "assistant", "tool"}
         )
         used += max(0, int(extra_tokens or 0))
         return used <= history_budget, limit, used, history_budget

@@ -47,7 +47,11 @@ export async function maybeRecoverRunFromPoll() {
   try {
     const result = await api(`/api/runs?conversation_id=${encodeURIComponent(conversationId)}&active_only=1`);
     if (state.conversationId !== conversationId || state.abortController) return;
-    const run = (result.runs || [])[0];
+    // 只认顶层对话 Run（与 /api/runs 的口径一致）：后台子 Job 不占用会话运行位。
+    const run = (result.runs || []).find(
+      (item) => !String(item.parent_job_id || '').trim()
+        && ['chat', 'plan_execute'].includes(String(item.kind || '')),
+    );
     if (run && run.id) {
       console.warn('[naiba] 轮询兜底：检测到活跃 Run，恢复流 run=', run.id);
       state.checkRunEligible = false;

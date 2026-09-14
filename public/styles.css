@@ -87,6 +87,17 @@ html[data-theme="dark"] {
   --user-bubble:color-mix(in srgb, var(--accent) 22%, #171a24);
   --aborted-bg:#1d2130; --aborted-border:#4c4938; --sidebar-hover:rgba(255,255,255,.08); --sidebar-active:rgba(var(--brand-500-rgb),.28); --overlay-2:rgba(255,255,255,.1);
   --success-soft:#163c3b; --warning-soft:#46351a; --danger-soft:#452322; --sb-thumb:#3d455c; --sb-thumb-hover:#66708a;
+  /* 换肤软色族（--accent-soft / --accent-soft-2 / --violet-*）在 :root 与各 skin 里都是
+     「浅底淡彩」配方，只服务浅色主题。暗色下若不覆盖，它们仍是近白色，而 --text 早已变浅，
+     于是撞成「近白底 + 近白字」（实测 .active-task-bar 正文、.provider-card.is-default 卡名
+     对比度仅 1.05，等同不可读）。这里统一重新混色：软底 = accent 混入暗面，violet 深色反转
+     成亮色。消费这些变量的组件（提示条 / API 卡片 / 格式提示 / 拖拽态 / 任务状态）无需改动。 */
+  --accent-soft:color-mix(in srgb, var(--accent) 28%, var(--surface));
+  --accent-soft-2:color-mix(in srgb, var(--accent) 34%, var(--surface));
+  --violet-soft:color-mix(in srgb, var(--accent) 28%, var(--surface));
+  --violet-softer:color-mix(in srgb, var(--accent) 14%, var(--surface));
+  --violet-deep:color-mix(in srgb, var(--accent) 62%, #ffffff);
+  --violet-deep-2:color-mix(in srgb, var(--accent) 55%, #ffffff);
 }
 html[data-theme="dark"] .topbar { background: color-mix(in srgb, var(--surface) 94%, transparent); }
 
@@ -1311,11 +1322,21 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 }
 .update-version-trigger:disabled { opacity: .6; cursor: default; }
 .update-version-trigger:focus-visible { outline: 2px solid rgba(var(--brand-500-rgb), .25); border-color: var(--accent); }
+/* 菜单由 JS 挂进顶层宿主（#updateVersionMenuHost，缺失时退回 body）并改用 fixed 定位
+   （top/left/width/max-height 由 positionUpdateVersionMenu 写入，内联值优先于本规则）。
+   这里只声明弹出外观与高度契约：
+   - 20 行 = 20 * 34px（border-box，全局 * 已设 box-sizing:border-box，含上下边框与外边距）；
+   - 同时受视口高度约束（- 80px 留给触发按钮与安全边距），避免小窗口下菜单伸出屏幕。 */
 .update-version-menu {
-  position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0; max-height: calc(20 * 34px);
+  position: fixed; z-index: 60; max-height: min(calc(20 * 34px), calc(100dvh - 80px));
   overflow-y: auto; padding: 3px; border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--surface); box-shadow: 0 8px 24px rgba(0,0,0,.28);
 }
+/* 无 JS 兜底：菜单留在 combobox 内时按祖先定位（会被祖先裁剪，仅保证不彻底漏出）。 */
+.update-version-combobox .update-version-menu { position: absolute; top: calc(100% + 4px); left: 0; right: 0; }
+/* popover 顶层宿主：只作为定位容器，不得产生任何可交互/可绘制区域，
+   否则它会在 dialog 之上铺一层看不见的拦截（菜单之外的点击会被吞掉）。 */
+.update-version-menu-host { display: contents; margin: 0; border: 0; padding: 0; background: transparent; overflow: visible; }
 .update-version-menu[hidden] { display: none; }
 .update-version-option { min-height: 32px; display: flex; align-items: center; padding: 4px 8px; border-radius: var(--r-sm); color: var(--text); font-size: 13px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .update-version-option:hover, .update-version-option[aria-selected="true"] { background: rgba(var(--brand-500-rgb), .16); color: var(--accent); }

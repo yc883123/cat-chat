@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from naiba.core.media_types import MEDIA_EXTS, is_media_path, truncate_by_kind
+from naiba.core.media_types import MEDIA_EXTS, is_media_path, media_kind_of, truncate_by_kind
 from naiba.core.paths import path_within  # noqa: F401  (re-export for callers)
 
 # 多媒体产物（图片/视频/音频）走消息内产物卡片预览
@@ -34,14 +34,21 @@ def _is_media_product_path(raw: str) -> bool:
 ATTACHMENT_ONLY_NOTICE = "[用户未输入文字，只发送了以下附件]"
 
 
-def upload_reference_lines(uploads: list[dict[str, Any]], *, pdf_tools: bool = True) -> list[str]:
+def upload_reference_lines(
+    uploads: list[dict[str, Any]], *, pdf_tools: bool = True, video_tools: bool = True,
+) -> list[str]:
     """用户上传附件的模型侧引用行（_run_chat 与历史重放共用，保证逐字节一致）。
 
     PDF 附件在 ``pdf_tools=True`` 时追加固定处理指引：提取文本用 read_pdf；扫描版/看图用
     pdf_render_pages 渲染页图后 vision_analyze；细节不清时 pdf_zoom_region 局部放大。
-    该文本条件出现、每轮稳定，不改变非 PDF 会话的前缀。
-    会话工具集不含 read_pdf 时传 ``pdf_tools=False``：不再指引模型调用不存在的工具
-    （系统提示的「PDF 处理策略」段同口径，见 ``run/chat.py``）。
+    视频附件在 ``video_tools=True`` 时追加同类指引：probe_video 读元信息 → extract_frames
+    抽帧/生成联系表 → vision_analyze 识别内容。
+    该文本条件出现、每轮稳定，不改变非 PDF/非视频会话的前缀。
+    会话工具集不含对应工具时传 ``pdf_tools=False`` / ``video_tools=False``：不再指引模型
+    调用不存在的工具（系统提示的「PDF / 视频处理策略」段同口径，见 ``run/chat.py``）。
+
+    视频类型判定读 ``core/media_types.py::media_kind_of``（不在此二次维护扩展名名单，
+    教训 §九.30）；PDF 分支沿用扩展名判断以保持既有输出逐字节不变。
     """
     lines: list[str] = []
     for item in uploads or []:
@@ -58,23 +65,32 @@ def upload_reference_lines(uploads: list[dict[str, Any]], *, pdf_tools: bool = T
                     "pdf_render_pages 渲染页图后调用 vision_analyze；细节不清时用 pdf_zoom_region 局部放大）"
                 )
             lines.append(line)
+        elif video_tools and media_kind_of(path) == "video":
+            lines.append(
+                f"[用户上传文件：{path}]"
+                "（视频文件：先用 probe_video 读取时长与帧率，再用 extract_frames 抽帧"
+                "（模式可选 times/interval/keyframes）并生成联系表，然后把联系表或帧图路径"
+                "交给 vision_analyze 识别内容）"
+            )
         else:
             lines.append(f"[用户上传文件：{path}]")
     return lines
 
 
 def compose_user_content(
-    message: str, uploads: list[dict[str, Any]], *, pdf_tools: bool = True,
+    message: str, uploads: list[dict[str, Any]], *,
+    pdf_tools: bool = True, video_tools: bool = True,
 ) -> str:
     """用户轮次的模型可见文本（_run_chat 与历史重放共用的唯一拼接口径）。
 
     非空文字：保持历史口径逐字节不变（``文字 + "\\n" + 引用行``），前缀缓存不受影响；
     纯附件（用户未输入文字）：以固定提示行替代空文字，再接附件引用行，使模型明确
     "本轮只有附件、没有指令"，而不是自行脑补诉求。
-    ``pdf_tools`` 透传给 ``upload_reference_lines``（会话工具集是否含 read_pdf）。
+    ``pdf_tools`` / ``video_tools`` 透传给 ``upload_reference_lines``
+    （会话工具集是否含 read_pdf / extract_frames）。
     """
     text = str(message or "")
-    lines = upload_reference_lines(uploads, pdf_tools=pdf_tools)
+    lines = upload_reference_lines(uploads, pdf_tools=pdf_tools, video_tools=video_tools)
     if not lines:
         return text
     body = "\n".join(lines)

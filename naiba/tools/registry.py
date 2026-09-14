@@ -141,6 +141,9 @@ MEDIA_DECLARATIONS: dict[str, dict[str, str]] = {
     "read_pdf": {"policy": "never", "extract": "none"},
     "pdf_render_pages": {"policy": "inline", "extract": "structured"},
     "pdf_zoom_region": {"policy": "inline", "extract": "structured"},
+    # video 域（帧图与联系表是抽帧产物，probe_video 只出文本元信息）
+    "probe_video": {"policy": "never", "extract": "none"},
+    "extract_frames": {"policy": "inline", "extract": "structured"},
 }
 
 
@@ -1133,6 +1136,59 @@ def build_document_tool_specs() -> list[ToolSpec]:
     ]
 
 
+def build_video_tool_specs() -> list[ToolSpec]:
+    """视频域工具声明：probe_video（元信息）+ extract_frames（抽帧 + 联系表）。
+
+    执行逻辑在 naiba.video 服务 + video Provider。编排规则（先 probe → 按目标选模式 →
+    先用联系表概览、再抽单帧细看）在系统提示常驻区，描述只答职责。
+    """
+    return [
+        ToolSpec(
+            name="probe_video",
+            description=(
+                "读取视频文件的元信息：时长、帧率、分辨率、总帧数、视频编码、是否含音轨。"
+                "用于在抽帧前了解视频基本信息，决定抽帧的时间点或间隔。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {"path": _string("视频文件绝对路径")},
+                "required": ["path"],
+            },
+            side_effect=False,
+            retryable=True,
+            timeout=60,
+            permission="confirm",
+        ),
+        ToolSpec(
+            name="extract_frames",
+            description=(
+                "从视频抽帧存为 PNG：mode=times 按时间点、interval 按固定间隔、"
+                "keyframes 按画面切换择优；可加一张联系表。单次最多 8 帧，返回帧图路径。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": _string("视频文件绝对路径"),
+                    "mode": {"type": "string", "enum": ["times", "interval", "keyframes"], "description": "抽取模式：times / interval / keyframes", "default": "interval"},
+                    "times": _string('时间点列表（mode=times 时使用），如 "3,15,42.5"（秒）', ""),
+                    "interval": {"type": "number", "description": "每隔多少秒抽一帧（mode=interval 时使用）", "default": 2},
+                    "threshold": {"type": "number", "description": "画面切换灵敏度 0-1（mode=keyframes，越小越敏感；建议 0.2-0.5，默认 0.3）", "default": 0.3},
+                    "start": {"type": "number", "description": "起始时间（秒），缺省从头"},
+                    "end": {"type": "number", "description": "结束时间（秒），缺省到结尾"},
+                    "max": {"type": "integer", "description": "最多抽几帧（上限 12，默认 8，超过按间隔均匀裁剪）", "default": 8},
+                    "max_edge": {"type": "integer", "description": "单帧长边像素上限", "default": 1600},
+                    "contact_sheet": {"type": "boolean", "description": "是否额外生成一张拼图联系表", "default": True},
+                },
+                "required": ["path"],
+            },
+            side_effect=True,
+            retryable=True,
+            timeout=180,
+            permission="auto",
+        ),
+    ]
+
+
 def build_tool_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register_many(build_core_tool_specs())
@@ -1144,6 +1200,7 @@ def build_tool_registry() -> ToolRegistry:
     registry.register_many(build_search_tool_specs())
     registry.register_many(build_history_tool_specs())
     registry.register_many(build_document_tool_specs())
+    registry.register_many(build_video_tool_specs())
     # 别名表在查询层归一（Phase 5 后唯一来源；当前与 ToolExecutor.TOOL_ALIASES 双轨一致）
     registry.register_alias_map(HARNESS_ALIASES)
     # 媒体采集声明：内置工具逐名写入 metadata["media"]（缺失即装配期报错，

@@ -62,13 +62,85 @@ function closeUpdateVersionMenu() {
   if (!menu || !trigger) return;
   menu.hidden = true;
   trigger.setAttribute('aria-expanded', 'false');
+  // 顶层宿主留空即退出顶层，避免它继续盖住对话框上的其它内容。
+  const host = $('#updateVersionMenuHost');
+  if (host && typeof host.hidePopover === 'function' && host.matches(':popover-open')) {
+    try {
+      host.hidePopover();
+    } catch (error) {
+      /* 已关闭或浏览器拒绝：无副作用，忽略 */
+    }
+  }
+}
+
+/* 版本菜单 = fixed 定位 + 顶层宿主挂载，两个坑一次解决（教训 §九.27 + §九.50）。
+   坑一（裁剪）：留在 #updateVersionCombobox 里会被两层祖先裁掉——`.update-status{overflow:hidden}`
+   切掉一半选项，设置面板内容区又是 overflow:auto，滚动时菜单不跟手；fixed 让包含块变成视口。
+   坑二（层级）：设置页本身是模态 <dialog>（top layer），body 上的 fixed 弹层同样盖不过它，
+   所以挂载点取 #updateVersionMenuHost（popover 顶层宿主，见 updateVersionMenuHost()）。
+   注意：fixed 只在祖先没有 transform/filter/contain 时相对视口生效——宿主用 display: contents
+   不产生盒子，满足该前提。 */
+const UPDATE_VERSION_MENU_GAP = 4;
+// 触发按钮与视口之间至少留出的边距，避免菜单贴死屏幕边缘。
+const UPDATE_VERSION_MENU_MARGIN = 12;
+
+/* 选中菜单的挂载容器：优先设置面板里的 popover 顶层宿主（能盖住模态 dialog），
+   没有（例如宿主被裁掉、浏览器不支持 popover）则退回 body。
+   注意不能用 `:popover-open` 做存在性判断——未 showPopover() 时它匹配不到任何元素。 */
+function updateVersionMenuHost() {
+  const host = $('#updateVersionMenuHost');
+  if (!host) return document.body;
+  if (typeof host.showPopover !== 'function') return document.body;
+  try {
+    if (!host.matches(':popover-open')) host.showPopover();
+  } catch (error) {
+    return document.body;
+  }
+  return host;
+}
+
+function positionUpdateVersionMenu() {
+  const menu = $('#updateVersionMenu');
+  const trigger = $('#updateVersionTrigger');
+  if (!menu || !trigger || menu.hidden) return;
+  const box = trigger.getBoundingClientRect();
+  const width = Math.max(box.width, 220);
+  const viewportHeight = window.innerHeight;
+  const naturalHeight = menu.offsetHeight;
+  const roomBelow = viewportHeight - box.bottom - UPDATE_VERSION_MENU_GAP - UPDATE_VERSION_MENU_MARGIN;
+  const roomAbove = box.top - UPDATE_VERSION_MENU_GAP - UPDATE_VERSION_MENU_MARGIN;
+  // 先尽量完整放下：下方优先，下方放不下但上方能放下则翻转。
+  // 两侧都放不下时（面板本身很矮或菜单很长），选空间更大的一侧贴边，
+  // 并把高度压到可用空间——否则菜单会整段伸出视口，底部选项根本点不到。
+  let height = naturalHeight;
+  let top;
+  if (naturalHeight <= roomBelow) {
+    top = box.bottom + UPDATE_VERSION_MENU_GAP;
+  } else if (naturalHeight <= roomAbove) {
+    top = box.top - naturalHeight - UPDATE_VERSION_MENU_GAP;
+  } else if (roomBelow >= roomAbove) {
+    height = Math.max(0, roomBelow);
+    top = box.bottom + UPDATE_VERSION_MENU_GAP;
+  } else {
+    height = Math.max(0, roomAbove);
+    top = box.top - height - UPDATE_VERSION_MENU_GAP;
+  }
+  const maxLeft = Math.max(UPDATE_VERSION_MENU_MARGIN, window.innerWidth - width - UPDATE_VERSION_MENU_MARGIN);
+  menu.style.position = 'fixed';
+  menu.style.width = `${width}px`;
+  menu.style.maxHeight = `${Math.round(height)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+  menu.style.left = `${Math.round(Math.min(Math.max(UPDATE_VERSION_MENU_MARGIN, box.left), maxLeft))}px`;
 }
 
 function openUpdateVersionMenu() {
   const menu = $('#updateVersionMenu');
   const trigger = $('#updateVersionTrigger');
   if (!menu || !trigger || trigger.disabled) return;
+  const host = updateVersionMenuHost();
+  if (menu.parentElement !== host) host.appendChild(menu);
   menu.hidden = false;
+  positionUpdateVersionMenu();
   trigger.setAttribute('aria-expanded', 'true');
   const selected = menu.querySelector('[aria-selected="true"]');
   selected?.scrollIntoView({ block: 'nearest' });
@@ -86,26 +158,39 @@ function initUpdateVersionCombobox() {
     if (!items.length) return;
     let index = items.findIndex((item) => item.getAttribute('aria-selected') === 'true');
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      // preventDefault 是必需的：空间键之外，方向键默认还会滚动祖先容器，
+      // 菜单现在挂在 body 下（fixed），祖先滚动会把菜单推离触发按钮。
       event.preventDefault();
       if (menu.hidden) openUpdateVersionMenu();
       index = (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
       native.value = items[index].dataset.value;
       native.dispatchEvent(new Event('change', { bubbles: true }));
-    } else if (event.key === 'Enter' || event.key === ' ') {
+    } else if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
       event.preventDefault();
       menu.hidden ? openUpdateVersionMenu() : closeUpdateVersionMenu();
     } else if (event.key === 'Escape') {
+      event.preventDefault();
       closeUpdateVersionMenu();
     }
   });
   trigger.addEventListener('blur', () => {
     setTimeout(() => {
-      if (!document.activeElement?.closest('#updateVersionCombobox')) closeUpdateVersionMenu();
+      // 菜单已挂到 body 下，不再是 combobox 的后代：祖先判定要同时放行菜单自身。
+      const active = document.activeElement;
+      if (!active?.closest('#updateVersionCombobox') && !active?.closest('#updateVersionMenu')) {
+        closeUpdateVersionMenu();
+      }
     }, 0);
   });
   document.addEventListener('click', (event) => {
-    if (!event.target.closest('#updateVersionCombobox')) closeUpdateVersionMenu();
+    if (!event.target.closest('#updateVersionCombobox') && !event.target.closest('#updateVersionMenu')) {
+      closeUpdateVersionMenu();
+    }
   });
+  // 页面/面板滚动或窗口变化时重新贴合触发按钮（fixed 不会跟着祖先滚动）。
+  const reposition = () => { if (!menu.hidden) positionUpdateVersionMenu(); };
+  window.addEventListener('scroll', reposition, true);
+  window.addEventListener('resize', reposition);
   initUpdateVersionCombobox._ready = true;
 }
 

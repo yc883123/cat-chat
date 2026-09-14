@@ -104,14 +104,7 @@ class NetIO:
                 "url": url,
                 "use_system_fallback": use_system_fallback,
             }
-            self._direct_opener = None
-            self._system_opener = None
-            if url:
-                self._manual_opener = urllib.request.build_opener(
-                    urllib.request.ProxyHandler({"http": url, "https": url})
-                )
-            else:
-                self._manual_opener = None
+            self._manual_opener = self._build_manual_opener(url) if url else None
 
     def proxy_state(self) -> dict[str, Any]:
         """返回当前代理策略状态，供设置页与 API 测试展示“实际生效模式”。"""
@@ -169,6 +162,11 @@ class NetIO:
 
     # ---- 内部 opener 选择 ----
 
+    @staticmethod
+    def _build_manual_opener(url: str) -> urllib.request.OpenerDirector:
+        """按手动代理地址构建 opener（唯一构造点，供 configure/重试共用）。"""
+        return urllib.request.build_opener(urllib.request.ProxyHandler({"http": url, "https": url}))
+
     def _opener_for(self, host: str, local: bool) -> urllib.request.OpenerDirector:
         with self._lock:
             configured = self._configured
@@ -187,7 +185,11 @@ class NetIO:
                 self._system_opener = urllib.request.build_opener(urllib.request.ProxyHandler())
             return self._system_opener
         if configured.get("url"):
-            return self._manual_opener or urllib.request.build_opener()  # pragma: no cover - configure() 已重建
+            # 缓存缺失时按当前策略重建手动代理 opener。绝不能退回 build_opener()
+            # （空 ProxyHandler 一族会静默直连）——那等于把一次抖动变成绕开代理。
+            if self._manual_opener is None:
+                self._manual_opener = self._build_manual_opener(str(configured["url"]))
+            return self._manual_opener
         if configured.get("use_system_fallback"):
             if self._system_opener is None:
                 self._system_opener = urllib.request.build_opener(urllib.request.ProxyHandler())
@@ -197,15 +199,24 @@ class NetIO:
         return self._direct_opener
 
     def _refresh_opener(self, host: str, local: bool) -> urllib.request.OpenerDirector:
-        """丢弃当前策略下的 opener 并创建新实例，用于一次受控重试。"""
+        """丢弃当前策略下的 opener 并创建新实例，用于一次受控重试。
+
+        分支必须与 ``_opener_for`` 的最终选择逐一对齐，否则会出现
+        “重试却复用同一个失败 opener”的空转：例如「代理已开启 + 未填地址 +
+        关闭系统回退」在旧写法下不匹配任何分支，直连 opener 不会被丢弃。
+        """
         with self._lock:
             configured = self._configured
             if local or (configured is not None and not configured.get("enabled")):
                 self._direct_opener = None
-            elif configured is None or configured.get("use_system_fallback"):
+            elif configured is None:
                 self._system_opener = None
             elif configured.get("url"):
                 self._manual_opener = None
+            elif configured.get("use_system_fallback"):
+                self._system_opener = None
+            else:
+                self._direct_opener = None
         return self._opener_for(host, local)
 
     # ---- 统一入口 ----

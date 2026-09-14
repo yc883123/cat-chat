@@ -28,11 +28,21 @@ from naiba.run.session import (
 
 from naiba.run.chat import ConversationRunMixin
 from naiba.core.exceptions import ActiveRunError
+from naiba.storage.store import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES
+
+
+# 「这条会话在不在回答」只由这些 kind 的**顶层** Run 决定（见 store.create_chat_run）。
+# 后台子 Job（子代理 / 视觉 / 批处理）的 kind 不在其中，parent_job_id 也非空。
+PRIMARY_RUN_KINDS = frozenset({"chat", "plan_execute"})
 
 
 class ConversationRunManager(ConversationRunMixin):
-    ACTIVE = {"queued", "running", "waiting", "cancelling"}
-    TERMINAL = {"completed", "failed", "cancelled"}
+    # 与存储层共用同一份状态定义（见 store.ACTIVE_TASK_STATUSES 注释）：
+    # jobs.cancel() 会把子任务置为 stopping，取消判定必须认它，否则一个正在
+    # 收尾的子任务会被当成「已结束」。TERMINAL 一并补上 interrupted（重启清理
+    # 产生），让 wait_for_events 对中断过的 run 立即返回而不是空等 15 秒。
+    ACTIVE = set(ACTIVE_TASK_STATUSES)
+    TERMINAL = set(TERMINAL_TASK_STATUSES)
 
     def __init__(self, app: AppContext):
         self.app = app
@@ -149,6 +159,21 @@ class ConversationRunManager(ConversationRunMixin):
 
     def list(self, conversation_id: str = "", active_only: bool = False) -> list[dict[str, Any]]:
         return self.app.storage.list_background_tasks(conversation_id, active_only)
+
+    def list_primary(self, conversation_id: str = "", active_only: bool = False) -> list[dict[str, Any]]:
+        """只返回**顶层对话 Run**（后台子 Job 不算）。
+
+        子 Job 不占用会话的运行位，却会被 ``/api/runs`` 的前端消费者当成
+        「会话正在回答」，把「分支 / 重新生成 / 新会话」三个救援入口全部挡住
+        （2026-09-14 客户机实测：一个卡在 stopping 的子任务让用户只剩重启一条路）。
+        与 ``storage.active_run`` 的顶层语义保持一致。
+        """
+        return [
+            item
+            for item in self.list(conversation_id, active_only)
+            if str(item.get("kind") or "") in PRIMARY_RUN_KINDS
+            and not str(item.get("parent_job_id") or "")
+        ]
 
     def get(self, run_id: str) -> dict[str, Any] | None:
         return self.app.storage.get_background_task(run_id)

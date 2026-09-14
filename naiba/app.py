@@ -217,6 +217,13 @@ class NaibaChatApp:
         self.tool_registry.register_provider(
             DocumentToolProvider(core_tool_context, lambda: self._paths.data_dir)
         )
+        # video 域 Provider（视频抽帧）：probe_video/extract_frames 单一定义；
+        # 帧图缓存走 uploads/video_frames（被 /api/imaging/clean 与统计自动覆盖）。
+        from naiba.tools.providers.video import VideoToolProvider
+
+        self.tool_registry.register_provider(
+            VideoToolProvider(core_tool_context, lambda: self._paths.data_dir)
+        )
         self.jobs = JobRegistry(self)
         # MCP 生命周期：工具发现后注册到统一工具表，断开/注销时清理
         self.mcp.on_tools_discovered = self.tool_registry.register_mcp_tools
@@ -1190,7 +1197,7 @@ class NaibaChatApp:
                     {"role": "system", "content": "你是连接测试助手。直接回答，不要调用工具。"},
                     {"role": "user", "content": "只回复 OK"},
                 ],
-                {"temperature": 0, "max_tokens": 128, "stream": False, "connection_test": True},
+                {"temperature": 0, "max_tokens": 128, "stream": False, "connection_test": True, "lock_label": "连接测试"},
             )
             capability_resolver = getattr(self.vision, "brain_image_capability", None)
             capability = (

@@ -40,6 +40,19 @@ API_USER_AGENT = (
 ONLINE_MODEL_TIMEOUT_SECONDS = 180
 LOCAL_MODEL_TIMEOUT_SECONDS = 1800
 PROVIDER_TEST_TIMEOUT_SECONDS = 30
+# 等本地锁期间的等待时长回报间隔（秒）。原实现是 `lock.acquire()`：无超时、不看
+# cancel_event，另一个调用占着全局本地锁时主对话线程会**无限静默**地等下去。
+LOCAL_LOCK_WAIT_NOTICE_SECONDS = 5.0
+# 本地后端「首字节超时」（秒）：prefill 期间一个字节都不吐是本地模型的常态，但
+# 「正在 prefill」与「永远做不完」在界面上无法区分。本地请求的总超时是 30 分钟
+# （LOCAL_MODEL_TIMEOUT_SECONDS），意味着请求体一旦超过真实 n_ctx，用户要干等半小时
+# 才看到报错（客户机实测：整条会话看起来「永久卡死」，重启无效）。这里对**首个字节**
+# 另设一个短超时：超过即断开连接，并给出可行动的错误。0 = 关闭本层（回到旧行为）。
+# 可用 options["first_byte_timeout_seconds"] 覆盖（运行设置 → 本地首字节超时）。
+LOCAL_FIRST_BYTE_TIMEOUT_SECONDS = 120
+# 本地锁占用者的默认标签：调用方可用 options["lock_label"] 换成更具体的角色
+# （视觉识别 / 子代理 / 计划整理 …），等锁的一方就能在状态里指名道姓。
+DEFAULT_LOCK_LABEL = "对话回复"
 FAST_RETRY_NETWORK_ERRORS = {10053, 10054, 10061}
 # 失败请求体落盘（取证）：思考回传类 400/422 与全部 5xx 都写这个文件（覆盖式，只留最近一次）。
 ERROR_DUMP_FILENAME = "naiba-model-error-payload.json"
@@ -56,6 +69,43 @@ class EmptyModelStreamError(RuntimeError):
     按瞬时故障处理：在既有重试预算内退避重发；次数用尽后原样抛出（消息文本与
     用户可见错误保持不变）。仅 codex_responses 会抛出该类型，其它在线协议不受影响。
     """
+
+
+class LocalModelFirstByteTimeout(RuntimeError):
+    """本地后端在首字节超时内没有吐出任何内容。
+
+    与「网络超时」「连接失败」区分开：这一条几乎总是「本轮请求体超过真实上下文
+    窗口，prefill 做不完」或「模型仍在加载」。本地请求的总超时是
+    ``LOCAL_MODEL_TIMEOUT_SECONDS``(1800s)，不加这一层的话用户要等半小时才看到
+    报错，期间界面只有一个「等待本地模型资源」——客户机实测整条会话看起来永久
+    卡死（重启后端、重启电脑都无效：病根在每轮构造的请求体里，不在进程里）。
+    """
+
+
+def local_first_byte_timeout_error(seconds: float) -> LocalModelFirstByteTimeout:
+    """首字节超时的统一文案（生成器与调用方共用，避免两处措辞漂移）。"""
+    return LocalModelFirstByteTimeout(
+        f"本地模型 {max(1, int(round(max(0.0, float(seconds)))))} 秒内没有输出任何内容（prefill 未完成或模型仍在加载）。"
+        "常见原因是本轮请求超出了本地模型的真实上下文长度："
+        "可以开一个新会话、减少 /引用 与附件后重试，"
+        "或在「设置 → API 供应商」里确认该本地模型的上下文长度。"
+        "（该超时可在「设置 → 运行设置 → 本地首字节超时」调整，0 = 关闭）"
+    )
+
+
+def _has_stream_payload(line: Any) -> bool:
+    """这一行是否算「模型真的开始输出了」。
+
+    **关键**：SSE 的注释行（``: keepalive``）与空行是链路保活噪音——网关、
+    反向代理、部分推理服务都会在等模型时周期性发它们。若把注释行当成「已有输出」，
+    首字节超时就被静默解除，而请求其实一个正文字节都没有（实测：假端点只发保活注释时，
+    超时闸门完全不触发，客户端一直等到对端自己断开）。所以进度只认**有效载荷行**。
+    """
+    if isinstance(line, (bytes, bytearray)):
+        raw = bytes(line).strip()
+        return bool(raw) and not raw.startswith(b":")
+    text = str(line).strip()
+    return bool(text) and not text.startswith(":")
 
 
 class _ErrorHTMLParser(HTMLParser):
@@ -232,6 +282,28 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
     """在线模型调用。"""
 
     _local_execution_lock = threading.RLock()
+    # 本地锁占用者标签。本地锁是全进程唯一的类属性，而占用它的调用未必有 status 通道
+    # （视觉识别、子代理都传 status=None）——于是界面只看得到「等待本地模型资源」，
+    # 既不知道是谁在用、也不知道要等多久，只能重启。这里记一个标签，让等锁的一方
+    # 在状态里**指名道姓**：调用方通过 options["lock_label"] 声明自己的角色。
+    _local_holder_guard = threading.Lock()
+    _local_holder_label = ""
+
+    @classmethod
+    def _set_local_holder(cls, label: str) -> None:
+        with cls._local_holder_guard:
+            cls._local_holder_label = str(label or "")
+
+    @classmethod
+    def _clear_local_holder(cls, label: str) -> None:
+        with cls._local_holder_guard:
+            if cls._local_holder_label == str(label or ""):
+                cls._local_holder_label = ""
+
+    @classmethod
+    def _local_holder_name(cls) -> str:
+        with cls._local_holder_guard:
+            return cls._local_holder_label
 
     def __init__(self) -> None:
         # 每个 HTTP 请求线程独立保存最近一次模型调用信息，避免并发对话互相覆盖。
@@ -302,6 +374,8 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                 if not str(payload.get("type") or "").startswith("reasoning"):
                     status(payload)
         is_local = kind == "local"
+        # 本地锁占用者标签：调用方声明角色，等锁的一方能指名道姓地知道「谁在用」。
+        holder_label = str(options.get("lock_label") or "").strip() or DEFAULT_LOCK_LABEL
         if is_local and status:
             status({"type": "status", "message": "等待本地模型资源"})
         # Local backends share GPU/RAM and commonly expose one active model.
@@ -325,8 +399,13 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
             "reasoning_effort": str(profile.get("reasoning_effort") or "auto"),
         }
         lock_started = time.perf_counter()
-        lock.acquire()
+        if is_local:
+            self._acquire_local_lock(lock, options, effective_status, holder_label)
+        else:
+            lock.acquire()
         diagnostics["lock_wait_ms"] = round((time.perf_counter() - lock_started) * 1000, 1)
+        if is_local:
+            self._set_local_holder(holder_label)
         total_started = time.perf_counter()
         try:
             content, reasoning, reasoning_id, usage = self._complete_online(
@@ -334,6 +413,8 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
             )
         finally:
             lock.release()
+            if is_local:
+                self._clear_local_holder(holder_label)
             diagnostics["total_ms"] = round((time.perf_counter() - total_started) * 1000, 1)
             self.last_diagnostics = diagnostics
         # DeepSeek thinking mode REQUIRES assistant reasoning_content to be passed
@@ -348,6 +429,56 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
         self.last_reasoning_id = reasoning_id
         self.last_usage = usage
         return content
+
+    @classmethod
+    def _busy_notice(cls, waited: float) -> str:
+        """等本地锁时的可见状态文案：**指名道姓**说出占用者。"""
+        holder = cls._local_holder_name()
+        who = f"{holder} 正在使用" if holder else "另一处调用仍在使用"
+        return (
+            f"本地模型忙：{who}，已排队等待 {max(0, int(waited))} 秒"
+            "（本地后端同一时刻只处理一个请求）"
+        )
+
+    @staticmethod
+    def _acquire_local_lock(
+        lock: Any,
+        options: dict[str, Any],
+        status: StatusCallback | None = None,
+        holder: str = "",
+    ) -> None:
+        """等本地锁期间**可取消**且**可见**。
+
+        原实现 `lock.acquire()` 无超时也不看 ``cancel_event``：本地锁是类属性（全进程唯一），
+        被另一个调用（子代理、或 ``status=None`` 因而在界面上完全隐形的视觉调用）占住时，
+        主对话线程会无限静默地等下去 ——「停止」按钮只能把 DB 里的 run 行置为 cancelled，
+        停不掉这个线程，界面就永久停在「等待本地模型资源」。改为 0.5 秒粒度的可中断等待：
+        取消信号到达即抛（与重试路径同一约定文案），并每 LOCAL_LOCK_WAIT_NOTICE_SECONDS
+        秒回报一次真实等待时长，让「卡住了」和「在排队」在界面上可分辨。
+
+        ``holder`` 是本次调用自己的角色名，用于登记「现在是谁在占锁」；等锁的一侧会
+        通过 ``_busy_notice`` 把占用者名字打出来（首次发现忙碌时立刻回报一次，之后每
+        5 秒一次），这样「隐形占锁者」（视觉识别、子代理）在界面上不再不可归因。
+        """
+        cancel_event = options.get("cancel_event")
+        if not isinstance(cancel_event, threading.Event):
+            cancel_event = None
+        if lock.acquire(timeout=0.5):
+            return
+        waited = 0.0
+        announced = 0.0
+        if status is not None:
+            # 首次发现被占住就立刻说明「谁在用」，不要先沉默 5 秒。
+            status({"type": "status", "message": ModelRuntime._busy_notice(waited)})
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("任务已取消")
+            if lock.acquire(timeout=0.5):
+                return
+            waited += 0.5
+            if status is not None and waited - announced >= LOCAL_LOCK_WAIT_NOTICE_SECONDS:
+                announced = waited
+                status({"type": "status", "message": ModelRuntime._busy_notice(waited)})
 
     @staticmethod
     def _urlopen_cancelable(
@@ -442,6 +573,81 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
         if error is not None:
             raise error
         return result.get("data", b"")
+
+    @staticmethod
+    def _iter_stream_lines(
+        response: Any,
+        cancel_event: threading.Event | None = None,
+        first_byte_timeout: float = 0.0,
+    ) -> Any:
+        """逐行产出流式响应，在取消或首字节超时时尽快中断读取。
+
+        读取线程阻塞在 ``response.readline()``（socket 读）里，循环体根本没有机会
+        看到取消请求——本地模型 prefill 期间一个字节都不吐，此前「停止」对它完全
+        无效，只能等满 30 分钟超时。这里让一个轻量看门狗线程做两件事：
+
+        1. **取消**置位时关闭连接，把阻塞的读打断，再把随之而来的 I/O 异常翻译成
+           统一的「任务已取消」，避免被误判成网络故障而进入重试/报错分支；
+        2. ``first_byte_timeout > 0`` 时，若**连续**该秒数没有收到任何**有效载荷行**
+           （SSE 注释与空行不算，见 ``_has_stream_payload``），同样关闭连接并抛
+           ``LocalModelFirstByteTimeout``。
+
+        第 2 条是给本地后端用的：本地请求总超时 1800 秒，「prefill 做不完」与
+        「正在 prefill」在界面上无法区分，用户要干等半小时才知道这一轮根本没戏。
+        计时从**进入生成器**开始（此时 HTTP 头已收到），只约束「模型有没有在出内容」；
+        一有正文字节就重新起算，因此它同时能抓住「中途长时间静默」。
+        """
+        timeout_seconds = max(0.0, float(first_byte_timeout or 0.0))
+        if cancel_event is None and timeout_seconds <= 0:
+            yield from response
+            return
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("任务已取消")
+        stop = threading.Event()
+        state = {"started": False, "timed_out": False}
+        progress = {"last": time.perf_counter()}
+
+        def abort_watchdog() -> None:
+            # 只做一件事：取消或长时间没有有效载荷时关闭连接，让阻塞中的 readline 立刻抛错返回。
+            while not stop.wait(0.1):
+                if cancel_event is not None and cancel_event.is_set():
+                    try:
+                        response.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return
+                if timeout_seconds > 0 and time.perf_counter() - progress["last"] >= timeout_seconds:
+                    state["timed_out"] = True
+                    try:
+                        response.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return
+
+        threading.Thread(
+            target=abort_watchdog, name="naiba-stream-abort", daemon=True
+        ).start()
+        try:
+            for line in response:
+                if _has_stream_payload(line):
+                    state["started"] = True
+                    progress["last"] = time.perf_counter()
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("任务已取消")
+                yield line
+            # 超时有时表现为「连接被关掉 → 迭代干净结束」，这里补一次判定，
+            # 避免退化成下游那句含糊的「流式响应中没有文本内容」。
+            if state["timed_out"]:
+                raise local_first_byte_timeout_error(timeout_seconds)
+        except Exception as exc:  # noqa: BLE001
+            # 连接被看门狗关掉时会抛 ValueError/OSError，按关掉它的原因归因。
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("任务已取消") from exc
+            if state["timed_out"]:
+                raise local_first_byte_timeout_error(timeout_seconds) from exc
+            raise
+        finally:
+            stop.set()
 
     @staticmethod
     def list_online_models(profile: dict[str, Any]) -> list[dict[str, Any]]:
@@ -908,6 +1114,17 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
         timeout_override = options.get("request_timeout_seconds")
         if isinstance(timeout_override, (int, float)) and timeout_override > 0:
             request_timeout = max(1, min(int(timeout_override), LOCAL_MODEL_TIMEOUT_SECONDS))
+        # 本地流式请求另加「首字节超时」：prefill 做不完时本地后端一个字节都不吐，
+        # 只靠 1800 秒总超时等于让用户干等半小时（客户机实测整条会话看似永久卡死）。
+        # 在线请求不加：云端排队/长时间思考是合法的，且在线已有 180 秒总超时兜底。
+        first_byte_timeout = 0.0
+        if is_local:
+            first_byte_timeout = float(LOCAL_FIRST_BYTE_TIMEOUT_SECONDS)
+            override = options.get("first_byte_timeout_seconds")
+            if isinstance(override, (int, float)) and not isinstance(override, bool):
+                first_byte_timeout = max(0.0, float(override))
+        if diagnostics is not None:
+            diagnostics["first_byte_timeout_s"] = round(first_byte_timeout, 3)
         attempts = 1 if is_local else 3
         attempts_override = options.get("request_attempts")
         if isinstance(attempts_override, int) and attempts_override > 0:
@@ -941,7 +1158,9 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
             try:
                 with ModelRuntime._urlopen_cancelable(request, request_timeout, cancel_event) as response:
                     if stream_enabled and response_format == "ollama":
-                        streamed = ModelRuntime._read_ollama_stream(response, status)
+                        streamed = ModelRuntime._read_ollama_stream(
+                            ModelRuntime._iter_stream_lines(response, cancel_event, first_byte_timeout), status
+                        )
                         content = ModelRuntime._clean_content(streamed["content"])
                         reasoning = streamed["reasoning"]
                         if not content:
@@ -962,7 +1181,10 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                                 with ModelRuntime._urlopen_cancelable(
                                     retry_request, request_timeout, cancel_event
                                 ) as retry_response:
-                                    streamed = ModelRuntime._read_ollama_stream(retry_response, status)
+                                    streamed = ModelRuntime._read_ollama_stream(
+                                        ModelRuntime._iter_stream_lines(retry_response, cancel_event, first_byte_timeout),
+                                        status,
+                                    )
                                 content = ModelRuntime._clean_content(streamed["content"])
                                 reasoning = streamed["reasoning"]
                                 if not content:
@@ -973,7 +1195,9 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                                 raise RuntimeError("Ollama 流式响应中没有文本内容")
                         return content, reasoning, "", streamed["usage"]
                     if stream_enabled and response_format == "lm_studio":
-                        streamed = ModelRuntime._read_lm_studio_stream(response, status)
+                        streamed = ModelRuntime._read_lm_studio_stream(
+                            ModelRuntime._iter_stream_lines(response, cancel_event, first_byte_timeout), status
+                        )
                         content = ModelRuntime._clean_content(streamed["content"])
                         reasoning = streamed["reasoning"]
                         if not content:
@@ -984,7 +1208,11 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                                 raise RuntimeError("LM Studio 流式响应中没有文本内容")
                         return content, reasoning, "", streamed["usage"]
                     if stream_enabled and response_format != "gemini":
-                        streamed = ModelRuntime._read_sse_response(response, response_format, status)
+                        streamed = ModelRuntime._read_sse_response(
+                            ModelRuntime._iter_stream_lines(response, cancel_event, first_byte_timeout),
+                            response_format,
+                            status,
+                        )
                         content = ModelRuntime._clean_content(streamed["content"])
                         reasoning = streamed["reasoning"]
                         if not content:

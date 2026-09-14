@@ -442,6 +442,14 @@ export function populateRuntimeSettings() {
   if ($('#contextWarningPercent')) {
     $('#contextWarningPercent').value = Number(settings.context_warning_percent ?? 80);
   }
+  // 本地首字节超时 / Agent 最大步数：0 有意义（分别表示「关闭本层」「不限制」），
+  // 因此不能用 `|| 默认值` 回填，必须原样回显。
+  if ($('#localFirstByteTimeout')) {
+    $('#localFirstByteTimeout').value = Number(settings.local_first_byte_timeout_seconds ?? 120);
+  }
+  if ($('#agentStepLimit')) {
+    $('#agentStepLimit').value = Number(settings.agent_step_limit ?? 200);
+  }
   // 新会话种子模板：留空 = 前端回退到内置默认（占位符说明见设置项下方小字）。
   if ($('#contextResetSeedTemplate')) {
     $('#contextResetSeedTemplate').value = String(settings.context_reset_seed_template || '');
@@ -1849,9 +1857,14 @@ export async function saveRuntimeSettings() {
   }
   // 阈值留空按默认 80 处理（0 才是"关闭提醒"，避免误清空导致静默关闭）。
   const warningRaw = String($('#contextWarningPercent')?.value ?? '').trim();
+  // 这两项同理：0 是有效值，只有「留空」才回落到默认值。
+  const firstByteRaw = String($('#localFirstByteTimeout')?.value ?? '').trim();
+  const maxStepsRaw = String($('#agentStepLimit')?.value ?? '').trim();
   const payload = {
     command_timeout: Number($('#commandTimeout')?.value || 120),
     context_warning_percent: warningRaw === '' ? 80 : Number(warningRaw),
+    local_first_byte_timeout_seconds: firstByteRaw === '' ? 120 : Number(firstByteRaw),
+    agent_step_limit: maxStepsRaw === '' ? 200 : Number(maxStepsRaw),
     context_reset_seed_template: String($('#contextResetSeedTemplate')?.value || ''),
     workspace_dir: $('#workspaceDir')?.value.trim() || '',
     imaging: {

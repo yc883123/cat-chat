@@ -387,6 +387,11 @@
   </dialog>
 
   <dialog id="settingsDialog" class="settings-dialog">
+    <!-- 顶层宿主：模态 dialog 会进入顶层（top layer），body 下的菜单即使 z-index 再高
+         也会被 dialog 与 ::backdrop 盖住。把「目标版本」菜单放进这个 popover 宿主，
+         open 时它同样进入顶层且晚于 dialog，从而稳稳浮在设置面板之上。
+         （popover 定位由 JS 以 fixed + top/left 指定；宿主本身不拦截指针。） -->
+    <div id="updateVersionMenuHost" popover="manual" class="update-version-menu-host"></div>
     <div class="dialog-toolbar">
       <div><h2>设置</h2><p>模型与运行参数</p></div>
       <button class="icon-button" data-close="settingsDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
@@ -455,6 +460,8 @@
           <div class="field-grid">
             <label>命令超时（秒）<input id="commandTimeout" type="number" min="10" max="900" step="10"><small class="hint">仅工具与命令执行有效；不控制在线或本地模型的响应超时。</small></label>
             <label>上下文提醒阈值（%）<input id="contextWarningPercent" type="number" min="0" max="100" step="5"><small class="hint">上下文用量达到该百分比时弹窗提醒一次；0 = 关闭提醒。</small></label>
+            <label>本地首字节超时（秒）<input id="localFirstByteTimeout" type="number" min="0" max="1800" step="10"><small class="hint">本地模型做 prefill 时往往长时间不输出内容，与「一直做不完」在界面上无法区分。连续该时长没有输出任何正文（链路的保活注释不算）即断开并报错。0 = 关闭（退回等满 30 分钟总超时的旧行为）。</small></label>
+            <label>Agent 最大步数<input id="agentStepLimit" type="number" min="0" max="1000" step="10"><small class="hint">单轮回复允许的模型调用次数上限（每次工具调用算一步）。达到上限会停止并说明原因，避免模型反复调工具停不下来。0 = 不限制。</small></label>
             <label class="field-wide">新会话种子消息（模型重置上下文后填入输入框）
               <textarea id="contextResetSeedTemplate" rows="4" maxlength="2000" spellcheck="false"
                         placeholder="留空使用内置默认模板"></textarea>

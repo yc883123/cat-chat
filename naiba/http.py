@@ -149,7 +149,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             conversation_id = query.get("conversation_id", [""])[0]
             active_only = query.get("active_only", ["0"])[0] == "1"
-            self._json({"runs": self.app.runs.list(conversation_id, active_only)})
+            # 该接口回答的是「这条会话在不在回答」，因此只回**顶层对话 Run**
+            # （后台子 Job 不算，见 runs.list_primary）。卡住的子任务曾把
+            # 「分支 / 重新生成 / 新会话」三个救援入口全部挡住（2026-09-14）。
+            # 需要看子任务请用 /api/tasks。
+            self._json({"runs": self.app.runs.list_primary(conversation_id, active_only)})
         elif path.startswith("/api/runs/") and path.endswith("/events"):
             run_id = path.split("/")[-2]
             query = urllib.parse.parse_qs(parsed.query)
@@ -703,14 +707,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json({"error": "run_id 和 conversation_id 不能同时为空"}, HTTPStatus.BAD_REQUEST)
             else:
                 if not run_id:
-                    active = next(
-                        (
-                            item for item in self.app.runs.list(conversation_id, active_only=True)
-                            if str(item.get("kind") or "") in {"chat", "plan_execute"}
-                        ),
-                        None,
-                    )
-                    run_id = str((active or {}).get("id") or "")
+                    # list_primary 已限定为顶层对话 Run（kind + parent_job_id），
+                    # 这里直接取最新的那条。
+                    primary = self.app.runs.list_primary(conversation_id, active_only=True)
+                    run_id = str((primary[0] if primary else {}).get("id") or "")
                 run = self.app.runs.get(run_id) if run_id else None
                 if run and conversation_id and str(run.get("conversation_id") or "") != conversation_id:
                     self._json({"error": "运行不属于当前对话"}, HTTPStatus.BAD_REQUEST)

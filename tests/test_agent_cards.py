@@ -178,7 +178,8 @@ class ToolGroupCatalogTests(unittest.TestCase):
         self.assertEqual(membership["读取与检索"], [
             "read_file", "list_directory", "search_files",
             "read_pdf", "pdf_render_pages", "pdf_zoom_region",
-        ])
+            "probe_video", "extract_frames",
+        ], "视频抽帧与 PDF 三件套同组（读元信息 + 抽帧，都是「读取与检索」）")
         self.assertEqual(membership["文件写入与编辑"], ["write_file", "edit_file"])
         self.assertEqual(membership["命令与脚本执行"], ["pwsh", "run_skill_script"])
         self.assertEqual(membership["视觉与图片"], ["vision_analyze", "vision_image_ops"])

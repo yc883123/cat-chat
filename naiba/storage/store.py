@@ -20,6 +20,33 @@ CURRENT_SCHEMA_VERSION = 17
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
 
+# 「未结束」的任务状态（run 与 job 共用 background_tasks 表）。
+# 重启清理、活动列表查询与取消判定必须共用这一份定义：
+# ``jobs.cancel()`` 会把子任务置为 ``stopping``（见 naiba/jobs.py 的 JOB_ACTIVE），
+# 而 store 侧的启动清理与判定曾经漏掉它，于是产生「重启也清不掉的僵尸」——
+# 一个卡在 stopping 的子任务会让整条会话永久显示「回复进行中」，把「分支 /
+# 重新生成 / 新会话」三个救援入口全部挡住（2026-09-14 客户机实测）。
+ACTIVE_TASK_STATUSES: tuple[str, ...] = (
+    "queued",
+    "running",
+    "waiting",
+    "stopping",
+    "cancelling",
+)
+
+# 终态（含启动清理自身产生的 interrupted）：状态一定在这里或上面的集合里。
+TERMINAL_TASK_STATUSES: tuple[str, ...] = (
+    "completed",
+    "failed",
+    "cancelled",
+    "interrupted",
+)
+
+
+def _status_in_clause(statuses: tuple[str, ...]) -> str:
+    """把状态集合渲染成 SQL 的 ``IN (...)`` 片段（字面量，不含用户输入）。"""
+    return "(" + ", ".join(f"'{status}'" for status in statuses) + ")"
+
 
 def _attachment_title(attachments: list[dict[str, Any]] | None) -> str:
     """纯附件轮次的会话标题回退：首个附件名（无名字时取路径文件名）。"""
@@ -637,14 +664,17 @@ class ChatStorage:
             )
             # 增量迁移（列新增 / 旧数据回填）由 apply_pending_migrations() 在重启清理之后统一执行。
             now = int(time.time() * 1000)
+            # ACTIVE_TASK_STATUSES 必须覆盖全部未结束状态：漏掉 stopping 会让
+            # 「已取消但线程没退出去」的子任务存活过重启，成为永久僵尸。
+            active_clause = _status_in_clause(ACTIVE_TASK_STATUSES)
             interrupted = db.execute(
                 "SELECT id FROM background_tasks "
-                "WHERE status IN ('queued', 'running', 'waiting', 'cancelling')"
+                f"WHERE status IN {active_clause}"
             ).fetchall()
             # Harness 对齐：运行中任务在服务重启后变为 interrupted，而非静默丢失
             db.execute(
                 "UPDATE background_tasks SET status = 'interrupted', error = ?, updated_at = ?, finished_at = ? "
-                "WHERE status IN ('queued', 'running', 'waiting', 'cancelling')",
+                f"WHERE status IN {active_clause}",
                 ("服务重启，运行已中断", now, now),
             )
             for row in interrupted:
@@ -2130,7 +2160,7 @@ class ChatStorage:
             conditions.append("conversation_id = ?")
             parameters.append(conversation_id)
         if active_only:
-            conditions.append("status IN ('queued', 'running', 'waiting', 'stopping', 'cancelling')")
+            conditions.append(f"status IN {_status_in_clause(ACTIVE_TASK_STATUSES)}")
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         parameters.append(max(1, min(int(limit), 200)))
         with self._connect() as db:

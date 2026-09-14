@@ -6,7 +6,7 @@
 //
 // 运行（必须与隔离实例同一个 shell 生命周期，见 run_video_e2e.sh）：
 //   NAIBA_SMOKE_BASE=http://127.0.0.1:8797 \
-//   NODE_PATH=C:/Users/admin/node_modules \
+//   NODE_PATH=~/node_modules \
 //   node verify/video_e2e_smoke.cjs
 //
 // 产物：verify/video_e2e_shots/*.png + verify/video_e2e_result.json

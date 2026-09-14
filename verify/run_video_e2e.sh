@@ -10,8 +10,8 @@ set -u
 cd "$(dirname "$0")/.."
 
 PY=".venv/Scripts/python.exe"
-NODE="C:/Users/admin/.workbuddy/binaries/node/versions/22.22.2-3/node.exe"
-NODE_MODULES="C:/Users/admin/node_modules"     # playwright 装在这里（仓库里没有 node_modules）
+NODE="${NAIBA_NODE_BIN:-${USERPROFILE:-$HOME}/.workbuddy/binaries/node/versions/22.22.2-3/node.exe}"
+NODE_MODULES="${NAIBA_NODE_MODULES:-${USERPROFILE:-$HOME}/node_modules}"   # playwright 装在这里（仓库里没有 node_modules）
 PORT="${NAIBA_TMP_PORT:-8797}"
 LOG="verify/_video_e2e_server.log"
 

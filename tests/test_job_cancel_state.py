@@ -67,6 +67,20 @@ class JobCancelStateTests(unittest.TestCase):
         self.registry._threads[job_id] = threading.Thread(target=lambda: None)
         return event
 
+    def _wait_for_watchdog(self, job_id: str, timeout: float = 10.0) -> None:
+        """等到兜底线程**彻底**收尾：状态已落库、取消事件与线程句柄都已摘掉。
+
+        只等「状态变了」是不够的——线程随后还要 ``_forget_job_thread`` 并释放 SQLite 连接，
+        不等它就会在 tearDown 里撞上 ``PermissionError: [WinError 32]``（CI runner 上必挂），
+        断言本身也会因为读到「状态已改、句柄未摘」的中间态而随机红（本地线程调度快，
+        恰好盖住了这个竞态，2026-09-15 流水线实测）。
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and job_id in self.registry._cancel:
+            time.sleep(0.02)
+        self.assertNotIn(job_id, self.registry._cancel, "兜底线程没在超时内收尾")
+        self.assertNotIn(job_id, self.registry._threads, "收尾后必须摘掉线程句柄")
+
     def test_cancel_persists_cancel_requested(self) -> None:
         job_id = self._job()
         snapshot = self.registry.cancel(job_id, owner=self.conversation["id"], reason="测试停止")
@@ -99,11 +113,9 @@ class JobCancelStateTests(unittest.TestCase):
         self._register_worker(job_id)
         with mock.patch.object(jobs_module, "STOP_WATCHDOG_SECONDS", 0.05):
             self.registry.cancel(job_id, owner=self.conversation["id"])
-            deadline = time.monotonic() + 3.0
-            while time.monotonic() < deadline:
-                if self.storage.get_background_task(job_id)["status"] != "stopping":
-                    break
-                time.sleep(0.02)
+            # 先把线程等干净再断言：看门狗线程的收尾顺序是「落库 → 发事件 → 摘句柄」，
+            # 抢在中间断言会读到半成品，tearDown 还会因为连接没释放而删不掉临时目录。
+            self._wait_for_watchdog(job_id)
         row = self.storage.get_background_task(job_id)
         self.assertEqual(
             row["status"], "cancelled",
@@ -111,21 +123,27 @@ class JobCancelStateTests(unittest.TestCase):
         )
         self.assertIn("停止超时", row["error"])
         self.assertTrue(row["finished_at"], "强制收尾也要写 finished_at")
-        self.assertNotIn(job_id, self.registry._cancel, "收尾后要摘掉取消事件，避免 shutdown 白等")
 
     def test_unregistered_job_is_not_force_cancelled(self) -> None:
-        """没登记过取消事件的（例如被误传到 Job 接口的顶层 Run）不得被兜底标成已取消。"""
+        """没登记过取消事件的（例如被误传到 Job 接口的顶层 Run）连兜底线程都不该起。
+
+        直接断言「没挂兜底」，而不是 sleep 一会儿看它没被改——前者是确定性的证据，
+        后者只能证明「这段时间恰好没出事」。
+        """
         job_id = self._job()
-        with mock.patch.object(jobs_module, "STOP_WATCHDOG_SECONDS", 0.05):
+        with mock.patch.object(self.registry, "_schedule_stop_watchdog") as scheduled:
             self.registry.cancel(job_id, owner=self.conversation["id"])
-            time.sleep(0.3)
+        self.assertEqual(scheduled.call_count, 0, "没有 worker 就不该挂兜底线程")
         self.assertEqual(self.storage.get_background_task(job_id)["status"], "stopping")
 
     def test_cancel_cascades_to_children(self) -> None:
         parent = self._job(kind="shell")
         self._register_worker(parent)
         child = self._job(kind="comfyui", parent=parent)
-        self.registry.cancel(parent, owner=self.conversation["id"], reason="父任务取消")
+        # 父任务会挂兜底线程：把超时推到很远，这里断言的是「取消已级联到子任务」，
+        # 不是「兜底已经把父任务收尾了」（默认 90 秒会在本用例结束后唤醒，届时临时库已删）。
+        with mock.patch.object(jobs_module, "STOP_WATCHDOG_SECONDS", 3600.0):
+            self.registry.cancel(parent, owner=self.conversation["id"], reason="父任务取消")
         self.assertEqual(self.storage.get_background_task(parent)["status"], "stopping")
         self.assertEqual(self.storage.get_background_task(child)["status"], "stopping")
 

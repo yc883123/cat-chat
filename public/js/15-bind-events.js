@@ -7,7 +7,7 @@ import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarni
 import { branchMessage, cancelActiveEdit, cancelSessionStart, confirmActiveEdit, fillContextResetSeed, initTurnRail, isNearBottom, regenerateMessage, setStickToBottom, startEditMessage, startNewSession } from "./04-messages.js";
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
 import { switchPermissionMode } from "./06-tasks-plans.js";
-import { checkUpdate, installUpdate, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
+import { checkUpdate, closeComposerModelPicker, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
 import { cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeConversationMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel } from "./08-conversations.js";
 import { addProvider, addSearchProfile, applyProviderModelCapabilities, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadWorkspaceTree, openAgentCard, openProviderCard, openVisionProviderForm, persistSearchProfiles, pickAgentAvatar, pickWorkspace, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, saveMcpServer, saveProvider, saveRuntimeSettings, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, showAgentForm, switchAgentTab, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, updateAgentSkillTabCount, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint } from "./09-settings.js";
 import { readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
@@ -106,6 +106,8 @@ export function bindEvents() {
   });
   $('#modelSelect').addEventListener('change', saveModelSelection);
   $('#composerModelSelect').addEventListener('change', saveComposerModelSelection);
+  // 自动化脚本 / 程序化改值（page.selectOption）不经过浮层：change 后把触发按钮文案对齐一次。
+  $('#composerModelSelect').addEventListener('change', () => syncComposerModelPicker());
   $('#agentSelect').addEventListener('change', saveAgentSelection);
   $('#openSkills').addEventListener('click', () => $('#skillsDialog').showModal());
   $('#openTasks').addEventListener('click', () => $('#tasksDialog').showModal());
@@ -136,12 +138,43 @@ export function bindEvents() {
     closePermissionModeMenu();
     $('#permissionModeButton').focus();
   });
+  // 输入区模型「可搜索下拉」：触发按钮开合 + 面板内点击委托 + 搜索过滤 + 键盘选择。
+  // 浮层打开时会挂到 body（fixed 定位），所以查找一律按 id，不用后代选择器。
+  $('#composerModelTrigger')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleComposerModelPicker();
+  });
+  $('#composerModelPanel')?.addEventListener('click', handleComposerModelPickerClick);
+  $('#composerModelSearch')?.addEventListener('input', (event) => filterComposerModelPicker(event.target.value));
+  $('#composerModelSearch')?.addEventListener('keydown', handleComposerModelPickerKey);
+  window.addEventListener('resize', positionComposerModelPicker);
+  window.addEventListener('scroll', positionComposerModelPicker, true);
+  document.addEventListener('keydown', (event) => {
+    // 搜索框内的 Esc 由 handleComposerModelPickerKey 消费（已 stopPropagation）；
+    // 这里兜住「焦点不在搜索框」时的关闭（如点过列表项之后）。
+    if (event.key !== 'Escape' || !composerPickerState.open) return;
+    closeComposerModelPicker();
+    $('#composerModelTrigger')?.focus();
+  });
   $('#taskList').addEventListener('click', (event) => {
     // 「停止」按钮必须先于「点卡片打开对话」处理，否则点停止会顺带跳转到该对话。
     const cancelButton = event.target.closest('[data-task-cancel]');
     if (cancelButton) {
       event.stopPropagation();
       cancelTask(cancelButton.dataset.taskCancel);
+      return;
+    }
+    // 「详情」是行内折叠，同样不能顺带跳转会话。
+    const detailButton = event.target.closest('[data-task-detail]');
+    if (detailButton) {
+      event.stopPropagation();
+      const panel = detailButton.closest('[data-task-id]')?.querySelector('.task-detail');
+      if (panel) {
+        const open = panel.hidden;
+        panel.hidden = !open;
+        detailButton.setAttribute('aria-expanded', String(open));
+        detailButton.textContent = open ? '收起' : '详情';
+      }
       return;
     }
     const item = event.target.closest('[data-task-id]');
@@ -351,6 +384,8 @@ export function bindEvents() {
   document.addEventListener('click', (event) => {
     // 审批上拉框：点菜单与触发按钮之外的地方即收起（触发按钮自身已 stopPropagation）。
     if (permissionMenuState.open && !event.target.closest?.('#permissionModeMenu')) closePermissionModeMenu();
+    // 模型搜索浮层：点浮层与触发按钮之外即收起（触发按钮自身已 stopPropagation）。
+    if (composerPickerState.open && !event.target.closest?.('#composerModelPanel')) closeComposerModelPicker();
     if (!quickPanelState.open) return;
     if (event.target.closest?.('#quickMessagePanel')) return;
     if (event.target.closest?.('#quickMessageButton')) return;

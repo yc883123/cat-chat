@@ -67,6 +67,8 @@ KEEP = {
     "update_version_smoke.py", "update_version_smoke.cjs",
     # 发版跟踪与 Release 资产核对（本机无 gh：走匿名 GitHub API）
     "release_watch.py",
+    # 任务面板重做冒烟（§六 已登记；Python 自编排 + Node 检查 + 无浏览器渲染兜底）
+    "tasks_panel_smoke.py", "tasks_panel_smoke.cjs", "tasks_panel_render_check.mjs",
     # 本脚本自身
     "cleanup_verify.py",
 }

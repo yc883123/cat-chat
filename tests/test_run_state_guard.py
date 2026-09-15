@@ -142,9 +142,15 @@ class _StorageStub:
         self.calls: list[tuple[str, bool]] = []
 
     def list_background_tasks(
-        self, conversation_id: str = "", active_only: bool = False, limit: int = 50
+        self,
+        conversation_id: str = "",
+        active_only: bool = False,
+        limit: int = 50,
+        exclude_kinds: tuple[str, ...] | None = None,
     ) -> list[dict]:
+        # 签名必须与 ChatStorage.list_background_tasks 一致（manager.list 会原样透传）。
         self.calls.append((conversation_id, active_only))
+        self.exclude_kinds = exclude_kinds
         return list(self.rows)
 
 

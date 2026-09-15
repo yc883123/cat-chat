@@ -8,25 +8,48 @@ import { fileUrl } from "./03-media.js";
 import { renderRunTasks, syncCurrentConversation } from "./08-conversations.js";
 import { RUN_RECONNECT_COOLDOWN, clearElapsedStatus, resumeRun, setConnectionState, stopRunWatchdog } from "./11-run-stream.js";
 import { cancelCurrentRun, closePermissionModeMenu, setBusy } from "./12-chat-input.js";
-export const activeTaskStatuses = new Set(['queued', 'running', 'waiting', 'cancelling']);
+export const activeTaskStatuses = new Set(['queued', 'running', 'waiting', 'stopping', 'cancelling']);
+
+// 后台作业类型的中文名。面板按它标注每行、并按"触发它的那次回答"分组后写进组标题
+// （组标题不引用用户消息原文——那可能含有不该复述的内容）。
+export const TASK_KIND_LABELS = {
+  comfyui: 'ComfyUI 生成',
+  shell: '命令执行',
+  http_poll: 'HTTP 轮询',
+  check: '外部检查',
+  subagent: '子 Agent',
+};
+
+export function taskKindLabel(kind) {
+  const key = String(kind || '').trim();
+  if (!key) return '后台任务';
+  return TASK_KIND_LABELS[key] || key;
+}
 
 export async function loadTasks() {
   if (state.taskPollInFlight || document.visibilityState === 'hidden') return;
   state.taskPollInFlight = true;
   try {
-    const result = await api('/api/tasks');
+    // jobs_only=1：只要后台作业。background_tasks 是 run 与 job 共用的一张表，
+    // chat/plan_execute 那些行是「每一次回答的记录」而不是任务，混在一起会让
+    // 用户看到"我发过的每一句话都是一个任务"。
+    const result = await api('/api/tasks?jobs_only=1');
     const previous = new Map(state.tasks.map((task) => [task.id, task.status]));
     state.tasks = result.tasks || [];
+    state.taskSyncFailed = '';
+    state.taskSyncedAt = Date.now();
     renderRunTasks();
     for (const task of state.tasks) {
       if (previous.has(task.id) && previous.get(task.id) !== task.status && ['completed', 'failed', 'cancelled'].includes(task.status)) {
-        if (task.status === 'completed') toast(`${task.agent_name} 的任务已完成`);
+        if (task.status === 'completed') toast(`${taskKindLabel(task.kind)}已完成`);
         if (task.conversation_id === state.conversationId) syncCurrentConversation();
       }
     }
     await maybeRecoverRunFromPoll();
   } catch (error) {
+    state.taskSyncFailed = error.message;
     console.debug('[naiba] 任务同步失败:', error.message);
+    renderRunTasks();
   } finally {
     state.taskPollInFlight = false;
   }
@@ -108,7 +131,17 @@ export function scheduleTaskSync(delay = null) {
 }
 
 export function taskStatusLabel(status) {
-  return ({ queued: '排队中', running: '运行中', waiting: '等待确认', cancelling: '取消中', completed: '已完成', failed: '失败', cancelled: '已取消', interrupted: '已中断' })[status] || status;
+  return ({
+    queued: '排队中',
+    running: '运行中',
+    waiting: '等待中',
+    stopping: '停止中',
+    cancelling: '取消中',
+    completed: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+    interrupted: '已中断',
+  })[status] || status;
 }
 
 // 审批模式上拉框：收起态只有触发按钮（显示当前档），点开才在按钮上方弹出列表。

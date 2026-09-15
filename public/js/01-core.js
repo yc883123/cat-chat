@@ -93,6 +93,10 @@ export const state = {
   // 工具目录拉取时间戳（短时效缓存：MCP 按需连接，启动时的目录可能还没有 mcp__* 工具）。
   toolCatalogAt: 0,
   tasks: [],
+  // 任务面板的数据新鲜度：轮询失败时面板要如实显示原因与「最后成功更新」时间，
+  // 否则用户看到的是上一次的旧状态却以为是最新的。
+  taskSyncedAt: 0,
+  taskSyncFailed: '',
   taskTimer: null,
   taskPollInFlight: false,
   taskPolling: false,

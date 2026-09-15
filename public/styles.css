@@ -82,7 +82,10 @@ html[data-theme="dark"] {
   --neutral-500:#8d96ad; --neutral-600:#aeb6c8; --neutral-700:#c8ceda; --neutral-800:#e3e7ef; --neutral-900:#0d1019;
   --bg:#111522; --surface:#171a24; --surface-2:#1d2130; --surface-inset:#121620; --line:#2b3143; --line-strong:#3d455c; --text:#e3e7ef; --muted:#8d96ad;
   --sidebar:#0d1019; --sidebar-line:rgba(255,255,255,.1); --sidebar-text:#e3e7ef; --sidebar-muted:#9ca6bd;
-  --code-bg:#0d1019; --code-bar:#171a24; --code-text:#e3e7ef; --code-inline:#c8ceda; --code-copy-hover:#2b3143;
+  /* 行内代码：浅色配方是「浅底(neutral-100) + 深字(--text)」，暗色下 --text 变浅，
+     若沿用旧值 #c8ceda 会撞成「浅底浅字」（实测对比度约 1.2，等同不可读）。
+     这里换成比卡片表面亮一档的深底，出字交给下方 .message-body 显式 color: var(--text)。 */
+  --code-bg:#0d1019; --code-bar:#171a24; --code-text:#e3e7ef; --code-inline:#2b3143; --code-copy-hover:#2b3143;
   --user-bubble:#25283a; --reasoning-bg:#1d2130; --reasoning-border:#3d455c; --reasoning-text:#aebcff;
   --user-bubble:color-mix(in srgb, var(--accent) 22%, #171a24);
   --aborted-bg:#1d2130; --aborted-border:#4c4938; --sidebar-hover:rgba(255,255,255,.08); --sidebar-active:rgba(var(--brand-500-rgb),.28); --overlay-2:rgba(255,255,255,.1);
@@ -356,6 +359,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 /* 计数用普通数字文本（此前是圆角胶囊 + 灰底，视觉上像"奇怪的徽标"） */
 #taskCount { font-variant-numeric: tabular-nums; font-weight: 600; }
 .task-button.has-active #taskCount { color: var(--accent); }
+/* 没有活动任务但有历史记录：显示总数并弱化——否则跑完就变 0，用户以为从来没有过任务 */
+.task-button #taskCount.is-idle { color: var(--muted); font-weight: 500; }
 /* 文件面板重开按钮：与其它顶栏按钮同款（此前用侧栏深色底，与浅色主题格格不入、hover 也不一致）。 */
 .file-reopen-button:not([hidden]) { display: inline-flex; align-items: center; gap: 6px; }
 #fileTabsCount { font-variant-numeric: tabular-nums; font-weight: 600; }
@@ -467,7 +472,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .code-block .tok-attr { color: var(--tok-keyword); }
 .code-block .tok-key { color: var(--tok-string); }
 .message-body code { font-family: var(--font-mono); font-size: .91em; }
-.message-body :not(pre) > code { background: var(--code-inline); border: 1px solid var(--line); padding: 1px 5px; border-radius: var(--r-xs); }
+.message-body :not(pre) > code { color: var(--text); background: var(--code-inline); border: 1px solid var(--line); padding: 1px 5px; border-radius: var(--r-xs); }
 .message-body .table-wrap { overflow-x: auto; margin: 10px 0; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-1); }
 .message-body table { border-collapse: collapse; width: 100%; min-width: 260px; font-size: 13px; line-height: 1.45; }
 .message-body th, .message-body td { border: 1px solid var(--line); padding: 6px 9px; text-align: left; vertical-align: top; word-break: break-word; color: var(--text); }
@@ -800,10 +805,45 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
 .send-button.is-stop:hover { background: var(--brand-700); }
 .composer-meta { min-height: 22px; display: flex; align-items: center; color: var(--muted); font-size: 11px; padding: 4px 2px 0; gap: 12px; white-space: nowrap; }
 .composer-meta-left { min-width: 0; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
-.composer-model { min-width: 0; display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
+.composer-model { position: relative; min-width: 0; display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
 .composer-model > span { flex: none; }
-/* 输入区模型下拉：只列当前 API 的模型目录（已移除手动输入框 #composerModelCustom） */
-#composerModelSelect { height: 22px; min-width: 100px; max-width: 190px; padding: 0 22px 0 6px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); color: var(--text); font-size: 11px; }
+/* 输入区模型控件：原生 select 降级为「隐藏的值容器」，它仍是**唯一值来源**——composerModelChoice /
+   会话落库 / 提交对话 / 自动化脚本的 selectOption 全部读它，可视化层是下方的触发按钮 + 可搜索浮层。
+   中转站未分组时目录能返回 400+ 个模型，原生下拉只能靠滚动定位，故改可搜索浮层。
+   ⚠️ 隐藏只能靠「1×1 + opacity: 0」：display:none / visibility:hidden 会让 Playwright 判定元素不可见，
+   既有 verify/composer_model_smoke.cjs、verify/video_e2e_smoke.cjs 会全部失败。不要改成别的方式。 */
+#composerModelSelect { position: absolute; left: 0; top: 0; display: block; width: 1px; height: 1px; margin: 0; padding: 0; border: 0; opacity: 0; pointer-events: none; }
+.composer-model-trigger { height: 22px; min-width: 100px; max-width: 190px; display: inline-flex; align-items: center; gap: 3px; padding: 0 3px 0 6px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); color: var(--text); font-size: 11px; cursor: pointer; }
+.composer-model-trigger:hover { border-color: var(--line-strong); background: var(--surface-2); }
+.composer-model-trigger[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
+.composer-model-trigger:disabled { opacity: .5; cursor: not-allowed; }
+.composer-model-trigger-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-model-trigger-caret { width: 12px; height: 12px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform .15s ease; }
+.composer-model-trigger[aria-expanded="true"] .composer-model-trigger-caret { transform: rotate(180deg); }
+/* 模型搜索浮层：fixed + 打开时挂到 body，避免被 .composer-wrap 的 overflow 裁剪（教训 §九.27；
+   编辑历史消息时整个 composer 还会被搬进 .message-row，只有挂 body 才两边都躲得开）。 */
+.composer-model-panel { position: fixed; z-index: 45; width: min(360px, calc(100vw - 24px)); padding: 6px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--surface); box-shadow: var(--shadow-2); display: flex; flex-direction: column; gap: 6px; }
+.composer-model-panel[hidden] { display: none; }
+.composer-model-panel-head { flex: none; display: flex; align-items: center; gap: 6px; }
+.composer-model-search { flex: 1 1 auto; min-width: 0; height: 28px; padding: 0 8px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-2); color: var(--text); font-size: 12px; }
+.composer-model-search:focus { outline: none; border-color: var(--accent); }
+.composer-model-count { flex: none; color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+/* flex: 1 1 auto + min-height: 0：面板被视口空间顶住时先压候选列（列内滚），
+   搜索框/刷新行/脚注保持原尺寸（它们都是 flex: none）。 */
+.composer-model-list { flex: 1 1 auto; min-height: 0; max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
+.composer-model-list[hidden] { display: none; }
+/* flex: none 必须留：400+ 条时列是 flex column，默认 flex-shrink:1 会把每行压成一条细缝（实测踩过）。 */
+.composer-model-option { position: relative; flex: none; display: block; width: 100%; border: 0; border-radius: var(--r-xs); background: transparent; color: var(--text); padding: 5px 8px; text-align: left; font-size: 12px; line-height: 18px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-model-option:hover { background: var(--surface-2); }
+/* 键盘高亮（软底）与「当前已选中」（左侧竖条 + 加粗）是两件事，必须能同时看出 */
+.composer-model-option.is-active { background: var(--accent-soft); color: var(--accent); }
+.composer-model-option[aria-selected="true"] { font-weight: 600; }
+.composer-model-option[aria-selected="true"]::before { content: ""; position: absolute; left: 0; top: 4px; bottom: 4px; width: 2px; border-radius: 1px; background: var(--accent); }
+.composer-model-empty { flex: none; padding: 12px 8px; color: var(--muted); font-size: 12px; text-align: center; }
+.composer-model-empty[hidden] { display: none; }
+.composer-model-refresh { flex: none; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: transparent; color: var(--muted); padding: 7px 8px; text-align: left; font-size: 12px; cursor: pointer; }
+.composer-model-refresh:hover { color: var(--accent); background: var(--surface-2); }
+.composer-model-foot { flex: none; color: var(--muted); font-size: 10.5px; padding: 0 8px 2px; }
 /* 右侧信息组（思考强度 + 就绪）：整组靠右，两者之间留固定间距 */
 .composer-meta-right { display: inline-flex; align-items: center; gap: 10px; margin-left: auto; flex: none; }
 .composer-meta-right #runtimeStatus { margin-left: 0; justify-self: auto; }
@@ -1364,18 +1404,39 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 }
 .toast.show { transform: translate(-50%, 0); opacity: 1; }
 .tasks-dialog { width: min(680px, calc(100vw - 28px)); }
-.task-list { max-height: min(70vh, 620px); overflow: auto; padding: 14px 18px 18px; }
+/* 统计条常驻面板顶部：共 N · 运行中 M · 失败 K · 已完成 J；轮询失败时整条转告警色 */
+.task-summary { padding: 10px 18px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.task-summary.is-stale { background: var(--danger-soft); color: var(--red); }
+.task-list { max-height: min(70vh, 620px); overflow: auto; padding: 4px 18px 18px; }
 .task-empty { padding: 36px 12px; color: var(--muted); text-align: center; }
-.task-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 14px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+/* 会话内一层：同一批作业（同一个父回答派生）归一组，组标题 = 类型摘要 + 时间 */
+.task-group { padding-top: 12px; }
+.task-group-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 6px 0 8px; border-bottom: 1px solid var(--line); }
+.task-group-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 12px; font-weight: 600; }
+.task-group-stat { flex: 0 0 auto; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.task-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; padding: 10px 0 10px 12px; border-bottom: 1px solid var(--line); border-left: 2px solid var(--line); }
 .task-item:last-child { border-bottom: 0; }
-.task-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
-.task-meta, .task-detail { grid-column: 1; color: var(--muted); font-size: 12px; line-height: 1.4; }
-.task-actions { grid-column: 2; grid-row: 1 / span 3; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.task-head { grid-column: 1; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.task-kind { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
+.task-elapsed { flex: 0 0 auto; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.task-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
+.task-actions { grid-column: 2; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.task-time { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.task-detail { grid-column: 1 / -1; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; margin: 2px 0 0; padding: 8px 10px; border-radius: 5px; background: var(--surface-2); font-size: 12px; line-height: 1.45; }
+.task-detail[hidden] { display: none; }
+.task-detail dt { color: var(--muted); white-space: nowrap; }
+.task-detail dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
 .task-status { padding: 3px 7px; border-radius: 3px; background: var(--surface-2); color: var(--muted); font-size: 11px; white-space: nowrap; }
-.task-status.running, .task-status.queued, .task-status.waiting, .task-status.cancelling { background: var(--violet-soft); color: var(--violet-deep); }
+.task-status.running, .task-status.queued, .task-status.waiting { background: var(--violet-soft); color: var(--violet-deep); }
+/* 停止中/取消中：与"进行中"区分开（用户要看得出"已经点过停止、正在收尾"） */
+.task-status.stopping, .task-status.cancelling { background: var(--warning-soft); color: var(--warning); }
+.task-status.completed { background: var(--success-soft); color: var(--success); }
 .task-status.failed { background: var(--danger-soft); color: var(--red); }
-.task-cancel { border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--red); padding: 4px 7px; font-size: 11px; }
-.task-confirm, .task-reject { border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--accent); padding: 4px 7px; font-size: 11px; }
+.task-cancel, .task-more, .task-confirm, .task-reject { border: 1px solid var(--line); border-radius: 4px; background: var(--surface); padding: 4px 7px; font-size: 11px; }
+.task-cancel { color: var(--red); }
+.task-cancel:disabled { opacity: .55; }
+.task-more { color: var(--muted); }
+.task-confirm { color: var(--accent); }
 .task-reject { color: var(--red); }
 .mobile-only { display: none; }
 .sidebar-backdrop { display: none; }
@@ -1549,7 +1610,7 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   .topbar { grid-template-rows: auto auto auto; }
   .composer-meta { flex-wrap: wrap; gap: 5px; }
   .composer-meta-left { width: 100%; }
-  .composer-workspace, .permission-mode-switch { max-width: 100%; }
+  .composer-workspace, .composer-model, .permission-mode-switch { max-width: 100%; }
   #composerWorkspaceSelect { max-width: min(150px, 55vw); }
   #runtimeStatus { justify-self: start; }
 }
@@ -1702,7 +1763,7 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .tool-group-tag { font-style: normal; font-size: 10.5px; color: var(--muted); }
 
 @media (max-width: 520px) {
-  #composerModelSelect { max-width: min(180px, calc(100vw - 92px)); }
+  .composer-model-trigger { max-width: min(180px, calc(100vw - 92px)); }
   .tool-set-name { flex-basis: 100%; max-width: none; }
   .tool-preset-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .agent-tool-group-head { grid-template-columns: auto auto max-content minmax(0, 1fr) auto; gap: 6px; }

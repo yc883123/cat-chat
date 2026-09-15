@@ -28,12 +28,17 @@ from naiba.run.session import (
 
 from naiba.run.chat import ConversationRunMixin
 from naiba.core.exceptions import ActiveRunError
-from naiba.storage.store import ACTIVE_TASK_STATUSES, TERMINAL_TASK_STATUSES
+from naiba.storage.store import (
+    ACTIVE_TASK_STATUSES,
+    PRIMARY_RUN_KINDS as _PRIMARY_RUN_KINDS,
+    TERMINAL_TASK_STATUSES,
+)
 
 
 # 「这条会话在不在回答」只由这些 kind 的**顶层** Run 决定（见 store.create_chat_run）。
 # 后台子 Job（子代理 / 视觉 / 批处理）的 kind 不在其中，parent_job_id 也非空。
-PRIMARY_RUN_KINDS = frozenset({"chat", "plan_execute"})
+# 词表定义在 storage（任务面板的 jobs_only 过滤要用同一份），此处只做集合化。
+PRIMARY_RUN_KINDS = frozenset(_PRIMARY_RUN_KINDS)
 
 
 class ConversationRunManager(ConversationRunMixin):
@@ -157,8 +162,16 @@ class ConversationRunManager(ConversationRunMixin):
         self.bus.drop(run_id)
         self._unregister_sink(run_id)
 
-    def list(self, conversation_id: str = "", active_only: bool = False) -> list[dict[str, Any]]:
-        return self.app.storage.list_background_tasks(conversation_id, active_only)
+    def list(
+        self,
+        conversation_id: str = "",
+        active_only: bool = False,
+        limit: int = 50,
+        exclude_kinds: tuple[str, ...] | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.app.storage.list_background_tasks(
+            conversation_id, active_only, limit=limit, exclude_kinds=exclude_kinds
+        )
 
     def list_primary(self, conversation_id: str = "", active_only: bool = False) -> list[dict[str, Any]]:
         """只返回**顶层对话 Run**（后台子 Job 不算）。
@@ -212,13 +225,18 @@ class ConversationRunManager(ConversationRunMixin):
                 return run
             if event:
                 event.set()
-            updated = self.app.storage.update_background_task(
-                run_id,
-                status="cancelling" if is_active else "cancelled",
-                cancel_requested=True,
-                detail={"message": "正在取消任务"} if is_active else {"message": "任务已取消"},
-                finished=not is_active,
-            )
+            if is_active:
+                updated = self.app.storage.update_background_task(
+                    run_id,
+                    status="cancelling",
+                    cancel_requested=True,
+                    detail={"message": "正在取消任务"},
+                )
+            else:
+                # 父 Run 已是终态（后台任务的常态：回答早已发出、只剩子 Job 在跑）：
+                # 它只是子任务的归属锚点，不是本次取消的对象。改写它会把这一轮回答
+                # 从"已完成"篡改成"已取消"，历史记录就失真了。只级联停子任务。
+                updated = run
             conversation_id = str(run.get("conversation_id") or "")
             for child in children:
                 child_id = str(child.get("id") or "")

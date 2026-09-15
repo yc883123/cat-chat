@@ -44,6 +44,12 @@ logger = logging.getLogger("naiba.jobs")
 JOB_TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
 JOB_ACTIVE = {"queued", "running", "waiting", "stopping"}
 
+# 停止超时兜底：worker 最长的"不看取消信号"窗口是 _run_check 的退避上限 60 秒，
+# 所以给它 90 秒。到点仍是 stopping 说明 worker 没响应取消（卡在网络等待里），
+# 继续挂着会永久占住活动名额（stopping 属于 storage.ACTIVE_TASK_STATUSES），
+# 而一个卡住的子任务会让整条会话被判成"回复进行中"、挡住三个救援入口。
+STOP_WATCHDOG_SECONDS = 90.0
+
 # 副作用/不可重试的检查型错误归类（MCP、HTTP、Job 查询）用于 Agent Loop 重试决策
 RETRYABLE_ERROR_PREFIXES = (
     "MCP",
@@ -262,15 +268,75 @@ class JobRegistry:
             event = self._cancel.get(job_id)
         if event:
             event.set()
+        # cancel_requested 是"停止请求已下发"的持久标记：_set_status 靠它冻结状态，
+        # 否则 worker 的下一次状态更新会把 stopping 打回 running（用户看到的是"停不下来"）。
         snapshot = self._snapshot(
             self.app.storage.update_job(
-                job_id, status="stopping", current_step="正在停止", detail={"message": reason or "用户取消"}
+                job_id,
+                status="stopping",
+                current_step="正在停止",
+                cancel_requested=True,
+                detail={"message": reason or "用户取消"},
             )
             or {}
         )
         # 父任务取消时递归取消所有子任务（级联）
         self._cancel_children(job_id, owner, reason)
+        # 只有登记过取消事件的才是 JobRegistry 自己起的 worker；没登记的（如被误传的
+        # 顶层 Run）不设兜底，免得把一条仍在跑的回答强行标成已取消。
+        if event is not None:
+            self._schedule_stop_watchdog(job_id)
         return snapshot
+
+    def _schedule_stop_watchdog(self, job_id: str, timeout: float | None = None) -> None:
+        """停止超时兜底：worker 没响应取消信号时强制收尾（见 STOP_WATCHDOG_SECONDS 注释）。
+
+        ``timeout`` 为 None 时按调用时刻读取模块常量——这样测试与后续调参都只改一处，
+        不会因为默认参数在 def 期被求值而失效。
+        """
+        delay = STOP_WATCHDOG_SECONDS if timeout is None else timeout
+
+        def watchdog() -> None:
+            try:
+                time.sleep(delay)
+                current = self.app.storage.get_background_task(job_id)
+                if not current or str(current.get("status") or "") != "stopping":
+                    return
+                logger.warning(
+                    "Job 停止超时，强制收尾：job=%s kind=%s step=%s",
+                    job_id, current.get("kind"), current.get("current_step"),
+                )
+                detail = current.get("detail") if isinstance(current.get("detail"), dict) else {}
+                detail = dict(detail)
+                detail["message"] = "停止超时，已强制结束"
+                self.app.storage.update_job(
+                    job_id,
+                    status="cancelled",
+                    error="停止超时，已强制结束",
+                    detail=detail,
+                    finished=True,
+                )
+                self._emit(
+                    job_id,
+                    {"type": "job_finished", "status": "cancelled", "error": "停止超时，已强制结束"},
+                )
+                self._forget_job_thread(job_id)
+                condition = self._condition(job_id)
+                with condition:
+                    condition.notify_all()
+            except Exception:  # noqa: BLE001 - 兜底线程不得把异常抛到线程外
+                logger.exception("Job 停止超时兜底失败：job=%s", job_id)
+
+        threading.Thread(
+            target=watchdog, name=f"job-stop-watchdog-{job_id[:8]}", daemon=True
+        ).start()
+
+    def _forget_job_thread(self, job_id: str) -> None:
+        """摘掉该 job 的取消事件与线程句柄：worker 已不再消费它们，留着只会让
+        ``shutdown()`` 在一个永远不会退出的线程上白等到超时。"""
+        with self._lock:
+            self._cancel.pop(job_id, None)
+            self._threads.pop(job_id, None)
 
     def _cancel_children(self, parent_id: str, owner: str | None, reason: str | None) -> None:
         children = [j for j in self.list(owner=owner) if str(j.get("parent_job_id") or "") == parent_id]

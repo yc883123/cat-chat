@@ -113,6 +113,9 @@ venv.bak/
 # mypy
 .mypy_cache/
 
+# Node 依赖（Playwright 浏览器冒烟用；本机 npm 安装，不入仓库）
+node_modules/
+
 # CodeBuddy
 .codebuddy/
 
@@ -259,6 +262,9 @@ verify/*
 !verify/sitecustomize.py
 !verify/skill_prompt_check.mjs
 !verify/starter_reasoning_smoke.cjs
+!verify/tasks_panel_render_check.mjs
+!verify/tasks_panel_smoke.cjs
+!verify/tasks_panel_smoke.py
 !verify/tdz_check.py
 !verify/tool_groups_smoke.cjs
 !verify/tool_groups_smoke.py

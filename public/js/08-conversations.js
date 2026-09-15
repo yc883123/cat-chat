@@ -4,7 +4,7 @@
 
 import { $, api, escapeHtml, state, toast } from "./01-core.js";
 import { renderMessages } from "./04-messages.js";
-import { activeTaskStatuses, loadTasks, renderPermissionModeSwitch, taskStatusLabel } from "./06-tasks-plans.js";
+import { activeTaskStatuses, loadTasks, renderPermissionModeSwitch, taskKindLabel, taskStatusLabel } from "./06-tasks-plans.js";
 import { applyConversationAgent, applyConversationModel, composerModelChoice } from "./07-models-agents.js";
 import { readAsDataUrl } from "./10-upload.js";
 import { detachRunSubscription, resumeConversationRun } from "./11-run-stream.js";
@@ -742,10 +742,6 @@ export function scheduleConversationSync(delay = null) {
   }, delay ?? interval);
 }
 
-export function taskModeLabel(task) {
-  return '普通';
-}
-
 export function taskElapsed(task) {
   const start = Number(task.started_at || task.created_at || 0);
   const end = Number(task.finished_at || Date.now());
@@ -755,35 +751,163 @@ export function taskElapsed(task) {
   return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
 }
 
+// 组标题与行内的时间：今天只给时分，昨天带前缀，更早带月日。
+export function formatTaskTime(value) {
+  const ms = Number(value || 0);
+  if (!ms) return '时间未知';
+  const at = new Date(ms);
+  const pad = (n) => String(n).padStart(2, '0');
+  const clock = `${pad(at.getHours())}:${pad(at.getMinutes())}`;
+  const now = new Date();
+  if (at.toDateString() === now.toDateString()) return clock;
+  if (at.toDateString() === new Date(now.getTime() - 86400000).toDateString()) return `昨天 ${clock}`;
+  return `${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${clock}`;
+}
+
+// 组标题 = 类型摘要 + 时间（如「ComfyUI 生成 ×2 · 14:32」）。刻意不引用用户消息原文：
+// 那句话可能含有不该在面板里复述的内容。
+export function taskGroupTitle(tasks) {
+  const counts = new Map();
+  for (const task of tasks) {
+    const name = taskKindLabel(task.kind);
+    counts.set(name, (counts.get(name) || 0) + 1);
+  }
+  const summary = [...counts.entries()]
+    .map(([name, count]) => (count > 1 ? `${name} ×${count}` : name))
+    .join(' + ');
+  const stamps = tasks.map((task) => Number(task.created_at) || 0).filter(Boolean);
+  return `${summary} · ${formatTaskTime(stamps.length ? Math.min(...stamps) : 0)}`;
+}
+
+// 详情折叠里的键名：worker 写进 detail/result 的是英文键，常见几个给中文标签，
+// 其余原样展示（只铺展标量，避免把整张快照塞进 DOM）。
+const TASK_DETAIL_KEY_LABELS = { message: '说明', reason: '原因', command: '命令', exit_code: '退出码' };
+
+function taskDetailRows(task) {
+  const rows = [];
+  const push = (label, value) => {
+    const text = String(value ?? '').trim();
+    if (!text) return;
+    rows.push([label, text.length > 300 ? `${text.slice(0, 300)}…` : text]);
+  };
+  push('当前步骤', task.current_step);
+  push('说明', task.detail?.message);
+  push('错误', task.error);
+  if (Number(task.attempt) > 0) push('轮询次数', `${Number(task.attempt)} 次`);
+  const handle = task.checkpoint?.handle ?? task.result?.handle;
+  if (handle !== undefined && handle !== null && handle !== '') push('外部句柄', handle);
+  for (const [key, value] of Object.entries(task.detail || {})) {
+    if (key === 'message' || value === null || typeof value === 'object') continue;
+    push(TASK_DETAIL_KEY_LABELS[key] || key, value);
+  }
+  for (const [key, value] of Object.entries(task.result || {})) {
+    if (value === null || typeof value === 'object') continue;
+    push(`结果 · ${TASK_DETAIL_KEY_LABELS[key] || key}`, value);
+  }
+  if (task.checkpoint && Object.keys(task.checkpoint).length) {
+    let text = '';
+    try { text = JSON.stringify(task.checkpoint); } catch (error) { text = ''; }
+    if (text) push('断点', text);
+  }
+  return rows.slice(0, 12);
+}
+
+function taskRowMarkup(task) {
+  const active = activeTaskStatuses.has(task.status);
+  const note = String(task.error || task.detail?.message || task.current_step || '');
+  const rows = taskDetailRows(task);
+  const detailHtml = rows.length
+    ? `<dl class="task-detail" hidden>${rows
+      .map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`)
+      .join('')}</dl>`
+    : '';
+  const detailButton = rows.length
+    ? `<button type="button" class="task-more" data-task-detail="${escapeHtml(task.id)}" aria-expanded="false" aria-label="展开详情">详情</button>`
+    : '';
+  return `<div class="task-item" data-task-id="${escapeHtml(task.id)}">
+      <div class="task-head">
+        <span class="task-status ${escapeHtml(task.status)}">${escapeHtml(taskStatusLabel(task.status))}</span>
+        <b class="task-kind" title="${escapeHtml(String(task.kind || ''))}">${escapeHtml(taskKindLabel(task.kind))}</b>
+        <span class="task-elapsed">${escapeHtml(taskElapsed(task))}</span>
+        ${note ? `<span class="task-note" title="${escapeHtml(note)}">${escapeHtml(note)}</span>` : ''}
+      </div>
+      <div class="task-actions">
+        <span class="task-time" title="最后更新">${escapeHtml(formatTaskTime(task.updated_at || task.created_at))}</span>
+        ${detailButton}
+        ${active ? `<button type="button" class="task-cancel" data-task-cancel="${escapeHtml(task.id)}" aria-label="停止这个后台任务">停止</button>` : ''}
+      </div>
+      ${detailHtml}
+    </div>`;
+}
+
+function renderTaskSummary(jobs, active) {
+  const box = $('#taskSummary');
+  if (!box) return;
+  const failed = jobs.filter((task) => task.status === 'failed').length;
+  const completed = jobs.filter((task) => task.status === 'completed').length;
+  const stats = `共 ${jobs.length} · 运行中 ${active.length} · 失败 ${failed} · 已完成 ${completed}`;
+  const stale = String(state.taskSyncFailed || '');
+  if (!stale) {
+    box.classList.remove('is-stale');
+    box.textContent = stats;
+    return;
+  }
+  // 轮询失败：如实说出原因与「最后成功更新」，而不是默默展示上一次的旧状态。
+  const last = state.taskSyncedAt ? `最后成功更新：${formatTaskTime(state.taskSyncedAt)}` : '尚未成功同步过';
+  box.classList.add('is-stale');
+  box.textContent = `${stats} · 同步失败：${stale}（${last}）`;
+}
+
 export function renderRunTasks() {
-  const active = state.tasks.filter((task) => activeTaskStatuses.has(task.status));
-  $('#taskCount').textContent = String(active.length);
-  $('#openTasks').classList.toggle('has-active', active.length > 0);
+  // 面板只列后台作业：chat/plan_execute 那些行是「每一次回答的记录」，不是任务
+  // （后端 jobs_only=1 已过滤，这里再兜一层防止旧数据/旧缓存混进来）。
+  const jobs = (state.tasks || []).filter((task) => !['chat', 'plan_execute'].includes(String(task.kind || '')));
+  const active = jobs.filter((task) => activeTaskStatuses.has(task.status));
+  // 徽标：有活动任务时显示活动数；全部结束但有历史时显示总数并弱化——
+  // 否则跑完就变 0，用户会以为从来没有过任务（截图里的「0 任务」就是这个原因）。
+  const badge = $('#taskCount');
+  if (badge) {
+    badge.textContent = String(active.length || jobs.length);
+    badge.classList.toggle('is-idle', active.length === 0 && jobs.length > 0);
+  }
+  $('#openTasks')?.classList.toggle('has-active', active.length > 0);
   const current = active.filter((task) => task.conversation_id === state.conversationId);
   const bar = $('#activeTaskBar');
-  bar.hidden = current.length === 0;
-  if (current.length) {
-    bar.innerHTML = `当前对话有 ${current.length} 个 Run 正在执行。<button type="button" data-open-tasks>查看</button>`;
+  if (bar) {
+    bar.hidden = current.length === 0;
+    if (current.length) {
+      bar.innerHTML = `当前对话有 ${current.length} 个后台任务正在执行。<button type="button" data-open-tasks>查看</button>`;
+    }
   }
+  renderTaskSummary(jobs, active);
   const list = $('#taskList');
-  if (!state.tasks.length) {
+  if (!list) return;
+  if (!jobs.length) {
     list.innerHTML = '<div class="task-empty">暂无异步任务</div>';
     return;
   }
-  list.innerHTML = state.tasks.map((task) => {
-    const conversation = state.conversations.find((item) => item.id === task.conversation_id);
-    const detail = task.error || task.detail?.message || '';
-    return `<div class="task-item" data-task-id="${escapeHtml(task.id)}">
-      <div class="task-title">${escapeHtml(task.message)}</div>
-      <div class="task-meta">${escapeHtml(taskModeLabel(task))} · ${escapeHtml(task.agent_name)} · ${escapeHtml(conversation?.title || '原对话')} · ${escapeHtml(taskElapsed(task))}</div>
-      <div class="task-detail">${escapeHtml(detail)}</div>
-      <div class="task-actions">
-        <span class="task-status ${escapeHtml(task.status)}">${taskStatusLabel(task.status)}</span>
-        ${activeTaskStatuses.has(task.status)
-          ? `<button type="button" class="task-cancel" data-task-cancel="${escapeHtml(task.id)}">停止</button>`
-          : ''}
+  // 同一批作业（同一个父回答派生）归一组；父行不在返回里（已被过滤）时按"无父作业"单独成组。
+  const groups = new Map();
+  for (const task of jobs) {
+    const key = String(task.parent_job_id || '');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(task);
+  }
+  const ordered = [...groups.values()]
+    .map((tasks) => {
+      const sorted = [...tasks].sort((a, b) => Number(a.created_at || 0) - Number(b.created_at || 0));
+      return { tasks: sorted, latest: Math.max(...sorted.map((task) => Number(task.created_at) || 0)) };
+    })
+    .sort((a, b) => b.latest - a.latest);
+  list.innerHTML = ordered.map(({ tasks }) => {
+    const failed = tasks.filter((task) => task.status === 'failed').length;
+    return `<section class="task-group">
+      <div class="task-group-head">
+        <span class="task-group-title">${escapeHtml(taskGroupTitle(tasks))}</span>
+        <span class="task-group-stat">共 ${tasks.length}${failed ? ` · 失败 ${failed}` : ''}</span>
       </div>
-    </div>`;
+      ${tasks.map(taskRowMarkup).join('')}
+    </section>`;
   }).join('');
 }
 

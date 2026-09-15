@@ -172,10 +172,28 @@
                 <option value="">未分组</option>
               </select>
             </div>
-            <label class="composer-model" for="composerModelSelect">
+            <!-- 模型控件：原生 select 降级为「隐藏的值容器」（唯一值来源，样式见 styles.css），
+                 可视化层是触发按钮 + 可搜索浮层——中转站未分组时目录能返回 400+ 个模型，
+                 原生下拉只能靠滚动定位。浮层 fixed + 打开时挂 body，避免被 .composer-wrap 裁剪。
+                 不用 <label> 包裹：label 的点击会转发给 select，而面板里有 input/button。 -->
+            <div class="composer-model">
               <span>模型</span>
-              <select id="composerModelSelect" aria-label="当前模型"></select>
-            </label>
+              <select id="composerModelSelect" aria-label="当前模型" tabindex="-1"></select>
+              <button type="button" class="composer-model-trigger" id="composerModelTrigger" aria-haspopup="listbox" aria-expanded="false" aria-label="当前模型" title="选择模型">
+                <span class="composer-model-trigger-text" id="composerModelTriggerText">请先在设置中检查模型</span>
+                <svg class="composer-model-trigger-caret" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 15l6-6 6 6"></path></svg>
+              </button>
+              <div class="composer-model-panel" id="composerModelPanel" hidden>
+                <div class="composer-model-panel-head">
+                  <input type="text" class="composer-model-search" id="composerModelSearch" placeholder="输入关键字搜索模型…" aria-label="搜索模型" autocomplete="off" spellcheck="false">
+                  <span class="composer-model-count" id="composerModelCount" aria-hidden="true"></span>
+                </div>
+                <div class="composer-model-list" id="composerModelList" role="listbox" aria-label="模型列表"></div>
+                <div class="composer-model-empty" id="composerModelEmpty" hidden>没有匹配的模型</div>
+                <button type="button" class="composer-model-refresh" id="composerModelRefresh">↻ 重新检测模型</button>
+                <div class="composer-model-foot">↑↓ 选择 · Enter 确认 · Esc 关闭</div>
+              </div>
+            </div>
             <!-- 审批模式：收起为一个上拉框（触发按钮显示当前档 + 点击在按钮上方弹出列表），不再平铺四段 -->
             <div class="permission-mode-switch" id="permissionModeSwitch">
               <button type="button" class="permission-mode-button" id="permissionModeButton" aria-haspopup="listbox" aria-expanded="false" title="当前对话审批模式">
@@ -856,6 +874,7 @@
         <button class="icon-button" data-close="tasksDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
       </div>
     </div>
+    <div class="task-summary" id="taskSummary"></div>
     <div class="task-list" id="taskList"></div>
   </dialog>
 

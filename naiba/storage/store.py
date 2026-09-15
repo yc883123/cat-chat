@@ -42,10 +42,20 @@ TERMINAL_TASK_STATUSES: tuple[str, ...] = (
     "interrupted",
 )
 
+# 「顶层对话 Run」的 kind——只有这些 kind 的顶层记录才算"这条会话在不在回答"。
+# 其余 kind（shell/check/http_poll/comfyui/subagent）都是后台作业：任务面板只列它们，
+# 否则用户看到的是自己发过的每一句话被当成"任务"。唯一一份定义，manager 直接引用。
+PRIMARY_RUN_KINDS: tuple[str, ...] = ("chat", "plan_execute")
+
 
 def _status_in_clause(statuses: tuple[str, ...]) -> str:
     """把状态集合渲染成 SQL 的 ``IN (...)`` 片段（字面量，不含用户输入）。"""
     return "(" + ", ".join(f"'{status}'" for status in statuses) + ")"
+
+
+def _kinds_not_in_clause(kinds: tuple[str, ...]) -> str:
+    """把 kind 集合渲染成 SQL 的 ``NOT IN (...)`` 片段（字面量，不含用户输入）。"""
+    return "(" + ", ".join(f"'{kind}'" for kind in kinds) + ")"
 
 
 def _attachment_title(attachments: list[dict[str, Any]] | None) -> str:
@@ -1735,7 +1745,7 @@ class ChatStorage:
                 "agent_id, agent_name, status, message, detail, error, cancel_requested, "
                 "created_at, started_at, updated_at, finished_at "
                 "FROM background_tasks WHERE conversation_id = ? "
-                "AND status IN ('queued', 'running', 'waiting', 'cancelling') "
+                f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} "
                 "AND (parent_job_id IS NULL OR parent_job_id = '') "
                 "ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 (conversation_id,),
@@ -1783,7 +1793,7 @@ class ChatStorage:
             if not parent_job_id:
                 active = db.execute(
                     "SELECT id FROM background_tasks WHERE conversation_id = ? "
-                    "AND status IN ('queued', 'running', 'waiting', 'cancelling') "
+                    f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} "
                     "AND (parent_job_id IS NULL OR parent_job_id = '') LIMIT 1",
                     (conversation_id,),
                 ).fetchone()
@@ -1865,7 +1875,7 @@ class ChatStorage:
             if not parent_job_id:
                 active = db.execute(
                     "SELECT id FROM background_tasks WHERE conversation_id = ? "
-                    "AND status IN ('queued', 'running', 'waiting', 'cancelling') "
+                    f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} "
                     "AND (parent_job_id IS NULL OR parent_job_id = '') LIMIT 1",
                     (conversation_id,),
                 ).fetchone()
@@ -2153,6 +2163,7 @@ class ChatStorage:
         conversation_id: str = "",
         active_only: bool = False,
         limit: int = 50,
+        exclude_kinds: tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
         conditions = []
         parameters: list[Any] = []
@@ -2161,6 +2172,10 @@ class ChatStorage:
             parameters.append(conversation_id)
         if active_only:
             conditions.append(f"status IN {_status_in_clause(ACTIVE_TASK_STATUSES)}")
+        if exclude_kinds:
+            # 任务面板只要后台作业。过滤必须在 SQL 层：默认 limit 是 50，而 chat 行
+            # 占绝大多数，先捞出来再筛会把较早的作业挤出窗口（面板只显示最近几条）。
+            conditions.append(f"kind NOT IN {_kinds_not_in_clause(tuple(exclude_kinds))}")
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         parameters.append(max(1, min(int(limit), 200)))
         with self._connect() as db:

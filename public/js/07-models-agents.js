@@ -418,6 +418,8 @@ const COMPOSER_MODEL_REFRESH = '__refresh_composer_models__';
 // 下拉框最后一次有效选择（'' = 未选择）：刷新前记下，强制重拉目录后还原。
 let composerModelLastChoice = '';
 let composerModelRefreshBusy = false;
+// 输入区模型「可搜索下拉」浮层的状态（原生 select 仍是唯一值来源，这里只是它的投影）。
+export const composerPickerState = { open: false, activeIndex: -1, items: [] };
 
 export function composerModelChoice() {
   const select = $('#composerModelSelect');
@@ -476,6 +478,8 @@ function renderComposerModels(provider, preferredModel = '') {
   const matched = Boolean(desired) && [...select.options].some((option) => option.value === desired);
   select.value = matched ? desired : '';
   composerModelLastChoice = select.value;
+  // 目录/会话/API 变了：触发按钮文案与浮层候选一起对齐到新的 options。
+  syncComposerModelPicker();
 }
 
 export function composerModelIsValidated() {
@@ -545,6 +549,8 @@ async function refreshComposerModels() {
   } finally {
     composerModelRefreshBusy = false;
     select.disabled = false;
+    // 触发按钮的可用态跟着 select 走：刷新结束要恢复可点。
+    syncComposerModelPicker();
   }
 }
 
@@ -562,6 +568,218 @@ export async function saveComposerModelSelection() {
   } catch (error) {
     toast(`保存模型失败：${error.message}`);
   }
+}
+
+// ---- 输入区模型「可搜索下拉」 -------------------------------------------------
+// 中转站未分组时 /v1/models 能返回 400+ 个模型，原生 select 只能靠滚动定位。这里把原生
+// select 降级为「隐藏的值容器」（唯一值来源，样式见 styles.css #composerModelSelect），
+// 在它之上叠一层可搜索浮层：输入即过滤、↑↓ 选择、Enter 确认、Esc 关闭。
+// 选中与刷新一律回写 select.value + 派发 change，复用既有落库/重拉链路，不开第二条路径。
+
+// 候选数据源 = select 的 options 本身，保证浮层与值容器**永不分叉**。
+function composerPickerSource() {
+  const select = $('#composerModelSelect');
+  if (!select) return [];
+  return [...select.options]
+    // 空值占位项不是模型、「↻ 重新检测模型」是动作（各有独立入口），都不进候选列表。
+    .filter((option) => option.value !== '' && option.value !== COMPOSER_MODEL_REFRESH)
+    .map((option) => ({
+      id: option.value,
+      label: option.textContent.trim() || option.value,
+      selected: option.selected,
+    }));
+}
+
+function setComposerPickerActive(index) {
+  const list = $('#composerModelList');
+  const total = composerPickerState.items.length;
+  if (!list || !total) {
+    composerPickerState.activeIndex = -1;
+    return;
+  }
+  // 环绕取模：到底继续按 ↓ 回到第一项（与 @ 文件弹层同一口径）。
+  const next = ((index % total) + total) % total;
+  composerPickerState.activeIndex = next;
+  list.querySelectorAll('[data-model-index]').forEach((element) => {
+    element.classList.toggle('is-active', Number(element.dataset.modelIndex) === next);
+  });
+  list.querySelector('.is-active')?.scrollIntoView({ block: 'nearest' });
+}
+
+// 按关键字重建候选列表（模型 id 与显示名任一命中即可）；query 为空 = 列出全部。
+export function filterComposerModelPicker(query = '') {
+  const list = $('#composerModelList');
+  if (!list) return;
+  const source = composerPickerSource();
+  const needle = String(query || '').trim().toLowerCase();
+  const items = needle
+    ? source.filter((item) => item.id.toLowerCase().includes(needle)
+      || item.label.toLowerCase().includes(needle))
+    : source;
+  composerPickerState.items = items;
+  // 400+ 条一次性构建：与原生 select 本就要渲染同样数量的 option 同量级，
+  // 用 fragment 只插一次，不做虚拟滚动（过滤是单次线性扫描，无需防抖）。
+  const fragment = document.createDocumentFragment();
+  items.forEach((item, index) => {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = 'composer-model-option';
+    option.setAttribute('role', 'option');
+    option.setAttribute('aria-selected', item.selected ? 'true' : 'false');
+    option.dataset.modelIndex = String(index);
+    option.title = item.id;
+    option.textContent = item.label;
+    fragment.append(option);
+  });
+  list.replaceChildren(fragment);
+  list.hidden = items.length === 0;
+  const empty = $('#composerModelEmpty');
+  if (empty) empty.hidden = items.length > 0;
+  const count = $('#composerModelCount');
+  if (count) count.textContent = needle ? `${items.length}/${source.length}` : String(source.length);
+  // 光标优先落在「当前已选模型」上：400+ 条时打开浮层就能看见自己在用的那个，
+  // 不会一按 Enter 就把模型换成目录第一项（目录顺序由供应商决定，没有语义）。
+  const selectedIndex = items.findIndex((item) => item.selected);
+  setComposerPickerActive(selectedIndex >= 0 ? selectedIndex : 0);
+}
+
+// 把触发按钮与浮层对齐到 select 的当前状态。renderComposerModels 末尾、change 之后、
+// 刷新结束时都会调用，所以「目录/会话/API 变了」与「程序直接改 select.value」两条路都不会留下过期显示。
+export function syncComposerModelPicker() {
+  const select = $('#composerModelSelect');
+  const trigger = $('#composerModelTrigger');
+  if (!select || !trigger) return;
+  const value = String(select.value || '');
+  const label = select.selectedOptions[0]?.textContent.trim() || '';
+  // 刷新伪选项只是动作、不是模型：按钮文案保持上一个模型名，不闪成「↻ 重新检测模型」。
+  if (value !== COMPOSER_MODEL_REFRESH) {
+    const text = $('#composerModelTriggerText');
+    if (text) text.textContent = label || '请先在设置中检查模型';
+  }
+  trigger.disabled = select.disabled;
+  trigger.title = value && value !== COMPOSER_MODEL_REFRESH ? `当前模型：${label || value}（点击搜索切换）` : '选择模型';
+  if (!composerPickerState.open) return;
+  // 刷新进行中（select 被禁用）不能继续选：直接收起，避免选到过期项。
+  if (select.disabled) {
+    closeComposerModelPicker();
+    return;
+  }
+  filterComposerModelPicker($('#composerModelSearch')?.value || '');
+}
+
+export function positionComposerModelPicker() {
+  const panel = $('#composerModelPanel');
+  const trigger = $('#composerModelTrigger');
+  if (!panel || !trigger || panel.hidden) return;
+  const rect = trigger.getBoundingClientRect();
+  const gap = 8;
+  const edge = 12;
+  const above = rect.top - gap - edge;
+  const below = window.innerHeight - rect.bottom - gap - edge;
+  // 输入区在底部 → 默认朝上展开；朝上的空间不足 180px（列太扁没法挑）时改朝下。
+  let openUp = above >= below;
+  if ((openUp ? above : below) < 180) openUp = !openUp;
+  // 高度上限 = 该侧可用空间，候选列自己滚。**不能只把 top 夹进视口**：400+ 条时面板
+  // 比按钮上方还高，那样会把整块夹到视口边缘、离按钮几百像素（实测过的「弹层到处飘」）。
+  panel.style.maxHeight = `${Math.round(Math.max(120, openUp ? above : below))}px`;
+  const panelRect = panel.getBoundingClientRect();
+  // 朝上时锚**底边**（bottom）而不是算 top：过滤后高度会从 426 缩到 134，
+  // 锚底边高度变化就只往上长，永远贴着触发按钮；只算 top 会原地收缩、留一大截空白。
+  if (openUp) {
+    panel.style.bottom = `${Math.round(window.innerHeight - rect.top + gap)}px`;
+    panel.style.top = 'auto';
+  } else {
+    panel.style.top = `${Math.round(Math.min(rect.bottom + gap, Math.max(edge, window.innerHeight - panelRect.height - edge)))}px`;
+    panel.style.bottom = 'auto';
+  }
+  // 与审批模式菜单同一口径：左对齐触发按钮、夹在视口内（窄屏按钮靠边时不溢出）。
+  const left = Math.min(
+    Math.max(edge, rect.left),
+    Math.max(edge, window.innerWidth - panelRect.width - edge),
+  );
+  panel.style.left = `${Math.round(left)}px`;
+}
+
+export function closeComposerModelPicker() {
+  composerPickerState.open = false;
+  composerPickerState.activeIndex = -1;
+  composerPickerState.items = [];
+  const panel = $('#composerModelPanel');
+  if (panel) panel.hidden = true;
+  $('#composerModelTrigger')?.setAttribute('aria-expanded', 'false');
+}
+
+export function openComposerModelPicker() {
+  const panel = $('#composerModelPanel');
+  const trigger = $('#composerModelTrigger');
+  const select = $('#composerModelSelect');
+  if (!panel || !trigger || !select || select.disabled) return;
+  // 浮层挂到 body 并 fixed 定位：避免被 .composer-wrap 的 overflow 裁剪（教训 §九.27）；
+  // 编辑历史消息时整个 composer 会被搬进 .message-row，也只有挂 body 才躲得开。
+  if (panel.parentElement !== document.body) document.body.appendChild(panel);
+  composerPickerState.open = true;
+  panel.hidden = false;
+  trigger.setAttribute('aria-expanded', 'true');
+  const search = $('#composerModelSearch');
+  if (search) search.value = '';
+  // 先定位再填列表：定位锚的是底边、高度上限看的是可用空间，都与内容高度无关；
+  // 反过来（先填列表）会让「滚到当前已选模型」在面板还没定位时执行。
+  positionComposerModelPicker();
+  filterComposerModelPicker('');
+  search?.focus();
+}
+
+export function toggleComposerModelPicker() {
+  if (composerPickerState.open) closeComposerModelPicker();
+  else openComposerModelPicker();
+}
+
+// 关面板 → 回写 select → 派发 change：落库/强制重拉都仍走 saveComposerModelSelection 那一条链路。
+function commitComposerModelPicker(id, { focusInput = true } = {}) {
+  const select = $('#composerModelSelect');
+  if (!select) return;
+  closeComposerModelPicker();
+  // 目录可能在面板打开期间变了：过期项直接丢弃，不写进 select。
+  if (![...select.options].some((option) => option.value === id)) return;
+  select.value = id;
+  select.dispatchEvent(new Event('change'));
+  if (focusInput) $('#messageInput')?.focus();
+}
+
+export function handleComposerModelPickerKey(event) {
+  if (!composerPickerState.open) return;
+  if (event.isComposing) return; // 输入法组词期间不抢键（与 @ 文件弹层同口径）
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    if (!composerPickerState.items.length) return;
+    setComposerPickerActive(composerPickerState.activeIndex + (event.key === 'ArrowDown' ? 1 : -1));
+    return;
+  }
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    const item = composerPickerState.items[composerPickerState.activeIndex];
+    if (item) commitComposerModelPicker(item.id);
+    return;
+  }
+  if (event.key === 'Escape') {
+    // stopPropagation：文档级另有审批菜单/会话菜单的 Esc 处理，不能被连带触发。
+    event.preventDefault();
+    event.stopPropagation();
+    closeComposerModelPicker();
+    $('#composerModelTrigger')?.focus();
+  }
+}
+
+export function handleComposerModelPickerClick(event) {
+  // 「↻ 重新检测模型」走原有伪选项链路（saveComposerModelSelection 里早退到强制重拉）。
+  if (event.target.closest?.('#composerModelRefresh')) {
+    commitComposerModelPicker(COMPOSER_MODEL_REFRESH, { focusInput: false });
+    return;
+  }
+  const option = event.target.closest?.('[data-model-index]');
+  if (!option) return;
+  const item = composerPickerState.items[Number(option.dataset.modelIndex)];
+  if (item) commitComposerModelPicker(item.id);
 }
 
 export function localProviderKind(provider) {

@@ -38,6 +38,7 @@ from naiba.core.paths import path_within
 from naiba.paths import PathContext, default_path_context, static_asset_version
 from naiba.storage.avatars import AVATAR_MAX_BYTES
 from naiba.storage.media import UPLOAD_MAX_BYTES, _uploads_total_bytes
+from naiba.storage.store import PRIMARY_RUN_KINDS as _PRIMARY_RUN_KINDS
 
 logger = logging.getLogger("naiba.http")
 
@@ -144,7 +145,18 @@ class RequestHandler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             conversation_id = query.get("conversation_id", [""])[0]
             active_only = query.get("active_only", ["0"])[0] == "1"
-            self._json({"tasks": self.app.tasks.list(conversation_id, active_only)})
+            # jobs_only=1：只回后台作业（shell/check/http_poll/comfyui/subagent）。
+            # background_tasks 是 run 与 job 共用的一张表，chat/plan_execute 那些行是
+            # "每一次回答的记录"而不是任务——平铺给任务面板会让用户以为"我发过的每句话
+            # 都是一个任务"。过滤交给 SQL：默认 limit 是 50 且 chat 行占绝大多数。
+            jobs_only = query.get("jobs_only", ["0"])[0] == "1"
+            tasks = self.app.tasks.list(
+                conversation_id,
+                active_only,
+                limit=200 if jobs_only else 50,
+                exclude_kinds=_PRIMARY_RUN_KINDS if jobs_only else None,
+            )
+            self._json({"tasks": tasks})
         elif path == "/api/runs":
             query = urllib.parse.parse_qs(parsed.query)
             conversation_id = query.get("conversation_id", [""])[0]
@@ -755,15 +767,6 @@ class RequestHandler(BaseHTTPRequestHandler):
                         self._json({"retried": True, "job_id": new_id}, HTTPStatus.OK)
                     else:
                         self._json({"error": "Job 不存在或无权访问"}, HTTPStatus.NOT_FOUND)
-        elif path.startswith("/api/jobs/") and path.endswith("/cancel"):
-            job_id = path.split("/")[-2]
-            if not job_id:
-                self._json({"error": "job_id 不能为空"}, HTTPStatus.BAD_REQUEST)
-            else:
-                job = self.app.jobs.cancel(
-                    job_id, owner=body.get("conversation_id") or None, reason="用户取消"
-                )
-                self._json(job or {"error": "Job 不存在"}, HTTPStatus.OK if job else HTTPStatus.NOT_FOUND)
         elif path == "/api/chat":
             self._chat(body)
         elif path == "/api/tasks":

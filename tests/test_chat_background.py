@@ -49,7 +49,10 @@ def default_payload(**overrides) -> dict:
 class ChatBackgroundConfigTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        # root 必须 resolve()：CI runner 的 TEMP 是 8.3 短路径（`...\RUNNER~1\...`），而产品侧
+        # 把设置里的背景图路径 resolve() 之后再存——测试侧不 resolve 就会「本地全绿、CI 全红」
+        # （§六 第 ③ 条；本地用 junction 建一个 `naiba~1` 目录即可复现）。
+        self.root = Path(self.tmp.name).resolve()
         self.data_dir = self.root / "data"
         self.uploads = self.data_dir / "uploads" / "2026-09-15"
         self.uploads.mkdir(parents=True)

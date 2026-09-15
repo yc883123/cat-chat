@@ -6,6 +6,9 @@
 - ``EventType``：前后端事件流 type 枚举。前端可处置的种类必须 ⊆ 本枚举
   （测试 test_contracts 从 public/app.js 反查校验，防止两端漂移）。
 - ``MetadataKeys``：消息 metadata JSON 键常量（写入方与重放方的唯一契约来源）。
+- ``CHOICE_GROUP_KEYS`` / ``CHOICE_MODES`` / ``CHOICE_SOURCES``：AI 回复里「交互选项组」的
+  结构契约。实时事件（run/chat）、消息 metadata 与历史读取（http）三条路径共用
+  ``core.choices.normalize_choice_groups`` 这一个规范化入口，结构本身登记在这里。
 """
 
 from __future__ import annotations
@@ -61,6 +64,20 @@ def validate_run_context(ctx: Any) -> list[str]:
     if not isinstance(ctx, dict):
         return ["<not-a-dict>"]
     return sorted(set(ctx.keys()) - set(RUN_CONTEXT_KEYS))
+
+
+# ---- 交互选项组契约（写入方 run/chat，重放方 core/choices + http，消费方前端选择面板）----
+# 组结构：{"prompt": 题目标题, "choices": [选项原文...], "mode": "single"|"multi",
+#         "source": "explicit"|"natural"}；options 原文不截断（长题目/长选项原样保留）。
+# 兼容历史：message.metadata.choices（纯字符串数组，无题目）由规范化升级为单组。
+CHOICE_GROUP_KEYS: tuple[str, ...] = ("prompt", "choices", "mode", "source")
+CHOICE_MODES: tuple[str, ...] = ("single", "multi")
+SOURCE_EXPLICIT = "explicit"   # 来自回复里的 ```naiba-choices 结构化代码块（有效块优先）
+SOURCE_NATURAL = "natural"     # 来自自然语言识别的"请选择…" + 编号/字母列表
+CHOICE_SOURCES: tuple[str, ...] = (SOURCE_EXPLICIT, SOURCE_NATURAL)
+DEFAULT_CHOICE_MODE = "single"
+# 回复中显式结构化选项的围栏语言标记（模型输出约定，不是工具，也不进工具目录）。
+EXPLICIT_CHOICE_FENCE = "naiba-choices"
 
 
 @runtime_checkable
@@ -211,6 +228,9 @@ class EventPayload(TypedDict, total=False):
     skills: list[dict[str, Any]]
     choices: list[str]
     choice_groups: list[dict[str, Any]]
+    # choice 事件的来源消息 id：前端以「会话 + 来源消息」为键保存临时选择，
+    # 缺了它 choice 与随后的 done 会各算一个来源，面板会在两事件之间被重建（选择被清空）。
+    message_id: str
     plan: dict[str, Any]
     aborted_message: dict[str, Any]
     # 诊断
@@ -256,7 +276,7 @@ EVENT_PAYLOAD_KEYS: dict[str, frozenset[str] | None] = {
     "tool_start": frozenset({"tool", "arguments", "reason"}),
     "tool_result": frozenset({"tool", "success", "result", "arguments", "reason", "media", "media_truncated"}),
     "tool_confirm": frozenset({"tool_name", "tool_desc", "arguments", "confirm_id"}),
-    "choice": frozenset({"choices", "choice_groups"}),
+    "choice": frozenset({"choices", "choice_groups", "message_id"}),
     "cancelled": frozenset({"message", "aborted_message"}),
     "run_failed": frozenset({"error"}),
     "context_full": frozenset({"limit", "used", "budget"}),

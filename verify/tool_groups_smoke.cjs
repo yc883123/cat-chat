@@ -120,8 +120,8 @@ async function scopeSnapshot(page) {
       JSON.stringify(cardState.cards));
     check('预设卡名称与个数正确', JSON.stringify(cardState.cards.filter((c) => c.preset).map((c) => [c.title, c.count]))
       === JSON.stringify([
-        ['只读模式', '4 个工具'], ['标准模式', '8 个工具'], ['长会话模式', '12 个工具'],
-        ['ComfyUI 联动', '13 个工具'],
+        ['只读模式', '6 个工具'], ['标准模式', '13 个工具'], ['长会话模式', '17 个工具'],
+        ['ComfyUI 联动', '18 个工具'],
         ['全能模式', `${(catalog.tools || []).length} 个工具`],
       ]), JSON.stringify(cardState.cards.map((c) => [c.title, c.count])));
     check('卡片态不展开工具列表', cardState.editorHidden === true, JSON.stringify(cardState));
@@ -130,7 +130,7 @@ async function scopeSnapshot(page) {
 
     // 点预设卡：不直接套用，而是「按下 → 卡片上移收起 → 列表从下方滑入」，命名栏预填该卡名字。
     const PRESET_NAMES = { readonly: '只读模式', standard: '标准模式', comfyui: 'ComfyUI 联动', full: '全能模式' };
-    for (const [value, expected] of [['readonly', 4], ['standard', 8], ['comfyui', 13],
+    for (const [value, expected] of [['readonly', 6], ['standard', 13], ['comfyui', 18],
       ['full', (catalog.tools || []).length]]) {
       await page.click(`[data-tool-preset-card="${value}"]`);
       // 先量「按下」那一帧：被点的卡片必须立刻带 .is-picked（选中反馈）。
@@ -160,9 +160,11 @@ async function scopeSnapshot(page) {
       if (value === 'readonly') {
         const tools = await page.evaluate(() => [...document.querySelectorAll('#agentToolScope .permission-grid input[type="checkbox"]:checked')]
           .map((cb) => cb.value).sort());
-        check('只读模式只含 4 个只读工具', JSON.stringify(tools) === JSON.stringify([
-          'list_directory', 'read_file', 'search_files', 'vision_analyze',
-        ]), JSON.stringify(tools));
+        check('只读模式只含 6 个只读工具（纯读取的 read_pdf / probe_video 在，会写产物三件不在）',
+          JSON.stringify(tools) === JSON.stringify([
+            'list_directory', 'probe_video', 'read_file', 'read_pdf', 'search_files',
+            'vision_analyze',
+          ]), JSON.stringify(tools));
       }
       await page.click('#agentToolEditorBack');
       await page.waitForTimeout(600);
@@ -197,9 +199,10 @@ async function scopeSnapshot(page) {
     check('点添加卡进入编辑态（卡片收起 + 编辑区展开）',
       editorState.editorVisible && editorState.cardsHidden && editorState.hasName, JSON.stringify(editorState));
     check('「添加」卡命名栏留空', editorState.name === '', JSON.stringify(editorState));
-    check('「添加」卡默认载入标准模式的 8 个工具（不跟随当前选中项）',
-      editorState.checked === 8 && JSON.stringify(editorState.tools) === JSON.stringify([
-        'edit_file', 'list_directory', 'pwsh', 'read_file', 'run_skill_script',
+    check('「添加」卡默认载入标准模式的 13 个工具（不跟随当前选中项）',
+      editorState.checked === 13 && JSON.stringify(editorState.tools) === JSON.stringify([
+        'edit_file', 'extract_frames', 'list_directory', 'pdf_render_pages', 'pdf_zoom_region',
+        'probe_video', 'pwsh', 'read_file', 'read_pdf', 'run_skill_script',
         'search_files', 'vision_analyze', 'write_file',
       ]), JSON.stringify(editorState));
     check('编辑态弹层高度仍与卡片态一致', Math.abs(editorState.dialogH - dialogH) <= 2, String(editorState.dialogH));

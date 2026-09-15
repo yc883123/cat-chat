@@ -2,14 +2,16 @@
 // 03-media.js —— 拆分自 public/app.js 第 712-1211 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, api, draggedFileCache, escapeHtml, state, toast } from "./01-core.js";
+import { $, api, draggedFileCache, escapeHtml, localFileUrl, state, toast } from "./01-core.js";
 import { markdown } from "./02-markdown.js";
 import { selectedProvider } from "./07-models-agents.js";
 import { renderPendingFiles } from "./10-upload.js";
 export function fileUrl(source) {
   const value = String(source || '');
   if (/^https?:\/\//i.test(value) && !/^https?:\/\/(?:127\.0\.0\.1|localhost):8188\//i.test(value)) return value;
-  return `/api/file?token=${encodeURIComponent(state.token)}&path=${encodeURIComponent(value)}`;
+  // 本地路径的 URL 形状唯一定义在 01-core.localFileUrl（聊天背景图也用它，
+  // 避免两处各拼一份 /api/file URL 后慢慢漂移）。
+  return localFileUrl(value);
 }
 
 export function attachmentThumbPath(attachment) {

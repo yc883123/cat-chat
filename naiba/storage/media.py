@@ -108,6 +108,51 @@ def store_uploaded_file(
     }
 
 
+def rotate_uploaded_image(
+    source: Path,
+    data_dir: Path,
+    imaging: dict[str, Any] | None = None,
+    turns: int = 1,
+) -> dict[str, Any]:
+    """把图片顺时针旋转 90°×turns，另存成 uploads 里的新文件并返回其记录。
+
+    **为什么落到文件、而不是在每个渲染路径叠一层 transform**：旋转的正解就是把竖图变成横图
+    ——改完之后它就是一张普通横图，取景、模糊填充、缩略图、内置/自定义背景、缓存回收全都自动
+    成立；若改成视图态旋转，`.chat-bg-surface` 就得再分出"旋转/未旋转"两套几何，正好破坏
+    「渲染单一事实来源」（见维护说明 §九.70）。
+
+    复用 ``store_uploaded_file``：分日目录、内容级去重、压缩、缩略图生成一次到位；
+    统一输出 PNG（无损，避免 JPEG 二次压缩掉画质），文件名为 ``<原名>_rot<角度>.png``。
+    """
+    from PIL import Image, ImageOps
+
+    path = Path(source).expanduser().resolve()
+    if not path.is_file():
+        raise ValueError("图片文件不存在，无法旋转")
+    try:
+        with Image.open(path) as probe:
+            probe.load()
+            # 上传管线对 png/jpg/webp 已经做过 exif_transpose；这里再兜一次是为了
+            # .gif/.bmp/.avif 这些"原样落盘"的格式（EXIF 方向不能被忽略两次）。
+            image = ImageOps.exif_transpose(probe)
+            if image is None:  # 极老版本 Pillow 的返回值防御
+                image = probe.copy()
+            else:
+                image = image.copy()
+    except ValueError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 坏图一律按"无法识别"报错，不吞
+        raise ValueError(f"无法识别的图片：{exc}") from None
+
+    steps = int(turns) % 4
+    for _ in range(steps):
+        image = image.transpose(Image.Transpose.ROTATE_270)   # PIL 的 270 = 顺时针 90°
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    name = f"{path.stem}_rot{steps * 90}.png"
+    return store_uploaded_file(buffer.getvalue(), name, data_dir, imaging)
+
+
 def _thumb_path_for(main_path: Path) -> str:
     """既有图片的缩略图路径（可能与主图分日同桶；不存在时返回空串）。"""
     thumb = _thumb_webp_path(main_path)

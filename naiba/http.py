@@ -27,7 +27,7 @@ from typing import Any
 import naiba.net as net_io
 from naiba.app import NaibaChatApp
 from naiba.config import tool_catalog_entries, tool_group_entries, tool_preset_entries
-from naiba.core.choices import _detect_choice_groups
+from naiba.core.choices import resolve_message_choice_groups
 from naiba.core.conv_files import _conv_file_allow, _conv_file_open, _conv_file_save
 from naiba.core.diagnostics import ensure_utf8_stdio
 from naiba.core.exceptions import ActiveRunError
@@ -298,7 +298,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 last_message = conversation["messages"][-1]
                 if last_message.get("role") == "assistant":
                     metadata = last_message.setdefault("metadata", {})
-                    choice_groups = _detect_choice_groups(str(last_message.get("content") or ""))
+                    # 历史读取只做"补齐"，绝不用空的解析结果覆盖已有有效数据（口径在
+                    # core.choices.resolve_message_choice_groups：有效 metadata 优先）。
+                    choice_groups = resolve_message_choice_groups(
+                        metadata, str(last_message.get("content") or "")
+                    )
                     metadata["choice_groups"] = choice_groups
                     metadata["choices"] = choice_groups[0]["choices"] if choice_groups else []
             self._json(conversation or {"error": "对话不存在"}, HTTPStatus.OK if conversation else HTTPStatus.NOT_FOUND)
@@ -340,6 +344,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
             except (OSError, ValueError, RuntimeError) as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif path == "/api/backgrounds":
+            # 内置背景图清单（首次访问时幂等生成到 data/backgrounds/）。
+            self._json(self.app.background_presets())
         elif path == "/api/install/dirs":
             self._json(self.app.list_skill_dirs())
         elif path == "/api/mcp/status/light":
@@ -607,6 +614,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json({"error": "上传接口已升级为 multipart 流式"}, HTTPStatus.BAD_REQUEST)
         elif path == "/api/uploads/delete":
             self._json(*self.app._delete_upload(body))
+        elif path == "/api/uploads/rotate":
+            self._json(*self.app.api_rotate_upload(body))
         elif path == "/api/uploads/check":
             self._json(*self.app.api_check_uploads(body))
         elif path == "/api/install/dir":

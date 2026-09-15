@@ -2,14 +2,14 @@
 // 11-run-stream.js —— 拆分自 public/app.js 第 4710-5237 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, api, escapeHtml, state, toast } from "./01-core.js";
+import { $, api, escapeHtml, notifyComposerChanged, state, toast } from "./01-core.js";
 import { pendingContextWarning, showContextWarning } from "./03-media.js";
 import { messageElement, scrollToBottom, setStickToBottom } from "./04-messages.js";
 import { loadTasks } from "./06-tasks-plans.js";
 import { createConversation, loadConversations, openConversation } from "./08-conversations.js";
 import { composerModelChoice, composerModelIsValidated, selectedProvider } from "./07-models-agents.js";
 import { missingAttachmentPaths, renderPendingFiles } from "./10-upload.js";
-import { closeQuickMessagePanel, handleChatEvent, hideChoiceButtons, setBusy } from "./12-chat-input.js";
+import { beginChoiceSubmit, closeQuickMessagePanel, commitChoiceSubmit, handleChatEvent, rollbackChoiceSubmit, setBusy } from "./12-chat-input.js";
 import { hideSkillPopup, parseSkillReferences, renderInputMirror, resizeTextarea, stripSkillReferences } from "./13-skill-refs.js";
 import { hideFilePopup } from "./16-file-refs.js";
 
@@ -493,7 +493,9 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
   }
   // 用户新发起一轮：恢复跟随，让新答复从底部开始流式显示。
   setStickToBottom(true);
-  hideChoiceButtons();
+  // 新消息提交使旧选择面板失效：先只隐藏（不清临时选择），请求被受理后才真正失效，
+  // 被拒（网络错误 / 409）时把面板连答案一起还给用户（见 restoreRejectedSubmit）。
+  beginChoiceSubmit();
   const referencedIds = parseSkillReferences(text).map((tok) => tok.skill.id);
   const messageText = stripSkillReferences(text);
   const conversationId = state.conversationId;
@@ -520,6 +522,21 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
   state.cancelRequested = false;
   state.cancelConversationId = '';
   setBusy(true);
+  // 本轮提交被拒时的回退：把草稿文字、待发送附件与选择面板（含已选答案）放回用户手上，
+  // 而不是让一次网络抖动或 409 直接吞掉用户刚答好的选择。
+  const restoreRejectedSubmit = () => {
+    rollbackChoiceSubmit();
+    if (!String(input.value || '').trim()) {
+      input.value = text;
+      resizeTextarea();
+      renderInputMirror();
+      notifyComposerChanged(input);
+    }
+    if (!state.pendingFiles.length && attachments.length) {
+      state.pendingFiles = attachments.map((item) => ({ ...item }));
+      renderPendingFiles();
+    }
+  };
   try {
     const response = await fetch('/api/chat', {
       method: 'POST',
@@ -544,15 +561,19 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
       if (response.status === 409 && payload.active_run_id) {
         detachRunSubscription();
         if (state.conversationId === conversationId) await openConversation(conversationId);
+        restoreRejectedSubmit();
         toast('当前对话已有 Run，已恢复其进度');
         return;
       }
       throw new Error(payload.error || `HTTP ${response.status}`);
     }
+    // 请求已被受理：旧面板与其临时选择现在才真正失效（重试/换会话都不会再弹回来）。
+    commitChoiceSubmit();
     await consumeRunStream(response, row, conversationId, state.chatRunId, controller, runGeneration);
   } catch (error) {
     if (error.name !== 'AbortError' && state.conversationId === conversationId) {
       row.querySelector('.answer-content').innerHTML = `<p>请求失败：${escapeHtml(error.message)}</p>`;
+      restoreRejectedSubmit();
     }
   } finally {
     if (state.abortController === controller) await finishRunSubscription(conversationId, controller);

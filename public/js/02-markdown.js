@@ -3,6 +3,7 @@
 // ============================================================
 
 import { $, escapeHtml, normalizeLanguage, restoreSafeHtml } from "./01-core.js";
+import { choicePreviewMarkup, explicitChoiceGroups, isChoiceFence } from "./17-choice-groups.js";
 export function highlightCode(rawCode, language) {
   const code = String(rawCode ?? '');
   const lang = normalizeLanguage(language);
@@ -219,6 +220,15 @@ export function markdown(text, allowRichText = true) {
   const codeBlocks = [];
   const addCodeBlock = (language, rawCode) => {
     const index = codeBlocks.length;
+    // 显式 ```naiba-choices 块是模型给出的结构化选择（见 naiba/core/choices.py）：有效块渲染成
+    // 可读题目与选项，不让用户看到原始 JSON；无效块保持下面的普通代码块（不隐藏、不生成控件）。
+    if (isChoiceFence(language)) {
+      const preview = choicePreviewMarkup(explicitChoiceGroups(rawCode));
+      if (preview) {
+        codeBlocks.push(preview);
+        return index;
+      }
+    }
     const lang = escapeHtml(String(language || '').trim());
     const highlighted = highlightCode(rawCode, String(language || '').trim());
     codeBlocks.push(

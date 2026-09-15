@@ -12,6 +12,7 @@ import { createConversation, openConversation } from "./08-conversations.js";
 import { uploadFiles } from "./10-upload.js";
 import { SKILL_INSTALL_PRESET, SKILL_SCRIPT_RULES, clearElapsedStatus, clearRunReconnectTimers, clearVisionProgress, collapseToolReasoningBlock, createStreamingReasoningBlock, detachRunConnection, sendChatMessage, setConnectionState, stopRunWatchdog } from "./11-run-stream.js";
 import { insertTextAtCursor, renderInputMirror, resizeTextarea, updateSkillPopup } from "./13-skill-refs.js";
+import { normalizeChoiceGroups } from "./17-choice-groups.js";
 export async function startSkillInstall() {
   if (state.chatRunId || state.abortController) {
     toast('请先等待当前任务结束或停止后再安装 Skill');
@@ -797,8 +798,12 @@ function handleToolConfirmEvent(event, { row, answer, runId }) {
 }
 
 function handleChoiceEvent(event) {
-  // AI回复包含可选项，显示选择按钮
-  showChoiceButtons(event.choices, event.choice_groups);
+  // AI回复包含可选项，显示选择面板。带上来源消息 id（后端 choice 事件已带 message_id），
+  // 面板据此绑定「会话 + 来源消息」，避免同会话多条提问互相串题。
+  showChoiceButtons(event.choices, event.choice_groups, {
+    messageId: event.message_id,
+    conversationId: state.conversationId,
+  });
 }
 
 function handleCancelledEvent(event, { row, answer, setActivity, conversationId }) {
@@ -880,7 +885,11 @@ function handleDoneEvent(event, { row, answer, collapseReasoning, conversationId
       const metadata = event.message.metadata || {};
       if ((Array.isArray(metadata.choice_groups) && metadata.choice_groups.length)
         || (Array.isArray(metadata.choices) && metadata.choices.length)) {
-        showChoiceButtons(metadata.choices, metadata.choice_groups);
+        // 与 choice 事件同口径：同一个来源消息 → 同一份临时选择（重复事件只更新数据）。
+        showChoiceButtons(metadata.choices, metadata.choice_groups, {
+          messageId: event.message.id,
+          conversationId: state.conversationId,
+        });
       }
     } catch (error) {
       console.error('[naiba] done 事件渲染崩溃:', error, 'message=', event.message);
@@ -926,120 +935,317 @@ function handleErrorEvent(event, { row, answer, collapseReasoning, conversationI
   if (conversationId) void refreshFirstTurnCard(conversationId);
 }
 
-export function showChoiceButtons(choices, choiceGroups = []) {
+/* ---------- 交互选择面板：单选 / 多选 / 多组 ----------
+ * 后端只提供数据（消息 metadata.choices / metadata.choice_groups），面板只做「收集答案 →
+ * 一次性填入输入框」，不新增接口、不自动发送、不阻塞后台。状态以「会话 + 来源消息」为键
+ * 存在前端内存里：重渲染 / 重复事件 / 会话切换都不清空（切回来还能接着答）；整页刷新即
+ * 从首题重来，不落任何半成品。实时 choice 事件、done 事件 metadata、历史渲染三个入口
+ * 统一汇入 showChoiceButtons（选择状态的唯一同步入口）。
+ */
+const choiceSelections = new Map();  // key → { groups, answers, index, collapsed, done }
+const CHOICE_MEMORY_MAX = 24;        // 内存里最多保留多少条临时选择（按插入序淘汰最旧）
+let activeChoiceKey = '';
+let choicePendingSubmit = null;      // 提交中的面板（失败可回退，见 rollbackChoiceSubmit）
+
+function choiceKeyOf(conversationId, messageId) {
+  const conversation = String(conversationId ?? '');
+  const message = String(messageId || '');
+  return `${conversation}::${message || 'legacy'}`;
+}
+
+function pruneChoiceSelections() {
+  while (choiceSelections.size > CHOICE_MEMORY_MAX) {
+    const oldest = choiceSelections.keys().next().value;
+    if (oldest === activeChoiceKey) break;
+    choiceSelections.delete(oldest);
+  }
+}
+
+/** 前端侧规范化：与后端 normalize_choice_groups 同口径，实现见 17-choice-groups.js。 */
+
+function choicePicked(entry, index) {
+  const picked = entry.answers[index];
+  return Array.isArray(picked) ? picked : [];
+}
+
+/** 答案块：一行一题（`视觉：写实`），多选同行用「、」连接；无题目时只写选项。 */
+function choiceAnswerBlock(entry) {
+  return entry.groups
+    .map((group, index) => {
+      const text = choicePicked(entry, index).join('、');
+      if (!text) return '';
+      return group.prompt ? `${group.prompt}：${text}` : text;
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+function syncChoicePanelLock(busy = Boolean(state.abortController)) {
+  const host = $('#choiceButtons');
+  if (!host) return;
+  const entry = choiceSelections.get(activeChoiceKey);
+  const picked = entry ? choicePicked(entry, entry.index).length : 0;
+  host.classList.toggle('is-busy', Boolean(busy));
+  $$('#choiceButtons button').forEach((button) => {
+    const nav = button.dataset.choiceNav;
+    if (nav === 'collapse') return;            // 折叠是纯显示操作，运行中也允许
+    if (nav === 'next' || nav === 'done') button.disabled = Boolean(busy) || !picked;
+    else button.disabled = Boolean(busy);      // 选项卡片 / 上一题
+  });
+}
+
+function onChoiceOptionClick(entry, choice) {
+  if (state.abortController) return;           // 运行中不接受答题
+  const group = entry.groups[entry.index];
+  const picked = choicePicked(entry, entry.index);
+  if (group.mode === 'multi') {
+    entry.answers[entry.index] = picked.includes(choice)
+      ? picked.filter((item) => item !== choice)
+      : [...picked, choice];
+    renderChoicePanel();
+    return;
+  }
+  entry.answers[entry.index] = [choice];
+  // 单选点击即进入下一题；最后一题停在原地，等用户统一点「完成」。
+  if (entry.index < entry.groups.length - 1) {
+    entry.index += 1;
+    renderChoicePanel();
+    scrollToBottom();
+    return;
+  }
+  renderChoicePanel();
+}
+
+function completeChoicePanel() {
+  const entry = choiceSelections.get(activeChoiceKey);
+  if (!entry || entry.done) return;            // 「完成」只执行一次
+  const unanswered = entry.groups.findIndex((_, index) => !choicePicked(entry, index).length);
+  if (unanswered >= 0) {                       // 每题至少选一项才可完成
+    entry.index = unanswered;
+    renderChoicePanel();
+    toast(`第 ${unanswered + 1} 题还没有选择`);
+    return;
+  }
+  const block = choiceAnswerBlock(entry);
+  entry.done = true;
+  entry.collapsed = false;
   hideChoiceButtons();
+  fillComposerAnswer(block);
+  toast('选择已填入输入框，确认后再发送');
+}
+
+function renderChoicePanel() {
+  const entry = choiceSelections.get(activeChoiceKey);
   const composerWrap = $('.composer-wrap');
   const composer = $('#composerForm');
-  const legacyChoices = Array.isArray(choices)
-    ? choices.map((choice) => String(choice).trim()).filter(Boolean)
-    : [];
-  const sourceGroups = Array.isArray(choiceGroups) && choiceGroups.length
-    ? choiceGroups
-    : [{ prompt: '', choices: legacyChoices }];
-  const groups = sourceGroups.map((group) => ({
-    prompt: String(group?.prompt || '').trim(),
-    choices: Array.isArray(group?.choices)
-      ? group.choices.map((choice) => String(choice).trim()).filter(Boolean)
-      : [],
-  })).filter((group) => group.choices.length);
-  if (!composerWrap || !composer || !groups.length) return;
+  if (!entry || !composerWrap || !composer) return;
+  let host = $('#choiceButtons');
+  if (!host) {
+    host = document.createElement('div');
+    host.className = 'choice-buttons';
+    host.id = 'choiceButtons';
+    host.setAttribute('role', 'group');
+    composerWrap.insertBefore(host, composer);
+  }
+  const group = entry.groups[entry.index];
+  const picked = choicePicked(entry, entry.index);
+  const multi = group.mode === 'multi';
+  const last = entry.index === entry.groups.length - 1;
+  const busy = Boolean(state.abortController);
+  host.dataset.choiceKey = activeChoiceKey;
+  host.classList.toggle('is-collapsed', entry.collapsed);
+  host.classList.toggle('is-busy', busy);
+  host.setAttribute('aria-label', group.prompt || `第 ${entry.index + 1} 组选项`);
+  host.replaceChildren();
 
-  const container = document.createElement('div');
-  container.className = 'choice-buttons';
-  container.id = 'choiceButtons';
-  container.setAttribute('role', 'group');
-  container.setAttribute('aria-label', '可选回复');
-  composerWrap.insertBefore(container, composer);
+  const header = document.createElement('div');
+  header.className = 'choice-header';
+  const collapse = document.createElement('button');
+  collapse.type = 'button';
+  collapse.className = 'choice-collapse';
+  collapse.dataset.choiceNav = 'collapse';
+  collapse.textContent = entry.collapsed ? '▸' : '▾';
+  collapse.title = entry.collapsed ? '展开选项' : '折叠选项（已选保留）';
+  collapse.setAttribute('aria-expanded', String(!entry.collapsed));
+  collapse.setAttribute('aria-label', collapse.title);
+  collapse.addEventListener('click', () => {
+    entry.collapsed = !entry.collapsed;        // 折叠只改显示，已选照旧保留
+    renderChoicePanel();
+  });
+  header.appendChild(collapse);
 
-  const selected = [];
-  let groupIndex = 0;
+  const prompt = document.createElement('strong');
+  prompt.className = 'choice-prompt';
+  prompt.textContent = group.prompt || '请选择';
+  header.appendChild(prompt);
 
-  const formatAnswer = (group, choice, index) => choice;
+  const mode = document.createElement('span');
+  mode.className = `choice-mode-badge is-${multi ? 'multi' : 'single'}`;
+  mode.textContent = multi ? '多选' : '单选';
+  header.appendChild(mode);
 
-  const renderGroup = () => {
-    const group = groups[groupIndex];
-    container.replaceChildren();
-    container.setAttribute('aria-label', group.prompt || `第 ${groupIndex + 1} 组选项`);
+  if (entry.groups.length > 1) {
+    const progress = document.createElement('span');
+    progress.className = 'choice-progress';
+    progress.textContent = `${entry.index + 1}/${entry.groups.length}`;
+    header.appendChild(progress);
+  }
+  host.appendChild(header);
 
-    const header = document.createElement('div');
-    header.className = 'choice-header';
-    if (groupIndex > 0) {
-      const back = document.createElement('button');
-      back.type = 'button';
-      back.className = 'choice-back';
-      back.textContent = '←';
-      back.title = '返回上一项';
-      back.setAttribute('aria-label', '返回上一项');
-      back.disabled = Boolean(state.abortController);
-      back.addEventListener('click', () => {
-        selected.splice(groupIndex - 1);
-        groupIndex -= 1;
-        renderGroup();
-      });
-      header.appendChild(back);
+  const body = document.createElement('div');
+  body.className = 'choice-body';
+  body.hidden = entry.collapsed;
+
+  const options = document.createElement('div');
+  options.className = 'choice-options';
+  group.choices.forEach((choice) => {
+    const selected = picked.includes(choice);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'choice-btn';
+    btn.classList.toggle('is-selected', selected);
+    btn.dataset.choiceValue = choice;
+    btn.setAttribute('role', multi ? 'checkbox' : 'radio');
+    btn.setAttribute('aria-checked', String(selected));
+    btn.textContent = choice;
+    btn.disabled = busy;
+    if (multi) {
+      const box = document.createElement('span');
+      box.className = 'choice-check';
+      box.setAttribute('aria-hidden', 'true');
+      btn.prepend(box);
     }
+    btn.addEventListener('click', () => onChoiceOptionClick(entry, choice));
+    options.appendChild(btn);
+  });
+  body.appendChild(options);
 
-    const prompt = document.createElement('strong');
-    prompt.className = 'choice-prompt';
-    prompt.textContent = group.prompt || '请选择';
-    header.appendChild(prompt);
-
-    if (groups.length > 1) {
-      const progress = document.createElement('span');
-      progress.className = 'choice-progress';
-      progress.textContent = `${groupIndex + 1}/${groups.length}`;
-      header.appendChild(progress);
-    }
-    container.appendChild(header);
-
-    if (selected.length) {
-      const summary = document.createElement('div');
-      summary.className = 'choice-selection-summary';
-      summary.textContent = `已选：${selected.join('；')}`;
-      container.appendChild(summary);
-    }
-
-    const options = document.createElement('div');
-    options.className = 'choice-options';
-    group.choices.forEach((choice) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'choice-btn';
-      btn.textContent = choice;
-      btn.disabled = Boolean(state.abortController);
-      btn.addEventListener('click', () => {
-        selected[groupIndex] = choice;
-        if (groupIndex < groups.length - 1) {
-          groupIndex += 1;
-          renderGroup();
-          scrollToBottom();
-          return;
-        }
-        const answer = groups
-          .map((answerGroup, index) => formatAnswer(answerGroup, selected[index], index))
-          .join('\n');
-        hideChoiceButtons();
-        fillComposer(answer);
-      });
-      options.appendChild(btn);
+  if (picked.length) {
+    const summary = document.createElement('div');
+    summary.className = 'choice-selection-summary';
+    const label = document.createElement('span');
+    label.className = 'choice-summary-label';
+    label.textContent = '已选：';
+    summary.appendChild(label);
+    // 多选逐项分行、长选项完整换行，不做截断
+    const list = document.createElement('div');
+    list.className = 'choice-summary-list';
+    picked.forEach((item) => {
+      const line = document.createElement('span');
+      line.className = 'choice-summary-item';
+      line.textContent = item;
+      list.appendChild(line);
     });
-    container.appendChild(options);
-  };
+    summary.appendChild(list);
+    body.appendChild(summary);
+  }
+  host.appendChild(body);
 
-  renderGroup();
+  const actions = document.createElement('div');
+  actions.className = 'choice-actions';
+  actions.hidden = entry.collapsed;
+  if (entry.index > 0) {
+    const back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'choice-nav';
+    back.dataset.choiceNav = 'prev';
+    back.textContent = '上一题';
+    back.disabled = busy;
+    back.addEventListener('click', () => {
+      entry.index -= 1;                        // 返回修改，已选保留
+      renderChoicePanel();
+    });
+    actions.appendChild(back);
+  }
+  const hint = document.createElement('span');
+  hint.className = 'choice-hint';
+  hint.textContent = multi
+    ? (picked.length ? `已选 ${picked.length} 项` : '可多选，勾选后进入下一题')
+    : (picked.length ? '已选 1 项' : '请选择一项');
+  actions.appendChild(hint);
+
+  const go = document.createElement('button');
+  go.type = 'button';
+  go.className = 'choice-nav choice-nav-primary';
+  go.dataset.choiceNav = last ? 'done' : 'next';
+  go.textContent = last ? '完成' : '下一题';
+  go.disabled = busy || !picked.length;
+  go.addEventListener('click', () => {
+    if (last) {
+      completeChoicePanel();
+      return;
+    }
+    entry.index += 1;
+    renderChoicePanel();
+  });
+  actions.appendChild(go);
+  host.appendChild(actions);
+}
+
+export function showChoiceButtons(choices, choiceGroups = [], context = {}) {
+  const groups = normalizeChoiceGroups(choices, choiceGroups);
+  if (!groups.length) {
+    hideChoiceButtons();
+    return;
+  }
+  const key = choiceKeyOf(context.conversationId ?? state.conversationId, context.messageId);
+  const known = choiceSelections.get(key);
+  if (known?.done) return;                     // 已完成（答案已在输入框里）：重复事件/重渲染不再弹
+  if (known) {
+    // 同一来源重复同步：只更新数据，不重建已选状态（撤回多选后事件重放也不会被清空）。
+    known.groups = groups;
+    known.answers = groups.map((group, index) => choicePicked(known, index).filter((c) => group.choices.includes(c)));
+    if (known.index >= groups.length) known.index = groups.length - 1;
+    if (known.index < 0) known.index = 0;
+  } else {
+    choiceSelections.set(key, { groups, answers: [], index: 0, collapsed: false, done: false });
+    pruneChoiceSelections();
+  }
+  activeChoiceKey = key;
+  renderChoicePanel();
   scrollToBottom();
 }
 
+/** 只移除 DOM，不清内存：会话切换后切回来仍能接着答（整页刷新才真正丢弃）。 */
 export function hideChoiceButtons() {
   const existing = $('#choiceButtons');
   if (existing) existing.remove();
 }
 
-export function fillComposer(text) {
-  // 把按钮拼好的内容放进输入框由用户确认，不自动发送。
+/** 提交路径①：本轮已带上面板的答案发出，先只隐藏不销毁（失败可回退）。 */
+export function beginChoiceSubmit() {
+  const entry = choiceSelections.get(activeChoiceKey);
+  hideChoiceButtons();
+  if (!entry) return false;
+  choicePendingSubmit = { key: activeChoiceKey };
+  return true;
+}
+
+/** 提交路径②：请求被受理 → 旧面板与其临时选择一起失效。 */
+export function commitChoiceSubmit() {
+  choicePendingSubmit = null;
+  const prefix = `${String(state.conversationId ?? '')}::`;
+  [...choiceSelections.keys()].forEach((key) => {
+    if (key.startsWith(prefix)) choiceSelections.delete(key);
+  });
+}
+
+/** 提交路径③：请求被拒（网络错误 / 409）→ 面板连答案一起还给用户。 */
+export function rollbackChoiceSubmit() {
+  const pending = choicePendingSubmit;
+  choicePendingSubmit = null;
+  if (!pending) return;
+  activeChoiceKey = pending.key;
+  if (choiceSelections.has(pending.key)) renderChoicePanel();
+}
+
+/** 选择面板收尾：有草稿时在末尾追加换行分隔的答案块（草稿与待发送附件都保留）。
+ * 原「替换输入框」的 fillComposer 只服务于旧单选按钮，已并入本函数（2026-09-15）。 */
+function fillComposerAnswer(block) {
   const input = $('#messageInput');
-  if (!input) return;
-  input.value = String(text || '');
+  if (!input || !block) return;
+  const draft = String(input.value || '');
+  input.value = draft.trim() ? `${draft.replace(/\s+$/, '')}\n${block}` : block;
   resizeTextarea();
   renderInputMirror();
   updateSkillPopup();
@@ -1118,7 +1324,9 @@ export function setBusy(busy) {
     : (busy
       ? '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"></rect></svg>'
       : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>');
-  $$('#choiceButtons button').forEach((button) => { button.disabled = busy; });
+  // 选择面板：运行中禁用答题，结束时按「是否已选」恢复（下一题/完成要求每题至少选一项，
+  // 不能一律 enable；单一写入点见 syncChoicePanelLock）。
+  syncChoicePanelLock(busy);
   // 输入框的 disabled/placeholder 与发送按钮一律由 updateContextComposerLock /
   // updateSendButtonState 单点维护（含「上下文已满」与「正在编辑消息」两种锁定原因），
   // 此处只负责图标与停止态样式——两个写入点会互相覆盖，实测踩过。

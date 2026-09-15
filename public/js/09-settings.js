@@ -2,7 +2,7 @@
 // 09-settings.js —— 拆分自 public/app.js 第 3115-4672 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, api, applyAppearance, escapeHtml, state, toast } from "./01-core.js";
+import { $, $$, api, applyAppearance, applyChatBackground, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, localFileUrl, state, toast } from "./01-core.js";
 import { applyConversationAgent, populateComposerModels, populateModels, renderAgents, updateUnloadModelButton } from "./07-models-agents.js";
 import { closeAgentPromptPresetPanel, currentAgentFixedSkillIds, renderAgentPromptPresetList } from "./08-conversations.js";
 import { skillList } from "./13-skill-refs.js";
@@ -28,6 +28,201 @@ export function populateAppearanceSettings() {
   $$('input[name="appearanceTheme"]').forEach((input) => { input.checked = input.value === theme; });
   $$('input[name="appearanceSkin"]').forEach((input) => { input.checked = input.value === skin; });
   applyAppearance({ theme, skin });
+  populateChatBackgroundSettings();
+}
+
+// ---- 聊天背景（外观页） ----
+// 控件是可选增强：旧 index.html 没有这些节点时其它设置照常工作（与外观控件同款约定）。
+export function populateChatBackgroundSettings() {
+  const configured = state.bootstrap?.settings?.chat_background || {};
+  const previous = state.chatBackground || {};
+  // 取景字段必须一起带过去：漏传的表现是"面板一开，用户调好的取景被回填成默认"。
+  // crop 用键存在与否判断（它的"未设置"是 null，?? 会把 null 吞掉）。
+  applyChatBackground({
+    image: configured.image ?? previous.image ?? '',
+    opacity: configured.opacity ?? previous.opacity,
+    crop: 'crop' in configured ? configured.crop : (previous.crop ?? null),
+    position_x: configured.position_x ?? previous.position_x,
+    position_y: configured.position_y ?? previous.position_y,
+    zoom: configured.zoom ?? previous.zoom,
+  });
+  updateChatBackgroundControls();
+  setChatBackgroundStatus('');
+}
+
+// 面板回显的唯一写入点：滑杆值/百分比/缩略图显隐/清除与调整按钮可用性都随当前背景状态走。
+export function updateChatBackgroundControls() {
+  const background = state.chatBackground || { image: '', opacity: 0.35 };
+  const slider = $('#chatBackgroundOpacity');
+  // 用户正在拖滑杆时不要用回填值抢走手柄（input 事件会重绘周边文案）。
+  if (slider && document.activeElement !== slider) slider.value = String(background.opacity);
+  const output = $('#chatBackgroundOpacityValue');
+  if (output) output.textContent = `${Math.round(Number(background.opacity) * 100)}%`;
+  const preview = $('#chatBackgroundPreview');
+  if (preview) preview.hidden = !background.image;
+  const clear = $('#clearChatBackground');
+  if (clear) clear.disabled = !background.image;
+  const pick = $('#pickChatBackground');
+  if (pick) pick.textContent = background.image ? '更换图片' : '选择图片';
+  const edit = $('#editChatBackground');
+  if (edit) {
+    // 没图时"调整取景"没有对象；编辑器里的失效提示另有一条（这里是入口的先决条件）。
+    edit.disabled = !background.image;
+    edit.title = background.image ? '在白板上拖动 / 缩放，决定露出图片的哪一块' : '请先选择一张背景图';
+  }
+  syncChatBackgroundPresetState();
+}
+
+// ---- 内置背景图（设置卡那一排缩略图） ----
+// 清单来自 /api/backgrounds（首次访问时后端幂等生成到 data/backgrounds/），点一下即应用。
+export async function loadChatBackgroundPresets() {
+  if (state.chatBackgroundPresets?.length) {
+    renderChatBackgroundPresets(state.chatBackgroundPresets);
+    return state.chatBackgroundPresets;
+  }
+  try {
+    const result = await api('/api/backgrounds');
+    state.chatBackgroundPresets = Array.isArray(result?.presets) ? result.presets : [];
+  } catch (error) {
+    // 拿不到内置图只是少一个便利入口，不打扰用户；控制台留一条供排查（warn 不是 error，
+    // 零报错的冒烟断言不受影响）。
+    state.chatBackgroundPresets = [];
+    console.warn('内置背景图清单读取失败：', error.message);
+  }
+  renderChatBackgroundPresets(state.chatBackgroundPresets);
+  return state.chatBackgroundPresets;
+}
+
+export function renderChatBackgroundPresets(presets = []) {
+  const box = $('#chatBackgroundPresets');
+  const row = $('#chatBackgroundPresetsRow');
+  if (!box || !row) return;
+  const list = Array.isArray(presets) ? presets.filter((item) => item?.path) : [];
+  if (!list.length) {
+    box.hidden = true;
+    row.replaceChildren();
+    return;
+  }
+  const current = String(state.chatBackground?.image || '');
+  row.innerHTML = list.map((preset) => {
+    const path = String(preset.path);
+    const active = Boolean(current) && path === current;
+    const thumb = String(preset.thumb_path || path);
+    const name = escapeHtml(preset.name || '内置背景');
+    return `<button type="button" class="chat-background-preset${active ? ' is-active' : ''}" role="radio" aria-checked="${active ? 'true' : 'false'}" data-chat-bg-preset="${escapeHtml(path)}" title="${escapeHtml(preset.description || preset.name || '')}"><img src="${escapeHtml(localFileUrl(thumb))}" alt="" loading="lazy"><span>${name}</span></button>`;
+  }).join('');
+  box.hidden = false;
+}
+
+// 只切换"当前用的是哪一张"的高亮：整排重绘会丢焦点、也会在拖滑杆时反复重建 DOM。
+export function syncChatBackgroundPresetState() {
+  const current = String(state.chatBackground?.image || '');
+  $$('#chatBackgroundPresetsRow .chat-background-preset').forEach((button) => {
+    const active = Boolean(current) && button.dataset.chatBgPreset === current;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-checked', active ? 'true' : 'false');
+  });
+}
+
+// 缩略图文件缺失（生成失败/被删）时别留破图：把 img 摘掉，按钮降级成纯文字。
+document.addEventListener('error', (event) => {
+  const img = event.target;
+  if (!(img instanceof HTMLImageElement) || !img.closest('.chat-background-preset')) return;
+  img.remove();
+}, true);
+
+// ---- 背景图编辑器（弹层） ----
+// 弹层是可选增强：旧 index.html 没有这些节点时整块跳过。
+
+// 概览视图：整张图按 contain 铺满可用区，取景框按 crop 画在图上。
+// 为什么全部用 px：比例与位置必须是准的，不能靠 aspect-ratio + max-*（Chromium 为了满足
+// 上限会破坏比例 → 取景就不准了，上一轮实测踩过）。
+// 取景框永远在图片内（clampChatBackgroundCrop 保证），所以"整图 ∪ 框"就是图片本身——
+// 旧版那套并集求解整个不需要了，也不会再出现"框跑到图外把概览撑成奇怪比例"。
+export function renderChatBackgroundCropView() {
+  const stage = $('#chatBgStage');
+  const overview = $('#chatBgOverview');
+  const imageEl = $('#chatBgOverviewImage');
+  const frameEl = $('#chatBgCropFrame');
+  if (!stage || !overview || !imageEl || !frameEl) return;
+  const aspect = chatBackgroundImageAspect();
+  if (!(aspect > 0)) return;   // 图片比例还没探到：保持现状（失效提示另有出口）
+  const crop = chatBackgroundCrop(state.chatBackground || {});
+  const style = window.getComputedStyle(stage);
+  const availableWidth = Math.max(
+    40, stage.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+  );
+  const availableHeight = Math.max(
+    40, stage.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom),
+  );
+  const imageWidth = Math.min(availableWidth, availableHeight * aspect);
+  const imageHeight = imageWidth / aspect;
+  const px = (value) => `${value.toFixed(2)}px`;
+  overview.style.width = px(imageWidth);
+  overview.style.height = px(imageHeight);
+  imageEl.style.left = '0px';
+  imageEl.style.top = '0px';
+  imageEl.style.width = px(imageWidth);
+  imageEl.style.height = px(imageHeight);
+  frameEl.style.left = px(crop.x * imageWidth);
+  frameEl.style.top = px(crop.y * imageHeight);
+  frameEl.style.width = px(crop.w * imageWidth);
+  frameEl.style.height = px(crop.h * imageHeight);
+}
+
+// 打开编辑器时调用：概览尺寸 + 缩放滑杆的动态上下限 + 回填当前取景。
+export function populateChatBackgroundEditor() {
+  if (!$('#chatBackgroundBoard')) return;
+  const limits = chatBackgroundCropScaleLimits();
+  const slider = $('#chatBgZoom');
+  if (slider) {
+    slider.min = String(limits.min);
+    slider.max = String(limits.max);
+    slider.step = '0.01';
+  }
+  renderChatBackgroundCropView();
+  updateChatBackgroundEditorControls();
+  setChatBackgroundEditorError('');
+  setChatBackgroundEditorEnabled(true);
+}
+
+// 状态 → 界面的单向回填（拖框、拖手柄、滚轮、滑杆、预置、旋转都走它）。
+export function updateChatBackgroundEditorControls() {
+  const scale = chatBackgroundCropScale(chatBackgroundCrop(state.chatBackground || {}));
+  const limits = chatBackgroundCropScaleLimits();
+  const slider = $('#chatBgZoom');
+  if (slider) {
+    slider.min = String(limits.min);
+    slider.max = String(limits.max);
+    // 不要把用户正在拖的手柄抢走（值相同则不写）。
+    if (Math.abs(Number(slider.value) - scale) > 0.005) slider.value = String(scale);
+  }
+  const output = $('#chatBgZoomValue');
+  if (output) output.textContent = `${Math.round(scale * 100)}%`;
+  renderChatBackgroundCropView();
+}
+
+export function setChatBackgroundEditorEnabled(enabled) {
+  ['#chatBgZoom', '#chatBgFitCover', '#chatBgFitContain', '#chatBgReset', '#chatBgRotate', '#chatBgSave']
+    .forEach((selector) => {
+      const element = $(selector);
+      if (element) element.disabled = !enabled;
+    });
+}
+
+export function setChatBackgroundEditorError(message) {
+  const box = $('#chatBgEditorError');
+  if (!box) return;
+  box.textContent = String(message || '');
+  box.hidden = !message;
+}
+
+export function setChatBackgroundStatus(message, isError = false) {
+  const status = $('#chatBackgroundStatus');
+  if (!status) return;
+  status.textContent = String(message || '');
+  // `.settings-content .hint` 是 (0,2,0)，普通类压不住它；错误色用 id 级规则。
+  status.classList.toggle('is-error', Boolean(isError) && Boolean(message));
 }
 
 export function updateSkillSummary() {

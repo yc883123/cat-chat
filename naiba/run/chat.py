@@ -24,7 +24,7 @@ from naiba.core.exceptions import TaskCancelled
 from naiba.vision.runtime import VisionBudget
 from naiba.core.attachments import _image_intent, compose_user_content, union_run_media
 from naiba.core.conv_files import _conv_workspace_root, resolve_file_references
-from naiba.core.choices import _detect_choice_groups
+from naiba.core.choices import detect_choice_groups
 from naiba.core.exceptions import ActiveRunError
 from naiba.core.file_changes import file_changes_from_runs
 from naiba.core.history import build_model_history
@@ -799,7 +799,7 @@ class ConversationRunMixin:
                         })
                 response, plan = self.app.plans.process_response(plan_id, response)
                 plan_status = str((plan or {}).get("status") or "")
-            choice_groups = _detect_choice_groups(response)
+            choice_groups = detect_choice_groups(response)
             changed_files = file_changes_from_runs(runs)
             # 消息级媒体 = 各次工具调用携带的媒体记录汇总（采集已在产出点完成；
             # 这里只做去重 + 分桶上限，超限带自述信息，前端渲染提示块）。
@@ -854,9 +854,16 @@ class ConversationRunMixin:
                 )
                 followup = None
             if choice_groups:
+                # 事件带来源消息 id：前端以「会话 + 来源消息」为键保存临时选择，
+                # 缺了它 choice 与随后的 done 会被当成两个来源，面板在两事件之间被重建。
                 self.emit(
                     run_id,
-                    {"type": "choice", "choices": choice_groups[0]["choices"], "choice_groups": choice_groups},
+                    {
+                        "type": "choice",
+                        "message_id": str(saved.get("id") or ""),
+                        "choices": choice_groups[0]["choices"],
+                        "choice_groups": choice_groups,
+                    },
                 )
             # 首轮上下文在终态事件之前落盘：前端收到 done 即拉取 first_turn，
             # 抢先落盘消除"卡闪一下后消失"的竞态（finally 仍兜底幂等重写）。

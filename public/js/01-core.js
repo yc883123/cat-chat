@@ -20,6 +20,11 @@ export const state = {
   token: urlToken || localStorage.getItem('naibaChatToken') || localStorage.getItem('lanSkillToken') || '',
   bootstrap: null,
   appearance: { theme: 'system', skin: 'violet' },
+  // 聊天背景图（只铺对话区）：服务端 settings.chat_background 是唯一事实来源，
+  // 这里保存当前生效值（含编辑器调出的取景），供设置面板/编辑器回填与失效兜底使用。
+  chatBackground: { image: '', opacity: 0.35, crop: null, position_x: 50, position_y: 50, zoom: 1 },
+  // 内置背景图清单（/api/backgrounds，首次打开设置时拉一次并缓存）。
+  chatBackgroundPresets: [],
   conversations: [],
   conversationId: '',
   selectedSkills: storedSkillIds,
@@ -185,6 +190,14 @@ export function applyAppearance(appearance = {}) {
 export function initializeAppearance() {
   const initial = readStoredAppearance();
   applyAppearance(initial);
+  // 背景图先用本地缓存画出来（含上次的取景与图片比例，否则每次刷新都要等 bootstrap 才出现，
+  // 而且几何未知时会先画 cover 再跳一下）；首屏可能还没有 token（未登录），此时 URL 取不到图
+  // 也无妨——bootstrap 后 syncAppearanceFromBootstrap 会用服务端值重画一次。
+  const stored = readStoredChatBackground();
+  if (stored.aspect) setChatBackgroundImageAspect(stored.aspect);
+  applyChatBackground(stored);
+  refreshChatBackgroundGeometry();
+  watchChatBackgroundGeometry();
   const media = window.matchMedia?.('(prefers-color-scheme: dark)');
   media?.addEventListener?.('change', () => {
     if (state.appearance?.theme === 'system') applyAppearance(state.appearance);
@@ -192,14 +205,34 @@ export function initializeAppearance() {
   return initial;
 }
 
+// 对话区尺寸变化的跟踪：侧栏/文件面板开合不会触发 window.resize，所以额外挂一个
+// ResizeObserver。编辑器打开期间**不刷新**（见 refreshChatBackgroundGeometry 的说明）。
+let chatBackgroundGeometryWatched = false;
+
+function watchChatBackgroundGeometry() {
+  if (chatBackgroundGeometryWatched) return;
+  chatBackgroundGeometryWatched = true;
+  const editorOpen = () => Boolean(document.getElementById('chatBackgroundDialog')?.open);
+  const refresh = () => { if (!editorOpen()) refreshChatBackgroundGeometry(); };
+  window.addEventListener('resize', refresh);
+  const target = $('.chat-backdrop');
+  if (target && typeof ResizeObserver === 'function') {
+    new ResizeObserver(refresh).observe(target);
+  }
+}
+
 // 在 bootstrap 完成后调用，服务端配置优先；旧版本无 appearance 时保留本地偏好。
 export function syncAppearanceFromBootstrap(bootstrap) {
   const configured = bootstrap?.settings?.appearance || bootstrap?.appearance;
   const local = readStoredAppearance();
-  return applyAppearance({
+  const next = applyAppearance({
     theme: configured?.theme ?? local.theme,
     skin: configured?.skin ?? local.skin,
   });
+  // 背景图与外观同一时机同步（同一个 settings 载荷，不必再等第二处调用）。
+  // 内部自己做失效兜底，是 fire-and-forget，不阻塞首屏。
+  void syncChatBackgroundFromBootstrap(bootstrap);
+  return next;
 }
 
 export async function saveAppearance(patch = {}) {
@@ -214,6 +247,354 @@ export async function saveAppearance(patch = {}) {
     // 乐观更新后端失败时仍保留本地选择，调用方负责提示用户。
     throw error;
   }
+}
+
+// ---- 聊天背景图（只铺对话区） ----
+// 与外观同一套策略：服务端 settings.chat_background 是唯一事实来源（同实例多端共享），
+// localStorage 只用来"首屏先画出来"，随后由 bootstrap 的服务端值校正。
+const CHAT_BACKGROUND_KEY = 'naibaChatBackground';
+const CHAT_BACKGROUND_MIN_OPACITY = 0.05;
+const CHAT_BACKGROUND_DEFAULT_OPACITY = 0.35;
+// 能当背景的格式（与后端 config.CHAT_BACKGROUND_IMAGE_FORMATS 同口径）：必须在
+// WebView2/Chromium 里能解码，否则就是"选图成功、背景一片空白"的静默失败
+// （TIFF / HEIC 是实测踩过的坑）。这里只做选择前的前置过滤，**判定以后端为准**——
+// 后端按图片内容识别，改名骗不过去。
+export const CHAT_BACKGROUND_FORMATS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif']);
+// 取景 = 自由裁剪区域 crop（图片内的相对矩形，见下方 chatBackgroundCrop）。
+// position_* / zoom 是**旧模型的遗留输入**：旧模型把取景框比例锁死成对话区比例，只有
+// "缩放 + 位置"两个自由度，于是「填满」「完整显示」两个预置态必然有一个方向自由度恰好
+// 为 0（用户报障："取景框只能横向切割，不能竖向切割"）。crop 缺失时才用它们换算等价区域。
+const CHAT_BACKGROUND_DEFAULT_POSITION = 50;
+const CHAT_BACKGROUND_DEFAULT_ZOOM = 1;
+// 与后端 CHAT_BACKGROUND_MIN/MAX_ZOOM 同口径（后端是权威，这里只做前端收敛）。
+const CHAT_BACKGROUND_MIN_ZOOM = 0.05;
+const CHAT_BACKGROUND_MAX_ZOOM = 4;
+// 与后端 CHAT_BACKGROUND_MIN_CROP 同口径：取景区域的最小边长（图片比例）。
+export const CHAT_BACKGROUND_MIN_CROP = 0.02;
+
+// /api/file 的 URL 形状唯一定义点（03-media.js 的 fileUrl 复用它）。
+// 放在 01-core 而不是 03-media：01-core 是底层模块，反向 import 03-media 会形成循环依赖。
+export function localFileUrl(source) {
+  return `/api/file?token=${encodeURIComponent(state.token)}&path=${encodeURIComponent(String(source || ''))}`;
+}
+
+// 几何量缓存：取景要按「图片原始比例 q」与「对话区盒子比例 r」算百分比尺寸。
+// 两个值都不便宜（q 要探针、r 要量布局），所以只在打开/尺寸变化时算一次，拖拽时复用
+// ——applyChatBackground 每次拖拽都会调用，绝不能在里面 measure（会逐帧强制布局）。
+const chatBackgroundGeometry = { imageAspect: 0, boxAspect: 0 };
+
+function readStoredChatBackground() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(CHAT_BACKGROUND_KEY) || '{}');
+    return {
+      image: typeof raw.image === 'string' ? raw.image : '',
+      opacity: clampChatBackgroundOpacity(raw.opacity),
+      crop: normalizeChatBackgroundCrop(raw.crop),
+      position_x: clampChatBackgroundPosition(raw.position_x),
+      position_y: clampChatBackgroundPosition(raw.position_y),
+      zoom: clampChatBackgroundZoom(raw.zoom),
+      // 上次探到的图片比例：首屏要靠它算取景，否则要先渲染一帧 cover 再跳（闪跳）。
+      aspect: Number(raw.aspect) > 0 ? Number(raw.aspect) : 0,
+    };
+  } catch (_) {
+    return { image: '', opacity: CHAT_BACKGROUND_DEFAULT_OPACITY, aspect: 0 };
+  }
+}
+
+export function clampChatBackgroundOpacity(value) {
+  const opacity = Number(value);
+  if (!Number.isFinite(opacity)) return CHAT_BACKGROUND_DEFAULT_OPACITY;
+  return Math.min(1, Math.max(CHAT_BACKGROUND_MIN_OPACITY, opacity));
+}
+
+export function clampChatBackgroundPosition(value) {
+  const position = Number(value);
+  if (!Number.isFinite(position)) return CHAT_BACKGROUND_DEFAULT_POSITION;
+  return Math.min(100, Math.max(0, position));
+}
+
+export function clampChatBackgroundZoom(value) {
+  const zoom = Number(value);
+  if (!Number.isFinite(zoom)) return CHAT_BACKGROUND_DEFAULT_ZOOM;
+  return Math.min(CHAT_BACKGROUND_MAX_ZOOM, Math.max(CHAT_BACKGROUND_MIN_ZOOM, zoom));
+}
+
+// 图片原始比例 q（宽/高）：探针拿到后写入；0 = 未知（此时回落 cover）。
+export function setChatBackgroundImageAspect(aspect) {
+  const value = Number(aspect);
+  chatBackgroundGeometry.imageAspect = Number.isFinite(value) && value > 0 ? value : 0;
+  return chatBackgroundGeometry.imageAspect;
+}
+
+export function chatBackgroundImageAspect() {
+  return chatBackgroundGeometry.imageAspect;
+}
+
+// 对话区盒子比例 r：量一次缓存起来。窗口/侧栏尺寸变化时由 refreshChatBackgroundGeometry
+// 刷新；**编辑器打开期间不刷新**（白板比例与滑杆上下限按打开时量到的 r 定格，避免调图中
+// 窗口一动取景就跟着跳——关掉重开即恢复精确）。
+export function refreshChatBackgroundGeometry() {
+  const element = $('.chat-backdrop') || $('#messages');
+  const rect = element?.getBoundingClientRect?.();
+  const aspect = rect && rect.height > 0 ? rect.width / rect.height : 0;
+  const changed = Math.abs(aspect - chatBackgroundGeometry.boxAspect) > 0.001;
+  chatBackgroundGeometry.boxAspect = aspect;
+  if (changed) applyChatBackground({});
+  return aspect;
+}
+
+export function chatBackgroundBoxAspect() {
+  return chatBackgroundGeometry.boxAspect;
+}
+
+// 「填满」区域：图片内最大的、比例等于对话区比例（r）的居中矩形 = 旧模型 zoom=1 的观感。
+// 取景框可自由改形状后，"填满"从"唯一的框形状"降级成一键预置，语义没变。
+export function chatBackgroundFillCrop() {
+  const q = chatBackgroundGeometry.imageAspect;
+  const r = chatBackgroundGeometry.boxAspect;
+  if (!(q > 0) || !(r > 0)) return { x: 0, y: 0, w: 1, h: 1 };
+  const width = Math.min(1, r / q);
+  const height = Math.min(1, q / r);
+  return { x: (1 - width) / 2, y: (1 - height) / 2, w: width, h: height };
+}
+
+// 取景区域收敛：边长至少 CHAT_BACKGROUND_MIN_CROP，整体不许越出图片（越界按图片边界推回）。
+// 编辑器每次拖拽/缩放都过它 → "框跑到图片外"这种状态在数据层就不可能存在（也就不会出现
+// 用户拖了半天却什么都没发生：现在的框永远在图片里，两个方向都永远有可动空间）。
+export function clampChatBackgroundCrop(crop) {
+  const raw = crop && typeof crop === 'object' ? crop : {};
+  const width = Math.min(1, Math.max(CHAT_BACKGROUND_MIN_CROP, Number(raw.w) || 0));
+  const height = Math.min(1, Math.max(CHAT_BACKGROUND_MIN_CROP, Number(raw.h) || 0));
+  const x = Math.min(1 - width, Math.max(0, Number(raw.x) || 0));
+  const y = Math.min(1 - height, Math.max(0, Number(raw.y) || 0));
+  return { x, y, w: width, h: height };
+}
+
+// 本地归一化（与后端 normalize_chat_background_crop 同口径）：结构不可用 → null（= 自动）。
+function normalizeChatBackgroundCrop(value) {
+  if (!value || typeof value !== 'object') return null;
+  const numbers = {};
+  for (const key of ['x', 'y', 'w', 'h']) {
+    const number = Number(value[key]);
+    if (!Number.isFinite(number)) return null;
+    numbers[key] = number;
+  }
+  // 宽高非正 = "没有取景" → 回落自动（与后端同口径，别把它收敛成一条缝）。
+  if (!(numbers.w > 0) || !(numbers.h > 0)) return null;
+  return clampChatBackgroundCrop(numbers);
+}
+
+// 当前生效的取景区域：crop 优先；缺失时按旧模型（zoom + 位置）换算等价区域，再收敛进图片。
+// 换算对"填满 / 完整显示"这两个预置态是**逐像素等价**的（旧模型的框比例恒等于对话区比例，
+// 新模型算出来是同一个矩形），只有"缩到比对话区还小、四周全靠留白"的特例会被收敛成
+// "整张图等比铺"——后者的观感更好，且留白照旧由模糊底补上。
+export function chatBackgroundCrop(background = state.chatBackground || {}) {
+  const explicit = background?.crop;
+  if (explicit && Number(explicit.w) > 0 && Number(explicit.h) > 0) {
+    return clampChatBackgroundCrop(explicit);
+  }
+  const zoom = clampChatBackgroundZoom(background?.zoom);
+  if (Math.abs(zoom - 1) < 1e-6) return chatBackgroundFillCrop();
+  const q = chatBackgroundGeometry.imageAspect;
+  const r = chatBackgroundGeometry.boxAspect;
+  if (!(q > 0) || !(r > 0)) return { x: 0, y: 0, w: 1, h: 1 };
+  // 旧模型：可见区宽 = 1/zoom（图片单位）、高 = 宽 × q/r；左上角 = (1 - 宽) × 位置% / 100。
+  const width = 1 / zoom;
+  const height = width * q / r;
+  return clampChatBackgroundCrop({
+    x: (1 - width) * clampChatBackgroundPosition(background?.position_x) / 100,
+    y: (1 - height) * clampChatBackgroundPosition(background?.position_y) / 100,
+    w: width,
+    h: height,
+  });
+}
+
+// 「缩放」读数：相对「填满」的线性倍率（= sqrt(填满面积 / 取景面积)）。
+// 对比例等于对话区的取景，它与旧模型的 zoom 数值**完全一致**（迁移不改读数）；
+// 自由形状的取景则是一个同样单调的近似读数（滑杆/滚轮只做等比缩放，不会改形状）。
+export function chatBackgroundCropScale(crop = chatBackgroundCrop()) {
+  const fill = chatBackgroundFillCrop();
+  const area = Math.max(1e-9, Math.abs(crop.w * crop.h));
+  return Math.sqrt((fill.w * fill.h) / area);
+}
+
+// 缩放滑杆范围：下限 = 整张图（取景最大），上限 = 最小取景（封顶 CHAT_BACKGROUND_MAX_ZOOM）。
+export function chatBackgroundCropScaleLimits() {
+  const fill = chatBackgroundFillCrop();
+  const fillArea = Math.max(1e-9, fill.w * fill.h);
+  return {
+    min: Math.min(1, Math.sqrt(fillArea)),
+    max: Math.min(CHAT_BACKGROUND_MAX_ZOOM, Math.sqrt(fillArea) / CHAT_BACKGROUND_MIN_CROP),
+  };
+}
+
+// 把取景区域映射成 CSS：图片按"取景块等比铺满对话区（contain-fit，不拉伸）"来画，
+// 再解出让取景块居中的 background-position 百分比。留白（未被取景层覆盖的地方）由
+// .chat-bg-blur 的模糊底补上——所以这里只负责"铺得对不对"，不负责盖满。
+// 百分比相对元素自身盒子解析，因此真实对话区（大盒子）与白板/缩略图（小盒子、同比例）
+// 渲染出的取景完全一致：编辑器里调的就是关掉后看到的。
+// 未知 q/r 时返回 null → CSS 回落 `cover`/居中（无几何信息时的默认观感）。
+function chatBackgroundFit(crop) {
+  const q = chatBackgroundGeometry.imageAspect;
+  const r = chatBackgroundGeometry.boxAspect;
+  if (!(q > 0) || !(r > 0)) return null;
+  const regionAspect = q * crop.w / crop.h;
+  let sizeX;   // 图片的绘制宽度（相对对话区宽度的百分比）
+  let sizeY;   // 图片的绘制高度（相对对话区高度的百分比）
+  if (regionAspect >= r) {
+    // 取景块比对话区"更宽" → 按宽度顶满（高度自然不满，露出模糊底）。
+    sizeX = 100 / crop.w;
+    sizeY = sizeX * r / q;
+  } else {
+    sizeY = 100 / crop.h;
+    sizeX = sizeY * q / r;
+  }
+  const denominatorX = 1 - sizeX / 100;
+  const denominatorY = 1 - sizeY / 100;
+  const positionX = Math.abs(denominatorX) > 1e-6
+    ? 100 * (0.5 - (crop.x + crop.w / 2) * sizeX / 100) / denominatorX : 50;
+  const positionY = Math.abs(denominatorY) > 1e-6
+    ? 100 * (0.5 - (crop.y + crop.h / 2) * sizeY / 100) / denominatorY : 50;
+  return {
+    size: `${sizeX.toFixed(2)}% ${sizeY.toFixed(2)}%`,
+    position: `${positionX.toFixed(2)}% ${positionY.toFixed(2)}%`,
+    // 取景块形状正好等于对话区形状 → 铺满，不需要模糊底。
+    covered: Math.abs(regionAspect - r) < 0.002,
+  };
+}
+
+// 背景层 / 白板 / 缩略图的**唯一写入点**：写 :root 上的 CSS 变量，三处共用同一组变量，
+// 所以强度、位置、缩放不可能出现"某个视图没跟上"。
+export function applyChatBackground(background = {}) {
+  const previous = state.chatBackground || {};
+  const next = {
+    image: String(background.image ?? previous.image ?? ''),
+    opacity: clampChatBackgroundOpacity(background.opacity ?? previous.opacity),
+    // crop 的显式 null = 恢复"自动"（按对话区比例取最大区域），所以必须看键在不在，
+    // 用 ?? 会把 null 当"没给"吞掉，结果就是"清不掉取景"。
+    crop: 'crop' in background ? normalizeChatBackgroundCrop(background.crop) : (previous.crop ?? null),
+    // 旧字段只维护不写回：crop 缺失时它们是换算输入（旧客户端/旧配置的升级路径）。
+    position_x: clampChatBackgroundPosition(background.position_x ?? previous.position_x),
+    position_y: clampChatBackgroundPosition(background.position_y ?? previous.position_y),
+    zoom: clampChatBackgroundZoom(background.zoom ?? previous.zoom),
+  };
+  state.chatBackground = next;
+  const root = document.documentElement;
+  root.style.setProperty('--chat-bg-opacity', String(next.opacity));
+  const fit = next.image ? chatBackgroundFit(chatBackgroundCrop(next)) : null;
+  // 取景块形状 ≠ 对话区形状时铺不满，留白交给同图的模糊底（"完整显示"等状态本来就这样）。
+  root.dataset.chatBgCover = !next.image || !fit || fit.covered ? '1' : '0';
+  if (next.image) {
+    root.style.setProperty('--chat-bg-image', `url("${localFileUrl(next.image)}")`);
+    if (fit) {
+      root.style.setProperty('--chat-bg-size', fit.size);
+      root.style.setProperty('--chat-bg-position', fit.position);
+    } else {
+      // 几何未知：让 CSS 用默认的 cover/居中（无取景信息时的默认观感），别拿旧尺寸硬套新图。
+      root.style.removeProperty('--chat-bg-size');
+      root.style.removeProperty('--chat-bg-position');
+    }
+    if (chatBackgroundGeometry.boxAspect > 0) {
+      root.style.setProperty('--chat-bg-ratio', String(chatBackgroundGeometry.boxAspect));
+    }
+  } else {
+    root.style.removeProperty('--chat-bg-image');
+    root.style.removeProperty('--chat-bg-size');
+    root.style.removeProperty('--chat-bg-position');
+  }
+  const preview = $('#chatBackgroundPreview');
+  if (preview) preview.hidden = !next.image;
+  try {
+    // aspect 一起缓存：首屏预渲染要用它算取景，否则会"先 cover 再跳一下"。
+    localStorage.setItem(CHAT_BACKGROUND_KEY, JSON.stringify({
+      ...next,
+      aspect: chatBackgroundGeometry.imageAspect || undefined,
+    }));
+  } catch (_) { /* storage disabled */ }
+  return next;
+}
+
+// bootstrap 完成后调用：服务端值优先，并顺手处理"图片已不存在"的死链设置。
+export async function syncChatBackgroundFromBootstrap(bootstrap) {
+  const configured = bootstrap?.settings?.chat_background;
+  const local = readStoredChatBackground();
+  // 先用本地缓存（含上次探到的图片比例）画一帧：首屏不会因为几何未知而闪一下。
+  if (!chatBackgroundImageAspect() && local.aspect) setChatBackgroundImageAspect(local.aspect);
+  applyChatBackground({
+    image: configured?.image ?? local.image,
+    opacity: configured?.opacity ?? local.opacity,
+    // 服务端给了 chat_background 就以它的 crop 为准（含显式 null = 自动）；老服务端没有该
+    // 字段时用本地缓存，再靠下面的 position/zoom（旧模型字段）兜底换算。
+    crop: configured ? normalizeChatBackgroundCrop(configured.crop) : (local.crop ?? null),
+    position_x: configured?.position_x ?? local.position_x,
+    position_y: configured?.position_y ?? local.position_y,
+    zoom: configured?.zoom ?? local.zoom,
+  });
+  const configuredImage = String(configured?.image || '');
+  if (!configuredImage) return state.chatBackground;
+  refreshChatBackgroundGeometry();
+  // 图片可能已被缓存清理 / 换机器后 data_dir 迁移失效：探一次，坏链就地清空并提示，
+  // 不留一条"看着有设置、其实什么都没有"的死链。探针同时把图片原始比例 q 带回来，
+  // 取景（位置/缩放）要靠 q 才算得出来。
+  const probe = await probeChatBackgroundImage(localFileUrl(configuredImage));
+  if (!probe) {
+    await clearChatBackgroundSetting();
+    toast('背景图文件已失效，已清除背景设置');
+    return state.chatBackground;
+  }
+  const aspect = probe.naturalWidth / probe.naturalHeight;
+  if (Number.isFinite(aspect) && aspect > 0 && Math.abs(aspect - chatBackgroundImageAspect()) > 0.0001) {
+    setChatBackgroundImageAspect(aspect);
+    // q 到位后重画一次：首次（本地缓存没有 aspect 时）这一笔会把取景补正到精确值。
+    applyChatBackground({});
+  }
+  return state.chatBackground;
+}
+
+// 探针：成功返回已解码的 Image（naturalWidth/Height 可用于算比例），失败返回 null。
+function probeChatBackgroundImage(url) {
+  return new Promise((resolve) => {
+    const probe = new Image();
+    probe.onload = () => resolve(probe);
+    probe.onerror = () => resolve(null);
+    probe.src = url;
+  });
+}
+
+// 编辑器/设置面板打开前也可以主动探一次（换图后要立刻拿到新 q）。
+export async function probeChatBackgroundImageAspect(path) {
+  const probe = await probeChatBackgroundImage(localFileUrl(path));
+  if (!probe) return 0;
+  const aspect = probe.naturalWidth / probe.naturalHeight;
+  setChatBackgroundImageAspect(aspect);
+  return chatBackgroundImageAspect();
+}
+
+// 保存背景设置（唯一写入通道）。失败时抛出，由调用方决定怎么提示。
+export async function saveChatBackground(patch = {}) {
+  const next = applyChatBackground({ ...state.chatBackground, ...patch });
+  const result = await api('/api/settings', { method: 'POST', body: { chat_background: next } });
+  const saved = result?.settings?.chat_background || result?.chat_background;
+  if (saved) applyChatBackground(saved);
+  if (state.bootstrap?.settings) state.bootstrap.settings.chat_background = saved || next;
+  return state.chatBackground;
+}
+
+// 「清除背景」与"图片失效兜底"共用：先清设置（清完才不再算"在用"），再尽力回收旧文件。
+export async function clearChatBackgroundSetting({ reclaim = '' } = {}) {
+  const previous = String(state.chatBackground?.image || '');
+  applyChatBackground({ image: '' });
+  try {
+    await saveChatBackground({ image: '' });
+  } catch (_) {
+    // 服务端不可达时本地已清空，下次启动同步会再试一次；不把这里变成未捕获的拒绝。
+  }
+  const target = String(reclaim || previous || '');
+  if (target) {
+    // 回收失败不影响"已清除"（文件有引用或已被清理时服务端会拒绝）。
+    api('/api/uploads/delete', { method: 'POST', body: { path: target } }).catch(() => { /* 交给清理机制 */ });
+  }
+  return state.chatBackground;
 }
 
 export const $ = (selector) => document.querySelector(selector);

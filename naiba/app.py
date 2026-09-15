@@ -48,9 +48,11 @@ from naiba.skills.install import (
     _unique_dir, _zip_has_skill_md, clear_skill_recycle, delete_skill, list_skill_recycle,
     remove_skill_references, restore_skill_recycle_entry,
 )
+from naiba.storage.backgrounds import ensure_background_presets, is_backgrounds_path
 from naiba.storage.media import (
     _clean_uploads_cache, _process_uploaded_image, _uploads_total_bytes, auto_clean_uploads,
-    is_uploads_path, missing_cache_attachment, remove_uploaded_file, store_uploaded_file,
+    is_uploads_path, missing_cache_attachment, remove_uploaded_file, rotate_uploaded_image,
+    store_uploaded_file,
 )
 from naiba.storage.avatars import read_agent_avatar, store_agent_avatar
 from naiba.storage.media_collect import MediaCollector
@@ -1306,12 +1308,34 @@ class NaibaChatApp:
             auto_clean_uploads(
                 self._paths.data_dir,
                 limit=auto_clean_mb * 1024 * 1024,
-                referenced_checker=self.storage.upload_path_referenced,
+                referenced_checker=self._upload_path_in_use,
                 # 本次刚落盘的附件无条件保留：它此刻还没落库（引用保护对它无效），
                 # 只有保护窗口 + 这条显式保护能拦住"上传即被清理"。
                 protect_paths=[p for p in (result.get("path"), result.get("thumb_path")) if p],
             )
         return result, HTTPStatus.OK
+
+    def _upload_path_in_use(self, target: Path) -> bool:
+        """上传文件是否"在用"：消息/快照引用（storage 判定）之外，聊天背景图也算。
+
+        背景图路径只写在 config.json 里（不是消息附件），不补这条判定的话，缓存自动
+        清理会把它当无人引用的旧图删掉——用户什么都没做，背景图就"自己没了"
+        （前端兜底只会清空设置并提示）。手动清理仍按"不区分引用"的既有语义，
+        不改（那是用户显式点的按钮，UI 已明确告知）。
+        """
+        try:
+            if self.storage.upload_path_referenced(target):
+                return True
+        except (OSError, ValueError):
+            return True  # 判定不了时宁可保留（与清理侧同向）
+        background = self.config.data.get("chat_background") or {}
+        image = str(background.get("image") or "").strip()
+        if not image:
+            return False
+        try:
+            return Path(image).expanduser().resolve() == target
+        except (OSError, ValueError):
+            return False
 
     def api_clean_image_cache(self) -> tuple[dict[str, Any], int]:
         """手动清理缓存文件（设置页按钮）：与自动清理共用同一阈值口径
@@ -1337,13 +1361,42 @@ class NaibaChatApp:
         data_dir = self._paths.data_dir
         if not is_uploads_path(data_dir, raw_path):
             return {"error": "只允许删除宿主 uploads 缓存目录内的文件"}, HTTPStatus.FORBIDDEN
-        if self.storage.upload_path_referenced(Path(raw_path).expanduser().resolve()):
-            return {"error": "该文件已被消息引用，不可删除"}, HTTPStatus.CONFLICT
+        if self._upload_path_in_use(Path(raw_path).expanduser().resolve()):
+            return {"error": "该文件已被消息或聊天背景引用，不可删除"}, HTTPStatus.CONFLICT
         try:
             removed = remove_uploaded_file(data_dir, raw_path)
         except (OSError, ValueError) as exc:
             return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
         return {"ok": True, "removed": bool(removed)}, HTTPStatus.OK
+
+    def api_rotate_upload(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """把一张（背景）图顺时针旋转 90° 并另存为新文件；前端随后把它写进背景设置。
+
+        只接受 uploads / 内置 backgrounds 内的文件——这两个目录是"我们自己放图的地方"，
+        别的路径（工作区任意文件）不该被这个接口读出来再另存一份。
+        旋转结果走 ``store_uploaded_file``：分日目录 + 内容去重 + 缩略图，与普通上传同源。
+        """
+        raw = str(body.get("path") or "")
+        data_dir = self._paths.data_dir
+        try:
+            turns = int(body.get("turns") or 1)
+        except (TypeError, ValueError):
+            return {"error": "turns 必须是整数（1 = 顺时针 90°）"}, HTTPStatus.BAD_REQUEST
+        if not (is_uploads_path(data_dir, raw) or is_backgrounds_path(data_dir, raw)):
+            return {"error": "只允许旋转宿主数据目录（uploads / backgrounds）内的图片"}, HTTPStatus.FORBIDDEN
+        imaging = dict(self.config.data.get("imaging") or {}) if getattr(self, "config", None) else {}
+        try:
+            result = rotate_uploaded_image(Path(raw), data_dir, imaging, turns=turns)
+        except (OSError, ValueError) as exc:
+            return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
+        return {"ok": True, **result}, HTTPStatus.OK
+
+    def background_presets(self) -> dict[str, Any]:
+        """内置背景图清单（设置面板那一排缩略图用；首次访问时幂等生成）。
+
+        生成失败/目录不可写时返回空清单——前端那排就整体隐藏，不影响自定义上传与其它设置。
+        """
+        return {"presets": ensure_background_presets(self._paths.data_dir)}
 
     def api_check_uploads(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         """发送前附件存在性校验（前端在提交前调用，避免丢草稿才发现附件没了）。

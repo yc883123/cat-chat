@@ -304,6 +304,54 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .context-usage-popover strong { display: block; margin-bottom: 4px; }
 .context-usage-popover small { display: block; margin-top: 4px; color: var(--muted); }
 .chat-main { min-width: 0; min-height: 0; width: 100%; height: 100%; overflow: hidden; display: grid; grid-template-rows: 60px minmax(0, 1fr) min-content; position: relative; }
+/* 背景图的**渲染规则唯一来源**：真实对话区（.chat-backdrop）、编辑白板（.chat-bg-board）、
+   设置卡缩略图（.chat-background-preview 内的图层）三处都挂 .chat-bg-surface，只消费
+   :root 上的同一组变量 —— 写入点只有 applyChatBackground()，所以三个视图不可能漂移。
+   尺寸/位置用**百分比**：百分比相对元素自身盒子解析，因此真实对话区（大盒子）与白板/缩略图
+   （小盒子、同比例）渲染出的取景完全一致 —— 编辑器里调的就是关掉后看到的。
+   尺寸未知（图片比例还没探到）时回落 `cover`/居中，即无取景信息时的默认观感。
+   背景自带按元素盒子裁剪：超出部分不会撑出格子、也不产生滚动条，无需额外裁剪层。 */
+.chat-bg-surface {
+  background-image: var(--chat-bg-image, none);
+  background-size: var(--chat-bg-size, cover);
+  background-position: var(--chat-bg-position, 50% 50%);
+  background-repeat: no-repeat;
+  opacity: var(--chat-bg-opacity, 1);
+}
+
+/* 对话区背景图层：与 .messages 同占 grid 第 2 格 → 高度自动等于消息区，
+   不用写死顶栏/输入框高度（顶栏与输入区保持原样，背景不铺上去）。
+   为什么不做成 .messages 自己的 background-image：滚动容器的背景定位区是
+   整个滚动内容高度，长会话下会被拉伸变形——必须走独立图层。
+   这一层只是"裁剪窗口"：模糊底层 + 取景层都在里面，超出部分（缩放）被裁掉不进别的格子。 */
+.chat-backdrop {
+  grid-area: 2 / 1 / 3 / 2;
+  position: relative;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.chat-backdrop-layer { position: absolute; inset: 0; }
+
+/* 模糊填充层：取景没铺满对话区时（zoom < 1 / 完整显示），未覆盖的地方用**同一张图的模糊放大版**
+   补上，而不是露一条页面底色的纸带（电视与短视频的常规做法）。
+   只在需要时显示：applyChatBackground() 会写 :root 的 data-chat-bg-cover="0"。
+   注意它是"氛围底"而不是取景层——所以这里固定用 cover + 居中，不吃取景变量（这是有意为之）。 */
+.chat-bg-blur {
+  position: absolute;
+  inset: 0;
+  display: none;
+  background-image: var(--chat-bg-image, none);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  /* 与取景层同一个强度：否则模糊底比图本身还"实"，观感像两块不同的东西。 */
+  opacity: var(--chat-bg-opacity, 1);
+  /* 放大一点再模糊：否则模糊后边缘会露出没铺到的亮边。 */
+  transform: scale(1.12);
+  filter: blur(26px) saturate(1.05) brightness(.96);
+}
+[data-chat-bg-cover="0"] .chat-bg-blur { display: block; }
 /* ── 对话刻度轨：每个用户轮次一条横条，视口中心所在轮次加粗凸起（最多同时显示 30 条） ── */
 /* 绝对定位到「消息区」那一格（grid-row: 2）→ 高度自动等于消息区，不用 JS 算；
    贴会话区右缘、让开滚动条（right: 12px）。 */
@@ -368,7 +416,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .file-reopen-button.has-tabs #fileTabsCount { color: var(--accent); }
 
 /* 消息列在「扣掉刻度轨宽度」的区域里居中 → 整体左移半条轨道（约 13px），右边不显逼仄 */
-.messages { min-height: 0; overflow-y: scroll; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 34px max(22px, calc((100% - var(--chat-max) - var(--turn-rail-w)) / 2 + var(--turn-rail-w))) 28px max(22px, calc((100% - var(--chat-max) - var(--turn-rail-w)) / 2)); scroll-behavior: smooth; }
+.messages { grid-area: 2 / 1 / 3 / 2; position: relative; z-index: 1; min-height: 0; overflow-y: scroll; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 34px max(22px, calc((100% - var(--chat-max) - var(--turn-rail-w)) / 2 + var(--turn-rail-w))) 28px max(22px, calc((100% - var(--chat-max) - var(--turn-rail-w)) / 2)); scroll-behavior: smooth; }
 .empty-state { min-height: 100%; display: grid; place-content: center; justify-items: center; padding-bottom: 8vh; }
 .empty-state[hidden] { display: none; }
 .empty-mark, .auth-mark { width: 56px; height: 56px; display: grid; place-items: center; color: white; background: linear-gradient(135deg, var(--brand-500), var(--brand-700)); border-radius: var(--r-full); box-shadow: 0 6px 18px rgba(var(--brand-500-rgb), .3); }
@@ -383,7 +431,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .starter-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .starter-title { font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; }
 .starter-desc { font-size: 11px; color: var(--muted); line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; }
-.starter-grid .starter-add { border-style: dashed; border-color: var(--line-strong); background: transparent; }
+/* 虚线边框保留，但底色必须是实底：它是对话区内容，透明会让背景图透上来
+   （守门脚本 verify/css_content_bg.py 盯着这一条）。 */
+.starter-grid .starter-add { border-style: dashed; border-color: var(--line-strong); background: var(--surface); }
 .starter-grid .starter-add:hover { border-color: var(--accent); }
 .starter-grid .custom-starter { position: relative; display: flex; }
 .starter-grid .custom-starter > button { flex: 1; min-width: 0; }
@@ -1441,19 +1491,51 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .mobile-only { display: none; }
 .sidebar-backdrop { display: none; }
 
-/* 选择按钮样式 - 只在AI要求选择时出现 */
+/* 选择面板样式 - 只在AI要求选择时出现（单选/多选/多组，见 public/js/12-chat-input.js） */
 .choice-buttons { display: block; padding: 10px 0; animation: choiceSlideUp .25s ease-out; }
-.choice-header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; margin-bottom: 8px; min-height: 28px; }
+.choice-header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 8px; margin-bottom: 8px; min-height: 28px; }
+.choice-collapse { width: 24px; height: 24px; padding: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--muted); font-size: 11px; line-height: 1; cursor: pointer; }
+.choice-collapse:hover { border-color: var(--accent); color: var(--accent); }
 .choice-prompt { min-width: 0; font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; }
+.choice-mode-badge { flex: none; padding: 1px 7px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--muted); font-size: 11px; line-height: 1.6; white-space: nowrap; }
+.choice-mode-badge.is-multi { border-color: var(--accent); color: var(--accent); }
 .choice-progress { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-.choice-back { width: 28px; height: 28px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); cursor: pointer; }
-.choice-selection-summary { margin: -2px 0 8px; color: var(--muted); font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
+.choice-body { display: block; }
+.choice-selection-summary { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.35; }
+.choice-summary-label { display: block; }
+/* 多选逐项分行、长选项完整换行（不截断、不加省略号） */
+.choice-summary-list { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; }
+.choice-summary-item { color: var(--text); overflow-wrap: anywhere; white-space: pre-wrap; }
+.choice-summary-item::before { content: '· '; color: var(--muted); }
 .choice-options { display: flex; flex-wrap: wrap; gap: 8px; }
 .choice-btn { max-width: 100%; padding: 8px 16px; border: 1px solid var(--line-strong); border-radius: 18px; background: var(--surface); color: var(--text); font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; cursor: pointer; transition: all .15s; }
 .choice-btn:hover { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 .choice-btn:active { transform: scale(.97); }
-.choice-btn:disabled, .choice-back:disabled { opacity: .5; cursor: wait; }
+.choice-btn.is-selected { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.choice-btn:disabled, .choice-collapse:disabled, .choice-nav:disabled { opacity: .5; cursor: wait; }
+/* 多选勾选标记：未选空心方框，已选实心打勾（纯 CSS，不引图标资源） */
+.choice-check { display: inline-block; width: 13px; height: 13px; margin-right: 7px; border: 1px solid var(--line-strong); border-radius: 3px; vertical-align: -2px; position: relative; }
+.choice-btn.is-selected .choice-check { border-color: var(--accent); background: var(--accent); }
+.choice-btn.is-selected .choice-check::after { content: ''; position: absolute; left: 3.5px; top: .5px; width: 4px; height: 8px; border: solid var(--surface); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.choice-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.choice-hint { flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 12px; }
+.choice-nav { flex: none; padding: 6px 14px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: 13px; cursor: pointer; transition: all .15s; }
+.choice-nav:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.choice-nav-primary { border-color: var(--accent); background: var(--accent); color: var(--surface); }
+.choice-nav-primary:hover:not(:disabled) { background: var(--accent-soft); color: var(--accent); }
+.choice-buttons.is-collapsed .choice-body, .choice-buttons.is-collapsed .choice-actions { display: none; }
+.choice-buttons.is-collapsed .choice-header { margin-bottom: 0; }
 @keyframes choiceSlideUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+/* 显式 ```naiba-choices 块在回复正文里的可读展示：有效块不显示原始 JSON（见 public/js/17-choice-groups.js） */
+.choice-preview { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-2); }
+.choice-preview-bar { margin-bottom: 8px; color: var(--muted); font-size: 11px; letter-spacing: .06em; }
+.choice-preview-group + .choice-preview-group { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); }
+.choice-preview-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.choice-preview-index { flex: none; width: 18px; height: 18px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: 11px; line-height: 18px; text-align: center; }
+.choice-preview-prompt { flex: 1 1 auto; min-width: 0; font-size: 13px; overflow-wrap: anywhere; }
+.choice-preview-options { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.choice-preview-options li { padding: 5px 12px; border: 1px solid var(--line-strong); border-radius: 999px; font-size: 12.5px; overflow-wrap: anywhere; }
 
 @media (max-width: 1100px) and (min-width: 761px) {
   .topbar { gap: 8px; padding: 0 12px; }
@@ -1563,6 +1645,9 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   .choice-buttons { max-height: min(38dvh, 310px); overflow-y: auto; overscroll-behavior: contain; padding: 8px 2px; animation: none; }
   .choice-options { display: grid; grid-template-columns: 1fr; gap: 7px; }
   .choice-btn { width: 100%; min-height: 42px; text-align: left; padding: 9px 12px; border-radius: var(--radius); }
+  .choice-nav { min-height: 44px; padding: 8px 16px; }
+  .choice-collapse { width: 44px; height: 44px; }
+  .choice-header { min-height: 44px; }
   /* 桌面端是 170px + 1fr 两列；手机端必须显式改成单列，否则导航与内容继续横排。 */
   .settings-layout { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .settings-nav { display: flex; gap: 4px; overflow-x: auto; overscroll-behavior-x: contain; padding: 6px; border-right: 0; border-bottom: 1px solid var(--line); scrollbar-width: none; }
@@ -1742,6 +1827,99 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .appearance-skin-card[data-appearance-skin="rose"]::before { background: #d94d78; box-shadow: 12px 0 0 #ffe2ea, 24px 0 0 #fac4d2; }
 .appearance-skin-card[data-appearance-skin="forest"]::before { background: #29935f; box-shadow: 12px 0 0 #d8f1e5, 24px 0 0 #b4e2ca; }
 @media (max-width: 560px) { .appearance-skin-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* 「聊天背景」设置卡：同比例缩略图（点击进编辑器）+ 选图/调整/清除 + 强度滑杆。
+   缩略图与真实背景层共用 .chat-bg-surface（同一组变量、同样按盒子百分比解析），
+   且它的长宽比由 JS 写成 --chat-bg-ratio（= 当前对话区比例）→ 取景与关掉弹层后看到的
+   完全一致，不再是"只能看透明度"的第三条渲染路径。 */
+.chat-background-actions { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 12px; margin: 0 0 12px; }
+/* 尺寸要显式写：flex 行里的 `width:auto + aspect-ratio` 会解析成 0 宽（空内容 + flex: none），
+   所以宽度 = 116px × 对话区比例，高度交给 aspect-ratio（被 max-width 收窄时高度会跟着缩，
+   比例不破）。极端超宽图（比例 > 卡片宽/116px）会被 max-width 收窄，缩略图比例略失真——
+   真实背景层与白板仍然是精确的。 */
+.chat-background-preview { position: relative; flex: none; width: calc(116px * var(--chat-bg-ratio, 1.7778)); max-width: 100%; height: auto; aspect-ratio: var(--chat-bg-ratio, 1.7778); border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--surface-2); cursor: zoom-in; }
+.chat-background-preview[hidden] { display: none; }
+.chat-background-preview:hover { border-color: var(--accent); }
+.chat-background-preview:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.chat-background-preview-layer { position: absolute; inset: 0; }
+.chat-background-preview-label { position: absolute; left: 6px; bottom: 6px; padding: 2px 7px; border-radius: var(--r-xs); background: var(--surface); color: var(--muted); font-size: 11px; }
+.chat-background-buttons { display: flex; flex-wrap: wrap; gap: 8px; align-content: flex-start; }
+/* 内置背景：一排小缩略图，点一下即应用（走与自定义上传完全相同的保存通道）。
+   名字条用实底：设置弹层本身不透明，没必要在图上再叠半透明层。 */
+.chat-background-presets { display: grid; gap: 7px; margin: 0 0 12px; }
+.chat-background-presets[hidden] { display: none; }
+.chat-background-presets-label { color: var(--muted); font-size: 12px; }
+.chat-background-presets-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.chat-background-preset { position: relative; width: 96px; height: 60px; padding: 0; border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--surface-2); cursor: pointer; }
+.chat-background-preset img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.chat-background-preset span { position: absolute; left: 0; right: 0; bottom: 0; padding: 2px 6px; background: var(--surface); color: var(--text); font-size: 10.5px; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-background-preset:hover { border-color: var(--accent); }
+.chat-background-preset:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.chat-background-preset.is-active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.chat-background-preset:disabled { opacity: .55; cursor: not-allowed; }
+.chat-background-slider { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; margin: 0 0 6px; font-size: 13px; color: var(--text); }
+.chat-background-slider input[type="range"] { width: 100%; accent-color: var(--accent); }
+.chat-background-slider output { min-width: 46px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+#chatBackgroundStatus:empty { display: none; }
+/* 错误态必须压过 `.settings-content .hint`（0,2,0）：用 id 级选择器，别再叠类名。 */
+#chatBackgroundStatus.is-error { color: var(--danger); }
+
+/* ---- 背景图编辑器（概览 + 取景框 + 效果预览，取景与真实背景层同源） ---- */
+/* 弹层 = 工具栏 / 可滚动的躯干 / 常驻按钮行：内容再高也不会把「完成」挤出可视区。 */
+.chat-bg-dialog { width: min(880px, calc(100vw - 30px)); height: min(760px, calc(100dvh - 30px)); display: flex; flex-direction: column; overflow: hidden; }
+.chat-bg-body { display: grid; gap: 12px; padding: 14px 18px 12px; flex: 1; min-height: 0; overflow: auto; }
+.chat-bg-footer { margin: 0; padding: 10px 18px 16px; border-top: 1px solid var(--line); flex: none; }
+.chat-bg-stage { position: relative; display: grid; place-items: center; height: min(40dvh, 360px); min-height: 160px; padding: 8px; border-radius: var(--r-lg); background: var(--surface-2); overflow: hidden; }
+/* 概览：JS 把「整张图」与「取景框」的并集算成 px 写进 #chatBgOverview 的宽高，内部两块
+   的 left/top/宽高也都是 px —— 比例要准，不能靠 aspect-ratio + max-*（上一轮教训：
+   Chromium 为了满足上限会破坏比例，取景就不准了）。 */
+/* cursor 会被子元素继承：在概览上写 move，等于"框内 / 框外压暗区都能拖动"的手势提示
+   （八个手柄各自覆盖成缩放光标）。 */
+.chat-bg-overview { position: relative; cursor: move; }
+.chat-bg-overview-image { position: absolute; background-image: var(--chat-bg-image, none); background-size: 100% 100%; background-repeat: no-repeat; box-shadow: var(--shadow-1); }
+/* 取景框：锁定对话区比例；框外压暗用一发超大 box-shadow 实现——比四个遮罩 div 省事，
+   也不会被"框比图大"这类状态搞乱；溢出的阴影由 .chat-bg-stage 的 overflow 裁掉。 */
+.chat-bg-crop-frame { position: absolute; border: 2px solid #fff; border-radius: 2px; box-shadow: 0 0 0 2px rgba(20, 22, 40, .35), 0 0 0 9999px rgba(12, 14, 26, .55); cursor: move; touch-action: none; }
+.chat-bg-crop-frame:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chat-bg-crop-frame.is-dragging { cursor: grabbing; }
+/* 八个手柄：四个角（两向）+ 四条边（单向）。自由裁剪的入口——旧版只有一个角柄、且框比例
+   锁死成对话区比例，用户报障"取景框不能调整大小 / 只能横向切割、不能竖向切割"就是冲它来的。
+   命中区比视觉大（角 18px 方块、边条 30×12），触屏也好抓。 */
+.chat-bg-crop-handle { position: absolute; background: #fff; border: 2px solid var(--accent); border-radius: 3px; touch-action: none; }
+.chat-bg-crop-handle[data-chat-bg-handle="nw"] { left: -9px; top: -9px; width: 18px; height: 18px; cursor: nwse-resize; }
+.chat-bg-crop-handle[data-chat-bg-handle="ne"] { right: -9px; top: -9px; width: 18px; height: 18px; cursor: nesw-resize; }
+.chat-bg-crop-handle[data-chat-bg-handle="sw"] { left: -9px; bottom: -9px; width: 18px; height: 18px; cursor: nesw-resize; }
+.chat-bg-crop-handle[data-chat-bg-handle="se"] { right: -9px; bottom: -9px; width: 18px; height: 18px; cursor: nwse-resize; }
+.chat-bg-crop-handle[data-chat-bg-handle="n"],
+.chat-bg-crop-handle[data-chat-bg-handle="s"] { left: 50%; width: 30px; height: 12px; margin-left: -15px; }
+.chat-bg-crop-handle[data-chat-bg-handle="n"] { top: -7px; cursor: ns-resize; }
+.chat-bg-crop-handle[data-chat-bg-handle="s"] { bottom: -7px; cursor: ns-resize; }
+.chat-bg-crop-handle[data-chat-bg-handle="w"],
+.chat-bg-crop-handle[data-chat-bg-handle="e"] { top: 50%; width: 12px; height: 30px; margin-top: -15px; }
+.chat-bg-crop-handle[data-chat-bg-handle="w"] { left: -7px; cursor: ew-resize; }
+.chat-bg-crop-handle[data-chat-bg-handle="e"] { right: -7px; cursor: ew-resize; }
+/* 效果预览（= 关掉弹层后的对话区）：与真实背景层共用 .chat-bg-surface。 */
+.chat-bg-result { display: grid; gap: 6px; justify-items: start; }
+.chat-bg-result-label { color: var(--muted); font-size: 12px; }
+.chat-bg-board { position: relative; overflow: hidden; width: min(360px, 100%); aspect-ratio: var(--chat-bg-ratio, 1.7778); border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--bg); box-shadow: var(--shadow-1); }
+.chat-bg-board-layer { position: absolute; inset: 0; }
+/* 占位内容：照真实版式画（AI 卡靠左、用户气泡靠右），底色用真实令牌——
+   它的唯一用途就是"一眼看出内容会不会被背景压住"，所以不能调淡、不能画成灰块。 */
+.chat-bg-board-mock { position: absolute; inset: 0; z-index: 1; display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; pointer-events: none; }
+.chat-bg-mock-card { width: min(72%, 420px); display: grid; gap: 6px; padding: 9px 11px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); box-shadow: var(--shadow-1); }
+.chat-bg-mock-bubble { align-self: flex-end; width: min(46%, 300px); display: grid; gap: 6px; padding: 8px 10px; border: 1px solid var(--violet-line); border-radius: var(--r-md); background: var(--user-bubble); }
+.chat-bg-mock-line { height: 7px; border-radius: 4px; background: var(--line); }
+.chat-bg-mock-line.mid { width: 82%; }
+.chat-bg-mock-line.short { width: 60%; }
+.chat-bg-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.chat-bg-controls .chat-background-slider { flex: 1 1 240px; margin: 0; }
+.chat-bg-error { color: var(--danger); }
+.chat-bg-error[hidden] { display: none; }
+@media (max-width: 760px) {
+  .chat-bg-stage { height: min(38dvh, 320px); }
+  .chat-bg-controls { flex-direction: column; align-items: stretch; }
+  .chat-bg-board { width: min(300px, 100%); }
+}
 
 /* 展开区容器：单层网格，或"平铺工具 + 二级分组"两种形态 */
 .agent-tool-group-body { background: var(--surface); }

@@ -252,21 +252,30 @@ class ToolGroupCatalogTests(unittest.TestCase):
                     if creator in closed:
                         closed.update(deps)
                 self.assertEqual(closed, set(tools), f"{preset_id} 预设缺少依赖闭包")
+        # 只读边界以 side_effect 为准：纯读取两件（read_pdf / probe_video）在，
+        # 会写产物文件的三件（pdf_render_pages / pdf_zoom_region / extract_frames）不在。
         self.assertEqual(presets["readonly"],
-                         {"read_file", "list_directory", "search_files", "vision_analyze"})
+                         {"read_file", "list_directory", "search_files",
+                          "read_pdf", "probe_video", "vision_analyze"})
         self.assertEqual(presets["standard"], {
-            "read_file", "list_directory", "search_files", "write_file", "edit_file",
-            "pwsh", "run_skill_script", "vision_analyze",
+            "read_file", "list_directory", "search_files",
+            "read_pdf", "pdf_render_pages", "pdf_zoom_region",
+            "probe_video", "extract_frames",
+            "write_file", "edit_file", "pwsh", "run_skill_script", "vision_analyze",
         })
-        self.assertFalse(presets["standard"] & {"http_request", "web_search", "read_pdf",
-                                                "pdf_render_pages", "pdf_zoom_region"},
-                         "标准模式不含联网与 PDF 工具")
+        self.assertFalse(presets["standard"] & {"http_request", "web_search"},
+                         "标准模式仍不含联网工具")
+        self.assertTrue(presets["standard"] >= {"read_pdf", "pdf_render_pages", "pdf_zoom_region",
+                                                "probe_video", "extract_frames"},
+                        "标准模式已收 PDF 三件套 + 视频抽帧两件套")
+        self.assertFalse(presets["readonly"] & {"pdf_render_pages", "pdf_zoom_region",
+                                                "extract_frames"},
+                         "只读模式不得收会写产物的工具")
         self.assertEqual(presets["longsession"], presets["standard"] | {
             "find_conversations", "recall_history", "read_conversation", "reset_context",
         }, "长会话模式 = 标准模式 + 翻历史三件套 + 重置上下文")
-        self.assertFalse(presets["longsession"] & {"http_request", "web_search", "read_pdf",
-                                                   "pdf_render_pages", "pdf_zoom_region"},
-                         "长会话模式也不含联网与 PDF 工具")
+        self.assertFalse(presets["longsession"] & {"http_request", "web_search"},
+                         "长会话模式仍不含联网工具")
         self.assertEqual(presets["comfyui"], presets["standard"] | {
             "comfyui_prepare_workflow", "comfyui_batch",
             "job_output", "job_status", "job_wait",

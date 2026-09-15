@@ -804,7 +804,12 @@ export function renderMessages(messages) {
     const choices = choiceMessage?.metadata?.choices || [];
     const choiceGroups = choiceMessage?.metadata?.choice_groups || [];
     if ((Array.isArray(choiceGroups) && choiceGroups.length) || (Array.isArray(choices) && choices.length)) {
-      showChoiceButtons(choices, choiceGroups);
+      // 选择面板的临时选择以「会话 + 来源消息」为键存在内存里：历史重渲染只是重新挂载
+      // 面板，已答的题与草稿不会被清掉；换会话再切回来同样保留（整页刷新才从首题重来）。
+      showChoiceButtons(choices, choiceGroups, {
+        messageId: choiceMessage?.id,
+        conversationId: state.conversationId,
+      });
     }
     else hideChoiceButtons();
     updateContextUsage(list);

@@ -97,6 +97,15 @@
         </button>
       </header>
 
+      <!-- 对话区背景图层：与 .messages 占同一格（grid-row 2），只铺对话区；
+           内容一律实底（AI 卡 / 用户气泡 / starter 卡），所以不需要蒙层压暗。
+           两层结构：.chat-bg-blur（取景没铺满时补两侧的模糊底）+ .chat-bg-surface（真正的取景）。
+           .chat-bg-surface 是取景渲染规则的唯一样式来源（编辑器预览、设置卡缩略图同挂它）。 -->
+      <div class="chat-backdrop" id="chatBackdrop" aria-hidden="true">
+        <span class="chat-bg-blur"></span>
+        <span class="chat-bg-surface chat-backdrop-layer"></span>
+      </div>
+
       <section class="messages" id="messages" aria-live="polite">
         <div class="empty-state" id="emptyState">
           <div class="empty-mark">
@@ -390,6 +399,65 @@
     </form>
   </dialog>
 
+  <dialog id="chatBackgroundDialog" class="panel-dialog chat-bg-dialog">
+    <div class="dialog-toolbar">
+      <div><h2>调整背景图</h2><p>拖框选区域、拖八个手柄改形状：框里那块会被完整铺进对话区，形状与对话区不同则两侧留白（用图片模糊底补上）</p></div>
+      <button class="icon-button" data-close="chatBackgroundDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+    </div>
+    <div class="chat-bg-body">
+      <!-- 概览区：整张图 + 取景框（自由矩形）；框外压暗。
+           框永远在图片内（clampChatBackgroundCrop），所以不存在"框跑出图外"的状态。 -->
+      <div class="chat-bg-stage" id="chatBgStage">
+        <div class="chat-bg-overview" id="chatBgOverview">
+          <span class="chat-bg-overview-image" id="chatBgOverviewImage" aria-hidden="true"></span>
+          <div class="chat-bg-crop-frame" id="chatBgCropFrame" tabindex="0" role="application" aria-label="取景框：拖动移动，八个手柄改形状与大小，滚轮缩放，方向键微调">
+            <span class="chat-bg-crop-handle" data-chat-bg-handle="nw" aria-hidden="true"></span>
+            <span class="chat-bg-crop-handle" data-chat-bg-handle="n" aria-hidden="true"></span>
+            <span class="chat-bg-crop-handle" data-chat-bg-handle="ne" aria-hidden="true"></span>
+            <span class="chat-bg-crop-handle" data-chat-bg-handle="w" aria-hidden="true"></span>
+            <span class="chat-bg-crop-handle" data-chat-bg-handle="e" aria-hidden="true"></span>
+            <span class="chat-bg-crop-handle" data-chat-bg-handle="sw" aria-hidden="true"></span>
+            <span class="chat-bg-crop-handle" data-chat-bg-handle="s" aria-hidden="true"></span>
+            <span class="chat-bg-crop-handle" data-chat-bg-handle="se" aria-hidden="true"></span>
+          </div>
+        </div>
+      </div>
+      <div class="chat-bg-controls">
+        <button class="control-button" id="chatBgFitCover" type="button">填满</button>
+        <button class="control-button" id="chatBgFitContain" type="button">完整显示</button>
+        <button class="control-button" id="chatBgReset" type="button">复位</button>
+        <button class="control-button" id="chatBgRotate" type="button" title="把图片顺时针转 90°（存成新图，原图不动）">旋转 90°</button>
+        <label class="chat-background-slider" for="chatBgZoom">
+          <span>缩放</span>
+          <input type="range" id="chatBgZoom" min="0.05" max="4" step="0.01" value="1">
+          <output id="chatBgZoomValue" for="chatBgZoom">100%</output>
+        </label>
+        <span class="hint">100% = 填满（框形状与对话区一致）；等比缩放不改形状，改形状拖框的边/角。</span>
+      </div>
+      <!-- 效果预览：与真实对话区同一套取景渲染（.chat-bg-surface）+ 占位内容，用于判断可读性。
+           取景图层与占位内容**分开**：.chat-bg-surface 带图层透明度，占位块放进去会被一起调淡。 -->
+      <div class="chat-bg-result">
+        <span class="chat-bg-result-label">效果预览（= 关掉弹层后的对话区）</span>
+        <div class="chat-bg-board" id="chatBackgroundBoard">
+          <span class="chat-bg-blur" aria-hidden="true"></span>
+          <span class="chat-bg-surface chat-bg-board-layer" aria-hidden="true"></span>
+          <div class="chat-bg-board-mock" aria-hidden="true">
+            <div class="chat-bg-mock-card"><span class="chat-bg-mock-line mid"></span><span class="chat-bg-mock-line"></span><span class="chat-bg-mock-line short"></span></div>
+            <div class="chat-bg-mock-bubble"><span class="chat-bg-mock-line"></span><span class="chat-bg-mock-line short"></span></div>
+          </div>
+        </div>
+      </div>
+      <p class="hint" id="chatBgEditorHint">拖动取景框选择要显示的区域，拖右下角（或滚轮 / 滑杆）缩放；框聚焦后方向键可微调（Shift 按 10 倍步进）。「完整显示」会把整张图放进来，两侧用同一张图的模糊底补满。</p>
+      <p class="hint chat-bg-error" id="chatBgEditorError" role="alert" hidden></p>
+    </div>
+    <!-- 按钮行固定在躯干之外：躯干可滚动，但「完成/取消」必须始终看得见
+         （照 provider 弹层的做法；实测踩过：内容超高时按钮被裁在可视区外）。 -->
+    <div class="form-actions chat-bg-footer">
+      <button class="control-button" data-close="chatBackgroundDialog" type="button">取消</button>
+      <button class="primary-button" id="chatBgSave" type="button">完成</button>
+    </div>
+  </dialog>
+
   <dialog id="contextWarningDialog" class="context-warning-dialog">
     <form method="dialog">
       <div class="dialog-toolbar">
@@ -460,6 +528,34 @@
             </div>
             <div class="form-actions"><button class="control-button" id="resetAppearance" type="button">恢复默认</button><button class="primary-button" id="saveAppearance" type="button">保存外观</button></div>
             <p class="hint" id="appearanceStatus" role="status"></p>
+          </div>
+          <div class="settings-card appearance-card" id="chatBackgroundCard">
+            <h4>聊天背景</h4>
+            <p class="hint">只铺在对话区，顶栏与输入区保持原样；消息气泡、AI 回复与卡片都是实底，不会被背景图透上来。支持 PNG / JPG / WebP / GIF / BMP / AVIF。</p>
+            <div class="chat-background-actions">
+              <div class="chat-background-preview" id="chatBackgroundPreview" role="button" tabindex="0" title="点击调整取景" hidden>
+                <span class="chat-bg-blur" aria-hidden="true"></span>
+                <span class="chat-bg-surface chat-background-preview-layer" aria-hidden="true"></span>
+                <span class="chat-background-preview-label">点击调整</span>
+              </div>
+              <div class="chat-background-buttons">
+                <button class="control-button" id="pickChatBackground" type="button">选择图片</button>
+                <button class="control-button" id="editChatBackground" type="button">调整背景图</button>
+                <button class="control-button" id="clearChatBackground" type="button">清除背景</button>
+                <input type="file" id="chatBackgroundFile" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/avif" hidden>
+              </div>
+            </div>
+            <div class="chat-background-presets" id="chatBackgroundPresets" hidden>
+              <span class="chat-background-presets-label">内置背景（点一下即应用）</span>
+              <div class="chat-background-presets-row" id="chatBackgroundPresetsRow" role="radiogroup" aria-label="内置背景图"></div>
+            </div>
+            <label class="chat-background-slider" for="chatBackgroundOpacity">
+              <span>背景强度</span>
+              <input type="range" id="chatBackgroundOpacity" min="0.05" max="1" step="0.05" value="0.35">
+              <output id="chatBackgroundOpacityValue" for="chatBackgroundOpacity">35%</output>
+            </label>
+            <p class="hint">数值越小背景越淡（最淡 5%）；100% 时背景图完全显示。「调整背景图」里可以拖动/缩放决定露出图片的哪一块。</p>
+            <p class="hint" id="chatBackgroundStatus" role="status"></p>
           </div>
         </section>
         <section data-settings-panel="models" hidden>

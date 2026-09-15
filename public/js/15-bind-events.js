@@ -2,19 +2,559 @@
 // 15-bind-events.js —— 拆分自 public/app.js 第 6658-7653 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, api, applyAppearance, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, hideTextContextMenu, restoreTopbarCompact, runTextContextAction, saveAppearance, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer } from "./01-core.js";
+import { $, $$, api, applyAppearance, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, hideTextContextMenu, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer } from "./01-core.js";
 import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarning, ensureImageContextMenu, handleImageLightboxKey, hideImageContextMenu, initImageLightboxInteractions, isPywebview, openImageLightbox, positionContextUsagePopover, resetContextWarningResume, runImageContextAction, showImageContextMenu, stepImageLightbox, toggleContextUsagePopover, updateSendButtonState } from "./03-media.js";
 import { branchMessage, cancelActiveEdit, cancelSessionStart, confirmActiveEdit, fillContextResetSeed, initTurnRail, isNearBottom, regenerateMessage, setStickToBottom, startEditMessage, startNewSession } from "./04-messages.js";
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
 import { switchPermissionMode } from "./06-tasks-plans.js";
 import { checkUpdate, closeComposerModelPicker, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
 import { cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeConversationMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel } from "./08-conversations.js";
-import { addProvider, addSearchProfile, applyProviderModelCapabilities, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadWorkspaceTree, openAgentCard, openProviderCard, openVisionProviderForm, persistSearchProfiles, pickAgentAvatar, pickWorkspace, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, saveMcpServer, saveProvider, saveRuntimeSettings, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, showAgentForm, switchAgentTab, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, updateAgentSkillTabCount, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint } from "./09-settings.js";
+import { addProvider, addSearchProfile, applyProviderModelCapabilities, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadWorkspaceTree, openAgentCard, openProviderCard, openVisionProviderForm, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, saveMcpServer, saveProvider, saveRuntimeSettings, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, showAgentForm, switchAgentTab, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint } from "./09-settings.js";
 import { readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
 import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handlePasteImage, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState } from "./12-chat-input.js";
 import { commitSkillSelection, hideSkillPopup, insertSkillRefAtCursor, moveSkillPopupSelection, popupState, positionSkillPopup, renderInputMirror, resizeTextarea, setSkillPopupSelection, skillList, updateSkillPopup } from "./13-skill-refs.js";
 import { activateFileTab, activeFileTab, applyFilePanelOpenClass, cancelFileEdit, closeFilePanel, closeSidebar, filePanelState, filePanelUsable, openFilePanel, openSidebar, removeFileTab, reopenFilePanel, restoreLeftSidebarCollapse, saveFileTab, setLeftSidebarCollapsed, sidebarDesktop, startFileEdit, updateFileTabsButton } from "./14-file-panel.js";
 import { handleFilePopupClick, handleFilePopupKey, positionFilePopup, updateFilePopup } from "./16-file-refs.js";
+// ---- 聊天背景图（外观页） ----
+// 上传走同一个 /api/uploads（落盘 data/uploads/<日期>/，返回绝对路径），但**不进入
+// state.pendingFiles**——那是"随消息发送的附件"，背景图不该出现在输入框上方。
+function uploadChatBackgroundFile(file) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/uploads');
+    if (state.token) xhr.setRequestHeader('Authorization', `Bearer ${state.token}`);
+    xhr.onload = () => {
+      let payload = {};
+      try { payload = JSON.parse(xhr.responseText || '{}'); } catch (_) { /* 非 JSON 错误体 */ }
+      if (xhr.status >= 200 && xhr.status < 300 && payload.path) resolve(payload);
+      else reject(new Error(payload.error || `HTTP ${xhr.status}`));
+    };
+    xhr.onerror = () => reject(new Error('网络错误'));
+    const form = new FormData();
+    form.append('file', file, file.name);
+    xhr.send(form);
+  });
+}
+
+function resetChatBackgroundFileInput() {
+  const input = $('#chatBackgroundFile');
+  if (input) input.value = '';
+}
+
+// 选图 → 上传 → 保存设置。前置只做轻量过滤（扩展名），**格式判定以后端为准**：
+// 后端按图片内容识别，TIFF/HEIC 改名成 .png 也照样被拦下。
+async function handleChatBackgroundFile(file) {
+  if (!file) return;
+  const name = String(file.name || '');
+  const ext = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+  if (!CHAT_BACKGROUND_FORMATS.has(ext)) {
+    setChatBackgroundStatus('背景图仅支持 PNG / JPG / WebP / GIF / BMP / AVIF', true);
+    resetChatBackgroundFileInput();
+    return;
+  }
+  // 整份快照（不只是 image）：失败回滚要连取景一起还回去——换图时取景被复位成居中/填满，
+  // 只回滚图片会留下"图回去了、位置却变了"的半截状态。
+  const snapshot = { ...(state.chatBackground || {}) };
+  const previous = String(snapshot.image || '');
+  setChatBackgroundStatus(`正在上传「${name}」…`);
+  let uploaded;
+  try {
+    uploaded = await uploadChatBackgroundFile(file);
+  } catch (error) {
+    setChatBackgroundStatus(`上传失败：${error.message}`, true);
+    resetChatBackgroundFileInput();
+    return;
+  }
+  try {
+    // 先探新图比例：q 到手后保存那一帧就是正确取景（否则会先按上一张图的几何画一下）。
+    await probeChatBackgroundImageAspect(uploaded.path);
+    // 换图 = 取景复位（crop: null = 自动按对话区比例取最大区域居中）：新图的构图与上一张
+    // 无关，沿用旧取景只会莫名其妙。旧字段一起归零，免得 crop 缺失时又按旧值算出偏移。
+    await saveChatBackground({ image: uploaded.path, crop: null, position_x: 50, position_y: 50, zoom: 1 });
+  } catch (error) {
+    // saveChatBackground 是"乐观应用 + 落库"：服务端拒绝时必须把图层回滚到上一张，
+    // 否则界面留着"设置失败、背景却已变空白"的假象（被拒的图浏览器多半也解不出来）。
+    applyChatBackground(snapshot);
+    updateChatBackgroundControls();
+    setChatBackgroundStatus(`保存失败：${error.message}`, true);
+    // 存不进设置的上传文件立即回收，别在缓存目录里留垃圾；但与当前背景同路径时不能删。
+    if (uploaded.path !== previous) {
+      api('/api/uploads/delete', { method: 'POST', body: { path: uploaded.path } }).catch(() => { /* 交给清理机制 */ });
+    }
+    resetChatBackgroundFileInput();
+    return;
+  }
+  // 换图成功后再回收上一张：新图已写进设置，旧图才不再算"在用"（否则会被判为引用中拒绝删除）。
+  // 上一张是内置背景时跳过（它在 data/backgrounds，删不掉也不该删）。
+  if (previous && previous !== uploaded.path && !isBuiltInBackground(previous)) {
+    reclaimBackgroundFile(previous);
+  }
+  updateChatBackgroundControls();
+  setChatBackgroundStatus('背景图已更新');
+  resetChatBackgroundFileInput();
+}
+
+// 点内置背景：与"选图"走**同一条**保存通道（先探比例 → 取景复位 → 落库），只是来源是内置目录。
+// 内置图在 data/backgrounds 下、不在 uploads 里，所以不参与缓存回收（清除背景时的回收请求
+// 会被服务端按"非 uploads 路径"拒绝，属预期，不影响清除本身）。
+async function applyChatBackgroundPreset(path) {
+  const target = String(path || '');
+  if (!target || target === String(state.chatBackground?.image || '')) return;
+  const row = $('#chatBackgroundPresetsRow');
+  const buttons = row ? [...row.querySelectorAll('button')] : [];
+  buttons.forEach((button) => { button.disabled = true; });
+  setChatBackgroundStatus('正在应用内置背景…');
+  const snapshot = { ...(state.chatBackground || {}) };
+  try {
+    await probeChatBackgroundImageAspect(target);
+    await saveChatBackground({ image: target, crop: null, position_x: 50, position_y: 50, zoom: 1 });
+    setChatBackgroundStatus('已应用内置背景，可用「调整背景图」继续微调');
+  } catch (error) {
+    // 乐观应用失败要回滚（与选图同一条铁律），否则界面上留着"应用失败但背景已变"的假象。
+    applyChatBackground(snapshot);
+    setChatBackgroundStatus(`应用失败：${error.message}`, true);
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+    updateChatBackgroundControls();
+  }
+}
+
+function bindChatBackgroundControls() {
+  const pick = $('#pickChatBackground');
+  const file = $('#chatBackgroundFile');
+  const clear = $('#clearChatBackground');
+  const slider = $('#chatBackgroundOpacity');
+  if (!pick || !file) return;
+  pick.addEventListener('click', () => file.click());
+  file.addEventListener('change', () => { void handleChatBackgroundFile(file.files?.[0]); });
+  // 内置背景用事件委托：那一排是 renderChatBackgroundPresets() 整排重绘的。
+  $('#chatBackgroundPresetsRow')?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-chat-bg-preset]');
+    if (button) void applyChatBackgroundPreset(button.dataset.chatBgPreset);
+  });
+  clear?.addEventListener('click', async () => {
+    if (!state.chatBackground?.image) return;
+    clear.disabled = true;
+    setChatBackgroundStatus('正在清除…');
+    await clearChatBackgroundSetting();
+    updateChatBackgroundControls();
+    setChatBackgroundStatus('背景已清除');
+  });
+  if (!slider) return;
+  // 拖动时本地实时预览（不落库），松手（change）才保存——滑杆不该每动一格发一次请求。
+  slider.addEventListener('input', () => {
+    applyChatBackground({ opacity: clampChatBackgroundOpacity(slider.value) });
+    updateChatBackgroundControls();
+  });
+  slider.addEventListener('change', async () => {
+    try {
+      await saveChatBackground({ opacity: clampChatBackgroundOpacity(slider.value) });
+      updateChatBackgroundControls();
+      setChatBackgroundStatus('背景强度已保存');
+    } catch (error) {
+      setChatBackgroundStatus(`保存失败：${error.message}`, true);
+    }
+  });
+}
+
+// ---- 背景图编辑器（概览 + 取景框；交互数学与 CSS 那套百分比同源） ----
+// 交互期间**只改本地显示**（applyChatBackground 写 CSS 变量），不发任何请求；
+// 点「完成」才落库。原因：落库与"取消回滚"不能并存——中途落一次库，用户按取消
+// 就只回滚了本地，下次刷新又变回中途那个值（前后端不一致）。
+// 唯一例外是「旋转 90°」：它要在服务端把图真的转成新文件，属于"换图"而不是"取景"，
+// 所以由它自己负责回滚与派生文件回收（见 rotateChatBackgroundImage）。
+// 关闭路径（Esc / × / 取消 / 完成）全部收敛到 closeChatBackgroundEditor()：非 commit
+// 一律回滚到打开时的快照（乐观应用铁律，见维护说明 §九.69）。
+let chatBgEditorSnapshot = null;
+const chatBgEditorDerived = new Set();   // 本次编辑中旋转出来的派生图（取消时要回收）
+let chatBgDrag = null;                   // { pointerId, x, y }
+let chatBgResize = null;                 // { pointerId, x, y }
+let chatBgPinch = null;                  // { distance, wf }
+const chatBgPointers = new Map();
+
+// 派生图回收：服务端在"文件有引用/不在 uploads"时会拒，属预期，不影响其它流程。
+function reclaimBackgroundFile(path) {
+  const target = String(path || '');
+  if (!target) return;
+  api('/api/uploads/delete', { method: 'POST', body: { path: target } }).catch(() => { /* 交给清理机制 */ });
+}
+
+// 是不是内置背景图：它们在 data/backgrounds（不在 uploads）里，既不该删、也删不掉
+// （回收请求会被服务端 403 拒掉，只在控制台留一条没意义的 4xx）。所以先按清单排除。
+function isBuiltInBackground(path) {
+  const target = String(path || '');
+  if (!target) return false;
+  return (state.chatBackgroundPresets || []).some((item) => String(item.path || '') === target);
+}
+
+// 概览里"整张图"的显示尺寸（px）：拖动位移要换算成图片比例位移，就靠它。
+function chatBgOverviewMetrics() {
+  const rect = $('#chatBgOverviewImage')?.getBoundingClientRect?.();
+  if (!rect || !rect.width || !rect.height) return null;
+  return { width: rect.width, height: rect.height };
+}
+
+// 拖取景框 = 平移取景区域：Δpx → Δ图片比例 → 写回 crop。
+// 两个方向都自由，唯一的约束是"框不许出图"（clampChatBackgroundCrop）——旧模型那种
+// "某个方向自由度恰好为 0、拖了没反应"的状态在数据层已经不可能出现。
+function moveChatBackgroundFrameBy(dxPx, dyPx) {
+  const metrics = chatBgOverviewMetrics();
+  if (!metrics) return;
+  const crop = chatBackgroundCrop(state.chatBackground || {});
+  applyChatBackground({
+    crop: clampChatBackgroundCrop({
+      ...crop,
+      x: crop.x + dxPx / metrics.width,
+      y: crop.y + dyPx / metrics.height,
+    }),
+  });
+  updateChatBackgroundEditorControls();
+}
+
+// 拖手柄改大小：handle = n / s / e / w 的任意组合（角 = 两个方向一起改）。
+// **这才是"自由裁剪"**：横向能切、竖向也能切，框形状不受对话区比例约束（旧模型锁死比例，
+// 于是"填满/完整显示"必然有一个方向切不动）。手柄拖到图片边界或最小边长就停住。
+function resizeChatBackgroundFrameBy(handle, dxPx, dyPx) {
+  const metrics = chatBgOverviewMetrics();
+  if (!metrics) return;
+  const crop = chatBackgroundCrop(state.chatBackground || {});
+  const dx = dxPx / metrics.width;
+  const dy = dyPx / metrics.height;
+  let { x, y, w, h } = crop;
+  const right = x + w;
+  const bottom = y + h;
+  if (handle.includes('w')) {
+    const nextX = Math.min(right - CHAT_BACKGROUND_MIN_CROP, Math.max(0, x + dx));
+    w = right - nextX;
+    x = nextX;
+  }
+  if (handle.includes('e')) {
+    w = Math.min(1 - x, Math.max(CHAT_BACKGROUND_MIN_CROP, w + dx));
+  }
+  if (handle.includes('n')) {
+    const nextY = Math.min(bottom - CHAT_BACKGROUND_MIN_CROP, Math.max(0, y + dy));
+    h = bottom - nextY;
+    y = nextY;
+  }
+  if (handle.includes('s')) {
+    h = Math.min(1 - y, Math.max(CHAT_BACKGROUND_MIN_CROP, h + dy));
+  }
+  applyChatBackground({ crop: { x, y, w, h } });
+  updateChatBackgroundEditorControls();
+}
+
+// 等比缩放取景框（滚轮 / 滑杆 / 双指捏合）：绕框心缩放，**不改形状**——改形状靠拖手柄。
+// 上下限由"最小边长 + 不许出图"同时给出，到了边界就停住（不做隐式位移，免得手感发飘）。
+function scaleChatBackgroundFrameTo(targetScale) {
+  const current = chatBackgroundCrop(state.chatBackground || {});
+  const limits = chatBackgroundCropScaleLimits();
+  const from = chatBackgroundCropScale(current);
+  if (!(from > 0)) return;
+  const target = Math.min(limits.max, Math.max(limits.min, Number(targetScale) || from));
+  const factor = from / target;
+  const width = current.w * factor;
+  const height = current.h * factor;
+  const centerX = current.x + current.w / 2;
+  const centerY = current.y + current.h / 2;
+  applyChatBackground({
+    crop: clampChatBackgroundCrop({
+      x: centerX - width / 2,
+      y: centerY - height / 2,
+      w: width,
+      h: height,
+    }),
+  });
+  updateChatBackgroundEditorControls();
+}
+
+// 「填满 / 完整显示 / 复位」：一键换取景区域（复位 = 回到打开编辑器时的取景，不是出厂值）。
+function applyChatBackgroundCropPreset(crop) {
+  applyChatBackground({ crop: clampChatBackgroundCrop(crop) });
+  updateChatBackgroundEditorControls();
+}
+
+// 「旋转 90°」：在服务端把（背景）图顺时针转 90° 另存为新文件，再把它设为背景。
+// 属于"换图"而不是"取景"：立刻落库（与选图/预设同一通道），失败整份回滚；
+// 取消编辑器时把它们回收掉——原图全程不动。
+async function rotateChatBackgroundImage() {
+  const current = String(state.chatBackground?.image || '');
+  if (!current) return;
+  const button = $('#chatBgRotate');
+  if (button) button.disabled = true;
+  const before = { ...(state.chatBackground || {}) };
+  setChatBackgroundEditorError('');
+  setChatBackgroundStatus('正在旋转…');
+  try {
+    const result = await api('/api/uploads/rotate', { method: 'POST', body: { path: current, turns: 1 } });
+    if (!result?.path) throw new Error('旋转接口没有返回新文件');
+    // 取景跟着图一起转：顺时针 90° 把 (x, y, w, h) 映射成 (1-y-h, x, h, w)。
+    // 必须**在探新比例之前**读出来——旧模型（crop 缺失）的换算要用旧几何。
+    const cropBefore = chatBackgroundCrop(state.chatBackground || {});
+    chatBgEditorDerived.add(String(result.path));
+    await probeChatBackgroundImageAspect(result.path);
+    await saveChatBackground({
+      image: result.path,
+      crop: clampChatBackgroundCrop({
+        x: 1 - cropBefore.y - cropBefore.h,
+        y: cropBefore.x,
+        w: cropBefore.h,
+        h: cropBefore.w,
+      }),
+      position_x: 50,
+      position_y: 50,
+      zoom: 1,
+    });
+    // 图片比例变了 → 概览与取景框要按新比例重画（滑杆上下限也跟着变）。
+    populateChatBackgroundEditor();
+    setChatBackgroundStatus('已顺时针旋转 90°（取景跟着转过去了，可继续调）');
+  } catch (error) {
+    applyChatBackground(before);
+    updateChatBackgroundEditorControls();
+    setChatBackgroundEditorError(`旋转失败：${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function openChatBackgroundEditor() {
+  const dialog = $('#chatBackgroundDialog');
+  const frame = $('#chatBgCropFrame');
+  if (!dialog || !frame) return;
+  const image = String(state.chatBackground?.image || '');
+  if (!image) {
+    setChatBackgroundStatus('先选择一张背景图，再调整取景', true);
+    return;
+  }
+  // 打开前刷新几何量：编辑器打开期间不再跟踪窗口变化（对话区比例与滑杆上下限定格，
+  // 免得调图中窗口一动取景就跳；关掉重开即精确）。
+  refreshChatBackgroundGeometry();
+  const aspect = await probeChatBackgroundImageAspect(image);
+  chatBgEditorDerived.clear();
+  chatBgEditorSnapshot = { ...(state.chatBackground || {}) };
+  if (!dialog.open) dialog.showModal();
+  // 躯干是可滚动的：重开时必须回到顶部，否则停在上次滚到的位置（实测：概览被滚出可视区，
+  // 拖框 / 拖动都抓不到它）。
+  const body = $('#chatBackgroundDialog .chat-bg-body');
+  if (body) body.scrollTop = 0;
+  populateChatBackgroundEditor();
+  if (!aspect) {
+    // 图片文件没了（缓存清理 / 换机器）：弹层里说清楚并锁住控件，不显示一块空白概览。
+    setChatBackgroundEditorEnabled(false);
+    setChatBackgroundEditorError('背景图文件已失效，请重新选择图片');
+  }
+  frame.focus({ preventScroll: true });
+}
+
+// 非 commit 的关闭：回滚到打开时的取景，并回收本次编辑中旋转出来的派生图。
+// 注意"回滚"必须**同时落库**：旋转是立刻落库的换图，只回滚本地的话刷新又变回旋转后的图
+// （实测被校验脚本抓到：取消后服务端仍是 _rot90 那张）。回收要等落库之后再做，
+// 否则那一刻文件仍被设置引用，服务端会以 409 拒绝（还会在控制台留一条 4xx）。
+async function revertChatBackgroundEditor() {
+  const snapshot = chatBgEditorSnapshot;
+  chatBgEditorSnapshot = null;
+  const derived = [...chatBgEditorDerived];
+  chatBgEditorDerived.clear();
+  if (!snapshot) return;
+  const imageChanged = derived.length > 0
+    || String(snapshot.image || '') !== String(state.chatBackground?.image || '');
+  applyChatBackground(snapshot);
+  if (imageChanged) {
+    try {
+      await saveChatBackground(snapshot);
+    } catch (error) {
+      toast(`撤销旋转失败：${error.message}`);
+      return;   // 落库失败就别回收派生图：它可能还被服务端引用着
+    }
+  }
+  derived.filter((path) => path && path !== snapshot.image).forEach(reclaimBackgroundFile);
+}
+
+function closeChatBackgroundEditor({ commit = false } = {}) {
+  const dialog = $('#chatBackgroundDialog');
+  if (commit) chatBgEditorSnapshot = null;
+  else revertChatBackgroundEditor();
+  if (dialog?.open) dialog.close();
+  else updateChatBackgroundControls();
+}
+
+async function commitChatBackgroundEditor() {
+  const background = state.chatBackground || {};
+  const original = String(chatBgEditorSnapshot?.image || '');
+  try {
+    // 落库的是取景区域本身（crop；null = 自动）。旧字段不再回写——它们是升级换算的输入，
+    // 由服务端保留原值即可。
+    await saveChatBackground({ crop: background.crop ?? null });
+  } catch (error) {
+    // 保存失败就留在弹层里，快照不丢（之后按取消仍能回滚），也不假装已保存。
+    setChatBackgroundEditorError(`保存失败：${error.message}`);
+    return;
+  }
+  chatBgEditorDerived.clear();
+  // 编辑期间换过图（旋转）：旧图不再被引用 → 回收（与"选图/换图"同一条规则；
+  // 内置背景图不在 uploads 里，跳过）。
+  if (original && original !== String(background.image || '') && !isBuiltInBackground(original)) {
+    reclaimBackgroundFile(original);
+  }
+  closeChatBackgroundEditor({ commit: true });
+  setChatBackgroundStatus('背景取景已保存');
+}
+
+function bindChatBackgroundEditor() {
+  const dialog = $('#chatBackgroundDialog');
+  const frame = $('#chatBgCropFrame');
+  const overview = $('#chatBgOverview');
+  const preview = $('#chatBackgroundPreview');
+  $('#editChatBackground')?.addEventListener('click', () => { void openChatBackgroundEditor(); });
+  // 缩略图本身就是入口：它已经与真实背景同源，点它进编辑器是最自然的心智。
+  preview?.addEventListener('click', () => { void openChatBackgroundEditor(); });
+  preview?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    void openChatBackgroundEditor();
+  });
+  if (!dialog || !frame || !overview) return;
+
+  // close 事件是**唯一兜底**：Esc、× 、取消、以及任何 dialog.close() 都会走到这里。
+  dialog.addEventListener('close', () => {
+    if (chatBgEditorSnapshot) void revertChatBackgroundEditor();
+    chatBgPointers.clear();
+    chatBgDrag = null;
+    chatBgResize = null;
+    chatBgPinch = null;
+    frame.classList.remove('is-dragging');
+    updateChatBackgroundControls();
+  });
+
+  $('#chatBgSave')?.addEventListener('click', () => { void commitChatBackgroundEditor(); });
+  // 「填满」= 图片内最大的、比例等于对话区比例的居中矩形（= 旧模型 zoom=1 的观感）。
+  $('#chatBgFitCover')?.addEventListener('click', () => applyChatBackgroundCropPreset(chatBackgroundFillCrop()));
+  // 「完整显示」= 整张图（形状与对话区不同就留白，由模糊底补）。
+  $('#chatBgFitContain')?.addEventListener('click', () => applyChatBackgroundCropPreset({ x: 0, y: 0, w: 1, h: 1 }));
+  // 「复位」= 回到打开编辑器时的取景（"我刚调乱了，退回去"），不是出厂值。
+  $('#chatBgReset')?.addEventListener('click', () => {
+    applyChatBackgroundCropPreset(chatBgEditorSnapshot?.crop || chatBackgroundFillCrop());
+  });
+  $('#chatBgRotate')?.addEventListener('click', () => { void rotateChatBackgroundImage(); });
+  $('#chatBgZoom')?.addEventListener('input', (event) => scaleChatBackgroundFrameTo(event.target.value));
+
+  // 双指捏合只在**真·多指**（触屏/笔）时成立：鼠标 + 表里残留的指针曾被误判成捏合，
+  // 表现就是"只能缩放、拖不动"（见下面 pointerdown 里的自愈注释）。
+  const startPinch = () => {
+    const touchPointers = [...chatBgPointers.values()].filter((pointer) => pointer.type !== 'mouse');
+    if (touchPointers.length < 2) return false;
+    const [first, second] = touchPointers;
+    chatBgPinch = {
+      distance: Math.hypot(first.x - second.x, first.y - second.y),
+      scale: chatBackgroundCropScale(chatBackgroundCrop(state.chatBackground || {})),
+    };
+    return true;
+  };
+  const endPointer = (event) => {
+    chatBgPointers.delete(event.pointerId);
+    if (chatBgPointers.size < 2) chatBgPinch = null;
+    if (chatBgDrag?.pointerId === event.pointerId) {
+      chatBgDrag = null;
+      frame.classList.remove('is-dragging');
+    }
+    if (chatBgResize?.pointerId === event.pointerId) chatBgResize = null;
+  };
+
+  // 手势统一挂在**概览**上：手柄、框内、框外的压暗区都能起手。
+  // 为什么不在框上监听：命中区越大越不容易"拖不动"（用户曾因"只能缩放、动不了"报障）；
+  // 现在两个方向的自由度由 crop 模型保证——框永远在图片内，横向/竖向都**永远**有空间。
+  overview.addEventListener('pointerdown', (event) => {
+    if (event.button) return;
+    // 新手势开始：主指针按下先清残留。丢了 pointerup（捕获失败、在窗口外松手、切窗口回来）
+    // 会在表里留一个"幽灵指针"，下一次按下就会被当成双指捏合——这正是"取景框锁死、
+    // 只能缩放、不能上下左右移动"的根因。自愈比祈祷事件齐全可靠。
+    if (event.isPrimary) {
+      chatBgPointers.clear();
+      chatBgDrag = null;
+      chatBgResize = null;
+      chatBgPinch = null;
+    }
+    // 捕获失败不能中断手势（合成指针 / 指针已释放时会抛 NotFoundError）：拿不到捕获只是
+    // 少了"指针移出元素也收得到事件"的保障，底下还有 window 兜底，不该让整个拖拽起不来。
+    try {
+      overview.setPointerCapture?.(event.pointerId);
+    } catch (_) { /* 自愈与兜底已覆盖 */ }
+    chatBgPointers.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+      type: event.pointerType || 'mouse',
+    });
+    const handle = event.target?.dataset?.chatBgHandle || '';
+    if (startPinch()) {
+      chatBgDrag = null;
+      chatBgResize = null;
+    } else if (handle) {
+      chatBgResize = { pointerId: event.pointerId, handle, x: event.clientX, y: event.clientY };
+    } else {
+      chatBgDrag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+      frame.classList.add('is-dragging');
+      frame.focus({ preventScroll: true });
+    }
+    event.preventDefault();
+  });
+  overview.addEventListener('pointermove', (event) => {
+    if (!chatBgPointers.has(event.pointerId)) return;
+    chatBgPointers.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+      type: event.pointerType || 'mouse',
+    });
+    if (chatBgPinch) {
+      const touchPointers = [...chatBgPointers.values()].filter((pointer) => pointer.type !== 'mouse');
+      if (touchPointers.length < 2 || !(chatBgPinch.distance > 0)) return;
+      const [first, second] = touchPointers;
+      const distance = Math.hypot(first.x - second.x, first.y - second.y);
+      // 双指：按距离比缩放（与滑杆同一条路径）。
+      scaleChatBackgroundFrameTo(chatBgPinch.scale * (distance / chatBgPinch.distance));
+      return;
+    }
+    if (chatBgDrag && chatBgDrag.pointerId === event.pointerId) {
+      moveChatBackgroundFrameBy(event.clientX - chatBgDrag.x, event.clientY - chatBgDrag.y);
+      chatBgDrag.x = event.clientX;
+      chatBgDrag.y = event.clientY;
+      return;
+    }
+    if (!chatBgResize || chatBgResize.pointerId !== event.pointerId) return;
+    resizeChatBackgroundFrameBy(
+      chatBgResize.handle,
+      event.clientX - chatBgResize.x,
+      event.clientY - chatBgResize.y,
+    );
+    chatBgResize.x = event.clientX;
+    chatBgResize.y = event.clientY;
+  });
+  overview.addEventListener('pointerup', endPointer);
+  overview.addEventListener('pointercancel', endPointer);
+  overview.addEventListener('lostpointercapture', endPointer);
+  // 兜底：指针在窗口外抬起 / 系统取消时，pointerup 可能到不了概览。上面那次自愈能兜住，
+  // 但直接收干净更省心（endPointer 幂等，重复触发无害）。
+  window.addEventListener('pointerup', endPointer);
+  window.addEventListener('pointercancel', endPointer);
+
+  // 滚轮缩放框（绕框心）；指数手感：向上滚（deltaY < 0）放大。
+  overview.addEventListener('wheel', (event) => {
+    event.preventDefault();
+    const scale = chatBackgroundCropScale(chatBackgroundCrop(state.chatBackground || {}));
+    scaleChatBackgroundFrameTo(scale * Math.exp(-event.deltaY * 0.0015));
+  }, { passive: false });
+
+  // 方向键微调取景框：1px 步进，Shift 10px。
+  frame.addEventListener('keydown', (event) => {
+    const step = event.shiftKey ? 10 : 1;
+    const moves = {
+      ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step],
+    };
+    const move = moves[event.key];
+    if (!move) return;
+    event.preventDefault();
+    moveChatBackgroundFrameBy(move[0], move[1]);
+  });
+}
+
 export function bindEvents() {
   document.addEventListener('contextmenu', (event) => {
     hideTextContextMenu();
@@ -201,6 +741,8 @@ export function bindEvents() {
     $('#settingsDialog').showModal();
     loadStorageStats();
     refreshImageCacheSize();
+    // 内置背景清单：懒加载一次（后端首次访问时幂等生成到 data/backgrounds/）。
+    void loadChatBackgroundPresets();
   });
   // 外观面板控件为可选增强：旧版 index.html 没有这些节点时不影响其它事件。
   const appearanceReset = $('#resetAppearance');
@@ -227,6 +769,11 @@ export function bindEvents() {
     try { await saveAppearance({ theme: 'system', skin: 'violet' }); syncAppearanceControls(); }
     catch (error) { toast(`恢复默认失败：${error.message}`); }
   });
+  // 聊天背景：选图（走 /api/uploads，不进待发送附件列表）、强度滑杆、清除。
+  // 控件在旧 index.html 里不存在时整块跳过（与上面外观控件同款的可选增强约定）。
+  bindChatBackgroundControls();
+  // 背景图编辑器（白板取景）：入口、拖动/滚轮/双指、适配按钮、收口关闭。
+  bindChatBackgroundEditor();
   $$('[data-close]').forEach((button) => button.addEventListener('click', () => $(`#${button.dataset.close}`).close()));
   // 会话条目「⋯」菜单：菜单项点击 → 重命名/删除；点击外部、Esc、侧栏滚动均关闭。
   $('#conversationItemMenu')?.addEventListener('click', (event) => {

@@ -22,6 +22,120 @@ logger = logging.getLogger("naiba.config")
 APPEARANCE_THEMES = frozenset({"system", "light", "dark"})
 APPEARANCE_SKINS = frozenset({"violet", "ocean", "rose", "forest"})
 
+# ---- 聊天背景图（只铺对话区）----
+# 透明度滑杆范围：0.05 是「还能看见」的下限，1 = 完全不透明。
+CHAT_BACKGROUND_MIN_OPACITY = 0.05
+# 滑杆默认值（方案定稿值：待实机看效果再定）。
+CHAT_BACKGROUND_DEFAULT_OPACITY = 0.35
+# 允许当背景的图片格式：按**读出来的 format**（不是扩展名）判定，白名单之外一律拒绝。
+# 候选是「WebView2/Chromium 能解码 + /api/file 能给出正确 MIME」的位图：
+# TIFF / HEIC 这类虽然能上传，但浏览器解不出来——放过去就是"设置保存成功、背景一片空白"
+# 的静默失败（本项目最忌的失败形态）。SVG 也不收：矢量无法按内容校验，
+# 且不在 core/media_types.py 的图片清单里（口径统一）。
+CHAT_BACKGROUND_IMAGE_FORMATS = ("PNG", "JPEG", "WEBP", "GIF", "BMP", "AVIF")
+# 位置 / 缩放：**旧模型的遗留输入**。旧模型把取景框比例锁死成对话区比例，只有
+# 「缩放 + 位置」两个自由度，于是「填满」「完整显示」两个预置态必然有一个方向自由度
+# 恰好为 0（用户报障："取景框只能横向切割，不能竖向切割"——就是它）。现在权威字段是
+# `crop`（自由裁剪矩形）；旧值只在 crop 缺失时用来换算等价区域（升级观感零变化），
+# 前端不再写回，保留只为兼容旧客户端 / 旧配置文件。
+CHAT_BACKGROUND_DEFAULT_POSITION = 50.0
+CHAT_BACKGROUND_MIN_ZOOM = 0.05
+CHAT_BACKGROUND_MAX_ZOOM = 4.0
+CHAT_BACKGROUND_DEFAULT_ZOOM = 1.0
+# 裁剪区域（crop）：图片内的相对矩形 {x, y, w, h}（x/y = 左上角，w/h = 宽高，都是图片比例）。
+# 缺失 = 自动（由前端按对话区比例取最大区域居中，即旧模型 zoom=1 的观感）。
+# 最小边长 2%：再小就是一条缝，拖拽/滑杆都无法操作，界面上也没有意义。
+CHAT_BACKGROUND_MIN_CROP = 0.02
+
+
+def normalize_chat_background_opacity(value: Any) -> float:
+    """背景图透明度归一化：非法值回落默认，越界 clamp 到 [0.05, 1]。"""
+    try:
+        opacity = float(value)
+    except (TypeError, ValueError):
+        return CHAT_BACKGROUND_DEFAULT_OPACITY
+    if opacity != opacity:  # NaN：NaN 参与比较恒为 False，会被 min/max 静默放过
+        return CHAT_BACKGROUND_DEFAULT_OPACITY
+    return min(1.0, max(CHAT_BACKGROUND_MIN_OPACITY, opacity))
+
+
+def normalize_chat_background_position(value: Any) -> float:
+    """背景图位置（锚点百分比）：非法值回落 50（居中），越界 clamp 到 [0, 100]。"""
+    try:
+        position = float(value)
+    except (TypeError, ValueError):
+        return CHAT_BACKGROUND_DEFAULT_POSITION
+    if position != position:
+        return CHAT_BACKGROUND_DEFAULT_POSITION
+    return round(min(100.0, max(0.0, position)), 1)
+
+
+def normalize_chat_background_zoom(value: Any) -> float:
+    """背景图缩放倍率：非法值回落 1（= 填满），越界 clamp 到 [0.05, 4]。"""
+    try:
+        zoom = float(value)
+    except (TypeError, ValueError):
+        return CHAT_BACKGROUND_DEFAULT_ZOOM
+    if zoom != zoom:
+        return CHAT_BACKGROUND_DEFAULT_ZOOM
+    return round(min(CHAT_BACKGROUND_MAX_ZOOM, max(CHAT_BACKGROUND_MIN_ZOOM, zoom)), 3)
+
+
+def normalize_chat_background_crop(value: Any) -> dict[str, Any] | None:
+    """裁剪区域归一化；返回 None = 未设置（= 自动按对话区比例取最大区域）。
+
+    加载期容错：手改配置、旧配置、前端都可能给出"形状不对"的值（字段缺失、宽高非正、
+    越界）。这里一律**静默收敛**（越界 clamp、结构不可用回落 None）；写入路径走
+    `update_settings` 的严格校验，两边分工与旧字段一致。
+    """
+    if not isinstance(value, dict):
+        return None
+    numbers: dict[str, float] = {}
+    for field in ("x", "y", "w", "h"):
+        try:
+            number = float(value[field])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if number != number or abs(number) == float("inf"):  # NaN / ±inf
+            return None
+        numbers[field] = number
+    # 宽高非正 = "没有取景"（手改成 0 或负数只可能是想表达"别用取景"）→ 回落自动。
+    if numbers["w"] <= 0 or numbers["h"] <= 0:
+        return None
+    width = min(1.0, max(CHAT_BACKGROUND_MIN_CROP, numbers["w"]))
+    height = min(1.0, max(CHAT_BACKGROUND_MIN_CROP, numbers["h"]))
+    return {
+        "x": round(min(1.0 - width, max(0.0, numbers["x"])), 4),
+        "y": round(min(1.0 - height, max(0.0, numbers["y"])), 4),
+        "w": round(width, 4),
+        "h": round(height, 4),
+    }
+
+
+def normalize_chat_background(value: Any) -> dict[str, Any]:
+    """把任意（手改 / 旧配置 / 前端）取值归一化成完整的 chat_background 对象。
+
+    单点实现：默认值、加载期合并、`update_settings` 三处共用同一套
+    「非法回落默认、越界 clamp」规则——写三遍迟早漂移。注意它**不做**格式/存在性校验
+    （那是 `_validated_chat_background_image` 的事），也不报错（枚举类错误留给
+    `update_settings` 显式抛，避免"点保存没反应"）。
+    """
+    raw = value if isinstance(value, dict) else {}
+    return {
+        "image": str(raw.get("image") or "").strip(),
+        "opacity": normalize_chat_background_opacity(raw.get("opacity")),
+        # crop 缺失 → None（自动）。前端拿到 None 会自己算「按对话区比例取最大区域」。
+        "crop": normalize_chat_background_crop(raw.get("crop")),
+        "position_x": normalize_chat_background_position(raw.get("position_x")),
+        "position_y": normalize_chat_background_position(raw.get("position_y")),
+        "zoom": normalize_chat_background_zoom(raw.get("zoom")),
+    }
+
+
+def default_chat_background() -> dict[str, Any]:
+    """默认背景设置（= 归一化后的空值，加载期与校验分支都复用）。"""
+    return normalize_chat_background({})
+
 
 def validate_skills_dir(resolved: Path, *, app_dir: Path, public_dir: Path, data_dir: Path) -> None:
     """限制 Skill 目录范围，防止把高危目录暴露给扫描、解压和文件读取。"""
@@ -58,6 +172,11 @@ def default_config() -> dict[str, Any]:
             "theme": "system",
             "skin": "violet",
         },
+        # 对话区自定义背景图：image = data_dir/uploads 内的绝对路径（"" = 不启用），
+        # opacity = 该图层的透明度，position_x/y + zoom = 编辑器里调出来的取景
+        # （zoom 是相对「填满」的倍率；< 1 会四周留白，这正是"看全整张图"的手段）。
+        # 图片以外的内容一律实底，所以不需要蒙层。
+        "chat_background": default_chat_background(),
         # Per-user reusable system prompts for conversation settings.  These
         # live in config.json instead of the conversation database by design.
         "conversation_prompt_presets": [],
@@ -232,15 +351,18 @@ def _mcp_subgroup(name: str) -> str:
 # 新建 Agent 的默认勾选 = 「标准模式」预设的工具集（守门测试钉死两者一致，
 # 否则新建 Agent 打开时会显示「当前：自定义」而不是「标准模式」）。
 #
-# ⚠️ 视频抽帧两件套（probe_video / extract_frames）**刻意不进** _DEFAULT_SELECTED_TOOLS
-#    与 TOOL_PRESETS——与 PDF 三件套（read_pdf / pdf_render_pages / pdf_zoom_region）
-#    完全对齐：只由「全能模式」的 group:* 覆盖，用户在 Agent 工具集里手动勾。
-#    理由：塞进 standard 会连带三重代价 —— ① 本常量必须与 standard 同步（守门钉死相等）；
-#    ② 守门断言「标准 8」变 10；③ 所有新建 Agent 默认多两个工具 + 多一段系统提示（全局行为变更）。
-#    将来若真要进某个预设，该预设**必须已含依赖闭包**：extract_frames 抽了帧需要
-#    vision_analyze 才能读，否则"抽帧没人看"。
+# 文档 / 视频五件套（PDF 三件套 read_pdf / pdf_render_pages / pdf_zoom_region +
+# 视频抽帧两件套 probe_video / extract_frames）**已并入预设与默认勾选**：
+#   standard（13）/ longsession（17）/ comfyui（18）三档全收；
+#   readonly 只收纯读取的两件（read_pdf / probe_video，side_effect=False）——
+#   会写产物文件的 pdf_render_pages / pdf_zoom_region / extract_frames 不进只读。
+# ⚠️ 依赖闭包：extract_frames 抽了帧需要 vision_analyze 才能读，而收它的三档显式预设
+#    （standard / longsession / comfyui）本来都已含 vision_analyze（full 走 group:*），
+#    故闭包自洽；只读那档不收 extract_frames（守门见 tests/test_agent_cards.py）。
 _DEFAULT_SELECTED_TOOLS = frozenset({
     "read_file", "list_directory", "search_files",
+    "read_pdf", "pdf_render_pages", "pdf_zoom_region",
+    "probe_video", "extract_frames",
     "write_file", "edit_file", "pwsh", "run_skill_script",
     "vision_analyze",
 })
@@ -367,12 +489,15 @@ def tool_group_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 # ---- 工具集预设（Agent 编辑页：一键选中一批工具）----
-# 4 档：只读模式 / 标准模式 / ComfyUI 联动 / 全能模式（按能力从小到大排）。
+# 5 档：只读模式 6 / 标准模式 13 / 长会话模式 17 / ComfyUI 联动 18 / 全能模式 group:*（33），
+# 按能力从小到大排。
 # include 支持两种写法：具体工具名，或 "group:分类名"（"group:*" 表示所有分类）。
 # exclude 用于从已包含的分类里再剔除个别工具。
-# 注意：分类收敛为 6 组后，组的粒度比单个预设的意图更粗（「联网与外部服务」同时含 ComfyUI
-# 与 MCP 动态工具、「任务与扩展」含 Skill 管理），因此**除 group:* 外一律显式列工具名**，
-# 保持每个预设的语义精确。写错的组名/工具名由 resolve_tool_preset 告警 + 守门测试兜住。
+# 注意：分类收敛为 7 组后，组的粒度比单个预设的意图更粗（「联网与外部服务」同时含 ComfyUI
+# 与 MCP 动态工具、「任务与扩展」含 Skill 管理、「读取与检索」同时含纯读取的 read_pdf /
+# probe_video 与会写产物的 pdf_render_pages / pdf_zoom_region / extract_frames），
+# 因此**除 group:* 外一律显式列工具名**，保持每个预设的语义精确。
+# 写错的组名/工具名由 resolve_tool_preset 告警 + 守门测试兜住。
 # 另一个硬约束：预设的工具名必须**已经包含依赖闭包**（如 ComfyUI 预设显式带 job_output/
 # job_status/job_wait），否则「下拉显示的个数」与「套用后的实际个数」会不一致。
 TOOL_PRESETS: tuple[dict[str, Any], ...] = (
@@ -380,16 +505,24 @@ TOOL_PRESETS: tuple[dict[str, Any], ...] = (
         "id": "readonly",
         "name": "只读模式",
         "tagline": "只读不改",
-        "desc": "只能查看和搜索文件、看图片。不写文件、不跑命令、不联网，最省心。",
-        "include": ["read_file", "list_directory", "search_files", "vision_analyze"],
+        "desc": "只能看和搜文件、读 PDF 文本、看视频元信息、看图片。不写文件、不跑命令、不联网，最省心。",
+        # 只读边界以 ToolSpec.side_effect 为准：read_pdf / probe_video 是纯读取；
+        # pdf_render_pages / pdf_zoom_region / extract_frames 会写产物文件，故不进本档。
+        "include": [
+            "read_file", "list_directory", "search_files",
+            "read_pdf", "probe_video",
+            "vision_analyze",
+        ],
     },
     {
         "id": "standard",
         "name": "标准模式",
         "tagline": "日常推荐",
-        "desc": "读写文件 + 搜索 + 跑命令 + 看图，覆盖绝大多数本机任务。",
+        "desc": "读写文件 + 搜索 + 跑命令 + 看图 + 读 PDF / 抽视频帧，覆盖绝大多数本机任务。",
         "include": [
             "read_file", "list_directory", "search_files",
+            "read_pdf", "pdf_render_pages", "pdf_zoom_region",
+            "probe_video", "extract_frames",
             "write_file", "edit_file", "pwsh", "run_skill_script",
             "vision_analyze",
         ],
@@ -401,6 +534,8 @@ TOOL_PRESETS: tuple[dict[str, Any], ...] = (
         "desc": "标准模式全部能力，外加翻历史（列会话 / 检索 / 读原文）与重置上下文，适合长会话与跨会话回忆。",
         "include": [
             "read_file", "list_directory", "search_files",
+            "read_pdf", "pdf_render_pages", "pdf_zoom_region",
+            "probe_video", "extract_frames",
             "write_file", "edit_file", "pwsh", "run_skill_script",
             "vision_analyze",
             "find_conversations", "recall_history", "read_conversation", "reset_context",
@@ -413,6 +548,8 @@ TOOL_PRESETS: tuple[dict[str, Any], ...] = (
         "desc": "标准能力 + ComfyUI 工作流与批量出图，并带上任务查询工具。走 HTTP 通道直连本机 ComfyUI，不启用任何 MCP 连接。",
         "include": [
             "read_file", "list_directory", "search_files",
+            "read_pdf", "pdf_render_pages", "pdf_zoom_region",
+            "probe_video", "extract_frames",
             "write_file", "edit_file", "pwsh", "run_skill_script", "vision_analyze",
             "comfyui_prepare_workflow", "comfyui_batch",
             # comfyui_batch 的依赖闭包（JOB_CREATOR_TOOL_DEPS / 前端 AGENT_TOOL_DEP_RULES）：
@@ -714,7 +851,7 @@ class ConfigStore:
             except (OSError, json.JSONDecodeError):
                 pass
         # 嵌套默认值合并：用户配置若只写了部分子字段，补齐缺失键。
-        for key in ("vision", "search", "appearance"):
+        for key in ("vision", "search", "appearance", "chat_background"):
             merged = dict(default_config().get(key, {}))
             if isinstance(defaults.get(key), dict):
                 merged.update(defaults[key])
@@ -725,6 +862,10 @@ class ConfigStore:
                 skin = str(merged.get("skin") or "").strip().lower()
                 merged["theme"] = theme if theme in APPEARANCE_THEMES else "system"
                 merged["skin"] = skin if skin in APPEARANCE_SKINS else "violet"
+            elif key == "chat_background":
+                # 手改过 / 旧配置（没有 position_x/y·zoom 三个键）都在这里补齐并归一化：
+                # 前端拿到什么就画什么，不能让 NaN、越界值或缺失键漏进公开设置。
+                merged = normalize_chat_background(merged)
             defaults[key] = merged
         # Build 74 changes the historical 120-second Run-wide vision budget
         # into a 180-second timeout for each individual visual request. Only
@@ -1565,6 +1706,7 @@ class ConfigStore:
             "proxy",
             "workspaces",
             "appearance",
+            "chat_background",
         }
         with self.lock:
             for key in allowed:
@@ -1633,6 +1775,32 @@ class ConfigStore:
                             "theme": merged.get("theme", "system"),
                             "skin": merged.get("skin", "violet"),
                         }
+                    elif key == "chat_background":
+                        incoming = values[key]
+                        if not isinstance(incoming, dict):
+                            raise ValueError("chat_background 必须是对象")
+                        unknown = set(incoming) - {
+                            "image", "opacity", "crop", "position_x", "position_y", "zoom",
+                        }
+                        if unknown:
+                            names = ", ".join(sorted(map(str, unknown)))
+                            raise ValueError(f"chat_background 包含不支持的字段：{names}")
+                        # 先在"当前值 + 本次增量"上归一化：透明度是滑杆量、crop 是拖拽来的
+                        # 矩形，越界一律 clamp（normalize_chat_background 是与默认值、加载期
+                        # 共用的一套规则）。crop: null 是合法值 = 恢复"自动取最大区域"。
+                        merged = normalize_chat_background({
+                            **dict(self.data.get("chat_background", {})),
+                            **incoming,
+                        })
+                        if incoming.get("crop") is not None and "crop" in incoming:
+                            # 结构类错误显式报错（前端永远给齐四个数值，缺一个就说明契约对不上，
+                            # 静默吞掉会变成"拖了没反应"）；越界仍由归一化 clamp。
+                            merged["crop"] = self._validated_chat_background_crop(incoming["crop"])
+                        # 图片路径要在归一化之后再校验替换：它是**解析后的绝对路径**，
+                        # 不能让它被 incoming 里的原始字符串覆盖回去。
+                        if "image" in incoming:
+                            merged["image"] = self._validated_chat_background_image(incoming["image"])
+                        self.data[key] = merged
                     elif key in ("vision", "search", "imaging"):
                         incoming = values[key]
                         if not isinstance(incoming, dict):
@@ -2183,6 +2351,86 @@ class ConfigStore:
                 options["max_tokens"] = int(profile["max_output_tokens"])
             options.update(self.runtime_guard_options())
             return options
+
+    def _validated_chat_background_image(self, raw: Any) -> str:
+        """校验聊天背景图：必须是 data_dir/uploads 内、浏览器能解码的图片文件。
+
+        三道闸，缺一不可：
+        1. 绝对路径 + 落在 `data/uploads` 内——设置里的路径会被前端直接拼进
+           `/api/file?path=…`，放宽等于开一条任意文件读取通道（也保证
+           `/api/uploads/delete` 能回收它）；
+        2. 文件必须存在——换个 data_dir 之后留着的绝对路径会变成死链；
+        3. **按内容**（Pillow 读出的 format，不信扩展名）命中白名单——TIFF/HEIC
+           之类浏览器解不出来的格式放过去，就是"保存成功、背景空白"的静默失败。
+        返回解析后的绝对路径字符串；`""` 表示清除背景。
+        """
+        value = str(raw or "").strip()
+        if not value:
+            return ""
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            raise ValueError("背景图路径必须是绝对路径")
+        resolved = candidate.resolve()
+        # 只放行两个受管目录：uploads（用户上传）与 backgrounds（内置预设图，见
+        # storage/backgrounds.py）。config 层不能 import storage，所以这里按同一口径直接写
+        # 目录名——改口径时两处一起改（与 is_uploads_path 的既有约定一致）。
+        data_root = self.resolve_data_dir()
+        allowed_roots = (
+            (data_root / "uploads").resolve(),
+            (data_root / "backgrounds").resolve(),
+        )
+        if not any(path_within(resolved, root) for root in allowed_roots):
+            raise ValueError("背景图必须来自本机（data/uploads 或 data/backgrounds 目录内）")
+        if not resolved.is_file():
+            raise ValueError("背景图文件不存在，请重新选择")
+        # PIL 是硬依赖（上传管线也在用），缺失时让它按 ImportError 暴露，不吞成"用户选错图"。
+        from PIL import Image
+        from PIL.Image import DecompressionBombError
+
+        try:
+            with Image.open(resolved) as probe:
+                image_format = str(probe.format or "").upper()
+        except DecompressionBombError:
+            raise ValueError("背景图尺寸过大，请先压缩后再选") from None
+        except Exception:  # noqa: BLE001 - 坏图/未知格式一律按"无法识别"处理
+            raise ValueError("无法识别的图片文件，请重新选择") from None
+        if image_format not in CHAT_BACKGROUND_IMAGE_FORMATS:
+            allowed = " / ".join(CHAT_BACKGROUND_IMAGE_FORMATS)
+            current = image_format or resolved.suffix.lower().lstrip(".") or "未知"
+            raise ValueError(f"背景图仅支持 {allowed} 格式（当前识别为 {current}）")
+        return str(resolved)
+
+    @staticmethod
+    def _validated_chat_background_crop(raw: Any) -> dict[str, Any]:
+        """裁剪区域（写入路径）：结构必须齐全，尺寸必须为正；越界 clamp 回图片内。
+
+        为什么结构错误报错而不是静默回落"自动"：crop 是编辑器拖出来的矩形，四个数永远
+        一起发；只发一半只可能是前后端版本对不上——静默改回"自动"会让用户的调整凭空
+        消失，且看不出原因（正是本项目最忌的静默失败）。
+        """
+        if not isinstance(raw, dict):
+            raise ValueError("crop 必须是对象")
+        unknown = set(raw) - {"x", "y", "w", "h"}
+        if unknown:
+            names = ", ".join(sorted(map(str, unknown)))
+            raise ValueError(f"crop 包含不支持的字段：{names}")
+        numbers: dict[str, float] = {}
+        for field in ("x", "y", "w", "h"):
+            if field not in raw:
+                raise ValueError("crop 需要 x、y、w、h 四个数值")
+            try:
+                number = float(raw[field])
+            except (TypeError, ValueError):
+                raise ValueError(f"crop.{field} 必须是数值") from None
+            if number != number or abs(number) == float("inf"):
+                raise ValueError(f"crop.{field} 必须是有限数值")
+            numbers[field] = number
+        if numbers["w"] <= 0 or numbers["h"] <= 0:
+            raise ValueError("crop 的宽和高必须大于 0")
+        normalized = normalize_chat_background_crop(numbers)
+        if normalized is None:
+            raise ValueError("crop 无效")
+        return normalized
 
     @staticmethod
     def _positive_context_size(value: Any, field: str) -> int:

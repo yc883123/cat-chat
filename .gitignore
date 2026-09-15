@@ -210,9 +210,12 @@ verify/*
 !verify/branch_first_turn_smoke.py
 !verify/browser_smoke.cjs
 !verify/cleanup_verify.py
+!verify/choice_panel_smoke.cjs
+!verify/choice_panel_smoke.py
 !verify/composer_model_smoke.cjs
 !verify/composer_model_smoke.py
 !verify/context_menu_smoke.cjs
+!verify/css_content_bg.py
 !verify/dup_ids.py
 !verify/esm_cross_assign.py
 !verify/esm_graph_check.py

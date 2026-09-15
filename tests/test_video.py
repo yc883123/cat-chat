@@ -360,22 +360,25 @@ class VideoServiceTests(unittest.TestCase):
         for name in ("probe_video", "extract_frames"):
             row = next(item for item in catalog if item["name"] == name)
             self.assertEqual(row["group"], "读取与检索")
-            self.assertFalse(row["default_selected"], "视频工具与 PDF 对齐：不进默认勾选")
+            self.assertTrue(row["default_selected"], "视频工具已并入默认勾选（= 标准模式）")
         pdf_tail = names.index("pdf_zoom_region")
         self.assertEqual(names[pdf_tail + 1: pdf_tail + 3], ["probe_video", "extract_frames"])
 
-    def test_default_selected_and_presets_unchanged(self) -> None:
-        """与 PDF 完全对齐：新工具不进 _DEFAULT_SELECTED_TOOLS，也不进任何显式预设。"""
+    def test_default_selected_and_presets_include_new_tools(self) -> None:
+        """视频两件套已并入默认勾选与预设：只读只收纯读取的 probe_video。"""
         from naiba.config import TOOL_PRESETS, _DEFAULT_SELECTED_TOOLS
 
-        self.assertNotIn("probe_video", _DEFAULT_SELECTED_TOOLS)
-        self.assertNotIn("extract_frames", _DEFAULT_SELECTED_TOOLS)
-        for preset in TOOL_PRESETS:
-            include = list(preset.get("include") or [])
-            if "group:*" in include:
-                continue
-            self.assertNotIn("probe_video", include, preset["id"])
-            self.assertNotIn("extract_frames", include, preset["id"])
+        self.assertIn("probe_video", _DEFAULT_SELECTED_TOOLS)
+        self.assertIn("extract_frames", _DEFAULT_SELECTED_TOOLS)
+        includes = {preset["id"]: set(preset.get("include") or []) for preset in TOOL_PRESETS}
+        self.assertIn("probe_video", includes["readonly"], "只读模式收纯读取的 probe_video")
+        self.assertNotIn("extract_frames", includes["readonly"],
+                         "抽帧会写产物文件，不进只读模式")
+        for preset_id in ("standard", "longsession", "comfyui"):
+            with self.subTest(preset=preset_id):
+                self.assertIn("probe_video", includes[preset_id], preset_id)
+                self.assertIn("extract_frames", includes[preset_id], preset_id)
+        self.assertIn("group:*", includes["full"], "全能模式仍靠 group:* 覆盖全部工具")
 
 
 class VideoMediaPipelineTests(unittest.TestCase):

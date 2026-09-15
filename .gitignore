@@ -214,6 +214,7 @@ verify/*
 !verify/choice_panel_smoke.py
 !verify/composer_model_smoke.cjs
 !verify/composer_model_smoke.py
+!verify/ci_short_path_check.py
 !verify/context_menu_smoke.cjs
 !verify/css_content_bg.py
 !verify/dup_ids.py

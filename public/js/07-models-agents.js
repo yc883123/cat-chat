@@ -259,7 +259,7 @@ export function renderUpdateStatus(status) {
   // 仅根据是否存在更新内容显示/隐藏详情；不重置用户已展开/收起状态
   notesPanel.hidden = notes.length === 0;
   const messages = {
-    idle: '启动后仅检查更新，不会自动安装；请手动选择版本后点击「立即更新」。',
+    idle: '点「检查更新」才会去查新版本（启动不再自动检查）；不会自动安装，请手动选择版本后点击「立即更新」。',
     checking: '正在检查更新…',
     current: '当前已经是最新版本。',
     available: '发现新版本，可以立即安装。',

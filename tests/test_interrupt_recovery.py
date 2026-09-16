@@ -15,8 +15,9 @@
    「打开窗口」才唤回界面 —— 更新脚本用 ``-WindowStyle Hidden`` 启动新进程，
    而这个程序本来就是窗口化打包（``console=False``，没有控制台要藏）。
 
-3. （设计确认，无需改动）「还没点检查更新就查到新版本」= 启动后 4 秒的后台元数据检查
-   （只查不装）+ 前端 30 秒轮询；见 launcher / 05-bootstrap，本条不做断言。
+3. 「还没点检查更新就查到新版本」——启动 4 秒的后台元数据检查是当时的设计（只查不装），
+   但用户视为问题；按用户决定改为**只在点「检查更新」时才发起**（见
+   ``UpdateCheckIsManualTests``）。
 
 全量验证口径见 `项目维护说明（修改代码前必读）.md` §六。
 """
@@ -228,6 +229,36 @@ class StreamingRowSurvivesRerenderTests(unittest.TestCase):
         self.assertIn("state.runRow?.isConnected", body, "只搬还在消息区里的那一行")
         self.assertIn("state.runConversationId", body, "只搬属于当前会话的那一行")
         self.assertIn("run_id", body, "库里已有本轮终稿时不得再多出一条重复气泡")
+
+
+class UpdateCheckIsManualTests(unittest.TestCase):
+    """更新检查只在用户点「检查更新」时发起：启动不再自动查（2026-09-16 用户拍板）。"""
+
+    def test_launcher_does_not_start_an_update_check(self) -> None:
+        source = (ROOT / "launcher.py").read_text(encoding="utf-8")
+        # 只看活的代码行：解释「为什么删掉」的注释里会提到那个调用。
+        live = "\n".join(
+            line for line in source.splitlines() if not line.lstrip().startswith("#")
+        )
+        self.assertNotIn(
+            "start_check",
+            live,
+            "启动自动查更新会让用户「没点检查更新就看到新版本」；检查只由 "
+            "POST /api/update/check 触发",
+        )
+
+    def test_idle_copy_points_at_the_manual_entry(self) -> None:
+        for name in ("index.html", "js/07-models-agents.js"):
+            body = (ROOT / "public" / name).read_text(encoding="utf-8")
+            self.assertIn("点「检查更新」才会去查新版本", body, f"{name} 的默认文案要说明是手动触发")
+
+    def test_manual_route_still_checks(self) -> None:
+        source = (ROOT / "naiba" / "http.py").read_text(encoding="utf-8")
+        self.assertIn(
+            "self.app.updater.start_check(force=True)",
+            source,
+            "/api/update/check 仍是唯一的检查入口（强制查，不吃缓存）",
+        )
 
 
 class UpdateRestartShowsWindowTests(unittest.TestCase):

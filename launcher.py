@@ -234,8 +234,10 @@ class Launcher:
         self.window.events.closing += self._on_window_closing
         # 窗口就绪即确保可见（见 _on_window_loaded：更新脚本重启时曾把主窗口一起藏起来）。
         self.window.events.loaded += self._on_window_loaded
-        # 启动后仅做后台元数据检查（不自动安装），前端通过 30 秒轮询感知结果。
-        threading.Timer(4.0, srv.APP.updater.start_check).start()
+        # 启动时不自动查更新：检查只在用户点「检查更新」时发起（`POST /api/update/check`）。
+        # 此前这里是 `threading.Timer(4.0, updater.start_check)`，于是用户「还没点检查更新就能
+        # 查到新版本」，容易被当成 bug（2026-09-16 用户反馈第三条）。只查不装的语义不变，
+        # 只是不再由程序主动发起。
         icon_path = srv.RESOURCE_DIR / "icon.ico"
         start_kwargs = {}
         if icon_path.is_file():

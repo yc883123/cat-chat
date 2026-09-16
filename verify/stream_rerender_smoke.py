@@ -164,7 +164,11 @@ def start_fake_model() -> ThreadingHTTPServer:
 
 def main() -> int:
     global ISOLATED_ROOT, DATA_DIR
-    isolated = tempfile.TemporaryDirectory(prefix="stream_rerender_", dir=ROOT / "verify")
+    # ignore_cleanup_errors：Windows 上刚被 terminate 的服务进程可能还占着 db/-wal 文件，
+    # 清理失败不该让一轮冒烟以异常收场（残留的隔离目录不影响下次跑，脚本按时间戳新建）。
+    isolated = tempfile.TemporaryDirectory(
+        prefix="stream_rerender_", dir=ROOT / "verify", ignore_cleanup_errors=True
+    )
     ISOLATED_ROOT = Path(isolated.name)
     DATA_DIR = ISOLATED_ROOT / "data"
     DATA_DIR.mkdir(parents=True, exist_ok=True)

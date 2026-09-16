@@ -2,7 +2,8 @@
 
 ConversationRunMixin：submit_chat/submit_plan（提交与快照固化）、_run_chat 主循环、
 _run_plan 计划执行包装、_all_run_events/_rebuild_partial_run/_persist_aborted_message/
-_persist_failed_message（事件重建与取消幂等持久化）。模块级辅助：_search_sources/_merge_usage_summary。
+_persist_failed_message（事件重建与取消幂等持久化）/recover_interrupted_runs（重启中断恢复）。
+模块级辅助：_search_sources/_merge_usage_summary。
 """
 
 from __future__ import annotations
@@ -31,6 +32,12 @@ from naiba.core.history import build_model_history
 from naiba.core.tool_results import display_tool_run
 from naiba.run.stream import _RunEventSink, _safe_activity
 from naiba.storage.media import missing_cache_attachment
+
+# 中断轮次重建时的判据：事件流里出现这些事件，说明这一轮已有可展示的内容
+# （正文增量 / 思考 / 工具活动 / 已发出的 Skill 列表），值得重建一条 partial 消息。
+RECOVERABLE_EVENT_TYPES = frozenset(
+    {"delta", "reasoning", "reasoning_delta", "tool_start", "tool_result", "skills"}
+)
 
 VISION_ANALYZE_GUIDE = (
     "图片处理策略：需要了解附件/上下文中图片的内容时，调用 vision_analyze 工具并传入图片路径。"
@@ -1208,6 +1215,68 @@ class ConversationRunMixin:
         content = "".join(content_parts).strip()
         return reasoning, tool_runs, content, _safe_activity(events, reasoning, tool_runs)
 
+    def recover_interrupted_runs(self) -> int:
+        """把「服务重启中断」的对话 Run 里已经吐出来的内容重建为一条 partial 消息。
+
+        启动清理（``storage._initialize``）只把 in-flight 的 background_tasks 标成
+        ``interrupted`` 并补一条 error 事件；模型在此之前已经流式输出的正文只活在
+        ``run_events`` 里，界面上无从看到 —— 用户看到的是「那条回复凭空消失，重启、
+        刷新都不回来」（2026-09-16 实测：用户点任务面板导致流式视图被拆掉，随后重启，
+        这一轮的正文与工具活动全部消失）。这里复用失败路径的重建逻辑把它落库：
+        重启后至少能看到已生成的部分 +「未完成」标记 + 中断原因。
+
+        只处理本次启动被判为中断的顶层对话 Run（chat / plan_execute，即
+        ``PRIMARY_RUN_KINDS``）；没有任何可展示内容（正文/思考/工具活动）的轮次跳过，
+        避免塞一条空壳消息。重复调用幂等（``_persist_failed_message`` 自带同 run 去重）。
+        返回实际落库的条数。
+        """
+        from naiba.storage.store import INTERRUPTED_TASK_REASON, PRIMARY_RUN_KINDS
+
+        recovered = 0
+        for task in list(getattr(self.app.storage, "interrupted_tasks", []) or []):
+            run_id = str(task.get("id") or "")
+            conversation_id = str(task.get("conversation_id") or "")
+            if not run_id or not conversation_id:
+                continue
+            if str(task.get("kind") or "") not in PRIMARY_RUN_KINDS:
+                continue
+            try:
+                events = self._all_run_events(run_id)
+                if not any(
+                    str(event.get("type") or "") in RECOVERABLE_EVENT_TYPES for event in events
+                ):
+                    # 一个字都没来得及产出（例如刚起跑就被重启）：不留空壳消息。
+                    continue
+                skills = next(
+                    (
+                        [
+                            {
+                                "id": str(item.get("id") or ""),
+                                "name": str(item.get("name") or ""),
+                                "source": str(item.get("source") or "auto"),
+                            }
+                            for item in event.get("skills") or []
+                            if isinstance(item, dict)
+                        ]
+                        for event in events
+                        if str(event.get("type") or "") == "skills"
+                        and isinstance(event.get("skills"), list)
+                    ),
+                    [],
+                )
+                message = self._persist_failed_message(
+                    run_id,
+                    conversation_id,
+                    skills,
+                    error=INTERRUPTED_TASK_REASON,
+                    placeholder=f"（本次回答未完成：{INTERRUPTED_TASK_REASON}）",
+                )
+                if message:
+                    recovered += 1
+            except Exception:  # noqa: BLE001 - 恢复失败不能挡住启动
+                traceback.print_exc()
+        return recovered
+
     def _persist_failed_message(
         self,
         run_id: str,
@@ -1215,12 +1284,16 @@ class ConversationRunMixin:
         skills: list[dict[str, Any]],
         trace: list[dict[str, Any]] | None = None,
         error: str = "",
+        placeholder: str = "（本次回答未完成）",
     ) -> dict[str, Any] | None:
         """运行异常（如 HTTP 500）时把本次已累积内容重建为一条 partial assistant 消息并入库。
 
         与取消路径共用事件重建逻辑：失败前的思考/部分回复/工具活动不丢失，
         刷新/重渲染/后续上下文都能看到（作为普通 assistant 消息计入历史），
         同时保留独立的 error 消息记录完整原因。
+
+        ``placeholder`` 只在「一个字都没产出」时作为占位正文；重启中断恢复
+        （``recover_interrupted_runs``）会传入带原因的版本，让用户不必猜这条为什么停在这里。
         """
         try:
             # 先把 sink 里尚未落库的 delta 主动刷出，避免失败前最后一段输出被缓冲丢弃。
@@ -1239,7 +1312,7 @@ class ConversationRunMixin:
             pass
         reasoning, tool_runs, content, activity = self._rebuild_partial_run(run_id, events)
         if not content:
-            content = "（本次回答未完成）"
+            content = placeholder
         changed_files = file_changes_from_runs(tool_runs)
         # 失败轮次同样展示已生成的媒体（同取消路径：media 随事件带回）。
         attachments, attachments_truncated = union_run_media(tool_runs)

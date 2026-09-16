@@ -47,6 +47,10 @@ TERMINAL_TASK_STATUSES: tuple[str, ...] = (
 # 否则用户看到的是自己发过的每一句话被当成"任务"。唯一一份定义，manager 直接引用。
 PRIMARY_RUN_KINDS: tuple[str, ...] = ("chat", "plan_execute")
 
+# 服务重启把 in-flight 任务判为中断时写进 background_tasks.error / run_events 的原因文案。
+# 两处（任务行 + 事件流）共用一份，运行层重建「中断轮次」的部分消息时也复用它。
+INTERRUPTED_TASK_REASON = "服务重启，运行已中断"
+
 
 def _status_in_clause(statuses: tuple[str, ...]) -> str:
     """把状态集合渲染成 SQL 的 ``IN (...)`` 片段（字面量，不含用户输入）。"""
@@ -539,6 +543,10 @@ class ChatStorage:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # 本次启动被判为「服务重启中断」的 in-flight 任务（id/conversation_id/kind）。
+        # 只做记录，不做恢复：正文重建要用 run_events，那属于运行层（见
+        # ConversationRunMixin.recover_interrupted_runs）。
+        self.interrupted_tasks: list[dict[str, str]] = []
         self._initialize()
 
     def upload_path_referenced(self, target: Path) -> bool:
@@ -678,14 +686,24 @@ class ChatStorage:
             # 「已取消但线程没退出去」的子任务存活过重启，成为永久僵尸。
             active_clause = _status_in_clause(ACTIVE_TASK_STATUSES)
             interrupted = db.execute(
-                "SELECT id FROM background_tasks "
+                "SELECT id, conversation_id, kind FROM background_tasks "
                 f"WHERE status IN {active_clause}"
             ).fetchall()
+            # 记录本次被判为中断的任务，供运行层把「已经吐出来的正文」重建落库
+            # （见 ConversationRunMixin.recover_interrupted_runs）。
+            self.interrupted_tasks = [
+                {
+                    "id": str(row["id"]),
+                    "conversation_id": str(row["conversation_id"] or ""),
+                    "kind": str(row["kind"] or ""),
+                }
+                for row in interrupted
+            ]
             # Harness 对齐：运行中任务在服务重启后变为 interrupted，而非静默丢失
             db.execute(
                 "UPDATE background_tasks SET status = 'interrupted', error = ?, updated_at = ?, finished_at = ? "
                 f"WHERE status IN {active_clause}",
-                ("服务重启，运行已中断", now, now),
+                (INTERRUPTED_TASK_REASON, now, now),
             )
             for row in interrupted:
                 sequence = db.execute(
@@ -693,7 +711,7 @@ class ChatStorage:
                     (row["id"],),
                 ).fetchone()[0]
                 payload = json.dumps(
-                    {"type": "error", "message": "服务重启，运行已中断"},
+                    {"type": "error", "message": INTERRUPTED_TASK_REASON},
                     ensure_ascii=False,
                 )
                 db.execute(

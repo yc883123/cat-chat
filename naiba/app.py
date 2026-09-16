@@ -274,6 +274,13 @@ class NaibaChatApp:
         # jobs that explicitly opted into resume are safely re-created from
         # their durable checkpoint and persisted parameters.
         self.jobs.resume_interrupted()
+        # 重启清理只把 in-flight 的对话 Run 标成 interrupted；已经流式输出过的正文只存在
+        # 事件流里，不重建就会表现为「那条回复凭空消失，刷新/重启都不回来」。这里把它
+        # 落库成一条带「未完成」标记的 partial 消息（失败不影响启动）。
+        try:
+            self.runs.recover_interrupted_runs()
+        except Exception:  # noqa: BLE001
+            logger.exception("中断轮次恢复失败")
         self.updater = UpdateManager(self._paths.app_dir, self._paths.data_dir)
         self.update_restart_callback = None
         # 后台自动连接所有已启用 MCP 服务；对启动时未连上的做周期重试，

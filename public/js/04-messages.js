@@ -912,6 +912,20 @@ export function renderMessages(messages) {
     '渲染起点=', state.renderStart,
     'conversationId=', state.conversationId,
     'roles=', list.map((m) => m.role).join(','));
+  // 流式中的 run 行必须活过这次重渲染：它就是「正在进行的那条助手回复」，正文此刻只在
+  // DOM 里（run 结束才落库）。此前它被 replaceChildren 连根拔掉，而重渲染后又没人把它挂回来，
+  // 于是正在流式输出的回复从屏幕上凭空消失，且此后一直不回来（只有等 run 结束才会重新出现）。
+  // 典型触发：后台任务跑着时点任务面板里的某一行 —— 那一步会对当前会话做整体重渲染。
+  // 判据收紧到「确有活动流 + 行还挂在消息区 + 属于当前会话 + 库里还没有这轮的**助手**消息」，
+  // 避免把别的会话的行误搬过来，也避免在流刚结束、库里已有终稿时多出一条重复气泡。
+  // 注意必须限定 role==='assistant'：这一轮的**用户**消息 metadata 里也带同一个 run_id。
+  const liveRunRow = (
+    state.abortController
+    && state.runRow?.isConnected
+    && String(state.runConversationId || '') === String(state.conversationId || '')
+    && !list.some((item) => item?.role === 'assistant'
+      && String((item?.metadata || {}).run_id || '') === String(state.chatRunId || ''))
+  ) ? state.runRow : null;
   try {
     container.replaceChildren();
     // 始终保留 empty 在容器中，仅切换 hidden；否则它会被移出 DOM，
@@ -933,6 +947,8 @@ export function renderMessages(messages) {
         requestAnimationFrame(() => scrollToBottom());
       }
     }
+    // 把活动流的那条助手气泡挂回末尾（append 会把同一个节点搬过来，流式内容与滚动状态都保住）。
+    if (liveRunRow) container.append(liveRunRow);
     const choiceMessage = pendingChoiceMessage(list);
     const choices = choiceMessage?.metadata?.choices || [];
     const choiceGroups = choiceMessage?.metadata?.choice_groups || [];

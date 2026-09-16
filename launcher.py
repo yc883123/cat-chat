@@ -174,6 +174,16 @@ class Launcher:
                 pass
         return False  # 阻止真正关闭
 
+    def _on_window_loaded(self) -> None:
+        """页面就绪后确认主窗口可见。
+
+        更新流程的重启脚本若带上 SW_HIDE（此前 apply-update.ps1 用了
+        `-WindowStyle Hidden`），新进程会正常跑起来、托盘图标也在，但主窗口不出来，
+        用户只能到托盘双击「打开窗口」才能唤回界面。这里主动 show/restore 一次，
+        把这类外部启动方式的隐藏标记抹平。
+        """
+        self._show_window()
+
     def run(self) -> None:
         import webview
 
@@ -222,6 +232,8 @@ class Launcher:
             text_select=True,
         )
         self.window.events.closing += self._on_window_closing
+        # 窗口就绪即确保可见（见 _on_window_loaded：更新脚本重启时曾把主窗口一起藏起来）。
+        self.window.events.loaded += self._on_window_loaded
         # 启动后仅做后台元数据检查（不自动安装），前端通过 30 秒轮询感知结果。
         threading.Timer(4.0, srv.APP.updater.start_check).start()
         icon_path = srv.RESOURCE_DIR / "icon.ico"

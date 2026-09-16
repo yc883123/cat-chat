@@ -223,6 +223,7 @@ verify/*
 !verify/esm_unused_imports.py
 !verify/file_ref_smoke.cjs
 !verify/frontend_runtime_settings_check.cjs
+!verify/frozen_interrupt_check.py
 !verify/frozen_video_check.py
 !verify/lightbox_smoke.cjs
 !verify/make_test_card.py
@@ -266,6 +267,8 @@ verify/*
 !verify/sitecustomize.py
 !verify/skill_prompt_check.mjs
 !verify/starter_reasoning_smoke.cjs
+!verify/stream_rerender_smoke.cjs
+!verify/stream_rerender_smoke.py
 !verify/tasks_panel_render_check.mjs
 !verify/tasks_panel_smoke.cjs
 !verify/tasks_panel_smoke.py

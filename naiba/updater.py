@@ -35,6 +35,42 @@ DEFAULT_RELEASE_NOTES = [
 ]
 
 
+# 安装（换 exe）用的 PowerShell 脚本正文。放模块级常量而不是内联字符串，是为了让
+# 守门测试与冻结版自检能在**运行期**读到它——本程序被 PyInstaller 打进 PYZ 后没有可读的
+# 源码文件，只有运行期常量还拿得到（否则「更新后重启不显示窗口」这类文案缺陷无法在
+# 打包产物上回归）。
+#
+# 两条 Start-Process 都必须以**普通窗口**启动：本程序是窗口化打包（spec `console=False`，
+# 本来就没有控制台窗口要藏），而 `-WindowStyle Hidden` 会让新进程的主窗口一起处于隐藏状态
+# ——更新后进程活着、托盘图标在，但界面不出来，用户只能到托盘双击「打开窗口」才能唤回。
+APPLY_UPDATE_SCRIPT = """param([int]$ProcessId, [string]$Downloaded, [string]$Target, [string]$Backup)
+$ErrorActionPreference = 'Stop'
+Wait-Process -Id $ProcessId -Timeout 30 -ErrorAction SilentlyContinue
+$deadline = (Get-Date).AddSeconds(60)
+$installed = $false
+while ((Get-Date) -lt $deadline) {
+  try {
+    if (Test-Path -LiteralPath $Target) { Copy-Item -LiteralPath $Target -Destination $Backup -Force }
+    Copy-Item -LiteralPath $Downloaded -Destination $Target -Force
+    $installed = $true
+    break
+  } catch { Start-Sleep -Milliseconds 500 }
+}
+if (-not $installed) { exit 1 }
+$env:PYINSTALLER_RESET_ENVIRONMENT = '1'
+Get-ChildItem Env: | Where-Object { $_.Name -like '_PYI_*' } | ForEach-Object {
+  Remove-Item -LiteralPath ("Env:" + $_.Name) -ErrorAction SilentlyContinue
+}
+$started = Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target) -PassThru
+Start-Sleep -Seconds 3
+if ($started.HasExited) {
+  Start-Sleep -Seconds 2
+  Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target)
+}
+Remove-Item -LiteralPath $Downloaded -Force -ErrorAction SilentlyContinue
+"""
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -675,35 +711,7 @@ class UpdateManager:
         update_dir = downloaded.parent
         script = update_dir / "apply-update.ps1"
         backup = update_dir / "naiba-chat.previous.exe"
-        script.write_text(
-            """param([int]$ProcessId, [string]$Downloaded, [string]$Target, [string]$Backup)
-$ErrorActionPreference = 'Stop'
-Wait-Process -Id $ProcessId -Timeout 30 -ErrorAction SilentlyContinue
-$deadline = (Get-Date).AddSeconds(60)
-$installed = $false
-while ((Get-Date) -lt $deadline) {
-  try {
-    if (Test-Path -LiteralPath $Target) { Copy-Item -LiteralPath $Target -Destination $Backup -Force }
-    Copy-Item -LiteralPath $Downloaded -Destination $Target -Force
-    $installed = $true
-    break
-  } catch { Start-Sleep -Milliseconds 500 }
-}
-if (-not $installed) { exit 1 }
-$env:PYINSTALLER_RESET_ENVIRONMENT = '1'
-Get-ChildItem Env: | Where-Object { $_.Name -like '_PYI_*' } | ForEach-Object {
-  Remove-Item -LiteralPath ("Env:" + $_.Name) -ErrorAction SilentlyContinue
-}
-$started = Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target) -WindowStyle Hidden -PassThru
-Start-Sleep -Seconds 3
-if ($started.HasExited) {
-  Start-Sleep -Seconds 2
-  Start-Process -FilePath $Target -WorkingDirectory (Split-Path -Parent $Target) -WindowStyle Hidden
-}
-Remove-Item -LiteralPath $Downloaded -Force -ErrorAction SilentlyContinue
-""",
-            encoding="utf-8",
-        )
+        script.write_text(APPLY_UPDATE_SCRIPT, encoding="utf-8")
         creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         subprocess.Popen(
             [

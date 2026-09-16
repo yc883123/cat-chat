@@ -206,9 +206,42 @@ class EditComposerBridgeSourceTests(unittest.TestCase):
         self.assertNotIn("messageInput.disabled", body)
         self.assertNotIn(".placeholder =", body)
 
-    def test_editing_state_cleared_when_conversation_rerenders(self):
+    def test_editing_state_survives_same_conversation_rerender(self):
+        """重渲染不再无条件退编辑态。
+
+        轮询 syncCurrentConversation（后台任务写消息、流式落库都会引爆）走的就是
+        renderMessages；改前那里无条件 applyEditingState(null)，一次刷新就会静默吃掉编辑现场
+        （改到一半的字掉回底部、附件丢失、按钮从「重新发送」变回「发送」）。
+        现在的契约：同会话且被编辑消息还在 → 保现场复挂；消息没了/换会话 → 退出且**必还草稿**。
+        """
         body = _fn_body(self.messages_js, "export function renderMessages(")
-        self.assertIn("applyEditingState(null)", body, "重渲染会换掉编辑框 → 编辑态必须同步退出")
+        self.assertIn("prepareEditRerender(", body)
+        self.assertIn("resumeEditComposer(", body)
+        self.assertNotIn("applyEditingState(null)", body,
+                         "不能无条件退编辑态（那会静默吃掉编辑中的文字与附件）")
+        prep = _fn_body(self.messages_js, "function prepareEditRerender(")
+        self.assertIn("switched", prep, "必须区分「同会话刷新」与「切换会话」")
+        self.assertIn("restoreInlineComposer({ resume: true })", prep,
+                      "同会话刷新要先归位、保 stash，渲染后再复挂")
+        self.assertNotIn("restoreDraft", prep, "保现场分支不得还原/丢弃草稿")
+        exit_body = _fn_body(self.messages_js, "function exitEditWithDraft()")
+        self.assertIn("restoreDraft: true", exit_body, "强制退出必须把底部草稿还回去")
+        self.assertIn("applyEditingState(null)", exit_body)
+
+    def test_mount_edit_composer_is_shared_by_both_paths(self):
+        """首次进入编辑与重渲染后复挂必须走同一个挂载函数，避免两条路径逻辑漂移。
+
+        另钉住一个派生坑：编辑期间底部留着一个 `composer-wrap edit-placeholder` 空锚点，
+        且它被插在真 composer **前面**，所以复挂时不能再查一次 `.composer-wrap`。
+        """
+        start = _fn_body(self.messages_js, "export function startEditMessage(")
+        self.assertIn("mountEditComposer(row, { wrap, text: currentText, files })", start)
+        self.assertIn("composer-wrap:not(.edit-placeholder)", start,
+                      "取真 composer 必须排除占位锚点")
+        resume = _fn_body(self.messages_js, "function resumeEditComposer(snapshot)")
+        self.assertIn("mountEditComposer(row, { wrap: state.editComposerStash.wrap", resume)
+        self.assertIn("ensureMessageRendered(", resume, "懒加载窗口里没有该行时先扩窗口")
+        self.assertIn("exitEditWithDraft()", resume, "实在挂不上就退出编辑，草稿仍不丢")
 
     def test_pending_files_move_with_composer_and_remain_editable(self):
         self.assertIn("pendingFiles", self.messages_js)

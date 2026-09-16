@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.6.2-beta
-  RELEASE_TAG: v2.6.2-beta
-  PACKAGE_NAME: naiba-chat-2.6.2-beta-windows-x64
+  RELEASE_VERSION: 2.6.3-beta
+  RELEASE_TAG: v2.6.3-beta
+  PACKAGE_NAME: naiba-chat-2.6.3-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -87,11 +87,11 @@ jobs:
           Copy-Item -LiteralPath "README.md" -Destination $packageDir
           Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\${{ env.PACKAGE_NAME }}.zip" -Force
 
-      - name: Publish 2.6.2 Beta release
+      - name: Publish 2.6.3 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Naiba Chat 2.6.2 Beta
+          name: Naiba Chat 2.6.3 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -99,13 +99,13 @@ jobs:
             dist/${{ env.PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Naiba Chat 2.6.2 Beta Windows build from `${{ github.sha }}`。
+            Naiba Chat 2.6.3 Beta Windows build from `${{ github.sha }}`。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - 流式滚动不再抖动：消息列表去掉 `scroll-behavior: smooth`——流式期间每个增量 / 工具事件都会贴底，平滑动画会让页面长期处于「追赶最新内容」的状态（肉眼可见的晃动），上滑阅读历史时的高度变化也被动画放大成抖动；现在程序化贴底一律瞬时定位（容器默认瞬时 + `withInstantScroll` 双保险），唯一保留平滑的是用户主动跳转（刻度轨点击）。
-            - 用户主动跳转仍是平滑的：刻度轨点击在自己的调用点显式传 `behavior:'smooth'`，跳转体验不降级。
-            - 长回复不再掉帧：流式 markdown 渲染改为自适应节流——短回复保持 40ms 跟手，累积越长间隔越大（每 4000 字 +50ms、240ms 封顶），不再对越写越长的整段文本每 40ms 重跑一次渲染。
-            - 保持不变：懒加载窗口、预渲染补高度、刻度轨跳转、分割线同进同出等既有契约全部保持；本地验证：懒加载守门单测 12 例 + 浏览器冒烟 13 项全通过。
+            - 编辑不再被后台刷新静默取消：编辑消息时恰好撞上一次会话同步（轮询、重新打开当前会话、清空会话都算）此前会让消息列表重渲染时无条件退出编辑态——编辑框消失、改到一半的字掉回底部输入框、附件丢失、发送键从「重新发送」变回「发送」（再按回车就变成发新消息），全程零提示；现在同一会话刷新且被编辑的消息还在 → 编辑现场（文字、附件、光标位置）原样暂存，重渲染后自动挂回新气泡，用户无感知。
+            - 强制退出也不丢草稿：只有被编辑的消息真没了（被截断 / 删除）或切换会话才退出编辑，此时把「进入编辑前的底部草稿」（文字 + 附件）逐字还原回输入框，并明确提示「编辑已取消，草稿已还原到底部输入框」。
+            - 两条路径同一份逻辑：首次进入编辑与重渲染后复挂共用同一个挂载函数；归位必须发生在重渲染之前（重渲染会连坐销毁搬进气泡的输入区）。
+            - 本地验证：编辑 / 重新生成守门单测 26 例；隔离实例 + 无头 Edge 冒烟扩到 51 项断言（新增两条用例用拦截会话详情接口的方式造出真实的一次同会话同步，并做过反证——退回旧行为立刻复现「输入区回到最底部、按钮变回『发送』」）；全量单测 1139 例无新增失败。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

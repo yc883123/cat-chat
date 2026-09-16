@@ -195,8 +195,12 @@ export function preloadDraggedFile(source, name = '') {
 
 // 编辑时把完整的底部 composer-wrap 原节点移动到用户气泡中。这样输入框、@/Skill
 // 弹层、附件列表、粘贴/拖放上传和发送按钮都继续使用原有事件绑定。
-// 同一时刻最多一个编辑框，退出前必须先把原节点归位，避免 openConversation 重绘时丢失。
-function restoreInlineComposer({ restoreDraft = false } = {}) {
+// 同一时刻最多一个编辑框，退出前必须先把原节点归位。
+//
+// resume = true 是「重渲染前的归位」：只把节点搬回底部，**保留 stash 与占位锚点**（渲染后要按
+// `[data-message-id]` 复挂回新生成的气泡），既不还原草稿也不清 stash。原因见 renderMessages：
+// replaceChildren 会连坐销毁搬进气泡的 composer-wrap，所以必须先归位、再渲染、最后复挂。
+function restoreInlineComposer({ restoreDraft = false, resume = false } = {}) {
   const stash = state.editComposerStash;
   const wrap = document.querySelector('.composer-wrap.is-inline-edit') || stash?.wrap;
   if (!stash || !wrap) return;
@@ -206,9 +210,10 @@ function restoreInlineComposer({ restoreDraft = false } = {}) {
     else parent.appendChild(wrap);
   }
   wrap.hidden = false;
-  if (stash.placeholder && stash.placeholder.parentNode) stash.placeholder.remove();
   wrap.classList.remove('is-inline-edit');
   wrap.querySelector('.edit-composer-header')?.remove();
+  if (resume) return;
+  if (stash.placeholder && stash.placeholder.parentNode) stash.placeholder.remove();
   if (restoreDraft) {
     state.pendingFiles = (stash.files || []).map((file) => ({ ...file }));
     const input = $('#messageInput');
@@ -277,12 +282,40 @@ export function confirmActiveEdit() {
   return true;
 }
 
+// 把 composer-wrap 原节点挂进 row 的气泡并回填文字/附件。「首次进入编辑」与「重渲染后复挂」
+// 共用此处，避免两条路径逻辑漂移（复挂漏一步就会出现"输入框在、附件没了/按钮没变"半残状态）。
+// wrap 必须由调用方传入：进入编辑后底部还留着一个 `composer-wrap edit-placeholder` 空锚点，
+// 且它被插在真 composer **前面**，再查一次 `.composer-wrap` 会抓到那个空 div（派生的坑）。
+// 复挂时 stash 必须还在：把它的 row 指向新生成的那一行，取消/确认才认得出新气泡。
+function mountEditComposer(row, { wrap, text = '', files = [] } = {}) {
+  const body = row?.querySelector('.message-body');
+  const textarea = $('#messageInput');
+  if (!body || !wrap || !textarea) return false;
+  body.replaceChildren();
+  const header = document.createElement('div');
+  header.className = 'edit-composer-header';
+  header.innerHTML = '<span>正在编辑此消息</span><button type="button" class="control-button" data-edit-cancel>取消</button>';
+  body.append(wrap, header);
+  wrap.classList.add('is-inline-edit');
+  state.pendingFiles = (files || []).map((file) => ({ ...file }));
+  textarea.value = String(text ?? '');
+  if (state.editComposerStash) state.editComposerStash.row = row;
+  renderPendingFiles();
+  applyEditingState(row);
+  resizeTextarea();
+  renderInputMirror();
+  notifyComposerChanged(textarea);
+  header.querySelector('[data-edit-cancel]').addEventListener('click', cancelActiveEdit);
+  return true;
+}
+
 export function startEditMessage(row) {
   if (!row) return;
   // #composerForm：移动真实表单节点，不复制它，确保既有事件监听与 @/附件行为全部保留。
   if (state.editingMessageId) cancelActiveEdit();
   const body = row.querySelector('.message-body');
-  const wrap = document.querySelector('.composer-wrap');
+  // 排除 edit-placeholder 占位锚点（它也是 .composer-wrap，且在文档顺序里排在前面）。
+  const wrap = document.querySelector('.composer-wrap:not(.edit-placeholder)');
   if (!body || !wrap) return;
   // 提取纯文本内容（不含附件标记）。带 /ref 引用的消息优先回填原始 display_content（含引用的原文），
   // 否则退到 DOM 文本/rawContent。
@@ -306,24 +339,82 @@ export function startEditMessage(row) {
     files: (state.pendingFiles || []).map((file) => ({ ...file })),
   };
   row.dataset.rawContent = currentText;
-  body.replaceChildren();
-  const header = document.createElement('div');
-  header.className = 'edit-composer-header';
-  header.innerHTML = '<span>正在编辑此消息</span><button type="button" class="control-button" data-edit-cancel>取消</button>';
-  body.append(wrap, header);
-  wrap.classList.add('is-inline-edit');
-  state.pendingFiles = attachments.map((file) => ({ ...file, existingAttachment: true }));
+  const files = attachments.map((file) => ({ ...file, existingAttachment: true }));
+  if (!mountEditComposer(row, { wrap, text: currentText, files })) return;
   const textarea = $('#messageInput');
-  if (!textarea) return;
-  textarea.value = currentText;
-  renderPendingFiles();
-  applyEditingState(row);
-  resizeTextarea();
-  renderInputMirror();
-  notifyComposerChanged(textarea);
-  header.querySelector('[data-edit-cancel]').addEventListener('click', cancelActiveEdit);
   textarea.focus();
   textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+}
+
+// 编辑被强制结束（被编辑的消息没了 / 换了会话）：把「进入编辑前暂存的底部草稿」还回底部输入框。
+// 这是与旧行为的关键差别——以前是静默丢弃，用户改到一半的内容直接消失。
+function exitEditWithDraft() {
+  if (!state.editingMessageId && !state.editComposerStash) return;
+  const stash = state.editComposerStash;
+  const row = stash?.row;
+  const hadDraft = Boolean(String(stash?.text || '').trim()) || Boolean((stash?.files || []).length);
+  hideSkillPopup();
+  hideFilePopup();
+  restoreInlineComposer({ restoreDraft: true });
+  row?.classList.remove('is-editing');
+  applyEditingState(null);
+  toast(hadDraft ? '编辑已取消，草稿已还原到底部输入框' : '编辑已取消');
+}
+
+// 重渲染前的编辑态分流。返回 null（本次不复挂）或复挂快照。
+//   · 同会话刷新（轮询 syncCurrentConversation / 重新打开当前会话）且被编辑消息仍在
+//     → 只归位、保 stash，等渲染后把 composer 复挂回新气泡：编辑框、改过的字、附件全都在。
+//   · 被编辑消息已不存在（被截断/删除）或换了会话 → 退出编辑并还原草稿（exitEditWithDraft）。
+// **顺序是硬要求**：replaceChildren 会连坐销毁搬进气泡的 composer-wrap，必须先归位再渲染。
+function prepareEditRerender(list, switched) {
+  if (!state.editingMessageId) return null;
+  const stash = state.editComposerStash;
+  const textarea = $('#messageInput');
+  const messageId = state.editingMessageId;
+  const stillThere = !switched && list.some((message) => String(message?.id || '') === messageId);
+  if (stillThere && stash && textarea) {
+    const snapshot = {
+      messageId,
+      text: String(textarea.value ?? ''),
+      files: (state.pendingFiles || []).map((file) => ({ ...file })),
+      selection: [textarea.selectionStart, textarea.selectionEnd],
+      focused: document.activeElement === textarea,
+    };
+    restoreInlineComposer({ resume: true });
+    return snapshot;
+  }
+  exitEditWithDraft();
+  return null;
+}
+
+// 渲染后把 composer 复挂回（可能是新生成的）那条消息行。
+// 懒加载窗口里没有它时先向前扩窗口；实在拿不到就按「退出编辑」兜底——草稿仍不会丢。
+function resumeEditComposer(snapshot) {
+  if (!snapshot) return;
+  const container = $('#messages');
+  const findRow = () => {
+    const rows = container ? container.querySelectorAll('.message-row[data-message-id]') : [];
+    for (const row of rows) if (row.dataset.messageId === snapshot.messageId) return row;
+    return null;
+  };
+  let row = findRow();
+  if (!row) {
+    const index = (state.messages || []).findIndex((message) => String(message?.id || '') === snapshot.messageId);
+    if (index >= 0 && ensureMessageRendered(index)) row = findRow();
+  }
+  if (!row || !state.editComposerStash) {
+    exitEditWithDraft();
+    return;
+  }
+  if (!mountEditComposer(row, { wrap: state.editComposerStash.wrap, text: snapshot.text, files: snapshot.files })) {
+    exitEditWithDraft();
+    return;
+  }
+  const textarea = $('#messageInput');
+  if (textarea && snapshot.focused) {
+    textarea.focus();
+    try { textarea.setSelectionRange(snapshot.selection[0], snapshot.selection[1]); } catch (_) { /* 选区越界时忽略 */ }
+  }
 }
 
 // 共用重发：截断到某条用户消息、恢复它的附件、回到输入框并发送。
@@ -800,13 +891,14 @@ export function renderMessages(messages) {
   const container = $('#messages');
   const empty = emptyStateElement;
   closeImageLightbox();
-  // 重渲染会把会话内编辑框一起换掉 → 编辑态必须同步退出，
-  // 否则底部会一直卡在「重新发送」（编辑框已经不在了）。
-  if (state.editingMessageId) applyEditingState(null);
   const list = Array.isArray(messages) ? messages : [];
   // 切换会话 → 窗口重置为「最近 N 轮」；同一会话刷新（轮询/保存后）→ 保留当前窗口与滚动位置，
   // 否则用户正在往上翻历史时一次轮询就会把他拽回底部。
   const switched = state.messagesConversationId !== String(state.conversationId || '');
+  // 编辑态分流：以前这里会无条件把编辑态退掉，于是轮询/后台任务写消息引发的一次同会话刷新
+  // 就会静默吃掉编辑现场（文字掉回底部、附件丢失、按钮从「重新发送」变回「发送」）。
+  // 现在同会话且被编辑消息还在 → 保现场复挂；只有消息真没了或换了会话才退出（且必还草稿）。
+  const editResume = prepareEditRerender(list, switched);
   const keepScroll = !switched && !stickToBottom;
   const previousScrollTop = container.scrollTop;
   const wantedStart = switched ? initialRenderStart(list) : clampTurnStart(list, Number(state.renderStart) || 0);
@@ -857,6 +949,8 @@ export function renderMessages(messages) {
   } catch (error) {
     console.error('[naiba] renderMessages 渲染崩溃:', error, '消息数=', list.length);
   }
+  // 复挂必须在 replaceChildren 之后：新生成的气泡才有 [data-message-id] 可挂。
+  resumeEditComposer(editResume);
 }
 
 /**

@@ -1,11 +1,13 @@
 // 任务面板浏览器冒烟（Playwright + 系统 Edge）。
 //
 // 由 verify/tasks_panel_smoke.py 编排：起一个读仓库 public/ 的隔离源码实例、播种
-// "回答记录 + 后台作业"混排的数据，然后在这里断言这次改造的四条承诺：
+// "回答记录 + 后台作业"混排的数据（含 chat → 子 Agent → ComfyUI 两层派生链），
+// 然后在这里断言这次改造的五条承诺：
 //   1. 面板只列后台作业（chat/plan_execute 那些"回答记录"不出现）；
 //   2. 按回答分组，组标题 = 类型 + 时间，且不引用用户消息原文；
 //   3. 状态一律中文（含「停止中」）；行内停止按钮只对活动作业出现；
-//   4. 零 pageerror / 零 console.error；窄屏不横向滚动。
+//   4. 两层派生链同组、子行带嵌套标记（缩进 + `↳` 由真实 CSS 生效）；
+//   5. 零 pageerror / 零 console.error；窄屏不横向滚动。
 //
 // 环境变量：NAIBA_SMOKE_BASE（默认 http://127.0.0.1:8811）
 const { chromium } = require('playwright');
@@ -39,9 +41,9 @@ function check(label, ok, detail = '') {
 
   try {
     await page.goto(BASE, { waitUntil: 'domcontentloaded' });
-    // 面板渲染在轮询里完成（弹层没开也会重绘 #taskList）：等三条作业都到位再开弹层。
+    // 面板渲染在轮询里完成（弹层没开也会重绘 #taskList）：等五条作业都到位再开弹层。
     await page.waitForFunction(
-      () => document.querySelectorAll('#taskList .task-item').length === 3,
+      () => document.querySelectorAll('#taskList .task-item').length === 5,
       null, { timeout: 30000 },
     );
 
@@ -55,7 +57,7 @@ function check(label, ok, detail = '') {
     await page.waitForSelector('#tasksDialog[open] .task-item', { timeout: 10000 });
 
     const itemIds = await page.$$eval('#tasksDialog .task-item', (nodes) => nodes.map((n) => n.dataset.taskId));
-    check('面板只列后台作业（3 条）', itemIds.length === 3, JSON.stringify(itemIds));
+    check('面板只列后台作业（5 条）', itemIds.length === 5, JSON.stringify(itemIds));
     check('回答记录不出现在面板',
       !itemIds.includes('smoke-reply-1') && !itemIds.includes('smoke-reply-2'), JSON.stringify(itemIds));
 
@@ -64,6 +66,19 @@ function check(label, ok, detail = '') {
       JSON.stringify(titles));
     check('同批两个作业显示 ×2', titles.some((t) => t.includes('×2')), JSON.stringify(titles));
     check('组标题不引用用户消息原文', !titles.some((t) => t.includes('不该出现在面板里')), JSON.stringify(titles));
+    check('组标题把 subagent 标为「AI 子任务」', titles.some((t) => t.includes('AI 子任务')), JSON.stringify(titles));
+
+    // 行标题优先显示落库任务名（message = JobSpec.label），类型名退居 hover 提示。
+    const kindTitles = await page.$$eval('#tasksDialog .task-item', (nodes) => nodes.map((n) => ({
+      id: n.dataset.taskId,
+      title: (n.querySelector('.task-kind')?.textContent || '').trim(),
+      tooltip: (n.querySelector('.task-kind')?.getAttribute('title') || '').trim(),
+    })));
+    const subagentRow = kindTitles.find((row) => row.id === 'smoke-job-subagent') || { title: '', tooltip: '' };
+    check('子任务行标题显示任务名而非类型名',
+      subagentRow.title === '子任务：整理素材并提交出图' && subagentRow.title !== 'AI 子任务',
+      JSON.stringify(subagentRow));
+    check('行标题 hover 提示保底显示类型名', subagentRow.tooltip === 'AI 子任务', JSON.stringify(subagentRow));
 
     const statuses = await page.$$eval('#tasksDialog .task-item .task-status', (nodes) => nodes.map((n) => n.textContent.trim()));
     check('状态显示为「停止中」', statuses.includes('停止中'), JSON.stringify(statuses));
@@ -75,7 +90,38 @@ function check(label, ok, detail = '') {
     check('终态作业没有停止按钮', !cancelIds.includes('smoke-job-failed'), JSON.stringify(cancelIds));
 
     const summary = (await page.textContent('#taskSummary')) || '';
-    check('统计条口径', /共 3 · 运行中 2 · 失败 1 · 已完成 0/.test(summary), summary);
+    // 「运行中」= 活动态总数（含 stopping / queued / waiting）：本批 3 running + 1 stopping。
+    check('统计条口径', /共 5 · 运行中 4 · 失败 1 · 已完成 0/.test(summary), summary);
+
+    // 两层派生链（chat → 子 Agent → ComfyUI）：chat 行被 jobs_only 过滤后，子 Agent 与它
+    // 派生的 ComfyUI 仍得在同一组里；子行还要有嵌套标记，且缩进/`↳` 必须由真实 CSS 生效
+    // （只断言类名会把"样式没打进去"这种事故放过去）。
+    const sections = await page.$$eval('#tasksDialog .task-group', (nodes) => nodes.map((section) => ({
+      title: (section.querySelector('.task-group-title')?.textContent || '').trim(),
+      ids: [...section.querySelectorAll('.task-item')].map((n) => n.dataset.taskId),
+      nested: [...section.querySelectorAll('.task-item')].map((n) => n.classList.contains('task-item-nested')),
+    })));
+    check('派生链同组（作业不按单层父 id 裂开）', sections.length === 2, JSON.stringify(sections));
+    const chain = sections.find((section) => section.ids.includes('smoke-job-subagent')) || { ids: [], nested: [] };
+    check('子 Agent 与它派生的 ComfyUI 在同一组',
+      chain.ids.length === 3 && chain.ids.includes('smoke-job-nested') && chain.ids.includes('smoke-job-failed'),
+      JSON.stringify(chain.ids));
+    // 缩进口径跟「父行是否也在面板里」走：失败作业的父（chat 行）被过滤 → 不缩进；
+    // 子 Agent 的父就是那条失败作业 → 缩进；它派生的 ComfyUI 同理。
+    const nestedById = new Map(chain.ids.map((id, index) => [id, chain.nested[index]]));
+    check('只有父行可见的作业才缩进（父行被过滤的那个不缩进）',
+      nestedById.get('smoke-job-failed') === false
+      && nestedById.get('smoke-job-subagent') === true
+      && nestedById.get('smoke-job-nested') === true,
+      JSON.stringify([...nestedById]));
+
+    const nestedStyle = await page.$eval('#tasksDialog .task-item-nested', (node) => ({
+      marginLeft: getComputedStyle(node).marginLeft,
+      indentMark: getComputedStyle(node.querySelector('.task-kind'), '::before').content,
+    }));
+    check('嵌套缩进与 ↳ 标记由真实 CSS 生效',
+      parseFloat(nestedStyle.marginLeft) > 0 && String(nestedStyle.indentMark).includes('↳'),
+      JSON.stringify(nestedStyle));
 
     const detailButton = await page.$('#tasksDialog [data-task-detail="smoke-job-failed"]');
     check('失败作业有详情入口', Boolean(detailButton));
@@ -86,9 +132,17 @@ function check(label, ok, detail = '') {
       check('详情可展开且含失败原因', visible && detailText.includes('第 1 段提交失败'), detailText.slice(0, 120));
     }
 
+    // Playwright 截图留档：验证前端显示效果的人工核对证据（verify/ 在 .gitignore）。
+    const fs = require('fs');
+    const path = require('path');
+    const shotsDir = path.join(__dirname, 'tasks_panel_shots');
+    fs.mkdirSync(shotsDir, { recursive: true });
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.screenshot({ path: path.join(shotsDir, 'desktop-panel.png') });
     await page.setViewportSize({ width: 430, height: 900 });
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     check('430px 视口无横向滚动', overflow <= 0, `overflow=${overflow}`);
+    await page.screenshot({ path: path.join(shotsDir, 'mobile-panel.png') });
 
     check('零 pageerror', pageErrors.length === 0, pageErrors.join(' | '));
     check('零 console.error', consoleErrors.length === 0, consoleErrors.join(' | '));

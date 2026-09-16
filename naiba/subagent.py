@@ -100,7 +100,7 @@ def run_subagent_agent(
     allowed_tools = [t for t in allowed_tools if t not in SUBAGENT_BLOCKED_TOOLS]
     skill_policy = params.get("skill_policy") or {"mode": "auto", "skill_ids": []}
 
-    emit({"type": "job_status", "status": "running", "current_step": "子 Agent 推理中"})
+    emit({"type": "job_status", "status": "running", "current_step": "推理中"})
     # 子 Agent 继承"该会话的工作区 + 审批档位"（不得扩大权限）：
     # 直接用 app.executor 会让判定/执行落到启动期默认工作区——会话工作区内的路径被判越界，
     # 且 run_context 缺 executor 时 unpack_skill_archive 等工具取不到工作区（必然失败）。
@@ -223,7 +223,12 @@ def subagent_handler_factory(app: AppContext) -> Callable[..., tuple[bool, str]]
             tool for tool in child_tools
             if tool in parent_allowed and tool not in SUBAGENT_BLOCKED_TOOLS
         ]
-        label = str((arguments or {}).get("label") or "")[:120] or "子 Agent 任务"
+        # 默认任务名从 instruction 派生（「子任务：前 24 字…」）：面板行标题显示的是
+        # 落库 message（label），笼统的「AI 子任务」说不清这行在干什么。
+        label = str((arguments or {}).get("label") or "").strip()[:120]
+        if not label:
+            head = " ".join(instruction.split())[:24]
+            label = f"子任务：{head}{'…' if len(' '.join(instruction.split())) > 24 else ''}"
         spec = JobSpec(
             kind="subagent",
             conversation_id=conversation_id,

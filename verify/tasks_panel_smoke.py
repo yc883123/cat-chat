@@ -9,7 +9,9 @@
 - 接口契约：`/api/tasks?jobs_only=1` 只回后台作业；不带该参数时行为与从前一致（向后兼容）；
 - Job 取消：`POST /api/jobs/{id}/cancel` 落 `stopping` + `cancel_requested`；
 - 前端：面板只列作业、按回答分组、组标题为「类型 + 时间」、状态含「停止中」、
-  停止按钮只对活动作业出现、零 pageerror / 零 console.error、窄屏不横向滚动。
+  停止按钮只对活动作业出现、零 pageerror / 零 console.error、窄屏不横向滚动；
+- 两层派生链（chat → 子 Agent → ComfyUI）：父行被过滤后子任务不裂成两组，
+  且子行带嵌套标记（缩进与 `↳` 由真实 CSS 生效）。
 
 前置：仓库根 `node_modules/` 里有 playwright（`npm install --no-save playwright`），
 浏览器用系统 Edge（`channel: 'msedge'`），无需 `npx playwright install`。
@@ -119,13 +121,23 @@ def seed(root: Path) -> str:
 
 
 def seed_active(root: Path, conversation_id: str) -> None:
-    """服务起来之后再插活动作业：否则会被启动清理改写成 interrupted。"""
+    """服务起来之后再插活动作业：否则会被启动清理改写成 interrupted。
+
+    其中 subagent → nested 是**两层派生链**（真实链路：chat → 子 Agent → ComfyUI），
+    用来钉死分组口径：chat 行被 jobs_only 过滤后，子 Agent 与它派生的 ComfyUI 必须
+    仍收在同一组，并且子行带嵌套标记（缩进 + 连接线）。
+    """
     db_path = root / "data" / "chat.db"
     insert_task(db_path, "smoke-job-running", conversation_id, "comfyui", "running",
                 parent="smoke-reply-1", message="ComfyUI 批量生成",
                 current_step="已提交 2/3", attempt=3)
     insert_task(db_path, "smoke-job-stopping", conversation_id, "comfyui", "stopping",
                 parent="smoke-reply-1", message="ComfyUI 批量生成")
+    insert_task(db_path, "smoke-job-subagent", conversation_id, "subagent", "running",
+                parent="smoke-job-failed", message="子任务：整理素材并提交出图")
+    insert_task(db_path, "smoke-job-nested", conversation_id, "comfyui", "running",
+                parent="smoke-job-subagent", message="ComfyUI 批量生成",
+                current_step="已提交 1/3")
 
 
 def main() -> int:
@@ -163,8 +175,11 @@ def main() -> int:
         print("② 服务已就绪后再播活动作业（避开启动清理）")
         seed_active(root, conversation_id)
         active_ids = [str(item.get("id") or "") for item in (_api("/api/tasks?jobs_only=1").get("tasks") or [])]
-        check("三条作业齐备且未被启动清理改写",
-              set(active_ids) == {"smoke-job-running", "smoke-job-stopping", "smoke-job-failed"},
+        check("五条作业齐备且未被启动清理改写",
+              set(active_ids) == {
+                  "smoke-job-running", "smoke-job-stopping", "smoke-job-failed",
+                  "smoke-job-subagent", "smoke-job-nested",
+              },
               f"{active_ids}")
 
         print("③ 前端（Playwright + 系统 Edge）")

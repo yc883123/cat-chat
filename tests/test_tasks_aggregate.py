@@ -45,6 +45,13 @@ def _function_body(source: str, signature: str) -> str:
     return rest if match is None else rest[: match.start() + 1]
 
 
+def _css_rule(source: str, selector: str) -> str:
+    """取 CSS 规则体（``选择器 { ... }``），用于钉死「这条规则存在且含某个声明」。"""
+    start = source.index(selector + " {")
+    end = source.index("}", start)
+    return source[start:end]
+
+
 class TasksJobsOnlyFilterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -150,6 +157,34 @@ class TaskPanelFrontendTests(unittest.TestCase):
         self.assertIn("taskSyncFailed", self.tasks_js)
         body = _function_body(self.conversations_js, "function renderTaskSummary(")
         self.assertIn("最后成功更新", body)
+
+    def test_derived_chain_groups_by_visible_chain_anchor(self) -> None:
+        """派生链必须按「可见父链锚点」分组，而不是按单层 parent_job_id。
+
+        事故：chat → 子 Agent → ComfyUI 两层链路里 chat 行被 jobs_only 过滤，
+        单层分组会把子 Agent 与它派生的 ComfyUI 拆成两组（用户看到「一个子 Agent
+        又变成两个任务」）；但也不能简单地"上溯到最顶层可见行"——那样同一父下
+        的兄弟作业（父不在面板里）会各自成组，破坏既有「×N」同批口径。
+        """
+        body = _function_body(self.conversations_js, "export function renderRunTasks(")
+        self.assertIn("const key = rootKeyOf(task);", body)
+        self.assertIn("byId.get(", body, "锚点要沿可见父链上溯，必须查得到父行")
+        self.assertIn("seen.has(next)", body, "环状父子链必须能收敛（脏数据不得卡死面板）")
+        self.assertNotIn(
+            "const key = String(task.parent_job_id || '');", body,
+            "单层 parent_job_id 分组是本次要修的缺陷，不得回退",
+        )
+
+    def test_child_rows_are_marked_nested(self) -> None:
+        """子任务行必须有从属标记（缩进 + 连接线），且只有父行在面板里时才加。"""
+        row = _function_body(self.conversations_js, "function taskRowMarkup(")
+        self.assertIn("nested = false", row, "taskRowMarkup 要显式接嵌套标记（默认不嵌套）")
+        self.assertIn(" task-item-nested", row)
+        body = _function_body(self.conversations_js, "export function renderRunTasks(")
+        self.assertIn("byId.has(String(task.parent_job_id", body, "父行也在面板里才缩进")
+        styles = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
+        self.assertIn(".task-item-nested", styles)
+        self.assertIn("margin-left", _css_rule(styles, ".task-item-nested"), "子行要缩进")
 
 
 if __name__ == "__main__":

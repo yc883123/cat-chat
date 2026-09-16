@@ -17,13 +17,21 @@ export const TASK_KIND_LABELS = {
   shell: '命令执行',
   http_poll: 'HTTP 轮询',
   check: '外部检查',
-  subagent: '子 Agent',
+  subagent: 'AI 子任务',
 };
 
 export function taskKindLabel(kind) {
   const key = String(kind || '').trim();
   if (!key) return '后台任务';
   return TASK_KIND_LABELS[key] || key;
+}
+
+// 行标题：优先显示落库的任务名（message，即 JobSpec.label），没有时回退类型名。
+// 「Job(kind)」是后端 create_run 在无 label 时的兜底名，对用户不可读，不展示。
+export function taskDisplayTitle(task) {
+  const message = String(task?.message || '').trim();
+  if (message && !/^Job\([a-z_]+\)$/i.test(message)) return message;
+  return taskKindLabel(task?.kind);
 }
 
 export async function loadTasks() {

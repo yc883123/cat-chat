@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from naiba import net as net_io
+from naiba.core.exceptions import TaskCancelled
 from naiba.events import EventBus
 from naiba.tools.providers.core import POWERSHELL_UTF8_PREFIX
 
@@ -182,6 +183,18 @@ class JobRegistry:
     # ---- 统一接口 ----
     def start(self, spec: JobSpec, owner: str | None = None) -> str:
         owner = owner or spec.owner_session_id or spec.conversation_id
+        # 父任务取消闸门：父已被取消（或正在停止）时拒绝创建。取消级联只抓「取消
+        # 那一刻」已存在的子任务；没有这道闸门，没及时响应取消信号的 worker 之后
+        # 仍能派生新 Job（实测：subagent 被取消后仍创建 comfyui Job 并跑完 6/6）。
+        # 注意不能拦「父已终态」：回答完成后派生/恢复的后台 Job 都以终态 Run 为
+        # 归属锚点，resume()/retry() 也要在终态父下重建 Job。
+        parent_id = str(spec.parent_job_id or "")
+        if parent_id:
+            parent = self.app.storage.get_background_task(parent_id)
+            if parent:
+                parent_status = str(parent.get("status") or "")
+                if parent.get("cancel_requested") or parent_status in {"stopping", "cancelling", "cancelled"}:
+                    raise TaskCancelled("父任务已取消，不再创建新任务")
         snapshot = {
             "job_spec": {"kind": spec.kind, "resumable": spec.resumable},
             "params": spec.params,
@@ -376,7 +389,11 @@ class JobRegistry:
             resumable=True,
             checkpoint=checkpoint,
         )
-        new_id = self.start(spec, owner=job["owner_session_id"])
+        try:
+            new_id = self.start(spec, owner=job["owner_session_id"])
+        except TaskCancelled as exc:
+            # 父任务已取消：显式 resume/retry 也不应复活用户取消掉的工作。
+            raise ValueError(str(exc)) from exc
         if new_id:
             # 在新 Job 的增量输出里写入一条来源说明，job_output 与记录均可见。
             self._emit(new_id, {"type": "output", "line": f"（本 Job 由 Job {job_id} 恢复/重试）"})
@@ -438,6 +455,11 @@ class JobRegistry:
             seen_signatures.add(signature)
             try:
                 new_id = self.resume(job_id, owner=str(job.get("owner_session_id") or "") or None)
+            except TaskCancelled:
+                # 父任务在停止前已被用户取消：恢复它等于复活用户明确不要的工作。
+                # 打上接续标记，避免每轮启动都重复尝试并刷错误日志。
+                self._mark_superseded(job_id, reason="父任务已取消，不再恢复")
+                continue
             except Exception:
                 logger.exception("恢复中断 Job 失败：job=%s", job_id)
                 continue
@@ -489,10 +511,10 @@ class JobRegistry:
 
     def _run_subagent(self, job_id: str, spec: JobSpec, cancel: threading.Event) -> None:
         if not self.agent_runner:
-            self._set_status(job_id, "running", current_step="子 Agent 运行器未配置")
-            self._finish(job_id, "failed", error="子 Agent 运行器未配置")
+            self._set_status(job_id, "running", current_step="子任务运行器未配置")
+            self._finish(job_id, "failed", error="子任务运行器未配置")
             return
-        self._set_status(job_id, "running", current_step="子 Agent 已启动")
+        self._set_status(job_id, "running", current_step="已启动")
         try:
             self.agent_runner(job_id, spec, cancel, lambda p: self._emit(job_id, p))
             job = self.get(job_id)
@@ -501,6 +523,13 @@ class JobRegistry:
         except Exception as exc:
             logger.exception("子 Agent Job 执行失败：job=%s", job_id)
             self._finish(job_id, "failed", error=str(exc))
+        finally:
+            # 兜底：子 Agent 被取消/失败而退出时，它派生的子 Job 不得继续跑。
+            # 取消级联（cancel → _cancel_children）只抓「取消那一刻」已存在的子
+            # 任务；worker 晚于取消创建的子 Job 会逃逸，在这里收网。
+            job = self.get(job_id)
+            if job and (job.get("cancel_requested") or str(job.get("status") or "") in {"cancelled", "failed"}):
+                self._cancel_children(job_id, owner=None, reason="父任务已结束")
 
     def _run_shell(self, job_id: str, spec: JobSpec, cancel: threading.Event) -> None:
         params = spec.params or {}

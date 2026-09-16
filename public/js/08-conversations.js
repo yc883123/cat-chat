@@ -4,7 +4,7 @@
 
 import { $, api, escapeHtml, state, toast } from "./01-core.js";
 import { renderMessages } from "./04-messages.js";
-import { activeTaskStatuses, loadTasks, renderPermissionModeSwitch, taskKindLabel, taskStatusLabel } from "./06-tasks-plans.js";
+import { activeTaskStatuses, loadTasks, renderPermissionModeSwitch, taskDisplayTitle, taskKindLabel, taskStatusLabel } from "./06-tasks-plans.js";
 import { applyConversationAgent, applyConversationModel, composerModelChoice } from "./07-models-agents.js";
 import { readAsDataUrl } from "./10-upload.js";
 import { detachRunSubscription, resumeConversationRun } from "./11-run-stream.js";
@@ -812,7 +812,7 @@ function taskDetailRows(task) {
   return rows.slice(0, 12);
 }
 
-function taskRowMarkup(task) {
+function taskRowMarkup(task, nested = false) {
   const active = activeTaskStatuses.has(task.status);
   const note = String(task.error || task.detail?.message || task.current_step || '');
   const rows = taskDetailRows(task);
@@ -824,10 +824,17 @@ function taskRowMarkup(task) {
   const detailButton = rows.length
     ? `<button type="button" class="task-more" data-task-detail="${escapeHtml(task.id)}" aria-expanded="false" aria-label="展开详情">详情</button>`
     : '';
-  return `<div class="task-item" data-task-id="${escapeHtml(task.id)}">
+  // 后台任务的逐行日志（展开详情时按 cursor 增量拉取）。
+  // 日志行本来就以 job_log 事件写在 run_events 里，但前端一直没人消费它——「转后台以后
+  // 还能实时看日志」在那之前是假前提，所以先把入口补上，再谈引导模型转后台。
+  const logHtml = rows.length
+    ? '<div class="task-log" hidden><div class="task-log-head">任务日志<span class="task-log-hint"></span></div>'
+      + '<div class="task-log-lines" role="log" aria-label="后台任务实时输出"></div></div>'
+    : '';
+  return `<div class="task-item${nested ? ' task-item-nested' : ''}" data-task-id="${escapeHtml(task.id)}">
       <div class="task-head">
         <span class="task-status ${escapeHtml(task.status)}">${escapeHtml(taskStatusLabel(task.status))}</span>
-        <b class="task-kind" title="${escapeHtml(String(task.kind || ''))}">${escapeHtml(taskKindLabel(task.kind))}</b>
+        <b class="task-kind" title="${escapeHtml(taskKindLabel(task.kind))}">${escapeHtml(taskDisplayTitle(task))}</b>
         <span class="task-elapsed">${escapeHtml(taskElapsed(task))}</span>
         ${note ? `<span class="task-note" title="${escapeHtml(note)}">${escapeHtml(note)}</span>` : ''}
       </div>
@@ -837,7 +844,83 @@ function taskRowMarkup(task) {
         ${active ? `<button type="button" class="task-cancel" data-task-cancel="${escapeHtml(task.id)}" aria-label="停止这个后台任务">停止</button>` : ''}
       </div>
       ${detailHtml}
+      ${logHtml}
     </div>`;
+}
+
+// ---- 后台任务日志（job_log）：按 cursor 增量拉取，展开详情时可见 ----
+// 数据来源：JobRegistry 逐行 emit 的 job_log 事件已经落在 run_events 里，
+// `GET /api/jobs/<id>/events?after=<cursor>` 原样读回（后端无新增接口）。
+// cursor 语义：只返回 sequence > cursor 的行，所以重复调用是幂等的——列表每轮重渲染后
+// 重新拉一次就是天然轮询，不会出现重复行。
+const taskLogCursors = new Map();   // taskId → 已消费到的 sequence
+const openTaskLogs = new Set();     // 当前展开日志的 taskId（列表重渲染后据此恢复展开态）
+const TASK_LOG_MAX_LINES = 200;     // 只保留最近 N 行：长任务的日志可以到几万行，不能无限铺 DOM
+
+export function setTaskLogOpen(taskId, open) {
+  const id = String(taskId || '');
+  if (!id) return;
+  if (open) {
+    openTaskLogs.add(id);
+    loadTaskLog(id);
+  } else {
+    openTaskLogs.delete(id);
+  }
+}
+
+function taskLogBox(taskId) {
+  const item = $(`[data-task-id="${taskId}"]`);
+  return item ? item.querySelector('.task-log') : null;
+}
+
+async function loadTaskLog(taskId) {
+  const log = taskLogBox(taskId);
+  if (!log || log.hidden) return;
+  const lines = log.querySelector('.task-log-lines');
+  const hint = log.querySelector('.task-log-hint');
+  if (!lines) return;
+  const after = taskLogCursors.get(taskId) || 0;
+  let payload = null;
+  try {
+    payload = await api(`/api/jobs/${encodeURIComponent(taskId)}/events?after=${after}`);
+  } catch (error) {
+    if (hint) hint.textContent = '读取失败';
+    return;
+  }
+  const events = Array.isArray(payload?.events) ? payload.events : [];
+  const cursor = Number(payload?.cursor || 0);
+  if (cursor > after) taskLogCursors.set(taskId, cursor);
+  let appended = 0;
+  for (const event of events) {
+    const text = String(event?.line ?? '').replace(/\s+$/, '');
+    if (!text) continue;
+    const line = document.createElement('div');
+    line.className = 'task-log-line';
+    line.textContent = text;
+    lines.appendChild(line);
+    appended += 1;
+  }
+  while (lines.childElementCount > TASK_LOG_MAX_LINES) lines.removeChild(lines.firstElementChild);
+  if (appended && lines.childElementCount) lines.scrollTop = lines.scrollHeight;
+  if (hint) hint.textContent = lines.childElementCount ? `最近 ${lines.childElementCount} 行` : '暂无输出';
+}
+
+// 列表整体重渲染后恢复展开态（并把详情面板与日志一起展开），再续拉一次增量日志。
+function restoreOpenTaskLogs() {
+  for (const id of [...openTaskLogs]) {
+    const item = $(`[data-task-id="${id}"]`);
+    const log = item ? item.querySelector('.task-log') : null;
+    if (!log) { openTaskLogs.delete(id); continue; }
+    log.hidden = false;
+    const detail = item.querySelector('.task-detail');
+    if (detail) detail.hidden = false;
+    const button = item.querySelector('[data-task-detail]');
+    if (button) {
+      button.setAttribute('aria-expanded', 'true');
+      button.textContent = '收起';
+    }
+    loadTaskLog(id);
+  }
 }
 
 function renderTaskSummary(jobs, active) {
@@ -887,9 +970,30 @@ export function renderRunTasks() {
     return;
   }
   // 同一批作业（同一个父回答派生）归一组；父行不在返回里（已被过滤）时按"无父作业"单独成组。
+  // 分组 key 必须沿**可见父链**上溯到锚点：链路是 chat → 子Agent → ComfyUI 两层，
+  // chat 行被 jobs_only 过滤后，若只按单层 parent_job_id 分组，子 Agent 与它派生的
+  // ComfyUI 任务会裂成两组（用户看到"一个子 Agent 又分成两个任务"）。
+  // 锚点口径：① 无父作业仍用 ''（沿用旧口径，同批无父作业归一组）；
+  // ② 父不在列表（chat 行被过滤/记录已清理）→ 用那个**父 id** 当锚点，兄弟作业不拆开；
+  // ③ 父在列表就继续上溯，环用 seen 兜住（脏数据不得把面板卡死）。
+  const byId = new Map(jobs.map((task) => [String(task.id), task]));
+  const rootKeyOf = (task) => {
+    let key = String(task.parent_job_id || '');
+    if (!key) return '';
+    const seen = new Set([String(task.id), key]);
+    let parent = byId.get(key);
+    while (parent) {
+      const next = String(parent.parent_job_id || '');
+      if (!next || seen.has(next)) break; // 可见顶层 / 成环：停在这里，父行与子行同组
+      seen.add(next);
+      key = next;
+      parent = byId.get(next);
+    }
+    return key;
+  };
   const groups = new Map();
   for (const task of jobs) {
-    const key = String(task.parent_job_id || '');
+    const key = rootKeyOf(task);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(task);
   }
@@ -906,9 +1010,11 @@ export function renderRunTasks() {
         <span class="task-group-title">${escapeHtml(taskGroupTitle(tasks))}</span>
         <span class="task-group-stat">共 ${tasks.length}${failed ? ` · 失败 ${failed}` : ''}</span>
       </div>
-      ${tasks.map(taskRowMarkup).join('')}
+      ${tasks.map((task) => taskRowMarkup(task, byId.has(String(task.parent_job_id || '')))).join('')}
     </section>`;
   }).join('');
+  // 列表是整体重渲染的，展开态与日志内容都要就地恢复（cursor 保证不会重复追加）。
+  restoreOpenTaskLogs();
 }
 
 // ---- Agent 设置页：快捷提示词（套用 / 另存 / 删除）+ 角色卡导入 ----

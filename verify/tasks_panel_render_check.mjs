@@ -5,7 +5,8 @@
 //   1. 面板只列后台作业——chat/plan_execute 那些"回答记录"不得出现；
 //   2. 组标题 = 类型 + 时间，且**不引用用户消息原文**；
 //   3. 状态一律中文（含「停止中」），不把英文状态码漏到界面上；
-//   4. 行内停止按钮只对活动态出现；徽标在没有活动任务时回落为总数。
+//   4. 行内停止按钮只对活动态出现；徽标在没有活动任务时回落为总数；
+//   5. 派生链（chat → 子 Agent → ComfyUI）里父行被过滤后仍收成一组，子任务行带嵌套标记。
 //
 // 用法：node verify/tasks_panel_render_check.mjs
 import { readFileSync } from 'node:fs';
@@ -29,6 +30,9 @@ const code = [
   extract(tasksJs, 'export const TASK_KIND_LABELS'),
   extract(tasksJs, 'export function taskKindLabel('),
   extract(tasksJs, 'export function taskStatusLabel('),
+  // 行标题口径（06-tasks-plans）：taskRowMarkup 用它渲染任务名，必须一并 extract，
+  // 否则离线渲染守门会以「ReferenceError: taskDisplayTitle is not defined」整体失败。
+  extract(tasksJs, 'export function taskDisplayTitle('),
   extract(conversationsJs, 'export function taskElapsed('),
   extract(conversationsJs, 'export function formatTaskTime('),
   extract(conversationsJs, 'export function taskGroupTitle('),
@@ -68,11 +72,13 @@ function element(selector) {
 
 const state = { tasks: [], conversationId: 'conv-1', taskSyncFailed: '', taskSyncedAt: 0 };
 
+// restoreOpenTaskLogs 在真实页面里负责"列表重渲染后恢复展开态 + 续拉日志"，依赖 DOM/网络，
+// 本脚本只校验 markup（DOM 桩没有 querySelector/网络），故以空实现注入——它不影响任何断言。
 const factory = new Function(
-  'escapeHtml', 'activeTaskStatuses', 'state', '$',
+  'escapeHtml', 'activeTaskStatuses', 'state', '$', 'restoreOpenTaskLogs',
   `${code}\n;return { renderRunTasks, taskGroupTitle, taskStatusLabel, taskKindLabel };`,
 );
-const panel = factory(escapeHtml, activeTaskStatuses, state, element);
+const panel = factory(escapeHtml, activeTaskStatuses, state, element, () => {});
 
 const failures = [];
 function check(label, ok, detail = '') {
@@ -119,6 +125,47 @@ check('活动作业有停止按钮、终态没有',
 check('详情按钮只在有内容时出现', html.includes('data-task-detail="job-fail"') && !html.includes('data-task-detail="job-done"'));
 check('统计条口径', summary.textContent === '共 3 · 运行中 1 · 失败 1 · 已完成 1', summary.textContent);
 check('徽标显示活动数', element('#taskCount').textContent === '1', element('#taskCount').textContent);
+
+// ---- 派生链分组：chat（被过滤）→ 子 Agent → ComfyUI 必须收成一组 ----
+// 事故口径：链路的父行（chat 回答记录）不在 jobs_only 返回里，若按**单层** parent_job_id
+// 分组，子 Agent 与它派生的 ComfyUI 任务会各占一组（用户看到「一个子 Agent 又变成两个任务」），
+// 且子任务行没有任何从属标记。
+const chatRow2 = { // 真实链路的最顶层，面板里不出现
+  id: 'chat-1', kind: 'chat', conversation_id: 'conv-1', parent_job_id: '',
+  status: 'cancelled', cancel_requested: true, detail: {}, checkpoint: {},
+};
+const subagentJob = {
+  id: 'job-sub', kind: 'subagent', conversation_id: 'conv-1', parent_job_id: 'chat-1',
+  status: 'running', created_at: Date.now() - 30000, updated_at: Date.now(), detail: {}, checkpoint: {},
+};
+const nestedChild = {
+  id: 'job-child', kind: 'comfyui', conversation_id: 'conv-1', parent_job_id: 'job-sub',
+  status: 'running', created_at: Date.now() - 20000, updated_at: Date.now(),
+  current_step: '已提交 1/3', detail: {}, checkpoint: {},
+};
+state.tasks = [chatRow2, subagentJob, nestedChild];
+panel.renderRunTasks();
+const nestedHtml = element('#taskList').innerHTML;
+check('两层派生只成一组（子 Agent 与它派生的 ComfyUI 不拆开）',
+  (nestedHtml.match(/class="task-group"/g) || []).length === 1, nestedHtml.slice(0, 240));
+check('组统计含父子两行', nestedHtml.includes('共 2'), nestedHtml.slice(0, 300));
+// 类型名随产品口径统一为「AI 子任务」（TASK_KIND_LABELS.subagent），断言跟着口径走。
+const SUBAGENT_LABEL = 'AI 子任务';
+check(`组标题按类型合并（${SUBAGENT_LABEL} + ComfyUI 生成）`,
+  new RegExp(`${SUBAGENT_LABEL} \\+ ComfyUI 生成 · `).test(nestedHtml), nestedHtml.slice(0, 300));
+check('子任务行带嵌套标记',
+  nestedHtml.includes('class="task-item task-item-nested" data-task-id="job-child"'), nestedHtml.slice(0, 400));
+check('父行（父已被过滤）不误加嵌套标记',
+  nestedHtml.includes('class="task-item" data-task-id="job-sub"'), nestedHtml.slice(0, 400));
+
+// 环状父子链（脏数据/手改库）：渲染必须能收敛，不能把面板卡死。
+const cycleA = { id: 'cyc-a', kind: 'comfyui', conversation_id: 'conv-1', parent_job_id: 'cyc-b', status: 'running', created_at: Date.now() - 1000, detail: {}, checkpoint: {} };
+const cycleB = { id: 'cyc-b', kind: 'comfyui', conversation_id: 'conv-1', parent_job_id: 'cyc-a', status: 'running', created_at: Date.now(), detail: {}, checkpoint: {} };
+state.tasks = [cycleA, cycleB];
+panel.renderRunTasks();
+check('环状父子链渲染能收敛（不卡死）',
+  element('#taskList').innerHTML.includes('data-task-id="cyc-a"')
+  && element('#taskList').innerHTML.includes('data-task-id="cyc-b"'));
 
 // 停止中：既要有中文，也要有活动态按钮
 state.tasks = [{ ...jobRunning, status: 'stopping' }, jobFailed, jobDone];

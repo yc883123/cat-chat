@@ -27,7 +27,7 @@ from typing import Any
 import naiba.net as net_io
 from naiba.app import NaibaChatApp
 from naiba.config import tool_catalog_entries, tool_group_entries, tool_preset_entries
-from naiba.core.choices import resolve_message_choice_groups
+from naiba.core.choices import backfill_turn_choice_groups
 from naiba.core.conv_files import _conv_file_allow, _conv_file_open, _conv_file_save
 from naiba.core.diagnostics import ensure_utf8_stdio
 from naiba.core.exceptions import ActiveRunError
@@ -295,16 +295,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             conversation_id = path.rsplit("/", 1)[-1]
             conversation = self.app.storage.get_conversation(conversation_id)
             if conversation and conversation.get("messages"):
-                last_message = conversation["messages"][-1]
-                if last_message.get("role") == "assistant":
-                    metadata = last_message.setdefault("metadata", {})
-                    # 历史读取只做"补齐"，绝不用空的解析结果覆盖已有有效数据（口径在
-                    # core.choices.resolve_message_choice_groups：有效 metadata 优先）。
-                    choice_groups = resolve_message_choice_groups(
-                        metadata, str(last_message.get("content") or "")
-                    )
-                    metadata["choice_groups"] = choice_groups
-                    metadata["choices"] = choice_groups[0]["choices"] if choice_groups else []
+                backfill_turn_choice_groups(conversation["messages"])
             self._json(conversation or {"error": "对话不存在"}, HTTPStatus.OK if conversation else HTTPStatus.NOT_FOUND)
         elif path == "/api/plans":
             query = urllib.parse.parse_qs(parsed.query)
@@ -757,11 +748,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             if not job_id:
                 self._json({"error": "job_id 不能为空"}, HTTPStatus.BAD_REQUEST)
             else:
-                new_id = self.app.jobs.resume(job_id, owner=body.get("conversation_id") or None)
-                if new_id:
-                    self._json({"resumed": True, "job_id": new_id}, HTTPStatus.OK)
+                try:
+                    new_id = self.app.jobs.resume(job_id, owner=body.get("conversation_id") or None)
+                except ValueError as exc:
+                    self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
                 else:
-                    self._json({"error": "Job 不可恢复或不存在"}, HTTPStatus.NOT_FOUND)
+                    if new_id:
+                        self._json({"resumed": True, "job_id": new_id}, HTTPStatus.OK)
+                    else:
+                        self._json({"error": "Job 不可恢复或不存在"}, HTTPStatus.NOT_FOUND)
         elif path.startswith("/api/jobs/") and path.endswith("/retry"):
             job_id = path.split("/")[-2]
             if not job_id:

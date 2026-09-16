@@ -7,6 +7,7 @@ import json
 import logging
 import shutil
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 
@@ -140,10 +141,20 @@ def _copy_legacy_data(source: Path, paths: PathContext, replace_empty_target: bo
             if sidecar.is_file() and sidecar.stat().st_size:
                 shutil.copy2(sidecar, target_db.with_name(target_db.name + suffix))
 
+    # 旧数据目录顶层的易变运行期档不搬运：数据库本体由其上方专属分支处理（含 WAL/SHM 配对），
+    # server.lock / server.json 是实例锁与状态档（pid/host/port/token），每次启动都会重写。
+    volatile = {"chat.db", "chat.db-wal", "chat.db-shm", "server.lock", "server.json"}
     for item in legacy_data.iterdir():
-        if item.name in {"chat.db", "chat.db-wal", "chat.db-shm", "server.lock"}:
+        if item.name in volatile:
             continue
-        report["data"] = _merge_data_tree(item, paths.data_dir / item.name) or report["data"]
+        destination = paths.data_dir / item.name
+        if item.is_dir():
+            report["data"] = _merge_data_tree(item, destination) or report["data"]
+        elif not destination.exists():
+            # _merge_data_tree 只接受目录（首句就是 target.mkdir），文件喂进去会先把目标建成
+            # 同名目录、再由 source.iterdir() 抛 OSError，让整段迁移静默中断（WinError 183 事故）。
+            shutil.copy2(item, destination)
+            report["data"] = True
 
     # 导入旧安装根目录的 Skills（旧版 paths.app_dir/skills 或数据目录同级 skills）到新托管目录。
     managed_skills = (paths.data_dir / "skills").resolve()
@@ -157,11 +168,27 @@ def _copy_legacy_data(source: Path, paths: PathContext, replace_empty_target: bo
     return report
 
 
-def migrate_legacy_data(paths: PathContext) -> dict[str, Any]:
-    """冻结版首次启动：从 EXE 相邻旧目录迁移 config.json 与 data/ 到数据目录。
+def _write_migration_warning(paths: PathContext, exc: BaseException) -> None:
+    """把启动迁移失败追加到数据目录（文件通道，沿用 storage/store.py 的既有约定）。
 
-    仅当数据目录（%LOCALAPPDATA%\\NaibaChat）尚未初始化时执行；旧文件保留，
-    不覆盖已存在的新数据。源码模式（paths.app_dir == paths.exe_dir）跳过。
+    冻结版（windowed）stdout/stderr 均为 None，``logging`` 的兜底输出无处可去，所以窗口版
+    唯一的诊断通道就是数据目录里的日志文件。诊断通道自身失败不改变迁移结果，故只放弃写文件。
+    """
+    try:
+        paths.data_dir.mkdir(parents=True, exist_ok=True)
+        target = paths.data_dir / "data-migration-warning.log"
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(target, "a", encoding="utf-8") as handle:
+            handle.write(f"{stamp} [naiba-migration] {type(exc).__name__}: {exc}\n")
+    except OSError:
+        pass
+
+
+def migrate_legacy_data(paths: PathContext) -> dict[str, Any]:
+    """冻结版每次启动：尝试把 EXE 相邻旧目录的 config.json 与 data/ 合并进数据目录。
+
+    旧文件保留（不删除、不改写源目录）；目标已有的文件一律优先，只补缺失项，
+    因此重复启动是幂等的。源码模式（paths.app_dir == paths.exe_dir）直接跳过。
     """
     report: dict[str, Any] = {"migrated": False, "config": False, "data": False, "source": ""}
     if str(paths.app_dir) == str(paths.exe_dir):
@@ -171,10 +198,15 @@ def migrate_legacy_data(paths: PathContext) -> dict[str, Any]:
     if not legacy_config.is_file() and not legacy_data.is_dir():
         return report
     try:
-        migrated = _copy_legacy_data(paths.exe_dir)
+        migrated = _copy_legacy_data(paths.exe_dir, paths)
         report.update(migrated)
-    except OSError as exc:
-        logger.warning("迁移旧数据失败：%s", exc)
+    except Exception as exc:  # noqa: BLE001 - 迁移失败绝不能阻断启动
+        # 启动路径上未被捕获的非 OSError 会让冻结版直接弹 traceback 框退出（EXE 旁有旧目录的
+        # 用户必现）。这里放宽到 Exception：记录 + 进 report（bootstrap 诊断页可取）+ 落文件，
+        # 迁移退化成"未执行"，但程序照常启动（旧数据仍在 EXE 旁，不会丢）。
+        report["error"] = f"{type(exc).__name__}: {exc}"
+        logger.exception("迁移旧数据失败（已跳过，不影响启动）：%s", exc)
+        _write_migration_warning(paths, exc)
     if report["config"] or report["data"]:
         report["migrated"] = True
         report["source"] = str(paths.exe_dir)

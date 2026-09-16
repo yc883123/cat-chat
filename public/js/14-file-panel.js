@@ -44,7 +44,8 @@ export function openFilePanel(rawPath) {
   applyFilePanelOpenClass();
   const tab = ensureFileTab(rawPath, true);
   renderFilePanel();
-  if (tab && !tab.info && !tab.loading) loadFileTab(tab);
+  // 一律强制重读：AI 可能在本轮/上一轮改过该文件，缓存的 tab.info 不能当作最新内容（见 reloadFileTab）。
+  reloadFileTab(tab);
   return true;
 }
 
@@ -66,7 +67,18 @@ export function ensureFileTab(rawPath, activate = false) {
   let tab = filePanelState.tabs.find((item) => item.key === key);
   if (!tab) {
     const name = String(rawPath).replace(/\\/g, '/').split('/').pop() || rawPath;
-    tab = { key, raw: String(rawPath), name, info: null, loading: false, error: '', editing: false, draft: null };
+    tab = {
+      key,
+      raw: String(rawPath),
+      name,
+      info: null,
+      loading: false,
+      reloading: false, // 已有内容时的后台重读（保留旧内容渲染，不闪空态）
+      refreshedAt: 0,   // 上次重读的发起时间，供 reloadFileTab 做节流
+      error: '',
+      editing: false,
+      draft: null,
+    };
     filePanelState.tabs.push(tab);
   }
   if (activate) filePanelState.activeKey = key;
@@ -77,22 +89,54 @@ export function activeFileTab() {
   return filePanelState.tabs.find((item) => item.key === filePanelState.activeKey) || null;
 }
 
-export async function loadFileTab(tab) {
-  if (!tab || tab.loading || tab.info) return;
+// 同一标签在窗口内的重复点击（点 chip / 切标签 / 重开面板）只发一次请求，避免内容抖动。
+export const FILE_RELOAD_THROTTLE_MS = 400;
+
+/**
+ * 读取文件内容。force=true 时忽略已缓存的 tab.info，重新从磁盘读取：
+ * - 有旧内容：请求期间保留旧内容渲染，成功后整体替换（不闪「文件尚未加载」空态）；
+ * - 读取失败：有旧内容则保留旧内容并 toast，无旧内容才落 tab.error；
+ * - 成功后重置 editing/draft（脏草稿的拦截在 reloadFileTab，不在这里）。
+ */
+export async function loadFileTab(tab, force = false) {
+  if (!tab || tab.loading || (tab.info && !force)) return;
+  const hadInfo = Boolean(tab.info);
   tab.loading = true;
-  tab.error = '';
+  if (hadInfo) tab.reloading = true;
+  else tab.error = '';
   renderFilePanel();
   try {
     const info = await api(`/api/conversations/${encodeURIComponent(state.conversationId)}/file/open?path=${encodeURIComponent(tab.raw)}`);
     tab.info = info;
     tab.draft = null;
     tab.editing = false;
+    tab.error = '';
   } catch (error) {
-    tab.error = error.message || '读取文件失败';
+    const message = error.message || '读取文件失败';
+    if (hadInfo) toast(`重新读取失败，仍显示上次内容：${message}`);
+    else tab.error = message;
   } finally {
     tab.loading = false;
+    tab.reloading = false;
     renderFilePanel();
   }
+}
+
+/**
+ * 「点击即重读」的统一入口（openFilePanel / activateFileTab / reopenFilePanel 共用）：
+ * 正在编辑且草稿有改动时只提示、不覆盖用户输入；其余情况按 FILE_RELOAD_THROTTLE_MS 节流后强制重读。
+ */
+export function reloadFileTab(tab) {
+  if (!tab) return;
+  if (tab.editing && tab.draft !== null && tab.draft !== tab.info?.content) {
+    toast('文件正在编辑中，已保留你的修改');
+    return;
+  }
+  const now = Date.now();
+  // 首次加载（无缓存）不受节流限制，保证点开即有内容；已有内容时窗口内的重复点击并入上一次请求。
+  if (tab.info && now - (tab.refreshedAt || 0) < FILE_RELOAD_THROTTLE_MS) return;
+  tab.refreshedAt = now;
+  void loadFileTab(tab, true);
 }
 
 export function activateFileTab(key) {
@@ -100,7 +144,7 @@ export function activateFileTab(key) {
   if (!tab) return;
   filePanelState.activeKey = key;
   renderFilePanel();
-  if (!tab.info && !tab.loading && !tab.error) loadFileTab(tab);
+  reloadFileTab(tab);
 }
 
 export function removeFileTab(key) {
@@ -149,6 +193,7 @@ export function fileToolbarMeta(tab) {
   else parts.push(FILE_MD_NAME_RE.test(info.name || '') ? 'Markdown' : '文本');
   if (info.size != null) parts.push(formatFileSize(info.size));
   if (info.truncated) parts.push('仅预览前 2MB');
+  if (tab.reloading) parts.push('刷新中…');
   return parts.join(' · ');
 }
 
@@ -165,11 +210,12 @@ export function renderFilePanelBody() {
     return;
   }
   const info = tab.info;
-  if (tab.loading) {
+  // 强制重读时旧内容仍在 info 里：继续渲染旧内容 + 工具栏「刷新中…」，不闪空态。
+  if (tab.loading && !info) {
     body.innerHTML = '<div class="file-panel-hint"><div class="file-loading">正在读取文件…</div></div>';
     return;
   }
-  if (tab.error) {
+  if (tab.error && !info) {
     body.innerHTML = `<div class="file-panel-hint">无法读取文件：${escapeHtml(tab.error)}</div>`;
     return;
   }
@@ -216,7 +262,7 @@ export function fileContentViewHtml(tab) {
     return `<div class="file-edit-area"><textarea class="file-edit-textarea" spellcheck="false" aria-label="编辑 ${escapeHtml(info.name || '')}">${escapeHtml(value)}</textarea><div class="file-edit-foot"><span>Ctrl/⌘ + S 或 Ctrl/⌘ + Enter 保存 · Esc 取消</span></div></div>`;
   }
   if (info.kind === 'image') {
-    const url = convFileRawUrl(info.path || tab.raw);
+    const url = convFileRawUrl(info.path || tab.raw, fileVersionToken(info));
     return `<div class="file-image-wrap"><img src="${escapeHtml(url)}" alt="${escapeHtml(info.name || '')}" data-large-url="${escapeHtml(url)}"></div>`;
   }
   if (info.kind === 'binary') {
@@ -230,8 +276,17 @@ export function fileContentViewHtml(tab) {
   return `<pre class="file-preview-text">${escapeHtml(text)}</pre>`;
 }
 
-export function convFileRawUrl(path) {
-  return `/api/conversations/${encodeURIComponent(state.conversationId)}/file/raw?token=${encodeURIComponent(state.token)}&path=${encodeURIComponent(String(path || ''))}`;
+/** 图片版本令牌：mtime-size。同名文件被覆盖后令牌变化 → URL 变化 → 绕过浏览器缓存（/file/raw 带 max-age）。 */
+export function fileVersionToken(info) {
+  const mtime = Number(info?.mtime);
+  const size = Number(info?.size);
+  if (!Number.isFinite(mtime) && !Number.isFinite(size)) return '';
+  return `${Number.isFinite(mtime) ? mtime : ''}-${Number.isFinite(size) ? size : ''}`;
+}
+
+export function convFileRawUrl(path, version = '') {
+  const base = `/api/conversations/${encodeURIComponent(state.conversationId)}/file/raw?token=${encodeURIComponent(state.token)}&path=${encodeURIComponent(String(path || ''))}`;
+  return version ? `${base}&v=${encodeURIComponent(version)}` : base;
 }
 
 export function startFileEdit(key) {
@@ -267,8 +322,7 @@ export async function saveFileTab(key) {
     toast(`已保存 ${tab.name}`);
     tab.draft = null;
     tab.editing = false;
-    tab.info = null; // 重新读取以刷新 content/mtime
-    loadFileTab(tab);
+    await loadFileTab(tab, true); // 强制重读刷新 content/mtime；旧内容继续渲染，不闪空态
   } catch (error) {
     toast(`保存失败：${error.message}`);
   }
@@ -321,6 +375,8 @@ export function reopenFilePanel() {
   filePanelState.open = true;
   applyFilePanelOpenClass();
   renderFilePanel();
+  // 重开面板同样按「点击即重读」处理：期间文件可能已被 AI 改动。
+  reloadFileTab(activeFileTab());
 }
 
 export function updateFileTabsButton() {

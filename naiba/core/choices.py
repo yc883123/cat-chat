@@ -45,10 +45,22 @@ _EXPLICIT_BLOCK_RE = re.compile(
 
 # 只接受明确的"选择"意图。英文只保留完整词组，避免正文/代码里的裸 select / choose / pick
 # 触发误判（例如 SQL 的 "SELECT * FROM …"）。
+# 2026-09-16 扩充：AI 常写「以下是当前的选项 / 选项如下 / 你可以选择 / 请从以下中选」这类不含
+# "请选择"字样的措辞——实测本机 31 条"问句 + 编号列表"回复里只有 5 条命中旧词表，是"该弹
+# 没弹"的主因。新增词一律是「选项类名词 + 结构词」组合，仍不接受裸 select / choose / pick。
 CUE_RE = re.compile(
     r"请(?:先|再)?选择|请(?:你|您)?选|再选(?:一下|一个|个)?|供(?:你|您)?选择|可供选择|"
     r"选哪个|选一个|pick one|choose one|select one|which one|which of|choose from|select from|"
-    r"select\s+(?:multiple|more\s+than\s+one)|choose\s+(?:multiple|more\s+than\s+one)",
+    r"select\s+(?:multiple|more\s+than\s+one)|choose\s+(?:multiple|more\s+than\s+one)|"
+    r"以下是(?:当前|本次|这轮|可)?(?:的)?(?:选项|选择项|可选方案|可选项|可选项目)|"
+    r"下面(?:是|有)(?:当前|本次)?(?:的)?(?:选项|选择项|可选方案|可选项)|"
+    r"(?:选项|选择项|可选方案|可选项|可选项目)(?:如下|如下所示|有以下几个|有以下这些)|"
+    r"你可以(?:选择|从以下|从下面|从下列|从中选)|"
+    r"请从(?:以下|下面|下列|上述)|"
+    r"从(?:以下|下面|下列)(?:选项|方案|中)?选|"
+    r"here (?:are|is) (?:the|some|your|a few) (?:options|choices)|"
+    r"(?:the )?(?:options|choices) (?:are|below)|"
+    r"you can (?:choose|pick|select)",
     re.IGNORECASE,
 )
 # 每题自带的单选/多选标识：必须是"独立词"形态（括号包裹、后随标点、或行尾），
@@ -75,6 +87,8 @@ def _clean_choice_text(value: str) -> str:
     value = re.sub(r"^(?:\[[ xX]\]\s*)", "", str(value or "").strip())
     value = re.sub(r"^(?:\*\*|__)", "", value)
     value = re.sub(r"\s*(?:\*\*|__)$", "", value)
+    # 行内加粗闭合标记（"1. **甲** — 说明"）也一并剥掉：选项按钮只显示纯文本、不解析 Markdown。
+    value = value.replace("**", "")
     value = re.sub(r"^\d{1,2}\s*[.、:：)）\]】]\s*", "", value.strip())
     return value.strip()
 
@@ -94,6 +108,22 @@ def _is_prompt_line(text: str) -> bool:
 def _mode_of(prompt: str) -> str:
     """题目行里的多选提示（"可多选 / 选择多个 …"）→ multi，其余为 single。"""
     return "multi" if MULTI_HINT_RE.search(str(prompt or "")) else DEFAULT_CHOICE_MODE
+
+
+def _choice_marker_continues(kind: str, previous: Any, current: Any) -> bool:
+    """跨空行的两个选项标记是否属于同一序列（只对可判定的编号/字母序列生效）。
+
+    用于「1. …（空行）2. …」这类 Markdown 列表：空行后编号仍连续 → 同一组；
+    编号重新从 1 开始（新列表）→ 交给调用方 finish_group 切开，避免两组被合并后
+    因编号不连续而整组丢弃。bullet/named 的 marker 是递增计数、无法判定，一律视为延续。
+    """
+    if kind == "numbered":
+        return isinstance(previous, int) and isinstance(current, int) and current == previous + 1
+    if kind == "lettered":
+        return (isinstance(previous, str) and isinstance(current, str)
+                and len(previous) == 1 and len(current) == 1
+                and current == chr(ord(previous) + 1))
+    return True
 
 
 def normalize_choice_groups(raw: Any, source: str = "") -> list[dict[str, Any]]:
@@ -178,9 +208,30 @@ def _detect_choice_groups(text: str) -> list[dict[str, Any]]:
     # Long Skill manuals and MCP instructions are not interactive choices.
     if len(raw_text) > MAX_SCAN_LEN or re.search(r"<skill\b|mcp_servers\s*:|official-comfy-mcp", raw_text, re.I):
         return []
-    # 代码示例（含显式 naiba-choices 块本身）里的列表不是交互选项，先排除围栏代码块。
-    visible_text = re.sub(r"```[\s\S]*?```", "", raw_text)
-    lines = visible_text.splitlines()
+    # 围栏代码块默认不参与识别（多是代码示例，剔除以免误判）；但 AI 也常用代码块包裹
+    # 「选择题」的选项清单——这类块紧跟在带选择意图/单选多选标识的题目行之后，块内列表
+    # 需要并入候选（2026-09-16，实测"给我几个选择题"这类请求会触发）。
+    # 规则：块内行仅在「块前一行是题目行」时并入；显式 naiba-choices 块不参与自然语言识别。
+    lines: list[str] = []
+    fence_body: list[str] | None = None
+    fence_is_explicit = False
+    for raw_line in raw_text.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("```"):
+            if fence_body is None:
+                fence_body = []
+                fence_info = stripped[3:].strip().lower().split()
+                fence_is_explicit = bool(fence_info) and fence_info[0] == EXPLICIT_CHOICE_FENCE
+            else:
+                if fence_body and not fence_is_explicit and lines and _is_prompt_line(lines[-1]):
+                    lines.extend(fence_body)
+                fence_body = None
+                fence_is_explicit = False
+            continue
+        if fence_body is None:
+            lines.append(raw_line)
+        else:
+            fence_body.append(raw_line)
 
     numbered_pattern = re.compile(
         r"^\s*(?:\*\*|__)?(?:[（(\[【]?\s*(\d{1,2})\s*[.、):：）\]】])"
@@ -204,13 +255,14 @@ def _detect_choice_groups(text: str) -> list[dict[str, Any]]:
     current_prompt = ""
     current_start_line = -1
     current_prompt_line = -1  # 组首行时最近一个题目行的快照（避免被后续题目行覆盖）
+    blank_gap = False         # 组内是否出现过空行（跨空行的同一序列仍算一组）
     preceding_prompt = ""
     preceding_prompt_line = -1
     recent_prompt = ""
     recent_prompt_line = -1
 
     def finish_group() -> None:
-        nonlocal current_kind, current_items, current_prompt, current_start_line, current_prompt_line
+        nonlocal current_kind, current_items, current_prompt, current_start_line, current_prompt_line, blank_gap
         if current_items:
             groups.append(
                 {
@@ -226,6 +278,7 @@ def _detect_choice_groups(text: str) -> list[dict[str, Any]]:
         current_prompt = ""
         current_start_line = -1
         current_prompt_line = -1
+        blank_gap = False
 
     for line_index, raw_line in enumerate(lines):
         # Models frequently put compact choices on one line, for example
@@ -240,6 +293,13 @@ def _detect_choice_groups(text: str) -> list[dict[str, Any]]:
         ).splitlines() or [""]
         for line in expanded_lines:
             stripped = line.strip()
+            # 空行不打断选项组：AI 常用「1. …（空行）2. …」的 Markdown 写法。空行若按普通行
+            # 处理会 finish_group，把一组选项切成两个单项组（<2 项全部丢弃）——真实会话里这是
+            # "该弹没弹"的另一个成因。真正的新列表由下面的延续性校验切开，不合并。
+            if not stripped:
+                if current_items:
+                    blank_gap = True
+                continue
             parsed: tuple[str, Any, str] | None = None
             match = numbered_pattern.match(line)
             if match:
@@ -293,7 +353,8 @@ def _detect_choice_groups(text: str) -> list[dict[str, Any]]:
 
             if parsed:
                 kind, marker, value = parsed
-                if current_items and kind != current_kind:
+                if current_items and (kind != current_kind
+                        or (blank_gap and not _choice_marker_continues(current_kind, current_items[-1][0], marker))):
                     finish_group()
                 if not current_items:
                     current_kind = kind
@@ -366,6 +427,32 @@ def resolve_message_choice_groups(metadata: Any, content: str) -> list[dict[str,
     if stored:
         return stored
     return detect_choice_groups(content)
+
+
+def backfill_turn_choice_groups(messages: list[dict[str, Any]]) -> None:
+    """历史读取：给「最后一条 user 消息之后」的 assistant 消息就地补齐选项数据。
+
+    前端选择面板的保活口径是「未回答的那组选项，即使后面又追加了 assistant 消息也要留着」，
+    因此不能只补最后一条（followup 轮次 / 后台任务回执 / 错误重试都会把面板顶掉）。
+    补齐只走 resolve_message_choice_groups：有效 metadata 优先，绝不用空的解析结果覆盖
+    已落库数据；无选项时写空列表，保持与既有 metadata 形态一致，重复调用幂等。
+    入参为会话的 messages 列表（storage.get_conversation 的返回值），就地修改。
+    """
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "")
+        if role == "user":
+            break
+        if role != "assistant":
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+            message["metadata"] = metadata
+        choice_groups = resolve_message_choice_groups(metadata, str(message.get("content") or ""))
+        metadata["choice_groups"] = choice_groups
+        metadata["choices"] = choice_groups[0]["choices"] if choice_groups else []
 
 
 def _detect_choices(text: str) -> list[str]:

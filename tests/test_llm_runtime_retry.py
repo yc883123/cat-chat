@@ -38,6 +38,13 @@ def sse(chunk: dict) -> bytes:
 EMPTY_CODEX_STREAM = [sse({"type": "response.completed", "response": {"output": []}})]
 DELTA_CODEX_STREAM = [sse({"type": "response.output_text.delta", "delta": "答复"})]
 EMPTY_OPENAI_STREAM = [sse({"choices": [{"delta": {}}]})]
+DELTA_OPENAI_STREAM = [sse({"choices": [{"delta": {"content": "答复"}}]})]
+# 只有思考、没有正文：mimo-v2.5 这类推理模型长思考后可能整轮只回 reasoning_content，
+# 正文为空的流对用户等于「气泡里什么都没有」，必须当空流重试而不是直接判失败。
+REASONING_ONLY_OPENAI_STREAM = [
+    sse({"choices": [{"delta": {"reasoning_content": "先核对一遍参数…"}}]}),
+    sse({"choices": [{"delta": {}}]}),
+]
 
 
 def http_error(code: int, body: str = "", reason: str = "Internal Server Error") -> urllib.error.HTTPError:
@@ -236,6 +243,31 @@ class OnlineRetryTests(unittest.TestCase):
         self.assertEqual(len(calls), 1, "其它在线格式的空流不得纳入重试")
         self.assertIsNotNone(error)
         self.assertNotIsInstance(error, EmptyModelStreamError)
+
+    def test_reasoning_only_stream_is_retried_then_raises(self) -> None:
+        """有思考无正文：整轮按空流退避重试，不能把"空白回答"交给上层。"""
+        events: list[dict] = []
+        calls, _content, error = self._run(
+            [REASONING_ONLY_OPENAI_STREAM], status=events.append,
+            options={"stream": True}, profile=PROFILE_OPENAI)
+        self.assertEqual(len(calls), 3, "有思考无正文的流必须重试到次数上限")
+        self.assertIsInstance(error, EmptyModelStreamError)
+        self.assertIn("没有文本内容", str(error))
+        retry_notes = [
+            str(event.get("message") or "")
+            for event in events
+            if event.get("type") == "status" and "空响应" in str(event.get("message") or "")
+        ]
+        self.assertTrue(retry_notes, f"空流重试必须带状态提示，实际：{retry_notes}")
+
+    def test_reasoning_only_then_delta_returns_content(self) -> None:
+        """重试后正文正常返回：思考不能把这一轮的结果提前吃成空回答。"""
+        calls, content, error = self._run(
+            [REASONING_ONLY_OPENAI_STREAM, DELTA_OPENAI_STREAM],
+            options={"stream": True}, profile=PROFILE_OPENAI)
+        self.assertIsNone(error)
+        self.assertEqual(content, "答复", "思考轮重试成功后应返回正文")
+        self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":

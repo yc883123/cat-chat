@@ -56,9 +56,22 @@ export function explicitChoiceGroups(rawCode) {
   return normalizeChoiceGroups(null, payload);
 }
 
-/** 有效显式块 → 静态预览（题目 + 单选/多选标识 + 选项列表）；空 → 由调用方回退为代码块。 */
+/**
+ * 有效显式块 → **折叠成一行**的静态预览：默认只显示「选择题 · 题目（N 个选项）」，
+ * 点击展开完整选项列表（交互面板才是答题入口，这里定位为回看）。
+ * 空 → 由调用方回退为代码块（不隐藏原始内容）。
+ * 「已答/未答」由 04-messages.js 在渲染后按「其后是否出现过 user 消息」补 is-answered。
+ */
 export function choicePreviewMarkup(groups) {
   if (!Array.isArray(groups) || !groups.length) return "";
+  const totalChoices = groups.reduce(
+    (sum, group) => sum + (Array.isArray(group?.choices) ? group.choices.length : 0),
+    0,
+  );
+  const subject = String(groups[0]?.prompt || "").trim() || "请选择";
+  const meta = groups.length > 1
+    ? `${groups.length} 题 · ${totalChoices} 个选项`
+    : `${totalChoices} 个选项`;
   const body = groups.map((group, index) => {
     const multi = String(group?.mode ?? "") === "multi";
     const options = (Array.isArray(group?.choices) ? group.choices : [])
@@ -71,5 +84,13 @@ export function choicePreviewMarkup(groups) {
       + `<span class="choice-mode-badge is-${multi ? "multi" : "single"}">${multi ? "多选" : "单选"}</span>`
       + `</div><ul class="choice-preview-options">${options}</ul></div>`;
   }).join("");
-  return `<div class="choice-preview"><div class="choice-preview-bar">选择题</div>${body}</div>`;
+  return `<div class="choice-preview is-collapsed">`
+    + `<button type="button" class="choice-preview-toggle" data-choice-preview-toggle aria-expanded="false">`
+    + `<span class="choice-preview-caret" aria-hidden="true">▸</span>`
+    + `<span class="choice-preview-label">选择题</span>`
+    + `<span class="choice-preview-subject">${escapeHtml(subject)}</span>`
+    + `<span class="choice-preview-meta">${escapeHtml(meta)}</span>`
+    + `</button>`
+    + `<div class="choice-preview-body">${body}</div>`
+    + `</div>`;
 }

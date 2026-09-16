@@ -84,6 +84,37 @@ class ChoiceDetectionTests(unittest.TestCase):
         text = "这里没有选项\n```\n1. 代码行\n2. 代码行二\n```"
         self.assertEqual(_detect_choice_groups(text), [])
 
+    def test_fenced_choice_list_after_cue_is_detected(self):
+        # AI 用代码块包裹选项清单：块紧跟「…每题多选：」这类题目行 → 必须识别（2026-09-16）
+        text = (
+            "以下是你可以让我做的事情，每题多选：\n\n"
+            "1.图片生成方向（多选）\n"
+            "```\n"
+            "1. 继续系列（换场景）\n"
+            "2. 单图生图\n"
+            "```\n"
+        )
+        groups = _detect_choice_groups(text)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["prompt"], "图片生成方向（多选）")
+        self.assertEqual(groups[0]["choices"], ["继续系列（换场景）", "单图生图"])
+        self.assertEqual(groups[0]["mode"], "multi")
+
+    def test_fenced_code_without_cue_still_excluded(self):
+        # 块前一行不是题目行（普通说明）时，代码块里的编号列表依旧不算选项
+        text = "这是示例代码：\n```\n1. 第一步\n2. 第二步\n```"
+        self.assertEqual(_detect_choice_groups(text), [])
+
+    def test_explicit_fence_not_treated_as_natural_choices(self):
+        # 显式 naiba-choices 块不参与自然语言识别（即使前面恰好是题目行）
+        text = (
+            "请选择方案：\n"
+            "```naiba-choices\n"
+            '{"choice_groups":[{"prompt":"视觉","choices":["A","B"]}]}\n'
+            "```\n"
+        )
+        self.assertEqual(_detect_choice_groups(text), [])
+
     def test_skill_manual_not_choices(self):
         text = '使用说明 <skill name="x">……</skill>\n1. 步骤A\n2. 步骤B'
         self.assertEqual(_detect_choice_groups(text), [])
@@ -305,6 +336,85 @@ class HistoryChoiceGroupsTests(unittest.TestCase):
     def test_both_empty_stays_empty(self):
         self.assertEqual(resolve_message_choice_groups({}, "普通回复，没有选项。"), [])
         self.assertEqual(resolve_message_choice_groups(None, ""), [])
+
+
+class BlankLineChoiceListTests(unittest.TestCase):
+    """空行不打断选项组：AI 常用「1. …（空行）2. …」的 Markdown 写法。
+
+    旧实现里空行会 finish_group，把一组选项切成多个单项组（每项 <2 项全部丢弃），
+    实测真实会话里「1. **甲** — 说明\\n\\n2. **乙** — 说明」这类回复因此整组漏判。
+    """
+
+    def test_blank_line_between_numbered_choices(self):
+        groups = _detect_choice_groups("好的！以下是当前的选项：\n\n1. 甲\n\n2. 乙\n")
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["choices"], ["甲", "乙"])
+
+    def test_blank_line_between_bullet_choices(self):
+        groups = _detect_choice_groups("请选择：\n- 甲\n\n- 乙")
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["choices"], ["甲", "乙"])
+
+    def test_blank_line_then_new_list_is_split(self):
+        # 编号重新从 1 开始 = 新列表：只保留紧邻题目行的第一组，不得两组合并后整组丢弃
+        groups = _detect_choice_groups("请选择：\n1. A\n2. B\n\n1. C\n2. D")
+        self.assertEqual([g["choices"] for g in groups], [["A", "B"]])
+
+    def test_blank_line_breaks_group_when_followed_by_prose(self):
+        groups = _detect_choice_groups("请选择：\n1. A\n2. B\n\n以上就是全部方案。")
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]["choices"], ["A", "B"])
+
+    def test_inline_bold_markers_stripped(self):
+        # 真实回复常用「1. **甲** — 说明」：行内加粗闭合标记不得漏进选项文本
+        groups = _detect_choice_groups("请选择：\n1. **甲** — 说明\n2. **乙** — 说明")
+        self.assertEqual(groups[0]["choices"], ["甲 — 说明", "乙 — 说明"])
+
+
+class ChoiceCueRelaxationTests(unittest.TestCase):
+    """2026-09-16 扩充 CUE 词表：AI 常用的「选项类名词 + 结构词」措辞必须识别。
+
+    背景：旧词表只认「请选择 / 选哪个 / pick one…」，AI 写「以下是当前的选项：」这类
+    措辞时整组漏判（本机真实会话里 31 条"问句 + 编号列表"只有 5 条命中），是"面板该弹
+    没弹"的主因。新增词必须是「选项类名词 + 结构词」组合，不得退化为裸 select/choose/pick。
+    """
+
+    def _choices(self, text):
+        groups = _detect_choice_groups(text)
+        return groups[0]["choices"] if groups else []
+
+    def test_here_are_current_options(self):
+        self.assertEqual(self._choices("好的！以下是当前的选项：\n1. 甲\n2. 乙"), ["甲", "乙"])
+
+    def test_here_are_bare_options(self):
+        self.assertEqual(self._choices("以下是可选项：\n1. 甲\n2. 乙"), ["甲", "乙"])
+
+    def test_options_as_follows(self):
+        self.assertEqual(self._choices("选项如下：\n1. 甲\n2. 乙"), ["甲", "乙"])
+
+    def test_you_can_choose(self):
+        self.assertEqual(self._choices("你可以选择：\n1. 甲\n2. 乙"), ["甲", "乙"])
+
+    def test_pick_from_below_options(self):
+        self.assertEqual(self._choices("请从以下方案中选一个：\n1. 甲\n2. 乙"), ["甲", "乙"])
+
+    def test_english_here_are_options(self):
+        self.assertEqual(self._choices("Here are the options:\n1. A\n2. B"), ["A", "B"])
+
+    def test_english_options_are(self):
+        self.assertEqual(self._choices("The options are:\n1. A\n2. B"), ["A", "B"])
+
+    def test_english_you_can_choose(self):
+        self.assertEqual(self._choices("You can choose:\n1. A\n2. B"), ["A", "B"])
+
+    def test_new_cues_do_not_accept_narration_lists(self):
+        for text in (
+            "以下是本次改动说明：\n1. 改了 A\n2. 改了 B",
+            "下面是项目结构：\n1. src\n2. tests",
+            "文档正文：这里讲多选组件的用法。\n1. 事项一\n2. 事项二",
+            "SELECT * FROM users\n1. a\n2. b",
+        ):
+            self.assertEqual(_detect_choice_groups(text), [], text)
 
 
 if __name__ == "__main__":

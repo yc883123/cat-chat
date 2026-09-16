@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """CI 环境差异自检：在「短路径 TEMP」下跑测试（GitHub runner 的 TEMP 是 8.3 短名）。
 
-**为什么需要它**：runner 的临时目录形如 `C:\\Users\\RUNNER~1\\AppData\\Local\\Temp`，
-而产品侧会把设置里的路径 `resolve()` 之后再存（背景图 / 附件 / 工作区都是这个口径）。
-测试侧若拿**未 resolve** 的临时路径去比，就会「本地全绿、CI 全红」——2.5.0-beta 的发布
-就是这么红的（7 条断言，全是 `naiba_realtarget\\tempXxx\\...` != `naiba~1\\tempXxx\\...`），
-而本机 `C:\\Users\\<name>\\...` 没有短名，照不出来。见维护说明 §六 第 ③ 条 / §九.72。
+**为什么需要它**：runner 的 TEMP 带 8.3 短名（账户目录被截断成 `RUNNER~1`，整个路径
+就是 `%USERPROFILE%` 那种形态的短名版本），而产品侧会把设置里的路径 `resolve()` 之后
+再存（背景图 / 附件 / 工作区都是这个口径）。测试侧若拿**未 resolve** 的临时路径去比，
+就会「本地全绿、CI 全红」——2.5.0-beta 的发布就是这么红的（7 条断言，全是
+`naiba_realtarget\\tempXxx\\...` != `naiba~1\\tempXxx\\...`），而本机账户目录没有短名，
+照不出来。见维护说明 §六 第 ③ 条 / §九.72。
 
 做法：在临时目录下建一个名字带 `~1` 的 **junction** 指向真实目录，把 `TEMP`/`TMP` 指过去，
 再跑与 CI 完全相同的那条命令（`python -m unittest discover -s tests`）。跑完自动拆掉 junction。

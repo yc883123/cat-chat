@@ -24,6 +24,7 @@ RUN_CONTEXT_KEYS: tuple[str, ...] = (
     "cancel_event", "vision_budget", "interaction_mode", "routing_message",
     "mcp_active", "trace_messages", "plan_exit_content", "plan_step_title",
     "model_has_vision", "tool_defs", "workspace_dir", "media_intent",
+    "event_sink", "truncation",
 )
 
 # 运行期保持 dict 形态（零行为变化）；"带默认值/校验"经由工厂与校验函数落地，
@@ -53,6 +54,12 @@ def default_run_context() -> dict[str, Any]:
         "tool_defs": None,
         "workspace_dir": "",
         "media_intent": False,
+        # 事件出口（可调用）：工具实现把「实时进度」交给它，由宿主统一落库 + SSE 广播。
+        # 工具层不直接持有 manager，避免把 run 内部结构泄漏到工具实现里。
+        "event_sink": None,
+        # 本轮答复的截断自述信息（{"finish_reason","truncated","continued"}）；
+        # 由 skills/agent.py 写入、run/chat.py 落进消息 metadata。
+        "truncation": {},
     }
 
 
@@ -151,6 +158,9 @@ class RunContext(TypedDict, total=False):
     tool_defs: dict[str, Any] | None # 会话化 def 覆盖（如 vision_analyze 按模型能力换形态）
     workspace_dir: str               # 本轮会话工作区（解析后的绝对路径；产物类工具落盘默认位置）
     media_intent: bool               # 用户本轮是否明确要求看图（枚举类工具的 intent_gated 门禁）
+    # ---- 透明化/截断自述（工具实时进度出口 + 本轮答复截断信息）----
+    event_sink: Any                  # 工具实时进度出口（callable(dict) -> None；缺省不报进度）
+    truncation: dict[str, Any]       # 本轮答复截断信息（finish_reason / truncated / continued）
 
 
 class EventType(str, Enum):
@@ -167,6 +177,7 @@ class EventType(str, Enum):
     SKILL_WARNING = "skill_warning"
     TOOLS_AVAILABLE = "tools_available"
     TOOL_START = "tool_start"
+    TOOL_PROGRESS = "tool_progress"
     TOOL_RESULT = "tool_result"
     TOOL_CONFIRM = "tool_confirm"
     CHOICE = "choice"
@@ -220,6 +231,8 @@ class EventPayload(TypedDict, total=False):
     arguments: dict[str, Any]
     confirm_id: str
     success: bool
+    # 工具调用实例序号（同一轮并行调用同名工具时，前端据此把事件贴到正确的卡片上）
+    seq: int
     # 媒体（宿主在工具产出时提取的托管记录：kind/name/source/thumb_path；
     # media_truncated 为分桶截断的自述信息，前端据此渲染提示块）
     media: list[dict[str, Any]]
@@ -273,8 +286,11 @@ EVENT_PAYLOAD_KEYS: dict[str, frozenset[str] | None] = {
     "reasoning_delta": frozenset({"content"}),
     "reasoning_end": frozenset(),
     "reasoning": frozenset({"content"}),
-    "tool_start": frozenset({"tool", "arguments", "reason"}),
-    "tool_result": frozenset({"tool", "success", "result", "arguments", "reason", "media", "media_truncated"}),
+    "tool_start": frozenset({"tool", "arguments", "reason", "seq"}),
+    # 工具实时进度（pwsh / run_skill_script 逐行 stdout+stderr）：line 为一行原文，
+    # seq 与 tool_start/tool_result 同值，前端据此把行贴到正确的运行卡片上。
+    "tool_progress": frozenset({"tool", "line", "seq"}),
+    "tool_result": frozenset({"tool", "success", "result", "arguments", "reason", "media", "media_truncated", "seq"}),
     "tool_confirm": frozenset({"tool_name", "tool_desc", "arguments", "confirm_id"}),
     "choice": frozenset({"choices", "choice_groups", "message_id"}),
     "cancelled": frozenset({"message", "aborted_message"}),

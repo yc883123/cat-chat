@@ -164,6 +164,71 @@ def _model_visible_runs(step_runs: list[dict[str, Any]]) -> str:
 
 
 
+# 正文以这些标点收尾 = 「明显还没写完」（模型正准备展开下一句/下一段/下一个列表项）。
+_UNFINISHED_TAIL = ("：", ":", "，", ",", "、", "；", ";", "——", "…", "...", "-")
+
+# 「撞输出上限」的各供应商写法（与 ProtocolMixins._LENGTH_FINISH_REASONS 同口径）。
+# 此处再兜一层：即使调用方传进来的是原字面量（没经 _online_finish_reason 归一），也判得对。
+_LENGTH_FINISH_REASONS = frozenset(
+    {"length", "max_tokens", "max_output_tokens", "token_limit", "incomplete"}
+)
+
+# 自动续写指令：要求「从断点接着写」，并明确禁止重开与加前言——否则模型很容易把
+# 整段重写一遍（这正是用户报障里「前文整段重复」的成因之一）。
+_CONTINUE_INSTRUCTION = (
+    "上一条回复在句中断开了（疑似撞上输出上限或流被上游掐断）。请**直接从断点处接着写**，"
+    "不要重复已经出现过的内容，不要重新开头，也不要加任何解释、前言或道歉。"
+)
+
+
+def _truncation_info(finish_reason: str, content: str) -> dict[str, Any]:
+    """判定一段答复是否可能不完整（结果写进消息 metadata.truncated，前端据此提示）。
+
+    两条独立信号，命中任一即视为「可能不完整」：
+
+    1. ``finish_reason == "length"``——供应商明确表示撞了输出上限（最硬的证据）；
+    2. 终止原因缺失（``""``，流被掐断或中继吞掉了该字段）**且**正文以明显未完成的标点收尾。
+
+    第 2 条只在「没有任何终止原因」时生效：供应商明确回报 ``stop`` 时，正文以冒号结尾是
+    模型自己的选择，不替它续写（避免把正常收尾也接一段）。这条规则来自一次实测事故——
+    272 字符正文停在「：」，而全链路没有任何终止原因留痕，只能反向推断，故把「原因缺失」
+    本身也当成可疑信号记录下来。
+    """
+    raw_reason = str(finish_reason or "").strip().lower()
+    length_hit = raw_reason in _LENGTH_FINISH_REASONS
+    reason = "length" if length_hit else raw_reason
+    text = str(content or "").rstrip()
+    unfinished = bool(text) and any(text.endswith(item) for item in _UNFINISHED_TAIL)
+    truncated = bool(length_hit or (raw_reason == "" and unfinished))
+    return {
+        "finish_reason": reason,
+        "truncated": truncated,
+        "unfinished_tail": unfinished,
+        "continued": False,
+    }
+
+
+def _seq_event_sink(event: EventCallback, seq: int) -> EventCallback:
+    """给「这一次工具调用」绑定实例序号（进度事件带 seq）。
+
+    为什么序号只能绑在出口上：一轮里可以并行发起多个工具调用（ThreadPoolExecutor），
+    ``run_context`` 是它们共享的，写进上下文会被并发覆盖；绑在 per-call 的事件出口上，
+    前端才能把 ``tool_progress`` 的行贴到正确的运行卡片（同名工具并发时尤其必要）。
+    """
+    def sink(payload: dict[str, Any]) -> None:
+        if str(payload.get("type") or "") == "tool_progress":
+            payload = {**payload, "seq": seq}
+        event(payload)  # noqa: event-internal - sink 转发：真实发射点在工具实现（tool_progress 已登记）
+    return sink
+
+
+def _call_context(run_context: RunContext | None, event: EventCallback, seq: int) -> RunContext | None:
+    """派生一次工具调用专用的 run_context：只替换 event_sink，其余键共享（零拷贝语义）。"""
+    if not isinstance(run_context, dict):
+        return run_context
+    return {**run_context, "event_sink": _seq_event_sink(event, seq)}
+
+
 class SkillAgent:
     TOOL_GUIDE = """
 可用工具（需要操作时一次只调用一个）：
@@ -642,6 +707,13 @@ class SkillAgent:
         no_progress_signature = ""
         no_progress_count = 0
         parse_error_count = 0
+        # 本轮答复的截断自述（run_context["truncation"] → 消息 metadata.truncated）：
+        # truncated 一旦成立就保持成立（续写成功也不抹掉"曾经被截断"这个事实）。
+        truncation_state: dict[str, Any] = {
+            "finish_reason": "", "truncated": False, "continued": False,
+        }
+        # 自动续写前的各个片段（续写成功后按顺序拼回最终答复）。
+        continued_parts: list[str] = []
 
         def assistant_message(content: Any = "", **extra: Any) -> dict[str, Any]:
             message: dict[str, Any] = {"role": "assistant", "content": content}
@@ -697,6 +769,10 @@ class SkillAgent:
             reasoning = getattr(model_runtime, "last_reasoning", "") if model_runtime else ""
             reasoning_id = getattr(model_runtime, "last_reasoning_id", "") if model_runtime else ""
             usage = getattr(model_runtime, "last_usage", {}) if model_runtime else {}
+            # 终止原因（"stop"/"length"/"tool_calls"，空串 = 供应商没给）：与 last_usage
+            # 同一条旁路。用它区分「模型自己停住」与「撞输出上限被切」——没有它就只能靠猜。
+            finish_reason = getattr(model_runtime, "last_finish_reason", "") if model_runtime else ""
+            request_end_reason = str(finish_reason or "")
             if usage:
                 usages.append({**usage, "request_ms": request_ms})
                 # 实时用量：每完成一次请求即推送最新汇总（最后一次请求口径的命中率 +
@@ -761,7 +837,31 @@ class SkillAgent:
                         ),
                     })
                     continue
-                content = str(action.get("content") or raw or "任务已完成").strip()
+                piece = str(action.get("content") or raw or "任务已完成").strip()
+                # 截断自述 + 自动续写（只做一次）：正文中途停住时，「模型自己收尾」与
+                # 「被输出上限/上游掐断」在界面上完全一样，所以先把判定结果留档，再补一段。
+                verdict = _truncation_info(request_end_reason, piece)
+                if verdict["truncated"]:
+                    truncation_state["truncated"] = True
+                    truncation_state["finish_reason"] = verdict["finish_reason"]
+                    truncation_state["unfinished_tail"] = verdict["unfinished_tail"]
+                if verdict["truncated"] and not truncation_state["continued"]:
+                    truncation_state["continued"] = True
+                    continued_parts.append(piece)
+                    event({"type": "status", "message": "上一段回复疑似被截断，正在自动续写…"})
+                    logger.warning(
+                        "[truncation] finish_reason=%s unfinished_tail=%s，已自动续写一次",
+                        verdict["finish_reason"] or "<empty>",
+                        verdict["unfinished_tail"],
+                    )
+                    messages.append(assistant_message(piece))
+                    messages.append({"role": "user", "content": _CONTINUE_INSTRUCTION})
+                    continue
+                content = (
+                    "\n".join([*continued_parts, piece]).strip() if continued_parts else piece
+                )
+                if isinstance(run_context, dict):
+                    run_context["truncation"] = dict(truncation_state)
                 if reasoning:
                     event({"type": "reasoning", "content": reasoning})
                 # 不要把最终答复截断在 2000 字符：done 事件的 message（完整 assistant
@@ -799,15 +899,16 @@ class SkillAgent:
             )
             parallel_results: dict[int, tuple[bool, str]] = {}
             if parallel_safe:
-                for call in normalized_calls:
-                    event({"type": "tool_requested", "tool": str(call.get("tool") or ""), "arguments": call.get("arguments") or {}, "reason": call.get("reason", "")})  # noqa: event-internal
+                for index, call in enumerate(normalized_calls):
+                    event({"type": "tool_requested", "seq": index, "tool": str(call.get("tool") or ""), "arguments": call.get("arguments") or {}, "reason": call.get("reason", "")})  # noqa: event-internal
                 with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(normalized_calls))) as pool:
                     futures = {
                         index: pool.submit(
                             self._execute_with_retry,
                             str(call.get("tool") or ""),
                             call.get("arguments") if isinstance(call.get("arguments"), dict) else {},
-                            active, allowed, tool_registry, cancel_event, event, run_context,
+                            active, allowed, tool_registry, cancel_event, event,
+                            _call_context(run_context, event, index),
                         )
                         for index, call in enumerate(normalized_calls)
                     }
@@ -822,7 +923,7 @@ class SkillAgent:
                     event({"type": "run_failed", "error": "工具调用解析失败：缺少工具名或参数"})
                     return "工具调用解析失败，已停止执行。", runs, reasonings, self._summarize_usage(usages)
                 if not parallel_safe:
-                    event({"type": "tool_requested", "tool": tool, "arguments": arguments, "reason": call.get("reason", "")})  # noqa: event-internal
+                    event({"type": "tool_requested", "seq": call_index, "tool": tool, "arguments": arguments, "reason": call.get("reason", "")})  # noqa: event-internal
                 if cancel_event and cancel_event.is_set():
                     abort_run()
 
@@ -831,7 +932,8 @@ class SkillAgent:
                     success, result = parallel_results[call_index]
                 else:
                     success, result = self._execute_with_retry(
-                        tool, arguments, active, allowed, tool_registry, cancel_event, event, run_context
+                        tool, arguments, active, allowed, tool_registry, cancel_event, event,
+                        _call_context(run_context, event, call_index),
                     )
                 # 原始 run（tool/arguments/result 原文/success/reason）只供宿主收尾
                 # （附件提取、file_changes、step 图片注入）；模型与前端均以
@@ -841,7 +943,7 @@ class SkillAgent:
                 self._collect_media(run, tool_registry, run_context)
                 runs.append(run)
                 step_runs.append(run)
-                event({"type": "tool_result", **display_tool_run(run)})
+                event({"type": "tool_result", **display_tool_run(run), "seq": call_index})
 
                 if not success and key == repeat_key:
                     repeat_count += 1

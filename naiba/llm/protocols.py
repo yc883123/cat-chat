@@ -591,6 +591,57 @@ class ProtocolMixins:
         }
 
 
+    # 各供应商"撞输出上限"的不同写法，统一归一为 "length"（Agent 循环只认这一个截断信号）。
+    # responses 的 "incomplete" 绝大多数就是 max_output_tokens，故并入 length 处理。
+    _LENGTH_FINISH_REASONS = frozenset(
+        {"length", "max_tokens", "max_output_tokens", "token_limit", "incomplete"}
+    )
+
+    @staticmethod
+    def _online_finish_reason(request_format: str, result: Any) -> str:
+        """提取模型响应的终止原因（各供应商字段名归一；取最后一个非空值）。
+
+        为什么必须记录它：「正文中途停住」这件事，在界面上无法区分是模型自己收尾、还是撞上
+        输出上限被切——没有这个字段就只能靠猜（实测排查一次截断事故时，全链路没有任何终止
+        原因留痕，只能反向推断）。返回 ``""`` 表示供应商没给（流被掐断/中继吞字段），
+        这个「没有原因」本身也是值得留档的信号。
+
+        与 ``_online_usage`` 同构：``result`` 既可能是单个响应对象，也可能是流式 chunk 列表。
+        """
+        chunks = result if isinstance(result, list) else [result]
+        finish = ""
+        for chunk in chunks:
+            if not isinstance(chunk, dict):
+                continue
+            holders: list[dict[str, Any]] = [chunk]
+            if isinstance(chunk.get("response"), dict):
+                # Responses 流：status / incomplete_details 嵌在 response 对象里。
+                holders.append(chunk["response"])
+            for holder in holders:
+                for key in ("done_reason", "finish_reason", "stop_reason", "finishReason", "status"):
+                    value = holder.get(key)
+                    if isinstance(value, dict):
+                        value = value.get("reason")
+                    if value:
+                        finish = str(value)
+                choices = holder.get("choices")
+                if isinstance(choices, list):
+                    for choice in choices:
+                        if not isinstance(choice, dict):
+                            continue
+                        value = choice.get("finish_reason") or choice.get("stop_reason")
+                        if value:
+                            finish = str(value)
+                candidates = holder.get("candidates")
+                if isinstance(candidates, list):
+                    for candidate in candidates:
+                        if isinstance(candidate, dict) and candidate.get("finishReason"):
+                            finish = str(candidate["finishReason"])
+        normalized = str(finish or "").strip().lower()
+        if normalized in ProtocolMixins._LENGTH_FINISH_REASONS:
+            return "length"
+        return normalized
+
     @staticmethod
     def _openai_tool_calls_action(result: Any, request_format: str) -> str | None:
         """Extract native OpenAI ``tool_calls`` from a non-streaming response.

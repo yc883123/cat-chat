@@ -8,7 +8,7 @@ import { branchMessage, cancelActiveEdit, cancelSessionStart, confirmActiveEdit,
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
 import { switchPermissionMode } from "./06-tasks-plans.js";
 import { checkUpdate, closeComposerModelPicker, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
-import { cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeConversationMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel } from "./08-conversations.js";
+import { cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeConversationMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel, setTaskLogOpen } from "./08-conversations.js";
 import { addProvider, addSearchProfile, applyProviderModelCapabilities, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadWorkspaceTree, openAgentCard, openProviderCard, openVisionProviderForm, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, saveMcpServer, saveProvider, saveRuntimeSettings, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, showAgentForm, switchAgentTab, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint } from "./09-settings.js";
 import { readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
 import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handlePasteImage, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState } from "./12-chat-input.js";
@@ -708,12 +708,18 @@ export function bindEvents() {
     const detailButton = event.target.closest('[data-task-detail]');
     if (detailButton) {
       event.stopPropagation();
-      const panel = detailButton.closest('[data-task-id]')?.querySelector('.task-detail');
+      const item = detailButton.closest('[data-task-id]');
+      const panel = item?.querySelector('.task-detail');
+      const log = item?.querySelector('.task-log');
       if (panel) {
         const open = panel.hidden;
         panel.hidden = !open;
+        // 详情面板与任务日志同开同关（日志是这个折叠块的正文，不该再多一个按钮）。
+        if (log) log.hidden = !open;
         detailButton.setAttribute('aria-expanded', String(open));
         detailButton.textContent = open ? '收起' : '详情';
+        // 展开即拉一次日志；任务还在跑时由任务列表轮询持续续拉（cursor 只取新增行）。
+        setTaskLogOpen(detailButton.dataset.taskDetail, open);
       }
       return;
     }
@@ -1079,6 +1085,18 @@ export function bindEvents() {
     const regenerateButton = event.target.closest('[data-regenerate-message]');
     if (regenerateButton) {
       regenerateMessage(regenerateButton.dataset.regenerateMessage);
+      return;
+    }
+    const choicePreviewToggle = event.target.closest('[data-choice-preview-toggle]');
+    if (choicePreviewToggle) {
+      // 正文里的「选择题」静态块默认折叠成一行，点开才展开选项（真正的答题入口是面板）
+      const preview = choicePreviewToggle.closest('.choice-preview');
+      if (preview) {
+        const collapsed = preview.classList.toggle('is-collapsed');
+        choicePreviewToggle.setAttribute('aria-expanded', String(!collapsed));
+        const caret = choicePreviewToggle.querySelector('.choice-preview-caret');
+        if (caret) caret.textContent = collapsed ? '▸' : '▾';
+      }
       return;
     }
     const openFileButton = event.target.closest('[data-open-file]');

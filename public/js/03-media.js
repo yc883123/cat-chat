@@ -618,6 +618,20 @@ export function mediaTruncatedNotice(truncated) {
   return `<div class="media-truncated">共 ${total} 个媒体，仅显示前 ${shown} 个</div>`;
 }
 
+// 本轮答复的截断自述（后端 metadata.truncated）：模型撞输出上限、或流在没有终止原因的
+// 情况下带着"明显没说完"的正文结束时写入——静默截断 = 误导源，必须让用户看见。
+export function truncationNotice(truncated) {
+  if (!truncated || typeof truncated !== 'object' || !truncated.truncated) return '';
+  const reason = String(truncated.finish_reason || '');
+  const detail = reason === 'length'
+    ? '已达模型输出上限'
+    : reason ? `终止原因 ${reason}` : '未收到终止原因（流可能被上游掐断）';
+  const parts = [detail];
+  if (truncated.continued) parts.push('已自动续写一次');
+  if (truncated.unfinished_tail) parts.push('正文停在未完成的标点');
+  return `<div class="truncation-notice" title="模型这一轮没有正常收尾，正文可能不完整">本轮回复可能被截断：${escapeHtml(parts.join(' · '))}</div>`;
+}
+
 // 单次工具调用的媒体块（就地内嵌）：无媒体且无截断提示时返回空串。
 export function toolMediaMarkup(run = {}) {
   const media = Array.isArray(run.media) ? run.media : [];

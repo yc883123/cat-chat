@@ -644,6 +644,18 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
 .tool-media .media-grid img.thumbnail { max-height: 180px; }
 /* 分桶截断自述（"共 N 个媒体，仅显示前 M 个"）：绝不静默截断。 */
 .media-truncated { margin-top: 6px; font-size: 11px; color: var(--muted); }
+/* 工具执行实时输出区（pwsh / run_skill_script 的 tool_progress）：等宽、限高、自身滚动。
+   刻意压到「信息密度优先」：低饱和底 + 细描边，不与参数 <pre> 抢层次。 */
+.tool-run .tool-live { margin: 6px 0 0; max-height: 220px; overflow-y: auto; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; line-height: 1.5; color: var(--text); }
+.tool-run .tool-live[hidden] { display: none; }
+.tool-live-line { white-space: pre-wrap; word-break: break-word; }
+.tool-live-line + .tool-live-line { margin-top: 1px; }
+/* 运行中的卡片：摘要做呼吸脉冲——静止画面里也要看得出「这一刻它在干活」。 */
+.tool-run[data-state="running"] > summary { animation: tool-live-pulse 1.6s ease-in-out infinite; }
+@keyframes tool-live-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+@media (prefers-reduced-motion: reduce) { .tool-run[data-state="running"] > summary { animation: none; } }
+/* 截断自述（metadata.truncated）：模型没正常收尾时，绝不能让用户以为话说完了。 */
+.truncation-notice { margin: 6px 0 0; padding: 6px 10px; border: 1px solid var(--aborted-border); border-radius: var(--r-md); background: var(--aborted-bg); color: var(--warning); font-size: 12px; }
 /* 活动时间线请求分割线（极简版）：每次新请求的开始块上方一条淡色横线。
    absolute 定位悬挂在块上缘之外（top:-8px），不占块内高度（块不变高）、
    横线与块之间预留 8px 垂直距离；margin-top 为横线留出空隙。 */
@@ -1465,6 +1477,9 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .task-group-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 12px; font-weight: 600; }
 .task-group-stat { flex: 0 0 auto; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .task-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; padding: 10px 0 10px 12px; border-bottom: 1px solid var(--line); border-left: 2px solid var(--line); }
+/* 子任务（父 Job 也在同组，如子 Agent 派生的 ComfyUI）：缩进 + 左侧连接线，表达从属关系 */
+.task-item-nested { margin-left: 18px; border-left-color: var(--accent, #4f8cff); }
+.task-item-nested .task-kind::before { content: '↳ '; color: var(--muted); font-weight: 400; }
 .task-item:last-child { border-bottom: 0; }
 .task-head { grid-column: 1; display: flex; align-items: center; gap: 8px; min-width: 0; }
 .task-kind { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
@@ -1475,6 +1490,13 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .task-detail { grid-column: 1 / -1; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; margin: 2px 0 0; padding: 8px 10px; border-radius: 5px; background: var(--surface-2); font-size: 12px; line-height: 1.45; }
 .task-detail[hidden] { display: none; }
 .task-detail dt { color: var(--muted); white-space: nowrap; }
+/* 后台任务日志（job_log）：与任务详情同一缩进层级，等宽限高自带滚动。 */
+.task-log { grid-column: 1 / -1; margin: 2px 0 0; }
+.task-log[hidden] { display: none; }
+.task-log-head { display: flex; align-items: baseline; gap: 8px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.task-log-hint { font-weight: 400; font-variant-numeric: tabular-nums; }
+.task-log-lines { margin-top: 4px; max-height: 200px; overflow-y: auto; padding: 6px 8px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-2); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; line-height: 1.5; color: var(--text); }
+.task-log-line { white-space: pre-wrap; word-break: break-word; }
 .task-detail dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
 .task-status { padding: 3px 7px; border-radius: 3px; background: var(--surface-2); color: var(--muted); font-size: 11px; white-space: nowrap; }
 .task-status.running, .task-status.queued, .task-status.waiting { background: var(--violet-soft); color: var(--violet-deep); }
@@ -1499,14 +1521,18 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .choice-prompt { min-width: 0; font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; }
 .choice-mode-badge { flex: none; padding: 1px 7px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--muted); font-size: 11px; line-height: 1.6; white-space: nowrap; }
 .choice-mode-badge.is-multi { border-color: var(--accent); color: var(--accent); }
+/* 已跳过的题：虚线灰徽标（跳过 = 不写进发送内容，但仍可在答案块外单独提交） */
+.choice-mode-badge.is-skip { border-style: dashed; color: var(--muted); }
 .choice-progress { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .choice-body { display: block; }
-.choice-selection-summary { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.35; }
-.choice-summary-label { display: block; }
-/* 多选逐项分行、长选项完整换行（不截断、不加省略号） */
-.choice-summary-list { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; }
-.choice-summary-item { color: var(--text); overflow-wrap: anywhere; white-space: pre-wrap; }
-.choice-summary-item::before { content: '· '; color: var(--muted); }
+/* 「自定义回复」：与预设选项并存的一项；就地展开输入框（见 public/js/12-chat-input.js） */
+.choice-custom { margin-top: 8px; }
+.choice-custom-toggle { width: 100%; min-height: 34px; padding: 7px 12px; border: 1px dashed var(--line-strong); border-radius: var(--radius); background: transparent; color: var(--muted); font-size: 12.5px; text-align: left; cursor: pointer; }
+.choice-custom-toggle:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.choice-custom-input { width: 100%; min-height: 54px; resize: vertical; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: 13px; line-height: 1.45; font-family: inherit; }
+.choice-custom-input:focus { outline: none; border-color: var(--accent); }
+.choice-custom-clear { margin-top: 6px; padding: 0; border: 0; background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; }
+.choice-custom-clear:hover:not(:disabled) { color: var(--accent); }
 .choice-options { display: flex; flex-wrap: wrap; gap: 8px; }
 .choice-btn { max-width: 100%; padding: 8px 16px; border: 1px solid var(--line-strong); border-radius: 18px; background: var(--surface); color: var(--text); font-size: 13px; line-height: 1.35; overflow-wrap: anywhere; cursor: pointer; transition: all .15s; }
 .choice-btn:hover { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
@@ -1527,9 +1553,18 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .choice-buttons.is-collapsed .choice-header { margin-bottom: 0; }
 @keyframes choiceSlideUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 
-/* 显式 ```naiba-choices 块在回复正文里的可读展示：有效块不显示原始 JSON（见 public/js/17-choice-groups.js） */
-.choice-preview { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-2); }
-.choice-preview-bar { margin-bottom: 8px; color: var(--muted); font-size: 11px; letter-spacing: .06em; }
+/* 显式 ```naiba-choices 块在回复正文里的可读展示：折叠成一行，点开看选项（见 public/js/17-choice-groups.js） */
+.choice-preview { margin: 10px 0; padding: 4px 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-2); }
+.choice-preview-toggle { display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 2px; border: 0; background: transparent; color: var(--muted); font-size: 11.5px; letter-spacing: .04em; text-align: left; cursor: pointer; }
+.choice-preview-toggle:hover { color: var(--accent); }
+.choice-preview-caret { flex: none; width: 12px; font-size: 10px; }
+.choice-preview-label { flex: none; }
+.choice-preview-subject { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 12.5px; }
+.choice-preview-meta { flex: none; white-space: nowrap; }
+/* 该消息之后已出现过用户消息 = 这组选项已答（标记由 04-messages.js 渲染后补） */
+.choice-preview.is-answered .choice-preview-meta::after { content: ' · 已答'; color: var(--success); }
+.choice-preview.is-collapsed .choice-preview-body { display: none; }
+.choice-preview:not(.is-collapsed) .choice-preview-body { margin: 6px 0 8px; }
 .choice-preview-group + .choice-preview-group { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); }
 .choice-preview-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .choice-preview-index { flex: none; width: 18px; height: 18px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: 11px; line-height: 18px; text-align: center; }
@@ -1645,6 +1680,8 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   .choice-buttons { max-height: min(38dvh, 310px); overflow-y: auto; overscroll-behavior: contain; padding: 8px 2px; animation: none; }
   .choice-options { display: grid; grid-template-columns: 1fr; gap: 7px; }
   .choice-btn { width: 100%; min-height: 42px; text-align: left; padding: 9px 12px; border-radius: var(--radius); }
+  .choice-custom-toggle { min-height: 44px; }
+  .choice-custom-input { min-height: 72px; font-size: 14px; }
   .choice-nav { min-height: 44px; padding: 8px 16px; }
   .choice-collapse { width: 44px; height: 44px; }
   .choice-header { min-height: 44px; }

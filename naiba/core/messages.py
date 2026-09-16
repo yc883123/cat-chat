@@ -21,6 +21,9 @@ MESSAGE_METADATA_KEYS: tuple[str, ...] = (
     "aborted",
     "partial",
     "error",
+    # 本轮答复截断自述（{"finish_reason","truncated","continued"}）：非空即表示
+    # 模型输出可能不完整，前端据此在正文末尾渲染提示行。
+    "truncated",
     "run_id",
     "agent_id",
     "display_content",
@@ -51,6 +54,9 @@ class MetadataKeys:
     ABORTED = "aborted"
     PARTIAL = "partial"
     ERROR = "error"
+    # 本轮答复截断自述（{"finish_reason","truncated","continued"}）：模型输出被
+    # 输出上限截断、或流在没有终止原因的情况下带着"明显未说完"的正文结束时写入。
+    TRUNCATED = "truncated"
     RUN_ID = "run_id"
     AGENT_ID = "agent_id"
     DISPLAY_CONTENT = "display_content"

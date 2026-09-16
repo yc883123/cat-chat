@@ -773,6 +773,8 @@ class PlanManager:
                 "cancel_event": cancel_event,
                 # 工作区随 Run 快照冻结（与主会话同源：判定/执行/产物目录都用它）
                 "workspace_dir": str(frozen.get("workspace_dir") or ""),
+                # 计划步骤里的 pwsh / 脚本同样要可见（与主会话同一出口）。
+                "event_sink": event,
             },
         )
         self.app.storage.add_message(

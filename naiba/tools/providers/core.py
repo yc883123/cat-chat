@@ -13,9 +13,11 @@ import fnmatch
 import json
 import logging
 import os
+import queue
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -34,6 +36,176 @@ POWERSHELL_UTF8_PREFIX = (
     "$utf8 = [System.Text.UTF8Encoding]::new($false); "
     "[Console]::InputEncoding = $utf8; [Console]::OutputEncoding = $utf8; $OutputEncoding = $utf8;"
 )
+
+# ---- 工具实时进度（pwsh / run_skill_script）----
+# 逐行推送的最小间隔（秒）：一次 `npm install` 能吐几千行，逐行落 run_events 会把库撑爆；
+# 按时间片合并（丢弃中间行、只报最新一行）既让用户"看得见在动"，又不放大存储。
+LIVE_PROGRESS_INTERVAL = 0.25
+# 单次工具调用的推送条数上限（同样的防膨胀护栏；超出后不再推送，只保证最终结果完整）。
+LIVE_PROGRESS_MAX_EVENTS = 300
+# 单行原文上限（超长行不整行回传，避免事件体积失控）。
+LIVE_LINE_MAX = 400
+
+
+class _LiveProgress:
+    """把子进程输出按时间片合并成 ``tool_progress`` 事件（尽力而为，绝不抛错）。"""
+
+    def __init__(self, run_context: Any, tool: str) -> None:
+        sink = run_context.get("event_sink") if isinstance(run_context, dict) else None
+        self._sink = sink if callable(sink) else None
+        self._tool = tool
+        self._last = 0.0
+        self._pending = ""
+        self._sent = 0
+
+    def feed(self, line: str) -> None:
+        text = str(line or "").rstrip("\r\n")
+        if not text or self._sink is None:
+            return
+        self._pending = text[:LIVE_LINE_MAX]
+        if time.monotonic() - self._last >= LIVE_PROGRESS_INTERVAL:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self._pending or self._sink is None or self._sent >= LIVE_PROGRESS_MAX_EVENTS:
+            return
+        payload = {"type": "tool_progress", "tool": self._tool, "line": self._pending}
+        self._pending = ""
+        self._sent += 1
+        self._last = time.monotonic()
+        try:
+            self._sink(payload)
+        except Exception:  # noqa: BLE001 - 进度推送失败绝不能影响工具执行结果
+            pass
+
+
+def _stop_process(process: subprocess.Popen) -> None:
+    try:
+        process.kill()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _run_streaming_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    timeout: int,
+    max_output: int,
+    tool: str,
+    run_context: dict[str, Any] | None = None,
+    env: dict[str, str] | None = None,
+) -> str:
+    """Popen + 读者线程 + 队列执行命令：实时回报逐行输出，终态返回 ``exit_code=<n>`` 前缀文本。
+
+    两条硬约束（都与既有实现的行为差异有关，改动时必须保持）：
+
+    1. **不能用 ``readline`` 直读**（``jobs.py:_run_shell`` 的写法）：子进程长时间无输出时
+       ``readline`` 会永久阻塞，循环体里的取消/超时检查形同虚设——用户点「停止」要等命令
+       自己跑完才有反应。这里读者线程把行推进 ``queue``，主循环 ``get(timeout=0.2)`` 轮询，
+       取消与超时都能在 200ms 内响应。
+    2. **返回值必须保留 ``exit_code=<n>\\n`` 前缀**：``_result_success`` 用
+       ``^exit_code=(-?\\d+)`` 判定成败，丢前缀会让失败命令静默变成成功。
+    """
+    live = _LiveProgress(run_context, tool)
+    cancel_event = run_context.get("cancel_event") if isinstance(run_context, dict) else None
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        env=env,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    lines: "queue.Queue[tuple[str, str]]" = queue.Queue()
+
+    def _reader(stream: Any, channel: str) -> None:
+        try:
+            if stream is None:
+                return
+            for raw_line in stream:
+                lines.put((channel, raw_line))
+        except Exception:  # noqa: BLE001 - 管道被终止时读异常属正常收尾
+            pass
+        finally:
+            lines.put((channel, ""))  # EOF 哨兵：主循环据此判定"管道已排空"
+
+    readers = [
+        threading.Thread(target=_reader, args=(process.stdout, "out"), daemon=True, name="naiba-tool-stdout"),
+        threading.Thread(target=_reader, args=(process.stderr, "err"), daemon=True, name="naiba-tool-stderr"),
+    ]
+    for reader in readers:
+        reader.start()
+
+    out_lines: list[str] = []
+    err_lines: list[str] = []
+    eof = 0
+    cancelled = False
+    timed_out = False
+    deadline = time.monotonic() + max(1, int(timeout))
+    while eof < 2:
+        if cancel_event is not None and cancel_event.is_set():
+            cancelled = True
+            break
+        if time.monotonic() > deadline:
+            timed_out = True
+            break
+        try:
+            channel, text = lines.get(timeout=0.2)
+        except queue.Empty:
+            continue
+        if not text:
+            eof += 1
+            continue
+        line = text.rstrip("\r\n")
+        (out_lines if channel == "out" else err_lines).append(line)
+        live.feed(line)
+
+    if cancelled or timed_out:
+        _stop_process(process)
+    try:
+        returncode = process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        _stop_process(process)
+        returncode = -1
+    # 读者线程收尾 + 显式关管道：常驻服务里不关会持续泄漏文件句柄（unittest 会直接报
+    # ResourceWarning: unclosed file）。先 join 再关，避免把正在阻塞读的线程的流拽掉。
+    for reader in readers:
+        reader.join(timeout=1.0)
+    for stream in (process.stdout, process.stderr):
+        try:
+            if stream is not None:
+                stream.close()
+        except Exception:  # noqa: BLE001
+            pass
+    # 终止后把读者线程可能还在赶路的那几行收干净（不阻塞：队列已排空即返回）。
+    while True:
+        try:
+            channel, text = lines.get_nowait()
+        except queue.Empty:
+            break
+        if text:
+            (out_lines if channel == "out" else err_lines).append(text.rstrip("\r\n"))
+    live.flush()
+
+    stdout_text = "\n".join(out_lines)
+    stderr_text = "\n".join(err_lines)
+    output = (stdout_text + ("\n" + stderr_text if stderr_text else "")).strip()
+    note = ""
+    if cancelled or (cancel_event is not None and cancel_event.is_set()):
+        returncode = -1
+        note = "（命令已被用户取消）"
+    elif timed_out:
+        returncode = -1
+        note = f"（命令超过 {max(1, int(timeout))} 秒上限，已强制终止）"
+    prefix = f"exit_code={returncode}\n"
+    if note:
+        prefix += f"{note}\n"
+    return prefix + output[:max_output]
 
 
 def _powershell_literal(value: Any) -> str:
@@ -620,31 +792,37 @@ def _tool_edit_file(ctx: ToolContext, args: dict[str, Any], active_skills: list[
     return f"{summary}\n{diff}" if diff else summary
 
 
-def _tool_pwsh(ctx: ToolContext, args: dict[str, Any], active_skills: list[dict[str, Any]] | None = None) -> str:
+def _tool_pwsh(
+    ctx: ToolContext,
+    args: dict[str, Any],
+    active_skills: list[dict[str, Any]] | None = None,
+    run_context: dict[str, Any] | None = None,
+) -> str:
     command = str(args.get("command") or "").strip()
     if not command:
         raise ValueError("command 不能为空")
     cwd = _resolve_tool_path(ctx, args.get("cwd"), default_workspace=True)
     timeout = min(max(int(args.get("timeout", ctx.command_timeout)), 1), 900)
     max_output = min(max(int(args.get("max_output", 50000)), 0), 200000)
-    completed = subprocess.run(
+    return _run_streaming_command(
         [
             "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
             POWERSHELL_UTF8_PREFIX + "\n" + command,
         ],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+        cwd=cwd,
         timeout=timeout,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        max_output=max_output,
+        tool="pwsh",
+        run_context=run_context,
     )
-    output = (completed.stdout + ("\n" + completed.stderr if completed.stderr else "")).strip()
-    return f"exit_code={completed.returncode}\n{output[:max_output]}"
 
 
-def _tool_run_skill_script(ctx: ToolContext, args: dict[str, Any], active_skills: list[dict[str, Any]]) -> str:
+def _tool_run_skill_script(
+    ctx: ToolContext,
+    args: dict[str, Any],
+    active_skills: list[dict[str, Any]],
+    run_context: dict[str, Any] | None = None,
+) -> str:
     skill_name = str(args.get("skill") or "")
     relative_script = str(args.get("script") or "")
     skill = next((item for item in active_skills if item["name"] == skill_name or item["id"] == skill_name), None)
@@ -669,9 +847,11 @@ def _tool_run_skill_script(ctx: ToolContext, args: dict[str, Any], active_skills
             # 隐藏入口会把 stdio 强制为 UTF-8——runw 下 PYTHONIOENCODING 未必生效）。
             command = [sys.executable, "--run-skill-script", str(script), *map(str, raw_args)]
         else:
+            # -u：管道下游是块缓冲，脚本 print 不 flush 会攒到 4KB 才吐一次——「实时输出」
+            # 会退化成"命令结束才一次性出现"。
             # -X utf8：源码路径下也让子进程进入 UTF-8 模式（open() 默认编码 + stdio 一致），
             # 不只依赖 PYTHONIOENCODING 被继承。
-            command = [ctx.python_executable, "-X", "utf8", str(script), *map(str, raw_args)]
+            command = [ctx.python_executable, "-u", "-X", "utf8", str(script), *map(str, raw_args)]
     elif suffix == ".ps1":
         invocation = "& " + " ".join(
             _powershell_literal(item) for item in [script, *map(str, raw_args)]
@@ -688,20 +868,22 @@ def _tool_run_skill_script(ctx: ToolContext, args: dict[str, Any], active_skills
     # Windows 管道下 Python 子进程默认用 locale 编码（GBK）输出 stdout/stderr，
     # 父进程按 UTF-8 解码会得到乱码（实测：中文路径参数/报错信息变 �）。强制子进程
     # UTF-8 运行时（PYTHONIOENCODING+PYTHONUTF8），输出与 argv 均为 UTF-8，解码匹配。
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
-    completed = subprocess.run(
+    env = {
+        **os.environ,
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+        # 冻结版走 --run-skill-script（无 -u 可用）时靠它拿到行缓冲；源码路径两条都加。
+        "PYTHONUNBUFFERED": "1",
+    }
+    return _run_streaming_command(
         command,
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+        cwd=root,
         timeout=timeout,
+        max_output=50000,
+        tool="run_skill_script",
+        run_context=run_context,
         env=env,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
-    output = (completed.stdout + ("\n" + completed.stderr if completed.stderr else "")).strip()
-    return f"exit_code={completed.returncode}\n{output[:50000]}"
 
 
 def _tool_http_request(ctx: ToolContext, args: dict[str, Any], active_skills: list[dict[str, Any]] | None = None) -> str:
@@ -973,11 +1155,30 @@ _ALIAS_CANONICAL: dict[str, str] = {
     "grep": "search_files",
 }
 
+# 需要「实时逐行输出」的工具：只有子进程类工具才有可流的输出，故显式枚举（放行面最小）。
+_STREAM_TOOL_FNS: dict[str, Callable[..., Any]] = {
+    "pwsh": _tool_pwsh,
+    "run_skill_script": _tool_run_skill_script,
+}
+
 
 def _make_str_execute(ctx: ToolContext, fn: Callable[..., Any], name: str = "") -> Any:
     def execute(arguments: dict[str, Any], active_skills: list[dict[str, Any]], run_context: dict[str, Any] | None = None) -> tuple[bool, str]:
         # 每次调用按当前运行工作区派生 ctx：执行侧与判定侧同源（相对路径不再按启动期工作区解析）
         result = fn(ctx_for_run(ctx, run_context), arguments, active_skills)
+        return _result_success(name, result), result
+    return execute
+
+
+def _make_stream_execute(ctx: ToolContext, fn: Callable[..., Any], name: str = "") -> Any:
+    """实时进度版绑定（仅 ``pwsh`` / ``run_skill_script``）。
+
+    与 ``_make_str_execute`` 的唯一差别：把 ``run_context`` 透传给实现函数——实现函数从
+    ``run_context["event_sink"]`` 取到事件出口，把子进程的逐行输出推成 ``tool_progress``。
+    其余工具保持原签名不动，改动面收敛在这两个工具上。
+    """
+    def execute(arguments: dict[str, Any], active_skills: list[dict[str, Any]], run_context: dict[str, Any] | None = None) -> tuple[bool, str]:
+        result = fn(ctx_for_run(ctx, run_context), arguments, active_skills, run_context)
         return _result_success(name, result), result
     return execute
 
@@ -1014,6 +1215,8 @@ class CoreToolProvider:
         for spec in build_core_tool_specs():
             if spec.name == "reset_context":
                 execute = _make_reset_context_execute(self._context)
+            elif spec.name in _STREAM_TOOL_FNS:
+                execute = _make_stream_execute(self._context, _STREAM_TOOL_FNS[spec.name], spec.name)
             elif spec.name in _STR_TOOL_FNS:
                 execute = _make_str_execute(self._context, _STR_TOOL_FNS[spec.name], spec.name)
             else:

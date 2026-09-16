@@ -180,6 +180,7 @@ class StreamMixins:
             ),
             "reasoning": "".join(reasoning_parts),
             "usage": ProtocolMixins._online_usage("ollama", chunks),
+            "finish_reason": ProtocolMixins._online_finish_reason("ollama", chunks),
         }
 
 
@@ -311,6 +312,7 @@ class StreamMixins:
             "reasoning": "".join(reasoning_parts),
             "reasoning_id": reasoning_ids[-1] if reasoning_ids else "",
             "usage": usage,
+            "finish_reason": ProtocolMixins._online_finish_reason(request_format, chunks),
         }
 
 
@@ -382,6 +384,7 @@ class StreamMixins:
             "content": StreamMixins._clean_content("".join(full_content_parts)),
             "reasoning": "".join(reasoning_parts),
             "usage": ProtocolMixins._online_usage("lm_studio", chunks) if chunks else {},
+            "finish_reason": ProtocolMixins._online_finish_reason("lm_studio", chunks),
         }
 
 

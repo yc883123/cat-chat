@@ -62,6 +62,20 @@ ERROR_DUMP_MAX_BYTES = 512 * 1024
 LOCAL_REQUEST_FORMATS = {"ollama", "lm_studio", "llama_cpp", "unsloth"}
 _AGENT_BUFFER_LIMIT = 1024
 
+# 最近一次模型请求的终止原因（thread-local）：`_complete_online` 是 staticmethod、返回 4-tuple
+# 是既有契约（加一个元素要动所有调用点），故沿用 `last_usage` 的「旁路记录」思路——
+# 静态层把值写进线程局部，`complete()` 拿到返回值后立即抄进实例属性 `last_finish_reason`。
+# 取值语义见 `ProtocolMixins._online_finish_reason`（"length" = 撞输出上限，"" = 供应商没给）。
+_FINISH_REASON = threading.local()
+
+
+def _record_finish_reason(value: Any) -> None:
+    _FINISH_REASON.value = str(value or "")
+
+
+def _last_finish_reason() -> str:
+    return str(getattr(_FINISH_REASON, "value", "") or "")
+
 
 class EmptyModelStreamError(RuntimeError):
     """在线模型（仅 codex_responses）流式响应消费完毕但既无正文也无有效 Agent action。
@@ -344,6 +358,19 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
     def last_usage(self, value: dict[str, int]) -> None:
         self._local.last_usage = dict(value)
 
+    @property
+    def last_finish_reason(self) -> str:
+        """最近一次模型请求的终止原因（"stop"/"length"/"tool_calls"/""）。
+
+        消费方（Agent 循环）用 ``getattr(model_runtime, "last_finish_reason", "")`` 读取，
+        与 ``last_usage`` 完全同构；空字符串表示供应商未提供该字段（流被掐断或中继吞字段）。
+        """
+        return str(getattr(self._local, "last_finish_reason", "") or "")
+
+    @last_finish_reason.setter
+    def last_finish_reason(self, value: str) -> None:
+        self._local.last_finish_reason = str(value or "")
+
     def complete(
         self,
         profile: dict[str, Any],
@@ -428,6 +455,8 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
         self.last_reasoning = reasoning
         self.last_reasoning_id = reasoning_id
         self.last_usage = usage
+        # 终止原因由 _complete_online 在返回前写入线程局部（静态层拿不到 self），此处抄到实例上。
+        self.last_finish_reason = _last_finish_reason()
         return content
 
     @classmethod
@@ -1193,6 +1222,7 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                                         reasoning = ""
                             if not content:
                                 raise RuntimeError("Ollama 流式响应中没有文本内容")
+                        _record_finish_reason(streamed.get("finish_reason"))
                         return content, reasoning, "", streamed["usage"]
                     if stream_enabled and response_format == "lm_studio":
                         streamed = ModelRuntime._read_lm_studio_stream(
@@ -1206,6 +1236,7 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                                 reasoning = ""
                             else:
                                 raise RuntimeError("LM Studio 流式响应中没有文本内容")
+                        _record_finish_reason(streamed.get("finish_reason"))
                         return content, reasoning, "", streamed["usage"]
                     if stream_enabled and response_format != "gemini":
                         streamed = ModelRuntime._read_sse_response(
@@ -1219,12 +1250,17 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                             content = ModelRuntime._reasoning_action(reasoning)
                             if content:
                                 reasoning = ""
-                            elif response_format == "codex_responses":
-                                # 仅 codex_responses 归入可重试的空流（EmptyModelStreamError）：
-                                # 中继可能只回聚合事件；其它在线格式保留原 RuntimeError、不重试。
+                            elif response_format == "codex_responses" or reasoning:
+                                # 空正文按「可重试空流」（EmptyModelStreamError）处理，分两种情况：
+                                # ① codex_responses：中继可能只回聚合事件，正文在聚合事件里补不回来；
+                                # ② 有推理无正文：模型确实在生成、正文却丢失/被上游截断
+                                #    （实测 mimo-v2.5 推理循环刷屏后正文为空）。退避后再试一次
+                                #    大概率恢复，不该把一次上游抖动升级成整轮对话失败。
+                                # 既无正文也无推理的空流仍保留原 RuntimeError、不重试。
                                 raise EmptyModelStreamError("在线模型流式响应中没有文本内容")
                             else:
                                 raise RuntimeError("在线模型流式响应中没有文本内容")
+                        _record_finish_reason(streamed.get("finish_reason"))
                         return content, reasoning, str(streamed.get("reasoning_id") or ""), streamed["usage"]
                     raw_response = ModelRuntime._read_response_cancelable(
                         response, cancel_event
@@ -1498,9 +1534,11 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
         except RuntimeError:
             reasoning = ModelRuntime._online_reasoning(response_format, result)
             if connection_test and reasoning:
+                _record_finish_reason("")
                 return "接口已返回有效响应", reasoning, "", usage
             raise
         reasoning_id = ModelRuntime._responses_reasoning_id(response_format, result)
+        _record_finish_reason(ModelRuntime._online_finish_reason(response_format, result))
         return content, reasoning, reasoning_id, usage
 
     @staticmethod

@@ -4,7 +4,7 @@
 
 import { $, api, draggedFileCache, emptyStateElement, escapeHtml, notifyComposerChanged, state, toast } from "./01-core.js";
 import { markdown } from "./02-markdown.js";
-import { activityMarkup, closeImageLightbox, fileChangesSummaryMarkup, fileUrl, mediaKind, mediaMarkup, mediaTruncatedNotice, reasoningMarkup, remainingAttachments, skillMarkup, sourcesMarkup, toolMarkup, updateContextComposerLock, updateContextUsage, updateSendButtonState, uploadedFileMarkup, usageMarkup } from "./03-media.js";
+import { activityMarkup, closeImageLightbox, fileChangesSummaryMarkup, fileUrl, mediaKind, mediaMarkup, mediaTruncatedNotice, reasoningMarkup, remainingAttachments, skillMarkup, sourcesMarkup, toolMarkup, truncationNotice, updateContextComposerLock, updateContextUsage, updateSendButtonState, uploadedFileMarkup, usageMarkup } from "./03-media.js";
 import { openConversation, syncCurrentConversation } from "./08-conversations.js";
 import { renderPendingFiles } from "./10-upload.js";
 import { hideChoiceButtons, sendMessage, showChoiceButtons } from "./12-chat-input.js";
@@ -172,6 +172,7 @@ export function messageElement(message, temporary = false) {
           ${reasoningToolHtml}
           ${temporary ? '<div class="run-activity activity">正在准备</div>' : ''}
           <div class="answer-content" data-raw="" ${hideBottomContent ? 'style="display:none"' : ''}>${temporary ? '' : abortedBadge + markdown(message.content)}</div>
+          ${temporary ? '' : truncationNotice(metadata.truncated)}
           ${temporary ? '' : sourcesMarkup(metadata.sources)}
           ${mediaMarkup(bottomAttachments)}
           ${bottomAttachments.length ? mediaTruncatedNotice(metadata.attachments_truncated) : ''}
@@ -705,7 +706,28 @@ function messageRangeFragment(messages, start, end) {
     const divider = sessionDividerAfter(message);
     if (divider) fragment.append(divider);
   }
+  markChoicePreviewAnsweredState(fragment, messages);
   return fragment;
+}
+
+/**
+ * 给正文里的「选择题」静态块标记已答/未答：该 assistant 消息之后出现过 user 消息即为已答。
+ * 判定基于完整 messages（懒加载只渲染窗口，索引仍取自全量列表，滚动补渲染时标记不会漂移）。
+ */
+function markChoicePreviewAnsweredState(fragment, messages) {
+  const answered = new Set();
+  let seenUser = false;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message) continue;
+    if (message.role === 'user') { seenUser = true; continue; }
+    if (seenUser && message.role === 'assistant') answered.add(String(message.id || ''));
+  }
+  if (!answered.size) return;
+  fragment.querySelectorAll('.choice-preview').forEach((preview) => {
+    const row = preview.closest('.message-row[data-message-id]');
+    if (row && answered.has(String(row.dataset.messageId || ''))) preview.classList.add('is-answered');
+  });
 }
 
 // 程序化定位/补偿必须瞬时生效：容器是 scroll-behavior: smooth，直接写 scrollTop 会动画化，
@@ -818,17 +840,23 @@ export function renderMessages(messages) {
   }
 }
 
+/**
+ * 取当前该展示的选项面板来源消息：从末尾向前扫描。
+ * - 遇到 user 消息 → 该组选项已被回答（或本就没有未回答的选项），返回 null；
+ * - 遇到「带选项的 assistant」→ 返回它；
+ * - 遇到「不带选项的 assistant」（followup 轮次 / 后台任务回执 / 错误重试）→ 继续向前找：
+ *   用户还没回复过的那组选项，不能因为后面又追加了一条 AI 消息就整块消失。
+ */
 export function pendingChoiceMessage(messages) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message?.role === 'user') return null;
+    if (message?.role !== 'assistant') continue;
     const choices = message?.metadata?.choices;
     const groups = message?.metadata?.choice_groups;
-    if (message?.role === 'assistant'
-      && ((Array.isArray(groups) && groups.length) || (Array.isArray(choices) && choices.length))) {
+    if ((Array.isArray(groups) && groups.length) || (Array.isArray(choices) && choices.length)) {
       return message;
     }
-    if (message?.role === 'assistant') return null;
   }
   return null;
 }

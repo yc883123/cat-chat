@@ -2,7 +2,7 @@
 // 12-chat-input.js —— 拆分自 public/app.js 第 5238-6068 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, api, escapeHtml, notifyComposerChanged, state, toast } from "./01-core.js";
+import { $, $$, api, escapeHtml, state, toast } from "./01-core.js";
 import { markdown } from "./02-markdown.js";
 import { setContextUsage, toolMediaMarkup, updateContextComposerLock, updateContextUsage, usageMarkup } from "./03-media.js";
 import { fillContextResetSeed, getStreamingProseSegment, messageElement, moveBottomProseInline, refreshFirstTurnCard, replaceWithMessage, scheduleStreamingMarkdown, scrollToBottom } from "./04-messages.js";
@@ -544,6 +544,7 @@ const CHAT_EVENT_HANDLERS = {
   reasoning_end: handleReasoningEndEvent,
   reasoning: handleReasoningEvent,
   tool_start: handleToolStartEvent,
+  tool_progress: handleToolProgressEvent,
   tool_result: handleToolResultEvent,
   tool_confirm: handleToolConfirmEvent,
   choice: handleChoiceEvent,
@@ -714,6 +715,85 @@ function handleReasoningEvent(event, { row, answer }) {
   content.dataset.raw = (content.dataset.raw || '') + (content.dataset.raw ? '\n\n---\n\n' : '') + event.content;
 }
 
+// ---- 工具实时输出（tool_progress）：卡片内滚动输出区 + 运行计时 ----
+// 后端已按时间片节流，这里再做两件事：限制保留行数、只在用户贴着底部时自动跟随
+// （否则用户往上翻看命令输出时，每一行新内容都会把他拽回底部）。
+const TOOL_LIVE_MAX_LINES = 200;
+// 卡片 DOM → 计时器 id。用 Map 而不是往 dataset 里写 timer id：dataset 会被整体
+// 序列化进快照/调试输出，塞一个不透明的整数进去只会让现场更难读。
+const toolLiveTimers = new Map();
+
+function toolLiveElapsed(card) {
+  const startedAt = Number(card.dataset.startTs || 0);
+  return startedAt ? Math.max(0, Math.round((Date.now() - startedAt) / 1000)) : 0;
+}
+
+function startToolLiveTimer(card) {
+  const tick = () => {
+    const summary = card.querySelector('summary');
+    if (!summary) return;
+    const reason = card.dataset.reason ? ` · ${card.dataset.reason}` : '';
+    summary.textContent = `Running · ${card.dataset.tool || ''}${reason} · 已运行 ${toolLiveElapsed(card)}s`;
+  };
+  tick();
+  toolLiveTimers.set(card, setInterval(tick, 1000));
+}
+
+function stopToolLiveTimer(card) {
+  const timer = toolLiveTimers.get(card);
+  if (timer === undefined) return toolLiveElapsed(card);
+  clearInterval(timer);
+  toolLiveTimers.delete(card);
+  return toolLiveElapsed(card);
+}
+
+function findToolCard(row, event) {
+  const cards = row.querySelectorAll('.tool-run');
+  if (!cards.length) return null;
+  const raw = event.seq;
+  const seq = raw === undefined || raw === null ? '' : String(raw);
+  if (seq) {
+    // 优先按实例序号定位：一轮里并行调用多个同名工具时，只有序号能唯一确定是哪一张卡
+    //（“最后一个 .tool-run”会把结果贴到别的卡片上）。
+    for (let i = cards.length - 1; i >= 0; i -= 1) {
+      if (cards[i].dataset.seq === seq && cards[i].dataset.state === 'running') return cards[i];
+    }
+    for (let i = cards.length - 1; i >= 0; i -= 1) {
+      if (cards[i].dataset.seq === seq) return cards[i];
+    }
+  }
+  for (let i = cards.length - 1; i >= 0; i -= 1) {
+    if (cards[i].dataset.state === 'running') return cards[i];
+  }
+  return cards[cards.length - 1];
+}
+
+function handleToolProgressEvent(event, { row }) {
+  const card = findToolCard(row, event);
+  if (!card) return false;
+  const line = String(event.line || '');
+  if (!line) return false;
+  let live = card.querySelector('.tool-live');
+  if (!live) {
+    live = document.createElement('div');
+    live.className = 'tool-live';
+    const anchor = card.querySelector('pre');
+    if (anchor) anchor.after(live);
+    else card.appendChild(live);
+  }
+  live.hidden = false;
+  // 贴底判定必须在插入之前算：插入之后 scrollHeight 已经变了。
+  const pinned = live.scrollTop + live.clientHeight >= live.scrollHeight - 24;
+  const item = document.createElement('div');
+  item.className = 'tool-live-line';
+  item.textContent = line;
+  live.appendChild(item);
+  while (live.childElementCount > TOOL_LIVE_MAX_LINES) live.removeChild(live.firstElementChild);
+  if (pinned) live.scrollTop = live.scrollHeight;
+  // 返回 false：进度事件不触发整页滚动——命令刷屏时把页面一直拽到底，用户没法看别处。
+  return false;
+}
+
 function handleToolStartEvent(event, { row, answer }) {
   clearElapsedStatus();
   // 首个工具出现：把之前累计在底部的正文移到内联块（紧跟该工具前），并切换为“有工具”模式。
@@ -727,40 +807,56 @@ function handleToolStartEvent(event, { row, answer }) {
   const details = document.createElement('details');
   details.className = 'tool-run';
   details.open = true;
+  // 实例序号 + 原始工具名/原因：tool_progress / tool_result 靠它们回到正确的卡片，
+  // 终态摘要也要复用（不再依赖渲染时的字符串，避免与后续事件拼出来的文本不一致）。
+  details.dataset.seq = event.seq === undefined || event.seq === null ? '' : String(event.seq);
+  details.dataset.tool = String(event.tool || '');
+  details.dataset.reason = String(event.reason || '');
+  details.dataset.state = 'running';
+  details.dataset.startTs = String(Date.now());
   const toolArguments = typeof event.arguments === 'string'
     ? event.arguments
     : JSON.stringify(event.arguments || {}, null, 2);
-  details.innerHTML = `<summary>Running · ${escapeHtml(event.tool)}${event.reason ? ` · ${escapeHtml(event.reason)}` : ''}</summary><pre>${escapeHtml(toolArguments)}</pre>`;
+  // 摘要文本由计时器写入（含「已运行 Ns」），这里只留空壳 + 参数 + 实时输出区。
+  details.innerHTML = `<summary></summary><pre>${escapeHtml(toolArguments)}</pre><div class="tool-live" hidden></div>`;
   markRequestStart(row, details);
   answer.before(details);
+  startToolLiveTimer(details);
   // 让新插入的工具块始终位于末尾（紧贴 answer），从而保持时间顺序。
   scrollToBottom();
 }
 
 function handleToolResultEvent(event, { row }) {
-  const toolRuns = row.querySelectorAll('.tool-run');
-  const last = toolRuns[toolRuns.length - 1];
-  if (last) {
-    const summary = last.querySelector('summary');
-    if (summary) summary.textContent = `${event.success ? 'Completed' : 'Failed'} · ${event.tool}`;
-    const toolArguments = typeof event.arguments === 'string'
-      ? event.arguments
-      : JSON.stringify(event.arguments || {}, null, 2);
-    const pre = last.querySelector('pre') || document.createElement('pre');
-    pre.textContent = `${toolArguments}\n\n${String(event.result || '')}`;
-    if (!pre.parentNode) last.appendChild(pre);
-    last.open = false;
-    // 媒体就地出现在本次工具块下方（流式期间即可见，不必等整轮结束）。
-    // 工具块本身保持折叠；终态 done 会用 messageElement 全量重渲染，toolRunMarkup
-    // 从同一份 run.media 重建同位置的媒体块，位置与内容不变。
-    const markup = toolMediaMarkup(event);
-    const next = last.nextElementSibling;
-    if (next && next.classList && next.classList.contains('tool-media')) {
-      if (markup) next.outerHTML = markup;
-      else next.remove();
-    } else if (markup) {
-      last.insertAdjacentHTML('afterend', markup);
-    }
+  const card = findToolCard(row, event);
+  if (!card) return;
+  const seconds = stopToolLiveTimer(card);
+  card.dataset.state = event.success ? 'completed' : 'failed';
+  const summary = card.querySelector('summary');
+  if (summary) {
+    const reason = card.dataset.reason ? ` · ${card.dataset.reason}` : '';
+    const tool = String(event.tool || card.dataset.tool || '');
+    summary.textContent = `${event.success ? 'Completed' : 'Failed'} · ${tool}${reason} · ${seconds}s`;
+  }
+  const live = card.querySelector('.tool-live');
+  // 实时输出区留在卡片内（卡片折叠，展开仍能看到这次命令真实打了什么），空则不留空块。
+  if (live && !live.childElementCount) live.hidden = true;
+  const toolArguments = typeof event.arguments === 'string'
+    ? event.arguments
+    : JSON.stringify(event.arguments || {}, null, 2);
+  const pre = card.querySelector('pre') || document.createElement('pre');
+  pre.textContent = `${toolArguments}\n\n${String(event.result || '')}`;
+  if (!pre.parentNode) card.appendChild(pre);
+  card.open = false;
+  // 媒体就地出现在本次工具块下方（流式期间即可见，不必等整轮结束）。
+  // 工具块本身保持折叠；终态 done 会用 messageElement 全量重渲染，toolRunMarkup
+  // 从同一份 run.media 重建同位置的媒体块，位置与内容不变。
+  const markup = toolMediaMarkup(event);
+  const next = card.nextElementSibling;
+  if (next && next.classList && next.classList.contains('tool-media')) {
+    if (markup) next.outerHTML = markup;
+    else next.remove();
+  } else if (markup) {
+    card.insertAdjacentHTML('afterend', markup);
   }
 }
 
@@ -937,15 +1033,18 @@ function handleErrorEvent(event, { row, answer, collapseReasoning, conversationI
 
 /* ---------- 交互选择面板：单选 / 多选 / 多组 ----------
  * 后端只提供数据（消息 metadata.choices / metadata.choice_groups），面板只做「收集答案 →
- * 一次性填入输入框」，不新增接口、不自动发送、不阻塞后台。状态以「会话 + 来源消息」为键
- * 存在前端内存里：重渲染 / 重复事件 / 会话切换都不清空（切回来还能接着答）；整页刷新即
- * 从首题重来，不落任何半成品。实时 choice 事件、done 事件 metadata、历史渲染三个入口
- * 统一汇入 showChoiceButtons（选择状态的唯一同步入口）。
+ * 直接作为一轮消息发送」（2026-09-16 起不再经输入框中转：长答案平铺在输入框里太占地方）。
+ * 输入框里已有的草稿会拼在答案前面一起发出（口径见 sendChatMessage 的 textOverride 合并）。
+ * 状态以「会话 + 来源消息」为键存在前端内存里：重渲染 / 重复事件 / 会话切换都不清空
+ * （切回来还能接着答）；整页刷新即从首题重来，不落任何半成品。实时 choice 事件、done 事件
+ * metadata、历史渲染三个入口统一汇入 showChoiceButtons（选择状态的唯一同步入口）。
  */
 const choiceSelections = new Map();  // key → { groups, answers, index, collapsed, done }
 const CHOICE_MEMORY_MAX = 24;        // 内存里最多保留多少条临时选择（按插入序淘汰最旧）
 let activeChoiceKey = '';
 let choicePendingSubmit = null;      // 提交中的面板（失败可回退，见 rollbackChoiceSubmit）
+let pendingChoiceCustomFocus = -1;   // 刚展开「自定义回复」的题号：下次渲染后把焦点落进输入框
+let choiceSubmitting = false;        // 「发送」防连点：一轮发送流程结束前不再受理
 
 function choiceKeyOf(conversationId, messageId) {
   const conversation = String(conversationId ?? '');
@@ -968,13 +1067,56 @@ function choicePicked(entry, index) {
   return Array.isArray(picked) ? picked : [];
 }
 
-/** 答案块：一行一题（`视觉：写实`），多选同行用「、」连接；无题目时只写选项。 */
+/** 该题的自定义回复（与预设选项并存；空串表示未填）。 */
+function choiceCustom(entry, index) {
+  const value = Array.isArray(entry.customs) ? entry.customs[index] : '';
+  return String(value ?? '').trim();
+}
+
+/** 该题是否已有答案：预设选项或自定义回复任一非空。 */
+function choiceHasAnswer(entry, index) {
+  return Boolean(choicePicked(entry, index).length || choiceCustom(entry, index));
+}
+
+/** 该题是否被显式跳过（跳过题不参与"未答"拦截，也不写进答案块）。 */
+function choiceSkipped(entry, index) {
+  return Boolean(Array.isArray(entry.skipped) ? entry.skipped[index] : false);
+}
+
+/** 该题是否已处理（答了或明确跳过）——「下一题 / 完成」的门槛。 */
+function choiceResolved(entry, index) {
+  return choiceHasAnswer(entry, index) || choiceSkipped(entry, index);
+}
+
+/** 该题的有效答案项 = 预设选项 + 自定义回复（自定义永远作为额外一项，单选也并存）。 */
+function choiceAnswerItems(entry, index) {
+  const items = [...choicePicked(entry, index)];
+  const custom = choiceCustom(entry, index);
+  if (custom) items.push(custom);
+  return items;
+}
+
+/** 提示文案（已选数量含自定义项；跳过题有独立提示）。 */
+function choiceHintText(entry, index) {
+  const picked = choicePicked(entry, index).length;
+  const custom = choiceCustom(entry, index) ? 1 : 0;
+  const total = picked + custom;
+  const multi = entry.groups[index]?.mode === 'multi';
+  if (total) return `已选 ${total} 项`;
+  if (choiceSkipped(entry, index)) return '已跳过本题';
+  return multi ? '可多选，勾选后进入下一题（也可自己写）' : '请选择一项、写自定义回复，或点「跳过」';
+}
+
+/** 答案块：一行一题（`视觉：写实`），多选同行用「、」连接；自定义回复作为该题最后一项。 */
 function choiceAnswerBlock(entry) {
   return entry.groups
     .map((group, index) => {
-      const text = choicePicked(entry, index).join('、');
+      const text = choiceAnswerItems(entry, index).join('、');
       if (!text) return '';
-      return group.prompt ? `${group.prompt}：${text}` : text;
+      if (!group.prompt) return text;
+      // 题目自带冒号结尾（"请选择下一步："）时不重复追加分隔符
+      const separator = /[：:]$/.test(group.prompt) ? '' : '：';
+      return `${group.prompt}${separator}${text}`;
     })
     .filter(Boolean)
     .join('\n');
@@ -984,14 +1126,49 @@ function syncChoicePanelLock(busy = Boolean(state.abortController)) {
   const host = $('#choiceButtons');
   if (!host) return;
   const entry = choiceSelections.get(activeChoiceKey);
-  const picked = entry ? choicePicked(entry, entry.index).length : 0;
+  const hasAnswer = entry ? choiceResolved(entry, entry.index) : false;
   host.classList.toggle('is-busy', Boolean(busy));
   $$('#choiceButtons button').forEach((button) => {
     const nav = button.dataset.choiceNav;
     if (nav === 'collapse') return;            // 折叠是纯显示操作，运行中也允许
-    if (nav === 'next' || nav === 'done') button.disabled = Boolean(busy) || !picked;
-    else button.disabled = Boolean(busy);      // 选项卡片 / 上一题
+    if (nav === 'next' || nav === 'done') button.disabled = Boolean(busy) || !hasAnswer;
+    else button.disabled = Boolean(busy);      // 选项卡片 / 上一题 / 自定义
   });
+}
+
+/**
+ * 就地刷新当前题的选中态 / 已选摘要 / 提示与主按钮禁用（不重建 DOM）。
+ * 自定义输入框正在打字时点选项、或边打边看已选摘要，都不该被打断——重建会丢焦点。
+ */
+function syncChoiceSelectionUi(entry) {
+  const host = $('#choiceButtons');
+  if (!host) return;
+  const index = entry.index;
+  const picked = choicePicked(entry, index);
+  const items = choiceAnswerItems(entry, index);
+  host.querySelectorAll('.choice-btn').forEach((button) => {
+    const selected = picked.includes(button.dataset.choiceValue || '');
+    button.classList.toggle('is-selected', selected);
+    button.setAttribute('aria-checked', String(selected));
+  });
+  const hint = host.querySelector('.choice-hint');
+  if (hint) hint.textContent = choiceHintText(entry, index);
+  const go = host.querySelector('.choice-nav-primary');
+  if (go) go.disabled = Boolean(state.abortController) || !choiceResolved(entry, index);
+}
+
+/** 跳过/取消跳过当前题：跳过即前进（与单选点选项一致），最后一题停在原地等「完成」。 */
+function toggleChoiceSkip(entry, index) {
+  if (state.abortController) return;           // 运行中不接受操作
+  if (!Array.isArray(entry.skipped)) entry.skipped = [];
+  entry.skipped[index] = !choiceSkipped(entry, index);
+  if (entry.skipped[index] && index < entry.groups.length - 1) {
+    entry.index = index + 1;
+    renderChoicePanel();
+    scrollToBottom();
+    return;
+  }
+  renderChoicePanel();
 }
 
 function onChoiceOptionClick(entry, choice) {
@@ -1002,7 +1179,13 @@ function onChoiceOptionClick(entry, choice) {
     entry.answers[entry.index] = picked.includes(choice)
       ? picked.filter((item) => item !== choice)
       : [...picked, choice];
-    renderChoicePanel();
+    syncChoiceSelectionUi(entry);
+    return;
+  }
+  // 再点一次已选中的选项 = 取消该题选择（停在原题，不进入下一题；此前是"选中了取消不掉"）
+  if (picked.length === 1 && picked[0] === choice) {
+    entry.answers[entry.index] = [];
+    syncChoiceSelectionUi(entry);
     return;
   }
   entry.answers[entry.index] = [choice];
@@ -1013,25 +1196,28 @@ function onChoiceOptionClick(entry, choice) {
     scrollToBottom();
     return;
   }
-  renderChoicePanel();
+  syncChoiceSelectionUi(entry);
 }
 
+/** 收尾：把答案直接作为一轮消息发送（失败时面板连答案一起还给用户，见 rollbackChoiceSubmit）。 */
 function completeChoicePanel() {
   const entry = choiceSelections.get(activeChoiceKey);
-  if (!entry || entry.done) return;            // 「完成」只执行一次
-  const unanswered = entry.groups.findIndex((_, index) => !choicePicked(entry, index).length);
-  if (unanswered >= 0) {                       // 每题至少选一项才可完成
+  if (!entry || choiceSubmitting) return;      // 防连点：一轮发送流程结束前不再受理
+  const unanswered = entry.groups.findIndex((_, index) => !choiceResolved(entry, index));
+  if (unanswered >= 0) {                       // 每题要么作答、要么显式跳过
     entry.index = unanswered;
     renderChoicePanel();
-    toast(`第 ${unanswered + 1} 题还没有选择`);
+    toast(`第 ${unanswered + 1} 题还没有选择（也可以点「跳过」）`);
     return;
   }
   const block = choiceAnswerBlock(entry);
-  entry.done = true;
+  // 全部跳过时答案块为空：发一条明确的跳过说明，而不是空白消息
+  const text = block || '（已跳过全部选择题）';
   entry.collapsed = false;
-  hideChoiceButtons();
-  fillComposerAnswer(block);
-  toast('选择已填入输入框，确认后再发送');
+  choiceSubmitting = true;
+  // 面板不在这里提前隐藏：sendChatMessage 的守卫（模型未选 / 回复进行中 / 上下文提醒）都在
+  // beginChoiceSubmit 之前 return，被拦下时面板与答案保持原样，用户可修正后重试。
+  Promise.resolve(sendMessage(text)).finally(() => { choiceSubmitting = false; });
 }
 
 function renderChoicePanel() {
@@ -1084,6 +1270,13 @@ function renderChoicePanel() {
   mode.textContent = multi ? '多选' : '单选';
   header.appendChild(mode);
 
+  if (choiceSkipped(entry, entry.index)) {
+    const skipBadge = document.createElement('span');
+    skipBadge.className = 'choice-mode-badge is-skip';
+    skipBadge.textContent = '已跳过';
+    header.appendChild(skipBadge);
+  }
+
   if (entry.groups.length > 1) {
     const progress = document.createElement('span');
     progress.className = 'choice-progress';
@@ -1120,25 +1313,53 @@ function renderChoicePanel() {
   });
   body.appendChild(options);
 
-  if (picked.length) {
-    const summary = document.createElement('div');
-    summary.className = 'choice-selection-summary';
-    const label = document.createElement('span');
-    label.className = 'choice-summary-label';
-    label.textContent = '已选：';
-    summary.appendChild(label);
-    // 多选逐项分行、长选项完整换行，不做截断
-    const list = document.createElement('div');
-    list.className = 'choice-summary-list';
-    picked.forEach((item) => {
-      const line = document.createElement('span');
-      line.className = 'choice-summary-item';
-      line.textContent = item;
-      list.appendChild(line);
+  // 「自定义回复」：与预设选项并存的一项；就地展开输入框（展开态存 entry.customOpen，按题号对齐）
+  const customBlock = document.createElement('div');
+  customBlock.className = 'choice-custom';
+  const customValue = Array.isArray(entry.customs) ? String(entry.customs[entry.index] ?? '') : '';
+  if (!(entry.customOpen && entry.customOpen[entry.index])) {
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'choice-custom-toggle';
+    toggle.dataset.choiceNav = 'custom';
+    toggle.textContent = customValue.trim() ? `自定义：${customValue.trim()}（点击修改）` : '＋ 自定义回复…';
+    toggle.disabled = busy;
+    toggle.addEventListener('click', () => {
+      entry.customOpen[entry.index] = true;
+      pendingChoiceCustomFocus = entry.index;   // 重建后把焦点落回输入框
+      renderChoicePanel();
     });
-    summary.appendChild(list);
-    body.appendChild(summary);
+    customBlock.appendChild(toggle);
+  } else {
+    const input = document.createElement('textarea');
+    input.className = 'choice-custom-input';
+    input.rows = 2;
+    input.placeholder = '输入你自己的回复（与上面选项并存，随「完成」一起填入输入框）';
+    input.value = customValue;
+    input.disabled = busy;
+    input.addEventListener('input', () => {
+      entry.customs[entry.index] = input.value;
+      syncChoiceSelectionUi(entry);
+    });
+    customBlock.appendChild(input);
+    if (customValue.trim()) {
+      const clear = document.createElement('button');
+      clear.type = 'button';
+      clear.className = 'choice-custom-clear';
+      clear.dataset.choiceNav = 'custom';
+      clear.textContent = '清除自定义回复';
+      clear.disabled = busy;
+      clear.addEventListener('click', () => {
+        entry.customs[entry.index] = '';
+        entry.customOpen[entry.index] = false;
+        renderChoicePanel();
+      });
+      customBlock.appendChild(clear);
+    }
   }
+  body.appendChild(customBlock);
+
+  // 不再渲染「已选：…」摘要：选项选中态 + 自定义输入框已表达全部答案，摘要与按钮高亮重复。
   host.appendChild(body);
 
   const actions = document.createElement('div');
@@ -1157,11 +1378,18 @@ function renderChoicePanel() {
     });
     actions.appendChild(back);
   }
+  const skip = document.createElement('button');
+  skip.type = 'button';
+  skip.className = 'choice-nav';
+  skip.dataset.choiceNav = 'skip';
+  skip.textContent = choiceSkipped(entry, entry.index) ? '取消跳过' : '跳过';
+  skip.title = choiceSkipped(entry, entry.index) ? '恢复本题（需要作答）' : '跳过本题（不写进发送内容）';
+  skip.disabled = busy;
+  skip.addEventListener('click', () => toggleChoiceSkip(entry, entry.index));
+  actions.appendChild(skip);
   const hint = document.createElement('span');
   hint.className = 'choice-hint';
-  hint.textContent = multi
-    ? (picked.length ? `已选 ${picked.length} 项` : '可多选，勾选后进入下一题')
-    : (picked.length ? '已选 1 项' : '请选择一项');
+  hint.textContent = choiceHintText(entry, entry.index);
   actions.appendChild(hint);
 
   const go = document.createElement('button');
@@ -1169,7 +1397,10 @@ function renderChoicePanel() {
   go.className = 'choice-nav choice-nav-primary';
   go.dataset.choiceNav = last ? 'done' : 'next';
   go.textContent = last ? '完成' : '下一题';
-  go.disabled = busy || !picked.length;
+  go.title = last
+    ? '点「完成」后直接发送（输入框里已有的草稿会拼在答案前面）'
+    : '进入下一题';
+  go.disabled = busy || !choiceResolved(entry, entry.index);
   go.addEventListener('click', () => {
     if (last) {
       completeChoicePanel();
@@ -1180,6 +1411,17 @@ function renderChoicePanel() {
   });
   actions.appendChild(go);
   host.appendChild(actions);
+
+  // 刚点开「自定义回复」：把焦点落进输入框（光标置尾），省得用户再点一次
+  if (pendingChoiceCustomFocus === entry.index) {
+    pendingChoiceCustomFocus = -1;
+    const input = host.querySelector('.choice-custom-input');
+    if (input) {
+      input.focus();
+      const end = input.value.length;
+      try { input.setSelectionRange(end, end); } catch (_) { /* 个别输入类型不支持选区 */ }
+    }
+  }
 }
 
 export function showChoiceButtons(choices, choiceGroups = [], context = {}) {
@@ -1195,10 +1437,14 @@ export function showChoiceButtons(choices, choiceGroups = [], context = {}) {
     // 同一来源重复同步：只更新数据，不重建已选状态（撤回多选后事件重放也不会被清空）。
     known.groups = groups;
     known.answers = groups.map((group, index) => choicePicked(known, index).filter((c) => group.choices.includes(c)));
+    // 自定义回复与展开态按题号对齐：题目数变化时不越界、不串题。
+    known.customs = groups.map((_, index) => String((known.customs || [])[index] ?? ''));
+    known.customOpen = groups.map((_, index) => Boolean((known.customOpen || [])[index]));
+    known.skipped = groups.map((_, index) => Boolean((known.skipped || [])[index]));
     if (known.index >= groups.length) known.index = groups.length - 1;
     if (known.index < 0) known.index = 0;
   } else {
-    choiceSelections.set(key, { groups, answers: [], index: 0, collapsed: false, done: false });
+    choiceSelections.set(key, { groups, answers: [], customs: [], customOpen: [], skipped: [], index: 0, collapsed: false, done: false });
     pruneChoiceSelections();
   }
   activeChoiceKey = key;
@@ -1239,19 +1485,7 @@ export function rollbackChoiceSubmit() {
   if (choiceSelections.has(pending.key)) renderChoicePanel();
 }
 
-/** 选择面板收尾：有草稿时在末尾追加换行分隔的答案块（草稿与待发送附件都保留）。
- * 原「替换输入框」的 fillComposer 只服务于旧单选按钮，已并入本函数（2026-09-15）。 */
-function fillComposerAnswer(block) {
-  const input = $('#messageInput');
-  if (!input || !block) return;
-  const draft = String(input.value || '');
-  input.value = draft.trim() ? `${draft.replace(/\s+$/, '')}\n${block}` : block;
-  resizeTextarea();
-  renderInputMirror();
-  updateSkillPopup();
-  notifyComposerChanged(input);
-  input.focus();
-}
+
 
 export async function approveTool(confirmId, runId = state.chatRunId) {
   try {

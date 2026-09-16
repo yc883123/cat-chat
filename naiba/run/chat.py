@@ -704,6 +704,10 @@ class ConversationRunMixin:
                 # 用户本轮是否明确要看图：枚举类工具的媒体声明 intent_gated 据此放行
                 # （判定用用户原文，不用路由增强文本——后者可能含历史助手措辞）。
                 "media_intent": _image_intent(message),
+                # 工具实时进度出口（pwsh / run_skill_script 逐行 stdout+stderr）。
+                # 工具实现只依赖这一个 callable，不直接持有 manager——run 的内部结构
+                # 不向工具层泄漏，换实现（SSE/落库策略）时工具侧零改动。
+                "event_sink": event,
             }
             worker = SkillAgent(
                 self.app.catalog,
@@ -831,6 +835,11 @@ class ConversationRunMixin:
             }
             if attachments_truncated:
                 metadata[MetadataKeys.ATTACHMENTS_TRUNCATED] = attachments_truncated
+            # 本轮答复的截断自述（finish_reason / 是否已自动续写）：由 Agent 循环写入
+            # run_context["truncation"]。非空即表示正文可能不完整，前端在末尾渲染提示行。
+            truncation = (run_context or {}).get("truncation") if isinstance(run_context, dict) else None
+            if truncation:
+                metadata[MetadataKeys.TRUNCATED] = dict(truncation)
             # 模型调用 reset_context 成功 → 在本条 AI 回复上落「新会话」分割线标记：
             # 下一条消息起 build_model_history 只取分割线之后的内容（本条及其之前都不进上下文）。
             reset_info = (run_context or {}).get("context_reset") if isinstance(run_context, dict) else None

@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.6.0-beta
-  RELEASE_TAG: v2.6.0-beta
-  PACKAGE_NAME: naiba-chat-2.6.0-beta-windows-x64
+  RELEASE_VERSION: 2.6.1-beta
+  RELEASE_TAG: v2.6.1-beta
+  PACKAGE_NAME: naiba-chat-2.6.1-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -87,11 +87,11 @@ jobs:
           Copy-Item -LiteralPath "README.md" -Destination $packageDir
           Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\${{ env.PACKAGE_NAME }}.zip" -Force
 
-      - name: Publish 2.6.0 Beta release
+      - name: Publish 2.6.1 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Naiba Chat 2.6.0 Beta
+          name: Naiba Chat 2.6.1 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -99,14 +99,13 @@ jobs:
             dist/${{ env.PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Naiba Chat 2.6.0 Beta Windows build from `${{ github.sha }}`。
+            Naiba Chat 2.6.1 Beta Windows build from `${{ github.sha }}`。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - 工具执行实时可见：pwsh 与 run_skill_script 逐行推送子进程输出，工具卡片内就是等宽滚动输出区（最近 200 行、贴底才自动跟随），摘要行显示「Running · 工具名 · 已运行 Ns」，跑完变成「Completed · 工具名 · Ns」。
-            - 停止与超时即时生效：这两类命令改用「读者线程 + 队列」执行，点「停止」立刻终止子进程（不再等命令自己跑完），超时按上限强制终止，两者都返回明确的 exit_code=-1 与原因说明。
-            - 模型输出截断守护：全链路记录终止原因（finish_reason）；答复撞上输出上限、或流在没有终止原因的情况下停在句中断点时自动从断点续写一次，并在消息末尾标注「本轮回复可能被截断」（已续写 / 续写后仍被切）。
-            - 后台任务的日志真的能看：任务面板展开详情时按游标增量拉取该任务的逐行日志（job_log 一直在写、前端此前从未消费），日志随列表轮询自动续拉且不重复。
-            - 任务面板行标题与文案：优先显示落库的真实任务名，子 Agent 类型标签统一为「AI 子任务」，状态与错误文案去掉重复前缀。
+            - 聊天背景图不再「自己消失」：启动探针失败（图片被缓存清理删掉 / 数据目录迁移后路径失效 / 启动瞬间抖动）不再清空背景设置，只标记「文件暂不可用」并在设置卡给出重新选择入口；唯一会清空背景的入口只剩你主动点「清除背景」。
+            - 背景图文件暂缺不再牵连其它设置：保存改为只提交本次改动（改强度、调取景不再把失效的图片路径一起送审），文件补回后背景自动重新出现，不必重启。
+            - 迁移与找回兜底：换了数据目录或换了机器后，旧路径按文件名在当前受管目录（含按日分目录）里自动找回并接上；确实找不到也保留原路径等你重选。缓存自动清理把当前背景图算作「在用」，主图与缩略图成组保留。
+            - 守门与验证：背景图相关单测 30 例（含「探针失败不得清空设置」的前端源码守门）+ 隔离数据目录与真实浏览器的两阶段冒烟（文件缺失 → 设置保留并提示 → 补回文件自动恢复）。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

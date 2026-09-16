@@ -23,6 +23,9 @@ export const state = {
   // 聊天背景图（只铺对话区）：服务端 settings.chat_background 是唯一事实来源，
   // 这里保存当前生效值（含编辑器调出的取景），供设置面板/编辑器回填与失效兜底使用。
   chatBackground: { image: '', opacity: 0.35, crop: null, position_x: 50, position_y: 50, zoom: 1 },
+  // 当前背景图文件是否不可用（探针结果，运行时状态：不落库、不进设置契约）。
+  // 只标记不清空——背景图文件暂缺时设置必须原样保留，用户重新选一张即可。
+  chatBackgroundImageMissing: false,
   // 内置背景图清单（/api/backgrounds，首次打开设置时拉一次并缓存）。
   chatBackgroundPresets: [],
   conversations: [],
@@ -531,17 +534,22 @@ export async function syncChatBackgroundFromBootstrap(bootstrap) {
     zoom: configured?.zoom ?? local.zoom,
   });
   const configuredImage = String(configured?.image || '');
-  if (!configuredImage) return state.chatBackground;
-  refreshChatBackgroundGeometry();
-  // 图片可能已被缓存清理 / 换机器后 data_dir 迁移失效：探一次，坏链就地清空并提示，
-  // 不留一条"看着有设置、其实什么都没有"的死链。探针同时把图片原始比例 q 带回来，
-  // 取景（位置/缩放）要靠 q 才算得出来。
-  const probe = await probeChatBackgroundImage(localFileUrl(configuredImage));
-  if (!probe) {
-    await clearChatBackgroundSetting();
-    toast('背景图文件已失效，已清除背景设置');
+  if (!configuredImage) {
+    setChatBackgroundImageMissing(false);
     return state.chatBackground;
   }
+  refreshChatBackgroundGeometry();
+  // 图片可能已被缓存清理 / 换机器后 data_dir 迁移失效：探一次拿回图片原始比例 q
+  // （取景要靠 q 才算得出来）。探针失败**只标记「暂不可用」，绝不动态清空设置**——
+  // 旧实现就地 clearChatBackgroundSetting()，一次探针失败（网络抖动、启动顺序、
+  // 文件被清理）就永久丢掉用户背景，还找不到回来（用户报障：更新后背景图消失）。
+  const probe = await probeChatBackgroundImage(localFileUrl(configuredImage));
+  if (!probe) {
+    setChatBackgroundImageMissing(true);
+    toast('背景图文件暂不可用，设置已保留；可在「设置 → 外观 → 聊天背景」重新选择');
+    return state.chatBackground;
+  }
+  setChatBackgroundImageMissing(false);
   const aspect = probe.naturalWidth / probe.naturalHeight;
   if (Number.isFinite(aspect) && aspect > 0 && Math.abs(aspect - chatBackgroundImageAspect()) > 0.0001) {
     setChatBackgroundImageAspect(aspect);
@@ -561,28 +569,92 @@ function probeChatBackgroundImage(url) {
   });
 }
 
+// 背景图"文件是否可用"状态的 UI 回调（15-bind-events 启动时注册一次）：
+// 01-core 是低层模块，不能反向 import 设置面板；探针是异步的，状态回来后要让卡片重画。
+let chatBackgroundMissingHook = null;
+
+export function onChatBackgroundMissingChange(hook) {
+  chatBackgroundMissingHook = typeof hook === 'function' ? hook : null;
+}
+
+// 状态唯一写入点：只改标记 + 通知 UI，**不碰设置**（设置只有用户主动操作才会被改写）。
+function setChatBackgroundImageMissing(missing) {
+  const next = Boolean(missing);
+  if (state.chatBackgroundImageMissing === next) return next;
+  state.chatBackgroundImageMissing = next;
+  try {
+    chatBackgroundMissingHook?.();
+  } catch (error) {
+    console.warn('背景图可用性回调失败：', error);
+  }
+  return next;
+}
+
+// 重探当前背景图（换图成功后调用）：返回"这张图是否可用"。
+export async function refreshChatBackgroundImageStatus() {
+  const image = String(state.chatBackground?.image || '');
+  if (!image) {
+    setChatBackgroundImageMissing(false);
+    return false;
+  }
+  const probe = await probeChatBackgroundImage(localFileUrl(image));
+  // 探针期间又换了图：这次结果作废（卡片显示的是另一张图的状态）。
+  if (String(state.chatBackground?.image || '') !== image) return !state.chatBackgroundImageMissing;
+  const wasMissing = state.chatBackgroundImageMissing;
+  const missing = !probe;
+  setChatBackgroundImageMissing(missing);
+  if (wasMissing && !missing) {
+    // 图又回来了（用户补回文件 / 恢复被清理的缓存）：同值写回不会触发浏览器重新加载，
+    // 先摘掉变量再挂回去，背景才会真的重新出现（不必重启）。
+    const root = document.documentElement;
+    root.style.removeProperty('--chat-bg-image');
+    applyChatBackground({});
+  }
+  return !missing;
+}
+
 // 编辑器/设置面板打开前也可以主动探一次（换图后要立刻拿到新 q）。
 export async function probeChatBackgroundImageAspect(path) {
-  const probe = await probeChatBackgroundImage(localFileUrl(path));
+  const target = String(path || '');
+  const probe = await probeChatBackgroundImage(localFileUrl(target));
+  // 探的正好是当前背景图（编辑器打开、启动同步都走这里）：顺手刷新可用性标记。
+  if (target && target === String(state.chatBackground?.image || '')) {
+    setChatBackgroundImageMissing(!probe);
+  }
   if (!probe) return 0;
   const aspect = probe.naturalWidth / probe.naturalHeight;
   setChatBackgroundImageAspect(aspect);
   return chatBackgroundImageAspect();
 }
 
+// 允许写进 config.json 的字段（服务端对未知字段整份拒绝）；`state.chatBackground` 之外的
+// 运行时标记（image_missing 之类）永远不许混进请求体。
+const CHAT_BACKGROUND_WRITABLE_KEYS = ['image', 'opacity', 'crop', 'position_x', 'position_y', 'zoom'];
+
 // 保存背景设置（唯一写入通道）。失败时抛出，由调用方决定怎么提示。
+// **只提交本次增量**：服务端本就是"当前值 + 增量"的合并语义；整份提交会让"只改透明度"
+// 顺带把 image 重新校验一遍——背景图文件失效时用户连强度滑杆都调不了（只能看到
+// 「保存失败：背景图文件不存在」）。
 export async function saveChatBackground(patch = {}) {
   const next = applyChatBackground({ ...state.chatBackground, ...patch });
-  const result = await api('/api/settings', { method: 'POST', body: { chat_background: next } });
+  const payload = {};
+  for (const key of CHAT_BACKGROUND_WRITABLE_KEYS) {
+    if (key in patch) payload[key] = next[key];
+  }
+  const result = await api('/api/settings', { method: 'POST', body: { chat_background: payload } });
   const saved = result?.settings?.chat_background || result?.chat_background;
   if (saved) applyChatBackground(saved);
   if (state.bootstrap?.settings) state.bootstrap.settings.chat_background = saved || next;
+  // 图片路径被写入（换图 / 撤销旋转）→ 重探可用性：新图刚上传过，旧图却未必还在磁盘上。
+  if ('image' in payload) void refreshChatBackgroundImageStatus();
   return state.chatBackground;
 }
 
-// 「清除背景」与"图片失效兜底"共用：先清设置（清完才不再算"在用"），再尽力回收旧文件。
+// 「清除背景」（用户主动）与"图片失效兜底"共用：先清设置（清完才不再算"在用"），
+// 再尽力回收旧文件。**只有这里、只有用户点「清除背景」才会把 image 写回空串。**
 export async function clearChatBackgroundSetting({ reclaim = '' } = {}) {
   const previous = String(state.chatBackground?.image || '');
+  setChatBackgroundImageMissing(false);
   applyChatBackground({ image: '' });
   try {
     await saveChatBackground({ image: '' });

@@ -1900,6 +1900,10 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 #chatBackgroundStatus:empty { display: none; }
 /* 错误态必须压过 `.settings-content .hint`（0,2,0）：用 id 级选择器，别再叠类名。 */
 #chatBackgroundStatus.is-error { color: var(--danger); }
+/* 「背景图文件暂不可用」提示：同样是 id 级（压过 .settings-content .hint），
+   与上面的错误态同色——它是提醒（设置还在、只是图读不到），不是操作反馈。 */
+#chatBackgroundMissingHint { color: var(--danger); }
+#chatBackgroundMissingHint:empty { display: none; }
 
 /* ---- 背景图编辑器（概览 + 取景框 + 效果预览，取景与真实背景层同源） ---- */
 /* 弹层 = 工具栏 / 可滚动的躯干 / 常驻按钮行：内容再高也不会把「完成」挤出可视区。 */

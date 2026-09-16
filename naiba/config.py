@@ -1797,7 +1797,8 @@ class ConfigStore:
                             # 静默吞掉会变成"拖了没反应"）；越界仍由归一化 clamp。
                             merged["crop"] = self._validated_chat_background_crop(incoming["crop"])
                         # 图片路径要在归一化之后再校验替换：它是**解析后的绝对路径**，
-                        # 不能让它被 incoming 里的原始字符串覆盖回去。
+                        # 不能让它被 incoming 里的原始字符串覆盖回去。文件暂缺不清空、
+                        # 只保留路径（见 _validated_chat_background_image）。
                         if "image" in incoming:
                             merged["image"] = self._validated_chat_background_image(incoming["image"])
                         self.data[key] = merged
@@ -2353,15 +2354,18 @@ class ConfigStore:
             return options
 
     def _validated_chat_background_image(self, raw: Any) -> str:
-        """校验聊天背景图：必须是 data_dir/uploads 内、浏览器能解码的图片文件。
+        """校验聊天背景图：必须是 data_dir/uploads（或 backgrounds）内的图片文件。
 
-        三道闸，缺一不可：
-        1. 绝对路径 + 落在 `data/uploads` 内——设置里的路径会被前端直接拼进
+        三道闸：
+        1. 绝对路径 + 落在两个受管目录内——设置里的路径会被前端直接拼进
            `/api/file?path=…`，放宽等于开一条任意文件读取通道（也保证
            `/api/uploads/delete` 能回收它）；
-        2. 文件必须存在——换个 data_dir 之后留着的绝对路径会变成死链；
-        3. **按内容**（Pillow 读出的 format，不信扩展名）命中白名单——TIFF/HEIC
-           之类浏览器解不出来的格式放过去，就是"保存成功、背景空白"的静默失败。
+        2. **按内容**（Pillow 读出的 format，不信扩展名）命中白名单——TIFF/HEIC
+           之类浏览器解不出来的格式放过去，就是"保存成功、背景空白"的静默失败；
+        3. **文件不在磁盘上时不清空设置**：缓存清理、数据目录迁移、换机器都会让旧路径
+           失效，旧实现当场抛错（前端探针再兜底清空），用户什么都没做背景就"自己没了"。
+           现在先按文件名在当前受管目录里兜底找回；确实找不到就**原样保留路径**，
+           由前端标记「文件暂不可用」并引导重新选择——丢文件可以，丢设置不行。
         返回解析后的绝对路径字符串；`""` 表示清除背景。
         """
         value = str(raw or "").strip()
@@ -2380,9 +2384,18 @@ class ConfigStore:
             (data_root / "backgrounds").resolve(),
         )
         if not any(path_within(resolved, root) for root in allowed_roots):
-            raise ValueError("背景图必须来自本机（data/uploads 或 data/backgrounds 目录内）")
+            # 旧数据目录 / 旧机器留下的绝对路径：按文件名在当前受管目录里找回同命中文件
+            # （**越界边界不放宽**：只有真找回同名文件才会迁移，否则照旧拒绝）。
+            recovered = self._same_name_background_image(resolved.name)
+            if recovered is None:
+                raise ValueError("背景图必须来自本机（data/uploads 或 data/backgrounds 目录内）")
+            resolved = recovered
+        elif not resolved.is_file():
+            resolved = self._same_name_background_image(resolved.name) or resolved
         if not resolved.is_file():
-            raise ValueError("背景图文件不存在，请重新选择")
+            # 文件确实找不到（缓存清理 / 迁移窗口）：保留原路径。前端探针失败只标记
+            # 「暂不可用」，用户重新选一张即可——清空设置才是真正的数据丢失。
+            return str(resolved)
         # PIL 是硬依赖（上传管线也在用），缺失时让它按 ImportError 暴露，不吞成"用户选错图"。
         from PIL import Image
         from PIL.Image import DecompressionBombError
@@ -2399,6 +2412,31 @@ class ConfigStore:
             current = image_format or resolved.suffix.lower().lstrip(".") or "未知"
             raise ValueError(f"背景图仅支持 {allowed} 格式（当前识别为 {current}）")
         return str(resolved)
+
+    def _same_name_background_image(self, name: str) -> Path | None:
+        """在当前受管目录里按文件名找回同命中背景图（数据目录迁移的兜底）。
+
+        只在 ``uploads``（含 `YYYY-MM-DD` 分日目录）与 ``backgrounds`` 内部找——越界路径
+        不会因为"有个同名文件"就被放行成任意路径；Windows 文件名比较不区分大小写
+        （`rglob` 语义）。只负责"找"，格式校验仍由调用方照常执行。
+        """
+        target = str(name or "").strip()
+        if not target or target in {".", ".."}:
+            return None
+        data_root = self.resolve_data_dir()
+        for root in ((data_root / "uploads").resolve(), (data_root / "backgrounds").resolve()):
+            if not root.is_dir():
+                continue
+            direct = root / target
+            if direct.is_file():
+                return direct
+            try:
+                for candidate in sorted(root.rglob(target)):
+                    if candidate.is_file():
+                        return candidate
+            except OSError:
+                continue
+        return None
 
     @staticmethod
     def _validated_chat_background_crop(raw: Any) -> dict[str, Any]:

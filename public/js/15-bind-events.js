@@ -2,7 +2,7 @@
 // 15-bind-events.js —— 拆分自 public/app.js 第 6658-7653 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, api, applyAppearance, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, hideTextContextMenu, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer } from "./01-core.js";
+import { $, $$, api, applyAppearance, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, hideTextContextMenu, onChatBackgroundMissingChange, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer } from "./01-core.js";
 import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarning, ensureImageContextMenu, handleImageLightboxKey, hideImageContextMenu, initImageLightboxInteractions, isPywebview, openImageLightbox, positionContextUsagePopover, resetContextWarningResume, runImageContextAction, showImageContextMenu, stepImageLightbox, toggleContextUsagePopover, updateSendButtonState } from "./03-media.js";
 import { branchMessage, cancelActiveEdit, cancelSessionStart, confirmActiveEdit, fillContextResetSeed, initTurnRail, isNearBottom, regenerateMessage, setStickToBottom, startEditMessage, startNewSession } from "./04-messages.js";
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
@@ -124,6 +124,9 @@ function bindChatBackgroundControls() {
   const file = $('#chatBackgroundFile');
   const clear = $('#clearChatBackground');
   const slider = $('#chatBackgroundOpacity');
+  // 启动探针（bootstrap 同步）是异步的：结果回来后重画设置卡——「背景图文件暂不可用」
+  // 提示的唯一渲染点是 updateChatBackgroundControls（01-core 不能反向 import 设置面板）。
+  onChatBackgroundMissingChange(() => updateChatBackgroundControls());
   if (!pick || !file) return;
   pick.addEventListener('click', () => file.click());
   file.addEventListener('change', () => { void handleChatBackgroundFile(file.files?.[0]); });

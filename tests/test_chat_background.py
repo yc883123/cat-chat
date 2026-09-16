@@ -3,19 +3,25 @@
 
 守门目标（都是"静默失败"的高危面）：
 - 非法透明度/位置/缩放不能让 NaN 或越界值漏进公开设置（前端直接拿它写 CSS 变量）；
-- 背景图路径必须落在 data/uploads 内（会被前端拼进 /api/file?path=…）；
+- 背景图路径必须落在 data/uploads（或 backgrounds）内（会被前端拼进 /api/file?path=…）；
 - 按**图片内容**判定格式，TIFF/HEIC 这类浏览器解不出来的必须当场拒绝——
-  否则是"设置保存成功但背景一片空白"，用户看不出原因。
+  否则是"设置保存成功但背景一片空白"，用户看不出原因；
+- **文件暂缺不得清空设置**（缓存清理 / 数据目录迁移 / 换机器）：先按文件名兜底找回，
+  找不到就原样保留路径，由前端标记「文件暂不可用」——丢文件可以，丢设置不行。
 """
 
 import json
+import os
+import re
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from naiba.storage.media import _clean_uploads_cache  # noqa: E402
 from naiba.config import (  # noqa: E402
     CHAT_BACKGROUND_DEFAULT_OPACITY,
     CHAT_BACKGROUND_DEFAULT_POSITION,
@@ -283,13 +289,55 @@ class ChatBackgroundConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.update_settings({"chat_background": {"image": str(other)}})
 
-    def test_rejects_missing_and_broken_file(self):
-        with self.assertRaises(ValueError):
-            self.store.update_settings({"chat_background": {"image": str(self.uploads / "nope.png")}})
+    def test_missing_file_keeps_path_instead_of_clearing(self):
+        """文件暂缺（缓存清理 / 迁移窗口）不得清空设置：保留路径，由用户重新选择。
+
+        旧行为是当场抛错 + 前端探针兜底清空——用户什么都没做，背景就"自己没了"，
+        且再也找不回来（用户报障）。
+        """
+        missing = self.uploads / "nope.png"
+        result = self.store.update_settings({"chat_background": {"image": str(missing)}})
+        self.assertEqual(result["chat_background"]["image"], str(missing))
+        self.assertEqual(
+            ConfigStore(self.config_path).data["chat_background"]["image"], str(missing)
+        )
+        # 文件暂缺不该连累别的字段：强度/取景照常保存（前端只提交增量）。
+        result = self.store.update_settings({"chat_background": {"opacity": 0.8}})
+        self.assertEqual(result["chat_background"]["image"], str(missing))
+        self.assertEqual(result["chat_background"]["opacity"], 0.8)
+
+    def test_broken_image_file_is_still_rejected(self):
         broken = self.uploads / "broken.png"
         broken.write_bytes(b"not an image at all")
         with self.assertRaises(ValueError):
             self.store.update_settings({"chat_background": {"image": str(broken)}})
+
+    def test_same_name_fallback_recovers_migrated_path(self):
+        """换了数据目录 / 换了机器：旧路径不在当前受管目录里时按文件名找回并迁移。"""
+        recovered = self._image("my-wallpaper.png")
+        old_path = self.root / "old-install" / "uploads" / "2026-08-01" / "my-wallpaper.png"
+        self.assertFalse(old_path.exists(), "夹具必须是「旧 install 留下的失效路径」")
+        result = self.store.update_settings({"chat_background": {"image": str(old_path)}})
+        self.assertEqual(result["chat_background"]["image"], str(recovered))
+
+    def test_same_name_fallback_searches_builtin_backgrounds(self):
+        from naiba.storage import backgrounds
+
+        original = backgrounds.PRESET_SIZE
+        backgrounds.PRESET_SIZE = (160, 100)
+        self.addCleanup(lambda: setattr(backgrounds, "PRESET_SIZE", original))
+
+        builtin = Path(backgrounds.ensure_background_presets(self.data_dir)[0]["path"])
+        old_path = self.root / "old-install" / "backgrounds" / builtin.name
+        result = self.store.update_settings({"chat_background": {"image": str(old_path)}})
+        self.assertEqual(result["chat_background"]["image"], str(builtin))
+
+    def test_same_name_fallback_does_not_smuggle_broken_file(self):
+        """同名兜底同样要过格式校验：同名的坏文件（根本不是图）照旧拒绝。"""
+        (self.uploads / "wallpaper.png").write_bytes(b"not an image")
+        outside = self.root / "old-install" / "wallpaper.png"
+        with self.assertRaises(ValueError):
+            self.store.update_settings({"chat_background": {"image": str(outside)}})
 
     def test_rejects_browser_undecodable_format(self):
         """TIFF 能上传、能落盘，但 WebView2 解不出来——必须在这里拦掉。"""
@@ -312,6 +360,117 @@ class ChatBackgroundConfigTests(unittest.TestCase):
                 path = self._image(name, fmt=fmt)
                 result = self.store.update_settings({"chat_background": {"image": str(path)}})
                 self.assertEqual(result["chat_background"]["image"], str(path))
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _read_js(name: str) -> str:
+    return (ROOT / "public" / "js" / name).read_text(encoding="utf-8")
+
+
+def _function_body(source: str, signature: str) -> str:
+    """取顶层函数体（到下一个顶层 function / async function / export function 之前）。"""
+    start = source.index(signature)
+    rest = source[start:]
+    match = re.search(r"\n(?:export )?(?:async )?function ", rest[1:])
+    return rest if match is None else rest[: match.start() + 1]
+
+
+class BackgroundCacheProtectionTests(unittest.TestCase):
+    """自动缓存清理必须把「在用」的背景图当引用看待（否则背景图会被清理删掉）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="naiba_bg_cache_")
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name).resolve()
+        from naiba.app import NaibaChatApp
+        from naiba.paths import PathContext
+
+        self.app = NaibaChatApp(paths=PathContext.local(root, root / "config.json"))
+        self.data_dir = self.app.paths.data_dir
+        self.uploads = self.data_dir / "uploads" / "2026-01-01"
+        self.uploads.mkdir(parents=True, exist_ok=True)
+
+    def _png(self, name: str = "bg.png", size=(24, 16)) -> Path:
+        from PIL import Image
+
+        path = self.uploads / name
+        Image.new("RGB", size, (10, 120, 200)).save(path, format="PNG")
+        return path
+
+    def _age(self, path: Path, days: int = 2) -> None:
+        stamp = (datetime.now() - timedelta(days=days)).timestamp()
+        os.utime(path, (stamp, stamp))
+
+    def test_background_image_counts_as_in_use(self):
+        background = self._png()
+        self.app.config.update_settings({"chat_background": {"image": str(background)}})
+        self.assertTrue(self.app._upload_path_in_use(background.resolve()))
+        # 保护只针对当前背景图，不是整棵 uploads 树：别的未被引用图片照旧可被清理。
+        other = self._png("other.png")
+        self.assertFalse(self.app._upload_path_in_use(other.resolve()))
+
+    def test_auto_clean_keeps_background_and_its_thumbnail(self):
+        background = self._png()
+        thumb = background.with_name(background.stem + "_thumb.webp")
+        thumb.write_bytes(b"thumb-bytes")
+        self.app.config.update_settings({"chat_background": {"image": str(background)}})
+        stale = self._png("stale.png", size=(64, 64))
+        self._age(stale)
+
+        result = _clean_uploads_cache(
+            limit=1,
+            data_dir=self.data_dir,
+            referenced_checker=self.app._upload_path_in_use,
+            grace_seconds=0,
+        )
+        self.assertTrue(background.is_file(), "在用背景图不得被自动清理删除")
+        self.assertTrue(thumb.is_file(), "背景图的缩略图随主图成组保留")
+        self.assertFalse(stale.is_file(), "未被引用的旧缓存仍应被清理")
+        self.assertGreaterEqual(result["removed"], 1)
+
+
+class BackgroundNeverAutoClearedTests(unittest.TestCase):
+    """设置不许被自动清空（前端源码守门；服务端侧见 config._validated_chat_background_image）。
+
+    背景图文件暂缺时：设置原样保留 + 卡片提示「暂不可用」；把 image 写回空串的唯一入口
+    只能是用户点「清除背景」。
+    """
+
+    def test_bootstrap_probe_marks_missing_without_clearing(self) -> None:
+        body = _function_body(
+            _read_js("01-core.js"), "export async function syncChatBackgroundFromBootstrap"
+        )
+        self.assertIn("setChatBackgroundImageMissing(true)", body, "探针失败必须标记不可用")
+        # 只看代码：注释里说明"旧实现曾清空"是文档，不算违规。
+        code = "\n".join(line.split("//", 1)[0] for line in body.splitlines())
+        self.assertNotIn("clearChatBackgroundSetting", code, "探针失败不得清空背景设置")
+
+    def test_save_sends_delta_instead_of_full_state(self) -> None:
+        body = _function_body(_read_js("01-core.js"), "export async function saveChatBackground")
+        self.assertIn("CHAT_BACKGROUND_WRITABLE_KEYS", body)
+        self.assertIn("if ('image' in payload)", body, "换图后要重探可用性")
+        self.assertNotIn("chat_background: next", body, "整份状态提交会把失效的 image 一起送审")
+
+    def test_settings_card_renders_missing_hint(self) -> None:
+        controls = _function_body(
+            _read_js("09-settings.js"), "export function updateChatBackgroundControls"
+        )
+        self.assertIn("state.chatBackgroundImageMissing", controls)
+        self.assertIn("chatBackgroundMissingHint", controls)
+        html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+        self.assertEqual(html.count('id="chatBackgroundMissingHint"'), 1)
+
+    def test_probe_result_reaches_the_card(self) -> None:
+        core = _read_js("01-core.js")
+        self.assertIn("export function onChatBackgroundMissingChange", core)
+        binder = _read_js("15-bind-events.js")
+        self.assertIn(
+            "onChatBackgroundMissingChange(() => updateChatBackgroundControls())",
+            binder,
+            "异步探针结果必须回写到设置卡",
+        )
 
 
 if __name__ == "__main__":

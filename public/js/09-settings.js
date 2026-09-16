@@ -2,7 +2,7 @@
 // 09-settings.js —— 拆分自 public/app.js 第 3115-4672 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, api, applyAppearance, applyChatBackground, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, localFileUrl, state, toast } from "./01-core.js";
+import { $, $$, api, applyAppearance, applyChatBackground, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, localFileUrl, refreshChatBackgroundImageStatus, state, toast } from "./01-core.js";
 import { applyConversationAgent, populateComposerModels, populateModels, renderAgents, updateUnloadModelButton } from "./07-models-agents.js";
 import { closeAgentPromptPresetPanel, currentAgentFixedSkillIds, renderAgentPromptPresetList } from "./08-conversations.js";
 import { skillList } from "./13-skill-refs.js";
@@ -48,6 +48,9 @@ export function populateChatBackgroundSettings() {
   });
   updateChatBackgroundControls();
   setChatBackgroundStatus('');
+  // 打开设置页顺手重探一次当前背景图：文件被清理/补回后不必重启就能看到准确状态
+  // （启动探针只跑一次；探针失败**不会**改设置，只刷新「文件暂不可用」提示）。
+  void refreshChatBackgroundImageStatus();
 }
 
 // 面板回显的唯一写入点：滑杆值/百分比/缩略图显隐/清除与调整按钮可用性都随当前背景状态走。
@@ -60,6 +63,18 @@ export function updateChatBackgroundControls() {
   if (output) output.textContent = `${Math.round(Number(background.opacity) * 100)}%`;
   const preview = $('#chatBackgroundPreview');
   if (preview) preview.hidden = !background.image;
+  // 「文件暂不可用」提示：设置**原样保留**（探针失败只标记、不清空），但必须让用户看得见——
+  // 背景一片空却没有任何说明就是静默失效；这里给出原因与出路（重新选择图片）。
+  const imageMissing = Boolean(state.chatBackgroundImageMissing) && Boolean(background.image);
+  const missingHint = $('#chatBackgroundMissingHint');
+  if (missingHint) {
+    missingHint.hidden = !imageMissing;
+    missingHint.textContent = imageMissing
+      ? '背景图文件暂不可用（设置已保留）：图片可能已被缓存清理或数据目录迁移移除，点「更换图片」重新选择即可。'
+      : '';
+  }
+  const previewLabel = preview?.querySelector('.chat-background-preview-label');
+  if (previewLabel) previewLabel.textContent = imageMissing ? '文件暂不可用' : '点击调整';
   const clear = $('#clearChatBackground');
   if (clear) clear.disabled = !background.image;
   const pick = $('#pickChatBackground');

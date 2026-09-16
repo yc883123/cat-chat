@@ -416,7 +416,11 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .file-reopen-button.has-tabs #fileTabsCount { color: var(--accent); }
 
 /* 消息列在「扣掉刻度轨宽度」的区域里居中 → 整体左移半条轨道（约 13px），右边不显逼仄 */
-.messages { grid-area: 2 / 1 / 3 / 2; position: relative; z-index: 1; min-height: 0; overflow-y: scroll; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 34px max(22px, calc((100% - var(--chat-max) - var(--turn-rail-w)) / 2 + var(--turn-rail-w))) 28px max(22px, calc((100% - var(--chat-max) - var(--turn-rail-w)) / 2)); scroll-behavior: smooth; }
+/* 不加 `scroll-behavior: smooth`：流式期间每次 delta/工具事件都会贴底，
+   平滑动画会让容器长期处于"追赶最新内容"的状态（肉眼可见的晃动），
+   而上滑阅读历史时的高度变化也会被动画放大成抖动。默认瞬时定位；
+   用户主动跳转（刻度轨点击）在自己的调用点显式传 `behavior: 'smooth'`。 */
+.messages { grid-area: 2 / 1 / 3 / 2; position: relative; z-index: 1; min-height: 0; overflow-y: scroll; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 34px max(22px, calc((100% - var(--chat-max) - var(--turn-rail-w)) / 2 + var(--turn-rail-w))) 28px max(22px, calc((100% - var(--chat-max) - var(--turn-rail-w)) / 2)); }
 .empty-state { min-height: 100%; display: grid; place-content: center; justify-items: center; padding-bottom: 8vh; }
 .empty-state[hidden] { display: none; }
 .empty-mark, .auth-mark { width: 56px; height: 56px; display: grid; place-items: center; color: white; background: linear-gradient(135deg, var(--brand-500), var(--brand-700)); border-radius: var(--r-full); box-shadow: 0 6px 18px rgba(var(--brand-500-rgb), .3); }

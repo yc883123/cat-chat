@@ -531,16 +531,34 @@ export function isNearBottom(threshold = 80) {
 
 // 默认滚动：只在用户仍停留在底部（跟随）时才自动滚到最新内容；
 // 用户滚轮上滑阅读历史时，后续任何 delta/工具事件都不再把页面强行拉回底部。
+// 一律经 withInstantScroll 瞬时定位：流式期间这里每帧都会被调到，动画化的平滑滚动
+// 会让容器长期处于"追赶最新内容"的状态（体感上的持续晃动）。
 export function scrollToBottom() {
   if (!stickToBottom) return;
   const messages = $('#messages');
-  if (messages) messages.scrollTop = messages.scrollHeight;
+  if (messages) withInstantScroll(messages, () => { messages.scrollTop = messages.scrollHeight; });
 }
 
 // 强制滚到底部：用于确实需要展示最新内容的地方（渲染后一次性定位）。
 export function forceScrollToBottom() {
   const messages = $('#messages');
-  if (messages) messages.scrollTop = messages.scrollHeight;
+  if (messages) withInstantScroll(messages, () => { messages.scrollTop = messages.scrollHeight; });
+}
+
+// 流式 markdown 渲染的自适应节流。
+// 每次渲染都是「整段 raw 重跑 markdown + 整体 innerHTML」，单次成本随回复长度线性增长，
+// 而事件频率大致恒定（token 速率不变）⇒ 总成本随长度呈 O(n²)，长回复后半段明显掉帧。
+// 所以按当前累积长度拉长节流间隔：短回复保持 40ms（跟手），每累积 4000 字 +50ms，
+// 240ms 封顶（间隔再大就肉眼可见"一段一段蹦"，得不偿失）。
+export const STREAMING_RENDER_MIN_MS = 40;
+const STREAMING_RENDER_STEP_CHARS = 4000;
+const STREAMING_RENDER_STEP_MS = 50;
+const STREAMING_RENDER_MAX_MS = 240;
+
+export function streamingRenderDelay(raw) {
+  const length = String(raw || '').length;
+  const steps = Math.floor(length / STREAMING_RENDER_STEP_CHARS);
+  return Math.min(STREAMING_RENDER_MAX_MS, STREAMING_RENDER_MIN_MS + steps * STREAMING_RENDER_STEP_MS);
 }
 
 export function scheduleStreamingMarkdown(element, raw) {
@@ -552,7 +570,7 @@ export function scheduleStreamingMarkdown(element, raw) {
     element.dataset.renderScheduled = '0';
     element.innerHTML = markdown(element.dataset.raw || '');
     scrollToBottom();
-  }, 40);
+  }, streamingRenderDelay(raw));
 }
 
 // 把“中途正文”作为独立兄弟块插到 answer 之前，按时间顺序与思考块/工具块交错显示。
@@ -730,8 +748,9 @@ function markChoicePreviewAnsweredState(fragment, messages) {
   });
 }
 
-// 程序化定位/补偿必须瞬时生效：容器是 scroll-behavior: smooth，直接写 scrollTop 会动画化，
-// 既测不准（scrollTop 读回旧值），还会在动画期间连发 scroll 事件干扰懒加载判定。
+// 程序化定位/补偿必须瞬时生效：不能依赖容器的 scroll-behavior（那是全局契约，
+// 而这里是"这一刻必须立刻到位"）。即使将来有人把 `smooth` 加回 CSS，经这里写入的
+// scrollTop 也不会被动画化——读回值准确，也不会在动画期间连发 scroll 事件干扰懒加载判定。
 function withInstantScroll(container, mutate) {
   const previous = container.style.scrollBehavior;
   container.style.scrollBehavior = 'auto';

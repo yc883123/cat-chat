@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.6.1-beta
-  RELEASE_TAG: v2.6.1-beta
-  PACKAGE_NAME: naiba-chat-2.6.1-beta-windows-x64
+  RELEASE_VERSION: 2.6.2-beta
+  RELEASE_TAG: v2.6.2-beta
+  PACKAGE_NAME: naiba-chat-2.6.2-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -87,11 +87,11 @@ jobs:
           Copy-Item -LiteralPath "README.md" -Destination $packageDir
           Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\${{ env.PACKAGE_NAME }}.zip" -Force
 
-      - name: Publish 2.6.1 Beta release
+      - name: Publish 2.6.2 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Naiba Chat 2.6.1 Beta
+          name: Naiba Chat 2.6.2 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -99,13 +99,13 @@ jobs:
             dist/${{ env.PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Naiba Chat 2.6.1 Beta Windows build from `${{ github.sha }}`。
+            Naiba Chat 2.6.2 Beta Windows build from `${{ github.sha }}`。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - 聊天背景图不再「自己消失」：启动探针失败（图片被缓存清理删掉 / 数据目录迁移后路径失效 / 启动瞬间抖动）不再清空背景设置，只标记「文件暂不可用」并在设置卡给出重新选择入口；唯一会清空背景的入口只剩你主动点「清除背景」。
-            - 背景图文件暂缺不再牵连其它设置：保存改为只提交本次改动（改强度、调取景不再把失效的图片路径一起送审），文件补回后背景自动重新出现，不必重启。
-            - 迁移与找回兜底：换了数据目录或换了机器后，旧路径按文件名在当前受管目录（含按日分目录）里自动找回并接上；确实找不到也保留原路径等你重选。缓存自动清理把当前背景图算作「在用」，主图与缩略图成组保留。
-            - 守门与验证：背景图相关单测 30 例（含「探针失败不得清空设置」的前端源码守门）+ 隔离数据目录与真实浏览器的两阶段冒烟（文件缺失 → 设置保留并提示 → 补回文件自动恢复）。
+            - 流式滚动不再抖动：消息列表去掉 `scroll-behavior: smooth`——流式期间每个增量 / 工具事件都会贴底，平滑动画会让页面长期处于「追赶最新内容」的状态（肉眼可见的晃动），上滑阅读历史时的高度变化也被动画放大成抖动；现在程序化贴底一律瞬时定位（容器默认瞬时 + `withInstantScroll` 双保险），唯一保留平滑的是用户主动跳转（刻度轨点击）。
+            - 用户主动跳转仍是平滑的：刻度轨点击在自己的调用点显式传 `behavior:'smooth'`，跳转体验不降级。
+            - 长回复不再掉帧：流式 markdown 渲染改为自适应节流——短回复保持 40ms 跟手，累积越长间隔越大（每 4000 字 +50ms、240ms 封顶），不再对越写越长的整段文本每 40ms 重跑一次渲染。
+            - 保持不变：懒加载窗口、预渲染补高度、刻度轨跳转、分割线同进同出等既有契约全部保持；本地验证：懒加载守门单测 12 例 + 浏览器冒烟 13 项全通过。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

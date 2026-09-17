@@ -623,9 +623,14 @@ export function mediaTruncatedNotice(truncated) {
 export function truncationNotice(truncated) {
   if (!truncated || typeof truncated !== 'object' || !truncated.truncated) return '';
   const reason = String(truncated.finish_reason || '');
-  const detail = reason === 'length'
-    ? '已达模型输出上限'
-    : reason ? `终止原因 ${reason}` : '未收到终止原因（流可能被上游掐断）';
+  // cause 由后端区分同一条 length 的两种成因（本地模型 prompt+completion 贴到窗口 =
+  // context，其余 = output）。两者对用户的建议相反：撞输出上限可以调大输出上限/让它接着写，
+  // 窗口耗尽只能新会话——曾经两者都显示「已达模型输出上限」，用户照着续写只会越写越失败。
+  const cause = String(truncated.cause || '');
+  let detail = '未收到终止原因（流可能被上游掐断）';
+  if (cause === 'context') detail = '上下文窗口已耗尽，建议「新会话」后继续';
+  else if (reason === 'length') detail = '已达模型输出上限';
+  else if (reason) detail = `终止原因 ${reason}`;
   const parts = [detail];
   if (truncated.continued) parts.push('已自动续写一次');
   if (truncated.unfinished_tail) parts.push('正文停在未完成的标点');

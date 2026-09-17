@@ -181,7 +181,56 @@ _CONTINUE_INSTRUCTION = (
 )
 
 
-def _truncation_info(finish_reason: str, content: str) -> dict[str, Any]:
+# 「窗口已满」的收尾指引：轮首闸门（整轮拒绝，还没开始干活）与循环内复查（干活干到一半
+# 撞墙，保住已完成的结果）必须共用同一份措辞——两处漂移会让用户以为是两种不同的故障。
+_NEW_SESSION_HINT = (
+    "建议让模型撰写交接文档，并点本条回复上的「新会话」开始新会话（聊天记录一条不删）；"
+    "若这是本地模型且窗口未被自动探测到，可在 设置 → 模型 里填写真实「上下文窗口」后重试。"
+    "请【新建对话】后继续。"
+)
+
+_CONTEXT_FULL_NOTICE = (
+    "上下文已达到窗口上限，继续回答可能超出模型的上下文窗口或显著降低答案质量。"
+    + _NEW_SESSION_HINT
+)
+
+_CONTEXT_LOOP_NOTICE = (
+    "上下文已达到窗口上限，已停止继续调用工具（本轮已完成的工具结果保留在上方）。"
+    + _NEW_SESSION_HINT
+)
+
+# 「撞输出上限」与「上下文窗口耗尽」在 finish_reason 上长得一样（都是 length），但对用户的
+# 建议完全相反：前者该续写/调大输出上限，后者再怎么续写都只会让请求更大。用「prompt +
+# completion 是否已贴到窗口」这个比例把两者分开（阈值取 95%：本地后端在生成到 n_ctx 时
+# 报 length，实测总量与窗口的差距就在个位数百分比内）。
+_CONTEXT_SATURATION_RATIO = 0.95
+
+
+def _context_saturated(usage: dict[str, Any] | None, limit: int) -> bool:
+    """本请求的 prompt+completion 是否已贴到窗口（≥95%）。"""
+    if int(limit or 0) <= 0 or not isinstance(usage, dict):
+        return False
+
+    def _number(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    total = _number(usage.get("total_tokens"))
+    if total <= 0:
+        total = _number(usage.get("input_tokens")) + _number(usage.get("output_tokens"))
+    return total > 0 and total >= int(limit) * _CONTEXT_SATURATION_RATIO
+
+
+def _truncation_info(
+    finish_reason: str,
+    content: str,
+    *,
+    usage: dict[str, Any] | None = None,
+    limit: int = 0,
+    local: bool = False,
+) -> dict[str, Any]:
     """判定一段答复是否可能不完整（结果写进消息 metadata.truncated，前端据此提示）。
 
     两条独立信号，命中任一即视为「可能不完整」：
@@ -193,6 +242,11 @@ def _truncation_info(finish_reason: str, content: str) -> dict[str, Any]:
     模型自己的选择，不替它续写（避免把正常收尾也接一段）。这条规则来自一次实测事故——
     272 字符正文停在「：」，而全链路没有任何终止原因留痕，只能反向推断，故把「原因缺失」
     本身也当成可疑信号记录下来。
+
+    ``cause`` 只在 ``reason == "length"`` 时给出成因：本地模型的窗口是**总窗口**
+    （prompt + 生成共用），生成到 n_ctx 时后端同样报 length，因此光看 length 无法区分
+    「撞输出上限」（续写/调大 max_tokens 有用）与「窗口耗尽」（续写只会让请求更大）。
+    判据见 ``_context_saturated``：仅本地模型 + 总量已贴到窗口（≥95%）才算 ``context``。
     """
     raw_reason = str(finish_reason or "").strip().lower()
     length_hit = raw_reason in _LENGTH_FINISH_REASONS
@@ -200,11 +254,15 @@ def _truncation_info(finish_reason: str, content: str) -> dict[str, Any]:
     text = str(content or "").rstrip()
     unfinished = bool(text) and any(text.endswith(item) for item in _UNFINISHED_TAIL)
     truncated = bool(length_hit or (raw_reason == "" and unfinished))
+    cause = ""
+    if length_hit:
+        cause = "context" if (local and _context_saturated(usage, limit)) else "output"
     return {
         "finish_reason": reason,
         "truncated": truncated,
         "unfinished_tail": unfinished,
         "continued": False,
+        "cause": cause,
     }
 
 
@@ -645,13 +703,7 @@ class SkillAgent:
                 "used": used,
                 "budget": budget,
             })
-            return (
-                "上下文已达到窗口上限，继续回答可能超出模型的上下文窗口或显著降低答案质量。"
-                "建议让模型撰写交接文档，并点本条回复上的「新会话」开始新会话（聊天记录一条不删）；"
-                "若这是本地模型且窗口未被自动探测到，可在 设置 → 模型 里填写真实「上下文窗口」后重试。"
-                "请【新建对话】后继续。",
-                [], [], self._summarize_usage(usages),
-            )
+            return _CONTEXT_FULL_NOTICE, [], [], self._summarize_usage(usages)
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         selected_history = self._select_history(
@@ -692,6 +744,23 @@ class SkillAgent:
         if _cache_debug_enabled():
             _debug_message_digest(messages, "initial", event)
 
+        # 循环内上下文复查的基线。轮首闸门只在整轮开始前查一次，之后**工具结果、追加指令、
+        # 图片批**持续往 messages 里加，请求体可以一路涨过窗口：本地后端收下后做不完
+        # prefill，界面就停在「等待本地模型资源」（客户机实测：整条会话看起来永久卡死，
+        # 重启无效——病根在每轮构造的请求体里）。这里以 `messages` 自身为基准算一遍
+        # 「固定部分」，之后每步只把新增部分累计进来（增量，不每步重算全量历史）。
+        context_base_tokens = sum(
+            self._replay_footprint_tokens(item)
+            for item in messages[1:trace_start]
+            if isinstance(item, dict) and item.get("role") in {"user", "assistant", "tool"}
+        )
+        context_extra_tokens = 0
+        context_watermark = trace_start
+        # 轮首闸门算出的 limit/budget 与这里同源（同一 profile/options/system），直接复用。
+        context_limit = limit
+        context_budget = budget
+        model_is_local = str(profile.get("kind") or "").strip().lower() == "local"
+
         runs = []
         reasonings: list[str] = []
         # model_complete 是 ModelRuntime.complete 的绑定方法，可通过 __self__ 读取 last_reasoning
@@ -710,7 +779,7 @@ class SkillAgent:
         # 本轮答复的截断自述（run_context["truncation"] → 消息 metadata.truncated）：
         # truncated 一旦成立就保持成立（续写成功也不抹掉"曾经被截断"这个事实）。
         truncation_state: dict[str, Any] = {
-            "finish_reason": "", "truncated": False, "continued": False,
+            "finish_reason": "", "truncated": False, "continued": False, "cause": "",
         }
         # 自动续写前的各个片段（续写成功后按顺序拼回最终答复）。
         continued_parts: list[str] = []
@@ -750,6 +819,30 @@ class SkillAgent:
                 if isinstance(run_context, dict):
                     run_context["trace_messages"] = messages[trace_start:]
                 return message, runs, reasonings, self._summarize_usage(usages)
+            # 循环内上下文复查：轮首闸门只看了一眼「历史 + 本轮提问」，循环里的工具结果
+            # 还在不断加长请求体。越界就**优雅收尾**而不是发出注定失败的请求——与轮首
+            # 闸门的语义差异：轮首 = 整轮拒绝（还没干活），循环内 = 保住半成品。
+            for item in messages[context_watermark:]:
+                if isinstance(item, dict) and item.get("role") in {"user", "assistant", "tool"}:
+                    context_extra_tokens += self._replay_footprint_tokens(item)
+            context_watermark = len(messages)
+            context_used = context_base_tokens + context_extra_tokens
+            if context_used > context_budget:
+                event({
+                    "type": "context_full",
+                    "limit": context_limit,
+                    "used": context_used,
+                    "budget": context_budget,
+                })
+                event({"type": "status", "message": "上下文已达窗口上限，已停止继续调用工具"})
+                logger.warning(
+                    "[context] 循环内复查越界：used=%s budget=%s limit=%s（已完成 %s 步）",
+                    context_used, context_budget, context_limit, step,
+                )
+                content = "\n\n".join([*continued_parts, _CONTEXT_LOOP_NOTICE]).strip()
+                if isinstance(run_context, dict):
+                    run_context["trace_messages"] = messages[trace_start:]
+                return content, runs, reasonings, self._summarize_usage(usages)
             step += 1
             event({"type": "status", "message": f"正在思考（第 {step} 轮）"})
             try:
@@ -840,11 +933,19 @@ class SkillAgent:
                 piece = str(action.get("content") or raw or "任务已完成").strip()
                 # 截断自述 + 自动续写（只做一次）：正文中途停住时，「模型自己收尾」与
                 # 「被输出上限/上游掐断」在界面上完全一样，所以先把判定结果留档，再补一段。
-                verdict = _truncation_info(request_end_reason, piece)
+                verdict = _truncation_info(
+                    request_end_reason,
+                    piece,
+                    usage=usage,
+                    limit=context_limit,
+                    local=model_is_local,
+                )
                 if verdict["truncated"]:
                     truncation_state["truncated"] = True
                     truncation_state["finish_reason"] = verdict["finish_reason"]
                     truncation_state["unfinished_tail"] = verdict["unfinished_tail"]
+                    if verdict["cause"]:
+                        truncation_state["cause"] = verdict["cause"]
                 if verdict["truncated"] and not truncation_state["continued"]:
                     truncation_state["continued"] = True
                     continued_parts.append(piece)

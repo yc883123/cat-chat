@@ -17,7 +17,12 @@ from typing import Any, Callable
 
 from naiba import net as net_io
 from naiba.llm.protocols import ProtocolMixins
-from naiba.llm.stream import StreamMixins
+from naiba.llm.stream import (
+    ContextOverflowError,
+    StreamMixins,
+    _STREAM_SOURCE_LABELS,
+    is_context_overflow,
+)
 from naiba.core.diagnostics import (
     _debug_complete_marker,
     _debug_payload_dump,
@@ -104,6 +109,108 @@ def local_first_byte_timeout_error(seconds: float) -> LocalModelFirstByteTimeout
         "可以开一个新会话、减少 /引用 与附件后重试，"
         "或在「设置 → API 供应商」里确认该本地模型的上下文长度。"
         "（该超时可在「设置 → 运行设置 → 本地首字节超时」调整，0 = 关闭）"
+    )
+
+
+def _window_from_error_detail(detail: str) -> int:
+    """从服务端错误体里抠出它自报的上下文窗口值（抠不到返回 0）。
+
+    后端说的窗口是**真值**，优先级高于本机探测/配置：llama.cpp 回
+    ``"n_ctx":4096``，LM Studio 回 ``n_ctx: 4096``，DeepSeek/OpenAI 回
+    ``maximum context length is 65536 tokens``。用户看到「当前窗口 4096」再去设置里
+    对照，比看到配置里那个偏大的数字有用得多。
+    """
+    text = str(detail or "")
+    for pattern in (
+        r"n[_\s-]?ctx[\"']?\s*[:=]\s*(\d+)",
+        r"maximum context length is\s*(\d+)",
+        r"context length (?:is|of)\s*(\d+)",
+        r"context window (?:is|of)\s*(\d+)",
+    ):
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        try:
+            value = int(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 0
+
+
+def context_overflow_message(provider: str, window: int, *, is_local: bool) -> str:
+    """上下文溢出的**唯一**用户可见文案（本地/在线共用一套口径）。
+
+    为什么必须说清「窗口」与「下一步」：溢出在旧实现里表现为
+    ① 本地后端不做完 prefill，界面静止在「等待本地模型资源」直到超时；
+    ② 报错时只透传 ``HTTP 400: {原始 JSON}``。两者都让用户无从下手——真正有效的
+    动作只有两个：开新会话（不再重发整段历史），或把真实窗口填进设置。
+    """
+    who = str(provider or "").strip() or ("本地模型" if is_local else "当前模型")
+    try:
+        window_value = max(0, int(window or 0))
+    except (TypeError, ValueError):
+        window_value = 0
+    window_text = f"{window_value} tokens" if window_value > 0 else "未知"
+    if is_local:
+        return (
+            f"本地模型上下文窗口不足（{who}，当前窗口 {window_text}）：本轮请求已超出窗口，"
+            "模型无法继续处理。请点本条回复上的「新会话」，或新建对话后继续（聊天记录一条不删）；"
+            "若窗口值与实际不符，可在 设置 → 模型 里填写该模型的真实「上下文窗口」后重试。"
+        )
+    return (
+        f"模型上下文窗口不足（{who}，当前窗口 {window_text}）：本轮请求已超出窗口，"
+        "模型无法继续处理。请点本条回复上的「新会话」，或新建对话后继续（聊天记录一条不删）。"
+    )
+
+
+def _error_body_evidence(raw: str) -> str:
+    """把服务端错误体里**与错误本身相关**的部分拼成一段文本（供溢出判定）。
+
+    只看 `error`（含它的兄弟字段，如 llama.cpp 的 `n_ctx`/`n_prompt_tokens`）与顶层
+    `message`/`detail`，绝不把整段原文纳入判定——部分网关会把请求体原样回显，扫全文
+    就有把用户正文里的词当成溢出证据的风险。
+    """
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    parts: list[str] = []
+    for value in (parsed.get("error"), parsed.get("message"), parsed.get("detail")):
+        if isinstance(value, dict):
+            try:
+                parts.append(json.dumps(value, ensure_ascii=False))
+            except (TypeError, ValueError):
+                continue
+        elif isinstance(value, str):
+            parts.append(value)
+    return "\n".join(parts)
+
+
+def _context_overflow_error(
+    exc: ContextOverflowError,
+    profile: dict[str, Any],
+    *,
+    is_local: bool,
+    provider: str,
+) -> ContextOverflowError:
+    """给原始溢出错误补上「后端名 + 当前窗口」，生成用户可见文案。"""
+    try:
+        profile_window = int(profile.get("context_window") or profile.get("context_size") or 0)
+    except (TypeError, ValueError):
+        profile_window = 0
+    # 后端自报的窗口是**真值**，优先于本机探测/配置：用户对着真值才知道该往设置里填什么。
+    reported = exc.window or _window_from_error_detail(exc.detail or str(exc))
+    window = reported or profile_window
+    backend = provider or exc.backend
+    return ContextOverflowError(
+        context_overflow_message(backend, window, is_local=is_local),
+        window=window,
+        backend=backend,
+        detail=exc.detail or str(exc),
     )
 
 
@@ -1135,6 +1242,14 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
         # (e.g. an unexpected /v1/models) is immediately visible in the error.
         endpoint_path = parsed_endpoint.path or "/"
         target_detail += f"（{endpoint_host}:{endpoint_port}{endpoint_path}）"
+        # 溢出文案里的「后端名」：优先用户给供应商起的名字，其次后端类型标签。
+        # llama_cpp/unsloth 在 wire 层统一成 openai_chat，故先查 configured_format。
+        overflow_source = (
+            provider_name
+            or _STREAM_SOURCE_LABELS.get(configured_format, "")
+            or _STREAM_SOURCE_LABELS.get(request_format, "")
+            or request_format
+        )
         request_timeout = (
             LOCAL_MODEL_TIMEOUT_SECONDS
             if is_local
@@ -1290,11 +1405,26 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                             ) from exc
                 break
             except urllib.error.HTTPError as exc:
+                raw_body = exc.read().decode("utf-8", errors="replace")
                 detail = _summarize_http_error(
-                    exc.read().decode("utf-8", errors="replace"),
+                    raw_body,
                     exc.headers.get("Content-Type", "") if exc.headers else "",
                     endpoint_host,
                 )
+                # 上下文溢出必须**最先**判定：它是 4xx、重发同一份请求必然再失败，而且绝不能
+                # 被下面「剥离字段后重试」的兼容链当成协议不兼容（那只会白打一次注定失败的
+                # 请求，再把错误冲淡成「请求失败：HTTP 400: {原始 JSON}」）。
+                evidence = _error_body_evidence(raw_body)
+                if is_context_overflow(detail) or (evidence and is_context_overflow(evidence)):
+                    # 注意：在 except 处理块里抛出的异常**不会被同一个 try 的其它 except
+                    # 子句接住**，所以这里必须自己拼好用户文案（不能指望下面的统一出口）。
+                    # detail 带上完整响应体，供解析后端自报的 n_ctx。
+                    raise _context_overflow_error(
+                        ContextOverflowError(detail, detail=raw_body),
+                        profile,
+                        is_local=is_local,
+                        provider=overflow_source,
+                    ) from exc
                 stream_option_rejection = any(
                     marker in detail.lower()
                     for marker in ("stream_options", "include_usage")
@@ -1499,6 +1629,14 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                 elif is_http_exception:
                     hint = "；响应读取不完整（连接中断），请检查网络/代理后重试"
                 raise RuntimeError(f"无法连接{target_detail}：{reason}{hint}") from exc
+            except ContextOverflowError as exc:
+                # 溢出的统一出口：本地 attempts 本就不重试；在线也不重试（重发同一份超长
+                # 请求必然再失败）。这里补上「后端名 + 当前窗口」的可行动文案后原样抛出，
+                # 由 run/chat.py 的既有失败路径落成一条消息（ContextOverflowError 继承
+                # RuntimeError，那边无需改动）。
+                raise _context_overflow_error(
+                    exc, profile, is_local=is_local, provider=overflow_source,
+                ) from exc
             except EmptyModelStreamError:
                 # 仅在线 codex_responses 的流式空响应走此分支（本地/连接测试不重试）；
                 # 与 HTTP 重试同策略：退避 + 可取消等待 + 带次数的状态提示。

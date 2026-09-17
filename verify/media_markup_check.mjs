@@ -29,6 +29,10 @@ const stub = {
   draggedFileCache: new Map(),
   escapeHtml,
   state,
+  // 与 01-core.localFileUrl 逐字同口径（本地路径的 URL 形状唯一定义在那里）。
+  // 缺了它 fileUrl 会抛 ReferenceError，整支检查在第一条断言前就崩——
+  // 这类桩缺口属于"静默失效的防线"，出现即补，不能留。
+  localFileUrl: (source) => `/api/file?token=${encodeURIComponent(state.token)}&path=${encodeURIComponent(String(source || ''))}`,
   toast: () => {},
   markdown: (text) => String(text || ''),
   selectedProvider: () => null,

@@ -15,6 +15,90 @@ from naiba.llm.protocols import ProtocolMixins
 StatusCallback = Callable[[dict[str, Any]], None]
 
 
+# 「本轮请求超出上下文窗口」的服务端特征串。只用来判定**服务端错误体**（4xx 的 detail、
+# 流里内嵌的 error 事件），不碰用户正文，因此没有误伤面。各后端写法不同：
+# llama.cpp / Unsloth 回 `exceed_context_size_error` 与 `n_ctx`；LM Studio 回
+# `greater than the context length`；Ollama 把错误整块塞在流里；在线供应商多为
+# `maximum context length`（DeepSeek/OpenAI）或 `prompt is too long`（Anthropic）。
+_CONTEXT_OVERFLOW_MARKERS = (
+    "exceed_context_size",
+    "exceeds the available context",
+    "exceeds the context",
+    "context length",
+    "context window",
+    "context size",
+    "maximum context",
+    "max context length",
+    "prompt is too long",
+    "input is too long",
+    "reduce the length",
+    "n_ctx",
+)
+
+# 流内错误事件的来源标注（写进异常文案，让用户知道是哪个后端拒的）。
+_STREAM_SOURCE_LABELS = {
+    "ollama": "Ollama",
+    "lm_studio": "LM Studio",
+    "llama_cpp": "llama.cpp",
+    "unsloth": "Unsloth",
+}
+
+
+def is_context_overflow(detail: Any) -> bool:
+    """服务端错误体是否表示「上下文窗口不足」（大小写无关的纯字符串判定）。"""
+    text = str(detail or "").lower()
+    return any(marker in text for marker in _CONTEXT_OVERFLOW_MARKERS)
+
+
+class ContextOverflowError(RuntimeError):
+    """后端明确回报：本轮请求已超出模型的上下文窗口。
+
+    与「网络故障」「供应商限流」分开：溢出是 4xx、重发同一份请求必然再失败，必须给
+    用户**可操作的建议**（新会话 / 填写真实上下文窗口）而不是一段原始 JSON。
+    用户可见文案由 `naiba.llm.runtime.context_overflow_message` 在「后端名 + 当前窗口」
+    都已知时统一拼装（本层只管如实带上后端原文）。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        window: int = 0,
+        backend: str = "",
+        detail: str = "",
+    ) -> None:
+        super().__init__(str(message or "上下文窗口不足"))
+        try:
+            self.window = max(0, int(window or 0))
+        except (TypeError, ValueError):
+            self.window = 0
+        self.backend = str(backend or "")
+        self.detail = str(detail or "")
+
+
+def _stream_error(source: str, error: Any) -> BaseException:
+    """把流里内嵌的错误对象/文本转成合适的异常（溢出走专用类型，其余保留原文）。
+
+    ``detail`` 保留错误的**完整原样**（dict 就序列化）：本地后端常把真值放在 message
+    的兄弟字段里（llama.cpp 的 ``n_ctx``），只留 message 就再也解析不出真实窗口。
+    """
+    if isinstance(error, dict):
+        detail = str(
+            error.get("message") or error.get("detail") or error.get("error") or error
+        )
+        try:
+            raw = json.dumps(error, ensure_ascii=False)
+        except (TypeError, ValueError):
+            raw = str(error)
+    else:
+        detail = str(error or "").strip()
+        raw = detail
+    detail = detail or "未知错误"
+    if is_context_overflow(detail) or is_context_overflow(raw):
+        return ContextOverflowError(detail, detail=raw, backend=source)
+    return RuntimeError(f"{source} 流式错误：{detail}")
+
+
 # Patterns used to keep agent tool-call protocols out of the user-facing
 # streaming answer. The classifier below decides, before forwarding any
 # fragment, whether the leading model output is ordinary prose or an agent
@@ -139,6 +223,12 @@ class StreamMixins:
                 continue
             if not isinstance(chunk, dict):
                 continue
+            # Ollama 把后端错误（含「超出上下文长度」）作为一行 `{"error": "..."}` 直接
+            # 塞在流里。此前这个字段整块被吞掉，用户在界面上只能看到「流式响应中没有
+            # 文本内容」——真实原因（窗口不够 / 模型未加载 / 参数非法）完全不可见。
+            error = chunk.get("error")
+            if error not in (None, "", False, {}, []):
+                raise _stream_error("Ollama", error)
             chunks.append(chunk)
             message = chunk.get("message") or {}
             for index, raw_call in enumerate(message.get("tool_calls") or [] if isinstance(message, dict) else []):
@@ -227,6 +317,16 @@ class StreamMixins:
                 continue
             if not isinstance(chunk, dict):
                 continue
+            # 有些本地后端（llama.cpp / Unsloth 的部分版本、部分兼容网关）不返回 4xx，
+            # 而是把错误作为 SSE 事件嵌在流里。正常事件（含 codex_responses 的
+            # output_item.* / response.* 与 OpenAI 的 choices delta）都不带顶层 `error`
+            # 键，故用真值判定即可，不会误伤正常流。此前这类错误事件被静默跳过，最终
+            # 只会以「流式响应中没有文本内容」收场。
+            error = chunk.get("error")
+            if error not in (None, "", False, {}, []):
+                raise _stream_error(
+                    _STREAM_SOURCE_LABELS.get(request_format, "模型服务"), error
+                )
             chunks.append(chunk)
             event_type = str(chunk.get("type") or "")
             # 捕获 reasoning item 的服务端唯一 id：output_item.added 事件携带 item
@@ -349,7 +449,9 @@ class StreamMixins:
                 error = chunk.get("error") or "LM Studio 返回未知错误"
                 if isinstance(error, dict):
                     error = str(error.get("message") or error.get("details") or error)
-                raise RuntimeError(f"LM Studio 流式错误：{error}")
+                # 统一走 `_stream_error`：溢出（LM Studio 的「greater than the context
+                # length (n_keep: …, n_ctx: …)」）转成专用错误，其余保留原文。
+                raise _stream_error("LM Studio", error)
             if event_type in ("chat.end", "message.end", "reasoning.end", "message.start", "reasoning.start"):
                 continue
             if event_type in ("reasoning.delta", "reasoning.full"):

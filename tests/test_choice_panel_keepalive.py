@@ -88,7 +88,7 @@ class HistoryBackfillTests(unittest.TestCase):
 class CustomReplyWiringTests(unittest.TestCase):
     """「自定义回复」：选项面板里与预设选项**一律并存**的一项（就地输入框）。
 
-    行为级校验见 verify/choice_custom_reply_check.mjs（抽取同一批函数真执行）；
+    行为级校验见归档的 verify/choice_custom_reply_check.mjs（抽取同一批函数真执行；该脚本 2026-09-16 归档）；
     这里只守源码接口，防止后续重构把并存口径改回互斥。
     """
 

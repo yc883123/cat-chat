@@ -195,36 +195,31 @@ dsh-vision-router/
 # 便于其他合作者直接调用；新增可复用脚本时在此补一行 ! 放行。
 # 测试临时目录也落在 verify/ 下（见维护说明 §九.4），已被上面的规则覆盖。
 verify/*
-!verify/_check_dark_soft_contrast.cjs
 !verify/_check_tool_cards_compact.cjs
 !verify/_check_turn_rail.cjs
 !verify/_release_check.py
 !verify/_serve_tmp.py
-!verify/_serve_video_e2e.py
 !verify/agent_avatar_smoke.cjs
 !verify/agent_cards_smoke.cjs
 !verify/agent_prompt_smoke.cjs
 !verify/attachment_only_smoke.py
 !verify/backfill_media.py
+!verify/batch1_smoke.cjs
+!verify/batch1_smoke.py
 !verify/branch_first_turn_smoke.cjs
 !verify/branch_first_turn_smoke.py
 !verify/browser_smoke.cjs
 !verify/cleanup_verify.py
-!verify/choice_panel_smoke.cjs
-!verify/choice_panel_smoke.py
 !verify/composer_model_smoke.cjs
 !verify/composer_model_smoke.py
-!verify/ci_short_path_check.py
 !verify/context_menu_smoke.cjs
-!verify/css_content_bg.py
 !verify/dup_ids.py
 !verify/esm_cross_assign.py
 !verify/esm_graph_check.py
 !verify/esm_unused_imports.py
 !verify/file_ref_smoke.cjs
-!verify/frontend_runtime_settings_check.cjs
+!verify/frozen_batch1_check.py
 !verify/frozen_interrupt_check.py
-!verify/frozen_video_check.py
 !verify/lightbox_smoke.cjs
 !verify/make_test_card.py
 !verify/media_inline_smoke.cjs
@@ -246,9 +241,6 @@ verify/*
 !verify/release_watch.py
 !verify/ring_usage_smoke.cjs
 !verify/ring_usage_smoke.py
-!verify/run_frontend_check.sh
-!verify/run_video_e2e.sh
-!verify/runtime_guard_smoke.py
 !verify/scan_undef_all.py
 !verify/scan_unused_pkg.py
 !verify/seed_agent_avatar_chat.py
@@ -281,4 +273,3 @@ verify/*
 !verify/upload_smoke.py
 !verify/usage_rate_smoke.cjs
 !verify/verify_doc_encoding.py
-!verify/video_e2e_smoke.cjs

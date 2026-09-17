@@ -9,7 +9,7 @@
 `--accent-soft-2` / `--violet-*` 定义成**服务于浅色主题的浅底淡彩**（如 `#EDECFF`、
 `#d9efff`），而 `html[data-theme="dark"]` 只覆盖了 `--neutral-*` / `--text` 等，
 **没有重定义这些软色**；`--text` 已变成近白 ⇒ 近白底 + 近白字的组合。
-浏览器实测（`verify/_check_dark_soft_contrast.cjs`）：修复前该组合对比度 **1.05**
+浏览器实测（`verify/_check_dark_soft_contrast.cjs`，2026-09-16 归档）：修复前该组合对比度 **1.05**
 （1.0 = 完全同色），修复后 16.92。
 
 本测试不跑浏览器，只钉住两条易复发的不变量：

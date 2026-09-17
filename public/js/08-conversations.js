@@ -112,7 +112,7 @@ export function sidebarRowAt(offsets, pos) {
 export function sidebarRowHtml(row) {
   if (row.type === 'header') {
     return `<div class="workspace-group ${row.isExp ? 'expanded' : ''}" data-workspace-name="${escapeHtml(row.wsName)}" data-workspace-dir="${escapeHtml(row.dir)}">
-      <div class="workspace-group-header" data-action="toggle-group">
+      <div class="workspace-group-header" data-action="toggle-group" title="${escapeHtml(row.dir ? `${row.label}（${row.dir}）` : row.label)}">
         <span class="workspace-caret">▸</span>
         <span class="workspace-group-name">${escapeHtml(row.label)}</span>
         <span class="workspace-count">${row.count}</span>
@@ -481,9 +481,37 @@ export function renderComposerWorkspace() {
   if (!select) return;
   const current = state.conversations.find((c) => c.id === state.conversationId);
   const currentGroup = current ? (current.workspace_group || '').trim() : '';
-  const options = ['', ...(state.workspaces || []).map((w) => w.name)];
-  select.innerHTML = options.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name || '未分组')}</option>`).join('');
+  const workspaces = Array.isArray(state.workspaces) ? state.workspaces : [];
+  // 工作区允许重名（分组按名字归并），光看下拉名字分不清谁是谁——把目录路径放进
+  // option 的 title，悬停即可分辨；select 自身的 title 同步显示当前选中项的目录。
+  const dirOf = (name) => {
+    const hit = workspaces.find((w) => String(w?.name || '') === name);
+    return String(hit?.dir || '').trim();
+  };
+  const options = ['', ...workspaces.map((w) => w.name)];
+  // 会话所属分组**没登记在本实例的配置里**时，必须把这个分组本身补回下拉：
+  // `select.value = currentGroup` 找不到对应 option 会**静默落成 ''**，界面就把「属于 naiba-chat
+  // 的会话」显示成「未分组」——状态显示错，用户还会以为会话被搬走了，而且切走就再也切不回来
+  // （下拉里根本没有那一项）。注册表与库分属两份 config.json 时这是必现的，见 §九.89。
+  const orphan = currentGroup && !options.includes(currentGroup) ? currentGroup : '';
+  if (orphan) options.push(orphan);
+  select.innerHTML = options.map((name) => {
+    const isOrphan = name !== '' && name === orphan;
+    const tip = name
+      ? (isOrphan ? '本实例配置里没有登记这个工作区（会话仍在它名下）' : dirOf(name))
+      : '不属于任何工作区的会话';
+    const titleAttr = tip ? ` title="${escapeHtml(tip)}"` : '';
+    const label = isOrphan ? `${name}（未注册）` : (name || '未分组');
+    return `<option value="${escapeHtml(name)}"${titleAttr}>${escapeHtml(label)}</option>`;
+  }).join('');
   select.value = currentGroup;
+  const currentDir = currentGroup ? dirOf(currentGroup) : '';
+  // 未注册时明确说出「当前值是什么、怎么恢复」——只写通用「选择工作区」会让用户以为选中的是未分组。
+  select.title = currentDir
+    ? `选择工作区（当前：${currentDir}）`
+    : orphan
+      ? `当前工作区「${orphan}」未在本实例注册（可在侧栏「新建工作区」登记同名工作区）`
+      : '选择工作区';
 }
 
 export async function onComposerWorkspaceChange(event) {

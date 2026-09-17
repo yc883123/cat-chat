@@ -11,8 +11,11 @@
    `showAgentForm()` 的 `focus()` 把文档滚到弹层位置，"偶发"露出来。修法：作者级
    `dialog:not([open]) { display: none; }`（(0,1,1) 高于 `.agent-dialog` 的 (0,1,0)，无需 `!important`）。
 
-2. **顶栏折叠**：手机顶栏在 ≤380px 下要占三行（模型 / Agent / 操作区），会话区只剩半屏。新增
-   一个细条按钮 `#toggleTopbarCompact`，收起整条 `.topbar-actions` 并把模型 / Agent 并回第 1 行。
+2. **顶栏折叠**：手机顶栏在 ≤760px 下要占三行（API / Agent / 操作区 + 折叠条），会话区只剩半屏。
+   细条按钮 `#toggleTopbarCompact` 收起后**整条顶栏只剩它自己**（API / Agent 两个下拉、操作区、
+   侧栏按钮全部 `display: none`），并把「展开顶栏」文字亮出来。曾经的实现只隐藏 `.topbar-actions`
+   并把两个下拉收拢到第 1 行，用户看到的仍是「一行 API + 一行 Agent + 一条箭头」——收起等于没收
+   （用户手机截图报障，§九.86）。
 
 关键不变量（改这些地方前先读本文件）：
 - 关闭态弹层必须 `display: none`，且该规则**不在任何媒体查询里**、不带 `!important`；
@@ -20,6 +23,7 @@
   **不得**用 `!important` / `pointer-events` / 隐藏按钮文字来省空间（§九.44 + test_mobile_parity）；
 - 折叠条**不在** `.topbar-actions` 内、不带 `.control-button` / `.mcp-button` 类
   （否则 `verify/topbar_smoke.cjs` 会量到收起后 0 宽而报红）；
+- 收起是「只留一个入口」而不是「删掉能力」：那个入口必须带可见文字、且点一次全部恢复；
 - 折叠默认展开（干净浏览器无 localStorage），状态记在 `naibaChatTopbarCompact`。
 """
 from __future__ import annotations
@@ -158,17 +162,34 @@ class TopbarCollapseStyleTests(unittest.TestCase):
         for snippet in (
             ".topbar-collapse-toggle {",
             ".topbar-collapse-toggle svg {",
-            ".topbar.compact .topbar-actions { display: none; }",
+            ".topbar.compact > *:not(.topbar-collapse-toggle) { display: none; }",
         ):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, mobile, f"折叠规则不在 760 块内：{snippet}")
 
-    def test_compact_pulls_selects_back_to_one_row(self) -> None:
-        """≤380px 原本三行：不收拢模型 / Agent 就省不下高度。高特异性必须写 .topbar.compact。"""
+    def test_compact_hides_every_child_but_the_toggle(self) -> None:
+        """收起 = 整条顶栏只剩折叠条（API / Agent / 操作区 / 侧栏按钮一起让位）。
+
+        只隐藏 `.topbar-actions` 是**不够的**：用户看到的仍是「API 栏 + Agent 栏 + 箭头」，
+        收起等于没收（手机截图报障）。这条断言就是钉住「一个都不许剩」。
+        """
         mobile = self._mobile_block()
-        self.assertIn(".topbar.compact { grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);", mobile)
-        self.assertIn(".topbar.compact .model-control { grid-column: 2; grid-row: 1; }", mobile)
-        self.assertIn(".topbar.compact .agent-control { grid-column: 3; grid-row: 1; }", mobile)
+        self.assertIn(".topbar.compact > *:not(.topbar-collapse-toggle) { display: none; }", mobile)
+        # 收起后单列一行：两个下拉不再需要并排，也不许留下 380 块的三行模板。
+        self.assertIn(".topbar.compact { grid-template-columns: 1fr; grid-template-rows: auto; }", mobile)
+        self.assertNotIn(".topbar.compact .model-control", mobile, "收起态不得再给下拉单独排格")
+        self.assertNotIn(".topbar.compact .agent-control", mobile, "收起态不得再给下拉单独排格")
+        self.assertNotIn(".topbar.compact .topbar-actions { display: none; }", mobile)
+
+    def test_toggle_label_only_shows_when_collapsed(self) -> None:
+        """收起后顶栏只剩这一个入口，必须靠文字说明「点它能展开」（裸箭头认不出来）。"""
+        mobile = self._mobile_block()
+        label = mobile[mobile.index(".topbar-toggle-label {"):]
+        label = label[: label.index("}")]
+        self.assertIn("display: none", label, "展开态要保持细条，不显示文字")
+        self.assertIn(".topbar.compact .topbar-toggle-label { display: inline; }", mobile)
+        index = (ROOT / "public/index.html").read_text(encoding="utf-8")
+        self.assertIn('<span class="topbar-toggle-label">展开顶栏</span>', index)
 
     def test_toggle_is_full_width_row(self) -> None:
         mobile = self._mobile_block()

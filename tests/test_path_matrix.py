@@ -23,11 +23,25 @@ from naiba.core.paths import path_within, path_within_any, within_detail  # noqa
 
 
 def _make_dir_link(link: Path, target: Path) -> None:
-    """创建目录链接：优先符号链接，Windows 回退 junction；不可用则跳过测试。"""
+    """创建目录链接：优先符号链接，Windows 回退 junction；不可用则跳过测试。
+
+    注意 `os.symlink` **不抛异常也可能没建成**（受限环境/沙箱里写入被静默拦掉，实测
+    `link.exists()` 为 False、`resolve()` 原样返回链接路径）——所以每次都要**验活**，
+    否则本文件会以一条 `AssertionError` 假红，而不是老老实实 SkipTest。
+    """
     target.mkdir(parents=True, exist_ok=True)
+
+    def usable() -> bool:
+        """链接真的可用 = 解析结果就是目标目录本身（静默失败时 resolve() 会返回链接自身）。"""
+        try:
+            return link.is_dir() and link.resolve() == target.resolve()
+        except OSError:
+            return False
+
     try:
         os.symlink(target, link, target_is_directory=True)
-        return
+        if usable():
+            return
     except (OSError, NotImplementedError, AttributeError):
         pass
     if os.name == "nt":
@@ -35,8 +49,12 @@ def _make_dir_link(link: Path, target: Path) -> None:
             ["cmd", "/c", "mklink", "/J", str(link), str(target)],
             capture_output=True,
             text=True,
+            # 中文 Windows 的 mklink 输出是 GBK：按 UTF-8 硬解会在读线程里抛
+            # UnicodeDecodeError（一串看着像失败的堆栈，其实只影响读输出），这里只关心
+            # returncode，解码用 replace 兜住即可。
+            errors="replace",
         )
-        if completed.returncode == 0 and link.exists():
+        if completed.returncode == 0 and usable():
             return
     raise unittest.SkipTest("当前环境不允许创建目录链接（符号链接/junction）")
 

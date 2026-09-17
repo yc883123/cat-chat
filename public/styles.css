@@ -330,6 +330,18 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .context-usage-popover[hidden] { display: none; }
 .context-usage-popover strong { display: block; margin-bottom: 4px; }
 .context-usage-popover small { display: block; margin-top: 4px; color: var(--muted); }
+/* Agent 说明按钮 + 弹层：与 context-usage-popover 同一模式（fixed + 挂 body），
+   内容是静态说明文案，比用量弹层更宽一些。 */
+.agent-help-button { flex: none; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--line-strong); background: none; color: var(--muted); font-size: 11px; line-height: 1; display: grid; place-items: center; cursor: pointer; padding: 0; }
+.agent-help-button:hover { color: var(--text); border-color: var(--accent); }
+.agent-help-popover { position: fixed; left: 12px; top: 12px; z-index: 100; width: min(340px, calc(100vw - 24px)); max-height: min(70vh, 480px); overflow-y: auto; padding: 12px 14px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--surface); box-shadow: var(--shadow-2); color: var(--text); font-size: 12px; line-height: 1.6; }
+.agent-help-popover[hidden] { display: none; }
+.agent-help-popover strong { display: block; margin: 8px 0 4px; }
+.agent-help-popover strong:first-child { margin-top: 0; }
+.agent-help-popover p { margin: 0; }
+.agent-help-popover ul, .agent-help-popover ol { margin: 0; padding-left: 18px; }
+.agent-help-popover li { margin: 2px 0; }
+.agent-help-popover small { display: block; margin-top: 8px; color: var(--muted); }
 .chat-main { min-width: 0; min-height: 0; width: 100%; height: 100%; overflow: hidden; display: grid; grid-template-rows: 60px minmax(0, 1fr) min-content; position: relative; }
 /* 背景图的**渲染规则唯一来源**：真实对话区（.chat-backdrop）、编辑白板（.chat-bg-board）、
    设置卡缩略图（.chat-background-preview 内的图层）三处都挂 .chat-bg-surface，只消费
@@ -1697,14 +1709,15 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
     gap: 4px;
     z-index: auto;
   }
-  /* 顶栏折叠条：一条 ~24px 的细条，整行可点（横向命中面积远大于图标本身）。
+  /* 顶栏折叠条：展开态是一条 ~24px 的细条，整行可点（横向命中面积远大于图标本身）。
      刻意不写死 grid-row —— 用 grid-column: 1/-1 + 自动行排布，760 块（3 列 2 行）与
-     380 块（2 列 3 行）都能自然落到操作区之后；收起后 .topbar-actions 是 display:none 不占行，
-     细条自动上移一行，不会留下空行。 */
+     380 块（2 列 3 行）都能自然落到操作区之后；收起后其余子元素全部 display:none 不占行。 */
   .topbar-collapse-toggle {
     grid-column: 1 / -1;
-    display: grid;
-    place-items: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
     width: 100%;
     min-height: 24px;
     margin: 0;
@@ -1718,14 +1731,23 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   }
   .topbar-collapse-toggle:active { background: var(--surface-2); color: var(--text); }
   .topbar-collapse-toggle svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform var(--t-fast); }
-  /* 收起态：整条操作区（轮次 / 文件 / 任务 / Skill / MCP / 刷新）让给会话区，只留第 1 行下拉；
-     点细条即恢复。能力只被临时收起、没有被删除（不得靠隐藏按钮文字来省空间，见 §九.44）。 */
-  .topbar.compact .topbar-actions { display: none; }
-  /* 收起后模型 / Agent 并回同一行：≤380px 原本各占一行，不收拢就省不下高度。
-     必须写在高特异性的 .topbar.compact 下，才不受文件更后面的 380 块影响。 */
-  .topbar.compact { grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: auto; }
-  .topbar.compact .model-control { grid-column: 2; grid-row: 1; }
-  .topbar.compact .agent-control { grid-column: 3; grid-row: 1; }
+  /* 展开态只留箭头（细条省高度）；收起态整条顶栏只剩这一个入口，必须醒目可认：
+     加底色 + 边框 + 「展开顶栏」文字，否则只剩一个 18px 小箭头，用户认不出这是唯一的展开入口。 */
+  .topbar-toggle-label { display: none; font-size: 12px; line-height: 1; color: inherit; }
+  /* 收起态 = **整条顶栏只剩这一个按钮**（API / Agent 两个下拉、操作区、侧栏按钮全部隐藏）。
+     曾经的实现只隐藏 `.topbar-actions` 并把两个下拉收拢到第 1 行，用户看到的仍是
+     「一行 API + 一行 Agent + 一条箭头」，收起等于没收（用户手机截图报障，§九.86）。
+     能力只是被临时收起、没有被删除：点这一条即全部恢复（不得靠隐藏按钮文字来省空间，§九.44）；
+     选择器特异性高于本块内其它子元素规则，也不受更靠后的 380 块影响。 */
+  .topbar.compact > *:not(.topbar-collapse-toggle) { display: none; }
+  .topbar.compact { grid-template-columns: 1fr; grid-template-rows: auto; }
+  .topbar.compact .topbar-collapse-toggle {
+    min-height: 32px;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    color: var(--text);
+  }
+  .topbar.compact .topbar-toggle-label { display: inline; }
   .topbar.compact .topbar-collapse-toggle svg { transform: rotate(180deg); }
   .mcp-button, .control-button { min-width: 34px; min-height: 44px; max-width: 100%; padding: 0 8px; }
   #openSidebar { min-width: 44px; min-height: 44px; }

@@ -905,6 +905,14 @@ export function insertTextIntoEditable(text) {
   return false;
 }
 
+// 「粘贴」按钮在两条程序化通道都不可用时的**唯一**提示。
+// 不可用是常态而不是异常：`document.execCommand('paste')` 被所有现代浏览器禁用，
+// `navigator.clipboard.readText()` 又要求安全上下文 + 用户授权，而手机经局域网
+// `http://192.168.x.x:8765` 访问时连 `navigator.clipboard` 对象都没有。
+// 提示必须给出**可行动作**（桌面 Ctrl+V / 手机长按系统菜单）——旧实现只说「浏览器未授权」，
+// 用户照着这四个字没有任何下一步可走（§九.85）。
+const PASTE_UNAVAILABLE_HINT = '浏览器不允许网页读剪贴板：请按 Ctrl+V，手机可长按输入框用系统菜单';
+
 export async function runTextContextAction(action) {
   try {
     if (contextMenuMode === 'edit') {
@@ -930,15 +938,17 @@ export async function runTextContextAction(action) {
         }
       } else if (action === 'paste') {
         let ok = false;
-        try { ok = document.execCommand('paste'); } catch (_) { /* 忽略 */ }
+        try { ok = document.execCommand('paste'); } catch (_) { /* 现代浏览器一律禁用，必然失败 */ }
         if (!ok && navigator.clipboard?.readText) {
+          // 只有**安全上下文**（https / localhost / 桌面内嵌壳）才有这个对象；
+          // 手机经局域网 http://192.168.x.x:8765 打开时它根本不存在，
+          // 存在时也可能被权限拒绝（NotAllowedError）——两条都要落到同一句提示上。
           try {
             const text = await navigator.clipboard.readText();
-            ok = insertTextIntoEditable(text);
-          } catch (_) { /* 忽略 */ }
+            if (text != null) ok = insertTextIntoEditable(text);
+          } catch (_) { /* 权限被拒：走下面的可行动提示 */ }
         }
-        if (ok) toast('已粘贴');
-        else toast('粘贴失败：浏览器未授权');
+        toast(ok ? '已粘贴' : PASTE_UNAVAILABLE_HINT);
       } else if (action === 'delete') {
         const el = contextMenuTarget;
         if (el && typeof el.value === 'string' && typeof el.selectionStart === 'number') {
@@ -1031,8 +1041,9 @@ export function normalizeLanguage(language) {
 
 // ---- 手机端顶栏折叠：收起操作区，把被顶栏吃掉的高度还给会话区 ----
 // 形态定义全在 CSS 的 ≤760px 块里（桌面上按钮根本不渲染、规则也不命中），JS 只负责切类与记忆选择：
-// 收起 = 隐藏整条 .topbar-actions（轮次 / 文件 / 任务 / Skill / MCP / 刷新临时让位，点细条即回），
-// 并把模型与 Agent 两个下拉并回第 1 行。与 setLeftSidebarCollapsed 同一套路（localStorage 记状态）。
+// 收起 = 只留下拉箭头一条（API / Agent / 操作区 / 侧栏按钮全部隐藏，形态定义在 CSS
+// `.topbar.compact > *:not(.topbar-collapse-toggle)`），点细条全部恢复。
+// 与 setLeftSidebarCollapsed 同一套路（localStorage 记状态）。
 const TOPBAR_COMPACT_KEY = 'naibaChatTopbarCompact';
 
 export function setTopbarCompact(compact) {

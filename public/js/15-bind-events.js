@@ -7,7 +7,7 @@ import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarni
 import { branchMessage, cancelActiveEdit, cancelSessionStart, confirmActiveEdit, deleteMessageFlow, fillContextResetSeed, initTurnRail, isNearBottom, regenerateMessage, setStickToBottom, startEditMessage, startNewSession, undoLastDelete } from "./04-messages.js";
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
 import { switchPermissionMode } from "./06-tasks-plans.js";
-import { checkUpdate, closeComposerModelPicker, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
+import { checkUpdate, closeAgentHelpPopover, closeComposerModelPicker, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, positionAgentHelpPopover, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleAgentHelpPopover, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
 import { cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeBranchChainPanel, closeConversationMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, runFullTextSearch, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel, setTaskLogOpen, setTaskLogStick, setWorkspaceSearchMode, syncSearchModeUi, SEARCH_DEBOUNCE_MS } from "./08-conversations.js";
 import { addProvider, addSearchProfile, applyProviderModelCapabilities, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadWorkspaceTree, openAgentCard, openProviderCard, openVisionProviderForm, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, saveMcpServer, saveProvider, saveRuntimeSettings, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, showAgentForm, switchAgentTab, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint } from "./09-settings.js";
 import { readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
@@ -558,11 +558,24 @@ function bindChatBackgroundEditor() {
   });
 }
 
+// 最近一次 pointerdown 的指针类型：`contextmenu` 事件本身不带 pointerType，只能这样记下来。
+// 用途：**触摸/手写笔长按必须让给系统菜单**。手机经局域网 http:// 打开时是**非安全上下文**，
+// 网页既没有 `navigator.clipboard`、`execCommand('paste')` 也被浏览器禁用，系统长按菜单
+// （复制 / 粘贴 / 全选）是手机上唯一可行的粘贴路径。旧实现在 contextmenu 上无条件
+// `preventDefault()`，等于把这条路一起关掉——用户实测就是「粘贴失败：浏览器未授权」（§九.85）。
+let lastPointerType = 'mouse';
+
+function isLongPressPointer() {
+  return lastPointerType === 'touch' || lastPointerType === 'pen';
+}
+
 export function bindEvents() {
   document.addEventListener('contextmenu', (event) => {
     hideTextContextMenu();
     const editable = editableElement(event.target);
     if (editable) {
+      // 长按（触摸 / 手写笔）不拦截：交给系统自己的文本菜单，见 lastPointerType 的注释。
+      if (isLongPressPointer()) return;
       event.preventDefault();
       showTextContextMenu(event, '', 'edit', editable);
       return;
@@ -584,6 +597,10 @@ export function bindEvents() {
     event.preventDefault();
     showTextContextMenu(event, selection.toString(), 'selection', null);
   });
+  // 记录指针类型（捕获阶段：即使后续 handler 停掉传播也要先记到）。只记不拦，行为零影响。
+  document.addEventListener('pointerdown', (event) => {
+    lastPointerType = event.pointerType || 'mouse';
+  }, true);
   document.addEventListener('pointerdown', (event) => {
     if (!event.target.closest?.('#textContextMenu')) hideTextContextMenu();
   });
@@ -1064,6 +1081,12 @@ export function bindEvents() {
   window.addEventListener('resize', positionContextUsagePopover);
   window.addEventListener('scroll', positionContextUsagePopover, true);
   document.addEventListener('click', closeContextUsagePopover);
+  // Agent 说明弹层（顶栏「?」）：与上下文用量弹层同一套开合规则。
+  $('#agentHelpButton').addEventListener('click', toggleAgentHelpPopover);
+  $('#agentHelpPopover').addEventListener('click', (event) => event.stopPropagation());
+  window.addEventListener('resize', positionAgentHelpPopover);
+  window.addEventListener('scroll', positionAgentHelpPopover, true);
+  document.addEventListener('click', closeAgentHelpPopover);
   $('#messageInput').addEventListener('paste', handlePasteImage);
   $('#saveVision').addEventListener('click', saveVisionSettings);
   $('#testVision').addEventListener('click', testVisionConnection);

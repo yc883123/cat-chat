@@ -13,7 +13,13 @@
 - `topLayerContainer()` 只认模态 dialog（`:modal`），要排除 toast（它是 `<dialog>` 但用 `show()`）；
 - 选区菜单分支必须把选区限制在同一弹层内；
 - 编辑菜单条目齐全（撤销/重做/剪切/复制/粘贴/删除/全选）；
-- number/email 输入框不暴露 `selectionStart` → 「复制」退化为整值复制。
+- number/email 输入框不暴露 `selectionStart` → 「复制」退化为整值复制；
+- **触摸 / 手写笔长按不得被拦截**（§九.85）：手机经局域网 http:// 打开时是**非安全上下文**，
+  网页既没有 `navigator.clipboard`、`execCommand('paste')` 也被浏览器禁用——系统长按菜单是手机上
+  唯一可行的粘贴入口。旧实现在 `contextmenu` 上无条件 `preventDefault()`，把它一起关掉了，
+  用户实测「粘贴失败：浏览器未授权」；
+- 「粘贴」按钮在两条程序化通道都不可用时必须给**可行动作**（Ctrl+V / 长按系统菜单），
+  不许只说「未授权」。
 """
 from __future__ import annotations
 
@@ -92,6 +98,40 @@ class TextContextMenuTests(unittest.TestCase):
         rule = rule[: rule.index("}")]
         self.assertIn("position: fixed", rule)
         self.assertIn("z-index", rule)
+
+    def test_touch_long_press_is_left_to_the_system_menu(self) -> None:
+        """手机长按不拦截：系统菜单才是手机上唯一能用的粘贴入口（§九.85）。"""
+        bind = self._bind()
+        self.assertIn("let lastPointerType = 'mouse';", bind, "没有记录指针类型，长按判定无从谈起")
+        self.assertIn("lastPointerType = event.pointerType || 'mouse';", bind)
+        self.assertRegex(bind, r"\}, true\);", "指针类型要在捕获阶段记，别被后续 stopPropagation 吞掉")
+        body = bind[bind.index("document.addEventListener('contextmenu'"):]
+        body = body[: body.index("document.addEventListener('pointerdown'")]
+        self.assertIn("isLongPressPointer()", body)
+        self.assertLess(
+            body.index("isLongPressPointer()"),
+            body.index("event.preventDefault()"),
+            "长按判定必须排在 preventDefault 之前，否则照样把系统菜单关掉",
+        )
+        helper = bind[bind.index("function isLongPressPointer()"):]
+        helper = helper[: helper.index("\n}")]
+        self.assertIn("'touch'", helper)
+        self.assertIn("'pen'", helper)
+
+    def test_paste_falls_back_to_an_actionable_hint(self) -> None:
+        """两条程序化通道都不可用时，提示必须给出下一步动作。"""
+        core = self._core()
+        self.assertNotIn("粘贴失败：浏览器未授权", core, "又回到只说「未授权」、不给下一步的老文案")
+        self.assertIn("PASTE_UNAVAILABLE_HINT", core)
+        hint = core[core.index("const PASTE_UNAVAILABLE_HINT"):]
+        hint = hint[: hint.index(";")]
+        self.assertIn("Ctrl+V", hint, "桌面通路：要告诉用户按 Ctrl+V")
+        self.assertIn("长按", hint, "手机通路：要告诉用户长按用系统菜单")
+        paste = core[core.index("} else if (action === 'paste') {"):]
+        paste = paste[: paste.index("} else if (action === 'delete')")]
+        self.assertIn("toast(ok ? '已粘贴' : PASTE_UNAVAILABLE_HINT);", paste,
+                      "成功与失败都要出声，不许出现「点了没反应」")
+        self.assertIn("insertTextIntoEditable(text)", paste)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,46 @@ import { appendPresetSkillsToComposer } from "./13-skill-refs.js";
 const UPDATE_BUSY_PHASES = ['checking', 'downloading', 'restarting'];
 const UPDATE_RELEASE_URL = 'https://github.com/yc883123/naiba-chat/releases';
 
+/* Agent 说明弹层（顶栏 Agent 选择器左侧的「?」）：与 contextUsagePopover 同一模式——
+   fixed 定位 + 打开时挂到 body（顶栏容器有 overflow 裁剪），内容是静态文案，无需动态生成。 */
+export function positionAgentHelpPopover() {
+  const popover = $('#agentHelpPopover');
+  const button = $('#agentHelpButton');
+  if (!popover || !button || popover.hidden) return;
+  const edge = 12;
+  const gap = 9;
+  const buttonRect = button.getBoundingClientRect();
+  const popoverRect = popover.getBoundingClientRect();
+  const maxLeft = Math.max(edge, window.innerWidth - popoverRect.width - edge);
+  const left = Math.min(Math.max(edge, buttonRect.left), maxLeft);
+  let top = buttonRect.bottom + gap;
+  if (top + popoverRect.height > window.innerHeight - edge) {
+    top = Math.max(edge, buttonRect.top - popoverRect.height - gap);
+  }
+  popover.style.left = `${Math.round(left)}px`;
+  popover.style.top = `${Math.round(top)}px`;
+}
+
+export function toggleAgentHelpPopover(event) {
+  event.stopPropagation();
+  const popover = $('#agentHelpPopover');
+  const button = $('#agentHelpButton');
+  if (!popover || !button) return;
+  const open = popover.hidden;
+  if (open && popover.parentElement !== document.body) document.body.appendChild(popover);
+  popover.hidden = !open;
+  button.setAttribute('aria-expanded', String(open));
+  if (open) positionAgentHelpPopover();
+}
+
+export function closeAgentHelpPopover() {
+  const popover = $('#agentHelpPopover');
+  const button = $('#agentHelpButton');
+  if (!popover || popover.hidden) return;
+  popover.hidden = true;
+  button?.setAttribute('aria-expanded', 'false');
+}
+
 function updateVersionAllowed(release) {
   if (!release || release.installable === false) return false;
   const value = String(release.version || release.tag || '').trim().replace(/^v/i, '');

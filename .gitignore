@@ -201,6 +201,8 @@ verify/*
 !verify/_serve_tmp.py
 !verify/agent_avatar_smoke.cjs
 !verify/agent_cards_smoke.cjs
+!verify/agent_help_popover.cjs
+!verify/agent_help_popover.py
 !verify/agent_prompt_smoke.cjs
 !verify/attachment_only_smoke.py
 !verify/backfill_media.py
@@ -220,12 +222,14 @@ verify/*
 !verify/file_ref_smoke.cjs
 !verify/frozen_batch1_check.py
 !verify/frozen_interrupt_check.py
+!verify/frozen_mobile_ui_check.py
 !verify/frozen_q1_check.py
 !verify/lightbox_smoke.cjs
 !verify/make_test_card.py
 !verify/media_inline_smoke.cjs
 !verify/media_markup_check.mjs
 !verify/mobile_shell_smoke.cjs
+!verify/mobile_ui_regression.cjs
 !verify/p3_data_check.py
 !verify/p4_display_smoke.cjs
 !verify/p4_transport_check.py

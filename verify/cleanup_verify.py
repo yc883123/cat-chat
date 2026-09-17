@@ -7,13 +7,15 @@
 配套规则见维护说明 §8.7（用户表示结束会话时先问、再按此清理）。安全边界：
 - 删除前把「所有将被删除的脚本」压进 verify/_archive/verify_scripts_<日期>.zip；
 - 同时写 _archive/deleted_manifest.txt 记录被删文件与体积；
-- 只动 verify，不碰仓库任何已跟踪文件；_archive/ 永不清。
+- **凡受版本控制的文件一律不删**（`git ls-files verify` 兜底，见下面 TRACKED）——
+  只动 verify 下的未跟踪产物，不碰仓库任何已跟踪文件；_archive/ 永不清。
 """
 from __future__ import annotations
 
 import datetime
 import pathlib
 import shutil
+import subprocess
 import sys
 import zipfile
 
@@ -36,7 +38,16 @@ KEEP = {
     "provider_cards_smoke.cjs", "agent_cards_smoke.cjs", "agent_avatar_smoke.cjs",
     "context_menu_smoke.cjs", "_check_turn_rail.cjs", "_check_tool_cards_compact.cjs",
     "sidebar_favorites_smoke.cjs", "agent_prompt_smoke.cjs", "quick_msg_smoke.cjs",
-    "starter_reasoning_smoke.cjs", "mobile_shell_smoke.cjs",
+    "starter_reasoning_smoke.cjs", "mobile_shell_smoke.cjs", "mobile_ui_regression.cjs",
+    # Agent 说明弹层 + 工作区路径/未注册分组提示冒烟（§六 已登记；Python 自编排 + Node 检查）
+    "agent_help_popover.py", "agent_help_popover.cjs",
+    # 以下 6 个写在 .gitignore 白名单、也登记在 §六，却一直没进本名单（2026-09-17 补）：
+    # 靠 TRACKED 兜底才没被删，但「名单漂移」本身就该修——见 §九.91 与 tests/test_verify_assets.py。
+    "frozen_interrupt_check.py", "frozen_q1_check.py",
+    "q1_context_smoke.py", "q1_context_smoke.cjs",
+    "stream_rerender_smoke.py", "stream_rerender_smoke.cjs",
+    # 冻结版前端资源自检（§六 已登记）
+    "frozen_mobile_ui_check.py",
     # 播种器
     "seed_usage_message.py", "seed_media_message.py", "seed_favorites.py",
     "seed_turn_rail_chat.py", "seed_agent_avatar_chat.py",
@@ -73,9 +84,35 @@ KEEP = {
     "release_watch.py",
     # 任务面板重做冒烟（§六 已登记；Python 自编排 + Node 检查 + 无浏览器渲染兜底）
     "tasks_panel_smoke.py", "tasks_panel_smoke.cjs", "tasks_panel_render_check.mjs",
+    # 隔离实例的公共 harness：维护说明「归档说明」点名要求留在 verify/（被 tasks_panel_smoke.py 依赖）
+    "_serve_tmp.py",
     # 本脚本自身
     "cleanup_verify.py",
 }
+
+
+def _tracked_names() -> set[str]:
+    """仓库里已跟踪的 verify/ 文件名——它们正是 .gitignore 里 `!verify/*` 白名单放行的复用资产。"""
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "verify"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+    except OSError:
+        return set()
+    if out.returncode != 0:
+        return set()
+    return {pathlib.PurePath(line.strip()).name for line in out.stdout.splitlines() if line.strip()}
+
+
+# KEEP 名单靠人手维护，漏登记一个就会被 --apply 删掉：2026-09-17 实测漏了 7 个受控脚本
+# （`_serve_tmp.py`、`q1_context_smoke.py`/`.cjs`、`stream_rerender_smoke.py`/`.cjs`、
+# `frozen_q1_check.py`、`frozen_interrupt_check.py`），而它们全都写在 §六 里、还在被别的脚本依赖。
+# 所以：**受版本控制即保留**——.gitignore 的 !verify/* 白名单本来就是「§六 已登记的复用资产」的唯一口径，
+# 两边自动对齐，不必再各记一份名单（新增脚本只需照 §六 补 .gitignore 白名单，这里同步生效）。
+TRACKED = _tracked_names()
+EXTRA_KEEP = sorted(n for n in TRACKED if n not in KEEP)
+KEEP |= TRACKED
 
 SCRIPT_EXT = {".py", ".cjs", ".mjs", ".js", ".ps1"}
 
@@ -94,6 +131,10 @@ dir_bytes = sum(f.stat().st_size for d in dirs for f in d.rglob("*") if f.is_fil
 total_kb = sum(p.stat().st_size for p in del_files) / 1024
 
 print(f"保留 {keep_count} 个（§六 资产 + 本脚本）")
+if not TRACKED:
+    print("  ⚠ 未取到版本控制清单（不在仓库根跑？）——仅按 KEEP 名单保留，请勿在此状态下 --apply")
+elif EXTRA_KEEP:
+    print(f"  其中 {len(EXTRA_KEEP)} 个靠版本控制兜底保留（KEEP 名单漏登记）：{', '.join(EXTRA_KEEP)}")
 print(f"将删脚本 {len(del_scripts)} 个 / 产物 {len(del_other)} 个（合计 {total_kb:.0f} KB）"
       f" / 临时目录 {len(dirs)} 个（{dir_bytes/1048576:.1f} MB）")
 if del_files:

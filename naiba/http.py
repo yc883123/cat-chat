@@ -287,6 +287,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json({"error": f"文件不存在或已被移动：{exc}"}, HTTPStatus.NOT_FOUND)
             except (OSError, ValueError) as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif path == "/api/search/messages":
+            # 侧栏「全文」搜索：只读，复用 storage 的 instr(lower()) 子串匹配。
+            # 校验（q 空 400 / limit 非法 400 / conversation_id 不存在 404）在 app 层，
+            # 与 /api/conversations 一样属于「传输层只解析、业务层只判定」的分工。
+            self._json(*self.app.api_search_messages(urllib.parse.parse_qs(parsed.query)))
+        elif path.endswith("/branch_chain"):
+            # 分支链（源 + 兄弟分支 / 自己的全部分支）：必须排在下面的
+            # /api/conversations/<id> 兜底分支之前，否则会被当成会话 id 吃掉。
+            conversation_id = path.split("/")[-2]
+            self._json(*self.app.api_branch_chain(conversation_id))
         elif path.endswith("/first_turn"):
             conversation_id = path.split("/")[-2]
             info = self.app._first_turn_info(conversation_id)
@@ -826,6 +836,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         elif path == "/api/messages/edit":
             self._edit_message(body)
+        elif path == "/api/messages/delete":
+            self._json(*self.app.api_delete_message(body))
+        elif path == "/api/messages/restore":
+            self._json(*self.app.api_restore_messages(body))
         else:
             self._json({"error": "接口不存在"}, HTTPStatus.NOT_FOUND)
 

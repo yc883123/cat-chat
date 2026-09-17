@@ -63,6 +63,10 @@ KEEP = {
     "_release_check.py",
     # 「重新生成 / 编辑」冒烟（§六 已登记；Python 自编排 + Node 检查）
     "regenerate_smoke.py", "regenerate_smoke.cjs",
+    # 第一批三项（全文搜索 / 分支导航 / 删除单条消息）联动冒烟（§六 已登记）
+    "batch1_smoke.py", "batch1_smoke.cjs",
+    # 第一批三项的冻结版实跑自检（§六 已登记）
+    "frozen_batch1_check.py",
     # 软件更新「目标版本」下拉冒烟（§六 已登记；Python 自编排 + Node 检查）
     "update_version_smoke.py", "update_version_smoke.cjs",
     # 发版跟踪与 Release 资产核对（本机无 gh：走匿名 GitHub API）

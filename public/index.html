@@ -40,7 +40,15 @@
           </button>
         </div>
       </div>
-      <input class="workspace-search-input" id="workspaceSearchInput" type="text" placeholder="搜索工作区或对话" hidden>
+      <!-- 侧栏搜索：默认「标题」模式 = 纯本地过滤（与升级前逐字节同行为）；切到「全文」
+           则按正文检索（GET /api/search/messages），结果列表替换会话树区域渲染。 -->
+      <div class="workspace-search-row" id="workspaceSearchRow" hidden>
+        <div class="search-mode-switch" role="group" aria-label="搜索范围">
+          <button type="button" id="workspaceSearchModeTitle" class="active" aria-pressed="true" title="只按会话标题过滤（本地，即时）">标题</button>
+          <button type="button" id="workspaceSearchModeFull" aria-pressed="false" title="按消息正文全文检索（含历史会话）">全文</button>
+        </div>
+        <input class="workspace-search-input" id="workspaceSearchInput" type="text" placeholder="搜索对话" autocomplete="off">
+      </div>
       <nav class="conversation-list" id="sidebarWorkspaceTree" aria-label="工作区"></nav>
       <div class="sidebar-footer">
         <button class="address-button" id="copyAddress" title="复制手机访问地址">
@@ -361,6 +369,17 @@
   <div class="conversation-menu" id="conversationItemMenu" hidden role="menu" aria-label="会话操作">
     <button type="button" role="menuitem" data-conversation-action="rename">重命名</button>
     <button type="button" role="menuitem" class="is-danger" data-conversation-action="delete">删除</button>
+  </div>
+
+  <!-- 分支链小面板：同样 fixed 挂 body（侧栏是滚动容器，挂在里面会被裁剪），
+       列出源会话 + 兄弟分支（自己是分支时）或自己的全部分支（自己是源时），
+       当前会话高亮；点任意项切过去。数据来自 GET /api/conversations/<id>/branch_chain。 -->
+  <div class="branch-chain-panel" id="branchChainPanel" hidden role="menu" aria-label="分支链">
+    <div class="branch-chain-head">
+      <span id="branchChainHeadText">分支链</span>
+      <button type="button" id="branchChainClose" aria-label="关闭分支链">关闭</button>
+    </div>
+    <div class="branch-chain-list" id="branchChainList"></div>
   </div>
 
   <dialog id="renameConversationDialog" class="rename-conversation-dialog">
@@ -976,6 +995,32 @@
   </dialog>
 
   <dialog class="toast" id="toast" role="status"></dialog>
+
+  <!-- 删除消息确认：分级提示（之后还有 N 条 / 带分割线 / 带图），user 消息另给两个粒度选项。
+       刻意不用 window.confirm —— 它给不出「只删这一条 / 整轮删除」两个粒度，而且原生弹窗
+       无法截图留证（前端变更要求附截图）。 -->
+  <dialog id="messageDeleteDialog" class="rename-conversation-dialog message-delete-dialog">
+    <div class="dialog-toolbar">
+      <div><h2>删除消息</h2><p id="messageDeleteHint">删除后 10 秒内可撤销（刷新页面后不可撤销）</p></div>
+      <button class="icon-button" type="button" data-close="messageDeleteDialog" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+    </div>
+    <div class="message-delete-body">
+      <ul class="message-delete-notes" id="messageDeleteNotes"></ul>
+      <div class="form-actions message-delete-actions">
+        <button class="control-button" type="button" id="messageDeleteCancel">取消</button>
+        <button class="control-button" type="button" id="messageDeleteSingle" hidden>仅删这一条</button>
+        <button class="primary-button" type="button" id="messageDeleteTurn" hidden>连同 AI 回复整轮删除</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 删除后的撤销条：挂在 body 上、10 秒后自动消失。撤销快照只存内存（刷新即失效），
+       所以文案里明写「刷新页面后不可撤销」。 -->
+  <div class="undo-bar" id="undoBar" hidden role="status" aria-live="polite">
+    <span class="undo-bar-text" id="undoBarText">已删除</span>
+    <button class="undo-bar-button" type="button" id="undoBarAction">撤销</button>
+    <span class="undo-bar-progress"></span>
+  </div>
   <div class="image-lightbox" id="imageLightbox" hidden aria-hidden="true" tabindex="-1">
     <button class="lightbox-close" id="imageLightboxClose" type="button" title="关闭" aria-label="关闭大图"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
     <button class="lightbox-nav lightbox-prev" id="imageLightboxPrev" type="button" title="上一张（←）" aria-label="上一张" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"></path></svg></button>

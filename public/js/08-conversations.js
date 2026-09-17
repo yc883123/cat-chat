@@ -3,7 +3,7 @@
 // ============================================================
 
 import { $, api, escapeHtml, state, toast } from "./01-core.js";
-import { renderMessages } from "./04-messages.js";
+import { renderMessages, revealMessage } from "./04-messages.js";
 import { activeTaskStatuses, loadTasks, renderPermissionModeSwitch, taskDisplayTitle, taskKindLabel, taskStatusLabel } from "./06-tasks-plans.js";
 import { applyConversationAgent, applyConversationModel, composerModelChoice } from "./07-models-agents.js";
 import { readAsDataUrl } from "./10-upload.js";
@@ -131,11 +131,24 @@ export function sidebarRowHtml(row) {
   }
   const c = row.c;
   const favorite = Number(c.favorite || 0) === 1;
+  // 分支徽标 / 源计数：都以列表数据里的字段为唯一依据（branched_from_id / branch_count /
+  // branch_source_title 随会话列表一次带下），点开分支链面板就是唯一的额外请求。
+  const branchSourceId = String(c.branched_from_id || '');
+  const branchCount = Number(c.branch_count || 0) || 0;
+  const branchSourceTitle = String(c.branch_source_title || '');
+  const branchBadge = branchSourceId
+    ? `<button class="conversation-branch" data-action="open-branch-chain" title="${escapeHtml(branchSourceTitle ? `分支自《${branchSourceTitle}》` : '源会话已删除')}" aria-label="查看分支链" aria-haspopup="menu"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6.5" cy="5.5" r="2.4"></circle><circle cx="6.5" cy="18.5" r="2.4"></circle><circle cx="17.5" cy="12" r="2.4"></circle><path d="M6.5 7.9v8.2M8.9 5.5h3.1a2.5 2.5 0 0 1 2.5 2.5v1.6M8.9 18.5h3.1a2.5 2.5 0 0 0 2.5-2.5v-1.6"></path></svg></button>`
+    : '';
+  const branchCountBadge = branchCount > 0
+    ? `<button class="conversation-branch-count" data-action="open-branch-chain" title="这个会话有 ${branchCount} 个分支" aria-label="查看 ${branchCount} 个分支" aria-haspopup="menu">⑂${branchCount}</button>`
+    : '';
   // data-group：虚拟列表里行是扁平的（工作区分组只包住表头），带上所属分组便于
   // 「已收藏」这类特殊分组的定位/断言（不参与任何业务逻辑）。
   return `<div class="conversation-item ${c.id === state.conversationId ? 'active' : ''}" data-conversation-id="${c.id}" data-group="${escapeHtml(row.wsName || '')}">
     <button class="conversation-star ${favorite ? 'is-favorite' : ''}" data-action="toggle-favorite" title="${favorite ? '取消收藏' : '收藏会话'}" aria-label="${escapeHtml(c.title)} ${favorite ? '取消收藏' : '收藏'}" aria-pressed="${favorite}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.6l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.8l5.9-.9z"></path></svg></button>
+    ${branchBadge}
     <button class="conversation-open" title="${escapeHtml(c.title)}">${escapeHtml(c.title)}</button>
+    ${branchCountBadge}
     <span class="conversation-time">${escapeHtml(formatRelativeTime(c.updated_at))}</span>
     <button class="conversation-more" data-action="open-conversation-menu" title="更多操作" aria-label="${escapeHtml(c.title)} 的更多操作" aria-haspopup="menu">⋯</button>
   </div>`;
@@ -150,9 +163,16 @@ export function resetSidebarWindowRange() {
   sidebarWindowRange = { start: -1, end: -1, totalH: 0, rendered: false };
 }
 
+// 侧栏当前是否在展示「全文搜索结果」。结果条数固定（≤50）且不是虚拟列表，因此凡是
+// 「按行窗口重写 #sidebarWorkspaceTree」的路径都必须让路，否则一次滚动委托就会把结果盖掉。
+export function sidebarShowsSearchResults() {
+  return state.workspaceSearchMode === 'full' && Boolean((state.workspaceSearch || '').trim());
+}
+
 export function renderSidebarWindow(targetScrollTop, { force = false } = {}) {
   const tree = $('#sidebarWorkspaceTree');
   if (!tree) return;
+  if (sidebarShowsSearchResults()) return;
   if (!sidebarRowCache.length) {
     // 顶栏「新会话」按钮已移除（每个工作区分组自带「＋ 新会话」）；这里保留一个兜底入口，
     // 否则"一条会话都没有"时侧栏没有任何新建入口。
@@ -205,6 +225,12 @@ export function restoreSidebarWidth() {
 export function renderSidebar() {
   const tree = $('#sidebarWorkspaceTree');
   if (!tree) return;
+  // 全文模式：结果列表**替换**会话树区域（同一个容器），命中词高亮、头部明示截断。
+  // 关键词清空后 `sidebarShowsSearchResults()` 变假，自然退回下面的会话树渲染。
+  if (sidebarShowsSearchResults()) {
+    renderSearchResults(tree, (state.workspaceSearch || '').trim());
+    return;
+  }
   const search = (state.workspaceSearch || '').trim().toLowerCase();
   const activeWs = currentConversationWorkspaceGroup();
   if (!state.expandedGroups.has('__init')) {
@@ -293,6 +319,129 @@ export function renderSidebar() {
   renderSidebarWindow(st, { force: true });
 }
 
+// ---- 侧栏「全文」搜索：结果替换会话树区域渲染 ----
+// 数据来自 GET /api/search/messages（只读接口，后端 instr(lower()) 子串匹配）。
+// 竞态处理：请求不取消（切工作区/会话都可能触发），但**渲染前**一律校验「当前仍是全文模式
+// 且关键词与响应一致」，过期响应直接丢弃——否则快速输入时会把上一个词的命中画进来。
+export const SEARCH_DEBOUNCE_MS = 300;
+const SEARCH_HIT_LIMIT = 30;
+
+// 命中词高亮：snippet 是原文的连续子串，所以这里只在它自己内部找关键词。
+// 先转义再插 <mark>——顺序反了会让转义后的 &amp; 之类的长度与原文错位。
+export function highlightSnippet(snippet, needle) {
+  const text = String(snippet || '');
+  const target = String(needle || '');
+  if (!target) return escapeHtml(text);
+  const lower = text.toLowerCase();
+  const wanted = target.toLowerCase();
+  let out = '';
+  let at = 0;
+  for (;;) {
+    const found = lower.indexOf(wanted, at);
+    if (found < 0) break;
+    out += escapeHtml(text.slice(at, found))
+      + `<mark>${escapeHtml(text.slice(found, found + wanted.length))}</mark>`;
+    at = found + wanted.length;
+  }
+  return out + escapeHtml(text.slice(at));
+}
+
+export function renderSearchResults(tree, query) {
+  const result = state.searchResults;
+  if (!result || state.searchQuery !== query) {
+    tree.innerHTML = `<div class="search-empty">正在检索「${escapeHtml(query)}」…</div>`;
+    return;
+  }
+  if (result.error) {
+    tree.innerHTML = `<div class="search-empty">搜索失败：${escapeHtml(String(result.error))}</div>`;
+    return;
+  }
+  const hits = Array.isArray(result.hits) ? result.hits : [];
+  if (!hits.length) {
+    tree.innerHTML = `<div class="search-empty">没有找到包含「${escapeHtml(query)}」的消息</div>`;
+    return;
+  }
+  const head = `<div class="search-results-head"><b>共 ${Number(result.total_hits || 0)} 条命中</b>`
+    + (result.truncated ? `<span>（只显示最近 ${hits.length} 条）</span>` : '')
+    + '</div>';
+  const items = hits.map((hit) => (
+    `<button type="button" class="search-hit${hit.conversation_id === state.conversationId ? ' active' : ''}"`
+    + ` data-search-hit="${escapeHtml(hit.message_id || '')}"`
+    + ` data-conversation-id="${escapeHtml(hit.conversation_id || '')}"`
+    + ' title="跳到这条消息">'
+    + '<span class="search-hit-row">'
+    + `<span class="search-hit-title">${escapeHtml(hit.conversation_title || '（无标题）')}</span>`
+    + (hit.in_context === false ? '<span class="search-hit-out">已划出上下文</span>' : '')
+    + `<span class="search-hit-time">${escapeHtml(formatRelativeTime(hit.created_at))}</span>`
+    + '</span>'
+    + `<span class="search-hit-snippet">${highlightSnippet(hit.snippet, state.searchQuery)}</span>`
+    + '</button>'
+  )).join('');
+  tree.innerHTML = `<div class="search-results">${head}${items}</div>`;
+}
+
+export async function runFullTextSearch() {
+  const query = (state.workspaceSearch || '').trim();
+  state.searchResults = null;
+  state.searchQuery = '';
+  state.searchLoading = false;
+  if (!query) {
+    renderSidebar();
+    return;
+  }
+  state.searchQuery = query;
+  state.searchLoading = true;
+  renderSidebar();
+  try {
+    const result = await api(`/api/search/messages?q=${encodeURIComponent(query)}&limit=${SEARCH_HIT_LIMIT}`);
+    if (!sidebarShowsSearchResults() || state.searchQuery !== query) return;  // 过期响应：丢弃
+    state.searchResults = result;
+  } catch (error) {
+    if (!sidebarShowsSearchResults() || state.searchQuery !== query) return;
+    state.searchResults = { hits: [], total_hits: 0, truncated: false, error: error.message };
+  }
+  state.searchLoading = false;
+  renderSidebar();
+}
+
+// 模式切换（标题｜全文）：默认标题模式，行为与升级前逐字节一致（本地过滤，不发请求）。
+export function setWorkspaceSearchMode(mode) {
+  const next = mode === 'full' ? 'full' : 'title';
+  state.workspaceSearchMode = next;
+  state.searchResults = null;
+  state.searchQuery = '';
+  state.searchLoading = false;
+  syncSearchModeUi();
+  renderSidebar();
+  if (next === 'full' && (state.workspaceSearch || '').trim()) void runFullTextSearch();
+}
+
+export function syncSearchModeUi() {
+  const full = state.workspaceSearchMode === 'full';
+  const titleButton = $('#workspaceSearchModeTitle');
+  const fullButton = $('#workspaceSearchModeFull');
+  titleButton?.classList.toggle('active', !full);
+  fullButton?.classList.toggle('active', full);
+  titleButton?.setAttribute('aria-pressed', String(!full));
+  fullButton?.setAttribute('aria-pressed', String(full));
+  const input = $('#workspaceSearchInput');
+  if (input) input.placeholder = full ? '搜索消息正文' : '搜索对话';
+}
+
+// 命中项跳转：先切会话，再按 message_id 定位并高亮（定位算法与刻度轨跳转同口径）。
+async function openSearchHit(conversationId, messageId) {
+  if (!conversationId || !messageId) return;
+  try {
+    if (conversationId !== state.conversationId) await openConversation(conversationId);
+    else renderSidebar();   // 同一会话：只把「当前会话」的命中标记刷新一下
+    const located = revealMessage(messageId);
+    if (!located) toast('这条消息已不在该对话中（可能刚被删除）');
+    else closeSidebar();    // 手机端顺手收起抽屉；桌面端本就是空操作
+  } catch (error) {
+    toast(`打开会话失败：${error.message}`);
+  }
+}
+
 // 当前会话行的滚动定位：**最小滚动**——已可见就一动不动；不可见才把最近的那一份
 // （同一会话可能同时出现在工作区分组与「已收藏」分组）刚好带进视口，绝不强制顶到最上。
 // 此前一律 `st = offsets[idx]`，点一下列表就整片滚到顶，用户根本找不回原来的位置。
@@ -359,6 +508,13 @@ export async function onComposerWorkspaceChange(event) {
 }
 
 export async function onSidebarTreeClick(event) {
+  // 全文搜索命中项：先切会话，再按 message_id 定位并高亮。放在最前面——它不是
+  // .conversation-item，落到下面的分支会被无声忽略。
+  const hit = event.target.closest('[data-search-hit]');
+  if (hit) {
+    await openSearchHit(hit.dataset.conversationId || '', hit.dataset.searchHit || '');
+    return;
+  }
   const actionEl = event.target.closest('[data-action]');
   if (actionEl) {
     const action = actionEl.dataset.action;
@@ -385,6 +541,9 @@ export async function onSidebarTreeClick(event) {
     } else if (action === 'toggle-favorite') {
       const id = actionEl.closest('.conversation-item')?.dataset.conversationId || '';
       toggleConversationFavorite(id);
+    } else if (action === 'open-branch-chain') {
+      const id = actionEl.closest('.conversation-item')?.dataset.conversationId || '';
+      void openBranchChainPanel(actionEl, id);
     } else if (action === 'open-conversation-menu') {
       const id = actionEl.closest('.conversation-item')?.dataset.conversationId || '';
       openConversationMenu(actionEl, id);
@@ -436,6 +595,89 @@ export function openConversationMenu(anchorEl, id) {
   }
   menu.style.left = `${Math.round(left)}px`;
   menu.style.top = `${Math.round(top)}px`;
+}
+
+// ---- 分支链面板：点会话行的 ⑂ 徽标 / ⑂N 计数弹出 ----
+// 只解决「认得出、跳得过去」：源会话 + 兄弟分支（自己是分支时），或自己的全部分支
+// （自己是源时）。侧栏本身仍是平铺 + 徽标，不画树——树与 updated_at 排序根本冲突，
+// 多级分支还会打乱虚拟列表的行索引。
+let branchChainConversationId = '';
+
+export function closeBranchChainPanel() {
+  const panel = $('#branchChainPanel');
+  branchChainConversationId = '';
+  if (!panel || panel.hidden) return;
+  panel.hidden = true;
+}
+
+export function branchChainTargetId() {
+  return branchChainConversationId;
+}
+
+// 定位口径与会话「⋯」菜单一致（§九.27）：fixed 挂 body，锚点右下角为起点、贴边时上翻。
+export function positionBranchChainPanel(anchorEl) {
+  const panel = $('#branchChainPanel');
+  if (!panel || panel.hidden) return;
+  const rect = anchorEl.getBoundingClientRect();
+  const size = panel.getBoundingClientRect();
+  const edge = 8;
+  const left = Math.min(
+    Math.max(edge, rect.left),
+    Math.max(edge, window.innerWidth - size.width - edge),
+  );
+  let top = rect.bottom + 4;
+  if (top + size.height > window.innerHeight - edge) {
+    top = Math.max(edge, rect.top - size.height - 4);
+  }
+  panel.style.left = `${Math.round(left)}px`;
+  panel.style.top = `${Math.round(top)}px`;
+}
+
+export function renderBranchChain(chain) {
+  const list = $('#branchChainList');
+  const head = $('#branchChainHeadText');
+  if (!list) return;
+  const items = Array.isArray(chain?.items) ? chain.items : [];
+  const role = String(chain?.role || 'none');
+  if (head) head.textContent = role === 'branch' ? '分支链（源 + 兄弟）' : '这个会话的分支';
+  if (role === 'none' || !items.length) {
+    list.innerHTML = '<div class="branch-chain-empty">这个会话没有分支</div>';
+    return;
+  }
+  const rows = [];
+  if (chain.source_deleted) rows.push('<div class="branch-chain-item is-gone">源会话已删除</div>');
+  for (const item of items) {
+    rows.push(
+      `<button type="button" class="branch-chain-item${item.is_current ? ' is-current' : ''}${item.is_source ? ' is-source' : ''}"`
+      + ` data-branch-goto="${escapeHtml(item.id || '')}" title="${escapeHtml(item.title || '')}">`
+      + `${escapeHtml(item.title || '（无标题）')}</button>`
+    );
+  }
+  list.innerHTML = rows.join('');
+}
+
+export async function openBranchChainPanel(anchorEl, conversationId) {
+  const panel = $('#branchChainPanel');
+  const list = $('#branchChainList');
+  if (!panel || !list || !conversationId) return;
+  if (!panel.hidden && branchChainConversationId === conversationId) {
+    closeBranchChainPanel();
+    return;
+  }
+  branchChainConversationId = conversationId;
+  if (panel.parentElement !== document.body) document.body.appendChild(panel);
+  list.innerHTML = '<div class="branch-chain-empty">正在读取分支链…</div>';
+  panel.hidden = false;
+  positionBranchChainPanel(anchorEl);
+  try {
+    const chain = await api(`/api/conversations/${conversationId}/branch_chain`);
+    if (panel.hidden || branchChainConversationId !== conversationId) return;  // 期间被关掉/换了锚点
+    renderBranchChain(chain);
+  } catch (error) {
+    if (panel.hidden || branchChainConversationId !== conversationId) return;
+    list.innerHTML = `<div class="branch-chain-empty">读取失败：${escapeHtml(error.message)}</div>`;
+  }
+  positionBranchChainPanel(anchorEl);   // 内容换过高度，重新夹一次视口
 }
 
 export async function toggleConversationFavorite(id) {
@@ -821,16 +1063,19 @@ function taskRowMarkup(task, nested = false) {
       .map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`)
       .join('')}</dl>`
     : '';
-  const detailButton = rows.length
-    ? `<button type="button" class="task-more" data-task-detail="${escapeHtml(task.id)}" aria-expanded="false" aria-label="展开详情">详情</button>`
-    : '';
+  // 「详情」入口常驻：它展开的不只是结构化字段，还有下面那段任务日志——把入口绑在
+  // 「有没有详情行」上，会让「无标量字段、但有日志」的任务永远打不开日志（ComfyUI 的
+  // result 常整块是对象，会被 taskDetailRows 跳过）。
+  const detailButton = `<button type="button" class="task-more" data-task-detail="${escapeHtml(task.id)}" aria-expanded="false" aria-label="展开详情">详情</button>`;
   // 后台任务的逐行日志（展开详情时按 cursor 增量拉取）。
   // 日志行本来就以 job_log 事件写在 run_events 里，但前端一直没人消费它——「转后台以后
   // 还能实时看日志」在那之前是假前提，所以先把入口补上，再谈引导模型转后台。
-  const logHtml = rows.length
-    ? '<div class="task-log" hidden><div class="task-log-head">任务日志<span class="task-log-hint"></span></div>'
-      + '<div class="task-log-lines" role="log" aria-label="后台任务实时输出"></div></div>'
-    : '';
+  const logHtml = '<div class="task-log" hidden><div class="task-log-head">任务日志<span class="task-log-hint"></span></div>'
+    + '<div class="task-log-lines" role="log" aria-label="后台任务实时输出"></div></div>';
+  // 「跳转」是卡片上唯一的切会话入口：卡片本体不再整块可点——卡片上遍布可读内容
+  // （任务名、说明、可选中文本、展开的日志），整块可点时一次误触就切走会话并关掉面板。
+  // 位置固定在「详情」左侧（用户口径：跳转是显式动作，靠边不抢阅读区）。
+  const openButton = `<button type="button" class="task-open" data-task-open="${escapeHtml(task.id)}" title="打开这个任务所属的对话">跳转</button>`;
   return `<div class="task-item${nested ? ' task-item-nested' : ''}" data-task-id="${escapeHtml(task.id)}">
       <div class="task-head">
         <span class="task-status ${escapeHtml(task.status)}">${escapeHtml(taskStatusLabel(task.status))}</span>
@@ -840,6 +1085,7 @@ function taskRowMarkup(task, nested = false) {
       </div>
       <div class="task-actions">
         <span class="task-time" title="最后更新">${escapeHtml(formatTaskTime(task.updated_at || task.created_at))}</span>
+        ${openButton}
         ${detailButton}
         ${active ? `<button type="button" class="task-cancel" data-task-cancel="${escapeHtml(task.id)}" aria-label="停止这个后台任务">停止</button>` : ''}
       </div>
@@ -851,9 +1097,15 @@ function taskRowMarkup(task, nested = false) {
 // ---- 后台任务日志（job_log）：按 cursor 增量拉取，展开详情时可见 ----
 // 数据来源：JobRegistry 逐行 emit 的 job_log 事件已经落在 run_events 里，
 // `GET /api/jobs/<id>/events?after=<cursor>` 原样读回（后端无新增接口）。
-// cursor 语义：只返回 sequence > cursor 的行，所以重复调用是幂等的——列表每轮重渲染后
-// 重新拉一次就是天然轮询，不会出现重复行。
+// cursor 语义：只返回 sequence > cursor 的行，所以重复调用是幂等的，不会出现重复行。
+// 但「cursor 只增」和「面板每轮轮询都整体重建 DOM」叠在一起会丢行：新节点里没有日志，
+// 续拉只带回上一轮之后的增量，已看到的历史行会在每次重绘时凭空消失（展开着也只剩最近
+// 一轮的新行，hint 还跳回「暂无输出」）。所以已消费的行必须自己留一份（taskLogLines），
+// DOM 只当投影：重绘后先按缓存回填、再续拉增量；收起再展开同样靠缓存还原最近 200 行。
 const taskLogCursors = new Map();   // taskId → 已消费到的 sequence
+const taskLogLines = new Map();     // taskId → 已消费的行文本（重绘/重开日志时回填的依据）
+const taskLogStick = new Map();     // taskId → 重绘前是否停在底部（回填时据此决定贴不贴底）
+const taskLogLoading = new Set();   // taskId → 正在拉取（避免同一个 cursor 被并发消费两遍）
 const openTaskLogs = new Set();     // 当前展开日志的 taskId（列表重渲染后据此恢复展开态）
 const TASK_LOG_MAX_LINES = 200;     // 只保留最近 N 行：长任务的日志可以到几万行，不能无限铺 DOM
 
@@ -868,9 +1120,48 @@ export function setTaskLogOpen(taskId, open) {
   }
 }
 
+// 日志滚动位置（由 #taskList 的捕获阶段滚动委托实时上报）：用户上翻读历史时，
+// 新行到来与整表重绘都不得把他拽回底部；回到贴底才继续跟随。
+export function setTaskLogStick(taskId, stick) {
+  const id = String(taskId || '');
+  if (id) taskLogStick.set(id, Boolean(stick));
+}
+
+// 按 id 在面板内定位任务行：不拼属性选择器——任务 id 来自后端，含引号/反斜杠时会拼出
+// 非法选择器直接抛错；也避免全局选择器命中面板外的同名 data 属性（如活动流气泡）。
+function taskItemById(taskId) {
+  const id = String(taskId || '');
+  const list = $('#taskList');
+  if (!id || !list) return null;
+  for (const item of list.querySelectorAll('[data-task-id]')) {
+    if (item.dataset.taskId === id) return item;
+  }
+  return null;
+}
+
 function taskLogBox(taskId) {
-  const item = $(`[data-task-id="${taskId}"]`);
+  const item = taskItemById(taskId);
   return item ? item.querySelector('.task-log') : null;
+}
+
+// 把行文本铺进日志框（回填缓存与追加增量共用）：统一裁剪到上限；贴底与否由调用方决定，
+// 用户正在往上翻历史时不能被每轮重绘拽回底部。
+function renderLogLines(lines, texts, stickToBottom = true) {
+  if (!lines || !texts.length) return;
+  const fragment = document.createDocumentFragment();
+  for (const text of texts) {
+    const line = document.createElement('div');
+    line.className = 'task-log-line';
+    line.textContent = text;
+    fragment.appendChild(line);
+  }
+  lines.appendChild(fragment);
+  while (lines.childElementCount > TASK_LOG_MAX_LINES) lines.removeChild(lines.firstElementChild);
+  if (stickToBottom) lines.scrollTop = lines.scrollHeight;
+}
+
+function logHintText(lines) {
+  return lines.childElementCount ? `最近 ${lines.childElementCount} 行` : '暂无输出';
 }
 
 async function loadTaskLog(taskId) {
@@ -879,38 +1170,60 @@ async function loadTaskLog(taskId) {
   const lines = log.querySelector('.task-log-lines');
   const hint = log.querySelector('.task-log-hint');
   if (!lines) return;
+  // 重绘后的空节点先按缓存回填：这一步不看 cursor，历史行不会因为重绘而丢。
+  if (!lines.childElementCount) renderLogLines(lines, taskLogLines.get(taskId) || [], taskLogStick.get(taskId) !== false);
+  if (hint) hint.textContent = logHintText(lines);
+  if (taskLogLoading.has(taskId)) return;
+  taskLogLoading.add(taskId);
   const after = taskLogCursors.get(taskId) || 0;
   let payload = null;
   try {
     payload = await api(`/api/jobs/${encodeURIComponent(taskId)}/events?after=${after}`);
   } catch (error) {
-    if (hint) hint.textContent = '读取失败';
+    if (hint) hint.textContent = lines.childElementCount ? `最近 ${lines.childElementCount} 行 · 读取失败` : '读取失败';
     return;
+  } finally {
+    taskLogLoading.delete(taskId);
   }
   const events = Array.isArray(payload?.events) ? payload.events : [];
   const cursor = Number(payload?.cursor || 0);
   if (cursor > after) taskLogCursors.set(taskId, cursor);
-  let appended = 0;
+  // 先写缓存再落 DOM：拉取期间列表可能已经重绘，此时新节点里没有这些行，下一轮
+  // restore 会按缓存回填。缓存是唯一真相，DOM 丢了不影响内容完整性。
+  const fresh = [];
   for (const event of events) {
     const text = String(event?.line ?? '').replace(/\s+$/, '');
-    if (!text) continue;
-    const line = document.createElement('div');
-    line.className = 'task-log-line';
-    line.textContent = text;
-    lines.appendChild(line);
-    appended += 1;
+    if (text) fresh.push(text);
   }
-  while (lines.childElementCount > TASK_LOG_MAX_LINES) lines.removeChild(lines.firstElementChild);
-  if (appended && lines.childElementCount) lines.scrollTop = lines.scrollHeight;
-  if (hint) hint.textContent = lines.childElementCount ? `最近 ${lines.childElementCount} 行` : '暂无输出';
+  if (fresh.length) {
+    const cache = taskLogLines.get(taskId) || [];
+    cache.push(...fresh);
+    while (cache.length > TASK_LOG_MAX_LINES) cache.shift();
+    taskLogLines.set(taskId, cache);
+  }
+  // await 之后重新取一次节点：旧节点可能已脱离文档，不能把新行写进「尸体」。
+  const liveLog = taskLogBox(taskId);
+  const liveLines = liveLog ? liveLog.querySelector('.task-log-lines') : null;
+  if (!liveLines) return;
+  if (!liveLines.childElementCount) renderLogLines(liveLines, taskLogLines.get(taskId) || [], taskLogStick.get(taskId) !== false);
+  else renderLogLines(liveLines, fresh, taskLogStick.get(taskId) !== false);
+  const liveHint = liveLog.querySelector('.task-log-hint');
+  if (liveHint) liveHint.textContent = logHintText(liveLines);
 }
 
 // 列表整体重渲染后恢复展开态（并把详情面板与日志一起展开），再续拉一次增量日志。
 function restoreOpenTaskLogs() {
   for (const id of [...openTaskLogs]) {
-    const item = $(`[data-task-id="${id}"]`);
+    const item = taskItemById(id);
     const log = item ? item.querySelector('.task-log') : null;
-    if (!log) { openTaskLogs.delete(id); continue; }
+    if (!log) {
+      // 任务已从列表消失（清理/删除）：展开态与日志缓存一并回收，别让 Map 只涨不落。
+      openTaskLogs.delete(id);
+      taskLogCursors.delete(id);
+      taskLogLines.delete(id);
+      taskLogStick.delete(id);
+      continue;
+    }
     log.hidden = false;
     const detail = item.querySelector('.task-detail');
     if (detail) detail.hidden = false;
@@ -967,6 +1280,8 @@ export function renderRunTasks() {
   if (!list) return;
   if (!jobs.length) {
     list.innerHTML = '<div class="task-empty">暂无异步任务</div>';
+    // 任务全被清理时顺手回收展开态与日志缓存（restore 找不到对应行会自己删）。
+    restoreOpenTaskLogs();
     return;
   }
   // 同一批作业（同一个父回答派生）归一组；父行不在返回里（已被过滤）时按"无父作业"单独成组。
@@ -1003,6 +1318,13 @@ export function renderRunTasks() {
       return { tasks: sorted, latest: Math.max(...sorted.map((task) => Number(task.created_at) || 0)) };
     })
     .sort((a, b) => b.latest - a.latest);
+  // 重绘前先记下「用户是否停在日志底部」：restore 回填时据此决定贴不贴底，
+  // 别让每轮轮询的重绘把正在往上翻历史的人拽回底部（采集必须在 innerHTML 覆盖之前，
+  // 覆盖之后读到的是新的空节点，永远算出"贴底"）。
+  for (const id of [...openTaskLogs]) {
+    const lines = taskItemById(id)?.querySelector('.task-log-lines');
+    if (lines) taskLogStick.set(id, lines.scrollHeight - lines.scrollTop - lines.clientHeight < 12);
+  }
   list.innerHTML = ordered.map(({ tasks }) => {
     const failed = tasks.filter((task) => task.status === 'failed').length;
     return `<section class="task-group">
@@ -1013,7 +1335,7 @@ export function renderRunTasks() {
       ${tasks.map((task) => taskRowMarkup(task, byId.has(String(task.parent_job_id || '')))).join('')}
     </section>`;
   }).join('');
-  // 列表是整体重渲染的，展开态与日志内容都要就地恢复（cursor 保证不会重复追加）。
+  // 列表是整体重渲染的，展开态与日志内容都要就地恢复（日志按缓存回填 + cursor 续拉，不会重复）。
   restoreOpenTaskLogs();
 }
 

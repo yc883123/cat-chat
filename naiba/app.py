@@ -67,6 +67,17 @@ from naiba.vision.runtime import VisionRouter
 logger = logging.getLogger("naiba.app")
 
 
+def _query_first(params: dict[str, Any], name: str) -> str:
+    """取 query string 里的首个值（``parse_qs`` 的原生形态是 dict[str, list[str]]）。
+
+    放模块级而非 app 方法：它是纯函数，且测试可以用轻量 stub app 直接跑路由层。
+    """
+    value = params.get(name)
+    if isinstance(value, list):
+        return str(value[0]) if value else ""
+    return str(value or "")
+
+
 class NaibaChatApp:
     def __init__(self, paths: PathContext | None = None):
         self._paths = paths or default_path_context()
@@ -1046,6 +1057,71 @@ class NaibaChatApp:
             return
         removed = self.storage.truncate_from_message(conversation_id, message_id)
         return self._reply({"ok": True, "removed": removed, "attachments": (target.get("metadata") or {}).get("attachments") or []})
+
+    # ---- 侧栏「全文搜索」/「分支导航」/「删除单条消息」的 UI 直读接口 ----
+    # 三个都返回 ``(payload, status)``，由 http.py 直接 ``self._json(*...)`` 透传：
+    # 与 api_create_conversation / api_update_conversation_settings 同一形态。
+    def api_search_messages(self, params: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """全文搜索（只读，不进模型上下文）。
+
+        ``limit`` 默认 30、上限 50，越界即夹紧而不报错——它是 UI 的展示意图，不是契约；
+        ``q`` 为空是 400（空查询会白扫一遍全库且结果毫无意义）；
+        ``conversation_id`` 给了但不存在是 404，避免前端把「搜不到」误读成「这个会话没命中」。
+        """
+        query = _query_first(params, "q").strip()
+        if not query:
+            return {"error": "q 不能为空"}, HTTPStatus.BAD_REQUEST
+        raw_limit = _query_first(params, "limit").strip()
+        try:
+            limit = int(raw_limit) if raw_limit else 30
+        except ValueError:
+            return {"error": "limit 必须是整数"}, HTTPStatus.BAD_REQUEST
+        conversation_id = _query_first(params, "conversation_id").strip()
+        try:
+            return (
+                self.storage.search_messages(query, conversation_id=conversation_id, limit=limit),
+                HTTPStatus.OK,
+            )
+        except LookupError as exc:
+            return {"error": str(exc)}, HTTPStatus.NOT_FOUND
+
+    def api_branch_chain(self, conversation_id: str) -> tuple[dict[str, Any], int]:
+        """该会话所属的分支链（源 + 兄弟分支，或自己的全部分支）。只读。"""
+        if not conversation_id:
+            return {"error": "conversation_id 不能为空"}, HTTPStatus.BAD_REQUEST
+        try:
+            return self.storage.branch_chain(conversation_id), HTTPStatus.OK
+        except LookupError as exc:
+            return {"error": str(exc)}, HTTPStatus.NOT_FOUND
+
+    def api_delete_message(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """删除一条消息（``mode="single"``）或一整轮（``mode="turn"``），回传撤销快照。"""
+        conversation_id = str(body.get("conversation_id") or "")
+        message_id = str(body.get("message_id") or "")
+        if not conversation_id or not message_id:
+            return {"error": "conversation_id 和 message_id 不能为空"}, HTTPStatus.BAD_REQUEST
+        mode = str(body.get("mode") or "single")
+        try:
+            return self.storage.delete_message(conversation_id, message_id, mode), HTTPStatus.OK
+        except LookupError as exc:
+            return {"error": str(exc)}, HTTPStatus.NOT_FOUND
+        except ValueError as exc:
+            return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
+
+    def api_restore_messages(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """撤销删除：按快照把消息原样插回（``messages`` 为 ``/api/messages/delete`` 的 ``removed``）。"""
+        conversation_id = str(body.get("conversation_id") or "")
+        if not conversation_id:
+            return {"error": "conversation_id 不能为空"}, HTTPStatus.BAD_REQUEST
+        messages = body.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return {"error": "messages 必须是非空数组"}, HTTPStatus.BAD_REQUEST
+        try:
+            return self.storage.restore_messages(conversation_id, messages), HTTPStatus.OK
+        except LookupError as exc:
+            return {"error": str(exc)}, HTTPStatus.NOT_FOUND
+        except ValueError as exc:
+            return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
 
     def _hidden_skill_entries(self) -> list[dict[str, Any]]:
         """返回当前被隐藏（命中 hidden_skill_ids，但不带隐藏过滤扫描得到）的 Skill 条目。"""

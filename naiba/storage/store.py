@@ -15,7 +15,7 @@ from naiba.core.messages import MetadataKeys
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
-CURRENT_SCHEMA_VERSION = 17
+CURRENT_SCHEMA_VERSION = 18
 
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
@@ -517,6 +517,23 @@ def _migrate_to_v17(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE conversations ADD COLUMN model_name TEXT NOT NULL DEFAULT ''")
 
 
+def _migrate_to_v18(db: sqlite3.Connection) -> None:
+    """分支来源登记（侧栏分支徽标 / 分支链面板的数据来源）。
+
+    两列都是**纯增量、默认空串**：存量分支会话（v18 之前建的）没有来源记录，
+    明确不回溯——按标题 ``(N)`` 弱推断不可靠，宁可显示为无关联。
+    ``branched_from_id`` 悬空（源会话被删）不是错误：徽标降级为「源会话已删除」。
+    """
+    try:
+        db.execute("SELECT branched_from_id FROM conversations LIMIT 1")
+    except sqlite3.OperationalError:
+        db.execute("ALTER TABLE conversations ADD COLUMN branched_from_id TEXT NOT NULL DEFAULT ''")
+    try:
+        db.execute("SELECT branch_message_id FROM conversations LIMIT 1")
+    except sqlite3.OperationalError:
+        db.execute("ALTER TABLE conversations ADD COLUMN branch_message_id TEXT NOT NULL DEFAULT ''")
+
+
 # 目标版本 -> 迁移函数。新增版本时在此追加并提升 CURRENT_SCHEMA_VERSION。
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
@@ -536,6 +553,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     15: _migrate_to_v15,
     16: _migrate_to_v16,
     17: _migrate_to_v17,
+    18: _migrate_to_v18,
 }
 
 
@@ -959,19 +977,65 @@ class ChatStorage:
         return self.get_conversation(conversation_id, include_messages=False)
 
     def list_conversations(self, mode: str | None = None) -> list[dict[str, Any]]:
+        columns = (
+            "id, title, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, "
+            "lightweight_mode, lightweight_disabled_features, title_customized, system_prompt, "
+            "stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, "
+            "skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, "
+            "interaction_mode, favorite, branched_from_id, branch_message_id, created_at, updated_at"
+        )
         with self._connect() as db:
             if mode:
                 rows = db.execute(
-                    "SELECT id, title, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, lightweight_mode, lightweight_disabled_features, title_customized, system_prompt, stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, interaction_mode, favorite, created_at, updated_at "
-                    "FROM conversations WHERE mode = ? ORDER BY updated_at DESC",
+                    f"SELECT {columns} FROM conversations WHERE mode = ? ORDER BY updated_at DESC",
                     (mode,),
                 ).fetchall()
             else:
                 rows = db.execute(
-                    "SELECT id, title, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, lightweight_mode, lightweight_disabled_features, title_customized, system_prompt, stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, interaction_mode, favorite, created_at, updated_at "
-                    "FROM conversations ORDER BY updated_at DESC"
+                    f"SELECT {columns} FROM conversations ORDER BY updated_at DESC"
                 ).fetchall()
-        return [self._conversation_dict(row) for row in rows]
+            items = [self._conversation_dict(row) for row in rows]
+            # 分支计数与「源标题」一次带出（列表里已有全部标题，缺失的才回查一次），
+            # 侧栏徽标因此不需要任何额外请求，也不会退化成逐行 COUNT 的 N+1。
+            counts = self._branch_counts(db, [item["id"] for item in items])
+            titles = {item["id"]: str(item.get("title") or "") for item in items}
+            missing = sorted({
+                str(item.get("branched_from_id") or "")
+                for item in items
+                if str(item.get("branched_from_id") or "") not in titles
+            } - {""})
+            if missing:
+                titles.update(self._conversation_titles(db, missing))
+        for item in items:
+            item["branch_count"] = counts.get(item["id"], 0)
+            item["branch_source_title"] = titles.get(str(item.get("branched_from_id") or ""), "")
+        return items
+
+    def _branch_counts(self, db: sqlite3.Connection, conversation_ids: list[str]) -> dict[str, int]:
+        """这批会话各自被分支了多少次（一次 GROUP BY 解决，避免逐行 COUNT）。"""
+        ids = [str(value) for value in conversation_ids if str(value)]
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        rows = db.execute(
+            "SELECT branched_from_id AS src, COUNT(*) AS n FROM conversations "
+            f"WHERE branched_from_id IN ({placeholders}) GROUP BY branched_from_id",
+            ids,
+        ).fetchall()
+        return {str(row["src"]): int(row["n"] or 0) for row in rows}
+
+    def _conversation_titles(
+        self, db: sqlite3.Connection, conversation_ids: list[str]
+    ) -> dict[str, str]:
+        """id → 标题（只为「分支徽标 tooltip」取的轻量查询；不存在的 id 自然缺席）。"""
+        ids = sorted({str(value) for value in conversation_ids if str(value)})
+        if not ids:
+            return {}
+        placeholders = ",".join("?" for _ in ids)
+        rows = db.execute(
+            f"SELECT id, title FROM conversations WHERE id IN ({placeholders})", ids
+        ).fetchall()
+        return {str(row["id"]): str(row["title"] or "") for row in rows}
 
     def find_conversations(self, query: str = "", limit: int = 20) -> list[dict[str, Any]]:
         """按标题关键词找会话（空 query = 最近会话），带消息条数与最后一条消息预览。
@@ -1198,6 +1262,117 @@ class ChatStorage:
             "in_context": boundary is None or (created_at, rid) > boundary,
         }
 
+    # ---- 侧栏「全文搜索」的只读查询 ----
+    # 与 search_history 共用同一套匹配口径（instr(lower()) 子串、同一条
+    # conversation_context_boundary / _history_ordinals 判定），但**返回形态不同**：
+    # search_history 是给模型看的（按会话分桶、每会话限 N 条、偏「有哪些相关会话」），
+    # 而侧栏要的是「按最近使用排下来的一串命中」——分桶会把它压成每会话 3 条，
+    # 用户搜同一个词时看不到完整结果。所以这里单开一条扁平查询，不改 search_history。
+    SNIPPET_CONTEXT_CHARS = 60
+
+    def search_messages(
+        self,
+        query: str,
+        *,
+        conversation_id: str = "",
+        limit: int = 30,
+    ) -> dict[str, Any]:
+        """全文搜索（UI 口径）：一次给出一串按「会话最近使用 + 消息时间」排序的命中。
+
+        - ``limit`` 已在调用方夹到 [1, 50]；``truncated`` 显式标注是否被截断，绝不静默丢弃。
+        - 每条的 ``snippet`` 是**原文的连续子串**（命中词前后各 ``SNIPPET_CONTEXT_CHARS`` 字），
+          前端据此做高亮时不需要再回查正文。
+        - ``in_context`` 按**每条命中自己那条会话**的分割线判定：命中在最新分割线之前 = 已划出上下文。
+        ``conversation_id`` 指定但不存在时抛 ``LookupError``（路由层转 404）。
+        """
+        needle = str(query or "").strip()
+        if not needle:
+            raise ValueError("query 不能为空")
+        size = max(1, min(int(limit or 30), 50))
+        with self._connect() as db:
+            scope = self._history_scope_counts(db)
+            if conversation_id:
+                meta = self._conversation_history_meta(db, conversation_id)
+                if meta is None:
+                    raise LookupError("对话不存在")
+                total = int(db.execute(
+                    "SELECT COUNT(*) FROM messages WHERE conversation_id = ? "
+                    "AND instr(lower(content), lower(?)) > 0",
+                    (conversation_id, needle),
+                ).fetchone()[0] or 0)
+                rows = db.execute(
+                    "SELECT m.id AS mid, m.role AS role, m.content AS content, "
+                    "       m.created_at AS created_at, m.rowid AS rid, "
+                    "       c.id AS cid, c.title AS title, c.updated_at AS conv_updated "
+                    "FROM messages m JOIN conversations c ON c.id = m.conversation_id "
+                    "WHERE m.conversation_id = ? AND instr(lower(m.content), lower(?)) > 0 "
+                    "ORDER BY m.created_at, m.rowid LIMIT ?",
+                    (conversation_id, needle, size),
+                ).fetchall()
+            else:
+                total = int(db.execute(
+                    "SELECT COUNT(*) FROM messages WHERE instr(lower(content), lower(?)) > 0",
+                    (needle,),
+                ).fetchone()[0] or 0)
+                rows = db.execute(
+                    "SELECT m.id AS mid, m.role AS role, m.content AS content, "
+                    "       m.created_at AS created_at, m.rowid AS rid, "
+                    "       c.id AS cid, c.title AS title, c.updated_at AS conv_updated "
+                    "FROM messages m JOIN conversations c ON c.id = m.conversation_id "
+                    "WHERE instr(lower(m.content), lower(?)) > 0 "
+                    "ORDER BY c.updated_at DESC, m.created_at DESC, m.rowid DESC LIMIT ?",
+                    (needle, size),
+                ).fetchall()
+            cids = list(dict.fromkeys(str(row["cid"]) for row in rows))
+            ordinals = self._history_ordinals(db, cids)
+            boundaries = {cid: self.conversation_context_boundary(cid) for cid in cids}
+        hits = []
+        for row in rows:
+            cid = str(row["cid"])
+            created_at = int(row["created_at"] or 0)
+            rid = int(row["rid"] or 0)
+            boundary = boundaries.get(cid)
+            hits.append({
+                "conversation_id": cid,
+                "conversation_title": str(row["title"] or "（无标题）"),
+                "conversation_updated_at": int(row["conv_updated"] or 0),
+                "message_id": str(row["mid"]),
+                "role": str(row["role"] or ""),
+                "ordinal": ordinals.get(str(row["mid"]), 0),
+                "snippet": self.snippet_around(str(row["content"] or ""), needle),
+                "created_at": created_at,
+                "in_context": boundary is None or (created_at, rid) > boundary,
+            })
+        return {
+            "query": needle,
+            "conversation_id": conversation_id,
+            "total_hits": total,
+            "returned": len(hits),
+            "truncated": total > len(hits),
+            "limit": size,
+            "scope": scope,
+            "hits": hits,
+        }
+
+    @classmethod
+    def snippet_around(cls, content: str, needle: str) -> str:
+        """命中词前后各 ``SNIPPET_CONTEXT_CHARS`` 字的**连续原文**片段（两端按需加省略号）。"""
+        text = str(content or "")
+        if not needle:
+            return text[: cls.SNIPPET_CONTEXT_CHARS * 2]
+        at = text.lower().find(needle.lower())
+        if at < 0:
+            return text[: cls.SNIPPET_CONTEXT_CHARS * 2]
+        span = cls.SNIPPET_CONTEXT_CHARS
+        start = max(0, at - span)
+        end = min(len(text), at + len(needle) + span)
+        snippet = text[start:end]
+        if start > 0:
+            snippet = "…" + snippet
+        if end < len(text):
+            snippet = snippet + "…"
+        return snippet
+
     def read_conversation_messages(
         self, conversation_id: str, *, start: int = 1, count: int = 20
     ) -> dict[str, Any] | None:
@@ -1241,13 +1416,19 @@ class ChatStorage:
     def get_conversation(self, conversation_id: str, include_messages: bool = True) -> dict[str, Any] | None:
         with self._connect() as db:
             row = db.execute(
-                "SELECT id, title, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, lightweight_mode, lightweight_disabled_features, title_customized, system_prompt, stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, interaction_mode, favorite, created_at, updated_at "
+                "SELECT id, title, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, lightweight_mode, lightweight_disabled_features, title_customized, system_prompt, stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, interaction_mode, favorite, branched_from_id, branch_message_id, created_at, updated_at "
                 "FROM conversations WHERE id = ?",
                 (conversation_id,),
             ).fetchone()
             if not row:
                 return None
             result = self._conversation_dict(row)
+            # 详情也要带分支字段：分支链面板点开后要立刻显示「源是谁」，不该再打一次列表接口。
+            source_id = str(result.get("branched_from_id") or "")
+            result["branch_count"] = self._branch_counts(db, [conversation_id]).get(conversation_id, 0)
+            result["branch_source_title"] = (
+                self._conversation_titles(db, [source_id]).get(source_id, "") if source_id else ""
+            )
             if include_messages:
                 messages = db.execute(
                     "SELECT id, role, content, metadata, created_at FROM messages "
@@ -1332,15 +1513,19 @@ class ChatStorage:
                 "lightweight_mode, lightweight_disabled_features, title_customized, system_prompt, "
                 "stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, "
                 "skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, interaction_mode, "
+                "branched_from_id, branch_message_id, "
                 "first_turn, created_at, updated_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     new_id, new_title, src["mode"], src["permission_mode"],
                     src["web_search_enabled"], src["deep_reasoning_enabled"], src["lightweight_mode"],
                     src["lightweight_disabled_features"], 1, src["system_prompt"], src["stream_enabled"],
                     src["workspace_dir"], src["workspace_group"], src["reasoning_effort"],
                     src["enabled_tool_ids"], inherited_skill_policy, src["chat_supports_images"], src["provider_id"], src["model_key"], src["model_name"],
-                    src["agent_id"], src["interaction_mode"], inherited_first_turn, now, now,
+                    src["agent_id"], src["interaction_mode"],
+                    # 分支来源登记（v18）：侧栏徽标与分支链面板都读这两列。
+                    source_id, message_id,
+                    inherited_first_turn, now, now,
                 ),
             )
             for m in branch_rows[:branch_idx]:
@@ -1361,6 +1546,74 @@ class ChatStorage:
         return {
             "conversation": self.get_conversation(new_id, include_messages=True),
             "branch_message": branch_message,
+        }
+
+    def branch_chain(self, conversation_id: str) -> dict[str, Any]:
+        """该会话所属的「分支链」：源会话 + 兄弟分支（自己是分支）或其全部分支（自己是源）。
+
+        侧栏只有平铺列表 + 徽标，不画树（树与 ``updated_at`` 排序根本冲突，多级分支还会
+        打乱虚拟列表的行索引），所以这条链只为「认得出、跳得过去」服务：
+
+        - ``role == "branch"``：自己由 ``branched_from_id`` 指向某个源；链 = 源 + 所有兄弟
+          （含自己），按创建时间正序。源会话已删时 ``source_deleted`` 为真、链里没有源项。
+        - ``role == "source"``：链 = 自己的全部分支（按创建时间正序；自己不在链里——
+          用户已经在它上面了）。
+        - ``role == "none"``：既不是分支、也没有分支 → 空链。
+
+        ``branched_from_id`` 悬空（源被删）不算错误，只是 ``source_deleted``；会话本身不存在
+        才抛 ``LookupError``（路由层转 404）。
+        """
+        with self._connect() as db:
+            own = db.execute(
+                "SELECT id, title, branched_from_id, branch_message_id, created_at, updated_at "
+                "FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
+            if not own:
+                raise LookupError("对话不存在")
+            source_id = str(own["branched_from_id"] or "")
+            if source_id:
+                source = db.execute(
+                    "SELECT id, title, branched_from_id, branch_message_id, created_at, updated_at "
+                    "FROM conversations WHERE id = ?",
+                    (source_id,),
+                ).fetchone()
+                siblings = db.execute(
+                    "SELECT id, title, branched_from_id, branch_message_id, created_at, updated_at "
+                    "FROM conversations WHERE branched_from_id = ? "
+                    "ORDER BY created_at, rowid",
+                    (source_id,),
+                ).fetchall()
+                chain = ([source] if source else []) + list(siblings)
+                role = "branch"
+            else:
+                source = None
+                branches = db.execute(
+                    "SELECT id, title, branched_from_id, branch_message_id, created_at, updated_at "
+                    "FROM conversations WHERE branched_from_id = ? "
+                    "ORDER BY created_at, rowid",
+                    (conversation_id,),
+                ).fetchall()
+                chain = list(branches)
+                role = "source" if branches else "none"
+        items = [
+            {
+                "id": str(row["id"]),
+                "title": str(row["title"] or "（无标题）"),
+                "created_at": int(row["created_at"] or 0),
+                "updated_at": int(row["updated_at"] or 0),
+                "branch_message_id": str(row["branch_message_id"] or ""),
+                "is_source": bool(source) and str(row["id"]) == str(source["id"]),
+                "is_current": str(row["id"]) == str(conversation_id),
+            }
+            for row in chain
+        ]
+        return {
+            "conversation_id": conversation_id,
+            "role": role,
+            "source_deleted": role == "branch" and source is None,
+            "source": next((item for item in items if item["is_source"]), None),
+            "items": items,
         }
 
     def update_conversation_settings(
@@ -1734,6 +1987,166 @@ class ChatStorage:
                 (int(time.time() * 1000), conversation_id),
             )
         return cursor.rowcount
+
+    # ---- 删除单条/整轮消息 + 撤销（快照插回） ----
+    # 「删除」= 从模型上下文剔除 + 界面移除，**不动任何附件文件**：仍被其它消息引用的附件
+    # 不受影响，不再被引用的那些交给既有缓存自动清理（其 15 分钟保护窗口 + 引用保护逻辑不变）。
+    MESSAGE_DELETE_MODES: tuple[str, ...] = ("single", "turn")
+
+    def delete_message(
+        self, conversation_id: str, message_id: str, mode: str = "single"
+    ) -> dict[str, Any]:
+        """删除一条消息（``single``）或一整轮（``turn``），返回被删消息的完整快照供撤销插回。
+
+        - ``single``：只删该 id 那一行。``role='session'`` 的遗留标记行**拒绝**
+          （那是「新会话分割线」的旧形态，语义属于 ``delete_session_start``；误删会把上下文
+          起点悄悄往前挪）。
+        - ``turn``：仅对 user 消息可用 —— 删该 user 消息 + 其后**紧随的连续 assistant 消息**
+          （遇下一条 user 即停；途中的 session 标记行一并带走，它属于这一轮的痕迹）。
+        - 快照按原始顺序返回，含 ``metadata_json``（原始文本）：撤销时原样插回，content 与
+          metadata 逐字节不变，因此「删了又撤销」不会让模型请求的前缀缓存失效。
+        - 事务内删除并推进 ``conversations.updated_at``（与 ``truncate_from_message`` 同口径，
+          前端既有轮询自然感知）。
+        """
+        kind = str(mode or "single")
+        if kind not in self.MESSAGE_DELETE_MODES:
+            raise ValueError("mode 必须是 single 或 turn")
+        with self._connect() as db:
+            target = db.execute(
+                "SELECT id, role, content, metadata, created_at, rowid AS rid FROM messages "
+                "WHERE id = ? AND conversation_id = ?",
+                (message_id, conversation_id),
+            ).fetchone()
+            if not target:
+                raise LookupError("消息不存在")
+            if str(target["role"]) == "session":
+                raise ValueError("分割线标记行不能用这个接口删除，请用撤销分割线")
+            victims = [target]
+            if kind == "turn":
+                if str(target["role"]) != "user":
+                    raise ValueError("只有用户消息支持整轮删除")
+                following = db.execute(
+                    "SELECT id, role, content, metadata, created_at, rowid AS rid FROM messages "
+                    "WHERE conversation_id = ? "
+                    "AND (created_at > ? OR (created_at = ? AND rowid > ?)) "
+                    "ORDER BY created_at, rowid",
+                    (conversation_id, target["created_at"], target["created_at"], target["rid"]),
+                ).fetchall()
+                for row in following:
+                    if str(row["role"]) not in ("assistant", "session"):
+                        break  # 遇到下一条 user（或任何非本轮角色）即停
+                    victims.append(row)
+            db.execute(
+                "DELETE FROM messages WHERE id IN (%s)"
+                % ",".join("?" for _ in victims),
+                [str(row["id"]) for row in victims],
+            )
+            now = int(time.time() * 1000)
+            db.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (now, conversation_id),
+            )
+        return {
+            "ok": True,
+            "conversation_id": conversation_id,
+            "mode": kind,
+            "removed": [self._message_snapshot(row) for row in victims],
+            "updated_at": now,
+        }
+
+    def restore_messages(self, conversation_id: str, snapshots: list[dict[str, Any]]) -> dict[str, Any]:
+        """按快照把被删消息原样插回（删除的撤销）。返回实际插回条数与跳过的 id。
+
+        逐字节还原 ``id`` / ``content`` / ``metadata`` / ``created_at``；``metadata_json``
+        存在时按原文本写回，否则用 ``json.dumps`` 重新序列化。**已存在的 id 跳过**——
+        重复点撤销不会报错，也不会覆盖现有内容。
+        已知边界：SQLite 的隐式 rowid 会重新分配，**同一毫秒**内的两条消息相对次序可能交换；
+        概率极低，且模型侧顺序由 ``(created_at, rowid)`` 重排，影响局限于同毫秒邻居的显示序。
+        """
+        rows_in = [item for item in (snapshots or []) if isinstance(item, dict)]
+        if not rows_in:
+            raise ValueError("messages 不能为空")
+        with self._connect() as db:
+            if not db.execute("SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)).fetchone():
+                raise LookupError("对话不存在")
+            existing = {
+                str(row[0]) for row in db.execute(
+                    "SELECT id FROM messages WHERE conversation_id = ?", (conversation_id,)
+                ).fetchall()
+            }
+            restored: list[str] = []
+            skipped: list[str] = []
+            for item in rows_in:
+                snapshot = self._normalize_snapshot(item)
+                message_id = snapshot["id"]
+                if not message_id or message_id in existing:
+                    skipped.append(message_id)
+                    continue
+                db.execute(
+                    "INSERT INTO messages(id, conversation_id, role, content, metadata, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        message_id,
+                        conversation_id,
+                        snapshot["role"],
+                        snapshot["content"],
+                        snapshot["metadata_json"],
+                        snapshot["created_at"],
+                    ),
+                )
+                existing.add(message_id)
+                restored.append(message_id)
+            now = int(time.time() * 1000)
+            db.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (now, conversation_id),
+            )
+        return {
+            "ok": True,
+            "conversation_id": conversation_id,
+            "restored": restored,
+            "skipped": skipped,
+            "count": len(restored),
+            "updated_at": now,
+        }
+
+    @staticmethod
+    def _message_snapshot(row: sqlite3.Row) -> dict[str, Any]:
+        """被删消息的完整快照（撤销插回的唯一依据）。"""
+        raw = row["metadata"]
+        text = raw if isinstance(raw, str) else json.dumps(raw or {}, ensure_ascii=False)
+        return {
+            "id": str(row["id"]),
+            "role": str(row["role"] or ""),
+            "content": str(row["content"] or ""),
+            "metadata_json": text,
+            "created_at": int(row["created_at"] or 0),
+        }
+
+    @staticmethod
+    def _normalize_snapshot(item: dict[str, Any]) -> dict[str, Any]:
+        """把前端回传的快照归一成插回所需的六个字段（缺 ``metadata_json`` 时重新序列化）。"""
+        message_id = str(item.get("id") or "")
+        role = str(item.get("role") or "")
+        if not message_id or role not in ("user", "assistant", "session"):
+            raise ValueError("快照缺少有效的 id / role")
+        raw = item.get("metadata_json")
+        if isinstance(raw, str) and raw.strip():
+            text = raw
+        else:
+            metadata = item.get("metadata")
+            text = json.dumps(metadata if isinstance(metadata, dict) else {}, ensure_ascii=False)
+        try:
+            created_at = int(item.get("created_at") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("快照的 created_at 必须是整数")
+        return {
+            "id": message_id,
+            "role": role,
+            "content": str(item.get("content") or ""),
+            "metadata_json": text,
+            "created_at": created_at,
+        }
 
     def create_background_task(
         self,
@@ -2337,6 +2750,11 @@ class ChatStorage:
         result.pop("lightweight_disabled_features", None)
         # 收藏标记统一成 0/1 整数（列可能来自旧库迁移前的行对象，避免 None/字符串）。
         result["favorite"] = 1 if int(result.get("favorite") or 0) else 0
+        # 分支来源列：老库（v18 之前）行对象里可能没有这两列，统一补空串，
+        # 前端只按「非空 = 是分支」判断，不必再判 undefined。
+        result["branched_from_id"] = str(result.get("branched_from_id") or "")
+        result["branch_message_id"] = str(result.get("branch_message_id") or "")
+        result.setdefault("branch_count", 0)
         try:
             parsed = json.loads(result.get("enabled_tool_ids") or "[]")
             if not isinstance(parsed, list):

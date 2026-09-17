@@ -56,9 +56,9 @@ class RegenerateFrontendSourceTests(unittest.TestCase):
     def test_assistant_actions_order_copy_regenerate_session(self):
         self.assertIn('data-regenerate-message=', self.messages_js, "AI 回复要有「重新生成」")
         self.assertIn(
-            '<button data-copy-message>复制</button>${regenerateButton}${sessionButton}',
+            '<button data-copy-message>复制</button>${regenerateButton}${deleteButton}${sessionButton}',
             self.messages_js,
-            "AI 操作区顺序必须是 复制 → 重新生成 → 新会话",
+            "AI 操作区顺序必须是 复制 → 重新生成 → 删除 → 新会话",
         )
         self.assertIn("(!temporary && message.id)", self.messages_js,
                       "「重新生成」显示条件与「新会话」同口径：已落库的完整回复才有")

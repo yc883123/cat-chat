@@ -183,8 +183,8 @@ class SessionStartFrontendTests(unittest.TestCase):
     def test_button_sits_next_to_copy_in_assistant_actions(self):
         js = self._read("04-messages.js")
         self.assertIn('data-session-start-after=', js)
-        self.assertIn('<button data-copy-message>复制</button>${regenerateButton}${sessionButton}', js,
-                      "AI 操作区顺序必须是 复制 → 重新生成 → 新会话")
+        self.assertIn('<button data-copy-message>复制</button>${regenerateButton}${deleteButton}${sessionButton}', js,
+                      "AI 操作区顺序必须是 复制 → 重新生成 → 删除 → 新会话")
         self.assertIn("(!temporary && message.id)", js, "只有已落库的完整回复才有入口")
         html = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
         self.assertNotIn('id="newSessionButton"', html, "输入区底部的旧入口已移除")

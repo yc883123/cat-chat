@@ -4,11 +4,11 @@
 
 import { $, $$, api, applyAppearance, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, hideTextContextMenu, onChatBackgroundMissingChange, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer } from "./01-core.js";
 import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarning, ensureImageContextMenu, handleImageLightboxKey, hideImageContextMenu, initImageLightboxInteractions, isPywebview, openImageLightbox, positionContextUsagePopover, resetContextWarningResume, runImageContextAction, showImageContextMenu, stepImageLightbox, toggleContextUsagePopover, updateSendButtonState } from "./03-media.js";
-import { branchMessage, cancelActiveEdit, cancelSessionStart, confirmActiveEdit, fillContextResetSeed, initTurnRail, isNearBottom, regenerateMessage, setStickToBottom, startEditMessage, startNewSession } from "./04-messages.js";
+import { branchMessage, cancelActiveEdit, cancelSessionStart, confirmActiveEdit, deleteMessageFlow, fillContextResetSeed, initTurnRail, isNearBottom, regenerateMessage, setStickToBottom, startEditMessage, startNewSession, undoLastDelete } from "./04-messages.js";
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
 import { switchPermissionMode } from "./06-tasks-plans.js";
 import { checkUpdate, closeComposerModelPicker, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
-import { cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeConversationMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel, setTaskLogOpen } from "./08-conversations.js";
+import { cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeBranchChainPanel, closeConversationMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, runFullTextSearch, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel, setTaskLogOpen, setTaskLogStick, setWorkspaceSearchMode, syncSearchModeUi, SEARCH_DEBOUNCE_MS } from "./08-conversations.js";
 import { addProvider, addSearchProfile, applyProviderModelCapabilities, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadWorkspaceTree, openAgentCard, openProviderCard, openVisionProviderForm, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, saveMcpServer, saveProvider, saveRuntimeSettings, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, showAgentForm, switchAgentTab, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint } from "./09-settings.js";
 import { readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
 import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handlePasteImage, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState } from "./12-chat-input.js";
@@ -699,38 +699,54 @@ export function bindEvents() {
     closeComposerModelPicker();
     $('#composerModelTrigger')?.focus();
   });
+  // 任务卡片上只有三个显式动作（停止 / 详情 / 跳转），按「破坏性优先」判定；
+  // 卡片本体不是动作区——点任务名、说明、空白一律无副作用（此前整卡可点，读日志或
+  // 选中文本时一次误触就切走会话并顺手关掉面板）。所以这里不需要兜底跳转分支。
   $('#taskList').addEventListener('click', (event) => {
-    // 「停止」按钮必须先于「点卡片打开对话」处理，否则点停止会顺带跳转到该对话。
     const cancelButton = event.target.closest('[data-task-cancel]');
     if (cancelButton) {
       event.stopPropagation();
       cancelTask(cancelButton.dataset.taskCancel);
       return;
     }
-    // 「详情」是行内折叠，同样不能顺带跳转会话。
     const detailButton = event.target.closest('[data-task-detail]');
     if (detailButton) {
       event.stopPropagation();
       const item = detailButton.closest('[data-task-id]');
       const panel = item?.querySelector('.task-detail');
       const log = item?.querySelector('.task-log');
-      if (panel) {
-        const open = panel.hidden;
-        panel.hidden = !open;
-        // 详情面板与任务日志同开同关（日志是这个折叠块的正文，不该再多一个按钮）。
-        if (log) log.hidden = !open;
-        detailButton.setAttribute('aria-expanded', String(open));
-        detailButton.textContent = open ? '收起' : '详情';
-        // 展开即拉一次日志；任务还在跑时由任务列表轮询持续续拉（cursor 只取新增行）。
-        setTaskLogOpen(detailButton.dataset.taskDetail, open);
-      }
+      // 展开态以日志框为准：详情行可能为空（无结构化字段），日志容器则常驻。
+      const open = log ? log.hidden : Boolean(panel?.hidden);
+      if (panel) panel.hidden = !open;
+      // 详情面板与任务日志同开同关（日志是这个折叠块的正文，不该再多一个按钮）。
+      if (log) log.hidden = !open;
+      detailButton.setAttribute('aria-expanded', String(open));
+      detailButton.textContent = open ? '收起' : '详情';
+      // 展开即拉一次日志；任务还在跑时由任务列表轮询持续续拉（cursor 只取新增行）。
+      setTaskLogOpen(detailButton.dataset.taskDetail, open);
       return;
     }
-    const item = event.target.closest('[data-task-id]');
-    if (!item) return;
-    const task = state.tasks.find((value) => value.id === item.dataset.taskId);
-    if (task) { $('#tasksDialog').close(); openConversation(task.conversation_id); }
+    const openButton = event.target.closest('[data-task-open]');
+    if (!openButton) return;
+    event.stopPropagation();
+    const task = state.tasks.find((value) => value.id === openButton.dataset.taskOpen);
+    const conversationId = String(task?.conversation_id || '');
+    if (!conversationId) {
+      toast('这个任务没有关联的对话');
+      return;
+    }
+    $('#tasksDialog').close();
+    // 与侧栏打开会话同口径：失败要出声（此前是未捕获的 Promise 拒绝）。
+    openConversation(conversationId).catch((error) => toast(`打开会话失败：${error.message}`));
   });
+  // 日志滚动位置影响「新行到来/整表重绘时贴不贴底」：用户上翻读历史时不能被拽回底部。
+  // scroll 不冒泡，但捕获阶段会经过祖先容器，所以委托在 #taskList 上监听（第三个参数 true）。
+  $('#taskList').addEventListener('scroll', (event) => {
+    const lines = event.target?.closest?.('.task-log-lines');
+    const item = lines?.closest?.('[data-task-id]');
+    if (!lines || !item) return;
+    setTaskLogStick(item.dataset.taskId, lines.scrollHeight - lines.scrollTop - lines.clientHeight < 12);
+  }, true);
   $('#mcpStatus').addEventListener('click', () => {
     $('#settingsDialog').showModal();
     switchSettingsTab('connections');
@@ -784,6 +800,9 @@ export function bindEvents() {
   // 背景图编辑器（白板取景）：入口、拖动/滚轮/双指、适配按钮、收口关闭。
   bindChatBackgroundEditor();
   $$('[data-close]').forEach((button) => button.addEventListener('click', () => $(`#${button.dataset.close}`).close()));
+  // 删除后的撤销条：只有一个动作（撤销）。10 秒窗口与进度条时长由 04-messages 负责，
+  // 这里只保证点得到——条本身是 body 上的常驻节点，不能每次删除都重新绑监听。
+  $('#undoBarAction')?.addEventListener('click', () => { void undoLastDelete(); });
   // 会话条目「⋯」菜单：菜单项点击 → 重命名/删除；点击外部、Esc、侧栏滚动均关闭。
   $('#conversationItemMenu')?.addEventListener('click', (event) => {
     const button = event.target.closest('[data-conversation-action]');
@@ -800,10 +819,32 @@ export function bindEvents() {
   $('#newWorkspaceForm')?.addEventListener('submit', saveNewWorkspace);
   // Esc 关闭 ⋯ 菜单：菜单本身不一定持有焦点（点击 ⋯ 后焦点在按钮上），
   // 因此挂在 document 上而不是菜单元素上。
+  // 分支链面板（点会话行 ⑂ 徽标 / ⑂N 计数弹出）：点条目切会话；点外部 / Esc / 侧栏滚动收起。
+  $('#branchChainList')?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-branch-goto]');
+    if (!button) return;
+    const target = button.dataset.branchGoto || '';
+    closeBranchChainPanel();
+    if (target && target !== state.conversationId) {
+      openConversation(target).catch((error) => toast(`打开会话失败：${error.message}`));
+    }
+  });
+  $('#branchChainClose')?.addEventListener('click', closeBranchChainPanel);
+  // 点面板与徽标之外收起。徽标自己负责开/关切换，这里必须放行——否则一次点击会
+  // 先被 toggle 打开、再被这里立刻关掉（表现为「点了没反应」）。
+  document.addEventListener('click', (event) => {
+    const panel = $('#branchChainPanel');
+    if (!panel || panel.hidden) return;
+    if (panel.contains(event.target)) return;
+    if (event.target.closest?.('[data-action="open-branch-chain"]')) return;
+    closeBranchChainPanel();
+  });
   document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
     const menu = $('#conversationItemMenu');
     if (menu && !menu.hidden) closeConversationMenu();
+    const chain = $('#branchChainPanel');
+    if (chain && !chain.hidden) closeBranchChainPanel();
   });
   // Agent 编辑表单：快捷提示词面板（套用 / × 删除）+ 另存 + 角色卡追加导入。
   $('#agentPromptPresetButton')?.addEventListener('click', (event) => {
@@ -1112,6 +1153,11 @@ export function bindEvents() {
       branchMessage(branchButton.closest('.message-row'));
       return;
     }
+    const deleteButton = event.target.closest('[data-delete-message]');
+    if (deleteButton) {
+      void deleteMessageFlow(deleteButton.closest('.message-row'));
+      return;
+    }
     const sessionStartButton = event.target.closest('[data-session-start-after]');
     if (sessionStartButton) {
       startNewSession(sessionStartButton.dataset.sessionStartAfter);
@@ -1166,6 +1212,9 @@ export function bindEvents() {
   // 侧栏虚拟化：滚动时按窗口重绘可视行
   $('#sidebarWorkspaceTree').addEventListener('scroll', () => {
     closeConversationMenu();
+    // 分支链面板是 fixed 挂在 body 上的浮层，锚点（会话行）滚走了它必须跟着收，
+    // 否则会悬在半空指着一个已经不在那里的会话。
+    closeBranchChainPanel();
     if (sidebarScrollRaf) return;
     setSidebarScrollRaf(requestAnimationFrame(() => {
       setSidebarScrollRaf(0);
@@ -1292,15 +1341,47 @@ export function bindEvents() {
     renderSidebar();
     toast(state.workspaceSort === 'name' ? '已按名称排序' : '已按时间排序');
   });
+  const searchRow = $('#workspaceSearchRow');
   $('#workspaceSearch').addEventListener('click', () => {
     const input = $('#workspaceSearchInput');
-    if (!input) return;
-    input.hidden = !input.hidden;
-    if (!input.hidden) input.focus();
-    else { input.value = ''; state.workspaceSearch = ''; renderSidebar(); }
+    if (!searchRow || !input) return;
+    searchRow.hidden = !searchRow.hidden;
+    if (!searchRow.hidden) {
+      syncSearchModeUi();
+      input.focus();
+    } else {
+      // 关闭搜索：两种模式都要复位，否则树区域会停在「全文结果」上。
+      input.value = '';
+      state.workspaceSearch = '';
+      state.searchResults = null;
+      state.searchQuery = '';
+      setWorkspaceSearchMode('title');
+      renderSidebar();
+    }
   });
+  // 「标题｜全文」切换：默认标题（本地过滤，行为与升级前一致）；全文模式且有词时顺带检索一次。
+  $('#workspaceSearchModeTitle')?.addEventListener('click', () => setWorkspaceSearchMode('title'));
+  $('#workspaceSearchModeFull')?.addEventListener('click', () => setWorkspaceSearchMode('full'));
+  // 输入：标题模式即时本地过滤；全文模式防抖 300ms 再打接口（逐字符打库没有必要）。
+  let searchDebounceTimer = 0;
   $('#workspaceSearchInput').addEventListener('input', (event) => {
     state.workspaceSearch = event.target.value;
+    if (state.workspaceSearchMode !== 'full') {
+      renderSidebar();
+      return;
+    }
+    window.clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = window.setTimeout(() => { void runFullTextSearch(); }, SEARCH_DEBOUNCE_MS);
+  });
+  // Esc：清空关键词退回会话树——结果列表是**替换**会话树渲染的，必须有键盘出口。
+  $('#workspaceSearchInput').addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.target.value = '';
+    state.workspaceSearch = '';
+    state.searchResults = null;
+    state.searchQuery = '';
+    window.clearTimeout(searchDebounceTimer);
     renderSidebar();
   });
   $('#composerWorkspaceSelect').addEventListener('change', onComposerWorkspaceChange);

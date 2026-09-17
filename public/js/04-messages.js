@@ -124,12 +124,13 @@ export function messageElement(message, temporary = false) {
     });
   }
   if (message.role === 'user') {
-    // 「编辑」（破坏性：截断这条提问及其之后）在前，「分支」（非破坏性）在后——编辑更常用，
-    // 且与 AI 回复上的「重新生成」是同一个截断点的两种入口。
+    // 「编辑」（破坏性：截断这条提问及其之后）在前，「分支」（非破坏性）居中，「删除」最后——
+    // 编辑最常用，删除破坏性最强（因此排在末尾，且带分级确认框）。
     const actions = message.id
       ? '<div class="message-actions">'
         + '<button data-edit-message title="编辑这条提问并从这里重新发送（其后的消息会被删除）">编辑</button>'
         + '<button data-branch-message title="从这条消息分支到新会话继续">分支</button>'
+        + '<button data-delete-message title="删除这条提问（可只删这一条，或连同 AI 回复整轮删除；10 秒内可撤销）">删除</button>'
         + '</div>'
       : '';
     row.innerHTML = `<div class="message-body">${renderUserContent(metadata.display_content || message.content)}${uploadedFileMarkup(metadata.attachments)}${actions}</div>`;
@@ -163,6 +164,10 @@ export function messageElement(message, temporary = false) {
     const regenerateButton = (!temporary && message.id)
       ? `<button data-regenerate-message="${escapeHtml(message.id)}" title="用同一条提问重新生成这条回复（前面的对话历史保持不变）">重新生成</button>`
       : '';
+    // 「删除」夹在「重新生成」与「新会话」之间（操作区顺序 复制 → 重新生成 → 删除 → 新会话）。
+    const deleteButton = (!temporary && message.id)
+      ? `<button data-delete-message title="删除这条回复（保留提问；10 秒内可撤销）">删除</button>`
+      : '';
     row.innerHTML = `
       ${avatarHtml}
       <div class="message-card">
@@ -178,7 +183,7 @@ export function messageElement(message, temporary = false) {
           ${bottomAttachments.length ? mediaTruncatedNotice(metadata.attachments_truncated) : ''}
           ${temporary ? '' : fileChangesSummaryMarkup(metadata.files)}
           ${temporary ? '' : usageMarkup({ ...(metadata.usage || {}), performance: metadata.performance || metadata.usage?.performance }, message.created_at)}
-          ${temporary ? '' : `<div class="message-actions"><button data-copy-message>复制</button>${regenerateButton}${sessionButton}</div>`}
+          ${temporary ? '' : `<div class="message-actions"><button data-copy-message>复制</button>${regenerateButton}${deleteButton}${sessionButton}</div>`}
         </div>
       </div>`;
   }
@@ -572,6 +577,153 @@ export async function branchMessage(row) {
   }
 }
 
+// ---- 删除单条消息 / 整轮 + 撤销 ----
+// 语义：删除 = 从模型上下文剔除 + 界面移除。缓存结论（确认框按此分级提示）：
+//   · 删除点**之前**的内容逐字节不变 → 前缀缓存照常命中；
+//   · 之后的内容一次性重缓存（与「分割线换前缀」同模式，比「编辑」丢 tail 便宜）；
+//   · 删尾部零成本；撤销按原字节插回后旧缓存可重新命中（快照带原始 metadata 文本）。
+// 确认框刻意不用 window.confirm：它给不出「只删这一条 / 整轮删除」两个粒度，
+// 而且原生弹窗无法截图留证（前端变更要求附截图）。
+const UNDO_WINDOW_MS = 10000;
+let deleteUndoState = null;   // { conversationId, removed, timer } —— 只存内存，刷新即失效
+
+function askDeleteScope({ isUser, notes }) {
+  const dialog = $('#messageDeleteDialog');
+  if (!dialog) return Promise.resolve('');
+  const list = $('#messageDeleteNotes');
+  const singleButton = $('#messageDeleteSingle');
+  const turnButton = $('#messageDeleteTurn');
+  const cancelButton = $('#messageDeleteCancel');
+  if (list) list.innerHTML = (notes || []).map((line) => `<li>${escapeHtml(line)}</li>`).join('');
+  // assistant 消息只有「删这一条」一种粒度：删掉提问比删掉回答危险得多，不在此开放。
+  // 注意两个按钮**不能都藏**（曾写成 singleButton.hidden = !isUser，结果回复一条都删不掉）：
+  // 「仅删这一条」对 user / assistant 都是合法动作，「整轮」才只对 user 开放。
+  if (singleButton) singleButton.hidden = false;
+  if (turnButton) turnButton.hidden = !isUser;
+  return new Promise((resolve) => {
+    let settled = false;
+    const cleanup = () => {
+      singleButton?.removeEventListener('click', onSingle);
+      turnButton?.removeEventListener('click', onTurn);
+      cancelButton?.removeEventListener('click', onCancel);
+      dialog.removeEventListener('close', onCancel);
+    };
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (dialog.open && typeof dialog.close === 'function') dialog.close();
+      resolve(value);
+    };
+    function onSingle() { done('single'); }
+    function onTurn() { done('turn'); }
+    function onCancel() { done(''); }
+    singleButton?.addEventListener('click', onSingle);
+    turnButton?.addEventListener('click', onTurn);
+    cancelButton?.addEventListener('click', onCancel);
+    dialog.addEventListener('close', onCancel);
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
+  });
+}
+
+function showDeleteUndo(conversationId, removed, mode) {
+  const bar = $('#undoBar');
+  if (!bar || !removed.length) return;
+  hideDeleteUndo();
+  const text = $('#undoBarText');
+  if (text) {
+    text.textContent = mode === 'turn'
+      ? `已删除整轮（${removed.length} 条消息）`
+      : '已删除 1 条消息';
+  }
+  deleteUndoState = {
+    conversationId,
+    removed,
+    timer: window.setTimeout(() => hideDeleteUndo(), UNDO_WINDOW_MS),
+  };
+  bar.hidden = false;
+  // 重排一次再显示，确保每次都能重播淡入与进度条动画（连删两条时尤其明显）。
+  void bar.offsetWidth;
+  bar.classList.add('show');
+}
+
+function hideDeleteUndo() {
+  const bar = $('#undoBar');
+  if (deleteUndoState?.timer) window.clearTimeout(deleteUndoState.timer);
+  deleteUndoState = null;
+  if (!bar) return;
+  bar.classList.remove('show');
+  window.setTimeout(() => { if (!deleteUndoState) bar.hidden = true; }, 220);
+}
+
+// 撤销：按快照把消息原样插回（后端逐字节还原 id/content/metadata/created_at）。
+export async function undoLastDelete() {
+  const pending = deleteUndoState;
+  if (!pending) return;
+  hideDeleteUndo();
+  try {
+    await api('/api/messages/restore', {
+      method: 'POST',
+      body: { conversation_id: pending.conversationId, messages: pending.removed },
+    });
+    if (state.conversationId === pending.conversationId) await syncCurrentConversation();
+    toast('已恢复删除的消息');
+  } catch (error) {
+    toast(`撤销失败：${error.message}`);
+  }
+}
+
+export async function deleteMessageFlow(row) {
+  if (state.chatRunId || state.abortController) {
+    toast('请先等待当前回答结束或停止后再删除');
+    return;
+  }
+  const conversationId = state.conversationId;
+  const messageId = row?.dataset.messageId || '';
+  if (!conversationId || !messageId) return;
+  const messages = state.messages || [];
+  const index = messages.findIndex((message) => String(message?.id || '') === messageId);
+  if (index < 0) {
+    toast('删除失败：消息不存在');
+    return;
+  }
+  const message = messages[index];
+  const isUser = message.role === 'user';
+  const metadata = message.metadata || {};
+  const trailing = messages.slice(index + 1).length;
+  const hasImages = Array.isArray(metadata.attachments) && metadata.attachments.some(
+    (item) => item && mediaKind(item.source || item.path, item.name) === 'image'
+  );
+  const notes = [
+    isUser
+      ? '整轮删除会同时移除这条提问与其后紧随的 AI 回复；「仅删这一条」只移除提问。'
+      : '这条回复会从对话与模型上下文中移除，它的提问会保留。',
+  ];
+  if (trailing > 0) {
+    notes.push(`该消息之后还有 ${trailing} 条消息，删除后下一轮对话会重建一次缓存（一次性成本）。`);
+    if (hasImages) notes.push('图片会随后续消息重新发送。');
+  } else {
+    notes.push('这条消息在末尾：删除不会影响任何已有缓存。');
+  }
+  if (metadata.session_start) {
+    notes.push('这条消息带有「新会话」分割线：删除后它之前的内容会重新进入模型上下文。');
+  }
+  const mode = await askDeleteScope({ isUser, notes });
+  if (!mode) return;
+  try {
+    const result = await api('/api/messages/delete', {
+      method: 'POST',
+      body: { conversation_id: conversationId, message_id: messageId, mode },
+    });
+    const removed = Array.isArray(result.removed) ? result.removed : [];
+    if (state.conversationId === conversationId) await syncCurrentConversation();
+    showDeleteUndo(conversationId, removed, result.mode || mode);
+  } catch (error) {
+    toast(`删除失败：${error.message}`);
+  }
+}
+
 // 在某条 AI 回复之后落一条「新会话」分割线：此线以上的消息不再进入模型上下文。
 export async function startNewSession(afterMessageId) {
   if (state.abortController || state.chatRunId) {
@@ -885,6 +1037,35 @@ function ensureMessageRendered(messageIndex) {
     guard += 1;
   }
   return (Number(state.renderStart) || 0) <= messageIndex;
+}
+
+// 全文搜索命中跳转：把某条消息滚到视口垂直中心并高亮 2 秒（只加 class，不改结构）。
+// 定位算法与 scrollToTurn 同口径——不用 scrollIntoView：它会尽量贴边，于是被高亮的那条
+// 落在视口最上/最下沿，用户看不出自己到底跳到了哪一条。懒加载窗口里没有它时先向前扩窗口。
+export function revealMessage(messageId) {
+  const container = $('#messages');
+  const wanted = String(messageId || '');
+  if (!container || !wanted) return false;
+  const messages = state.messages || [];
+  const index = messages.findIndex((message) => String(message?.id || '') === wanted);
+  if (index < 0) return false;
+  if (!ensureMessageRendered(index)) return false;
+  let row = null;
+  for (const candidate of container.querySelectorAll('.message-row[data-message-id]')) {
+    if (candidate.dataset.messageId === wanted) { row = candidate; break; }
+  }
+  if (!row) return false;
+  // 用户是主动跳到历史位置的：关掉"贴底跟随"，否则流式回答的新增量会立刻把他拽回底部。
+  setStickToBottom(false);
+  const base = container.getBoundingClientRect().top - container.scrollTop;
+  const rect = row.getBoundingClientRect();
+  const top = rect.top - base - Math.max(0, (container.clientHeight - rect.height) / 2);
+  container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+  row.classList.remove('message-located');
+  void row.offsetWidth;   // 连点同一条命中时强制重播动画
+  row.classList.add('message-located');
+  window.setTimeout(() => row.classList.remove('message-located'), 2000);
+  return true;
 }
 
 export function renderMessages(messages) {

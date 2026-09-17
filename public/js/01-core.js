@@ -130,6 +130,13 @@ export const state = {
   workspaces: [],
   workspaceSort: 'updated',
   workspaceSearch: '',
+  // 侧栏搜索模式：'title' = 本地标题过滤（默认，行为与升级前一致）；'full' = 正文全文检索。
+  workspaceSearchMode: 'title',
+  // 全文检索的结果快照（{ query, total_hits, truncated, hits }）；null = 尚未检索/已退回标题模式。
+  searchResults: null,
+  // 已发出请求的关键词（用于丢弃过期响应，避免快速输入时结果错位）。
+  searchQuery: '',
+  searchLoading: false,
   expandedGroups: new Set(),
   customPrompts: [],
   editingStarterPrompt: -1,

@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.6.6-beta
-  RELEASE_TAG: v2.6.6-beta
-  PACKAGE_NAME: naiba-chat-2.6.6-beta-windows-x64
+  RELEASE_VERSION: 2.6.7-beta
+  RELEASE_TAG: v2.6.7-beta
+  PACKAGE_NAME: naiba-chat-2.6.7-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -87,11 +87,11 @@ jobs:
           Copy-Item -LiteralPath "README.md" -Destination $packageDir
           Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\${{ env.PACKAGE_NAME }}.zip" -Force
 
-      - name: Publish 2.6.6 Beta release
+      - name: Publish 2.6.7 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Naiba Chat 2.6.6 Beta
+          name: Naiba Chat 2.6.7 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -99,15 +99,15 @@ jobs:
             dist/${{ env.PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Naiba Chat 2.6.6 Beta Windows build from `${{ github.sha }}`。
+            Naiba Chat 2.6.7 Beta Windows build from `${{ github.sha }}`。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - 本地模型上下文不够时报错说人话（本次重点）：此前要么被整块吞掉（Ollama 流式响应里的 `error` 字段从未被读取，用户只看到一句「流式响应中没有文本内容」），要么原文透传（`请求失败：HTTP 400: {原始JSON}`）。现在三种流形态（Ollama NDJSON、SSE 内嵌 error、LM Studio error 事件）与 HTTP 4xx 走同一个识别层，统一给出：后端名 + 当前真实窗口 + 两条动作（点本条回复上的「新会话」，或到 设置 → 模型 填真实「上下文窗口」）。在线模型走同一条链路，同样受益。
-            - 窗口取后端自报的真值：llama.cpp / LM Studio 回 `n_ctx`，DeepSeek / OpenAI 回 `maximum context length is N`，比本机配置可信（典型坑：设置里填着 32768、后端其实只开了 4096）。判定只作用于服务端错误体，从不扫用户正文。
-            - 溢出判定提到重试兼容链之前：否则 4xx 溢出的语义会被「剥离 stream_options / tools / reasoning 后重试」的兼容逻辑吃掉，白打一次注定失败的请求还把错误冲淡。
-            - Agent 循环内增量复查（新增）：工具结果一轮轮累积、此前只在整轮开始前查一次窗口；现在每步调用前纯读复查（不改发给模型的字节序列，前缀缓存契约不受影响），越预算就保住已生成的正文并附「新会话」指引优雅收尾。
-            - 截断原因区分（本次修复）：`finish_reason=length` 此前一律按「撞输出上限」自动续写一次，但本地模型生成到 n_ctx 时后端报的同样是 length；现在本地模型 + 总量贴到窗口 95% 以上才提示「上下文窗口已耗尽，建议新会话后继续」，否则仍是「已达模型输出上限」。
-            - 本地验证：新增守门单测 27 例，全量 1256 例通过；新增隔离实例 + 无头 Edge 冒烟 20 项断言（含一个真返回 400 + `n_ctx:4096` 的假本地后端）；冻结版实跑自检 14 项。
+            - 未注册的工作区分组不再被显示成「未分组」（本次重点）：会话的分组名存在库里、工作区注册表存在 `config.json` 里，两台实例各存一份注册表必然分叉；此时下拉 `select.value = 当前分组名` 找不到对应选项会按 HTML 规范静默落成空字符串，界面于是把「属于 naiba-chat 的会话」显示成「未分组」——用户以为会话被搬走了，而且切走之后再也切不回来（那个分组在下拉里根本不存在）。现在会把该分组本身补回下拉、标注「（未注册）」，并在悬停提示里写清「当前值是什么、怎么恢复」（在侧栏「新建工作区」登记同名工作区即可）。补回来的分组只用于显示、绝不回写 config.json——注册表归谁由用户决定。
+            - Agent 说明弹层（新增）：顶栏 Agent 选择器左侧多了一个「?」按钮，点开是说明弹层——Agent = 岗位角色（人设 + 工具箱 + 技能包，没勾选的工具一律用不了，工具箱在会话开始时锁定），三种预设 Agent 各自适合什么，以及 ComfyUI 出图的**两条路线**：HTTP 直连（启动本机 ComfyUI → 设置 → Agent 工具页一键套用「ComfyUI 联动」预设，不需要配 MCP）与 MCP 连接（设置 → MCP 连上服务后在工具页手动勾选 comfy 工具）。两条任选其一即可。
+            - 工作区重名分不清 → 悬停看目录（新增）：分组按名字归并、允许重名，光看名字分不清；现在侧栏分组标题与下拉的每一项都带目录路径的悬停提示，下拉自身也显示当前选中项的目录。
+            - 手机端长按粘贴（本次修复）：手机经局域网 `http://192.168.x.x:8765` 访问属非安全上下文，网页既没有 `navigator.clipboard`、`execCommand('paste')` 也被浏览器一律禁用，系统长按菜单是唯一可行的粘贴路径；而此前 `contextmenu` 对可编辑元素无条件 `preventDefault()`，等于把这条路一起关掉（用户实测「粘贴失败：浏览器未授权」）。现在触摸 / 手写笔长按直接放行给系统菜单（鼠标右键菜单照旧），提示也换成带动作的一句话（「请按 Ctrl+V，手机可长按输入框用系统菜单」）。
+            - 顶栏「收起」以前等于没收（本次修复）：旧实现只隐藏操作区又把两个下拉收拢到第一行，用户看到的仍是「一行 API + 一行 Agent + 一条箭头」；现在收起态整条顶栏只剩折叠条一个按钮（`.topbar.compact > *:not(.topbar-collapse-toggle){display:none}`），并显示「展开顶栏」文字（此前只有一个 18px 小箭头，认不出这是唯一入口）。能力只是临时收起、点一下全部恢复。
+            - 本地验证：全量单测 1262 例通过；新增隔离真实实例 + 无头 Edge 冒烟 `verify/agent_help_popover.py` 23 项断言（含「配置驱动的快捷卡片必须渲染齐」——静态取样会让配置驱动的 UI 整体消失而断言照样全绿）；顺带修好清理脚本会误删 7 个受版本控制脚本的名册漂移问题，并加守门单测锁住两份名册。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

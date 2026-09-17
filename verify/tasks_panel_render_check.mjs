@@ -72,13 +72,15 @@ function element(selector) {
 
 const state = { tasks: [], conversationId: 'conv-1', taskSyncFailed: '', taskSyncedAt: 0 };
 
-// restoreOpenTaskLogs 在真实页面里负责"列表重渲染后恢复展开态 + 续拉日志"，依赖 DOM/网络，
-// 本脚本只校验 markup（DOM 桩没有 querySelector/网络），故以空实现注入——它不影响任何断言。
+// restoreOpenTaskLogs / taskItemById / 日志贴底状态表在真实页面里依赖 DOM 与网络，
+// 本脚本只校验 markup（DOM 桩没有 querySelector/网络），故以空实现/空表注入——
+// 它们只影响「重绘后日志往哪滚」，不参与任何一条断言（markup 由 taskRowMarkup 产出）。
 const factory = new Function(
   'escapeHtml', 'activeTaskStatuses', 'state', '$', 'restoreOpenTaskLogs',
+  'taskItemById', 'taskLogStick', 'openTaskLogs',
   `${code}\n;return { renderRunTasks, taskGroupTitle, taskStatusLabel, taskKindLabel };`,
 );
-const panel = factory(escapeHtml, activeTaskStatuses, state, element, () => {});
+const panel = factory(escapeHtml, activeTaskStatuses, state, element, () => {}, () => null, new Map(), new Set());
 
 const failures = [];
 function check(label, ok, detail = '') {
@@ -122,7 +124,20 @@ check('活动作业有停止按钮、终态没有',
   html.includes('data-task-cancel="job-run"')
   && !html.includes('data-task-cancel="job-fail"')
   && !html.includes('data-task-cancel="job-done"'));
-check('详情按钮只在有内容时出现', html.includes('data-task-detail="job-fail"') && !html.includes('data-task-detail="job-done"'));
+// 跳转：卡片本体不再整块可点（旧口径点任务名/空白即切会话并顺手关面板），
+// 切会话只走显式按钮；按钮固定排在「详情」左侧。
+check('每行都有「跳转」按钮（不靠点卡片空白切会话）',
+  html.includes('data-task-open="job-run"') && html.includes('data-task-open="job-done"'), html.slice(0, 400));
+check('「跳转」排在「详情」之前（卡片右侧）',
+  html.includes('data-task-open="job-fail"')
+  && html.indexOf('data-task-open="job-fail"') < html.indexOf('data-task-detail="job-fail"'));
+// 详情入口常驻：它展开的不只是结构化字段，还有任务日志——把入口绑在「有没有详情行」上，
+// 会让「无标量字段、但有日志」的任务（ComfyUI 的 result 常整块是对象）永远打不开日志。
+check('详情入口常驻（无详情行的任务也能展开日志块）',
+  html.includes('data-task-detail="job-fail"') && html.includes('data-task-detail="job-done"'));
+check('日志容器常驻且默认折叠（每行一个，展开才拉取）',
+  (html.match(/class="task-log" hidden/g) || []).length === 3,
+  `${(html.match(/class="task-log" hidden/g) || []).length}`);
 check('统计条口径', summary.textContent === '共 3 · 运行中 1 · 失败 1 · 已完成 1', summary.textContent);
 check('徽标显示活动数', element('#taskCount').textContent === '1', element('#taskCount').textContent);
 

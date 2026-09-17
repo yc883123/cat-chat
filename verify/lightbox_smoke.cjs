@@ -296,6 +296,64 @@ function pathOf(url) {
     await page.waitForTimeout(300);
     check('单张图点击空白处关闭', (await lightbox()).open === false, JSON.stringify(await lightbox()));
 
+    // ⑦ 手机形态（390x844）：灯箱控件必须浮在图片之上，且关闭按钮/计数不压在图片上。
+    //    回归背景（用户实测）：img 带 will-change:transform 会自建层叠上下文（层级视为 0），
+    //    而它在 DOM 里排在 close/prev 之后，按文档顺序绘制会盖住左箭头——手机上表现为
+    //    「左箭头被图片吞掉、点击穿透成半屏翻页」，而右箭头正常，左右不一致。
+    //    这里临时取消手机形态的上下安全带并把图片撑满视口（最极端条件），对每个控件做 hitTest。
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.click('#messages img[data-large-url] >> nth=0');
+    await page.waitForTimeout(500);
+    // 手机形态的上下「控件安全带」：叉叉与计数应完整落在图片之外，不再骑在图片边缘上
+    const mobileLayout = await page.evaluate(() => {
+      const pick = (sel) => {
+        const r = document.querySelector(sel).getBoundingClientRect();
+        return { top: Math.round(r.top), bottom: Math.round(r.bottom), width: Math.round(r.width) };
+      };
+      return { img: pick('#imageLightboxImg'), close: pick('#imageLightboxClose'), counter: pick('#imageLightboxCounter'), prev: pick('#imageLightboxPrev'), next: pick('#imageLightboxNext') };
+    });
+    check('手机形态：关闭按钮不与图片重叠', mobileLayout.close.bottom <= mobileLayout.img.top, JSON.stringify(mobileLayout));
+    check('手机形态：计数不与图片重叠', mobileLayout.counter.top >= mobileLayout.img.bottom, JSON.stringify(mobileLayout));
+    check('手机形态：左右箭头尺寸一致', mobileLayout.prev.width === mobileLayout.next.width && mobileLayout.prev.top === mobileLayout.next.top, JSON.stringify(mobileLayout));
+    await page.addStyleTag({ content: '.image-lightbox{padding:24px!important}.image-lightbox img{max-width:94vw!important;max-height:94vh!important}' });
+    await page.evaluate(() => {
+      const img = document.querySelector('#imageLightboxImg');
+      img.style.width = '94vw';
+      img.style.height = '94vh';
+      img.style.objectFit = 'cover';
+    });
+    const hitControl = (selector) => page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!el || el.hidden) return { ok: false, reason: 'hidden' };
+      const rect = el.getBoundingClientRect();
+      const top = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      return { ok: Boolean(top && (top === el || el.contains(top))), reason: top ? (top.id || top.tagName.toLowerCase()) : 'null' };
+    }, selector);
+    for (const [label, selector] of [
+      ['左箭头', '#imageLightboxPrev'],
+      ['右箭头', '#imageLightboxNext'],
+      ['关闭按钮', '#imageLightboxClose'],
+      ['计数', '#imageLightboxCounter'],
+    ]) {
+      const result = await hitControl(selector);
+      check(`手机形态：${label}浮在图片之上（未被遮挡）`, result.ok, JSON.stringify(result));
+    }
+    const navGeometry = await page.evaluate(() => {
+      const pick = (sel) => {
+        const r = document.querySelector(sel).getBoundingClientRect();
+        return [Math.round(r.top), Math.round(r.width), Math.round(r.height)];
+      };
+      return { prev: pick('#imageLightboxPrev'), next: pick('#imageLightboxNext') };
+    });
+    check('手机形态：左右箭头尺寸与纵向位置一致', JSON.stringify(navGeometry.prev) === JSON.stringify(navGeometry.next), JSON.stringify(navGeometry));
+    await page.click('#imageLightboxPrev');
+    await page.waitForTimeout(300);
+    state = await lightbox();
+    check('手机形态：左箭头可点击翻页（回到最后一张）', state.counter === '3 / 3', JSON.stringify(state));
+    await page.screenshot({ path: `${__dirname}\\lightbox_mobile_smoke.png` });
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(300);
+
     check('零页面错误', pageErrors.length === 0, pageErrors.join(' | '));
     console.log('  404 资源:', notFound.length ? JSON.stringify([...new Set(notFound)]) : '无');
     console.log('  上传结果:', JSON.stringify(uploaded));

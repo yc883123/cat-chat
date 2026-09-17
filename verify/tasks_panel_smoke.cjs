@@ -2,12 +2,14 @@
 //
 // 由 verify/tasks_panel_smoke.py 编排：起一个读仓库 public/ 的隔离源码实例、播种
 // "回答记录 + 后台作业"混排的数据（含 chat → 子 Agent → ComfyUI 两层派生链），
-// 然后在这里断言这次改造的五条承诺：
+// 然后在这里断言这次改造的六条承诺：
 //   1. 面板只列后台作业（chat/plan_execute 那些"回答记录"不出现）；
 //   2. 按回答分组，组标题 = 类型 + 时间，且不引用用户消息原文；
 //   3. 状态一律中文（含「停止中」）；行内停止按钮只对活动作业出现；
 //   4. 两层派生链同组、子行带嵌套标记（缩进 + `↳` 由真实 CSS 生效）；
-//   5. 零 pageerror / 零 console.error；窄屏不横向滚动。
+//   5. 切会话只走显式「跳转」按钮（卡片本体不再是动作区，点空白不跳转）；
+//      任务日志在列表整体重绘后不能被擦掉（cursor 只增，必须按缓存回填）；
+//   6. 零 pageerror / 零 console.error；窄屏不横向滚动。
 //
 // 环境变量：NAIBA_SMOKE_BASE（默认 http://127.0.0.1:8811）
 const { chromium } = require('playwright');
@@ -38,6 +40,20 @@ function check(label, ok, detail = '') {
   await page.route('**/api/providers/models', (route) => route.fulfill({
     status: 200, contentType: 'application/json', body: JSON.stringify({ models: [] }),
   }));
+
+  // 任务日志接口打桩：首次（after=0）给 5 行、cursor=5；此后如实返回「无新增」。
+  // 用来钉死「列表整体重绘后，已看到的日志行不能被擦掉」——重绘出的空节点若只按
+  // cursor 续拉，历史行会整块消失（这正是本次修掉的任务日志展示缺陷）。
+  await page.route('**/api/jobs/**/events**', (route) => {
+    const after = Number(new URL(route.request().url()).searchParams.get('after') || 0);
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(after === 0
+        ? { events: [1, 2, 3, 4, 5].map((n) => ({ sequence: n, line: `冒烟日志第 ${n} 行` })), cursor: 5 }
+        : { events: [], cursor: 5 }),
+    });
+  });
 
   try {
     await page.goto(BASE, { waitUntil: 'domcontentloaded' });
@@ -131,6 +147,40 @@ function check(label, ok, detail = '') {
       const visible = await page.isVisible('#tasksDialog [data-task-id="smoke-job-failed"] .task-detail');
       check('详情可展开且含失败原因', visible && detailText.includes('第 1 段提交失败'), detailText.slice(0, 120));
     }
+
+    // 跳转：卡片本体不再是动作区（旧行为点任意空白即切会话并关面板），切会话只走显式按钮。
+    const openIds = await page.$$eval('#tasksDialog [data-task-open]', (nodes) => nodes.map((n) => n.dataset.taskOpen));
+    check('每行都有「跳转」按钮', openIds.length === 5 && openIds.includes('smoke-job-running'), JSON.stringify(openIds));
+    await page.click('#tasksDialog [data-task-id="smoke-job-failed"] .task-kind');
+    await page.waitForTimeout(250);
+    const stillOpen = await page.evaluate(() => Boolean(document.querySelector('#tasksDialog[open]')));
+    check('点任务名/空白不再跳转（面板保持打开）', stillOpen);
+
+    // 任务日志：展开详情会拉起 5 行（上面的桩按 cursor 给增量）；列表每轮轮询都会
+    // 整体重建 DOM，重绘后这些行必须还在（修复前只剩 cursor 之后的新行 → 整块消失）。
+    const logLineSel = '#tasksDialog [data-task-id="smoke-job-failed"] .task-log-line';
+    await page.waitForFunction(
+      (sel) => document.querySelectorAll(sel).length > 0, logLineSel, { timeout: 8000 },
+    ).catch(() => {});
+    const logLinesBefore = await page.$$eval(logLineSel, (nodes) => nodes.length);
+    check('展开后任务日志按 cursor 拉到 5 行', logLinesBefore === 5, `${logLinesBefore}`);
+
+    // 给当前行节点打个标记：轮询重绘会换掉节点，标记消失即证明「确实重绘过一轮」。
+    const itemSel = '#tasksDialog [data-task-id="smoke-job-failed"]';
+    await page.evaluate((sel) => {
+      const item = document.querySelector(sel);
+      if (item) item.dataset.logMark = '1';
+    }, itemSel);
+    const repainted = await page.waitForFunction(
+      (sel) => document.querySelector(sel)?.dataset.logMark !== '1', itemSel, { timeout: 10000 },
+    ).then(() => true).catch(() => false);
+    check('等到了列表整体重绘（轮询重建 DOM）', repainted);
+    // 重绘后的回填是异步的：等日志回到 5 行（修复前会一直停在 0，这份断言必红）。
+    const logKept = await page.waitForFunction(
+      (sel) => document.querySelectorAll(sel).length >= 5, logLineSel, { timeout: 8000 },
+    ).then(() => true).catch(() => false);
+    const logLinesAfter = await page.$$eval(logLineSel, (nodes) => nodes.length);
+    check('重绘后已看到的日志行没有被擦掉', logKept && logLinesAfter >= 5, `${logLinesAfter}`);
 
     // Playwright 截图留档：验证前端显示效果的人工核对证据（verify/ 在 .gitignore）。
     const fs = require('fs');

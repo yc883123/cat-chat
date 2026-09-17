@@ -1,7 +1,7 @@
 // 「流式回复撞上点击任务面板 → 消息区整体重渲染」回归冒烟（由 verify/stream_rerender_smoke.py 编排）。
 //
 // 覆盖：
-//   ① 面板那一行点了会跳会话（业务行为不变）；
+//   ① 面板那一行的「跳转」按钮点了会跳会话（切会话入口已从"整卡可点"收窄为显式按钮）；
 //   ② 点完之后**同一条气泡还在文档里**（`replaceChildren` 后必须复挂活动流的 run 行）——
 //      改前这一步会失败：正在流式输出的那条助手气泡被连根拔掉且无人复挂；
 //   ③ 点完之后后续 delta 仍继续落进那条气泡（流没断、渲染目标没换人）；
@@ -9,8 +9,8 @@
 //   ⑤ 零页面错误。
 //
 // 全真链路：真 POST /api/chat、真 run、真事件流；只有模型响应来自本地假 SSE 服务
-// （10 段、每段 400ms，好让「流到一半点任务行」稳定复现）。任务面板那一行由浏览器侧
-// 拦截 /api/tasks 注入（面板只列后台作业，点击即 openConversation(当前会话)）。
+// （10 段、每段 400ms，好让「流到一半点跳转按钮」稳定复现）。任务面板那一行由浏览器侧
+// 拦截 /api/tasks 注入（面板只列后台作业，点「跳转」即 openConversation(当前会话)）。
 const { chromium } = require('playwright');
 
 const BASE = process.env.NAIBA_SMOKE_BASE || 'http://127.0.0.1:8798';
@@ -132,11 +132,13 @@ async function apiJson(path, options = {}) {
     check('流式气泡已出现并收到第一段正文', Boolean(live), JSON.stringify(live));
     if (!live) throw new Error('活动流的气泡没出现，后续断言无从谈起');
 
-    // ---- 核心：流到一半点任务面板里那一行 ----
+    // ---- 核心：流到一半点任务面板那一行的「跳转」按钮 ----
+    // （切会话入口已从「整卡可点」收窄为显式按钮：卡片空白不再有副作用，
+    //   但按钮走的是同一个 openConversation(当前会话) → 重渲染路径，触发条件不变。）
     const rendersBefore = naibaLogs.filter((line) => line.includes('renderMessages')).length;
     await page.click('#openTasks');
-    await page.waitForSelector(`#taskList [data-task-id="${BG_TASK_ID}"]`, { timeout: 5000 });
-    await page.click(`#taskList [data-task-id="${BG_TASK_ID}"] .task-kind`);
+    await page.waitForSelector(`#taskList [data-task-id="${BG_TASK_ID}"] [data-task-open]`, { timeout: 5000 });
+    await page.click(`#taskList [data-task-id="${BG_TASK_ID}"] [data-task-open]`);
 
     const reRendered = await waitFor(
       () => Promise.resolve(
@@ -144,7 +146,7 @@ async function apiJson(path, options = {}) {
       ),
       8000,
     );
-    check('点击任务行触发了消息区重渲染（缺陷的触发条件成立）', Boolean(reRendered),
+    check('点击「跳转」按钮触发了消息区重渲染（缺陷的触发条件成立）', Boolean(reRendered),
       `renderMessages 日志条数=${naibaLogs.filter((l) => l.includes('renderMessages')).length}`);
 
     const afterClick = await markedRow();

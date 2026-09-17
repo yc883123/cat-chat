@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.6.5-beta
-  RELEASE_TAG: v2.6.5-beta
-  PACKAGE_NAME: naiba-chat-2.6.5-beta-windows-x64
+  RELEASE_VERSION: 2.6.6-beta
+  RELEASE_TAG: v2.6.6-beta
+  PACKAGE_NAME: naiba-chat-2.6.6-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -87,11 +87,11 @@ jobs:
           Copy-Item -LiteralPath "README.md" -Destination $packageDir
           Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\${{ env.PACKAGE_NAME }}.zip" -Force
 
-      - name: Publish 2.6.5 Beta release
+      - name: Publish 2.6.6 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Naiba Chat 2.6.5 Beta
+          name: Naiba Chat 2.6.6 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -99,13 +99,15 @@ jobs:
             dist/${{ env.PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Naiba Chat 2.6.5 Beta Windows build from `${{ github.sha }}`。
+            Naiba Chat 2.6.6 Beta Windows build from `${{ github.sha }}`。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - 消息全文搜索（新增）：侧栏搜索框升级为「标题 / 全文」双模式；全文模式下输入即全库检索消息正文（300ms 防抖），结果显示为「会话标题 + 命中片段（命中词高亮）+ 第 N 条」，点击直接跳到那条消息并高亮定位 2 秒（自动跨会话切换、按需加载历史窗口）。检索不复用给模型用的「按会话分桶」口径；结果超上限时明确标注「已截断」，不静默丢结果。
-            - 分支导航（新增，数据库 v17→v18）：建立分支时登记来源会话与分支点消息，侧栏条目出现 ⑂ 徽标（悬停显示源标题）与「⑂N」下级分支计数，点开分支链面板可看源会话与所有兄弟分支并一键切换。侧栏仍保持平铺（不画树）；旧数据不回溯推断；源会话被删时降级提示「源会话已删除」而不是报错。
-            - 删除单条消息 + 撤销（新增）：用户消息操作区「编辑 · 分支 · 删除」，AI 回复「复制 · 重新生成 · 删除 · 新会话」。可选「仅删这一条」或（对提问）「删除这一轮」（连同后面的回复一起删，遇下一条提问即停），确认框写清后果（后面还有几条、是否带图、是否带走上下文起点）；删除后底部出现 10 秒撤销条，撤销会把内容逐字节原样插回（含时间、附件、活动轨迹），前缀缓存命中一并恢复。
-            - 本地验证：新增守门单测 77 例（搜索 17 / 分支链 23 / 删除撤销 37），全量 1229 例通过；新增隔离实例 + 无头 Edge 冒烟 39 项断言（含 6 张截图）；冻结版编译成功并通过运行期自检 24 项。
+            - 本地模型上下文不够时报错说人话（本次重点）：此前要么被整块吞掉（Ollama 流式响应里的 `error` 字段从未被读取，用户只看到一句「流式响应中没有文本内容」），要么原文透传（`请求失败：HTTP 400: {原始JSON}`）。现在三种流形态（Ollama NDJSON、SSE 内嵌 error、LM Studio error 事件）与 HTTP 4xx 走同一个识别层，统一给出：后端名 + 当前真实窗口 + 两条动作（点本条回复上的「新会话」，或到 设置 → 模型 填真实「上下文窗口」）。在线模型走同一条链路，同样受益。
+            - 窗口取后端自报的真值：llama.cpp / LM Studio 回 `n_ctx`，DeepSeek / OpenAI 回 `maximum context length is N`，比本机配置可信（典型坑：设置里填着 32768、后端其实只开了 4096）。判定只作用于服务端错误体，从不扫用户正文。
+            - 溢出判定提到重试兼容链之前：否则 4xx 溢出的语义会被「剥离 stream_options / tools / reasoning 后重试」的兼容逻辑吃掉，白打一次注定失败的请求还把错误冲淡。
+            - Agent 循环内增量复查（新增）：工具结果一轮轮累积、此前只在整轮开始前查一次窗口；现在每步调用前纯读复查（不改发给模型的字节序列，前缀缓存契约不受影响），越预算就保住已生成的正文并附「新会话」指引优雅收尾。
+            - 截断原因区分（本次修复）：`finish_reason=length` 此前一律按「撞输出上限」自动续写一次，但本地模型生成到 n_ctx 时后端报的同样是 length；现在本地模型 + 总量贴到窗口 95% 以上才提示「上下文窗口已耗尽，建议新会话后继续」，否则仍是「已达模型输出上限」。
+            - 本地验证：新增守门单测 27 例，全量 1256 例通过；新增隔离实例 + 无头 Edge 冒烟 20 项断言（含一个真返回 400 + `n_ctx:4096` 的假本地后端）；冻结版实跑自检 14 项。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

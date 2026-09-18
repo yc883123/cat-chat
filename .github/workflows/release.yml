@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.6.8-beta
-  RELEASE_TAG: v2.6.8-beta
-  PACKAGE_NAME: naiba-chat-2.6.8-beta-windows-x64
+  RELEASE_VERSION: 2.6.9-beta
+  RELEASE_TAG: v2.6.9-beta
+  PACKAGE_NAME: naiba-chat-2.6.9-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -87,11 +87,11 @@ jobs:
           Copy-Item -LiteralPath "README.md" -Destination $packageDir
           Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\${{ env.PACKAGE_NAME }}.zip" -Force
 
-      - name: Publish 2.6.8 Beta release
+      - name: Publish 2.6.9 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Naiba Chat 2.6.8 Beta
+          name: Naiba Chat 2.6.9 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -99,14 +99,14 @@ jobs:
             dist/${{ env.PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Naiba Chat 2.6.8 Beta Windows build from `${{ github.sha }}`。
+            Naiba Chat 2.6.9 Beta Windows build from `${{ github.sha }}`。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - 点「新会话」后圆环归零、输入框立刻可用（本次重点）：本地模型上下文不够时会引导你点本条回复上的「新会话」，但那条线划下去之后占用圆环仍停在 100%、输入框仍是禁用态——历史已经划到线以下却还被告知「上下文已满」，唯一出路是刷新页面。根因是圆环取「有效用量」时只看最后一条带用量的消息、没认这把「分割线」；现在改为从消息列表末尾向前扫描、扫到最新一条分割线即停，线以上（含被标记消息本身）的用量一律不算，圆环归零、输入框解锁、发送键可用；撤销分割线后同一套扫描自动回锁。
-            - 刚重置完还想接着写的那一句现在真的发得出去（本次重点）：分割线出现那一刻本轮回复仍在收尾（运行标志未落下），此前「运行中不得用历史值覆盖实时值」的保护会把种子填进一个仍然禁用的输入框，表现为「字填好了却按不下去」；现在只对「上下文已重置」这一种场景放行，其余历史重渲染照旧不许擦掉实时值。
-            - 提示说得更明白：划完线不再只说「下一条消息起……」，而是明确说出「上下文占用已清零，可直接继续」。
-            - 兼容旧数据：分割线同时认新形态（metadata.session_start）与更早版本留下的 role=session 标记行。
-            - 本地验证：全量单测 1268 例通过；新增隔离真实实例 + 无头 Edge 冒烟 verify/context_reset_lock.py 14 项断言（真库播种的「满量→新会话→解锁→撤销→回锁」全链路，含三张留证截图），并做了回退反证（退回旧写法后断言立刻变红）；冻结版编译成功，且打包资源经冻结版入口探针确认为新代码。
+            - 换字体不用再手敲字体名（本次重点）：以前得自己填一串 font-family、还得先知道机器上装了什么，普通用户无从下手。现在「设置 → 外观 → 会话字体」的第四张卡片由「自定义」改为「指定字体」，点开是下拉列表，内置 11 种常见中文字体（微软雅黑、苹方、宋体、楷体、黑体、仿宋、思源黑体、思源宋体、霞鹜文楷、得意黑、鸿蒙黑体）；手机端点开直接弹系统选择器。
+            - 没装的字体会自己标出来：列表每项都用浏览器现场实测该字体能否真的参与排版，没装的后缀「（未安装）」——只是提醒、不禁选（设置存在服务端、多设备共享，这台没装不代表手机没装）。
+            - 手敲入口降级为高级兜底：列表末项「手动填写…」选中后才展开原输入框；旧配置零迁移，之前存过的自定义字体串原样还在，切到预置字体再切回来也不会丢。
+            - 预览与落库仍是同一套规矩：字号滑杆与字体列表都只做本地预览，统一由「保存外观」落库（与主题、皮肤同一套交互）。
+            - 本地验证：全量单测 1296 例通过；新增隔离真实实例 + 无头 Edge 冒烟 verify/chat_font_smoke.py 39 项断言（含手机竖屏、点选后比对 canvas 渲染度量确认正文真的换了字体、占位值不外泄），其中「未安装」标注是与现场重新度量逐项对照得出的；冻结版编译成功，打包资源与后端字体白名单经冻结版入口探针确认为新代码（17 项）。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

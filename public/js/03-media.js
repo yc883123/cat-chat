@@ -802,12 +802,32 @@ export function usageMarkup(usage, createdAt = null) {
   return `${tokenLine}${durationLine}${laneLine}${warningLine}`;
 }
 
+// 「新会话」分割线判据（与 04-messages.sessionDividerAfter 同一份口径）：
+// 新形态 = 标记落在锚点消息的 metadata 上（`session_start`，分割线画在该消息**下方**）；
+// 遗留形态 = 独立的 role=session 标记行（早期版本，那一行本身就是分割线）。
+// 语义：此线以上的消息不再进入模型上下文（**含被标记的那条消息本身**）。
+function isContextStartDivider(message) {
+  if (!message || typeof message !== 'object') return false;
+  if (message.role === 'session') return true;
+  return Boolean(message.metadata && message.metadata.session_start);
+}
+
 export function updateContextUsage(messages = null, message = null) {
   let target = message;
-  if (!target && Array.isArray(messages)) {
+  // 终态单消息入口（done/error/取消）：分割线画在这条消息下方 → 这轮的 usage 属于
+  // 「已被划出上下文」的那一段，必须按「无用量」处理——模型调 reset_context 成功时，
+  // 同一条 done 消息**同时**带满量 usage 与 session_start，正是全靠这一步分辨。
+  let contextReset = Boolean(target) && isContextStartDivider(target);
+  if (contextReset) target = null;
+  if (!target && !contextReset && Array.isArray(messages)) {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
-      if (messages[index]?.role === 'assistant' && messages[index]?.metadata?.usage) {
-        target = messages[index];
+      const item = messages[index];
+      // 从末尾向前扫到**最新一条**分割线就停：线以上（含被标记的那条）的 usage 一律不算，
+      // 线以下没有 usage（分割线之后还没聊过）→ usage=null → 圆环归零、输入框解锁。
+      // 撤销分割线后同一段扫描会重新看到线以上的 usage、按需回锁——语义自洽，无特殊分支。
+      if (isContextStartDivider(item)) { contextReset = true; break; }
+      if (item?.role === 'assistant' && item?.metadata?.usage) {
+        target = item;
         break;
       }
     }
@@ -816,7 +836,9 @@ export function updateContextUsage(messages = null, message = null) {
   const conversationId = String(state.conversationId || '');
   // 运行中：历史重渲染（会话/任务轮询）不得把实时圆环擦回「暂无数据」——本轮尚未
   // 落库，messages 里当然没有 usage；只有会话真正切换时才用新会话的历史值覆盖。
-  if (!usage && state.chatBusy && state.contextUsageConversationId === conversationId) return;
+  // 例外：`contextReset` 是「上下文已被显式重置」的确证（分割线已落库），此刻即使
+  // 还在收尾（chatBusy 尚未落下）也必须归零解锁，否则重置后满量锁会一直挂着。
+  if (!usage && !contextReset && state.chatBusy && state.contextUsageConversationId === conversationId) return;
   setContextUsage(usage, conversationId);
 }
 

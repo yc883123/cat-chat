@@ -742,7 +742,7 @@ export async function startNewSession(afterMessageId) {
       body: { after_message_id: afterMessageId, source: 'manual' },
     });
     await syncCurrentConversation();
-    toast('已划出分割线：下一条消息起，此线以上的内容不再进入模型上下文');
+    toast('已划出分割线：此线以上的内容不再进入模型上下文，上下文占用已清零，可直接继续');
   } catch (error) {
     toast(`划分割线失败：${error.message}`);
   }

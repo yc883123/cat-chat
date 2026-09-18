@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.6.7-beta
-  RELEASE_TAG: v2.6.7-beta
-  PACKAGE_NAME: naiba-chat-2.6.7-beta-windows-x64
+  RELEASE_VERSION: 2.6.8-beta
+  RELEASE_TAG: v2.6.8-beta
+  PACKAGE_NAME: naiba-chat-2.6.8-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -87,11 +87,11 @@ jobs:
           Copy-Item -LiteralPath "README.md" -Destination $packageDir
           Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\${{ env.PACKAGE_NAME }}.zip" -Force
 
-      - name: Publish 2.6.7 Beta release
+      - name: Publish 2.6.8 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Naiba Chat 2.6.7 Beta
+          name: Naiba Chat 2.6.8 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -99,15 +99,14 @@ jobs:
             dist/${{ env.PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Naiba Chat 2.6.7 Beta Windows build from `${{ github.sha }}`。
+            Naiba Chat 2.6.8 Beta Windows build from `${{ github.sha }}`。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - 未注册的工作区分组不再被显示成「未分组」（本次重点）：会话的分组名存在库里、工作区注册表存在 `config.json` 里，两台实例各存一份注册表必然分叉；此时下拉 `select.value = 当前分组名` 找不到对应选项会按 HTML 规范静默落成空字符串，界面于是把「属于 naiba-chat 的会话」显示成「未分组」——用户以为会话被搬走了，而且切走之后再也切不回来（那个分组在下拉里根本不存在）。现在会把该分组本身补回下拉、标注「（未注册）」，并在悬停提示里写清「当前值是什么、怎么恢复」（在侧栏「新建工作区」登记同名工作区即可）。补回来的分组只用于显示、绝不回写 config.json——注册表归谁由用户决定。
-            - Agent 说明弹层（新增）：顶栏 Agent 选择器左侧多了一个「?」按钮，点开是说明弹层——Agent = 岗位角色（人设 + 工具箱 + 技能包，没勾选的工具一律用不了，工具箱在会话开始时锁定），三种预设 Agent 各自适合什么，以及 ComfyUI 出图的**两条路线**：HTTP 直连（启动本机 ComfyUI → 设置 → Agent 工具页一键套用「ComfyUI 联动」预设，不需要配 MCP）与 MCP 连接（设置 → MCP 连上服务后在工具页手动勾选 comfy 工具）。两条任选其一即可。
-            - 工作区重名分不清 → 悬停看目录（新增）：分组按名字归并、允许重名，光看名字分不清；现在侧栏分组标题与下拉的每一项都带目录路径的悬停提示，下拉自身也显示当前选中项的目录。
-            - 手机端长按粘贴（本次修复）：手机经局域网 `http://192.168.x.x:8765` 访问属非安全上下文，网页既没有 `navigator.clipboard`、`execCommand('paste')` 也被浏览器一律禁用，系统长按菜单是唯一可行的粘贴路径；而此前 `contextmenu` 对可编辑元素无条件 `preventDefault()`，等于把这条路一起关掉（用户实测「粘贴失败：浏览器未授权」）。现在触摸 / 手写笔长按直接放行给系统菜单（鼠标右键菜单照旧），提示也换成带动作的一句话（「请按 Ctrl+V，手机可长按输入框用系统菜单」）。
-            - 顶栏「收起」以前等于没收（本次修复）：旧实现只隐藏操作区又把两个下拉收拢到第一行，用户看到的仍是「一行 API + 一行 Agent + 一条箭头」；现在收起态整条顶栏只剩折叠条一个按钮（`.topbar.compact > *:not(.topbar-collapse-toggle){display:none}`），并显示「展开顶栏」文字（此前只有一个 18px 小箭头，认不出这是唯一入口）。能力只是临时收起、点一下全部恢复。
-            - 本地验证：全量单测 1262 例通过；新增隔离真实实例 + 无头 Edge 冒烟 `verify/agent_help_popover.py` 23 项断言（含「配置驱动的快捷卡片必须渲染齐」——静态取样会让配置驱动的 UI 整体消失而断言照样全绿）；顺带修好清理脚本会误删 7 个受版本控制脚本的名册漂移问题，并加守门单测锁住两份名册。
+            - 点「新会话」后圆环归零、输入框立刻可用（本次重点）：本地模型上下文不够时会引导你点本条回复上的「新会话」，但那条线划下去之后占用圆环仍停在 100%、输入框仍是禁用态——历史已经划到线以下却还被告知「上下文已满」，唯一出路是刷新页面。根因是圆环取「有效用量」时只看最后一条带用量的消息、没认这把「分割线」；现在改为从消息列表末尾向前扫描、扫到最新一条分割线即停，线以上（含被标记消息本身）的用量一律不算，圆环归零、输入框解锁、发送键可用；撤销分割线后同一套扫描自动回锁。
+            - 刚重置完还想接着写的那一句现在真的发得出去（本次重点）：分割线出现那一刻本轮回复仍在收尾（运行标志未落下），此前「运行中不得用历史值覆盖实时值」的保护会把种子填进一个仍然禁用的输入框，表现为「字填好了却按不下去」；现在只对「上下文已重置」这一种场景放行，其余历史重渲染照旧不许擦掉实时值。
+            - 提示说得更明白：划完线不再只说「下一条消息起……」，而是明确说出「上下文占用已清零，可直接继续」。
+            - 兼容旧数据：分割线同时认新形态（metadata.session_start）与更早版本留下的 role=session 标记行。
+            - 本地验证：全量单测 1268 例通过；新增隔离真实实例 + 无头 Edge 冒烟 verify/context_reset_lock.py 14 项断言（真库播种的「满量→新会话→解锁→撤销→回锁」全链路，含三张留证截图），并做了回退反证（退回旧写法后断言立刻变红）；冻结版编译成功，且打包资源经冻结版入口探针确认为新代码。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

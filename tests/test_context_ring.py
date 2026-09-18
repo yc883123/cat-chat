@@ -254,5 +254,57 @@ class ContextWarningConfigTests(unittest.TestCase):
                 store.update_settings({"context_warning_percent": bad})
 
 
+class ContextResetLockTests(unittest.TestCase):
+    """「新会话」分割线之后，圆环与输入框锁必须跟随重置（终端用户卡死的那个 bug）。
+
+    保护对象：`public/js/03-media.js::updateContextUsage` —— 取「有效用量」时必须先扫到
+    **最新一条分割线**就停，线以上（含被标记消息本身）的 usage 一律不算。
+    旧写法只找「最后一条带 usage 的 assistant」，于是分割线之后有效上下文≈0，
+    圆环与锁却按线以上的满量算：交接流程的最后一步（种子消息已填好却发不出去）永久卡死。
+
+    真实 DOM 断言见 `verify/context_reset_lock.py` + `.cjs`（B 级）。
+    """
+
+    def test_scan_stops_at_newest_session_divider(self) -> None:
+        body = _function_body(_read("03-media.js"), "export function updateContextUsage")
+        loop = body[body.index("for ("):]
+        self.assertIn("isContextStartDivider(item)", loop, "扫描必须识别「新会话」分割线")
+        self.assertLess(
+            loop.index("isContextStartDivider(item)"),
+            loop.index("metadata?.usage"),
+            "分割线判定必须排在 usage 判定之前——反了就等于没修（先吃到满量就 break 了）",
+        )
+        self.assertIn("break", loop, "遇到最新一条分割线必须停止向前找 usage")
+
+    def test_divider_detection_covers_legacy_marker_row(self) -> None:
+        helper = _function_body(_read("03-media.js"), "function isContextStartDivider")
+        self.assertIn("session_start", helper, "新形态：标记落在锚点消息的 metadata 上")
+        self.assertIn("role === 'session'", helper, "遗留形态：独立的 role=session 标记行")
+
+    def test_single_message_entry_treats_divider_as_no_usage(self) -> None:
+        """done 事件同时带满量 usage 与 session_start——单消息入口必须按「无用量」处理。"""
+        body = _function_body(_read("03-media.js"), "export function updateContextUsage")
+        self.assertIn("isContextStartDivider(target)", body, "单消息入口也要判分割线")
+        self.assertIn("if (contextReset) target = null;", body, "命中即丢弃该条 usage")
+
+    def test_reset_overrides_busy_guard(self) -> None:
+        """收尾瞬间 chatBusy 还没落下，重置也必须立即生效（否则满量锁一直挂在屏幕上）。"""
+        body = _function_body(_read("03-media.js"), "export function updateContextUsage")
+        self.assertIn("!contextReset && state.chatBusy", body,
+                      "运行中保护必须给「上下文已重置」让路")
+
+    def test_reset_still_goes_through_single_writer(self) -> None:
+        body = _function_body(_read("03-media.js"), "export function updateContextUsage")
+        setter_calls = body.count("setContextUsage(")
+        self.assertEqual(setter_calls, 1, "重置路径不得绕开唯一写入点（否则圆环/锁两套口径）")
+
+    def test_new_session_toast_says_context_cleared(self) -> None:
+        """手动划线的用户反馈必须说清「已清零」，否则用户不敢继续输入。"""
+        source = _read("04-messages.js")
+        start = source.index("export async function startNewSession")
+        end = source.index("export async function cancelSessionStart")
+        self.assertIn("上下文占用已清零", source[start:end])
+
+
 if __name__ == "__main__":
     unittest.main()

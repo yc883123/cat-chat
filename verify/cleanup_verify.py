@@ -66,6 +66,8 @@ KEEP = {
     "branch_first_turn_smoke.py", "branch_first_turn_smoke.cjs",
     # 新会话边界 / 种子消息冒烟（§六 已登记；Python 自编排 + Node 检查）
     "session_start_smoke.py", "session_start_smoke.cjs",
+    # 「重置上下文后前端锁不解除」回归（§六 已登记；Python 自编排 + Node 检查）
+    "context_reset_lock.py", "context_reset_lock.cjs",
     # 消息列表懒加载冒烟（§六 已登记；Python 自编排 + Node 检查）
     "lazy_messages_smoke.py", "lazy_messages_smoke.cjs",
     # 会话模型下拉冒烟（§六 已登记；Python 自编排 + Node 检查）

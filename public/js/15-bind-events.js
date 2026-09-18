@@ -9,7 +9,7 @@ import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
 import { switchPermissionMode } from "./06-tasks-plans.js";
 import { checkUpdate, closeAgentHelpPopover, closeComposerModelPicker, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, positionAgentHelpPopover, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleAgentHelpPopover, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
 import { cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeBranchChainPanel, closeConversationMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, runFullTextSearch, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel, setTaskLogOpen, setTaskLogStick, setWorkspaceSearchMode, syncSearchModeUi, SEARCH_DEBOUNCE_MS } from "./08-conversations.js";
-import { addProvider, addSearchProfile, applyProviderModelCapabilities, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadWorkspaceTree, openAgentCard, openProviderCard, openVisionProviderForm, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, saveMcpServer, saveProvider, saveRuntimeSettings, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, showAgentForm, switchAgentTab, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint } from "./09-settings.js";
+import { addProvider, addSearchProfile, appearanceFormValues, applyProviderModelCapabilities, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadWorkspaceTree, openAgentCard, openProviderCard, openVisionProviderForm, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, saveMcpServer, saveProvider, saveRuntimeSettings, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, showAgentForm, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint } from "./09-settings.js";
 import { readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
 import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handlePasteImage, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState } from "./12-chat-input.js";
 import { commitSkillSelection, hideSkillPopup, insertSkillRefAtCursor, moveSkillPopupSelection, popupState, positionSkillPopup, renderInputMirror, resizeTextarea, setSkillPopupSelection, skillList, updateSkillPopup } from "./13-skill-refs.js";
@@ -789,27 +789,43 @@ export function bindEvents() {
   // 外观面板控件为可选增强：旧版 index.html 没有这些节点时不影响其它事件。
   const appearanceReset = $('#resetAppearance');
   const appearanceSave = $('#saveAppearance');
-  const syncAppearanceControls = () => {
-    const theme = state.appearance?.theme || 'system';
-    const skin = state.appearance?.skin || 'violet';
-    $$('input[name="appearanceTheme"]').forEach((el) => { el.checked = el.value === theme; });
-    $$('input[name="appearanceSkin"]').forEach((el) => { el.checked = el.value === skin; });
+  const setAppearanceStatus = (text) => {
+    const status = $('#appearanceStatus'); if (status) status.textContent = text;
   };
-  $$('input[name="appearanceTheme"], input[name="appearanceSkin"]').forEach((input) => input.addEventListener('change', () => {
-    const theme = $('input[name="appearanceTheme"]:checked')?.value || 'system';
-    const skin = $('input[name="appearanceSkin"]:checked')?.value || 'violet';
-    applyAppearance({ theme, skin });
-    const status = $('#appearanceStatus'); if (status) status.textContent = '有未保存的外观更改';
-  }));
+  // 会话字体卡片在下一张卡片里，单独给一行反馈，用户不用回头看上面那张卡。
+  const setFontStatus = (text) => {
+    const status = $('#chatFontStatus'); if (status) status.textContent = text;
+  };
+  // 预览（本地即时生效，不落库）+ 回显控件。字号滑块拖动是高频事件，
+  // 走这条路径就绝不会每像素打一次 API；落库统一由「保存外观」完成，
+  // 与主题/皮肤保持同一种交互（面板里不出现"有的即时存、有的要点击"）。
+  const previewAppearance = (dirty) => {
+    applyAppearance(appearanceFormValues());
+    syncAppearanceControls();
+    if (dirty) setAppearanceStatus('有未保存的外观更改');
+    if (dirty) setFontStatus('有未保存的会话字体更改');
+  };
+  $$('input[name="appearanceTheme"], input[name="appearanceSkin"], input[name="appearanceChatFont"]').forEach((input) => input.addEventListener('change', () => previewAppearance(true)));
+  $('#chatFontSize')?.addEventListener('input', () => previewAppearance(true));
+  // 点选字体（原生 select：手机上弹系统选择器，不必打字）；选到「手动填写…」时
+  // syncAppearanceControls 会把文本框那一行展开，走的是同一条预览/落库路径。
+  $('#chatFontPick')?.addEventListener('change', () => previewAppearance(true));
+  $('#chatFontFamilyCustom')?.addEventListener('input', () => previewAppearance(true));
   appearanceSave?.addEventListener('click', async () => {
-    const theme = $('input[name="appearanceTheme"]:checked')?.value || 'system';
-    const skin = $('input[name="appearanceSkin"]:checked')?.value || 'violet';
-    try { await saveAppearance({ theme, skin }); syncAppearanceControls(); const status = $('#appearanceStatus'); if (status) status.textContent = '外观设置已保存'; }
-    catch (error) { toast(`保存外观失败：${error.message}`); }
+    try {
+      await saveAppearance(appearanceFormValues());
+      syncAppearanceControls();
+      setAppearanceStatus('外观设置已保存');
+      setFontStatus('会话字体已保存');
+    } catch (error) { toast(`保存外观失败：${error.message}`); }
   });
   appearanceReset?.addEventListener('click', async () => {
-    try { await saveAppearance({ theme: 'system', skin: 'violet' }); syncAppearanceControls(); }
-    catch (error) { toast(`恢复默认失败：${error.message}`); }
+    try {
+      await saveAppearance({ theme: 'system', skin: 'violet', chat_font_size: 15, chat_font_family: 'system', chat_font_family_custom: '' });
+      syncAppearanceControls();
+      setAppearanceStatus('已恢复默认外观');
+      setFontStatus('已恢复默认字体');
+    } catch (error) { toast(`恢复默认失败：${error.message}`); }
   });
   // 聊天背景：选图（走 /api/uploads，不进待发送附件列表）、强度滑杆、清除。
   // 控件在旧 index.html 里不存在时整块跳过（与上面外观控件同款的可选增强约定）。

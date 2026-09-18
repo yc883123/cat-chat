@@ -21,6 +21,25 @@ logger = logging.getLogger("naiba.config")
 # same validation rules.
 APPEARANCE_THEMES = frozenset({"system", "light", "dark"})
 APPEARANCE_SKINS = frozenset({"violet", "ocean", "rose", "forest"})
+# 会话区（消息气泡/正文）字体：字号是像素整数，字体族只存枚举键，
+# 具体的 font-family 栈由前端常量映射（后端不碰 CSS，避免两端各写一份真相）。
+# 结构三档：跟随界面 / 衬线 / 圆润。
+APPEARANCE_CHAT_FONT_STRUCTURAL = ("system", "serif", "rounded")
+# 预置字体（前端「指定字体」列表里逐项点选，替掉"手敲 CSS 字体名"）：
+# 键名是稳定契约，加一款字体 = 这里加一个键 + 前端补一条栈与标签；
+# **键不进 UI 文案**，中文名由前端 CHAT_FONT_PICKS 提供（后端不管显示）。
+APPEARANCE_CHAT_FONT_PRESETS = (
+    "yahei", "pingfang", "simsun", "kaiti", "simhei", "fangsong",
+    "noto_sans", "noto_serif", "lxgw", "smiley", "harmonyos",
+)
+APPEARANCE_CHAT_FONT_FAMILIES = frozenset(
+    (*APPEARANCE_CHAT_FONT_STRUCTURAL, *APPEARANCE_CHAT_FONT_PRESETS, "custom")
+)
+CHAT_FONT_SIZE_MIN = 13
+CHAT_FONT_SIZE_MAX = 18
+CHAT_FONT_SIZE_DEFAULT = 15
+# 自定义字体串只作为 font-family 片段注入 CSS 变量，截断长度是纵深防御。
+CHAT_FONT_FAMILY_CUSTOM_MAX = 100
 
 # ---- 聊天背景图（只铺对话区）----
 # 透明度滑杆范围：0.05 是「还能看见」的下限，1 = 完全不透明。
@@ -137,6 +156,50 @@ def default_chat_background() -> dict[str, Any]:
     return normalize_chat_background({})
 
 
+# ---- 外观设置（主题/皮肤/会话字体）----
+def clamp_chat_font_size(value: Any) -> int:
+    """会话字号：能转成数值就夹回 13-18，转不动一律回默认值。
+
+    越界不报错（它只是显示偏好，静默夹回比让整份设置保存失败更合理）；
+    真正的"非法输入"由更新路径的 `_validated_chat_font_size` 显式拦住。
+    """
+    try:
+        size = int(float(value))
+    except (TypeError, ValueError):
+        return CHAT_FONT_SIZE_DEFAULT
+    return max(CHAT_FONT_SIZE_MIN, min(CHAT_FONT_SIZE_MAX, size))
+
+
+def clean_chat_font_family_custom(value: Any) -> str:
+    """自定义字体串：去空白 + 截断。它只作为 font-family 栈片段注入 CSS 变量。"""
+    return str(value or "").strip()[:CHAT_FONT_FAMILY_CUSTOM_MAX]
+
+
+def normalize_appearance(appearance: Any) -> dict[str, Any]:
+    """归一化外观设置，供配置加载与运行时更新**共用**（与 chat_background 同款约定）。
+
+    公开 settings 载荷里永远不出现非法枚举、越界字号或超长字体串；
+    返回的键集固定，前端可以放心整体替换 state.appearance。
+    """
+    merged = dict(appearance) if isinstance(appearance, dict) else {}
+    theme = str(merged.get("theme") or "").strip().lower()
+    skin = str(merged.get("skin") or "").strip().lower()
+    family = str(merged.get("chat_font_family") or "").strip().lower()
+    return {
+        "theme": theme if theme in APPEARANCE_THEMES else "system",
+        "skin": skin if skin in APPEARANCE_SKINS else "violet",
+        "chat_font_size": clamp_chat_font_size(merged.get("chat_font_size", CHAT_FONT_SIZE_DEFAULT)),
+        "chat_font_family": family if family in APPEARANCE_CHAT_FONT_FAMILIES else "system",
+        # 切换回非 custom 时保留用户输入过的串，避免"改一下又切回来"要重打一遍。
+        "chat_font_family_custom": clean_chat_font_family_custom(merged.get("chat_font_family_custom")),
+    }
+
+
+def default_appearance() -> dict[str, Any]:
+    """默认外观设置（= 归一化后的空值，默认配置与加载期兜底都复用）。"""
+    return normalize_appearance({})
+
+
 def validate_skills_dir(resolved: Path, *, app_dir: Path, public_dir: Path, data_dir: Path) -> None:
     """限制 Skill 目录范围，防止把高危目录暴露给扫描、解压和文件读取。"""
     resolved = resolved.resolve()
@@ -171,6 +234,10 @@ def default_config() -> dict[str, Any]:
         "appearance": {
             "theme": "system",
             "skin": "violet",
+            # 会话区字号/字体族：只影响 .message-body，不动全局 UI 与等宽字体。
+            "chat_font_size": CHAT_FONT_SIZE_DEFAULT,
+            "chat_font_family": "system",
+            "chat_font_family_custom": "",
         },
         # 对话区自定义背景图：image = data_dir/uploads 内的绝对路径（"" = 不启用），
         # opacity = 该图层的透明度，position_x/y + zoom = 编辑器里调出来的取景
@@ -858,10 +925,7 @@ class ConfigStore:
             if key == "appearance":
                 # Normalize hand-edited/legacy config values.  Invalid enum
                 # values should never leak into the public settings payload.
-                theme = str(merged.get("theme") or "").strip().lower()
-                skin = str(merged.get("skin") or "").strip().lower()
-                merged["theme"] = theme if theme in APPEARANCE_THEMES else "system"
-                merged["skin"] = skin if skin in APPEARANCE_SKINS else "violet"
+                merged = normalize_appearance(merged)
             elif key == "chat_background":
                 # 手改过 / 旧配置（没有 position_x/y·zoom 三个键）都在这里补齐并归一化：
                 # 前端拿到什么就画什么，不能让 NaN、越界值或缺失键漏进公开设置。
@@ -1756,7 +1820,10 @@ class ConfigStore:
                         incoming = values[key]
                         if not isinstance(incoming, dict):
                             raise ValueError("appearance 必须是对象")
-                        unknown = set(incoming) - {"theme", "skin"}
+                        unknown = set(incoming) - {
+                            "theme", "skin",
+                            "chat_font_size", "chat_font_family", "chat_font_family_custom",
+                        }
                         if unknown:
                             names = ", ".join(sorted(map(str, unknown)))
                             raise ValueError(f"appearance 包含不支持的字段：{names}")
@@ -1771,10 +1838,28 @@ class ConfigStore:
                             if skin not in APPEARANCE_SKINS:
                                 raise ValueError("皮肤必须是 violet、ocean、rose 或 forest")
                             merged["skin"] = skin
-                        self.data[key] = {
-                            "theme": merged.get("theme", "system"),
-                            "skin": merged.get("skin", "violet"),
-                        }
+                        if "chat_font_size" in incoming:
+                            merged["chat_font_size"] = self._validated_chat_font_size(
+                                incoming["chat_font_size"]
+                            )
+                        if "chat_font_family" in incoming:
+                            family = str(incoming["chat_font_family"] or "").strip().lower()
+                            if family not in APPEARANCE_CHAT_FONT_FAMILIES:
+                                # 文案从集合动态生成：加一款预置字体不必再改一遍文案
+                                # （写死清单的老写法每加一个键都要同步四处，必漏一处）。
+                                raise ValueError(
+                                    "会话字体必须是以下之一："
+                                    + "、".join(sorted(APPEARANCE_CHAT_FONT_FAMILIES))
+                                )
+                            merged["chat_font_family"] = family
+                        if "chat_font_family_custom" in incoming:
+                            if not isinstance(incoming["chat_font_family_custom"], str):
+                                raise ValueError("自定义字体必须是不超过 100 字符的文本")
+                            merged["chat_font_family_custom"] = clean_chat_font_family_custom(
+                                incoming["chat_font_family_custom"]
+                            )
+                        # 整体过一遍归一化：键集固定，前端可放心替换 state.appearance。
+                        self.data[key] = normalize_appearance(merged)
                     elif key == "chat_background":
                         incoming = values[key]
                         if not isinstance(incoming, dict):
@@ -2469,6 +2554,24 @@ class ConfigStore:
         if normalized is None:
             raise ValueError("crop 无效")
         return normalized
+
+    @staticmethod
+    def _validated_chat_font_size(raw: Any) -> int:
+        """会话字号（写入路径）：必须是 13-18 的整数。
+
+        越界**报错**而不是夹回：滑块送来的值永远在区间内，越界只可能是客户端算错或
+        旧版前端发的——静默夹回会让用户看到"设了没生效"却查不出原因。
+        （配置文件被手改的情况由加载路径的 clamp_chat_font_size 兜底。）
+        """
+        if isinstance(raw, bool):
+            raise ValueError("会话字号必须是 13-18 的整数")
+        try:
+            size = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError("会话字号必须是 13-18 的整数") from None
+        if not (CHAT_FONT_SIZE_MIN <= size <= CHAT_FONT_SIZE_MAX):
+            raise ValueError(f"会话字号必须是 {CHAT_FONT_SIZE_MIN}-{CHAT_FONT_SIZE_MAX} 的整数")
+        return size
 
     @staticmethod
     def _positive_context_size(value: Any, field: str) -> int:

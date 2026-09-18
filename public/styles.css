@@ -65,6 +65,13 @@
   --font-sans:"Inter","HarmonyOS Sans SC","PingFang SC","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
   --font-mono:"Cascadia Code","JetBrains Mono",Consolas,"Courier New",monospace;
 
+  /* 会话区字体（设置 → 外观）：只作用于 .message-body，由 01-core.js 的
+     applyAppearance() 用内联样式覆盖。默认值与历史硬编码值完全一致，
+     所以没设过的用户视觉零变化；新老消息都读同一份 :root 变量，
+     流式增量插入 DOM 时无需在渲染循环里做任何事。 */
+  --msg-font-size:15px;
+  --msg-font-family:var(--font-sans);
+
   /* polish-base：滚动条 */
   --sb-thumb:var(--neutral-300); --sb-thumb-hover:var(--neutral-400);
   --sb-track:transparent;
@@ -504,7 +511,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 /* AI 回复卡片容器：白底圆角卡片 + 柔和阴影，承载全部回复内容 */
 .message-card { min-width: 0; max-width: min(100%, 860px); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow-1); padding: 14px 16px; transition: box-shadow var(--t-fast); }
 .message-card:hover { box-shadow: var(--shadow-2); }
-.message-body { min-width: 0; max-width: 100%; overflow-wrap: anywhere; word-break: break-word; line-height: 1.7; font-size: 15px; user-select: text; -webkit-user-select: text; }
+.message-body { min-width: 0; max-width: 100%; overflow-wrap: anywhere; word-break: break-word; line-height: 1.7; font-size: var(--msg-font-size); font-family: var(--msg-font-family); user-select: text; -webkit-user-select: text; }
 .message-card .message-body { padding: 0; background: none; border: 0; }
 .message-row.user .message-body { max-width: min(75%, 680px); background: var(--user-bubble); border: 1px solid var(--violet-line); padding: 9px 13px; border-radius: var(--r-md); }
 .message-row.user.is-editing .message-body { max-width: 100%; width: 100%; background: transparent; border-color: transparent; padding: 0; }
@@ -1249,6 +1256,24 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .skin-option { flex-direction:column; align-items:flex-start; }
 .skin-swatch { width:100%; height:28px; border-radius:6px; background:var(--accent); }
 .skin-violet .skin-swatch { background:#7c5cff; } .skin-ocean .skin-swatch { background:#168aad; } .skin-rose .skin-swatch { background:#d45d79; } .skin-forest .skin-swatch { background:#4c956c; }
+/* 会话字体（设置 → 外观）：字号滑杆 + 字体族单选 + 自定义串 + 实时样例。
+   样例块直接消费 --msg-font-size / --msg-font-family，就是消息区看到的字号字体。 */
+.chat-font-size-row { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:10px; margin:0 0 10px; font-size:13px; color:var(--text); }
+.chat-font-size-row input[type="range"] { width:100%; accent-color:var(--accent); }
+.chat-font-size-row output { min-width:46px; text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }
+.appearance-font-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.chat-font-custom { margin-top:10px; }
+/* 点选列表与手敲文本框同一个外观：手机上是原生选择器，下拉即选，不必打字。 */
+.chat-font-custom select,
+.chat-font-custom input[type="text"] { width:100%; padding:9px 11px; border:1px solid var(--line); border-radius:var(--radius); background:var(--bg); color:var(--text); }
+.chat-font-custom select { cursor:pointer; }
+.chat-font-custom[hidden] { display:none; }
+.chat-font-manual-row { margin-top:10px; }
+/* 压过 .settings-content .hint 的负上边距（0,2,1 > 0,2,0；它原本是给"紧跟卡片标题"用的）。 */
+.chat-font-custom p.hint { margin:6px 0 0; }
+.chat-font-sample { margin:12px 0 0; padding:10px 12px; border:1px dashed var(--line); border-radius:var(--radius); background:var(--surface-2); color:var(--text); line-height:1.7; font-size:var(--msg-font-size); font-family:var(--msg-font-family); }
+#chatFontStatus:empty { display:none; }
+#chatFontStatus { margin:8px 0 0; color:var(--muted); font-size:12px; }
 /* 快捷提示词面板（复用 .quick-msg-* 结构，只是更宽一点容纳标题+预览） */
 .agent-preset-panel { width: 360px; }
 .tiny { min-height: 29px; padding: 0 8px; font-size: 12px; }

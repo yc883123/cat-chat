@@ -2,11 +2,18 @@
 // 09-settings.js —— 拆分自 public/app.js 第 3115-4672 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, api, applyAppearance, applyChatBackground, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, localFileUrl, refreshChatBackgroundImageStatus, state, toast } from "./01-core.js";
+import { $, $$, api, applyAppearance, applyChatBackground, CHAT_FONT_PICKS, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, isFontInstalled, localFileUrl, refreshChatBackgroundImageStatus, state, toast } from "./01-core.js";
 import { applyConversationAgent, populateComposerModels, populateModels, renderAgents, updateUnloadModelButton } from "./07-models-agents.js";
 import { closeAgentPromptPresetPanel, currentAgentFixedSkillIds, renderAgentPromptPresetList } from "./08-conversations.js";
 import { skillList } from "./13-skill-refs.js";
 import { switchSettingsTab } from "./15-bind-events.js";
+
+// 「指定字体」radio 的占位值：只活在 DOM 里，**永不落库**（见 appearanceFormValues）。
+// 后端白名单不认它 ⇒ 若不翻译会直接保存失败（最典型的事故面）。
+const CHAT_FONT_PICK_VALUE = '__pick__';
+// 结构三档：除它们之外的所有字体键（含 custom）都走「指定字体」下拉表达。
+const CHAT_FONT_BASE_FAMILIES = new Set(['system', 'serif', 'rounded']);
+
 export function renderSkills(filter = '') {
   if (!state.bootstrap) return;
   const query = filter.trim().toLowerCase();
@@ -23,12 +30,96 @@ export function renderSkills(filter = '') {
 
 export function populateAppearanceSettings() {
   const appearance = state.bootstrap?.settings?.appearance || {};
+  // 会话字体三键可能是旧版服务端没给的（undefined）——applyAppearance 会沿用当前值，
+  // 所以这里直接透传，不做 || 兜底（否则"连上旧实例"会把用户字体重置回默认）。
+  applyAppearance({
+    theme: appearance.theme || 'system',
+    skin: appearance.skin || 'violet',
+    chat_font_size: appearance.chat_font_size,
+    chat_font_family: appearance.chat_font_family,
+    chat_font_family_custom: appearance.chat_font_family_custom,
+  });
+  // 选项先建好再回显：select 里没有对应 option 时 value 会被清空。
+  buildChatFontPickOptions();
+  syncAppearanceControls();
+  populateChatBackgroundSettings();
+}
+
+// 把 state.appearance 回显到外观面板的所有控件（主题 / 皮肤 / 会话字号 / 字体族）。
+// 设置弹窗打开（populateAppearanceSettings）与保存/恢复默认之后都要调它，
+// 否则"保存成功了但控件还显示旧值"。
+export function syncAppearanceControls() {
+  const appearance = state.appearance || {};
   const theme = appearance.theme || 'system';
   const skin = appearance.skin || 'violet';
+  const size = Number(appearance.chat_font_size) || 15;
+  const family = appearance.chat_font_family || 'system';
+  const custom = appearance.chat_font_family_custom || '';
   $$('input[name="appearanceTheme"]').forEach((input) => { input.checked = input.value === theme; });
   $$('input[name="appearanceSkin"]').forEach((input) => { input.checked = input.value === skin; });
-  applyAppearance({ theme, skin });
-  populateChatBackgroundSettings();
+  // 结构三档各有自己的 radio；**任何预置字体键都落到「指定字体」那一项**（含 custom），
+  // 由下面的 select 表达具体是谁——两层显隐分开：radio 管 select 行、select 管手动行。
+  const usingPick = !CHAT_FONT_BASE_FAMILIES.has(family);
+  const radioValue = usingPick ? CHAT_FONT_PICK_VALUE : family;
+  $$('input[name="appearanceChatFont"]').forEach((input) => { input.checked = input.value === radioValue; });
+  const slider = $('#chatFontSize');
+  if (slider && slider.value !== String(size)) slider.value = String(size);
+  const output = $('#chatFontSizeValue');
+  if (output) output.textContent = `${size}px`;
+  const customRow = $('#chatFontCustomRow');
+  if (customRow) customRow.hidden = !usingPick;
+  const pick = $('#chatFontPick');
+  if (pick && usingPick && pick.value !== family) pick.value = family;
+  const manualRow = $('#chatFontManualRow');
+  if (manualRow) manualRow.hidden = !(usingPick && family === 'custom');
+  // 只在内容真的不同时才写回：文本框边打边预览会调用本函数，
+  // 无脑 value= 会把光标甩到行尾（改中间字符时最难受）。
+  const customInput = $('#chatFontFamilyCustom');
+  if (customInput && customInput.value !== custom) customInput.value = custom;
+}
+
+// 「指定字体」下拉的选项：依 CHAT_FONT_PICKS 现建（字体清单不进 HTML），
+// 用 canvas 探测给没装的字体加「（未安装）」后缀——**只标注、不禁选**：
+// 设置存在服务端、跨设备共享，这台没装不代表手机没装。
+export function buildChatFontPickOptions() {
+  const pick = $('#chatFontPick');
+  if (!pick) return;
+  const previous = pick.value;
+  pick.textContent = '';
+  CHAT_FONT_PICKS.forEach((item) => {
+    const option = document.createElement('option');
+    option.value = item.key;
+    option.textContent = isFontInstalled(item.probe) ? item.label : `${item.label}（未安装）`;
+    pick.appendChild(option);
+  });
+  if (previous) pick.value = previous;
+}
+
+// 面板控件的当前值 → 可直接交给 applyAppearance / saveAppearance 的对象。
+// 控件在旧 index.html 里不存在时返回 undefined（= 这次没传，沿用当前值），
+// 而不是默认值——否则打开一次设置就会把用户已存的偏好抹平。
+export function appearanceFormValues() {
+  const slider = $('#chatFontSize');
+  const family = $('input[name="appearanceChatFont"]:checked');
+  const customInput = $('#chatFontFamilyCustom');
+  const pick = $('#chatFontPick');
+  // __pick__ 只是前端占位值，**永远不许落库**（后端白名单会拒、表现为"保存失败"）：
+  // 选中它时必须翻译成 select 里的真实键（预置键或 custom）。
+  let fontFamily;
+  if (family) {
+    fontFamily = family.value === CHAT_FONT_PICK_VALUE
+      ? (pick ? pick.value : undefined)
+      : family.value;
+  }
+  return {
+    theme: $('input[name="appearanceTheme"]:checked')?.value || 'system',
+    skin: $('input[name="appearanceSkin"]:checked')?.value || 'violet',
+    chat_font_size: slider ? Number(slider.value) : undefined,
+    chat_font_family: fontFamily || undefined,
+    // 只有「手动填写」时才带上用户串：选了预置字体就不去动它，
+    // 用户上次打过的串因此原样留在库里，切回来还在。
+    chat_font_family_custom: fontFamily === 'custom' && customInput ? customInput.value : undefined,
+  };
 }
 
 // ---- 聊天背景（外观页） ----

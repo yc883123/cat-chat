@@ -50,6 +50,10 @@ webview/
 # Build artifacts
 dist/
 build/
+# PyInstaller 的 --clean 会撞上 safe-delete 护栏（一次删上百个文件），本项目改为
+# `mv build build.bak-<日期>` 或 `--workpath build2` 绕开，这些遗留目录不该进版本库。
+build.bak-*/
+build2/
 *.spec
 *.exe
 build_info.json
@@ -211,6 +215,8 @@ verify/*
 !verify/branch_first_turn_smoke.cjs
 !verify/branch_first_turn_smoke.py
 !verify/browser_smoke.cjs
+!verify/chat_font_smoke.cjs
+!verify/chat_font_smoke.py
 !verify/cleanup_verify.py
 !verify/composer_model_smoke.cjs
 !verify/composer_model_smoke.py
@@ -223,6 +229,7 @@ verify/*
 !verify/esm_unused_imports.py
 !verify/file_ref_smoke.cjs
 !verify/frozen_batch1_check.py
+!verify/frozen_chat_font_check.py
 !verify/frozen_interrupt_check.py
 !verify/frozen_mobile_ui_check.py
 !verify/frozen_q1_check.py

@@ -6,7 +6,10 @@
   "workspace_dir": "skills",
   "appearance": {
     "theme": "system",
-    "skin": "violet"
+    "skin": "violet",
+    "chat_font_size": 15,
+    "chat_font_family": "system",
+    "chat_font_family_custom": ""
   },
   "conversation_prompt_presets": [],
   "temperature": 0.7,

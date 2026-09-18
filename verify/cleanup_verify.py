@@ -86,6 +86,8 @@ KEEP = {
     "release_watch.py",
     # 任务面板重做冒烟（§六 已登记；Python 自编排 + Node 检查 + 无浏览器渲染兜底）
     "tasks_panel_smoke.py", "tasks_panel_smoke.cjs", "tasks_panel_render_check.mjs",
+    # 会话区字体冒烟（§六 已登记；Python 自编排 + Node 检查）
+    "chat_font_smoke.py", "chat_font_smoke.cjs", "frozen_chat_font_check.py",
     # 隔离实例的公共 harness：维护说明「归档说明」点名要求留在 verify/（被 tasks_panel_smoke.py 依赖）
     "_serve_tmp.py",
     # 本脚本自身

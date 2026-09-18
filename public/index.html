@@ -537,7 +537,7 @@
       <nav class="settings-nav" aria-label="设置分类">
         <label class="settings-search"><span class="sr-only">搜索设置</span><input id="settingsSearch" type="search" placeholder="搜索设置" autocomplete="off"></label>
         <div class="settings-nav-group"><span class="settings-nav-heading">常规</span>
-          <button class="active" data-settings-tab="appearance" data-settings-search="主题 皮肤 深色 浅色">外观</button>
+          <button class="active" data-settings-tab="appearance" data-settings-search="主题 皮肤 深色 浅色 字体 字号">外观</button>
           <button data-settings-tab="runtime" data-settings-search="超时 代理 缓存 工作区">运行设置</button>
         </div>
         <div class="settings-nav-group"><span class="settings-nav-heading">模型与 Agent</span>
@@ -579,6 +579,34 @@
             </div>
             <div class="form-actions"><button class="control-button" id="resetAppearance" type="button">恢复默认</button><button class="primary-button" id="saveAppearance" type="button">保存外观</button></div>
             <p class="hint" id="appearanceStatus" role="status"></p>
+          </div>
+          <div class="settings-card appearance-card">
+            <h4>会话字体</h4>
+            <p class="hint">只影响消息区的正文与气泡，界面其它部分和代码块字体保持不变。</p>
+            <div class="chat-font-size-row">
+              <label for="chatFontSize">字号</label>
+              <input id="chatFontSize" type="range" min="13" max="18" step="1" value="15" aria-describedby="chatFontSizeValue">
+              <output id="chatFontSizeValue" for="chatFontSize">15px</output>
+            </div>
+            <div class="appearance-font-options" role="radiogroup" aria-label="会话字体">
+              <label class="appearance-option"><input type="radio" name="appearanceChatFont" value="system"><span><b>跟随界面</b><small>系统默认无衬线</small></span></label>
+              <label class="appearance-option"><input type="radio" name="appearanceChatFont" value="serif"><span><b>衬线</b><small>宋体，阅读感更强</small></span></label>
+              <label class="appearance-option"><input type="radio" name="appearanceChatFont" value="rounded"><span><b>圆润</b><small>现代无衬线</small></span></label>
+              <label class="appearance-option"><input type="radio" name="appearanceChatFont" value="__pick__"><span><b>指定字体</b><small>列表里选，不用打字</small></span></label>
+            </div>
+            <div class="chat-font-custom" id="chatFontCustomRow" hidden>
+              <label class="sr-only" for="chatFontPick">指定字体</label>
+              <!-- 选项由 09-settings.js 依 CHAT_FONT_PICKS 动态构建（未安装的加「（未安装）」后缀），
+                   这里只留空壳：字体清单不进 HTML，避免两处各写一份。 -->
+              <select id="chatFontPick"></select>
+              <div class="chat-font-manual-row" id="chatFontManualRow" hidden>
+                <label class="sr-only" for="chatFontFamilyCustom">自定义字体名</label>
+                <input id="chatFontFamilyCustom" type="text" maxlength="100" autocomplete="off" spellcheck="false" placeholder="例如 LXGW WenKai, 楷体">
+                <p class="hint">按 CSS font-family 写法填，用逗号分隔多个候选；字体不存在时会自动回退到界面字体。</p>
+              </div>
+            </div>
+            <p class="chat-font-sample" id="chatFontSample">这是一段示例文字，用来预览当前字号与字体。The quick brown fox jumps over the lazy dog.</p>
+            <p class="hint" id="chatFontStatus" role="status"></p>
           </div>
           <div class="settings-card appearance-card" id="chatBackgroundCard">
             <h4>聊天背景</h4>

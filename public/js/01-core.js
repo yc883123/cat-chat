@@ -19,7 +19,13 @@ export const initialSkillMode = ['auto', 'pinned', 'exclusive'].includes(storedS
 export const state = {
   token: urlToken || localStorage.getItem('naibaChatToken') || localStorage.getItem('lanSkillToken') || '',
   bootstrap: null,
-  appearance: { theme: 'system', skin: 'violet' },
+  appearance: {
+    theme: 'system',
+    skin: 'violet',
+    chat_font_size: 15,
+    chat_font_family: 'system',
+    chat_font_family_custom: '',
+  },
   // 聊天背景图（只铺对话区）：服务端 settings.chat_background 是唯一事实来源，
   // 这里保存当前生效值（含编辑器调出的取景），供设置面板/编辑器回填与失效兜底使用。
   chatBackground: { image: '', opacity: 0.35, crop: null, position_x: 50, position_y: 50, zoom: 1 },
@@ -159,6 +165,114 @@ export const draggedFileCache = new Map();
 const APPEARANCE_KEY = 'naibaChatAppearance';
 const THEMES = new Set(['system', 'light', 'dark']);
 const SKINS = new Set(['violet', 'ocean', 'rose', 'forest']);
+// 会话区字体族：后端只存枚举键，真正的 font-family 栈在这里（唯一真相）。
+// serif 优先思源宋体/Noto Serif，Windows 落到 SimSun；rounded 取各平台默认的
+// 现代无衬线（PingFang / 雅黑 UI / HarmonyOS），三者都自带 --font-sans 兜底。
+// 预置字体（「指定字体」列表点选用）：**每一条都以 var(--font-sans) 收尾**——
+// 用户点了一款本机没装的字体时，视觉上回落到界面字体而不是变成浏览器默认的衬线
+// （SimSun 那条是例外：generic serif 才是它该有的样子）。
+const MSG_FONT_FAMILIES = {
+  system: 'var(--font-sans)',
+  serif: '"Source Han Serif SC","Noto Serif SC","Songti SC",SimSun,serif',
+  rounded: '"PingFang SC","Microsoft YaHei UI","HarmonyOS Sans SC",system-ui,sans-serif',
+  yahei: '"Microsoft YaHei UI","Microsoft YaHei",var(--font-sans)',
+  pingfang: '"PingFang SC",var(--font-sans)',
+  simsun: 'SimSun,"Songti SC",serif',
+  kaiti: 'KaiTi,"Kaiti SC","STKaiti",var(--font-sans)',
+  simhei: 'SimHei,"Heiti SC",var(--font-sans)',
+  fangsong: 'FangSong,"STFangsong","FangSong_GB2312",var(--font-sans)',
+  noto_sans: '"Source Han Sans SC","Noto Sans CJK SC","Noto Sans SC",var(--font-sans)',
+  noto_serif: '"Source Han Serif SC","Noto Serif CJK SC","Noto Serif SC",var(--font-sans)',
+  lxgw: '"LXGW WenKai","LXGW WenKai Screen",var(--font-sans)',
+  smiley: '"Smiley Sans",var(--font-sans)',
+  harmonyos: '"HarmonyOS Sans SC","HarmonyOS Sans",var(--font-sans)',
+};
+const MSG_FONT_FAMILY_KEYS = new Set([...Object.keys(MSG_FONT_FAMILIES), 'custom']);
+
+// 「指定字体」下拉的清单：**标签与探测名不进 HTML、也不进后端**（后端只认键）。
+// probe = 该栈里首选的那个字体名，只用于 canvas 安装探测（缺失时选项后缀「（未安装）」）。
+// 顺序 = 面板里看到的顺序（常用中文系统字体在前，需要自行安装的在后）。
+export const CHAT_FONT_PICKS = [
+  { key: 'yahei', label: '微软雅黑', probe: 'Microsoft YaHei UI' },
+  { key: 'pingfang', label: '苹方', probe: 'PingFang SC' },
+  { key: 'simsun', label: '宋体', probe: 'SimSun' },
+  { key: 'kaiti', label: '楷体', probe: 'KaiTi' },
+  { key: 'simhei', label: '黑体', probe: 'SimHei' },
+  { key: 'fangsong', label: '仿宋', probe: 'FangSong' },
+  { key: 'noto_sans', label: '思源黑体', probe: 'Source Han Sans SC' },
+  { key: 'noto_serif', label: '思源宋体', probe: 'Source Han Serif SC' },
+  { key: 'lxgw', label: '霞鹜文楷', probe: 'LXGW WenKai' },
+  { key: 'smiley', label: '得意黑', probe: 'Smiley Sans' },
+  { key: 'harmonyos', label: '鸿蒙黑体', probe: 'HarmonyOS Sans SC' },
+  // 兜底：手敲 CSS 字体名（高级用户 / 特殊字体）。
+  { key: 'custom', label: '手动填写…', probe: '' },
+];
+
+// ---- 字体安装探测（canvas 双基线度量）----
+// 为什么不用 window.queryLocalFonts()：它要权限弹窗、且**只在安全上下文可用**——
+// 手机走 http://192.168.5.x 是非安全上下文，直接不可用；canvas 度量无权限、全平台可用。
+const FONT_PROBE_TEXT = 'mmmmmmmmmmlli 永字八法';
+const FONT_PROBE_SIZE = 72;   // 放大量级，让"有/无"的宽度差远大于噪声
+const FONT_PROBE_BASELINES = ['monospace', 'sans-serif', 'serif'];
+const fontInstalledCache = new Map();
+
+export function isFontInstalled(probe) {
+  const name = String(probe || '').trim();
+  // 没给探测名（custom 行）→ 一律当"已安装"，不标注。
+  if (!name) return true;
+  if (fontInstalledCache.has(name)) return fontInstalledCache.get(name);
+  let installed = true;
+  try {
+    const ctx = document.createElement('canvas').getContext('2d');
+    const widthOf = (family) => {
+      ctx.font = `${FONT_PROBE_SIZE}px ${family}`;
+      return ctx.measureText(FONT_PROBE_TEXT).width;
+    };
+    // 任一基线下的宽度不同 ⇒ 该字体真的参与了排版 ⇒ 已安装。
+    // （三条基线是因为单一基线可能恰好就是探测字体本身，那样"没装"会被误判成"装了"。）
+    installed = FONT_PROBE_BASELINES.some(
+      (baseline) => Math.abs(widthOf(`"${name}", ${baseline}`) - widthOf(baseline)) > 0.5,
+    );
+  } catch (_error) {
+    installed = true;   // 探测是标注增强，不是门禁：异常就当已安装
+  }
+  fontInstalledCache.set(name, installed);
+  return installed;
+}
+
+const MSG_FONT_SIZE_MIN = 13;
+const MSG_FONT_SIZE_MAX = 18;
+const MSG_FONT_SIZE_DEFAULT = 15;
+
+function clampMsgFontSize(value) {
+  const size = Math.round(Number(value));
+  if (!Number.isFinite(size)) return MSG_FONT_SIZE_DEFAULT;
+  return Math.min(MSG_FONT_SIZE_MAX, Math.max(MSG_FONT_SIZE_MIN, size));
+}
+
+// 「有值且是数字」才算候选值：null / undefined / '' / 非数字一律视为"这次没传"，
+// 交给调用方回落到旧值或默认值（?? 只在 null/undefined 时回落，所以要先归一成 null）。
+function numericOrNull(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+// 自定义串只作为 font-family 栈片段：去掉会破坏 CSS 语法的字符（`;` `{` `}` 与
+// 反斜杠转义），而不是整串拒收——用户粘一段带引号的字体名是最常见的用法。
+function resolveMsgFontFamily(appearance) {
+  const family = appearance?.chat_font_family;
+  if (family === 'custom') {
+    const custom = String(appearance?.chat_font_family_custom || '')
+      .replace(/[;{}\\]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 100);
+    if (custom) return `${custom}, var(--font-sans)`;
+    return 'var(--font-sans)';
+  }
+  return MSG_FONT_FAMILIES[family] || MSG_FONT_FAMILIES.system;
+}
 
 function readStoredAppearance() {
   try {
@@ -166,9 +280,20 @@ function readStoredAppearance() {
     return {
       theme: THEMES.has(raw.theme) ? raw.theme : 'system',
       skin: SKINS.has(raw.skin) ? raw.skin : 'violet',
+      chat_font_size: clampMsgFontSize(raw.chat_font_size),
+      chat_font_family: MSG_FONT_FAMILY_KEYS.has(raw.chat_font_family) ? raw.chat_font_family : 'system',
+      chat_font_family_custom: typeof raw.chat_font_family_custom === 'string'
+        ? raw.chat_font_family_custom.slice(0, 100)
+        : '',
     };
   } catch (_) {
-    return { theme: 'system', skin: 'violet' };
+    return {
+      theme: 'system',
+      skin: 'violet',
+      chat_font_size: MSG_FONT_SIZE_DEFAULT,
+      chat_font_family: 'system',
+      chat_font_family_custom: '',
+    };
   }
 }
 
@@ -183,6 +308,19 @@ export function applyAppearance(appearance = {}) {
   const next = {
     theme: THEMES.has(appearance.theme) ? appearance.theme : (THEMES.has(previous.theme) ? previous.theme : 'system'),
     skin: SKINS.has(appearance.skin) ? appearance.skin : (SKINS.has(previous.skin) ? previous.skin : 'violet'),
+    // 会话字体同样遵循「新值合法用新值 → 否则沿用旧值 → 再否则默认」，
+    // 这样只传 theme/skin 的老调用点（设置面板、恢复默认）不会把字体悄悄重置。
+    chat_font_size: clampMsgFontSize(
+      numericOrNull(appearance.chat_font_size)
+      ?? numericOrNull(previous.chat_font_size)
+      ?? MSG_FONT_SIZE_DEFAULT,
+    ),
+    chat_font_family: MSG_FONT_FAMILY_KEYS.has(appearance.chat_font_family)
+      ? appearance.chat_font_family
+      : (MSG_FONT_FAMILY_KEYS.has(previous.chat_font_family) ? previous.chat_font_family : 'system'),
+    chat_font_family_custom: typeof appearance.chat_font_family_custom === 'string'
+      ? appearance.chat_font_family_custom.slice(0, 100)
+      : (typeof previous.chat_font_family_custom === 'string' ? previous.chat_font_family_custom.slice(0, 100) : ''),
   };
   state.appearance = next;
   const root = document.documentElement;
@@ -191,6 +329,10 @@ export function applyAppearance(appearance = {}) {
   root.dataset.themeMode = next.theme;
   root.dataset.skin = next.skin;
   root.style.colorScheme = actualTheme;
+  // 会话区字体：挂 :root 变量（不是 body 字号），只被 .message-body 消费，
+  // 侧栏/按钮/设置弹窗与代码块的 --font-mono 都不受影响。
+  root.style.setProperty('--msg-font-size', `${next.chat_font_size}px`);
+  root.style.setProperty('--msg-font-family', resolveMsgFontFamily(next));
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.content = actualTheme === 'dark' ? '#111522' : (next.skin === 'ocean' ? '#f0f7ff' : '#f4f5f2');
   try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(next)); } catch (_) { /* storage disabled */ }
@@ -238,6 +380,11 @@ export function syncAppearanceFromBootstrap(bootstrap) {
   const next = applyAppearance({
     theme: configured?.theme ?? local.theme,
     skin: configured?.skin ?? local.skin,
+    // 旧版服务端没有这三个键 → undefined → applyAppearance 退回本地缓存值，
+    // 不会出现"连上旧版实例就重置字体"。
+    chat_font_size: configured?.chat_font_size ?? local.chat_font_size,
+    chat_font_family: configured?.chat_font_family ?? local.chat_font_family,
+    chat_font_family_custom: configured?.chat_font_family_custom ?? local.chat_font_family_custom,
   });
   // 背景图与外观同一时机同步（同一个 settings 载荷，不必再等第二处调用）。
   // 内部自己做失效兜底，是 fire-and-forget，不阻塞首屏。

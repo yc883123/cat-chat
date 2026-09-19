@@ -554,6 +554,7 @@ class ConversationRunMixin:
             history = build_model_history(
                 snapshot.get("conversation_messages") or [], event,
                 pdf_tools=pdf_tools_enabled, video_tools=video_tools_enabled,
+                **self.app.config.reasoning_replay_options(),
             )
             # 视觉统一由模型驱动（自动路由已移除）：文本大脑不支持看图时，只把图片改写为
             # 安全文本占位（路径引用 + 工具提示），由模型按需主动调用 vision_analyze；

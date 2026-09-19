@@ -32,6 +32,103 @@ MODEL_IMAGE_MAX_EDGE = 1600
 MODEL_IMAGE_TARGET_BYTES = 900 * 1024
 MODEL_IMAGE_HISTORY_LIMIT = 3
 
+# ---- 思考回放限长（双闸门）--------------------------------------------------
+# 背景（2026-09-19 对本机运行库 chat.db 的只读量化，见维护说明 §九.103）：MiMo 会话单条
+# 回复落库思考 43 万 / 28.7 万 / 14 万字符，正文却只有几十字符；全库 188 条带思考的
+# 回复里 21 条 >2 万字符、9 条 >5 万字符。这些思考**每一轮都被原样回放**给模型，
+# 模型看到自己上一轮的推理循环样本后被强锚定 ⇒「每次总结都是同一条文字」。
+# 两处出口都必须挂截断：trace 存在时 metadata.reasoning 不回放（两路互斥），但实测
+# 仍有 23 条带思考却没有 trace 的老消息（约 108 万字符）只能走 message 路径。
+#
+# 只截**回放**，不动落库：metadata / trace 里的完整思考原样保留，展示/导出/排查不受影响。
+#
+# 记账口径（真实数据实测，见 verify/_probe_reasoning_gate.py）：闸门约束**保留内容**长度，
+# 省略标记另计（约 24~30 字符/条）。43 万字符的失控思考 → 4024 字符（4000 + 标记）。
+# 整轮同理 ⇒ 是「软」闸门；硬上界会牺牲「标记非空」这条存在性契约，得不偿失。
+# 确定性与前缀缓存：同一条消息 + 同一组参数 ⇒ 每次算出的字节完全一致（无时间、无随机、
+# 无并发依赖）。首次上线与被改参数时，回放字节会与上一轮实际发送不同 ⇒ 前缀缓存断一次，
+# 断点之前的字节没变、仍然命中；之后重新稳定。
+MODEL_REASONING_REPLAY_MAX_CHARS = 4000
+MODEL_REASONING_REPLAY_TURN_CHARS = 16000
+MODEL_REASONING_REPLAY_MIN_KEEP_CHARS = 200
+# 省略标记必须**自带换行**：被保留的前缀可能停在句子中间，紧跟标记才不会粘连。
+MODEL_REASONING_REPLAY_OMITTED = "\n…（思考过长，已省略后续 {n} 字符）"
+
+
+def _clip_reasoning_text(text: str, keep: int) -> str:
+    """把单条思考截到 ``keep`` 字符并附省略标记（``keep`` 不小于原长时原样返回）。
+
+    标记行**始终非空**：即使 ``keep`` 被压到 0，返回的也是纯标记（不是空串）。
+    这条是 DeepSeek / Kimi 的**存在性**契约——带 tools 的思考轮必须回传非空
+    reasoning_text，空串会 400（protocols._responses_input 的实测矩阵）。
+
+    **字符记账（别把它当 bug 去"修"）**：闸门约束的是**保留内容**长度，标记另计 ——
+    被截断时返回 ``文本[:keep] + 标记``，因此 ``len(结果) == keep + len(标记)``，
+    比 ``keep`` 多出约 24~30 字符（标记里的数字位数最多 3 位浮动）。这是刻意的：
+    标记必须存在（存在性契约要非空），所以被截断的那条**必然**长于 ``keep``。
+    实测：4000 档 + 43 万字符原思考 ⇒ 4024 字符（`verify/_probe_reasoning_gate.py`）。
+    整轮预算同样按「保留内容」记账，标记与保底溢出不计入 —— 故整轮是**软**闸门。
+    """
+    value = str(text or "")
+    if keep >= len(value):
+        return value
+    omitted = len(value) - keep
+    return value[:keep] + MODEL_REASONING_REPLAY_OMITTED.format(n=omitted)
+
+
+class _ReasoningReplayBudget:
+    """一次 ``build_model_history`` 调用内、单个轮次的 reasoning 回放额度。
+
+    **两级闸门**：
+    - 单条硬闸门 ``single_max``：单条 reasoning 超过即截断；
+    - 整轮软闸门 ``turn_max``：同一轮次（= 一条 assistant 消息重放的整条 trace，实测
+      平均 9.92 条模型消息、其中 2.87 条带思考）内所有被回放的 reasoning 条目合计超预算时，
+      **由新到旧**分配额度——最新条目优先占满单条上限（离本轮最近、最可能承载「上轮结论
+      是怎么推出来的」），额度耗尽后更旧条目压缩到保底 ``min_keep``；保底允许总量轻微
+      溢出，故是「软」闸门。
+
+    轮内「思考 → 调工具 → 再思考」走内存累积的 messages，**不经过回放**，因此不会被截；
+    被截的只是跨轮重放。损失是「我上轮是**怎么**推出来的」，不是「我上轮得出了**什么**」。
+
+    **记账口径**：``remaining`` 按**保留内容**长度扣减，省略标记（约 24~30 字符/条）与
+    ``min_keep`` 保底溢出都不计 ⇒ 发出的整轮总字符会略高于 ``turn_max``（软闸门）。
+    单条硬闸门同理约束内容长度，被截断的那条实际长度 = ``single_max`` + 标记长度。
+    要精确上界就得牺牲「标记始终非空」或「保底不清零」，不值得——见 `_clip_reasoning_text`。
+    """
+
+    def __init__(self, single_max: int, turn_max: int, min_keep: int) -> None:
+        self.single_max = max(0, int(single_max or 0))
+        self.turn_max = max(0, int(turn_max or 0))
+        self.min_keep = max(0, int(min_keep or 0))
+
+    @property
+    def enabled(self) -> bool:
+        return self.single_max > 0 or self.turn_max > 0
+
+    def plan(self, texts: list[str]) -> list[str]:
+        """按「由新到旧」分配额度，返回与输入等长、同序的裁剪结果。"""
+        values = [str(text or "") for text in texts]
+        if not self.enabled:
+            return values
+        planned: list[str | None] = [None] * len(values)
+        remaining = self.turn_max
+        for index in range(len(values) - 1, -1, -1):
+            text = values[index]
+            if not text:
+                planned[index] = text
+                continue
+            if self.turn_max > 0 and remaining <= 0:
+                cap = self.min_keep
+            elif self.single_max > 0:
+                cap = self.single_max
+            else:
+                cap = len(text)
+            keep = min(len(text), cap)
+            if self.turn_max > 0:
+                remaining = max(0, remaining - keep)
+            planned[index] = _clip_reasoning_text(text, keep)
+        return [value if value is not None else "" for value in planned]
+
 
 def _jpeg_for_model(image: Any, target_bytes: int = MODEL_IMAGE_TARGET_BYTES) -> bytes:
     from PIL import Image
@@ -157,7 +254,26 @@ def _debug_replay_digest(trace: list[Any], label: str, event=None) -> None:
         print("\n".join(lines), file=sys.stderr, flush=True)
 
 
-def _copy_model_trace_message(message: Any) -> dict[str, Any] | None:
+def _trace_reasoning_text(message: Any) -> str:
+    """取出一条 trace 条目里会被回放的 reasoning 文本（与复制逻辑同口径）。
+
+    只认 ``reasoning_content`` / ``reasoning``（``_openai_messages`` 与 codex 的
+    reasoning item 读的都是这两个键）；非文本值按空处理，交给复制函数原样携带。
+    """
+    if not isinstance(message, dict):
+        return ""
+    value = message.get("reasoning_content")
+    if value is None:
+        value = message.get("reasoning")
+    if value is None or isinstance(value, (dict, list)):
+        return ""
+    return str(value)
+
+
+def _copy_model_trace_message(
+    message: Any,
+    reasoning_override: str | None = None,
+) -> dict[str, Any] | None:
     """Faithfully rebuild a stored ``trace`` entry so the replayed history stays
     byte-identical to what the agent actually sent to the model that turn.
 
@@ -169,6 +285,10 @@ def _copy_model_trace_message(message: Any) -> dict[str, Any] | None:
     correlation ids, both diverging from the on-the-wire bytes (breaking DeepSeek's
     prefix cache) and producing an invalid tool-call sequence. Copy **every** field
     that affects the request verbatim.
+
+    ``reasoning_override``：由 ``_ReasoningReplayBudget`` 算出的裁剪后思考文本。
+    只替换 ``reasoning_content`` 一个字段——最终答复、``tool_calls``、工具结果一律不动
+    （``reasoning_id`` 等非文本字段也保持原样）。
     """
     if not isinstance(message, dict):
         return None
@@ -178,6 +298,8 @@ def _copy_model_trace_message(message: Any) -> dict[str, Any] | None:
     for key in ("reasoning_content", "reasoning_id", "tool_calls", "tool_call_id", "name"):
         if message.get(key):
             out[key] = message[key]
+    if reasoning_override is not None and out.get("reasoning_content"):
+        out["reasoning_content"] = reasoning_override
     return out
 
 
@@ -187,6 +309,8 @@ def build_model_history(
     *,
     pdf_tools: bool = True,
     video_tools: bool = True,
+    reasoning_replay_max_chars: int = MODEL_REASONING_REPLAY_MAX_CHARS,
+    reasoning_replay_turn_chars: int = MODEL_REASONING_REPLAY_TURN_CHARS,
 ) -> list[dict[str, Any]]:
     """Build model history, carrying EVERY user message's own images (all kept).
 
@@ -196,6 +320,10 @@ def build_model_history(
     ``pdf_tools`` / ``video_tools``：会话工具集是否含 read_pdf / extract_frames，决定
     PDF / 视频附件引用行是否带处理指引（与 _run_chat 同口径，同一会话内恒定——
     两处必须传同一个值，否则破坏"逐字节一致"契约与前缀缓存）。
+    ``reasoning_replay_max_chars`` / ``reasoning_replay_turn_chars``：思考回放的
+    单条硬闸门与整轮软闸门（0 = 关闭该层；见 ``_ReasoningReplayBudget``）。
+    **三个活调用点（对话 / 子代理 / 计划执行）必须传同一组值**，否则同一会话会出现
+    两种回放字节 ⇒ 前缀缓存断 + 行为不一致。
     """
     history: list[dict[str, Any]] = []
     replay_seq = 0
@@ -242,6 +370,8 @@ def build_model_history(
         message = {"role": item["role"], "content": content}
         # Thinking-mode gateways require assistant reasoning_content on the
         # next request; it lives in persisted metadata, not visible content.
+        # 无 trace 的老消息（实测 23 条、合计约 108 万字符）只能走这一路，
+        # 所以这里同样必须挂闸门（单条硬闸门；整轮预算交给下面 trace 分支）。
         if item.get("role") == "assistant":
             raw_reasoning = (item.get("metadata") or {}).get(MetadataKeys.REASONING)
             if isinstance(raw_reasoning, list):
@@ -249,7 +379,11 @@ def build_model_history(
             elif raw_reasoning is not None:
                 raw_reasoning = str(raw_reasoning)
             if str(raw_reasoning or "").strip():
-                message["reasoning_content"] = str(raw_reasoning)
+                message["reasoning_content"] = _ReasoningReplayBudget(
+                    reasoning_replay_max_chars,
+                    reasoning_replay_turn_chars,
+                    MODEL_REASONING_REPLAY_MIN_KEEP_CHARS,
+                ).plan([str(raw_reasoning)])[0]
         # trace 权威化：本轮 trace 已包含最终答复（含工具调用/结果/推理），重放端只重放
         # trace，不再另行拼接 message，从而消除"答复重复 → 前缀错位"的隐患。对旧格式
         # （trace 不含答复）做兜底：仅当 trace 末条不是本次答复（assistant 文本消息）时，
@@ -257,9 +391,19 @@ def build_model_history(
         if item.get("role") == "assistant":
             trace = (item.get("metadata") or {}).get(MetadataKeys.TRACE) or []
             if trace:
+                # 整轮软闸门：一条 assistant 消息重放的整条 trace 算一个轮次
+                # （实测平均 9.92 条模型消息、其中 2.87 条带思考）。
+                budget = _ReasoningReplayBudget(
+                    reasoning_replay_max_chars,
+                    reasoning_replay_turn_chars,
+                    MODEL_REASONING_REPLAY_MIN_KEEP_CHARS,
+                )
+                planned_reasoning = budget.plan([
+                    _trace_reasoning_text(entry) for entry in trace
+                ])
                 last_replayed: dict[str, Any] | None = None
-                for m in trace:
-                    tmsg = _copy_model_trace_message(m)
+                for index, m in enumerate(trace):
+                    tmsg = _copy_model_trace_message(m, planned_reasoning[index])
                     if tmsg is None:
                         continue
                     history.append(tmsg)

@@ -303,12 +303,12 @@ class StreamCancellationTests(unittest.TestCase):
         self.assertNotIn("_read_lm_studio_stream(response,", source)
         self.assertNotIn("_read_ollama_stream(response,", source)
         self.assertEqual(
-            source.count("_iter_stream_lines(response, cancel_event, first_byte_timeout)"),
-            3,
-            "ollama / lm_studio / sse 三条流式路径都要接上取消 + 首字节超时",
+            source.count("response, cancel_event, first_byte_timeout, stream_total_timeout"),
+            4,
+            "ollama / lm_studio / sse / ollama 重发 四条流式路径都要接上取消 + 首字节超时 + 总时长兜底",
         )
         self.assertEqual(
-            source.count("_iter_stream_lines(retry_response, cancel_event, first_byte_timeout)"),
+            source.count("retry_response, cancel_event, first_byte_timeout, stream_total_timeout"),
             1,
             "Ollama 的 think=false 重发路径同样要接上",
         )

@@ -50,6 +50,43 @@ def is_context_overflow(detail: Any) -> bool:
     return any(marker in text for marker in _CONTEXT_OVERFLOW_MARKERS)
 
 
+class StreamTotalTimeout(RuntimeError):
+    """单次流式请求超过**总时长**兜底（不是空闲超时）。
+
+    为什么需要它：``ONLINE_MODEL_TIMEOUT_SECONDS`` 是 urllib 每次读操作的空闲超时，
+    推理 delta 持续到达就不断重置它。一段 43 万字符的思考循环可以无限流下去，界面上
+    「合法长思考」与「死循环」完全无法区分，只能靠用户手动停止。本层给在线请求加一道
+    **墙钟**总时长（默认 900 秒，远超市面最长合法思考）。
+
+    ``reasoning_chars`` / ``had_content``：超时时刻的进度（由解析层回填），runtime 用它
+    区分「全程只有推理、零正文」（⇒ 转空流语义、重试时降档）与「正文已经出来了」（⇒ 按
+    瞬时故障退避重试）。
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(str(message))
+        self.reasoning_chars = 0
+        self.had_content = False
+
+
+class EmptyModelStreamError(RuntimeError):
+    """流式响应消费完毕但既无正文也无有效 Agent action（或思考异常冗长被主动中断）。
+
+    按**瞬时故障 / 可自愈**处理：在既有重试预算内退避重发；「有推理零正文」的空流还会
+    沿预设词表自动降低思考强度（思考烧光输出额度的自愈），次数用尽后抛出。
+    定义在解析层是因为**判定在这里**（三个流解析器都能抛），runtime 侧只负责重试策略。
+
+    ``reasoning_chars``：熔断时已累计的推理字符数（诊断用；普通空流为 0）。
+    """
+
+    def __init__(self, message: str, *, reasoning_chars: int = 0) -> None:
+        super().__init__(str(message))
+        try:
+            self.reasoning_chars = max(0, int(reasoning_chars or 0))
+        except (TypeError, ValueError):
+            self.reasoning_chars = 0
+
+
 class ContextOverflowError(RuntimeError):
     """后端明确回报：本轮请求已超出模型的上下文窗口。
 
@@ -74,6 +111,54 @@ class ContextOverflowError(RuntimeError):
             self.window = 0
         self.backend = str(backend or "")
         self.detail = str(detail or "")
+
+
+def _mark_progress(
+    progress: dict[str, Any] | None,
+    reasoning_chars: int,
+    has_content: bool,
+) -> None:
+    """把已经吃进来的进度回传给调用方（供总时长超时归因用；不影响解析结果）。"""
+    if progress is None:
+        return
+    progress["reasoning_chars"] = int(reasoning_chars)
+    progress["has_content"] = bool(has_content)
+
+
+def _reasoning_break_error(chars: int) -> EmptyModelStreamError:
+    return EmptyModelStreamError(
+        f"思考异常冗长（已累计 {int(chars)} 字推理）且未产出任何正文，已主动中断",
+        reasoning_chars=int(chars),
+    )
+
+
+def _break_on_runaway_reasoning(
+    reasoning_chars: int,
+    limit: float,
+    has_content: bool,
+    status: StatusCallback | None,
+) -> None:
+    """推理量超过预算且正文仍为空 ⇒ 主动中断（异常交给 runtime 去降档重试）。
+
+    为什么要熔断：``ONLINE_MODEL_TIMEOUT_SECONDS`` 是 urllib **每次读操作的空闲超时**，
+    推理 delta 持续到达就会不停重置它，于是一段 43 万字符的思考循环可以无限流下去，
+    直到上游掐断（实测 mimo-v2.5 / deepseek-v4.1-flash 的高档思考）。DeepSeek / Moonshot
+    的思考 token 还按输出计费——不是「等它想完就好」，而是**在烧钱**。
+
+    **正文一旦出现即解除熔断**：思考 + 正文正常输出是合法形态，绝不误伤。
+    ``limit <= 0`` 表示关闭本层（行为与改动前完全一致）。
+    """
+    if limit <= 0 or has_content or reasoning_chars <= limit:
+        return
+    if status:
+        status({
+            "type": "status",
+            "message": (
+                f"思考异常冗长（已累计 {int(reasoning_chars)} 字推理）且正文为空，"
+                "已主动中断并准备降档重试"
+            ),
+        })
+    raise _reasoning_break_error(reasoning_chars)
 
 
 def _stream_error(source: str, error: Any) -> BaseException:
@@ -212,12 +297,18 @@ class _ReasoningStreamer:
 
 class StreamMixins:
     @staticmethod
-    def _read_ollama_stream(response: Any, status: StatusCallback | None) -> dict[str, Any]:
+    def _read_ollama_stream(
+        response: Any,
+        status: StatusCallback | None,
+        reasoning_break_chars: float = 0.0,
+        progress: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         chunks: list[dict[str, Any]] = []
         full_content_parts: list[str] = []
         pending = ""
         reasoning_parts: list[str] = []
         reasoning_streamer = _ReasoningStreamer(status, reasoning_parts)
+        reasoning_chars = 0
         tool_protocol = False
         inline_parser = _InlineReasoningParser()
         native_tool_calls: dict[int, dict[str, str]] = {}
@@ -251,10 +342,17 @@ class StreamMixins:
             text, inline_reasoning = inline_parser.feed(text)
             reasoning = reasoning + inline_reasoning
             if reasoning:
+                reasoning_chars += len(reasoning)
                 reasoning_streamer.feed(reasoning)
             if not text:
+                _mark_progress(progress, reasoning_chars, bool(full_content_parts) or bool(native_tool_calls))
+                _break_on_runaway_reasoning(
+                    reasoning_chars, reasoning_break_chars,
+                    bool(full_content_parts) or bool(native_tool_calls), status,
+                )
                 continue
             full_content_parts.append(text)
+            _mark_progress(progress, reasoning_chars, True)
             if not tool_protocol:
                 pending += text
                 pending, tool_protocol = StreamMixins._forward_guarded_text(pending, status)
@@ -292,6 +390,8 @@ class StreamMixins:
         response: Any,
         request_format: str,
         status: StatusCallback | None,
+        reasoning_break_chars: float = 0.0,
+        progress: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Collect SSE chunks while forwarding only ordinary prose to the chat client.
 
@@ -299,12 +399,16 @@ class StreamMixins:
         DeepSeek ``<tool name="...">`` and native OpenAI ``tool_calls``) are
         buffered but never sent as ``delta`` events—they only reach the Agent
         Loop as the parsed action returned by ``complete``.
+
+        ``reasoning_break_chars``：思考预算熔断（见 ``_break_on_runaway_reasoning``）；
+        纯解析层不读 options，由调用处透传。
         """
         chunks: list[dict[str, Any]] = []
         full_content_parts: list[str] = []
         pending = ""
         reasoning_parts: list[str] = []
         reasoning_ids: list[str] = []
+        reasoning_chars = 0
         reasoning_streamer = _ReasoningStreamer(status, reasoning_parts)
         native_tool_calls: dict[int, dict[str, str]] = {}
         tool_protocol = False
@@ -351,6 +455,7 @@ class StreamMixins:
             text, inline_reasoning = inline_parser.feed(text)
             reasoning = reasoning + inline_reasoning
             if reasoning:
+                reasoning_chars += len(reasoning)
                 reasoning_streamer.feed(reasoning)
             if tool_calls:
                 # Native OpenAI tool calls must not appear as answer text.
@@ -370,8 +475,15 @@ class StreamMixins:
                         slot["arguments"] += call["arguments"]
                 continue
             if not text:
+                has_content = bool(full_content_parts) or tool_protocol or bool(native_tool_calls)
+                _mark_progress(progress, reasoning_chars, has_content)
+                # 只有「正文仍为空」的思考增量才可能触发熔断；原生工具调用已到位时不算空转。
+                _break_on_runaway_reasoning(
+                    reasoning_chars, reasoning_break_chars, has_content, status,
+                )
                 continue
             full_content_parts.append(text)
+            _mark_progress(progress, reasoning_chars, True)
             if not tool_protocol:
                 pending += text
                 pending, tool_protocol = StreamMixins._forward_guarded_text(pending, status)
@@ -422,7 +534,12 @@ class StreamMixins:
 
 
     @staticmethod
-    def _read_lm_studio_stream(response: Any, status: StatusCallback | None) -> dict[str, Any]:
+    def _read_lm_studio_stream(
+        response: Any,
+        status: StatusCallback | None,
+        reasoning_break_chars: float = 0.0,
+        progress: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """按 LM Studio 原生 chat SSE 事件解析（``message.delta`` / ``reasoning.delta`` / ``error`` / ``chat.end``）。
 
         与 OpenAI 兼容流不同，LM Studio 的 ``type`` 事件直接携带 ``content`` 增量；结构化错误事件
@@ -433,6 +550,7 @@ class StreamMixins:
         pending = ""
         reasoning_parts: list[str] = []
         reasoning_streamer = _ReasoningStreamer(status, reasoning_parts)
+        reasoning_chars = 0
         tool_protocol = False
         inline_parser = _InlineReasoningParser()
         for raw_line in response:
@@ -462,7 +580,13 @@ class StreamMixins:
             if event_type in ("reasoning.delta", "reasoning.full"):
                 reasoning = ProtocolMixins._text_value(chunk.get("content"))
                 if reasoning:
+                    reasoning_chars += len(reasoning)
                     reasoning_streamer.feed(reasoning)
+                    has_content = bool(full_content_parts) or tool_protocol
+                    _mark_progress(progress, reasoning_chars, has_content)
+                    _break_on_runaway_reasoning(
+                        reasoning_chars, reasoning_break_chars, has_content, status,
+                    )
                 continue
             if event_type in ("message.delta", "message.full"):
                 text = ProtocolMixins._text_value(chunk.get("content"))
@@ -471,10 +595,17 @@ class StreamMixins:
                 text = ProtocolMixins._text_value(chunk.get("content") or chunk.get("text"))
             text, inline_reasoning = inline_parser.feed(text)
             if inline_reasoning:
+                reasoning_chars += len(inline_reasoning)
                 reasoning_streamer.feed(inline_reasoning)
             if not text:
+                has_content = bool(full_content_parts) or tool_protocol
+                _mark_progress(progress, reasoning_chars, has_content)
+                _break_on_runaway_reasoning(
+                    reasoning_chars, reasoning_break_chars, has_content, status,
+                )
                 continue
             full_content_parts.append(text)
+            _mark_progress(progress, reasoning_chars, True)
             if not tool_protocol:
                 pending += text
                 pending, tool_protocol = StreamMixins._forward_guarded_text(pending, status)

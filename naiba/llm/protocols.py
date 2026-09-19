@@ -12,6 +12,8 @@ import re
 import urllib.parse
 from typing import Any
 
+from naiba.llm import thinking as thinking_module
+
 logger = logging.getLogger("naiba.model_runtime")
 
 # 空 CoT 的工具调用轮必须回传**非空** reasoning_text（DeepSeek Responses + tools + 思考模式，
@@ -102,10 +104,11 @@ class ProtocolMixins:
     def _is_deepseek_profile(profile: dict[str, Any]) -> bool:
         """Return whether an OpenAI-compatible profile speaks DeepSeek's
         thinking-mode dialect, which requires assistant reasoning_content on
-        every replayed assistant message (including an empty value)."""
-        base_url = str(profile.get("base_url") or "").lower()
-        model = str(profile.get("model") or "").lower()
-        return "deepseek" in model or "deepseek.com" in base_url
+        every replayed assistant message (including an empty value).
+
+        判定实现在 ``naiba.llm.thinking``（思考预设数据层的唯一来源），此处只做转发。
+        """
+        return thinking_module.is_deepseek_profile(profile)
 
     @staticmethod
     def _is_kimi_k3_profile(profile: dict[str, Any]) -> bool:
@@ -114,9 +117,13 @@ class ProtocolMixins:
         判定只看模型名：K3 是月之暗面唯一接受 ``reasoning_effort`` 的模型
         （官方取值 low/high/max、默认 max、思考永远开启）；K2.x 用 ``thinking``
         参数、收到 ``reasoning_effort`` 会报错，绝不能按 K3 方言发。
+
+        模式集合来自预设表的 ``match.model_contains``（``thinking.kimi_k3`` 一行），
+        不再在这里硬编码子串——改中继名只需改数据。
         """
-        model = str(profile.get("model") or "").lower()
-        return "kimi-k3" in model
+        return thinking_module.model_matches(
+            thinking_module.preset_model_patterns("kimi_k3"), profile.get("model")
+        )
 
 
     @staticmethod
@@ -380,55 +387,44 @@ class ProtocolMixins:
         return system_prompt, input_parts
 
 
-    # 「有推理零正文」空流重试时的思考强度降档链：high→medium→low 逐级下探。
+    # 「有推理零正文」空流重试时的思考强度降档链：**按词表声明顺序**下探
+    # （见 thinking.lower_effort）。原实现写死「应用四档减一」（high→medium→low），
+    # 对只声明 low/high/max 的词表（Kimi K3）会降到不存在的档。
     # off 本来就不发思考、auto 未发任何强度参数，二者都「无档可降」。
-    _LOWER_REASONING_EFFORT = {"high": "medium", "medium": "low"}
 
     @staticmethod
-    def _lower_reasoning_effort(effort: str) -> str:
-        """返回下一档思考强度；不可降（off/low/auto/未知）时返回空串。"""
-        return ProtocolMixins._LOWER_REASONING_EFFORT.get((effort or "").strip().lower(), "")
+    def _lower_reasoning_effort(effort: str, profile: dict[str, Any] | None = None) -> str:
+        """返回下一档思考强度；不可降（off/low/auto/未知/该档未声明）时返回空串。"""
+        preset = thinking_module.resolve_thinking(profile or {})
+        return thinking_module.lower_effort(preset, effort)
+
+    @staticmethod
+    def _thinking_preset(profile: dict[str, Any]) -> dict[str, Any]:
+        """按 provider 画像解析思考预设（卡片 thinking > 模型名 > request_format 默认）。"""
+        return thinking_module.resolve_thinking(profile)
+
+    @staticmethod
+    def _thinking_patch(profile: dict[str, Any], effort: str) -> dict[str, Any]:
+        """画像级思考 wire 补丁（**未声明的档位发请求前就失败**，不等上游 400）。"""
+        return thinking_module.thinking_payload(
+            thinking_module.resolve_thinking(profile), effort, strict=True
+        )
 
     @staticmethod
     def _reasoning_params(
         request_format: str, effort: str, deepseek: bool = False, kimi_k3: bool = False,
     ) -> dict[str, Any]:
-        """把思维强度映射为各供应商协议字段；``auto`` 不发送任何参数。"""
-        effort = (effort or "auto").strip().lower()
-        if effort not in {"off", "low", "medium", "high"}:
-            return {}
-        if request_format == "lm_studio":
-            # LM Studio 原生 API 支持 off/low/medium/high/on。
-            return {"reasoning": effort if effort != "off" else "off"}
-        if request_format == "ollama":
-            # Ollama 支持布尔值以及 low/medium/high；保留用户选择的强度。
-            return {"think": False if effort == "off" else effort}
-        if request_format == "openai_chat":
-            if kimi_k3:
-                # Kimi K3 官方方言：reasoning_effort 只认 low/high/max（默认 max），
-                # 且思考永远开启、无法关闭——off 落到最低档 low 是最贴近的语义。
-                # 应用四档 off/low/medium/high 据此映射（最高档 high→max）。
-                # 注意 K2.x 不接受 reasoning_effort（会 400），此分支仅 K3 可走。
-                mapping = {"off": "low", "low": "low", "medium": "high", "high": "max"}
-                return {"reasoning_effort": mapping[effort]}
-            # OpenAI 仅支持 low/medium/high；off 视为不启用（不发送字段）。
-            if effort == "off":
-                return {}
-            return {"reasoning_effort": effort}
-        if request_format == "codex_responses":
-            if deepseek:
-                # DeepSeek Responses API 的 effort 取值：none/low/high/max。
-                # 应用四档 off/low/medium/high 据此映射（最高档 high→max，off→none 真正关思考）。
-                mapping = {"off": "none", "low": "low", "medium": "high", "high": "max"}
-                return {"reasoning": {"effort": mapping[effort]}}
-            # OpenAI Codex Responses：低/中/高三档。
-            # （Kimi K3 无 Responses API；经中继走此格式时按 OpenAI 方言透传，
-            #  由中继自行翻译，不做 K3 特判。）
-            if effort == "off":
-                return {}
-            return {"reasoning": {"effort": effort}}
-        # gemini / claude 首期保持自动，不发送未验证字段。
-        return {}
+        """把思维强度映射为各供应商协议字段；``auto`` 不发送任何参数。
+
+        数据驱动：映射表在 ``naiba.llm.thinking.THINKING_PRESETS``，本函数只做转发。
+        保留旧签名（``deepseek`` / ``kimi_k3``）以便旧调用点与既有守门用例继续可用；
+        新代码请用 ``_thinking_patch(profile, effort)``（带卡片覆盖与发前校验）。
+        未声明的档位在此入口**容错为空**（``strict=False``），保持既有语义。
+        """
+        preset = thinking_module.find_preset(
+            request_format, deepseek=deepseek, kimi_k3=kimi_k3
+        )
+        return thinking_module.thinking_payload(preset, effort, strict=False)
 
 
     @staticmethod

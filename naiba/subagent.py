@@ -69,7 +69,11 @@ def run_subagent_agent(
     if not conversation:
         app.storage.update_job(job_id, result={"error": "对话已删除"})
         return
-    history = build_model_history(conversation.get("messages", []))
+    # 子代理与主会话同库同会话：思考回放限长必须与主对话同参数，
+    # 否则同一会话出现两种回放字节（前缀缓存断 + 行为不一致）。
+    history = build_model_history(
+        conversation.get("messages", []), **app.config.reasoning_replay_options()
+    )
     model_key = str(conversation.get("model_key") or "")
     if not model_key:
         provider_id = str(conversation.get("provider_id") or "")

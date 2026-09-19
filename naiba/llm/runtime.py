@@ -16,10 +16,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from naiba import net as net_io
+from naiba.llm import thinking as thinking_module
 from naiba.llm.protocols import ProtocolMixins
 from naiba.llm.stream import (
     ContextOverflowError,
+    EmptyModelStreamError,
     StreamMixins,
+    StreamTotalTimeout,
     _STREAM_SOURCE_LABELS,
     is_context_overflow,
 )
@@ -44,6 +47,29 @@ API_USER_AGENT = (
 )
 ONLINE_MODEL_TIMEOUT_SECONDS = 180
 LOCAL_MODEL_TIMEOUT_SECONDS = 1800
+# A0：思考时的**默认输出上限**。`max_tokens` 本就是「思考 + 正文」的总量闸门，事故缺口
+# 不在「填得太大」，而在「不填 = 不发字段 = 上游默认值近乎无限」——只有 Claude 有 4096
+# 硬兜底，其余协议不发字段就等于把输出额度交给上游默认值（DeepSeek/Moonshot 的思考
+# token 按输出计费）。实测：MiMo 会话单条回复思考 43 万字符 ≈ 10 万+ token，正是这么烧出来的。
+# 真正落地的值是 ``min(本值, 预设表的 max_output_ceiling)``；用户显式设了
+# ``max_output_tokens`` 时**永不覆盖**（含故意设很大的值），只靠 400 自愈兜底。
+DEFAULT_THINKING_MAX_OUTPUT_TOKENS = 32768
+# Claude 的历史兼容兜底：Anthropic 的 max_tokens 是协议必填，A0 只把默认值从 4096 抬到
+# min(32768, 预设 ceiling)，不得改坏「必填」语义。
+CLAUDE_MAX_TOKENS_FLOOR = 4096
+# 输出上限被端点拒绝时的错误体关键词（A0 注入值自愈的判据；用户显式值不吞错）。
+_MAX_TOKENS_REJECTION_MARKERS = (
+    "max_tokens", "max_output_tokens", "maxoutputtokens", "max output tokens", "num_predict",
+)
+# 在线单次流式请求的**总时长兜底**（秒）。urllib 的 timeout 是「每次读操作的空闲超时」，
+# 推理 delta 持续到达就会不停重置它——一段 43 万字符的思考循环可以无限流下去（见
+# _iter_stream_lines 的注释）。900 秒远超市面最长合法思考，只用于把「合法长思考」与
+# 「死循环」分开。可用 options["stream_total_timeout_seconds"] 覆盖（0 = 关闭）。
+ONLINE_STREAM_TOTAL_TIMEOUT_SECONDS = 900
+# 「思考异常冗长」熔断阈值（字符）：正常 high 档思考罕见超过（约 1.2~2 万 token 的推理量），
+# 而实测失控循环是 10 万+ 字符。只在**正文仍为空**时熔断，正文一旦出现即解除。
+# 可用 options["reasoning_stream_break_chars"] 覆盖（0 = 关闭）。
+REASONING_STREAM_BREAK_CHARS = 48000
 PROVIDER_TEST_TIMEOUT_SECONDS = 30
 # 等本地锁期间的等待时长回报间隔（秒）。原实现是 `lock.acquire()`：无超时、不看
 # cancel_event，另一个调用占着全局本地锁时主对话线程会**无限静默**地等下去。
@@ -82,16 +108,6 @@ def _last_finish_reason() -> str:
     return str(getattr(_FINISH_REASON, "value", "") or "")
 
 
-class EmptyModelStreamError(RuntimeError):
-    """在线模型流式响应消费完毕但既无正文也无有效 Agent action。
-
-    按瞬时故障处理：在既有重试预算内退避重发；「有推理零正文」的空流还会在重试时
-    沿 high→medium→low 自动降低思考强度（思考烧光输出额度的自愈，详见重试处注释），
-    次数用尽后抛出。codex_responses 的空流与任意在线协议的「有推理零正文」流都会
-    抛出该类型。
-    """
-
-
 class LocalModelFirstByteTimeout(RuntimeError):
     """本地后端在首字节超时内没有吐出任何内容。
 
@@ -112,6 +128,62 @@ def local_first_byte_timeout_error(seconds: float) -> LocalModelFirstByteTimeout
         "或在「设置 → API 供应商」里确认该本地模型的上下文长度。"
         "（该超时可在「设置 → 运行设置 → 本地首字节超时」调整，0 = 关闭）"
     )
+
+
+def _stream_total_timeout_error(seconds: float) -> StreamTotalTimeout:
+    """单次请求总时长超时的统一文案（生成器与调用方共用，避免两处措辞漂移）。"""
+    minutes = max(1.0, float(seconds)) / 60
+    return StreamTotalTimeout(
+        f"单次请求超过 {minutes:g} 分钟仍未结束，已停止等待。"
+        "常见原因是模型陷入了超长思考循环：可以降低思考强度、精简上下文后重试，"
+        "或开一个新会话。"
+        "（该上限可在 options[\"stream_total_timeout_seconds\"] 调整，0 = 关闭）"
+    )
+
+
+def _empty_stream_label(configured_format: str, is_local: bool) -> str:
+    """「空流」报错的**来源标签**：本地后端不许自称「在线模型」。
+
+    实测踩过：LM Studio（kind=local）跑到「有推理零正文」时，最终诊断却写
+    「在线模型流式响应中没有文本内容」——本机模型报错说自己是云端，用户按这句话
+    根本找不到该去哪个设置页排查（真实流式路径复测发现，见 verify/_probe_reasoning_break.py）。
+    """
+    fmt = str(configured_format or "").strip().lower()
+    if fmt == "lm_studio":
+        return "LM Studio"
+    if fmt == "ollama":
+        return "Ollama"
+    # llama.cpp / unsloth / 未知本地后端都归「本地模型」；其余才是在线。
+    return "本地模型" if is_local else "在线模型"
+
+
+def _empty_stream_phrase(configured_format: str, is_local: bool) -> str:
+    """拼出「<来源>流式响应中没有文本内容」（Latin 标签后留空格，中文标签不留）。"""
+    label = _empty_stream_label(configured_format, is_local)
+    gap = " " if label[-1:].isascii() else ""
+    return f"{label}{gap}流式响应中没有文本内容"
+
+
+def _mentions_max_tokens(detail: str) -> bool:
+    """错误体是否在抱怨「输出上限字段」（A0 注入值自愈的判据）。"""
+    text = str(detail or "").lower()
+    return any(marker in text for marker in _MAX_TOKENS_REJECTION_MARKERS)
+
+
+def _drop_injected_max_tokens(payload: dict[str, Any]) -> None:
+    """剥掉 A0 注入的输出上限字段（四种协议落点 + 两种本地形态）。
+
+    只在 ``injected_max_tokens`` 为真时调用（值是我们填的，不是用户设的），
+    所以不需要区分来源；用户显式设的值触发的 400 走「不吞错」分支。
+    """
+    payload.pop("max_tokens", None)
+    payload.pop("max_output_tokens", None)
+    generation_config = payload.get("generationConfig")
+    if isinstance(generation_config, dict):
+        generation_config.pop("maxOutputTokens", None)
+    ollama_options = payload.get("options")
+    if isinstance(ollama_options, dict):
+        ollama_options.pop("num_predict", None)
 
 
 def _window_from_error_detail(detail: str) -> int:
@@ -717,12 +789,13 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
         response: Any,
         cancel_event: threading.Event | None = None,
         first_byte_timeout: float = 0.0,
+        total_timeout: float = 0.0,
     ) -> Any:
-        """逐行产出流式响应，在取消或首字节超时时尽快中断读取。
+        """逐行产出流式响应，在取消 / 首字节超时 / 总时长超时时尽快中断读取。
 
         读取线程阻塞在 ``response.readline()``（socket 读）里，循环体根本没有机会
         看到取消请求——本地模型 prefill 期间一个字节都不吐，此前「停止」对它完全
-        无效，只能等满 30 分钟超时。这里让一个轻量看门狗线程做两件事：
+        无效，只能等满 30 分钟超时。这里让一个轻量看门狗线程做三件事：
 
         1. **取消**置位时关闭连接，把阻塞的读打断，再把随之而来的 I/O 异常翻译成
            统一的「任务已取消」，避免被误判成网络故障而进入重试/报错分支；
@@ -734,16 +807,24 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
         「正在 prefill」在界面上无法区分，用户要干等半小时才知道这一轮根本没戏。
         计时从**进入生成器**开始（此时 HTTP 头已收到），只约束「模型有没有在出内容」；
         一有正文字节就重新起算，因此它同时能抓住「中途长时间静默」。
+
+        3. ``total_timeout > 0`` 时按**墙钟**计总时长，超时抛 ``StreamTotalTimeout``。
+           这一条是给在线请求的：``ONLINE_MODEL_TIMEOUT_SECONDS`` 是 urllib **每次读操作
+           的空闲超时**，推理 delta 持续到达就不断重置它——一段 43 万字符的思考循环可以
+           无限流下去（DeepSeek/Moonshot 的思考 token 还按输出计费），界面上「合法长思考」
+           与「死循环」无法区分，只能靠用户手动停止。
         """
         timeout_seconds = max(0.0, float(first_byte_timeout or 0.0))
-        if cancel_event is None and timeout_seconds <= 0:
+        total_seconds = max(0.0, float(total_timeout or 0.0))
+        if cancel_event is None and timeout_seconds <= 0 and total_seconds <= 0:
             yield from response
             return
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("任务已取消")
         stop = threading.Event()
-        state = {"started": False, "timed_out": False}
+        state = {"started": False, "timed_out": False, "total_timed_out": False}
         progress = {"last": time.perf_counter()}
+        started_at = time.perf_counter()
 
         def abort_watchdog() -> None:
             # 只做一件事：取消或长时间没有有效载荷时关闭连接，让阻塞中的 readline 立刻抛错返回。
@@ -756,6 +837,13 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                     return
                 if timeout_seconds > 0 and time.perf_counter() - progress["last"] >= timeout_seconds:
                     state["timed_out"] = True
+                    try:
+                        response.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return
+                if total_seconds > 0 and time.perf_counter() - started_at >= total_seconds:
+                    state["total_timed_out"] = True
                     try:
                         response.close()
                     except Exception:  # noqa: BLE001
@@ -775,12 +863,16 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                 yield line
             # 超时有时表现为「连接被关掉 → 迭代干净结束」，这里补一次判定，
             # 避免退化成下游那句含糊的「流式响应中没有文本内容」。
+            if state["total_timed_out"]:
+                raise _stream_total_timeout_error(total_seconds)
             if state["timed_out"]:
                 raise local_first_byte_timeout_error(timeout_seconds)
         except Exception as exc:  # noqa: BLE001
             # 连接被看门狗关掉时会抛 ValueError/OSError，按关掉它的原因归因。
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("任务已取消") from exc
+            if state["total_timed_out"]:
+                raise _stream_total_timeout_error(total_seconds) from exc
             if state["timed_out"]:
                 raise local_first_byte_timeout_error(timeout_seconds) from exc
             raise
@@ -998,6 +1090,20 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
         reasoning_enabled = bool(
             options.get("reasoning_enabled", reasoning_effort in {"low", "medium", "high"})
         )
+        # 思考预设（卡片 thinking > 模型名 > request_format 默认）：思考强度的 wire 落点、
+        # 该端点接受的输出上限、以及「现在这一次是否确认会思考」的判据全从这里来。
+        thinking_preset = ModelRuntime._thinking_preset(profile)
+        # A0：思考时的默认输出上限。只在「未设置 + 确认会思考 + 预设声明了 ceiling」时才填，
+        # 且判据必须是**模型级**（见 thinking.thinking_active）——协议族预设命中不构成依据，
+        # 否则 gpt-4o 这类不思考的模型每个请求都会重演「填 32768 → 400 → 剥字段」。
+        injected_max_tokens = False
+        if max_tokens is None:
+            ceiling = thinking_module.max_output_ceiling(thinking_preset)
+            if ceiling > 0 and thinking_module.thinking_active(
+                profile, reasoning_effort, preset=thinking_preset
+            ):
+                max_tokens = min(DEFAULT_THINKING_MAX_OUTPUT_TOKENS, ceiling)
+                injected_max_tokens = True
         headers = {"Content-Type": "application/json", "User-Agent": API_USER_AGENT}
         native_tools = ModelRuntime._tool_schemas(options.get("tools"), request_format)
         response_format = request_format
@@ -1027,13 +1133,12 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                 payload["tools"] = native_tools
                 payload["tool_choice"] = "auto"
                 payload["parallel_tool_calls"] = True
-            reasoning_params = ModelRuntime._reasoning_params(
-                request_format, reasoning_effort,
-                kimi_k3=ModelRuntime._is_kimi_k3_profile(profile),
-            )
+            # 思考强度按 provider 画像的预设解析（卡片 thinking > 模型名 > request_format
+            # 默认）。Kimi K2.x 落到「不发字段」的预设，不再「首请求必然先 400 一次」。
+            reasoning_params = ModelRuntime._thinking_patch(profile, reasoning_effort)
             # DeepSeek selects thinking behavior from the model itself; its
             # OpenAI-compatible endpoint does not accept OpenAI's
-            # `reasoning_effort` request field.
+            # `reasoning_effort` request field.（预设已声明全 null，这条显式抑制是兜底。）
             if ModelRuntime._is_deepseek_profile(profile):
                 reasoning_params = {}
             if reasoning_params:
@@ -1063,10 +1168,7 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                 payload["tools"] = native_tools
                 payload["tool_choice"] = "auto"
                 payload["parallel_tool_calls"] = True
-            reasoning_params = ModelRuntime._reasoning_params(
-                request_format, reasoning_effort,
-                deepseek=ModelRuntime._is_deepseek_profile(profile),
-            )
+            reasoning_params = ModelRuntime._thinking_patch(profile, reasoning_effort)
             if reasoning_params:
                 payload.update(reasoning_params)
             if api_key:
@@ -1105,13 +1207,22 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
             )
             # Anthropic requires max_tokens; use its compatibility floor only
             # when the provider did not expose a limit and the user left it blank.
+            # Anthropic 必须填 max_tokens（协议必填）：A0.b 的「off/auto 不填」对它不适用——
+            # 本项只把默认值从 4096 抬到 min(32768, 预设 ceiling=8192)，不改「必填」语义。
+            claude_max_tokens = max_tokens
+            if claude_max_tokens is None:
+                claude_max_tokens = min(
+                    DEFAULT_THINKING_MAX_OUTPUT_TOKENS,
+                    max(CLAUDE_MAX_TOKENS_FLOOR, thinking_module.max_output_ceiling(thinking_preset)),
+                )
+                injected_max_tokens = True
             payload = {
                 "model": model,
                 "messages": [
                     ModelRuntime._claude_message(item)
                     for item in messages if item.get("role") != "system"
                 ],
-                "max_tokens": max_tokens if max_tokens is not None else 4096,
+                "max_tokens": claude_max_tokens,
                 "stream": stream_enabled,
             }
             if temperature is not None:
@@ -1154,7 +1265,7 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                 payload["options"] = ollama_options
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
-            reasoning_params = ModelRuntime._reasoning_params(request_format, reasoning_effort)
+            reasoning_params = ModelRuntime._thinking_patch(profile, reasoning_effort)
             if reasoning_params:
                 payload.update(reasoning_params)
         elif request_format == "lm_studio":
@@ -1196,7 +1307,7 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                 context_window = profile.get("context_window") or profile.get("context_size")
                 if context_window:
                     payload["context_length"] = int(context_window)
-                reasoning_params = ModelRuntime._reasoning_params(request_format, reasoning_effort)
+                reasoning_params = ModelRuntime._thinking_patch(profile, reasoning_effort)
                 if reasoning_params:
                     payload.update(reasoning_params)
             if api_key:
@@ -1242,6 +1353,8 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
         endpoint_host = parsed_endpoint.hostname or parsed_endpoint.netloc or endpoint
         endpoint_port = parsed_endpoint.port or (443 if parsed_endpoint.scheme == "https" else 80)
         target = "本地模型" if is_local else "在线模型"
+        # 「空流」报错的来源标签：LM Studio / Ollama 必须自报家门，不许自称「在线模型」。
+        empty_stream_phrase = _empty_stream_phrase(configured_format, is_local)
         target_detail = f"{target}“{provider_name}”" if provider_name else target
         # Include the endpoint PATH (not only host:port) so a mis-routed request
         # (e.g. an unexpected /v1/models) is immediately visible in the error.
@@ -1265,7 +1378,10 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
             request_timeout = max(1, min(int(timeout_override), LOCAL_MODEL_TIMEOUT_SECONDS))
         # 本地流式请求另加「首字节超时」：prefill 做不完时本地后端一个字节都不吐，
         # 只靠 1800 秒总超时等于让用户干等半小时（客户机实测整条会话看似永久卡死）。
-        # 在线请求不加：云端排队/长时间思考是合法的，且在线已有 180 秒总超时兜底。
+        # 在线请求不加首字节超时：云端排队/长时间思考是合法的，真正的兜底是下面的
+        # **墙钟总时长**（ONLINE_STREAM_TOTAL_TIMEOUT_SECONDS）。
+        # 注意 180 秒**不是**总超时：它是 urllib 每次读操作的空闲超时，delta 持续到达
+        # 就会不停重置它——只靠它拦不住推理死循环（旧注释与此相反，已修正）。
         first_byte_timeout = 0.0
         if is_local:
             first_byte_timeout = float(LOCAL_FIRST_BYTE_TIMEOUT_SECONDS)
@@ -1274,6 +1390,26 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                 first_byte_timeout = max(0.0, float(override))
         if diagnostics is not None:
             diagnostics["first_byte_timeout_s"] = round(first_byte_timeout, 3)
+        # 「思考异常冗长」熔断阈值（字符；0 = 关闭）。纯解析层不读 options，由这里透传。
+        reasoning_break_chars = float(REASONING_STREAM_BREAK_CHARS)
+        break_override = options.get("reasoning_stream_break_chars")
+        if isinstance(break_override, (int, float)) and not isinstance(break_override, bool):
+            reasoning_break_chars = max(0.0, float(break_override))
+        # 在线单请求总时长兜底（秒；0 = 关闭）。urllib 的 timeout 是「每次读操作的空闲超时」，
+        # 推理 delta 持续到达就不断重置它——只靠 180s 空闲超时，一段思考死循环可以无限流下去。
+        stream_total_timeout = 0.0
+        if not is_local:
+            stream_total_timeout = float(ONLINE_STREAM_TOTAL_TIMEOUT_SECONDS)
+            total_override = options.get("stream_total_timeout_seconds")
+            if isinstance(total_override, (int, float)) and not isinstance(total_override, bool):
+                stream_total_timeout = max(0.0, float(total_override))
+        # LM Studio 是本地后端（is_local ⇒ attempts=1、空流默认不重试），但它的「有推理零正文」
+        # 与在线同病（思考烧光输出额度），§C 要求补齐降档重试，故单独开这个口子。
+        # ollama 不动：它有自己的 think=False 内联重试，且本地重发要多付一次 prefill。
+        lm_studio_retry = configured_format == "lm_studio"
+        if diagnostics is not None:
+            diagnostics["reasoning_break_chars"] = int(reasoning_break_chars)
+            diagnostics["stream_total_timeout_s"] = round(stream_total_timeout, 3)
         attempts = 1 if is_local else 3
         attempts_override = options.get("request_attempts")
         if isinstance(attempts_override, int) and attempts_override > 0:
@@ -1284,10 +1420,20 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
             attempts = max(attempts, 2)
         if stream_options_requested and native_tools:
             attempts = max(attempts, 3)
+        if lm_studio_retry:
+            # LM Studio 的空流降档重试至少要两次尝试才有意义。
+            attempts = max(attempts, 2)
+        # A0 注入型兜底启用时 attempts 下限 +1：effort=high 打在不支持思考的端点上会连锁
+        # 触发两个剥字段自愈（既有 reasoning_fallback 剥 reasoning_effort → A0 自愈剥注入的
+        # max_tokens），各消耗一次 attempt；默认 attempts=3 刚好够但很紧，再撞上
+        # stream_options / tools 回退就会耗尽，于是「剥两类字段 + 一次成功」将没有余量。
+        if injected_max_tokens and attempts < 5:
+            attempts += 1
         tool_fallback_used = False
         stream_options_fallback_used = False
         reasoning_fallback_used = False
         reasoning_passback_fallback_used = False
+        max_tokens_fallback_used = False
         # 「有推理零正文」空流重试时的降档状态：current_effort 只影响本次请求的
         # 重试负载（不改会话设置）；empty_stream_reason_chars 记录失败尝试里最长的
         # 一次推理长度，给最终报错提供诊断。
@@ -1308,14 +1454,28 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
             })
         for attempt in range(attempts):
             request_started = time.perf_counter()
+            # 每次尝试重置进度袋：总时长超时后要靠它区分「全程只有推理」与「正文已出来」。
+            stream_progress: dict[str, Any] = {}
             if diagnostics is not None:
                 diagnostics["attempts"] = attempt + 1
             try:
                 with ModelRuntime._urlopen_cancelable(request, request_timeout, cancel_event) as response:
                     if stream_enabled and response_format == "ollama":
-                        streamed = ModelRuntime._read_ollama_stream(
-                            ModelRuntime._iter_stream_lines(response, cancel_event, first_byte_timeout), status
-                        )
+                        try:
+                            streamed = ModelRuntime._read_ollama_stream(
+                                ModelRuntime._iter_stream_lines(
+                                    response, cancel_event, first_byte_timeout, stream_total_timeout
+                                ),
+                                status, reasoning_break_chars, stream_progress,
+                            )
+                        except EmptyModelStreamError as exc:
+                            # 思考预算熔断（§A）：本地模型也会思考失控（如 Qwen3 循环）。
+                            # 不直接失败，走下面的「关掉思考重试一次」既有路径。
+                            empty_stream_reason_chars = max(
+                                empty_stream_reason_chars,
+                                int(getattr(exc, "reasoning_chars", 0) or 0),
+                            )
+                            streamed = {"content": "", "reasoning": "", "usage": {}, "finish_reason": ""}
                         content = ModelRuntime._clean_content(streamed["content"])
                         reasoning = streamed["reasoning"]
                         if not content:
@@ -1337,8 +1497,10 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                                     retry_request, request_timeout, cancel_event
                                 ) as retry_response:
                                     streamed = ModelRuntime._read_ollama_stream(
-                                        ModelRuntime._iter_stream_lines(retry_response, cancel_event, first_byte_timeout),
-                                        status,
+                                        ModelRuntime._iter_stream_lines(
+                                            retry_response, cancel_event, first_byte_timeout, stream_total_timeout
+                                        ),
+                                        status, reasoning_break_chars, stream_progress,
                                     )
                                 content = ModelRuntime._clean_content(streamed["content"])
                                 reasoning = streamed["reasoning"]
@@ -1352,7 +1514,10 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                         return content, reasoning, "", streamed["usage"]
                     if stream_enabled and response_format == "lm_studio":
                         streamed = ModelRuntime._read_lm_studio_stream(
-                            ModelRuntime._iter_stream_lines(response, cancel_event, first_byte_timeout), status
+                            ModelRuntime._iter_stream_lines(
+                                response, cancel_event, first_byte_timeout, stream_total_timeout
+                            ),
+                            status, reasoning_break_chars, stream_progress,
                         )
                         content = ModelRuntime._clean_content(streamed["content"])
                         reasoning = streamed["reasoning"]
@@ -1360,15 +1525,25 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                             content = ModelRuntime._reasoning_action(reasoning)
                             if content:
                                 reasoning = ""
+                            elif reasoning:
+                                # 「有推理零正文」= 思考烧光了输出额度（实测本地模型同理）。
+                                # 对齐在线路径语义：抛 EmptyModelStreamError 走降档重试，
+                                # 而不是把一次可自愈的抖动升级成整轮失败（原实现直接 RuntimeError）。
+                                empty_stream_reason_chars = max(empty_stream_reason_chars, len(reasoning))
+                                raise EmptyModelStreamError(empty_stream_phrase)
                             else:
-                                raise RuntimeError("LM Studio 流式响应中没有文本内容")
+                                raise RuntimeError(empty_stream_phrase)
                         _record_finish_reason(streamed.get("finish_reason"))
                         return content, reasoning, "", streamed["usage"]
                     if stream_enabled and response_format != "gemini":
                         streamed = ModelRuntime._read_sse_response(
-                            ModelRuntime._iter_stream_lines(response, cancel_event, first_byte_timeout),
+                            ModelRuntime._iter_stream_lines(
+                                response, cancel_event, first_byte_timeout, stream_total_timeout
+                            ),
                             response_format,
                             status,
+                            reasoning_break_chars,
+                            stream_progress,
                         )
                         content = ModelRuntime._clean_content(streamed["content"])
                         reasoning = streamed["reasoning"]
@@ -1388,9 +1563,9 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                                 #    抖动/思考失控升级成整轮对话失败。
                                 # 既无正文也无推理的空流仍保留原 RuntimeError、不重试。
                                 empty_stream_reason_chars = max(empty_stream_reason_chars, len(reasoning))
-                                raise EmptyModelStreamError("在线模型流式响应中没有文本内容")
+                                raise EmptyModelStreamError(empty_stream_phrase)
                             else:
-                                raise RuntimeError("在线模型流式响应中没有文本内容")
+                                raise RuntimeError(empty_stream_phrase)
                         _record_finish_reason(streamed.get("finish_reason"))
                         return content, reasoning, str(streamed.get("reasoning_id") or ""), streamed["usage"]
                     raw_response = ModelRuntime._read_response_cancelable(
@@ -1441,6 +1616,34 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                         is_local=is_local,
                         provider=overflow_source,
                     ) from exc
+                # A0 自愈（**只对注入值生效**）：思考时我们主动填的输出上限兜底值若被端点拒绝
+                # （模型真实上限比预设表小），去掉该字段重试一次——用户没要求这个值，不能让
+                # 兜底把一轮对话打死。**用户显式设的值触发的 400 不吞错**（照常抛出，暴露
+                # 真实问题）。只重试一次，禁循环。
+                if (
+                    injected_max_tokens
+                    and not max_tokens_fallback_used
+                    and exc.code in {400, 422}
+                    and _mentions_max_tokens(detail)
+                ):
+                    if request_format == "claude":
+                        # Anthropic 的 max_tokens 是协议必填：去掉必然再 400。
+                        # 回退到旧的 4096 兼容值才是有意义的自愈（不得改坏「必填」语义）。
+                        payload["max_tokens"] = CLAUDE_MAX_TOKENS_FLOOR
+                        note = "当前接口不接受较大的输出上限，已回退兼容值重试"
+                    else:
+                        _drop_injected_max_tokens(payload)
+                        note = "当前接口不接受该输出上限字段，已去掉后重试"
+                    request = urllib.request.Request(
+                        endpoint,
+                        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                        headers=headers,
+                        method="POST",
+                    )
+                    max_tokens_fallback_used = True
+                    if status:
+                        status({"type": "status", "message": note})
+                    continue
                 stream_option_rejection = any(
                     marker in detail.lower()
                     for marker in ("stream_options", "include_usage")
@@ -1474,6 +1677,10 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                     fallback_payload = dict(payload)
                     for key in ("tools", "tool_choice", "parallel_tool_calls", "toolConfig"):
                         fallback_payload.pop(key, None)
+                    # 回写到 payload：**剥掉的字段必须累积**。否则下一个兜底分支
+                    # （A0 的去 max_tokens 自愈）会从旧的 payload 重建请求，把刚刚
+                    # 剥掉的字段又贴回去，「剥两类字段 + 一次成功」的余量就白给了。
+                    payload = fallback_payload
                     request = urllib.request.Request(
                         endpoint,
                         data=json.dumps(fallback_payload, ensure_ascii=False).encode("utf-8"),
@@ -1527,6 +1734,8 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                         fallback_messages.append(message)
                     fallback_payload["messages"] = fallback_messages
                     fallback_payload.pop("reasoning_effort", None)
+                    # 同上：回写 payload，让后续兜底分支在「已剥掉思考字段」的基底上继续。
+                    payload = fallback_payload
                     request = urllib.request.Request(
                         endpoint,
                         data=json.dumps(fallback_payload, ensure_ascii=False).encode("utf-8"),
@@ -1555,6 +1764,10 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                     fallback_payload = dict(payload)
                     for key in ("tools", "tool_choice", "parallel_tool_calls", "toolConfig"):
                         fallback_payload.pop(key, None)
+                    # 回写到 payload：**剥掉的字段必须累积**。否则下一个兜底分支
+                    # （A0 的去 max_tokens 自愈）会从旧的 payload 重建请求，把刚刚
+                    # 剥掉的字段又贴回去，「剥两类字段 + 一次成功」的余量就白给了。
+                    payload = fallback_payload
                     request = urllib.request.Request(
                         endpoint,
                         data=json.dumps(fallback_payload, ensure_ascii=False).encode("utf-8"),
@@ -1653,53 +1866,84 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                 raise _context_overflow_error(
                     exc, profile, is_local=is_local, provider=overflow_source,
                 ) from exc
-            except EmptyModelStreamError:
-                # 仅在线的流式空响应走此分支（本地/连接测试不重试）。
-                # 「有推理零正文」的空流极可能是思考烧光了输出额度——原样重发会
-                # 重现同一个推理循环（实测三次尝试各思考约 10 万字符、正文全空），
-                # 所以重试沿 high→medium→low 逐级降低思考强度，打破循环而不是
-                # 重复循环；无档可降（off/low/auto 或该协议本就不发思考字段）时
-                # 保持原有的退避重发，应对真正的上游瞬时抖动。
-                if not is_local and not connection_test and attempt + 1 < attempts:
-                    delay = min(1.5 * (attempt + 1), 5.0)
-                    lowered = ""
-                    # openai_chat + DeepSeek 的画像不发任何思考字段（端点拒收
-                    # reasoning_effort），降档无从谈起；其余 codex_responses /
-                    # openai_chat 都可以在线控档（Kimi K3 走自己的方言映射）。
-                    if response_format in {"codex_responses", "openai_chat"} and not (
-                        response_format == "openai_chat"
-                        and ModelRuntime._is_deepseek_profile(profile)
-                    ):
-                        lowered = ModelRuntime._lower_reasoning_effort(current_effort)
+            except StreamTotalTimeout as exc:
+                # 单次请求超过墙钟总时长（§D）。900 秒远超市面最长合法思考，所以走到这里
+                # 要么是上游卡死、要么是思考死循环——两者都不能继续等下去。
+                # 归因靠解析层回传的进度袋：**全程只有推理、零正文** ⇒ 与空流同病，
+                # 重试时降档打破循环；否则按瞬时故障退避重发（与 URLError 分支同档）。
+                if attempt + 1 >= attempts:
+                    raise
+                delay = min(1.5 * (attempt + 1), 5.0)
+                reasoning_only = bool(stream_progress.get("reasoning_chars")) and not bool(
+                    stream_progress.get("has_content")
+                )
+                lowered_note = ""
+                if reasoning_only:
+                    lowered = ModelRuntime._lower_reasoning_effort(current_effort, profile)
                     if lowered:
                         current_effort = lowered
                         effort_lowered_on_retry = True
-                        reasoning_params = ModelRuntime._reasoning_params(
-                            response_format, current_effort,
-                            deepseek=ModelRuntime._is_deepseek_profile(profile),
-                            kimi_k3=ModelRuntime._is_kimi_k3_profile(profile),
-                        )
-                        payload = dict(payload)
-                        wire_key = "reasoning" if response_format == "codex_responses" else "reasoning_effort"
-                        if reasoning_params:
-                            payload[wire_key] = reasoning_params[wire_key]
-                        else:
-                            payload.pop(wire_key, None)
+                        payload = thinking_module.strip_thinking_fields(payload)
+                        payload.update(ModelRuntime._thinking_patch(profile, current_effort))
                         request = urllib.request.Request(
                             endpoint,
                             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                             headers=headers,
                             method="POST",
                         )
-                        message = (
-                            f"在线模型返回空响应（思考未产出正文），{delay:g} 秒后"
-                            f"自动降低思考强度重试（{attempt + 1}/{attempts - 1}）"
+                        lowered_note = "并自动降低思考强度"
+                if status:
+                    status({"type": "status", "message": (
+                        f"单次请求超过 {stream_total_timeout / 60:g} 分钟仍未结束，已停止等待，"
+                        f"{delay:g} 秒后{lowered_note}重试（{attempt + 1}/{attempts - 1}）"
+                    )})
+                if cancel_event:
+                    if cancel_event.wait(delay):
+                        raise RuntimeError("任务已取消")
+                else:
+                    time.sleep(delay)
+                continue
+            except EmptyModelStreamError as exc:
+                if getattr(exc, "reasoning_chars", 0):
+                    # 思考预算熔断：把熔断时的截断长度记进诊断（文案已兼容）。
+                    empty_stream_reason_chars = max(
+                        empty_stream_reason_chars, int(exc.reasoning_chars)
+                    )
+                # 在线的流式空响应走此分支（连接测试不重试）；本地只有 LM Studio 走
+                # （is_local ⇒ attempts 默认 1，它的空流降档重试是 §C 明确补齐的口子）。
+                # 「有推理零正文」的空流极可能是思考烧光了输出额度——原样重发会重现同一个
+                # 推理循环（实测三次尝试各思考约 10 万字符、正文全空），所以重试沿**该 provider
+                # 预设的词表顺序**逐级降低思考强度，打破循环而不是重复循环；无档可降
+                # （off/low/auto 或该协议本就不发思考字段）时保持原有的退避重发，
+                # 应对真正的上游瞬时抖动。
+                if (not is_local or lm_studio_retry) and not connection_test and attempt + 1 < attempts:
+                    delay = min(1.5 * (attempt + 1), 5.0)
+                    lowered_note = ""
+                    # 按该 provider 预设的词表顺序下探一档（见 thinking.lower_effort）：
+                    # K3 的 low/high/max 退到「声明顺序里的上一档」，而不是「应用四档减一」
+                    # 退到不存在的中档；不再按协议族写白名单（LM Studio 等本地方言同样可降）。
+                    # openai_chat + DeepSeek 预设不发任何思考字段，降档无从谈起。
+                    lowered = ModelRuntime._lower_reasoning_effort(current_effort, profile)
+                    if lowered:
+                        current_effort = lowered
+                        effort_lowered_on_retry = True
+                        # 先剥掉旧方言字段再补新档，避免 reasoning / reasoning_effort 两种
+                        # 落点同时残留在请求体里（strip 返回副本，不动上面那份 payload）。
+                        payload = thinking_module.strip_thinking_fields(payload)
+                        payload.update(ModelRuntime._thinking_patch(profile, current_effort))
+                        request = urllib.request.Request(
+                            endpoint,
+                            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                            headers=headers,
+                            method="POST",
                         )
-                    else:
-                        message = (
-                            f"在线模型返回空响应，{delay:g} 秒后重试"
-                            f"（{attempt + 1}/{attempts - 1}）"
-                        )
+                        lowered_note = "自动降低思考强度"
+                    suffix = f"{lowered_note}重试（{attempt + 1}/{attempts - 1}）"
+                    message = (
+                        f"在线模型返回空响应（思考未产出正文），{delay:g} 秒后{suffix}"
+                        if lowered_note
+                        else f"在线模型返回空响应，{delay:g} 秒后{suffix}"
+                    )
                     if status:
                         status({
                             "type": "status",
@@ -1718,7 +1962,7 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                         else "（模型思考后未产出正文，"
                     )
                     raise RuntimeError(
-                        "在线模型流式响应中没有文本内容"
+                        f"{empty_stream_phrase}"
                         f"{diagnosis}已自动降低思考强度重试仍失败；"
                         "请把思考强度调低或精简上下文后重新生成）"
                     )

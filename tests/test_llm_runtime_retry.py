@@ -169,8 +169,9 @@ class OnlineRetryTests(unittest.TestCase):
 
     def test_http_500_is_retried_then_raises(self) -> None:
         events: list[dict] = []
-        calls, _content, error = self._run([http_error(500)] * 3, status=events.append)
-        self.assertEqual(len(calls), 3, "HTTP 500 必须重试到次数上限")
+        calls, _content, error = self._run([http_error(500)] * 4, status=events.append)
+        # attempts = 4：A0 注入型兜底启用时下限 +1（见 runtime 里 attempts 计算处注释）。
+        self.assertEqual(len(calls), 4, "HTTP 500 必须重试到次数上限")
         self.assertIsNotNone(error)
         self.assertIn("HTTP 500", str(error))
         retry_notes = [
@@ -243,7 +244,7 @@ class OnlineRetryTests(unittest.TestCase):
         events: list[dict] = []
         calls, _content, error = self._run(
             [EMPTY_CODEX_STREAM], status=events.append, options={"stream": True})
-        self.assertEqual(len(calls), 3, "codex 空流必须重试到次数上限")
+        self.assertEqual(len(calls), 4, "codex 空流必须重试到次数上限")
         self.assertIsInstance(error, EmptyModelStreamError)
         self.assertIn("没有文本内容", str(error))
         retry_notes = [
@@ -273,7 +274,7 @@ class OnlineRetryTests(unittest.TestCase):
         calls, _content, error = self._run(
             [REASONING_ONLY_OPENAI_STREAM], status=events.append,
             options={"stream": True}, profile=PROFILE_OPENAI)
-        self.assertEqual(len(calls), 3, "有思考无正文的流必须重试到次数上限")
+        self.assertEqual(len(calls), 4, "有思考无正文的流必须重试到次数上限")
         self.assertIsInstance(error, EmptyModelStreamError)
         self.assertIn("没有文本内容", str(error))
         retry_notes = [
@@ -323,7 +324,7 @@ class OnlineRetryTests(unittest.TestCase):
         calls, _content, error = self._run(
             [REASONING_ONLY_CODEX_STREAM], status=events.append,
             options={"stream": True}, profile={**PROFILE, "reasoning_effort": "high"})
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 4)
         self.assertIsNotNone(error)
         self.assertIn("没有文本内容", str(error))
         self.assertIn("降低思考强度", str(error))
@@ -331,26 +332,27 @@ class OnlineRetryTests(unittest.TestCase):
             json.loads(call.data.decode("utf-8"))["reasoning"]["effort"]
             for call in calls
         ]
-        self.assertEqual(efforts, ["max", "high", "low"], "重试必须逐级降档")
+        self.assertEqual(efforts[:3], ["max", "high", "low"], "重试必须逐级降档")
+        self.assertEqual(set(efforts[3:]), {"low"}, "降到最低档后不得再改负载")
 
     def test_reasoning_only_codex_low_effort_retries_as_is(self) -> None:
         """已是最低档：无档可降，保持原样退避重试（应对上游瞬时抖动）。"""
         calls, _content, error = self._run(
             [REASONING_ONLY_CODEX_STREAM], options={"stream": True},
             profile={**PROFILE, "reasoning_effort": "low"})
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 4)
         self.assertIsInstance(error, EmptyModelStreamError)
         efforts = [
             json.loads(call.data.decode("utf-8"))["reasoning"]["effort"]
             for call in calls
         ]
-        self.assertEqual(efforts, ["low", "low", "low"], "无档可降时不得改负载")
+        self.assertEqual(set(efforts), {"low"}, "无档可降时不得改负载")
 
     def test_reasoning_only_codex_auto_effort_retries_as_is(self) -> None:
         """auto 未发任何思考参数：无档可降，重试负载不得新增 reasoning 字段。"""
         calls, _content, error = self._run(
             [REASONING_ONLY_CODEX_STREAM], options={"stream": True}, profile=PROFILE)
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 4)
         self.assertIsInstance(error, EmptyModelStreamError)
         for call in calls:
             self.assertNotIn("reasoning", json.loads(call.data.decode("utf-8")))
@@ -360,7 +362,7 @@ class OnlineRetryTests(unittest.TestCase):
         calls, _content, error = self._run(
             [REASONING_ONLY_OPENAI_STREAM], options={"stream": True},
             profile={**PROFILE_OPENAI, "reasoning_effort": "high"})
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(calls), 4)
         self.assertIsInstance(error, EmptyModelStreamError)
         for call in calls:
             self.assertNotIn("reasoning_effort", json.loads(call.data.decode("utf-8")))
@@ -401,6 +403,291 @@ class OnlineRetryTests(unittest.TestCase):
         self.assertEqual(content, "pong")
         payload = json.loads(calls[0].data.decode("utf-8"))
         self.assertEqual(payload.get("reasoning_effort"), "low")
+
+
+# 不支持思考的模型（auto 档必须**不发** max_tokens，否则每请求白打一次 400 往返）。
+PROFILE_GPT4O = {
+    **PROFILE,
+    "name": "openai-official",
+    "base_url": "https://api.openai.com",
+    "model": "gpt-4o",
+    "request_format": "openai_chat",
+}
+# Anthropic：max_tokens 是协议必填（默认值是 4096 兜底，不是「不发」）。
+PROFILE_CLAUDE = {
+    **PROFILE,
+    "name": "anthropic",
+    "base_url": "https://api.anthropic.com",
+    "model": "claude-sonnet-4",
+    "request_format": "claude",
+}
+# Gemini：输出上限落在 generationConfig.maxOutputTokens，键名与其它三种协议都不同。
+PROFILE_GEMINI = {
+    **PROFILE,
+    "name": "gemini",
+    "base_url": "https://generativelanguage.googleapis.com",
+    "model": "gemini-2.5-pro",
+    "request_format": "gemini",
+}
+PLAIN_OPENAI_DONE = {
+    "choices": [{"message": {"content": "pong"}}],
+    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+}
+
+
+class ThinkingOutputBudgetTests(unittest.TestCase):
+    """A0：思考时的默认输出上限（max_tokens 是「思考+正文」的总量闸门）。
+
+    事故缺口不是「填得太大」，而是「不填 = 不发字段 = 上游默认值近乎无限」（只有 Claude
+    有 4096 硬兜底）。MiMo 会话单条 43 万字符思考就是这么烧出来的。
+    """
+
+    def _run(
+        self,
+        outcomes: list,
+        options: dict | None = None,
+        profile: dict | None = None,
+        messages: list | None = None,
+        status=None,
+    ) -> tuple[list, str, BaseException | None]:
+        calls: list = []
+        dump_dir = tempfile.mkdtemp(prefix="naiba-a0-test-")
+        self.addCleanup(shutil.rmtree, dump_dir, ignore_errors=True)
+
+        def fake_open(request, timeout, cancel_event=None, opener=None):
+            calls.append(request)
+            outcome = outcomes[min(len(calls) - 1, len(outcomes) - 1)]
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return FakeResponse(outcome)
+
+        with mock.patch.object(ModelRuntime, "_urlopen_cancelable", fake_open), \
+                mock.patch("naiba.llm.runtime.time.sleep"), \
+                mock.patch.dict(os.environ, {"NAIBA_ERROR_DUMP_DIR": dump_dir}, clear=False):
+            try:
+                content = ModelRuntime().complete(
+                    profile or PROFILE,
+                    messages or MESSAGES,
+                    options if options is not None else {"stream": False},
+                    status,
+                )
+                error = None
+            except RuntimeError as exc:
+                content, error = "", exc
+        return calls, content, error
+
+    @staticmethod
+    def _payload(call) -> dict:
+        return json.loads(call.data.decode("utf-8"))
+
+    def test_explicit_effort_fills_default_cap(self) -> None:
+        calls, content, error = self._run(
+            [PLAIN_OPENAI_DONE], profile={**PROFILE_GPT, "reasoning_effort": "high"})
+        self.assertIsNone(error)
+        self.assertEqual(content, "pong")
+        self.assertEqual(self._payload(calls[0])["max_tokens"], 32768)
+
+    def test_cap_is_clamped_by_preset_ceiling(self) -> None:
+        """claude 预设的 ceiling 是 8192：注入值必须是 min(32768, ceiling)。"""
+        calls, _content, _error = self._run(
+            [{"content": [{"type": "text", "text": "pong"}]}],
+            profile={**PROFILE_CLAUDE, "reasoning_effort": "high"})
+        self.assertEqual(self._payload(calls[0])["max_tokens"], 8192)
+
+    def test_user_value_wins_over_cap(self) -> None:
+        calls, _content, _error = self._run(
+            [PLAIN_OPENAI_DONE], options={"stream": False, "max_tokens": 65536},
+            profile={**PROFILE_GPT, "reasoning_effort": "high"})
+        self.assertEqual(self._payload(calls[0])["max_tokens"], 65536,
+                         "用户显式设的值（含故意设很大）永远优先")
+
+    def test_off_never_fills(self) -> None:
+        calls, _content, _error = self._run(
+            [PLAIN_OPENAI_DONE], profile={**PROFILE_GPT, "reasoning_effort": "off"})
+        self.assertNotIn("max_tokens", self._payload(calls[0]))
+
+    def test_auto_without_model_level_evidence_never_fills(self) -> None:
+        """粒度洞回归：协议族预设命中**不构成** auto 档的填充依据。
+
+        gpt-4o 不思考，若按协议族预设（openai）填 32768，端点会 400；而剥字段自愈只在
+        **单次请求内**重试、不是学习，于是每个请求都完整重演「填 → 400 → 剥 → 重试」。
+        """
+        calls, _content, _error = self._run([PLAIN_OPENAI_DONE], profile=PROFILE_GPT4O)
+        self.assertNotIn("max_tokens", self._payload(calls[0]),
+                         "auto 档 + 仅协议族预设命中 ⇒ 不得发字段（与现状一致）")
+
+    def test_auto_with_model_level_evidence_fills(self) -> None:
+        """模型级证据成立（DeepSeek 画像命中预设表里的思考模型）⇒ auto 也填。"""
+        calls, _content, _error = self._run([PLAIN_OPENAI_DONE], profile=PROFILE_OPENAI)
+        self.assertEqual(self._payload(calls[0])["max_tokens"], 32768)
+
+    def test_auto_with_card_declared_thinking_fills(self) -> None:
+        """卡片显式配置 thinking ⇒ 视为模型级证据（用户自己声明这台端点会思考）。"""
+        calls, _content, _error = self._run(
+            [PLAIN_OPENAI_DONE],
+            profile={**PROFILE_GPT4O, "thinking": {"max_output_ceiling": 65536}})
+        self.assertEqual(self._payload(calls[0])["max_tokens"], 32768,
+                         "auto + 卡片声明 ⇒ 填 min(32768, ceiling)")
+
+    def test_claude_fills_even_at_auto(self) -> None:
+        """claude 的 max_tokens 是协议必填：A0.b 的「off/auto 不填」对它不适用。"""
+        calls, _content, _error = self._run(
+            [{"content": [{"type": "text", "text": "pong"}]}],
+            profile={**PROFILE_CLAUDE, "reasoning_effort": "off"})
+        self.assertEqual(self._payload(calls[0])["max_tokens"], 8192)
+
+    def test_cap_lands_on_each_protocols_own_key(self) -> None:
+        """四种协议的**落点键名各不相同**——写错键名会静默不生效（真实请求体复检踩过）。
+
+        真实复测（verify/_probe_a0_wire.py）用记录型上游收下请求体才发现：
+        codex_responses 是 `max_output_tokens`、gemini 是 `generationConfig.maxOutputTokens`，
+        按 `max_tokens` 去断言只会看到 None，误判成「没注入」。
+        """
+        cases = [
+            ("openai_chat", {**PROFILE_GPT, "reasoning_effort": "high"}, PLAIN_OPENAI_DONE,
+             ["max_tokens"], 32768),
+            ("codex_responses", {**PROFILE, "reasoning_effort": "high"}, {"output": []},
+             ["max_output_tokens"], 32768),
+            ("claude", {**PROFILE_CLAUDE, "reasoning_effort": "high"},
+             {"content": [{"type": "text", "text": "pong"}]}, ["max_tokens"], 8192),
+            ("gemini", {**PROFILE_GEMINI, "reasoning_effort": "high"}, {"candidates": []},
+             ["generationConfig", "maxOutputTokens"], 8192),
+        ]
+        for label, profile, outcome, path, expect in cases:
+            with self.subTest(protocol=label):
+                calls, _content, _error = self._run([outcome], profile=profile)
+                payload = self._payload(calls[0])
+                for key in path:
+                    self.assertIn(key, payload, f"{label} 的落点键名不得改变")
+                    payload = payload[key]
+                self.assertEqual(payload, expect, f"{label} 的注入值")
+
+    def test_injected_value_400_drops_field_once(self) -> None:
+        """注入值被端点拒 ⇒ 去字段重试一次（用户没要求这个值，不能让兜底打死一轮）。"""
+        body = json.dumps({"error": {"message": "max_output_tokens is too large for this model"}})
+        events: list[dict] = []
+        calls, content, error = self._run(
+            [http_error(400, body, "Bad Request"), {"output_text": "pong"}],
+            status=events.append)
+        self.assertIsNone(error)
+        self.assertEqual(content, "pong")
+        self.assertEqual(len(calls), 2, "只重试一次，禁循环")
+        self.assertIn("max_output_tokens", self._payload(calls[0]))
+        self.assertNotIn("max_output_tokens", self._payload(calls[1]),
+                         "重试必须去掉我们注入的字段")
+        notes = [str(e.get("message") or "") for e in events if e.get("type") == "status"]
+        self.assertTrue(any("输出上限" in note for note in notes), f"必须告知用户，实际：{notes}")
+
+    def test_user_value_400_is_not_swallowed(self) -> None:
+        """用户显式设的值触发的 400 **不吞错**（照常抛出，暴露真实问题）。"""
+        body = json.dumps({"error": {"message": "max_output_tokens is too large"}})
+        calls, _content, error = self._run(
+            [http_error(400, body, "Bad Request")], options={"stream": False, "max_tokens": 999999})
+        self.assertIsNotNone(error)
+        self.assertIn("HTTP 400", str(error))
+        self.assertEqual(len(calls), 1, "用户显式值不得触发去字段自愈")
+
+    def test_chained_stripping_has_budget(self) -> None:
+        """effort=high 打在不支持思考的端点：连锁剥 reasoning_effort + 注入的 max_tokens。
+
+        两次剥字段各消耗一次 attempt，默认 3 会很紧 ⇒ 注入启用时 attempts 下限 +1。
+        同时断言：第一次剥掉的字段不能在下一次重建负载时被贴回来（否则永远剥不干净）。
+        """
+        reasoning_body = json.dumps({"error": {"message": "unknown field: reasoning_effort"}})
+        cap_body = json.dumps({"error": {"message": "max_tokens is too large"}})
+        calls, content, error = self._run(
+            [
+                http_error(400, reasoning_body, "Bad Request"),
+                http_error(400, cap_body, "Bad Request"),
+                PLAIN_OPENAI_DONE,
+            ],
+            profile={**PROFILE_GPT, "reasoning_effort": "high"},
+        )
+        self.assertIsNone(error, f"剥两类字段后必须仍有余量成功，实际错误：{error}")
+        self.assertEqual(content, "pong")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(self._payload(calls[0]).get("reasoning_effort"), "high")
+        self.assertEqual(self._payload(calls[1]).get("max_tokens"), 32768,
+                         "第二次只剩「去 max_tokens」一件事要做")
+        self.assertNotIn("reasoning_effort", self._payload(calls[1]),
+                         "已剥掉的思考字段不得在重建负载时被贴回来")
+        self.assertNotIn("max_tokens", self._payload(calls[2]))
+        self.assertNotIn("reasoning_effort", self._payload(calls[2]))
+
+    def test_attempts_budget_bumped_only_when_injected(self) -> None:
+        """注入启用 ⇒ attempts 下限 +1（3 → 4）；未启用（gpt-4o auto）保持 3。"""
+        calls_bad, _content, error_bad = self._run(
+            [http_error(500)], profile={**PROFILE_GPT, "reasoning_effort": "high"})
+        self.assertIsNotNone(error_bad)
+        self.assertEqual(len(calls_bad), 4, "注入启用时 attempts = 3 + 1")
+        calls_plain, _content, error_plain = self._run([http_error(500)], profile=PROFILE_GPT4O)
+        self.assertIsNotNone(error_plain)
+        self.assertEqual(len(calls_plain), 3, "未注入时 attempts 保持 3")
+
+
+# Kimi K2.x：用 thinking 参数，**收到 reasoning_effort 会 400**（根因 6 的真 bug）。
+PROFILE_KIMI_K2 = {
+    **PROFILE,
+    "name": "kimi-k2",
+    "base_url": "https://api.moonshot.cn",
+    "model": "kimi-k2.6",
+    "request_format": "openai_chat",
+}
+
+
+class ThinkingDialectWireTests(unittest.TestCase):
+    """思考方言落到请求体的位置与取值（预设数据驱动的端到端证据）。"""
+
+    def _payload_for(self, profile: dict, effort: str) -> dict:
+        calls: list = []
+        done = (
+            {"output_text": "pong", "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}
+            if str(profile.get("request_format")) == "codex_responses"
+            else PLAIN_OPENAI_DONE
+        )
+
+        def fake_open(request, timeout, cancel_event=None, opener=None):
+            calls.append(request)
+            return FakeResponse(done)
+
+        with mock.patch.object(ModelRuntime, "_urlopen_cancelable", fake_open):
+            ModelRuntime().complete(
+                {**profile, "reasoning_effort": effort}, MESSAGES, {"stream": False}, None
+            )
+        return json.loads(calls[0].data.decode("utf-8"))
+
+    def test_kimi_k2_never_receives_reasoning_effort(self) -> None:
+        """根因 6：K2.x 收到 reasoning_effort 会 400（改档位必先白打一次）。
+
+        改成数据驱动后，K2 落到 format=none 的预设，**任何档位都不发字段**。
+        """
+        for effort in ("off", "low", "medium", "high"):
+            payload = self._payload_for(PROFILE_KIMI_K2, effort)
+            self.assertNotIn("reasoning_effort", payload, f"K2 在 {effort} 档不得发字段")
+            self.assertNotIn("reasoning", payload, f"K2 在 {effort} 档不得发任何思考字段")
+
+    def test_kimi_k3_mapping_unchanged(self) -> None:
+        """§九.102 三家分治的 K3 映射不变：off→low / low→low / medium→high / high→max。"""
+        self.assertEqual(self._payload_for(PROFILE_KIMI, "off").get("reasoning_effort"), "low")
+        self.assertEqual(self._payload_for(PROFILE_KIMI, "low").get("reasoning_effort"), "low")
+        self.assertEqual(self._payload_for(PROFILE_KIMI, "medium").get("reasoning_effort"), "high")
+        self.assertEqual(self._payload_for(PROFILE_KIMI, "high").get("reasoning_effort"), "max")
+
+    def test_auto_sends_no_effort_field(self) -> None:
+        payload = self._payload_for(PROFILE_KIMI, "auto")
+        self.assertNotIn("reasoning_effort", payload)
+
+    def test_kimi_k3_via_codex_relay_is_not_special_cased(self) -> None:
+        """资格约束：kimi-k3 + codex_responses 不得命中 K3 预设（由中继按 OpenAI 方言翻译）。"""
+        profile = {**PROFILE_KIMI, "request_format": "codex_responses",
+                   "base_url": "https://relay.example.com"}
+        payload = self._payload_for(profile, "medium")
+        self.assertEqual(payload.get("reasoning"), {"effort": "medium"},
+                         "K3 走 codex 中继时必须按 OpenAI Codex 方言发")
+
+    def test_deepseek_codex_mapping_unchanged(self) -> None:
+        self.assertEqual(self._payload_for(PROFILE, "off").get("reasoning"), {"effort": "none"})
+        self.assertEqual(self._payload_for(PROFILE, "high").get("reasoning"), {"effort": "max"})
 
 
 if __name__ == "__main__":

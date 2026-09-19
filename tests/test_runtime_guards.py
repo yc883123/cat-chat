@@ -148,7 +148,7 @@ class FirstByteTimeoutTests(unittest.TestCase):
         block = block[: block.index("if diagnostics is not None")]
         self.assertIn("if is_local:", block)
         self.assertIn("LOCAL_FIRST_BYTE_TIMEOUT_SECONDS", block)
-        # 在线请求不加这一层：云端排队/长思考合法，且已有 180 秒总超时兜底。
+        # 在线请求不加这一层：云端排队/长思考合法，另有 900 秒墙钟总时长兜底（§D）。
         self.assertIn(
             'override = options.get("first_byte_timeout_seconds")',
             block,
@@ -157,12 +157,7 @@ class FirstByteTimeoutTests(unittest.TestCase):
 
     def test_every_local_stream_path_receives_the_timeout(self) -> None:
         source = _read_source("naiba", "llm", "runtime.py")
-        self.assertEqual(
-            source.count("_iter_stream_lines(response, cancel_event, first_byte_timeout)"), 3
-        )
-        self.assertEqual(
-            source.count("_iter_stream_lines(retry_response, cancel_event, first_byte_timeout)"), 1
-        )
+        self.assertEqual(source.count("cancel_event, first_byte_timeout, stream_total_timeout"), 4)
 
 
 class LockHolderAttributionTests(unittest.TestCase):

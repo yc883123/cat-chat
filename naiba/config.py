@@ -290,6 +290,14 @@ def default_config() -> dict[str, Any]:
         # （见下方 self.data.pop("max_agent_steps")），沿用同名会让老配置里的残值突然生效、
         # 把用户的步数卡死在一个随手填过的小数字上。
         "agent_step_limit": 200,
+        # 思考回放限长（双闸门，0 = 关闭该层）。失控思考会被**每一轮原样回放**给模型，
+        # 模型看到自己上一轮的推理循环样本后被强锚定（实测「每次总结都是同一条文字」）。
+        # reasoning_replay_max_chars = 单条硬闸门；reasoning_replay_turn_chars = 同一轮次内
+        # 所有回放思考条目的合计软闸门（由新到旧分配额度，最新条目优先）。
+        # 只截**回放**，不动落库；改值后下一次请求会重建一次前缀缓存。
+        # 默认值与 core.history.MODEL_REASONING_REPLAY_* 必须一致。
+        "reasoning_replay_max_chars": 4000,
+        "reasoning_replay_turn_chars": 16000,
         # 图片缓存：image_upload_original=True 按原尺寸存；False 则超过 image_max_pixels
         # 时用 Lanczos 压缩。缩略图始终从保存后的主图按 thumbnail_max_pixels 生成 WebP（_thumb.webp）。
         "imaging": {
@@ -1759,6 +1767,8 @@ class ConfigStore:
             "command_timeout",
             "context_warning_percent",
             "local_first_byte_timeout_seconds",
+            "reasoning_replay_max_chars",
+            "reasoning_replay_turn_chars",
             "agent_step_limit",
             "context_reset_seed_template",
             "access_token",
@@ -1956,6 +1966,25 @@ class ConfigStore:
                             if seconds != 0 and not 5 <= seconds <= 1800:
                                 raise ValueError("本地首字节超时必须在 5-1800 秒之间（0 = 关闭）")
                             self.data[key] = seconds
+                    elif key in {"reasoning_replay_max_chars", "reasoning_replay_turn_chars"}:
+                        # 0 = 关闭该层；否则 0-1000000 字符。留空按该项默认值处理
+                        # （避免误清空导致限长静默失效）。
+                        default = (
+                            REASONING_REPLAY_MAX_CHARS_DEFAULT
+                            if key == "reasoning_replay_max_chars"
+                            else REASONING_REPLAY_TURN_CHARS_DEFAULT
+                        )
+                        raw = values[key]
+                        if raw in (None, ""):
+                            self.data[key] = default
+                        else:
+                            try:
+                                chars = int(raw)
+                            except (TypeError, ValueError):
+                                raise ValueError("思考回放限长必须是整数（字符数）") from None
+                            if chars != 0 and not 100 <= chars <= 1000000:
+                                raise ValueError("思考回放限长必须在 100-1000000 之间（0 = 关闭限长）")
+                            self.data[key] = chars
                     elif key == "agent_step_limit":
                         # 0 = 不限制；否则 1-1000 步。留空按默认值处理。
                         raw = values[key]
@@ -2416,6 +2445,25 @@ class ConfigStore:
         options["max_steps"] = max(0, steps)
         return options
 
+    def reasoning_replay_options(self) -> dict[str, int]:
+        """思考回放限长（双闸门）配置，注入 ``build_model_history``。
+
+        **必须覆盖全部三个活调用点**（``run/chat.py`` 主对话、``subagent.py`` 子代理、
+        ``plans.py`` 计划执行）：子代理与主会话同库同会话，只走默认值就会让同一会话
+        出现两种回放字节 ⇒ 前缀缓存断 + 行为不一致。
+        """
+        options: dict[str, int] = {}
+        for key, default in (
+            ("reasoning_replay_max_chars", REASONING_REPLAY_MAX_CHARS_DEFAULT),
+            ("reasoning_replay_turn_chars", REASONING_REPLAY_TURN_CHARS_DEFAULT),
+        ):
+            try:
+                value = int(self.data.get(key, default))
+            except (TypeError, ValueError):
+                value = default
+            options[key] = max(0, value)
+        return options
+
     def generation_options(self, selection: str = "") -> dict[str, Any]:
         with self.lock:
             key = self._normalize_model_key(selection) or str(self.data.get("default_model_key") or "")
@@ -2749,6 +2797,11 @@ def _infer_supports_images(provider: dict[str, Any]) -> bool:
 # 一致性由 tests/test_runtime_guards.py 守门（两份定义漂移会让默认值失效）。
 LOCAL_FIRST_BYTE_TIMEOUT_DEFAULT = 120
 AGENT_MAX_STEPS_DEFAULT = 200
+# 思考回放限长（双闸门）默认值。必须与 core.history 的
+# MODEL_REASONING_REPLAY_MAX_CHARS / MODEL_REASONING_REPLAY_TURN_CHARS 一致
+# （一致性由 tests/test_reasoning_replay.py 守门）。
+REASONING_REPLAY_MAX_CHARS_DEFAULT = 4000
+REASONING_REPLAY_TURN_CHARS_DEFAULT = 16000
 
 
 def _infer_context_window(provider: dict[str, Any]) -> int:

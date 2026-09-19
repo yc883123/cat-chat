@@ -661,6 +661,8 @@
             <label>命令超时（秒）<input id="commandTimeout" type="number" min="10" max="900" step="10"><small class="hint">仅工具与命令执行有效；不控制在线或本地模型的响应超时。</small></label>
             <label>上下文提醒阈值（%）<input id="contextWarningPercent" type="number" min="0" max="100" step="5"><small class="hint">上下文用量达到该百分比时弹窗提醒一次；0 = 关闭提醒。</small></label>
             <label>本地首字节超时（秒）<input id="localFirstByteTimeout" type="number" min="0" max="1800" step="10"><small class="hint">本地模型做 prefill 时往往长时间不输出内容，与「一直做不完」在界面上无法区分。连续该时长没有输出任何正文（链路的保活注释不算）即断开并报错。0 = 关闭（退回等满 30 分钟总超时的旧行为）。</small></label>
+            <label>单条思考回放上限（字符）<input id="reasoningReplayMaxChars" type="number" min="0" max="1000000" step="500"><small class="hint">模型思考（思维链）会随历史每轮原样回放，超长思考被反复回放会把模型锚定在同一个循环里。单条思考超过该长度即截断并附省略标记。只截回放、不改聊天记录。<b>改动后下一次请求会重建一次缓存。</b>0 = 关闭限长。</small></label>
+            <label>整轮思考回放预算（字符）<input id="reasoningReplayTurnChars" type="number" min="0" max="1000000" step="1000"><small class="hint">同一轮内多条思考合计超过该预算时，<b>由新到旧</b>分配额度：最近的思考优先保留，更旧的压缩到保底 200 字符。调小省上下文，调大保留上轮思路。<b>改动后下一次请求会重建一次缓存。</b>0 = 关闭限长。</small></label>
             <label>Agent 最大步数<input id="agentStepLimit" type="number" min="0" max="1000" step="10"><small class="hint">单轮回复允许的模型调用次数上限（每次工具调用算一步）。达到上限会停止并说明原因，避免模型反复调工具停不下来。0 = 不限制。</small></label>
             <label class="field-wide">新会话种子消息（模型重置上下文后填入输入框）
               <textarea id="contextResetSeedTemplate" rows="4" maxlength="2000" spellcheck="false"
@@ -892,7 +894,7 @@
         </label>
         <label class="provider-field" id="providerMaxOutputField">最大输出 Tokens（可选）
           <input id="providerMaxOutputTokens" type="number" min="1" max="1048576" step="1" placeholder="留空则使用供应商默认值">
-          <small class="hint" id="providerMaxOutputHint">在线模型使用供应商自身的模型上限；只限制单次回复长度，不改变上下文窗口。</small>
+          <small class="hint" id="providerMaxOutputHint">在线模型使用供应商自身的模型上限；只限制单次回复长度，不改变上下文窗口。<b>开启思考时留空，会按 min(32768, 该端点上限) 兜底</b>：思考与正文共用这份输出额度，不兜底就等于把额度交给上游默认值（思考失控时会一路烧下去）。</small>
         </label>
         <label class="provider-field" id="providerTemperatureField">温度（可选）
           <input id="providerTemperature" type="number" min="0" max="2" step="0.1" placeholder="留空则使用供应商默认值">

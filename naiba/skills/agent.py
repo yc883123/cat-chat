@@ -221,6 +221,47 @@ _CONTEXT_LOOP_NOTICE = (
 # 报 length，实测总量与窗口的差距就在个位数百分比内）。
 _CONTEXT_SATURATION_RATIO = 0.95
 
+# 重复答复检测（只提示、不拦截）。背景：失控思考被全量回灌后模型会被锚定在同一个循环里
+# （实测 MiMo 会话「每次总结都是同一条文字」）。Agent 循环本来有「同一工具连续失败/无进展」
+# 的熔断，但**最终答复与上一轮逐字相同**此前没有任何感知——用户只看得到一条重复的回答，
+# 不知道是模型卡住了还是自己真的要求过复述。
+# 下限 20 字符：短应答（「好的」「已完成」）重复属于正常对话，不该误伤。
+_REPEAT_ANSWER_MIN_CHARS = 20
+_REPEAT_ANSWER_NOTICE = (
+    "本次答复与上一轮完全相同，模型可能陷入了重复；"
+    "建议换个说法追问、降低思考强度，或点本条回复上的「新会话」重开上下文。"
+)
+
+
+def _normalize_answer_text(value: Any) -> str:
+    """答复正文的规范化形态：去掉首尾空白并把连续空白折叠成一个空格。
+
+    只做规范化再逐字比较，不做相似度——「完全相同」才提示，避免误报。
+    """
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _last_answer_before(messages: list[dict[str, Any]]) -> str:
+    """请求消息里**最近一条**有正文的 assistant 消息（跳过带工具调用的空正文行）。"""
+    for item in reversed(messages or []):
+        if not isinstance(item, dict) or str(item.get("role") or "") != "assistant":
+            continue
+        text = _normalize_answer_text(item.get("content"))
+        if text:
+            return text
+    return ""
+
+
+def _repeat_answer_notice(messages: list[dict[str, Any]], answer: str) -> str:
+    """本次答复与上一轮逐字相同（且够长）时返回提示文案，否则返回空串。"""
+    current = _normalize_answer_text(answer)
+    if len(current) < _REPEAT_ANSWER_MIN_CHARS:
+        return ""
+    previous = _last_answer_before(messages)
+    if not previous or previous != current:
+        return ""
+    return _REPEAT_ANSWER_NOTICE
+
 
 def _context_saturated(usage: dict[str, Any] | None, limit: int) -> bool:
     """本请求的 prompt+completion 是否已贴到窗口（≥95%）。"""
@@ -1039,6 +1080,13 @@ class SkillAgent:
                 content = (
                     "\n".join([*continued_parts, piece]).strip() if continued_parts else piece
                 )
+                # 重复答复检测：**只提示、不拦截**（用户可能真的要求过复述，或就是要再听一遍）。
+                # 不落 metadata —— 那会改动消息契约并影响 build_model_history 的字节稳定性
+                # （前缀缓存），而这条提示本身没有跨轮价值。
+                repeat_notice = _repeat_answer_notice(messages, content)
+                if repeat_notice:
+                    logger.warning("[repeat-answer] 本次答复与上一轮逐字相同（长度 %s）", len(content))
+                    event({"type": "status", "message": repeat_notice})
                 if isinstance(run_context, dict):
                     run_context["truncation"] = dict(truncation_state)
                 if reasoning:

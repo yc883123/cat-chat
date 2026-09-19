@@ -698,7 +698,12 @@ class PlanManager:
         if not conversation:
             raise RuntimeError("发起计划的对话已删除")
         frozen = snapshot or {}
-        history = build_model_history(frozen.get("conversation_messages") or conversation.get("messages", []))
+        # 与主对话/子代理同参数（plan 模式当前已封存，但签名与口径保持一致，
+        # 复活时不会因为只走默认值而让同一会话出现两种回放字节）。
+        history = build_model_history(
+            frozen.get("conversation_messages") or conversation.get("messages", []),
+            **self.app.config.reasoning_replay_options(),
+        )
         model_key = str(frozen.get("model_key") or conversation.get("model_key") or "")
         if not model_key:
             provider_id = str(frozen.get("provider_id") or conversation.get("provider_id") or "")

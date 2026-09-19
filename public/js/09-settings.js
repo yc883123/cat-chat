@@ -751,6 +751,13 @@ export function populateRuntimeSettings() {
   if ($('#agentStepLimit')) {
     $('#agentStepLimit').value = Number(settings.agent_step_limit ?? 200);
   }
+  // 思考回放限长同理：0 表示「关闭限长」，不能用 `|| 默认值` 回填。
+  if ($('#reasoningReplayMaxChars')) {
+    $('#reasoningReplayMaxChars').value = Number(settings.reasoning_replay_max_chars ?? 4000);
+  }
+  if ($('#reasoningReplayTurnChars')) {
+    $('#reasoningReplayTurnChars').value = Number(settings.reasoning_replay_turn_chars ?? 16000);
+  }
   // 新会话种子模板：留空 = 前端回退到内置默认（占位符说明见设置项下方小字）。
   if ($('#contextResetSeedTemplate')) {
     $('#contextResetSeedTemplate').value = String(settings.context_reset_seed_template || '');
@@ -2161,10 +2168,15 @@ export async function saveRuntimeSettings() {
   // 这两项同理：0 是有效值，只有「留空」才回落到默认值。
   const firstByteRaw = String($('#localFirstByteTimeout')?.value ?? '').trim();
   const maxStepsRaw = String($('#agentStepLimit')?.value ?? '').trim();
+  const replayMaxRaw = String($('#reasoningReplayMaxChars')?.value ?? '').trim();
+  const replayTurnRaw = String($('#reasoningReplayTurnChars')?.value ?? '').trim();
   const payload = {
     command_timeout: Number($('#commandTimeout')?.value || 120),
     context_warning_percent: warningRaw === '' ? 80 : Number(warningRaw),
     local_first_byte_timeout_seconds: firstByteRaw === '' ? 120 : Number(firstByteRaw),
+    // 思考回放限长：0 有意义（关闭限长），只有「留空」才回落到默认值。
+    reasoning_replay_max_chars: replayMaxRaw === '' ? 4000 : Number(replayMaxRaw),
+    reasoning_replay_turn_chars: replayTurnRaw === '' ? 16000 : Number(replayTurnRaw),
     agent_step_limit: maxStepsRaw === '' ? 200 : Number(maxStepsRaw),
     context_reset_seed_template: String($('#contextResetSeedTemplate')?.value || ''),
     workspace_dir: $('#workspaceDir')?.value.trim() || '',

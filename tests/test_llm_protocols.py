@@ -130,9 +130,18 @@ class LlmProtocolTests(unittest.TestCase):
         self.assertEqual(messages[0]["content"][-1].get("cache_control"), {"type": "ephemeral"})
 
     def test_reasoning_params(self):
-        params = P._reasoning_params("openai_chat", "high", deepseek=True)
+        """预设表驱动：普通 openai_chat 发 reasoning_effort；DeepSeek 画像一个字段都不发。
+
+        （后者是数据化之后才对的语义：DeepSeek 兼容端点拒收 reasoning_effort，
+        旧实现里 ``deepseek`` 这个入参只在 codex_responses 分支被读到，openai_chat
+        分支照样发字段——正是 Kimi K2 那个「调档必先 400」bug 的同源问题。）
+        """
+        params = P._reasoning_params("openai_chat", "high")
         self.assertIsInstance(params, dict)
         self.assertIn("reasoning_effort", params)
+        self.assertEqual(P._reasoning_params("openai_chat", "high", deepseek=True), {})
+        self.assertEqual(P._reasoning_params("openai_chat", "off"), {})
+        self.assertEqual(P._reasoning_params("openai_chat", "auto"), {})
 
     def test_reasoning_params_kimi_k3(self):
         """Kimi K3 方言：reasoning_effort 只认 low/high/max（默认 max），思考关不掉。

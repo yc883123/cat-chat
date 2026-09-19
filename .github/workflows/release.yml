@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.6.11-beta
-  RELEASE_TAG: v2.6.11-beta
-  PACKAGE_NAME: naiba-chat-2.6.11-beta-windows-x64
+  RELEASE_VERSION: 2.7.0-beta
+  RELEASE_TAG: v2.7.0-beta
+  PACKAGE_NAME: naiba-chat-2.7.0-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -87,11 +87,11 @@ jobs:
           Copy-Item -LiteralPath "README.md" -Destination $packageDir
           Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\${{ env.PACKAGE_NAME }}.zip" -Force
 
-      - name: Publish 2.6.11 Beta release
+      - name: Publish 2.7.0 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Naiba Chat 2.6.11 Beta
+          name: Naiba Chat 2.7.0 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -99,14 +99,16 @@ jobs:
             dist/${{ env.PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Naiba Chat 2.6.11 Beta Windows build from `${{ github.sha }}`。
+            Naiba Chat 2.7.0 Beta Windows build from `${{ github.sha }}`。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - 运行中可以「插话」了（本次新能力）：AI 还在回答时输入框照常可用——打字回车把话插进队列，面板上可「引导 / 编辑 / 删除」；点「引导」后这句话作为新的用户指令追加到对话末尾、模型下一步就能看到（只追加、不改写历史，前缀缓存不受影响）。未引导的插话不进模型上下文（草稿态）；运行结束后残留队列自动冻结，仍可删除或取回草稿。
-            - 思考失控自动降档重试（本次重点修复）：思考型模型（DeepSeek 等）在复杂长任务里偶发「想个没完」——推理刷屏约十万字符、正文一个字没有，上游以零计费截断；以前三次重试原样重发、必然重演，整轮任务判死「执行失败」。现在重试会自动沿「高→中→低」降低思考强度打破循环（只改本次重试负载，不动会话设置）；实在救不回时，报错会说清「思考未产出正文 + 最长一次思考约 N 万字」并给出操作建议，不再只有一句看不懂的「没有文本内容」。
-            - Kimi K3 思考强度四档全部可用：按官方方言映射（低→low、中→high、高→max；K3 的思考无法关闭，「关」落到最贴近的最低档 low）。此前「中」档会被官方端点拒绝（只认 low/high/max），「关」不发字段反而落到默认 max（最高档）。
-            - 状态栏不再误报「重连中」（本次修复）：长思考流期间右下角不再错误挂着重连横幅——横幅的显示状态改由连接状态机单点托管，与计时器寿命分离；「正在思考 · 已等待 X 秒」的计时是特性、不受影响。
-            - 本地验证：全量单测 1333 例通过；插话 19 例单测 + 34 项真实后端浏览器冒烟（verify/interjection_smoke）；降档重试 6 例与 Kimi K3 方言 3 例守门（tests/test_llm_runtime_retry.py / test_llm_protocols.py）。
+            - 给失控的长思考装上三道闸门（本次重点）：思考型模型在复杂长任务里偶发「想个没完」——推理刷屏数万字符、正文一个字没有，输出额度被烧光后上游直接截断；更糟的是上一轮的失控思考会被原样全量回灌进下一轮请求，模型被自己的循环锚定，于是每一轮都复读同一结论（本次用真实数据库量化确认：单条落库思考 431,726 字符、整个会话合计 153 万字符，而正文只有二十几个字）。现在流式期有预算熔断（推理超 4.8 万字符且正文仍为空就主动中断、走已有的降档重试，正文一出现即解除）、回放期有双闸门（单条 4000 / 整轮 16000 字符，由新到旧分配额度并附省略标记，只截回放不动落库，截断确定性 ⇒ 前缀缓存不破）、计费期有默认上限兜底（不再「不填就等于上游默认近乎无限」，未显式设置时按 min(32768, 端点上限) 兜底，你自己设的值永远优先）。
+            - 单次请求总时长兜底：180 秒是「每次读操作的空闲超时」，只要还有推理增量到达就不断被重置——一段思考死循环可以这样无限流下去。现在在线请求另加 15 分钟墙钟兜底。
+            - 思考强度识别改为数据驱动（本次重构）：此前靠模型名子串嗅探 + 六条分支硬编码，改个中继名就静默失效；现在是一张声明式预设表（10 个预设，覆盖 OpenAI / DeepSeek / Kimi / Claude / Gemini / Ollama / LM Studio），网关用自有词汇也能配，未声明的档位在发请求前就报错。顺带修掉一个老 bug：Kimi K2 系列把思考强度从默认调到任意一档，首个请求必然白打一次 400。
+            - 本地模型补齐：LM Studio「有推理、零正文」以前直接报错，现在对齐在线路径走降档重试；本地模型报错也不再自称「在线模型」。
+            - 重复答复会提示了：终态答复与上一轮逐字相同（且不短于 20 字符）时给一条提示，只提示不拦截。
+            - 新增两个可调参数：「设置 → 运行设置」里的思考回放单条 / 整轮上限（默认 4000 / 16000，0 = 关闭）。
+            - 本地验证：全量单测 1429 例通过；三条真实路径复测——真实库会话回放从 153 万字符降到 4024 字符且两次构建逐字节一致、gpt-4o 的 auto 档确认不发 max_tokens 且全程零 400 往返、12000 字正常思考确认不触发熔断。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

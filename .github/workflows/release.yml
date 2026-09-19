@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.7.1-beta
-  RELEASE_TAG: v2.7.1-beta
-  PACKAGE_NAME: naiba-chat-2.7.1-beta-windows-x64
+  RELEASE_VERSION: 2.7.2-beta
+  RELEASE_TAG: v2.7.2-beta
+  PACKAGE_NAME: naiba-chat-2.7.2-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -87,11 +87,11 @@ jobs:
           Copy-Item -LiteralPath "README.md" -Destination $packageDir
           Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\${{ env.PACKAGE_NAME }}.zip" -Force
 
-      - name: Publish 2.7.1 Beta release
+      - name: Publish 2.7.2 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Naiba Chat 2.7.1 Beta
+          name: Naiba Chat 2.7.2 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -99,12 +99,13 @@ jobs:
             dist/${{ env.PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Naiba Chat 2.7.1 Beta Windows build from `${{ github.sha }}`。
+            Naiba Chat 2.7.2 Beta Windows build from `${{ github.sha }}`。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - Kimi K3 的输出上限接上兜底（本次重点）：上一版给「思考开启且未显式设置输出上限」的会话注入 min(32768, 端点上限) 作为总量闸门，但 K3 的上限当时标为「待实测」、按 0 处理（等于不注入），K3 会话实际没吃上这道闸门。本次用真实端点实测回填为 1048576：官方 max_completion_tokens 上限即 1,048,576，实测 4096~1048576 全阶梯通过（1M 真实成交）；10M 以上撞的是中继按 max_tokens 预扣费的额度墙（不是协议拒绝），2^31-1 才被端点判 max_tokens is invalid。现在 K3 会话在思考开启时按 min(32768, 1048576) 注入兜底。
-            - 一条排查经验：验证思考强度字段是否真的生效必须走流式——中继的非流式响应不返回推理内容且 reasoning_tokens 记 0，容易被误读成「字段被吞」；流式下推理内容真实出现且 token 数随档位变化。
-            - 本地验证：全量单测 1430 例通过，其中新增一条钉死 K3 上限的守门用例，防止这个值被静默改回 0。
+            - 修掉「覆盖更新后用户自建的 MCP 服务被清空」（本次重点）：MCP 配置在加载时有一道「退役旧版捆绑 ComfyUI 桥接」的清理，判据写的是「id 等于 comfyui 就丢弃」——而当年那个旧桥接注册的条目恰好就叫 comfyui，用户自行安装官方 comfy-mcp 后取名 comfyui 再自然不过，于是被当成自家旧资产一起清掉。清理紧跟着一次落盘（每次启动都会把配置写回磁盘），所以服务不是「被忽略」而是「被永久删除」，且每次启动都会重演；用户平时不重启、只在覆盖更新时重启，表现就是「一更新就没」。其他设置（API 卡片、Agent 等）都不在过滤名单里，所以全部幸存——这正是「只有 MCP 列表空了」的原因。
+            - 修复方式：过滤判据从「名字」收窄为「签名」——只有参数里出现旧桥接脚本文件名 `comfyui_mcp_server.py` 的条目才会被剥离。特意没有按路径片段 `comfyui-mcp` 匹配：真实案例里用户的虚拟环境目录就叫 `comfyui-mcp-env`，按目录名匹配照样误伤。
+            - 临时出路（在 2.7.1 及更早版本上）：把该 MCP 服务的 id 改成 `comfyui` 之外的名字（例如 `comfy-mcp`）就不会被过滤命中；升级到 2.7.2 后原来的名字同样保留。
+            - 本地验证：全量单测 1431 例通过，其中 `test_config_migration` 改为按签名剥离旧桥接并新增「用户自建 comfyui 服务存活」守门用例。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

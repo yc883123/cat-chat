@@ -72,7 +72,8 @@ class ConfigMigrationTests(unittest.TestCase):
     def test_mcp_servers_deduped_and_legacy_comfyui_retired(self):
         store = self._store({
             "mcp_servers": [
-                {"id": "comfyui", "command": "x"},
+                # 旧版捆绑桥接（退役脚本签名）：必须剥离
+                {"id": "comfyui", "command": "py", "args": ["skills/comfyui-mcp/comfyui_mcp_server.py"]},
                 {"id": "comfy-mcp", "command": "y"},
                 {"id": "comfy-mcp", "command": "y"},
                 {"id": "other", "command": "z"},
@@ -80,6 +81,22 @@ class ConfigMigrationTests(unittest.TestCase):
         })
         ids = [item["id"] for item in store.data["mcp_servers"]]
         self.assertEqual(ids, ["comfy-mcp", "other"])
+
+    def test_user_registered_comfyui_server_survives(self):
+        # 用户自行注册的官方 comfy-mcp 恰好取名 comfyui：不是旧桥接，不许误删
+        #（真实事故：环境目录含 "comfyui-mcp" 子串，也不能按目录名误判）。
+        store = self._store({
+            "mcp_servers": [
+                {
+                    "id": "comfyui",
+                    "command": "H:\\ComfyUI\\comfyui-mcp-env\\Scripts\\comfy-mcp.exe",
+                    "args": [],
+                    "env": {"COMFY_BIN": "H:\\ComfyUI\\comfy.exe"},
+                },
+            ]
+        })
+        ids = [item["id"] for item in store.data["mcp_servers"]]
+        self.assertEqual(ids, ["comfyui"])
 
     def test_vision_default_timeout_migrated(self):
         store = self._store({"vision": {"timeout_ms": 120000}})

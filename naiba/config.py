@@ -912,6 +912,21 @@ def _starter_preset_entry(preset: dict[str, str]) -> dict[str, str]:
     return entry
 
 
+def _is_retired_comfyui_bridge(server: dict[str, Any]) -> bool:
+    """识别已退役的旧版捆绑 ComfyUI 桥接条目（按脚本文件名，而非路径片段）。
+
+    旧版 `skills/comfyui-mcp` 的 configure_mcp.py 注册的条目形如
+    ``command=<python>, args=[.../comfyui_mcp_server.py]``。只匹配脚本文件名：
+    用户自建环境目录可能叫 `comfyui-mcp-env`（含 "comfyui-mcp" 子串），
+    按目录名匹配会误伤。
+    """
+    parts = [str(server.get("command") or "")]
+    args = server.get("args")
+    if isinstance(args, list):
+        parts.extend(str(item) for item in args)
+    return any("comfyui_mcp_server.py" in part.lower() for part in parts)
+
+
 class ConfigStore:
     def __init__(self, path: Path, paths: PathContext | None = None):
         self.path = path
@@ -960,7 +975,10 @@ class ConfigStore:
                 sid = str(server.get("id") or "").strip()
                 # The legacy custom ComfyUI bridge is retired. Never revive it
                 # from a migrated per-user config or an older portable build.
-                if sid == "comfyui":
+                # 只按旧桥接的脚本签名（comfyui_mcp_server.py）识别：用户自行注册的
+                # 官方 comfy-mcp 若恰好取名 comfyui，不能一并误删（曾致覆盖更新后
+                # MCP 列表被清空——启动时剥离 + __init__ 末尾 save 落盘）。
+                if sid == "comfyui" and _is_retired_comfyui_bridge(server):
                     continue
                 if not sid or sid in seen:
                     if sid:

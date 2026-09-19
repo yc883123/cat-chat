@@ -17,6 +17,7 @@ from naiba.llm.stream import (  # noqa: E402
     _InlineReasoningParser,
     _ReasoningStreamer,
 )
+from naiba.skills.agent import SkillAgent  # noqa: E402
 
 
 def sse(chunk: dict) -> bytes:
@@ -32,14 +33,61 @@ class StreamGuardTests(unittest.TestCase):
 
     def test_tool_protocol_offset(self):
         self.assertEqual(StreamMixins._tool_protocol_offset('<tool name="x">'), 0)
+        self.assertEqual(StreamMixins._tool_protocol_offset('<|open|>tools<|sep|>'), 0)
         self.assertIsNone(StreamMixins._tool_protocol_offset("纯文本内容"))
 
     def test_possible_protocol_suffix_length(self):
         self.assertEqual(StreamMixins._possible_protocol_suffix_length(""), 0)
         self.assertEqual(StreamMixins._possible_protocol_suffix_length("<to"), 3)
         self.assertEqual(StreamMixins._possible_protocol_suffix_length("<tool"), 5)
+        self.assertEqual(StreamMixins._possible_protocol_suffix_length("<|open|>to"), 10)
         # <think 由 _InlineReasoningParser 处理，不属于工具协议守卫 token。
         self.assertEqual(StreamMixins._possible_protocol_suffix_length("<thi"), 0)
+
+    def test_kimi_harmony_single_tool_action(self):
+        raw = (
+            '收到，开始排查：<|open|>tools<|sep|>'
+            '<|open|>call tool="pwsh" index="1"<|sep|>'
+            '<|open|>argument key="command" type="string"<|sep|>'
+            'Get-Process | Select-Object Id,Name'
+            '<|close|>argument<|sep|><|close|>call<|sep|>'
+            '<|close|>tools<|sep|><|close|>message<|sep|>'
+        )
+        action = SkillAgent._parse_action(raw)
+        self.assertEqual(action["type"], "tool")
+        self.assertEqual(action["tool"], "pwsh")
+        self.assertEqual(
+            action["arguments"], {"command": "Get-Process | Select-Object Id,Name"}
+        )
+
+    def test_kimi_harmony_parallel_actions_and_json_types(self):
+        raw = (
+            '<|open|>tools<|sep|>'
+            '<|open|>call tool="read_file" index="1"<|sep|>'
+            '<|open|>argument key="path" type="string"<|sep|>D:\\\\work\\\\a.txt'
+            '<|close|>argument<|sep|>'
+            '<|open|>argument key="max_lines" type="integer"<|sep|>12'
+            '<|close|>argument<|sep|><|close|>call<|sep|>'
+            '<|open|>call tool="list_directory" index="2"<|sep|>'
+            '<|open|>argument key="path" type="string"<|sep|>D:\\\\work'
+            '<|close|>argument<|sep|>'
+            '<|open|>argument key="recursive" type="boolean"<|sep|>true'
+            '<|close|>argument<|sep|><|close|>call<|sep|>'
+            '<|close|>tools<|sep|>'
+        )
+        action = SkillAgent._parse_action(raw)
+        self.assertEqual(action["type"], "tools")
+        self.assertEqual([call["tool"] for call in action["calls"]],
+                         ["read_file", "list_directory"])
+        self.assertEqual(action["calls"][0]["arguments"]["max_lines"], 12)
+        self.assertIs(action["calls"][1]["arguments"]["recursive"], True)
+
+    def test_kimi_harmony_truncated_call_is_parse_error(self):
+        raw = (
+            '<|open|>tools<|sep|><|open|>call tool="pwsh" index="1"<|sep|>'
+            '<|open|>argument key="command" type="string"<|sep|>Get-Process'
+        )
+        self.assertEqual(SkillAgent._parse_action(raw), {"type": "parse_error"})
 
     def test_clean_content_strips_think_blocks(self):
         # 语义：保留最后一个 </think> 之后的可见文本，其余 think 块剔除。
@@ -105,6 +153,23 @@ class StreamReaderTests(unittest.TestCase):
         self.assertEqual(result["content"], "回答")
         self.assertEqual(result["reasoning"], "")
         self.assertTrue(any(e.get("type") == "delta" for e in events))
+
+    def test_read_sse_hides_split_kimi_harmony_protocol(self):
+        events = []
+        pieces = [
+            '<|open|>to',
+            'ols<|sep|><|open|>call tool="pwsh" index="1"<|sep|>',
+            '<|open|>argument key="command" type="string"<|sep|>Get-Date',
+            '<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|>',
+        ]
+        response = [
+            sse({"choices": [{"delta": {"content": piece}}]}) for piece in pieces
+        ]
+        result = StreamMixins._read_sse_response(response, "openai_chat", events.append)
+        self.assertFalse(any("<|open|>" in str(e.get("content") or "") for e in events))
+        action = SkillAgent._parse_action(result["content"])
+        self.assertEqual(action["tool"], "pwsh")
+        self.assertEqual(action["arguments"], {"command": "Get-Date"})
 
     def test_read_sse_captures_reasoning_item_id(self):
         """DeepSeek Responses 思考回传必需 reasoning item id：从 output_item.added

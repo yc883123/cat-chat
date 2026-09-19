@@ -679,11 +679,20 @@ export function toolMarkup(runs = []) {
 
 export function activityMarkup(activity = []) {
   if (!Array.isArray(activity) || !activity.length) return '';
+  // 只渲染**最后一段正文**（prose）：更早的每一段都跟在某次工具调用前面，是模型"调用工具前的
+  // 过程播报"（"我已定位根因 / 继续验证 / 现在补测试"），一轮能攒十来段近义废话，摞满一条回复
+  // （见维护说明 §九.97）。后端出参已按同口径过滤（naiba/run/stream._build_activity_timeline），
+  // 这里再兜一次是为**历史消息**——它们的 activity 早已带着那十来段落库，不重算就永远显示旧形态。
+  const lastProseIndex = activity.reduce(
+    (found, item, index) => ((item && item.type === 'prose') ? index : found), -1);
+  const visible = lastProseIndex < 0
+    ? activity
+    : activity.filter((item, index) => (!item || item.type !== 'prose' || index === lastProseIndex));
   // 所有思考块一视同仁（均折叠）；请求轮次断点「·」标在每次新请求开始块的左侧
   // （request_index 由后端以 usage 事件为边界标注，与用量明细的请求序号对应）。
   let html = '';
   let prevRequestIndex = 0;
-  activity.forEach((item, index) => {
+  visible.forEach((item, index) => {
     try {
       const requestStart = Number(item.request_index || 0) !== Number(prevRequestIndex || 0);
       const markerClass = requestStart ? ' request-start' : '';

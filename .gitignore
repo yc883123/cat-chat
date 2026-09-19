@@ -233,6 +233,7 @@ verify/*
 !verify/frozen_interrupt_check.py
 !verify/frozen_mobile_ui_check.py
 !verify/frozen_q1_check.py
+!verify/frozen_tool_prose_check.py
 !verify/lightbox_smoke.cjs
 !verify/make_test_card.py
 !verify/media_inline_smoke.cjs
@@ -283,6 +284,7 @@ verify/*
 !verify/tdz_check.py
 !verify/tool_groups_smoke.cjs
 !verify/tool_groups_smoke.py
+!verify/tool_prefix_prose_smoke.py
 !verify/topbar_smoke.cjs
 !verify/update_version_smoke.cjs
 !verify/update_version_smoke.py

@@ -37,10 +37,18 @@ def _build_activity_timeline(
     """按运行事件的严格物理时间序，把思考段、正文与工具调用交错产出，供前端按时间显示思维链/工具链。
 
     正文（delta 事件）只有当本轮确实调用了工具时才作为 ``{"type": "prose", "text": ...}``
-    条目插入到它发生的时间点（"中途回复的正文"随工具链交错展示）；若没有任何工具调用，
-    正文就是整段的最终回复，统一放到末尾 content 里，避免"正文跑到最前面、思考在最后"
-    的倒序观感。内容复用传入的 reasonings 与 runs（避免重复/不一致），仅用 events 的
-    先后顺序决定交错。计数不齐时把剩余段落追加到末尾兜底。本函数为模块级。
+    条目出现；若没有任何工具调用，正文就是整段的最终回复，统一放到末尾 content 里，
+    避免"正文跑到最前面、思考在最后"的倒序观感。内容复用传入的 reasonings 与 runs
+    （避免重复/不一致），仅用 events 的先后顺序决定交错。计数不齐时把剩余段落追加到
+    末尾兜底。本函数为模块级。
+
+    **只保留最后一段正文（2026-09-19，用户实测"十句进度话术堆在一条回复里"）**：
+    模型每调用一次工具，都会先在正文里说一句"我已定位根因 / 继续验证 / 现在补测试"，
+    这类"工具调用前的过程播报"一轮能攒下十来段，且句意高度重复。此前每段都作为独立
+    prose 条目交错展示，一条回复里就摞成满屏废话。现在**除最后一段外全部丢弃**：
+    一段正文之后若还有工具条目，它必然是某次工具调用前的预告；只有后面不再有工具调用的
+    那一段，才是模型真正给出的最终答复。宿主生成的工具状态（tool 条目）足以说明过程，
+    不需要复述（源头另在系统提示里约束，见 `naiba/skills/agent.py`）。
 
     每个条目附带 ``ts``（对应 run_events 事件的 created_at 毫秒时间戳）与
     ``request_index``（模型请求轮次序号，以 usage 事件为边界；前端据此在每次
@@ -166,9 +174,15 @@ def _build_activity_timeline(
     # 最终答复（最后一 prose 段）固定到时间线末尾：模型流式时"后段思考/工具"可能晚于
     # 最终答复到达（buffered），物理序会把答复排在它们之前——用户实测确认最终答复应
     # 显示在时间线之后（思考全部折叠时尤为明显），故最终答复整体后置（其余条目仍严格物理序）。
-    prose_indexes = [index for index, item in enumerate(activity) if item.get("type") == "prose"]
-    if prose_indexes:
-        activity.append(activity.pop(prose_indexes[-1]))
+    #
+    # 同时丢弃所有**更早**的 prose 段：它们都是"某次工具调用前的过程播报"（后面还有工具
+    # 条目），句意高度重复且对用户无信息量（2026-09-19 实测：一条回复攒了十段近义进度）。
+    # 只留最后一段还有个额外好处——activityHasProse 仍为真，前端"正文内嵌在时间线里、
+    # 不再在末尾重复渲染"的既有契约（public/js/04-messages.js）保持不变。
+    prose_items = [item for item in activity if item.get("type") == "prose"]
+    if prose_items:
+        other_items = [item for item in activity if item.get("type") != "prose"]
+        activity = [*other_items, prose_items[-1]]
     return activity
 
 

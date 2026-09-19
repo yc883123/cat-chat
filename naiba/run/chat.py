@@ -1174,6 +1174,11 @@ class ConversationRunMixin:
         """从 run_events 重建部分运行内容：reasoning / tool_runs / 正文 / activity 时间线。
 
         供"取消"与"失败"两类收尾路径复用，保证重建结果一致。
+
+        正文只取**最后一次工具调用之后**的那一段：模型每轮工具调用前都会说一句进度
+        （"已定位根因"…），把这些 delta 全拼起来就是那堆重复话术（2026-09-19 用户报障）。
+        口径与 ``stream._build_activity_timeline`` 的 prose 过滤一致——工具事件之前的正文
+        一律是过程播报（丢弃），此后累积的才是模型真正给出的答复。
         """
         reasoning: list[str] = []
         reasoning_parts: list[str] = []
@@ -1182,6 +1187,9 @@ class ConversationRunMixin:
         in_reasoning = False
         for ev in events:
             kind = str(ev.get("type") or "")
+            if kind.startswith("tool"):
+                # 工具调用发生 ⇒ 此前累积的正文只是那一步的过程播报，丢弃重来。
+                content_parts = []
             if kind == "reasoning_start":
                 reasoning_parts = []
                 in_reasoning = True

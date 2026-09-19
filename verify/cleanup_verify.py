@@ -48,6 +48,8 @@ KEEP = {
     "stream_rerender_smoke.py", "stream_rerender_smoke.cjs",
     # 冻结版前端资源自检（§六 已登记）
     "frozen_mobile_ui_check.py",
+    # 冻结版：工具调用前的进度播报不再堆积（§六 已登记；运行期真调用 + 打包资源双查）
+    "frozen_tool_prose_check.py",
     # 播种器
     "seed_usage_message.py", "seed_media_message.py", "seed_favorites.py",
     "seed_turn_rail_chat.py", "seed_agent_avatar_chat.py",
@@ -62,6 +64,8 @@ KEEP = {
     "ring_usage_smoke.py", "ring_usage_smoke.cjs",
     # 工具分类改版冒烟（§六 已登记；Python 自编排 + Node 检查）
     "tool_groups_smoke.py", "tool_groups_smoke.cjs",
+    # 工具调用前的进度播报不得累积进助手消息（§六 已登记；Python 自编排，无浏览器）
+    "tool_prefix_prose_smoke.py",
     # 分支对话继承首轮上下文冒烟（§六 已登记；Python 自编排 + Node 检查）
     "branch_first_turn_smoke.py", "branch_first_turn_smoke.cjs",
     # 新会话边界 / 种子消息冒烟（§六 已登记；Python 自编排 + Node 检查）

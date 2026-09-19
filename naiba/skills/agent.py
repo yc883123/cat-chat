@@ -73,6 +73,21 @@ def _resolve_step_limit(max_steps: Any, options: Any) -> int:
 # leak into the answer as plain text).
 _TOOL_OPEN_TAG = re.compile(r"^<(tool_calls|invoke|tool)\b", re.IGNORECASE)
 _TOOL_NAMED_ATTR = re.compile(r"\b(?:name|type)\s*=")
+# Harmony-style reserved-token dialect emitted by Kimi K3 through some
+# OpenAI-compatible Responses relays.  The relay places this protocol in a
+# message/output_text item instead of exposing native function_call objects.
+_HARMONY_TOOL_MARKER = re.compile(r"<\|open\|>(?:tools|call)\b", re.IGNORECASE)
+_HARMONY_CALL = re.compile(
+    r"<\|open\|>call\b(?P<attrs>.*?)<\|sep\|>(?P<body>.*?)"
+    r"<\|close\|>call(?:<\|sep\|>)?",
+    re.IGNORECASE | re.DOTALL,
+)
+_HARMONY_ARGUMENT = re.compile(
+    r"<\|open\|>argument\b(?P<attrs>.*?)<\|sep\|>(?P<value>.*?)"
+    r"<\|close\|>argument(?:<\|sep\|>)?",
+    re.IGNORECASE | re.DOTALL,
+)
+_HARMONY_ATTR = re.compile(r"([\w-]+)\s*=\s*(['\"])(.*?)\2", re.DOTALL)
 
 
 
@@ -663,6 +678,9 @@ class SkillAgent:
             )
         system_parts.extend([
             "最终答复只说明实际结果或真实阻塞，不展示内部思考。",
+            "调用工具前不要输出过程预告或进度播报（如「我已定位根因」「继续验证」「现在补测试」）："
+            "直接发起调用，也不要重复或改写同一句进度；仅在遇到真实阻塞、需要用户决策或"
+            "已启动长时间后台任务时，才用一句话说明。",
             "需要用户选择时，先写‘请选择……：’，再用每行一个的连续编号列表；每题给明确题目，多选必须显式标注「（多选）」。"
             "题目或选项较长、或一次要问多题时，改用 ```naiba-choices 代码块给出结构化选项："
             '内容为 {"choice_groups":[{"prompt":"题目标题","choices":["选项一","选项二"],"mode":"single"}]}'
@@ -1496,6 +1514,9 @@ class SkillAgent:
 
     @classmethod
     def _parse_action(cls, text: str) -> dict[str, Any]:
+        harmony_action = cls._extract_harmony_tool_action(text)
+        if harmony_action:
+            return harmony_action
         xml_action = cls._extract_xml_tool_action(text)
         if xml_action:
             return xml_action
@@ -1519,6 +1540,8 @@ class SkillAgent:
         # Models sometimes emit a short natural-language preface before the
         # action. Still classify the embedded protocol as an action so it is
         # never persisted as the assistant's visible answer.
+        if _HARMONY_TOOL_MARKER.search(probe):
+            return True
         if re.search(r"<(?:tool_calls|invoke|tool)\b", probe, flags=re.IGNORECASE):
             return True
         if re.search(r'\{[\s\S]{0,96}"(?:type|tool)"\s*:', probe, flags=re.IGNORECASE):
@@ -1535,6 +1558,61 @@ class SkillAgent:
                     return bool(_TOOL_NAMED_ATTR.search(probe[:200]))
                 return True
         return False
+
+    @classmethod
+    def _extract_harmony_tool_action(cls, text: str) -> dict[str, Any] | None:
+        """Parse Kimi/Harmony reserved-token tool calls from message text.
+
+        Affected compatible relays return these tokens inside ``output_text``
+        rather than as Responses ``function_call`` items.  Preserve argument
+        types when the body is JSON; otherwise keep the literal string (which
+        is how commands and paths are normally emitted).
+        """
+        cleaned = str(text or "").strip()
+        if not _HARMONY_TOOL_MARKER.search(cleaned):
+            return None
+        matches = list(_HARMONY_CALL.finditer(cleaned))
+        # Do not execute a valid-looking prefix when a later call was cut off.
+        if not matches or len(matches) != len(re.findall(
+            r"<\|open\|>call\b", cleaned, flags=re.IGNORECASE
+        )):
+            return None
+        calls: list[dict[str, Any]] = []
+        for match in matches:
+            attrs = {
+                key.lower(): value
+                for key, _quote, value in _HARMONY_ATTR.findall(match.group("attrs"))
+            }
+            tool = str(attrs.get("tool") or attrs.get("name") or "").strip()
+            if not tool:
+                return None
+            arguments: dict[str, Any] = {}
+            body = match.group("body")
+            argument_matches = list(_HARMONY_ARGUMENT.finditer(body))
+            if len(argument_matches) != len(re.findall(
+                r"<\|open\|>argument\b", body, flags=re.IGNORECASE
+            )):
+                return None
+            for argument in argument_matches:
+                arg_attrs = {
+                    key.lower(): value
+                    for key, _quote, value in _HARMONY_ATTR.findall(argument.group("attrs"))
+                }
+                name = str(arg_attrs.get("key") or arg_attrs.get("name") or "").strip()
+                if not name:
+                    return None
+                raw_value = argument.group("value").strip()
+                arg_type = str(arg_attrs.get("type") or "").strip().lower()
+                if arg_type in {"string", "str"}:
+                    value: Any = raw_value
+                else:
+                    try:
+                        value = json.loads(raw_value)
+                    except json.JSONDecodeError:
+                        value = raw_value
+                arguments[name] = value
+            calls.append({"type": "tool", "tool": tool, "arguments": arguments})
+        return calls[0] if len(calls) == 1 else {"type": "tools", "calls": calls}
 
     @classmethod
     def _extract_xml_tool_action(cls, text: str) -> dict[str, Any] | None:

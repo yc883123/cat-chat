@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.6.9-beta
-  RELEASE_TAG: v2.6.9-beta
-  PACKAGE_NAME: naiba-chat-2.6.9-beta-windows-x64
+  RELEASE_VERSION: 2.6.10-beta
+  RELEASE_TAG: v2.6.10-beta
+  PACKAGE_NAME: naiba-chat-2.6.10-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -87,11 +87,11 @@ jobs:
           Copy-Item -LiteralPath "README.md" -Destination $packageDir
           Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\${{ env.PACKAGE_NAME }}.zip" -Force
 
-      - name: Publish 2.6.9 Beta release
+      - name: Publish 2.6.10 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Naiba Chat 2.6.9 Beta
+          name: Naiba Chat 2.6.10 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -99,14 +99,13 @@ jobs:
             dist/${{ env.PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Naiba Chat 2.6.9 Beta Windows build from `${{ github.sha }}`。
+            Naiba Chat 2.6.10 Beta Windows build from `${{ github.sha }}`。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - 换字体不用再手敲字体名（本次重点）：以前得自己填一串 font-family、还得先知道机器上装了什么，普通用户无从下手。现在「设置 → 外观 → 会话字体」的第四张卡片由「自定义」改为「指定字体」，点开是下拉列表，内置 11 种常见中文字体（微软雅黑、苹方、宋体、楷体、黑体、仿宋、思源黑体、思源宋体、霞鹜文楷、得意黑、鸿蒙黑体）；手机端点开直接弹系统选择器。
-            - 没装的字体会自己标出来：列表每项都用浏览器现场实测该字体能否真的参与排版，没装的后缀「（未安装）」——只是提醒、不禁选（设置存在服务端、多设备共享，这台没装不代表手机没装）。
-            - 手敲入口降级为高级兜底：列表末项「手动填写…」选中后才展开原输入框；旧配置零迁移，之前存过的自定义字体串原样还在，切到预置字体再切回来也不会丢。
-            - 预览与落库仍是同一套规矩：字号滑杆与字体列表都只做本地预览，统一由「保存外观」落库（与主题、皮肤同一套交互）。
-            - 本地验证：全量单测 1296 例通过；新增隔离真实实例 + 无头 Edge 冒烟 verify/chat_font_smoke.py 39 项断言（含手机竖屏、点选后比对 canvas 渲染度量确认正文真的换了字体、占位值不外泄），其中「未安装」标注是与现场重新度量逐项对照得出的；冻结版编译成功，打包资源与后端字体白名单经冻结版入口探针确认为新代码（17 项）。
+            - 工具调用前的「过程预告」不再堆进答案里（本次重点）：用 Agent 跑多步任务时，模型每轮调用工具前都会顺口说一句「我已定位根因」「继续验证」「现在补测试」，这些话此前每轮都被保留——一轮跑下来，最后那条回复里整整齐齐堆着十几句进度播报，真正的结论被埋在最后一句。根因在三层：流式层把工具协议之前的自然语言当作正常正文发出（这本身是设计如此、不该改），运行层把这十几段正文全部收进「活动时间线」，重建半截回复时又把它们全部拼回正文。现在三层统一口径——一段正文只有「最后一段」才有资格留在结果里：时间线只保留最后一段正文，重建时以「最后一次工具事件」为界、之前的累积正文一律丢弃（停在工具步上就是空正文，不吐半句废话）。历史消息同样受益：前端渲染时也只画最后一段正文，不必重算旧数据。
+            - 系统提示补了一句「不许播报进度」（本次调整）：明确要求调用工具前不要输出过程预告或进度播报，也不要重复改写同一句进度；只在遇到真实阻塞、需要用户决策、或已启动长时间后台任务时，才用一句话说明。
+            - Kimi K3 的工具调用不再漏进正文（本次修复）：K3 及其它 Harmony 风格兼容端点会把工具调用序列化成保留 token 混在普通文本里返回（`<|open|>tools<|sep|>...`），而不是返回原生的 function_call 项。此前这类输出既没被识别成工具调用、也没被拦住，结果是把整段协议原样吐在对话里。现在流式边界的协议守卫认这套 token（含被 SSE 切成两半的 `<|open|>to` + `ols`），跨包也能拦住；解析层同时支持并行多工具调用与参数类型还原（integer / boolean），截断的调用明确报「解析失败」而不是猜。
+            - 本地验证：全量单测 1305 例通过；新增隔离真实实例 + 假 K3 模型冒烟 verify/tool_prefix_prose_smoke.py（4 轮工具调用，双向断言——既要证明流里确实出现过预告、前提成立，又要证明最终结果里只剩最后一段正文、工具活动 4 条齐全、预告一词不留），并做过回退反证（把修复退回旧写法后冒烟立刻变红）；前端渲染另加 6 项真实执行断言（verify/media_markup_check.mjs）；冻结版编译成功，并由冻结版入口自检 verify/frozen_tool_prose_check.py 确认 exe 内的时间线重建、半截回复重建与打包前端资源都是新代码（9 项）。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

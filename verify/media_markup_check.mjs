@@ -51,7 +51,7 @@ const stub = {
 
 const factory = new Function(
   ...Object.keys(stub),
-  `${source}\n;return { toolRunMarkup, toolMediaMarkup, mediaTruncatedNotice, mediaMarkup, mediaKind, fileUrl, inlineMediaSources, remainingAttachments, uploadedFileMarkup };`,
+  `${source}\n;return { toolRunMarkup, toolMediaMarkup, mediaTruncatedNotice, mediaMarkup, mediaKind, fileUrl, inlineMediaSources, remainingAttachments, uploadedFileMarkup, activityMarkup };`,
 );
 const media = factory(...Object.values(stub));
 
@@ -137,6 +137,50 @@ const assistantAudio = media.mediaMarkup([{ kind: 'audio', name: 'a.mp3', source
 check('助手图片带 figcaption', assistantImage.includes('<figcaption title="a.png">a.png</figcaption>'), assistantImage);
 check('助手视频带 figcaption', assistantVideo.includes('<figcaption title="v.mp4">v.mp4</figcaption>'), assistantVideo);
 check('助手音频带 figcaption', assistantAudio.includes('<figcaption title="a.mp3">a.mp3</figcaption>'), assistantAudio);
+
+// 10. 活动时间线只渲染最后一段正文（工具调用前的过程播报不得堆满一条回复，§九.97）
+// 这是**真执行**渲染函数：源码级断言只能证明"代码里有过滤"，证明不了"渲染结果对"。
+const noisy = [
+  { type: 'prose', text: '我已核对接口和调用链。', request_index: 1 },
+  { type: 'tool', run: { tool: 'read_file', success: true }, request_index: 1 },
+  { type: 'prose', text: '根因已经锁定。', request_index: 2 },
+  { type: 'tool', run: { tool: 'edit_file', success: true }, request_index: 2 },
+  { type: 'prose', text: '现在补协议。', request_index: 3 },
+  { type: 'tool', run: { tool: 'pwsh', success: true }, request_index: 3 },
+  { type: 'prose', text: '修好了，共改 2 个文件。', request_index: 4 },
+];
+const noisyHtml = media.activityMarkup(noisy);
+const proseCount = (html) => (String(html).match(/class="stream-prose/g) || []).length;
+check('三句过程播报只渲染最后一段正文', proseCount(noisyHtml) === 1, String(proseCount(noisyHtml)));
+check(
+  '渲染的是最终答复、且不残留任何中途播报',
+  noisyHtml.includes('修好了，共改 2 个文件。')
+    && !noisyHtml.includes('我已核对接口和调用链。')
+    && !noisyHtml.includes('根因已经锁定。')
+    && !noisyHtml.includes('现在补协议。'),
+  noisyHtml,
+);
+check('工具条目一个不少（3 个）', (noisyHtml.match(/class="tool-run/g) || []).length === 3, noisyHtml);
+check(
+  '单段正文照常渲染',
+  proseCount(media.activityMarkup([
+    { type: 'tool', run: { tool: 'read_file', success: true } },
+    { type: 'prose', text: '只有一句话。' },
+  ])) === 1,
+);
+check(
+  '只有工具时没有正文块',
+  proseCount(media.activityMarkup([{ type: 'tool', run: { tool: 'read_file', success: true } }])) === 0,
+);
+check(
+  '思考条目不被正文过滤牵连',
+  media.activityMarkup([
+    { type: 'reasoning', text: '第一段思考', request_index: 1 },
+    { type: 'prose', text: '播报', request_index: 1 },
+    { type: 'tool', run: { tool: 'read_file', success: true }, request_index: 1 },
+    { type: 'prose', text: '最终答复。', request_index: 2 },
+  ]).includes('reasoning-block'),
+);
 
 console.log();
 console.log(`媒体渲染校验：${failures.length ? `${failures.length} 项失败 -> ${failures}` : '全部通过'}`);

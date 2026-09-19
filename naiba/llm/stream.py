@@ -109,6 +109,11 @@ _TOOL_NAMED_ATTR = re.compile(r"\b(?:name|type)\s*=")
 # protocol. Keep a short unflushed tail so a marker split across SSE chunks is
 # detected before it can reach the visible answer.
 _TOOL_PROTOCOL_ANYWHERE = re.compile(r"<(?:tool_calls|invoke|tool)\b", re.IGNORECASE)
+# Kimi K3 (and other Harmony-style compatible endpoints) may serialize tool
+# calls as reserved tokens in ordinary output text instead of returning native
+# function_call items, for example ``<|open|>tools<|sep|>...``.  Treat this as
+# an agent protocol at the stream boundary so it never leaks into the answer.
+_HARMONY_TOOL_ANYWHERE = re.compile(r"<\|open\|>(?:tools|call)\b", re.IGNORECASE)
 _JSON_TOOL_ANYWHERE = re.compile(
     r'\{(?=[\s\S]{0,96}"(?:type|tool)"\s*:)',
     re.IGNORECASE,
@@ -541,6 +546,9 @@ class StreamMixins:
         xml_match = _TOOL_PROTOCOL_ANYWHERE.search(buffer)
         if xml_match:
             offsets.append(xml_match.start())
+        harmony_match = _HARMONY_TOOL_ANYWHERE.search(buffer)
+        if harmony_match:
+            offsets.append(harmony_match.start())
         json_match = _JSON_TOOL_ANYWHERE.search(buffer)
         if json_match:
             offsets.append(json_match.start())
@@ -558,7 +566,10 @@ class StreamMixins:
         """
         lower = buffer.lower()
         keep = 0
-        for token in ("<tool_calls", "<invoke", "<tool"):
+        for token in (
+            "<tool_calls", "<invoke", "<tool",
+            "<|open|>tools", "<|open|>call",
+        ):
             limit = min(len(token) - 1, len(lower))
             for size in range(1, limit + 1):
                 if token.startswith(lower[-size:]):

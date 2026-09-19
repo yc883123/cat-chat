@@ -129,8 +129,10 @@ THINKING_PRESETS: tuple[dict[str, Any], ...] = (
         "id": "kimi_k3",
         "format": THINKING_FORMAT_OPENAI,
         "efforts": {"off": "low", "low": "low", "medium": "high", "high": "max"},
-        # 待真实端点实测（见维护说明 §九「G1 实测清单」）；0 = 未知 ⇒ A0 不注入。
-        "max_output_ceiling": 0,
+        # 官方规格 max_completion_tokens 上限 1048576（1M 上下文模型）；
+        # teynex 中继实测 1M 接受、10M 撞计费墙（按 max_tokens 预扣费）、int32 上限 500
+        # 「max_tokens is invalid」。上限定协议口径 1048576，计费预扣属中继行为、非协议拒绝。
+        "max_output_ceiling": 1048576,
         "match": {"request_format": "openai_chat", "model_contains": ("kimi-k3",)},
     },
     {

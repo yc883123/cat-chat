@@ -88,6 +88,16 @@ class PresetResolutionTests(unittest.TestCase):
         for fmt in ("ollama", "lm_studio"):
             self.assertEqual(T.max_output_ceiling(T.resolve_thinking({"request_format": fmt})), 0)
 
+    def test_kimi_k3_ceiling_pinned_to_measured_value(self) -> None:
+        """K3 上限钉死实测值 1048576（2026-09-19 teynex 中继实测 + 官方文档口径一致；
+
+        实测：4096~1048576 全阶梯 200，10M 撞的是计费预扣墙而非协议拒绝，
+        int32 上限被端点判 invalid）。不准静默改回 0（= 放弃 A0 兜底）。
+        """
+        resolved = T.resolve_thinking(KIMI_K3)
+        self.assertEqual(resolved["id"], "kimi_k3")
+        self.assertEqual(resolved["max_output_ceiling"], 1048576)
+
 
 class UndeclaredEffortTests(unittest.TestCase):
     """纪律 2：未声明的档位在发请求前就失败（不是发出去等 400）。"""

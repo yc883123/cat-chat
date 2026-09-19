@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.6.10-beta
-  RELEASE_TAG: v2.6.10-beta
-  PACKAGE_NAME: naiba-chat-2.6.10-beta-windows-x64
+  RELEASE_VERSION: 2.6.11-beta
+  RELEASE_TAG: v2.6.11-beta
+  PACKAGE_NAME: naiba-chat-2.6.11-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -87,11 +87,11 @@ jobs:
           Copy-Item -LiteralPath "README.md" -Destination $packageDir
           Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\${{ env.PACKAGE_NAME }}.zip" -Force
 
-      - name: Publish 2.6.10 Beta release
+      - name: Publish 2.6.11 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Naiba Chat 2.6.10 Beta
+          name: Naiba Chat 2.6.11 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -99,13 +99,14 @@ jobs:
             dist/${{ env.PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Naiba Chat 2.6.10 Beta Windows build from `${{ github.sha }}`。
+            Naiba Chat 2.6.11 Beta Windows build from `${{ github.sha }}`。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - 工具调用前的「过程预告」不再堆进答案里（本次重点）：用 Agent 跑多步任务时，模型每轮调用工具前都会顺口说一句「我已定位根因」「继续验证」「现在补测试」，这些话此前每轮都被保留——一轮跑下来，最后那条回复里整整齐齐堆着十几句进度播报，真正的结论被埋在最后一句。根因在三层：流式层把工具协议之前的自然语言当作正常正文发出（这本身是设计如此、不该改），运行层把这十几段正文全部收进「活动时间线」，重建半截回复时又把它们全部拼回正文。现在三层统一口径——一段正文只有「最后一段」才有资格留在结果里：时间线只保留最后一段正文，重建时以「最后一次工具事件」为界、之前的累积正文一律丢弃（停在工具步上就是空正文，不吐半句废话）。历史消息同样受益：前端渲染时也只画最后一段正文，不必重算旧数据。
-            - 系统提示补了一句「不许播报进度」（本次调整）：明确要求调用工具前不要输出过程预告或进度播报，也不要重复改写同一句进度；只在遇到真实阻塞、需要用户决策、或已启动长时间后台任务时，才用一句话说明。
-            - Kimi K3 的工具调用不再漏进正文（本次修复）：K3 及其它 Harmony 风格兼容端点会把工具调用序列化成保留 token 混在普通文本里返回（`<|open|>tools<|sep|>...`），而不是返回原生的 function_call 项。此前这类输出既没被识别成工具调用、也没被拦住，结果是把整段协议原样吐在对话里。现在流式边界的协议守卫认这套 token（含被 SSE 切成两半的 `<|open|>to` + `ols`），跨包也能拦住；解析层同时支持并行多工具调用与参数类型还原（integer / boolean），截断的调用明确报「解析失败」而不是猜。
-            - 本地验证：全量单测 1305 例通过；新增隔离真实实例 + 假 K3 模型冒烟 verify/tool_prefix_prose_smoke.py（4 轮工具调用，双向断言——既要证明流里确实出现过预告、前提成立，又要证明最终结果里只剩最后一段正文、工具活动 4 条齐全、预告一词不留），并做过回退反证（把修复退回旧写法后冒烟立刻变红）；前端渲染另加 6 项真实执行断言（verify/media_markup_check.mjs）；冻结版编译成功，并由冻结版入口自检 verify/frozen_tool_prose_check.py 确认 exe 内的时间线重建、半截回复重建与打包前端资源都是新代码（9 项）。
+            - 运行中可以「插话」了（本次新能力）：AI 还在回答时输入框照常可用——打字回车把话插进队列，面板上可「引导 / 编辑 / 删除」；点「引导」后这句话作为新的用户指令追加到对话末尾、模型下一步就能看到（只追加、不改写历史，前缀缓存不受影响）。未引导的插话不进模型上下文（草稿态）；运行结束后残留队列自动冻结，仍可删除或取回草稿。
+            - 思考失控自动降档重试（本次重点修复）：思考型模型（DeepSeek 等）在复杂长任务里偶发「想个没完」——推理刷屏约十万字符、正文一个字没有，上游以零计费截断；以前三次重试原样重发、必然重演，整轮任务判死「执行失败」。现在重试会自动沿「高→中→低」降低思考强度打破循环（只改本次重试负载，不动会话设置）；实在救不回时，报错会说清「思考未产出正文 + 最长一次思考约 N 万字」并给出操作建议，不再只有一句看不懂的「没有文本内容」。
+            - Kimi K3 思考强度四档全部可用：按官方方言映射（低→low、中→high、高→max；K3 的思考无法关闭，「关」落到最贴近的最低档 low）。此前「中」档会被官方端点拒绝（只认 low/high/max），「关」不发字段反而落到默认 max（最高档）。
+            - 状态栏不再误报「重连中」（本次修复）：长思考流期间右下角不再错误挂着重连横幅——横幅的显示状态改由连接状态机单点托管，与计时器寿命分离；「正在思考 · 已等待 X 秒」的计时是特性、不受影响。
+            - 本地验证：全量单测 1333 例通过；插话 19 例单测 + 34 项真实后端浏览器冒烟（verify/interjection_smoke）；降档重试 6 例与 Kimi K3 方言 3 例守门（tests/test_llm_runtime_retry.py / test_llm_protocols.py）。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

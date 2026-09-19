@@ -83,10 +83,12 @@ def _last_finish_reason() -> str:
 
 
 class EmptyModelStreamError(RuntimeError):
-    """在线模型（仅 codex_responses）流式响应消费完毕但既无正文也无有效 Agent action。
+    """在线模型流式响应消费完毕但既无正文也无有效 Agent action。
 
-    按瞬时故障处理：在既有重试预算内退避重发；次数用尽后原样抛出（消息文本与
-    用户可见错误保持不变）。仅 codex_responses 会抛出该类型，其它在线协议不受影响。
+    按瞬时故障处理：在既有重试预算内退避重发；「有推理零正文」的空流还会在重试时
+    沿 high→medium→low 自动降低思考强度（思考烧光输出额度的自愈，详见重试处注释），
+    次数用尽后抛出。codex_responses 的空流与任意在线协议的「有推理零正文」流都会
+    抛出该类型。
     """
 
 
@@ -1025,7 +1027,10 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                 payload["tools"] = native_tools
                 payload["tool_choice"] = "auto"
                 payload["parallel_tool_calls"] = True
-            reasoning_params = ModelRuntime._reasoning_params(request_format, reasoning_effort)
+            reasoning_params = ModelRuntime._reasoning_params(
+                request_format, reasoning_effort,
+                kimi_k3=ModelRuntime._is_kimi_k3_profile(profile),
+            )
             # DeepSeek selects thinking behavior from the model itself; its
             # OpenAI-compatible endpoint does not accept OpenAI's
             # `reasoning_effort` request field.
@@ -1283,6 +1288,12 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
         stream_options_fallback_used = False
         reasoning_fallback_used = False
         reasoning_passback_fallback_used = False
+        # 「有推理零正文」空流重试时的降档状态：current_effort 只影响本次请求的
+        # 重试负载（不改会话设置）；empty_stream_reason_chars 记录失败尝试里最长的
+        # 一次推理长度，给最终报错提供诊断。
+        current_effort = reasoning_effort
+        effort_lowered_on_retry = False
+        empty_stream_reason_chars = 0
         if diagnostics is not None:
             parsed = urllib.parse.urlsplit(endpoint)
             try:
@@ -1369,9 +1380,14 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                                 # 空正文按「可重试空流」（EmptyModelStreamError）处理，分两种情况：
                                 # ① codex_responses：中继可能只回聚合事件，正文在聚合事件里补不回来；
                                 # ② 有推理无正文：模型确实在生成、正文却丢失/被上游截断
-                                #    （实测 mimo-v2.5 推理循环刷屏后正文为空）。退避后再试一次
-                                #    大概率恢复，不该把一次上游抖动升级成整轮对话失败。
+                                #    （实测 mimo-v2.5 推理循环刷屏后正文为空；deepseek-v4.1-flash
+                                #    高档思考陷入约 10 万字符推理循环、正文/工具全空，上游以
+                                #    零计费截断——思考烧光了输出额度）。退避后再试一次大概率
+                                #    恢复；若是②，重试时还会自动降低思考强度打破推理循环
+                                #    （见下方 EmptyModelStreamError 捕获处），不把一次上游
+                                #    抖动/思考失控升级成整轮对话失败。
                                 # 既无正文也无推理的空流仍保留原 RuntimeError、不重试。
+                                empty_stream_reason_chars = max(empty_stream_reason_chars, len(reasoning))
                                 raise EmptyModelStreamError("在线模型流式响应中没有文本内容")
                             else:
                                 raise RuntimeError("在线模型流式响应中没有文本内容")
@@ -1638,17 +1654,56 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                     exc, profile, is_local=is_local, provider=overflow_source,
                 ) from exc
             except EmptyModelStreamError:
-                # 仅在线 codex_responses 的流式空响应走此分支（本地/连接测试不重试）；
-                # 与 HTTP 重试同策略：退避 + 可取消等待 + 带次数的状态提示。
+                # 仅在线的流式空响应走此分支（本地/连接测试不重试）。
+                # 「有推理零正文」的空流极可能是思考烧光了输出额度——原样重发会
+                # 重现同一个推理循环（实测三次尝试各思考约 10 万字符、正文全空），
+                # 所以重试沿 high→medium→low 逐级降低思考强度，打破循环而不是
+                # 重复循环；无档可降（off/low/auto 或该协议本就不发思考字段）时
+                # 保持原有的退避重发，应对真正的上游瞬时抖动。
                 if not is_local and not connection_test and attempt + 1 < attempts:
                     delay = min(1.5 * (attempt + 1), 5.0)
+                    lowered = ""
+                    # openai_chat + DeepSeek 的画像不发任何思考字段（端点拒收
+                    # reasoning_effort），降档无从谈起；其余 codex_responses /
+                    # openai_chat 都可以在线控档（Kimi K3 走自己的方言映射）。
+                    if response_format in {"codex_responses", "openai_chat"} and not (
+                        response_format == "openai_chat"
+                        and ModelRuntime._is_deepseek_profile(profile)
+                    ):
+                        lowered = ModelRuntime._lower_reasoning_effort(current_effort)
+                    if lowered:
+                        current_effort = lowered
+                        effort_lowered_on_retry = True
+                        reasoning_params = ModelRuntime._reasoning_params(
+                            response_format, current_effort,
+                            deepseek=ModelRuntime._is_deepseek_profile(profile),
+                            kimi_k3=ModelRuntime._is_kimi_k3_profile(profile),
+                        )
+                        payload = dict(payload)
+                        wire_key = "reasoning" if response_format == "codex_responses" else "reasoning_effort"
+                        if reasoning_params:
+                            payload[wire_key] = reasoning_params[wire_key]
+                        else:
+                            payload.pop(wire_key, None)
+                        request = urllib.request.Request(
+                            endpoint,
+                            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                            headers=headers,
+                            method="POST",
+                        )
+                        message = (
+                            f"在线模型返回空响应（思考未产出正文），{delay:g} 秒后"
+                            f"自动降低思考强度重试（{attempt + 1}/{attempts - 1}）"
+                        )
+                    else:
+                        message = (
+                            f"在线模型返回空响应，{delay:g} 秒后重试"
+                            f"（{attempt + 1}/{attempts - 1}）"
+                        )
                     if status:
                         status({
                             "type": "status",
-                            "message": (
-                                f"在线模型返回空响应，{delay:g} 秒后重试"
-                                f"（{attempt + 1}/{attempts - 1}）"
-                            ),
+                            "message": message,
                         })
                     if cancel_event:
                         if cancel_event.wait(delay):
@@ -1656,6 +1711,17 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                     else:
                         time.sleep(delay)
                     continue
+                if effort_lowered_on_retry:
+                    diagnosis = (
+                        f"（模型思考后未产出正文，最长一次思考约 {empty_stream_reason_chars // 10000} 万字；"
+                        if empty_stream_reason_chars >= 10000
+                        else "（模型思考后未产出正文，"
+                    )
+                    raise RuntimeError(
+                        "在线模型流式响应中没有文本内容"
+                        f"{diagnosis}已自动降低思考强度重试仍失败；"
+                        "请把思考强度调低或精简上下文后重新生成）"
+                    )
                 raise
 
             finally:

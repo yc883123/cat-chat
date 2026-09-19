@@ -107,6 +107,17 @@ class ProtocolMixins:
         model = str(profile.get("model") or "").lower()
         return "deepseek" in model or "deepseek.com" in base_url
 
+    @staticmethod
+    def _is_kimi_k3_profile(profile: dict[str, Any]) -> bool:
+        """Return whether the profile targets Kimi K3（月之暗面）.
+
+        判定只看模型名：K3 是月之暗面唯一接受 ``reasoning_effort`` 的模型
+        （官方取值 low/high/max、默认 max、思考永远开启）；K2.x 用 ``thinking``
+        参数、收到 ``reasoning_effort`` 会报错，绝不能按 K3 方言发。
+        """
+        model = str(profile.get("model") or "").lower()
+        return "kimi-k3" in model
+
 
     @staticmethod
     def _responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -369,8 +380,19 @@ class ProtocolMixins:
         return system_prompt, input_parts
 
 
+    # 「有推理零正文」空流重试时的思考强度降档链：high→medium→low 逐级下探。
+    # off 本来就不发思考、auto 未发任何强度参数，二者都「无档可降」。
+    _LOWER_REASONING_EFFORT = {"high": "medium", "medium": "low"}
+
     @staticmethod
-    def _reasoning_params(request_format: str, effort: str, deepseek: bool = False) -> dict[str, Any]:
+    def _lower_reasoning_effort(effort: str) -> str:
+        """返回下一档思考强度；不可降（off/low/auto/未知）时返回空串。"""
+        return ProtocolMixins._LOWER_REASONING_EFFORT.get((effort or "").strip().lower(), "")
+
+    @staticmethod
+    def _reasoning_params(
+        request_format: str, effort: str, deepseek: bool = False, kimi_k3: bool = False,
+    ) -> dict[str, Any]:
         """把思维强度映射为各供应商协议字段；``auto`` 不发送任何参数。"""
         effort = (effort or "auto").strip().lower()
         if effort not in {"off", "low", "medium", "high"}:
@@ -382,6 +404,13 @@ class ProtocolMixins:
             # Ollama 支持布尔值以及 low/medium/high；保留用户选择的强度。
             return {"think": False if effort == "off" else effort}
         if request_format == "openai_chat":
+            if kimi_k3:
+                # Kimi K3 官方方言：reasoning_effort 只认 low/high/max（默认 max），
+                # 且思考永远开启、无法关闭——off 落到最低档 low 是最贴近的语义。
+                # 应用四档 off/low/medium/high 据此映射（最高档 high→max）。
+                # 注意 K2.x 不接受 reasoning_effort（会 400），此分支仅 K3 可走。
+                mapping = {"off": "low", "low": "low", "medium": "high", "high": "max"}
+                return {"reasoning_effort": mapping[effort]}
             # OpenAI 仅支持 low/medium/high；off 视为不启用（不发送字段）。
             if effort == "off":
                 return {}
@@ -393,6 +422,8 @@ class ProtocolMixins:
                 mapping = {"off": "none", "low": "low", "medium": "high", "high": "max"}
                 return {"reasoning": {"effort": mapping[effort]}}
             # OpenAI Codex Responses：低/中/高三档。
+            # （Kimi K3 无 Responses API；经中继走此格式时按 OpenAI 方言透传，
+            #  由中继自行翻译，不做 K3 特判。）
             if effort == "off":
                 return {}
             return {"reasoning": {"effort": effort}}

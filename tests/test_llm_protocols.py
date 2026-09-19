@@ -134,6 +134,32 @@ class LlmProtocolTests(unittest.TestCase):
         self.assertIsInstance(params, dict)
         self.assertIn("reasoning_effort", params)
 
+    def test_reasoning_params_kimi_k3(self):
+        """Kimi K3 方言：reasoning_effort 只认 low/high/max（默认 max），思考关不掉。
+
+        应用四档据此映射：off→low（最贴近「关」）、low→low、medium→high、high→max。
+        K2.x 不接受 reasoning_effort（会 400），判定必须只命中 K3。
+        """
+        self.assertEqual(P._reasoning_params("openai_chat", "off", kimi_k3=True),
+                         {"reasoning_effort": "low"})
+        self.assertEqual(P._reasoning_params("openai_chat", "low", kimi_k3=True),
+                         {"reasoning_effort": "low"})
+        self.assertEqual(P._reasoning_params("openai_chat", "medium", kimi_k3=True),
+                         {"reasoning_effort": "high"})
+        self.assertEqual(P._reasoning_params("openai_chat", "high", kimi_k3=True),
+                         {"reasoning_effort": "max"})
+        # auto 不发任何参数（与其它协议一致）
+        self.assertEqual(P._reasoning_params("openai_chat", "auto", kimi_k3=True), {})
+        # 判定只看模型名、仅命中 K3（K2.x 用 thinking 参数，绝不能按 K3 方言发）
+        self.assertTrue(P._is_kimi_k3_profile({"model": "kimi-k3"}))
+        self.assertTrue(P._is_kimi_k3_profile({"model": "Kimi-K3-0905"}))
+        self.assertFalse(P._is_kimi_k3_profile({"model": "kimi-k2.6"}))
+        self.assertFalse(P._is_kimi_k3_profile({"model": "kimi-k2.7-code"}))
+        self.assertFalse(P._is_kimi_k3_profile({"model": "deepseek-v4-flash"}))
+        # codex_responses 不做 K3 特判：K3 无 Responses API，中继按 OpenAI 方言翻译
+        self.assertEqual(P._reasoning_params("codex_responses", "medium", kimi_k3=True),
+                         {"reasoning": {"effort": "medium"}})
+
     def test_with_endpoint_and_local_endpoint(self):
         self.assertEqual(P._with_endpoint("https://api.openai.com/v1", "/chat/completions"),
                          "https://api.openai.com/v1/chat/completions")

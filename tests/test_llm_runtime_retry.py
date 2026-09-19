@@ -27,6 +27,22 @@ PROFILE = {
 }
 MESSAGES = [{"role": "user", "content": "ping"}]
 PROFILE_OPENAI = {**PROFILE, "request_format": "openai_chat"}
+# 非 DeepSeek 画像（GPT）：openai_chat 下 reasoning_effort 在线可控档。
+PROFILE_GPT = {
+    **PROFILE,
+    "name": "gpt",
+    "base_url": "https://api.openai.com",
+    "model": "gpt-5",
+    "request_format": "openai_chat",
+}
+# Kimi K3 画像（月之暗面官方 openai_chat）：reasoning_effort 只认 low/high/max。
+PROFILE_KIMI = {
+    **PROFILE,
+    "name": "kimi",
+    "base_url": "https://api.moonshot.cn",
+    "model": "kimi-k3",
+    "request_format": "openai_chat",
+}
 
 
 def sse(chunk: dict) -> bytes:
@@ -44,6 +60,13 @@ DELTA_OPENAI_STREAM = [sse({"choices": [{"delta": {"content": "答复"}}]})]
 REASONING_ONLY_OPENAI_STREAM = [
     sse({"choices": [{"delta": {"reasoning_content": "先核对一遍参数…"}}]}),
     sse({"choices": [{"delta": {}}]}),
+]
+# codex_responses 版「有推理零正文」：deepseek-v4.1-flash 高档思考陷入推理循环、
+# 正文/工具全空、上游以零计费截断的真实事故形态（2026-09-19 实测，单次约 10 万字符
+# 推理、三次重试全部重演）。重试必须沿 high→medium→low 降档打破循环，不能原样重发。
+REASONING_ONLY_CODEX_STREAM = [
+    sse({"type": "response.reasoning_summary_text.delta", "delta": "再想想……"}),
+    sse({"type": "response.completed", "response": {"output": []}}),
 ]
 
 
@@ -268,6 +291,116 @@ class OnlineRetryTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(content, "答复", "思考轮重试成功后应返回正文")
         self.assertEqual(len(calls), 2)
+
+    def test_reasoning_only_codex_retry_lowers_effort(self) -> None:
+        """高档思考空流：重试必须降低思考强度，而不是原样重发同一负载。"""
+        events: list[dict] = []
+        calls, content, error = self._run(
+            [REASONING_ONLY_CODEX_STREAM, DELTA_CODEX_STREAM],
+            status=events.append, options={"stream": True},
+            profile={**PROFILE, "reasoning_effort": "high"})
+        self.assertIsNone(error)
+        self.assertEqual(content, "答复")
+        self.assertEqual(len(calls), 2)
+        # PROFILE 模型名含 deepseek → codex 映射 high→max、medium→high。
+        first = json.loads(calls[0].data.decode("utf-8"))
+        second = json.loads(calls[1].data.decode("utf-8"))
+        self.assertEqual(first["reasoning"]["effort"], "max", "首发必须按会话设置")
+        self.assertEqual(second["reasoning"]["effort"], "high", "重试必须降一档")
+        notes = [
+            str(event.get("message") or "")
+            for event in events
+            if event.get("type") == "status"
+        ]
+        self.assertTrue(
+            any("降低思考强度" in note for note in notes),
+            f"降档重试必须在状态提示里告知用户，实际：{notes}",
+        )
+
+    def test_reasoning_only_codex_exhausted_reports_diagnosis(self) -> None:
+        """三档全部烧完：报错必须带诊断与可操作建议，不能只有「没有文本内容」。"""
+        events: list[dict] = []
+        calls, _content, error = self._run(
+            [REASONING_ONLY_CODEX_STREAM], status=events.append,
+            options={"stream": True}, profile={**PROFILE, "reasoning_effort": "high"})
+        self.assertEqual(len(calls), 3)
+        self.assertIsNotNone(error)
+        self.assertIn("没有文本内容", str(error))
+        self.assertIn("降低思考强度", str(error))
+        efforts = [
+            json.loads(call.data.decode("utf-8"))["reasoning"]["effort"]
+            for call in calls
+        ]
+        self.assertEqual(efforts, ["max", "high", "low"], "重试必须逐级降档")
+
+    def test_reasoning_only_codex_low_effort_retries_as_is(self) -> None:
+        """已是最低档：无档可降，保持原样退避重试（应对上游瞬时抖动）。"""
+        calls, _content, error = self._run(
+            [REASONING_ONLY_CODEX_STREAM], options={"stream": True},
+            profile={**PROFILE, "reasoning_effort": "low"})
+        self.assertEqual(len(calls), 3)
+        self.assertIsInstance(error, EmptyModelStreamError)
+        efforts = [
+            json.loads(call.data.decode("utf-8"))["reasoning"]["effort"]
+            for call in calls
+        ]
+        self.assertEqual(efforts, ["low", "low", "low"], "无档可降时不得改负载")
+
+    def test_reasoning_only_codex_auto_effort_retries_as_is(self) -> None:
+        """auto 未发任何思考参数：无档可降，重试负载不得新增 reasoning 字段。"""
+        calls, _content, error = self._run(
+            [REASONING_ONLY_CODEX_STREAM], options={"stream": True}, profile=PROFILE)
+        self.assertEqual(len(calls), 3)
+        self.assertIsInstance(error, EmptyModelStreamError)
+        for call in calls:
+            self.assertNotIn("reasoning", json.loads(call.data.decode("utf-8")))
+
+    def test_reasoning_only_openai_deepseek_does_not_lower(self) -> None:
+        """openai_chat + DeepSeek 画像不发思考字段（端点拒收）：降档无从谈起。"""
+        calls, _content, error = self._run(
+            [REASONING_ONLY_OPENAI_STREAM], options={"stream": True},
+            profile={**PROFILE_OPENAI, "reasoning_effort": "high"})
+        self.assertEqual(len(calls), 3)
+        self.assertIsInstance(error, EmptyModelStreamError)
+        for call in calls:
+            self.assertNotIn("reasoning_effort", json.loads(call.data.decode("utf-8")))
+
+    def test_reasoning_only_openai_gpt_lowers_effort(self) -> None:
+        """openai_chat + GPT：reasoning_effort 在线可控，重试降档 high→medium。"""
+        calls, content, error = self._run(
+            [REASONING_ONLY_OPENAI_STREAM, DELTA_OPENAI_STREAM],
+            options={"stream": True}, profile={**PROFILE_GPT, "reasoning_effort": "high"})
+        self.assertIsNone(error)
+        self.assertEqual(content, "答复")
+        efforts = [
+            json.loads(call.data.decode("utf-8")).get("reasoning_effort")
+            for call in calls
+        ]
+        self.assertEqual(efforts, ["high", "medium"])
+
+    def test_reasoning_only_kimi_k3_lowers_with_dialect(self) -> None:
+        """Kimi K3 降档走自家方言：首发 high→max，重试 medium→high。"""
+        calls, content, error = self._run(
+            [REASONING_ONLY_OPENAI_STREAM, DELTA_OPENAI_STREAM],
+            options={"stream": True}, profile={**PROFILE_KIMI, "reasoning_effort": "high"})
+        self.assertIsNone(error)
+        self.assertEqual(content, "答复")
+        efforts = [
+            json.loads(call.data.decode("utf-8")).get("reasoning_effort")
+            for call in calls
+        ]
+        self.assertEqual(efforts, ["max", "high"], "K3 方言映射必须在降档链上生效")
+
+    def test_kimi_k3_off_maps_to_low_on_wire(self) -> None:
+        """K3 思考关不掉：off 必须发最低档 low（不发字段 = 默认 max，与「关」相反）。"""
+        calls, content, error = self._run(
+            [{"choices": [{"message": {"content": "pong"}}],
+              "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}],
+            profile={**PROFILE_KIMI, "reasoning_effort": "off"})
+        self.assertIsNone(error)
+        self.assertEqual(content, "pong")
+        payload = json.loads(calls[0].data.decode("utf-8"))
+        self.assertEqual(payload.get("reasoning_effort"), "low")
 
 
 if __name__ == "__main__":

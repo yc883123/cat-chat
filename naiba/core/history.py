@@ -206,6 +206,12 @@ def build_model_history(
         if metadata.get(MetadataKeys.SESSION_START):
             history = []
             continue
+        # 插话（interjection）：落库形态是普通 role=user 行，但**只有被 agent 消费过的
+        # 才允许进上下文**。pending（等用户点「引导」）与 stopped（运行取消后冻结）必须
+        # 挡在这里——它们是库里真行，不过滤就等于把「用户从没发出的指令」送进下一轮请求。
+        if (metadata.get(MetadataKeys.INTERJECTION)
+                and not metadata.get(MetadataKeys.INTERJECTION_CONSUMED)):
+            continue
         if item.get("role") not in {"user", "assistant"}:
             continue
         content = str(item.get("content") or "")

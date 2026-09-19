@@ -22,6 +22,7 @@ RUN_CONTEXT_KEYS: tuple[str, ...] = (
     "run_id", "job_id", "conversation_id", "owner_session_id", "parent_job_id",
     "depth", "allowed_tools", "skill_policy", "job_registry", "executor",
     "cancel_event", "vision_budget", "interaction_mode", "routing_message",
+    "pull_interjections", "mark_interjections_consumed",
     "mcp_active", "trace_messages", "plan_exit_content", "plan_step_title",
     "model_has_vision", "tool_defs", "workspace_dir", "media_intent",
     "event_sink", "truncation",
@@ -46,6 +47,10 @@ def default_run_context() -> dict[str, Any]:
         "vision_budget": None,
         "interaction_mode": "craft",
         "routing_message": "",
+        # 插话回调（由 run/chat 组装时注入）：缺省 None = 本轮不支持插话，
+        # agent 侧的消费点会直接跳过（子 Agent/计划等形态不排队插话）。
+        "pull_interjections": None,
+        "mark_interjections_consumed": None,
         "mcp_active": False,
         "trace_messages": [],
         "plan_exit_content": "",
@@ -149,6 +154,8 @@ class RunContext(TypedDict, total=False):
     vision_budget: Any               # VisionBudget（本轮视觉预算）
     interaction_mode: str            # craft / plan / ask
     routing_message: str             # 触发本轮的用户消息
+    pull_interjections: Any          # 拉取「已引导待消费」插话回调（返回 list[dict]）
+    mark_interjections_consumed: Any # 标记插话已消费回调（callable(message_ids)）
     # ---- 扩展键（生产方写入、消费方读取，属既有隐式协议，一并显式化）----
     mcp_active: bool                 # 本轮是否激活 MCP（skills 写入）
     trace_messages: list[Any]        # 本轮 trace 原样消息（技能层写入）
@@ -189,6 +196,10 @@ class EventType(str, Enum):
     ERROR = "error"
     DEBUG_CACHE = "debug_cache"
     HEARTBEAT = "heartbeat"
+    # ---- 插话（interjection）：运行中排队的新指令 ----
+    # user_guidance 用户点了「引导」；interjection_consumed agent 已在某一步取走。
+    USER_GUIDANCE = "user_guidance"
+    INTERJECTION_CONSUMED = "interjection_consumed"
 
     # ---- Agent 循环记录（无消费事件已随阶段 4 清理）----
     # ---- Job 域（字段动态展开，宽松）----
@@ -300,6 +311,11 @@ EVENT_PAYLOAD_KEYS: dict[str, frozenset[str] | None] = {
     "error": frozenset({"message", "partial_message"}),
     "debug_cache": frozenset({"label", "lines"}),
     "heartbeat": frozenset(),
+    # ---- 插话（interjection）----
+    # user_guidance：用户点了「引导」→ 前端把队列行升格成正式消息行 + 撤销旧工具确认。
+    # interjection_consumed：agent 已在某一步取走该插话（前端把队列行置灰移除）。
+    "user_guidance": frozenset({"message_id", "message"}),
+    "interjection_consumed": frozenset({"message_id", "message"}),
     # ---- Job 域（字段动态展开，宽松）----
     "job_status": None,
     "job_finished": None,

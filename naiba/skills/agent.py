@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from naiba.core.contracts import RunContext
+from naiba.core.messages import MetadataKeys
 
 import hashlib
 import concurrent.futures
@@ -801,6 +802,9 @@ class SkillAgent:
         }
         # 自动续写前的各个片段（续写成功后按顺序拼回最终答复）。
         continued_parts: list[str] = []
+        # 本步内已取走的插话 id：同一小步里两处消费点（循环顶 + 终态答复重排）会连续
+        # 调用 consume_interjections，靠它去重，避免同一条插话被追加两次。
+        seen_interjections: set[str] = set()
 
         def assistant_message(content: Any = "", **extra: Any) -> dict[str, Any]:
             message: dict[str, Any] = {"role": "assistant", "content": content}
@@ -812,6 +816,49 @@ class SkillAgent:
                 message["reasoning_id"] = reasoning_id
             message.update(extra)
             return message
+
+        def consume_interjections() -> int:
+            """把用户「引导」过的插话追加到 messages 末尾，返回取走条数。
+
+            契约（前缀缓存）：**只追加，不改写、不重排已有历史**——插话作为一条新的
+            user 消息跟在当前 messages 后面，相对上一次请求仍是 append-only，
+            DeepSeek 前缀缓存不受影响。未被消费前它也进不了历史（见 core/history.py）。
+            """
+            getter = (run_context or {}).get("pull_interjections")
+            if not callable(getter):
+                return 0
+            consumed = 0
+            for item in getter() or []:
+                message_id = str(item.get("id") or "")
+                if not message_id or message_id in seen_interjections:
+                    continue
+                seen_interjections.add(message_id)
+                content = str(item.get("content") or "").strip()
+                attachments = (item.get("metadata") or {}).get(MetadataKeys.ATTACHMENTS) or []
+                paths = [
+                    str(attachment.get("path") or attachment.get("source") or "").strip()
+                    for attachment in attachments
+                    if isinstance(attachment, dict)
+                    and str(attachment.get("path") or attachment.get("source") or "").strip()
+                ]
+                if paths:
+                    content += "\n\n[插话附带文件]\n" + "\n".join(paths)
+                if not content:
+                    continue
+                messages.append({
+                    "role": "user",
+                    "content": "用户插话（优先处理，并根据新指令继续当前任务）：\n" + content,
+                })
+                marker = (run_context or {}).get("mark_interjections_consumed")
+                if callable(marker):
+                    marker([message_id])
+                event({
+                    "type": "interjection_consumed",
+                    "message_id": message_id,
+                    "message": content[:500],
+                })
+                consumed += 1
+            return consumed
 
         def abort_run() -> None:
             # 把本轮已累积的模型消息（工具调用/结果/推理）写入 trace，供“已中止”消息携带，
@@ -862,6 +909,9 @@ class SkillAgent:
                     run_context["trace_messages"] = messages[trace_start:]
                 return content, runs, reasonings, self._summarize_usage(usages)
             step += 1
+            # 每步开头先把已「引导」的插话取进本轮 messages（旧实现挂载位，语义不变）：
+            # 用户点「引导」= 立刻干预下一步，而不是等这轮跑完。
+            consume_interjections()
             event({"type": "status", "message": f"正在思考（第 {step} 轮）"})
             try:
                 if _cache_debug_enabled():
@@ -932,6 +982,16 @@ class SkillAgent:
                 )
             parse_error_count = 0
             if action.get("type") not in {"tool", "tools"}:
+                # 终态答复与插话同一步到达：模型认为这轮结束了，但用户刚「引导」了新指令。
+                # 顺序必须是「先落答复、再把插话排回末尾」——直接追加会让 messages 变成
+                # 连续两条 user（模型侧非法且破坏 append-only）。重排后 continue 再跑一轮。
+                before_interjections = len(messages)
+                if consume_interjections():
+                    interjections = messages[before_interjections:]
+                    del messages[before_interjections:]
+                    messages.append(assistant_message(str(action.get("content") or raw or "")))
+                    messages.extend(interjections)
+                    continue
                 pending_jobs = self._pending_background_jobs(run_context)
                 if pending_jobs:
                     event({

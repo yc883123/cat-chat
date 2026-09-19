@@ -70,6 +70,12 @@ export const state = {
   elapsedTimer: null,      // “已等待 X 秒”计时器句柄
   elapsedBase: '',
   elapsedSince: 0,
+  // 状态栏当前是否归「重连中…」所有。**必须与 elapsedTimer 分开存**：`clearElapsedStatus()`
+  // 会把计时器和它的来源标记一起抹掉，而 `resumeRun` 开头的 detachRunConnection() 正好在
+  // 重连建立前调它——若判据存在被一起抹掉的那个字段上，「重连成功该收摊」的判断就永远
+  // 不成立，状态栏会原地冻结成「重连中… · 已等待 0 秒」（2026-09-19 实测复现）。
+  // 由 showElapsedStatus 单一写入（每次换条幅都重置），settleReconnectStatus 消费。
+  elapsedReconnectShown: false,
   taskSubmitting: false,
   renameConversationId: '',
   newWorkspaceDir: '',

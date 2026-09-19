@@ -722,6 +722,36 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(self.app.migration_move_data(body))
         elif path == "/api/migration/merge":
             self._json(self.app.migration_merge(body))
+        elif path == "/api/chat/interject":
+            # 插话（运行中入队）：202 表示「已排队，不代表已发送」——真正的发送时机
+            # 由用户在队列面板点「引导」决定（见 run/manager.py 的插话段注释）。
+            try:
+                self._json(self.app.runs.interject(body), HTTPStatus.ACCEPTED)
+            except LookupError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+            except ValueError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif path == "/api/chat/interject/guide":
+            try:
+                self._json(self.app.runs.guide_interjection(body))
+            except LookupError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+            except ValueError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif path == "/api/chat/interject/edit":
+            try:
+                self._json(self.app.runs.edit_interjection(body))
+            except LookupError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+            except ValueError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif path == "/api/chat/interject/delete":
+            try:
+                self._json(self.app.runs.delete_interjection(body))
+            except LookupError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+            except ValueError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         elif path == "/api/chat/cancel":
             run_id = str(body.get("run_id") or "").strip()
             conversation_id = str(body.get("conversation_id") or "").strip()

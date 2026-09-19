@@ -70,6 +70,10 @@ KEEP = {
     "branch_first_turn_smoke.py", "branch_first_turn_smoke.cjs",
     # 新会话边界 / 种子消息冒烟（§六 已登记；Python 自编排 + Node 检查）
     "session_start_smoke.py", "session_start_smoke.cjs",
+    # 插话（运行中第二输入通道）+ 流式状态「重连中…」滞留冒烟（§六 已登记）
+    "interjection_smoke.py", "interjection_smoke.cjs",
+    # 冻结版自检：插话状态机 + 面板资源 + 重连横幅（§六 已登记）
+    "frozen_interjection_check.py",
     # 「重置上下文后前端锁不解除」回归（§六 已登记；Python 自编排 + Node 检查）
     "context_reset_lock.py", "context_reset_lock.cjs",
     # 消息列表懒加载冒烟（§六 已登记；Python 自编排 + Node 检查）

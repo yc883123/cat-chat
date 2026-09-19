@@ -2183,6 +2183,233 @@ class ChatStorage:
             ).fetchone()
         return self._task_dict(row) if row else None
 
+    # ---- 插话（interjection）：运行中排队的新指令 ----
+    # 落库形态 = 一条 role=user 的普通消息 + metadata 标记（键见 MetadataKeys.INTERJECTION*）。
+    # 之所以复用 messages 表而不是另开队列表：插话被消费后**就是**这轮对话里一条真实的
+    # 用户消息（模型看到的消息序列与库内顺序天然一致），另存一份反而要处理"什么时候并回"。
+    # 代价是查询侧必须按标记过滤：`build_model_history` 只放行 consumed 的插话，
+    # `list_run_interjections` 只取 guided 未消费的，前端只把未消费的渲染进队列面板。
+
+    def add_run_interjection(
+        self,
+        conversation_id: str,
+        run_id: str,
+        content: str,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """为活动中的 Run 建一条待发指令（pending）。
+
+        刻意不让 agent 看到：用户明确点「引导」之后（``guide_run_interjection``）
+        才进入可拉取队列。
+        """
+        now = int(time.time() * 1000)
+        message_id = uuid.uuid4().hex
+        metadata = {
+            MetadataKeys.ATTACHMENTS: attachments or [],
+            MetadataKeys.RUN_ID: run_id,
+            MetadataKeys.INTERJECTION: True,
+            MetadataKeys.INTERJECTION_GUIDED: False,
+        }
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            active = db.execute(
+                "SELECT id FROM background_tasks WHERE id = ? AND conversation_id = ? "
+                f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)}",
+                (run_id, conversation_id),
+            ).fetchone()
+            if not active:
+                raise LookupError("运行不存在或已结束")
+            db.execute(
+                "INSERT INTO messages(id, conversation_id, role, content, metadata, created_at) "
+                "VALUES (?, ?, 'user', ?, ?, ?)",
+                (message_id, conversation_id, content, json.dumps(metadata, ensure_ascii=False), now),
+            )
+            db.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
+        return {
+            "id": message_id,
+            "role": "user",
+            "content": content,
+            "metadata": metadata,
+            "created_at": now,
+        }
+
+    def list_run_interjections(self, run_id: str) -> list[dict[str, Any]]:
+        """该 Run 下**已被引导、尚未消费**的插话（agent 消费点的唯一输入）。
+
+        pending（未引导）与 stopped 不在此列——前者等用户显式操作，后者永不发送。
+        """
+        run = self.get_background_task(run_id)
+        if not run:
+            return []
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id, role, content, metadata, created_at FROM messages "
+                "WHERE conversation_id = ? AND role = 'user' ORDER BY created_at, rowid",
+                (str(run.get("conversation_id") or ""),),
+            ).fetchall()
+        return [
+            message for message in (self._message_dict(row) for row in rows)
+            if bool(message.get("metadata", {}).get(MetadataKeys.INTERJECTION))
+            and str(message.get("metadata", {}).get(MetadataKeys.RUN_ID) or "") == run_id
+            and bool(message.get("metadata", {}).get(MetadataKeys.INTERJECTION_GUIDED))
+            and not bool(message.get("metadata", {}).get(MetadataKeys.INTERJECTION_CONSUMED))
+            and not bool(message.get("metadata", {}).get(MetadataKeys.INTERJECTION_STOPPED))
+        ]
+
+    def guide_run_interjection(
+        self, conversation_id: str, run_id: str, message_id: str
+    ) -> dict[str, Any]:
+        """把一条 pending 插话放行给活动中的 Run（agent 下一步取走）。"""
+        now = int(time.time() * 1000)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            active = db.execute(
+                "SELECT id FROM background_tasks WHERE id = ? AND conversation_id = ? "
+                f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)}",
+                (run_id, conversation_id),
+            ).fetchone()
+            if not active:
+                raise LookupError("运行不存在或已结束")
+            row = db.execute(
+                "SELECT id, role, content, metadata, created_at FROM messages "
+                "WHERE id = ? AND conversation_id = ? AND role = 'user'",
+                (message_id, conversation_id),
+            ).fetchone()
+            if not row:
+                raise LookupError("待引导消息不存在")
+            message = self._message_dict(row)
+            metadata = dict(message.get("metadata") or {})
+            if (not metadata.get(MetadataKeys.INTERJECTION)
+                    or str(metadata.get(MetadataKeys.RUN_ID) or "") != run_id
+                    or metadata.get(MetadataKeys.INTERJECTION_GUIDED)
+                    or metadata.get(MetadataKeys.INTERJECTION_CONSUMED)):
+                raise LookupError("待引导消息不存在或已被处理")
+            metadata[MetadataKeys.INTERJECTION_GUIDED] = True
+            db.execute(
+                "UPDATE messages SET metadata = ? WHERE id = ?",
+                (json.dumps(metadata, ensure_ascii=False), message_id),
+            )
+            db.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
+        message["metadata"] = metadata
+        return message
+
+    def mark_run_interjections_consumed(self, run_id: str, message_ids: list[str]) -> None:
+        """标记插话已被 agent 取走（此后它才允许进模型历史）。"""
+        ids = [str(message_id).strip() for message_id in message_ids if str(message_id).strip()]
+        if not ids:
+            return
+        placeholders = ", ".join("?" for _ in ids)
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT id, metadata FROM messages WHERE id IN ({placeholders})", ids
+            ).fetchall()
+            for row in rows:
+                try:
+                    metadata = json.loads(row["metadata"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    metadata = {}
+                if (str(metadata.get(MetadataKeys.RUN_ID) or "") != run_id
+                        or not metadata.get(MetadataKeys.INTERJECTION)):
+                    continue
+                metadata[MetadataKeys.INTERJECTION_CONSUMED] = True
+                db.execute(
+                    "UPDATE messages SET metadata = ? WHERE id = ?",
+                    (json.dumps(metadata, ensure_ascii=False), row["id"]),
+                )
+
+    def stop_pending_interjections(self, run_id: str) -> int:
+        """冻结该 Run 的队列：保留可见，但永久阻止派发（绝不自动发送）。
+
+        两处调用，缺一不可：
+        - `ConversationRunManager.cancel`：取消那一刻就冻结——run 线程可能正卡在模型流上，
+          等它自己观察到取消信号时，用户点「引导」还会把指令补进一条将死的 run；
+        - `ConversationRunManager._finish`：任何终态（含正常完成）都冻结——本版没有自动
+          follow-up，run 一结束队列就没有消费者了，留着 pending 只会让用户以为还能引导。
+        幂等：已消费/已 stopped 的行不动，重复调用不重复计数。
+        """
+        stopped = 0
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            # SQLite 不认 Python 常量，键路径只能写字面量——用 f-string 从 MetadataKeys
+            # 插值，保证 SQL 与 Python 侧读的是同一个键（改常量不会漏改这里）。
+            j = "$."
+            rows = db.execute(
+                "SELECT id, metadata FROM messages WHERE role = 'user' "
+                f"AND json_extract(metadata, '{j}{MetadataKeys.RUN_ID}') = ? "
+                f"AND json_extract(metadata, '{j}{MetadataKeys.INTERJECTION}') = 1",
+                (run_id,),
+            ).fetchall()
+            for row in rows:
+                try:
+                    metadata = json.loads(row["metadata"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    metadata = {}
+                if metadata.get(MetadataKeys.INTERJECTION_CONSUMED):
+                    continue
+                if not metadata.get(MetadataKeys.INTERJECTION_STOPPED):
+                    metadata[MetadataKeys.INTERJECTION_STOPPED] = True
+                    db.execute(
+                        "UPDATE messages SET metadata = ? WHERE id = ?",
+                        (json.dumps(metadata, ensure_ascii=False), row["id"]),
+                    )
+                    stopped += 1
+        return stopped
+
+    def delete_run_interjection(
+        self, conversation_id: str, run_id: str, message_id: str
+    ) -> bool:
+        """删除一条插话（已消费的不给删——它已经是本轮真实上下文的一部分）。
+
+        对「已引导」的行只放行**队列已冻结**的那些：引导过的插话正排在 agent 的取用队列里，
+        在 Run 还活着时删掉会让「模型看到的」与「用户界面显示的」直接对不上；而 Run 一旦
+        结束（cancel 或 `_finish` 都会标 stopped），它就永远等不到派发了，此时必须允许删除
+        ——否则用户排进去的字既发不出、也删不掉，只能看着它烂在面板里。
+        """
+        with self._connect() as db:
+            j = "$."
+            cursor = db.execute(
+                "DELETE FROM messages WHERE id = ? AND conversation_id = ? AND role = 'user' "
+                f"AND json_extract(metadata, '{j}{MetadataKeys.RUN_ID}') = ? "
+                f"AND json_extract(metadata, '{j}{MetadataKeys.INTERJECTION}') = 1 "
+                f"AND COALESCE(json_extract(metadata, '{j}{MetadataKeys.INTERJECTION_CONSUMED}'), 0) = 0 "
+                f"AND (COALESCE(json_extract(metadata, '{j}{MetadataKeys.INTERJECTION_GUIDED}'), 0) = 0 "
+                f"     OR COALESCE(json_extract(metadata, '{j}{MetadataKeys.INTERJECTION_STOPPED}'), 0) = 1)",
+                (message_id, conversation_id, run_id),
+            )
+            if cursor.rowcount:
+                db.execute(
+                    "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                    (int(time.time() * 1000), conversation_id),
+                )
+        return bool(cursor.rowcount)
+
+    def edit_run_interjection(
+        self, conversation_id: str, run_id: str, message_id: str, content: str
+    ) -> dict[str, Any]:
+        """就地改写一条仍在排队的插话（不删记录，保持消息 id 稳定，前端可原位刷新）。"""
+        content = str(content or "").strip()
+        if not content:
+            raise ValueError("插话内容不能为空")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT id, role, content, metadata, created_at FROM messages "
+                "WHERE id = ? AND conversation_id = ? AND role = 'user'",
+                (message_id, conversation_id),
+            ).fetchone()
+            if not row:
+                raise LookupError("插话不存在")
+            message = self._message_dict(row)
+            metadata = dict(message.get("metadata") or {})
+            if (not metadata.get(MetadataKeys.INTERJECTION)
+                    or str(metadata.get(MetadataKeys.RUN_ID) or "") != run_id
+                    or metadata.get(MetadataKeys.INTERJECTION_GUIDED)
+                    or metadata.get(MetadataKeys.INTERJECTION_CONSUMED)):
+                raise LookupError("插话不存在或已被引导")
+            db.execute("UPDATE messages SET content = ? WHERE id = ?", (content, message_id))
+            db.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (int(time.time() * 1000), conversation_id))
+        return {**message, "content": content}
+
     def create_chat_run(
         self,
         conversation_id: str,

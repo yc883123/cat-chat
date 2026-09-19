@@ -800,6 +800,31 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
 .composer-wrap { min-height: 0; max-height: 42dvh; overflow-y: auto; padding: 8px max(20px, calc((100% - var(--chat-max) - var(--turn-rail-w)) / 2 + var(--turn-rail-w))) max(12px, env(safe-area-inset-bottom)) max(20px, calc((100% - var(--chat-max) - var(--turn-rail-w)) / 2)); background: var(--bg); }
 .composer-wrap.dragover { background: var(--accent-soft); }
 .composer-wrap.dragover .composer { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(var(--brand-500-rgb), .14); }
+/* 插话队列面板：挂在输入框正上方（与选择面板同层、不同时间窗）。
+   行状态三态由 JS 用 class 表达：默认=待引导（可引导/编辑/删除）、is-guided=已引导（等模型取走）、
+   is-stopped=已停止（运行被取消，队列冻结，只能删除）。 */
+.run-guidance-list { display: grid; gap: 5px; margin: 0 0 8px; }
+.run-guidance-list[hidden] { display: none; }
+.run-guidance-head { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.run-guidance-card { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--surface); color: var(--text); font-size: 13px; }
+.run-guidance-card.is-guided { border-style: dashed; color: var(--muted); }
+.run-guidance-card.is-stopped { border-color: var(--red); color: var(--muted); }
+.run-guidance-badge { flex: none; padding: 1px 7px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 11px; white-space: nowrap; }
+.run-guidance-card.is-guided .run-guidance-badge { background: var(--accent-soft); color: var(--accent); }
+.run-guidance-card.is-stopped .run-guidance-badge { background: var(--surface-2); color: var(--red); }
+.run-guidance-icon { flex: none; color: var(--muted); font-size: 16px; line-height: 1; }
+.run-guidance-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-guidance-input { flex: 1; min-width: 0; padding: 5px 7px; border: 1px solid var(--accent); border-radius: 4px; background: var(--bg); color: var(--text); font: inherit; resize: vertical; }
+.run-guidance-actions { display: flex; align-items: center; gap: 2px; flex: none; }
+.run-guidance-actions button { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: 16px; }
+.run-guidance-actions button:hover { background: var(--surface-2); color: var(--text); }
+.run-guidance-actions button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.run-guidance-actions [data-interjection-guide] { background: var(--accent-solid); color: #fff; }
+.run-guidance-actions [data-interjection-guide]:hover { background: var(--brand-700); color: #fff; }
+.run-guidance-actions [data-interjection-guide]:disabled { background: var(--surface-2); color: var(--muted); }
+.run-guidance-actions [data-interjection-delete]:hover { color: var(--red); }
+.run-guidance-actions [data-interjection-save] { width: auto; padding: 0 10px; background: var(--accent-solid); color: #fff; font-size: 12px; }
+.run-guidance-actions [data-interjection-save]:hover { background: var(--brand-700); color: #fff; }
 .character-card-import { display: flex; align-items: center; margin-top: 6px; }
 .active-task-bar { margin: 0 0 7px; padding: 7px 9px; border-left: 2px solid var(--accent); background: var(--accent-soft); color: var(--text); font-size: 12px; line-height: 1.4; }
 .active-task-bar button { border: 0; background: transparent; color: var(--accent); padding: 0; font-weight: 600; }
@@ -914,9 +939,11 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
 
 .composer .icon-button,
 .composer .send-button,
+.composer .interject-button,
 .composer .context-usage-button { width: 38px; height: 38px; }
 .composer .icon-button svg { width: 20px; height: 20px; }
 .composer .send-button svg { width: 20px; height: 20px; }
+.composer .interject-button svg { width: 20px; height: 20px; }
 .composer .deep-reasoning-button svg { width: 20px; height: 20px; }
 .attach-button { color: var(--muted); }
 .send-button { border: 0; border-radius: var(--r-md); background: var(--accent-solid); color: white; transition: var(--t-fast); }
@@ -926,6 +953,12 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
 .send-button:disabled:hover { background: var(--surface-2); }
 .send-button.is-stop { background: var(--red); }
 .send-button.is-stop:hover { background: var(--brand-700); }
+/* 「插话」按钮：只在运行中出现（关闭态由 [hidden] 承担），样式刻意比发送键轻——
+   视觉主按钮永远留给「停止」，避免运行中把「阻止它」和「插一句话」混淆。 */
+.interject-button { display: grid; place-items: center; flex: none; padding: 0; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--surface); color: var(--text); transition: var(--t-fast); }
+.interject-button[hidden] { display: none; }
+.interject-button:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.interject-button:disabled { border-color: var(--line); background: var(--surface-2); color: var(--muted); cursor: not-allowed; opacity: .55; }
 .composer-meta { min-height: 22px; display: flex; align-items: center; color: var(--muted); font-size: 11px; padding: 4px 2px 0; gap: 12px; white-space: nowrap; }
 .composer-meta-left { min-width: 0; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .composer-model { position: relative; min-width: 0; display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
@@ -1688,6 +1721,8 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   /* 窄屏放不下 26px 轨道，且 3px 刻度不可点：直接隐藏，消息列恢复居中 */
   .app-shell { --turn-rail-w: 0px; }
   .turn-rail { display: none; }
+  /* 插话队列的动作按钮：手机端放大到可点区间（与 .icon-button 同口径） */
+  .run-guidance-actions button { width: 34px; height: 34px; }
   html, body, .app-shell, .chat-main, .topbar, .messages, .composer-wrap { width: 100%; max-width: 100%; min-width: 0; }
   html, body { overflow-x: hidden; }
   .mobile-only { display: inline-grid; }

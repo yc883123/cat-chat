@@ -10,6 +10,7 @@ import { renderPendingFiles } from "./10-upload.js";
 import { hideChoiceButtons, sendMessage, showChoiceButtons } from "./12-chat-input.js";
 import { hideSkillPopup, renderInputMirror, renderUserContent, resizeTextarea, updateSkillPopup } from "./13-skill-refs.js";
 import { hideFilePopup } from "./16-file-refs.js";
+import { isQueuedInterjection, renderRunGuidance } from "./18-interjections.js";
 // 当前会话所用 Agent 的自定义头像 URL（没有则空串 → 回退到默认的「AI」圆标）。
 // 与 currentAgentFixedSkillIds 同口径：会话绑定的 Agent 优先，失效时回退默认 Agent。
 export function currentAgentAvatarUrl() {
@@ -1072,7 +1073,12 @@ export function renderMessages(messages) {
   const container = $('#messages');
   const empty = emptyStateElement;
   closeImageLightbox();
-  const list = Array.isArray(messages) ? messages : [];
+  // 插话（interjection）：未消费的插话是 role=user 真行，但既不进模型上下文
+  // （core/history.py 过滤），也不该出现在消息流里——它由输入框上方的队列面板承载。
+  // 在这里**一次性**把它滤掉，state.messages 才与「用户真正发出过的对话」等价：
+  // 刻度轨 / 上下文用量 / 选择面板来源判定都不会被一条还没发出的指令带偏。
+  const rawMessages = Array.isArray(messages) ? messages : [];
+  const list = rawMessages.filter((message) => !isQueuedInterjection(message));
   // 切换会话 → 窗口重置为「最近 N 轮」；同一会话刷新（轮询/保存后）→ 保留当前窗口与滚动位置，
   // 否则用户正在往上翻历史时一次轮询就会把他拽回底部。
   const switched = state.messagesConversationId !== String(state.conversationId || '');
@@ -1130,6 +1136,9 @@ export function renderMessages(messages) {
     }
     // 把活动流的那条助手气泡挂回末尾（append 会把同一个节点搬过来，流式内容与滚动状态都保住）。
     if (liveRunRow) container.append(liveRunRow);
+    // 插话队列面板：吃**未过滤**的原始数组（队列行本身是要被滤掉的那种消息）。
+    // 放在消息区之外（输入框上方），所以与流式行的复挂、选择面板都不抢位置。
+    renderRunGuidance(rawMessages);
     const choiceMessage = pendingChoiceMessage(list);
     const choices = choiceMessage?.metadata?.choices || [];
     const choiceGroups = choiceMessage?.metadata?.choice_groups || [];

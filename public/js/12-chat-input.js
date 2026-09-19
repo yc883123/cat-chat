@@ -10,9 +10,10 @@ import { loadTasks, renderPermissionModeSwitch } from "./06-tasks-plans.js";
 import { updateUnloadModelButton } from "./07-models-agents.js";
 import { createConversation, openConversation } from "./08-conversations.js";
 import { uploadFiles } from "./10-upload.js";
-import { SKILL_INSTALL_PRESET, SKILL_SCRIPT_RULES, clearElapsedStatus, clearRunReconnectTimers, clearVisionProgress, collapseToolReasoningBlock, createStreamingReasoningBlock, detachRunConnection, sendChatMessage, setConnectionState, stopRunWatchdog } from "./11-run-stream.js";
+import { SKILL_INSTALL_PRESET, SKILL_SCRIPT_RULES, clearElapsedStatus, clearRunReconnectTimers, clearVisionProgress, collapseToolReasoningBlock, createStreamingReasoningBlock, detachRunConnection, sendChatMessage, setConnectionState, settleReconnectStatus, showElapsedStatus, stopRunWatchdog } from "./11-run-stream.js";
 import { insertTextAtCursor, renderInputMirror, resizeTextarea, updateSkillPopup } from "./13-skill-refs.js";
 import { normalizeChoiceGroups } from "./17-choice-groups.js";
+import { freezeQueuedInterjections, handleInterjectionConsumedEvent, handleUserGuidanceEvent, queuedInterjectionStats } from "./18-interjections.js";
 export async function startSkillInstall() {
   if (state.chatRunId || state.abortController) {
     toast('请先等待当前任务结束或停止后再安装 Skill');
@@ -548,6 +549,9 @@ const CHAT_EVENT_HANDLERS = {
   tool_result: handleToolResultEvent,
   tool_confirm: handleToolConfirmEvent,
   choice: handleChoiceEvent,
+  // 插话（插话队列面板的实时反馈；实现见 18-interjections.js）
+  user_guidance: handleUserGuidanceEvent,
+  interjection_consumed: handleInterjectionConsumedEvent,
   cancelled: handleCancelledEvent,
   run_failed: handleRunFailedEvent,
   context_full: handleContextFullEvent,
@@ -559,6 +563,11 @@ const CHAT_EVENT_HANDLERS = {
 export function handleChatEvent(event, row, conversationId = state.conversationId, runId = state.chatRunId) {
   if (conversationId !== state.conversationId) return;
   if (state.cancelRequested || state.cancelledRunIds.has(String(event.run_id || runId || ''))) return;
+  // 重连已恢复：任何真实事件到达即撤销「重连中…」滞留。挂在这里（而不是各个 handler 里）
+  // 是唯一不漏的挂法——reasoning_delta / reasoning_end / reasoning / tool_progress /
+  // tool_result / usage 六个 handler 本来都不清计时，逐个补调用必漏；未知类型也一样算
+  // 「流活着」。只清 'reconnect' 来源：「正在思考 · 已等待 X 秒」是设计特性（见 settleReconnectStatus）。
+  settleReconnectStatus();
   const answer = row.querySelector('.answer-content');
   const activity = row.querySelector('.run-activity');
   const setActivity = (content, html = false) => {
@@ -602,17 +611,10 @@ function handleStatusEvent(event, { setActivity }) {
   clearVisionProgress();
   const statusMessage = String(event.message || '');
   setActivity(statusMessage);
-  // 思考等待计时：显示 “正在思考 … · 已等待 X 秒”，收到进展事件即清除
-  if (state.elapsedTimer) clearElapsedStatus();
-  state.elapsedBase = statusMessage || '正在思考';
-  state.elapsedSince = Date.now();
-  const tick = () => {
-    const seconds = Math.max(0, Math.floor((Date.now() - state.elapsedSince) / 1000));
-    const el = $('#runtimeStatus');
-    if (el) el.textContent = `${state.elapsedBase} · 已等待 ${seconds} 秒`;
-  };
-  tick();
-  state.elapsedTimer = window.setInterval(tick, 1000);
+  // 思考等待计时：显示 “正在思考 … · 已等待 X 秒”，收到进展事件即清除。
+  // 走统一入口并标记来源 'status'——与重连计时区分，避免重连恢复后状态栏被
+  // 一个已失效的「重连中…」独占（清计时的判据见 11-run-stream.js settleReconnectStatus）。
+  showElapsedStatus(statusMessage || '正在思考', 'status');
 }
 
 function handleSkillsEvent(event, { setActivity }) {
@@ -926,6 +928,8 @@ function handleCancelledEvent(event, { row, answer, setActivity, conversationId 
   }
   // 首轮上下文折叠卡：终态事件前后端已把 first_turn 落盘，即时拉取展示（首轮取消同样有上下文可看）。
   if (conversationId) void refreshFirstTurnCard(conversationId);
+  // 队列随 Run 一起冻结：残留插话只剩「取回输入框 / 删除」两个出口（本版无自动 follow-up）。
+  freezeQueuedInterjections();
 }
 
 function handleRunFailedEvent(event, { answer, setActivity }) {
@@ -935,6 +939,8 @@ function handleRunFailedEvent(event, { answer, setActivity }) {
   // 工具协议解析失败：只展示可读错误，不显示原始 XML/JSON 或命令参数。
   answer.innerHTML = `<p>执行失败：${escapeHtml(event.error || '任务执行失败')}</p>`;
   $('#runtimeStatus').textContent = '执行失败';
+  // 失败同样意味着一轮结束：队列不再有消费者，冻结成「已停止」（同时撤掉引导按钮）。
+  freezeQueuedInterjections();
 }
 
 function handleContextFullEvent() {
@@ -994,6 +1000,16 @@ function handleDoneEvent(event, { row, answer, collapseReasoning, conversationId
     answer.innerHTML = '<p>计划执行完成</p>';
   }
   $('#runtimeStatus').textContent = '就绪';
+  // 共存守卫（与「选择」面板）：本轮结束时队列里还有未引导的插话——**只提示不消费**。
+  // 旧版在这里自动 claim 队列开一个 follow-up run，若终态带选择题，刚弹出的选择面板会
+  // 被新 run 立刻锁死、用户点选项又变成新插话，两个意图互相打架（本版明确不做）。
+  // 顺序要紧：先取统计（此时还是 pending，才能报出「还有 N 条未引导」），再冻结面板
+  // ——冻结后残留行转「已停止」，只剩「取回输入框 / 删除」两个出口。
+  const leftover = queuedInterjectionStats();
+  if (leftover.pending) {
+    toast(`本轮已结束，还有 ${leftover.pending} 条插话未引导：点「取回输入框」后作为新消息发送，或删除`);
+  }
+  freezeQueuedInterjections();
   // 首轮上下文折叠卡：后端在终态事件落盘之前已抢先写入 first_turn（见 run/chat.py），
   // done 后立即拉取展示，不必等下次 openConversation / 同步轮询。
   if (conversationId) void refreshFirstTurnCard(conversationId);

@@ -152,6 +152,10 @@ class ConversationRunManager(ConversationRunMixin):
         return event
 
     def _finish(self, run_id: str) -> None:
+        # 队列随 Run 一起收摊：任何终态（完成/失败/取消）之后都不再有消费点，残留插话
+        # 一律冻结。这一步是「取回 / 删除」两个用户出口的前置条件——`delete_run_interjection`
+        # 只肯删已冻结的 guided 行，不冻结的话用户排进去的字既发不出也删不掉。
+        self.app.storage.stop_pending_interjections(run_id)
         condition = self._condition(run_id)
         with condition:
             condition.notify_all()  # 唤醒可能仍在等待的 http 流线程（随后读终态事件退出）
@@ -237,6 +241,11 @@ class ConversationRunManager(ConversationRunMixin):
                 # 它只是子任务的归属锚点，不是本次取消的对象。改写它会把这一轮回答
                 # 从"已完成"篡改成"已取消"，历史记录就失真了。只级联停子任务。
                 updated = run
+            # 取消即冻结插话队列：标记 stopped（保留可见），**绝不自动发送**。
+            # 放在这里而不是只靠循环里检查：run 线程可能正卡在模型流上，等它自己
+            # 观察到取消信号时已晚，用户此刻点「引导」还会把指令补进一条将死的 run。
+            # （`_finish` 还会再冻一次，两处幂等；这里更早、覆盖面更稳。）
+            self.app.storage.stop_pending_interjections(run_id)
             conversation_id = str(run.get("conversation_id") or "")
             for child in children:
                 child_id = str(child.get("id") or "")
@@ -396,6 +405,76 @@ class ConversationRunManager(ConversationRunMixin):
         if executor is None or confirm_id not in getattr(executor, "pending_confirmation", {}):
             return None
         return executor.reject_execute(confirm_id)
+
+    # ---- 插话（interjection）：运行中的第二输入通道 ----
+    # 时间窗与「选择」面板天然互斥：插话只在 run 运行中入队，选择面板只在 run 结束后
+    # 收集答案。两条通道都**不做自动串联**——插话队列里的东西只有用户显式点「引导」
+    # 才会进 agent 的下一步；run 结束时残留的插话只提示、不自动开新 run（否则一旦终态
+    # 带选择题，刚弹出的选择面板会被自动 follow-up 锁死，用户的两种意图互相打架）。
+
+    def interject(self, body: dict[str, Any]) -> dict[str, Any]:
+        conversation_id = str(body.get("conversation_id") or "").strip()
+        run_id = str(body.get("run_id") or "").strip()
+        message = str(body.get("message") or "").strip()
+        attachments = body.get("attachments") or []
+        if not conversation_id or not run_id or not message:
+            raise ValueError("conversation_id、run_id 和 message 不能为空")
+        if not isinstance(attachments, list):
+            raise ValueError("attachments 必须是数组")
+        saved = self.app.storage.add_run_interjection(
+            conversation_id, run_id, message, attachments
+        )
+        return {"message": saved, "run_id": run_id}
+
+    def guide_interjection(self, body: dict[str, Any]) -> dict[str, Any]:
+        conversation_id = str(body.get("conversation_id") or "").strip()
+        run_id = str(body.get("run_id") or "").strip()
+        message_id = str(body.get("message_id") or "").strip()
+        if not conversation_id or not run_id or not message_id:
+            raise ValueError("conversation_id、run_id 和 message_id 不能为空")
+        saved = self.app.storage.guide_run_interjection(conversation_id, run_id, message_id)
+        with self._lock:
+            executor = self._executors.get(run_id)
+        # 待确认的工具调用属于旧轨迹：先拒掉，agent 下一步才能看见新指令
+        # （否则它会一直停在那张确认卡上等用户点，插话排在后面永远轮不到）。
+        if executor is not None:
+            pending = list(getattr(executor, "pending_confirmation", {}).keys())
+            for confirm_id in pending:
+                executor.reject_execute(confirm_id)
+        self.emit(run_id, {
+            "type": "user_guidance",
+            "message_id": message_id,
+            "message": str(saved.get("content") or ""),
+        })
+        return {"message": saved, "run_id": run_id}
+
+    def edit_interjection(self, body: dict[str, Any]) -> dict[str, Any]:
+        conversation_id = str(body.get("conversation_id") or "").strip()
+        run_id = str(body.get("run_id") or "").strip()
+        message_id = str(body.get("message_id") or "").strip()
+        message = str(body.get("message") or "").strip()
+        if not conversation_id or not run_id or not message_id or not message:
+            raise ValueError("conversation_id、run_id、message_id 和 message 不能为空")
+        saved = self.app.storage.edit_run_interjection(conversation_id, run_id, message_id, message)
+        return {"message": saved, "run_id": run_id}
+
+    def delete_interjection(self, body: dict[str, Any]) -> dict[str, Any]:
+        """删除一条插话。
+
+        **刻意不检查「Run 是否还活着」**：本版没有自动 follow-up，Run 一结束队列就冻结，
+        残留的插话只能靠用户手动清理（面板上的「取回输入框」就是「写回输入框 + 调本接口」）。
+        若在这里要求活动 Run，run 结束后用户既引导不了也删不掉，排进去的字就只能烂在面板里。
+        真正的闸门在存储层：已消费的不给删，已引导且未冻结的也不给删（见 delete_run_interjection）。
+        """
+        conversation_id = str(body.get("conversation_id") or "").strip()
+        run_id = str(body.get("run_id") or "").strip()
+        message_id = str(body.get("message_id") or "").strip()
+        if not conversation_id or not run_id or not message_id:
+            raise ValueError("conversation_id、run_id 和 message_id 不能为空")
+        deleted = self.app.storage.delete_run_interjection(conversation_id, run_id, message_id)
+        if not deleted:
+            raise LookupError("插话不存在、已被处理或正在被当前任务取用")
+        return {"ok": True, "message_id": message_id}
 
     def shutdown(self, timeout: float = 10.0) -> None:
         with self._lock:

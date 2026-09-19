@@ -699,6 +699,11 @@ class ConversationRunMixin:
                 # must not make progressive tool routing think every image is
                 # a generic file-management request.
                 "routing_message": self._routing_message(message, history),
+                # 插话（运行中的第二输入通道）：只给 agent 一个「拉取」和一个「标记已消费」
+                # 回调，队列的存储/状态机全在 storage 侧——agent 循环不需要知道插话怎么存。
+                # 拉取口径 = 已被用户「引导」且尚未消费（见 ChatStorage.list_run_interjections）。
+                "pull_interjections": lambda rid=run_id: self.app.storage.list_run_interjections(rid),
+                "mark_interjections_consumed": lambda ids, rid=run_id: self.app.storage.mark_run_interjections_consumed(rid, ids),
                 "model_has_vision": bool(brain_supports_images),
                 "tool_defs": (
                     self.app.vision.session_tool_defs(bool(brain_supports_images))

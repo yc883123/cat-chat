@@ -12,6 +12,7 @@ import { missingAttachmentPaths, renderPendingFiles } from "./10-upload.js";
 import { beginChoiceSubmit, closeQuickMessagePanel, commitChoiceSubmit, handleChatEvent, rollbackChoiceSubmit, setBusy } from "./12-chat-input.js";
 import { hideSkillPopup, parseSkillReferences, renderInputMirror, resizeTextarea, stripSkillReferences } from "./13-skill-refs.js";
 import { hideFilePopup } from "./16-file-refs.js";
+import { sendRunInterjection } from "./18-interjections.js";
 
 // 发送前附件存在性校验的互斥标志（模块内私有，不对外共享）：
 // 校验要走一次本地 HTTP，await 期间连点发送不能被放过去。
@@ -26,7 +27,14 @@ export function detachRunConnection() {
   state.abortController?.abort();
   clearVisionProgress();
   stopRunWatchdog();
-  clearElapsedStatus();
+  // 「重连中…」横幅归 connectionState 管：重连正在进行时**不能**在这里收摊——resumeRun 建立
+  // 新连接之前就会调本函数，收了就会在还没连上时报「正在处理」，界面与 connectionState
+  // 自相矛盾（2026-09-19 冒烟拍到：状态栏「正在处理」+ state=reconnecting）。
+  // 非重连态（换会话 / 换流）才收，且顺序要先还原文本再清思考计时：反了会连条幅现场一起丢。
+  if (state.connectionState !== 'reconnecting') {
+    settleReconnectStatus();
+    clearElapsedStatus();
+  }
   state.runWaitShown = false;
   state.runWaitPrevText = '';
   state.runGeneration += 1;
@@ -35,6 +43,10 @@ export function detachRunConnection() {
 
 export function detachRunSubscription() {
   detachRunConnection();
+  // 换会话：旧订阅的横幅随订阅一起收走，别把「重连中…」带进新会话
+  // （这条路径不经过 setConnectionState，见上面的注释）。
+  settleReconnectStatus();
+  clearElapsedStatus();
   clearRunReconnectTimers();
   state.chatRunId = '';
   state.runConversationId = '';
@@ -98,17 +110,28 @@ export async function fetchRunEvents(runId, controller) {
 }
 
 // 连接状态去重设置（角标依据）。
+// 离开「重连中」时在这里统一收走状态栏横幅：横幅的入口是 `setConnectionState('reconnecting')`
+// 旁边那句 showElapsedStatus('重连中…','reconnect')，出口就该是同一个状态机——挂在某个具体
+// 成功回调上（如 resumeRun 的 response.ok 之后）会漏：resumeRun 建立连接**之前**会先
+// 调 detachRunConnection，条幅现场可能已经不在，届时谁也认不出该收谁的场。
+// 判据见 settleReconnectStatus（只收重连条幅，不越权动「正在思考 · 已等待 X 秒」）。
 export function setConnectionState(next) {
   if (state.connectionState === next) return;
+  const previous = state.connectionState;
   state.connectionState = next;
+  if (previous === 'reconnecting' && next !== 'reconnecting') settleReconnectStatus();
 }
 
 // 显示 “{base} · 已等待 X 秒” 到 #runtimeStatus，每秒刷新；先清除旧计时。
-export function showElapsedStatus(base) {
+// kind 标记来源（'reconnect' / 'status'）：只有 'reconnect' 会被「恢复出流」单点清除，
+// 'status'（思考/工具等待计时）是设计特性，清除口径维持不变。
+export function showElapsedStatus(base, kind = 'status') {
   clearElapsedStatus();
   const since = Date.now();
   state.elapsedBase = String(base || '');
   state.elapsedSince = since;
+  // 换条幅即重新定归属：这是 elapsedReconnectShown 的唯一写入点（见 01-core.js 的注释）。
+  state.elapsedReconnectShown = kind === 'reconnect';
   const update = () => {
     const seconds = Math.max(0, Math.floor((Date.now() - since) / 1000));
     const el = $('#runtimeStatus');
@@ -122,6 +145,19 @@ export function clearElapsedStatus() {
   if (state.elapsedTimer) window.clearInterval(state.elapsedTimer);
   state.elapsedTimer = null;
   state.elapsedBase = '';
+}
+
+// 重连已恢复（重连成功或真实内容已到达）：清掉「重连中…」计时并把状态文本还原。
+// 判据用 elapsedReconnectShown 而不是计时器现场：detachRunConnection() 会先一步把计时器
+// 抹掉，用现场判就等于永远不收摊（见 01-core.js）。只处理重连条幅——思考计时由各自的
+// handler 按既有口径清除，不在这里越权。
+// 文本按「还在不在跑」还原：残留的归属标记即便晚一步被消费，也只写出当时正确的文案。
+export function settleReconnectStatus() {
+  if (!state.elapsedReconnectShown) return;
+  state.elapsedReconnectShown = false;
+  clearElapsedStatus();
+  const el = $('#runtimeStatus');
+  if (el) el.textContent = state.chatRunId ? '正在处理' : '就绪';
 }
 
 export function stopRunWatchdog() {
@@ -214,7 +250,7 @@ export async function probeAndRecoverRun() {
 export function enterReconnectCoolDown(showTimer = true) {
   setConnectionState('reconnecting');
   state.runReconnectAt = Date.now() + RUN_RECONNECT_COOLDOWN;
-  if (showTimer) showElapsedStatus('重连中…');
+  if (showTimer) showElapsedStatus('重连中…', 'reconnect');
 }
 
 // 断线自动重连：非 AbortError 且流仍当前时，指数退避 + 抖动后重建流。
@@ -233,7 +269,7 @@ export function scheduleRunReconnect(run, controller, generation) {
   setConnectionState('reconnecting');
   state.checkRunEligible = true;
   const delay = backoffDelay(state.runAttempt);
-  showElapsedStatus('重连中…');
+  showElapsedStatus('重连中…', 'reconnect');
   const timer = window.setTimeout(() => {
     state.runReconnectTimers.delete(timer);
     if (state.cancelRequested || state.cancelledRunIds.has(String(run.id))) return;
@@ -392,7 +428,7 @@ export async function resumeRun(run, options = {}) {
         const payload = await response.json().catch(() => ({}));
         throw new Error(payload.error || `HTTP ${response.status}`);
       }
-      setConnectionState('connected');
+      setConnectionState('connected');   // 离开 reconnect 态即由状态机收走「重连中…」横幅
       await consumeRunStream(response, row, conversationId, runId, controller, generation);
     } catch (error) {
       if (error.name !== 'AbortError' && !state.cancelRequested && state.conversationId === conversationId) {
@@ -453,7 +489,10 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
   }
   if (!state.conversationId) await createConversation();
   if (state.chatRunId || state.abortController) {
-    toast('回复进行中，请等待完成或先点击停止');
+    // 运行中：改走**插话队列**（入队后由用户决定何时「引导」），而不是把消息丢掉。
+    // 不合并 text 而是把按钮附带的那段传下去：sendRunInterjection 会自己与输入框内容
+    // 做同样的拼接，这里若传已合并的结果就会把输入框里的字重复一遍。
+    await sendRunInterjection(buttonText);
     return;
   }
   // 空闲会话的上下文提醒：改成"点发送才提醒"——弹窗确认前不提交、不清空草稿；

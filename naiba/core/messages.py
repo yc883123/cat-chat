@@ -33,6 +33,12 @@ MESSAGE_METADATA_KEYS: tuple[str, ...] = (
     "choice_groups",
     # 「新会话开始」边界标记（role=session 的标记行）：重放时从此清空此前历史。
     "session_start",
+    # 插话（interjection）：运行中用户排队的新指令，落库为 role=user 消息，未被
+    # interjection_consumed 标记前不进模型上下文（见 core.history.build_model_history）。
+    "interjection",
+    "interjection_guided",
+    "interjection_consumed",
+    "interjection_stopped",
 )
 
 
@@ -67,3 +73,12 @@ class MetadataKeys:
     # 新会话边界（写在 role=session 的标记行上）：build_model_history 遇到它即清空
     # 此前的历史；聊天记录本身不删，前端在该位置渲染分隔条。
     SESSION_START = "session_start"
+    # 插话（interjection）：run 运行中用户排队的「新指令」，作为一条 role=user 消息落库。
+    # 四个键构成队列状态机——INTERJECTION 是身份标记，其余三个互斥地表示进度：
+    #   guided   用户点了「引导」，等 agent 在下一步取走；
+    #   consumed agent 已把它追加进本轮模型消息（此时才允许进历史/上下文）；
+    #   stopped  运行被取消，队列就地冻结（README 承诺：绝不自动发送）。
+    INTERJECTION = "interjection"
+    INTERJECTION_GUIDED = "interjection_guided"
+    INTERJECTION_CONSUMED = "interjection_consumed"
+    INTERJECTION_STOPPED = "interjection_stopped"

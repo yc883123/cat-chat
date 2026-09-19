@@ -1023,7 +1023,7 @@ export function updateContextComposerLock(busy = false) {
     input.disabled = atCeiling;
     input.placeholder = editing
       ? '编辑消息，Enter 重新发送，Shift+Enter 换行，Esc 取消'
-      : (atCeiling ? '上下文已满，请新建对话后继续' : (busy ? '回复进行中…' : '输入消息'));
+      : (atCeiling ? '上下文已满，请新建对话后继续' : (busy ? '回复进行中…（输入后 Enter 加入插话队列）' : '输入消息'));
   }
   // 发送按钮的可用性由 updateSendButtonState 单点维护（含"运行中即停止键"语义）。
   updateSendButtonState();
@@ -1063,6 +1063,30 @@ export function updateSendButtonState() {
   sendBtn.disabled = disabled;
   sendBtn.title = title;
   sendBtn.setAttribute('aria-label', title);
+  updateInterjectButtonState(busy);
+}
+
+// 「插话」按钮（回复进行中才出现）的可用性：有文字或附件才可点——空点没有意义。
+// 关闭态用 hidden 而不是 disabled：运行结束后它整块消失，避免「发送」与「插话」
+// 两个按钮并存让用户分不清哪个会真的发出去。与 sendButton 同属本模块的可用性口径，
+// 由 updateSendButtonState 单点驱动（不要在各处另行改写这两个按钮）。
+function updateInterjectButtonState(busy) {
+  const button = $('#interjectButton');
+  if (!button) return;
+  button.hidden = !busy;
+  if (!busy) {
+    button.disabled = true;
+    return;
+  }
+  const uploading = state.pendingFiles.find((file) => file.uploading);
+  const hasText = Boolean(String($('#messageInput')?.value || '').trim());
+  const hasAttachment = state.pendingFiles.some((file) => file.path);
+  button.disabled = Boolean(uploading) || (!hasText && !hasAttachment);
+  const title = uploading
+    ? `请等待「${uploading.name}」上传完成`
+    : '加入插话队列';
+  button.title = title;
+  button.setAttribute('aria-label', title);
 }
 
 // Legacy provider context_size: migrated to context_window and kept only for

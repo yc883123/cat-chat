@@ -170,6 +170,9 @@
       <section class="composer-wrap">
         <div class="active-task-bar" id="activeTaskBar" hidden></div>
         <div class="pending-files" id="pendingFiles" hidden></div>
+        <!-- 插话队列（运行中排队的新指令）：紧贴输入框上方，与「选择」面板同层但互斥——
+             插话是运行中的输入通道，选择面板是运行结束后的输入通道。 -->
+        <div class="run-guidance-list" id="runGuidanceList" hidden aria-live="polite"></div>
         <form class="composer" id="composerForm">
           <input id="fileInput" type="file" multiple hidden>
           <button class="icon-button attach-button" type="button" id="attachButton" title="添加文件" aria-label="添加文件">
@@ -207,6 +210,9 @@
               <small id="lastTurnUsageSummary">完成一次回复后显示本轮消耗</small>
             </div>
           </div>
+          <button class="interject-button" id="interjectButton" type="button" hidden title="加入插话队列" aria-label="加入插话队列">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v9"></path><path d="M8.5 9.5 12 13l3.5-3.5"></path><path d="M4 18h16"></path></svg>
+          </button>
           <button class="send-button" id="sendButton" type="submit" title="发送" aria-label="发送">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>
           </button>

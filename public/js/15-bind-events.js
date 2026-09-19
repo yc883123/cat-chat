@@ -15,6 +15,7 @@ import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQui
 import { commitSkillSelection, hideSkillPopup, insertSkillRefAtCursor, moveSkillPopupSelection, popupState, positionSkillPopup, renderInputMirror, resizeTextarea, setSkillPopupSelection, skillList, updateSkillPopup } from "./13-skill-refs.js";
 import { activateFileTab, activeFileTab, applyFilePanelOpenClass, cancelFileEdit, closeFilePanel, closeSidebar, filePanelState, filePanelUsable, openFilePanel, openSidebar, removeFileTab, reopenFilePanel, restoreLeftSidebarCollapse, saveFileTab, setLeftSidebarCollapsed, sidebarDesktop, startFileEdit, updateFileTabsButton } from "./14-file-panel.js";
 import { handleFilePopupClick, handleFilePopupKey, positionFilePopup, updateFilePopup } from "./16-file-refs.js";
+import { guideAllInterjections, sendRunInterjection } from "./18-interjections.js";
 // ---- 聊天背景图（外观页） ----
 // 上传走同一个 /api/uploads（落盘 data/uploads/<日期>/，返回绝对路径），但**不进入
 // state.pendingFiles**——那是"随消息发送的附件"，背景图不该出现在输入框上方。
@@ -929,6 +930,9 @@ export function bindEvents() {
     if (state.chatRunId || state.abortController) cancelCurrentRun();
     else sendMessage();
   });
+  // 「插话」按钮：运行中出现（可用性由 updateSendButtonState 单点维护），
+  // 点了只是入队——真正的「现在就用上这条指令」是队列行上的「引导」。
+  $('#interjectButton').addEventListener('click', () => { void sendRunInterjection(); });
   $('#messageInput').addEventListener('input', () => { resizeTextarea(); renderInputMirror(); updateSkillPopup(); updateFilePopup(); updateSendButtonState(); });
   $('#messageInput').addEventListener('select', updateSkillPopup);
   $('#messageInput').addEventListener('click', () => { updateSkillPopup(); updateFilePopup(); });
@@ -971,7 +975,10 @@ export function bindEvents() {
       // 编辑态下回车同样确认编辑，与当前输入区的发送按钮保持一致。
       if (state.editingMessageId) { confirmActiveEdit(); return; }
       if (state.chatRunId || state.abortController) {
-        toast('回复进行中，请等待完成或先点击停止');
+        // 运行中回车 = 入队插话（Ctrl/Cmd+回车 = 把队列里所有待引导项一次放行）。
+        // 刻意不再是「回复进行中，请等待完成」——运行中打字本来就是合法输入通道。
+        if (event.ctrlKey || event.metaKey) void guideAllInterjections();
+        else void sendRunInterjection();
       } else {
         sendMessage();
       }

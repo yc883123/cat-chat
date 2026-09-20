@@ -241,6 +241,7 @@ verify/*
 !verify/make_test_card.py
 !verify/media_inline_smoke.cjs
 !verify/media_markup_check.mjs
+!verify/media_pipeline_audit.py
 !verify/mobile_shell_smoke.cjs
 !verify/mobile_ui_regression.cjs
 !verify/p3_data_check.py

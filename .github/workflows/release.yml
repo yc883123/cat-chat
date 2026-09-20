@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.7.5-beta
-  RELEASE_TAG: v2.7.5-beta
-  PACKAGE_NAME: naiba-chat-2.7.5-beta-windows-x64
+  RELEASE_VERSION: 2.7.6-beta
+  RELEASE_TAG: v2.7.6-beta
+  PACKAGE_NAME: naiba-chat-2.7.6-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -87,11 +87,11 @@ jobs:
           Copy-Item -LiteralPath "README.md" -Destination $packageDir
           Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\${{ env.PACKAGE_NAME }}.zip" -Force
 
-      - name: Publish 2.7.5 Beta release
+      - name: Publish 2.7.6 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Naiba Chat 2.7.5 Beta
+          name: Cat Chat 2.7.6 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -99,14 +99,16 @@ jobs:
             dist/${{ env.PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Naiba Chat 2.7.5 Beta Windows build from `${{ github.sha }}`。
+            Cat Chat 2.7.6 Beta Windows build from `${{ github.sha }}`。
+
+            **本次唯一变化：显示名改为 Cat Chat（原名 Naiba Chat）。** GitHub 仓库、`naiba-chat.exe`、更新资产与既有数据位置一律不动——直接覆盖安装即可，**不需要迁移数据，也不需要重新配置**；历史会话、API 卡片、Agent、Skill 与 MCP 配置原样保留。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - 新增供应商预设与首启引导（本次新能力）：新用户装完后「选供应商 → 粘 Key → 开聊」，不用再查文档填 API URL。添加 API 与首启引导改为「预设卡片列表 + 表单」，内置 14 条预设（DeepSeek / Kimi / 智谱 GLM / 通义千问 / OpenAI / Claude / Gemini，TE 中转 / 摆烂中转，Ollama / LM Studio / llama.cpp / Unsloth，以及全手填的自定义入口），每条预填名称、API URL、请求格式与推荐模型，表单只剩 API Key 一个空。中转站的引导文案按「这是什么站 → 怎么注册充值 → Key 在哪创建」三段式写清，并配「打开注册页」按钮；预设只是回填，全部字段照旧可改。
-            - ComfyUI 批量生成三连修（本次重点）：① 负 seed 随机值不再爆节点上限——rgthree「Seed (rgthree)」的 seed=-1（随机）此前被替换成 2^63 级巨数、超出该节点 ±2^50 的声明范围，被 ComfyUI 整单 400 拒收；现在随机值取各节点声明范围的交集 2^50。② shots 参数必须生效——此前只对单 workflow 生效、workflow_paths 分支静默无视（shots=10 返回 total=1），现在每个路径重复提交 shots 次，workflows 数组 + shots>1 明确报错而不是装没看见。③ 提交失败透传 ComfyUI 的拒收原因（哪个节点、什么校验错误），不再只剩一句「第 N 段提交失败」让模型盲试。
-            - 修掉「上下文重置工具显示成功、实际没重置」：模型调用 reset_context 后工具卡片显示已执行、返回 ok:true，但分割线不出现、占用圆环照旧——per-call 上下文副本是浅拷贝，工具写进运行上下文的标记落在副本上就永久丢失，宿主收尾读原对象读到空。现在写入一律同步回落共享对象。
+            - 界面与操作入口的产品名改为 Cat Chat（共 19 处显示文案）：浏览器标签、桌面窗口标题、托盘悬停标题、原生对话框标题、手机访问与数据目录迁移提示、启动横幅与命令行帮助；名称大小写与空格固定为 Cat Chat。程序行为、接口与数据格式一处未改。
+            - 机器认的身份一律保留：`yc883123/naiba-chat`、`naiba-chat.exe`、`naiba-chat-update.json` 与清单里的仓库 / 资产名 / SHA-256 校验；数据目录、`config.json`、`chat.db`、WebView2 profile 与全部本地存储键（`naibaChat*` 等）保持原值。改的是「人看的那一层」，因为 EXE 文件名与仓库地址一改，旧客户端的自动更新、既有快捷方式和用户数据路径会集体失配。
+            - 已知保留项（不是漏改）：任务管理器 / 资源管理器属性里仍可能显示原文件名（本次没有为构建产物新增 Windows 版本资源）；历史版本说明与旧文档中的旧名原样保留，属正常历史记录。应用图标没有任何改动。
 
-            本地验证：全量单测 1472 例通过。
+            本地验证：全量单测 1522 例通过（新增显示名品牌守门 28 例：显示名与内部标识各归各位）。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

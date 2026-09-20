@@ -1,21 +1,24 @@
-# Naiba Chat 2.7.5 Beta
+# Cat Chat 2.7.6 Beta
 
-Naiba Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。
+Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。
 
-## 2.7.5 Beta 主要能力
+> Cat Chat 原名 Naiba Chat。2.7.6 Beta 起仅调整显示名；GitHub 仓库、`naiba-chat.exe`、更新资产及既有数据位置保持不变，无需重新配置或搬迁数据。
 
-- **供应商预设与首启引导：新用户「选供应商 → 粘 Key → 开聊」（本次新能力）**：设置 → 模型 → 添加 API 与首次启动引导改为「预设卡片列表 + 表单」（参考 AI Gateway 布局：左边一列供应商卡片，点谁右边就是谁的表单）。内置 **14 条预设**——在线大厂 DeepSeek / Kimi / 智谱 GLM / 通义千问 / OpenAI / Claude / Gemini，中转 **TE 中转（teynex）** / **摆烂中转（bailan.store）**（参数照抄实测可用的卡片：URL、请求格式、推荐模型），本地 Ollama / LM Studio / llama.cpp / Unsloth，以及全手填的「自定义」入口。每条预填名称、API URL、请求格式、推荐模型与 Key 申请入口，**表单上只剩 API Key 一个空**。中转站用户不知道 `https://teynex.com` 这串 URL 通往哪，所以每条预设的引导文案按固定三段式写：**① 这是什么站 → ② 怎么注册 / 充值 → ③ Key 在哪创建、长什么样**，并配「打开注册页」按钮（原则：文案里出现的 URL，界面上必须有一个能点的按钮）；TE 中转的文案还写明两条实测经验——「该站按 max_tokens 预扣费，余额不足报 403 不是配置错，去充值就好」「用 GPT-5 / Codex 系模型请把请求格式改为 codex_responses、URL 末尾补 /v1」。**预设只是回填**，名称 / URL / 请求格式 / 模型全部照旧可改。
-- **ComfyUI 批量生成三连修（本次重点修复）**：用户要 10 张图，`comfyui_batch` 当天 6 次提交全部「第 1 段提交失败」秒败，模型连盲试 6 次后只能自写 Python 脚本绕道。排查（只读 sqlite + 1:1 复刻提交路径 POST 实验）抓到两个根因 + 一个放大器，一起修：① **负 seed 不再爆节点上限**——工作流里 rgthree「Seed (rgthree)」节点 `seed=-1`（-1=随机，该节点声明范围 ±2^50，合法）此前被替换成 2^63 级巨数、必超节点 max，被 ComfyUI 整单 400 拒收（同一文件走 MCP 原样提交即成功，20 秒内一胜一败是定位关键）；现在随机值取各常见节点声明范围的**交集 2^50**（核心 KSampler 0~2^64-1 ∩ rgthree ±2^50）。② **shots 参数必须生效**——`shots` 此前只对单 `workflow` 分支生效、`workflow_paths` 分支被静默无视（`workflow_paths + shots=10` 返回 `total=1`，模型自己都发现参数没生效）；现在每个路径重复提交 shots 次，显式 `workflows` 数组 + shots>1 **明确报错**（数组已逐条列出，要重复请复制元素）而不是装没看见。③ **提交失败透传原因**——此前 400 响应里的 node_errors（节点号 / 类型 / 具体校验错误）全部被吞，任务上只剩一句「第 N 段提交失败」，模型无法自诊只能盲试；现在压缩成「HTTP 400 …；节点 20（Seed (rgthree)）：Value … bigger than max …」写进任务错误（上限 600 字符防灌库）。
-- **修掉「上下文重置工具显示成功、实际没重置」（本次修复）**：模型调用 `reset_context` 后工具卡片显示「已执行」、返回 `ok:true`，但消息没有分割线、占用圆环照旧——上下文一点没变。根因是一次回归：per-call 上下文副本用浅拷贝派生（原注释写「零拷贝语义」），工具写进运行上下文的 `context_reset` 标记落在副本顶层就永久丢失，宿主收尾读原对象读到空。现在 per-call 视图**读=快照、写=同步回落共享对象**，工具写进运行上下文的状态不再「写完就丢」。
-- **验证**：全量单测 **1472 例通过**（含 ComfyUI 新守门：seed 上限与连线引用不动、shots 三分支、数组+shots 报错、400 拒收透传到「Seed (rgthree)」「bigger than max」字样）。ComfyUI 修复经**端到端实证**——修复后的提交路径向真实 ComfyUI 提交 seed=-1 的工作流成功拿到 prompt_id；首启引导与供应商预设经**真实后端浏览器冒烟**（隔离实例 + 无头 Edge，覆盖向导弹出、预设卡片渲染与「不该弹」的负向场景）。
+## 2.7.6 Beta 主要能力
 
-> 本版详细说明与历史版本更新日志见 [CHANGELOG.md](CHANGELOG.md)。
+- **显示名改为 Cat Chat（本次唯一变化）**：界面与操作入口的产品名从 Naiba Chat 改为 Cat Chat——浏览器标签、桌面窗口标题、托盘悬停标题、原生对话框标题、手机访问与数据目录迁移提示、启动横幅与命令行帮助，共 **19 处显示文案**；名称大小写与空格固定为 `Cat Chat`。程序行为、接口与数据格式一处未改。
+- **什么没变（重要）**：GitHub 仓库仍是 `yc883123/naiba-chat`，安装包与更新资产仍是 `naiba-chat.exe` / `naiba-chat-update.json`，更新链路的仓库、资产名与 SHA-256 校验全部照旧；数据目录、`config.json`、`chat.db`、WebView2 浏览器配置与全部本地存储键（`naibaChat*` 等）保持原值——**不需要迁移数据，也不需要重新配置**，直接覆盖安装即可，历史会话、API 卡片、Agent、Skill 与 MCP 配置原样保留。
+- **为什么只改显示名**：EXE 文件名、仓库地址和更新器里那几个常量是「机器认的身份」，一改就会让旧客户端的自动更新、既有快捷方式和用户数据路径集体失配。本次只动「人看的那一层」，代价最小、回滚最容易；边界表见 `项目维护说明（修改代码前必读）.md` §2.1。
+- **已知保留项（不是漏改）**：任务管理器 / 资源管理器属性里仍可能显示原文件名（本次没有为构建产物新增 Windows 版本资源）；`start.bat` 的窗口标题已同步；历史版本说明与旧文档里的 Naiba Chat 原样保留，属正常历史记录。**应用图标没有任何改动。**
+- **验证**：新增显示名品牌守门 `tests/test_display_branding.py` **28 例**——显示名与内部标识各归各位（托盘内部 name 与可见标题用 AST 分开断言；`naiba.chat` AppUserModelID、`naibaChat*` 存储键、`server_version` 与更新器三常量必须保持原值），并含前端语法检查与定向浏览器检查。
+
+> 各版本说明与历史更新日志见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 开始使用
 
 ### 使用 Windows 版本
 
-1. 下载 `naiba-chat-2.7.5-beta-windows-x64.zip`。
+1. 下载 `naiba-chat-2.7.6-beta-windows-x64.zip`。
 2. 解压到一个可写目录。
 3. 运行 `naiba-chat.exe`。
 4. 在设置中添加在线 API 或本地模型服务。
@@ -50,7 +53,7 @@ python server.py
 
 ## ComfyUI 与 MCP
 
-Naiba Chat 默认连接：
+Cat Chat 默认连接：
 
 ```text
 ComfyUI HTTP API:  http://127.0.0.1:8188
@@ -103,13 +106,13 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 
 - `naiba-chat.exe`
 - `naiba-chat-update.json`
-- `naiba-chat-2.7.5-beta-windows-x64.zip`
+- `naiba-chat-2.7.6-beta-windows-x64.zip`
 
 更新器会验证清单中的仓库、提交、文件名和 SHA-256。下载文件还必须是有效的 Windows 可执行文件；任何一项不一致都会终止安装。
 
 ## Beta 说明
 
-这是 2.7.5 Beta，适合实际使用和反馈，但仍有以下边界：
+这是 2.7.6 Beta，适合实际使用和反馈，但仍有以下边界：
 
 - 不内置 ComfyUI、模型权重或第三方生成服务，需用户自行安装和配置。
 - 不同模型的工具调用质量差异较大，小型模型可能无法稳定完成长链任务。
@@ -123,7 +126,7 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 ```powershell
 Get-ChildItem public\js\*.js | ForEach-Object { node --check $_.FullName }
 python -m unittest discover -s tests -q
-$env:NAIBA_BUILD_VERSION = "2.7.5-beta"
+$env:NAIBA_BUILD_VERSION = "2.7.6-beta"
 python -m PyInstaller --noconfirm --clean naiba-chat.spec
 ```
 

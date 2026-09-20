@@ -736,6 +736,16 @@ class SkillAgent:
             system_parts.append(
                 "需要后台任务时必须先调用 run_in_background、comfyui_batch 或 subagent 创建，再查询返回的真实 ID。"
             )
+        if "subagent" in allowed:
+            # 子 Agent 的**成本规则**放常驻区、不放工具描述（描述有 ≤100 字 / ≤3 句预算，见 §九.23）：
+            # 描述只留一句钩子，这里给出完整的计费形态与两条硬约束。
+            system_parts.append(
+                "子 Agent 的每一步推理都会重发父会话的完整历史：在前缀缓存命中的供应商"
+                "（如 DeepSeek / Kimi 官方 API）上，重放部分按缓存价计费、代价低；"
+                "在无缓存、或按额度预扣费的中继上则是全价重放，长会话里频繁创建子 Agent 会显著放大 token 消耗。"
+                "因此一次工具调用就能完成的简单任务不要开子 Agent；"
+                "单个父 Agent 最多 4 个子 Agent，且子 Agent 不能再派生子 Agent。"
+            )
         if "comfyui_batch" in allowed or "comfyui_prepare_workflow" in allowed:
             system_parts.append(
                 "ComfyUI 产物由宿主 Job Worker 轮询 history、下载、校验并附加到最终消息；"

@@ -895,6 +895,7 @@ def build_job_tool_specs() -> list[ToolSpec]:
             description=(
                 "创建同进程隔离子 Agent 执行独立子任务，返回子 Job ID（用 job_output 获取结果）。"
                 "子 Agent 继承工作目录，权限不超出父级。"
+                "成本随父会话历史重发而放大，简单任务不要开。"
             ),
             parameters={
                 "type": "object",

@@ -37,6 +37,12 @@ API = f"https://api.github.com/repos/{REPO}"
 STATIC_BASE = f"https://github.com/{REPO}/releases/latest/download"
 HEADERS = {"Accept": "application/vnd.github+json", "User-Agent": "naiba-release-watch"}
 
+# `release_notes` 头条允许的品牌前缀：**产品显示名 2026-09-20 起为 Cat Chat**（原名 Naiba Chat）。
+# 历史版本条目仍以 Naiba Chat 开头，所以两个前缀都算正常——但不能因此放宽到「任意字符串」，
+# 否则「头条写错/换了别的说明」这类发布事故会被静默放过。判据是「前缀 ∈ 已知品牌」，
+# 不是「含品牌字样」。
+BRAND_PREFIXES = ("Cat Chat", "Naiba Chat")
+
 # wait_for_run 的哨兵返回值：不是「超时没等到」，而是「根本问不到」——两者处置完全不同，
 # 混成一个 None 就会把额度问题误报成发布失败。
 API_UNAVAILABLE = object()
@@ -162,13 +168,18 @@ def hash_remote_exe(url: str, attempts: int = 4) -> str:
 def check_manifest(manifest: dict, commit: str = "") -> bool:
     """manifest 与本次提交是否自洽（两条核验路径共用）。"""
     ok = True
-    print(f"manifest: version={manifest['version']} commit={str(manifest['commit'])[:12]} "
-          f"notes={len(manifest['release_notes'])} 条")
-    print("  sha256 =", manifest["sha256"])
-    if commit and manifest["commit"] != commit:
+    notes = manifest.get("release_notes")
+    count = len(notes) if isinstance(notes, list) else "(不是列表)"
+    print(f"manifest: version={manifest.get('version')} "
+          f"commit={str(manifest.get('commit'))[:12]} notes={count} 条")
+    print("  sha256 =", manifest.get("sha256"))
+    if commit and manifest.get("commit") != commit:
         print("  !! manifest.commit 不是本次提交"); ok = False
-    if not manifest["release_notes"][0].startswith("Naiba Chat"):
-        print("  !! release_notes 头条异常"); ok = False
+    if not isinstance(notes, list) or not notes:
+        print("  !! release_notes 缺失或为空"); ok = False
+    elif not isinstance(notes[0], str) or not notes[0].startswith(BRAND_PREFIXES):
+        print(f"  !! release_notes 头条异常（需以 {' / '.join(BRAND_PREFIXES)} 开头）")
+        ok = False
     return ok
 
 

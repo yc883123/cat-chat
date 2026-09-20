@@ -187,5 +187,43 @@ class TaskPanelFrontendTests(unittest.TestCase):
         self.assertIn("margin-left", _css_rule(styles, ".task-item-nested"), "子行要缩进")
 
 
+class TaskPanelResumeDisplayTests(unittest.TestCase):
+    """重启恢复在面板上的显示口径（2026-09-20 事故）。
+
+    一次服务重启把 ComfyUI 批量生成中断，重启后自动接续跑完，面板里于是并排出现两条
+    共用父回答的行。用户看到的三个毛病：
+
+    1. 汇总行 ``共 3 · 运行中 0 · 失败 0 · 已完成 2`` 里凭空少一条——``interrupted``
+       既不算「失败」也不算「已完成」，从汇总行完全读不出「发生过一次中断」；
+    2. 恢复出的新 Job 标题显示成 ``完成 8/10``——旧 ``resume()`` 把 ``current_step``
+       当 label 写进了 ``message``（写入口已在 ``naiba/jobs.py`` 修掉），显示层再兜一层；
+    3. 中断源与接续它的新 Job 是两条对立状态的行，不点明「这条已经有人接手」读不懂。
+
+    渲染结果由 `verify/tasks_panel_render_check.mjs` 真执行校验；这里钉源码口径。
+    """
+
+    def setUp(self) -> None:
+        self.tasks_js = _read("06-tasks-plans.js")
+        self.conversations_js = _read("08-conversations.js")
+
+    def test_summary_has_a_bucket_for_every_terminal_status(self) -> None:
+        body = _function_body(self.conversations_js, "function renderTaskSummary(")
+        self.assertIn("'interrupted'", body, "中断是终态，汇总行必须给它一个桶，否则「共 N」对不上")
+        self.assertIn("'cancelled'", body, "取消同理")
+        self.assertIn("最后成功更新", body, "改汇总口径不得丢掉同步失败兜底")
+
+    def test_progress_shaped_message_is_not_used_as_title(self) -> None:
+        body = _function_body(self.tasks_js, "export function taskDisplayTitle(")
+        self.assertIn("TASK_PROGRESS_MESSAGE", body, "进度形文案不得顶在任务名位")
+        # 常量本身必须真的认「数字/数字」——只引用一个名字不算修好
+        declaration = self.tasks_js.split("const TASK_PROGRESS_MESSAGE", 1)[1].split("\n", 1)[0]
+        self.assertIn(r"\d+\s*\/\s*\d+", declaration, "「完成 8/10」这类进度必须命中")
+
+    def test_superseded_interrupted_row_explains_it_was_replaced(self) -> None:
+        row = _function_body(self.conversations_js, "function taskRowMarkup(")
+        self.assertIn("result?.resumed_into", row, "标记来自 resume 链路写进 result 的键")
+        self.assertIn("已由新任务接续", row)
+
+
 if __name__ == "__main__":
     unittest.main()

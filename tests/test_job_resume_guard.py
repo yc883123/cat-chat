@@ -150,6 +150,70 @@ class ResumeInterruptedDedupeTests(_RegistryCase):
         self.assertFalse(row["result"].get("resumed_into"), "未声明 resumable 的 Job 不得被自动恢复")
 
 
+class ResumeLabelTests(_RegistryCase):
+    """恢复/重试产生的新 Job 不得把 ``current_step`` 当任务名。
+
+    事故（2026-09-20 截图）：``resume()`` 用 ``job["current_step"]`` 当新 Job 的 label，
+    而 current_step 是**进度文字**（「完成 8/10」「提交第 3/10 段」）。label 会落进
+    ``background_tasks.message``，而它直接顶在任务面板的标题位——于是同一组里并排两条行
+    变成「ComfyUI 批量生成」与「完成 8/10」，用户读到的是一句没有主语、也看不出是恢复件的进度。
+    修复口径：任务名沿用源 Job 的原名并加「（恢复）」后缀，进度继续归 current_step。
+    """
+
+    def test_resume_keeps_original_label_instead_of_progress_text(self) -> None:
+        job_id = self._make_job(
+            status="interrupted",
+            checkpoint={"submitted": ["p1"], "completed": [], "errors": []},
+        )
+        self.storage.update_job(job_id, current_step="完成 8/10")  # 重启那一刻的进度文字
+        new_id = self.registry.resume(job_id, owner=self.conversation_id)
+
+        self.assertTrue(new_id, "可恢复的 Job 应当起一条新 Job")
+        row = self.storage.get_background_task(str(new_id)) or {}
+        self.assertEqual(row["message"], "ComfyUI 批量生成（恢复）", "标题必须是原名，不是进度")
+        self.assertNotIn("完成 8/10", str(row["message"]))
+        # 源 Job 自身保持原样：进度文字留在 current_step 里（面板的「当前步骤」还在展示它）
+        source = self.storage.get_background_task(job_id) or {}
+        self.assertEqual(source["current_step"], "完成 8/10")
+
+    def test_resume_without_original_label_falls_back_to_kind_name(self) -> None:
+        """源 Job 没有可读名字时**留空**，而不是退化成 current_step。
+
+        留空时 ``create_run`` 会写成 ``Job(kind)``，前端 ``taskDisplayTitle`` 认得这个兜底名
+        并改用类型名（「ComfyUI 生成」）显示。若这里退化成进度文字，前端就无从判断了。
+        """
+        run = self.storage.create_run(
+            self.conversation_id,
+            "",  # 无 label 的 Job：message 为空
+            {"id": "", "name": "Job", "system_prompt": "", "skill_ids": []},
+            {
+                "job_spec": {"kind": "comfyui", "resumable": True},
+                "params": {"comfyui_url": "http://127.0.0.1:1", "workflows": [{"1": {}}]},
+            },
+            kind="comfyui",
+            parent_job_id="parent-run",
+            owner_session_id=self.conversation_id,
+        )
+        job_id = str(run["id"])
+        self.storage.update_job(
+            job_id, status="interrupted", checkpoint={"submitted": ["p1"]}, current_step="完成 8/10"
+        )
+        new_id = self.registry.resume(job_id, owner=self.conversation_id)
+
+        row = self.storage.get_background_task(str(new_id)) or {}
+        self.assertEqual(row["message"], "Job(comfyui)", "无名时留空，交给前后端的类型名兜底")
+
+    def test_repeated_resume_does_not_stack_suffixes(self) -> None:
+        """连续恢复（恢复件又被恢复）不得叠成「X（恢复）（恢复）」。"""
+        first = self._make_job(status="interrupted", checkpoint={"submitted": ["p1"]})
+        second = self.registry.resume(first, owner=self.conversation_id)
+        self.storage.update_job(str(second), status="interrupted")
+        third = self.registry.resume(str(second), owner=self.conversation_id)
+
+        row = self.storage.get_background_task(str(third)) or {}
+        self.assertEqual(row["message"], "ComfyUI 批量生成（恢复）")
+
+
 class _ComfyStubState:
     def __init__(self) -> None:
         self.history: dict[str, dict] = {}

@@ -28,9 +28,16 @@ export function taskKindLabel(kind) {
 
 // 行标题：优先显示落库的任务名（message，即 JobSpec.label），没有时回退类型名。
 // 「Job(kind)」是后端 create_run 在无 label 时的兜底名，对用户不可读，不展示。
+//
+// 「进度形文案」同样不展示：旧实现把 source job 的 current_step 当恢复 Job 的 label
+// 写进 message（「完成 8/10」「提交第 3/10 段」），标题位于是显示成一句没有主语的进度。
+// 写入口已经修掉（naiba/jobs.py resume()），这里再兜一层，使仓库里已落库的旧记录
+// 也能回退到可读的类型名——否则用户看着历史任务依旧会以为没修。
+const TASK_PROGRESS_MESSAGE = /^(?:已入队|提交任务|正在停止|完成)$|(?:^|\D)\d+\s*\/\s*\d+/;
+
 export function taskDisplayTitle(task) {
   const message = String(task?.message || '').trim();
-  if (message && !/^Job\([a-z_]+\)$/i.test(message)) return message;
+  if (message && !/^Job\([a-z_]+\)$/i.test(message) && !TASK_PROGRESS_MESSAGE.test(message)) return message;
   return taskKindLabel(task?.kind);
 }
 

@@ -1051,7 +1051,17 @@ export function taskGroupTitle(tasks) {
 
 // 详情折叠里的键名：worker 写进 detail/result 的是英文键，常见几个给中文标签，
 // 其余原样展示（只铺展标量，避免把整张快照塞进 DOM）。
-const TASK_DETAIL_KEY_LABELS = { message: '说明', reason: '原因', command: '命令', exit_code: '退出码' };
+// resumed_into / resume_skipped / superseded_reason 是「重启恢复」链路写进 result 的标记，
+// 直接铺英文键用户读不出来，且它们正是解释「为什么这里有一条已中断的任务」的关键。
+const TASK_DETAIL_KEY_LABELS = {
+  message: '说明',
+  reason: '原因',
+  command: '命令',
+  exit_code: '退出码',
+  resumed_into: '已接续为新任务',
+  resume_skipped: '未恢复原因',
+  superseded_reason: '接续说明',
+};
 
 function taskDetailRows(task) {
   const rows = [];
@@ -1084,7 +1094,14 @@ function taskDetailRows(task) {
 
 function taskRowMarkup(task, nested = false) {
   const active = activeTaskStatuses.has(task.status);
-  const note = String(task.error || task.detail?.message || task.current_step || '');
+  const baseNote = String(task.error || task.detail?.message || task.current_step || '');
+  // 被接续/判重的中断 Job：源 Job 与接续它的那条新 Job 共用父回答，会并排出现在同一组里
+  // （一次重启中断 + 一次成功恢复 = 两条状态对立、时间相邻的行）。不点明「这条已经有人接手」，
+  // 用户读到的是「同一个任务怎么又中断又完成」。标记由 resume 链路写进 result，前端只做翻译。
+  const resumedInto = String(task.result?.resumed_into || '');
+  const resumeSkipped = String(task.result?.resume_skipped || '');
+  const supersededNote = resumedInto ? '已由新任务接续' : (resumeSkipped ? '重复副本，未重复恢复' : '');
+  const note = [baseNote, supersededNote].filter(Boolean).join(' · ');
   const rows = taskDetailRows(task);
   const detailHtml = rows.length
     ? `<dl class="task-detail" hidden>${rows
@@ -1267,9 +1284,24 @@ function restoreOpenTaskLogs() {
 function renderTaskSummary(jobs, active) {
   const box = $('#taskSummary');
   if (!box) return;
-  const failed = jobs.filter((task) => task.status === 'failed').length;
-  const completed = jobs.filter((task) => task.status === 'completed').length;
-  const stats = `共 ${jobs.length} · 运行中 ${active.length} · 失败 ${failed} · 已完成 ${completed}`;
+  const countOf = (status) => jobs.filter((task) => task.status === status).length;
+  const failed = countOf('failed');
+  const completed = countOf('completed');
+  // 汇总行必须自洽：早先只统计「失败 / 已完成」，于是「共 3 · 运行中 0 · 失败 0 · 已完成 2」
+  // 里凭空少了一条——那条是重启中断的 Job，它既不算失败也不算完成，用户从汇总行完全看不出
+  // 有过中断（2026-09-20 实测事故）。中断与取消同样是终态，各自成桶；计数为 0 时不显示，
+  // 保证「共 N」恒等于各项之和且不堆噪音。
+  const interrupted = countOf('interrupted');
+  const cancelled = countOf('cancelled');
+  const parts = [
+    `共 ${jobs.length}`,
+    `运行中 ${active.length}`,
+    `失败 ${failed}`,
+    `已完成 ${completed}`,
+  ];
+  if (interrupted) parts.push(`已中断 ${interrupted}`);
+  if (cancelled) parts.push(`已取消 ${cancelled}`);
+  const stats = parts.join(' · ');
   const stale = String(state.taskSyncFailed || '');
   if (!stale) {
     box.classList.remove('is-stale');

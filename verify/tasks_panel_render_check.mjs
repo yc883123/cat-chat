@@ -6,7 +6,9 @@
 //   2. 组标题 = 类型 + 时间，且**不引用用户消息原文**；
 //   3. 状态一律中文（含「停止中」），不把英文状态码漏到界面上；
 //   4. 行内停止按钮只对活动态出现；徽标在没有活动任务时回落为总数；
-//   5. 派生链（chat → 子 Agent → ComfyUI）里父行被过滤后仍收成一组，子任务行带嵌套标记。
+//   5. 派生链（chat → 子 Agent → ComfyUI）里父行被过滤后仍收成一组，子任务行带嵌套标记；
+//   6. 重启恢复件：恢复出的新 Job 标题沿用原名（不得把 current_step 当任务名），
+//      中断源行注明「已由新任务接续」，且汇总行按 interrupted/cancelled 单独成桶、数字自洽。
 //
 // 用法：node verify/tasks_panel_render_check.mjs
 import { readFileSync } from 'node:fs';
@@ -32,6 +34,7 @@ const code = [
   extract(tasksJs, 'export function taskStatusLabel('),
   // 行标题口径（06-tasks-plans）：taskRowMarkup 用它渲染任务名，必须一并 extract，
   // 否则离线渲染守门会以「ReferenceError: taskDisplayTitle is not defined」整体失败。
+  extract(tasksJs, 'const TASK_PROGRESS_MESSAGE'),
   extract(tasksJs, 'export function taskDisplayTitle('),
   extract(conversationsJs, 'export function taskElapsed('),
   extract(conversationsJs, 'export function formatTaskTime('),
@@ -188,6 +191,44 @@ panel.renderRunTasks();
 const stoppingHtml = element('#taskList').innerHTML;
 check('stopping 显示为「停止中」', stoppingHtml.includes('停止中'), stoppingHtml.slice(0, 300));
 check('stopping 仍算活动态（保留停止按钮）', stoppingHtml.includes('data-task-cancel="job-run"'));
+
+// ---- 重启恢复：中断源 Job 与接续它的新 Job ----
+// 事故口径（2026-09-20 用户截图）：一次服务重启把 ComfyUI 批量生成中断，重启后自动接续跑完。
+// 面板里于是并排出现两条共用父回答的行，旧实现有两个毛病：
+//   ① 新 Job 的标题被写成源 Job 的 current_step（「完成 8/10」）——任务名位显示一句进度，
+//      既没有主语、也看不出这是恢复件；
+//   ② 汇总行「共 3 · 运行中 0 · 失败 0 · 已完成 2」凭空少一条：interrupted 既不算失败、
+//      也不算完成，用户从汇总行完全读不出「发生过一次中断」。
+state.taskSyncFailed = ''; // 上面的同步失败用例会污染 summary，这里回到正常态
+const interruptedSource = {
+  id: 'job-int', kind: 'comfyui', conversation_id: 'conv-1', parent_job_id: 'run-3',
+  status: 'interrupted', message: 'ComfyUI 批量生成', created_at: Date.now() - 900000,
+  updated_at: Date.now(), current_step: '完成 8/10', error: '服务重启，运行已中断',
+  result: { resumed_into: 'job-resumed' }, detail: {}, checkpoint: {},
+};
+const resumedJob = {
+  id: 'job-resumed', kind: 'comfyui', conversation_id: 'conv-1', parent_job_id: 'run-3',
+  status: 'completed', message: 'ComfyUI 批量生成（恢复）', created_at: Date.now() - 800000,
+  updated_at: Date.now(), current_step: '完成 10/10', result: { total: 10 }, detail: {}, checkpoint: {},
+};
+state.tasks = [interruptedSource, resumedJob, jobDone];
+panel.renderRunTasks();
+const resumeHtml = element('#taskList').innerHTML;
+check('汇总行自洽：中断单独成桶（不再凭空少一条）',
+  element('#taskSummary').textContent === '共 3 · 运行中 0 · 失败 0 · 已完成 2 · 已中断 1',
+  element('#taskSummary').textContent);
+check('恢复件标题沿用原名 +（恢复）',
+  resumeHtml.includes('>ComfyUI 批量生成（恢复）</b>'), resumeHtml.slice(0, 500));
+check('中断源行点明「已由新任务接续」（两条对立状态才读得懂）',
+  resumeHtml.includes('已由新任务接续'), resumeHtml.slice(0, 500));
+
+// 历史脏数据：旧版本已经把 current_step 当 label 写进 message，显示层必须兜住，
+// 否则写入口修好了、用户看着旧记录依旧以为没修。
+state.tasks = [{ ...interruptedSource, id: 'job-legacy', status: 'completed', message: '完成 8/10', result: {} }];
+panel.renderRunTasks();
+check('进度形旧标题回退为类型名',
+  element('#taskList').innerHTML.includes('>ComfyUI 生成</b>'),
+  element('#taskList').innerHTML.slice(0, 400));
 
 // 全部终态：徽标回落为总数并弱化（否则跑完就变 0，用户以为从来没有过任务）
 state.tasks = [jobFailed, jobDone];

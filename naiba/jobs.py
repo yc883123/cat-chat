@@ -25,6 +25,7 @@ from naiba.core.contracts import AppContext
 import hashlib
 import json
 import logging
+import re
 import subprocess
 import threading
 import time
@@ -44,6 +45,11 @@ logger = logging.getLogger("naiba.jobs")
 
 JOB_TERMINAL = {"completed", "failed", "cancelled", "interrupted"}
 JOB_ACTIVE = {"queued", "running", "waiting", "stopping"}
+
+# ``create_run`` 在没有 label 时写入 ``background_tasks.message`` 的占位名（形如 ``Job(comfyui)``）。
+# 它对用户不可读，前端 ``taskDisplayTitle`` 会把它换成类型名——因此恢复 Job 时也不得把它
+# 当成"原名"沿用，否则会得到 ``Job(comfyui)（恢复）`` 这种绕过了前端兜底判定的怪名字。
+_PLACEHOLDER_JOB_LABEL_RE = re.compile(r"^Job\([a-z_]+\)$")
 
 # 停止超时兜底：worker 最长的"不看取消信号"窗口是 _run_check 的退避上限 60 秒，
 # 所以给它 90 秒。到点仍是 stopping 说明 worker 没响应取消（卡在网络等待里），
@@ -422,7 +428,26 @@ class JobRegistry:
         persisted_params = dict(persisted_params)
         # 记录来源 Job：resume/retry 产生的新 Job 可追溯“由谁恢复”，跨对话查询也能核对。
         persisted_params["_resumed_from"] = job_id
-        label = job.get("current_step") or f"恢复 Job({job['kind']})"
+        # 任务名绝不能取 current_step：那是**进度文字**（「完成 8/10」「提交第 3/10 段」），
+        # 而 background_tasks.message 直接顶在任务面板的标题位。旧实现把它当 label 写进去，
+        # 于是同一组里并排两条行变成「ComfyUI 批量生成」与「完成 8/10」——用户看到的是一句
+        # 没有主语、也看不出是恢复件的进度（2026-09-20 实测事故，见维护说明 §九）。
+        # 原名按可信度取：①发起时写进 run snapshot 的 JobSpec.label；②源 Job 已落库的 message。
+        # 注意 get()/``_snapshot()`` 刻意不带 message（它是展示字段，不在 Job 快照契约里），
+        # 所以第二路必须回库取，否则会静默丢名 → 标题退化成 Job(kind)。
+        # 两者都空、或只有一个占位名（Job(comfyui)）时留空，由 create_run 写占位名、
+        # 前端 taskDisplayTitle 再回退成类型名显示；绝不把进度文字顶上去。
+        persisted_label = str(persisted.get("label") or "") if isinstance(persisted, dict) else ""
+        stored = self.app.storage.get_background_task(job_id) or {}
+        base_label = (persisted_label or str(stored.get("message") or "")).strip()
+        if _PLACEHOLDER_JOB_LABEL_RE.match(base_label):
+            base_label = ""
+        if base_label.endswith("（恢复）"):
+            label = base_label  # 连续恢复不叠加后缀（否则「X（恢复）（恢复）」）
+        elif base_label:
+            label = f"{base_label}（恢复）"
+        else:
+            label = ""
         spec = JobSpec(
             kind=job["kind"],
             conversation_id=job["conversation_id"],

@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.7.3-beta
-  RELEASE_TAG: v2.7.3-beta
-  PACKAGE_NAME: naiba-chat-2.7.3-beta-windows-x64
+  RELEASE_VERSION: 2.7.5-beta
+  RELEASE_TAG: v2.7.5-beta
+  PACKAGE_NAME: naiba-chat-2.7.5-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -87,11 +87,11 @@ jobs:
           Copy-Item -LiteralPath "README.md" -Destination $packageDir
           Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\${{ env.PACKAGE_NAME }}.zip" -Force
 
-      - name: Publish 2.7.3 Beta release
+      - name: Publish 2.7.5 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Naiba Chat 2.7.3 Beta
+          name: Naiba Chat 2.7.5 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -99,15 +99,14 @@ jobs:
             dist/${{ env.PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Naiba Chat 2.7.3 Beta Windows build from `${{ github.sha }}`。
+            Naiba Chat 2.7.5 Beta Windows build from `${{ github.sha }}`。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - 修掉「手机切后台回来，上一次的提问自己回到输入框」（本次重点）：发消息的失败分支以前对所有非「用户主动中断」的异常一视同仁，连「请求已经被后端接住、只是流被手机系统掐断」也算「没发出去」，于是把整段提问塞回输入框。手机切后台时浏览器挂起网络、杀掉进行中的请求是系统常态，所以每次回来都要面对一条「请求失败 + 旧提问已回填」，再发一次还会撞上「该会话正在运行」。现在用「流是否已被受理」把两条失败路径分开：拿到 2xx 之后的断线一律按掉线处理——不回填草稿（后端那轮还在跑），改按退避重连把进度接回来。
-            - 修掉「已经允许过的操作又弹一次确认、点了却说未授权」：三条叠加的原因一起改。① 页面重载或重连后，事件回放会把已经处理过的确认请求原样重放，前端照旧渲染成带「允许执行」按钮的活卡，点下去后端当然认不出（「确认请求不属于该运行或已失效」）；现在回放出来的确认一律标注「确认已结束」，只作历史回执展示、没有按钮。② 点「允许 / 拒绝」失败时只弹一条提示、卡片永远停在「正在执行...」，看起来像已批准；现在失败原因直接写回卡片本身。③ 等待确认的时限从 5 分钟提到 30 分钟——手机切后台超过 5 分钟是常态，以前回来时确认早已自动作废。
-            - 插话队列的预览整段折行：排队等待的插话是要逐条审阅、编辑、删除的对象，「一行一句话省地方」在这里是错误取舍，窄屏手机上尤其看不清自己排了什么。
-            - 修掉「手机输入框打了很多字却只能看到一半」：移动 Chrome 的字体提升会放大普通元素的文字、却不动输入框这类表单控件，而输入框是「透明 textarea + 镜像层显字」的结构，两层被不同策略缩放后字号与换行点错位，可见部分就少了一半；现在全站关掉浏览器的自动缩放，字号一律以页面样式为准。该修复基于结构推断、尚待实机复验：如果你手机上仍然只显示一半，麻烦回报机型与浏览器版本。
+            - 新增供应商预设与首启引导（本次新能力）：新用户装完后「选供应商 → 粘 Key → 开聊」，不用再查文档填 API URL。添加 API 与首启引导改为「预设卡片列表 + 表单」，内置 14 条预设（DeepSeek / Kimi / 智谱 GLM / 通义千问 / OpenAI / Claude / Gemini，TE 中转 / 摆烂中转，Ollama / LM Studio / llama.cpp / Unsloth，以及全手填的自定义入口），每条预填名称、API URL、请求格式与推荐模型，表单只剩 API Key 一个空。中转站的引导文案按「这是什么站 → 怎么注册充值 → Key 在哪创建」三段式写清，并配「打开注册页」按钮；预设只是回填，全部字段照旧可改。
+            - ComfyUI 批量生成三连修（本次重点）：① 负 seed 随机值不再爆节点上限——rgthree「Seed (rgthree)」的 seed=-1（随机）此前被替换成 2^63 级巨数、超出该节点 ±2^50 的声明范围，被 ComfyUI 整单 400 拒收；现在随机值取各节点声明范围的交集 2^50。② shots 参数必须生效——此前只对单 workflow 生效、workflow_paths 分支静默无视（shots=10 返回 total=1），现在每个路径重复提交 shots 次，workflows 数组 + shots>1 明确报错而不是装没看见。③ 提交失败透传 ComfyUI 的拒收原因（哪个节点、什么校验错误），不再只剩一句「第 N 段提交失败」让模型盲试。
+            - 修掉「上下文重置工具显示成功、实际没重置」：模型调用 reset_context 后工具卡片显示已执行、返回 ok:true，但分割线不出现、占用圆环照旧——per-call 上下文副本是浅拷贝，工具写进运行上下文的标记落在副本上就永久丢失，宿主收尾读原对象读到空。现在写入一律同步回落共享对象。
 
-            本地验证：全量单测 1431 例通过。
+            本地验证：全量单测 1472 例通过。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

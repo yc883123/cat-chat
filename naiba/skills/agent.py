@@ -1383,8 +1383,11 @@ class SkillAgent:
                     if isinstance(run_context, dict)
                     else None
                 ) or self.executor
+                # 超时给 30 分钟（默认见 executor.wait_for_confirmation）：手机端切后台
+                # 超过 5 分钟是常态，300s 时代的自动拒绝会让用户回来后点「允许」只收到
+                # 「确认请求不属于该运行或已失效」。取消信号仍即时中断等待，不受影响。
                 success, result = confirmation_executor.wait_for_confirmation(
-                    confirm_id, timeout=300, cancel_event=cancel_event
+                    confirm_id, timeout=1800, cancel_event=cancel_event
                 )
         # 可重试错误：MCP / HTTP / Job 查询等；副作用工具（写文件/命令/脚本）不自动重试
         retryable = bool(tool_registry and getattr(tool_registry, "retryable", lambda _: False)(tool))

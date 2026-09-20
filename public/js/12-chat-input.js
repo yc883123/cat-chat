@@ -875,11 +875,22 @@ function handleToolConfirmEvent(event, { row, answer, runId }) {
   const toolArguments = typeof event.arguments === 'string'
     ? event.arguments
     : JSON.stringify(event.arguments || {}, null, 2);
+  // 去重：重连/重渲染若把同一确认事件再投一次，不能插第二张卡（两张卡的按钮点哪个
+  // 另一个都会变成「已失效」，纯属惊吓）。
+  if (confirmId && row.querySelector(`.tool-confirm[data-confirm-id="${CSS.escape(String(confirmId))}"]`)) {
+    return;
+  }
+  // 后端在回放时已标注「该确认不再待决」（confirm_resolved）：渲染成历史回执、不给按钮——
+  // 否则页面重载后旧确认卡「复活」，点了只会收到 409「确认请求不属于该运行或已失效」。
+  const actionsMarkup = event.confirm_resolved
+    ? '<div class="tool-confirm-status">该确认已处理或已超时失效（历史回执，无需操作）</div>'
+    : `<button class="tool-confirm-btn tool-confirm-reject" data-confirm-id="${escapeHtml(confirmId)}" data-run-id="${escapeHtml(event.run_id || runId)}">拒绝</button>
+        <button class="tool-confirm-btn tool-confirm-approve" data-confirm-id="${escapeHtml(confirmId)}" data-run-id="${escapeHtml(event.run_id || runId)}">允许执行</button>`;
   const confirmMarkup = `
     <div class="tool-confirm" data-confirm-id="${escapeHtml(confirmId)}">
       <div class="tool-confirm-header">
         <span class="tool-confirm-icon">⚠️</span>
-        <span class="tool-confirm-title">需要确认</span>
+        <span class="tool-confirm-title">${event.confirm_resolved ? '确认已结束' : '需要确认'}</span>
       </div>
       <div class="tool-confirm-body">
         <div class="tool-confirm-tool">工具：${escapeHtml(toolName)}</div>
@@ -887,8 +898,7 @@ function handleToolConfirmEvent(event, { row, answer, runId }) {
         ${toolArguments ? `<div class="tool-confirm-args"><pre>${escapeHtml(toolArguments)}</pre></div>` : ''}
       </div>
       <div class="tool-confirm-actions">
-        <button class="tool-confirm-btn tool-confirm-reject" data-confirm-id="${escapeHtml(confirmId)}" data-run-id="${escapeHtml(event.run_id || runId)}">拒绝</button>
-        <button class="tool-confirm-btn tool-confirm-approve" data-confirm-id="${escapeHtml(confirmId)}" data-run-id="${escapeHtml(event.run_id || runId)}">允许执行</button>
+        ${actionsMarkup}
       </div>
     </div>`;
   answer.insertAdjacentHTML('beforebegin', confirmMarkup);
@@ -1504,8 +1514,8 @@ export function rollbackChoiceSubmit() {
 
 
 export async function approveTool(confirmId, runId = state.chatRunId) {
+  const confirmEl = document.querySelector(`.tool-confirm[data-confirm-id="${CSS.escape(String(confirmId))}"]`);
   try {
-    const confirmEl = document.querySelector(`[data-confirm-id="${confirmId}"]`);
     if (confirmEl) {
       confirmEl.querySelector('.tool-confirm-actions').innerHTML = '<div class="tool-confirm-status">正在执行...</div>';
     }
@@ -1516,13 +1526,17 @@ export async function approveTool(confirmId, runId = state.chatRunId) {
       confirmEl.querySelector('.tool-confirm-status').textContent = response.success ? '已执行' : `执行失败：${response.result}`;
     }
   } catch (error) {
+    // 失败必须落回卡片（典型：确认已超时/被处理 → 409）——只 toast 会让卡片永远停在
+    // 「正在执行...」，用户以为已批准、实际上什么都没发生。
+    const actions = confirmEl?.querySelector('.tool-confirm-actions');
+    if (actions) actions.innerHTML = `<div class="tool-confirm-status">确认失败：${escapeHtml(error.message)}</div>`;
     toast(`确认失败：${error.message}`);
   }
 }
 
 export async function rejectTool(confirmId, runId = state.chatRunId) {
+  const confirmEl = document.querySelector(`.tool-confirm[data-confirm-id="${CSS.escape(String(confirmId))}"]`);
   try {
-    const confirmEl = document.querySelector(`[data-confirm-id="${confirmId}"]`);
     if (confirmEl) {
       confirmEl.querySelector('.tool-confirm-actions').innerHTML = '<div class="tool-confirm-status">已拒绝</div>';
     }
@@ -1531,6 +1545,8 @@ export async function rejectTool(confirmId, runId = state.chatRunId) {
     });
     if (confirmEl) confirmEl.querySelector('.tool-confirm-status').textContent = response.result || '已拒绝';
   } catch (error) {
+    const actions = confirmEl?.querySelector('.tool-confirm-actions');
+    if (actions) actions.innerHTML = `<div class="tool-confirm-status">操作失败：${escapeHtml(error.message)}</div>`;
     toast(`拒绝失败：${error.message}`);
   }
 }

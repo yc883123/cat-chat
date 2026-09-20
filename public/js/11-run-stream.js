@@ -576,6 +576,8 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
       renderPendingFiles();
     }
   };
+  let requestAccepted = false;   // 服务端已受理（拿到 2xx、流开始）——此后的断线不是「提交失败」
+  let reconnectScheduled = false;
   try {
     const response = await fetch('/api/chat', {
       method: 'POST',
@@ -608,14 +610,35 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
     }
     // 请求已被受理：旧面板与其临时选择现在才真正失效（重试/换会话都不会再弹回来）。
     commitChoiceSubmit();
+    requestAccepted = true;
     await consumeRunStream(response, row, conversationId, state.chatRunId, controller, runGeneration);
   } catch (error) {
     if (error.name !== 'AbortError' && state.conversationId === conversationId) {
-      row.querySelector('.answer-content').innerHTML = `<p>请求失败：${escapeHtml(error.message)}</p>`;
-      restoreRejectedSubmit();
+      if (requestAccepted) {
+        // 流已受理、中途断线（手机切后台杀连接是最常见诱因）：后端 Run 还在跑，
+        // 绝不能按「提交被拒」把草稿回填——那会让用户以为没发出去再发一次（撞 ACTIVE_RUN），
+        // 正是「切后台后上一次提问自己回到输入框」的根因。交给断线重连接回进度；
+        // 还没拿到 runId（run_started 未到达）时按「会话当前活动 Run」查询兜底。
+        const dropRunId = String(state.chatRunId || row.dataset.runId || '');
+        if (dropRunId) {
+          reconnectScheduled = true;
+          scheduleRunReconnect({ id: dropRunId, conversation_id: conversationId }, controller, runGeneration);
+        } else {
+          // 还没拿到 runId：resumeConversationRun 要求 abortController 为空，
+          // 先按「换流」口径解绑本代连接再走活动 Run 查询兜底（同 409 分支的顺序）。
+          detachRunSubscription();
+          await openConversation(conversationId);
+          await resumeConversationRun(conversationId);
+        }
+      } else {
+        row.querySelector('.answer-content').innerHTML = `<p>请求失败：${escapeHtml(error.message)}</p>`;
+        restoreRejectedSubmit();
+      }
     }
   } finally {
-    if (state.abortController === controller) await finishRunSubscription(conversationId, controller);
+    // 重连已排程时状态由 reconnect 计时器/轮询接管（与 resumeRun 的收尾约定一致），
+    // 这里不能 finishRunSubscription 清空，否则刚排上的重连立刻失去 runId 与代际。
+    if (!reconnectScheduled && state.abortController === controller) await finishRunSubscription(conversationId, controller);
   }
 }
 

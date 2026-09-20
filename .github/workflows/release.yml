@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.7.2-beta
-  RELEASE_TAG: v2.7.2-beta
-  PACKAGE_NAME: naiba-chat-2.7.2-beta-windows-x64
+  RELEASE_VERSION: 2.7.3-beta
+  RELEASE_TAG: v2.7.3-beta
+  PACKAGE_NAME: naiba-chat-2.7.3-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -87,11 +87,11 @@ jobs:
           Copy-Item -LiteralPath "README.md" -Destination $packageDir
           Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\${{ env.PACKAGE_NAME }}.zip" -Force
 
-      - name: Publish 2.7.2 Beta release
+      - name: Publish 2.7.3 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Naiba Chat 2.7.2 Beta
+          name: Naiba Chat 2.7.3 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -99,13 +99,15 @@ jobs:
             dist/${{ env.PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Naiba Chat 2.7.2 Beta Windows build from `${{ github.sha }}`。
+            Naiba Chat 2.7.3 Beta Windows build from `${{ github.sha }}`。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - 修掉「覆盖更新后用户自建的 MCP 服务被清空」（本次重点）：MCP 配置在加载时有一道「退役旧版捆绑 ComfyUI 桥接」的清理，判据写的是「id 等于 comfyui 就丢弃」——而当年那个旧桥接注册的条目恰好就叫 comfyui，用户自行安装官方 comfy-mcp 后取名 comfyui 再自然不过，于是被当成自家旧资产一起清掉。清理紧跟着一次落盘（每次启动都会把配置写回磁盘），所以服务不是「被忽略」而是「被永久删除」，且每次启动都会重演；用户平时不重启、只在覆盖更新时重启，表现就是「一更新就没」。其他设置（API 卡片、Agent 等）都不在过滤名单里，所以全部幸存——这正是「只有 MCP 列表空了」的原因。
-            - 修复方式：过滤判据从「名字」收窄为「签名」——只有参数里出现旧桥接脚本文件名 `comfyui_mcp_server.py` 的条目才会被剥离。特意没有按路径片段 `comfyui-mcp` 匹配：真实案例里用户的虚拟环境目录就叫 `comfyui-mcp-env`，按目录名匹配照样误伤。
-            - 临时出路（在 2.7.1 及更早版本上）：把该 MCP 服务的 id 改成 `comfyui` 之外的名字（例如 `comfy-mcp`）就不会被过滤命中；升级到 2.7.2 后原来的名字同样保留。
-            - 本地验证：全量单测 1431 例通过，其中 `test_config_migration` 改为按签名剥离旧桥接并新增「用户自建 comfyui 服务存活」守门用例。
+            - 修掉「手机切后台回来，上一次的提问自己回到输入框」（本次重点）：发消息的失败分支以前对所有非「用户主动中断」的异常一视同仁，连「请求已经被后端接住、只是流被手机系统掐断」也算「没发出去」，于是把整段提问塞回输入框。手机切后台时浏览器挂起网络、杀掉进行中的请求是系统常态，所以每次回来都要面对一条「请求失败 + 旧提问已回填」，再发一次还会撞上「该会话正在运行」。现在用「流是否已被受理」把两条失败路径分开：拿到 2xx 之后的断线一律按掉线处理——不回填草稿（后端那轮还在跑），改按退避重连把进度接回来。
+            - 修掉「已经允许过的操作又弹一次确认、点了却说未授权」：三条叠加的原因一起改。① 页面重载或重连后，事件回放会把已经处理过的确认请求原样重放，前端照旧渲染成带「允许执行」按钮的活卡，点下去后端当然认不出（「确认请求不属于该运行或已失效」）；现在回放出来的确认一律标注「确认已结束」，只作历史回执展示、没有按钮。② 点「允许 / 拒绝」失败时只弹一条提示、卡片永远停在「正在执行...」，看起来像已批准；现在失败原因直接写回卡片本身。③ 等待确认的时限从 5 分钟提到 30 分钟——手机切后台超过 5 分钟是常态，以前回来时确认早已自动作废。
+            - 插话队列的预览整段折行：排队等待的插话是要逐条审阅、编辑、删除的对象，「一行一句话省地方」在这里是错误取舍，窄屏手机上尤其看不清自己排了什么。
+            - 修掉「手机输入框打了很多字却只能看到一半」：移动 Chrome 的字体提升会放大普通元素的文字、却不动输入框这类表单控件，而输入框是「透明 textarea + 镜像层显字」的结构，两层被不同策略缩放后字号与换行点错位，可见部分就少了一半；现在全站关掉浏览器的自动缩放，字号一律以页面样式为准。该修复基于结构推断、尚待实机复验：如果你手机上仍然只显示一半，麻烦回报机型与浏览器版本。
+
+            本地验证：全量单测 1431 例通过。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

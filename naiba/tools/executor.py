@@ -285,7 +285,7 @@ class ToolExecutor:
     def wait_for_confirmation(
         self,
         confirm_id: str,
-        timeout: float = 300,
+        timeout: float = 1800,
         cancel_event: threading.Event | None = None,
     ) -> tuple[bool, str]:
         deadline = time.monotonic() + timeout
@@ -309,7 +309,8 @@ class ToolExecutor:
             pending = self.pending_confirmation.get(confirm_id)
             if pending and not pending.get("processing"):
                 self.pending_confirmation.pop(confirm_id, None)
-        return False, "用户未在5分钟内确认，已自动拒绝"
+        minutes = max(1, round(timeout / 60))
+        return False, f"用户未在{minutes}分钟内确认，已自动拒绝"
 
     def mcp_tool_guide(self) -> str:
         return self.mcp_registry.tool_guide()

@@ -113,7 +113,11 @@ html[data-theme="dark"] .topbar { background: color-mix(in srgb, var(--surface) 
 
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
-body { background: var(--bg); color: var(--text); overflow: hidden; }
+/* 关掉移动 Chrome 的字体提升（FontBoosting）：它会放大普通 div 的文字、却不动表单控件——
+   输入框镜像层（div）被放大而 textarea 不变，两层字号/换行点错位，用户看到的是「文字只显示
+   一半」；且 boosting 是否触发取决于布局启发式，时有时无（「手机排版偶尔会变」同源）。
+   全站字号一律以我们的 CSS 为准。 */
+body { background: var(--bg); color: var(--text); overflow: hidden; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 button, input, textarea, select { font: inherit; letter-spacing: 0; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .55; }
@@ -806,14 +810,16 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
 .run-guidance-list { display: grid; gap: 5px; margin: 0 0 8px; }
 .run-guidance-list[hidden] { display: none; }
 .run-guidance-head { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; line-height: 1.4; }
-.run-guidance-card { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--surface); color: var(--text); font-size: 13px; }
+.run-guidance-card { display: flex; align-items: flex-start; gap: 8px; min-height: 38px; padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--surface); color: var(--text); font-size: 13px; }
 .run-guidance-card.is-guided { border-style: dashed; color: var(--muted); }
 .run-guidance-card.is-stopped { border-color: var(--red); color: var(--muted); }
-.run-guidance-badge { flex: none; padding: 1px 7px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 11px; white-space: nowrap; }
+.run-guidance-badge { flex: none; margin-top: 3px; padding: 1px 7px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 11px; white-space: nowrap; }
 .run-guidance-card.is-guided .run-guidance-badge { background: var(--accent-soft); color: var(--accent); }
 .run-guidance-card.is-stopped .run-guidance-badge { background: var(--surface-2); color: var(--red); }
-.run-guidance-icon { flex: none; color: var(--muted); font-size: 16px; line-height: 1; }
-.run-guidance-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-guidance-icon { flex: none; padding-top: 3px; color: var(--muted); font-size: 16px; line-height: 1; }
+/* 预览整段折行展示（pre-wrap 保留用户原文的换行）：旧版 nowrap+ellipsis 让长插话
+   挤成一行省略号，用户看不清自己排了什么；顶对齐由 .run-guidance-card 的 flex-start 承担。 */
+.run-guidance-preview { flex: 1; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45; padding-top: 4px; }
 .run-guidance-input { flex: 1; min-width: 0; padding: 5px 7px; border: 1px solid var(--accent); border-radius: 4px; background: var(--bg); color: var(--text); font: inherit; resize: vertical; }
 .run-guidance-actions { display: flex; align-items: center; gap: 2px; flex: none; }
 .run-guidance-actions button { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); font-size: 16px; }

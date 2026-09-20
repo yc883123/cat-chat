@@ -1509,6 +1509,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             while True:
                 events = self.app.runs.wait_for_events(run_id, sequence, timeout=15.0)
                 for event in events:
+                    # 回放（页面重载/重连 after=0 起）会把**已处理过**的 tool_confirm 事件
+                    # 原样重发，前端据此又渲染出带「允许执行」按钮的卡——点了只会撞 409
+                    # 「确认请求不属于该运行或已失效」。流出口统一标注当前仍否待确认：
+                    # 实时事件此刻必在 pending（executor 先登记后发事件），不受影响。
+                    if event.get("type") == "tool_confirm":
+                        confirm_id = str(event.get("confirm_id") or "")
+                        if confirm_id and not self.app.runs.owns_confirmation(run_id, confirm_id):
+                            event = {**event, "confirm_resolved": True}
                     self.wfile.write((json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8"))
                     self.wfile.flush()
                     sequence = max(sequence, int(event.get("sequence") or 0))

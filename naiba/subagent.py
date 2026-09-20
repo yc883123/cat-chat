@@ -36,9 +36,35 @@ SUBAGENT_ALLOWED_TOOLS = [
     "http_request",
 ]
 
+
+def _coerce_fork(value: Any) -> bool:
+    """``fork`` 归一化：缺省、空值、无法判读一律回落 ``True``（存量行为不变）。
+
+    对齐 dsh 双模式的 seed 语义——只有显式 ``false`` 才走 spawn。
+    ``fork`` **不是模型参数**，而是工具注册时固化的常量（``subagent``=True /
+    ``subagent_spawn``=False，见 ``subagent_handler_factory``）：模式选择权在
+    Agent 工具集的用户开关上，模型零判断。旧的 Job 记录没有 ``fork`` 字段，
+    因此 resume 也走默认 fork，无需迁移。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"false", "0", "no", "off"}:
+            return False
+        if text in {"true", "1", "yes", "on"}:
+            return True
+        return True
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return True
+
+
 SUBAGENT_BLOCKED_TOOLS = {
     "register_mcp",
+    # 两个子代理工具同等待遇：子 Agent 不得再派生（深度 ≤2 的既定红线）。
     "subagent",
+    "subagent_spawn",
     "run_in_background",
     "job_output",
     "job_status",
@@ -69,11 +95,16 @@ def run_subagent_agent(
     if not conversation:
         app.storage.update_job(job_id, result={"error": "对话已删除"})
         return
-    # 子代理与主会话同库同会话：思考回放限长必须与主对话同参数，
+    # fork=true（`subagent` 工具）：回放父会话历史，思考回放限长必须与主对话同参数，
     # 否则同一会话出现两种回放字节（前缀缓存断 + 行为不一致）。
-    history = build_model_history(
-        conversation.get("messages", []), **app.config.reasoning_replay_options()
-    )
+    # fork=false（`subagent_spawn` 工具）：fresh child，不播种父历史（对齐 dsh 的 seed
+    # 缺省语义），无历史可回放，子代理只带自身人设 + instruction。
+    if _coerce_fork(params.get("fork", True)):
+        history = build_model_history(
+            conversation.get("messages", []), **app.config.reasoning_replay_options()
+        )
+    else:
+        history = []
     model_key = str(conversation.get("model_key") or "")
     if not model_key:
         provider_id = str(conversation.get("provider_id") or "")
@@ -191,8 +222,14 @@ def run_subagent_agent(
         app.storage.update_job(job_id, result={"error": str(exc)})
 
 
-def subagent_handler_factory(app: AppContext) -> Callable[..., tuple[bool, str]]:
-    """构造 ``subagent`` 系统工具处理器。"""
+def subagent_handler_factory(
+    app: AppContext, fork: bool = True
+) -> Callable[..., tuple[bool, str]]:
+    """构造子代理系统工具处理器。
+
+    ``fork`` 是**注册时固化的常量**（``subagent``=True / ``subagent_spawn``=False）：
+    模式来自用户的工具集二选一，不接受模型传参、也不在运行时判断（维护说明 §九.116）。
+    """
 
     def handler(
         arguments: dict[str, Any],
@@ -239,6 +276,9 @@ def subagent_handler_factory(app: AppContext) -> Callable[..., tuple[bool, str]]
             params={
                 "instruction": instruction,
                 "allowed_tools": child_tools,
+                # fork 在注册时固化（模型不传、也不可改）：落库的永远是解析后的确定值，
+                # resume 时不重算 ⇒ 同一 Job 的上下文模式恒等于创建时用户勾的那个工具。
+                "fork": _coerce_fork(fork),
                 "skill_policy": dict(ctx.get("skill_policy") or {"mode": "auto", "skill_ids": []}),
             },
             label=label,

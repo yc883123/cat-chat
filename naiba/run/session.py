@@ -20,7 +20,10 @@ from naiba.vision.runtime import IMAGE_SUFFIXES
 # 系统工具（除 9 个基础 agent_tools 外，按模式追加到 allowed_tools）。
 # - Craft 模式：作业/子 Agent/视觉/搜索工具全部可用；
 # - Ask/Plan 模式：仅只读分析与搜索工具（vision_image_ops 这类写文件工具排除）。
-JOB_TOOLS = ("run_in_background", "job_output", "job_status", "job_wait", "job_kill", "subagent", "todo_write")
+JOB_TOOLS = (
+    "run_in_background", "job_output", "job_status", "job_wait", "job_kill",
+    "subagent", "subagent_spawn", "todo_write",
+)
 # Harness 兼容别名（read/write/edit/grep）只存在于查询层归一（执行兼容），
 # 不再注入 allowed_tools/模型可见集；只保留规范名，避免别名与规范名重复披露。
 HARNESS_TOOLS = ("read_file", "write_file", "edit_file", "list_directory", "search_files", "pwsh")
@@ -40,8 +43,33 @@ SYSTEM_TOOLS_READONLY = VISION_READONLY_TOOLS + ("web_search",)
 JOB_CREATOR_TOOL_DEPS = {
     "run_in_background": ("job_output", "job_status", "job_wait", "job_kill"),
     "subagent": ("job_output",),
+    "subagent_spawn": ("job_output",),
     "comfyui_batch": ("job_output", "job_status", "job_wait"),
 }
+
+# ---- 工具互斥组（同一 Agent 工具集里只能勾一个，模式选择权完全归用户）----
+# 子代理的两种上下文模式做成**两个互斥工具**（subagent=fork 继承父历史 /
+# subagent_spawn=spawn 干净上下文）：模型只看到被启用的那个，不需要知道"模式"这个概念；
+# 用户在一次设置里选定，之后长期生效（与「ComfyUI 联动」等同款工具集心智）。
+# 组内**排前者**是保留方向：fork 选错只是费钱、结果仍对；反过来让子代理丢上下文
+# 是既费钱又出质量事故的方向（§九.116）。
+# 前端镜像 `AGENT_TOOL_MUTEX_GROUPS`（public/js/09-settings.js）——改一边必须改另一边。
+MUTUALLY_EXCLUSIVE_TOOL_GROUPS: tuple[tuple[str, ...], ...] = (("subagent", "subagent_spawn"),)
+
+
+def normalize_tool_mutex(tool_ids: Any) -> list[str]:
+    """互斥归一：同组多个同时出现 → 只保留组内排前者，其余丢弃（保持原顺序）。
+
+    存量配置本不该同时含两个（工具页是全选/互斥联动的），这里只是确定性兜底——
+    手攒的工具集、直接打 API 的写入、将来手工编辑的 config.json 都从这里收敛，
+    保证运行时**绝不相同组双开**。只含单个工具时是恒等操作。
+    """
+    result = list(tool_ids or [])
+    for group in MUTUALLY_EXCLUSIVE_TOOL_GROUPS:
+        present = [name for name in group if name in result]
+        for dropped in present[1:]:
+            result = [item for item in result if item != dropped]
+    return result
 
 
 def resolve_allowed_tools(
@@ -95,7 +123,9 @@ def resolve_allowed_tools(
                 if dep not in present:
                     allowed_tools.append(dep)
                     present.add(dep)
-    return allowed_tools
+    # 互斥归一放在最后：**这一处就保证运行时绝不相同组双开**（无论工具集来自
+    # 固化集、Agent scope 还是旧逻辑的兜底并集）。见 MUTUALLY_EXCLUSIVE_TOOL_GROUPS。
+    return normalize_tool_mutex(allowed_tools)
 
 
 def all_tool_names(app: AppContext) -> list[str]:
@@ -119,12 +149,14 @@ def bake_session_tool_ids(
     """
     existing = conversation.get("enabled_tool_ids") or []
     if existing:
-        return [str(item) for item in existing]
+        return normalize_tool_mutex([str(item) for item in existing])
     if app.storage.message_count(str(conversation.get("id") or "")) > 0:
         baked = all_tool_names(app)
     else:
         scope = [str(item) for item in (agent.get("tool_scope") or []) if str(item).strip()]
         baked = scope or all_tool_names(app)
+    # 落库的就必须是归一后的集合：前端显示与实际放行同源，不给"互斥的两个都开了"留洞。
+    baked = normalize_tool_mutex(baked)
     baked = list(dict.fromkeys(str(item) for item in baked if item))
     app.storage.set_enabled_tool_ids(str(conversation.get("id") or ""), baked)
     return baked
@@ -152,13 +184,16 @@ def enable_conversation_tools(
         existing = bake_session_tool_ids(app, conversation, agent)
         existing = [str(x) for x in existing if str(x).strip()]
     known = set(all_tool_names(app))
+    before = list(existing)
     added: list[str] = []
     for t in tool_ids:
         t = str(t or "").strip()
         if t and t in known and t not in existing:
             existing.append(t)
             added.append(t)
-    if added:
+    # 互斥归一：只加不删的路径同样过一遍，避免"注入另一个互斥工具"把集合变成双开。
+    existing = normalize_tool_mutex(existing)
+    if added or existing != before:
         app.storage.set_enabled_tool_ids(conversation_id, existing)
     return {"enabled_tool_ids": existing, "added": added}
 

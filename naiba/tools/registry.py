@@ -124,6 +124,8 @@ MEDIA_DECLARATIONS: dict[str, dict[str, str]] = {
     "job_wait": {"policy": "inline", "extract": "scan"},
     "job_kill": {"policy": "never", "extract": "none"},
     "subagent": {"policy": "inline", "extract": "scan"},
+    # 与 subagent 同一种 Job（kind 仍是 subagent）：返回快照里可能带产物路径
+    "subagent_spawn": {"policy": "inline", "extract": "scan"},
     # comfyui 域（wait=true 返回快照：completed_shots[].files 为产物 URL）
     "comfyui_prepare_workflow": {"policy": "never", "extract": "none"},
     "comfyui_batch": {"policy": "inline", "extract": "structured"},
@@ -893,14 +895,35 @@ def build_job_tool_specs() -> list[ToolSpec]:
         ToolSpec(
             name="subagent",
             description=(
-                "创建同进程隔离子 Agent 执行独立子任务，返回子 Job ID（用 job_output 获取结果）。"
-                "子 Agent 继承工作目录，权限不超出父级。"
-                "成本随父会话历史重发而放大，简单任务不要开。"
+                "创建同进程隔离子 Agent 执行独立子任务，返回子 Job ID。"
+                "子 Agent 继承本会话完整历史，适合需要前文上下文的子任务。"
+                "继承工作目录、权限不超出父级；长会话走无缓存中继时重放成本高。"
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "instruction": _string("给子 Agent 的任务指令"),
+                    "allowed_tools": {"type": "array", "items": {"type": "string"}, "default": []},
+                    "label": {"type": "string", "default": ""},
+                },
+                "required": ["instruction"],
+            },
+            side_effect=True,
+            retryable=False,
+            timeout=600,
+            permission="confirm",
+        ),
+        ToolSpec(
+            name="subagent_spawn",
+            description=(
+                "创建同进程隔离子 Agent 执行独立子任务，返回子 Job ID。"
+                "子 Agent 不带任何会话历史，起步成本低，但看不到前文。"
+                "instruction 必须自包含；继承工作目录、权限不超出父级。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "instruction": _string("给子 Agent 的任务指令（必须自包含）"),
                     "allowed_tools": {"type": "array", "items": {"type": "string"}, "default": []},
                     "label": {"type": "string", "default": ""},
                 },

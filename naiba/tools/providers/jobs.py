@@ -2,7 +2,7 @@
 
 处理器来源（整块复用，不做改写型手术）：
 - ``naiba.subagent.job_tool_handler_factory``：run_in_background/job_output/job_status/job_wait/job_kill；
-- ``naiba.subagent.subagent_handler_factory``：subagent；
+- ``naiba.subagent.subagent_handler_factory``：subagent（fork）/ subagent_spawn（spawn）；
 - 本模块函数：todo_write（自 app.py 处理器原样抽取，self→app 参数）。
 
 依赖经构造参数注入（AppContext Protocol），不摸全局。
@@ -45,11 +45,14 @@ def _todo_write_handler(
 
 
 class JobToolProvider:
-    """job/subagent 域：7 个任务工具（含 subagent/todo_write）单一定义。"""
+    """job/subagent 域：8 个任务工具（含 subagent/subagent_spawn/todo_write）单一定义。"""
 
     def __init__(self, app: AppContext) -> None:
         handlers = dict(job_tool_handler_factory(app))
-        handlers["subagent"] = subagent_handler_factory(app)
+        # 两种上下文模式 = 两个互斥的工具（工具集二选一，模型零判断，见 §九.116）：
+        # subagent 继承父会话历史（fork，默认方向），subagent_spawn 走干净上下文。
+        handlers["subagent"] = subagent_handler_factory(app, fork=True)
+        handlers["subagent_spawn"] = subagent_handler_factory(app, fork=False)
         handlers["todo_write"] = partial(_todo_write_handler, app)
         self._handlers = handlers
 

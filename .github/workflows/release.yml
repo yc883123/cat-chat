@@ -9,9 +9,9 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.7.6-beta
-  RELEASE_TAG: v2.7.6-beta
-  PACKAGE_NAME: naiba-chat-2.7.6-beta-windows-x64
+  RELEASE_VERSION: 2.7.7-beta
+  RELEASE_TAG: v2.7.7-beta
+  PACKAGE_NAME: naiba-chat-2.7.7-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -87,11 +87,11 @@ jobs:
           Copy-Item -LiteralPath "README.md" -Destination $packageDir
           Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\${{ env.PACKAGE_NAME }}.zip" -Force
 
-      - name: Publish 2.7.6 Beta release
+      - name: Publish 2.7.7 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 2.7.6 Beta
+          name: Cat Chat 2.7.7 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -99,16 +99,17 @@ jobs:
             dist/${{ env.PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 2.7.6 Beta Windows build from `${{ github.sha }}`。
+            Cat Chat 2.7.7 Beta Windows build from `${{ github.sha }}`。
 
-            **本次唯一变化：显示名改为 Cat Chat（原名 Naiba Chat）。** GitHub 仓库、`naiba-chat.exe`、更新资产与既有数据位置一律不动——直接覆盖安装即可，**不需要迁移数据，也不需要重新配置**；历史会话、API 卡片、Agent、Skill 与 MCP 配置原样保留。
+            **本次变化：子 Agent 分成「继承历史」与「干净上下文」两个互斥工具，模式由你选、模型不再自己猜。** 直接覆盖安装即可，**不需要迁移数据，也不需要重新配置**；历史会话、API 卡片、Agent、Skill 与 MCP 配置原样保留。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - 界面与操作入口的产品名改为 Cat Chat（共 19 处显示文案）：浏览器标签、桌面窗口标题、托盘悬停标题、原生对话框标题、手机访问与数据目录迁移提示、启动横幅与命令行帮助；名称大小写与空格固定为 Cat Chat。程序行为、接口与数据格式一处未改。
-            - 机器认的身份一律保留：`yc883123/naiba-chat`、`naiba-chat.exe`、`naiba-chat-update.json` 与清单里的仓库 / 资产名 / SHA-256 校验；数据目录、`config.json`、`chat.db`、WebView2 profile 与全部本地存储键（`naibaChat*` 等）保持原值。改的是「人看的那一层」，因为 EXE 文件名与仓库地址一改，旧客户端的自动更新、既有快捷方式和用户数据路径会集体失配。
-            - 已知保留项（不是漏改）：任务管理器 / 资源管理器属性里仍可能显示原文件名（本次没有为构建产物新增 Windows 版本资源）；历史版本说明与旧文档中的旧名原样保留，属正常历史记录。应用图标没有任何改动。
+            - 子 Agent 拆成两个工具：`subagent` 继承本会话完整历史（fork），`subagent_spawn` 不带任何会话历史、只看自身人设与 `instruction`（spawn）。两个工具参数完全一致（`instruction` / `allowed_tools` / `label`），在 Agent 工具勾选里**互斥**——勾上一个会自动取消另一个并给出提示。模式选择权 100% 归用户的工具集，模型侧看不到没启用的那个、也不做任何模式判断。
+            - 为什么不再让模型自己决定：实测里「要不要继承历史」这一判断不可靠——模型既不清楚你聊过什么才算背景，也无法预判继承带来的输入体量，同一句指令在不同运行里可能选到不同模式。`fork` 因此改为**注册时固化的常量**，模型即使硬塞 `fork` 参数也一律忽略。
+            - 互斥归一只有一个权威出口 `session.normalize_tool_mutex`（组内保留排前者 `subagent`），三个入口全部覆盖：每轮解析可用工具、会话工具集固化落库前、运行中启用额外工具；工具集写入前另有一次归一兜底。前端镜像同一套规则：单点勾选听用户的，批量「全选」按组内优先者归一并提示（副作用：「任务与扩展」分组永远进不了全选态，这是互斥的必然结果）。
+            - `full` 预设必须显式排除 `subagent_spawn`；系统常驻提示只讲当前启用的那一个工具的成本特征（继承历史在前缀缓存命中的供应商上按缓存价重放、无缓存中继上是全价重放；干净上下文任何供应商下起步成本都低但看不到前文），两条不会同时出现。
 
-            本地验证：全量单测 1522 例通过（新增显示名品牌守门 28 例：显示名与内部标识各归各位）。
+            本地验证：全量单测 1573 例通过（新增子代理双工具守门 27 例 + 互斥归一 24 例）；另有三条独立链路实证——前端纯函数冒烟 13 项、隔离真实实例接口探针 11 项（含通过 `/api/tool_sets` 同时写入两个工具、读回只剩 fork）、真实后端浏览器冒烟 12 项。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

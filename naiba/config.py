@@ -410,6 +410,9 @@ _TOOL_GROUP = {
     "vision_analyze": "视觉与图片", "vision_image_ops": "视觉与图片",
     "run_in_background": "任务与扩展", "job_output": "任务与扩展", "job_status": "任务与扩展",
     "job_wait": "任务与扩展", "job_kill": "任务与扩展", "subagent": "任务与扩展",
+    # 子代理的两种上下文模式互斥（同组只能勾一个，见 run/session.py 的
+    # MUTUALLY_EXCLUSIVE_TOOL_GROUPS）：分组与排序上把它们摆在一起。
+    "subagent_spawn": "任务与扩展",
     "todo_write": "任务与扩展",
     "install_skill": "任务与扩展", "unpack_skill_archive": "任务与扩展",
     "inspect_installed_skill": "任务与扩展",
@@ -478,7 +481,8 @@ def tool_catalog_entries(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # 视觉与图片
         "vision_analyze", "vision_image_ops",
         # 任务与扩展
-        "run_in_background", "job_output", "job_status", "job_wait", "job_kill", "subagent",
+        "run_in_background", "job_output", "job_status", "job_wait", "job_kill",
+        "subagent", "subagent_spawn",
         "todo_write",
         "install_skill", "unpack_skill_archive", "inspect_installed_skill",
         # 长会话
@@ -637,8 +641,11 @@ TOOL_PRESETS: tuple[dict[str, Any], ...] = (
         "id": "full",
         "name": "全能模式",
         "tagline": "全部工具",
-        "desc": "开启所有已注册工具（含 MCP、ComfyUI、能力管理、视觉全套）。能力最强，误操作风险也最高。",
+        "desc": "开启所有已注册工具（含 MCP、ComfyUI、能力管理、视觉全套）。能力最强，误操作风险也最高。子 Agent 有两种互斥的上下文模式，这里默认开「继承会话历史」的那种，想要干净上下文的在工具页手动换。",
         "include": ["group:*"],
+        # group:* 会把互斥的两个子代理工具同时展开 ⇒ 必须显式排除组内后位者
+        # （排前者 = fork = 安全方向；互斥归一唯一权威是 run/session.normalize_tool_mutex）。
+        "exclude": ["subagent_spawn"],
     },
 )
 
@@ -727,7 +734,12 @@ TOOL_SET_MAX = 30
 
 
 def _clean_tool_set_tools(tools: Any) -> list[str]:
-    """规整工具名列表：只收字符串、去空、去重、保持顺序；非列表一律当空集。"""
+    """规整工具名列表：只收字符串、去空、去重、保持顺序；非列表一律当空集。
+
+    末尾过一遍**互斥归一**（`subagent` / `subagent_spawn` 只能留一个）：前端保存前
+    已经归一，这里是后端兜底——手攒的工具集、直接打 ``/api/tool_sets`` 的写入、
+    手工编辑过的 config.json 都从这里收敛（§九.116）。
+    """
     if not isinstance(tools, list):
         return []
     result: list[str] = []
@@ -737,7 +749,11 @@ def _clean_tool_set_tools(tools: Any) -> list[str]:
         name = raw.strip()
         if name and name not in result:
             result.append(name)
-    return result
+    # 局部导入：互斥组的权威定义在运行层（run/session.py），而本模块是层级 2
+    # （只依赖 core 与 paths）——模块级 import 会破坏这条 DAG 红线，故在函数内取。
+    from naiba.run.session import normalize_tool_mutex
+
+    return normalize_tool_mutex(result)
 
 
 def _quick_message_entries(items: Any) -> list[dict[str, Any]]:

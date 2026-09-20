@@ -1492,15 +1492,42 @@ export function handleAgentAvatarFile(file) {
 export const AGENT_TOOL_DEP_RULES = {
   run_in_background: ['job_output', 'job_status', 'job_wait', 'job_kill'],
   subagent: ['job_output'],
+  subagent_spawn: ['job_output'],
   comfyui_batch: ['job_output', 'job_status', 'job_wait'],
 };
 
-export function applyAgentToolDependency(scope, changedTool, checked) {
+// 互斥组：同一组里只能勾选一个工具（与后端 naiba/run/session.py 的
+// MUTUALLY_EXCLUSIVE_TOOL_GROUPS 逐字镜像 —— 改一边必须改另一边）。
+// 子代理的两种上下文模式就是这一组：subagent 继承会话历史（fork）/ subagent_spawn
+// 干净上下文（spawn）。组内**排前者**是保留方向（fork 选错只是费钱，反过来丢上下文
+// 是质量事故），批量勾选（分类全选）冲突时按它归一。
+export const AGENT_TOOL_MUTEX_GROUPS = [['subagent', 'subagent_spawn']];
+
+// 工具 → 同组其它工具（勾一个就取消另一个）。
+const MUTEX_RIVALS = new Map();
+for (const group of AGENT_TOOL_MUTEX_GROUPS) {
+  for (const name of group) MUTEX_RIVALS.set(name, group.filter((n) => n !== name));
+}
+
+// 互斥归一：两个都在时只留组内排前者（与后端 normalize_tool_mutex 同口径）。
+export function normalizeToolMutex(scope) {
+  const result = new Set(scope || []);
+  for (const group of AGENT_TOOL_MUTEX_GROUPS) {
+    const present = group.filter((name) => result.has(name));
+    present.slice(1).forEach((name) => result.delete(name));
+  }
+  return [...result];
+}
+
+export function applyAgentToolDependency(scope, changedTool, checked, { applyMutex = true } = {}) {
   const result = new Set(scope);
   if (checked) {
     result.add(changedTool);
     const deps = AGENT_TOOL_DEP_RULES[changedTool];
     if (deps) deps.forEach((dep) => result.add(dep));
+    // 互斥：单点勾选时以用户刚点的这个为准（批量全选走 normalizeToolMutex，
+    // 那里按组内排前者保留 fork —— 全选没有"用户想选哪个"的语义）。
+    if (applyMutex) (MUTEX_RIVALS.get(changedTool) || []).forEach((rival) => result.delete(rival));
   } else {
     result.delete(changedTool);
     // 取消的若是某创建者必需的查询工具，则把这些创建者也一并取消。
@@ -1511,14 +1538,23 @@ export function applyAgentToolDependency(scope, changedTool, checked) {
   return [...result];
 }
 
-// 把工具集补齐依赖闭包：选中创建者工具时自动带上它依赖的查询工具。
-// 与后端依赖闭包保持一致，保证这里勾选的状态就是运行时会放行的 allowed_tools。
+// 把工具集补齐依赖闭包 + 互斥归一：选中创建者工具时自动带上它依赖的查询工具；
+// 互斥组冲突时只留排前者。与后端依赖闭包/互斥归一保持一致，保证这里勾选的状态
+// 就是运行时会放行的 allowed_tools。
 export function normalizeToolScope(scope) {
   const result = new Set(scope || []);
   for (const [creator, deps] of Object.entries(AGENT_TOOL_DEP_RULES)) {
     if (result.has(creator)) deps.forEach((dep) => result.add(dep));
   }
-  return [...result];
+  return normalizeToolMutex([...result]);
+}
+
+// 批量勾选（分类/二级分组全选）后的互斥提示：整组全选会同时命中互斥的两个子代理工具，
+// 这里按「保留组内排前者」归一，并提示一次 —— 否则用户看不出为什么少勾了一个。
+function notifyToolMutexDrop(before, after) {
+  const dropped = (before || []).filter((name) => !after.includes(name));
+  if (!dropped.length) return;
+  toast('子 Agent 有两种上下文模式，互斥只能开一个：已保留 subagent（继承会话历史）');
 }
 
 // —— 工具集：卡片态（内置预设 + 我的工具集）↔ 编辑态 ——
@@ -1726,7 +1762,7 @@ export function closeAgentToolEditor() {
 // 保存工具集：写入后端「我的工具集」（编辑中的原地更新），当前勾选已经是表单里的值，无需再套用。
 export async function saveAgentToolSet() {
   const known = knownToolNames();
-  const tools = state.agentFormToolScope.filter((name) => known.has(name));
+  const tools = normalizeToolMutex(state.agentFormToolScope.filter((name) => known.has(name)));
   if (!tools.length) {
     toast('还没勾选任何工具，先选几个再保存');
     return;
@@ -1844,10 +1880,11 @@ export function knownToolNames() {
   return new Set((state.toolCatalog?.tools || []).map((tool) => tool.name));
 }
 
-// 模板里可能存过已被移除的工具名：复刻时只应用当前目录里还存在的。
+// 模板里可能存过已被移除的工具名：复刻时只应用当前目录里还存在的；
+// 再过一遍互斥归一，防止老数据/手攒的模板把互斥的两个子代理工具都存进来。
 export function usableTemplateTools(template) {
   const known = knownToolNames();
-  return (template.tools || []).filter((name) => known.has(name));
+  return normalizeToolMutex((template.tools || []).filter((name) => known.has(name)));
 }
 
 export async function deleteToolTemplate(templateId) {
@@ -2038,6 +2075,8 @@ function buildToolCard(tool, list) {
   b.textContent = tool.name;
   if (AGENT_TOOL_DEP_RULES[tool.name]) {
     b.title = '选中后会自动带上其依赖的查询工具（job_output/job_status/job_wait/job_kill 等）。';
+  } else if (MUTEX_RIVALS.has(tool.name)) {
+    b.title = '与同组的另一个子 Agent 工具互斥：勾选它会自动取消那个（一次只能开一个模式）。';
   }
   const small = document.createElement('small');
   small.textContent = tool.description || '';
@@ -2070,8 +2109,12 @@ function buildSubgroupBlock(sub, tools, list) {
   all.addEventListener('change', () => {
     let scope = state.agentFormToolScope;
     for (const tool of tools) {
-      scope = applyAgentToolDependency(scope, tool.name, all.checked);
+      // 批量勾选不带"想选哪个"的语义 ⇒ 关掉逐项互斥，末尾统一按组内排前者归一。
+      scope = applyAgentToolDependency(scope, tool.name, all.checked, { applyMutex: false });
     }
+    const before = scope;
+    scope = normalizeToolMutex(scope);
+    if (all.checked) notifyToolMutexDrop(before, scope);
     setAgentToolScope(scope);
     syncAgentToolCheckboxes(list);
   });
@@ -2111,8 +2154,12 @@ function buildGroupBlock(group, toolMap, list) {
     let scope = state.agentFormToolScope;
     for (const name of group.tools || []) {
       const tool = toolMap.get(name);
-      if (tool) scope = applyAgentToolDependency(scope, tool.name, allCb.checked);
+      // 全选没有"用户想选哪个互斥项"的语义 ⇒ 关掉逐项互斥，末尾按组内排前者归一。
+      if (tool) scope = applyAgentToolDependency(scope, tool.name, allCb.checked, { applyMutex: false });
     }
+    const before = scope;
+    scope = normalizeToolMutex(scope);
+    if (allCb.checked) notifyToolMutexDrop(before, scope);
     setAgentToolScope(scope);
     // 勾上分类时自动展开，让用户看到自己到底开了什么。
     if (allCb.checked) setToolGroupCollapsed(groupEl, false);

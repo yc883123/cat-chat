@@ -1,20 +1,20 @@
-# Cat Chat 2.7.6 Beta
+# Cat Chat 2.7.7 Beta
 
 <p align="center">
   <img src="docs/cat-chat-logo.png" alt="Cat Chat" width="520">
 </p>
 
-Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。
+Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。2.7.7 Beta 把子 Agent 拆成「继承历史」与「干净上下文」两个互斥工具，模式由你选、模型不再自己猜。
 
-> Cat Chat 原名 Naiba Chat。2.7.6 Beta 起仅调整显示名；GitHub 仓库、`naiba-chat.exe`、更新资产及既有数据位置保持不变，无需重新配置或搬迁数据。
+> Cat Chat 原名 Naiba Chat。显示名自 2.7.6 Beta 起为 Cat Chat；GitHub 仓库、`naiba-chat.exe`、更新资产及既有数据位置保持不变，无需重新配置或搬迁数据。
 
-## 2.7.6 Beta 主要能力
+## 2.7.7 Beta 主要能力
 
-- **显示名改为 Cat Chat（本次唯一变化）**：界面与操作入口的产品名从 Naiba Chat 改为 Cat Chat——浏览器标签、桌面窗口标题、托盘悬停标题、原生对话框标题、手机访问与数据目录迁移提示、启动横幅与命令行帮助，共 **19 处显示文案**；名称大小写与空格固定为 `Cat Chat`。程序行为、接口与数据格式一处未改。
-- **什么没变（重要）**：GitHub 仓库仍是 `yc883123/naiba-chat`，安装包与更新资产仍是 `naiba-chat.exe` / `naiba-chat-update.json`，更新链路的仓库、资产名与 SHA-256 校验全部照旧；数据目录、`config.json`、`chat.db`、WebView2 浏览器配置与全部本地存储键（`naibaChat*` 等）保持原值——**不需要迁移数据，也不需要重新配置**，直接覆盖安装即可，历史会话、API 卡片、Agent、Skill 与 MCP 配置原样保留。
-- **为什么只改显示名**：EXE 文件名、仓库地址和更新器里那几个常量是「机器认的身份」，一改就会让旧客户端的自动更新、既有快捷方式和用户数据路径集体失配。本次只动「人看的那一层」，代价最小、回滚最容易；边界表见 `项目维护说明（修改代码前必读）.md` §2.1。
-- **已知保留项（不是漏改）**：任务管理器 / 资源管理器属性里仍可能显示原文件名（本次没有为构建产物新增 Windows 版本资源）；`start.bat` 的窗口标题已同步；历史版本说明与旧文档里的 Naiba Chat 原样保留，属正常历史记录。**应用图标没有任何改动。**
-- **验证**：新增显示名品牌守门 `tests/test_display_branding.py` **28 例**——显示名与内部标识各归各位（托盘内部 name 与可见标题用 AST 分开断言；`naiba.chat` AppUserModelID、`naibaChat*` 存储键、`server_version` 与更新器三常量必须保持原值），并含前端语法检查与定向浏览器检查。
+- **子 Agent 分成两个互斥工具，模式由你选（本次新能力）**：`subagent` 继承本会话完整历史，适合「背景已经在对话里聊清楚了，让子 Agent 接着干」；`subagent_spawn` 不带任何会话历史、只看自身人设与 `instruction`，适合「让子 Agent 从零独立完成一件自包含的事」。两个工具参数完全一致（`instruction` / `allowed_tools` / `label`），在 Agent 工具勾选里**互斥**：勾上一个会自动取消另一个并给出提示。
+- **模型不再自己猜模式**：实测中「要不要继承历史」这个判断不可靠——模型既不清楚你聊过什么才算背景，也无法预判继承带来的输入体量，同一句指令在不同运行里可能选到不同模式。因此 `fork` 改为**注册时固化的常量**，模型即使硬塞 `fork` 参数也一律忽略；模式选择权 100% 归用户的工具集，模型侧看不到没启用的那个。
+- **互斥归一只有一个权威出口**：`session.normalize_tool_mutex`——组内保留排前者（`subagent` / fork 这一侧）。三个入口全部覆盖：每轮解析可用工具、会话工具集固化落库前、运行中启用额外工具；工具集写入前另有一次归一兜底。前端镜像同一套规则——单点勾选听用户的，批量「全选」按组内优先者归一并提示（副作用：「任务与扩展」分组永远进不了全选态，这是互斥的必然结果）。
+- **预设与提示同步**：`full` 预设走分组展开，必须显式排除 `subagent_spawn`；系统常驻提示只讲当前启用的那一个工具的成本特征（继承历史在缓存命中的供应商上按缓存价重放、无缓存中继上是全价重放；干净上下文任何供应商下起步成本都低但看不到前文），两条不会同时出现。
+- **验证**：全量单测 **1573 例通过**（新增子代理双工具守门 27 例 + 互斥归一 24 例）；另有三条独立链路实证——前端纯函数冒烟 13 项、隔离真实实例接口探针 11 项（含通过 `/api/tool_sets` 同时写入两个工具、读回只剩 fork）、真实后端浏览器冒烟 12 项。
 
 > 各版本说明与历史更新日志见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -22,7 +22,7 @@ Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在�
 
 ### 使用 Windows 版本
 
-1. 下载 `naiba-chat-2.7.6-beta-windows-x64.zip`。
+1. 下载 `naiba-chat-2.7.7-beta-windows-x64.zip`。
 2. 解压到一个可写目录。
 3. 运行 `naiba-chat.exe`。
 4. 在设置中添加在线 API 或本地模型服务。
@@ -110,13 +110,13 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 
 - `naiba-chat.exe`
 - `naiba-chat-update.json`
-- `naiba-chat-2.7.6-beta-windows-x64.zip`
+- `naiba-chat-2.7.7-beta-windows-x64.zip`
 
 更新器会验证清单中的仓库、提交、文件名和 SHA-256。下载文件还必须是有效的 Windows 可执行文件；任何一项不一致都会终止安装。
 
 ## Beta 说明
 
-这是 2.7.6 Beta，适合实际使用和反馈，但仍有以下边界：
+这是 2.7.7 Beta，适合实际使用和反馈，但仍有以下边界：
 
 - 不内置 ComfyUI、模型权重或第三方生成服务，需用户自行安装和配置。
 - 不同模型的工具调用质量差异较大，小型模型可能无法稳定完成长链任务。
@@ -130,7 +130,7 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 ```powershell
 Get-ChildItem public\js\*.js | ForEach-Object { node --check $_.FullName }
 python -m unittest discover -s tests -q
-$env:NAIBA_BUILD_VERSION = "2.7.6-beta"
+$env:NAIBA_BUILD_VERSION = "2.7.7-beta"
 python -m PyInstaller --noconfirm --clean naiba-chat.spec
 ```
 

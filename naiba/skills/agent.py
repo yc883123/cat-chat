@@ -107,6 +107,42 @@ SKILL_PROMPT_HEADER = "以下技能说明必须遵循。需要技能附带的参
 # （点 13：只提示、不静默截断）。前端在发送前也用同类阈值自行估算提醒。
 SKILL_CONTENT_WARN_CHARS = 60000
 
+# ---- 子 Agent 的两种上下文模式（互斥双工具，维护说明 §九.116）----
+# 模式 = 用户在 Agent 工具页勾的那一个工具（subagent=fork 继承父历史 /
+# subagent_spawn=spawn 干净上下文），**不是模型参数、模型也不知道有另一种模式**：
+# 只讲它实际拿到的那个工具。规则放常驻区而非工具描述——描述有 ≤100 字 / ≤3 句预算（§九.23）。
+SUBAGENT_COMMON_RULES = (
+    "一次工具调用就能完成的简单任务不要开子 Agent；"
+    "单个父 Agent 最多 4 个子 Agent，且子 Agent 不能再派生子 Agent。"
+)
+SUBAGENT_FORK_RULE = (
+    "你创建的子 Agent 会继承本会话的完整历史：它的每一步推理都会重发父会话历史，"
+    "在前缀缓存命中的供应商（如 DeepSeek / Kimi 官方 API）上，重放部分按缓存价计费、代价低；"
+    "在无缓存、或按额度预扣费的中继上则是全价重放，长会话里每个子 Agent 的起步成本约等于父会话体量。"
+    "它看不到你的对话之外的东西——依赖前文细节的任务（例如「把上面聊到的那几个文件整理一下」）"
+    "要把关键背景（路径、格式、要求）写进 instruction。"
+)
+SUBAGENT_SPAWN_RULE = (
+    "你创建的子 Agent 不带任何会话历史：它只看到自身人设和 instruction，"
+    "任何供应商下起步成本都低，但它看不到前文（没有父历史、没有用户原话），"
+    "任务所需的路径、格式、背景必须全部写进 instruction。"
+    "适合自包含的子任务（例如「把这个 JSON 校验一遍」）；"
+    "依赖前文细节的任务（例如「把上面聊到的那几个文件整理一下」）不要派给它。"
+)
+
+
+def subagent_context_rule(allowed: set[str]) -> str:
+    """按**实际启用**的子代理工具给出对应的一条规则（两个工具互斥，只会命中一个）。
+
+    都没有启用时返回空串（调用点按空串跳过注入，与视觉/PDF 段同口径）。
+    """
+    if "subagent" in allowed:
+        return SUBAGENT_FORK_RULE
+    if "subagent_spawn" in allowed:
+        return SUBAGENT_SPAWN_RULE
+    return ""
+
+
 def comfyui_script_guide_enabled(allowed_tools: set[str]) -> bool:
     """是否注入「ComfyUI/短剧自动化优先小型脚本路径」这条编排指引。
 
@@ -732,20 +768,17 @@ class SkillAgent:
             "描述提交/生成/连接等任务事实时只依据工具返回；引用历史的 Job ID 或 prompt_id 前，先用 job_status/"
             "job_output 核实其真实状态；未经验证的状态（已提交/已完成/已连接）不得声称。"
         )
-        if {"run_in_background", "comfyui_batch", "subagent"} & allowed:
+        if {"run_in_background", "comfyui_batch", "subagent", "subagent_spawn"} & allowed:
             system_parts.append(
-                "需要后台任务时必须先调用 run_in_background、comfyui_batch 或 subagent 创建，再查询返回的真实 ID。"
+                "需要后台任务时必须先调用 run_in_background、comfyui_batch 或子 Agent 工具"
+                "（subagent / subagent_spawn）创建，再查询返回的真实 ID。"
             )
-        if "subagent" in allowed:
-            # 子 Agent 的**成本规则**放常驻区、不放工具描述（描述有 ≤100 字 / ≤3 句预算，见 §九.23）：
-            # 描述只留一句钩子，这里给出完整的计费形态与两条硬约束。
-            system_parts.append(
-                "子 Agent 的每一步推理都会重发父会话的完整历史：在前缀缓存命中的供应商"
-                "（如 DeepSeek / Kimi 官方 API）上，重放部分按缓存价计费、代价低；"
-                "在无缓存、或按额度预扣费的中继上则是全价重放，长会话里频繁创建子 Agent 会显著放大 token 消耗。"
-                "因此一次工具调用就能完成的简单任务不要开子 Agent；"
-                "单个父 Agent 最多 4 个子 Agent，且子 Agent 不能再派生子 Agent。"
-            )
+        # 子 Agent 的成本与用法规则：放常驻区、不放工具描述（描述有 ≤100 字 / ≤3 句预算，§九.23）；
+        # 只讲用户实际启用的那个工具（两种模式互斥二选一，模型不需要知道有另一种）。
+        context_rule = subagent_context_rule(allowed)
+        if context_rule:
+            system_parts.append(context_rule)
+            system_parts.append(SUBAGENT_COMMON_RULES)
         if "comfyui_batch" in allowed or "comfyui_prepare_workflow" in allowed:
             system_parts.append(
                 "ComfyUI 产物由宿主 Job Worker 轮询 history、下载、校验并附加到最终消息；"

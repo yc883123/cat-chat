@@ -188,9 +188,10 @@ class ToolGroupCatalogTests(unittest.TestCase):
             "comfyui_prepare_workflow", "comfyui_batch",
         ])
         self.assertEqual(membership["任务与扩展"], [
-            "run_in_background", "job_output", "job_status", "job_wait", "job_kill", "subagent",
+            "run_in_background", "job_output", "job_status", "job_wait", "job_kill",
+            "subagent", "subagent_spawn",
             "todo_write", "install_skill", "unpack_skill_archive", "inspect_installed_skill",
-        ])
+        ], "子代理的两种上下文模式互斥，排在相邻位置（见 tests/test_tool_mutex.py）")
         self.assertEqual(membership["长会话"], [
             "find_conversations", "recall_history", "read_conversation", "reset_context",
         ], "长会话工具集：翻历史三件套 + 重置上下文（成组勾选才有意义）")
@@ -282,7 +283,12 @@ class ToolGroupCatalogTests(unittest.TestCase):
         }, "ComfyUI 联动 = 标准模式 + ComfyUI 两个工具 + 依赖的 Job 查询工具")
         self.assertFalse([n for n in presets["comfyui"] if n.startswith("mcp__")],
                          "ComfyUI 预设声明不启用 MCP")
-        self.assertEqual(len(presets["full"]), len(known), "全能模式覆盖全部工具")
+        # 全能模式 = 全部工具 − 互斥组内被显式 exclude 的那一个（subagent_spawn：
+        # group:* 会把互斥的两个子代理工具同时展开，默认只留 fork，见 §九.116）。
+        full_preset = next(p for p in TOOL_PRESETS if p["id"] == "full")
+        self.assertEqual(list(full_preset.get("exclude") or []), ["subagent_spawn"],
+                         "全能模式必须显式排除互斥组的后位者")
+        self.assertEqual(len(presets["full"]), len(known) - 1, "全能模式覆盖全部工具（除互斥排除项）")
 
     def test_default_selected_tools_equal_standard_preset(self) -> None:
         from naiba.config import TOOL_PRESETS, _DEFAULT_SELECTED_TOOLS

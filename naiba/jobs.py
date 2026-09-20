@@ -85,6 +85,50 @@ class CheckSpec:
     check_kind: str = "http_poll"
 
 
+# 提交失败原因写入 job error / result.errors 时的长度上限：够定位节点问题，
+# 又不会把一条 400 响应（可能含整段工作流回显）原样灌进任务记录。
+_COMFYUI_REJECT_MAX_CHARS = 600
+
+
+def _summarize_comfyui_reject(status: int, body: str) -> str:
+    """把 ComfyUI 拒绝提交的响应压成一句可读原因（node_errors 优先）。
+
+    400 响应形如 {"error": {...}, "node_errors": {"20": {"class_type": "Seed (rgthree)",
+    "errors": [{"message": "...", "details": "seed"}]}}}。模型要靠这段文字自诊，
+    所以必须带上节点号、节点类型与具体校验错误，而不是一句笼统的「提交失败」。
+    """
+    text = (body or "").strip()
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return f"HTTP {status} {text[:_COMFYUI_REJECT_MAX_CHARS]}"
+    parts: list[str] = []
+    err = parsed.get("error") if isinstance(parsed, dict) else None
+    if isinstance(err, dict) and err.get("message"):
+        parts.append(str(err["message"]))
+    node_errors = parsed.get("node_errors") if isinstance(parsed, dict) else None
+    if isinstance(node_errors, dict):
+        for node_id, item in list(node_errors.items())[:3]:
+            class_type = ""
+            reasons: list[str] = []
+            if isinstance(item, dict):
+                class_type = str(item.get("class_type") or "")
+                for node_err in (item.get("errors") or [])[:3]:
+                    if not isinstance(node_err, dict):
+                        continue
+                    msg = str(node_err.get("message") or "")
+                    details = str(node_err.get("details") or "")
+                    if details and details != msg:
+                        msg = f"{msg}（{details}）"
+                    if msg:
+                        reasons.append(msg)
+            head = f"节点 {node_id}" + (f"（{class_type}）" if class_type else "")
+            parts.append(head + ("：" + "；".join(reasons) if reasons else ""))
+    if not parts:
+        return f"HTTP {status} {text[:_COMFYUI_REJECT_MAX_CHARS]}"
+    return f"HTTP {status} " + "；".join(parts)[:_COMFYUI_REJECT_MAX_CHARS]
+
+
 class JobRegistry:
     def __init__(self, app: AppContext):
         self.app = app
@@ -741,9 +785,9 @@ class JobRegistry:
             self.app.storage.update_job(job_id, current_step=f"提交第 {index + 1}/{shots} 段",
                                         progress=round(index / shots * 100, 1))
             self._emit(job_id, {"type": "job_check", "phase": "submit_shot", "shot": index + 1, "total": shots})
-            prompt_id = self._comfyui_submit(comfy_url, workflow, index)
+            prompt_id, submit_reason = self._comfyui_submit(comfy_url, workflow, index)
             if not prompt_id:
-                reason = f"第 {index + 1} 段提交失败（工作流或节点错误）"
+                reason = f"第 {index + 1} 段提交失败：{submit_reason}" if submit_reason else f"第 {index + 1} 段提交失败（工作流或节点错误）"
                 errors.append(reason)
                 self._emit(job_id, {"type": "job_check", "phase": "shot_failed", "shot": index + 1, "reason": reason})
                 # 单镜头失败记录原因，不自动跳过；依赖 checkpoint 供后续恢复
@@ -799,10 +843,11 @@ class JobRegistry:
                 self._finish(job_id, "cancelled", error="用户取消",
                              result={"prompt_ids": submitted, "completed": completed, "errors": errors})
                 return
-            prompt_id = self._comfyui_submit(comfy_url, workflows[index], index)
+            prompt_id, submit_reason = self._comfyui_submit(comfy_url, workflows[index], index)
             if not prompt_id:
-                errors.append({"index": index, "error": "提交失败"})
-                self._finish(job_id, "failed", error=f"第 {index + 1} 段提交失败",
+                reason_text = f"提交失败：{submit_reason}" if submit_reason else "提交失败"
+                errors.append({"index": index, "error": reason_text})
+                self._finish(job_id, "failed", error=f"第 {index + 1} 段{reason_text}",
                              result={"prompt_ids": submitted, "completed": completed, "errors": errors})
                 return
             submitted.append(prompt_id)
@@ -856,7 +901,7 @@ class JobRegistry:
                 # 任务面板就长期挂着「运行中 · 完成 5/8」且无法推进——这里改为可恢复处理。
                 used = int(resubmits.get(str(index), 0) or 0)
                 if used < max_resubmit and index < len(workflows):
-                    new_prompt_id = self._comfyui_submit(comfy_url, workflows[index], index)
+                    new_prompt_id, resubmit_reason = self._comfyui_submit(comfy_url, workflows[index], index)
                     if new_prompt_id:
                         resubmits[str(index)] = used + 1
                         submitted[index] = new_prompt_id
@@ -868,6 +913,7 @@ class JobRegistry:
                         self._emit(job_id, {"type": "job_check", "phase": "batch_resubmit",
                                             "index": index, "prompt_id": new_prompt_id, "total": total})
                         continue
+                    logger.error("ComfyUI 丢失重提交失败：job=%s index=%s %s", job_id, index, resubmit_reason)
                 errors.append({
                     "index": index,
                     "prompt_id": prompt_id,
@@ -952,7 +998,13 @@ class JobRegistry:
                     files.append(f"{base}/view?{query}")
         return files
 
-    def _comfyui_submit(self, base: str, workflow: dict[str, Any], index: int) -> str | None:
+    def _comfyui_submit(self, base: str, workflow: dict[str, Any], index: int) -> tuple[str, str]:
+        """提交单个工作流，返回 (prompt_id, 失败原因)。成功时 reason 为空串。
+
+        提交被 ComfyUI 拒绝（HTTP 4xx/5xx）或网络失败时，必须把服务端返回的原因
+        带回去。此前只回 None，任务上只剩一句「第 N 段提交失败」，模型与用户都看
+        不到真实原因（2026-09-20 事故：rgthree seed 超上限 400 被吞，模型连盲试 6 次）。
+        """
         del index
         payload = {"prompt": workflow, "client_id": uuid.uuid4().hex}
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -962,10 +1014,21 @@ class JobRegistry:
         try:
             with net_io.open(req, timeout=60) as resp:
                 body = json.loads(resp.read(100000).decode("utf-8", errors="replace"))
-            return str(body.get("prompt_id") or "")
+            prompt_id = str(body.get("prompt_id") or "")
+            if not prompt_id:
+                return "", "ComfyUI 响应缺少 prompt_id"
+            return prompt_id, ""
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read(4000).decode("utf-8", errors="replace")
+            except Exception:
+                detail = ""
+            reason = _summarize_comfyui_reject(exc.code, detail)
+            logger.error("ComfyUI 提交任务失败：base=%s HTTP %s %s", base, exc.code, reason)
+            return "", reason
         except Exception as exc:
             logger.exception("ComfyUI 提交任务失败：base=%s", base)
-            return None
+            return "", f"{type(exc).__name__}: {exc}"
 
     def _comfyui_wait_history(
         self, base: str, prompt_id: str, cancel: threading.Event, job_id: str, index: int, total: int

@@ -270,5 +270,148 @@ class SeedTemplateTests(unittest.TestCase):
         self.assertIn(".session-divider-seed", css)
 
 
+class CallContextWriteBackTests(unittest.TestCase):
+    """回归（2026-09-20 用户实测）：工具对 Run 上下文的写入必须回落共享 run_context。
+
+    Agent 循环给每次工具调用传的是 ``_call_context`` 派生的 per-call 上下文（为了让
+    ``event_sink`` 按调用隔离）；若派生对象"写完就丢"，``reset_context`` 的置位会被静默吞掉：
+    工具返回 ok=true、模型照常宣布「上下文已重置」，而分割线不落库、上下文原样不动、
+    前端圆环继续按满量显示。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.handoff = self.root / "交接.md"
+        self.handoff.write_text("任务目标：…\n已完成：…", encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_event_sink_is_per_call_but_writes_fall_back(self):
+        from naiba.skills.agent import _call_context
+
+        events = []
+        shared_sink = lambda payload: events.append(payload)  # noqa: E731 - 需要可比较同一对象
+        seen: list[dict] = []
+        call_sink = lambda payload: seen.append(payload)  # noqa: E731
+        run_context = {"conversation_id": "conv-1", "run_id": "run-1", "event_sink": shared_sink}
+        call_ctx = _call_context(run_context, call_sink, 0)
+        self.assertIsNot(call_ctx, run_context, "必须是派生对象：event_sink 要按调用隔离")
+        self.assertIsNot(call_ctx["event_sink"], shared_sink)
+        # per-call 出口仍要注入 seq（前端据此把进度贴到正确的运行卡片）
+        call_ctx["event_sink"]({"type": "tool_progress", "line": "x"})
+        self.assertEqual([payload.get("seq") for payload in seen], [0])
+        self.assertEqual(call_ctx["conversation_id"], "conv-1", "读语义与派生快照一致")
+        # 三条写路径（下标 / update / setdefault）都必须回落共享上下文
+        call_ctx["a"] = 1
+        call_ctx.update({"b": 2})
+        call_ctx.setdefault("c", 3)
+        self.assertEqual({key: run_context.get(key) for key in ("a", "b", "c")},
+                         {"a": 1, "b": 2, "c": 3})
+        self.assertIs(run_context["event_sink"], shared_sink,
+                      "event_sink 不得被 per-call 出口覆盖（并发时会把进度贴错卡片）")
+
+    def test_reset_context_lands_in_shared_context_through_call_context(self):
+        from naiba.skills.agent import _call_context
+
+        run_context = {"conversation_id": "conv-1", "run_id": "run-1"}
+        call_ctx = _call_context(run_context, lambda payload: None, 0)
+        provider = CoreToolProvider(_context(self.root))
+        spec = next(item for item in provider.tools() if item.name == "reset_context")
+        success, result = spec.execute({"handoff_path": str(self.handoff)}, [], call_ctx)
+        self.assertTrue(success)
+        self.assertTrue(json.loads(result)["ok"])
+        self.assertIn("context_reset", run_context,
+                      "置位必须让宿主收尾读得到（否则 session_start 分割线不落库）")
+        self.assertEqual(run_context["context_reset"]["handoff_path"], str(self.handoff.resolve()))
+        self.assertEqual(run_context["context_reset"]["source"], "tool")
+
+
+class _ResetRegistry:
+    """把 CoreToolProvider 的 reset_context 绑定成 Agent 循环的 registry（其余能力不需要）。"""
+
+    def __init__(self, spec) -> None:
+        self.spec = spec
+        self.calls: list[str] = []
+
+    def schemas(self) -> list:
+        return []
+
+    def side_effect(self, name: str) -> bool:
+        return True
+
+    def media_declaration(self, name: str) -> dict:
+        return {"extract": "none", "policy": "never"}
+
+    def execute(self, tool: str, arguments: dict, active: list, run_context: object):
+        self.calls.append(tool)
+        return self.spec.execute(arguments, active, run_context)
+
+
+class _Catalog:
+    def scan(self) -> list:
+        return []
+
+    def read_skill_content(self, path: str) -> str:  # pragma: no cover
+        return ""
+
+
+class AgentLoopResetTests(unittest.TestCase):
+    """A 级回归：真 Agent 循环 + 真 reset_context 工具，宿主收尾必须读得到置位。
+
+    这条用例覆盖的是"工具经由 per-call run_context 执行"的真实链路——单元级只调
+    ``_tool_reset_context`` 是抓不到派生副本吞写入这个 BUG 的。
+    """
+
+    def test_agent_turn_ends_and_shared_context_is_marked(self):
+        from naiba.skills.agent import SkillAgent
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            handoff = root / "交接.md"
+            handoff.write_text("任务目标：…\n待办：…", encoding="utf-8")
+            provider = CoreToolProvider(_context(root))
+            spec = next(item for item in provider.tools() if item.name == "reset_context")
+            registry = _ResetRegistry(spec)
+
+            model_calls: list[int] = []
+
+            def complete(_profile, messages, _options, _event):
+                model_calls.append(len(messages))
+                return json.dumps({
+                    "type": "tool",
+                    "tool": "reset_context",
+                    "arguments": {"handoff_path": str(handoff), "note": "第一阶段完成"},
+                    "reason": "交接完毕",
+                }, ensure_ascii=False)
+
+            run_context = {"conversation_id": "conv-1", "run_id": "run-1", "event_sink": lambda payload: None}
+            worker = SkillAgent(_Catalog(), None, complete, None)
+            response, runs, _reasonings, _usage = worker.run(
+                "写交接报告后重置上下文",
+                [],
+                {"kind": "local", "model": "m", "context_window": 32768},
+                {"stream": False, "max_tokens": 512, "max_steps": 10},
+                {"mode": "auto", "skill_ids": []},
+                [],
+                "",
+                ["reset_context"],
+                lambda payload: None,
+                None,
+                tool_registry=registry,
+                run_context=run_context,
+            )
+
+        self.assertEqual(registry.calls, ["reset_context"])
+        self.assertEqual(len(model_calls), 1, "重置成功后本轮立即收尾，不再请求模型")
+        self.assertIn("context_reset", run_context,
+                      "工具的置位必须回落到共享 run_context —— 否则宿主收尾不落 session_start，"
+                      "前端圆环继续按满量显示（2026-09-20 实测 BUG）")
+        self.assertEqual(run_context["context_reset"]["handoff_path"], str(handoff.resolve()))
+        self.assertIn("已交接", response)
+        self.assertEqual(len(runs), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

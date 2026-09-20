@@ -268,6 +268,80 @@ class ComfyBatchLostPromptTests(_RegistryCase):
         self.assertEqual(len(self.state.submits), 1, "产物已就绪时不得重复提交")
 
 
+class _ComfyRejectHandler(_ComfyStubHandler):
+    """POST /prompt 一律 400 + node_errors（复刻 rgthree seed 超上限被拒的响应）。"""
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 约定
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        self._send({
+            "error": {
+                "type": "prompt_outputs_failed_validation",
+                "message": "Prompt outputs failed validation",
+                "details": "",
+                "extra_info": {},
+            },
+            "node_errors": {
+                "20": {
+                    "errors": [{
+                        "type": "value_bigger_than_max",
+                        "message": "Value 6906715779295766020 bigger than max of 1125899906842624",
+                        "details": "seed",
+                        "extra_info": {},
+                    }],
+                    "dependent_outputs": ["191"],
+                    "class_type": "Seed (rgthree)",
+                },
+            },
+        }, status=400)
+
+
+class ComfyBatchSubmitRejectTests(_RegistryCase):
+    """ComfyUI 拒收（HTTP 400）时，原因必须写进任务 error 与 result.errors。
+
+    2026-09-20 事故：rgthree seed 超上限被 400 拒收，但 _comfyui_submit 只回 None，
+    任务上只剩「第 1 段提交失败」——模型看不到原因连盲试 6 次，最后绕道 MCP 才成功。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        handler = type("_RejectHandler", (_ComfyRejectHandler,), {})
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        super().tearDown()
+
+    def test_rejected_submit_surfaces_comfyui_reason(self) -> None:
+        job_id = self._make_job(status="running")
+        spec = JobSpec(
+            kind="comfyui",
+            conversation_id=self.conversation_id,
+            params={
+                "comfyui_url": self.base,
+                "workflows": [{"20": {"class_type": "Seed (rgthree)", "inputs": {"seed": -1}}}],
+                "wait_timeout": 600,
+            },
+            label="ComfyUI 批量生成",
+            parent_job_id="parent-run",
+            owner_session_id=self.conversation_id,
+        )
+        self.registry._run_comfyui_batch(  # noqa: SLF001 - 直接驱动 Worker，断言终态
+            job_id, spec, threading.Event(), self.base, spec.params["workflows"]
+        )
+        row = self.storage.get_background_task(job_id) or {}
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("Seed (rgthree)", row["error"], "任务错误必须带节点类型，模型才能自诊")
+        self.assertIn("bigger than max", row["error"])
+        errors = (row["result"] or {}).get("errors") or []
+        self.assertTrue(errors, "逐段错误必须落进 result.errors")
+        self.assertEqual(errors[0].get("index"), 0)
+        self.assertIn("Seed (rgthree)", str(errors[0].get("error") or ""))
+
+
 class ChildJobDoesNotLockConversationTests(unittest.TestCase):
     """运行中的后台子 Job 不得占用对话互斥位（否则对话发不出新消息）。"""
 

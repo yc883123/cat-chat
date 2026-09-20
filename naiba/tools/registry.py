@@ -960,12 +960,12 @@ def build_comfyui_tool_specs() -> list[ToolSpec]:
                 "properties": {
                     "workflows": {
                         "type": "array",
-                        "description": "API 格式工作流数组；仅极小临时工作流用，一般用 workflow_paths 引用文件",
+                        "description": "API 格式工作流数组，逐条列出每次提交的内容（不能与 shots>1 搭配）；一般用 workflow_paths 引用文件",
                         "items": {"type": "object"},
                     },
                     "workflow_paths": {
                         "type": "array",
-                        "description": "API 工作流 JSON 文件路径数组；引用本地文件提交（改动方式见系统提示的 ComfyUI 流程说明）",
+                        "description": "API 工作流 JSON 文件路径数组；引用本地文件提交（改动方式见系统提示的 ComfyUI 流程说明），每个路径的工作流重复提交 shots 次",
                         "items": {"type": "string"},
                     },
                     "workflow": {
@@ -974,7 +974,7 @@ def build_comfyui_tool_specs() -> list[ToolSpec]:
                     },
                     "shots": {
                         "type": "integer",
-                        "description": "重复提交单个 workflow 的次数",
+                        "description": "重复提交次数：与 workflow 或 workflow_paths 搭配时每个工作流重复提交 shots 次；与 workflows 数组搭配时不适用",
                         "minimum": 1,
                         "default": 1,
                     },

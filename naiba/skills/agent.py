@@ -337,11 +337,47 @@ def _seq_event_sink(event: EventCallback, seq: int) -> EventCallback:
     return sink
 
 
+class _CallRunContext(dict):
+    """一次工具调用的 run_context 视图：``event_sink`` 按调用隔离，其余顶层写入回落共享上下文。
+
+    为什么必须派生：一轮里可以并行发起多个工具调用（ThreadPoolExecutor），事件出口要按调用
+    隔离才能把 ``tool_progress`` 贴到正确的运行卡片（见 ``_seq_event_sink``）。
+
+    为什么必须回落：派生用的是浅拷贝，工具对 Run 上下文的**顶层新增/更新**只落在副本上，
+    宿主收尾读共享上下文时看不到——``reset_context`` 置位 ``run_context["context_reset"]``
+    就是这样被静默吞掉的：工具返回 ``ok=true``、模型照常宣称「上下文已重置」，而分割线没落库、
+    上下文原样不动、前端圆环照旧按满量显示（2026-09-20 用户实测）。所以除 ``event_sink`` 外，
+    所有顶层写入同步写回共享上下文；读语义与派生快照一致。
+    """
+
+    __slots__ = ("_base",)
+
+    def __init__(self, base: dict[str, Any], sink: EventCallback) -> None:
+        super().__init__(base)
+        self._base = base
+        dict.__setitem__(self, "event_sink", sink)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if key != "event_sink":
+            self._base[key] = value
+        dict.__setitem__(self, key, value)
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        # dict.update 走 C 实现、不经过覆写的 __setitem__，必须显式转发。
+        for key, value in dict(*args, **kwargs).items():
+            self[key] = value
+
+    def setdefault(self, key: str, default: Any = None) -> Any:
+        if key not in self:
+            self[key] = default
+        return dict.__getitem__(self, key)
+
+
 def _call_context(run_context: RunContext | None, event: EventCallback, seq: int) -> RunContext | None:
-    """派生一次工具调用专用的 run_context：只替换 event_sink，其余键共享（零拷贝语义）。"""
+    """派生一次工具调用专用的 run_context：``event_sink`` 按调用隔离，其余顶层写入回落共享上下文。"""
     if not isinstance(run_context, dict):
         return run_context
-    return {**run_context, "event_sink": _seq_event_sink(event, seq)}
+    return _CallRunContext(run_context, _seq_event_sink(event, seq))
 
 
 class SkillAgent:
@@ -660,6 +696,7 @@ class SkillAgent:
                 "ComfyUI 工作流提交统一走“改文件、再引用”：先用 comfyui_prepare_workflow 判断工作流格式，"
                 "用 read_file 读取本地工作流文件，需要改动（提示词、seed、尺寸、节点等）时用 edit_file 做局部精确替换，"
                 "最后用 comfyui_batch 的 workflow_paths 引用文件提交——只允许这一种方式，避免整段搬运大 JSON。"
+                "同一工作流要出 N 张就在同一次调用里带 shots=N（返回的 total 必须等于提交数，不等说明参数没生效）。"
             )
         if {"comfyui_prepare_workflow", "comfyui_batch"} <= allowed:
             guide_parts.append("若已有多个 API 工作流，优先一次调用 comfyui_batch，不要让模型逐节点手工拼 JSON 或逐段手工轮询。")

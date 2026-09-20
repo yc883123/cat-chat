@@ -161,7 +161,7 @@ class Launcher:
             pystray.MenuItem("在浏览器打开", self._open_browser(local_url)),
             pystray.MenuItem("退出", self._quit),
         )
-        return pystray.Icon("naiba-chat", image, "naiba-chat", menu)
+        return pystray.Icon("naiba-chat", image, "Cat Chat", menu)
 
     def _on_window_closing(self) -> bool:
         # 用户点关闭：若是要退出（托盘点了退出），放行；否则隐藏到托盘
@@ -223,7 +223,7 @@ class Launcher:
         threading.Thread(target=self.tray.run, daemon=True).start()
 
         self.window = webview.create_window(
-            "naiba-chat",
+            "Cat Chat",
             page_url,
             js_api=JsApi(),
             width=1280,
@@ -272,7 +272,7 @@ def _notify_startup_error(message: str) -> None:
     """桌面端启动失败提示：优先弹系统消息框（窗口/托盘场景下用户看不到 stderr）。"""
     if sys.platform == "win32":
         try:
-            ctypes.windll.user32.MessageBoxW(0, message, "naiba-chat 启动失败", 0x10)  # MB_ICONERROR
+            ctypes.windll.user32.MessageBoxW(0, message, "Cat Chat 启动失败", 0x10)  # MB_ICONERROR
             return
         except Exception:
             pass

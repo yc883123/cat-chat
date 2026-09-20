@@ -2011,7 +2011,7 @@ export async function applyAndMigrateDataDir() {
     }
     const target = result.target_data_dir || value;
     const skills = result.target_skills_dir || (result.resolved_skills_dirs && result.resolved_skills_dirs[0]) || '';
-    $('#migrationMessage').textContent = `数据库与 Skills 已复制到新目录（数据：${target}${skills ? `；Skills：${skills}` : ''}），请完全退出并重新启动 NaibaChat 生效。`;
+    $('#migrationMessage').textContent = `数据库与 Skills 已复制到新目录（数据：${target}${skills ? `；Skills：${skills}` : ''}），请完全退出并重新启动 Cat Chat 生效。`;
     state.bootstrap.data_migration = result;
     renderDataMigration();
   } catch (error) {

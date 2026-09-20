@@ -677,7 +677,7 @@ export function updateProviderVisionHint() {
   const hint = $('#providerVisionHint');
   const choice = $('#providerSupportsImages').value;
   if (choice === 'true') {
-    hint.textContent = '已强制设为支持图片；Naiba-chat 会把用户图片直接交给该模型。';
+    hint.textContent = '已强制设为支持图片；Cat Chat 会把用户图片直接交给该模型。';
     return;
   }
   if (choice === 'false') {

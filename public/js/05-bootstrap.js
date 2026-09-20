@@ -28,7 +28,7 @@ export function renderNetworkAccess() {
     ? access.lan_url
     : (pendingRestart || configuredHost === '127.0.0.1' ? '当前仅本机访问' : '手机访问不可用');
   const reason = pendingRestart
-    ? '手机访问已启用，请完全退出并重新启动 naiba-chat。'
+    ? '手机访问已启用，请完全退出并重新启动 Cat Chat。'
     : (access.lan_reason || '手机与电脑需连接同一局域网。');
   $('#lanAddress').textContent = address;
   $('#connectionAddress').textContent = access.lan_url || access.local_url || '未检测到可用地址';
@@ -45,7 +45,7 @@ export async function enableLanAccess() {
     Object.assign(state.bootstrap.settings, result.settings || {});
     state.bootstrap.lan_restart_required = Boolean(result.restart_required);
     renderNetworkAccess();
-    toast('手机访问已启用，请完全退出并重新启动 naiba-chat');
+    toast('手机访问已启用，请完全退出并重新启动 Cat Chat');
   } catch (error) {
     toast(`启用手机访问失败：${error.message}`);
   }

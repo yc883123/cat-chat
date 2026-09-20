@@ -1585,7 +1585,7 @@ def acquire_instance_lock(paths: PathContext):
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             handle.close()
-            raise RuntimeError("naiba-chat 已经在运行，请勿重复启动") from exc
+            raise RuntimeError("Cat Chat 已经在运行，请勿重复启动") from exc
         return handle
     except OSError as exc:
         raise RuntimeError(
@@ -1601,7 +1601,7 @@ def main_entry(paths: PathContext | None = None, on_app=None) -> None:
     os.environ["PYTHONUTF8"] = "1"
     os.environ["PYTHONIOENCODING"] = "utf-8"
     ensure_utf8_stdio(line_buffering=True, write_through=True)
-    parser = argparse.ArgumentParser(description="naiba-chat 局域网对话服务")
+    parser = argparse.ArgumentParser(description="Cat Chat 局域网对话服务")
     parser.add_argument("--host", default="")
     parser.add_argument("--port", type=int, default=0)
     args = parser.parse_args()
@@ -1624,7 +1624,7 @@ def main_entry(paths: PathContext | None = None, on_app=None) -> None:
     server = AppHTTPServer((host, port), RequestHandler, APP)
     server.daemon_threads = True
     write_status(host, port, str(APP.config.data["access_token"]), paths)
-    print("\nnaiba-chat 已启动")
+    print("\nCat Chat 已启动")
     access = network_access_status(host, port)
     print(f"手机访问： {access['lan_url'] or access['lan_reason']}")
     print(f"本机访问： {access['local_url']}")

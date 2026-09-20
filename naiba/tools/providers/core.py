@@ -910,7 +910,7 @@ def _tool_http_request(ctx: ToolContext, args: dict[str, Any], active_skills: li
 
 def _tool_register_mcp(ctx: ToolContext, args: dict[str, Any], active_skills: list[dict[str, Any]] | None = None) -> str:
     if not ctx.mcp_register:
-        raise RuntimeError("当前 NaibaChat 版本不支持自动注册 MCP")
+        raise RuntimeError("当前 Cat Chat 版本不支持自动注册 MCP")
     return json.dumps(ctx.mcp_register(args), ensure_ascii=False, indent=2)
 
 

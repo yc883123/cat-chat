@@ -330,7 +330,7 @@ class NaibaChatApp:
             selected = filedialog.askdirectory(
                 parent=root,
                 initialdir=initial_path if Path(initial_path).is_dir() else str(self._paths.exe_dir),
-                title="选择 NaibaChat 工作区目录", mustexist=False,
+                title="选择 Cat Chat 工作区目录", mustexist=False,
             )
             root.destroy()
         except Exception as exc:

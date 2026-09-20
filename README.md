@@ -1,5 +1,9 @@
 # Cat Chat 2.7.6 Beta
 
+<p align="center">
+  <img src="docs/cat-chat-logo.png" alt="Cat Chat" width="520">
+</p>
+
 Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。
 
 > Cat Chat 原名 Naiba Chat。2.7.6 Beta 起仅调整显示名；GitHub 仓库、`naiba-chat.exe`、更新资产及既有数据位置保持不变，无需重新配置或搬迁数据。

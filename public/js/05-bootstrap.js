@@ -6,8 +6,9 @@ import { $, $$, api, initializeAppearance, setServerStatus, state, syncAppearanc
 import { loadTasks, startTaskSync } from "./06-tasks-plans.js";
 import { populateModels, renderAgents, renderUpdateStatus } from "./07-models-agents.js";
 import { loadConversationPromptPresets, loadConversations, restoreSidebarWidth, setSidebarScrollToActive, startConversationSync } from "./08-conversations.js";
-import { migrateLegacyToolTemplates, populateAppearanceSettings, populateRuntimeSettings, populateSearchSettings, populateVisionSettings, renderAgentManager, renderMcp, renderProviders, renderSkills, startMcpPoll } from "./09-settings.js";
+import { loadProviderPresets, migrateLegacyToolTemplates, populateAppearanceSettings, populateRuntimeSettings, populateSearchSettings, populateVisionSettings, renderAgentManager, renderMcp, renderProviders, renderSkills, startMcpPoll } from "./09-settings.js";
 import { loadStarterPrompts } from "./12-chat-input.js";
+import { maybeShowOnboarding } from "./19-onboarding.js";
 export async function authenticate(token) {
   const response = await fetch('/api/auth', {
     method: 'POST',
@@ -100,6 +101,10 @@ export async function initialize() {
   startTaskSync();
   startConversationSync();
   startMcpPoll();
+  // 供应商模板（「只填 API Key」的接入名单）与首启引导：设置弹层与向导共用同一份名单，
+  // 拿不到名单时退化成全手填路径，不弹空窗、不阻塞启动。
+  await loadProviderPresets();
+  await maybeShowOnboarding();
   startUpdatePoll();
 }
 

@@ -81,6 +81,10 @@ export const state = {
   newWorkspaceDir: '',
   providerEditing: false,
   providerKindTab: 'online',
+  // /api/provider-presets 的一次性缓存：设置弹层「供应商模板」与首启引导共用同一份名单。
+  providerPresetList: [],
+  // 当前弹层里选中的模板 id（保存时随卡片落库，用于下次反显）。
+  providerPresetId: '',
   syncTimer: null,
   syncInFlight: false,
   syncPolling: false,

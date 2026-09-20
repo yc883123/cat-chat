@@ -1354,6 +1354,41 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .provider-scope-tabs button { min-height: 38px; border: 0; border-radius: calc(var(--radius) - 2px); background: transparent; color: var(--muted); font-weight: 600; }
 .provider-scope-tabs button.active { background: var(--surface); color: var(--accent); box-shadow: 0 1px 3px rgba(0, 0, 0, .08); }
 .provider-field[hidden] { display: none; }
+/* 供应商模板（预设）卡片网格：设置弹层与首启向导共用同一套卡片。
+   卡片 = 首字色块 + 名称 + 代表模型（本地/自定义显示「免 Key / 手动填写」）；
+   色块底与字都用 color-mix 跟主题面、主题字混色，亮暗主题与各皮肤都成立。 */
+.provider-preset-section { display: grid; gap: 8px; }
+.provider-preset-title { color: var(--muted); font-size: 12px; }
+.provider-preset-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.provider-preset-card { display: flex; align-items: center; gap: 9px; min-height: 54px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); color: var(--text); text-align: left; cursor: pointer; transition: border-color .15s ease, background .15s ease; }
+.provider-preset-card:hover, .provider-preset-card:focus-visible { border-color: var(--accent); outline: none; }
+.provider-preset-card.is-active { border-color: var(--accent); background: var(--accent-soft); }
+.provider-preset-abbr { flex: none; width: 28px; height: 28px; display: grid; place-items: center; border-radius: var(--r-sm); font-size: 11px; font-weight: 700; letter-spacing: -.02em; background: color-mix(in srgb, var(--preset-accent, var(--accent)) 18%, var(--surface)); color: color-mix(in srgb, var(--preset-accent, var(--accent)) 72%, var(--text)); }
+.provider-preset-meta { display: grid; gap: 2px; min-width: 0; }
+.provider-preset-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 600; }
+.provider-preset-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
+/* 引导条：选中模板后显示「这是什么站 + 怎么注册拿 Key」，右下角是能点的注册页入口
+   （文案里的远端网址必须可点，不让用户手抄）。 */
+.provider-preset-guide { display: grid; gap: 8px; margin-top: 2px; padding: 10px 11px; border-left: 3px solid var(--accent); border-radius: 0 var(--radius) var(--radius) 0; background: var(--accent-soft); }
+.provider-preset-guide[hidden] { display: none; }
+.provider-preset-guide-text { margin: 0; color: var(--text); font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.provider-preset-guide .provider-preset-key { justify-self: end; }
+.provider-preset-key[hidden] { display: none; }
+/* 首启引导向导：还没有任何可用供应商时的「选模板 → 粘 Key → 开聊」两步流程。 */
+.onboarding-dialog { width: min(660px, calc(100vw - 30px)); max-height: min(780px, calc(100dvh - 30px)); }
+.onboarding-body { display: flex; flex-direction: column; gap: 12px; padding-bottom: 16px; max-height: inherit; overflow: auto; }
+.onboarding-body > *:not(.dialog-toolbar) { margin-inline: 18px; }
+.onboarding-steps { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.onboarding-step.is-active { color: var(--accent); font-weight: 600; }
+.onboarding-step-sep { color: var(--line-strong); }
+/* 网格只露两行（6 张），其余滚动查看——首屏不把 14 张模板全铺开。 */
+.onboarding-preset-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; max-height: 178px; overflow-y: auto; padding-right: 2px; }
+.onboarding-preset-more { margin: 0; }
+.onboarding-recap { margin: 0; color: var(--text); font-size: 12.5px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
+#onboardingKeyRow { display: grid; gap: 10px; }
+#onboardingKeyRow[hidden] { display: none; }
+.onboarding-actions { justify-content: flex-end; }
+#onboardingSkip { margin-right: auto; }
 .provider-current { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 9px; align-items: end; }
 .provider-current .control-button, .provider-current .danger-button { height: 40px; }
 .workspace-dialog-body { padding: 16px 18px; }
@@ -1721,6 +1756,8 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   .workspace-control span, .model-control > span, .agent-control > span { display: none; }
   /* 不再隐藏「任务 / Skill」文字标签：只留裸数字没有意义（窄屏优先压缩模型/Agent 下拉框）。 */
   .provider-cards, .agent-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  /* 模板网格跟着窄屏降级为两列（卡片本身已经很矮，两列仍比一列好扫）。 */
+  .provider-preset-grid, .onboarding-preset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 760px) {
@@ -1857,8 +1894,11 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   .field-grid { grid-template-columns: 1fr; }
   .appearance-theme-options, .appearance-skin-options { grid-template-columns: 1fr 1fr; }
   .rename-conversation-dialog { width: 100vw; max-width: none; }
-  .settings-dialog, .panel-dialog, .provider-dialog, .agent-dialog { width: 100vw; max-width: none; height: 100dvh; max-height: none; border: 0; border-radius: 0; }
+  .settings-dialog, .panel-dialog, .provider-dialog, .agent-dialog, .onboarding-dialog { width: 100vw; max-width: none; height: 100dvh; max-height: none; border: 0; border-radius: 0; }
   .provider-cards, .agent-cards { grid-template-columns: 1fr; }
+  /* 手机整屏时模板网格保持两列、向导内容整体滚动（高度不再靠固定 max-height 卡）。 */
+  .onboarding-body { height: 100%; }
+  .onboarding-preset-grid { max-height: none; }
   /* 手机端文件面板：改为全屏抽屉形态（此前被整体隐藏 → 手机直接丢失「打开文件」能力）。
      与桌面共用同一个 #filePanel 与 openFilePanel/closeFilePanel 链路，只换呈现形态，不开第二条路径。 */
   .file-panel, .app-shell.file-panel-open .file-panel {

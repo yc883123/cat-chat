@@ -252,6 +252,8 @@ verify/*
 !verify/p6_comfy_render_smoke.cjs
 !verify/pending_files_smoke.cjs
 !verify/provider_cards_smoke.cjs
+!verify/provider_presets_smoke.cjs
+!verify/provider_presets_smoke.py
 !verify/q1_context_smoke.cjs
 !verify/q1_context_smoke.py
 !verify/quick_msg_smoke.cjs

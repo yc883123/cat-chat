@@ -857,6 +857,17 @@
         <button class="icon-button" type="button" data-close="providerDialog" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
       </div>
       <div class="provider-form-body">
+        <!-- 供应商模板：卡片网格（点一张即回填名称/地址/格式/推荐模型，标准供应商只需再
+             填 API Key）。「自定义」模板留空地址供手填（中转/私有端点）；用户改过的
+             字段不会被反向覆盖，选中的模板只作默认值。 -->
+        <section class="provider-field provider-preset-section">
+          <span class="provider-preset-title">供应商模板</span>
+          <div class="provider-preset-grid" id="providerPresetGrid" role="group" aria-label="供应商模板"></div>
+          <div class="provider-preset-guide" id="providerPresetGuide" hidden>
+            <p class="provider-preset-guide-text" id="providerPresetGuideText"></p>
+            <button type="button" class="control-button provider-preset-key" id="providerPresetKeyUrl" hidden>打开注册页 ↗</button>
+          </div>
+        </section>
         <label class="provider-field">供应商名称<input id="providerName" required placeholder="例如 OpenAI"></label>
         <label class="provider-field">API URL<input id="providerBaseUrl" required placeholder="https://api.openai.com/v1"></label>
         <label class="provider-field">API Key
@@ -928,6 +939,42 @@
         </div>
       </div>
     </form>
+  </dialog>
+
+  <!-- 首启引导：还没有任何可用供应商时弹出——选模板 → 粘贴 Key → 保存并开始。
+       跳过与任何关闭方式都记 localStorage 不再打扰；「添加 API」弹层里的供应商模板
+       与本向导共用同一份 /api/provider-presets 名单与同一套卡片渲染。 -->
+  <dialog id="onboardingDialog" class="onboarding-dialog">
+    <div class="onboarding-body">
+      <div class="dialog-toolbar">
+        <div><h2>欢迎使用 Naiba Chat</h2><p id="onboardingSubtitle">先添加一个模型供应商——选好供应商后只需粘贴 API Key。</p></div>
+        <button class="icon-button" type="button" data-close="onboardingDialog" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+      </div>
+      <div class="onboarding-steps">
+        <span class="onboarding-step is-active" id="onboardingStepPreset">1 选供应商</span>
+        <span class="onboarding-step-sep" aria-hidden="true">——</span>
+        <span class="onboarding-step" id="onboardingStepKey">2 粘贴 Key 开聊</span>
+      </div>
+      <div class="onboarding-preset-grid" id="onboardingPresetGrid" role="group" aria-label="供应商模板"></div>
+      <p class="hint onboarding-preset-more" id="onboardingPresetMore"></p>
+      <div id="onboardingKeyRow" hidden>
+        <p class="onboarding-recap" id="onboardingRecap"></p>
+        <div class="provider-preset-guide" id="onboardingGuide" hidden>
+          <p class="provider-preset-guide-text" id="onboardingGuideText"></p>
+          <button type="button" class="control-button provider-preset-key" id="onboardingKeyUrl" hidden>打开注册页 ↗</button>
+        </div>
+        <label class="provider-field" id="onboardingUrlField" hidden>API URL<input id="onboardingBaseUrl" placeholder="https://api.openai.com/v1"></label>
+        <label class="provider-field" id="onboardingKeyField">API Key<input id="onboardingApiKey" type="password" autocomplete="new-password" placeholder="粘贴 sk- 开头的 Key"></label>
+        <label class="provider-field" id="onboardingModelField" hidden>模型名称<input id="onboardingModel" placeholder="模型名称，保存后也可在设置里改"></label>
+      </div>
+      <p class="form-error" id="onboardingError"></p>
+      <div class="form-actions onboarding-actions">
+        <button type="button" class="control-button" id="onboardingBack" hidden>重新选择</button>
+        <button type="button" class="control-button" id="onboardingSkip">跳过，稍后自己配置</button>
+        <button type="button" class="control-button" id="onboardingTest" hidden>测试连接</button>
+        <button type="button" class="primary-button" id="onboardingSave" hidden>保存并开始</button>
+      </div>
+    </div>
   </dialog>
 
   <!-- Agent 设置：卡片点开后才弹出，字段与工具/Skill 选择器保持原样 -->

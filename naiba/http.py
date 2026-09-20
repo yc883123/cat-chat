@@ -141,6 +141,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(self.app.updater.status())
         elif path == "/api/agents":
             self._json({"agents": self.app.config.public_agents(), "default_agent_id": self.app.config.default_agent_id()})
+        elif path == "/api/provider-presets":
+            # 供应商预设表（「只填 API Key」的接入模板）：设置弹层与首启引导共用同一份。
+            self._json(self.app.api_provider_presets())
         elif path == "/api/tasks":
             query = urllib.parse.parse_qs(parsed.query)
             conversation_id = query.get("conversation_id", [""])[0]
@@ -482,6 +485,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json(self.app.api_upsert_model_profile(body))
             except Exception as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif path == "/api/provider-presets/open":
+            # 「打开注册页」：preset_id 进、白名单地址出，不接受前端传 URL（见 app.py）。
+            self._json(*self.app.api_open_provider_key_url(str(body.get("preset_id") or "")))
         elif path == "/api/providers/test":
             self._test_provider(body)
         elif path == "/api/providers/models":

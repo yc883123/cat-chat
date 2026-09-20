@@ -357,6 +357,147 @@ function providerProfiles() {
   return state.bootstrap?.model_profiles || state.bootstrap?.providers || [];
 }
 
+/* ---------- 供应商模板（预设）：卡片网格，选中即回填连接字段 ---------- */
+
+// 卡片首字色块：按预设下标循环取色；色块底/字都用 color-mix 与主题面、字混色，
+// 亮暗主题与各皮肤都成立（不引品牌 logo 图片，离线可用、发版不缺图）。
+export const PROVIDER_PRESET_ACCENTS = ['#4C6EF5', '#8B5CF6', '#0FA97F', '#E8930C', '#14A0C4', '#D0454A', '#5A67D8', '#C2557A'];
+const PRESET_GUIDE_FALLBACK = '选择上方任一模板可自动填好 API URL 与请求格式，只需再粘贴 API Key；也可以直接手填下面的字段。';
+
+export function providerPresets() {
+  return Array.isArray(state.providerPresetList) ? state.providerPresetList : [];
+}
+
+export function providerPresetById(presetId) {
+  const key = String(presetId || '').trim();
+  return key ? providerPresets().find((preset) => preset.id === key) || null : null;
+}
+
+// 名单唯一来源是后端 /api/provider-presets：拿不到时（离线/旧服务）返回空表，
+// 弹层退化成全手填路径，不抛错、不阻塞打开设置。
+export async function loadProviderPresets() {
+  if (providerPresets().length) return providerPresets();
+  try {
+    const result = await api('/api/provider-presets');
+    state.providerPresetList = Array.isArray(result.presets) ? result.presets : [];
+  } catch (_) {
+    state.providerPresetList = [];
+  }
+  return providerPresets();
+}
+
+// 卡片副标题：本地后端与自定义没有推荐模型，用「免 Key / 手动填写」说明这张卡给的是什么。
+export function providerPresetSubtitle(preset) {
+  if (!preset.key_required) return '免 Key';
+  return String(preset.model || '') || '手动填写';
+}
+
+export function providerPresetCardMarkup(preset, index, activeId = '') {
+  const accent = PROVIDER_PRESET_ACCENTS[index % PROVIDER_PRESET_ACCENTS.length];
+  const active = preset.id === activeId;
+  const name = escapeHtml(preset.name || preset.id || '');
+  const abbr = String(preset.abbr || (preset.name || '?')).slice(0, 3);
+  return `
+    <button type="button" class="provider-preset-card${active ? ' is-active' : ''}" data-provider-preset="${escapeHtml(preset.id)}" aria-pressed="${active ? 'true' : 'false'}" style="--preset-accent:${accent}" title="${name}">
+      <span class="provider-preset-abbr" aria-hidden="true">${escapeHtml(abbr)}</span>
+      <span class="provider-preset-meta">
+        <span class="provider-preset-name">${name}</span>
+        <span class="provider-preset-sub">${escapeHtml(providerPresetSubtitle(preset))}</span>
+      </span>
+    </button>`;
+}
+
+// 网格渲染：设置弹层与首启向导共用（同一个空容器 id 由调用方给，高亮各自传各自的选中项）。
+export function renderProviderPresetGrid(containerId, activeId = '') {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = providerPresets().map((preset, index) => providerPresetCardMarkup(preset, index, activeId)).join('');
+}
+
+// 只翻高亮、不重排 DOM（点卡回填表单时用，避免顺手把滚动位置弹回顶部）。
+export function markProviderPresetCards(containerId, activeId = '') {
+  const scope = document.getElementById(containerId);
+  if (!scope) return;
+  scope.querySelectorAll('[data-provider-preset]').forEach((card) => {
+    const active = Boolean(activeId) && card.dataset.providerPreset === activeId;
+    card.classList.toggle('is-active', active);
+    card.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+}
+
+// 「还有 …」提示：网格只露一部分时，把剩下没露脸的模板名字列出来（名字也来自同一份名单）。
+export function providerPresetMoreText(visibleCount) {
+  const presets = providerPresets();
+  if (!presets.length || presets.length <= visibleCount) return '';
+  const rest = presets.slice(visibleCount).map((preset) => preset.name);
+  const head = rest.slice(0, 5).join('、');
+  return `还有 ${head}${rest.length > 5 ? ' 等' : ''}，共 ${presets.length} 个模板（可滚动查看）。`;
+}
+
+// 引导条：选中模板后显示「这是什么站 + 怎么注册拿 Key」，附「打开注册页」按钮；
+// 没选模板时给默认说明（向导里传 fallback='' 表示整条隐藏）。
+export function fillProviderPresetGuide(root, preset, { fallback = PRESET_GUIDE_FALLBACK } = {}) {
+  if (!root) return;
+  const text = root.querySelector('.provider-preset-guide-text');
+  const button = root.querySelector('.provider-preset-key');
+  const hint = preset ? String(preset.hint || '') : fallback;
+  root.hidden = !hint;
+  if (text) text.textContent = hint;
+  if (button) {
+    button.hidden = !(preset && preset.key_url);
+    button.dataset.presetId = preset ? String(preset.id) : '';
+  }
+}
+
+// 高亮当前模板（编辑老卡片时按卡里记的 preset_id 反显；没有来源就不高亮）。
+// containerId 指到哪个网格就只标哪个网格：设置弹层与首启向导各有一份卡片。
+export function setProviderPresetSelection(presetId, containerId = 'providerPresetGrid') {
+  const key = String(presetId || '').trim();
+  // 名单还没载入时先原样记住（拉回来后再反显）；名单已到时只认表内的 id。
+  state.providerPresetId = (!providerPresets().length || providerPresetById(key)) ? key : '';
+  markProviderPresetCards(containerId, state.providerPresetId);
+}
+
+// 名单拉回来后补渲染（启动竞态：弹层可能先于 /api/provider-presets 打开）。
+function refreshProviderPresetGrid() {
+  void loadProviderPresets().then(() => {
+    renderProviderPresetGrid('providerPresetGrid', state.providerPresetId);
+    fillProviderPresetGuide($('#providerPresetGuide'), providerPresetById(state.providerPresetId));
+  });
+}
+
+// 选中模板：把名称/地址/请求格式/推荐模型/类型填进表单，并切引导文案。
+// 只写「模板默认值」，之后用户手改的字段不会再被覆盖（保存时 preset_id 只作来源标记）。
+export function applyProviderPreset(presetId) {
+  const preset = providerPresetById(presetId);
+  if (!preset) return null;
+  const local = preset.kind === 'local';
+  $('#providerKind').value = local ? '1' : '0';
+  $('#providerName').value = preset.name || '';
+  $('#providerBaseUrl').value = preset.base_url || '';
+  $('#providerFormat').value = preset.request_format || 'openai_chat';
+  syncProviderKindOptions();
+  setProviderModelOptions([], preset.model || '');
+  updateProviderFormatGuide();
+  updateProviderContextField();
+  updateUnloadModelButton();
+  setProviderPresetSelection(preset.id);
+  fillProviderPresetGuide($('#providerPresetGuide'), preset);
+  return preset;
+}
+
+// 「打开注册页」：地址由服务端按预设白名单取（前端只传 preset_id），
+// 用系统默认浏览器打开；失败就把原因说清楚，不做 window.open 兜底（内嵌窗口会再开一屏）。
+export async function openProviderPresetKeyUrl(presetId) {
+  const preset = providerPresetById(presetId);
+  if (!preset?.key_url) return;
+  try {
+    await api('/api/provider-presets/open', { method: 'POST', body: { preset_id: preset.id } });
+  } catch (error) {
+    toast(`打开注册页失败：${error.message}（可手动访问 ${preset.key_url}）`);
+  }
+}
+
 function providerCardMarkup(provider) {
   const id = escapeHtml(provider.id || '');
   const name = escapeHtml(provider.name || '未命名供应商');
@@ -420,10 +561,17 @@ export function showProviderForm(provider = {}, { isNew = false } = {}) {
   $('#toggleProviderKey').title = '显示 API Key';
   $('#providerKeyStatus').textContent = provider.has_api_key ? '已配置' : '未配置';
   $('#providerError').textContent = '';
-  $('#providerDialogTitle').textContent = isNew ? '添加 API 供应商' : (provider.name || 'API 供应商');
-  $('#providerDialogSubtitle').textContent = inferredKind === 'local' ? '本地 API' : '在线 API';
+  $('#providerDialogTitle').textContent = isNew ? '添加 API' : (provider.name || 'API 供应商');
+  $('#providerDialogSubtitle').textContent = isNew
+    ? '选择供应商模板，选好后只需粘贴 API Key'
+    : (inferredKind === 'local' ? '本地 API' : '在线 API');
   // 卡片点开即可编辑（不再有「只读 → 点编辑」两态）。
   setProviderEditMode(true);
+  // 模板网格：新卡不高亮任何模板；老卡按卡里记的来源反显（没记来源就是全手填配置）。
+  setProviderPresetSelection(provider.preset_id || '');
+  renderProviderPresetGrid('providerPresetGrid', state.providerPresetId);
+  fillProviderPresetGuide($('#providerPresetGuide'), providerPresetById(state.providerPresetId));
+  if (!providerPresets().length) refreshProviderPresetGrid();
   syncProviderKindOptions();
   updateProviderFormatGuide();
   updateProviderContextField();
@@ -561,6 +709,8 @@ export function providerFormValue() {
   const imageChoice = $('#providerSupportsImages').value;
   return {
     id: $('#providerId').value,
+    // 来源模板（可空）：服务端据此回填空字段，也让卡片记住自己是哪个模板来的。
+    preset_id: state.providerPresetId || '',
     name: $('#providerName').value.trim(),
     base_url: $('#providerBaseUrl').value.trim(),
     model: selectedModel === '__custom__' ? $('#providerModelCustom').value.trim() : selectedModel,
@@ -616,6 +766,22 @@ export function scheduleProviderModelCheck() {
   providerModelCheckTimer = setTimeout(() => loadProviderModels({ automatic: true }), 350);
 }
 
+// 保存成功后把服务端返回的卡片并回本地 bootstrap，并刷新模型 / 视觉下拉。
+// 设置弹层与首启向导共用：两处都保存 API，刷新动作必须一致（少刷一处就会出现
+// 「刚加完供应商但模型下拉里没有它」）。
+export function syncSavedProvider(saved) {
+  ['providers', 'model_profiles'].forEach((key) => {
+    const list = state.bootstrap[key] || (state.bootstrap[key] = []);
+    const index = list.findIndex((item) => item.id === saved.id);
+    if (index >= 0) list[index] = saved;
+    else list.push(saved);
+  });
+  const visionSelect = $('#visionProvider');
+  if (visionSelect) delete visionSelect.dataset.populated;
+  populateVisionSettings();
+  populateModels();
+}
+
 export async function saveProvider(event) {
   event.preventDefault();
   try {
@@ -637,17 +803,8 @@ export async function saveProvider(event) {
       }
     }
     const saved = await api('/api/providers', { method: 'POST', body: values });
-    ['providers', 'model_profiles'].forEach((key) => {
-      const list = state.bootstrap[key] || (state.bootstrap[key] = []);
-      const index = list.findIndex((item) => item.id === saved.id);
-      if (index >= 0) list[index] = saved;
-      else list.push(saved);
-    });
+    syncSavedProvider(saved);
     $('#providerId').value = saved.id;
-    populateModels();
-    const visionSelect = $('#visionProvider');
-    if (visionSelect) delete visionSelect.dataset.populated;
-    populateVisionSettings();
     toast('API 供应商已保存');
     cancelProviderEdit();
   } catch (error) {
@@ -694,22 +851,27 @@ export async function deleteProvider(providerId) {
   }
 }
 
+// 连接测试结果 → 一行人话（设置弹层与首启向导共用，避免两处各写一套来源名）。
+export function providerTestSummary(result) {
+  const sourceLabels = {
+    explicit: '手动配置',
+    llama_props: 'llama.cpp /props',
+    ollama_show: 'Ollama capabilities',
+    lm_studio_models: 'LM Studio 模型目录',
+    image_probe: '真实图片探针',
+    model_name: '模型名推断（未确认）',
+  };
+  const vision = result.supports_images ? '支持图片' : '纯文本';
+  const source = sourceLabels[result.capability_source] || result.capability_source || '未知';
+  const proxyNote = result.proxy_state?.note ? `；${result.proxy_state.note}` : '';
+  return `推理连接成功：${result.response}；视觉：${vision}；来源：${source}${proxyNote}`;
+}
+
 export async function testProvider() {
   $('#providerError').textContent = '正在测试连接…';
   try {
     const result = await api('/api/providers/test', { method: 'POST', body: providerFormValue() });
-    const sourceLabels = {
-      explicit: '手动配置',
-      llama_props: 'llama.cpp /props',
-      ollama_show: 'Ollama capabilities',
-      lm_studio_models: 'LM Studio 模型目录',
-      image_probe: '真实图片探针',
-      model_name: '模型名推断（未确认）',
-    };
-    const vision = result.supports_images ? '支持图片' : '纯文本';
-    const source = sourceLabels[result.capability_source] || result.capability_source || '未知';
-    const proxyNote = result.proxy_state?.note ? `；${result.proxy_state.note}` : '';
-    $('#providerError').textContent = `推理连接成功：${result.response}；视觉：${vision}；来源：${source}${proxyNote}`;
+    $('#providerError').textContent = providerTestSummary(result);
   } catch (error) {
     $('#providerError').textContent = `模型目录可能可访问，但推理服务不可用：${error.message}`;
   }

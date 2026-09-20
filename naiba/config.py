@@ -2303,6 +2303,10 @@ class ConfigStore:
             if raw_effort not in {"auto", "off", "low", "medium", "high"}:
                 raise ValueError("思维强度必须是 auto / off / low / medium / high 之一")
             payload["reasoning_effort"] = raw_effort
+            # 预设来源（可空）：只作前端反显与卡片角标，不参与任何请求构造。
+            preset_id = str(values.get("preset_id") or "").strip()
+            if preset_id:
+                payload["preset_id"] = preset_id
             optional_fields = {
                 "context_window": self._positive_context_size,
                 "max_output_tokens": self._positive_context_size,
@@ -2349,6 +2353,8 @@ class ConfigStore:
                 for field in ("context_window", "max_output_tokens", "temperature"):
                     if field not in payload:
                         existing.pop(field, None)
+                if not preset_id:
+                    existing.pop("preset_id", None)
                 if clear_supports_images:
                     existing.pop("supports_images", None)
                 existing.update(payload)

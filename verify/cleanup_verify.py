@@ -96,6 +96,8 @@ KEEP = {
     "tasks_panel_smoke.py", "tasks_panel_smoke.cjs", "tasks_panel_render_check.mjs",
     # 会话区字体冒烟（§六 已登记；Python 自编排 + Node 检查）
     "chat_font_smoke.py", "chat_font_smoke.cjs", "frozen_chat_font_check.py",
+    # 供应商预设（「只填 API Key」）+ 首启引导向导冒烟（§六 已登记；Python 自编排 + Node 检查）
+    "provider_presets_smoke.py", "provider_presets_smoke.cjs",
     # 隔离实例的公共 harness：维护说明「归档说明」点名要求留在 verify/（被 tasks_panel_smoke.py 依赖）
     "_serve_tmp.py",
     # 本脚本自身

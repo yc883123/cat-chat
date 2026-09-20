@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import webbrowser
 import zipfile
 from http import HTTPStatus
 from pathlib import Path
@@ -37,6 +38,7 @@ from naiba.core.network import network_access_status
 from naiba.core.conv_files import _conv_workspace_root, browse_workspace_tree
 from naiba.core.paths import path_within
 from naiba.jobs import JobRegistry
+from naiba.llm.provider_presets import apply_preset_values, provider_preset_key_url, provider_presets_payload
 from naiba.llm.runtime import ModelRuntime
 from naiba.mcp import MCPRegistry
 from naiba.paths import PathContext, default_path_context
@@ -769,13 +771,37 @@ class NaibaChatApp:
             updated = favorited if updated is None else {**updated, **favorited}
         return updated or {"error": "对话不存在"}, HTTPStatus.OK if updated else HTTPStatus.NOT_FOUND
 
+    def api_provider_presets(self) -> dict[str, Any]:
+        """供应商预设表（设置弹层与首启引导共用，名单唯一来源在 llm/provider_presets.py）。"""
+        return {"presets": provider_presets_payload()}
+
+    def api_open_provider_key_url(self, preset_id: str) -> tuple[dict[str, Any], int]:
+        """用系统默认浏览器打开预设的 Key 申请入口（弹层与向导的「打开注册页」按钮）。
+
+        地址只从预设表白名单里按 ``preset_id`` 取，**不接受调用方传入任意 URL**，
+        因此这个端点不会变成「打开任意网址」的通道；自定义 / 本地预设没有入口，
+        直接 400。引导文案里的远端网址必须能点，否则用户只能手抄（见 provider_presets）。
+        """
+        url = provider_preset_key_url(preset_id)
+        if not url:
+            return {"error": "该供应商模板没有注册页，请直接访问其官网"}, HTTPStatus.BAD_REQUEST
+        try:
+            opened = webbrowser.open(url)
+        except Exception as exc:  # pragma: no cover - 取决于桌面环境
+            return {"error": f"打开浏览器失败：{exc}"}, HTTPStatus.BAD_GATEWAY
+        if not opened:
+            return {"error": f"没能调起浏览器，请手动访问 {url}"}, HTTPStatus.BAD_GATEWAY
+        return {"ok": True, "url": url}, HTTPStatus.OK
+
     def api_upsert_model_profile(self, body: dict[str, Any]) -> dict[str, Any]:
         """保存 API / 本地模型连接配置。
 
         ``provider.model`` 只属于供应商设置和连接测试；普通会话最终使用的模型始终来自
         会话模型下拉框，因此修改这里不会改写任何已有会话的模型选择。
+        携带 ``preset_id`` 时先按预设表回填连接字段（用户显式提交的非空值优先），
+        未知预设抛 ValueError（HTTP 层转 400）。
         """
-        return self.config.upsert_provider(body)
+        return self.config.upsert_provider(apply_preset_values(body))
 
     def api_upsert_workspace(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         name = str(body.get("name") or "").strip()

@@ -8,7 +8,7 @@ import { renderSkills } from "./09-settings.js";
 import { appendPresetSkillsToComposer } from "./13-skill-refs.js";
 
 const UPDATE_BUSY_PHASES = ['checking', 'downloading', 'restarting'];
-const UPDATE_RELEASE_URL = 'https://github.com/yc883123/naiba-chat/releases';
+const UPDATE_RELEASE_URL = 'https://github.com/yc883123/cat-chat/releases';
 
 /* Agent 说明弹层（顶栏 Agent 选择器左侧的「?」）：与 contextUsagePopover 同一模式——
    fixed 定位 + 打开时挂到 body（顶栏容器有 overflow 裁剪），内容是静态文案，无需动态生成。 */

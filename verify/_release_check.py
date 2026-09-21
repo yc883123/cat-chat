@@ -42,6 +42,7 @@ readme = (ROOT / "README.md").read_text(encoding="utf-8")
 title_brand = brand_hit(readme, "# {brand} " + series + " Beta")
 print(f"[§4] README 标题 `# <品牌> {series} Beta`：命中品牌 = {title_brand or '无'}")
 for token in (f"## {series} Beta 主要能力",
+              f"cat-chat-{version}-windows-x64.zip",
               f"naiba-chat-{version}-windows-x64.zip",
               f'NAIBA_BUILD_VERSION = "{version}"'):
     print(f"[§4] README 含 {token!r}: {token in readme}")
@@ -59,7 +60,8 @@ except Exception as exc:  # noqa: BLE001
 
 for field, expect in (("RELEASE_VERSION", version),
                       ("RELEASE_TAG", f"v{version}"),
-                      ("PACKAGE_NAME", f"naiba-chat-{version}-windows-x64")):
+                      ("PACKAGE_NAME", f"cat-chat-{version}-windows-x64"),
+                      ("LEGACY_PACKAGE_NAME", f"naiba-chat-{version}-windows-x64")):
     found = re.search(rf"^\s*{field}:\s*(\S+)\s*$", workflow, re.M)
     actual = found.group(1) if found else "(未找到)"
     suffix = "" if actual == expect else f"  ← 与清单不符（应为 {expect}）"
@@ -68,6 +70,35 @@ name_brand = brand_hit(workflow, "name: {brand} " + series + " Beta")
 print(f"[§1] 工作流 Release 标题 `name: <品牌> {series} Beta`：命中品牌 = {name_brand or '无'}")
 publish_step = f"Publish {series} Beta release"
 print(f"[§1] 工作流含 {publish_step!r}: {publish_step in workflow}")
+
+# ---- 3b) 更新协议常量 + 5 项资产双发（仓库改名后新增的硬校验）----
+# 判据来自 §2.1「发布链路契约」：清单 repository / asset 是**已发布客户端逐字校验**的协议，
+# 改名后也不得改值；资产必须 5 项齐全，漏 naiba-chat.exe 会让全部旧客户端断更。
+# 这些字符串必须**逐字**出现在工作流里——注释固定值被清理掉时，这里要红。
+for literal, why in (
+        ('repository = "yc883123/naiba-chat"', "清单 repository 必须是旧值（协议常量）"),
+        ('asset = "naiba-chat.exe"', "清单 asset 必须是旧值（协议常量）"),
+        ('Get-FileHash -Algorithm SHA256 dist\\naiba-chat.exe',
+         "sha256 必须对旧名产物计算（两个 exe 同字节 ⇒ 哈希相等）"),
+        ('Copy-Item -LiteralPath "dist\\naiba-chat.exe" -Destination "dist\\cat-chat.exe"',
+         "必须复制出新名 exe"),
+):
+    print(f"[§3b] 工作流含 {literal!r}: {literal in workflow}   （{why}）")
+
+files_block = re.search(r"^([ \t]*)files:[ \t]*\|\n((?:\1[ \t]+\S.*\n?)+)", workflow, re.M)
+uploaded = ([line.strip() for line in files_block.group(2).splitlines() if line.strip()]
+            if files_block else [])
+expected_assets = (
+    "dist/naiba-chat.exe",                       # 旧客户端自动更新链，永久
+    "dist/cat-chat.exe",                         # 人类直接下载
+    "dist/${{ env.PACKAGE_NAME }}.zip",          # 新名包
+    "dist/${{ env.LEGACY_PACKAGE_NAME }}.zip",   # 旧名包
+    "naiba-chat-update.json",                    # 清单
+)
+print(f"[§3b] Release 上传资产 {len(uploaded)} 项：{uploaded}")
+for asset in expected_assets:
+    mark = "OK  " if asset in uploaded else "!!  "
+    print(f"[§3b] {mark}{asset}")
 
 # ---- 4) 本地绝对路径审计（口径复用守门单测；只扫入库的代码/配置类文件）----
 # 历史教训（§九.115）：这里曾自己写一套「rglob verify/ 下所有文件」的宽口径，把构建产物也当文本读进来

@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""显示名品牌守门：产品一律叫 `Cat Chat`，内部身份一律保留 `naiba` 系。
+"""显示名与仓库名品牌守门：产品一律叫 `Cat Chat`，内部身份一律保留 `naiba` 系。
 
-背景：产品从 Naiba Chat 改显示名为 Cat Chat（见「项目维护说明 §2.1 命名契约」）。
-这次只改人看得见的称呼——浏览器标签、桌面窗口标题、托盘悬停标题、原生对话框标题、
-启动横幅与 CLI 帮助、界面提示文案；仓库名、包名、EXE 名、更新资产、数据位置、
-AppUserModelID、浏览器存储键、协议标识一律不动。
+背景：产品从 Naiba Chat 改显示名为 Cat Chat（2026-09-20），仓库名随后改为 `cat-chat`
+（2026-09-21，旧地址由 GitHub 301 重定向；见「项目维护说明 §2.1 命名契约」）。两次改名都只动
+人看得见的部分——浏览器标签、桌面窗口标题、托盘悬停标题、原生对话框标题、启动横幅与 CLI 帮助、
+界面提示文案、人可见的仓库地址；包名、EXE 名、**更新协议常量**（清单 `repository` 字段值 /
+`naiba-chat.exe` / 清单文件名）、数据位置、AppUserModelID、浏览器存储键、协议标识一律不动。
 
 本文件守两件事，缺一不可：
 
@@ -12,14 +13,17 @@ AppUserModelID、浏览器存储键、协议标识一律不动。
 2. **机器依赖的内部标识必须还是原值**——这是同名回归最容易踩的地方：
    有人「顺手全替换」就会把 localStorage 键名一起改掉，老用户偏好全部丢失；
    把托盘内部 name 改成 cat-chat 会让系统把托盘图标当成另一个应用；
-   把 `server_version` 改掉会动到 HTTP 协议标识。
+   把 `server_version` 改掉会动到 HTTP 协议标识；
+   把更新协议常量改掉会让全部历史版本用户永久失去自动更新。
 
 刻意不做的事：不启动真实服务、不读真实配置、不联网、不按固定行号断言、
-不把「全仓库搜不到 naiba」当判据（仓库名、包名、协议标识本来就该留着）。
+不把「全仓库搜不到 naiba」当判据（包名、协议常量、EXE 名本来就该留着），
+也不把「文件里出现 cat 字样」当判据（仓库名 `cat-chat` 与 exe 名 `cat-chat.exe` 本来就该出现）。
 """
 from __future__ import annotations
 
 import ast
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -115,18 +119,30 @@ class FrontendDisplayBrandingTests(unittest.TestCase):
             for stale in ("Naiba Chat", "NaibaChat", "Naiba-chat", "NaibaChatData"):
                 self.assertNotIn(stale, text, f"{relative} 里还残留旧显示名 {stale!r}")
 
-    def test_actual_targets_keep_old_identifier(self):
-        """这两处指的是真东西的名字，不是产品称呼——改了会说错话。"""
+    def test_actual_targets_name_the_real_thing(self):
+        """这两处指的是真东西的名字，不是产品称呼——写错就是说错话。
+
+        2026-09-21 仓库更名为 `cat-chat`（旧地址由 GitHub 301 长期重定向），于是两侧口径分开：
+        - 更新来源显示**新**仓库名——用户点进去要落在真仓库上，旧名只是重定向；
+        - 防火墙放行对象**两个 exe 名都要提**——存量用户盘上仍是 `naiba-chat.exe`（首次安装时的
+          文件名在后续自动更新中原样保留），新装用户是 `cat-chat.exe`，只说一个就等于让另一半
+          人照着说明做却放行了错的进程名。
+        """
         html = _read("public/index.html")
-        # 防火墙放行对象是实际 EXE 名，EXE 仍叫 naiba-chat
-        self.assertIn("Windows 防火墙需要允许 naiba-chat 或当前端口通过", html)
-        # 更新仓库仍是 naiba-chat
-        self.assertIn("更新来自 yc883123/naiba-chat", html)
-        self.assertIn("https://github.com/yc883123/naiba-chat/releases", _read("public/js/07-models-agents.js"))
+        self.assertIn("Windows 防火墙需要允许 Cat Chat（cat-chat.exe，旧版本为 naiba-chat.exe）", html)
+        self.assertIn("更新来自 yc883123/cat-chat", html)
+        self.assertIn("https://github.com/yc883123/cat-chat/releases", _read("public/js/07-models-agents.js"))
 
 
 class FrontendStorageKeyTests(unittest.TestCase):
     """浏览器存储键是用户偏好的落脚点，改名时必须一个字都不动。"""
+
+    # 老键的两种命名形状：`naibaChat*`（camelCase）与 `naiba.*`（点号命名空间）。
+    # 只钉**这个形状**，不去禁「文件里出现 cat 字样」——仓库名与 exe 名本来就该出现。
+    CAT_KEY_SHAPE = re.compile(r"\bcat[A-Z]|\bcat\.")
+    STORAGE_KEY_CALL = re.compile(
+        r"(?:local|session)Storage\s*\.\s*(?:getItem|setItem|removeItem)\s*\(\s*(['\"])([^'\"]+)\1"
+    )
 
     KEPT_KEYS = (
         "naibaChatAppearance",
@@ -158,7 +174,19 @@ class FrontendStorageKeyTests(unittest.TestCase):
             self.assertIn(key, blob, f"存储键 {key!r} 不见了——改名不得动存储键")
 
     def test_no_cat_prefixed_replacement_key(self):
-        """不许为改名新建一套 cat 前缀的键，否则等于把老用户设置全部作废。"""
+        """不许为改名新建一套 cat 前缀的键，否则等于把老用户设置全部作废。
+
+        判据分两半，缺一不可：
+        ① **键名形状**——任何位置都不许出现 `catChat*` / `cat.*` 这类键名（老键正是
+           `naibaChat*` 与 `naiba.*` 两种形状，顺手替换出来的新名必然长这样）；
+        ② **实际取用的键**——逐条取出传给 `localStorage` / `sessionStorage` 的字面量键，
+           断言没有一个以 `cat` 开头（键常量声明在别处时，只有①能抓到，两条互补）。
+
+        **刻意不再用「文件里出现 `cat-chat` 就当违规」这种宽口径**：仓库名 `cat-chat` 与
+        EXE 名 `cat-chat.exe` 自 2026-09-21 起本来就是合法的可见文案，宽口径会在改名的同一刻
+        对正确代码报红——把真判据（键名）淹在假命中里。
+        """
+        scanned = 0
         for relative in (
             "public/index.html",
             "public/js/01-core.js",
@@ -168,8 +196,19 @@ class FrontendStorageKeyTests(unittest.TestCase):
             "public/js/15-bind-events.js",
             "public/js/19-onboarding.js",
         ):
-            self.assertNotIn("catChat", _read(relative))
-            self.assertNotIn("cat-chat", _read(relative))
+            text = _read(relative)
+            self.assertIsNone(
+                self.CAT_KEY_SHAPE.search(text),
+                f"{relative} 里出现 cat 前缀键名形状（老键是 naibaChat* / naiba.*）",
+            )
+            for _, key in self.STORAGE_KEY_CALL.findall(text):
+                scanned += 1
+                self.assertFalse(
+                    key.lower().startswith("cat"),
+                    f"{relative} 里出现 cat 前缀存储键 {key!r}——老用户设置会全部作废",
+                )
+        # 空断言防线：正则一旦跟不上前端写法就静默失效，这条会让它当场变红而不是假装通过。
+        self.assertGreater(scanned, 0, "没扫到任何 storage 键字面量——扫描正则已失效")
 
     def test_legacy_lan_keys_kept_for_compat_read(self):
         core = _read("public/js/01-core.js")
@@ -283,9 +322,12 @@ class CurrentDocsBrandingTests(unittest.TestCase):
         self.assertTrue(readme.startswith("# Cat Chat "), "README 首行标题应已是新显示名")
         self.assertIn("原名 Naiba Chat", readme)
         self.assertIn("无需重新配置或搬迁数据", readme)
-        # 下载文件名与仓库地址仍是旧标识
-        self.assertIn("naiba-chat-", readme)
+        # 仓库地址已是新名；旧地址作为「原名」说明保留（用户手上还有旧链接）
+        self.assertIn("github.com/yc883123/cat-chat", readme)
         self.assertIn("github.com/yc883123/naiba-chat", readme)
+        # 下载资产双名等价：旧名 zip 仍要列出来，否则既存的旧下载链接无人能解读
+        self.assertIn("naiba-chat-", readme)
+        self.assertIn("cat-chat-", readme)
 
     def test_changelog(self):
         self.assertIn("Cat Chat（原 Naiba Chat）", _read("CHANGELOG.md"))

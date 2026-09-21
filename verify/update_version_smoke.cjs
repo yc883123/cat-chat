@@ -28,6 +28,8 @@ function check(label, ok, detail = '') {
 }
 
 // 从新到旧的版本表：2.1.26 … 2.1.0（含当前版本），末位再补一个 2.0.0（必须被前端过滤）。
+// `release_url` 是**接口桩数据**（真实值由后端按新仓库名 `cat-chat` 给），这里跟着改只是为了
+// 「桩看起来像真数据」——本文件不对它做任何断言。
 function buildReleases() {
   const releases = [];
   for (let i = LATEST_PATCH; i >= 0; i -= 1) {
@@ -36,7 +38,7 @@ function buildReleases() {
       tag: `v${version}`,
       version,
       published_at: '2026-09-01T00:00:00Z',
-      release_url: `https://github.com/yc883123/naiba-chat/releases/tag/v${version}`,
+      release_url: `https://github.com/yc883123/cat-chat/releases/tag/v${version}`,
       release_notes: [`${version} 的更新说明`],
       installable: true,
       current: version === CURRENT_VERSION,
@@ -44,7 +46,7 @@ function buildReleases() {
   }
   releases.push({
     tag: 'v2.0.0', version: '2.0.0', published_at: '2025-01-01T00:00:00Z',
-    release_url: 'https://github.com/yc883123/naiba-chat/releases/tag/v2.0.0',
+    release_url: 'https://github.com/yc883123/cat-chat/releases/tag/v2.0.0',
     release_notes: ['大版本迁移'], installable: true, current: false,
   });
   return releases;

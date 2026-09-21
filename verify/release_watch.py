@@ -1,7 +1,11 @@
 """等 GitHub Actions 发版跑完，并校验 Release 资产是否自洽。
 
 本机**没有 gh CLI**，所以直接打匿名 GitHub API（仓库公开、免 token，60 次/小时）。
-一条命令走完「等 run → 看每步结论 → 核对 manifest → 下载 exe 对哈希」。
+一条命令走完「等 run → 看每步结论 → 核对 manifest → 核对 5 项资产 → 下载两个 exe 对哈希」。
+
+**资产契约（仓库更名后为 5 项，缺一即失败）**：`naiba-chat.exe`（旧客户端自动更新链，永久）、
+`cat-chat.exe`（与前者同字节，哈希必须相等且都等于清单值）、两个同名 zip、清单
+`naiba-chat-update.json`（其 `repository` 字段恒为旧值，见 `MANIFEST_REPOSITORY`）。
 
 **匿名额度是硬约束**：额度耗尽时 API 一律回 403（`X-RateLimit-Remaining: 0`）。
 旧实现把它当网络抖动、每 15s 重试一次直到 20 分钟超时，最后打印「超时」并退出 1
@@ -31,11 +35,29 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-REPO = "yc883123/naiba-chat"
+# 仓库 2026-09-21 更名为 `cat-chat`（旧名 `naiba-chat` 由 GitHub 301 长期重定向，新旧都能取到数据）。
+# 这里取**新名**：核验器的用途是「确认这次发布是好的」，用门面真名才顺带验到改名有没有生效。
+REPO = "yc883123/cat-chat"
+# 而清单里的 `repository` 是**协议常量**，必须与 `REPO` 不同名、永远写旧值——两者刻意分开，
+# 免得后人「顺手对齐」，那会让全部旧客户端拒绝更新。
+MANIFEST_REPOSITORY = "yc883123/naiba-chat"
 API = f"https://api.github.com/repos/{REPO}"
 # 不需要 API、不受额度限制的资产口：release 是 Latest 时直接按资产名取。
 STATIC_BASE = f"https://github.com/{REPO}/releases/latest/download"
 HEADERS = {"Accept": "application/vnd.github+json", "User-Agent": "naiba-release-watch"}
+
+# ======================= 发布资产契约（改名后为 5 项，缺一即发版失败） =======================
+# 前三项是**更新协议**：`naiba-chat.exe` 服务旧客户端自动更新链、`naiba-chat-update.json` 是清单，
+# 各自被历史版本逐字校验，**永久不可停发**；漏掉 `naiba-chat.exe` 会让全部旧客户端断更——这是本项目
+# 最致命的一类发布事故，所以必须**硬失败**，不能因为「资产本来就没在预期清单里」而静默放过。
+MANDATORY_ASSETS = ("naiba-chat.exe", "cat-chat.exe", "naiba-chat-update.json")
+# 两个 exe 是同一字节（哈希必须相等，且都等于清单里的值）：前者给旧客户端，后者给人直接下载。
+EXECUTABLE_ASSETS = ("naiba-chat.exe", "cat-chat.exe")
+# 双名 zip：内容等价，只有包内 exe 的文件名不同。旧名 zip 与更新器无关（更新器从不消费 zip），
+# 只为兼容既存的教程与口耳相传的下载链接。
+ZIP_SUFFIX = "-windows-x64.zip"
+ZIP_PREFIXES = ("cat-chat-", "naiba-chat-")
+# ==========================================================================================
 
 # `release_notes` 头条允许的品牌前缀：**产品显示名 2026-09-20 起为 Cat Chat**（原名 Naiba Chat）。
 # 历史版本条目仍以 Naiba Chat 开头，所以两个前缀都算正常——但不能因此放宽到「任意字符串」，
@@ -173,6 +195,12 @@ def check_manifest(manifest: dict, commit: str = "") -> bool:
     print(f"manifest: version={manifest.get('version')} "
           f"commit={str(manifest.get('commit'))[:12]} notes={count} 条")
     print("  sha256 =", manifest.get("sha256"))
+    if manifest.get("repository") != MANIFEST_REPOSITORY:
+        # 这是全项目后果最重的一个字段：旧客户端**逐字**比对它，改值即让全部历史版本用户
+        # 永久失去自动更新。仓库更名后它**仍然**必须写旧值（REPO 是新门面名，两者刻意不同名）。
+        print(f"  !! 清单 repository 必须恒为 {MANIFEST_REPOSITORY!r}（协议常量），"
+              f"实际 {manifest.get('repository')!r}")
+        ok = False
     if commit and manifest.get("commit") != commit:
         print("  !! manifest.commit 不是本次提交"); ok = False
     if not isinstance(notes, list) or not notes:
@@ -183,15 +211,35 @@ def check_manifest(manifest: dict, commit: str = "") -> bool:
     return ok
 
 
-def check_hash(manifest: dict, exe_url: str) -> bool:
+def check_hash(manifest: dict, exe_url: str, label: str = "exe") -> bool:
     """哈希必须实测比对：不一致时应用内「检查更新」会**静默拒绝安装**。"""
     actual = hash_remote_exe(exe_url)
-    print("  实际 sha256 =", actual)
+    print(f"  {label} 实际 sha256 =", actual)
     if actual != manifest["sha256"]:
-        print("  !! 哈希不一致 —— 应用内自动更新会拒绝安装")
+        print(f"  !! {label} 哈希与清单不一致 —— 应用内自动更新会拒绝安装")
         return False
-    print("  哈希一致 → 「检查更新」可正常校验并安装")
+    print(f"  {label} 哈希一致 → 「检查更新」可正常校验并安装")
     return True
+
+
+def check_asset_set(assets: dict) -> bool:
+    """5 项资产硬校验（缺一即失败）。
+
+    为什么不能只靠后面那句 `assets["naiba-chat.exe"]`：缺资产时它会抛 `KeyError`，等于把
+    「判失败」变成「崩给你看」；而漏传 `naiba-chat.exe` 正是最致命的一种发布事故。
+    """
+    ok = True
+    for name in MANDATORY_ASSETS:
+        if name not in assets:
+            print(f"  !! 缺少必需资产 {name}")
+            ok = False
+    for prefix in ZIP_PREFIXES:
+        if not any(n.startswith(prefix) and n.endswith(ZIP_SUFFIX) for n in assets):
+            print(f"  !! 缺少 {prefix}*{ZIP_SUFFIX}")
+            ok = False
+    if ok:
+        print("  OK  5 项资产齐全（双 exe + 双 zip + 清单）")
+    return ok
 
 
 def check_assets(tag: str, commit: str) -> bool:
@@ -201,10 +249,19 @@ def check_assets(tag: str, commit: str) -> bool:
     print(f"prerelease={release['prerelease']}  assets="
           + ", ".join(f"{n}({a['size']:,}B)" for n, a in assets.items()))
 
+    ok = check_asset_set(assets)
+    if "naiba-chat-update.json" not in assets:
+        # 清单都拿不到就没法往下核，但上面的缺项结论已经打出来了，不要返回 True。
+        return False
     manifest = get_json(assets["naiba-chat-update.json"]["browser_download_url"])
-    ok = check_manifest(manifest, commit)
-    if not check_hash(manifest, assets["naiba-chat.exe"]["browser_download_url"]):
+    if not check_manifest(manifest, commit):
         ok = False
+    # 两个 exe 各算一次：内容应当相同、且都等于清单值（同名复制，字节一致）。
+    for name in EXECUTABLE_ASSETS:
+        if name not in assets:
+            continue
+        if not check_hash(manifest, assets[name]["browser_download_url"], name):
+            ok = False
     return ok
 
 
@@ -241,10 +298,14 @@ def check_assets_static(tag: str, commit: str) -> bool:
     manifest = get_json(f"{STATIC_BASE}/naiba-chat-update.json")
     if not check_manifest(manifest, commit):
         ok = False
-    if not check_hash(manifest, f"{STATIC_BASE}/naiba-chat.exe"):
-        ok = False
+    # 两个 exe 都核：静态口没有资产列表，缺资产只能靠下载 404 暴露（这正是它的价值所在）。
+    for name in EXECUTABLE_ASSETS:
+        if not check_hash(manifest, f"{STATIC_BASE}/{name}", name):
+            ok = False
     if not ok:
         print("\n静态核验未通过。注意：额度耗尽时拿不到逐步骤结论，需要的话去 Actions 页面看。")
+    else:
+        print("  注：静态口拿不到资产列表，5 项资产齐全与否请用带额度的完整核验确认。")
     return ok
 
 

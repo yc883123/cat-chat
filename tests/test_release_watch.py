@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
-"""发布核验器 `verify/release_watch.py::check_manifest` 的离线守门。
+"""发布核验器 `verify/release_watch.py` 的离线守门。
 
-为什么要这条护栏：显示名 2026-09-20 起改为 **Cat Chat**（仓库、EXE、更新资产仍叫 naiba 系），
-而发布核验器原本把「头条必须以 `Naiba Chat` 开头」写死——首次以 Cat Chat 发布时，**核验器会把
-一次完全正常的发布判成异常**（`_watch_275.py` 那类临时脚本同理，所以判据要收进版本控制的测试里）。
+为什么要这条护栏：显示名 2026-09-20 起改为 **Cat Chat**，仓库名 2026-09-21 起改为 `cat-chat`
+（EXE 名、清单名与清单里的 `repository` 则作为**协议常量**永久保留 `naiba` 系），而发布核验器原本
+把「头条必须以 `Naiba Chat` 开头」写死——首次以 Cat Chat 发布时，**核验器会把一次完全正常的发布
+判成异常**（`_watch_275.py` 那类临时脚本同理，所以判据要收进版本控制的测试里）。
 
-改法是**支持两个已知品牌前缀**：当前显示名 `Cat Chat` 与历史名 `Naiba Chat` 都算正常。
-这里同时钉住反方向——核验不能因此变松：非法前缀、空说明、缺字段、类型不对一律必须判失败，
-否则「头条写错了」这类真事故会被静默放过。
+这里钉住三组判据：① 头条品牌前缀支持两个已知名；② 清单 `repository` 恒为旧值（与核验器自己的
+`REPO` 刻意不同名）；③ 5 项资产齐全（漏 `naiba-chat.exe` 会让全部旧客户端断更）。
+反方向同样钉住——核验不能因此变松：非法前缀、空说明、缺字段、类型不对、缺资产一律必须判失败，
+否则「头条写错了」「漏传了旧名 exe」这类真事故会被静默放过。
 """
 from __future__ import annotations
 
@@ -110,6 +112,102 @@ class CheckManifestBrandTest(unittest.TestCase):
         del manifest["version"]
         del manifest["sha256"]
         self.assertTrue(self._check(manifest))
+
+
+class ManifestRepositoryConstantTest(unittest.TestCase):
+    """清单 `repository` 是协议常量：恒为旧值，**与核验器自己的仓库名刻意不同**。
+
+    仓库 2026-09-21 更名为 `cat-chat`，但旧客户端逐字比对清单里的 `repository`——改值即让全部
+    历史版本用户永久失去自动更新。这里钉住的正是「别顺手把两个名字对齐」。
+    """
+
+    def setUp(self) -> None:
+        self.output = io.StringIO()
+
+    def _check(self, manifest: dict) -> bool:
+        with contextlib.redirect_stdout(self.output):
+            return rw.check_manifest(manifest)
+
+    def test_repo_constant_is_the_new_name_but_manifest_stays_old(self) -> None:
+        self.assertEqual("yc883123/cat-chat", rw.REPO)
+        self.assertEqual("yc883123/naiba-chat", rw.MANIFEST_REPOSITORY)
+        self.assertNotEqual(rw.REPO, rw.MANIFEST_REPOSITORY,
+                            "两个名字必须不同：一个是门面，一个是协议常量")
+
+    def test_old_value_accepted(self) -> None:
+        self.assertTrue(self._check(_manifest()))
+
+    def test_new_value_rejected(self) -> None:
+        """把 repository 改成新仓库名是最典型的「顺手对齐」事故，必须判失败。"""
+        self.assertFalse(self._check(_manifest(repository="yc883123/cat-chat")))
+        self.assertIn("清单 repository 必须恒为", self.output.getvalue())
+
+    def test_missing_or_wrong_type_rejected(self) -> None:
+        manifest = _manifest()
+        del manifest["repository"]
+        self.assertFalse(self._check(manifest))
+        self.assertFalse(self._check(_manifest(repository=None)))
+
+
+class AssetSetContractTest(unittest.TestCase):
+    """5 项资产硬校验：漏 `naiba-chat.exe` 是最致命的一类发布事故。
+
+    原实现直接 `assets["naiba-chat.exe"]`——缺资产时抛 `KeyError`，等于把「判失败」变成
+    「崩给你看」，而且缺项连一句可读结论都不留。
+    """
+
+    FULL = {
+        "naiba-chat.exe": {"size": 1},
+        "cat-chat.exe": {"size": 1},
+        "cat-chat-2.7.7-beta-windows-x64.zip": {"size": 1},
+        "naiba-chat-2.7.7-beta-windows-x64.zip": {"size": 1},
+        "naiba-chat-update.json": {"size": 1},
+    }
+
+    def setUp(self) -> None:
+        self.output = io.StringIO()
+
+    def _check(self, assets: dict) -> bool:
+        with contextlib.redirect_stdout(self.output):
+            return rw.check_asset_set(assets)
+
+    def _without(self, *names: str) -> dict:
+        return {k: v for k, v in self.FULL.items() if k not in names}
+
+    def test_full_set_accepted(self) -> None:
+        self.assertTrue(self._check(self.FULL))
+        self.assertIn("5 项资产齐全", self.output.getvalue())
+
+    def test_mandatory_assets_are_frozen(self) -> None:
+        self.assertEqual(("naiba-chat.exe", "cat-chat.exe", "naiba-chat-update.json"),
+                         rw.MANDATORY_ASSETS)
+
+    def test_each_missing_asset_is_rejected_with_a_readable_reason(self) -> None:
+        for name in ("naiba-chat.exe", "cat-chat.exe", "naiba-chat-update.json"):
+            with self.subTest(missing=name):
+                self.output.seek(0)
+                self.output.truncate()
+                self.assertFalse(self._check(self._without(name)))
+                self.assertIn(f"缺少必需资产 {name}", self.output.getvalue())
+
+    def test_each_missing_zip_is_rejected(self) -> None:
+        for name in ("cat-chat-2.7.7-beta-windows-x64.zip",
+                     "naiba-chat-2.7.7-beta-windows-x64.zip"):
+            with self.subTest(missing=name):
+                self.output.seek(0)
+                self.output.truncate()
+                self.assertFalse(self._check(self._without(name)))
+                self.assertIn("缺少", self.output.getvalue())
+
+    def test_similarly_named_zip_does_not_count(self) -> None:
+        """判据是「前缀 + 后缀都命中」，`naiba-chat.exe` 之类别名蒙不过去。"""
+        assets = self._without("naiba-chat-2.7.7-beta-windows-x64.zip")
+        assets["naiba-chat-2.7.7-beta-windows-x64.msi"] = {"size": 1}
+        self.assertFalse(self._check(assets))
+
+    def test_extra_assets_do_not_fail_the_check(self) -> None:
+        assets = dict(self.FULL, **{"extra-notes.txt": {"size": 1}})
+        self.assertTrue(self._check(assets))
 
 
 class CheckManifestCommitTest(unittest.TestCase):

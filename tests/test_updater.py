@@ -392,6 +392,53 @@ class SourceModeUpdateTests(unittest.TestCase):
         self.assertEqual(status["phase"], "error")
         self.assertIn("不是受支持的 naiba-chat Git 仓库", status["error"])
 
+    def test_source_repository_accepts_both_repository_names(self):
+        """仓库 2026-09-21 更名为 cat-chat，旧名由 GitHub 301 重定向继续可用。
+
+        remote 认两个名字缺一不可：老克隆仍是旧名、新克隆是新名，只认一个就会让另一半
+        用户在源码模式点「检查更新」时被误报成「不是受支持的仓库」。
+        """
+        accepted = (
+            "https://github.com/yc883123/naiba-chat.git",
+            "https://github.com/yc883123/cat-chat.git",
+            "https://github.com/yc883123/cat-chat",           # 不带 .git 后缀
+            "git@github.com:yc883123/cat-chat.git",           # SSH 形态
+            "https://github.com/YC883123/CAT-CHAT.git",       # 大小写不敏感
+        )
+        for remote in accepted:
+            with self.subTest(remote=remote):
+                self.manager._run_git = lambda *args, _r=remote, **_kwargs: _r
+                self.assertTrue(self.manager._source_repository(), remote)
+
+    def test_source_repository_rejects_lookalikes_and_forks(self):
+        """判据是**整个路径段**相等，不是「含 naiba-chat 字样」——否则别人 fork 一个同前缀仓库就能冒充。"""
+        rejected = (
+            "https://github.com/yc883123/naiba-chat-backup.git",
+            "https://github.com/yc883123/cat-chat-2.git",
+            "https://github.com/someone-else/naiba-chat.git",
+            "https://github.com/someone-else/cat-chat.git",
+            "https://gitlab.com/yc883123/cat-chat.git",
+            "https://github.com/yc883123/other.git",
+        )
+        for remote in rejected:
+            with self.subTest(remote=remote):
+                self.manager._run_git = lambda *args, _r=remote, **_kwargs: _r
+                self.assertFalse(self.manager._source_repository(), remote)
+
+    def test_source_repository_requires_git_dir_and_source_mode(self):
+        """没有 .git（拷来的目录）或已是冻结版时，一律不认作源码仓库。"""
+        self.manager._run_git = lambda *_args, **_kwargs: "https://github.com/yc883123/cat-chat.git"
+        self.assertTrue(self.manager._source_repository())
+        (self.app_dir / ".git").rmdir()
+        self.assertFalse(self.manager._source_repository())
+
+        (self.app_dir / ".git").mkdir()
+        sys.frozen = True
+        try:
+            self.assertFalse(self.manager._source_repository())
+        finally:
+            delattr(sys, "frozen")
+
 
 if __name__ == "__main__":
     unittest.main()

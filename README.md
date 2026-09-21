@@ -6,7 +6,7 @@
 
 Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。2.7.7 Beta 把子 Agent 拆成「继承历史」与「干净上下文」两个互斥工具，模式由你选、模型不再自己猜。
 
-> Cat Chat 原名 Naiba Chat。显示名自 2.7.6 Beta 起为 Cat Chat；GitHub 仓库、`naiba-chat.exe`、更新资产及既有数据位置保持不变，无需重新配置或搬迁数据。
+> Cat Chat 原名 Naiba Chat。显示名自 2.7.6 Beta 起为 Cat Chat；GitHub 仓库自 2.7.7 Beta 起更名为 `cat-chat`（旧地址自动跳转）。更新资产仍使用 `naiba-chat.exe` 与原有清单协议，既有数据位置不变，无需重新配置或搬迁数据。
 
 ## 2.7.7 Beta 主要能力
 
@@ -22,10 +22,12 @@ Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在�
 
 ### 使用 Windows 版本
 
-1. 下载 `naiba-chat-2.7.7-beta-windows-x64.zip`。
+1. 下载 `cat-chat-2.7.7-beta-windows-x64.zip`。
 2. 解压到一个可写目录。
-3. 运行 `naiba-chat.exe`。
+3. 运行 `cat-chat.exe`。
 4. 在设置中添加在线 API 或本地模型服务。
+
+> 归档里也提供旧名 `naiba-chat-2.7.7-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
 
 首次运行会创建本地数据目录。升级时请直接替换程序文件，不要删除原有 `data` 目录和配置文件。
 
@@ -34,8 +36,8 @@ Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在�
 需要 Windows、Python 3.11 或更高版本。
 
 ```powershell
-git clone https://github.com/yc883123/naiba-chat.git
-Set-Location naiba-chat
+git clone https://github.com/yc883123/cat-chat.git
+Set-Location cat-chat
 python -m pip install pywebview pystray pillow "mcp==2.1.1" pymupdf "av==18.1.0" python-multipart
 python server.py
 ```
@@ -108,11 +110,13 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 
 发布资产包含：
 
-- `naiba-chat.exe`
-- `naiba-chat-update.json`
-- `naiba-chat-2.7.7-beta-windows-x64.zip`
+- `naiba-chat.exe` —— **自动更新链路唯一使用的资产，永久保留此文件名**
+- `naiba-chat-update.json` —— 更新清单，其中 `repository` 字段永久写 `yc883123/naiba-chat`
+- `cat-chat.exe` —— 与 `naiba-chat.exe` 是同一文件，SHA-256 完全相同
+- `cat-chat-2.7.7-beta-windows-x64.zip`
+- `naiba-chat-2.7.7-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
 
-更新器会验证清单中的仓库、提交、文件名和 SHA-256。下载文件还必须是有效的 Windows 可执行文件；任何一项不一致都会终止安装。
+更新器会验证清单中的仓库、提交、文件名和 SHA-256。下载文件还必须是有效的 Windows 可执行文件；任何一项不一致都会终止安装。**自动更新始终读取 `naiba-chat.exe` 与清单里的旧仓库名**（GitHub 对旧仓库地址做长期重定向），这是已发布客户端逐字校验的协议，仓库改名后也不改值。
 
 ## Beta 说明
 
@@ -150,6 +154,6 @@ python verify\ring_usage_smoke.py      # 上下文圆环/提醒端到端冒烟�
 
 ## 项目地址
 
-- GitHub：<https://github.com/yc883123/naiba-chat>
-- Issues：<https://github.com/yc883123/naiba-chat/issues>
+- GitHub：<https://github.com/yc883123/cat-chat>（原名 <https://github.com/yc883123/naiba-chat>，旧地址自动跳转）
+- Issues：<https://github.com/yc883123/cat-chat/issues>
 

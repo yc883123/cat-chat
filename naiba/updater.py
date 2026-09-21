@@ -16,9 +16,18 @@ from typing import Any, Callable
 from naiba import net as net_io
 
 
+# ============================ 更新协议常量（永不可改） ============================
+# 下面三个常量连同清单里的 `repository` / `asset` 字段，是**已发布客户端逐字校验**的协议：
+# 旧客户端只接受 `naiba-chat.exe` 这个资产名，只接受清单 `repository == "yc883123/naiba-chat"`。
+# 仓库已更名为 `cat-chat`（2026-09-21），但 GitHub 对旧仓库名做长期 301 重定向，因此**改的是
+# 「人可见链接」，不是这三个常量**：Release 必须继续同时上传 `naiba-chat.exe` 与清单
+# `naiba-chat-update.json`，清单里的 `repository` 也必须继续写旧值。一旦停发或改值，
+# 全部历史版本用户会永久失去自动更新，且**无法用版本号界定受影响范围**（用户可能跳过任意多个版本）。
+# 唯一会破坏旧链路的操作是「在 `yc883123/naiba-chat` 这个旧名下新建仓库」——禁止。
 REPOSITORY = "yc883123/naiba-chat"
 MANIFEST_ASSET = "naiba-chat-update.json"
 EXECUTABLE_ASSET = "naiba-chat.exe"
+# ==================================================================================
 # 内存/磁盘发布列表在此时长内视为新鲜，命中即复用，减少对 GitHub API 配额的无谓消耗。
 CACHE_TTL_SECONDS = 6 * 3600
 # 合成发布条目的 tag；安装该条目时始终走 releases/latest/download 静态直连，不占 API 配额。
@@ -143,7 +152,11 @@ class UpdateManager:
         except (OSError, RuntimeError, subprocess.TimeoutExpired):
             return False
         normalized = remote.removesuffix(".git").replace("\\", "/")
-        return bool(re.search(r"github\.com[/:]yc883123/naiba-chat$", normalized))
+        # 仓库名 2026-09-21 起为 `cat-chat`（原名 `naiba-chat`，旧地址由 GitHub 301 长期重定向）。
+        # 这里**必须同时接受两个名字**：老克隆的 remote 仍是旧名，新克隆的 remote 是新名，
+        # 只认一个就会让另一半用户在源码模式点「检查更新」时被误报成「不是受支持的仓库」。
+        # 注意与 REPOSITORY 常量区分——那个是更新协议的一部分，**永远保持旧值**（见模块头注释）。
+        return bool(re.search(r"github\.com[/:]yc883123/(?:naiba-chat|cat-chat)$", normalized))
 
     def _read_build_info(self) -> dict[str, str]:
         if not getattr(sys, "frozen", False) and (self.app_dir / ".git").exists():

@@ -11,7 +11,11 @@ permissions:
 env:
   RELEASE_VERSION: 2.7.7-beta
   RELEASE_TAG: v2.7.7-beta
-  PACKAGE_NAME: naiba-chat-2.7.7-beta-windows-x64
+  # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
+  PACKAGE_NAME: cat-chat-2.7.7-beta-windows-x64
+  # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
+  # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
+  LEGACY_PACKAGE_NAME: naiba-chat-2.7.7-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -64,6 +68,11 @@ jobs:
       - name: Create update manifest
         shell: pwsh
         run: |
+          # !!! 更新协议常量，逐字不可改 !!!
+          # 仓库已更名为 cat-chat（旧地址由 GitHub 301 长期重定向），但清单这三个字段是**已发布
+          # 客户端逐字校验**的协议：`repository` 必须仍是 yc883123/naiba-chat、`asset` 必须仍是
+          # naiba-chat.exe、sha256 仍对 dist\naiba-chat.exe 计算。改任何一个，全部历史版本用户
+          # 会永久失去自动更新，且无法用版本号界定受影响范围。详见 naiba/updater.py 模块头注释。
           $hash = (Get-FileHash -Algorithm SHA256 dist\naiba-chat.exe).Hash.ToLowerInvariant()
           $releaseNotes = @(Get-Content -Raw -Encoding UTF8 release_notes.json | ConvertFrom-Json)
           $manifest = [ordered]@{
@@ -80,12 +89,20 @@ jobs:
       - name: Create Windows package
         shell: pwsh
         run: |
-          $packageDir = Join-Path "dist" "${{ env.PACKAGE_NAME }}"
-          New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
-          Copy-Item -LiteralPath "dist\naiba-chat.exe" -Destination $packageDir
-          Copy-Item -LiteralPath "naiba-chat-update.json" -Destination $packageDir
-          Copy-Item -LiteralPath "README.md" -Destination $packageDir
-          Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\${{ env.PACKAGE_NAME }}.zip" -Force
+          # 两个 zip 装的是同一份字节（cat-chat.exe 是 naiba-chat.exe 的副本，SHA-256 相同），
+          # 区别只在包内 exe 的文件名：新名包给人下载，旧名包留给既存的旧链接。
+          Copy-Item -LiteralPath "dist\naiba-chat.exe" -Destination "dist\cat-chat.exe" -Force
+          foreach ($pair in @(
+              @{ Name = "${{ env.PACKAGE_NAME }}";        Exe = "cat-chat.exe" },
+              @{ Name = "${{ env.LEGACY_PACKAGE_NAME }}"; Exe = "naiba-chat.exe" }
+          )) {
+            $packageDir = Join-Path "dist" $pair.Name
+            New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+            Copy-Item -LiteralPath "dist\$($pair.Exe)" -Destination $packageDir
+            Copy-Item -LiteralPath "naiba-chat-update.json" -Destination $packageDir
+            Copy-Item -LiteralPath "README.md" -Destination $packageDir
+            Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
+          }
 
       - name: Publish 2.7.7 Beta release
         uses: softprops/action-gh-release@v2
@@ -96,10 +113,14 @@ jobs:
           make_latest: true
           files: |
             dist/naiba-chat.exe
+            dist/cat-chat.exe
             dist/${{ env.PACKAGE_NAME }}.zip
+            dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
             Cat Chat 2.7.7 Beta Windows build from `${{ github.sha }}`。
+
+            > **关于文件名的说明**：仓库已更名为 `cat-chat`（旧链接由 GitHub 自动跳转）。本次 Release 同时提供 `cat-chat.exe` 与 `naiba-chat.exe`——**这是同一个文件，SHA-256 完全相同**；两个 ZIP 内容也等价，只有包内 exe 的文件名不同。应用内自动更新仍使用 `naiba-chat.exe` 资产与原有清单协议，**你不需要做任何操作**，已安装的旧版本会照常收到更新。
 
             **本次变化：子 Agent 分成「继承历史」与「干净上下文」两个互斥工具，模式由你选、模型不再自己猜。** 直接覆盖安装即可，**不需要迁移数据，也不需要重新配置**；历史会话、API 卡片、Agent、Skill 与 MCP 配置原样保留。
 

@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.8.1-beta
-  RELEASE_TAG: v2.8.1-beta
+  RELEASE_VERSION: 2.8.2-beta
+  RELEASE_TAG: v2.8.2-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-2.8.1-beta-windows-x64
+  PACKAGE_NAME: cat-chat-2.8.2-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-2.8.1-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-2.8.2-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -104,11 +104,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 2.8.1 Beta release
+      - name: Publish 2.8.2 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 2.8.1 Beta
+          name: Cat Chat 2.8.2 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -118,19 +118,20 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 2.8.1 Beta Windows build from `${{ github.sha }}`。
+            Cat Chat 2.8.2 Beta Windows build from `${{ github.sha }}`。
 
             > **关于文件名的说明**：仓库已更名为 `cat-chat`（旧链接由 GitHub 自动跳转）。本次 Release 同时提供 `cat-chat.exe` 与 `naiba-chat.exe`——**这是同一个文件，SHA-256 完全相同**；两个 ZIP 内容也等价，只有包内 exe 的文件名不同。应用内自动更新仍使用 `naiba-chat.exe` 资产与原有清单协议，**你不需要做任何操作**，已安装的旧版本会照常收到更新。
 
-            **本次变化：点「分支」时会先问一句——「保持当前 Agent」还是「更换 Agent」。** 直接覆盖安装即可，**不需要迁移数据，也不需要重新配置**；历史会话、API 卡片、Agent、Skill 与 MCP 配置原样保留。
+            **本次变化：端口被占用不再白屏（给中文提示后退出）；拖文件夹进输入区只发一份路径清单。** 直接覆盖安装即可，**不需要迁移数据，也不需要重新配置**；历史会话、API 卡片、Agent、Skill 与 MCP 配置原样保留。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - 以前点「分支」，新会话会连源会话**已固化的工具集**一起复制过去；工具集一固化，Agent 下拉就变成只读（这是为了保住前缀缓存）。现在分支前会先弹选择框：**保持当前 Agent** = 工具集随历史继承、缓存继续命中；**更换 Agent** = 新会话不固化工具集，回到「发首轮之前」，可以在输入区重新选 Agent 再问。
-            - 选「更换 Agent」时清掉的是三样绑在一起的东西：固化的工具集、按旧 Agent 冻结的 Skill 引用、旧的「首轮上下文」折叠卡——最后一项若留着，新会话顶部会展示上一任 Agent 的固化上下文，属于误导。**Agent 本身仍然预选原值**，换不换由你决定。
-            - 历史消息照常逐字复制，分支来源、标题 `(N)` 序号、源会话内容都不受影响；不新增数据库列，**不需要迁移**。在弹框里点「取消」不会产生新会话。
-            - 会话内换 Agent 的限制**没有放开**：已发过消息的会话仍然不允许中途换 Agent（切换会让整段历史重新计费），本次只在「分支新建会话」这一个时点给出换的机会。
+            - 以前端口被别的程序占着时，托盘图标照常出现、窗口却是一片白，一句提示都没有——换个端口重启就好了，但你根本不知道是这个原因。现在程序开窗口之前会先自己试一次：**绑不上就弹中文提示、然后退出，不再给你一个白屏**；提示里写明是哪个端口，并给出一行可复制粘贴的自查命令（`netstat -ano | findstr :<端口>`）和两条出路（关掉占用进程 / 换个端口并同步放行防火墙）。**刻意不做自动换端口**——换了之后你不知道自己在哪个端口上，手机书签、局域网访问、防火墙全对不上，宁可停下来问你。
+            - 顺便堵掉一种更难查的情况：端口没报错、但连上去的其实是**别人的服务**。现在健康检查会核对身份，不是自己人就不开窗；命令行启动也给同款中文提示与明确的退出码。
+            - **拖文件夹进输入区**：把素材目录拖进输入框，待发送区只出**一个**文件夹条目（不是几百张缩略图），发送时后端扫一份清单——绝对路径 + 目录内文件与子目录的相对路径，深度 3 层、最多 300 条、扫描超时 5 秒，计数取真实值。模型由此知道目录里有什么，要用哪张图时拼绝对路径即可走现有工具链，**你不需要逐个复制文件路径**。
+            - 工作区之外的目录会先弹一次确认（写明具体路径），点「允许」才建清单，**按会话记住、不会跨会话**。气泡里只展示前 10 项、可点开折叠查看完整清单（清单自己会说明是否被截断）。
+            - 两条边界如实说清：这个特性要靠桌面壳才拿得到文件夹真实路径（由 WebView2 提供），**纯浏览器访问时摸不到路径**，浏览器端保持原样；文件面板的目录行新增了一个「＋」，可以手工把目录加进清单。另外**运行中的「插话」通道带不了文件夹**，这种情况会直接拦住并提示，避免模型只看到半截语境。
 
-            本地验证：全量单测 **1651 例通过**（新增分支换 Agent 守门 21 例）；另有真实后端 + 无头 Edge 的端到端冒烟 26 项，含「新会话 Agent 下拉真的可用」这类可用性断言（3 张截图留证）。
+            本地验证：全量单测 **1697 例通过**（新增端口冲突守门 11 例、文件夹索引守门 35 例）；另有隔离实例 + 无头 Edge 的端到端冒烟 **41 项全过**，以及端口冲突的进程级实测（第二个实例给出中文提示并以退出码 2 结束、首个实例照常存活）。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

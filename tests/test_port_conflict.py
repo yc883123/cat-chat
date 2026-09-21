@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import socket
 import sys
 import threading
@@ -263,6 +264,51 @@ class LauncherStartupTests(unittest.TestCase):
                 thread.join(timeout=5)
         self.assertEqual(state["ours"], "ok")
         self.assertEqual(state["foreign"], "foreign", "别人的 200 不能被当成自己人")
+
+    def test_health_probe_ignores_system_proxy(self) -> None:
+        """健康检查必须绕过系统代理（2.8.2 真实回归：代理软件用户升级后起不来）。
+
+        裸 `urllib.request.urlopen` 跟随 Windows 系统代理与 `http_proxy` 环境变量，
+        而绕过列表只写「localhost」/「<local>」时不含 127.0.0.1 ⇒ 回环自检被送进
+        代理后 50 次全失败，应用被判 "down" 拒绝启动、重启也无效。这里把代理指向
+        一个必然拒绝连接的死端口：探测仍须返回 "ok"。
+        """
+        import launcher  # noqa: PLC0415 - 重型启动器按需导入
+
+        class _Ours(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+
+            def do_GET(self):  # noqa: N802
+                body = json.dumps({"status": "ok", "app": HEALTH_APP_MARKER}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Ours)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        thread.start()
+        self.addCleanup(self._shutdown_server, server, thread)
+
+        dead_proxy = "http://127.0.0.1:1"
+        # urllib 的默认 opener 在首次 urlopen 时构建并全局缓存（代理在构建时定死），
+        # 所以环境变量生效与否取决于缓存：清掉它，确保这次探测真的按新代理环境走。
+        with mock.patch.dict(os.environ, {
+            "http_proxy": dead_proxy, "HTTP_PROXY": dead_proxy,
+            "https_proxy": dead_proxy, "HTTPS_PROXY": dead_proxy,
+        }), mock.patch.object(urllib.request, "_opener", None):
+            state = launcher.Launcher()._wait_healthy(f"http://127.0.0.1:{server.server_address[1]}")
+        self.assertEqual(state, "ok", "回环健康检查被代理劫持：代理软件用户会完全无法启动")
+
+    @staticmethod
+    def _shutdown_server(server: ThreadingHTTPServer, thread: threading.Thread) -> None:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 if __name__ == "__main__":

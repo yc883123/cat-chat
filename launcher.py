@@ -22,6 +22,9 @@ import server as srv
 from naiba.core.network import port_conflict_message
 from naiba.storage.app_icon import app_icon_paths
 
+# 原生那边把文件路径交给 pywebview 需要一点时间（两条独立的消息通道）。测试会把它改成 0。
+FOLDER_DROP_SETTLE_SECONDS = 0.2
+
 
 def _app_dir() -> Path:
     """当前应用目录（自定义图标就落在它下面）：优先取已装配的 app 实例。
@@ -32,6 +35,30 @@ def _app_dir() -> Path:
     paths = getattr(getattr(srv, "APP", None), "paths", None)
     app_dir = getattr(paths, "app_dir", None)
     return Path(app_dir) if app_dir else Path(srv.APP_DIR)
+
+
+def _drop_debug_log(message: str) -> None:
+    """把"拖文件夹"这条链路的实况写一行到数据目录下的 `drop-debug.log`。
+
+    这条路是「前端 JS → WebView2 原生 → Python」三段接力，任何一段断了，用户只会看到
+    一句兜底提示，而 Python 侧连异常都看不到（原生那一步的异常抛在页面里）。所以每一段
+    都落一行日志，出问题时**直接读文件**就能定位，不用再问用户要现象。
+    """
+    try:
+        paths = getattr(getattr(srv, "APP", None), "paths", None)
+        data_dir = getattr(paths, "data_dir", None)
+        if not data_dir:
+            data_dir = getattr(srv, "DATA_DIR", None)
+        if not data_dir:
+            return
+        target = Path(data_dir) / "drop-debug.log"
+        if target.exists() and target.stat().st_size > 256 * 1024:
+            target.unlink(missing_ok=True)
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(target, "a", encoding="utf-8") as fh:
+            fh.write(f"{stamp} {message}\n")
+    except Exception:
+        pass  # 诊断日志永远不该拦住功能
 
 
 def _resolve_app_icon():
@@ -126,6 +153,71 @@ class JsApi:
                 pass
         return {"ok": True}
 
+    # ---- 拖文件夹进输入区：把"拖进来的文件夹在硬盘上的真实路径"交回前端 ----
+    def naibaFolderDrop(self, native_error: str = "") -> dict:
+        """前端在识别出"拖进来的是目录"时，主动追问：刚才那个目录的绝对路径是啥？
+
+        为什么不继续用 pywebview 的 drop 事件回调（`Launcher._on_composer_drop`）：
+        WebView2 的 `chrome.webview.postMessageWithAdditionalObjects` 只要收到不受支持的
+        对象就会**抛异常、整条消息作废**（微软官方文档写明），而 pywebview 注入的 drop
+        监听正是走这一步。它一抛，紧随其后的 `postMessage` 也不会执行 —— 意味着
+        **Python 侧永远等不到那个事件**，页面上却什么错都看不到，前端只能超时弹兜底提示。
+        这正是"浏览器里拖文件夹拿不到完整路径"这句提示在桌面客户端里也出现的原因。
+
+        现在的分工（三段各自可控）：
+          1. 前端在 drop 事件里**自己**调 `postMessageWithAdditionalObjects`，并把异常抓下来
+             （异常文本通过 `native_error` 带进来，兜底时能一眼看出是"原生这一步就废了"）；
+          2. WebView2 把文件对象连同真实路径交给 pywebview，pywebview 存进 `_dnd_state['paths']`
+             （**前提是有 drop 监听被注册过**，见 `_register_drop_listener`）；
+          3. 这里直接读 `_dnd_state['paths']`，只挑**目录**，交回前端去建索引。
+
+        普通文件不在这里管：它们仍走前端原有的上传链路（`uploadFiles`）。
+        """
+        result: dict = {"dirs": [], "reason": "start", "native_error": str(native_error or "")}
+        try:
+            from webview.dom import _dnd_state
+        except Exception as exc:  # pragma: no cover - 环境相关
+            result["reason"] = "import-failed"
+            _drop_debug_log(f"folderDrop import failed: {exc!r}")
+            return result
+
+        # 原生消息（第 2 段）和这次桥调用是两条独立的路，给它一点落地时间。
+        # 200ms 足够：那条消息在 drop 事件里就同步发出去了，桥调用还要一个来回。
+        time.sleep(FOLDER_DROP_SETTLE_SECONDS)
+        try:
+            raw = list(_dnd_state.get("paths") or [])
+        except Exception as exc:  # pragma: no cover - 环境相关
+            result["reason"] = "state-failed"
+            _drop_debug_log(f"folderDrop state failed: {exc!r}")
+            return result
+
+        dirs: list[str] = []
+        for entry in raw:
+            try:
+                full = str(entry[1] or "").strip()
+            except Exception:
+                continue
+            if not full or not os.path.isdir(full):
+                continue
+            if full not in dirs:
+                dirs.append(full)
+
+        # 消费过的路径要清掉：这个列表是 pywebview 的全局队列，留着会被**下一次**拖拽
+        # 当成"这次的新路径"，也会让 pywebview 的事件回调按文件名错配到别的对象上。
+        if raw:
+            try:
+                _dnd_state["paths"] = []
+            except Exception:
+                pass
+
+        result["dirs"] = dirs
+        result["reason"] = "ok" if dirs else ("empty" if not raw else "no-dir")
+        _drop_debug_log(
+            "folderDrop raw=%d dirs=%d reason=%s native_error=%r dirs=%r"
+            % (len(raw), len(dirs), result["reason"], result["native_error"], dirs)
+        )
+        return result
+
 
 class Launcher:
     def __init__(self) -> None:
@@ -192,11 +284,19 @@ class Launcher:
         ``foreign``＝端口上确实有 HTTP 服务在应答，但**不是本应用**（`/api/health` 的
         `app` 标记对不上）。这种情形必须当场失败：否则窗口会开到别人的应用上，
         用户在陌生界面里打字（旧实现只看 status code，5 秒白等后还照常开窗）。
+
+        健康检查**必须绕过一切代理**（`ProxyHandler({})`）：裸 `urllib.request.urlopen`
+        会跟随 Windows 系统代理与 `http_proxy` 环境变量，而代理绕过列表里只写
+        「localhost」或「<local>」时**不含 127.0.0.1**（`<local>` 只匹配不带点的名字）。
+        2.8.2 真实用户案例：开着代理软件的用户从 2.7.6 升上来就起不来、重启无效——
+        回环自检被送进代理后 50 次全失败，应用被判 "down" 拒绝启动。回环请求本来
+        就不该经过任何代理，这里必须显式断开。
         """
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         last = "down"
         for _ in range(50):
             try:
-                with urllib.request.urlopen(f"{local_url}/api/health", timeout=1) as response:
+                with opener.open(f"{local_url}/api/health", timeout=1) as response:
                     status = int(getattr(response, "status", 0) or 0)
                     body = response.read()
             except urllib.error.HTTPError:
@@ -319,33 +419,50 @@ class Launcher:
             except OSError:
                 continue
         if not paths or self.window is None:
+            _drop_debug_log(
+                "dropEvent: files=%d dirs=%d（无目录，交给前端原有链路）"
+                % (len(files), len(paths))
+            )
             return
         script = f"window.naibaHandleDroppedFolders({json.dumps(paths, ensure_ascii=False)});"
         try:
             self.window.evaluate_js(script)
-        except Exception:
-            pass  # 页面可能正在刷新：拿不到就算了，前端有超时降级提示
+            _drop_debug_log("dropEvent: 已回交前端 %d 个目录" % len(paths))
+        except Exception as exc:
+            # 页面可能正在刷新：拿不到就算了，前端有超时降级提示
+            _drop_debug_log(f"dropEvent: 回交前端失败 {exc!r}")
 
     def _register_drop_listener(self) -> None:
         """给输入区挂 drop 监听（pywebview 的 DOM 事件 API）。
 
+        **这一步不只是为了那条事件回调，更是"拖文件夹"整条链路的前置开关**：
+        WebView2 收到 `postMessageWithAdditionalObjects('FilesDropped', ...)` 时，
+        pywebview 会先看 `_dnd_state['num_listeners']`——**为 0 就整条消息丢掉**，
+        真实路径根本不落库。也就是说，这里没挂上，前端再怎么调原生接口都拿不到路径，
+        而用户只会看到一句兜底提示。所以这里失败必须留痕（见 `_drop_debug_log`）。
+
         必须等页面 loaded 之后再挂：`get_element` 走 evaluate_js，页面没加载就没有 DOM。
-        每次 loaded 先摘上一次（刷新页面会重建 DOM，但 Python 侧的事件表会累积），
-        挂失败也不影响其它功能（前端另有超时降级提示），所以整体吞异常。
+        每次 loaded 先摘上一次（刷新页面会重建 DOM，但 Python 侧的事件表会累积）。
         """
         try:
             from webview.dom import DOMEventHandler
 
             node = self.window.dom.get_element(".composer-wrap")
             if node is None:
+                _drop_debug_log("dropListener: .composer-wrap 未找到（页面结构变了？）")
                 return
             try:
                 node.events.drop -= self._on_composer_drop
             except Exception:
-                pass
+                pass  # 首次挂载时本来就没有，pywebview 内部会记一条 warning
             node.events.drop += DOMEventHandler(self._on_composer_drop)
-        except Exception:
-            pass
+            from webview.dom import _dnd_state
+
+            _drop_debug_log(
+                "dropListener: 已挂载 num_listeners=%s" % _dnd_state.get("num_listeners")
+            )
+        except Exception as exc:
+            _drop_debug_log(f"dropListener 挂载失败: {exc!r}")
 
     def run(self) -> None:
         import webview
@@ -386,14 +503,24 @@ class Launcher:
         if health != "ok":
             # 旧实现这里没有失败分支：5 秒白等之后照常开托盘、开窗口，用户看到的是
             # ERR_CONNECTION_REFUSED（或更糟——开到别人的服务上）。现在直接给中文原因。
-            reason = (
-                f"端口 {port} 上另有服务在应答，但它不是 Cat Chat。"
-                if health == "foreign"
-                else f"本机服务在 5 秒内没有就绪（端口 {port}）。"
-            )
-            raise self._abort_startup(
-                f"{reason}\n\n{port_conflict_message(port, host=host)}", instance_lock
-            )
+            if health == "foreign":
+                reason = (
+                    f"端口 {port} 上另有服务在应答，但它不是 Cat Chat。\n\n"
+                    f"{port_conflict_message(port, host=host)}"
+                )
+            else:
+                # "down"（绑定已成功、但自检连不上）绝不能再拼「无法绑定」那段文案——
+                # 2.8.2 用户看到的弹窗因此自相矛盾（绑定成功却提示端口被占），把排查
+                # 引向了 netstat。这里的真话是：绑定成功、自检不通，方向是代理/安全软件。
+                reason = (
+                    f"本机服务在 5 秒内没有就绪（端口 {port}）。\n\n"
+                    f"端口绑定本身是成功的（{host}:{port}），但启动自检"
+                    f" http://127.0.0.1:{port}/api/health 一直连不上。\n"
+                    "常见原因：代理软件接管了 127.0.0.1 的请求，或安全软件拦截了本进程的"
+                    "回环访问。请在代理软件中放行/绕过 127.0.0.1，或把 Cat Chat 加入"
+                    "安全软件白名单后重试。"
+                )
+            raise self._abort_startup(reason, instance_lock)
 
         # 图标只解析一次、托盘与窗口共用（见 _resolve_app_icon：各写一份会出现
         # 「托盘换了、窗口没换」的半截状态）。

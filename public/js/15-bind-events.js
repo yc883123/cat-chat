@@ -661,6 +661,23 @@ const DESKTOP_FOLDER_WAIT_MS = 800;
 
 let desktopFolderWaiter = null;   // 单次等待者：launcher 把路径送回来时兑现
 
+// 同一批路径可能从两条通道回来（见 handleFolderDrop），按路径 + 时间做个去重，
+// 免得一次拖拽长出两个一模一样的索引 chip。
+const FOLDER_DROP_DEDUPE_MS = 5000;
+const recentFolderPaths = new Map();
+
+function isFreshFolderPath(path) {
+  const now = Date.now();
+  const last = recentFolderPaths.get(path) || 0;
+  recentFolderPaths.set(path, now);
+  if (recentFolderPaths.size > 64) {
+    for (const [key, ts] of recentFolderPaths) {
+      if (now - ts > FOLDER_DROP_DEDUPE_MS) recentFolderPaths.delete(key);
+    }
+  }
+  return now - last > FOLDER_DROP_DEDUPE_MS;
+}
+
 /** 这次 drop 里有没有目录（按条目而非 files 判断）。 */
 function hasDroppedDirectory(event) {
   const items = event.dataTransfer?.items || [];
@@ -674,7 +691,7 @@ function hasDroppedDirectory(event) {
   return false;
 }
 
-/** 等 launcher 把"拖入目录的绝对路径"送回来；超时返回 null（浏览器端永远走这条）。 */
+/** 等 launcher 从旧通道（pywebview 的 drop 事件回调）把路径送回来；超时返回 null。 */
 function waitDesktopFolderPaths() {
   if (!isPywebview()) return Promise.resolve(null);
   return new Promise((resolve) => {
@@ -690,7 +707,52 @@ function waitDesktopFolderPaths() {
   });
 }
 
-async function handleFolderDrop(event) {
+// 把"拖进来的文件对象"直接交给 WebView2 原生：**这是拿到硬盘真实路径的唯一入口**。
+// 必须在这里同步调用（dataTransfer 出了事件就失效）。返回原生这一步的异常文本，
+// 空字符串表示没抛异常。
+//
+// 为什么要自己调：pywebview 注入的 drop 监听也走这一步，但 WebView2 只要收到不受支持的
+// 对象就抛异常、**整条消息作废**（官方文档），而它抛在页面里、Python 侧完全看不到——
+// 于是"事件回调"这条路会静默死掉。自己调就能把异常抓在手里，并且配合
+// `naibaFolderDrop`（直接读 pywebview 收到的路径）绕开那条死路。
+function handFilesToNative(files) {
+  try {
+    const wv = window.chrome?.webview;
+    if (!wv || typeof wv.postMessageWithAdditionalObjects !== 'function') {
+      return 'no-postMessageWithAdditionalObjects';
+    }
+    if (!files || !files.length) return 'empty-filelist';
+    wv.postMessageWithAdditionalObjects('FilesDropped', files);
+    return '';
+  } catch (error) {
+    return `native-throw: ${(error && (error.message || error.name)) || error}`;
+  }
+}
+
+/** 主动向桌面端要"这次拖进来的目录的真实路径"（不依赖 pywebview 的事件回调）。 */
+async function requestDesktopFolderPaths(nativeError) {
+  if (!isPywebview()) return { dirs: [], reason: 'browser' };
+  try {
+    const res = await window.pywebview.api.naibaFolderDrop(nativeError || '');
+    const dirs = Array.isArray(res?.dirs) ? res.dirs.filter(Boolean) : [];
+    return { dirs, reason: (res && res.reason) || 'noresult' };
+  } catch (error) {
+    return { dirs: [], reason: `api-failed: ${(error && error.message) || error}` };
+  }
+}
+
+/** 建 chip（同一路径短时间内只建一次）。 */
+async function addFolderPathsOnce(paths) {
+  let added = 0;
+  for (const path of paths) {
+    if (!isFreshFolderPath(path)) continue;
+    await addFolderChip(path, { quiet: true });
+    added += 1;
+  }
+  return added;
+}
+
+async function handleFolderDrop(event, nativeError) {
   // 混合拖入（文件 + 文件夹）：普通文件仍走原链路，目录另行处理。
   const plainFiles = [...(event.dataTransfer?.files || [])].filter((file) => {
     try {
@@ -700,16 +762,23 @@ async function handleFolderDrop(event) {
     }
   });
   if (plainFiles.length) uploadFiles(plainFiles);
-  const paths = await waitDesktopFolderPaths();
-  if (paths?.length) {
-    for (const path of paths) await addFolderChip(path, { quiet: true });
-    return;
-  }
+  // 两条通道一起等：① 主动追问（新，主通道）② 旧通道回交（launcher 直接回推，见
+  // naibaHandleDroppedFolders）。旧的留着是因为它便宜，且"没有等待者时会自己建 chip"。
+  const [waited, asked] = await Promise.all([
+    waitDesktopFolderPaths(),
+    requestDesktopFolderPaths(nativeError),
+  ]);
+  const added = await addFolderPathsOnce([...(waited || []), ...asked.dirs]);
+  if (added > 0) return;
   // 拿不到路径：宁可明确说清，也不能把目录当文件传上去（只会得到一个 0 字节附件）。
-  toast('浏览器里拖文件夹拿不到完整路径：请在桌面客户端里拖入，或用输入框的「@」选择文件夹');
+  toast(
+    isPywebview()
+      ? '没能读到这个文件夹的位置，请用输入框的「@」选择文件夹'
+      : '浏览器里拖文件夹拿不到完整路径：请在桌面客户端里拖入，或用输入框的「@」选择文件夹'
+  );
 }
 
-// launcher 的 drop 监听（pywebview DOM 事件）把目录绝对路径从这里交回来。
+// launcher 的 drop 事件回调（pywebview DOM 事件）把目录绝对路径从这里交回来。
 // 浏览器端永远不会被调用——Chromium 不给绝对路径（安全模型），那里只走上面的降级提示。
 window.naibaHandleDroppedFolders = (paths) => {
   const list = (Array.isArray(paths) ? paths : []).map((item) => String(item || '')).filter(Boolean);
@@ -719,7 +788,7 @@ window.naibaHandleDroppedFolders = (paths) => {
     return;
   }
   // 没有等待者（前端没识别出目录、或事件顺序反了）：直接建 chip，别丢用户的操作。
-  list.forEach((path) => { void addFolderChip(path, { quiet: true }); });
+  void addFolderPathsOnce(list);
 };
 
 export function bindEvents() {
@@ -1205,7 +1274,10 @@ export function bindEvents() {
       event.preventDefault();
       composerWrap.classList.remove('dragover');
       if (hasDroppedDirectory(event)) {
-        void handleFolderDrop(event);
+        // 必须在同步阶段把 File 对象交给原生（dataTransfer 出了事件就失效），
+        // 顺便把原生这一步的异常抓下来传给 Python 侧做诊断。
+        const nativeError = handFilesToNative(event.dataTransfer?.files);
+        void handleFolderDrop(event, nativeError);
         return;
       }
       if (event.dataTransfer.files?.length) uploadFiles([...event.dataTransfer.files]);

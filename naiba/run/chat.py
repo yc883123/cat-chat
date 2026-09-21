@@ -208,11 +208,18 @@ class ConversationRunMixin:
         attachments = body.get("attachments") or []
         if not isinstance(attachments, list):
             raise ValueError("attachments 必须是数组")
+        # 拖入的文件夹：只带路径，索引在**发送那一刻**由后端现扫（见 folder_indexes_for_send），
+        # 免得前端把一份几百条的清单来回传，也保证清单与真正送进模型的那一刻一致。
+        folders = body.get("folders") or []
+        if not isinstance(folders, list):
+            raise ValueError("folders 必须是数组")
         if not conversation_id:
             raise ValueError("conversation_id 不能为空")
-        # 纯附件轮次（只发文件/图片、不写字）合法：文字与可用附件至少有一个。
+        # 纯附件/纯文件夹轮次（只发文件、不写字）合法：文字与可用载荷至少有一个。
         if not message and not any(
             isinstance(item, dict) and str(item.get("path") or "").strip() for item in attachments
+        ) and not any(
+            str(item.get("path") if isinstance(item, dict) else item or "").strip() for item in folders
         ):
             raise ValueError("message 和 attachments 不能同时为空")
         # 附件落地校验：宿主缓存树内的文件已被清理/删除时明确报错，不把幽灵路径喂给模型
@@ -327,6 +334,10 @@ class ConversationRunMixin:
                 {"mode": "exclusive", "skill_ids": frozen_ids, "referenced_ids": referenced_ids},
                 catalog=catalog,
             )
+            # 拖入文件夹：索引必须在建 run 之前落定（它要同时进 metadata 与本轮模型载荷）。
+            # 未在会话里确认过的工作区外路径会在这里被拒（口径二，见 app.folder_index）——
+            # ValueError 一路冒到 HTTP 层变 400，绝不落到半个 run 上。
+            folder_indexes = self.app.folder_indexes_for_send(conversation_id, folders) if folders else []
             snapshot = {
                 "agent": agent,
                 "provider_id": str(conversation.get("provider_id") or ""),
@@ -337,6 +348,8 @@ class ConversationRunMixin:
                 "generation_options": self._generation_options(self.app.config, model_key),
                 "skill_policy": skill_policy,
                 "attachments": attachments,
+                # 文件夹索引快照（发送那一刻现扫）：落进消息 metadata，并由 _run_chat 拼进模型载荷。
+                "folder_indexes": folder_indexes,
                 "interaction_mode": mode,
                 "plan_id": plan_id,
                 # Freeze the conversation workspace into the run snapshot so
@@ -370,6 +383,7 @@ class ConversationRunMixin:
                     plan_id,
                     display_message=str(body.get("display_message") or ""),
                     title_text=message,
+                    folder_indexes=folder_indexes,
                 )
             except RuntimeError as exc:
                 active_error = self._active_error(exc)
@@ -523,9 +537,11 @@ class ConversationRunMixin:
             allowed_tool_names = {str(item) for item in (snapshot.get("allowed_tools") or [])}
             pdf_tools_enabled = "read_pdf" in allowed_tool_names
             video_tools_enabled = "extract_frames" in allowed_tool_names
-            # 与历史重放（build_model_history）同一拼接口径：纯附件轮次补固定提示行。
+            # 与历史重放（build_model_history）同一拼接口径：纯附件/纯文件夹轮次补固定提示行。
             effective = compose_user_content(
-                message, uploads, pdf_tools=pdf_tools_enabled, video_tools=video_tools_enabled
+                message, uploads,
+                folder_indexes=snapshot.get("folder_indexes") or [],
+                pdf_tools=pdf_tools_enabled, video_tools=video_tools_enabled,
             )
             model_key = str(snapshot.get("model_key") or "")
             if not model_key and snapshot.get("provider_id"):

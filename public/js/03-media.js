@@ -576,6 +576,49 @@ export function uploadedFileMarkup(files = []) {
   return `<div class="media-grid">${html}</div>`;
 }
 
+// 气泡里默认露出的文件夹条目数：再多就刷屏了（完整清单在 `<details>` 里，上限 300 条）。
+export const FOLDER_INDEX_PREVIEW = 10;
+
+// 用户气泡里的文件夹索引：**看得见，但只露个头**。
+// 完整清单（上限 300 条）同时进了模型载荷，那是 metadata 的事；气泡把 300 行路径全铺出来
+// 只会把对话框变成文件列表。默认只列前 10 条 + 一行「另有 N 项」，点摘要才展开剩下的。
+// 用原生 <details> 而不是自绘开合：消息重渲染（懒加载、流式收尾）会把自绘的展开状态冲掉，
+// 原生元素的状态跟着 DOM 一起重建，不需要在任何地方维护。
+export function folderIndexMarkup(indexes = []) {
+  const items = (Array.isArray(indexes) ? indexes : []).filter((item) => item && item.path);
+  if (!items.length) return '';
+  const blocks = items.map((item) => {
+    const entries = Array.isArray(item.entries) ? item.entries : [];
+    const total = Number(item.total ?? entries.length) || 0;
+    const images = Number(item.image_count || 0);
+    const preview = entries.slice(0, FOLDER_INDEX_PREVIEW);
+    const rest = entries.slice(FOLDER_INDEX_PREVIEW);
+    const hidden = Math.max(0, total - preview.length);
+    const lines = (list) => list
+      .map((entry) => `<li>${escapeHtml(String(entry?.rel || ''))}</li>`)
+      .join('');
+    const hint = hidden
+      ? `<li class="folder-index-more">另有 ${hidden} 项未显示${rest.length ? '（点开查看）' : ''}</li>`
+      : '';
+    const body = rest.length
+      ? `<ul class="folder-index-list">${lines(rest)}`
+        + (item.truncated
+          ? `<li class="folder-index-more">…仅列出前 ${entries.length} 项，另有 ${Math.max(0, total - entries.length)} 项未列出（可用工具按路径读取）</li>`
+          : '')
+        + '</ul>'
+      : '';
+    const name = escapeHtml(String(item.name || '文件夹'));
+    const path = escapeHtml(String(item.path));
+    return `<details class="folder-index">
+      <summary><span class="folder-index-head">📁 ${name} · 共 ${total} 项（含 ${images} 图）</span>
+      <ul class="folder-index-preview">${lines(preview)}${hint}</ul></summary>
+      ${body}
+      <span class="folder-index-path" title="${path}">${path}</span>
+    </details>`;
+  }).join('');
+  return `<div class="folder-indexes">${blocks}</div>`;
+}
+
 export function mediaMarkup(attachments = []) {
   if (!attachments.length) return '';
   const items = attachments.map((attachment) => {

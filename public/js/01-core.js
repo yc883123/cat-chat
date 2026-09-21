@@ -870,6 +870,9 @@ export async function api(path, options = {}) {
   if (!response.ok) {
     const error = new Error(payload.error || `HTTP ${response.status}`);
     error.status = response.status;
+    // 保留响应体：有些接口的错误体带可操作信息（如 403 + needs_confirm，前端据此弹确认框），
+    // 只留 status 就只能靠猜。
+    error.payload = payload;
     throw error;
   }
   return payload;

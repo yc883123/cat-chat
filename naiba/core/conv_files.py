@@ -4,18 +4,22 @@
 保存写回必须同时满足两者；越界路径（../穿越、绝对路径、http 前缀）一律拒绝。
 config 对象只要求 resolve_workspace_dir(raw) 契约（窄接口，见设计文档 §2.1）。
 
-另含两项会话工作区能力（输入框 @ 引用文件/目录）：
+另含三项会话工作区能力（输入框 @ 引用文件/目录）：
 - ``browse_workspace_tree``：会话工作区内的浅层目录浏览（只读、越界拒绝、隐藏项过滤）；
-- ``resolve_file_references``：把用户消息里的 ``@相对路径`` 解析成工作区内绝对路径（模型可见文本）。
+- ``resolve_file_references``：把用户消息里的 ``@相对路径`` 解析成工作区内绝对路径（模型可见文本）；
+- ``folder_index``：把"拖进输入区的文件夹"扫成一份**相对路径清单**（给模型看它下面有什么，
+  用户不必逐个复制文件路径），带深度/条数/超时三重闸门。
 """
 
 from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
+from naiba.core.media_types import media_kind_of
 from naiba.core.paths import path_within
 
 _CONV_FILE_SNIFF_BYTES = 4096          # 二进制嗅探长度
@@ -26,6 +30,25 @@ _CONV_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", 
 # 工作区浏览：单目录最多返回条目数与恒定隐藏项（VCS/宿主写入探测目录）。
 WORKSPACE_BROWSE_LIMIT = 500
 _ALWAYS_HIDDEN_NAMES = frozenset({".git", ".naiba_write_test"})
+
+# ---- 文件夹索引闸门（三个值都会影响**送进模型的字符量**，不是体验参数）-----------
+# 一次拖入可能是几百上千个文件的素材目录：清单原样拼进上下文能瞬间吃掉几万字符。
+# 深度 / 条数 / 扫描超时三重闸门缺一不可——条数挡住"一层里塞几千个"，深度挡住
+# "递归进 node_modules 式的深井"，超时挡住"网络盘/机械盘上慢到没边"。
+FOLDER_INDEX_MAX_DEPTH = 3
+FOLDER_INDEX_MAX_ENTRIES = 300
+FOLDER_INDEX_SCAN_TIMEOUT = 5.0
+
+
+class FolderConfirmRequired(ValueError):
+    """文件夹在会话工作区之外，且本会话尚未确认过读取（口径二，见计划 B.5）。
+
+    带上 ``path`` 让 HTTP 层回一个可操作的结构（前端据此弹一次确认），而不是一句干巴巴的 403。
+    """
+
+    def __init__(self, path: str) -> None:
+        super().__init__("该文件夹不在会话工作区内，需要先确认允许读取")
+        self.path = str(path)
 
 # @ 引用 token：@ 必须位于行首或空白之后；支持 @"含 空格 的路径" 引号形态。
 _FILE_REF_RE = re.compile(r'(?<!\S)@(?:"(?P<quoted>[^"\n]+)"|(?P<plain>[^\s]+))')
@@ -295,3 +318,106 @@ def resolve_file_references(text: str, root: Path | None) -> str:
         pos = end
     out.append(value[pos:])
     return "".join(out)
+
+
+# ---- 文件夹索引（拖文件夹进输入区：只给模型一份路径清单，不上传内容） --------------
+
+def _scan_folder_tree(
+    target: Path,
+    *,
+    max_entries: int,
+    max_depth: int,
+    deadline: float,
+) -> dict[str, Any]:
+    """深度优先扫一棵目录树，返回计数 + **相对该目录**的条目清单。
+
+    - 计数（``total`` / ``image_count`` / ``dir_count``）是**真实值**：条目清单被截断了也照数，
+      否则气泡上的"共 128 项"会随截断一起变小，用户会以为文件丢了；
+    - 条目清单只在预算内累积（``max_entries``）——它要拼进模型上下文，条数必须硬顶；
+    - 点号开头条目与 ``_ALWAYS_HIDDEN_NAMES`` 一律跳过（.git 之类对"这个目录里有什么图"
+      毫无信息量，纯属噪音）；
+    - 超时/超条数都置 ``truncated``，并给出 ``truncated_reason``，让前端与模型都说得清
+      "这份清单不全，别当成目录的全部内容"。
+    """
+    entries: list[dict[str, Any]] = []
+    total = 0
+    image_count = 0
+    dir_count = 0
+    truncated_reason = ""
+    # 栈里放 (目录, 深度)；深度口径：直接躺在 target 里的文件算第 1 层。
+    stack: list[tuple[Path, int]] = [(target, 0)]
+    while stack:
+        if time.monotonic() > deadline:
+            truncated_reason = "timeout"
+            break
+        directory, depth = stack.pop()
+        try:
+            children = sorted(directory.iterdir(), key=lambda item: item.name.lower())
+        except OSError:
+            continue
+        descend: list[tuple[Path, int]] = []
+        for child in children:
+            name = child.name
+            if name.startswith(".") or name in _ALWAYS_HIDDEN_NAMES:
+                continue
+            try:
+                if child.is_dir():
+                    dir_count += 1
+                    if depth + 1 < max_depth:
+                        descend.append((child, depth + 1))
+                    continue
+                size = child.stat().st_size
+            except OSError:
+                continue
+            total += 1
+            kind = media_kind_of(str(child)) or "file"
+            if kind == "image":
+                image_count += 1
+            if len(entries) >= max_entries:
+                truncated_reason = truncated_reason or "count"
+                continue
+            try:
+                rel = child.relative_to(target).as_posix()
+            except ValueError:  # 理论上不会发生；真发生就退化成绝对路径而不是丢条目
+                rel = str(child)
+            entries.append({"rel": rel, "kind": kind, "size": size})
+        # 逆序入栈 ⇒ 出栈后按名称升序处理，扫描结果与文件系统顺序无关（可复现）。
+        stack.extend(reversed(descend))
+    return {
+        "total": total,
+        "image_count": image_count,
+        "dir_count": dir_count,
+        "entries": entries,
+        "truncated": bool(truncated_reason),
+        "truncated_reason": truncated_reason,
+    }
+
+
+def folder_index(
+    target: Path,
+    *,
+    max_entries: int = FOLDER_INDEX_MAX_ENTRIES,
+    max_depth: int = FOLDER_INDEX_MAX_DEPTH,
+    timeout: float = FOLDER_INDEX_SCAN_TIMEOUT,
+) -> dict[str, Any]:
+    """把 ``target`` 目录扫成一份索引（只读，不读文件内容）。
+
+    ``target`` 必须已经是**调用方校验过的绝对路径**（存在性/权限口径见 ``app.folder_index``）。
+    """
+    path = Path(target)
+    name = path.name or str(path)
+    result: dict[str, Any] = {
+        "name": name,
+        "path": str(path),
+        "max_depth": int(max_depth),
+        "max_entries": int(max_entries),
+    }
+    result.update(
+        _scan_folder_tree(
+            path,
+            max_entries=int(max_entries),
+            max_depth=int(max_depth),
+            deadline=time.monotonic() + max(0.1, float(timeout)),
+        )
+    )
+    return result

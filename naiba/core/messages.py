@@ -10,6 +10,9 @@ from __future__ import annotations
 MESSAGE_METADATA_KEYS: tuple[str, ...] = (
     "attachments",
     "attachments_truncated",
+    # 拖入文件夹的路径索引快照（`[{name, path, total, image_count, entries[...]}]`）：
+    # 气泡按它渲染「前 N 条 + 折叠」，模型上下文按它拼出完整清单（见 core.attachments）。
+    "folder_indexes",
     "reasoning",
     "tool_runs",
     "trace",
@@ -49,6 +52,9 @@ class MetadataKeys:
     # 消息级媒体分桶截断的自述信息（{"total","shown","kinds"}）：超出上限时不静默，
     # 前端在媒体网格下方渲染"共 N 张，仅显示前 M 张"。
     ATTACHMENTS_TRUNCATED = "attachments_truncated"
+    # 拖入文件夹的路径索引快照：写入方 run/chat（发送那一刻生成），重放方 core.history 与
+    # 前端气泡渲染共用（`entries` 是相对该文件夹的路径清单，最多 300 条）。
+    FOLDER_INDEXES = "folder_indexes"
     REASONING = "reasoning"
     TOOL_RUNS = "tool_runs"
     TRACE = "trace"

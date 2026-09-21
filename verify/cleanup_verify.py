@@ -105,6 +105,8 @@ KEEP = {
     "chat_font_smoke.py", "chat_font_smoke.cjs", "frozen_chat_font_check.py",
     # 供应商预设（「只填 API Key」）+ 首启引导向导冒烟（§六 已登记；Python 自编排 + Node 检查）
     "provider_presets_smoke.py", "provider_presets_smoke.cjs",
+    # 拖文件夹进输入区（路径索引 + 工作区外确认）冒烟（§六 已登记；Python 自编排 + 无头 Edge）
+    "folder_drop_smoke.py", "folder_drop_smoke.cjs",
     # 隔离实例的公共 harness：维护说明「归档说明」点名要求留在 verify/（被 tasks_panel_smoke.py 依赖）
     "_serve_tmp.py",
     # 本脚本自身

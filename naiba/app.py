@@ -35,7 +35,13 @@ from naiba.core.migration import (
 )
 from naiba.core.media_types import media_exts_payload
 from naiba.core.network import network_access_status
-from naiba.core.conv_files import _conv_workspace_root, browse_workspace_tree
+from naiba.core.conv_files import (
+    FolderConfirmRequired,
+    _conv_file_target,
+    _conv_workspace_root,
+    browse_workspace_tree,
+    folder_index,
+)
 from naiba.core.paths import path_within
 from naiba.jobs import JobRegistry
 from naiba.llm.provider_presets import apply_preset_values, provider_preset_key_url, provider_presets_payload
@@ -96,6 +102,9 @@ class NaibaChatApp:
         # 保持历史兼容行为（跟随系统代理），直到用户在运行设置中显式保存。
         net_io.configure(self.config.data.get("proxy"))
         self.listener_host = str(self.config.data.get("host", "0.0.0.0"))
+        # 会话级「允许读取工作区外文件夹」的确认记录（口径二，见 core.conv_files.FolderConfirmRequired）。
+        # 只存内存：它表达的是"这一次对话里用户点过同意"，进程重启后重新问一次没有损失。
+        self._confirmed_folders: dict[str, set[str]] = {}
         # ConfigStore may reveal a custom data directory after the legacy
         # bootstrap migration has already run. Rebind all runtime globals and
         # carry over the bootstrap directory so the same process reads the
@@ -361,6 +370,61 @@ class NaibaChatApp:
             raise ValueError("工作区不可用")
         self.config.ensure_workspace_writable(root)
         return browse_workspace_tree(root, raw, hide_dotfiles=conversation is not None)
+
+    # ---- 拖入文件夹的路径索引（"让模型知道这个目录里有什么"，不传内容） ----
+    @staticmethod
+    def _folder_key(path: Path) -> str:
+        """确认记录的归一键：分隔符统一 + 去尾斜杠 + 忽略大小写（Windows 语义）。"""
+        return str(path).replace("\\", "/").rstrip("/").lower()
+
+    def _confirmed_folder_paths(self, conversation_id: str) -> set[str]:
+        return self._confirmed_folders.get(str(conversation_id or ""), set())
+
+    def folder_index(self, raw_path: Any, conversation_id: str = "", allow_outside: bool = False) -> dict[str, Any]:
+        """扫一个文件夹的索引（只读、不读文件内容）。
+
+        路径口径（计划 B.5 口径二）：会话工作区内的路径直接放行；工作区外的路径**必须**
+        先在本会话里确认过一次（``allow_outside=True`` 表示"用户已在界面上点过同意"，
+        确认按会话记住）。这样"拖个素材目录进来"不用拷进工作区，但也不会在用户没表态时
+        静默扫描工作区外的任意目录。拒绝时抛 ``FolderConfirmRequired``（HTTP 层转成可操作的 403）。
+        """
+        conversation: dict[str, Any] | None = None
+        if str(conversation_id or "").strip():
+            conversation = self.storage.get_conversation(str(conversation_id).strip())
+            if not conversation:
+                raise LookupError("对话不存在")
+        root = _conv_workspace_root(conversation, self.config)
+        target = _conv_file_target(raw_path, root)
+        if target is None:
+            raise ValueError("文件夹路径无效")
+        if not target.exists() or not target.is_dir():
+            raise ValueError("目录不存在或已被移动")
+        if not (root and path_within(target, root)):
+            key = self._folder_key(target)
+            if key not in self._confirmed_folder_paths(conversation_id):
+                if not allow_outside:
+                    raise FolderConfirmRequired(str(target))
+                self._confirmed_folders.setdefault(str(conversation_id or ""), set()).add(key)
+        return folder_index(target)
+
+    def folder_indexes_for_send(self, conversation_id: str, folders: list[Any]) -> list[dict[str, Any]]:
+        """**发送那一刻**生成索引快照（`submit_chat` 用）。
+
+        刻意不在发送时复用前端手上的旧索引：用户在拖进来之后可能又往目录里放了图，
+        快照以"真正送进模型的那一刻"为准，之后目录再变也不刷新（不做监听）。
+        """
+        result: list[dict[str, Any]] = []
+        for item in folders or []:
+            raw = str(item.get("path") if isinstance(item, dict) else item or "").strip()
+            if not raw:
+                continue
+            try:
+                result.append(self.folder_index(raw, conversation_id))
+            except FolderConfirmRequired as exc:
+                raise ValueError(
+                    f"文件夹不在会话工作区内，且本会话尚未确认允许读取：{exc.path}"
+                ) from exc
+        return result
 
     def _start_mcp_background(self) -> None:
         """应用启动后在后台连接所有已启用 MCP 服务，并保持到退出。
@@ -1085,7 +1149,14 @@ class NaibaChatApp:
             return self._reply({"error": "只能编辑用户消息"}, HTTPStatus.BAD_REQUEST)
             return
         removed = self.storage.truncate_from_message(conversation_id, message_id)
-        return self._reply({"ok": True, "removed": removed, "attachments": (target.get("metadata") or {}).get("attachments") or []})
+        metadata = target.get("metadata") or {}
+        return self._reply({
+            "ok": True,
+            "removed": removed,
+            "attachments": metadata.get("attachments") or [],
+            # 文件夹索引与附件同源：编辑后重发要把它们一起还给输入区（见 04-messages.js）。
+            "folder_indexes": metadata.get("folder_indexes") or [],
+        })
 
     # ---- 侧栏「全文搜索」/「分支导航」/「删除单条消息」的 UI 直读接口 ----
     # 三个都返回 ``(payload, status)``，由 http.py 直接 ``self._json(*...)`` 透传：

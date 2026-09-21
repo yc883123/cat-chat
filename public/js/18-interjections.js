@@ -18,7 +18,7 @@
 
 import { $, api, escapeHtml, state, toast } from "./01-core.js";
 import { updateContextComposerLock } from "./03-media.js";
-import { missingAttachmentPaths, renderPendingFiles } from "./10-upload.js";
+import { attachmentChips, folderChips, missingAttachmentPaths, renderPendingFiles } from "./10-upload.js";
 import { hideSkillPopup, renderInputMirror, resizeTextarea } from "./13-skill-refs.js";
 import { hideFilePopup } from "./16-file-refs.js";
 
@@ -285,7 +285,14 @@ export async function sendRunInterjection(textOverride = '') {
   const text = buttonText
     ? (inputText ? `${inputText}\n${buttonText}` : buttonText)
     : inputText;
-  const attachments = state.pendingFiles.map(({ name, path, size, thumb_path }) => ({ name, path, size, thumb_path }));
+  const attachments = attachmentChips().map(({ name, path, size, thumb_path }) => ({ name, path, size, thumb_path }));
+  // 插话通道不携带文件夹索引（那条通道的消息形态是"用户名 + 文件路径"，没有 metadata 落库
+  // 之外的注入点，硬塞进去会让重放与实时两条路径不一致）。明确挡下并**保留** chip，
+  // 而不是静默丢掉用户拖进来的目录。
+  if (folderChips().length) {
+    toast('文件夹要随新一轮消息发送（插话不携带文件夹索引）：请等本轮结束后再发，或先移除文件夹');
+    return null;
+  }
   if (!text && !attachments.length) {
     toast('请输入插话内容（或添加附件）后再加入队列');
     return null;

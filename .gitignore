@@ -244,6 +244,8 @@ verify/*
 !verify/frozen_q1_check.py
 !verify/frozen_interjection_check.py
 !verify/frozen_tool_prose_check.py
+!verify/folder_drop_smoke.cjs
+!verify/folder_drop_smoke.py
 !verify/interjection_smoke.cjs
 !verify/interjection_smoke.py
 !verify/lightbox_smoke.cjs

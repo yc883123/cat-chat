@@ -8,7 +8,7 @@ import { messageElement, scrollToBottom, setStickToBottom } from "./04-messages.
 import { loadTasks } from "./06-tasks-plans.js";
 import { createConversation, loadConversations, openConversation } from "./08-conversations.js";
 import { composerModelChoice, composerModelIsValidated, selectedProvider } from "./07-models-agents.js";
-import { missingAttachmentPaths, renderPendingFiles } from "./10-upload.js";
+import { attachmentChips, folderChips, folderIndexMetadata, missingAttachmentPaths, renderPendingFiles } from "./10-upload.js";
 import { beginChoiceSubmit, closeQuickMessagePanel, commitChoiceSubmit, handleChatEvent, rollbackChoiceSubmit, setBusy } from "./12-chat-input.js";
 import { hideSkillPopup, parseSkillReferences, renderInputMirror, resizeTextarea, stripSkillReferences } from "./13-skill-refs.js";
 import { hideFilePopup } from "./16-file-refs.js";
@@ -475,9 +475,14 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
   const text = buttonText
     ? (inputText ? `${inputText}\n${buttonText}` : buttonText)
     : inputText;
-  const attachments = state.pendingFiles.map(({ name, path, size, thumb_path }) => ({ name, path, size, thumb_path }));
-  // 纯附件轮次（只发文件/图片、不写文字）合法：文字与附件至少有一个才可发送。
-  if ((!text && !attachments.length) || state.taskSubmitting || state.cancelRequested) return;
+  const attachmentItems = attachmentChips();
+  const folderItems = folderChips();
+  const attachments = attachmentItems.map(({ name, path, size, thumb_path }) => ({ name, path, size, thumb_path }));
+  // 文件夹只带路径：索引在**发送那一刻**由后端现扫（见 app.folder_indexes_for_send），
+  // 前端手上的那份只用于输入区占位与乐观气泡，不重复上传几百条清单。
+  const folders = folderItems.map((item) => ({ path: item.path, name: item.name }));
+  // 纯附件/纯文件夹轮次（只发文件、不写文字）合法：文字与载荷至少有一个才可发送。
+  if ((!text && !attachments.length && !folders.length) || state.taskSubmitting || state.cancelRequested) return;
   const uploadingFile = state.pendingFiles.find((file) => file.uploading);
   if (uploadingFile) {
     toast(`请等待「${uploadingFile.name}」上传完成${uploadingFile.progress > 0 ? `（${uploadingFile.progress}%）` : ''}`);
@@ -538,6 +543,8 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
   const referencedIds = parseSkillReferences(text).map((tok) => tok.skill.id);
   const messageText = stripSkillReferences(text);
   const conversationId = state.conversationId;
+  // 提交被拒时要原样还回去的完整草稿（含文件夹 chip）：只还 attachments 会静默吞掉文件夹。
+  const pendingSnapshot = state.pendingFiles.map((item) => ({ ...item }));
   state.pendingFiles = [];
   renderPendingFiles();
   input.value = '';
@@ -547,7 +554,16 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
   hideFilePopup();
   closeQuickMessagePanel();
   if ($('#emptyState')) $('#emptyState').hidden = true;
-  const optimisticUser = { role: 'user', content: messageText, metadata: { attachments, display_content: text } };
+  const optimisticUser = {
+    role: 'user',
+    content: messageText,
+    metadata: {
+      attachments,
+      display_content: text,
+      // 乐观气泡用前端手上那份索引渲染（同一字段名，落库版本由后端在发送后写回）。
+      folder_indexes: folderItems.map(folderIndexMetadata),
+    },
+  };
   $('#messages').append(messageElement(optimisticUser));
   // 懒加载的渲染窗口以 state.messages 为准（刻度轨也从它收集轮次）：
   // 乐观插入的这轮同步进数组，刻度轨才会立刻多出这一条。
@@ -571,8 +587,8 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
       renderInputMirror();
       notifyComposerChanged(input);
     }
-    if (!state.pendingFiles.length && attachments.length) {
-      state.pendingFiles = attachments.map((item) => ({ ...item }));
+    if (!state.pendingFiles.length && pendingSnapshot.length) {
+      state.pendingFiles = pendingSnapshot.map((item) => ({ ...item }));
       renderPendingFiles();
     }
   };
@@ -587,6 +603,7 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
         message: messageText,
         display_message: text,
         attachments,
+        folders,
         model_key: $('#modelSelect').value,
         model_name: composerModelChoice(),
         skill_policy: {

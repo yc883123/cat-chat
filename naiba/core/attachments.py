@@ -32,6 +32,46 @@ def _is_media_product_path(raw: str) -> bool:
 
 # 仅附件、无文字的用户轮次：模型侧显式说明"用户没写指令"，避免模型自行编造用户诉求。
 ATTACHMENT_ONLY_NOTICE = "[用户未输入文字，只发送了以下附件]"
+# 同理，只有文件夹没有文字时也用固定提示行（与附件口径一致，不新增"另一种沉默"）。
+FOLDER_ONLY_NOTICE = "[用户未输入文字，只发送了以下文件夹]"
+
+
+def folder_index_lines(indexes: list[dict[str, Any]] | None) -> list[str]:
+    """文件夹索引的模型侧清单（与气泡展示层同一份数据，但**完整**）。
+
+    形态（每个文件夹一段）：
+
+        [文件夹] D:\\素材4（共 128 项，图片 96；下列路径均相对该文件夹）
+        - a/图1.png
+        - b/图2.png
+        - （仅列出前 300 项，另有 421 项未列出；需要更多内容可用工具按目录路径读取）
+
+    为什么要给"相对路径 + 绝对基路径"而不是一次性列绝对路径：模型要哪张图时把基路径与
+    相对路径一拼就能用现有工具链（读图 / 媒体工具 / 目录工具）打开，
+    这也是本需求的原意——用户不必逐个复制文件路径。
+
+    截断口径与 ``storage/media_collect`` 的"分桶预截断"同源：宁可让模型知道自己拿到的是
+    不全的清单（末尾自述），也不要它以为"这个目录就这几张图"。
+    """
+    lines: list[str] = []
+    for item in indexes or []:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        if not path:
+            continue
+        total = int(item.get("total") or 0)
+        images = int(item.get("image_count") or 0)
+        entries = [entry for entry in (item.get("entries") or []) if isinstance(entry, dict)]
+        lines.append(f"[文件夹] {path}（共 {total} 项，图片 {images}；下列路径均相对该文件夹）")
+        for entry in entries:
+            rel = str(entry.get("rel") or "").strip()
+            if rel:
+                lines.append(f"- {rel}")
+        missing = max(0, total - len(entries))
+        if item.get("truncated") and missing:
+            lines.append(f"- （仅列出前 {len(entries)} 项，另有 {missing} 项未列出；需要更多内容可用工具按目录路径读取）")
+    return lines
 
 
 def upload_reference_lines(
@@ -79,6 +119,7 @@ def upload_reference_lines(
 
 def compose_user_content(
     message: str, uploads: list[dict[str, Any]], *,
+    folder_indexes: list[dict[str, Any]] | None = None,
     pdf_tools: bool = True, video_tools: bool = True,
 ) -> str:
     """用户轮次的模型可见文本（_run_chat 与历史重放共用的唯一拼接口径）。
@@ -88,15 +129,20 @@ def compose_user_content(
     "本轮只有附件、没有指令"，而不是自行脑补诉求。
     ``pdf_tools`` / ``video_tools`` 透传给 ``upload_reference_lines``
     （会话工具集是否含 read_pdf / extract_frames）。
+
+    ``folder_indexes``：拖入文件夹的路径索引（见 ``folder_index_lines``）。它**追加在附件
+    引用行之后**——含附件的旧会话前缀字节因此逐字不变，只有真的带了文件夹的轮次才会多出这一段。
     """
     text = str(message or "")
     lines = upload_reference_lines(uploads, pdf_tools=pdf_tools, video_tools=video_tools)
-    if not lines:
+    folder_lines = folder_index_lines(folder_indexes)
+    if not lines and not folder_lines:
         return text
-    body = "\n".join(lines)
+    body = "\n".join([*lines, *folder_lines])
     if text.strip():
         return f"{text}\n{body}"
-    return f"{ATTACHMENT_ONLY_NOTICE}\n{body}"
+    notice = ATTACHMENT_ONLY_NOTICE if lines else FOLDER_ONLY_NOTICE
+    return f"{notice}\n{body}"
 
 
 _IMAGE_MEDIA_TERM_RE = re.compile(

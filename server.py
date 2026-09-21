@@ -88,7 +88,7 @@ from naiba.core.migration import (
 )
 from naiba.core.network import _is_usable_lan_ipv4, get_lan_ip, network_access_status
 from naiba.app import NaibaChatApp
-from naiba.http import AppHTTPServer, RequestHandler
+from naiba.http import AppHTTPServer, HEALTH_APP_MARKER, RequestHandler
 from naiba.config import (
     ConfigStore,
     VALID_MODEL_KINDS,

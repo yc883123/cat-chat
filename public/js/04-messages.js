@@ -4,9 +4,9 @@
 
 import { $, api, draggedFileCache, emptyStateElement, escapeHtml, notifyComposerChanged, state, toast } from "./01-core.js";
 import { markdown } from "./02-markdown.js";
-import { activityMarkup, closeImageLightbox, fileChangesSummaryMarkup, fileUrl, mediaKind, mediaMarkup, mediaTruncatedNotice, reasoningMarkup, remainingAttachments, skillMarkup, sourcesMarkup, toolMarkup, truncationNotice, updateContextComposerLock, updateContextUsage, updateSendButtonState, uploadedFileMarkup, usageMarkup } from "./03-media.js";
+import { activityMarkup, closeImageLightbox, fileChangesSummaryMarkup, fileUrl, folderIndexMarkup, mediaKind, mediaMarkup, mediaTruncatedNotice, reasoningMarkup, remainingAttachments, skillMarkup, sourcesMarkup, toolMarkup, truncationNotice, updateContextComposerLock, updateContextUsage, updateSendButtonState, uploadedFileMarkup, usageMarkup } from "./03-media.js";
 import { openConversation, syncCurrentConversation } from "./08-conversations.js";
-import { renderPendingFiles } from "./10-upload.js";
+import { attachmentChips, folderChips, folderChipsFromIndexes, folderIndexMetadata, renderPendingFiles } from "./10-upload.js";
 import { hideChoiceButtons, sendMessage, showChoiceButtons } from "./12-chat-input.js";
 import { hideSkillPopup, renderInputMirror, renderUserContent, resizeTextarea, updateSkillPopup } from "./13-skill-refs.js";
 import { hideFilePopup } from "./16-file-refs.js";
@@ -134,7 +134,7 @@ export function messageElement(message, temporary = false) {
         + '<button data-delete-message title="删除这条提问（可只删这一条，或连同 AI 回复整轮删除；10 秒内可撤销）">删除</button>'
         + '</div>'
       : '';
-    row.innerHTML = `<div class="message-body">${renderUserContent(metadata.display_content || message.content)}${uploadedFileMarkup(metadata.attachments)}${actions}</div>`;
+    row.innerHTML = `<div class="message-body">${renderUserContent(metadata.display_content || message.content)}${uploadedFileMarkup(metadata.attachments)}${folderIndexMarkup(metadata.folder_indexes)}${actions}</div>`;
   } else {
     const abortedBadge = metadata.aborted
       ? '<span class="aborted-badge">已中止</span>'
@@ -258,12 +258,15 @@ function submitEdit(row, textarea) {
   const value = String(textarea?.value ?? '');
   hideSkillPopup();
   hideFilePopup();
-  const attachments = (state.pendingFiles || []).filter((file) => file && file.path)
+  // 编辑框里可能同时有普通附件与文件夹 chip：附件照旧、文件夹走各自的通道（目录路径不能
+  // 当附件发给模型），否则 submit 会把目录混进 attachments 里当文件发。
+  const attachments = attachmentChips()
     .map(({ name, path, size, thumb_path }) => ({ name, path, size, thumb_path }));
+  const folders = folderChips().map(folderIndexMetadata);
   restoreInlineComposer();
   row.classList.remove('is-editing');
   applyEditingState(null);
-  confirmEditMessage(row, value, attachments);
+  confirmEditMessage(row, value, attachments, folders);
 }
 
 // 取消编辑：恢复进入编辑前的底部草稿与附件，再重新渲染当前会话。
@@ -345,7 +348,12 @@ export function startEditMessage(row) {
     files: (state.pendingFiles || []).map((file) => ({ ...file })),
   };
   row.dataset.rawContent = currentText;
-  const files = attachments.map((file) => ({ ...file, existingAttachment: true }));
+  // 文件夹索引同 attachments 一起回填：只回填附件会让"编辑后重发"悄悄丢掉那份目录清单
+  // （模型上看不见这个目录了，而气泡上还印着它）。
+  const files = [
+    ...attachments.map((file) => ({ ...file, existingAttachment: true })),
+    ...folderChipsFromIndexes(row.__messageMetadata?.folder_indexes),
+  ];
   if (!mountEditComposer(row, { wrap, text: currentText, files })) return;
   const textarea = $('#messageInput');
   textarea.focus();
@@ -430,11 +438,12 @@ function resumeEditComposer(snapshot) {
 // 截断走 /api/messages/edit：它只接受 role == "user" 的 id，随即删除该消息及其之后所有消息，并回传原附件。
 // 放行口径与 sendChatMessage/submit_chat 一致：**文字与可用附件至少有一个**——纯附件轮次
 // （只发文件/图片、不写字）同样可以重发；只传空文字又无附件才拒绝。
-export async function resendFromUserMessage(userMessageId, text, { successText = '已从该消息重开，编辑点之前的上下文将复用缓存', errorPrefix = '重发', attachments = [], attachmentsOverride = null } = {}) {
+export async function resendFromUserMessage(userMessageId, text, { successText = '已从该消息重开，编辑点之前的上下文将复用缓存', errorPrefix = '重发', attachments = [], attachmentsOverride = null, folderIndexes = [] } = {}) {
   // 编辑/重发最终仍走同一条输入管线：notifyComposerChanged(input) 会刷新镜像、引用弹层与发送状态。
   const content = String(text ?? '').trim();
   const knownAttachments = Array.isArray(attachments) ? attachments : [];
-  if (!content && !knownAttachments.length) {
+  const knownFolders = Array.isArray(folderIndexes) ? folderIndexes : [];
+  if (!content && !knownAttachments.length && !knownFolders.length) {
     toast('内容不能为空');
     return false;
   }
@@ -449,12 +458,16 @@ export async function resendFromUserMessage(userMessageId, text, { successText =
     // 恢复原消息的附件，供重发使用。字段口径与「分支」一致（含 thumb_path）：
     // 缺 thumb_path 时渲染层会退化成推导 `<path>_thumb.webp`，一旦缩略图不在同目录就 404。
     const restoredAttachments = Array.isArray(attachmentsOverride) ? attachmentsOverride : (result.attachments || []);
-    state.pendingFiles = restoredAttachments.map((f) => ({
-      name: f.name,
-      path: f.path,
-      size: f.size,
-      thumb_path: f.thumb_path,
-    }));
+    state.pendingFiles = [
+      ...restoredAttachments.map((f) => ({
+        name: f.name,
+        path: f.path,
+        size: f.size,
+        thumb_path: f.thumb_path,
+      })),
+      // 文件夹只恢复"占位 + 统计"：索引会在发送那一刻由后端重扫，不必在这里再取一次。
+      ...folderChipsFromIndexes(knownFolders.length ? knownFolders : (result.folder_indexes || [])),
+    ];
     renderPendingFiles();
     // 截断后重新渲染会话（被截断的消息已从历史消失）
     await openConversation(conversationId);
@@ -474,19 +487,18 @@ export async function resendFromUserMessage(userMessageId, text, { successText =
   }
 }
 
-export async function confirmEditMessage(row, newText, editedAttachments = null) {
+export async function confirmEditMessage(row, newText, editedAttachments = null, editedFolders = null) {
   const text = newText.trim();
   const messageId = row.dataset.messageId;
   if (!messageId || !state.conversationId) return;
-  const attachments = Array.isArray(editedAttachments)
-    ? editedAttachments
-    : ((row.__messageMetadata || {}).attachments || []);
-  // 空文字只在同时也没有附件时才拒绝（纯附件轮次同样可编辑重发）。
+  const metadata = row.__messageMetadata || {};
+  // 编辑框现状优先（用户可能在里面加/删过附件或文件夹 chip），没有才退回原消息。
   await resendFromUserMessage(messageId, text, {
     successText: '已从该消息重开，编辑点之前的上下文将复用缓存',
     errorPrefix: '编辑',
-    attachments,
+    attachments: Array.isArray(editedAttachments) ? editedAttachments : (metadata.attachments || []),
     attachmentsOverride: editedAttachments,
+    folderIndexes: Array.isArray(editedFolders) ? editedFolders : (metadata.folder_indexes || []),
   });
 }
 
@@ -533,6 +545,7 @@ export async function regenerateMessage(assistantMessageId) {
     successText: '正在重新生成（复用前缀缓存）',
     errorPrefix: '重新生成',
     attachments: metadata.attachments || [],
+    folderIndexes: metadata.folder_indexes || [],
   });
 }
 
@@ -630,7 +643,10 @@ export async function branchMessage(row) {
     input.value = branch.display_content || branch.content || '';
     resizeTextarea();
     renderInputMirror();
-    state.pendingFiles = (branch.attachments || []).map((f) => ({ name: f.name, path: f.path, size: f.size, thumb_path: f.thumb_path }));
+    state.pendingFiles = [
+      ...(branch.attachments || []).map((f) => ({ name: f.name, path: f.path, size: f.size, thumb_path: f.thumb_path })),
+      ...folderChipsFromIndexes(branch.folder_indexes || branch.metadata?.folder_indexes || []),
+    ];
     renderPendingFiles();
     input.focus();
     input.setSelectionRange(input.value.length, input.value.length);

@@ -28,12 +28,17 @@ import naiba.net as net_io
 from naiba.app import NaibaChatApp
 from naiba.config import tool_catalog_entries, tool_group_entries, tool_preset_entries
 from naiba.core.choices import backfill_turn_choice_groups
-from naiba.core.conv_files import _conv_file_allow, _conv_file_open, _conv_file_save
+from naiba.core.conv_files import (
+    FolderConfirmRequired,
+    _conv_file_allow,
+    _conv_file_open,
+    _conv_file_save,
+)
 from naiba.core.diagnostics import ensure_utf8_stdio
 from naiba.core.exceptions import ActiveRunError
 from naiba.core.http_range import content_range_header, parse_byte_range
 from naiba.core.media_types import MIME_BY_EXT
-from naiba.core.network import network_access_status
+from naiba.core.network import network_access_status, port_conflict_message
 from naiba.core.paths import path_within
 from naiba.paths import PathContext, default_path_context, static_asset_version
 from naiba.storage.app_icon import APP_ICON_MAX_BYTES
@@ -46,6 +51,15 @@ logger = logging.getLogger("naiba.http")
 # multipart 上传的传输层兜底上限（文件 80MB + 表单/边界开销）。
 _UPLOAD_BODY_LIMIT = 100 * 1024 * 1024
 
+# /api/health 的应用身份标记（launcher 用它排除「窗口开到别人的服务上」）：
+# 端口被别的 HTTP 服务占用时，健康检查只看 200 会放行，用户会在别人的应用里打字。
+# 该字段是**新增**的，老客户端/冒烟脚本只读 status 不受影响。
+HEALTH_APP_MARKER = "cat-chat"
+
+# Windows 专用套接字选项（其它平台没有这个名字；Windows 上取值是 **-5**，
+# 所以判"可用性"必须用 `is None`，不能拿符号当哨兵——踩过）。
+_SO_EXCLUSIVEADDRUSE = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+
 
 # 部分系统 mimetypes 未注册 webp/avif 等，导致 <img> 接到 application/octet-stream
 # 配合 nosniff 而拒绝渲染（缩略图破图）。兜底映射唯一定义在 core/media_types.py
@@ -53,8 +67,64 @@ _UPLOAD_BODY_LIMIT = 100 * 1024 * 1024
 _MEDIA_MIME_FALLBACK = dict(MIME_BY_EXT)
 
 
+def _port_has_listener(host: str, port: int, timeout: float = 0.4) -> bool:
+    """该端口上是否已有服务在**监听**（TIME_WAIT 残连不算）。
+
+    只给 Windows 的重绑决策用：独占绑定失败后，要区分「端口真被别的进程听着」与
+    「只是上次崩溃留下的 TIME_WAIT 残连」——前者必须如实报错（让用户看到中文提示），
+    后者必须允许重绑（否则崩溃后几分钟内起不来）。判据就是「能不能连上」。
+    """
+    probe_host = "127.0.0.1" if str(host or "") in {"", "0.0.0.0", "::"} else str(host)
+    try:
+        with socket.create_connection((probe_host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 class AppHTTPServer(ThreadingHTTPServer):
-    """携带应用实例的 HTTP 服务器：RequestHandler 经 self.server.app 访问。"""
+    """携带应用实例的 HTTP 服务器：RequestHandler 经 self.server.app 访问。
+
+    **Windows 绑定语义**（这是 8765 端口加固的核心）：Python 的 ``HTTPServer`` 默认
+    ``allow_reuse_address = 1``，而 Windows 的 ``SO_REUSEADDR`` 语义与 Unix 不同——
+    只要先绑方没设 ``SO_EXCLUSIVEADDRUSE``，第二个进程也能绑上同一个端口且**不报错**，
+    之后连接归谁不确定（表现为"刷新一下又通了"）。所以在 Windows 上改成
+    「独占优先、必要时回落」：
+
+    1. 先按 ``SO_EXCLUSIVEADDRUSE`` 独占绑定 —— 端口被占时如实抛 ``OSError``
+       （由 launcher 弹中文提示 / CLI 打印指引，不再静默双绑）；
+    2. 独占失败且**探不到监听者**（= 只剩 TIME_WAIT 残连）时，回落 ``SO_REUSEADDR``
+       重绑 —— 保住"崩溃后立即重启仍能起来"这条既有能力。
+       **禁止**把 ``allow_reuse_address`` 简单置 False 了事：那会让崩溃重启撞上
+       TIME_WAIT 直接起不来（比端口冲突更难自查）。
+    """
+
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self) -> None:
+        if os.name != "nt" or _SO_EXCLUSIVEADDRUSE is None:
+            super().server_bind()
+            return
+        self.socket.setsockopt(socket.SOL_SOCKET, _SO_EXCLUSIVEADDRUSE, 1)
+        try:
+            self.socket.bind(self.server_address)
+        except OSError:
+            host, port = self.server_address[0], int(self.server_address[1])
+            if _port_has_listener(str(host), port):
+                raise
+            # 只剩 TIME_WAIT 残连：允许重绑，否则崩溃后几分钟内起不来。
+            # **必须换一个新套接字**——Windows 上 SO_EXCLUSIVEADDRUSE 一旦设过就撤不干净
+            # （实测：同一套接字撤掉独占再开复用，bind 直接 WinError 10013 权限拒绝）。
+            try:
+                self.socket.close()
+            except OSError:
+                pass
+            self.socket = socket.socket(self.address_family, self.socket_type)
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.socket.bind(self.server_address)
+        self.server_address = self.socket.getsockname()
+        self.server_name = socket.getfqdn(self.server_address[0])
+        self.server_port = self.server_address[1]
 
     def __init__(self, server_address, handler_cls, app: NaibaChatApp):
         super().__init__(server_address, handler_cls)
@@ -127,7 +197,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         if path == "/api/health":
-            self._json({"status": "ok", "mcp": self.app.mcp.states()})
+            # app 标记见 HEALTH_APP_MARKER：launcher 靠它确认"这个 200 是我们自己的"。
+            self._json({"status": "ok", "app": HEALTH_APP_MARKER, "mcp": self.app.mcp.states()})
             return
         if path.startswith("/api/") and not self._authorized(parsed):
             self._json({"error": "访问口令无效"}, HTTPStatus.UNAUTHORIZED)
@@ -345,6 +416,27 @@ class RequestHandler(BaseHTTPRequestHandler):
                     query.get("path", [""])[0],
                     query.get("conversation_id", [""])[0],
                 ))
+            except LookupError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+            except (OSError, ValueError, RuntimeError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif path == "/api/files/folder-index":
+            # 拖文件夹进输入区：只回一份路径清单（不上传内容）。工作区外需要一次确认
+            # （口径二）——403 + needs_confirm 让前端弹框，而不是把用户堵在一句错误上。
+            try:
+                query = urllib.parse.parse_qs(parsed.query)
+                self._json(
+                    self.app.folder_index(
+                        query.get("path", [""])[0],
+                        query.get("conversation_id", [""])[0],
+                        allow_outside=query.get("allow_outside", ["0"])[0] == "1",
+                    )
+                )
+            except FolderConfirmRequired as exc:
+                self._json(
+                    {"error": str(exc), "needs_confirm": True, "path": exc.path},
+                    HTTPStatus.FORBIDDEN,
+                )
             except LookupError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
             except (OSError, ValueError, RuntimeError) as exc:
@@ -1667,7 +1759,13 @@ def main_entry(paths: PathContext | None = None, on_app=None) -> None:
     APP.config.data["port"] = port
     APP.config.save()
     APP.listener_host = host
-    server = AppHTTPServer((host, port), RequestHandler, APP)
+    try:
+        server = AppHTTPServer((host, port), RequestHandler, APP)
+    except OSError as exc:
+        # 端口被占/无权限绑定：CLI 下原本甩一条英文 traceback（普通用户看不懂）。
+        # 改成与桌面版同款中文指引 + 非零退出码（见 core.network.port_conflict_message）。
+        print(port_conflict_message(port, host=host, detail=str(exc)), file=sys.stderr)
+        raise SystemExit(2) from exc
     server.daemon_threads = True
     write_status(host, port, str(APP.config.data["access_token"]), paths)
     print("\nCat Chat 已启动")

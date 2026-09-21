@@ -49,6 +49,39 @@ def get_lan_ip() -> str | None:
     return next((address for address in dict.fromkeys(candidates) if _is_usable_lan_ipv4(address)), None)
 
 
+def port_conflict_message(port: Any, *, host: str = "", detail: str = "") -> str:
+    """端口无法绑定时的中文指引（桌面弹窗与 CLI 共用**同一份文案**）。
+
+    为什么要有这个函数：8765 被别的程序占用时，GUI 版曾"静默失败"——绑定在后台线程里
+    抛异常、线程无声死亡，托盘照出、窗口开到 `ERR_CONNECTION_REFUSED`，用户只看到
+    "软件坏了"。用户能自己解决这件事（关掉占用者或改 config.json 的 port），前提是
+    **有人告诉他**；文案里必须给出可复制的自查命令与两种处理办法，缺一不可。
+
+    ``detail`` 透传底层异常摘要（含 WinError 10048 之类），便于对照排查。
+    """
+    lines = [
+        f"Cat Chat 启动失败：端口 {port} 无法绑定（可能已被其它程序占用）。",
+    ]
+    if host:
+        lines.append(f"绑定地址：{host}:{port}")
+    if detail:
+        lines.append(f"系统返回：{detail}")
+    lines += [
+        "",
+        "先查是谁占着这个端口：",
+        f"  netstat -ano | findstr :{port}",
+        '  tasklist /FI "PID eq <上一步最后一列的 PID>"',
+        "",
+        "两种处理办法（任选一种）：",
+        "1) 关掉占用该端口的程序（也可能是没退干净的上一份 Cat Chat），再重新启动；",
+        '2) 换个端口：编辑 config.json，把 "port" 改成别的值（例如 8766），保存后重启。',
+        "   · 安装版：%LOCALAPPDATA%\\NaibaChat\\config.json",
+        "   · 源码版：项目目录下 config.json（也可用 python server.py --port 8800）",
+        "   注意：换端口后手机/局域网的访问地址与防火墙放行规则里的端口要一起改。",
+    ]
+    return "\n".join(lines)
+
+
 def network_access_status(host: str, port: int) -> dict[str, Any]:
     """Describe the active listener and the only LAN URL safe to present."""
     normalized_host = str(host or "").strip()

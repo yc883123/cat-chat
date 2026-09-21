@@ -1558,6 +1558,8 @@ class ChatStorage:
                 "metadata": branch_meta,
                 "display_content": branch_meta.get("display_content") or branch_rows[branch_idx]["content"],
                 "attachments": branch_meta.get("attachments") or [],
+                # 分支会把这条提问的文件夹索引一起带回输入区（否则"分支后重发"会丢清单）。
+                "folder_indexes": branch_meta.get("folder_indexes") or [],
             }
         return {
             "conversation": self.get_conversation(new_id, include_messages=True),
@@ -2439,10 +2441,13 @@ class ChatStorage:
         owner_session_id: str = "",
         display_message: str = "",
         title_text: str = "",
+        folder_indexes: list[dict[str, Any]] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically append the user message and create its owning run.
 
         ``title_text`` 仅用于首轮标题（用户原文，可能含 @ 引用）；留空时回退用 ``message``。
+        ``folder_indexes``：拖入文件夹的路径索引快照（发送那一刻生成，见 app.folder_indexes_for_send）——
+        与 ``attachments`` 一样写在消息 metadata 上，气泡与模型上下文各读自己的一份。
         """
         now = int(time.time() * 1000)
         run_id = uuid.uuid4().hex
@@ -2452,6 +2457,8 @@ class ChatStorage:
             "run_id": run_id,
             "agent_id": str(agent.get("id") or ""),
         }
+        if folder_indexes:
+            metadata[MetadataKeys.FOLDER_INDEXES] = folder_indexes
         if str(display_message or "").strip():
             # 气泡展示原样（含 /ref 蓝色），而 content 存模型看到的剥离版本。
             metadata["display_content"] = str(display_message)

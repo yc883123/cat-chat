@@ -90,6 +90,145 @@ export function readAsDataUrl(file) {
 
 // 非图片附件的占位图标（与图片缩略图同尺寸，保证整列左缘对齐）。
 const FILE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5"></path></svg>';
+// 文件夹占位图标（拖入文件夹时用，见 addFolderChip）。
+const FOLDER_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"></path></svg>';
+
+// ---- 待发送的文件夹（拖进来只显示一个占位，不铺缩略图）---------------------------
+// 目录拖进来时**不逐文件上传**：气泡里只显示一个占位 chip，消息里带的是"路径 + 文件索引"，
+// 让模型知道这个目录里有什么（用户不必逐个复制文件路径）。索引由后端扫（见
+// `naiba/core/conv_files.py::folder_index`，深度/条数/超时三重闸门）。
+// 浏览器端拿不到拖入文件夹的绝对路径（Chromium 安全模型），所以这条链路只在桌面壳里成立。
+
+export function isFolderChip(item) {
+  return String(item?.kind || '') === 'folder';
+}
+
+/** 待发送的普通附件（排除文件夹 chip：目录路径不能当附件发给模型）。 */
+export function attachmentChips() {
+  return state.pendingFiles.filter((item) => !isFolderChip(item));
+}
+
+export function folderChips() {
+  return state.pendingFiles.filter(isFolderChip);
+}
+
+/** 把消息 metadata 里的文件夹索引还原成待发送 chip（编辑/重发/重新生成/分支时用）。 */
+export function folderChipsFromIndexes(indexes = []) {
+  return (Array.isArray(indexes) ? indexes : [])
+    .filter((item) => item && String(item.path || '').trim())
+    .map((item) => ({
+      kind: 'folder',
+      name: String(item.name || '').trim() || String(item.path).split(/[\\/]/).pop() || '文件夹',
+      path: String(item.path),
+      total: Number(item.total || 0),
+      image_count: Number(item.image_count || 0),
+      dir_count: Number(item.dir_count || 0),
+      truncated: Boolean(item.truncated),
+      entries: Array.isArray(item.entries) ? item.entries : [],
+      existingFolder: true,   // 来自历史消息：不进"删除未引用缓存"那条链路
+    }));
+}
+
+/** 把索引对象裁成消息 metadata 的形状（乐观气泡要用，与后端落库字段同名）。 */
+export function folderIndexMetadata(chip) {
+  return {
+    name: chip.name,
+    path: chip.path,
+    total: chip.total,
+    image_count: chip.image_count,
+    dir_count: chip.dir_count,
+    truncated: Boolean(chip.truncated),
+    entries: chip.entries || [],
+  };
+}
+
+function fetchFolderIndex(path, { allowOutside = false } = {}) {
+  const params = new URLSearchParams({ path: String(path || '') });
+  if (state.conversationId) params.set('conversation_id', state.conversationId);
+  if (allowOutside) params.set('allow_outside', '1');
+  return api(`/api/files/folder-index?${params.toString()}`);
+}
+
+/** 工作区外文件夹的确认框（口径二：确认一次，按会话记住）。 */
+function askFolderAccess(path) {
+  const dialog = $('#folderAccessDialog');
+  // 弹层缺失（浏览器缓存了旧 index.html）时按"不授权"处理：宁可让用户再拖一次，
+  // 也不能在读不到提示的情况下默默读取工作区外的目录。
+  if (!dialog) return Promise.resolve(false);
+  const target = $('#folderAccessPath');
+  if (target) target.textContent = String(path || '');
+  return new Promise((resolve) => {
+    let settled = false;
+    const buttons = {
+      allow: $('#folderAccessAllow'),
+      deny: $('#folderAccessDeny'),
+      cancel: $('#folderAccessCancel'),
+    };
+    const cleanup = () => {
+      buttons.allow?.removeEventListener('click', onAllow);
+      buttons.deny?.removeEventListener('click', onDeny);
+      buttons.cancel?.removeEventListener('click', onCancel);
+      dialog.removeEventListener('close', onCancel);
+    };
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (dialog.open && typeof dialog.close === 'function') dialog.close();
+      resolve(value);
+    };
+    function onAllow() { done(true); }
+    function onDeny() { done(false); }
+    function onCancel() { done(false); }
+    buttons.allow?.addEventListener('click', onAllow);
+    buttons.deny?.addEventListener('click', onDeny);
+    buttons.cancel?.addEventListener('click', onCancel);
+    dialog.addEventListener('close', onCancel);
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
+  });
+}
+
+/**
+ * 把一个文件夹加进待发送列表（只建一个占位 chip，不展开、不传内容）。
+ * 工作区外的路径会先弹一次确认（403 + needs_confirm）。
+ */
+export async function addFolderChip(path, { allowOutside = false, quiet = false } = {}) {
+  const raw = String(path || '').trim();
+  if (!raw) return null;
+  if (state.pendingFiles.some((item) => isFolderChip(item) && String(item.path || '') === raw)) {
+    toast('这个文件夹已经在待发送列表里了');
+    return null;
+  }
+  let index;
+  try {
+    index = await fetchFolderIndex(raw, { allowOutside });
+  } catch (error) {
+    if (error?.status === 403 && error?.payload?.needs_confirm) {
+      const allowed = await askFolderAccess(error.payload.path || raw);
+      if (!allowed) return null;
+      return addFolderChip(raw, { allowOutside: true, quiet });
+    }
+    toast(`无法读取文件夹：${error.message}`);
+    return null;
+  }
+  const chip = {
+    kind: 'folder',
+    name: String(index?.name || '').trim() || raw.split(/[\\/]/).pop() || '文件夹',
+    path: String(index?.path || raw),
+    total: Number(index?.total || 0),
+    image_count: Number(index?.image_count || 0),
+    dir_count: Number(index?.dir_count || 0),
+    truncated: Boolean(index?.truncated),
+    entries: Array.isArray(index?.entries) ? index.entries : [],
+  };
+  state.pendingFiles.push(chip);
+  renderPendingFiles();
+  if (!quiet) {
+    toast(`已加入文件夹「${chip.name}」：${chip.total} 项（含 ${chip.image_count} 图）`);
+  }
+  return chip;
+}
 
 // 缩略图加载失败兜底（两级，与消息气泡的 .thumbnail → 主图 同策略）：
 //   ① 缩略图不在但主图还在 → 换成主图（`_thumb.webp` 可能从未生成或已被单独清掉）；
@@ -138,6 +277,19 @@ export function renderPendingFiles() {
   const container = $('#pendingFiles');
   if (!container) return;
   container.innerHTML = state.pendingFiles.map((file, index) => {
+    if (isFolderChip(file)) {
+      // 文件夹占位：图标 + 名字 + 统计 + 移除。刻意**不展开**——一个素材目录能拖出几百个
+      // 缩略图，输入区会被刷屏（用户要的是"让 AI 知道这目录里有什么"，不是"在这里翻图"）。
+      const stats = `${file.total ?? 0} 项 · 含 ${file.image_count ?? 0} 图`
+        + (file.dir_count ? ` · ${file.dir_count} 个子目录` : '')
+        + (file.truncated ? ' · 已截断' : '');
+      return `<div class="pending-item is-folder">
+      <span class="pending-thumb pending-thumb-folder" aria-hidden="true">${FOLDER_ICON}</span>
+      <span class="pending-name" title="${escapeHtml(file.path || file.name)}">${escapeHtml(file.name)}</span>
+      <span class="pending-status">${escapeHtml(stats)}</span>
+      <button type="button" class="pending-remove" data-remove-file="${index}" title="移除" aria-label="移除 ${escapeHtml(file.name)}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+    </div>`;
+    }
     const isImage = Boolean(file.path || file.thumb_path) && mediaKind(file.path, file.name) === 'image';
     // 上传中/无 path 时不渲染缩略图（旧逻辑会请求空路径 /api/file?path= → 404 破图）。
     const thumbUrl = file.path ? attachmentThumbUrl(file) : '';

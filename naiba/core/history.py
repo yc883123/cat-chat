@@ -344,10 +344,15 @@ def build_model_history(
             continue
         content = str(item.get("content") or "")
         previous_uploads = (item.get("metadata") or {}).get(MetadataKeys.ATTACHMENTS) or []
-        if item.get("role") == "user" and previous_uploads:
-            # 与 _run_chat 同一拼接口径（纯附件轮次补固定提示行，见 compose_user_content）。
+        # 拖入文件夹的路径索引：与附件走同一条拼装路径（否则"只拖了文件夹"的那一轮
+        # 重放时会丢掉清单，而 live 那一轮是带着清单发的 ⇒ 前缀缓存断在第一处差异上）。
+        previous_folders = (item.get("metadata") or {}).get(MetadataKeys.FOLDER_INDEXES) or []
+        if item.get("role") == "user" and (previous_uploads or previous_folders):
+            # 与 _run_chat 同一拼接口径（纯附件/纯文件夹轮次补固定提示行，见 compose_user_content）。
             content = compose_user_content(
-                content, previous_uploads, pdf_tools=pdf_tools, video_tools=video_tools
+                content, previous_uploads,
+                folder_indexes=previous_folders,
+                pdf_tools=pdf_tools, video_tools=video_tools,
             )
             image_parts: list[dict[str, Any]] = []
             for upload in previous_uploads:

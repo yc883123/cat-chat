@@ -12,11 +12,14 @@ import os
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import server as srv
+from naiba.core.network import port_conflict_message
 from naiba.storage.app_icon import app_icon_paths
 
 
@@ -133,11 +136,18 @@ class Launcher:
         self._exit_complete = threading.Event()
         self._exit_watchdog_started = False
 
-    # ---- HTTP 服务（后台线程） ----
-    def _run_server(self, host: str, port: int) -> None:
+    # ---- HTTP 服务（主线程绑定 + 后台线程服务） ----
+    def _bind_server(self, host: str, port: int) -> None:
+        """**在主线程**完成端口绑定，失败就把 OSError 抛给 run()。
+
+        此前绑定写在后台线程里（`AppHTTPServer(...)` 构造无 try/except），端口被占时
+        异常在子线程里无声死亡：冻结版没有控制台，用户只会看到"托盘在、窗口白屏"。
+        挪回主线程后，同一个异常就能变成一行中文提示。
+        """
         self.httpd = srv.AppHTTPServer((host, port), srv.RequestHandler, srv.APP)
         self.httpd.daemon_threads = True
-        srv.write_status(host, port, str(srv.APP.config.data["access_token"]))
+
+    def _serve(self) -> None:
         try:
             self.httpd.serve_forever(poll_interval=0.3)
         except Exception:
@@ -150,6 +160,62 @@ class Launcher:
                 self.httpd.server_close()
             except Exception:
                 pass
+
+    def _abort_startup(self, message: str, lock=None) -> SystemExit:
+        """启动期硬失败：弹中文提示 → 清现场 → 返回 SystemExit（调用方 ``raise`` 出去）。
+
+        返回异常而不是自己抛，是为了让调用点写成 ``raise self._abort_startup(...) from exc``
+        ——静态分析看得出控制流到此为止，不会被误读成"失败后继续往下启动"。
+        """
+        _notify_startup_error(message)
+        self._stop_server()
+        app = getattr(srv, "APP", None)
+        if app is not None:
+            try:
+                app.stop()
+            except Exception:
+                pass
+        try:
+            srv.STATUS_PATH.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if lock is not None:
+            try:
+                lock.close()
+            except Exception:
+                pass
+        return SystemExit(2)
+
+    def _wait_healthy(self, local_url: str) -> str:
+        """等本机服务就绪，返回 'ok' / 'foreign' / 'down'。
+
+        ``foreign``＝端口上确实有 HTTP 服务在应答，但**不是本应用**（`/api/health` 的
+        `app` 标记对不上）。这种情形必须当场失败：否则窗口会开到别人的应用上，
+        用户在陌生界面里打字（旧实现只看 status code，5 秒白等后还照常开窗）。
+        """
+        last = "down"
+        for _ in range(50):
+            try:
+                with urllib.request.urlopen(f"{local_url}/api/health", timeout=1) as response:
+                    status = int(getattr(response, "status", 0) or 0)
+                    body = response.read()
+            except urllib.error.HTTPError:
+                # 有 HTTP 服务，只是这个路径不健康：端口被别人占着。
+                return "foreign"
+            except Exception:
+                last = "down"
+                time.sleep(0.1)
+                continue
+            if status != 200:
+                return "foreign"
+            try:
+                payload = json.loads(body.decode("utf-8", errors="replace") or "{}")
+            except ValueError:
+                return "foreign"
+            if isinstance(payload, dict) and str(payload.get("app") or "") == srv.HEALTH_APP_MARKER:
+                return "ok"
+            return "foreign"
+        return last
 
     # ---- 托盘动作 ----
     def _force_exit_if_stuck(self) -> None:
@@ -218,7 +284,7 @@ class Launcher:
         return False  # 阻止真正关闭
 
     def _on_window_loaded(self) -> None:
-        """页面就绪后确认主窗口可见。
+        """页面就绪后确认主窗口可见，并挂上"拖文件夹进输入区"的监听。
 
         更新流程的重启脚本若带上 SW_HIDE（此前 apply-update.ps1 用了
         `-WindowStyle Hidden`），新进程会正常跑起来、托盘图标也在，但主窗口不出来，
@@ -226,6 +292,60 @@ class Launcher:
         把这类外部启动方式的隐藏标记抹平。
         """
         self._show_window()
+        self._register_drop_listener()
+
+    # ---- 拖入文件夹（桌面壳专属：只有这里拿得到真实绝对路径） ----
+    def _on_composer_drop(self, event) -> None:
+        """pywebview 的 drop 事件：把拖进来的**目录**绝对路径交回前端。
+
+        只有桌面壳能做这件事：WebView2 通过 `postMessageWithAdditionalObjects` 把 File 对象
+        连同真实路径一起送过来，pywebview 把它挂在事件的 `pywebviewFullPath` 上；纯浏览器里
+        Chromium 出于安全模型不给绝对路径（见计划 B.2），那条路只能降级。
+
+        普通文件不在这里处理——前端原有的上传链路照旧；这里只挑出**目录**，
+        并且"是不是目录"以磁盘真实类型为准（不猜 File.type）。
+        """
+        files = ((event or {}).get("dataTransfer") or {}).get("files") or []
+        paths: list[str] = []
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            full = str(item.get("pywebviewFullPath") or "").strip()
+            if not full:
+                continue
+            try:
+                if os.path.isdir(full):
+                    paths.append(full)
+            except OSError:
+                continue
+        if not paths or self.window is None:
+            return
+        script = f"window.naibaHandleDroppedFolders({json.dumps(paths, ensure_ascii=False)});"
+        try:
+            self.window.evaluate_js(script)
+        except Exception:
+            pass  # 页面可能正在刷新：拿不到就算了，前端有超时降级提示
+
+    def _register_drop_listener(self) -> None:
+        """给输入区挂 drop 监听（pywebview 的 DOM 事件 API）。
+
+        必须等页面 loaded 之后再挂：`get_element` 走 evaluate_js，页面没加载就没有 DOM。
+        每次 loaded 先摘上一次（刷新页面会重建 DOM，但 Python 侧的事件表会累积），
+        挂失败也不影响其它功能（前端另有超时降级提示），所以整体吞异常。
+        """
+        try:
+            from webview.dom import DOMEventHandler
+
+            node = self.window.dom.get_element(".composer-wrap")
+            if node is None:
+                return
+            try:
+                node.events.drop -= self._on_composer_drop
+            except Exception:
+                pass
+            node.events.drop += DOMEventHandler(self._on_composer_drop)
+        except Exception:
+            pass
 
     def run(self) -> None:
         import webview
@@ -252,15 +372,28 @@ class Launcher:
         local_url = f"http://127.0.0.1:{port}"
         page_url = f"{local_url}/?token={token}"
 
-        server_thread = threading.Thread(target=self._run_server, args=(host, port), daemon=True)
+        server_thread = threading.Thread(target=self._serve, name="naiba-http", daemon=True)
+        # 绑定在主线程完成：端口被占时这里是唯一能"说话"的地方（见 _bind_server）。
+        try:
+            self._bind_server(host, port)
+        except OSError as exc:
+            raise self._abort_startup(
+                port_conflict_message(port, host=host, detail=str(exc)), instance_lock
+            ) from exc
+        srv.write_status(host, port, str(srv.APP.config.data["access_token"]))
         server_thread.start()
-        for _ in range(50):
-            try:
-                with __import__("urllib.request").request.urlopen(f"{local_url}/api/health", timeout=1) as r:
-                    if r.status == 200:
-                        break
-            except Exception:
-                time.sleep(0.1)
+        health = self._wait_healthy(local_url)
+        if health != "ok":
+            # 旧实现这里没有失败分支：5 秒白等之后照常开托盘、开窗口，用户看到的是
+            # ERR_CONNECTION_REFUSED（或更糟——开到别人的服务上）。现在直接给中文原因。
+            reason = (
+                f"端口 {port} 上另有服务在应答，但它不是 Cat Chat。"
+                if health == "foreign"
+                else f"本机服务在 5 秒内没有就绪（端口 {port}）。"
+            )
+            raise self._abort_startup(
+                f"{reason}\n\n{port_conflict_message(port, host=host)}", instance_lock
+            )
 
         # 图标只解析一次、托盘与窗口共用（见 _resolve_app_icon：各写一份会出现
         # 「托盘换了、窗口没换」的半截状态）。

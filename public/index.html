@@ -1172,6 +1172,28 @@
     </div>
   </dialog>
 
+  <!-- 拖入工作区外的文件夹：先问一次「允许读取吗」（口径二，见 core/conv_files.FolderConfirmRequired）。
+       确认按会话记住（后端内存），同一会话内再拖同一目录不再问。 -->
+  <dialog id="folderAccessDialog" class="rename-conversation-dialog message-delete-dialog">
+    <div class="dialog-toolbar">
+      <div><h2>允许读取此文件夹？</h2><p id="folderAccessHint">Cat Chat 只会读取文件清单（路径与大小），不会上传或修改内容</p></div>
+      <button class="icon-button" type="button" data-close="folderAccessDialog" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+    </div>
+    <div class="message-delete-body">
+      <p class="folder-access-path" id="folderAccessPath"></p>
+      <ul class="message-delete-notes">
+        <li>该文件夹不在本会话的工作区内。允许后，它的文件清单会随消息一起发给模型（用于让模型知道目录里有什么）。</li>
+        <li>清单只含路径/类型/大小，不含文件内容；最多列出前 300 项、递归 3 层。</li>
+        <li>本次允许只对当前会话生效，重新启动程序后会再问一次。</li>
+      </ul>
+      <div class="form-actions message-delete-actions">
+        <button class="control-button" type="button" id="folderAccessCancel">取消</button>
+        <button class="control-button" type="button" id="folderAccessDeny">不允许</button>
+        <button class="primary-button" type="button" id="folderAccessAllow">允许并读取清单</button>
+      </div>
+    </div>
+  </dialog>
+
   <!-- 删除后的撤销条：挂在 body 上、10 秒后自动消失。撤销快照只存内存（刷新即失效），
        所以文案里明写「刷新页面后不可撤销」。 -->
   <div class="undo-bar" id="undoBar" hidden role="status" aria-live="polite">

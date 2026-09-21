@@ -10,7 +10,7 @@ import { switchPermissionMode } from "./06-tasks-plans.js";
 import { checkUpdate, closeAgentHelpPopover, closeComposerModelPicker, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, positionAgentHelpPopover, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleAgentHelpPopover, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
 import { cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeBranchChainPanel, closeConversationMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, runFullTextSearch, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel, setTaskLogOpen, setTaskLogStick, setWorkspaceSearchMode, syncSearchModeUi, SEARCH_DEBOUNCE_MS } from "./08-conversations.js";
 import { addProvider, addSearchProfile, appearanceFormValues, applyProviderModelCapabilities, applyProviderPreset, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadWorkspaceTree, openAgentCard, openProviderCard, openProviderPresetKeyUrl, openVisionProviderForm, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, saveMcpServer, saveProvider, saveRuntimeSettings, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, showAgentForm, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint } from "./09-settings.js";
-import { readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
+import { addFolderChip, isFolderChip, readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
 import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handlePasteImage, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState } from "./12-chat-input.js";
 import { commitSkillSelection, hideSkillPopup, insertSkillRefAtCursor, moveSkillPopupSelection, popupState, positionSkillPopup, renderInputMirror, resizeTextarea, setSkillPopupSelection, skillList, updateSkillPopup } from "./13-skill-refs.js";
 import { activateFileTab, activeFileTab, applyFilePanelOpenClass, cancelFileEdit, closeFilePanel, closeSidebar, filePanelState, filePanelUsable, openFilePanel, openSidebar, removeFileTab, reopenFilePanel, restoreLeftSidebarCollapse, saveFileTab, setLeftSidebarCollapsed, sidebarDesktop, startFileEdit, updateFileTabsButton } from "./14-file-panel.js";
@@ -653,6 +653,75 @@ function isLongPressPointer() {
   return lastPointerType === 'touch' || lastPointerType === 'pen';
 }
 
+// ---- 拖文件夹进输入区（桌面壳专属能力，见计划 B 部分）-----------------------------
+// 为什么不能只看 `dataTransfer.files`：浏览器把"拖进来的目录"也塞进 files（一个 type 空、
+// size 0 的假 File），照原样上传只会得到一个 0 字节附件。真实类型只能从 `webkitGetAsEntry()`
+// 读——它必须在 drop 事件同步阶段取，事件对象出了处理器就失效。
+const DESKTOP_FOLDER_WAIT_MS = 800;
+
+let desktopFolderWaiter = null;   // 单次等待者：launcher 把路径送回来时兑现
+
+/** 这次 drop 里有没有目录（按条目而非 files 判断）。 */
+function hasDroppedDirectory(event) {
+  const items = event.dataTransfer?.items || [];
+  for (const item of items) {
+    try {
+      if (item.kind === 'file' && item.webkitGetAsEntry?.()?.isDirectory) return true;
+    } catch (_) {
+      // 老浏览器没有 webkitGetAsEntry：当作没有目录，走原有上传链路。
+    }
+  }
+  return false;
+}
+
+/** 等 launcher 把"拖入目录的绝对路径"送回来；超时返回 null（浏览器端永远走这条）。 */
+function waitDesktopFolderPaths() {
+  if (!isPywebview()) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      desktopFolderWaiter = null;
+      resolve(value);
+    };
+    desktopFolderWaiter = finish;
+    setTimeout(() => finish(null), DESKTOP_FOLDER_WAIT_MS);
+  });
+}
+
+async function handleFolderDrop(event) {
+  // 混合拖入（文件 + 文件夹）：普通文件仍走原链路，目录另行处理。
+  const plainFiles = [...(event.dataTransfer?.files || [])].filter((file) => {
+    try {
+      return !(file.size === 0 && !file.type && !String(file.name || '').includes('.'));
+    } catch (_) {
+      return true;
+    }
+  });
+  if (plainFiles.length) uploadFiles(plainFiles);
+  const paths = await waitDesktopFolderPaths();
+  if (paths?.length) {
+    for (const path of paths) await addFolderChip(path, { quiet: true });
+    return;
+  }
+  // 拿不到路径：宁可明确说清，也不能把目录当文件传上去（只会得到一个 0 字节附件）。
+  toast('浏览器里拖文件夹拿不到完整路径：请在桌面客户端里拖入，或用输入框的「@」选择文件夹');
+}
+
+// launcher 的 drop 监听（pywebview DOM 事件）把目录绝对路径从这里交回来。
+// 浏览器端永远不会被调用——Chromium 不给绝对路径（安全模型），那里只走上面的降级提示。
+window.naibaHandleDroppedFolders = (paths) => {
+  const list = (Array.isArray(paths) ? paths : []).map((item) => String(item || '')).filter(Boolean);
+  const waiter = desktopFolderWaiter;
+  if (waiter) {
+    waiter(list);
+    return;
+  }
+  // 没有等待者（前端没识别出目录、或事件顺序反了）：直接建 chip，别丢用户的操作。
+  list.forEach((path) => { void addFolderChip(path, { quiet: true }); });
+};
+
 export function bindEvents() {
   document.addEventListener('contextmenu', (event) => {
     hideTextContextMenu();
@@ -1135,6 +1204,10 @@ export function bindEvents() {
       if (!event.dataTransfer?.files?.length && !droppedPath) return;
       event.preventDefault();
       composerWrap.classList.remove('dragover');
+      if (hasDroppedDirectory(event)) {
+        void handleFolderDrop(event);
+        return;
+      }
       if (event.dataTransfer.files?.length) uploadFiles([...event.dataTransfer.files]);
       else {
         const path = String(droppedPath).split('\n').find((item) => item && !item.startsWith('#')) || '';
@@ -1222,7 +1295,7 @@ export function bindEvents() {
     // 上传中 → 中止 XHR；新上传附件 → 删除未引用的缓存文件。
     // 从历史消息带入的附件仅从编辑列表移除，取消编辑后原消息仍需使用原文件。
     if (chip?.cancel) chip.cancel();
-    if (chip?.path && !chip.uploading && !chip.existingAttachment) {
+    if (chip?.path && !chip.uploading && !chip.existingAttachment && !isFolderChip(chip)) {
       api('/api/uploads/delete', { method: 'POST', body: { path: chip.path } }).catch(() => { /* 有引用/删除失败时保留文件，由清理机制回收 */ });
     }
     renderPendingFiles();

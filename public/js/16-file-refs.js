@@ -9,6 +9,7 @@
 // ============================================================
 
 import { $, api, escapeHtml, notifyComposerChanged, state } from "./01-core.js";
+import { addFolderChip } from "./10-upload.js";
 import { positionComposerPopup, renderInputMirror, resizeTextarea } from "./13-skill-refs.js";
 
 const DIR_CACHE = new Map();   // `${conversationId}|${rel}` → browse 响应（会话内复用）
@@ -155,10 +156,17 @@ function rowHtml(item, index) {
   const enter = (isDir || isParent)
     ? `<button type="button" class="file-popup-enter" data-file-enter="${index}" title="${isParent ? '返回上级目录' : '进入目录'}" aria-label="${isParent ? '返回上级目录' : '进入目录'}">${isParent ? '↑' : '›'}</button>`
     : '';
+  // 目录行多一个「＋」：把整个文件夹加进待发送（只带路径清单，不铺缩略图）。
+  // 这是拖拽之外的**第二条入口**，也是手机上唯一可用的那条——触屏没有 drop 事件。
+  // 刻意不用"目录行可拖拽"：本弹层的 mousedown 被 preventDefault 以保住输入框焦点，
+  // 而 Chromium 的拖拽正是由 mousedown 默认行为发起的（§九.120）。
+  const add = isDir
+    ? `<button type="button" class="file-popup-add" data-file-folder="${index}" title="把整个文件夹加入待发送（只索引路径与文件名，不上传内容）" aria-label="加入待发送">＋</button>`
+    : '';
   return `<div class="file-popup-item${selected ? ' selected' : ''}" role="option" aria-selected="${selected ? 'true' : 'false'}" data-file-index="${index}" data-kind="${kind}" title="${escapeHtml(tip)}">
     <span class="file-popup-icon">${iconSvg(kind)}</span>${hint}
     <span class="file-popup-name">${escapeHtml(label)}</span>
-    <small class="file-popup-meta">${escapeHtml(meta)}</small>${enter}
+    <small class="file-popup-meta">${escapeHtml(meta)}</small>${add}${enter}
   </div>`;
 }
 
@@ -327,6 +335,13 @@ export function handleFilePopupKey(event) {
 
 // 点击委托：右侧箭头/「返回上一级」箭头 = 进入，其余区域 = 引用（目录也可被引用）。
 export function handleFilePopupClick(event) {
+  const folderButton = event.target.closest?.('[data-file-folder]');
+  if (folderButton) {
+    event.preventDefault();
+    const target = filePopupState.items[Number(folderButton.dataset.fileFolder)];
+    if (target?.path) void addFolderChip(target.path);
+    return;
+  }
   const enterButton = event.target.closest?.('[data-file-enter]');
   if (enterButton) {
     event.preventDefault();

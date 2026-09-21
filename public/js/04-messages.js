@@ -536,6 +536,59 @@ export async function regenerateMessage(assistantMessageId) {
   });
 }
 
+// 分支前问「新会话用哪个 Agent」：分支会把源会话的**固化工具集**一起复制过去，而工具集
+// 一旦非空，Agent 下拉就锁死（07-models-agents.js 的 locked 判据），用户再也没法换。
+// 所以这里给出两条路：照旧继承（前缀缓存继续命中）／不继承（新会话回到「首轮之前」，
+// 发送前可以换 Agent，代价是这一轮历史要重新缓存）。
+// 与 askDeleteScope 同款 Promise 模式：close 事件兜底、防重复 settle。
+function askBranchAgentChoice({ sourceAgentName } = {}) {
+  const dialog = $('#branchAgentDialog');
+  // 对话框缺失（浏览器缓存了旧 index.html）时按「保持当前 Agent」降级：
+  // 宁可少一个新选项，也不能让「分支」这个按钮点不动。
+  if (!dialog) return Promise.resolve('keep');
+  const hint = $('#branchAgentHint');
+  const list = $('#branchAgentNotes');
+  const keepButton = $('#branchAgentKeep');
+  const resetButton = $('#branchAgentReset');
+  const cancelButton = $('#branchAgentCancel');
+  if (hint) {
+    hint.textContent = sourceAgentName
+      ? `新会话会复制分支点之前的全部历史，Agent 暂为「${sourceAgentName}」`
+      : '新会话会复制分支点之前的全部历史';
+  }
+  if (list) {
+    list.innerHTML = [
+      '保持当前 Agent：新会话沿用已固化的工具集，前缀缓存继续命中，但会话内不能再换 Agent。',
+      '更换 Agent：新会话不固化工具集，发送前可在输入区重新选 Agent，这一轮历史需重新缓存。',
+    ].map((line) => `<li>${escapeHtml(line)}</li>`).join('');
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const cleanup = () => {
+      keepButton?.removeEventListener('click', onKeep);
+      resetButton?.removeEventListener('click', onReset);
+      cancelButton?.removeEventListener('click', onCancel);
+      dialog.removeEventListener('close', onCancel);
+    };
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (dialog.open && typeof dialog.close === 'function') dialog.close();
+      resolve(value);
+    };
+    function onKeep() { done('keep'); }
+    function onReset() { done('reset'); }
+    function onCancel() { done(''); }
+    keepButton?.addEventListener('click', onKeep);
+    resetButton?.addEventListener('click', onReset);
+    cancelButton?.addEventListener('click', onCancel);
+    dialog.addEventListener('close', onCancel);
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
+  });
+}
+
 // 从某条 user 消息分支：新开一个会话，复制分支点之前的历史，并把分支消息预填进输入框。
 // 非破坏性（原会话保留）；运行中不显示分支按钮（见 CSS .conversation-running），此处兜底拦截。
 export async function branchMessage(row) {
@@ -549,10 +602,19 @@ export async function branchMessage(row) {
     toast('分支失败：消息或会话不存在');
     return;
   }
+  // 选择必须在 API 调用之前：取消 = 不产生新会话（否则会留下一个用户没打算要的分支）。
+  const sourceConversation = state.conversations.find((c) => c.id === sourceId);
+  const sourceAgentName = String(
+    (state.bootstrap?.agents || []).find(
+      (a) => String(a.id) === String(sourceConversation?.agent_id || ''),
+    )?.name || '',
+  );
+  const choice = await askBranchAgentChoice({ sourceAgentName });
+  if (!choice) return;
   try {
     const result = await api(`/api/conversations/${sourceId}/branch`, {
       method: 'POST',
-      body: { message_id: messageId },
+      body: { message_id: messageId, reset_agent: choice === 'reset' },
     });
     const newConversation = result.conversation || {};
     const branch = result.branch_message || {};
@@ -572,7 +634,9 @@ export async function branchMessage(row) {
     renderPendingFiles();
     input.focus();
     input.setSelectionRange(input.value.length, input.value.length);
-    toast('已从该消息分支到新会话');
+    toast(choice === 'reset'
+      ? '已分支到新会话，发送前可在输入区更换 Agent'
+      : '已从该消息分支到新会话');
   } catch (error) {
     toast(`分支失败：${error.message}`);
   }

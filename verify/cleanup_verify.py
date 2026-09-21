@@ -73,6 +73,8 @@ KEEP = {
     "tool_prefix_prose_smoke.py",
     # 分支对话继承首轮上下文冒烟（§六 已登记；Python 自编排 + Node 检查）
     "branch_first_turn_smoke.py", "branch_first_turn_smoke.cjs",
+    # 分支时可选「更换 Agent」冒烟（§六 已登记；Python 自编排 + 无头 Edge）
+    "branch_agent_smoke.py", "branch_agent_smoke.cjs",
     # 新会话边界 / 种子消息冒烟（§六 已登记；Python 自编排 + Node 检查）
     "session_start_smoke.py", "session_start_smoke.cjs",
     # 插话（运行中第二输入通道）+ 流式状态「重连中…」滞留冒烟（§六 已登记）

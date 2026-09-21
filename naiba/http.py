@@ -420,7 +420,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json({"error": "conversation_id 和 message_id 不能为空"}, HTTPStatus.BAD_REQUEST)
                 return
             try:
-                result = self.app.storage.branch_conversation(conversation_id, message_id)
+                # reset_agent=True = 用户选了「更换 Agent」：新会话不继承固化工具集，
+                # 发送首轮前可在输入区重新选（详见 store.branch_conversation docstring）。
+                result = self.app.storage.branch_conversation(
+                    conversation_id, message_id, reset_agent=bool(body.get("reset_agent"))
+                )
             except LookupError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
                 return

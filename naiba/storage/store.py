@@ -1456,11 +1456,24 @@ class ChatStorage:
                 (int(bool(value)), conversation_id),
             )
 
-    def branch_conversation(self, source_id: str, message_id: str) -> dict[str, Any]:
+    def branch_conversation(
+        self, source_id: str, message_id: str, reset_agent: bool = False
+    ) -> dict[str, Any]:
         """从源会话的分支点复制“之前”的历史到新会话，并完整复制源会话设置与冻结 Skill 策略。
 
         非破坏性：源会话保持原样。新会话历史为分支点之前的全部消息（含 metadata，
         使 build_model_history 能重建一致上下文）；返回新会话与分支消息（用于预填输入框）。
+
+        ``reset_agent``（默认 False，存量行为不变）：为 True 时不继承源会话的**固化态**，
+        让新会话一出生就是「首轮之前」的样子——用户在点「分支」时可选择换个 Agent 再问：
+
+        - ``enabled_tool_ids`` 留空 ⇒ 前端 Agent 下拉解锁（`07-models-agents.js` 的
+          ``locked`` 判据是「工具集非空」），首轮发送时由 ``bake_session_tool_ids`` 按
+          （可能换过的）当前 Agent 重新固化；
+        - ``skill_policy`` / ``first_turn`` 一并留空：这两列都是「按当时 Agent 冻结」的
+          派生物，继承下来会让新会话的 system 前缀与新 Agent 对不上，顶部折叠卡还会展示
+          旧 Agent 的固化上下文。
+        - ``agent_id`` **仍然继承**：下拉预选同一个 Agent，用户可换可不换。
         """
         now = int(time.time() * 1000)
         with self._connect() as db:
@@ -1481,12 +1494,13 @@ class ChatStorage:
                 raise ValueError("只能从用户消息分支")
             # 有历史时才继承源会话冻结技能集（保证新会话 system 前缀与复制的一致）；
             # 分支点是首条消息时留空，让首轮按现有规则重新冻结。
-            inherited_skill_policy = src["skill_policy"] if branch_idx > 0 else ""
+            # reset_agent（用户选了「更换 Agent」）时同样留空：技能集是按旧 Agent 冻结的。
+            inherited_skill_policy = src["skill_policy"] if (branch_idx > 0 and not reset_agent) else ""
             # 首轮上下文（会话顶部折叠卡）同样只在有历史时继承：分支点之前的首轮与源会话
             # 是同一轮（消息前缀一致）；否则新会话没有 chat run，卡片永远不显示。
             # 老会话（v16 之前）列里为空，回退读源会话最早 chat run 的快照。
             inherited_first_turn = ""
-            if branch_idx > 0:
+            if branch_idx > 0 and not reset_agent:
                 inherited_first_turn = str(src["first_turn"] or "")
                 if not inherited_first_turn:
                     legacy = (self._first_chat_run_snapshot(db, source_id) or {}).get("first_turn")
@@ -1521,7 +1535,9 @@ class ChatStorage:
                     src["web_search_enabled"], src["deep_reasoning_enabled"], src["lightweight_mode"],
                     src["lightweight_disabled_features"], 1, src["system_prompt"], src["stream_enabled"],
                     src["workspace_dir"], src["workspace_group"], src["reasoning_effort"],
-                    src["enabled_tool_ids"], inherited_skill_policy, src["chat_supports_images"], src["provider_id"], src["model_key"], src["model_name"],
+                    # reset_agent：不继承固化工具集（留空 ⇒ 前端下拉解锁 ⇒ 首轮按新 Agent 重固化）。
+                    "" if reset_agent else src["enabled_tool_ids"],
+                    inherited_skill_policy, src["chat_supports_images"], src["provider_id"], src["model_key"], src["model_name"],
                     src["agent_id"], src["interaction_mode"],
                     # 分支来源登记（v18）：侧栏徽标与分支链面板都读这两列。
                     source_id, message_id,

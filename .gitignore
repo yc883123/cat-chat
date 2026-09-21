@@ -218,6 +218,8 @@ verify/*
 !verify/backfill_media.py
 !verify/batch1_smoke.cjs
 !verify/batch1_smoke.py
+!verify/branch_agent_smoke.cjs
+!verify/branch_agent_smoke.py
 !verify/branch_first_turn_smoke.cjs
 !verify/branch_first_turn_smoke.py
 !verify/browser_smoke.cjs

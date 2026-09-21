@@ -1154,6 +1154,24 @@
     </div>
   </dialog>
 
+  <!-- 分支前问一句「换不换 Agent」：新会话要不要继承源会话的固化工具集。
+       刻意不用 window.confirm —— 两个选项的后果（缓存命中 vs 可换 Agent）需要正文说明，
+       而且原生弹窗无法截图留证（前端变更要求附截图）。 -->
+  <dialog id="branchAgentDialog" class="rename-conversation-dialog message-delete-dialog">
+    <div class="dialog-toolbar">
+      <div><h2>分支到新会话</h2><p id="branchAgentHint">新会话会复制分支点之前的全部历史</p></div>
+      <button class="icon-button" type="button" data-close="branchAgentDialog" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+    </div>
+    <div class="message-delete-body">
+      <ul class="message-delete-notes" id="branchAgentNotes"></ul>
+      <div class="form-actions message-delete-actions">
+        <button class="control-button" type="button" id="branchAgentCancel">取消</button>
+        <button class="control-button" type="button" id="branchAgentReset">更换 Agent</button>
+        <button class="primary-button" type="button" id="branchAgentKeep">保持当前 Agent</button>
+      </div>
+    </div>
+  </dialog>
+
   <!-- 删除后的撤销条：挂在 body 上、10 秒后自动消失。撤销快照只存内存（刷新即失效），
        所以文案里明写「刷新页面后不可撤销」。 -->
   <div class="undo-bar" id="undoBar" hidden role="status" aria-live="polite">

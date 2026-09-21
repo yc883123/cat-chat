@@ -36,6 +36,7 @@ from naiba.core.media_types import MIME_BY_EXT
 from naiba.core.network import network_access_status
 from naiba.core.paths import path_within
 from naiba.paths import PathContext, default_path_context, static_asset_version
+from naiba.storage.app_icon import APP_ICON_MAX_BYTES
 from naiba.storage.avatars import AVATAR_MAX_BYTES
 from naiba.storage.media import UPLOAD_MAX_BYTES, _uploads_total_bytes
 from naiba.storage.store import PRIMARY_RUN_KINDS as _PRIMARY_RUN_KINDS
@@ -351,6 +352,11 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/backgrounds":
             # 内置背景图清单（首次访问时幂等生成到 data/backgrounds/）。
             self._json(self.app.background_presets())
+        elif path == "/api/app-icon":
+            # 应用图标：状态（custom 是否生效）——重启后才会真的换掉托盘/窗口图标。
+            self._json(self.app.app_icon_status())
+        elif path == "/api/app-icon/image":
+            self._serve_app_icon()
         elif path == "/api/install/dirs":
             self._json(self.app.list_skill_dirs())
         elif path == "/api/mcp/status/light":
@@ -375,6 +381,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json({"error": "访问口令无效"}, HTTPStatus.UNAUTHORIZED)
                 return
             self._agent_avatar_upload()
+            return
+        # 应用图标同样走 multipart 小体积进内存（≤5MB），也必须在 JSON 读取前分流。
+        if path == "/api/app-icon" and self.headers.get("Content-Type", "").lower().startswith("multipart/form-data"):
+            if not self._authorized(parsed):
+                self._json({"error": "访问口令无效"}, HTTPStatus.UNAUTHORIZED)
+                return
+            self._app_icon_upload()
             return
         body = self._read_json(max_size=130 * 1024 * 1024)
         if body is None:
@@ -876,6 +889,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(*self.app.api_delete_message(body))
         elif path == "/api/messages/restore":
             self._json(*self.app.api_restore_messages(body))
+        elif path == "/api/app-icon":
+            # 图标走 multipart 小体积进内存（见 do_POST 的分流）；走到这里说明客户端发了
+            # JSON —— 明确回一句，免得前端把它当成"接口不存在"去猜。
+            self._json({"error": "应用图标请以 multipart 表单上传图片"}, HTTPStatus.BAD_REQUEST)
         else:
             self._json({"error": "接口不存在"}, HTTPStatus.NOT_FOUND)
 
@@ -911,7 +928,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json({"error": "访问口令无效"}, HTTPStatus.UNAUTHORIZED)
             return
         path = parsed.path
-        if path == "/api/tasks/clear":
+        if path == "/api/app-icon":
+            # 恢复默认图标（只删 custom-icon.*，内置 icon.ico 不动）。
+            self._json(*self.app.api_clear_app_icon())
+        elif path == "/api/tasks/clear":
             self._json({"deleted": self.app.storage.clear_terminal_background_tasks()})
         elif path.startswith("/api/quick-messages/"):
             index = path.rsplit("/", 1)[-1]
@@ -1258,6 +1278,28 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         fields, data = parsed
         self._json(*self.app.api_set_agent_avatar(fields.get("agent_id", ""), data))
+
+    def _app_icon_upload(self) -> None:
+        """应用图标上传（multipart 小体积进内存 → storage/app_icon 归一化落盘）。"""
+        parsed = self._read_multipart_small(APP_ICON_MAX_BYTES)
+        if parsed is None:
+            return
+        _fields, data = parsed
+        self._json(*self.app.api_set_app_icon(data))
+
+    def _serve_app_icon(self) -> None:
+        """当前生效图标的 PNG（弹窗预览用）：no-store —— 换/换回图标后刷新即见新图。"""
+        payload, status = self.app.api_read_app_icon()
+        if status != HTTPStatus.OK or not isinstance(payload, (bytes, bytearray)):
+            self._json(payload if isinstance(payload, dict) else {"error": "图标不可用"}, status)
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(payload)
 
     def _serve_agent_avatar(self, name: str) -> None:
         """Agent 头像：内容哈希命名 → 可长期强缓存；文件名非法/文件缺失走 404。"""

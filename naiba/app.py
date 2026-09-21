@@ -56,6 +56,9 @@ from naiba.storage.media import (
     is_uploads_path, missing_cache_attachment, remove_uploaded_file, rotate_uploaded_image,
     store_uploaded_file,
 )
+from naiba.storage.app_icon import (
+    clear_app_icon, has_custom_app_icon, read_app_icon_png, store_app_icon,
+)
 from naiba.storage.avatars import read_agent_avatar, store_agent_avatar
 from naiba.storage.media_collect import MediaCollector
 from naiba.storage.job_media import JobMediaWriter
@@ -1388,6 +1391,34 @@ class NaibaChatApp:
         data = read_agent_avatar(self._paths.data_dir, name)
         if data is None:
             return {"error": "头像不存在"}, HTTPStatus.NOT_FOUND
+        return data, HTTPStatus.OK
+
+    # ---- 应用图标（托盘 + 桌面窗口）：落 app_dir，重启生效（见 storage/app_icon.py） ----
+    def api_set_app_icon(self, raw: bytes) -> tuple[dict[str, Any], int]:
+        """上传并启用自定义应用图标；图片不合法/落盘失败一律 400 + 中文文案。"""
+        try:
+            store_app_icon(self._paths.app_dir, raw)
+        except ValueError as exc:
+            return self._reply({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        return self._reply({"ok": True, "custom": True})
+
+    def api_clear_app_icon(self) -> tuple[dict[str, Any], int]:
+        """恢复默认图标（只删 `custom-icon.*`，内置 `icon.ico` 不动）。"""
+        try:
+            clear_app_icon(self._paths.app_dir)
+        except ValueError as exc:
+            return self._reply({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        return self._reply({"ok": True, "custom": False})
+
+    def app_icon_status(self) -> dict[str, Any]:
+        """图标状态：自定义是否生效（前端据此决定「恢复默认」是否可点）。"""
+        return {"custom": has_custom_app_icon(self._paths.app_dir)}
+
+    def api_read_app_icon(self) -> tuple[bytes, int] | tuple[dict[str, Any], int]:
+        """当前生效图标的 PNG 字节（自定义优先，否则内置 icon.ico 转出），供弹窗预览。"""
+        data = read_app_icon_png(self._paths.app_dir, self._paths.resource_dir)
+        if not data:
+            return {"error": "图标不可用"}, HTTPStatus.NOT_FOUND
         return data, HTTPStatus.OK
 
     def _upload_spooled(self, spool_path: str, original_name: str) -> tuple[dict[str, Any], int]:

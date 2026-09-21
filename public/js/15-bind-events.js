@@ -560,6 +560,88 @@ function bindChatBackgroundEditor() {
   });
 }
 
+// ---- 应用图标（侧栏底部齿轮右侧入口）----
+// 图标只影响桌面端外观（窗口标题栏/任务栏 + 系统托盘）：pywebview 不支持运行时换窗口图标，
+// 因此与「启用手机访问」「数据目录迁移」同一种生效语义——**上传后完全退出并重新启动**才生效，
+// 不做运行中即时换（只换托盘不换窗口就成了半截状态）。
+// 预览图必须挂 token：`<img src>` 带不了 Authorization 头，手机/局域网访问靠查询串鉴权，
+// 与 01-core 的 localFileUrl 同一口径。
+function appIconImageUrl() {
+  const token = state.token ? `token=${encodeURIComponent(state.token)}&` : '';
+  return `/api/app-icon/image?${token}t=${Date.now()}`;
+}
+
+function setAppIconError(message) {
+  const node = $('#appIconError');
+  if (!node) return;
+  node.textContent = message || '';
+  node.hidden = !message;
+}
+
+function renderAppIconStatus(custom) {
+  const status = $('#appIconStatus');
+  if (status) status.textContent = custom ? '正在使用自定义图标' : '正在使用默认图标';
+  const reset = $('#appIconReset');
+  if (reset) reset.hidden = !custom;
+  const preview = $('#appIconPreview');
+  if (preview) preview.src = appIconImageUrl();
+}
+
+async function refreshAppIconDialog() {
+  try {
+    const payload = await api('/api/app-icon');
+    renderAppIconStatus(Boolean(payload.custom));
+  } catch (error) {
+    setAppIconError(`读取图标状态失败：${error.message}`);
+  }
+}
+
+async function uploadAppIcon(file) {
+  if (!file) return;
+  setAppIconError('');
+  const form = new FormData();
+  form.append('file', file, file.name || 'icon.png');
+  try {
+    const payload = await api('/api/app-icon', { method: 'POST', body: form });
+    renderAppIconStatus(Boolean(payload.custom));
+    toast('图标已更换，请完全退出并重新启动 Cat Chat 生效');
+  } catch (error) {
+    setAppIconError(`更换图标失败：${error.message}`);
+  }
+}
+
+async function resetAppIcon() {
+  setAppIconError('');
+  try {
+    const payload = await api('/api/app-icon', { method: 'DELETE' });
+    renderAppIconStatus(Boolean(payload.custom));
+    toast('已恢复默认图标，请完全退出并重新启动 Cat Chat 生效');
+  } catch (error) {
+    setAppIconError(`恢复默认失败：${error.message}`);
+  }
+}
+
+function bindAppIconControls() {
+  const entry = $('#openAppIcon');
+  if (!entry) return; // 旧 index.html 没有该入口时整块跳过（与外观控件同款的可选增强约定）
+  entry.addEventListener('click', () => {
+    setAppIconError('');
+    // 先给 <img> 一个 src 再开弹层：否则会先闪一下空框（alt 文本）才被接口回图盖上。
+    const preview = $('#appIconPreview');
+    if (preview) preview.src = appIconImageUrl();
+    $('#appIconDialog').showModal();
+    void refreshAppIconDialog();
+  });
+  $('#appIconPick').addEventListener('click', () => $('#appIconFile').click());
+  $('#appIconFile').addEventListener('change', () => {
+    const input = $('#appIconFile');
+    const file = input.files && input.files[0];
+    input.value = ''; // 选同一张图两次也要触发 change
+    void uploadAppIcon(file);
+  });
+  $('#appIconReset').addEventListener('click', () => { void resetAppIcon(); });
+}
+
 // 最近一次 pointerdown 的指针类型：`contextmenu` 事件本身不带 pointerType，只能这样记下来。
 // 用途：**触摸/手写笔长按必须让给系统菜单**。手机经局域网 http:// 打开时是**非安全上下文**，
 // 网页既没有 `navigator.clipboard`、`execCommand('paste')` 也被浏览器禁用，系统长按菜单
@@ -834,6 +916,8 @@ export function bindEvents() {
   bindChatBackgroundControls();
   // 背景图编辑器（白板取景）：入口、拖动/滚轮/双指、适配按钮、收口关闭。
   bindChatBackgroundEditor();
+  // 应用图标（侧栏底部齿轮右侧）：弹窗预览 + 选择图片 / 恢复默认，重启生效。
+  bindAppIconControls();
   $$('[data-close]').forEach((button) => button.addEventListener('click', () => $(`#${button.dataset.close}`).close()));
   // 删除后的撤销条：只有一个动作（撤销）。10 秒窗口与进度条时长由 04-messages 负责，
   // 这里只保证点得到——条本身是 body 上的常驻节点，不能每次删除都重新绑监听。

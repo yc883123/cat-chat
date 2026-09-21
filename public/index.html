@@ -58,6 +58,9 @@
         <button class="icon-button" id="openSettings" title="设置" aria-label="设置">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"></path></svg>
         </button>
+        <button class="icon-button" id="openAppIcon" title="更换应用图标" aria-label="更换应用图标">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><path d="M21 15.5l-4.5-4.5L6 21.5"></path></svg>
+        </button>
       </div>
       <div class="sidebar-resizer" id="sidebarResizer" title="拖动调整边栏宽度" aria-hidden="true"></div>
     </aside>
@@ -512,6 +515,28 @@
     <div class="form-actions chat-bg-footer">
       <button class="control-button" data-close="chatBackgroundDialog" type="button">取消</button>
       <button class="primary-button" id="chatBgSave" type="button">完成</button>
+    </div>
+  </dialog>
+
+  <!-- 应用图标：只影响桌面端外观（窗口标题栏/任务栏 + 系统托盘）。pywebview 不支持运行时
+       换窗口图标，因此与「启用手机访问」「数据目录迁移」同一种生效语义：上传后完全退出并
+       重新启动才生效。恢复默认只删自定义文件，仓库自带 icon.ico 一笔不动。 -->
+  <dialog id="appIconDialog" class="app-icon-dialog">
+    <div class="dialog-toolbar">
+      <div><h2>应用图标</h2><p>桌面窗口与系统托盘显示的图标</p></div>
+      <button class="icon-button" type="button" data-close="appIconDialog" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+    </div>
+    <div class="app-icon-body">
+      <img class="app-icon-preview" id="appIconPreview" alt="当前应用图标">
+      <span class="app-icon-status" id="appIconStatus">正在使用默认图标</span>
+    </div>
+    <p class="hint app-icon-hint">更换后需完全退出并重新启动 Cat Chat 才会生效（关闭窗口只是隐藏到托盘，请在托盘图标上右键选「退出」）。</p>
+    <p class="hint app-icon-hint">非方形图片会居中留白补成方形，不裁掉内容；建议用 256×256 以上的 PNG。</p>
+    <p class="hint app-icon-error" id="appIconError" role="alert" hidden></p>
+    <div class="form-actions">
+      <button class="control-button" id="appIconReset" type="button" hidden>恢复默认</button>
+      <button class="primary-button" id="appIconPick" type="button">选择图片</button>
+      <input type="file" id="appIconFile" accept="image/*" hidden>
     </div>
   </dialog>
 

@@ -42,6 +42,10 @@ KEEP = {
     "starter_reasoning_smoke.cjs", "mobile_shell_smoke.cjs", "mobile_ui_regression.cjs",
     # Agent 说明弹层 + 工作区路径/未注册分组提示冒烟（§六 已登记；Python 自编排 + Node 检查）
     "agent_help_popover.py", "agent_help_popover.cjs",
+    # 应用内更换图标冒烟（§六 已登记；Python 自编排 + Node 检查 + 进程级重启解析）
+    "app_icon_smoke.py", "app_icon_smoke.cjs",
+    # 冻结版：应用图标新模块真的进了 PYZ + `_MEIPASS\icon.ico` 在（§六 已登记）
+    "frozen_appicon_check.py",
     # 以下 6 个写在 .gitignore 白名单、也登记在 §六，却一直没进本名单（2026-09-17 补）：
     # 靠 TRACKED 兜底才没被删，但「名单漂移」本身就该修——见 §九.91 与 tests/test_verify_assets.py。
     "frozen_interrupt_check.py", "frozen_q1_check.py",

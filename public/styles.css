@@ -2157,6 +2157,21 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   .chat-bg-board { width: min(300px, 100%); }
 }
 
+/* ---- 应用图标弹窗（侧栏底部齿轮右侧入口）：预览 + 选择/恢复 ---- */
+/* 尺寸照重命名弹窗（同一类小弹层）。**必须 `height: fit-content`**：UA 给 `dialog:modal` 设了
+   `inset-block-start/end: 0`，`height: auto` 会被拉到 max-height 那么高（内容只占一半，按钮下方
+   留一大片空白）；fit-content 让内容决定高度，auto 外边距才真正把弹窗居中（同 .context-warning-dialog）。 */
+.app-icon-dialog { width: min(430px, calc(100vw - 30px)); height: fit-content; max-height: min(560px, calc(100dvh - 30px)); }
+.app-icon-body { display: grid; gap: 10px; justify-items: center; padding: 18px 18px 0; }
+/* 预览用 object-fit: contain —— 归一化后的图标本就是方形，这里只是别让它被拉伸；
+   底色用 surface-2 衬出透明留白区（否则透明图在浅色弹窗上与背景糊在一起）。 */
+.app-icon-preview { width: 96px; height: 96px; object-fit: contain; padding: 6px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); }
+.app-icon-status { color: var(--muted); font-size: 12px; }
+.app-icon-hint { margin: 10px 18px 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.app-icon-error { margin: 10px 18px 0; color: var(--danger); font-size: 12px; }
+.app-icon-error[hidden] { display: none; }
+.app-icon-dialog .form-actions { margin: 16px 0 0; padding: 12px 18px 16px; border-top: 1px solid var(--line); }
+
 /* 展开区容器：单层网格，或"平铺工具 + 二级分组"两种形态 */
 .agent-tool-group-body { background: var(--surface); }
 .agent-tool-group.collapsed .agent-tool-group-body { display: none; }

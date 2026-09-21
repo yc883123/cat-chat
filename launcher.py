@@ -14,8 +14,59 @@ import threading
 import time
 import webbrowser
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 
 import server as srv
+from naiba.storage.app_icon import app_icon_paths
+
+
+def _app_dir() -> Path:
+    """当前应用目录（自定义图标就落在它下面）：优先取已装配的 app 实例。
+
+    冻结版 = `%LOCALAPPDATA%\\NaibaChat`，源码版 = 仓库根；`srv.APP` 在 run() 装配前
+    还不存在，所以这里必须 getattr 兜底到模块级常量，不能让启动早退。
+    """
+    paths = getattr(getattr(srv, "APP", None), "paths", None)
+    app_dir = getattr(paths, "app_dir", None)
+    return Path(app_dir) if app_dir else Path(srv.APP_DIR)
+
+
+def _resolve_app_icon():
+    """解析应用图标，返回 (托盘用 PIL Image, 窗口用 .ico 路径或 None)。
+
+    优先级：自定义（`app_dir/custom-icon.*`，两张齐备）→ 内置 `RESOURCE_DIR/icon.ico`
+    → 兜底现画一个。托盘与 pywebview 窗口图标**共用这一个出口**：各写一份解析就会
+    出现「托盘换了、窗口没换」的半截状态（自定义图标是两张文件驱动的，两处读错一张
+    就会分叉）。任何一层读不出来都静默回退下一层——图标问题不该拦住启动。
+    """
+    from PIL import Image, ImageDraw
+
+    custom_png, custom_ico = app_icon_paths(_app_dir())
+    if custom_png.is_file() and custom_ico.is_file():
+        try:
+            with Image.open(custom_png) as img:
+                tray_image = img.convert("RGBA")
+            # .ico 也要读一次：它只交给 Windows/pywebview 用，坏了不会抛，只会让窗口
+            # 悄悄退回通用图标——那正是「托盘换了、窗口没换」的半截状态。两张都能读
+            # 才认这一对；`format` 判据顺带挡掉「PNG 改了后缀冒充 .ico」。
+            with Image.open(custom_ico) as ico:
+                if ico.format != "ICO":
+                    raise ValueError("not an ico")
+            return tray_image, str(custom_ico)
+        except (OSError, ValueError):
+            pass  # 文件在但坏了：回退默认，不报错
+    default_ico = Path(srv.RESOURCE_DIR) / "icon.ico"
+    if default_ico.is_file():
+        try:
+            with Image.open(default_ico) as img:
+                return img.convert("RGBA"), str(default_ico)
+        except (OSError, ValueError):
+            pass
+    image = Image.new("RGB", (64, 64), (18, 100, 64))
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((14, 14, 50, 50), fill=(255, 255, 255))
+    draw.ellipse((22, 22, 42, 42), fill=(18, 100, 64))
+    return image, None
 
 
 class JsApi:
@@ -141,20 +192,12 @@ class Launcher:
             webbrowser.open(url)
         return _open
 
-    def _build_tray(self, local_url: str):
+    def _build_tray(self, local_url: str, image=None):
         import pystray
-        from PIL import Image, ImageDraw
 
-        icon_path = srv.RESOURCE_DIR / "icon.ico"
-        try:
-            image = Image.open(icon_path).convert("RGBA") if icon_path.is_file() else None
-        except (OSError, ValueError):
-            image = None
         if image is None:
-            image = Image.new("RGB", (64, 64), (18, 100, 64))
-            draw = ImageDraw.Draw(image)
-            draw.ellipse((14, 14, 50, 50), fill=(255, 255, 255))
-            draw.ellipse((22, 22, 42, 42), fill=(18, 100, 64))
+            # 兜底：外部若单独调用本方法（不经过 run() 的解析），自己解析一次。
+            image, _ico_path = _resolve_app_icon()
 
         menu = pystray.Menu(
             pystray.MenuItem("打开窗口", lambda: self._show_window(), default=True),
@@ -219,7 +262,10 @@ class Launcher:
             except Exception:
                 time.sleep(0.1)
 
-        self.tray = self._build_tray(local_url)
+        # 图标只解析一次、托盘与窗口共用（见 _resolve_app_icon：各写一份会出现
+        # 「托盘换了、窗口没换」的半截状态）。
+        icon_image, icon_path = _resolve_app_icon()
+        self.tray = self._build_tray(local_url, icon_image)
         threading.Thread(target=self.tray.run, daemon=True).start()
 
         self.window = webview.create_window(
@@ -238,10 +284,9 @@ class Launcher:
         # 此前这里是 `threading.Timer(4.0, updater.start_check)`，于是用户「还没点检查更新就能
         # 查到新版本」，容易被当成 bug（2026-09-16 用户反馈第三条）。只查不装的语义不变，
         # 只是不再由程序主动发起。
-        icon_path = srv.RESOURCE_DIR / "icon.ico"
         start_kwargs = {}
-        if icon_path.is_file():
-            start_kwargs["icon"] = str(icon_path)
+        if icon_path:
+            start_kwargs["icon"] = icon_path
         # WebView2 持久化 profile：pywebview 的 private_mode 默认 True，会把 profile 放进
         # 临时目录并在进程退出时整个删除 —— 前端存在 localStorage 的偏好（侧栏宽度、
         # 文件面板宽度、顶栏 Skill 勾选、交互模式）因此每次启动都被重置。

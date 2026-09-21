@@ -167,6 +167,10 @@ icon-source.png
 icon-preview.png
 exe-icon-preview.png
 
+# 用户自定义应用图标（「更换应用图标」写入 app_dir；源码模式 app_dir = 仓库根）
+custom-icon.png
+custom-icon.ico
+
 使用说明.txt
 本地模型运行端推荐.md
 本地模型运行端推荐新版.md
@@ -208,6 +212,8 @@ verify/*
 !verify/agent_help_popover.cjs
 !verify/agent_help_popover.py
 !verify/agent_prompt_smoke.cjs
+!verify/app_icon_smoke.cjs
+!verify/app_icon_smoke.py
 !verify/attachment_only_smoke.py
 !verify/backfill_media.py
 !verify/batch1_smoke.cjs
@@ -228,6 +234,7 @@ verify/*
 !verify/esm_graph_check.py
 !verify/esm_unused_imports.py
 !verify/file_ref_smoke.cjs
+!verify/frozen_appicon_check.py
 !verify/frozen_batch1_check.py
 !verify/frozen_chat_font_check.py
 !verify/frozen_interrupt_check.py

@@ -31,6 +31,9 @@ KEEP = {
     "dup_ids.py", "sitecustomize.py", "media_markup_check.mjs",
     "media_pipeline_audit.py",
     "skill_prompt_check.mjs", "verify_doc_encoding.py",
+    # CI 环境差异自检（短路径 TEMP）：§六 第 ③ 条承诺「推之前跑一次」的闸门，
+    # 2026-09-17 归档批把文件删了却留着文档 ⇒ 闸门静默消失，2.8.2 首次推 master 因此红了流水线。
+    "ci_short_path_check.py",
     # 浏览器冒烟
     "browser_smoke.cjs", "topbar_smoke.cjs", "pending_files_smoke.cjs",
     "send_button_smoke.cjs", "send_state_smoke.cjs", "file_ref_smoke.cjs",

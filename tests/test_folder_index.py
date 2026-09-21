@@ -68,7 +68,10 @@ class FolderIndexScanTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="naiba_folderindex_")
-        self.root = Path(self.tmp.name) / "素材4"
+        # 必须 resolve()：CI runner 的 TEMP 是 8.3 短路径（`...\RUNNER~1\...`），
+        # 而产品侧会把路径 resolve() 之后再比对——测试侧不 resolve 就会「本地全绿、CI 全红」
+        # （与 tests/test_chat_background.py / test_file_references.py 同因同解）。
+        self.root = Path(self.tmp.name).resolve() / "素材4"
         self.root.mkdir()
         _make_tree(self.root)
         self.addCleanup(self.tmp.cleanup)
@@ -158,7 +161,9 @@ class FolderIndexGateTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="naiba_foldergate_")
-        base = Path(self.tmp.name)
+        # resolve() 同 FolderIndexScanTests：闸门把工作区与目标都 resolve() 过（`_conv_file_target`），
+        # 夹具不 resolve 的话，CI 的 8.3 短 TEMP 会让「403 里带上的路径」与夹具字符串对不上。
+        base = Path(self.tmp.name).resolve()
         self.workspace = base / "work"
         self.workspace.mkdir()
         (self.workspace / "inside").mkdir()
@@ -371,7 +376,8 @@ class FolderIndexStorageTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="naiba_folderstore_")
-        self.storage = ChatStorage(Path(self.tmp.name) / "chat.db")
+        # 同因：paths 一律走 resolve()，夹具也保持规范形态（见 FolderIndexScanTests.setUp）
+        self.storage = ChatStorage(Path(self.tmp.name).resolve() / "chat.db")
         self.conversation = self.storage.create_conversation(title="文件夹实验")
         self.cid = self.conversation["id"]
         self.addCleanup(self.tmp.cleanup)

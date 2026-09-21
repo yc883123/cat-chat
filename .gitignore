@@ -225,6 +225,7 @@ verify/*
 !verify/browser_smoke.cjs
 !verify/chat_font_smoke.cjs
 !verify/chat_font_smoke.py
+!verify/ci_short_path_check.py
 !verify/cleanup_verify.py
 !verify/composer_model_smoke.cjs
 !verify/composer_model_smoke.py

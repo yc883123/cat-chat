@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.8.5-beta
-  RELEASE_TAG: v2.8.5-beta
+  RELEASE_VERSION: 2.8.6-beta
+  RELEASE_TAG: v2.8.6-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-2.8.5-beta-windows-x64
+  PACKAGE_NAME: cat-chat-2.8.6-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-2.8.5-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-2.8.6-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -104,11 +104,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 2.8.5 Beta release
+      - name: Publish 2.8.6 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 2.8.5 Beta
+          name: Cat Chat 2.8.6 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -118,19 +118,19 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 2.8.5 Beta Windows build from `${{ github.sha }}`。
+            Cat Chat 2.8.6 Beta Windows build from `${{ github.sha }}`。
 
             > **关于文件名的说明**：仓库已更名为 `cat-chat`（旧链接由 GitHub 自动跳转）。本次 Release 同时提供 `cat-chat.exe` 与 `naiba-chat.exe`——**这是同一个文件，SHA-256 完全相同**；两个 ZIP 内容也等价，只有包内 exe 的文件名不同。应用内自动更新仍使用 `naiba-chat.exe` 资产与原有清单协议，**你不需要做任何操作**，已安装的旧版本会照常收到更新。
 
-            **本次变化：端口被占用时可以直接在弹窗里填一个新端口继续启动；「保存设置」不再「点了没反应」，连点也不会再长出重复的供应商卡片。** 直接覆盖安装即可，**不需要迁移数据，也不需要重新配置**；历史会话、API 卡片、Agent、Skill 与 MCP 配置原样保留。
+            **本次变化：用过「插话」之后，手机端输入框不再变成半屏高（一个字符都没打也降不下来）；「新会话」分割线填入多行种子消息时，高度与 `/ref` 高亮也会正确刷新。** 直接覆盖安装即可，**不需要迁移数据，也不需要重新配置**；历史会话、API 卡片、Agent、Skill 与 MCP 配置原样保留。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - **端口冲突可以直接在弹窗里解决**：2.8.2 起端口被占用会弹中文提示然后退出，但要你自己去改 `config.json`。现在弹窗里多一个输入框，**预填一个刚探测过空闲的端口**，输入 1-65535 就能当场重试启动，换掉的端口自动写回 `config.json`，下次启动直接生效；点「取消」仍回落原来的中文指引（写明端口 + `netstat -ano | findstr :端口` 自查命令 + 改 `port` 的出路）。**仍然不做自动换端口**——端口只由你显式决定；弹窗里也提醒了「换端口后手机 / 局域网的访问地址与防火墙放行规则要一起改」。
-            - **点「保存设置」不再「没反应」**：慢请求（在线中转站拉模型上下文参数，可能几秒到十几秒）之前全程零反馈，现在保存瞬间按钮就变「保存中…」并给出「正在获取模型上下文参数…」；万一保存失败，错误会真的显示出来（弹窗已被另一次并发保存关掉时改用提示条，不再丢进看不见的地方）。
-            - **连点「保存设置」不再长出重复卡片**：前端加了保存重入闸（**按钮禁用挡得住鼠标点击，挡不住在输入框里按回车**，所以两道都要）；后端在新建路径上补了幂等兜底——同一份配置（类型 + 名称 + 地址 + 模型 + Key 全同）重复提交只保留一条。**不同 API Key 的同名供应商仍可并存**（多账号是正常需求，不会被误合并）。
-            - 边界（如实说清）：**不做自动去重**——之前已经产生的重复卡片不会自动消失，请在设置里手动删掉多余的；万一运行环境里 tkinter 不可用，端口弹窗会优雅回落到原来的中文指引，不会比修复前更差。
+            - **手机输入框不再变成半屏（本次重点）**：根因是量输入框高度时**把折行后的提示语也算成了内容**——手机 360px 宽下，「回复进行中…（输入后 Enter 加入插话队列）」这句 23 字提示会折成多行，再叠加运行中多出来的插话按钮把输入区挤窄，空输入框被量成 155px（同一只空框其实只有 39px）。桌面约 880px 宽、一行放得下，所以只在手机上、只有用过插话才出现。
+            - **修法**：量高前先摘掉提示语、量完立刻放回；并把「提示语变化 / 输入区宽度变化之后要重新量高」补齐（插话按钮的出现与收起、本轮结束提示语换回「输入消息」，这两处以前都改了宽度却没重新量高）。
+            - **顺带修复**：「填入种子消息」把多行内容写进输入框时，以前不重算高度也不刷高亮层（正文看不见、`/ref` 高亮不显示）。
+            - 边界（如实说清）：输入框最大高度仍是 180px，长草稿的滚动行为不变；桌面端视觉零变化；**手机端需更新到本版本**（手机访问的是安装包内置的界面资源）。
 
-            本地验证：全量单测 **1740 例通过**（新增 21 例守门：端口弹窗 14 例、保存幂等 7 例）；另有隔离实例 + 无头 Edge 的端到端冒烟 13 项（连点 3 次只发出 1 次保存请求、后端连发 3 次只落 1 条），以及冻结版自检 12 项确认端口弹窗依赖的 tkinter / tcl-tk 资源真的打进了 exe。
+            本地验证：全量单测 **1749 例通过**（新增 9 例守门，含负向断言）；另有手机视口（360×780 · 触摸）端到端冒烟 13 项，以及短路径闸门全量复跑通过。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

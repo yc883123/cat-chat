@@ -314,10 +314,28 @@ export function renderUserContent(text) {
 }
 
 
+/**
+ * 输入框自增高（唯一写入点）。`MAX_COMPOSER_H` 与 styles.css 的 `.composer textarea { max-height }` 同值。
+ *
+ * 为什么量高时必须先摘掉 placeholder（§九.128，2026-09-22 用户手机截图报障）：
+ * **Chrome 的 `textarea.scrollHeight` 把折行后的 placeholder 也算成内容高度**。手机窄屏里
+ * 「回复进行中…（输入后 Enter 加入插话队列）」这句 23 字占位符 + 插话键把输入区挤到 88px，
+ * 空输入框被量成 155px 高 —— 表现就是「用了插话之后输入框变成半屏、一个字都没打也降不下来」。
+ * 桌面 composer 宽约 880px，同一句一行放得下，所以这个坑只在手机上出现。
+ * 摘→量→放回在同一帧内同步完成，不会闪；量高本来就强制一次同步布局，开销不变。
+ */
+const MAX_COMPOSER_H = 180;
 export function resizeTextarea() {
   const input = $('#messageInput');
+  if (!input) return;
+  const placeholder = input.placeholder;
   input.style.height = 'auto';
-  input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
+  if (placeholder) input.placeholder = '';
+  try {
+    input.style.height = `${Math.min(input.scrollHeight, MAX_COMPOSER_H)}px`;
+  } finally {
+    if (placeholder) input.placeholder = placeholder;
+  }
 }
 
 // ---- 右侧文件面板（消息末尾“修改文件”摘要 → 查看 / 富文本编辑）----

@@ -90,6 +90,9 @@ KEEP = {
     "lazy_messages_smoke.py", "lazy_messages_smoke.cjs",
     # 会话模型下拉冒烟（§六 已登记；Python 自编排 + Node 检查）
     "composer_model_smoke.py", "composer_model_smoke.cjs",
+    # 输入框高度（占位符不得算进内容高）冒烟（§六 已登记；自带静态 public/ 服务 + 无头 Edge，
+    # 页面内真 import 前端模块，不需要后端也不需要隔离数据目录，见 §九.128）
+    "composer_height_smoke.cjs",
     # 发布清单同步自检（只读）
     "_release_check.py",
     # 「重新生成 / 编辑」冒烟（§六 已登记；Python 自编排 + Node 检查）

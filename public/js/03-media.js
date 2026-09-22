@@ -6,6 +6,9 @@ import { $, api, draggedFileCache, escapeHtml, localFileUrl, state, toast } from
 import { markdown } from "./02-markdown.js";
 import { selectedProvider } from "./07-models-agents.js";
 import { renderPendingFiles } from "./10-upload.js";
+// 输入框自增高（§九.128）：placeholder 与输入区宽度都在 updateContextComposerLock 里变，
+// 必须在那里同步重算一次高度（13-skill-refs 只依赖 01-core/02-markdown，不引入新的成环面）。
+import { resizeTextarea } from "./13-skill-refs.js";
 export function fileUrl(source) {
   const value = String(source || '');
   if (/^https?:\/\//i.test(value) && !/^https?:\/\/(?:127\.0\.0\.1|localhost):8188\//i.test(value)) return value;
@@ -1070,6 +1073,11 @@ export function updateContextComposerLock(busy = false) {
   }
   // 发送按钮的可用性由 updateSendButtonState 单点维护（含"运行中即停止键"语义）。
   updateSendButtonState();
+  // 收尾重算输入框高度（§九.128）：上面刚改了 placeholder，updateSendButtonState 又经
+  // updateInterjectButtonState 切换了插话键显隐（= 输入区宽度 132px ↔ 88px）。这两件事都会
+  // 改变折行点，不重算就会把上一次的高度留在屏幕上——用户手机截图里的「空输入框占半屏、
+  // 本轮结束后也不回落」就是这么来的。放在最后，量的才是最终宽度下的真实内容高度。
+  resizeTextarea();
 }
 
 // 发送按钮可用性（唯一写入点）：文字或附件至少有一个才可发送——纯附件轮次（只发文件/

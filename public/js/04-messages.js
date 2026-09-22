@@ -58,6 +58,10 @@ export function fillContextResetSeed(info = {}) {
   const input = $('#messageInput');
   if (!input || !text) return false;
   input.value = text;
+  // 程序化写值不会触发 input 事件 ⇒ 高度与镜像层必须自己补（§九.128 同族）：漏了这两行，
+  // 多行种子消息会被塞进一行高的框里（正文看不见），`/ref` 高亮也不显示。
+  resizeTextarea();
+  renderInputMirror();
   notifyComposerChanged(input);
   input.focus();
   input.setSelectionRange(input.value.length, input.value.length);

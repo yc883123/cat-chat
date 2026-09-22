@@ -242,6 +242,7 @@ verify/*
 !verify/frozen_chat_font_check.py
 !verify/frozen_interrupt_check.py
 !verify/frozen_mobile_ui_check.py
+!verify/frozen_port_dialog_check.py
 !verify/frozen_q1_check.py
 !verify/frozen_interjection_check.py
 !verify/frozen_tool_prose_check.py
@@ -267,6 +268,8 @@ verify/*
 !verify/provider_cards_smoke.cjs
 !verify/provider_presets_smoke.cjs
 !verify/provider_presets_smoke.py
+!verify/provider_save_reentry_smoke.cjs
+!verify/provider_save_reentry_smoke.py
 !verify/q1_context_smoke.cjs
 !verify/q1_context_smoke.py
 !verify/quick_msg_smoke.cjs

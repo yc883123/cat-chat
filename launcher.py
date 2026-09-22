@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import server as srv
-from naiba.core.network import port_conflict_message
+from naiba.core.network import port_conflict_message, suggest_free_port
 from naiba.storage.app_icon import app_icon_paths
 
 # 原生那边把文件路径交给 pywebview 需要一点时间（两条独立的消息通道）。测试会把它改成 0。
@@ -529,12 +529,30 @@ class Launcher:
 
         server_thread = threading.Thread(target=self._serve, name="naiba-http", daemon=True)
         # 绑定在主线程完成：端口被占时这里是唯一能"说话"的地方（见 _bind_server）。
-        try:
-            self._bind_server(host, port)
-        except OSError as exc:
-            raise self._abort_startup(
-                port_conflict_message(port, host=host, detail=str(exc)), instance_lock
-            ) from exc
+        # 被占用时弹窗让用户当场输入新端口重试（§九.126）：端口仍由用户显式决定，
+        # **不做任何自动换端口**（§九.121 的决定不变）；点取消就回落既有中文指引并退出。
+        # OSError 必须在这里捕获（AST 守门盯着这一条）：绑定的 OSError 绝不能漏到
+        # 后台线程或顶层去变成无声死亡 / 裸 traceback。
+        while True:
+            try:
+                self._bind_server(host, port)
+                break
+            except OSError as exc:
+                new_port = _ask_alternate_port(port, str(exc))
+                if new_port is None:
+                    raise self._abort_startup(
+                        port_conflict_message(port, host=host, detail=str(exc)), instance_lock
+                    ) from exc
+                port = new_port
+                # 写回 config：换端口是一次用户决定，记下来下次启动直接生效，不必再翻文件。
+                # 写盘失败不影响本次启动（端口已在内存/本次绑定中生效）——只在 stderr 留痕。
+                try:
+                    srv.APP.config.data["port"] = port
+                    srv.APP.config.save()
+                except Exception as write_exc:
+                    print(f"[launcher] 换端口后写回 config 失败（本次启动不受影响）：{write_exc!r}", file=sys.stderr)
+                local_url = f"http://127.0.0.1:{port}"
+                page_url = f"{local_url}/?token={token}"
         srv.write_status(host, port, str(srv.APP.config.data["access_token"]))
         server_thread.start()
         health = self._wait_healthy(local_url)
@@ -609,6 +627,70 @@ class Launcher:
                 pass
             instance_lock.close()
             self._exit_complete.set()
+
+
+def _ask_alternate_port(port: int, detail: str = "") -> int | None:
+    """端口被占用时弹窗让用户**当场输入**一个新端口（§九.126）；取消/不可用返回 ``None``。
+
+    为什么要有这个函数：加固后（§九.121）端口冲突只会弹一个"只有确定"的 MessageBoxW，
+    指引用户自己去翻 config.json 改 ``port`` 再重启——能解决，但对不熟配置文件的用户
+    等于"软件坏了"。这里把"换个端口"变成弹窗里的一步操作，端口**仍由用户显式决定**
+    （不做任何自动换端口），并同步告知连带影响（局域网地址、防火墙放行）要跟着改。
+
+    返回 ``None`` 的两种情形都回落到既有的 ``_abort_startup`` + ``port_conflict_message``
+    文案：用户点了取消，或 tkinter 不可用（冻结包缺 tcl/tk 资源）——后者不会比加固前更差。
+    """
+    try:
+        import tkinter as tk
+        from tkinter import simpledialog
+
+        root = tk.Tk()
+    except Exception as exc:
+        print(f"[launcher] 无法弹出端口输入窗，回落中文指引：{exc!r}", file=sys.stderr)
+        return None
+    try:
+        root.withdraw()
+        try:
+            # 与 app.pick_workspace_directory 同款套路：主窗口还没建，必须自己保证置顶。
+            root.attributes("-topmost", True)
+        except Exception:
+            pass
+        suggestion = suggest_free_port(port)
+        summary = " ".join(str(detail or "").split())
+        if len(summary) > 160:
+            summary = summary[:160] + "…"
+        lines = [f"端口 {port} 无法绑定（可能已被其它程序占用）。"]
+        if summary:
+            lines.append(f"系统返回：{summary}")
+        lines += [
+            "",
+            "输入 1-65535 的新端口继续启动；点「取消」则退出（也可稍后改 config.json 的 \"port\"）。",
+            f"建议值 {suggestion}（刚探测为空闲端口）。",
+            "注意：换端口后手机/局域网的访问地址与防火墙放行规则里的端口要一起改。",
+        ]
+        answer = simpledialog.askinteger(
+            "端口被占用",
+            "\n".join(lines),
+            parent=root,
+            initialvalue=suggestion,
+            minvalue=1,
+            maxvalue=65535,
+        )
+    except Exception as exc:
+        print(f"[launcher] 端口输入窗不可用，回落中文指引：{exc!r}", file=sys.stderr)
+        return None
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+    if answer is None:
+        return None
+    try:
+        candidate = int(answer)
+    except (TypeError, ValueError):
+        return None
+    return candidate if 1 <= candidate <= 65535 else None
 
 
 def _notify_startup_error(message: str) -> None:

@@ -49,6 +49,45 @@ def get_lan_ip() -> str | None:
     return next((address for address in dict.fromkeys(candidates) if _is_usable_lan_ipv4(address)), None)
 
 
+def suggest_free_port(start: Any, tries: int = 10) -> int:
+    """给"端口被占用"弹窗提供一个大概率空闲的建议值（§九.126）。
+
+    从 ``start + 1`` 起逐个端口用**临时裸 socket** 试探：能 ``bind`` 上就说明当前
+    没人监听。**只 bind 不 listen、随后立刻 close**，因此不发一个字节、不产生
+    TIME_WAIT，也不会干扰任何已有连接（绑不上就是绑不上，探针本身无副作用）。
+
+    全忙时回落到 ``start + 1``：建议值只是弹窗的初始值，最终端口永远由用户显式确认
+    （§九.121 的"不做自动换端口"决定不变）。
+
+    刻意**不** import ``naiba.http``（本模块是层级 1）：那里的 ``_port_has_listener``
+    要发一次 TCP 连接去验身份，属于 HTTP 层的事；这里只需要"能不能绑上"。
+    """
+    try:
+        base = int(start)
+    except (TypeError, ValueError):
+        base = 0
+    if not 1 <= base <= 65535:
+        base = 8765
+    fallback = base + 1 if base < 65535 else base
+    try:
+        attempts = max(1, int(tries))
+    except (TypeError, ValueError):
+        attempts = 1
+    for offset in range(1, attempts + 1):
+        candidate = base + offset
+        if candidate > 65535:
+            break
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind(("127.0.0.1", candidate))
+        except OSError:
+            continue
+        finally:
+            probe.close()
+        return candidate
+    return fallback
+
+
 def port_conflict_message(port: Any, *, host: str = "", detail: str = "") -> str:
     """端口无法绑定时的中文指引（桌面弹窗与 CLI 共用**同一份文案**）。
 

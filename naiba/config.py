@@ -2283,7 +2283,8 @@ class ConfigStore:
 
     def upsert_model_profile(self, values: dict[str, Any]) -> dict[str, Any]:
         """统一保存在线 API 或本地模型配置。"""
-        model_id = str(values.get("id") or uuid.uuid4().hex[:12]).strip()
+        provided_id = str(values.get("id") or "").strip()
+        model_id = provided_id or uuid.uuid4().hex[:12]
         kind = str(values.get("kind") or "online").strip().lower()
         if kind not in VALID_MODEL_KINDS:
             raise ValueError("模型类型必须是 online 或 local")
@@ -2376,8 +2377,32 @@ class ConfigStore:
                 existing.update(payload)
                 stored = existing
             else:
-                providers.append(payload)
-                stored = payload
+                # 幂等兜底（§九.127）：连点「保存设置」会并发发出多个**无 id** 的 POST，
+                # 此前一律新建 ⇒ 列表里出现 N 张一模一样的卡片（用户实测 5 张）。
+                # 锁内比对"同类型 + 同名 + 同址 + 同模型 + 同 Key"：完全相同的条目直接复用。
+                # 判据含 api_key：不同 Key 的同名供应商仍允许并存（多账号是合理需求），
+                # 而同 Key 同名同址同模型的重复不可能是有意行为。
+                # 只在**无 id**时兜底：带 id 的请求是明确的"改这一条"，不属于本问题。
+                duplicate = None
+                if not provided_id:
+                    duplicate = next(
+                        (
+                            item
+                            for item in providers
+                            if str(item.get("kind") or "") == kind
+                            and str(item.get("name") or "") == payload["name"]
+                            and str(item.get("base_url") or "") == payload["base_url"]
+                            and str(item.get("model") or "") == payload["model"]
+                            and str(item.get("api_key") or "") == payload["api_key"]
+                        ),
+                        None,
+                    )
+                if duplicate is not None:
+                    model_id = str(duplicate.get("id") or model_id)
+                    stored = duplicate
+                else:
+                    providers.append(payload)
+                    stored = payload
             if not self.data.get("default_model_key"):
                 self.data["default_model_key"] = f"{kind}:{model_id}"
             self.save()

@@ -20,6 +20,7 @@ import json
 import re
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from urllib.parse import urlparse
@@ -252,6 +253,90 @@ class BackendWiringTests(unittest.TestCase):
         self.assertIn("HTTPStatus.BAD_REQUEST", body)
 
 
+class ProviderUpsertIdempotencyTests(unittest.TestCase):
+    """§九.127：连点「保存设置」→ 后端「无 id 的新建」必须幂等，不能变成 N 张重复卡。
+
+    事故链：慢上游探测期间按钮不禁用（前端，见 FrontendWiringTests）→ 连点 5 次发出
+    5 个**无 id** 的 POST → 后端此前一律 `uuid4()` 新建 ⇒ 列表出现 5 张同样的卡片。
+    前端防重入是主修，这里是第二层：即使请求真的并发到达，也只能落一条。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "config.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _values(self, **overrides):
+        values = {
+            "kind": "online",
+            "name": "SillyDream",
+            "base_url": "https://api.example/v1",
+            "model": "gpt-4o-mini",
+            "api_key": "sk-test",
+            "request_format": "openai_chat",
+        }
+        values.update(overrides)
+        return values
+
+    def test_repeated_anonymous_save_reuses_the_same_entry(self):
+        store = ConfigStore(self.path)
+        first = store.upsert_model_profile(self._values())
+        second = store.upsert_model_profile(self._values())
+        self.assertEqual(second["id"], first["id"], "同一条配置连发两次必须落在同一个 id 上")
+        self.assertEqual(second["model_key"], first["model_key"])
+        self.assertEqual(len(ConfigStore(self.path).data["providers"]), 1, "列表里只能有一张卡")
+
+    def test_concurrent_anonymous_saves_land_on_one_entry(self):
+        store = ConfigStore(self.path)
+        results = []
+        threads = [
+            threading.Thread(target=lambda: results.append(store.upsert_model_profile(self._values())))
+            for _ in range(5)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual({item["id"] for item in results}, {results[0]["id"]}, "并发新建必须收敛到同一个 id")
+        self.assertEqual(len(ConfigStore(self.path).data["providers"]), 1)
+
+    def test_different_api_key_still_creates_a_second_entry(self):
+        store = ConfigStore(self.path)
+        first = store.upsert_model_profile(self._values())
+        second = store.upsert_model_profile(self._values(api_key="sk-other"))
+        self.assertNotEqual(second["id"], first["id"], "多账号（不同 Key）是合理需求，必须允许并存")
+        self.assertEqual(len(store.data["providers"]), 2)
+
+    def test_different_model_or_url_is_not_merged(self):
+        store = ConfigStore(self.path)
+        first = store.upsert_model_profile(self._values())
+        self.assertNotEqual(store.upsert_model_profile(self._values(model="gpt-4o"))["id"], first["id"])
+        self.assertNotEqual(
+            store.upsert_model_profile(self._values(base_url="https://other.example/v1"))["id"], first["id"]
+        )
+        self.assertEqual(len(store.data["providers"]), 3)
+
+    def test_explicit_id_still_targets_that_entry(self):
+        """带 id 的请求语义是「改这一条」，不能被兜底改成新建。"""
+        store = ConfigStore(self.path)
+        first = store.upsert_model_profile(self._values())
+        updated = store.upsert_model_profile({**self._values(), "id": first["id"], "name": "改名了"})
+        self.assertEqual(updated["id"], first["id"])
+        self.assertEqual(updated["name"], "改名了")
+        self.assertEqual(len(store.data["providers"]), 1)
+
+    def test_empty_key_does_not_hitch_a_ride_on_a_keyed_entry(self):
+        """空 Key 的新建不能"蹭"上已有条目：那会把两次不同保存伪装成同一条。"""
+        store = ConfigStore(self.path)
+        keyed = store.upsert_model_profile(self._values(api_key="sk-keep"))
+        anonymous = store.upsert_model_profile(self._values(api_key=""))
+        self.assertNotEqual(anonymous["id"], keyed["id"])
+        entry = next(item for item in store.data["providers"] if item["id"] == keyed["id"])
+        self.assertEqual(entry["api_key"], "sk-keep", "既有条目不能被空 Key 的新建改写")
+
+
 class FrontendWiringTests(unittest.TestCase):
     def _index(self) -> str:
         return (ROOT / "public/index.html").read_text(encoding="utf-8")
@@ -371,6 +456,27 @@ class FrontendWiringTests(unittest.TestCase):
         self.assertIn(".provider-preset-grid, .onboarding-preset-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }", css)
         self.assertIn(".onboarding-dialog {", css)
         self.assertIn("color-mix(in srgb, var(--preset-accent", css, "色块要与主题面/字混色，亮暗主题都得能读")
+
+    def test_save_provider_has_reentry_guard_and_feedback(self):
+        """§九.127：设置弹层的「保存设置」必须与首启向导同款防重入 + 慢请求提示。
+
+        事故形态：慢上游探测（`/api/providers/models`）期间按钮不禁用、一句提示都没有
+        ⇒ 用户以为没反应、连点 5 次 ⇒ 5 张重复卡。这里钉住四件事：
+        重入闸（回车提交绕不过禁用，所以要显式闸）、保存中态、finally 恢复、错误可见。
+        """
+        settings = self._settings()
+        body = settings[settings.index("export async function saveProvider"):]
+        body = body[: body.index("\n}")]
+        self.assertIn("providerSaveInFlight", body, "必须有重入闸：disabled 挡不住输入框回车提交")
+        self.assertIn("button.disabled = true", body)
+        self.assertIn("保存中…", body, "与首启向导对齐的保存中态")
+        self.assertIn("finally", body, "必须 finally 恢复按钮，否则失败后按钮永久禁用")
+        self.assertIn("正在获取模型上下文参数", body, "慢探测阶段要有提示，否则体感是「点了没反应」")
+        self.assertIn("toast(`保存失败", body, "弹窗被并发的另一次保存关掉时，错误必须换个地方可见")
+        self.assertIn("syncSavedProvider(saved)", body, "两处共用同一份刷新函数")
+        # 刷新失败不能把已经保存成功这件事变成「没反应」：刷新调用必须包在 try 里。
+        refresh = body.index("syncSavedProvider(saved)")
+        self.assertIn("try {", body[:refresh], "刷新（syncSavedProvider）必须包 try/catch")
 
     def test_index_html_still_has_no_duplicate_ids(self):
         ids = re.findall(r'\sid="([^"]+)"', self._index())

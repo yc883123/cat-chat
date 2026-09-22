@@ -108,6 +108,10 @@ KEEP = {
     "chat_font_smoke.py", "chat_font_smoke.cjs", "frozen_chat_font_check.py",
     # 供应商预设（「只填 API Key」）+ 首启引导向导冒烟（§六 已登记；Python 自编排 + Node 检查）
     "provider_presets_smoke.py", "provider_presets_smoke.cjs",
+    # 「保存设置」防重入 + 后端幂等冒烟（§六 已登记；Python 自编排 + Node 检查）
+    "provider_save_reentry_smoke.py", "provider_save_reentry_smoke.cjs",
+    # 端口冲突弹窗冻结版自检（§六 已登记；打包后必跑，验 tkinter/tcl-tk 资源真的进包）
+    "frozen_port_dialog_check.py",
     # 拖文件夹进输入区（路径索引 + 工作区外确认）冒烟（§六 已登记；Python 自编排 + 无头 Edge）
     "folder_drop_smoke.py", "folder_drop_smoke.cjs",
     # 隔离实例的公共 harness：维护说明「归档说明」点名要求留在 verify/（被 tasks_panel_smoke.py 依赖）

@@ -782,11 +782,28 @@ export function syncSavedProvider(saved) {
   populateModels();
 }
 
+// 保存进行中的重入闸：`#saveProvider` 禁用只能挡住"点按钮"，**挡不住在输入框里按回车**
+// （disabled 的提交按钮不会派发 click，但表单仍会 submit）。两个都要。
+let providerSaveInFlight = false;
+
 export async function saveProvider(event) {
   event.preventDefault();
+  if (providerSaveInFlight) return;
+  const button = $('#saveProvider');
+  const label = button?.textContent || '保存设置';
+  providerSaveInFlight = true;
+  if (button) {
+    // 与首启向导 saveOnboardingProvider 同款：保存期间禁用 + 「保存中…」，
+    // 两处共用 syncSavedProvider，交互态也必须一致（少刷一处就是这次的事故）。
+    button.disabled = true;
+    button.textContent = '保存中…';
+  }
   try {
     const values = providerFormValue();
     if (values.model && (!values.context_window || !values.max_output_tokens)) {
+      // 这段预探测可能要几秒到十几秒（在线中转站），旧实现全程零反馈 ⇒
+      // 用户以为"点了没反应"就继续点。凡是慢请求前面都要有一句话。
+      $('#providerError').textContent = '正在获取模型上下文参数…';
       try {
         const result = await api('/api/providers/models', { method: 'POST', body: values });
         const matched = (result.models || []).find((item) => String(item.id || '') === values.model);
@@ -803,12 +820,29 @@ export async function saveProvider(event) {
       }
     }
     const saved = await api('/api/providers', { method: 'POST', body: values });
-    syncSavedProvider(saved);
+    // 先落"结果"，再刷新：`syncSavedProvider` 的第一步是把卡片并进本地 bootstrap
+    // （必须成功，否则关窗后列表里看不到新卡片），后面的 populateModels /
+    // populateVisionSettings 只是顺手刷新——旧实现里它们抛错会连 toast 与关窗一起
+    // 跳过，用户看到的同样是"点了没反应"。刷新失败只写控制台，不影响保存结论。
     $('#providerId').value = saved.id;
-    toast('API 供应商已保存');
+    try {
+      syncSavedProvider(saved);
+    } catch (refreshError) {
+      console.error('[providers] 供应商已保存，但刷新列表失败', refreshError);
+    }
     cancelProviderEdit();
+    toast('API 供应商已保存');
   } catch (error) {
-    $('#providerError').textContent = error.message;
+    // 弹窗可能已被"另一次并发的保存"关掉：那时把错误写进 #providerError 等于丢进
+    // 看不见的地方（体感仍是"没反应"）。弹窗还在就原地提示，已关就 toast 出来。
+    if ($('#providerDialog')?.open) $('#providerError').textContent = error.message;
+    else toast(`保存失败：${error.message}`);
+  } finally {
+    providerSaveInFlight = false;
+    if (button) {
+      button.disabled = false;
+      button.textContent = label;
+    }
   }
 }
 

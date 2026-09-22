@@ -178,6 +178,27 @@ class LlmProtocolTests(unittest.TestCase):
         self.assertEqual(P._local_endpoint("http://127.0.0.1:1234", "/v1/chat/completions"),
                          "http://127.0.0.1:1234/v1/chat/completions")
 
+    def test_with_endpoint_base_already_versioned(self):
+        """base 自带版本段（方舟 /api/v3、/api/coding/v3，智谱 /api/paas/v4）⇒ 剥 /v1 前缀直接追加。"""
+        ark_coding = "https://ark.cn-beijing.volces.com/api/coding/v3"
+        self.assertEqual(P._with_endpoint(ark_coding, "/v1/chat/completions"),
+                         "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions")
+        self.assertEqual(P._with_endpoint(ark_coding, "/v1/models"),
+                         "https://ark.cn-beijing.volces.com/api/coding/v3/models")
+        self.assertEqual(P._with_endpoint("https://ark.cn-beijing.volces.com/api/v3", "/v1/chat/completions"),
+                         "https://ark.cn-beijing.volces.com/api/v3/chat/completions")
+        self.assertEqual(P._with_endpoint("https://open.bigmodel.cn/api/paas/v4", "/v1/chat/completions"),
+                         "https://open.bigmodel.cn/api/paas/v4/chat/completions")
+        # 回归：Gemini /v1beta 目标不走新规则；/v1 结尾与裸域名的既有拼写逐字不变。
+        self.assertEqual(P._with_endpoint("https://generativelanguage.googleapis.com", "/v1beta/models"),
+                         "https://generativelanguage.googleapis.com/v1beta/models")
+        self.assertEqual(P._with_endpoint("https://api.openai.com/v1", "/v1/responses"),
+                         "https://api.openai.com/v1/responses")
+        self.assertEqual(P._with_endpoint("https://api.openai.com", "/v1/chat/completions"),
+                         "https://api.openai.com/v1/chat/completions")
+        self.assertEqual(P._with_endpoint("https://api.anthropic.com", "/v1/messages"),
+                         "https://api.anthropic.com/v1/messages")
+
     def test_online_usage_variants(self):
         self.assertEqual(P._online_usage("openai_chat", {
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}),

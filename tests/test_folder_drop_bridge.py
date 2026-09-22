@@ -152,10 +152,31 @@ class BridgeContractTests(unittest.TestCase):
         self.assertIn("from webview.dom import _dnd_state", self.py)
 
     def test_drop_listener_is_still_registered(self) -> None:
-        """**不能摘掉**：WebView2 只在 num_listeners > 0 时才把真实路径交给 pywebview。"""
+        """**不能摘掉**：WebView2 只在 num_listeners > 0 时才把真实路径交给 pywebview。
+
+        而且必须走 `node.on("drop", ...)`：pywebview 6.x 的 `events.*` 属性靠页面 JS
+        枚举 `on*` 动态生成，枚举结果偶尔不含 'drop'，`events.drop` 一访问就是
+        AttributeError（2026-09-22 09:37 实录），num_listeners 恒为 0，整条链路断死。
+        """
         self.assertIn("def _register_drop_listener", self.py)
-        self.assertIn("node.events.drop += DOMEventHandler(self._on_composer_drop)", self.py)
+        self.assertIn('node.on("drop", DOMEventHandler(self._on_composer_drop))', self.py)
+        self.assertNotIn("node.events.drop +=", self.py)
         self.assertIn("num_listeners", self.py)
+
+    def test_drop_listener_mount_is_deduped_and_retried(self) -> None:
+        """loaded 可能触发多次：同一页面只挂一份（标记）；挂载失败延时重试兜底。"""
+        self.assertIn("data-naiba-drop-bound", self.py)
+        self.assertIn("_DROP_LISTENER_MAX_ATTEMPTS", self.py)
+        self.assertIn("threading.Timer", self.py)
+
+    def test_frontend_swallows_stray_drops(self) -> None:
+        """拖到输入区之外只吞掉默认行为：WebView2 会把 drop 当导航，页面整个被换掉。"""
+        self.assertIn("document.addEventListener('dragover'", self.js)
+        window = self.js[self.js.index("document.addEventListener('dragover'"):]
+        window = window[: window.index("const composerWrap")]
+        self.assertIn("document.addEventListener('drop'", window)
+        self.assertIn("event.defaultPrevented", window)
+        self.assertIn("event.preventDefault()", window)
 
     def test_both_channels_are_deduped(self) -> None:
         """两条通道可能都回交同一批路径，不许长出两个相同的索引 chip。"""

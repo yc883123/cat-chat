@@ -843,6 +843,13 @@ class ProtocolMixins:
         base_path = parsed.path.rstrip("/")
         if base_path.endswith(target_path):
             return base_url
+        # base 已自带版本段（火山方舟 /api/v3、/api/coding/v3，智谱 /api/paas/v4 等）且目标是
+        # OpenAI 系 /v1/ 路径时，版本段本身就是端点前缀：剥掉 /v1 直接追加，避免拼出
+        # .../api/coding/v3/v1/chat/completions 这类双重版本路径（官方路径是 {base}/chat/completions）。
+        # Gemini 的 /v1beta 目标不走本规则；base 以 /v1 结尾的既有拼写经此规则结果与原逻辑一致。
+        if target_path.startswith("/v1/") and re.search(r"/v\d+$", base_path):
+            path = base_path + target_path[len("/v1"):]
+            return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
         path = ""
         for marker in ("/api/v1/", "/v1beta/", "/v1/"):
             if not target_path.startswith(marker):

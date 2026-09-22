@@ -2,7 +2,7 @@
 """供应商预设（「只填 API Key」接入模板）的表完整性 + 回填语义 + 前端接线守门。
 
 背景：设置 → 模型 →「添加 API」原先是一张空表单，API URL / 请求格式 / 模型名全要自己填，
-新用户第一步就卡住。现在后端有一张 14 条的预设表（大厂 7 + 中转 2 + 自定义 + 本地 4），
+新用户第一步就卡住。现在后端有一张 15 条的预设表（大厂 8 + 中转 2 + 自定义 + 本地 4），
 前端两个弹层（设置弹层与首启引导向导）共用同一份名单：选中卡片即回填连接字段，
 标准用户只剩 API Key 一个空。
 
@@ -35,14 +35,14 @@ from naiba.llm.provider_presets import (  # noqa: E402
 
 REQUIRED_FIELDS = ("id", "kind", "name", "abbr", "base_url", "request_format", "model", "key_required", "key_url", "hint")
 # 名单顺序即界面顺序：大厂 → 中转 → 自定义 → 本地（在线在前）。
-EXPECTED_ONLINE_IDS = ("deepseek", "kimi", "zhipu", "qwen", "openai", "claude", "gemini", "te", "bailan", "custom")
+EXPECTED_ONLINE_IDS = ("deepseek", "kimi", "zhipu", "qwen", "ark", "openai", "claude", "gemini", "te", "bailan", "custom")
 EXPECTED_LOCAL_IDS = ("ollama", "lm_studio", "llama_cpp", "unsloth")
 
 
 class PresetTableTests(unittest.TestCase):
-    def test_fourteen_presets_in_declared_order(self):
+    def test_fifteen_presets_in_declared_order(self):
         ids = [item["id"] for item in PROVIDER_PRESETS]
-        self.assertEqual(len(ids), 14, f"预设条数应为 14：{ids}")
+        self.assertEqual(len(ids), 15, f"预设条数应为 15：{ids}")
         self.assertEqual(len(set(ids)), len(ids), "预设 id 必须唯一")
         self.assertEqual(ids, list(EXPECTED_ONLINE_IDS) + list(EXPECTED_LOCAL_IDS))
 
@@ -98,6 +98,16 @@ class PresetTableTests(unittest.TestCase):
         self.assertEqual(bailan["base_url"], "https://api.bailan.store")
         self.assertEqual(bailan["request_format"], "openai_chat")
         self.assertEqual(bailan["model"], "grok-4.6")
+
+    def test_ark_preset_prefills_coding_plan_endpoint(self):
+        """方舟预设预填 Coding Plan 端点（订阅制）；按量端点与计费区分必须写进引导。"""
+        ark = provider_preset("ark")
+        self.assertEqual(ark["base_url"], "https://ark.cn-beijing.volces.com/api/coding/v3")
+        self.assertEqual(ark["request_format"], "openai_chat")
+        self.assertEqual(ark["model"], "doubao-seed-code")
+        # 官方警告：Coding Plan 端点与按量端点用错会按量扣费——引导里必须能对出两个 URL。
+        self.assertIn("ark.cn-beijing.volces.com/api/v3", ark["hint"], "按量端点切换要写进引导")
+        self.assertIn("按量扣费", ark["hint"], "计费区分警告要写进引导")
 
     def test_custom_preset_leaves_the_address_blank(self):
         custom = provider_preset("custom")

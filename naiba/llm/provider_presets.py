@@ -91,6 +91,25 @@ PROVIDER_PRESETS: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        "id": "ark",
+        "kind": "online",
+        "name": "火山方舟（豆包）",
+        "abbr": "方舟",
+        "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+        "request_format": "openai_chat",
+        "model": "doubao-seed-code",
+        "key_required": True,
+        "key_url": "https://www.volcengine.com/product/ark",
+        "hint": (
+            "火山方舟（字节跳动）模型平台，预填的是 Coding Plan 套餐端点（订阅制，模型 doubao-seed-code，"
+            "也可在控制台配置默认模型后改用 ark-code-latest）。使用方法：① 打开 "
+            "www.volcengine.com/product/ark 开通方舟并按需订阅 Coding Plan；"
+            "② 未订套餐、想按量计费的用户把 URL 改成 https://ark.cn-beijing.volces.com/api/v3 "
+            "并把模型改为 doubao-seed-2-1-pro-260628 等 Model ID——两个端点用错会按量扣费而不是扣套餐，注意区分；"
+            "③ 在控制台「API Key 管理」页创建 Key，复制粘到下方。"
+        ),
+    },
+    {
         "id": "openai",
         "kind": "online",
         "name": "OpenAI",

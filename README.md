@@ -1,21 +1,20 @@
-# Cat Chat 2.8.3 Beta
+# Cat Chat 2.8.4 Beta
 
 <p align="center">
   <img src="docs/cat-chat-logo.png" alt="Cat Chat" width="520">
 </p>
 
-Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。2.8.3 Beta 是一个紧急修复版：修好了 2.8.2 在**开着代理软件的电脑上无法启动**的问题（启动自检被系统代理劫持），并修正了自检失败弹窗里自相矛盾的文案。
+Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。2.8.4 Beta 修复了桌面端拖文件夹的启动竞态，并新增火山方舟（豆包）预设供应商卡片：预填 Coding Plan 端点、OpenAI 兼容请求格式与 `doubao-seed-code` 模型，同时修好了 base 自带版本段（`/api/v3`、`/api/coding/v3`、`/api/paas/v4`）时拼出双重版本路径的问题。
 
 > Cat Chat 原名 Naiba Chat。显示名自 2.7.6 Beta 起为 Cat Chat；GitHub 仓库自 2.8.0 Beta 起更名为 `cat-chat`（旧地址自动跳转）。更新资产仍使用 `naiba-chat.exe` 与原有清单协议，既有数据位置不变，无需重新配置或搬迁数据。
 
-## 2.8.3 Beta 主要能力
+## 2.8.4 Beta 主要能力
 
-- **修复：开代理软件的电脑打不开 2.8.2（本次重点）**：2.8.2 新增的启动自检用了系统默认 HTTP 栈，会**跟随系统代理**；而代理绕过列表里只写「localhost」或「`<local>`」时**不包含 127.0.0.1**（`<local>` 只匹配不带点的名字），于是回环自检被送进代理、50 次全部失败，应用被判「5 秒内没有就绪」拒绝启动——重启电脑也没用，因为代理设置是持久的。现在健康检查**显式绕过一切代理**（回环请求本来就不该经过代理），问题消除。
-- **弹窗文案修正**：2.8.2 自检失败的弹窗会把「绑定成功」与「端口 8765 无法绑定（可能已被其它程序占用）」拼在一起，自相矛盾、把排查引向 netstat。现在绑定成功但自检不通时，会如实说明，并指向真正的两个方向：代理软件接管 127.0.0.1 的请求、安全软件拦截本进程的回环访问。
-- **2.8.2 用户的临时自救（不升级也行）**：在代理软件的「绕过列表 / 直连规则」里加上 `127.0.0.1` 或 `127.*`，2.8.2 即可正常启动；升级 2.8.3 后这条配置不再必需。
-- **不受影响的版本**：2.7.6 及更早版本没有这道启动自检，照常可用；`cat-chat.exe` 与 `naiba-chat.exe` 是同一字节的双名复制（SHA-256 相同），文件名与本次问题无关。
-- **补齐 2.8.2 漏发的前端半边（如实说明）**：拖文件夹修复的桥接两段代码（前端在 drop 同步阶段主动把 File 交给原生 + Python 直读路径队列回交）都因提交遗漏没有随 2.8.2 发布——2.8.2 桌面端拖文件夹实际仍走旧的静默失效通道。2.8.3 把这两段补上（含守门测试），桌面端拖文件夹至此才真正按说明工作。
-- **验证**：全量单测 **1715 例通过**（新增「健康检查绕过系统代理」守门 1 例——用死代理环境实测旧代码路径判 down、新代码路径判 ok，确认守门有判别力）。
+- **新增：火山方舟（豆包）预设供应商卡片（本次重点）**：设置 → 模型的预设列表新增「火山方舟（豆包）」，预填 Coding Plan 端点 `https://ark.cn-beijing.volces.com/api/coding/v3`、OpenAI 兼容请求格式与 `doubao-seed-code` 模型；配置提示按三段式写清注册、充值与 Key 创建步骤，并提醒**按量付费用户把端点换成 `/api/v3`——两个端点用错会按量扣费而不是扣套餐**。
+- **修复：base 自带版本段的端点拼 URL 错误**：火山方舟 `/api/v3`、`/api/coding/v3`、智谱 `/api/paas/v4` 这类 base 之前会拼出 `.../v3/v1/chat/completions` 双重版本路径导致 404。现在 OpenAI 系路径遇 base 已带版本段时直接剥掉 `/v1` 追加，与官方路径一致；Gemini `/v1beta` 等既有拼写不受影响。
+- **修复：拖文件夹在部分启动时序下失效**：pywebview 6.x 的 `events.drop` 属性由页面枚举 `on*` 事件动态生成，时序性缺失时抛 AttributeError 导致拖拽监听挂载失败。现改为 `node.on()` 显式 API 挂载 + 防重复标记 + 失败自动重试（0.6 秒×5 次）；前端另加 document 级兜底——拖拽含文件时一律阻止浏览器默认行为，防止 WebView2 把 drop 当页面导航。
+- **已知边界（如实说清）**：方舟不提供 `/models` 列表接口（静态目录），模型列表可能拉取为空——若如此，预设卡片预填的 `doubao-seed-code` 可直接对话，不受影响；后续版本视真实 Key 实测再补手填兜底。
+- **验证**：全量单测 **1719 例通过**（新增「base 自带版本段拼 URL」守门 4 例，覆盖方舟两个端点、智谱 `/api/paas/v4` 及既有 Gemini / OpenAI / Claude 路径回归）。
 
 > 各版本说明与历史更新日志见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -23,12 +22,12 @@ Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在�
 
 ### 使用 Windows 版本
 
-1. 下载 `cat-chat-2.8.3-beta-windows-x64.zip`。
+1. 下载 `cat-chat-2.8.4-beta-windows-x64.zip`。
 2. 解压到一个可写目录。
 3. 运行 `cat-chat.exe`。
 4. 在设置中添加在线 API 或本地模型服务。
 
-> 归档里也提供旧名 `naiba-chat-2.8.3-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
+> 归档里也提供旧名 `naiba-chat-2.8.4-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
 
 首次运行会创建本地数据目录。升级时请直接替换程序文件，不要删除原有 `data` 目录和配置文件。
 
@@ -114,14 +113,14 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 - `naiba-chat.exe` —— **自动更新链路唯一使用的资产，永久保留此文件名**
 - `naiba-chat-update.json` —— 更新清单，其中 `repository` 字段永久写 `yc883123/naiba-chat`
 - `cat-chat.exe` —— 与 `naiba-chat.exe` 是同一文件，SHA-256 完全相同
-- `cat-chat-2.8.3-beta-windows-x64.zip`
-- `naiba-chat-2.8.3-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
+- `cat-chat-2.8.4-beta-windows-x64.zip`
+- `naiba-chat-2.8.4-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
 
 更新器会验证清单中的仓库、提交、文件名和 SHA-256。下载文件还必须是有效的 Windows 可执行文件；任何一项不一致都会终止安装。**自动更新始终读取 `naiba-chat.exe` 与清单里的旧仓库名**（GitHub 对旧仓库地址做长期重定向），这是已发布客户端逐字校验的协议，仓库改名后也不改值。
 
 ## Beta 说明
 
-这是 2.8.3 Beta，适合实际使用和反馈，但仍有以下边界：
+这是 2.8.4 Beta，适合实际使用和反馈，但仍有以下边界：
 
 - 不内置 ComfyUI、模型权重或第三方生成服务，需用户自行安装和配置。
 - 不同模型的工具调用质量差异较大，小型模型可能无法稳定完成长链任务。
@@ -135,7 +134,7 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 ```powershell
 Get-ChildItem public\js\*.js | ForEach-Object { node --check $_.FullName }
 python -m unittest discover -s tests -q
-$env:NAIBA_BUILD_VERSION = "2.8.3-beta"
+$env:NAIBA_BUILD_VERSION = "2.8.4-beta"
 python -m PyInstaller --noconfirm --clean naiba-chat.spec
 ```
 

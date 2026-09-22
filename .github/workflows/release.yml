@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.8.3-beta
-  RELEASE_TAG: v2.8.3-beta
+  RELEASE_VERSION: 2.8.4-beta
+  RELEASE_TAG: v2.8.4-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-2.8.3-beta-windows-x64
+  PACKAGE_NAME: cat-chat-2.8.4-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-2.8.3-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-2.8.4-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -104,11 +104,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 2.8.3 Beta release
+      - name: Publish 2.8.4 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 2.8.3 Beta
+          name: Cat Chat 2.8.4 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -118,19 +118,19 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 2.8.3 Beta Windows build from `${{ github.sha }}`。
+            Cat Chat 2.8.4 Beta Windows build from `${{ github.sha }}`。
 
             > **关于文件名的说明**：仓库已更名为 `cat-chat`（旧链接由 GitHub 自动跳转）。本次 Release 同时提供 `cat-chat.exe` 与 `naiba-chat.exe`——**这是同一个文件，SHA-256 完全相同**；两个 ZIP 内容也等价，只有包内 exe 的文件名不同。应用内自动更新仍使用 `naiba-chat.exe` 资产与原有清单协议，**你不需要做任何操作**，已安装的旧版本会照常收到更新。
 
-            **本次变化（紧急修复）：修复 2.8.2 在开代理软件的电脑上无法启动的问题。** 直接覆盖安装即可，**不需要迁移数据，也不需要重新配置**；历史会话、API 卡片、Agent、Skill 与 MCP 配置原样保留。
+            **本次变化：修复桌面端拖文件夹的启动竞态 + 新增火山方舟（豆包）支持。** 直接覆盖安装即可，**不需要迁移数据，也不需要重新配置**；历史会话、API 卡片、Agent、Skill 与 MCP 配置原样保留。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - **开代理软件（Clash / v2rayN 等）的用户升级到 2.8.2 后打不开**：启动自检用的是系统默认 HTTP 栈，会跟随系统代理；而代理绕过列表里只写「localhost」或「`<local>`」时**不包含 127.0.0.1**（`<local>` 只匹配不带点的名字），于是回环自检被送进代理、50 次全部失败，应用被判「5 秒内没有就绪」拒绝启动——重启电脑也没用，因为代理设置是持久的。2.8.3 让健康检查**显式绕过一切代理**（回环请求本来就不该经过代理），问题消除。
-            - 顺带修正 2.8.2 自检失败弹窗的**自相矛盾文案**：绑定明明成功了，却拼上一段「端口 8765 无法绑定（可能已被其它程序占用）」，把排查引向 netstat。现在「绑定成功但自检不通」会如实说明，并指向代理 / 安全软件两个真正的方向。
-            - 已发布版本的用户也可以不升级自救：在代理软件的「绕过列表 / 直连规则」里加上 `127.0.0.1` 或 `127.*`，2.8.2 即可正常启动。
-            - **顺带补齐 2.8.2 漏发的前端半边（如实说明）**：拖文件夹修复的桥接两段代码（前端在 drop 同步阶段主动把 File 交给原生 + Python 直读路径队列回交）都因提交遗漏没有随 2.8.2 发布——2.8.2 桌面端拖文件夹实际仍走旧的静默失效通道。2.8.3 把这两段补上（含守门测试），桌面端拖文件夹至此才真正按说明工作。
+            - **拖文件夹在部分启动时序下失效的修复**：pywebview 6.x 的 `events.drop` 属性是页面枚举 `on*` 事件动态生成的，时序性缺失时会抛 AttributeError 导致拖拽监听挂载失败。现改为 `node.on()` 显式 API 挂载 + 防重复标记 + 失败自动重试，前端另加 document 级兜底（拖拽含文件时一律阻止默认行为，防止 WebView2 把 drop 当页面导航）。
+            - **新增火山方舟（豆包）预设供应商卡片**：预填 Coding Plan 端点 `https://ark.cn-beijing.volces.com/api/coding/v3`、OpenAI 兼容请求格式、`doubao-seed-code` 模型，配置提示含「按量扣费与套餐端点用错会多扣钱」的提醒；按量付费用户把端点换成 `/api/v3` 即可。
+            - **修复 base 自带版本段的端点拼 URL 错误**：火山方舟 `/api/v3`、`/api/coding/v3`、智谱 `/api/paas/v4` 这类 base 之前会拼出 `.../v3/v1/chat/completions` 双重版本路径导致 404。现在 OpenAI 系路径遇 base 已带版本段时直接剥掉 `/v1` 追加，与官方路径一致。
+            - 已知边界：方舟不提供 `/models` 列表接口（静态目录），模型列表可能拉取为空——若如此，用预设卡片里预填的 `doubao-seed-code` 直接对话不受影响；后续版本视实测再补手填兜底。
 
-            本地验证：全量单测 **1715 例通过**（新增「健康检查绕过系统代理」守门 1 例——用死代理环境实测旧代码路径判 down、新代码路径判 ok）；并发版（同进程双绑防静默、TIME_WAIT 回落）等既有端口守门全部保持。
+            本地验证：全量单测 **1719 例通过**（新增「base 自带版本段拼 URL」守门 4 例；拖文件夹桥接守门保持）。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

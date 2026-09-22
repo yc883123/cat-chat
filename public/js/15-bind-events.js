@@ -1253,6 +1253,20 @@ export function bindEvents() {
     closeQuickMessagePanel();
   });
   $('#fileInput').addEventListener('change', (event) => { uploadFiles([...event.target.files]); event.target.value = ''; });
+  // 全窗口兜底：拖放落点在输入区（或 Skill 上传区）之外时，只吞掉默认行为、什么都不做。
+  // 不拦的话 WebView2 会把拖入的文件/文件夹当成 URL **导航走整个页面**（聊天记录、
+  // 未发送内容全丢），而"顺手在消息区松手还建了索引 chip"也是没人想要的副作用。
+  // dragover 也要 preventDefault：不声明"这里可以放"，drop 事件根本不会派发，
+  // 也就轮不到这里的 preventDefault。输入区/Skill 区自己的处理器已各自 preventDefault，
+  // 冒泡到这里时 defaultPrevented 已为 true，直接放行。
+  document.addEventListener('dragover', (event) => {
+    if (event.dataTransfer?.types?.includes('Files')) event.preventDefault();
+  });
+  document.addEventListener('drop', (event) => {
+    if (!event.dataTransfer?.types?.includes('Files')) return;
+    if (event.defaultPrevented) return;
+    event.preventDefault();
+  });
   const composerWrap = document.querySelector('.composer-wrap');
   if (composerWrap) {
     composerWrap.addEventListener('dragover', (event) => {

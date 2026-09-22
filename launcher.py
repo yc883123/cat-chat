@@ -24,6 +24,10 @@ from naiba.storage.app_icon import app_icon_paths
 
 # 原生那边把文件路径交给 pywebview 需要一点时间（两条独立的消息通道）。测试会把它改成 0。
 FOLDER_DROP_SETTLE_SECONDS = 0.2
+# drop 监听挂载失败后的重试参数：页面就绪时序竞态的兜底（2026-09-22 实录：更新后
+# 首次启动 09:37:14 挂载 AttributeError，之后每次拖入都拿不到路径）。
+_DROP_LISTENER_RETRY_SECONDS = 0.6
+_DROP_LISTENER_MAX_ATTEMPTS = 5
 
 
 def _app_dir() -> Path:
@@ -432,7 +436,7 @@ class Launcher:
             # 页面可能正在刷新：拿不到就算了，前端有超时降级提示
             _drop_debug_log(f"dropEvent: 回交前端失败 {exc!r}")
 
-    def _register_drop_listener(self) -> None:
+    def _register_drop_listener(self, _attempt: int = 0) -> None:
         """给输入区挂 drop 监听（pywebview 的 DOM 事件 API）。
 
         **这一步不只是为了那条事件回调，更是"拖文件夹"整条链路的前置开关**：
@@ -441,21 +445,47 @@ class Launcher:
         真实路径根本不落库。也就是说，这里没挂上，前端再怎么调原生接口都拿不到路径，
         而用户只会看到一句兜底提示。所以这里失败必须留痕（见 `_drop_debug_log`）。
 
+        为什么走 `node.on("drop", ...)` 而不是 `events.drop` 属性写法：
+        pywebview 6.x 的 `events.*` 属性是挂载前在页面里跑一段 JS 枚举元素身上的
+        `on*` 属性动态生成的，枚举结果**偶尔不含 'drop'**（2026-09-22 09:37 实录：
+        `AttributeError("'EventContainer' object has no attribute 'drop'")`，昨晚
+        同一份代码还挂载成功），一失败 num_listeners 恒为 0，之后每次拖入都只配
+        弹兜底提示。`on()` 直接 addEventListener，不依赖那次枚举。
+
         必须等页面 loaded 之后再挂：`get_element` 走 evaluate_js，页面没加载就没有 DOM。
-        每次 loaded 先摘上一次（刷新页面会重建 DOM，但 Python 侧的事件表会累积）。
+        同一页面上不许挂两份（loaded 可能触发多次，重复挂载会让一次 drop 回调多次）：
+        挂成后给元素打 `data-naiba-drop-bound` 标记，见到标记就跳过——页面刷新后 DOM
+        重建、标记随元素消失，正好需要重新挂。挂载后 num_listeners 仍为 0 就延时重试
+        （页面就绪时序的竞态兜底，最多 `_DROP_LISTENER_MAX_ATTEMPTS` 次）。
         """
+        mounted = False
         try:
             from webview.dom import DOMEventHandler
+
+            already_bound = False
+            try:
+                already_bound = bool(self.window.evaluate_js(
+                    "!!document.querySelector('.composer-wrap[data-naiba-drop-bound]')"
+                ))
+            except Exception:
+                already_bound = False  # 页面可能正在刷新：当没挂过，往下正常挂
+            if already_bound:
+                _drop_debug_log("dropListener: 标记在，跳过重复挂载")
+                return
 
             node = self.window.dom.get_element(".composer-wrap")
             if node is None:
                 _drop_debug_log("dropListener: .composer-wrap 未找到（页面结构变了？）")
                 return
+            node.on("drop", DOMEventHandler(self._on_composer_drop))
             try:
-                node.events.drop -= self._on_composer_drop
+                self.window.evaluate_js(
+                    "document.querySelector('.composer-wrap')"
+                    "?.setAttribute('data-naiba-drop-bound', '1');"
+                )
             except Exception:
-                pass  # 首次挂载时本来就没有，pywebview 内部会记一条 warning
-            node.events.drop += DOMEventHandler(self._on_composer_drop)
+                pass  # 打标记失败顶多可能多挂一次，不该拦住挂载本身
+            mounted = True
             from webview.dom import _dnd_state
 
             _drop_debug_log(
@@ -463,6 +493,14 @@ class Launcher:
             )
         except Exception as exc:
             _drop_debug_log(f"dropListener 挂载失败: {exc!r}")
+
+        if not mounted and _attempt < _DROP_LISTENER_MAX_ATTEMPTS:
+            timer = threading.Timer(
+                _DROP_LISTENER_RETRY_SECONDS,
+                lambda: self._register_drop_listener(_attempt + 1),
+            )
+            timer.daemon = True
+            timer.start()
 
     def run(self) -> None:
         import webview

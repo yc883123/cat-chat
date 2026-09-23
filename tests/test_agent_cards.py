@@ -55,6 +55,7 @@ FORM_FIELD_IDS = (
     "toggleAllToolGroups",
     "agentToolUnknownHint",
     "agentToolScope",
+    "editAgentToolScope",
     "agentError",
     "cancelAgent",
     "saveAgentForm",
@@ -323,7 +324,7 @@ class ToolGroupCatalogTests(unittest.TestCase):
 
     def test_tool_group_head_renders_title_and_desc_in_one_line(self) -> None:
         settings = (ROOT / "public/js/09-settings.js").read_text(encoding="utf-8")
-        body = settings[settings.index("function buildGroupBlock(group, toolMap, list) {"):]
+        body = settings[settings.index("function buildGroupBlock(group, toolMap, list, { onlySelected = false } = {}) {"):]
         body = body[: body.index("function emptyScopeHint(")]
         self.assertIn("head.append(caret, allCb, title, desc, count)", body,
                       "小字说明必须排在标题之后、计数之前（一行呈现）")
@@ -530,14 +531,17 @@ class AgentToolSetCardsTests(unittest.TestCase):
         # 点卡片必须载入该卡的工具并走依赖闭包（否则卡片显示个数 ≠ 实际放行个数）。
         editor = js[js.index("export function openAgentToolEditor("):]
         editor = editor[: editor.index("\n}")]
-        self.assertEqual(editor.count("normalizeToolScope("), 2, "预设卡与「我的工具集」卡都要补闭包")
+        self.assertEqual(editor.count("normalizeToolScope("), 3,
+                         "预设卡 / 「我的工具集」卡 / 「添加」卡三条底稿都要补闭包")
         self.assertIn("base.tools", editor)
         self.assertIn("usableTemplateTools(template)", editor)
         # 命名栏预填卡片名：预设卡用预设名、「我的工具集」卡用它自己的名字、「添加」卡留空。
         self.assertIn("nameInput.value = preset ? preset.name", editor)
-        # 「添加」卡不跟随当前选中项：固定以「标准模式」为起点。
-        self.assertIn("DEFAULT_TOOL_SET_PRESET_ID = 'standard'", js)
-        self.assertIn("presets.find((item) => item.id === DEFAULT_TOOL_SET_PRESET_ID)", editor)        # 三张入口（预设 / 我的工具集 / 添加）都要进编辑态。
+        # 「添加」卡以**当前勾选**为底稿（浅拷贝快照），不再固定以「标准模式」为起点：
+        # 用户勾好一套工具后点它，必须带着这套勾选进编辑器（旧行为会把勾选冲成 13 个标准工具）。
+        self.assertNotIn("DEFAULT_TOOL_SET_PRESET_ID", js, "固定标准模式底稿的常量已退役")
+        self.assertIn("setAgentToolScope(normalizeToolScope([...state.agentFormToolScope]))", editor,
+                      "「添加」卡底稿 = 当前勾选的快照（浅拷贝，不共享数组引用）")
         click = js[js.index("export function handleAgentToolPresetCardsClick("):]
         click = click[: click.index("\n}")]
         self.assertEqual(click.count("openAgentToolEditor("), 3)
@@ -575,6 +579,87 @@ class AgentToolSetCardsTests(unittest.TestCase):
         self.assertIn("TOOL_TEMPLATE_STORE", migrate)
         self.assertIn("removeItem(TOOL_TEMPLATE_STORE)", migrate)
 
+    def test_preset_view_lists_selected_tools(self):
+        """已配好的 Agent 再次打开时，卡片态必须直接摊开「当前用了哪些工具」。
+
+        原状：卡片只有「名字 + N 个工具」，底部摘要同理 —— 用户实测「已自定义好的 agent
+        再次打开后完全不知道用了什么工具」。修法是在摘要下面挂一份按分类分组的只读清单。
+        """
+        index = self._index()
+        for field in ("agentToolPeekList", "toggleAgentToolPeek", "agentToolPresetState"):
+            with self.subTest(field=field):
+                self.assertIn(f'id="{field}"', index)
+        tools_panel = index[index.index('data-agent-panel="tools"'):]
+        self.assertLess(tools_panel.index('id="agentToolPresetCards"'), tools_panel.index('id="agentToolPeekList"'),
+                        "清单要排在卡片下方（摘要行里）")
+        self.assertIn('aria-expanded="true"', tools_panel, "清单默认展开：再打开就该看到内容")
+        js = self._settings()
+        for snippet in ("export function toolScopeBreakdown(",
+                        "export function renderAgentToolPeek(",
+                        "export function toggleAgentToolPeek(",
+                        "export function resetAgentToolPeek("):
+            with self.subTest(snippet=snippet):
+                self.assertIn(snippet, js)
+        cards = js[js.index("export function renderAgentToolPresetCards()"):]
+        cards = cards[: cards.index("// 当前已选工具按分类摊平")]
+        self.assertIn("renderAgentToolPeek();", cards, "卡片重绘时要同步清单")
+        breakdown = js[js.index("export function toolScopeBreakdown()"):]
+        breakdown = breakdown[: breakdown.index("\n}")]
+        self.assertIn("state.toolCatalog?.groups", breakdown, "清单必须按后端下发的分类分组")
+        self.assertIn("其他", breakdown, "目录里未归类的工具要有兜底行，不能凭空少几个")
+        bind = self._bind()
+        self.assertIn("$('#toggleAgentToolPeek')?.addEventListener('click', toggleAgentToolPeek)", bind)
+        css = self._css()
+        self.assertIn(".tool-peek {", css)
+        self.assertIn(".tool-peek[hidden] { display: none; }", css)
+        peek_rule = css[css.index(".tool-peek {"):]
+        peek_rule = peek_rule[: peek_rule.index("}")]
+        self.assertIn("overflow: auto", peek_rule, "工具多时清单要能内部滚动，不能撑破固定高度的弹层")
+        self.assertIn("max-height", peek_rule)
+
+    def test_only_selected_view_matches_agent_scope(self):
+        """编辑态「只看已选」：一键把已勾选的工具按分类摊开，且不得反向污染配置。"""
+        index = self._index()
+        self.assertIn('id="agentToolOnlySelected"', index)
+        self.assertIn('aria-pressed="false"', index)
+        js = self._settings()
+        self.assertIn("export function toggleToolOnlySelected()", js)
+        self.assertIn("export function updateToolOnlySelectedButton(", js)
+        self.assertIn("function renderSelectedScope(list, groups, toolMap)", js)
+        picker = js[js.index("export function renderToolScopeList()"):]
+        picker = picker[: picker.index("\n}")]
+        self.assertIn("if (state.agentToolOnlySelected) renderSelectedScope(list, groups, toolMap);", picker,
+                      "只看已选优先于搜索：两份过滤叠加没人看得懂")
+        selected = js[js.index("function renderSelectedScope(list, groups, toolMap) {"):]
+        selected = selected[: selected.index("\n}")]
+        self.assertIn("buildGroupBlock(group, toolMap, list, { onlySelected: true })", selected)
+        block = js[js.index("function buildGroupBlock(group, toolMap, list, { onlySelected = false } = {}) {"):]
+        block = block[: block.index("function emptyScopeHint(")]
+        self.assertIn("const keep = (names) => (onlySelected", block, "网格只放已勾选的工具")
+        self.assertIn("body.hidden = !onlySelected;", block, "只看已选必须展开（折叠等于又看不到）")
+        self.assertIn("keep(sub.tools)", block, "MCP 二级分组同样只留已选成员")
+        # 关键语义：这一视图里全选框 = 取消该分类已选；绝不能再走「整组全选」分支。
+        allcb = block[block.index("allCb.addEventListener('change', () => {"):]
+        allcb = allcb[: allcb.index("let scope = state.agentFormToolScope;")]
+        self.assertIn("if (onlySelected) {", allcb)
+        self.assertNotIn("applyAgentToolDependency", allcb,
+                         "只看已选里点全选框不得触发整组全选（会凭空选出一批没勾过的工具）")
+        self.assertIn("queueSelectedScopeRerender()", block)
+        # 进出编辑态的复位：卡片态与分组视图是默认起点。
+        editor = js[js.index("export function openAgentToolEditor("):]
+        editor = editor[: editor.index("function enterToolEditorView(")]
+        self.assertIn("enterToolEditorView();", editor)
+        enter = js[js.index("function enterToolEditorView("):]
+        enter = enter[: enter.index("\n}")]
+        self.assertIn("state.agentToolOnlySelected = onlySelected;", enter)
+        self.assertIn("function queueSelectedScopeRerender()", js)
+        # 返回卡片态 / 打开表单两条路径都要复位：开关回分组视图、清单回展开态。
+        self.assertEqual(
+            js.count("state.agentToolOnlySelected = false;\n  swapToolView(false);\n  resetAgentToolPeek();"), 2,
+            "closeAgentToolEditor 与 renderAgentToolPicker 都要复位（否则下次进来停在核对视图）")
+        core = (ROOT / "public/js/01-core.js").read_text(encoding="utf-8")
+        self.assertIn("agentToolOnlySelected: false,", core)
+
     def test_swap_animation_keeps_height_fixed(self):
         js = self._settings()
         swap = js[js.index("function swapToolView(editing)"):]
@@ -593,6 +678,82 @@ class AgentToolSetCardsTests(unittest.TestCase):
         view_rule = view_rule[: view_rule.index("}")]
         self.assertIn("align-content: start", view_rule)
         self.assertIn("transition: opacity .08s", view_rule, "切换过渡已再缩短 1/3")
+
+    def test_edit_current_scope_entry_keeps_selection(self):
+        """卡片态「编辑当前工具集」：带着当前勾选进编辑器，一个工具都不动。
+
+        起因：已保存 Agent 的 tool_scope 匹配不上任何卡片时（摘要显示「当前：自定义（未保存）· N 个工具」），
+        点任何卡片都会用那张卡的工具覆盖它 —— 等于没有任何入口能改当前这套勾选。按钮常驻：
+        匹配到卡 / 未限制时点它也无害（不改勾选，比点卡片更安全）。
+        """
+        index = self._index()
+        self.assertIn('id="editAgentToolScope"', index, "摘要行要有常驻的「编辑当前工具集」入口")
+        self.assertNotIn('id="editAgentToolScope" hidden', index, "常驻入口：不做显隐分支")
+        head = index[index.index('class="tool-preset-summary-head"'):]
+        head = head[: head.index('id="agentToolPeekList"')]
+        self.assertLess(head.index('id="editAgentToolScope"'), head.index('id="toggleAgentToolPeek"'),
+                        "编辑入口排在「收起清单」左边，两枚按钮同一组")
+        js = self._settings()
+        self.assertIn("export function openAgentToolEditorCurrent()", js)
+        fn = js[js.index("export function openAgentToolEditorCurrent()"):]
+        fn = fn[: fn.index("\n}")]
+        # 核心语义：进编辑器只改视图，不得碰勾选（调 setAgentToolScope 就会覆盖）。
+        self.assertNotIn("setAgentToolScope", fn, "「编辑当前工具集」绝不能覆盖当前勾选")
+        self.assertIn("state.agentToolEditingId = ''", fn, "不是原地更新某张已有工具集卡")
+        self.assertIn("nameInput.value = ''", fn, "命名栏留空 → 保存时另存一套新工具集")
+        self.assertIn("enterToolEditorView()", fn)
+        bind = self._bind()
+        self.assertIn("$('#editAgentToolScope')?.addEventListener('click', openAgentToolEditorCurrent)", bind)
+        css = self._css()
+        self.assertIn(".tool-preset-summary-actions", css, "两枚按钮要成组（窄屏整组折行，不挤变形）")
+
+    def test_card_click_confirms_before_overwriting_unsaved_scope(self):
+        """防误触：当前是「还没存成卡片的自定义组合」时，点预设卡 / 我的工具集卡先 confirm 一次。
+
+        未限制（空表）与已命中某张卡片的组合点卡无损，不拦；「添加」卡以当前勾选为底稿、不覆盖
+        任何东西，也不经过这里。
+        """
+        js = self._settings()
+        self.assertIn("export function confirmToolScopeOverwrite()", js)
+        helper = js[js.index("function isUnsavedCustomScope()"):]
+        helper = helper[: helper.index("\n}")]
+        self.assertIn("state.agentFormUnrestricted && !state.agentFormScopeTouched", helper,
+                      "未限制（点卡无损）不算「自定义未保存」")
+        self.assertIn("!matchToolPreset()", helper, "已命中某张卡片的组合点卡无损，不拦")
+        confirm_fn = js[js.index("export function confirmToolScopeOverwrite()"):]
+        confirm_fn = confirm_fn[: confirm_fn.index("\n}")]
+        self.assertIn("return confirm(", confirm_fn)
+        self.assertIn("还没有保存成工具集卡片", confirm_fn, "文案要说清为什么拦、拦住的是什么")
+        click = js[js.index("export function handleAgentToolPresetCardsClick("):]
+        click = click[: click.index("\n}")]
+        self.assertLess(click.index("data-tool-preset-add"), click.index("confirmToolScopeOverwrite()"),
+                        "「添加」卡分支必须排在确认之前（它不覆盖勾选）")
+        self.assertIn("if (!confirmToolScopeOverwrite()) return;", click, "取消 = 留在卡片态、勾选不动")
+        add_branch = click[click.index("data-tool-preset-add"): click.index("confirmToolScopeOverwrite()")]
+        self.assertNotIn("confirm(", add_branch, "「添加」卡不该弹确认")
+
+    def test_delete_template_lists_referencing_agents(self):
+        """删除「我的工具集」前先列出哪些 Agent 正在用它（不再是一句盲删「确定吗」）。
+
+        删除是拷贝语义：删卡片不会改这些 Agent 已保存的 tool_scope，文案必须说清，
+        否则用户会以为删了工具集就收回了那些 Agent 的能力。
+        """
+        js = self._settings()
+        self.assertIn("export function toolTemplateUsedByAgents(template, agents)", js)
+        fn = js[js.index("export function toolTemplateUsedByAgents("):]
+        fn = fn[: fn.index("\n}")]
+        self.assertIn("usableTemplateTools(template)", fn, "与卡片匹配同口径（失效工具先滤掉）")
+        self.assertIn("matchableTools(agent?.tool_scope)", fn, "Agent 侧同样先滤幽灵名")
+        self.assertIn("tools.length > 0", fn, "未限制（空 tool_scope）不引用任何工具集")
+        delete = js[js.index("export async function deleteToolTemplate("):]
+        delete = delete[: delete.index("\n}")]
+        self.assertIn("await refreshAgentsFromServer()", delete, "删除不可逆：先拉最新 Agent 列表再判定")
+        self.assertIn("toolTemplateUsedByAgents(template, state.bootstrap?.agents || [])", delete)
+        self.assertIn("不会改动这些 Agent 已保存的配置", delete, "要说清删除的爆炸半径（拷贝语义）")
+        self.assertIn("确定删除工具集「${template.name}」吗？", delete, "无引用时保持原来的一句话确认")
+        # 匹配口径只有一处：幽灵名归一被 matchToolScope / toolScopeLabel / 引用判定共用。
+        self.assertEqual(js.count("const tools = matchableTools(raw);"), 1, "toolScopeLabel 走共用归一")
+        self.assertIn("const current = new Set(matchableTools(scope));", js, "matchToolScope 走共用归一")
 
 
 class AgentCardsMarkupTests(unittest.TestCase):
@@ -670,7 +831,12 @@ class AgentCardsMarkupTests(unittest.TestCase):
         self.assertIn("未限制（全部工具）", label, "空 tool_scope = 不限制")
         self.assertIn("自定义 · ", label)
         self.assertIn("matchToolScope(tools)", label)
-        self.assertIn("knownToolNames()", label, "退役/掉线工具名不参与匹配与计数")
+        # 退役/掉线工具名不参与匹配与计数：归一抽到 matchableTools 一处（matchToolScope /
+        # toolScopeLabel / 删除工具集前的引用判定共用），标签只负责调用它。
+        self.assertIn("matchableTools(raw)", label, "退役/掉线工具名不参与匹配与计数")
+        shared = source[source.index("function matchableTools(list)"):]
+        shared = shared[: shared.index("\n}")]
+        self.assertIn("knownToolNames()", shared, "「当前未注册」的名字在共用归一里被滤掉")
         card = source[source.index("function agentCardMarkup("):]
         card = card[: card.index("\n}")]
         self.assertIn("toolScopeLabel(agent.tool_scope)", card, "卡片用 Agent 的 tool_scope 算标签")

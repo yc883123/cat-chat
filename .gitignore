@@ -214,6 +214,7 @@ verify/*
 !verify/agent_prompt_smoke.cjs
 !verify/app_icon_smoke.cjs
 !verify/app_icon_smoke.py
+!verify/attach_picker_smoke.cjs
 !verify/attachment_only_smoke.py
 !verify/backfill_media.py
 !verify/batch1_smoke.cjs
@@ -227,9 +228,11 @@ verify/*
 !verify/chat_font_smoke.py
 !verify/ci_short_path_check.py
 !verify/cleanup_verify.py
+!verify/composer_enter_mobile_smoke.cjs
 !verify/composer_height_smoke.cjs
 !verify/composer_model_smoke.cjs
 !verify/composer_model_smoke.py
+!verify/composer_running_layout.cjs
 !verify/context_menu_smoke.cjs
 !verify/context_reset_lock.cjs
 !verify/context_reset_lock.py
@@ -237,6 +240,9 @@ verify/*
 !verify/esm_cross_assign.py
 !verify/esm_graph_check.py
 !verify/esm_unused_imports.py
+!verify/file_actions_smoke.cjs
+!verify/file_download_smoke.cjs
+!verify/file_edit_keepalive_smoke.cjs
 !verify/file_ref_smoke.cjs
 !verify/frozen_appicon_check.py
 !verify/frozen_batch1_check.py
@@ -306,6 +312,8 @@ verify/*
 !verify/tdz_check.py
 !verify/tool_groups_smoke.cjs
 !verify/tool_groups_smoke.py
+!verify/tool_peek_smoke.cjs
+!verify/tool_peek_smoke.py
 !verify/tool_prefix_prose_smoke.py
 !verify/topbar_smoke.cjs
 !verify/update_version_smoke.cjs

@@ -213,8 +213,14 @@
               <small id="lastTurnUsageSummary">完成一次回复后显示本轮消耗</small>
             </div>
           </div>
+          <!-- 插话键：运行中的**唯一**插话入口（运行中发送键已变身「停止」）。
+               图标是**整枚垂直翻转**过的（原「箭头向下扎进横线」指向的下方正好是停止键，
+               容易被读成「停止/下载」），现在箭头朝向输入框上方的插话队列；字形唯一，见 §九.135。 -->
           <button class="interject-button" id="interjectButton" type="button" hidden title="加入插话队列" aria-label="加入插话队列">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v9"></path><path d="M8.5 9.5 12 13l3.5-3.5"></path><path d="M4 18h16"></path></svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V11"></path><path d="M8.5 14.5 12 11l3.5 3.5"></path><path d="M4 6h16"></path></svg>
+            <!-- 文字标签只在「手机 + 运行中」显形（≤760px 的 .composer.is-running 块）：
+                 运行中它没有备选入口，纯图标在小屏上是认不出来的。 -->
+            <span class="interject-label">插话</span>
           </button>
           <button class="send-button" id="sendButton" type="submit" title="发送" aria-label="发送">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>
@@ -1068,7 +1074,24 @@
           <div class="tool-stage" id="agentToolStage">
             <div class="tool-preset-view" id="agentToolPresetView">
               <div class="tool-preset-cards" id="agentToolPresetCards"></div>
-              <p class="tool-preset-summary" id="agentToolPresetState">当前：未限制</p>
+              <!-- 摘要 + 「当前已选工具」只读清单：已配好的 Agent 再次打开时，
+                   卡片上只有「N 个工具」看不出配了什么，这里按分类把工具名直接摊开
+                   （默认展开、可收起，只读不改配置）。
+                   右侧两枚按钮：「编辑当前工具集」带着当前勾选进编辑器（不覆盖任何勾选，
+                   自定义组合匹配不上卡片时它是唯一的编辑入口）、「收起清单」只折叠上面这份清单。 -->
+              <div class="tool-preset-summary">
+                <div class="tool-preset-summary-head">
+                  <p class="tool-preset-summary-text" id="agentToolPresetState">当前：未限制</p>
+                  <div class="tool-preset-summary-actions">
+                    <button type="button" class="control-button tiny" id="editAgentToolScope"
+                            title="带着当前已勾选的工具进入编辑，不会覆盖现有勾选">编辑当前工具集</button>
+                    <button type="button" class="control-button tiny" id="toggleAgentToolPeek"
+                            aria-expanded="true" aria-controls="agentToolPeekList"
+                            title="展开/收起当前已选工具的清单">收起清单</button>
+                  </div>
+                </div>
+                <div class="tool-peek" id="agentToolPeekList"></div>
+              </div>
             </div>
 
             <div class="tool-editor" id="agentToolEditor" hidden>
@@ -1084,6 +1107,9 @@
                 <input id="agentToolFilter" class="tool-filter-input" type="search" autocomplete="off"
                        placeholder="搜索工具名或说明（如 vision、PDF、job）"
                        title="输入关键词过滤工具；清空即恢复分组视图">
+                <button type="button" class="control-button tiny" id="agentToolOnlySelected"
+                        aria-pressed="false"
+                        title="只显示当前已勾选的工具（按分类摊开，方便核对这一套到底开了什么）">只看已选 0</button>
               </div>
               <div class="agent-tool-scope" id="agentToolScope"></div>
             </div>
@@ -1203,6 +1229,7 @@
     <span class="undo-bar-progress"></span>
   </div>
   <div class="image-lightbox" id="imageLightbox" hidden aria-hidden="true" tabindex="-1">
+    <button class="lightbox-download" id="imageLightboxDownload" type="button" title="下载这张图" aria-label="下载这张图"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11"></path><path d="M8 12l4 4 4-4"></path><path d="M5 19h14"></path></svg></button>
     <button class="lightbox-close" id="imageLightboxClose" type="button" title="关闭" aria-label="关闭大图"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
     <button class="lightbox-nav lightbox-prev" id="imageLightboxPrev" type="button" title="上一张（←）" aria-label="上一张" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"></path></svg></button>
     <img id="imageLightboxImg" alt="大图预览" draggable="false">

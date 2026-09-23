@@ -72,6 +72,9 @@ KEEP = {
     "ring_usage_smoke.py", "ring_usage_smoke.cjs",
     # 工具分类改版冒烟（§六 已登记；Python 自编排 + Node 检查）
     "tool_groups_smoke.py", "tool_groups_smoke.cjs",
+    # 工具集「已配好再打开要看清用了哪些工具」冒烟（§六 已登记；Python 自编排起隔离实例 +
+    # Node 检查，见 §九.133）
+    "tool_peek_smoke.py", "tool_peek_smoke.cjs",
     # 工具调用前的进度播报不得累积进助手消息（§六 已登记；Python 自编排，无浏览器）
     "tool_prefix_prose_smoke.py",
     # 分支对话继承首轮上下文冒烟（§六 已登记；Python 自编排 + Node 检查）
@@ -93,6 +96,11 @@ KEEP = {
     # 输入框高度（占位符不得算进内容高）冒烟（§六 已登记；自带静态 public/ 服务 + 无头 Edge，
     # 页面内真 import 前端模块，不需要后端也不需要隔离数据目录，见 §九.128）
     "composer_height_smoke.cjs",
+    # 手机端四项体验修复（§九.135，§六 已登记；都是"静态 public/ 服务 + 页面内真 import"的轻量形态）：
+    # ① 手机回车=换行 ② 运行中拆两行+插话键 ③ 下载（文件面板/灯箱） ④ 附件两入口 ⑤ 文件动作条 ⑥ 编辑区存活
+    "composer_enter_mobile_smoke.cjs", "composer_running_layout.cjs",
+    "file_download_smoke.cjs", "attach_picker_smoke.cjs",
+    "file_actions_smoke.cjs", "file_edit_keepalive_smoke.cjs",
     # 发布清单同步自检（只读）
     "_release_check.py",
     # 「重新生成 / 编辑」冒烟（§六 已登记；Python 自编排 + Node 检查）

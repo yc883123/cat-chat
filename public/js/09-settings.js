@@ -1594,14 +1594,21 @@ function notifyToolMutexDrop(before, after) {
 // —— 工具集：卡片态（内置预设 + 我的工具集）↔ 编辑态 ——
 // 两态同框叠放、弹层高度固定：点任意卡片（含「添加」卡）都先按一下再向上滑出，工具列表从下方滑入。
 const TOOL_SWAP_MS = 130;  // = CSS 里 .tool-preset-view.is-leaving 的 50ms 延迟 + 80ms 过渡
-// 「添加自定义工具集」的起点：不跟随当前选中项，固定以标准模式为底稿。
-const DEFAULT_TOOL_SET_PRESET_ID = 'standard';
 const TOOL_SET_ADD_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>';
 const TOOL_SET_DEL_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>';
 
+// 一套工具（Agent 的 tool_scope 或工具集的 tools）参与匹配前的归一：滤掉「当前未注册」的幽灵名
+// （退役工具、掉线的 MCP 工具）。matchToolScope / toolScopeLabel / 删除工具集前的引用判定
+// 都走它，匹配口径只有这一处：幽灵名算进去只会让同一套工具因为几个死名字匹配不上。
+function matchableTools(list) {
+  const raw = Array.isArray(list) ? list.filter(Boolean) : [];
+  const known = knownToolNames();
+  return known.size ? raw.filter((name) => known.has(name)) : raw;
+}
+
 // 当前工具集命中哪张卡片：内置预设优先，其次「我的工具集」；都不匹配返回 null。
 export function matchToolScope(scope) {
-  const current = new Set(scope || []);
+  const current = new Set(matchableTools(scope));
   const same = (tools) => tools.length === current.size && tools.every((t) => current.has(t));
   const preset = (state.toolCatalog?.presets || []).find((item) => same(item.tools || []));
   if (preset) return { kind: 'preset', id: preset.id, name: preset.name, tools: preset.tools || [] };
@@ -1616,13 +1623,10 @@ export function matchToolPreset() {
 
 // 某个工具集（Agent 的 tool_scope）对应的名称：预设名 → 我的工具集名 → 未限制 / 自定义。
 // Agent 卡片用它在「固定 Skill」下方显示这一栏，一眼看出这个 Agent 开的是哪套工具。
-// 老配置里「当前未注册」的工具（退役工具、掉线的 MCP 工具）不参与匹配与计数：
-// 它们已经不存在了，算进去只会让同一套工具集因为几个幽灵名字匹配不上。
 export function toolScopeLabel(scope) {
   const raw = Array.isArray(scope) ? scope.filter(Boolean) : [];
   if (!raw.length) return '未限制（全部工具）';
-  const known = knownToolNames();
-  const tools = known.size ? raw.filter((name) => known.has(name)) : raw;
+  const tools = matchableTools(raw);
   if (!tools.length) return `自定义 · ${raw.length} 个工具`;
   const matched = matchToolScope(tools);
   if (matched) return matched.name;
@@ -1655,26 +1659,92 @@ export function renderAgentToolPresetCards() {
   });
   const templateCards = loadToolTemplates().map((template) => {
     const active = matched?.kind === 'template' && matched.id === template.id;
-    const count = usableTemplateTools(template).length;
+    const usable = usableTemplateTools(template);
+    const count = usable.length;
     const name = escapeHtml(template.name);
+    // 第二行给工具名预览：只写「我的工具集」等于零信息，用户看不出这套里装了什么。
+    const preview = usable.slice(0, 3).join('、') + (usable.length > 3 ? ' …' : '');
     return `<div class="tool-preset-card${active ? ' is-active' : ''}" role="button" tabindex="0"
-      data-tool-template-card="${escapeHtml(template.id)}" title="套用「${name}」">
+      data-tool-template-card="${escapeHtml(template.id)}"
+      title="套用「${name}」（${count} 个工具）${usable.length ? `：${escapeHtml(usable.join('、'))}` : ''}">
       <button type="button" class="tool-preset-card-del" data-tool-template-del="${escapeHtml(template.id)}"
               title="删除工具集「${name}」" aria-label="删除工具集「${name}」">${TOOL_SET_DEL_SVG}</button>
       <b>${name}</b>
-      <small>我的工具集</small>
-      <em>${count} 个工具</em>
+      <small>${escapeHtml(preview || '（工具已全部失效）')}</small>
+      <em>我的工具集 · ${count} 个工具</em>
     </div>`;
   });
   box.innerHTML = [...presetCards, ...templateCards].join('') + `
     <div class="tool-preset-card tool-preset-card-add" role="button" tabindex="0"
-         data-tool-preset-add title="从当前勾选开始，添加一套自定义工具集">
+         data-tool-preset-add title="以当前勾选的 ${state.agentFormToolScope.length} 个工具为底稿，另存一套自定义工具集">
       ${TOOL_SET_ADD_SVG}
       <span>添加自定义工具集</span>
     </div>`;
   const summary = $('#agentToolPresetState');
   if (summary) summary.textContent = toolSetSummary();
+  renderAgentToolPeek();
   updateToolCounter();
+}
+
+// 当前已选工具按分类摊平：[{ name: 分类名, tools: [工具名…] }]。
+// 卡片态把它直接列在摘要下面 —— 已配好的 Agent 再次打开时，先看清「用了什么」再谈要不要改。
+// 依赖工具目录的 groups（`group.tools` 含 MCP 二级分组的成员），目录里没归类的兜底进「其他」。
+export function toolScopeBreakdown() {
+  const scope = state.agentFormToolScope || [];
+  if (!scope.length) return [];
+  const selected = new Set(scope);
+  const placed = new Set();
+  const rows = [];
+  for (const group of state.toolCatalog?.groups || []) {
+    const tools = (group.tools || []).filter((name) => selected.has(name));
+    if (!tools.length) continue;
+    tools.forEach((name) => placed.add(name));
+    rows.push({ name: group.name, tools });
+  }
+  const rest = scope.filter((name) => !placed.has(name));
+  if (rest.length) rows.push({ name: '其他', tools: rest });
+  return rows;
+}
+
+// 只读清单：分组名 + 该组用到的工具名（顿号连接）。工具名多时靠容器滚动，不撑破弹层。
+export function renderAgentToolPeek() {
+  const box = $('#agentToolPeekList');
+  if (!box) return;
+  const rows = toolScopeBreakdown();
+  if (!rows.length) {
+    box.innerHTML = '<p class="tool-peek-empty">当前没有勾选任何工具（未限制 = 全部工具）。</p>';
+    return;
+  }
+  const unknown = state.agentFormUnknownTools || [];
+  box.innerHTML = rows.map((row) => `<div class="tool-peek-group">
+      <b>${escapeHtml(row.name)}</b>
+      <span>${escapeHtml(row.tools.join('、'))}</span>
+    </div>`).join('') + (unknown.length
+    ? `<div class="tool-peek-group is-unknown"><b>已失效</b><span>${escapeHtml(unknown.join('、'))}</span></div>`
+    : '');
+}
+
+// 打开表单时清单回到展开态（「收起」是临时动作，不跨表单残留）。
+export function resetAgentToolPeek() {
+  const box = $('#agentToolPeekList');
+  if (box) box.hidden = false;
+  const btn = $('#toggleAgentToolPeek');
+  if (btn) {
+    btn.textContent = '收起清单';
+    btn.setAttribute('aria-expanded', 'true');
+  }
+}
+
+export function toggleAgentToolPeek() {
+  const box = $('#agentToolPeekList');
+  if (!box) return;
+  const show = box.hidden;
+  box.hidden = !show;
+  const btn = $('#toggleAgentToolPeek');
+  if (btn) {
+    btn.textContent = show ? '收起清单' : '展开清单';
+    btn.setAttribute('aria-expanded', show ? 'true' : 'false');
+  }
 }
 
 // 勾选变化时刷新：卡片态重绘卡片（高亮/计数）；编辑态只更新摘要（面板隐藏，别白重绘）。
@@ -1705,6 +1775,28 @@ export function updateToolCounter() {
       ? `${total}/${total}`
       : `${state.agentFormToolScope.length}/${total}`;
   }
+  updateToolOnlySelectedButton(unrestricted ? total : state.agentFormToolScope.length);
+}
+
+// 「只看已选 N」按钮：数量随勾选实时变（它是编辑态里核对"这一套到底开了什么"的入口）。
+export function updateToolOnlySelectedButton(count) {
+  const btn = $('#agentToolOnlySelected');
+  if (!btn) return;
+  const total = typeof count === 'number' ? count : (state.agentFormToolScope || []).length;
+  btn.textContent = `只看已选 ${total}`;
+  btn.setAttribute('aria-pressed', state.agentToolOnlySelected ? 'true' : 'false');
+  btn.classList.toggle('is-active', Boolean(state.agentToolOnlySelected));
+}
+
+export function toggleToolOnlySelected() {
+  state.agentToolOnlySelected = !state.agentToolOnlySelected;
+  // 两份清单互斥：只看已选时搜索框不参与（否则两份过滤叠加，结果没人看得懂）。
+  if (state.agentToolOnlySelected) {
+    state.agentToolFilter = '';
+    const filter = $('#agentToolFilter');
+    if (filter) filter.value = '';
+  }
+  renderToolScopeList();
 }
 
 // 卡片态 ↔ 编辑态切换：卡片向上滑出、编辑区从下方滑入（返回时反向）。
@@ -1740,15 +1832,14 @@ function swapToolView(editing) {
 // 进入编辑态：
 //   内置预设卡 → 载入该预设的工具（走依赖闭包）、命名栏预填预设名、保存时另存为「我的工具集」；
 //   我的工具集卡 → 载入该套工具、命名栏预填它的名字、保存时原地更新；
-//   「添加」卡 → 以「标准模式」预设为起点（不跟随当前选中项）、命名栏留空（留空自动命名）。
+//   「添加」卡 → 以**当前勾选**为底稿（未限制时 = 当前目录全量）、命名栏留空（留空自动命名）。
+//   若只想带着当前勾选进编辑器而不另存，走 openAgentToolEditorCurrent()（不碰勾选）。
 export function openAgentToolEditor({ presetId = '', templateId = '' } = {}) {
   const presets = state.toolCatalog?.presets || [];
   const preset = presetId ? presets.find((item) => item.id === presetId) : null;
   const template = templateId
     ? loadToolTemplates().find((item) => item.id === templateId) : null;
-  // 底稿：点了预设卡就是该预设；点了「添加」卡则固定用标准模式（不跟随当前选中项）。
-  const base = preset || (presetId || templateId ? null
-    : presets.find((item) => item.id === DEFAULT_TOOL_SET_PRESET_ID) || null);
+  const base = preset || null;
   state.agentToolEditingId = template ? template.id : '';
   if (base) {
     setAgentToolScope(normalizeToolScope(base.tools || []));
@@ -1759,21 +1850,30 @@ export function openAgentToolEditor({ presetId = '', templateId = '' } = {}) {
       return;
     }
     setAgentToolScope(normalizeToolScope(tools));
+  } else {
+    // 「添加」卡：底稿就是当前勾选的快照（浅拷贝，之后勾选怎么变都不回头改这份底稿）。
+    setAgentToolScope(normalizeToolScope([...state.agentFormToolScope]));
   }
   const nameInput = $('#agentToolSetName');
   // 命名栏只预填「被点的那张卡」的名字；「添加」卡没有名字，留空（保存时自动命名）。
   if (nameInput) nameInput.value = preset ? preset.name : (template ? template.name : '');
-  state.agentToolFilter = '';
-  const filter = $('#agentToolFilter');
-  if (filter) filter.value = '';
-  renderToolScopeList();
-  syncAgentToolCheckboxes($('#agentToolScope'));
-  swapToolView(true);
-  // 上面 syncAgentToolCheckboxes → updateToolPresetUI 会重绘卡片（编辑态还没显示），
-  // 所以「按下」状态要在重绘之后再按 key 找回卡片打上。
+  enterToolEditorView();
+  // 上面 renderToolScopeList → syncAgentToolCheckboxes → updateToolPresetUI 会重绘卡片
+  // （编辑态还没显示），所以「按下」状态要在重绘之后再按 key 找回卡片打上。
   markPickedToolCard({ presetId, templateId });
   nameInput?.focus();
   nameInput?.select();
+}
+
+// 进入编辑态的共同收尾：清搜索词、按当前模式重画列表、滑入编辑区。
+// 从卡片进入 = 分组视图（要看全量、要动手改）；「只看已选」由开关单独切换。
+function enterToolEditorView({ onlySelected = false } = {}) {
+  state.agentToolFilter = '';
+  state.agentToolOnlySelected = onlySelected;
+  const filter = $('#agentToolFilter');
+  if (filter) filter.value = '';
+  renderToolScopeList();
+  swapToolView(true);
 }
 
 // 给刚点的那张卡打上「按下 / 已选」状态（按 key 重新查，兼容重绘后的新节点）。
@@ -1787,9 +1887,38 @@ function markPickedToolCard({ presetId = '', templateId = '' }) {
   card.setAttribute('aria-pressed', 'true');
 }
 
+// 「编辑当前工具集」：带着当前勾选直接进编辑态，一个工具都不动。
+// 与点卡片的本质区别——不调用 setAgentToolScope（点任何卡片都会用那张卡的工具覆盖当前勾选）。
+// 常驻入口：自定义组合匹配不上任何卡片时，它是唯一能改这套勾选的地方；匹配到卡 / 未限制时
+// 点它也无害（不改勾选，比点卡片更安全）。命名栏留空 = 保存时另存一套新的「我的工具集」。
+export function openAgentToolEditorCurrent() {
+  state.agentToolEditingId = '';
+  const nameInput = $('#agentToolSetName');
+  if (nameInput) nameInput.value = '';
+  enterToolEditorView();
+  nameInput?.focus();
+}
+
+// 当前勾选是不是「还没存成卡片的自定义组合」——点任何卡片都会把它整份换掉的那种。
+// 未限制（空表）与已命中某张卡片的组合点卡无损（后者载入的就是同一套），都不算。
+function isUnsavedCustomScope() {
+  const unrestricted = state.agentFormUnrestricted && !state.agentFormScopeTouched;
+  return (state.agentFormToolScope || []).length > 0 && !unrestricted && !matchToolPreset();
+}
+
+// 点卡片进编辑态前的防误触：只有「自定义未保存」才拦一次，取消 = 留在卡片态、勾选分毫不动。
+// 「添加」卡以当前勾选为底稿、不覆盖任何东西，所以不经过这里（见 handleAgentToolPresetCardsClick）。
+export function confirmToolScopeOverwrite() {
+  if (!isUnsavedCustomScope()) return true;
+  return confirm('当前的自定义工具组合还没有保存成工具集卡片，套用其它工具集会替换现在勾选的全部工具。继续吗？');
+}
+
 export function closeAgentToolEditor() {
   state.agentToolEditingId = '';
+  // 回到卡片态：下次点卡片重新从分组视图开始（「只看已选」只在当前这次编辑里生效）。
+  state.agentToolOnlySelected = false;
   swapToolView(false);
+  resetAgentToolPeek();
   renderAgentToolPresetCards();
 }
 
@@ -1836,6 +1965,9 @@ export function handleAgentToolPresetCardsClick(event) {
     openAgentToolEditor({});
     return;
   }
+  // 防误触：预设卡 / 「我的工具集」卡都会用那张卡的工具覆盖当前勾选，
+  // 只在这份勾选是「还没存成卡片的自定义组合」时才问一次（取消 = 分毫不动）。
+  if (!confirmToolScopeOverwrite()) return;
   const template = event.target.closest('[data-tool-template-card]');
   if (template) {
     openAgentToolEditor({ templateId: template.dataset.toolTemplateCard });
@@ -1921,10 +2053,34 @@ export function usableTemplateTools(template) {
   return normalizeToolMutex((template.tools || []).filter((name) => known.has(name)));
 }
 
+// 这套「我的工具集」当前被哪些 Agent 用着：与 matchToolScope 同口径（都过 matchableTools 滤幽灵名后
+// 做集合全等），未限制（空 tool_scope）不引用任何工具集、直接跳过。删除前把「谁在用」摆给用户看。
+export function toolTemplateUsedByAgents(template, agents) {
+  const usable = usableTemplateTools(template);
+  if (!usable.length) return [];
+  const same = new Set(usable);
+  return (agents || [])
+    .filter((agent) => {
+      const tools = matchableTools(agent?.tool_scope);
+      return tools.length > 0 && tools.length === same.size && tools.every((name) => same.has(name));
+    })
+    .map((agent) => ({ id: agent.id, name: agent.name || agent.id }));
+}
+
 export async function deleteToolTemplate(templateId) {
   const template = loadToolTemplates().find((item) => item.id === templateId);
   if (!template) return;
-  if (!confirm(`确定删除工具集「${template.name}」吗？`)) return;
+  // 删除不可逆，值得先拉一次最新 Agent 列表再判定「谁在用」：内存里的 state 可能停在别处改过之前。
+  // 拉不到就用现有列表兜底，不阻断删除。
+  try {
+    await refreshAgentsFromServer();
+  } catch (_error) { /* 忽略：引用提示是辅助信息，不该拦住删除 */ }
+  const users = toolTemplateUsedByAgents(template, state.bootstrap?.agents || []);
+  const lines = users.length
+    ? `\n\n以下 ${users.length} 个 Agent 当前套用的正是这套工具：\n${users.map((agent) => `· ${agent.name}`).join('\n')}`
+      + '\n\n删除只移除这张工具集卡片，不会改动这些 Agent 已保存的配置。'
+    : '';
+  if (!confirm(`确定删除工具集「${template.name}」吗？${lines}`)) return;
   try {
     await api(`/api/tool_sets/${encodeURIComponent(templateId)}`, { method: 'DELETE' });
   } catch (error) {
@@ -2078,9 +2234,11 @@ export async function renderAgentToolPicker() {
   // 初始加载也应用依赖联动，让显示状态与运行时放行的 allowed_tools 一致。
   // 这里不置 touched：自动补依赖不算用户改配置，未限制的旧 Agent 仍按“不限制”保存。
   state.agentFormToolScope = normalizeToolScope(state.agentFormToolScope);
-  // 每次打开表单都回到卡片态（编辑中的工具集不跨表单残留）。
+  // 每次打开表单都回到卡片态（编辑中的工具集不跨表单残留），清单回到展开态、开关回到分组视图。
   state.agentToolEditingId = '';
+  state.agentToolOnlySelected = false;
   swapToolView(false);
+  resetAgentToolPeek();
   renderAgentToolPresetCards();
   renderUnknownToolsHint();
   renderToolScopeList();
@@ -2103,6 +2261,7 @@ function buildToolCard(tool, list) {
       state.agentFormToolScope, tool.name, e.target.checked,
     ));
     syncAgentToolCheckboxes(list);
+    queueSelectedScopeRerender();
   });
   const span = document.createElement('span');
   const b = document.createElement('b');
@@ -2162,9 +2321,15 @@ function buildSubgroupBlock(sub, tools, list) {
   return block;
 }
 
-function buildGroupBlock(group, toolMap, list) {
+function buildGroupBlock(group, toolMap, list, { onlySelected = false } = {}) {
+  const selected = new Set(state.agentFormToolScope);
+  // 「只看已选」视图：网格里只放已勾选的工具（keep 负责过滤，空分类由调用方跳过）。
+  const keep = (names) => (onlySelected
+    ? (names || []).filter((name) => selected.has(name) && toolMap.has(name))
+    : (names || []));
   const groupEl = document.createElement('div');
-  groupEl.className = 'agent-tool-group collapsed';
+  // 只看已选时必须展开：折叠起来又变成「不知道配了什么」，正是本次要修的问题。
+  groupEl.className = onlySelected ? 'agent-tool-group is-only-selected' : 'agent-tool-group collapsed';
   groupEl.dataset.group = group.name;
 
   const head = document.createElement('div');
@@ -2182,9 +2347,22 @@ function buildGroupBlock(group, toolMap, list) {
   allCb.type = 'checkbox';
   allCb.className = 'group-select-all';
   allCb.setAttribute('data-group', group.name);
-  allCb.title = `全选/取消全选「${group.name}」分类下的所有工具`;
+  allCb.title = onlySelected
+    ? `取消勾选「${group.name}」分类下已选的工具`
+    : `全选/取消全选「${group.name}」分类下的所有工具`;
   allCb.addEventListener('click', (e) => e.stopPropagation());
   allCb.addEventListener('change', () => {
+    // 只看已选视图里网格只有已勾选的工具：取消全选框 = 清空该分类的已选。
+    // 绝不能走下面的「整组全选」分支 —— 那会让用户在这一视图里凭空多选出一批没勾过的工具。
+    if (onlySelected) {
+      if (!allCb.checked) {
+        const groupTools = new Set(group.tools || []);
+        setAgentToolScope(state.agentFormToolScope.filter((name) => !groupTools.has(name)));
+        queueSelectedScopeRerender();
+      }
+      syncAgentToolCheckboxes(list);
+      return;
+    }
     let scope = state.agentFormToolScope;
     for (const name of group.tools || []) {
       const tool = toolMap.get(name);
@@ -2229,12 +2407,12 @@ function buildGroupBlock(group, toolMap, list) {
   // 展开区：先平铺"不属于二级分组"的工具，再逐个渲染二级分组（MCP 按服务器）。
   const body = document.createElement('div');
   body.className = 'agent-tool-group-body';
-  body.hidden = true;
-  const direct = (group.direct_tools || group.tools || [])
+  body.hidden = !onlySelected;
+  const direct = keep(group.direct_tools || group.tools || [])
     .map((name) => toolMap.get(name)).filter(Boolean);
   if (direct.length) body.append(buildToolGrid(direct, list));
   for (const sub of group.subgroups || []) {
-    const tools = (sub.tools || []).map((name) => toolMap.get(name)).filter(Boolean);
+    const tools = keep(sub.tools).map((name) => toolMap.get(name)).filter(Boolean);
     if (!tools.length) continue;
     body.append(buildSubgroupBlock(sub, tools, list));
   }
@@ -2258,6 +2436,31 @@ function renderGroupedScope(list, groups, toolMap) {
     rendered += 1;
   }
   if (!rendered) list.append(emptyScopeHint('工具目录为空'));
+}
+
+// 「只看已选」视图：按分类摊开当前勾选的工具，空分类直接不出现。
+// 已配好的 Agent 再次打开时，分组视图里 6 个分类全折叠、只给「已选 x/y」，
+// 用户看不出这一套到底开了什么（本次要修的问题）；这个视图把答案直接摊开。
+function renderSelectedScope(list, groups, toolMap) {
+  const selected = new Set(state.agentFormToolScope);
+  let rendered = 0;
+  for (const group of groups) {
+    if (!(group.tools || []).some((name) => selected.has(name) && toolMap.has(name))) continue;
+    list.append(buildGroupBlock(group, toolMap, list, { onlySelected: true }));
+    rendered += 1;
+  }
+  if (!rendered) {
+    list.append(emptyScopeHint('当前没有勾选任何工具。再点一次「只看已选」回到分组视图。'));
+  }
+}
+
+// 「只看已选」视图下列表内容就是「已选集合」本身：勾选一变就得重画（取消的卡片要立刻消失）。
+// 延到下一帧，避免在事件处理途中把当前节点换掉（正被点击的那张卡片还在冒泡）。
+function queueSelectedScopeRerender() {
+  if (!state.agentToolOnlySelected) return;
+  window.requestAnimationFrame(() => {
+    if (state.agentToolOnlySelected) renderToolScopeList();
+  });
 }
 
 // 搜索结果视图：命中工具平铺一层（卡片带所属分类标签），省去在分组里逐层展开找。
@@ -2311,7 +2514,9 @@ export function renderToolScopeList() {
   const toolMap = new Map(catalog.map((tool) => [tool.name, tool]));
   const filter = String(state.agentToolFilter || '').trim().toLowerCase();
   list.innerHTML = '';
-  if (filter) renderFilteredScope(list, catalog, filter);
+  // 「只看已选」优先于搜索：它是一份核对清单，搜索框此时不参与（切换开关时会清空搜索词）。
+  if (state.agentToolOnlySelected) renderSelectedScope(list, groups, toolMap);
+  else if (filter) renderFilteredScope(list, catalog, filter);
   else renderGroupedScope(list, groups, toolMap);
   // 初始渲染后同步一次，让各分类“全选”框进入正确的勾选/半选状态。
   syncAgentToolCheckboxes(list);

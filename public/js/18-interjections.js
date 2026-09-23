@@ -16,7 +16,7 @@
 // 也不进消息流（04-messages.js 的可见性过滤），只在本面板里出现。
 // ============================================================
 
-import { $, api, escapeHtml, state, toast } from "./01-core.js";
+import { $, api, escapeHtml, isCoarsePointer, state, toast } from "./01-core.js";
 import { updateContextComposerLock } from "./03-media.js";
 import { attachmentChips, folderChips, missingAttachmentPaths, renderPendingFiles } from "./10-upload.js";
 import { hideSkillPopup, renderInputMirror, resizeTextarea } from "./13-skill-refs.js";
@@ -470,6 +470,9 @@ function markInterjectionGuided(messageId) {
   if (!row) return;
   editingInterjectionId = editingInterjectionId === id ? '' : editingInterjectionId;
   row.classList.add('is-guided');
+  // 引导是就地改行（不重建节点）⇒ 编辑态标记必须手动摘掉，否则「编辑中」的样式会留在
+  // 一个已经不可编辑的行上（后续任何依赖 .is-editing 的规则都会跟着错）。
+  row.classList.remove('is-editing');
   row.dataset.interjectionState = 'guided';
   row.querySelector('.run-guidance-input')?.remove();
   row.querySelector('.run-guidance-preview')?.removeAttribute('style');
@@ -515,7 +518,11 @@ function startEditInterjection(row) {
   textarea.className = 'run-guidance-input';
   textarea.rows = 2;
   textarea.value = row.dataset.rawContent || '';
-  textarea.placeholder = '修改这条插话（Enter 保存，Esc 取消，Shift+Enter 换行）';
+  // 文案按平台切：手机上敲不出 Shift 也按不到 Esc，承诺它们等于给用户看做不到的提示。
+  // 手机上裸回车已改判为换行（见下面的 keydown），提交只剩「保存」按钮这一条路。
+  textarea.placeholder = isCoarsePointer()
+    ? '修改这条插话（点「保存」提交，「取消」放弃）'
+    : '修改这条插话（Enter 保存，Esc 取消，Shift+Enter 换行）';
   if (preview) preview.replaceWith(textarea);
   else row.append(textarea);
   const actions = row.querySelector('.run-guidance-actions');
@@ -526,8 +533,17 @@ function startEditInterjection(row) {
     save.dataset.interjectionSave = 'true';
     save.textContent = '保存';
     save.title = '保存修改（不发送）';
-    actions.replaceChildren(save);
+    // 「取消」是手机端唯一能**放弃修改**的出口：桌面有 Esc，手机没有。它与 Esc 走完全
+    // 同一条路径（只还原界面、不发请求），所以点它不会把原文再存一遍。
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'run-guidance-cancel';
+    cancel.dataset.interjectionCancel = 'true';
+    cancel.textContent = '取消';
+    cancel.title = '放弃修改（不改变队列里的这条插话）';
+    actions.replaceChildren(save, cancel);
   }
+  row.classList.add('is-editing');
   textarea.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -536,6 +552,9 @@ function startEditInterjection(row) {
       return;
     }
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      // 与输入框同一条判定（第 1 项）：粗指针设备上裸回车 = 换行，提交只走「保存」按钮。
+      // 两处共用一个 isCoarsePointer()，不各写一套——否则同一个手机上两个输入框行为正好相反。
+      if (isCoarsePointer() && !(event.ctrlKey || event.metaKey)) return;
       event.preventDefault();
       commitInterjectionEdit(messageId, textarea.value);
     }
@@ -648,6 +667,12 @@ document.addEventListener('click', (event) => {
   if (event.target.closest('[data-interjection-reuse]')) {
     event.preventDefault();
     void reuseInterjection(row.dataset.messageId);
+    return;
+  }
+  if (event.target.closest('[data-interjection-cancel]')) {
+    event.preventDefault();
+    editingInterjectionId = '';
+    void commitInterjectionEdit(row.dataset.messageId, null);
     return;
   }
   if (event.target.closest('[data-interjection-save]')) {

@@ -191,6 +191,7 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .file-edit-area { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .file-edit-textarea { flex: 1; min-height: 0; width: 100%; resize: none; border: 0; outline: 0; padding: 10px 12px; background: var(--surface); color: var(--text); font-family: var(--font-mono); font-size: 12.5px; line-height: 1.6; user-select: text; -webkit-user-select: text; }
 .file-edit-foot { border-top: 1px solid var(--line); padding: 6px 10px; display: flex; align-items: center; gap: 8px; background: var(--surface-2); color: var(--muted); font-size: 11px; }
+.file-edit-hint { flex: 1; min-width: 0; }
 .file-edit-foot .control-button, .file-edit-foot .primary-button { min-height: 30px; padding: 0 11px; font-size: 12px; }
 
 /* AI 改动的文件变更列表（在消息底部汇总） */
@@ -203,6 +204,33 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .file-change-chip .file-change-name { overflow: hidden; text-overflow: ellipsis; }
 .file-change-op { flex: none; width: 17px; height: 17px; display: grid; place-items: center; border-radius: 50%; font-size: 10px; font-weight: 700; color: #fff; background: var(--accent); }
 .file-change-chip[data-file-op="edit"] .file-change-op { background: var(--accent-solid); }
+/* 文件 chip 的动作条（打开 / 打开文件夹 / 另存为）——§九.135 第 5 项。
+   桌面：悬停才露出（不悬停零占位，chip 独占整格，版式与改前逐像素一致，只多了个外层 span）；
+   手机：动作收进 chip 右侧常驻的「⋯」（规则在下面 ≤760px 块里）。
+   外层用 span 而不是给 chip 加位：chip 是 <a>/<button>，动作按钮不能塞进去（嵌套交互元素非法）。 */
+.file-with-actions { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.file-with-actions > .file-chip { flex: 1 1 auto; min-width: 0; }
+.file-with-actions > .file-change-chip { flex: 0 1 auto; min-width: 0; }
+.file-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-actions { display: none; align-items: center; gap: 2px; flex: none; }
+.file-with-actions:hover > .file-actions, .file-with-actions > .file-actions:focus-within { display: flex; }
+.file-action { width: 24px; height: 24px; display: grid; place-items: center; flex: none; padding: 0; border: 1px solid var(--line-strong); border-radius: var(--r-xs); background: var(--surface); color: var(--muted); cursor: pointer; }
+.file-action:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.file-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* 图标必须显式给 paint：SVG 默认 fill:rgb(0,0,0) / stroke:none，只给尺寸会画成实心块
+   （插话键图标就是这么错的，见 §九.135 第 6 项）。这里是唯一一处声明，markup 里不再写第二份。 */
+.file-action svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+/* 「⋯」是手机形态入口，桌面端由悬停替代（否则桌面会同时出现两套入口）。 */
+.file-action-more { display: none; font-size: 14px; line-height: 1; }
+.file-action-menu { position: fixed; z-index: 2100; min-width: 132px; padding: 4px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-3); }
+.file-action-menu[hidden] { display: none; }
+.file-action-menu button { display: flex; align-items: center; width: 100%; height: 34px; padding: 0 12px; border: 0; border-radius: var(--r-xs); background: transparent; color: var(--text); font-size: 13px; text-align: left; cursor: pointer; }
+.file-action-menu button:hover { background: var(--surface-2); color: var(--accent); }
+.file-action-menu button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* 附件动作条（手机）：两个入口的文字比文件动作长，给宽一点，别让「文件（PDF / Word / 文本…）」
+   折成两行（折行后两项高度不一致，点按目标看着就不像一个动作条）。 */
+.attach-menu { min-width: 196px; }
+.attach-menu button { white-space: nowrap; }
 .brand-row { min-height: 72px; padding: 15px 16px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--sidebar-line); }
 .brand-row strong { display: block; font-size: 16px; }
 .mcp-button i { width: 7px; height: 7px; border-radius: 50%; background: var(--sidebar-muted); }
@@ -771,6 +799,10 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
    点击穿透成半屏翻页）。统一给控件更高的 z-index，左右箭头表现一致。 */
 .lightbox-close { position: absolute; top: 16px; right: 20px; z-index: 3; width: 40px; height: 40px; border: 0; border-radius: 50%; background: rgba(255,255,255,.16); color: #fff; font-size: 26px; line-height: 1; cursor: pointer; }
 .lightbox-close:hover { background: rgba(255,255,255,.3); }
+/* 灯箱「下载」：贴在关闭键左侧（手机浏览器上这是把图存到相册/下载目录的唯一入口）。 */
+.lightbox-download { position: absolute; top: 16px; right: 68px; z-index: 3; width: 40px; height: 40px; border: 0; border-radius: 50%; background: rgba(255,255,255,.16); color: #fff; cursor: pointer; display: grid; place-items: center; }
+.lightbox-download:hover { background: rgba(255,255,255,.3); }
+.lightbox-download svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 /* 会话内图片左右切换：贴左右边缘的圆形按钮 + 底部计数 */
 .image-lightbox:focus { outline: none; }
 .lightbox-nav { position: absolute; top: 50%; z-index: 3; transform: translateY(-50%); width: 52px; height: 52px; border: 0; border-radius: 50%; background: rgba(255,255,255,.16); color: #fff; cursor: pointer; display: grid; place-items: center; }
@@ -794,6 +826,8 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
   .lightbox-next { right: 8px; }
   .lightbox-close { top: max(12px, env(safe-area-inset-top)); right: 14px; width: 38px; height: 38px; font-size: 22px; }
   .lightbox-close svg { width: 20px; height: 20px; }
+  .lightbox-download { top: max(12px, env(safe-area-inset-top)); right: 60px; width: 38px; height: 38px; }
+  .lightbox-download svg { width: 20px; height: 20px; }
   .lightbox-counter { bottom: max(12px, env(safe-area-inset-bottom)); }
 }
 .attachment { margin: 0; }
@@ -853,6 +887,10 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
 .run-guidance-actions [data-interjection-delete]:hover { color: var(--red); }
 .run-guidance-actions [data-interjection-save] { width: auto; padding: 0 10px; background: var(--accent-solid); color: #fff; font-size: 12px; }
 .run-guidance-actions [data-interjection-save]:hover { background: var(--brand-700); color: #fff; }
+/* 「取消」（编辑态专属）：手机上没有 Esc，这是唯一能**放弃修改**的出口，所以刻意做成
+   带文字的描边按钮而不是又一个裸图标 —— 可发现性是它存在的全部理由。它是中性操作
+   （不删除、不发送），配色保持中性，别抢「保存」的实心主色。 */
+.run-guidance-actions [data-interjection-cancel] { width: auto; padding: 0 10px; font-size: 12px; border: 1px solid var(--line-strong); color: var(--text); }
 .character-card-import { display: flex; align-items: center; margin-top: 6px; }
 .active-task-bar { margin: 0 0 7px; padding: 7px 9px; border-left: 2px solid var(--accent); background: var(--accent-soft); color: var(--text); font-size: 12px; line-height: 1.4; }
 .active-task-bar button { border: 0; background: transparent; color: var(--accent); padding: 0; font-weight: 600; }
@@ -979,7 +1017,11 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
 .composer .context-usage-button { width: 38px; height: 38px; }
 .composer .icon-button svg { width: 20px; height: 20px; }
 .composer .send-button svg { width: 20px; height: 20px; }
-.composer .interject-button svg { width: 20px; height: 20px; }
+/* 插话键的 SVG 单独补一遍 paint 属性：它**没有 `icon-button` 类**（样式挂在 .composer 尺寸组里），
+   所以吃不到 `.icon-button svg` 的 `fill:none; stroke:currentColor`，会回落到 SVG 默认
+   `fill: rgb(0,0,0)` / `stroke: none` —— 主干与底线零面积彻底不可见、箭头被填成一个孤零零的实心 ▾。
+   只给尺寸不给 paint 就是这个结果（现行版本全平台都画错了，见 §九.135）。 */
+.composer .interject-button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .composer .deep-reasoning-button svg { width: 20px; height: 20px; }
 .attach-button { color: var(--muted); }
 .send-button { border: 0; border-radius: var(--r-md); background: var(--accent-solid); color: white; transition: var(--t-fast); }
@@ -992,6 +1034,9 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
 /* 「插话」按钮：只在运行中出现（关闭态由 [hidden] 承担），样式刻意比发送键轻——
    视觉主按钮永远留给「停止」，避免运行中把「阻止它」和「插一句话」混淆。 */
 .interject-button { display: grid; place-items: center; flex: none; padding: 0; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--surface); color: var(--text); transition: var(--t-fast); }
+/* 文字标签默认不显示：桌面端插话键只是「运行中的备选入口」，加文字会把一行挤爆。
+   只在 ≤760px 的运行态块里显形（那里它是唯一入口，见 §九.135）。 */
+.interject-label { display: none; }
 .interject-button[hidden] { display: none; }
 .interject-button:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 .interject-button:disabled { border-color: var(--line); background: var(--surface-2); color: var(--muted); cursor: not-allowed; opacity: .55; }
@@ -1802,6 +1847,10 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   .turn-rail { display: none; }
   /* 插话队列的动作按钮：手机端放大到可点区间（与 .icon-button 同口径） */
   .run-guidance-actions button { width: 34px; height: 34px; }
+  /* 插话行「编辑中」收起「待引导」徽标：它此刻是冗余信息（正在编辑就说明还没引导），
+     而队列行只有 360px 宽 —— 留着它，「取消 + 保存」会把编辑框挤到 124px（实测），
+     收起后编辑框 205px，比改前（只有保存时）的 170px 还宽。详见 §九.134。 */
+  .run-guidance-card.is-editing .run-guidance-badge { display: none; }
   html, body, .app-shell, .chat-main, .topbar, .messages, .composer-wrap { width: 100%; max-width: 100%; min-width: 0; }
   html, body { overflow-x: hidden; }
   .mobile-only { display: inline-grid; }
@@ -1902,6 +1951,33 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   .composer { min-width: 0; width: 100%; }
   .composer-input { min-width: 0; }
   .composer .icon-button, .composer .send-button { flex: none; min-width: 44px; min-height: 44px; }
+  /* 44px 最小点按尺寸：这条原来只写了 .icon-button / .send-button，漏掉了同样是按钮的
+     插话键与上下文圆环（它们被 976 行的尺寸组定死 38×38，实测确实是 38）。一起补上，
+     免得「按不到」这件事只发生在两个最不显眼的键上。 */
+  .composer .interject-button, .composer .context-usage-button { min-width: 44px; min-height: 44px; }
+  /* 运行中（.composer.is-running，由 updateContextComposerLock 单点翻转）拆两行：
+     输入区独占一整行，按钮排到下面那一行。360px 下这比单行**更好用**：
+     输入区从 88px 变成 326px（3.7 倍），草稿够写；整行高 123 → 103px（草稿态反而更矮，
+     变高的是运行中的空框 58 → 103px，而那个位置本来就被运行条 / 插话队列占着）。
+     四种改法的实测对比见 verify/_probe_composer_options.png（数据 _probe_budget_variants.json）。
+     ⚠️ 只许住在**下面这一个**手机块里：4 个源码级守门（test_mobile_parity / test_mobile_topbar /
+     test_turn_jump / test_turn_rail）都用「第一个手机块」（就下面这一个 @media (max-width: 760px)）
+     定位，另起一个新块会让它们集体跑去检查新块（§九.134 的教训）。
+     注意：这段注释里不要写花括号——守门是按花括号配平找块尾、不认注释的。 */
+  .composer.is-running { flex-wrap: wrap; row-gap: 6px; }
+  .composer.is-running .composer-input { order: 1; flex: 1 1 100%; }
+  .composer.is-running .attach-button { order: 2; }
+  .composer.is-running .reasoning-wrap { order: 3; }
+  .composer.is-running .context-usage-wrap { order: 4; }
+  .composer.is-running #interjectButton { order: 5; margin-left: auto; }
+  .composer.is-running .send-button { order: 6; }
+  /* 运行中插话键拿文字 + 加宽到 69px：它是这一刻唯一的插话入口（发送键已是「停止」），
+     而它的图标本身很抽象。用真节点而不是 ::after —— 真节点可被断言、可被读屏。 */
+  .composer.is-running #interjectButton {
+    width: auto; min-width: 69px; height: 44px;
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 9px;
+  }
+  .composer.is-running #interjectButton .interject-label { display: inline; font-size: 12px; font-weight: 600; }
   .composer-meta { display: flex; flex-wrap: nowrap; gap: 8px; }
   .composer-meta-left { min-width: 0; flex: 1 1 auto; }
   #runtimeStatus { flex: none; margin-left: auto; }
@@ -1954,6 +2030,19 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   .file-change-chip { min-height: 40px; padding: 0 12px 0 6px; }
   .file-change-op { color: var(--muted); background: transparent; font-weight: 600; }
   .file-change-chip[data-file-op="edit"] .file-change-op { color: var(--accent); background: transparent; }
+  /* 编辑态操作条（§九.135 第 2 项）：保存/取消就在编辑区脚底，键盘弹起也在手边。
+     min-height 走 44px；提示文字占满余量、按钮不被挤扁。 */
+  .file-edit-foot { padding: 8px 10px; gap: 10px; }
+  .file-edit-foot .control-button, .file-edit-foot .primary-button { min-height: 44px; padding: 0 16px; font-size: 13px; }
+  .file-edit-foot .file-edit-hint { font-size: 11px; }
+  /* 文件 chip 动作条的手机形态（§九.135 第 5 项）：手机没有悬停，三个动作收进右侧常驻的
+     「⋯」；「打开文件夹」在非 pywebview 环境压根不渲染（markup 层决定，不靠 CSS 藏）。 */
+  .file-with-actions > .file-actions { display: flex; }
+  .file-actions .file-action[data-file-open],
+  .file-actions .file-action[data-file-reveal],
+  .file-actions .file-action[data-file-save-as] { display: none; }
+  .file-actions .file-action-more { display: grid; min-width: 44px; min-height: 44px; }
+  .file-action-menu button { height: 44px; font-size: 14px; }
 }
 
 @media (max-width: 380px) {
@@ -2013,7 +2102,29 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .tool-preset-card:hover .tool-preset-card-del { opacity: 1; }
 .tool-preset-card-del:hover { color: var(--red); background: var(--surface-2); }
 .tool-preset-card-del svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; }
-.tool-preset-summary { margin: 0; color: var(--muted); font-size: 12px; }
+/* 摘要行：左边「当前：… · N 个工具」，右边「编辑当前工具集」+「收起/展开清单」；
+   下面跟一份「当前已选工具」只读清单（已配好的 Agent 再次打开时一眼看清用了什么）。
+   窄屏放不下时按钮整组折到下一行（文字可收缩，按钮不挤变形）。 */
+.tool-preset-summary { display: grid; gap: 8px; }
+.tool-preset-summary-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px 10px; flex-wrap: wrap;
+}
+.tool-preset-summary-actions { display: flex; align-items: center; gap: 6px; flex: none; margin-left: auto; }
+.tool-preset-summary-text { margin: 0; min-width: 0; color: var(--muted); font-size: 12px; }
+.tool-peek {
+  display: grid; gap: 5px; max-height: 190px; overflow: auto;
+  padding: 9px 10px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface);
+}
+.tool-peek[hidden] { display: none; }
+.tool-peek-group { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 10px; align-items: baseline; }
+.tool-peek-group b { font-size: 11.5px; font-weight: 600; color: var(--text); white-space: nowrap; }
+.tool-peek-group span { font-size: 11.5px; line-height: 1.6; color: var(--muted); word-break: break-word; }
+.tool-peek-group.is-unknown b, .tool-peek-group.is-unknown span { color: var(--amber); }
+.tool-peek-empty { margin: 0; font-size: 12px; color: var(--muted); }
+/* 编辑态过滤行里的「只看已选 N」开关：开启时用强调色标出「现在是核对视图」。 */
+#agentToolOnlySelected { flex: none; }
+#agentToolOnlySelected.is-active { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 
 .tool-editor {
   display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0;

@@ -222,6 +222,102 @@ class JsApi:
         )
         return result
 
+    # ---- 消息里的文件 chip：打开 / 打开文件夹 / 另存为 ----
+    # 为什么这三个动作要走桥而不是纯前端：
+    #   · 浏览器里 `<a href="/api/file?...">` 只能「在新标签页里预览」，文本/代码就是显示一屏文本，
+    #     既不是「用关联程序打开」，也没有「另存为」的落点；
+    #   · WebView2 里 `<a download>` 的行为不可靠（没有下载管理器、也不弹保存框）。
+    # 三个方法统一 `{ok, error}` 返回（前端只看这两个字段），失败一律带可读原因，不静默。
+    @staticmethod
+    def _resolve_file(path) -> Path:
+        """把前端传来的路径收敛成一个「存在且是文件」的 Path，否则抛 ValueError。
+
+        信任口径沿用现有 JsApi：本机单用户、前端就是自家页面；这里只做"存不存在、是不是文件"
+        的校验，避免把目录当文件丢给 os.startfile（那会弹出资源管理器，看起来像"另存为成功了"）。
+        """
+        raw = str(path or "").strip()
+        if not raw:
+            raise ValueError("没有可操作的文件路径")
+        target = Path(raw)
+        if target.is_dir():
+            raise ValueError("这是一个文件夹，不是文件")
+        if not target.is_file():
+            raise ValueError("文件已不存在（可能已被移动或删除）")
+        return target
+
+    def naibaOpenFile(self, path: str) -> dict:
+        """用系统默认关联程序打开该文件（等价于在资源管理器里双击）。"""
+        try:
+            target = self._resolve_file(path)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        try:
+            os.startfile(str(target))  # type: ignore[attr-defined]  # 仅 Windows 有
+        except Exception as exc:  # pragma: no cover - 环境相关
+            return {"ok": False, "error": f"无法打开文件：{exc}"}
+        return {"ok": True}
+
+    def naibaRevealInFolder(self, path: str) -> dict:
+        """在资源管理器里定位并选中该文件。
+
+        这是桌面端专属动作：手机浏览器连的是同一台 PC，给它「打开文件夹」等于在用户看不见的
+        那台机器上弹一个窗口（前端据此在非 pywebview 环境下根本不渲染这个按钮）。
+        """
+        import subprocess
+
+        try:
+            target = self._resolve_file(path)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        try:
+            # `/select,<path>` 必须是**一个**参数（逗号是 explorer 自己的分隔符），
+            # 拆成两个 token 会被当成要打开两个位置。不 wait：explorer 会把请求转交给
+            # 已存在的 explorer 进程后立刻退出，等它没有意义。
+            subprocess.Popen(["explorer", f"/select,{target}"])
+        except Exception as exc:  # pragma: no cover - 环境相关
+            return {"ok": False, "error": f"无法打开文件夹：{exc}"}
+        return {"ok": True}
+
+    def naibaSaveFileAs(self, path: str, default_name: str = "") -> dict:
+        """把该文件复制到用户选定的位置（弹出系统保存对话框）。
+
+        取消不算失败：`cancelled` 让前端静默收场，而不是弹一句"保存失败"（用户明明点了取消）。
+        """
+        import shutil
+
+        try:
+            target = self._resolve_file(path)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+
+        name = str(default_name or "").strip()
+        if not name:
+            name = target.name
+        try:
+            import webview
+
+            windows = list(getattr(webview, "windows", []) or [])
+            if not windows:
+                return {"ok": False, "error": "窗口尚未就绪，请稍后重试"}
+            chosen = windows[0].create_file_dialog(
+                webview.SAVE_DIALOG, save_filename=name
+            )
+        except Exception as exc:  # pragma: no cover - 环境相关
+            return {"ok": False, "error": f"无法打开保存对话框：{exc}"}
+
+        # pywebview 各版本返回 str / list[str] / None 三种形态，统一收敛。
+        if isinstance(chosen, (list, tuple)):
+            chosen = chosen[0] if chosen else ""
+        dest = str(chosen or "").strip()
+        if not dest:
+            return {"ok": False, "cancelled": True, "error": "已取消"}
+
+        try:
+            shutil.copy2(str(target), dest)
+        except Exception as exc:
+            return {"ok": False, "error": f"保存失败：{exc}"}
+        return {"ok": True, "path": dest}
+
 
 class Launcher:
     def __init__(self) -> None:

@@ -2,7 +2,7 @@
 // 14-file-panel.js —— 拆分自 public/app.js 第 6329-6657 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, api, escapeHtml, state, toast } from "./01-core.js";
+import { $, api, escapeHtml, isCoarsePointer, state, toast } from "./01-core.js";
 import { renderSidebar } from "./08-conversations.js";
 import { markdownFilePreview } from "./12-chat-input.js";
 export const filePanelState = { open: false, activeKey: '', tabs: [] };
@@ -10,6 +10,14 @@ export const FILE_MD_NAME_RE = /\.(md|markdown|mdown)$/i;
 
 export function filePanelTabKey(raw) {
   return String(raw || '').replace(/\\/g, '/').toLowerCase();
+}
+
+// 编辑态脚注：手机上既没有 Ctrl/⌘ 也没有 Esc（虚拟键盘敲不出来），照桌面文案就是
+// 「给用户看一句做不到的提示」。判据与第 1 项同一处（`isCoarsePointer`），不另写一套。
+function fileEditHint() {
+  return isCoarsePointer()
+    ? '点「保存」写回磁盘，「取消」放弃修改'
+    : 'Ctrl/⌘ + S 或 Ctrl/⌘ + Enter 保存 · Esc 取消';
 }
 
 // 视口边界的唯一来源：CSS 的 @media (max-width: 760px) 与下面这个常量必须一致。
@@ -224,26 +232,46 @@ export function renderFilePanelBody() {
     return;
   }
   const savableText = info.kind === 'text' && info.savable && !info.truncated && !tab.editing;
-  const actionHtml = savableText
+  const editHtml = savableText
     ? '<button type="button" class="control-button" data-file-edit>编辑</button>'
-    : tab.editing
-      ? '<button type="button" class="control-button" data-file-edit-cancel>取消</button><button type="button" class="primary-button" data-file-save>保存</button>'
-      : '';
+    : '';
+  // 「下载」是**独立**于编辑态的动作：手机上它是把已生成/已修改的文件存到本地的唯一入口
+  // （此前面板工具栏只有「编辑」，点开文件只能内联看，没有任何保存路径，见 §九.135 第 3 项）。
+  const downloadHtml = (info.path || tab.raw) && !tab.editing
+    ? '<button type="button" class="control-button" data-file-download title="保存到本地">下载</button>'
+    : '';
+  const actionHtml = editHtml + downloadHtml;
   const truncNote = info.truncated ? '<small>（截断）</small>' : '';
-  body.innerHTML = `
-    <div class="file-view">
+  const toolbarHtml = `
       <div class="file-view-toolbar">
         <div class="file-view-title">
           <b title="${escapeHtml(info.path || tab.raw)}">${escapeHtml(info.name || tab.name)}${truncNote}</b>
           <small>${escapeHtml(fileToolbarMeta(tab))}${info.path ? ` · ${escapeHtml(info.path)}` : ''}</small>
         </div>
         <div class="file-view-actions">${actionHtml}</div>
-      </div>
+      </div>`;
+  // 编辑中不重建编辑区（§九.135 第 2 项）：`body.innerHTML = ...` 会把 textarea 连根拔掉，
+  // 选区、光标、正在显示的系统「复制/粘贴」菜单一起消失 —— 手机上"编辑文件很奇怪"的头号成因。
+  // 只把工具栏换掉（文件名/状态/动作都可能变），编辑区 DOM 原样留着；textarea 是活节点，
+  // 高度与滚动位置也就跟着保住了。
+  const live = body.querySelector('.file-view');
+  const keepEditor = Boolean(tab.editing && live
+    && live.dataset.fileKey === tab.key && live.querySelector('.file-edit-textarea'));
+  if (keepEditor) {
+    const bar = live.querySelector('.file-view-toolbar');
+    if (bar) bar.outerHTML = toolbarHtml;
+    return;
+  }
+  body.innerHTML = `
+    <div class="file-view${tab.editing ? ' is-editing' : ''}" data-file-key="${escapeHtml(tab.key)}">${toolbarHtml}
       ${fileContentViewHtml(tab)}
     </div>`;
   if (tab.editing) {
     const textarea = body.querySelector('.file-edit-textarea');
-    if (textarea) {
+    if (textarea && !textarea.dataset.bound) {
+      // 只在**新建** textarea 时挂一次监听：编辑区现在会在重绘之间存活，
+      // 沿用"每次 render 都重挂"的写法会同一节点上叠出多份监听（保存会连着触发好几次）。
+      textarea.dataset.bound = '1';
       textarea.focus();
       textarea.addEventListener('input', () => { tab.draft = textarea.value; });
       textarea.addEventListener('keydown', (event) => {
@@ -259,7 +287,11 @@ export function fileContentViewHtml(tab) {
   const info = tab.info || {};
   if (tab.editing) {
     const value = tab.draft !== null && tab.draft !== undefined ? tab.draft : (info.content || '');
-    return `<div class="file-edit-area"><textarea class="file-edit-textarea" spellcheck="false" aria-label="编辑 ${escapeHtml(info.name || '')}">${escapeHtml(value)}</textarea><div class="file-edit-foot"><span>Ctrl/⌘ + S 或 Ctrl/⌘ + Enter 保存 · Esc 取消</span></div></div>`;
+    // 「保存 / 取消」放在编辑区**脚底**，不再挂在顶部工具栏（§九.135 第 2 项）：
+    // 编辑区是 flex 列（textarea 撑开 + 这一条钉在底部），面板在手机上是 `inset: 0` 的全屏抽屉，
+    // 键盘弹起时面板跟着视觉视口收缩 ⇒ 这一条自然浮在键盘上方。此前按钮在顶部工具栏，
+    // 键盘一弹就被挤出可视区，手机上"改完存不了"。
+    return `<div class="file-edit-area"><textarea class="file-edit-textarea" spellcheck="false" aria-label="编辑 ${escapeHtml(info.name || '')}">${escapeHtml(value)}</textarea><div class="file-edit-foot"><span class="file-edit-hint">${escapeHtml(fileEditHint())}</span><button type="button" class="control-button" data-file-edit-cancel>取消</button><button type="button" class="primary-button" data-file-save>保存</button></div></div>`;
   }
   if (info.kind === 'image') {
     const url = convFileRawUrl(info.path || tab.raw, fileVersionToken(info));

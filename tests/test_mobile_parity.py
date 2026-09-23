@@ -54,6 +54,42 @@ class MobileParityTests(unittest.TestCase):
             found.append(mobile[index:end])
             start = end + 1
 
+    def test_styles_css_braces_are_balanced(self) -> None:
+        """整份 styles.css 必须花括号配平，且第一个 760 块必须真的在本文件内闭合。
+
+        教训（§九.135）：曾经在注释里写了「… 第一个 @media (max-width: 760px) { …」，
+        而几个守门是按**花括号配平**找块尾的、**不认注释** ⇒ 那个裸 `{` 让 1844 行之后的
+        全部内容都被吞进了第一个手机块；真正报出来的却是另一个用例
+        （`test_interjection_edit_actions` 的「所在的 @media 块没有闭合」），定位成本极高。
+        这条把根因直接钉死：配平 + 块尾位置，报错就能一眼指到成因。
+        """
+        css = self._css()
+        opens, closes = css.count("{"), css.count("}")
+        self.assertEqual(
+            opens,
+            closes,
+            "styles.css 花括号不配平：%d 个 { / %d 个 }（注释里写了裸 { 也会被算进来）"
+            % (opens, closes),
+        )
+        depth = 0
+        start = css.index("@media (max-width: 760px) {")
+        closed_at = None
+        for index in range(css.index("{", start), len(css)):
+            char = css[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    closed_at = index
+                    break
+        self.assertIsNotNone(closed_at, "第一个手机块在本文件内没有闭合（多半是注释里多了个裸 {）")
+        self.assertLess(
+            css[:closed_at].count("\n") + 1,
+            len(css.split("\n")),
+            "第一个手机块不该一直拖到文件末尾",
+        )
+
     def test_mobile_block_no_longer_removes_capabilities(self) -> None:
         mobile = self._mobile_block()
         self.assertNotIn("display: none !important", mobile, "又用 !important 把能力关掉了")

@@ -1,16 +1,14 @@
-"""工具分类改版冒烟的自编排入口（随仓库发布的可复用资产）。
+# -*- coding: utf-8 -*-
+"""工具集清单冒烟的自编排入口（随仓库发布的可复用资产，见 §九.133）。
 
-为什么改成隔离实例：这个冒烟会**写数据**（新建/删除「我的工具集」，并播种 3 个 Agent
-模拟「引用了某套工具集 / 自定义未保存 / 未限制」三种状态），而且真数据目录上有**单实例锁**
-（`server.lock`），对着在跑的窗口根本起不来。改成复用 `_serve_tmp.py`（自带独立
-config / data_dir / workspace / 端口），每轮从空目录起步：
-- 不碰真 `config.json` 与 `D:\naibachatdata`，也不需要跑完还原什么；
-- 与窗口里正在用的实例互不干扰（独立数据目录 ⇒ 不抢单实例锁）。
+为什么要自编排而不是直接对着在跑实例跑：这个冒烟会**写数据**（建一个工具集 + 一个 Agent，
+用来模拟"已配好的 Agent"），所以必须落在隔离数据目录里。这里复用 `_serve_tmp.py`
+（自带独立 config / data_dir / workspace / 端口），每轮从空目录起步。
 
-端口固定 8793（与 tool_peek_smoke 的 8805 错开）。失败保留 `verify/_tmp_tool_groups/`
-供排查，成功则删掉；日志永远留在 `verify/tool_groups_smoke_server.log`。
+隔离实例的 config 里 `mcp_servers` 为空 ⇒ 目录里没有 mcp__ 工具，脚本自己按这条假设挑工具。
 
-用法：.venv\\Scripts\\python.exe verify\\tool_groups_smoke.py
+用法：.venv\\Scripts\\python.exe verify\\tool_peek_smoke.py
+     （失败时保留 verify/_tmp_tool_peek/ 供排查，成功则删掉；日志永远留在 verify/tool_peek_smoke_server.log）
 """
 from __future__ import annotations
 
@@ -23,12 +21,13 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PORT = int(os.environ.get("NAIBA_TMP_PORT", "8793"))
+PORT = int(os.environ.get("NAIBA_TMP_PORT", "8805"))
 BASE = f"http://127.0.0.1:{PORT}"
-ISOLATED_ROOT = ROOT / "verify" / "_tmp_tool_groups"
+ISOLATED_ROOT = ROOT / "verify" / "_tmp_tool_peek"
 
 
 def wait_health(deadline: float = 90.0) -> bool:
+    """等隔离实例起来：/api/health 就绪即可（脚本第一步就是打 /api/tool_catalog）。"""
     end = time.time() + deadline
     while time.time() < end:
         try:
@@ -41,7 +40,7 @@ def wait_health(deadline: float = 90.0) -> bool:
 
 
 def main() -> int:
-    # 每轮从空目录起步：上一轮的「冒烟工具集」/播种 Agent 残留会让计数断言失真。
+    # 每轮从空目录起步：上一轮建的「探针工具集」/Agent 残留会让计数断言失真。
     if ISOLATED_ROOT.exists():
         shutil.rmtree(ISOLATED_ROOT, ignore_errors=True)
 
@@ -52,7 +51,7 @@ def main() -> int:
         "NAIBA_TMP_PORT": str(PORT),
         "NAIBA_TMP_ROOT": str(ISOLATED_ROOT),
     })
-    log_path = ROOT / "verify" / "tool_groups_smoke_server.log"
+    log_path = ROOT / "verify" / "tool_peek_smoke_server.log"
     log = log_path.open("w", encoding="utf-8")
     server = subprocess.Popen(  # noqa: S603 - 固定 argv
         [sys.executable, str(ROOT / "verify" / "_serve_tmp.py")],
@@ -64,10 +63,10 @@ def main() -> int:
             print(f"隔离实例未就绪（日志见 {log_path.name}）")
             return 1
         node_env = dict(os.environ)
-        node_env["NODE_PATH"] = str(Path.home() / "node_modules")
-        node_env["NAIBA_SMOKE_BASE"] = BASE
+        node_env["NODE_PATH"] = str(ROOT / "node_modules")
+        node_env["NAIBA_TMP_BASE"] = BASE
         node = subprocess.run(  # noqa: S603 - 固定 argv
-            ["node", str(ROOT / "verify" / "tool_groups_smoke.cjs")],
+            ["node", str(ROOT / "verify" / "tool_peek_smoke.cjs")],
             cwd=str(ROOT), env=node_env, check=False,
         )
         code = node.returncode
@@ -84,6 +83,10 @@ def main() -> int:
             print("已删除隔离数据目录（本轮全绿）")
         else:
             print(f"保留隔离数据目录供排查：{ISOLATED_ROOT}")
+        print(f"隔离实例已退出（exit={server.returncode}；terminate 收尾的正常退出码，不是失败判据）")
+    # 打印最后一行结论，方便在 CI / 手工一眼看清
+    if code != 0:
+        print("FAILED：详见上面的逐条 PASS/FAIL")
     return code
 
 

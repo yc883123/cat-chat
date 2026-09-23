@@ -110,6 +110,8 @@ export const state = {
   agentFormScopeTouched: false,
   // 工具集搜索框关键词（Agent 表单打开时复位）：非空时工具列表切成平铺搜索结果视图。
   agentToolFilter: '',
+  // 编辑态「只看已选」开关：按分类摊开当前勾选的工具（核对已配好的 Agent 开了什么）。
+  agentToolOnlySelected: false,
   // 「我的工具集」：后端 config.json 的 tool_sets（bootstrap 带回、保存/删除后刷新），
   // 不再走 localStorage——冻结版 pywebview private_mode 会清空 localStorage。
   toolTemplates: [],
@@ -930,6 +932,50 @@ export let contextMenuMode = 'selection'; // 'selection' | 'edit'
 export let contextMenuTarget = null;
 export let contextMenuRangeStart = 0;
 export let contextMenuRangeEnd = 0;
+
+/**
+ * 触发浏览器「保存到本地」：给同一个 URL 加 `download=1`（后端据此发 `Content-Disposition:
+ * attachment`，见 §九.135 第 3 项），文件名从 URL 的 `path` 参数里解出来，交给 `<a download>` 兜底。
+ *
+ * 为什么是同源才加参数：外链（ComfyUI 之外的图床等）加了也没意义，反而可能被对方当成未知参数；
+ * 而跨源 URL 的 `<a download>` 本来就被浏览器忽略（安全模型），只能靠对方自己的响应头。
+ *
+ * 桌面 exe 的「另存为」不走这里——WebView2 里 `<a download>` 行为不可靠，走 pywebview 的
+ * 保存对话框（见 03-media 的 chip 动作条与 launcher 的 JsApi）。
+ */
+export function triggerDownload(rawUrl) {
+  const text = String(rawUrl || '');
+  if (!text) return false;
+  let href = text;
+  let name = '';
+  try {
+    const parsed = new URL(text, location.origin);
+    const source = String(parsed.searchParams.get('path') || parsed.pathname || '');
+    name = decodeURIComponent(source.split(/[\\/]/).filter(Boolean).pop() || '');
+    if (parsed.origin === location.origin) {
+      parsed.searchParams.set('download', '1');
+      href = parsed.toString();
+    }
+  } catch (_error) {
+    // 不是可解析的 URL：原样交给浏览器（极少见，但别因此吞掉用户的点击）。
+  }
+  const link = document.createElement('a');
+  link.href = href;
+  if (name) link.download = name;
+  link.rel = 'noopener';
+  document.body.append(link);
+  link.click();
+  link.remove();
+  return true;
+}
+
+// 粗指针设备（手机 / 平板触屏）判定。**判据只用媒体查询，不用宽度**：把窗口拖窄的桌面浏览器
+// 仍然有物理 Shift 键，行为不该跟着窗口宽度变；外接键盘的平板则应当保留桌面语义。
+// 用途是「Enter 到底算发送还是算换行」——虚拟键盘上敲不出 Shift，若沿用桌面语义，
+// 手机用户永远敲不出换行（这正是 §九.135 第 1 项要修的东西）。
+export function isCoarsePointer() {
+  return Boolean(window.matchMedia?.('(pointer: coarse)')?.matches);
+}
 
 export function editableElement(target) {
   if (!(target instanceof Element)) return null;

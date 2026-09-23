@@ -12,6 +12,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import secrets
 import socket
 import sqlite3
@@ -65,6 +66,19 @@ _SO_EXCLUSIVEADDRUSE = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
 # 配合 nosniff 而拒绝渲染（缩略图破图）。兜底映射唯一定义在 core/media_types.py
 # （顺带补齐此前漏登记的 .m4v——视频因此可能不播）。
 _MEDIA_MIME_FALLBACK = dict(MIME_BY_EXT)
+
+
+def content_disposition_attachment(filename: str) -> str:
+    """`Content-Disposition: attachment` 头（RFC 6266 + RFC 5987）。
+
+    手机浏览器只能靠这个头把「内联预览」变成「保存到本地」——没有它，点开 .md / .py
+    只会把文本显示在页面里，用户找不到任何保存入口（§九.135 第 3 项）。
+    注意 HTTP 头只能是 latin-1：中文名必须走 `filename*=UTF-8''<百分号编码>`，同时给一个
+    纯 ASCII 的 `filename=` 兜底，否则含中文的名字在只认旧写法的客户端上会被截断或丢字。
+    """
+    name = re.sub(r"[\r\n\t/\\]+", "_", str(filename or "")).strip() or "download"
+    fallback = name.encode("ascii", "replace").decode("ascii").replace("?", "_") or "download"
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{urllib.parse.quote(name, safe='')}"
 
 
 def _port_has_listener(host: str, port: int, timeout: float = 0.4) -> bool:
@@ -354,6 +368,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                     f"{content_type}; charset=utf-8" if content_type.startswith("text/") else content_type,
                 )
                 self.send_header("Content-Length", str(len(data)))
+                if query.get("download", ["0"])[0] == "1":
+                    # 同上：加附件头 = 手机/桌面都能「另存为」，不加则维持内联预览。
+                    self.send_header("Content-Disposition", content_disposition_attachment(target.name))
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Cache-Control", "private, max-age=3600")
                 self.end_headers()
@@ -408,7 +425,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._serve_agent_avatar(path.rsplit("/", 1)[-1])
         elif path == "/api/file":
             query = urllib.parse.parse_qs(parsed.query)
-            self._serve_local_file(query.get("path", [""])[0])
+            self._serve_local_file(
+                query.get("path", [""])[0],
+                # ?download=1 = 让浏览器「存到本地」而不是内联预览（手机唯一的保存路径，
+                # 见 §九.135 第 3 项）。默认不带 → 行为与历史逐字节一致。
+                download=query.get("download", ["0"])[0] == "1",
+            )
         elif path == "/api/workspace/browse":
             try:
                 query = urllib.parse.parse_qs(parsed.query)
@@ -1156,7 +1178,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _serve_local_file(self, source: str) -> None:
+    def _serve_local_file(self, source: str, download: bool = False) -> None:
         if source.startswith("http://127.0.0.1:8188/") or source.startswith("http://localhost:8188/"):
             try:
                 with net_io.open(source, timeout=60) as response:
@@ -1171,6 +1193,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 f"{content_type}; charset=utf-8" if content_type.startswith("text/") else content_type,
             )
             self.send_header("Content-Length", str(len(data)))
+            if download:
+                self.send_header("Content-Disposition", content_disposition_attachment(Path(urllib.parse.urlparse(source).path).name))
             self.send_header("Cache-Control", "private, max-age=3600")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
@@ -1227,6 +1251,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Accept-Ranges", "bytes")
         if byte_range is not None:
             self.send_header("Content-Range", content_range_header(start, end, size))
+        if download:
+            # 只加这一个头：`Cache-Control` / `Accept-Ranges` / Range 语义一字不动
+            # （视频 seek 走同一个函数，动它们就会波及播放）。
+            self.send_header("Content-Disposition", content_disposition_attachment(path.name))
         self.send_header("Cache-Control", "private, max-age=3600")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()

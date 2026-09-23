@@ -2,18 +2,18 @@
 // 15-bind-events.js —— 拆分自 public/app.js 第 6658-7653 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, api, applyAppearance, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, hideTextContextMenu, onChatBackgroundMissingChange, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer } from "./01-core.js";
-import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarning, ensureImageContextMenu, handleImageLightboxKey, hideImageContextMenu, initImageLightboxInteractions, isPywebview, openImageLightbox, positionContextUsagePopover, resetContextWarningResume, runImageContextAction, showImageContextMenu, stepImageLightbox, toggleContextUsagePopover, updateSendButtonState } from "./03-media.js";
+import { $, $$, api, applyAppearance, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, hideTextContextMenu, isCoarsePointer, onChatBackgroundMissingChange, triggerDownload, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer } from "./01-core.js";
+import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarning, ensureImageContextMenu, fileUrl, handleImageLightboxKey, hideFileActionMenu, hideImageContextMenu, initImageLightboxInteractions, isPywebview, openImageLightbox, positionContextUsagePopover, resetContextWarningResume, runImageContextAction, saveLocalFile, showFileActionMenu, showImageContextMenu, stepImageLightbox, toggleContextUsagePopover, updateSendButtonState } from "./03-media.js";
 import { branchMessage, cancelActiveEdit, cancelSessionStart, confirmActiveEdit, deleteMessageFlow, fillContextResetSeed, initTurnRail, isNearBottom, regenerateMessage, setStickToBottom, startEditMessage, startNewSession, undoLastDelete } from "./04-messages.js";
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
 import { switchPermissionMode } from "./06-tasks-plans.js";
 import { checkUpdate, closeAgentHelpPopover, closeComposerModelPicker, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, positionAgentHelpPopover, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleAgentHelpPopover, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
 import { cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeBranchChainPanel, closeConversationMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, runFullTextSearch, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel, setTaskLogOpen, setTaskLogStick, setWorkspaceSearchMode, syncSearchModeUi, SEARCH_DEBOUNCE_MS } from "./08-conversations.js";
-import { addProvider, addSearchProfile, appearanceFormValues, applyProviderModelCapabilities, applyProviderPreset, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadWorkspaceTree, openAgentCard, openProviderCard, openProviderPresetKeyUrl, openVisionProviderForm, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, saveMcpServer, saveProvider, saveRuntimeSettings, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, showAgentForm, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint } from "./09-settings.js";
+import { addProvider, addSearchProfile, appearanceFormValues, applyProviderModelCapabilities, applyProviderPreset, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadWorkspaceTree, openAgentCard, openAgentToolEditorCurrent, openProviderCard, openProviderPresetKeyUrl, openVisionProviderForm, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, saveMcpServer, saveProvider, saveRuntimeSettings, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, showAgentForm, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAgentToolPeek, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, toggleToolOnlySelected, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint } from "./09-settings.js";
 import { addFolderChip, isFolderChip, readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
 import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handlePasteImage, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState } from "./12-chat-input.js";
 import { commitSkillSelection, hideSkillPopup, insertSkillRefAtCursor, moveSkillPopupSelection, popupState, positionSkillPopup, renderInputMirror, resizeTextarea, setSkillPopupSelection, skillList, updateSkillPopup } from "./13-skill-refs.js";
-import { activateFileTab, activeFileTab, applyFilePanelOpenClass, cancelFileEdit, closeFilePanel, closeSidebar, filePanelState, filePanelUsable, openFilePanel, openSidebar, removeFileTab, reopenFilePanel, restoreLeftSidebarCollapse, saveFileTab, setLeftSidebarCollapsed, sidebarDesktop, startFileEdit, updateFileTabsButton } from "./14-file-panel.js";
+import { activateFileTab, activeFileTab, applyFilePanelOpenClass, cancelFileEdit, closeFilePanel, closeSidebar, convFileRawUrl, filePanelState, filePanelUsable, fileVersionToken, openFilePanel, openSidebar, removeFileTab, reopenFilePanel, restoreLeftSidebarCollapse, saveFileTab, setLeftSidebarCollapsed, sidebarDesktop, startFileEdit, updateFileTabsButton } from "./14-file-panel.js";
 import { handleFilePopupClick, handleFilePopupKey, positionFilePopup, updateFilePopup } from "./16-file-refs.js";
 import { guideAllInterjections, sendRunInterjection } from "./18-interjections.js";
 import { dismissOnboarding, resetOnboarding, saveOnboardingProvider, selectOnboardingPreset, testOnboardingConnection } from "./19-onboarding.js";
@@ -791,6 +791,148 @@ window.naibaHandleDroppedFolders = (paths) => {
   void addFolderPathsOnce(list);
 };
 
+// ---- 附件按钮的两种入口（§九.135 第 4 项）----
+// 不新建第二个 <input type=file>：上传链路（change → uploadFiles → 待发送 chip → XHR）
+// 只能有一条，多一个 input 就是多一条会慢慢漂移的路。改的只是**点开之前**的 accept。
+// 「文件」入口的 accept：**MIME 在前、扩展名兜底**（§九.135 补，用户实测反馈后改）。
+// 第一版只给了扩展名清单（`.pdf,.doc,…`），在部分 Android ROM/浏览器上会被当成"没给约束"
+// 而回落 `*/*`，弹出来的第一个建议仍然是相册——用户原话「点了文件后还是跳相册」。
+// 关键点：这串里**不含 `image/*` 与 `video/*`**，系统把相册/相机过滤掉之后才会给出文件管理器。
+// 扩展名并列在后面是给「不认 MIME 只认后缀」的浏览器兜底（两边都不能省）。
+const FILE_ACCEPT_MIMES = [
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/json',
+  'application/xml',
+  'application/x-yaml',
+  'application/zip',
+  'application/x-7z-compressed',
+  'application/vnd.rar',
+  'application/x-tar',
+  'application/gzip',
+  'text/plain',
+  'text/markdown',
+  'text/csv',
+  'text/html',
+  'text/css',
+  'text/javascript',
+  'application/javascript',
+  'application/sql',
+  'application/x-sh',
+];
+const FILE_ACCEPT_EXTS = [
+  '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+  '.txt', '.md', '.markdown', '.csv', '.json', '.log',
+  '.py', '.js', '.mjs', '.ts', '.tsx', '.jsx', '.html', '.htm', '.css', '.xml',
+  '.yaml', '.yml', '.sql', '.sh', '.bat', '.cmd', '.ps1',
+  '.zip', '.7z', '.rar', '.tar', '.gz',
+];
+const ATTACH_ACCEPT = {
+  media: 'image/*,video/*',
+  file: FILE_ACCEPT_MIMES.concat(FILE_ACCEPT_EXTS).join(','),
+};
+
+function openFilePicker(kind = '') {
+  const input = $('#fileInput');
+  if (!input) return;
+  input.accept = ATTACH_ACCEPT[kind] || '';
+  input.click();
+}
+
+function ensureAttachMenu() {
+  let menu = $('#attachMenu');
+  if (menu) return menu;
+  menu = document.createElement('div');
+  menu.id = 'attachMenu';
+  menu.className = 'file-action-menu attach-menu';
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', '添加文件');
+  menu.innerHTML = '<button type="button" role="menuitem" data-attach-kind="media">照片 / 视频</button>'
+    + '<button type="button" role="menuitem" data-attach-kind="file">文件（PDF / Word / 文本…）</button>';
+  menu.hidden = true;
+  document.body.append(menu);
+  return menu;
+}
+
+function hideAttachMenu() {
+  const menu = $('#attachMenu');
+  if (menu) menu.hidden = true;
+}
+
+// 动作条贴着附件键**向上**展开：附件键在屏幕最下方，向下弹一定被键盘/屏幕边切掉。
+function showAttachMenu(trigger) {
+  const menu = ensureAttachMenu();
+  menu.hidden = false;
+  const box = trigger.getBoundingClientRect();
+  const { offsetWidth: width, offsetHeight: height } = menu;
+  const left = Math.max(6, Math.min(box.left, window.innerWidth - width - 6));
+  const above = box.top - height - 6;
+  const top = above > 6 ? above : Math.max(6, Math.min(box.bottom + 6, window.innerHeight - height - 6));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+// ---- 消息里文件 chip 的动作（打开 / 打开文件夹 / 另存为）——§九.135 第 5 项 ----
+// 桌面端三个动作都走 pywebview 桥（JsApi 侧统一 `{ok, error}` 返回，见 launcher.py）；
+// 浏览器/手机端只剩「打开（预览）」与「另存为（下载）」，两条都复用既有链路，
+// 不新增第二条 URL 生成器（`fileUrl` 与第 3 项的 `triggerDownload` 各自只有一处定义）。
+async function callDesktopFileAction({ method, args, failure, success = '' }) {
+  const bridge = window.pywebview?.api;
+  if (typeof bridge?.[method] !== 'function') {
+    toast('当前环境不支持该操作');
+    return;
+  }
+  try {
+    const result = await bridge[method](...args);
+    if (result && result.ok === false) {
+      // 用户点了「取消」不是失败：弹一句"保存失败"会让人以为文件出事了。
+      if (!result.cancelled) toast(result.error || failure);
+      return;
+    }
+    if (success) toast(success);
+  } catch (error) {
+    toast(`${failure}：${error.message}`);
+  }
+}
+
+async function runFileAction(button) {
+  const path = button.getAttribute('data-file-open')
+    || button.getAttribute('data-file-reveal')
+    || button.getAttribute('data-file-save-as')
+    || '';
+  if (!path) return;
+  const name = button.getAttribute('data-file-name')
+    || button.closest('[data-file-actions]')?.getAttribute('data-file-name')
+    || '';
+  if (button.hasAttribute('data-file-open')) {
+    if (isPywebview()) {
+      await callDesktopFileAction({ method: 'naibaOpenFile', args: [path], failure: '无法打开文件' });
+    } else {
+      // 浏览器/手机：维持现状的 /api/file 预览（能力边界如实呈现，不假装能唤起本机程序）。
+      window.open(fileUrl(path), '_blank', 'noopener');
+    }
+    return;
+  }
+  if (button.hasAttribute('data-file-reveal')) {
+    await callDesktopFileAction({ method: 'naibaRevealInFolder', args: [path], failure: '无法打开文件夹' });
+    return;
+  }
+  if (button.hasAttribute('data-file-save-as')) {
+    if (isPywebview()) {
+      await callDesktopFileAction({
+        method: 'naibaSaveFileAs', args: [path, name], failure: '另存为失败', success: '已另存为',
+      });
+    } else {
+      triggerDownload(fileUrl(path));
+    }
+  }
+}
+
 export function bindEvents() {
   document.addEventListener('contextmenu', (event) => {
     hideTextContextMenu();
@@ -854,6 +996,35 @@ export function bindEvents() {
   window.addEventListener('blur', hideTextContextMenu);
   window.addEventListener('resize', hideTextContextMenu);
   window.addEventListener('scroll', hideTextContextMenu, true);
+  // 附件动作条（手机）：菜单挂在 body 上，点击与外部收起都在 document 这一层接。
+  document.addEventListener('click', (event) => {
+    const item = event.target.closest?.('#attachMenu [data-attach-kind]');
+    if (!item) return;
+    event.preventDefault();
+    hideAttachMenu();
+    openFilePicker(item.getAttribute('data-attach-kind'));
+  });
+  document.addEventListener('pointerdown', (event) => {
+    if (event.target.closest?.('#attachMenu') || event.target.closest?.('#attachButton')) return;
+    hideAttachMenu();
+  });
+  window.addEventListener('resize', hideAttachMenu);
+  window.addEventListener('scroll', hideAttachMenu, true);
+  // 文件动作条在手机上的「⋯」菜单：菜单挂在 body 上（挂进 #messages 迟早被消息重渲染连根拔掉），
+  // 所以它的点击必须在 document 这一层接，再交给同一个 runFileAction。
+  document.addEventListener('click', (event) => {
+    const item = event.target.closest?.('#fileActionMenu [data-file-open], #fileActionMenu [data-file-reveal], #fileActionMenu [data-file-save-as]');
+    if (!item) return;
+    event.preventDefault();
+    hideFileActionMenu();
+    void runFileAction(item);
+  });
+  document.addEventListener('pointerdown', (event) => {
+    if (event.target.closest?.('#fileActionMenu') || event.target.closest?.('[data-file-more]')) return;
+    hideFileActionMenu();
+  });
+  window.addEventListener('resize', hideFileActionMenu);
+  window.addEventListener('scroll', hideFileActionMenu, true);
   // 大图右键 → 复制图片剪贴板（仅 pywebview 窗口自绘菜单；真实浏览器保留原生“复制图片”菜单）。
   document.addEventListener('contextmenu', (event) => {
     if (!isPywebview()) return;
@@ -1194,6 +1365,11 @@ export function bindEvents() {
       return;
     }
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      // 手机 / 平板（粗指针）：裸回车 = **换行**，不发送也不入队。
+      // 理由：虚拟键盘上没有 Shift 键，若沿用桌面语义，用户永远敲不出换行（换行只能靠 Shift+Enter，
+      // 而那个组合在触屏上不存在）；发送按钮就在右手边，手机不需要跟 Enter 抢这个键。
+      // 外接键盘仍可用 Ctrl/Cmd+Enter 发送（下面的分支照旧命中），所以能力没有丢。
+      if (isCoarsePointer() && !(event.ctrlKey || event.metaKey)) return;
       event.preventDefault();
       // 编辑态下回车同样确认编辑，与当前输入区的发送按钮保持一致。
       if (state.editingMessageId) { confirmActiveEdit(); return; }
@@ -1232,7 +1408,17 @@ export function bindEvents() {
     $('#skillsDialog').close();
     $('#messageInput').focus();
   });
-  $('#attachButton').addEventListener('click', () => $('#fileInput').click());
+  // 附件按钮：手机上先问「照片/视频」还是「文件」（§九.135 第 4 项）。
+  // 为什么：`#fileInput` 不带 accept 时"手机浏览器给什么入口"因设备/ROM 而异——部分 Android
+  // 直接进相册，用户根本看不到「文件」。而文档上传在链路上**本来就是通的**
+  // （`store_uploaded_file` 只卡 80MB，不做类型白名单），缺的只是那个入口。
+  // 桌面端行为一个字不改：直接开文件选择器，且 accept 复位成空（与改前逐字节一致）。
+  $('#attachButton').addEventListener('click', (event) => {
+    if (!isCoarsePointer()) { openFilePicker(''); return; }
+    event.stopPropagation();  // 别让下面的 document 点击兜底立刻把它收起来
+    if ($('#attachMenu')?.hidden === false) hideAttachMenu();
+    else showAttachMenu(event.currentTarget);
+  });
   // composer-meta「快捷消息」面板：按钮开合 + 点击委托（插入/编辑/删除/新建）+ 点外部关闭
   $('#quickMessageButton')?.addEventListener('click', (event) => {
     event.stopPropagation();
@@ -1433,6 +1619,24 @@ export function bindEvents() {
       }
       return;
     }
+    // 文件 chip 的动作条（§九.135 第 5 项）。必须排在 `[data-open-file]` 之前：chip 本体
+    // 仍是「打开文件面板」，动作条是纯增量的兄弟节点——两者属性名不同（file-open ↔ open-file），
+    // 这里先返回只是为了让「点了动作条不动面板」这条语义一眼可读。
+    const fileMoreButton = event.target.closest('[data-file-more]');
+    if (fileMoreButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (fileMoreButton.getAttribute('aria-expanded') === 'true') hideFileActionMenu();
+      else showFileActionMenu(fileMoreButton);
+      return;
+    }
+    const fileActionButton = event.target.closest('[data-file-open], [data-file-reveal], [data-file-save-as]');
+    if (fileActionButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      void runFileAction(fileActionButton);
+      return;
+    }
     const openFileButton = event.target.closest('[data-open-file]');
     if (openFileButton) {
       openFilePanel(openFileButton.dataset.openFile);
@@ -1539,6 +1743,18 @@ export function bindEvents() {
     if (event.target.closest('[data-file-edit]')) { startFileEdit(filePanelState.activeKey); return; }
     if (event.target.closest('[data-file-edit-cancel]')) { cancelFileEdit(filePanelState.activeKey); return; }
     if (event.target.closest('[data-file-save]')) { saveFileTab(filePanelState.activeKey); return; }
+    if (event.target.closest('[data-file-download]')) {
+      // 下载走 /file/raw（后端据 `download=1` 发 attachment），而不是自己拼字节流：
+      // 与内联预览共用同一条 URL 生成器，文件改名/换会话时不会两处漂移。
+      // 桌面/手机的分流在 saveLocalFile 单点决定（§九.135 补）：WebView2 里 `<a download>`
+      // 不会弹保存框——用户实测「电脑上点下载没用」——所以桌面自动改走原生「另存为」。
+      const tab = activeFileTab();
+      const info = tab?.info || {};
+      const target = info.path || tab?.raw || '';
+      if (!target) { toast('这个文件没有可下载的路径'); return; }
+      saveLocalFile(convFileRawUrl(target, fileVersionToken(info)), info.name || tab?.name || '');
+      return;
+    }
     const codeButton = event.target.closest('[data-copy-code]');
     if (codeButton) {
       const code = codeButton.closest('.code-block')?.querySelector('code');
@@ -1803,6 +2019,13 @@ export function bindEvents() {
     state.agentToolFilter = event.target.value;
     renderToolScopeList();
   });
+  // 编辑态「只看已选」：一键把当前勾选的工具按分类摊开（核对这套 Agent 到底开了什么）。
+  $('#agentToolOnlySelected')?.addEventListener('click', toggleToolOnlySelected);
+  // 卡片态「当前已选工具」清单的收起/展开。
+  $('#toggleAgentToolPeek')?.addEventListener('click', toggleAgentToolPeek);
+  // 卡片态「编辑当前工具集」：带着当前勾选进编辑器（不覆盖任何勾选；自定义组合匹配不上卡片时
+  // 它是唯一的编辑入口）。
+  $('#editAgentToolScope')?.addEventListener('click', openAgentToolEditorCurrent);
   // 工具集：卡片态（预设/我的工具集/添加卡，事件委托 + Enter/Space 等同点击）
   $('#agentToolPresetCards')?.addEventListener('click', handleAgentToolPresetCardsClick);
   $('#agentToolPresetCards')?.addEventListener('keydown', handleAgentToolPresetCardsKeydown);

@@ -133,6 +133,21 @@ class ComposerHeightSourceTests(unittest.TestCase):
                         "重算必须放在 updateSendButtonState 之后：插话键显隐会改输入区宽度，"
                         "先量就量在旧宽度上")
 
+    def test_context_lock_flags_running_row_before_measuring(self):
+        """运行态标记 `.composer.is-running` 必须在重算高度**之前**翻转（§九.135 第 6 项）。
+
+        这个类在手机上把输入区拆成两行（输入区宽度 88px → 326px）。写反了就会把旧宽度下
+        量出来的高度留在屏幕上——与 §九.128 那个「输入框占半屏、本轮结束也不回落」的 bug
+        完全同形，只是触发源换成了版式切换。
+        """
+        body = _fn_body(self.media_js, "export function updateContextComposerLock(")
+        self.assertIn("classList.toggle('is-running'", body,
+                      "运行态标记必须由这个方法单点翻转（busy 变化的入口都会经过它）")
+        toggle_at = body.index("classList.toggle('is-running'")
+        resize_at = body.rindex("resizeTextarea();")
+        self.assertLess(toggle_at, resize_at,
+                        "拆两行会改输入区宽度，必须先翻类再量高")
+
     def test_media_module_imports_resize_from_skill_refs(self):
         """`03-media.js` 要真的 import 到同一个 `resizeTextarea`，别自己抄一份。"""
         m = re.search(

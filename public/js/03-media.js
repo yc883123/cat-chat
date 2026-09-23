@@ -2,7 +2,7 @@
 // 03-media.js —— 拆分自 public/app.js 第 712-1211 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, api, draggedFileCache, escapeHtml, localFileUrl, state, toast } from "./01-core.js";
+import { $, api, draggedFileCache, escapeHtml, isCoarsePointer, localFileUrl, state, toast, triggerDownload } from "./01-core.js";
 import { markdown } from "./02-markdown.js";
 import { selectedProvider } from "./07-models-agents.js";
 import { renderPendingFiles } from "./10-upload.js";
@@ -254,6 +254,18 @@ export function initImageLightboxInteractions() {
   const img = $('#imageLightboxImg');
   if (!box || !img) return;
 
+  // 灯箱「下载」：手上把大图存到本地的唯一入口（此前只有缩放/翻页，没有任何保存路径）。
+  // 走 saveLocalFile —— 桌面（WebView2）里 `<a download>` 点了没反应（不会弹保存框），
+  // 所以桌面自动改走原生「另存为」，手机才走 `?download=1`（§九.135 补，用户实测反馈）。
+  $('#imageLightboxDownload')?.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const item = lightboxItems[lightboxIndex];
+    const url = String(item?.url || img.getAttribute('src') || '');
+    if (!url) return;
+    if (!saveLocalFile(url, String(item?.name || ''))) toast('这张图没有可下载的地址');
+  });
+
   // 滚轮缩放（以光标为锚点）
   box.addEventListener('wheel', (event) => {
     if (box.hidden) return;
@@ -389,6 +401,38 @@ export function initImageLightboxInteractions() {
 // 因此在 pywebview 窗口内自绘一个轻量菜单；真实浏览器保留其原生“复制图片”。
 export function isPywebview() {
   return Boolean(window.pywebview && window.pywebview.api);
+}
+
+// ---- 「把这份文件/图片存到本地」的**唯一入口**（§九.135 补）----
+// 桌面与手机必须走两条不同的路，判据只有一个：有没有 pywebview 桥。
+//   · 桌面（WebView2）：`<a download>` + `Content-Disposition: attachment` 的导航**不会**
+//     弹保存框——WebView2 要宿主处理 DownloadStarting，我们没接，于是点了等于没反应。
+//     用户实测原话「电脑上点下载这张图没用」。所以桌面复用第 5 项的原生「另存为」JsApi。
+//   · 浏览器 / 手机：`<a download>` 正常，走后端 `?download=1` 那条链。
+// 调用点一律只给裸 URL（`download=1` 与路径解析都在这里单点完成），别再各写一遍。
+export function localPathFromUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || ''), location.origin);
+    if (parsed.origin !== location.origin) return '';
+    return String(parsed.searchParams.get('path') || '');
+  } catch (_error) {
+    return '';
+  }
+}
+
+export function saveLocalFile(rawUrl, name = '') {
+  const url = String(rawUrl || '');
+  if (!url) return '';
+  const path = localPathFromUrl(url);
+  const bridge = window.pywebview?.api;
+  if (path && typeof bridge?.naibaSaveFileAs === 'function') {
+    Promise.resolve(bridge.naibaSaveFileAs(path, name)).then((result) => {
+      // 用户点了「取消」不是失败：弹「另存为失败」会让人以为文件出事了。
+      if (result && result.ok === false && !result.cancelled) toast(result.error || '另存为失败');
+    }).catch((error) => toast(`另存为失败：${error.message}`));
+    return 'saved';
+  }
+  return triggerDownload(url) ? 'download' : '';
 }
 
 export function ensureImageContextMenu() {
@@ -557,6 +601,101 @@ document.addEventListener('click', (event) => {
   if (ta) ta.focus();
 });
 
+// ---- 消息里文件 chip 的动作条：打开 / 打开文件夹 / 另存为（§九.135 第 5 项）----
+// 挂在两类**已有** chip 上，不新造卡片：消息里的非媒体 file-chip、消息末尾「本轮修改文件」chip。
+// 三个动作的落点各只有一条，别处不再重复实现：
+//   · 打开     —— 桌面端交给系统默认程序（WebView2 里新开标签页只会再开一个自己）；浏览器/手机
+//                 维持现状的 `/api/file` 预览；
+//   · 打开文件夹 —— 桌面端专属（`explorer /select,`）。**非 pywebview 环境根本不渲染这个按钮**
+//                 （不是靠 CSS 藏）：手机浏览器连的就是同一台 PC，点了只会在那台机器上弹窗口，
+//                 用户面前什么都没有；
+//   · 另存为   —— 桌面端走 pywebview 保存对话框（`<a download>` 在 WebView2 里不可靠）；
+//                 浏览器/手机复用第 3 项的 `?download=1`。
+// 图标**不带** paint 属性：`fill:none; stroke:currentColor` 由 CSS 的 `.file-action svg`
+// 单点声明（与 `.icon-button svg` 同口径）。这里不写第二份 —— 两处各写一遍就是插话键图标
+// 那个 bug 的成因（只给尺寸、没人给 paint，回落到 SVG 默认的实心黑）。
+const FILE_ACTION_ICONS = {
+  open: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 5h5v5"></path><path d="M19 5l-7 7"></path><path d="M18 14v4a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h4"></path></svg>',
+  folder: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7a1 1 0 0 1 1-1h3.6l1.8 2H19a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"></path></svg>',
+  saveAs: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v9"></path><path d="M8.5 9.5 12 13l3.5-3.5"></path><path d="M5 18h14"></path></svg>',
+};
+
+export function fileActionBarMarkup(path, name = '') {
+  const raw = String(path || '');
+  if (!raw) return '';
+  const safePath = escapeHtml(raw);
+  const safeName = escapeHtml(String(name || raw.split(/[\\/]/).filter(Boolean).pop() || raw));
+  const reveal = isPywebview()
+    ? `<button type="button" class="file-action" data-file-reveal="${safePath}" title="在资源管理器中定位" aria-label="打开文件夹">${FILE_ACTION_ICONS.folder}</button>`
+    : '';
+  return `<span class="file-actions" data-file-actions data-file-path="${safePath}" data-file-name="${safeName}">`
+    + `<button type="button" class="file-action" data-file-open="${safePath}" title="用系统默认程序打开" aria-label="打开">${FILE_ACTION_ICONS.open}</button>`
+    + reveal
+    + `<button type="button" class="file-action" data-file-save-as="${safePath}" title="另存为" aria-label="另存为">${FILE_ACTION_ICONS.saveAs}</button>`
+    + `<button type="button" class="file-action file-action-more" data-file-more title="更多操作" aria-label="更多操作" aria-haspopup="menu" aria-expanded="false">⋯</button>`
+    + '</span>';
+}
+
+// chip + 动作条的外壳。桌面悬停才露出动作条（不悬停零占位）；手机上动作条收成常驻「⋯」。
+function fileChipWithActionsMarkup({ url, path, name }) {
+  const safeName = escapeHtml(String(name || ''));
+  return '<span class="file-with-actions">'
+    + `<a class="file-chip" href="${url}" target="_blank" rel="noreferrer"><span class="file-chip-name">${safeName}</span></a>`
+    + fileActionBarMarkup(path, name)
+    + '</span>';
+}
+
+export function ensureFileActionMenu() {
+  let menu = $('#fileActionMenu');
+  if (menu) return menu;
+  menu = document.createElement('div');
+  menu.className = 'file-action-menu';
+  menu.id = 'fileActionMenu';
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', '文件操作');
+  menu.hidden = true;
+  document.body.append(menu);
+  return menu;
+}
+
+export function hideFileActionMenu() {
+  const menu = $('#fileActionMenu');
+  if (menu) menu.hidden = true;
+  document.querySelectorAll('[data-file-more][aria-expanded="true"]')
+    .forEach((button) => button.setAttribute('aria-expanded', 'false'));
+}
+
+// 手机端 chip 右侧的「⋯」：手机没有悬停可言，三个动作收进一个菜单（比长按可发现性好，
+// 也不和编辑区「长按交给系统原生菜单」的放行链纠缠）。
+// 菜单项**直接从 chip 上那三个按钮复制**，不另写一份清单：两处各写一遍必然漂移——
+// 第 3 项刚吃过一次「download=1 写了两份、断言只能钉住一份」的亏，这里不再犯。
+export function showFileActionMenu(trigger) {
+  const bar = trigger.closest('[data-file-actions]');
+  if (!bar) return;
+  const NAME_ATTRS = ['data-file-open', 'data-file-reveal', 'data-file-save-as'];
+  const LABELS = { 'data-file-open': '打开', 'data-file-reveal': '打开文件夹', 'data-file-save-as': '另存为' };
+  const items = [];
+  for (const button of bar.querySelectorAll('button')) {
+    const attr = NAME_ATTRS.find((name) => button.hasAttribute(name));
+    if (!attr) continue;
+    items.push(`<button type="button" role="menuitem" ${attr}="${button.getAttribute(attr)}" data-file-name="${escapeHtml(bar.getAttribute('data-file-name') || '')}">${LABELS[attr]}</button>`);
+  }
+  if (!items.length) return;
+  const menu = ensureFileActionMenu();
+  menu.innerHTML = items.join('');
+  menu.hidden = false;
+  const box = trigger.getBoundingClientRect();
+  const { offsetWidth: width, offsetHeight: height } = menu;
+  const left = Math.max(6, Math.min(box.right - width, window.innerWidth - width - 6));
+  const below = box.bottom + height + 6;
+  const top = below > window.innerHeight && box.top - height - 6 > 6
+    ? box.top - height - 6
+    : Math.max(6, Math.min(box.bottom + 6, window.innerHeight - height - 6));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  trigger.setAttribute('aria-expanded', 'true');
+}
+
 // 用户气泡/编辑框里的附件渲染（与助手侧同口径的媒体判定）：图片带缩略图+灯箱，
 // 视频/音频就地播放，其它类型仍是文件名 chip。放在本模块便于渲染守门真执行校验。
 export function uploadedFileMarkup(files = []) {
@@ -565,7 +704,8 @@ export function uploadedFileMarkup(files = []) {
     const source = file.source || file.path || '';
     const kind = mediaKind(source, file.name);
     const url = escapeHtml(fileUrl(source));
-    const name = escapeHtml(file.name || '');
+    const rawName = String(file.name || '');
+    const name = escapeHtml(rawName);
     if (kind === 'image') {
       const thumbUrl = attachmentThumbUrl(file);
       return `<figure class="attachment attachment-image"><img class="thumbnail" src="${escapeHtml(thumbUrl)}" alt="${name}" loading="lazy" draggable="true" data-large-url="${url}"><figcaption title="${name}">${name}</figcaption></figure>`;
@@ -574,7 +714,8 @@ export function uploadedFileMarkup(files = []) {
     if (kind === 'audio') return `<figure class="attachment attachment-media"><audio src="${url}" controls preload="metadata"></audio><figcaption title="${name}">${name}</figcaption></figure>`;
     // 非媒体（pdf/doc/zip…）：文件名 chip 直接可点开（浏览器能预览的预览、否则下载），
     // 与助手侧 mediaMarkup 的 chip 同口径——不再只是"看得见、点不动"的死文本。
-    return `<a class="file-chip" href="${url}" target="_blank" rel="noreferrer">${name}</a>`;
+    // 桌面端还多了打开文件夹/另存为两个动作（见 fileActionBarMarkup）。
+    return fileChipWithActionsMarkup({ url, path: source, name: rawName });
   }).join('');
   return `<div class="media-grid">${html}</div>`;
 }
@@ -640,7 +781,7 @@ export function mediaMarkup(attachments = []) {
     }
     if (kind === 'video') return `<figure class="media-item"><video src="${safeUrl}" controls playsinline preload="metadata"></video><figcaption title="${name}">${name}</figcaption></figure>`;
     if (kind === 'audio') return `<figure class="media-item"><audio src="${safeUrl}" controls preload="metadata"></audio><figcaption title="${name}">${name}</figcaption></figure>`;
-    return `<a class="file-chip" href="${safeUrl}" target="_blank" rel="noreferrer">${name}</a>`;
+    return fileChipWithActionsMarkup({ url: safeUrl, path: source, name: attachment.name || '生成文件' });
   }).join('');
   return `<div class="media-grid">${items}</div>`;
 }
@@ -1067,9 +1208,19 @@ export function updateContextComposerLock(busy = false) {
   // 只有普通新消息在上下文已满时锁住输入，disabled/placeholder 仍由这里统一维护。
   if (input) {
     input.disabled = atCeiling;
+    // 编辑态文案按平台切（第 1 项）：粗指针设备上 Shift / Esc 都不存在、裸回车也已改判为换行，
+    // 所以那里只能承诺「点右侧按钮」——不许给用户看做不到的提示（§六 同族要求）。
     input.placeholder = editing
-      ? '编辑消息，Enter 重新发送，Shift+Enter 换行，Esc 取消'
-      : (atCeiling ? '上下文已满，请新建对话后继续' : (busy ? '回复进行中…（输入后 Enter 加入插话队列）' : '输入消息'));
+      ? (isCoarsePointer()
+        ? '编辑消息，点右侧按钮重新发送'
+        : '编辑消息，Enter 重新发送，Shift+Enter 换行，Esc 取消')
+      : (atCeiling
+        ? '上下文已满，请新建对话后继续'
+        : (busy
+          // 运行中同样是「Enter 干什么」的平台差异：桌面 Enter 入队、手机 Enter 换行
+          // （第 1 项把手机裸回车改判为换行）。承诺做不到的事就是假提示。
+          ? (isCoarsePointer() ? '回复进行中…（输入后点插话键加入队列）' : '回复进行中…（输入后 Enter 加入插话队列）')
+          : '输入消息'));
   }
   // 发送按钮的可用性由 updateSendButtonState 单点维护（含"运行中即停止键"语义）。
   updateSendButtonState();
@@ -1077,6 +1228,11 @@ export function updateContextComposerLock(busy = false) {
   // updateInterjectButtonState 切换了插话键显隐（= 输入区宽度 132px ↔ 88px）。这两件事都会
   // 改变折行点，不重算就会把上一次的高度留在屏幕上——用户手机截图里的「空输入框占半屏、
   // 本轮结束后也不回落」就是这么来的。放在最后，量的才是最终宽度下的真实内容高度。
+  // 运行态标记（第 6 项）：手机上把输入区拆成两行（规则在 ≤760px 块里，桌面与编辑态不命中）。
+  // 只在这里翻一次 —— busy 变化的入口都会经过本函数，所以不需要额外的 resize / matchMedia 监听。
+  // **必须排在 resizeTextarea() 之前**：它把输入区宽度从 88px 改成 326px，先量就量在旧宽度上，
+  // 与上面 §九.128 那个 bug 完全同形（守门 tests/test_composer_height.py 钉死了这个顺序）。
+  $('#composerForm')?.classList.toggle('is-running', Boolean(busy));
   resizeTextarea();
 }
 
@@ -1209,8 +1365,10 @@ export function sourcesMarkup(sources = []) {
   return items ? `<details class="message-sources"><summary>联网来源（${sources.length}）</summary><ol>${items}</ol></details>` : '';
 }
 
-// 消息末尾「本轮修改的文件」总结。桌面端文件名可点 → 打开右侧文件面板；
-// 手机端（≤760px）由 CSS + openFilePanel 双重把关，仅展示、不可点。
+// 消息末尾「本轮修改的文件」总结。文件名可点 → 打开右侧文件面板（手机上是全屏抽屉，
+// 同一条 openFilePanel 链路）；chip 右侧另挂动作条（打开 / 打开文件夹 / 另存为，见
+// fileActionBarMarkup）——本项之前这里在手机上是"看得见、点不动"的死文本，而手机上
+// 恰恰最需要"把它存到本地"这条路。
 export function fileChangesSummaryMarkup(files = []) {
   if (!Array.isArray(files) || !files.length) return '';
   let edited = 0;
@@ -1228,9 +1386,13 @@ export function fileChangesSummaryMarkup(files = []) {
     // 判定与后端同源（mediaKind ← /api/bootstrap.media_exts）：此前前端多算 .bmp/.svg，
     // 后端又不把它们当媒体，结果产物两边都不显示（静默消失）。
     if (mediaKind(raw, f.name) !== 'other') return '';
-    const name = escapeHtml(f.name || raw.replace(/\\/g, '/').split('/').pop() || raw);
+    const rawName = String(f.name || raw.replace(/\\/g, '/').split('/').pop() || raw);
+    const name = escapeHtml(rawName);
     const isEdit = f.op === 'edit';
-    return `<button type="button" class="file-change-chip" data-file-op="${isEdit ? 'edit' : 'write'}" data-open-file="${escapeHtml(raw)}" title="${isEdit ? '编辑' : '新建'}：${escapeHtml(raw)}"><span class="file-change-op">${isEdit ? '改' : '新'}</span><span class="file-change-name">${name}</span></button>`;
+    return '<span class="file-with-actions">'
+      + `<button type="button" class="file-change-chip" data-file-op="${isEdit ? 'edit' : 'write'}" data-open-file="${escapeHtml(raw)}" title="${isEdit ? '编辑' : '新建'}：${escapeHtml(raw)}"><span class="file-change-op">${isEdit ? '改' : '新'}</span><span class="file-change-name">${name}</span></button>`
+      + fileActionBarMarkup(raw, rawName)
+      + '</span>';
   }).filter(Boolean).join('');
   if (!chips) return '';
   const opNote = [];

@@ -6,6 +6,12 @@
 // 配上插话键挤到 88px 的输入区，空值被量成 155px。桌面 composer 宽约 880px，同一句一行放得下，
 // 所以这个坑只在手机上出现（这就是「桌面看着好好的」的原因）。
 //
+// ⚠️ 口径更新（2026-09-23，§九.135 第 6 项）：运行中「插话键把输入区挤到 88px」这个前提**已经不成立**了
+// ——手机运行态现在是输入区独占一整行（326px），本文件里依赖「运行中被挤窄」的两条断言已按新几何改写
+// （⑤ 改为「插话键在场 + 输入区独占一行」，⑦ 改为「高度必须等于按当前宽度独立算出的期望值」，
+// 后者比原来的「变宽就变矮」方向性断言更强：它同时抓「没重算」与「量错宽度」两种错）。
+// 拆行本身的正/负例由 `verify/composer_running_layout.cjs` 单独钉死。
+//
 // 为什么静态服务就够：本条只考**输入框几何 + resizeTextarea / updateContextComposerLock 的行为**，
 // 与后端配置无关（§九.92 那条「静态服务让配置驱动 UI 消失」的教训不适用）。真后端下的整链路由
 // `verify/interjection_smoke.py`（入队 / 引导 / 冻结）与手工探针覆盖。
@@ -21,6 +27,12 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const PY = path.join(ROOT, '.venv', 'Scripts', 'python.exe');
 const BUSY_PLACEHOLDER = '回复进行中…（输入后 Enter 加入插话队列）';
 const ONE_LINE_MAX = 60;          // 一行高（16px 字号 → 23.2 行高 + 16 内边距 ≈ 39）+ 余量
+
+// `.composer .icon-button` / `.send-button` 带 `transition: var(--t-fast)`（120ms all），而
+// `order` 是可动画的整型属性 ⇒ 运行态拆行是一次真过渡。立刻量会拿到过渡中间态（出现过
+// 「第三行」这种与产品无关的假红），所以每次切换运行态后都要等版式稳定。
+const SETTLE_MS = 300;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const failures = [];
 const check = (label, ok, detail = '') => {
@@ -104,6 +116,19 @@ function waitForServer(deadline = 15) {
             interjectHidden: document.querySelector('#interjectButton').hidden,
           };
         },
+        // 独立模型：自己摘掉占位符、自己读 scrollHeight，算出「当前宽度下应有的高度」。
+        // 与 resizeTextarea() 的结果比对，能同时抓「漏了重算」（旧宽度读数留在屏幕上）
+        // 与「量错宽度」两种错 —— 比「变宽就变矮」这种方向性断言可靠。
+        expectH(cap = 180) {
+          const keepPh = t.placeholder;
+          const keepH = t.style.height;
+          t.placeholder = '';
+          t.style.height = 'auto';
+          const h = Math.min(t.scrollHeight, cap);
+          t.placeholder = keepPh;
+          t.style.height = keepH;
+          return h;
+        },
         setValue(v) { t.value = v; },
         resize() { window.__m.refs.resizeTextarea(); },
         lock(busy) { window.__m.core.state.chatBusy = busy; window.__m.media.updateContextComposerLock(busy); },
@@ -115,7 +140,7 @@ function waitForServer(deadline = 15) {
     const oneLine = await page.evaluate(() => window.__probe.oneLine());
     const setValue = (v) => page.evaluate((x) => window.__probe.setValue(x), v);
     const resize = () => page.evaluate(() => window.__probe.resize());
-    const lock = (busy) => page.evaluate((b) => window.__probe.lock(b), busy);
+    const lock = async (busy) => { await page.evaluate((b) => window.__probe.lock(b), busy); await sleep(SETTLE_MS); };
 
     // ── 前提对照：占位符真的会进入 scrollHeight（没有这条，下面的断言可能只是空测）
     await setValue('');
@@ -139,8 +164,9 @@ function waitForServer(deadline = 15) {
     const typedBusy = await snap();
     check('④ 运行中打字：按内容长高，且超过一行',
       typedBusy.inlinePx > oneLine && typedBusy.inlinePx <= 180, JSON.stringify(typedBusy));
-    check('⑤ 运行中插话键在场（输入区被挤窄）', busyLayout.interjectHidden === false
-      && typedBusy.taW < 140, `插话键=${busyLayout.interjectHidden} 宽=${typedBusy.taW}`);
+    check('⑤ 运行中：插话键在场且输入区独占一整行（宽度 ≥ 300）',
+      busyLayout.interjectHidden === false && typedBusy.taW >= 300,
+      `插话键隐藏=${busyLayout.interjectHidden} 输入区宽=${typedBusy.taW}`);
 
     // ── 宽度变化必须重算：本轮结束（插话键收起、输入区变宽）后同一段草稿要变矮
     await lock(false);
@@ -148,17 +174,20 @@ function waitForServer(deadline = 15) {
     check('⑥ 本轮结束：占位符换回短句、插话键收起（接线真的走通了）',
       typedIdle.interjectHidden === true && typedIdle.placeholder === '输入消息',
       JSON.stringify(typedIdle));
-    check('⑦ 同一段草稿在变宽的输入区里被重新量高（高度必须回落）',
-      typedIdle.inlinePx < typedBusy.inlinePx,
-      `窄=${typedBusy.inlinePx} 宽=${typedIdle.inlinePx}`);
+    const expectedIdle = await page.evaluate(() => window.__probe.expectH());
+    check('⑦ 版式切回单行后，高度是按**当前宽度**重新量出来的（与独立算出的期望值一致）',
+      Math.abs(typedIdle.inlinePx - expectedIdle) <= 1 && typedIdle.inlinePx !== typedBusy.inlinePx,
+      `运行中=${typedBusy.inlinePx} 结束后=${typedIdle.inlinePx} 独立期望=${expectedIdle}`);
     check('⑧ 草稿本身没被这两次重算吃掉', typedIdle.value === '第一版方向可以，但封面先别截图，改用竖版重出一版看看'.length);
 
     // ── 用户截图那一帧：值已清空 + 占位符已回短句 → 必须是一行高（不是残留的大高度）
     await setValue('');
     await lock(true);
     s = await snap();
-    check('⑨ 运行中清空（入队路径的两行：value="" + resizeTextarea）→ 回到一行高',
-      s.inlinePx <= ONE_LINE_MAX && s.composerH <= ONE_LINE_MAX + 20, JSON.stringify(s));
+    // 运行中原生就是**两行**版式（输入区一行 + 按钮一行 ≈103px），所以这里只断言「输入框本身
+    // 回到一行高」；拿 composer 的高度去比一行高会把拆行本身误判成 bug。
+    check('⑨ 运行中清空（入队路径的两行：value="" + resizeTextarea）→ 输入框回到一行高',
+      s.inlinePx <= ONE_LINE_MAX && s.composerH <= 110, JSON.stringify(s));
     await lock(false);
     s = await snap();
     check('⑩ 本轮结束（空框 + 短占位符）→ 仍是一行高，不残留',

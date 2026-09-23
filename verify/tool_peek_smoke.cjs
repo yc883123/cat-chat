@@ -3,7 +3,7 @@
 // 前置：由 tool_peek_smoke.py 自编排起隔离实例（独立 data_dir + 端口，默认 8805）——本脚本会
 // 往那个实例写一个工具集与一个 Agent，**不要直接对着真数据目录的实例跑**。
 // 手跑：先 `NAIBA_TMP_PORT=8805 NAIBA_TMP_ROOT=verify/_tmp_tool_peek .venv\Scripts\python.exe verify\_serve_tmp.py`，
-// 再 `NAIBA_TMP_BASE=http://127.0.0.1:8805 NODE_PATH=D:\naiba-chat\node_modules node verify\tool_peek_smoke.cjs`。
+// 再 `$env:NODE_PATH="<node_modules>"; $env:NAIBA_TMP_BASE="http://127.0.0.1:8805"; node verify\tool_peek_smoke.cjs`。
 const { chromium } = require('playwright');
 
 const BASE = process.env.NAIBA_TMP_BASE || 'http://127.0.0.1:8799';

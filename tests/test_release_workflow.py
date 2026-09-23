@@ -47,6 +47,9 @@ def _indent(line: str) -> int:
 
 def scan_structure(text: str) -> list[str]:
     """返回结构性问题的中文说明列表；空列表 = 通过。"""
+    # CI（Windows runner，autocrlf=true）checkout 出来是 CRLF：先归一化，
+    # 否则块标量正则的 `[ \t]*$` 不认 `\r`，判据 2 在 CI 上整个静默失效（2026-09-23）。
+    text = text.replace("\r\n", "\n")
     lines = text.split("\n")
     problems: list[str] = []
 
@@ -104,7 +107,9 @@ def workflow_facts() -> tuple[str, dict]:
     text = WORKFLOW.read_text(encoding="utf-8", newline="")
     env = {}
     for key in ("RELEASE_VERSION", "RELEASE_TAG", "PACKAGE_NAME", "LEGACY_PACKAGE_NAME"):
-        found = re.search(rf"^\s*{key}:[ \t]*(\S+)[ \t]*$", text, re.MULTILINE)
+        # `\r?` 必须留：CI（Windows runner，autocrlf=true）checkout 出来是 CRLF，
+        # MULTILINE 的 `$` 只认 `\n` 之前，不认 `\r` 之前——本地 LF 全绿、CI 红（2026-09-23）。
+        found = re.search(rf"^\s*{key}:[ \t]*(\S+)[ \t]*\r?$", text, re.MULTILINE)
         env[key] = found.group(1) if found else ""
     return text, env
 

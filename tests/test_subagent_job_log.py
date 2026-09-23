@@ -152,6 +152,9 @@ class SubagentJobPipelineTests(unittest.TestCase):
         self.registry = JobRegistry(self.app)
 
     def tearDown(self) -> None:
+        # ``wait`` 只等到状态进入终态就返回，worker 线程可能还差最后一两步（收尾写库）；
+        # 直接删临时目录会在 CI 时序下撞 WinError 32（chat.db 仍被占用）——先 join 再清理。
+        self.registry.shutdown(timeout=10)
         self.tmp.cleanup()
 
     def _subagent_job(self) -> str:

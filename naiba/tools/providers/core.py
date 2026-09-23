@@ -225,6 +225,10 @@ class ToolContext:
     # 宿主数据目录的动态 getter（None=无托管根）：读取策略把其下的 uploads/generated
     # 视为可信根（用户上传附件/宿主托管产物免确认）。动态获取防 rebind 漂移。
     data_dir_getter: Callable[[], Path] | None = None
+    # 本会话「用户已确认可读的工作区外目录」getter（None = 没有这条通道，行为与加字段前逐字节相同）。
+    # 与 data_dir_getter 同型：装配期注入、运行期动态取，防状态漂移；入参是 conversation_id。
+    # 只被读取类策略消费——写策略不读它（写工作区外仍逐次确认）。
+    confirmed_read_roots_getter: Callable[[str], list[Path]] | None = None
 
 
 # ---- 路径解析（自 ToolExecutor 原样抽取；workspace 参数采用当前运行工作区，缺省回退 ctx。防止装配期配置漂移） ----
@@ -246,9 +250,11 @@ def _read_roots(
     workspace: Path,
     active_skills: list[dict[str, Any]],
     data_dir: Path | None = None,
+    extra_roots: list[Any] | None = None,
 ) -> list[Path]:
     """读取类工具的可信根：会话工作区 + active Skill 根 + 宿主托管缓存目录
-    （uploads/generated——用户上传附件与宿主产物是"用户放进来的"，不属越界）。"""
+    （uploads/generated——用户上传附件与宿主产物是"用户放进来的"，不属越界）
+    + ``extra_roots``（会话内用户已点过「允许」的工作区外目录，见 ``_confirmed_read_roots``）。"""
     # 工作区根统一 resolve()：path_within 是纯词法比较（core/paths.py 约定"调用方先 resolve"），
     # 调用方若传入未解析的工作区（8.3 短名 / 符号链接 / junction），工作区内的文件会被误判越界。
     roots = [Path(workspace).resolve()]
@@ -265,6 +271,16 @@ def _read_roots(
         if not value:
             continue
         root = Path(value).expanduser().resolve()
+        if root not in roots:
+            roots.append(root)
+    for item in extra_roots or ():
+        if not str(item or "").strip():
+            continue
+        try:
+            root = Path(item).expanduser().resolve()
+        except (OSError, ValueError, TypeError):
+            # 单个坏根不得拖垮整张策略表：跳过它，其余根照旧生效。
+            continue
         if root not in roots:
             roots.append(root)
     return roots
@@ -1045,6 +1061,28 @@ def _http_request_policy(
     return "发送HTTP请求"
 
 
+def _confirmed_read_roots(ctx: ToolContext, run_context: dict[str, Any] | None) -> list[Path]:
+    """本会话用户已确认可读的工作区外目录（读取策略的追加可信根）。
+
+    授权只有一个来源：用户在界面上点过「允许」（``app.folder_index(allow_outside=True)``）。
+    模型无法用任何工具参数把自己想要的路径写进这个集合——这里只是**读**那份记录。
+
+    fail-closed：getter 缺失、会话 id 为空、getter 抛异常，一律按"没确认过"处理
+    （继续逐次确认），绝不当成放行。
+    """
+    getter = ctx.confirmed_read_roots_getter
+    if getter is None:
+        return []
+    cid = str((run_context or {}).get("conversation_id") or "").strip()
+    if not cid:
+        return []
+    try:
+        values = getter(cid) or []
+    except Exception:  # noqa: BLE001 - 授权查不到就退化成"没确认过"，不静默放行
+        return []
+    return [Path(item) for item in values if str(item or "").strip()]
+
+
 def _make_read_policy(ctx: ToolContext) -> Any:
     def policy(
         tool: str,
@@ -1054,15 +1092,15 @@ def _make_read_policy(ctx: ToolContext) -> Any:
         run_context: dict[str, Any] | None,
         workspace: Path | None = None,
     ) -> str:
-        # 只读检查非破坏性：工作区内/宿主托管缓存（用户上传附件与产物）免确认（任意模式），
-        # 其余越界必确认（不因 auto 放行）。
+        # 只读检查非破坏性：工作区内/宿主托管缓存（用户上传附件与产物）/本会话已确认允许的
+        # 工作区外目录，三处均免确认（任意模式），其余越界必确认（不因 auto 放行）。
         # 工作区必须是"当前运行（会话级）工作区"：Run 快照 workspace_dir 优先，其次引擎传入值
         # （引擎在该 Run 的 executor 上持有快照工作区），最后才回退装配期 ctx（不得用启动配置）。
         ws = policy_workspace(ctx, workspace, run_context)
         data_dir = ctx.data_dir_getter() if ctx.data_dir_getter is not None else None
         raw = arguments.get("path")
         path = _resolve_read_path(ctx, raw, active_skills, tool != "read_file", ws)
-        roots = _read_roots(ws, active_skills, data_dir)
+        roots = _read_roots(ws, active_skills, data_dir, _confirmed_read_roots(ctx, run_context))
         if not path_within_any(path, roots):
             reason = f"读取工作区外路径：{path}（当前工作区：{ws}）"
             _log_permission_decision(tool, raw, path, ws, roots, run_context, permission_mode, reason)

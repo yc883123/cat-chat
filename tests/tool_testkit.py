@@ -27,7 +27,17 @@ def run_context_for(workspace: Path, **extra: Any) -> dict[str, Any]:
     return context
 
 
-def assembled_registry(workspace: Path, mcp_registry: Any = None) -> Any:
+def assembled_registry(
+    workspace: Path,
+    mcp_registry: Any = None,
+    confirmed_read_roots: Any = None,
+) -> Any:
+    """组装态注册表。
+
+    ``confirmed_read_roots``：可选，会话级「用户已确认可读的工作区外目录」getter
+    （入参 conversation_id，返回 Path 列表）。不传 ⇒ ``ToolContext`` 该字段为 None，
+    行为与加字段前逐字节相同（老调用点零改动）。
+    """
     mcp = mcp_registry if mcp_registry is not None else MCPRegistry([])
     registry = build_tool_registry()
     registry.bind_mcp(mcp)
@@ -39,15 +49,21 @@ def assembled_registry(workspace: Path, mcp_registry: Any = None) -> Any:
                 command_timeout=60,
                 mcp_registry=mcp,
                 mcp_register=None,
+                confirmed_read_roots_getter=confirmed_read_roots,
             )
         )
     )
     return registry
 
 
-def wired_executor(workspace: Path, mode: str = "confirm", mcp_registry: Any = None) -> ToolExecutor:
+def wired_executor(
+    workspace: Path,
+    mode: str = "confirm",
+    mcp_registry: Any = None,
+    confirmed_read_roots: Any = None,
+) -> ToolExecutor:
     mcp = mcp_registry if mcp_registry is not None else MCPRegistry([])
-    registry = assembled_registry(workspace, mcp)
+    registry = assembled_registry(workspace, mcp, confirmed_read_roots)
     executor = ToolExecutor(workspace, sys.executable, 60, mcp, permission_mode=mode)
     executor.set_def_resolver(registry.get)
     executor.set_alias_resolver(registry.resolve)

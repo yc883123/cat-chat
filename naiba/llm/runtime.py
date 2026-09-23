@@ -91,6 +91,13 @@ ERROR_DUMP_STRING_LIMIT = 4000
 ERROR_DUMP_MAX_BYTES = 512 * 1024
 # 本地推理后端对应的请求格式；与 server.LOCAL_REQUEST_FORMATS 保持一致。
 LOCAL_REQUEST_FORMATS = {"ollama", "lm_studio", "llama_cpp", "unsloth"}
+# 在线请求体预算（字节）：超过即在**发送前**把最旧的图片换成文本占位。默认 8MB——低于
+# 市面上多数中继/网关的 10MB 体量闸门，又远大于正常一轮对话（含 4 张 900KB 图片约 5MB）。
+# 可用 options["online_payload_budget_bytes"] 覆盖（0/负数 = 关闭预检查，只保留 413 自愈）。
+ONLINE_PAYLOAD_BUDGET_BYTES = 8 * 1024 * 1024
+# 图片被省略后写回模型可见文本的占位行（不静默删图：模型要知道「这里本来有图」，
+# 与本地视觉路径的同款口径一致，见 naiba/vision/runtime.py 的图片省略提示）。
+IMAGE_OMITTED_PLACEHOLDER = "[已省略一张较早的图片：请求体超出供应商上限]"
 _AGENT_BUFFER_LIMIT = 1024
 
 # 最近一次模型请求的终止原因（thread-local）：`_complete_online` 是 staticmethod、返回 4-tuple
@@ -403,6 +410,126 @@ def _network_error_code(error: BaseException) -> int | None:
     reason = error.reason if isinstance(error, urllib.error.URLError) else error
     value = getattr(reason, "winerror", None) or getattr(reason, "errno", None)
     return int(value) if isinstance(value, int) else None
+
+
+# ---- 在线请求体过大（HTTP 413）治理 ----
+# 图片进模型上下文前已归一化到 ≤900KB/张，base64 后约 1.2MB/张；视觉会话里每调用一次
+# vision_analyze 就往 messages 尾部追加一批（≤4 张）图片，**批次只增不减**，审核十张图
+# 就能把请求体推到 12MB+，中继/网关直接回 HTTP 413。413 是「HTTP 载荷字节超限」，
+# 与「上下文窗口溢出」（is_context_overflow）完全是两回事，不能共用一条自愈链。
+
+def _json_payload_bytes(value: Any) -> int:
+    """按实际发包口径估算字节数（``ensure_ascii=False`` 与请求体一致）。"""
+    try:
+        return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _payload_message_list(payload: Any, request_format: str) -> list[Any] | None:
+    """取该请求格式里承载对话消息的那个数组（瘦身只在其中动手，绝不碰 tools 等字段）。"""
+    if not isinstance(payload, dict):
+        return None
+    key = {
+        "openai_chat": "messages",
+        "claude": "messages",
+        "lm_studio": "messages",
+        "codex_responses": "input",
+        "gemini": "contents",
+    }.get(request_format)
+    value = payload.get(key) if key else None
+    return value if isinstance(value, list) else None
+
+
+def _image_slot_kind(part: Any, request_format: str) -> bool:
+    """该 content part 是否是「图片载荷」槽位。"""
+    if not isinstance(part, dict):
+        return False
+    if request_format in {"openai_chat", "lm_studio"}:
+        return str(part.get("type") or "") == "image_url"
+    if request_format == "claude":
+        return str(part.get("type") or "") == "image"
+    if request_format == "codex_responses":
+        return str(part.get("type") or "") == "input_image"
+    if request_format == "gemini":
+        return "inlineData" in part or "inline_data" in part
+    return False
+
+
+def _image_omitted_part(request_format: str, role: str) -> dict[str, Any]:
+    """图片槽位的替换件：一段自述文本（模型据此知道「这里本来有图，被省略了」）。"""
+    if request_format == "gemini":
+        return {"text": IMAGE_OMITTED_PLACEHOLDER}
+    if request_format == "codex_responses":
+        # responses 协议区分 assistant/user 文本块类型，写错会被服务端拒。
+        return {
+            "type": "output_text" if role == "assistant" else "input_text",
+            "text": IMAGE_OMITTED_PLACEHOLDER,
+        }
+    return {"type": "text", "text": IMAGE_OMITTED_PLACEHOLDER}
+
+
+def _iter_image_slots(payload: Any, request_format: str):
+    """按「从旧到新」产出图片槽位 ``(parts_list, index, role)``。
+
+    文档序即时间序：messages/input/contents 由旧到新排列，各消息内部 parts 同理。
+    """
+    messages = _payload_message_list(payload, request_format)
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "")
+        parts = message.get("content")
+        if not isinstance(parts, list):
+            parts = message.get("parts")
+        if not isinstance(parts, list):
+            continue
+        for index, part in enumerate(parts):
+            if _image_slot_kind(part, request_format):
+                yield parts, index, role
+
+
+def _slim_payload_images(payload: Any, request_format: str, target_bytes: int) -> int:
+    """把最旧的图片依次换成文本占位，直到估算字节降到 ``target_bytes`` 之下。
+
+    返回省略的张数（0 = 没有可省的图片 / 目标非法）。**至少省一张**：调用方要么已经
+    确认超预算（守卫），要么刚被 413 拒（此时说明我们自己的估算与供应商上限不一致，
+    必须真的缩小请求体）。文本一律不动，对话语义不受影响；每步的字节增量按「被换掉
+    那个 part 的序列化长度差」精确扣减，不重复整包序列化。
+    """
+    if target_bytes <= 0:
+        return 0
+    slots = list(_iter_image_slots(payload, request_format))
+    if not slots:
+        return 0
+    total = _json_payload_bytes(payload)
+    removed = 0
+    for parts, index, role in slots:
+        if removed and total <= target_bytes:
+            break
+        before = _json_payload_bytes(parts[index])
+        replacement = _image_omitted_part(request_format, role)
+        parts[index] = replacement
+        total += _json_payload_bytes(replacement) - before
+        removed += 1
+    return removed
+
+
+def online_payload_budget_bytes(options: dict[str, Any] | None) -> int:
+    """本次请求的载荷预算：常量默认，options 可覆盖（0/负数 = 关闭预检查）。"""
+    override = (options or {}).get("online_payload_budget_bytes")
+    if isinstance(override, (int, float)) and not isinstance(override, bool):
+        return int(override)
+    return ONLINE_PAYLOAD_BUDGET_BYTES
+
+
+def _payload_too_large_message(target_detail: str, *, slimmed: bool) -> str:
+    """413 的用户可读文案：不回显供应商原始 JSON（那对用户没有可行动信息）。"""
+    action = "已自动省略较早的图片后仍被拒绝" if slimmed else "图片/附件总量超出供应商上限"
+    return (
+        f"{target_detail}返回 HTTP 413：请求体过大（{action}）。"
+        "请减少本轮携带的图片数量、改用单张识别，或换一个允许更大请求体的供应商后重试。"
+    )
 
 
 def _dump_failed_payload(
@@ -1434,6 +1561,9 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
         reasoning_fallback_used = False
         reasoning_passback_fallback_used = False
         max_tokens_fallback_used = False
+        # 在线载荷瘦身（HTTP 413 自愈 / 发送前预算守卫）：**单次、禁循环**——同一轮里
+        # 无论触发的是守卫还是 413，都只允许省略一次较早图片，之后照常按既有链路上报。
+        payload_slim_used = False
         # 「有推理零正文」空流重试时的降档状态：current_effort 只影响本次请求的
         # 重试负载（不改会话设置）；empty_stream_reason_chars 记录失败尝试里最长的
         # 一次推理长度，给最终报错提供诊断。
@@ -1452,6 +1582,29 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                 "http_ms": 0.0,
                 "proxy_mode": proxy_note or "跟随系统代理",
             })
+        # B3 发送前预算守卫：超过预算就先把最旧的图片换成文本占位再发，省掉一次
+        # 「上传几十 MB、必然 413」的往返。只对在线请求生效（本地模型有自己的图片
+        # 上限逻辑，且本地重发要多付一次 prefill）；连接测试不带图片，一并跳过。
+        payload_budget = online_payload_budget_bytes(options)
+        if not is_local and not connection_test and payload_budget > 0:
+            if _json_payload_bytes(payload) > payload_budget:
+                omitted = _slim_payload_images(payload, response_format, payload_budget)
+                if omitted:
+                    payload_slim_used = True
+                    request = urllib.request.Request(
+                        endpoint,
+                        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                        headers=headers,
+                        method="POST",
+                    )
+                    if status:
+                        status({
+                            "type": "status",
+                            "message": (
+                                f"本轮请求体过大，已省略 {omitted} 张较早的图片后发送"
+                                "（原始图片仍保留在会话记录中）"
+                            ),
+                        })
         for attempt in range(attempts):
             request_started = time.perf_counter()
             # 每次尝试重置进度袋：总时长超时后要靠它区分「全程只有推理」与「正文已出来」。
@@ -1615,6 +1768,31 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                         profile,
                         is_local=is_local,
                         provider=overflow_source,
+                    ) from exc
+                # HTTP 413 = 请求体字节超限（图片/附件太多），与「上下文窗口溢出」是两回事：
+                # 重发同一份请求必然再 413，所以先做一次**载荷瘦身自愈**（只省图片、不动文本、
+                # 单次禁循环），仍 413 才抛用户可读文案（不回显供应商原始 openai_error JSON）。
+                if exc.code == 413:
+                    if not is_local and not payload_slim_used and attempt + 1 < attempts:
+                        omitted = _slim_payload_images(
+                            payload, response_format, online_payload_budget_bytes(options)
+                        )
+                        if omitted:
+                            payload_slim_used = True
+                            request = urllib.request.Request(
+                                endpoint,
+                                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                                headers=headers,
+                                method="POST",
+                            )
+                            if status:
+                                status({
+                                    "type": "status",
+                                    "message": f"请求体过大，已省略 {omitted} 张较早的图片后重试",
+                                })
+                            continue
+                    raise RuntimeError(
+                        _payload_too_large_message(target_detail, slimmed=payload_slim_used)
                     ) from exc
                 # A0 自愈（**只对注入值生效**）：思考时我们主动填的输出上限兜底值若被端点拒绝
                 # （模型真实上限比预设表小），去掉该字段重试一次——用户没要求这个值，不能让

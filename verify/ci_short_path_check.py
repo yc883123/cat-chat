@@ -53,6 +53,9 @@ def build_junction() -> tuple[Path, Path]:
     result = subprocess.run(  # noqa: S603 - 固定 argv
         ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
         check=False, capture_output=True, text=True,
+        # mklink 的输出走 OEM 代码页（本机 GBK）：不指定编码时读取线程会 UnicodeDecodeError，
+        # 于是 `result.stdout` 变空、失败时的报错信息丢失（脚本本身在打印里只看 returncode）。
+        encoding="utf-8", errors="replace",
     )
     if result.returncode != 0:
         raise RuntimeError(f"创建 junction 失败：{(result.stdout or '').strip()} {(result.stderr or '').strip()}")

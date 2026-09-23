@@ -232,6 +232,9 @@ class NaibaChatApp:
             mcp_register=self.register_mcp_server,
             # 宿主数据目录（动态）：uploads/generated 作为读取可信根（用户上传附件免确认）。
             data_dir_getter=lambda: self._paths.data_dir,
+            # 本会话「用户已点过允许」的工作区外目录（动态）：读取类工具免确认的追加根。
+            # 同源即 folder_index 的确认记录（用户级授权只有一个事实）；写策略不读它。
+            confirmed_read_roots_getter=self.confirmed_read_roots,
             # reset_context 需要把「当前还在跑的后台任务」快照进分割线（种子消息里提醒模型）。
             extra={"active_background_tasks": self._active_background_tasks},
         )
@@ -379,6 +382,24 @@ class NaibaChatApp:
 
     def _confirmed_folder_paths(self, conversation_id: str) -> set[str]:
         return self._confirmed_folders.get(str(conversation_id or ""), set())
+
+    def confirmed_read_roots(self, conversation_id: str) -> list[Path]:
+        """本会话用户已点过「允许」的工作区外目录（读取类工具的免确认根）。
+
+        与 ``folder_index`` 的确认记录**同一个集合**：判定与执行同源，不为读取再存一份
+        （否则同一事实两处记录必然漂移）。空会话 id 一律返回空——确认记录按会话隔离，
+        没有会话就没有可继承的授权。
+
+        仅供读取类权限策略消费（``core.ToolContext.confirmed_read_roots_getter``）；
+        **写策略不读它**，写工作区外仍照旧逐次确认。
+        """
+        roots: list[Path] = []
+        for key in self._confirmed_folder_paths(conversation_id):
+            try:
+                roots.append(Path(key))
+            except (OSError, ValueError):
+                continue
+        return roots
 
     def folder_index(self, raw_path: Any, conversation_id: str = "", allow_outside: bool = False) -> dict[str, Any]:
         """扫一个文件夹的索引（只读、不读文件内容）。

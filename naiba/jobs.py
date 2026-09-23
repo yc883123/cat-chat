@@ -135,6 +135,87 @@ def _summarize_comfyui_reject(status: int, body: str) -> str:
     return f"HTTP {status} " + "；".join(parts)[:_COMFYUI_REJECT_MAX_CHARS]
 
 
+# 子代理事件 → 任务面板：日志行 / 当前步骤的长度口径。
+# 300 与前端任务详情的 300 字截断口径一致（taskDetailRows）；步骤行更短，避免把
+# 一整句状态文案塞进「当前步骤」这一列。
+_SUBAGENT_LOG_MAX_CHARS = 300
+_SUBAGENT_STEP_MAX_CHARS = 120
+
+
+def _truncate_note(text: str, limit: int) -> str:
+    """压成单行并按上限截断（省略号自述，不静默丢内容）。"""
+    flat = " ".join(str(text or "").split())
+    if len(flat) <= limit:
+        return flat
+    return flat[: max(1, limit - 1)] + "…"
+
+
+def _subagent_log_line(payload: dict[str, Any]) -> str:
+    """子代理事件 → 任务日志一行；返回空串表示该事件不落日志。
+
+    子代理只发 agent 域事件（status / tool_requested / tool_result / run_failed …），
+    其中**没有一个带 ``line`` 字段**，而前端任务日志只认 ``line``
+    （``public/js/08-conversations.js`` 的 ``String(event?.line ?? '')``），于是面板恒显示
+    「暂无输出」。这里把 agent 事件翻译成 Job 域的 ``job_log`` 行，前端与 ``job_output``
+    工具（读 line/message/content）同时受益。
+
+    红线：``tool_result`` 的 result 内容可能含图片 base64 / 大段文本，**成功时一律不进日志**；
+    失败时 result 就是错误文案，截断 300 字后写进日志（用户与模型都要靠它定位）。
+    """
+    kind = str(payload.get("type") or "")
+    if kind == "status":
+        return _truncate_note(str(payload.get("message") or ""), _SUBAGENT_LOG_MAX_CHARS)
+    if kind == "tool_requested":
+        return f"→ 调用工具 {str(payload.get('tool') or '工具').strip() or '工具'}"
+    if kind == "tool_result":
+        tool = str(payload.get("tool") or "工具").strip() or "工具"
+        if bool(payload.get("success")):
+            return f"✓ 工具 {tool} 完毕"
+        return _truncate_note(
+            f"✗ 工具 {tool} 失败：{payload.get('result') or ''}", _SUBAGENT_LOG_MAX_CHARS
+        )
+    if kind == "run_failed":
+        return _truncate_note(f"错误：{payload.get('error') or ''}", _SUBAGENT_LOG_MAX_CHARS)
+    # reasoning / usage / skills / tool_started / skill_warning … 太碎或纯诊断，不落日志。
+    return ""
+
+
+def _subagent_current_step(payload: dict[str, Any]) -> str:
+    """子代理事件 → ``background_tasks.current_step``；返回空串表示不动步骤。"""
+    kind = str(payload.get("type") or "")
+    if kind == "status":
+        return _truncate_note(str(payload.get("message") or ""), _SUBAGENT_STEP_MAX_CHARS)
+    if kind == "tool_requested":
+        tool = str(payload.get("tool") or "工具").strip() or "工具"
+        return _truncate_note(f"正在执行 {tool}", _SUBAGENT_STEP_MAX_CHARS)
+    if kind == "tool_result":
+        return "推理中"
+    # run_failed 不改步骤：终态由 _finish 统一写，避免面板先闪一个中途文案。
+    return ""
+
+
+def _subagent_event_sink(registry: "JobRegistry", job_id: str) -> Callable[[dict[str, Any]], None]:
+    """构造子代理事件接收器：翻译成 Job 日志/步骤，**并原样透传**原始事件。
+
+    原始事件照旧落 ``run_events``：``NAIBA_STRICT_EVENTS`` 契约校验、``job_output``
+    的 message/content 读取、以及历史取证都依赖它，翻译只是**追加**不是替换。
+    """
+
+    def sink(payload: dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            return
+        line = _subagent_log_line(payload)
+        if line:
+            registry._emit(job_id, {"type": "job_log", "line": line})
+        step = _subagent_current_step(payload)
+        if step:
+            # _set_status 自带 cancel_requested 闸门：取消后不会把面板回写成「运行中」。
+            registry._set_status(job_id, "running", current_step=step)
+        registry._emit(job_id, payload)
+
+    return sink
+
+
 class JobRegistry:
     def __init__(self, app: AppContext):
         self.app = app
@@ -585,7 +666,9 @@ class JobRegistry:
             return
         self._set_status(job_id, "running", current_step="已启动")
         try:
-            self.agent_runner(job_id, spec, cancel, lambda p: self._emit(job_id, p))
+            # 事件接收器必须做「agent 事件 → Job 日志/步骤」的翻译：子代理事件一个都不带
+            # ``line``，直通会让任务面板全程「暂无输出 + 当前步骤停在已启动」。
+            self.agent_runner(job_id, spec, cancel, _subagent_event_sink(self, job_id))
             job = self.get(job_id)
             if job and job["status"] not in JOB_TERMINAL:
                 self._finish(job_id, "completed", result={"subagent_job_id": job_id})

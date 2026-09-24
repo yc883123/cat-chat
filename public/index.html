@@ -91,25 +91,28 @@
           <p>把 Agent 理解成一个「岗位角色」：它有自己的人设（提示词）、自己的工具箱（工具集）和技能包（Skill）。
             切换 Agent 就像换了一个不同岗位的助手——它能干什么、不能干什么，完全由工具箱决定：
             没勾选的工具，它一律用不了。工具箱在会话开始时就锁定，中途不能换（要改去「设置 → Agent」）。</p>
-          <strong>三种预设 Agent 怎么选？</strong>
+          <strong>内置 6 个 Agent，按用途挑一个就行</strong>
           <ul>
-            <li><b>通用 Agent</b>：没有特定人设，日常问答、写作、整理资料都用它。</li>
-            <li><b>编程 Agent</b>：程序员人设，写代码、改文件找它；动手改文件前会先告诉你改哪里。</li>
-            <li><b>短剧 Agent</b>：编剧人设，配合短剧类 Skill 一步步确认主题、角色、分镜后再产出内容。</li>
+            <li><b>教程助手 Agent</b>（下拉里排第一位）：不会用 Cat Chat 就问它。它只读、不改你的文件，
+              回答一律是「一句话结论 + 编号点击步骤 + 这个功能在哪个页面」。</li>
+            <li><b>全能 Agent</b>（新会话默认）：日常都找它——问答、写作、整理资料、读写文件、跑命令，工具箱最全。</li>
+            <li><b>导演 Agent</b>：出图和拍片找它。聊创意 → 定剧本/分镜 → 写提示词 → 批量出图；
+              本地 ComfyUI 与云端 RunningHub 两条路都归它管。</li>
+            <li><b>提示词优化 Agent</b>：一句大白话或一张参考图，帮你改成能直接用的结构化提示词；
+              动笔前先问你给哪个模型、要不要英文、出图还是出视频。</li>
+            <li><b>编程助手 Agent</b>：写代码、改脚本、看报错找它；动手改文件前会先说要改哪几个。</li>
+            <li><b>Skill 助手 Agent</b>：帮你发现、安装、用好 Skill——你说想做什么，它去已装清单里找对口的。</li>
           </ul>
+          <small>这 6 个是内置的：能改能复制，但删不掉（卡片上没有 ×）。下拉里若还看到
+            「通用 Agent / 编程 Agent / 短剧 Agent」，那是早期版本留下的自定义 Agent，
+            可以在「设置 → Agent」里删掉；留着也不影响使用。</small>
           <strong>想用 ComfyUI 出图？两条路任选其一</strong>
-          <p><b>路线一 · HTTP 直连（推荐，最省事）</b></p>
-          <ol>
-            <li>启动本机 ComfyUI（默认 http://127.0.0.1:8188）。</li>
-            <li>「设置 → Agent」编辑 Agent → 工具页，一键套用<b>「ComfyUI 联动」</b>预设
-              （含 comfyui_prepare_workflow、comfyui_batch 和任务查询工具 job_output / job_status / job_wait）。</li>
-            <li>不需要配置 MCP。</li>
-          </ol>
-          <p><b>路线二 · MCP 连接</b></p>
-          <ol>
-            <li>在「设置 → MCP」配置并连接 ComfyUI MCP 服务（可用「设置本地 Comfy MCP」预设指令让 AI 帮你装）。</li>
-            <li>连接成功后，MCP 引入的 comfy 工具会出现在 Agent 工具页，手动勾选启用。</li>
-          </ol>
+          <p><b>路线一 · HTTP 直连（推荐，最省事）</b>：导演 Agent 开箱就带这套工具，切到它直接用即可。
+            换成别的 Agent 才需要去「设置 → Agent」编辑它 → 工具集页，一键套用<b>「ComfyUI 联动」</b>预设
+            （含 comfyui_prepare_workflow、comfyui_batch 和任务查询工具 job_output / job_status / job_wait）。</p>
+          <p><b>路线二 · MCP 连接</b>：在「设置 → MCP」配置并连接 ComfyUI MCP 服务
+            （可用开始页「设置本地 Comfy MCP」预设指令让 AI 帮你装）；连上后 MCP 引入的 comfy 工具
+            会出现在「设置 → Agent → 工具集」里，手动勾选启用。</p>
           <small>两条路任选其一即可，一般不需要同时开。Agent 的每个工具在设置页都有说明，不确定就先只读模式试试。</small>
         </div>
         <div class="topbar-actions">
@@ -567,39 +570,41 @@
          （popover 定位由 JS 以 fixed + top/left 指定；宿主本身不拦截指针。） -->
     <div id="updateVersionMenuHost" popover="manual" class="update-version-menu-host"></div>
     <div class="dialog-toolbar">
-      <div><h2>设置</h2><p>模型与运行参数</p></div>
+      <div><h2>设置</h2><p id="settingsToolbarSub">外观</p></div>
       <button class="icon-button" data-close="settingsDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
     </div>
     <div class="settings-layout">
       <nav class="settings-nav" aria-label="设置分类">
-        <label class="settings-search"><span class="sr-only">搜索设置</span><input id="settingsSearch" type="search" placeholder="搜索设置" autocomplete="off"></label>
+        <label class="settings-search"><span class="sr-only">搜索设置</span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg><input id="settingsSearch" type="search" placeholder="搜索设置" autocomplete="off"></label>
+        <!-- 每个导航项前置一枚线性图标（纯装饰，aria-hidden；可访问名仍是按钮文字）。
+             设置搜索按 button.textContent 匹配，图标不产生文本节点，故不影响筛选。 -->
         <div class="settings-nav-group"><span class="settings-nav-heading">常规</span>
-          <button class="active" data-settings-tab="appearance" data-settings-search="主题 皮肤 深色 浅色 字体 字号">外观</button>
-          <button data-settings-tab="runtime" data-settings-search="超时 代理 缓存 工作区">运行设置</button>
+          <button class="active" data-settings-tab="appearance" data-settings-search="主题 皮肤 深色 浅色 字体 字号"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="5"></rect><circle cx="12" cy="12" r="3.2"></circle></svg>外观</button>
+          <button data-settings-tab="runtime" data-settings-search="超时 代理 缓存 工作区"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h14"></path><circle cx="9" cy="6" r="2"></circle><circle cx="15" cy="12" r="2"></circle><circle cx="10" cy="18" r="2"></circle></svg>运行设置</button>
         </div>
         <div class="settings-nav-group"><span class="settings-nav-heading">模型与 Agent</span>
-          <button data-settings-tab="models" data-settings-search="模型 API 供应商">API 供应商</button>
-          <button data-settings-tab="agent" data-settings-search="角色 提示词 工具">Agent</button>
-          <button data-settings-tab="vision" data-settings-search="图片 视觉">视觉</button>
+          <button data-settings-tab="models" data-settings-search="模型 API 供应商"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3.5" width="18" height="7" rx="2.5"></rect><rect x="3" y="13.5" width="18" height="7" rx="2.5"></rect><path d="M7 7h.01M7 17h.01"></path></svg>API 供应商</button>
+          <button data-settings-tab="agent" data-settings-search="角色 提示词 工具"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.6"></circle><path d="M4.5 20a7.5 7.5 0 0 1 15 0"></path></svg>Agent</button>
+          <button data-settings-tab="vision" data-settings-search="图片 视觉"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"></path><circle cx="12" cy="12" r="3"></circle></svg>视觉</button>
         </div>
         <div class="settings-nav-group"><span class="settings-nav-heading">工具与联网</span>
-          <button data-settings-tab="skills" data-settings-search="技能 导入">Skills 管理</button>
-          <button data-settings-tab="search" data-settings-search="联网 搜索 网络">联网搜索</button>
-          <button data-settings-tab="connections" data-settings-search="MCP 手机 口令">连接状态</button>
+          <button data-settings-tab="skills" data-settings-search="技能 导入"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 20 8v8l-8 4.5L4 16V8z"></path><path d="M12 12 20 8M12 12v8.5M12 12 4 8"></path></svg>Skills 管理</button>
+          <button data-settings-tab="search" data-settings-search="联网 搜索 网络"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M3.5 12h17M12 3.5c2.5 2.6 2.5 14.4 0 17M12 3.5c-2.5 2.6-2.5 14.4 0 17"></path></svg>联网搜索</button>
+          <button data-settings-tab="connections" data-settings-search="MCP 手机 口令"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 14.5 14.5 9.5"></path><path d="M11 6.5 12.8 4.7a4.5 4.5 0 0 1 6.5 6.5L17.5 13"></path><path d="M13 17.5 11.2 19.3a4.5 4.5 0 0 1-6.5-6.5L6.5 11"></path></svg>连接状态</button>
         </div>
         <div class="settings-nav-group"><span class="settings-nav-heading">数据与隐私</span>
-          <button data-settings-tab="datamigration" data-settings-search="数据库 备份 迁移">数据与迁移</button>
+          <button data-settings-tab="datamigration" data-settings-search="数据库 备份 迁移"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7.5" ry="3"></ellipse><path d="M4.5 6v12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6"></path><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"></path></svg>数据与迁移</button>
         </div>
         <div class="settings-nav-group"><span class="settings-nav-heading">关于</span>
-          <button data-settings-tab="updates" data-settings-search="版本 更新">软件更新</button>
+          <button data-settings-tab="updates" data-settings-search="版本 更新"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4"></path><path d="M5 17.5v1A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5v-1"></path></svg>软件更新</button>
         </div>
         <p class="settings-nav-empty" id="settingsNavEmpty" hidden>没有匹配的设置</p>
       </nav>
       <div class="settings-content">
         <section data-settings-panel="appearance">
-          <div class="settings-section-heading"><h3>外观</h3><p>选择主题模式与界面皮肤，偏好会保存到当前 Cat Chat 服务。</p></div>
+          <div class="settings-panel-head"><h3>外观</h3><p>选择主题模式与界面皮肤，偏好会保存到当前 Cat Chat 服务。</p></div>
           <div class="settings-card appearance-card">
-            <h4>主题模式</h4><p class="hint">跟随系统会根据操作系统的浅色 / 深色设置自动切换。</p>
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"></path></svg></span><div><h4>主题模式</h4><p>跟随系统会根据操作系统的浅色 / 深色设置自动切换。</p></div></div>
             <div class="appearance-theme-options" role="radiogroup" aria-label="主题模式">
               <label class="appearance-option"><input type="radio" name="appearanceTheme" value="system"><span><b>跟随系统</b><small>自动同步设备</small></span></label>
               <label class="appearance-option"><input type="radio" name="appearanceTheme" value="light"><span><b>日间</b><small>明亮清晰</small></span></label>
@@ -607,7 +612,7 @@
             </div>
           </div>
           <div class="settings-card appearance-card">
-            <h4>界面皮肤</h4><p class="hint">强调色会应用到按钮、选中状态和消息气泡。</p>
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="8" height="8" rx="2.2"></rect><rect x="12.5" y="3.5" width="8" height="8" rx="2.2"></rect><rect x="3.5" y="12.5" width="8" height="8" rx="2.2"></rect><rect x="12.5" y="12.5" width="8" height="8" rx="2.2"></rect></svg></span><div><h4>界面皮肤</h4><p>强调色会应用到按钮、选中状态和消息气泡。</p></div></div>
             <div class="appearance-skin-options" role="radiogroup" aria-label="界面皮肤">
               <label class="skin-option skin-violet"><input type="radio" name="appearanceSkin" value="violet"><span class="skin-swatch"></span><b>紫藤</b></label>
               <label class="skin-option skin-ocean"><input type="radio" name="appearanceSkin" value="ocean"><span class="skin-swatch"></span><b>海洋</b></label>
@@ -618,8 +623,7 @@
             <p class="hint" id="appearanceStatus" role="status"></p>
           </div>
           <div class="settings-card appearance-card">
-            <h4>会话字体</h4>
-            <p class="hint">只影响消息区的正文与气泡，界面其它部分和代码块字体保持不变。</p>
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 6.5V5h14v1.5M12 5v14M8.5 19h7"></path></svg></span><div><h4>会话字体</h4><p>只影响消息区的正文与气泡，界面其它部分和代码块字体保持不变。</p></div></div>
             <div class="chat-font-size-row">
               <label for="chatFontSize">字号</label>
               <input id="chatFontSize" type="range" min="13" max="18" step="1" value="15" aria-describedby="chatFontSizeValue">
@@ -646,8 +650,7 @@
             <p class="hint" id="chatFontStatus" role="status"></p>
           </div>
           <div class="settings-card appearance-card" id="chatBackgroundCard">
-            <h4>聊天背景</h4>
-            <p class="hint">只铺在对话区，顶栏与输入区保持原样；消息气泡、AI 回复与卡片都是实底，不会被背景图透上来。支持 PNG / JPG / WebP / GIF / BMP / AVIF。</p>
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"></rect><circle cx="9" cy="10" r="1.6"></circle><path d="M4 17.5 8.5 13l4.5 4.5 3-3 4 4"></path></svg></span><div><h4>聊天背景</h4><p>只铺在对话区，顶栏与输入区保持原样；消息气泡、AI 回复与卡片都是实底，不会被背景图透上来。支持 PNG / JPG / WebP / GIF / BMP / AVIF。</p></div></div>
             <div class="chat-background-actions">
               <div class="chat-background-preview" id="chatBackgroundPreview" role="button" tabindex="0" title="点击调整取景" hidden>
                 <span class="chat-bg-blur" aria-hidden="true"></span>
@@ -676,6 +679,7 @@
           </div>
         </section>
         <section data-settings-panel="models" hidden>
+          <div class="settings-panel-head"><h3>API 供应商</h3><p>配置在线或本地模型服务；点开卡片可编辑模型、密钥与生成参数。</p></div>
           <div class="provider-scope-tabs" role="tablist" aria-label="API 供应商类型">
             <button class="active" data-provider-kind="online" type="button" role="tab">在线 API</button>
             <button data-provider-kind="local" type="button" role="tab">本地 API</button>
@@ -683,68 +687,82 @@
           <div class="provider-cards" id="providerCards"></div>
         </section>
         <section data-settings-panel="agent" hidden>
-          <div class="agent-heading"><h3>Agent 管理</h3><p>每个 Agent 拥有独立的预设、规则与固定 Skill，对话可随时切换。</p></div>
+          <div class="settings-panel-head"><h3>Agent 管理</h3><p>每个 Agent 拥有独立的预设、规则与固定 Skill，对话可随时切换。</p></div>
           <div class="agent-cards" id="agentCards"></div>
         </section>
         <section data-settings-panel="runtime" class="settings-panel" hidden>
-          <h3>运行设置</h3>
-          <div class="field-grid">
-            <label>命令超时（秒）<input id="commandTimeout" type="number" min="10" max="900" step="10"><small class="hint">仅工具与命令执行有效；不控制在线或本地模型的响应超时。</small></label>
-            <label>上下文提醒阈值（%）<input id="contextWarningPercent" type="number" min="0" max="100" step="5"><small class="hint">上下文用量达到该百分比时弹窗提醒一次；0 = 关闭提醒。</small></label>
-            <label>本地首字节超时（秒）<input id="localFirstByteTimeout" type="number" min="0" max="1800" step="10"><small class="hint">本地模型做 prefill 时往往长时间不输出内容，与「一直做不完」在界面上无法区分。连续该时长没有输出任何正文（链路的保活注释不算）即断开并报错。0 = 关闭（退回等满 30 分钟总超时的旧行为）。</small></label>
-            <label>单条思考回放上限（字符）<input id="reasoningReplayMaxChars" type="number" min="0" max="1000000" step="500"><small class="hint">模型思考（思维链）会随历史每轮原样回放，超长思考被反复回放会把模型锚定在同一个循环里。单条思考超过该长度即截断并附省略标记。只截回放、不改聊天记录。<b>改动后下一次请求会重建一次缓存。</b>0 = 关闭限长。</small></label>
-            <label>整轮思考回放预算（字符）<input id="reasoningReplayTurnChars" type="number" min="0" max="1000000" step="1000"><small class="hint">同一轮内多条思考合计超过该预算时，<b>由新到旧</b>分配额度：最近的思考优先保留，更旧的压缩到保底 200 字符。调小省上下文，调大保留上轮思路。<b>改动后下一次请求会重建一次缓存。</b>0 = 关闭限长。</small></label>
-            <label>Agent 最大步数<input id="agentStepLimit" type="number" min="0" max="1000" step="10"><small class="hint">单轮回复允许的模型调用次数上限（每次工具调用算一步）。达到上限会停止并说明原因，避免模型反复调工具停不下来。0 = 不限制。</small></label>
-            <label class="field-wide">新会话种子消息（模型重置上下文后填入输入框）
+          <div class="settings-panel-head">
+            <h3>运行设置</h3>
+            <p>超时、缓存与代理等运行参数，保存后立即生效。模型温度、上下文窗口和最大输出 Tokens 请在「API 供应商」中按供应商单独设置。</p>
+          </div>
+          <div class="settings-card">
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 6h14M5 12h14M5 18h14"></path><circle cx="9" cy="6" r="2"></circle><circle cx="15" cy="12" r="2"></circle><circle cx="10" cy="18" r="2"></circle></svg></span><div><h4>基础参数</h4></div></div>
+            <div class="field-grid">
+              <label>命令超时（秒）<input id="commandTimeout" type="number" min="10" max="900" step="10"><small class="hint">仅工具与命令执行有效；不控制在线或本地模型的响应超时。</small></label>
+              <label>上下文提醒阈值（%）<input id="contextWarningPercent" type="number" min="0" max="100" step="5"><small class="hint">上下文用量达到该百分比时弹窗提醒一次；0 = 关闭提醒。</small></label>
+              <label>本地首字节超时（秒）<input id="localFirstByteTimeout" type="number" min="0" max="1800" step="10"><small class="hint">本地模型做 prefill 时往往长时间不输出内容，与「一直做不完」在界面上无法区分。连续该时长没有输出任何正文（链路的保活注释不算）即断开并报错。0 = 关闭（退回等满 30 分钟总超时的旧行为）。</small></label>
+              <label>Agent 最大步数<input id="agentStepLimit" type="number" min="0" max="1000" step="10"><small class="hint">单轮回复允许的模型调用次数上限（每次工具调用算一步）。达到上限会停止并说明原因，避免模型反复调工具停不下来。0 = 不限制。</small></label>
+            </div>
+          </div>
+          <div class="settings-card">
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1"></path><path d="M3.5 4.5V10H9"></path><path d="M12 8v4.5l3 1.8"></path></svg></span><div><h4>思考回放</h4><p>模型思考（思维链）会随历史每轮原样回放，超长思考被反复回放会把模型锚定在同一个循环里。以下限长只截回放、不改聊天记录。</p></div></div>
+            <div class="field-grid">
+              <label>单条思考回放上限（字符）<input id="reasoningReplayMaxChars" type="number" min="0" max="1000000" step="500"><small class="hint">单条思考超过该长度即截断并附省略标记。<b>改动后下一次请求会重建一次缓存。</b>0 = 关闭限长。</small></label>
+              <label>整轮思考回放预算（字符）<input id="reasoningReplayTurnChars" type="number" min="0" max="1000000" step="1000"><small class="hint">同一轮内多条思考合计超过该预算时，<b>由新到旧</b>分配额度：最近的思考优先保留，更旧的压缩到保底 200 字符。调小省上下文，调大保留上轮思路。<b>改动后下一次请求会重建一次缓存。</b>0 = 关闭限长。</small></label>
+            </div>
+          </div>
+          <div class="settings-card">
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20.5 15a2 2 0 0 1-2 2H7l-4 3.5V6a2 2 0 0 1 2-2h13.5a2 2 0 0 1 2 2z"></path></svg></span><div><h4>新会话种子消息</h4><p>模型重置上下文后自动填入输入框。</p></div></div>
+            <label class="field-wide"><span class="sr-only">新会话种子消息模板</span>
               <textarea id="contextResetSeedTemplate" rows="4" maxlength="2000" spellcheck="false"
                         placeholder="留空使用内置默认模板"></textarea>
               <small class="hint">占位符：{handoff_path} 交接文档路径 · {task_count} 后台任务数 · {task_list} 任务清单（无后台任务时含占位符的整行会自动去掉）。填入后仍需你点发送。</small>
             </label>
-            <div class="field-wide proxy-settings settings-card">
-              <span class="settings-label"><b>网络代理（出站请求）</b></span>
-              <div class="proxy-mode-row">
-                <label class="proxy-option"><input type="radio" name="proxyMode" value="system" id="proxySystem"><span><b>跟随系统代理</b><small class="hint">读取 Windows 系统代理与环境变量</small></span></label>
-                <label class="proxy-option"><input type="radio" name="proxyMode" value="direct" id="proxyDirect"><span><b>关闭代理（强制直连）</b><small class="hint">所有外部请求直连，忽略系统/TUN 代理</small></span></label>
-                <label class="proxy-option"><input type="radio" name="proxyMode" value="manual" id="proxyManual"><span><b>手动代理</b><small class="hint">只走下方填写的地址</small></span></label>
-              </div>
-              <div id="proxyManualRow" hidden>
-                <label class="field-wide">代理地址<input id="proxyUrl" type="text" placeholder="http://127.0.0.1:7890" autocomplete="off"><small class="hint">仅支持 http/https，需包含端口号。</small></label>
-              </div>
-              <small class="hint">覆盖在线模型、联网搜索、更新检查与更新下载等所有外部请求；本地服务（127.0.0.1 / localhost / 局域网地址，如 Ollama、LM Studio、ComfyUI）始终直连。保存后立即生效，无需重启。</small>
-              <p class="hint" id="proxyStateHint"></p>
+          </div>
+          <div class="settings-card proxy-settings">
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"></circle><path d="M3.5 12h17M12 3.5c2.5 2.6 2.5 14.4 0 17M12 3.5c-2.5 2.6-2.5 14.4 0 17"></path></svg></span><div><h4>网络代理（出站请求）</h4><p>覆盖在线模型、联网搜索、更新检查与更新下载等所有外部请求；本地服务（127.0.0.1 / localhost / 局域网地址，如 Ollama、LM Studio、ComfyUI）始终直连。保存后立即生效，无需重启。</p></div></div>
+            <div class="proxy-mode-row">
+              <label class="proxy-option"><input type="radio" name="proxyMode" value="system" id="proxySystem"><span><b>跟随系统代理</b><small class="hint">读取 Windows 系统代理与环境变量</small></span></label>
+              <label class="proxy-option"><input type="radio" name="proxyMode" value="direct" id="proxyDirect"><span><b>关闭代理（强制直连）</b><small class="hint">所有外部请求直连，忽略系统/TUN 代理</small></span></label>
+              <label class="proxy-option"><input type="radio" name="proxyMode" value="manual" id="proxyManual"><span><b>手动代理</b><small class="hint">只走下方填写的地址</small></span></label>
             </div>
-            <div class="field-wide imaging-settings settings-card">
-              <label class="checkbox-field">
-                <input id="imageUploadOriginal" type="checkbox">
-                <span class="checkbox-text">
-                  <b>以原图片尺寸上传 / 缓存</b>
-                  <small class="hint">开启：保存原图；关闭：超过下方上限时用 Lanczos 压缩。</small>
-                </span>
-              </label>
-              <div class="imaging-grid">
-                <span id="imageCompressRow"><label class="field-narrow">上传最大像素数<input id="imageMaxPixels" type="number" min="1000" step="1000" value="2000000"><small class="hint">超过将压缩尺寸（保留原格式）。</small></label></span>
-                <label class="field-narrow">缩略图显示尺寸（像素）<input id="thumbnailMaxPixels" type="number" min="1000" step="1000" value="500000"><small class="hint">缩略图始终以 WebP 生成并保存在原图旁。</small></label>
-              </div>
-              <label class="field-narrow">缓存自动清理阈值（MB）<input id="autoCleanLimitMb" type="number" min="0" step="64" value="256"><small class="hint">上传后缓存文件总大小超过该值时，自动删除<strong>最旧且未被消息引用的</strong>缓存文件；被历史消息引用的文件永不自动删除。填 0 表示关闭自动清理。</small></label>
-              <div class="hint image-cache-row">当前缓存文件总大小（图片/PDF/视频/音频等）：<code id="imageCacheSize">-</code><button class="control-button" id="cleanImageCache" type="button" title="按时间从旧到新删除最旧文件（图片/PDF/视频等），按上方「缓存自动清理阈值」保留最新文件；不区分文件是否被消息引用，可能影响历史消息中已展示的文件">清理旧缓存文件</button></div>
+            <div id="proxyManualRow" hidden>
+              <label class="field-wide">代理地址<input id="proxyUrl" type="text" placeholder="http://127.0.0.1:7890" autocomplete="off"><small class="hint">仅支持 http/https，需包含端口号。</small></label>
             </div>
-            <div class="field-wide storage-maintenance settings-card">
-              <span class="settings-label"><b>历史数据管理</b></span>
-              <div class="hint storage-stat-row">
-                数据库：<code id="dbSize">-</code>
-                <span class="storage-stat-sep">·</span>运行记录：<code id="storageTaskCount">-</code>
-                <span class="storage-stat-sep">·</span>运行事件：<code id="eventCount">-</code>
-                <button class="control-button" id="refreshStorageStats" type="button">刷新</button>
-                <button class="control-button" id="compactDatabase" type="button" title="回收已删除历史数据占用的磁盘空间（VACUUM），可能耗时数秒">压缩数据库</button>
-              </div>
-              <small class="hint">运行事件会随推理流自动合流；先到「异步任务 → 清理已结束」删除终态记录，再点「压缩数据库」回收磁盘空间。</small>
+            <p class="hint" id="proxyStateHint"></p>
+          </div>
+          <div class="settings-card imaging-settings">
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"></rect><circle cx="9" cy="10" r="1.6"></circle><path d="M4 17.5 8.5 13l4.5 4.5 3-3 4 4"></path></svg></span><div><h4>图片与缓存</h4></div></div>
+            <label class="checkbox-field">
+              <input id="imageUploadOriginal" type="checkbox">
+              <span class="checkbox-text">
+                <b>以原图片尺寸上传 / 缓存</b>
+                <small class="hint">开启：保存原图；关闭：超过下方上限时用 Lanczos 压缩。</small>
+              </span>
+            </label>
+            <div class="imaging-grid">
+              <span id="imageCompressRow"><label class="field-narrow">上传最大像素数<input id="imageMaxPixels" type="number" min="1000" step="1000" value="2000000"><small class="hint">超过将压缩尺寸（保留原格式）。</small></label></span>
+              <label class="field-narrow">缩略图显示尺寸（像素）<input id="thumbnailMaxPixels" type="number" min="1000" step="1000" value="500000"><small class="hint">缩略图始终以 WebP 生成并保存在原图旁。</small></label>
+            </div>
+            <label class="field-narrow">缓存自动清理阈值（MB）<input id="autoCleanLimitMb" type="number" min="0" step="64" value="256"><small class="hint">上传后缓存文件总大小超过该值时，自动删除<strong>最旧且未被消息引用的</strong>缓存文件；被历史消息引用的文件永不自动删除。填 0 表示关闭自动清理。</small></label>
+            <div class="hint image-cache-row">当前缓存文件总大小（图片/PDF/视频/音频等）：<code id="imageCacheSize">-</code><button class="control-button" id="cleanImageCache" type="button" title="按时间从旧到新清理未被引用的缓存文件（图片/PDF/视频等），按上方「缓存自动清理阈值」保留最新文件；聊天背景图、应用图标与历史消息里仍在使用的文件会自动保留，不会被删除">清理旧缓存文件</button></div>
+          </div>
+          <div class="settings-card storage-maintenance">
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7.5" ry="3"></ellipse><path d="M4.5 6v12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6"></path><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"></path></svg></span><div><h4>历史数据管理</h4><p>运行事件会随推理流自动合流；先到「异步任务 → 清理已结束」删除终态记录，再点「压缩数据库」回收磁盘空间。</p></div></div>
+            <div class="storage-stat-row">
+              数据库：<code id="dbSize">-</code>
+              <span class="storage-stat-sep">·</span>运行记录：<code id="storageTaskCount">-</code>
+              <span class="storage-stat-sep">·</span>运行事件：<code id="eventCount">-</code>
+              <span class="storage-stat-fill"></span>
+              <button class="control-button" id="refreshStorageStats" type="button">刷新</button>
+              <button class="control-button" id="compactDatabase" type="button" title="回收已删除历史数据占用的磁盘空间（VACUUM），可能耗时数秒">压缩数据库</button>
             </div>
           </div>
-          <p class="hint">模型温度、上下文窗口和最大输出 Tokens 请在"API 供应商"中按供应商单独设置。</p>
           <div class="form-actions"><button class="primary-button" id="saveRuntime" type="button">保存参数</button></div>
         </section>
         <section data-settings-panel="connections" class="settings-panel" hidden>
-          <div class="settings-card"><h4>MCP 服务</h4><div id="mcpList" class="connection-list"></div>
+          <div class="settings-panel-head"><h3>连接状态</h3><p>MCP 服务与局域网访问：手机与电脑连接同一网络后，可用浏览器打开下方地址。</p></div>
+          <div class="settings-card"><div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 3v6M15 3v6"></path><path d="M6.5 9h11v3.5a5.5 5.5 0 0 1-11 0z"></path><path d="M12 18v3"></path></svg></span><div><h4>MCP 服务</h4></div></div><div id="mcpList" class="connection-list"></div>
           <details class="mcp-add-form" id="mcpAddForm">
             <summary>新增 MCP 服务器</summary>
             <div class="mcp-add-fields">
@@ -755,14 +773,14 @@
               <div class="form-actions"><button class="primary-button" id="saveMcpServer" type="button">保存并注册</button></div>
             </div>
           </details></div>
-          <div class="settings-card"><h4>手机访问</h4>
+          <div class="settings-card"><div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.5"></rect><path d="M11 18.5h2"></path></svg></span><div><h4>手机访问</h4></div></div>
           <div class="connection-address" id="connectionAddress"></div>
           <p class="hint" id="connectionReason"></p>
           <div class="form-actions" id="enableLanActions" hidden>
             <button class="primary-button" id="enableLanAccess" type="button">启用手机访问</button>
           </div>
           <p class="hint">手机和电脑需要连接同一局域网；Windows 防火墙需要允许 Cat Chat（cat-chat.exe，旧版本为 naiba-chat.exe）或当前端口通过。手机登录时需要使用下方访问口令。</p></div>
-          <div class="settings-card"><h4>访问口令</h4>
+          <div class="settings-card"><div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"></circle><path d="M11 12.5 19.5 4"></path><path d="M16.2 7.3 18.7 9.8M13.7 9.8 15.7 11.8"></path></svg></span><div><h4>访问口令</h4></div></div>
           <div class="field-grid">
             <label class="field-wide">访问口令（至少 4 位，手机和浏览器都用它登录）
               <input id="accessTokenInput" type="text" maxlength="64" placeholder="留空则保持当前口令">
@@ -772,8 +790,8 @@
           <p class="hint">保存后所有设备需用新口令重新登录。</p></div>
         </section>
         <section data-settings-panel="vision" hidden>
-          <h3>视觉（给纯文本大脑装眼睛）</h3>
-          <p class="hint">未配置视觉供应商时，自动使用内置 OVH 免费匿名视觉链兜底（限流严格，仅作默认）。生产建议配置自己的视觉 API（Qwen-VL / Gemini / GPT-4o 等）。</p>
+          <div class="settings-panel-head"><h3>视觉（给纯文本大脑装眼睛）</h3><p>未配置视觉供应商时，自动使用内置 OVH 免费匿名视觉链兜底（限流严格，仅作默认）。生产建议配置自己的视觉 API（Qwen-VL / Gemini / GPT-4o 等）。</p></div>
+          <div class="settings-card">
           <div class="field-grid">
             <div class="provider-current vision-provider-current field-wide">
               <label>视觉供应商（留空 = OVH 免费链）
@@ -790,10 +808,11 @@
             <button class="primary-button" id="saveVision" type="button">保存视觉设置</button>
           </div>
           <p class="hint" id="visionTestResult"></p>
+          </div>
         </section>
         <section data-settings-panel="search" hidden>
-          <h3>联网搜索（可选）</h3>
-          <p class="hint">配置搜索 API 端点后，只要该会话的 Agent 工具集包含 web_search，模型即可联网搜索（不再需要发送区开关）。结果属于不可信数据，只能作为任务素材。</p>
+          <div class="settings-panel-head"><h3>联网搜索（可选）</h3><p>配置搜索 API 端点后，只要该会话的 Agent 工具集包含 web_search，模型即可联网搜索（不再需要发送区开关）。结果属于不可信数据，只能作为任务素材。</p></div>
+          <div class="settings-card">
           <p class="hint" id="searchAvailability"></p>
           <div class="field-grid">
             <div class="provider-current field-wide">
@@ -813,19 +832,21 @@
             <button class="primary-button" id="saveSearch" type="button">保存搜索设置</button>
           </div>
           <p class="hint" id="searchTestResult"></p>
+          </div>
         </section>
         <section data-settings-panel="skills" class="settings-panel" hidden>
           <div class="form-actions skill-import-actions">
             <button class="primary-button" id="openSkillImport" type="button">导入 Skill</button>
           </div>
-          <div class="settings-card"><h4>已加载 Skill（<span id="installedSkillCount">0</span>）</h4>
+          <div class="settings-card"><div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5 20 8v8l-8 4.5L4 16V8z"></path><path d="M12 12 20 8M12 12v8.5M12 12 4 8"></path></svg></span><div><h4>已加载 Skill（<span id="installedSkillCount">0</span>）</h4></div></div>
           <div class="skill-list" id="installedSkillList"></div></div>
-          <div class="settings-card"><h4>已隐藏 Skill（<span id="hiddenSkillCount">0</span>）</h4><div class="skill-list" id="hiddenSkillList"><small class="hint">无已隐藏的 Skill</small></div></div>
-          <div class="settings-card"><div class="subheading-row"><h4>回收目录（<span id="recycledSkillCount">0</span>）</h4><button class="danger-button skill-recycle-clear" id="clearSkillRecycle" type="button">清空回收目录</button></div><div class="skill-list" id="recycledSkillList"><small class="hint">回收目录为空</small></div>
+          <div class="settings-card"><div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 3l18 18"></path><path d="M10.6 6.1A9.9 9.9 0 0 1 12 6c6 0 9.5 6 9.5 6a17 17 0 0 1-3.3 4"></path><path d="M6.4 7.7A16.6 16.6 0 0 0 2.5 12s3.5 6 9.5 6a9.6 9.6 0 0 0 3.6-.7"></path><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"></path></svg></span><div><h4>已隐藏 Skill（<span id="hiddenSkillCount">0</span>）</h4></div></div><div class="skill-list" id="hiddenSkillList"><small class="hint">无已隐藏的 Skill</small></div></div>
+          <div class="settings-card"><div class="subheading-row"><div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4.5 6.5h15M9.5 6.5V4.5h5v2M6.5 6.5l1 13.5h9l1-13.5"></path></svg></span><div><h4>回收目录（<span id="recycledSkillCount">0</span>）</h4></div></div><button class="danger-button skill-recycle-clear" id="clearSkillRecycle" type="button">清空回收目录</button></div><div class="skill-list" id="recycledSkillList"><small class="hint">回收目录为空</small></div>
           <p class="hint">此前被隐藏的 Skill 会出现在这里；点击“取消隐藏”即可重新使用。回收目录中的内容可恢复，清空后将永久删除。</p></div>
         </section>
         <section data-settings-panel="datamigration" hidden>
-          <h3>数据与迁移</h3>
+          <div class="settings-panel-head"><h3>数据与迁移</h3><p>数据库、上传文件与 Skills 目录的存放位置与健康状态。</p></div>
+          <div class="settings-card">
           <label class="field-wide data-dir-field">数据库与上传数据目录
             <input id="dataDir" type="text" placeholder="例如 D:\\CatChatData">
             <small class="hint">点击「应用并迁移」后，数据库、上传文件与 Skills 目录会一并复制到目标位置，并完成数据库结构迁移。迁移后需完全退出并重启 Cat Chat 生效。</small>
@@ -833,6 +854,7 @@
           <div class="form-actions">
             <button class="primary-button" id="applyDataDir" type="button">应用并迁移</button>
             <button class="control-button" id="backupData" type="button">备份数据</button>
+          </div>
           </div>
           <div class="update-status">
             <div><span>数据库版本</span><b id="migrationDbVersion">-</b></div>
@@ -845,7 +867,7 @@
           <p class="hint" id="migrationMessage"></p>
         </section>
         <section data-settings-panel="updates" hidden>
-          <h3>软件更新</h3>
+          <div class="settings-panel-head"><h3>软件更新</h3><p>点「检查更新」查询新版本，手动选择版本后点击「立即更新」；不会自动安装。</p></div>
           <div class="update-status">
             <div><span>当前版本</span><b id="currentVersion">-</b></div>
             <div><span>新版本</span><b id="latestVersion">尚未检查</b></div>
@@ -1041,6 +1063,7 @@
                       title="上传图片会中心裁切为正方形，用作该 Agent 会话里助手气泡的圆标（保存后生效）">自定义头像</button>
               <input id="agentAvatarFileInput" type="file" accept="image/*" hidden>
               <img id="agentAvatarPreview" class="agent-avatar-preview" alt="" hidden>
+              <span id="agentAvatarEmojiPreview" class="agent-avatar-emoji-preview" aria-hidden="true" hidden></span>
             </div>
           </div>
           <div class="agent-prompt-block">

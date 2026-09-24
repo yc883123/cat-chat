@@ -225,7 +225,15 @@ def default_config() -> dict[str, Any]:
         "port": 8765,
         "access_token": f"{secrets.randbelow(1000000):06d}",
         "skills_dirs": ["skills"],
-        "hidden_skill_ids": [],
+        # 首版默认隐藏的内置 Skill。**注意语义**：`hidden_skill_ids` 是"完全不进 catalog"，
+        # 不是"只是不在列表里显示"——SkillCatalog.scan 会直接跳过该 id（实证见维护说明 §九.138），
+        # 因此被隐藏的 Skill 连 / 引用、Agent 固定绑定都一起失效。
+        # ⇒ 只有"谁都不依赖"的内置 Skill 才能进这个默认值。copywriting 无出厂绑定，符合；
+        #    cat-chat-guide 被 tutor 内置 Agent 固定绑定，**绝不能隐藏**（否则教程助手无据可查）。
+        # 内容随教程加厚，等"3 分钟"系列教程齐了再放开。
+        # （`_BUNDLED_SKILL_ID` 定义在本文件稍后处；这里是**调用期**解析，不是导入期，
+        #   所以函数写在常量前面也拿得到。）
+        "hidden_skill_ids": [_BUNDLED_SKILL_ID["copywriting"]],
         "workspace_dir": "workspace",
         "data_dir": "data",
         "workspaces": [],
@@ -335,7 +343,8 @@ def default_config() -> dict[str, Any]:
                 "skill_ids": [],
             },
         ],
-        "default_agent_id": "general",
+        # 新装默认 Agent。老用户配置里已存过值，不回溯（只影响 first run）。
+        "default_agent_id": "master",
         # 视觉（Phase 0-3）：provider 缺省时使用内置 OVH 免费匿名视觉链兜底。
         # 视觉调用统一由模型驱动（vision_analyze 工具），无自动路由开关。
         "vision": {
@@ -360,22 +369,159 @@ def default_config() -> dict[str, Any]:
     }
 
 
-# 内置 Agent 机制保留（built_in 标记 + 不可删守卫 + 前端「内置」徽标），但**当前清单为空**：
-# 原先的四个预设（dsh-standard / dsh-code / dsh-minimal / dsh-cordis）已按用户要求下线。
-# 需要重新引入内置 Agent 时，在 `built_in_agents()` 里补回定义即可（tool_scope 留空数组 =
-# 不限制，运行时会放行全部工具并在新增工具时自动纳入，不需要再维护一份工具名清单）。
+# 内置 Agent 机制（built_in 标记 + 不可删守卫 + 前端「内置」徽标）自 2.8.9-beta 起重启：
+# 出厂 6 样，**返回顺序即前端展示顺序**（`public_agents()` 把这一段整体置顶）。
+#
+# 三条硬约束（守门见 tests/test_builtin_agents.py，改这里必读）：
+#   1. 全部使用**新 id / 新名字**，与老用户已改过的 general / coding / drama 零冲突——
+#      老三样一个字都不动，防止升级覆盖用户自定义；
+#   2. `tool_scope` 一律**显式列工具名**（无 group:*），且与对应 `TOOL_PRESETS` 展开逐项一致。
+#      **不要用空数组**：空数组的语义是「不限制」——运行时会放行全部工具（含 MCP 动态工具与
+#      子代理），出厂 Agent 一旦这么写就会随用户接 MCP 而自动扩权；
+#   3. `subagent` / `subagent_spawn` / `register_mcp` / `mcp__*` / `http_request` **一律不入列**
+#      （鱼群会烧 token；也不因用户后来接 MCP 而自动扩权）。
+#
+# 出厂 skill_ids 只许引用**随包 Skill**（每个用户装机即有）。非随包的本地 Skill 想挂到内置
+# Agent 上，走「设置页编辑该 Agent → 生成 built_in 覆盖版」，只存本机 config，不随版本分发。
+
+# 随包 Skill 的稳定 id = sha1("<frontmatter name>/<相对 skills/ 的路径>".lower())[:16]，
+# 与 naiba/skills/catalog.py::SkillCatalog.scan 同源。**不要手改这些常量**：改目录名或改
+# SKILL.md 的 frontmatter name 都会换 id，tests/test_builtin_agents.py 会用真实 skills/
+# 目录重算一遍，对不上即红（这是防「改名漂移」的唯一防线）。
+_BUNDLED_SKILL_ID = {
+    "cat-chat-guide": "9ceddfcaecb2f472",
+    "copywriting": "97e6e849bd844ed2",
+    "comfyui-shortdramav2": "a1dd8f9224a2291e",
+    "shortdramav2-rh": "8c4f474969a799b0",
+    "runninghub": "ba0c06c717020c3d",
+    "h3-prompt-writing": "0eef16c1c1ac466d",
+}
+
+# 内置 Agent 的工具档底稿：直接取工具预设里**已显式列名**的 include 列表，避免两份清单
+# 各写一遍再漂移。`TOOL_PRESETS` 在下方定义（调用时查表，不在导入期），写错 preset_id 由
+# 守门测试兜住而不是静默给空集。
+def _tool_preset_scope(preset_id: str) -> list[str]:
+    for preset in TOOL_PRESETS:
+        if str(preset.get("id")) == preset_id:
+            return [str(item) for item in (preset.get("include") or [])]
+    raise KeyError(f"未知工具预设：{preset_id}")
+
+
+# 提示词优化 Agent 的底稿不在任何预设里（只读 + 写稿，7 件）：显式列名，守门按同一份常量比对。
+_PROMPTER_SCOPE = [
+    "read_file", "list_directory", "search_files", "read_pdf",
+    "vision_analyze", "write_file", "edit_file",
+]
+
+# Skill 助手专用三件套（装 / 拆 / 查）。
+_SKILL_MANAGER_TOOLS = ["install_skill", "unpack_skill_archive", "inspect_installed_skill"]
 
 
 def built_in_agents() -> list[dict[str, Any]]:
-    """返回内置 Agent 定义清单（当前为空，机制保留）。
+    """返回出厂内置 Agent 清单（6 样，顺序 = 前端展示顺序）。
 
-    每次调用返回新副本，防止被外部篡改。清单为空时：
-    - `public_agents()` 只返回用户自定义 Agent；
-    - `upsert_agent()` 不再给任何 id 打 built_in 标记；
-    - `delete_agent()` 的内置守卫不再命中，所有 Agent 都可删除。
-    用户配置里遗留的旧内置副本由 `_migrate_agent_builtin_flags()` 去掉 built_in 标记。
+    每次调用返回新副本，防止被外部篡改。语义：
+    - `public_agents()` 把这段清单**置顶**（用户编辑过的覆盖版占原位次）；
+    - `upsert_agent()` 给这些 id 打 built_in 标记 ⇒ 不可删除，但可编辑生成覆盖版；
+    - `delete_agent()` 的内置守卫命中这些 id（静默忽略删除请求）。
+
+    出厂绑定（只许随包 Skill）：tutor→cat-chat-guide、director→短剧三件、prompter→
+    h3-prompt-writing；master / coder / skills 留空，靠用户临时 `/` 引用（如 copywriting）。
     """
-    return []
+    # `built_in` 标记**必须由出厂定义自带**，不能只靠 upsert 生成：前端据它显示「内置」徽标
+    # 并隐藏 × 删除按钮（`public/js/09-settings.js::agentCardMarkup`）。漏了它，卡片会出现一个
+    # 「点了没反应」的删除按钮——后端 `delete_agent` 的内置守卫是**静默拒绝**的，用户只会觉得坏掉了。
+    # 这里统一盖章，避免将来加第 7 样时忘记写这个键。
+    return [{**agent, "built_in": True} for agent in _built_in_agent_defs()]
+
+
+def _built_in_agent_defs() -> list[dict[str, Any]]:
+    """出厂 6 样的「裸定义」（不含 built_in 标记，由 built_in_agents() 统一盖章）。"""
+    return [
+        {
+            "id": "tutor",
+            "name": "教程助手 Agent",
+            "avatar": "📘",
+            "system_prompt": (
+                "你是 Cat Chat 的教程助手，专门教用户怎么使用这款软件。回答一律按小白能懂的方式："
+                "先给一句话结论，再给编号的点击步骤，步骤精确到按钮与页面名字"
+                "（如「⚙ 设置 → API 供应商 → 添加 API」）。用户描述不清时，主动给 2-3 个"
+                "「你是不是想……」的猜测让对方挑。拿不准的功能细节，先翻你的使用指南 Skill 和"
+                "工作区里的说明文档再回答，绝不编造按钮名字。每次回答末尾指出相关功能在软件的哪个页面。"
+            ),
+            "skill_ids": [_BUNDLED_SKILL_ID["cat-chat-guide"]],
+            "tool_scope": _tool_preset_scope("readonly"),
+        },
+        {
+            "id": "master",
+            "name": "全能 Agent",
+            "avatar": "🐱",
+            "system_prompt": (
+                "你是全能助手，日常任务都找你。用大白话回答，先给结论再给步骤；动文件或跑命令前，"
+                "先用一句话说清楚要做什么、会动哪些东西。你能翻看本会话之外的历史对话来回忆旧事。"
+                "不确定就直接问，不要猜。"
+            ),
+            "skill_ids": [],
+            "tool_scope": _tool_preset_scope("longsession"),
+        },
+        {
+            "id": "director",
+            "name": "导演 Agent",
+            "avatar": "🎬",
+            "system_prompt": (
+                "你是导演助手，陪用户把创意变成图和片：聊创意 → 定剧本/分镜 → 写提示词 → 批量出图出片。"
+                "出图出片有两条路：本地 ComfyUI（走 comfyui 工具，开工前先探测 http://127.0.0.1:8188 "
+                "是否运行，没启动就提醒）和云端 RunningHub（走用户选择的 RunningHub 类 Skill 与脚本，"
+                "适合没装 ComfyUI 或要云端算力的用户）；用户没说用哪条时，先问一句。张数、尺寸、"
+                "用哪个工作流不清楚时先问再提交；批量任务挂后台跑，完成后报告数量和保存位置。"
+                "用户通过 / 选择了短剧类 Skill 时，严格遵循该 Skill 的流程逐步确认。"
+            ),
+            "skill_ids": [
+                _BUNDLED_SKILL_ID["comfyui-shortdramav2"],
+                _BUNDLED_SKILL_ID["shortdramav2-rh"],
+                _BUNDLED_SKILL_ID["runninghub"],
+            ],
+            "tool_scope": _tool_preset_scope("comfyui"),
+        },
+        {
+            "id": "prompter",
+            "name": "提示词优化 Agent",
+            "avatar": "✍️",
+            "system_prompt": (
+                "你是提示词优化助手。用户给一句大白话或一张参考图，你负责改写成高质量的结构化提示词。"
+                "动笔前先确认：给哪个模型用（ComfyUI / Krea / MiniMax H3 / 其他）、要中文还是英文、"
+                "图还是视频。输出固定两段：优化后的提示词正文 + 三行以内的改动说明。"
+                "一次给一版主打 + 一版备选。"
+            ),
+            "skill_ids": [_BUNDLED_SKILL_ID["h3-prompt-writing"]],
+            "tool_scope": list(_PROMPTER_SCOPE),
+        },
+        {
+            "id": "coder",
+            "name": "编程助手 Agent",
+            "avatar": "💻",
+            "system_prompt": (
+                "你是编程助手。先理解需求再动手，给出可直接运行、结构清晰的代码；涉及文件改动或"
+                "跑命令时，先说明改动范围，再执行。报错时先读完整报错再改，不要瞎猜乱试。"
+            ),
+            "skill_ids": [],
+            "tool_scope": _tool_preset_scope("standard"),
+        },
+        {
+            "id": "skills",
+            "name": "Skill 助手 Agent",
+            "avatar": "🧩",
+            "system_prompt": (
+                "你是 Skill 助手，帮用户发现和用好 Cat Chat 的技能。用户说想做什么时，先用 "
+                "inspect_installed_skill 看已装的 Skill 里有没有对口的：有，就教用户在输入框打 / "
+                "引用它，一句话说清这个 Skill 能干嘛；没有合适的，说明可以安装新 Skill，经用户同意后"
+                "动手装（install_skill / unpack_skill_archive）。装完主动演示一句触发语。"
+                "修改已有 Skill 的文件前，先说明要改哪几个文件、改什么。"
+            ),
+            "skill_ids": [],
+            "tool_scope": [*_tool_preset_scope("standard"), *_SKILL_MANAGER_TOOLS],
+        },
+    ]
 
 
 def built_in_agent_ids() -> set[str]:
@@ -2703,17 +2849,22 @@ class ConfigStore:
     def public_agents(self) -> list[dict[str, Any]]:
         with self.lock:
             custom = [dict(agent) for agent in self.data.get("agents", [])]
-            # 内置 Agent 默认全开启，且允许用户自定义；若用户已编辑过某个内置 Agent，
-            # 其覆盖定义保存在 self.data['agents']（built_in=True），此时以覆盖版为准，
-            # 不再追加默认内置定义，避免同一个 Agent 出现两次。
-            overridden_ids = {
-                str(agent.get("id") or "") for agent in custom if agent.get("built_in")
+            # 排序三段式：**内置区恒在最前**（按 built_in_agents() 的定义顺序），其后是纯自定义。
+            # - 用户编辑过某个内置 Agent 时，覆盖版存在 self.data['agents']（built_in=True），
+            #   此时以覆盖版为准并**占该内置的原位次**（不能挪到最后，否则「教程助手排第一」的
+            #   对外承诺会在用户点过一次编辑后失效）；
+            # - 未编辑过的内置用出厂定义补位，避免同一个 Agent 出现两次；
+            # - 老三样（general / coding / drama）与其它自定义都是「纯自定义」，相对顺序不变。
+            overrides = {
+                str(agent.get("id") or ""): agent
+                for agent in custom if agent.get("built_in")
             }
-            built_in = [
-                dict(agent) for agent in built_in_agents()
-                if agent.get("id") not in overridden_ids
+            built_section = [
+                overrides.pop(str(builtin["id"]), dict(builtin))
+                for builtin in built_in_agents()
             ]
-            return custom + built_in
+            pure_custom = [agent for agent in custom if not agent.get("built_in")]
+            return built_section + pure_custom
 
     def default_agent_id(self) -> str:
         with self.lock:
@@ -2792,9 +2943,19 @@ class ConfigStore:
             agents = self.data.setdefault("agents", [])
             index = next((i for i, item in enumerate(agents) if item.get("id") == agent_id), None)
             # 头像：调用方没带 avatar 键时保留已存值（表单保存不带头像，不能顺手清掉）。
+            # 内置 Agent 还没有覆盖版时（index is None）兜底取出厂定义的头像——出厂头像是
+            # emoji 字形，表单同样不带头像键，这里清空就等于「用户点一次编辑，教程助手
+            # 的 📘 就没了」。非内置的新 Agent 取不到兜底值，仍是空串。
             avatar = values.get("avatar")
             if avatar is None:
-                avatar = (agents[index].get("avatar") if index is not None else "") or ""
+                if index is not None:
+                    avatar = agents[index].get("avatar")
+                else:
+                    builtin = next(
+                        (item for item in built_in_agents() if item.get("id") == agent_id), None
+                    )
+                    avatar = (builtin or {}).get("avatar")
+                avatar = avatar or ""
             payload["avatar"] = str(avatar).strip()
             if index is None:
                 agents.append(payload)

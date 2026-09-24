@@ -1,17 +1,18 @@
 # -*- coding: utf-8 -*-
-"""Agent 设置页（卡片网格 + 点开才弹出的设置弹层）与「下线内置 Agent」的守门。
+"""Agent 设置页（卡片网格 + 点开才弹出的设置弹层）与「内置 Agent」的守门。
 
 背景（两条一起做的改动）：
-1. 四个内置 Agent 预设（dsh-standard / dsh-code / dsh-minimal / dsh-cordis）按用户要求下线：
-   `built_in_agents()` 清单置空，**机制保留**（built_in 标记 + 不可删守卫 + 前端「内置」徽标）；
+1. 四个内置 Agent 预设（dsh-standard / dsh-code / dsh-minimal / dsh-cordis）曾按用户要求下线：
+   `built_in_agents()` 清单置空、**机制保留**（built_in 标记 + 不可删守卫 + 前端「内置」徽标）；
    用户配置里遗留的旧内置副本由 `_migrate_agent_builtin_flags()` 摘掉标记，变成普通可删 Agent。
+   2.8.9-beta 起内置机制**重启**（出厂 6 样，见 tests/test_builtin_agents.py），本文件的
+   遗留迁移用例继续成立：`dsh-*` 早已不在清单里，仍须摘标记、仍可删。
 2. Agent 管理页改成与 API 供应商页同款：卡片网格（一行最多三张）+ 末尾「新增 Agent」卡片 +
    卡片右上角 × 删除 + 点卡片才弹出顶层 `<dialog id="agentDialog">`（字段/工具集/Skill 选择器
    保持原样）。
 
 关键不变量：
-- 内置清单为空 → 不再注入任何内置 Agent，所有 Agent 都可删除，`upsert_agent` 不再打 built_in；
-- 遗留副本只摘标记、不动内容（用户改过的名称/提示词/工具集不丢）；
+- 清单外的遗留内置副本只摘标记、不动内容（用户改过的名称/提示词/工具集不丢），且可删除；
 - 卡片容器 `#agentCards`，旧 `#agentList`/`#addAgent`/`.agent-item*` 连绑定一起消失；
 - 表单整体搬进 `#agentDialog`，字段 id 与文案逐字不变；
 - 网格三列 + 窄屏 2/1 列。
@@ -28,7 +29,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from naiba.config import ConfigStore, built_in_agent_ids, built_in_agents  # noqa: E402
+from naiba.config import ConfigStore  # noqa: E402
 
 LEGACY_SELECTORS = ("#agentList", "#addAgent", "agent-item", "agent-manager", "data-agent-edit")
 
@@ -63,6 +64,12 @@ FORM_FIELD_IDS = (
 
 
 class BuiltInAgentsRetiredTests(unittest.TestCase):
+    """已下线内置 Agent（dsh-*）的遗留副本迁移：只摘标记、内容不丢、可删除。
+
+    出厂清单本身（6 样的 id/顺序/工具档/绑定）由 tests/test_builtin_agents.py 守门；
+    这里只保证**清单外**的遗留副本仍按老口径处理。
+    """
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -78,14 +85,8 @@ class BuiltInAgentsRetiredTests(unittest.TestCase):
             )
         return ConfigStore(self.config_path)
 
-    def test_built_in_list_is_empty_but_mechanism_kept(self) -> None:
-        self.assertEqual(built_in_agents(), [])
-        self.assertEqual(built_in_agent_ids(), set())
-
-    def test_no_built_in_agent_is_injected(self) -> None:
-        store = self._store({"agents": [{"id": "mine", "name": "我的 Agent", "system_prompt": "", "skill_ids": []}]})
-        ids = [agent.get("id") for agent in store.public_agents()]
-        self.assertEqual(ids, ["mine"])
+    def _agent(self, store: ConfigStore, agent_id: str) -> dict:
+        return next(agent for agent in store.public_agents() if agent.get("id") == agent_id)
 
     def test_legacy_built_in_flag_is_stripped_but_content_kept(self) -> None:
         store = self._store({
@@ -100,8 +101,8 @@ class BuiltInAgentsRetiredTests(unittest.TestCase):
                 }
             ]
         })
-        agent = store.public_agents()[0]
-        self.assertNotIn("built_in", agent, "遗留副本必须变成普通 Agent（否则前端仍隐藏删除按钮）")
+        agent = self._agent(store, "dsh-standard")
+        self.assertNotIn("built_in", agent, "清单外的遗留副本必须变成普通 Agent（否则前端仍隐藏删除按钮）")
         self.assertEqual(agent["name"], "dsh-standard（全能）")
         self.assertEqual(agent["system_prompt"], "用户改过的提示词")
         self.assertEqual(agent["tool_scope"], ["read_file"])
@@ -117,14 +118,16 @@ class BuiltInAgentsRetiredTests(unittest.TestCase):
             ],
             "default_agent_id": "keep",
         })
-        self.assertTrue(store.delete_agent("dsh-code"), "内置清单为空后旧内置 id 必须可删")
-        self.assertEqual([agent.get("id") for agent in store.public_agents()], ["keep"])
+        self.assertTrue(store.delete_agent("dsh-code"), "已下线内置 id 必须可删")
+        ids = [agent.get("id") for agent in store.public_agents()]
+        self.assertIn("keep", ids)
+        self.assertNotIn("dsh-code", ids)
 
-    def test_upsert_agent_never_marks_built_in(self) -> None:
+    def test_retired_ids_are_not_marked_built_in_on_upsert(self) -> None:
         store = self._store({})
         saved = store.upsert_agent({"id": "dsh-standard", "name": "再来一个", "system_prompt": "", "skill_ids": []})
         self.assertNotIn("built_in", saved)
-        self.assertNotIn("built_in", store.public_agents()[0])
+        self.assertNotIn("built_in", self._agent(store, "dsh-standard"))
 
 
 class ToolGroupCatalogTests(unittest.TestCase):
@@ -957,9 +960,14 @@ class AgentCardsMarkupTests(unittest.TestCase):
         self.assertLess(basic.index('id="agentName"'), basic.index('id="pickAgentAvatar"'))
         source = self._settings()
         for snippet in ("export function pickAgentAvatar(", "export function handleAgentAvatarFile(",
-                        "agentAvatarUrl(", "/api/agents/avatar/", "FormData()"):
+                        "agentAvatarUrl(", "agentAvatarEmoji(", "/api/agents/avatar", "FormData()"):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, source)
+        # 头像 URL / emoji 的判定只有一处定义（01-core）：04-messages 与 09-settings 都用它，
+        # 分成两份迟早会漂移（emoji 被当文件名拼进 /api/agents/avatar/ 就是破图）。
+        core = (ROOT / "public/js/01-core.js").read_text(encoding="utf-8")
+        self.assertIn("`/api/agents/avatar/${", core, "头像 URL 形状唯一定义点在 01-core")
+        self.assertIn("export function agentAvatarEmoji(", core)
         bind = self._bind()
         self.assertIn("$('#pickAgentAvatar')?.addEventListener('click', pickAgentAvatar)", bind)
         self.assertIn("handleAgentAvatarFile(file)", bind)

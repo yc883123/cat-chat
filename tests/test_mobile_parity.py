@@ -13,10 +13,12 @@
 - 760 块里不得再有「删能力」规则，必须换成形态（全屏抽屉 + 可点文件条目）；
 - 触摸目标不小于 44px（顶栏按钮 / 抽屉开关 / 输入区图标与发送 / 文件面板关闭）；
 - 视口边界只有一个来源：JS 侧统一取 `NARROW_VIEWPORT_MAX`，与 CSS 的 760px 一致；
-- 顶栏操作区的文字标签一律保留（§九.44：宁可整行换行，也不隐藏标签）。
+- 顶栏操作区的文字标签一律保留（§九.44：宁可整行换行，也不隐藏标签）；
+- 设置弹窗的布局列只许写在媒体查询里（见 test_settings_layout_columns_stay_breakpoint_scoped）。
 """
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -31,6 +33,41 @@ class MobileParityTests(unittest.TestCase):
 
     def _file_panel(self) -> str:
         return (ROOT / "public/js/14-file-panel.js").read_text(encoding="utf-8")
+
+    def _iter_rules(self, css: str):
+        """逐条吐出 (selector, body, in_media)。
+
+        只做 CSS 解析里最必要的两件事：花括号配对 + 记住自己是否落在 @media 里。
+        注释当空白，够本文件用。
+        """
+        stack: list = []
+        buf: list = []
+        index = 0
+        while index < len(css):
+            if css.startswith("/*", index):
+                index = css.index("*/", index) + 2
+                buf.append(" ")
+                continue
+            char = css[index]
+            if char == "{":
+                selector = "".join(buf).strip()
+                outer = stack[-1]["media"] if stack else False
+                stack.append({
+                    "selector": selector,
+                    "body": [],
+                    "media": outer or selector.startswith("@media"),
+                })
+                buf = []
+            elif char == "}":
+                frame = stack.pop() if stack else None
+                if frame is not None and not frame["selector"].startswith("@"):
+                    yield frame["selector"], "".join(frame["body"]), frame["media"]
+                buf = []
+            else:
+                if stack:
+                    stack[-1]["body"].append(char)
+                buf.append(char)
+            index += 1
 
     def _mobile_block(self) -> str:
         css = self._css()
@@ -94,6 +131,60 @@ class MobileParityTests(unittest.TestCase):
         mobile = self._mobile_block()
         self.assertNotIn("display: none !important", mobile, "又用 !important 把能力关掉了")
         self.assertNotIn("pointer-events: none", mobile, "又用 pointer-events 把能力关掉了")
+
+    def test_settings_layout_columns_stay_breakpoint_scoped(self) -> None:
+        """`.settings-layout` 的列定义只许「裸写且只有一个类名」，或住在媒体查询里。
+
+        教训（2026-09-24，设置页视觉重设计）：桌面段新写了一条
+        `.settings-dialog .settings-layout { grid-template-columns: 212px minmax(0, 1fr); }`，
+        权重高过手机块里的 `.settings-layout { grid-template-columns: minmax(0, 1fr); }`。
+        **媒体查询不加权重**，所以 760px 以下仍是「212px 侧栏 + 被挤扁的内容列」：
+        390px 竖屏下字号滑杆只剩 22px 宽、字体下拉只剩 112px，人和守门都拖不动。
+
+        判据用「权重」而不是「顺序」：基础规则 `.settings-layout`（1 个类名）能靠
+        「手机块更靠后」稳定取胜，是允许的；一旦叠了 `.settings-dialog` 前缀变成 2 个类名，
+        顺序就救不回来了，必须显式套 min-width。
+        """
+        css = self._css()
+        rules = list(self._iter_rules(css))
+        targets = [
+            (selector, body, in_media)
+            for selector, body, in_media in rules
+            if ".settings-layout" in selector and "grid-template-columns" in body
+        ]
+        # 先断言前提成立：基础那条与桌面那条都得真在，否则这条守门等于空转
+        self.assertTrue(
+            any(not in_media and "200px" in body for _, body, in_media in targets),
+            "没找到基础 `.settings-layout` 列定义，守门前提不成立",
+        )
+        self.assertTrue(
+            any("212px" in body for _, body, in_media in targets),
+            "没找到桌面端 `.settings-layout` 列定义，守门前提不成立",
+        )
+
+        mobile_start = css.index("@media (max-width: 760px) {")
+        offenders = []
+        for selector, _body, in_media in targets:
+            if in_media:
+                continue
+            if self._selector_weight(selector) >= 2:
+                offenders.append(selector)
+            elif css.find(selector + " {") > mobile_start:
+                offenders.append("%s（裸写在手机块之后，同样会压过去）" % selector)
+        self.assertEqual(
+            offenders,
+            [],
+            "`.settings-layout` 的列定义压过了手机块的单列写法，760px 以下内容列会被挤扁：%s"
+            % offenders,
+        )
+
+    @staticmethod
+    def _selector_weight(selector: str) -> int:
+        """粗略权重：id 记 2，类 / 属性 / 伪类各记 1。这里只比较「谁更具体」，够用。"""
+        weight = 0
+        for token in re.findall(r"#[-\w]+|\.[-\w]+|\[[^\]]*\]|:{1,2}[-\w]+", selector):
+            weight += 2 if token.startswith("#") else 1
+        return weight
 
     def test_file_panel_becomes_fullscreen_drawer(self) -> None:
         panel = self._rule(".file-panel, .app-shell.file-panel-open .file-panel {")

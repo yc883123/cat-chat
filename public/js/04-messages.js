@@ -2,7 +2,7 @@
 // 04-messages.js —— 拆分自 public/app.js 第 1212-1501 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, api, draggedFileCache, emptyStateElement, escapeHtml, notifyComposerChanged, state, toast } from "./01-core.js";
+import { $, agentAvatarEmoji, agentAvatarSrc, api, draggedFileCache, emptyStateElement, escapeHtml, notifyComposerChanged, state, toast } from "./01-core.js";
 import { markdown } from "./02-markdown.js";
 import { activityMarkup, closeImageLightbox, fileChangesSummaryMarkup, fileUrl, folderIndexMarkup, mediaKind, mediaMarkup, mediaTruncatedNotice, reasoningMarkup, remainingAttachments, skillMarkup, sourcesMarkup, toolMarkup, truncationNotice, updateContextComposerLock, updateContextUsage, updateSendButtonState, uploadedFileMarkup, usageMarkup } from "./03-media.js";
 import { openConversation, syncCurrentConversation } from "./08-conversations.js";
@@ -14,12 +14,20 @@ import { isQueuedInterjection, renderRunGuidance } from "./18-interjections.js";
 // 当前会话所用 Agent 的自定义头像 URL（没有则空串 → 回退到默认的「AI」圆标）。
 // 与 currentAgentFixedSkillIds 同口径：会话绑定的 Agent 优先，失效时回退默认 Agent。
 export function currentAgentAvatarUrl() {
+  return agentAvatarSrc(currentAgent());
+}
+
+// 内置 Agent 的 emoji 头像（avatar 字段存字形而非文件名）；与上面的 URL 互斥。
+export function currentAgentAvatarEmoji() {
+  return agentAvatarEmoji(currentAgent());
+}
+
+function currentAgent() {
   const agents = state.bootstrap?.agents || [];
   const conversation = state.conversations.find((item) => item.id === state.conversationId);
   let agent = agents.find((item) => item.id === String(conversation?.agent_id || ''));
   if (!agent) agent = agents.find((item) => item.id === String(state.bootstrap?.default_agent_id || ''));
-  const file = String(agent?.avatar || '');
-  return file ? `/api/agents/avatar/${encodeURIComponent(file)}` : '';
+  return agent;
 }
 
 // 内置默认种子模板（设置页留空时回退用它）；占位符：{handoff_path} / {task_count} / {task_list}
@@ -156,9 +164,12 @@ export function messageElement(message, temporary = false) {
     const bottomAttachments = remainingAttachments(metadata);
     // 自定义头像：用该 Agent 的会话把默认「AI」圆标换成上传的图片（已中心裁切成正方形）。
     const avatarUrl = currentAgentAvatarUrl();
+    const avatarEmoji = currentAgentAvatarEmoji();
     const avatarHtml = avatarUrl
       ? `<img class="message-avatar message-avatar-img" src="${escapeHtml(avatarUrl)}" alt="">`
-      : '<div class="message-avatar">AI</div>';
+      : (avatarEmoji
+        ? `<div class="message-avatar message-avatar-emoji">${escapeHtml(avatarEmoji)}</div>`
+        : '<div class="message-avatar">AI</div>');
     // 「新会话」分割线入口：紧挨「复制」右侧（只有已落库的完整回复才有 id，流式临时气泡不给）。
     const sessionButton = (!temporary && message.id)
       ? `<button data-session-start-after="${escapeHtml(message.id)}" title="在这条回复之后划一条分割线：此线以上的消息不再进入模型上下文（下方消息仍在上下文中，聊天记录全部保留）">新会话</button>`

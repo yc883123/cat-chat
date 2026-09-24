@@ -431,6 +431,152 @@ class BackgroundCacheProtectionTests(unittest.TestCase):
         self.assertGreaterEqual(result["removed"], 1)
 
 
+class ManualCleanCacheProtectsInUseFilesTests(unittest.TestCase):
+    """设置页「清理旧缓存文件」必须像自动清理一样保护"在用"文件（2026-09-24 用户报障）。
+
+    报障现象：点一下按钮，自己设的**聊天背景图**被删掉，卡片随后变成
+    「背景图文件暂不可用」。根因：手动路径给 ``_clean_uploads_cache`` 传了
+    ``referenced_checker=None``（"不区分引用"，UI 文案也照实这么写）。
+
+    这组用例一律走**真实入口** ``app.api_clean_image_cache()``，不碰底层原语
+    ——把那个 checker 参数删掉/改回 None，这里必须变红。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="naiba_bg_manual_clean_")
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name).resolve()
+        from naiba.app import NaibaChatApp
+        from naiba.paths import PathContext
+
+        self.app = NaibaChatApp(paths=PathContext.local(root, root / "config.json"))
+        self.data_dir = self.app.paths.data_dir
+        self.uploads = self.data_dir / "uploads" / "2026-01-01"
+        self.uploads.mkdir(parents=True, exist_ok=True)
+        # 阈值单位是 MB，最小只能设 1 ⇒ 夹具必须造出 > 1MB 的缓存，否则清理循环
+        # 一进来就 break（total <= limit），整组用例会退化成"什么都没发生"的假绿。
+        self.app.config.update_settings({"imaging": {"auto_clean_limit_mb": 1}})
+
+    def _noise_png(self, name: str, size=(700, 700)) -> Path:
+        """随机像素 PNG（体积大且不可压缩，用来真正顶破 1MB 阈值）。"""
+        import os as _os
+        from PIL import Image
+
+        path = self.uploads / name
+        Image.frombytes("RGB", size, _os.urandom(size[0] * size[1] * 3)).save(path, format="PNG")
+        return path
+
+    def _age(self, path: Path, days: int = 2) -> None:
+        stamp = (datetime.now() - timedelta(days=days)).timestamp()
+        os.utime(path, (stamp, stamp))
+
+    def test_fixture_really_exceeds_the_limit(self):
+        """前提断言：夹具确实超阈，否则下面几条都是空转（影子断言）。"""
+        background = self._noise_png("bg.png")
+        stale = self._noise_png("stale.png")
+        total = background.stat().st_size + stale.stat().st_size
+        self.assertGreater(total, 1024 * 1024, "夹具必须超过 1MB 阈值，清理才会真的跑起来")
+
+    def test_manual_clean_keeps_chat_background_and_thumb(self):
+        background = self._noise_png("bg.png")
+        thumb = self.uploads / "bg_thumb.webp"
+        thumb.write_bytes(b"thumb-bytes")
+        self.app.config.update_settings({"chat_background": {"image": str(background)}})
+        # 背景图设为"最旧"：清理循环按旧→新走，它必然先被检查到（否则可能提前 break）。
+        self._age(background, days=3)
+        self._age(thumb, days=3)
+        stale = self._noise_png("stale.png")
+        self._age(stale, days=2)
+
+        result, status = self.app.api_clean_image_cache()
+
+        self.assertEqual(status, 200)
+        self.assertTrue(background.is_file(), "手动清理不得删除在用聊天背景图")
+        self.assertTrue(thumb.is_file(), "背景图的缩略图随主图成组保留")
+        self.assertFalse(stale.is_file(), "未被引用的旧缓存仍应被清理")
+        self.assertGreaterEqual(result["skipped_referenced"], 1, "跳过的引用组必须计数并回报")
+
+    def test_manual_clean_keeps_message_referenced_image(self):
+        referenced = self._noise_png("in_message.png")
+        self._age(referenced, days=3)
+        conv = self.app.storage.create_conversation("清理", "缓存保护")
+        attachment = {"name": referenced.name, "path": str(referenced), "size": 10, "thumb_path": ""}
+        self.app.storage.create_chat_run(
+            str(conv.get("id") or ""),
+            "看一下这张图",
+            [attachment],
+            {"id": "general", "name": "通用 Agent", "system_prompt": "", "skill_ids": []},
+            {"attachments": [attachment]},
+            "craft",
+        )
+        self.assertTrue(self.app._upload_path_in_use(referenced.resolve()), "前提：该图已被消息引用")
+        stale = self._noise_png("stale2.png")
+        self._age(stale, days=2)
+
+        result, status = self.app.api_clean_image_cache()
+
+        self.assertEqual(status, 200)
+        self.assertTrue(referenced.is_file(), "历史消息里展示过的图不得被手动清理删除")
+        self.assertFalse(stale.is_file())
+
+    def test_manual_clean_never_touches_custom_app_icon(self):
+        """应用图标在 app_dir（不是 data_dir），缓存清理物理上碰不到它——但要用例钉住。
+
+        用户报障时一并怀疑"换过的图标也会被清掉"。图标两件套（png+ico）落
+        ``app.paths.app_dir``，而 ``_image_cache_dirs`` 只认 ``data_dir/uploads`` 与
+        ``data_dir/generated``：断言清理**真的跑了**（removed ≥ 1）而图标分毫未动。
+        """
+        from naiba.storage.app_icon import APP_ICON_ICO_NAME, APP_ICON_PNG_NAME, app_icon_paths
+
+        png_path, ico_path = app_icon_paths(self.app.paths.app_dir)
+        png_path.parent.mkdir(parents=True, exist_ok=True)
+        png_path.write_bytes(b"custom-png")
+        ico_path.write_bytes(b"custom-ico")
+        self.assertNotEqual(
+            png_path.parent.resolve(), self.data_dir.resolve(),
+            "前提：图标目录与数据目录必须不同，否则这条断言没有意义",
+        )
+        background = self._noise_png("bg.png")
+        self._age(background, days=3)
+        stale = self._noise_png("stale3.png")
+        self._age(stale, days=2)
+
+        result, status = self.app.api_clean_image_cache()
+
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(result["removed"], 1, "前提：这次清理真的删了东西")
+        self.assertTrue(png_path.is_file(), "自定义图标 png 不得被缓存清理删除")
+        self.assertTrue(ico_path.is_file(), "自定义图标 ico 不得被缓存清理删除")
+        self.assertEqual(png_path.read_bytes(), b"custom-png")
+        self.assertEqual(ico_path.read_bytes(), b"custom-ico")
+
+
+class CleanCacheDisclosureTests(unittest.TestCase):
+    """「清理旧缓存文件」的**告知义务**（2026-09-24 用户报障"清缓存也没告诉人家"）。
+
+    行为侧由 ManualCleanCacheProtectsInUseFilesTests 钉死；这里钉文案与回报：
+    按钮 tooltip 不许再声称"不区分引用、可能影响历史消息"，且结果必须如实回报
+    "保留了多少仍在用的文件"——否则"点了清理没删多少"会被当成按钮坏了。
+    """
+
+    def _index_html(self) -> str:
+        return (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+
+    def test_button_tooltip_no_longer_claims_reference_unaware(self):
+        html = self._index_html()
+        start = html.index('id="cleanImageCache"')
+        tag = html[start - 200: start + 600]
+        self.assertNotIn("不区分文件是否被消息引用", tag,
+                         "手动清理已改为保护引用文件，tooltip 不得再写'不区分引用'")
+        self.assertIn("背景图", tag, "tooltip 必须点明背景图会被保留（这正是报障点）")
+
+    def test_clean_result_reports_what_was_kept(self):
+        body = _function_body(_read_js("09-settings.js"), "export async function cleanImageCache")
+        self.assertIn("skipped_referenced", body, "必须用后端的跳过计数回报'保留了多少仍在用的文件'")
+        self.assertIn("没有可清理", body, "一个都没删时要说明原因，而不是静默成功")
+        self.assertIn("个仍在用的文件", body, "保留数要连量词与中心语一起给（别拼出'仍在用 的文件'）")
+
+
 class BackgroundNeverAutoClearedTests(unittest.TestCase):
     """设置不许被自动清空（前端源码守门；服务端侧见 config._validated_chat_background_image）。
 

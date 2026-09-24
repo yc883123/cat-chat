@@ -175,5 +175,64 @@ class AgentAvatarApiTests(unittest.TestCase):
         self.assertEqual(int(status), 404)
 
 
+class AgentEmojiAvatarTests(unittest.TestCase):
+    """内置 Agent 的 emoji 头像（avatar 字段的二义性）。
+
+    `avatar` 字段要么是后端生成的文件名（`<id>_<hash>.webp`），要么是内置 Agent 的
+    emoji 字形。两者混用就会出破图：`/api/agents/avatar/%F0%9F%93%98` 永远 404。
+    所以后台必须拒绝把非文件名当文件读，前端必须分清两种取值（守门见下面的前端接线断言）。
+    """
+
+    def test_emoji_is_never_treated_as_an_avatar_filename(self) -> None:
+        for value in ("📘", "🐱", "🎬", "✍️", "💻", "🧩", "abc.webp", "a_b.webp.bak"):
+            with self.subTest(value=value):
+                self.assertFalse(is_avatar_filename(value), "emoji / 非法名绝不能当头像文件读取")
+        self.assertTrue(is_avatar_filename("abc_0123456789ab.webp"), "反向：正常文件名必须通过")
+
+    def test_built_in_emoji_survives_upsert_and_public_listing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConfigStore(Path(tmp) / "config.json")
+            # 表单保存不带头像键：内置 emoji 不能被顺手清掉。
+            saved = store.upsert_agent({
+                "id": "tutor", "name": "教程助手 Agent", "system_prompt": "改过", "skill_ids": [],
+            })
+            self.assertEqual(saved["avatar"], "📘", "表单保存不带头像时必须保留内置 emoji")
+            agent = next(item for item in store.public_agents() if item["id"] == "tutor")
+            self.assertEqual(agent["avatar"], "📘")
+
+    def test_uploaded_avatar_replaces_emoji(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ConfigStore(Path(tmp) / "config.json")
+            saved = store.upsert_agent({
+                "id": "tutor", "name": "教程助手 Agent", "system_prompt": "",
+                "skill_ids": [], "avatar": "tutor_0123456789ab.webp",
+            })
+            self.assertEqual(saved["avatar"], "tutor_0123456789ab.webp", "上传头像必须能顶掉 emoji")
+
+    def test_frontend_tells_emoji_and_filename_apart(self) -> None:
+        core = (ROOT / "public/js/01-core.js").read_text(encoding="utf-8")
+        for snippet in ("export function agentAvatarFile(", "export function agentAvatarEmoji(",
+                        "export function agentAvatarSrc(", "AVATAR_FILE_RE", "AVATAR_EMOJI_MAX_LENGTH"):
+            with self.subTest(snippet=snippet):
+                self.assertIn(snippet, core, "头像取值判定必须集中定义在 01-core")
+        self.assertIn(r"/^[A-Za-z0-9_-]+\.webp$/", core,
+                      "文件名判定必须与后端 is_avatar_filename 同口径（只认 .webp + 含下划线）")
+
+    def test_emoji_rendered_at_all_three_sites(self) -> None:
+        """三处渲染点缺一不可：Agent 卡片、表单预览、助手消息圆标。"""
+        settings = (ROOT / "public/js/09-settings.js").read_text(encoding="utf-8")
+        self.assertIn("agent-card-avatar-emoji", settings, "Agent 卡片要能画 emoji")
+        messages = (ROOT / "public/js/04-messages.js").read_text(encoding="utf-8")
+        self.assertIn("export function currentAgentAvatarEmoji(", messages)
+        self.assertIn("message-avatar-emoji", messages, "助手消息圆标要能画 emoji")
+        index = (ROOT / "public/index.html").read_text(encoding="utf-8")
+        self.assertIn('id="agentAvatarEmojiPreview"', index, "表单里要有 emoji 预览位")
+        css = (ROOT / "public/styles.css").read_text(encoding="utf-8")
+        for rule in (".agent-card-avatar-emoji {", ".message-avatar-emoji {",
+                     ".agent-avatar-emoji-preview {", ".agent-avatar-emoji-preview[hidden] {"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, css)
+
+
 if __name__ == "__main__":
     unittest.main()

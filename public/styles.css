@@ -540,6 +540,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .message-avatar { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; background: linear-gradient(135deg, var(--brand-500), var(--brand-700)); color: white; font-weight: 700; font-size: 12px; box-shadow: 0 1px 3px rgba(30,33,56,.18); }
 /* 自定义头像：上传图已在后端中心裁切成正方形，这里 object-fit 再兜一层 */
 .message-avatar-img { object-fit: cover; background: var(--surface-2); }
+/* 内置 Agent 的 emoji 头像：换成文本字形，底色从品牌渐变改中性底，否则深色 emoji 看不清 */
+.message-avatar-emoji { background: var(--surface-2); font-size: 17px; font-weight: 400; line-height: 1; }
 /* AI 回复卡片容器：白底圆角卡片 + 柔和阴影，承载全部回复内容 */
 .message-card { min-width: 0; max-width: min(100%, 860px); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow-1); padding: 14px 16px; transition: box-shadow var(--t-fast); }
 .message-card:hover { box-shadow: var(--shadow-2); }
@@ -1242,7 +1244,8 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .auth-dialog .primary-button { width: 100%; margin-top: 8px; }
 .form-error { color: var(--red); font-size: 12px; min-height: 18px; }
 .panel-dialog { width: min(700px, calc(100vw - 30px)); height: min(760px, calc(100dvh - 30px)); }
-.settings-dialog { width: min(920px, calc(100vw - 30px)); height: min(700px, calc(100dvh - 30px)); }
+/* 显式声明底色：内容区已改用 --bg 灰底衬卡片，dialog 不再依赖 UA color-scheme 底色（深色下两种深灰会断层）。 */
+.settings-dialog { width: min(920px, calc(100vw - 30px)); height: min(700px, calc(100dvh - 30px)); background: var(--surface); }
 .skill-delete-dialog { width: min(560px, calc(100vw - 30px)); height: auto; max-height: min(400px, calc(100dvh - 30px)); }
 .skill-delete-body { padding: 4px 18px 18px; }
 .skill-delete-body p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; white-space: pre-line; }
@@ -1295,6 +1298,9 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .control-button.ghost:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .agent-avatar-preview { width: 32px; height: 32px; flex: none; border-radius: 50%; object-fit: cover; border: 1px solid var(--line-strong); }
 .agent-avatar-preview[hidden] { display: none; }
+/* 内置 Agent 的 emoji 头像（avatar 字段存字形）：与 <img> 版同尺寸同形状，换成文本居中 */
+.agent-avatar-emoji-preview { width: 32px; height: 32px; flex: none; display: grid; place-items: center; border-radius: 50%; background: var(--surface-2); border: 1px solid var(--line-strong); font-size: 17px; line-height: 1; }
+.agent-avatar-emoji-preview[hidden] { display: none; }
 .agent-prompt-hint { color: var(--muted); font-size: 11px; line-height: 1.5; }
 .conversation-star, .conversation-more { border: 0; background: transparent; color: var(--sidebar-muted); flex: none; display: grid; place-items: center; padding: 0; transition: opacity .15s ease, color .15s ease; }
 .conversation-star { width: 26px; height: 26px; opacity: 0.55; }
@@ -1352,20 +1358,32 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .skill-item b { font-size: 13px; }
 .skill-item p { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .skill-item em { color: var(--amber); background: var(--amber-soft); padding: 2px 5px; border-radius: 3px; font-size: 10px; font-style: normal; }
-.settings-layout { display: grid; grid-template-columns: 170px minmax(0, 1fr); height: calc(100% - 65px); }
-.settings-nav { background: var(--surface-2); padding: 12px 8px; border-right: 1px solid var(--line); overflow:auto; }
-.settings-nav button { display: block; width: 100%; height: 38px; border: 0; background: transparent; border-radius: var(--radius); text-align: left; padding: 0 10px; color: var(--text); }
-.settings-nav button.active { background: var(--surface); color: var(--accent); font-weight: 600; }
-.settings-nav-group { margin-bottom: 14px; }
-.settings-nav-heading { display:block; padding: 5px 10px; color: var(--muted); font-size: 11px; font-weight: 600; }
-.settings-search { display:block; margin: 0 2px 12px; }
-.settings-search input { width:100%; height:34px; padding:0 9px; border:1px solid var(--line); border-radius:var(--radius); background:var(--surface); color:var(--text); }
+.settings-layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); height: calc(100% - 65px); }
+.settings-nav { background: var(--surface-2); padding: 12px 10px 16px; border-right: 1px solid var(--line); overflow: auto; }
+.settings-nav button { position: relative; display: block; width: 100%; height: 36px; margin-bottom: 1px; border: 0; background: transparent; border-radius: var(--radius); text-align: left; padding: 0 10px 0 14px; color: var(--text); font-size: 13px; transition: background var(--t-fast); }
+.settings-nav button:hover { background: rgba(var(--brand-500-rgb), .07); }
+.settings-nav button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.settings-nav button.active::before { content: ""; position: absolute; left: 3px; top: 8px; bottom: 8px; width: 3px; border-radius: 999px; background: var(--accent); }
+.settings-nav-group { margin-bottom: 18px; }
+.settings-nav-group:last-child { margin-bottom: 0; }
+.settings-nav-heading { display: block; padding: 0 10px; margin-bottom: 5px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .05em; }
+.settings-search { position: relative; display: block; margin: 0 2px 14px; }
+.settings-search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); width: 13px; height: 13px; fill: none; stroke: var(--muted); stroke-width: 2; stroke-linecap: round; pointer-events: none; }
+.settings-search input { width: 100%; height: 34px; padding: 0 9px 0 30px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); }
+.settings-search input::placeholder { color: var(--muted); }
 .settings-nav-empty { margin: 12px 10px; color: var(--muted); font-size: 12px; }
-.settings-content { overflow: auto; padding: 20px; }
-.settings-content h3 { margin: 0 0 14px; font-size: 15px; }
-.settings-card { padding: 15px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-1); margin-bottom: 14px; }
+.settings-content { overflow: auto; padding: 22px 24px 28px; background: var(--bg); }
+.settings-content h3 { margin: 0; font-size: 17px; }
+/* 每个设置面板的统一页头：大标题 + 一行说明（各 panel 结构一致的锚点） */
+.settings-panel-head { margin-bottom: 18px; }
+.settings-panel-head p { margin: 4px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.settings-card { padding: 16px 18px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--shadow-1); margin-bottom: 14px; }
 .settings-card h4 { margin: 0 0 6px; font-size: 14px; }
-.settings-section-heading p { margin: -8px 0 14px; color: var(--muted); font-size: 12px; }
+.settings-card > :last-child { margin-bottom: 0; }
+/* 卡内标题块：标题 + 描述（描述替代旧的裸 hint 段落，避免负 margin 对齐 hack） */
+.settings-card-head { margin-bottom: 12px; }
+.settings-card-head h4 { margin: 0; font-size: 13.5px; font-weight: 600; }
+.settings-card-head p { margin: 3px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .appearance-theme-options, .appearance-skin-options { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
 .appearance-skin-options { grid-template-columns:repeat(4,minmax(0,1fr)); }
 .appearance-option, .skin-option { display:flex; align-items:center; gap:8px; padding:10px; border:1px solid var(--line); border-radius:var(--radius); cursor:pointer; }
@@ -1389,8 +1407,8 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .chat-font-custom select { cursor:pointer; }
 .chat-font-custom[hidden] { display:none; }
 .chat-font-manual-row { margin-top:10px; }
-/* 压过 .settings-content .hint 的负上边距（0,2,1 > 0,2,0；它原本是给"紧跟卡片标题"用的）。 */
-.chat-font-custom p.hint { margin:6px 0 0; }
+/* 字体下拉下方的说明：贴近控件（叠 .settings-content 前缀，优先级高过 .settings-content .hint 的 0 0 10px）。 */
+.settings-content .chat-font-custom p.hint { margin: 6px 0 0; }
 .chat-font-sample { margin:12px 0 0; padding:10px 12px; border:1px dashed var(--line); border-radius:var(--radius); background:var(--surface-2); color:var(--text); line-height:1.7; font-size:var(--msg-font-size); font-family:var(--msg-font-family); }
 #chatFontStatus:empty { display:none; }
 #chatFontStatus { margin:8px 0 0; color:var(--muted); font-size:12px; }
@@ -1507,9 +1525,6 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .model-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 9px; align-items: end; }
 .model-picker .control-button { height: 40px; margin-top: 6px; }
 #providerModelCustom[hidden] { display: none; }
-.agent-heading { margin-bottom: 17px; }
-.agent-heading h3 { margin-bottom: 4px; }
-.agent-heading p { margin: 0; color: var(--muted); font-size: 12px; }
 /* Agent 卡片：与供应商卡片同款外壳（两页内容不同，各自维护，避免改一处牵连另一页） */
 .agent-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .agent-card { position: relative; display: grid; align-content: start; gap: 6px; min-height: 132px; padding: 14px 14px 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); color: var(--text); text-align: left; cursor: pointer; transition: border-color .15s ease, box-shadow .15s ease; }
@@ -1517,6 +1532,7 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 /* 默认 Agent 不给高亮：卡片上任何强调色都会被误读成"当前选中"（默认项由顶栏选择器体现）。 */
 .agent-card-name { padding-right: 22px; display: flex; align-items: center; gap: 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 600; }
 .agent-card-avatar { width: 22px; height: 22px; flex: none; border-radius: 50%; object-fit: cover; border: 1px solid var(--line-strong); }
+.agent-card-avatar-emoji { display: grid; place-items: center; background: var(--surface-2); font-size: 13px; line-height: 1; }
 .agent-card-meta { color: var(--muted); font-size: 11.5px; }
 .agent-card-tools { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-card-prompt { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
@@ -1606,7 +1622,10 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .skill-item .skill-delete { border: 0; background: none; color: var(--muted); padding: 4px 8px; font-size: 13px; cursor: pointer; flex: none; }
 .skill-item .skill-delete:hover { color: var(--red); }
 .skill-item .skill-tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: var(--surface-2); color: var(--muted); border: 1px solid var(--line); flex: none; }
-.settings-content .hint { color: var(--muted); font-size: 12px; margin: -6px 0 14px; line-height: 1.4; }
+.settings-content .hint { color: var(--muted); font-size: 12px; margin: 0 0 10px; line-height: 1.5; }
+/* 输入框尾注（label 内 input/textarea/select 之后的小字）：统一与控件间距 6px。
+   兄弟选择器避免误伤 checkbox-text 等「文字块内」的 hint。 */
+.settings-card label input ~ .hint, .settings-card label textarea ~ .hint, .settings-card label select ~ .hint { display: block; margin: 6px 0 0; }
 #installedSkillList { height: auto; max-height: 280px; overflow: auto; }
 .skill-list .skill-item .desc { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
@@ -1625,12 +1644,20 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .imaging-grid label { display: grid; gap: 6px; }
 .imaging-grid label input, .imaging-grid label select { margin-top: 0; }
 .imaging-grid label .hint { margin: 0; color: var(--muted); line-height: 1.4; }
-.image-cache-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0; color: var(--muted); font-size: 12px; }
-.image-cache-row .control-button { min-height: 26px; padding: 0 10px; font-size: 12px; }
+/* 「状态行」外壳：缓存大小 / 存储统计共用——浅底圆角条，按钮靠右。 */
+.image-cache-row, .storage-stat-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-inset); color: var(--muted); font-size: 12px; }
+.image-cache-row code, .storage-stat-row code { font-family: var(--font-mono); color: var(--text); font-size: 12px; }
+.storage-stat-sep { color: var(--line-strong); }
+.storage-stat-fill { flex: 1; }
+.image-cache-row .control-button, .storage-stat-row .control-button { min-height: 28px; padding: 0 10px; font-size: 12px; }
+.image-cache-row .control-button { margin-left: auto; }
 #imageCompressRow[hidden] { display: none; }
-.proxy-settings { display: grid; gap: 8px; padding: 10px 0 2px; border-top: 1px dashed var(--line); }
-.proxy-mode-row { display: flex; flex-direction: column; gap: 6px; }
-.proxy-option { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; color: var(--text); }
+/* 代理卡：它同时是 .settings-card（内边距/边框由卡片统一给），这里只管内容布局。
+   历史上这条规则用 padding/border-top 覆盖了卡片样式，导致内容贴边 + 卡片上多一条虚线。 */
+.proxy-settings { display: grid; gap: 10px; }
+.proxy-mode-row { display: flex; flex-direction: column; gap: 2px; margin: 0 -10px; }
+.proxy-option { display: flex; align-items: flex-start; gap: 9px; padding: 8px 10px; border-radius: var(--r-md); cursor: pointer; color: var(--text); transition: background var(--t-fast); }
+.proxy-option:hover { background: var(--surface-inset); }
 .proxy-option input[type="radio"] { width: 16px; height: 16px; margin: 2px 0 0; padding: 0; flex: none; accent-color: var(--accent); }
 .proxy-option span { display: grid; gap: 1px; min-width: 0; }
 .proxy-option b { font-size: 13px; font-weight: 600; color: var(--text); }
@@ -1643,7 +1670,7 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 .connection-address { padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); font-family: var(--font-mono); font-size: 13px; margin-bottom: 10px; }
 #connectionReason { margin: 8px 0 14px; }
-.update-status { display: grid; gap: 1px; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--line); }
+.update-status { display: grid; gap: 1px; border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; background: var(--line); box-shadow: var(--shadow-1); }
 .update-status > div { min-height: 52px; padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; gap: 18px; background: var(--surface); }
 .update-latest-value { min-width: 0; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 5px 12px; }
 .update-notes-toggle { display: inline-flex; align-items: center; gap: 4px; padding: 3px 0; border: 0; background: transparent; color: var(--accent); cursor: pointer; font: inherit; font-size: 12px; white-space: nowrap; }
@@ -1989,16 +2016,20 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   .choice-nav { min-height: 44px; padding: 8px 16px; }
   .choice-collapse { width: 44px; height: 44px; }
   .choice-header { min-height: 44px; }
-  /* 桌面端是 170px + 1fr 两列；手机端必须显式改成单列，否则导航与内容继续横排。 */
+  /* 桌面端是 200px + 1fr 两列；手机端必须显式改成单列，否则导航与内容继续横排。 */
   .settings-layout { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .settings-nav { display: flex; gap: 4px; overflow-x: auto; overscroll-behavior-x: contain; padding: 6px; border-right: 0; border-bottom: 1px solid var(--line); scrollbar-width: none; }
-  .settings-nav-group { display: contents; }
+  .settings-nav-group { display: contents; margin-bottom: 0; }
   .settings-nav-heading { display:none; }
   .settings-search { min-width: 150px; margin: 0; }
   .settings-search input { height: 36px; }
   .settings-nav::-webkit-scrollbar { display: none; }
   .settings-nav button { width: auto; min-width: max-content; flex: none; text-align: center; padding: 0 10px; white-space: nowrap; }
+  /* 横向导航条里左侧竖条指示会横亘在按钮边缘，手机上禁用（保留淡紫底色选中态）。 */
+  .settings-nav button.active::before { display: none; }
   .settings-content { height: auto; min-height: 0; padding: 15px; }
+  .settings-panel-head { margin-bottom: 14px; }
+  .settings-card { padding: 14px 15px; }
   .provider-current { grid-template-columns: minmax(0, 1fr) auto auto; }
   .provider-current .control-button, .provider-current .danger-button { padding: 0 10px; }
   .permission-grid { grid-template-columns: 1fr; }
@@ -2390,3 +2421,202 @@ body { font-family: var(--font-sans); }
 .undo-bar-progress { position: absolute; left: 0; bottom: 0; height: 2px; width: 100%; background: var(--accent); transform-origin: left center; transform: scaleX(0); }
 .undo-bar.show .undo-bar-progress { animation: naiba-undo-countdown 10s linear forwards; }
 @keyframes naiba-undo-countdown { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   设置页视觉重设计（2026-09-24）
+   ───────────────────────────────────────────────────────────────────────
+   把设置弹窗统一到「卡片 + 图标 + 现代控件」这套**版式**语言。口径：
+
+   · **只动版式，不动配色。** 原有的色板与主题/换肤体系（--surface / --accent /
+     --muted / --line … 以及四套皮肤）原样保留：本段不引入任何新的色值，
+     也不改写任何文字的既有颜色。深色与浅色、四套皮肤都自动成立。
+   · **只做视觉**：不改任何设置项、控件 id、data-* 钩子与交互逻辑。
+   · **作用域**一律收在 `.settings-dialog` 内 —— 聊天区、会话弹层、Agent 弹层
+     都不受影响；要回退时整段删掉即恢复原样。
+   · 透明度类装饰（聚焦环 / 按钮微光）沿用仓库既有做法 rgba(--brand-500-rgb, α)，
+     跟着换肤一起走色相。
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── 尺度令牌：只服务设置弹窗，不外溢到全局 ── */
+.settings-dialog {
+  --set-r-card: 14px;                       /* 卡片圆角 */
+  --set-r-ctl: 10px;                        /* 控件圆角 */
+  --set-ctl-h: 38px;                        /* 输入类控件高度 */
+  --set-ring: rgba(var(--brand-500-rgb), .18);   /* 聚焦环（与既有 focus 口径一致） */
+  --set-glow: rgba(var(--brand-500-rgb), .28);   /* 主按钮微光 */
+}
+
+/* 桌面尺寸单独一条：手机块靠「更靠后」把弹窗改成整屏，若在这里直接写宽度，
+   同特异度的本规则会把它反向压回去（媒体查询不加权重）。 */
+@media (min-width: 761px) {
+  .settings-dialog { width: min(1000px, calc(100vw - 30px)); height: min(742px, calc(100dvh - 30px)); }
+}
+
+/* ── 顶栏：标题加重、关闭键圆形 ── */
+.settings-dialog .dialog-toolbar { min-height: 72px; padding: 14px 20px; }
+.settings-dialog .dialog-toolbar h2 { font-size: 19px; font-weight: 700; letter-spacing: -.01em; }
+.settings-dialog .dialog-toolbar .icon-button { width: 34px; height: 34px; border-radius: var(--r-full); }
+
+/* ── 左导航：图标 + 文字，选中项整块底色（原左侧竖条去掉，避免与底色重复表达） ──
+   图标与「图标 + 文字」的排布两种断点共用（手机端导航是横向滚动条，同样要图标对齐）；
+   而两列布局 / 侧栏留白 / 搜索框外观是桌面专属，见下面那条 min-width 块。 */
+.settings-dialog .settings-nav button { display: flex; align-items: center; gap: 10px; }
+.settings-dialog .settings-nav button svg { flex: none; width: 16px; height: 16px; fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: stroke var(--t-fast); }
+.settings-dialog .settings-nav button:hover svg { stroke: var(--text); }
+.settings-dialog .settings-nav button.active svg { stroke: var(--accent); }
+/* 选中态已由整块底色表达，左侧竖条与之重复，去掉（手机块原本也这么做） */
+.settings-dialog .settings-nav button.active::before { display: none; }
+
+/* ⚠️ 桌面专属的这几条**必须**限定 min-width：手机块（@media max-width:760px）里已有自己的
+   单列布局与横向导航，但**媒体查询不加权重**，同特异度时靠后的规则照样压过去 —— 不限定的话
+   手机端会继续用 212px 侧栏，内容列被挤到 22px（字号滑杆拖不动、字体下拉只剩 112px）。
+   血案与守门：verify/chat_font_smoke.cjs 的「手机竖屏」三连断言。 */
+@media (min-width: 761px) {
+  /* 布局高度跟着顶栏走（原值 65px 与新顶栏不同步会露出缝隙） */
+  .settings-dialog .settings-layout { grid-template-columns: 212px minmax(0, 1fr); height: calc(100% - 72px); }
+  .settings-dialog .settings-nav { padding: 14px 12px 18px; background: var(--surface); }
+  .settings-dialog .settings-search { margin: 0 0 16px; }
+  .settings-dialog .settings-search svg { left: 11px; width: 14px; height: 14px; }
+  .settings-dialog .settings-search input { height: 36px; padding-left: 33px; border-color: transparent; border-radius: var(--set-r-ctl); background: var(--surface-2); }
+  .settings-dialog .settings-search input:focus { border-color: var(--accent); background: var(--surface); outline: 3px solid var(--set-ring); }
+  .settings-dialog .settings-nav-group { margin-bottom: 16px; }
+  .settings-dialog .settings-nav-group:last-child { margin-bottom: 0; }
+  .settings-dialog .settings-nav-heading { margin: 0 0 6px; padding: 0 10px; letter-spacing: .04em; }
+  .settings-dialog .settings-nav button { height: 38px; margin-bottom: 2px; padding: 0 10px; border-radius: var(--set-r-ctl); }
+}
+.settings-dialog .settings-nav button svg { flex: none; width: 16px; height: 16px; fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: stroke var(--t-fast); }
+.settings-dialog .settings-nav button:hover svg { stroke: var(--text); }
+.settings-dialog .settings-nav button.active svg { stroke: var(--accent); }
+.settings-dialog .settings-nav button.active::before { display: none; }
+
+/* ── 内容区与页头 ── */
+.settings-dialog .settings-content { padding: 24px 26px 34px; }
+.settings-dialog .settings-panel-head { margin-bottom: 20px; }
+.settings-dialog .settings-panel-head h3 { font-size: 18px; font-weight: 700; letter-spacing: -.01em; }
+.settings-dialog .settings-panel-head p { margin-top: 5px; max-width: 74ch; }
+
+/* ── 卡片 ── */
+.settings-dialog .settings-card { margin-bottom: 16px; padding: 18px 20px; border-radius: var(--set-r-card); }
+.settings-dialog .settings-card > h4 { margin: 0 0 12px; font-weight: 600; }
+
+/* 卡头：图标芯片 + 标题 + 说明。图标芯片是这套版式的锚点，
+   所以有标题的卡片一律收进 .settings-card-head（结构见 index.html）。 */
+.settings-dialog .settings-card-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 14px; }
+.settings-dialog .settings-card-head > div { min-width: 0; }
+.settings-dialog .settings-card-head h4 { margin: 0; font-weight: 600; }
+.settings-dialog .settings-card-head p { margin: 4px 0 0; }
+/* 卡头嵌进「标题 + 右侧按钮」那一行时不再自带下边距（否则会把这行顶歪） */
+.settings-dialog .subheading-row .settings-card-head { margin-bottom: 0; }
+.settings-dialog .set-ico { flex: none; width: 26px; height: 26px; display: grid; place-items: center; border-radius: var(--r-sm); background: var(--accent-soft); color: var(--accent); }
+.settings-dialog .set-ico svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ── 表单控件：统一高度与圆角（配色沿用原样） ── */
+.settings-dialog label input, .settings-dialog label select, .settings-dialog label textarea { border-radius: var(--set-r-ctl); }
+.settings-dialog label input, .settings-dialog label select { height: var(--set-ctl-h); }
+.settings-dialog label input:focus, .settings-dialog label select:focus, .settings-dialog label textarea:focus { border-color: var(--accent); outline: 3px solid var(--set-ring); }
+.settings-dialog .field-grid { gap: 16px; }
+
+/* ── 按钮：圆角与尺寸对齐；次级按钮改用 --surface-2 底，深色下才不会与卡片同色糊成一块
+      （浅色下本来就是白底+描边，换成 --surface-2 反而更接近既有 hover 态，配色未变） ── */
+.settings-dialog .primary-button { min-height: 36px; padding: 0 16px; border-radius: var(--set-r-ctl); font-weight: 600; box-shadow: 0 2px 10px var(--set-glow); }
+.settings-dialog .control-button { min-height: 34px; border-radius: var(--set-r-ctl); background: var(--surface-2); }
+.settings-dialog .danger-button { min-height: 34px; border-radius: var(--set-r-ctl); }
+.settings-dialog .form-actions { gap: 10px; margin-top: 16px; }
+
+/* ── 分段控件：API 类型切换与「主题模式」同款（底槽 + 选中实心胶囊） ── */
+.settings-dialog .provider-scope-tabs { gap: 4px; margin-bottom: 16px; padding: 4px; border-radius: var(--r-lg); }
+.settings-dialog .provider-scope-tabs button { min-height: 40px; border-radius: var(--r-sm); font-size: 13.5px; }
+.settings-dialog .provider-scope-tabs button.active { background: var(--accent-solid); color: #fff; box-shadow: 0 2px 10px var(--set-glow); }
+
+/* 主题模式：三格分段。单选项本身仍可被键盘 Tab 到（只做视觉隐藏，不用 display:none，
+   否则键盘用户无法到达——把「好看」做进 a11y 的底线）。 */
+.settings-dialog .appearance-theme-options { gap: 4px; padding: 4px; border-radius: var(--r-lg); background: var(--surface-2); }
+.settings-dialog .appearance-theme-options .appearance-option { justify-content: center; padding: 9px 12px; border: 0; border-radius: var(--r-sm); }
+.settings-dialog .appearance-theme-options .appearance-option span { text-align: center; }
+.settings-dialog .appearance-theme-options .appearance-option:has(input:checked) { background: var(--accent-solid); color: #fff; }
+.settings-dialog .appearance-theme-options .appearance-option:has(input:checked) b { color: #fff; }
+.settings-dialog .appearance-theme-options .appearance-option:has(input:checked) small { color: rgba(255, 255, 255, .82); }
+
+/* 单选项（主题 / 皮肤 / 会话字体）里的原生 radio 只做「选中状态」的语义载体，
+   视觉上不再单独出现——它原来是 display:block + width:100%，在横排里会把标题和
+   说明挤成竖排（旧版外观页的真实错位来源）。选中表达交给容器边框/底色与皮肤色块打勾。 */
+.settings-dialog .appearance-option, .settings-dialog .skin-option { position: relative; }
+.settings-dialog .appearance-option input, .settings-dialog .skin-option input { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; opacity: 0; }
+.settings-dialog .appearance-option:has(input:focus-visible), .settings-dialog .skin-option:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.settings-dialog .appearance-option span { min-width: 0; }
+
+/* ── 皮肤色板：圆形色块，选中块内打勾 + 强调色光环（色块本身仍是各皮肤原色） ── */
+.settings-dialog .skin-option { flex-direction: row; align-items: center; gap: 9px; padding: 9px 11px; border-radius: var(--set-r-ctl); }
+.settings-dialog .skin-swatch { flex: none; display: grid; place-items: center; width: 22px; height: 22px; border-radius: var(--r-full); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .08); }
+.settings-dialog .skin-option:has(input:checked) .skin-swatch { color: #fff; font-size: 12px; font-weight: 700; box-shadow: 0 0 0 3px var(--accent-soft), inset 0 0 0 1px rgba(0, 0, 0, .06); }
+.settings-dialog .skin-option:has(input:checked) .skin-swatch::after { content: "✓"; line-height: 1; }
+
+/* ── 会话字体：选项间距与样例块对齐新卡片语言 ── */
+.settings-dialog .appearance-font-options { gap: 10px; }
+.settings-dialog .chat-font-sample { border-style: solid; border-color: var(--line); border-radius: var(--set-r-ctl); }
+
+/* ── 开关：复选框渲染成胶囊开关（仅 .checkbox-field，Skill 列表的复选框不受影响） ── */
+.settings-dialog .checkbox-field input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  width: 40px;
+  height: 22px;
+  margin: 1px 0 0;
+  flex: none;
+  border: 0;
+  border-radius: var(--r-full);
+  background: var(--line-strong);
+  cursor: pointer;
+  transition: background var(--t-fast);
+}
+.settings-dialog .checkbox-field input[type="checkbox"]::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .28); transition: transform var(--t-fast); }
+.settings-dialog .checkbox-field input[type="checkbox"]:checked { background: var(--accent); }
+.settings-dialog .checkbox-field input[type="checkbox"]:checked::after { transform: translateX(18px); }
+.settings-dialog .checkbox-field input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── 滑杆：细轨 + 已填部分（--fill 由 JS 按当前值写入）+ 圆钮，着色仍走强调色 ── */
+.settings-dialog input[type="range"] { -webkit-appearance: none; appearance: none; height: 22px; background: transparent; cursor: pointer; }
+.settings-dialog input[type="range"]::-webkit-slider-runnable-track { height: 6px; border-radius: var(--r-full); background: linear-gradient(to right, var(--accent) 0 var(--fill, 0%), var(--surface-2) var(--fill, 0%) 100%); box-shadow: inset 0 0 0 1px var(--line); }
+.settings-dialog input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; margin-top: -5px; border: 2px solid var(--accent); border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, .25); }
+.settings-dialog input[type="range"]::-moz-range-track { height: 6px; border-radius: var(--r-full); background: var(--surface-2); }
+.settings-dialog input[type="range"]::-moz-range-progress { height: 6px; border-radius: var(--r-full); background: var(--accent); }
+.settings-dialog input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; border: 2px solid var(--accent); border-radius: 50%; background: #fff; }
+.settings-dialog input[type="range"]:focus-visible { outline: none; }
+.settings-dialog input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--set-ring), 0 1px 4px rgba(0, 0, 0, .25); }
+
+/* ── 卡内浅底状态行 / 连接卡片：只调圆角与内边距 ── */
+.settings-dialog .image-cache-row, .settings-dialog .storage-stat-row { padding: 11px 13px; border-radius: var(--set-r-ctl); }
+.settings-dialog .image-cache-row .control-button, .settings-dialog .storage-stat-row .control-button { min-height: 30px; }
+.settings-dialog .mcp-add-form { border-radius: var(--set-r-card); }
+.settings-dialog .connection-item { border-radius: var(--set-r-ctl); }
+.settings-dialog .connection-address { border-radius: var(--set-r-ctl); }
+
+/* ── 键值表（「数据与迁移」信息块 / 「软件更新」状态块） ── */
+.settings-dialog .update-status { border-radius: var(--set-r-card); }
+.settings-dialog .update-status > div { min-height: 48px; padding: 11px 14px; }
+.settings-dialog .update-status b { font-weight: 600; }
+
+/* ── API 供应商 / Agent 卡片：圆形首字头像（沿用强调色软底）+ 圆角对齐 ── */
+.settings-dialog .provider-cards, .settings-dialog .agent-cards { gap: 12px; }
+.settings-dialog .provider-card, .settings-dialog .agent-card { border-radius: var(--set-r-card); }
+.settings-dialog .provider-card { padding: 13px 13px 12px; }
+.settings-dialog .provider-card-head { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.settings-dialog .provider-card-head .provider-card-name { flex: 1 1 auto; min-width: 0; }
+.settings-dialog .provider-card-avatar { flex: none; width: 26px; height: 26px; display: grid; place-items: center; border-radius: var(--r-full); background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 700; }
+.settings-dialog .agent-card { padding: 15px 15px 13px; }
+.settings-dialog .agent-card-avatar, .settings-dialog .agent-card-avatar-emoji { width: 26px; height: 26px; }
+
+/* ── 手机端：新控件的尺度收一档（横排导航等既有形态不动） ──
+   间距类两条是**还原**：桌面段是 (0,2,0)，同特异度压不过手机块原本的 (0,1,0) 写法，
+   这里显式写回手机块本来的取值，免得桌面尺度渗进窄屏。 */
+@media (max-width: 760px) {
+  .settings-dialog .dialog-toolbar { min-height: 64px; padding: 10px 14px; }
+  .settings-dialog .settings-layout { height: calc(100% - 64px); }
+  .settings-dialog .settings-content { padding: 16px; }
+  .settings-dialog .settings-panel-head { margin-bottom: 14px; }
+  .settings-dialog .settings-card { padding: 15px 16px; border-radius: var(--r-lg); margin-bottom: 14px; }
+  .settings-dialog .appearance-theme-options .appearance-option { padding: 8px 9px; }
+  .settings-dialog .appearance-theme-options .appearance-option small { display: none; }
+  .settings-dialog .skin-option { padding: 8px 10px; }
+}

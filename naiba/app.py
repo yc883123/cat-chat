@@ -1550,10 +1550,16 @@ class NaibaChatApp:
     def _upload_path_in_use(self, target: Path) -> bool:
         """上传文件是否"在用"：消息/快照引用（storage 判定）之外，聊天背景图也算。
 
-        背景图路径只写在 config.json 里（不是消息附件），不补这条判定的话，缓存自动
-        清理会把它当无人引用的旧图删掉——用户什么都没做，背景图就"自己没了"
-        （前端兜底只会清空设置并提示）。手动清理仍按"不区分引用"的既有语义，
-        不改（那是用户显式点的按钮，UI 已明确告知）。
+        背景图路径只写在 config.json 里（不是消息附件），不补这条判定的话，缓存清理
+        会把它当无人引用的旧图删掉——用户什么都没做，背景图就"自己没了"
+        （前端兜底只会清空设置并提示）。
+
+        **自动清理与设置页「清理旧缓存文件」共用本判定**（2026-09-24 修：手动路径此前
+        刻意不带引用保护，UI 也照实写了"不区分引用"，结果就是点一下按钮把背景图删了）。
+        本函数是"缓存树里哪些文件不许删"的**唯一口径**，两处入口都从它取。
+
+        应用图标不在此列也不需在此列：`custom-icon.*` 落在 ``app_dir``（不是 data_dir），
+        而缓存清理只遍历 ``data_dir/uploads`` 与 ``data_dir/generated``，物理上碰不到它。
         """
         try:
             if self.storage.upload_path_referenced(target):
@@ -1571,8 +1577,13 @@ class NaibaChatApp:
 
     def api_clean_image_cache(self) -> tuple[dict[str, Any], int]:
         """手动清理缓存文件（设置页按钮）：与自动清理共用同一阈值口径
-        （imaging.auto_clean_limit_mb，默认 256MB；0=关闭自动清理时手动回退默认值），
-        按时间从旧到新保留最新文件、不区分引用（UI 已明确告知此语义）。
+        （imaging.auto_clean_limit_mb，默认 256MB；0=关闭自动清理时手动回退默认值）。
+
+        **必须带引用保护**：与自动清理传同一个 ``_upload_path_in_use``——被消息、快照或
+        「聊天背景图」引用的文件一律保留。2026-09-24 修：此前手动路径传 ``None``
+        （"不区分引用"，UI 文案也这么写），于是用户点一下「清理旧缓存文件」就把自己设的
+        **背景图**删了，卡片随即变成「背景图文件暂不可用」——用户视角是"清缓存把背景清没了"。
+        引用文件过多时允许超限（宁可缓存大，不删用户在用的图）；确实没得清时前端会说明原因。
         """
         imaging = dict(self.config.data.get("imaging") or {}) if getattr(self, "config", None) else {}
         try:
@@ -1582,7 +1593,11 @@ class NaibaChatApp:
         if limit_mb <= 0:
             limit_mb = 256
         try:
-            result = _clean_uploads_cache(limit=limit_mb * 1024 * 1024, data_dir=self._paths.data_dir)
+            result = _clean_uploads_cache(
+                limit=limit_mb * 1024 * 1024,
+                data_dir=self._paths.data_dir,
+                referenced_checker=self._upload_path_in_use,
+            )
         except OSError as exc:
             return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
         return result, HTTPStatus.OK

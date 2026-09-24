@@ -2,7 +2,7 @@
 // 09-settings.js —— 拆分自 public/app.js 第 3115-4672 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, api, applyAppearance, applyChatBackground, CHAT_FONT_PICKS, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, isFontInstalled, localFileUrl, refreshChatBackgroundImageStatus, state, toast } from "./01-core.js";
+import { $, $$, agentAvatarEmoji, agentAvatarSrc, api, applyAppearance, applyChatBackground, CHAT_FONT_PICKS, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, isFontInstalled, localFileUrl, refreshChatBackgroundImageStatus, state, toast } from "./01-core.js";
 import { applyConversationAgent, populateComposerModels, populateModels, renderAgents, updateUnloadModelButton } from "./07-models-agents.js";
 import { closeAgentPromptPresetPanel, currentAgentFixedSkillIds, renderAgentPromptPresetList } from "./08-conversations.js";
 import { skillList } from "./13-skill-refs.js";
@@ -45,6 +45,18 @@ export function populateAppearanceSettings() {
   populateChatBackgroundSettings();
 }
 
+// 滑杆的「已填充部分」：纯 CSS 无法按控件当前值画轨道（轨道不知道 value），
+// 于是由 JS 把百分比写进 --fill，交给 CSS 的 linear-gradient 着色。
+// 纯视觉：不落库、不发请求，值本身仍由原有的预览/保存路径负责。
+export function syncRangeFill(input) {
+  if (!input || input.type !== 'range') return;
+  const min = Number(input.min || 0);
+  const max = Number(input.max || 100);
+  const value = Number(input.value || 0);
+  const ratio = max > min ? (value - min) / (max - min) : 0;
+  input.style.setProperty('--fill', `${Math.round(Math.min(Math.max(ratio, 0), 1) * 100)}%`);
+}
+
 // 把 state.appearance 回显到外观面板的所有控件（主题 / 皮肤 / 会话字号 / 字体族）。
 // 设置弹窗打开（populateAppearanceSettings）与保存/恢复默认之后都要调它，
 // 否则"保存成功了但控件还显示旧值"。
@@ -64,6 +76,7 @@ export function syncAppearanceControls() {
   $$('input[name="appearanceChatFont"]').forEach((input) => { input.checked = input.value === radioValue; });
   const slider = $('#chatFontSize');
   if (slider && slider.value !== String(size)) slider.value = String(size);
+  syncRangeFill(slider);
   const output = $('#chatFontSizeValue');
   if (output) output.textContent = `${size}px`;
   const customRow = $('#chatFontCustomRow');
@@ -150,6 +163,7 @@ export function updateChatBackgroundControls() {
   const slider = $('#chatBackgroundOpacity');
   // 用户正在拖滑杆时不要用回填值抢走手柄（input 事件会重绘周边文案）。
   if (slider && document.activeElement !== slider) slider.value = String(background.opacity);
+  syncRangeFill(slider);
   const output = $('#chatBackgroundOpacityValue');
   if (output) output.textContent = `${Math.round(Number(background.opacity) * 100)}%`;
   const preview = $('#chatBackgroundPreview');
@@ -500,16 +514,21 @@ export async function openProviderPresetKeyUrl(presetId) {
 
 function providerCardMarkup(provider) {
   const id = escapeHtml(provider.id || '');
-  const name = escapeHtml(provider.name || '未命名供应商');
+  const label = provider.name || '未命名供应商';
+  const name = escapeHtml(label);
+  const initial = escapeHtml((Array.from(label.trim())[0] || '?').toUpperCase());
   const format = PROVIDER_FORMAT_LABELS[provider.request_format] || escapeHtml(provider.request_format || '未指定格式');
-  // 卡片压成两行：名称 + 脚行（格式标签 + 当前角标）。模型名不再上卡片（在弹层里看），
-  // 卡片更矮、一行能放下的信息更整齐。
+  // 卡片压成两行：首行（首字头像 + 名称）+ 脚行（格式标签 + 当前角标）。模型名不再上卡片（在弹层里看），
+  // 卡片更矮、一行能放下的信息更整齐。头像底色走 --accent-soft（原版配色，不引入新色值）。
   return `
     <div class="provider-card${provider.is_default ? ' is-default' : ''}" data-provider-card="${id}" role="button" tabindex="0" aria-label="编辑 ${name}">
       <button class="provider-card-delete" type="button" data-provider-delete="${id}" title="删除 ${name}" aria-label="删除 ${name}">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
       </button>
-      <span class="provider-card-name" title="${name}">${name}</span>
+      <span class="provider-card-head">
+        <span class="provider-card-avatar" aria-hidden="true">${initial}</span>
+        <span class="provider-card-name" title="${name}">${name}</span>
+      </span>
       <span class="provider-card-foot">
         <span class="provider-card-tag">${format}</span>
         ${provider.is_default ? '<span class="provider-card-badge">当前</span>' : ''}
@@ -1044,7 +1063,27 @@ export async function cleanImageCache() {
     const result = await api('/api/imaging/clean', { method: 'POST', body: {} });
     state.bootstrap.image_cache_bytes = Number(result.size || 0);
     $('#imageCacheSize').textContent = formatBytes(Number(result.size || 0));
-    toast(`已清理 ${formatBytes(Number(result.freed || 0))}（删除 ${Number(result.removed || 0)} 个文件，按时间从旧到新）`);
+    // 如实报账：删了多少 / 释放多少 / **保留了多少仍在用的**。
+    // 后端会保护被消息、快照、聊天背景图引用的文件，所以"点了清理却没删多少"是正常结果，
+    // 必须说明原因——否则会被当成按钮坏了（用户报障：清缓存把自己设的背景图清没了）。
+    const removed = Number(result.removed || 0);
+    const freed = Number(result.freed || 0);
+    const keptReferenced = Number(result.skipped_referenced || 0);
+    const keptRecent = Number(result.skipped_recent || 0);
+    if (removed === 0) {
+      const reasons = [];
+      if (keptReferenced) reasons.push(`${keptReferenced} 个仍在使用（背景图 / 历史消息引用）`);
+      if (keptRecent) reasons.push(`${keptRecent} 个是最近刚用的`);
+      toast(reasons.length
+        ? `没有可清理的缓存文件：${reasons.join('、')}，已自动保留`
+        : '没有可清理的缓存文件');
+    } else {
+      const kept = [];
+      if (keptReferenced) kept.push(`${keptReferenced} 个仍在用的文件`);
+      if (keptRecent) kept.push(`${keptRecent} 个最近用过的文件`);
+      toast(`已清理 ${formatBytes(freed)}（删除 ${removed} 个文件）`
+        + (kept.length ? `，另保留 ${kept.join('、')}` : ''));
+    }
   } catch (error) {
     toast(`清理失败：${error.message}`);
   } finally {
@@ -1371,9 +1410,9 @@ const AGENT_PROMPT_PREVIEW_LIMIT = 140;
 // 弹层里新选的头像文件（保存时才上传；新建 Agent 此时还没有 id，必须延后到保存后）。
 let agentAvatarFile = null;
 
+// 上传头像的 URL（内置 Agent 的 emoji 头像走 agentAvatarEmoji，不在这里）。
 export function agentAvatarUrl(agent) {
-  const file = String(agent?.avatar || '');
-  return file ? `/api/agents/avatar/${encodeURIComponent(file)}` : '';
+  return agentAvatarSrc(agent);
 }
 
 function agentCardMarkup(agent) {
@@ -1385,6 +1424,11 @@ function agentCardMarkup(agent) {
     ? `${prompt.slice(0, AGENT_PROMPT_PREVIEW_LIMIT)}…`
     : prompt;
   const avatar = agentAvatarUrl(agent);
+  // 内置 Agent 用 emoji 当头像（avatar 字段存字形）；上传过图片的走 <img>。两者互斥。
+  const avatarEmoji = agentAvatarEmoji(agent);
+  const avatarHtml = avatar
+    ? `<img class="agent-card-avatar" src="${escapeHtml(avatar)}" alt="">`
+    : (avatarEmoji ? `<span class="agent-card-avatar agent-card-avatar-emoji">${escapeHtml(avatarEmoji)}</span>` : '');
   // 卡片上不再标「默认」角标、也不给默认 Agent 加高亮：默认项由顶栏 Agent 选择器体现，
   // 卡片上一旦有强调色/角标，会被误读成"当前选中/正在编辑的那一个"。
   const badges = [
@@ -1394,7 +1438,7 @@ function agentCardMarkup(agent) {
   return `
     <div class="agent-card" data-agent-card="${id}" role="button" tabindex="0" aria-label="编辑 ${name}">
       ${agent.built_in ? '' : `<button class="agent-card-delete" type="button" data-agent-delete="${id}" title="删除 ${name}" aria-label="删除 ${name}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>`}
-      <span class="agent-card-name" title="${name}">${avatar ? `<img class="agent-card-avatar" src="${escapeHtml(avatar)}" alt="">` : ''}${name}</span>
+      <span class="agent-card-name" title="${name}">${avatarHtml}${name}</span>
       <span class="agent-card-meta">${skills ? `${skills} 个固定 Skill` : '无固定 Skill'}</span>
       <span class="agent-card-tools" title="该 Agent 的工具集：${escapeHtml(toolSetName)}">工具集：${escapeHtml(toolSetName)}</span>
       <p class="agent-card-prompt">${preview ? escapeHtml(preview) : '未设置系统提示词'}</p>
@@ -1487,6 +1531,13 @@ export function showAgentForm(agent = null) {
     avatarPreview.src = existingAvatar;
     avatarPreview.title = existingAvatar ? '当前头像' : '';
   }
+  // emoji 头像（内置 Agent）用一个文本节点预览：<img> 画不出字形。
+  const existingEmoji = agentAvatarEmoji(agent);
+  const emojiPreview = $('#agentAvatarEmojiPreview');
+  if (emojiPreview) {
+    emojiPreview.hidden = !existingEmoji;
+    emojiPreview.textContent = existingEmoji;
+  }
   $('#agentDialogTitle').textContent = state.agentFormIsNew ? '新增 Agent' : (agent?.name || 'Agent 设置');
   $('#agentDialogSubtitle').textContent = state.agentFormIsNew
     ? '保存后自动分配 ID'
@@ -1515,6 +1566,12 @@ export function handleAgentAvatarFile(file) {
     preview.hidden = false;
     preview.src = URL.createObjectURL(file);
     preview.title = `待保存：${file.name || '头像'}`;
+  }
+  // 选了新图就顶掉 emoji 头像：保存后 avatar 字段会变成文件名，字形预览必须同步收起。
+  const emojiPreview = $('#agentAvatarEmojiPreview');
+  if (emojiPreview) {
+    emojiPreview.hidden = true;
+    emojiPreview.textContent = '';
   }
   toast('头像已选择，点「保存 Agent」后生效');
 }

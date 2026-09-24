@@ -2513,6 +2513,12 @@ export async function backupData() {
 export function switchSettingsTab(name) {
   $$('.settings-nav button').forEach((button) => button.classList.toggle('active', button.dataset.settingsTab === name));
   $$('[data-settings-panel]').forEach((panel) => { panel.hidden = panel.dataset.settingsPanel !== name; });
+  // 标题栏副标题跟随当前分类；切换后内容区回到顶部，避免带着上一页的滚动位置。
+  const tabButton = $$('.settings-nav button[data-settings-tab]').find((button) => button.dataset.settingsTab === name);
+  const toolbarSub = $('#settingsToolbarSub');
+  if (toolbarSub && tabButton) toolbarSub.textContent = tabButton.textContent.trim();
+  const content = $('.settings-dialog .settings-content');
+  if (content) content.scrollTop = 0;
   if (name === 'appearance') {
     const theme = state.appearance?.theme || 'system';
     const skin = state.appearance?.skin || 'violet';

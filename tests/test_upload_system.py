@@ -245,8 +245,14 @@ class StoreUploadedFileTests(unittest.TestCase):
         self.assertIsNotNone(resolve_attachment_file(self.data_dir, stale))
         self.assertFalse(missing_cache_attachment(self.data_dir, stale), "迁移后的旧路径能兜底命中就不算缺失")
 
-    def test_manual_clean_without_checker_keeps_referenced_unaware(self) -> None:
-        """手动清理（无 checker）保持按时间保留语义，不感知引用。"""
+    def test_low_level_clean_without_checker_is_time_based_only(self) -> None:
+        """底层原语的"不传 checker"回退分支：按时间保留，不感知引用。
+
+        **这不是设置页按钮的行为**（2026-09-24 起按钮与自动清理一样传 checker，见
+        `NaibaChatApp.api_clean_image_cache`）。此分支只为原语内部复用与测试保留；
+        任何面向用户的入口都不许走它——历史上手动按钮走了这条，于是把用户设的
+        聊天背景图删了。
+        """
         import os
         from datetime import datetime, timedelta
 

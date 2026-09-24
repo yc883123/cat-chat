@@ -447,6 +447,32 @@ export function localFileUrl(source) {
   return `/api/file?token=${encodeURIComponent(state.token)}&path=${encodeURIComponent(String(source || ''))}`;
 }
 
+// Agent 头像取值：`avatar` 字段要么是后端生成的头像**文件名**（`<id>_<hash>.webp`，
+// 见 naiba/storage/avatars.py::is_avatar_filename），要么是内置 Agent 的 **emoji 字形**。
+// 两者必须分清：emoji 当文件名拼进 `/api/agents/avatar/` 只会得到一张破图。
+// 放在 01-core 是因为 04-messages.js 与 09-settings.js 都要用（底层模块，无循环依赖）。
+const AVATAR_FILE_RE = /^[A-Za-z0-9_-]+\.webp$/;
+// 只把「短字形」当 emoji：历史遗留的长字符串（老文件名等）继续走 <img> 去 404，
+// 不要把它当文本画到头像位上。
+const AVATAR_EMOJI_MAX_LENGTH = 8;
+
+export function agentAvatarFile(agent) {
+  const value = String(agent?.avatar || '').trim();
+  return AVATAR_FILE_RE.test(value) && value.includes('_') ? value : '';
+}
+
+export function agentAvatarEmoji(agent) {
+  const value = String(agent?.avatar || '').trim();
+  if (!value || agentAvatarFile(agent)) return '';
+  return value.length <= AVATAR_EMOJI_MAX_LENGTH ? value : '';
+}
+
+export function agentAvatarSrc(agent) {
+  const value = String(agent?.avatar || '').trim();
+  if (!value || agentAvatarEmoji(agent)) return '';
+  return `/api/agents/avatar/${encodeURIComponent(value)}`;
+}
+
 // 几何量缓存：取景要按「图片原始比例 q」与「对话区盒子比例 r」算百分比尺寸。
 // 两个值都不便宜（q 要探针、r 要量布局），所以只在打开/尺寸变化时算一次，拖拽时复用
 // ——applyChatBackground 每次拖拽都会调用，绝不能在里面 measure（会逐帧强制布局）。

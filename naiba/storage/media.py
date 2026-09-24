@@ -278,10 +278,10 @@ def auto_clean_uploads(
     referenced_checker: Callable[[Path], bool] | None = None,
     protect_paths: Iterable[str | Path] | None = None,
 ) -> dict[str, Any] | None:
-    """上传后超限自动清理：仅超过 limit 时触发；默认带引用保护（B1）。
+    """上传后超限自动清理：仅超过 limit 时触发；带引用保护（B1）。
 
-    referenced_checker 提供时只删未被引用的组（历史消息引用永久保留），
-    未提供时退化为手动清理的按时间保留语义（调用方应始终提供）。
+    referenced_checker 提供时只删未被引用的组（消息/快照/聊天背景引用永久保留）；
+    未提供时退化为按时间保留语义（**不感知引用**），调用方应始终提供。
     protect_paths 是本次调用必须无条件保留的路径（上传入口传本次刚落盘的主图/缩略图）——
     与 ``UPLOAD_CLEAN_GRACE_SECONDS`` 保护窗口互为双保险。
     """
@@ -487,22 +487,31 @@ def _clean_uploads_cache(
 ) -> dict[str, Any]:
     """清理旧图片缓存（uploads + generated）。
 
-    ``referenced_checker=None``（手动清理，设置页按钮）：按组（主图+缩略图）× 时间戳
-    从新到旧，保留总大小不超过 limit 的最新的（旧行为，**不感知引用、也不受保护窗口约束**）；
-    ``referenced_checker`` 提供（自动清理 B1）：从最旧开始逐组删除**未被引用**的组
-    （checker 返回 True=被消息/快照引用，永久保留），直到剩余 ≤ limit；引用文件
-    过多时允许超限（宁可缓存超限也不删用户历史引用的图）。自动清理另有两道保护：
-    - ``grace_seconds`` 保护窗口：最近落盘/改动的组一律不删（刚上传待发送、工具刚产出）；
-    - ``protect_paths``：本次必须无条件保留的具体路径（上传入口传刚落盘的文件）。
+    两条路径**都应当传 referenced_checker**（生产代码无例外）：
+    - 传了（正常路径，自动清理与设置页手动清理都走这条）：从最旧开始逐组删除
+      **未被引用**的组（checker 返回 True = 被消息/快照/聊天背景引用，永久保留），
+      直到剩余 ≤ limit；引用文件过多时允许超限（宁可缓存超限也不删用户正在用的图）。
+      另有两道保护：
+      - ``grace_seconds`` 保护窗口：最近落盘/改动的组一律不删（刚上传待发送、工具刚产出）；
+      - ``protect_paths``：本次必须无条件保留的具体路径（上传入口传刚落盘的文件）。
+    - 不传（``None``，**仅测试与历史语义**）：按组（主图+缩略图）× 时间戳从新到旧，
+      保留总大小不超过 limit 的最新的——**不感知引用、不受保护窗口约束**。
+      2026-09-24 修：设置页「清理旧缓存文件」曾经走的是这条，于是把**聊天背景图**
+      与**历史消息里展示过的图**一起删了（用户什么都没做背景就"自己没了"）。
+      任何面向用户的入口都不许再用 None。
 
     返回 {removed: 删除文件数, freed: 释放字节数, size: 清理后剩余字节数,
-    skipped_recent: 因保护窗口跳过的组数, skipped_protected: 因 protect_paths 跳过的组数}。
+    skipped_recent: 因保护窗口跳过的组数, skipped_protected: 因 protect_paths 跳过的组数,
+    skipped_referenced: 因被引用跳过的组数（前端据此如实告知"保留了多少仍在用的文件"）}。
     """
     if data_dir is None:
         raise ValueError("data_dir 必须显式传入")
     cache_dirs = [d for d in _image_cache_dirs(data_dir) if d.is_dir()]
     if not cache_dirs:
-        return {"removed": 0, "freed": 0, "size": 0, "skipped_recent": 0, "skipped_protected": 0}
+        return {
+            "removed": 0, "freed": 0, "size": 0,
+            "skipped_recent": 0, "skipped_protected": 0, "skipped_referenced": 0,
+        }
     # 以"主图 + 其缩略图"成组（主图名 X.ext 与其缩略图 X_thumb.webp 归为一组）。
     # 组键 = "目录名/相对路径"（相对 cache_dir，含分日子目录），
     # 避免不同日期/不同目录下同名前缀被合并（上传分日目录 2026-09 起）。
@@ -563,6 +572,7 @@ def _clean_uploads_cache(
         freed = 0
         skipped_recent = 0
         skipped_protected = 0
+        skipped_referenced = 0
         for mtime, key, paths in sorted(entries, key=lambda item: item[0]):  # 旧 -> 新
             if remaining <= limit:
                 break
@@ -577,7 +587,10 @@ def _clean_uploads_cache(
             )
             try:
                 if referenced_checker(main_file):
-                    continue  # 被消息/快照引用：永久保留（允许超限）
+                    # 计数而非静默跳过：设置页要如实告诉用户"保留了多少个仍在用的文件"，
+                    # 否则"点了清理却好像没反应"会被当成按钮坏了（见 api_clean_image_cache）。
+                    skipped_referenced += 1
+                    continue  # 被消息/快照/聊天背景引用：永久保留（允许超限）
             except (OSError, ValueError):
                 continue
             group_size = _group_size(paths)
@@ -596,6 +609,7 @@ def _clean_uploads_cache(
             "size": _uploads_total_bytes(data_dir),
             "skipped_recent": skipped_recent,
             "skipped_protected": skipped_protected,
+            "skipped_referenced": skipped_referenced,
         }
 
     kept_keys: set[str] = set()
@@ -618,11 +632,14 @@ def _clean_uploads_cache(
                 freed += size
             except OSError:
                 continue
-    # 手动清理不做保护（用户显式操作，语义即"按时间保留最短"）：跳过计数恒为 0。
+    # 这是"不传 referenced_checker"的**按时间保留**分支：它不感知引用（见上方函数文档）。
+    # 生产代码的两个入口（上传后自动清理、设置页手动清理）都必须传 checker；
+    # 此处不再是设置页按钮的行为，勿据此推断"手动清理会删引用文件"。
     return {
         "removed": removed,
         "freed": freed,
         "size": _uploads_total_bytes(data_dir),
         "skipped_recent": 0,
         "skipped_protected": 0,
+        "skipped_referenced": 0,
     }

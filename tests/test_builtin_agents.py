@@ -18,7 +18,9 @@
 - 往任一内置 scope 里塞 `subagent` → `test_scope_never_grants_spawn_and_external_tools` 变红；
 - 把 tutor 挪到第二位 → `test_ids_and_order_are_pinned` 变红；
 - 把 tutor 的绑定换成不存在的 id 或非随包 id → `test_bindings_are_bundled_skills` 变红；
-- 把 cat-chat-guide 的 id 加进 DEFAULTS['hidden_skill_ids'] → `test_default_hidden_skills_stay_usable` 变红。
+- 把 cat-chat-guide 的 id 加进 DEFAULTS['hidden_skill_ids'] → `test_default_hidden_skills_stay_usable` 变红；
+- `_is_untouched_factory_agent()` 里去掉 `tool_scope` 那一项判断 → `test_narrowed_tool_scope_is_kept` 变红；
+- 迁移里去掉改指 default 的那两行 → `test_default_agent_id_is_repointed_when_it_was_removed` 变红。
 """
 from __future__ import annotations
 
@@ -32,6 +34,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from naiba.config import (  # noqa: E402
+    _RETIRED_FACTORY_AGENT_IDS,
     TOOL_PRESETS,
     ConfigStore,
     built_in_agent_ids,
@@ -45,8 +48,27 @@ from naiba.skills.catalog import SkillCatalog  # noqa: E402
 BUNDLED_SKILLS_DIR = ROOT / "skills"
 
 EXPECTED_ORDER = ("tutor", "master", "director", "prompter", "coder", "skills")
-# 老三样：出厂必须原样保留，且不能与内置 id 撞车（撞了会把用户改过的 Agent 顶掉）。
+# 老三样（已退役的出厂 Agent）：id 不能与内置 id 撞车（撞了会把老用户改过的 Agent 顶掉）。
 LEGACY_AGENT_IDS = {"general", "coding", "drama"}
+
+# 2.8.9-beta 之前 `default_config()["agents"]` 的出厂原样。**故意在测试里重写一遍**，
+# 不从生产常量读——否则生产常量改错时测试会跟着一起错（同义反复）。
+# 迁移只清「与这份定义逐字段完全一致」的条目，改过的必须留下（见 RetiredFactoryAgentCleanupTests）。
+LEGACY_FACTORY_AGENTS = (
+    {"id": "general", "name": "通用 Agent", "system_prompt": "", "skill_ids": []},
+    {
+        "id": "coding",
+        "name": "编程 Agent",
+        "system_prompt": "你是资深编程助手。先理解需求，再给出可直接运行、结构清晰的代码；涉及文件操作时先说明改动范围。",
+        "skill_ids": [],
+    },
+    {
+        "id": "drama",
+        "name": "短剧 Agent",
+        "system_prompt": "你是短剧创作助手。遵循所选短剧类 Skill 的交互收集流程，逐步确认主题、角色、分镜与风格后再产出内容。",
+        "skill_ids": [],
+    },
+)
 
 # 预设兜底的内置 Agent → TOOL_PRESETS 的 id。
 PRESET_BACKED = {
@@ -274,10 +296,11 @@ class PublicAgentsOrderTests(unittest.TestCase):
         return ConfigStore(self.config_path)
 
     def test_fresh_install_order_is_built_in_first(self) -> None:
+        """全新安装的 Agent 下拉**恒为 6 项内置**（老三样自 2.8.9-beta 起不再出厂）。"""
         store = self._store()
         self.assertEqual([a["id"] for a in store.public_agents()],
-                         [*EXPECTED_ORDER, "general", "coding", "drama"],
-                         "内置区在最前，老三样保持出厂相对顺序排在其后")
+                         list(EXPECTED_ORDER),
+                         "出厂配置不含自定义 Agent，下拉必须正好是内置那 6 项")
 
     def test_custom_agents_land_after_built_in_section(self) -> None:
         store = self._store({"agents": [
@@ -306,7 +329,7 @@ class PublicAgentsOrderTests(unittest.TestCase):
         for agent_id in EXPECTED_ORDER:
             with self.subTest(agent=agent_id):
                 self.assertFalse(store.delete_agent(agent_id), "内置 Agent 不可删除")
-        self.assertEqual([a["id"] for a in store.public_agents()], [*EXPECTED_ORDER, "general", "coding", "drama"])
+        self.assertEqual([a["id"] for a in store.public_agents()], list(EXPECTED_ORDER))
 
     def test_upsert_of_built_in_id_marks_built_in(self) -> None:
         store = self._store({})
@@ -335,12 +358,18 @@ class DefaultAgentTests(unittest.TestCase):
         self.assertEqual(agent["name"], "全能 Agent")
 
     def test_legacy_default_value_is_preserved(self) -> None:
-        """老用户配置里已存过默认值 ⇒ 不回溯（只在缺失/失效时才回落到首个可用 Agent）。"""
+        """老用户配置里已存过默认值 ⇒ 不回溯（只在缺失/失效时才回落到首个可用 Agent）。
+
+        老用户要**保留自己设过的默认 Agent**（这里用用户自建 id 代表：老三样已退役，
+        未改动的会在启动时被清掉并改指 master，见 RetiredFactoryAgentCleanupTests）。
+        """
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.json"
-            config_path.write_text(json.dumps({"default_agent_id": "general"}, ensure_ascii=False),
-                                   encoding="utf-8")
-            self.assertEqual(ConfigStore(config_path).default_agent_id(), "general")
+            config_path.write_text(json.dumps({
+                "agents": [{"id": "mine", "name": "我的", "system_prompt": "", "skill_ids": []}],
+                "default_agent_id": "mine",
+            }, ensure_ascii=False), encoding="utf-8")
+            self.assertEqual(ConfigStore(config_path).default_agent_id(), "mine")
 
     def test_invalid_default_falls_back_to_a_resolvable_agent(self) -> None:
         """默认值失效（指向已删 Agent）时必须回落，不能返回一个解析不到的空 id。"""
@@ -393,6 +422,98 @@ class AgentHelpPopoverTests(unittest.TestCase):
                     "<b>%s</b>" % legacy, block,
                     "老三样已不是产品推荐的预设，弹层不得再把它们当预设介绍",
                 )
+
+
+class RetiredFactoryAgentCleanupTests(unittest.TestCase):
+    """老用户配置里「从没被碰过」的老三样，启动时必须被清掉；改过的一个都不许动。
+
+    为什么要有这条迁移（2.9.2-beta）：出厂配置自 2.8.9-beta 起不再预置 general / coding /
+    drama（改由 `built_in_agents()` 提供 6 个内置），但 `ConfigStore.__init__` 是
+    `defaults.update(loaded)` 而 `agents` 为**整体键替换**——只改出厂配置**只影响新装**，
+    老用户 config.json 里的老三样会一直留在 Agent 下拉里（新装 6 项 / 老用户 9 项），
+    与弹层写的「内置 6 个 Agent」和教程正文当场对不上。
+
+    判据边界（这是本条守门真正要钉的东西）：
+    - **未改动的判定是逐字段一致**——只改过 tool_scope、只改过名字、挂过 Skill、换过头像，
+      都算"用户碰过"，必须保留。宁可留冗余，也不能升级覆盖用户自定义。
+    - 被清掉的条目若正是 `default_agent_id`，必须改指 master，不能留悬空默认值。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.config_path = self.root / "config.json"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _store(self, payload: dict) -> ConfigStore:
+        self.config_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return ConfigStore(self.config_path)
+
+    def _ids(self, store: ConfigStore) -> list[str]:
+        return [a["id"] for a in store.public_agents()]
+
+    def test_retired_id_set_is_pinned(self) -> None:
+        """生产常量必须正好覆盖老三样——多写一个 id 就可能误删用户的别的 Agent。"""
+        self.assertEqual(set(_RETIRED_FACTORY_AGENT_IDS), LEGACY_AGENT_IDS)
+
+    def test_untouched_three_are_removed_on_upgrade(self) -> None:
+        store = self._store({"agents": [dict(item) for item in LEGACY_FACTORY_AGENTS]})
+        self.assertEqual(self._ids(store), list(EXPECTED_ORDER),
+                         "逐字段未改动的老三样必须被清掉，下拉与新装一致（6 项）")
+
+    def test_default_agent_id_is_repointed_when_it_was_removed(self) -> None:
+        store = self._store({
+            "agents": [dict(item) for item in LEGACY_FACTORY_AGENTS],
+            "default_agent_id": "general",
+        })
+        resolved = store.default_agent_id()
+        self.assertEqual(resolved, "master", "被清掉的默认 Agent 必须改指 master，不能留悬空值")
+        self.assertIsNotNone(store.get_agent(resolved), "改指后的默认 Agent 必须解析得到")
+        # 必须**落盘**改指，而不是只靠 default_agent_id() 的兜底遮掩过去：
+        # 兜底只在读的时候生效，配置文件里留着 "general" 会让下次启动再走一遍同样的回落，
+        # 也让「用户设的默认是谁」这件事变得取决于兜底逻辑而不是数据本身。
+        saved = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["default_agent_id"], "master",
+                         "改指要写回配置文件，不能只靠运行时兜底")
+
+    def test_renamed_agent_is_kept(self) -> None:
+        """用户改过名字 ⇒ 用户资产，必须原样保留（含它自己仍是默认 Agent 这件事）。"""
+        general = dict(LEGACY_FACTORY_AGENTS[0], name="我的助手")
+        store = self._store({"agents": [general], "default_agent_id": "general"})
+        self.assertIn("general", self._ids(store), "改过名的 Agent 不得被升级清掉")
+        self.assertEqual(store.default_agent_id(), "general")
+
+    def test_narrowed_tool_scope_is_kept(self) -> None:
+        """用户收窄过工具集 ⇒ 保留。空数组（设置页存一次就会写成它）不算收窄。"""
+        narrowed = dict(LEGACY_FACTORY_AGENTS[0], tool_scope=["read_file"])
+        store = self._store({"agents": [narrowed]})
+        self.assertIn("general", self._ids(store), "收窄过工具集的 Agent 不得被清掉")
+
+    def test_form_saved_empty_tool_scope_is_still_treated_as_untouched(self) -> None:
+        general = dict(LEGACY_FACTORY_AGENTS[0], tool_scope=[])
+        store = self._store({"agents": [general]})
+        self.assertEqual(self._ids(store), list(EXPECTED_ORDER),
+                         "tool_scope=[] 与出厂（不带该键）语义相同，仍应视为未改动")
+
+    def test_edited_prompt_or_skill_binding_is_kept(self) -> None:
+        cases = {
+            "system_prompt": dict(LEGACY_FACTORY_AGENTS[1], system_prompt="改成我的规则"),
+            "skill_ids": dict(LEGACY_FACTORY_AGENTS[2], skill_ids=["97e6e849bd844ed2"]),
+            "avatar": dict(LEGACY_FACTORY_AGENTS[0], avatar="🐱"),
+        }
+        for field, agent in cases.items():
+            with self.subTest(field=field):
+                store = self._store({"agents": [agent]})
+                self.assertIn(agent["id"], self._ids(store),
+                              f"改过 {field} 的 Agent 不得被清掉")
+
+    def test_custom_agents_are_never_touched_by_the_cleanup(self) -> None:
+        mine = {"id": "agent_0123456789ab", "name": "通用 Agent", "system_prompt": "", "skill_ids": []}
+        store = self._store({"agents": [mine], "default_agent_id": "agent_0123456789ab"})
+        self.assertIn("agent_0123456789ab", self._ids(store),
+                      "清理只认老三样 id，用户自建的同名 Agent 一个都不能动")
 
 
 if __name__ == "__main__":

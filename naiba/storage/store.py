@@ -557,6 +557,32 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
 }
 
 
+# ---- SQLite 瞬时故障重试 ----
+# WAL 下「每操作开一条连接」+「主线程轮询与 worker 线程并发写」会撞上瞬时故障：
+# 最后一个连接关闭时 checkpoint 并删除 -shm/-wal，此刻另一个刚打开的连接写库会报
+# ``attempt to write a readonly database``（SQLITE_READONLY_CANTINIT）。它不是「库真的
+# 只读」，重连即成功——但 ``jobs._emit`` 的容错会把它吞成「静默丢一行事件」，
+# 实测任务面板因此偶发少一行过程日志（22 次循环复现 7 次异常、1 次断言失败）。
+# 事件写入是追加语义（sequence 在事务内重算）、Job 更新是幂等 UPDATE，
+# 因此重试不会产生重复或断号副作用。
+_TRANSIENT_SQLITE_MARKERS: tuple[str, ...] = (
+    "attempt to write a readonly database",
+    "database is locked",
+    "database table is locked",
+    "unable to open database file",
+)
+_SQLITE_WRITE_ATTEMPTS = 4
+_SQLITE_WRITE_RETRY_DELAY = 0.05
+
+
+def _is_transient_sqlite_error(exc: BaseException) -> bool:
+    """是否「重连即好」的瞬时 SQLite 故障（非瞬时错误一律原样抛出，不得掩盖）。"""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _TRANSIENT_SQLITE_MARKERS)
+
+
 class ChatStorage:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -587,6 +613,23 @@ class ChatStorage:
                 "SELECT 1 FROM background_tasks WHERE snapshot LIKE ? ESCAPE '\\' LIMIT 1", (like,)
             ).fetchone()
             return bool(row)
+
+    def _write_with_retry(self, operation: Callable[[], Any]) -> Any:
+        """执行写操作；遇瞬时 SQLite 故障自动重试（判据见 ``_is_transient_sqlite_error``）。
+
+        只重试已知的瞬时形态；其余异常（含 ``LookupError``）立即原样抛出，
+        绝不掩盖真实错误。次数用尽后抛出最后一次的瞬时异常。
+        """
+        last_error: sqlite3.OperationalError | None = None
+        for attempt in range(_SQLITE_WRITE_ATTEMPTS):
+            try:
+                return operation()
+            except sqlite3.OperationalError as exc:
+                if not _is_transient_sqlite_error(exc):
+                    raise
+                last_error = exc
+                time.sleep(_SQLITE_WRITE_RETRY_DELAY * (attempt + 1))
+        raise last_error if last_error is not None else sqlite3.OperationalError("写操作重试耗尽")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -2668,22 +2711,28 @@ class ChatStorage:
     def append_run_event(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         now = int(time.time() * 1000)
         event_type = str(payload.get("type") or "event")
-        with self._connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            exists = db.execute(
-                "SELECT 1 FROM background_tasks WHERE id = ?", (run_id,)
-            ).fetchone()
-            if not exists:
-                raise LookupError("运行不存在")
-            sequence = db.execute(
-                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_events WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()[0]
-            db.execute(
-                "INSERT INTO run_events(run_id, sequence, event_type, payload, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (run_id, sequence, event_type, json.dumps(payload, ensure_ascii=False), now),
-            )
+
+        def _write() -> int:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                exists = db.execute(
+                    "SELECT 1 FROM background_tasks WHERE id = ?", (run_id,)
+                ).fetchone()
+                if not exists:
+                    raise LookupError("运行不存在")
+                sequence = db.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_events WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()[0]
+                db.execute(
+                    "INSERT INTO run_events(run_id, sequence, event_type, payload, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (run_id, sequence, event_type, json.dumps(payload, ensure_ascii=False), now),
+                )
+                return int(sequence)
+
+        # 瞬时故障重试：sequence 在事务内重算，重试不会写出重复或断号的事件。
+        sequence = int(self._write_with_retry(_write))
         return {**payload, "run_id": run_id, "sequence": sequence, "created_at": now}
 
     def list_run_events(self, run_id: str, after: int = 0, limit: int = 500) -> list[dict[str, Any]]:
@@ -2818,13 +2867,17 @@ class ChatStorage:
         if not values:
             return self.get_background_task(task_id)
         assignments = ", ".join(f"{key} = ?" for key in values)
-        with self._connect() as db:
-            cursor = db.execute(
-                f"UPDATE background_tasks SET {assignments} WHERE id = ?",
-                (*values.values(), task_id),
-            )
-            if cursor.rowcount == 0:
-                return None
+        def _write() -> bool:
+            with self._connect() as db:
+                cursor = db.execute(
+                    f"UPDATE background_tasks SET {assignments} WHERE id = ?",
+                    (*values.values(), task_id),
+                )
+                # rowcount 必须在连接关闭前取值（重试包装返回的是普通值，不是游标）。
+                return cursor.rowcount != 0
+
+        if not self._write_with_retry(_write):
+            return None
         return self.get_background_task(task_id)
 
     def get_background_task(self, task_id: str) -> dict[str, Any] | None:

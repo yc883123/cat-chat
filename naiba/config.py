@@ -320,29 +320,12 @@ def default_config() -> dict[str, Any]:
         # MCP 服务默认不注册；只有用户显式配置并授权时才可连接。
         "mcp_servers": [],
         # 多 Agent 定义：每个 Agent 有独立的预设/规则（system_prompt）与固定 Skill（skill_ids）。
-        "agents": [
-            {
-                "id": "general",
-                "name": "通用 Agent",
-                "system_prompt": "",
-                # Domain Skills are routed from the current request or
-                # explicitly selected by the user; do not inject them into
-                # every general-agent turn.
-                "skill_ids": [],
-            },
-            {
-                "id": "coding",
-                "name": "编程 Agent",
-                "system_prompt": "你是资深编程助手。先理解需求，再给出可直接运行、结构清晰的代码；涉及文件操作时先说明改动范围。",
-                "skill_ids": [],
-            },
-            {
-                "id": "drama",
-                "name": "短剧 Agent",
-                "system_prompt": "你是短剧创作助手。遵循所选短剧类 Skill 的交互收集流程，逐步确认主题、角色、分镜与风格后再产出内容。",
-                "skill_ids": [],
-            },
-        ],
+        # 出厂**为空**：6 个内置 Agent 由 built_in_agents() 提供，不进配置文件、也不会被覆盖写回；
+        # 这里只存「用户自建」与「用户编辑过某个内置后生成的覆盖版」。
+        # 2.8.9-beta 之前出厂曾预置 general / coding / drama 三样（老三样），
+        # 现已退役：定义保留在 _RETIRED_FACTORY_AGENTS，老用户配置里**未被改动的**残留
+        # 由 _migrate_retired_factory_agents() 在启动时清掉（改过的一律保留，见该常量注释）。
+        "agents": [],
         # 新装默认 Agent。老用户配置里已存过值，不回溯（只影响 first run）。
         "default_agent_id": "master",
         # 视觉（Phase 0-3）：provider 缺省时使用内置 OVH 免费匿名视觉链兜底。
@@ -373,8 +356,8 @@ def default_config() -> dict[str, Any]:
 # 出厂 6 样，**返回顺序即前端展示顺序**（`public_agents()` 把这一段整体置顶）。
 #
 # 三条硬约束（守门见 tests/test_builtin_agents.py，改这里必读）：
-#   1. 全部使用**新 id / 新名字**，与老用户已改过的 general / coding / drama 零冲突——
-#      老三样一个字都不动，防止升级覆盖用户自定义；
+#   1. 全部使用**新 id / 新名字**：老三样 general / coding / drama 已退役（定义见
+#      _RETIRED_FACTORY_AGENTS），新内置 id 与它们零冲突，避免升级顶掉老用户改过的同名 Agent；
 #   2. `tool_scope` 一律**显式列工具名**（无 group:*），且与对应 `TOOL_PRESETS` 展开逐项一致。
 #      **不要用空数组**：空数组的语义是「不限制」——运行时会放行全部工具（含 MCP 动态工具与
 #      子代理），出厂 Agent 一旦这么写就会随用户接 MCP 而自动扩权；
@@ -396,6 +379,57 @@ _BUNDLED_SKILL_ID = {
     "runninghub": "ba0c06c717020c3d",
     "h3-prompt-writing": "0eef16c1c1ac466d",
 }
+
+# 已退役的出厂 Agent（老三样）。2.8.9-beta 之前 default_config()["agents"] 预置的就是这三条；
+# 之后出厂 Agent 全部改由 built_in_agents() 提供，出厂配置不再含它们。
+#
+# 这里保留一份「出厂原样」定义，**只服务于 _migrate_retired_factory_agents()**：
+# `ConfigStore.__init__` 走 `defaults.update(loaded)`，而 `agents` 是整体键替换（不是深合并）
+# ⇒ 改出厂配置只影响新装，老用户 config.json 里存着的老三样会一直留在下拉里与教程对不上。
+# 迁移按「与本表逐字段完全一致」判定「用户从没碰过」才清；改过名 / 改过提示词 / 收窄过
+# 工具集 / 挂过 Skill 的条目一律原样保留——那是用户资产，升级绝不能覆盖（2026-09-24 拍板）。
+_RETIRED_FACTORY_AGENTS: tuple[dict[str, Any], ...] = (
+    {"id": "general", "name": "通用 Agent", "system_prompt": "", "skill_ids": []},
+    {
+        "id": "coding",
+        "name": "编程 Agent",
+        "system_prompt": "你是资深编程助手。先理解需求，再给出可直接运行、结构清晰的代码；涉及文件操作时先说明改动范围。",
+        "skill_ids": [],
+    },
+    {
+        "id": "drama",
+        "name": "短剧 Agent",
+        "system_prompt": "你是短剧创作助手。遵循所选短剧类 Skill 的交互收集流程，逐步确认主题、角色、分镜与风格后再产出内容。",
+        "skill_ids": [],
+    },
+)
+_RETIRED_FACTORY_AGENT_IDS = frozenset(str(item["id"]) for item in _RETIRED_FACTORY_AGENTS)
+
+
+def _is_untouched_factory_agent(agent: dict[str, Any], spec: dict[str, Any]) -> bool:
+    """配置里的 Agent 条目是否与出厂定义「逐字段完全一致」（= 用户从没碰过它）。
+
+    只比用户能改的字段：name / system_prompt / skill_ids / tool_scope / avatar。
+    任一项与出厂不同、或还带着 built_in 标记，就按「用户改过」处理——**宁可留下也不误删**。
+    tool_scope 缺键与空数组都算未收窄（出厂条目不带该键，设置页存一次会写成 []）。
+    """
+    if agent.get("built_in"):
+        return False
+    if str(agent.get("name") or "") != str(spec.get("name") or ""):
+        return False
+    if str(agent.get("system_prompt") or "") != str(spec.get("system_prompt") or ""):
+        return False
+    skills = agent.get("skill_ids")
+    if not isinstance(skills, list):
+        return False
+    if [str(item) for item in skills] != [str(item) for item in (spec.get("skill_ids") or [])]:
+        return False
+    if agent.get("tool_scope") not in (None, []):
+        return False
+    if str(agent.get("avatar") or ""):
+        return False
+    return True
+
 
 # 内置 Agent 的工具档底稿：直接取工具预设里**已显式列名**的 include 列表，避免两份清单
 # 各写一遍再漂移。`TOOL_PRESETS` 在下方定义（调用时查表，不在导入期），写错 preset_id 由
@@ -1175,6 +1209,9 @@ class ConfigStore:
         self._migrate_default_agent_skills()
         self._migrate_legacy_tool_names()
         self._migrate_agent_builtin_flags()
+        # 必须排在 _migrate_default_agent_skills() 之后：那个迁移会把历史默认挂在 general 上的
+        # 领域 Skill 摘掉，摘完才与出厂定义一致，未改动的残留才能被判出来并清掉。
+        self._migrate_retired_factory_agents()
         tools = self.data.get("agent_tools")
         # run_command 已并入 pwsh：历史默认集里保存的是 run_command（而非 pwsh）。
         # 先统一映射死工具名，避免升级后通用 Agent 静默丢失命令执行能力。
@@ -1241,10 +1278,9 @@ class ConfigStore:
     def _migrate_agent_builtin_flags(self) -> None:
         """清掉已下线内置 Agent 遗留的 built_in 标记。
 
-        内置清单现在为空，但用户配置里可能还留着曾经编辑过的旧内置副本
-        （例如 dsh-standard，带 built_in=True）。不清掉的话前端会继续显示「内置」并隐藏
-        删除按钮，而后端已经允许删除——两边口径不一致，用户会觉得「删不掉」。
-        只摘标记，不动名称/提示词/工具集，用户内容不丢。
+        用户配置里可能还留着曾经编辑过的旧内置副本（例如 dsh-standard，带 built_in=True）。
+        不清掉的话前端会继续显示「内置」并隐藏删除按钮，而后端已经允许删除——两边口径
+        不一致，用户会觉得「删不掉」。只摘标记，不动名称/提示词/工具集，用户内容不丢。
         """
         agents = self.data.get("agents")
         if not isinstance(agents, list):
@@ -1255,6 +1291,42 @@ class ConfigStore:
                 continue
             if agent.get("built_in") and str(agent.get("id") or "") not in built_in:
                 agent.pop("built_in", None)
+
+    def _migrate_retired_factory_agents(self) -> None:
+        """清掉老用户配置里**从没被碰过**的历史出厂 Agent（通用 / 编程 / 短剧）。
+
+        出厂配置自 2.8.9-beta 起不再预置这三个 Agent（改由 built_in_agents() 提供 6 个内置），
+        但 `agents` 是整体键替换 ⇒ 老用户 config.json 里的老三样会一直留在 Agent 下拉里
+        （新装 6 项、老用户 9 项），与教程和「内置 6 个 Agent」的对外说法对不上。
+
+        判据是 `_is_untouched_factory_agent()`：**与出厂定义逐字段完全一致**才清。
+        用户只要改过名字、提示词、工具集或技能，就视为用户资产原样保留——
+        宁可留下冗余条目，也不能因升级覆盖用户自定义。
+
+        被清掉的条目同时从 `default_agent_id` 上摘掉（改指 master），否则会留下一个
+        解析不到的悬空默认值，下次读配置时走兜底、用户看到的下拉预选会莫名其妙地跳。
+        """
+        agents = self.data.get("agents")
+        if not isinstance(agents, list) or not agents:
+            return
+        spec_by_id = {str(item["id"]): item for item in _RETIRED_FACTORY_AGENTS}
+        kept: list[Any] = []
+        removed: list[str] = []
+        for agent in agents:
+            if not isinstance(agent, dict):
+                kept.append(agent)
+                continue
+            spec = spec_by_id.get(str(agent.get("id") or ""))
+            if spec is not None and _is_untouched_factory_agent(agent, spec):
+                removed.append(str(agent["id"]))
+                continue
+            kept.append(agent)
+        if not removed:
+            return
+        self.data["agents"] = kept
+        if str(self.data.get("default_agent_id") or "").strip() in removed:
+            self.data["default_agent_id"] = "master"
+        print(f"[config] Removed untouched retired factory Agents: {', '.join(removed)}")
 
     def _migrate_conversation_prompt_presets(self) -> None:
         """Normalize prompt presets from config files created by older builds."""
@@ -2854,7 +2926,8 @@ class ConfigStore:
             #   此时以覆盖版为准并**占该内置的原位次**（不能挪到最后，否则「教程助手排第一」的
             #   对外承诺会在用户点过一次编辑后失效）；
             # - 未编辑过的内置用出厂定义补位，避免同一个 Agent 出现两次；
-            # - 老三样（general / coding / drama）与其它自定义都是「纯自定义」，相对顺序不变。
+            # - 用户自建 Agent（含**用户改过、因而被保留下来**的老三样残留）都是「纯自定义」，
+            #   相对顺序不变；未改动的老三样已由 _migrate_retired_factory_agents() 清掉。
             overrides = {
                 str(agent.get("id") or ""): agent
                 for agent in custom if agent.get("built_in")
@@ -2872,9 +2945,14 @@ class ConfigStore:
             configured = str(self.data.get("default_agent_id") or "").strip()
             if configured and any(agent.get("id") == configured for agent in agents):
                 return configured
+            # 回落优先新装默认 master（内置阵容恒含它，是教程第 1 篇的主角）。
+            # 老三样已退役，不能再拿 "general" 当回落目标——它可能已被
+            # _migrate_retired_factory_agents() 清掉，回落过去就是悬空值。
+            if any(str(agent.get("id") or "") == "master" for agent in agents):
+                return "master"
             if agents:
-                return str(agents[0].get("id") or "general")
-            return "general"
+                return str(agents[0].get("id") or "master")
+            return "master"
 
     def get_agent(self, agent_id: str) -> dict[str, Any] | None:
         agent_id = str(agent_id or "").strip()
@@ -2962,7 +3040,7 @@ class ConfigStore:
             else:
                 agents[index] = payload
             if not self.get_agent(str(self.data.get("default_agent_id") or "")):
-                self.data["default_agent_id"] = agents[0].get("id", "general") if agents else "general"
+                self.data["default_agent_id"] = agents[0].get("id", "master") if agents else "master"
             self.save()
         return payload
 
@@ -2980,8 +3058,8 @@ class ConfigStore:
             if self.data.get("default_agent_id") == agent_id:
                 remaining = self.data["agents"]
                 self.data["default_agent_id"] = (
-                    next((item.get("id") for item in remaining if item.get("id") == "general"), None)
-                    or (remaining[0].get("id") if remaining else "general")
+                    next((item.get("id") for item in remaining if item.get("id") == "master"), None)
+                    or (remaining[0].get("id") if remaining else "master")
                 )
             self.save()
             return True

@@ -1401,7 +1401,7 @@ export async function testSearchConnection() {
 export async function refreshAgentsFromServer() {
   const data = await api('/api/agents');
   state.bootstrap.agents = data.agents || [];
-  state.bootstrap.default_agent_id = data.default_agent_id || 'general';
+  state.bootstrap.default_agent_id = data.default_agent_id || 'master';
 }
 
 // 卡片上的提示词摘要长度（超出截断，完整内容在弹层里看）。

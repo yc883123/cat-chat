@@ -39,6 +39,14 @@ _BLOCK_SCALAR = re.compile(r"^(\s*)([^\s#][^:]*):[ \t]*\|[-+]?[ \t]*$")
 # 根级合法行：顶层映射键 / 注释 / 文档标记
 _ROOT_KEY = re.compile(r"^[A-Za-z_][\w.\- ]*:(\s|$)")
 _ROOT_MARKER = re.compile(r"^(#|---|\.\.\.|%)")
+# 更新说明的切句符：中文标点 + 空白。用于「body 是否照抄上一版」的判据。
+_CLAUSE_SPLIT = re.compile(r"[，。；：、（）()「」【】《》,;:()\[\]{}\s]+")
+# 判「照抄」的最短子句长度：太短（如「本次重点」）会在两版之间天然重合，属噪声。
+_COPY_MIN_CLAUSE = 12
+# 判「照抄」所需的最少命中条数：**一两句共享措辞是正常的**——新版说明旧功能时本来就会用到
+# 相同说法（如「被消息、快照、聊天背景引用的文件一律保留」在 2.9.0 与 2.9.1 都出现）。
+# 而「整段漏换」的签名是**成片**重合：实测 2.9.0 那次漏换命中了 5 句。取 3 作阈值。
+_COPY_MIN_HITS = 3
 
 
 def _indent(line: str) -> int:
@@ -114,6 +122,38 @@ def workflow_facts() -> tuple[str, dict]:
     return text, env
 
 
+def block_scalar_text(text: str, key: str) -> str:
+    """取出 `key: |` 字面块标量的正文（不含键行），供「正文是否漏改」类判据使用。
+
+    不依赖 pyyaml：按缩进走，空行保留为空串（块内的空行属于正文）。取不到时返回空串。
+    """
+    lines = text.replace("\r\n", "\n").split("\n")
+    for index, line in enumerate(lines):
+        match = _BLOCK_SCALAR.match(line)
+        if match is None or match.group(2).strip() != key:
+            continue
+        base = len(match.group(1))
+        collected: list[str] = []
+        cursor = index + 1
+        while cursor < len(lines):
+            candidate = lines[cursor]
+            if not candidate.strip():
+                collected.append("")
+                cursor += 1
+                continue
+            if _indent(candidate) <= base:
+                break
+            collected.append(candidate)
+            cursor += 1
+        return "\n".join(collected)
+    return ""
+
+
+def long_clauses(text: str, min_length: int = _COPY_MIN_CLAUSE) -> list[str]:
+    """把一段中文更新说明按标点切成子句，只保留够长的那些（用于照抄比对）。"""
+    return [piece for piece in _CLAUSE_SPLIT.split(text) if len(piece) >= min_length]
+
+
 class WorkflowStructureTests(unittest.TestCase):
     """工作流文件本身必须是合法 YAML——不合法则 GitHub 直接不运行（本次事故）。"""
 
@@ -182,6 +222,40 @@ class ReleaseVersionConsistencyTests(unittest.TestCase):
         """`body` 是手写正文，最容易漏改；至少要带上本版标题。"""
         display = self.version.replace("-beta", "") + " Beta"
         self.assertIn(f"Cat Chat {display} Windows build", self.text)
+
+    def test_release_body_is_not_stale_copy_of_previous_notes(self) -> None:
+        """`body` 不得照抄上一版更新说明的长片段（2026-09-24 的真事故）。
+
+        2.9.0-beta 发版时，`env` / tag / 两个包名 / Release 标题 / README / 两份清单**都**
+        改成了 2.9.0，**唯独 `body: |` 那段手写正文忘了换**——线上 Release 页面因此标题写着
+        「Cat Chat 2.9.0 Beta」，正文却整段在讲 2.8.8 的手机端回车，末尾还留着「1872 例通过」。
+        当时的守门只要求「body 带上本版标题」（见上一条），标题一改就绿，正文照抄无人拦——
+        这条就是补那个洞。
+
+        判据：把**上一版**更新说明按标点切成 ≥12 字的子句；若其中**成片**（≥3 句）出现在
+        body 里、却都不在本版说明里 ⇒ 认定整段漏换，判红并指名是哪几句。只命中一两句不算——
+        新版说明旧功能时本来就会复用相同说法（2.9.1 描述 2.9.0 的清理策略时就是这样）。
+        """
+        notes = json.loads(MANIFEST.read_text(encoding="utf-8")).get("release_notes") or []
+        self.assertGreaterEqual(len(notes), 2, "更新说明至少要两条，才能和上一版比对")
+        current, previous = notes[0], notes[1]
+
+        body = block_scalar_text(self.text, "body")
+        self.assertTrue(body.strip(), "没取到 release.yml 的 body 正文（守门自身失效，先修它）")
+
+        copied = [
+            clause
+            for clause in long_clauses(previous)
+            if clause in body and clause not in current
+        ]
+        if len(copied) < _COPY_MIN_HITS:
+            return
+        self.fail(
+            "release.yml 的 body 疑似还在照抄上一版更新说明（版本号改完却忘了换正文）——"
+            "命中 %d 句：\n" % len(copied)
+            + "\n".join(f"  · {clause}" for clause in copied[:6])
+            + "\n本版更新说明里没有这些句子，请把 body 整段换成本版内容。"
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

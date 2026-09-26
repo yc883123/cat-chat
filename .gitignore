@@ -190,6 +190,9 @@ _hl_test.js
 .pdftest.html
 .pdftest_out.pdf
 .pdfdoc.html
+# 教程 PDF 流水线的中间物：scripts/make_tutorial_html.py 产出的 `_tutorial.html`
+#（打印成 PDF 后即可删，脚本 docstring 里一直声称"已在 .gitignore 里"，实际漏了，2026-09-26 补上）
+docs/tutorial-*/_tutorial.html
 .chrome-print/
 .chrome-print2/
 .cp4/
@@ -207,6 +210,13 @@ verify/*
 !verify/_check_turn_rail.cjs
 !verify/_release_check.py
 !verify/_serve_tmp.py
+# 教程截图流水线（2026-09-26 入库）：冻结版 exe + 隔离根 + 播种 + Playwright 驱动三件套。
+# 口径与踩坑都写在 skill `frozen-build-shot-harness` 与文件内注释里，属可复用资产：
+# `_tut_run.sh` 一键跑一篇（重置隔离根 → 播种 → 起服务 → 拍 → 杀服务），
+# `_tutorial_serve.py` 是隔离实例与脱敏播种器，`_tutorial_shots.cjs` 是各篇的拍摄脚本。
+!verify/_tut_run.sh
+!verify/_tutorial_serve.py
+!verify/_tutorial_shots.cjs
 !verify/agent_avatar_smoke.cjs
 !verify/agent_cards_smoke.cjs
 !verify/agent_help_popover.cjs

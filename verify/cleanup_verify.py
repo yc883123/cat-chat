@@ -127,6 +127,10 @@ KEEP = {
     "folder_drop_smoke.py", "folder_drop_smoke.cjs",
     # 隔离实例的公共 harness：维护说明「归档说明」点名要求留在 verify/（被 tasks_panel_smoke.py 依赖）
     "_serve_tmp.py",
+    # 教程截图流水线三件套（§六 已登记；冻结版 exe + 隔离根 + 脱敏播种 + Playwright 驱动）：
+    # `_tut_run.sh` 一键跑一篇，`_tutorial_serve.py` 是隔离实例与播种器（被前者调用），
+    # `_tutorial_shots.cjs` 是各篇的拍摄脚本。删掉任何一个这条流水线就断。
+    "_tut_run.sh", "_tutorial_serve.py", "_tutorial_shots.cjs",
     # 本脚本自身
     "cleanup_verify.py",
 }

@@ -17,12 +17,14 @@
 - **触摸 / 手写笔长按不得被拦截**（§九.85）：手机经局域网 http:// 打开时是**非安全上下文**，
   网页既没有 `navigator.clipboard`、`execCommand('paste')` 也被浏览器禁用——系统长按菜单是手机上
   唯一可行的粘贴入口。旧实现在 `contextmenu` 上无条件 `preventDefault()`，把它一起关掉了，
-  用户实测「粘贴失败：浏览器未授权」；
+  用户实测「粘贴失败：浏览器未授权」；编辑分支与消息正文选区分支都要放行（选区分支不放行的
+  症状是长按先弹桌面样式的「复制选中 / 快速发送」、压掉系统选区菜单）；
 - 「粘贴」按钮在两条程序化通道都不可用时必须给**可行动作**（Ctrl+V / 长按系统菜单），
   不许只说「未授权」。
 """
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -117,6 +119,29 @@ class TextContextMenuTests(unittest.TestCase):
         helper = helper[: helper.index("\n}")]
         self.assertIn("'touch'", helper)
         self.assertIn("'pen'", helper)
+
+    def test_selection_menu_leaves_touch_long_press_to_system(self) -> None:
+        """消息正文选区分支同样不得拦截触摸长按：手机长按选中消息文本要出系统选区菜单
+        （复制 / 全选 / 分享），而不是桌面样式的「复制选中 / 快速发送」——后者会把系统
+        菜单压掉，之后拖选择手柄系统菜单才冒出来，两套菜单先后打架（用户实测）。"""
+        bind = self._bind()
+        body = bind[bind.index("document.addEventListener('contextmenu'"):]
+        body = body[: body.index("document.addEventListener('pointerdown'")]
+        guards = [m.start() for m in re.finditer(r"if \(isLongPressPointer\(\)\) return;", body)]
+        prevents = [m.start() for m in re.finditer(r"event\.preventDefault\(\)", body)]
+        self.assertGreaterEqual(
+            len(guards), 2,
+            "编辑分支与消息正文选区分支都要有触摸长按放行判定",
+        )
+        self.assertGreaterEqual(len(prevents), 2)
+        self.assertGreater(
+            guards[1], prevents[0],
+            "第二处放行判定应属于选区分支（排在编辑分支 preventDefault 之后）",
+        )
+        self.assertLess(
+            guards[1], prevents[1],
+            "选区分支的放行判定必须排在其 preventDefault 之前，否则照样把系统选区菜单关掉",
+        )
 
     def test_paste_falls_back_to_an_actionable_hint(self) -> None:
         """两条程序化通道都不可用时，提示必须给出下一步动作。"""

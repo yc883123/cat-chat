@@ -643,7 +643,8 @@ function bindAppIconControls() {
 }
 
 // 最近一次 pointerdown 的指针类型：`contextmenu` 事件本身不带 pointerType，只能这样记下来。
-// 用途：**触摸/手写笔长按必须让给系统菜单**。手机经局域网 http:// 打开时是**非安全上下文**，
+// 用途：**触摸/手写笔长按必须让给系统菜单**（编辑分支与消息正文选区分支都要放行，见
+// contextmenu 处理器）。手机经局域网 http:// 打开时是**非安全上下文**，
 // 网页既没有 `navigator.clipboard`、`execCommand('paste')` 也被浏览器禁用，系统长按菜单
 // （复制 / 粘贴 / 全选）是手机上唯一可行的粘贴路径。旧实现在 contextmenu 上无条件
 // `preventDefault()`，等于把这条路一起关掉——用户实测就是「粘贴失败：浏览器未授权」（§九.85）。
@@ -944,6 +945,11 @@ export function bindEvents() {
       showTextContextMenu(event, '', 'edit', editable);
       return;
     }
+    // 触摸 / 手写笔长按（含长按选中消息正文）同样让给系统菜单，理由同上：手机系统选区
+    // 菜单自带「复制 / 全选 / 分享」且不依赖安全上下文，而「复制选中 / 快速发送」是照
+    // 桌面鼠标右键设计的。不放行的话，长按会先弹桌面菜单、把系统选区菜单压掉，之后
+    // 拖选择手柄系统菜单才冒出来——两套菜单先后打架（用户实测）。
+    if (isLongPressPointer()) return;
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed || !selection.toString().trim()) return;
     const range = selection.getRangeAt(0);

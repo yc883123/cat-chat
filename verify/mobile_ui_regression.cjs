@@ -1,9 +1,12 @@
-// 移动端两处回归验证（静态 public/ 服务，端口 8799）：
+// 移动端三处回归验证（静态 public/ 服务，端口 8799）：
 //   ① 顶栏「下沉箭头」收起后必须**只剩它自己**（API / Agent 两个下拉、操作区、侧栏按钮全部让位），
 //      并亮出「展开顶栏」文字；点一次全部恢复。
 //   ② 输入框粘贴：手机经局域网 http:// 打开时是**非安全上下文**，网页读不到剪贴板。
 //      正确形态是「触摸长按不拦截 → 交给系统菜单」，桌面鼠标右键仍走自定义菜单；
 //      两条程序化通道都不可用时，提示必须给可行动作（Ctrl+V / 长按系统菜单）。
+//   ③ 消息正文选区：触摸长按选中文本同样不得拦截 contextmenu（系统选区菜单自带
+//      复制/全选/分享，且要先于桌面样式「复制选中/快速发送」出现）；鼠标右键仍弹
+//      自定义选区菜单。旧实现只在编辑分支放行，选区分支把系统菜单压掉了（用户实测）。
 // 用法：$env:NODE_PATH="<node_modules>"; node verify\mobile_ui_regression.cjs
 //
 // 说明：静态服务下没有后端，这里只考「前端形态与事件决策」。Android 系统长按菜单本身
@@ -259,6 +262,53 @@ function waitForServer(deadline = 15) {
         fail('右键菜单里没有「粘贴」项');
       }
       await page.evaluate(() => document.querySelector('#textContextMenu')?.setAttribute('hidden', ''));
+    }
+
+    // ---- ③ 消息正文选区：触摸长按不拦截，桌面右键仍弹「复制选中/快速发送」 ----
+    const sel = await page.evaluate(() => {
+      // 静态服务没有真实消息，造一个临时 .message-body 来考事件决策本身
+      //（contextmenu 处理器只认 .message-body 内的非折叠选区）。
+      const holder = document.createElement('div');
+      holder.className = 'message-body';
+      holder.textContent = '移动端选区回归文本';
+      holder.style.position = 'fixed';
+      holder.style.top = '10px';
+      holder.style.left = '10px';
+      document.body.append(holder);
+      const range = document.createRange();
+      range.selectNodeContents(holder);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const fire = (pointerType) => {
+        holder.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerType, button: 0 }));
+        const ev = new PointerEvent('contextmenu', { bubbles: true, cancelable: true, pointerType });
+        holder.dispatchEvent(ev);
+        const menu = document.querySelector('#textContextMenu');
+        return {
+          prevented: ev.defaultPrevented,
+          menuHidden: !menu || menu.hidden,
+          items: menu && !menu.hidden
+            ? [...menu.querySelectorAll('[data-context-action]')].map((b) => b.dataset.contextAction)
+            : [],
+        };
+      };
+      const touch = fire('touch');
+      const mouse = fire('mouse');
+      selection.removeAllRanges();
+      holder.remove();
+      return { touch, mouse };
+    });
+    if (!sel.touch.prevented && sel.touch.menuHidden) {
+      pass('触摸长按选区：不拦截 contextmenu（系统选区菜单可用，不弹桌面菜单）');
+    } else {
+      fail('触摸长按选区被拦截', JSON.stringify(sel.touch));
+    }
+    if (sel.mouse.prevented && !sel.mouse.menuHidden
+        && sel.mouse.items.includes('copy') && sel.mouse.items.includes('quote')) {
+      pass(`鼠标右键选区：仍是自定义菜单（${sel.mouse.items.join('/')}）`);
+    } else {
+      fail('鼠标右键选区自定义菜单', JSON.stringify(sel.mouse));
     }
 
     if (pageErrors.length) fail('零 pageerror / console.error', pageErrors.slice(0, 3).join(' | '));

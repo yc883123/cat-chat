@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 import re
 import shutil
@@ -583,6 +584,31 @@ def _is_transient_sqlite_error(exc: BaseException) -> bool:
     return any(marker in text for marker in _TRANSIENT_SQLITE_MARKERS)
 
 
+def _retry_transient_write(method: Callable[..., Any]) -> Callable[..., Any]:
+    """把**整个方法体**当作一次写操作重试（判据同 ``ChatStorage._write_with_retry``）。
+
+    为什么整方法重试是安全的：被装饰的方法全部满足两条——
+    (1) 副作用都在**单个** ``BEGIN IMMEDIATE`` 事务里，失败即随 ``with`` 上下文回滚，
+        不会留下半截写入；
+    (2) 返回的 id 要么在方法内生成、要么写后回读 ⇒ 重试不会让调用方拿到一个
+        「写进去又没了的 id」。
+    业务错误（``LookupError`` / ``RuntimeError("ACTIVE_RUN:…")`` / ``ValueError``）都不是
+    ``OperationalError``，一次都不会重试。
+
+    2026-09-25 起因：上一轮修复只覆盖了 ``append_run_event`` / ``update_job`` 两处，
+    其余写路径裸奔。拍教程截图时 ``update_run_snapshot`` 撞上 WAL 瞬时
+    ``SQLITE_READONLY_CANTINIT``，**整个回合直接被打死**，用户看到的是
+    「请求失败：attempt to write a readonly database」——写路径的重试覆盖必须是
+    「全部」而不是「记得的那几处」，故收敛成一个装饰器 + 结构性守门用例。
+    """
+
+    @functools.wraps(method)
+    def wrapper(self: "ChatStorage", *args: Any, **kwargs: Any) -> Any:
+        return self._write_with_retry(lambda: method(self, *args, **kwargs))
+
+    return wrapper
+
+
 class ChatStorage:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -801,6 +827,7 @@ class ChatStorage:
         self._repair_legacy_model_keys()
         self._disable_legacy_plan_mode()
 
+    @_retry_transient_write
     def _repair_legacy_model_keys(self) -> None:
         with self._connect() as db:
             db.execute(
@@ -808,11 +835,13 @@ class ChatStorage:
                 "WHERE model_key = '' AND provider_id != ''"
             )
 
+    @_retry_transient_write
     def _disable_legacy_plan_mode(self) -> None:
         """Keep historical plans, but make every conversation use normal chat."""
         with self._connect() as db:
             db.execute("UPDATE conversations SET interaction_mode = 'craft' WHERE interaction_mode != 'craft'")
 
+    @_retry_transient_write
     def synchronize_workspace_bindings(self, workspace_dirs: dict[str, str]) -> int:
         """Repair conversations whose sidebar group and workspace directory disagree.
 
@@ -847,6 +876,7 @@ class ChatStorage:
                 changed += 1
         return changed
 
+    @_retry_transient_write
     def apply_pending_migrations(self) -> None:
         """依次应用尚未执行的迁移，直到 user_version == CURRENT_SCHEMA_VERSION。"""
         # 数据改写型迁移（v14 起：合并/收缩存量行）执行前自动整库备份到 data/backups，
@@ -876,6 +906,7 @@ class ChatStorage:
         with self._connect() as db:
             return int(db.execute("PRAGMA user_version").fetchone()[0])
 
+    @_retry_transient_write
     def set_user_version(self, version: int) -> None:
         with self._connect() as db:
             db.execute(f"PRAGMA user_version = {int(version)}")
@@ -912,6 +943,7 @@ class ChatStorage:
             "message_count": int(messages[0]),
         }
 
+    @_retry_transient_write
     def compress_run_events(self, run_id: str) -> int:
         """run 终态后压缩该 run 的事件流：流式期逐块落库的 reasoning_delta 合流为整段。
 
@@ -922,6 +954,7 @@ class ChatStorage:
         with self._connect() as db:
             return _coalesce_reasoning_deltas(db, run_id=run_id)
 
+    @_retry_transient_write
     def compact_database(self) -> dict[str, Any]:
         """VACUUM 物理收缩数据库（回收已清理历史数据占用的磁盘空间）。
 
@@ -966,6 +999,7 @@ class ChatStorage:
             "migrations": applied,
         }
 
+    @_retry_transient_write
     def create_conversation(
         self,
         title: str = "新对话",
@@ -1481,6 +1515,7 @@ class ChatStorage:
                 result["messages"] = [self._message_dict(message) for message in messages]
             return result
 
+    @_retry_transient_write
     def set_conversation_skill_policy(
         self, conversation_id: str, policy: dict[str, Any] | None
     ) -> None:
@@ -1491,6 +1526,7 @@ class ChatStorage:
                 (json.dumps(policy or {}, ensure_ascii=False), conversation_id),
             )
 
+    @_retry_transient_write
     def set_conversation_chat_supports_images(self, conversation_id: str, value: bool) -> None:
         """Persist a conversation's frozen image-support capability (avoid re-probing per turn)."""
         with self._connect() as db:
@@ -1499,6 +1535,7 @@ class ChatStorage:
                 (int(bool(value)), conversation_id),
             )
 
+    @_retry_transient_write
     def branch_conversation(
         self, source_id: str, message_id: str, reset_agent: bool = False
     ) -> dict[str, Any]:
@@ -1677,6 +1714,7 @@ class ChatStorage:
             "items": items,
         }
 
+    @_retry_transient_write
     def update_conversation_settings(
         self,
         conversation_id: str,
@@ -1783,6 +1821,7 @@ class ChatStorage:
                 return None
         return self.get_conversation(conversation_id, include_messages=False)
 
+    @_retry_transient_write
     def clear_conversation_model_overrides(self, model_key: str, model_name: str) -> int:
         """清空「仍保存着该 API 旧默认模型名」的会话覆盖，返回受影响会话数。
 
@@ -1807,6 +1846,7 @@ class ChatStorage:
             )
             return int(cursor.rowcount or 0)
 
+    @_retry_transient_write
     def set_enabled_tool_ids(self, conversation_id: str, tool_ids: list[str] | tuple[str, ...] | set[str]) -> None:
         """固化某会话的启用工具集（会话启动时写入，之后不可改）。"""
         with self._connect() as db:
@@ -1819,6 +1859,7 @@ class ChatStorage:
                 ),
             )
 
+    @_retry_transient_write
     def set_conversation_favorite(self, conversation_id: str, favorite: bool) -> dict[str, Any] | None:
         """只改收藏标记，**不动 ``updated_at``**。
 
@@ -1834,6 +1875,7 @@ class ChatStorage:
                 return None
         return self.get_conversation(conversation_id, include_messages=False)
 
+    @_retry_transient_write
     def clear_workspace_group(self, workspace_group: str) -> int:
         """删除工作区时把其下对话归档到「未分组」（workspace_group 置空），返回受影响行数。"""
         with self._connect() as db:
@@ -1851,6 +1893,7 @@ class ChatStorage:
             ).fetchone()
         return int(row[0]) if row else 0
 
+    @_retry_transient_write
     def add_message(
         self,
         conversation_id: str,
@@ -1894,6 +1937,7 @@ class ChatStorage:
             "created_at": now,
         }
 
+    @_retry_transient_write
     def set_session_start(
         self,
         conversation_id: str,
@@ -1940,6 +1984,7 @@ class ChatStorage:
             )
         return {"id": message_id, "metadata": metadata, "created_at": now}
 
+    @_retry_transient_write
     def clear_session_start(self, message_id: str) -> bool:
         """撤销某条消息上的「新会话」标记（消息本身与其余 metadata 一律保留）。"""
         now = int(time.time() * 1000)
@@ -1963,6 +2008,7 @@ class ChatStorage:
             )
         return True
 
+    @_retry_transient_write
     def delete_session_start(self, message_id: str) -> bool:
         """删除**遗留形态**的边界标记行（role=session；只允许删该角色，避免误删对话消息）。"""
         now = int(time.time() * 1000)
@@ -1980,6 +2026,7 @@ class ChatStorage:
             )
         return True
 
+    @_retry_transient_write
     def update_message_metadata(
         self, conversation_id: str, message_id: str, metadata: dict[str, Any]
     ) -> bool:
@@ -2003,11 +2050,13 @@ class ChatStorage:
                 )
         return cursor.rowcount > 0
 
+    @_retry_transient_write
     def delete_conversation(self, conversation_id: str) -> bool:
         with self._connect() as db:
             cursor = db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
         return cursor.rowcount > 0
 
+    @_retry_transient_write
     def clear_conversation_messages(self, conversation_id: str) -> int:
         """Clear persisted chat/tool history while retaining the conversation settings."""
         with self._connect() as db:
@@ -2018,6 +2067,7 @@ class ChatStorage:
             )
         return cursor.rowcount
 
+    @_retry_transient_write
     def truncate_from_message(self, conversation_id: str, message_id: str) -> int:
         """删除某条消息及其之后（同一会话内按 (created_at, rowid) 排序不早于它的）所有消息。
 
@@ -2054,6 +2104,7 @@ class ChatStorage:
     # 不受影响，不再被引用的那些交给既有缓存自动清理（其 15 分钟保护窗口 + 引用保护逻辑不变）。
     MESSAGE_DELETE_MODES: tuple[str, ...] = ("single", "turn")
 
+    @_retry_transient_write
     def delete_message(
         self, conversation_id: str, message_id: str, mode: str = "single"
     ) -> dict[str, Any]:
@@ -2115,6 +2166,7 @@ class ChatStorage:
             "updated_at": now,
         }
 
+    @_retry_transient_write
     def restore_messages(self, conversation_id: str, snapshots: list[dict[str, Any]]) -> dict[str, Any]:
         """按快照把被删消息原样插回（删除的撤销）。返回实际插回条数与跳过的 id。
 
@@ -2251,6 +2303,7 @@ class ChatStorage:
     # 代价是查询侧必须按标记过滤：`build_model_history` 只放行 consumed 的插话，
     # `list_run_interjections` 只取 guided 未消费的，前端只把未消费的渲染进队列面板。
 
+    @_retry_transient_write
     def add_run_interjection(
         self,
         conversation_id: str,
@@ -2317,6 +2370,7 @@ class ChatStorage:
             and not bool(message.get("metadata", {}).get(MetadataKeys.INTERJECTION_STOPPED))
         ]
 
+    @_retry_transient_write
     def guide_run_interjection(
         self, conversation_id: str, run_id: str, message_id: str
     ) -> dict[str, Any]:
@@ -2354,6 +2408,7 @@ class ChatStorage:
         message["metadata"] = metadata
         return message
 
+    @_retry_transient_write
     def mark_run_interjections_consumed(self, run_id: str, message_ids: list[str]) -> None:
         """标记插话已被 agent 取走（此后它才允许进模型历史）。"""
         ids = [str(message_id).strip() for message_id in message_ids if str(message_id).strip()]
@@ -2378,6 +2433,7 @@ class ChatStorage:
                     (json.dumps(metadata, ensure_ascii=False), row["id"]),
                 )
 
+    @_retry_transient_write
     def stop_pending_interjections(self, run_id: str) -> int:
         """冻结该 Run 的队列：保留可见，但永久阻止派发（绝不自动发送）。
 
@@ -2416,6 +2472,7 @@ class ChatStorage:
                     stopped += 1
         return stopped
 
+    @_retry_transient_write
     def delete_run_interjection(
         self, conversation_id: str, run_id: str, message_id: str
     ) -> bool:
@@ -2444,6 +2501,7 @@ class ChatStorage:
                 )
         return bool(cursor.rowcount)
 
+    @_retry_transient_write
     def edit_run_interjection(
         self, conversation_id: str, run_id: str, message_id: str, content: str
     ) -> dict[str, Any]:
@@ -2471,6 +2529,7 @@ class ChatStorage:
             db.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (int(time.time() * 1000), conversation_id))
         return {**message, "content": content}
 
+    @_retry_transient_write
     def create_chat_run(
         self,
         conversation_id: str,
@@ -2577,6 +2636,7 @@ class ChatStorage:
                 db.execute("UPDATE conversations SET title = ? WHERE id = ?", (title, conversation_id))
         return self.get_background_task(run_id) or {}, history
 
+    @_retry_transient_write
     def create_run(
         self,
         conversation_id: str,
@@ -2643,6 +2703,7 @@ class ChatStorage:
             value = {}
         return value if isinstance(value, dict) else {}
 
+    @_retry_transient_write
     def update_run_snapshot(self, run_id: str, updates: dict[str, Any]) -> dict[str, Any]:
         """合并更新 run 快照（读取-合并-写回；快照是冻结基线的运行时补充键，如 first_turn）。"""
         current = self.get_run_snapshot(run_id) or {}
@@ -2679,6 +2740,7 @@ class ChatStorage:
             return None
         return value if isinstance(value, dict) else None
 
+    @_retry_transient_write
     def set_conversation_first_turn(self, conversation_id: str, info: dict[str, Any]) -> None:
         """落盘会话级首轮上下文（分支对话继承、清空已结束任务后仍可读）。
 
@@ -2755,6 +2817,7 @@ class ChatStorage:
             )
         return events
 
+    @_retry_transient_write
     def update_background_task(
         self,
         task_id: str,
@@ -2923,6 +2986,7 @@ class ChatStorage:
             ).fetchall()
         return [self._task_dict(row) for row in rows]
 
+    @_retry_transient_write
     def clear_terminal_background_tasks(self) -> int:
         """Remove completed task records and their cascaded run events, never active runs.
 
@@ -2954,6 +3018,7 @@ class ChatStorage:
         return row is not None
 
     # ---- 计划（Plan 模式） ----
+    @_retry_transient_write
     def create_plan(self, conversation_id: str, question: str) -> dict[str, Any]:
         now = int(time.time() * 1000)
         plan_id = uuid.uuid4().hex
@@ -2994,6 +3059,7 @@ class ChatStorage:
             ).fetchall()
         return [self._plan_dict(row) for row in rows]
 
+    @_retry_transient_write
     def update_plan(
         self,
         plan_id: str,

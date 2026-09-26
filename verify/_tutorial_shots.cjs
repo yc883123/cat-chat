@@ -133,6 +133,62 @@ async function shot(page, tut, name) {
   return p;
 }
 
+// 把页面上出现的**真实密钥**就地替换成等长的 `xxxx`，再截图。
+//
+// 教程 3 绕不过这一步：正文第 2 步就是「把 Key 发给 AI」，那条用户消息里躺着真 Key，
+// 而图是要进公开仓库的。做法是在 DOM 文本节点上原地替换（不是打码、不是裁掉），
+// 替换后与正文示例里的 `xxxxxxxxxxxxxxxx` 观感完全一致，读者看到的就是他该看到的样子。
+// 只处理文本节点——输入框的 value 不走 textContent，但消息发出后输入框已被清空，不构成遗漏。
+async function redactText(page, secret) {
+  const needle = String(secret || '').trim();
+  if (!needle) return 0;
+  const hits = await page.evaluate((s) => {
+    const masked = 'x'.repeat(s.length);
+    let count = 0;
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    for (const node of nodes) {
+      const text = node.nodeValue || '';
+      if (!text.includes(s)) continue;
+      count += text.split(s).length - 1;
+      node.nodeValue = text.split(s).join(masked);
+    }
+    return count;
+  }, needle);
+  console.log(`  脱敏：替换 ${hits} 处密钥字面量（掩码 ${'x'.repeat(needle.length)}）`);
+  if (hits === 0) {
+    // 一处都没替换到，要么密钥压根没上屏、要么被拆进了多个节点。
+    // **不能静默通过**：真发生了就是密钥直接进图，必须让人看见。
+    console.log('  ⚠ 没在 DOM 里找到密钥字面量（若它确实上屏了，就要人工复核这张图）');
+  }
+  return hits;
+}
+
+// 技能的 Site Selection 会先问「AI 站 / CN 站」。本机 `~/.openclaw/openclaw.json` 里
+// `skills.entries.runninghub.site` 已经是 `ai`，脚本会自己读；但**模型不知道**，仍可能弹一次问。
+// 弹了就点「AI 站」，不弹什么都不做——这步不在教程正文里，别让它卡住拍摄。
+async function answerSiteQuestionIfAsked(page) {
+  const host = page.locator('#choiceButtons');
+  if (await host.count() === 0) return false;
+  const text = (await host.innerText().catch(() => '')) || '';
+  if (!/站点|runninghub\.(ai|cn)|国际站|中文站/i.test(text)) return false;
+  const options = host.locator('button');
+  const total = await options.count();
+  for (let i = 0; i < total; i += 1) {
+    const label = ((await options.nth(i).innerText().catch(() => '')) || '').trim();
+    if (/AI\s*站|国际站/.test(label)) {
+      console.log(`  站点选择：点「${label}」`);
+      await options.nth(i).click();
+      await waitRunDone(page, 300000);
+      return true;
+    }
+  }
+  console.log('  站点选择面板里没找到「AI 站」选项，跳过');
+  return false;
+}
+
+
 // 原生 select 里可能混着伪选项（形如 __refresh_xxx__），一律按「value 非空且非 __ 前缀」挑，
 // 绝不按下标——选到伪选项会静默不生效。
 async function pickOptionValue(page, selector, matchText) {
@@ -574,15 +630,68 @@ const SHOTS = {
   },
 
   // 教程 3 · RunningHub 云端出图
-  // 无需账号就能拍的只有 02-slash-skill；03-key / 04-dialog / 05-result 都要**真实 Key**
-  //（05-result 还要 RunningHub 账号额度——真提交是要花钱的）。
+  //
+  // **前提是「能用标准模型 API 的 Key」**：2026-09-26 实测本人的个人版 Key（apiType=NORMAL）
+  // 调任何模型端点都回 `errorCode 1014 Access Denied：标准模型API仅限企业级-共享API Key调用`，
+  // 只有 AI 应用通道（`runninghub_app.py`）能用。所以：
+  //   · `04-dialog`（模型菜单）**不需要真出图**，任何能鉴权的 Key 都能拍；
+  //   · `03-key` 拍的是「把 Key 交给 AI 让它自验」，也只需要鉴权；
+  //   · `05-result` 需要**真跑出图**，被 1014 / 余额挡住时就只能跳过，绝不假装成功。
+  // Key 从环境变量读（`NAIBA_TUT_RH_KEY`），**不写进仓库**；截图前一律先 `redactText`。
   async 'tutorial-03'(page) {
+    const key = (process.env.NAIBA_TUT_RH_KEY || '').trim();
     await selectAgent(page, '导演');
     await openSlashPopup(page, 'runninghub');
     await shot(page, 'tutorial-03', '02-slash-skill.png');
     await page.keyboard.press('Escape');
     await sleep(400);
-    console.log('  待补：03-key / 04-dialog / 05-result 需要真实 RunningHub Key');
+
+    if (!key) {
+      console.log('  未给 NAIBA_TUT_RH_KEY ⇒ 03-key / 04-dialog / 05-result 全部跳过');
+      return;
+    }
+
+    // 03-key：正文话术原样发出去，让 AI 自己验、自己存
+    await sendMessage(page, `这是我的 RunningHub API Key：${key}，帮我测试能不能用，然后存下来。`);
+    await waitRunDone(page, 420000);
+    // 技能会先问站点（`api-key-setup.md` / SKILL.md 的 Site Selection）——本机
+    // `~/.openclaw/openclaw.json` 已写死 `site: ai`，但**模型不知道**，仍可能弹一次。
+    // 弹了就按「AI 站」点掉，别让流程卡在这（这一步本身不是正文讲的内容）。
+    await answerSiteQuestionIfAsked(page);
+    await redactText(page, key);
+    await shot(page, 'tutorial-03', '03-key.png');
+
+    // 04-dialog：说要什么。按技能 RULE 7，出图前**必须先给固定 5 项模型菜单并等用户选**，
+    // 所以这张拍的就是那个菜单（正文那句「先把要提交的参数整理成一张表念给你听」）。
+    await sendMessage(page, '用 RunningHub 出一张古风人物立绘，竖版 1024×1536。');
+    await waitRunDone(page, 420000);
+    // 站点问也可能拖到这一步才出现（模型先问站点、再问模型是常见的两个回合）
+    await answerSiteQuestionIfAsked(page);
+    await redactText(page, key);
+    const menu = page.locator('#choiceButtons');
+    if (await menu.count() > 0) {
+      console.log('  模型菜单以选项面板形式给出 ⇒ 04-dialog 裁选项区');
+      await menu.screenshot({ path: path.join(outDir('tutorial-03'), '04-dialog.png') });
+    } else {
+      await shot(page, 'tutorial-03', '04-dialog.png');
+    }
+
+    // 05-result：真出图 + 任务面板。挡住就如实记账，不伪造。
+    await sendMessage(page, '就第一个，默认那个。');
+    await waitRunDone(page, 600000);
+    await redactText(page, key);
+    const denied = await page.evaluate(() => {
+      const text = document.body.innerText || '';
+      return /1014|Access Denied|访问被拒绝|余额|insufficient/i.test(text);
+    });
+    if (denied) {
+      console.log('  ⚠ 提交被拒（权限/余额）⇒ 05-result 跳过，需要「企业级-共享 API Key」+ 充值');
+      await shot(page, 'tutorial-03', '05-result.BLOCKED.png');
+      return;
+    }
+    await openTasksPanel(page);
+    await shot(page, 'tutorial-03', '05-result.png');
+    await closeDialog(page, 'tasksDialog');
   },
 
   // 教程 4 · 出一集短剧（本地 ComfyUI 路线）

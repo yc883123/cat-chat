@@ -1,33 +1,30 @@
-# Cat Chat 2.9.5 Beta
+# Cat Chat 2.9.6 Beta
 
 <p align="center">
   <img src="docs/cat-chat-logo.png" alt="Cat Chat" width="520">
 </p>
 
-Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。2.9.5 Beta 有两个重点：**写数据库时偶发的「请求失败：attempt to write a readonly database」不再把整个回合打死**（SQLite 写路径的瞬时故障重试，从「个别几处」补到全部 42 条），以及**教程助手把「设置 → 外观」整页背下来了**——问它怎么换聊天背景、怎么换主题皮肤，现在能给按钮级步骤。顺带修掉手机上「长按消息正文和系统菜单打架」。
+Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。2.9.6 Beta 只有一个变化，但它是「让一整类 API 卡片完全没法用」的那种：**用「Codex /responses」请求格式的卡片，在严格校验的端点上不再被直接拒收**——根因是回传思考历史的 reasoning item 少了一个官方必填字段 `summary`。如果你用的是 OpenAI 兼容格式（`/v1/chat/completions`）、Gemini、Claude 或本地模型，本版与你无关。
 
 > Cat Chat 原名 Naiba Chat。显示名自 2.7.6 Beta 起为 Cat Chat；GitHub 仓库自 2.8.0 Beta 起更名为 `cat-chat`（旧地址自动跳转）。更新资产仍使用 `naiba-chat.exe` 与原有清单协议，既有数据位置不变，无需重新配置或搬迁数据。
 
-## 2.9.5 Beta 主要能力
-
-- **修复：偶发的「attempt to write a readonly database」不再打死整个回合（本次重点）**：SQLite 在 WAL 模式下、**最后一个连接关闭时**会做一次 checkpoint 并删掉 `-wal` / `-shm`；此刻恰好有另一个连接要写，就会撞上一次瞬时只读。以前只有个别几条写路径包了重试，其余「裸奔」——表现是**整个回合直接失败**，你重发一次往往就好了，所以极难复现。现在 **全部 42 条写路径**都带瞬时重试，并新增守门**用 AST 扫源码**强制这件事：以后新增写路径忘了包，测试直接判红，不靠人记。
-- **教程助手知识库补上「设置 → 外观」整页（本次重点）**：以前问它「怎么换聊天背景」「怎么换主题皮肤」，它会老实回「我翻遍了使用指南和手册要点，没有找到具体操作步骤」——因为知识库里确实没有这一页（而它是设置里的第一个 tab）。现在它能给出按钮级步骤：主题模式（跟随系统 / 日间 / 夜间）、界面皮肤、会话字体，以及聊天背景的**选择图片 → 拖背景强度 → 调整背景图 / 清除背景**。
-- **修复：手机上长按消息正文，不再和系统菜单打架**：长按消息正文以前会压掉系统自带的选区菜单，得再拖一次选择手柄它才冒出来——两套菜单先后打架。现在长按正文同样放行系统菜单。
-- **教程配图补齐**：8 篇「3 分钟」教程全部配上真实界面截图与 PDF（共 38 张图），图文与正文逐条对上。RunningHub 那一篇另讲清两件最容易白忙一场的事——**AI 站与 CN 站的账号和 Key 不通用**，以及**标准模型接口只认「企业级-共享 API Key」**（个人版 Key 调用会被直接拒掉，错误码 `1014`）。
-- **产品行为零变化（如实说清）**：本版只改**一处存储健壮性、一处触摸交互、知识库文档与教程配图**——不改任何工具的默认行为、不改清理策略、不改数据格式。已保存的会话、API 卡片、你自己建的 Agent、Skill 与 MCP 配置全部不动；升级直接覆盖安装即可，不需要迁移数据或重新配置。
-- **验证**：全量单测 **1947 例**（本版新增守门：写路径重试覆盖的 AST 扫描、教程文档四个方向的一致性检查共 7 例；后者在 7 处变异下逐条判红）。已在打包版内复跑资源探针，确认新知识库确实进了 exe。
+## 2.9.6 Beta 主要能力
+- **修复：Codex /responses 格式不再被严格校验的端点拒收（本次唯一变化）**：这个格式回传思考历史时，reasoning item 少发了官方必填字段 `summary`。OpenAI 官方 schema 里，input 侧 reasoning item 的必填项恰好只有三个——`id` / `summary` / `type`，其中 `summary` 必须存在、但允许是空数组；我们此前只发 `type` / `id` / `content`，于是按「非可选字段」反序列化的端点（Rust 系中转、严格校验的网关）在**反序列化阶段**就把整个请求退回，报 `missing field summary`——表现是这张卡片完全无法对话，换模型、换 Key 都没有用。现在补上 `summary`（空数组），对端即可正常解析。
+- **影响范围（如实说清）**：只影响请求格式为「Codex /responses」的 API 卡片；OpenAI 兼容（`/v1/chat/completions`）、Gemini、Claude 与全部本地模型格式一处未改。对宽松端点（例如 DeepSeek 官方 Responses API）本次是**加键不是改值**——其官方兼容性明细写明 reasoning item 的 `summary` / `encrypted_content`「不支持」，且「不支持的参数会被静默忽略、不会报错」，所以行为与缓存命中率都不受影响。
+- **新增守门**：对 reasoning item 的**四个产出分支**（普通轮 / 带服务端真实 id 轮 / 带工具调用的思考轮 / 无思考的工具轮占位）统一断言 `id` / `summary` / `type` 三件必填齐备，任一分支漏字段直接判红；并做过变异核对——把 `summary` 摘掉，该用例立刻变红，还原即绿。
+- **验证**：全量单测 **1948 例**通过；修复后用真实中转端点实测连通（teynex.com `/v1/responses` + `deepseek-v4.1-flash`），并顺带确认上下文缓存的 usage 字段正常透传：同一前缀重发命中 94%，耗时从 9.4 秒降到 2.5 秒。
 > 各版本说明与历史更新日志见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 开始使用
 
 ### 使用 Windows 版本
 
-1. 下载 `cat-chat-2.9.5-beta-windows-x64.zip`。
+1. 下载 `cat-chat-2.9.6-beta-windows-x64.zip`。
 2. 解压到一个可写目录。
 3. 运行 `cat-chat.exe`。
 4. 在设置中添加在线 API 或本地模型服务。
 
-> 归档里也提供旧名 `naiba-chat-2.9.5-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
+> 归档里也提供旧名 `naiba-chat-2.9.6-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
 
 首次运行会创建本地数据目录。升级时请直接替换程序文件，不要删除原有 `data` 目录和配置文件。
 
@@ -113,14 +110,14 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 - `naiba-chat.exe` —— **自动更新链路唯一使用的资产，永久保留此文件名**
 - `naiba-chat-update.json` —— 更新清单，其中 `repository` 字段永久写 `yc883123/naiba-chat`
 - `cat-chat.exe` —— 与 `naiba-chat.exe` 是同一文件，SHA-256 完全相同
-- `cat-chat-2.9.5-beta-windows-x64.zip`
-- `naiba-chat-2.9.5-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
+- `cat-chat-2.9.6-beta-windows-x64.zip`
+- `naiba-chat-2.9.6-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
 
 更新器会验证清单中的仓库、提交、文件名和 SHA-256。下载文件还必须是有效的 Windows 可执行文件；任何一项不一致都会终止安装。**自动更新始终读取 `naiba-chat.exe` 与清单里的旧仓库名**（GitHub 对旧仓库地址做长期重定向），这是已发布客户端逐字校验的协议，仓库改名后也不改值。
 
 ## Beta 说明
 
-这是 2.9.5 Beta，适合实际使用和反馈，但仍有以下边界：
+这是 2.9.6 Beta，适合实际使用和反馈，但仍有以下边界：
 
 - 不内置 ComfyUI、模型权重或第三方生成服务，需用户自行安装和配置。
 - 不同模型的工具调用质量差异较大，小型模型可能无法稳定完成长链任务。
@@ -134,7 +131,7 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 ```powershell
 Get-ChildItem public\js\*.js | ForEach-Object { node --check $_.FullName }
 python -m unittest discover -s tests -q
-$env:NAIBA_BUILD_VERSION = "2.9.5-beta"
+$env:NAIBA_BUILD_VERSION = "2.9.6-beta"
 python -m PyInstaller --noconfirm --clean naiba-chat.spec
 ```
 

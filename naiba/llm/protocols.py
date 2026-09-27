@@ -907,9 +907,18 @@ class ProtocolMixins:
                 )
                 digest = hashlib.sha1(tools_signature.encode("utf-8")).hexdigest()
             reasoning_id = f"rs_h_{digest[:16]}"
+        # 官方 schema（OpenAPI `ReasoningItem`，input 侧）reasoning item 的 **required
+        # 只有三项：id / summary / type**，其中 summary 是数组、「必须存在但可为 0 长度」；
+        # content / encrypted_content / status 都是可选。strict serde 的对端（Rust 系中转按
+        # 非 Option 字段反序列化）缺 summary 会直接 400：
+        #   Failed to deserialize the JSON body into the target type:
+        #   input: invalid "reasoning" item: missing field `summary`
+        # 2026-09-27 真实用户命中（teynex.com 中转）。空数组对宽松实现（DeepSeek 思考回传）
+        # 无副作用：加键是纯增量，不会影响已通过的 200 矩阵。
         return {
             "type": "reasoning",
             "id": reasoning_id,
+            "summary": [],
             "content": [{"type": "reasoning_text", "text": text}],
         }
 

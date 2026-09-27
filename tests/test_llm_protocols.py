@@ -108,6 +108,38 @@ class LlmProtocolTests(unittest.TestCase):
         self.assertEqual(out3[0].get("role"), "assistant")
         self.assertEqual(len(out3), 1)
 
+    def test_responses_input_reasoning_item_official_required_fields(self):
+        """官方 schema 的 input 侧 reasoning item：**required 恰为 id / summary / type**。
+
+        `summary` 必须存在（可为 0 长度数组）——strict serde 的对端（Rust 系中转按非
+        Option 字段反序列化）缺它会直接 400：
+        `input: invalid "reasoning" item: missing field `summary``。
+        2026-09-27 真实用户命中（teynex.com 中转），故对**四个产出分支**统一体检，
+        任一分支漏字段即红。"""
+        cases = [
+            [{"role": "assistant", "content": "回答", "reasoning_content": "思考中"}],
+            [{"role": "assistant", "content": "回答", "reasoning_content": "思考中",
+              "reasoning_id": "rs_real123"}],
+            [{"role": "assistant", "content": "", "reasoning": "先调用工具",
+              "tool_calls": [{"id": "c1", "name": "pwsh", "arguments": {"command": "dir"}}]}],
+            [{"role": "assistant", "content": "",
+              "tool_calls": [{"id": "c9", "name": "pwsh", "arguments": {"command": "ping"}}]}],
+        ]
+        checked = 0
+        for messages in cases:
+            for item in P._responses_input(messages):
+                if item.get("type") != "reasoning":
+                    continue
+                checked += 1
+                for key in ("id", "summary", "type"):
+                    self.assertIn(key, item, f"reasoning item 缺官方必填字段 {key}：{item}")
+                self.assertIsInstance(item["summary"], list)
+                self.assertIsInstance(item["id"], str)
+                self.assertTrue(item["id"], "reasoning item 的 id 不得为空")
+                self.assertIsInstance(item["content"], list)
+                self.assertEqual(item["content"][0]["type"], "reasoning_text")
+        self.assertEqual(checked, 4, "四个分支都必须产出 reasoning item（含占位分支）")
+
     def test_tool_schemas_all_formats(self):
         rows = [{"name": "read_file", "description": "读", "parameters": {"type": "object", "properties": {}}}]
         self.assertEqual(P._tool_schemas(rows, "openai_chat")[0]["type"], "function")

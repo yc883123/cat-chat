@@ -312,9 +312,16 @@ def default_config() -> dict[str, Any]:
             "image_upload_original": False,
             "image_max_pixels": 2000000,
             "thumbnail_max_pixels": 500000,
-            # 图片缓存自动清理阈值（MB）：上传后总大小超限时自动删除最旧且未被
-            # 消息/快照引用的缓存（引用中的文件永不自动删除）；0=关闭自动清理。
+            # 上传缓存（data/uploads）自动清理阈值（MB）：该目录总大小超限时自动删除
+            # 最旧且未被消息/快照引用的文件（引用中的文件永不自动删除）；0=关闭。
+            # **只管 uploads**：生成产物缓存有独立阈值（见下一项），两者各删各的。
             "auto_clean_limit_mb": 256,
+            # 生成产物缓存（data/generated）自动清理阈值（MB）：同上，独立阈值、
+            # 独立触发点（工具/任务产物落盘时），0=关闭。
+            # 新装默认比 uploads 宽松（产物是"刚生成还在看"的东西，误删代价更高）；
+            # 存量配置在 ConfigStore 里按旧 auto_clean_limit_mb 继承（含 0），
+            # 避免升级后突然开始删除用户已有的生成产物。
+            "generated_clean_limit_mb": 512,
         },
         "providers": [],
         # MCP 服务默认不注册；只有用户显式配置并授权时才可连接。
@@ -1129,10 +1136,12 @@ class ConfigStore:
         self._paths = paths or PathContext.local(Path(path).parent, Path(path))
         self.lock = threading.RLock()
         defaults = default_config()
+        loaded_config: dict[str, Any] = {}
         if path.exists():
             try:
                 loaded = json.loads(path.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict):
+                    loaded_config = loaded
                     defaults.update(loaded)
             except (OSError, json.JSONDecodeError):
                 pass
@@ -1199,6 +1208,24 @@ class ConfigStore:
                 "url": "",
                 "use_system_fallback": False,
             }
+        else:
+            # 存量配置：generated 清理阈值继承旧 `auto_clean_limit_mb` 的值（含 0=关闭）。
+            # 语义变化点——`auto_clean_limit_mb` 从「uploads + generated 合计」收窄为
+            # 「仅 uploads」；若这里直接落到新装默认 512MB，升级用户会在毫无察觉的情况下
+            # 开始删除已有的生成产物（或反过来，本来设 0=关闭的人突然开始被删）。
+            # 只在该键**从未被写过**时补一次；用户显式设过就永不再覆盖。
+            loaded_imaging = loaded_config.get("imaging")
+            if not (isinstance(loaded_imaging, dict)
+                    and "generated_clean_limit_mb" in loaded_imaging):
+                inherited = 256
+                if isinstance(loaded_imaging, dict):
+                    try:
+                        inherited = max(0, int(loaded_imaging.get("auto_clean_limit_mb", 256) or 0))
+                    except (TypeError, ValueError):
+                        inherited = 256
+                imaging_defaults = dict(defaults.get("imaging") or {})
+                imaging_defaults["generated_clean_limit_mb"] = inherited
+                defaults["imaging"] = imaging_defaults
         self.data = defaults
         self._migrate_conversation_prompt_presets()
         self._migrate_tool_sets()
@@ -2165,6 +2192,7 @@ class ConfigStore:
                                 except (TypeError, ValueError):
                                     raise ValueError(f"{field} 必须是正整数") from None
                             # 缓存自动清理阈值（MB）：0=关闭；1-4096 区间上限防误填。
+                            # 两个 scope 各自一个阈值（uploads / generated），互不影响。
                             try:
                                 auto_mb = int(merged.get("auto_clean_limit_mb", 256) or 0)
                             except (TypeError, ValueError):
@@ -2172,6 +2200,15 @@ class ConfigStore:
                             if auto_mb < 0 or auto_mb > 4096:
                                 raise ValueError("缓存自动清理阈值必须在 0-4096 MB 之间")
                             merged["auto_clean_limit_mb"] = auto_mb
+                            try:
+                                generated_mb = int(
+                                    merged.get("generated_clean_limit_mb", 512) or 0
+                                )
+                            except (TypeError, ValueError):
+                                raise ValueError("generated_clean_limit_mb 必须是整数") from None
+                            if generated_mb < 0 or generated_mb > 4096:
+                                raise ValueError("生成产物缓存清理阈值必须在 0-4096 MB 之间")
+                            merged["generated_clean_limit_mb"] = generated_mb
                         self.data[key] = merged
                     elif key == "proxy":
                         incoming = values[key]

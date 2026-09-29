@@ -744,8 +744,13 @@
               <span id="imageCompressRow"><label class="field-narrow">上传最大像素数<input id="imageMaxPixels" type="number" min="1000" step="1000" value="2000000"><small class="hint">超过将压缩尺寸（保留原格式）。</small></label></span>
               <label class="field-narrow">缩略图显示尺寸（像素）<input id="thumbnailMaxPixels" type="number" min="1000" step="1000" value="500000"><small class="hint">缩略图始终以 WebP 生成并保存在原图旁。</small></label>
             </div>
-            <label class="field-narrow">缓存自动清理阈值（MB）<input id="autoCleanLimitMb" type="number" min="0" step="64" value="256"><small class="hint">上传后缓存文件总大小超过该值时，自动删除<strong>最旧且未被消息引用的</strong>缓存文件；被历史消息引用的文件永不自动删除。填 0 表示关闭自动清理。</small></label>
-            <div class="hint image-cache-row">当前缓存文件总大小（图片/PDF/视频/音频等）：<code id="imageCacheSize">-</code><button class="control-button" id="cleanImageCache" type="button" title="按时间从旧到新清理未被引用的缓存文件（图片/PDF/视频等），按上方「缓存自动清理阈值」保留最新文件；聊天背景图、应用图标与历史消息里仍在使用的文件会自动保留，不会被删除">清理旧缓存文件</button></div>
+            <div class="imaging-grid">
+              <label class="field-narrow">上传缓存清理阈值（MB）<input id="autoCleanLimitMb" type="number" min="0" step="64" value="256"><small class="hint">用户上传与视觉缓存（uploads）。超过该值时自动删除<strong>最旧且未被消息引用的</strong>文件；被历史消息引用的文件永不自动删除。填 0 = 关闭。</small></label>
+              <label class="field-narrow">生成产物清理阈值（MB）<input id="generatedCleanLimitMb" type="number" min="0" step="64" value="512"><small class="hint">工具与任务产物（generated）。产物落盘时超过该值即自动清理最旧且未被引用的文件。填 0 = 关闭。</small></label>
+            </div>
+            <div class="hint image-cache-row">上传缓存：<code id="uploadsCacheSize">-</code><span class="cache-ref-hint" id="uploadsCacheHint"></span><button class="control-button" id="cleanUploadsCache" type="button" title="按时间从旧到新清理 uploads 里未被引用的缓存文件（图片/PDF/视频等），按上方「上传缓存清理阈值」保留最新文件；聊天背景图与历史消息里仍在使用的文件会自动保留，不会被删除">清理上传缓存</button></div>
+            <div class="hint image-cache-row">产物缓存：<code id="generatedCacheSize">-</code><span class="cache-ref-hint" id="generatedCacheHint"></span><button class="control-button" id="cleanGeneratedCache" type="button" title="按时间从旧到新清理 generated 里未被引用的工具/任务产物，按上方「生成产物清理阈值」保留最新文件；历史消息与运行记录里仍在使用的文件会自动保留，不会被删除">清理产物缓存</button></div>
+            <div class="hint image-cache-row">合计：<code id="imageCacheSize">-</code></div>
           </div>
           <div class="settings-card storage-maintenance">
             <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7.5" ry="3"></ellipse><path d="M4.5 6v12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6"></path><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"></path></svg></span><div><h4>历史数据管理</h4><p>运行事件会随推理流自动合流；先到「异步任务 → 清理已结束」删除终态记录，再点「压缩数据库」回收磁盘空间。</p></div></div>

@@ -20,7 +20,7 @@ import webbrowser
 import zipfile
 from http import HTTPStatus
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import naiba.net as net_io
 from naiba.capability import CapabilityRuntime
@@ -42,7 +42,7 @@ from naiba.core.conv_files import (
     browse_workspace_tree,
     folder_index,
 )
-from naiba.core.paths import path_within
+from naiba.core.paths import normalized_path_key, path_within
 from naiba.jobs import JobRegistry
 from naiba.llm.provider_presets import apply_preset_values, provider_preset_key_url, provider_presets_payload
 from naiba.llm.runtime import ModelRuntime
@@ -58,9 +58,10 @@ from naiba.skills.install import (
 )
 from naiba.storage.backgrounds import ensure_background_presets, is_backgrounds_path
 from naiba.storage.media import (
-    _clean_uploads_cache, _process_uploaded_image, _uploads_total_bytes, auto_clean_uploads,
-    is_uploads_path, missing_cache_attachment, remove_uploaded_file, rotate_uploaded_image,
-    store_uploaded_file,
+    CACHE_SCOPES, SCOPE_GENERATED, SCOPE_UPLOADS,
+    _clean_uploads_cache, _process_uploaded_image,
+    cache_scope_bytes, cache_scope_dir, is_uploads_path, missing_cache_attachment,
+    remove_uploaded_file, rotate_uploaded_image, store_uploaded_file,
 )
 from naiba.storage.app_icon import (
     clear_app_icon, has_custom_app_icon, read_app_icon_png, store_app_icon,
@@ -76,6 +77,13 @@ from naiba.updater import UpdateManager
 from naiba.vision.runtime import VisionRouter
 
 logger = logging.getLogger("naiba.app")
+
+# 缓存清理的**进程内**互斥：同一时刻只允许一个清理在扫 messages 表
+# （自动清理 / 手动按钮 / 两个 scope 之间都串行）。后台清理持锁跑完整轮次
+# （含补跑登记过的触发），手动清理拿不到锁就如实回「正在清理，请稍后再试」。
+# 注意：模块级锁只保证**单进程**互斥；打包版有 server.lock 单实例锁，
+# 源码模式若同时起两个实例，跨进程的并发扫表不在本锁覆盖范围内。
+_CACHE_CLEAN_LOCK = threading.Lock()
 
 
 def _query_first(params: dict[str, Any], name: str) -> str:
@@ -126,8 +134,20 @@ class NaibaChatApp:
             self._paths.rebind_data_dir(configured_data_dir)
         self._paths.data_dir.mkdir(parents=True, exist_ok=True)
         self.storage = ChatStorage(self._paths.data_dir / "chat.db")
+        # ---- 缓存清理的运行时状态（uploads / generated 各一套）----
+        # `_cache_clean_pending`：占锁期间新来的触发按 scope 登记待清理 + 必须无条件保留的
+        #   路径（刚落盘的附件），当前轮跑完后复查并补跑——**不能丢弃最后一次触发**。
+        # `_cache_clean_reports`：每个 scope 最近一次清理的如实回报（成功/失败/不可达），
+        #   经 /api/imaging/stats 透出给设置页（不新增协议常量、不新增推送通道）。
+        self._cache_clean_state_lock = threading.Lock()
+        self._cache_clean_pending: dict[str, set[str]] = {}
+        self._cache_clean_reports: dict[str, dict[str, Any]] = {}
         # 媒体采集器（工具产出点按声明提取 + 托管缓存）：data_dir/imaging 每次调用实时解析。
-        self.media_collector = MediaCollector(self.config, self._paths)
+        # on_cached：产物落进 data/generated 后触发**该目录自己的**后台清理
+        # （此前 generated 只能蹭"上传"便车，只生成不上传时再大也永不清）。
+        self.media_collector = MediaCollector(
+            self.config, self._paths, on_cached=self._on_generated_cached
+        )
         # 异步 Job 产物写回（终态时挂回发起它的助手消息；用同一采集器）。
         self.job_media_writer = JobMediaWriter(self.storage, self.config, self._paths, self.media_collector)
         # 统一事件总线：run/job 共用单点「写事件 + 唤醒」，装配根出口（阶段 2）。
@@ -518,7 +538,9 @@ class NaibaChatApp:
             "default_agent_id": self.config.default_agent_id(),
             "tool_sets": self.config.get_tool_sets(),
             "workspaces": self.config.data.get("workspaces", []),
-            "image_cache_bytes": _uploads_total_bytes(self._paths.data_dir),
+            # 缓存字节数分目录透出（uploads / generated 各删各的）：`image_cache_bytes`
+            # 保留为两者之和，旧前端不受影响。
+            **self._cache_bytes_payload(),
             # 媒体扩展名与分桶上限的唯一来源（core/media_types.py）：前端不再各写
             # 一份正则，消除"前后端名单漂移"导致的产物静默消失/破图。
             "media_exts": media_exts_payload(),
@@ -964,7 +986,7 @@ class NaibaChatApp:
                 "default_model_key": self.config.default_model_key(),
                 "resolved_workspace_dir": str(self.config.resolve_workspace_dir()),
                 "resolved_data_dir": str(self.config.resolve_data_dir()),
-                "image_cache_bytes": _uploads_total_bytes(self.paths.data_dir),
+                **self._cache_bytes_payload(),
                 "restart_required": (
                     ("data_dir" in body and self.config.resolve_data_dir() != self.paths.data_dir.resolve())
                     or ("host" in body and str(self.config.data.get("host")) != self.listener_host)
@@ -1531,21 +1553,185 @@ class NaibaChatApp:
             return {"error": "单个文件不能超过 80 MB"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE
         imaging = dict(self.config.data.get("imaging") or {}) if getattr(self, "config", None) else {}
         result = store_uploaded_file(data, original_name, self._paths.data_dir, imaging)
-        # 上传后超限自动清理（B1：只删未被消息/快照引用的缓存；阈值可在设置页调整，0=关闭）。
+        # 上传后触发 uploads 的**后台**清理（A：异步，不再同步挂在响应里）。
+        # 此前这一步同步跑完才回响应：缓存超限时一轮判定要几十秒（509 组 × 2 条 LIKE
+        # 全表扫 118MB metadata），用户看到的是"上传 78 秒"。响应里的 `clean_pending`
+        # 只表示"本轮启动了/登记了后台清理"，**不是**"这次上传变慢是清理造成的"。
+        # 阈值只按 uploads 判定；generated 有自己的阈值与触发点（产物落盘时）。
+        clean_pending = self._trigger_cache_clean(
+            SCOPE_UPLOADS,
+            # 本次刚落盘的附件无条件保留：它此刻还没落库（引用保护对它无效），
+            # 只有保护窗口 + 这条显式保护能拦住"上传即被清理"。
+            protect_paths=[p for p in (result.get("path"), result.get("thumb_path")) if p],
+        )
+        return {**result, "clean_pending": clean_pending}, HTTPStatus.OK
+
+    # ---- 缓存清理（uploads / generated 分开；自动路径异步、手动路径同步） ----
+
+    def _cache_bytes_payload(self) -> dict[str, int]:
+        """缓存字节数（分目录 + 合计）：bootstrap 与 /api/settings 共用同一份口径。"""
+        data_dir = self._paths.data_dir
+        uploads_bytes = cache_scope_bytes(data_dir, SCOPE_UPLOADS)
+        generated_bytes = cache_scope_bytes(data_dir, SCOPE_GENERATED)
+        return {
+            "image_cache_bytes": uploads_bytes + generated_bytes,
+            "uploads_cache_bytes": uploads_bytes,
+            "generated_cache_bytes": generated_bytes,
+        }
+
+    def cache_clean_limit_mb(self, scope: str) -> int:
+        """该 scope 的自动清理阈值（MB）：0 = 关闭该目录的自动清理（两个目录各自独立）。"""
+        imaging = dict(self.config.data.get("imaging") or {}) if getattr(self, "config", None) else {}
+        key, default = (
+            ("auto_clean_limit_mb", 256)
+            if scope == SCOPE_UPLOADS
+            else ("generated_clean_limit_mb", 512)
+        )
         try:
-            auto_clean_mb = int(imaging.get("auto_clean_limit_mb", 256) or 256)
+            value = int(imaging.get(key, default))
         except (TypeError, ValueError):
-            auto_clean_mb = 256
-        if auto_clean_mb > 0:
-            auto_clean_uploads(
-                self._paths.data_dir,
-                limit=auto_clean_mb * 1024 * 1024,
+            value = default
+        return max(0, value)
+
+    def cache_clean_limit_bytes(self, scope: str) -> int:
+        return self.cache_clean_limit_mb(scope) * 1024 * 1024
+
+    def api_imaging_stats(self) -> dict[str, Any]:
+        """缓存统计（设置页 / 前端轮询）：分目录字节数 + 每个 scope 最近一次清理的如实回报。
+
+        `cache_clean[scope]` 里可能出现 `unreachable` / `referenced_bytes` / `error`：
+        前两者用于解释"为什么清理腾不出空间"，后者是失败状态（**不伪装成清理完成**）。
+        只在真跑过清理之后才有——不做"打开设置页就全表扫一遍"的昂贵动作。
+        """
+        with self._cache_clean_state_lock:
+            reports = {key: dict(value) for key, value in self._cache_clean_reports.items()}
+        return {**self._cache_bytes_payload(), "cache_clean": reports}
+
+    def _on_generated_cached(self) -> None:
+        """产物落进 data/generated 后的回调（MediaCollector 写盘成功后调用）。
+
+        generated 此前没有自己的触发点（自动清理唯一入口是"上传"），只生成不上传时
+        再大也永不清；这里补上它自己的触发。
+        """
+        try:
+            self._trigger_cache_clean(SCOPE_GENERATED)
+        except Exception as exc:  # noqa: BLE001 - 采集链路的副作用绝不打断工具执行
+            logger.warning("generated 缓存清理触发失败：%s", exc)
+
+    def _referenced_cache_keys(self, scopes: Iterable[str]) -> set[str]:
+        """批量判定：一次扫表拿到被引用的缓存路径键集合（外加当前聊天背景图）。"""
+        roots = [cache_scope_dir(self._paths.data_dir, item) for item in scopes]
+        keys = self.storage.referenced_cache_paths(roots)
+        background = str(((self.config.data.get("chat_background") or {}).get("image") or "")).strip()
+        if background:
+            key = normalized_path_key(background)
+            if key:
+                # 背景图路径只写在 config.json 里（不是消息附件），批量集合与单文件
+                # LIKE 复核都查不到它，必须在这里显式补进来。
+                keys.add(key)
+        return keys
+
+    def _trigger_cache_clean(
+        self, scope: str, protect_paths: Iterable[str] = ()
+    ) -> bool:
+        """按 scope 判定阈值并**异步**启动清理；返回是否启动/登记了本轮清理。"""
+        limit = self.cache_clean_limit_bytes(scope)
+        if limit <= 0:
+            return False
+        try:
+            if cache_scope_bytes(self._paths.data_dir, scope) <= limit:
+                return False
+        except OSError:
+            return False
+        return self._start_cache_clean(scope, protect_paths=protect_paths)
+
+    def _start_cache_clean(
+        self, scope: str, protect_paths: Iterable[str] = (), trigger: str = "auto"
+    ) -> bool:
+        """登记并（如当前无人在跑）启动后台清理。
+
+        占锁期间的新触发**按 scope 登记**（连同必须保留的路径），由当前轮跑完后复查补跑；
+        直接丢弃最后一次触发会让"刚上传的那批"永远等不到清理。
+        """
+        with self._cache_clean_state_lock:
+            bucket = self._cache_clean_pending.setdefault(scope, set())
+            bucket.update(str(item) for item in protect_paths if str(item or "").strip())
+        if _CACHE_CLEAN_LOCK.acquire(blocking=False):
+            threading.Thread(
+                target=self._cache_clean_worker,
+                args=(scope, trigger),
+                name="naiba-cache-clean",
+                daemon=True,
+            ).start()
+        return True
+
+    def _cache_clean_worker(self, scope: str, trigger: str) -> None:
+        """后台清理主循环：跑完当前 scope 后复查待清理登记并补跑，最后释放进程内锁。"""
+        holding = True
+        current, current_trigger = scope, trigger
+        try:
+            while True:
+                with self._cache_clean_state_lock:
+                    protect = sorted(self._cache_clean_pending.pop(current, set()))
+                report = self._run_cache_clean_once(current, protect, current_trigger)
+                if report is not None:
+                    with self._cache_clean_state_lock:
+                        self._cache_clean_reports[current] = report
+                # 先放锁再复查：否则"放锁 → 新触发登记 → 拿不到锁"这一小段会丢掉触发。
+                _CACHE_CLEAN_LOCK.release()
+                holding = False
+                with self._cache_clean_state_lock:
+                    nxt = next(
+                        (item for item in CACHE_SCOPES if item in self._cache_clean_pending), ""
+                    )
+                if not nxt:
+                    return
+                if not _CACHE_CLEAN_LOCK.acquire(blocking=False):
+                    # 有别人（手动清理）接手：登记项留给它之后的轮次或下一次触发。
+                    return
+                holding = True
+                current, current_trigger = nxt, "auto"
+        except Exception as exc:  # noqa: BLE001 - 后台清理绝不能让线程静默死掉
+            logger.warning("后台缓存清理异常：scope=%s error=%s", current, exc)
+        finally:
+            if holding:
+                try:
+                    _CACHE_CLEAN_LOCK.release()
+                except RuntimeError:
+                    pass
+
+    def _run_cache_clean_once(
+        self, scope: str, protect_paths: Iterable[str], trigger: str
+    ) -> dict[str, Any] | None:
+        """跑一轮某个 scope 的清理；未超阈值时返回 None（不产生"清理结果"）。"""
+        limit = self.cache_clean_limit_bytes(scope)
+        report: dict[str, Any] = {
+            "scope": scope,
+            "trigger": trigger,
+            "ts": int(time.time()),
+            "limit_mb": limit // (1024 * 1024),
+        }
+        if limit <= 0:
+            report["skipped"] = "disabled"
+            return report
+        try:
+            if cache_scope_bytes(self._paths.data_dir, scope) <= limit:
+                return None
+            cleaned = _clean_uploads_cache(
+                limit=limit,
+                data_dir=self._paths.data_dir,
                 referenced_checker=self._upload_path_in_use,
-                # 本次刚落盘的附件无条件保留：它此刻还没落库（引用保护对它无效），
-                # 只有保护窗口 + 这条显式保护能拦住"上传即被清理"。
-                protect_paths=[p for p in (result.get("path"), result.get("thumb_path")) if p],
+                protect_paths=protect_paths,
+                scope=scope,
+                referenced_keys=self._referenced_cache_keys([scope]),
             )
-        return result, HTTPStatus.OK
+        except (OSError, ValueError) as exc:
+            # 失败必须留下可查询的状态，不能伪装成"清理完成"。
+            logger.warning("缓存清理失败：scope=%s error=%s", scope, exc)
+            report["error"] = str(exc)
+            return report
+        report.update(cleaned)
+        return report
 
     def _upload_path_in_use(self, target: Path) -> bool:
         """上传文件是否"在用"：消息/快照引用（storage 判定）之外，聊天背景图也算。
@@ -1575,32 +1761,64 @@ class NaibaChatApp:
         except (OSError, ValueError):
             return False
 
-    def api_clean_image_cache(self) -> tuple[dict[str, Any], int]:
-        """手动清理缓存文件（设置页按钮）：与自动清理共用同一阈值口径
-        （imaging.auto_clean_limit_mb，默认 256MB；0=关闭自动清理时手动回退默认值）。
+    def api_clean_image_cache(self, scope: str = "") -> tuple[dict[str, Any], int]:
+        """手动清理缓存文件（设置页按钮）：**同步**执行，按 scope 分开清理。
+
+        - `scope` 为空（旧调用口径）= 依次清理 uploads 与 generated，各自用自己的阈值，
+          返回分目录明细（`scopes`）与合计；
+        - `scope` 为 `uploads` / `generated` 时只清理该目录。
+
+        阈值口径：自动清理阈值为 0（=关闭自动清理）时，手动清理回落到该目录的默认值
+        （uploads 256MB / generated 512MB）——"关掉自动"不该等于"手动也清不了"。
 
         **必须带引用保护**：与自动清理传同一个 ``_upload_path_in_use``——被消息、快照或
         「聊天背景图」引用的文件一律保留。2026-09-24 修：此前手动路径传 ``None``
         （"不区分引用"，UI 文案也这么写），于是用户点一下「清理旧缓存文件」就把自己设的
         **背景图**删了，卡片随即变成「背景图文件暂不可用」——用户视角是"清缓存把背景清没了"。
         引用文件过多时允许超限（宁可缓存大，不删用户在用的图）；确实没得清时前端会说明原因。
+
+        占锁（后台清理正在扫表）时返回 ``{"busy": True, ...}``，前端据此**不显示**
+        误导性的完成提示。
         """
-        imaging = dict(self.config.data.get("imaging") or {}) if getattr(self, "config", None) else {}
+        scope = str(scope or "").strip()
+        if scope and scope not in CACHE_SCOPES:
+            return {"error": f"未知的缓存范围：{scope}"}, HTTPStatus.BAD_REQUEST
+        if not _CACHE_CLEAN_LOCK.acquire(blocking=False):
+            return {"busy": True, "message": "正在清理，请稍后再试"}, HTTPStatus.OK
         try:
-            limit_mb = int(imaging.get("auto_clean_limit_mb", 256) or 256)
-        except (TypeError, ValueError):
-            limit_mb = 256
-        if limit_mb <= 0:
-            limit_mb = 256
-        try:
-            result = _clean_uploads_cache(
-                limit=limit_mb * 1024 * 1024,
-                data_dir=self._paths.data_dir,
-                referenced_checker=self._upload_path_in_use,
-            )
-        except OSError as exc:
-            return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
-        return result, HTTPStatus.OK
+            targets = [scope] if scope else list(CACHE_SCOPES)
+            results: dict[str, dict[str, Any]] = {}
+            for item in targets:
+                default_mb = 256 if item == SCOPE_UPLOADS else 512
+                limit = self.cache_clean_limit_bytes(item) or default_mb * 1024 * 1024
+                try:
+                    cleaned = _clean_uploads_cache(
+                        limit=limit,
+                        data_dir=self._paths.data_dir,
+                        referenced_checker=self._upload_path_in_use,
+                        scope=item,
+                        referenced_keys=self._referenced_cache_keys([item]),
+                    )
+                except OSError as exc:
+                    return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
+                cleaned = {**cleaned, "trigger": "manual", "ts": int(time.time())}
+                results[item] = cleaned
+                with self._cache_clean_state_lock:
+                    self._cache_clean_reports[item] = cleaned
+            merged: dict[str, Any] = {
+                "trigger": "manual",
+                "ts": int(time.time()),
+                "scopes": results,
+                "unreachable": bool(results) and all(item["unreachable"] for item in results.values()),
+            }
+            for key in (
+                "removed", "freed", "size",
+                "skipped_recent", "skipped_protected", "skipped_referenced", "referenced_bytes",
+            ):
+                merged[key] = sum(int(item.get(key) or 0) for item in results.values())
+            return merged, HTTPStatus.OK
+        finally:
+            _CACHE_CLEAN_LOCK.release()
 
     def _delete_upload(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         """删除未被引用的上传文件（前端移除 chip 时调用；有引用则拒绝）。"""

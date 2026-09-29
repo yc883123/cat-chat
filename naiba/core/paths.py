@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -21,6 +22,23 @@ def path_within(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def normalized_path_key(value: Any) -> str:
+    """路径比较键：绝对化 + 大小写归一（Windows 不区分大小写）。
+
+    只做**词法**归一（``abspath`` 而非 ``resolve``）：不触盘、对不存在的文件同样可用，
+    适合给「缓存文件是否被引用」这类集合判定做键。两侧（集合里的候选路径、待判定的
+    真实文件）必须走同一个函数，否则会出现"同一条路径两种写法各算一份"的漏判。
+    解析失败（非法盘符/超长路径等）返回空串，调用方按"判定不了"处理。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return os.path.normcase(os.path.abspath(os.path.expanduser(text)))
+    except (OSError, ValueError):
+        return ""
 
 
 def path_within_any(path: Path, roots: Iterable[Path]) -> bool:

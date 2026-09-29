@@ -5,6 +5,13 @@
 
 ---
 
+## 2.9.6 Beta 主要能力
+- **修复：Codex /responses 格式不再被严格校验的端点拒收（本次唯一变化）**：这个格式回传思考历史时，reasoning item 少发了官方必填字段 `summary`。OpenAI 官方 schema 里，input 侧 reasoning item 的必填项恰好只有三个——`id` / `summary` / `type`，其中 `summary` 必须存在、但允许是空数组；我们此前只发 `type` / `id` / `content`，于是按「非可选字段」反序列化的端点（Rust 系中转、严格校验的网关）在**反序列化阶段**就把整个请求退回，报 `missing field summary`——表现是这张卡片完全无法对话，换模型、换 Key 都没有用。现在补上 `summary`（空数组），对端即可正常解析。
+- **影响范围（如实说清）**：只影响请求格式为「Codex /responses」的 API 卡片；OpenAI 兼容（`/v1/chat/completions`）、Gemini、Claude 与全部本地模型格式一处未改。对宽松端点（例如 DeepSeek 官方 Responses API）本次是**加键不是改值**——其官方兼容性明细写明 reasoning item 的 `summary` / `encrypted_content`「不支持」，且「不支持的参数会被静默忽略、不会报错」，所以行为与缓存命中率都不受影响。
+- **新增守门**：对 reasoning item 的**四个产出分支**（普通轮 / 带服务端真实 id 轮 / 带工具调用的思考轮 / 无思考的工具轮占位）统一断言 `id` / `summary` / `type` 三件必填齐备，任一分支漏字段直接判红；并做过变异核对——把 `summary` 摘掉，该用例立刻变红，还原即绿。
+- **验证**：全量单测 **1948 例**通过；修复后用真实中转端点实测连通（teynex.com `/v1/responses` + `deepseek-v4.1-flash`），并顺带确认上下文缓存的 usage 字段正常透传：同一前缀重发命中 94%，耗时从 9.4 秒降到 2.5 秒。
+
+
 ## 2.9.5 Beta 主要能力
 
 - **修复：偶发的「attempt to write a readonly database」不再打死整个回合（本次重点）**：SQLite 在 WAL 模式下、**最后一个连接关闭时**会做一次 checkpoint 并删掉 `-wal` / `-shm`；此刻恰好有另一个连接要写，就会撞上一次瞬时只读。以前只有个别几条写路径包了重试，其余「裸奔」——表现是**整个回合直接失败**，你重发一次往往就好了，所以极难复现。现在 **全部 42 条写路径**都带瞬时重试，并新增守门**用 AST 扫源码**强制这件事：以后新增写路径忘了包，测试直接判红，不靠人记。

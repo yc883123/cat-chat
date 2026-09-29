@@ -61,11 +61,16 @@ EMPTY_RESULT: dict[str, Any] = {"media": [], "truncated": None}
 class MediaCollector:
     """按声明提取工具产物媒体（宿主托管缓存），返回可内嵌进会话记录的小型记录。"""
 
-    def __init__(self, config: Any, paths: Any = None) -> None:
+    def __init__(self, config: Any, paths: Any = None, on_cached: Any = None) -> None:
         # config 只作为"取数入口"保存：data_dir / imaging 每次调用实时解析，
         # 避免闭包捕获装配期可变状态（教训 9/17）。
         self._config = config
         self._paths = paths
+        # on_cached：**产物真正落进 data/generated 之后**调用（宿主据此触发 generated
+        # 目录自己的后台清理）。generated 此前没有独立触发点，只能蹭"上传"便车——
+        # 只生成不上传的场景（纯 Job / 工具出图）再大也永不清。回调由宿主注入，
+        # 这里只负责"写盘成功就通知一次"，不关心它做什么；回调异常不得打断采集。
+        self._on_cached = on_cached
 
     # ---- 对外唯一入口 ----
     def collect(
@@ -148,6 +153,8 @@ class MediaCollector:
                     generated_dir.mkdir(parents=True, exist_ok=True)
                     destination = _cache_by_content(source, local_path, is_local_comfy, generated_dir, name)
                     source = str(destination)
+                    # 写盘成功即通知宿主（generated 目录自己的后台清理触发点）。
+                    self._notify_cached()
                     if not thumb_path:
                         thumb_path = _ensure_webp_thumb(destination, imaging)
                         if not thumb_path:
@@ -168,6 +175,16 @@ class MediaCollector:
                 logger.warning("媒体候选落地校验失败，丢弃：source=%s error=%s", source, exc)
                 return None
         return {"kind": kind, "name": name, "source": source, "thumb_path": thumb_path}
+
+    def _notify_cached(self) -> None:
+        """通知宿主"刚往 generated 落了一份产物"；回调异常不得影响采集链路。"""
+        callback = self._on_cached
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception as exc:  # noqa: BLE001 - 采集的副作用绝不打断工具执行
+            logger.warning("产物落盘回调失败：%s", exc)
 
 
 def _cache_by_content(

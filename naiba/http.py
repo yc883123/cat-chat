@@ -44,7 +44,7 @@ from naiba.core.paths import path_within
 from naiba.paths import PathContext, default_path_context, static_asset_version
 from naiba.storage.app_icon import APP_ICON_MAX_BYTES
 from naiba.storage.avatars import AVATAR_MAX_BYTES
-from naiba.storage.media import UPLOAD_MAX_BYTES, _uploads_total_bytes
+from naiba.storage.media import UPLOAD_MAX_BYTES
 from naiba.storage.store import PRIMARY_RUN_KINDS as _PRIMARY_RUN_KINDS
 
 logger = logging.getLogger("naiba.http")
@@ -220,7 +220,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path == "/api/storage/stats":
             self._json(self.app.storage.storage_usage())
         elif path == "/api/imaging/stats":
-            self._json({"image_cache_bytes": _uploads_total_bytes(self.app.paths.data_dir)})
+            # 分目录字节数 + 每个 scope 最近一次清理的如实回报（含 unreachable/error）。
+            self._json(self.app.api_imaging_stats())
         elif path == "/api/bootstrap":
             self._json(self.app.bootstrap())
         elif path == "/api/update":
@@ -639,7 +640,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         elif path == "/api/imaging/clean":
-            self._json(*self.app.api_clean_image_cache())
+            # 按 scope 清理（"uploads" / "generated"）；不带 scope 时两者都清（兼容旧调用）。
+            self._json(*self.app.api_clean_image_cache(str(body.get("scope") or "")))
         elif path == "/api/settings":
             try:
                 self._json(*self.app.api_update_runtime_settings(body))

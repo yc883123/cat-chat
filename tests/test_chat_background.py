@@ -564,11 +564,17 @@ class CleanCacheDisclosureTests(unittest.TestCase):
 
     def test_button_tooltip_no_longer_claims_reference_unaware(self):
         html = self._index_html()
-        start = html.index('id="cleanImageCache"')
+        # uploads 按钮：背景图就住在 uploads，tooltip 必须点明它会被保留（这正是报障点）。
+        start = html.index('id="cleanUploadsCache"')
         tag = html[start - 200: start + 600]
         self.assertNotIn("不区分文件是否被消息引用", tag,
                          "手动清理已改为保护引用文件，tooltip 不得再写'不区分引用'")
         self.assertIn("背景图", tag, "tooltip 必须点明背景图会被保留（这正是报障点）")
+        # generated 按钮：产物目录同样带引用保护，tooltip 不得声称"会删掉在用的产物"。
+        gen_start = html.index('id="cleanGeneratedCache"')
+        gen_tag = html[gen_start - 200: gen_start + 600]
+        self.assertNotIn("不区分文件是否被消息引用", gen_tag)
+        self.assertIn("引用", gen_tag, "产物缓存按钮也要说明引用文件会被保留")
 
     def test_clean_result_reports_what_was_kept(self):
         body = _function_body(_read_js("09-settings.js"), "export async function cleanImageCache")

@@ -2048,7 +2048,9 @@ export function bindEvents() {
   document.querySelectorAll('input[name="proxyMode"]').forEach((radio) => {
     radio.addEventListener('change', renderProxyRows);
   });
-  $('#cleanImageCache')?.addEventListener('click', cleanImageCache);
+  // 缓存清理按 scope 分成两个按钮：各自只清自己的目录，互不牵连。
+  $('#cleanUploadsCache')?.addEventListener('click', () => cleanImageCache('uploads'));
+  $('#cleanGeneratedCache')?.addEventListener('click', () => cleanImageCache('generated'));
   $('#refreshStorageStats')?.addEventListener('click', loadStorageStats);
   $('#compactDatabase')?.addEventListener('click', compactDatabase);
   $('#imageUploadOriginal')?.addEventListener('change', renderImageCompressRow);

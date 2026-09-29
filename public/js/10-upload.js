@@ -10,6 +10,12 @@ import { attachmentThumbUrl, fileUrl, mediaKind, updateSendButtonState } from ".
 export const UPLOAD_MAX_BYTES = 80 * 1024 * 1024;
 // 并发上传上限：多文件同时传完更快，又不会打满连接。
 const UPLOAD_CONCURRENCY = 3;
+// 慢上传提醒阈值（毫秒）：字节传完后服务端还要落盘 + 生成缩略图 + 做引用判定，
+// 大文件/慢盘上可能明显慢于上传本身。到 100% 但请求还没回来就显示「服务器处理中…」，
+// 超过该时长再补一句等待提示——否则用户会以为卡死，反复重传。
+const SLOW_UPLOAD_HINT_MS = 8000;
+// 超时后的完整说明：chip 宽度有限，正文用短句，完整话术挂在 title 上。
+const SLOW_UPLOAD_TIP = '文件已传到服务器，正在处理，请稍候，暂时不要重复上传';
 
 export function uploadFiles(files) {
   const valid = [];
@@ -33,11 +39,15 @@ export function uploadFiles(files) {
 }
 
 function uploadOne(file) {
-  const chip = { name: file.name, uploading: true, progress: 0 };
+  const chip = { name: file.name, uploading: true, progress: 0, slow: false };
   state.pendingFiles.push(chip);
   renderPendingFiles();
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
+    let slowTimer = null;
+    const clearSlowTimer = () => {
+      if (slowTimer) { clearTimeout(slowTimer); slowTimer = null; }
+    };
     // 取消句柄：chip 移除时由 renderPendingFiles 的移除按钮调用。
     chip.cancel = () => {
       try { xhr.abort(); } catch (_) { /* 已结束 */ }
@@ -47,9 +57,17 @@ function uploadOne(file) {
     xhr.upload.onprogress = (event) => {
       if (!event.lengthComputable) return;
       chip.progress = Math.round((event.loaded / event.total) * 100);
+      if (chip.progress >= 100 && !slowTimer) {
+        // 字节传完、请求尚未返回：进入「服务器处理」阶段，起计时器做慢上传提醒。
+        slowTimer = setTimeout(() => {
+          slowTimer = null;
+          if (chip.uploading) { chip.slow = true; renderPendingFiles(); }
+        }, SLOW_UPLOAD_HINT_MS);
+      }
       renderPendingFiles();
     };
     xhr.onload = () => {
+      clearSlowTimer();
       chip.cancel = null;
       let payload = {};
       try { payload = JSON.parse(xhr.responseText || '{}'); } catch (_) { /* 非 JSON 错误体 */ }
@@ -57,19 +75,21 @@ function uploadOne(file) {
         Object.assign(chip, payload, { uploading: false, progress: 100 });
       } else {
         state.pendingFiles = state.pendingFiles.filter((item) => item !== chip);
-        toast(`上传失败：${payload.error || `HTTP ${xhr.status}`}`);
+        toast(`上传失败：${payload.error || `HTTP ${xhr.status}`}，可重试`);
       }
       renderPendingFiles();
       resolve();
     };
     xhr.onerror = () => {
+      clearSlowTimer();
       chip.cancel = null;
       state.pendingFiles = state.pendingFiles.filter((item) => item !== chip);
-      toast(`上传失败：网络错误`);
+      toast('上传失败：网络错误，可重新拖入或选择该文件重试');
       renderPendingFiles();
       resolve();
     };
     xhr.onabort = () => {
+      clearSlowTimer();
       chip.cancel = null;
       resolve();
     };
@@ -271,6 +291,18 @@ export async function missingAttachmentPaths(paths = []) {
   }
 }
 
+/**
+ * 上传中的状态文案。字节传完（100%）并不等于完成——服务端还要落盘、生成缩略图、
+ * 做引用判定，这段等待必须给用户一个说法（"服务器处理中…"），超时再补等待提示；
+ * 否则 100% 长时间不动会被当成卡死。
+ */
+function uploadStatusText(file) {
+  if (Number(file.progress || 0) >= 100) {
+    return file.slow ? '服务器处理中，暂时不要重复上传' : '服务器处理中…';
+  }
+  return file.progress > 0 ? `${file.progress}%` : '上传中';
+}
+
 // 待发送附件：输入框上方的**竖直列表**（固定高度、可滚动、文件名截断、图片带预览）。
 // 此前是横向 chip 条，文件名一长就一屏显示不全、还要横向拖滚动条。
 export function renderPendingFiles() {
@@ -297,7 +329,7 @@ export function renderPendingFiles() {
       ? `<img class="pending-thumb" src="${escapeHtml(thumbUrl)}" alt="" draggable="false" data-large-url="${escapeHtml(fileUrl(file.path))}">`
       : `<span class="pending-thumb pending-thumb-file" aria-hidden="true">${FILE_ICON}</span>`;
     const status = file.uploading
-      ? `<span class="pending-status">${file.progress > 0 ? `${file.progress}%` : '上传中'}</span>`
+      ? `<span class="pending-status${file.slow ? ' is-slow' : ''}"${file.slow ? ` title="${SLOW_UPLOAD_TIP}"` : ''}>${uploadStatusText(file)}</span>`
       : '';
     return `<div class="pending-item${file.uploading ? ' is-uploading' : ''}">
       ${preview}

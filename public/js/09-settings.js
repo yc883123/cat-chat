@@ -984,8 +984,9 @@ export function populateRuntimeSettings() {
   if ($('#imageMaxPixels')) $('#imageMaxPixels').value = Number(imaging.image_max_pixels || 2000000);
   if ($('#thumbnailMaxPixels')) $('#thumbnailMaxPixels').value = Number(imaging.thumbnail_max_pixels || 500000);
   if ($('#autoCleanLimitMb')) $('#autoCleanLimitMb').value = Number(imaging.auto_clean_limit_mb ?? 256);
+  if ($('#generatedCleanLimitMb')) $('#generatedCleanLimitMb').value = Number(imaging.generated_clean_limit_mb ?? 512);
   renderImageCompressRow();
-  if ($('#imageCacheSize')) $('#imageCacheSize').textContent = formatBytes(Number(state.bootstrap.image_cache_bytes || 0));
+  renderCacheSizes(state.bootstrap || {});
   renderProxySettings();
   renderWorkspaceControl();
 }
@@ -1045,24 +1046,74 @@ export function formatBytes(bytes) {
   return `${n.toFixed(n >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+/* 缓存字节数按 scope 分开显示（uploads / generated），另给一行合计。
+   `payload` 来自 /api/bootstrap、/api/settings 或 /api/imaging/stats，三处字段同名；
+   只有 /api/imaging/stats 会带 `cache_clean`（最近一次清理的如实回报）。 */
+export function renderCacheSizes(payload) {
+  const data = payload || {};
+  const uploads = Number(data.uploads_cache_bytes || 0);
+  const generated = Number(data.generated_cache_bytes || 0);
+  const total = data.image_cache_bytes !== undefined
+    ? Number(data.image_cache_bytes || 0)
+    : uploads + generated;
+  state.bootstrap.image_cache_bytes = total;
+  if ($('#uploadsCacheSize')) $('#uploadsCacheSize').textContent = formatBytes(uploads);
+  if ($('#generatedCacheSize')) $('#generatedCacheSize').textContent = formatBytes(generated);
+  if ($('#imageCacheSize')) $('#imageCacheSize').textContent = formatBytes(total);
+  renderCacheCleanHints(data.cache_clean);
+}
+
+/* 每个 scope 的「被引用而无法释放」提示：只在真跑过清理之后才有值
+   （后端刻意不做"打开设置页就全表扫一遍"的昂贵动作）。
+   按计划 F 的口径：**被引用部分 > 该目录阈值**时才提示，并给出可操作的出路
+   （需删除对应会话才能腾出）——否则"点了清理却没腾出多少空间"会被当成按钮坏了。 */
+export function renderCacheCleanHints(reports) {
+  const map = reports || {};
+  const imaging = (state.bootstrap && state.bootstrap.settings
+    && state.bootstrap.settings.imaging) || {};
+  const limitMb = {
+    uploads: Number(imaging.auto_clean_limit_mb ?? 256),
+    generated: Number(imaging.generated_clean_limit_mb ?? 512),
+  };
+  [['uploads', '#uploadsCacheHint'], ['generated', '#generatedCacheHint']].forEach(([scope, selector]) => {
+    const el = $(selector);
+    if (!el) return;
+    const report = map[scope] || {};
+    const parts = [];
+    const referenced = Number(report.referenced_bytes || 0);
+    // 被引用部分超过该目录阈值：自动清理永远到不了目标，如实说清并给出出路。
+    if (referenced > 0 && referenced > Number(limitMb[scope] || 0) * 1024 * 1024) {
+      parts.push(`其中 ${formatBytes(referenced)} 被历史消息引用，自动清理无法释放；需删除对应会话才能腾出`);
+    }
+    if (report.unreachable) parts.push('清理后仍超过阈值（可释放的都已清理）');
+    if (report.error) parts.push(`上次清理失败：${report.error}`);
+    el.textContent = parts.length ? `（${parts.join('；')}）` : '';
+  });
+}
+
 export async function refreshImageCacheSize() {
   try {
     const result = await api('/api/imaging/stats');
-    state.bootstrap.image_cache_bytes = Number(result.image_cache_bytes || 0);
-    if ($('#imageCacheSize')) $('#imageCacheSize').textContent = formatBytes(state.bootstrap.image_cache_bytes);
+    renderCacheSizes(result);
   } catch (_) { /* 打开设置页时统计失败不打扰用户 */ }
 }
 
-export async function cleanImageCache() {
-  const btn = $('#cleanImageCache');
+/* 手动清理缓存：`scope` 为 'uploads' / 'generated'（空串 = 两者都清，兼容旧调用）。
+   两个按钮各自传自己的 scope，互不牵连。 */
+export async function cleanImageCache(scope = '') {
+  const btn = scope === 'generated' ? $('#cleanGeneratedCache') : $('#cleanUploadsCache');
   if (!btn) return;
   const prev = btn.textContent;
   btn.disabled = true;
   btn.textContent = '清理中…';
   try {
-    const result = await api('/api/imaging/clean', { method: 'POST', body: {} });
-    state.bootstrap.image_cache_bytes = Number(result.size || 0);
-    $('#imageCacheSize').textContent = formatBytes(Number(result.size || 0));
+    const result = await api('/api/imaging/clean', { method: 'POST', body: { scope } });
+    if (result.busy) {
+      // 后台清理正占着进程内锁：如实说"稍后再试"，绝不显示误导性的完成提示。
+      toast(result.message || '正在清理，请稍后再试');
+      return;
+    }
+    await refreshImageCacheSize();
     // 如实报账：删了多少 / 释放多少 / **保留了多少仍在用的**。
     // 后端会保护被消息、快照、聊天背景图引用的文件，所以"点了清理却没删多少"是正常结果，
     // 必须说明原因——否则会被当成按钮坏了（用户报障：清缓存把自己设的背景图清没了）。
@@ -2690,6 +2741,7 @@ export async function saveRuntimeSettings() {
       image_max_pixels: Number($('#imageMaxPixels')?.value || 2000000),
       thumbnail_max_pixels: Number($('#thumbnailMaxPixels')?.value || 500000),
       auto_clean_limit_mb: Number($('#autoCleanLimitMb')?.value ?? 256),
+      generated_clean_limit_mb: Number($('#generatedCleanLimitMb')?.value ?? 512),
     },
     proxy,
   };
@@ -2697,10 +2749,7 @@ export async function saveRuntimeSettings() {
   Object.assign(state.bootstrap.settings, result.settings);
   state.bootstrap.resolved_workspace_dir = result.resolved_workspace_dir || state.bootstrap.resolved_workspace_dir;
   if ($('#resolvedWorkspaceDir')) $('#resolvedWorkspaceDir').textContent = state.bootstrap.resolved_workspace_dir || '-';
-  if (result.image_cache_bytes !== undefined) {
-    state.bootstrap.image_cache_bytes = result.image_cache_bytes;
-    if ($('#imageCacheSize')) $('#imageCacheSize').textContent = formatBytes(Number(result.image_cache_bytes || 0));
-  }
+  if (result.image_cache_bytes !== undefined) renderCacheSizes(result);
   if (result.proxy_state) {
     state.bootstrap.proxy_state = result.proxy_state;
     renderProxyStateHint(result);

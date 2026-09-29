@@ -1209,6 +1209,8 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
 .pending-thumb-file svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .pending-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .pending-status { flex: none; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+/* 慢上传提醒：字节已传完但服务端仍在处理（落盘/缩略图/引用判定），换个颜色提示"别急着重传"。 */
+.pending-status.is-slow { color: var(--warning); }
 .pending-remove { width: 22px; height: 22px; flex: none; display: grid; place-items: center; border: 0; border-radius: var(--r-xs); background: transparent; color: var(--muted); padding: 0; cursor: pointer; }
 .pending-remove:hover { background: var(--surface-2); color: var(--red); }
 .pending-remove svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
@@ -1651,6 +1653,9 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .storage-stat-fill { flex: 1; }
 .image-cache-row .control-button, .storage-stat-row .control-button { min-height: 28px; padding: 0 10px; font-size: 12px; }
 .image-cache-row .control-button { margin-left: auto; }
+/* 每个 scope 的「被引用而无法释放」提示：紧跟在字节数后面，空着时整段不占位。 */
+.cache-ref-hint { color: var(--muted); }
+.cache-ref-hint:empty { display: none; }
 #imageCompressRow[hidden] { display: none; }
 /* 代理卡：它同时是 .settings-card（内边距/边框由卡片统一给），这里只管内容布局。
    历史上这条规则用 padding/border-top 覆盖了卡片样式，导致内容贴边 + 卡片上多一条虚线。 */

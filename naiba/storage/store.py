@@ -10,9 +10,10 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 from naiba.core.messages import MetadataKeys
+from naiba.core.paths import normalized_path_key
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
@@ -609,6 +610,49 @@ def _retry_transient_write(method: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
+def _json_escaped_literal(text: str) -> str:
+    """字符串在 ``json.dumps(..., ensure_ascii=False)`` 输出里的**字面量**形态（不含首尾引号）。
+
+    metadata/snapshot 的路径值就是这么存的（``"path": "D:\\data\\uploads\\x.png"``），
+    所以「在原文里找路径」= 找这个转义后的片段。
+    """
+    return json.dumps(str(text), ensure_ascii=False)[1:-1]
+
+
+def _unescape_json_literal(literal: str) -> str:
+    """把 JSON 字符串字面量（不含首尾引号）还原成原文；坏转义时退回朴素替换。"""
+    try:
+        return json.loads('"' + literal + '"')
+    except (json.JSONDecodeError, ValueError):
+        return literal.replace("\\\\", "\\")
+
+
+def _iter_escaped_literals(text: str, needle: str) -> Iterator[str]:
+    """在 JSON 原文里找出所有以 ``needle`` 开头的字符串字面量并还原成原文。
+
+    边界：从 needle 命中处向后扫到**未转义的** ``"``（路径里不会出现裸引号，
+    转义序列 ``\\x`` 整体跳过），得到字面量片段后交给 ``json.loads`` 还原。
+    needle 本身已是转义形态，故命中位置起 ``len(needle)`` 个字符一定是原文的转义写法。
+    """
+    start = 0
+    size = len(text)
+    while True:
+        index = text.find(needle, start)
+        if index < 0:
+            return
+        end = index + len(needle)
+        while end < size:
+            char = text[end]
+            if char == "\\":
+                end += 2
+                continue
+            if char == '"':
+                break
+            end += 1
+        yield _unescape_json_literal(text[index:min(end, size)])
+        start = index + len(needle)
+
+
 class ChatStorage:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -627,7 +671,7 @@ class ChatStorage:
         """
         # metadata/snapshot 以 json.dumps(ensure_ascii=False) 存储：路径值形如
         # "path": "C:\\...\\x.pdf"。用 JSON 转义后的片段做 LIKE 子串匹配。
-        escaped = json.dumps(str(target), ensure_ascii=False)[1:-1]
+        escaped = _json_escaped_literal(str(target))
         like = "%" + escaped.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         with self._connect() as db:
             row = db.execute(
@@ -639,6 +683,51 @@ class ChatStorage:
                 "SELECT 1 FROM background_tasks WHERE snapshot LIKE ? ESCAPE '\\' LIMIT 1", (like,)
             ).fetchone()
             return bool(row)
+
+    def referenced_cache_paths(self, roots: Iterable[str | Path]) -> set[str]:
+        """一次扫描读出「被引用的」缓存文件路径集合（替代逐文件 LIKE 全表扫）。
+
+        背景（2026-09-29 实测）：缓存分组 509 组、messages.metadata 合计 118MB 时，
+        逐组 2 条 ``LIKE '%<转义路径>%'`` 全表扫描一轮要 58 秒——而这轮扫描被同步挂在
+        POST /api/uploads 的响应里，用户看到的是"上传 78 秒"。改成**一次流式扫描**、
+        把结果建成集合后按组查表，成本从 O(组数 × 全表) 降到 O(全表) 一次。
+
+        口径与 ``upload_path_referenced`` **保持一致**（同样只认 messages.metadata 与
+        background_tasks.snapshot，同样按"JSON 转义后的字面路径"匹配），只是把
+        "逐文件问一次"换成"整表找一遍"。
+
+        实现：按**转义后的目录前缀**在原文里做 C 级 ``str.find``，比逐行 ``json.loads``
+        （118MB 级）快一个数量级，而且某一行 JSON 损坏也不会让整批判定失败
+        （那种情况下该行的路径进不了集合，删除前还有 ``upload_path_referenced`` 复核兜底）。
+
+        返回值为 ``normalized_path_key`` 规范化后的比较键集合（绝对路径 + 大小写归一）。
+        """
+        needles: set[str] = set()
+        for root in roots or ():
+            text = str(root or "").strip()
+            if not text:
+                continue
+            needles.add(_json_escaped_literal(text))
+            forward = text.replace("\\", "/")
+            if forward != text:
+                # 少数记录里的路径以正斜杠落库（跨平台复制/手工改过的 metadata）。
+                needles.add(_json_escaped_literal(forward))
+        if not needles:
+            return set()
+        found: set[str] = set()
+        with self._connect() as db:
+            for table, column in (("messages", "metadata"), ("background_tasks", "snapshot")):
+                cursor = db.execute(f"SELECT {column} FROM {table}")
+                for row in cursor:
+                    text = row[0]
+                    if not isinstance(text, str) or not text:
+                        continue
+                    for needle in needles:
+                        for raw in _iter_escaped_literals(text, needle):
+                            key = normalized_path_key(raw)
+                            if key:
+                                found.add(key)
+        return found
 
     def _write_with_retry(self, operation: Callable[[], Any]) -> Any:
         """执行写操作；遇瞬时 SQLite 故障自动重试（判据见 ``_is_transient_sqlite_error``）。

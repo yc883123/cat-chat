@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 2.9.7-beta
-  RELEASE_TAG: v2.9.7-beta
+  RELEASE_VERSION: 2.9.8-beta
+  RELEASE_TAG: v2.9.8-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-2.9.7-beta-windows-x64
+  PACKAGE_NAME: cat-chat-2.9.8-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-2.9.7-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-2.9.8-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -104,11 +104,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 2.9.7 Beta release
+      - name: Publish 2.9.8 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 2.9.7 Beta
+          name: Cat Chat 2.9.8 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -118,22 +118,21 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 2.9.7 Beta Windows build from `${{ github.sha }}`。
+            Cat Chat 2.9.8 Beta Windows build from `${{ github.sha }}`。
 
             > **关于文件名的说明**：仓库已更名为 `cat-chat`（旧链接由 GitHub 自动跳转）。本次 Release 同时提供 `cat-chat.exe` 与 `naiba-chat.exe`——**这是同一个文件，SHA-256 完全相同**；两个 ZIP 内容也等价，只有包内 exe 的文件名不同。应用内自动更新仍使用 `naiba-chat.exe` 资产与原有清单协议，**你不需要做任何操作**，已安装的旧版本会照常收到更新。
 
-            **本次变化：上传不再被缓存清理拖住几十秒；用户上传缓存与生成产物缓存彻底分开、各删各的。** 直接覆盖安装即可，**不需要迁移数据，也不需要重新配置**；历史会话、API 卡片、Agent、Skill 与 MCP 配置原样保留。
+            **本次变化：侧栏排序按钮升级成「分组与排序」面板——归档、单列表、手动拖拽排序一次到位。** 直接覆盖安装即可，**不需要迁移数据，也不需要重新配置**；数据库自动 v18 → v20（conversations 新增 archived、sort_order 两列，首次启动自动完成），历史会话、收藏、分支、API 卡片、Agent、Skill 与 MCP 配置原样保留。
 
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - **止痛：上传落盘即返回，自动清理挪到后台（本次重点）**：此前每次上传都同步跑一遍缓存清理——实测缓存 1053.5MB / 509 组，每组两次 LIKE 全表扫（`messages.metadata` 共 118MB），一轮判定 58 秒，全卡在上传请求里（`POST /api/uploads` 返回 200 却耗时 78.6 秒）。现在上传落盘后立即返回，清理改在后台线程执行；响应新增 `clean_pending`（仅表示已登记/启动清理，不作为上传变慢的归因）。清理进行中再触发会按目录登记、结束后复查补跑，不丢最后一次触发。
-            - **除根：引用判定从 1018 次全表 LIKE 降到一次流式扫描（本次重点）**：新增批量引用读取，游标流式扫 `messages.metadata` + `background_tasks.snapshot`，C 级字符串查找抽取引用路径（不把 118MB 一次性 `json.loads`）；集合外、准备删除的每一组，删除前仍再走一次原有 LIKE 复核，命中即保留——双保险，误方向只能是「多留」。
-            - **uploads 与 generated 彻底分开、各删各的（本次重点）**：显示拆成两个数（合计保留）、阈值拆成两个输入框（新增 `generated_clean_limit_mb`，新装默认 512MB）、清理按目录只扫自己的目录与阈值、触发也拆开（上传只触发 uploads，产物落盘触发 generated）。以前两目录混在一个 mtime 池里对同一额度删最旧，generated 撑爆额度会挤删最旧的用户上传图；且 generated 没有自己的触发点，只生成不上传时永不清。
-            - **阈值语义变化（升级须知）**：`auto_clean_limit_mb` 从「两目录合计」收窄为「**只管 uploads**」。存量配置未显式设置新字段时，`generated_clean_limit_mb` 继承原值（含 0=关闭），避免升级后突然删除生成产物；显式设置过的值不被覆盖。两个目录各自的 0 都表示关闭该目录的自动清理。
-            - **不可达判定 + 状态上报**：不再用「连续 K 组被引用就停」的近似短路；现在先完整扫描候选并归类，再据「剩余候选都不可删」判定 `unreachable`，新增 `referenced_bytes`（完整扫描，不是提前中断的部分结果）。清理异常记日志并保留失败状态，不把失败伪装成完成。
-            - **慢上传提醒（前端）**：进度 100% 但响应未回时显示「服务器处理中…」，等待超 8 秒追加「文件已传到服务器，正在处理，请稍候，暂时不要重复上传」；失败/超时/断网给出重试引导。慢提示不依赖 `clean_pending`。
-            - **设置页提示**：缓存大小旁，若该目录被引用部分超过其阈值，显示「其中 X MB 被历史消息引用，自动清理无法释放；需删除对应会话才能腾出」，uploads / generated 各一行。
+            - **「分组与排序」面板**：排序按钮换成滑杆图标（双横线 + 两个圆钮），点击弹出三段面板（分组方式 / 排序方式 / 筛选会话），选中项打勾、点外面或 Esc 关闭。三项偏好存服务端配置（`settings.sidebar`），刷新不再回默认。
+            - **分组方式两档**：按工作区（组头 / 折叠 / 每组默认 5 条）与单列表（全平铺、无组头、无每组上限；「已收藏」分组仍固定在底部）。
+            - **排序方式三档**：最近更新 / 按名称沿用；新增手动排序——单列表模式下按住会话行拖动，松手把全量顺序落库（一条事务写 1..N，中途失败整体回滚），刷新后保持，新会话置顶。分组模式下该项灰显并注明「仅单列表模式可用」。
+            - **会话归档**：⋯菜单新增「归档 / 取消归档」。归档 = 仅隐藏、不删数据：随时在「仅显示已归档」里找回，点开仍能继续聊；归档会话不进「已收藏」分组，全局全文搜索默认排除（会话内搜索不受影响）。
+            - **筛选会话三档**：隐藏已归档（默认）/ 全部对话 / 仅显示已归档；「全部对话」里归档会话带「已归档」标记、半透明显示。
+            - **归档与拖拽都不推进「最近更新」时间**，不会把时间排序搅乱。
 
-            本地验证：全量单测 **1988 例通过**；新增守门均做变异核对（摘掉批量判定、删除前复核、scope 过滤、unreachable 全扫等判据，对应用例逐条判红，还原即绿）；另有前端真后端隔离实例的 Playwright 截图（慢上传提示、设置页拆分各一张）。release.yml 经真解析核对（YAML 合法）；两份清单 JSON 合法。
+            本地验证：全量单测 **2012 例通过**（新增守门 24 例，写路径重试 AST 守门自动覆盖两个新写方法）；Playwright 真后端隔离实例断言 18/18；发版前重编 exe 并跑打包资源探针（前端文件逐字节比对 + 指纹、public/skills 全树比对）全部通过。release.yml 经真解析核对（YAML 合法）；两份清单 JSON 合法。
 
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

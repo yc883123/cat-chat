@@ -41,6 +41,15 @@ CHAT_FONT_SIZE_DEFAULT = 15
 # 自定义字体串只作为 font-family 片段注入 CSS 变量，截断长度是纵深防御。
 CHAT_FONT_FAMILY_CUSTOM_MAX = 100
 
+# ---- 侧栏「分组与排序」偏好（照 DeepSeek Harness 口径）----
+# 与 appearance 同款的小而稳的枚举：配置迁移与运行时更新共用同一份校验规则。
+# group：按工作区分组 / 单列表；sort：手动 / 最近更新 / 按名称；
+# filter：隐藏已归档 / 全部对话 / 仅显示已归档。
+SIDEBAR_PREF_GROUPS = frozenset({"workspace", "flat"})
+SIDEBAR_PREF_SORTS = frozenset({"manual", "updated", "name"})
+SIDEBAR_PREF_FILTERS = frozenset({"hide", "all", "only"})
+SIDEBAR_PREF_DEFAULTS = {"group": "workspace", "sort": "updated", "filter": "hide"}
+
 # ---- 聊天背景图（只铺对话区）----
 # 透明度滑杆范围：0.05 是「还能看见」的下限，1 = 完全不透明。
 CHAT_BACKGROUND_MIN_OPACITY = 0.05
@@ -2060,6 +2069,7 @@ class ConfigStore:
             "workspaces",
             "appearance",
             "chat_background",
+            "sidebar",
         }
         with self.lock:
             for key in allowed:
@@ -2175,6 +2185,33 @@ class ConfigStore:
                         # 只保留路径（见 _validated_chat_background_image）。
                         if "image" in incoming:
                             merged["image"] = self._validated_chat_background_image(incoming["image"])
+                        self.data[key] = merged
+                    elif key == "sidebar":
+                        # 侧栏「分组与排序」三项偏好：小而稳的枚举，允许部分更新
+                        # （前端每次只提交改动的那个维度），未提交的键保持现值。
+                        incoming = values[key]
+                        if not isinstance(incoming, dict):
+                            raise ValueError("sidebar 必须是对象")
+                        unknown = set(incoming) - {"group", "sort", "filter"}
+                        if unknown:
+                            names = ", ".join(sorted(map(str, unknown)))
+                            raise ValueError(f"sidebar 包含不支持的字段：{names}")
+                        merged = {**SIDEBAR_PREF_DEFAULTS, **dict(self.data.get("sidebar", {}))}
+                        if "group" in incoming:
+                            group = str(incoming["group"] or "").strip().lower()
+                            if group not in SIDEBAR_PREF_GROUPS:
+                                raise ValueError("group 必须是 workspace 或 flat")
+                            merged["group"] = group
+                        if "sort" in incoming:
+                            sort = str(incoming["sort"] or "").strip().lower()
+                            if sort not in SIDEBAR_PREF_SORTS:
+                                raise ValueError("sort 必须是 manual、updated 或 name")
+                            merged["sort"] = sort
+                        if "filter" in incoming:
+                            filter_value = str(incoming["filter"] or "").strip().lower()
+                            if filter_value not in SIDEBAR_PREF_FILTERS:
+                                raise ValueError("filter 必须是 hide、all 或 only")
+                            merged["filter"] = filter_value
                         self.data[key] = merged
                     elif key in ("vision", "search", "imaging"):
                         incoming = values[key]

@@ -2,7 +2,7 @@
 // 08-conversations.js —— 拆分自 public/app.js 第 2330-3114 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, api, escapeHtml, state, toast } from "./01-core.js";
+import { $, api, escapeHtml, saveSidebarPrefs, state, toast } from "./01-core.js";
 import { renderMessages, revealMessage } from "./04-messages.js";
 import { activeTaskStatuses, loadTasks, renderPermissionModeSwitch, taskDisplayTitle, taskKindLabel, taskStatusLabel } from "./06-tasks-plans.js";
 import { applyConversationAgent, applyConversationModel, composerModelChoice } from "./07-models-agents.js";
@@ -144,11 +144,14 @@ export function sidebarRowHtml(row) {
     : '';
   // data-group：虚拟列表里行是扁平的（工作区分组只包住表头），带上所属分组便于
   // 「已收藏」这类特殊分组的定位/断言（不参与任何业务逻辑）。
-  return `<div class="conversation-item ${c.id === state.conversationId ? 'active' : ''}" data-conversation-id="${c.id}" data-group="${escapeHtml(row.wsName || '')}">
+  // 手动排序 + 单列表模式下整行可拖拽（dragover/drop 委托在 #sidebarWorkspaceTree 上）。
+  const archived = Number(c.archived || 0) === 1;
+  return `<div class="conversation-item ${c.id === state.conversationId ? 'active' : ''}${archived ? ' is-archived' : ''}" data-conversation-id="${c.id}" data-group="${escapeHtml(row.wsName || '')}"${row.flat && state.workspaceSort === 'manual' ? ' draggable="true"' : ''}>
     <button class="conversation-star ${favorite ? 'is-favorite' : ''}" data-action="toggle-favorite" title="${favorite ? '取消收藏' : '收藏会话'}" aria-label="${escapeHtml(c.title)} ${favorite ? '取消收藏' : '收藏'}" aria-pressed="${favorite}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.6l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.8l5.9-.9z"></path></svg></button>
     ${branchBadge}
     <button class="conversation-open" title="${escapeHtml(c.title)}">${escapeHtml(c.title)}</button>
     ${branchCountBadge}
+    ${archived ? '<span class="archived-tag">已归档</span>' : ''}
     <span class="conversation-time">${escapeHtml(formatRelativeTime(c.updated_at))}</span>
     <button class="conversation-more" data-action="open-conversation-menu" title="更多操作" aria-label="${escapeHtml(c.title)} 的更多操作" aria-haspopup="menu">⋯</button>
   </div>`;
@@ -241,8 +244,16 @@ export function renderSidebar() {
       state.expandedGroups.add(activeWs);
     }
   }
+  // 「筛选会话」三档（DeepSeek Harness 口径）：hide=默认隐藏已归档；all=全部显示；
+  // only=只看已归档。「已收藏」分组恒不含归档会话——否则它会成为绕过筛选的出口。
+  const filterArchived = (list) => {
+    if (state.sidebarFilter === 'only') return list.filter((c) => Number(c.archived || 0) === 1);
+    if (state.sidebarFilter === 'all') return list;
+    return list.filter((c) => Number(c.archived || 0) !== 1);
+  };
+  const visibleConversations = filterArchived(state.conversations);
   const groups = new Map();
-  for (const c of state.conversations) {
+  for (const c of visibleConversations) {
     const key = (c.workspace_group || '').trim();
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(c);
@@ -260,12 +271,28 @@ export function renderSidebar() {
   const sortConv = (list) => {
     const arr = [...list];
     if (state.workspaceSort === 'name') arr.sort((a, b) => String(a.title).localeCompare(String(b.title), 'zh'));
-    else arr.sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+    else if (state.workspaceSort === 'manual') {
+      // 手动排序位：sort_order 升序（拖拽落序 1..N）；从未排过序的（0）最小，
+      // 因此排最前——配合同分位按更新时间倒序，「新会话置顶」自然成立。
+      // 分组模式下没有拖拽入口，但同一排序口径在组内也自洽（未排序会话靠前）。
+      arr.sort((a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0)
+        || String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+    } else arr.sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
     return arr;
   };
 
   const rows = [];
-  for (const wsName of orderedNames) {
+  if (state.sidebarGroup === 'flat') {
+    // 「单列表」模式：不画工作区组头/折叠/5 条上限，全部会话平铺（拖拽落序
+    // 也只在这里开放）。顶部保留一个「＋ 新会话」入口——组内的 newchat 按钮没了，
+    // 平铺模式下不能让用户失去新建入口。
+    let list = sortConv(visibleConversations);
+    if (search) {
+      list = list.filter((c) => String(c.title || '').toLowerCase().includes(search));
+    }
+    rows.push({ type: 'newchat', wsName: '', dir: '' });
+    for (const c of list) rows.push({ type: 'item', c, wsName: '', flat: true });
+  } else for (const wsName of orderedNames) {
     const isUngrouped = wsName === '';
     const label = isUngrouped ? '未分组' : wsName;
     const dir = (registered.find((w) => w.name === wsName) || {}).dir || '';
@@ -293,7 +320,8 @@ export function renderSidebar() {
 
   // 「已收藏」分组固定在侧栏最下方：跨工作区汇总，不受工作区分组的折叠/5 条上限影响，
   // 也不把会话从原工作区移走（两处都显示，避免用户以为会话丢了）。
-  const favoriteList = sortConv(state.conversations.filter((c) => Number(c.favorite || 0) === 1))
+  // 归档会话**不进收藏组**：否则它会成为绕过「隐藏已归档」筛选的出口。
+  const favoriteList = sortConv(visibleConversations.filter((c) => Number(c.favorite || 0) === 1))
     .filter((c) => !search || String(c.title || '').toLowerCase().includes(search));
   if (favoriteList.length) {
     const isExp = state.expandedGroups.has(SIDE_FAVORITES_GROUP);
@@ -609,6 +637,12 @@ export function openConversationMenu(anchorEl, id) {
   if (!menu.hidden && conversationMenuId === id) { closeConversationMenu(); return; }
   conversationMenuId = id;
   if (menu.parentElement !== document.body) document.body.appendChild(menu);
+  // 归档按钮文案随目标会话当前状态切换（归档 ↔ 取消归档）。
+  const conversation = state.conversations.find((item) => item.id === id);
+  const archiveButton = menu.querySelector('[data-conversation-action="archive"]');
+  if (archiveButton) {
+    archiveButton.textContent = Number(conversation?.archived || 0) === 1 ? '取消归档' : '归档';
+  }
   menu.hidden = false;
   const rect = anchorEl.getBoundingClientRect();
   const menuRect = menu.getBoundingClientRect();
@@ -623,6 +657,188 @@ export function openConversationMenu(anchorEl, id) {
   }
   menu.style.left = `${Math.round(left)}px`;
   menu.style.top = `${Math.round(top)}px`;
+}
+
+// ---- 侧栏「分组与排序」面板 ----
+// 与 ⋯ 菜单同一套 fixed 挂 body 模式（§九.27）：侧栏是 overflow 滚动容器，
+// 内嵌浮层会被裁剪。三段偏好乐观更新 + saveSidebarPrefs 持久化到服务端。
+export function closeSidebarViewMenu() {
+  const menu = $('#sidebarViewMenu');
+  if (!menu || menu.hidden) return;
+  menu.hidden = true;
+  $('#workspaceSort')?.setAttribute('aria-expanded', 'false');
+}
+
+function syncSidebarViewMenuState() {
+  const menu = $('#sidebarViewMenu');
+  if (!menu) return;
+  for (const button of menu.querySelectorAll('[data-view-pref]')) {
+    const kind = button.dataset.viewPref;
+    const value = button.dataset.viewValue;
+    const current = kind === 'group' ? state.sidebarGroup : kind === 'sort' ? state.workspaceSort : state.sidebarFilter;
+    button.setAttribute('aria-checked', String(value === current));
+  }
+  // 手动排序初版只在单列表开放：分组模式下禁用该项（视觉灰显 + 点了提示）。
+  const manual = menu.querySelector('[data-manual-option]');
+  const note = menu.querySelector('[data-manual-note]');
+  if (manual) manual.classList.toggle('is-disabled', state.sidebarGroup !== 'flat');
+  if (note) note.textContent = state.sidebarGroup === 'flat' ? '拖拽会话调整顺序' : '仅单列表模式可用';
+}
+
+export function openSidebarViewMenu(anchorEl) {
+  const menu = $('#sidebarViewMenu');
+  const button = $('#workspaceSort');
+  if (!menu || !button) return;
+  if (!menu.hidden) { closeSidebarViewMenu(); return; }
+  if (menu.parentElement !== document.body) document.body.appendChild(menu);
+  syncSidebarViewMenuState();
+  menu.hidden = false;
+  button.setAttribute('aria-expanded', 'true');
+  const rect = anchorEl.getBoundingClientRect();
+  const menuRect = menu.getBoundingClientRect();
+  const edge = 8;
+  const left = Math.min(
+    Math.max(edge, rect.left),
+    Math.max(edge, window.innerWidth - menuRect.width - edge),
+  );
+  let top = rect.bottom + 4;
+  if (top + menuRect.height > window.innerHeight - edge) {
+    top = Math.max(edge, rect.top - menuRect.height - 4);
+  }
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+}
+
+// 面板里点某个偏好：乐观改 state → 重绘侧栏 → 落库（失败提示但不回滚，
+// 偏好不是数据，下次打开会话时服务端值会校正回来）。
+export async function applySidebarViewPref(kind, value) {
+  if (kind === 'sort' && value === 'manual' && state.sidebarGroup !== 'flat') {
+    toast('手动排序请在「分组方式 → 单列表」下使用');
+    return;
+  }
+  closeSidebarViewMenu();
+  const patch = kind === 'group' ? { group: value } : kind === 'sort' ? { sort: value } : { filter: value };
+  try {
+    await saveSidebarPrefs(patch);
+  } catch (error) {
+    toast(`保存偏好失败：${error.message}`);
+  }
+  renderSidebar();
+}
+
+// ---- 归档 / 取消归档 ----
+// 与收藏同一套乐观更新：只改可见性标记，失败回滚。归档会话在「隐藏已归档」
+// 档下从侧栏消失，但当前打开中的会话不受影响（仍可继续聊）。
+export async function toggleConversationArchive(id) {
+  const conversation = state.conversations.find((item) => item.id === id);
+  if (!conversation) return;
+  const next = Number(conversation.archived || 0) !== 1;
+  closeConversationMenu();
+  conversation.archived = next ? 1 : 0;
+  renderSidebar();
+  try {
+    const updated = await api(`/api/conversations/${id}/settings`, {
+      method: 'POST',
+      body: { archived: next },
+    });
+    const index = state.conversations.findIndex((item) => item.id === id);
+    if (index >= 0) state.conversations[index] = { ...state.conversations[index], ...updated };
+    renderSidebar();
+    toast(next ? '已归档，可在「筛选会话」里找回' : '已取消归档');
+  } catch (error) {
+    conversation.archived = next ? 0 : 1;
+    renderSidebar();
+    toast(`归档失败：${error.message}`);
+  }
+}
+
+// ---- 手动排序：单列表拖拽落序 ----
+// 只在「单列表 + 手动排序」下把行标记为 draggable（见 sidebarRowHtml）；
+// dragover/drop 委托在 #sidebarWorkspaceTree 上（行是虚拟化窗口重绘的，
+// 逐行绑事件会被 innerHTML 重写洗掉）。
+export function bindSidebarDragDrop() {
+  const tree = $('#sidebarWorkspaceTree');
+  if (!tree) return;
+  let draggingId = '';
+  tree.addEventListener('dragstart', (event) => {
+    const item = event.target.closest?.('.conversation-item[draggable="true"]');
+    if (!item) return;
+    draggingId = item.dataset.conversationId || '';
+    item.classList.add('is-dragging');
+    event.dataTransfer.effectAllowed = 'move';
+    try { event.dataTransfer.setData('text/plain', draggingId); } catch (_) { /* IE 兼容无需 */ }
+  });
+  tree.addEventListener('dragend', (event) => {
+    draggingId = '';
+    tree.querySelectorAll('.conversation-item.is-dragging, .conversation-item.drop-target')
+      .forEach((el) => el.classList.remove('is-dragging', 'drop-target'));
+    if (event.target?.closest?.('.conversation-item')) renderSidebar();
+  });
+  tree.addEventListener('dragover', (event) => {
+    if (!draggingId) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    const item = event.target.closest?.('.conversation-item[draggable="true"]');
+    tree.querySelectorAll('.conversation-item.drop-target').forEach((el) => el.classList.remove('drop-target'));
+    if (item && item.dataset.conversationId !== draggingId) item.classList.add('drop-target');
+  });
+  tree.addEventListener('drop', (event) => {
+    if (!draggingId) return;
+    event.preventDefault();
+    const item = event.target.closest?.('.conversation-item[draggable="true"]');
+    if (!item || item.dataset.conversationId === draggingId) return;
+    const beforeId = item.dataset.conversationId || '';
+    // 目标顺序：当前可见平铺顺序里，把拖拽行插到目标行之前（落点行上方）。
+    // 归档筛选/搜索结果下拖拽同样成立——提交的是「所见即所得」的顺序。
+    const orderedVisible = visibleFlatConversationIds();
+    const from = orderedVisible.indexOf(draggingId);
+    if (from >= 0) orderedVisible.splice(from, 1);
+    const to = orderedVisible.indexOf(beforeId);
+    orderedVisible.splice(to >= 0 ? to : 0, 0, draggingId);
+    void persistConversationOrder(orderedVisible);
+  });
+}
+
+// 当前「单列表可见顺序」的会话 id（与 renderSidebar 的 flat 分支同一口径：
+// 归档筛选 → 排序口径 → 标题搜索过滤）。
+function visibleFlatConversationIds() {
+  let list = state.conversations.filter((c) => {
+    if (state.sidebarFilter === 'only') return Number(c.archived || 0) === 1;
+    if (state.sidebarFilter === 'all') return true;
+    return Number(c.archived || 0) !== 1;
+  });
+  if (state.workspaceSort === 'name') list = [...list].sort((a, b) => String(a.title).localeCompare(String(b.title), 'zh'));
+  else if (state.workspaceSort === 'manual') {
+    list = [...list].sort((a, b) => (Number(a.sort_order) || 0) - (Number(b.sort_order) || 0)
+      || String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+  } else list = [...list].sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+  const search = (state.workspaceSearch || '').trim().toLowerCase();
+  if (search) list = list.filter((c) => String(c.title || '').toLowerCase().includes(search));
+  return list.map((c) => String(c.id));
+}
+
+// 落库：提交**全量**会话顺序（可见顺序在前，其余会话按现有相对顺序垫后），
+// 服务端整体写 1..N。乐观更新本地 sort_order，失败时刷新列表校正。
+async function persistConversationOrder(orderedVisibleIds) {
+  const visibleSet = new Set(orderedVisibleIds);
+  const rest = state.conversations
+    .map((c) => String(c.id))
+    .filter((id) => !visibleSet.has(id));
+  const orderedIds = [...orderedVisibleIds, ...rest];
+  const rankById = new Map(orderedIds.map((id, index) => [id, index + 1]));
+  const previousRanks = new Map(state.conversations.map((c) => [String(c.id), Number(c.sort_order) || 0]));
+  state.conversations.forEach((c) => { c.sort_order = rankById.get(String(c.id)) || 0; });
+  renderSidebar();
+  try {
+    await api('/api/conversations/reorder', { method: 'POST', body: { order: orderedIds } });
+    toast('已保存排序');
+  } catch (error) {
+    state.conversations.forEach((c) => {
+      c.sort_order = previousRanks.get(String(c.id)) || 0;
+    });
+    renderSidebar();
+    toast(`保存排序失败：${error.message}`);
+  }
 }
 
 // ---- 分支链面板：点会话行的 ⑂ 徽标 / ⑂N 计数弹出 ----

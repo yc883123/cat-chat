@@ -17,7 +17,7 @@ from naiba.core.paths import normalized_path_key
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
-CURRENT_SCHEMA_VERSION = 18
+CURRENT_SCHEMA_VERSION = 20
 
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
@@ -536,6 +536,32 @@ def _migrate_to_v18(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE conversations ADD COLUMN branch_message_id TEXT NOT NULL DEFAULT ''")
 
 
+def _migrate_to_v19(db: sqlite3.Connection) -> None:
+    """会话归档标记（侧栏「分组与排序」的筛选三档数据来源）。
+
+    纯增量列：默认 0（未归档），不影响任何既有读取路径；列已存在时跳过（幂等）。
+    归档语义与 DeepSeek Harness 对齐：**仅从侧栏与全文搜索隐藏，不删任何数据**，
+    会话仍可打开继续聊，可随时取消归档。
+    """
+    try:
+        db.execute("SELECT archived FROM conversations LIMIT 1")
+    except sqlite3.OperationalError:
+        db.execute("ALTER TABLE conversations ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+
+
+def _migrate_to_v20(db: sqlite3.Connection) -> None:
+    """会话手动排序位（「手动排序」模式 + 单列表拖拽的数据落地处）。
+
+    ``sort_order`` 为 0 表示「从未手动排过序」：手动模式下未排序的会话按
+    ``updated_at`` 倒序排在最前（新会话自然出现顶部）；拖拽落序后整体重排为
+    1..N（``set_conversation_sort_order``）。纯增量列，幂等。
+    """
+    try:
+        db.execute("SELECT sort_order FROM conversations LIMIT 1")
+    except sqlite3.OperationalError:
+        db.execute("ALTER TABLE conversations ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
+
+
 # 目标版本 -> 迁移函数。新增版本时在此追加并提升 CURRENT_SCHEMA_VERSION。
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
@@ -556,6 +582,8 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     16: _migrate_to_v16,
     17: _migrate_to_v17,
     18: _migrate_to_v18,
+    19: _migrate_to_v19,
+    20: _migrate_to_v20,
 }
 
 
@@ -1148,7 +1176,8 @@ class ChatStorage:
             "lightweight_mode, lightweight_disabled_features, title_customized, system_prompt, "
             "stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, "
             "skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, "
-            "interaction_mode, favorite, branched_from_id, branch_message_id, created_at, updated_at"
+            "interaction_mode, favorite, archived, sort_order, branched_from_id, "
+            "branch_message_id, created_at, updated_at"
         )
         with self._connect() as db:
             if mode:
@@ -1476,8 +1505,12 @@ class ChatStorage:
                     (conversation_id, needle, size),
                 ).fetchall()
             else:
+                # 全局口径默认**排除已归档会话**（照 DeepSeek Harness：归档=从搜索与
+                # 列表同时隐藏）。指定会话 id 的站内搜索不排除——归档会话仍可打开，
+                # 在它内部搜自己的历史必须照常工作。
                 total = int(db.execute(
-                    "SELECT COUNT(*) FROM messages WHERE instr(lower(content), lower(?)) > 0",
+                    "SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id "
+                    "WHERE instr(lower(m.content), lower(?)) > 0 AND c.archived = 0",
                     (needle,),
                 ).fetchone()[0] or 0)
                 rows = db.execute(
@@ -1485,7 +1518,7 @@ class ChatStorage:
                     "       m.created_at AS created_at, m.rowid AS rid, "
                     "       c.id AS cid, c.title AS title, c.updated_at AS conv_updated "
                     "FROM messages m JOIN conversations c ON c.id = m.conversation_id "
-                    "WHERE instr(lower(m.content), lower(?)) > 0 "
+                    "WHERE instr(lower(m.content), lower(?)) > 0 AND c.archived = 0 "
                     "ORDER BY c.updated_at DESC, m.created_at DESC, m.rowid DESC LIMIT ?",
                     (needle, size),
                 ).fetchall()
@@ -1582,7 +1615,7 @@ class ChatStorage:
     def get_conversation(self, conversation_id: str, include_messages: bool = True) -> dict[str, Any] | None:
         with self._connect() as db:
             row = db.execute(
-                "SELECT id, title, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, lightweight_mode, lightweight_disabled_features, title_customized, system_prompt, stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, interaction_mode, favorite, branched_from_id, branch_message_id, created_at, updated_at "
+                "SELECT id, title, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, lightweight_mode, lightweight_disabled_features, title_customized, system_prompt, stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, interaction_mode, favorite, archived, sort_order, branched_from_id, branch_message_id, created_at, updated_at "
                 "FROM conversations WHERE id = ?",
                 (conversation_id,),
             ).fetchone()
@@ -1963,6 +1996,64 @@ class ChatStorage:
             if cursor.rowcount == 0:
                 return None
         return self.get_conversation(conversation_id, include_messages=False)
+
+    @_retry_transient_write
+    def set_conversation_archived(self, conversation_id: str, archived: bool) -> dict[str, Any] | None:
+        """只改归档标记，**不动 ``updated_at``**。
+
+        与 ``set_conversation_favorite`` 同一约束：归档是侧栏可见性标记，若推进时间，
+        「隐藏已归档」切到「全部对话」时整列顺序会被打乱，且手动排序位也会被
+        「最近更新」口径覆盖。归档语义照 DeepSeek Harness：仅隐藏，不删数据。
+        """
+        with self._connect() as db:
+            cursor = db.execute(
+                "UPDATE conversations SET archived = ? WHERE id = ?",
+                (1 if bool(archived) else 0, conversation_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return self.get_conversation(conversation_id, include_messages=False)
+
+    @_retry_transient_write
+    def set_conversation_sort_order(self, ordered_ids: list[str]) -> int:
+        """按给定顺序整体重排手动排序位（1..N），返回实际写入的行数。
+
+        拖拽落序一次提交**全量可见顺序**：一个事务里逐条写 1..N，中途失败整体回滚，
+        不会出现「半截排序」。列表里不存在的 id（期间被删的会话）先被剔除、
+        **不消耗序号**，剩余 id 按提交顺序拿到连续的 1..N；之后再新建的会话
+        ``sort_order`` 为 0，手动模式下排在最前（新会话置顶）。
+        不推进 ``updated_at``：重排本身不是会话活动，不能反过来改变时间排序。
+        """
+        unique: list[str] = []
+        seen: set[str] = set()
+        for raw in ordered_ids or []:
+            conversation_id = str(raw).strip()
+            if conversation_id and conversation_id not in seen:
+                seen.add(conversation_id)
+                unique.append(conversation_id)
+        if not unique:
+            return 0
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            placeholders = ",".join("?" for _ in unique)
+            existing = {
+                str(row["id"])
+                for row in db.execute(
+                    f"SELECT id FROM conversations WHERE id IN ({placeholders})", unique
+                ).fetchall()
+            }
+            written = 0
+            index = 0
+            for conversation_id in unique:
+                if conversation_id not in existing:
+                    continue
+                index += 1
+                cursor = db.execute(
+                    "UPDATE conversations SET sort_order = ? WHERE id = ?",
+                    (index, conversation_id),
+                )
+                written += int(cursor.rowcount or 0)
+        return written
 
     @_retry_transient_write
     def clear_workspace_group(self, workspace_group: str) -> int:
@@ -3208,6 +3299,10 @@ class ChatStorage:
         result.pop("lightweight_disabled_features", None)
         # 收藏标记统一成 0/1 整数（列可能来自旧库迁移前的行对象，避免 None/字符串）。
         result["favorite"] = 1 if int(result.get("favorite") or 0) else 0
+        # 归档 / 手动排序位：同样统一成整数；老库（v19/v20 之前）行对象缺列时补默认值，
+        # 前端只按 0/1 与数值大小判断，不必再判 undefined。
+        result["archived"] = 1 if int(result.get("archived") or 0) else 0
+        result["sort_order"] = int(result.get("sort_order") or 0)
         # 分支来源列：老库（v18 之前）行对象里可能没有这两列，统一补空串，
         # 前端只按「非空 = 是分支」判断，不必再判 undefined。
         result["branched_from_id"] = str(result.get("branched_from_id") or "")

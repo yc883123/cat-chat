@@ -2,7 +2,7 @@
 // 05-bootstrap.js —— 拆分自 public/app.js 第 1502-1605 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, api, initializeAppearance, setServerStatus, state, syncAppearanceFromBootstrap, toast } from "./01-core.js";
+import { $, $$, api, initializeAppearance, setServerStatus, state, syncAppearanceFromBootstrap, syncSidebarPrefsFromBootstrap, toast } from "./01-core.js";
 import { loadTasks, startTaskSync } from "./06-tasks-plans.js";
 import { populateModels, renderAgents, renderUpdateStatus } from "./07-models-agents.js";
 import { loadConversationPromptPresets, loadConversations, restoreSidebarWidth, setSidebarScrollToActive, startConversationSync } from "./08-conversations.js";
@@ -66,6 +66,9 @@ export async function initialize() {
     return;
   }
   syncAppearanceFromBootstrap(state.bootstrap);
+  // 侧栏「分组与排序」三项偏好：服务端 settings.sidebar 覆盖默认值（loadConversations
+  // 之前必须就位，否则首次渲染会用默认口径画一遍再跳）。
+  syncSidebarPrefsFromBootstrap(state.bootstrap);
   populateAppearanceSettings();
   const migration = state.bootstrap.data_location?.migration;
   if (migration?.migrated) {

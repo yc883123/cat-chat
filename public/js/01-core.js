@@ -147,6 +147,13 @@ export const state = {
   providerModelCatalogs: {},
   workspaces: [],
   workspaceSort: 'updated',
+  // 侧栏「分组与排序」三项偏好（服务端 settings.sidebar 是唯一事实来源，
+  // 与 appearance 同一套「服务端为准、同一实例多端共享」策略）：
+  // sidebarGroup: 'workspace'（按工作区）/ 'flat'（单列表）；
+  // workspaceSort: 'updated' / 'name' / 'manual'（手动排序仅单列表可拖拽）；
+  // sidebarFilter: 'hide'（隐藏已归档）/ 'all' / 'only'。
+  sidebarGroup: 'workspace',
+  sidebarFilter: 'hide',
   workspaceSearch: '',
   // 侧栏搜索模式：'title' = 本地标题过滤（默认，行为与升级前一致）；'full' = 正文全文检索。
   workspaceSearchMode: 'title',
@@ -416,6 +423,47 @@ export async function saveAppearance(patch = {}) {
     // 乐观更新后端失败时仍保留本地选择，调用方负责提示用户。
     throw error;
   }
+}
+
+// ---- 侧栏「分组与排序」偏好 ----
+// 与 appearance 同一套策略：服务端 settings.sidebar 是唯一事实来源（同实例多端共享，
+// 重启不丢）；没有 localStorage 首屏层——三项偏好不涉及闪烁问题，直接等服务端值。
+const SIDEBAR_PREF_KEYS = { group: ['workspace', 'flat'], sort: ['manual', 'updated', 'name'], filter: ['hide', 'all', 'only'] };
+
+function normalizeSidebarPrefs(raw = {}) {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  return {
+    group: SIDEBAR_PREF_KEYS.group.includes(source.group) ? source.group : 'workspace',
+    sort: SIDEBAR_PREF_KEYS.sort.includes(source.sort) ? source.sort : 'updated',
+    filter: SIDEBAR_PREF_KEYS.filter.includes(source.filter) ? source.filter : 'hide',
+  };
+}
+
+// bootstrap 完成后调用：服务端值覆盖 state（旧版服务端没有 sidebar 键 → 保留默认）。
+export function syncSidebarPrefsFromBootstrap(bootstrap) {
+  const configured = bootstrap?.settings?.sidebar;
+  const prefs = normalizeSidebarPrefs(configured);
+  state.sidebarGroup = prefs.group;
+  state.workspaceSort = prefs.sort;
+  state.sidebarFilter = prefs.filter;
+  return prefs;
+}
+
+// 乐观更新一项偏好并持久化到服务端（fire-and-forget 由调用方决定；失败抛出）。
+export function sidebarPrefsSnapshot() {
+  return { group: state.sidebarGroup, sort: state.workspaceSort, filter: state.sidebarFilter };
+}
+
+export async function saveSidebarPrefs(patch = {}) {
+  const next = { ...sidebarPrefsSnapshot(), ...patch };
+  state.sidebarGroup = next.group;
+  state.workspaceSort = next.sort;
+  state.sidebarFilter = next.filter;
+  const result = await api('/api/settings', { method: 'POST', body: { sidebar: next } });
+  const saved = result?.settings?.sidebar;
+  if (saved) syncSidebarPrefsFromBootstrap({ settings: { sidebar: saved } });
+  if (state.bootstrap?.settings) state.bootstrap.settings.sidebar = saved || next;
+  return next;
 }
 
 // ---- 聊天背景图（只铺对话区） ----

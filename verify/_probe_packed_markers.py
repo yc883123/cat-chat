@@ -37,7 +37,10 @@ CHANGED = [
     "styles.css",
     "js/01-core.js",
     "js/04-messages.js",
+    "js/05-bootstrap.js",
+    "js/08-conversations.js",
     "js/09-settings.js",
+    "js/10-upload.js",
     "js/15-bind-events.js",
 ]
 
@@ -107,18 +110,46 @@ FINGERPRINTS = {
     # 2.9.2 再加上「弹层里老三样那句改成『已退役』口径」。
     "index.html": [
         "set-ico",
-        "聊天背景图、应用图标与历史消息里仍在使用的文件会自动保留",
+        # 2.9.7：清理按钮拆成两个，tooltip 也按目录各写一句（旧的「合并一句」已不存在）。
+        "聊天背景图与历史消息里仍在使用的文件会自动保留",
+        "历史消息与运行记录里仍在使用的文件会自动保留",
         "设置 → 连接状态 → MCP 服务",
         "早期版本预置的",
+        # 2.9.7：上传缓存 / 生成产物缓存拆成两行两阈值两按钮。
+        "generatedCleanLimitMb",
+        "cleanGeneratedCache",
+        # 2.9.8：侧栏「分组与排序」浮层菜单（滑杆按钮的新面板）。
+        "sidebarViewMenu",
+        "分组与排序",
     ],
-    "styles.css": ["--set-r-card", "agent-card-tag", "settings-card-head"],
+    "styles.css": ["--set-r-card", "agent-card-tag", "settings-card-head", "cache-ref-hint", "sidebar-view-menu", "is-archived"],
     # emoji 头像判定入口（内置 Agent 用 emoji，上传图走 <img>）。
-    "js/01-core.js": ["agentAvatarEmoji", "agentAvatarFile"],
+    "js/01-core.js": ["agentAvatarEmoji", "agentAvatarFile", "normalizeSidebarPrefs"],
+    # 2.9.8：bootstrap 时同步服务端 settings.sidebar 三项偏好。
+    "js/05-bootstrap.js": ["syncSidebarPrefsFromBootstrap"],
+    # 2.9.8：分组/排序/归档三件套（面板开合、归档切换、拖拽落序）。
+    "js/08-conversations.js": [
+        "openSidebarViewMenu",
+        "toggleConversationArchive",
+        "bindSidebarDragDrop",
+        "is-archived",
+    ],
     "js/04-messages.js": ["currentAgentAvatarEmoji"],
     # 「内置」徽标 + 隐藏 × 删除；清理结果如实报账的 skipped_referenced。
     # 2.9.2：默认 Agent 兜底 id 由 general 改 master（老三样已退役）。
-    "js/09-settings.js": ['agent-card-tag">内置', "skipped_referenced", "data.default_agent_id || 'master'"],
-    "js/15-bind-events.js": ["settingsToolbarSub"],
+    # 2.9.7：新增产物阈值字段 + 按目录的「被引用无法释放」提示（含可操作出路）。
+    "js/09-settings.js": [
+        'agent-card-tag">内置',
+        "skipped_referenced",
+        "data.default_agent_id || 'master'",
+        "generated_clean_limit_mb",
+        "renderCacheCleanHints",
+        "需删除对应会话才能腾出",
+    ],
+    # 2.9.7：进度 100% 未回响应时的「服务器处理中」+ 8 秒慢提示。
+    "js/10-upload.js": ["SLOW_UPLOAD_HINT_MS", "服务器处理中", "file.slow"],
+    # 2.9.8：滑杆按钮 / ⋯菜单归档项 / 侧栏拖拽接线。
+    "js/15-bind-events.js": ["settingsToolbarSub", "cleanImageCache('generated')", "openSidebarViewMenu", "toggleConversationArchive", "bindSidebarDragDrop"],
 }
 
 # 打包时被 spec 排除的目录（private_skill_dirs / 产物），比对时同步跳过。

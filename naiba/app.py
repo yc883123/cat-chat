@@ -838,6 +838,9 @@ class NaibaChatApp:
         favorite = body.get("favorite")
         if favorite is not None and not isinstance(favorite, bool):
             return {"error": "favorite 必须是布尔值"}, HTTPStatus.BAD_REQUEST
+        archived = body.get("archived")
+        if archived is not None and not isinstance(archived, bool):
+            return {"error": "archived 必须是布尔值"}, HTTPStatus.BAD_REQUEST
         if workspace_group is not None:
             workspace_group = str(workspace_group).strip()
             if workspace_group:
@@ -879,7 +882,26 @@ class NaibaChatApp:
             if favorited is None:
                 return {"error": "对话不存在"}, HTTPStatus.NOT_FOUND
             updated = favorited if updated is None else {**updated, **favorited}
+        if archived is not None:
+            # 归档单独落库：同收藏，只改可见性标记、不推进 updated_at。
+            archived_result = self.storage.set_conversation_archived(conversation_id, archived)
+            if archived_result is None:
+                return {"error": "对话不存在"}, HTTPStatus.NOT_FOUND
+            updated = archived_result if updated is None else {**updated, **archived_result}
         return updated or {"error": "对话不存在"}, HTTPStatus.OK if updated else HTTPStatus.NOT_FOUND
+
+    def api_reorder_conversations(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """手动排序落库：按前端给定的全量顺序写 1..N。
+
+        请求体 ``order`` 必须是会话 id 字符串数组（前端把当前可见顺序 + 拖拽结果
+        一起提交）；服务端不校验每个 id 都存在——期间被删的会话自然跳过，
+        新建的会话保持 sort_order=0（手动模式下排在最前）。
+        """
+        order = body.get("order")
+        if not isinstance(order, list) or any(not isinstance(item, str) for item in order):
+            return {"error": "order 必须是会话 id 字符串数组"}, HTTPStatus.BAD_REQUEST
+        written = self.storage.set_conversation_sort_order(order)
+        return {"written": written}, HTTPStatus.OK
 
     def api_provider_presets(self) -> dict[str, Any]:
         """供应商预设表（设置弹层与首启引导共用，名单唯一来源在 llm/provider_presets.py）。"""

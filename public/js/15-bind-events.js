@@ -8,7 +8,7 @@ import { branchMessage, cancelActiveEdit, cancelSessionStart, confirmActiveEdit,
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
 import { switchPermissionMode } from "./06-tasks-plans.js";
 import { checkUpdate, closeAgentHelpPopover, closeComposerModelPicker, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, positionAgentHelpPopover, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleAgentHelpPopover, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
-import { cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeBranchChainPanel, closeConversationMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, runFullTextSearch, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel, setTaskLogOpen, setTaskLogStick, setWorkspaceSearchMode, syncSearchModeUi, SEARCH_DEBOUNCE_MS } from "./08-conversations.js";
+import { applySidebarViewPref, bindSidebarDragDrop, cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeBranchChainPanel, closeConversationMenu, closeSidebarViewMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, openSidebarViewMenu, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, runFullTextSearch, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel, toggleConversationArchive, setTaskLogOpen, setTaskLogStick, setWorkspaceSearchMode, syncSearchModeUi, SEARCH_DEBOUNCE_MS } from "./08-conversations.js";
 import { addProvider, addSearchProfile, appearanceFormValues, applyProviderModelCapabilities, applyProviderPreset, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadWorkspaceTree, openAgentCard, openAgentToolEditorCurrent, openProviderCard, openProviderPresetKeyUrl, openVisionProviderForm, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, saveMcpServer, saveProvider, saveRuntimeSettings, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, showAgentForm, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAgentToolPeek, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, toggleToolOnlySelected, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint } from "./09-settings.js";
 import { addFolderChip, isFolderChip, readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
 import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handlePasteImage, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState } from "./12-chat-input.js";
@@ -1245,7 +1245,9 @@ export function bindEvents() {
     closeConversationMenu();
     if (!id) return;
     if (button.dataset.conversationAction === 'rename') openRenameConversation(id);
-    else if (button.dataset.conversationAction === 'delete') {
+    else if (button.dataset.conversationAction === 'archive') {
+      toggleConversationArchive(id).catch((error) => toast(`归档失败：${error.message}`));
+    } else if (button.dataset.conversationAction === 'delete') {
       deleteConversation(id).catch((error) => toast(`删除失败：${error.message}`));
     }
   });
@@ -1277,6 +1279,8 @@ export function bindEvents() {
     if (event.key !== 'Escape') return;
     const menu = $('#conversationItemMenu');
     if (menu && !menu.hidden) closeConversationMenu();
+    const viewMenu = $('#sidebarViewMenu');
+    if (viewMenu && !viewMenu.hidden) closeSidebarViewMenu();
     const chain = $('#branchChainPanel');
     if (chain && !chain.hidden) closeBranchChainPanel();
   });
@@ -1712,6 +1716,7 @@ export function bindEvents() {
   // 侧栏虚拟化：滚动时按窗口重绘可视行
   $('#sidebarWorkspaceTree').addEventListener('scroll', () => {
     closeConversationMenu();
+    closeSidebarViewMenu();
     // 分支链面板是 fixed 挂在 body 上的浮层，锚点（会话行）滚走了它必须跟着收，
     // 否则会悬在半空指着一个已经不在那里的会话。
     closeBranchChainPanel();
@@ -1848,11 +1853,27 @@ export function bindEvents() {
   };
   window.addEventListener('resize', recalcSidebarW);
   $('#addWorkspace').addEventListener('click', createWorkspace);
-  $('#workspaceSort').addEventListener('click', () => {
-    state.workspaceSort = state.workspaceSort === 'updated' ? 'name' : 'updated';
-    renderSidebar();
-    toast(state.workspaceSort === 'name' ? '已按名称排序' : '已按时间排序');
+  // 「分组与排序」面板（替代旧的时间/名称硬切换按钮）：锚在按钮下方弹出。
+  $('#workspaceSort').addEventListener('click', (event) => {
+    event.stopPropagation();
+    openSidebarViewMenu(event.currentTarget);
   });
+  // 面板项点击：乐观改偏好 → 落库 → 重绘侧栏。
+  $('#sidebarViewMenu')?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-view-pref]');
+    if (!button) return;
+    void applySidebarViewPref(button.dataset.viewPref, button.dataset.viewValue);
+  });
+  // 点面板与按钮之外收起（按钮自己负责开/关切换，上面已 stopPropagation）。
+  document.addEventListener('click', (event) => {
+    const menu = $('#sidebarViewMenu');
+    if (!menu || menu.hidden) return;
+    if (menu.contains(event.target)) return;
+    if (event.target.closest?.('#workspaceSort')) return;
+    closeSidebarViewMenu();
+  });
+  // 单列表 + 手动排序：拖拽落序（委托绑定，虚拟化重写不洗掉）。
+  bindSidebarDragDrop();
   const searchRow = $('#workspaceSearchRow');
   $('#workspaceSearch').addEventListener('click', () => {
     const input = $('#workspaceSearchInput');

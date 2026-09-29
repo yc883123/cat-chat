@@ -603,6 +603,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path.startswith("/api/conversations/") and path.endswith("/settings"):
             conversation_id = path.split("/")[-2]
             self._json(*self.app.api_update_conversation_settings(conversation_id, body))
+        elif path == "/api/conversations/reorder":
+            # 手动排序落库：精确匹配必须放在上面的 endswith 链之后也安全——
+            # "reorder" 不与任何 endswith 后缀冲突；但为了可读性仍紧邻 settings 放置。
+            self._json(*self.app.api_reorder_conversations(body))
         elif path == "/api/workspaces":
             self._json(*self.app.api_upsert_workspace(body))
         elif path == "/api/workspaces/delete":

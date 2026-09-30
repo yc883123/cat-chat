@@ -27,6 +27,7 @@ from naiba.core.history import encode_image_for_model
 from naiba.core.tool_results import display_tool_run, model_visible_run, truncate_json_text
 from naiba.core.exceptions import TaskCancelled
 from naiba.core.media_types import DEFAULT_MEDIA_DECLARATION
+from naiba.core import text_fences
 from naiba.skills.catalog import SkillCatalog
 from naiba.tools.executor import ToolExecutor
 from naiba.skills.context import fallback_context_window
@@ -1093,10 +1094,28 @@ class SkillAgent:
                         ),
                     })
                     continue
-                logger.warning("工具调用解析失败：连续三次无法得到完整工具动作（不展示原文）")
+                # 三次都判 parse_error：旧写法只回一句固定文案，**模型这一轮的正文被整体丢掉**
+                # （界面只有「已停止执行」，用户不知道自己丢了内容；被吞的正文其实还在 raw 里）。
+                # 现在保留最后一轮原文 + 失败说明另起一段，并经 run_context["partial"] 让 chat
+                # 层给这条消息落 metadata.partial（前端已有「未完成」徽标）——宁可标注不完整，
+                # 也不静默吞内容。
+                last_output = str(raw or "").strip()
+                note = (
+                    "（以上为模型本轮原文：其输出未通过工具动作格式校验，连续三次重试失败，"
+                    "已停止执行；如需继续请重新提问或换用工具调用更稳定的模型。）"
+                )
+                logger.warning(
+                    "工具调用解析失败：连续三次无法得到完整工具动作（保留原文 + 失败说明）：head=%s",
+                    last_output[:200] or "（空）",
+                )
                 event({"type": "run_failed", "error": "工具调用格式连续三次无法自动纠正"})
+                if isinstance(run_context, dict):
+                    run_context["partial"] = {
+                        "reason": "tool_protocol_parse_error",
+                        "attempts": parse_error_count,
+                    }
                 return (
-                    "工具调用格式连续三次无法自动纠正，已停止执行。",
+                    ((last_output + "\n\n" + note) if last_output else note),
                     runs,
                     reasonings,
                     self._summarize_usage(usages),
@@ -1705,69 +1724,131 @@ class SkillAgent:
 
     @classmethod
     def _parse_action(cls, text: str) -> dict[str, Any]:
-        harmony_action = cls._extract_harmony_tool_action(text)
-        if harmony_action:
-            return harmony_action
-        xml_action = cls._extract_xml_tool_action(text)
-        if xml_action:
-            return xml_action
-        parsed = cls._extract_json(text)
-        if isinstance(parsed, dict) and parsed.get("type") in {"tool", "tools", "final"}:
-            return parsed
-        # The output clearly intends an agent tool action but could not be
-        # parsed (truncated tag, malformed JSON, ...). Signal a parse failure
-        # instead of leaking the raw protocol as the answer.
-        if cls._looks_like_tool_protocol(text):
-            return {"type": "parse_error"}
-        return {"type": "final", "content": text.strip()}
+        """把模型输出解析成 Agent 动作——**三段式，围栏内一律不算协议**。
+
+        ① **整条回答就是一块围栏**（部分端点会把协议整块包进 ```json / ```xml）⇒ 先剥围栏再解析；
+        ② **掩码后定位**：协议标记只在围栏**外**才算标记（``naiba/core/text_fences``）。旧写法在
+           整段输出里任意位置扫标记，于是正文里 ```json 的**示例**会被当成协议——不只是丢正文，
+           ``_extract_json`` 对任意位置的 ``{`` 做 ``raw_decode``，会把示例里的
+           ``{"type":"tool","tool":"pwsh",…}`` 当成真动作**直接执行**；
+        ③ **协议必须顶到回答尾**（尾部只允许空白 / 闭合围栏 / Harmony 收尾 token）：
+           「工具动作后面还接正文」的输出**不再执行该动作**，整体按正文展示。这与旧行为相反
+           （旧：静默执行动作 + 静默丢弃正文）——宁可不动作，也不静默吞内容。
+
+        返回 ``{"type": "parse_error"}`` 表示「明显想发协议但解析不出来」，由调用处有界重试。
+        """
+        raw = str(text or "")
+        unwrapped = text_fences.unwrap_whole_response_fence(raw)
+        for body in ([unwrapped, raw] if unwrapped else [raw]):
+            action, protocol_like = cls._extract_agent_action(body)
+            if action is not None:
+                return action
+            if protocol_like:
+                return {"type": "parse_error"}
+        return {"type": "final", "content": raw.strip()}
 
     @classmethod
-    def _looks_like_tool_protocol(cls, text: str) -> bool:
-        """Heuristic: does ``text`` look like an agent tool-call protocol that
-        merely failed to parse, rather than a plain-language answer?"""
-        probe = (text or "").lstrip()
-        if not probe:
+    def _extract_agent_action(cls, text: str) -> tuple[dict[str, Any] | None, bool]:
+        """单条候选文本 → ``(动作或 None, 是否「想发协议但解析失败」)``。"""
+        masked = text_fences.mask_fenced_code(text)
+        harmony_action, harmony_broken = cls._extract_harmony_tool_action(text, masked)
+        if harmony_action is not None or harmony_broken:
+            return harmony_action, harmony_broken
+        xml_action, xml_broken = cls._extract_xml_tool_action(text, masked)
+        if xml_action is not None or xml_broken:
+            return xml_action, xml_broken
+        parsed = cls._extract_json(text, masked)
+        if isinstance(parsed, dict) and parsed.get("type") in {"tool", "tools", "final"}:
+            return parsed, False
+        if cls._looks_like_tool_protocol(text, masked):
+            return None, True
+        return None, False
+
+    @staticmethod
+    def _decodable_json(text: str, index: int) -> bool:
+        """``text[index:]`` 是不是一段**能解码**的 JSON（能 ⇒ 它是正文里的 JSON，不是被切断的动作）。"""
+        try:
+            value, _end = json.JSONDecoder().raw_decode(str(text or ""), max(0, int(index)))
+        except (json.JSONDecodeError, TypeError, ValueError):
             return False
-        # Models sometimes emit a short natural-language preface before the
-        # action. Still classify the embedded protocol as an action so it is
-        # never persisted as the assistant's visible answer.
-        if _HARMONY_TOOL_MARKER.search(probe):
+        return isinstance(value, (dict, list))
+
+    @classmethod
+    def _looks_like_tool_protocol(cls, text: str, masked: str | None = None) -> bool:
+        """``text`` 是否「明显想发工具协议、只是没解析出来」（这种输出绝不能当正文落库）。
+
+        判据两条：只在**掩码文本**上找标记（围栏内一律不算），且标记必须落在回答的**最后一段**里——
+        被截断的动作总是停在最后一段。正文中间的裸 JSON 即使形状像动作也不算协议：能解码的一律
+        按正文放行（旧写法在这里会把示例当动作执行）。
+        """
+        source = str(text or "")
+        if not source.strip():
+            return False
+        scan = source if masked is None else masked
+        harmony = _HARMONY_TOOL_MARKER.search(scan)
+        if harmony and text_fences.in_final_block(scan, harmony.start()):
             return True
-        if re.search(r"<(?:tool_calls|invoke|tool)\b", probe, flags=re.IGNORECASE):
+        xml_marker = re.search(r"<(?:tool_calls|invoke|tool)\b", scan, flags=re.IGNORECASE)
+        if xml_marker and text_fences.in_final_block(scan, xml_marker.start()):
             return True
-        if re.search(r'\{[\s\S]{0,96}"(?:type|tool)"\s*:', probe, flags=re.IGNORECASE):
-            return True
-        first = probe[0]
-        if first in "{[":
+        json_marker = re.search(r'\{[\s\S]{0,96}"(?:type|tool)"\s*:', scan, flags=re.IGNORECASE)
+        if json_marker and text_fences.in_final_block(scan, json_marker.start()):
+            return not cls._decodable_json(source, json_marker.start())
+        # 掩码后开头可能是空格（回答以围栏开头）：定位到第一个非空白字符再判形态
+        first = next((index for index, char in enumerate(scan) if not char.isspace()), None)
+        if first is None:
+            return False
+        head = scan[first:]
+        if head[0] in "{[":
             # JSON/array action schema: only treat as a protocol when it
             # carries the action-style ``"type"``/``"tool"`` key, so an ordinary
             # JSON answer is still shown to the user.
-            return bool(re.search(r'"(?:type|tool)"\s*:', probe[:200]))
-        if first == "<":
-            if _TOOL_OPEN_TAG.match(probe):
-                if probe[:4].lower() == "<tool":
-                    return bool(_TOOL_NAMED_ATTR.search(probe[:200]))
+            if not re.search(r'"(?:type|tool)"\s*:', head[:200], flags=re.IGNORECASE):
+                return False
+            return not cls._decodable_json(source, first)
+        if head[0] == "<":
+            if _TOOL_OPEN_TAG.match(head):
+                if head[:5].lower() == "<tool":
+                    return bool(_TOOL_NAMED_ATTR.search(head[:200]))
                 return True
         return False
 
     @classmethod
-    def _extract_harmony_tool_action(cls, text: str) -> dict[str, Any] | None:
+    def _extract_harmony_tool_action(
+        cls, text: str, masked: str | None = None
+    ) -> tuple[dict[str, Any] | None, bool]:
         """Parse Kimi/Harmony reserved-token tool calls from message text.
 
         Affected compatible relays return these tokens inside ``output_text``
         rather than as Responses ``function_call`` items.  Preserve argument
         types when the body is JSON; otherwise keep the literal string (which
         is how commands and paths are normally emitted).
+
+        定位一律在**掩码文本**上（围栏里的 harmony 示例不参与），并且协议必须顶到回答尾——
+        尾部允许 ``<|close|>`` / ``<|sep|>`` 收尾 token 与空白。掩码只把围栏内换成空格，
+        围栏外的分组内容与原文逐字符一致，所以分组直接从掩码文本取。
+        返回 ``(动作或 None, 是否「想发协议但畸形/被切断」)``。
         """
-        cleaned = str(text or "").strip()
-        if not _HARMONY_TOOL_MARKER.search(cleaned):
-            return None
-        matches = list(_HARMONY_CALL.finditer(cleaned))
+        source = str(text or "")
+        scan = source if masked is None else masked
+        marker = _HARMONY_TOOL_MARKER.search(scan)
+        if not marker:
+            return None, False
+        if not text_fences.in_final_block(scan, marker.start()):
+            # 标记后面还隔着空行接正文 ⇒ 那不是本轮要执行的动作
+            return None, False
+        matches = list(_HARMONY_CALL.finditer(scan))
         # Do not execute a valid-looking prefix when a later call was cut off.
         if not matches or len(matches) != len(re.findall(
-            r"<\|open\|>call\b", cleaned, flags=re.IGNORECASE
+            r"<\|open\|>call\b", scan, flags=re.IGNORECASE
         )):
-            return None
+            return None, True
+        trailing = re.sub(
+            r"<\|close\|>[A-Za-z_-]*|<\|sep\|>", "", scan[matches[-1].end():], flags=re.IGNORECASE
+        )
+        if trailing.strip():
+            # 动作后面还接正文 ⇒ 按正文展示，不执行（见 _parse_action 第 ③ 段）
+            return None, False
         calls: list[dict[str, Any]] = []
         for match in matches:
             attrs = {
@@ -1776,14 +1857,14 @@ class SkillAgent:
             }
             tool = str(attrs.get("tool") or attrs.get("name") or "").strip()
             if not tool:
-                return None
+                return None, True
             arguments: dict[str, Any] = {}
             body = match.group("body")
             argument_matches = list(_HARMONY_ARGUMENT.finditer(body))
             if len(argument_matches) != len(re.findall(
                 r"<\|open\|>argument\b", body, flags=re.IGNORECASE
             )):
-                return None
+                return None, True
             for argument in argument_matches:
                 arg_attrs = {
                     key.lower(): value
@@ -1791,7 +1872,7 @@ class SkillAgent:
                 }
                 name = str(arg_attrs.get("key") or arg_attrs.get("name") or "").strip()
                 if not name:
-                    return None
+                    return None, True
                 raw_value = argument.group("value").strip()
                 arg_type = str(arg_attrs.get("type") or "").strip().lower()
                 if arg_type in {"string", "str"}:
@@ -1803,17 +1884,22 @@ class SkillAgent:
                         value = raw_value
                 arguments[name] = value
             calls.append({"type": "tool", "tool": tool, "arguments": arguments})
-        return calls[0] if len(calls) == 1 else {"type": "tools", "calls": calls}
+        return (calls[0] if len(calls) == 1 else {"type": "tools", "calls": calls}), False
 
     @classmethod
-    def _extract_xml_tool_action(cls, text: str) -> dict[str, Any] | None:
-        """Accept XML tool-call dialects emitted by some OpenAI-compatible models."""
-        cleaned = str(text or "").strip()
-        if not cleaned:
-            return None
-        # Models occasionally wrap the protocol in a markdown XML fence.
-        cleaned = re.sub(r"^```(?:xml)?\s*", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    def _extract_xml_tool_action(
+        cls, text: str, masked: str | None = None
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Accept XML tool-call dialects emitted by some OpenAI-compatible models.
+
+        定位一律在**掩码文本**上：正文里 ```` ```xml ```` 围栏中的示例不参与。
+        「整条回答被围栏包裹」的既有支持由 ``_parse_action`` 的整文剥围栏负责，这里不重复剥。
+        返回 ``(动作或 None, 是否「想发协议但畸形/被切断」)``。
+        """
+        source = str(text or "")
+        scan = source if masked is None else masked
+        if not scan.strip():
+            return None, False
 
         # DeepSeek-compatible endpoints may emit ``<tool name="...">``
         # wrapped in an outer ``<tool type="tool">`` block. Some versions
@@ -1821,30 +1907,37 @@ class SkillAgent:
         # directly instead of requiring the entire response to be valid XML.
         named_tool = re.search(
             r"<tool\b[^>]*\bname\s*=\s*['\"]([^'\"]+)['\"][^>]*>(.*?)</tool>",
-            cleaned,
+            scan,
             flags=re.IGNORECASE | re.DOTALL,
         )
         if named_tool:
+            if not text_fences.only_fence_tail(scan, named_tool.end()):
+                # 动作后面还接正文 ⇒ 按正文展示，不执行（见 _parse_action 第 ③ 段）
+                return None, False
             tool = named_tool.group(1).strip()
-            body = named_tool.group(2)
+            # 参数体取**原文**的同偏移片段：掩码只影响围栏内，取原文可保证围栏里的
+            # 字面量（例如参数值本身是一段代码）不会被空格替换。
+            body = source[named_tool.start(2):named_tool.end(2)]
             arguments = cls._parse_xml_parameters(body)
-            return {"type": "tool", "tool": tool, "arguments": arguments}
+            return {"type": "tool", "tool": tool, "arguments": arguments}, False
 
-        if "<invoke" not in cleaned:
-            return None
+        if "<invoke" not in scan:
+            return None, False
         try:
-            root = ET.fromstring(cleaned)
+            root = ET.fromstring(source.strip())
         except ET.ParseError:
-            return None
+            # 整条回答不是合法 XML：是不是「被切断的动作」交给 _looks_like_tool_protocol 判
+            # （它要求标记落在最后一段里，正文中间的 XML 片段不会被误判）。
+            return None, False
         invokes = [root] if root.tag.rsplit("}", 1)[-1] == "invoke" else [
             node for node in root.iter() if node.tag.rsplit("}", 1)[-1] == "invoke"
         ]
         if len(invokes) != 1:
-            return None
+            return None, False
         invoke = invokes[0]
         tool = str(invoke.attrib.get("name") or "").strip()
         if not tool:
-            return None
+            return None, False
         arguments: dict[str, Any] = {}
         for parameter in invoke:
             if parameter.tag.rsplit("}", 1)[-1] != "parameter":
@@ -1860,7 +1953,7 @@ class SkillAgent:
                     arguments[name] = value
             else:
                 arguments[name] = ""
-        return {"type": "tool", "tool": tool, "arguments": arguments}
+        return {"type": "tool", "tool": tool, "arguments": arguments}, False
 
     @staticmethod
     def _parse_xml_parameters(body: str) -> dict[str, Any]:
@@ -1900,25 +1993,31 @@ class SkillAgent:
         return arguments
 
     @staticmethod
-    def _extract_json(text: str) -> dict[str, Any] | None:
-        cleaned = text.strip()
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
-        try:
-            value = json.loads(cleaned)
-            return value if isinstance(value, dict) else None
-        except json.JSONDecodeError:
-            pass
+    def _extract_json(text: str, masked: str | None = None) -> dict[str, Any] | None:
+        """围栏外的 JSON 对象候选：解码成功**且顶到回答尾**才算动作载荷。
+
+        旧写法先整体 ``json.loads``，再对**任意位置**的 ``{`` 做 ``raw_decode``——正文里的
+        ```json 示例（哪怕在围栏内）会被取出来当成真动作执行。现在候选位置取自**掩码文本**
+        （围栏内一律看不见），解码在**原文**上做（取回真实内容），且解码结束位置之后只允许
+        空白与闭合围栏行。「整条回答就是 ```json 包裹的协议」由 ``_parse_action`` 的整文剥围栏
+        负责，这里不再剥围栏。
+        """
+        source = str(text or "")
+        scan = source if masked is None else masked
         decoder = json.JSONDecoder()
-        for index, char in enumerate(cleaned):
+        for index, char in enumerate(scan):
             if char != "{":
                 continue
             try:
-                value, _ = decoder.raw_decode(cleaned[index:])
-                if isinstance(value, dict):
-                    return value
+                value, end = decoder.raw_decode(source, index)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(value, dict):
+                continue
+            if not text_fences.only_fence_tail(scan, end):
+                # 后面还接正文 ⇒ 不执行（整体按正文展示），也不判 parse_error
+                continue
+            return value
         return None
 
 

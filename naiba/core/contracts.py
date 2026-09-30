@@ -25,7 +25,7 @@ RUN_CONTEXT_KEYS: tuple[str, ...] = (
     "pull_interjections", "mark_interjections_consumed",
     "mcp_active", "trace_messages", "plan_exit_content", "plan_step_title",
     "model_has_vision", "tool_defs", "workspace_dir", "media_intent",
-    "event_sink", "truncation",
+    "event_sink", "truncation", "partial",
 )
 
 # 运行期保持 dict 形态（零行为变化）；"带默认值/校验"经由工厂与校验函数落地，
@@ -65,6 +65,10 @@ def default_run_context() -> dict[str, Any]:
         # 本轮答复的截断自述信息（{"finish_reason","truncated","continued"}）；
         # 由 skills/agent.py 写入、run/chat.py 落进消息 metadata。
         "truncation": {},
+        # 本轮正文**不完整**的自述信息（{"reason","attempts"}）：工具协议连续解析失败时
+        # agent 仍把模型原文落库，但必须标注「未完成」，由 run/chat.py 落进 metadata.partial
+        # （前端已有「未完成」徽标）。与 truncation 的区别：那是长度截断，这是格式校验失败。
+        "partial": {},
     }
 
 
@@ -168,6 +172,7 @@ class RunContext(TypedDict, total=False):
     # ---- 透明化/截断自述（工具实时进度出口 + 本轮答复截断信息）----
     event_sink: Any                  # 工具实时进度出口（callable(dict) -> None；缺省不报进度）
     truncation: dict[str, Any]       # 本轮答复截断信息（finish_reason / truncated / continued）
+    partial: dict[str, Any]          # 本轮正文不完整（reason / attempts）→ 消息 metadata.partial
 
 
 class EventType(str, Enum):

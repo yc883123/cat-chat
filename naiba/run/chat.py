@@ -886,6 +886,12 @@ class ConversationRunMixin:
             truncation = (run_context or {}).get("truncation") if isinstance(run_context, dict) else None
             if truncation:
                 metadata[MetadataKeys.TRUNCATED] = dict(truncation)
+            # 正文**不完整**的另一条来源：工具协议连续三次解析失败，Agent 不再只回固定文案，
+            # 而是保留模型原文并附一句失败说明（run_context["partial"]）。这里落 metadata.partial，
+            # 前端复用既有「未完成」徽标——与 truncation（长度截断）是两回事，宁可标注也不静默吞正文。
+            partial_info = (run_context or {}).get("partial") if isinstance(run_context, dict) else None
+            if partial_info:
+                metadata[MetadataKeys.PARTIAL] = True
             # 模型调用 reset_context 成功 → 在本条 AI 回复上落「新会话」分割线标记：
             # 下一条消息起 build_model_history 只取分割线之后的内容（本条及其之前都不进上下文）。
             reset_info = (run_context or {}).get("context_reset") if isinstance(run_context, dict) else None

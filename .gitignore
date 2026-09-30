@@ -181,6 +181,8 @@ naiba-model-debug.log
 
 # Dev/test scratch artifacts that leaked into the repository before. Keep them out.
 _agent_tool_shots/
+# Windows 文件夹权限修复的备份与撤销脚本（本机取证物，永不入库）
+.acl-recovery/
 _iso_test/
 _iso_test2/
 _iso_test3/

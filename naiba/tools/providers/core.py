@@ -616,8 +616,10 @@ def _search_one_file(
     multiline: bool,
     compiled=None,
 ) -> tuple[str | None, int]:
-    """单文件搜索：兼容旧子串格式；正则支持多行与上下文。命中返回（文本，命中数），未命中 (None, 0)。
+    """单文件搜索：子串与正则两条路；正则另支持多行与上下文。命中返回（文本，命中数），未命中 (None, 0)。
 
+    输出统一为「表头独占一行印路径 + 其后只带行号」（``{行号}: {内容}``，与
+    ``read_file`` 的 ``with_line_numbers`` 同口径），路径不在每行重复。
     子串模式与正则模式统一受 ignore_case 控制（默认区分大小写——语义不再随模式突变）。
     """
     # ---- 多行正则：跨行匹配，输出命中块与所在行范围 ----
@@ -641,7 +643,7 @@ def _search_one_file(
             if len(blocks) >= 20:
                 blocks.append("  ... 命中过多，已截断")
                 break
-        return f"{path}: {len(spans)} 处命中\n" + "\n".join(blocks), len(spans)
+        return f"{path}:（{len(spans)} 处命中）\n" + "\n".join(blocks), len(spans)
     # ---- 逐行匹配（子串或正则），支持上下文 ----
     lines = content.splitlines()
     hits: list[int] = []
@@ -658,15 +660,19 @@ def _search_one_file(
     if not hits:
         return None, 0
     if context_lines <= 0:
-        # 兼容旧格式：path:行号: 内容（子串与正则一致，不破坏既有解析）
-        rows = []
+        # 表头独占一行印路径，其后每行只有 `{行号}: {内容}`——与 read_file 的
+        # with_line_numbers 同一口径。此前每行重复印一遍绝对路径：命中 N 行就重复 N 次，
+        # 而模型可见结果有 30000 字符硬预算（core.tool_results.MODEL_RESULT_MAX_CHARS），
+        # 长路径 + 多命中时预算先被路径吃光，真正的命中内容反而被截断。
+        rows = [f"{path}:"]
         for index in hits[:100]:
-            rows.append(f"{path}:{index + 1}: {lines[index].strip()[:500]}")
+            rows.append(f"{index + 1}: {lines[index].strip()[:500]}")
         if len(hits) > 100:
-            rows.append(f"{path}: ... 共 {len(hits)} 处命中，仅显示前 100 处")
+            rows.append(f"... 共 {len(hits)} 处命中，仅显示前 100 处")
         return "\n".join(rows), len(hits)
-    # 带上下文：命中行距不超过 2*context+1 的相邻命中合为一块，避免重复打印同一上下文
-    blocks: list[str] = []
+    # 带上下文：命中行距不超过 2*context+1 的相邻命中合为一块，避免重复打印同一上下文。
+    # 同一文件只印一次表头，块内行同样只带行号（去重口径与无上下文分支一致）。
+    blocks: list[str] = [f"{path}:"]
     shown = 0
     runs: list[list[int]] = []
     current: list[int] = []
@@ -680,11 +686,13 @@ def _search_one_file(
     for run in runs:
         first = max(0, run[0] - context_lines)
         last = min(len(lines) - 1, run[-1] + context_lines)
-        body = [f"{path}:{line_no}: {lines[line_no]}" for line_no in range(first, last + 1)]
+        # 行号是 1 基（`line_no + 1`）：本分支历史上印的是 enumerate 的 0 基下标，比无上下文
+        # 分支与 read_file 少 1，模型照着它传 start_line 就会读错一行。
+        body = [f"{line_no + 1}: {lines[line_no]}" for line_no in range(first, last + 1)]
         blocks.append("\n".join(body))
         shown += len(run)
         if shown >= 100:
-            blocks.append(f"{path}: ... 已显示 {shown} 处命中，剩余省略")
+            blocks.append(f"... 已显示 {shown} 处命中，剩余省略")
             break
     return "\n\n".join(blocks), len(hits)
 
@@ -758,7 +766,9 @@ def _tool_search_files(ctx: ToolContext, args: dict[str, Any], active_skills: li
         summary.append(f"共 {total_hits} 处命中，已显示前 {len(matches)} 组")
     if skipped_large:
         summary.append(f"已跳过 {skipped_large} 个超过 {max_file_size} 字节的文件")
-    body = "\n".join(matches) or ("未找到匹配内容" if not summary else "未找到匹配内容（详情见汇总）")
+    # 文件块之间空行分隔：每个块的表头已独占一行，再挤在相邻行上会让「哪几行属于哪个文件」
+    # 读不出来（跨文件命中越多越明显）。
+    body = "\n\n".join(matches) or ("未找到匹配内容" if not summary else "未找到匹配内容（详情见汇总）")
     return body + (("\n" + "；".join(summary) + "。") if summary else "")
 
 

@@ -233,6 +233,60 @@ class SearchSemanticsTests(unittest.TestCase):
             }, None)
         self.assertIn("路径不存在", str(ctx.exception))
 
+    # ---- 输出去重：表头独占一行印路径，行号行不再重复绝对路径 ----
+
+    def test_default_output_header_once_and_bare_line_numbers(self) -> None:
+        target = self.tmp / "dup.py"
+        target.write_text("import os\nx = 1\nimport os\n", encoding="utf-8")
+        out = core_provider._tool_search_files(self.ctx, {
+            "path": str(target), "query": "import os",
+        }, None)
+        rows = out.splitlines()
+        self.assertEqual(rows[0], f"{target}:", f"表头应独占一行：{rows[:3]}")
+        self.assertEqual(rows[1], "1: import os")
+        self.assertEqual(rows[2], "3: import os")
+        self.assertEqual(out.count(str(target)), 1, "同一文件的路径只能出现一次")
+        for row in rows[1:]:
+            self.assertNotIn(str(self.tmp), row, f"行号行不得再带绝对路径：{row}")
+
+    def test_context_output_prints_header_once_and_numbers_are_one_based(self) -> None:
+        target = self.tmp / "ctx.py"
+        target.write_text("a\nb\nMATCH\nd\ne\n\nMATCH\nh\n", encoding="utf-8")
+        out = core_provider._tool_search_files(self.ctx, {
+            "path": str(target), "query": "MATCH", "context_lines": 1,
+        }, None)
+        self.assertEqual(out.splitlines()[0], f"{target}:")
+        self.assertEqual(out.count(str(target)), 1, "上下文块再多也只印一次表头")
+        # 1 基行号：与无上下文分支、read_file 同口径（历史上这一支印的是 0 基下标，
+        # 模型照它传 start_line 会读错一行）。
+        self.assertIn("2: b", out)
+        self.assertIn("3: MATCH", out)
+        self.assertIn("7: MATCH", out)
+        self.assertNotIn("0: ", out)
+
+    def test_multiline_regex_header_carries_hit_count(self) -> None:
+        target = self.tmp / "multi.py"
+        target.write_text("import os\nx = 1\nimport os", encoding="utf-8")
+        out = core_provider._tool_search_files(self.ctx, {
+            "path": str(target), "query": r"import\s+os", "regex": True, "multiline": True,
+        }, None)
+        self.assertEqual(out.splitlines()[0], f"{target}:（2 处命中）")
+        self.assertEqual(out.count(str(target)), 1)
+        self.assertIn("match 1-1 行:", out)
+
+    def test_multi_file_output_repeats_each_path_once_and_blanks_between_files(self) -> None:
+        (self.tmp / "one.txt").write_text("NEEDLE\nfiller\n", encoding="utf-8")
+        (self.tmp / "two.txt").write_text("filler\nNEEDLE\n", encoding="utf-8")
+        out = core_provider._tool_search_files(self.ctx, {
+            "path": str(self.tmp), "query": "NEEDLE", "pattern": "*.txt",
+        }, None)
+        for name in ("one.txt", "two.txt"):
+            path = str(self.tmp / name)
+            self.assertEqual(out.count(path), 1, f"{name} 的路径只应出现在表头一次")
+            self.assertIn(f"{path}:", out)
+        self.assertIn("\n\n", out, "文件块之间必须空行分隔")
+        self.assertIn("共 2 处命中，已显示前 2 组", out)
+
 
 class JobOutputCursorTests(unittest.TestCase):
     def test_cursor_marker_roundtrip(self) -> None:

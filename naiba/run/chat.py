@@ -11,6 +11,7 @@ from __future__ import annotations
 from naiba.core.contracts import MetadataKeys, RunContext
 
 import json
+import logging
 import threading
 import time
 import traceback
@@ -28,11 +29,13 @@ from naiba.core.conv_files import _conv_workspace_root, resolve_file_references
 from naiba.core.choices import detect_choice_groups
 from naiba.core.exceptions import ActiveRunError
 from naiba.core.file_changes import file_changes_from_runs
-from naiba.core.history import build_model_history
+from naiba.core.history import build_model_history, local_brain
 from naiba.core.tool_results import display_tool_run
 from naiba.core.usage_stats import cost_for
 from naiba.run.stream import _RunEventSink, _safe_activity
 from naiba.storage.media import missing_cache_attachment
+
+logger = logging.getLogger(__name__)
 
 # 中断轮次重建时的判据：事件流里出现这些事件，说明这一轮已有可展示的内容
 # （正文增量 / 思考 / 工具活动 / 已发出的 Skill 列表），值得重建一条 partial 消息。
@@ -582,6 +585,9 @@ class ConversationRunMixin:
             history = build_model_history(
                 snapshot.get("conversation_messages") or [], event,
                 pdf_tools=pdf_tools_enabled, video_tools=video_tools_enabled,
+                # 本地大脑才回放「图片已降级」旗标（降级不可逆 → 历史字节单调稳定）。
+                # 判据与 vision 侧同源（core.history.local_brain），三处 build 调用点同口径。
+                local_image_brain=local_brain(profile),
                 **self.app.config.reasoning_replay_options(),
             )
             # 视觉统一由模型驱动（自动路由已移除）：文本大脑不支持看图时，只把图片改写为
@@ -607,12 +613,17 @@ class ConversationRunMixin:
                 vision_timeout = 180.0
             vision_budget = VisionBudget(vision_timeout)
             try:
-                history, vision_note = self.app.vision.prepare_history(
+                history, vision_note, image_demotions = self.app.vision.prepare_history(
                     history, profile, cancel_event=cancel_event, vision_budget=vision_budget
                 )
                 vision_trace = dict(getattr(self.app.vision, "last_trace", {}) or vision_trace)
                 if vision_note:
                     event({"type": "status", "message": vision_note})
+                # 图片降级不可逆：把「这一轮被省略的图片」落成消息 metadata 旗标，下一轮由
+                # build_model_history 直接回放同一份占位文本。不做这一步就等于每轮重算保留集
+                # ⇒ 窗口滑动 ⇒ 从被挤出的那条消息起本地前缀缓存全断（批量出图会话每轮重新
+                # prefill）。写库失败只记日志，本轮照常发请求（旁路，不影响对话）。
+                self._record_local_image_demotions(conversation_id, image_demotions)
             except Exception as exc:  # noqa: BLE001 - 图片清洗异常不应阻断普通聊天
                 if cancel_event.is_set():
                     raise TaskCancelled("任务已取消")
@@ -1081,6 +1092,61 @@ class ConversationRunMixin:
             # 用量台账：计划执行与主对话同一口径（最后一条 usage 事件 = 累计汇总）。
             self.app.record_run_usage(run_id)
             self._finish(run_id)
+
+    def _record_local_image_demotions(
+        self, conversation_id: str, demotions: list[dict[str, Any]]
+    ) -> None:
+        """把「这一轮被省略的历史图片」落成消息 metadata 旗标——**降级不可逆**。
+
+        存在理由：本地图片总量上限过去**每轮重算**保留集，窗口随新图滑动 ⇒ 被挤出去的那条
+        消息字节变化 ⇒ 从那条消息起本地前缀缓存全断（批量出图的会话每轮都在重新 prefill）。
+        旗标落库后，``build_model_history`` 直接回放同一份占位文本，历史字节从此单调稳定。
+
+        旁路语义：写库失败只记日志，本轮请求照发——旗标少落一轮，下一轮重新降级即可，
+        代价只是多断一次前缀；记账失败绝不能中断对话（与 §九.136 同口径）。
+        """
+        if not demotions:
+            return
+        try:
+            conversation = self.app.storage.get_conversation(conversation_id)
+        except Exception:  # noqa: BLE001 - 记账前置读取失败同样只记日志
+            logger.exception("本地图片降级旗标：读取会话失败 conversation=%s", conversation_id)
+            return
+        known = {
+            str(message.get("id") or ""): (message.get("metadata") or {})
+            for message in ((conversation or {}).get("messages") or [])
+            if isinstance(message, dict)
+        }
+        for entry in demotions:
+            message_id = str((entry or {}).get("message_id") or "")
+            names = [
+                str(name) for name in ((entry or {}).get("names") or []) if str(name or "").strip()
+            ]
+            if not message_id or not names:
+                # 没有 message id（历史不是 build_model_history 产出来的，例如测试桩）：
+                # 这一轮照常降级，只是不落旗标——下一轮重新算一遍，行为退回修复前。
+                continue
+            if message_id not in known:
+                logger.info("本地图片降级旗标跳过（消息已不存在）：message=%s", message_id)
+                continue
+            merged_names = list(dict.fromkeys(names))
+            previous_flag = known[message_id].get(MetadataKeys.LOCAL_IMAGES_CAPPED)
+            if isinstance(previous_flag, dict) and isinstance(previous_flag.get("names"), list):
+                # 旗标只增不减：保留旧清单在前，新降级的追加在后（回放占位因此稳定）。
+                merged_names = list(dict.fromkeys(
+                    [str(name) for name in previous_flag["names"] if str(name or "").strip()]
+                    + merged_names
+                ))
+            try:
+                self.app.storage.update_message_metadata(
+                    conversation_id,
+                    message_id,
+                    {**known[message_id], MetadataKeys.LOCAL_IMAGES_CAPPED: {"names": merged_names}},
+                )
+            except Exception:  # noqa: BLE001 - 记账失败绝不中断对话
+                logger.exception(
+                    "本地图片降级旗标写入失败：conversation=%s message=%s", conversation_id, message_id
+                )
 
     def _all_run_events(self, run_id: str) -> list[dict[str, Any]]:
         """Read EVERY event for a run, paginating past the 500-row default limit.

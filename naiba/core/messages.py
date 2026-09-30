@@ -34,6 +34,11 @@ MESSAGE_METADATA_KEYS: tuple[str, ...] = (
     # naiba.core.contracts.CHOICE_GROUP_KEYS；choices 是 choice_groups[0] 的旧版扁平副本。
     "choices",
     "choice_groups",
+    # 本地大脑的「图片已降级」旗标（{"names": [被省略的图片文件名，按原顺序]}）：
+    # 本地多模态模型单次请求有图片总量上限，被挤出的图片改写成占位文本。**降级不可逆**——
+    # 写进这条消息的 metadata 后，后续每轮由 build_model_history 直接回放同样的占位文本
+    # （不再重新编码这些图片），历史字节因此单调稳定、本地前缀缓存不再每轮清零（§九.146）。
+    "local_images_capped",
     # 「新会话开始」边界标记（role=session 的标记行）：重放时从此清空此前历史。
     "session_start",
     # 插话（interjection）：运行中用户排队的新指令，落库为 role=user 消息，未被
@@ -79,6 +84,10 @@ class MetadataKeys:
     # 新会话边界（写在 role=session 的标记行上）：build_model_history 遇到它即清空
     # 此前的历史；聊天记录本身不删，前端在该位置渲染分隔条。
     SESSION_START = "session_start"
+    # 本地大脑的「图片已降级」旗标（`{"names": [...]}`）：由 run/chat 在本地图片总量上限
+    # 生效那轮写入，之后 build_model_history（仅 local brain）回放同样的占位文本。
+    # **只在 kind=local 时读写**——切到在线模型即恢复原图（前缀断一次，可接受）。
+    LOCAL_IMAGES_CAPPED = "local_images_capped"
     # 插话（interjection）：run 运行中用户排队的「新指令」，作为一条 role=user 消息落库。
     # 四个键构成队列状态机——INTERJECTION 是身份标记，其余三个互斥地表示进度：
     #   guided   用户点了「引导」，等 agent 在下一步取走；

@@ -32,6 +32,64 @@ MODEL_IMAGE_MAX_EDGE = 1600
 MODEL_IMAGE_TARGET_BYTES = 900 * 1024
 MODEL_IMAGE_HISTORY_LIMIT = 3
 
+# ---- 本地大脑的图片历史：降级不可逆 -----------------------------------------
+# 本地多模态模型单次请求有图片总量上限（张数 + 字节），被挤出的图片改写成占位文本。
+# 这个上限过去**每轮对全量历史重算**，两笔实测代价（探针 verify/_probe_image_prefix.py）：
+# ① 已经会被丢掉的旧图仍然每轮读盘 + PIL 重编码（6 轮批量出图会话 63 次 → 旗标接管后 37 次）；
+# ② 历史回缩（删除/编辑消息）时保留窗口往回滑，**已经发过占位的旧图又被装回真图**，
+#    从那条消息起历史整体重写。注意：只追加消息的稳态下前缀断点只在窗口边缘那条消息上，
+#    并不是「每轮全断」——别把这条修复当成缓存命中率修复来宣传。
+# 现在「哪些图片已降级」写进那条消息的 metadata（``MetadataKeys.LOCAL_IMAGES_CAPPED``），
+# 此后各轮由 ``build_model_history`` 直接回放**同一份**占位文本 ⇒ 决定不回退、旧图不再重编码。
+# 旗标只在 ``kind=local`` 的大脑下读写：切到在线模型即恢复原图（前缀断一次，可接受）。
+HISTORY_MESSAGE_ID_KEY = "_message_id"
+HISTORY_LOCAL_IMAGES_KEY = "_local_images_capped"
+# 两个内部键都只用于「把图片降级决定映射回落库消息」（vision 层没有 message id，也看不到
+# metadata）：前者定位消息，后者带上「本轮之前已经降级的图片名」，让 vision 那一趟把新的
+# 省略项**合并进同一个占位块**——各写一块占位等于同一消息出现两份「已省略 N 张」，字节反而
+# 更乱。它们**绝不能进请求体**——``llm/protocols.py`` 的各 wire 消息构造器都是按字段重建
+# dict，因此天然不带；守门测试逐个构造器反查，防止日后有人改成整体拷贝把内部键带出去。
+
+
+def local_brain(profile: Any) -> bool:
+    """会话大脑是否本地模型（``kind == "local"``）。图片历史旗标只在这个前提下读写。"""
+    return str((profile or {}).get("kind") or "").strip().lower() == "local"
+
+
+LOCAL_IMAGE_OMITTED_PREFIX = "[已省略 "
+LOCAL_IMAGE_OMITTED_HINT = "本地模型单次请求的图片上限"
+
+
+def local_image_omitted_marker(names: list[str]) -> str:
+    """被省略图片的占位文本（**唯一实现**，``json`` 序列化图片文件名）。
+
+    「首次降级那轮的线上改写」（``vision/runtime.py``）与「之后各轮的旗标回放」（本模块）
+    必须逐字节一致，否则前缀还是断在原地——所以这条文案只能有一份，两处都调它。
+    """
+    cleaned = [str(name or "（未命名图片）") for name in names]
+    return (
+        f"{LOCAL_IMAGE_OMITTED_PREFIX}{len(cleaned)} 张较早的图片：{LOCAL_IMAGE_OMITTED_HINT}\n"
+        f"图片文件名：{json.dumps(cleaned, ensure_ascii=False)}\n"
+        "（如需查看请调用 vision_analyze 工具并传入图片路径。）"
+    )
+
+
+def is_local_image_omitted_marker(text: str) -> bool:
+    """这段文本是不是「本地图片降级」占位块（供 vision 层合并旧块时识别）。"""
+    return text.startswith(LOCAL_IMAGE_OMITTED_PREFIX) and LOCAL_IMAGE_OMITTED_HINT in text
+
+
+def local_omitted_image_names(metadata: Any) -> list[str]:
+    """读出这条消息已被降级的图片文件名（按当初的顺序）；无旗标返回空表。"""
+    flag = (metadata or {}).get(MetadataKeys.LOCAL_IMAGES_CAPPED)
+    if not isinstance(flag, dict):
+        return []
+    names = flag.get("names")
+    if not isinstance(names, list):
+        return []
+    return [str(name) for name in names if str(name or "").strip()]
+
+
 # ---- 思考回放限长（双闸门）--------------------------------------------------
 # 背景（2026-09-19 对本机运行库 chat.db 的只读量化，见维护说明 §九.103）：MiMo 会话单条
 # 回复落库思考 43 万 / 28.7 万 / 14 万字符，正文却只有几十字符；全库 188 条带思考的
@@ -311,6 +369,7 @@ def build_model_history(
     video_tools: bool = True,
     reasoning_replay_max_chars: int = MODEL_REASONING_REPLAY_MAX_CHARS,
     reasoning_replay_turn_chars: int = MODEL_REASONING_REPLAY_TURN_CHARS,
+    local_image_brain: bool = False,
 ) -> list[dict[str, Any]]:
     """Build model history, carrying EVERY user message's own images (all kept).
 
@@ -323,7 +382,10 @@ def build_model_history(
     ``reasoning_replay_max_chars`` / ``reasoning_replay_turn_chars``：思考回放的
     单条硬闸门与整轮软闸门（0 = 关闭该层；见 ``_ReasoningReplayBudget``）。
     **三个活调用点（对话 / 子代理 / 计划执行）必须传同一组值**，否则同一会话会出现
-    两种回放字节 ⇒ 前缀缓存断 + 行为不一致。
+    两种回放字节 ⇒ 前缀缓存断 + 行为不一致。``local_image_brain`` 同理：它决定
+    「图片降级旗标」是否回放，同会话内必须按同一个判据（``local_brain(profile)``）传值。
+    ``local_image_brain=True`` 时，带 ``MetadataKeys.LOCAL_IMAGES_CAPPED`` 旗标的消息
+    **不再重新编码**被降级的那几张图片，改为在末尾回放同一份占位文本（见模块内注释）。
     """
     history: list[dict[str, Any]] = []
     replay_seq = 0
@@ -355,22 +417,43 @@ def build_model_history(
                 pdf_tools=pdf_tools, video_tools=video_tools,
             )
             image_parts: list[dict[str, Any]] = []
+            # 旗标接管：这条消息里「已经降级过」的图片不再重新编码，末尾统一回放占位文本。
+            # 槽位口径必须与降级那一轮完全一致（每张被降级的图当初也占过一个
+            # MODEL_IMAGE_HISTORY_LIMIT 槽位），否则后面第 4 张图会凭空补进来 ⇒ 字节又变。
+            omitted_names = local_omitted_image_names(metadata) if local_image_brain else []
+            omitted_replayed: list[str] = []
+            consumed_slots = 0
             for upload in previous_uploads:
                 path = str(upload.get("path") or "")
                 if not path or Path(path).suffix.lower() not in IMAGE_MEDIA_TYPES:
                     continue
-                if len(image_parts) >= MODEL_IMAGE_HISTORY_LIMIT:
+                if consumed_slots >= MODEL_IMAGE_HISTORY_LIMIT:
                     break
+                name = Path(path).name
+                if name in omitted_names:
+                    consumed_slots += 1
+                    if name not in omitted_replayed:
+                        omitted_replayed.append(name)
+                    continue
                 encoded = encode_image_for_model(path)
                 if encoded:
                     image_parts.append(encoded)
-            if image_parts:
-                history.append(
-                    {
-                        "role": item["role"],
-                        "content": [{"type": "text", "text": content}, *image_parts],
-                    }
-                )
+                    consumed_slots += 1
+            if image_parts or omitted_replayed:
+                entry: dict[str, Any] = {
+                    "role": item["role"],
+                    "content": [{"type": "text", "text": content}, *image_parts],
+                    # 内部键：供 vision 层把「图片降级决定」映射回落库消息（见模块内注释）；
+                    # wire 构造器按字段重建 dict，不会把它带进请求体（有守门测试反查）。
+                    HISTORY_MESSAGE_ID_KEY: str(item.get("id") or ""),
+                }
+                if omitted_replayed:
+                    entry["content"].append(
+                        {"type": "text", "text": local_image_omitted_marker(omitted_replayed)}
+                    )
+                    # 带上已降级清单：本轮 vision 若还要再省几张，必须合并进上面这一块占位。
+                    entry[HISTORY_LOCAL_IMAGES_KEY] = list(omitted_replayed)
+                history.append(entry)
                 continue
         message = {"role": item["role"], "content": content}
         # Thinking-mode gateways require assistant reasoning_content on the

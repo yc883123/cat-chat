@@ -35,6 +35,7 @@ from naiba.skills.context import (  # noqa: E402
     LOCAL_DEFAULT_CONTEXT_WINDOW,
     fallback_context_window,
 )
+from naiba.core.history import HISTORY_MESSAGE_ID_KEY  # noqa: E402
 from naiba.vision.runtime import VisionRouter  # noqa: E402
 
 LOCAL_PROFILE = {"kind": "local", "model": "qwen3-vl", "request_format": "llama_cpp"}
@@ -201,8 +202,14 @@ def _image_part(name: str, payload: str = "YWJj") -> dict:
 
 
 def _history_with_images(count: int) -> list[dict]:
+    # 带 HISTORY_MESSAGE_ID_KEY：生产环境里这张键由 build_model_history 打上去，
+    # 降级清单要靠它映射回落库消息（没有 id 就只降级、不落旗标）。
     return [
-        {"role": "user", "content": [{"type": "text", "text": f"第 {i} 张"}, _image_part(f"{i}.png")]}
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": f"第 {i} 张"}, _image_part(f"{i}.png")],
+            HISTORY_MESSAGE_ID_KEY: f"m{i}",
+        }
         for i in range(count)
     ]
 
@@ -316,7 +323,12 @@ class LocalImageCapTests(unittest.TestCase):
     def test_keeps_most_recent_images_and_placeholder_rest(self) -> None:
         limit = VisionRouter.LOCAL_REQUEST_IMAGE_LIMIT
         history = _history_with_images(limit + 5)
-        capped, note = self.router._cap_local_history_images(history)
+        capped, note, demotions = self.router._cap_local_history_images(history)
+        self.assertEqual(
+            [(entry["message_id"], entry["names"]) for entry in demotions],
+            [(f"m{i}", [f"{i}.png"]) for i in range(5)],
+            "被降级的消息必须连 message id 一起回传，chat 层才落得了旗标（降级不可逆）",
+        )
         remaining = [
             part
             for item in capped
@@ -347,7 +359,8 @@ class LocalImageCapTests(unittest.TestCase):
         history = _history_with_images(4)
         for item in history:
             item["content"][1]["data"] = big
-        capped, note = self.router._cap_local_history_images(history)
+        capped, note, demotions = self.router._cap_local_history_images(history)
+        self.assertEqual(len(demotions), 2, "字节预算挤掉的 2 条也要回传旗标")
         remaining = sum(
             1
             for item in capped
@@ -359,16 +372,18 @@ class LocalImageCapTests(unittest.TestCase):
 
     def test_small_history_is_untouched(self) -> None:
         history = _history_with_images(2)
-        capped, note = self.router._cap_local_history_images(history)
+        capped, note, demotions = self.router._cap_local_history_images(history)
         self.assertEqual(note, "")
+        self.assertEqual(demotions, [], "没降级就不该回传旗标清单")
         self.assertIs(capped, history)
 
     def test_prepare_history_applies_cap_only_to_local_multimodal(self) -> None:
         limit = VisionRouter.LOCAL_REQUEST_IMAGE_LIMIT
         history = _history_with_images(limit + 3)
         local_profile = {**LOCAL_PROFILE, "supports_images": True}
-        capped, note = self.router.prepare_history(history, local_profile)
+        capped, note, demotions = self.router.prepare_history(history, local_profile)
         self.assertIn("本地模型单次请求图片上限", note)
+        self.assertEqual(len(demotions), 3, "本地大脑：被省略的图片要回传旗标清单")
         self.assertEqual(
             sum(
                 1
@@ -379,8 +394,11 @@ class LocalImageCapTests(unittest.TestCase):
             limit,
         )
         online_profile = {**ONLINE_PROFILE, "supports_images": True}
-        untouched, online_note = self.router.prepare_history(_history_with_images(limit + 3), online_profile)
+        untouched, online_note, online_demotions = self.router.prepare_history(
+            _history_with_images(limit + 3), online_profile
+        )
         self.assertEqual(online_note, "", "在线模型不动（保住 1.6.0 的前缀缓存契约）")
+        self.assertEqual(online_demotions, [], "在线模型不写降级旗标（旗标只在 kind=local 读写）")
         self.assertEqual(
             sum(
                 1

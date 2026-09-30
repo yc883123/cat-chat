@@ -22,7 +22,7 @@ from typing import Any, Callable
 from naiba.skills.agent import SkillAgent
 from naiba.core.exceptions import TaskCancelled
 from naiba.tools.executor import ToolExecutor
-from naiba.core.history import build_model_history
+from naiba.core.history import build_model_history, local_brain
 
 INTERACTION_MODES = ("craft", "plan")
 
@@ -698,17 +698,20 @@ class PlanManager:
         if not conversation:
             raise RuntimeError("发起计划的对话已删除")
         frozen = snapshot or {}
-        # 与主对话/子代理同参数（plan 模式当前已封存，但签名与口径保持一致，
-        # 复活时不会因为只走默认值而让同一会话出现两种回放字节）。
-        history = build_model_history(
-            frozen.get("conversation_messages") or conversation.get("messages", []),
-            **self.app.config.reasoning_replay_options(),
-        )
         model_key = str(frozen.get("model_key") or conversation.get("model_key") or "")
         if not model_key:
             provider_id = str(frozen.get("provider_id") or conversation.get("provider_id") or "")
             model_key = f"online:{provider_id}" if provider_id else ""
         profile = self.app.config.profile(model_key)
+        # 与主对话/子代理同参数（plan 模式当前已封存，但签名与口径保持一致，
+        # 复活时不会因为只走默认值而让同一会话出现两种回放字节）。
+        # profile 因此必须先解析：`local_image_brain` 决定「图片降级旗标」是否回放，
+        # 同会话内三处 build 调用点必须按同一个判据传值（core.history.local_brain）。
+        history = build_model_history(
+            frozen.get("conversation_messages") or conversation.get("messages", []),
+            local_image_brain=local_brain(profile),
+            **self.app.config.reasoning_replay_options(),
+        )
         if frozen.get("generation_options"):
             options = dict(frozen["generation_options"])
         else:

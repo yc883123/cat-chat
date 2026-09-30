@@ -2651,3 +2651,84 @@ body { font-family: var(--font-sans); }
   .settings-dialog .appearance-theme-options .appearance-option small { display: none; }
   .settings-dialog .skin-option { padding: 8px 10px; }
 }
+
+/* ---- 用量统计（设置页）+ 供应商弹层费用单价 ---- */
+.provider-pricing-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.provider-pricing-grid input { width: 100%; }
+.usage-unpriced { color: var(--muted); }
+.usage-table-wrap { overflow-x: auto; }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 12.5px; white-space: nowrap; }
+.usage-table th, .usage-table td { padding: 7px 10px; text-align: right; border-bottom: 1px solid var(--line); }
+.usage-table th:first-child, .usage-table td:first-child { text-align: left; }
+.usage-table th { color: var(--muted); font-weight: 600; font-size: 11.5px; }
+.usage-table tbody tr:last-child td { border-bottom: 0; }
+.usage-unpriced-cell { color: var(--muted); }
+.usage-empty { text-align: center; color: var(--muted); }
+
+/* ---- 用量统计 · 分析视图（KPI 卡 / 工具行 / 手绘 SVG 图表 / 筛选与偏好弹窗） ---- */
+/* 颜色全部消费语义变量：dark 主题与四款皮肤自动适配，无需逐主题覆盖。 */
+.usage-kpis { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-bottom: 12px; }
+.usage-kpi { border: 1px solid var(--line); border-radius: var(--r-lg); padding: 11px 13px; background: var(--surface); min-width: 0; }
+.usage-kpi-label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.usage-kpi-icon { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; flex: none; }
+.usage-kpi-icon svg { width: 13px; height: 13px; stroke: #fff; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.usage-kpi-value { display: block; font-size: 20px; font-weight: 650; margin-top: 6px; font-variant-numeric: tabular-nums; letter-spacing: -0.2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-kpi-sub { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.usage-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.usage-chip { padding: 5px 12px; border-radius: var(--r-full); border: 1px solid var(--line-strong); background: var(--surface); font-size: 12.5px; cursor: pointer; color: var(--text); transition: background var(--t-fast), border-color var(--t-fast); }
+.usage-chip:hover { background: var(--surface-2); }
+.usage-chip.active { background: var(--accent-soft); border-color: var(--accent); color: var(--violet-deep); font-weight: 600; }
+html[data-theme="dark"] .usage-chip.active { color: var(--violet-deep); }
+.usage-seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--r-md); overflow: hidden; flex: none; }
+.usage-seg button { border: 0; background: var(--surface); padding: 5px 12px; font-size: 12.5px; cursor: pointer; color: var(--muted); }
+.usage-seg button + button { border-left: 1px solid var(--line); }
+.usage-seg button.active { background: var(--accent-soft); color: var(--violet-deep); font-weight: 600; }
+.usage-seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.usage-sel { padding: 5px 8px; border-radius: var(--r-md); border: 1px solid var(--line-strong); background: var(--surface); font-size: 12.5px; color: var(--text); }
+.usage-tb-label { color: var(--muted); font-size: 12px; }
+.usage-toolbar-actions { display: inline-flex; gap: 8px; margin-left: auto; }
+.usage-chart-card { margin-bottom: 14px; }
+.usage-chart-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.usage-chart-head h4 { margin: 0; font-size: 14px; }
+.usage-chart-sum { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.usage-metric-seg { margin-left: auto; }
+.usage-legend { display: flex; gap: 8px; flex-wrap: wrap; margin: 2px 0 6px; }
+.usage-legend-item { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--muted); cursor: pointer; padding: 2px 4px; border-radius: var(--r-xs); border: 0; background: none; }
+.usage-legend-item:hover { background: var(--surface-2); }
+.usage-legend-item.off { opacity: 0.35; }
+.usage-legend-dot { width: 9px; height: 9px; border-radius: 3px; flex: none; }
+.usage-svg-box { width: 100%; }
+.usage-svg-box svg { display: block; width: 100%; height: auto; }
+.usage-svg-box .usage-sankey-ribbon { cursor: pointer; transition: opacity var(--t-fast); }
+/* 图表 tooltip：必须挂在模态 dialog（top layer）内部，body 上的 fixed 会被设置弹窗盖住。 */
+.usage-tooltip { position: fixed; z-index: 60; pointer-events: none; display: none; min-width: 170px; max-width: min(320px, calc(100vw - 24px)); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-md); box-shadow: var(--shadow-3); padding: 9px 11px; font-size: 12px; }
+.usage-tooltip-title { font-weight: 650; margin-bottom: 5px; font-size: 12px; }
+.usage-tooltip-row { display: flex; align-items: center; gap: 6px; margin: 2px 0; font-variant-numeric: tabular-nums; }
+.usage-tooltip-row .usage-tt-name { color: var(--muted); flex: 1; padding-right: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-tooltip-row .usage-tt-val { font-weight: 600; }
+.usage-tooltip-muted { color: var(--muted); font-size: 11px; margin-top: 4px; }
+
+/* 筛选 / 偏好弹窗：复用 panel-dialog 骨架，收窄为表单尺寸。手机端的关键是
+   max-height 压住 dvh + body 内滚——软键盘弹出时 JS 再按 visualViewport 收紧
+   （09-settings.js 的 applyUsageDialogViewport，与本 CSS 双保险）。 */
+.usage-dialog { width: min(480px, calc(100vw - 24px)); height: auto; max-height: calc(100dvh - 24px); }
+.usage-dialog .usage-dialog-body { padding: 16px 20px 20px; overflow-y: auto; min-height: 0; }
+.usage-dialog-field { margin-bottom: 14px; }
+.usage-dialog-field > label { display: block; font-size: 12.5px; font-weight: 600; margin-bottom: 6px; }
+.usage-dialog-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.usage-dialog-row input { padding: 6px 9px; border-radius: var(--r-md); border: 1px solid var(--line-strong); font-size: 13px; background: var(--surface); color: var(--text); }
+.usage-dialog-note { color: var(--muted); font-size: 11.5px; }
+.usage-dialog-note.usage-dialog-hint { margin: 6px 0 0; }
+.usage-dialog .usage-dialog-note { width: 62px; flex: none; }
+.usage-dialog .usage-dialog-hint.usage-dialog-note { width: auto; }
+.usage-dialog-divider { border: 0; border-top: 1px dashed var(--line-strong); margin: 14px 0; }
+
+@media (max-width: 900px) { .usage-kpis { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 560px) {
+  .usage-kpis { grid-template-columns: repeat(2, 1fr); }
+  .usage-kpi-value { font-size: 17px; }
+  .usage-toolbar { gap: 8px; }
+  .usage-dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
+  .usage-dialog .usage-dialog-body { padding: 12px 14px 16px; }
+}

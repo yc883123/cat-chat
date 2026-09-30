@@ -970,9 +970,14 @@ export function usageMarkup(usage, createdAt = null) {
   const detailsHtml = details.length
     ? `<button class="usage-toggle-btn" type="button" data-usage-toggle aria-expanded="false" aria-label="查看逐次请求明细">请求明细 <span class="usage-toggle-arrow">▸</span></button><div class="usage-requests" hidden>${details.map((item) => usageRequestLine(item)).join('')}</div>`
     : '';
+  // 单轮费用（服务端按当前单价现算，末次请求口径——跨会话统计的 Σ 费用在设置页）。
+  const cost = usage.cost && typeof usage.cost === 'object' ? usage.cost : null;
+  const costText = cost
+    ? ` · 约 ${cost.currency || '¥'}${Number(cost.amount || 0) > 0 && Number(cost.amount) < 0.01 ? Number(cost.amount).toFixed(6).replace(/0+$/, '').replace(/\.$/, '') : Number(cost.amount || 0).toFixed(4).replace(/0+$/, '').replace(/\.$/, '')}`
+    : '';
   // 顶部总结行保持自然文本（不定宽对齐——定宽会让单行数字稀疏）；请求明细表内保留列格式化。
   const tokenLine = (input || output)
-    ? `<div class="usage-line" title="本轮 ${requests} 次模型请求">本轮 ${total} tokens · 输入 ${input} · 输出 ${output} · 缓存命中率 ${rate}%（命中 ${cached} / 重算 ${miss}）${detailsHtml}</div>`
+    ? `<div class="usage-line" title="本轮 ${requests} 次模型请求">本轮 ${total} tokens · 输入 ${input} · 输出 ${output} · 缓存命中率 ${rate}%（命中 ${cached} / 重算 ${miss}）${costText}${detailsHtml}</div>`
     : '';
   const durationMs = Number(performance.total_ms || 0);
   const elapsedMs = Number(usage.elapsed_ms || 0);

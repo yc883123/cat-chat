@@ -9,7 +9,7 @@ import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
 import { switchPermissionMode } from "./06-tasks-plans.js";
 import { checkUpdate, closeAgentHelpPopover, closeComposerModelPicker, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, positionAgentHelpPopover, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleAgentHelpPopover, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
 import { applySidebarViewPref, bindSidebarDragDrop, cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeBranchChainPanel, closeConversationMenu, closeSidebarViewMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, openSidebarViewMenu, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, runFullTextSearch, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel, toggleConversationArchive, setTaskLogOpen, setTaskLogStick, setWorkspaceSearchMode, syncSearchModeUi, SEARCH_DEBOUNCE_MS } from "./08-conversations.js";
-import { addProvider, addSearchProfile, appearanceFormValues, applyProviderModelCapabilities, applyProviderPreset, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadWorkspaceTree, openAgentCard, openAgentToolEditorCurrent, openProviderCard, openProviderPresetKeyUrl, openVisionProviderForm, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, saveMcpServer, saveProvider, saveRuntimeSettings, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, showAgentForm, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAgentToolPeek, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, toggleToolOnlySelected, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint } from "./09-settings.js";
+import { addProvider, addSearchProfile, appearanceFormValues, applyProviderModelCapabilities, applyProviderPreset, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadUsageStats, loadWorkspaceTree, openAgentCard, openAgentToolEditorCurrent, openProviderCard, openProviderPresetKeyUrl, openVisionProviderForm, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, saveMcpServer, saveProvider, saveRuntimeSettings, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, setUsageChart, setUsageDim, setUsageGran, setUsageMetric, setUsageRange, showAgentForm, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAgentToolPeek, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, toggleToolOnlySelected, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint, applyUsageFilter, openUsagePrefsDialog, resetUsageFilter, saveUsagePrefs, selectUsageFilterRange, usageUnbindDialogViewport } from "./09-settings.js";
 import { addFolderChip, isFolderChip, readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
 import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handlePasteImage, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState } from "./12-chat-input.js";
 import { commitSkillSelection, hideSkillPopup, insertSkillRefAtCursor, moveSkillPopupSelection, popupState, positionSkillPopup, renderInputMirror, resizeTextarea, setSkillPopupSelection, skillList, updateSkillPopup } from "./13-skill-refs.js";
@@ -1342,7 +1342,13 @@ export function bindEvents() {
   $('#messageInput').addEventListener('click', () => { updateSkillPopup(); updateFilePopup(); });
   $('#messageInput').addEventListener('focus', () => { updateSkillPopup(); updateFilePopup(); });
   $('#messageInput').addEventListener('scroll', () => { const mirror = $('#inputMirror'); if (mirror) mirror.scrollTop = $('#messageInput').scrollTop; positionSkillPopup(); positionFilePopup(); });
-  window.addEventListener('resize', () => { positionSkillPopup(); positionFilePopup(); });
+  // 弹层跟随：窗口 resize 之外还必须跟 visualViewport 的 resize/scroll —— 软键盘开合只走
+  // visualViewport（布局视口不动），不跟的话手机上 @// 弹层拿到的是过期坐标、
+  // 上半截被顶出可视屏幕（2026-09-30 手机截图报障）。三个来源复用同一重定位回调。
+  const repositionComposerPopups = () => { positionSkillPopup(); positionFilePopup(); };
+  window.addEventListener('resize', repositionComposerPopups);
+  window.visualViewport?.addEventListener('resize', repositionComposerPopups);
+  window.visualViewport?.addEventListener('scroll', repositionComposerPopups);
   $('#messageInput').addEventListener('keydown', (event) => {
     // @ 工作区引用弹层优先消费按键（Tab 进目录 / Shift+Tab 返回 / Enter 引用）。
     if (handleFilePopupKey(event)) {
@@ -2074,6 +2080,40 @@ export function bindEvents() {
   $('#cleanGeneratedCache')?.addEventListener('click', () => cleanImageCache('generated'));
   $('#refreshStorageStats')?.addEventListener('click', loadStorageStats);
   $('#compactDatabase')?.addEventListener('click', compactDatabase);
+  // 用量分析视图：工具行委托（范围 chips / 维度 / 分布图 / 指标共用一组 data-*），
+  // 粒度是 select 单绑；两个弹窗的打开/应用/重置/保存各自单绑。dialog 的原生
+  // close 事件（Esc / 关闭按钮 / 程序 close 都会触发）统一摘可视视口监听。
+  $('#usageRangeChips')?.addEventListener('click', (event) => {
+    const chip = event.target.closest('[data-usage-range]');
+    if (chip) setUsageRange(chip.dataset.usageRange);
+  });
+  $('#usageDimSeg')?.addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-usage-dim]');
+    if (btn) setUsageDim(btn.dataset.usageDim);
+  });
+  $('#usageGranSel')?.addEventListener('change', (event) => setUsageGran(event.target.value));
+  $('#usageChartSeg')?.addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-usage-chart]');
+    if (btn) setUsageChart(btn.dataset.usageChart);
+  });
+  $('#usageMetricSeg')?.addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-usage-metric]');
+    if (btn) setUsageMetric(btn.dataset.usageMetric);
+  });
+  $('#usageFilterChips')?.addEventListener('click', (event) => {
+    const chip = event.target.closest('[data-usage-filter-range]');
+    if (chip) selectUsageFilterRange(chip.dataset.usageFilterRange);
+  });
+  $('#usageFilterOpen')?.addEventListener('click', () => {
+    // 「筛选」按钮与「自定义」chip 走同一个弹窗：setUsageRange('custom') 的分支。
+    setUsageRange('custom');
+  });
+  $('#usageFilterApply')?.addEventListener('click', applyUsageFilter);
+  $('#usageFilterReset')?.addEventListener('click', resetUsageFilter);
+  $('#usageFilterDialog')?.addEventListener('close', usageUnbindDialogViewport);
+  $('#usagePrefsOpen')?.addEventListener('click', openUsagePrefsDialog);
+  $('#usagePrefsSave')?.addEventListener('click', saveUsagePrefs);
+  $('#usagePrefsDialog')?.addEventListener('close', usageUnbindDialogViewport);
   $('#imageUploadOriginal')?.addEventListener('change', renderImageCompressRow);
   $('#imageLightboxClose')?.addEventListener('click', closeImageLightbox);
   $('#imageLightboxPrev')?.addEventListener('click', (event) => { event.stopPropagation(); stepImageLightbox(-1); });
@@ -2557,6 +2597,7 @@ export function switchSettingsTab(name) {
   if (name === 'agent') renderAgentManager();
   if (name === 'skills') loadInstalledSkills(false);
   if (name === 'connections') loadMcpServers();
+  if (name === 'usage') loadUsageStats();
   if (name === 'datamigration') loadDataMigrationHealth();
   if (name === 'updates') api('/api/update').then((status) => {
     state.bootstrap.update = status;

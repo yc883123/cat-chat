@@ -49,6 +49,13 @@ SIDEBAR_PREF_GROUPS = frozenset({"workspace", "flat"})
 SIDEBAR_PREF_SORTS = frozenset({"manual", "updated", "name"})
 SIDEBAR_PREF_FILTERS = frozenset({"hide", "all", "only"})
 SIDEBAR_PREF_DEFAULTS = {"group": "workspace", "sort": "updated", "filter": "hide"}
+# 「用量统计」分析视图的默认偏好（枚举键集与 defaults 一一对应；
+# 自定义时间窗是会话态，不在这里、也不落库）。
+USAGE_DASH_PREF_RANGES = frozenset({"today", "1", "7", "14", "29"})
+USAGE_DASH_PREF_GRANS = frozenset({"hour", "day"})
+USAGE_DASH_PREF_CHARTS = frozenset({"bar", "area"})
+USAGE_DASH_PREF_METRICS = frozenset({"cost", "tokens"})
+USAGE_DASH_PREF_DEFAULTS = {"range": "1", "gran": "hour", "chart": "bar", "metric": "cost"}
 
 # ---- 聊天背景图（只铺对话区）----
 # 透明度滑杆范围：0.05 是「还能看见」的下限，1 = 完全不透明。
@@ -2070,6 +2077,7 @@ class ConfigStore:
             "appearance",
             "chat_background",
             "sidebar",
+            "usage_dash",
         }
         with self.lock:
             for key in allowed:
@@ -2212,6 +2220,39 @@ class ConfigStore:
                             if filter_value not in SIDEBAR_PREF_FILTERS:
                                 raise ValueError("filter 必须是 hide、all 或 only")
                             merged["filter"] = filter_value
+                        self.data[key] = merged
+                    elif key == "usage_dash":
+                        # 「用量统计」分析视图的四项默认偏好：与 sidebar 同一套策略——
+                        # 小而稳的枚举、允许部分更新（前端每次只提交改动的键）、
+                        # 未提交的键保持现值。自定义时间窗是会话态、永不落库。
+                        incoming = values[key]
+                        if not isinstance(incoming, dict):
+                            raise ValueError("usage_dash 必须是对象")
+                        unknown = set(incoming) - {"range", "gran", "chart", "metric"}
+                        if unknown:
+                            names = ", ".join(sorted(map(str, unknown)))
+                            raise ValueError(f"usage_dash 包含不支持的字段：{names}")
+                        merged = {**USAGE_DASH_PREF_DEFAULTS, **dict(self.data.get("usage_dash", {}))}
+                        if "range" in incoming:
+                            range_value = str(incoming["range"] or "").strip().lower()
+                            if range_value not in USAGE_DASH_PREF_RANGES:
+                                raise ValueError("range 必须是 today、1、7、14 或 29")
+                            merged["range"] = range_value
+                        if "gran" in incoming:
+                            gran = str(incoming["gran"] or "").strip().lower()
+                            if gran not in USAGE_DASH_PREF_GRANS:
+                                raise ValueError("gran 必须是 hour 或 day")
+                            merged["gran"] = gran
+                        if "chart" in incoming:
+                            chart = str(incoming["chart"] or "").strip().lower()
+                            if chart not in USAGE_DASH_PREF_CHARTS:
+                                raise ValueError("chart 必须是 bar 或 area")
+                            merged["chart"] = chart
+                        if "metric" in incoming:
+                            metric = str(incoming["metric"] or "").strip().lower()
+                            if metric not in USAGE_DASH_PREF_METRICS:
+                                raise ValueError("metric 必须是 cost 或 tokens")
+                            merged["metric"] = metric
                         self.data[key] = merged
                     elif key in ("vision", "search", "imaging"):
                         incoming = values[key]
@@ -2649,6 +2690,16 @@ class ConfigStore:
                     payload["supports_images"] = raw_supports_images
                 else:
                     raise ValueError("supports_images 必须是布尔值或 null")
+            # 三档单价（可选）：带 pricing 键就按「提交什么算什么」处理——三项全空等
+            # 于未定价 ⇒ 清除旧值（与其它可选字段「不提交即清除」同口径）；不带
+            # pricing 键的旧客户端提交不动它（向后兼容）。
+            clear_pricing = False
+            if "pricing" in values:
+                pricing = self._provider_pricing(values.get("pricing"))
+                if pricing:
+                    payload["pricing"] = pricing
+                else:
+                    clear_pricing = True
             if kind == "local":
                 payload["local_backend"] = local_backend
             else:
@@ -2666,6 +2717,8 @@ class ConfigStore:
                     existing.pop("preset_id", None)
                 if clear_supports_images:
                     existing.pop("supports_images", None)
+                if clear_pricing:
+                    existing.pop("pricing", None)
                 existing.update(payload)
                 stored = existing
             else:
@@ -2989,6 +3042,51 @@ class ConfigStore:
         if parsed <= 0 or (isinstance(value, float) and not value.is_integer()):
             raise ValueError(f"{field} 必须是正整数")
         return parsed
+
+    PRICING_FIELDS = (
+        "input_per_million",
+        "cached_input_per_million",
+        "output_per_million",
+    )
+    PRICING_MAX_PER_MILLION = 1_000_000
+    PRICING_CURRENCY_MAX_CHARS = 8
+    PRICING_DEFAULT_CURRENCY = "¥"
+
+    @classmethod
+    def _provider_pricing(cls, raw: Any) -> dict[str, Any] | None:
+        """解析 provider 三档单价（费用统计的唯一计价来源，§五.6 登记）。
+
+        三档 = 未命中输入 / 缓存命中输入 / 输出，单位**每百万 tokens**。空串或
+        None 表示未设该档；给了值就必须是 0 到 1e6 的数字（非法**显式报错**，
+        不静默归零——把 12 写成 1.2 会让账目错一个数量级）。币种去空白后 ≤8
+        字符，缺省 ``¥``。三档全空返回 None（未定价）：调用方据此清除旧值，
+        ``cost_for`` 据此跳过计费。
+        """
+        if raw in (None, ""):
+            return None
+        if not isinstance(raw, dict):
+            raise ValueError("pricing 必须是对象")
+        pricing: dict[str, Any] = {}
+        for field in cls.PRICING_FIELDS:
+            value = raw.get(field)
+            if value in (None, ""):
+                continue
+            if isinstance(value, bool):
+                raise ValueError(f"单价 {field} 必须是 0 到 {cls.PRICING_MAX_PER_MILLION} 的数字")
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"单价 {field} 必须是 0 到 {cls.PRICING_MAX_PER_MILLION} 的数字") from None
+            if parsed < 0 or parsed > cls.PRICING_MAX_PER_MILLION:
+                raise ValueError(f"单价 {field} 必须是 0 到 {cls.PRICING_MAX_PER_MILLION} 的数字")
+            pricing[field] = parsed
+        currency = str(raw.get("currency") or "").strip()
+        if len(currency) > cls.PRICING_CURRENCY_MAX_CHARS:
+            raise ValueError(f"币种符号不能超过 {cls.PRICING_CURRENCY_MAX_CHARS} 个字符")
+        pricing["currency"] = currency or cls.PRICING_DEFAULT_CURRENCY
+        if not any(field in pricing for field in cls.PRICING_FIELDS):
+            return None
+        return pricing
 
     # ---- Agent 管理 ----
 

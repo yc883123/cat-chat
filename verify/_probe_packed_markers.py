@@ -41,7 +41,9 @@ CHANGED = [
     "js/08-conversations.js",
     "js/09-settings.js",
     "js/10-upload.js",
+    "js/13-skill-refs.js",
     "js/15-bind-events.js",
+    "js/16-file-refs.js",
 ]
 
 # 本轮新增 / 必须存在的内置 Skill（**必须在包里**，否则出厂绑定失效）。
@@ -121,8 +123,16 @@ FINGERPRINTS = {
         # 2.9.8：侧栏「分组与排序」浮层菜单（滑杆按钮的新面板）。
         "sidebarViewMenu",
         "分组与排序",
+        # 2.9.9：用量统计 → 分析视图（KPI 六卡 + 工具行 + 筛选/偏好双弹窗 + 桑基）。
+        "usageKpiCalls",
+        "usageRangeChips",
+        "usageFilterDialog",
+        "usagePrefsDialog",
+        "usageSankeyBox",
     ],
-    "styles.css": ["--set-r-card", "agent-card-tag", "settings-card-head", "cache-ref-hint", "sidebar-view-menu", "is-archived"],
+    "styles.css": ["--set-r-card", "agent-card-tag", "settings-card-head", "cache-ref-hint", "sidebar-view-menu", "is-archived",
+                   # 2.9.9：分析视图全套样式（KPI 网格 / 工具行 chip / tooltip / 弹窗 dvh 兜底）。
+                   ".usage-kpis", ".usage-chip", ".usage-tooltip", ".usage-dialog"],
     # emoji 头像判定入口（内置 Agent 用 emoji，上传图走 <img>）。
     "js/01-core.js": ["agentAvatarEmoji", "agentAvatarFile", "normalizeSidebarPrefs"],
     # 2.9.8：bootstrap 时同步服务端 settings.sidebar 三项偏好。
@@ -145,11 +155,20 @@ FINGERPRINTS = {
         "generated_clean_limit_mb",
         "renderCacheCleanHints",
         "需删除对应会话才能腾出",
+        # 2.9.9：分析视图（偏好落库键 / 桶序列 / 桑基常量 / 手机 vv 弹窗适配）。
+        "usage_dash",
+        "usageBucketSeries",
+        "USAGE_SANKEY_MAX_MODELS",
+        "usageSyncDialogBounds",
     ],
     # 2.9.7：进度 100% 未回响应时的「服务器处理中」+ 8 秒慢提示。
     "js/10-upload.js": ["SLOW_UPLOAD_HINT_MS", "服务器处理中", "file.slow"],
     # 2.9.8：滑杆按钮 / ⋯菜单归档项 / 侧栏拖拽接线。
-    "js/15-bind-events.js": ["settingsToolbarSub", "cleanImageCache('generated')", "openSidebarViewMenu", "toggleConversationArchive", "bindSidebarDragDrop"],
+    # 2.9.9：软键盘开合走 visualViewport，弹层重定位跟着它走；用量弹窗 close 统一摘 vv 监听。
+    "js/15-bind-events.js": ["settingsToolbarSub", "cleanImageCache('generated')", "openSidebarViewMenu", "toggleConversationArchive", "bindSidebarDragDrop", "window.visualViewport?.addEventListener", "usageUnbindDialogViewport"],
+    # 2.9.9：@ / 弹层定位可视视口感知 + hide 清内联 maxHeight（手机软键盘裁弹层修复）。
+    "js/13-skill-refs.js": ["window.visualViewport", "style.removeProperty('max-height')"],
+    "js/16-file-refs.js": ["style.removeProperty('max-height')"],
 }
 
 # 打包时被 spec 排除的目录（private_skill_dirs / 产物），比对时同步跳过。

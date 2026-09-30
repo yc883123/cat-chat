@@ -282,6 +282,7 @@ verify/*
 !verify/p6_comfy_extract_check.py
 !verify/p6_comfy_render_smoke.cjs
 !verify/pending_files_smoke.cjs
+!verify/popup_keyboard_mobile_smoke.cjs
 !verify/provider_cards_smoke.cjs
 !verify/provider_presets_smoke.cjs
 !verify/provider_presets_smoke.py
@@ -330,4 +331,5 @@ verify/*
 !verify/update_version_smoke.py
 !verify/upload_smoke.py
 !verify/usage_rate_smoke.cjs
+!verify/usage_stats_smoke.cjs
 !verify/verify_doc_encoding.py

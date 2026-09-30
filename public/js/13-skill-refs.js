@@ -111,11 +111,32 @@ export function positionComposerPopup(popup) {
   const input = $('#messageInput');
   if (!popup || !input || popup.hidden) return;
   const rect = input.getBoundingClientRect();
+  // 可视视口感知（2026-09-30 手机截图报障）：Android Chrome 弹出软键盘时布局视口不动、
+  // 可视视口缩小且被推到输入框上方（visualViewport.offsetTop > 0）。弹层是 position:fixed、
+  // 只拿布局坐标，只看 window.innerHeight 会把上半截顶出可视屏幕 ⇒ 以「当前真正可见的区域」
+  // （vv.offsetTop ~ vv.offsetTop + vv.height）为参照；桌面无偏移时两套坐标重合，行为不变。
+  const vv = window.visualViewport;
+  const vvTop = vv ? vv.offsetTop : 0;
+  const vvBottom = vvTop + (vv ? vv.height : window.innerHeight);
+  // 先摘上一轮的内联 maxHeight 再读 CSS 上限：内联值若留着会把 getComputedStyle 的读数
+  // 钉死在上一轮的约束上，键盘收起时弹层就再也长不回去了。
+  popup.style.removeProperty('max-height');
+  // 量输入框上/下两侧的可见空间、选大的一侧放弹层；用内联 maxHeight 把弹层压进可用空间
+  // （必须先设 maxHeight 再读 offsetHeight，量出来的高才反映约束）。上限仍受 CSS max-height
+  // 约束（.file-popup 300 / .skill-popup 260），桌面空间富余时内联值=CSS 值，观感不变。
+  const gap = 6;
+  const above = rect.top - vvTop;
+  const below = vvBottom - rect.bottom;
+  const usable = Math.max(above, below) - gap;
+  if (usable > 0) {
+    const cssCap = Number.parseFloat(getComputedStyle(popup).maxHeight);
+    popup.style.maxHeight = `${Math.min(usable, Number.isFinite(cssCap) ? cssCap : Infinity)}px`;
+  }
+  // else：可视区被挤得贴住输入框，压不下去也放不下——退回 CSS 上限，靠下方夹取兜底。
   const ph = popup.offsetHeight;
-  let top = rect.top - ph - 6;
-  if (top < 8) top = rect.bottom + 6;
-  // 兜底：弹层高于可视区时贴住顶部，避免溢出到屏幕外。
-  top = Math.max(8, Math.min(top, window.innerHeight - ph - 8));
+  let top = (above >= below) ? rect.top - ph - gap : rect.bottom + gap;
+  // 兜底：夹取范围随可视视口走，弹层不许溢出到可视屏幕之外。
+  top = Math.max(vvTop + 8, Math.min(top, vvBottom - ph - 8));
   popup.style.left = `${Math.max(8, rect.left)}px`;
   popup.style.width = `${rect.width}px`;
   popup.style.top = `${top}px`;
@@ -148,7 +169,9 @@ export function showSkillPopup(items, selectedIndex, token) {
 export function hideSkillPopup() {
   popupState.open = false; popupState.items = []; popupState.token = null; popupState.selectedIndex = 0;
   const popup = $('#skillPopup');
-  if (popup) popup.hidden = true;
+  // 连同 positionComposerPopup 写入的内联 maxHeight 一起清掉，别把上一轮键盘态的
+  // 高度约束带进下一轮打开（visualViewport 感知修复，2026-09-30）。
+  if (popup) { popup.hidden = true; popup.style.removeProperty('max-height'); }
 }
 
 export function setSkillPopupSelection(index) {

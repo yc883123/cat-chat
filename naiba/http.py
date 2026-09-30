@@ -219,6 +219,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/storage/stats":
             self._json(self.app.storage.storage_usage())
+        elif path == "/api/usage/stats":
+            query = urllib.parse.parse_qs(parsed.query)
+            self._json(*self.app.api_usage_stats(query))
         elif path == "/api/imaging/stats":
             # 分目录字节数 + 每个 scope 最近一次清理的如实回报（含 unreachable/error）。
             self._json(self.app.api_imaging_stats())

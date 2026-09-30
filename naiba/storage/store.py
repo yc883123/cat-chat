@@ -17,7 +17,7 @@ from naiba.core.paths import normalized_path_key
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
-CURRENT_SCHEMA_VERSION = 20
+CURRENT_SCHEMA_VERSION = 21
 
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
@@ -562,6 +562,43 @@ def _migrate_to_v20(db: sqlite3.Connection) -> None:
         db.execute("ALTER TABLE conversations ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0")
 
 
+def _migrate_to_v21(db: sqlite3.Connection) -> None:
+    """API Token 用量台账（「设置 → 用量统计」的数据落地处）。
+
+    一个 run/job 完成时落**一条**汇总记录（``record_usage``，run_id 主键幂等：
+    重跑/中断恢复重记是 REPLACE 而不是翻倍）。token 口径是「Σ 全部模型请求」
+    （requests_detail 求和），与上下文圆环的「最后一次请求」口径不同——后者
+    继续由消息 metadata.usage 承担，本表只服务聚合统计。``created_at`` 是
+    完成时刻（毫秒）；不落价格快照，费用在查询时按当前单价重算。
+    ``CREATE TABLE IF NOT EXISTS`` 自带幂等。
+    """
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS usage_records (
+            run_id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL DEFAULT '',
+            message_id TEXT NOT NULL DEFAULT '',
+            kind TEXT NOT NULL DEFAULT 'chat',
+            model_key TEXT NOT NULL DEFAULT '',
+            model_name TEXT NOT NULL DEFAULT '',
+            agent_id TEXT NOT NULL DEFAULT '',
+            requests INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            cached_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL
+        )
+        """
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usage_records_created ON usage_records(created_at)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usage_records_model ON usage_records(model_key, created_at)"
+    )
+
+
 # 目标版本 -> 迁移函数。新增版本时在此追加并提升 CURRENT_SCHEMA_VERSION。
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
@@ -584,6 +621,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     18: _migrate_to_v18,
     19: _migrate_to_v19,
     20: _migrate_to_v20,
+    21: _migrate_to_v21,
 }
 
 
@@ -2996,6 +3034,154 @@ class ChatStorage:
                 {**payload, "run_id": run_id, "sequence": row["sequence"], "created_at": row["created_at"]}
             )
         return events
+
+    @staticmethod
+    def _normalize_usage_record(record: dict[str, Any]) -> tuple[Any, ...]:
+        """把调用方给的 dict 收敛成 usage_records 的列元组（缺省 0/空串）。
+
+        run_id 为空直接拒绝（它是幂等主键，没有它 REPLACE 语义就不成立）；
+        token/请求数全部夹紧为非负整数，坏数据宁可归零也不让聚合查询翻车。
+        """
+        run_id = str(record.get("run_id") or "").strip()
+        if not run_id:
+            raise ValueError("usage 记录缺少 run_id")
+        created_at = record.get("created_at")
+        try:
+            created_ms = int(created_at) if created_at is not None else int(time.time() * 1000)
+        except (TypeError, ValueError):
+            created_ms = int(time.time() * 1000)
+
+        def _count(key: str) -> int:
+            try:
+                return max(0, int(record.get(key) or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        return (
+            run_id,
+            str(record.get("conversation_id") or ""),
+            str(record.get("message_id") or ""),
+            str(record.get("kind") or "chat"),
+            str(record.get("model_key") or ""),
+            str(record.get("model_name") or ""),
+            str(record.get("agent_id") or ""),
+            _count("requests"),
+            _count("input_tokens"),
+            _count("cached_tokens"),
+            _count("output_tokens"),
+            _count("total_tokens"),
+            created_ms,
+        )
+
+    @_retry_transient_write
+    def record_usage(self, record: dict[str, Any]) -> bool:
+        """落一条 run 级用量汇总（INSERT OR REPLACE：同 run 重记不翻倍）。
+
+        返回是否新写入（False = 该 run_id 已有记录且本次数据无变化语义上是重放）。
+        任何调用方（chat 收尾 / Job 收尾 / 中断恢复）都以本方法为唯一入口。
+        """
+        values = self._normalize_usage_record(record)
+        with self._connect() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO usage_records("
+                "run_id, conversation_id, message_id, kind, model_key, model_name, "
+                "agent_id, requests, input_tokens, cached_tokens, output_tokens, "
+                "total_tokens, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                values,
+            )
+        return True
+
+    _USAGE_AGG_COLUMNS = (
+        "COUNT(*) AS turns",
+        "COALESCE(SUM(requests), 0) AS requests",
+        "COALESCE(SUM(input_tokens), 0) AS input_tokens",
+        "COALESCE(SUM(cached_tokens), 0) AS cached_tokens",
+        "COALESCE(SUM(output_tokens), 0) AS output_tokens",
+        "COALESCE(SUM(total_tokens), 0) AS total_tokens",
+    )
+
+    def usage_stats(
+        self,
+        since_ms: int,
+        until_ms: int = 0,
+        model_key: str = "",
+        bucket: str = "day",
+    ) -> dict[str, Any]:
+        """按时间窗（可按 model_key 收窄）聚合 usage_records（只读，无重试语义）。
+
+        返回 totals / by_model / by_day / by_bucket / first_record_at；by_day 按
+        **本地时区**归日（strftime + 'localtime'）。until_ms<=0 表示不设上界。
+
+        注意 by_day / by_bucket 的粒度是**桶×模型**（同一模型键一行）：费用按
+        模型单价计算，聚合到「桶」必须保留模型维度才能精确计价，折叠成桶级单行
+        是调用方（app 层）算完费用之后的职责。by_day 恒为天级；``bucket="hour"``
+        时 by_bucket 为小时级（``%Y-%m-%d %H:00``，本地时区），否则与 by_day
+        同内容（共用一次查询，不多花一条 SQL）。
+        """
+        window = "created_at >= ?"
+        params: list[Any] = [max(0, int(since_ms))]
+        if until_ms and int(until_ms) > 0:
+            window += " AND created_at < ?"
+            params.append(int(until_ms))
+        key = str(model_key or "").strip()
+        if key:
+            window += " AND model_key = ?"
+            params.append(key)
+        agg = ", ".join(self._USAGE_AGG_COLUMNS)
+        with self._connect() as db:
+            totals = dict(db.execute(
+                f"SELECT {agg} FROM usage_records WHERE {window}", tuple(params)
+            ).fetchone())
+            by_model = [
+                dict(row)
+                for row in db.execute(
+                    f"SELECT model_key, model_name, {agg} FROM usage_records "
+                    f"WHERE {window} GROUP BY model_key, model_name ORDER BY input_tokens DESC",
+                    tuple(params),
+                ).fetchall()
+            ]
+            by_day = [
+                dict(row)
+                for row in db.execute(
+                    "SELECT strftime('%Y-%m-%d', created_at / 1000, 'unixepoch', 'localtime') AS day, "
+                    "model_key, model_name, "
+                    f"{agg} FROM usage_records WHERE {window} "
+                    "GROUP BY day, model_key, model_name ORDER BY day DESC",
+                    tuple(params),
+                ).fetchall()
+            ]
+            if str(bucket or "day").strip().lower() == "hour":
+                # 小时级分桶（分析视图「按小时」粒度）：桶键带当天小时段，
+                # 仍是「桶×模型」粒度——计价折叠是 app 层的职责。
+                by_bucket = [
+                    dict(row)
+                    for row in db.execute(
+                        "SELECT strftime('%Y-%m-%d %H:00', created_at / 1000, 'unixepoch', 'localtime') AS day, "
+                        "model_key, model_name, "
+                        f"{agg} FROM usage_records WHERE {window} "
+                        "GROUP BY day, model_key, model_name ORDER BY day DESC",
+                        tuple(params),
+                    ).fetchall()
+                ]
+            else:
+                by_bucket = by_day
+            first = db.execute(
+                f"SELECT MIN(created_at) FROM usage_records WHERE {window}", tuple(params)
+            ).fetchone()[0]
+        for bucket_row in [totals, *by_model, *by_day, *by_bucket]:
+            bucket_row["turns"] = max(0, int(bucket_row.get("turns") or 0))
+            bucket_row["requests"] = max(0, int(bucket_row.get("requests") or 0))
+            for name in ("input_tokens", "cached_tokens", "output_tokens", "total_tokens"):
+                bucket_row[name] = max(0, int(bucket_row.get(name) or 0))
+            bucket_row["uncached_tokens"] = max(0, bucket_row["input_tokens"] - bucket_row["cached_tokens"])
+        return {
+            "totals": totals,
+            "by_model": by_model,
+            "by_day": by_day,
+            "by_bucket": by_bucket,
+            "first_record_at": int(first or 0),
+        }
 
     @_retry_transient_write
     def update_background_task(

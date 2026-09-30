@@ -572,6 +572,11 @@ export function showProviderForm(provider = {}, { isNew = false } = {}) {
   $('#providerSupportsImages').value = provider.supports_images_explicit === true
     ? 'true'
     : (provider.supports_images_explicit === false ? 'false' : 'auto');
+  const pricing = (provider.pricing && typeof provider.pricing === 'object') ? provider.pricing : {};
+  $('#providerPriceInput').value = pricing.input_per_million ?? '';
+  $('#providerPriceCachedInput').value = pricing.cached_input_per_million ?? '';
+  $('#providerPriceOutput').value = pricing.output_per_million ?? '';
+  $('#providerPriceCurrency').value = pricing.currency ?? '';
   setProviderModelOptions([], provider.model || '');
   $('#providerFormat').value = provider.request_format || 'openai_chat';
   $('#providerApiKey').value = '';
@@ -643,6 +648,7 @@ export function setProviderEditMode(editing) {
     '#providerKind', '#providerModel', '#providerModelCustom', '#providerContextWindow',
     '#providerMaxOutputTokens', '#providerTemperature', '#providerReasoningEffort',
     '#providerSupportsImages', '#loadProviderModels',
+    '#providerPriceInput', '#providerPriceCachedInput', '#providerPriceOutput', '#providerPriceCurrency',
   ].forEach((selector) => {
     const element = $(selector);
     if (element) element.disabled = !editing;
@@ -742,6 +748,14 @@ export function providerFormValue() {
     temperature: numberOrUndefined('#providerTemperature'),
     reasoning_effort: $('#providerReasoningEffort').value,
     supports_images: imageChoice === 'auto' ? null : imageChoice === 'true',
+    // 三档单价（可选）：**全空也提交空对象**，让后端清除旧值（与「不提交即清除」
+    // 其它可选字段不同：这里带键才动定价，旧客户端不带键不会误清）。
+    pricing: {
+      input_per_million: numberOrUndefined('#providerPriceInput'),
+      cached_input_per_million: numberOrUndefined('#providerPriceCachedInput'),
+      output_per_million: numberOrUndefined('#providerPriceOutput'),
+      currency: $('#providerPriceCurrency').value.trim(),
+    },
   };
 }
 
@@ -1140,6 +1154,1017 @@ export async function cleanImageCache(scope = '') {
   } finally {
     btn.disabled = false;
     btn.textContent = prev;
+  }
+}
+
+/* ---------- 用量统计 · 分析视图 ---------- */
+// token 千分位；0 归一为 "0"。
+function usageNumber(value) {
+  // tokens 人类可读：K/M/B 三档英文缩写（1 位小数去尾零），<1000 原样；
+  // 表格单元格用 usageNumCell() 的 title 保留千分位精确值，悬停可查。
+  const n = Number(value || 0);
+  const abs = Math.abs(n);
+  const compact = (scaled, unit) => `${scaled.toFixed(1).replace(/\.0$/, '')}${unit}`;
+  if (abs >= 1e9) return compact(n / 1e9, 'B');
+  if (abs >= 1e6) return compact(n / 1e6, 'M');
+  if (abs >= 1e3) return compact(n / 1e3, 'K');
+  return n.toLocaleString();
+}
+
+function usageNumCell(value) {
+  const n = Number(value || 0);
+  return `<td title="${n.toLocaleString()}">${usageNumber(n)}</td>`;
+}
+
+// 费用展示：小金额保留更多位（百万 token 级的单价常产出 0.000x），大金额收敛到 4 位。
+function usageCostLabel(cost) {
+  if (!cost || typeof cost !== 'object') return '';
+  const amount = Number(cost.amount || 0);
+  const text = amount > 0 && amount < 0.01 ? amount.toFixed(6).replace(/0+$/, '').replace(/\.$/, '') : amount.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+  return `${cost.currency || '¥'}${text}`;
+}
+
+// 多币种合计（KPI 卡 / 明细表 / 图表 tooltip 共用）：同一数组里按币种分行，不混加。
+function usageCostsLabel(costs) {
+  if (!Array.isArray(costs) || !costs.length) return '';
+  return costs.map((item) => usageCostLabel(item)).join(' + ');
+}
+
+// 图表画费用时的折算口径：多币种不混加，但一张图只有一个 y 轴——$ 按 7.2 折算
+// 进柱高，tooltip 与明细表仍按币种分列原值。汇率是展示近似值，不参与台账。
+const USAGE_USD_TO_CNY = 7.2;
+// 系列色板（亮暗主题都保持可读的中饱和色）：模型维度按排名取色；供应商维度
+// 优先按 provider_id 映射（老朋友固定色），陌生的 id 哈希取色兜底。
+const USAGE_SERIES_COLORS = ['#12A594', '#E8930C', '#3E8FE0', '#DC4A8C', '#5AA66F', '#8A93B2', '#C77E3A', '#7C5CFF'];
+const USAGE_PROVIDER_COLORS = { te: '#7C5CFF', moda: '#12A594', deepseek: '#3E8FE0', mimo: '#8A93B2', openai: '#E8930C' };
+const USAGE_OTHER_COLOR = '#C3C8D9';
+// 分布图 / 趋势图的系列数上限：超出折成「其他」，图例不至于爆掉。
+const USAGE_TOP_SERIES = 5;
+// 桑基右列（模型节点）上限：再多就挤成一团，失去分流图的意义。
+const USAGE_SANKEY_MAX_MODELS = 9;
+
+// 四项默认偏好与后端 settings.usage_dash 的枚举口径一一对应（config.py
+// USAGE_DASH_PREF_*）；自定义时间窗是会话态，永不落库。
+const USAGE_PREF_DEFAULTS = { range: '1', gran: 'hour', chart: 'bar', metric: 'cost' };
+const USAGE_PREF_KEYS = {
+  range: ['today', '1', '7', '14', '29'],
+  gran: ['hour', 'day'],
+  chart: ['bar', 'area'],
+  metric: ['cost', 'tokens'],
+};
+
+// 消耗划分维度：'model'（一序列一模型）| 'provider'（一序列一 API 供应商）。
+let usageDim = 'model';
+// 四项偏好（服务端 settings.usage_dash 的镜像；usageSyncPrefs 负责覆盖）。
+let usagePrefs = { ...USAGE_PREF_DEFAULTS };
+// 会话态窗口：range/custom 来自工具行与筛选弹窗；custom 为 null 表示快选。
+let usageCustom = null;
+// 图例隐藏集：跨维度保留（旧 key 在新系列里不命中即自然失效）。
+let usageHidden = new Set();
+// 最近一次 /api/usage/stats 响应（窗口切换重新请求；维度/图例切换纯重绘）。
+let usageStatsCache = null;
+// 服务端偏好是否已同步进 usagePrefs（每次进入用量页重同步 = 回到保存的默认视图）。
+let usagePrefsSynced = false;
+
+function normalizeUsagePrefs(raw = {}) {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  const pick = (key) => (USAGE_PREF_KEYS[key].includes(source[key]) ? source[key] : USAGE_PREF_DEFAULTS[key]);
+  return { range: pick('range'), gran: pick('gran'), chart: pick('chart'), metric: pick('metric') };
+}
+
+// 进入用量页时同步服务端偏好（与「侧栏分组与排序」同款：服务端是唯一事实来源）。
+function usageSyncPrefs() {
+  usagePrefs = normalizeUsagePrefs(state.bootstrap?.settings?.usage_dash);
+  usagePrefsSynced = true;
+}
+
+// 当前窗口的毫秒区间与标签。today / 快选 N 天走 days 参数；custom 走 since/until。
+// 返回的 start 已对齐桶边界（hour 对齐整点、day 对齐当地零点）——前端桶序列以
+// 它为准，服务端 since 只用来圈数据，两边差几分钟不影响归桶。
+function usageWindowBounds() {
+  const gran = usagePrefs.gran;
+  const size = gran === 'hour' ? 3_600_000 : 86_400_000;
+  const align = (ms) => {
+    if (gran === 'day') {
+      const d = new Date(ms);
+      d.setHours(0, 0, 0, 0);
+      return d.getTime();
+    }
+    return Math.floor(ms / size) * size;
+  };
+  const now = Date.now();
+  if (usagePrefs.range === 'custom' && usageCustom) {
+    return { start: align(usageCustom.startMs), end: usageCustom.endMs, label: '自定义' };
+  }
+  if (usagePrefs.range === 'today') {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return { start: d.getTime(), end: now, label: '今天' };
+  }
+  const days = Number(usagePrefs.range) || 1;
+  return { start: align(now - days * 86_400_000), end: now, label: `最近 ${days} 天` };
+}
+
+// 连续桶序列：分析图的时间轴必须补齐没有数据的桶（否则图形稀疏难读）。
+// 返回 [{ key, short, full }]，key 与后端 strftime 桶键逐字对齐。
+function usageBucketSeries(start, end) {
+  const hour = usagePrefs.gran === 'hour';
+  const size = hour ? 3_600_000 : 86_400_000;
+  const p2 = (n) => String(n).padStart(2, '0');
+  const buckets = [];
+  for (let t = start; t < end; t += size) {
+    const d = new Date(t);
+    const day = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`;
+    if (hour) {
+      const key = `${day} ${p2(d.getHours())}:00`;
+      buckets.push({ key, short: `${p2(d.getHours())}:00`, full: `${d.getMonth() + 1}月${d.getDate()}日 ${p2(d.getHours())}:00` });
+    } else {
+      buckets.push({ key: day, short: `${p2(d.getMonth() + 1)}-${p2(d.getDate())}`, full: `${d.getMonth() + 1}月${d.getDate()}日` });
+    }
+  }
+  return buckets;
+}
+
+// 把「桶×模型」行（cache.by_bucket）聚合成图表数据：
+// buckets（桶→系列→cell）+ series（窗口总量 Top N + 其他）。维度切换纯前端重算。
+function usageAggregate() {
+  const { start, end } = usageWindowBounds();
+  const buckets = usageBucketSeries(start, end);
+  const byKey = new Map(buckets.map((b) => [b.key, b]));
+  const byProvider = usageDim === 'provider';
+  // 窗口内各系列的 token 总量（排 Top N 用）。
+  const totals = new Map();
+  const cells = new Map(); // 桶键 → Map(系列 key → cell)
+  for (const row of Array.isArray(usageStatsCache?.by_bucket) ? usageStatsCache.by_bucket : []) {
+    if (!byKey.has(row.day)) continue;
+    const key = String(row.model_key || '');
+    const seriesKey = byProvider ? key.split(':', 2)[1] || key || '?' : key;
+    const tokens = Number(row.total_tokens || 0);
+    totals.set(seriesKey, (totals.get(seriesKey) || 0) + tokens);
+    if (!cells.has(row.day)) cells.set(row.day, new Map());
+    const bucketCells = cells.get(row.day);
+    const cell = bucketCells.get(seriesKey) || { turns: 0, requests: 0, input_tokens: 0, cached_tokens: 0, output_tokens: 0, costs: {} };
+    for (const name of ('turns requests input_tokens cached_tokens output_tokens').split(' ')) {
+      cell[name] += Number(row[name] || 0);
+    }
+    if (row.cost && typeof row.cost === 'object' && Number(row.cost.amount)) {
+      const cur = row.cost.currency || '¥';
+      cell.costs[cur] = (cell.costs[cur] || 0) + Number(row.cost.amount);
+    }
+    bucketCells.set(seriesKey, cell);
+  }
+  const ranked = [...totals.entries()].sort((a, b) => b[1] - a[1]);
+  const topKeys = new Set(ranked.slice(0, USAGE_TOP_SERIES).map(([k]) => k));
+  const nameOf = (key) => {
+    if (byProvider) {
+      const row = (usageStatsCache?.by_bucket || []).find((r) => String(r.model_key || '').split(':', 2)[1] === key);
+      return row?.provider_name || key;
+    }
+    const row = (usageStatsCache?.by_bucket || []).find((r) => String(r.model_key || '') === key);
+    return row?.model_name || key;
+  };
+  const colorOf = (key, index) => {
+    if (byProvider) return USAGE_PROVIDER_COLORS[key] || USAGE_SERIES_COLORS[index % USAGE_SERIES_COLORS.length];
+    return USAGE_SERIES_COLORS[index % USAGE_SERIES_COLORS.length];
+  };
+  const series = ranked
+    .filter(([k]) => topKeys.has(k))
+    .map(([k], index) => ({ key: k, name: nameOf(k), color: colorOf(k, index) }));
+  if (ranked.length > USAGE_TOP_SERIES) series.push({ key: '__other__', name: '其他', color: USAGE_OTHER_COLOR });
+  // hidden 集里的旧维度 key 不影响新系列；渲染时 off 态按 key 命中。
+  return { buckets, cells, series, start, end };
+}
+
+function usageFoldCell(cell) {
+  if (!cell) return null;
+  return {
+    ...cell,
+    total_tokens: cell.input_tokens + cell.output_tokens,
+  };
+}
+
+// 桶内折算费用（画图口径：$ 折 ¥，见 USAGE_USD_TO_CNY 注释）。
+function usageCellCostValue(costs) {
+  let sum = 0;
+  for (const [currency, amount] of Object.entries(costs || {})) {
+    sum += Number(amount || 0) * (currency === '$' ? USAGE_USD_TO_CNY : 1);
+  }
+  return sum;
+}
+
+// 当前主请求：today/快选走 days，自定义走 since/until（成对，服务端校验）。
+export async function loadUsageStats() {
+  if (!$('#usageKpiCalls')) return;
+  if (!usagePrefsSynced) usageSyncPrefs();
+  const { start, end } = usageWindowBounds();
+  try {
+    let stats;
+    if (usagePrefs.range === 'custom' && usageCustom) {
+      stats = await api(`/api/usage/stats?since=${encodeURIComponent(usageCustom.startMs)}&until=${encodeURIComponent(usageCustom.endMs)}&bucket=${usagePrefs.gran}`);
+    } else if (usagePrefs.range === 'today') {
+      // 今天 = 服务端按 days=1 圈数据，前端桶序列只收零点之后的桶。
+      stats = await api(`/api/usage/stats?days=1&bucket=${usagePrefs.gran}`);
+    } else {
+      stats = await api(`/api/usage/stats?days=${Number(usagePrefs.range) || 1}&bucket=${usagePrefs.gran}`);
+    }
+    usageStatsCache = stats;
+    usageRenderAll({ start, end });
+  } catch (error) {
+    toast(`用量统计加载失败：${error.message}`);
+  }
+}
+
+/* ═══════════ 手绘 SVG 图表（零依赖；颜色消费语义变量，dark 自动适配） ═══════════ */
+const USAGE_SVG_NS = 'http://www.w3.org/2000/svg';
+
+function usageSvgEl(tag, attrs = {}) {
+  const node = document.createElementNS(USAGE_SVG_NS, tag);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  return node;
+}
+
+// Catmull-Rom → Bezier 平滑折线（预览同款算法）。
+function usageSmoothPath(pts) {
+  if (pts.length < 2) return '';
+  let d = `M${pts[0][0]},${pts[0][1]}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[Math.min(pts.length - 1, i + 2)];
+    const c1 = [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6];
+    const c2 = [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6];
+    d += `C${c1[0]},${c1[1]} ${c2[0]},${c2[1]} ${p2[0]},${p2[1]}`;
+  }
+  return d;
+}
+
+// tooltip 节点：必须挂在模态 dialog（top layer）内部——body 上的 fixed 浮层会被
+// 设置弹窗盖住（index.html 快捷提示词面板同款教训）。惰性创建，只挂一次。
+function usageTooltipEl() {
+  const host = $('#settingsDialog') || document.body;
+  let tip = host.querySelector('.usage-tooltip');
+  if (!tip) {
+    tip = document.createElement('div');
+    tip.className = 'usage-tooltip';
+    host.appendChild(tip);
+  }
+  return tip;
+}
+
+function usageShowTooltip(html, x, y) {
+  const tip = usageTooltipEl();
+  tip.innerHTML = html;
+  tip.style.display = 'block';
+  const rect = tip.getBoundingClientRect();
+  // 防出屏：右缘放不下翻到指针左侧；下缘放不下翻上去。用 innerHeight/innerWidth
+  // 兜底（tooltip 是短命的悬浮物，不需要按可视视口精确约束）。
+  let left = x + 14;
+  let top = y + 12;
+  if (left + rect.width > window.innerWidth - 8) left = x - rect.width - 12;
+  if (top + rect.height > window.innerHeight - 8) top = y - rect.height - 10;
+  tip.style.left = `${Math.max(8, left)}px`;
+  tip.style.top = `${Math.max(8, top)}px`;
+}
+
+function usageHideTooltip() {
+  const tip = ($('#settingsDialog') || document.body).querySelector('.usage-tooltip');
+  if (tip) tip.style.display = 'none';
+}
+
+function usageFmtTok(n) {
+  n = Number(n || 0);
+  if (n >= 1e8) return `${(n / 1e8).toFixed(2)} 亿`;
+  if (n >= 1e4) return `${(n / 1e4).toFixed(1)} 万`;
+  return usageNumber(n);
+}
+
+function usageFmtCosts(costs, { short = false } = {}) {
+  const parts = Object.entries(costs || {})
+    .filter(([, v]) => Number(v) > 0.0001)
+    .map(([c, v]) => `${c}${v.toFixed(short ? 0 : 2)}`);
+  return parts.length ? parts.join(' + ') : '—';
+}
+
+function usageRenderLegend(containerId, series) {
+  const box = $(`#${containerId}`);
+  if (!box) return;
+  box.innerHTML = '';
+  for (const s of series) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = `usage-legend-item${usageHidden.has(s.key) ? ' off' : ''}`;
+    item.title = '点击显示 / 隐藏该系列';
+    item.innerHTML = `<span class="usage-legend-dot" style="background:${s.color}"></span>${escapeHtml(s.name)}`;
+    item.addEventListener('click', () => {
+      if (usageHidden.has(s.key)) usageHidden.delete(s.key);
+      else usageHidden.add(s.key);
+      usageRenderAll();
+    });
+    box.appendChild(item);
+  }
+}
+
+// 空窗口占位：没有数据的图不画空轴，给一行居中说明。
+function usageEmptySvg(width, height, text) {
+  const svg = usageSvgEl('svg', { viewBox: `0 0 ${width} ${height}` });
+  const t = usageSvgEl('text', { x: width / 2, y: height / 2, 'text-anchor': 'middle', 'font-size': 13, fill: 'var(--muted)' });
+  t.textContent = text;
+  svg.appendChild(t);
+  return svg;
+}
+
+/* 消耗分布：堆叠柱状 / 半透明面积（指标可切 花费 | Token）。 */
+function usageRenderDist(agg) {
+  const box = $('#usageDistBox');
+  if (!box) return;
+  box.innerHTML = '';
+  const W = 1000;
+  const H = 260;
+  const padL = 46;
+  const padR = 10;
+  const padT = 12;
+  const padB = 26;
+  const iw = W - padL - padR;
+  const ih = H - padT - padB;
+  const { buckets, cells, series } = agg;
+  const metric = usagePrefs.metric;
+  const visible = series.filter((s) => !usageHidden.has(s.key));
+  const valueOf = (cell) => {
+    if (!cell) return 0;
+    if (metric === 'tokens') return cell.input_tokens + cell.output_tokens;
+    return usageCellCostValue(cell.costs);
+  };
+  const bucketTotal = (bucket) => {
+    const bucketCells = cells.get(bucket.key);
+    if (!bucketCells) return 0;
+    let sum = 0;
+    for (const cell of bucketCells.values()) sum += valueOf(cell);
+    return sum;
+  };
+  const maxV = Math.max(1e-9, ...buckets.map(bucketTotal));
+  const svg = usageSvgEl('svg', { viewBox: `0 0 ${W} ${H}` });
+  for (let i = 0; i <= 4; i++) {
+    const v = (maxV * i) / 4;
+    const y = padT + ih - (ih * i) / 4;
+    svg.appendChild(usageSvgEl('line', { x1: padL, y1: y, x2: W - padR, y2: y, stroke: 'var(--line)', 'stroke-width': 1 }));
+    const t = usageSvgEl('text', { x: padL - 7, y: y + 4, 'text-anchor': 'end', 'font-size': 10.5, fill: 'var(--muted)' });
+    t.textContent = metric === 'tokens' ? usageFmtTok(v) : `¥${v.toFixed(v >= 100 ? 0 : v >= 1 ? 1 : 2)}`;
+    svg.appendChild(t);
+  }
+  const n = buckets.length;
+  const step = iw / Math.max(1, n);
+  const barW = Math.max(2, Math.min(26, step * 0.62));
+  const labelEvery = Math.max(1, Math.ceil(n / 12));
+  buckets.forEach((bucket, i) => {
+    const cx = padL + step * (i + 0.5);
+    if (i % labelEvery === 0) {
+      const t = usageSvgEl('text', { x: cx, y: H - 8, 'text-anchor': 'middle', 'font-size': 10, fill: 'var(--muted)' });
+      t.textContent = bucket.short;
+      svg.appendChild(t);
+    }
+    if (usagePrefs.chart === 'bar') {
+      const bucketCells = cells.get(bucket.key);
+      if (!bucketCells) return;
+      let acc = 0;
+      for (const s of visible) {
+        const v = valueOf(bucketCells.get(s.key));
+        if (!v) continue;
+        const hVal = (v / maxV) * ih;
+        svg.appendChild(usageSvgEl('rect', {
+          x: cx - barW / 2, y: padT + ih - acc - hVal, width: barW, height: Math.max(hVal, 0.5),
+          fill: s.color, rx: Math.min(2.5, barW / 4), opacity: 0.92,
+        }));
+        acc += hVal;
+      }
+    }
+  });
+  if (usagePrefs.chart === 'area') {
+    // 面积图：系列间独立归一、半透明重叠（不堆叠），贴近「趋势叠加」的读法。
+    for (const s of [...visible].reverse()) {
+      const pts = buckets.map((bucket, i) => {
+        const v = valueOf(cells.get(bucket.key)?.get(s.key)) / maxV;
+        return [padL + step * (i + 0.5), padT + ih - v * ih];
+      });
+      const line = usageSmoothPath(pts);
+      if (!line) continue;
+      svg.appendChild(usageSvgEl('path', { d: `${line}L${pts[pts.length - 1][0]},${padT + ih}L${pts[0][0]},${padT + ih}Z`, fill: s.color, opacity: 0.16 }));
+      svg.appendChild(usageSvgEl('path', { d: line, fill: 'none', stroke: s.color, 'stroke-width': 1.8 }));
+    }
+  }
+  // 按桶的 hover 命中区（透明矩形；触摸设备跟随手指位置出 tooltip）。
+  buckets.forEach((bucket, i) => {
+    const hit = usageSvgEl('rect', { x: padL + step * i, y: padT, width: step, height: ih, fill: 'transparent' });
+    hit.addEventListener('mousemove', (ev) => {
+      const bucketCells = cells.get(bucket.key);
+      const rows = visible.map((s) => {
+        const cell = bucketCells?.get(s.key);
+        if (!cell) return '';
+        const val = metric === 'tokens' ? `${usageFmtTok(cell.input_tokens + cell.output_tokens)} tok` : usageFmtCosts(cell.costs);
+        return `<div class="usage-tooltip-row"><span class="usage-legend-dot" style="background:${s.color}"></span><span class="usage-tt-name">${escapeHtml(s.name)}</span><span class="usage-tt-val">${val}</span></div>`;
+      }).join('');
+      const tot = bucketTotal(bucket);
+      const totLabel = metric === 'tokens' ? `${usageFmtTok(tot)} token` : `¥${tot.toFixed(2)}`;
+      usageShowTooltip(`<div class="usage-tooltip-title">${escapeHtml(bucket.full)}</div>${rows}<div class="usage-tooltip-muted">合计 ${totLabel}</div>`, ev.clientX, ev.clientY);
+    });
+    hit.addEventListener('mouseleave', usageHideTooltip);
+    svg.appendChild(hit);
+  });
+  if (!visible.length || !n) {
+    box.innerHTML = '';
+    box.appendChild(usageEmptySvg(W, H, '暂无数据——开始对话后这里会出现图表。'));
+  } else {
+    box.appendChild(svg);
+  }
+  usageRenderLegend('usageDistLegend', series);
+  const windowSum = buckets.reduce((s, b) => s + bucketTotal(b), 0);
+  const sumEl = $('#usageDistSum');
+  if (sumEl) sumEl.textContent = metric === 'tokens' ? `合计 ${usageFmtTok(windowSum)} token` : `合计 ¥${windowSum.toFixed(2)}（$ 按 ${USAGE_USD_TO_CNY} 折算画图，明细仍分币种）`;
+}
+
+/* 调用趋势：按系列的多序列平滑线（请求次数）。 */
+function usageRenderTrend(agg) {
+  const box = $('#usageTrendBox');
+  if (!box) return;
+  box.innerHTML = '';
+  const W = 1000;
+  const H = 230;
+  const padL = 40;
+  const padR = 10;
+  const padT = 12;
+  const padB = 24;
+  const iw = W - padL - padR;
+  const ih = H - padT - padB;
+  const { buckets, cells, series } = agg;
+  const visible = series.filter((s) => !usageHidden.has(s.key));
+  const requestsOf = (bucket, key) => cells.get(bucket.key)?.get(key)?.requests || 0;
+  const maxV = Math.max(1, ...buckets.map((b) => Math.max(0, ...visible.map((s) => requestsOf(b, s.key)))));
+  const svg = usageSvgEl('svg', { viewBox: `0 0 ${W} ${H}` });
+  for (let i = 0; i <= 3; i++) {
+    const y = padT + ih - (ih * i) / 3;
+    svg.appendChild(usageSvgEl('line', { x1: padL, y1: y, x2: W - padR, y2: y, stroke: 'var(--line)', 'stroke-width': 1 }));
+    const t = usageSvgEl('text', { x: padL - 6, y: y + 4, 'text-anchor': 'end', 'font-size': 10.5, fill: 'var(--muted)' });
+    t.textContent = String(Math.round((maxV * i) / 3));
+    svg.appendChild(t);
+  }
+  const n = buckets.length;
+  const step = iw / Math.max(1, n);
+  const labelEvery = Math.max(1, Math.ceil(n / 12));
+  buckets.forEach((b, i) => {
+    if (i % labelEvery === 0) {
+      const t = usageSvgEl('text', { x: padL + step * (i + 0.5), y: H - 6, 'text-anchor': 'middle', 'font-size': 10, fill: 'var(--muted)' });
+      t.textContent = b.short;
+      svg.appendChild(t);
+    }
+  });
+  for (const s of visible) {
+    const pts = buckets.map((b, i) => [padL + step * (i + 0.5), padT + ih - (requestsOf(b, s.key) / maxV) * ih]);
+    const line = usageSmoothPath(pts);
+    if (!line) continue;
+    svg.appendChild(usageSvgEl('path', { d: `${line}L${pts[pts.length - 1][0]},${padT + ih}L${pts[0][0]},${padT + ih}Z`, fill: s.color, opacity: 0.08 }));
+    svg.appendChild(usageSvgEl('path', { d: line, fill: 'none', stroke: s.color, 'stroke-width': 1.8 }));
+  }
+  buckets.forEach((bucket, i) => {
+    const hit = usageSvgEl('rect', { x: padL + step * i, y: padT, width: step, height: ih, fill: 'transparent' });
+    hit.addEventListener('mousemove', (ev) => {
+      const rows = visible.map((s) => {
+        const cell = cells.get(bucket.key)?.get(s.key);
+        return `<div class="usage-tooltip-row"><span class="usage-legend-dot" style="background:${s.color}"></span><span class="usage-tt-name">${escapeHtml(s.name)}</span><span class="usage-tt-val">${usageNumber(cell?.requests || 0)} 次 · ${usageNumber(cell?.turns || 0)} 轮</span></div>`;
+      }).join('');
+      usageShowTooltip(`<div class="usage-tooltip-title">${escapeHtml(bucket.full)}</div>${rows}`, ev.clientX, ev.clientY);
+    });
+    hit.addEventListener('mouseleave', usageHideTooltip);
+    svg.appendChild(hit);
+  });
+  if (!visible.length || !n) {
+    box.innerHTML = '';
+    box.appendChild(usageEmptySvg(W, H, '暂无数据。'));
+  } else {
+    box.appendChild(svg);
+  }
+  usageRenderLegend('usageTrendLegend', series);
+  const calls = buckets.reduce((s, b) => s + [...(cells.get(b.key)?.values() || [])].reduce((s2, c) => s2 + c.requests, 0), 0);
+  const sumEl = $('#usageTrendSum');
+  if (sumEl) sumEl.textContent = `窗口内共 ${usageNumber(calls)} 次请求`;
+}
+
+/* API 供应商对比：横向条（多供应商是我们区别于单 API 后台的根本差异）。 */
+function usageRenderProviders() {
+  const box = $('#usageProvBox');
+  if (!box) return;
+  box.innerHTML = '';
+  const rows = Array.isArray(usageStatsCache?.by_provider) ? usageStatsCache.by_provider : [];
+  const W = 1000;
+  const rowH = 40;
+  const padL = 130;
+  const padR = 160;
+  if (!rows.length) {
+    box.appendChild(usageEmptySvg(W, 80, '暂无数据。'));
+    return;
+  }
+  const cnyOf = (row) => {
+    let sum = 0;
+    for (const item of row.costs || []) sum += Number(item.amount || 0) * (item.currency === '$' ? USAGE_USD_TO_CNY : 1);
+    return sum;
+  };
+  const sorted = [...rows].sort((a, b) => cnyOf(b) - cnyOf(a));
+  const maxCny = Math.max(1e-9, ...sorted.map(cnyOf));
+  const H = sorted.length * rowH + 8;
+  const svg = usageSvgEl('svg', { viewBox: `0 0 ${W} ${H}` });
+  sorted.forEach((row, i) => {
+    const y = i * rowH + 6;
+    const providerId = String(row.provider_id || '');
+    const color = USAGE_PROVIDER_COLORS[providerId] || USAGE_SERIES_COLORS[i % USAGE_SERIES_COLORS.length];
+    const name = usageSvgEl('text', { x: padL - 10, y: y + 15, 'text-anchor': 'end', 'font-size': 12, fill: 'var(--text)' });
+    name.textContent = `${row.provider_name || providerId || '未知供应商'}${row.priced ? '' : ' ·'}`;
+    svg.appendChild(name);
+    const bw = (W - padL - padR) * (cnyOf(row) / maxCny);
+    svg.appendChild(usageSvgEl('rect', { x: padL, y: y + 4, width: Math.max(bw, 2), height: 16, rx: 4, fill: color, opacity: 0.85 }));
+    const val = usageSvgEl('text', { x: padL + Math.max(bw, 2) + 8, y: y + 16, 'font-size': 11.5, fill: 'var(--text)', 'font-variant-numeric': 'tabular-nums' });
+    val.textContent = `${usageCostsLabel(row.costs) || '未定价'} · ${usageFmtTok(row.total_tokens)} tok · ${usageNumber(row.requests)} 次`;
+    svg.appendChild(val);
+  });
+  box.appendChild(svg);
+  const unpriced = sorted.filter((row) => !row.priced);
+  const hint = $('#usageUnpricedHint');
+  if (hint) {
+    hint.hidden = unpriced.length === 0;
+    hint.textContent = unpriced.length
+      ? `${usageNumber(Number(usageStatsCache?.totals?.unpriced_turns || 0))} 轮来自未设单价的供应商（${unpriced.map((row) => row.provider_name).join('、')}），未计入费用；到「API 供应商 → 编辑 → 费用单价」补设后即可追溯。`
+      : '';
+  }
+}
+
+/* 缓存命中率：按当前维度的系列横向条（cached / input）。 */
+function usageRenderCache(agg) {
+  const box = $('#usageCacheBox');
+  if (!box) return;
+  box.innerHTML = '';
+  const W = 1000;
+  const rowH = 34;
+  const padL = 150;
+  const padR = 100;
+  const byProvider = usageDim === 'provider';
+  const acc = new Map();
+  for (const row of Array.isArray(usageStatsCache?.by_bucket) ? usageStatsCache.by_bucket : []) {
+    const key = String(row.model_key || '');
+    const seriesKey = byProvider ? key.split(':', 2)[1] || key || '?' : key;
+    const name = byProvider ? (row.provider_name || seriesKey) : (row.model_name || key);
+    const item = acc.get(seriesKey) || { name, input_tokens: 0, cached_tokens: 0 };
+    item.input_tokens += Number(row.input_tokens || 0);
+    item.cached_tokens += Number(row.cached_tokens || 0);
+    acc.set(seriesKey, item);
+  }
+  const rows = [...acc.values()]
+    .map((item) => ({ ...item, rate: item.input_tokens ? item.cached_tokens / item.input_tokens : 0 }))
+    .filter((item) => item.input_tokens > 0)
+    .sort((a, b) => b.rate - a.rate);
+  if (!rows.length) {
+    box.appendChild(usageEmptySvg(W, 80, '暂无数据。'));
+    return;
+  }
+  const H = rows.length * rowH + 8;
+  const svg = usageSvgEl('svg', { viewBox: `0 0 ${W} ${H}` });
+  const bw = W - padL - padR;
+  rows.forEach((row, i) => {
+    const y = i * rowH + 5;
+    const name = usageSvgEl('text', { x: padL - 10, y: y + 14, 'text-anchor': 'end', 'font-size': 12, fill: 'var(--text)' });
+    name.textContent = row.name;
+    svg.appendChild(name);
+    svg.appendChild(usageSvgEl('rect', { x: padL, y: y + 3, width: bw, height: 13, rx: 4, fill: 'var(--surface-2)' }));
+    svg.appendChild(usageSvgEl('rect', { x: padL, y: y + 3, width: Math.max(bw * row.rate, 1), height: 13, rx: 4, fill: 'var(--success)', opacity: 0.8 }));
+    const val = usageSvgEl('text', { x: padL + bw + 8, y: y + 14, 'font-size': 11.5, fill: 'var(--muted)', 'font-variant-numeric': 'tabular-nums' });
+    val.textContent = `${(row.rate * 100).toFixed(1)}%（缓存 ${usageFmtTok(row.cached_tokens)}）`;
+    svg.appendChild(val);
+  });
+  box.appendChild(svg);
+}
+
+/* 分流：供应商 → 模型 两层桑基（按 Token 量；hover 看单流占比）。 */
+function usageRenderSankey() {
+  const box = $('#usageSankeyBox');
+  if (!box) return;
+  box.innerHTML = '';
+  const modelRows = Array.isArray(usageStatsCache?.by_model) ? usageStatsCache.by_model : [];
+  if (!modelRows.length) {
+    box.appendChild(usageEmptySvg(1000, 160, '暂无数据。'));
+    return;
+  }
+  const flows = new Map(); // providerId → Map(modelKey → tokens)
+  const provTot = new Map();
+  const modelTot = new Map();
+  const meta = new Map(); // modelKey → { name, providerId }
+  for (const row of modelRows) {
+    const key = String(row.model_key || '');
+    const providerId = key.split(':', 2)[1] || key || '?';
+    const tokens = Number(row.total_tokens || 0);
+    if (!flows.has(providerId)) flows.set(providerId, new Map());
+    flows.get(providerId).set(key, (flows.get(providerId).get(key) || 0) + tokens);
+    provTot.set(providerId, (provTot.get(providerId) || 0) + tokens);
+    modelTot.set(key, (modelTot.get(key) || 0) + tokens);
+    meta.set(key, { name: row.model_name || key, providerId });
+  }
+  const provs = [...provTot.entries()].sort((a, b) => b[1] - a[1]);
+  const models = [...modelTot.entries()].sort((a, b) => b[1] - a[1]).slice(0, USAGE_SANKEY_MAX_MODELS);
+  const grand = [...provTot.values()].reduce((s, v) => s + v, 0) || 1;
+  const W = 1000;
+  const H = 300;
+  const padL = 96;
+  const padR = 110;
+  const padT = 14;
+  const padB = 14;
+  const usableH = H - padT - padB;
+  const gap = 14;
+  const provHsum = usableH - gap * (provs.length - 1);
+  const modelHsum = usableH - gap * (models.length - 1);
+  const x0 = padL;
+  const x1 = W - padR;
+  const nodeW = 13;
+  const svg = usageSvgEl('svg', { viewBox: `0 0 ${W} ${H}` });
+  const provNameOf = (providerId) => {
+    for (const row of modelRows) {
+      if (String(row.model_key || '').split(':', 2)[1] === providerId) return row.provider_name || providerId;
+    }
+    return providerId;
+  };
+  const colorOf = (providerId) => USAGE_PROVIDER_COLORS[providerId] || USAGE_SERIES_COLORS[provs.findIndex(([pid]) => pid === providerId) % USAGE_SERIES_COLORS.length];
+  let y = padT;
+  const provGeo = new Map();
+  for (const [providerId, tokens] of provs) {
+    const h = Math.max(10, (provHsum * tokens) / grand);
+    provGeo.set(providerId, { y0: y, h, tokens });
+    svg.appendChild(usageSvgEl('rect', { x: x0 - nodeW, y, width: nodeW, height: h, rx: 3, fill: colorOf(providerId) }));
+    const lbl = usageSvgEl('text', { x: x0 - nodeW - 7, y: y + h / 2 + 4, 'text-anchor': 'end', 'font-size': 11.5, fill: 'var(--text)' });
+    lbl.textContent = provNameOf(providerId);
+    svg.appendChild(lbl);
+    const val = usageSvgEl('text', { x: x0 - nodeW - 7, y: y + h / 2 + 16, 'text-anchor': 'end', 'font-size': 10, fill: 'var(--muted)' });
+    val.textContent = usageFmtTok(tokens);
+    svg.appendChild(val);
+    y += h + gap;
+  }
+  y = padT;
+  const modelGeo = new Map();
+  for (const [modelKey, tokens] of models) {
+    const info = meta.get(modelKey);
+    const h = Math.max(8, (modelHsum * tokens) / grand);
+    modelGeo.set(modelKey, { y0: y, h, tokens });
+    svg.appendChild(usageSvgEl('rect', { x: x1, y, width: nodeW, height: h, rx: 3, fill: colorOf(info?.providerId || '') }));
+    const lbl = usageSvgEl('text', { x: x1 + nodeW + 7, y: y + h / 2 + 4, 'font-size': 11.5, fill: 'var(--text)' });
+    lbl.textContent = info?.name || modelKey;
+    svg.appendChild(lbl);
+    y += h + gap;
+  }
+  // 流带：按目标模型内堆叠；hover 高亮 + 显示占比。
+  const cursorAt = new Map();
+  for (const [providerId] of provs) {
+    const g0 = provGeo.get(providerId);
+    let srcOffset = 0;
+    const targets = models
+      .map(([mk]) => [mk, flows.get(providerId)?.get(mk) || 0])
+      .filter(([, tokens]) => tokens > 0)
+      .sort((a, b) => b[1] - a[1]);
+    for (const [modelKey, tokens] of targets) {
+      const g1 = modelGeo.get(modelKey);
+      const h0 = Math.max(2, (g0.h * tokens) / g0.tokens);
+      const yOff = cursorAt.get(modelKey) || 0;
+      const h1 = Math.max(2, (g1.h * tokens) / g1.tokens);
+      const y0 = g0.y0 + srcOffset;
+      const y1 = g1.y0 + yOff;
+      const mx = (x0 + x1) / 2;
+      const path = usageSvgEl('path', {
+        d: `M${x0},${y0}C${mx},${y0} ${mx},${y1} ${x1},${y1}L${x1},${y1 + h1}C${mx},${y1 + h1} ${mx},${y0 + h0} ${x0},${y0 + h0}Z`,
+        fill: colorOf(providerId), opacity: 0.3, class: 'usage-sankey-ribbon',
+      });
+      path.addEventListener('mousemove', (ev) => {
+        path.setAttribute('opacity', '0.55');
+        usageShowTooltip(`<div class="usage-tooltip-title">${escapeHtml(provNameOf(providerId))} → ${escapeHtml(meta.get(modelKey)?.name || modelKey)}</div><div class="usage-tooltip-row"><span class="usage-tt-name">Token</span><span class="usage-tt-val">${usageFmtTok(tokens)}</span></div><div class="usage-tooltip-row"><span class="usage-tt-name">占比</span><span class="usage-tt-val">${((tokens / grand) * 100).toFixed(1)}%</span></div><div class="usage-tooltip-muted">窗口内按 Token 量</div>`, ev.clientX, ev.clientY);
+      });
+      path.addEventListener('mouseleave', () => {
+        path.setAttribute('opacity', '0.3');
+        usageHideTooltip();
+      });
+      svg.appendChild(path);
+      srcOffset += h0;
+      cursorAt.set(modelKey, yOff + h1);
+    }
+  }
+  box.appendChild(svg);
+}
+
+/* 明细表（沿用旧表口径；维度随工具行切换）。 */
+function usageRenderTable() {
+  const byProvider = usageDim === 'provider';
+  const head = $('#usageDetailHead');
+  const body = $('#usageDetailBody');
+  const title = $('#usageDetailTitle');
+  const desc = $('#usageDetailDesc');
+  if (!head || !body) return;
+  if (title) title.textContent = byProvider ? '按 API 供应商明细' : '按模型明细';
+  if (desc) desc.textContent = byProvider
+    ? '当前时间窗内每个 API 供应商的消耗与费用。'
+    : '当前时间窗内每个模型的消耗与费用。';
+  head.innerHTML = `<th>${byProvider ? 'API 供应商' : '模型'}</th><th>轮次</th><th>请求</th><th>输入</th><th>命中</th><th>输出</th><th>命中率</th><th>费用</th>`;
+  const rows = byProvider
+    ? (Array.isArray(usageStatsCache?.by_provider) ? usageStatsCache.by_provider : [])
+    : (Array.isArray(usageStatsCache?.by_model) ? usageStatsCache.by_model : []);
+  body.innerHTML = rows.length
+    ? rows.map((row) => {
+      const input = Number(row.input_tokens || 0);
+      const cached = Number(row.cached_tokens || 0);
+      const rate = input ? `${((cached / input) * 100).toFixed(1)}%` : '—';
+      const label = byProvider
+        ? (row.provider_name || row.provider_id || '未知供应商')
+        : (row.model_name || row.model_key || '未知模型');
+      const costCell = row.priced
+        ? escapeHtml(byProvider ? (usageCostsLabel(row.costs) || '—') : usageCostLabel(row.cost))
+        : '<span class="usage-unpriced-cell">未定价</span>';
+      return `<tr><td>${escapeHtml(label)}</td>${usageNumCell(row.turns)}${usageNumCell(row.requests)}${usageNumCell(input)}${usageNumCell(cached)}${usageNumCell(row.output_tokens)}<td>${rate}</td><td>${costCell}</td></tr>`;
+    }).join('')
+    : '<tr><td colspan="8" class="usage-empty">暂无数据——开始对话后这里会出现统计。</td></tr>';
+}
+
+/* KPI 六卡（口径与表格一致：窗口聚合、多币种分行、未定价轮次单独提示）。 */
+function usageRenderKpi(agg) {
+  const totals = usageStatsCache?.totals || {};
+  const requests = Number(totals.requests || 0);
+  const input = Number(totals.input_tokens || 0);
+  const cached = Number(totals.cached_tokens || 0);
+  const output = Number(totals.output_tokens || 0);
+  const minutes = Math.max(1, (agg.end - agg.start) / 60000);
+  const setText = (id, text) => {
+    const el = $(`#${id}`);
+    if (el) el.textContent = text;
+  };
+  const callsEl = $('#usageKpiCalls');
+  if (callsEl) callsEl.innerHTML = `${usageNumber(requests)}<small>次</small>`;
+  setText('usageKpiCallsSub', `${usageNumber(totals.turns || 0)} 轮对话`);
+  setText('usageKpiCost', usageCostsLabel(totals.costs));
+  setText('usageKpiCostSub', Number(totals.unpriced_turns || 0) ? `${usageNumber(totals.unpriced_turns)} 轮未定价未计入` : '全部供应商已计价');
+  const tokensEl = $('#usageKpiTokens');
+  if (tokensEl) tokensEl.innerHTML = `${usageFmtTok(input + output)}<small>tok</small>`;
+  setText('usageKpiTokensSub', `输入 ${usageFmtTok(input)} · 输出 ${usageFmtTok(output)}`);
+  setText('usageKpiRpm', (requests / minutes).toFixed(2));
+  setText('usageKpiTpm', ((input + output) / minutes / 1000).toFixed(1));
+  setText('usageKpiCache', input ? `${((cached / input) * 100).toFixed(1)}%` : '—');
+  setText('usageKpiCacheSub', `缓存输入 ${usageFmtTok(cached)} / 总输入 ${usageFmtTok(input)}`);
+}
+
+/* 总渲染：窗口标签 + KPI + 全部图表 + 明细表。维度/图例切换不重新请求。 */
+function usageRenderAll(bounds = null) {
+  if (!usageStatsCache) return;
+  const { start, end, label } = bounds || usageWindowBounds();
+  const rangeLabel = usagePrefs.range === 'custom' && usageCustom
+    ? `${new Date(start).toLocaleDateString()} ~ ${new Date(end).toLocaleDateString()}`
+    : label;
+  usageSyncWindowControls();
+  const agg = usageAggregate();
+  usageRenderKpi(agg);
+  usageRenderDist(agg);
+  usageRenderTrend(agg);
+  usageRenderProviders();
+  usageRenderCache(agg);
+  usageRenderSankey();
+  usageRenderTable();
+}
+
+// 工具行控件与状态的同步（active 态 / select 值 / 自定义 chip 的高亮）。
+function usageSyncWindowControls() {
+  const chips = $('#usageRangeChips');
+  if (chips) {
+    for (const chip of chips.querySelectorAll('[data-usage-range]')) {
+      chip.classList.toggle('active', chip.dataset.usageRange === usagePrefs.range);
+    }
+  }
+  const dim = $('#usageDimSeg');
+  if (dim) {
+    for (const btn of dim.querySelectorAll('[data-usage-dim]')) {
+      btn.classList.toggle('active', btn.dataset.usageDim === usageDim);
+    }
+  }
+  const gran = $('#usageGranSel');
+  if (gran) gran.value = usagePrefs.gran;
+  const chart = $('#usageChartSeg');
+  if (chart) {
+    for (const btn of chart.querySelectorAll('[data-usage-chart]')) {
+      btn.classList.toggle('active', btn.dataset.usageChart === usagePrefs.chart);
+    }
+  }
+  const metric = $('#usageMetricSeg');
+  if (metric) {
+    for (const btn of metric.querySelectorAll('[data-usage-metric]')) {
+      btn.classList.toggle('active', btn.dataset.usageMetric === usagePrefs.metric);
+    }
+  }
+}
+
+/* ═══════════ 工具行 / 弹窗事件（由 15-bind-events.js 绑定） ═══════════ */
+
+export function setUsageRange(range) {
+  if (range === 'custom') {
+    openUsageFilterDialog();
+    return;
+  }
+  if (!USAGE_PREF_KEYS.range.includes(range)) return;
+  usagePrefs.range = range;
+  usageCustom = null;
+  void loadUsageStats();
+}
+
+export function setUsageDim(dim) {
+  if (dim !== 'model' && dim !== 'provider') return;
+  usageDim = dim;
+  usageRenderAll();
+}
+
+export function setUsageGran(gran) {
+  if (!USAGE_PREF_KEYS.gran.includes(gran)) return;
+  usagePrefs.gran = gran;
+  void loadUsageStats();
+}
+
+export function setUsageChart(type) {
+  if (!USAGE_PREF_KEYS.chart.includes(type)) return;
+  usagePrefs.chart = type;
+  usageRenderAll();
+}
+
+export function setUsageMetric(metric) {
+  if (!USAGE_PREF_KEYS.metric.includes(metric)) return;
+  usagePrefs.metric = metric;
+  usageRenderAll();
+}
+
+/* ═══════════ 手机端弹层可视视口适配（与 @ 弹层修复同源的问题） ═══════════ */
+// 软键盘弹出时 Android Chrome 只缩 visualViewport（布局视口不动），居中 dialog
+// 以布局视口定位，底部会被键盘盖住。打开用量弹窗期间监听 vv resize/scroll，把
+// dialog 的 max-height 压到可视区内（CSS 的 100dvh 兜底普通小屏，这里兜键盘态）。
+function usageSyncDialogBounds() {
+  for (const id of ['usageFilterDialog', 'usagePrefsDialog']) {
+    const dlg = $(`#${id}`);
+    if (!dlg || !dlg.open) continue;
+    const vv = window.visualViewport;
+    if (!vv) {
+      dlg.style.removeProperty('max-height');
+      continue;
+    }
+    const avail = Math.max(240, Math.min(vv.height, window.innerHeight - vv.offsetTop) - 16);
+    dlg.style.maxHeight = `${avail}px`;
+  }
+}
+
+function usageDialogViewportListeners() {
+  usageSyncDialogBounds();
+}
+
+function usageBindDialogViewport(on) {
+  const vv = window.visualViewport;
+  if (on) {
+    window.addEventListener('resize', usageDialogViewportListeners);
+    vv?.addEventListener('resize', usageDialogViewportListeners);
+    vv?.addEventListener('scroll', usageDialogViewportListeners);
+  } else {
+    window.removeEventListener('resize', usageDialogViewportListeners);
+    vv?.removeEventListener('resize', usageDialogViewportListeners);
+    vv?.removeEventListener('scroll', usageDialogViewportListeners);
+  }
+}
+
+export function openUsageFilterDialog() {
+  const dlg = $('#usageFilterDialog');
+  if (!dlg) return;
+  // 回填当前窗口（所见即所选）：自定义控件反映实况，快选 chip 高亮当前 range。
+  const { start, end } = usageWindowBounds();
+  const p2 = (n) => String(n).padStart(2, '0');
+  const sd = new Date(start);
+  const ed = new Date(end);
+  const startD = $('#usageFilterStartD');
+  const startT = $('#usageFilterStartT');
+  const endD = $('#usageFilterEndD');
+  const endT = $('#usageFilterEndT');
+  if (startD) startD.value = `${sd.getFullYear()}-${p2(sd.getMonth() + 1)}-${p2(sd.getDate())}`;
+  if (startT) startT.value = `${p2(sd.getHours())}:${p2(sd.getMinutes())}`;
+  if (endD) endD.value = `${ed.getFullYear()}-${p2(ed.getMonth() + 1)}-${p2(ed.getDate())}`;
+  if (endT) endT.value = `${p2(ed.getHours())}:${p2(ed.getMinutes())}`;
+  const gran = $('#usageFilterGran');
+  if (gran) gran.value = usagePrefs.gran;
+  const chips = $('#usageFilterChips');
+  if (chips) {
+    for (const chip of chips.querySelectorAll('[data-usage-filter-range]')) {
+      chip.classList.toggle('active', chip.dataset.usageFilterRange === usagePrefs.range);
+    }
+  }
+  dlg.showModal();
+  usageBindDialogViewport(true);
+  usageSyncDialogBounds();
+}
+
+export function applyUsageFilter() {
+  const gran = $('#usageFilterGran')?.value;
+  if (USAGE_PREF_KEYS.gran.includes(gran)) usagePrefs.gran = gran;
+  const startD = $('#usageFilterStartD')?.value;
+  const startT = $('#usageFilterStartT')?.value || '00:00';
+  const endD = $('#usageFilterEndD')?.value;
+  const endT = $('#usageFilterEndT')?.value || '23:59';
+  const active = document.querySelector('#usageFilterChips .usage-chip.active');
+  const startMs = startD ? new Date(`${startD}T${startT}`).getTime() : 0;
+  const endMs = endD ? new Date(`${endD}T${endT}`).getTime() : 0;
+  if (startMs && endMs && endMs > startMs) {
+    // 填了完整起止时间 = 自定义窗口优先（快选不再生效，弹窗里有说明）。
+    usagePrefs.range = 'custom';
+    usageCustom = { startMs, endMs: Math.min(endMs, Date.now()) };
+  } else if (active && USAGE_PREF_KEYS.range.includes(active.dataset.usageFilterRange)) {
+    usagePrefs.range = active.dataset.usageFilterRange;
+    usageCustom = null;
+  }
+  $('#usageFilterDialog')?.close();
+  usageUnbindDialogViewport();
+  void loadUsageStats();
+}
+
+export function resetUsageFilter() {
+  usagePrefs.range = USAGE_PREF_DEFAULTS.range;
+  usagePrefs.gran = USAGE_PREF_DEFAULTS.gran;
+  usageCustom = null;
+  $('#usageFilterDialog')?.close();
+  usageUnbindDialogViewport();
+  void loadUsageStats();
+}
+
+export function openUsagePrefsDialog() {
+  const dlg = $('#usagePrefsDialog');
+  if (!dlg) return;
+  const range = $('#usagePrefsRange');
+  const gran = $('#usagePrefsGran');
+  const chart = $('#usagePrefsChart');
+  const metric = $('#usagePrefsMetric');
+  if (range) range.value = usagePrefs.range === 'custom' ? USAGE_PREF_DEFAULTS.range : usagePrefs.range;
+  if (gran) gran.value = usagePrefs.gran;
+  if (chart) chart.value = usagePrefs.chart;
+  if (metric) metric.value = usagePrefs.metric;
+  dlg.showModal();
+  usageBindDialogViewport(true);
+  usageSyncDialogBounds();
+}
+
+// 偏好保存：与「侧栏分组与排序」同款——POST /api/settings 的 usage_dash 键，
+// 服务端白名单校验（config.py），成功后回写 bootstrap 镜像。失败提示不回滚
+// （偏好不是数据，重进设置页服务端值会校正回来）。
+export async function saveUsagePrefs() {
+  const next = {
+    range: $('#usagePrefsRange')?.value || usagePrefs.range,
+    gran: $('#usagePrefsGran')?.value || usagePrefs.gran,
+    chart: $('#usagePrefsChart')?.value || usagePrefs.chart,
+    metric: $('#usagePrefsMetric')?.value || usagePrefs.metric,
+  };
+  const normalized = normalizeUsagePrefs(next);
+  const btn = $('#usagePrefsSave');
+  const prev = btn?.textContent;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '保存中…';
+  }
+  try {
+    const result = await api('/api/settings', { method: 'POST', body: { usage_dash: normalized } });
+    usagePrefs = normalizeUsagePrefs(result?.settings?.usage_dash || normalized);
+    if (state.bootstrap?.settings) state.bootstrap.settings.usage_dash = usagePrefs;
+    if (usagePrefs.range !== 'custom') usageCustom = null;
+    $('#usagePrefsDialog')?.close();
+    usageUnbindDialogViewport();
+    usagePrefsSynced = true;
+    usageRenderAll();
+    void loadUsageStats();
+    toast('用量默认设置已保存');
+  } catch (error) {
+    toast(`保存偏好失败：${error.message}`);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = prev || '保存偏好设置';
+    }
+  }
+}
+
+export function usageUnbindDialogViewport() {
+  usageBindDialogViewport(false);
+  const dlg = $('#usageFilterDialog');
+  const prefs = $('#usagePrefsDialog');
+  dlg?.style.removeProperty('max-height');
+  prefs?.style.removeProperty('max-height');
+}
+
+// 筛选弹窗内点快选 chip（只改高亮；应用时才生效）。
+export function selectUsageFilterRange(range) {
+  const chips = $('#usageFilterChips');
+  if (!chips) return;
+  for (const chip of chips.querySelectorAll('[data-usage-filter-range]')) {
+    chip.classList.toggle('active', chip.dataset.usageFilterRange === range);
+  }
+  // 选了快选：清掉自定义输入，避免「看起来选了 7 天其实还是自定义」的歧义。
+  if (USAGE_PREF_KEYS.range.includes(range)) {
+    const startD = $('#usageFilterStartD');
+    const endD = $('#usageFilterEndD');
+    if (startD) startD.value = '';
+    if (endD) endD.value = '';
   }
 }
 

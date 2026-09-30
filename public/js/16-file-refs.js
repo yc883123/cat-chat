@@ -207,7 +207,9 @@ export function hideFilePopup() {
   filePopupState.loading = false;
   filePopupState.selectedIndex = 0;
   const popup = $('#filePopup');
-  if (popup) popup.hidden = true;
+  // 连同 positionComposerPopup 写入的内联 maxHeight 一起清掉，别把上一轮键盘态的
+  // 高度约束带进下一轮打开（visualViewport 感知修复，2026-09-30）。
+  if (popup) { popup.hidden = true; popup.style.removeProperty('max-height'); }
 }
 
 export function positionFilePopup() {

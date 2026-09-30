@@ -45,6 +45,10 @@ FORM_FIELD_IDS = (
     "providerTemperature",
     "providerReasoningEffort",
     "providerSupportsImages",
+    "providerPriceInput",
+    "providerPriceCachedInput",
+    "providerPriceOutput",
+    "providerPriceCurrency",
     "providerError",
     "testProvider",
     "unloadProviderModel",
@@ -63,6 +67,7 @@ FORM_LABELS = (
     "温度（可选）",
     "思维强度",
     "视觉输入能力",
+    "费用单价（每百万 tokens，可选）",
 )
 
 

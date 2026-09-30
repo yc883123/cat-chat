@@ -285,6 +285,16 @@ class JobRegistry:
             job_id, status=status, error=error, result=result or {}, detail=detail, finished=True
         )
         self._emit(job_id, {"type": "job_finished", "status": status, "error": error, "result": result or {}})
+        # 用量台账：subagent 的 usage 事件已由 _subagent_event_sink 原样落 run_events
+        # （SkillAgent 每请求重发累计汇总），在统一收口处补记一条。其它 kind
+        # （shell/check/http_poll/comfyui）不产生模型调用，无账可记。
+        if str((current or {}).get("kind") or "") == "subagent":
+            recorder = getattr(self.app, "record_run_usage", None)
+            if recorder is not None:
+                try:
+                    recorder(job_id)
+                except Exception:
+                    logger.exception("用量台账记录失败：job=%s", job_id)
         # 异步产物写回：Job 在工具返回之后才产出的媒体挂回发起它的助手消息
         # （comfyui_batch wait=false / run_in_background 的主路径；写回失败不影响终态）。
         self._write_back_media(job_id)

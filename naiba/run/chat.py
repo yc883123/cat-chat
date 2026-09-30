@@ -30,6 +30,7 @@ from naiba.core.exceptions import ActiveRunError
 from naiba.core.file_changes import file_changes_from_runs
 from naiba.core.history import build_model_history
 from naiba.core.tool_results import display_tool_run
+from naiba.core.usage_stats import cost_for
 from naiba.run.stream import _RunEventSink, _safe_activity
 from naiba.storage.media import missing_cache_attachment
 
@@ -496,6 +497,12 @@ class ConversationRunMixin:
         search_sources: list[dict[str, str]] = []
         vision_trace: dict[str, Any] = {"requests": 0, "cache_hit": False}
         chat_diagnostics: dict[str, Any] = {}
+        # 用量台账的尽力关联消息 id（done/取消/失败三条路径各自的落库消息）。
+        usage_message_id = ""
+        # 当前轮模型的三档单价（profile 在 try 内解析，这里先占位）：
+        # usage 事件只在 agent 循环里产生（此时 profile 必已解析），但静态闭包
+        # 引用 try 内局部变量不可靠，改用这个占位变量传递。
+        usage_pricing: dict[str, Any] | None = None
 
         def event(payload: dict[str, Any]) -> None:
             nonlocal skills
@@ -512,11 +519,15 @@ class ConversationRunMixin:
             if payload.get("type") == "usage" and isinstance(payload.get("usage"), dict):
                 # 流式期间的"本轮已耗时"由 run 线程计时注入（elapsed_ms）：
                 # 终态由 metadata.usage.performance.total_ms 提供汇总值，两者互斥使用。
+                # 实时费用：按当前轮 profile.pricing 现算（末次请求口径，与统计页的
+                # Σ 口径不同）；未定价时不含 cost 键，前端据实不展示。
+                live_cost = cost_for(payload["usage"], usage_pricing) if usage_pricing else None
                 payload = {
                     **payload,
                     "usage": {
                         **payload["usage"],
                         "elapsed_ms": round((time.perf_counter() - run_started) * 1000, 1),
+                        **({"cost": live_cost} if live_cost else {}),
                     },
                 }
             sink(payload)
@@ -550,6 +561,7 @@ class ConversationRunMixin:
             # 顺序错误会导致 prepare_history 因 profile 未定义而整体被跳过（视觉失效）。
             model_name = str(snapshot.get("model_name") or "").strip()
             profile = _profile_with_model_override(self.app.config, model_key, model_name)
+            usage_pricing = profile.get("pricing") if isinstance(profile.get("pricing"), dict) else None
             conversation_effort = str(snapshot.get("reasoning_effort") or "").strip().lower()
             if conversation_effort in {"off", "low", "medium", "high"}:
                 # 会话显式指定了思维强度，覆盖 provider 设置。
@@ -775,6 +787,11 @@ class ConversationRunMixin:
                     else ("local_default" if is_local_profile else "unknown")
                 )
                 usage["model_key"] = model_key
+                # 终态费用与实时事件同口径（末次请求 + 当前单价）：统计页的跨会话 Σ
+                # 费用走 usage_records 台账，这里只是单条回复上的展示值。
+                usage_cost = cost_for(usage, usage_pricing) if usage_pricing else None
+                if usage_cost:
+                    usage["cost"] = usage_cost
                 usage["lanes"] = {
                     "vision": dict(vision_trace),
                     "chat": dict(chat_diagnostics),
@@ -883,6 +900,7 @@ class ConversationRunMixin:
                         or current.get("status") in {"cancelling", "cancelled"}):
                     raise TaskCancelled("任务已取消")
                 saved = self.app.storage.add_message(conversation_id, "assistant", response, metadata)
+                usage_message_id = str(saved.get("id") or "")
                 self.app.storage.update_background_task(
                     run_id,
                     status="failed" if sink.failure_message else "completed",
@@ -927,6 +945,8 @@ class ConversationRunMixin:
                 run_id, conversation_id, skills,
                 trace=(run_context or {}).get("trace_messages") or [],
             )
+            if aborted_message:
+                usage_message_id = str(aborted_message.get("id") or "")
             self.app.storage.update_background_task(
                 run_id, status="cancelled", detail={"message": "任务已取消"}, finished=True
             )
@@ -950,6 +970,8 @@ class ConversationRunMixin:
                 trace=(run_context or {}).get("trace_messages") or [],
                 error=error_message,
             )
+            if partial_message:
+                usage_message_id = str(partial_message.get("id") or "")
             try:
                 self.app.storage.add_message(
                     conversation_id,
@@ -990,6 +1012,10 @@ class ConversationRunMixin:
                 self.app.storage.compress_run_events(run_id)
             except Exception:
                 traceback.print_exc()
+            # 用量台账：done/cancelled/failed 三条路径都在这里收口（事件均已 flush，
+            # compress 只合流 reasoning_delta、不动 usage 事件）。从最后一条 usage
+            # 事件取累计汇总，失败不阻断收尾（record_run_usage 自带容错）。
+            self.app.record_run_usage(run_id, message_id=usage_message_id)
             self._finish(run_id)
 
     def _run_plan(self, run_id: str, cancel_event: threading.Event) -> None:
@@ -1046,6 +1072,8 @@ class ConversationRunMixin:
                 self.app.storage.compress_run_events(run_id)
             except Exception:
                 traceback.print_exc()
+            # 用量台账：计划执行与主对话同一口径（最后一条 usage 事件 = 累计汇总）。
+            self.app.record_run_usage(run_id)
             self._finish(run_id)
 
     def _all_run_events(self, run_id: str) -> list[dict[str, Any]]:
@@ -1303,6 +1331,9 @@ class ConversationRunMixin:
                 )
                 if message:
                     recovered += 1
+                    # 用量台账补记：中断 run 的 usage 事件都还在 run_events 里，
+                    # 重建消息时一并落账（幂等；失败不挡启动恢复）。
+                    self.app.record_run_usage(run_id, message_id=str(message.get("id") or ""))
             except Exception:  # noqa: BLE001 - 恢复失败不能挡住启动
                 traceback.print_exc()
         return recovered

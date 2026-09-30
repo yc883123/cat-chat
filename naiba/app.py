@@ -43,6 +43,7 @@ from naiba.core.conv_files import (
     folder_index,
 )
 from naiba.core.paths import normalized_path_key, path_within
+from naiba.core.usage_stats import cost_for, tokens_from_summary
 from naiba.jobs import JobRegistry
 from naiba.llm.provider_presets import apply_preset_values, provider_preset_key_url, provider_presets_payload
 from naiba.llm.runtime import ModelRuntime
@@ -1628,6 +1629,285 @@ class NaibaChatApp:
         with self._cache_clean_state_lock:
             reports = {key: dict(value) for key, value in self._cache_clean_reports.items()}
         return {**self._cache_bytes_payload(), "cache_clean": reports}
+
+    def record_run_usage(
+        self,
+        run_id: str,
+        usage: dict[str, Any] | None = None,
+        message_id: str = "",
+        model_key: str = "",
+        model_name: str = "",
+    ) -> None:
+        """把一次 run/job 的用量汇总落进 usage_records 台账（``record_usage``）。
+
+        ``usage`` 未传时读 ``run_events`` 里**最后一条** usage 事件——SkillAgent 每次
+        请求都会重发"到当前为止"的累计汇总（含全量 ``requests_detail``），所以最后
+        一条就是最完整的口径；cancel/failed/中断恢复路径的事件同样已 flush 落库。
+
+        维度字段：conversation_id/kind/agent_id 从 background_tasks 行取；model_key/
+        model_name 优先用调用方传值（subagent 有现成 profile），否则从 run 快照取
+        （chat/plan_execute 的快照里有）。**任何异常只记日志、不阻断收尾**——用量
+        记录是统计旁路，和 `_write_back_media` 同容错语义，绝不影响回答本身。
+        """
+        try:
+            summary = usage if isinstance(usage, dict) else None
+            if summary is None:
+                for payload in reversed(self.storage.list_run_events(run_id)):
+                    if str(payload.get("type") or "") == "usage" and isinstance(payload.get("usage"), dict):
+                        summary = payload["usage"]
+                        break
+            if not isinstance(summary, dict) or not summary:
+                return
+            tokens = tokens_from_summary(summary)
+            if not (tokens.get("requests") or tokens.get("input_tokens") or tokens.get("output_tokens")):
+                # 一次请求都没发出去（首请求前即取消/失败）：不落空行。
+                return
+            key = str(model_key or "").strip()
+            name = str(model_name or "").strip()
+            snapshot: dict[str, Any] = {}
+            if not key:
+                try:
+                    snapshot = self.storage.get_run_snapshot(run_id) or {}
+                except Exception:  # noqa: BLE001 - 快照读不到时维度字段留空即可
+                    snapshot = {}
+                key = str(snapshot.get("model_key") or "")
+                if not key and snapshot.get("provider_id"):
+                    key = f"online:{snapshot['provider_id']}"
+                if not name:
+                    name = str(snapshot.get("model_name") or "").strip()
+            task = self.storage.get_background_task(run_id) or {}
+            if not key:
+                # 会话回退：subagent 等 Job 的快照是 job_spec（没有 model 字段），
+                # 它们用的就是会话当前模型——从会话行取（chat run 在上一步已命中快照）。
+                try:
+                    conversation = self.storage.get_conversation(str(task.get("conversation_id") or "")) or {}
+                except Exception:  # noqa: BLE001 - 同上，维度字段拿不到就留空
+                    conversation = {}
+                key = str(conversation.get("model_key") or "")
+                if not key and conversation.get("provider_id"):
+                    key = f"online:{conversation['provider_id']}"
+                if not name:
+                    name = str(conversation.get("model_name") or "").strip()
+            record: dict[str, Any] = {
+                "run_id": run_id,
+                "conversation_id": str(task.get("conversation_id") or ""),
+                "message_id": str(message_id or ""),
+                "kind": str(task.get("kind") or "chat"),
+                "model_key": key,
+                "model_name": name,
+                "agent_id": str(task.get("agent_id") or ""),
+                **tokens,
+                "created_at": int(time.time() * 1000),
+            }
+            self.storage.record_usage(record)
+        except Exception:  # noqa: BLE001 - 用量记录失败绝不能打断 run 收尾
+            logger.exception("用量记录失败（不阻断收尾）：run=%s", run_id)
+
+    def _provider_pricing_for_key(self, model_key: str) -> dict[str, Any] | None:
+        """按 model_key 找供应商的三档单价（只取 pricing，绝不外泄 api_key 等私有字段）。"""
+        kind, _, provider_id = str(model_key or "").partition(":")
+        if not provider_id:
+            return None
+        for provider in self.config.public_providers():
+            if str(provider.get("id") or "") == provider_id and (str(provider.get("kind") or "") or "online") == kind:
+                pricing = provider.get("pricing")
+                return pricing if isinstance(pricing, dict) else None
+        return None
+
+    def _provider_name_for_key(self, model_key: str) -> str:
+        """model_key（kind:provider_id）→ 供应商显示名；查不到返回空串（孤儿，前端归「已删除的 API」）。"""
+        kind, _, provider_id = str(model_key or "").partition(":")
+        if not provider_id:
+            return ""
+        for provider in self.config.public_providers():
+            if str(provider.get("id") or "") == provider_id and (str(provider.get("kind") or "") or "online") == kind:
+                return str(provider.get("name") or "")
+        return ""
+
+    @staticmethod
+    def _usage_cost_rows(rows: list[dict[str, Any]], pricing_of: Any) -> tuple[list[dict[str, Any]], int]:
+        """给一组用量行（by_model / by_day 粒度）算费用与未定价轮次。
+
+        返回 (costs 多币种合计, unpriced_turns)。多币种**不混加**：同一数组里
+        按币种分行；未定价（供应商没设单价）的轮次如实计数，前端提示
+        「N 轮未设单价，未计入费用」。显式把单价设为 0 视为已定价（免费）。
+        """
+        costs: dict[str, float] = {}
+        unpriced_turns = 0
+        for row in rows:
+            cost = cost_for(row, pricing_of(str(row.get("model_key") or "")))
+            if cost:
+                costs[cost["currency"]] = costs.get(cost["currency"], 0.0) + float(cost["amount"])
+            else:
+                unpriced_turns += max(0, int(row.get("turns") or 0))
+        return (
+            [{"currency": name, "amount": round(amount, 6)} for name, amount in sorted(costs.items())],
+            unpriced_turns,
+        )
+
+    def _fold_usage_bucket_rows(
+        self, rows: list[dict[str, Any]], pricing_of
+    ) -> list[dict[str, Any]]:
+        """把「桶×模型」粒度行折叠成桶级单行（计价后再折，多币种不混加）。
+
+        目前只服务 by_day（天级明细表）。桶键统一放在 ``day`` 字段。费用按
+        当前单价逐行计算后按币种累加；未定价模型只计用量不计费。
+        """
+        folded: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            key = str(row.get("day") or "")
+            bucket = folded.setdefault(key, {
+                "day": key, "turns": 0, "requests": 0, "input_tokens": 0, "cached_tokens": 0,
+                "output_tokens": 0, "total_tokens": 0, "uncached_tokens": 0, "costs": {},
+            })
+            for name in ("turns", "requests", "input_tokens", "cached_tokens", "output_tokens", "total_tokens", "uncached_tokens"):
+                bucket[name] += max(0, int(row.get(name) or 0))
+            cost = cost_for(row, pricing_of(str(row.get("model_key") or "")))
+            if cost:
+                bucket["costs"][cost["currency"]] = bucket["costs"].get(cost["currency"], 0.0) + float(cost["amount"])
+        folded_rows = []
+        for key in sorted(folded, reverse=True):
+            bucket = folded[key]
+            bucket["costs"] = [
+                {"currency": name, "amount": round(amount, 6)}
+                for name, amount in sorted(bucket["costs"].items())
+            ]
+            folded_rows.append(bucket)
+        return folded_rows
+
+    def api_usage_stats(self, params: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """用量与费用统计（只读）。``days`` 默认 30、夹紧 [1,365]——它是 UI 的
+        展示意图，越界夹紧不报错（同搜索 limit 口径）；``model_key`` 可选，给了
+        就只统计该模型。``bucket`` 是分桶粒度（``day`` 默认 | ``hour``，非法值
+        显式报错）；``since``/``until``（毫秒）都给时覆盖 days 窗口（自定义范围），
+        必须成对出现且 since < until。响应恒带 ``by_model``（一行一模型）、
+        ``by_provider``（一行一 API 供应商，前端切换视图共用一次请求）与
+        ``by_bucket``（**桶×模型**行，逐行带 cost/priced/provider_name——前端
+        分析视图按维度自行拆系列；``by_day`` 恒为折叠后的天级单行、保持旧版
+        兼容）。费用恒按**当前单价**重算（不落价格快照，§五.12）。
+        """
+        raw_days = _query_first(params, "days").strip()
+        try:
+            days = int(raw_days) if raw_days else 30
+        except ValueError:
+            return {"error": "days 必须是整数"}, HTTPStatus.BAD_REQUEST
+        days = max(1, min(days, 365))
+        bucket = _query_first(params, "bucket").strip().lower() or "day"
+        if bucket not in {"day", "hour"}:
+            return {"error": "bucket 必须是 day 或 hour"}, HTTPStatus.BAD_REQUEST
+        raw_since = _query_first(params, "since").strip()
+        raw_until = _query_first(params, "until").strip()
+        custom_window: tuple[int, int] | None = None
+        if raw_since or raw_until:
+            try:
+                since_val = int(raw_since) if raw_since else 0
+                until_val = int(raw_until) if raw_until else 0
+            except ValueError:
+                return {"error": "since/until 必须是毫秒整数"}, HTTPStatus.BAD_REQUEST
+            if since_val <= 0 or until_val <= 0 or since_val >= until_val:
+                return {"error": "since/until 必须成对出现且 since < until"}, HTTPStatus.BAD_REQUEST
+            custom_window = (since_val, until_val)
+        model_key = _query_first(params, "model_key").strip()
+        now_ms = int(time.time() * 1000)
+        if custom_window is not None:
+            since, until = custom_window
+        else:
+            since = now_ms - days * 86_400_000
+            until = 0
+        stats = self.storage.usage_stats(since, until_ms=until, model_key=model_key, bucket=bucket)
+        pricing_of = self._provider_pricing_for_key
+        totals_costs, totals_unpriced = self._usage_cost_rows(stats["by_model"], pricing_of)
+        by_model = []
+        for row in stats["by_model"]:
+            pricing = pricing_of(str(row.get("model_key") or ""))
+            by_model.append(
+                {
+                    **row,
+                    "cost": cost_for(row, pricing),
+                    "priced": isinstance(pricing, dict) and any(
+                        field in pricing for field in ("input_per_million", "cached_input_per_million", "output_per_million")
+                    ),
+                }
+            )
+        # by_day / by_bucket 都是「桶×模型」粒度：逐行计价后折叠成桶级单行
+        # （多币种不混加）。折叠是同一份逻辑，两个粒度共用。
+        by_day = self._fold_usage_bucket_rows(stats["by_day"], pricing_of)
+        # by_bucket 例外：**不折叠**，保持「桶×模型」行透传（逐行按当前单价算
+        # cost/priced、补 provider_name）。分析视图的前端要按「模型 | 供应商」
+        # 两个维度自行拆系列，折叠成桶级单行就拆不动了；天级明细表继续用折叠
+        # 后的 by_day。行数 = 有数据的桶×模型组合，小时粒度下通常远小于满矩阵。
+        by_bucket = []
+        for row in stats["by_bucket"]:
+            key = str(row.get("model_key") or "")
+            pricing = pricing_of(key)
+            by_bucket.append(
+                {
+                    **row,
+                    "cost": cost_for(row, pricing),
+                    "priced": isinstance(pricing, dict) and any(
+                        field in pricing for field in ("input_per_million", "cached_input_per_million", "output_per_million")
+                    ),
+                    "provider_name": self._provider_name_for_key(key) or "已删除的 API",
+                }
+            )
+        # by_provider：按「API 供应商」聚合（前端「模型 | API 供应商」切换的数据源，
+        # 恒带、切换不二次请求）。model_key 的 kind:provider_id 前缀即供应商身份；
+        # 同一供应商的多条模型行合并（费用按币种累加、不混加），供应商已删/改 id 的
+        # 孤儿行归入「已删除的 API」，台账不丢数。
+        by_provider_rows: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in by_model:
+            key = str(row.get("model_key") or "")
+            kind, _, provider_id = key.partition(":")
+            ident = (kind or "online", provider_id or key or "?")
+            prow = by_provider_rows.setdefault(ident, {
+                "provider_id": provider_id or key,
+                "provider_name": self._provider_name_for_key(key) or "已删除的 API",
+                "turns": 0, "requests": 0, "input_tokens": 0, "cached_tokens": 0,
+                "output_tokens": 0, "total_tokens": 0, "uncached_tokens": 0,
+                "costs": {}, "priced": False,
+            })
+            for name in ("turns", "requests", "input_tokens", "cached_tokens", "output_tokens", "total_tokens", "uncached_tokens"):
+                prow[name] += max(0, int(row.get(name) or 0))
+            cost = row.get("cost")
+            if isinstance(cost, dict):
+                prow["costs"][cost["currency"]] = prow["costs"].get(cost["currency"], 0.0) + float(cost["amount"])
+            if row.get("priced"):
+                prow["priced"] = True
+        by_provider = []
+        for ident in sorted(by_provider_rows, key=lambda k: -int(by_provider_rows[k]["total_tokens"])):
+            prow = by_provider_rows[ident]
+            prow["costs"] = [
+                {"currency": name, "amount": round(amount, 6)}
+                for name, amount in sorted(prow["costs"].items())
+            ]
+            by_provider.append(prow)
+        local = time.localtime()
+        today_start = int(time.mktime((local.tm_year, local.tm_mon, local.tm_mday, 0, 0, 0, 0, 0, -1)) * 1000)
+        today_stats = self.storage.usage_stats(today_start, model_key=model_key)
+        today_costs, today_unpriced = self._usage_cost_rows(today_stats["by_model"], pricing_of)
+        return self._reply(
+            {
+                "days": days,
+                "since": since,
+                "until": until,
+                "bucket": bucket,
+                "totals": {
+                    **stats["totals"],
+                    "costs": totals_costs,
+                    "unpriced_turns": totals_unpriced,
+                },
+                "today": {
+                    **today_stats["totals"],
+                    "costs": today_costs,
+                    "unpriced_turns": today_unpriced,
+                },
+                "by_model": by_model,
+                "by_provider": by_provider,
+                "by_day": by_day,
+                "by_bucket": by_bucket,
+                "first_record_at": stats["first_record_at"],
+            }
+        )
 
     def _on_generated_cached(self) -> None:
         """产物落进 data/generated 后的回调（MediaCollector 写盘成功后调用）。

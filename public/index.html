@@ -647,6 +647,7 @@
           <button data-settings-tab="connections" data-settings-search="MCP 手机 口令"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 14.5 14.5 9.5"></path><path d="M11 6.5 12.8 4.7a4.5 4.5 0 0 1 6.5 6.5L17.5 13"></path><path d="M13 17.5 11.2 19.3a4.5 4.5 0 0 1-6.5-6.5L6.5 11"></path></svg>连接状态</button>
         </div>
         <div class="settings-nav-group"><span class="settings-nav-heading">数据与隐私</span>
+          <button data-settings-tab="usage" data-settings-search="用量 token 费用 统计 价格 单价"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"></path></svg>用量统计</button>
           <button data-settings-tab="datamigration" data-settings-search="数据库 备份 迁移"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7.5" ry="3"></ellipse><path d="M4.5 6v12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6"></path><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"></path></svg>数据与迁移</button>
         </div>
         <div class="settings-nav-group"><span class="settings-nav-heading">关于</span>
@@ -925,6 +926,79 @@
           </div>
           <p class="hint" id="migrationMessage"></p>
         </section>
+        <section data-settings-panel="usage" hidden>
+          <div class="settings-panel-head"><h3>用量统计</h3><p>Token 消耗与费用的分析视图（Σ 全部模型请求口径，与单条回复的上下文圆环口径不同）。费用按「API 供应商」里设置的三档单价实时计算，改价后历史金额随之重算；多供应商多币种分列合计，不混算。</p></div>
+          <div class="usage-kpis">
+            <div class="usage-kpi"><span class="usage-kpi-label"><i class="usage-kpi-icon" style="background:var(--accent)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"></path></svg></i>总调用</span><b class="usage-kpi-value" id="usageKpiCalls">—</b><small class="usage-kpi-sub" id="usageKpiCallsSub">—</small></div>
+            <div class="usage-kpi"><span class="usage-kpi-label"><i class="usage-kpi-icon" style="background:var(--warning)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v10M9.5 9.5c0-1 1-1.8 2.5-1.8s2.5.7 2.5 1.8-1 1.6-2.5 2c-1.5.4-2.5 1-2.5 2s1 1.8 2.5 1.8 2.5-.8 2.5-1.8"></path></svg></i>总耗费</span><b class="usage-kpi-value" id="usageKpiCost">—</b><small class="usage-kpi-sub" id="usageKpiCostSub">—</small></div>
+            <div class="usage-kpi"><span class="usage-kpi-label"><i class="usage-kpi-icon" style="background:#3E8FE0"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="8" ry="3"></ellipse><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"></path></svg></i>总 TOKEN</span><b class="usage-kpi-value" id="usageKpiTokens">—</b><small class="usage-kpi-sub" id="usageKpiTokensSub">—</small></div>
+            <div class="usage-kpi"><span class="usage-kpi-label"><i class="usage-kpi-icon" style="background:var(--success)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18a8 8 0 0 1 16 0"></path><path d="M12 18l4-6"></path></svg></i>平均 RPM</span><b class="usage-kpi-value" id="usageKpiRpm">—</b><small class="usage-kpi-sub">次 / 分钟</small></div>
+            <div class="usage-kpi"><span class="usage-kpi-label"><i class="usage-kpi-icon" style="background:#DC4A8C"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h6l-1 8 9-12h-6l1-8z"></path></svg></i>平均 TPM</span><b class="usage-kpi-value" id="usageKpiTpm">—</b><small class="usage-kpi-sub">千 token / 分钟</small></div>
+            <div class="usage-kpi"><span class="usage-kpi-label"><i class="usage-kpi-icon" style="background:#5AA66F"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 4v5c0 4.4-3 8-7 9-4-1-7-4.6-7-9V7l7-4z"></path><path d="M9 12l2 2 4-4"></path></svg></i>缓存命中率</span><b class="usage-kpi-value" id="usageKpiCache">—</b><small class="usage-kpi-sub" id="usageKpiCacheSub">—</small></div>
+          </div>
+          <p class="hint usage-unpriced" id="usageUnpricedHint" hidden></p>
+          <div class="usage-toolbar">
+            <div class="usage-chips" id="usageRangeChips" role="group" aria-label="时间范围">
+              <button type="button" class="usage-chip" data-usage-range="today">今天</button>
+              <button type="button" class="usage-chip active" data-usage-range="1">1 天</button>
+              <button type="button" class="usage-chip" data-usage-range="7">7 天</button>
+              <button type="button" class="usage-chip" data-usage-range="14">14 天</button>
+              <button type="button" class="usage-chip" data-usage-range="29">29 天</button>
+              <button type="button" class="usage-chip" data-usage-range="custom" id="usageRangeCustom">自定义</button>
+            </div>
+            <span class="usage-tb-label">维度</span>
+            <div class="usage-seg" id="usageDimSeg" role="group" aria-label="统计划分维度">
+              <button type="button" data-usage-dim="model" class="active">模型</button>
+              <button type="button" data-usage-dim="provider">API 供应商</button>
+            </div>
+            <span class="usage-tb-label">粒度</span>
+            <select class="usage-sel" id="usageGranSel" aria-label="时间粒度">
+              <option value="hour" selected>小时</option>
+              <option value="day">天</option>
+            </select>
+            <span class="usage-tb-label">分布图</span>
+            <div class="usage-seg" id="usageChartSeg" role="group" aria-label="分布图类型">
+              <button type="button" data-usage-chart="bar" class="active">柱状图</button>
+              <button type="button" data-usage-chart="area">面积图</button>
+            </div>
+            <span class="usage-toolbar-actions">
+              <button type="button" class="control-button" id="usageFilterOpen">筛选</button>
+              <button type="button" class="control-button" id="usagePrefsOpen">偏好设置</button>
+            </span>
+          </div>
+          <div class="settings-card usage-chart-card">
+            <div class="usage-chart-head"><h4>消耗分布</h4><span class="usage-chart-sum" id="usageDistSum">—</span><div class="usage-seg usage-metric-seg" id="usageMetricSeg" role="group" aria-label="消耗指标"><button type="button" data-usage-metric="cost" class="active">花费</button><button type="button" data-usage-metric="tokens">Token</button></div></div>
+            <div class="usage-legend" id="usageDistLegend"></div>
+            <div class="usage-svg-box" id="usageDistBox"></div>
+          </div>
+          <div class="settings-card usage-chart-card">
+            <div class="usage-chart-head"><h4>调用趋势</h4><span class="usage-chart-sum" id="usageTrendSum">—</span></div>
+            <div class="usage-legend" id="usageTrendLegend"></div>
+            <div class="usage-svg-box" id="usageTrendBox"></div>
+          </div>
+          <div class="settings-card usage-chart-card">
+            <div class="usage-chart-head"><h4>API 供应商对比</h4><span class="usage-chart-sum">多供应商各自计价、按币种分开合计，不混算</span></div>
+            <div class="usage-svg-box" id="usageProvBox"></div>
+          </div>
+          <div class="settings-card usage-chart-card">
+            <div class="usage-chart-head"><h4>缓存命中率</h4><span class="usage-chart-sum">cached / input，按当前窗口与维度聚合</span></div>
+            <div class="usage-svg-box" id="usageCacheBox"></div>
+          </div>
+          <div class="settings-card usage-chart-card">
+            <div class="usage-chart-head"><h4>分流</h4><span class="usage-chart-sum">API 供应商 → 模型 · 按当前窗口 Token 量</span></div>
+            <div class="usage-svg-box" id="usageSankeyBox"></div>
+          </div>
+          <div class="settings-card">
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="3.5" width="18" height="7" rx="2.5"></rect><rect x="3" y="13.5" width="18" height="7" rx="2.5"></rect><path d="M7 7h.01M7 17h.01"></path></svg></span><div><h4 id="usageDetailTitle">按模型明细</h4><p id="usageDetailDesc">当前时间窗内每个模型的消耗与费用。</p></div></div>
+            <div class="usage-table-wrap">
+              <table class="usage-table">
+                <thead><tr id="usageDetailHead"></tr></thead>
+                <tbody id="usageDetailBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <p class="hint">没有数据？在「API 供应商」里加好模型并开始对话即可。单价在「API 供应商 → 编辑 → 费用单价」里设置（留空不计费）；视觉车道的用量暂不计入。</p>
+        </section>
         <section data-settings-panel="updates" hidden>
           <div class="settings-panel-head"><h3>软件更新</h3><p>点「检查更新」查询新版本，手动选择版本后点击「立即更新」；不会自动安装。</p></div>
           <div class="update-status">
@@ -1039,6 +1113,15 @@
             <option value="false">纯文本</option>
           </select>
           <small class="hint" id="providerVisionHint">自动检测会优先读取运行端能力；上传图片时才会执行最小图片探针。</small>
+        </label>
+        <label class="provider-field" id="providerPricingField">费用单价（每百万 tokens，可选）
+          <span class="provider-pricing-grid">
+            <input id="providerPriceInput" type="number" min="0" max="1000000" step="any" placeholder="输入（未命中）单价">
+            <input id="providerPriceCachedInput" type="number" min="0" max="1000000" step="any" placeholder="缓存命中单价">
+            <input id="providerPriceOutput" type="number" min="0" max="1000000" step="any" placeholder="输出单价">
+            <input id="providerPriceCurrency" type="text" maxlength="8" placeholder="币种（如 ¥ / $）" aria-label="币种符号">
+          </span>
+          <small class="hint">按「未命中输入 / 缓存命中输入 / 输出」三档计价，留空的档位按 0 计；三档全空 = 未定价，不计入费用。本地模型通常留空。</small>
         </label>
       </div>
       <div class="provider-form-footer">
@@ -1300,6 +1383,90 @@
         <button class="control-button" type="button" id="folderAccessDeny">不允许</button>
         <button class="primary-button" type="button" id="folderAccessAllow">允许并读取</button>
       </div>
+    </div>
+  </dialog>
+
+  <!-- 用量分析：筛选弹窗（时间范围 + 自定义起止 + 粒度）。原生 <dialog> 在 top layer，
+       不会被设置弹窗（同为模态 dialog）盖住，也没有侧栏滚动容器裁剪问题（教训 §九.27）。 -->
+  <dialog id="usageFilterDialog" class="panel-dialog usage-dialog">
+    <div class="dialog-toolbar">
+      <div><h2>用量筛选</h2><p>按时间范围与粒度筛选用量视图</p></div>
+      <button class="icon-button" data-close="usageFilterDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+    </div>
+    <div class="usage-dialog-body">
+      <div class="usage-dialog-field">
+        <label>快速范围</label>
+        <div class="usage-chips" id="usageFilterChips" role="group" aria-label="筛选时间范围">
+          <button type="button" class="usage-chip" data-usage-filter-range="today">今天</button>
+          <button type="button" class="usage-chip" data-usage-filter-range="1">1 天</button>
+          <button type="button" class="usage-chip" data-usage-filter-range="7">7 天</button>
+          <button type="button" class="usage-chip" data-usage-filter-range="14">14 天</button>
+          <button type="button" class="usage-chip" data-usage-filter-range="29">29 天</button>
+        </div>
+      </div>
+      <hr class="usage-dialog-divider">
+      <div class="usage-dialog-field">
+        <label>自定义时间范围</label>
+        <div class="usage-dialog-row"><span class="usage-dialog-note">起始时间</span><input type="date" id="usageFilterStartD"><input type="time" id="usageFilterStartT" value="00:00"></div>
+        <div class="usage-dialog-row"><span class="usage-dialog-note">结束时间</span><input type="date" id="usageFilterEndD"><input type="time" id="usageFilterEndT" value="23:59"></div>
+        <p class="usage-dialog-note usage-dialog-hint">填了起止时间就按自定义范围算，快选不再生效。</p>
+      </div>
+      <div class="usage-dialog-field">
+        <label>时间粒度</label>
+        <select class="usage-sel" id="usageFilterGran" aria-label="筛选时间粒度">
+          <option value="hour">小时</option>
+          <option value="day">天</option>
+        </select>
+      </div>
+      <div class="form-actions">
+        <button class="control-button" type="button" id="usageFilterReset">重置</button>
+        <button class="primary-button" type="button" id="usageFilterApply">应用筛选</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 用量分析：偏好弹窗（四项默认值落服务端 settings.usage_dash，与「侧栏分组与排序」同款）。 -->
+  <dialog id="usagePrefsDialog" class="panel-dialog usage-dialog">
+    <div class="dialog-toolbar">
+      <div><h2>用量默认设置</h2><p>设置用量统计的默认时间范围与图表偏好</p></div>
+      <button class="icon-button" data-close="usagePrefsDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+    </div>
+    <div class="usage-dialog-body">
+      <div class="usage-dialog-field">
+        <label for="usagePrefsRange">默认范围</label>
+        <select class="usage-sel" id="usagePrefsRange">
+          <option value="today">今天</option>
+          <option value="1">1 天</option>
+          <option value="7">7 天</option>
+          <option value="14">14 天</option>
+          <option value="29">29 天</option>
+        </select>
+      </div>
+      <div class="usage-dialog-field">
+        <label for="usagePrefsGran">默认时间粒度</label>
+        <select class="usage-sel" id="usagePrefsGran">
+          <option value="hour">小时</option>
+          <option value="day">天</option>
+        </select>
+      </div>
+      <div class="usage-dialog-field">
+        <label for="usagePrefsChart">默认消耗分布图</label>
+        <select class="usage-sel" id="usagePrefsChart">
+          <option value="bar">柱状图</option>
+          <option value="area">面积图</option>
+        </select>
+      </div>
+      <div class="usage-dialog-field">
+        <label for="usagePrefsMetric">默认消耗指标</label>
+        <select class="usage-sel" id="usagePrefsMetric">
+          <option value="cost">花费</option>
+          <option value="tokens">Token</option>
+        </select>
+      </div>
+      <div class="form-actions">
+        <button class="primary-button" type="button" id="usagePrefsSave">保存偏好设置</button>
+      </div>
+      <p class="usage-dialog-note usage-dialog-hint">偏好保存到服务端（沿用「侧栏分组与排序」同款机制），同一实例多端共享、重启不丢。</p>
     </div>
   </dialog>
 

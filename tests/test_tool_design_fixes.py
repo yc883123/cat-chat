@@ -179,7 +179,10 @@ class DeterministicEnumerationTests(unittest.TestCase):
 
 class SearchSemanticsTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp(prefix="naiba-search-"))
+        # **两侧都要 resolve()**（§9.53）：生产侧对工作区路径做过 resolve()，而 CI runner 的
+        # TEMP 是 8.3 短路径（`NAIBA-S~1`），不 resolve 就会「本机全绿、流水线必挂」——
+        # 断言里比较的是工具输出的绝对路径，必须与生产侧同一形态。
+        self.tmp = Path(tempfile.mkdtemp(prefix="naiba-search-")).resolve()
         self.ctx = _ctx(self.tmp)
         self.target = self.tmp / "code.txt"
         self.target.write_text("foo\nFOO\nbar\n", encoding="utf-8")

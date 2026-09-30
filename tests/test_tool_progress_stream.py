@@ -8,10 +8,13 @@
 3. 取消与超时都要在秒级返回。``jobs.py:_run_shell`` 的 ``readline`` 直读写法在子进程
    长时间无输出时会永久阻塞，循环体里的取消/超时检查形同虚设——这两条用例就是钉死
    "不许再退回那种写法"。
+4. ``run_skill_script`` 的 ``args.timeout`` 上界（900→7200）与"这个值确实传到墙钟"。
+   上限只由 ``core.py`` 一处 clamp 决定，注册表里的 ``spec.timeout`` 是给 Web 看的元数据。
 """
 from __future__ import annotations
 
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -161,6 +164,93 @@ class PwshProviderIntegrationTests(unittest.TestCase):
                 any("line" in str(item.get("line") or "") for item in progressed),
                 f"进度行内容异常：{progressed[:3]}",
             )
+
+
+class SkillScriptTimeoutCapTests(unittest.TestCase):
+    """``run_skill_script`` 的超时上限与「这个值真的传到墙钟」。
+
+    两条用例分工不同，缺一即漏：
+
+    * 上限直钉：用 monkeypatch 截住 ``_run_streaming_command``，读它收到的 ``timeout``——
+      真等 900/7200 秒不可行，而只看代码也无法证明 clamp 没被别处二次截断；
+    * 真跑守卫：``sleep 3`` 的脚本在 ``timeout: 2`` 必须被判超时、在 ``timeout: 5``
+      必须正常结束——证明新上限不是"只改了个没人读的数字"，取消/超时通道确实在
+      ``args.timeout`` 这条路上。
+    """
+
+    SLEEP_THREE = (
+        "import time\n"
+        "print('start')\n"
+        "time.sleep(3)\n"
+        "print('end')\n"
+    )
+
+    def _fixture(self, root: Path) -> tuple[core.ToolContext, list[dict]]:
+        script = root / "scripts" / "nap.py"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text(self.SLEEP_THREE, encoding="utf-8")
+        ctx = core.ToolContext(
+            workspace=root,
+            python_executable=sys.executable,
+            command_timeout=120,
+            mcp_registry=None,
+        )
+        return ctx, [{"id": "nap", "name": "nap", "root": str(root)}]
+
+    def test_timeout_is_clamped_to_7200_and_defaults_to_context(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            ctx, skills = self._fixture(root)
+            seen: list[object] = []
+            original = core._run_streaming_command
+
+            def spy(_command, **kwargs):
+                seen.append(kwargs.get("timeout"))
+                return "exit_code=0\n"
+
+            core._run_streaming_command = spy
+            try:
+                core._tool_run_skill_script(
+                    ctx, {"skill": "nap", "script": "scripts/nap.py", "timeout": 99999}, skills,
+                )
+                core._tool_run_skill_script(ctx, {"skill": "nap", "script": "scripts/nap.py"}, skills)
+                core._tool_run_skill_script(
+                    ctx, {"skill": "nap", "script": "scripts/nap.py", "timeout": 0}, skills,
+                )
+            finally:
+                core._run_streaming_command = original
+            self.assertEqual(seen[0], 7200, f"上界应为 7200：{seen}")
+            self.assertEqual(seen[1], 120, "缺省仍取 ctx.command_timeout（120 不抬）")
+            self.assertEqual(seen[2], 1, "下界仍是 1 秒")
+
+    def test_real_run_honours_requested_timeout_below_and_above_sleep(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            ctx, skills = self._fixture(root)
+            started = time.monotonic()
+            short = core._tool_run_skill_script(
+                ctx, {"skill": "nap", "script": "scripts/nap.py", "timeout": 2}, skills, {},
+            )
+            self.assertLess(time.monotonic() - started, 10, f"超时判定过慢：{short[:80]}")
+            self.assertTrue(short.startswith("exit_code=-1"), short[:80])
+            self.assertIn("上限", short)
+            self.assertNotIn("end", short, "超时后仍拿到收尾输出 = 墙钟没真正生效")
+            long_run = core._tool_run_skill_script(
+                ctx, {"skill": "nap", "script": "scripts/nap.py", "timeout": 5}, skills, {},
+            )
+            self.assertTrue(long_run.startswith("exit_code=0"), long_run[:120])
+            self.assertIn("end", long_run)
+
+    def test_registry_metadata_is_not_an_execution_gate(self) -> None:
+        """``spec.timeout=120`` 只是 Web 目录元数据，不得反过来夹住执行。"""
+        from naiba.tools.registry import build_tool_registry
+
+        registry = build_tool_registry()
+        self.assertEqual(registry.timeout("run_skill_script"), 120)
+        self.assertEqual(
+            [row["timeout"] for row in registry.schemas() if row["name"] == "run_skill_script"],
+            [120],
+        )
 
 
 if __name__ == "__main__":

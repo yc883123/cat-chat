@@ -880,7 +880,10 @@ def _tool_run_skill_script(
         command = ["node", str(script), *map(str, raw_args)]
     else:
         command = [str(script), *map(str, raw_args)]
-    timeout = min(max(int(args.get("timeout", ctx.command_timeout)), 1), 900)
+    # 上限 7200 秒（原 900）：技能脚本里的长耗时批处理（出图/批量转码/爬取）实测会被
+    # 15 分钟硬闸门掐断，且 pwsh 的 args.timeout 与这里口径不同步是有意为之——
+    # 真正的墙钟在 _run_streaming_command 的 deadline，取消按钮仍 200ms 内响应。
+    timeout = min(max(int(args.get("timeout", ctx.command_timeout)), 1), 7200)
     # Windows 管道下 Python 子进程默认用 locale 编码（GBK）输出 stdout/stderr，
     # 父进程按 UTF-8 解码会得到乱码（实测：中文路径参数/报错信息变 �）。强制子进程
     # UTF-8 运行时（PYTHONIOENCODING+PYTHONUTF8），输出与 argv 均为 UTF-8，解码匹配。

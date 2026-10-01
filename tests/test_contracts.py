@@ -81,6 +81,58 @@ class EventContractTests(unittest.TestCase):
         self.assertGreater(len(validate_run_context("not-a-dict")), 0)
         self.assertEqual(set(RUN_CONTEXT_KEYS), set(RunContext.__annotations__))
 
+    def test_run_context_bare_keys_are_registered(self):
+        """源码扫描：以 `run_context` / `run_ctx` 名义取用的**字面量键**必须登记进契约（§九.148）。
+
+        `validate_run_context` 只在测试里跑，生产侧的 run_context 就是普通 dict —— 真正防漂移的是
+        这条扫描：写侧 `run_context[k] = …`、读侧 `run_context.get(k)` / `(run_context or {}).get(k)`
+        里出现的每个字面量键都要在 `RUN_CONTEXT_KEYS` 里。它当场逮到两枚裸键——
+        `context_reset`（`tools/providers/core.py` 写，`run/chat.py` 与 `skills/agent.py` 两处读，
+        正是「模型划分割线」这条链）与 `trace_system`（agent 写、run/chat 读，first_turn 落盘用）。
+        口径限定在「变量名为 run_context/run_ctx 的字面量取用」：经 snapshot/ctx/frozen 等别名转发的
+        读法不在判据内（否则会误伤无关 dict），那类键由下面那条点名钉桩兜住。
+        """
+        import ast
+
+        names = {"run_context", "run_ctx"}
+
+        def mentions(node) -> bool:
+            return any(isinstance(sub, ast.Name) and sub.id in names for sub in ast.walk(node))
+
+        found: dict[str, list[str]] = {}
+        for path in sorted((ROOT / "naiba").rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            rel = path.relative_to(ROOT).as_posix()
+            for node in ast.walk(tree):
+                key = None
+                if isinstance(node, ast.Subscript) and mentions(node.value):
+                    if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
+                        key = node.slice.value
+                elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    if node.func.attr in ("get", "pop", "setdefault", "update") and mentions(node.func.value):
+                        if node.args and isinstance(node.args[0], ast.Constant):
+                            if isinstance(node.args[0].value, str):
+                                key = node.args[0].value
+                if key is None:
+                    continue
+                found.setdefault(key, []).append(f"{rel}:{getattr(node, 'lineno', 0)}")
+        # 早停判据：扫到的键太少说明解析口径失效，不能让守门空转。
+        self.assertGreaterEqual(len(found), 15, f"扫描到的 run_context 字面量键过少（{len(found)}），判据失效")
+        escaped = {k: v for k, v in found.items() if k not in set(RUN_CONTEXT_KEYS)}
+        self.assertFalse(
+            escaped,
+            "run_context 裸键未登记进契约：" + "；".join(f"{k} ← {v[0]}" for k, v in sorted(escaped.items())),
+        )
+
+    def test_cross_layer_run_context_keys_are_pinned(self):
+        """两枚曾逃逸的跨层键点名钉桩（别名转发的读法扫描够不着，这里兜住）。"""
+        for key in ("context_reset", "trace_system"):
+            self.assertIn(key, RUN_CONTEXT_KEYS, f"{key} 必须登记进 RUN_CONTEXT_KEYS（§九.148）")
+            self.assertIn(key, RunContext.__annotations__, f"{key} 必须在 RunContext 注解里")
+            self.assertIn(key, default_run_context(), f"{key} 必须在 default_run_context() 里有默认值")
+        self.assertFalse(default_run_context()["context_reset"], "缺省必须是假值：空 dict = 本轮无重置请求")
+        self.assertEqual(default_run_context()["trace_system"], "")
+
     def test_message_order_contract_is_backend_authority(self):
         # 历史消息排序契约：后端唯一决定顺序（(created_at, rowid)），前端按 API
         # 返回数组顺序渲染、不自行排序。存储层 SQL 与契约常量必须一致。

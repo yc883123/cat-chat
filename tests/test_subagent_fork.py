@@ -85,6 +85,10 @@ class _FakeConfig:
     def reasoning_replay_options(self) -> dict:
         return {"reasoning_replay_max_chars": 4000, "reasoning_replay_turn_chars": 16000}
 
+    def image_encode_cache_options(self) -> dict:
+        # 图片编码记忆与思考回放同一纪律：子代理调用点也要传（§九.152）。
+        return {"image_encode_cache_mb": 512}
+
     def profile(self, model_key: str) -> dict:
         return {"id": model_key or "test-model"}
 

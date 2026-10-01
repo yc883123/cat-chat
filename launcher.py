@@ -103,6 +103,144 @@ def _resolve_app_icon():
     return image, None
 
 
+# ---- 剪贴板读取：输入区右键「粘贴」时把图片/文件直接粘进待发送列表 ----
+# 为什么走 Python 桥而不是 `navigator.clipboard.read()`：桌面壳虽然有安全上下文
+# （127.0.0.1），但**读**方向要 clipboard-read 权限，而同一模块的写方向
+# （`copy_image_to_clipboard`）已经实测会被 WebView2 拒绝——桥没有权限与安全上下文要求。
+# 手机经局域网 http:// 打开时既没有桥、也不是安全上下文，所以这是**桌面端能力**，
+# 手机上仍走长按系统菜单那条路（§九.85 的口径不变）。
+CLIPBOARD_IMAGE_MAX_BYTES = 32 * 1024 * 1024
+CLIPBOARD_IMAGE_NAME = "粘贴的图片.png"
+# 剪贴板里"复制的文件"走服务端落盘（见 JsApi.naibaUploadLocalPaths）：上限与 /api/uploads 对齐。
+CLIPBOARD_UPLOAD_MAX_FILES = 20
+CLIPBOARD_UPLOAD_MAX_BYTES = 80 * 1024 * 1024
+def _encode_clipboard_image(data: bytes, *, already_png: bool = False) -> str:
+    """剪贴板里的图片 → PNG base64。超上限**明确报错**，不静默截断/降质。
+
+    **刻意不补 BITMAPFILEHEADER**（2026-10-01 形态矩阵实测，见
+    `tests/test_clipboard_paste.py::ClipboardDibMatrixTests`）：Pillow 本来就能直接读裸
+    CF_DIB（`Image.open` 报 `fmt=DIB`）——40 字节 BI_RGB、V5/V4 头带完整 4 掩码 / 3 掩码 /
+    掩码全 0，裸读全部正常且像素颜色正确；补上文件头**既没修好任何形态、也没弄坏任何形态**
+    （唯一读不动的"V5 + 只给 2 个掩码"，补头同样读不动）。既然是零收益，就别加那段代码；
+    但也别以为它是危险操作——它只是无用。这条注释留在这里，是为了不让下一个人再花一轮
+    重新发现同一件事。
+    """
+    import base64
+    import io
+
+    from PIL import Image
+
+    if already_png:
+        png = data
+    else:
+        buf = io.BytesIO()
+        Image.open(io.BytesIO(data)).convert("RGBA").save(buf, "PNG")
+        png = buf.getvalue()
+    if len(png) > CLIPBOARD_IMAGE_MAX_BYTES:
+        raise ValueError(
+            f"图片过大（超过上限 {CLIPBOARD_IMAGE_MAX_BYTES // (1024 * 1024)}MB）：请改用 Ctrl+V 粘贴"
+        )
+    return base64.b64encode(png).decode("ascii")
+
+
+def _clipboard_read() -> dict:
+    """**唯一的 win32 边界**：把剪贴板读成朴素字典，其余逻辑都是纯函数（便于测试）。
+
+    读失败就抛（由 `clipboard_payload` 统一翻成给用户看的错误），不在这里吞掉。
+    """
+    import win32clipboard
+    import win32con
+
+    opened = False
+    for _ in range(10):
+        try:
+            win32clipboard.OpenClipboard()
+            opened = True
+            break
+        except Exception:
+            time.sleep(0.05)   # 剪贴板常被其它程序短暂占用（与写方向同口径）
+    if not opened:
+        raise RuntimeError("系统剪贴板被其它程序占用")
+    try:
+        result: dict = {"hdrop": [], "dib": None, "png": None, "text": ""}
+        if win32clipboard.IsClipboardFormatAvailable(win32con.CF_HDROP):
+            data = win32clipboard.GetClipboardData(win32con.CF_HDROP)
+            # pywin32 对 CF_HDROP 做了解码：正常是 tuple[str]，单文件时可能是 str。
+            if isinstance(data, str):
+                result["hdrop"] = [data]
+            elif isinstance(data, (list, tuple)):
+                result["hdrop"] = [str(item) for item in data]
+        if win32clipboard.IsClipboardFormatAvailable(win32con.CF_DIB):
+            result["dib"] = win32clipboard.GetClipboardData(win32con.CF_DIB)
+        # 部分程序（新版 Chromium）只放注册格式 "PNG"：作为次要来源。
+        png_format = win32clipboard.RegisterClipboardFormat("PNG")
+        if png_format and win32clipboard.IsClipboardFormatAvailable(png_format):
+            result["png"] = win32clipboard.GetClipboardData(png_format)
+        if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+            result["text"] = str(win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT) or "")
+        return result
+    finally:
+        try:
+            win32clipboard.CloseClipboard()
+        except Exception:
+            pass
+
+
+def clipboard_payload(read=None) -> dict:
+    """剪贴板内容 → 前端可直接消费的**一种**载荷：图片 / 文件 / 文本 / 空。
+
+    优先级 **文件 → 位图 → 文本**，理由：
+    · 复制文件时，磁盘路径才是原始资产（零拷贝过 IPC、任意大小、原名保留，且路径附件
+      是这个应用已支持的一等形态——拖链接、@ 引用、拖文件夹都走它）；
+    · 位图（截图 / 网页里的"复制图片"）没有路径，只能整份搬过 IPC；
+    · 只有文本时**不把文本搬进 IPC**，让前端走既有的 `readText()` 通道（长文不小）。
+    """
+    reader = read or _clipboard_read
+    try:
+        raw = reader()
+    except Exception as exc:  # noqa: BLE001 - 剪贴板是外部资源，失败要如实回给用户
+        print(f"[launcher] 读取系统剪贴板失败：{exc!r}", file=sys.stderr)
+        return {"ok": False, "error": f"无法读取系统剪贴板：{exc}"}
+
+    paths = [str(path) for path in (raw.get("hdrop") or []) if os.path.isfile(str(path))]
+    if paths:
+        sizes: list[int] = []
+        for path in paths:
+            try:
+                sizes.append(os.path.getsize(path))
+            except OSError:
+                sizes.append(0)
+        return {
+            "ok": True,
+            "kind": "files",
+            "paths": paths,
+            "names": [os.path.basename(path) or path for path in paths],
+            "sizes": sizes,
+        }
+
+    image_data = raw.get("dib") or raw.get("png") or b""
+    if image_data:
+        try:
+            encoded = _encode_clipboard_image(image_data, already_png=not raw.get("dib"))
+        except Exception as exc:  # noqa: BLE001 - 解析失败要如实回给用户
+            print(f"[launcher] 剪贴板图片解析失败：{exc!r}", file=sys.stderr)
+            # 坏图不该连累文本粘贴：有文本就退回文本，没有才报错。
+            if str(raw.get("text") or ""):
+                return {"ok": True, "kind": "text"}
+            return {"ok": False, "error": f"剪贴板里的图片无法解析：{exc}"}
+        return {
+            "ok": True,
+            "kind": "image",
+            "mime": "image/png",
+            "base64": encoded,
+            "name": CLIPBOARD_IMAGE_NAME,
+        }
+
+    if str(raw.get("text") or ""):
+        return {"ok": True, "kind": "text"}
+    return {"ok": True, "kind": "empty"}
+
+
 class JsApi:
     """pywebview js_api 桥：供前端调用 Python 完成桌面端能力。
 
@@ -112,6 +250,11 @@ class JsApi:
     前端把图片字节（base64）传进来，用 PIL 归一化成 DIB 后写入剪贴板，任何桌面程序
     （画图/Word/微信等）都能直接粘贴。
     """
+
+    def __init__(self, app=None) -> None:
+        # app = `srv.APP`（装配在 create_window 之前）。剪贴板粘贴的"本地文件 → 上传目录"
+        # 要走 app._upload_spooled（拖入文件用的同一条落库管线），所以要能拿到它。
+        self._app = app
 
     def copy_image_to_clipboard(self, base64_data: str) -> dict:
         import base64
@@ -156,6 +299,83 @@ class JsApi:
             except Exception:
                 pass
         return {"ok": True}
+
+    # ---- 输入区右键「粘贴」：把剪贴板里的图片 / 文件直接粘进待发送列表 ----
+    def naibaClipboardPayload(self) -> dict:
+        """问原生：剪贴板里现在是图片、文件、文本还是空（前端据此决定粘贴行为与菜单文案）。
+
+        · `kind == "image"` → 前端把 base64 转成 File 走既有 `uploadFiles`（有缩略图、进度、取消）；
+        · `kind == "files"` → 前端按 `paths` 生成**路径附件**（零拷贝，与拖链接/@引用同一形态，
+          图片照样出缩略图——`renderPendingFiles` 对带 path 的图片项就会渲染缩略图）；
+        · `kind == "text"`  → 前端走原有 `readText()` 通道（文本不进 IPC）；
+        · `kind == "empty"` → 前端给可行动提示（Ctrl+V / 长按系统菜单）。
+        """
+        return clipboard_payload()
+
+    def naibaUploadLocalPaths(self, paths: list[str]) -> dict:
+        """把剪贴板里**复制来的本地文件**复制进上传目录（与拖入文件同一条落库管线）。
+
+        为什么不复用"路径附件"（零拷贝）：那是我第一版的做法，用户实测当场否掉——
+        `/api/file` 只服务**工作区与 data 目录**内的路径（其余一律 403「文件不在允许访问的
+        目录中」，见 `http.py`），所以工作区外的图片在前端只能显示成**破图**；而模型能读到
+        它（走绝对路径 + 工具），于是出现"模型看得见、前端看不见"。**看得见**是这条功能的
+        硬要求，所以必须真正落盘成上传件。
+
+        为什么不把字节经 base64 过桥：几十 MB 走 pywebview 的 JSON IPC 会明显卡；服务端
+        本机拷贝零成本，且直接复用 `app._upload_spooled`（内容级去重 / 分日落盘 / 图片压缩与
+        缩略图 / 上传后异步清理的引用保护全在同一处）。
+
+        **必须先复制到临时 spool 再交给它**：`_upload_spooled` 读完会 `unlink` 掉传进去的
+        路径——直接把用户的原文件路径递给它，等于把用户的文件删了（有守门用例钉住）。
+        """
+        if self._app is None:
+            return {"ok": False, "error": "上传通道不可用（未接入应用上下文）"}
+        wanted = [str(item) for item in (paths or []) if str(item or "").strip()]
+        if not wanted:
+            return {"ok": False, "error": "没有要粘贴的文件"}
+        if len(wanted) > CLIPBOARD_UPLOAD_MAX_FILES:
+            return {"ok": False, "error": f"一次最多粘贴 {CLIPBOARD_UPLOAD_MAX_FILES} 个文件"}
+
+        import shutil
+        import tempfile
+
+        results: list[dict] = []
+        for raw in wanted:
+            source = Path(raw)
+            if not source.is_file():
+                results.append({"name": source.name, "error": "文件不存在或已被移动"})
+                continue
+            try:
+                if source.stat().st_size > CLIPBOARD_UPLOAD_MAX_BYTES:
+                    results.append({"name": source.name, "error": "单个文件不能超过 80 MB"})
+                    continue
+            except OSError as exc:
+                results.append({"name": source.name, "error": f"读取文件失败：{exc}"})
+                continue
+
+            spool_name = ""
+            try:
+                with tempfile.NamedTemporaryFile(
+                    prefix="clip-paste-", suffix=".part", delete=False
+                ) as spool:
+                    spool_name = spool.name
+                    with open(source, "rb") as handle:
+                        shutil.copyfileobj(handle, spool, length=1024 * 1024)
+                payload, status = self._app._upload_spooled(spool_name, source.name)
+                spool_name = ""   # 已由 _upload_spooled 读完并清理
+                if int(status) != 200 or not str(payload.get("path") or ""):
+                    message = str(payload.get("error") or f"HTTP {status}")
+                    print(f"[launcher] 粘贴上传失败：{source.name} -> {message}", file=sys.stderr)
+                    results.append({"name": source.name, "error": message})
+                    continue
+                results.append({**payload, "status": int(status)})
+            except Exception as exc:  # noqa: BLE001 - 单个文件失败不该让整批粘贴失败
+                print(f"[launcher] 粘贴上传异常：{source.name} -> {exc!r}", file=sys.stderr)
+                results.append({"name": source.name, "error": f"{type(exc).__name__}: {exc}"})
+            finally:
+                if spool_name:
+                    Path(spool_name).unlink(missing_ok=True)   # 失败路径自己收尾，不留 .part
+        return {"ok": True, "results": results}
 
     # ---- 拖文件夹进输入区：把"拖进来的文件夹在硬盘上的真实路径"交回前端 ----
     def naibaFolderDrop(self, native_error: str = "") -> dict:
@@ -683,7 +903,7 @@ class Launcher:
         self.window = webview.create_window(
             "Cat Chat",
             page_url,
-            js_api=JsApi(),
+            js_api=JsApi(srv.APP),
             width=1280,
             height=860,
             min_size=(900, 600),

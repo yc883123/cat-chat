@@ -1139,6 +1139,34 @@ export function showTextContextMenu(event, selection = '', mode = 'selection', t
   menu.style.left = `${Math.max(6, Math.min(event.clientX, window.innerWidth - width - 6))}px`;
   menu.style.top = `${Math.max(6, Math.min(event.clientY, window.innerHeight - height - 6))}px`;
   // 不要自动聚焦菜单按钮，否则文本框会失焦，选中高亮会消失。
+  // 文本框菜单的「粘贴」文案要看剪贴板里到底是什么（图片/文件/文本），异步问一次后回填。
+  if (mode === 'edit') void refreshContextMenuPasteLabel();
+}
+
+// 「粘贴」的原生驱动由组合根注入（01-core 是底层模块，反向 import 12-chat-input 会成环）：
+// { probe(): Promise<payload|null>, labelFor(payload): string, apply(): Promise<{handled,message}> }
+let clipboardPasteDriver = null;
+
+export function setClipboardPasteDriver(driver) {
+  clipboardPasteDriver = driver || null;
+}
+
+/** 回填「粘贴」文案。等待期间菜单可能已经关了/换成别的模式，每一处都要重新确认。 */
+export async function refreshContextMenuPasteLabel() {
+  const driver = clipboardPasteDriver;
+  if (!driver || contextMenuMode !== 'edit') return;
+  const menu = $('#textContextMenu');
+  if (!menu || menu.hidden) return;
+  const button = menu.querySelector('button[data-context-action="paste"]');
+  if (!button) return;
+  try {
+    const payload = await driver.probe();
+    if (contextMenuMode !== 'edit' || menu.hidden) return;
+    const label = driver.labelFor(payload);
+    if (label) button.textContent = label;   // 拿不到（文本/空/无桥）就保留默认的「粘贴」
+  } catch (_) {
+    /* 文案只是增强：探测失败不能影响菜单本身可用 */
+  }
 }
 
 export function focusContextTarget() {
@@ -1218,17 +1246,39 @@ export async function runTextContextAction(action) {
         }
       } else if (action === 'paste') {
         let ok = false;
-        try { ok = document.execCommand('paste'); } catch (_) { /* 现代浏览器一律禁用，必然失败 */ }
-        if (!ok && navigator.clipboard?.readText) {
-          // 只有**安全上下文**（https / localhost / 桌面内嵌壳）才有这个对象；
-          // 手机经局域网 http://192.168.x.x:8765 打开时它根本不存在，
-          // 存在时也可能被权限拒绝（NotAllowedError）——两条都要落到同一句提示上。
+        let handled = false;
+        let message = '';
+        // ① 桌面壳：先问原生剪贴板——图片/文件走这条路（系统右键菜单在 WebView2 里是关的，
+        //    用户弹不出来，所以只能由自绘菜单承担"右键粘贴图片"）。
+        if (clipboardPasteDriver) {
           try {
-            const text = await navigator.clipboard.readText();
-            if (text != null) ok = insertTextIntoEditable(text);
-          } catch (_) { /* 权限被拒：走下面的可行动提示 */ }
+            const result = await clipboardPasteDriver.apply();
+            handled = Boolean(result && result.handled);
+            ok = handled;
+            message = (result && result.message) || '';
+          } catch (error) {
+            handled = true;   // 桥出错也算处理过：别再去试注定失败的 execCommand
+            message = `粘贴失败：${error.message}`;
+          }
         }
-        toast(ok ? '已粘贴' : PASTE_UNAVAILABLE_HINT);
+        // ② 文本通道（原有行为）：execCommand → readText。
+        if (!handled) {
+          try { ok = document.execCommand('paste'); } catch (_) { /* 现代浏览器一律禁用，必然失败 */ }
+          if (!ok && navigator.clipboard?.readText) {
+            // 只有**安全上下文**（https / localhost / 桌面内嵌壳）才有这个对象；
+            // 手机经局域网 http://192.168.x.x:8765 打开时它根本不存在，
+            // 存在时也可能被权限拒绝（NotAllowedError）——两条都要落到同一句提示上。
+            try {
+              const text = await navigator.clipboard.readText();
+              // **空串必须挡在这里**：剪贴板里是图片/文件时 Chromium 的 readText 会给出空串，
+              // 而 insertTextIntoEditable('') 对 textarea 就是"把选中内容替换成空串"
+              // （＝删掉用户选中的文字）并返回 true，还会误报"已粘贴"。
+              if (typeof text === 'string' && text !== '') ok = insertTextIntoEditable(text);
+            } catch (_) { /* 权限被拒：走下面的可行动提示 */ }
+          }
+          message = ok ? '已粘贴' : PASTE_UNAVAILABLE_HINT;
+        }
+        toast(message);
       } else if (action === 'delete') {
         const el = contextMenuTarget;
         if (el && typeof el.value === 'string' && typeof el.selectionStart === 'number') {

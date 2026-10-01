@@ -53,10 +53,11 @@ class VisionPrepareHistoryTests(unittest.TestCase):
 
     def test_text_model_images_become_safe_placeholder(self):
         history = _history_with_image()
-        new_history, note = self.router.prepare_history(
+        new_history, note, demotions = self.router.prepare_history(
             history, {"model": "deepseek-v4-flash", "request_format": "openai_chat"}
         )
         self.assertTrue(note.startswith("已移除"), f"note 应说明图片清洗：{note}")
+        self.assertEqual(demotions, [], "纯文本模型的占位改写不是本地图片总量降级，不落旗标")
         content = new_history[0]["content"]
         self.assertEqual(
             [part for part in content if part.get("type") == "image"], [],
@@ -72,10 +73,11 @@ class VisionPrepareHistoryTests(unittest.TestCase):
 
     def test_multimodal_model_keeps_original_images(self):
         history = _history_with_image()
-        new_history, note = self.router.prepare_history(
+        new_history, note, demotions = self.router.prepare_history(
             history, {"model": "gpt-4o", "request_format": "openai_chat"}
         )
         self.assertEqual(note, "")
+        self.assertEqual(demotions, [], "在线多模态大脑不做图片降级（旗标只在 kind=local 读写）")
         self.assertEqual(len(new_history[0]["content"]), 2)
         self.assertEqual(new_history[0]["content"][1]["type"], "image")
 

@@ -1,7 +1,10 @@
 """模型流解析与推理流（自 naiba.llm.runtime 迁出）。
 
 含：SSE/Ollama/LM Studio 流解析、推理 (<think>) 流事件、Agent 工具协议守卫
-（判别书面前缀是正文还是 JSON/XML 工具动作）与缓冲收尾。纯解析层：
+（判别书面前缀是正文还是 JSON/XML/Harmony 工具动作）与缓冲收尾。守卫是**围栏感知**的
+有状态类 ``_ProtocolStreamGuard``（三条流式路径共用一份口径）：Markdown 围栏里的示例
+不算协议，围栏标记被 SSE 拆成两包也能跟上——口径来自 ``naiba/core/text_fences.py``，
+与 ``skills/agent.py`` 的终态解析必须一致。纯解析层：
 不触碰网络/锁/状态；ModelRuntime 经继承 StreamMixins（并 ProtocolMixins）复用。
 """
 from __future__ import annotations
@@ -10,6 +13,7 @@ import json
 import re
 from typing import Any, Callable
 
+from naiba.core import text_fences
 from naiba.core.text_fences import (
     is_fence_close_line,
     parse_fence_open,
@@ -76,11 +80,15 @@ def _mask_outside(buffer: str, regions: list[tuple[int, int]]) -> str:
 
 
 class _FenceGuard:
-    """流式围栏状态机：跨 chunk 跟踪围栏开合，围栏内不扫描工具协议标记。
+    """围栏**区间**状态机（跨 chunk 跟踪围栏开合）：``regions`` 返回「可以扫描协议」的区间。
 
-    ``regions`` 返回「可以扫描协议」的区间；围栏内的区间不在清单里，但调用方仍会把它们
-    作为正文下发（掩码只影响检测，不影响可见文本）。未闭合的围栏一律按正文放行——它到
-    流尾为止都不是协议候选，最终由 Agent 终态解析按「整文围栏」处理。
+    ⚠️ 生产路径不用它——三条流式路径统一走 :class:`_ProtocolStreamGuard`（它额外覆盖
+    「闭合围栏被拆包」「闭合围栏与协议前缀同块」「status=None 也要推进状态」三个线上事故）。
+    本类与 :meth:`StreamMixins._forward_guarded_text` 是**保留的兼容入口**：
+    ``tests/test_fence_actions.py`` 直接钉死 ``regions`` / ``in_fence`` 的区间语义，
+    改动前先看那份守门。围栏内的区间不在清单里，但调用方仍会把它们作为正文下发
+    （掩码只影响检测，不影响可见文本）。未闭合的围栏一律按正文放行——它到流尾为止
+    都不是协议候选，最终由 Agent 终态解析按「整文围栏」处理。
     """
 
     def __init__(self) -> None:
@@ -396,6 +404,153 @@ class _ReasoningStreamer:
             StreamMixins._emit_buffered_reasoning(self.status, "".join(self.parts))
 
 
+def _possible_fence_suffix_length(buffer: str) -> int:
+    """缓冲区末尾是不是「半个围栏标记行」——是则留待下一块（围栏标记可能被 SSE 拆两包）。
+
+    只在**行首**（缩进 ≤3 空格）算数：行内代码的 ``x = ` `` 不需要保留。
+    完整围栏行（≥3）由 :func:`naiba.core.text_fences.fence_scan` 直接处理，这里只补
+    那 1–2 个字符的窗口。
+    """
+    text = str(buffer or "")
+    if not text:
+        return 0
+    line = text[text.rfind("\n") + 1:]
+    if not line:
+        return 0
+    indent = len(line) - len(line.lstrip(" "))
+    if indent > text_fences.MAX_FENCE_INDENT:
+        return 0
+    body = line[indent:]
+    if not body:
+        # 末行缩进后为空（整行只有 1–3 个空格）：没有围栏字符可判，直接放行。
+        # 缺这一条就会在下一行 body[0] 越界 ⇒ IndexError 打死整条流。纯空格 delta
+        # 真实可达（缩进、两空格硬换行被 SSE 拆包都是 1–3 个空格），且 IndexError
+        # 不在 runtime 的重试 except 列表里、Agent 只捕 RuntimeError ⇒ 整轮回答作废。
+        return 0
+    if body[0] not in text_fences.FENCE_CHARACTERS:
+        return 0
+    if any(char != body[0] for char in body):
+        return 0
+    if len(body) >= text_fences.MIN_FENCE_LENGTH:
+        return 0
+    return len(line)
+
+
+class _ProtocolStreamGuard:
+    """工具协议守卫（SSE / Ollama / LM Studio 三条流式路径共用）：**围栏感知**。
+
+    与旧的无状态 ``_forward_guarded_text`` 只有一处实质差别，但那处是决定性的——
+    **协议标记只在 Markdown 围栏之外才算协议**。旧写法在整块缓冲区里任意位置扫标记，
+    于是正文里 ```` ```json ```` 的示例（``{`` 后 96 字符内出现 ``"type"``/``"tool"``）
+    会被当成协议：吐出标记之前的正文、判定「这是工具轮」，**该次响应剩余正文一条 delta
+    都不再发** ⇒ 界面正好停在围栏行。
+
+    围栏状态必须跨 chunk 保持（```` ```` 与闭合行可能被 SSE 拆成两包），所以守卫是有状态的。
+
+    刻意保持不变的行为（有测试钉死，勿动）：
+
+    * ``_classify_agent_output`` 只看缓冲区开头判定「正文还是协议」；
+    * 判定为协议后**该次响应剩余正文不再外发**（协议只作为 action 进 Agent Loop）；
+    * **未闭合围栏到流尾 = 全部按正文放行**——被切断的回答里，围栏后面的内容不是协议。
+    """
+
+    def __init__(self) -> None:
+        self.pending = ""
+        self.detected = False
+        self._in_fence = False
+        self._fence_char = ""
+        self._fence_length = 0
+
+    def feed(self, text: str, status: StatusCallback | None) -> None:
+        """吃进一段正文，按「能安全外发多少」推 delta；已判定协议后一律不外发。"""
+        if self.detected:
+            return
+        piece = str(text or "")
+        if not piece:
+            return
+        self.pending += piece
+        self._flush(status, final=False)
+
+    def finish(self, status: StatusCallback | None) -> None:
+        """流收尾：把最后一块正文放出去（未闭合围栏此时一律按正文处理）。"""
+        if self.detected:
+            self.pending = ""
+            return
+        self._flush(status, final=True)
+
+    # ---- 内部 ----
+    def _mask(self, text: str) -> tuple[str, text_fences.FenceState]:
+        """掩码 + **本块结束时**的围栏状态（两个返回值都要用，别丢掉状态）。"""
+        return text_fences.fence_scan(
+            text,
+            in_fence=self._in_fence,
+            fence_char=self._fence_char,
+            fence_length=self._fence_length,
+        )
+
+    @staticmethod
+    def _emit(status: StatusCallback | None, text: str) -> None:
+        if text and status:
+            status({"type": "delta", "content": text})
+
+    def _flush(self, status: StatusCallback | None, *, final: bool) -> None:
+        pending = self.pending
+        if not pending:
+            return
+        masked, end_state = self._mask(pending)
+        # 缓冲区开头正处于围栏内 ⇒ 这段是代码正文，不参与「开头是正文还是协议」判定
+        # （掩码后是空格开头，_classify_agent_output 会判成 pending 并把代码块堵到流尾）。
+        # 这里问的是「缓冲区开头长什么样」，所以用进入本块时的状态 self._in_fence。
+        if not self._in_fence and StreamMixins._classify_agent_output(pending) == "tool":
+            self.detected = True
+            self.pending = ""
+            return
+        offset = StreamMixins._tool_protocol_offset(masked)
+        if offset is not None:
+            visible = pending[:offset]
+            if visible:
+                self._emit(status, visible)
+                self._advance(visible)
+            self.detected = True
+            self.pending = ""
+            return
+        if final:
+            self._emit(status, pending)
+            self.pending = ""
+            return
+        # 「半个围栏标记」必须**无条件**留住：闭合围栏同样可能被 SSE 拆成两包
+        # （"``" + "`"）。漏留会把半截当正文发出去，_advance 又按整行扫 ⇒
+        # fence_close 认不出来、_in_fence 永久停在围栏内，之后真正的协议会被
+        # 当成围栏里的代码正文整套放行（协议明文进 UI）。
+        keep = _possible_fence_suffix_length(pending)
+        if not end_state[0]:
+            # 协议标记的半截只在**本块结束时已回到围栏外**才需要挽留。判据必须用本块
+            # 结束状态而不是 self._in_fence：本块内闭合围栏后掩码已经不在围栏里，
+            # 用进入时的状态会让「闭合围栏 + 协议前缀同块」整段外发——协议的前几个
+            # 字符一旦流出，下一块里就没有 `{` / `<to` 可锚，协议其余部分全部按正文外发。
+            keep = max(keep, StreamMixins._possible_protocol_suffix_length(pending))
+        if keep >= len(pending):
+            return
+        visible = pending[:-keep] if keep else pending
+        if visible:
+            # 状态推进不能挂在 status 上：status=None 是真实路径（视觉识别、子代理），
+            # 那时同样要把已放行的前缀从缓冲里去掉，围栏状态必须跟着推进，否则
+            # 同一个输入有没有 UI 回调会走出两种状态机。
+            self._emit(status, visible)
+            self._advance(visible)
+        self.pending = pending[-keep:] if keep else ""
+
+    def _advance(self, forwarded: str) -> None:
+        """把围栏状态推进到「已外发部分」的末尾；保留段下一轮从这个状态续扫。"""
+        _masked, state = text_fences.fence_scan(
+            forwarded,
+            in_fence=self._in_fence,
+            fence_char=self._fence_char,
+            fence_length=self._fence_length,
+        )
+        self._in_fence, self._fence_char, self._fence_length = state
+
+
 class StreamMixins:
     @staticmethod
     def _read_ollama_stream(
@@ -406,14 +561,12 @@ class StreamMixins:
     ) -> dict[str, Any]:
         chunks: list[dict[str, Any]] = []
         full_content_parts: list[str] = []
-        pending = ""
+        guard = _ProtocolStreamGuard()
         reasoning_parts: list[str] = []
         reasoning_streamer = _ReasoningStreamer(status, reasoning_parts)
         reasoning_chars = 0
-        tool_protocol = False
         inline_parser = _InlineReasoningParser()
         native_tool_calls: dict[int, dict[str, str]] = {}
-        guard = _FenceGuard()
         for raw_line in response:
             try:
                 chunk = json.loads(raw_line.decode("utf-8", errors="replace"))
@@ -455,21 +608,14 @@ class StreamMixins:
                 continue
             full_content_parts.append(text)
             _mark_progress(progress, reasoning_chars, True)
-            if not tool_protocol:
-                pending += text
-                pending, tool_protocol = StreamMixins._forward_guarded_text(
-                    pending, status, guard=guard
-                )
+            guard.feed(text, status)
         final_text, final_reasoning = inline_parser.feed("", final=True)
         if final_reasoning:
             reasoning_streamer.feed(final_reasoning)
         if final_text:
             full_content_parts.append(final_text)
-            pending += final_text
-        if not tool_protocol:
-            pending, tool_protocol = StreamMixins._forward_guarded_text(
-                pending, status, final=True, guard=guard
-            )
+            guard.feed(final_text, status)
+        guard.finish(status)
         reasoning_streamer.finish()
         return {
             "content": (
@@ -511,15 +657,13 @@ class StreamMixins:
         """
         chunks: list[dict[str, Any]] = []
         full_content_parts: list[str] = []
-        pending = ""
+        guard = _ProtocolStreamGuard()
         reasoning_parts: list[str] = []
         reasoning_ids: list[str] = []
         reasoning_chars = 0
         reasoning_streamer = _ReasoningStreamer(status, reasoning_parts)
         native_tool_calls: dict[int, dict[str, str]] = {}
-        tool_protocol = False
         inline_parser = _InlineReasoningParser()
-        guard = _FenceGuard()
         for raw_line in response:
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line.startswith("data:"):
@@ -566,10 +710,8 @@ class StreamMixins:
                 reasoning_streamer.feed(reasoning)
             if tool_calls:
                 # Native OpenAI tool calls must not appear as answer text.
-                if not tool_protocol:
-                    StreamMixins._forward_guarded_text(pending, status, final=True, guard=guard)
-                    pending = ""
-                tool_protocol = True
+                guard.finish(status)
+                guard.detected = True
                 for call in tool_calls:
                     slot = native_tool_calls.setdefault(
                         call.get("index", 0), {"id": "", "name": "", "arguments": ""}
@@ -582,7 +724,7 @@ class StreamMixins:
                         slot["arguments"] += call["arguments"]
                 continue
             if not text:
-                has_content = bool(full_content_parts) or tool_protocol or bool(native_tool_calls)
+                has_content = bool(full_content_parts) or guard.detected or bool(native_tool_calls)
                 _mark_progress(progress, reasoning_chars, has_content)
                 # 只有「正文仍为空」的思考增量才可能触发熔断；原生工具调用已到位时不算空转。
                 _break_on_runaway_reasoning(
@@ -591,17 +733,13 @@ class StreamMixins:
                 continue
             full_content_parts.append(text)
             _mark_progress(progress, reasoning_chars, True)
-            if not tool_protocol:
-                pending += text
-                pending, tool_protocol = StreamMixins._forward_guarded_text(
-                    pending, status, guard=guard
-                )
+            guard.feed(text, status)
         final_text, final_reasoning = inline_parser.feed("", final=True)
         if final_reasoning:
             reasoning_streamer.feed(final_reasoning)
         if final_text:
             full_content_parts.append(final_text)
-            pending += final_text
+            guard.feed(final_text, status)
         # codex_responses 中继可能只回聚合事件（response.completed /
         # response.output_item.done）而不逐段发 output_text.delta。增量正文为空时
         # 从这里回填正文/思考/reasoning_id/tool action，避免被误判为空流。
@@ -609,7 +747,7 @@ class StreamMixins:
         if (
             request_format == "codex_responses"
             and not native_tool_calls
-            and not tool_protocol
+            and not guard.detected
         ):
             agg_text, agg_reasoning, agg_id, aggregated_action = (
                 ProtocolMixins._codex_responses_aggregated(chunks)
@@ -620,11 +758,8 @@ class StreamMixins:
                 reasoning_streamer.feed(agg_reasoning)
             if not aggregated_action and agg_text and not "".join(full_content_parts).strip():
                 full_content_parts.append(agg_text)
-                pending += agg_text
-        if not tool_protocol:
-            pending, tool_protocol = StreamMixins._forward_guarded_text(
-                pending, status, final=True, guard=guard
-            )
+                guard.feed(agg_text, status)
+        guard.finish(status)
         reasoning_streamer.finish()
         usage = ProtocolMixins._online_usage(request_format, chunks)
         if native_tool_calls:
@@ -658,13 +793,11 @@ class StreamMixins:
         """
         chunks: list[dict[str, Any]] = []
         full_content_parts: list[str] = []
-        pending = ""
+        guard = _ProtocolStreamGuard()
         reasoning_parts: list[str] = []
         reasoning_streamer = _ReasoningStreamer(status, reasoning_parts)
         reasoning_chars = 0
-        tool_protocol = False
         inline_parser = _InlineReasoningParser()
-        guard = _FenceGuard()
         for raw_line in response:
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line.startswith("data:"):
@@ -694,7 +827,7 @@ class StreamMixins:
                 if reasoning:
                     reasoning_chars += len(reasoning)
                     reasoning_streamer.feed(reasoning)
-                    has_content = bool(full_content_parts) or tool_protocol
+                    has_content = bool(full_content_parts) or guard.detected
                     _mark_progress(progress, reasoning_chars, has_content)
                     _break_on_runaway_reasoning(
                         reasoning_chars, reasoning_break_chars, has_content, status,
@@ -710,7 +843,7 @@ class StreamMixins:
                 reasoning_chars += len(inline_reasoning)
                 reasoning_streamer.feed(inline_reasoning)
             if not text:
-                has_content = bool(full_content_parts) or tool_protocol
+                has_content = bool(full_content_parts) or guard.detected
                 _mark_progress(progress, reasoning_chars, has_content)
                 _break_on_runaway_reasoning(
                     reasoning_chars, reasoning_break_chars, has_content, status,
@@ -718,21 +851,14 @@ class StreamMixins:
                 continue
             full_content_parts.append(text)
             _mark_progress(progress, reasoning_chars, True)
-            if not tool_protocol:
-                pending += text
-                pending, tool_protocol = StreamMixins._forward_guarded_text(
-                    pending, status, guard=guard
-                )
+            guard.feed(text, status)
         final_text, final_reasoning = inline_parser.feed("", final=True)
         if final_reasoning:
             reasoning_streamer.feed(final_reasoning)
         if final_text:
             full_content_parts.append(final_text)
-            pending += final_text
-        if not tool_protocol:
-            pending, tool_protocol = StreamMixins._forward_guarded_text(
-                pending, status, final=True, guard=guard
-            )
+            guard.feed(final_text, status)
+        guard.finish(status)
         reasoning_streamer.finish()
         return {
             "content": StreamMixins._clean_content("".join(full_content_parts)),

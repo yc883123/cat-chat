@@ -25,6 +25,7 @@ from naiba.core.contracts import AppContext
 import hashlib
 import json
 import logging
+import queue
 import re
 import subprocess
 import threading
@@ -68,6 +69,44 @@ RETRYABLE_ERROR_PREFIXES = (
     "连接",
     "超时",
 )
+
+# 后台 shell Job 的墙钟上限。**必须与「同一件事」的其他入口对齐**，否则系统提示
+# 「耗时任务用 run_in_background」会在一个说不出口的数字上静默失效：
+#   * 工具直调路径 pwsh / run_skill_script 上限 7200（tools/providers/core.py）；
+#   * 收集端 job_wait 默认就愿意等 7200（本文件 _run_check 的 wait_timeout）；
+# 原先这里是 900，等于「收集端肯等 2 小时、被收集的任务 15 分钟就死」。
+JOB_SHELL_DEFAULT_TIMEOUT_SECONDS = 120
+JOB_SHELL_MAX_TIMEOUT_SECONDS = 7200
+
+
+def _job_shell_timeout(params: dict[str, Any]) -> int:
+    """shell Job 的墙钟秒数：非法值退回默认、再钳到上限。
+
+    非法的 timeout（字符串、None、浮点垃圾）属于「可预期异常」：记 warning 后退回默认，
+    不让一个参数拼写错误把整条后台任务打成异常退出（原先的 ``int(...)`` 直接抛，
+    而那行在 try 之外）。
+    """
+    raw = params.get("timeout", JOB_SHELL_DEFAULT_TIMEOUT_SECONDS)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("shell Job 的 timeout 参数非法（%r），改用默认 %d 秒", raw, JOB_SHELL_DEFAULT_TIMEOUT_SECONDS)
+        value = JOB_SHELL_DEFAULT_TIMEOUT_SECONDS
+    if value < 1:
+        logger.warning("shell Job 的 timeout=%s 小于 1 秒，按 1 秒处理", value)
+    return min(max(value, 1), JOB_SHELL_MAX_TIMEOUT_SECONDS)
+
+
+def _terminate_process(proc: subprocess.Popen) -> None:
+    """先 terminate、5 秒内不退再 kill（三处调用点共用，别再各写一遍）。"""
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except Exception:  # noqa: BLE001 - 进程可能已退出/不可杀，兜底强杀
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @dataclass
@@ -697,13 +736,14 @@ class JobRegistry:
         params = spec.params or {}
         command = str(params.get("command") or "").strip()
         cwd = str(params.get("cwd") or "").strip() or str(self.app.config.data.get("workspace_dir") or ".")
-        timeout = min(max(int(params.get("timeout", 120)), 1), 900)
+        timeout = _job_shell_timeout(params)
         if not command:
             self._set_status(job_id, "running", current_step="缺少 command 参数")
             self._finish(job_id, "failed", error="shell Job 缺少 command 参数")
             return
         self._set_status(job_id, "running", current_step="执行命令")
         proc = None
+        readers: list[threading.Thread] = []
         try:
             proc = subprocess.Popen(
                 [
@@ -720,33 +760,70 @@ class JobRegistry:
                 errors="replace",
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+            # 逐行读必须交给**读者线程 + 队列**：直接在循环里 `proc.stdout.readline()` 会在
+            # 子进程长时间无输出时永久阻塞，循环体里的取消/超时检查形同虚设——本仓库已把
+            # 「不许再退回 readline 直读」写成硬标准（tests/test_tool_progress_stream.py 第 3 条），
+            # 当时只落到了 pwsh/run_skill_script 路径；上限抬到 2 小时后这里不修就变成
+            # 「一个静默长任务既停不掉也超不了时」。写法与 core._run_streaming_command 一致。
+            lines: queue.Queue = queue.Queue()
+
+            def _pump(stream, sink: queue.Queue) -> None:
+                try:
+                    for raw in stream:
+                        sink.put(raw)
+                finally:
+                    sink.put(None)  # EOF 哨兵
+
+            reader = threading.Thread(
+                target=_pump, args=(proc.stdout, lines), name=f"job-shell-{job_id[:8]}", daemon=True
+            )
+            reader.start()
+            readers.append(reader)
+
             output: list[str] = []
             start = time.monotonic()
+            deadline = start + timeout
+            outcome = ""
             while True:
                 if cancel.is_set():
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=5)
-                    except Exception:
-                        proc.kill()
-                    self._finish(job_id, "cancelled", error="用户取消", result={"exit_code": -1, "output": "\n".join(output)})
-                    return
-                line = proc.stdout.readline() if proc.stdout else ""
-                if line == "" and proc.poll() is not None:
+                    outcome = "cancelled"
                     break
-                if line:
-                    output.append(line.rstrip("\n"))
-                    self._emit(job_id, {"type": "job_log", "line": line.rstrip("\n")})
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    outcome = "timeout"
+                    break
+                try:
+                    line = lines.get(timeout=min(0.2, remaining))
+                except queue.Empty:
+                    continue
+                if line is None:
+                    break  # 子进程输出结束
+                text = str(line).rstrip("\n")
+                # 空行不进日志、不进终态输出（与改造前 `if line:` 同口径：否则
+                # 任务面板会多出空日志行，result.output 里也会多出空行）。
+                if not text:
+                    continue
+                output.append(text)
+                self._emit(job_id, {"type": "job_log", "line": text})
                 elapsed = time.monotonic() - start
                 self.app.storage.update_job(job_id, progress=min(99.0, elapsed / timeout * 100))
-                if elapsed >= timeout:
-                    proc.terminate()
+
+            if outcome:
+                _terminate_process(proc)
+                # 终止后把读者线程还在赶路的最后几行收干净（不阻塞：队列已排空即返回）
+                while True:
                     try:
-                        proc.wait(timeout=5)
-                    except Exception:
-                        proc.kill()
-                    self._finish(job_id, "failed", error="shell Job 超时", result={"exit_code": -1, "output": "\n".join(output)})
-                    return
+                        late = lines.get_nowait()
+                    except queue.Empty:
+                        break
+                    if late is not None:
+                        output.append(str(late).rstrip("\n"))
+                result = {"exit_code": -1, "output": "\n".join(output)}
+                if outcome == "cancelled":
+                    self._finish(job_id, "cancelled", error="用户取消", result=result)
+                else:
+                    self._finish(job_id, "failed", error="shell Job 超时", result=result)
+                return
             rc = proc.wait()
             text = "\n".join(output)
             self._set_status(job_id, "running", progress=100, current_step="命令结束")
@@ -763,6 +840,17 @@ class JobRegistry:
                 except Exception:
                     pass
             self._finish(job_id, "failed", error=f"{type(exc).__name__}: {exc}")
+        finally:
+            # 读者线程收尾 + 显式关管道：常驻服务里不关会持续泄漏文件句柄
+            # （unittest 会直接报 ResourceWarning: unclosed file）。先 join 再关，
+            # 避免把正在阻塞读的线程的流拽掉。与 core._run_streaming_command 同口径。
+            for reader in readers:
+                reader.join(timeout=1.0)
+            try:
+                if proc is not None and proc.stdout is not None:
+                    proc.stdout.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _run_check(self, job_id: str, spec: JobSpec, cancel: threading.Event) -> None:
         """通用 HTTP 提交 + 轮询检查 Worker（持续检查/唤醒）。

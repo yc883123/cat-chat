@@ -25,10 +25,18 @@ RUN_CONTEXT_KEYS: tuple[str, ...] = (
     "pull_interjections", "mark_interjections_consumed",
     "mcp_active", "trace_messages", "plan_exit_content", "plan_step_title",
     "model_has_vision", "tool_defs", "workspace_dir", "media_intent",
-    "event_sink", "truncation",
+    "event_sink", "truncation", "partial",
     # 本 Run 是否有「工具确认」回路：普通对话/计划执行 True，子 Agent 与后台 Job False。
     # 围栏来源动作在 False 的形态下直接按原文收尾（不执行、不挂起、不等待超时）。
     "confirmation_ui",
+    # 两枚**曾经逃逸出契约**的跨层裸键（§九.148，源码扫描当场逮到）：
+    # trace_system —— SkillAgent 带出的完整系统提示词原文（trace 只记增量、不含 system）；
+    # context_reset —— reset_context 工具置位的「本轮重置请求」，收尾路径据此落 metadata.session_start。
+    "trace_system", "context_reset",
+    # 本轮是这条会话的第几个用户轮次（1 起；由 `run/chat.py` 组装时算好）：供 skills/agent.py
+    # 给图片批注入标签标注「第 N 轮装载」——标签会被 trace 重放进后续每一轮，不带轮次就分不清
+    # 「历史旧图」与「当前成品」（§九.150）。
+    "turn_index",
 )
 
 # 运行期保持 dict 形态（零行为变化）；"带默认值/校验"经由工厂与校验函数落地，
@@ -62,6 +70,8 @@ def default_run_context() -> dict[str, Any]:
         "tool_defs": None,
         "workspace_dir": "",
         "media_intent": False,
+        # 用户轮次序号（1 起）：0 = 未提供（子代理/计划执行没有"轮"的概念）。
+        "turn_index": 0,
         # 事件出口（可调用）：工具实现把「实时进度」交给它，由宿主统一落库 + SSE 广播。
         # 工具层不直接持有 manager，避免把 run 内部结构泄漏到工具实现里。
         "event_sink": None,
@@ -71,6 +81,15 @@ def default_run_context() -> dict[str, Any]:
         # 默认「有确认回路」：只有明确知道没有确认入口的形态（子 Agent / 后台 Job）
         # 才显式置 False，避免缺失字段时把正常自动化误伤成「不可确认」。
         "confirmation_ui": True,
+        # 本轮正文**不完整**的自述信息（{"reason","attempts"}）：工具协议连续解析失败时
+        # agent 仍把模型原文落库，但必须标注「未完成」，由 run/chat.py 落进 metadata.partial
+        # （前端已有「未完成」徽标）。与 truncation 的区别：那是长度截断，这是格式校验失败。
+        "partial": {},
+        # SkillAgent 带出的完整系统提示词原文（trace 增量不含 system）：first_turn 落盘取这份。
+        "trace_system": "",
+        # reset_context 工具的本轮重置请求（{"at","source","handoff_path","note","tasks"}）：
+        # 空 dict = 本轮没有重置请求；收尾路径据此把分割线写进 assistant 消息 metadata。
+        "context_reset": {},
     }
 
 
@@ -175,6 +194,11 @@ class RunContext(TypedDict, total=False):
     event_sink: Any                  # 工具实时进度出口（callable(dict) -> None；缺省不报进度）
     truncation: dict[str, Any]       # 本轮答复截断信息（finish_reason / truncated / continued）
     confirmation_ui: bool            # 本 Run 是否有工具确认回路（子 Agent / 后台 Job 为 False）
+    partial: dict[str, Any]          # 本轮正文不完整（reason / attempts）→ 消息 metadata.partial
+    # ---- 两枚曾逃逸的跨层键（§九.148：写侧在技能/工具层，读侧在 run/chat 收尾）----
+    trace_system: str                # SkillAgent 带出的完整系统提示词原文（first_turn 落盘用）
+    context_reset: dict[str, Any]    # reset_context 的本轮重置请求 → 消息 metadata.session_start
+    turn_index: int                  # 本轮是第几个用户轮次（1 起）→ 图片批标签「第N轮装载」
 
 
 class EventType(str, Enum):

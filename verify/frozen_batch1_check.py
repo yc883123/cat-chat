@@ -25,7 +25,11 @@ def check(label: str, condition: bool, detail: str = "") -> None:
 
 from naiba.storage.store import CURRENT_SCHEMA_VERSION, MIGRATIONS, ChatStorage  # noqa: E402
 
-check("CURRENT_SCHEMA_VERSION == 18", CURRENT_SCHEMA_VERSION == 18, str(CURRENT_SCHEMA_VERSION))
+check("CURRENT_SCHEMA_VERSION == 21", CURRENT_SCHEMA_VERSION == 21, str(CURRENT_SCHEMA_VERSION))
+# 上面这个字面量**故意写死**（不是跟 CURRENT_SCHEMA_VERSION 自比——那样恒真、等于没断言）：
+# 它要证明的是「打包进去的迁移链真的是我以为的那一版」，schema 每次升版都必须在这里同步改一次。
+# 教训：它自 `bcc1788`（v18→v21）起就一直是红的，被当成"这脚本本来就红"的噪音忽略了——
+# 一条长期红的守卫等于没有守卫，发现即修。
 check("MIGRATIONS 含 v18", 18 in MIGRATIONS)
 for name in ("search_messages", "snippet_around", "branch_chain", "delete_message", "restore_messages"):
     check(f"ChatStorage.{name} 存在", hasattr(ChatStorage, name))

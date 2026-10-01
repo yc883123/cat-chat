@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from naiba.jobs import JobRegistry, JobSpec
-from naiba.core.history import build_model_history
+from naiba.core.history import build_model_history, local_brain
 from naiba.core.tool_results import model_visible_run
 
 MAX_SUBAGENT_DEPTH = 2
@@ -99,17 +99,26 @@ def run_subagent_agent(
     # 否则同一会话出现两种回放字节（前缀缓存断 + 行为不一致）。
     # fork=false（`subagent_spawn` 工具）：fresh child，不播种父历史（对齐 dsh 的 seed
     # 缺省语义），无历史可回放，子代理只带自身人设 + instruction。
-    if _coerce_fork(params.get("fork", True)):
-        history = build_model_history(
-            conversation.get("messages", []), **app.config.reasoning_replay_options()
-        )
-    else:
-        history = []
     model_key = str(conversation.get("model_key") or "")
     if not model_key:
         provider_id = str(conversation.get("provider_id") or "")
         model_key = f"online:{provider_id}" if provider_id else ""
     profile = app.config.profile(model_key)
+    # fork=true（`subagent` 工具）：回放父会话历史，思考回放限长必须与主对话同参数，
+    # 否则同一会话出现两种回放字节（前缀缓存断 + 行为不一致）。
+    # fork=false（`subagent_spawn` 工具）：fresh child，不播种父历史（对齐 dsh 的 seed
+    # 缺省语义），无历史可回放，子代理只带自身人设 + instruction。
+    # `local_image_brain` 同理由：图片降级旗标的回放判据三处调用点必须一致（core.history.local_brain），
+    # 否则主对话已落旗标的老消息在子代理里又被装成真图 ⇒ 字节不一致 + 本地请求重新膨胀。
+    if _coerce_fork(params.get("fork", True)):
+        history = build_model_history(
+            conversation.get("messages", []),
+            local_image_brain=local_brain(profile),
+            **app.config.reasoning_replay_options(),
+            **app.config.image_encode_cache_options(),
+        )
+    else:
+        history = []
     getter = app.config.generation_options
     try:
         options = dict(getter(model_key))

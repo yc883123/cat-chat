@@ -13,6 +13,14 @@
 from __future__ import annotations
 
 from naiba.core.contracts import AppContext
+from naiba.core.history import (
+    HISTORY_LOCAL_IMAGES_KEY,
+    HISTORY_MESSAGE_ID_KEY,
+    is_local_image_omitted_marker,
+    local_brain,
+    local_image_cap_enabled,
+    local_image_omitted_marker,
+)
 
 import hashlib
 import io
@@ -593,7 +601,7 @@ class VisionRouter:
         brain_profile: dict[str, Any],
         cancel_event: threading.Event | None = None,
         vision_budget: VisionBudget | None = None,
-    ) -> tuple[list[dict[str, Any]], str]:
+    ) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
         """把历史里的 image 部件改写成安全文本占位，由模型按需调用 vision_analyze 看图。
 
         视觉/多模态聊天模型（包括 llama.cpp + mmproj）始终保留原图直接看图（无需工具）；
@@ -605,21 +613,24 @@ class VisionRouter:
 
         ``cancel_event`` / ``vision_budget`` 为历史兼容参数（自动路由已移除，不再使用）。
 
-        返回 (new_history, note)。note 非空表示本轮发生了安全清洗。
+        返回 ``(new_history, note, image_demotions)``。note 非空表示本轮发生了安全清洗；
+        ``image_demotions`` 只在本地大脑下非空——调用方（run/chat）据此把「哪些图片已降级」
+        落成消息 metadata 旗标，让降级不可逆（前缀缓存因此不再每轮被滑窗打断）。
         """
         self.last_trace = {"requests": 0, "cache_hit": False}
         cfg = self.config()
         # 多模态聊天模型始终直接收到原图；占位改写只服务纯文本聊天模型。
         brain_supports = self.brain_supports_images(brain_profile)
         if brain_supports:
-            # 本地多模态大脑同样直发原图，但必须有「每请求图片总量上限」：
-            # core.history 的 MODEL_IMAGE_HISTORY_LIMIT=3 是**每条 user 消息**的封顶
-            # （计数在 per-message 循环里重置），全对话没有任何总量约束，而多模态分支
-            # 过去直接 return 原样放行。16 小时会话可累积上百张 ~1MB 图并在每轮全量
-            # 重发 ⇒ 请求体上百 MB、本地视觉塔 prefill 做不完 ⇒ 界面永久停在
-            # 「等待本地模型资源」。在线模型不动（保住 1.6.0 的前缀缓存契约）。
-            if str(brain_profile.get("kind") or "").strip().lower() != "local":
-                return history, ""
+            # 本地多模态大脑**默认原样直发全部历史图片**（含旧的、含很多张）——2026-10-01 用户
+            # 实测纠正：会话内连续跑时这些图片本来就在服务端的 KV / 前缀缓存里，客户端重发同样的
+            # 字节只是请求体大一点，服务端命中前缀即复用（同会话含 3 张真图时命中率实测 87.9%），
+            # **不会每轮重新 prefill**。反倒是「保留窗口每轮滑动」会把断点推到历史最前面（滑掉的
+            # 是最早那张图）⇒ 后面全部重新 prefill —— 那才是「12 张以后丢缓存」的机制。
+            # 旧的「每请求图片总量上限」（`_cap_local_history_images`）因此默认停用，机制保留、
+            # 一处开关可恢复（core.history.LOCAL_IMAGE_CAP_ENABLED）。在线模型分支从来不动。
+            if not local_brain(brain_profile) or not local_image_cap_enabled():
+                return history, "", []
             return self._cap_local_history_images(history)
 
         try:
@@ -651,7 +662,7 @@ class VisionRouter:
             merged_text = (text + "\n\n" + marker).strip() if text else marker
             new_history.append({**item, "content": [{"type": "text", "text": merged_text}]})
         note = f"已移除 {removed_images} 张图片（纯文本模型，图片仅以路径引用）" if removed_images else ""
-        return new_history, note
+        return new_history, note, []
 
     # 本地多模态模型单次请求的图片上限：张数 + base64 载荷字节（≈ 原始字节 × 4/3）。
     # 目的不是「提升效果」，而是把本地视觉塔的 prefill 成本压回常量级：本地后端做不完
@@ -662,11 +673,17 @@ class VisionRouter:
     @classmethod
     def _cap_local_history_images(
         cls, history: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], str]:
+    ) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
         """只保留**最近** N 张真图（且不超字节上限），更早的图片改写成路径占位。
 
-        对同一输入结果恒定（保留的是「按位置最后 N 张」），所以同一轮内多次调用一致。
-        被省略的图片仍按文件名列出，模型可随时用 vision_analyze 按路径重新装入，信息不丢。
+        返回 ``(capped, note, demotions)``。``demotions`` 是 ``[{"message_id", "names"}]``——
+        ``names`` 是这条消息的**全量**降级清单（旧省在前 + 本轮新增在后，**含重复项**：
+        重复项代表"同名图片省了几张"），落库层据此整块替换 ``local_images_capped`` 旗标。
+        旗标落库后，下一轮 ``build_model_history`` 直接回放同一份占位文本，保留窗口不再对
+        老消息滑动 ⇒ 降级不可逆、旧图不再重编码（缺 id 的条目只降级、不落旗标）。
+
+        占位文案由 ``core.history.local_image_omitted_marker`` 单一构造，与旗标回放共用——
+        两处不一致就等于「首轮回放过占位、之后又改字节」，前缀照旧断。
         """
         positions: list[tuple[int, int]] = []
         total_bytes = 0
@@ -682,7 +699,7 @@ class VisionRouter:
             len(positions) <= cls.LOCAL_REQUEST_IMAGE_LIMIT
             and total_bytes <= cls.LOCAL_REQUEST_IMAGE_BYTES_LIMIT
         ):
-            return history, ""
+            return history, "", []
 
         kept: set[tuple[int, int]] = set()
         kept_bytes = 0
@@ -698,6 +715,7 @@ class VisionRouter:
             kept_bytes += part_bytes
 
         capped: list[dict[str, Any]] = []
+        demotions: list[dict[str, Any]] = []
         for message_index, item in enumerate(history):
             content = item.get("content") if isinstance(item, dict) else None
             has_dropped = isinstance(content, list) and any(
@@ -720,23 +738,40 @@ class VisionRouter:
                     new_content.append(part)
                 else:
                     dropped.append(str(part.get("name") or part.get("path") or "（未命名图片）"))
+            previously_capped = [
+                str(name)
+                for name in (item.get(HISTORY_LOCAL_IMAGES_KEY) or [])
+                if str(name or "").strip()
+            ]
+            # **不去重**：重复项代表"同名图片省了几张"，是回放的匹配依据（去重会让
+            # 本该保留的那张一起被跳过）。展示用的去重在 local_image_omitted_marker 里做。
+            merged_names = previously_capped + dropped
+            new_content = [
+                part for part in new_content
+                if not (
+                    part.get("type") == "text"
+                    and is_local_image_omitted_marker(str(part.get("text") or ""))
+                )
+            ]
             new_content.append(
-                {
-                    "type": "text",
-                    "text": (
-                        f"[已省略 {len(dropped)} 张较早的图片：本地模型单次请求的图片上限]\n"
-                        f"图片文件名：{json.dumps(dropped, ensure_ascii=False)}\n"
-                        "（如需查看请调用 vision_analyze 工具并传入图片路径。）"
-                    ),
-                }
+                # 合并占位：这条消息可能已经带着旗标回放的占位块（build_model_history 写的），
+                # 本轮新省略的要并进**同一块**，否则同一条消息出现两份「已省略 N 张」，
+                # 字节反而更乱、旗标也数重了。合并顺序与 chat 落库的旗标一致（旧名在前）。
+                {"type": "text", "text": local_image_omitted_marker(merged_names)}
             )
             capped.append({**item, "content": new_content})
+            demotions.append({
+                "message_id": str(item.get(HISTORY_MESSAGE_ID_KEY) or ""),
+                # 回传**全量**清单（旧省在前 + 本轮新增在后），不是本轮增量：
+                # 落库层据此整块替换旗标，重复调用天然幂等（增量合并会重复累加张数）。
+                "names": merged_names,
+            })
         omitted = len(positions) - len(kept)
         note = (
             f"本地模型单次请求图片上限：已省略 {omitted} 张较早的图片，"
             f"保留最近 {len(kept)} 张（被省略的仍可用 vision_analyze 按路径查看）"
         )
-        return capped, note
+        return capped, note, demotions
 
     @staticmethod
     def _image_part_bytes(part: dict[str, Any]) -> int:

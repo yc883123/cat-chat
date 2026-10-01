@@ -11,6 +11,7 @@ from __future__ import annotations
 from naiba.core.contracts import MetadataKeys, RunContext
 
 import json
+import logging
 import threading
 import time
 import traceback
@@ -28,11 +29,13 @@ from naiba.core.conv_files import _conv_workspace_root, resolve_file_references
 from naiba.core.choices import detect_choice_groups
 from naiba.core.exceptions import ActiveRunError
 from naiba.core.file_changes import file_changes_from_runs
-from naiba.core.history import build_model_history
+from naiba.core.history import build_model_history, local_brain
 from naiba.core.tool_results import display_tool_run
 from naiba.core.usage_stats import cost_for
 from naiba.run.stream import _RunEventSink, _safe_activity
 from naiba.storage.media import missing_cache_attachment
+
+logger = logging.getLogger(__name__)
 
 # 中断轮次重建时的判据：事件流里出现这些事件，说明这一轮已有可展示的内容
 # （正文增量 / 思考 / 工具活动 / 已发出的 Skill 列表），值得重建一条 partial 消息。
@@ -137,6 +140,44 @@ def _search_sources(tool_runs: list[dict[str, Any]]) -> list[dict[str, str]]:
                 ).strip(),
             })
     return sources[:20]
+
+
+def _user_turn_index(messages: list[Any], message_id: str) -> int:
+    """本轮是这条会话的第几个**用户轮次**（1 起）——供图片批标签标注「第几轮装载」（§九.150）。
+
+    为什么不用"数所有 user 消息"：插话（运行中的第二输入通道）也是 ``role=user``，但它不构成
+    一轮；``metadata.interjection`` 是权威标记，比按文本前缀猜稳。另外**注入的图片批消息根本
+    不在库里**（只活在当轮请求与 trace 里），所以数"持久化消息"天然不会把它们算进来——这正是
+    这个函数放在 `run/chat.py`（拿得到快照里的会话消息）而不是 skills 层的原因。
+
+    找不到当前消息（分支/编辑/分割线裁剪等边界）时退回"数到最后一条为止"：会话消息里已含
+    本轮用户消息，所以结果仍是当前轮次。
+    """
+    index = 0
+    for item in messages or []:
+        if not isinstance(item, dict) or str(item.get("role") or "") != "user":
+            continue
+        metadata = item.get("metadata") or {}
+        if isinstance(metadata, dict) and metadata.get(MetadataKeys.INTERJECTION):
+            continue
+        index += 1
+        if message_id and str(item.get("id") or "") == message_id:
+            return index
+    return max(index, 1)
+
+
+def _turn_index_for_run(snapshot: dict[str, Any], run: dict[str, Any]) -> int:
+    """本轮序号（1 起）——**唯一取数点**：当前用户消息 id 从 **run 行**的 `input_message_id` 取。
+
+    ⚠️ 千万别用同函数里的 `message` 去取 id：它是 `str(run.get("message") or "")`，**字符串**。
+    2026-10-01 我自己就写成了 `message.get("id")` ⇒ **每个新会话第一轮都崩**
+    `'str' object has no attribute 'get'`，而且抛在 run 构造期（trace/tool_runs/activity 全空），
+    用户实测报障；`_user_turn_index` 的单测全绿也抓不到——纯函数单测不覆盖接线（§九.151）。
+    """
+    return _user_turn_index(
+        snapshot.get("conversation_messages") or [],
+        str(run.get("input_message_id") or ""),
+    )
 
 
 def _summarize_trace_messages(messages: list[Any]) -> list[dict[str, Any]]:
@@ -582,7 +623,11 @@ class ConversationRunMixin:
             history = build_model_history(
                 snapshot.get("conversation_messages") or [], event,
                 pdf_tools=pdf_tools_enabled, video_tools=video_tools_enabled,
+                # 本地大脑才回放「图片已降级」旗标（降级不可逆 → 历史字节单调稳定）。
+                # 判据与 vision 侧同源（core.history.local_brain），三处 build 调用点同口径。
+                local_image_brain=local_brain(profile),
                 **self.app.config.reasoning_replay_options(),
+                **self.app.config.image_encode_cache_options(),
             )
             # 视觉统一由模型驱动（自动路由已移除）：文本大脑不支持看图时，只把图片改写为
             # 安全文本占位（路径引用 + 工具提示），由模型按需主动调用 vision_analyze；
@@ -607,12 +652,17 @@ class ConversationRunMixin:
                 vision_timeout = 180.0
             vision_budget = VisionBudget(vision_timeout)
             try:
-                history, vision_note = self.app.vision.prepare_history(
+                history, vision_note, image_demotions = self.app.vision.prepare_history(
                     history, profile, cancel_event=cancel_event, vision_budget=vision_budget
                 )
                 vision_trace = dict(getattr(self.app.vision, "last_trace", {}) or vision_trace)
                 if vision_note:
                     event({"type": "status", "message": vision_note})
+                # 图片降级不可逆：把「这一轮被省略的图片」落成消息 metadata 旗标，下一轮由
+                # build_model_history 直接回放同一份占位文本。不做这一步就等于每轮重算保留集
+                # ⇒ 窗口滑动 ⇒ 从被挤出的那条消息起本地前缀缓存全断（批量出图会话每轮重新
+                # prefill）。写库失败只记日志，本轮照常发请求（旁路，不影响对话）。
+                self._record_local_image_demotions(conversation_id, image_demotions)
             except Exception as exc:  # noqa: BLE001 - 图片清洗异常不应阻断普通聊天
                 if cancel_event.is_set():
                     raise TaskCancelled("任务已取消")
@@ -745,6 +795,11 @@ class ConversationRunMixin:
                 # 用户本轮是否明确要看图：枚举类工具的媒体声明 intent_gated 据此放行
                 # （判定用用户原文，不用路由增强文本——后者可能含历史助手措辞）。
                 "media_intent": _image_intent(message),
+                # 本轮是第几个用户轮次（1 起）：图片批注入标签用它标注「第 N 轮装载」，
+                # 让模型能区分「历史里装进来的旧图」与「当前成品图」（§九.150）。
+                # ⚠️ 取数点固定走 _turn_index_for_run（run 行的 input_message_id）——`message`
+                # 在这里是**字符串**，拿它取 id 会 AttributeError（§九.151）。
+                "turn_index": _turn_index_for_run(snapshot, run),
                 # 工具实时进度出口（pwsh / run_skill_script 逐行 stdout+stderr）。
                 # 工具实现只依赖这一个 callable，不直接持有 manager——run 的内部结构
                 # 不向工具层泄漏，换实现（SSE/落库策略）时工具侧零改动。
@@ -888,6 +943,12 @@ class ConversationRunMixin:
             truncation = (run_context or {}).get("truncation") if isinstance(run_context, dict) else None
             if truncation:
                 metadata[MetadataKeys.TRUNCATED] = dict(truncation)
+            # 正文**不完整**的另一条来源：工具协议连续三次解析失败，Agent 不再只回固定文案，
+            # 而是保留模型原文并附一句失败说明（run_context["partial"]）。这里落 metadata.partial，
+            # 前端复用既有「未完成」徽标——与 truncation（长度截断）是两回事，宁可标注也不静默吞正文。
+            partial_info = (run_context or {}).get("partial") if isinstance(run_context, dict) else None
+            if partial_info:
+                metadata[MetadataKeys.PARTIAL] = True
             # 模型调用 reset_context 成功 → 在本条 AI 回复上落「新会话」分割线标记：
             # 下一条消息起 build_model_history 只取分割线之后的内容（本条及其之前都不进上下文）。
             reset_info = (run_context or {}).get("context_reset") if isinstance(run_context, dict) else None
@@ -1077,6 +1138,57 @@ class ConversationRunMixin:
             # 用量台账：计划执行与主对话同一口径（最后一条 usage 事件 = 累计汇总）。
             self.app.record_run_usage(run_id)
             self._finish(run_id)
+
+    def _record_local_image_demotions(
+        self, conversation_id: str, demotions: list[dict[str, Any]]
+    ) -> None:
+        """把「这条消息已被省略的历史图片」落成 metadata 旗标——**降级不可逆**。
+
+        存在理由：本地图片总量上限过去**每轮重算**保留集，窗口随新图滑动 ⇒ 被挤出去的那条
+        消息字节变化 ⇒ 从那条消息起本地前缀缓存断掉，而已经降级过的旧图还会被重新读盘 +
+        重编码（实测批量出图会话 63 次 vs 37 次，见 ``verify/_probe_image_prefix.py``）。
+        旗标落库后 ``build_model_history`` 直接回放同一份占位文本，降级不再回退、旧图不再重编码。
+
+        ``demotions[].names`` 是 vision 回传的**全量**清单（旧省在前 + 本轮新增在后，
+        含重复项），这里**整键替换**旗标而不是增量合并：增量合并遇到重复调用会把张数累加，
+        而重复项正是"同名图片省了几张"的回放匹配依据（见 core.history.local_omitted_image_names）。
+
+        **写入必须是按键原子合并**（`storage.merge_message_metadata` 的单条 `json_set`），
+        不能"先读整块 metadata、改完再整块写回"：这条消息是**多写入方**共享的行——用户点
+        「新会话」时 `set_session_start` 会往同一行写 `session_start`，两边各自读到的都是旧
+        整块，后写者就抹掉先写者的键（丢 `session_start` ⇒ `build_model_history` 清空整段
+        上下文）。按键合并让数据库按当前值保留其他键，谁都不用读整块。
+
+        旁路语义：写库失败只记日志，本轮请求照发——旗标少落一轮，下一轮重新降级即可，
+        代价只是多断一次前缀；记账失败绝不能中断对话（与 §九.136 同口径）。
+        """
+        if not demotions:
+            return
+        for entry in demotions:
+            try:
+                message_id = str((entry or {}).get("message_id") or "")
+                names = [
+                    str(name)
+                    for name in ((entry or {}).get("names") or [])
+                    if str(name or "").strip()
+                ]
+                if not message_id or not names:
+                    # 没有 message id（历史不是 build_model_history 产出来的，例如测试桩）：
+                    # 这一轮照常降级，只是不落旗标——下一轮重新算一遍，行为退回修复前。
+                    continue
+                # 命中与否由 SQLite 的行数给出（不存在 ⇒ 0），所以不必先读会话；
+                # 也顺手去掉了"metadata 不是 dict"那条分支——根本不再读它。
+                if not self.app.storage.merge_message_metadata(
+                    conversation_id,
+                    message_id,
+                    {MetadataKeys.LOCAL_IMAGES_CAPPED: {"names": names}},
+                ):
+                    logger.info("本地图片降级旗标跳过（消息已不存在）：message=%s", message_id)
+            except Exception:  # noqa: BLE001 - 单条记账失败绝不中断对话
+                logger.exception(
+                    "本地图片降级旗标写入失败：conversation=%s message=%s",
+                    conversation_id, (entry or {}).get("message_id"),
+                )
 
     def _all_run_events(self, run_id: str) -> list[dict[str, Any]]:
         """Read EVERY event for a run, paginating past the 500-row default limit.

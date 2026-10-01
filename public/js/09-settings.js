@@ -982,6 +982,10 @@ export function populateRuntimeSettings() {
   if ($('#reasoningReplayTurnChars')) {
     $('#reasoningReplayTurnChars').value = Number(settings.reasoning_replay_turn_chars ?? 16000);
   }
+  // 图片编码记忆同上：0 = 关闭记忆，不能用 `|| 默认值` 回填。
+  if ($('#imageEncodeCacheMb')) {
+    $('#imageEncodeCacheMb').value = Number(settings.image_encode_cache_mb ?? 512);
+  }
   // 新会话种子模板：留空 = 前端回退到内置默认（占位符说明见设置项下方小字）。
   if ($('#contextResetSeedTemplate')) {
     $('#contextResetSeedTemplate').value = String(settings.context_reset_seed_template || '');
@@ -4234,6 +4238,7 @@ export async function saveRuntimeSettings() {
   const maxStepsRaw = String($('#agentStepLimit')?.value ?? '').trim();
   const replayMaxRaw = String($('#reasoningReplayMaxChars')?.value ?? '').trim();
   const replayTurnRaw = String($('#reasoningReplayTurnChars')?.value ?? '').trim();
+  const imageCacheRaw = String($('#imageEncodeCacheMb')?.value ?? '').trim();
   const payload = {
     command_timeout: Number($('#commandTimeout')?.value || 120),
     context_warning_percent: warningRaw === '' ? 80 : Number(warningRaw),
@@ -4241,6 +4246,8 @@ export async function saveRuntimeSettings() {
     // 思考回放限长：0 有意义（关闭限长），只有「留空」才回落到默认值。
     reasoning_replay_max_chars: replayMaxRaw === '' ? 4000 : Number(replayMaxRaw),
     reasoning_replay_turn_chars: replayTurnRaw === '' ? 16000 : Number(replayTurnRaw),
+    // 图片编码记忆：0 = 关闭记忆（每轮重编码），同样只有「留空」才回落默认值。
+    image_encode_cache_mb: imageCacheRaw === '' ? 512 : Number(imageCacheRaw),
     agent_step_limit: maxStepsRaw === '' ? 200 : Number(maxStepsRaw),
     context_reset_seed_template: String($('#contextResetSeedTemplate')?.value || ''),
     workspace_dir: $('#workspaceDir')?.value.trim() || '',

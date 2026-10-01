@@ -15,7 +15,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from naiba.skills.agent import _extract_step_image_batches  # noqa: E402
+from naiba.skills.agent import (  # noqa: E402
+    _extract_step_image_batches,
+    _image_batch_label,
+    _image_batch_message,
+)
+from naiba.run.chat import _turn_index_for_run, _user_turn_index  # noqa: E402
 from naiba.tools.registry import (  # noqa: E402
     VISION_ANALYZE_DESCRIPTION,
     VISION_ANALYZE_LOAD_DESCRIPTION,
@@ -71,6 +76,142 @@ class ExtractStepImageBatchesTests(unittest.TestCase):
         runs = [self._run("read_file", []), {"tool": "vision_analyze", "result": "not-json", "success": True}]
         batches = _extract_step_image_batches(runs, inject=True)
         self.assertEqual(batches, [])
+
+
+class ImageBatchLabelTests(unittest.TestCase):
+    """注入标签必须带**身份**：装载轮次 + 文件名（§九.150）。
+
+    病历（2026-10-01 用户实测）：旧标签 `【图片批 1/1】` 三条字字相同、不带轮次也不带文件名，
+    而它会随 trace 重放进后续每一轮 ⇒ 模型在第 4 轮盯着第 1 轮那张旧图，把上一轮自己写的
+    提示词复述成"已检查完毕、肢体正常"。用户给的格式就是身份：`（历史·第N轮装载）：文件名`。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="naiba-vision-label-"))
+        self.images = []
+        for index in range(5):
+            p = self.tmp / f"lumine_scene_{index}.png"
+            _png(p)
+            self.images.append({"name": p.name, "path": str(p), "thumb_path": ""})
+
+    def _batch(self, images: list[dict]) -> dict:
+        runs = [{"tool": "vision_analyze", "result": json.dumps({"note": "x", "images": images}), "success": True}]
+        return _extract_step_image_batches(runs, inject=True)[0]
+
+    def test_batch_carries_the_shown_file_names(self) -> None:
+        batch = self._batch(self.images)
+        self.assertEqual(batch["shown"], 4)
+        self.assertEqual(batch["names"], [f"lumine_scene_{i}.png" for i in range(4)],
+                         "只带**实际注入**那几张的名字（没注入的不许写进标签）")
+
+    def test_label_carries_turn_and_file_name(self) -> None:
+        batch = self._batch(self.images[:1])
+        self.assertEqual(
+            _image_batch_label(batch, 2),
+            "【图片批 1/1（历史·第2轮装载）：lumine_scene_0.png】",
+        )
+
+    def test_label_lists_every_shown_name_and_marks_truncation(self) -> None:
+        batch = self._batch(self.images)
+        self.assertEqual(
+            _image_batch_label(batch, 2),
+            "【图片批 1/1（历史·第2轮装载）：lumine_scene_0.png、lumine_scene_1.png、"
+            "lumine_scene_2.png、lumine_scene_3.png；本次读取 5 张，已展示前 4 张】",
+        )
+
+    def test_label_without_a_turn_index_does_not_invent_one(self) -> None:
+        """子代理/计划执行没有"轮"的概念：退化成（历史·装载），不编"第0轮"。"""
+        label = _image_batch_label(self._batch(self.images[:1]), 0)
+        self.assertEqual(label, "【图片批 1/1（历史·装载）：lumine_scene_0.png】")
+        self.assertNotIn("第0轮", label)
+
+    def test_message_is_label_plus_images_only(self) -> None:
+        """旧版那句「以上是工具刚读取的图片，请据此继续（点击即可查看大图）。」必须彻底消失。"""
+        batch = self._batch(self.images[:2])
+        message = _image_batch_message(batch, 3)
+        self.assertEqual(message["role"], "user")
+        parts = message["content"]
+        self.assertEqual(len(parts), 3, "1 段标签 + 2 张图")
+        self.assertEqual(parts[0]["text"], "【图片批 1/1（历史·第3轮装载）：lumine_scene_0.png、lumine_scene_1.png】")
+        self.assertEqual([p.get("type") for p in parts[1:]], ["image", "image"])
+        text = parts[0]["text"]
+        for gone in ("请据此继续", "点击即可查看大图", "以上是工具刚读取的图片"):
+            self.assertNotIn(gone, text, f"多余的说明必须去掉：{gone}")
+
+    def test_str_only_images_still_get_labels(self) -> None:
+        """兼容只给字符串路径的结果：不许因为取名炸掉整批注入。"""
+        batch = self._batch([str(self.images[0]["path"])])
+        self.assertEqual(batch["names"], ["lumine_scene_0.png"])
+        self.assertEqual(_image_batch_label(batch, 1), "【图片批 1/1（历史·第1轮装载）：lumine_scene_0.png】")
+
+
+class UserTurnIndexTests(unittest.TestCase):
+    """轮次口径：插话不算一轮；注入的图片批消息根本不在库里所以不会被数进来。"""
+
+    @staticmethod
+    def _user(mid: str, interjection: bool = False) -> dict:
+        metadata = {"interjection": True} if interjection else {}
+        return {"id": mid, "role": "user", "content": "x", "metadata": metadata}
+
+    @staticmethod
+    def _assistant(mid: str) -> dict:
+        return {"id": mid, "role": "assistant", "content": "y", "metadata": {}}
+
+    def test_counts_user_turns_only(self) -> None:
+        messages = [
+            self._user("u1"), self._assistant("a1"),
+            self._user("u2", interjection=True),      # 插话不构成一轮
+            self._user("u2b"), self._assistant("a2"),
+            self._user("u3"),
+        ]
+        self.assertEqual(_user_turn_index(messages, "u3"), 3)
+        self.assertEqual(_user_turn_index(messages, "u2b"), 2)
+
+    def test_falls_back_to_the_last_turn_when_id_is_unknown(self) -> None:
+        messages = [self._user("u1"), self._assistant("a1"), self._user("u2")]
+        self.assertEqual(_user_turn_index(messages, ""), 2, "会话消息已含本轮用户消息，数到最后即当前轮")
+        self.assertEqual(_user_turn_index(messages, "不存在"), 2)
+
+    def test_empty_history_is_turn_one(self) -> None:
+        self.assertEqual(_user_turn_index([], "u1"), 1)
+
+
+class TurnIndexWiringTests(unittest.TestCase):
+    """接线级守门：`turn_index` 的"当前消息 id"必须取自 **run 行**，绝不能取自 `message`。
+
+    病历（2026-10-01，我自己的回归，用户实测报障）：`run/chat.py` 里
+    `message = str(run.get("message") or "")` 是**字符串**，我在 run_context 里写了
+    `message.get("id")` ⇒ **每个新会话第一轮都崩** `'str' object has no attribute 'get'`，
+    且抛在 run 构造期（trace/tool_runs/activity 全空、界面显示"（本次回答未完成）"）。
+    `_user_turn_index` 的单测全绿也抓不到——**纯函数单测不覆盖接线**（§九.151）。
+    """
+
+    def test_helper_reads_id_from_run_row(self) -> None:
+        snapshot = {
+            "conversation_messages": [
+                {"id": "u1", "role": "user", "content": "a", "metadata": {}},
+                {"id": "a1", "role": "assistant", "content": "b", "metadata": {}},
+                {"id": "u2", "role": "user", "content": "c", "metadata": {}},
+            ]
+        }
+        self.assertEqual(_turn_index_for_run(snapshot, {"input_message_id": "u2"}), 2)
+        self.assertEqual(_turn_index_for_run(snapshot, {}), 2, "缺 input_message_id 时退回「数到最后」")
+
+    def test_call_site_never_takes_id_from_message(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "naiba" / "run" / "chat.py").read_text(encoding="utf-8")
+        self.assertIn(
+            'message = str(run.get("message") or "")',
+            source,
+            "前提：chat.py 里的 message 是字符串——本守门存在的理由；若它变成了 dict，请回头改这里的判据",
+        )
+        self.assertIn('"turn_index": _turn_index_for_run(', source, "取数点必须固定走 helper")
+        call = source.split('"turn_index": _turn_index_for_run(')[1].split(")")[0]
+        self.assertIn("run", call)
+        self.assertNotIn(
+            "message.get(",
+            call,
+            "message 是 str，拿它取 id 会 AttributeError（§九.151 的真实事故）",
+        )
 
 
 class VisionBatchSchemaTests(unittest.TestCase):

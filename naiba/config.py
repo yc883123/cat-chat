@@ -327,6 +327,14 @@ def default_config() -> dict[str, Any]:
         # 默认值与 core.history.MODEL_REASONING_REPLAY_* 必须一致。
         "reasoning_replay_max_chars": 4000,
         "reasoning_replay_turn_chars": 16000,
+        # 图片编码记忆（进程内 LRU）的字节预算（MB）：`build_model_history` 每轮都要把历史里
+        # 每张图重新「读盘 → PIL 解码 → 缩到 1600px → JPEG 多档试压 → base64」，而服务端的
+        # 前缀/KV 缓存省不掉这段**客户端**的活（真实出图 3.9MB PNG 实测单张中位 77ms，12 张
+        # 一轮 ≈0.92s 的开口延迟）。编码是确定性的（同文件 ⇒ 同字节，正是前缀缓存成立的前提），
+        # 所以按 (路径, 大小, mtime) 记忆一次、之后每轮只查表。
+        # 0 = 关闭记忆（每轮照旧重编码，只影响速度、不影响发给模型的字节）。
+        # 默认值与 core.history.IMAGE_ENCODE_CACHE_MB_DEFAULT 必须一致。
+        "image_encode_cache_mb": 512,
         # 图片缓存：image_upload_original=True 按原尺寸存；False 则超过 image_max_pixels
         # 时用 Lanczos 压缩。缩略图始终从保存后的主图按 thumbnail_max_pixels 生成 WebP（_thumb.webp）。
         "imaging": {
@@ -2069,6 +2077,7 @@ class ConfigStore:
             "local_first_byte_timeout_seconds",
             "reasoning_replay_max_chars",
             "reasoning_replay_turn_chars",
+            "image_encode_cache_mb",
             "agent_step_limit",
             "interject_direct_send",
             "context_reset_seed_template",
@@ -2364,6 +2373,23 @@ class ConfigStore:
                             if chars != 0 and not 100 <= chars <= 1000000:
                                 raise ValueError("思考回放限长必须在 100-1000000 之间（0 = 关闭限长）")
                             self.data[key] = chars
+                    elif key == "image_encode_cache_mb":
+                        # 0 = 关闭记忆；否则 1-4096 MB（超上限即按最旧淘汰）。留空按默认值处理。
+                        raw = values[key]
+                        if raw in (None, ""):
+                            self.data[key] = IMAGE_ENCODE_CACHE_MB_DEFAULT
+                        else:
+                            try:
+                                if isinstance(raw, float) and not float(raw).is_integer():
+                                    raise ValueError
+                                megabytes = int(raw)
+                            except (TypeError, ValueError):
+                                raise ValueError("图片编码记忆上限必须是整数（MB）") from None
+                            if megabytes != 0 and not 1 <= megabytes <= IMAGE_ENCODE_CACHE_MB_MAX:
+                                raise ValueError(
+                                    f"图片编码记忆上限必须在 1-{IMAGE_ENCODE_CACHE_MB_MAX} MB 之间（0 = 关闭）"
+                                )
+                            self.data[key] = megabytes
                     elif key == "agent_step_limit":
                         # 0 = 不限制；否则 1-1000 步。留空按默认值处理。
                         raw = values[key]
@@ -2904,6 +2930,22 @@ class ConfigStore:
         options["max_steps"] = max(0, steps)
         return options
 
+    def image_encode_cache_options(self) -> dict[str, int]:
+        """图片编码记忆的字节预算（MB），注入 ``build_model_history``。
+
+        与 ``reasoning_replay_options`` 同一纪律：**三个活调用点都要传**（主对话 / 子代理 /
+        计划执行），否则同一会话内会出现"有时查表、有时重编码"的两种行为（字节不变，
+        但速度与内存口径不一致）。
+        """
+        raw = self.data.get("image_encode_cache_mb", IMAGE_ENCODE_CACHE_MB_DEFAULT)
+        try:
+            megabytes = int(raw)
+        except (TypeError, ValueError):
+            megabytes = IMAGE_ENCODE_CACHE_MB_DEFAULT
+        if megabytes != 0:
+            megabytes = max(1, min(IMAGE_ENCODE_CACHE_MB_MAX, megabytes))
+        return {"image_encode_cache_mb": megabytes}
+
     def reasoning_replay_options(self) -> dict[str, int]:
         """思考回放限长（双闸门）配置，注入 ``build_model_history``。
 
@@ -3327,6 +3369,11 @@ AGENT_MAX_STEPS_DEFAULT = 200
 # （一致性由 tests/test_reasoning_replay.py 守门）。
 REASONING_REPLAY_MAX_CHARS_DEFAULT = 4000
 REASONING_REPLAY_TURN_CHARS_DEFAULT = 16000
+# 图片编码记忆上限默认值/上限。必须与 core.history 的
+# IMAGE_ENCODE_CACHE_MB_DEFAULT / IMAGE_ENCODE_CACHE_MB_MAX 一致
+# （一致性由 tests/test_image_encode_cache.py 守门）。
+IMAGE_ENCODE_CACHE_MB_DEFAULT = 512
+IMAGE_ENCODE_CACHE_MB_MAX = 4096
 
 
 def _infer_context_window(provider: dict[str, Any]) -> int:

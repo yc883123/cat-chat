@@ -48,6 +48,49 @@ check("打包资源：触摸长按不拦截 contextmenu", "if (isLongPressPointe
 check("打包资源：粘贴不可用给可行动作", "PASTE_UNAVAILABLE_HINT" in core and "Ctrl+V" in core)
 check("打包资源：旧死文案已消失", "粘贴失败：浏览器未授权" not in core)
 
+# ---- ①b 桌面端「右键粘贴图片/文件」：桥与前端接线都要在 exe 里 --------------------
+# 这条功能横跨打包的 Python（launcher.JsApi）与打包的前端资源，两侧都要查：
+# 源码模式读 `public/` 永远是新的，读不到「用户那个 exe 里到底有没有这个桥」。
+try:
+    chat = (public / "js" / "12-chat-input.js").read_text(encoding="utf-8")
+except Exception as exc:  # noqa: BLE001
+    chat = ""
+    check("可读到打包内的 12-chat-input.js", False, repr(exc))
+check("打包资源：输入模块调桥读剪贴板", "naibaClipboardPayload" in chat)
+check("打包资源：图片走既有上传链路", "uploadFiles([pngFileFromBase64(" in chat)
+check("打包资源：文件走**服务端落盘**（不是前端看不见的路径附件）",
+      "naibaUploadLocalPaths" in chat and "addClipboardPathAttachments" not in chat)
+check("打包资源：菜单文案自适应有实现", "粘贴图片并上传" in chat and "labelFor" in chat)
+check("打包资源：底层模块有注入点", "export function setClipboardPasteDriver" in core)
+check("打包资源：组合根真的注册了驱动", "setClipboardPasteDriver(clipboardPasteDriver)" in bind)
+check("打包资源：空串不得替换选区（旧写法已消失）",
+      "text !== ''" in core and "if (text != null) ok = insertTextIntoEditable(text)" not in core)
+
+# 运行期真值：桥函数真的在打包的解释器里（读源码文本在冻结版不可用，只能断言可达对象）。
+_payload_fn = None
+for _name in ("clipboard_payload",):
+    _candidate = globals().get(_name)
+    if callable(_candidate):
+        _payload_fn = _candidate
+if _payload_fn is None:
+    try:  # 沿调用栈找持有 launcher 全局的那层 frame（不能 import launcher：它是打包入口脚本）
+        import inspect
+
+        for _frame in inspect.stack():
+            _fn = _frame.frame.f_globals.get("clipboard_payload")
+            if callable(_fn):
+                _payload_fn = _fn
+                break
+    except Exception as exc:  # noqa: BLE001
+        check("可沿调用栈定位 launcher 的全局命名空间", False, repr(exc))
+check("运行期：剪贴板载荷函数可达", callable(_payload_fn))
+if callable(_payload_fn):
+    try:
+        _shape = _payload_fn(read=lambda: {"hdrop": [], "dib": None, "png": None, "text": ""})
+        check("运行期：空剪贴板 → kind=empty", _shape == {"ok": True, "kind": "empty"}, str(_shape))
+    except Exception as exc:  # noqa: BLE001
+        check("运行期：剪贴板载荷可调用", False, repr(exc))
+
 # ---- ② 顶栏收起：整条只剩折叠条 + 「展开顶栏」文字入口 --------------------------
 check(
     "打包资源：收起隐藏全部子元素",

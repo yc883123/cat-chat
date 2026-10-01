@@ -20,10 +20,12 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from naiba.core.contracts import MetadataKeys  # noqa: E402
 from naiba.core.media_types import job_media_declaration  # noqa: E402
 from naiba.storage.job_media import JobMediaWriter  # noqa: E402
 from naiba.storage.media_collect import MediaCollector  # noqa: E402
@@ -170,6 +172,53 @@ class JobMediaWriteBackTests(unittest.TestCase):
         self.assertIsNone(self.writer.write_back(job), "重复写回不得再产生新增")
         metadata = self.storage.get_conversation(self.conversation_id)["messages"][-1]["metadata"]
         self.assertEqual(len(metadata["tool_runs"][0]["media"]), 1)
+        self.assertEqual(len(metadata["attachments"]), 1)
+
+    def test_write_back_keeps_a_concurrently_written_session_start(self) -> None:
+        """产物写回只 patch 自己那几个键：同一行的 `session_start` 不得被抹掉。
+
+        真实路径：用户给某条 AI 回复点了「新会话」（`set_session_start` 就写在这一行），
+        而那条回复发起的后台 Job 可能几十分钟后才跑完并写回产物 —— 旧实现拿着"点之前"
+        的整块 metadata 整块写回，把 `session_start` 抹掉 ⇒ `build_model_history`
+        清空整段上下文（用户视角＝模型突然失忆）。这里把并发写**精确注入在
+        「读完整块、还没写回」的窗口里**：整块写回必红。
+        """
+        job_id = self._create_job()
+        message_id = str(self.message["id"])
+        real_attach = JobMediaWriter._attach
+        injected = {"done": False}
+
+        def attach_then_race(writer_self, metadata, job_id_arg, media, truncated):
+            added = real_attach(writer_self, metadata, job_id_arg, media, truncated)
+            if not injected["done"]:
+                injected["done"] = True
+                # 就在这个窗口里，另一个写入方落下自己的键（用户点了「新会话」）
+                self.storage.set_session_start(self.conversation_id, message_id, note="窗口内")
+            return added
+
+        with mock.patch.object(JobMediaWriter, "_attach", attach_then_race):
+            written = self.writer.write_back(self.storage.get_background_task(job_id))
+        self.assertIsNotNone(written)
+        metadata = self.storage.get_conversation(self.conversation_id)["messages"][-1]["metadata"]
+        self.assertIn("session_start", metadata, "并发落下的会话边界不得被产物写回抹掉")
+        self.assertEqual(len(metadata["tool_runs"][0]["media"]), 1, "产物仍然要写进去")
+        self.assertEqual(len(metadata["attachments"]), 1, "消息级汇总也要更新")
+
+    def test_write_back_clears_a_stale_truncated_marker(self) -> None:
+        """产物不再截断时要清掉旧的 `attachments_truncated`（改走 json_remove 的行为回归）。
+
+        整块写回是靠 `metadata.pop(...)` 清这个键的；改成键级 patch 后必须显式用
+        `remove=`，否则界面上会留着一个过期的"已截断"提示。
+        """
+        job_id = self._create_job()
+        message_id = str(self.message["id"])
+        self.assertTrue(self.storage.merge_message_metadata(
+            self.conversation_id, message_id,
+            {MetadataKeys.ATTACHMENTS_TRUNCATED: {"images": 9}},
+        ))
+        self.assertIsNotNone(self.writer.write_back(self.storage.get_background_task(job_id)))
+        metadata = self.storage.get_conversation(self.conversation_id)["messages"][-1]["metadata"]
+        self.assertNotIn(MetadataKeys.ATTACHMENTS_TRUNCATED, metadata)
         self.assertEqual(len(metadata["attachments"]), 1)
 
     def test_cancelled_job_partial_products_written(self) -> None:

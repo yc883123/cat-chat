@@ -12,6 +12,8 @@ import hashlib
 import io
 import json
 import sys
+import threading
+from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,207 @@ IMAGE_MEDIA_TYPES = {
 MODEL_IMAGE_MAX_EDGE = 1600
 MODEL_IMAGE_TARGET_BYTES = 900 * 1024
 MODEL_IMAGE_HISTORY_LIMIT = 3
+
+# ---- 图片编码记忆（进程内 LRU，按字节预算淘汰）--------------------------------
+# 为什么需要它：`build_model_history` **每轮**都把历史里每张图重新走一遍
+# 「读盘 → PIL 解码 → 缩到 1600px → JPEG 多档试压 → base64」。服务端的前缀/KV 缓存省的是
+# 服务端的 prefill，省不掉这段**客户端**的活：用真实出图（3.9MB PNG）实测单张中位 77ms，
+# 12 张一轮就是 ≈0.92s 的开口延迟（探针 verify/_probe_image_prefix.py 数的是次数：6 轮 63 次）。
+# 编码是**确定性**的（同一文件 ⇒ 同一字节，这正是前缀缓存能成立的前提），所以按
+# (绝对路径, 文件大小, mtime_ns) 记一次即可，之后每轮只做字典查找 + 复用已算好的 base64。
+# 上限由运行设置 `image_encode_cache_mb` 控制（默认 512MB，0 = 关闭记忆、每轮照旧重编码）。
+IMAGE_ENCODE_CACHE_MB_DEFAULT = 512
+IMAGE_ENCODE_CACHE_MB_MAX = 4096
+
+
+class _ImageEncodeCache:
+    """按字节预算淘汰的 LRU（线程安全）。
+
+    键含 `mtime_ns` 与 `size`：图片被重新生成/替换（同路径不同内容）时必须重编码，
+    否则会把旧图的字节发给模型（比"慢"严重得多）。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._items: OrderedDict[tuple[str, int, int], tuple[dict[str, str], int]] = OrderedDict()
+        self._limit_bytes = IMAGE_ENCODE_CACHE_MB_DEFAULT * 1024 * 1024
+        self._bytes = 0
+        self.hits = 0
+        self.misses = 0
+
+    # ---- 配置 ----
+    def set_limit_mb(self, megabytes: Any) -> None:
+        try:
+            value = int(megabytes)
+        except (TypeError, ValueError):
+            value = IMAGE_ENCODE_CACHE_MB_DEFAULT
+        value = max(0, min(IMAGE_ENCODE_CACHE_MB_MAX, value))
+        with self._lock:
+            self._limit_bytes = value * 1024 * 1024
+            self._evict_locked(keep_newest=True)
+
+    @property
+    def limit_bytes(self) -> int:
+        return self._limit_bytes
+
+    @property
+    def enabled(self) -> bool:
+        return self._limit_bytes > 0
+
+    # ---- 读写 ----
+    def get(self, key: tuple[str, int, int]) -> dict[str, str] | None:
+        if not self.enabled:
+            return None
+        with self._lock:
+            entry = self._items.get(key)
+            if entry is None:
+                self.misses += 1
+                return None
+            self._items.move_to_end(key)
+            self.hits += 1
+            # 返回**副本**：调用方会把部件塞进消息列表，谁改一下都不能污染缓存。
+            return dict(entry[0])
+
+    def put(self, key: tuple[str, int, int], value: dict[str, str]) -> None:
+        if not self.enabled:
+            return
+        cost = _image_part_cost(value)
+        with self._lock:
+            if key in self._items:
+                self._bytes -= self._items[key][1]
+            self._items[key] = (dict(value), cost)
+            self._items.move_to_end(key)
+            self._bytes += cost
+            self._evict_locked()
+
+    def _evict_locked(self, keep_newest: bool = False) -> None:
+        # keep_newest：上限调小/关闭时至少不把"最新放进来的那条"立刻踢掉（本轮还要用）。
+        floor = 1 if keep_newest and self._items else 0
+        while self._bytes > self._limit_bytes and len(self._items) > floor:
+            _key, (_value, cost) = self._items.popitem(last=False)
+            self._bytes -= cost
+
+    def clear(self) -> None:
+        with self._lock:
+            self._items.clear()
+            self._bytes = 0
+            # 计数器一并归零：`clear()` 的语义是"从零开始"，否则测试与诊断里的命中率会跨用例累加。
+            self.hits = 0
+            self.misses = 0
+
+    def stats(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "entries": len(self._items),
+                "bytes": self._bytes,
+                "limit_bytes": self._limit_bytes,
+                "hits": self.hits,
+                "misses": self.misses,
+            }
+
+
+def _image_part_cost(part: dict[str, str]) -> int:
+    """一条缓存项的字节开销（base64 字符串是大头，加上名字与固定余量）。"""
+    return len(str(part.get("data") or "")) + len(str(part.get("name") or "")) + 64
+
+
+_IMAGE_ENCODE_CACHE = _ImageEncodeCache()
+
+
+def set_image_encode_cache_limit_mb(megabytes: Any) -> None:
+    """配置图片编码记忆上限（运行设置 `image_encode_cache_mb`，0 = 关闭）。"""
+    _IMAGE_ENCODE_CACHE.set_limit_mb(megabytes)
+
+
+def image_encode_cache_stats() -> dict[str, int]:
+    """缓存统计（守门与诊断用）。"""
+    return _IMAGE_ENCODE_CACHE.stats()
+
+# ---- 本地大脑的图片历史 ------------------------------------------------------
+# 本地多模态大脑：历史里的图片**全部原样保留**（不降级、不占位）——这是 2026-10-01 用户实测
+# 纠正后的口径，旧口径的因果讲反了：
+#   · 本地会话内连续跑时，历史里的图片**本来就在服务端的 KV / 前缀缓存里**：客户端把同样的
+#     字节再发一遍，服务端命中前缀就复用已算好的 KV，**不会每轮重新 prefill 图片**
+#     （同会话含 3 张真图时缓存命中率实测仍有 87.9%）。
+#   · 真正打断前缀的恰恰是「保留窗口每轮滑动」：滑掉的是**历史最早**那张图，断点落在很靠前的
+#     位置 ⇒ 后面全部重新 prefill。这就是「12 张以后丢缓存」的机制。
+#   · 「模型服务重启 / 中断会话后继续」导致的重新 prefill 是服务端的事，不在本端设计范围内。
+# 因此旧的「每请求图片总量上限 + 降级旗标回放」（§九.146）**默认停用**：它对缓存命中率从来没有
+# 正收益（旧注释自己写着"别把这条修复当成缓存命中率修复来宣传"），只省下**客户端**的读盘 +
+# PIL 重编码次数（探针 verify/_probe_image_prefix.py 实测 63→37），以及历史被回滚时的前缀收益。
+# 机制整体保留、一处开关可恢复。保留图片剩下的只有两项本地成本：请求体更大（每轮 base64 重发）
+# 与每轮重新编码（如需优化，可给 encode_image_for_model 加按 (路径, mtime, 大小) 的进程内缓存）。
+#
+# —— 以下是**保留机制**（默认不启用）的语义，供日后恢复时参考 ——
+# 上限（张数 + 字节）挤出的图片改写成占位文本；「哪些图片已降级」写进那条消息的 metadata
+# （``MetadataKeys.LOCAL_IMAGES_CAPPED``），此后各轮由 ``build_model_history`` 回放**同一份**
+# 占位文本（字节一致，否则"记忆"本身就在改写历史）。旗标只在 ``kind=local`` 下读写。
+HISTORY_MESSAGE_ID_KEY = "_message_id"
+HISTORY_LOCAL_IMAGES_KEY = "_local_images_capped"
+
+
+# 本地大脑是否启用「每请求图片总量上限 + 降级旗标回放」。**默认关**（见上方修订说明）。
+# 唯一判据：vision 层（是否降级）与 history 层（是否回放占位）必须同源，否则同一条消息
+# 在两轮之间字节不一致 ⇒ 前缀照旧断。要恢复旧行为，把这里改成 True（机制与用例都还在）。
+LOCAL_IMAGE_CAP_ENABLED = False
+
+
+def local_image_cap_enabled() -> bool:
+    """本地图片上限 / 降级旗标是否启用（**唯一判据**，vision 与 history 共用；测试可 patch）。"""
+    return bool(LOCAL_IMAGE_CAP_ENABLED)
+# 两个内部键都只用于「把图片降级决定映射回落库消息」（vision 层没有 message id，也看不到
+# metadata）：前者定位消息，后者带上「本轮之前已经降级的图片名」，让 vision 那一趟把新的
+# 省略项**合并进同一个占位块**——各写一块占位等于同一消息出现两份「已省略 N 张」，字节反而
+# 更乱。它们**绝不能进请求体**——``llm/protocols.py`` 的各 wire 消息构造器都是按字段重建
+# dict，因此天然不带；守门测试逐个构造器反查，防止日后有人改成整体拷贝把内部键带出去。
+
+
+def local_brain(profile: Any) -> bool:
+    """会话大脑是否本地模型（``kind == "local"``）。图片历史旗标只在这个前提下读写。"""
+    return str((profile or {}).get("kind") or "").strip().lower() == "local"
+
+
+LOCAL_IMAGE_OMITTED_PREFIX = "[已省略 "
+LOCAL_IMAGE_OMITTED_HINT = "本地模型单次请求的图片上限"
+
+
+def local_image_omitted_marker(names: list[str]) -> str:
+    """被省略图片的占位文本（**唯一实现**，``json`` 序列化图片文件名）。
+
+    ``names`` 允许**重复**：重复项代表"同一张图被附了两次、两张都省了"。占位里的张数
+    按**出现次数**报，``json`` 里只列去重后的文件名（展示口径）——「首次降级那轮的线上
+    改写」（``vision/runtime.py``）与「之后各轮的旗标回放」（本模块）必须逐字节一致，
+    所以计数与展示都只能有一份实现。
+    """
+    cleaned = [str(name or "（未命名图片）") for name in names]
+    shown = list(dict.fromkeys(cleaned))
+    return (
+        f"{LOCAL_IMAGE_OMITTED_PREFIX}{len(cleaned)} 张较早的图片：{LOCAL_IMAGE_OMITTED_HINT}\n"
+        f"图片文件名：{json.dumps(shown, ensure_ascii=False)}\n"
+        "（如需查看请调用 vision_analyze 工具并传入图片路径。）"
+    )
+
+
+def is_local_image_omitted_marker(text: str) -> bool:
+    """这段文本是不是「本地图片降级」占位块（供 vision 层合并旧块时识别）。"""
+    return text.startswith(LOCAL_IMAGE_OMITTED_PREFIX) and LOCAL_IMAGE_OMITTED_HINT in text
+
+
+def local_omitted_image_names(metadata: Any) -> list[str]:
+    """读出这条消息已被降级的图片文件名——**保留重复项**（按当初的降级顺序）。
+
+    重复项就是匹配依据：同一条消息里的同名图片（同一张图附两次，或两个不同目录下的同名
+    文件）必须按"第几次出现"逐一对应。按"名字在清单里"匹配会把本该**保留**的那张也一起
+    跳过 ⇒ 历史字节变化 + 那张图不可逆消失，恰好击穿"降级不可逆"要建立的不变量。
+    """
+    flag = (metadata or {}).get(MetadataKeys.LOCAL_IMAGES_CAPPED)
+    if not isinstance(flag, dict):
+        return []
+    names = flag.get("names")
+    if not isinstance(names, list):
+        return []
+    return [str(name) for name in names if str(name or "").strip()]
+
 
 # ---- 思考回放限长（双闸门）--------------------------------------------------
 # 背景（2026-09-19 对本机运行库 chat.db 的只读量化，见维护说明 §九.103）：MiMo 会话单条
@@ -164,6 +367,17 @@ def encode_image_for_model(source: str) -> dict[str, str] | None:
     media_type = IMAGE_MEDIA_TYPES.get(path.suffix.lower())
     if not media_type or not path.is_file() or path.stat().st_size > 30 * 1024 * 1024:
         return None
+    # 进程内记忆：同一张图（同路径 + 同大小 + 同 mtime）只编码一次。
+    # 图片被替换（同路径新内容）时 mtime/size 变 ⇒ 键变 ⇒ 自动重编码，绝不会把旧图的字节发出去。
+    try:
+        stat = path.stat()
+        cache_key = (str(path), int(stat.st_size), int(stat.st_mtime_ns))
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        cached = _IMAGE_ENCODE_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
     raw = path.read_bytes()
     try:
         from PIL import Image, ImageOps
@@ -173,12 +387,15 @@ def encode_image_for_model(source: str) -> dict[str, str] | None:
             raw = _jpeg_for_model(image)
     except (ImportError, OSError, ValueError):
         return None
-    return {
+    part = {
         "type": "image",
         "media_type": "image/jpeg",
         "data": base64.b64encode(raw).decode("ascii"),
         "name": path.name,
     }
+    if cache_key is not None:
+        _IMAGE_ENCODE_CACHE.put(cache_key, part)
+    return part
 
 
 # 这些工具的结果属于"内容/文件/图像读取"，模型在后续轮次可能仍要引用
@@ -311,6 +528,8 @@ def build_model_history(
     video_tools: bool = True,
     reasoning_replay_max_chars: int = MODEL_REASONING_REPLAY_MAX_CHARS,
     reasoning_replay_turn_chars: int = MODEL_REASONING_REPLAY_TURN_CHARS,
+    local_image_brain: bool = False,
+    image_encode_cache_mb: int = IMAGE_ENCODE_CACHE_MB_DEFAULT,
 ) -> list[dict[str, Any]]:
     """Build model history, carrying EVERY user message's own images (all kept).
 
@@ -323,8 +542,15 @@ def build_model_history(
     ``reasoning_replay_max_chars`` / ``reasoning_replay_turn_chars``：思考回放的
     单条硬闸门与整轮软闸门（0 = 关闭该层；见 ``_ReasoningReplayBudget``）。
     **三个活调用点（对话 / 子代理 / 计划执行）必须传同一组值**，否则同一会话会出现
-    两种回放字节 ⇒ 前缀缓存断 + 行为不一致。
+    两种回放字节 ⇒ 前缀缓存断 + 行为不一致。``local_image_brain`` 同理：它决定
+    「图片降级旗标」是否回放，同会话内必须按同一个判据（``local_brain(profile)``）传值。
+    ``local_image_brain=True`` 时，带 ``MetadataKeys.LOCAL_IMAGES_CAPPED`` 旗标的消息
+    **不再重新编码**被降级的那几张图片，改为在末尾回放同一份占位文本（见模块内注释）。
+    ``image_encode_cache_mb``：图片编码记忆的字节预算（运行设置 `image_encode_cache_mb`，
+    0 = 关闭）。这里是该缓存的**唯一写入点**，三个活调用点同样必须传同一个值——它只影响
+    "同一张图编码几次"，不影响产出的字节，因此不会动摇前缀缓存契约。
     """
+    set_image_encode_cache_limit_mb(image_encode_cache_mb)
     history: list[dict[str, Any]] = []
     replay_seq = 0
     for item in conversation_messages:
@@ -355,22 +581,54 @@ def build_model_history(
                 pdf_tools=pdf_tools, video_tools=video_tools,
             )
             image_parts: list[dict[str, Any]] = []
+            # 旗标接管：这条消息里「已经降级过」的图片不再重新编码，末尾统一回放占位文本。
+            # 槽位口径必须与降级那一轮完全一致（每张被降级的图当初也占过一个
+            # MODEL_IMAGE_HISTORY_LIMIT 槽位），否则后面第 4 张图会凭空补进来 ⇒ 字节又变。
+            # ⚠️ 默认停用（local_image_cap_enabled()）——本地大脑按"全部图片原样保留"走，
+            # 带旗标的老消息也一律回放真图（否则老会话会一直停留在占位形态上）。
+            omitted_names = (
+                local_omitted_image_names(metadata)
+                if (local_image_brain and local_image_cap_enabled())
+                else []
+            )
+            omitted_left = Counter(omitted_names)
+            omitted_replayed: list[str] = []
+            consumed_slots = 0
             for upload in previous_uploads:
                 path = str(upload.get("path") or "")
                 if not path or Path(path).suffix.lower() not in IMAGE_MEDIA_TYPES:
                     continue
-                if len(image_parts) >= MODEL_IMAGE_HISTORY_LIMIT:
+                if consumed_slots >= MODEL_IMAGE_HISTORY_LIMIT:
                     break
+                name = Path(path).name
+                # 按**出现次数**匹配（不是"名字在清单里"）：同一条消息里的同名图片要
+                # 第几次出现对应第几次，否则会把本该保留的那张一起跳过——历史字节变了，
+                # 而且那张图不可逆地消失（见 local_omitted_image_names 的说明）。
+                if omitted_left.get(name, 0) > 0:
+                    omitted_left[name] -= 1
+                    consumed_slots += 1
+                    # 清单里保留重复项：占位文本按出现次数报数（与降级那一轮同口径）。
+                    omitted_replayed.append(name)
+                    continue
                 encoded = encode_image_for_model(path)
                 if encoded:
                     image_parts.append(encoded)
-            if image_parts:
-                history.append(
-                    {
-                        "role": item["role"],
-                        "content": [{"type": "text", "text": content}, *image_parts],
-                    }
-                )
+                    consumed_slots += 1
+            if image_parts or omitted_replayed:
+                entry: dict[str, Any] = {
+                    "role": item["role"],
+                    "content": [{"type": "text", "text": content}, *image_parts],
+                    # 内部键：供 vision 层把「图片降级决定」映射回落库消息（见模块内注释）；
+                    # wire 构造器按字段重建 dict，不会把它带进请求体（有守门测试反查）。
+                    HISTORY_MESSAGE_ID_KEY: str(item.get("id") or ""),
+                }
+                if omitted_replayed:
+                    entry["content"].append(
+                        {"type": "text", "text": local_image_omitted_marker(omitted_replayed)}
+                    )
+                    # 带上已降级清单：本轮 vision 若还要再省几张，必须合并进上面这一块占位。
+                    entry[HISTORY_LOCAL_IMAGES_KEY] = list(omitted_replayed)
+                history.append(entry)
                 continue
         message = {"role": item["role"], "content": content}
         # Thinking-mode gateways require assistant reasoning_content on the

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import re
 import shutil
 import sqlite3
@@ -14,6 +15,12 @@ from typing import Any, Callable, Iterable, Iterator
 
 from naiba.core.messages import MetadataKeys
 from naiba.core.paths import normalized_path_key
+
+logger = logging.getLogger("naiba.storage.store")
+
+# metadata 键的合法形状（一层、标识符）：`merge_message_metadata` 要把键名拼进 SQLite 的
+# JSON 路径（路径不支持占位符），所以形状校验就是那条拼接的安全边界。
+_METADATA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
@@ -2181,25 +2188,24 @@ class ChatStorage:
             }
         }
         now = int(time.time() * 1000)
+        # 读一次只为「消息是否存在」与返回值；**写不再整块覆盖**——同行还有图片降级旗标等
+        # 写入方，「读整块→整块写回」会让先写者的键消失（丢 session_start ⇒ 上下文清空）。
         with self._connect() as db:
             row = db.execute(
                 "SELECT metadata FROM messages WHERE id = ? AND conversation_id = ?",
                 (message_id, conversation_id),
             ).fetchone()
-            if not row:
-                return None
+        if not row:
+            return None
+        if not self.merge_message_metadata(conversation_id, message_id, marker):
+            return None
+        try:
             metadata = json.loads(row["metadata"] or "{}")
-            if not isinstance(metadata, dict):
-                metadata = {}
-            metadata.update(marker)
-            db.execute(
-                "UPDATE messages SET metadata = ? WHERE id = ?",
-                (json.dumps(metadata, ensure_ascii=False), message_id),
-            )
-            db.execute(
-                "UPDATE conversations SET updated_at = ? WHERE id = ?",
-                (now, conversation_id),
-            )
+        except (json.JSONDecodeError, TypeError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata.update(marker)
         return {"id": message_id, "metadata": metadata, "created_at": now}
 
     @_retry_transient_write
@@ -2215,10 +2221,13 @@ class ChatStorage:
             metadata = json.loads(row["metadata"] or "{}")
             if not isinstance(metadata, dict) or MetadataKeys.SESSION_START not in metadata:
                 return False
-            metadata.pop(MetadataKeys.SESSION_START, None)
+            # 只摘掉自己这个键（`json_remove`），不整块写回：同行的其他写入方（图片降级
+            # 旗标等）并发落下的键必须原样保留。
             db.execute(
-                "UPDATE messages SET metadata = ? WHERE id = ?",
-                (json.dumps(metadata, ensure_ascii=False), message_id),
+                "UPDATE messages SET metadata = "
+                f"json_remove(COALESCE(NULLIF(metadata, ''), '{{}}'), '$.{MetadataKeys.SESSION_START}') "
+                "WHERE id = ?",
+                (message_id,),
             )
             db.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
@@ -2260,6 +2269,62 @@ class ChatStorage:
             cursor = db.execute(
                 "UPDATE messages SET metadata = ? WHERE id = ? AND conversation_id = ?",
                 (json.dumps(metadata or {}, ensure_ascii=False), message_id, conversation_id),
+            )
+            if cursor.rowcount:
+                db.execute(
+                    "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                    (now, conversation_id),
+                )
+        return cursor.rowcount > 0
+
+    @_retry_transient_write
+    def merge_message_metadata(
+        self,
+        conversation_id: str,
+        message_id: str,
+        patch: dict[str, Any],
+        *,
+        remove: tuple[str, ...] | list[str] = (),
+    ) -> bool:
+        """**按键原子合并**一条消息的 metadata（单条 ``json_set``/``json_remove`` UPDATE），并推进会话 updated_at。
+
+        为什么不能用「先读整块 metadata、改完再整块写回」：同一条消息上有多个写入方
+        （图片降级旗标 `local_images_capped`、会话边界 `session_start`、异步 Job 产物写回的
+        `tool_runs`/`attachments`、插话状态…），各自读到的都是**旧**整块，后写者会把先写者
+        刚落的键整块抹掉。丢 `session_start` 的后果不是"少个标记"——`build_model_history`
+        会把整段上下文清空（用户视角＝模型突然失忆）。这里把写入降成"只改自己那几个键"，
+        其他键由数据库按**当前值**原样保留，两个写入方并发也不再互相覆盖。
+
+        ``remove``：需要**删掉**的键（例如产物不再截断时要清 `attachments_truncated`）。
+        删除不存在的键是静默无操作，调用方不必先确认它在不在。
+
+        契约：键必须是一层、且只含标识符字符（键名直接进 JSON 路径，不接受调用方任意
+        字符串）；值以 JSON 文本经 ``json(?)`` 传入。返回是否命中该消息（消息不存在时
+        False——SQLite 对 UPDATE 的 rowcount 只统计命中的行，即使新值等于旧值也计 1，
+        所以 0 一定意味着"没这行"）。
+        """
+        keys = [str(key) for key in (patch or {})]
+        remove_keys = [str(key) for key in (remove or ())]
+        if not keys and not remove_keys:
+            return False
+        for key in (*keys, *remove_keys):
+            if not _METADATA_KEY_RE.match(key):
+                raise ValueError(f"metadata 键名非法（只允许一层标识符）：{key!r}")
+        # 键名来自代码常量（MetadataKeys），此处已做形状校验；SQLite 的 JSON 路径
+        # 又不能写占位符，所以只能拼接——那句校验就是这条拼接的安全边界。
+        expression = "COALESCE(NULLIF(metadata, ''), '{}')"
+        if keys:
+            assignments = ", ".join(f"'$.{key}', json(?)" for key in keys)
+            expression = f"json_set({expression}, {assignments})"
+        if remove_keys:
+            paths = ", ".join(f"'$.{key}'" for key in remove_keys)
+            expression = f"json_remove({expression}, {paths})"
+        values = [json.dumps(patch[key], ensure_ascii=False) for key in keys]
+        now = int(time.time() * 1000)
+        with self._connect() as db:
+            cursor = db.execute(
+                f"UPDATE messages SET metadata = {expression} WHERE id = ? AND conversation_id = ?",
+                (*values, message_id, conversation_id),
             )
             if cursor.rowcount:
                 db.execute(
@@ -2391,8 +2456,21 @@ class ChatStorage:
         逐字节还原 ``id`` / ``content`` / ``metadata`` / ``created_at``；``metadata_json``
         存在时按原文本写回，否则用 ``json.dumps`` 重新序列化。**已存在的 id 跳过**——
         重复点撤销不会报错，也不会覆盖现有内容。
-        已知边界：SQLite 的隐式 rowid 会重新分配，**同一毫秒**内的两条消息相对次序可能交换；
-        概率极低，且模型侧顺序由 ``(created_at, rowid)`` 重排，影响局限于同毫秒邻居的显示序。
+
+        **顺序锚定（不是可选项）**：会话排序契约是 ``(created_at, rowid)``，而隐式 rowid 在插回时
+        必然重新分配（新的总是最大）。快照带原 rowid 时按 ``(created_at, 原 rowid)`` 算出目标插入位，
+        再把「排在该批之后、却与它 created_at 并列或更早」的现存行**从后继起整体往后挪**（挪后缀，
+        后缀内部相对次序不变，量取「批次里最晚的 created_at − 后继 created_at + 1」）⇒ 撤销后顺序
+        与删除前逐条一致。整批只定位**一次**：``delete_message`` 的快照本来就是连续块，逐条重新定位
+        会拿"已插回行的新 rowid"去和"批次里下一条的原 rowid"比大小（两个域混用），批次内部反而翻序。
+        不这么做会发生什么：同毫秒并列时新 rowid 会把被撤销的消息挤到最后——探针实测
+        「u1 a1 u2 a2 同毫秒、删 a1 再撤销」变成 u1 u2 a2 **a1**；a1 上带着「新会话分割线」标记时
+        ``build_model_history`` 会把整段上下文清空（用户视角＝模型突然失忆），前缀缓存也从那条起
+        整体重写。缺 ``rowid`` 的老快照退化为修复前行为（排到最后）并记 info 日志。
+
+        两个已处理的边界：① SQLite 无 AUTOINCREMENT，删掉当时 rowid 最大的行后下一条会**复用**
+        该 rowid，所以找后继用 ``>=``（``>`` 会在复用时误判"没有后继"⇒ 又不腾位）；
+        ② 快照顺序按调用方给的来，但公开入口不能假定有序——原 rowid 齐全时先按排序契约还原。
         """
         rows_in = [item for item in (snapshots or []) if isinstance(item, dict)]
         if not rows_in:
@@ -2405,28 +2483,85 @@ class ChatStorage:
                     "SELECT id FROM messages WHERE conversation_id = ?", (conversation_id,)
                 ).fetchall()
             }
-            restored: list[str] = []
+
+            def load_positions() -> list[tuple[int, int]]:
+                """现存行的排序键 ``(created_at, rowid)``——即当前排序契约下的真实顺序。"""
+                return [
+                    (int(row["created_at"] or 0), int(row["rid"]))
+                    for row in db.execute(
+                        "SELECT created_at, rowid AS rid FROM messages "
+                        "WHERE conversation_id = ? ORDER BY created_at, rowid",
+                        (conversation_id,),
+                    ).fetchall()
+                ]
+
+            pending: list[dict[str, Any]] = []
             skipped: list[str] = []
             for item in rows_in:
                 snapshot = self._normalize_snapshot(item)
-                message_id = snapshot["id"]
-                if not message_id or message_id in existing:
-                    skipped.append(message_id)
+                if not snapshot["id"] or snapshot["id"] in existing:
+                    skipped.append(snapshot["id"])
                     continue
-                db.execute(
-                    "INSERT INTO messages(id, conversation_id, role, content, metadata, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        message_id,
-                        conversation_id,
-                        snapshot["role"],
-                        snapshot["content"],
-                        snapshot["metadata_json"],
-                        snapshot["created_at"],
-                    ),
-                )
-                existing.add(message_id)
-                restored.append(message_id)
+                pending.append(snapshot)
+            if len(pending) > 1 and all(item.get("rowid") is not None for item in pending):
+                # 调用方（前端）按删除顺序回传，但**不能假定**：`/api/messages/restore` 是公开
+                # 入口，手写乱序数组会让"整批一次定位"取错头、批次内部也按传入顺序拿递增新
+                # rowid 而翻序。原 rowid 齐全时先按排序契约还原删除前的顺序。
+                pending.sort(key=lambda item: (int(item["created_at"]), int(item["rowid"])))
+            restored: list[str] = []
+            if pending:
+                # **整批一次定位**：``delete_message`` 的快照本来就是连续块（single 一行、
+                # turn 是「user + 紧随的连续 assistant」），所以整批插在同一个位置。
+                # 不能逐条重新定位——已经插回的批次行拿到的是新 rowid（必然最大），拿它的
+                # 新 rowid 去和批次里下一条的**原 rowid** 比大小是两个域混用，批次内部会翻序。
+                head = pending[0]
+                head_rid = head.get("rowid")
+                positions = load_positions()
+                if head_rid is None:
+                    if positions:
+                        logger.info(
+                            "撤销快照缺少原 rowid，只能按插入顺序排到末尾：conversation=%s count=%d",
+                            conversation_id, len(pending),
+                        )
+                else:
+                    key = (int(head["created_at"]), int(head_rid))
+                    # 用 `>=` 而不是 `>`：SQLite 没有 AUTOINCREMENT，删掉"当时 rowid 最大"的
+                    # 那一行之后，下一条新消息会**复用**这个 rowid（撤销前又发了一条同毫秒消息
+                    # 就能命中）。这时现存行里存在与 key **完全相同**的 (created_at, rowid)，
+                    # `>` 会直接跳过它 ⇒ successor=None ⇒ 不腾位 ⇒ 被撤销的消息又排到最后，
+                    # 正是本次修复要消灭的那类故障。`>=` 在无复用时与 `>` 完全等价。
+                    successor = next((pos for pos in positions if pos >= key), None)
+                    if successor is not None:
+                        # 后继与批次**并列或更早**时，新 rowid 会把整批挤到后继之后 ⇒
+                        # 从后继起把后缀整体推后，直到它超过批次里最晚的那条（后缀内部次序不变）。
+                        latest = max(int(item["created_at"]) for item in pending)
+                        if successor[0] <= latest:
+                            bump = latest - successor[0] + 1
+                            db.execute(
+                                "UPDATE messages SET created_at = created_at + ? "
+                                "WHERE conversation_id = ? "
+                                "AND (created_at > ? OR (created_at = ? AND rowid >= ?))",
+                                (bump, conversation_id, successor[0], successor[0], successor[1]),
+                            )
+                            logger.info(
+                                "撤销消息顺序锚定：自后继起后缀时间戳 +%dms（同毫秒并列腾位）"
+                                "conversation=%s count=%d", bump, conversation_id, len(pending),
+                            )
+                for snapshot in pending:
+                    db.execute(
+                        "INSERT INTO messages(id, conversation_id, role, content, metadata, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            snapshot["id"],
+                            conversation_id,
+                            snapshot["role"],
+                            snapshot["content"],
+                            snapshot["metadata_json"],
+                            int(snapshot["created_at"]),
+                        ),
+                    )
+                    existing.add(snapshot["id"])
+                    restored.append(snapshot["id"])
             now = int(time.time() * 1000)
             db.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
@@ -2443,20 +2578,35 @@ class ChatStorage:
 
     @staticmethod
     def _message_snapshot(row: sqlite3.Row) -> dict[str, Any]:
-        """被删消息的完整快照（撤销插回的唯一依据）。"""
+        """被删消息的完整快照（撤销插回的唯一依据）。
+
+        额外带上 **原 rowid**（查询里别名 ``rid``）：隐式 rowid 在插回时会重新分配，而会话的
+        排序契约是 ``(created_at, rowid)``——同毫秒的多条消息一旦丢掉原 rowid，撤销就会把这条
+        消息排到同毫秒邻居**之后**（实测：分割线标记落在这一组里时，`build_model_history`
+        会把整段上下文清空，界面上就是"模型突然失忆"）。带原 rowid 才能算出正确的插入位。
+        """
         raw = row["metadata"]
         text = raw if isinstance(raw, str) else json.dumps(raw or {}, ensure_ascii=False)
+        try:
+            original_rowid: int | None = int(row["rid"])
+        except (IndexError, KeyError, TypeError, ValueError):
+            original_rowid = None
         return {
             "id": str(row["id"]),
             "role": str(row["role"] or ""),
             "content": str(row["content"] or ""),
             "metadata_json": text,
             "created_at": int(row["created_at"] or 0),
+            "rowid": original_rowid,
         }
 
     @staticmethod
     def _normalize_snapshot(item: dict[str, Any]) -> dict[str, Any]:
-        """把前端回传的快照归一成插回所需的六个字段（缺 ``metadata_json`` 时重新序列化）。"""
+        """把前端回传的快照归一成插回所需的字段（缺 ``metadata_json`` 时重新序列化）。
+
+        ``rowid``（原 SQLite rowid）**可选**：老快照/手改快照没有它就退化为"按插入顺序排到最后"
+        （即修复前的行为），有它才能把消息锚回原位。
+        """
         message_id = str(item.get("id") or "")
         role = str(item.get("role") or "")
         if not message_id or role not in ("user", "assistant", "session"):
@@ -2471,12 +2621,18 @@ class ChatStorage:
             created_at = int(item.get("created_at") or 0)
         except (TypeError, ValueError):
             raise ValueError("快照的 created_at 必须是整数")
+        raw_rid = item.get("rowid", item.get("rid"))
+        try:
+            original_rowid = int(raw_rid) if raw_rid not in (None, "") else None
+        except (TypeError, ValueError):
+            original_rowid = None
         return {
             "id": message_id,
             "role": role,
             "content": str(item.get("content") or ""),
             "metadata_json": text,
             "created_at": created_at,
+            "rowid": original_rowid,
         }
 
     def create_background_task(
@@ -2618,9 +2774,15 @@ class ChatStorage:
                     or metadata.get(MetadataKeys.INTERJECTION_CONSUMED)):
                 raise LookupError("待引导消息不存在或已被处理")
             metadata[MetadataKeys.INTERJECTION_GUIDED] = True
+            # 同事务内**只改自己这一个键**（json_set）：整块写回会抹掉同行其他写入方
+            # （图片降级旗标等）并发落下的键。不能换成 merge_message_metadata——那会另开
+            # 连接，"读→判断→写"就不再原子，而本函数的幂等性正建立在这段原子性上。
             db.execute(
-                "UPDATE messages SET metadata = ? WHERE id = ?",
-                (json.dumps(metadata, ensure_ascii=False), message_id),
+                "UPDATE messages SET metadata = "
+                f"json_set(COALESCE(NULLIF(metadata, ''), '{{}}'), "
+                f"'$.{MetadataKeys.INTERJECTION_GUIDED}', json('true')) "
+                "WHERE id = ?",
+                (message_id,),
             )
             db.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
         message["metadata"] = metadata
@@ -2647,8 +2809,11 @@ class ChatStorage:
                     continue
                 metadata[MetadataKeys.INTERJECTION_CONSUMED] = True
                 db.execute(
-                    "UPDATE messages SET metadata = ? WHERE id = ?",
-                    (json.dumps(metadata, ensure_ascii=False), row["id"]),
+                    "UPDATE messages SET metadata = "
+                    f"json_set(COALESCE(NULLIF(metadata, ''), '{{}}'), "
+                    f"'$.{MetadataKeys.INTERJECTION_CONSUMED}', json('true')) "
+                    "WHERE id = ?",
+                    (row["id"],),
                 )
 
     @_retry_transient_write
@@ -2684,8 +2849,11 @@ class ChatStorage:
                 if not metadata.get(MetadataKeys.INTERJECTION_STOPPED):
                     metadata[MetadataKeys.INTERJECTION_STOPPED] = True
                     db.execute(
-                        "UPDATE messages SET metadata = ? WHERE id = ?",
-                        (json.dumps(metadata, ensure_ascii=False), row["id"]),
+                        "UPDATE messages SET metadata = "
+                        f"json_set(COALESCE(NULLIF(metadata, ''), '{{}}'), "
+                        f"'$.{MetadataKeys.INTERJECTION_STOPPED}', json('true')) "
+                        "WHERE id = ?",
+                        (row["id"],),
                     )
                     stopped += 1
         return stopped

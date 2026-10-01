@@ -100,6 +100,18 @@ class PasteActionWiringTests(unittest.TestCase):
         body = _function_body(self.chat, "function addClipboardPathAttachments")
         self.assertIn("existing.has(path)", body, "连点两次不该出现两条一样的附件")
 
+    def test_no_probe_cache_so_the_label_cannot_lie(self) -> None:
+        """文案与动作都必须按**此刻**的剪贴板算。
+
+        曾经给探测加了 2 秒缓存，真浏览器冒烟当场抓出"文案说谎"：缓存窗口内先复制图片、
+        再复制文本，菜单仍写「粘贴图片并上传」（点击时动作是对的，标签是错的）。
+        这条源码守卫让"再加回缓存"在单测层面就红，不必等浏览器冒烟。
+        """
+        self.assertNotIn("nativePasteCache", self.chat, "探测不许缓存：标签与动作都要看当下")
+        self.assertNotIn("NATIVE_PASTE_CACHE_MS", self.chat)
+        probe = _function_body(self.chat, "async function probeNativeClipboard")
+        self.assertIn("await bridge.naibaClipboardPayload()", probe, "每次都要真的问一次")
+
     # ---- ⑥ 没有桥时必须退回原有文本通道（手机口径不变）----
     def test_no_bridge_falls_back_to_the_text_channel(self) -> None:
         body = _function_body(self.chat, "async function probeNativeClipboard")

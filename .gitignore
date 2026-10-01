@@ -131,6 +131,9 @@ _exe_stderr.txt
 _run_server.py
 _test_pkg.py
 _verify_local.py
+# 本地临时工作目录：测试/探针的 TEMP 落点（`naiba-pdf-*`/缩略图/夹具产物都会落进来）。
+# 2026-10-01 教训：一次 `git add -A` 把这里 119 个测试产物扫进了提交，靠 `git reset --soft` 才收回。
+.dsh-tmp/
 naiba-chat.exe
 build_info.json
 start.bat
@@ -241,6 +244,7 @@ verify/*
 !verify/ci_short_path_check.py
 !verify/cleanup_verify.py
 !verify/clipboard_paste_smoke.py
+!verify/clipboard_paste_smoke.cjs
 !verify/composer_enter_mobile_smoke.cjs
 !verify/composer_height_smoke.cjs
 !verify/composer_model_smoke.cjs

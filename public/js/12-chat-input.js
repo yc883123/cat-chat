@@ -533,27 +533,22 @@ export async function handlePasteImage(event) {
 // 为什么不在 01-core.js 里直接调桥：01-core 是底层模块，反向 import 这里会成环——
 // 所以把驱动对象注入进去（见 15-bind-events.js 的 setClipboardPasteDriver）。
 // 手机/浏览器里没有桥：驱动返回 null，调用方退回原有的文本粘贴通道（§九.85 口径不变）。
-const NATIVE_PASTE_CACHE_MS = 2000;
-let nativePasteCache = { at: 0, payload: null };
-
+//
+// **刻意不做探测缓存**（曾经有 2 秒缓存，被真浏览器冒烟当场抓出"文案说谎"）：菜单文案与
+// 点击动作都必须按**此刻**的剪贴板算——缓存窗口内先复制图片再复制文本，文案会停在
+// 「粘贴图片并上传」而实际粘的是文本。读一次剪贴板是毫秒级、且只发生在右键/点击时，
+// 不值得为它冒"标签骗人/按旧内容动手"的风险。
 function nativeClipboardBridge() {
   const api = window.pywebview?.api;
   return typeof api?.naibaClipboardPayload === 'function' ? api : null;
 }
 
-async function probeNativeClipboard(force = false) {
+async function probeNativeClipboard() {
   const bridge = nativeClipboardBridge();
   if (!bridge) return null;
-  const now = Date.now();
-  if (!force && nativePasteCache.payload && now - nativePasteCache.at < NATIVE_PASTE_CACHE_MS) {
-    return nativePasteCache.payload;   // 菜单文案已经问过一次：点击时别重复 IPC
-  }
   try {
-    const payload = await bridge.naibaClipboardPayload();
-    nativePasteCache = { at: Date.now(), payload };
-    return payload;
+    return await bridge.naibaClipboardPayload();
   } catch (error) {
-    nativePasteCache = { at: 0, payload: null };
     return { ok: false, error: `读取系统剪贴板失败：${error.message}` };
   }
 }
@@ -596,7 +591,7 @@ function addClipboardPathAttachments(paths, names, sizes) {
 
 /** 执行粘贴：返回 `{handled, message}`；`handled=false` 表示交给原有的文本通道。 */
 async function applyNativeClipboardPaste() {
-  const payload = await probeNativeClipboard(true);
+  const payload = await probeNativeClipboard();
   if (!payload) return { handled: false, message: '' };
   if (payload.ok === false) return { handled: true, message: payload.error || '读取系统剪贴板失败' };
   if (payload.kind === 'image') {

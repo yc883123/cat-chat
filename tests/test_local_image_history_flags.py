@@ -17,6 +17,7 @@
 
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -559,18 +560,38 @@ class ConcurrentMetadataWritersTests(unittest.TestCase):
     def test_no_whole_blob_metadata_write_on_shared_rows(self) -> None:
         """**结构守门**：共享行上的写入一律键级（`json_set`/`json_remove`），不得整块写回。
 
-        允许整块写回的只剩 `update_message_metadata` 一处（"整块 metadata 都是自己算的"
-        场景）；三个插话写入方（`set_interjection_guided` /
-        `mark_run_interjections_consumed` / `stop_pending_interjections`）与
-        `storage/job_media.py::write_back` 都必须按键写。判据是源码里整块替换语句的出现
-        次数——旧实现 store.py 4 条、job_media.py 1 条调用。
+        规则是**按函数**判的，不是按文件计数：整块替换只允许出现在
+        `update_message_metadata`（"整块 metadata 都是自己算的"场景）与一次性数据改写型
+        迁移（`_migrate_to_v22/v23`，存量行批量改写，不参与并发）。三个插话写入方
+        （`set_interjection_guided` / `mark_run_interjections_consumed` /
+        `stop_pending_interjections`）与 `storage/job_media.py::write_back` 必须按键写。
         """
-        store = _read_source("naiba", "storage", "store.py")
+        import ast
+
+        source = _read_source("naiba", "storage", "store.py")
+        spans = [
+            (node.name, node.lineno, node.end_lineno or node.lineno)
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        allowed = {"update_message_metadata", "_migrate_to_v22", "_migrate_to_v23"}
+        offenders = []
+        for match in re.finditer(r"UPDATE messages SET [^\n]*", source):
+            statement = match.group(0)
+            if "metadata = ?" not in statement and "metadata = ?," not in statement:
+                continue
+            line = source[: match.start()].count("\n") + 1
+            owner = next(
+                (name for name, start, end in spans if start <= line <= end), "<module>"
+            )
+            if owner not in allowed:
+                offenders.append(f"{owner}:{line} {statement.strip()[:60]}")
         self.assertEqual(
-            store.count("UPDATE messages SET metadata = ? WHERE id = ?"), 1,
-            "store.py 只允许 update_message_metadata 那一条整块替换（其余一律键级 json_set）",
+            [], offenders,
+            "共享消息行上的整块 metadata 写回只允许 update_message_metadata 与数据迁移，"
+            f"其余必须键级 json_set：{offenders}",
         )
-        self.assertIn("json_set(", store, "键级合并必须真的落到 SQL 上")
+        self.assertIn("json_set(", source, "键级合并必须真的落到 SQL 上")
         media = _read_source("naiba", "storage", "job_media.py")
         self.assertIn("merge_message_metadata", media, "产物写回必须按键合并")
         self.assertNotIn(

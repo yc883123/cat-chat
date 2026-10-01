@@ -606,7 +606,9 @@ class StorageLayerTests(UsageStatsBase):
         self.assertEqual(stats["totals"]["turns"], 2)
 
     def test_migration_v21_idempotent(self) -> None:
-        self.assertEqual(CURRENT_SCHEMA_VERSION, 21)
+        # 只断言"当前版本已包含 v21"，不再钉死具体数字：每加一条迁移都要来改这里的话，
+        # 这条用例就退化成"记得改数字"，而不是它真正要守的"重复打开幂等、数据保留"。
+        self.assertGreaterEqual(CURRENT_SCHEMA_VERSION, 21)
         # 同一库重复打开：迁移幂等，数据保留。
         self.storage.record_usage({
             "run_id": "m1", "requests": 1, "input_tokens": 10, "output_tokens": 1,

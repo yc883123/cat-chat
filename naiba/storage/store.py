@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import logging
 import math
@@ -25,7 +26,7 @@ _METADATA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
-CURRENT_SCHEMA_VERSION = 22
+CURRENT_SCHEMA_VERSION = 23
 
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
@@ -658,6 +659,104 @@ def _migrate_to_v22(db: sqlite3.Connection) -> None:
         print(f"[naiba-storage] v22：清理 {updated} 行 first_turn.full_messages（只写不读的副本）")
 
 
+def _migrate_to_v23(db: sqlite3.Connection) -> None:
+    """把 `metadata.trace` 抽成 `message_traces` 独立表，按内容哈希只存一份（幂等）。
+
+    **为什么要抽**：`trace` 是「本轮发给模型的完整字节序列」，按 assistant 消息各存一份。
+    实测 messages.metadata 221.7MB 里它占 167.4MB；而按整块内容去重后，其中 62.2MB
+    （36%）是**逐字节重复的同一份 blob**（同一 trace 被多条消息各存一遍）。
+    抽表后：① 重复的只留一份；② 22 万行 run_events 之外，缓存引用扫描
+    （`referenced_cache_paths`，上传时同步跑）不必再遍历混着大 blobs 的 metadata 文本。
+
+    **口径**：`messages.trace_hash` 指向 `message_traces.trace_hash`，行内不再留 `trace`；
+    读取侧由 `_message_dict` 透明补回 `metadata["trace"]`，所以 `history.py`、前端与
+    所有既有消费方**不需要任何改动**。
+
+    **路径引用风险（必须一并处理）**：trace 里会出现宿主缓存路径（实测 131 条消息），
+    而 `upload_path_referenced` / `referenced_cache_paths` 原先只扫 messages.metadata 与
+    background_tasks.snapshot。不把本表接入这两处，缓存清理就会把仍在对话里引用的图片
+    当成"没人用"删掉。已在两个扫描点加入 message_traces.data。
+
+    幂等：已经抽过的行（trace_hash 已填且 metadata 无 trace）跳过；`CREATE TABLE`/
+    `ALTER TABLE` 均已存在时跳过。内容改写失败会让迁移整体失败（用户可见、可重试）。
+    """
+    try:
+        db.execute("SELECT trace_hash FROM messages LIMIT 1")
+    except sqlite3.OperationalError:
+        db.execute("ALTER TABLE messages ADD COLUMN trace_hash TEXT NOT NULL DEFAULT ''")
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS message_traces ("
+        "trace_hash TEXT PRIMARY KEY, data TEXT NOT NULL)"
+    )
+    # 按「真正会写盘的 JSON 文本」去重：文本相同 = 内容相同，正是运行期 `add_message`
+    # 存进去的那份字节。用户实测 `metadata` 里的 trace 文本重复率 36%，这一轮就能收敛。
+    payload_by_sort_key: dict[str, str] = {}
+    pending: list[tuple[str, str]] = []  # (message_id, sort_key)
+    for message_id, raw in db.execute(
+        "SELECT id, metadata FROM messages "
+        "WHERE metadata LIKE '%\"trace\"%' AND trace_hash = ''"
+    ).fetchall():
+        try:
+            metadata = json.loads(raw or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(metadata, dict) or "trace" not in metadata:
+            continue
+        trace = metadata.get("trace")
+        if not isinstance(trace, list) or not trace:
+            # 空 trace 与"没有 trace"等价：只摘键，不建表行（省掉一张空行）。
+            metadata.pop("trace", None)
+            db.execute(
+                "UPDATE messages SET metadata = ? WHERE id = ?",
+                (json.dumps(metadata, ensure_ascii=False), message_id),
+            )
+            continue
+        try:
+            payload = json.dumps(trace, ensure_ascii=False)
+            sort_key = json.dumps(trace, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            continue  # 不可序列化（理论上不会发生）：原样保留，不冒险改写
+        payload_by_sort_key.setdefault(sort_key, payload)
+        pending.append((message_id, sort_key))
+
+    hash_by_sort_key: dict[str, str] = {}
+    written = 0
+    for sort_key, payload in payload_by_sort_key.items():
+        trace_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        hash_by_sort_key[sort_key] = trace_hash
+        cursor = db.execute(
+            "INSERT OR IGNORE INTO message_traces(trace_hash, data) VALUES (?, ?)",
+            (trace_hash, payload),
+        )
+        written += cursor.rowcount
+    updates: list[tuple[str, str, str]] = []
+    for message_id, sort_key in pending:
+        trace_hash = hash_by_sort_key.get(sort_key)
+        if not trace_hash:
+            continue
+        row = db.execute("SELECT metadata FROM messages WHERE id = ?", (message_id,)).fetchone()
+        try:
+            metadata = json.loads((row[0] if row else "") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        metadata.pop("trace", None)
+        updates.append((json.dumps(metadata, ensure_ascii=False), trace_hash, message_id))
+    db.executemany("UPDATE messages SET metadata = ?, trace_hash = ? WHERE id = ?", updates)
+    if pending:
+        print(
+            f"[naiba-storage] v23：trace 抽表完成，{len(pending)} 条消息 → "
+            f"{written} 份唯一 blob（{len(updates)} 行已改写）"
+        )
+    db.commit()
+    try:
+        db.execute("VACUUM")
+    except sqlite3.OperationalError as exc:
+        # 空间回收失败不影响内容迁移结果（与 v14 同口径）。
+        _warn_data_migration(db, f"[naiba-storage] 迁移 v23 内容完成，VACUUM 未执行：{exc}")
+
+
 # 目标版本 -> 迁移函数。新增版本时在此追加并提升 CURRENT_SCHEMA_VERSION。
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
@@ -682,6 +781,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     20: _migrate_to_v20,
     21: _migrate_to_v21,
     22: _migrate_to_v22,
+    23: _migrate_to_v23,
 }
 
 
@@ -816,6 +916,54 @@ def _job_values_unchanged(values: dict[str, Any], current: dict[str, Any] | None
     return compared
 
 
+# ---- trace 的内容寻址存储（v23 起）----
+# `metadata.trace` 是「本轮发给模型的完整字节序列」，按 assistant 消息各存一份；实测
+# messages.metadata 221.7MB 里它占 167.4MB，且 36% 是逐字节重复的同一份 blob。
+# 抽到 `message_traces(trace_hash, data)` 后：同一 blob 全库一行；读取侧由
+# `_hydrate_trace` 透明补回 `metadata["trace"]`，**所有消费方（history/前端/导出）零改动**。
+def _trace_blob(trace: Any) -> str | None:
+    """把一条消息的 trace 序列化成落库文本；空 trace 与"没有 trace"等价，返回 None。"""
+    if not isinstance(trace, list) or not trace:
+        return None
+    try:
+        return json.dumps(trace, ensure_ascii=False)
+    except (TypeError, ValueError):
+        # 不可序列化（理论上不会发生）：按"没有 trace"处理，绝不让它打断消息落库。
+        return None
+
+
+def _split_trace_payload(metadata: dict[str, Any]) -> tuple[str, str] | None:
+    """从 metadata 里**摘出** trace 并返回 (trace_hash, payload)；无 trace 返回 None。
+
+    就地修改入参（调用方传的是自己的副本）。trace 为空列表时只摘键、不建表行。
+    """
+    if "trace" not in metadata:
+        return None
+    blob = _trace_blob(metadata.pop("trace"))
+    if blob is None:
+        return None
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest(), blob
+
+
+def _hydrate_trace(db: sqlite3.Connection, trace_hash: str, cache: dict[str, str]) -> list[Any] | None:
+    """按 hash 取回 trace 列表；取不到（行缺失/损坏）返回 None（调用方保持无 trace）。"""
+    if not trace_hash:
+        return None
+    if trace_hash not in cache:
+        row = db.execute(
+            "SELECT data FROM message_traces WHERE trace_hash = ?", (trace_hash,)
+        ).fetchone()
+        cache[trace_hash] = str(row[0]) if row and row[0] else ""
+    blob = cache.get(trace_hash) or ""
+    if not blob:
+        return None
+    try:
+        value = json.loads(blob)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return value if isinstance(value, list) else None
+
+
 class ChatStorage:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -827,10 +975,14 @@ class ChatStorage:
         self._initialize()
 
     def upload_path_referenced(self, target: Path) -> bool:
-        """目标上传文件是否已被引用（messages.metadata / background_tasks.snapshot）。
+        """目标上传文件是否已被引用（messages.metadata / background_tasks.snapshot / traces）。
 
         删除保护：上传文件被任何消息附件或 run 快照引用后不可删除，
         避免移除 chip 的 DELETE 误删"已发送/已引用"的文件（防御双端竞态）。
+
+        `message_traces.data` 也必须扫：v23 起 `metadata.trace` 搬进了独立表，而 trace 里
+        会出现宿主缓存路径（实测 131 条消息）。漏掉它就会把仍被 trace 引用的图片当"没人用"
+        删掉（模型下一轮 vision_analyze 直接报"未找到图片文件"）。
         """
         # metadata/snapshot 以 json.dumps(ensure_ascii=False) 存储：路径值形如
         # "path": "C:\\...\\x.pdf"。用 JSON 转义后的片段做 LIKE 子串匹配。
@@ -845,6 +997,11 @@ class ChatStorage:
             row = db.execute(
                 "SELECT 1 FROM background_tasks WHERE snapshot LIKE ? ESCAPE '\\' LIMIT 1", (like,)
             ).fetchone()
+            if row:
+                return True
+            row = db.execute(
+                "SELECT 1 FROM message_traces WHERE data LIKE ? ESCAPE '\\' LIMIT 1", (like,)
+            ).fetchone()
             return bool(row)
 
     def referenced_cache_paths(self, roots: Iterable[str | Path]) -> set[str]:
@@ -855,13 +1012,16 @@ class ChatStorage:
         POST /api/uploads 的响应里，用户看到的是"上传 78 秒"。改成**一次流式扫描**、
         把结果建成集合后按组查表，成本从 O(组数 × 全表) 降到 O(全表) 一次。
 
-        口径与 ``upload_path_referenced`` **保持一致**（同样只认 messages.metadata 与
-        background_tasks.snapshot，同样按"JSON 转义后的字面路径"匹配），只是把
-        "逐文件问一次"换成"整表找一遍"。
+        口径与 ``upload_path_referenced`` **保持一致**（同样只认 messages.metadata、
+        background_tasks.snapshot 与 message_traces.data，同样按"JSON 转义后的字面路径"
+        匹配），只是把"逐文件问一次"换成"整表找一遍"。
 
         实现：按**转义后的目录前缀**在原文里做 C 级 ``str.find``，比逐行 ``json.loads``
         （118MB 级）快一个数量级，而且某一行 JSON 损坏也不会让整批判定失败
         （那种情况下该行的路径进不了集合，删除前还有 ``upload_path_referenced`` 复核兜底）。
+
+        v23 起 trace 在 `message_traces.data`：漏扫这一表 = 缓存清理看不见 trace 里的引用
+        （实测 131 条消息），会把仍在对话里用的图片当"没人用"删掉。
 
         返回值为 ``normalized_path_key`` 规范化后的比较键集合（绝对路径 + 大小写归一）。
         """
@@ -879,7 +1039,11 @@ class ChatStorage:
             return set()
         found: set[str] = set()
         with self._connect() as db:
-            for table, column in (("messages", "metadata"), ("background_tasks", "snapshot")):
+            for table, column in (
+                ("messages", "metadata"),
+                ("background_tasks", "snapshot"),
+                ("message_traces", "data"),
+            ):
                 cursor = db.execute(f"SELECT {column} FROM {table}")
                 for row in cursor:
                     text = row[0]
@@ -954,6 +1118,10 @@ class ChatStorage:
                 );
                 CREATE INDEX IF NOT EXISTS idx_messages_conversation
                     ON messages(conversation_id, created_at);
+                CREATE TABLE IF NOT EXISTS message_traces (
+                    trace_hash TEXT PRIMARY KEY,
+                    data TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS background_tasks (
                     id TEXT PRIMARY KEY,
                     conversation_id TEXT NOT NULL,
@@ -1765,11 +1933,15 @@ class ChatStorage:
             )
             if include_messages:
                 messages = db.execute(
-                    "SELECT id, role, content, metadata, created_at FROM messages "
+                    "SELECT id, role, content, metadata, trace_hash, created_at FROM messages "
                     "WHERE conversation_id = ? ORDER BY created_at, rowid",
                     (conversation_id,),
                 ).fetchall()
-                result["messages"] = [self._message_dict(message) for message in messages]
+                # 同一批次内复用 trace blob（长会话里同一份 trace 可能被多条消息引用）。
+                trace_cache: dict[str, str] = {}
+                result["messages"] = [
+                    self._message_dict(db, message, trace_cache) for message in messages
+                ]
             return result
 
     @_retry_transient_write
@@ -2218,12 +2390,22 @@ class ChatStorage:
     ) -> dict[str, Any]:
         now = int(time.time() * 1000)
         message_id = uuid.uuid4().hex
-        metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
+        payload = dict(metadata or {})
+        # trace 走内容寻址独立表：同一份 blob 只存一行，消息行只留 trace_hash。
+        # 调用方接口不变——返回值里照旧带完整 `metadata["trace"]`。
+        trace_hash = _split_trace_payload(payload)
+        metadata_json = json.dumps(payload, ensure_ascii=False)
         with self._connect() as db:
+            if trace_hash:
+                db.execute(
+                    "INSERT OR IGNORE INTO message_traces(trace_hash, data) VALUES (?, ?)",
+                    (trace_hash[0], trace_hash[1]),
+                )
             db.execute(
-                "INSERT INTO messages(id, conversation_id, role, content, metadata, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (message_id, conversation_id, role, content, metadata_json, now),
+                "INSERT INTO messages(id, conversation_id, role, content, metadata, trace_hash, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (message_id, conversation_id, role, content, metadata_json,
+                 trace_hash[0] if trace_hash else "", now),
             )
             db.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
@@ -2353,12 +2535,32 @@ class ChatStorage:
         因此消息顺序契约 `(created_at, rowid)` 不受影响；updated_at 变化会让前端既有
         轮询（syncCurrentConversation 的 snapshot）检测到并重渲染该会话。
         返回是否命中该消息（消息已被删除时 False，调用方记录后放弃）。
+
+        **整块替换**是本方法唯一的合法形态（各写入方只传自己拥有的键，见契约），
+        但 trace 例外：调用方给的 metadata 常是 `get_conversation` 回读的整块（已含
+        hydrate 回来的 trace），照原样写回就会把大 blob 重新塞进 metadata 列。这里统一
+        摘出来走内容寻址表（`add_message` 同款口径），保持"trace 只在 message_traces"。
         """
         now = int(time.time() * 1000)
+        payload = dict(metadata or {})
+        trace = _split_trace_payload(payload)
+        metadata_json = json.dumps(payload, ensure_ascii=False)
         with self._connect() as db:
+            assignments = "metadata = ?"
+            values: list[Any] = [metadata_json]
+            if trace:
+                db.execute(
+                    "INSERT OR IGNORE INTO message_traces(trace_hash, data) VALUES (?, ?)",
+                    (trace[0], trace[1]),
+                )
+                assignments += ", trace_hash = ?"
+                values.append(trace[0])
+            # 不带 trace 时**不碰** trace_hash：调用方没给 trace 是常规形态，
+            # 不能因为"这次 metadata 里没有 trace"就把该行已有的 trace 抹掉。
+            values.extend([message_id, conversation_id])
             cursor = db.execute(
-                "UPDATE messages SET metadata = ? WHERE id = ? AND conversation_id = ?",
-                (json.dumps(metadata or {}, ensure_ascii=False), message_id, conversation_id),
+                f"UPDATE messages SET {assignments} WHERE id = ? AND conversation_id = ?",
+                tuple(values),
             )
             if cursor.rowcount:
                 db.execute(
@@ -2821,12 +3023,13 @@ class ChatStorage:
             return []
         with self._connect() as db:
             rows = db.execute(
-                "SELECT id, role, content, metadata, created_at FROM messages "
+                "SELECT id, role, content, metadata, trace_hash, created_at FROM messages "
                 "WHERE conversation_id = ? AND role = 'user' ORDER BY created_at, rowid",
                 (str(run.get("conversation_id") or ""),),
             ).fetchall()
+            messages = [self._message_dict(db, row) for row in rows]
         return [
-            message for message in (self._message_dict(row) for row in rows)
+            message for message in messages
             if bool(message.get("metadata", {}).get(MetadataKeys.INTERJECTION))
             and str(message.get("metadata", {}).get(MetadataKeys.RUN_ID) or "") == run_id
             and bool(message.get("metadata", {}).get(MetadataKeys.INTERJECTION_GUIDED))
@@ -2850,13 +3053,13 @@ class ChatStorage:
             if not active:
                 raise LookupError("运行不存在或已结束")
             row = db.execute(
-                "SELECT id, role, content, metadata, created_at FROM messages "
+                "SELECT id, role, content, metadata, trace_hash, created_at FROM messages "
                 "WHERE id = ? AND conversation_id = ? AND role = 'user'",
                 (message_id, conversation_id),
             ).fetchone()
             if not row:
                 raise LookupError("待引导消息不存在")
-            message = self._message_dict(row)
+            message = self._message_dict(db, row)
             metadata = dict(message.get("metadata") or {})
             if (not metadata.get(MetadataKeys.INTERJECTION)
                     or str(metadata.get(MetadataKeys.RUN_ID) or "") != run_id
@@ -2988,13 +3191,13 @@ class ChatStorage:
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                "SELECT id, role, content, metadata, created_at FROM messages "
+                "SELECT id, role, content, metadata, trace_hash, created_at FROM messages "
                 "WHERE id = ? AND conversation_id = ? AND role = 'user'",
                 (message_id, conversation_id),
             ).fetchone()
             if not row:
                 raise LookupError("插话不存在")
-            message = self._message_dict(row)
+            message = self._message_dict(db, row)
             metadata = dict(message.get("metadata") or {})
             if (not metadata.get(MetadataKeys.INTERJECTION)
                     or str(metadata.get(MetadataKeys.RUN_ID) or "") != run_id
@@ -3070,11 +3273,11 @@ class ChatStorage:
                 (message_id, conversation_id, message, json.dumps(metadata, ensure_ascii=False), now),
             )
             rows = db.execute(
-                "SELECT id, role, content, metadata, created_at FROM messages "
+                "SELECT id, role, content, metadata, trace_hash, created_at FROM messages "
                 "WHERE conversation_id = ? ORDER BY created_at, rowid",
                 (conversation_id,),
             ).fetchall()
-            history = [self._message_dict(row) for row in rows]
+            history = [self._message_dict(db, row) for row in rows]
             frozen = dict(snapshot)
             frozen["conversation_messages"] = history
             db.execute(
@@ -3800,13 +4003,38 @@ class ChatStorage:
                 result[key] = [] if key == "steps" else {}
         return result
 
-    @staticmethod
-    def _message_dict(row: sqlite3.Row) -> dict[str, Any]:
+    def _message_dict(
+        self,
+        db: sqlite3.Connection,
+        row: sqlite3.Row,
+        trace_cache: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """把 messages 行转成消息字典，并把 trace 从独立表**透明补回** ``metadata``。
+
+        为什么必须补回：`history.py` 与前端都按 `metadata["trace"]` 读取，抽表不能改变
+        这个契约。调用方拿不到 trace 时保持"无 trace"（与"这条消息本来就没有 trace"同形），
+        `build_model_history` 的既有兜底分支照旧成立。
+
+        ``trace_cache`` 由一次批量读取（如 `get_conversation`）传入以复用同 blob，
+        缺省时每次查询一次——同一 hash 在同一批次内极少重复，不额外挂全局缓存。
+        """
         result = dict(row)
         try:
-            result["metadata"] = json.loads(result.get("metadata") or "{}")
+            metadata = json.loads(result.get("metadata") or "{}")
         except json.JSONDecodeError:
-            result["metadata"] = {}
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        trace_hash = str(result.get("trace_hash") or "")
+        if trace_hash and "trace" not in metadata:
+            trace = _hydrate_trace(
+                db, trace_hash, trace_cache if trace_cache is not None else {}
+            )
+            if trace is not None:
+                metadata["trace"] = trace
+        result["metadata"] = metadata
+        # trace_hash 是实现细节，不透给消费方（避免它被当成 metadata 契约的一部分）。
+        result.pop("trace_hash", None)
         return result
 
     @staticmethod

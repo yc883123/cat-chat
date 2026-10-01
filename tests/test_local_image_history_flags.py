@@ -473,6 +473,28 @@ class ConcurrentMetadataWritersTests(unittest.TestCase):
         self.assertNotIn(MetadataKeys.SESSION_START, metadata, "边界要被摘掉")
         self.assertEqual(self._flag_names(), ["a.png"], "摘边界不得顺手抹掉旗标")
 
+    def test_no_whole_blob_metadata_write_on_shared_rows(self) -> None:
+        """**结构守门**：共享行上的写入一律键级（`json_set`/`json_remove`），不得整块写回。
+
+        允许整块写回的只剩 `update_message_metadata` 一处（"整块 metadata 都是自己算的"
+        场景）；三个插话写入方（`set_interjection_guided` /
+        `mark_run_interjections_consumed` / `stop_pending_interjections`）与
+        `storage/job_media.py::write_back` 都必须按键写。判据是源码里整块替换语句的出现
+        次数——旧实现 store.py 4 条、job_media.py 1 条调用。
+        """
+        store = _read_source("naiba", "storage", "store.py")
+        self.assertEqual(
+            store.count("UPDATE messages SET metadata = ? WHERE id = ?"), 1,
+            "store.py 只允许 update_message_metadata 那一条整块替换（其余一律键级 json_set）",
+        )
+        self.assertIn("json_set(", store, "键级合并必须真的落到 SQL 上")
+        media = _read_source("naiba", "storage", "job_media.py")
+        self.assertIn("merge_message_metadata", media, "产物写回必须按键合并")
+        self.assertNotIn(
+            "update_message_metadata", media,
+            "整块替换会抹掉同一助手消息上的 session_start（用户点过「新会话」时）",
+        )
+
     def test_merge_message_metadata_semantics(self) -> None:
         """合并的契约：只改传进来的键、返回是否命中、非法键名直接报错。"""
         self.assertTrue(

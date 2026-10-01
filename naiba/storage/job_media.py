@@ -86,7 +86,24 @@ class JobMediaWriter:
         if not added:
             return None
         message_id = str(message.get("id") or "")
-        if not self._storage.update_message_metadata(conversation_id, message_id, metadata):
+        # **只 patch 自己拥有的那几个键**，不整块写回。同一条助手消息上还有别的写入方
+        # （用户可以给 AI 回复点「新会话」→ `set_session_start` 就写在这一行），而 Job
+        # 可能在几十分钟后才写回产物：整块写回会拿着"点之前"的旧快照把 `session_start`
+        # 抹掉 ⇒ `build_model_history` 清空整段上下文（用户视角＝模型突然失忆）。
+        # 只带上"本来就有"的键，避免凭空给消息加空数组。
+        patch: dict[str, Any] = {}
+        for key in (MetadataKeys.TOOL_RUNS, "activity", MetadataKeys.ATTACHMENTS):
+            if key in metadata:
+                patch[key] = metadata[key]
+        # 产物不再截断时要清掉旧标记（`json_remove`；删不存在的键是静默无操作）。
+        remove: tuple[str, ...] = ()
+        if metadata.get(MetadataKeys.ATTACHMENTS_TRUNCATED):
+            patch[MetadataKeys.ATTACHMENTS_TRUNCATED] = metadata[MetadataKeys.ATTACHMENTS_TRUNCATED]
+        else:
+            remove = (MetadataKeys.ATTACHMENTS_TRUNCATED,)
+        if not self._storage.merge_message_metadata(
+            conversation_id, message_id, patch, remove=remove
+        ):
             logger.warning("Job 产物写回失败（消息已不存在）：message=%s", message_id)
             return None
         return {"conversation_id": conversation_id, "message_id": message_id, "added": added}

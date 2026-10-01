@@ -2279,38 +2279,51 @@ class ChatStorage:
 
     @_retry_transient_write
     def merge_message_metadata(
-        self, conversation_id: str, message_id: str, patch: dict[str, Any]
+        self,
+        conversation_id: str,
+        message_id: str,
+        patch: dict[str, Any],
+        *,
+        remove: tuple[str, ...] | list[str] = (),
     ) -> bool:
-        """**按键原子合并**一条消息的 metadata（单条 ``json_set`` UPDATE），并推进会话 updated_at。
+        """**按键原子合并**一条消息的 metadata（单条 ``json_set``/``json_remove`` UPDATE），并推进会话 updated_at。
 
         为什么不能用「先读整块 metadata、改完再整块写回」：同一条消息上有多个写入方
-        （图片降级旗标 `local_images_capped`、会话边界 `session_start`、插话状态…），
-        各自读到的都是**旧**整块，后写者会把先写者刚落的键整块抹掉。丢 `session_start`
-        的后果不是"少个标记"——`build_model_history` 会把整段上下文清空（用户视角＝模型
-        突然失忆）。这里把写入降成"只改自己那几个键"，其他键由数据库按**当前值**原样保留，
-        两个写入方并发也不再互相覆盖。
+        （图片降级旗标 `local_images_capped`、会话边界 `session_start`、异步 Job 产物写回的
+        `tool_runs`/`attachments`、插话状态…），各自读到的都是**旧**整块，后写者会把先写者
+        刚落的键整块抹掉。丢 `session_start` 的后果不是"少个标记"——`build_model_history`
+        会把整段上下文清空（用户视角＝模型突然失忆）。这里把写入降成"只改自己那几个键"，
+        其他键由数据库按**当前值**原样保留，两个写入方并发也不再互相覆盖。
 
-        契约：``patch`` 的键必须是一层、且只含标识符字符（键名直接进 JSON 路径，不接受
-        调用方任意字符串）；值以 JSON 文本经 ``json(?)`` 传入。返回是否命中该消息
-        （消息不存在时 False——SQLite 对 UPDATE 的 rowcount 只统计命中的行，即使新值
-        与旧值相同也计 1，所以 0 一定意味着"没这行"）。
+        ``remove``：需要**删掉**的键（例如产物不再截断时要清 `attachments_truncated`）。
+        删除不存在的键是静默无操作，调用方不必先确认它在不在。
+
+        契约：键必须是一层、且只含标识符字符（键名直接进 JSON 路径，不接受调用方任意
+        字符串）；值以 JSON 文本经 ``json(?)`` 传入。返回是否命中该消息（消息不存在时
+        False——SQLite 对 UPDATE 的 rowcount 只统计命中的行，即使新值等于旧值也计 1，
+        所以 0 一定意味着"没这行"）。
         """
         keys = [str(key) for key in (patch or {})]
-        if not keys:
+        remove_keys = [str(key) for key in (remove or ())]
+        if not keys and not remove_keys:
             return False
-        for key in keys:
+        for key in (*keys, *remove_keys):
             if not _METADATA_KEY_RE.match(key):
                 raise ValueError(f"metadata 键名非法（只允许一层标识符）：{key!r}")
         # 键名来自代码常量（MetadataKeys），此处已做形状校验；SQLite 的 JSON 路径
         # 又不能写占位符，所以只能拼接——那句校验就是这条拼接的安全边界。
-        assignments = ", ".join(f"'$.{key}', json(?)" for key in keys)
+        expression = "COALESCE(NULLIF(metadata, ''), '{}')"
+        if keys:
+            assignments = ", ".join(f"'$.{key}', json(?)" for key in keys)
+            expression = f"json_set({expression}, {assignments})"
+        if remove_keys:
+            paths = ", ".join(f"'$.{key}'" for key in remove_keys)
+            expression = f"json_remove({expression}, {paths})"
         values = [json.dumps(patch[key], ensure_ascii=False) for key in keys]
         now = int(time.time() * 1000)
         with self._connect() as db:
             cursor = db.execute(
-                "UPDATE messages SET metadata = "
-                f"json_set(COALESCE(NULLIF(metadata, ''), '{{}}'), {assignments}) "
-                "WHERE id = ? AND conversation_id = ?",
+                f"UPDATE messages SET metadata = {expression} WHERE id = ? AND conversation_id = ?",
                 (*values, message_id, conversation_id),
             )
             if cursor.rowcount:
@@ -2761,9 +2774,15 @@ class ChatStorage:
                     or metadata.get(MetadataKeys.INTERJECTION_CONSUMED)):
                 raise LookupError("待引导消息不存在或已被处理")
             metadata[MetadataKeys.INTERJECTION_GUIDED] = True
+            # 同事务内**只改自己这一个键**（json_set）：整块写回会抹掉同行其他写入方
+            # （图片降级旗标等）并发落下的键。不能换成 merge_message_metadata——那会另开
+            # 连接，"读→判断→写"就不再原子，而本函数的幂等性正建立在这段原子性上。
             db.execute(
-                "UPDATE messages SET metadata = ? WHERE id = ?",
-                (json.dumps(metadata, ensure_ascii=False), message_id),
+                "UPDATE messages SET metadata = "
+                f"json_set(COALESCE(NULLIF(metadata, ''), '{{}}'), "
+                f"'$.{MetadataKeys.INTERJECTION_GUIDED}', json('true')) "
+                "WHERE id = ?",
+                (message_id,),
             )
             db.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
         message["metadata"] = metadata
@@ -2790,8 +2809,11 @@ class ChatStorage:
                     continue
                 metadata[MetadataKeys.INTERJECTION_CONSUMED] = True
                 db.execute(
-                    "UPDATE messages SET metadata = ? WHERE id = ?",
-                    (json.dumps(metadata, ensure_ascii=False), row["id"]),
+                    "UPDATE messages SET metadata = "
+                    f"json_set(COALESCE(NULLIF(metadata, ''), '{{}}'), "
+                    f"'$.{MetadataKeys.INTERJECTION_CONSUMED}', json('true')) "
+                    "WHERE id = ?",
+                    (row["id"],),
                 )
 
     @_retry_transient_write
@@ -2827,8 +2849,11 @@ class ChatStorage:
                 if not metadata.get(MetadataKeys.INTERJECTION_STOPPED):
                     metadata[MetadataKeys.INTERJECTION_STOPPED] = True
                     db.execute(
-                        "UPDATE messages SET metadata = ? WHERE id = ?",
-                        (json.dumps(metadata, ensure_ascii=False), row["id"]),
+                        "UPDATE messages SET metadata = "
+                        f"json_set(COALESCE(NULLIF(metadata, ''), '{{}}'), "
+                        f"'$.{MetadataKeys.INTERJECTION_STOPPED}', json('true')) "
+                        "WHERE id = ?",
+                        (row["id"],),
                     )
                     stopped += 1
         return stopped

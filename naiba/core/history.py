@@ -12,6 +12,7 @@ import hashlib
 import io
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -63,13 +64,16 @@ LOCAL_IMAGE_OMITTED_HINT = "本地模型单次请求的图片上限"
 def local_image_omitted_marker(names: list[str]) -> str:
     """被省略图片的占位文本（**唯一实现**，``json`` 序列化图片文件名）。
 
-    「首次降级那轮的线上改写」（``vision/runtime.py``）与「之后各轮的旗标回放」（本模块）
-    必须逐字节一致，否则前缀还是断在原地——所以这条文案只能有一份，两处都调它。
+    ``names`` 允许**重复**：重复项代表"同一张图被附了两次、两张都省了"。占位里的张数
+    按**出现次数**报，``json`` 里只列去重后的文件名（展示口径）——「首次降级那轮的线上
+    改写」（``vision/runtime.py``）与「之后各轮的旗标回放」（本模块）必须逐字节一致，
+    所以计数与展示都只能有一份实现。
     """
     cleaned = [str(name or "（未命名图片）") for name in names]
+    shown = list(dict.fromkeys(cleaned))
     return (
         f"{LOCAL_IMAGE_OMITTED_PREFIX}{len(cleaned)} 张较早的图片：{LOCAL_IMAGE_OMITTED_HINT}\n"
-        f"图片文件名：{json.dumps(cleaned, ensure_ascii=False)}\n"
+        f"图片文件名：{json.dumps(shown, ensure_ascii=False)}\n"
         "（如需查看请调用 vision_analyze 工具并传入图片路径。）"
     )
 
@@ -80,7 +84,12 @@ def is_local_image_omitted_marker(text: str) -> bool:
 
 
 def local_omitted_image_names(metadata: Any) -> list[str]:
-    """读出这条消息已被降级的图片文件名（按当初的顺序）；无旗标返回空表。"""
+    """读出这条消息已被降级的图片文件名——**保留重复项**（按当初的降级顺序）。
+
+    重复项就是匹配依据：同一条消息里的同名图片（同一张图附两次，或两个不同目录下的同名
+    文件）必须按"第几次出现"逐一对应。按"名字在清单里"匹配会把本该**保留**的那张也一起
+    跳过 ⇒ 历史字节变化 + 那张图不可逆消失，恰好击穿"降级不可逆"要建立的不变量。
+    """
     flag = (metadata or {}).get(MetadataKeys.LOCAL_IMAGES_CAPPED)
     if not isinstance(flag, dict):
         return []
@@ -421,6 +430,7 @@ def build_model_history(
             # 槽位口径必须与降级那一轮完全一致（每张被降级的图当初也占过一个
             # MODEL_IMAGE_HISTORY_LIMIT 槽位），否则后面第 4 张图会凭空补进来 ⇒ 字节又变。
             omitted_names = local_omitted_image_names(metadata) if local_image_brain else []
+            omitted_left = Counter(omitted_names)
             omitted_replayed: list[str] = []
             consumed_slots = 0
             for upload in previous_uploads:
@@ -430,10 +440,14 @@ def build_model_history(
                 if consumed_slots >= MODEL_IMAGE_HISTORY_LIMIT:
                     break
                 name = Path(path).name
-                if name in omitted_names:
+                # 按**出现次数**匹配（不是"名字在清单里"）：同一条消息里的同名图片要
+                # 第几次出现对应第几次，否则会把本该保留的那张一起跳过——历史字节变了，
+                # 而且那张图不可逆地消失（见 local_omitted_image_names 的说明）。
+                if omitted_left.get(name, 0) > 0:
+                    omitted_left[name] -= 1
                     consumed_slots += 1
-                    if name not in omitted_replayed:
-                        omitted_replayed.append(name)
+                    # 清单里保留重复项：占位文本按出现次数报数（与降级那一轮同口径）。
+                    omitted_replayed.append(name)
                     continue
                 encoded = encode_image_for_model(path)
                 if encoded:

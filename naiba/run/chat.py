@@ -1096,11 +1096,16 @@ class ConversationRunMixin:
     def _record_local_image_demotions(
         self, conversation_id: str, demotions: list[dict[str, Any]]
     ) -> None:
-        """把「这一轮被省略的历史图片」落成消息 metadata 旗标——**降级不可逆**。
+        """把「这条消息已被省略的历史图片」落成 metadata 旗标——**降级不可逆**。
 
         存在理由：本地图片总量上限过去**每轮重算**保留集，窗口随新图滑动 ⇒ 被挤出去的那条
-        消息字节变化 ⇒ 从那条消息起本地前缀缓存全断（批量出图的会话每轮都在重新 prefill）。
-        旗标落库后，``build_model_history`` 直接回放同一份占位文本，历史字节从此单调稳定。
+        消息字节变化 ⇒ 从那条消息起本地前缀缓存断掉，而已经降级过的旧图还会被重新读盘 +
+        重编码（实测批量出图会话 63 次 vs 37 次，见 ``verify/_probe_image_prefix.py``）。
+        旗标落库后 ``build_model_history`` 直接回放同一份占位文本，降级不再回退、旧图不再重编码。
+
+        ``demotions[].names`` 是 vision 回传的**全量**清单（旧省在前 + 本轮新增在后，
+        含重复项），这里**整块替换**旗标而不是增量合并：增量合并遇到重复调用会把张数累加，
+        而重复项正是"同名图片省了几张"的回放匹配依据（见 core.history.local_omitted_image_names）。
 
         旁路语义：写库失败只记日志，本轮请求照发——旗标少落一轮，下一轮重新降级即可，
         代价只是多断一次前缀；记账失败绝不能中断对话（与 §九.136 同口径）。
@@ -1118,34 +1123,38 @@ class ConversationRunMixin:
             if isinstance(message, dict)
         }
         for entry in demotions:
-            message_id = str((entry or {}).get("message_id") or "")
-            names = [
-                str(name) for name in ((entry or {}).get("names") or []) if str(name or "").strip()
-            ]
-            if not message_id or not names:
-                # 没有 message id（历史不是 build_model_history 产出来的，例如测试桩）：
-                # 这一轮照常降级，只是不落旗标——下一轮重新算一遍，行为退回修复前。
-                continue
-            if message_id not in known:
-                logger.info("本地图片降级旗标跳过（消息已不存在）：message=%s", message_id)
-                continue
-            merged_names = list(dict.fromkeys(names))
-            previous_flag = known[message_id].get(MetadataKeys.LOCAL_IMAGES_CAPPED)
-            if isinstance(previous_flag, dict) and isinstance(previous_flag.get("names"), list):
-                # 旗标只增不减：保留旧清单在前，新降级的追加在后（回放占位因此稳定）。
-                merged_names = list(dict.fromkeys(
-                    [str(name) for name in previous_flag["names"] if str(name or "").strip()]
-                    + merged_names
-                ))
             try:
+                message_id = str((entry or {}).get("message_id") or "")
+                names = [
+                    str(name)
+                    for name in ((entry or {}).get("names") or [])
+                    if str(name or "").strip()
+                ]
+                if not message_id or not names:
+                    # 没有 message id（历史不是 build_model_history 产出来的，例如测试桩）：
+                    # 这一轮照常降级，只是不落旗标——下一轮重新算一遍，行为退回修复前。
+                    continue
+                if message_id not in known:
+                    logger.info("本地图片降级旗标跳过（消息已不存在）：message=%s", message_id)
+                    continue
+                metadata = known[message_id]
+                if not isinstance(metadata, dict):
+                    # metadata 不是 dict 属于数据损坏：记账失败绝不能升级成"本轮视觉清洗失败"
+                    # （外层 except 会把整轮所有图片降级成文本），所以就地记日志跳过。
+                    logger.warning(
+                        "本地图片降级旗标跳过（metadata 形态异常）：message=%s type=%s",
+                        message_id, type(metadata).__name__,
+                    )
+                    continue
                 self.app.storage.update_message_metadata(
                     conversation_id,
                     message_id,
-                    {**known[message_id], MetadataKeys.LOCAL_IMAGES_CAPPED: {"names": merged_names}},
+                    {**metadata, MetadataKeys.LOCAL_IMAGES_CAPPED: {"names": names}},
                 )
-            except Exception:  # noqa: BLE001 - 记账失败绝不中断对话
+            except Exception:  # noqa: BLE001 - 单条记账失败绝不中断对话
                 logger.exception(
-                    "本地图片降级旗标写入失败：conversation=%s message=%s", conversation_id, message_id
+                    "本地图片降级旗标写入失败：conversation=%s message=%s",
+                    conversation_id, (entry or {}).get("message_id"),
                 )
 
     def _all_run_events(self, run_id: str) -> list[dict[str, Any]]:

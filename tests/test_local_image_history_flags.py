@@ -204,6 +204,61 @@ class LocalImageFlagTests(unittest.TestCase):
             "旗标里的 paths[0] 仍占一个槽：只剩两张真图，第 4 张不得补位",
         )
 
+    def test_same_file_attached_twice_replays_byte_identically(self) -> None:
+        """同一张图在一条消息里附两次：回放必须逐字节等于首降那轮，且只跳该跳的那张。
+
+        旧写法按"名字在清单里"匹配 ⇒ 两个同名上传**都被跳过**，本该保留的那张也消失：
+        历史字节变了（前缀断）+ 那张图不可逆地没了，正好击穿本功能要建立的不变量。
+        触发很现实：前端上传不去重、后端按内容去重返回同一个 path，拖两次就是两个同名附件。
+        """
+        same = self.paths[0]
+        messages = [_user_message("m1", [same, same]), _user_message("m2", self.paths[1:2])]
+
+        first = build_model_history(messages, local_image_brain=True)
+        capped, _note, demotions = self._cap(first, limit=2)
+        messages[0]["metadata"][MetadataKeys.LOCAL_IMAGES_CAPPED] = {
+            "names": list(demotions[0]["names"])
+        }
+        replayed = build_model_history(messages, local_image_brain=True)
+
+        self.assertEqual(demotions[0]["names"], [Path(same).name], "只省了先出现的那一次")
+        self.assertEqual(_image_count(capped), 2)
+        self.assertEqual(_wire_bytes(capped[0]), _wire_bytes(replayed[0]), "回放必须字节一致")
+        self.assertEqual(_image_count(replayed), 2, "同名图片不得被一起跳过")
+
+    def test_different_files_with_the_same_basename_replay_byte_identically(self) -> None:
+        """两个不同目录下的同名文件：同样按"第几次出现"对应，不能按名字一刀切。"""
+        left = Path(self.tmp.name) / "left"
+        right = Path(self.tmp.name) / "right"
+        left.mkdir(exist_ok=True)
+        right.mkdir(exist_ok=True)
+        paths = _write_images(left, 1) + _write_images(right, 1)
+        self.assertEqual(Path(paths[0]).name, Path(paths[1]).name, "前置条件：两个文件同名")
+        self.assertNotEqual(paths[0], paths[1], "前置条件：两个文件不同")
+        messages = [_user_message("m1", paths), _user_message("m2", self.paths[1:2])]
+
+        first = build_model_history(messages, local_image_brain=True)
+        capped, _note, demotions = self._cap(first, limit=2)
+        messages[0]["metadata"][MetadataKeys.LOCAL_IMAGES_CAPPED] = {
+            "names": list(demotions[0]["names"])
+        }
+        replayed = build_model_history(messages, local_image_brain=True)
+
+        self.assertEqual(demotions[0]["names"], [Path(paths[0]).name])
+        self.assertEqual(_image_count(capped), 2)
+        self.assertEqual(_wire_bytes(capped[0]), _wire_bytes(replayed[0]))
+        self.assertEqual(_image_count(replayed), 2)
+
+    def test_duplicate_names_are_counted_by_occurrence(self) -> None:
+        """占位里的张数按**出现次数**报：同名两张都省了就说两张（json 里仍只列一次名字）。"""
+        same = self.paths[0]
+        messages = [_user_message("m1", [same, same, self.paths[1]])]
+        first = build_model_history(messages, local_image_brain=True)
+        capped, _note, _demotions = self._cap(first, limit=1)
+        marker = _marker_texts(capped)[0]
+        self.assertIn("已省略 2 张较早的图片", marker)
+        self.assertEqual(marker.count(Path(same).name), 1, "json 里只列一次（去重展示）")
+
     def test_online_brain_does_not_replay_flags(self) -> None:
         """旗标只在 kind=local 回放：在线大脑照常带原图（切模型断一次前缀，可接受）。"""
         messages = [_user_message("m1", self.paths[:3])]
@@ -288,19 +343,45 @@ class FlagPersistenceTests(unittest.TestCase):
             or []
         )
 
-    def test_merges_monotonically_and_keeps_other_metadata(self) -> None:
+    def test_replaces_with_the_authoritative_list_and_keeps_other_metadata(self) -> None:
+        """``names`` 是 vision 回传的**全量**清单 ⇒ 整块替换（旧省在前 + 本轮新增在后）。
+
+        替换而不是增量合并有两个理由：① 重复调用天然幂等（增量合并会把张数累加，
+        而重复项正是「同名图片省了几张」的回放匹配依据）；② 陈旧名字会被自然清掉。
+        """
         self.host._record_local_image_demotions(
             "c1", [{"message_id": "m1", "names": ["a.png"]}]
         )
+        self.assertEqual(self._flag(), ["a.png"])
         self.host._record_local_image_demotions(
-            "c1", [{"message_id": "m1", "names": ["b.png", "a.png"]}]
+            "c1", [{"message_id": "m1", "names": ["a.png", "b.png"]}]
         )
-        self.assertEqual(self._flag(), ["a.png", "b.png"], "旗标只增不减，且不去重两次")
+        self.assertEqual(self._flag(), ["a.png", "b.png"], "旧省在前、新增在后，顺序即回放顺序")
+        # 幂等：同一份全量清单再来一次，旗标一字不变（增量合并会变成 4 项）
+        self.host._record_local_image_demotions(
+            "c1", [{"message_id": "m1", "names": ["a.png", "b.png"]}]
+        )
+        self.assertEqual(self._flag(), ["a.png", "b.png"], "重复记账不得把同一张图数两次")
         self.assertEqual(
             self.messages[0]["metadata"].get("attachments"),
             [{"path": "a.png", "name": "a.png"}],
             "写旗标绝不能清空 attachments 等既有 metadata（update_message_metadata 是整块替换）",
         )
+
+    def test_keeps_duplicate_names_for_replay_matching(self) -> None:
+        """同名图片省了两张 ⇒ 清单里必须留两项（回放靠它逐次跳过）。"""
+        self.host._record_local_image_demotions(
+            "c1", [{"message_id": "m1", "names": ["dup.png", "dup.png"]}]
+        )
+        self.assertEqual(self._flag(), ["dup.png", "dup.png"])
+
+    def test_non_dict_metadata_is_skipped_without_raising(self) -> None:
+        """metadata 形态异常时只跳过该条，不得把异常抛到"整轮视觉清洗失败"分支。"""
+        self.messages[0]["metadata"] = "坏数据"
+        self.host._record_local_image_demotions(
+            "c1", [{"message_id": "m1", "names": ["a.png"]}]
+        )
+        self.assertEqual(self.storage.writes, [])
 
     def test_skips_entries_without_message_id(self) -> None:
         self.host._record_local_image_demotions("c1", [{"message_id": "", "names": ["a.png"]}])

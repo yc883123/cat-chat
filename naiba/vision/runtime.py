@@ -675,10 +675,10 @@ class VisionRouter:
         """只保留**最近** N 张真图（且不超字节上限），更早的图片改写成路径占位。
 
         返回 ``(capped, note, demotions)``。``demotions`` 是 ``[{"message_id", "names"}]``——
-        被降级清单**必须回传**给写库的那一层（run/chat 有 storage 与 message id），
-        落成消息 metadata 的 ``local_images_capped`` 旗标。旗标落库后，下一轮
-        ``build_model_history`` 直接回放同一份占位文本，保留窗口不再对老消息滑动 ⇒
-        历史字节单调稳定、本地前缀缓存不再每轮清零（缺 id 的条目只降级、不落旗标）。
+        ``names`` 是这条消息的**全量**降级清单（旧省在前 + 本轮新增在后，**含重复项**：
+        重复项代表"同名图片省了几张"），落库层据此整块替换 ``local_images_capped`` 旗标。
+        旗标落库后，下一轮 ``build_model_history`` 直接回放同一份占位文本，保留窗口不再对
+        老消息滑动 ⇒ 降级不可逆、旧图不再重编码（缺 id 的条目只降级、不落旗标）。
 
         占位文案由 ``core.history.local_image_omitted_marker`` 单一构造，与旗标回放共用——
         两处不一致就等于「首轮回放过占位、之后又改字节」，前缀照旧断。
@@ -741,7 +741,9 @@ class VisionRouter:
                 for name in (item.get(HISTORY_LOCAL_IMAGES_KEY) or [])
                 if str(name or "").strip()
             ]
-            merged_names = list(dict.fromkeys(previously_capped + dropped))
+            # **不去重**：重复项代表"同名图片省了几张"，是回放的匹配依据（去重会让
+            # 本该保留的那张一起被跳过）。展示用的去重在 local_image_omitted_marker 里做。
+            merged_names = previously_capped + dropped
             new_content = [
                 part for part in new_content
                 if not (
@@ -758,7 +760,9 @@ class VisionRouter:
             capped.append({**item, "content": new_content})
             demotions.append({
                 "message_id": str(item.get(HISTORY_MESSAGE_ID_KEY) or ""),
-                "names": dropped,
+                # 回传**全量**清单（旧省在前 + 本轮新增在后），不是本轮增量：
+                # 落库层据此整块替换旗标，重复调用天然幂等（增量合并会重复累加张数）。
+                "names": merged_names,
             })
         omitted = len(positions) - len(kept)
         note = (

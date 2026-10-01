@@ -216,6 +216,7 @@ verify/*
 !verify/_dedup_write_audit.py
 !verify/_release_check.py
 !verify/_serve_tmp.py
+!verify/run_freeze_smoke.py
 # 教程截图流水线（2026-09-26 入库）：冻结版 exe + 隔离根 + 播种 + Playwright 驱动三件套。
 # 口径与踩坑都写在 skill `frozen-build-shot-harness` 与文件内注释里，属可复用资产：
 # `_tut_run.sh` 一键跑一篇（重置隔离根 → 播种 → 起服务 → 拍 → 杀服务），

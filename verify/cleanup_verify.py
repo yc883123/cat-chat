@@ -111,6 +111,9 @@ KEEP = {
     # 图片缓存重复写入审计（只读）：按 sha256 量出 generated/uploads 的冗余字节，
     # 并验证 existing_content_path 不漏命中、不误判
     "_dedup_write_audit.py",
+    # 「运行中并发改会话」冒烟：真实服务 + 可暂停假后端，钉住 run 的"冻结快照自足"契约
+    # （改 `create_chat_run` 不再固化整段会话之前必须先跑通它）
+    "run_freeze_smoke.py",
     # 「重新生成 / 编辑」冒烟（§六 已登记；Python 自编排 + Node 检查）
     "regenerate_smoke.py", "regenerate_smoke.cjs",
     # 第一批三项（全文搜索 / 分支导航 / 删除单条消息）联动冒烟（§六 已登记）

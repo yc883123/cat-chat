@@ -363,6 +363,39 @@ class SameMillisecondRestoreOrderTests(MessageDeleteTestCase):
         self.storage.restore_messages(self.cid, removed)
         self.assertEqual(self._order()[-1], "第一轮回答", "缺原 rowid 时按插入顺序排到末尾")
 
+    def test_rowid_reuse_before_undo_still_anchors_in_place(self) -> None:
+        """撤销前又发过同毫秒消息（新消息复用了刚删掉的 rowid）也必须锚回原位。
+
+        SQLite 没有 AUTOINCREMENT：删掉"当时 rowid 最大"的那一行后，下一条新消息会复用该
+        rowid。找后继若用严格 ``>``，就会误判"没有后继"⇒ 不腾位 ⇒ 被撤销的消息排到最后，
+        正是这条修复要消灭的故障（只在撤销晚于下一条消息时触发，所以单看删→撤销测不出来）。
+        """
+        with mock.patch("naiba.storage.store.time.time", return_value=1700000000.123):
+            _u1 = self._add("user", "第一条")
+            a1 = self._add("assistant", "要撤销的这条")
+        removed = self.storage.delete_message(self.cid, a1, "single")["removed"]
+        self.assertEqual(int(removed[0]["rowid"]), 2, "前置条件：它当时是 rowid 最大的行")
+        with mock.patch("naiba.storage.store.time.time", return_value=1700000000.123):
+            self._add("user", "撤销前新发的一条")  # 复用 rowid 2
+        self.storage.restore_messages(self.cid, removed)
+        self.assertEqual(
+            self._order(), ["第一条", "要撤销的这条", "撤销前新发的一条"],
+            "复用 rowid 时后继搜索必须用 >=，否则整批被排到最后",
+        )
+
+    def test_unordered_snapshot_is_sorted_before_anchoring(self) -> None:
+        """公开入口不能假定调用方有序：乱序快照按排序契约还原后再定位。
+
+        整轮删除给的是两条（user + 紧随 assistant）。乱序回传时若不先排序，取到的批头是
+        较晚那条 ⇒ 锚点算错、批次内部也按传入顺序拿递增新 rowid 而整体翻序。
+        """
+        _u1, _a1, u2, _a2 = self._same_millisecond_two_turns()
+        before = self._order()
+        removed = self.storage.delete_message(self.cid, u2, "turn")["removed"]
+        self.assertEqual(len(removed), 2, "前置条件：整轮删除回传两条")
+        self.storage.restore_messages(self.cid, list(reversed(removed)))
+        self.assertEqual(self._order(), before, "乱序快照也要还原成 (created_at, rowid) 的原顺序")
+
 
 class DeleteDialogSourceTests(unittest.TestCase):
     """前端确认框的粒度契约（源码级护栏 —— 这里曾真出过一个 bug）。

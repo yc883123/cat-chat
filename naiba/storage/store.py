@@ -2405,6 +2405,10 @@ class ChatStorage:
         「u1 a1 u2 a2 同毫秒、删 a1 再撤销」变成 u1 u2 a2 **a1**；a1 上带着「新会话分割线」标记时
         ``build_model_history`` 会把整段上下文清空（用户视角＝模型突然失忆），前缀缓存也从那条起
         整体重写。缺 ``rowid`` 的老快照退化为修复前行为（排到最后）并记 info 日志。
+
+        两个已处理的边界：① SQLite 无 AUTOINCREMENT，删掉当时 rowid 最大的行后下一条会**复用**
+        该 rowid，所以找后继用 ``>=``（``>`` 会在复用时误判"没有后继"⇒ 又不腾位）；
+        ② 快照顺序按调用方给的来，但公开入口不能假定有序——原 rowid 齐全时先按排序契约还原。
         """
         rows_in = [item for item in (snapshots or []) if isinstance(item, dict)]
         if not rows_in:
@@ -2437,6 +2441,11 @@ class ChatStorage:
                     skipped.append(snapshot["id"])
                     continue
                 pending.append(snapshot)
+            if len(pending) > 1 and all(item.get("rowid") is not None for item in pending):
+                # 调用方（前端）按删除顺序回传，但**不能假定**：`/api/messages/restore` 是公开
+                # 入口，手写乱序数组会让"整批一次定位"取错头、批次内部也按传入顺序拿递增新
+                # rowid 而翻序。原 rowid 齐全时先按排序契约还原删除前的顺序。
+                pending.sort(key=lambda item: (int(item["created_at"]), int(item["rowid"])))
             restored: list[str] = []
             if pending:
                 # **整批一次定位**：``delete_message`` 的快照本来就是连续块（single 一行、
@@ -2454,7 +2463,12 @@ class ChatStorage:
                         )
                 else:
                     key = (int(head["created_at"]), int(head_rid))
-                    successor = next((pos for pos in positions if pos > key), None)
+                    # 用 `>=` 而不是 `>`：SQLite 没有 AUTOINCREMENT，删掉"当时 rowid 最大"的
+                    # 那一行之后，下一条新消息会**复用**这个 rowid（撤销前又发了一条同毫秒消息
+                    # 就能命中）。这时现存行里存在与 key **完全相同**的 (created_at, rowid)，
+                    # `>` 会直接跳过它 ⇒ successor=None ⇒ 不腾位 ⇒ 被撤销的消息又排到最后，
+                    # 正是本次修复要消灭的那类故障。`>=` 在无复用时与 `>` 完全等价。
+                    successor = next((pos for pos in positions if pos >= key), None)
                     if successor is not None:
                         # 后继与批次**并列或更早**时，新 rowid 会把整批挤到后继之后 ⇒
                         # 从后继起把后缀整体推后，直到它超过批次里最晚的那条（后缀内部次序不变）。

@@ -129,6 +129,44 @@ class StoreUploadedFileTests(unittest.TestCase):
         self.assertTrue(again["deduped"])
         self.assertEqual(Path(again["thumb_path"]).resolve(), thumb.resolve())
 
+    def test_content_already_in_generated_reuses_that_copy(self) -> None:
+        """跨 scope 去重：同一份字节已作为工具产物收在 generated 时，上传不再落第二份。
+
+        真实场景：ComfyUI 产物先被 `MediaCollector` 收进 generated，随后（或同时）同一张图
+        又从预览目录上传——旧实现会在 uploads 里再存一份同内容大图（实测 generated 与
+        uploads 各有一份同字节的 2~5MB PNG）。
+        """
+        imaging = {"image_upload_original": True, "thumbnail_max_pixels": 500000}
+        png = _small_png(64, 64, (12, 34, 56))
+        generated = self.data_dir / "generated"
+        generated.mkdir(parents=True, exist_ok=True)
+        cached = generated / "abc123def456abcd_产物.png"
+        cached.write_bytes(png)
+
+        result = store_uploaded_file(png, "上传副本.png", self.data_dir, imaging)
+        self.assertTrue(result["deduped"], "已存在于 generated 的同内容必须命中去重")
+        self.assertEqual(Path(result["path"]).resolve(), cached.resolve())
+        uploads_root = self.data_dir / "uploads"
+        upload_files = [p for p in uploads_root.rglob("*") if p.is_file()] if uploads_root.is_dir() else []
+        self.assertEqual(upload_files, [], "uploads 里不得再落一份同内容文件")
+        self.assertTrue(result["thumb_path"], "复用 generated 主图时仍须补出缩略图")
+        self.assertTrue(Path(result["thumb_path"]).is_file())
+        self.assertEqual(Path(result["thumb_path"]).name, f"{cached.stem}_thumb.webp")
+
+    def test_generated_lookup_ignores_thumbnails_and_other_sizes(self) -> None:
+        """跨 scope 去重不得被侧车缩略图带偏：真正的上传仍要落到 uploads。"""
+        png = _small_png(32, 32, (200, 10, 10))
+        generated = self.data_dir / "generated"
+        generated.mkdir(parents=True, exist_ok=True)
+        # 侧车缩略图目录项：名字以 _thumb.webp 结尾，主图去重必须跳过它。
+        (generated / "eeeeeeeeeeeeeeee_某图_thumb.webp").write_bytes(png)
+
+        result = store_uploaded_file(png, "新图.png", self.data_dir, {"image_upload_original": True})
+        self.assertFalse(result["deduped"], "侧车缩略图不得被当成主图命中")
+        main = Path(result["path"])
+        self.assertTrue(main.is_file())
+        self.assertEqual(main.parent.parent.name, "uploads")
+
     def test_auto_clean_with_reference_guard(self) -> None:
         """B1：自动清理带引用保护——被引用的最旧组永久保留，只删未引用组。"""
         import os

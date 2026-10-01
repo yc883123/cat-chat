@@ -251,6 +251,39 @@ class SqliteWriteRetryTests(unittest.TestCase):
             "无字段更新应原样返回当前行（不因重试包装变成 None）",
         )
 
+    def test_update_job_repeated_identical_values_do_not_write(self) -> None:
+        """幂等短路：值没变的重复进度更新不得再写库（Job 轮询/日志行的高频路径）。
+
+        判据用 `updated_at`：它每次调用都会被带上，真发生 UPDATE 必然推进毫秒时间戳；
+        时间戳不动即证明这一轮没有落任何写。
+        """
+        first = self.storage.update_job(self.run_id, progress=42.0, current_step="采样中")
+        self.assertIsNotNone(first)
+        stamp = int(first["updated_at"])
+        import time as _time
+
+        _time.sleep(0.02)
+        again = self.storage.update_job(self.run_id, progress=42.0, current_step="采样中")
+        self.assertIsNotNone(again)
+        self.assertEqual(
+            int(again["updated_at"]), stamp, "重复的同值更新不该产生写（updated_at 不得推进）"
+        )
+        # 值真的变了仍然必须写进去。
+        changed = self.storage.update_job(self.run_id, progress=43.0)
+        self.assertGreater(int(changed["updated_at"]), stamp, "值变化时必须正常落库")
+        self.assertAlmostEqual(float(changed["progress"]), 43.0)
+
+    def test_update_job_non_scalar_payloads_always_write(self) -> None:
+        """checkpoint/result 这类 JSON 大字段不参与短路比较：必须照常写入。"""
+        first = self.storage.update_job(self.run_id, checkpoint={"step": 1})
+        stamp = int(first["updated_at"])
+        import time as _time
+
+        _time.sleep(0.02)
+        second = self.storage.update_job(self.run_id, checkpoint={"step": 1})
+        self.assertGreater(int(second["updated_at"]), stamp, "JSON 字段更新不得被短路掉")
+        self.assertEqual(second["checkpoint"], {"step": 1})
+
     # ---- 6. 覆盖面：每条写路径都必须包重试（上一轮修复只包了 2 处的回归护栏） ----
 
     def test_every_write_path_is_retry_wrapped_or_explicitly_justified(self) -> None:

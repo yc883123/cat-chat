@@ -108,11 +108,16 @@ class JobMediaWriteBackTests(unittest.TestCase):
             )
         del uuid
 
-    def _make_png(self, name: str) -> Path:
+    def _make_png(self, name: str, color: tuple[int, int, int] = (10, 120, 200)) -> Path:
+        """写一张纯色 PNG；``color`` 决定字节——同色 = 同内容（内容寻址会合并）。
+
+        测试要两份**互相独立**的产物时（并发写回用例），必须给出不同颜色：同色文件的
+        字节完全相同，`MediaCollector` 按内容复用同一份缓存，这是刻意的去重语义。
+        """
         from PIL import Image
 
         path = self.tmp / name
-        Image.new("RGB", (48, 32), (10, 120, 200)).save(path)
+        Image.new("RGB", (48, 32), color).save(path)
         return path
 
     def _create_job(
@@ -216,7 +221,7 @@ class JobMediaWriteBackTests(unittest.TestCase):
         """
         message_id = str(self.message["id"])
         job_a = self._create_job(record_job_id_in_message=False)
-        second = self._make_png("second.png")
+        second = self._make_png("second.png", (200, 40, 30))
         job_b = self._create_job(
             record_job_id_in_message=False,
             result={"completed_shots": [{"index": 0, "files": [str(second)]}]},

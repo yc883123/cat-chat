@@ -184,6 +184,67 @@ class CollectTruncationTests(_TempCase):
         )
 
 
+class GeneratedDedupeWriteGuardTests(_TempCase):
+    """重复写入护栏：同一份内容再次采集时**不得**再整份写一遍盘。
+
+    背景（实测）：generated 缓存里 138.8MB 中有 135.6MB 是"同一份内容、两个文件名"。
+    旧实现即使内容已命中缓存，也先把来源完整写成 `.part` 临时文件、算完哈希发现重名才
+    删掉——同一张图被多条消息引用一次就白写一遍整份字节。
+    """
+
+    def _generated_files(self) -> list[Path]:
+        generated = self.data_dir / "generated"
+        return sorted(p for p in generated.rglob("*") if p.is_file())
+
+    def test_second_collect_of_same_bytes_does_not_write_again(self) -> None:
+        first = self._make_png("same_a.png")
+        collected = self.collector.collect(_run(str(first)), INLINE)["media"][0]
+        cached = Path(collected["source"])
+        self.assertTrue(cached.is_file())
+        before = self._generated_files()
+        before_mtimes = {p: p.stat().st_mtime_ns for p in before}
+
+        # 同名同内容、但换了来源路径（真实场景：Desktop 上带时间戳的副本）再采集一次。
+        second = self._make_png("same_b.png")
+        again = self.collector.collect(_run(str(second)), INLINE)["media"][0]
+        self.assertEqual(
+            Path(again["source"]), cached, "同内容必须复用既有缓存文件（不得落第二份）"
+        )
+        after = self._generated_files()
+        self.assertEqual(
+            [p for p in after if p.suffix != ".webp"],
+            [p for p in before if p.suffix != ".webp"],
+            "重复采集不得新增主图文件",
+        )
+        for path, mtime in before_mtimes.items():
+            if path.name.endswith(".webp"):
+                continue
+            self.assertEqual(
+                path.stat().st_mtime_ns, mtime,
+                f"同内容重复采集不得重写既有文件：{path.name}",
+            )
+
+    def test_no_partial_temp_files_left_behind(self) -> None:
+        target = self._make_png("clean.png")
+        self.collector.collect(_run(str(target)), INLINE)
+        leftovers = [p for p in self._generated_files() if p.name.endswith(".part")]
+        self.assertEqual(leftovers, [], "缓存写入必须原子收尾，不留 .part")
+
+    def test_source_already_in_cache_skips_copy(self) -> None:
+        """来源本身就在宿主缓存树内（generated/uploads）时，原位复用、不再复制。"""
+        target = self._make_png("h.png")
+        first = self.collector.collect(_run(str(target)), INLINE)["media"][0]
+        cached = Path(first["source"])
+        before = self._generated_files()
+
+        again = self.collector.collect(_run(str(cached)), INLINE)["media"][0]
+        self.assertEqual(Path(again["source"]), cached)
+        self.assertEqual(
+            self._generated_files(), before, "来源已在缓存树内时不得再复制一份"
+        )
+        self.assertTrue(Path(again["thumb_path"]).is_file(), "缩略图仍需可得")
+
+
 class TextSourceBoundaryTests(unittest.TestCase):
     """纯文本来源的边界处理：URL 与 Windows 路径必须分开（真实事故回归）。
 

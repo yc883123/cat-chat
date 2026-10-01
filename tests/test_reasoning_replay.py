@@ -192,6 +192,114 @@ class ReasoningReplayClipTests(unittest.TestCase):
         self.assertEqual(history[1]["content"], "答复")
 
 
+class ReasoningPassbackBackfillTests(unittest.TestCase):
+    """DeepSeek 官方 thinking 模式：每条 assistant 历史都必须带**非空** reasoning_content。
+
+    病历（2026-10-01，用户截图真机 400）：`api.deepseek.com` 返回
+    ``The reasoning_content in the thinking mode must be passed back to the API``。
+    缺字段的消息来源不止一处——失败占位消息（``（本次回答未完成）``，首轮调用即 400 时
+    trace/reasoning 都是空）、换模型前的老回复、无思考的工具轮。旧实现只保证"有思考就回放"，
+    对"没思考可回放"的消息一律不带字段 ⇒ 400；且失败后落库的占位消息本身无思考，
+    下一轮又 400（**毒化循环**：同一会话再也发不出去）。
+    """
+
+    DEEPSEEK = {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-pro"}
+    OPENAI = {"base_url": "https://api.openai.com", "model": "gpt-5.6"}
+
+    def _protocols(self):
+        from naiba.llm.protocols import NO_REASONING_PLACEHOLDER, ProtocolMixins
+
+        return ProtocolMixins, NO_REASONING_PLACEHOLDER
+
+    def test_deepseek_profile_backfills_non_empty_placeholder(self) -> None:
+        P, placeholder = self._protocols()
+        kwargs = P._reasoning_passback_kwargs(self.DEEPSEEK, True)
+        wire = P._openai_messages(
+            [
+                {"role": "user", "content": "问"},
+                {"role": "assistant", "content": "（本次回答未完成）"},
+                {"role": "assistant", "content": "有思考", "reasoning_content": "想"},
+                {"role": "user", "content": "再问"},
+            ],
+            **kwargs,
+        )
+        self.assertEqual(wire[1]["reasoning_content"], placeholder, "缺思考必须补非空占位")
+        self.assertTrue(wire[1]["reasoning_content"].strip(), "占位不得为空串")
+        self.assertEqual(wire[2]["reasoning_content"], "想", "真思考不得被占位覆盖")
+        self.assertNotIn("reasoning_content", wire[0], "user 消息不带字段")
+        self.assertNotIn("reasoning_content", wire[3], "user 消息不带字段")
+
+    def test_non_deepseek_profile_keeps_empty_backfill(self) -> None:
+        P, placeholder = self._protocols()
+        wire = P._openai_messages(
+            [{"role": "assistant", "content": "答复"}],
+            **P._reasoning_passback_kwargs(self.OPENAI, True),
+        )
+        self.assertEqual(wire[0]["reasoning_content"], "", "非 DeepSeek 保持原空串回填")
+        self.assertNotEqual(wire[0]["reasoning_content"], placeholder)
+
+    def test_reasoning_disabled_adds_no_field(self) -> None:
+        """未开思考时不补任何字段（保持字节不变，避免给非思考端点塞字段）。"""
+        P, _ = self._protocols()
+        for profile in (self.DEEPSEEK, self.OPENAI):
+            kwargs = P._reasoning_passback_kwargs(profile, False)
+            self.assertEqual(kwargs, {"include_reasoning_content": False})
+            wire = P._openai_messages([{"role": "assistant", "content": "答复"}], **kwargs)
+            self.assertNotIn("reasoning_content", wire[0])
+
+    def test_backfill_is_byte_stable_across_calls(self) -> None:
+        """占位是常量 ⇒ 同一历史每轮字节一致（前缀缓存硬契约）。"""
+        P, _ = self._protocols()
+        message = [{"role": "assistant", "content": "（本次回答未完成）"}]
+        first = P._openai_messages(message, **P._reasoning_passback_kwargs(self.DEEPSEEK, True))
+        second = P._openai_messages(message, **P._reasoning_passback_kwargs(self.DEEPSEEK, True))
+        self.assertEqual(json.dumps(first, ensure_ascii=False), json.dumps(second, ensure_ascii=False))
+
+    def test_failed_partial_message_is_backfilled_end_to_end(self) -> None:
+        """端到端：失败占位消息经 build_model_history 重放后，wire 上必须带非空字段。"""
+        P, placeholder = self._protocols()
+        history = build_model_history([
+            {"role": "user", "content": "你好"},
+            {
+                "role": "assistant",
+                "content": "（本次回答未完成）",
+                "metadata": {"partial": True, "reasoning": [], "trace": [], "error": "HTTP 400"},
+            },
+        ])
+        wire = P._openai_messages(history, **P._reasoning_passback_kwargs(self.DEEPSEEK, True))
+        self.assertEqual(wire[1]["content"], "（本次回答未完成）")
+        self.assertEqual(wire[1]["reasoning_content"], placeholder)
+
+    def test_empty_reasoning_string_is_also_backfilled(self) -> None:
+        """空串思考（服务端返回过空 CoT）与缺字段同样被拒 ⇒ DeepSeek 下一并补占位。
+
+        非 DeepSeek 画像保持原样（空串留在字段里，`include_reasoning_content` 的语义不变）。
+        """
+        P, placeholder = self._protocols()
+        empty = [{"role": "assistant", "content": "答复", "reasoning_content": ""}]
+        deepseek = P._openai_messages(empty, **P._reasoning_passback_kwargs(self.DEEPSEEK, True))
+        self.assertEqual(deepseek[0]["reasoning_content"], placeholder, "空串过不了 DeepSeek 方言")
+        other = P._openai_messages(empty, **P._reasoning_passback_kwargs(self.OPENAI, True))
+        self.assertEqual(other[0]["reasoning_content"], "", "非 DeepSeek 保持原值（空串）")
+
+    def test_both_wire_call_sites_share_the_helper(self) -> None:
+        """两个 OpenAI Chat 形态调用点（openai_chat / lm_studio 带工具）必须共用同一裁决。"""
+        source = _read_source("naiba", "llm", "runtime.py")
+        self.assertEqual(
+            source.count("_reasoning_passback_kwargs(profile, reasoning_enabled)"), 2,
+            "两个 wire 调用点都要走 _reasoning_passback_kwargs，漏一处就出现两种字节",
+        )
+        self.assertNotIn(
+            "include_reasoning_content=(\n", source,
+            "旧的内联表达式必须已被收敛（否则两个调用点会漂移）",
+        )
+
+    def test_helper_is_the_single_decision_point(self) -> None:
+        source = _read_source("naiba", "llm", "protocols.py")
+        _assert_has(source, "def _reasoning_passback_kwargs(", "protocols.py 裁决点")
+        _assert_has(source, "NO_REASONING_PLACEHOLDER", "protocols.py 占位常量复用")
+
+
 class ReasoningReplayConfigTests(unittest.TestCase):
     """两个参数：默认值、校验、持久化、注入。"""
 

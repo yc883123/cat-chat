@@ -64,7 +64,22 @@ class ProtocolMixins:
     def _openai_messages(
         messages: list[dict[str, Any]],
         include_reasoning_content: bool = False,
+        reasoning_placeholder: str | None = None,
     ) -> list[dict[str, Any]]:
+        """把内部消息序列转成 OpenAI Chat 请求体。
+
+        ``include_reasoning_content``：assistant 消息**没有**思考可回放时，是否补一个
+        ``reasoning_content: ""``（空串）。用于"思考方言端点要求字段存在、且接受空串"的画像。
+
+        ``reasoning_placeholder``：与上一个互斥的**非空**兜底文本。DeepSeek 官方 thinking
+        模式的 chat completions 要求重放的 assistant 消息带 ``reasoning_content``，缺字段直接
+        ``400 The reasoning_content in the thinking mode must be passed back to the API``
+        （2026-10-01 用户真机截图）；官方文案要求的是"回传"，故取更严的**非空**占位——
+        本文档早前的"兼容网关拒空串"结论在 2026-10-01 真机上未能复现（teynex 对空串也 200），
+        但非空占位在官方端点与中转上都被接受，属两边都安全的取值。
+        给了占位时**空串也按缺字段处理**（同一条更严口径）。
+        占位是**恒定文本**且只在缺思考的消息上出现，跨轮逐字节一致，不破坏前缀缓存。
+        """
         converted = []
         for item in messages:
             role = str(item.get("role") or "user")
@@ -80,10 +95,13 @@ class ProtocolMixins:
                 reasoning_content = item.get("reasoning_content")
                 if reasoning_content is None:
                     reasoning_content = item.get("reasoning")
-                if reasoning_content is not None or include_reasoning_content:
-                    message["reasoning_content"] = (
-                        "" if reasoning_content is None else str(reasoning_content)
-                    )
+                if reasoning_content:
+                    # 有真思考：原样回放（可能是被闸门截断过的前缀 + 省略标记）。
+                    message["reasoning_content"] = str(reasoning_content)
+                elif reasoning_placeholder is not None:
+                    message["reasoning_content"] = reasoning_placeholder
+                elif include_reasoning_content or reasoning_content is not None:
+                    message["reasoning_content"] = ""
             if role == "assistant" and isinstance(item.get("tool_calls"), list):
                 message["tool_calls"] = [
                     {
@@ -99,12 +117,42 @@ class ProtocolMixins:
             converted.append(message)
         return converted
 
+    @staticmethod
+    def _reasoning_passback_kwargs(
+        profile: dict[str, Any],
+        reasoning_enabled: bool,
+    ) -> dict[str, Any]:
+        """``_openai_messages`` 的思考回填参数（**wire 调用点必须共用这一份**）。
+
+        两个 OpenAI Chat 形态的调用点（``openai_chat`` 分支与 ``lm_studio`` 带工具的
+        分支）过去各写一份表达式；漏改一处就会出现「同一画像、两种字节」⇒ 前缀缓存断。
+        这里收敛成唯一来源。
+
+        - 未开启思考：**不补**任何 reasoning_content（保持字节不变，最小惊讶）；
+        - DeepSeek 画像 + 开启思考：补**非空**常量占位。官方 thinking 模式的
+          chat completions 要求重放的 assistant 消息带
+          ``reasoning_content``，缺字段直接 400
+          ``The reasoning_content in the thinking mode must be passed back to the API``
+          （2026-10-01 用户实测）；官方文案要求"回传"，取更严的非空占位
+          （非空在官方端点与中转上都被接受；"空串被网关拒"的旧结论本轮未能复现）。
+        - 其余画像 + 开启思考：补空串（OpenAI 方言容忍，历史行为）。
+        """
+        if not reasoning_enabled:
+            return {"include_reasoning_content": False}
+        if ProtocolMixins._is_deepseek_profile(profile):
+            return {
+                "include_reasoning_content": False,
+                "reasoning_placeholder": NO_REASONING_PLACEHOLDER,
+            }
+        return {"include_reasoning_content": True}
 
     @staticmethod
     def _is_deepseek_profile(profile: dict[str, Any]) -> bool:
         """Return whether an OpenAI-compatible profile speaks DeepSeek's
         thinking-mode dialect, which requires assistant reasoning_content on
-        every replayed assistant message (including an empty value).
+        every replayed assistant message (**non-empty** — see
+        ``_openai_messages`` 的 ``reasoning_placeholder``：缺字段直接 400，故按官方
+        "回传"文案取更严的非空占位；"空串被网关拒"的旧结论本轮真机未能复现)。
 
         判定实现在 ``naiba.llm.thinking``（思考预设数据层的唯一来源），此处只做转发。
         """

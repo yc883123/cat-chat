@@ -1241,14 +1241,12 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                 "model": model,
                 "messages": ModelRuntime._openai_messages(
                     messages,
-                    # DeepSeek-compatible gateways commonly reject an empty
-                    # reasoning_content field on ordinary assistant history.
-                    # Real persisted reasoning is still preserved by
-                    # _openai_messages; only synthetic empty backfills are
-                    # disabled for DeepSeek.
-                    include_reasoning_content=(
-                        reasoning_enabled and not ModelRuntime._is_deepseek_profile(profile)
-                    ),
+                    # DeepSeek 官方 thinking 模式要求重放的 assistant 消息带 reasoning_content
+                    # （缺字段 400 "must be passed back to the API"，2026-10-01 用户真机）；
+                    # 官方文案要求的是"回传"，故对缺思考的消息取更严的**非空**占位。
+                    # 回填参数由 _reasoning_passback_kwargs 统一裁决
+                    # （DeepSeek 用非空占位、其余方言用空串、未开思考不补）。
+                    **ModelRuntime._reasoning_passback_kwargs(profile, reasoning_enabled),
                 ),
                 "stream": stream_enabled,
             }
@@ -1405,9 +1403,7 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                     "model": model,
                     "messages": ModelRuntime._openai_messages(
                         messages,
-                        include_reasoning_content=(
-                            reasoning_enabled and not ModelRuntime._is_deepseek_profile(profile)
-                        ),
+                        **ModelRuntime._reasoning_passback_kwargs(profile, reasoning_enabled),
                     ),
                     "stream": stream_enabled,
                     "tools": native_tools,

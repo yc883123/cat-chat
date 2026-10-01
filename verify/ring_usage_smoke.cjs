@@ -51,6 +51,13 @@ const signal = (step) => { if (STEP) fs.writeFileSync(STEP, String(step)); };
 (async () => {
   const browser = await chromium.launch({ channel: 'msedge', headless: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  // 首启引导弹窗（`maybeShowOnboarding`：没有**可用在线供应商**时自动 showModal）会盖住
+  // 侧栏并拦截点击。本冒烟只播种了本地模型档（model_profiles），在没配在线供应商的机器/
+  // 隔离库上必然弹窗，于是"点开会话"稳定超时——与冒烟要考的圆环无关。与其它冒烟同口径，
+  // 先标记已忽略（只影响这个临时浏览器上下文，不落任何用户数据）。
+  await page.addInitScript(() => {
+    try { localStorage.setItem('naibaOnboardingDismissed', '1'); } catch (_) { /* 无存储权限 */ }
+  });
   const pageErrors = [];
   page.on('pageerror', (err) => pageErrors.push(`pageerror: ${err.message}`));
   page.on('console', (msg) => { if (msg.type() === 'error') pageErrors.push(`console.error: ${msg.text()}`); });

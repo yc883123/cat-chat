@@ -571,8 +571,17 @@ class ProtocolMixins:
             if not isinstance(arguments, dict):
                 logger.warning("工具调用解析失败：参数不是 JSON 对象")
                 return json.dumps({"type": "parse_error"}, ensure_ascii=False)
-            actions.append({"type": "tool", "tool": name, "arguments": arguments})
-        payload = actions[0] if len(actions) == 1 else {"type": "tools", "calls": actions}
+            actions.append({
+                "type": "tool",
+                "tool": name,
+                "arguments": arguments,
+                # 显式来源标记（计划 2026-10-01 §3.1）：原生 function calling 不走围栏确认，
+                # 由 Agent 原样继承，后续层不得再靠文本重新推断来源。
+                "source": "native",
+            })
+        payload = actions[0] if len(actions) == 1 else {
+            "type": "tools", "calls": actions, "source": "native",
+        }
         return json.dumps(payload, ensure_ascii=False)
 
 

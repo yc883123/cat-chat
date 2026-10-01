@@ -26,6 +26,9 @@ RUN_CONTEXT_KEYS: tuple[str, ...] = (
     "mcp_active", "trace_messages", "plan_exit_content", "plan_step_title",
     "model_has_vision", "tool_defs", "workspace_dir", "media_intent",
     "event_sink", "truncation",
+    # 本 Run 是否有「工具确认」回路：普通对话/计划执行 True，子 Agent 与后台 Job False。
+    # 围栏来源动作在 False 的形态下直接按原文收尾（不执行、不挂起、不等待超时）。
+    "confirmation_ui",
 )
 
 # 运行期保持 dict 形态（零行为变化）；"带默认值/校验"经由工厂与校验函数落地，
@@ -65,6 +68,9 @@ def default_run_context() -> dict[str, Any]:
         # 本轮答复的截断自述信息（{"finish_reason","truncated","continued"}）；
         # 由 skills/agent.py 写入、run/chat.py 落进消息 metadata。
         "truncation": {},
+        # 默认「有确认回路」：只有明确知道没有确认入口的形态（子 Agent / 后台 Job）
+        # 才显式置 False，避免缺失字段时把正常自动化误伤成「不可确认」。
+        "confirmation_ui": True,
     }
 
 
@@ -168,6 +174,7 @@ class RunContext(TypedDict, total=False):
     # ---- 透明化/截断自述（工具实时进度出口 + 本轮答复截断信息）----
     event_sink: Any                  # 工具实时进度出口（callable(dict) -> None；缺省不报进度）
     truncation: dict[str, Any]       # 本轮答复截断信息（finish_reason / truncated / continued）
+    confirmation_ui: bool            # 本 Run 是否有工具确认回路（子 Agent / 后台 Job 为 False）
 
 
 class EventType(str, Enum):
@@ -244,6 +251,9 @@ class EventPayload(TypedDict, total=False):
     success: bool
     # 工具调用实例序号（同一轮并行调用同名工具时，前端据此把事件贴到正确的卡片上）
     seq: int
+    # 动作来源（计划 2026-10-01 §3.1）：native / bare_protocol_tail / fenced。
+    # fenced（整条响应就是一个围栏块里的工具动作）无论会话档位都先要一次确认。
+    action_source: str
     # 媒体（宿主在工具产出时提取的托管记录：kind/name/source/thumb_path；
     # media_truncated 为分桶截断的自述信息，前端据此渲染提示块）
     media: list[dict[str, Any]]
@@ -297,12 +307,12 @@ EVENT_PAYLOAD_KEYS: dict[str, frozenset[str] | None] = {
     "reasoning_delta": frozenset({"content"}),
     "reasoning_end": frozenset(),
     "reasoning": frozenset({"content"}),
-    "tool_start": frozenset({"tool", "arguments", "reason", "seq"}),
+    "tool_start": frozenset({"tool", "arguments", "reason", "seq", "action_source"}),
     # 工具实时进度（pwsh / run_skill_script 逐行 stdout+stderr）：line 为一行原文，
     # seq 与 tool_start/tool_result 同值，前端据此把行贴到正确的运行卡片上。
     "tool_progress": frozenset({"tool", "line", "seq"}),
-    "tool_result": frozenset({"tool", "success", "result", "arguments", "reason", "media", "media_truncated", "seq"}),
-    "tool_confirm": frozenset({"tool_name", "tool_desc", "arguments", "confirm_id"}),
+    "tool_result": frozenset({"tool", "success", "result", "arguments", "reason", "media", "media_truncated", "seq", "action_source"}),
+    "tool_confirm": frozenset({"tool_name", "tool_desc", "arguments", "confirm_id", "action_source"}),
     "choice": frozenset({"choices", "choice_groups", "message_id"}),
     "cancelled": frozenset({"message", "aborted_message"}),
     "run_failed": frozenset({"error"}),

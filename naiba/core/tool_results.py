@@ -112,6 +112,10 @@ def display_tool_run(run: dict[str, Any]) -> dict[str, Any]:
     visible["arguments"] = (run or {}).get("arguments") if isinstance((run or {}).get("arguments"), dict) else {}
     if (run or {}).get("reason"):
         visible["reason"] = str((run or {}).get("reason") or "")
+    # 动作来源（native / bare_protocol_tail / fenced）：只作可观测与前端确认文案用，
+    # **不进模型上下文**（model_visible_run 不含），也不携带命令正文。
+    if (run or {}).get("source"):
+        visible["action_source"] = str((run or {}).get("source") or "")
     media = (run or {}).get("media")
     if isinstance(media, list) and media:
         visible["media"] = media

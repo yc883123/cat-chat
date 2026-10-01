@@ -37,7 +37,11 @@ from naiba.core.media_types import (
     truncate_by_kind,
 )
 from naiba.core.paths import path_within
-from naiba.storage.media import _ensure_webp_thumb
+from naiba.storage.media import (
+    _ensure_webp_thumb,
+    existing_content_path,
+    is_managed_cache_path,
+)
 
 logger = logging.getLogger("naiba.storage.media_collect")
 
@@ -147,14 +151,38 @@ class MediaCollector:
             except OSError as exc:
                 logger.warning("媒体候选路径解析失败：source=%s error=%s", source, exc)
                 already_cached = False
+            if not already_cached and is_managed_cache_path(data_dir, local_path):
+                # 来源本身就落在宿主图片缓存树内（generated / uploads / backgrounds / avatars）：
+                # 它已经被 /api/file 托管，再复制一份进 generated 只是**同一字节写第二遍**。
+                # 直接原位复用；缩略图仍按需补齐（与缓存产物同一命名约定）。
+                already_cached = True
+                if not thumb_path:
+                    thumb_path = _ensure_webp_thumb(local_path.resolve(), imaging) or source
             if not already_cached:
+                # 预读窗口 + 一次内容命中查询：本地来源先读一小段，问一次"这份内容是否
+                # 已在 generated 里"。命中则整份字节一个都不写（连临时文件都不建）——
+                # 同一产物被多条消息反复引用是重复写入的主要来源。查询失败一律按
+                # "未命中"处理（退化成旧行为），绝不让探测本身打断采集。
+                generated_dir = (data_dir / "generated").resolve()
+                head = _read_head(local_path) if is_local_file else b""
                 try:
-                    generated_dir = (data_dir / "generated").resolve()
+                    cached_before = (
+                        existing_content_path(generated_dir, head) if head else None
+                    )
+                except OSError as exc:
+                    logger.warning("产物缓存探测失败，按未命中处理：error=%s", exc)
+                    cached_before = None
+                try:
                     generated_dir.mkdir(parents=True, exist_ok=True)
-                    destination = _cache_by_content(source, local_path, is_local_comfy, generated_dir, name)
+                    destination = _cache_by_content(
+                        source, local_path, is_local_comfy, generated_dir, name,
+                        head=head, existing=cached_before,
+                    )
                     source = str(destination)
-                    # 写盘成功即通知宿主（generated 目录自己的后台清理触发点）。
-                    self._notify_cached()
+                    # 写盘成功才通知宿主（generated 目录自己的后台清理触发点）；
+                    # 命中既有缓存时没有新写盘，不必触发（清理由上一次落盘的那轮负责）。
+                    if destination != cached_before:
+                        self._notify_cached()
                     if not thumb_path:
                         thumb_path = _ensure_webp_thumb(destination, imaging)
                         if not thumb_path:
@@ -187,12 +215,31 @@ class MediaCollector:
             logger.warning("产物落盘回调失败：%s", exc)
 
 
+# 预读窗口：判断「本地来源的内容是否已在 generated 缓存里」时只看这么多字节。
+# 判定本身是**逐字节前缀比较**（全等才算命中），窗口大小只影响"要读多少"、不影响正确性；
+# 1MiB 足以让同尺寸的不同图片在第一轮比较就被区分开。
+_HEAD_PROBE_BYTES = 1024 * 1024
+
+
+def _read_head(path: Path) -> bytes:
+    """读取本地来源的前 ``_HEAD_PROBE_BYTES`` 字节；读不了（权限/竞态）返回空。"""
+    try:
+        with path.open("rb") as stream:
+            return stream.read(_HEAD_PROBE_BYTES)
+    except OSError as exc:
+        logger.warning("产物预读失败（将退化为完整落盘）：path=%s error=%s", path, exc)
+        return b""
+
+
 def _cache_by_content(
     source: str,
     local_path: Path,
     is_local_comfy: bool,
     generated_dir: Path,
     name: str,
+    *,
+    head: bytes = b"",
+    existing: Path | None = None,
 ) -> Path:
     """把产物按**内容哈希**收进 generated 缓存，返回落盘路径。
 
@@ -202,12 +249,26 @@ def _cache_by_content(
     临时文件，再原子改名为 `<内容哈希16>_<name>`；同内容已存在时复用（去重），
     内容变化则自然落到新文件——顺带让 `/api/file` 的浏览器缓存不会命中旧内容。
 
+    **不再无条件整份重写**：``existing`` 是调用方已查到的同内容缓存文件（``head`` 是它
+    用来判定的来源前缀）。命中时直接复用既有文件，临时文件与随后的 rename 全部省掉。
+    旧实现在这条路径上「同内容也先写一份临时文件再删」，同一份内容被再次采集一次就白写
+    一遍整份字节（实测真实缓存 138.8MB 里有 40.6MB 是这类重复）。
+
     失败（网络/磁盘/权限）由调用方兜底（保留原来源并记日志）。
     """
+    if existing is None and head:
+        existing = existing_content_path(generated_dir, head)
+    if existing is not None:
+        # 同内容已在缓存里：不写临时文件、不改名，直接复用既有文件。
+        return existing
     temp = generated_dir / f".{uuid.uuid4().hex}.part"
     digest = hashlib.sha256()
     try:
-        reader = net_io.open(source, timeout=120) if is_local_comfy else local_path.open("rb")
+        if is_local_comfy:
+            # 网络流不可 seek：head 作废（本分支调用方不会传 head），整份流式读。
+            reader = net_io.open(source, timeout=120)
+        else:
+            reader = local_path.open("rb")
         with reader as stream, temp.open("wb") as writer:
             while True:
                 chunk = stream.read(1024 * 1024)

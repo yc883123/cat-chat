@@ -84,7 +84,7 @@ def store_uploaded_file(
     safe_name = _UPLOAD_SAFE_NAME_RE.sub("_", name) or "upload.bin"
     main_bytes, thumb_name, thumb_bytes = _process_uploaded_image(data, name, imaging)
     digest = hashlib.sha256(main_bytes).hexdigest()
-    # 内容级去重：同大小候选再比内容哈希（避免全目录哈希开销）。
+    # 内容级去重（uploads 内）：同大小候选再比内容哈希（避免全目录哈希开销）。
     existing = _find_duplicate(uploads_root, len(main_bytes), digest)
     if existing is not None:
         return {
@@ -93,6 +93,21 @@ def store_uploaded_file(
             "size": existing.stat().st_size,
             # 缩略图按"主图 stem + _thumb.webp"推导；不存在时返回空串（前端回退主图）。
             "thumb_path": _thumb_path_for(existing),
+            "deduped": True,
+        }
+    # 跨 scope 去重：同一份字节若已作为**工具产物**收在 generated 里，直接复用原位，
+    # 不再重编码/复制进 uploads。同一张图"既被采集又被前端上传"是常见的双份来源
+    # （实测 generated 与 uploads 各存了一份同内容大图）；复用后只需补侧车缩略图。
+    shared = _find_generated_duplicate(data_dir, len(main_bytes), digest)
+    if shared is not None:
+        thumb_path = _thumb_path_for(shared)
+        if not thumb_path:
+            thumb_path = _ensure_webp_thumb(shared, imaging)
+        return {
+            "name": shared.name,
+            "path": str(shared),
+            "size": shared.stat().st_size,
+            "thumb_path": thumb_path,
             "deduped": True,
         }
     target_dir = upload_target_dir(data_dir)
@@ -198,6 +213,47 @@ def _find_duplicate(uploads_root: Path, size: int, digest: str) -> Path | None:
                     return path
         except OSError:
             continue
+    return None
+
+
+def _find_generated_duplicate(data_dir: Path, size: int, digest: str) -> Path | None:
+    """同一份处理后的字节是否已收在 ``generated`` 缓存里（跨 scope 内容去重）。
+
+    只对**同大小**候选比内容哈希：generated 里同大小的文件通常很少，全目录哈希的
+    开销可以接受，而这一步避免的是"同一张大图在 generated 与 uploads 各存一份"。
+    与 ``is_managed_cache_path`` 同一口径：命中的文件由 /api/file 托管、可正常展示。
+    """
+    generated_root = (Path(data_dir) / "generated").resolve()
+    if not generated_root.is_dir():
+        return None
+    candidates: list[Path] = []
+    try:
+        for path in generated_root.rglob("*"):
+            if not path.is_file() or path.name.endswith(".part"):
+                continue
+            # 侧车缩略图不是主图，不参与主图去重（其大小一般也不等于主图）。
+            if path.name.endswith("_thumb.webp"):
+                continue
+            try:
+                if path.stat().st_size == size:
+                    candidates.append(path)
+            except OSError:
+                continue
+    except OSError:
+        return None
+    for path in candidates:
+        try:
+            chunk = hashlib.sha256()
+            with path.open("rb") as handle:
+                while True:
+                    block = handle.read(65536)
+                    if not block:
+                        break
+                    chunk.update(block)
+        except OSError:
+            continue
+        if chunk.hexdigest() == digest:
+            return path
     return None
 
 
@@ -457,6 +513,63 @@ def cache_scope_dir(data_dir: Path, scope: str) -> Path:
     if scope not in CACHE_SCOPES:
         raise ValueError(f"未知的缓存范围：{scope}")
     return (Path(data_dir) / scope).resolve()
+
+
+# 可服务（/api/file 可读）的宿主图片缓存目录。判断「来源是否已被宿主托管」时按这个集合，
+# 而不是只看 uploads/generated：backgrounds / avatars 同样是受管目录，来源落在那里时
+# 再复制一份进 generated 只是把同一字节写第二遍。
+_MANAGED_MEDIA_SUBDIRS: tuple[str, ...] = (
+    *CACHE_SCOPES, "backgrounds", "avatars",
+)
+
+
+def managed_cache_roots(data_dir: Path) -> tuple[Path, ...]:
+    """宿主托管图片的根目录集合（uploads / generated / backgrounds / avatars）。"""
+    root = Path(data_dir)
+    return tuple((root / name).resolve() for name in _MANAGED_MEDIA_SUBDIRS)
+
+
+def is_managed_cache_path(data_dir: Path, raw_path: str | Path) -> bool:
+    """raw_path 是否已在宿主托管的图片缓存树内（命中即无需再复制/落盘）。"""
+    try:
+        resolved = Path(raw_path).expanduser().resolve()
+    except (OSError, ValueError):
+        return False
+    return any(path_within(resolved, root) for root in managed_cache_roots(data_dir))
+
+
+def existing_content_path(root: Path, head: bytes) -> Path | None:
+    """``head`` 这段字节所属的内容是否已收在 ``root`` 里；命中返回那个文件。
+
+    判定用**字节前缀包含**而不是「文件名哈希前缀相等」：同一份内容必然同前缀，
+    而不同内容几乎不可能共享整段前缀——这样既不依赖文件名的正则形状，也不会把
+    「哈希前 16 位相同但内容不同」误判成同一份（后者会直接导致显示错图）。
+    """
+    if not head:
+        return None
+    candidates: list[tuple[int, Path]] = []
+    try:
+        for path in root.iterdir():
+            if not path.is_file() or path.name.endswith(".part"):
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            # 大小必须容得下这段前缀，否则直接排除（省掉一次读取）。
+            if stat.st_size < len(head):
+                continue
+            candidates.append((stat.st_size, path))
+    except OSError:
+        return None
+    for _size, path in sorted(candidates, key=lambda item: item[0]):
+        try:
+            with path.open("rb") as handle:
+                if handle.read(len(head)) == head:
+                    return path
+        except OSError:
+            continue
+    return None
 
 
 def cache_scope_bytes(data_dir: Path, scope: str) -> int:

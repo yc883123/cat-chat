@@ -1,7 +1,7 @@
 // 输入区右键「粘贴」粘图片 / 文件的**真浏览器**端到端冒烟（§九.149）。
 //
 // 运行：
-//   $env:NODE_PATH="C:\Users\ylxia\node_modules"
+//   $env:NODE_PATH="<node_modules 目录>"        # Playwright 装在哪就指哪（本机不在项目内）
 //   python -m http.server 8795 --directory public      # 只需静态服务
 //   node verify\clipboard_paste_smoke.cjs
 //
@@ -61,13 +61,6 @@ async function pendingNames(page) {
     .map((el) => el.querySelector('.pending-name')?.textContent?.trim() || ''));
 }
 
-async function pendingPaths(page) {
-  return page.evaluate(async () => {
-    const core = await import('/js/01-core.js');
-    return (core.state.pendingFiles || []).map((item) => String(item.path || ''));
-  });
-}
-
 (async () => {
   const browser = await chromium.launch({ channel: 'msedge', headless: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
@@ -83,10 +76,47 @@ async function pendingPaths(page) {
       body: JSON.stringify({ path: '/api/file?path=uploads%2Fsmoke.png', name: '粘贴的图片.png', size: 68 }),
     });
   });
+  // 落盘后的附件要经 `/api/file` 取图：这里桩成 1×1 PNG，好断言"缩略图真的渲染出来了"
+  // （用户实测报过的那条：模型看得见、前端只显示破图）。
+  await page.route('**/api/file*', (route) => route.fulfill({
+    status: 200,
+    contentType: 'image/png',
+    body: Buffer.from(PNG_B64, 'base64'),
+  }));
   // 假桥：必须在页面脚本之前就位（模块顶层会读 window.pywebview）
   await page.addInitScript(() => {
     window.__clipPayload = { ok: true, kind: 'empty' };
-    window.pywebview = { api: { naibaClipboardPayload: async () => window.__clipPayload } };
+    window.__uploadedPaths = [];
+    window.pywebview = {
+      api: {
+        naibaClipboardPayload: async () => window.__clipPayload,
+        // 服务端落盘：真实实现复制进 uploads/ 并回收缩略图。**形状必须是真实的**：
+        // `store_uploaded_file` 返回的是**裸文件系统路径**（前端再经 fileUrl() 拼 /api/file），
+        // 给 URL 会与真实形态不符、把这条冒烟变成验一个虚构。
+        naibaUploadLocalPaths: async (paths) => {
+          window.__uploadedPaths.push(...paths);
+          const imageExts = ['.png', '.jpg', '.jpeg', '.webp'];
+          return {
+            ok: true,
+            results: paths.map((path, index) => {
+              const name = path.split('\\').pop() || '文件';
+              const dot = name.lastIndexOf('.');
+              const ext = dot > 0 ? name.slice(dot) : '';
+              // **按原扩展名返回**、且只有图片才有 thumb_path——给两个文件都发 .png 的假数据，
+              // 会让"非图片不该有缩略图"这条断言红在一个虚构上（第一版就是这么错的）。
+              return {
+                path: `D:\\naiba-smoke\\data\\uploads\\2026-10-01\\smoke${index}${ext}`,
+                thumb_path: imageExts.includes(ext.toLowerCase())
+                  ? `D:\\naiba-smoke\\data\\uploads\\2026-10-01\\smoke${index}_thumb.webp`
+                  : '',
+                name,
+                size: 100 + index,
+              };
+            }),
+          };
+        },
+      },
+    };
   });
 
   try {
@@ -98,6 +128,13 @@ async function pendingPaths(page) {
       const chat = await import('/js/12-chat-input.js');
       core.setClipboardPasteDriver(chat.clipboardPasteDriver);
       core.state.conversationId = 'smoke-conversation';
+      // **静态服务没有 /api/bootstrap**，而 `mediaKind()` 的扩展名清单就来自它
+      // （bootstrap.media_exts，唯一定义在后端 core/media_types.py）。不注入的话
+      // 所有附件都会被判成 other、一律只渲染文件图标——第一版就是因此把"看得见"验成了假绿。
+      core.state.bootstrap = {
+        ...(core.state.bootstrap || {}),
+        media_exts: { exts: { image: ['.png', '.jpg', '.jpeg', '.webp'], video: [], audio: [] } },
+      };
       return Boolean(chat.clipboardPasteDriver && chat.clipboardPasteDriver.apply);
     });
     check('驱动可注入且具备 apply', wired);
@@ -111,12 +148,15 @@ async function pendingPaths(page) {
     check('① 图片进了待发送列表', (await pendingNames(page)).includes('粘贴的图片.png'),
       JSON.stringify(await pendingNames(page)));
     check('① 上传请求真的发出（File 交给了上传管线）', uploadCalls === 1, `uploadCalls=${uploadCalls}`);
-    check('① 待发送列表可见且带缩略图', await page.evaluate(() => {
+    check('① 待发送列表可见且**图片**带真缩略图（不是文件图标）', await page.evaluate(() => {
       const box = document.querySelector('#pendingFiles');
-      return Boolean(box && !box.hidden && box.querySelector('.pending-thumb'));
+      // 必须点明 `img.pending-thumb`：`.pending-thumb` 也匹配文件图标的 span，
+      // 上一版就是这么断言了一条恒真的弱断言（缩略图没渲染也绿灯）。
+      const img = box?.querySelector('img.pending-thumb');
+      return Boolean(box && !box.hidden && img && /\/api\/file/.test(img.getAttribute('src') || ''));
     }));
 
-    // ---- ② 文件：文案 + 路径附件（零拷贝，不发上传请求)----
+    // ---- ② 文件：文案 + **服务端落盘**（看得见）----
     const uploadsBefore = uploadCalls;
     await page.evaluate((payload) => { window.__clipPayload = payload; }, FILES_PAYLOAD);
     check('② 菜单文案变「粘贴 2 个文件」', (await pasteMenuLabel(page)) === '粘贴 2 个文件');
@@ -124,9 +164,43 @@ async function pendingPaths(page) {
     const names = await pendingNames(page);
     check('② 两个文件名都进了待发送列表',
       names.includes('中文图片.png') && names.includes('第二个文件.txt'), JSON.stringify(names));
-    check('② 走的是路径附件（带 path，零拷贝）',
-      (await pendingPaths(page)).includes('D:\\smoke\\中文图片.png'), JSON.stringify(await pendingPaths(page)));
-    check('② 文件分支不发上传请求（没有多余字节过网）', uploadCalls === uploadsBefore,
+    check('② 走了服务端落盘桥（不是零拷贝路径附件）',
+      JSON.stringify(await page.evaluate(() => window.__uploadedPaths)) ===
+        JSON.stringify(FILES_PAYLOAD.paths),
+      JSON.stringify(await page.evaluate(() => window.__uploadedPaths)));
+    const thumbDiagnostic = await page.evaluate(async () => {
+      const core = await import('/js/01-core.js');
+      const row = (name) => [...document.querySelectorAll('#pendingFiles .pending-item')]
+        .find((el) => (el.querySelector('.pending-name')?.textContent || '').trim() === name);
+      const image = row('中文图片.png');
+      const thumb = image?.querySelector('img.pending-thumb');
+      const info = {
+        hasImageRow: Boolean(image),
+        hasImg: Boolean(thumb),
+        exts: (core.state.bootstrap?.media_exts?.exts?.image || []).length,
+        item: image ? (core.state.pendingFiles.find((f) => f.name === '中文图片.png') || {}) : {},
+      };
+      if (thumb) {
+        if (!thumb.complete) {
+          await new Promise((resolve) => {
+            thumb.addEventListener('load', resolve, { once: true });
+            thumb.addEventListener('error', resolve, { once: true });
+          });
+        }
+        Object.assign(info, { src: thumb.getAttribute('src'), width: thumb.naturalWidth });
+      }
+      return info;
+    });
+    check('② 图片文件落盘后的 chip 带缩略图且**真的渲染出来**（用户报过的"前端看不到"）',
+      thumbDiagnostic.hasImg && thumbDiagnostic.width > 0
+        && /\/api\/file/.test(thumbDiagnostic.src || '')
+        && !(await page.evaluate(() => {
+          const row = [...document.querySelectorAll('#pendingFiles .pending-item')]
+            .find((el) => (el.querySelector('.pending-name')?.textContent || '').trim() === '第二个文件.txt');
+          return Boolean(row?.querySelector('img.pending-thumb'));
+        })),
+      JSON.stringify(thumbDiagnostic));
+    check('② 文件分支不发 HTTP 上传请求（本机拷贝，没有多余字节过网）', uploadCalls === uploadsBefore,
       `uploads ${uploadsBefore} -> ${uploadCalls}`);
 
     // ---- ③ 重复粘贴：不产生重复条目 ----

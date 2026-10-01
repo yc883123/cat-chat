@@ -111,6 +111,9 @@ def _resolve_app_icon():
 # 手机上仍走长按系统菜单那条路（§九.85 的口径不变）。
 CLIPBOARD_IMAGE_MAX_BYTES = 32 * 1024 * 1024
 CLIPBOARD_IMAGE_NAME = "粘贴的图片.png"
+# 剪贴板里"复制的文件"走服务端落盘（见 JsApi.naibaUploadLocalPaths）：上限与 /api/uploads 对齐。
+CLIPBOARD_UPLOAD_MAX_FILES = 20
+CLIPBOARD_UPLOAD_MAX_BYTES = 80 * 1024 * 1024
 def _encode_clipboard_image(data: bytes, *, already_png: bool = False) -> str:
     """剪贴板里的图片 → PNG base64。超上限**明确报错**，不静默截断/降质。
 
@@ -248,6 +251,11 @@ class JsApi:
     （画图/Word/微信等）都能直接粘贴。
     """
 
+    def __init__(self, app=None) -> None:
+        # app = `srv.APP`（装配在 create_window 之前）。剪贴板粘贴的"本地文件 → 上传目录"
+        # 要走 app._upload_spooled（拖入文件用的同一条落库管线），所以要能拿到它。
+        self._app = app
+
     def copy_image_to_clipboard(self, base64_data: str) -> dict:
         import base64
         import io
@@ -303,6 +311,71 @@ class JsApi:
         · `kind == "empty"` → 前端给可行动提示（Ctrl+V / 长按系统菜单）。
         """
         return clipboard_payload()
+
+    def naibaUploadLocalPaths(self, paths: list[str]) -> dict:
+        """把剪贴板里**复制来的本地文件**复制进上传目录（与拖入文件同一条落库管线）。
+
+        为什么不复用"路径附件"（零拷贝）：那是我第一版的做法，用户实测当场否掉——
+        `/api/file` 只服务**工作区与 data 目录**内的路径（其余一律 403「文件不在允许访问的
+        目录中」，见 `http.py`），所以工作区外的图片在前端只能显示成**破图**；而模型能读到
+        它（走绝对路径 + 工具），于是出现"模型看得见、前端看不见"。**看得见**是这条功能的
+        硬要求，所以必须真正落盘成上传件。
+
+        为什么不把字节经 base64 过桥：几十 MB 走 pywebview 的 JSON IPC 会明显卡；服务端
+        本机拷贝零成本，且直接复用 `app._upload_spooled`（内容级去重 / 分日落盘 / 图片压缩与
+        缩略图 / 上传后异步清理的引用保护全在同一处）。
+
+        **必须先复制到临时 spool 再交给它**：`_upload_spooled` 读完会 `unlink` 掉传进去的
+        路径——直接把用户的原文件路径递给它，等于把用户的文件删了（有守门用例钉住）。
+        """
+        if self._app is None:
+            return {"ok": False, "error": "上传通道不可用（未接入应用上下文）"}
+        wanted = [str(item) for item in (paths or []) if str(item or "").strip()]
+        if not wanted:
+            return {"ok": False, "error": "没有要粘贴的文件"}
+        if len(wanted) > CLIPBOARD_UPLOAD_MAX_FILES:
+            return {"ok": False, "error": f"一次最多粘贴 {CLIPBOARD_UPLOAD_MAX_FILES} 个文件"}
+
+        import shutil
+        import tempfile
+
+        results: list[dict] = []
+        for raw in wanted:
+            source = Path(raw)
+            if not source.is_file():
+                results.append({"name": source.name, "error": "文件不存在或已被移动"})
+                continue
+            try:
+                if source.stat().st_size > CLIPBOARD_UPLOAD_MAX_BYTES:
+                    results.append({"name": source.name, "error": "单个文件不能超过 80 MB"})
+                    continue
+            except OSError as exc:
+                results.append({"name": source.name, "error": f"读取文件失败：{exc}"})
+                continue
+
+            spool_name = ""
+            try:
+                with tempfile.NamedTemporaryFile(
+                    prefix="clip-paste-", suffix=".part", delete=False
+                ) as spool:
+                    spool_name = spool.name
+                    with open(source, "rb") as handle:
+                        shutil.copyfileobj(handle, spool, length=1024 * 1024)
+                payload, status = self._app._upload_spooled(spool_name, source.name)
+                spool_name = ""   # 已由 _upload_spooled 读完并清理
+                if int(status) != 200 or not str(payload.get("path") or ""):
+                    message = str(payload.get("error") or f"HTTP {status}")
+                    print(f"[launcher] 粘贴上传失败：{source.name} -> {message}", file=sys.stderr)
+                    results.append({"name": source.name, "error": message})
+                    continue
+                results.append({**payload, "status": int(status)})
+            except Exception as exc:  # noqa: BLE001 - 单个文件失败不该让整批粘贴失败
+                print(f"[launcher] 粘贴上传异常：{source.name} -> {exc!r}", file=sys.stderr)
+                results.append({"name": source.name, "error": f"{type(exc).__name__}: {exc}"})
+            finally:
+                if spool_name:
+                    Path(spool_name).unlink(missing_ok=True)   # 失败路径自己收尾，不留 .part
+        return {"ok": True, "results": results}
 
     # ---- 拖文件夹进输入区：把"拖进来的文件夹在硬盘上的真实路径"交回前端 ----
     def naibaFolderDrop(self, native_error: str = "") -> dict:
@@ -830,7 +903,7 @@ class Launcher:
         self.window = webview.create_window(
             "Cat Chat",
             page_url,
-            js_api=JsApi(),
+            js_api=JsApi(srv.APP),
             width=1280,
             height=860,
             min_size=(900, 600),

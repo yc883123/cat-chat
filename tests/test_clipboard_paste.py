@@ -206,6 +206,100 @@ class ClipboardPayloadTests(unittest.TestCase):
             json.dumps(payload)   # 抛异常即失败
 
 
+class UploadLocalPathsTests(unittest.TestCase):
+    """剪贴板里"复制的文件" → 服务端落盘（`JsApi.naibaUploadLocalPaths`）。
+
+    为什么必须落盘（而不是把路径当附件）：`/api/file` 只服务工作区与 data 目录内的路径，
+    其余一律 403 ⇒ 工作区外的图片在前端只能显示成**破图**（用户实测："模型确实看到了，
+    但前端看不到"）。落盘走的是拖入文件那条 `app._upload_spooled`（去重/压缩/缩略图全套）。
+
+    **最要紧的一条**：`_upload_spooled` 读完会 unlink 掉传进去的路径，所以桥必须先复制到
+    临时 spool——直接递用户原文件等于把用户的文件删了。下面有反断言钉住。
+    """
+
+    class _App:
+        def __init__(self, payload=None, status=200, raises=None):
+            self.calls: list[tuple[str, str]] = []
+            self._payload = payload if payload is not None else {"path": "uploads/x.png", "name": "x.png"}
+            self._status = status
+            self._raises = raises
+
+        def _upload_spooled(self, spool_path, original_name):
+            """忠实模拟真实实现：**读掉 spool 再 unlink**（这正是桥必须先复制的理由）。"""
+            data = Path(spool_path).read_bytes()
+            self.calls.append((spool_path, original_name))
+            self.last_bytes = data
+            Path(spool_path).unlink(missing_ok=True)
+            if self._raises:
+                raise self._raises
+            return dict(self._payload), self._status
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="naiba_clip_upload_")
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.source = self.dir / "中文图片.png"
+        self.source.write_bytes(b"PNG-BYTES" * 8)
+
+    def _api(self, app):
+        return launcher.JsApi(app)
+
+    def test_copies_to_a_spool_and_keeps_the_original_file(self) -> None:
+        app = self._App()
+        result = self._api(app).naibaUploadLocalPaths([str(self.source)])
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["results"][0]["path"], "uploads/x.png")
+        self.assertEqual(result["results"][0]["status"], 200)
+        # 原文件必须原封不动（桥先复制到 spool）
+        self.assertTrue(self.source.is_file(), "把用户的原文件交给 _upload_spooled 会被它删掉")
+        self.assertEqual(self.source.read_bytes(), b"PNG-BYTES" * 8)
+        # 交给 app 的必须是**另一个**路径，且内容一致
+        spool_path, original_name = app.calls[0]
+        self.assertNotEqual(Path(spool_path), self.source)
+        self.assertEqual(original_name, "中文图片.png", "原始文件名要带过去（中文不能乱）")
+        self.assertEqual(app.last_bytes, b"PNG-BYTES" * 8)
+        self.assertFalse(Path(spool_path).exists(), "spool 由 _upload_spooled 收尾，桥不该留残留")
+
+    def test_spool_is_cleaned_when_the_upload_fails(self) -> None:
+        """落盘抛异常时桥自己收尾 .part，不留垃圾。"""
+        app = self._App(raises=RuntimeError("磁盘满了"))
+        result = self._api(app).naibaUploadLocalPaths([str(self.source)])
+        self.assertTrue(result["ok"], "单文件失败不该让整批失败")
+        self.assertIn("磁盘满了", result["results"][0]["error"])
+        self.assertTrue(self.source.is_file())
+        leftovers = list(self.dir.glob("*.part")) + [
+            p for p in Path(tempfile.gettempdir()).glob("clip-paste-*.part")
+        ]
+        self.assertEqual(leftovers, [], "失败路径必须清掉自己的临时文件")
+
+    def test_missing_file_and_oversized_file_are_reported_per_item(self) -> None:
+        app = self._App()
+        api = self._api(app)
+        gone = api.naibaUploadLocalPaths([str(self.dir / "不存在.png")])
+        self.assertIn("不存在或已被移动", gone["results"][0]["error"])
+        with mock.patch.object(launcher, "CLIPBOARD_UPLOAD_MAX_BYTES", 4):
+            big = api.naibaUploadLocalPaths([str(self.source)])
+        self.assertIn("80 MB", big["results"][0]["error"])
+        self.assertEqual(app.calls, [], "超限/不存在都不该进落库入口")
+
+    def test_upload_error_status_is_reported(self) -> None:
+        app = self._App(payload={"error": "单个文件不能超过 80 MB"}, status=413)
+        result = self._api(app).naibaUploadLocalPaths([str(self.source)])
+        self.assertIn("80 MB", result["results"][0]["error"])
+
+    def test_without_app_and_without_paths_are_explicit(self) -> None:
+        """没有 app（源码模式直调）与空入参都要明确报错，不许静默成功。"""
+        self.assertIn("上传通道不可用", launcher.JsApi().naibaUploadLocalPaths(["x"])["error"])
+        self.assertIn("没有要粘贴的文件", self._api(self._App()).naibaUploadLocalPaths([])["error"])
+
+    def test_too_many_files_are_refused_up_front(self) -> None:
+        with mock.patch.object(launcher, "CLIPBOARD_UPLOAD_MAX_FILES", 2):
+            result = self._api(self._App()).naibaUploadLocalPaths(["a", "b", "c"])
+        self.assertFalse(result["ok"])
+        self.assertIn("最多粘贴 2 个", result["error"])
+
+
 class ClipboardWritePathTests(unittest.TestCase):
     """写方向（copy_image_to_clipboard）不能被这次改动带坏：两条路共用同一套剪贴板语义。"""
 

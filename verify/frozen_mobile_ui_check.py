@@ -58,7 +58,8 @@ except Exception as exc:  # noqa: BLE001
     check("可读到打包内的 12-chat-input.js", False, repr(exc))
 check("打包资源：输入模块调桥读剪贴板", "naibaClipboardPayload" in chat)
 check("打包资源：图片走既有上传链路", "uploadFiles([pngFileFromBase64(" in chat)
-check("打包资源：文件走路径附件", "state.pendingFiles.push" in chat and "renderPendingFiles()" in chat)
+check("打包资源：文件走**服务端落盘**（不是前端看不见的路径附件）",
+      "naibaUploadLocalPaths" in chat and "addClipboardPathAttachments" not in chat)
 check("打包资源：菜单文案自适应有实现", "粘贴图片并上传" in chat and "labelFor" in chat)
 check("打包资源：底层模块有注入点", "export function setClipboardPasteDriver" in core)
 check("打包资源：组合根真的注册了驱动", "setClipboardPasteDriver(clipboardPasteDriver)" in bind)

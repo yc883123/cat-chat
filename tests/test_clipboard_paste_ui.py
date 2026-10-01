@@ -50,6 +50,17 @@ class PasteActionWiringTests(unittest.TestCase):
         self.assertIn(f"def {BRIDGE_METHOD}(", self.launcher, "Python 侧缺桥方法")
         self.assertIn(f"{BRIDGE_METHOD}", self.chat, "前端没调这个桥方法（改名就会静默失效）")
 
+    def test_upload_bridge_method_name_matches_on_both_sides(self) -> None:
+        """复制来的文件必须走**服务端落盘**这条桥。
+
+        用户实测否掉过"零拷贝路径附件"那一版：`/api/file` 只服务工作区与 data 目录内的路径，
+        工作区外的图片在前端只能显示成**破图**（模型反而看得见，因为模型走绝对路径 + 工具）。
+        所以文件一定要真落盘成上传件，桥名两边都得在。
+        """
+        self.assertIn("def naibaUploadLocalPaths(", self.launcher)
+        self.assertIn("naibaUploadLocalPaths", self.chat)
+        self.assertIn("JsApi(srv.APP)", self.launcher, "桥要拿到 app 才能复用 _upload_spooled")
+
     # ---- ② 粘贴动作必须走原生驱动 ----
     def test_paste_action_consults_the_native_driver(self) -> None:
         body = _function_body(self.core, "export async function runTextContextAction")
@@ -90,15 +101,27 @@ class PasteActionWiringTests(unittest.TestCase):
         self.assertIn("uploadFiles([pngFileFromBase64(", body, "图片必须复用既有上传链路")
         self.assertIn("createConversation", body, "没有会话时先建会话（与 handlePasteImage 同口径）")
 
-    def test_file_payload_becomes_a_path_attachment(self) -> None:
-        body = _function_body(self.chat, "function addClipboardPathAttachments")
-        self.assertIn("state.pendingFiles.push", body)
-        self.assertIn("path,", body, "必须带 path：路径附件是零拷贝形态（与拖链接/@引用同一路）")
+    def test_file_payload_goes_through_the_server_upload_pipeline(self) -> None:
+        """文件分支必须调桥落盘，并把落盘结果当 chip（有 path/thumb_path 才看得见）。"""
+        body = _function_body(self.chat, "async function uploadClipboardPaths")
+        self.assertIn("api.naibaUploadLocalPaths(paths)", body)
+        self.assertIn("state.pendingFiles.push({ ...item, uploading: false, progress: 100 })", body,
+                      "chip 形状要与上传成功时一致（缩略图/名称/大小取落盘后的真值）")
         self.assertIn("renderPendingFiles()", body, "推完必须重渲染待发送列表")
+        # 上一版那条"零拷贝路径附件"必须彻底消失：留下来就会被误用成"看不见的附件"
+        self.assertNotIn("addClipboardPathAttachments", self.chat)
 
     def test_files_are_deduplicated_against_pending_list(self) -> None:
-        body = _function_body(self.chat, "function addClipboardPathAttachments")
-        self.assertIn("existing.has(path)", body, "连点两次不该出现两条一样的附件")
+        body = _function_body(self.chat, "async function uploadClipboardPaths")
+        self.assertIn("state.pendingFiles.some(", body, "连点两次不该出现两条一样的附件")
+        self.assertIn("duplicated", body)
+
+    def test_partial_failures_are_reported_not_swallowed(self) -> None:
+        """逐个文件的失败要在提示里说出来（超 80MB / 文件已移动等），不许静默少几个。"""
+        body = _function_body(self.chat, "async function uploadClipboardPaths")
+        self.assertIn("errors.push(", body)
+        self.assertIn("个失败", body)
+        self.assertIn("response?.ok === false", body, "整批失败（如未接入 app）也要出声")
 
     def test_no_probe_cache_so_the_label_cannot_lie(self) -> None:
         """文案与动作都必须按**此刻**的剪贴板算。

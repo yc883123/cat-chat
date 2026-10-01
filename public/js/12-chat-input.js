@@ -570,23 +570,54 @@ function pngFileFromBase64(base64Data, name) {
   return new File([bytes], name || '粘贴的图片.png', { type: 'image/png' });
 }
 
-/** 复制文件的情况走**路径附件**（与拖入本地链接/@引用同形态）：零拷贝、任意大小。 */
-function addClipboardPathAttachments(paths, names, sizes) {
-  const existing = new Set(state.pendingFiles.map((item) => String(item.path || '')));
+/** 复制文件的情况走**服务端落盘**：与拖入一个文件完全相同（缩略图/压缩/去重/清理保护全套）。
+ *
+ * 为什么要落盘而不是"把路径当附件"（我曾经这么做、被用户实测否掉）：`/api/file` 只服务
+ * **工作区与 data 目录**内的路径（其余一律 403），工作区外的图片在前端只能显示成**破图**——
+ * 模型反而看得见（走绝对路径 + 工具），于是表现为"模型看到了、前端看不到"。**看得见是硬要求**。
+ */
+async function uploadClipboardPaths(paths) {
+  const api = window.pywebview?.api;
+  if (typeof api?.naibaUploadLocalPaths !== 'function') {
+    return { handled: false, message: '' };   // 没有上传通道：别硬造一条前端看不见的附件
+  }
+  let response = null;
+  try {
+    response = await api.naibaUploadLocalPaths(paths);
+  } catch (error) {
+    return { handled: true, message: `粘贴上传失败：${error.message}` };
+  }
+  if (response?.ok === false) {
+    return { handled: true, message: response.error || '粘贴上传失败' };
+  }
+  const results = Array.isArray(response?.results) ? response.results : [];
+  const errors = [];
   let added = 0;
-  paths.forEach((raw, index) => {
-    const path = String(raw || '');
-    if (!path || existing.has(path)) return;
-    existing.add(path);
-    state.pendingFiles.push({
-      name: String(names[index] || '').trim() || path.split(/[\\/]/).pop() || '文件',
-      path,
-      size: Number(sizes[index] || 0),
-    });
-    added += 1;
-  });
+  let duplicated = 0;
+  for (const item of results) {
+    if (item && item.path) {
+      const path = String(item.path);
+      if (state.pendingFiles.some((pending) => String(pending.path || '') === path)) {
+        duplicated += 1;
+        continue;
+      }
+      // 与上传成功时的 chip 同形状（`uploadOne` 也是 Object.assign(payload)），
+      // 这样缩略图/名称/大小都按落盘后的真值渲染——前端因此**看得见**。
+      state.pendingFiles.push({ ...item, uploading: false, progress: 100 });
+      added += 1;
+    } else if (item) {
+      errors.push(`${item.name || '文件'}：${item.error || '上传失败'}`);
+    }
+  }
   if (added) renderPendingFiles();
-  return added;
+  if (errors.length) {
+    return {
+      handled: true,
+      message: `已粘贴 ${added} 个文件；${errors.length} 个失败（${errors[0]}）`,
+    };
+  }
+  if (!added && duplicated) return { handled: true, message: '这些文件已在待发送列表里' };
+  return { handled: true, message: added ? `已粘贴 ${added} 个文件` : '没有可粘贴的文件' };
 }
 
 /** 执行粘贴：返回 `{handled, message}`；`handled=false` 表示交给原有的文本通道。 */
@@ -602,11 +633,7 @@ async function applyNativeClipboardPaste() {
   if (payload.kind === 'files') {
     const paths = payload.paths || [];
     if (!paths.length) return { handled: false, message: '' };
-    const added = addClipboardPathAttachments(paths, payload.names || [], payload.sizes || []);
-    return {
-      handled: true,
-      message: added ? `已粘贴 ${added} 个文件` : '这些文件已在待发送列表里',
-    };
+    return uploadClipboardPaths(paths);
   }
   return { handled: false, message: '' };   // text / empty：交给既有 readText 通道
 }

@@ -936,6 +936,25 @@ class NaibaChatApp:
         """
         return self.config.upsert_provider(apply_preset_values(body))
 
+    def api_update_provider_pricing(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """只改一张卡片的三档单价（用量统计页「费用单价」弹层）。
+
+        与 ``api_upsert_model_profile`` 分开：定价弹层只提交 ``id`` / ``kind`` /
+        ``pricing``，**不接受**其它连接字段——否则「改价」这条路径会顺带覆盖
+        base_url / api_key（前端手里根本没有真 Key）。三档全空 = 清除定价。
+        """
+        try:
+            result = self.config.set_provider_pricing(
+                str(body.get("id") or ""),
+                str(body.get("kind") or "online"),
+                body.get("pricing"),
+            )
+        except LookupError as exc:
+            return {"error": str(exc)}, HTTPStatus.NOT_FOUND
+        except (ValueError, TypeError) as exc:
+            return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
+        return result, HTTPStatus.OK
+
     def api_upsert_workspace(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         name = str(body.get("name") or "").strip()
         raw_dir = str(body.get("dir") or "").strip()

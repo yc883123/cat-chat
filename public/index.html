@@ -927,7 +927,17 @@
           <p class="hint" id="migrationMessage"></p>
         </section>
         <section data-settings-panel="usage" hidden>
-          <div class="settings-panel-head"><h3>用量统计</h3><p>Token 消耗与费用的分析视图（Σ 全部模型请求口径，与单条回复的上下文圆环口径不同）。费用按「API 供应商」里设置的三档单价实时计算，改价后历史金额随之重算；多供应商多币种分列合计，不混算。</p></div>
+          <div class="settings-panel-head has-action">
+            <div class="settings-panel-head-text">
+              <h3>用量统计</h3>
+              <p>Token 消耗与费用的分析视图（Σ 全部模型请求口径，与单条回复的上下文圆环口径不同）。费用按已设定的三档单价实时计算，改价后历史金额随之重算；单价在右上角「费用单价」里按 供应商 → 模型 管理，多供应商多币种分列合计，不混算。</p>
+            </div>
+            <button class="control-button settings-panel-action" type="button" id="usagePricingOpen" title="按供应商 → 模型 设置三档单价">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v10M9.5 9.5c0-1 1-1.8 2.5-1.8s2.5.7 2.5 1.8-1 1.6-2.5 2c-1.5.4-2.5 1-2.5 2s1 1.8 2.5 1.8 2.5-.8 2.5-1.8"></path></svg>
+              <span>费用单价</span>
+              <span class="usage-pricing-count" id="usagePricingCount" hidden>0</span>
+            </button>
+          </div>
           <div class="usage-kpis">
             <div class="usage-kpi"><span class="usage-kpi-label"><i class="usage-kpi-icon" style="background:var(--accent)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"></path></svg></i>总调用</span><b class="usage-kpi-value" id="usageKpiCalls">—</b><small class="usage-kpi-sub" id="usageKpiCallsSub">—</small></div>
             <div class="usage-kpi"><span class="usage-kpi-label"><i class="usage-kpi-icon" style="background:var(--warning)"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v10M9.5 9.5c0-1 1-1.8 2.5-1.8s2.5.7 2.5 1.8-1 1.6-2.5 2c-1.5.4-2.5 1-2.5 2s1 1.8 2.5 1.8 2.5-.8 2.5-1.8"></path></svg></i>总耗费</span><b class="usage-kpi-value" id="usageKpiCost">—</b><small class="usage-kpi-sub" id="usageKpiCostSub">—</small></div>
@@ -997,7 +1007,7 @@
               </table>
             </div>
           </div>
-          <p class="hint">没有数据？在「API 供应商」里加好模型并开始对话即可。单价在「API 供应商 → 编辑 → 费用单价」里设置（留空不计费）；视觉车道的用量暂不计入。</p>
+          <p class="hint">没有数据？在「API 供应商」里加好模型并开始对话即可。单价在右上角「费用单价」里按 供应商 → 模型 设置（留空不计费）；视觉车道的用量暂不计入。</p>
         </section>
         <section data-settings-panel="updates" hidden>
           <div class="settings-panel-head"><h3>软件更新</h3><p>点「检查更新」查询新版本，手动选择版本后点击「立即更新」；不会自动安装。</p></div>
@@ -1113,15 +1123,6 @@
             <option value="false">纯文本</option>
           </select>
           <small class="hint" id="providerVisionHint">自动检测会优先读取运行端能力；上传图片时才会执行最小图片探针。</small>
-        </label>
-        <label class="provider-field" id="providerPricingField">费用单价（每百万 tokens，可选）
-          <span class="provider-pricing-grid">
-            <input id="providerPriceInput" type="number" min="0" max="1000000" step="any" placeholder="输入（未命中）单价">
-            <input id="providerPriceCachedInput" type="number" min="0" max="1000000" step="any" placeholder="缓存命中单价">
-            <input id="providerPriceOutput" type="number" min="0" max="1000000" step="any" placeholder="输出单价">
-            <input id="providerPriceCurrency" type="text" maxlength="8" placeholder="币种（如 ¥ / $）" aria-label="币种符号">
-          </span>
-          <small class="hint">按「未命中输入 / 缓存命中输入 / 输出」三档计价，留空的档位按 0 计；三档全空 = 未定价，不计入费用。本地模型通常留空。</small>
         </label>
       </div>
       <div class="provider-form-footer">
@@ -1467,6 +1468,52 @@
         <button class="primary-button" type="button" id="usagePrefsSave">保存偏好设置</button>
       </div>
       <p class="usage-dialog-note usage-dialog-hint">偏好保存到服务端（沿用「侧栏分组与排序」同款机制），同一实例多端共享、重启不丢。</p>
+    </div>
+  </dialog>
+
+  <!-- 用量统计：「费用单价」弹层。入口只占面板头右上角一个按钮，页面里不铺任何定价控件。
+       一级 = 按 base_url 归一的分组（同一端点下的模型卡片归一组），二级 = 该组下已定价的
+       条目（可改价 / 删除定价 / 添加未定价的卡片），币种整组套用、行内可单独覆盖、可自定义。
+       定价唯一写入口是 POST /api/providers/pricing（只提交 id/kind/pricing）——不复用整表单，
+       免得改价顺手把 base_url / api_key 覆盖掉。原生 <dialog> 在 top layer，不会被设置弹窗盖住。 -->
+  <dialog id="usagePricingDialog" class="panel-dialog usage-dialog pricing-dialog">
+    <div class="dialog-toolbar">
+      <button class="icon-button pricing-back" id="usagePricingBack" type="button" title="返回供应商列表" aria-label="返回供应商列表" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"></path></svg></button>
+      <div class="pricing-toolbar-text">
+        <h2 id="usagePricingTitle">费用单价</h2>
+        <p id="usagePricingSub">按 base_url 分组的 API 供应商 → 模型</p>
+      </div>
+      <button class="icon-button" data-close="usagePricingDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+    </div>
+    <div class="usage-dialog-body pricing-body">
+      <div id="usagePricingLevel1">
+        <p class="hint usage-dialog-hint">分组按 base_url 归一：同一地址（忽略末尾斜杠与大小写）下的模型卡片归为一组，与卡片名字无关。留空不计费；三档全空 = 未定价。改动保存后立即生效，历史费用按新价重算。</p>
+        <div id="usagePricingGroups" class="pricing-groups"></div>
+      </div>
+
+      <div id="usagePricingLevel2" hidden>
+        <div class="pricing-cur-bar">
+          <span class="pricing-cur-label">币种</span>
+          <div class="pricing-cur-chips" id="usagePricingCurChips"></div>
+          <div class="pricing-cur-custom" id="usagePricingCurCustom" hidden>
+            <input type="text" id="usagePricingCurInput" maxlength="8" placeholder="如 USDT" aria-label="自定义币种符号">
+            <button class="control-button tiny" type="button" id="usagePricingCurOk">确定</button>
+            <button class="control-button tiny" type="button" id="usagePricingCurCancel">取消</button>
+          </div>
+          <span class="hint pricing-cur-hint" id="usagePricingCurHint">整组套用</span>
+        </div>
+        <p class="hint usage-dialog-hint">整组套用改这个地址下所有模型；行内符号按钮只改单个模型；自定义符号最多 8 个字符。统计里按币种分列合计，不混算。</p>
+        <div class="pricing-pool" id="usagePricingPool" hidden>
+          <p class="hint" id="usagePricingPoolNote"></p>
+          <div id="usagePricingPoolList"></div>
+        </div>
+        <div id="usagePricingRows"></div>
+        <button class="pricing-add" type="button" id="usagePricingAdd">＋ 添加模型定价</button>
+      </div>
+    </div>
+    <div class="pricing-foot">
+      <p class="hint" id="usagePricingNote">保存即生效 · 历史费用按新价重算</p>
+      <button class="primary-button" type="button" id="usagePricingDone">完成</button>
     </div>
   </dialog>
 

@@ -624,6 +624,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json(self.app.api_upsert_model_profile(body))
             except Exception as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif path == "/api/providers/pricing":
+            # 定价弹层专用入口：只提交 {id, kind, pricing}，不碰连接配置。
+            self._json(*self.app.api_update_provider_pricing(body))
         elif path == "/api/provider-presets/open":
             # 「打开注册页」：preset_id 进、白名单地址出，不接受前端传 URL（见 app.py）。
             self._json(*self.app.api_open_provider_key_url(str(body.get("preset_id") or "")))

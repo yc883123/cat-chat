@@ -2429,6 +2429,43 @@ class ConfigStore:
             payload["local_backend"] = request_format
         return self.upsert_model_profile(payload)
 
+    def set_provider_pricing(self, provider_id: str, kind: str, pricing: Any) -> dict[str, Any]:
+        """只改一张模型卡片的三档单价（用量统计页「费用单价」弹层的唯一写入口）。
+
+        刻意与 ``upsert_model_profile`` 分开：那边要求整份表单（base_url / model /
+        api_key 都要在），而定价弹层手里只有 ``id`` 与 ``pricing``——拿整表单提交
+        会把连接配置用空值覆盖掉（前端也拿不到真 Key）。这里**只动 pricing 一个键**，
+        其余字段原样保留；``pricing`` 三档全空按既有语义**删除该键**（= 未定价，不计费）。
+
+        找不到卡片（或 kind 对不上）抛 LookupError ⇒ HTTP 层转 404；pricing 非法
+        （非数字 / 超范围 / 币种过长）由 ``_provider_pricing`` 抛 ValueError ⇒ 400。
+        """
+        pid = str(provider_id or "").strip()
+        if not pid:
+            raise ValueError("id 不能为空")
+        normalized_kind = str(kind or "online").strip().lower()
+        if normalized_kind not in VALID_MODEL_KINDS:
+            raise ValueError("模型类型必须是 online 或 local")
+        parsed = self._provider_pricing(pricing)
+        with self.lock:
+            provider = next(
+                (item for item in self.data.get("providers", []) if item.get("id") == pid),
+                None,
+            )
+            if provider is None or str(provider.get("kind") or "online") != normalized_kind:
+                raise LookupError("该模型卡片不存在")
+            if parsed:
+                provider["pricing"] = parsed
+            else:
+                provider.pop("pricing", None)
+            self.save()
+            return {
+                "id": pid,
+                "kind": normalized_kind,
+                "model_key": f"{normalized_kind}:{pid}",
+                "pricing": provider.get("pricing") or {},
+            }
+
     def delete_provider(self, provider_id: str) -> bool:
         """兼容别名：按 id 删除（不区分 online/local）。"""
         with self.lock:

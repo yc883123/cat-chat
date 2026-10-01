@@ -21,6 +21,16 @@ r"""一次性探针：核对「改过的前端文件 / 新增的内置 Skill 是
     skills/cat-chat-guide/references/{10,20,30,40,50,60,70,80}-*.md（**本轮新增 8 篇**，
       其中 10-教程-3分钟用ComfyUI出图.md 已被 20-教程2-3分钟用ComfyUI出图.md 取代）
 
+    本轮（2.9.11-beta：定价入口从供应商表单迁到「用量统计 → 右上角 费用单价」）改过 / 新增的文件：
+        naiba/config.py（新增 set_provider_pricing：只改一张卡的三档单价，连接字段一律不动）,
+        naiba/app.py（api_update_provider_pricing：LookupError→404 / ValueError→400）,
+        naiba/http.py（POST /api/providers/pricing 精确匹配，排在 /api/providers/ 前缀分支之前）,
+        public/index.html（用量统计面板头 has-action + 右上角入口按钮；**删掉**供应商表单里的单价字段；
+          **新增** #usagePricingDialog 一级/二级弹层）,
+        public/styles.css（删掉 .provider-pricing-grid 死样式；新增 .pricing-* 一整段）,
+        public/js/09-settings.js（providerFormValue 不再带价格键；新增费用单价弹层整段逻辑）,
+        public/js/15-bind-events.js（弹层接线 + 事件委托）
+
 下面 CHANGED 里那 6 个前端文件是 2.9.0 轮次的重点比对项，仍逐字节核对 + 指纹，留作回归
 ——它们本轮没动，但**不该在包里走样**。
 """
@@ -139,10 +149,17 @@ FINGERPRINTS = {
         "usageFilterDialog",
         "usagePrefsDialog",
         "usageSankeyBox",
+        # 2.9.11：定价入口从供应商表单搬到用量统计右上角 → 一级/二级弹层。
+        "usagePricingOpen",
+        "usagePricingDialog",
+        "usagePricingGroups",
+        "usagePricingCurChips",
     ],
     "styles.css": ["--set-r-card", "agent-card-tag", "settings-card-head", "cache-ref-hint", "sidebar-view-menu", "is-archived",
                    # 2.9.9：分析视图全套样式（KPI 网格 / 工具行 chip / tooltip / 弹窗 dvh 兜底）。
-                   ".usage-kpis", ".usage-chip", ".usage-tooltip", ".usage-dialog"],
+                   ".usage-kpis", ".usage-chip", ".usage-tooltip", ".usage-dialog",
+                   # 2.9.11：费用单价弹层（分组卡 / 二级行 / 币种条 + 自定义币种删除叉）。
+                   ".pricing-dialog", ".pricing-group", ".pricing-row", ".pricing-cur-x"],
     # emoji 头像判定入口（内置 Agent 用 emoji，上传图走 <img>）。
     "js/01-core.js": ["agentAvatarEmoji", "agentAvatarFile", "normalizeSidebarPrefs"],
     # 2.9.8：bootstrap 时同步服务端 settings.sidebar 三项偏好。
@@ -170,12 +187,18 @@ FINGERPRINTS = {
         "usageBucketSeries",
         "USAGE_SANKEY_MAX_MODELS",
         "usageSyncDialogBounds",
+        # 2.9.11：费用单价弹层（base_url 归一分组 / 三档写入 / 自定义币种增删 / 角标刷新）。
+        "refreshUsagePricingBadge",
+        "pricingBuildGroups",
+        "pricingDropCurrency",
+        "PRICING_BASE_CURRENCIES",
     ],
     # 2.9.7：进度 100% 未回响应时的「服务器处理中」+ 8 秒慢提示。
     "js/10-upload.js": ["SLOW_UPLOAD_HINT_MS", "服务器处理中", "file.slow"],
     # 2.9.8：滑杆按钮 / ⋯菜单归档项 / 侧栏拖拽接线。
     # 2.9.9：软键盘开合走 visualViewport，弹层重定位跟着它走；用量弹窗 close 统一摘 vv 监听。
-    "js/15-bind-events.js": ["settingsToolbarSub", "cleanImageCache('generated')", "openSidebarViewMenu", "toggleConversationArchive", "bindSidebarDragDrop", "window.visualViewport?.addEventListener", "usageUnbindDialogViewport"],
+    # 2.9.11：费用单价弹层接线（入口 / 返回 / 完成 / 事件委托 + 自定义币种删除）。
+    "js/15-bind-events.js": ["settingsToolbarSub", "cleanImageCache('generated')", "openSidebarViewMenu", "toggleConversationArchive", "bindSidebarDragDrop", "window.visualViewport?.addEventListener", "usageUnbindDialogViewport", "openUsagePricingDialog", "usagePricingDialog", "data-pricing-drop-currency"],
     # 2.9.9：@ / 弹层定位可视视口感知 + hide 清内联 maxHeight（手机软键盘裁弹层修复）。
     "js/13-skill-refs.js": ["window.visualViewport", "style.removeProperty('max-height')"],
     "js/16-file-refs.js": ["style.removeProperty('max-height')"],

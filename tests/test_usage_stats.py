@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 import unittest
+from http import HTTPStatus
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -248,6 +249,150 @@ class PricingConfigTests(unittest.TestCase):
         reopened = ConfigStore(Path(self.tmp.name) / "config.json")
         provider = reopened.public_providers()[0]
         self.assertEqual(provider["pricing"], {"output_per_million": 3.0, "currency": "USD"})
+
+    def test_set_provider_pricing_touches_price_only(self) -> None:
+        """「费用单价」弹层的唯一写入口：只改三档价格，连接字段一律不动。
+
+        这是把定价从供应商表单搬走后的关键不变量——弹层拿不到真 api_key，
+        若写路径顺手带上连接字段，一保存就会把 base_url / Key 覆盖成空。
+        """
+        saved = self.config.upsert_model_profile(dict(self.base))
+        result = self.config.set_provider_pricing(
+            saved["id"], "online",
+            {"input_per_million": "2", "cached_input_per_million": 0.4,
+             "output_per_million": 8, "currency": " usd "},
+        )
+        self.assertEqual(result["id"], saved["id"])
+        self.assertEqual(result["kind"], "online")
+        self.assertEqual(result["model_key"], f"online:{saved['id']}")
+        self.assertEqual(
+            result["pricing"],
+            {"input_per_million": 2.0, "cached_input_per_million": 0.4,
+             "output_per_million": 8.0, "currency": "usd"},
+        )
+        # 币种原样保留大小写（只去空白）：费用统计按「精确字符串」分币种行，
+        # 因此 USD 与 usd 会各占一行——这是选定语义，不是 bug。
+        card = [p for p in self.config.public_providers() if p["id"] == saved["id"]][0]
+        self.assertEqual(card["base_url"], "https://api.example.com")
+        self.assertEqual(card["model"], "m1")
+        # public_providers 会遮蔽明文 Key，所以用 has_api_key / provider_secret 验「没被动过」。
+        self.assertTrue(card["has_api_key"])
+        self.assertEqual(self.config.provider_secret(saved["id"]), "sk-1")
+        # 三档全空 = 清除定价（键整个删掉，不是留空对象）。
+        cleared = self.config.set_provider_pricing(saved["id"], "online", {})
+        self.assertEqual(cleared["pricing"], {})
+        card = [p for p in self.config.public_providers() if p["id"] == saved["id"]][0]
+        self.assertNotIn("pricing", card)
+        self.assertEqual(self.config.provider_secret(saved["id"]), "sk-1")
+
+    def test_set_provider_pricing_rejects_bad_input(self) -> None:
+        saved = self.config.upsert_model_profile(dict(self.base))
+        local = self.config.upsert_model_profile({
+            **self.base, "name": "Ollama", "kind": "local",
+            "request_format": "ollama", "base_url": "http://127.0.0.1:11434",
+        })
+        # 空 id / 非法 kind → ValueError（调用方给错参数）。
+        with self.assertRaises(ValueError):
+            self.config.set_provider_pricing("   ", "online", {"input_per_million": 1})
+        with self.assertRaises(ValueError):
+            self.config.set_provider_pricing(saved["id"], "cloud", {"input_per_million": 1})
+        # 价格本身非法（负数 / 非数字 / 币种超 8 字符）→ ValueError。
+        for bad in ({"input_per_million": -1}, {"output_per_million": "x"},
+                    {"currency": "123456789"}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    self.config.set_provider_pricing(saved["id"], "online", bad)
+        # id 不存在 → LookupError。
+        with self.assertRaises(LookupError):
+            self.config.set_provider_pricing("no-such-id", "online", {"input_per_million": 1})
+        # id 在、但 kind 对不上（把本地卡当在线卡改）→ LookupError，且本地卡没被动过。
+        with self.assertRaises(LookupError):
+            self.config.set_provider_pricing(local["id"], "online", {"input_per_million": 1})
+        card = [p for p in self.config.public_providers() if p["id"] == local["id"]][0]
+        self.assertNotIn("pricing", card)
+        self.assertEqual(card["kind"], "local")
+
+    def test_set_provider_pricing_reruns_cost_immediately(self) -> None:
+        """改价必须「马上生效」：费用查询按当前单价现算，不落价格快照。"""
+        saved = self.config.upsert_model_profile({
+            **self.base,
+            "pricing": {"input_per_million": 2, "output_per_million": 8},
+        })
+        self.storage = ChatStorage(Path(self.tmp.name) / "chat.db")
+        conversation = self.storage.create_conversation(title="改价")
+        self.storage.record_usage({
+            "run_id": "r1", "conversation_id": conversation["id"], "kind": "chat",
+            "model_key": saved["model_key"], "model_name": "m1",
+            "requests": 1, "input_tokens": 1_000_000, "cached_tokens": 0,
+            "output_tokens": 0, "total_tokens": 1_000_000, "created_at": int(time.time() * 1000),
+        })
+        app = NaibaChatApp.__new__(NaibaChatApp)
+        app.storage = self.storage
+        app.config = self.config
+        self.assertEqual(app.api_usage_stats({"days": ["30"]})[0]["totals"]["costs"],
+                         [{"currency": "¥", "amount": 2.0}])
+        # 只改价、不补记任何用量 → 历史那一轮金额随新价重算。
+        self.config.set_provider_pricing(saved["id"], "online",
+                                        {"input_per_million": 10, "output_per_million": 8})
+        self.assertEqual(app.api_usage_stats({"days": ["30"]})[0]["totals"]["costs"],
+                         [{"currency": "¥", "amount": 10.0}])
+
+
+class ProviderPricingEndpointTests(unittest.TestCase):
+    """POST /api/providers/pricing（定价弹层的轻量端点）。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.config = ConfigStore(Path(self.tmp.name) / "config.json")
+        self.app = NaibaChatApp.__new__(NaibaChatApp)
+        self.app.config = self.config
+        self.saved = self.config.upsert_model_profile({
+            "name": "DS", "base_url": "https://api.example.com", "model": "m1",
+            "api_key": "sk-1", "kind": "online", "request_format": "openai_chat",
+        })
+
+    def _card(self) -> dict:
+        return [p for p in self.config.public_providers() if p["id"] == self.saved["id"]][0]
+
+    def test_ok_and_status_codes(self) -> None:
+        payload, status = self.app.api_update_provider_pricing(
+            {"id": self.saved["id"], "kind": "online",
+             "pricing": {"input_per_million": 2, "output_per_million": 8}},
+        )
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertEqual(payload["pricing"]["input_per_million"], 2.0)
+        # 非法值 → 400。
+        for bad in ({"kind": "cloud", "pricing": {}},
+                    {"kind": "online", "pricing": {"currency": "123456789"}},
+                    {"kind": "online", "pricing": {"input_per_million": -1}}):
+            with self.subTest(bad=bad):
+                _, code = self.app.api_update_provider_pricing({"id": self.saved["id"], **bad})
+                self.assertEqual(code, HTTPStatus.BAD_REQUEST)
+        # 卡片不存在 / kind 对不上 → 404。
+        for pid, kind in (("no-such-id", "online"), (self.saved["id"], "local")):
+            with self.subTest(pid=pid, kind=kind):
+                _, code = self.app.api_update_provider_pricing(
+                    {"id": pid, "kind": kind, "pricing": {"input_per_million": 1}})
+                self.assertEqual(code, HTTPStatus.NOT_FOUND)
+
+    def test_connection_fields_survive_pricing_write(self) -> None:
+        self.app.api_update_provider_pricing(
+            {"id": self.saved["id"], "kind": "online",
+             "pricing": {"input_per_million": 2, "output_per_million": 8}},
+        )
+        card = self._card()
+        self.assertEqual(card["base_url"], "https://api.example.com")
+        self.assertEqual(card["model"], "m1")
+        self.assertEqual(card["name"], "DS")
+        self.assertTrue(card["has_api_key"])
+        self.assertEqual(self.config.provider_secret(self.saved["id"]), "sk-1")
+
+    def test_route_is_wired_in_http_layer(self) -> None:
+        """守门路由接线：POST 精确匹配必须存在，且排在 /api/providers/ 前缀分支之前。"""
+        source = (ROOT / "naiba" / "http.py").read_text(encoding="utf-8")
+        self.assertIn('path == "/api/providers/pricing"', source)
+        self.assertIn("api_update_provider_pricing", source)
 
 
 class EndpointTests(UsageStatsBase):

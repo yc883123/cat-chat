@@ -572,11 +572,6 @@ export function showProviderForm(provider = {}, { isNew = false } = {}) {
   $('#providerSupportsImages').value = provider.supports_images_explicit === true
     ? 'true'
     : (provider.supports_images_explicit === false ? 'false' : 'auto');
-  const pricing = (provider.pricing && typeof provider.pricing === 'object') ? provider.pricing : {};
-  $('#providerPriceInput').value = pricing.input_per_million ?? '';
-  $('#providerPriceCachedInput').value = pricing.cached_input_per_million ?? '';
-  $('#providerPriceOutput').value = pricing.output_per_million ?? '';
-  $('#providerPriceCurrency').value = pricing.currency ?? '';
   setProviderModelOptions([], provider.model || '');
   $('#providerFormat').value = provider.request_format || 'openai_chat';
   $('#providerApiKey').value = '';
@@ -648,7 +643,6 @@ export function setProviderEditMode(editing) {
     '#providerKind', '#providerModel', '#providerModelCustom', '#providerContextWindow',
     '#providerMaxOutputTokens', '#providerTemperature', '#providerReasoningEffort',
     '#providerSupportsImages', '#loadProviderModels',
-    '#providerPriceInput', '#providerPriceCachedInput', '#providerPriceOutput', '#providerPriceCurrency',
   ].forEach((selector) => {
     const element = $(selector);
     if (element) element.disabled = !editing;
@@ -748,14 +742,9 @@ export function providerFormValue() {
     temperature: numberOrUndefined('#providerTemperature'),
     reasoning_effort: $('#providerReasoningEffort').value,
     supports_images: imageChoice === 'auto' ? null : imageChoice === 'true',
-    // 三档单价（可选）：**全空也提交空对象**，让后端清除旧值（与「不提交即清除」
-    // 其它可选字段不同：这里带键才动定价，旧客户端不带键不会误清）。
-    pricing: {
-      input_per_million: numberOrUndefined('#providerPriceInput'),
-      cached_input_per_million: numberOrUndefined('#providerPriceCachedInput'),
-      output_per_million: numberOrUndefined('#providerPriceOutput'),
-      currency: $('#providerPriceCurrency').value.trim(),
-    },
+    // 单价**不在这里提交**：定价已迁到「用量统计 → 右上角 费用单价」（按 base_url 分组 →
+    // 模型），走 POST /api/providers/pricing 单点写入。不带价格键时后端不动旧值
+    // （config.upsert_model_profile 的向后兼容分支），所以这张表单既不会误清也不会覆盖价格。
   };
 }
 
@@ -813,6 +802,8 @@ export function syncSavedProvider(saved) {
   if (visionSelect) delete visionSelect.dataset.populated;
   populateVisionSettings();
   populateModels();
+  // 新卡片默认没有单价 ⇒ 用量页「费用单价」角标要跟着变（不用等切回设置页才发现）。
+  refreshUsagePricingBadge();
 }
 
 // 保存进行中的重入闸：`#saveProvider` 禁用只能挡住"点按钮"，**挡不住在输入框里按回车**
@@ -1690,7 +1681,7 @@ function usageRenderProviders() {
   if (hint) {
     hint.hidden = unpriced.length === 0;
     hint.textContent = unpriced.length
-      ? `${usageNumber(Number(usageStatsCache?.totals?.unpriced_turns || 0))} 轮来自未设单价的供应商（${unpriced.map((row) => row.provider_name).join('、')}），未计入费用；到「API 供应商 → 编辑 → 费用单价」补设后即可追溯。`
+      ? `${usageNumber(Number(usageStatsCache?.totals?.unpriced_turns || 0))} 轮来自未设单价的供应商（${unpriced.map((row) => row.provider_name).join('、')}），未计入费用；点右上角「费用单价」补设后即可追溯。`
       : '';
   }
 }
@@ -1994,12 +1985,475 @@ export function setUsageMetric(metric) {
   usageRenderAll();
 }
 
+/* ---------- 费用单价弹层（用量统计 → 按 base_url 分组 → 模型） ---------- */
+// 为什么单开一处：单价原先挂在「API 供应商 → 编辑」表单里，和连接配置混在一起，
+// 既看不出「这是谁的价」，改 Key / 改模型时还可能顺手把价格清掉。这里按
+// 「供应商 → 模型」两层管理，写入只走 POST /api/providers/pricing（只提交
+// id/kind/pricing）——**不复用整表单**，因为那张表单要求 base_url/model/api_key，
+// 前端手里也没有真 Key，用它提交等于顺手覆盖连接配置。
+//
+// 分组键 = base_url 归一（去空白、去末尾斜杠、小写）：卡片名是用户随手填的
+// （「主力对话」「深度思考」都可能是同一个端点），而归一后的地址才是计费身份。
+// 组内可整组套用币种；行内符号按钮只改单个模型；未定价的卡片收在「添加模型定价」里。
+const PRICING_BASE_CURRENCIES = ['¥', '$', '€'];
+const PRICING_TIER_FIELDS = ['input_per_million', 'cached_input_per_million', 'output_per_million'];
+const PRICING_TIER_LABELS = ['输入（未命中）', '缓存命中', '输出'];
+const PRICING_DEFAULT_CURRENCY = '¥';
+
+// 一组 = 同一 base_url 归一后的所有卡片；priced = 已设单价的（含本次新加的草稿），
+// pool = 还没定价、可从「添加模型定价」拉进来的。全部派生自 bootstrap 的卡片列表。
+let pricingGroups = [];
+let pricingCurrent = -1;
+// 本次打开期间「从池子加进来、还没写库」的卡片 id（草稿行）。
+let pricingDraftIds = new Set();
+
+function pricingNormUrl(url) {
+  return String(url || '').trim().toLowerCase().replace(/\/+$/, '');
+}
+
+function pricingOf(provider) {
+  const pricing = provider?.pricing;
+  return (pricing && typeof pricing === 'object') ? pricing : {};
+}
+
+function pricingHasValue(provider) {
+  const pricing = pricingOf(provider);
+  return PRICING_TIER_FIELDS.some((field) => {
+    const value = pricing[field];
+    return value !== undefined && value !== null && value !== '';
+  });
+}
+
+function pricingCurrencyOf(provider) {
+  return String(pricingOf(provider).currency || PRICING_DEFAULT_CURRENCY);
+}
+
+function pricingBuildGroups() {
+  const map = new Map();
+  for (const provider of providerProfiles()) {
+    const key = pricingNormUrl(provider.base_url);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(provider);
+  }
+  pricingGroups = [...map.entries()].map(([url, cards]) => ({
+    url,
+    cards,
+    priced: cards.filter((card) => pricingHasValue(card) || pricingDraftIds.has(card.id)),
+    pool: cards.filter((card) => !pricingHasValue(card) && !pricingDraftIds.has(card.id)),
+  }));
+}
+
+// 面板头角标 = 全站未定价卡片数（一眼看出还有几个模型没计价）。
+export function refreshUsagePricingBadge() {
+  const badge = $('#usagePricingCount');
+  if (!badge) return;
+  const unpriced = providerProfiles().filter((provider) => !pricingHasValue(provider)).length;
+  badge.textContent = String(unpriced);
+  badge.hidden = unpriced === 0;
+}
+
+// 写库：只提交 id/kind/pricing。成功后就地改 bootstrap 里的卡片（不重拉整份列表）。
+async function pricingWrite(provider, pricing) {
+  const result = await api('/api/providers/pricing', {
+    method: 'POST',
+    body: { id: provider.id, kind: provider.kind || 'online', pricing },
+  });
+  pricingPatchProvider(provider.id, result?.pricing);
+  return result;
+}
+
+function pricingPatchProvider(id, pricing) {
+  for (const key of ['providers', 'model_profiles']) {
+    const list = state.bootstrap?.[key];
+    if (!Array.isArray(list)) continue;
+    const item = list.find((entry) => entry.id === id);
+    if (!item) continue;
+    if (pricing && Object.keys(pricing).length) item.pricing = pricing;
+    else delete item.pricing;
+  }
+}
+
+// 改完价格后：角标 → 分组 → 币种条 → 弹层 → 用量页（KPI / 明细 / 未定价提示都按当前单价现算）。
+// **币种条必须在这里一起重渲染**：整组套用币种 / 移除自定义币种 / 删除定价都会改变
+// 「哪些币种正在被用」，漏了它就会出现「写完库但 chip 条还是旧样子」——用户既看不到
+// 刚加的自定义币种，也就点不到那个 × 去删它（一级时 pricingCurrent = -1，函数自己会早退）。
+function pricingAfterWrite(message) {
+  pricingBuildGroups();
+  refreshUsagePricingBadge();
+  pricingRenderLevel1();
+  pricingRenderCurBar();
+  pricingRenderLevel2();
+  void loadUsageStats();
+  if (message) toast(message);
+  return;
+}
+
+export function openUsagePricingDialog() {
+  const dlg = $('#usagePricingDialog');
+  if (!dlg) return;
+  pricingDraftIds = new Set();
+  pricingCurrent = -1;
+  pricingBuildGroups();
+  pricingShowLevel1();
+  refreshUsagePricingBadge();
+  dlg.showModal();
+  usageBindDialogViewport(true);
+  usageSyncDialogBounds();
+}
+
+function pricingShowLevel1() {
+  pricingCurrent = -1;
+  const level1 = $('#usagePricingLevel1');
+  const level2 = $('#usagePricingLevel2');
+  if (level1) level1.hidden = false;
+  if (level2) level2.hidden = true;
+  const back = $('#usagePricingBack');
+  if (back) back.hidden = true;
+  pricingSetText('usagePricingTitle', '费用单价');
+  pricingSetText('usagePricingSub', '按 base_url 分组的 API 供应商 → 模型');
+  pricingSetText('usagePricingNote', '保存即生效 · 历史费用按新价重算');
+  pricingRenderLevel1();
+  const body = pricingDialogBody();
+  if (body) body.scrollTop = 0;
+}
+
+function pricingShowLevel2(index) {
+  const group = pricingGroups[index];
+  if (!group) return;
+  pricingCurrent = index;
+  const level1 = $('#usagePricingLevel1');
+  const level2 = $('#usagePricingLevel2');
+  if (level1) level1.hidden = true;
+  if (level2) level2.hidden = false;
+  const back = $('#usagePricingBack');
+  if (back) back.hidden = false;
+  pricingSetText('usagePricingTitle', pricingGroupTitle(group));
+  pricingRenderCurBar();
+  pricingRenderLevel2();
+  const body = pricingDialogBody();
+  if (body) body.scrollTop = 0;
+}
+
+function pricingDialogBody() {
+  const dlg = $('#usagePricingDialog');
+  return dlg ? dlg.querySelector('.pricing-body') : null;
+}
+
+// 本段自己的文本写入 helper（usageRenderKpi 里的 setText 是那支函数的局部常量，借不到）。
+function pricingSetText(id, text) {
+  const el = $(`#${id}`);
+  if (el) el.textContent = text;
+}
+
+function pricingGroupTitle(group) {
+  const lead = group.priced[0] || group.cards[0] || {};
+  return String(lead.name || '未命名供应商');
+}
+
+function pricingGroupHost(group) {
+  return pricingNormUrl(group.url) || '（未填写 API 地址）';
+}
+
+/* ---- 一级：分组列表 ---- */
+function pricingRenderLevel1() {
+  const box = $('#usagePricingGroups');
+  if (!box) return;
+  if (!pricingGroups.length) {
+    box.innerHTML = '<p class="pricing-empty">还没有任何 API 供应商卡片。<br>先到「API 供应商」里添加模型，再回来设单价。</p>';
+    return;
+  }
+  box.innerHTML = pricingGroups.map((group, index) => {
+    const total = group.cards.length;
+    const priced = group.priced.length;
+    const tag = priced === total
+      ? `<span class="pricing-tag ok">已定价 ${priced}/${total}</span>`
+      : (priced === 0
+        ? `<span class="pricing-tag muted">${total} 个未定价</span>`
+        : `<span class="pricing-tag warn">${total - priced} 个未定价</span>`);
+    const currencies = new Set(group.priced.map((card) => pricingCurrencyOf(card)));
+    const curLabel = currencies.size > 1 ? '混合' : ([...currencies][0] || PRICING_DEFAULT_CURRENCY);
+    const host = pricingGroupHost(group);
+    const lead = pricingGroupTitle(group);
+    const initial = Array.from(lead)[0] || '?';
+    return `<div class="pricing-group">
+      <button class="pricing-group-head" type="button" data-pricing-group="${index}" aria-label="管理 ${escapeHtml(lead)} 的单价">
+        <span class="pricing-group-avatar" aria-hidden="true">${escapeHtml(initial)}</span>
+        <span class="pricing-group-meta"><b>${escapeHtml(lead)}</b><small title="${escapeHtml(host)}">${escapeHtml(host)} · ${total} 个模型</small></span>
+        <span class="pricing-tag muted" title="组内币种">${escapeHtml(curLabel)}</span>
+        ${tag}
+        <span class="pricing-group-go" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"></path></svg></span>
+      </button>
+    </div>`;
+  }).join('');
+}
+
+/* ---- 二级：币种条 + 条目行 + 添加 ---- */
+function pricingRenderCurBar() {
+  const group = pricingGroups[pricingCurrent];
+  const chips = $('#usagePricingCurChips');
+  if (!group || !chips) return;
+  const used = new Map();
+  group.priced.forEach((card) => {
+    const cur = pricingCurrencyOf(card);
+    used.set(cur, (used.get(cur) || 0) + 1);
+  });
+  const usedKeys = [...used.keys()];
+  const mixed = usedKeys.length > 1;
+  const options = [...PRICING_BASE_CURRENCIES, ...usedKeys.filter((cur) => !PRICING_BASE_CURRENCIES.includes(cur))];
+  chips.innerHTML = options.map((cur) => {
+    const on = !mixed && usedKeys.length === 1 && usedKeys[0] === cur;
+    // 非基础档 = 自定义币种：带一个 × 直接移除（把用到它的模型改回默认币种）。
+    const removable = !PRICING_BASE_CURRENCIES.includes(cur);
+    return `<button class="pricing-cur-chip${on ? ' is-on' : ''}" type="button" data-pricing-currency="${escapeHtml(cur)}" title="整组套用 ${escapeHtml(cur)}">`
+      + `${escapeHtml(cur)}${removable ? `<span class="pricing-cur-x" data-pricing-drop-currency="${escapeHtml(cur)}" role="button" title="移除币种 ${escapeHtml(cur)}">✕</span>` : ''}</button>`;
+  }).join('') + `<button class="pricing-cur-chip${mixed ? ' is-mixed' : ''}" type="button" data-pricing-custom="1">`
+    + (mixed ? `混合 ${escapeHtml(usedKeys.join(' '))}` : '其他…') + '</button>';
+  const hint = $('#usagePricingCurHint');
+  if (hint) {
+    hint.textContent = mixed
+      ? '组内币种不一致，可整组统一'
+      : (group.priced.length ? '整组套用' : '先添加一个模型定价');
+  }
+}
+
+function pricingRowMarkup(card, index) {
+  const pricing = pricingOf(card);
+  const draft = pricingDraftIds.has(card.id);
+  const badge = draft
+    ? '<span class="pricing-row-badge is-dirty">待填写</span>'
+    : '<span class="pricing-row-badge is-saved">已保存</span>';
+  const currency = pricingCurrencyOf(card);
+  const fields = PRICING_TIER_FIELDS.map((field, tier) => {
+    const value = pricing[field];
+    const text = (value === undefined || value === null) ? '' : String(value);
+    return `<div class="pricing-field">
+      <label>${PRICING_TIER_LABELS[tier]}</label>
+      <div class="pricing-field-box">
+        <input type="number" min="0" max="1000000" step="any" inputmode="decimal" data-pricing-price data-tier="${tier}" value="${escapeHtml(text)}" placeholder="—" aria-label="${PRICING_TIER_LABELS[tier]}单价">
+        <button class="pricing-cur-btn" type="button" data-pricing-row-currency title="点一下切换这个模型的币种">${escapeHtml(currency)}</button>
+      </div></div>`;
+  }).join('');
+  return `<div class="pricing-row${draft ? ' is-draft' : ''}" data-pricing-row="${index}" data-pricing-id="${escapeHtml(card.id)}" data-pricing-cur="${escapeHtml(currency)}">
+    <div class="pricing-row-head">
+      <span class="pricing-row-name" title="${escapeHtml(card.model || '')}">${escapeHtml(card.model || '未指定模型')}</span>
+      <span class="pricing-row-card">卡片：${escapeHtml(card.name || '未命名')}</span>
+      ${badge}
+    </div>
+    <div class="pricing-price-grid">${fields}</div>
+    <div class="pricing-row-foot">
+      <span class="pricing-row-note">按此价计费；改完点保存即刻生效，历史费用一并重算</span>
+      <button class="control-button tiny" type="button" data-pricing-remove>删除定价</button>
+      <button class="primary-button tiny" type="button" data-pricing-save hidden>保存</button>
+    </div>
+  </div>`;
+}
+
+function pricingRenderLevel2() {
+  const group = pricingGroups[pricingCurrent];
+  if (!group) return;
+  const rows = $('#usagePricingRows');
+  if (rows) {
+    rows.innerHTML = group.priced.length
+      ? group.priced.map((card, index) => pricingRowMarkup(card, index)).join('')
+      : '<p class="pricing-empty">这个分组还没有设定单价的模型。<br>点下方「＋ 添加模型定价」开始。</p>';
+  }
+  const pool = $('#usagePricingPool');
+  const poolList = $('#usagePricingPoolList');
+  const addBtn = $('#usagePricingAdd');
+  if (poolList) {
+    poolList.innerHTML = group.pool.map((card, index) => `<button class="pricing-pool-item" type="button" data-pricing-pick="${index}">`
+      + `<span class="n">${escapeHtml(card.model || card.id)}</span>`
+      + `<span class="p">${escapeHtml(card.name || '未命名')}</span></button>`).join('');
+  }
+  if (pool) pool.hidden = true;
+  if (addBtn) {
+    addBtn.hidden = group.pool.length === 0;
+    addBtn.textContent = group.pool.length ? `＋ 添加模型定价（${group.pool.length} 个待设）` : '＋ 添加模型定价';
+  }
+  const note = $('#usagePricingPoolNote');
+  if (note) note.textContent = `选择要添加单价的模型（这个地址下尚未定价的 ${group.pool.length} 个卡片）：`;
+  pricingSetText('usagePricingSub', `${pricingGroupHost(group)} · ${group.priced.length} 个已定价`
+    + (group.pool.length ? ` · ${group.pool.length} 个未定价` : ''));
+}
+
+export function pricingTogglePool() {
+  const pool = $('#usagePricingPool');
+  if (pool) pool.hidden = !pool.hidden;
+}
+
+export function pricingOpenCustomCurrency() {
+  const box = $('#usagePricingCurCustom');
+  if (!box) return;
+  box.hidden = false;
+  $('#usagePricingCurInput')?.focus();
+}
+
+export function pricingCloseCustomCurrency() {
+  const box = $('#usagePricingCurCustom');
+  const input = $('#usagePricingCurInput');
+  if (box) box.hidden = true;
+  if (input) input.value = '';
+}
+
+// 自定义币种：1–8 个字符，确定后整组套用（与后端 PRICING_CURRENCY_MAX_CHARS 同口径）。
+export async function pricingConfirmCustomCurrency() {
+  const input = $('#usagePricingCurInput');
+  const value = String(input?.value || '').replace(/\s+/g, '').slice(0, 8);
+  if (!value) { input?.focus(); return; }
+  pricingCloseCustomCurrency();
+  await pricingApplyGroupCurrency(value);
+}
+
+// 整组套用：把该组所有已定价卡片的币种改成 cur（逐张写库；张数 = 卡片数，通常个位数）。
+export async function pricingApplyGroupCurrency(cur) {
+  const group = pricingGroups[pricingCurrent];
+  if (!group || !group.priced.length) {
+    toast('这个分组还没有定价条目，先添加一个模型定价');
+    return;
+  }
+  const targets = group.priced.filter((card) => pricingCurrencyOf(card) !== cur);
+  if (!targets.length) return;
+  try {
+    for (const card of targets) {
+      await pricingWrite(card, { ...pricingOf(card), currency: cur });
+    }
+    pricingAfterWrite(`币种已改为 ${cur}（${targets.length} 个模型）`);
+  } catch (error) {
+    pricingAfterWrite();
+    toast(`改币种失败：${error.message}`);
+  }
+}
+
+// 移除自定义币种：把用到它的卡片改回默认币种（会改账目口径，所以先确认）。
+export async function pricingDropCurrency(cur) {
+  const group = pricingGroups[pricingCurrent];
+  if (!group) return;
+  const targets = group.priced.filter((card) => pricingCurrencyOf(card) === cur);
+  if (targets.length && !confirm(`移除币种「${cur}」：${targets.length} 个模型会改回默认币种 ${PRICING_DEFAULT_CURRENCY}，金额口径随之变化。继续吗？`)) {
+    return;
+  }
+  if (!targets.length) { pricingRenderCurBar(); return; }
+  try {
+    for (const card of targets) {
+      await pricingWrite(card, { ...pricingOf(card), currency: PRICING_DEFAULT_CURRENCY });
+    }
+    pricingAfterWrite(`已移除币种「${cur}」 · ${targets.length} 个模型改回 ${PRICING_DEFAULT_CURRENCY}`);
+  } catch (error) {
+    pricingAfterWrite();
+    toast(`移除币种失败：${error.message}`);
+  }
+}
+
+export function pricingAddFromPool(index) {
+  const group = pricingGroups[pricingCurrent];
+  const card = group?.pool?.[index];
+  if (!card) return;
+  pricingDraftIds.add(card.id);
+  pricingBuildGroups();
+  pricingRenderLevel1();
+  pricingRenderCurBar();
+  pricingRenderLevel2();
+  const draft = document.querySelector(`.pricing-row[data-pricing-id="${CSS.escape(card.id)}"]`);
+  draft?.querySelector('input[data-pricing-price]')?.focus();
+}
+
+// 行内改价：标记「未保存」，浮出保存按钮（保存前不写库、不影响统计）。
+export function pricingMarkRowDirty(row) {
+  if (!row) return;
+  row.classList.add('is-dirty');
+  const badge = row.querySelector('.pricing-row-badge');
+  if (badge) {
+    badge.className = 'pricing-row-badge is-dirty';
+    badge.textContent = '未保存';
+  }
+  const save = row.querySelector('[data-pricing-save]');
+  if (save) save.hidden = false;
+}
+
+// 行内币种：点一下循环切换（¥ → $ → € → 本组自定义 → ¥），只改这一个模型。
+export function pricingCycleRowCurrency(row) {
+  if (!row) return;
+  const group = pricingGroups[pricingCurrent];
+  const card = group?.priced?.[Number(row.dataset.pricingRow)];
+  if (!card) return;
+  const options = [...PRICING_BASE_CURRENCIES];
+  const current = row.dataset.pricingCur || PRICING_DEFAULT_CURRENCY;
+  if (!options.includes(current)) options.push(current);
+  const next = options[(options.indexOf(current) + 1) % options.length];
+  row.dataset.pricingCur = next;
+  row.querySelectorAll('[data-pricing-row-currency]').forEach((button) => { button.textContent = next; });
+  pricingMarkRowDirty(row);
+}
+
+// 保存一张卡片：读这一行的三档 + 币种，写库后整层重渲染（保证徽标/金额一致）。
+export async function pricingSaveRow(row) {
+  if (!row) return;
+  const group = pricingGroups[pricingCurrent];
+  const card = group?.priced?.[Number(row.dataset.pricingRow)];
+  if (!card) return;
+  const inputs = [...row.querySelectorAll('[data-pricing-price]')];
+  const pricing = { currency: row.dataset.pricingCur || PRICING_DEFAULT_CURRENCY };
+  inputs.forEach((input) => {
+    const field = PRICING_TIER_FIELDS[Number(input.dataset.tier)];
+    const raw = input.value.trim();
+    if (raw !== '') pricing[field] = raw;
+  });
+  if (PRICING_TIER_FIELDS.every((field) => pricing[field] === undefined)) {
+    pricingRowNote(row, '三档全空 = 未定价，请至少填一档');
+    return;
+  }
+  const saveBtn = row.querySelector('[data-pricing-save]');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '保存中…'; }
+  try {
+    await pricingWrite(card, pricing);
+    pricingDraftIds.delete(card.id);
+    pricingAfterWrite(`已保存 · 「${card.model || card.id}」立即按 ${pricing.currency} 计价`);
+  } catch (error) {
+    pricingRowNote(row, `保存失败：${error.message}`);
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '保存'; }
+  }
+}
+
+// 删除定价 = 提交空 pricing（后端删键 ⇒ 未定价，不再计费）。该行回到「添加」池。
+export async function pricingRemoveRow(row) {
+  if (!row) return;
+  const group = pricingGroups[pricingCurrent];
+  const card = group?.priced?.[Number(row.dataset.pricingRow)];
+  if (!card) return;
+  try {
+    await pricingWrite(card, {});
+    pricingDraftIds.delete(card.id);
+    pricingAfterWrite(`已删除定价 · 「${card.model || card.id}」不再计费`);
+  } catch (error) {
+    pricingRowNote(row, `删除失败：${error.message}`);
+  }
+}
+
+export function pricingGoBackToList() {
+  pricingShowLevel1();
+}
+
+export function pricingOpenGroup(index) {
+  pricingShowLevel2(index);
+}
+
+function pricingRowNote(row, text) {
+  const note = row.querySelector('.pricing-row-note');
+  if (!note) return;
+  note.textContent = text;
+  note.classList.add('is-error');
+  window.setTimeout(() => {
+    note.classList.remove('is-error');
+    note.textContent = '按此价计费；改完点保存即刻生效，历史费用一并重算';
+  }, 2600);
+}
+
 /* ═══════════ 手机端弹层可视视口适配（与 @ 弹层修复同源的问题） ═══════════ */
 // 软键盘弹出时 Android Chrome 只缩 visualViewport（布局视口不动），居中 dialog
 // 以布局视口定位，底部会被键盘盖住。打开用量弹窗期间监听 vv resize/scroll，把
 // dialog 的 max-height 压到可视区内（CSS 的 100dvh 兜底普通小屏，这里兜键盘态）。
 function usageSyncDialogBounds() {
-  for (const id of ['usageFilterDialog', 'usagePrefsDialog']) {
+  for (const id of ['usageFilterDialog', 'usagePrefsDialog', 'usagePricingDialog']) {
     const dlg = $(`#${id}`);
     if (!dlg || !dlg.open) continue;
     const vv = window.visualViewport;

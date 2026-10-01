@@ -1,7 +1,8 @@
 // 用量统计「分析视图」冒烟（隔离源码实例，脚本自起自停；端口 8812）。
 // 覆盖：端点 bucket 契约（by_bucket 桶×模型行）/ KPI 六卡 / 手绘 SVG 五图 /
 //       明细表与维度切换 / 图例隐藏 / 筛选弹窗（粒度切换）/ 偏好弹窗落库
-//       settings.usage_dash / 供应商弹层三档单价回填回归 /
+//       settings.usage_dash / 费用单价弹层（供应商表单字段已迁出 / 一级 base_url 归一分组 /
+//       二级行改价即时落库 / 自定义币种整组套用与移除）/
 //       ★ 手机端弹层可视视口适配（软键盘桩：dialog max-height 压进可视区）。
 // 运行：node verify/usage_stats_smoke.cjs（playwright 从仓库 node_modules 或 NODE_PATH 解析）。
 const { spawn } = require('child_process');
@@ -35,6 +36,12 @@ async function waitForHealth(deadlineMs = 30000) {
     await new Promise((resolve) => setTimeout(resolve, 300));
   }
   return false;
+}
+
+// 取 bootstrap 里的 API 卡片：只认 model_profiles（providers 是前端回退别名），
+// 两个键同时存在时不能相加——那是同一份列表，会把计数翻倍。
+function bootstrapCards(payload) {
+  return payload?.model_profiles || payload?.providers || [];
 }
 
 async function openUsageTab(page) {
@@ -302,21 +309,119 @@ async function main() {
     check('偏好弹窗：usage_dash 落服务端（range=7）且工具行跟随',
       savedPrefs?.range === '7' && savedPrefs?.gran === 'hour', JSON.stringify(savedPrefs));
 
-    /* 供应商弹层：单价回填 + 保存后重开仍在（回归段，与本次改动无关但必须不退化）。 */
-    await desktop.evaluate(() => {
-      [...document.querySelectorAll('.provider-card')].find((card) => card.textContent.includes('冒烟 DeepSeek')).click();
+    /* ══ 费用单价弹层（本轮改动）══
+       入口在用量统计右上角；一级按 base_url 归一 分组，二级管行。
+       供应商表单里的三档单价字段已整体迁出 ⇒ 先断言「尸体不存在」，再跑新流程。 */
+    const corpses = await desktop.$$('#providerPriceInput, #providerPriceCachedInput, #providerPriceOutput, #providerPriceCurrency, #providerPricingField');
+    check('供应商表单：单价字段已迁出（不存在任何 providerPrice* 控件）', corpses.length === 0, `found=${corpses.length}`);
+
+    const pageErrors = [];
+    desktop.on('pageerror', (error) => pageErrors.push(String(error)));
+    desktop.on('dialog', (dialog) => { dialog.accept(); });
+
+    await desktop.evaluate(() => document.querySelector('#usagePricingOpen').click());
+    await desktop.waitForSelector('#usagePricingDialog[open]', { timeout: 4000 });
+    const level1 = await desktop.$$eval('#usagePricingGroups .pricing-group', (nodes) => nodes.map((n) => n.textContent.replace(/\s+/g, ' ').trim()));
+    // 种子里「冒烟 DeepSeek」与「冒烟 Mimo」共用同一个 base_url ⇒ 必须归成**同一组**
+    // （分组键是归一地址，不是卡片名），组内 1 已定价 + 1 未定价。
+    check('费用单价一级：同 base_url 的两张卡归成一组，并标出未定价数',
+      level1.length === 1 && level1[0].includes('冒烟 DeepSeek') && level1[0].includes('2 个模型') && level1[0].includes('1 个未定价'),
+      JSON.stringify(level1));
+
+    await desktop.evaluate(() => document.querySelector('[data-pricing-group="0"]').click());
+    await desktop.waitForFunction(() => document.querySelector('#usagePricingLevel2') && !document.querySelector('#usagePricingLevel2').hidden, undefined, { timeout: 4000 });
+    const row = await desktop.evaluate(() => {
+      const el = document.querySelector('.pricing-row');
+      if (!el) return null;
+      return {
+        prices: [...el.querySelectorAll('[data-pricing-price]')].map((i) => i.value),
+        cur: el.dataset.pricingCur,
+        badge: el.querySelector('.pricing-row-badge')?.textContent || '',
+      };
     });
-    await desktop.waitForSelector('#providerDialog[open]', { timeout: 5000 });
-    const pricing = await desktop.evaluate(() => ({
-      input: document.querySelector('#providerPriceInput')?.value || '',
-      cached: document.querySelector('#providerPriceCachedInput')?.value || '',
-      output: document.querySelector('#providerPriceOutput')?.value || '',
-      currency: document.querySelector('#providerPriceCurrency')?.value || '',
+    check('费用单价二级：三档单价与币种按当前卡片回填',
+      row && row.prices[0] === '2' && row.prices[1] === '0.4' && row.prices[2] === '8' && row.cur === '¥' && row.badge === '已保存',
+      JSON.stringify(row));
+    const poolState = await desktop.evaluate(() => ({
+      hidden: document.querySelector('#usagePricingPool')?.hidden === true,
+      add: document.querySelector('#usagePricingAdd')?.textContent || '',
     }));
-    check('供应商弹层：三档单价与币种回填',
-      pricing.input === '2' && pricing.cached === '0.4' && pricing.output === '8' && pricing.currency === '¥',
-      JSON.stringify(pricing));
-    await desktop.keyboard.press('Escape');
+    check('费用单价二级：未定价卡片收在「添加模型定价」里（不占条目行）',
+      poolState.hidden && poolState.add.includes('1 个待设'), JSON.stringify(poolState));
+
+    // 从池里拉未定价卡片进来 → 草稿行 → 改价浮出保存 → 保存后立即落库。
+    await desktop.evaluate(() => document.querySelector('#usagePricingAdd').click());
+    await desktop.evaluate(() => document.querySelector('#usagePricingPoolList [data-pricing-pick="0"]').click());
+    const draftId = await desktop.evaluate(() => {
+      const el = [...document.querySelectorAll('.pricing-row')].find((r) => r.classList.contains('is-draft'));
+      return el ? el.dataset.pricingId : '';
+    });
+    check('费用单价二级：从池中添加 → 生成「待填写」草稿行', Boolean(draftId), draftId);
+    await desktop.evaluate(() => {
+      const el = [...document.querySelectorAll('.pricing-row')].find((r) => r.classList.contains('is-draft'));
+      const input = el.querySelectorAll('[data-pricing-price]')[0];
+      input.value = '1.5';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const dirty = await desktop.evaluate(() => {
+      const el = [...document.querySelectorAll('.pricing-row')].find((r) => r.classList.contains('is-draft'));
+      return { badge: el.querySelector('.pricing-row-badge')?.textContent || '', saveHidden: el.querySelector('[data-pricing-save]')?.hidden };
+    });
+    check('费用单价二级：改价后标「未保存」并浮出保存按钮（改前不写库）',
+      dirty.badge === '未保存' && dirty.saveHidden === false, JSON.stringify(dirty));
+    await desktop.evaluate(() => {
+      const el = [...document.querySelectorAll('.pricing-row')].find((r) => r.classList.contains('is-draft'));
+      el.querySelector('[data-pricing-save]').click();
+    });
+    let savedRow = false;
+    try {
+      await desktop.waitForFunction((id) => {
+        const el = document.querySelector(`.pricing-row[data-pricing-id="${id}"]`);
+        return el && !el.classList.contains('is-draft') && el.querySelector('.pricing-row-badge')?.textContent === '已保存';
+      }, draftId, { timeout: 6000 });
+      savedRow = true;
+    } catch (_) { /* timed out */ }
+    const afterSave = await apiJson('/api/bootstrap');
+    const written = bootstrapCards(afterSave).find((p) => p.id === draftId);
+    check('费用单价：保存后服务端立即写入（POST /api/providers/pricing 生效）',
+      savedRow && written?.pricing?.input_per_million === 1.5, JSON.stringify(written?.pricing));
+    check('费用单价：入口未定价角标随保存更新（两张卡都已定价 ⇒ 角标隐藏）',
+      await desktop.evaluate(() => document.querySelector('#usagePricingCount')?.hidden === true));
+
+    // 自定义币种：整组套用 → 币种条出现带 × 的自定义 chip → 点 × 可移除、改回默认币种。
+    await desktop.evaluate(() => document.querySelector('#usagePricingCurChips [data-pricing-custom]').click());
+    await desktop.evaluate(() => {
+      const input = document.querySelector('#usagePricingCurInput');
+      input.value = 'USDT';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#usagePricingCurOk').click();
+    });
+    await desktop.waitForFunction(() => Boolean(document.querySelector('#usagePricingCurChips [data-pricing-drop-currency="USDT"]')), undefined, { timeout: 6000 });
+    const usdt = await apiJson('/api/bootstrap');
+    const usdtCards = bootstrapCards(usdt).filter((p) => p.pricing?.currency === 'USDT');
+    const usdtChip = await desktop.evaluate(() => {
+      const chip = document.querySelector('#usagePricingCurChips [data-pricing-drop-currency="USDT"]');
+      return { text: chip?.parentElement?.textContent?.trim() || '', hasX: Boolean(chip) };
+    });
+    check('费用单价：自定义币种 USDT 整组套用（两张卡都改），chip 带 × 可移除',
+      usdtCards.length === 2 && usdtChip.hasX && usdtChip.text.includes('USDT'), JSON.stringify({ cards: usdtCards.length, chip: usdtChip }));
+    await desktop.evaluate(() => document.querySelector('#usagePricingCurChips [data-pricing-drop-currency="USDT"]').click());
+    let dropped = false;
+    try {
+      await desktop.waitForFunction(() => !document.querySelector('#usagePricingCurChips [data-pricing-drop-currency="USDT"]'), undefined, { timeout: 6000 });
+      dropped = true;
+    } catch (_) { /* timed out */ }
+    const afterDrop = await apiJson('/api/bootstrap');
+    const dropCards = bootstrapCards(afterDrop);
+    const backToDefault = dropCards.every((p) => !p.pricing || p.pricing.currency === '¥');
+    const priceKept = dropCards.find((p) => p.id === draftId)?.pricing?.input_per_million === 1.5;
+    check('费用单价：移除自定义币种 ⇒ 改回默认 ¥，且单价本身不受影响',
+      dropped && backToDefault && priceKept, JSON.stringify({ dropped, backToDefault, priceKept }));
+
+    // 关闭弹层 → 用量页按当前单价重算（原先未定价的 Mimo 现在有价了）。
+    await desktop.evaluate(() => document.querySelector('#usagePricingDone').click());
+    await desktop.waitForFunction(() => !document.querySelector('#usagePricingDialog').open, undefined, { timeout: 4000 });
+    check('费用单价：弹层可正常关闭，且过程零 pageerror', pageErrors.length === 0, pageErrors.join(' | '));
     await desktop.close();
 
     /* ══ 手机视图：软键盘桩下弹窗 max-height 压进可视区（用户点名的重点） ══ */

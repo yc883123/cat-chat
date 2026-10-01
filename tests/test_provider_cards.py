@@ -45,10 +45,6 @@ FORM_FIELD_IDS = (
     "providerTemperature",
     "providerReasoningEffort",
     "providerSupportsImages",
-    "providerPriceInput",
-    "providerPriceCachedInput",
-    "providerPriceOutput",
-    "providerPriceCurrency",
     "providerError",
     "testProvider",
     "unloadProviderModel",
@@ -67,7 +63,16 @@ FORM_LABELS = (
     "温度（可选）",
     "思维强度",
     "视觉输入能力",
-    "费用单价（每百万 tokens，可选）",
+)
+# 定价已迁出本表单（2026-10-01）：单价改在「用量统计 → 右上角 费用单价」里按
+# 「供应商 → 模型」管理，写库走 POST /api/providers/pricing。表单里既没有字段，
+# 提交体也不带 pricing 键（不带键时后端不动旧值，见 config.upsert_model_profile）。
+REMOVED_PRICING_IDS = (
+    "providerPricingField",
+    "providerPriceInput",
+    "providerPriceCachedInput",
+    "providerPriceOutput",
+    "providerPriceCurrency",
 )
 
 
@@ -224,6 +229,28 @@ class ProviderCardsMarkupTests(unittest.TestCase):
         dialog = css[css.index(".provider-dialog {"):]
         dialog = dialog[: dialog.index("}")]
         self.assertIn("max-height", dialog, "弹层内部需可滚动，不能溢出视口")
+
+    def test_pricing_fields_moved_out_of_provider_form(self) -> None:
+        """单价字段与「改价即整表单提交」的老路径必须彻底消失（含死样式与表单键）。"""
+        sources = {
+            "public/index.html": self._index(),
+            "public/js/09-settings.js": self._settings(),
+            "public/js/15-bind-events.js": self._bind(),
+            "public/styles.css": self._css(),
+        }
+        for name, source in sources.items():
+            for corpse in REMOVED_PRICING_IDS + ("provider-pricing-grid",):
+                with self.subTest(file=name, corpse=corpse):
+                    self.assertNotIn(corpse, source)
+        # 表单值里也不许再带 pricing 键：带上就等于「拿连接配置表单写价格」，
+        # 一旦 model 或 api_key 为空就会把定价连人带价一起覆盖。
+        # 先剥掉行注释再查：注释里点名 /api/providers/pricing 是正当的，真正的风险
+        # 只在返回对象真的带上 pricing 键；剥注释后判定才既精确又不会误伤文案。
+        body = self._settings()
+        body = body[body.index("export function providerFormValue()"):]
+        body = body[: body.index("\n}")]
+        code = "\n".join(re.sub(r"//.*$", "", line) for line in body.splitlines())
+        self.assertNotIn("pricing", code)
 
     def test_index_html_still_has_no_duplicate_ids(self) -> None:
         """顺手守住重复 id（教训 §九.45）。"""

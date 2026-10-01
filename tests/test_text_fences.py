@@ -151,6 +151,34 @@ class TailAnchorTests(unittest.TestCase):
             text_fences.only_fence_tail(prose, end, closers=True), "收尾标签之后有正文仍要拒"
         )
 
+    def test_only_fence_tail_closers_is_a_whitelist(self) -> None:
+        """``closers=True`` 只放行协议自身收尾标签的**白名单**，未知关闭标签按正文拒。
+
+        旧写法用 ``</[A-Za-z][\\w:-]*\\s*>`` 放行**任意** XML 关闭标签，于是
+        ``<tool …>…</tool>\\n</evil>`` 里的 ``</evil>`` 被当成"协议自身的收尾"、
+        尾锚定误判通过 ⇒ 动作被执行、真正跟在动作后面的正文消失。
+        """
+        body = '<tool name="read_file"><parameter name="path">x</parameter></tool>'
+        end = len(body)
+        for closer in ("</tool>", "</invoke>", "</tool_calls>", "</Tool>", "</INVOKE>"):
+            with self.subTest(closer=closer):
+                self.assertTrue(
+                    text_fences.only_fence_tail(body + "\n" + closer, end, closers=True),
+                    f"白名单收尾标签必须放行：{closer}",
+                )
+        for unknown in ("</evil>", "</parameter>", "</x>", "</tool_calls2>"):
+            with self.subTest(unknown=unknown):
+                self.assertFalse(
+                    text_fences.only_fence_tail(body + "\n" + unknown, end, closers=True),
+                    f"未知关闭标签不得放行：{unknown}",
+                )
+        # 白名单标签之后若还接正文，仍要拒。
+        self.assertFalse(
+            text_fences.only_fence_tail(body + "\n</invoke>\n以上就是全部。", end, closers=True)
+        )
+        # 默认口径（closers=False）任何收尾标签都不放行。
+        self.assertFalse(text_fences.only_fence_tail(body + "\n</invoke>", end))
+
     def test_only_fence_tail_must_be_given_raw_text(self) -> None:
         """判据必须喂**原文**：掩码文本里一个孤立 ``` 会开假围栏、把尾部正文掩成空格。"""
         text = '{"type":"tool"}\n```\n这条先不执行。'

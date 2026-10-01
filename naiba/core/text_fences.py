@@ -46,11 +46,15 @@ _OPEN_RE = re.compile(r"^(?P<indent>[ \t]{0,3})(?P<fence>`{3,}|~{3,})(?P<info>.*
 _FENCE_NOISE_RE = re.compile(r"^[ \t]*(?:`{3,}|~{3,})[ \t]*$")
 # 空行（只含空白的行）：段落边界，`in_final_block` 用它判断标记是否落在最后一段。
 _BLANK_LINE = re.compile(r"\n[ \t]*\n")
-# 协议自身的**收尾标签**：动作后面只跟这些不算"还接正文"。DeepSeek 兼容端点会把
-# 命名工具包在外层 ``<tool type="tool">`` 里、再用 ``</invoke>`` 收尾，正则取到内层
-# ``<tool name=…>…</tool>`` 之后剩下的就是这些标签——不放行会把已上线方言误判成
-# "协议后面接正文"，整条方言退化成 parse_error（工具不再执行）。
-_CLOSING_TAG = re.compile(r"</[A-Za-z][\w:-]*\s*>")
+# 协议自身的**收尾标签**白名单：只有这几个标签属于协议本身。旧写法用
+# ``</[A-Za-z][\w:-]*\s*>`` 放行**任意** XML 关闭标签，于是
+# ``<tool name="read_file">…</tool>\n</evil>`` 里的 ``</evil>`` 被当作"协议自身的收尾"，
+# 尾锚定误判通过 ⇒ 动作被执行、真正跟在动作后面的正文消失。这里收紧成明确白名单。
+# DeepSeek 兼容端点会把命名工具包在外层 ``<tool type="tool">`` 里、再用 ``</invoke>``
+# 收尾，正则取到内层 ``<tool name=…>…</tool>`` 之后剩下的正是这些标签——不放行会把
+# 已上线方言误判成"协议后面接正文"，整条方言退化成 parse_error（工具不再执行）。
+# 大小写口径与 agent 侧定位用的 ``re.IGNORECASE`` 保持一致。
+_CLOSING_TAG = re.compile(r"</(?:tool_calls|invoke|tool)\s*>", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -324,9 +328,11 @@ def only_fence_tail(text: str, index: int, *, closers: bool = False) -> bool:
     「协议必须顶到回答末尾」是终态层的判据：工具动作后面还接正文的输出**不再执行该动作**，
     整体按正文展示——与旧行为（静默执行动作、静默丢掉正文）相反，宁可不动作也不吞内容。
 
-    ``closers=True`` 额外放行 ``</tool>`` / ``</invoke>`` 这类收尾标签：命名工具方言
-    （``<tool type="tool">`` 里再包一层 ``<tool name=…>``）取到内层块后，尾部落的正是外层
-    收尾标签，按"正文"处理会把整条已上线方言打成 parse_error。
+    ``closers=True`` 额外放行 ``</tool>`` / ``</invoke>`` / ``</tool_calls>`` 这几个**协议自身**
+    的收尾标签：命名工具方言（``<tool type="tool">`` 里再包一层 ``<tool name=…>``）取到内层块后，
+    尾部落的正是外层收尾标签，按"正文"处理会把整条已上线方言打成 parse_error。
+    **只放行白名单**——任意未知关闭标签（如 ``</evil>``）一律按"动作后面还接正文"处理，
+    否则 ``<tool …>…</tool>\n</evil>`` 会被误判成"协议顶到回答尾"而执行动作。
 
     ⚠️ 调用方必须传**原文**：掩码文本里一个孤立的 ```` ``` ```` 会开启假围栏、把它后面的
     正文一并掩成空格，尾锚定就会误判通过（动作被执行、尾部正文却消失）。

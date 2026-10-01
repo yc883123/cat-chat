@@ -172,6 +172,100 @@ class StreamingFenceTests(unittest.TestCase):
             detected.append(guard.detected)
         self.assertEqual(detected[0], detected[1], "有没有 UI 回调不能改变守卫的状态机")
 
+    def test_tab_indented_fence_split_across_chunks(self) -> None:
+        """Tab 缩进的围栏拆包也不能泄漏协议（计划 §2.1）。
+
+        ``text_fences`` 允许围栏行用最多 3 个空格**或制表符**缩进，但旧写法
+        ``_possible_fence_suffix_length`` 只 ``lstrip(" ")``：带 Tab 缩进的半个闭合行
+        ``"\\t``"`` 不被保留 ⇒ 半截当正文外发、``_advance`` 按整行扫认不出闭合 ⇒
+        ``_in_fence`` 永久停在围栏内，之后的真实协议被当成围栏里的代码正文整套放行。
+        """
+        protocol = '{"type": "tool", "tool": "pwsh", "arguments": {"command": "dir"}}'
+        pieces = ["\t```json\n", '{"a": 1}\n', "\t``", "`\n", protocol]
+        content, emitted, _events = self._read(pieces)
+        # 围栏内的示例 JSON 属于可见正文；闭合围栏行之后不得再出现协议。
+        self.assertTrue(emitted.endswith("\t```\n"), f"协议前半截不得外发：{emitted!r}")
+        self.assertNotIn('"command"', emitted, f"围栏后的真实协议不得进 delta：{emitted!r}")
+        self.assertNotIn('"tool"', emitted, "只有围栏里的示例可以出现，真协议必须被吞")
+        self.assertEqual(emitted.count('"a": 1'), 1, "围栏里的示例必须原样可见")
+        self.assertEqual(SkillAgent._parse_action(content)["tool"], "pwsh")
+
+    def test_tab_indented_opening_fence_split_across_chunks(self) -> None:
+        """Tab 缩进的**开启**围栏被拆包：正文照常外发，围栏内的示例不判协议。"""
+        pieces = ["说明：\n\t`", "``json\n", '{"a": 1}\n', "\t```\n", "后面还有正文。"]
+        content, emitted, _events = self._read(pieces)
+        self.assertEqual(emitted, "".join(pieces), "带缩进的开启围栏不得让正文停在半行")
+        self.assertIn("后面还有正文", emitted)
+        self.assertEqual(SkillAgent._parse_action(content)["type"], "final")
+
+    def test_tab_indented_closing_fence_then_real_protocol(self) -> None:
+        """Tab 缩进的闭合围栏之后紧接真实 JSON / XML / Harmony 协议，一律不得进 delta。"""
+        json_protocol = '{"type": "tool", "tool": "pwsh", "arguments": {"command": "dir"}}'
+        xml_protocol = '<invoke name="pwsh"><parameter name="command">dir</parameter></invoke>'
+        harmony_protocol = (
+            '<|open|>tools<|sep|><|open|>call tool="pwsh" index="1"<|sep|>'
+            '<|open|>argument key="command" type="string"<|sep|>Get-Process'
+            '<|close|>argument<|sep|><|close|>call<|sep|>'
+            '<|close|>tools<|sep|><|end_of_text|>'
+        )
+        cases = [
+            (json_protocol, '"command"', '{"a": 1}'),
+            (xml_protocol, "<invoke", "<x/>"),
+            (harmony_protocol, "<|open|>", "随便写点"),
+        ]
+        for protocol, leak_marker, example_body in cases:
+            with self.subTest(protocol=leak_marker):
+                pieces = [
+                    f"示例：\n\t```\n{example_body}\n",
+                    "\t``",
+                    "`\n",
+                    protocol,
+                ]
+                content, emitted, _events = self._read(pieces)
+                self.assertNotIn(leak_marker, emitted, f"协议不得进 delta：{emitted!r}")
+                self.assertTrue(emitted.endswith("\t```\n"), f"协议前半截不得外发：{emitted!r}")
+                self.assertEqual(SkillAgent._parse_action(content)["tool"], "pwsh")
+
+    def test_tab_indented_fence_status_none_matches_callback(self) -> None:
+        """Tab 缩进围栏拆包时，``status=None`` 与有回调两条路径的状态机必须一致。
+
+        ``status=None`` 是真实路径（视觉识别 / 子代理），此时没有 delta 事件可记录，
+        所以比的是守卫的**状态**（detected / pending / 围栏状态），不是事件流。
+        """
+        from naiba.llm.stream import _ProtocolStreamGuard
+
+        pieces = [
+            "前言：\n\t```json\n",
+            '{"a": 1}\n',
+            "\t``",
+            "`\n",
+            '{"type": "tool", "tool": "pwsh"}',
+        ]
+        states: list[tuple] = []
+        emitted_with_callback = ""
+        for with_callback in (True, False):
+            guard = _ProtocolStreamGuard()
+            events: list[dict] = []
+            sink = events.append if with_callback else None
+            for piece in pieces:
+                guard.feed(piece, sink)
+            guard.finish(sink)
+            states.append(
+                (
+                    guard.detected,
+                    guard.pending,
+                    guard._in_fence,
+                    guard._fence_char,
+                    guard._fence_length,
+                )
+            )
+            if with_callback:
+                emitted_with_callback = forwarded(events)
+        self.assertEqual(states[0], states[1], "有没有 UI 回调不能改变守卫的状态机")
+        self.assertTrue(states[0][0], "Tab 缩进围栏拆包后必须识别出真实协议")
+        self.assertNotIn('"type": "tool"', emitted_with_callback)
+        self.assertTrue(emitted_with_callback.endswith("\t```\n"))
+
 
 class TerminalFenceTests(unittest.TestCase):
     """终态层 ``_parse_action``：围栏内外、尾锚定的完整判定矩阵。"""
@@ -283,6 +377,39 @@ class TerminalFenceTests(unittest.TestCase):
         """同名收尾标签（``</tool>``）同样属于协议自身，不算"后面还接正文"。"""
         text = '<tool name="pwsh"><parameter name="command">dir</parameter></tool></tool>'
         self.assertEqual(SkillAgent._parse_action(text)["tool"], "pwsh")
+
+    def test_named_tool_with_unknown_closer_is_not_executed(self) -> None:
+        """未知关闭标签（``</evil>``）是动作**之后**的正文 ⇒ 不执行，整体按正文展示（计划 §2.2）。
+
+        旧写法 ``_CLOSING_TAG`` 放行任意 ``</name>``：``</evil>`` 被当成"协议自身的收尾"，
+        尾锚定误判通过 ⇒ 动作被执行、真正跟在动作后面的正文消失。
+        """
+        text = (
+            '<tool name="read_file"><parameter name="path">x</parameter></tool>\n'
+            "</evil>"
+        )
+        action = SkillAgent._parse_action(text)
+        self.assertEqual(action["type"], "final", "未知关闭标签不得让动作绕过尾锚定")
+        self.assertIn("</evil>", action["content"], "未知标签必须原样留在正文里")
+
+    def test_named_tool_with_unknown_closer_and_prose_is_not_executed(self) -> None:
+        """``</evil>`` 之后再接正文同样不执行（双重否决）。"""
+        text = (
+            '<tool name="read_file"><parameter name="path">x</parameter></tool>\n'
+            "</evil>\n这段先不执行。"
+        )
+        action = SkillAgent._parse_action(text)
+        self.assertEqual(action["type"], "final")
+        self.assertIn("这段先不执行", action["content"])
+
+    def test_invoke_with_whitelisted_outer_closer_still_executes(self) -> None:
+        """白名单收尾标签（``</invoke>`` / ``</tool_calls>``）仍属协议自身，保持兼容。"""
+        text = ('<tool_calls><invoke name="pwsh">'
+                '<parameter name="command">dir</parameter></invoke></tool_calls>')
+        action = SkillAgent._parse_action(text)
+        self.assertEqual(action["type"], "tool")
+        self.assertEqual(action["tool"], "pwsh")
+        self.assertEqual(action["arguments"], {"command": "dir"})
 
     def test_complete_named_tool_with_trailing_prose_is_final(self) -> None:
         """形状**完整**的动作后面接正文 ⇒ 按正文展示，不进 parse_error 重试。

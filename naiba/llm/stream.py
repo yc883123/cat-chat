@@ -407,9 +407,15 @@ class _ReasoningStreamer:
 def _possible_fence_suffix_length(buffer: str) -> int:
     """缓冲区末尾是不是「半个围栏标记行」——是则留待下一块（围栏标记可能被 SSE 拆两包）。
 
-    只在**行首**（缩进 ≤3 空格）算数：行内代码的 ``x = ` `` 不需要保留。
+    只在**行首**（缩进 ≤3 个空格/制表符）算数：行内代码的 ``x = ` `` 不需要保留。
     完整围栏行（≥3）由 :func:`naiba.core.text_fences.fence_scan` 直接处理，这里只补
     那 1–2 个字符的窗口。
+
+    缩进口径必须与 :func:`naiba.core.text_fences.fence_run` **逐字一致**（``lstrip(" \\t")``
+    + ``MAX_FENCE_INDENT``）：``text_fences`` 允许围栏行用最多 3 个空格**或制表符**缩进，
+    这里若只剥空格，``"\\t``"`` 这种带 Tab 缩进的半个闭合围栏行就不会被保留——
+    半截被当正文发出去、``_advance`` 又按整行扫 ⇒ 闭合认不出、``_in_fence`` 永久停在
+    围栏内，之后的真实协议会被当成围栏里的代码正文整套放行（协议明文进 UI）。
     """
     text = str(buffer or "")
     if not text:
@@ -417,7 +423,7 @@ def _possible_fence_suffix_length(buffer: str) -> int:
     line = text[text.rfind("\n") + 1:]
     if not line:
         return 0
-    indent = len(line) - len(line.lstrip(" "))
+    indent = len(line) - len(line.lstrip(" \t"))
     if indent > text_fences.MAX_FENCE_INDENT:
         return 0
     body = line[indent:]

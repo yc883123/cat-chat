@@ -17,6 +17,9 @@ const ACTIVE_TITLE = process.env.NAIBA_SMOKE_ACTIVE_TITLE || '插话冒烟';
 const CHOICE_TITLE = process.env.NAIBA_SMOKE_CHOICE_TITLE || '插话选择共存冒烟';
 const ACTIVE_ID = process.env.NAIBA_SMOKE_ACTIVE_ID || '';
 const RUN_ID = process.env.NAIBA_SMOKE_RUN_ID || '';
+const DIRECT_TITLE = process.env.NAIBA_SMOKE_DIRECT_TITLE || '插话直达冒烟';
+const DIRECT_ID = process.env.NAIBA_SMOKE_DIRECT_ID || '';
+const DIRECT_RUN_ID = process.env.NAIBA_SMOKE_DIRECT_RUN_ID || '';
 const ROOT = path.resolve(__dirname, '..');
 const failures = [];
 
@@ -117,6 +120,14 @@ async function diag(page) {
     }
   });
   page.on('dialog', (dialog) => dialog.accept());
+
+  // 首启引导弹窗（`maybeShowOnboarding`：没有「可用供应商」时自动 showModal）会拦住所有点击。
+  // 隔离实例 `_serve_tmp.py` 播的两张供应商卡片 api_key 都是空的 ⇒ `hasUsableProvider()` 为假
+  // ⇒ 必然弹出（本次实测：A 段第一步就被它 intercept）。它与本冒烟要验的东西无关，开局就写上
+  // 「已看过引导」标记把它摘掉——这是环境噪音，不是被测行为。
+  await page.addInitScript(() => {
+    try { window.localStorage.setItem('naibaOnboardingDismissed', '1'); } catch (_) { /* 隐私模式 */ }
+  });
 
   // 合成事件流：把 /api/runs/*/events 换成本地可控的 ReadableStream。
   // 这样 resumeRun / consumeRunStream / handleChatEvent 全是**真代码**，只有字节来源是假的。
@@ -427,6 +438,68 @@ async function diag(page) {
         return !input.disabled && !host.classList.contains('is-busy')
           && [...host.querySelectorAll('button[data-choice-value]')].every((b) => !b.disabled);
       }), '');
+
+    // ─────────── I. 「插话直达」开关（设置 → 运行设置）───────────
+    // 开关打开后，运行中回车不该再停在「待引导」：入队即引导，用户不用再点第二次。
+    const toggle = await apiJson('/api/settings', {
+      method: 'POST', body: { interject_direct_send: true },
+    });
+    check('I① 服务端已落开关（settings 载荷回 true）',
+      toggle?.settings?.interject_direct_send === true,
+      JSON.stringify(toggle?.settings?.interject_direct_send));
+
+    await page.reload({ waitUntil: 'load', timeout: 30000 });
+    await page.waitForSelector('#sidebarWorkspaceTree .conversation-item', { timeout: 30000 });
+    await settlePollingOff();
+    // 先断前提：bootstrap 真把开关带回来了。前提不成立时后面的断言测的是旧口径，等于空转。
+    const pref = await page.evaluate(async () => {
+      const core = await import('./js/01-core.js');
+      return core.state.bootstrap?.settings?.interject_direct_send;
+    });
+    check('I② 前提成立：bootstrap 带回开关 = true', pref === true, String(pref));
+
+    // 设置页勾选框必须跟着服务端值走（同一份载荷在 UI 上的唯一呈现）。
+    await page.evaluate(async () => {
+      const bind = await import('./js/15-bind-events.js');
+      const settings = await import('./js/09-settings.js');
+      document.querySelector('#settingsDialog').showModal();
+      bind.switchSettingsTab('runtime');
+      settings.populateRuntimeSettings();
+    });
+    await page.waitForTimeout(300);
+    const checkboxOn = await page.evaluate(() => Boolean(document.querySelector('#interjectDirectSend')?.checked));
+    check('I③ 设置页「插话直达」勾选框显示已开启', checkboxOn === true, String(checkboxOn));
+    await page.screenshot({ path: path.join(ROOT, 'verify', 'interjection_smoke_4_direct_send.png') });
+    await page.evaluate(() => document.querySelector('#settingsDialog').close());
+
+    await openConversation(DIRECT_TITLE);
+    await page.waitForSelector('#messages.conversation-running', { timeout: 20000 });
+    await page.waitForTimeout(800);
+    await settlePollingOff();
+    await page.fill('#messageInput', '直达：改成 9:16');
+    await page.press('#messageInput', 'Enter');
+    await page.waitForTimeout(1200);
+    panel = await panelSnapshot(page);
+    const directRow = rowByText(panel, '直达：改成 9:16');
+    check('I④ 开关打开：入队即「已引导」，不再停在待引导（无需用户点引导）',
+      Boolean(directRow) && directRow.state === 'guided' && directRow.badge === '已引导'
+      && !directRow.actions.includes('guide'),
+      JSON.stringify(panel.rows));
+    messages = await messagesOf(DIRECT_ID);
+    const directSaved = messages.find((m) => m.content === '直达：改成 9:16');
+    check('I⑤ 后端真落了引导标记（agent 下一步就能取走）',
+      Boolean(directSaved) && directSaved.metadata?.interjection === true
+      && directSaved.metadata?.interjection_guided === true
+      && !directSaved.metadata?.interjection_consumed
+      && String(directSaved.metadata?.run_id || '') === DIRECT_RUN_ID,
+      JSON.stringify(directSaved && directSaved.metadata));
+
+    // 关回去：默认口径（两段式）不能被这次冒烟留下副作用。
+    const restored = await apiJson('/api/settings', {
+      method: 'POST', body: { interject_direct_send: false },
+    });
+    check('I⑥ 关回开关（还原默认两段式）',
+      restored?.settings?.interject_direct_send === false, '');
 
     check('零页面错误 / console.error', pageErrors.length === 0, JSON.stringify(pageErrors.slice(0, 3)));
   } catch (error) {

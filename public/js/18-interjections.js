@@ -272,6 +272,15 @@ async function resolveActiveRunId(conversationId) {
 }
 
 /**
+ * 「插话直达」开关当前值（设置 → 运行设置；服务端 settings 是唯一事实来源）。
+ *
+ * 开启时插话入队后立即替用户按下「引导」——即"输入完直接进当前任务"，不再要求多一次点击。
+ */
+function interjectDirectSendEnabled() {
+  return Boolean(state.bootstrap?.settings?.interject_direct_send);
+}
+
+/**
  * 运行中发送：把输入框（含待发送附件）的内容排进插话队列。
  *
  * 与 sendChatMessage 的差异：不调 /api/chat（那会与进行中的 Run 撞 ACTIVE_RUN），
@@ -363,6 +372,18 @@ export async function sendRunInterjection(textOverride = '') {
       metadata: { attachments, interjection: true, interjection_guided: false },
     };
     appendRunGuidance(message);
+    // 「插话直达」（设置 → 运行设置）：入队之后立刻替用户按下「引导」。刻意复用
+    // guideInterjection 而不是自己再打一个接口——拒掉待确认的工具卡、user_guidance 事件、
+    // 队列行转「已引导」全在那一条路径上，两处各写一遍必然漂移。引导失败时这一行就留在
+    // 队列（待引导），用户仍可手动引导 / 取回 / 删除，刚打的字不会丢——比一次请求失败
+    // 就整条内容作废安全得多。
+    if (message.id && interjectDirectSendEnabled()) {
+      const guided = await guideInterjection(message.id);
+      toast(guided
+        ? '已发送给 AI：下一步即生效'
+        : '已进入插话队列：直达发送未成功，可点「引导」重试');
+      return message;
+    }
     toast('已加入插话队列：可编辑 / 删除，或点「引导」立即并进当前任务');
     return message;
   } finally {

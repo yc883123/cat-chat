@@ -760,6 +760,16 @@
             </div>
           </div>
           <div class="settings-card">
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"></path></svg></span><div><h4>插话</h4><p>模型运行中你仍可继续输入；这里决定这条新指令什么时候并进当前任务。</p></div></div>
+            <label class="checkbox-field">
+              <input id="interjectDirectSend" type="checkbox">
+              <span class="checkbox-text">
+                <b>插话直达（免引导）</b>
+                <small class="hint">开启后，运行中输入的内容立即发给 AI（下一步生效），不再停在插话队列里等你点「引导」。与手动引导一致，这条新指令会撤掉当前等待你确认的工具卡片。改动立即生效，同一服务上的其他设备同样适用。</small>
+              </span>
+            </label>
+          </div>
+          <div class="settings-card">
             <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1"></path><path d="M3.5 4.5V10H9"></path><path d="M12 8v4.5l3 1.8"></path></svg></span><div><h4>思考回放</h4><p>模型思考（思维链）会随历史每轮原样回放，超长思考被反复回放会把模型锚定在同一个循环里。以下限长只截回放、不改聊天记录。</p></div></div>
             <div class="field-grid">
               <label>单条思考回放上限（字符）<input id="reasoningReplayMaxChars" type="number" min="0" max="1000000" step="500"><small class="hint">单条思考超过该长度即截断并附省略标记。<b>改动后下一次请求会重建一次缓存。</b>0 = 关闭限长。</small></label>

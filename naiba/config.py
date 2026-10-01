@@ -314,6 +314,11 @@ def default_config() -> dict[str, Any]:
         # （见下方 self.data.pop("max_agent_steps")），沿用同名会让老配置里的残值突然生效、
         # 把用户的步数卡死在一个随手填过的小数字上。
         "agent_step_limit": 200,
+        # 「插话直达」：运行中输入插话后是否**立即**并进当前任务（等价于替用户按下队列行上的
+        # 「引导」）。False = 维持两段式（先入插话队列、等用户显式引导），与旧版行为一致。
+        # 只影响「什么时候把新指令交给 agent」，不改插话的落库形态与消费点；前端消费见
+        # public/js/18-interjections.js::sendRunInterjection。
+        "interject_direct_send": False,
         # 思考回放限长（双闸门，0 = 关闭该层）。失控思考会被**每一轮原样回放**给模型，
         # 模型看到自己上一轮的推理循环样本后被强锚定（实测「每次总结都是同一条文字」）。
         # reasoning_replay_max_chars = 单条硬闸门；reasoning_replay_turn_chars = 同一轮次内
@@ -2065,6 +2070,7 @@ class ConfigStore:
             "reasoning_replay_max_chars",
             "reasoning_replay_turn_chars",
             "agent_step_limit",
+            "interject_direct_send",
             "context_reset_seed_template",
             "access_token",
             "workspace_dir",
@@ -2108,6 +2114,12 @@ class ConfigStore:
                         }
                         requested = values[key] if isinstance(values[key], list) else []
                         self.data[key] = [tool for tool in requested if tool in valid_tools]
+                    elif key == "interject_direct_send":
+                        # 只收真布尔：JSON 里传 "false" 会被 bool() 判成 True，静默反着来
+                        # 是最难查的一类「开关失灵」，宁可显式报错让调用方改对。
+                        if not isinstance(values[key], bool):
+                            raise ValueError("interject_direct_send 必须是布尔值")
+                        self.data[key] = values[key]
                     elif key == "workspace_dir":
                         raw = str(values[key] or "").strip()
                         if not raw:

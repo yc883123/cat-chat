@@ -38,6 +38,7 @@ DATA_DIR = TMP_ROOT / "data"
 
 ACTIVE_TITLE = "插话冒烟"
 CHOICE_TITLE = "插话选择共存冒烟"
+DIRECT_TITLE = "插话直达冒烟"
 AGENT = {"id": "", "name": "Chat", "system_prompt": "", "skill_ids": []}
 
 
@@ -53,8 +54,9 @@ def wait_health(deadline: float = 90.0) -> bool:
     return False
 
 
-def seed() -> tuple[str, str, str]:
-    """播种夹具，返回 (活动 Run 的会话 id, 活动 Run id, 选择题会话 id)。
+def seed() -> tuple[str, str, str, str, str]:
+    """播种夹具，返回 (活动 Run 的会话 id, 活动 Run id, 选择题会话 id,
+    「插话直达」会话 id, 直达会话的活动 Run id)。
 
     注意：必须在服务启动**之后**调用（见 main 的注释）——启动清理会把先播的活动 Run
     判成「服务重启，运行已中断」。
@@ -97,7 +99,18 @@ def seed() -> tuple[str, str, str]:
             "interjection_stopped": True,
         },
     )
-    return str(active["id"]), str(run["id"]), str(choice["id"])
+    # ③ 「插话直达」开关专用的活动 Run：必须**独立**于 ①——F 段会把 ① 的 Run 冻结，
+    #    复用同一个会话时新插话一进来就被本地判成「已停止」，验不到"入队即引导"。
+    direct = storage.create_conversation(DIRECT_TITLE)
+    storage.add_message(direct["id"], "user", f"{DIRECT_TITLE}：先出一版草稿")
+    storage.add_message(direct["id"], "assistant", "草稿好了，听你下一句。")
+    direct_run = storage.create_run(
+        direct["id"], f"{DIRECT_TITLE}：先出一版草稿", AGENT, {}, kind="chat"
+    )
+    return (
+        str(active["id"]), str(run["id"]), str(choice["id"]),
+        str(direct["id"]), str(direct_run["id"]),
+    )
 
 
 def main() -> int:
@@ -124,7 +137,7 @@ def main() -> int:
             return 1
         # 必须在 server 起来**之后**播种：启动清理会把库里残留的活动 Run 判为
         # 「服务重启，运行已中断」，先播的话活动 Run 一开机就被改成终态，插话入队全 404。
-        active_id, run_id, choice_id = seed()
+        active_id, run_id, choice_id, direct_id, direct_run_id = seed()
         node_env = dict(os.environ)
         node_env.update({
             "NAIBA_SMOKE_BASE": BASE,
@@ -133,6 +146,9 @@ def main() -> int:
             "NAIBA_SMOKE_CHOICE_ID": choice_id,
             "NAIBA_SMOKE_ACTIVE_TITLE": ACTIVE_TITLE,
             "NAIBA_SMOKE_CHOICE_TITLE": CHOICE_TITLE,
+            "NAIBA_SMOKE_DIRECT_ID": direct_id,
+            "NAIBA_SMOKE_DIRECT_RUN_ID": direct_run_id,
+            "NAIBA_SMOKE_DIRECT_TITLE": DIRECT_TITLE,
         })
         node = subprocess.run(  # noqa: S603 - 固定 argv
             ["node", str(ROOT / "verify" / "interjection_smoke.cjs")],

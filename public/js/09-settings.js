@@ -971,6 +971,10 @@ export function populateRuntimeSettings() {
   if ($('#agentStepLimit')) {
     $('#agentStepLimit').value = Number(settings.agent_step_limit ?? 200);
   }
+  // 插话直达：布尔偏好，缺省 false = 维持「入队 → 手动引导」两段式（与旧版行为一致）。
+  if ($('#interjectDirectSend')) {
+    $('#interjectDirectSend').checked = Boolean(settings.interject_direct_send);
+  }
   // 思考回放限长同理：0 表示「关闭限长」，不能用 `|| 默认值` 回填。
   if ($('#reasoningReplayMaxChars')) {
     $('#reasoningReplayMaxChars').value = Number(settings.reasoning_replay_max_chars ?? 4000);
@@ -994,6 +998,31 @@ export function populateRuntimeSettings() {
   renderCacheSizes(state.bootstrap || {});
   renderProxySettings();
   renderWorkspaceControl();
+}
+
+/**
+ * 「插话直达」开关：即时生效（与「侧栏分组与排序」同款——POST /api/settings 单项提交，
+ * 服务端 settings 是唯一事实来源，不自造 localStorage 影子副本）。
+ *
+ * checkbox 已经由用户点成新值，写失败必须**回滚**：否则界面显示「已开启」而服务端仍是
+ * 关闭，下一轮插话照样排队等引导，用户只会以为开关失灵（「看着开了其实没开」最难查）。
+ */
+export async function saveInterjectDirectSend(enabled) {
+  const value = Boolean(enabled);
+  try {
+    const result = await api('/api/settings', { method: 'POST', body: { interject_direct_send: value } });
+    // 以服务端回声为准（拿不到回声的只有一个可能：对端是不含该键的旧版，退回本次意图值）。
+    const saved = result?.settings?.interject_direct_send;
+    const applied = typeof saved === 'boolean' ? saved : value;
+    if (state.bootstrap?.settings) state.bootstrap.settings.interject_direct_send = applied;
+    if ($('#interjectDirectSend')) $('#interjectDirectSend').checked = applied;
+    toast(applied ? '插话将直达 AI：下一步即生效' : '插话将先进队列，等你点「引导」');
+    return applied;
+  } catch (error) {
+    if ($('#interjectDirectSend')) $('#interjectDirectSend').checked = !value;
+    toast(`保存失败：${error.message}`);
+    return !value;
+  }
 }
 
 /* ---------- 网络代理（出站请求） ---------- */

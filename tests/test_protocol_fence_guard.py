@@ -190,6 +190,20 @@ class StreamingFenceTests(unittest.TestCase):
         self.assertEqual(emitted.count('"a": 1'), 1, "围栏里的示例必须原样可见")
         self.assertEqual(SkillAgent._parse_action(content)["tool"], "pwsh")
 
+    def test_tab_indented_crlf_closing_fence_split_across_chunks(self) -> None:
+        """Tab-indented CRLF closing fences remain intact when ``\\r`` and ``\\n`` split."""
+        protocol = '{"type": "tool", "tool": "pwsh", "arguments": {"command": "dir"}}'
+        pieces = [
+            "示例：\r\n\t```json\r\n{\"a\": 1}\r\n",
+            "\t```\r",
+            "\n",
+            protocol,
+        ]
+        content, emitted, _events = self._read(pieces)
+        self.assertTrue(emitted.endswith("\t```\r\n"), f"协议前半截不得外发：{emitted!r}")
+        self.assertNotIn('"command"', emitted, f"协议本体不得进 delta：{emitted!r}")
+        self.assertEqual(SkillAgent._parse_action(content)["tool"], "pwsh")
+
     def test_tab_indented_opening_fence_split_across_chunks(self) -> None:
         """Tab 缩进的**开启**围栏被拆包：正文照常外发，围栏内的示例不判协议。"""
         pieces = ["说明：\n\t`", "``json\n", '{"a": 1}\n', "\t```\n", "后面还有正文。"]

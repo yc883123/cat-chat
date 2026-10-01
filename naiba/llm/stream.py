@@ -423,10 +423,13 @@ def _possible_fence_suffix_length(buffer: str) -> int:
     line = text[text.rfind("\n") + 1:]
     if not line:
         return 0
-    indent = len(line) - len(line.lstrip(" \t"))
+    # CRLF can be split between ``\r`` and ``\n``.  Treat a terminal CR as
+    # line-ending whitespace while still retaining the full partial line.
+    probe_line = line[:-1] if line.endswith("\r") else line
+    indent = len(probe_line) - len(probe_line.lstrip(" \t"))
     if indent > text_fences.MAX_FENCE_INDENT:
         return 0
-    body = line[indent:]
+    body = probe_line[indent:]
     if not body:
         # 末行缩进后为空（整行只有 1–3 个空格）：没有围栏字符可判，直接放行。
         # 缺这一条就会在下一行 body[0] 越界 ⇒ IndexError 打死整条流。纯空格 delta

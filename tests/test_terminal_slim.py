@@ -140,6 +140,21 @@ class SlimTerminalRunTests(unittest.TestCase):
         self.assertNotIn("message", payload)
         self.assertEqual(payload["type"], "cancelled", "类型必须保留（前端按它收尾）")
 
+    def test_error_event_partial_message_is_slimmed(self) -> None:
+        """error 事件的 `partial_message` 过去**不在**收缩口径里（这份副本会永久留库）。"""
+        self.storage.append_run_event(self.run_id, {
+            "type": "error",
+            "message": "HTTP 400",
+            "partial_message": {"id": "m3", "role": "assistant", "content": "半截",
+                                "metadata": {"partial": True}},
+        })
+        result = self.storage.slim_terminal_run(self.run_id)
+        self.assertEqual(result["events"], 1)
+        payload = self._payloads()[-1]
+        self.assertNotIn("partial_message", payload, "失败事件的完整消息副本同样不得留库")
+        self.assertEqual(payload["message"], "HTTP 400", "错误原因（短文案）必须保留")
+        self.assertEqual(payload["type"], "error")
+
     # ---- 2. 不碰 interrupted（恢复期要读快照） ----
 
     def test_interrupted_snapshot_is_not_slimmed(self) -> None:

@@ -1046,9 +1046,10 @@ class ConversationRunMixin:
             self.app.storage.update_background_task(
                 run_id, status="cancelled", detail={"message": "任务已取消"}, finished=True
             )
+            # 与 done 同口径：事件**不带** `aborted_message`（整份消息与 messages 表重复，
+            # 写进 run_events 再被终态瘦身删掉）。`aborted_message` 本身仍是本地变量，
+            # 只用于给用量台账带 message_id；完整消息由前端收尾重载会话拿到。
             cancelled_payload: dict[str, Any] = {"type": "cancelled", "message": "任务已取消"}
-            if aborted_message:
-                cancelled_payload["aborted_message"] = aborted_message
             if snapshot.get("is_first_turn"):
                 try:
                     self._persist_first_turn_context(run_id, snapshot, run_context)
@@ -1084,9 +1085,9 @@ class ConversationRunMixin:
                 error=error_message,
                 finished=True,
             )
+            # 同 cancelled/done：`partial_message` 只留在本地（给用量台账带 message_id），
+            # 不进事件载荷——error 的这份副本此前连瘦身都没覆盖过，会永久留在 run_events 里。
             error_payload: dict[str, Any] = {"type": "error", "message": error_message}
-            if partial_message:
-                error_payload["partial_message"] = partial_message
             if snapshot.get("is_first_turn"):
                 try:
                     self._persist_first_turn_context(run_id, snapshot, run_context)

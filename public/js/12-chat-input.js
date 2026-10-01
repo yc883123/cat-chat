@@ -1052,8 +1052,10 @@ function handleCancelledEvent(event, { row, answer, setActivity, conversationId 
       console.error('[naiba] cancelled 事件渲染崩溃:', error, 'message=', event.aborted_message);
     }
   } else {
-    // 没有 aborted_message（例如 forced-cancel 未及时重建）：绝不能清空已展示的中途输出，
-    // 只在真正无任何内容时才显示占位提示；否则会抹掉 AI 已输出的回复。
+    // 新契约（run/chat.py 的 cancelled 发射点）与 forced-cancel 兜底都**不再带**
+    // `aborted_message`——整份消息写进 run_events 再被终态瘦身删掉是空转，完整消息由收尾重载
+    // 会话从 API 取。这里绝不能清空已展示的中途输出：只在真正无任何内容时才显示占位提示，
+    // 否则会抹掉 AI 已输出的回复（存量事件仍带 aborted_message，走上面的老路径）。
     const hasContent = Boolean((answer.dataset.raw || '').trim())
       || row.querySelector('.reasoning-block, .tool-run, .stream-prose, .tool-confirm');
     if (!hasContent) {
@@ -1073,7 +1075,7 @@ function handleRunFailedEvent(event, { answer, setActivity }) {
   setActivity('');
   // 工具协议解析失败：只展示可读错误，不显示原始 XML/JSON 或命令参数。
   // 但**不能**在已有正文时清空它：末次解析失败会把模型最后一轮原文保留在答复里
-  // （后端已落库，done 事件随后用完整消息替换本行），这里清屏会让正文先闪掉。
+  // （后端已落库，收尾重载会话时按落库版本渲染本行），这里清屏会让正文先闪掉。
   const hasContent = Boolean((answer.dataset.raw || '').trim());
   if (!hasContent) {
     answer.innerHTML = `<p>执行失败：${escapeHtml(event.error || '任务执行失败')}</p>`;
@@ -1175,8 +1177,8 @@ function handleErrorEvent(event, { row, answer, collapseReasoning, conversationI
   clearVisionProgress();
   collapseReasoning();
   if (event.partial_message) {
-    // 失败时后端已把累积内容持久化为 partial assistant 消息，直接用其渲染，
-    // 保留已展示的思考/正文/工具，避免 HTTP 500 后内容被覆盖丢失。
+    // 存量形态（重放旧事件流/旧库）：失败时后端把累积内容持久化成了 partial assistant 消息，
+    // 直接用其渲染，保留已展示的思考/正文/工具。
     try {
       const partialRow = replaceWithMessage(row, event.partial_message);
       updateContextUsage(null, event.partial_message);
@@ -1184,8 +1186,9 @@ function handleErrorEvent(event, { row, answer, collapseReasoning, conversationI
       console.error('[naiba] error 事件渲染崩溃:', error, 'message=', event.partial_message);
     }
   } else {
-    // 没有 partial_message：绝不能清空已展示的中途输出，
-    // 只在真正无任何内容时才显示错误占位；否则会抹掉 AI 已输出的回复。
+    // 新契约（run/chat.py 的 error 发射点）**不再带** `partial_message`：整份消息写进
+    // run_events 是会长久留库的重复副本（它连终态瘦身都没覆盖过），完整消息由前端收尾重载
+    // 会话从 API 取。这里绝不能清空已展示的中途输出，只在真正无任何内容时才显示错误占位。
     const hasContent = Boolean((answer.dataset.raw || '').trim())
       || row.querySelector('.reasoning-block, .tool-run, .stream-prose, .tool-confirm');
     if (hasContent) {

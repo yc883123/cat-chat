@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from naiba.core.contracts import AppContext
 
+import logging
 import threading
 import time
 from pathlib import Path
@@ -34,6 +35,9 @@ from naiba.storage.store import (
     PRIMARY_RUN_KINDS as _PRIMARY_RUN_KINDS,
     TERMINAL_TASK_STATUSES,
 )
+
+
+logger = logging.getLogger("naiba.run.manager")
 
 
 # 「这条会话在不在回答」只由这些 kind 的**顶层** Run 决定（见 store.create_chat_run）。
@@ -284,26 +288,25 @@ class ConversationRunManager(ConversationRunMixin):
                 if current and current.get("status") == "cancelling":
                     # 兜底：即便 run 线程没能及时重建“已中止”消息（模型流卡住/空闲），
                     # 也在这里把已累积的内容持久化，避免中途输出丢失。
-                    aborted_message = None
                     try:
                         conversation_id = str(current.get("conversation_id") or "")
                         skills = (current.get("detail") or {}).get("skills") or []
                         if conversation_id:
-                            aborted_message = self._persist_aborted_message(
-                                run_id, conversation_id, skills
-                            )
+                            # 只落库：消息本体是前端收尾重载会话时的唯一来源，事件不带副本。
+                            self._persist_aborted_message(run_id, conversation_id, skills)
                     except Exception:
-                        aborted_message = None
+                        # 重建失败不阻断取消收尾（用户至少能取消掉），但必须留痕。
+                        logger.exception("强制取消兜底：重建已中止消息失败 run=%s", run_id)
                     self.app.storage.update_background_task(
                         run_id,
                         status="cancelled",
                         detail={"message": "任务已取消"},
                         finished=True,
                     )
-                    cancelled_payload: dict[str, Any] = {"type": "cancelled", "message": "任务已取消"}
-                    if aborted_message:
-                        cancelled_payload["aborted_message"] = aborted_message
-                    self.emit(run_id, cancelled_payload)
+                    # 与主对话取消路径同口径：事件不带完整 `aborted_message`（见 run/chat.py）。
+                    # 这里的重建只为把已累积内容落库（上面那句 `_persist_aborted_message`），
+                    # 前端收尾会重载会话拿到它。
+                    self.emit(run_id, {"type": "cancelled", "message": "任务已取消"})
             except Exception:
                 pass
 

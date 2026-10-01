@@ -27,7 +27,7 @@ _METADATA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
-CURRENT_SCHEMA_VERSION = 23
+CURRENT_SCHEMA_VERSION = 24
 
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
@@ -397,36 +397,58 @@ def _coalesce_reasoning_deltas(db: sqlite3.Connection, run_id: str | None = None
     return processed
 
 
+# 各终态事件里"与 messages 表逐字重复的完整消息副本"键（按 type 分开，不能一刀切 pop）：
+#   - done：`message` 就是整份 assistant 消息对象（存量里也见过错挂在 done 上的
+#     `aborted_message`，一并收掉）；
+#   - cancelled：`message` 是"任务已取消"文案（老版本还可能是对象）+ `aborted_message` 是
+#     整份"已中止"消息；
+#   - error：只有 `partial_message` 是重复副本——`message` 是**错误原因短文案**，前端要显示，
+#     重放时更不能丢（所以它不在收缩之列）。
+_SLIM_TERMINAL_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
+    "done": ("message", "aborted_message"),
+    "cancelled": ("message", "aborted_message"),
+    "error": ("partial_message",),
+}
+
+
 def _slim_terminal_event_payload_rows(
     db: sqlite3.Connection, run_id: str = ""
 ) -> int:
-    """done/cancelled 事件载荷去掉 message 与 aborted_message（幂等）。
+    """终态事件载荷去掉与 messages 表重复的完整消息副本（幂等）。
 
-    这两个键携带完整消息对象（content + metadata + trace…），与 messages 表重复；
-    仅前端在运行结束即时渲染用；run 终态后再无读取方。返回处理行数。
+    收缩键按事件类型分开（见 `_SLIM_TERMINAL_PAYLOAD_KEYS`）：这些对象（content + metadata
+    + trace…）只在运行结束的即时渲染里用得到，run 终态后再无读取方，却会一直堆在库里。
+    v14 的旧口径只覆盖 done/cancelled，且 `error.partial_message` 至今没人收（失败事件会
+    永久带着整条 partial 消息）。返回处理行数。
 
     ``run_id`` 为空表示全库（迁移用）；给定时只处理该 run（运行期收尾用）。
     """
-    conditions = ["event_type IN ('done', 'cancelled')"]
+    conditions = [
+        "event_type IN (" + ", ".join(f"'{kind}'" for kind in TERMINAL_RUN_EVENT_TYPES) + ")"
+    ]
     parameters: list[Any] = []
     if run_id:
         conditions.append("run_id = ?")
         parameters.append(run_id)
     updated = 0
-    for row_run_id, sequence, payload in db.execute(
-        f"SELECT run_id, sequence, payload FROM run_events WHERE {' AND '.join(conditions)}",
+    for row_run_id, sequence, event_type, payload in db.execute(
+        f"SELECT run_id, sequence, event_type, payload FROM run_events "
+        f"WHERE {' AND '.join(conditions)}",
         tuple(parameters),
     ).fetchall():
+        keys = _SLIM_TERMINAL_PAYLOAD_KEYS.get(str(event_type or ""), ())
+        if not keys:
+            continue
         try:
             obj = json.loads(payload or "{}")
         except (json.JSONDecodeError, TypeError):
             continue
         if not isinstance(obj, dict):
             continue
-        if "message" not in obj and "aborted_message" not in obj:
+        if not any(key in obj for key in keys):
             continue
-        obj.pop("message", None)
-        obj.pop("aborted_message", None)
+        for key in keys:
+            obj.pop(key, None)
         db.execute(
             "UPDATE run_events SET payload = ? WHERE run_id = ? AND sequence = ?",
             (json.dumps(obj, ensure_ascii=False), row_run_id, sequence),
@@ -436,7 +458,7 @@ def _slim_terminal_event_payload_rows(
 
 
 def _slim_terminal_event_payloads(db: sqlite3.Connection) -> int:
-    """迁移口径：全库瘦身 done/cancelled 事件载荷。"""
+    """迁移口径：全库瘦身终态事件载荷（done/cancelled/error）。"""
     return _slim_terminal_event_payload_rows(db)
 
 
@@ -785,6 +807,27 @@ def _migrate_to_v23(db: sqlite3.Connection) -> None:
         _warn_data_migration(db, f"[naiba-storage] 迁移 v23 内容完成，VACUUM 未执行：{exc}")
 
 
+def _migrate_to_v24(db: sqlite3.Connection) -> None:
+    """补齐终态事件的重复副本收缩口径：把 done/cancelled/**error** 的完整消息对象全库清掉。
+
+    **为什么要再来一次**：v14 只收缩 done/cancelled 的 `message`/`aborted_message`，两条口子
+    一直漏着——① `error.partial_message` 压根不在口径内（存量的失败事件永久带着整条 partial
+    消息）；② v14 之后、运行期瘦身（9.155）之前落库的 done 事件仍是"带整份消息"的形态
+    （实测本机 201 行 / 36.0MB，占 run_events 全部载荷的 82%）。这些副本在终态后都没有读取方
+    （前端收尾时重载会话拿完整消息，见 run/chat.py 的终态发射点）。
+
+    幂等：已收缩过的行没有这三个键，直接跳过；内容改写失败会让迁移整体失败（用户可见、可重试）。
+    物理回收同 v14/v23 口径（VACUUM 失败只记诊断，不影响内容迁移结果）。
+    """
+    updated = _slim_terminal_event_payload_rows(db)
+    db.commit()
+    print(f"[naiba-storage] v24：终态事件消息副本收缩完成，{updated} 行已改写")
+    try:
+        db.execute("VACUUM")
+    except sqlite3.OperationalError as exc:
+        _warn_data_migration(db, f"[naiba-storage] 迁移 v24 内容完成，VACUUM 未执行：{exc}")
+
+
 # 目标版本 -> 迁移函数。新增版本时在此追加并提升 CURRENT_SCHEMA_VERSION。
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
@@ -810,6 +853,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     21: _migrate_to_v21,
     22: _migrate_to_v22,
     23: _migrate_to_v23,
+    24: _migrate_to_v24,
 }
 
 

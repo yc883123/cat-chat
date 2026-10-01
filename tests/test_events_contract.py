@@ -230,16 +230,21 @@ class EventEmissionContractTests(unittest.TestCase):
             missing = sorted(allowed - union)
             self.assertEqual(missing, [], f"事件 {kind} 契约图键未在 EventPayload 并集登记：{missing}")
 
-    def test_done_payload_carries_no_full_message(self):
-        """终态 `done` 不带完整消息对象（2026-10 起）。
+    def test_terminal_payloads_carry_no_full_message(self):
+        """终态事件**都不带**完整消息对象（2026-10 起）。
 
         带一份就等于把整条消息（含最占体积的 `metadata.trace`，实测单轮最长 318KB）写进
-        `run_events`、终态再被 `slim_terminal_run` 删掉——纯空转。完整消息由前端收尾重载
-        会话（`GET /api/conversations/<id>`）提供；事件只留"只有事件能给"的即时动作字段。
+        `run_events`，终态再被 `slim_terminal_run` 删掉——纯空转（error 的 `partial_message`
+        过去连瘦身都没覆盖，会永久留库）。完整消息由前端收尾重载会话
+        （`GET /api/conversations/<id>`）提供；事件只留"只有事件能给"的即时动作字段。
         """
-        allowed = EVENT_PAYLOAD_KEYS["done"]
-        self.assertNotIn("message", allowed, "done 不得再携带完整消息对象")
-        self.assertIn("session_start", allowed, "模型重置上下文后的种子预填只走事件")
+        done_keys = EVENT_PAYLOAD_KEYS["done"]
+        self.assertNotIn("message", done_keys, "done 不得再携带完整消息对象")
+        self.assertIn("session_start", done_keys, "模型重置上下文后的种子预填只走事件")
+        self.assertEqual(EVENT_PAYLOAD_KEYS["cancelled"], frozenset({"message"}),
+                         "cancelled 只留文案（前端靠会话重载拿完整消息）")
+        self.assertEqual(EVENT_PAYLOAD_KEYS["error"], frozenset({"message"}),
+                         "error 只留错误原因（partial_message 是会长久留库的重复副本）")
 
 
 class ValidateEventPayloadTests(unittest.TestCase):

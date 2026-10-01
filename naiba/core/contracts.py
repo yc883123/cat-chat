@@ -268,6 +268,7 @@ class EventPayload(TypedDict, total=False):
     # done 事件里的「新会话」重置信息（模型调 reset_context 成功时才有）：终态事件不再带
     # 完整消息，前端要靠它在收尾瞬间把种子消息预填进输入框（重载路径只画分割线、不填）。
     session_start: dict[str, Any]
+    # 存量形态（v24 前的 cancelled/error 事件会带，新契约不再发射；前端仍容忍重放旧事件流）。
     partial_message: dict[str, Any]
     # 工具流
     tool: str
@@ -293,6 +294,7 @@ class EventPayload(TypedDict, total=False):
     # 缺了它 choice 与随后的 done 会各算一个来源，面板会在两事件之间被重建（选择被清空）。
     message_id: str
     plan: dict[str, Any]
+    # 存量形态（v24 前的 cancelled 事件会带，新契约不再发射；前端仍容忍重放旧事件流）。
     aborted_message: dict[str, Any]
     # 诊断
     label: str
@@ -349,14 +351,18 @@ EVENT_PAYLOAD_KEYS: dict[str, frozenset[str] | None] = {
     "tool_result": frozenset({"tool", "success", "result", "arguments", "reason", "media", "media_truncated", "seq", "action_source"}),
     "tool_confirm": frozenset({"tool_name", "tool_desc", "arguments", "confirm_id", "action_source"}),
     "choice": frozenset({"choices", "choice_groups", "message_id"}),
-    "cancelled": frozenset({"message", "aborted_message"}),
+    # cancelled / error 也**不再携带**完整消息对象（aborted_message / partial_message）：
+    # 与 done 同一口径——消息本体先落库，事件里带一份等于写进 run_events 再被终态瘦身删掉
+    # （error 的 partial_message 连瘦身都没覆盖过，会永久留在库里）。前端收尾时重载会话
+    # （GET /api/conversations/<id>）拿完整消息；`message` 仍是短文案/错误原因本身。
+    "cancelled": frozenset({"message"}),
     "run_failed": frozenset({"error"}),
     "context_full": frozenset({"limit", "used", "budget"}),
     # done **不带** `message`：终态消息由前端收尾时重载会话（GET /api/conversations/<id>）
     # 拿到，事件里带着它等于把整份消息（含 metadata.trace，实测最长 318KB）写进 run_events
     # 再被终态瘦身删掉。这里只放"只有事件能给的即时动作"字段。
     "done": frozenset({"session_start", "followup_run_id", "plan"}),
-    "error": frozenset({"message", "partial_message"}),
+    "error": frozenset({"message"}),
     "debug_cache": frozenset({"label", "lines"}),
     "heartbeat": frozenset(),
     # ---- 插话（interjection）----

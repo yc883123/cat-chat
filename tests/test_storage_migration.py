@@ -310,5 +310,80 @@ class FirstTurnSlimMigrationTests(unittest.TestCase):
             self.assertEqual(storage.get_user_version(), CURRENT_SCHEMA_VERSION)
 
 
+class TerminalEventSlimMigrationTests(unittest.TestCase):
+    """v24：补齐终态事件重复副本的收缩口径。
+
+    v14 只收了 done/cancelled 的 `message`/`aborted_message`，两条口子一直漏着：
+    ① `error.partial_message` 压根不在口径内（失败事件永久带着整条 partial 消息）；
+    ② v14 之后、运行期瘦身之前落库的 done 事件仍是带整份消息的形态（实测 201 行 / 36MB）。
+    这些副本在终态后都没有读取方——前端收尾时重载会话拿完整消息。
+    """
+
+    def _seed(self, tmp: Path) -> tuple[ChatStorage, str, str]:
+        storage = ChatStorage(tmp / "chat.db")
+        convo = storage.create_conversation()
+        agent = {"id": "general", "name": "通用 Agent"}
+        run = storage.create_chat_run(
+            convo["id"], "消息", [], agent, {"model_key": "online:demo"}, "craft"
+        )
+        storage.update_background_task(run["id"], status="completed", finished=True)
+        # 直接落"存量形态"事件：新契约的发射点已经不带这些键了。
+        storage.append_run_event(run["id"], {
+            "type": "done",
+            "message": {
+                "id": "m1", "role": "assistant", "content": "答复",
+                "metadata": {"trace": [{"role": "user", "content": "x" * 256}]},
+            },
+        })
+        storage.append_run_event(run["id"], {
+            "type": "cancelled", "message": "任务已取消",
+            "aborted_message": {"id": "m2", "role": "assistant", "content": "（已中止）"},
+        })
+        storage.append_run_event(run["id"], {
+            "type": "error", "message": "HTTP 400",
+            "partial_message": {"id": "m3", "role": "assistant", "content": "半截"},
+        })
+        storage.set_user_version(23)  # 回到 v23 再迁移：模拟存量库
+        return storage, str(run["id"]), str(convo["id"])
+
+    def _payloads(self, root: Path, run_id: str) -> dict[str, dict]:
+        with closing(sqlite3.connect(root / "chat.db")) as db:
+            return {
+                str(row[0]): json.loads(row[1] or "{}")
+                for row in db.execute(
+                    "SELECT event_type, payload FROM run_events WHERE run_id = ?", (run_id,)
+                )
+            }
+
+    def test_all_terminal_message_copies_are_slimmed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            storage, run_id, conversation_id = self._seed(root)
+            storage.apply_pending_migrations()
+            payloads = self._payloads(root, run_id)
+            self.assertNotIn("message", payloads["done"], "done 的完整消息副本必须清掉")
+            self.assertNotIn("aborted_message", payloads["cancelled"])
+            self.assertNotIn("partial_message", payloads["error"], "error 那份是 v14 漏掉的")
+            self.assertNotIn("message", payloads["cancelled"], "cancelled 文案由 type 承担")
+            self.assertEqual(payloads["error"]["message"], "HTTP 400",
+                             "error 的 message 是错误原因短文案：必须保留（重放也要能显示）")
+            self.assertEqual(payloads["done"]["type"], "done", "事件类型保留（前端按它收尾）")
+            # 只动事件副本：消息本体（含 hydrate 回来的 trace）必须完好。
+            messages = storage.get_conversation(conversation_id)["messages"]
+            self.assertTrue(messages, "迁移只动事件载荷，不碰 messages 表")
+            self.assertEqual(storage.get_user_version(), CURRENT_SCHEMA_VERSION)
+
+    def test_v24_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            storage, run_id, _ = self._seed(root)
+            storage.apply_pending_migrations()
+            storage.apply_pending_migrations()  # 二次重跑：不得报错、不得改坏
+            payloads = self._payloads(root, run_id)
+            self.assertEqual(payloads["done"].get("message"), None)
+            self.assertEqual(payloads["error"].get("partial_message"), None)
+            self.assertEqual(payloads["error"]["message"], "HTTP 400")
+
+
 if __name__ == "__main__":
     unittest.main()

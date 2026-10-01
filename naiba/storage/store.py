@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import re
 import shutil
 import sqlite3
@@ -14,6 +15,8 @@ from typing import Any, Callable, Iterable, Iterator
 
 from naiba.core.messages import MetadataKeys
 from naiba.core.paths import normalized_path_key
+
+logger = logging.getLogger("naiba.storage.store")
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
@@ -2391,8 +2394,17 @@ class ChatStorage:
         逐字节还原 ``id`` / ``content`` / ``metadata`` / ``created_at``；``metadata_json``
         存在时按原文本写回，否则用 ``json.dumps`` 重新序列化。**已存在的 id 跳过**——
         重复点撤销不会报错，也不会覆盖现有内容。
-        已知边界：SQLite 的隐式 rowid 会重新分配，**同一毫秒**内的两条消息相对次序可能交换；
-        概率极低，且模型侧顺序由 ``(created_at, rowid)`` 重排，影响局限于同毫秒邻居的显示序。
+
+        **顺序锚定（不是可选项）**：会话排序契约是 ``(created_at, rowid)``，而隐式 rowid 在插回时
+        必然重新分配（新的总是最大）。快照带原 rowid 时按 ``(created_at, 原 rowid)`` 算出目标插入位，
+        再把「排在该批之后、却与它 created_at 并列或更早」的现存行**从后继起整体往后挪**（挪后缀，
+        后缀内部相对次序不变，量取「批次里最晚的 created_at − 后继 created_at + 1」）⇒ 撤销后顺序
+        与删除前逐条一致。整批只定位**一次**：``delete_message`` 的快照本来就是连续块，逐条重新定位
+        会拿"已插回行的新 rowid"去和"批次里下一条的原 rowid"比大小（两个域混用），批次内部反而翻序。
+        不这么做会发生什么：同毫秒并列时新 rowid 会把被撤销的消息挤到最后——探针实测
+        「u1 a1 u2 a2 同毫秒、删 a1 再撤销」变成 u1 u2 a2 **a1**；a1 上带着「新会话分割线」标记时
+        ``build_model_history`` 会把整段上下文清空（用户视角＝模型突然失忆），前缀缓存也从那条起
+        整体重写。缺 ``rowid`` 的老快照退化为修复前行为（排到最后）并记 info 日志。
         """
         rows_in = [item for item in (snapshots or []) if isinstance(item, dict)]
         if not rows_in:
@@ -2405,28 +2417,75 @@ class ChatStorage:
                     "SELECT id FROM messages WHERE conversation_id = ?", (conversation_id,)
                 ).fetchall()
             }
-            restored: list[str] = []
+
+            def load_positions() -> list[tuple[int, int]]:
+                """现存行的排序键 ``(created_at, rowid)``——即当前排序契约下的真实顺序。"""
+                return [
+                    (int(row["created_at"] or 0), int(row["rid"]))
+                    for row in db.execute(
+                        "SELECT created_at, rowid AS rid FROM messages "
+                        "WHERE conversation_id = ? ORDER BY created_at, rowid",
+                        (conversation_id,),
+                    ).fetchall()
+                ]
+
+            pending: list[dict[str, Any]] = []
             skipped: list[str] = []
             for item in rows_in:
                 snapshot = self._normalize_snapshot(item)
-                message_id = snapshot["id"]
-                if not message_id or message_id in existing:
-                    skipped.append(message_id)
+                if not snapshot["id"] or snapshot["id"] in existing:
+                    skipped.append(snapshot["id"])
                     continue
-                db.execute(
-                    "INSERT INTO messages(id, conversation_id, role, content, metadata, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        message_id,
-                        conversation_id,
-                        snapshot["role"],
-                        snapshot["content"],
-                        snapshot["metadata_json"],
-                        snapshot["created_at"],
-                    ),
-                )
-                existing.add(message_id)
-                restored.append(message_id)
+                pending.append(snapshot)
+            restored: list[str] = []
+            if pending:
+                # **整批一次定位**：``delete_message`` 的快照本来就是连续块（single 一行、
+                # turn 是「user + 紧随的连续 assistant」），所以整批插在同一个位置。
+                # 不能逐条重新定位——已经插回的批次行拿到的是新 rowid（必然最大），拿它的
+                # 新 rowid 去和批次里下一条的**原 rowid** 比大小是两个域混用，批次内部会翻序。
+                head = pending[0]
+                head_rid = head.get("rowid")
+                positions = load_positions()
+                if head_rid is None:
+                    if positions:
+                        logger.info(
+                            "撤销快照缺少原 rowid，只能按插入顺序排到末尾：conversation=%s count=%d",
+                            conversation_id, len(pending),
+                        )
+                else:
+                    key = (int(head["created_at"]), int(head_rid))
+                    successor = next((pos for pos in positions if pos > key), None)
+                    if successor is not None:
+                        # 后继与批次**并列或更早**时，新 rowid 会把整批挤到后继之后 ⇒
+                        # 从后继起把后缀整体推后，直到它超过批次里最晚的那条（后缀内部次序不变）。
+                        latest = max(int(item["created_at"]) for item in pending)
+                        if successor[0] <= latest:
+                            bump = latest - successor[0] + 1
+                            db.execute(
+                                "UPDATE messages SET created_at = created_at + ? "
+                                "WHERE conversation_id = ? "
+                                "AND (created_at > ? OR (created_at = ? AND rowid >= ?))",
+                                (bump, conversation_id, successor[0], successor[0], successor[1]),
+                            )
+                            logger.info(
+                                "撤销消息顺序锚定：自后继起后缀时间戳 +%dms（同毫秒并列腾位）"
+                                "conversation=%s count=%d", bump, conversation_id, len(pending),
+                            )
+                for snapshot in pending:
+                    db.execute(
+                        "INSERT INTO messages(id, conversation_id, role, content, metadata, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            snapshot["id"],
+                            conversation_id,
+                            snapshot["role"],
+                            snapshot["content"],
+                            snapshot["metadata_json"],
+                            int(snapshot["created_at"]),
+                        ),
+                    )
+                    existing.add(snapshot["id"])
+                    restored.append(snapshot["id"])
             now = int(time.time() * 1000)
             db.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
@@ -2443,20 +2502,35 @@ class ChatStorage:
 
     @staticmethod
     def _message_snapshot(row: sqlite3.Row) -> dict[str, Any]:
-        """被删消息的完整快照（撤销插回的唯一依据）。"""
+        """被删消息的完整快照（撤销插回的唯一依据）。
+
+        额外带上 **原 rowid**（查询里别名 ``rid``）：隐式 rowid 在插回时会重新分配，而会话的
+        排序契约是 ``(created_at, rowid)``——同毫秒的多条消息一旦丢掉原 rowid，撤销就会把这条
+        消息排到同毫秒邻居**之后**（实测：分割线标记落在这一组里时，`build_model_history`
+        会把整段上下文清空，界面上就是"模型突然失忆"）。带原 rowid 才能算出正确的插入位。
+        """
         raw = row["metadata"]
         text = raw if isinstance(raw, str) else json.dumps(raw or {}, ensure_ascii=False)
+        try:
+            original_rowid: int | None = int(row["rid"])
+        except (IndexError, KeyError, TypeError, ValueError):
+            original_rowid = None
         return {
             "id": str(row["id"]),
             "role": str(row["role"] or ""),
             "content": str(row["content"] or ""),
             "metadata_json": text,
             "created_at": int(row["created_at"] or 0),
+            "rowid": original_rowid,
         }
 
     @staticmethod
     def _normalize_snapshot(item: dict[str, Any]) -> dict[str, Any]:
-        """把前端回传的快照归一成插回所需的六个字段（缺 ``metadata_json`` 时重新序列化）。"""
+        """把前端回传的快照归一成插回所需的字段（缺 ``metadata_json`` 时重新序列化）。
+
+        ``rowid``（原 SQLite rowid）**可选**：老快照/手改快照没有它就退化为"按插入顺序排到最后"
+        （即修复前的行为），有它才能把消息锚回原位。
+        """
         message_id = str(item.get("id") or "")
         role = str(item.get("role") or "")
         if not message_id or role not in ("user", "assistant", "session"):
@@ -2471,12 +2545,18 @@ class ChatStorage:
             created_at = int(item.get("created_at") or 0)
         except (TypeError, ValueError):
             raise ValueError("快照的 created_at 必须是整数")
+        raw_rid = item.get("rowid", item.get("rid"))
+        try:
+            original_rowid = int(raw_rid) if raw_rid not in (None, "") else None
+        except (TypeError, ValueError):
+            original_rowid = None
         return {
             "id": message_id,
             "role": role,
             "content": str(item.get("content") or ""),
             "metadata_json": text,
             "created_at": created_at,
+            "rowid": original_rowid,
         }
 
     def create_background_task(

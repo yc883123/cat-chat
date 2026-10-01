@@ -21,6 +21,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -293,6 +294,74 @@ class PrefixCacheStabilityTests(MessageDeleteTestCase):
             "分割线标记写在 metadata 里，撤销必须一并还原",
         )
         self.assertIn("session_start", json.dumps(self._rows(), ensure_ascii=False))
+
+
+class SameMillisecondRestoreOrderTests(MessageDeleteTestCase):
+    """同毫秒并列是**常态**（实测：连发四条消息常常只落在 2 个毫秒里），撤销必须锚回原位。
+
+    隐式 rowid 在插回时必然重新分配（新的总是最大），排序契约 ``(created_at, rowid)`` 于是会把
+    被撤销的消息挤到同毫秒邻居**之后**。后果不是"显示顺序变一下"：分割线（``session_start`` 写在
+    metadata 上）落在这组里时，``build_model_history`` 会把整段上下文清空——用户视角就是"模型突然失忆"。
+    （``set_session_start`` 之所以不用独立标记行，正是同一个理由：中间插行必须回移时间戳。）
+    """
+
+    def _same_millisecond_two_turns(self):
+        with mock.patch("naiba.storage.store.time.time", return_value=1700000000.123):
+            return self._two_turns()
+
+    def _order(self) -> list[str]:
+        return [str(row["content"]) for row in self._rows()]
+
+    def test_snapshot_carries_the_original_rowid(self) -> None:
+        self._same_millisecond_two_turns()
+        middle = self._rows()[1]["id"]
+        removed = self.storage.delete_message(self.cid, middle, "single")["removed"]
+        self.assertIsInstance(removed[0].get("rowid"), int, "锚定顺序要靠原 rowid，快照必须带上它")
+
+    def test_restore_after_same_millisecond_turn_delete_keeps_order(self) -> None:
+        u1, _a1, _u2, _a2 = self._same_millisecond_two_turns()
+        before_order = self._order()
+        frozen = json.dumps(self._history(), ensure_ascii=False, sort_keys=True)
+        result = self.storage.delete_message(self.cid, u1, "turn")
+        self.storage.restore_messages(self.cid, result["removed"])
+        self.assertEqual(self._order(), before_order, "撤销后消息顺序必须与删除前逐条一致")
+        self.assertEqual(
+            json.dumps(self._history(), ensure_ascii=False, sort_keys=True), frozen,
+            "顺序一错，前缀缓存就是从那条起整体重写",
+        )
+
+    def test_restore_after_same_millisecond_session_start_keeps_context(self) -> None:
+        _u1, a1, _u2, _a2 = self._same_millisecond_two_turns()
+        self.storage.set_session_start(self.cid, a1, note="切一下")
+        before_order = self._order()
+        frozen = json.dumps(self._history(), ensure_ascii=False, sort_keys=True)
+        result = self.storage.delete_message(self.cid, a1, "single")
+        self.storage.restore_messages(self.cid, result["removed"])
+        self.assertEqual(self._order(), before_order)
+        self.assertEqual(
+            json.dumps(self._history(), ensure_ascii=False, sort_keys=True), frozen,
+            "分割线必须回到原位：锚定失效时它排到最后 ⇒ 上下文被整段清空（探针实测就是 []）",
+        )
+
+    def test_anchoring_shifts_only_the_millisecond_suffix(self) -> None:
+        u1, a1, u2, a2 = self._same_millisecond_two_turns()
+        before = {row["id"]: int(row["created_at"]) for row in self._rows()}
+        result = self.storage.delete_message(self.cid, a1, "single")
+        self.storage.restore_messages(self.cid, result["removed"])
+        after = {row["id"]: int(row["created_at"]) for row in self._rows()}
+        self.assertEqual(after[u2], before[u2] + 1, "腾位只把后继及其之后推后 1ms")
+        self.assertEqual(after[a2], before[a2] + 1)
+        self.assertEqual(after[u1], before[u1], "前缀消息的时间戳一个都不动（前缀缓存契约）")
+        self.assertEqual(after[a1], before[a1], "被撤销的那条时间戳原样还原")
+
+    def test_snapshot_without_rowid_degrades_to_append(self) -> None:
+        """老快照/手改快照没有原 rowid：退化为修复前行为（排到最后），但绝不抛异常。"""
+        _u1, a1, _u2, _a2 = self._same_millisecond_two_turns()
+        removed = self.storage.delete_message(self.cid, a1, "single")["removed"]
+        for item in removed:
+            item.pop("rowid", None)
+        self.storage.restore_messages(self.cid, removed)
+        self.assertEqual(self._order()[-1], "第一轮回答", "缺原 rowid 时按插入顺序排到末尾")
 
 
 class DeleteDialogSourceTests(unittest.TestCase):

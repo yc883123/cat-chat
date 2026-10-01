@@ -672,7 +672,7 @@ def _search_one_file(
         return "\n".join(rows), len(hits)
     # 带上下文：命中行距不超过 2*context+1 的相邻命中合为一块，避免重复打印同一上下文。
     # 同一文件只印一次表头，块内行同样只带行号（去重口径与无上下文分支一致）。
-    blocks: list[str] = [f"{path}:"]
+    bodies: list[str] = []
     shown = 0
     runs: list[list[int]] = []
     current: list[int] = []
@@ -689,12 +689,15 @@ def _search_one_file(
         # 行号是 1 基（`line_no + 1`）：本分支历史上印的是 enumerate 的 0 基下标，比无上下文
         # 分支与 read_file 少 1，模型照着它传 start_line 就会读错一行。
         body = [f"{line_no + 1}: {lines[line_no]}" for line_no in range(first, last + 1)]
-        blocks.append("\n".join(body))
+        bodies.append("\n".join(body))
         shown += len(run)
         if shown >= 100:
-            blocks.append(f"... 已显示 {shown} 处命中，剩余省略")
+            bodies[-1] += f"\n... 已显示 {shown} 处命中，剩余省略"
             break
-    return "\n\n".join(blocks), len(hits)
+    # 表头独占一行且**紧跟**首个上下文块（与无上下文分支同口径）：表头若也塞进
+    # `"\n\n".join`，路径与首个块之间就会多出一个空行——同一函数两条分支两种排版，
+    # 「哪几行属于哪个文件」反而更难读。
+    return f"{path}:\n" + "\n\n".join(bodies), len(hits)
 
 
 def _tool_search_files(ctx: ToolContext, args: dict[str, Any], active_skills: list[dict[str, Any]] | None = None) -> str:

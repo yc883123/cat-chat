@@ -260,12 +260,16 @@ class SearchSemanticsTests(unittest.TestCase):
         }, None)
         self.assertEqual(out.splitlines()[0], f"{target}:")
         self.assertEqual(out.count(str(target)), 1, "上下文块再多也只印一次表头")
+        # 表头必须**紧跟**首个上下文块：把表头也塞进 "\n\n".join 会在路径与首个块之间
+        # 多出一个空行，与无上下文分支的排版不一致（同一个函数两条分支两种口径）。
+        self.assertEqual(out.splitlines()[1], "2: b", f"表头后不得插空行：{out.splitlines()[:3]}")
         # 1 基行号：与无上下文分支、read_file 同口径（历史上这一支印的是 0 基下标，
         # 模型照它传 start_line 会读错一行）。
         self.assertIn("2: b", out)
         self.assertIn("3: MATCH", out)
         self.assertIn("7: MATCH", out)
         self.assertNotIn("0: ", out)
+        self.assertIn("\n\n", out, "相邻命中块之间仍然空行分隔（可读性靠它）")
 
     def test_multiline_regex_header_carries_hit_count(self) -> None:
         target = self.tmp / "multi.py"

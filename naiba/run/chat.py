@@ -142,6 +142,30 @@ def _search_sources(tool_runs: list[dict[str, Any]]) -> list[dict[str, str]]:
     return sources[:20]
 
 
+def _user_turn_index(messages: list[Any], message_id: str) -> int:
+    """本轮是这条会话的第几个**用户轮次**（1 起）——供图片批标签标注「第几轮装载」（§九.150）。
+
+    为什么不用"数所有 user 消息"：插话（运行中的第二输入通道）也是 ``role=user``，但它不构成
+    一轮；``metadata.interjection`` 是权威标记，比按文本前缀猜稳。另外**注入的图片批消息根本
+    不在库里**（只活在当轮请求与 trace 里），所以数"持久化消息"天然不会把它们算进来——这正是
+    这个函数放在 `run/chat.py`（拿得到快照里的会话消息）而不是 skills 层的原因。
+
+    找不到当前消息（分支/编辑/分割线裁剪等边界）时退回"数到最后一条为止"：会话消息里已含
+    本轮用户消息，所以结果仍是当前轮次。
+    """
+    index = 0
+    for item in messages or []:
+        if not isinstance(item, dict) or str(item.get("role") or "") != "user":
+            continue
+        metadata = item.get("metadata") or {}
+        if isinstance(metadata, dict) and metadata.get(MetadataKeys.INTERJECTION):
+            continue
+        index += 1
+        if message_id and str(item.get("id") or "") == message_id:
+            return index
+    return max(index, 1)
+
+
 def _summarize_trace_messages(messages: list[Any]) -> list[dict[str, Any]]:
     """trace 消息摘要化（first_turn 展示用）：图片 base64 data 替换为占位说明。
 
@@ -756,6 +780,11 @@ class ConversationRunMixin:
                 # 用户本轮是否明确要看图：枚举类工具的媒体声明 intent_gated 据此放行
                 # （判定用用户原文，不用路由增强文本——后者可能含历史助手措辞）。
                 "media_intent": _image_intent(message),
+                # 本轮是第几个用户轮次（1 起）：图片批注入标签用它标注「第 N 轮装载」，
+                # 让模型能区分「历史里装进来的旧图」与「当前成品图」（§九.150）。
+                "turn_index": _user_turn_index(
+                    snapshot.get("conversation_messages") or [], str(message.get("id") or "")
+                ),
                 # 工具实时进度出口（pwsh / run_skill_script 逐行 stdout+stderr）。
                 # 工具实现只依赖这一个 callable，不直接持有 manager——run 的内部结构
                 # 不向工具层泄漏，换实现（SSE/落库策略）时工具侧零改动。

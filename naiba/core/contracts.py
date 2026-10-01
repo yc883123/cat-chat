@@ -30,6 +30,10 @@ RUN_CONTEXT_KEYS: tuple[str, ...] = (
     # trace_system —— SkillAgent 带出的完整系统提示词原文（trace 只记增量、不含 system）；
     # context_reset —— reset_context 工具置位的「本轮重置请求」，收尾路径据此落 metadata.session_start。
     "trace_system", "context_reset",
+    # 本轮是这条会话的第几个用户轮次（1 起；由 `run/chat.py` 组装时算好）：供 skills/agent.py
+    # 给图片批注入标签标注「第 N 轮装载」——标签会被 trace 重放进后续每一轮，不带轮次就分不清
+    # 「历史旧图」与「当前成品」（§九.150）。
+    "turn_index",
 )
 
 # 运行期保持 dict 形态（零行为变化）；"带默认值/校验"经由工厂与校验函数落地，
@@ -63,6 +67,8 @@ def default_run_context() -> dict[str, Any]:
         "tool_defs": None,
         "workspace_dir": "",
         "media_intent": False,
+        # 用户轮次序号（1 起）：0 = 未提供（子代理/计划执行没有"轮"的概念）。
+        "turn_index": 0,
         # 事件出口（可调用）：工具实现把「实时进度」交给它，由宿主统一落库 + SSE 广播。
         # 工具层不直接持有 manager，避免把 run 内部结构泄漏到工具实现里。
         "event_sink": None,
@@ -185,6 +191,7 @@ class RunContext(TypedDict, total=False):
     # ---- 两枚曾逃逸的跨层键（§九.148：写侧在技能/工具层，读侧在 run/chat 收尾）----
     trace_system: str                # SkillAgent 带出的完整系统提示词原文（first_turn 落盘用）
     context_reset: dict[str, Any]    # reset_context 的本轮重置请求 → 消息 metadata.session_start
+    turn_index: int                  # 本轮是第几个用户轮次（1 起）→ 图片批标签「第N轮装载」
 
 
 class EventType(str, Enum):

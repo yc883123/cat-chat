@@ -55,6 +55,19 @@ try:
         "契约：RUN_CONTEXT_KEYS 含 pull_interjections / mark_interjections_consumed",
         {"pull_interjections", "mark_interjections_consumed"} <= set(RUN_CONTEXT_KEYS),
     )
+    # §九.150：图片批注入标签要标注「第 N 轮装载」，轮次靠这枚契约键跨层传进 skills 层。
+    check("契约：RUN_CONTEXT_KEYS 含 turn_index（图片批标签的装载轮次）", "turn_index" in set(RUN_CONTEXT_KEYS))
+    try:
+        from naiba.skills.agent import _image_batch_label
+
+        _probe_batch = {"batch_index": 1, "total_batches": 1, "loaded": 1, "shown": 1, "names": ["a.png"]}
+        check(
+            "运行期：图片批标签带「装载轮次 + 文件名」且不含旧叮嘱",
+            _image_batch_label(_probe_batch, 2) == "【图片批 1/1（历史·第2轮装载）：a.png】",
+            _image_batch_label(_probe_batch, 2),
+        )
+    except Exception as exc:  # noqa: BLE001 —— 打包缺函数必须报红，不能静默跳过
+        check("运行期：图片批标签带「装载轮次 + 文件名」且不含旧叮嘱", False, f"{type(exc).__name__}: {exc}")
     interjection_keys = {
         MetadataKeys.INTERJECTION,
         MetadataKeys.INTERJECTION_GUIDED,

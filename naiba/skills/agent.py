@@ -193,21 +193,61 @@ def _extract_step_image_batches(
         if not isinstance(images, list) or not images:
             continue
         parts: list[dict[str, Any]] = []
+        names: list[str] = []
         for img in images[:4]:
-            path = str((img or {}).get("path") or "")
+            # 原始结果里每张是 {name, path, thumb_path}；兼容个别实现只给字符串路径。
+            if isinstance(img, str):
+                path, raw_name = img, ""
+            else:
+                path = str((img or {}).get("path") or "")
+                raw_name = str((img or {}).get("name") or "")
             part = encode_image_for_model(path) if path else None
             if part:
                 parts.append(part)
+                # 文件名要进注入标签：标签是这批图的**身份**（见 _image_batch_label）。
+                names.append(raw_name or (Path(path).name if path else ""))
         batches.append({
             "loaded": len(images),
             "shown": len(parts),
             "parts": parts,
+            "names": [name for name in names if name],
         })
     total = len(batches)
     for index, batch in enumerate(batches, 1):
         batch["batch_index"] = index
         batch["total_batches"] = total
     return batches
+
+
+def _image_batch_label(batch: dict[str, Any], turn_index: int = 0) -> str:
+    """图片批注入消息的标签——它是这批图的**身份**，不是说明：`【图片批 1/1（历史·第2轮装载）：a.png】`。
+
+    为什么必须带身份（2026-10-01 用户实测，见 §九.150）：这条消息会随 trace 原样重放进后续
+    **每一轮**请求，而旧标签（`【图片批 1/1】`）三条字字相同、既不带轮次也不带文件名 ⇒ 模型
+    分不清「历史里装进来的旧图」和「当前成品图」：它在第 4 轮盯着第 1 轮那张旧图，却把上一轮
+    自己写的提示词复述成"已检查完毕、肢体正常"。带上**装载轮次 + 文件名**后，任何一条批次都能
+    被归位（旧图不可能冒充当前产物）。
+
+    ``turn_index`` 由 `run/chat.py` 组装 run_context 时算好（契约键）；子代理/计划执行没有"轮"
+    的概念，退化成 `（历史·装载）` 而不是编一个"第0轮"。
+    """
+    label = f"【图片批 {batch['batch_index']}/{batch['total_batches']}"
+    label += f"（历史·第{turn_index}轮装载）" if turn_index > 0 else "（历史·装载）"
+    names = [str(name) for name in (batch.get("names") or []) if str(name or "").strip()]
+    if names:
+        label += "：" + "、".join(names)
+    if batch["loaded"] > batch["shown"]:
+        # 截断必须说出来（静默截断=误导源，教训 24）：这是事实，不是多余说明。
+        label += f"；本次读取 {batch['loaded']} 张，已展示前 {batch['shown']} 张"
+    return label + "】"
+
+
+def _image_batch_message(batch: dict[str, Any], turn_index: int = 0) -> dict[str, Any]:
+    """图片批注入消息：只有标签文本 + 图片部件，不带任何额外的叮嘱/说明。"""
+    return {
+        "role": "user",
+        "content": [{"type": "text", "text": _image_batch_label(batch, turn_index)}, *batch["parts"]],
+    }
 
 
 def _model_visible_runs(step_runs: list[dict[str, Any]]) -> str:
@@ -1363,21 +1403,14 @@ class SkillAgent:
             # vision_analyze（装载形态）：把读取的图片作为 image content 分批注入，供多模态模型直接看图。
             # 每批（=一次 vision_analyze 调用）最多 4 张；超限在注入文本中显式标注，
             # 避免模型误以为"后续批次不存在"（静默截断=误导源，教训 24）。
+            # 标签必须带**身份**（装载轮次 + 文件名）——它会随 trace 重放进后续每一轮，不带身份
+            # 就会出现"把历史旧图当当前成品"（§九.150）。轮次由 run/chat 组装 run_context 时算好。
             step_batches = _extract_step_image_batches(step_runs, bool(profile.get("supports_images")))
+            batch_turn = int((run_context or {}).get("turn_index") or 0)
             for batch in step_batches:
                 if not batch["parts"]:
                     continue
-                label = f"【图片批 {batch['batch_index']}/{batch['total_batches']}"
-                if batch["loaded"] > batch["shown"]:
-                    label += f"：本次读取 {batch['loaded']} 张，已展示前 {batch['shown']} 张"
-                label += "】"
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": label + " 以上是工具刚读取的图片，请据此继续（点击即可查看大图）。"},
-                        *batch["parts"],
-                    ],
-                })
+                messages.append(_image_batch_message(batch, batch_turn))
 
             # 模型请求了上下文重置（reset_context 已校验交接文档并置位）：本轮到此为止，
             # 不再带着旧上下文继续干活；收尾路径把标记写到本条 AI 回复上，

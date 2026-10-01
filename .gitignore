@@ -213,6 +213,7 @@ dsh-vision-router/
 verify/*
 !verify/_check_tool_cards_compact.cjs
 !verify/_check_turn_rail.cjs
+!verify/_dedup_write_audit.py
 !verify/_release_check.py
 !verify/_serve_tmp.py
 # 教程截图流水线（2026-09-26 入库）：冻结版 exe + 隔离根 + 播种 + Playwright 驱动三件套。

@@ -65,7 +65,14 @@ _WRITE_SQL = re.compile(
     re.IGNORECASE,
 )
 # 自身不写 SQL、但被调用即代表写库的模块级 helper。
-_WRITE_HELPERS = {"_coalesce_reasoning_deltas"}
+# `_slim_terminal_event_payload_rows` / `_slim_terminal_snapshot_rows` 就是这种：它们执行
+# UPDATE，方法体里却没有写 SQL 字面量。漏登记会让「新写路径必须包重试」这条守门出现盲区
+# （实测：`slim_terminal_run` 一度完全不被扫描器看见）。
+_WRITE_HELPERS = {
+    "_coalesce_reasoning_deltas",
+    "_slim_terminal_event_payload_rows",
+    "_slim_terminal_snapshot_rows",
+}
 
 
 def _literal_texts(node: ast.AST) -> list[str]:
@@ -338,6 +345,7 @@ class SqliteWriteRetryTests(unittest.TestCase):
             "update_plan",
             "apply_pending_migrations",
             "compress_run_events",
+            "slim_terminal_run",
             "_initialize",
         ):
             with self.subTest(name=name):
@@ -415,6 +423,13 @@ class SqliteWriteRetryTests(unittest.TestCase):
         fake = self._flaky(2)
         self.assertEqual(self.storage.compress_run_events(self.run_id), 0)
         self.assertEqual(fake.calls, 3, "两次瞬时故障 + 一次成功合流")
+
+    def test_slim_terminal_run_retries_transient_readonly(self) -> None:
+        """运行期收尾的瘦身同样必须包重试：它挂在 finally 里，不能因瞬时故障丢整段收缩。"""
+        fake = self._flaky(2)
+        result = self.storage.slim_terminal_run(self.run_id)
+        self.assertEqual(result, {"events": 0, "snapshots": 0})
+        self.assertEqual(fake.calls, 3, "两次瞬时故障 + 一次成功瘦身")
 
     def test_business_error_in_newly_wrapped_path_is_not_retried(self) -> None:
         """新包的写路径同样只重试瞬时故障：业务错误一次都不许重试。"""

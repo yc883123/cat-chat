@@ -206,6 +206,53 @@ class BudgetTests(unittest.TestCase):
         set_image_encode_cache_limit_mb("不是数字")
         self.assertEqual(image_encode_cache_stats()["limit_bytes"], IMAGE_ENCODE_CACHE_MB_DEFAULT * 1024 * 1024)
 
+    def test_zero_releases_cache_and_reopening_does_not_reuse_old_entries(self) -> None:
+        """0 = 关闭记忆：运行时设为 0 必须**释放**缓存（entries/bytes 归零）。
+
+        旧实现 `set_limit_mb(0)` 仍走 `_evict_locked(keep_newest=True)`，会保留最新一条，
+        于是 entries/bytes 不为 0；重新开启时还会复用关闭前的旧值——「关了还在」。
+        """
+        cache = history_mod._ImageEncodeCache()
+        cache.set_limit_mb(8)
+        payload = {"type": "image", "media_type": "image/jpeg", "data": "x" * 1000, "name": "a"}
+        cache.put(("k1", 1, 1), payload)
+        cache.put(("k2", 1, 1), payload)
+        self.assertEqual(cache.stats()["entries"], 2)
+        self.assertGreater(cache.stats()["bytes"], 0)
+
+        cache.set_limit_mb(0)  # 关闭
+        stats = cache.stats()
+        self.assertFalse(cache.enabled)
+        self.assertEqual(stats["entries"], 0, "关闭必须释放全部条目")
+        self.assertEqual(stats["bytes"], 0, "关闭必须把字节归零")
+
+        cache.set_limit_mb(8)  # 重新开启
+        self.assertTrue(cache.enabled)
+        self.assertEqual(cache.stats()["entries"], 0, "重新开启时不该冒出关闭前的旧条目")
+        self.assertIsNone(cache.get(("k1", 1, 1)), "旧条目已释放 ⇒ 必然未命中")
+        self.assertIsNone(cache.get(("k2", 1, 1)), "旧条目已释放 ⇒ 必然未命中")
+
+    def test_reopening_after_zero_reencodes_and_keeps_bytes_identical(self) -> None:
+        """正值 → 0 → 正值：重新开启后要重新编码，且产出字节与首次一致（不影响发给模型的字节）。"""
+        path = self.dir / "reopen.png"
+        _png(path, (12, 34, 56), size=64)
+        set_image_encode_cache_limit_mb(8)
+        with _EncodedCallCounter() as first:
+            part_a = encode_image_for_model(str(path))
+        self.assertEqual(first.count, 1)
+        with _EncodedCallCounter() as second:
+            part_b = encode_image_for_model(str(path))
+        self.assertEqual(second.count, 0, "开启状态下第二次应命中缓存")
+        self.assertEqual(part_a, part_b)
+
+        set_image_encode_cache_limit_mb(0)  # 关闭并释放
+        self.assertEqual(image_encode_cache_stats()["entries"], 0)
+        set_image_encode_cache_limit_mb(8)  # 重新开启
+        with _EncodedCallCounter() as third:
+            part_c = encode_image_for_model(str(path))
+        self.assertEqual(third.count, 1, "重新开启后旧条目已释放，必须重新编码")
+        self.assertEqual(part_c, part_a, "开关记忆不得改变发给模型的字节")
+
 
 class ByteStabilityTests(unittest.TestCase):
     """开/关记忆产出的历史必须**逐字节相同**——这是"只影响速度"的书面承诺。"""

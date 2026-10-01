@@ -18,8 +18,10 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -203,6 +205,66 @@ class JobMediaWriteBackTests(unittest.TestCase):
         self.assertIn("session_start", metadata, "并发落下的会话边界不得被产物写回抹掉")
         self.assertEqual(len(metadata["tool_runs"][0]["media"]), 1, "产物仍然要写进去")
         self.assertEqual(len(metadata["attachments"]), 1, "消息级汇总也要更新")
+
+    def test_concurrent_job_write_backs_keep_both_jobs_media(self) -> None:
+        """两个 Job 并发写回同一条消息：读→合并→写必须在同一临界区。
+
+        键级合并只隔离**不同键**；同一条消息的两次写回都改 `tool_runs`/`attachments`，
+        后写者若拿着"读到的旧数组"覆盖先写者刚落的媒体，先写者的产物就没了（同键陈旧
+        数组覆盖）。这里让两个 Job 各指向同一条消息的**一次工具调用**，两条线程同时
+        写回，断言两份媒体都留下。
+        """
+        message_id = str(self.message["id"])
+        job_a = self._create_job(record_job_id_in_message=False)
+        second = self._make_png("second.png")
+        job_b = self._create_job(
+            record_job_id_in_message=False,
+            result={"completed_shots": [{"index": 0, "files": [str(second)]}]},
+        )
+        # 两次工具调用各自 result 带自己的 job_id（真实链路里就是两次 comfyui_batch wait=false）
+        metadata = dict(self.message["metadata"])
+        metadata["tool_runs"] = [
+            {"tool": "comfyui_batch", "success": True, "result": json.dumps({"job_id": job_a})},
+            {"tool": "comfyui_batch", "success": True, "result": json.dumps({"job_id": job_b})},
+        ]
+        metadata["attachments"] = []
+        self.storage.update_message_metadata(self.conversation_id, message_id, metadata)
+
+        real_attach = JobMediaWriter._attach
+
+        def slow_attach(writer_self, meta, job_id_arg, media, truncated):
+            added = real_attach(writer_self, meta, job_id_arg, media, truncated)
+            time.sleep(0.4)  # 拉大"读后未写"的窗口：没有串行化时两个写回必然都基于旧快照
+            return added
+
+        sink: dict[str, Any] = {}
+
+        def run(job_id: str, key: str) -> None:
+            try:
+                sink[key] = self.writer.write_back(self.storage.get_background_task(job_id))
+            except BaseException as exc:  # noqa: BLE001 - 线程里不能吞掉异常，要回传给主线程断言
+                sink[key] = exc
+
+        with mock.patch.object(JobMediaWriter, "_attach", slow_attach):
+            t1 = threading.Thread(target=run, args=(job_a, "a"))
+            t2 = threading.Thread(target=run, args=(job_b, "b"))
+            t1.start()
+            time.sleep(0.08)  # 让 A 先读到旧快照，再放 B 进来
+            t2.start()
+            t1.join(20)
+            t2.join(20)
+        self.assertFalse(t1.is_alive(), "写回线程未在超时内结束")
+        self.assertFalse(t2.is_alive(), "写回线程未在超时内结束")
+        for key in ("a", "b"):
+            value = sink.get(key)
+            self.assertIsInstance(value, dict, f"写回 {key} 应成功：{value!r}")
+            self.assertEqual(value["added"], 1)
+
+        metadata = self.storage.get_conversation(self.conversation_id)["messages"][-1]["metadata"]
+        runs = metadata["tool_runs"]
+        self.assertEqual(len(runs[0].get("media") or []), 1, "Job A 的产物被并发写回覆盖了")
+        self.assertEqual(len(runs[1].get("media") or []), 1, "Job B 的产物被并发写回覆盖了")
+        self.assertEqual(len(metadata["attachments"]), 2, "消息级汇总应同时含两份产物")
 
     def test_write_back_clears_a_stale_truncated_marker(self) -> None:
         """产物不再截断时要清掉旧的 `attachments_truncated`（改走 json_remove 的行为回归）。

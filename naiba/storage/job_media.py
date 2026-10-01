@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from typing import Any
 
 from naiba.core.attachments import union_run_media
@@ -45,6 +46,10 @@ class JobMediaWriter:
         self._config = config
         self._paths = paths
         self._collector = collector or MediaCollector(config, paths)
+        # 读→去重合并→写回必须**串行化**：两个 Job 同时终态时，后写者若拿着"读到的旧数组"
+        # 覆盖先写者刚落的媒体，就是同键陈旧数组覆盖——键级合并只隔离不同键，挡不住同键。
+        # Job 在**同进程**后台线程里跑，进程内一把锁即可（写回低频，全局串行无实际代价）。
+        self._write_lock = threading.Lock()
 
     def write_back(self, job: dict[str, Any]) -> dict[str, Any] | None:
         """写回一次；返回 ``{conversation_id, message_id, added}``，无需写回时返回 None。"""
@@ -66,47 +71,50 @@ class JobMediaWriter:
         conversation_id = str(parent.get("conversation_id") or (job or {}).get("conversation_id") or "")
         if not conversation_id:
             return None
-        message = self._find_assistant_message(conversation_id, parent_id, parent)
-        if message is None:
-            logger.info("Job 产物无处挂载（未找到对应助手消息）：job=%s run=%s", (job or {}).get("id"), parent_id)
-            return None
-        collected = self._collector.collect(
-            {
-                "tool": f"job:{kind}",
-                "result": json.dumps(result, ensure_ascii=False),
-                "success": True,
-            },
-            declaration,
-        )
-        media = collected.get("media") or []
-        if not media:
-            return None
-        metadata = dict(message.get("metadata") or {})
-        added = self._attach(metadata, str((job or {}).get("id") or ""), media, collected.get("truncated"))
-        if not added:
-            return None
-        message_id = str(message.get("id") or "")
-        # **只 patch 自己拥有的那几个键**，不整块写回。同一条助手消息上还有别的写入方
-        # （用户可以给 AI 回复点「新会话」→ `set_session_start` 就写在这一行），而 Job
-        # 可能在几十分钟后才写回产物：整块写回会拿着"点之前"的旧快照把 `session_start`
-        # 抹掉 ⇒ `build_model_history` 清空整段上下文（用户视角＝模型突然失忆）。
-        # 只带上"本来就有"的键，避免凭空给消息加空数组。
-        patch: dict[str, Any] = {}
-        for key in (MetadataKeys.TOOL_RUNS, "activity", MetadataKeys.ATTACHMENTS):
-            if key in metadata:
-                patch[key] = metadata[key]
-        # 产物不再截断时要清掉旧标记（`json_remove`；删不存在的键是静默无操作）。
-        remove: tuple[str, ...] = ()
-        if metadata.get(MetadataKeys.ATTACHMENTS_TRUNCATED):
-            patch[MetadataKeys.ATTACHMENTS_TRUNCATED] = metadata[MetadataKeys.ATTACHMENTS_TRUNCATED]
-        else:
-            remove = (MetadataKeys.ATTACHMENTS_TRUNCATED,)
-        if not self._storage.merge_message_metadata(
-            conversation_id, message_id, patch, remove=remove
-        ):
-            logger.warning("Job 产物写回失败（消息已不存在）：message=%s", message_id)
-            return None
-        return {"conversation_id": conversation_id, "message_id": message_id, "added": added}
+        job_id = str((job or {}).get("id") or "")
+        with self._write_lock:
+            # 读也在锁内：并发的第二个写回必须读到第一个已提交的结果，否则会拿旧数组覆盖。
+            message = self._find_assistant_message(conversation_id, parent_id, parent)
+            if message is None:
+                logger.info("Job 产物无处挂载（未找到对应助手消息）：job=%s run=%s", job_id, parent_id)
+                return None
+            collected = self._collector.collect(
+                {
+                    "tool": f"job:{kind}",
+                    "result": json.dumps(result, ensure_ascii=False),
+                    "success": True,
+                },
+                declaration,
+            )
+            media = collected.get("media") or []
+            if not media:
+                return None
+            metadata = dict(message.get("metadata") or {})
+            added = self._attach(metadata, job_id, media, collected.get("truncated"))
+            if not added:
+                return None
+            message_id = str(message.get("id") or "")
+            # **只 patch 自己拥有的那几个键**，不整块写回。同一条助手消息上还有别的写入方
+            # （用户可以给 AI 回复点「新会话」→ `set_session_start` 就写在这一行），而 Job
+            # 可能在几十分钟后才写回产物：整块写回会拿着"点之前"的旧快照把 `session_start`
+            # 抹掉 ⇒ `build_model_history` 清空整段上下文（用户视角＝模型突然失忆）。
+            # 只带上"本来就有"的键，避免凭空给消息加空数组。
+            patch: dict[str, Any] = {}
+            for key in (MetadataKeys.TOOL_RUNS, "activity", MetadataKeys.ATTACHMENTS):
+                if key in metadata:
+                    patch[key] = metadata[key]
+            # 产物不再截断时要清掉旧标记（`json_remove`；删不存在的键是静默无操作）。
+            remove: tuple[str, ...] = ()
+            if metadata.get(MetadataKeys.ATTACHMENTS_TRUNCATED):
+                patch[MetadataKeys.ATTACHMENTS_TRUNCATED] = metadata[MetadataKeys.ATTACHMENTS_TRUNCATED]
+            else:
+                remove = (MetadataKeys.ATTACHMENTS_TRUNCATED,)
+            if not self._storage.merge_message_metadata(
+                conversation_id, message_id, patch, remove=remove
+            ):
+                logger.warning("Job 产物写回失败（消息已不存在）：message=%s", message_id)
+                return None
+            return {"conversation_id": conversation_id, "message_id": message_id, "added": added}
 
     # ---- 内部 ----
     def _find_assistant_message(

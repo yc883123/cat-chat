@@ -70,6 +70,13 @@ class _ImageEncodeCache:
         value = max(0, min(IMAGE_ENCODE_CACHE_MB_MAX, value))
         with self._lock:
             self._limit_bytes = value * 1024 * 1024
+            if value == 0:
+                # 0 = 关闭记忆：**释放全部条目**（`entries`/`bytes` 归零）。否则 `_evict_locked`
+                # 的 `keep_newest` 会保留最新一条，`stats()` 里 entries/bytes 不为 0，重新开启时
+                # 还会复用关闭前的旧值——与"关闭"的语义不符。
+                self._items.clear()
+                self._bytes = 0
+                return
             self._evict_locked(keep_newest=True)
 
     @property

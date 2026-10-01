@@ -187,6 +187,19 @@ def hash_remote_exe(url: str, attempts: int = 4) -> str:
     raise NetworkError(str(last))
 
 
+def same_commit(left: str | None, right: str | None) -> bool:
+    """两个 sha 是否指同一次提交（调用方可能只给短 sha，另一侧是全 sha）。
+
+    2026-10-01 实录：`release_watch.py <短 sha> <tag>` 走静态口时拿 manifest / tag 的全 40 位
+    sha 与命令行传入的 7 位短 sha 做 == 比较 ⇒ 明明对得上却报「不是本次提交」，把结论误判成
+    「静态核验未通过」。统一按「一方是另一方的前缀」判等（任一为空则视为不比较）。
+    """
+    if not left or not right:
+        return False
+    a, b = str(left).lower(), str(right).lower()
+    return a.startswith(b) or b.startswith(a)
+
+
 def check_manifest(manifest: dict, commit: str = "") -> bool:
     """manifest 与本次提交是否自洽（两条核验路径共用）。"""
     ok = True
@@ -201,8 +214,8 @@ def check_manifest(manifest: dict, commit: str = "") -> bool:
         print(f"  !! 清单 repository 必须恒为 {MANIFEST_REPOSITORY!r}（协议常量），"
               f"实际 {manifest.get('repository')!r}")
         ok = False
-    if commit and manifest.get("commit") != commit:
-        print("  !! manifest.commit 不是本次提交"); ok = False
+    if commit and not same_commit(manifest.get("commit"), commit):
+        print(f"  !! manifest.commit={manifest.get('commit')} 不是本次提交 {commit}"); ok = False
     if not isinstance(notes, list) or not notes:
         print("  !! release_notes 缺失或为空"); ok = False
     elif not isinstance(notes[0], str) or not notes[0].startswith(BRAND_PREFIXES):
@@ -290,8 +303,8 @@ def check_assets_static(tag: str, commit: str) -> bool:
     if tag in tags:
         tag_sha = tags[tag]
         print(f"  OK  tag {tag} → {tag_sha[:12]}")
-        if commit and tag_sha != commit:
-            print(f"  !! tag 指向 {tag_sha[:12]}，不是本次提交 {commit[:12]}"); ok = False
+        if commit and not same_commit(tag_sha, commit):
+            print(f"  !! tag 指向 {tag_sha[:12]}，不是本次提交 {str(commit)[:12]}"); ok = False
     else:
         print(f"  !! 远端还没有 tag {tag}（最近 5 个：{', '.join(sorted(tags)[-5:])}）"); ok = False
 

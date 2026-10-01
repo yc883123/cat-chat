@@ -83,7 +83,23 @@ class MigrationV14Tests(unittest.TestCase):
             # interrupted 始终保留（恢复重建需要）
             storage.update_background_task(interrupted_run["id"], status="interrupted", finished=True)
 
-            # 造大量推理 delta + done/cancelled 全量消息事件
+            # 造大量推理 delta + done/cancelled 全量消息事件。
+            # 注意：`create_chat_run` 已不再把整段会话固化进快照（新契约），而 v14 迁移的
+            # "终态收缩 conversation_messages"是**存量数据**保护——所以这里必须显式把存量
+            # 形态写回去，否则第 3 段断言会退化成"测了个本来就没有的键"。
+            with closing(sqlite3.connect(Path(tmp) / "chat.db")) as db:
+                for target in (done_run["id"], interrupted_run["id"]):
+                    snapshot = json.loads(db.execute(
+                        "SELECT snapshot FROM background_tasks WHERE id=?", (target,)
+                    ).fetchone()[0] or "{}")
+                    snapshot["conversation_messages"] = [
+                        {"id": "m1", "role": "user", "content": "存量历史", "metadata": {}},
+                    ]
+                    db.execute(
+                        "UPDATE background_tasks SET snapshot=? WHERE id=?",
+                        (json.dumps(snapshot, ensure_ascii=False), target),
+                    )
+                db.commit()
             with closing(sqlite3.connect(Path(tmp) / "chat.db")) as db:
                 _insert_delta_events(db, interrupted_run["id"], 5000, 20)  # 100000 字符
                 for run_id in (done_run["id"], cancelled_run["id"]):

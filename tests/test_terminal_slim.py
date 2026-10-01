@@ -43,18 +43,26 @@ class SlimTerminalRunTests(unittest.TestCase):
         self.message = self.storage.add_message(
             str(self.conversation["id"]), "assistant", "答复", {"trace": TRACE}
         )
-        # 直接把状态改成终态（**不走 update_background_task**）：它在 finished 时会自己
-        # 调 `_slim_run_snapshot`，这里要构造的正是"存量库仍带 conversation_messages 的终态行"
-        # 这一被守卫的场景。
+        # `create_chat_run` 已不再固化整段会话（新契约），所以这里**显式构造存量形态**：
+        # 本用例守护的是"终态把存量副本收缩掉"这条保护（历史上它挡过 81MB 的 O(N²) 累积），
+        # 不构造就会变成空跑。状态也直接改库：`update_background_task(finished)` 自己会
+        # 顺手收缩，那样就测不到 `slim_terminal_run` 了。
         with closing(sqlite3.connect(self.db_path)) as db:
+            snapshot = json.loads(db.execute(
+                "SELECT snapshot FROM background_tasks WHERE id = ?", (self.run_id,)
+            ).fetchone()[0] or "{}")
+            snapshot["conversation_messages"] = [
+                {"id": "m0", "role": "user", "content": "历史提问", "metadata": {}},
+            ]
             db.execute(
-                "UPDATE background_tasks SET status = 'completed', finished_at = ? WHERE id = ?",
-                (int(time.time() * 1000), self.run_id),
+                "UPDATE background_tasks SET snapshot = ?, status = 'completed', finished_at = ? "
+                "WHERE id = ?",
+                (json.dumps(snapshot, ensure_ascii=False), int(time.time() * 1000), self.run_id),
             )
             db.commit()
         self.assertIn(
             "conversation_messages", self._snapshot(),
-            "前提：create_chat_run 确实把整段会话固化进了快照（这正是每轮 2× 历史写入的来源）",
+            "前提：已构造出带整段会话的存量快照（正是本用例要收缩的对象）",
         )
 
     def tearDown(self) -> None:
@@ -139,6 +147,18 @@ class SlimTerminalRunTests(unittest.TestCase):
             "interrupted 运行还要靠快照恢复，不得收缩",
         )
 
+    def test_new_run_snapshot_has_no_conversation_copy(self) -> None:
+        """新契约：`create_chat_run` 不再固化整段会话（每轮省掉 2× 历史的写入）。"""
+        agent = {"id": "general", "name": "通用 Agent"}
+        fresh, _history = self.storage.create_chat_run(
+            str(self.conversation["id"]), "另一轮提问", [], agent,
+            {"model_key": "online:demo"}, "craft",
+        )
+        snapshot = self.storage.get_run_snapshot(str(fresh["id"])) or {}
+        self.assertNotIn("conversation_messages", snapshot)
+        expected = len(self.storage.get_conversation(str(self.conversation["id"]))["messages"])
+        self.assertEqual(snapshot.get("history_size"), expected, "只留体量标记")
+
     # ---- 3. 幂等 ----
 
     def test_slim_is_idempotent(self) -> None:
@@ -162,6 +182,17 @@ class SlimTerminalRunTests(unittest.TestCase):
             "type": "done", "message": {"id": "x", "role": "assistant", "content": "y",
                                         "metadata": {"trace": TRACE}},
         })
+        # 给"别的 run"也构造存量快照：这样"只动自己的 run"这条才真的可判。
+        with closing(sqlite3.connect(self.db_path)) as db:
+            snapshot = json.loads(db.execute(
+                "SELECT snapshot FROM background_tasks WHERE id = ?", (other_id,)
+            ).fetchone()[0] or "{}")
+            snapshot["conversation_messages"] = [{"id": "z", "role": "user", "content": "别的"}]
+            db.execute(
+                "UPDATE background_tasks SET snapshot = ? WHERE id = ?",
+                (json.dumps(snapshot, ensure_ascii=False), other_id),
+            )
+            db.commit()
         self._append_done()
         self.storage.slim_terminal_run(self.run_id)
         with closing(sqlite3.connect(self.db_path)) as db:

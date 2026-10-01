@@ -175,9 +175,49 @@ def _turn_index_for_run(snapshot: dict[str, Any], run: dict[str, Any]) -> int:
     用户实测报障；`_user_turn_index` 的单测全绿也抓不到——纯函数单测不覆盖接线（§九.151）。
     """
     return _user_turn_index(
-        snapshot.get("conversation_messages") or [],
+        run.get("conversation_messages") or snapshot.get("conversation_messages") or [],
         str(run.get("input_message_id") or ""),
     )
+
+
+def _frozen_history_for_run(
+    run: dict[str, Any], conversation: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    """本轮要喂给模型的**冻结历史**（不再从快照里读整段副本）。
+
+    冻结语义靠两条既有事实表达，而不是靠复制一份消息到 `snapshot`：
+
+    1. `background_tasks.input_message_id` 是本轮那条用户消息的 id（与建 run 同一事务写入）；
+    2. 消息顺序契约是 `(created_at, rowid)`，因此"它（含）之前的消息"在后续被并发写入
+       （插话/新消息/编辑）之后仍是**同一个前缀**。
+
+    所以取"提交那一刻的历史"= 取活会话里到 `input_message_id` 为止的前缀。
+    ``snapshot["conversation_messages"]`` 只在**旧数据**（本次改动之前建的 run）里存在，
+    读到就直接用，保证升级后仍能重放中断/在跑的旧 run。
+
+    为什么值得这么改：旧实现每轮把整段会话复制进 `background_tasks.snapshot`（终态再整块
+    删掉），实测一轮 6 条 300KB 的历史就要 2×1.8MB 物理写入，且随会话变长线性增长——
+    这是"运行期几百 MB 磁盘写入、库却不大"的最大单一来源。
+    """
+    legacy = run.get("conversation_messages")
+    if isinstance(legacy, list) and legacy:
+        return legacy
+    messages = list((conversation or {}).get("messages") or [])
+    boundary = str(run.get("input_message_id") or "")
+    if not boundary:
+        return messages
+    frozen: list[dict[str, Any]] = []
+    for message in messages:
+        frozen.append(message)
+        if str((message or {}).get("id") or "") == boundary:
+            return frozen
+    # 边界不在库里（消息被删/历史被截断）：退回全量并留证——宁可多回放几条，
+    # 也不能静默丢掉整段上下文（那会让模型"突然失忆"，是用户可感知的故障）。
+    logger.warning(
+        "冻结历史找不到 input_message_id（消息可能已被删除），回退为全量会话：run=%s boundary=%s",
+        str(run.get("id") or ""), boundary,
+    )
+    return messages
 
 
 def _merge_usage_summary(
@@ -448,7 +488,9 @@ class ConversationRunMixin:
                 "plan_id": plan_id,
                 "interaction_mode": "plan",
                 "agent": agent,
-                "conversation_messages": conversation.get("messages") or [],
+                # 不再固化整段会话（同 `create_chat_run`）：计划 run 没有 input_message_id
+                # 边界，冻结历史在 `_run_plan` 里取"启动那一刻的活会话"。
+                "history_size": len(conversation.get("messages") or []),
                 "provider_id": str(conversation.get("provider_id") or ""),
                 "model_key": model_key,
                 "model_name": model_name,
@@ -501,6 +543,10 @@ class ConversationRunMixin:
             return
         run_executor = self.executor_for_run(run_id, snapshot)
         conversation_id = str(run["conversation_id"])
+        # 冻结历史（不再从快照读整段副本）：取活会话里到 input_message_id 为止的前缀。
+        # 这一次读是**每轮一次**，而旧实现是"提交时写一份进快照 + 终态整块删一份"。
+        frozen_conversation = self.app.storage.get_conversation(conversation_id) or {}
+        run["conversation_messages"] = _frozen_history_for_run(run, frozen_conversation)
         mode = str(snapshot.get("interaction_mode") or run.get("interaction_mode") or "craft")
         plan_id = str(snapshot.get("plan_id") or run.get("plan_id") or "")
         sink = _RunEventSink(self, run_id, cancel_event)
@@ -593,6 +639,7 @@ class ConversationRunMixin:
                 )
             reasoning_effort = profile["reasoning_effort"]
             history = build_model_history(
+                run.get("conversation_messages") or
                 snapshot.get("conversation_messages") or [], event,
                 pdf_tools=pdf_tools_enabled, video_tools=video_tools_enabled,
                 # 本地大脑才回放「图片已降级」旗标（降级不可逆 → 历史字节单调稳定）。
@@ -1075,6 +1122,12 @@ class ConversationRunMixin:
             )
             self.emit(run_id, {"type": "status", "message": "计划开始执行"})
             snapshot = self.app.storage.get_run_snapshot(run_id) or {}
+            # 计划 run 的冻结历史：快照里没有副本（已不再固化），这里取启动那一刻的活会话。
+            # `_frozen_history_for_run` 会优先用快照里的旧副本（升级前建的 run）。
+            plan_conversation = self.app.storage.get_conversation(
+                str(run.get("conversation_id") or "")
+            ) or {}
+            snapshot["conversation_messages"] = _frozen_history_for_run(run, plan_conversation)
             run_executor = self.executor_for_run(run_id, snapshot)
             plan = self.app.plans.run_execution(
                 plan_id, cancel_event, sink, snapshot, run_executor=run_executor

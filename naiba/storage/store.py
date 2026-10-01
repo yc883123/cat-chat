@@ -3325,8 +3325,16 @@ class ChatStorage:
                 (conversation_id,),
             ).fetchall()
             history = [self._message_dict(db, row) for row in rows]
+            # ⚠️ `history` 只作为返回值供测试/调用方核对（生产调用方 `run/chat.py` 用 `_` 丢弃）。
+            # 它是一次**整段会话全量读**（含每条 metadata），而运行期 `_run_chat` 又会读一次
+            # 会话——两读同一份数据。要省掉需要改返回签名（多处调用点），本次刻意不动。
+            # **不再把整段会话固化进快照**：那份副本每轮要写一遍、终态再整块删一遍，实测
+            # 一轮 6 条历史就是 2×1.8MB 物理写入，随会话变长线性增长。运行期要的"冻结那一刻
+            # 的历史"改由 `input_message_id`（本轮用户消息 id，就在下面 INSERT 的同一事务里
+            # 填入）当**游标**表达：它（含）之前的消息前缀就是冻结历史——顺序契约
+            # (created_at, rowid) 保证并发写入只会追加在其后。`history_size` 仅用于核对。
             frozen = dict(snapshot)
-            frozen["conversation_messages"] = history
+            frozen["history_size"] = len(history)
             db.execute(
                 "INSERT INTO background_tasks("
                 "id, conversation_id, kind, interaction_mode, input_message_id, plan_id, "

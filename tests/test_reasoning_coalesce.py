@@ -71,20 +71,52 @@ class ReasoningStreamTests(unittest.TestCase):
 
 
 class RunSnapshotSlimTests(unittest.TestCase):
-    def _make_run(self, storage, conversation_id, agent):
-        run, _history = storage.create_chat_run(
+    """快照收缩：**新** run 不再固化整段会话；**旧** run（存量副本）终态仍会被收缩。
+
+    2026-10 起 `create_chat_run` 不再把 `conversation_messages` 写进快照（冻结语义改由
+    `input_message_id` 游标表达，见 `run/chat.py::_frozen_history_for_run`），因此这里
+    必须**显式构造存量形态**——否则"终态收缩"这条保护会被悄悄测不到（历史上它挡过
+    81MB 的 O(N²) 累积）。
+    """
+
+    def _make_run(self, storage, conversation_id, agent, *, legacy_history: bool = False):
+        run, history = storage.create_chat_run(
             conversation_id, "测试消息", [], agent, {"model_key": "online:demo"}, "craft"
         )
+        if legacy_history:
+            # 存量形态：老版本把整段会话固化进了快照。直接改库模拟。
+            snapshot = storage.get_run_snapshot(run["id"]) or {}
+            snapshot["conversation_messages"] = history
+            with storage._connect() as db:  # noqa: SLF001 - 构造存量数据
+                db.execute(
+                    "UPDATE background_tasks SET snapshot = ? WHERE id = ?",
+                    (json.dumps(snapshot, ensure_ascii=False), run["id"]),
+                )
         return run
 
-    def test_terminal_status_slims_snapshot(self):
+    def test_new_run_snapshot_has_no_conversation_copy(self):
+        """新契约：快照里没有整段会话副本，只留体量标记与游标。"""
         with tempfile.TemporaryDirectory() as tmp:
             storage = ChatStorage(Path(tmp) / "chat.db")
             convo = storage.create_conversation()
             agent = {"id": "general", "name": "通用 Agent"}
             run = self._make_run(storage, convo["id"], agent)
+            snapshot = storage.get_run_snapshot(run["id"])
+            self.assertNotIn(
+                "conversation_messages", snapshot,
+                "每轮固化整段会话是「运行期几百 MB 写入、库却不大」的最大来源，不得回归",
+            )
+            self.assertEqual(snapshot.get("history_size"), 1, "只留体量标记")
+            self.assertEqual(snapshot.get("model_key"), "online:demo")
+
+    def test_terminal_status_slims_legacy_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage = ChatStorage(Path(tmp) / "chat.db")
+            convo = storage.create_conversation()
+            agent = {"id": "general", "name": "通用 Agent"}
+            run = self._make_run(storage, convo["id"], agent, legacy_history=True)
             before = storage.get_run_snapshot(run["id"])
-            self.assertIn("conversation_messages", before)
+            self.assertIn("conversation_messages", before, "前提：存量副本已构造出来")
             storage.update_background_task(run["id"], status="completed", finished=True)
             after = storage.get_run_snapshot(run["id"])
             self.assertNotIn("conversation_messages", after)
@@ -96,21 +128,24 @@ class RunSnapshotSlimTests(unittest.TestCase):
             convo = storage.create_conversation()
             agent = {"id": "general", "name": "通用 Agent"}
             for status in ("failed", "cancelled"):
-                run = self._make_run(storage, convo["id"], agent)
+                run = self._make_run(storage, convo["id"], agent, legacy_history=True)
                 storage.update_background_task(run["id"], status=status, finished=True)
                 self.assertNotIn(
                     "conversation_messages", storage.get_run_snapshot(run["id"]),
                     f"{status} 后 snapshot 应收缩",
                 )
 
-    def test_interrupted_keeps_snapshot(self):
+    def test_interrupted_keeps_legacy_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
             storage = ChatStorage(Path(tmp) / "chat.db")
             convo = storage.create_conversation()
             agent = {"id": "general", "name": "通用 Agent"}
-            run = self._make_run(storage, convo["id"], agent)
+            run = self._make_run(storage, convo["id"], agent, legacy_history=True)
             storage.update_background_task(run["id"], status="interrupted", finished=True)
-            self.assertIn("conversation_messages", storage.get_run_snapshot(run["id"]))
+            self.assertIn(
+                "conversation_messages", storage.get_run_snapshot(run["id"]),
+                "interrupted 是恢复期读源，存量副本不得被收缩",
+            )
 
 
 class CompressRunEventsTests(unittest.TestCase):

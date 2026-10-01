@@ -1,19 +1,20 @@
 # -*- coding: utf-8 -*-
 """B 步前置冒烟：**运行中并发改会话**时，本轮必须仍按"冻结那一刻的历史"走。
 
-为什么需要它：`create_chat_run` 会把整段会话固化进 `snapshot.conversation_messages`，
-`_run_chat` 的 `build_model_history` 与 `_turn_index_for_run` 都读这份冻结快照。这条
-"快照自足"契约是每轮 2× 历史写入的来源；要改掉它（B 步）就必须先把契约本身钉住，
-否则"少写一半"会变成"运行中的会话被并发写入悄悄改掉上下文"。
+为什么需要它：`create_chat_run` 提交时定下 `input_message_id`（本轮用户消息 id），运行期
+`_frozen_history_for_run` 就以它为**游标**取"到它为止的消息前缀"当作冻结历史，`build_model_history`
+与 `_turn_index_for_run` 都吃这份前缀。这条"冻结前缀"契约就是"不再把整段会话固化进快照"
+（每轮省掉 2× 历史的写入）的承重结构——先把它钉住，才敢改掉那份快照副本。
 
 做法：起**真实服务**（隔离根），模型后端是**可暂停的假后端**——它把收到的请求记录
 下来并卡住不返回，于是运行线程停在"已冻结、等模型回"的窗口里；这时从活库并发写入，
 再放行。判据：
 
-1. 运行期内该 run 的 `conversation_messages` 字节**完全不变**（并发写入不可见）；
-2. 假后端收到的**线上请求历史**里没有并发写入的内容（冻结历史真的被用于回放）；
-3. 图片批注入的**轮次编号**（`_turn_index_for_run`）用的是冻结历史（并发写入不影响）；
-4. 运行能照常收尾（不因并发写入报错），且 A 步的终态瘦身生效。
+1. 线上模型请求的历史与**冻结前缀**逐行一致（回放确实只吃提交那一刻的历史）；
+2. 并发写入后，按 `input_message_id` 重新解析出的冻结前缀**逐字不变**；
+3. 并发写入的内容没有出现在本轮的线上请求里；
+4. `snapshot` 里没有 `conversation_messages`（新契约：不再固化整段会话），只留 `history_size`；
+5. 运行照常收尾，且终态瘦身生效（库里的 done 事件去掉完整 message）。
 
 用法：项目根\\.venv\\Scripts\\python.exe verify\\run_freeze_smoke.py
 （`--serve` 是子进程入口，不用手工调用；README/维护说明不需要登记它）
@@ -452,16 +453,32 @@ def run_checks(check: _Check) -> int:
         return 1
 
     frozen = (storage.get_run_snapshot(run_id) or {}).get("conversation_messages") or []
-    frozen_lines = [
-        f"{m.get('role')}:{m.get('content')}" for m in frozen
-        if m.get("role") in {"user", "assistant"}
-    ]
+    if frozen:
+        # 旧数据形态（本次改动之前建的 run）：冻结副本还在快照里。
+        print("     注：该 run 的快照仍带 conversation_messages 副本（旧数据形态）")
+        frozen_lines = [
+            f"{m.get('role')}:{m.get('content')}" for m in frozen
+            if m.get("role") in {"user", "assistant"}
+        ]
+    else:
+        # 新形态：快照不再固化整段会话，冻结语义由 input_message_id 这个**游标**表达。
+        boundary = str((storage.get_background_task(run_id) or {}).get("input_message_id") or "")
+        live_now = storage.get_conversation(conversation_id)["messages"]
+        frozen = []
+        for message in live_now:
+            frozen.append(message)
+            if str(message.get("id") or "") == boundary:
+                break
+        frozen_lines = [
+            f"{m.get('role')}:{m.get('content')}" for m in frozen
+            if m.get("role") in {"user", "assistant"}
+        ]
     check.ok(len(frozen) == len(live_before) + 1,
-             f"快照冻结了 {len(frozen)} 条（历史 {len(live_before)} + 本轮用户消息 1）")
+             f"冻结历史恰为「历史 {len(live_before)} + 本轮用户消息 1」= {len(frozen)} 条")
     online_payload = STATE.snapshot()[0]
     online_lines = history_lines(online_payload)
     check.ok(online_lines == frozen_lines,
-             "判据①：线上模型请求的历史与冻结快照逐行一致（回放确实走快照）")
+             "判据①：线上模型请求的历史与冻结历史逐行一致（回放确实走冻结前缀）")
     freeze_fingerprint = json.dumps(frozen, ensure_ascii=False, sort_keys=True)
     online_count_before = len(online_payload.get("messages") or [])
 
@@ -472,14 +489,30 @@ def run_checks(check: _Check) -> int:
              f"活库确实被改了：{len(live_before)} → {len(live_after)} 条"
              "（+1 本轮用户消息、+1 并发写入）")
 
-    frozen_now = (storage.get_run_snapshot(run_id) or {}).get("conversation_messages") or []
+    # 判据②：并发写入之后，重新按游标解析出来的冻结前缀必须与并发前逐字一致。
+    # 这是"不再整段固化进快照"之后唯一承重的保证——前缀稳定性靠 (created_at, rowid) 顺序契约。
+    rerun_boundary = str((storage.get_background_task(run_id) or {}).get("input_message_id") or "")
+    refrozen: list[dict] = []
+    for message in storage.get_conversation(conversation_id)["messages"]:
+        refrozen.append(message)
+        if str(message.get("id") or "") == rerun_boundary:
+            break
     check.ok(
-        json.dumps(frozen_now, ensure_ascii=False, sort_keys=True) == freeze_fingerprint,
-        "判据②：并发写入后该 run 的 conversation_messages 字节完全不变",
+        json.dumps(refrozen, ensure_ascii=False, sort_keys=True) == freeze_fingerprint,
+        "判据②：并发写入后按 input_message_id 重新解析的冻结前缀逐字不变",
     )
     check.ok(
         INJECTED_TEXT not in json.dumps(online_payload, ensure_ascii=False),
         "判据③：并发写入的内容没有出现在本轮的线上请求里",
+    )
+    snapshot_now = storage.get_run_snapshot(run_id) or {}
+    check.ok(
+        "conversation_messages" not in snapshot_now,
+        "新契约：快照里不再固化整段会话（每轮省掉 2× 历史的写入）",
+    )
+    check.ok(
+        int(snapshot_now.get("history_size") or -1) == len(frozen),
+        f"快照只留体量标记：history_size={snapshot_now.get('history_size')}（期望 {len(frozen)}）",
     )
 
     print("\n[4] 放行模型，观察收尾")
@@ -489,8 +522,9 @@ def run_checks(check: _Check) -> int:
     check.ok(not stream.error, f"流没有报错（error={stream.error!r}）")
     terminal = stream.terminal_event() or {}
     check.ok(terminal.get("type") == "done", f"终态事件为 done（实得 {terminal.get('type')!r}）")
+    # done 事件在**流里**必须带 message（前端靠它即时渲染）；库里那份由收尾瘦身去掉。
     check.ok(terminal.get("message") is not None,
-             "终态事件仍带 message（提交瘦身前，前端靠它即时渲染）")
+             "流里的终态事件带 message（前端即时渲染依赖它，瘦身只动库里那份）")
 
     # 收尾链路（compress + slim）都在 finally 里，done 事件落库可能稍晚于 done 流结束。
     done_payloads: list[dict] = []

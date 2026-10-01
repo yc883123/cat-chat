@@ -136,7 +136,11 @@ class TraceStorageTests(unittest.TestCase):
         )
 
     def test_run_snapshot_history_keeps_trace(self) -> None:
-        # 快照固化的是"提交那一刻的会话消息"，所以先落消息再建 run（与真实时序一致）。
+        """快照不再固化整段会话，但**冻结历史**里的 trace 必须照旧 hydrate 回来。
+
+        新契约：`create_chat_run` 只在快照里留 `history_size`，冻结历史由
+        `input_message_id` 游标在运行期解析。这里直接验证那条路径拿到的消息带 trace。
+        """
         self._add(TRACE_A)
         agent = {"id": "general", "name": "通用 Agent"}
         run, _handle = self.storage.create_chat_run(
@@ -144,11 +148,37 @@ class TraceStorageTests(unittest.TestCase):
             {"model_key": "online:demo"}, "craft",
         )
         snapshot = self.storage.get_run_snapshot(str(run["id"])) or {}
-        messages = snapshot.get("conversation_messages") or []
-        self.assertTrue(messages, "快照必须带上会话消息（运行线程隔离需要）")
-        assistant = [m for m in messages if m.get("metadata", {}).get("trace")]
-        self.assertTrue(assistant, "快照里的消息必须带 hydrate 回来的 trace")
+        self.assertNotIn("conversation_messages", snapshot, "新契约：快照不固化整段会话")
+        self.assertGreaterEqual(int(snapshot.get("history_size") or 0), 1)
+
+        from naiba.run.chat import _frozen_history_for_run
+
+        frozen = _frozen_history_for_run(run, self.storage.get_conversation(
+            str(self.conversation["id"])
+        ))
+        assistant = [m for m in frozen if m.get("metadata", {}).get("trace")]
+        self.assertTrue(assistant, "冻结历史里的消息必须带 hydrate 回来的 trace")
         self.assertEqual(assistant[-1]["metadata"]["trace"], TRACE_A)
+
+    def test_frozen_history_prefers_legacy_snapshot_copy(self) -> None:
+        """存量 run（快照里还有副本）必须优先用那份副本，保证升级后行为不变。"""
+        from naiba.run.chat import _frozen_history_for_run
+
+        legacy = [{"id": "old1", "role": "user", "content": "旧副本", "metadata": {}}]
+        frozen = _frozen_history_for_run(
+            {"conversation_messages": legacy, "input_message_id": "whatever"}, {}
+        )
+        self.assertEqual(frozen, legacy)
+
+    def test_frozen_history_falls_back_to_full_conversation(self) -> None:
+        """边界 id 找不到（消息被删/截断）时退回全量，绝不静默丢上下文。"""
+        from naiba.run.chat import _frozen_history_for_run
+
+        messages = [{"id": "a", "role": "user", "content": "问", "metadata": {}}]
+        frozen = _frozen_history_for_run(
+            {"input_message_id": "不存在的 id"}, {"messages": messages}
+        )
+        self.assertEqual(frozen, messages)
 
     # ---- 4. 路径引用扇描 ----
 

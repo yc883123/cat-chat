@@ -396,16 +396,26 @@ def _coalesce_reasoning_deltas(db: sqlite3.Connection, run_id: str | None = None
     return processed
 
 
-def _slim_terminal_event_payloads(db: sqlite3.Connection) -> int:
+def _slim_terminal_event_payload_rows(
+    db: sqlite3.Connection, run_id: str = ""
+) -> int:
     """done/cancelled 事件载荷去掉 message 与 aborted_message（幂等）。
 
     这两个键携带完整消息对象（content + metadata + trace…），与 messages 表重复；
     仅前端在运行结束即时渲染用；run 终态后再无读取方。返回处理行数。
+
+    ``run_id`` 为空表示全库（迁移用）；给定时只处理该 run（运行期收尾用）。
     """
+    conditions = ["event_type IN ('done', 'cancelled')"]
+    parameters: list[Any] = []
+    if run_id:
+        conditions.append("run_id = ?")
+        parameters.append(run_id)
     updated = 0
-    for run_id, sequence, payload in db.execute(
-        "SELECT run_id, sequence, payload FROM run_events WHERE event_type IN ('done', 'cancelled')"
-    ):
+    for row_run_id, sequence, payload in db.execute(
+        f"SELECT run_id, sequence, payload FROM run_events WHERE {' AND '.join(conditions)}",
+        tuple(parameters),
+    ).fetchall():
         try:
             obj = json.loads(payload or "{}")
         except (json.JSONDecodeError, TypeError):
@@ -418,23 +428,35 @@ def _slim_terminal_event_payloads(db: sqlite3.Connection) -> int:
         obj.pop("aborted_message", None)
         db.execute(
             "UPDATE run_events SET payload = ? WHERE run_id = ? AND sequence = ?",
-            (json.dumps(obj, ensure_ascii=False), run_id, sequence),
+            (json.dumps(obj, ensure_ascii=False), row_run_id, sequence),
         )
         updated += 1
     return updated
 
 
-def _slim_terminal_snapshots(db: sqlite3.Connection) -> int:
+def _slim_terminal_event_payloads(db: sqlite3.Connection) -> int:
+    """迁移口径：全库瘦身 done/cancelled 事件载荷。"""
+    return _slim_terminal_event_payload_rows(db)
+
+
+def _slim_terminal_snapshot_rows(db: sqlite3.Connection, task_id: str = "") -> int:
     """终态（completed/failed/cancelled）Run 的 snapshot 去掉 conversation_messages（幂等）。
 
     该键只在运行期与 interrupted 恢复期被读取（快照语义：run 线程与 HTTP 线程隔离），
     终态后无读取方；interrupted 保留。返回处理行数。
+
+    ``task_id`` 为空表示全库（迁移用）；给定时只处理该 run（运行期收尾用）。
     """
+    conditions = ["status IN ('completed', 'failed', 'cancelled')"]
+    parameters: list[Any] = []
+    if task_id:
+        conditions.append("id = ?")
+        parameters.append(task_id)
     updated = 0
-    for task_id, snapshot_text in db.execute(
-        "SELECT id, snapshot FROM background_tasks "
-        "WHERE status IN ('completed', 'failed', 'cancelled')"
-    ):
+    for row_id, snapshot_text in db.execute(
+        f"SELECT id, snapshot FROM background_tasks WHERE {' AND '.join(conditions)}",
+        tuple(parameters),
+    ).fetchall():
         try:
             obj = json.loads(snapshot_text or "{}")
         except (json.JSONDecodeError, TypeError):
@@ -444,10 +466,15 @@ def _slim_terminal_snapshots(db: sqlite3.Connection) -> int:
         obj.pop("conversation_messages", None)
         db.execute(
             "UPDATE background_tasks SET snapshot = ? WHERE id = ?",
-            (json.dumps(obj, ensure_ascii=False), task_id),
+            (json.dumps(obj, ensure_ascii=False), row_id),
         )
         updated += 1
     return updated
+
+
+def _slim_terminal_snapshots(db: sqlite3.Connection) -> int:
+    """迁移口径：全库收缩终态 Run 的 snapshot。"""
+    return _slim_terminal_snapshot_rows(db)
 
 
 def _warn_data_migration(db: sqlite3.Connection, message: str) -> None:
@@ -1373,6 +1400,26 @@ class ChatStorage:
         """
         with self._connect() as db:
             return _coalesce_reasoning_deltas(db, run_id=run_id)
+
+    @_retry_transient_write
+    def slim_terminal_run(self, run_id: str) -> dict[str, int]:
+        """run 终态收尾：给事件流与快照**同时**瘦身（幂等，可重复调用）。
+
+        为什么要在运行期做（而不是像 v14 那样只在迁移里做）：`done`/`cancelled` 事件带着
+        完整消息对象（content + metadata + **含 trace 的 metadata**），与 `messages` 表、
+        `metadata.trace` 完全重复；`create_chat_run` 又会把整段会话固化进 snapshot。两者在
+        run 终态后都没有读取方，却会一直堆在库里。实测存量：done/cancelled **35.0MB / 228 行
+        全部仍带 message 对象**，终态快照 `conversation_messages` 曾经累积到 81MB。
+
+        调用时机：必须在**终态事件已经 emit 之后**——前端是唯一读者，它收到终态即停止轮询；
+        早于此调用会让前端拿不到即时渲染所需的消息对象。
+
+        返回 `{"events": 处理行数, "snapshots": 处理行数}`；失败由调用方旁路（收尾不阻断）。
+        """
+        with self._connect() as db:
+            events = _slim_terminal_event_payload_rows(db, run_id)
+            snapshots = _slim_terminal_snapshot_rows(db, run_id)
+        return {"events": events, "snapshots": snapshots}
 
     @_retry_transient_write
     def compact_database(self) -> dict[str, Any]:

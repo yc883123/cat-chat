@@ -1047,6 +1047,14 @@ class ConversationRunMixin:
                 self.app.storage.compress_run_events(run_id)
             except Exception:
                 traceback.print_exc()
+            # 终态瘦身：done/cancelled 事件去掉完整消息对象、快照去掉 conversation_messages。
+            # 两者在终态后都没有读取方（前端是唯一读者，收到终态即停止轮询），不瘦身就会
+            # 一直堆在库里（实测存量 35MB 事件 / 曾经 81MB 快照）。放在终态事件 emit 之后；
+            # 失败只打堆栈，不阻断收尾。
+            try:
+                self.app.storage.slim_terminal_run(run_id)
+            except Exception:
+                traceback.print_exc()
             # 用量台账：done/cancelled/failed 三条路径都在这里收口（事件均已 flush，
             # compress 只合流 reasoning_delta、不动 usage 事件）。从最后一条 usage
             # 事件取累计汇总，失败不阻断收尾（record_run_usage 自带容错）。
@@ -1105,6 +1113,11 @@ class ConversationRunMixin:
         finally:
             try:
                 self.app.storage.compress_run_events(run_id)
+            except Exception:
+                traceback.print_exc()
+            # 与主对话同口径的终态瘦身（事件里的完整消息对象 + 快照的整段会话）。
+            try:
+                self.app.storage.slim_terminal_run(run_id)
             except Exception:
                 traceback.print_exc()
             # 用量台账：计划执行与主对话同一口径（最后一条 usage 事件 = 累计汇总）。

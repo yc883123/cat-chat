@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import math
 import re
 import shutil
 import sqlite3
@@ -724,6 +725,43 @@ def _iter_escaped_literals(text: str, needle: str) -> Iterator[str]:
             end += 1
         yield _unescape_json_literal(text[index:min(end, size)])
         start = index + len(needle)
+
+
+# `update_job` 幂等短路允许比对的**标量**列：值是简单类型、比较代价与读一次行相当。
+# checkpoint/result/detail/error 明确排除——它们是 JSON 大字段，为比较而反序列化不划算。
+_JOB_SCALAR_FIELDS: frozenset[str] = frozenset(
+    {"status", "progress", "current_step", "attempt", "cancel_requested", "started_at", "finished_at"}
+)
+
+
+def _job_values_unchanged(values: dict[str, Any], current: dict[str, Any] | None) -> bool:
+    """`update_job` 要写的值是否与库里当前值逐字相同（相同则这次 UPDATE 无信息量）。
+
+    除 `updated_at`（每次都带、必然不同）外的字段若全在标量白名单里且没变，就判定为
+    no-op。任何读不到的行（current 为 None）都按"不相等"处理，让调用方照常走写路径，
+    沿用它既有的"任务不存在 → 返回 None"语义。
+    """
+    if not current:
+        return False
+    compared = False
+    for key, new_value in values.items():
+        if key == "updated_at":
+            continue
+        if key not in _JOB_SCALAR_FIELDS:
+            return False
+        old_value = current.get(key)
+        if isinstance(new_value, float) or isinstance(old_value, float):
+            try:
+                if math.isclose(float(old_value or 0), float(new_value or 0), abs_tol=1e-6):
+                    compared = True
+                    continue
+            except (TypeError, ValueError):
+                return False
+            return False
+        if old_value != new_value:
+            return False
+        compared = True
+    return compared
 
 
 class ChatStorage:
@@ -3463,9 +3501,28 @@ class ChatStorage:
             values["finished_at"] = now
         if not values:
             return self.get_background_task(task_id)
+        # 幂等短路：`updated_at` 之外的字段若与库里**逐字相同**，这条 UPDATE 不带来任何
+        # 状态变化，却仍要开一条连接、写 WAL 帧并推进 checkpoint。Job 轮询（进度百分比
+        # 随 elapsed 反复算）、shell 每读一行日志都调一次进度更新，命中率很高。
+        # 只比对**标量列**：checkpoint/result/detail/error 是 JSON 大字段，反序列化来比
+        # 会让"省一次写"变成"多几次读"，得不偿失（这些调用方也确实在改内容）。
+        #
+        # 判据的读必须和写一起放进 `_write_with_retry` 里：`_connect` 的瞬时故障
+        # （readonly/locked）在白名单里，短路读若留在重试包装外，一次瞬时故障就会把
+        # 整个调用打死——这正是本模块第 675 行记录的旧事故形态。
         assignments = ", ".join(f"{key} = ?" for key in values)
         def _write() -> bool:
             with self._connect() as db:
+                current = db.execute(
+                    "SELECT status, progress, current_step, attempt, cancel_requested, "
+                    "started_at, finished_at FROM background_tasks WHERE id = ?",
+                    (task_id,),
+                ).fetchone()
+                if current is None:
+                    return False
+                if _job_values_unchanged(values, self._task_dict(current)):
+                    # 无信息量：不执行 UPDATE，报告"命中"以沿用"行存在"的返回语义。
+                    return True
                 cursor = db.execute(
                     f"UPDATE background_tasks SET {assignments} WHERE id = ?",
                     (*values.values(), task_id),

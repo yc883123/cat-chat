@@ -52,6 +52,8 @@ KEEP = {
     "app_icon_smoke.py", "app_icon_smoke.cjs",
     # 冻结版：应用图标新模块真的进了 PYZ + `_MEIPASS\icon.ico` 在（§六 已登记）
     "frozen_appicon_check.py",
+    # 真机剪贴板往返（右键粘贴图片/文件的原生桥，§九.149）：独占真实剪贴板，自带备份/恢复
+    "clipboard_paste_smoke.py",
     # 以下 6 个写在 .gitignore 白名单、也登记在 §六，却一直没进本名单（2026-09-17 补）：
     # 靠 TRACKED 兜底才没被删，但「名单漂移」本身就该修——见 §九.91 与 tests/test_verify_assets.py。
     "frozen_interrupt_check.py", "frozen_q1_check.py",

@@ -54,7 +54,6 @@ def seed() -> None:
         "model_key": "online:demo",
         "agent_name": "通用 Agent",
         "skills": [],
-        "full_messages": [{"role": "system", "content": SYSTEM_TEXT}],
     })
 
 

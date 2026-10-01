@@ -180,34 +180,6 @@ def _turn_index_for_run(snapshot: dict[str, Any], run: dict[str, Any]) -> int:
     )
 
 
-def _summarize_trace_messages(messages: list[Any]) -> list[dict[str, Any]]:
-    """trace 消息摘要化（first_turn 展示用）：图片 base64 data 替换为占位说明。
-
-    完整消息仍逐条保留（role/content/metadata 原文），只剥离超长二进制负载——
-    前端展示"第一轮发送内容"时无需几 MB 的图片 base64。
-    """
-    out: list[dict[str, Any]] = []
-    for item in messages:
-        if not isinstance(item, dict):
-            continue
-        content = item.get("content")
-        if not isinstance(content, list):
-            out.append(dict(item))
-            continue
-        summarized = []
-        for part in content:
-            if (
-                isinstance(part, dict)
-                and part.get("type") in {"image", "input_image"}
-                and isinstance(part.get("data"), str)
-                and len(part["data"]) > 200
-            ):
-                part = {**part, "data": "[base64 图片数据已省略]"}
-            summarized.append(part)
-        out.append({**item, "content": summarized})
-    return out
-
-
 def _merge_usage_summary(
     summary: dict[str, Any], latest: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1280,6 +1252,9 @@ class ConversationRunMixin:
         生成参数 + 完整请求消息（图片 data 摘要化）；技能取冻结集 ∪ 本轮引用。
         非首轮/无 trace（轻量 direct 未写 trace）时为空操作。
         """
+        # 同 run 只落一次：终态前与 finally 兜底各调一次，第二次是同载荷重复落盘。
+        if self.first_turn_already_persisted(run_id):
+            return
         trace = (run_context or {}).get("trace_messages") or []
         # system 优先取 SkillAgent 带出的完整原文（trace 不含 system——增量设计）；
         # direct 轻量路径 fallback 从 trace 里找 role=system。
@@ -1320,16 +1295,20 @@ class ConversationRunMixin:
                 {"id": skill_id, "name": str((catalog_map.get(skill_id) or {}).get("name") or skill_id)}
                 for skill_id in skill_ids
             ],
-            "full_messages": _summarize_trace_messages(
-                [{"role": "system", "content": system_text}, *trace]
-            ),
         }
+        # 这里**不再落 `full_messages`**：它是 system + 整轮 trace 的又一份副本，写进
+        # `background_tasks.snapshot` 与 `conversations.first_turn` 两处，而全仓库没有任何
+        # 读取方（前端折叠卡只用 system/tools/skills/options/agent_name/model_key）。
+        # 实测它占 first_turn 的 76%（4.42 / 5.8 MB）。需要完整消息时看 assistant 消息的
+        # metadata.trace（那是运行层的权威副本），不再在展示快照里复制一遍。
         self.app.storage.update_run_snapshot(run_id, {"first_turn": first_turn})
         # 会话级副本：分支对话不复制 run 行、「清空已结束任务」会删掉 chat run 行，
         # 只存 run 快照的话这两种情况都会让顶部折叠卡消失（用户报障的分支场景）。
         conversation_id = str((run_context or {}).get("conversation_id") or "")
         if conversation_id:
             self.app.storage.set_conversation_first_turn(conversation_id, first_turn)
+        # 两处都写成功后才标记：中途抛异常时 finally 兜底仍会重试同一份载荷。
+        self.mark_first_turn_persisted(run_id)
 
     @staticmethod
     def _rebuild_partial_run(

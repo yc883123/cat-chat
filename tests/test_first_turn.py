@@ -5,9 +5,11 @@
 列（分支对话继承、清空已结束任务后不丢）；v17 会话模型名覆盖；`_first_turn_info` 的取数顺序与旧结构归一。
 """
 
+import inspect
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -125,23 +127,21 @@ class FirstTurnStoreTests(unittest.TestCase):
     def test_no_chat_run_returns_none(self):
         self.assertIsNone(self.storage.first_chat_run_snapshot(self.conversation["id"]))
 
-    def test_trace_summarizer_strips_big_image_base64(self):
-        from naiba.run.chat import _summarize_trace_messages
+    def test_first_turn_payload_has_no_dead_full_messages(self):
+        """`full_messages` 是只写不读的副本，禁止再回到 first_turn 载荷里。
 
-        messages = [
-            {"role": "system", "content": "s"},
-            {"role": "user", "content": [
-                {"type": "text", "text": "看图"},
-                {"type": "image", "data": "x" * 999, "media_type": "image/png"},
-            ]},
-            {"role": "user", "content": [{"type": "image", "data": "short"}]},
-            {"role": "assistant", "content": "ok"},
-        ]
-        out = _summarize_trace_messages(messages)
-        self.assertEqual(out[1]["content"][1]["data"], "[base64 图片数据已省略]")
-        self.assertEqual(out[2]["content"][0]["data"], "short", "小负载不动")
-        self.assertEqual(out[0], messages[0])
-        self.assertEqual(out[3], messages[3])
+        为什么钉死：它是「system + 整轮 trace」的又一份副本，写进 run 快照与会话列两处，
+        却没有任何读取方（前端折叠卡只读 system/tools/skills/options/agent_name/model_key），
+        实测占 first_turn 的 76%。这条用例同时挡住"顺手加回来"和"改回写入路径"两种回退。
+        """
+        from naiba.run.chat import ConversationRunMixin
+
+        source = inspect.getsource(ConversationRunMixin._persist_first_turn_context)
+        self.assertNotIn(
+            '"full_messages"', source,
+            "first_turn 载荷不得再带 full_messages（只写不读，占 76% 体积）",
+        )
+        self.assertNotIn("_summarize_trace_messages", source)
 
 
 class FirstTurnBranchTests(unittest.TestCase):
@@ -223,6 +223,119 @@ class FirstTurnBranchTests(unittest.TestCase):
         self.assertEqual(self.storage.conversation_first_turn(self.conversation["id"]), self.first_turn)
         self.assertIsNone(self.storage.first_chat_run_snapshot(self.conversation["id"]),
                           "run 快照确实被清空（说明会话级副本是唯一留存）")
+
+
+class FirstTurnSingleWriteTests(unittest.TestCase):
+    """同一 run 的 first_turn 只落一次盘（终态前 + finally 兜底不得重复写同载荷）。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.storage = ChatStorage(Path(self.tmp.name) / "chat.db")
+        self.conversation = self.storage.create_conversation()
+        agent = {"id": "general", "name": "通用 Agent"}
+        self.run, _handle = self.storage.create_chat_run(
+            str(self.conversation["id"]), "第一问", [], agent,
+            {"model_key": "online:demo"},
+            "craft",
+        )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _runner(self):
+        """最小 runner：只借 `first_turn_already_persisted` / `mark_first_turn_persisted`。"""
+        from naiba.run.manager import ConversationRunManager
+
+        return ConversationRunManager.__new__(ConversationRunManager)
+
+    def test_flag_flips_only_after_success(self) -> None:
+        # 故意不预置 `_first_turn_done`：`__new__` 构造的实例本就没有它，
+        # 兜底逻辑必须能在缺失时正常工作（否则首轮上下文会直接落不了盘）。
+        runner = self._runner()
+        run_id = str(self.run["id"])
+        self.assertFalse(runner.first_turn_already_persisted(run_id), "初始未落盘")
+        runner.mark_first_turn_persisted(run_id)
+        self.assertTrue(runner.first_turn_already_persisted(run_id), "标记后视为已落盘")
+
+    def test_persist_runs_once_per_run(self) -> None:
+        """第二次调用必须直接返回，且**不再调用** storage 的两个写入口。"""
+        from naiba.run.chat import ConversationRunMixin
+
+        runner = self._runner()
+        runner._first_turn_done = set()
+        runner._first_turn_lock = threading.Lock()
+        runner.app = SimpleNamespace(
+            storage=self.storage,
+            tool_registry=SimpleNamespace(schemas=lambda: []),
+            catalog=SimpleNamespace(scan=lambda: []),
+        )
+        snapshot = {
+            "is_first_turn": True,
+            "allowed_tools": [],
+            "generation_options": {},
+            "model_key": "online:demo",
+            "agent": {"name": "通用 Agent"},
+            "skill_policy": {},
+        }
+        run_context = {
+            "trace_messages": [],
+            "trace_system": "系统提示词原文",
+            "conversation_id": str(self.conversation["id"]),
+        }
+        writes: list[str] = []
+        runner.app.storage = SimpleNamespace(
+            update_run_snapshot=lambda *a, **k: writes.append("snapshot"),
+            set_conversation_first_turn=lambda *a, **k: writes.append("conversation"),
+        )
+        run_id = str(self.run["id"])
+        ConversationRunMixin._persist_first_turn_context(runner, run_id, snapshot, run_context)
+        self.assertEqual(writes, ["snapshot", "conversation"], "首次应两处各写一次")
+        ConversationRunMixin._persist_first_turn_context(runner, run_id, snapshot, run_context)
+        self.assertEqual(writes, ["snapshot", "conversation"], "第二次不得再写（同载荷重复落盘）")
+
+    def test_failed_first_write_is_retried_by_fallback(self) -> None:
+        """首次写盘抛异常时不得置标记，finally 兜底仍要能补上。"""
+        from naiba.run.chat import ConversationRunMixin
+
+        runner = self._runner()
+        runner._first_turn_done = set()
+        runner._first_turn_lock = threading.Lock()
+        runner.app = SimpleNamespace(
+            tool_registry=SimpleNamespace(schemas=lambda: []),
+            catalog=SimpleNamespace(scan=lambda: []),
+        )
+        snapshot = {
+            "is_first_turn": True, "allowed_tools": [], "generation_options": {},
+            "model_key": "online:demo", "agent": {"name": "Agent"}, "skill_policy": {},
+        }
+        run_context = {
+            "trace_messages": [], "trace_system": "系统提示词",
+            "conversation_id": str(self.conversation["id"]),
+        }
+        attempts: list[int] = []
+
+        def boom(*args, **kwargs):
+            attempts.append(1)
+            raise sqlite3.OperationalError("disk I/O error")
+
+        runner.app.storage = SimpleNamespace(
+            update_run_snapshot=boom,
+            set_conversation_first_turn=lambda *a, **k: None,
+        )
+        run_id = str(self.run["id"])
+        with self.assertRaises(sqlite3.OperationalError):
+            ConversationRunMixin._persist_first_turn_context(runner, run_id, snapshot, run_context)
+        self.assertEqual(len(attempts), 1, "首次确实尝试过写")
+        self.assertFalse(
+            runner.first_turn_already_persisted(run_id),
+            "写盘失败不得置标记（否则兜底路径会放弃重试）",
+        )
+        runner.app.storage = SimpleNamespace(
+            update_run_snapshot=lambda *a, **k: None,
+            set_conversation_first_turn=lambda *a, **k: None,
+        )
+        ConversationRunMixin._persist_first_turn_context(runner, run_id, snapshot, run_context)
+        self.assertTrue(runner.first_turn_already_persisted(run_id), "兜底路径应补上")
 
 
 class FirstTurnInfoTests(unittest.TestCase):

@@ -59,6 +59,10 @@ class ConversationRunManager(ConversationRunMixin):
         self._executors: dict[str, Any] = {}
         self._sinks: dict[str, _RunEventSink] = {}
         self._sinks_lock = threading.Lock()
+        # 已经落过 first_turn 的 run：`_persist_first_turn_context` 在终态前与 finally 兜底
+        # 各调一次，第二次是同载荷重复落盘（同一份首轮上下文再序列化再写两处）。
+        self._first_turn_done: set[str] = set()
+        self._first_turn_lock = threading.Lock()
 
     def _resolve_allowed_tools(
         self,
@@ -304,6 +308,38 @@ class ConversationRunManager(ConversationRunMixin):
     def _unregister_sink(self, run_id: str) -> None:
         with self._sinks_lock:
             self._sinks.pop(run_id, None)
+        # 顺带回收本 run 的 first_turn 落盘标记（不清会随会话数无限增长）。
+        marker = getattr(self, "_first_turn_done", None)
+        if marker is not None:
+            with getattr(self, "_first_turn_lock", None) or threading.Lock():
+                marker.discard(run_id)
+
+    def first_turn_already_persisted(self, run_id: str) -> bool:
+        """本 run 的 first_turn 是否**已经成功落盘**。
+
+        `_persist_first_turn_context` 在「终态前」与「finally 兜底」各被调一次，第二次是
+        **同载荷重复落盘**（把同一份首轮上下文再序列化一次并写 run 快照 + 会话列两处）。
+        标记只在**写盘成功之后**才置上，所以第一次失败时兜底路径仍会接手重试。
+
+        用 getattr 兜底：`__new__` 构造的实例（只跑某个方法、不走 `__init__` 的测试与
+        工具）没有这两个字段，缺了不该让首轮上下文直接落不了盘。
+        """
+        marker = getattr(self, "_first_turn_done", None)
+        if marker is None:
+            return False
+        with getattr(self, "_first_turn_lock", None) or threading.Lock():
+            return run_id in marker
+
+    def mark_first_turn_persisted(self, run_id: str) -> None:
+        """记录本 run 的 first_turn 已成功落盘（成功后才调用）。"""
+        marker = getattr(self, "_first_turn_done", None)
+        if marker is None:
+            marker = set()
+            self._first_turn_done = marker
+        if getattr(self, "_first_turn_lock", None) is None:
+            self._first_turn_lock = threading.Lock()
+        with self._first_turn_lock:
+            marker.add(run_id)
 
     def _flush_sink(self, run_id: str) -> None:
         """Flush any pending delta buffered in this run's sink (thread-safe)."""

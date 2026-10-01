@@ -227,5 +227,72 @@ class MigrationV14Tests(unittest.TestCase):
             self.assertIn("VACUUM 未执行", warning_log.read_text(encoding="utf-8"))
 
 
+class FirstTurnSlimMigrationTests(unittest.TestCase):
+    """v22：清掉 first_turn 里只写不读的 `full_messages`（会话列 + run 快照两处）。"""
+
+    def _seed(self, tmp: Path) -> ChatStorage:
+        storage = ChatStorage(tmp / "chat.db")
+        convo = storage.create_conversation()
+        agent = {"id": "general", "name": "通用 Agent"}
+        run, _h = storage.create_chat_run(
+            convo["id"], "消息", [], agent, {"model_key": "online:demo"}, "craft"
+        )
+        payload = {
+            "system": "系统提示词",
+            "tools": [{"name": "read_file"}],
+            "full_messages": [{"role": "system", "content": "x" * 4096}],
+        }
+        storage.set_conversation_first_turn(convo["id"], payload)
+        storage.update_run_snapshot(run["id"], {"first_turn": dict(payload)})
+        # 回到 v21 再迁移：模拟存量库
+        storage.set_user_version(21)
+        return storage
+
+    def test_full_messages_removed_from_both_places(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            storage = self._seed(root)
+            storage.apply_pending_migrations()
+            with closing(sqlite3.connect(root / "chat.db")) as db:
+                raw = db.execute(
+                    "SELECT first_turn FROM conversations"
+                ).fetchone()[0]
+                payload = json.loads(raw)
+                self.assertNotIn("full_messages", payload, "会话列必须清掉 full_messages")
+                self.assertEqual(payload["system"], "系统提示词", "其余键原样保留")
+                snapshot = db.execute(
+                    "SELECT snapshot FROM background_tasks"
+                ).fetchone()[0]
+                self.assertNotIn(
+                    "full_messages", json.loads(snapshot)["first_turn"],
+                    "run 快照（老会话兜底读源）同样要清",
+                )
+
+    def test_migration_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            storage = self._seed(root)
+            storage.apply_pending_migrations()
+            storage.apply_pending_migrations()  # 二次重跑：不得报错、不得改坏
+            with closing(sqlite3.connect(root / "chat.db")) as db:
+                payload = json.loads(db.execute("SELECT first_turn FROM conversations").fetchone()[0])
+                self.assertNotIn("full_messages", payload)
+                self.assertEqual(payload["tools"], [{"name": "read_file"}])
+
+    def test_broken_json_row_is_skipped_not_fatal(self) -> None:
+        """坏 JSON 行不得让整个迁移失败（否则用户卡在启动迁移上）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            storage = self._seed(root)
+            storage.set_user_version(21)
+            with closing(sqlite3.connect(root / "chat.db")) as db:
+                db.execute(
+                    "UPDATE conversations SET first_turn = ?", ("{不是 JSON",)
+                )
+                db.commit()
+            storage.apply_pending_migrations()  # 不应抛异常
+            self.assertEqual(storage.get_user_version(), CURRENT_SCHEMA_VERSION)
+
+
 if __name__ == "__main__":
     unittest.main()

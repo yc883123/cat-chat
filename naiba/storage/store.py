@@ -25,7 +25,7 @@ _METADATA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
-CURRENT_SCHEMA_VERSION = 21
+CURRENT_SCHEMA_VERSION = 22
 
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
@@ -607,6 +607,57 @@ def _migrate_to_v21(db: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_v22(db: sqlite3.Connection) -> None:
+    """清掉 first_turn 里**只写不读**的 `full_messages` 键（幂等）。
+
+    该键是「system + 整轮 trace」的又一份副本，同时写进 `background_tasks.snapshot`
+    与 `conversations.first_turn` 两处，而全仓库没有任何读取方（前端折叠卡只用
+    system/tools/skills/options/agent_name/model_key）。实测占 first_turn 的 76%
+    （4.42 / 5.8 MB），删掉是纯减法。
+
+    只动这一个键：其余键原样保留、JSON 不可解析的行跳过（坏数据不因本迁移被放大）。
+    内容改写失败会让迁移整体失败（用户可见、可重试）。
+    """
+    updated = 0
+    for conversation_id, raw in db.execute(
+        "SELECT id, first_turn FROM conversations WHERE first_turn LIKE '%full_messages%'"
+    ).fetchall():
+        try:
+            payload = json.loads(raw or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict) or "full_messages" not in payload:
+            continue
+        payload.pop("full_messages", None)
+        db.execute(
+            "UPDATE conversations SET first_turn = ? WHERE id = ?",
+            (json.dumps(payload, ensure_ascii=False), conversation_id),
+        )
+        updated += 1
+    # run 快照里的 first_turn 是老会话的**兜底读源**，同样要清；终态 run 的快照在收尾时
+    # 被 `_slim_run_snapshot` 收缩，这里只处理还留着该键的行。
+    for task_id, raw in db.execute(
+        "SELECT id, snapshot FROM background_tasks WHERE snapshot LIKE '%full_messages%'"
+    ).fetchall():
+        try:
+            snapshot = json.loads(raw or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(snapshot, dict):
+            continue
+        first_turn = snapshot.get("first_turn")
+        if not isinstance(first_turn, dict) or "full_messages" not in first_turn:
+            continue
+        first_turn.pop("full_messages", None)
+        db.execute(
+            "UPDATE background_tasks SET snapshot = ? WHERE id = ?",
+            (json.dumps(snapshot, ensure_ascii=False), task_id),
+        )
+        updated += 1
+    if updated:
+        print(f"[naiba-storage] v22：清理 {updated} 行 first_turn.full_messages（只写不读的副本）")
+
+
 # 目标版本 -> 迁移函数。新增版本时在此追加并提升 CURRENT_SCHEMA_VERSION。
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
@@ -630,6 +681,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     19: _migrate_to_v19,
     20: _migrate_to_v20,
     21: _migrate_to_v21,
+    22: _migrate_to_v22,
 }
 
 

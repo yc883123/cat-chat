@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """契约：本地大脑的「图片已降级」旗标（降级不可逆）。
 
 保护对象（维护说明 §九.146）：
@@ -68,6 +68,26 @@ ONLINE_PROFILE = {"kind": "online", "model": "gpt-4o", "request_format": "openai
                   "supports_images": True}
 
 
+def setUpModule() -> None:
+    """本文件钉的是**保留机制**的契约（默认已停用，见 §九.146 修订）。
+
+    2026-10-01 用户实测纠正：本地会话内历史图片本来就在服务端 KV / 前缀缓存里，降级滑窗才是
+    "12 张以后丢缓存"的元凶 ⇒ `LOCAL_IMAGE_CAP_ENABLED` 默认 False，本地大脑按"全部图片原样
+    保留"走。机制代码与用例全部保留，本模块把开关打开来钉它自己的契约；
+    **开关关掉时的行为**由 `CapSwitchedOffTests`（本文件末尾，显式关）覆盖，**出厂默认值本身**
+    由 `tests/test_local_model_guard.py::LocalImageCapTests` 里那条**不打补丁**的用例钉住
+    （变异核对：把默认改成 True ⇒ 它红）。
+    """
+    global _CAP_PATCHER
+    _CAP_PATCHER = mock.patch.object(history_mod, "LOCAL_IMAGE_CAP_ENABLED", True)
+    _CAP_PATCHER.start()
+
+
+def tearDownModule() -> None:
+    if _CAP_PATCHER is not None:
+        _CAP_PATCHER.stop()
+
+
 def _write_images(tmp: Path, count: int) -> list[str]:
     paths = []
     for index in range(count):
@@ -111,6 +131,69 @@ def _marker_texts(history: list[dict], index: int = 0) -> list[str]:
 
 def _wire_bytes(item: dict) -> str:
     return json.dumps(item.get("content"), ensure_ascii=False, sort_keys=True)
+
+
+_CAP_PATCHER = None
+
+
+class CapSwitchedOffTests(unittest.TestCase):
+    """开关关掉时的口径：本地大脑**不做任何图片处理**（用户 2026-10-01 要求；出厂默认即关）。
+
+    1. 超限也全部保留（`prepare_history` 原样放行、不降级、不回传旗标）；
+    2. 老会话里已经落了 `local_images_capped` 的消息**按真图还原**（旗标不再回放）——
+       否则老会话会永久停在占位形态上；
+    3. 在线大脑与文本大脑路径都不受影响。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.paths = _write_images(Path(self.tmp.name), 4)
+        self.router = VisionRouter(_AppStub(VISION_CONFIG))
+
+    def test_local_brain_keeps_every_image_when_switch_off(self) -> None:
+        """开关关：本地大脑不降级、不回传旗标、原样放行；**远超每请求上限的图片也全部保留**。
+
+        6 条消息 × 3 张 = 18 张（> LOCAL_REQUEST_IMAGE_LIMIT=12）：这是用户要的口径。
+        注意 `MODEL_IMAGE_HISTORY_LIMIT=3` 是**每条 user 消息**的封顶（另一套规则，未改动），
+        所以喂 4 张会被它裁到 3 张——本用例按 3 张/条来构造。
+        """
+        per_message = self.paths[:3]
+        messages = [_user_message(f"m{index}", per_message) for index in range(6)]
+        history = build_model_history(messages, local_image_brain=True)
+        self.assertEqual(_image_count(history), 18, "18 张全部要在上下文里（12 张上限已停用）")
+        with mock.patch.object(history_mod, "LOCAL_IMAGE_CAP_ENABLED", False):
+            kept, note, demotions = self.router.prepare_history(history, LOCAL_PROFILE)
+        self.assertIs(kept, history, "原样放行：连对象都不换")
+        self.assertEqual(_image_count(kept), 18)
+        self.assertEqual(note, "")
+        self.assertEqual(demotions, [])
+        # 机制没被删掉：显式打开就照旧降级（这是"停用"与"删除"的区别）
+        with mock.patch.object(VisionRouter, "LOCAL_REQUEST_IMAGE_LIMIT", 1):
+            capped, _note, cap_demotions = self.router._cap_local_history_images(history)
+        self.assertEqual(_image_count(capped), 1)
+        self.assertTrue(cap_demotions)
+
+    def test_flagged_old_messages_replay_real_images_when_switch_off(self) -> None:
+        """开关关：老会话已落的旗标**不再回放**，那张图要回到上下文（否则永久停在占位形态）。"""
+        messages = [_user_message("m1", self.paths[:2])]
+        messages[0]["metadata"][MetadataKeys.LOCAL_IMAGES_CAPPED] = {
+            "names": [Path(self.paths[0]).name]
+        }
+        with mock.patch.object(history_mod, "LOCAL_IMAGE_CAP_ENABLED", False):
+            replayed = build_model_history(messages, local_image_brain=True)
+        texts = [
+            str(part.get("text") or "")
+            for part in replayed[0]["content"]
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        self.assertEqual(_image_count(replayed), 2, "旗标里的那张图也要回到上下文")
+        self.assertFalse(
+            any(is_local_image_omitted_marker(text) for text in texts),
+            f"默认不该再出现占位块：{texts}",
+        )
+        self.assertNotIn(HISTORY_LOCAL_IMAGES_KEY, replayed[0], "也不该再挂内部降级键")
+
 
 
 class LocalImageFlagTests(unittest.TestCase):

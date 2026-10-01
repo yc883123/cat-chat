@@ -33,18 +33,38 @@ MODEL_IMAGE_MAX_EDGE = 1600
 MODEL_IMAGE_TARGET_BYTES = 900 * 1024
 MODEL_IMAGE_HISTORY_LIMIT = 3
 
-# ---- 本地大脑的图片历史：降级不可逆 -----------------------------------------
-# 本地多模态模型单次请求有图片总量上限（张数 + 字节），被挤出的图片改写成占位文本。
-# 这个上限过去**每轮对全量历史重算**，两笔实测代价（探针 verify/_probe_image_prefix.py）：
-# ① 已经会被丢掉的旧图仍然每轮读盘 + PIL 重编码（6 轮批量出图会话 63 次 → 旗标接管后 37 次）；
-# ② 历史回缩（删除/编辑消息）时保留窗口往回滑，**已经发过占位的旧图又被装回真图**，
-#    从那条消息起历史整体重写。注意：只追加消息的稳态下前缀断点只在窗口边缘那条消息上，
-#    并不是「每轮全断」——别把这条修复当成缓存命中率修复来宣传。
-# 现在「哪些图片已降级」写进那条消息的 metadata（``MetadataKeys.LOCAL_IMAGES_CAPPED``），
-# 此后各轮由 ``build_model_history`` 直接回放**同一份**占位文本 ⇒ 决定不回退、旧图不再重编码。
-# 旗标只在 ``kind=local`` 的大脑下读写：切到在线模型即恢复原图（前缀断一次，可接受）。
+# ---- 本地大脑的图片历史 ------------------------------------------------------
+# 本地多模态大脑：历史里的图片**全部原样保留**（不降级、不占位）——这是 2026-10-01 用户实测
+# 纠正后的口径，旧口径的因果讲反了：
+#   · 本地会话内连续跑时，历史里的图片**本来就在服务端的 KV / 前缀缓存里**：客户端把同样的
+#     字节再发一遍，服务端命中前缀就复用已算好的 KV，**不会每轮重新 prefill 图片**
+#     （同会话含 3 张真图时缓存命中率实测仍有 87.9%）。
+#   · 真正打断前缀的恰恰是「保留窗口每轮滑动」：滑掉的是**历史最早**那张图，断点落在很靠前的
+#     位置 ⇒ 后面全部重新 prefill。这就是「12 张以后丢缓存」的机制。
+#   · 「模型服务重启 / 中断会话后继续」导致的重新 prefill 是服务端的事，不在本端设计范围内。
+# 因此旧的「每请求图片总量上限 + 降级旗标回放」（§九.146）**默认停用**：它对缓存命中率从来没有
+# 正收益（旧注释自己写着"别把这条修复当成缓存命中率修复来宣传"），只省下**客户端**的读盘 +
+# PIL 重编码次数（探针 verify/_probe_image_prefix.py 实测 63→37），以及历史被回滚时的前缀收益。
+# 机制整体保留、一处开关可恢复。保留图片剩下的只有两项本地成本：请求体更大（每轮 base64 重发）
+# 与每轮重新编码（如需优化，可给 encode_image_for_model 加按 (路径, mtime, 大小) 的进程内缓存）。
+#
+# —— 以下是**保留机制**（默认不启用）的语义，供日后恢复时参考 ——
+# 上限（张数 + 字节）挤出的图片改写成占位文本；「哪些图片已降级」写进那条消息的 metadata
+# （``MetadataKeys.LOCAL_IMAGES_CAPPED``），此后各轮由 ``build_model_history`` 回放**同一份**
+# 占位文本（字节一致，否则"记忆"本身就在改写历史）。旗标只在 ``kind=local`` 下读写。
 HISTORY_MESSAGE_ID_KEY = "_message_id"
 HISTORY_LOCAL_IMAGES_KEY = "_local_images_capped"
+
+
+# 本地大脑是否启用「每请求图片总量上限 + 降级旗标回放」。**默认关**（见上方修订说明）。
+# 唯一判据：vision 层（是否降级）与 history 层（是否回放占位）必须同源，否则同一条消息
+# 在两轮之间字节不一致 ⇒ 前缀照旧断。要恢复旧行为，把这里改成 True（机制与用例都还在）。
+LOCAL_IMAGE_CAP_ENABLED = False
+
+
+def local_image_cap_enabled() -> bool:
+    """本地图片上限 / 降级旗标是否启用（**唯一判据**，vision 与 history 共用；测试可 patch）。"""
+    return bool(LOCAL_IMAGE_CAP_ENABLED)
 # 两个内部键都只用于「把图片降级决定映射回落库消息」（vision 层没有 message id，也看不到
 # metadata）：前者定位消息，后者带上「本轮之前已经降级的图片名」，让 vision 那一趟把新的
 # 省略项**合并进同一个占位块**——各写一块占位等于同一消息出现两份「已省略 N 张」，字节反而
@@ -429,7 +449,13 @@ def build_model_history(
             # 旗标接管：这条消息里「已经降级过」的图片不再重新编码，末尾统一回放占位文本。
             # 槽位口径必须与降级那一轮完全一致（每张被降级的图当初也占过一个
             # MODEL_IMAGE_HISTORY_LIMIT 槽位），否则后面第 4 张图会凭空补进来 ⇒ 字节又变。
-            omitted_names = local_omitted_image_names(metadata) if local_image_brain else []
+            # ⚠️ 默认停用（local_image_cap_enabled()）——本地大脑按"全部图片原样保留"走，
+            # 带旗标的老消息也一律回放真图（否则老会话会一直停留在占位形态上）。
+            omitted_names = (
+                local_omitted_image_names(metadata)
+                if (local_image_brain and local_image_cap_enabled())
+                else []
+            )
             omitted_left = Counter(omitted_names)
             omitted_replayed: list[str] = []
             consumed_slots = 0

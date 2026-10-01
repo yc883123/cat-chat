@@ -35,6 +35,7 @@ from naiba.skills.context import (  # noqa: E402
     LOCAL_DEFAULT_CONTEXT_WINDOW,
     fallback_context_window,
 )
+from naiba.core import history as history_mod  # noqa: E402
 from naiba.core.history import HISTORY_MESSAGE_ID_KEY  # noqa: E402
 from naiba.vision.runtime import VisionRouter  # noqa: E402
 
@@ -377,11 +378,39 @@ class LocalImageCapTests(unittest.TestCase):
         self.assertEqual(demotions, [], "没降级就不该回传旗标清单")
         self.assertIs(capped, history)
 
-    def test_prepare_history_applies_cap_only_to_local_multimodal(self) -> None:
+    def test_prepare_history_leaves_local_images_untouched_by_default(self) -> None:
+        """**默认口径（2026-10-01 用户实测纠正）**：本地大脑不做任何图片处理。
+
+        理由（§九.146 修订）：会话内连续跑时历史图片本来就在服务端 KV / 前缀缓存里，重发同样
+        字节不触发重新 prefill；而「保留窗口每轮滑动」会把断点推到历史最前面（滑掉最早那张），
+        才是「12 张以后丢缓存」的机制。所以本地分支与在线分支一样原样放行。
+        """
         limit = VisionRouter.LOCAL_REQUEST_IMAGE_LIMIT
         history = _history_with_images(limit + 3)
         local_profile = {**LOCAL_PROFILE, "supports_images": True}
-        capped, note, demotions = self.router.prepare_history(history, local_profile)
+        kept, note, demotions = self.router.prepare_history(history, local_profile)
+        self.assertEqual(note, "", "本地大脑默认不降级：不应有任何清洗说明")
+        self.assertEqual(demotions, [], "不该回传降级清单（否则 run/chat 会落旗标）")
+        self.assertIs(kept, history, "原样放行：连对象都不换")
+        self.assertEqual(
+            sum(
+                1
+                for item in kept
+                for part in item["content"]
+                if isinstance(part, dict) and part.get("type") == "image"
+            ),
+            limit + 3,
+            "全部超限图片也必须留在上下文里",
+        )
+
+    def test_prepare_history_applies_cap_only_to_local_multimodal_when_enabled(self) -> None:
+        """开关打开时（保留机制）仍只在本地多模态生效；在线模型一律不动。"""
+        limit = VisionRouter.LOCAL_REQUEST_IMAGE_LIMIT
+        local_profile = {**LOCAL_PROFILE, "supports_images": True}
+        with mock.patch.object(history_mod, "LOCAL_IMAGE_CAP_ENABLED", True):
+            capped, note, demotions = self.router.prepare_history(
+                _history_with_images(limit + 3), local_profile
+            )
         self.assertIn("本地模型单次请求图片上限", note)
         self.assertEqual(len(demotions), 3, "本地大脑：被省略的图片要回传旗标清单")
         self.assertEqual(

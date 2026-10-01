@@ -18,6 +18,7 @@ from naiba.core.history import (
     HISTORY_MESSAGE_ID_KEY,
     is_local_image_omitted_marker,
     local_brain,
+    local_image_cap_enabled,
     local_image_omitted_marker,
 )
 
@@ -621,13 +622,14 @@ class VisionRouter:
         # 多模态聊天模型始终直接收到原图；占位改写只服务纯文本聊天模型。
         brain_supports = self.brain_supports_images(brain_profile)
         if brain_supports:
-            # 本地多模态大脑同样直发原图，但必须有「每请求图片总量上限」：
-            # core.history 的 MODEL_IMAGE_HISTORY_LIMIT=3 是**每条 user 消息**的封顶
-            # （计数在 per-message 循环里重置），全对话没有任何总量约束，而多模态分支
-            # 过去直接 return 原样放行。16 小时会话可累积上百张 ~1MB 图并在每轮全量
-            # 重发 ⇒ 请求体上百 MB、本地视觉塔 prefill 做不完 ⇒ 界面永久停在
-            # 「等待本地模型资源」。在线模型不动（保住 1.6.0 的前缀缓存契约）。
-            if not local_brain(brain_profile):
+            # 本地多模态大脑**默认原样直发全部历史图片**（含旧的、含很多张）——2026-10-01 用户
+            # 实测纠正：会话内连续跑时这些图片本来就在服务端的 KV / 前缀缓存里，客户端重发同样的
+            # 字节只是请求体大一点，服务端命中前缀即复用（同会话含 3 张真图时命中率实测 87.9%），
+            # **不会每轮重新 prefill**。反倒是「保留窗口每轮滑动」会把断点推到历史最前面（滑掉的
+            # 是最早那张图）⇒ 后面全部重新 prefill —— 那才是「12 张以后丢缓存」的机制。
+            # 旧的「每请求图片总量上限」（`_cap_local_history_images`）因此默认停用，机制保留、
+            # 一处开关可恢复（core.history.LOCAL_IMAGE_CAP_ENABLED）。在线模型分支从来不动。
+            if not local_brain(brain_profile) or not local_image_cap_enabled():
                 return history, "", []
             return self._cap_local_history_images(history)
 

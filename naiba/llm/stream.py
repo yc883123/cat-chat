@@ -316,6 +316,12 @@ def _possible_fence_suffix_length(buffer: str) -> int:
     if indent > text_fences.MAX_FENCE_INDENT:
         return 0
     body = line[indent:]
+    if not body:
+        # 末行缩进后为空（整行只有 1–3 个空格）：没有围栏字符可判，直接放行。
+        # 缺这一条就会在下一行 body[0] 越界 ⇒ IndexError 打死整条流。纯空格 delta
+        # 真实可达（缩进、两空格硬换行被 SSE 拆包都是 1–3 个空格），且 IndexError
+        # 不在 runtime 的重试 except 列表里、Agent 只捕 RuntimeError ⇒ 整轮回答作废。
+        return 0
     if body[0] not in text_fences.FENCE_CHARACTERS:
         return 0
     if any(char != body[0] for char in body):
@@ -368,22 +374,28 @@ class _ProtocolStreamGuard:
         self._flush(status, final=True)
 
     # ---- 内部 ----
-    def _mask(self, text: str) -> str:
-        masked, _state = text_fences.fence_scan(
+    def _mask(self, text: str) -> tuple[str, text_fences.FenceState]:
+        """掩码 + **本块结束时**的围栏状态（两个返回值都要用，别丢掉状态）。"""
+        return text_fences.fence_scan(
             text,
             in_fence=self._in_fence,
             fence_char=self._fence_char,
             fence_length=self._fence_length,
         )
-        return masked
+
+    @staticmethod
+    def _emit(status: StatusCallback | None, text: str) -> None:
+        if text and status:
+            status({"type": "delta", "content": text})
 
     def _flush(self, status: StatusCallback | None, *, final: bool) -> None:
         pending = self.pending
         if not pending:
             return
-        masked = self._mask(pending)
+        masked, end_state = self._mask(pending)
         # 缓冲区开头正处于围栏内 ⇒ 这段是代码正文，不参与「开头是正文还是协议」判定
         # （掩码后是空格开头，_classify_agent_output 会判成 pending 并把代码块堵到流尾）。
+        # 这里问的是「缓冲区开头长什么样」，所以用进入本块时的状态 self._in_fence。
         if not self._in_fence and StreamMixins._classify_agent_output(pending) == "tool":
             self.detected = True
             self.pending = ""
@@ -391,28 +403,35 @@ class _ProtocolStreamGuard:
         offset = StreamMixins._tool_protocol_offset(masked)
         if offset is not None:
             visible = pending[:offset]
-            if visible and status:
-                status({"type": "delta", "content": visible})
+            if visible:
+                self._emit(status, visible)
                 self._advance(visible)
             self.detected = True
             self.pending = ""
             return
         if final:
-            if status:
-                status({"type": "delta", "content": pending})
+            self._emit(status, pending)
             self.pending = ""
             return
-        keep = 0
-        if not self._in_fence:
-            keep = max(
-                StreamMixins._possible_protocol_suffix_length(pending),
-                _possible_fence_suffix_length(pending),
-            )
+        # 「半个围栏标记」必须**无条件**留住：闭合围栏同样可能被 SSE 拆成两包
+        # （"``" + "`"）。漏留会把半截当正文发出去，_advance 又按整行扫 ⇒
+        # fence_close 认不出来、_in_fence 永久停在围栏内，之后真正的协议会被
+        # 当成围栏里的代码正文整套放行（协议明文进 UI）。
+        keep = _possible_fence_suffix_length(pending)
+        if not end_state[0]:
+            # 协议标记的半截只在**本块结束时已回到围栏外**才需要挽留。判据必须用本块
+            # 结束状态而不是 self._in_fence：本块内闭合围栏后掩码已经不在围栏里，
+            # 用进入时的状态会让「闭合围栏 + 协议前缀同块」整段外发——协议的前几个
+            # 字符一旦流出，下一块里就没有 `{` / `<to` 可锚，协议其余部分全部按正文外发。
+            keep = max(keep, StreamMixins._possible_protocol_suffix_length(pending))
         if keep >= len(pending):
             return
         visible = pending[:-keep] if keep else pending
-        if visible and status:
-            status({"type": "delta", "content": visible})
+        if visible:
+            # 状态推进不能挂在 status 上：status=None 是真实路径（视觉识别、子代理），
+            # 那时同样要把已放行的前缀从缓冲里去掉，围栏状态必须跟着推进，否则
+            # 同一个输入有没有 UI 回调会走出两种状态机。
+            self._emit(status, visible)
             self._advance(visible)
         self.pending = pending[-keep:] if keep else ""
 

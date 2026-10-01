@@ -108,6 +108,70 @@ class StreamingFenceTests(unittest.TestCase):
         self.assertEqual(action["type"], "tool")
         self.assertEqual(action["tool"], "read_file")
 
+    def test_whitespace_only_delta_does_not_crash(self) -> None:
+        """纯空格 delta（缩进 / 两空格硬换行被拆包）不得打死整条流。
+
+        旧写法在 ``_possible_fence_suffix_length`` 里对空行做 ``body[0]``：整行只有 1–3 个
+        空格时越界抛 IndexError。IndexError 不在 runtime 的重试 except 列表里、Agent 也只捕
+        RuntimeError ⇒ 用户看到「请求失败：string index out of range」，整轮回答作废且不重试。
+        """
+        for pieces in (
+            ["让我看看：\n", "  ", "接下来是第二行。\n"],
+            ["甲\n", " ", "乙"],
+            ["缩进：\n", "   ", "粗体"],
+        ):
+            content, emitted, _events = self._read(pieces)
+            self.assertEqual(emitted, "".join(pieces), f"纯空格拆包不得丢正文：{pieces!r}")
+            # content 走 _clean_content（末尾空白会 strip），这里只关心"一个字都没丢"。
+            self.assertEqual(content, "".join(pieces).strip())
+
+    def test_closing_fence_split_across_chunks(self) -> None:
+        """闭合围栏被 SSE 拆成两包（`` ` `` + `` `` ``）也必须认出来。
+
+        半截闭合行漏留 ⇒ 被当正文发出去、``_advance`` 又按整行扫 ⇒ 闭合认不出、
+        ``_in_fence`` 永久停在围栏内，之后真正的协议会被当成围栏里的代码正文整套放行。
+        """
+        protocol = '{"type": "tool", "tool": "pwsh", "arguments": {"command": "dir"}}'
+        for middle in (["``", "`\n"], ["`", "``\n"]):
+            pieces = ["说明：\n```json\n{\"a\": 1}\n", *middle, protocol]
+            content, emitted, _events = self._read(pieces)
+            self.assertNotIn('"command"', emitted, f"协议本体不得进 delta：{middle!r}")
+            self.assertTrue(emitted.endswith("```\n"), f"协议前半截不得外发：{emitted!r}")
+            self.assertEqual(SkillAgent._parse_action(content)["tool"], "pwsh")
+
+    def test_closing_fence_and_protocol_prefix_in_one_chunk(self) -> None:
+        """「闭合围栏 + 协议前几个字符」落在同一块：keep 必须按本块**结束**状态判。
+
+        用进入本块时的状态会因为「块内刚闭合围栏」而漏保 —— 协议前缀一旦流出，
+        下一块里就没有 ``{`` 可锚，协议其余部分全部按正文外发。
+        """
+        pieces = [
+            "说明：\n```json\n{\"a\": 1}\n",
+            "```\n{\"ty",
+            'pe": "tool", "tool": "pwsh", "arguments": {"command": "dir"}}',
+        ]
+        content, emitted, _events = self._read(pieces)
+        self.assertNotIn('"tool"', emitted, f"协议前缀不得外发：{emitted!r}")
+        self.assertEqual(SkillAgent._parse_action(content)["tool"], "pwsh")
+
+    def test_guard_state_does_not_depend_on_status_callback(self) -> None:
+        """status=None（视觉识别 / 子代理路径）时围栏状态同样必须推进。
+
+        状态推进挂在 ``if status`` 上 ⇒ 同一个输入有没有 UI 回调会走出两种状态机。
+        """
+        from naiba.llm.stream import _ProtocolStreamGuard
+
+        pieces = ["前言：\n```json\n", '{"type": "tool", "tool": "pwsh"}\n', "```\n后面还有正文"]
+        detected: list[bool] = []
+        for with_callback in (True, False):
+            guard = _ProtocolStreamGuard()
+            sink = (lambda _event: None) if with_callback else None
+            for piece in pieces:
+                guard.feed(piece, sink)
+            guard.finish(sink)
+            detected.append(guard.detected)
+        self.assertEqual(detected[0], detected[1], "有没有 UI 回调不能改变守卫的状态机")
+
 
 class TerminalFenceTests(unittest.TestCase):
     """终态层 ``_parse_action``：围栏内外、尾锚定的完整判定矩阵。"""

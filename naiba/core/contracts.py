@@ -26,6 +26,10 @@ RUN_CONTEXT_KEYS: tuple[str, ...] = (
     "mcp_active", "trace_messages", "plan_exit_content", "plan_step_title",
     "model_has_vision", "tool_defs", "workspace_dir", "media_intent",
     "event_sink", "truncation", "partial",
+    # 两枚**曾经逃逸出契约**的跨层裸键（§九.148，源码扫描当场逮到）：
+    # trace_system —— SkillAgent 带出的完整系统提示词原文（trace 只记增量、不含 system）；
+    # context_reset —— reset_context 工具置位的「本轮重置请求」，收尾路径据此落 metadata.session_start。
+    "trace_system", "context_reset",
 )
 
 # 运行期保持 dict 形态（零行为变化）；"带默认值/校验"经由工厂与校验函数落地，
@@ -69,6 +73,11 @@ def default_run_context() -> dict[str, Any]:
         # agent 仍把模型原文落库，但必须标注「未完成」，由 run/chat.py 落进 metadata.partial
         # （前端已有「未完成」徽标）。与 truncation 的区别：那是长度截断，这是格式校验失败。
         "partial": {},
+        # SkillAgent 带出的完整系统提示词原文（trace 增量不含 system）：first_turn 落盘取这份。
+        "trace_system": "",
+        # reset_context 工具的本轮重置请求（{"at","source","handoff_path","note","tasks"}）：
+        # 空 dict = 本轮没有重置请求；收尾路径据此把分割线写进 assistant 消息 metadata。
+        "context_reset": {},
     }
 
 
@@ -173,6 +182,9 @@ class RunContext(TypedDict, total=False):
     event_sink: Any                  # 工具实时进度出口（callable(dict) -> None；缺省不报进度）
     truncation: dict[str, Any]       # 本轮答复截断信息（finish_reason / truncated / continued）
     partial: dict[str, Any]          # 本轮正文不完整（reason / attempts）→ 消息 metadata.partial
+    # ---- 两枚曾逃逸的跨层键（§九.148：写侧在技能/工具层，读侧在 run/chat 收尾）----
+    trace_system: str                # SkillAgent 带出的完整系统提示词原文（first_turn 落盘用）
+    context_reset: dict[str, Any]    # reset_context 的本轮重置请求 → 消息 metadata.session_start
 
 
 class EventType(str, Enum):

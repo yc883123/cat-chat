@@ -48,6 +48,48 @@ async function trackRequests(page) {
   });
 }
 
+/**
+ * 记录**全程出现过**的确认卡（按 data-confirm-id 去重）。
+ *
+ * 为什么不看终态 DOM：本轮结束会把消息行整行重渲染成最终答复，确认卡可能随之消失；
+ * 拿「结束后还剩几张卡」当判据会把成功误报成失败（计划 §7 P1 验收阻断）。
+ * 出现次数统计对重渲染免疫，而且比快照计数更强——中途闪现又消失的第 2 张卡也会被抓到。
+ */
+async function watchConfirmCards(page) {
+  await page.addInitScript(() => {
+    window.__fenceConfirmIds = new Set();
+    const collect = (root) => {
+      try {
+        if (!root || !root.querySelectorAll) return;
+        // 节点本身就可能是确认卡（卡片是整块 insertAdjacentHTML 插进来的），
+        // querySelectorAll 只匹配后代，必须再单独判一次 matches。
+        if (root.matches && root.matches('.tool-confirm')) {
+          const own = root.getAttribute('data-confirm-id') || '';
+          if (own) window.__fenceConfirmIds.add(own);
+        }
+        root.querySelectorAll('.tool-confirm').forEach((el) => {
+          const id = el.getAttribute('data-confirm-id') || '';
+          if (id) window.__fenceConfirmIds.add(id);
+        });
+      } catch (err) {
+        /* 记录失败不影响页面 */
+      }
+    };
+    const start = () => {
+      collect(document);
+      try {
+        new MutationObserver((records) => {
+          records.forEach((record) => record.addedNodes.forEach((node) => collect(node)));
+        }).observe(document.documentElement, { childList: true, subtree: true });
+      } catch (err) {
+        /* 观察不到时退化为只统计已存在的卡片 */
+      }
+    };
+    if (document.documentElement) start();
+    else document.addEventListener('DOMContentLoaded', start, { once: true });
+  });
+}
+
 async function waitFor(fn, { timeout = 30000, interval = 200, label = '条件' } = {}) {
   const end = Date.now() + timeout;
   let last = null;
@@ -189,12 +231,17 @@ async function assertFinished(page, label) {
     { label: `${label} 最终答复出现`, timeout: 90000 },
   );
   const info = await page.evaluate(() => ({
-    cards: document.querySelectorAll('.tool-confirm').length,
+    // 终态只剩「出现过几次确认卡」这一条判据（不要求卡片仍留在 DOM 里）。
+    confirmIds: window.__fenceConfirmIds ? Array.from(window.__fenceConfirmIds) : null,
     tools: Array.from(document.querySelectorAll('.tool-run-title, .tool-run')).map(
       (el) => el.textContent || '',
     ),
   }));
-  check(info.cards === 1, `${label} 全程只弹了 1 张确认卡`, `实际 ${info.cards} 张`);
+  check(
+    Array.isArray(info.confirmIds) && info.confirmIds.length === 1,
+    `${label} 全程只出现过 1 张确认卡`,
+    `实际 ${JSON.stringify(info.confirmIds)}`,
+  );
   const joined = info.tools.join(' | ');
   check(joined.includes('list_directory'), `${label} 第一个围栏动作执行了`);
   check(joined.includes('read_file'), `${label} 第二个围栏动作免确认直接执行了`);
@@ -241,6 +288,7 @@ async function desktopFlow(browser) {
     if (msg.type() === 'error') errors.push(`console: ${msg.text()}`);
   });
   await trackRequests(page);
+  await watchConfirmCards(page);
   await page.goto(BASE, { waitUntil: 'domcontentloaded' });
   await waitFor(() => page.evaluate(() => Boolean(document.querySelector('#sendButton'))),
     { label: '应用启动', timeout: 30000 });
@@ -276,6 +324,7 @@ async function mobileFlow(browser) {
     if (msg.type() === 'error') errors.push(`console: ${msg.text()}`);
   });
   await trackRequests(page);
+  await watchConfirmCards(page);
   await page.goto(BASE, { waitUntil: 'domcontentloaded' });
   await sleep(1500);
   await openConversationByTitle(page, TITLE_MOBILE);

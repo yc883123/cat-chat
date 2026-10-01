@@ -283,8 +283,16 @@ export function renderPlanBar() {
       + (plan.detail?.message ? ` · ${escapeHtml(plan.detail.message)}` : '');
     if (plan.detail?.confirm_id) {
       const confirmId = escapeHtml(plan.detail.confirm_id);
+      // fenced = 动作来自代码块（围栏）文本；后端按「本 Run + 工作区 + 工具集合」授权，
+      // 所以按钮文案与说明必须让用户看懂批准范围（计划 2026-10-01 §2.6）。
+      const fenced = plan.detail.action_source === 'fenced';
+      const approveLabel = fenced ? '允许本轮继续执行后续操作' : '确认执行';
       actions = `<button type="button" data-plan-action="reject" data-confirm-id="${confirmId}">拒绝</button>`
-        + `<button type="button" class="plan-primary" data-plan-action="confirm" data-confirm-id="${confirmId}">确认执行</button>`;
+        + `<button type="button" class="plan-primary" data-plan-action="confirm" data-confirm-id="${confirmId}"`
+        + ` data-allow-run="${fenced ? '1' : '0'}">${approveLabel}</button>`;
+      if (fenced) {
+        text += ' · 该动作来自代码块（围栏）文本，允许后本 Run 内同类动作不再逐次询问';
+      }
     }
     actions += `<button type="button" data-plan-action="cancel" data-plan-id="${planId}">取消</button>`;
   } else if (plan.status === 'failed') {
@@ -392,16 +400,19 @@ export async function cancelPlan(planId) {
   await loadPlans();
 }
 
-export async function resolvePlanConfirmation(confirmId, approved) {
+export async function resolvePlanConfirmation(confirmId, approved, allowRun = undefined) {
   const runId = String(activePlan()?.detail?.run_id || state.chatRunId || '');
   if (!runId) {
     toast('找不到该确认所属的 Run');
     return;
   }
   try {
-    await api(approved ? '/api/tool/confirm' : '/api/tool/reject', {
-      method: 'POST', body: { run_id: runId, confirm_id: confirmId },
-    });
+    // 计划 2026-10-01 §2.6：显式传 allow_run，不再靠后端缺省值隐式授予 Run 级授权。
+    // 后端只收布尔（其它类型 400），所以「没给选择」时宁可不发这个字段，由后端按
+    // 围栏来源的既定兼容策略处理。
+    const body = { run_id: runId, confirm_id: confirmId };
+    if (typeof allowRun === 'boolean') body.allow_run = allowRun;
+    await api(approved ? '/api/tool/confirm' : '/api/tool/reject', { method: 'POST', body });
   } catch (error) {
     toast(`处理确认失败：${error.message}`);
   }

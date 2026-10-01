@@ -88,10 +88,42 @@ def resolve_mode_tools(
     return configured
 
 
+def plan_detail_for_event(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Run 事件 → Plan 详情（Plan 与普通对话共用同一份事件语义）。
+
+    计划 2026-10-01 §2.6：确认详情必须带 ``action_source``——前端据此把围栏来源的
+    确认卡改成「允许本轮继续执行后续操作」并写明授权范围，历史回放也读同一个字段。
+    """
+    kind = str(payload.get("type") or "")
+    if kind == "status":
+        return {"message": str(payload.get("message") or "正在执行")}
+    if kind == "tool_start":
+        return {
+            "message": f"正在执行 {payload.get('tool') or '工具'}",
+            "tool": str(payload.get("tool") or ""),
+        }
+    if kind == "tool_confirm":
+        return {
+            "message": "等待工具确认",
+            "tool": str(payload.get("tool_name") or ""),
+            "tool_desc": str(payload.get("tool_desc") or ""),
+            "arguments": payload.get("arguments") or {},
+            "confirm_id": str(payload.get("confirm_id") or ""),
+            "action_source": str(payload.get("action_source") or ""),
+        }
+    if kind == "tool_result":
+        return {"message": f"工具 {payload.get('tool') or ''} 执行完毕"}
+    return None
+
+
 class ReadOnlyToolExecutor:
     """只读工具执行代理：禁止写类工具与 MCP，http_request 仅允许 GET/HEAD。
 
     写类工具在 SkillAgent 层已通过 allowed_tools 过滤，本代理作为最后防线。
+    计划 2026-10-01 §2.2：判定收敛到 ``policy_denial`` 单一入口，并作为
+    **确认后的复核入口**（``recheck``）随待确认项一起保存——围栏来源动作走
+    ``request_confirmation`` 且批准后直接落 ``execute_unchecked``，若不复核，
+    只读约束会被确认链路整个绕开（实测：Plan + 围栏 ``http_request POST``）。
     """
 
     BLOCKED_TOOLS = {"write_file", "edit_file", "pwsh", "run_skill_script", "register_mcp"}
@@ -102,6 +134,19 @@ class ReadOnlyToolExecutor:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
 
+    def policy_denial(self, tool: str, arguments: dict[str, Any]) -> str:
+        """只读策略判定：返回空串=放行，非空=拒绝理由（确认前后唯一的判定入口）。"""
+        if tool in self.BLOCKED_TOOLS or "." in tool:
+            return f"当前为只读模式，已禁止工具：{tool}"
+        # 只读模式始终禁止 ComfyUI 的 run_workflow 等具有副作用的 MCP 工具。
+        if tool.endswith("__run_workflow"):
+            return f"当前为只读模式，已禁止工具：{tool}"
+        if tool == "http_request":
+            method = str((arguments or {}).get("method") or "GET").upper()
+            if method not in {"GET", "HEAD"}:
+                return f"只读模式仅允许 GET/HEAD 请求（收到 {method}）"
+        return ""
+
     def execute(
         self,
         tool: str,
@@ -109,16 +154,34 @@ class ReadOnlyToolExecutor:
         active_skills: list[dict[str, Any]],
         run_context: dict[str, Any] | None = None,
     ) -> tuple[bool, str]:
-        if tool in self.BLOCKED_TOOLS or "." in tool:
-            return False, f"当前为只读模式，已禁止工具：{tool}"
-        # 只读模式始终禁止 ComfyUI 的 run_workflow 等具有副作用的 MCP 工具。
-        if tool.endswith("__run_workflow"):
-            return False, f"当前为只读模式，已禁止工具：{tool}"
-        if tool == "http_request":
-            method = str((arguments or {}).get("method") or "GET").upper()
-            if method not in {"GET", "HEAD"}:
-                return False, f"只读模式仅允许 GET/HEAD 请求（收到 {method}）"
-        return self._inner.execute(tool, arguments, active_skills, run_context)
+        denial = self.policy_denial(tool, arguments)
+        if denial:
+            return False, denial
+        return self._inner.execute(
+            tool, arguments, active_skills, run_context, recheck=self.policy_denial
+        )
+
+    def request_confirmation(
+        self,
+        tool: str,
+        arguments: dict[str, Any],
+        active_skills: list[dict[str, Any]],
+        reason: str,
+        run_context: dict[str, Any] | None = None,
+        fenced_scope: dict[str, Any] | None = None,
+    ) -> tuple[bool, str]:
+        """围栏来源的确认请求同样先过只读判定，并把复核入口带进待确认项。
+
+        被禁止的工具（``pwsh`` / 工作区外写 / 非 GET 的 ``http_request`` …）在
+        置卡之前就拒绝：既不可能落到底层，也不给用户一张点了也必然失败的确认卡。
+        """
+        denial = self.policy_denial(tool, arguments)
+        if denial:
+            return False, denial
+        return self._inner.request_confirmation(
+            tool, arguments, active_skills, reason, run_context, fenced_scope,
+            recheck=self.policy_denial,
+        )
 
 
 class CraftToolExecutor:
@@ -571,22 +634,7 @@ class PlanManager:
                 raise TaskCancelled("计划已取消")
             if external_event is not None:
                 external_event(payload)
-            kind = str(payload.get("type") or "")
-            detail: dict[str, Any] | None = None
-            if kind == "status":
-                detail = {"message": str(payload.get("message") or "正在执行")}
-            elif kind == "tool_start":
-                detail = {"message": f"正在执行 {payload.get('tool') or '工具'}", "tool": str(payload.get("tool") or "")}
-            elif kind == "tool_confirm":
-                detail = {
-                    "message": "等待工具确认",
-                    "tool": str(payload.get("tool_name") or ""),
-                    "tool_desc": str(payload.get("tool_desc") or ""),
-                    "arguments": payload.get("arguments") or {},
-                    "confirm_id": str(payload.get("confirm_id") or ""),
-                }
-            elif kind == "tool_result":
-                detail = {"message": f"工具 {payload.get('tool') or ''} 执行完毕"}
+            detail = plan_detail_for_event(payload)
             if detail is not None:
                 try:
                     self.app.storage.update_plan(plan_id, detail=detail_with_run(detail))

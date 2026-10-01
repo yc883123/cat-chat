@@ -99,7 +99,34 @@ _HARMONY_CLOSE = re.compile(r"<\|close\|>[A-Za-z_][\w-]*(?:\s*<\|sep\|>)?", re.I
 # 内部判定，落库/展示前由 `_fence_outcome_text` 剥掉。
 _FENCED_REJECTED_MARKER = "FENCED_REJECTED:"
 _FENCED_SKIPPED_MARKER = "FENCED_SKIPPED:"
-_FENCED_MARKERS = (_FENCED_REJECTED_MARKER, _FENCED_SKIPPED_MARKER)
+_FENCED_EXPIRED_MARKER = "FENCED_EXPIRED:"
+_FENCED_MARKERS = (
+    _FENCED_REJECTED_MARKER,
+    _FENCED_SKIPPED_MARKER,
+    _FENCED_EXPIRED_MARKER,
+)
+
+# 等待确认阶段的失败文案：**都是「用户没批准」**（拒绝 / 确认失效 / 超时自动拒绝），
+# 不是工具执行失败。三者共用一个判定入口 ⇒ 共用同一条收尾路径（计划 2026-10-01 §2.4）：
+# 不回灌模型、当轮以原文收尾。
+_FENCED_WAIT_FAILURES = (
+    ("用户拒绝执行", _FENCED_REJECTED_MARKER, "用户拒绝了该代码块动作。"),
+    ("确认ID无效或已过期", _FENCED_EXPIRED_MARKER, "该确认已失效（已被处理或超时）。"),
+    ("确认请求已失效", _FENCED_EXPIRED_MARKER, "该确认已失效（已被处理或超时）。"),
+    ("用户未在", _FENCED_EXPIRED_MARKER, "确认已超时，系统自动拒绝。"),
+)
+
+
+def _fenced_wait_failure(result: Any) -> str:
+    """围栏动作「等人批准但没等到」时返回带标记的收尾串（否则空串）。
+
+    只认**用户侧结论**（拒绝/失效/超时）；真正的工具执行报错不在此列，照旧回灌模型。
+    """
+    text = str(result or "")
+    for prefix, marker, note in _FENCED_WAIT_FAILURES:
+        if text.startswith(prefix):
+            return f"{marker}未执行：{note}"
+    return ""
 
 
 def _fence_outcome_marker(result: Any) -> str:
@@ -1245,11 +1272,16 @@ class SkillAgent:
                 return "工具调用解析失败，已停止执行。", runs, reasonings, self._summarize_usage(usages)
             normalized_calls = [call if isinstance(call, dict) else {} for call in calls]
             action_source = str(action.get("source") or "")
-            call_sources = [
-                str(call.get("source") or action_source or "") for call in normalized_calls
-            ]
+            # 来源继承（计划 2026-10-01 §2.1）：`tools.calls` 里嵌套的 `source` 一律忽略，
+            # 每个 call 都继承顶层来源。否则整条围栏里的多工具动作只要有一个 call 标
+            # `source=final`（或 native），就能把自己降级成免确认，绕过围栏强制确认。
+            call_sources = [action_source for _ in normalized_calls]
+            # 围栏来源的多工具动作**串行**执行：并行时每个 call 都会各自去等一次确认，
+            # 用户会同时看到多张卡（批准一张，其余仍在悬挂等待）。串行 + 批准后写 Run 级
+            # 授权，才是「批准一次、后续同类动作直接执行」。
             parallel_safe = bool(
                 len(normalized_calls) > 1
+                and action_source != self.SOURCE_FENCED
                 and tool_registry is not None
                 and all(
                     str(call.get("tool") or "") not in {"todo_write"}
@@ -1577,9 +1609,12 @@ class SkillAgent:
                 success, result = self._run_executor(run_context).wait_for_confirmation(
                     confirm_id, timeout=1800, cancel_event=cancel_event
                 )
-            if fenced and not success and str(result).startswith("用户拒绝执行"):
-                # 用户拒绝围栏动作：不作为工具失败回灌模型（计划 §3.4），由上层以原文收尾。
-                return False, f"{_FENCED_REJECTED_MARKER}未执行：用户拒绝了该代码块动作。"
+            if fenced and not success:
+                wait_failure = _fenced_wait_failure(result)
+                if wait_failure:
+                    # 用户拒绝 / 确认失效 / 超时自动拒绝：都不作为工具失败回灌模型
+                    # （计划 §3.4），由上层以原文收尾。
+                    return False, wait_failure
         # 可重试错误：MCP / HTTP / Job 查询等；副作用工具（写文件/命令/脚本）不自动重试
         retryable = bool(tool_registry and getattr(tool_registry, "retryable", lambda _: False)(tool))
         deterministic_failure = any(marker in str(result or "") for marker in (
@@ -1649,11 +1684,16 @@ class SkillAgent:
 
         计划 §3.4/§3.5：拒绝后**不**把「用户拒绝执行」当新一轮模型指令回灌；当前轮
         直接结束，正文保留原始围栏内容，用户可据工具名/说明/参数自行判断。
+        确认失效 / 超时自动拒绝走**同一条**路径（计划 §2.4）——它们同属「用户没有批准」，
+        回灌只会让模型把同一条命令再发一遍、再等一次确认。
         """
         body = str(raw or "").strip()
         if marker == _FENCED_REJECTED_MARKER:
             note = "该动作未执行：你在确认卡上选择了「拒绝」。"
             status = "已拒绝执行该代码块动作；本轮结束，未执行任何命令。"
+        elif marker == _FENCED_EXPIRED_MARKER:
+            note = "该动作未执行：确认已失效或超时（没有收到你的批准）。"
+            status = "代码块动作的确认已失效或超时，本轮结束，未执行任何命令。"
         else:
             note = "该动作未执行：当前运行（子 Agent / 后台任务）没有可用的确认入口。"
             status = "代码块动作在当前运行形态下无法确认，已按原文收尾（未执行）。"

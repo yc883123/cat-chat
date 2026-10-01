@@ -55,6 +55,7 @@ S2M = "S2M 手机围栏授权"
 S3 = "S3 围栏动作被拒"
 S4 = "S4 围栏包 final"
 S5 = "S5 围栏示例加尾部裸协议"
+S6 = "S6 围栏多工具嵌套来源"
 
 SAMPLE_TEXT = "fence smoke fixture\n"
 
@@ -87,9 +88,20 @@ S5_TEXT = (
 )
 S5_FINAL = "目录列完了。"
 S2_FINAL = "两步都做完了。"
+S6_FINAL = "两步都做完了。"
 S3_SHOULD_NOT_BE_CALLED = "（不应到达：拒绝后不得再发起模型调用）"
 
-PROMPT_KEYS = (S1, S2, S2M, S3, S4, S5)
+# S6：整条响应是一段围栏的**多工具**动作，其中两个 call 分别标了 source=final / native。
+# 嵌套来源必须被忽略（全部继承顶层 fenced），而且这一批只能弹一次确认卡。
+FENCE_MULTI = fence(json.dumps({
+    "type": "tools",
+    "calls": [
+        {"tool": "list_directory", "arguments": {"path": "."}, "source": "final"},
+        {"tool": "read_file", "arguments": {"path": SAMPLE_FILE}, "source": "native"},
+    ],
+}, ensure_ascii=False))
+
+PROMPT_KEYS = (S1, S2, S2M, S3, S4, S5, S6)
 CALLS: dict[str, int] = {key: 0 for key in PROMPT_KEYS}
 CALLS_LOCK = threading.Lock()
 
@@ -101,6 +113,8 @@ def script_for(prompt: str, completed: int) -> str:
         return S4_TEXT
     if prompt == S5:
         return S5_TEXT if completed == 0 else S5_FINAL
+    if prompt == S6:
+        return FENCE_MULTI if completed == 0 else S6_FINAL
     if prompt in (S2, S2M):
         if completed == 0:
             return FENCE_LIST
@@ -248,7 +262,7 @@ def seed() -> dict[str, str]:
         "model": BOUND_MODEL,
     })
     ids: dict[str, str] = {}
-    for title in (S1, S3, S4, S5, S2, S2M):
+    for title in (S1, S3, S4, S5, S6, S2, S2M):
         conversation = storage.create_conversation(
             title,
             model_key=f"online:{PROVIDER_ID}",
@@ -463,6 +477,57 @@ def scenario_s3(ids: dict[str, str], checker: Checker) -> None:
     checker.ok("FENCED_REJECTED" not in content, "S3 内部标记不得落库")
 
 
+def scenario_s6(ids: dict[str, str], checker: Checker) -> None:
+    """整条围栏包多工具 + call 里嵌套 source：整体确认、只确认一次、按顺序执行。
+
+    对应计划 2026-10-01 §2.1 / §2.5：嵌套来源不得把顶层 fenced 降级；同一批动作
+    只能有一个确认回路（并行会让每个 call 各等一张卡，批准一张其余长时间悬挂）。
+    """
+    conversation_id = ids[S6]
+    collected: list[dict] = []
+    worker = threading.Thread(target=run_chat, args=(conversation_id, S6, collected), daemon=True)
+    worker.start()
+    confirm = wait_for_confirm(collected)
+    if confirm is None:
+        checker.ok(False, "S6 未等到 tool_confirm（嵌套 source 把围栏来源降级成免确认了？）")
+        return
+    checker.eq(str(confirm.get("action_source") or ""), "fenced", "S6 确认事件的 action_source")
+    run_id = str(confirm.get("run_id") or "")
+    checker.ok(bool(run_id), "S6 确认事件必须带 run_id")
+    # 批准前：不得已经出现工具结果（整批动作都还没执行）。**必须用 /api/chat 的实时
+    # 流（collected），不能调 /api/runs/{id}/events**——那是流式端点，对未结束的 run
+    # 会一直挂着，而 run 又在等这里的批准 ⇒ 自己等自己，死锁。
+    kinds = [str(event.get("type") or "") for event in list(collected)]
+    checker.ok(
+        "tool_result" not in kinds,
+        f"S6 批准前不应有任何工具结果，实际事件序列：{kinds}",
+    )
+    post("/api/tool/confirm", {
+        "confirm_id": str(confirm.get("confirm_id") or ""),
+        "run_id": run_id,
+        "allow_run": True,
+    })
+    checker.ok(wait_run_end(worker), "S6 批准后 run 必须在限期内收尾")
+
+    message = last_assistant(conversation_id)
+    checker.eq(
+        tool_names(message), ["list_directory", "read_file"],
+        "S6 两个围栏调用都执行且顺序与动作顺序一致",
+    )
+    runs = [item.get("run") or {} for item in activity_of(message) if item.get("type") == "tool"]
+    checker.ok(all(bool(run.get("success")) for run in runs), f"S6 工具必须全部成功：{runs}")
+    checker.eq(
+        [str(run.get("action_source") or "") for run in runs], ["fenced", "fenced"],
+        "S6 嵌套 source=final/native 不得改写记账里的来源",
+    )
+    checker.eq(str(message.get("content") or ""), S6_FINAL, "S6 最终答复")
+    confirms = [
+        event for event in run_events(run_id) if str(event.get("type")) == "tool_confirm"
+    ]
+    checker.eq(len(confirms), 1, "S6 同一批围栏动作只应确认一次")
+    checker.eq(CALLS[S6], 2, "S6 模型调用次数（首轮动作 + 收尾答复）")
+
+
 # ---------------------------------------------------------------- B 段（浏览器）
 def browser_part(checker: Checker) -> None:
     env = dict(os.environ)
@@ -549,6 +614,7 @@ def main() -> int:
         scenario_s4(ids, checker)
         scenario_s5(ids, checker)
         scenario_s3(ids, checker)
+        scenario_s6(ids, checker)
         browser_part(checker)
 
         if checker.failures:
@@ -559,7 +625,8 @@ def main() -> int:
         print(
             "冒烟通过：正文夹围栏示例不执行且正文完整；围栏包 final 直接放行；"
             "围栏示例+尾部裸协议只执行裸协议（auto 档不弹卡）；围栏动作被拒不执行也不重发；"
-            "整条围栏动作桌面与手机各确认一次、批准本轮后第二个动作免确认。"
+            "整条围栏动作桌面与手机各确认一次、批准本轮后第二个动作免确认；"
+            "围栏里的多工具动作嵌套来源不得降级、只弹一张卡且按顺序执行。"
         )
         return 0
     except Exception as exc:  # noqa: BLE001 - 冒烟要把异常变成可读结论

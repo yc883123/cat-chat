@@ -193,8 +193,15 @@ class ToolExecutor:
         reason: str,
         run_context: dict[str, Any] | None = None,
         extra: dict[str, Any] | None = None,
+        recheck: Callable[[str, dict[str, Any]], str] | None = None,
     ) -> tuple[bool, str]:
-        """登记一次待确认并返回 ``NEED_CONFIRM`` 协议串（唯一的协议构造点）。"""
+        """登记一次待确认并返回 ``NEED_CONFIRM`` 协议串（唯一的协议构造点）。
+
+        ``recheck``（计划 2026-10-01 §2.2）是**确认后的复核入口**：包装执行器
+        （ReadOnly 等）把「本包装器自己的策略判定」随待确认项一起存下来，
+        批准时先复核一遍再落底层 ``execute_unchecked``——确认后的执行因此
+        不会绕过包装层（例如只读模式下的 POST / run_workflow）。
+        """
         tool = self._resolve_tool_name(tool)
         if self.permission_mode == "deny":
             return False, f"权限被拒绝：{reason}（工具：{tool}）"
@@ -206,6 +213,8 @@ class ToolExecutor:
             "run_context": run_context,
             "processing": False,
         }
+        if callable(recheck):
+            pending["recheck"] = recheck
         if extra:
             pending.update(extra)
         with self._confirmation_lock:
@@ -228,16 +237,18 @@ class ToolExecutor:
         reason: str,
         run_context: dict[str, Any] | None = None,
         fenced_scope: dict[str, Any] | None = None,
+        recheck: Callable[[str, dict[str, Any]], str] | None = None,
     ) -> tuple[bool, str]:
         """显式要求一次确认（**不经过权限策略**）：供「围栏来源动作一律先确认」使用。
 
         与 ``execute`` 的差别只有一处：判定来源不是 ``permission_mode`` 而是调用方。
         ``fenced_scope`` 非空时，批准会顺带授予本次 Run 的围栏动作一次授权
-        （见 ``grant_fenced_approval``）。
+        （见 ``grant_fenced_approval``）。``recheck`` 见 ``_enqueue_confirmation``。
         """
         return self._enqueue_confirmation(
             tool, arguments, active_skills, reason, run_context,
             extra={"fenced_scope": dict(fenced_scope)} if fenced_scope else None,
+            recheck=recheck,
         )
 
     def execute(
@@ -246,6 +257,7 @@ class ToolExecutor:
         arguments: dict[str, Any],
         active_skills: list[dict[str, Any]],
         run_context: dict[str, Any] | None = None,
+        recheck: Callable[[str, dict[str, Any]], str] | None = None,
     ) -> tuple[bool, str]:
         try:
             reason = self._confirmation_reason(tool, arguments, active_skills, run_context)
@@ -253,7 +265,7 @@ class ToolExecutor:
             return False, f"{type(exc).__name__}: {exc}"
         if reason:
             return self._enqueue_confirmation(
-                tool, arguments, active_skills, reason, run_context
+                tool, arguments, active_skills, reason, run_context, recheck=recheck
             )
         return self.execute_unchecked(tool, arguments, active_skills, run_context)
 
@@ -287,6 +299,21 @@ class ToolExecutor:
         except Exception as exc:
             return False, f"{type(exc).__name__}: {exc}"
 
+    @staticmethod
+    def _post_check_denial(pending: dict[str, Any]) -> str:
+        """批准时的复核：返回非空即表示「确认通过了，但策略仍不允许」，禁止执行。
+
+        兜底原则与 ``_evaluate_confirmation_reason`` 一致：复核**抛异常也拒绝**
+        （fail-closed），不因为包装层出错而放行一个本该被拦的动作。
+        """
+        check = pending.get("recheck")
+        if not callable(check):
+            return ""
+        try:
+            return str(check(pending["tool"], pending.get("arguments") or {}) or "")
+        except Exception as exc:
+            return f"确认后复核失败（已拒绝执行）：{type(exc).__name__}: {exc}"
+
     def confirm_execute(self, confirm_id: str, allow_run: bool | None = None) -> tuple[bool, str]:
         """确认并执行待确认的工具调用"""
         with self._confirmation_lock:
@@ -296,6 +323,12 @@ class ToolExecutor:
             if pending.get("processing"):
                 return False, "该操作正在执行"
             pending["processing"] = True
+            denial = self._post_check_denial(pending)
+            if denial:
+                result = (False, denial)
+                self.pending_confirmation.pop(confirm_id, None)
+                self.confirmation_results[confirm_id] = result
+                return result
             self._apply_fenced_scope(pending, allow_run)
         result = self.execute_unchecked(
             pending["tool"], pending["arguments"], pending["active_skills"], pending.get("run_context")
@@ -314,6 +347,14 @@ class ToolExecutor:
             if pending.get("processing"):
                 return True, "工具已在执行"
             pending["processing"] = True
+            denial = self._post_check_denial(pending)
+            if denial:
+                # 复核不通过：同样不能执行，但必须把结论写回 confirmation_results——
+                # 正在等待的 Run 靠它收尾，否则会一直等到 30 分钟超时。
+                result = (False, denial)
+                self.pending_confirmation.pop(confirm_id, None)
+                self.confirmation_results[confirm_id] = result
+                return result
             self._apply_fenced_scope(pending, allow_run)
 
         def worker() -> None:

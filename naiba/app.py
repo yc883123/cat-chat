@@ -1054,9 +1054,14 @@ class NaibaChatApp:
             return
         # 计划 2026-10-01 §3.4：allow_run=False 表示「只允许这一次」；缺省（含旧前端）
         # 对围栏来源确认按「允许本轮继续执行后续操作」处理（否则连续任务会退化成反复点确认）。
+        # 计划 §2.3：只接受 JSON true/false。字符串 "false"、0/1、数组、对象一律 400——
+        # 它们经 bool() 转换后可能变成 True，把 Run 级授权**静默放大**到整轮。
         allow_run = body.get("allow_run")
-        if allow_run is not None:
-            allow_run = bool(allow_run)
+        if allow_run is not None and not isinstance(allow_run, bool):
+            return self._reply(
+                {"error": "allow_run 必须是布尔值（true/false）"}, HTTPStatus.BAD_REQUEST
+            )
+            return
         # Do not hold the browser's approval request open while a generation,
         # command or MCP action runs for minutes. The owning Run keeps waiting
         # for the real result through the confirmation condition.

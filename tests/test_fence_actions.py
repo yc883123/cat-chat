@@ -20,12 +20,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from naiba.app import NaibaChatApp  # noqa: E402
 from naiba.core.text_fences import (  # noqa: E402
     fence_mask,
     is_fence_noise,
     unwrap_whole_response_fence,
 )
 from naiba.llm.stream import StreamMixins, _FenceGuard  # noqa: E402
+from naiba.plans import ReadOnlyToolExecutor, plan_detail_for_event  # noqa: E402
 from naiba.skills.agent import SkillAgent  # noqa: E402
 from naiba.tools.registry import ToolRegistry  # noqa: E402
 
@@ -433,15 +435,15 @@ class _Catalog:
 
 
 class _Registry(ToolRegistry):
-    """最小注册表：只暴露一个工具，用来观察它究竟有没有被执行。"""
+    """最小注册表：只暴露给定工具，用来观察它们究竟有没有被执行。"""
 
-    def __init__(self, spec):
+    def __init__(self, *specs):
         super().__init__()
         self.calls = []
-        self._spec = spec
+        self._specs = {spec.name: spec for spec in specs}
 
     def get(self, name):
-        return self._spec if name == self._spec.name else None
+        return self._specs.get(name)
 
     def side_effect(self, name):
         return False
@@ -454,7 +456,7 @@ class _Registry(ToolRegistry):
 
     def execute(self, tool, arguments, active, run_context=None):
         self.calls.append(tool)
-        return self._spec.execute(arguments, active, run_context)
+        return self._specs[tool].execute(arguments, active, run_context)
 
 
 class AgentFenceTurnTests(unittest.TestCase):
@@ -466,7 +468,7 @@ class AgentFenceTurnTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _spec(self):
+    def _spec(self, name="read_file"):
         from naiba.mcp import MCPRegistry
         from naiba.tools.providers.core import CoreToolProvider, ToolContext
 
@@ -477,7 +479,7 @@ class AgentFenceTurnTests(unittest.TestCase):
             mcp_registry=MCPRegistry([]),
             mcp_register=None,
         ))
-        return next(item for item in provider.tools() if item.name == "read_file")
+        return next(item for item in provider.tools() if item.name == name)
 
     def _run(self, replies, run_context_extra=None, registry=None):
         executor = wired_executor(self.root, mode="auto")
@@ -646,6 +648,390 @@ class AgentFenceTurnTests(unittest.TestCase):
         response, _runs, _registry, _executor = self._run([raw])
         self.assertIn("无法自动纠正", response)
         self.assertIn("read_file", response, "末次解析失败必须保留模型最后一轮原文")
+
+
+class NestedSourceOverrideTests(AgentFenceTurnTests):
+    """计划 2026-10-01 §2.1：`tools.calls` 里的嵌套 `source` 不得降级确认要求。
+
+    整条响应是一段围栏时，围栏里的多工具 JSON 只要有一个 call 标了 `source=final`
+    （或 `native`），旧实现就会把这个 call 当成「免确认来源」——于是 `pwsh` 这类
+    危险工具能借着围栏整体合法而绕过强制确认。现在每个 call 一律继承顶层来源。
+    """
+
+    def _fenced_multi(self, calls):
+        payload = json.dumps({"type": "tools", "calls": calls}, ensure_ascii=False)
+        return f"{F}json\n{payload}\n{F}"
+
+    def _run_multi(self, raw, verdict, allow_run=True):
+        """跑一轮多工具围栏动作，返回 ``(runs, registry, events, completions, 批准前已执行的工具)``。"""
+        executor = wired_executor(self.root, mode="auto")
+        registry = _Registry(self._spec("read_file"), self._spec("list_directory"))
+        executor.set_def_resolver(registry.get)
+        events: list[dict] = []
+        completions = {"count": 0}
+        executed_before_approval: list[str] = []
+        answers = iter([raw, "两个都做完了。"])
+
+        def complete(_profile, _messages, _options, _event):
+            completions["count"] += 1
+            return next(answers, "两个都做完了。")
+
+        def watcher():
+            for _ in range(800):
+                pending = list(executor.pending_confirmation.keys())
+                if pending:
+                    executed_before_approval.extend(registry.calls)
+                    if verdict == "approve":
+                        executor.confirm_execute(pending[0], allow_run=allow_run)
+                    elif verdict == "reject":
+                        executor.reject_execute(pending[0])
+                    elif verdict == "expire":
+                        # 模拟确认失效（实际链路里是超时/已被处理）：直接摘掉待确认项，
+                        # wait_for_confirmation 会返回「确认请求已失效」。
+                        executor.pending_confirmation.pop(pending[0], None)
+                    return
+                time.sleep(0.01)
+
+        threading.Thread(target=watcher, daemon=True).start()
+        worker = SkillAgent(_Catalog(), executor, complete, None)
+        response, runs, _reasonings, _usage = worker.run(
+            "两步都做一下",
+            [],
+            {"kind": "local", "model": "m", "context_window": 32768},
+            {"stream": False, "max_tokens": 512, "max_steps": 4},
+            {"mode": "auto", "skill_ids": []},
+            [],
+            "",
+            ["read_file", "list_directory"],
+            events.append,
+            None,
+            tool_registry=registry,
+            run_context={
+                "run_id": "run-nested", "conversation_id": "c", "executor": executor,
+                "workspace_dir": str(self.root), "confirmation_ui": True,
+            },
+        )
+        return {
+            "response": response, "runs": runs, "registry": registry, "events": events,
+            "completions": completions["count"], "before": executed_before_approval,
+        }
+
+    def test_nested_source_cannot_downgrade_fenced_confirmation(self):
+        raw = self._fenced_multi([
+            {"tool": "read_file", "arguments": {"path": str(self.root / "a.txt")},
+             "source": "final"},
+            {"tool": "list_directory", "arguments": {"path": "."}, "source": "native"},
+        ])
+        outcome = self._run_multi(raw, "approve", allow_run=True)
+        confirms = [e for e in outcome["events"] if e.get("type") == "tool_confirm"]
+        self.assertTrue(confirms, "围栏里的多工具动作必须产生确认卡")
+        self.assertEqual(
+            [e.get("action_source") for e in confirms], ["fenced"],
+            "嵌套的 source=final/native 不得把顶层 fenced 降级",
+        )
+        # 批准前不得有任何执行：确认事件之前不许出现任何工具结果事件
+        # （确认的那一次是经 `execute_unchecked` 直接落 def 执行的，不走注册表，
+        #  所以只盯 registry.calls 会漏，必须按事件顺序判）。
+        kinds = [e.get("type") for e in outcome["events"]]
+        first_confirm = kinds.index("tool_confirm")
+        self.assertNotIn("tool_result", kinds[:first_confirm], "批准之前任何调用都不许执行")
+        self.assertEqual(outcome["before"], [])
+        self.assertEqual(
+            [(r.get("tool"), r.get("success")) for r in outcome["runs"]],
+            [("read_file", True), ("list_directory", True)],
+            "批准后两个调用都应执行（第二个复用 Run 级授权）",
+        )
+        self.assertEqual(
+            [r.get("source") for r in outcome["runs"]], ["fenced", "fenced"],
+            "记账里的来源也必须全部是 fenced",
+        )
+
+    def test_fenced_multi_tool_asks_exactly_once(self):
+        raw = self._fenced_multi([
+            {"tool": "read_file", "arguments": {"path": str(self.root / "a.txt")}},
+            {"tool": "list_directory", "arguments": {"path": "."}},
+        ])
+        outcome = self._run_multi(raw, "approve", allow_run=True)
+        confirms = [e for e in outcome["events"] if e.get("type") == "tool_confirm"]
+        self.assertEqual(
+            len(confirms), 1,
+            "同一批围栏动作只应有一个确认回路（并行会同时挂出多张卡）",
+        )
+
+    def test_fenced_multi_tool_reject_stops_the_whole_batch(self):
+        raw = self._fenced_multi([
+            {"tool": "read_file", "arguments": {"path": str(self.root / "a.txt")}},
+            {"tool": "list_directory", "arguments": {"path": "."}},
+        ])
+        outcome = self._run_multi(raw, "reject")
+        self.assertEqual(outcome["registry"].calls, [], "拒绝后整条动作都不许执行")
+        self.assertIn("未执行", outcome["response"])
+        self.assertIn(F, outcome["response"], "收尾必须保留原始围栏内容")
+        self.assertEqual(
+            outcome["completions"], 1,
+            "拒绝后不得再发起模型请求（否则模型会把同一条命令再发一遍）",
+        )
+
+    def test_expired_confirmation_ends_turn_without_refeedback(self):
+        raw = self._fenced_multi([
+            {"tool": "read_file", "arguments": {"path": str(self.root / "a.txt")}},
+        ])
+        outcome = self._run_multi(raw, "expire")
+        self.assertEqual(outcome["registry"].calls, [], "确认失效后不得执行")
+        self.assertIn("未执行", outcome["response"])
+        self.assertIn("失效", outcome["response"])
+        self.assertEqual(outcome["completions"], 1, "确认失效须与拒绝走同一条收尾")
+        self.assertNotIn("FENCED_", outcome["response"], "内部标记不得进入用户可见文案")
+
+    def test_timeout_message_maps_to_fenced_expired(self):
+        from naiba.skills.agent import _fenced_wait_failure
+
+        for text in (
+            "用户拒绝执行：pwsh",
+            "用户未在30分钟内确认，已自动拒绝",
+            "确认请求已失效",
+            "确认ID无效或已过期",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(_fenced_wait_failure(text), text)
+        self.assertEqual(_fenced_wait_failure("命令返回非零退出码"), "")
+
+
+class PlanReadOnlyConfirmTests(unittest.TestCase):
+    """计划 2026-10-01 §2.2：只读代理的判定必须在**确认之后**依然生效。
+
+    围栏来源动作走 ``request_confirmation``，批准后直接落 ``execute_unchecked``——
+    若只读判定只挂在 ``execute`` 入口，Plan 模式下一条围栏 ``http_request POST``
+    批准后就会真的发出去（只读约束被确认链路整个绕开）。
+    """
+
+    class _Spec:
+        def __init__(self, name, log):
+            self.name = name
+            self.log = log
+            self.side_effect = False
+            self.policy = None
+
+        def execute(self, arguments, active_skills, run_context=None):
+            self.log.append(self.name)
+            return True, f"{self.name} done"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.log: list[str] = []
+        self.executor = wired_executor(self.root, mode="auto")
+        self.specs = {
+            name: self._Spec(name, self.log)
+            for name in ("http_request", "read_file", "pwsh", "write_file")
+        }
+        self.executor.set_def_resolver(self.specs.get)
+        self.wrapper = ReadOnlyToolExecutor(self.executor)
+        self.agent = SkillAgent(None, self.wrapper, None, None)
+        self.run_context = {
+            "executor": self.wrapper,
+            "workspace_dir": str(self.root),
+            "confirmation_ui": True,
+        }
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _call(self, tool, arguments, source="fenced", allowed=None):
+        return self.agent._execute_with_retry(
+            tool, arguments, [], set(allowed or {tool}), None, None,
+            lambda _payload: None, self.run_context, source,
+        )
+
+    def _call_bounded(self, tool, arguments, source="fenced", allowed=None, timeout=20):
+        outcome: dict = {}
+
+        def caller():
+            try:
+                outcome["result"] = self._call(tool, arguments, source, allowed)
+            except Exception as exc:  # pragma: no cover - 失败要看见原因
+                outcome["error"] = exc
+
+        thread = threading.Thread(target=caller, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout)
+        self.assertFalse(thread.is_alive(), "调用迟迟不返回：是不是又在等一个不存在的确认？")
+        self.assertNotIn("error", outcome, outcome.get("error"))
+        return outcome["result"]
+
+    def test_fenced_post_is_refused_before_any_confirmation(self):
+        ok, out = self._call_bounded(
+            "http_request", {"url": "https://example.invalid", "method": "POST"}
+        )
+        self.assertFalse(ok, out)
+        self.assertIn("只读模式仅允许 GET/HEAD", out)
+        self.assertEqual(self.executor.pending_confirmation, {}, "注定失败的动作不该弹卡")
+        self.assertEqual(self.log, [], "底层实现绝不能被调用")
+
+    def test_fenced_run_workflow_is_refused(self):
+        ok, out = self._call_bounded("comfyui__run_workflow", {}, allowed={"comfyui__run_workflow"})
+        self.assertFalse(ok, out)
+        self.assertIn("只读模式", out)
+        self.assertEqual(self.executor.pending_confirmation, {})
+
+    def test_fenced_get_is_confirmed_then_executed(self):
+        """只读能力不能被整体误伤：GET 仍应走「确认 → 执行」。"""
+        outcome: dict = {}
+
+        def caller():
+            outcome["result"] = self._call("http_request", {"url": "https://example.invalid"})
+
+        thread = threading.Thread(target=caller, daemon=True)
+        thread.start()
+        pending = []
+        for _ in range(600):
+            pending = list(self.executor.pending_confirmation.keys())
+            if pending:
+                break
+            if not thread.is_alive():
+                break
+            time.sleep(0.01)
+        self.assertTrue(pending, "只读来源的 GET 也必须先确认")
+        self.assertEqual(self.log, [], "批准前不得执行")
+        self.executor.confirm_execute(pending[0], allow_run=True)
+        thread.join(timeout=20)
+        self.assertFalse(thread.is_alive())
+        self.assertTrue(outcome["result"][0], outcome["result"])
+        self.assertEqual(self.log, ["http_request"], "批准后只读的 GET 必须真的执行")
+
+    def test_recheck_blocks_execution_when_policy_breaks_after_card(self):
+        """确认后的复核入口确实挂在批准路径上，而不是只在入口挡一次。
+
+        构造方式：先让一个**通过**只读判定的调用正常弹卡，然后在批准前把待确认项里的
+        参数改成越权形态（``GET`` → ``POST``）。批准时复核必须以**确认时的参数**重新判定。
+        """
+        outcome: dict = {}
+
+        def caller():
+            outcome["result"] = self._call("http_request", {"url": "https://example.invalid"})
+
+        thread = threading.Thread(target=caller, daemon=True)
+        thread.start()
+        pending = []
+        for _ in range(600):
+            pending = list(self.executor.pending_confirmation.keys())
+            if pending:
+                break
+            if not thread.is_alive():
+                break
+            time.sleep(0.01)
+        self.assertTrue(pending)
+        self.executor.pending_confirmation[pending[0]]["arguments"]["method"] = "POST"
+        ok, out = self.executor.confirm_execute(pending[0], allow_run=True)
+        thread.join(timeout=20)
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(ok, out)
+        self.assertIn("只读模式仅允许 GET/HEAD", out)
+        self.assertEqual(self.log, [], "复核不通过时底层实现不能被调用")
+
+    def test_readonly_execute_path_also_carries_recheck(self):
+        """普通（非围栏）路径：确认卡也是带复核入口的。"""
+        ok, out = self.wrapper.execute("pwsh", {"command": "dir"}, [], self.run_context)
+        self.assertFalse(ok, out)
+        self.assertIn("已禁止工具", out)
+        ok, out = self.wrapper.execute("http_request", {"method": "GET"}, [], self.run_context)
+        self.assertTrue(ok, out)
+        self.executor.pending_confirmation.clear()
+        self.assertEqual(self.log, ["http_request"])
+
+
+class PlanConfirmContractTests(unittest.TestCase):
+    """计划 2026-10-01 §2.6：Plan 的确认详情与普通对话共用同一来源字段与终态语义。"""
+
+    def test_tool_confirm_detail_carries_action_source(self):
+        detail = plan_detail_for_event({
+            "type": "tool_confirm",
+            "confirm_id": "c-1",
+            "tool_name": "read_file",
+            "tool_desc": "读取文件",
+            "arguments": {"path": "a.txt"},
+            "action_source": "fenced",
+        })
+        self.assertEqual(detail["confirm_id"], "c-1")
+        self.assertEqual(detail["tool"], "read_file")
+        self.assertEqual(detail["tool_desc"], "读取文件")
+        self.assertEqual(detail["arguments"], {"path": "a.txt"})
+        self.assertEqual(detail["action_source"], "fenced")
+
+    def test_missing_source_degrades_to_plain_confirmation(self):
+        detail = plan_detail_for_event({"type": "tool_confirm", "confirm_id": "c-2"})
+        self.assertEqual(detail["action_source"], "", "缺来源时按普通确认处理，不得默认 fenced")
+
+    def test_other_events_keep_their_shape(self):
+        self.assertEqual(
+            plan_detail_for_event({"type": "status", "message": "跑起来了"}),
+            {"message": "跑起来了"},
+        )
+        self.assertEqual(
+            plan_detail_for_event({"type": "tool_start", "tool": "read_file"}),
+            {"message": "正在执行 read_file", "tool": "read_file"},
+        )
+        self.assertEqual(
+            plan_detail_for_event({"type": "tool_result", "tool": "read_file"}),
+            {"message": "工具 read_file 执行完毕"},
+        )
+        self.assertIsNone(plan_detail_for_event({"type": "delta", "content": "…"}))
+
+
+class AllowRunProtocolTests(unittest.TestCase):
+    """计划 2026-10-01 §2.3：``allow_run`` 只接受真正的布尔值。
+
+    ``bool("false")`` 是 ``True``：旧实现会把字符串 ``"false"`` 当成「允许本轮继续」，
+    静默把一次授权放大成整轮授权。类型不对必须 400，不能悄悄转换。
+    """
+
+    class _Runs:
+        def __init__(self):
+            self.seen: list[Any] = []
+
+        def confirm_tool_async(self, run_id, confirm_id, allow_run=None):
+            self.seen.append(allow_run)
+            return True, "ok"
+
+    class _Stub:
+        def __init__(self):
+            self.runs = AllowRunProtocolTests._Runs()
+            self.replies: list[tuple[Any, int]] = []
+
+        def _reply(self, payload, status=200):
+            self.replies.append((payload, status))
+            return payload, status
+
+    def _call(self, body):
+        stub = self._Stub()
+        NaibaChatApp._confirm_tool(stub, body)
+        return stub
+
+    def test_non_boolean_values_are_rejected(self):
+        for value in ("false", "true", "", 0, 1, [], {}, ["true"]):
+            with self.subTest(value=value):
+                stub = self._call({"run_id": "r", "confirm_id": "c", "allow_run": value})
+                self.assertEqual(stub.runs.seen, [], f"{value!r} 不该被当成授权")
+                self.assertEqual(stub.replies[-1][1], 400, stub.replies)
+                self.assertIn("布尔值", str(stub.replies[-1][0].get("error") or ""))
+
+    def test_boolean_values_are_forwarded_verbatim(self):
+        for value in (True, False):
+            with self.subTest(value=value):
+                stub = self._call({"run_id": "r", "confirm_id": "c", "allow_run": value})
+                self.assertEqual(stub.runs.seen, [value])
+                self.assertEqual(stub.replies[-1][1], 200)
+
+    def test_missing_field_keeps_documented_legacy_default(self):
+        """旧前端不带该字段：按「围栏来源 ⇒ 允许本轮继续」的既定兼容策略处理（None）。"""
+        stub = self._call({"run_id": "r", "confirm_id": "c"})
+        self.assertEqual(stub.runs.seen, [None])
+        self.assertEqual(stub.replies[-1][1], 200)
+
+    def test_missing_identifiers_are_rejected(self):
+        stub = self._call({"run_id": "", "confirm_id": ""})
+        self.assertEqual(stub.runs.seen, [])
+        self.assertEqual(stub.replies[-1][1], 400)
 
 
 if __name__ == "__main__":

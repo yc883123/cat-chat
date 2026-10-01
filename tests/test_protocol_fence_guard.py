@@ -256,6 +256,115 @@ class TerminalFenceTests(unittest.TestCase):
     def test_plain_json_answer_is_not_protocol(self) -> None:
         self.assertEqual(SkillAgent._parse_action('{"answer": "就是这两个数"}')["type"], "final")
 
+    # ---- 「形状完整」与「被切断」必须分开（否则已上线方言退化成三次重试）----
+
+    DEEPSEEK_WRAPPED = (
+        '<tool type="tool">\n'
+        '<tool name="read_file">\n'
+        '<parameter name="path">D:\\素材\\单元03.md</parameter>\n'
+        '<parameter name="max_chars">30000</parameter>\n'
+        '</tool>\n'
+        '</invoke>'
+    )
+
+    def test_deepseek_wrapped_named_tool_still_executes(self) -> None:
+        """回归：已上线的 DeepSeek 包装方言（外层 ``<tool type="tool">`` + ``</invoke>`` 收尾）。
+
+        取到内层 ``<tool name=…>…</tool>`` 之后尾部落的是外层收尾标签；尾锚定若只放行
+        「空白 / 围栏行」，整条方言会被判成"协议后面还接正文"，最终连续三次解析失败、
+        工具不再执行（该支持由 001bfdb 引入，原测试文件已删除，这里是唯一覆盖）。
+        """
+        action = SkillAgent._parse_action(self.DEEPSEEK_WRAPPED)
+        self.assertEqual(action["type"], "tool", "包装方言不得退化成 parse_error")
+        self.assertEqual(action["tool"], "read_file")
+        self.assertEqual(action["arguments"], {"path": "D:\\素材\\单元03.md", "max_chars": 30000})
+
+    def test_named_tool_with_outer_closer_still_executes(self) -> None:
+        """同名收尾标签（``</tool>``）同样属于协议自身，不算"后面还接正文"。"""
+        text = '<tool name="pwsh"><parameter name="command">dir</parameter></tool></tool>'
+        self.assertEqual(SkillAgent._parse_action(text)["tool"], "pwsh")
+
+    def test_complete_named_tool_with_trailing_prose_is_final(self) -> None:
+        """形状**完整**的动作后面接正文 ⇒ 按正文展示，不进 parse_error 重试。
+
+        旧写法 XML 分支无条件 True，「完整动作 + 正文」被误判成"想发却发不出来"，
+        白白重试三次再把原文标成「未完成」——与 JSON 分支口径相反。
+        """
+        text = '<tool name="pwsh"><parameter name="command">dir</parameter></tool>\n这就是全部。'
+        action = SkillAgent._parse_action(text)
+        self.assertEqual(action["type"], "final")
+        self.assertIn("这就是全部", action["content"])
+
+    def test_xml_invoke_with_trailing_prose_is_final(self) -> None:
+        """``<invoke>`` 方言与命名工具同口径：完整动作 + 正文 ⇒ final（不是 parse_error）。"""
+        text = ('<invoke name="pwsh"><parameter name="command">dir</parameter></invoke>'
+                '\n\n先不执行。')
+        self.assertEqual(SkillAgent._parse_action(text)["type"], "final")
+
+    def test_tool_calls_multi_invoke_keeps_parse_error(self) -> None:
+        """多 call 的 ``<tool_calls>`` 包装块本实现不执行 ⇒ 必须保住有界重试。
+
+        若把它算成"完整协议按正文展示"，模型就再也没机会改成单 call。
+        """
+        text = (
+            '<tool_calls>\n'
+            '<invoke name="pwsh"><parameter name="command">dir</parameter></invoke>\n'
+            '<invoke name="pwsh"><parameter name="command">pwd</parameter></invoke>\n'
+            '</tool_calls>'
+        )
+        self.assertEqual(SkillAgent._parse_action(text), {"type": "parse_error"})
+
+    def test_fenced_xml_example_plus_real_trailing_invoke_executes(self) -> None:
+        """围栏里的示例不参与定位，但**尾部**的真协议仍要能执行。
+
+        旧写法对整段文本做 ``ET.fromstring``：前面有围栏示例就整体解析失败 ⇒ 尾部真协议
+        被判成"被切断"；更早的版本则相反，会把围栏里的示例执行掉。
+        """
+        text = (
+            '示例：\n```xml\n<tool name="x"><parameter name="p">1</parameter></tool>\n```\n'
+            '现在执行：\n<invoke name="pwsh"><parameter name="command">dir</parameter></invoke>'
+        )
+        action = SkillAgent._parse_action(text)
+        self.assertEqual(action["type"], "tool")
+        self.assertEqual(action["tool"], "pwsh")
+        self.assertEqual(action["arguments"], {"command": "dir"})
+
+    def test_pretty_printed_truncated_json_is_parse_error(self) -> None:
+        """pretty-print 且被切断的动作中间带空行 ⇒ 仍要进有界重试。
+
+        ``in_final_block``（标记之后没有空行）看的是排版信号，会被动作自己内部的空行骗过；
+        改用结构信号（括号没配平）后，被切断的动作不会静默当正文落库。
+        """
+        text = '我来执行：\n{"type": "tool",\n\n  "tool": "pwsh", "arguments": {'
+        self.assertEqual(SkillAgent._parse_action(text), {"type": "parse_error"})
+
+    def test_protocol_then_lone_fence_then_prose_is_final(self) -> None:
+        """尾锚定必须看**原文**：动作后面一个孤立的 ``` 不得把尾部正文掩掉。
+
+        判据传掩码文本时，那个 ``` 会开启假围栏、把它后面的正文一起掩成空格 ⇒
+        锚定误判通过 ⇒ 动作被执行、尾部正文从界面消失（正是要消灭的"静默执行 + 吞正文"）。
+        """
+        text = ('{"type": "tool", "tool": "pwsh", "arguments": {"command": "dir"}}\n'
+                '```\n这条命令我先不执行，等你确认。')
+        action = SkillAgent._parse_action(text)
+        self.assertEqual(action["type"], "final")
+        self.assertIn("等你确认", action["content"])
+
+    def test_harmony_end_token_tail_still_executes(self) -> None:
+        """收尾 token 是一族：relay 未必剥掉的 ``<|end_of_text|>`` / ``<|eot_id|>`` 也要认。
+
+        少认一个就等于把**完整**的动作判成"被切断"，连续三次解析失败后工具不再执行。
+        """
+        body = (
+            '<|open|>tools<|sep|><|open|>call tool="pwsh" index="1"<|sep|>'
+            '<|open|>argument key="command" type="string"<|sep|>Get-Process'
+            '<|close|>argument<|sep|><|close|>call<|sep|>'
+        )
+        for tail in ('<|close|>tools<|sep|><|end_of_text|>', '<|close|>tools<|sep|><|eot_id|>'):
+            action = SkillAgent._parse_action(body + tail)
+            self.assertEqual(action["type"], "tool", f"收尾 token 未被识别：{tail!r}")
+            self.assertEqual(action["tool"], "pwsh")
+
 
 class ParseErrorPreservesProseTests(unittest.TestCase):
     """三次解析失败：模型原文必须保留（旧行为只回固定文案，正文整体丢失）。"""

@@ -29,6 +29,11 @@ MIN_FENCE_LENGTH = 3
 MAX_FENCE_INDENT = 3
 # 空行（只含空白的行）：段落边界，`in_final_block` 用它判断标记是否落在最后一段。
 _BLANK_LINE = re.compile(r"\n[ \t]*\n")
+# 协议自身的**收尾标签**：动作后面只跟这些不算"还接正文"。DeepSeek 兼容端点会把
+# 命名工具包在外层 ``<tool type="tool">`` 里、再用 ``</invoke>`` 收尾，正则取到内层
+# ``<tool name=…>…</tool>`` 之后剩下的就是这些标签——不放行会把已上线方言误判成
+# "协议后面接正文"，整条方言退化成 parse_error（工具不再执行）。
+_CLOSING_TAG = re.compile(r"</[A-Za-z][\w:-]*\s*>")
 
 
 def fence_run(line: str) -> tuple[str, int, str] | None:
@@ -160,16 +165,25 @@ def unwrap_whole_response_fence(text: str) -> str:
     return "\n".join(lines[1:last_index]).strip()
 
 
-def only_fence_tail(text: str, index: int) -> bool:
-    """``index`` 之后是否只剩空白与围栏标记行（协议可以顶到响应尾）。
+def only_fence_tail(text: str, index: int, *, closers: bool = False) -> bool:
+    """``index`` 之后是否只剩空白、围栏标记行（可选：协议自身的收尾标签）。
 
     「协议必须顶到回答末尾」是终态层的判据：工具动作后面还接正文的输出**不再执行该动作**，
     整体按正文展示——与旧行为（静默执行动作、静默丢掉正文）相反，宁可不动作也不吞内容。
+
+    ``closers=True`` 额外放行 ``</tool>`` / ``</invoke>`` 这类收尾标签：命名工具方言
+    （``<tool type="tool">`` 里再包一层 ``<tool name=…>``）取到内层块后，尾部落的正是外层
+    收尾标签，按"正文"处理会把整条已上线方言打成 parse_error。
+
+    ⚠️ 调用方必须传**原文**：掩码文本里一个孤立的 ```` ``` ```` 会开启假围栏、把它后面的
+    正文一并掩成空格，尾锚定就会误判通过（动作被执行、尾部正文却消失）。
     """
     source = str(text or "")
     rest = source[max(0, int(index)):]
     if not rest.strip():
         return True
+    if closers:
+        rest = _CLOSING_TAG.sub(" ", rest)
     return all(not line.strip() or is_fence_line(line) for line in rest.split("\n"))
 
 

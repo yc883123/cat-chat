@@ -75,6 +75,12 @@ def _resolve_step_limit(max_steps: Any, options: Any) -> int:
 # leak into the answer as plain text).
 _TOOL_OPEN_TAG = re.compile(r"^<(tool_calls|invoke|tool)\b", re.IGNORECASE)
 _TOOL_NAMED_ATTR = re.compile(r"\b(?:name|type)\s*=")
+# 配平的命名工具块（`<tool name=…>…</tool>`）：**形状完整**的动作。
+# 与"想发但发不出来"要分开：完整的动作后面接正文属"按正文展示"，不属 parse_error 重试。
+_TOOL_NAMED_COMPLETE = re.compile(
+    r"<tool\b[^>]*\bname\s*=\s*['\"][^'\"]+['\"][^>]*>[\s\S]*?</tool\s*>",
+    re.IGNORECASE,
+)
 # Harmony-style reserved-token dialect emitted by Kimi K3 through some
 # OpenAI-compatible Responses relays.  The relay places this protocol in a
 # message/output_text item instead of exposing native function_call objects.
@@ -1773,6 +1779,70 @@ class SkillAgent:
             return False
         return isinstance(value, (dict, list))
 
+    @staticmethod
+    def _incomplete_json(text: str, index: int) -> bool:
+        """从 ``index`` 起的 ``{`` 是否**没闭上**（= 被切断的动作），与空行无关。
+
+        ``in_final_block``（标记之后没有空行）看的是"最后一段"这个**排版**信号，而
+        pretty-print 且被切断的动作中间本来就带空行（``{"type": "tool",\\n\\n  "tool": …``），
+        会被它误判成正文、失去 parse_error 的有界重试。这里改用**结构**信号：括号没配平
+        就是没发完。只把"深度始终非负、结尾仍 > 0"算未完成——正文里多出一个 ``}`` 的段落不算。
+        字符串内的花括号不参与（用 in_string/escaped 跟踪）。
+        """
+        source = str(text or "")
+        start = max(0, int(index))
+        if start >= len(source) or source[start] != "{":
+            return False
+        depth = 0
+        in_string = False
+        escaped = False
+        for char in source[start:]:
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth <= 0:
+                    return False
+        return depth > 0
+
+    @classmethod
+    def _xml_action_fragment(cls, source: str, scan: str) -> tuple[str, int] | None:
+        """定位**单个、形状完整**的可执行 XML 工具协议 → ``(片段, 片段在原文中的结束偏移)``。
+
+        覆盖两种形态：``<tool_calls>`` 包装块（内含**恰好一个** ``<invoke>``）与全篇仅一个
+        裸 ``<invoke>``。多 call 的包装块一律返回 None——本实现
+        （``_extract_xml_tool_action``）只执行单 call，返回 None 才能保住 parse_error 的
+        有界重试，不会退化成"整段当正文展示"（既不执行也不纠正）。
+
+        定位在**掩码文本**上做（围栏里的示例不参与），片段回**原文**取（参数值不被掩码成空格）。
+        旧写法对整段 ``source`` 做 ``ET.fromstring``：前面只要有前言或围栏示例就整体解析失败，
+        尾部的真协议反而被判成"被切断的动作"。
+        """
+        body = str(scan or "")
+        raw = str(source or "")
+        if len(re.findall(r"<invoke\b", body, flags=re.IGNORECASE)) > 1:
+            return None
+        for tag in ("tool_calls", "invoke"):
+            opened = re.search(rf"<{tag}\b", body, flags=re.IGNORECASE)
+            if not opened:
+                continue
+            close = re.search(rf"</{tag}\s*>", raw[opened.start():], flags=re.IGNORECASE)
+            if not close:
+                continue
+            end = opened.start() + close.end()
+            return raw[opened.start():end], end
+        return None
+
     @classmethod
     def _looks_like_tool_protocol(cls, text: str, masked: str | None = None) -> bool:
         """``text`` 是否「明显想发工具协议、只是没解析出来」（这种输出绝不能当正文落库）。
@@ -1780,6 +1850,9 @@ class SkillAgent:
         判据两条：只在**掩码文本**上找标记（围栏内一律不算），且标记必须落在回答的**最后一段**里——
         被截断的动作总是停在最后一段。正文中间的裸 JSON 即使形状像动作也不算协议：能解码的一律
         按正文放行（旧写法在这里会把示例当动作执行）。
+
+        形状**完整且可执行**的协议一律不算"被切断"：那种输出属"动作后面还接正文"，按 final 展示
+        （见 ``_parse_action`` 第 ③ 段），不能落进 parse_error 的有界重试。
         """
         source = str(text or "")
         if not source.strip():
@@ -1787,12 +1860,24 @@ class SkillAgent:
         scan = source if masked is None else masked
         harmony = _HARMONY_TOOL_MARKER.search(scan)
         if harmony and text_fences.in_final_block(scan, harmony.start()):
-            return True
+            # 走到这里说明 _extract_harmony_tool_action 已经判过一轮：动作要么**完整**只是
+            # 尾巴上还跟了正文，要么标记根本不在最后一段——两者都按正文展示
+            # （见 _parse_action 第 ③ 段），不属于"想发却发不出来"。
+            # 真正被切断的 call 在上一步就以 broken=True 返回、已经进了有界重试。
+            return False
         xml_marker = re.search(r"<(?:tool_calls|invoke|tool)\b", scan, flags=re.IGNORECASE)
         if xml_marker and text_fences.in_final_block(scan, xml_marker.start()):
-            return True
+            # 命名工具块配平 ⇒ 完整；否则看 _xml_action_fragment（含"只允许单 call"）。
+            # 旧写法这里无条件 True ⇒「<tool …>…</tool> + 正文」被误判成"想发但发不出"，
+            # 落进三次重试后把整段原文标成「未完成」，与 JSON 分支口径相反。
+            if _TOOL_NAMED_COMPLETE.match(scan[xml_marker.start():]):
+                return False
+            return cls._xml_action_fragment(source, scan) is None
         json_marker = re.search(r'\{[\s\S]{0,96}"(?:type|tool)"\s*:', scan, flags=re.IGNORECASE)
-        if json_marker and text_fences.in_final_block(scan, json_marker.start()):
+        if json_marker and (
+            text_fences.in_final_block(scan, json_marker.start())
+            or cls._incomplete_json(source, json_marker.start())
+        ):
             return not cls._decodable_json(source, json_marker.start())
         # 掩码后开头可能是空格（回答以围栏开头）：定位到第一个非空白字符再判形态
         first = next((index for index, char in enumerate(scan) if not char.isspace()), None)
@@ -1808,9 +1893,14 @@ class SkillAgent:
             return not cls._decodable_json(source, first)
         if head[0] == "<":
             if _TOOL_OPEN_TAG.match(head):
+                if _TOOL_NAMED_COMPLETE.match(head):
+                    # 完整的命名工具 + 尾部正文 ⇒ 按正文展示（与上面的标记分支同口径）
+                    return False
                 if head[:5].lower() == "<tool":
                     return bool(_TOOL_NAMED_ATTR.search(head[:200]))
-                return True
+                # <tool_calls> / <invoke> 开头：形状完整且可执行 ⇒ 按正文展示；
+                # 找不到完整单 call 片段（被切断 / 多 call 包装块）才算"想发而发不出来"。
+                return cls._xml_action_fragment(source, scan) is None
         return False
 
     @classmethod
@@ -1844,7 +1934,14 @@ class SkillAgent:
         )):
             return None, True
         trailing = re.sub(
-            r"<\|close\|>[A-Za-z_-]*|<\|sep\|>", "", scan[matches[-1].end():], flags=re.IGNORECASE
+            # 收尾 token 是一族：闭合标签、分隔符，以及 relay 未必剥掉的「结束」标记
+            # （<|end_of_text|> / <|eot_id|> / <|im_end|> …）。少认一个就等于把完整的
+            # 动作判成"被切断"，连续三次解析失败后工具不再执行。
+            r"<\|close\|>[A-Za-z_-]*|<\|sep\|>"
+            r"|<\|(?:end_of_text|eot_id|im_end|end|eom|start_of_text)\|>",
+            "",
+            scan[matches[-1].end():],
+            flags=re.IGNORECASE,
         )
         if trailing.strip():
             # 动作后面还接正文 ⇒ 按正文展示，不执行（见 _parse_action 第 ③ 段）
@@ -1911,7 +2008,11 @@ class SkillAgent:
             flags=re.IGNORECASE | re.DOTALL,
         )
         if named_tool:
-            if not text_fences.only_fence_tail(scan, named_tool.end()):
+            # 尾锚定在**原文**上判（不能传 scan：孤立的 ``` 会在掩码里开假围栏，
+            # 把它后面的正文一并掩掉 ⇒ 锚定误判通过、动作被执行而尾部正文消失）；
+            # closers=True 放行外层收尾标签（`</invoke>` / `</tool>`）——DeepSeek 包装方言
+            # 正是"内层 </tool> 之后还跟一个外层收尾标签"，不放行会把整条方言打成 parse_error。
+            if not text_fences.only_fence_tail(source, named_tool.end(), closers=True):
                 # 动作后面还接正文 ⇒ 按正文展示，不执行（见 _parse_action 第 ③ 段）
                 return None, False
             tool = named_tool.group(1).strip()
@@ -1921,12 +2022,18 @@ class SkillAgent:
             arguments = cls._parse_xml_parameters(body)
             return {"type": "tool", "tool": tool, "arguments": arguments}, False
 
-        if "<invoke" not in scan:
+        located = cls._xml_action_fragment(source, scan)
+        if located is None:
+            return None, False
+        fragment, fragment_end = located
+        if not text_fences.only_fence_tail(source, fragment_end, closers=True):
+            # 动作后面还接正文 ⇒ 按正文展示，不执行（见 _parse_action 第 ③ 段）。
+            # 与 named_tool 分支同一口径：XML 方言也不能"静默执行 + 静默吞正文"。
             return None, False
         try:
-            root = ET.fromstring(source.strip())
+            root = ET.fromstring(fragment)
         except ET.ParseError:
-            # 整条回答不是合法 XML：是不是「被切断的动作」交给 _looks_like_tool_protocol 判
+            # 片段本身不是合法 XML：是不是「被切断的动作」交给 _looks_like_tool_protocol 判
             # （它要求标记落在最后一段里，正文中间的 XML 片段不会被误判）。
             return None, False
         invokes = [root] if root.tag.rsplit("}", 1)[-1] == "invoke" else [
@@ -2014,8 +2121,10 @@ class SkillAgent:
                 continue
             if not isinstance(value, dict):
                 continue
-            if not text_fences.only_fence_tail(scan, end):
-                # 后面还接正文 ⇒ 不执行（整体按正文展示），也不判 parse_error
+            if not text_fences.only_fence_tail(source, end):
+                # 动作后面还接正文 ⇒ 不执行（整体按正文展示），也不判 parse_error。
+                # 判据用**原文**：传掩码文本时，动作后面一个孤立的 ``` 会开假围栏、
+                # 把它后面的正文一并掩掉 ⇒ 锚定误判通过（动作被执行、尾部正文消失）。
                 continue
             return value
         return None

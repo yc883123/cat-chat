@@ -128,6 +128,32 @@ class TailAnchorTests(unittest.TestCase):
         text = '{"type":"tool"}\n然后我说几句收尾。'
         self.assertFalse(text_fences.only_fence_tail(text, text.index("}") + 1))
 
+    def test_only_fence_tail_closers_option(self) -> None:
+        """``closers=True`` 放行协议**自身**的收尾标签（DeepSeek 包装方言要用）。
+
+        ``</invoke>`` / ``</tool>`` 是协议的一部分，不是"后面还接了正文"；不放行会让
+        已上线的包装方言整条退化成 parse_error。真正的正文仍然要拒。
+        """
+        text = '<tool name="x"><parameter name="p">1</parameter></tool>\n</invoke>'
+        end = text.index("</tool>") + len("</tool>")
+        self.assertTrue(text_fences.only_fence_tail(text, end, closers=True))
+        self.assertFalse(text_fences.only_fence_tail(text, end), "默认口径不放行任何收尾标签")
+        prose = text + "\n以上就是全部。"
+        self.assertFalse(
+            text_fences.only_fence_tail(prose, end, closers=True), "收尾标签之后有正文仍要拒"
+        )
+
+    def test_only_fence_tail_must_be_given_raw_text(self) -> None:
+        """判据必须喂**原文**：掩码文本里一个孤立 ``` 会开假围栏、把尾部正文掩成空格。"""
+        text = '{"type":"tool"}\n```\n这条先不执行。'
+        end = text.index("}") + 1
+        masked = text_fences.mask_fenced_code(text)
+        self.assertFalse(text_fences.only_fence_tail(text, end))
+        self.assertTrue(
+            text_fences.only_fence_tail(masked, end),
+            "这条断言是反向钉桩：说明为什么调用方不能传掩码文本",
+        )
+
     def test_in_final_block(self) -> None:
         self.assertTrue(text_fences.in_final_block('正文\n{"type": "tool", "too', 3))
         self.assertFalse(

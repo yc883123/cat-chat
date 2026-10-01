@@ -27,6 +27,7 @@ from naiba.core.history import encode_image_for_model
 from naiba.core.tool_results import display_tool_run, model_visible_run, truncate_json_text
 from naiba.core.exceptions import TaskCancelled
 from naiba.core.media_types import DEFAULT_MEDIA_DECLARATION
+from naiba.core.text_fences import fence_mask, is_fence_noise, unwrap_whole_response_fence
 from naiba.skills.catalog import SkillCatalog
 from naiba.tools.executor import ToolExecutor
 from naiba.skills.context import fallback_context_window
@@ -89,6 +90,34 @@ _HARMONY_ARGUMENT = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _HARMONY_ATTR = re.compile(r"([\w-]+)\s*=\s*(['\"])(.*?)\2", re.DOTALL)
+# 协议信封的收尾标记（``<|close|>tools<|sep|>``）：判定「协议是否位于响应尾部」时并入协议本体。
+_HARMONY_CLOSE = re.compile(r"<\|close\|>[A-Za-z_][\w-]*(?:\s*<\|sep\|>)?", re.IGNORECASE)
+
+# ---- 围栏来源动作的终态标记（内部协议，不进用户可见文案）----
+# 计划 2026-10-01 §3.4/§3.5：围栏动作被拒绝、或当前运行没有确认入口时，本轮直接以
+# 原文收尾，**不**把「用户拒绝执行」当成新一轮模型指令回灌。标记只用于 Agent 循环
+# 内部判定，落库/展示前由 `_fence_outcome_text` 剥掉。
+_FENCED_REJECTED_MARKER = "FENCED_REJECTED:"
+_FENCED_SKIPPED_MARKER = "FENCED_SKIPPED:"
+_FENCED_MARKERS = (_FENCED_REJECTED_MARKER, _FENCED_SKIPPED_MARKER)
+
+
+def _fence_outcome_marker(result: Any) -> str:
+    """工具结果是否带围栏终态标记；返回命中的标记（无则空串）。"""
+    text = str(result or "")
+    for marker in _FENCED_MARKERS:
+        if text.startswith(marker):
+            return marker
+    return ""
+
+
+def _fence_outcome_text(result: Any) -> str:
+    """剥掉内部标记，只留可读文案（前端与落库都用它）。"""
+    text = str(result or "")
+    for marker in _FENCED_MARKERS:
+        if text.startswith(marker):
+            return text[len(marker):].strip()
+    return text
 
 
 
@@ -430,6 +459,8 @@ class SkillAgent:
 
 只有确实需要调用工具时，才只输出一个 JSON 对象，不要 Markdown。例如：
 {"type":"tool","tool":"list_directory","arguments":{"path":"D:\\skill","recursive":false},"reason":"读取目标目录"}
+**不要把这个 JSON 包进 ``` 代码块**：包进围栏会被当作「示例」而要求用户逐次确认，
+等于让自动化停下来。围栏只用于示例/说明，里面的 JSON 一律不会被当成真实调用。
 不需要工具或任务完成后，直接输出给用户的自然语言答复，不要再包 JSON。
 不要照抄示例，不要使用不存在的工具。工具结果会在下一轮发给你，最多执行有限步数，不要重复无效操作。
 """.strip()
@@ -1093,10 +1124,28 @@ class SkillAgent:
                         ),
                     })
                     continue
-                logger.warning("工具调用解析失败：连续三次无法得到完整工具动作（不展示原文）")
+                logger.warning("工具调用解析失败：连续三次无法得到完整工具动作（保留最后一轮原文）")
+                # 计划 §3.4：末次失败也要保留最后一轮原文，用空行与失败说明分隔，
+                # 禁止固定失败文案覆盖整条正文（用户需要原文自己判断发生了什么）。
+                fallback = str(raw or "").strip()
+                failure_note = "工具调用格式连续三次无法自动纠正，已停止执行。"
+                truncated_answer = (
+                    f"{failure_note}\n\n以下为模型最后一次输出原文（未执行）：\n\n{fallback}"
+                    if fallback
+                    else failure_note
+                )
                 event({"type": "run_failed", "error": "工具调用格式连续三次无法自动纠正"})
+                if isinstance(run_context, dict):
+                    # 标记 partial：前端据此显示「内容可能不完整」，而不是把它当完整答复。
+                    run_context["truncation"] = {
+                        "truncated": True,
+                        "finish_reason": "parse_error",
+                        "continued": False,
+                    }
+                    messages.append(assistant_message(truncated_answer))
+                    run_context["trace_messages"] = messages[trace_start:]
                 return (
-                    "工具调用格式连续三次无法自动纠正，已停止执行。",
+                    truncated_answer,
                     runs,
                     reasonings,
                     self._summarize_usage(usages),
@@ -1195,6 +1244,10 @@ class SkillAgent:
                 event({"type": "run_failed", "error": "工具调用解析失败：没有可执行调用"})
                 return "工具调用解析失败，已停止执行。", runs, reasonings, self._summarize_usage(usages)
             normalized_calls = [call if isinstance(call, dict) else {} for call in calls]
+            action_source = str(action.get("source") or "")
+            call_sources = [
+                str(call.get("source") or action_source or "") for call in normalized_calls
+            ]
             parallel_safe = bool(
                 len(normalized_calls) > 1
                 and tool_registry is not None
@@ -1207,7 +1260,7 @@ class SkillAgent:
             parallel_results: dict[int, tuple[bool, str]] = {}
             if parallel_safe:
                 for index, call in enumerate(normalized_calls):
-                    event({"type": "tool_requested", "seq": index, "tool": str(call.get("tool") or ""), "arguments": call.get("arguments") or {}, "reason": call.get("reason", "")})  # noqa: event-internal
+                    event({"type": "tool_requested", "seq": index, "tool": str(call.get("tool") or ""), "arguments": call.get("arguments") or {}, "reason": call.get("reason", ""), "action_source": call_sources[index]})  # noqa: event-internal
                 with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(normalized_calls))) as pool:
                     futures = {
                         index: pool.submit(
@@ -1216,6 +1269,7 @@ class SkillAgent:
                             call.get("arguments") if isinstance(call.get("arguments"), dict) else {},
                             active, allowed, tool_registry, cancel_event, event,
                             _call_context(run_context, event, index),
+                            call_sources[index],
                         )
                         for index, call in enumerate(normalized_calls)
                     }
@@ -1226,11 +1280,12 @@ class SkillAgent:
                 call = call if isinstance(call, dict) else {}
                 tool = str(call.get("tool") or "")
                 arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+                call_source = call_sources[call_index] if call_index < len(call_sources) else ""
                 if not tool:
                     event({"type": "run_failed", "error": "工具调用解析失败：缺少工具名或参数"})
                     return "工具调用解析失败，已停止执行。", runs, reasonings, self._summarize_usage(usages)
                 if not parallel_safe:
-                    event({"type": "tool_requested", "seq": call_index, "tool": tool, "arguments": arguments, "reason": call.get("reason", "")})  # noqa: event-internal
+                    event({"type": "tool_requested", "seq": call_index, "tool": tool, "arguments": arguments, "reason": call.get("reason", ""), "action_source": call_source})  # noqa: event-internal
                 if cancel_event and cancel_event.is_set():
                     abort_run()
 
@@ -1241,11 +1296,34 @@ class SkillAgent:
                     success, result = self._execute_with_retry(
                         tool, arguments, active, allowed, tool_registry, cancel_event, event,
                         _call_context(run_context, event, call_index),
+                        call_source,
+                    )
+                # 围栏来源动作被拒/无确认 UI：不当成工具失败回灌模型，直接以原文收尾
+                # （计划 2026-10-01 §3.4/§3.5）。
+                fence_marker = _fence_outcome_marker(result)
+                if not success and fence_marker:
+                    run = {
+                        "tool": tool, "arguments": arguments,
+                        "result": _fence_outcome_text(result),
+                        "success": False, "reason": str(call.get("reason") or ""),
+                        "source": call_source,
+                    }
+                    self._collect_media(run, tool_registry, run_context)
+                    runs.append(run)
+                    step_runs.append(run)
+                    event({"type": "tool_result", **display_tool_run(run), "seq": call_index})
+                    return self._finish_with_unexecuted_fence(
+                        fence_marker, raw, event, runs, reasonings, usages,
+                        run_context, messages, trace_start, assistant_message,
                     )
                 # 原始 run（tool/arguments/result 原文/success/reason）只供宿主收尾
                 # （附件提取、file_changes、step 图片注入）；模型与前端均以
                 # model_visible/display（core.tool_results）为准。
-                run = {"tool": tool, "arguments": arguments, "result": result, "success": success, "reason": str(call.get("reason") or "")}
+                run = {
+                    "tool": tool, "arguments": arguments, "result": result,
+                    "success": success, "reason": str(call.get("reason") or ""),
+                    "source": call_source,
+                }
                 # 媒体采集：在事件发射前写回 run["media"]（原始 result 仅此处可见）。
                 self._collect_media(run, tool_registry, run_context)
                 runs.append(run)
@@ -1323,7 +1401,12 @@ class SkillAgent:
                         "content": truncate_json_text(json.dumps(model_visible_run(run), ensure_ascii=False)),
                     })
             else:
-                messages.append(assistant_message(json.dumps(action, ensure_ascii=False)))
+                # 回显给模型的动作里不带内部来源字段：`source` 只服务于授权判定与可观测性，
+                # 写进模型上下文会改变历史字节（前缀缓存）且对模型无意义。
+                echo_action = {
+                    key: value for key, value in action.items() if key != "source"
+                }
+                messages.append(assistant_message(json.dumps(echo_action, ensure_ascii=False)))
                 messages.append(
                     {
                         "role": "user",
@@ -1418,11 +1501,17 @@ class SkillAgent:
         cancel_event: threading.Event | None,
         event: EventCallback,
         run_context: RunContext | None = None,
+        source: str = "",
     ) -> tuple[bool, str]:
         """执行工具并处理权限确认与可重试失败（最多 2 次）。副作用工具不重试。
 
         若提供 ``tool_registry``，则统一经其分发（可解析 subagent / job_* 等系统工具）；
         否则退回 ``ToolExecutor`` 直接执行。
+
+        ``source`` 为动作来源（见 ``SOURCE_*``）。来源 ``fenced`` 的动作走两段式授权：
+        ① 当前 Run 尚无围栏授权 → 无论会话是 ``auto`` 还是 ``full`` 都先生成一次确认
+        （包装执行器的 ``execute_unchecked`` 旁路因此无法绕过）；
+        ② 已有授权 → 按既有权限策略正常执行（跨类别高风险、工作区外、联网副作用仍单独确认）。
         """
         if tool not in allowed:
             event({"type": "tool_started", "tool": tool})  # noqa: event-internal
@@ -1443,11 +1532,33 @@ class SkillAgent:
                 return tool_registry.execute(tool, arguments, active, run_context)
             return self.executor.execute(tool, arguments, active)
 
-        success, result = _dispatch()
+        fenced = source == self.SOURCE_FENCED
+        if fenced and not self._fenced_approval_active(run_context, allowed):
+            if not self._confirmation_ui(run_context):
+                # 无确认回路的执行形态（子 Agent / 后台 Job）：直接按原文收尾并标记未执行，
+                # 不执行、不挂起、不等待 30 分钟（计划 §3.5 fail-safe）。
+                return False, (
+                    f"{_FENCED_SKIPPED_MARKER}未执行：该动作来自代码块（围栏）来源，"
+                    "需要用户确认，而当前运行没有确认入口。"
+                )
+            success, result = self._run_executor(run_context).request_confirmation(
+                tool,
+                arguments,
+                active,
+                "代码块（围栏）来源的工具动作需要先确认",
+                run_context,
+                fenced_scope={
+                    "allowed_tools": sorted(str(item) for item in allowed),
+                    "workspace": self._run_workspace(run_context),
+                },
+            )
+        else:
+            success, result = _dispatch()
+
         confirmation_requested = False
-        if not success and result.startswith("NEED_CONFIRM:"):
+        if not success and str(result).startswith("NEED_CONFIRM:"):
             confirmation_requested = True
-            parts = result.split(":", 3)
+            parts = str(result).split(":", 3)
             if len(parts) >= 4:
                 confirm_id = parts[1]
                 tool_desc = parts[2]
@@ -1457,18 +1568,18 @@ class SkillAgent:
                     "tool_name": tool,
                     "tool_desc": tool_desc,
                     "arguments": arguments,
+                    # 来源随确认卡一起下发：前端据此把文案改为「允许本轮继续执行后续操作」。
+                    "action_source": source,
                 })
-                confirmation_executor = (
-                    (run_context or {}).get("executor")
-                    if isinstance(run_context, dict)
-                    else None
-                ) or self.executor
                 # 超时给 30 分钟（默认见 executor.wait_for_confirmation）：手机端切后台
                 # 超过 5 分钟是常态，300s 时代的自动拒绝会让用户回来后点「允许」只收到
                 # 「确认请求不属于该运行或已失效」。取消信号仍即时中断等待，不受影响。
-                success, result = confirmation_executor.wait_for_confirmation(
+                success, result = self._run_executor(run_context).wait_for_confirmation(
                     confirm_id, timeout=1800, cancel_event=cancel_event
                 )
+            if fenced and not success and str(result).startswith("用户拒绝执行"):
+                # 用户拒绝围栏动作：不作为工具失败回灌模型（计划 §3.4），由上层以原文收尾。
+                return False, f"{_FENCED_REJECTED_MARKER}未执行：用户拒绝了该代码块动作。"
         # 可重试错误：MCP / HTTP / Job 查询等；副作用工具（写文件/命令/脚本）不自动重试
         retryable = bool(tool_registry and getattr(tool_registry, "retryable", lambda _: False)(tool))
         deterministic_failure = any(marker in str(result or "") for marker in (
@@ -1488,6 +1599,70 @@ class SkillAgent:
             time.sleep(1.0)
             success, result = _dispatch()
         return success, result
+
+    def _run_executor(self, run_context: RunContext | None) -> Any:
+        """本 Run 自己的执行器（确认/授权必须落在 Run 隔离实例上）。"""
+        executor = (run_context or {}).get("executor") if isinstance(run_context, dict) else None
+        return executor or self.executor
+
+    def _run_workspace(self, run_context: RunContext | None) -> str:
+        executor = self._run_executor(run_context)
+        try:
+            return str(executor.workspace_for_run(run_context))
+        except Exception:
+            return (
+                str((run_context or {}).get("workspace_dir") or "")
+                if isinstance(run_context, dict)
+                else ""
+            )
+
+    def _fenced_approval_active(self, run_context: RunContext | None, allowed: set[str]) -> bool:
+        checker = getattr(self._run_executor(run_context), "fenced_approval_active", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(allowed, self._run_workspace(run_context)))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _confirmation_ui(run_context: RunContext | None) -> bool:
+        """本 Run 是否有确认回路：子 Agent / 后台 Job 显式置 False（安全默认）。"""
+        if not isinstance(run_context, dict):
+            return True
+        return bool(run_context.get("confirmation_ui", True))
+
+    def _finish_with_unexecuted_fence(
+        self,
+        marker: str,
+        raw: str,
+        event: EventCallback,
+        runs: list[dict[str, Any]],
+        reasonings: list[str],
+        usages: list[dict[str, int]],
+        run_context: RunContext | None,
+        messages: list[dict[str, Any]],
+        trace_start: int,
+        build_message: Callable[..., dict[str, Any]],
+    ) -> tuple[str, list[dict[str, Any]], list[str], dict[str, Any]]:
+        """围栏动作未执行时的收尾：以原文为正文，附加一行「未执行」说明。
+
+        计划 §3.4/§3.5：拒绝后**不**把「用户拒绝执行」当新一轮模型指令回灌；当前轮
+        直接结束，正文保留原始围栏内容，用户可据工具名/说明/参数自行判断。
+        """
+        body = str(raw or "").strip()
+        if marker == _FENCED_REJECTED_MARKER:
+            note = "该动作未执行：你在确认卡上选择了「拒绝」。"
+            status = "已拒绝执行该代码块动作；本轮结束，未执行任何命令。"
+        else:
+            note = "该动作未执行：当前运行（子 Agent / 后台任务）没有可用的确认入口。"
+            status = "代码块动作在当前运行形态下无法确认，已按原文收尾（未执行）。"
+        event({"type": "status", "message": status})
+        answer = f"{body}\n\n（{note}）" if body else note
+        if isinstance(run_context, dict):
+            messages.append(build_message(answer))
+            run_context["trace_messages"] = messages[trace_start:]
+        return answer, runs, reasonings, self._summarize_usage(usages)
 
 
     @staticmethod
@@ -1703,8 +1878,40 @@ class SkillAgent:
         ascii_chars = sum(1 for char in text if ord(char) < 128)
         return max(1, (ascii_chars + 3) // 4 + (len(text) - ascii_chars)) if text else 0
 
+    # ---- 动作来源（计划 2026-10-01 §3.1）：解析结果显式带 source，后续层不得再靠文本猜来源 ----
+    # native           供应商原生 function calling（由 llm/protocols 打标）
+    # bare_protocol_tail 响应尾部的裸 JSON/XML/Harmony 协议 → 走既有权限策略
+    # fenced           整条响应解开围栏后才得到的动作 → 无论会话档位一律先确认
+    # final            最终正文 → 直接显示，不执行
+    SOURCE_NATIVE = "native"
+    SOURCE_BARE = "bare_protocol_tail"
+    SOURCE_FENCED = "fenced"
+    SOURCE_FINAL = "final"
+    ACTION_SOURCES = (SOURCE_NATIVE, SOURCE_BARE, SOURCE_FENCED, SOURCE_FINAL)
+
     @classmethod
     def _parse_action(cls, text: str) -> dict[str, Any]:
+        raw = str(text or "")
+        fenced = unwrap_whole_response_fence(raw)
+        if fenced is not None:
+            inner, _char = fenced
+            action = cls._parse_protocol_text(inner)
+            if isinstance(action, dict) and action.get("type") in {"tool", "tools"}:
+                # 整条响应就是一个围栏块且内容是工具协议 ⇒ 来源 fenced（强制确认）。
+                return {**action, "source": cls.SOURCE_FENCED}
+            if isinstance(action, dict) and action.get("type") == "final":
+                return {
+                    "type": "final",
+                    "content": str(action.get("content") or inner).strip(),
+                    "source": cls.SOURCE_FINAL,
+                }
+            # 围栏内是普通代码/配置/文本：按正文放行——不执行、不确认、不算 parse_error。
+            return {"type": "final", "content": raw.strip(), "source": cls.SOURCE_FINAL}
+        return cls._parse_bare_protocol(raw)
+
+    @classmethod
+    def _parse_protocol_text(cls, text: str) -> dict[str, Any] | None:
+        """在给定文本内解析协议（Harmony / XML / JSON），不关心来源。"""
         harmony_action = cls._extract_harmony_tool_action(text)
         if harmony_action:
             return harmony_action
@@ -1714,12 +1921,95 @@ class SkillAgent:
         parsed = cls._extract_json(text)
         if isinstance(parsed, dict) and parsed.get("type") in {"tool", "tools", "final"}:
             return parsed
-        # The output clearly intends an agent tool action but could not be
-        # parsed (truncated tag, malformed JSON, ...). Signal a parse failure
-        # instead of leaking the raw protocol as the answer.
-        if cls._looks_like_tool_protocol(text):
+        return None
+
+    @classmethod
+    def _parse_bare_protocol(cls, raw: str) -> dict[str, Any]:
+        """解析「不是整文围栏」的响应：裸协议必须在响应尾部才执行。
+
+        围栏段先在**等长掩码**上抹掉（偏移不变）——围栏里的示例协议因此不会被当成
+        真实动作（计划 §四.2「围栏内永远不作为协议候选」）。
+        """
+        masked = fence_mask(raw)
+        located = cls._locate_bare_protocol(masked)
+        if located is not None:
+            action, _start, end = located
+            if not is_fence_noise(raw[end:]):
+                # 动作后面还有正文 ⇒ 协议不在响应尾部：按正文显示，不执行、不报错。
+                return {"type": "final", "content": raw.strip(), "source": cls.SOURCE_FINAL}
+            if isinstance(action, dict):
+                declared = str(action.get("source") or "")
+                source = declared if declared in cls.ACTION_SOURCES else cls.SOURCE_BARE
+                return {**action, "source": source}
             return {"type": "parse_error"}
-        return {"type": "final", "content": text.strip()}
+        if cls._looks_like_tool_protocol(masked):
+            return {"type": "parse_error"}
+        return {"type": "final", "content": raw.strip(), "source": cls.SOURCE_FINAL}
+
+    @classmethod
+    def _locate_bare_protocol(
+        cls, text: str
+    ) -> tuple[dict[str, Any] | None, int, int] | None:
+        """定位裸协议：返回 ``(动作或 None, 起点, 终点)``。
+
+        动作解析失败时仍返回区间（``end`` 落到文本末尾），由调用方按「是否位于响应尾部」
+        决定是 parse_error 还是普通正文。
+        """
+        if not text or not text.strip():
+            return None
+        harmony_marker = _HARMONY_TOOL_MARKER.search(text)
+        if harmony_marker:
+            matches = list(_HARMONY_CALL.finditer(text))
+            end = matches[-1].end() if matches else len(text)
+            # 协议信封的收尾标记（``<|close|>tools<|sep|><|close|>message<|sep|>`` …）也算
+            # 协议本体：不把它们算进去会把「尾部约束」误判成「后面还有正文」。
+            while True:
+                tail_marker = _HARMONY_CLOSE.match(text, end)
+                if not tail_marker:
+                    break
+                end = tail_marker.end()
+            action = cls._extract_harmony_tool_action(text)
+            return (action if isinstance(action, dict) else None), harmony_marker.start(), end
+        xml_marker = re.search(r"<(?:tool_calls|invoke|tool)\b", text, flags=re.IGNORECASE)
+        if xml_marker:
+            action = cls._extract_xml_tool_action(text)
+            return (
+                (action if isinstance(action, dict) else None),
+                xml_marker.start(),
+                cls._xml_protocol_end(text),
+            )
+        return cls._locate_json_action(text)
+
+    @staticmethod
+    def _xml_protocol_end(text: str) -> int:
+        """XML 协议块的结束偏移；找不到闭合标签时按「延伸到文本末尾」处理。"""
+        end = 0
+        for pattern in (r"</invoke\s*>", r"</tool\s*>", r"</tool_calls\s*>"):
+            for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+                end = max(end, match.end())
+        return end or len(text)
+
+    @staticmethod
+    def _locate_json_action(text: str) -> tuple[dict[str, Any] | None, int, int] | None:
+        """在文本里逐个 ``{`` 做 raw_decode，取第一个动作形对象。"""
+        decoder = json.JSONDecoder()
+        first_dict: tuple[int, int] | None = None
+        for index, char in enumerate(text):
+            if char != "{":
+                continue
+            try:
+                value, consumed = decoder.raw_decode(text[index:])
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(value, dict):
+                continue
+            if first_dict is None:
+                first_dict = (index, index + consumed)
+            if value.get("type") in {"tool", "tools", "final"}:
+                return value, index, index + consumed
+        if first_dict is not None:
+            return None, first_dict[0], first_dict[1]
+        return None
 
     @classmethod
     def _looks_like_tool_protocol(cls, text: str) -> bool:

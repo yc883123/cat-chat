@@ -53,6 +53,28 @@ class ToolExecutor:
         self._alias_resolver: Callable[[str], str] | None = None
         # 诊断标签（如 "run:<id>" / "app"）：仅在权限诊断开启时写日志，判定逻辑不读它
         self.debug_label: str = ""
+        # Run 级「围栏来源动作」一次授权（计划 2026-10-01 §3.4）：
+        # 只在当前 executor（= 当前 Run 的隔离实例）内有效，随 Run 结束/切换工作区/
+        # 工具集合变化而失效；不写全局配置、不跨 Run 复用。
+        self._fenced_approval: dict[str, Any] | None = None
+
+    # ---- 围栏来源动作的 Run 级授权（不改变既有权限策略） ----
+    def grant_fenced_approval(self, allowed_tools: Any, workspace: Any = "") -> None:
+        """记录「允许本轮继续执行后续操作」：绑定当前 Run 的允许工具集合与工作区。"""
+        self._fenced_approval = {
+            "tools": sorted(str(item) for item in (allowed_tools or [])),
+            "workspace": str(workspace or ""),
+        }
+
+    def fenced_approval_active(self, allowed_tools: Any, workspace: Any = "") -> bool:
+        """当前 Run 是否已获得围栏动作授权（工具集合或工作区变化即失效）。"""
+        approval = self._fenced_approval
+        if not approval:
+            return False
+        return (
+            approval.get("tools") == sorted(str(item) for item in (allowed_tools or []))
+            and str(approval.get("workspace") or "") == str(workspace or "")
+        )
 
     # ---- 注入 ----
     def set_def_resolver(self, resolver: Callable[[str], Any] | None) -> None:
@@ -163,6 +185,61 @@ class ToolExecutor:
             return ""
         return f"执行工具需要确认：{tool}"
 
+    def _enqueue_confirmation(
+        self,
+        tool: str,
+        arguments: dict[str, Any],
+        active_skills: list[dict[str, Any]],
+        reason: str,
+        run_context: dict[str, Any] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> tuple[bool, str]:
+        """登记一次待确认并返回 ``NEED_CONFIRM`` 协议串（唯一的协议构造点）。"""
+        tool = self._resolve_tool_name(tool)
+        if self.permission_mode == "deny":
+            return False, f"权限被拒绝：{reason}（工具：{tool}）"
+        confirm_id = str(uuid.uuid4())
+        pending = {
+            "tool": tool,
+            "arguments": arguments,
+            "active_skills": active_skills,
+            "run_context": run_context,
+            "processing": False,
+        }
+        if extra:
+            pending.update(extra)
+        with self._confirmation_lock:
+            # run_context 一并暂存：批准执行时必须复用原 Run 的工作区/取消信号/权限模式，
+            # 以及依赖 run_context 的工具行为（产物目录、job 归属、reset_context 等）。
+            self.pending_confirmation[confirm_id] = pending
+        # NEED_CONFIRM 协议以半角冒号分三段解析（agent.py split(":", 3)）；确认理由中
+        # 的 Windows 盘符（C:\…）含半角冒号会截断描述文本，故仅对确认理由做全角化。
+        reason_safe = str(reason or "").replace(":", "：")
+        return False, (
+            f"NEED_CONFIRM:{confirm_id}:{reason_safe}:"
+            f"{json.dumps(arguments, ensure_ascii=False)[:500]}"
+        )
+
+    def request_confirmation(
+        self,
+        tool: str,
+        arguments: dict[str, Any],
+        active_skills: list[dict[str, Any]],
+        reason: str,
+        run_context: dict[str, Any] | None = None,
+        fenced_scope: dict[str, Any] | None = None,
+    ) -> tuple[bool, str]:
+        """显式要求一次确认（**不经过权限策略**）：供「围栏来源动作一律先确认」使用。
+
+        与 ``execute`` 的差别只有一处：判定来源不是 ``permission_mode`` 而是调用方。
+        ``fenced_scope`` 非空时，批准会顺带授予本次 Run 的围栏动作一次授权
+        （见 ``grant_fenced_approval``）。
+        """
+        return self._enqueue_confirmation(
+            tool, arguments, active_skills, reason, run_context,
+            extra={"fenced_scope": dict(fenced_scope)} if fenced_scope else None,
+        )
+
     def execute(
         self,
         tool: str,
@@ -175,25 +252,8 @@ class ToolExecutor:
         except Exception as exc:
             return False, f"{type(exc).__name__}: {exc}"
         if reason:
-            if self.permission_mode == "deny":
-                return False, f"权限被拒绝：{reason}（工具：{tool}）"
-            confirm_id = str(uuid.uuid4())
-            with self._confirmation_lock:
-                # run_context 一并暂存：批准执行时必须复用原 Run 的工作区/取消信号/权限模式，
-                # 以及依赖 run_context 的工具行为（产物目录、job 归属、reset_context 等）。
-                self.pending_confirmation[confirm_id] = {
-                    "tool": tool,
-                    "arguments": arguments,
-                    "active_skills": active_skills,
-                    "run_context": run_context,
-                    "processing": False,
-                }
-            # NEED_CONFIRM 协议以半角冒号分三段解析（agent.py split(":", 3)）；确认理由中
-            # 的 Windows 盘符（C:\…）含半角冒号会截断描述文本，故仅对确认理由做全角化。
-            reason_safe = str(reason or "").replace(":", "：")
-            return False, (
-                f"NEED_CONFIRM:{confirm_id}:{reason_safe}:"
-                f"{json.dumps(arguments, ensure_ascii=False)[:500]}"
+            return self._enqueue_confirmation(
+                tool, arguments, active_skills, reason, run_context
             )
         return self.execute_unchecked(tool, arguments, active_skills, run_context)
 
@@ -227,7 +287,7 @@ class ToolExecutor:
         except Exception as exc:
             return False, f"{type(exc).__name__}: {exc}"
 
-    def confirm_execute(self, confirm_id: str) -> tuple[bool, str]:
+    def confirm_execute(self, confirm_id: str, allow_run: bool | None = None) -> tuple[bool, str]:
         """确认并执行待确认的工具调用"""
         with self._confirmation_lock:
             pending = self.pending_confirmation.get(confirm_id)
@@ -236,6 +296,7 @@ class ToolExecutor:
             if pending.get("processing"):
                 return False, "该操作正在执行"
             pending["processing"] = True
+            self._apply_fenced_scope(pending, allow_run)
         result = self.execute_unchecked(
             pending["tool"], pending["arguments"], pending["active_skills"], pending.get("run_context")
         )
@@ -244,7 +305,7 @@ class ToolExecutor:
             self.confirmation_results[confirm_id] = result
         return result
 
-    def confirm_execute_async(self, confirm_id: str) -> tuple[bool, str]:
+    def confirm_execute_async(self, confirm_id: str, allow_run: bool | None = None) -> tuple[bool, str]:
         """Approve immediately and execute the potentially long tool off-request."""
         with self._confirmation_lock:
             pending = self.pending_confirmation.get(confirm_id)
@@ -253,6 +314,7 @@ class ToolExecutor:
             if pending.get("processing"):
                 return True, "工具已在执行"
             pending["processing"] = True
+            self._apply_fenced_scope(pending, allow_run)
 
         def worker() -> None:
             result = self.execute_unchecked(
@@ -268,6 +330,18 @@ class ToolExecutor:
             daemon=True,
         ).start()
         return True, "已确认，工具正在后台执行"
+
+    def _apply_fenced_scope(self, pending: dict[str, Any], allow_run: bool | None) -> None:
+        """围栏来源确认被批准时授予本 Run 的一次授权（``allow_run=False`` 可只批这一次）。
+
+        授权绑定当轮的允许工具集合与工作区：换工作区、改工具集合或 Run 结束即失效。
+        """
+        scope = pending.get("fenced_scope")
+        if not isinstance(scope, dict):
+            return
+        if allow_run is False:
+            return
+        self.grant_fenced_approval(scope.get("allowed_tools"), scope.get("workspace"))
 
     def reject_execute(self, confirm_id: str) -> tuple[bool, str]:
         """拒绝待确认的工具调用"""

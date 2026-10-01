@@ -193,6 +193,9 @@ def run_subagent_agent(
         "workspace_dir": str(session_workspace),
         "executor": sub_executor,
         "cancel_event": cancel,
+        # 子 Agent 跑在自己的后台 Job 里，没有前端确认卡：围栏来源动作在此直接按原文
+        # 收尾（未执行），不执行、不挂起、不等待 30 分钟（计划 2026-10-01 §3.5）。
+        "confirmation_ui": False,
     }
     try:
         content, runs, reasonings, usage = worker.run(

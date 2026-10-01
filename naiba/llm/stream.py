@@ -10,9 +10,110 @@ import json
 import re
 from typing import Any, Callable
 
+from naiba.core.text_fences import (
+    is_fence_close_line,
+    parse_fence_open,
+    partial_fence_opener_length,
+)
 from naiba.llm.protocols import ProtocolMixins
 
 StatusCallback = Callable[[dict[str, Any]], None]
+
+
+def _iter_lines(text: str, start: int):
+    """从 ``start`` 起逐行产出 ``(行起点, 行内容(去换行), 下一行起点, 行是否已完整)``。"""
+    pos = start
+    size = len(text)
+    while pos < size:
+        newline = text.find("\n", pos)
+        if newline < 0:
+            yield pos, text[pos:].rstrip("\r"), size, False
+            return
+        yield pos, text[pos:newline].rstrip("\r"), newline + 1, True
+        pos = newline + 1
+
+
+def _fence_open_after(buffer: str, start: int):
+    """``start`` 之后第一个**完整行**的围栏开启行 → ``(起点, 下一行起点, char, 长度)``。"""
+    for line_start, body, nxt, complete in _iter_lines(buffer, start):
+        if not complete:
+            return None
+        opened = parse_fence_open(body)
+        if opened:
+            char, length, _info = opened
+            return line_start, nxt, char, length
+    return None
+
+
+def _fence_close_after(buffer: str, start: int, char: str, length: int) -> int | None:
+    """``start`` 之后第一个闭合行 → 闭合行之后的位置（未闭合返回 None）。"""
+    for _line_start, body, nxt, complete in _iter_lines(buffer, start):
+        if not complete:
+            return None
+        if is_fence_close_line(body, char, length):
+            return nxt
+    return None
+
+
+def _mask_outside(buffer: str, regions: list[tuple[int, int]]) -> str:
+    """把「围栏内」的部分换成等长空格（偏移不变），只留可扫描区间。
+
+    流式场景不能用无状态的 ``fence_mask``：pending 可能是从围栏中间开始的（开启行早已
+    作为正文下发并移出缓冲），只有本对象的区间清单知道哪一段仍在围栏里。
+    """
+    size = len(buffer)
+    if not regions:
+        return "".join("\n" if char == "\n" else ("\r" if char == "\r" else " ") for char in buffer)
+    covered = bytearray(size)
+    for start, end in regions:
+        for position in range(max(0, start), min(size, end)):
+            covered[position] = 1
+    chars = list(buffer)
+    for position in range(size):
+        if not covered[position] and chars[position] not in "\r\n":
+            chars[position] = " "
+    return "".join(chars)
+
+
+class _FenceGuard:
+    """流式围栏状态机：跨 chunk 跟踪围栏开合，围栏内不扫描工具协议标记。
+
+    ``regions`` 返回「可以扫描协议」的区间；围栏内的区间不在清单里，但调用方仍会把它们
+    作为正文下发（掩码只影响检测，不影响可见文本）。未闭合的围栏一律按正文放行——它到
+    流尾为止都不是协议候选，最终由 Agent 终态解析按「整文围栏」处理。
+    """
+
+    def __init__(self) -> None:
+        self.in_fence = False
+        self.char = ""
+        self.length = 0
+
+    def regions(self, buffer: str, final: bool = False) -> tuple[list[tuple[int, int]], int]:
+        regions: list[tuple[int, int]] = []
+        pos = 0
+        size = len(buffer)
+        while True:
+            if self.in_fence:
+                closed_at = _fence_close_after(buffer, pos, self.char, self.length)
+                if closed_at is None:
+                    return regions, 0
+                self.in_fence = False
+                pos = closed_at
+                continue
+            opened = _fence_open_after(buffer, pos)
+            if opened is None:
+                keep = 0 if final else partial_fence_opener_length(buffer)
+                end = size - keep
+                if end > pos:
+                    regions.append((pos, end))
+                return regions, keep
+            start, after, char, length = opened
+            if start > pos:
+                regions.append((pos, start))
+            self.in_fence = True
+            self.char = char
+            self.length = length
+            pos = after
 
 
 # 「本轮请求超出上下文窗口」的服务端特征串。只用来判定**服务端错误体**（4xx 的 detail、
@@ -312,6 +413,7 @@ class StreamMixins:
         tool_protocol = False
         inline_parser = _InlineReasoningParser()
         native_tool_calls: dict[int, dict[str, str]] = {}
+        guard = _FenceGuard()
         for raw_line in response:
             try:
                 chunk = json.loads(raw_line.decode("utf-8", errors="replace"))
@@ -355,7 +457,9 @@ class StreamMixins:
             _mark_progress(progress, reasoning_chars, True)
             if not tool_protocol:
                 pending += text
-                pending, tool_protocol = StreamMixins._forward_guarded_text(pending, status)
+                pending, tool_protocol = StreamMixins._forward_guarded_text(
+                    pending, status, guard=guard
+                )
         final_text, final_reasoning = inline_parser.feed("", final=True)
         if final_reasoning:
             reasoning_streamer.feed(final_reasoning)
@@ -363,7 +467,9 @@ class StreamMixins:
             full_content_parts.append(final_text)
             pending += final_text
         if not tool_protocol:
-            pending, tool_protocol = StreamMixins._forward_guarded_text(pending, status, final=True)
+            pending, tool_protocol = StreamMixins._forward_guarded_text(
+                pending, status, final=True, guard=guard
+            )
         reasoning_streamer.finish()
         return {
             "content": (
@@ -413,6 +519,7 @@ class StreamMixins:
         native_tool_calls: dict[int, dict[str, str]] = {}
         tool_protocol = False
         inline_parser = _InlineReasoningParser()
+        guard = _FenceGuard()
         for raw_line in response:
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line.startswith("data:"):
@@ -460,7 +567,7 @@ class StreamMixins:
             if tool_calls:
                 # Native OpenAI tool calls must not appear as answer text.
                 if not tool_protocol:
-                    StreamMixins._forward_guarded_text(pending, status, final=True)
+                    StreamMixins._forward_guarded_text(pending, status, final=True, guard=guard)
                     pending = ""
                 tool_protocol = True
                 for call in tool_calls:
@@ -486,7 +593,9 @@ class StreamMixins:
             _mark_progress(progress, reasoning_chars, True)
             if not tool_protocol:
                 pending += text
-                pending, tool_protocol = StreamMixins._forward_guarded_text(pending, status)
+                pending, tool_protocol = StreamMixins._forward_guarded_text(
+                    pending, status, guard=guard
+                )
         final_text, final_reasoning = inline_parser.feed("", final=True)
         if final_reasoning:
             reasoning_streamer.feed(final_reasoning)
@@ -513,7 +622,9 @@ class StreamMixins:
                 full_content_parts.append(agg_text)
                 pending += agg_text
         if not tool_protocol:
-            pending, tool_protocol = StreamMixins._forward_guarded_text(pending, status, final=True)
+            pending, tool_protocol = StreamMixins._forward_guarded_text(
+                pending, status, final=True, guard=guard
+            )
         reasoning_streamer.finish()
         usage = ProtocolMixins._online_usage(request_format, chunks)
         if native_tool_calls:
@@ -553,6 +664,7 @@ class StreamMixins:
         reasoning_chars = 0
         tool_protocol = False
         inline_parser = _InlineReasoningParser()
+        guard = _FenceGuard()
         for raw_line in response:
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line.startswith("data:"):
@@ -608,7 +720,9 @@ class StreamMixins:
             _mark_progress(progress, reasoning_chars, True)
             if not tool_protocol:
                 pending += text
-                pending, tool_protocol = StreamMixins._forward_guarded_text(pending, status)
+                pending, tool_protocol = StreamMixins._forward_guarded_text(
+                    pending, status, guard=guard
+                )
         final_text, final_reasoning = inline_parser.feed("", final=True)
         if final_reasoning:
             reasoning_streamer.feed(final_reasoning)
@@ -616,7 +730,9 @@ class StreamMixins:
             full_content_parts.append(final_text)
             pending += final_text
         if not tool_protocol:
-            pending, tool_protocol = StreamMixins._forward_guarded_text(pending, status, final=True)
+            pending, tool_protocol = StreamMixins._forward_guarded_text(
+                pending, status, final=True, guard=guard
+            )
         reasoning_streamer.finish()
         return {
             "content": StreamMixins._clean_content("".join(full_content_parts)),
@@ -738,32 +854,37 @@ class StreamMixins:
         pending: str,
         status: StatusCallback | None,
         final: bool = False,
+        guard: "_FenceGuard | None" = None,
     ) -> tuple[str, bool]:
         """Forward safe prose while retaining enough tail to catch tool XML/JSON.
 
         Returns the unflushed tail and whether a tool protocol was detected.
         Once detected, callers suppress the remainder of that model response.
+
+        围栏感知（计划 2026-10-01 §3.4）：``guard`` 跨 chunk 跟踪围栏开合，
+        **围栏内不扫描协议标记**——代码块里的示例 JSON/XML/Harmony 会被当作正文
+        正常下发，围栏前后的正文也都能继续产生 delta。未闭合围栏到流尾按正文放行。
         """
-        classification = StreamMixins._classify_agent_output(pending)
+        if guard is None:
+            guard = _FenceGuard()
+        regions, fence_keep = guard.regions(pending, final)
+        masked = _mask_outside(buffer=pending, regions=regions)
+        classification = StreamMixins._classify_agent_output(masked)
         if classification == "tool":
             return "", True
-        offset = StreamMixins._tool_protocol_offset(pending)
+        offset = StreamMixins._tool_protocol_offset(masked)
         if offset is not None:
             visible = pending[:offset]
             if visible and status:
                 status({"type": "delta", "content": visible})
             return "", True
-        if final:
-            if pending and status:
-                status({"type": "delta", "content": pending})
-            return "", False
-        keep = StreamMixins._possible_protocol_suffix_length(pending)
+        keep = 0 if final else max(fence_keep, StreamMixins._possible_protocol_suffix_length(masked))
         if keep >= len(pending):
             return pending, False
-        visible = pending[:-keep] if keep else pending
+        visible = pending[: len(pending) - keep] if keep else pending
         if visible and status:
             status({"type": "delta", "content": visible})
-        return pending[-keep:] if keep else "", False
+        return pending[len(pending) - keep:] if keep else "", False
 
 
     @staticmethod

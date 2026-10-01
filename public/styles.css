@@ -762,10 +762,11 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
 .tool-confirm-body { margin-bottom: 12px; }
 .tool-confirm-tool { font-weight: 500; margin-bottom: 4px; }
 .tool-confirm-desc { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+.tool-confirm-hint { color: var(--muted); font-size: 12px; margin-bottom: 8px; line-height: 1.5; }
 .tool-confirm-args { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px; margin-top: 8px; }
 .tool-confirm-args pre { margin: 0; font-size: 12px; max-height: 200px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
-.tool-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
-.tool-confirm-btn { padding: 6px 16px; border-radius: var(--radius); font-size: 13px; font-weight: 500; }
+.tool-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.tool-confirm-btn { padding: 6px 16px; border-radius: var(--radius); font-size: 13px; font-weight: 500; max-width: 100%; }
 .tool-confirm-reject { background: var(--surface); border: 1px solid var(--line); color: var(--text); }
 .tool-confirm-reject:hover { background: var(--surface-2); }
 .tool-confirm-approve { background: var(--accent-solid); border: 1px solid var(--accent-solid); color: white; }

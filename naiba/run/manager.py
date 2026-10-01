@@ -378,16 +378,20 @@ class ConversationRunManager(ConversationRunMixin):
         with self._lock:
             return self._executors.setdefault(run_id, executor)
 
-    def confirm_tool(self, run_id: str, confirm_id: str) -> tuple[bool, str] | None:
+    def confirm_tool(
+        self, run_id: str, confirm_id: str, allow_run: bool | None = None
+    ) -> tuple[bool, str] | None:
         if not self.owns_confirmation(run_id, confirm_id):
             return None
         with self._lock:
             executor = self._executors.get(run_id)
         if executor is None or confirm_id not in getattr(executor, "pending_confirmation", {}):
             return None
-        return executor.confirm_execute(confirm_id)
+        return executor.confirm_execute(confirm_id, allow_run)
 
-    def confirm_tool_async(self, run_id: str, confirm_id: str) -> tuple[bool, str] | None:
+    def confirm_tool_async(
+        self, run_id: str, confirm_id: str, allow_run: bool | None = None
+    ) -> tuple[bool, str] | None:
         if not self.owns_confirmation(run_id, confirm_id):
             return None
         with self._lock:
@@ -395,7 +399,7 @@ class ConversationRunManager(ConversationRunMixin):
         if executor is None or confirm_id not in getattr(executor, "pending_confirmation", {}):
             return None
         starter = getattr(executor, "confirm_execute_async", None)
-        return starter(confirm_id) if callable(starter) else executor.confirm_execute(confirm_id)
+        return starter(confirm_id, allow_run) if callable(starter) else executor.confirm_execute(confirm_id, allow_run)
 
     def reject_tool(self, run_id: str, confirm_id: str) -> tuple[bool, str] | None:
         if not self.owns_confirmation(run_id, confirm_id):

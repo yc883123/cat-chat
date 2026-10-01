@@ -780,6 +780,8 @@ class PlanManager:
                 "workspace_dir": str(frozen.get("workspace_dir") or ""),
                 # 计划步骤里的 pwsh / 脚本同样要可见（与主会话同一出口）。
                 "event_sink": event,
+                # 计划执行由前端确认卡承接（与普通对话同口径）。
+                "confirmation_ui": True,
             },
         )
         self.app.storage.add_message(

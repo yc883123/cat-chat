@@ -882,10 +882,19 @@ function handleToolConfirmEvent(event, { row, answer, runId }) {
   }
   // 后端在回放时已标注「该确认不再待决」（confirm_resolved）：渲染成历史回执、不给按钮——
   // 否则页面重载后旧确认卡「复活」，点了只会收到 409「确认请求不属于该运行或已失效」。
+  // fenced（代码块来源）的确认额外给一个「允许本轮继续执行后续操作」：批准后本 Run 内的
+  // 后续围栏动作不再逐个询问（后端按 Run + 工作区 + 工具集合授权，换其一即失效）。
+  const confirmButtons = (allowRun) => `
+        <button class="tool-confirm-btn tool-confirm-reject" data-confirm-id="${escapeHtml(confirmId)}" data-run-id="${escapeHtml(event.run_id || runId)}">拒绝</button>
+        <button class="tool-confirm-btn tool-confirm-approve${allowRun ? ' tool-confirm-approve-run' : ''}" data-confirm-id="${escapeHtml(confirmId)}" data-run-id="${escapeHtml(event.run_id || runId)}" data-allow-run="${allowRun ? '1' : '0'}">${allowRun ? '允许本轮继续执行后续操作' : '允许执行'}</button>`;
   const actionsMarkup = event.confirm_resolved
     ? '<div class="tool-confirm-status">该确认已处理或已超时失效（历史回执，无需操作）</div>'
-    : `<button class="tool-confirm-btn tool-confirm-reject" data-confirm-id="${escapeHtml(confirmId)}" data-run-id="${escapeHtml(event.run_id || runId)}">拒绝</button>
-        <button class="tool-confirm-btn tool-confirm-approve" data-confirm-id="${escapeHtml(confirmId)}" data-run-id="${escapeHtml(event.run_id || runId)}">允许执行</button>`;
+    : (event.action_source === 'fenced'
+      ? confirmButtons(true)
+      : confirmButtons(false));
+  const confirmHint = event.action_source === 'fenced'
+    ? '<div class="tool-confirm-hint">这段动作来自代码块（围栏）文本，可能是说明里的示例。允许后本轮的后续同类动作不再重复询问。</div>'
+    : '';
   const confirmMarkup = `
     <div class="tool-confirm" data-confirm-id="${escapeHtml(confirmId)}">
       <div class="tool-confirm-header">
@@ -895,6 +904,7 @@ function handleToolConfirmEvent(event, { row, answer, runId }) {
       <div class="tool-confirm-body">
         <div class="tool-confirm-tool">工具：${escapeHtml(toolName)}</div>
         <div class="tool-confirm-desc">${escapeHtml(toolDesc)}</div>
+        ${confirmHint}
         ${toolArguments ? `<div class="tool-confirm-args"><pre>${escapeHtml(toolArguments)}</pre></div>` : ''}
       </div>
       <div class="tool-confirm-actions">
@@ -947,7 +957,14 @@ function handleRunFailedEvent(event, { answer, setActivity }) {
   clearVisionProgress();
   setActivity('');
   // 工具协议解析失败：只展示可读错误，不显示原始 XML/JSON 或命令参数。
-  answer.innerHTML = `<p>执行失败：${escapeHtml(event.error || '任务执行失败')}</p>`;
+  // 但**不能**在已有正文时清空它：末次解析失败会把模型最后一轮原文保留在答复里
+  // （后端已落库，done 事件随后用完整消息替换本行），这里清屏会让正文先闪掉。
+  const hasContent = Boolean((answer.dataset.raw || '').trim());
+  if (!hasContent) {
+    answer.innerHTML = `<p>执行失败：${escapeHtml(event.error || '任务执行失败')}</p>`;
+  } else {
+    setActivity(`执行失败：${event.error || '任务执行失败'}`);
+  }
   $('#runtimeStatus').textContent = '执行失败';
   // 失败同样意味着一轮结束：队列不再有消费者，冻结成「已停止」（同时撤掉引导按钮）。
   freezeQueuedInterjections();
@@ -1513,15 +1530,17 @@ export function rollbackChoiceSubmit() {
 
 
 
-export async function approveTool(confirmId, runId = state.chatRunId) {
+export async function approveTool(confirmId, runId = state.chatRunId, allowRun = undefined) {
   const confirmEl = document.querySelector(`.tool-confirm[data-confirm-id="${CSS.escape(String(confirmId))}"]`);
   try {
     if (confirmEl) {
       confirmEl.querySelector('.tool-confirm-actions').innerHTML = '<div class="tool-confirm-status">正在执行...</div>';
     }
-    const response = await api('/api/tool/confirm', {
-      method: 'POST', body: { run_id: runId, confirm_id: confirmId },
-    });
+    const body = { run_id: runId, confirm_id: confirmId };
+    // allow_run 只在确认卡明确给了选择时才发送：缺省由后端按「围栏来源 ⇒ 允许本轮继续」处理，
+    // 老前端（不知道这个字段）行为不变。
+    if (typeof allowRun === 'boolean') body.allow_run = allowRun;
+    const response = await api('/api/tool/confirm', { method: 'POST', body });
     if (confirmEl) {
       confirmEl.querySelector('.tool-confirm-status').textContent = response.success ? '已执行' : `执行失败：${response.result}`;
     }
@@ -1562,7 +1581,9 @@ document.addEventListener('click', (event) => {
   if (button.classList.contains('tool-confirm-reject')) {
     rejectTool(confirmId, runId);
   } else if (button.classList.contains('tool-confirm-approve')) {
-    approveTool(confirmId, runId);
+    // data-allow-run 只在围栏确认卡上存在（"1" = 允许本轮继续；"0" = 仅这一次）。
+    const flag = button.dataset.allowRun;
+    approveTool(confirmId, runId, flag === undefined ? undefined : flag === '1');
   }
 });
 

@@ -251,6 +251,8 @@ verify/*
 !verify/esm_graph_check.py
 !verify/esm_unused_imports.py
 !verify/file_actions_smoke.cjs
+!verify/fence_action_smoke.cjs
+!verify/fence_action_smoke.py
 !verify/file_download_smoke.cjs
 !verify/file_edit_keepalive_smoke.cjs
 !verify/file_ref_smoke.cjs

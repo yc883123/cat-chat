@@ -749,6 +749,8 @@ class ConversationRunMixin:
                 # 工具实现只依赖这一个 callable，不直接持有 manager——run 的内部结构
                 # 不向工具层泄漏，换实现（SSE/落库策略）时工具侧零改动。
                 "event_sink": event,
+                # 普通对话与计划执行都有前端确认卡承接：围栏来源动作可在此征得授权。
+                "confirmation_ui": True,
             }
             worker = SkillAgent(
                 self.app.catalog,

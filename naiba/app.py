@@ -1052,10 +1052,15 @@ class NaibaChatApp:
         if not confirm_id or not run_id:
             return self._reply({"error": "run_id 和 confirm_id 不能为空"}, HTTPStatus.BAD_REQUEST)
             return
+        # 计划 2026-10-01 §3.4：allow_run=False 表示「只允许这一次」；缺省（含旧前端）
+        # 对围栏来源确认按「允许本轮继续执行后续操作」处理（否则连续任务会退化成反复点确认）。
+        allow_run = body.get("allow_run")
+        if allow_run is not None:
+            allow_run = bool(allow_run)
         # Do not hold the browser's approval request open while a generation,
         # command or MCP action runs for minutes. The owning Run keeps waiting
         # for the real result through the confirmation condition.
-        result_pair = self.runs.confirm_tool_async(run_id, confirm_id)
+        result_pair = self.runs.confirm_tool_async(run_id, confirm_id, allow_run)
         if result_pair is None:
             return self._reply({"error": "确认请求不属于该运行或已失效"}, HTTPStatus.CONFLICT)
             return

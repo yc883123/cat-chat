@@ -128,6 +128,8 @@ KEEP = {
     "frozen_port_dialog_check.py",
     # 拖文件夹进输入区（路径索引 + 工作区外确认）冒烟（§六 已登记；Python 自编排 + 无头 Edge）
     "folder_drop_smoke.py", "folder_drop_smoke.cjs",
+    # 围栏（``` / ~~~）来源动作的来源标记与确认流程验收（§六 已登记；假 SSE 模型 + 隔离实例 + 无头 Edge）
+    "fence_action_smoke.py", "fence_action_smoke.cjs",
     # 隔离实例的公共 harness：维护说明「归档说明」点名要求留在 verify/（被 tasks_panel_smoke.py 依赖）
     "_serve_tmp.py",
     # 教程截图流水线三件套（§六 已登记；冻结版 exe + 隔离根 + 脱敏播种 + Playwright 驱动）：

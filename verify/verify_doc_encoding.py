@@ -1,122 +1,122 @@
-"""校验文档类改动：UTF-8 无 BOM、无「意外」替换字符、关键表述自洽。
+"""Check documentation encoding and keep the maintenance guide bounded.
 
-用法：.venv\\Scripts\\python.exe verify\\verify_doc_encoding.py
-说明：维护说明 §九.18 故意保留了两处 U+FFFD 作为乱码指纹示例，按行白名单放行；
-      其它位置出现 U+FFFD 一律判失败（这是 GBK 固化事故的指纹）。
+Usage::
+
+    .venv\\Scripts\\python.exe verify\\verify_doc_encoding.py
+
+The maintenance guide is a snapshot, not an append-only incident log. This
+guard deliberately checks only its stable contract and size policy; it does
+not duplicate volatile test counts or historical section numbers.
 """
 from __future__ import annotations
 
-import ast
 import pathlib
 import sys
 
-FILES = [
-    ".gitignore",
-    "README.md",
-    "项目维护说明（修改代码前必读）.md",
-]
 
-# 允许出现的 U+FFFD 所在行必须含以下标记之一（§九.18 的乱码示例）
-ALLOW_MARKERS = ("run_skill_script 实测", "can't find entry file")
-
-failed = False
-for name in FILES:
-    data = pathlib.Path(name).read_bytes()
-    has_bom = data[:3] == b"\xef\xbb\xbf"
-    try:
-        text = data.decode("utf-8")
-        decode = "utf-8 OK"
-    except UnicodeDecodeError as exc:
-        text = ""
-        decode = f"DECODE FAIL: {exc}"
-        failed = True
-    unexpected = [
-        (idx, line)
-        for idx, line in enumerate(text.split("\n"), 1)
-        if "\ufffd" in line and not any(m in line for m in ALLOW_MARKERS)
-    ]
-    if has_bom or decode != "utf-8 OK" or unexpected:
-        failed = True
-    total = data.count(b"\xef\xbf\xbd")
-    print(f"{name}: BOM={has_bom} {decode} U+FFFD={total} 非示例={len(unexpected)} "
-          f"lines={text.count(chr(10))}")
-    for idx, line in unexpected:
-        print(f"    line {idx}: {line[:120].encode('unicode_escape').decode('ascii')}")
-
-# 内容自洽：文档改动的关键表述
-doc = pathlib.Path("项目维护说明（修改代码前必读）.md").read_text(encoding="utf-8")
-
-# 这两个数字会随代码与用例增长而变。历史上它们被写死成 69 文件 / 844 用例，文档早已跑到
-# 70 / 920，于是守门自己成了长期噪声（FAIL 里还看不出该怎么修）。改为**从实际数据推导**后再比对：
-# 文件数口径与 verify/scan_undef_all.py 的 TARGETS 一致（naiba/ 全包 + server.py + launcher.py），
-# 用例数用 AST 静态数 tests/ 下的 def test*（与 unittest discover 实测一致，且不导入任何测试模块）。
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-PKG_FILE_COUNT = len(list(ROOT.joinpath("naiba").rglob("*.py"))) + len(
-    [p for p in (ROOT / "server.py", ROOT / "launcher.py") if p.exists()]
-)
-TEST_CASE_COUNT = 0
-for _test_file in ROOT.joinpath("tests").rglob("test_*.py"):
-    for _node in ast.walk(ast.parse(_test_file.read_text(encoding="utf-8"))):
-        if isinstance(_node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _node.name.startswith("test"):
-            TEST_CASE_COUNT += 1
+MAINTENANCE_DOC = "项目维护说明（修改代码前必读）.md"
+ENCODING_FILES = (".gitignore", "README.md", MAINTENANCE_DOC)
 
-checks = {
-    "§3.1 树含 .venv/": "├── .venv/" in doc,
-    "§六 解释器纪律": "**解释器纪律（本机唯一正确用法）**" in doc,
-    "§六 编译用 venv": "项目根\\.venv\\Scripts\\python.exe -m PyInstaller" in doc,
-    "无 518 残留": "518 用例" not in doc,
-    f"§六 检查器 {PKG_FILE_COUNT} 文件": f"（{PKG_FILE_COUNT} 文件 0 候选）" in doc,
-    "§六 不再提 verify_split_merge": "verify_split_merge" not in doc,
-    "§六 补工具卡片检查": "_check_tool_cards_compact.cjs" in doc,
-    f"§六 {TEST_CASE_COUNT} 用例": f"（{TEST_CASE_COUNT} 用例，" in doc,
-    "§3.4 分区无重复标题": "不再有灰色标题块与固定高度" in doc,
-    "§九.50 toast top layer": "底部提示框（`#toast`）是同一个坑" in doc,
-    "§3.4 Agent 分区切换": "弹层内改为分区切换" in doc,
-    "§六 提示注入口径守门": "test_prompt_gating" in doc,
-    "§六 分支首轮冒烟": "branch_first_turn_smoke.py" in doc,
-    "§四 分支继承首轮上下文": "分支对话在分支点不是首条消息时继承该列" in doc,
-    "§3.3 v17 迁移": "迁移 v1-v17" in doc,
-    "§四 快捷提示词页下线": "设置页的「快捷提示词」页已整体下线" in doc,
-    "§3.3 视觉文案分流": "按模型视觉能力分「分析/装载」两种文案" in doc,
-    "§九.23 条件注入口径": "按会话固化工具集条件注入" in doc,
-    "§8.8 路径纪律": "### 8.8 路径纪律：禁止本机绝对路径" in doc,
-    "§六 路径守门": "test_no_absolute_paths" in doc,
-    "§3.4 发送前判定": "pendingContextWarning" in doc,
-    "§3.4 5% 重新提醒": "CONTEXT_WARNING_STEP=5" in doc,
-    "§九.52 实时值": "52. **\"实时值\"必须有主" in doc,
-    "§六 弹窗几何断言": "高度 ≤240px" in doc,
-    "§3.4 圆环唯一写入点": "上下文圆环/弹层的唯一写入点" in doc,
-    "§3.4 提醒阈值": "上下文提醒阈值" in doc,
-    "§六 圆环守门": "test_context_ring" in doc,
-    "§六 圆环冒烟": "ring_usage_smoke.py" in doc,
-    "§六 弹窗冒烟": "contextWarningDialog" in doc,
-    "§3.3 5xx 退避": "429 + 全部 5xx" in doc,
-    "§九.51 5xx 教训": "51. **供应商 5xx 是瞬时故障" in doc,
-    "§六 5xx 守门测试": "test_llm_runtime_retry" in doc,
-    "§8.1 链含第 9 步": "9. 会话收尾（用户表示结束会话时）" in doc,
-    "§8.7 会话收尾清理": "### 8.7 会话收尾清理" in doc,
-    "§8.7 指向一键脚本": "verify\\cleanup_verify.py" in doc,
-    "§3.3 工具分类 7 组": "7 组单一维度分类" in doc,
-    "§3.3 预设 5 档": "**5 档**" in doc,
-    "§四 PDF 条件注入": "仅当会话工具集含 `read_pdf` 时注入" in doc,
-    "§3.4 风险徽标": "group-badge" in doc,
-    "§六 工具分类冒烟": "tool_groups_smoke.py" in doc,
+# Keep the document small enough that every maintenance pass can read it in
+# full. The value is also stated in the guide and checked as an anchor below.
+MAX_DOC_BYTES = 120 * 1024
+MAX_DOC_LINES = 500
+
+# These are the durable promises that the compressed guide must retain. Do
+# not add incident-specific prose or dynamic counts here: those are exactly
+# what caused the guide and this check to grow together in the past.
+REQUIRED_ANCHORS = {
+    "体积与内容边界": "## 0. 体积与内容边界（硬规则）",
+    "容量政策": "主文上限：**120 KB / 500 行**",
+    "当前版本": "Cat Chat 2.9.14 Beta",
+    "事件契约": "naiba/core/contracts.py",
+    "Playwright 验收": "Playwright 前端验收（每次改动必做）",
+    "路径纪律": "### 8.8 路径纪律：禁止本机绝对路径",
+    "消息列表契约": "list_primary",
+    "停止状态契约": "stopping",
+    "推理回放上限": "MODEL_REASONING_REPLAY_MAX_CHARS",
+    "推理回放配置": "reasoning_replay_max_chars",
+    "推理回放预算": "_ReasoningReplayBudget",
+    "本地首字节超时": "LocalModelFirstByteTimeout",
+    "本地首字节配置": "local_first_byte_timeout_seconds",
+    "锁标签": "lock_label",
+    "Agent 步数上限": "agent_step_limit",
+    "本地上下文记忆": "remember_local_context_window",
+    "上下文探测": "context_window_probed",
+    "默认步数": "DEFAULT_MAX_STEPS",
 }
-readme = pathlib.Path("README.md").read_text(encoding="utf-8")
-checks["README 无 public/app.js"] = "public/app.js" not in readme
-checks["README js 逐个检查"] = "Get-ChildItem public\\js\\*.js" in readme
-ignore = pathlib.Path(".gitignore").read_text(encoding="utf-8")
-checks[".gitignore 含 .workbuddy/"] = "\n.workbuddy/\n" in ignore
-checks[".gitignore 注释无乱码"] = "验证脚本目录" in ignore
-checks[".gitignore 默认忽略 verify 产物"] = "\nverify/*\n" in ignore
-checks[".gitignore 放行可复用脚本"] = "\n!verify/scan_undef_all.py\n" in ignore
-checks[".gitignore 放行工具分类冒烟"] = "\n!verify/tool_groups_smoke.cjs\n" in ignore
-checks["§六 目录分工表"] = "**目录分工（`tests/` vs `verify/`）**" in doc
-checks["无 .tmptest 残留"] = ".tmptest" not in doc
 
-for label, ok in checks.items():
-    print(("PASS " if ok else "FAIL ") + label)
-    if not ok:
+
+def _check_encoding(path: pathlib.Path) -> bool:
+    """Print and validate UTF-8/BOM/replacement-character status for *path*."""
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        print(f"FAIL {path.relative_to(ROOT)}: cannot read: {exc}")
+        return False
+
+    has_bom = data.startswith(b"\xef\xbb\xbf")
+    try:
+        decoded = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        print(f"FAIL {path.relative_to(ROOT)}: UTF-8 decode failed: {exc}")
+        return False
+
+    replacement_count = decoded.count("\ufffd")
+    line_count = len(decoded.splitlines())
+    ok = not has_bom and replacement_count == 0
+    print(
+        f"{'PASS' if ok else 'FAIL'} {path.relative_to(ROOT)}: "
+        f"BOM={has_bom} utf-8 OK U+FFFD={replacement_count} "
+        f"bytes={len(data)} lines={line_count}"
+    )
+    if has_bom:
+        print("    UTF-8 BOM is not allowed")
+    if replacement_count:
+        print("    replacement characters (U+FFFD) are not allowed")
+    return ok
+
+
+def main() -> int:
+    failed = False
+    for name in ENCODING_FILES:
+        failed = not _check_encoding(ROOT / name) or failed
+
+    doc_path = ROOT / MAINTENANCE_DOC
+    try:
+        doc_bytes = doc_path.read_bytes()
+        doc = doc_bytes.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"FAIL {MAINTENANCE_DOC}: cannot load maintenance guide: {exc}")
+        return 1
+
+    doc_lines = len(doc.splitlines())
+    if len(doc_bytes) > MAX_DOC_BYTES:
+        print(
+            f"FAIL maintenance guide size: {len(doc_bytes)} bytes "
+            f"> {MAX_DOC_BYTES} bytes ({MAX_DOC_BYTES // 1024} KB)"
+        )
         failed = True
+    else:
+        print(
+            f"PASS maintenance guide size: {len(doc_bytes)} bytes "
+            f"<= {MAX_DOC_BYTES} bytes ({MAX_DOC_BYTES // 1024} KB)"
+        )
 
-sys.exit(1 if failed else 0)
+    if doc_lines > MAX_DOC_LINES:
+        print(f"FAIL maintenance guide lines: {doc_lines} > {MAX_DOC_LINES}")
+        failed = True
+    else:
+        print(f"PASS maintenance guide lines: {doc_lines} <= {MAX_DOC_LINES}")
+
+    for label, token in REQUIRED_ANCHORS.items():
+        present = token in doc
+        print(f"{'PASS' if present else 'FAIL'} anchor {label}: {token}")
+        failed = not present or failed
+
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

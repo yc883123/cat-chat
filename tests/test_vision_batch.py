@@ -20,7 +20,7 @@ from naiba.skills.agent import (  # noqa: E402
     _image_batch_label,
     _image_batch_message,
 )
-from naiba.run.chat import _user_turn_index  # noqa: E402
+from naiba.run.chat import _turn_index_for_run, _user_turn_index  # noqa: E402
 from naiba.tools.registry import (  # noqa: E402
     VISION_ANALYZE_DESCRIPTION,
     VISION_ANALYZE_LOAD_DESCRIPTION,
@@ -174,6 +174,44 @@ class UserTurnIndexTests(unittest.TestCase):
 
     def test_empty_history_is_turn_one(self) -> None:
         self.assertEqual(_user_turn_index([], "u1"), 1)
+
+
+class TurnIndexWiringTests(unittest.TestCase):
+    """接线级守门：`turn_index` 的"当前消息 id"必须取自 **run 行**，绝不能取自 `message`。
+
+    病历（2026-10-01，我自己的回归，用户实测报障）：`run/chat.py` 里
+    `message = str(run.get("message") or "")` 是**字符串**，我在 run_context 里写了
+    `message.get("id")` ⇒ **每个新会话第一轮都崩** `'str' object has no attribute 'get'`，
+    且抛在 run 构造期（trace/tool_runs/activity 全空、界面显示"（本次回答未完成）"）。
+    `_user_turn_index` 的单测全绿也抓不到——**纯函数单测不覆盖接线**（§九.151）。
+    """
+
+    def test_helper_reads_id_from_run_row(self) -> None:
+        snapshot = {
+            "conversation_messages": [
+                {"id": "u1", "role": "user", "content": "a", "metadata": {}},
+                {"id": "a1", "role": "assistant", "content": "b", "metadata": {}},
+                {"id": "u2", "role": "user", "content": "c", "metadata": {}},
+            ]
+        }
+        self.assertEqual(_turn_index_for_run(snapshot, {"input_message_id": "u2"}), 2)
+        self.assertEqual(_turn_index_for_run(snapshot, {}), 2, "缺 input_message_id 时退回「数到最后」")
+
+    def test_call_site_never_takes_id_from_message(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "naiba" / "run" / "chat.py").read_text(encoding="utf-8")
+        self.assertIn(
+            'message = str(run.get("message") or "")',
+            source,
+            "前提：chat.py 里的 message 是字符串——本守门存在的理由；若它变成了 dict，请回头改这里的判据",
+        )
+        self.assertIn('"turn_index": _turn_index_for_run(', source, "取数点必须固定走 helper")
+        call = source.split('"turn_index": _turn_index_for_run(')[1].split(")")[0]
+        self.assertIn("run", call)
+        self.assertNotIn(
+            "message.get(",
+            call,
+            "message 是 str，拿它取 id 会 AttributeError（§九.151 的真实事故）",
+        )
 
 
 class VisionBatchSchemaTests(unittest.TestCase):

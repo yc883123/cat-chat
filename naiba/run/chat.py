@@ -166,6 +166,20 @@ def _user_turn_index(messages: list[Any], message_id: str) -> int:
     return max(index, 1)
 
 
+def _turn_index_for_run(snapshot: dict[str, Any], run: dict[str, Any]) -> int:
+    """本轮序号（1 起）——**唯一取数点**：当前用户消息 id 从 **run 行**的 `input_message_id` 取。
+
+    ⚠️ 千万别用同函数里的 `message` 去取 id：它是 `str(run.get("message") or "")`，**字符串**。
+    2026-10-01 我自己就写成了 `message.get("id")` ⇒ **每个新会话第一轮都崩**
+    `'str' object has no attribute 'get'`，而且抛在 run 构造期（trace/tool_runs/activity 全空），
+    用户实测报障；`_user_turn_index` 的单测全绿也抓不到——纯函数单测不覆盖接线（§九.151）。
+    """
+    return _user_turn_index(
+        snapshot.get("conversation_messages") or [],
+        str(run.get("input_message_id") or ""),
+    )
+
+
 def _summarize_trace_messages(messages: list[Any]) -> list[dict[str, Any]]:
     """trace 消息摘要化（first_turn 展示用）：图片 base64 data 替换为占位说明。
 
@@ -782,9 +796,9 @@ class ConversationRunMixin:
                 "media_intent": _image_intent(message),
                 # 本轮是第几个用户轮次（1 起）：图片批注入标签用它标注「第 N 轮装载」，
                 # 让模型能区分「历史里装进来的旧图」与「当前成品图」（§九.150）。
-                "turn_index": _user_turn_index(
-                    snapshot.get("conversation_messages") or [], str(message.get("id") or "")
-                ),
+                # ⚠️ 取数点固定走 _turn_index_for_run（run 行的 input_message_id）——`message`
+                # 在这里是**字符串**，拿它取 id 会 AttributeError（§九.151）。
+                "turn_index": _turn_index_for_run(snapshot, run),
                 # 工具实时进度出口（pwsh / run_skill_script 逐行 stdout+stderr）。
                 # 工具实现只依赖这一个 callable，不直接持有 manager——run 的内部结构
                 # 不向工具层泄漏，换实现（SSE/落库策略）时工具侧零改动。

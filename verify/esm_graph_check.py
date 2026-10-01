@@ -178,8 +178,16 @@ for path in files:
         if len(owners) == 1 and owners[0] != path.name:
             pattern = re.compile(rf"(?<![\w$]){re.escape(name)}(?![\w$])")
             hits = [m for m in pattern.finditer(stripped)]
-            # 属性键（`name:`）容忍
-            real = [h for h in hits if stripped[h.end():h.end() + 1] != ":"]
+            # 属性键（`name:`）与成员访问（`obj.name` / `obj?.name`）容忍：前者是对象字面量
+            # 的键，后者是**别的对象**上的同名属性（如 `btn.dataset.usageDim`），两者都不是
+            # 对本模块绑定的引用。不排除成员访问会把它误报成"引用未 import"（实测
+            # 15-bind-events.js 的 `dataset.usageDim` 就是这么被当成 09-settings.js 的
+            # 模块级 `usageDim` 的）。
+            real = [
+                h for h in hits
+                if stripped[h.end():h.end() + 1] != ":"
+                and stripped[h.start() - 1:h.start()] != "."
+            ]
             if real:
                 problems.append(f"{path.name}: 引用 {name}（{owners[0]}）但未 import")
 

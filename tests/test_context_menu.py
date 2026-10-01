@@ -154,8 +154,12 @@ class TextContextMenuTests(unittest.TestCase):
         self.assertIn("长按", hint, "手机通路：要告诉用户长按用系统菜单")
         paste = core[core.index("} else if (action === 'paste') {"):]
         paste = paste[: paste.index("} else if (action === 'delete')")]
-        self.assertIn("toast(ok ? '已粘贴' : PASTE_UNAVAILABLE_HINT);", paste,
-                      "成功与失败都要出声，不许出现「点了没反应」")
+        # 2026-10-01：粘贴动作前面加了「先问原生剪贴板（桌面壳里图片/文件走那条路）」，
+        # 出声音的写法从 `toast(ok ? '已粘贴' : HINT)` 变成先定 message 再 toast(message)——
+        # 断言形状跟着改，但**意图不变**：两条结局都必须出声，不许「点了没反应」。
+        self.assertIn("'已粘贴'", paste, "成功要出声")
+        self.assertIn("PASTE_UNAVAILABLE_HINT", paste, "失败要给出可行动的提示")
+        self.assertIn("toast(message)", paste, "两条结局都得真的弹出来")
         self.assertIn("insertTextIntoEditable(text)", paste)
 
 

@@ -9,7 +9,7 @@ import { fillContextResetSeed, getStreamingProseSegment, messageElement, moveBot
 import { loadTasks, renderPermissionModeSwitch } from "./06-tasks-plans.js";
 import { updateUnloadModelButton } from "./07-models-agents.js";
 import { createConversation, openConversation } from "./08-conversations.js";
-import { uploadFiles } from "./10-upload.js";
+import { uploadFiles, renderPendingFiles } from "./10-upload.js";
 import { SKILL_INSTALL_PRESET, SKILL_SCRIPT_RULES, clearElapsedStatus, clearRunReconnectTimers, clearVisionProgress, collapseToolReasoningBlock, createStreamingReasoningBlock, detachRunConnection, sendChatMessage, setConnectionState, settleReconnectStatus, showElapsedStatus, stopRunWatchdog } from "./11-run-stream.js";
 import { insertTextAtCursor, renderInputMirror, resizeTextarea, updateSkillPopup } from "./13-skill-refs.js";
 import { normalizeChoiceGroups } from "./17-choice-groups.js";
@@ -528,6 +528,99 @@ export async function handlePasteImage(event) {
   await uploadFiles(imageFiles);
   toast('已粘贴图片，可发送');
 }
+
+// ---- 输入区右键「粘贴」：桌面壳里问原生剪贴板，图片直接上传、文件直接挂成路径附件 ----
+// 为什么不在 01-core.js 里直接调桥：01-core 是底层模块，反向 import 这里会成环——
+// 所以把驱动对象注入进去（见 15-bind-events.js 的 setClipboardPasteDriver）。
+// 手机/浏览器里没有桥：驱动返回 null，调用方退回原有的文本粘贴通道（§九.85 口径不变）。
+const NATIVE_PASTE_CACHE_MS = 2000;
+let nativePasteCache = { at: 0, payload: null };
+
+function nativeClipboardBridge() {
+  const api = window.pywebview?.api;
+  return typeof api?.naibaClipboardPayload === 'function' ? api : null;
+}
+
+async function probeNativeClipboard(force = false) {
+  const bridge = nativeClipboardBridge();
+  if (!bridge) return null;
+  const now = Date.now();
+  if (!force && nativePasteCache.payload && now - nativePasteCache.at < NATIVE_PASTE_CACHE_MS) {
+    return nativePasteCache.payload;   // 菜单文案已经问过一次：点击时别重复 IPC
+  }
+  try {
+    const payload = await bridge.naibaClipboardPayload();
+    nativePasteCache = { at: Date.now(), payload };
+    return payload;
+  } catch (error) {
+    nativePasteCache = { at: 0, payload: null };
+    return { ok: false, error: `读取系统剪贴板失败：${error.message}` };
+  }
+}
+
+/** 菜单项文案：让用户点之前就知道这一下会把图片/文件粘进来（而不是只写"粘贴"）。 */
+function clipboardPasteLabelFor(payload) {
+  if (!payload) return '';
+  if (payload.kind === 'image') return '粘贴图片并上传';
+  const count = payload.kind === 'files' ? (payload.paths || []).length : 0;
+  if (count > 1) return `粘贴 ${count} 个文件`;
+  if (count === 1) return '粘贴文件';
+  return '';
+}
+
+function pngFileFromBase64(base64Data, name) {
+  const binary = atob(String(base64Data || ''));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return new File([bytes], name || '粘贴的图片.png', { type: 'image/png' });
+}
+
+/** 复制文件的情况走**路径附件**（与拖入本地链接/@引用同形态）：零拷贝、任意大小。 */
+function addClipboardPathAttachments(paths, names, sizes) {
+  const existing = new Set(state.pendingFiles.map((item) => String(item.path || '')));
+  let added = 0;
+  paths.forEach((raw, index) => {
+    const path = String(raw || '');
+    if (!path || existing.has(path)) return;
+    existing.add(path);
+    state.pendingFiles.push({
+      name: String(names[index] || '').trim() || path.split(/[\\/]/).pop() || '文件',
+      path,
+      size: Number(sizes[index] || 0),
+    });
+    added += 1;
+  });
+  if (added) renderPendingFiles();
+  return added;
+}
+
+/** 执行粘贴：返回 `{handled, message}`；`handled=false` 表示交给原有的文本通道。 */
+async function applyNativeClipboardPaste() {
+  const payload = await probeNativeClipboard(true);
+  if (!payload) return { handled: false, message: '' };
+  if (payload.ok === false) return { handled: true, message: payload.error || '读取系统剪贴板失败' };
+  if (payload.kind === 'image') {
+    if (!state.conversationId) await createConversation();
+    await uploadFiles([pngFileFromBase64(payload.base64, payload.name)]);
+    return { handled: true, message: '已粘贴图片并上传' };
+  }
+  if (payload.kind === 'files') {
+    const paths = payload.paths || [];
+    if (!paths.length) return { handled: false, message: '' };
+    const added = addClipboardPathAttachments(paths, payload.names || [], payload.sizes || []);
+    return {
+      handled: true,
+      message: added ? `已粘贴 ${added} 个文件` : '这些文件已在待发送列表里',
+    };
+  }
+  return { handled: false, message: '' };   // text / empty：交给既有 readText 通道
+}
+
+export const clipboardPasteDriver = {
+  probe: () => probeNativeClipboard(),
+  labelFor: clipboardPasteLabelFor,
+  apply: () => applyNativeClipboardPaste(),
+};
 
 // ---- Run 事件流渲染：类型路由表（阶段 3：巨型 if-else → type→handler 表）----
 // 约定：handler 返回 false 表示“本事件不触发滚动”（原 debug_cache/reasoning_delta

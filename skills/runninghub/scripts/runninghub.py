@@ -26,6 +26,12 @@ import tempfile
 import time
 from pathlib import Path
 
+# cat-chat 冻结版是无窗口进程（PyInstaller console=False）。这种父进程直接 spawn 控制台
+# 程序时，Windows 会为子进程新建控制台 ⇒ 轮询类调用（轮询任务状态）会让用户看到黑框
+# 无限闪现（默认终端为 Windows Terminal 时尤其明显）。故所有 curl 调用统一隐藏窗口。
+# POSIX 上该常量为 0，行为不变。
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 SITES = {
     "ai": {
         "label": "AI site (international, runninghub.ai)",
@@ -224,7 +230,7 @@ def curl_post_json(url: str, payload: dict, headers: dict, timeout: int = 60) ->
                "--max-time", str(timeout), "-d", f"@{tmp_path}"]
         for k, v in headers.items():
             cmd += ["-H", f"{k}: {v}"]
-        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
     finally:
         os.unlink(tmp_path)
 
@@ -424,7 +430,7 @@ def upload_file(api_key: str, file_path: str) -> str:
     cmd = ["curl", "-s", "-S", "--fail-with-body", "-X", "POST", url,
            "-H", f"Authorization: Bearer {api_key}",
            "-F", f"file=@{file_path}", "--max-time", "120"]
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
     if result.returncode != 0:
         print(f"Upload failed: {result.stderr}", file=sys.stderr)
         sys.exit(1)
@@ -531,7 +537,7 @@ def poll_task(api_key: str, task_id: str) -> dict:
 def download_file(url: str, output_path: str) -> str:
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     cmd = ["curl", "-s", "-S", "-L", "-o", output_path, "--max-time", "300", url]
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
     if result.returncode != 0:
         print(f"Download failed: {result.stderr}", file=sys.stderr)
         sys.exit(1)

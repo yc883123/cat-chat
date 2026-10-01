@@ -59,6 +59,9 @@ REQUIRED_SKILLS = [
     "cat-chat-guide/references/60-教程6-3分钟让AI写个小工具.md",
     "cat-chat-guide/references/70-教程7-3分钟给CatChat装个新技能.md",
     "cat-chat-guide/references/80-教程8-3分钟认识教程助手.md",
+    # 2.9.10：RunningHub 技能脚本（黑框闪现修复所在处）——必须进包，且带隐藏窗口指纹。
+    "runninghub/scripts/runninghub_app.py",
+    "runninghub/scripts/runninghub.py",
 ]
 
 # 本轮改过的 Skill 文件里的「已生效」指纹（缺一即证改动没进包）。
@@ -102,6 +105,13 @@ SKILL_FINGERPRINTS = {
     ],
     "cat-chat-guide/references/80-教程8-3分钟认识教程助手.md": [
         "全套 8 篇速查表",
+    ],
+    # 2.9.10：无窗口父进程下 spawn curl 会弹控制台（黑框闪现）⇒ 9 处调用统一带该标志。
+    "runninghub/scripts/runninghub_app.py": [
+        "creationflags=_NO_WINDOW",
+    ],
+    "runninghub/scripts/runninghub.py": [
+        "creationflags=_NO_WINDOW",
     ],
 }
 

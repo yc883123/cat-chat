@@ -230,6 +230,17 @@ class EventEmissionContractTests(unittest.TestCase):
             missing = sorted(allowed - union)
             self.assertEqual(missing, [], f"事件 {kind} 契约图键未在 EventPayload 并集登记：{missing}")
 
+    def test_done_payload_carries_no_full_message(self):
+        """终态 `done` 不带完整消息对象（2026-10 起）。
+
+        带一份就等于把整条消息（含最占体积的 `metadata.trace`，实测单轮最长 318KB）写进
+        `run_events`、终态再被 `slim_terminal_run` 删掉——纯空转。完整消息由前端收尾重载
+        会话（`GET /api/conversations/<id>`）提供；事件只留"只有事件能给"的即时动作字段。
+        """
+        allowed = EVENT_PAYLOAD_KEYS["done"]
+        self.assertNotIn("message", allowed, "done 不得再携带完整消息对象")
+        self.assertIn("session_start", allowed, "模型重置上下文后的种子预填只走事件")
+
 
 class ValidateEventPayloadTests(unittest.TestCase):
     """validate_event_payload 行为单测（严格模式核心）。"""

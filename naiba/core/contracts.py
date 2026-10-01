@@ -265,6 +265,9 @@ class EventPayload(TypedDict, total=False):
     budget: int
     reason: str
     followup_run_id: str
+    # done 事件里的「新会话」重置信息（模型调 reset_context 成功时才有）：终态事件不再带
+    # 完整消息，前端要靠它在收尾瞬间把种子消息预填进输入框（重载路径只画分割线、不填）。
+    session_start: dict[str, Any]
     partial_message: dict[str, Any]
     # 工具流
     tool: str
@@ -341,7 +344,10 @@ EVENT_PAYLOAD_KEYS: dict[str, frozenset[str] | None] = {
     "cancelled": frozenset({"message", "aborted_message"}),
     "run_failed": frozenset({"error"}),
     "context_full": frozenset({"limit", "used", "budget"}),
-    "done": frozenset({"message", "followup_run_id", "plan"}),
+    # done **不带** `message`：终态消息由前端收尾时重载会话（GET /api/conversations/<id>）
+    # 拿到，事件里带着它等于把整份消息（含 metadata.trace，实测最长 318KB）写进 run_events
+    # 再被终态瘦身删掉。这里只放"只有事件能给的即时动作"字段。
+    "done": frozenset({"session_start", "followup_run_id", "plan"}),
     "error": frozenset({"message", "partial_message"}),
     "debug_cache": frozenset({"label", "lines"}),
     "heartbeat": frozenset(),

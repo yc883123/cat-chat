@@ -14,7 +14,8 @@
 2. 并发写入后，按 `input_message_id` 重新解析出的冻结前缀**逐字不变**；
 3. 并发写入的内容没有出现在本轮的线上请求里；
 4. `snapshot` 里没有 `conversation_messages`（新契约：不再固化整段会话），只留 `history_size`；
-5. 运行照常收尾，且终态瘦身生效（库里的 done 事件去掉完整 message）。
+5. 运行照常收尾；终态 `done` 事件**不携带完整消息**（只留小载荷），终态消息由会话 API
+   提供——库里那份同理，不再有"写一整份消息再瘦身删掉"的空转。
 
 用法：项目根\\.venv\\Scripts\\python.exe verify\\run_freeze_smoke.py
 （`--serve` 是子进程入口，不用手工调用；README/维护说明不需要登记它）
@@ -522,31 +523,54 @@ def run_checks(check: _Check) -> int:
     check.ok(not stream.error, f"流没有报错（error={stream.error!r}）")
     terminal = stream.terminal_event() or {}
     check.ok(terminal.get("type") == "done", f"终态事件为 done（实得 {terminal.get('type')!r}）")
-    # done 事件在**流里**必须带 message（前端靠它即时渲染）；库里那份由收尾瘦身去掉。
-    check.ok(terminal.get("message") is not None,
-             "流里的终态事件带 message（前端即时渲染依赖它，瘦身只动库里那份）")
+    # done **不再携带完整消息**：终态消息由前端收尾时重载会话（GET /api/conversations/<id>）
+    # 拿到；事件里带一份就等于把它写进 run_events 再被终态瘦身删掉（实测单轮最长 318KB）。
+    check.ok("message" not in terminal,
+             "done 事件不携带完整消息对象（终态消息改由会话 API 提供）")
 
     # 收尾链路（compress + slim）都在 finally 里，done 事件落库可能稍晚于 done 流结束。
     done_payloads: list[dict] = []
     deadline = time.time() + 20
     while time.time() < deadline:
-        with storage._connect() as db:  # noqa: SLF001 - 冒烟直接读事件表核对瘦身
+        with storage._connect() as db:  # noqa: SLF001 - 冒烟直接读事件表核对
             rows = db.execute(
                 "SELECT payload FROM run_events WHERE run_id = ? AND event_type = 'done'",
                 (run_id,),
             ).fetchall()
         done_payloads = [json.loads(row[0]) for row in rows]
-        if done_payloads and all("message" not in item for item in done_payloads):
+        if done_payloads:
             break
         time.sleep(0.3)
     check.ok(bool(done_payloads), "库里确实落了一条 done 事件")
     check.ok(
         all("message" not in item for item in done_payloads),
-        "A 步瘦身生效：库里的 done 事件已去掉完整 message 对象",
+        "库里的 done 事件也没有完整 message 对象（压根没写过，不靠收尾补刀）",
+    )
+    check.ok(
+        all(len(json.dumps(item, ensure_ascii=False)) < 4096 for item in done_payloads),
+        "库里的 done 事件是小载荷（不再有整份消息 + metadata.trace）",
     )
     stored = storage.get_run_snapshot(run_id) or {}
     check.ok("conversation_messages" not in stored,
              "A 步瘦身生效：收尾后快照不再固化整段会话")
+    # 终态消息的**唯一来源**：前端收尾重载的会话 API（见 11-run-stream.js::finishRunSubscription
+    # → openConversation）。这条断言就是"done 不带 message 仍然不丢内容"的证据。
+    conversation_status, conversation_payload = get_json(f"/api/conversations/{conversation_id}")
+    api_messages = conversation_payload.get("messages") or []
+    check.ok(
+        conversation_status == 200 and any(
+            str(m.get("content") or "") == MODEL_ANSWER for m in api_messages
+        ),
+        "会话 API 能取到本轮终态消息（前端 done 之后靠它渲染）",
+    )
+    check.ok(
+        any(
+            str(m.get("content") or "") == MODEL_ANSWER
+            and str((m.get("metadata") or {}).get("run_id") or "") == run_id
+            for m in api_messages
+        ),
+        "终态消息带本轮 run_id（重载路径据此归属到本轮）",
+    )
 
     print("\n[5] 收尾核对")
     final_messages = storage.get_conversation(conversation_id)["messages"]

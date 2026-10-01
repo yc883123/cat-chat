@@ -1110,23 +1110,28 @@ function handleUsageEvent(event, { row, answer }) {
   setContextUsage(event.usage || null);
 }
 
+/* 模型调用 reset_context 成功后的「种子消息预填」：只在终态瞬间做一次，不自动发送
+ * （种子消息可以很长，用户要能改完再发；刷新后仍可从分割线上的按钮找回）。
+ * 两条来源都要认：存量/重放事件（done 带完整 message 的 metadata）与新契约
+ * （done 只带 session_start，见 run/chat.py 终态发射点）。 */
+function prefillResetSeed(resetInfo) {
+  if (!resetInfo || String(resetInfo.source || '') !== 'tool') return;
+  if (fillContextResetSeed(resetInfo)) {
+    toast('模型已交接并重置上下文：种子消息已填入输入框，确认后发送即可继续');
+  }
+}
+
 function handleDoneEvent(event, { row, answer, collapseReasoning, conversationId }) {
   clearElapsedStatus();
   clearVisionProgress();
   collapseReasoning();
   if (event.message) {
+    // 存量形态（重放旧事件流/旧库）：done 曾携带完整消息对象，按老路径就地渲染一次。
     try {
       const completedRow = replaceWithMessage(row, event.message);
       updateContextUsage(null, event.message);
-      // 模型调用 reset_context 成功：把「新会话」种子消息填进输入框（不自动发送，
-      // 用户可编辑后再点发送；刷新后仍可从分割线上的「填入种子消息」按钮找回）。
-      const resetInfo = event.message.metadata?.session_start;
-      if (resetInfo && String(resetInfo.source || '') === 'tool') {
-        if (fillContextResetSeed(resetInfo)) {
-          toast('模型已交接并重置上下文：种子消息已填入输入框，确认后发送即可继续');
-        }
-      }
       const metadata = event.message.metadata || {};
+      prefillResetSeed(metadata.session_start);
       if ((Array.isArray(metadata.choice_groups) && metadata.choice_groups.length)
         || (Array.isArray(metadata.choices) && metadata.choices.length)) {
         // 与 choice 事件同口径：同一个来源消息 → 同一份临时选择（重复事件只更新数据）。
@@ -1138,8 +1143,16 @@ function handleDoneEvent(event, { row, answer, collapseReasoning, conversationId
     } catch (error) {
       console.error('[naiba] done 事件渲染崩溃:', error, 'message=', event.message);
     }
-  } else {
+  } else if (event.plan) {
     answer.innerHTML = '<p>计划执行完成</p>';
+  } else {
+    // 新契约（run/chat.py 的 done 发射点）：终态事件**不再带完整消息**——那份副本连同
+    // metadata.trace 会被写进 run_events 再被终态瘦身删掉，纯属白写。完整消息改由收尾路径
+    // 紧接着的会话重载从 API 取（11-run-stream.js::finishRunSubscription →
+    // openConversation → GET /api/conversations/<id>），选择面板 / 用量圆环 / 思考与工具
+    // 卡片都由那条重渲染路径负责。这里**不写任何占位文案**：流式行上已经有正在显示的回答，
+    // 覆盖它才是真的丢内容；只补「只有事件能给」的种子预填。
+    prefillResetSeed(event.session_start);
   }
   $('#runtimeStatus').textContent = '就绪';
   // 共存守卫（与「选择」面板）：本轮结束时队列里还有未引导的插话——**只提示不消费**。

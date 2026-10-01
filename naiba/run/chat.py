@@ -1010,11 +1010,25 @@ class ConversationRunMixin:
                     self._persist_first_turn_context(run_id, snapshot, run_context)
                 except Exception:
                     traceback.print_exc()
-            self.emit(run_id, {
+            # 终态事件**不再携带完整消息对象**：那份副本（content + metadata，含最占体积的
+            # `metadata.trace` 线协议回放，实测单轮最长 318KB）与 messages 表逐字重复，写进
+            # run_events 后终态又立刻被 `slim_terminal_run` 删掉——等于白写一遍再擦一遍，库
+            # 里留下的只是一份被丢掉的副本。前端拿到终态后本来就会重载会话
+            # （`11-run-stream.js::finishRunSubscription` → `openConversation`，走
+            # `GET /api/conversations/<id>`），完整消息由那条 API 路径提供；这里只留
+            # 收尾**即时动作**要用的字段：
+            #   - `session_start`：模型 reset_context 成功时才有——前端要立刻把种子消息预填进
+            #     输入框（重载路径只画分割线、不会主动填），属于"只有事件能给"的信息；
+            #   - `followup_run_id`：后续 run 串联（当前恒为空串，保留既有 wire 形状）。
+            # 契约：`core/contracts.py` 的 done 条目已收紧（再往 done 里塞 message 会被
+            # `tests/test_events_contract.py` 判违规）；行为守门 `verify/run_freeze_smoke.py`。
+            done_payload: dict[str, Any] = {
                 "type": "done",
-                "message": saved,
                 "followup_run_id": "",
-            })
+            }
+            if reset_info:
+                done_payload["session_start"] = dict(reset_info)
+            self.emit(run_id, done_payload)
         except TaskCancelled:
             sink.flush()
             if mode == "plan" and plan_id:

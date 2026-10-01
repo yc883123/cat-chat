@@ -266,6 +266,12 @@ class SeedTemplateTests(unittest.TestCase):
         self.assertIn("data-fill-reset-seed", binds)
         chat = (ROOT / "public" / "js" / "12-chat-input.js").read_text(encoding="utf-8")
         self.assertIn("fillContextResetSeed(resetInfo)", chat, "模型重置后自动预填种子消息")
+        # 两条来源都必须接：存量事件（done 带完整 message）与新契约（done 只带
+        # session_start；完整消息改由收尾重载会话从 API 取，见 run/chat.py 终态发射点）。
+        self.assertIn("prefillResetSeed(metadata.session_start)", chat,
+                      "存量终态事件里的重置信息仍要预填")
+        self.assertIn("prefillResetSeed(event.session_start)", chat,
+                      "新契约 done 事件里的重置信息也要预填")
         css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
         self.assertIn(".session-divider-seed", css)
 

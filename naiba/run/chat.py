@@ -427,7 +427,7 @@ class ConversationRunMixin:
                 # （只替换工作区内真实存在的文件/目录，其余原样保留）。会话标题仍取用户原文。
                 workspace_root = _conv_workspace_root(conversation, self.app.config)
                 model_message = resolve_file_references(message, workspace_root)
-                run, _ = self.app.storage.create_chat_run(
+                run = self.app.storage.create_chat_run(
                     conversation_id,
                     model_message,
                     attachments,

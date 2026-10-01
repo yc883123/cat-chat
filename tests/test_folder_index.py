@@ -384,14 +384,16 @@ class FolderIndexStorageTests(unittest.TestCase):
 
     def test_create_chat_run_persists_folder_indexes(self) -> None:
         folder = {"path": "D:\\素材4", "total": 2, "image_count": 2, "entries": [{"rel": "a.png"}]}
-        run, history = self.storage.create_chat_run(
+        run = self.storage.create_chat_run(
             self.cid, "看图", [], {"id": "default"}, {"agent_id": "default"},
             "chat", folder_indexes=[folder],
         )
         stored = self.storage.get_conversation(self.cid)["messages"][-1]
         self.assertEqual(stored["metadata"][MetadataKeys.FOLDER_INDEXES], [folder])
         self.assertEqual(run["input_message_id"], stored["id"], "用户消息与所属 run 必须指向同一条")
-        # 模型上下文也要读得到（落库与重放同源）
+        # 模型上下文也要读得到（落库与重放同源）：`create_chat_run` 不再返回整段会话，
+        # 这里按消费方口径自己读活库。
+        history = self.storage.get_conversation(self.cid)["messages"]
         self.assertIn("[文件夹] D:\\素材4", build_model_history(history)[0]["content"])
 
     def test_empty_folder_indexes_do_not_add_metadata(self) -> None:

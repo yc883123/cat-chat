@@ -68,16 +68,16 @@ class MigrationV14Tests(unittest.TestCase):
             storage = self._make_v13_like_db(Path(tmp))
             convo = storage.create_conversation()
             agent = {"id": "general", "name": "通用 Agent"}
-            done_run, _h = storage.create_chat_run(
+            done_run = storage.create_chat_run(
                 convo["id"], "消息1", [], agent, {"model_key": "online:demo"}, "craft"
             )
             # 终态化（ACTIVE 集合释放，才能创建下一个 run）
             storage.update_background_task(done_run["id"], status="completed", finished=True)
-            cancelled_run, _h = storage.create_chat_run(
+            cancelled_run = storage.create_chat_run(
                 convo["id"], "消息2", [], agent, {"model_key": "online:demo"}, "craft"
             )
             storage.update_background_task(cancelled_run["id"], status="failed", finished=True)
-            interrupted_run, _h = storage.create_chat_run(
+            interrupted_run = storage.create_chat_run(
                 convo["id"], "消息3", [], agent, {"model_key": "online:demo"}, "craft"
             )
             # interrupted 始终保留（恢复重建需要）
@@ -167,7 +167,7 @@ class MigrationV14Tests(unittest.TestCase):
             storage = self._make_v13_like_db(Path(tmp))
             convo = storage.create_conversation()
             agent = {"id": "general", "name": "通用 Agent"}
-            run, _h = storage.create_chat_run(
+            run = storage.create_chat_run(
                 convo["id"], "消息", [], agent, {"model_key": "online:demo"}, "craft"
             )
             storage.update_background_task(run["id"], status="completed", finished=True)
@@ -187,7 +187,7 @@ class MigrationV14Tests(unittest.TestCase):
             storage = ChatStorage(Path(tmp) / "chat.db")
             convo = storage.create_conversation()
             agent = {"id": "general", "name": "通用 Agent"}
-            run, _h = storage.create_chat_run(
+            run = storage.create_chat_run(
                 convo["id"], "消息", [], agent, {"model_key": "online:demo"}, "craft"
             )
             with closing(sqlite3.connect(Path(tmp) / "chat.db")) as db:
@@ -226,7 +226,7 @@ class MigrationV14Tests(unittest.TestCase):
             storage = ChatStorage(Path(tmp) / "chat.db")
             convo = storage.create_conversation()
             agent = {"id": "general", "name": "通用 Agent"}
-            run, _h = storage.create_chat_run(
+            run = storage.create_chat_run(
                 convo["id"], "消息", [], agent, {"model_key": "online:demo"}, "craft"
             )
             storage.update_background_task(run["id"], status="completed", finished=True)
@@ -250,7 +250,7 @@ class FirstTurnSlimMigrationTests(unittest.TestCase):
         storage = ChatStorage(tmp / "chat.db")
         convo = storage.create_conversation()
         agent = {"id": "general", "name": "通用 Agent"}
-        run, _h = storage.create_chat_run(
+        run = storage.create_chat_run(
             convo["id"], "消息", [], agent, {"model_key": "online:demo"}, "craft"
         )
         payload = {

@@ -233,7 +233,7 @@ class FirstTurnSingleWriteTests(unittest.TestCase):
         self.storage = ChatStorage(Path(self.tmp.name) / "chat.db")
         self.conversation = self.storage.create_conversation()
         agent = {"id": "general", "name": "通用 Agent"}
-        self.run, _handle = self.storage.create_chat_run(
+        self.run = self.storage.create_chat_run(
             str(self.conversation["id"]), "第一问", [], agent,
             {"model_key": "online:demo"},
             "craft",

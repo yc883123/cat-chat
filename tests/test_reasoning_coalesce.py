@@ -80,13 +80,14 @@ class RunSnapshotSlimTests(unittest.TestCase):
     """
 
     def _make_run(self, storage, conversation_id, agent, *, legacy_history: bool = False):
-        run, history = storage.create_chat_run(
+        run = storage.create_chat_run(
             conversation_id, "测试消息", [], agent, {"model_key": "online:demo"}, "craft"
         )
         if legacy_history:
             # 存量形态：老版本把整段会话固化进了快照。直接改库模拟。
+            # `create_chat_run` 已不再返回整段会话（新契约），这里自己读活库。
             snapshot = storage.get_run_snapshot(run["id"]) or {}
-            snapshot["conversation_messages"] = history
+            snapshot["conversation_messages"] = storage.get_conversation(conversation_id)["messages"]
             with storage._connect() as db:  # noqa: SLF001 - 构造存量数据
                 db.execute(
                     "UPDATE background_tasks SET snapshot = ? WHERE id = ?",
@@ -169,9 +170,9 @@ class CompressRunEventsTests(unittest.TestCase):
             storage = ChatStorage(Path(tmp) / "chat.db")
             convo = storage.create_conversation()
             agent = {"id": "general", "name": "通用 Agent"}
-            run_a, _h = storage.create_chat_run(convo["id"], "A", [], agent, {"model_key": "m"}, "craft")
+            run_a = storage.create_chat_run(convo["id"], "A", [], agent, {"model_key": "m"}, "craft")
             storage.update_background_task(run_a["id"], status="completed", finished=True)
-            run_b, _h = storage.create_chat_run(convo["id"], "B", [], agent, {"model_key": "m"}, "craft")
+            run_b = storage.create_chat_run(convo["id"], "B", [], agent, {"model_key": "m"}, "craft")
             storage.update_background_task(run_b["id"], status="interrupted", finished=True)
             with closing(__import__("sqlite3").connect(Path(tmp) / "chat.db")) as db:
                 self._insert_delta_events(db, run_a["id"], 300, 10)  # 3000 字符 -> 2 段

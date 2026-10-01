@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """终态瘦身守门：`slim_terminal_run` 的事件/快照收缩必须在**终态事件之后**、且幂等。
 
-为什么钉死：`done`/`cancelled` 事件带着完整消息对象（含 `metadata.trace`），`create_chat_run`
-会把整段会话固化进 `snapshot.conversation_messages`。这两份在 run 终态后都没有读取方
-（前端是唯一读者，收到终态即停止轮询），但会一直堆在库里——实测存量 35.0MB / 228 行事件
-全部仍带 message 对象。守门要保证：① 瘦身真的发生；② 瘦身**只**发生在终态、且不碰
+为什么钉死：**存量** `done`/`cancelled` 事件带着完整消息对象（含 `metadata.trace`），
+`create_chat_run` 历史上还会把整段会话固化进 `snapshot.conversation_messages`。这两份在
+run 终态后都没有读取方，却会一直堆在库里——实测存量 35.0MB / 201 行 done 事件仍带 message
+对象、快照曾经累积到 81MB。收缩机制因此必须留着（存量数据 + 取消/失败事件仍带
+`aborted_message`/`partial_message`；新契约的 `done` 已不再携带完整消息，见 `run/chat.py`
+的终态发射点）。守门要保证：① 瘦身真的发生；② 瘦身**只**发生在终态、且不碰
 interrupted（恢复期还要读快照）；③ 幂等、可重复调用；④ 失败不吞成假成功。
 """
 
@@ -30,23 +32,24 @@ class SlimTerminalRunTests(unittest.TestCase):
         self.db_path = Path(self.tmp.name) / "chat.db"
         self.storage = ChatStorage(self.db_path)
         self.conversation = self.storage.create_conversation()
-        # 先有一条历史消息：`create_chat_run` 会把**当时整段会话**固化进 snapshot
-        # （这正是每轮 2× 历史写入的来源），所以必须先落消息再建 run。
+        # 先有一条历史消息：存量形态里 `create_chat_run` 会把**当时整段会话**固化进 snapshot
+        # （这正是每轮 2× 历史写入的来源），所以先落消息、下面再手工构造那份存量快照。
         self.storage.add_message(str(self.conversation["id"]), "user", "历史提问")
         agent = {"id": "general", "name": "通用 Agent"}
-        run, _handle = self.storage.create_chat_run(
+        run = self.storage.create_chat_run(
             str(self.conversation["id"]), "问题", [], agent,
             {"model_key": "online:demo"}, "craft",
         )
         self.run_id = str(run["id"])
-        # 终态事件带完整消息对象（含 trace）——真实形态
+        # 存量形态的终态事件：带完整消息对象（含 trace）。**直接调 append_run_event 构造**——
+        # 新契约的 done 发射点已经不带 message 了，这里要钉的是"存量那份会被收缩"。
         self.message = self.storage.add_message(
             str(self.conversation["id"]), "assistant", "答复", {"trace": TRACE}
         )
-        # `create_chat_run` 已不再固化整段会话（新契约），所以这里**显式构造存量形态**：
-        # 本用例守护的是"终态把存量副本收缩掉"这条保护（历史上它挡过 81MB 的 O(N²) 累积），
-        # 不构造就会变成空跑。状态也直接改库：`update_background_task(finished)` 自己会
-        # 顺手收缩，那样就测不到 `slim_terminal_run` 了。
+        # `create_chat_run` 已不再固化整段会话、也不再返回整段会话（新契约），所以这里
+        # **显式构造存量形态**：本用例守护的是"终态把存量副本收缩掉"这条保护（历史上它挡过
+        # 81MB 的 O(N²) 累积），不构造就会变成空跑。状态也直接改库：
+        # `update_background_task(finished)` 自己会顺手收缩，那样就测不到 `slim_terminal_run` 了。
         with closing(sqlite3.connect(self.db_path)) as db:
             snapshot = json.loads(db.execute(
                 "SELECT snapshot FROM background_tasks WHERE id = ?", (self.run_id,)
@@ -96,10 +99,10 @@ class SlimTerminalRunTests(unittest.TestCase):
     # ---- 1. 事件瘦身 ----
 
     def test_done_event_keeps_message_until_slim_called(self) -> None:
-        """瘦身之前事件必须**保持原样**——前端要靠它即时渲染，早瘦身就是丢内容。"""
+        """瘦身是收尾路径的**显式动作**：事件落库不会自动收缩，存量形态原样留到收尾。"""
         self._append_done()
         payloads = self._payloads()
-        self.assertIn("message", payloads[-1], "终态事件在瘦身之前必须带完整消息")
+        self.assertIn("message", payloads[-1], "存量终态事件在收尾瘦身之前必须原样保留")
         self.assertTrue(self._snapshot().get("conversation_messages"), "快照同理")
 
     def test_slim_removes_message_and_snapshot_history(self) -> None:
@@ -150,7 +153,7 @@ class SlimTerminalRunTests(unittest.TestCase):
     def test_new_run_snapshot_has_no_conversation_copy(self) -> None:
         """新契约：`create_chat_run` 不再固化整段会话（每轮省掉 2× 历史的写入）。"""
         agent = {"id": "general", "name": "通用 Agent"}
-        fresh, _history = self.storage.create_chat_run(
+        fresh = self.storage.create_chat_run(
             str(self.conversation["id"]), "另一轮提问", [], agent,
             {"model_key": "online:demo"}, "craft",
         )
@@ -173,7 +176,7 @@ class SlimTerminalRunTests(unittest.TestCase):
     def test_slim_only_touches_its_own_run(self) -> None:
         """只能动本 run：另一个未结束的 run 的事件/快照必须原样保留。"""
         agent = {"id": "general", "name": "通用 Agent"}
-        other, _h = self.storage.create_chat_run(
+        other = self.storage.create_chat_run(
             str(self.conversation["id"]), "另一个问题", [], agent,
             {"model_key": "online:demo"}, "craft",
         )

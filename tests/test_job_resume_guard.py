@@ -417,7 +417,7 @@ class ChildJobDoesNotLockConversationTests(unittest.TestCase):
         self.snapshot = {"model_key": "online:demo", "provider_id": "demo"}
 
     def test_running_child_job_does_not_block_new_turn(self) -> None:
-        run, _ = self.storage.create_chat_run(
+        run = self.storage.create_chat_run(
             self.conversation_id, "发起批量生成", [], self.agent, self.snapshot, "craft"
         )
         run_id = str(run["id"])
@@ -440,7 +440,7 @@ class ChildJobDoesNotLockConversationTests(unittest.TestCase):
             self.storage.active_run(self.conversation_id),
             "后台子 Job 不应被当成活跃 Run 占用对话互斥位",
         )
-        again, _ = self.storage.create_chat_run(
+        again = self.storage.create_chat_run(
             self.conversation_id, "继续下一轮", [], self.agent, self.snapshot, "craft"
         )
         self.assertTrue(str(again["id"]), "子 Job 在跑时仍必须能发起新的一轮")

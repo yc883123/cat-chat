@@ -143,7 +143,7 @@ class TraceStorageTests(unittest.TestCase):
         """
         self._add(TRACE_A)
         agent = {"id": "general", "name": "通用 Agent"}
-        run, _handle = self.storage.create_chat_run(
+        run = self.storage.create_chat_run(
             str(self.conversation["id"]), "第一问", [], agent,
             {"model_key": "online:demo"}, "craft",
         )

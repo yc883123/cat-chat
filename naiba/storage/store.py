@@ -3270,12 +3270,18 @@ class ChatStorage:
         display_message: str = "",
         title_text: str = "",
         folder_indexes: list[dict[str, Any]] | None = None,
-    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    ) -> dict[str, Any]:
         """Atomically append the user message and create its owning run.
 
         ``title_text`` 仅用于首轮标题（用户原文，可能含 @ 引用）；留空时回退用 ``message``。
         ``folder_indexes``：拖入文件夹的路径索引快照（发送那一刻生成，见 app.folder_indexes_for_send）——
         与 ``attachments`` 一样写在消息 metadata 上，气泡与模型上下文各读自己的一份。
+
+        **只返回 run**：本函数曾额外返回一份"整段会话"（``SELECT ... WHERE conversation_id``
+        + 逐行 hydrate 的全部历史）供调用方核对，但生产唯一调用点 ``run/chat.py::_run_chat``
+        是拿 ``_`` 丢弃它的，而运行期紧接着又会按 ``input_message_id`` 游标读一次会话——
+        等于每轮白读一整段会话（含每条 metadata）。要历史的调用方自己读
+        ``get_conversation``；冻结历史继续由 ``input_message_id`` 游标表达。
         """
         now = int(time.time() * 1000)
         run_id = uuid.uuid4().hex
@@ -3319,22 +3325,20 @@ class ChatStorage:
                 "VALUES (?, ?, 'user', ?, ?, ?)",
                 (message_id, conversation_id, message, json.dumps(metadata, ensure_ascii=False), now),
             )
-            rows = db.execute(
-                "SELECT id, role, content, metadata, trace_hash, created_at FROM messages "
-                "WHERE conversation_id = ? ORDER BY created_at, rowid",
+            # 本轮消息数（含刚插入的这条用户消息）：既给首轮标题判定用，也是快照的
+            # `history_size` 体量标记。用 COUNT 而不是"读整段会话再 len()"——后者每轮白读
+            # 整段历史（含每条 metadata），见方法注释。
+            message_count = db.execute(
+                "SELECT COUNT(*) FROM messages WHERE conversation_id = ?",
                 (conversation_id,),
-            ).fetchall()
-            history = [self._message_dict(db, row) for row in rows]
-            # ⚠️ `history` 只作为返回值供测试/调用方核对（生产调用方 `run/chat.py` 用 `_` 丢弃）。
-            # 它是一次**整段会话全量读**（含每条 metadata），而运行期 `_run_chat` 又会读一次
-            # 会话——两读同一份数据。要省掉需要改返回签名（多处调用点），本次刻意不动。
-            # **不再把整段会话固化进快照**：那份副本每轮要写一遍、终态再整块删一遍，实测
+            ).fetchone()[0]
+            # **不把整段会话固化进快照**：那份副本每轮要写一遍、终态再整块删一遍，实测
             # 一轮 6 条历史就是 2×1.8MB 物理写入，随会话变长线性增长。运行期要的"冻结那一刻
-            # 的历史"改由 `input_message_id`（本轮用户消息 id，就在下面 INSERT 的同一事务里
+            # 的历史"由 `input_message_id`（本轮用户消息 id，就在上面 INSERT 的同一事务里
             # 填入）当**游标**表达：它（含）之前的消息前缀就是冻结历史——顺序契约
             # (created_at, rowid) 保证并发写入只会追加在其后。`history_size` 仅用于核对。
             frozen = dict(snapshot)
-            frozen["history_size"] = len(history)
+            frozen["history_size"] = int(message_count)
             db.execute(
                 "INSERT INTO background_tasks("
                 "id, conversation_id, kind, interaction_mode, input_message_id, plan_id, "
@@ -3358,17 +3362,13 @@ class ChatStorage:
                 ),
             )
             db.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
-            message_count = db.execute(
-                "SELECT COUNT(*) FROM messages WHERE conversation_id = ?",
-                (conversation_id,),
-            ).fetchone()[0]
             if message_count <= 2 and not conversation["title_customized"]:
                 # 纯附件轮次（无文字）没有可用的标题文本：回退到首个附件名，避免所有
                 # 图片/文件首轮都叫"新对话"而无法区分。@ 引用轮次取用户原文（非解析后的路径）。
                 title_source = str(title_text or message)
                 title = " ".join(title_source.strip().split())[:36] or _attachment_title(attachments)
                 db.execute("UPDATE conversations SET title = ? WHERE id = ?", (title, conversation_id))
-        return self.get_background_task(run_id) or {}, history
+        return self.get_background_task(run_id) or {}
 
     @_retry_transient_write
     def create_run(

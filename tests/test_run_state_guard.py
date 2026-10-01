@@ -99,7 +99,7 @@ class StartupCleanupTests(unittest.TestCase):
     def _make_child_task(self, storage: ChatStorage, status: str) -> str:
         conversation = storage.create_conversation(title="t")
         conversation_id = str(conversation["id"])
-        run, _history = storage.create_chat_run(
+        run = storage.create_chat_run(
             conversation_id,
             "子任务",
             [],

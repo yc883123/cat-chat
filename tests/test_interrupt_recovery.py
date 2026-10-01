@@ -87,7 +87,7 @@ class InterruptedRunRecoveryTests(unittest.TestCase):
         storage = ChatStorage(self.db_path)
         conversation = storage.create_conversation(title="中断恢复")
         conversation_id = str(conversation["id"])
-        run, _history = storage.create_chat_run(
+        run = storage.create_chat_run(
             conversation_id,
             "是",
             [],

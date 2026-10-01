@@ -16,7 +16,7 @@ class StorageMaintenanceTests(unittest.TestCase):
             storage = ChatStorage(Path(tmp) / "chat.db")
             convo = storage.create_conversation()
             agent = {"id": "general", "name": "通用 Agent"}
-            run, _h = storage.create_chat_run(
+            run = storage.create_chat_run(
                 convo["id"], "消息", [], agent, {"model_key": "online:demo"}, "craft"
             )
             storage.update_background_task(run["id"], status="completed", finished=True)
@@ -34,7 +34,7 @@ class StorageMaintenanceTests(unittest.TestCase):
             storage = ChatStorage(Path(tmp) / "chat.db")
             convo = storage.create_conversation()
             agent = {"id": "general", "name": "通用 Agent"}
-            run, _h = storage.create_chat_run(
+            run = storage.create_chat_run(
                 convo["id"], "消息", [], agent, {"model_key": "online:demo"}, "craft"
             )
             storage.update_background_task(run["id"], status="completed", finished=True)

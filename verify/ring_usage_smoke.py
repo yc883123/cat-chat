@@ -108,7 +108,7 @@ def restore_config() -> None:
 def seed() -> tuple[str, str, str]:
     conversation = STORAGE.create_conversation(TITLE)
     conversation_id = str(conversation["id"])
-    run, _history = STORAGE.create_chat_run(
+    run = STORAGE.create_chat_run(
         conversation_id,
         "圆环冒烟：本次请求已完成，圆环应即时刷新",
         [],

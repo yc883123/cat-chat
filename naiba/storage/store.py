@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
+from naiba.core.contracts import TERMINAL_RUN_EVENT_TYPES
 from naiba.core.messages import MetadataKeys
 from naiba.core.paths import normalized_path_key
 
@@ -3550,6 +3551,23 @@ class ChatStorage:
                 {**payload, "run_id": run_id, "sequence": row["sequence"], "created_at": row["created_at"]}
             )
         return events
+
+    def terminal_event_sequence(self, run_id: str) -> int:
+        """该 run 已落库的终态事件（done/cancelled/error）的最大 sequence；没有则 0。
+
+        给 HTTP 流关流用：状态置终态与终态事件落库不是一次原子写（收尾路径先
+        ``update_background_task`` 再 emit），只看状态就关流会让客户端整轮收不到终态事件。
+        判据的三种情形见 ``naiba/http.py::_stream_run``。
+        """
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT COALESCE(MAX(sequence), 0) FROM run_events "
+                "WHERE run_id = ? AND event_type IN ("
+                + ", ".join(f"'{kind}'" for kind in TERMINAL_RUN_EVENT_TYPES)
+                + ")",
+                (run_id,),
+            ).fetchone()
+        return int(row[0] or 0)
 
     @staticmethod
     def _normalize_usage_record(record: dict[str, Any]) -> tuple[Any, ...]:

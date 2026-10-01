@@ -61,6 +61,12 @@ HEALTH_APP_MARKER = "cat-chat"
 # 所以判"可用性"必须用 `is None`，不能拿符号当哨兵——踩过）。
 _SO_EXCLUSIVEADDRUSE = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
 
+# run 事件流关流前的宽限：run 状态置终态（`update_background_task`）与终态事件落库（`emit`）
+# 不是一次原子写，中间窗口里"状态已终态 + 没有新事件"并不等于"终态事件不会来了"。只按状态
+# 关流实测偶发让客户端整轮收不到 done，所以这里给它一小段时间等终态事件出现（见 _stream_run）。
+# 取值只需覆盖那几毫秒的写库窗口；真有 run 崩死没落终态事件时，代价也只是这一小段等待。
+TERMINAL_EVENT_GRACE_SECONDS = 2.0
+
 
 # 部分系统 mimetypes 未注册 webp/avif 等，导致 <img> 接到 application/octet-stream
 # 配合 nosniff 而拒绝渲染（缩略图破图）。兜底映射唯一定义在 core/media_types.py
@@ -1689,6 +1695,17 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
         sequence = max(0, int(after))
+        # 关流判据（曾经只看"状态已终态"，于是偶发整轮收不到 done）：
+        # 状态置终态与终态事件落库**不是一次原子写**——收尾路径先 `update_background_task`
+        # 再 emit done/cancelled/error（见 run/chat.py）。若流线程恰好在这个窗口里检查，
+        # 就会"状态已终态 + 还没有新事件"→ break，客户端从头到尾没收到终态事件（前端还能
+        # 靠收尾重载会话兜住，但恢复/重放路径就丢了收尾信号）。判据改成三条：
+        #   ① 本连接已送达终态事件 → 立即关流（终态之后不再有新事件，前端收到即停止轮询）；
+        #   ② 状态已终态、且该 run 的终态事件**早已在游标之下**（客户端此前已拿到）→ 关流；
+        #   ③ 状态已终态但终态事件还没落库 → 给一小段 grace 等它出现，超时才按原行为关流
+        #      （进程崩溃/被中断清理的 run 可能真的没有终态事件）。
+        terminal_sent = False
+        grace_deadline = 0.0
         try:
             while True:
                 events = self.app.runs.wait_for_events(run_id, sequence, timeout=15.0)
@@ -1704,10 +1721,25 @@ class RequestHandler(BaseHTTPRequestHandler):
                     self.wfile.write((json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8"))
                     self.wfile.flush()
                     sequence = max(sequence, int(event.get("sequence") or 0))
+                    if event.get("type") in self.app.runs.TERMINAL_EVENT_TYPES:
+                        terminal_sent = True
+                if terminal_sent:
+                    break
                 current = self.app.runs.get(run_id)
-                if not current or current.get("status") in self.app.runs.TERMINAL:
-                    if not self.app.runs.events_after(run_id, sequence):
+                if not current:
+                    break
+                if current.get("status") in self.app.runs.TERMINAL:
+                    if self.app.runs.events_after(run_id, sequence):
+                        continue
+                    if self.app.runs.terminal_event_sequence(run_id):
                         break
+                    if grace_deadline == 0.0:
+                        grace_deadline = time.monotonic() + TERMINAL_EVENT_GRACE_SECONDS
+                    if time.monotonic() < grace_deadline:
+                        time.sleep(0.05)
+                        continue
+                    break
+                grace_deadline = 0.0
                 if not events:
                     self.wfile.write(b'{"type":"heartbeat"}\n')
                     self.wfile.flush()

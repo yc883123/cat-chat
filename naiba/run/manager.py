@@ -27,6 +27,7 @@ from naiba.run.session import (
 )
 
 from naiba.run.chat import ConversationRunMixin
+from naiba.core.contracts import TERMINAL_RUN_EVENT_TYPES as _TERMINAL_RUN_EVENT_TYPES
 from naiba.core.exceptions import ActiveRunError
 from naiba.storage.store import (
     ACTIVE_TASK_STATUSES,
@@ -48,6 +49,9 @@ class ConversationRunManager(ConversationRunMixin):
     # 产生），让 wait_for_events 对中断过的 run 立即返回而不是空等 15 秒。
     ACTIVE = set(ACTIVE_TASK_STATUSES)
     TERMINAL = set(TERMINAL_TASK_STATUSES)
+    # 终态**事件**（done/cancelled/error，与终态**状态**是两回事）：HTTP 流据此判断
+    # "终态事件是否已送达"，见 naiba/http.py::_stream_run。
+    TERMINAL_EVENT_TYPES = frozenset(_TERMINAL_RUN_EVENT_TYPES)
 
     def __init__(self, app: AppContext):
         self.app = app
@@ -201,6 +205,10 @@ class ConversationRunManager(ConversationRunMixin):
 
     def events_after(self, run_id: str, after: int = 0) -> list[dict[str, Any]]:
         return self.app.storage.list_run_events(run_id, after)
+
+    def terminal_event_sequence(self, run_id: str) -> int:
+        """该 run 已落库的终态事件 sequence（没有则 0）；HTTP 流关流判据用（见 http._stream_run）。"""
+        return self.app.storage.terminal_event_sequence(run_id)
 
     def wait_for_events(self, run_id: str, after: int = 0, timeout: float = 15.0) -> list[dict[str, Any]]:
         """拉取 after 之后的事件；无则等条件唤醒（15s 超时兜底）。

@@ -322,6 +322,14 @@ class EventPayload(TypedDict, total=False):
 # 历史消息排序契约：后端唯一决定消息顺序（(created_at, rowid)），前端按 API
 # 返回数组顺序渲染、不自行排序——见 tests/test_contracts.py 守门。
 MESSAGE_ORDER_KEYS: tuple[str, ...] = ("created_at", "rowid")
+
+# run 的**终态事件**：事件流里代表"这一轮真的结束了"的三个 type（前端收到即停止轮询）。
+# 唯一权威定义，两处消费：
+#   ① `http._stream_run` 判"终态事件是否已送达客户端"——状态置终态与终态事件落库不是一次
+#      原子写，只看状态就关流会让客户端整轮收不到终态事件（见该函数注释）；
+#   ② `storage.terminal_event_sequence` 查该 run 有没有落过终态事件（宽限判据）。
+TERMINAL_RUN_EVENT_TYPES: tuple[str, ...] = ("done", "cancelled", "error")
+
 EVENT_PAYLOAD_KEYS: dict[str, frozenset[str] | None] = {
     # ---- 对话流（前端 handleChatEvent 可处置）----
     "run_started": frozenset({"run_id"}),

@@ -18,6 +18,10 @@ from naiba.core.paths import normalized_path_key
 
 logger = logging.getLogger("naiba.storage.store")
 
+# metadata 键的合法形状（一层、标识符）：`merge_message_metadata` 要把键名拼进 SQLite 的
+# JSON 路径（路径不支持占位符），所以形状校验就是那条拼接的安全边界。
+_METADATA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
 CURRENT_SCHEMA_VERSION = 21
@@ -2184,25 +2188,24 @@ class ChatStorage:
             }
         }
         now = int(time.time() * 1000)
+        # 读一次只为「消息是否存在」与返回值；**写不再整块覆盖**——同行还有图片降级旗标等
+        # 写入方，「读整块→整块写回」会让先写者的键消失（丢 session_start ⇒ 上下文清空）。
         with self._connect() as db:
             row = db.execute(
                 "SELECT metadata FROM messages WHERE id = ? AND conversation_id = ?",
                 (message_id, conversation_id),
             ).fetchone()
-            if not row:
-                return None
+        if not row:
+            return None
+        if not self.merge_message_metadata(conversation_id, message_id, marker):
+            return None
+        try:
             metadata = json.loads(row["metadata"] or "{}")
-            if not isinstance(metadata, dict):
-                metadata = {}
-            metadata.update(marker)
-            db.execute(
-                "UPDATE messages SET metadata = ? WHERE id = ?",
-                (json.dumps(metadata, ensure_ascii=False), message_id),
-            )
-            db.execute(
-                "UPDATE conversations SET updated_at = ? WHERE id = ?",
-                (now, conversation_id),
-            )
+        except (json.JSONDecodeError, TypeError):
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata.update(marker)
         return {"id": message_id, "metadata": metadata, "created_at": now}
 
     @_retry_transient_write
@@ -2218,10 +2221,13 @@ class ChatStorage:
             metadata = json.loads(row["metadata"] or "{}")
             if not isinstance(metadata, dict) or MetadataKeys.SESSION_START not in metadata:
                 return False
-            metadata.pop(MetadataKeys.SESSION_START, None)
+            # 只摘掉自己这个键（`json_remove`），不整块写回：同行的其他写入方（图片降级
+            # 旗标等）并发落下的键必须原样保留。
             db.execute(
-                "UPDATE messages SET metadata = ? WHERE id = ?",
-                (json.dumps(metadata, ensure_ascii=False), message_id),
+                "UPDATE messages SET metadata = "
+                f"json_remove(COALESCE(NULLIF(metadata, ''), '{{}}'), '$.{MetadataKeys.SESSION_START}') "
+                "WHERE id = ?",
+                (message_id,),
             )
             db.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
@@ -2263,6 +2269,49 @@ class ChatStorage:
             cursor = db.execute(
                 "UPDATE messages SET metadata = ? WHERE id = ? AND conversation_id = ?",
                 (json.dumps(metadata or {}, ensure_ascii=False), message_id, conversation_id),
+            )
+            if cursor.rowcount:
+                db.execute(
+                    "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                    (now, conversation_id),
+                )
+        return cursor.rowcount > 0
+
+    @_retry_transient_write
+    def merge_message_metadata(
+        self, conversation_id: str, message_id: str, patch: dict[str, Any]
+    ) -> bool:
+        """**按键原子合并**一条消息的 metadata（单条 ``json_set`` UPDATE），并推进会话 updated_at。
+
+        为什么不能用「先读整块 metadata、改完再整块写回」：同一条消息上有多个写入方
+        （图片降级旗标 `local_images_capped`、会话边界 `session_start`、插话状态…），
+        各自读到的都是**旧**整块，后写者会把先写者刚落的键整块抹掉。丢 `session_start`
+        的后果不是"少个标记"——`build_model_history` 会把整段上下文清空（用户视角＝模型
+        突然失忆）。这里把写入降成"只改自己那几个键"，其他键由数据库按**当前值**原样保留，
+        两个写入方并发也不再互相覆盖。
+
+        契约：``patch`` 的键必须是一层、且只含标识符字符（键名直接进 JSON 路径，不接受
+        调用方任意字符串）；值以 JSON 文本经 ``json(?)`` 传入。返回是否命中该消息
+        （消息不存在时 False——SQLite 对 UPDATE 的 rowcount 只统计命中的行，即使新值
+        与旧值相同也计 1，所以 0 一定意味着"没这行"）。
+        """
+        keys = [str(key) for key in (patch or {})]
+        if not keys:
+            return False
+        for key in keys:
+            if not _METADATA_KEY_RE.match(key):
+                raise ValueError(f"metadata 键名非法（只允许一层标识符）：{key!r}")
+        # 键名来自代码常量（MetadataKeys），此处已做形状校验；SQLite 的 JSON 路径
+        # 又不能写占位符，所以只能拼接——那句校验就是这条拼接的安全边界。
+        assignments = ", ".join(f"'$.{key}', json(?)" for key in keys)
+        values = [json.dumps(patch[key], ensure_ascii=False) for key in keys]
+        now = int(time.time() * 1000)
+        with self._connect() as db:
+            cursor = db.execute(
+                "UPDATE messages SET metadata = "
+                f"json_set(COALESCE(NULLIF(metadata, ''), '{{}}'), {assignments}) "
+                "WHERE id = ? AND conversation_id = ?",
+                (*values, message_id, conversation_id),
             )
             if cursor.rowcount:
                 db.execute(

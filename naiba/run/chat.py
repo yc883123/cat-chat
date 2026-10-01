@@ -1104,24 +1104,20 @@ class ConversationRunMixin:
         旗标落库后 ``build_model_history`` 直接回放同一份占位文本，降级不再回退、旧图不再重编码。
 
         ``demotions[].names`` 是 vision 回传的**全量**清单（旧省在前 + 本轮新增在后，
-        含重复项），这里**整块替换**旗标而不是增量合并：增量合并遇到重复调用会把张数累加，
+        含重复项），这里**整键替换**旗标而不是增量合并：增量合并遇到重复调用会把张数累加，
         而重复项正是"同名图片省了几张"的回放匹配依据（见 core.history.local_omitted_image_names）。
+
+        **写入必须是按键原子合并**（`storage.merge_message_metadata` 的单条 `json_set`），
+        不能"先读整块 metadata、改完再整块写回"：这条消息是**多写入方**共享的行——用户点
+        「新会话」时 `set_session_start` 会往同一行写 `session_start`，两边各自读到的都是旧
+        整块，后写者就抹掉先写者的键（丢 `session_start` ⇒ `build_model_history` 清空整段
+        上下文）。按键合并让数据库按当前值保留其他键，谁都不用读整块。
 
         旁路语义：写库失败只记日志，本轮请求照发——旗标少落一轮，下一轮重新降级即可，
         代价只是多断一次前缀；记账失败绝不能中断对话（与 §九.136 同口径）。
         """
         if not demotions:
             return
-        try:
-            conversation = self.app.storage.get_conversation(conversation_id)
-        except Exception:  # noqa: BLE001 - 记账前置读取失败同样只记日志
-            logger.exception("本地图片降级旗标：读取会话失败 conversation=%s", conversation_id)
-            return
-        known = {
-            str(message.get("id") or ""): (message.get("metadata") or {})
-            for message in ((conversation or {}).get("messages") or [])
-            if isinstance(message, dict)
-        }
         for entry in demotions:
             try:
                 message_id = str((entry or {}).get("message_id") or "")
@@ -1134,23 +1130,14 @@ class ConversationRunMixin:
                     # 没有 message id（历史不是 build_model_history 产出来的，例如测试桩）：
                     # 这一轮照常降级，只是不落旗标——下一轮重新算一遍，行为退回修复前。
                     continue
-                if message_id not in known:
-                    logger.info("本地图片降级旗标跳过（消息已不存在）：message=%s", message_id)
-                    continue
-                metadata = known[message_id]
-                if not isinstance(metadata, dict):
-                    # metadata 不是 dict 属于数据损坏：记账失败绝不能升级成"本轮视觉清洗失败"
-                    # （外层 except 会把整轮所有图片降级成文本），所以就地记日志跳过。
-                    logger.warning(
-                        "本地图片降级旗标跳过（metadata 形态异常）：message=%s type=%s",
-                        message_id, type(metadata).__name__,
-                    )
-                    continue
-                self.app.storage.update_message_metadata(
+                # 命中与否由 SQLite 的行数给出（不存在 ⇒ 0），所以不必先读会话；
+                # 也顺手去掉了"metadata 不是 dict"那条分支——根本不再读它。
+                if not self.app.storage.merge_message_metadata(
                     conversation_id,
                     message_id,
-                    {**metadata, MetadataKeys.LOCAL_IMAGES_CAPPED: {"names": names}},
-                )
+                    {MetadataKeys.LOCAL_IMAGES_CAPPED: {"names": names}},
+                ):
+                    logger.info("本地图片降级旗标跳过（消息已不存在）：message=%s", message_id)
             except Exception:  # noqa: BLE001 - 单条记账失败绝不中断对话
                 logger.exception(
                     "本地图片降级旗标写入失败：conversation=%s message=%s",

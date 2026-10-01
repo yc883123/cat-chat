@@ -39,6 +39,7 @@ from naiba.core.history import (  # noqa: E402
 )
 from naiba.llm.protocols import ProtocolMixins  # noqa: E402
 from naiba.run.chat import ConversationRunMixin  # noqa: E402
+from naiba.storage.store import ChatStorage  # noqa: E402
 from naiba.vision.runtime import VisionRouter  # noqa: E402
 
 
@@ -303,23 +304,31 @@ class LocalImageFlagTests(unittest.TestCase):
 
 
 class FlagPersistenceTests(unittest.TestCase):
-    """chat 层落库：合并只增不减、不清空其它 metadata、缺 id 就跳过。"""
+    """chat 层落库：按键合并、不清空其它 metadata、缺 id 就跳过、失败只记日志。"""
 
     class _Storage:
+        """**只**提供本函数用到的那一个写入接口。
+
+        刻意不提供 ``get_conversation`` / ``update_message_metadata``：写旗标不再允许
+        「先读整块 metadata 再整块写回」，那正是丢更新的来源（丢 ``session_start`` ⇒
+        上下文被整段清空）。谁改回去，这里会直接 AttributeError 红掉。
+        """
+
         def __init__(self, messages: list[dict]):
             self.messages = messages
             self.writes: list[tuple[str, dict]] = []
 
-        def get_conversation(self, _conversation_id: str) -> dict:
-            return {"messages": self.messages}
-
-        def update_message_metadata(
-            self, _conversation_id: str, message_id: str, metadata: dict
+        def merge_message_metadata(
+            self, _conversation_id: str, message_id: str, patch: dict
         ) -> bool:
             for message in self.messages:
                 if message["id"] == message_id:
+                    metadata = message.get("metadata")
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    metadata.update(patch)   # 模拟 SQLite 的 json_set：只改传进来的键
                     message["metadata"] = metadata
-                    self.writes.append((message_id, metadata))
+                    self.writes.append((message_id, patch))
                     return True
             return False
 
@@ -344,7 +353,7 @@ class FlagPersistenceTests(unittest.TestCase):
         )
 
     def test_replaces_with_the_authoritative_list_and_keeps_other_metadata(self) -> None:
-        """``names`` 是 vision 回传的**全量**清单 ⇒ 整块替换（旧省在前 + 本轮新增在后）。
+        """``names`` 是 vision 回传的**全量**清单 ⇒ 整键替换（旧省在前 + 本轮新增在后）。
 
         替换而不是增量合并有两个理由：① 重复调用天然幂等（增量合并会把张数累加，
         而重复项正是「同名图片省了几张」的回放匹配依据）；② 陈旧名字会被自然清掉。
@@ -365,7 +374,7 @@ class FlagPersistenceTests(unittest.TestCase):
         self.assertEqual(
             self.messages[0]["metadata"].get("attachments"),
             [{"path": "a.png", "name": "a.png"}],
-            "写旗标绝不能清空 attachments 等既有 metadata（update_message_metadata 是整块替换）",
+            "写旗标绝不能清空 attachments 等既有 metadata（写入是按键合并，其他键由数据库保留）",
         )
 
     def test_keeps_duplicate_names_for_replay_matching(self) -> None:
@@ -375,14 +384,6 @@ class FlagPersistenceTests(unittest.TestCase):
         )
         self.assertEqual(self._flag(), ["dup.png", "dup.png"])
 
-    def test_non_dict_metadata_is_skipped_without_raising(self) -> None:
-        """metadata 形态异常时只跳过该条，不得把异常抛到"整轮视觉清洗失败"分支。"""
-        self.messages[0]["metadata"] = "坏数据"
-        self.host._record_local_image_demotions(
-            "c1", [{"message_id": "m1", "names": ["a.png"]}]
-        )
-        self.assertEqual(self.storage.writes, [])
-
     def test_skips_entries_without_message_id(self) -> None:
         self.host._record_local_image_demotions("c1", [{"message_id": "", "names": ["a.png"]}])
         self.host._record_local_image_demotions("c1", [{"message_id": "m1", "names": []}])
@@ -390,19 +391,120 @@ class FlagPersistenceTests(unittest.TestCase):
         self.assertEqual(self.storage.writes, [], "无 id / 无名字 / 消息不存在都不应写库")
 
     def test_write_failure_does_not_raise(self) -> None:
+        """写库失败只记日志、绝不抛到外层「整轮视觉清洗失败」分支。"""
         def boom(*_args, **_kwargs):
             raise RuntimeError("库锁")
 
-        self.storage.update_message_metadata = boom  # type: ignore[method-assign]
+        self.storage.merge_message_metadata = boom  # type: ignore[method-assign]
         self.host._record_local_image_demotions(
             "c1", [{"message_id": "m1", "names": ["a.png"]}]
         )
         self.assertEqual(self._flag(), [], "写库失败只记日志，本轮照常发请求")
+        self.assertIsInstance(
+            self.messages[0]["metadata"], dict,
+            "失败路径不得把 metadata 破坏成非 dict（那会让后续轮次整段降级）",
+        )
+
+
+class ConcurrentMetadataWritersTests(unittest.TestCase):
+    """同一行有多个 metadata 写入方时**不得互相抹键**（图片降级旗标 / 会话边界）。
+
+    病历：两侧都写「先读整块 metadata、改完再整块写回」，各自读到的都是**旧**整块 ⇒
+    后写者把先写者刚落的键整块抹掉。丢 `session_start` 的代价不是"少个标记"：
+    `build_model_history` 会清空整段上下文（用户视角＝模型突然失忆）。
+    修法是把写入降成按键原子合并（单条 `json_set`）——数据库按当前值保留其他键。
+    """
+
+    class _Host(ConversationRunMixin):
+        def __init__(self, storage) -> None:
+            self.app = SimpleNamespace(storage=storage)
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="naiba_flag_race_")
+        self.addCleanup(self.tmp.cleanup)
+        self.storage = ChatStorage(Path(self.tmp.name) / "chat.db")
+        self.cid = str(self.storage.create_conversation("并发写入")["id"])
+        self.mid = str(self.storage.add_message(
+            self.cid, "user", "带图",
+            {MetadataKeys.ATTACHMENTS: [{"path": "a.png", "name": "a.png"}]},
+        )["id"])
+        self.host = self._Host(self.storage)
+
+    def _metadata(self) -> dict:
+        return dict((self.storage.get_conversation(self.cid)["messages"][0].get("metadata") or {}))
+
+    def _flag_names(self) -> list[str]:
+        return list((self._metadata().get(MetadataKeys.LOCAL_IMAGES_CAPPED) or {}).get("names") or [])
+
+    def test_flag_writer_has_no_read_modify_write(self) -> None:
+        """**结构守门**：旗标写入不得再出现「读整块 → 整块写回」这两步。
+
+        这是丢更新的唯一来源：两个写入方各自读到的都是旧整块，后写者抹掉先写者的键。
+        本用例在旧实现上必红（旧实现正是 `get_conversation` + `update_message_metadata`），
+        是这条修复的判决性守卫；运行期还有 `FlagPersistenceTests._Storage` 只提供
+        `merge_message_metadata` 作为第二道（改回去会 AttributeError）。
+        """
+        body = _read_source("naiba", "run", "chat.py").split(
+            "def _record_local_image_demotions", 1
+        )[1].split("\n    def ", 1)[0]
+        self.assertIn("merge_message_metadata", body, "必须走按键原子合并")
+        self.assertNotIn("get_conversation", body, "不许再先读整块会话（那是竞态窗口的一半）")
+        self.assertNotIn("update_message_metadata", body, "整块替换会抹掉同行的其他键")
+
+    def test_flag_and_session_start_share_one_row_without_losing_keys(self) -> None:
+        """两个写入方共用一行：两种先后顺序都必须两键俱全。"""
+        self.host._record_local_image_demotions(
+            self.cid, [{"message_id": self.mid, "names": ["a.png"]}]
+        )
+        self.storage.set_session_start(self.cid, self.mid, note="并发")
+        metadata = self._metadata()
+        self.assertEqual(self._flag_names(), ["a.png"], "会话边界的写入不得抹掉旗标")
+        self.assertIn(MetadataKeys.SESSION_START, metadata)
+        self.assertIn(MetadataKeys.ATTACHMENTS, metadata)
+
+    def test_clear_session_start_keeps_the_flag(self) -> None:
+        """对称保证：撤销会话边界只摘自己那个键（`json_remove`），不整块写回。"""
+        self.storage.set_session_start(self.cid, self.mid, note="先落边界")
+        self.host._record_local_image_demotions(
+            self.cid, [{"message_id": self.mid, "names": ["a.png"]}]
+        )
+        self.assertTrue(self.storage.clear_session_start(self.mid))
+        metadata = self._metadata()
+        self.assertNotIn(MetadataKeys.SESSION_START, metadata, "边界要被摘掉")
+        self.assertEqual(self._flag_names(), ["a.png"], "摘边界不得顺手抹掉旗标")
+
+    def test_merge_message_metadata_semantics(self) -> None:
+        """合并的契约：只改传进来的键、返回是否命中、非法键名直接报错。"""
+        self.assertTrue(
+            self.storage.merge_message_metadata(
+                self.cid, self.mid, {MetadataKeys.LOCAL_IMAGES_CAPPED: {"names": ["a.png"]}}
+            )
+        )
+        metadata = self._metadata()
+        self.assertEqual((metadata.get(MetadataKeys.LOCAL_IMAGES_CAPPED) or {}).get("names"), ["a.png"])
+        self.assertIn(MetadataKeys.ATTACHMENTS, metadata, "其他键按当前值原样保留")
+        self.assertFalse(
+            self.storage.merge_message_metadata(self.cid, "ghost", {MetadataKeys.LOCAL_IMAGES_CAPPED: {}}),
+            "消息不存在时必须返回 False（调用方据此记日志），而不是静默成功",
+        )
+        with self.assertRaises(ValueError):
+            self.storage.merge_message_metadata(self.cid, self.mid, {"$.bad path": 1})
+        with self.assertRaises(ValueError):
+            self.storage.merge_message_metadata(self.cid, self.mid, {"bad-key": 1})
+
+    def test_merge_message_metadata_advances_conversation_updated_at(self) -> None:
+        """前端靠 `conversations.updated_at` 轮询感知变化——合并也必须推进它。"""
+        before = int(self.storage.get_conversation(self.cid, include_messages=False)["updated_at"] or 0)
+        with mock.patch("naiba.storage.store.time.time", return_value=(before / 1000) + 60):
+            self.storage.merge_message_metadata(
+                self.cid, self.mid, {MetadataKeys.LOCAL_IMAGES_CAPPED: {"names": ["a.png"]}}
+            )
+        after = int(self.storage.get_conversation(self.cid, include_messages=False)["updated_at"] or 0)
+        self.assertGreater(after, before)
 
 
 class InternalKeysNeverLeakTests(unittest.TestCase):
     """守门：``_message_id`` / ``_local_images_capped`` 绝不进 wire 消息。"""
-
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         paths = _write_images(Path(self.tmp.name), 1)

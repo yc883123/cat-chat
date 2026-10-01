@@ -757,6 +757,7 @@
               <label>上下文提醒阈值（%）<input id="contextWarningPercent" type="number" min="0" max="100" step="5"><small class="hint">上下文用量达到该百分比时弹窗提醒一次；0 = 关闭提醒。</small></label>
               <label>本地首字节超时（秒）<input id="localFirstByteTimeout" type="number" min="0" max="1800" step="10"><small class="hint">本地模型做 prefill 时往往长时间不输出内容，与「一直做不完」在界面上无法区分。连续该时长没有输出任何正文（链路的保活注释不算）即断开并报错。0 = 关闭（退回等满 30 分钟总超时的旧行为）。</small></label>
               <label>Agent 最大步数<input id="agentStepLimit" type="number" min="0" max="1000" step="10"><small class="hint">单轮回复允许的模型调用次数上限（每次工具调用算一步）。达到上限会停止并说明原因，避免模型反复调工具停不下来。0 = 不限制。</small></label>
+              <label>图片编码记忆上限（MB）<input id="imageEncodeCacheMb" type="number" min="0" max="4096" step="64"><small class="hint">每轮发消息前，历史里的每张图片都要重新「读盘 → 解码 → 压到 1600px → base64」。这项把编码结果按「路径 + 大小 + 修改时间」在内存里记住，同一张图一个会话只编码一次（真实出图 3.9MB PNG 单张中位约 77ms，12 张一轮约 0.92 秒）。<b>只影响速度与内存，不影响发给模型的字节</b>，因此不会打断前缀缓存。图片被重新生成会自动重编码。0 = 关闭记忆。</small></label>
             </div>
           </div>
           <div class="settings-card">

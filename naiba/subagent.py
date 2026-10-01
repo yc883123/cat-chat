@@ -115,6 +115,7 @@ def run_subagent_agent(
             conversation.get("messages", []),
             local_image_brain=local_brain(profile),
             **app.config.reasoning_replay_options(),
+            **app.config.image_encode_cache_options(),
         )
     else:
         history = []

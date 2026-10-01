@@ -627,6 +627,7 @@ class ConversationRunMixin:
                 # 判据与 vision 侧同源（core.history.local_brain），三处 build 调用点同口径。
                 local_image_brain=local_brain(profile),
                 **self.app.config.reasoning_replay_options(),
+                **self.app.config.image_encode_cache_options(),
             )
             # 视觉统一由模型驱动（自动路由已移除）：文本大脑不支持看图时，只把图片改写为
             # 安全文本占位（路径引用 + 工具提示），由模型按需主动调用 vision_analyze；

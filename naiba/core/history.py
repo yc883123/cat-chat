@@ -12,7 +12,8 @@ import hashlib
 import io
 import json
 import sys
-from collections import Counter
+import threading
+from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,121 @@ IMAGE_MEDIA_TYPES = {
 MODEL_IMAGE_MAX_EDGE = 1600
 MODEL_IMAGE_TARGET_BYTES = 900 * 1024
 MODEL_IMAGE_HISTORY_LIMIT = 3
+
+# ---- 图片编码记忆（进程内 LRU，按字节预算淘汰）--------------------------------
+# 为什么需要它：`build_model_history` **每轮**都把历史里每张图重新走一遍
+# 「读盘 → PIL 解码 → 缩到 1600px → JPEG 多档试压 → base64」。服务端的前缀/KV 缓存省的是
+# 服务端的 prefill，省不掉这段**客户端**的活：用真实出图（3.9MB PNG）实测单张中位 77ms，
+# 12 张一轮就是 ≈0.92s 的开口延迟（探针 verify/_probe_image_prefix.py 数的是次数：6 轮 63 次）。
+# 编码是**确定性**的（同一文件 ⇒ 同一字节，这正是前缀缓存能成立的前提），所以按
+# (绝对路径, 文件大小, mtime_ns) 记一次即可，之后每轮只做字典查找 + 复用已算好的 base64。
+# 上限由运行设置 `image_encode_cache_mb` 控制（默认 512MB，0 = 关闭记忆、每轮照旧重编码）。
+IMAGE_ENCODE_CACHE_MB_DEFAULT = 512
+IMAGE_ENCODE_CACHE_MB_MAX = 4096
+
+
+class _ImageEncodeCache:
+    """按字节预算淘汰的 LRU（线程安全）。
+
+    键含 `mtime_ns` 与 `size`：图片被重新生成/替换（同路径不同内容）时必须重编码，
+    否则会把旧图的字节发给模型（比"慢"严重得多）。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._items: OrderedDict[tuple[str, int, int], tuple[dict[str, str], int]] = OrderedDict()
+        self._limit_bytes = IMAGE_ENCODE_CACHE_MB_DEFAULT * 1024 * 1024
+        self._bytes = 0
+        self.hits = 0
+        self.misses = 0
+
+    # ---- 配置 ----
+    def set_limit_mb(self, megabytes: Any) -> None:
+        try:
+            value = int(megabytes)
+        except (TypeError, ValueError):
+            value = IMAGE_ENCODE_CACHE_MB_DEFAULT
+        value = max(0, min(IMAGE_ENCODE_CACHE_MB_MAX, value))
+        with self._lock:
+            self._limit_bytes = value * 1024 * 1024
+            self._evict_locked(keep_newest=True)
+
+    @property
+    def limit_bytes(self) -> int:
+        return self._limit_bytes
+
+    @property
+    def enabled(self) -> bool:
+        return self._limit_bytes > 0
+
+    # ---- 读写 ----
+    def get(self, key: tuple[str, int, int]) -> dict[str, str] | None:
+        if not self.enabled:
+            return None
+        with self._lock:
+            entry = self._items.get(key)
+            if entry is None:
+                self.misses += 1
+                return None
+            self._items.move_to_end(key)
+            self.hits += 1
+            # 返回**副本**：调用方会把部件塞进消息列表，谁改一下都不能污染缓存。
+            return dict(entry[0])
+
+    def put(self, key: tuple[str, int, int], value: dict[str, str]) -> None:
+        if not self.enabled:
+            return
+        cost = _image_part_cost(value)
+        with self._lock:
+            if key in self._items:
+                self._bytes -= self._items[key][1]
+            self._items[key] = (dict(value), cost)
+            self._items.move_to_end(key)
+            self._bytes += cost
+            self._evict_locked()
+
+    def _evict_locked(self, keep_newest: bool = False) -> None:
+        # keep_newest：上限调小/关闭时至少不把"最新放进来的那条"立刻踢掉（本轮还要用）。
+        floor = 1 if keep_newest and self._items else 0
+        while self._bytes > self._limit_bytes and len(self._items) > floor:
+            _key, (_value, cost) = self._items.popitem(last=False)
+            self._bytes -= cost
+
+    def clear(self) -> None:
+        with self._lock:
+            self._items.clear()
+            self._bytes = 0
+            # 计数器一并归零：`clear()` 的语义是"从零开始"，否则测试与诊断里的命中率会跨用例累加。
+            self.hits = 0
+            self.misses = 0
+
+    def stats(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "entries": len(self._items),
+                "bytes": self._bytes,
+                "limit_bytes": self._limit_bytes,
+                "hits": self.hits,
+                "misses": self.misses,
+            }
+
+
+def _image_part_cost(part: dict[str, str]) -> int:
+    """一条缓存项的字节开销（base64 字符串是大头，加上名字与固定余量）。"""
+    return len(str(part.get("data") or "")) + len(str(part.get("name") or "")) + 64
+
+
+_IMAGE_ENCODE_CACHE = _ImageEncodeCache()
+
+
+def set_image_encode_cache_limit_mb(megabytes: Any) -> None:
+    """配置图片编码记忆上限（运行设置 `image_encode_cache_mb`，0 = 关闭）。"""
+    _IMAGE_ENCODE_CACHE.set_limit_mb(megabytes)
+
+
+def image_encode_cache_stats() -> dict[str, int]:
+    """缓存统计（守门与诊断用）。"""
+    return _IMAGE_ENCODE_CACHE.stats()
 
 # ---- 本地大脑的图片历史 ------------------------------------------------------
 # 本地多模态大脑：历史里的图片**全部原样保留**（不降级、不占位）——这是 2026-10-01 用户实测
@@ -251,6 +367,17 @@ def encode_image_for_model(source: str) -> dict[str, str] | None:
     media_type = IMAGE_MEDIA_TYPES.get(path.suffix.lower())
     if not media_type or not path.is_file() or path.stat().st_size > 30 * 1024 * 1024:
         return None
+    # 进程内记忆：同一张图（同路径 + 同大小 + 同 mtime）只编码一次。
+    # 图片被替换（同路径新内容）时 mtime/size 变 ⇒ 键变 ⇒ 自动重编码，绝不会把旧图的字节发出去。
+    try:
+        stat = path.stat()
+        cache_key = (str(path), int(stat.st_size), int(stat.st_mtime_ns))
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        cached = _IMAGE_ENCODE_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
     raw = path.read_bytes()
     try:
         from PIL import Image, ImageOps
@@ -260,12 +387,15 @@ def encode_image_for_model(source: str) -> dict[str, str] | None:
             raw = _jpeg_for_model(image)
     except (ImportError, OSError, ValueError):
         return None
-    return {
+    part = {
         "type": "image",
         "media_type": "image/jpeg",
         "data": base64.b64encode(raw).decode("ascii"),
         "name": path.name,
     }
+    if cache_key is not None:
+        _IMAGE_ENCODE_CACHE.put(cache_key, part)
+    return part
 
 
 # 这些工具的结果属于"内容/文件/图像读取"，模型在后续轮次可能仍要引用
@@ -399,6 +529,7 @@ def build_model_history(
     reasoning_replay_max_chars: int = MODEL_REASONING_REPLAY_MAX_CHARS,
     reasoning_replay_turn_chars: int = MODEL_REASONING_REPLAY_TURN_CHARS,
     local_image_brain: bool = False,
+    image_encode_cache_mb: int = IMAGE_ENCODE_CACHE_MB_DEFAULT,
 ) -> list[dict[str, Any]]:
     """Build model history, carrying EVERY user message's own images (all kept).
 
@@ -415,7 +546,11 @@ def build_model_history(
     「图片降级旗标」是否回放，同会话内必须按同一个判据（``local_brain(profile)``）传值。
     ``local_image_brain=True`` 时，带 ``MetadataKeys.LOCAL_IMAGES_CAPPED`` 旗标的消息
     **不再重新编码**被降级的那几张图片，改为在末尾回放同一份占位文本（见模块内注释）。
+    ``image_encode_cache_mb``：图片编码记忆的字节预算（运行设置 `image_encode_cache_mb`，
+    0 = 关闭）。这里是该缓存的**唯一写入点**，三个活调用点同样必须传同一个值——它只影响
+    "同一张图编码几次"，不影响产出的字节，因此不会动摇前缀缓存契约。
     """
+    set_image_encode_cache_limit_mb(image_encode_cache_mb)
     history: list[dict[str, Any]] = []
     replay_seq = 0
     for item in conversation_messages:

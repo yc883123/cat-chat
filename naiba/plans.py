@@ -711,6 +711,7 @@ class PlanManager:
             frozen.get("conversation_messages") or conversation.get("messages", []),
             local_image_brain=local_brain(profile),
             **self.app.config.reasoning_replay_options(),
+            **self.app.config.image_encode_cache_options(),
         )
         if frozen.get("generation_options"):
             options = dict(frozen["generation_options"])

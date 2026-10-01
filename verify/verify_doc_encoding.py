@@ -29,7 +29,7 @@ MAX_DOC_LINES = 500
 REQUIRED_ANCHORS = {
     "体积与内容边界": "## 0. 体积与内容边界（硬规则）",
     "容量政策": "主文上限：**120 KB / 500 行**",
-    "当前版本": "Cat Chat 2.9.14 Beta",
+    "当前版本": "Cat Chat 3.0.0 Beta",
     "事件契约": "naiba/core/contracts.py",
     "Playwright 验收": "Playwright 前端验收（每次改动必做）",
     "路径纪律": "### 8.8 路径纪律：禁止本机绝对路径",

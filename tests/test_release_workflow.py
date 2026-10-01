@@ -223,6 +223,24 @@ class ReleaseVersionConsistencyTests(unittest.TestCase):
         display = self.version.replace("-beta", "") + " Beta"
         self.assertIn(f"Cat Chat {display} Windows build", self.text)
 
+    def test_release_body_has_no_unsubstituted_placeholder(self) -> None:
+        """`body` 里不得残留 `__XXX__` 形式的占位符（2026-10-01 的真事故）。
+
+        历次发版的 `_bump_*.py` 把「全量单测 N 例」的例数替换进了两份清单的更新说明，
+        **却漏了 `body`**：`_body_*.txt` 里的 `**__TESTCOUNT__**` 原样进了 `release.yml`，
+        于是线上 Release 页面正文公开写着「全量单测 **__TESTCOUNT__** 通过」。
+        本地无从察觉的原因和本条文件头部记录的那次事故一样——单测全绿、两份 JSON 合法、
+        `git diff` 看着也对，**没有任何检查会去看那段手写正文的措辞**。
+        """
+        body = block_scalar_text(self.text, "body")
+        self.assertTrue(body.strip(), "没取到 release.yml 的 body 正文（守门自身失效，先修它）")
+        leftover = sorted(set(re.findall(r"__[A-Z][A-Z0-9_]*__", body)))
+        self.assertEqual(
+            [], leftover,
+            "release.yml 的 body 里残留未替换的占位符（线上 Release 正文会原样显示它）："
+            + ", ".join(leftover),
+        )
+
     def test_release_body_is_not_stale_copy_of_previous_notes(self) -> None:
         """`body` 不得照抄上一版更新说明的长片段（2026-09-24 的真事故）。
 

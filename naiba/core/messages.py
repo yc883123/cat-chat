@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+from typing import Any
+
 # 全部 metadata 键的权威清单（新增键同步更新本表与 MetadataKeys）。
 MESSAGE_METADATA_KEYS: tuple[str, ...] = (
     "attachments",
@@ -97,3 +99,27 @@ class MetadataKeys:
     INTERJECTION_GUIDED = "interjection_guided"
     INTERJECTION_CONSUMED = "interjection_consumed"
     INTERJECTION_STOPPED = "interjection_stopped"
+
+
+def strip_message_traces(messages: list[dict[str, Any]] | None) -> int:
+    """**就地**摘掉一批消息 metadata 里的 `trace`，返回摘掉的条数。
+
+    为什么能摘：`trace` 是「本轮发给模型的完整字节序列」，只服务后端回放
+    （`core/history.build_model_history`、前缀缓存审计、缓存引用扫描），前端零读取
+    （`public/` 里没有任何 trace 引用）。而它是最占体积的一份——实测单条可以到几百 KB，
+    而 `GET /api/conversations/<id>` 会把整段会话的 trace 全部序列化一遍（前端每开一次
+    会话、每轮收尾重载都要付一次）。
+
+    **只用于出网（给浏览器）的只读响应**：写入回路的快照必须保持逐字节完整——例如
+    `/api/messages/delete` 的 `removed` 会被前端原样 POST 回 `/api/messages/restore`，
+    在那里剥掉 trace 等于"撤销删除"时把 trace 永久丢掉。调用方按这个口径决定用不用它。
+    """
+    stripped = 0
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if isinstance(metadata, dict) and MetadataKeys.TRACE in metadata:
+            metadata.pop(MetadataKeys.TRACE, None)
+            stripped += 1
+    return stripped

@@ -39,6 +39,7 @@ from naiba.core.diagnostics import ensure_utf8_stdio
 from naiba.core.exceptions import ActiveRunError
 from naiba.core.http_range import content_range_header, parse_byte_range
 from naiba.core.media_types import MIME_BY_EXT
+from naiba.core.messages import strip_message_traces
 from naiba.core.network import network_access_status, port_conflict_message
 from naiba.core.paths import path_within
 from naiba.paths import PathContext, default_path_context, static_asset_version
@@ -408,6 +409,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             conversation = self.app.storage.get_conversation(conversation_id)
             if conversation and conversation.get("messages"):
                 backfill_turn_choice_groups(conversation["messages"])
+                # trace 是后端专用的线协议回放副本（`public/` 里零引用），却是最占体积的一份：
+                # 不发它，长会话每次打开/每轮收尾重载都能省掉几十 MB。写入回路的快照
+                # （/api/messages/delete 的 removed）不在此列——见 core.messages.strip_message_traces。
+                strip_message_traces(conversation["messages"])
             self._json(conversation or {"error": "对话不存在"}, HTTPStatus.OK if conversation else HTTPStatus.NOT_FOUND)
         elif path == "/api/plans":
             query = urllib.parse.parse_qs(parsed.query)
@@ -549,6 +554,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                 result = self.app.storage.branch_conversation(
                     conversation_id, message_id, reset_agent=bool(body.get("reset_agent"))
                 )
+                # 与 GET /api/conversations/<id> 同口径：出网的消息不带 trace（前端只读
+                # `branch_message` 预填输入框，随后自己重载新会话；这条响应曾把整份复制的
+                # 历史连同 trace 一起发出去）。
+                strip_message_traces((result.get("conversation") or {}).get("messages"))
             except LookupError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
                 return

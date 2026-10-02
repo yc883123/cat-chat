@@ -43,6 +43,16 @@ DEFAULT_RELEASE_NOTES = [
     "修复更新说明长期显示旧内容的问题，发布流程改为读取统一说明文件。",
 ]
 
+# 下载进度在「无新字节」超过该秒数后判定为疑似卡死（前端据此把进度条标黄并提示）。
+STALL_SECONDS = 8
+# 「已下载、待重启」的落盘标记：下载与校验成功后写入，重启前一直保留，
+# 因此下次启动 App 仍能给出「立即重启」入口，不必重新下载。
+READY_MARKER = "ready-update.json"
+
+
+class UpdateCancelled(Exception):
+    """用户主动取消下载（内部信号，不作为错误展示）。"""
+
 
 # 安装（换 exe）用的 PowerShell 脚本正文。放模块级常量而不是内联字符串，是为了让
 # 守门测试与冻结版自检能在**运行期**读到它——本程序被 PyInstaller 打进 PYZ 后没有可读的
@@ -110,19 +120,56 @@ class UpdateManager:
         self._releases_from_cache = False
         self.manual_release_url = ""
         self.manual_update_available = False
+        # 「更新代理」scoped 覆盖项：仅作用于本模块发起的请求（检查/清单/下载），
+        # 与全局 net_io 策略解耦。None / {"mode": "inherit"} 表示跟随全局。
+        self.proxy_override: dict[str, Any] | None = None
+        # 下载进度（供前端进度条）：received/total 为字节，speed 为字节/秒（约 0.5s 采样）。
+        self.download: dict[str, Any] = {
+            "received": 0,
+            "total": 0,
+            "speed": 0.0,
+            "started_at": 0.0,
+            "updated_at": 0.0,
+        }
+        self._cancel = threading.Event()
         self.build = self._read_build_info()
+        # 「已下载待重启」状态：从磁盘标记恢复，重启 App 后仍可一键应用。
+        self.ready: dict[str, Any] | None = self._load_ready()
         self.pending_verification = self.verify_pending()
 
-    @staticmethod
-    def _with_proxy_context(message: str) -> str:
-        """在错误消息末尾附上当前实际生效的外部请求模式，便于用户定位网络问题。"""
+    # ---- 更新代理（scoped 覆盖项） ----
+
+    def configure_proxy(self, settings: dict[str, Any] | None) -> None:
+        """注入「更新代理」设置；非法值一律按跟随全局处理（不阻断更新能力）。"""
+        if not isinstance(settings, dict):
+            settings = {}
+        mode = str(settings.get("mode") or "inherit").strip().lower()
+        if mode not in {"inherit", "system", "direct", "manual"}:
+            mode = "inherit"
+        with self.lock:
+            self.proxy_override = {"mode": mode, "url": str(settings.get("url") or "").strip()}
+
+    def _proxy_note(self) -> str:
+        """本次更新实际走哪条路（含 scoped 覆盖项），用于错误文案与状态展示。"""
+        override = self.proxy_override
         try:
-            note = net_io.proxy_state().get("note") or ""
+            info = net_io.describe_override(override)
         except Exception:  # noqa: BLE001 - 诊断信息失败不影响主流程
-            note = ""
+            return ""
+        return str(info.get("note") or "").strip()
+
+    def _open(self, request: urllib.request.Request, timeout: float):
+        """本模块唯一的出站入口：统一携带「更新代理」覆盖项。"""
+        with self.lock:
+            override = dict(self.proxy_override) if self.proxy_override else None
+        return net_io.open_scoped(request, override=override, timeout=timeout)
+
+    def _with_proxy_context(self, message: str) -> str:
+        """在错误消息末尾附上本次更新实际走的链路，便于用户定位网络问题。"""
+        note = self._proxy_note()
         if not note:
             return message
-        return f"{message}（外部请求：{note}）"
+        return f"{message}（更新链路：{note}）"
 
     def _run_git(self, *args: str, timeout: int = 30) -> str:
         attempts = 2 if args and args[0] in {"fetch", "pull", "ls-remote"} else 1
@@ -254,6 +301,8 @@ class UpdateManager:
         with self.lock:
             latest = dict(self.latest or {})
             current_commit = self.build.get("commit", "")
+            phase = self.phase
+            ready = dict(self.ready or {})
             update_available = bool(
                 latest
                 and latest.get("update_available", latest.get("commit") != current_commit)
@@ -264,7 +313,7 @@ class UpdateManager:
                 "mode": self.mode,
                 "current_version": self.build.get("version", "dev"),
                 "current_commit": current_commit,
-                "phase": self.phase,
+                "phase": phase,
                 "error": self.error,
                 "checked_at": self.checked_at,
                 "update_available": update_available,
@@ -279,6 +328,22 @@ class UpdateManager:
                 "releases": list(self.releases),
                 "pending_verification": self.pending_verification,
                 "source_dirty": self._source_dirty(),
+                # 下载进度（前端进度条 / 卡死提示）与取消可用性。
+                "download": self._download_snapshot(),
+                "can_cancel": phase == "downloading",
+                # 已下载待重启：跨重启保留，用户可选「立即重启」或稍后手动重启。
+                "ready": {
+                    "version": str(ready.get("version") or ""),
+                    "commit": str(ready.get("commit") or ""),
+                    "downloaded_at": int(ready.get("downloaded_at") or 0),
+                } if ready else {},
+                "can_apply": bool(ready) and phase not in {"downloading", "restarting"},
+                # 本次更新实际走的链路（受「更新代理」影响），设置页直接展示。
+                "proxy": {
+                    "mode": (self.proxy_override or {}).get("mode", "inherit"),
+                    "url": (self.proxy_override or {}).get("url", ""),
+                    "note": self._proxy_note(),
+                },
             }
 
     @staticmethod
@@ -308,7 +373,7 @@ class UpdateManager:
         return f"检查更新失败：HTTP {exc.code}"
 
     @staticmethod
-    def _request_json(url: str, timeout: int = 20) -> dict[str, Any] | list[Any]:
+    def _request_json(url: str, timeout: int = 20, opener=None) -> dict[str, Any] | list[Any]:
         request = urllib.request.Request(
             url,
             headers={
@@ -317,7 +382,8 @@ class UpdateManager:
                 "X-GitHub-Api-Version": "2022-11-28",
             },
         )
-        with net_io.open(request, timeout=timeout) as response:
+        open_fn = opener or (lambda req, timeout: net_io.open(req, timeout=timeout))
+        with open_fn(request, timeout) as response:
             value = json.loads(response.read().decode("utf-8-sig"))
         if not isinstance(value, (dict, list)):
             raise RuntimeError("更新服务器返回了无效数据")
@@ -422,7 +488,7 @@ class UpdateManager:
                     return self.releases
         try:
             url = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=100"
-            data = self._request_json(url)
+            data = self._request_json(url, opener=self._open)
         except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
             # API 限流/网络抖动时回退读缓存，保留历史版本下拉项。
             cached = self._load_cached_releases(cache)
@@ -485,7 +551,9 @@ class UpdateManager:
 
     def _fetch_manifest_for_tag(self, tag: str) -> dict[str, Any]:
         base = self._manifest_base(tag)
-        manifest = self._validate_manifest(self._request_json(f"{base}/{MANIFEST_ASSET}"))
+        manifest = self._validate_manifest(
+            self._request_json(f"{base}/{MANIFEST_ASSET}", opener=self._open)
+        )
         is_latest = not tag or tag == LATEST_TAG
         manifest.update(
             {
@@ -700,6 +768,71 @@ class UpdateManager:
         threading.Thread(target=run, name="naiba-update-check", daemon=True).start()
         return self.status()
 
+    # ---- 下载进度 ----
+
+    def _reset_download_progress(self) -> None:
+        with self.lock:
+            self.download = {
+                "received": 0,
+                "total": 0,
+                "speed": 0.0,
+                "started_at": 0.0,
+                "updated_at": 0.0,
+            }
+
+    def _begin_download(self, total: int) -> None:
+        now = time.time()
+        with self.lock:
+            self.download = {
+                "received": 0,
+                "total": max(0, int(total or 0)),
+                "speed": 0.0,
+                "started_at": now,
+                "updated_at": now,
+            }
+
+    def _advance_download(self, received: int) -> None:
+        """按块更新已下载字节，并以 ≥0.5s 的采样间隔估算速度。"""
+        now = time.time()
+        with self.lock:
+            last_at = float(self.download.get("updated_at") or now)
+            last_received = int(self.download.get("received") or 0)
+            elapsed = now - last_at
+            if elapsed >= 0.5:
+                self.download["speed"] = max(0.0, (received - last_received) / elapsed)
+            self.download["received"] = int(received)
+            self.download["updated_at"] = now
+
+    def _download_snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            data = dict(self.download)
+            phase = self.phase
+        received = int(data.get("received") or 0)
+        total = int(data.get("total") or 0)
+        updated_at = float(data.get("updated_at") or 0)
+        stalled = bool(
+            phase == "downloading"
+            and updated_at
+            and (time.time() - updated_at) >= STALL_SECONDS
+        )
+        return {
+            "received": received,
+            "total": total,
+            "speed": float(data.get("speed") or 0.0),
+            "percent": round(received / total * 100) if total else 0,
+            "stalled": stalled,
+        }
+
+    # ---- 取消下载 ----
+
+    def cancel_install(self) -> dict[str, Any]:
+        """请求中止正在进行的下载；实际收尾由下载线程完成（前端轮询可见）。"""
+        with self.lock:
+            if self.phase != "downloading":
+                raise RuntimeError("当前没有正在进行的下载")
+            self._cancel.set()
+        return self.status()
+
     def _download(self, latest: dict[str, Any]) -> Path:
         update_dir = self.data_dir / "update"
         update_dir.mkdir(parents=True, exist_ok=True)
@@ -708,9 +841,28 @@ class UpdateManager:
             str(latest["download_url"]),
             headers={"Accept": "application/octet-stream", "User-Agent": "naiba-chat-updater"},
         )
-        with net_io.open(request, timeout=120) as response, target.open("wb") as output:
-            while chunk := response.read(1024 * 1024):
-                output.write(chunk)
+        self._cancel.clear()
+        received = 0
+        with self._open(request, timeout=120) as response, target.open("wb") as output:
+            try:
+                total = int(response.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                total = 0
+            self._begin_download(total)
+            try:
+                while True:
+                    if self._cancel.is_set():
+                        raise UpdateCancelled()
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+                    received += len(chunk)
+                    self._advance_download(received)
+            except UpdateCancelled:
+                output.close()
+                target.unlink(missing_ok=True)
+                raise
         if target.stat().st_size < 1024 * 1024 or target.read_bytes()[:2] != b"MZ":
             target.unlink(missing_ok=True)
             raise RuntimeError("下载的更新文件不是有效的 Windows 程序")
@@ -718,6 +870,121 @@ class UpdateManager:
             target.unlink(missing_ok=True)
             raise RuntimeError("更新文件校验失败，已拒绝安装")
         return target
+
+    # ---- 「已下载待重启」状态 ----
+
+    def _ready_marker_path(self) -> Path:
+        return self.data_dir / "update" / READY_MARKER
+
+    def _load_ready(self) -> dict[str, Any] | None:
+        """启动时恢复「已下载待重启」：标记、文件存在且哈希一致才算数。"""
+        marker = self._ready_marker_path()
+        if not marker.is_file():
+            return None
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            marker.unlink(missing_ok=True)
+            return None
+        if not isinstance(data, dict):
+            marker.unlink(missing_ok=True)
+            return None
+        commit = str(data.get("commit") or "")
+        sha256 = str(data.get("sha256") or "").lower()
+        name = str(data.get("file") or "")
+        path = self.data_dir / "update" / name if name else None
+        valid = bool(
+            re.fullmatch(r"[0-9a-f]{40}", commit)
+            and re.fullmatch(r"[0-9a-f]{64}", sha256)
+            and path is not None
+            and path.is_file()
+            and path.stat().st_size >= 1024 * 1024
+            and path.read_bytes()[:2] == b"MZ"
+            and _sha256(path) == sha256
+        )
+        if not valid:
+            # 半成品/损坏/被清理：静默丢弃，让用户重新下载，不留下误导性的待重启入口。
+            marker.unlink(missing_ok=True)
+            if path is not None:
+                path.unlink(missing_ok=True)
+            return None
+        if commit == str(self.build.get("commit") or ""):
+            # 标记对应的版本已经是当前运行版本（说明更新已应用）：清掉残留。
+            marker.unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
+            return None
+        return {
+            "version": str(data.get("version") or commit[:7]),
+            "commit": commit,
+            "sha256": sha256,
+            "file": name,
+            "downloaded_at": int(data.get("downloaded_at") or 0),
+            "release_url": str(data.get("release_url") or ""),
+        }
+
+    def _mark_ready(self, latest: dict[str, Any], downloaded: Path) -> None:
+        payload = {
+            "version": str(latest.get("version") or ""),
+            "commit": str(latest.get("commit") or ""),
+            "sha256": str(latest.get("sha256") or ""),
+            "file": downloaded.name,
+            "downloaded_at": int(time.time()),
+            "release_url": str(latest.get("release_url") or ""),
+        }
+        marker = self._ready_marker_path()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        with self.lock:
+            self.ready = payload
+            self.phase = "ready"
+            self.error = ""
+            self._reset_download_progress()
+
+    def discard_ready(self) -> dict[str, Any]:
+        """放弃已下载的更新：删标记与安装包，回到可再次下载的状态。"""
+        with self.lock:
+            if self.phase in {"downloading", "restarting"}:
+                raise RuntimeError("更新正在下载或重启中，无法放弃")
+            ready = dict(self.ready or {})
+            self.ready = None
+            self.phase = "available" if self._update_pending() else "idle"
+        self._ready_marker_path().unlink(missing_ok=True)
+        name = str(ready.get("file") or "")
+        if name:
+            (self.data_dir / "update" / name).unlink(missing_ok=True)
+        return self.status()
+
+    def _update_pending(self) -> bool:
+        latest = self.latest or {}
+        return bool(latest.get("update_available", True))
+
+    def apply_ready(self, on_ready: Callable[[], None] | None = None) -> dict[str, Any]:
+        """把已下载并校验通过的新版安装包交给替换脚本；由用户点「立即重启」触发。"""
+        with self.lock:
+            if self.phase in {"downloading", "restarting"}:
+                raise RuntimeError("更新正在下载或重启中，请稍候")
+            ready = dict(self.ready or {})
+        if not ready:
+            raise RuntimeError("没有已下载的更新，请先下载")
+        path = self.data_dir / "update" / str(ready.get("file") or "")
+        if not path.is_file() or _sha256(path) != str(ready.get("sha256") or ""):
+            self.discard_ready()
+            raise RuntimeError("更新文件已损坏或被清理，请重新下载")
+        with self.lock:
+            self.phase = "restarting"
+            self.error = ""
+        # pending 标记只在「真正要安装」这一刻写：此前版本在下载前就写，
+        # 下载失败/取消后下次启动会误报「上次更新校验失败」。
+        self._write_pending(ready)
+        self._launch_replacer(path)
+
+        def restart() -> None:
+            time.sleep(0.5)
+            if on_ready:
+                on_ready()
+
+        threading.Thread(target=restart, name="naiba-update-restart", daemon=True).start()
+        return self.status()
 
     def _launch_replacer(self, downloaded: Path) -> None:
         target = Path(sys.executable).resolve()
@@ -750,6 +1017,11 @@ class UpdateManager:
     def start_install(
         self, target_tag: str | None = None, on_ready: Callable[[], None] | None = None
     ) -> dict[str, Any]:
+        """开始下载更新（非阻塞）。下载+校验通过后进入 ``ready`` 态，**不自动重启**；
+        真正安装由 :meth:`apply_ready` 在用户点「立即重启」时执行。
+
+        ``on_ready`` 仅为兼容旧调用方保留，当前不再使用（重启回调归 apply_ready）。
+        """
         if not self.supported:
             raise RuntimeError("当前运行方式不支持自动更新")
         if self.mode == "source":
@@ -780,21 +1052,25 @@ class UpdateManager:
         with self.lock:
             self.phase = "downloading"
             self.error = ""
-        self._write_pending(latest)
+            self._cancel.clear()
+            self._reset_download_progress()
 
         def install() -> None:
             try:
                 downloaded = self._download(latest)
-                self._launch_replacer(downloaded)
+                # 下载与校验都通过后才进入「待重启」：此时既不写 pending、也不启动替换脚本，
+                # 由用户在「立即重启 / 稍后重启」之间自己选（§九 更新链路）。
+                self._mark_ready(latest, downloaded)
+            except UpdateCancelled:
                 with self.lock:
-                    self.phase = "restarting"
-                time.sleep(0.5)
-                if on_ready:
-                    on_ready()
+                    self.phase = "available" if self._update_pending() else "idle"
+                    self.error = ""
+                    self._reset_download_progress()
             except Exception as exc:
                 with self.lock:
                     self.phase = "error"
                     self.error = self._with_proxy_context(f"安装更新失败：{exc}")
+                    self._reset_download_progress()
 
         threading.Thread(target=install, name="naiba-update-install", daemon=True).start()
         return self.status()

@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 3.1.0-beta
-  RELEASE_TAG: v3.1.0-beta
+  RELEASE_VERSION: 3.1.1-beta
+  RELEASE_TAG: v3.1.1-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-3.1.0-beta-windows-x64
+  PACKAGE_NAME: cat-chat-3.1.1-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-3.1.0-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-3.1.1-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -104,11 +104,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 3.1.0 Beta release
+      - name: Publish 3.1.1 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 3.1.0 Beta
+          name: Cat Chat 3.1.1 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -118,22 +118,21 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 3.1.0 Beta Windows build from `${{ github.sha }}`。
+            Cat Chat 3.1.1 Beta Windows build from `${{ github.sha }}`。
             
             > **关于文件名的说明**：仓库已更名为 `cat-chat`（旧链接由 GitHub 自动跳转）。本次 Release 同时提供 `cat-chat.exe` 与 `naiba-chat.exe`——**这是同一个文件，SHA-256 完全相同**；两个 ZIP 内容也等价，只有包内 exe 的文件名不同。应用内自动更新仍使用 `naiba-chat.exe` 资产与原有清单协议，**你不需要做任何操作**，已安装的旧版本会照常收到更新。
             
-            **本次变化：存储与事件流大幅瘦身，运行期磁盘写入与长会话加载明显下降。** 每条回复携带的 trace（本轮发给模型的完整字节序列）从消息 metadata 抽到独立表按内容寻址、全库只存一份；终态事件不再携带完整消息对象、run 快照不再每轮固化整段会话；打开会话与每轮收尾重载的响应不再带 trace；思考增量与正文同节奏合批落库、事件落库复用长连接，生成期写事务的次数与单次成本双降。另修复 run 事件流偶发整轮收不到 done 的关流竞态，以及 trace 抽表后「删除→撤销」「分支到新会话」丢 trace 引用的问题。本次含数据库迁移（v22–v24），迁移前自动备份整库；历史会话、收藏、分支、API 卡片、Agent、Skill 与 MCP 配置原样保留，直接覆盖安装即可。
+            **本次变化：把「更新」这件事补齐——进度看得见、卡住能取消、代理可以单独设、什么时候重启由你决定；聊天输入框也能展开了。** 检查更新时开始显示真实下载进度（已下载 / 总量、实时速度），超过 8 秒没有新数据会把进度条标黄并提示「连接疑似卡死」，随时可以点「取消下载」中止并自动清理没下完的文件。设置里新增独立的「更新代理」开关（跟随全局 / 跟随系统 / 强制直连 / 手动地址），只作用于检查更新与下载——只给 GitHub 单独挂代理时不必再改全局网络策略，页面还会实时告诉你本次更新实际走的是哪条链路，出错时也带上这条信息便于定位。下载并校验成功后不再自动重启，而是停在「待重启」等你选「立即重启」或「稍后重启」，这个状态跨重启保留；关掉设置窗口后，右下角悬浮卡会继续显示进度、卡死提示与重启入口（窄屏自动贴到顶部，不遮挡输入框）。聊天输入框发送键旁新增展开/折叠按钮，折叠 180px 封顶、展开到 72dvh，只改高度上限不动 DOM，会话编辑模式下落到窗口顶部时向下生长，不会被截断。本次无数据库迁移、无数据格式变化，历史会话、收藏、分支、API 卡片、Agent、Skill 与 MCP 配置原样保留，直接覆盖安装即可。
             
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - **trace 内容寻址存储**：trace 抽到 `message_traces` 表按内容哈希去重（实测重复率 36%），读取侧透明补回，模型历史回放与前缀缓存行为不变。
-            - **终态事件与快照瘦身**：done/cancelled/error 不再携带完整消息（终态消息由会话接口提供）；run 的快照不再固化整段会话，冻结历史改由本轮用户消息 id 作游标表达；终态后自动收缩存量副本。
-            - **出网不带 trace**：会话接口不再序列化整段会话的 trace（实测单条最长 318KB）；不消费 trace 的读取路径也不再回读 blob。
-            - **事件流写放大收敛**：reasoning_delta 与正文同节奏合批落库（4096 字符 / 0.1s），事件落库复用长连接（实测单次写入 8.5ms → 1.4ms）；界面流式节奏不变。
-            - **事件流关流竞态修复**：状态置终态与终态事件落库不是原子写，关流前现在会确认终态事件已送达（2 秒宽限）。
-            - **删除撤销与分支保留 trace**：被恢复/复制的消息不再丢 trace 引用，前缀缓存不再从该消息起断链。
-            - **升级须知**：含数据库迁移（v22–v24：清理首轮上下文冗余副本、trace 抽表、终态事件副本收缩），迁移前自动备份整库到 data/backups，直接覆盖安装即可。
+            - **更新进度与取消**：下载中显示「已下载 / 总量」与实时速度；8 秒无新数据转「连接疑似卡死」提示；「取消下载」随时可用，中止后自动清理半成品。
+            - **独立「更新代理」**：四态分段开关（跟随全局 / 跟随系统 / 强制直连 / 手动地址），只作用于检查更新与下载，不影响模型与其他外部请求；状态行实时显示本次实际链路。
+            - **重启时机交给用户**：下载校验完成后进入「待重启」，可选「立即重启」或「稍后重启」（状态跨重启保留）；关闭设置后由右下角悬浮卡接管进度与重启入口，窄屏退化为顶部卡片。
+            - **输入框展开 / 折叠**：发送键旁双三角按钮，折叠 180px 封顶、展开 72dvh；只改高度上限、不搬动 DOM，会话编辑模式下也不会被窗口边缘截断。
+            - **更新面板显示修复**：进度条未下载时不再意外显示（作者样式的 display 顶掉了 hidden）；更新代理四选项此前被全局控件高度规则撑成巨型圆点、文字被挤成竖排，现已改为等宽分段控件。
+            - **文案修复**：更新代理状态行不再出现「本次更新走：更新链路：…」这种重复前缀。
             
-            本地验证：全量单测 **2374** 通过（跳过 2 项）；trace 存储 / 终态瘦身 / 出网载荷 / 事件流关流与长连接 / 流式合批专项守门 **58** 例通过；「运行中并发改会话」真机冒烟（真实服务 + 可暂停假后端）全绿——并发写入不进本轮线上请求、冻结前缀逐字不变、终态事件为小载荷；发布清单 JSON 与 workflow 结构核对通过。
+            本地验证：全量单测 **2409** 通过；「更新面板」真机冒烟（真实服务隔离实例 + Playwright）**34** 项断言全绿，覆盖下载中 / 卡死 / 取消 / 待重启 / 放弃更新全路径、四态代理落库与选项几何；发布清单 JSON 与 workflow 结构核对通过。
             
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

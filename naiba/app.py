@@ -331,6 +331,8 @@ class NaibaChatApp:
         except Exception:  # noqa: BLE001
             logger.exception("中断轮次恢复失败")
         self.updater = UpdateManager(self._paths.app_dir, self._paths.data_dir)
+        # 「更新代理」独立于全局 proxy：启动时注入一次，设置保存后再注入更新。
+        self.updater.configure_proxy(self.config.data.get("update_proxy"))
         self.update_restart_callback = None
         # 后台自动连接所有已启用 MCP 服务；对启动时未连上的做周期重试，
         # 保证 MCP 工具在会话固化工具集之前就绪（否则新会话烘焙不到它们）。
@@ -1017,6 +1019,8 @@ class NaibaChatApp:
         settings = self.config.update_settings(body)
         # 代理设置变更即时生效：重建统一网络入口的 opener，无需重启。
         net_io.configure(self.config.data.get("proxy"))
+        # 「更新代理」是独立的 scoped 覆盖项：单独注入，不覆盖全局策略。
+        self.updater.configure_proxy(self.config.data.get("update_proxy"))
         model_key = str(body.get("model_key") or body.get("default_model_key") or "").strip()
         if model_key:
             self.config.set_default_model_key(model_key)

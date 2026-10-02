@@ -743,6 +743,22 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json(self.app.updater.start_install(target_tag=target_tag, on_ready=self.app.update_restart_callback))
             except RuntimeError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif path == "/api/update/cancel":
+            try:
+                self._json(self.app.updater.cancel_install())
+            except RuntimeError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif path == "/api/update/apply":
+            # 用户点「立即重启」：把已下载并校验过的安装包交给替换脚本。
+            try:
+                self._json(self.app.updater.apply_ready(on_ready=self.app.update_restart_callback))
+            except RuntimeError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif path == "/api/update/discard":
+            try:
+                self._json(self.app.updater.discard_ready())
+            except RuntimeError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         elif path == "/api/character-card/parse":
             self._parse_character_card(body)
         elif path == "/api/conversation-prompt-presets":

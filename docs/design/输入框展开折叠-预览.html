@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>输入框原地展开/折叠 · 交互预览</title>
+<style>
+:root {
+  --brand-500:#7C5CFF; --brand-600:#6D5AE6; --brand-100:#EDECFF;
+  --neutral-0:#FFFFFF; --neutral-50:#F8F9FC; --neutral-100:#F1F2F7;
+  --neutral-200:#E6E8F0; --neutral-300:#D2D6E3; --neutral-500:#7A8099; --neutral-800:#2A2E40;
+  --bg:var(--neutral-50); --surface:var(--neutral-0); --surface-2:var(--neutral-100);
+  --line:var(--neutral-200); --line-strong:var(--neutral-300);
+  --text:var(--neutral-800); --muted:var(--neutral-500);
+  --accent:var(--brand-500); --accent-solid:var(--brand-600); --accent-soft:var(--brand-100);
+  --r-lg:12px; --r-md:8px; --r-full:999px;
+  --shadow-2:0 4px 12px rgba(30,33,56,.08), 0 2px 4px rgba(30,33,56,.04);
+  /* 折叠态 180px 与真实 MAX_COMPOSER_H 同值；展开态上限用 dvh */
+  --composer-h-collapsed:180px;
+  --composer-h-expanded:72dvh;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: var(--bg); color: var(--text);
+  display: flex; flex-direction: column; height: 100dvh; overflow: hidden;
+}
+svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+.topbar {
+  flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 14px; background: var(--surface); border-bottom: 1px solid var(--line);
+}
+.topbar h1 { font-size: 15px; font-weight: 600; }
+.topbar .spacer { flex: 1; }
+.demo-toggle {
+  font-size: 12px; padding: 6px 10px; border-radius: var(--r-full);
+  border: 1px solid var(--line-strong); background: var(--surface); color: var(--text);
+  cursor: pointer; white-space: nowrap;
+}
+.demo-toggle.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-solid); }
+
+.hint-bar {
+  flex: none; padding: 6px 14px; font-size: 12px; color: var(--muted);
+  background: var(--accent-soft); border-bottom: 1px solid var(--line); line-height: 1.6;
+}
+
+/* 消息区：overflow-y 滚动 → 内容只会被推着滚动，永不截断（同真实 .messages） */
+.messages { flex: 1; overflow-y: auto; padding: 16px 14px; display: flex; flex-direction: column; gap: 14px; }
+.msg { max-width: 78%; padding: 10px 12px; border-radius: var(--r-lg); font-size: 14px; line-height: 1.55; }
+.msg.user { align-self: flex-end; background: var(--accent-solid); color: #fff; }
+.msg.assistant { align-self: flex-start; background: var(--surface); border: 1px solid var(--line); }
+.msg .edit-slot:empty { display: none; }
+.edit-composer-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin-top: 8px; color: var(--muted); font-size: 12px;
+}
+.edit-composer-header button {
+  border: 1px solid var(--line-strong); background: var(--surface); color: var(--text);
+  border-radius: var(--r-md); padding: 3px 10px; font-size: 12px; cursor: pointer;
+}
+.msg.editing { max-width: 100%; align-self: stretch; background: transparent; border-color: var(--accent); }
+
+/* ── composer（同真实结构） ── */
+.composer-wrap {
+  flex: none; padding: 8px 14px max(12px, env(safe-area-inset-bottom));
+  background: var(--bg); max-height: 42dvh; overflow-y: auto;
+}
+.composer-wrap.hidden-anchor { visibility: hidden; height: 0; min-height: 0; padding: 0; overflow: hidden; }
+/* 编辑态（搬进气泡）：同真实样式——取消 max-height 与裁剪，纵向空间全放开 */
+.composer-wrap.is-inline-edit { max-height: none; overflow: visible; padding: 0; background: transparent; width: 100%; }
+.composer {
+  min-height: 52px; display: flex; align-items: flex-end; gap: 6px; padding: 6px;
+  background: var(--surface); border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-2);
+}
+.composer-input { position: relative; flex: 1; min-width: 0; }
+.composer textarea {
+  display: block; width: 100%; resize: none; border: 0; outline: 0;
+  max-height: var(--composer-h-collapsed); min-height: 38px; padding: 8px 6px;
+  font: inherit; font-size: 14px; line-height: 1.45; color: var(--text); background: transparent;
+}
+/* 展开态：textarea 上限抬到 72dvh；底部 wrap 上限抬到 88dvh（编辑态本来就 none） */
+.composer-wrap.is-expanded textarea { max-height: var(--composer-h-expanded); }
+.composer-wrap.is-expanded:not(.is-inline-edit) { max-height: 88dvh; }
+.icon-button, .send-button {
+  flex: none; width: 38px; height: 38px; border-radius: var(--r-md);
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; background: transparent; color: var(--muted); cursor: pointer;
+}
+.icon-button:hover { background: var(--surface-2); color: var(--text); }
+.send-button { background: var(--accent-solid); color: #fff; }
+.expand-button[aria-pressed="true"] { color: var(--accent-solid); background: var(--accent-soft); }
+.composer-meta { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 12px; color: var(--muted); }
+.composer-meta .chip { border: 1px solid var(--line); background: var(--surface); border-radius: var(--r-full); padding: 3px 10px; }
+
+.toast {
+  position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%);
+  background: rgba(30,33,56,.92); color: #fff; font-size: 13px;
+  padding: 8px 14px; border-radius: var(--r-full); z-index: 1200; pointer-events: none;
+}
+@media (min-width: 761px) {
+  .messages, .composer-wrap { padding-left: max(20px, calc((100% - 860px)/2)); padding-right: max(20px, calc((100% - 860px)/2)); }
+}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <h1>原地展开/折叠 · 预览</h1>
+  <div class="spacer"></div>
+  <button class="demo-toggle" id="longTextBtn" type="button">填入长文本</button>
+  <button class="demo-toggle" id="editModeBtn" type="button">模拟编辑模式（搬到顶部）</button>
+</header>
+<div class="hint-bar">
+  关键验证：① 直接点 ⇕，底部输入框向上展开；② 先开「模拟编辑模式」让输入框搬到<b>窗口顶部</b>的消息里，再点 ⇕——它改为<b>向下</b>展开，消息区自然滚动，<b>完整显示不截断</b>。
+</div>
+
+<main class="messages" id="messages">
+  <div class="msg user" id="anchorMsg">帮我写一个 RunningHub 工作流的批量重命名脚本。<div class="edit-slot" id="editSlot"></div></div>
+  <div class="msg assistant">可以。先说下命名规则：加速节点统一加 [Turbo] 前缀……</div>
+  <div class="msg assistant">脚本大概 40 行，支持 dry-run 预览改名结果。</div>
+  <div class="msg assistant">占位消息：展开时我会被往下推，消息区自动滚动。</div>
+  <div class="msg assistant">占位消息：验证长内容下展开不截断。</div>
+</main>
+
+<section class="composer-wrap" id="composerWrap">
+  <form class="composer" id="composerForm">
+    <button class="icon-button" type="button" title="添加文件"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-9-9"/><path d="M12 7v10M7 12h10"/></svg></button>
+    <div class="composer-input">
+      <textarea id="messageInput" rows="1" placeholder="输入消息" spellcheck="false"></textarea>
+    </div>
+    <button class="icon-button" type="button" title="思考强度"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"/><path d="M20.2 20.2c2.04-2.03.02-7.35-4.5-11.87S5.86 1.8 3.83 3.83c-2.04 2.03-.02 7.35 4.5 11.87s9.84 6.53 11.87 4.5Z"/></svg></button>
+    <!-- 新增：展开/折叠（双三角），发送键旁按钮列 -->
+    <button class="icon-button expand-button" type="button" id="expandBtn" title="展开输入框" aria-pressed="false">
+      <svg viewBox="0 0 24 24"><path d="M7 9l5-5 5 5"/><path d="M7 15l5 5 5-5"/></svg>
+    </button>
+    <button class="send-button" type="submit" title="发送"><svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+  </form>
+  <div class="composer-meta"><span class="chip">工作区：默认</span><span class="chip">deepseek-v4.1-flash</span></div>
+</section>
+
+<script>
+const input = document.getElementById('messageInput');
+const wrap = document.getElementById('composerWrap');
+const expandBtn = document.getElementById('expandBtn');
+const editSlot = document.getElementById('editSlot');
+const anchorMsg = document.getElementById('anchorMsg');
+const messages = document.getElementById('messages');
+let editing = false;
+let expanded = false;
+let stash = null;
+
+const COLLAPSED_H = 180;
+function expandedCap() { return Math.round(window.innerHeight * 0.72); }
+
+/* 真实 resizeTextarea 的唯一改动：上限由展开态决定 */
+function resize() {
+  input.style.height = 'auto';
+  const cap = expanded ? expandedCap() : COLLAPSED_H;
+  input.style.height = Math.min(input.scrollHeight, cap) + 'px';
+}
+input.addEventListener('input', resize);
+window.addEventListener('resize', () => { if (expanded) resize(); });
+
+function setExpanded(next) {
+  expanded = next;
+  wrap.classList.toggle('is-expanded', expanded);
+  expandBtn.setAttribute('aria-pressed', String(expanded));
+  expandBtn.title = expanded ? '收起输入框' : '展开输入框';
+  resize();
+  /* 展开时把 composer 滚进视野（编辑态在顶部时向下生长，无需滚动） */
+  if (expanded && !editing) wrap.scrollIntoView({ block: 'end', behavior: 'smooth' });
+}
+expandBtn.addEventListener('click', () => setExpanded(!expanded));
+
+function toast(text) {
+  const el = document.createElement('div');
+  el.className = 'toast'; el.textContent = text;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 1800);
+}
+
+function send() {
+  if (!input.value.trim()) return;
+  const el = document.createElement('div');
+  el.className = 'msg user'; el.textContent = input.value;
+  messages.appendChild(el);
+  input.value = '';
+  setExpanded(false);               /* 发送后自动收回折叠态 */
+  toast(editing ? '已确认编辑并重发（预览）' : '已发送（预览）');
+  if (editing) toggleEditMode();
+  messages.scrollTop = messages.scrollHeight;
+}
+document.getElementById('composerForm').addEventListener('submit', (e) => { e.preventDefault(); send(); });
+
+/* 模拟编辑模式：把 composer 真节点搬进顶部消息气泡（同真实实现） */
+function toggleEditMode() {
+  editing = !editing;
+  document.getElementById('editModeBtn').classList.toggle('on', editing);
+  document.getElementById('editModeBtn').textContent = editing ? '退出编辑模式' : '模拟编辑模式（搬到顶部）';
+  if (editing) {
+    stash = { parent: wrap.parentNode, next: wrap.nextSibling };
+    wrap.classList.add('is-inline-edit');
+    const header = document.createElement('div');
+    header.className = 'edit-composer-header';
+    header.innerHTML = '<span>正在编辑此消息</span><button type="button" id="cancelEditBtn">取消</button>';
+    editSlot.append(header, wrap);
+    anchorMsg.classList.add('editing');
+    messages.scrollTop = 0;          /* 被编辑消息在窗口最顶部 */
+    document.getElementById('cancelEditBtn').addEventListener('click', toggleEditMode);
+  } else {
+    stash.parent.insertBefore(wrap, stash.next);
+    wrap.classList.remove('is-inline-edit');
+    editSlot.replaceChildren();
+    anchorMsg.classList.remove('editing');
+    stash = null;
+  }
+  resize();
+}
+document.getElementById('editModeBtn').addEventListener('click', toggleEditMode);
+
+document.getElementById('longTextBtn').addEventListener('click', () => {
+  input.value = '给这个工作流重命名一下，主要是加速节点要标出来。\n\n' +
+    Array.from({ length: 30 }, (_, i) => `${i + 1}. 节点 node_${100 + i} → 加 [Turbo] 前缀，采样器带步数后缀，LoraLoader 末尾追加权重，先 dry-run 输出对照表再落盘。`).join('\n');
+  resize();
+  toast('已填入 30 行长文本，点 ⇕ 对比折叠/展开');
+});
+resize();
+</script>
+</body>
+</html>

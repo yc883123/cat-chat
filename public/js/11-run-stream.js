@@ -10,7 +10,7 @@ import { createConversation, loadConversations, openConversation } from "./08-co
 import { composerModelChoice, composerModelIsValidated, selectedProvider } from "./07-models-agents.js";
 import { attachmentChips, folderChips, folderIndexMetadata, missingAttachmentPaths, renderPendingFiles } from "./10-upload.js";
 import { beginChoiceSubmit, closeQuickMessagePanel, commitChoiceSubmit, handleChatEvent, rollbackChoiceSubmit, setBusy } from "./12-chat-input.js";
-import { hideSkillPopup, parseSkillReferences, renderInputMirror, resizeTextarea, stripSkillReferences } from "./13-skill-refs.js";
+import { collapseComposerIfExpanded, hideSkillPopup, parseSkillReferences, renderInputMirror, resizeTextarea, stripSkillReferences } from "./13-skill-refs.js";
 import { hideFilePopup } from "./16-file-refs.js";
 import { sendRunInterjection } from "./18-interjections.js";
 
@@ -548,6 +548,8 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
   state.pendingFiles = [];
   renderPendingFiles();
   input.value = '';
+  // 发送后收回折叠态：内容已清空，留着大输入框没有意义（编辑态确认同样是这条路径）。
+  collapseComposerIfExpanded();
   resizeTextarea();
   renderInputMirror();
   hideSkillPopup();

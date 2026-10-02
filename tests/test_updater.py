@@ -5,6 +5,7 @@
 错误提示分级、清单校验失败直连失败不降级，以及正常 API 路径与源码模式回归。
 """
 
+import hashlib
 import io
 import json
 import os
@@ -17,7 +18,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from naiba.updater import EXECUTABLE_ASSET, LATEST_TAG, MANIFEST_ASSET, REPOSITORY, UpdateManager  # noqa: E402
+from naiba.updater import (  # noqa: E402
+    EXECUTABLE_ASSET,
+    LATEST_TAG,
+    MANIFEST_ASSET,
+    READY_MARKER,
+    REPOSITORY,
+    UpdateCancelled,
+    UpdateManager,
+)
 
 
 API_RELEASES_URL = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=100"
@@ -68,7 +77,8 @@ class RequestStub:
         self.calls = []
 
     def route(self, api=None, latest=None, tag=None):
-        def dispatch(url):
+        def dispatch(url, **_kwargs):
+            # **_kwargs：updater 现在会带 opener= 走「更新代理」scoped 入口，桩只关心 URL。
             self.calls.append(url)
             if url.startswith(API_RELEASES_URL):
                 return self._resolve(api, url)
@@ -87,6 +97,30 @@ class RequestStub:
         if isinstance(value, BaseException):
             raise value
         return value
+
+
+def fake_download_response(payload: bytes, *, on_read=None):
+    """构造 `_download` 需要的响应对象（只用得到 headers / read / 上下文管理）。"""
+
+    class FakeResponse:
+        def __init__(self):
+            self._buf = io.BytesIO(payload)
+            self.headers = {"Content-Length": str(len(payload))}
+            self.reads = 0
+
+        def read(self, size=-1):
+            self.reads += 1
+            if on_read is not None:
+                on_read(self.reads)
+            return self._buf.read(size)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    return FakeResponse()
 
 
 class ExecutableUpdateTests(unittest.TestCase):
@@ -302,9 +336,9 @@ class ExecutableUpdateTests(unittest.TestCase):
         self.manager._request_json = self.stub.route(api=network_error, latest=network_error)
         status = self.manager.check(force=True)
         self.assertEqual(status["phase"], "error")
-        # 基础文案保持不变，仅在末尾附带当前实际生效的外部请求模式（用于定位代理问题）。
+        # 基础文案保持不变，仅在末尾附带本次更新实际走的链路（用于定位代理问题）。
         self.assertTrue(status["error"].startswith("无法连接更新服务器，请检查网络后重试"))
-        self.assertIn("外部请求：", status["error"])
+        self.assertIn("更新链路：", status["error"])
 
     def test_check_normal_api_path_regression(self):
         self.set_build("2.1.6-beta")
@@ -320,10 +354,73 @@ class ExecutableUpdateTests(unittest.TestCase):
         self.assertIn(f"{TAG_DL_BASE}/v2.1.7-beta/{MANIFEST_ASSET}", self.stub.calls)
         self.assertFalse(any(url.startswith(f"{LATEST_DL_BASE}/") for url in self.stub.calls))
 
-    # ---------- 安装入口（latest 合成条目） ----------
+    # ---------- 下载进度 / 取消 / 「已下载待重启」 ----------
+
+    def _payload(self, size=2 * 1024 * 1024):
+        payload = b"MZ" + b"\x00" * (size - 2)
+        return payload, hashlib.sha256(payload).hexdigest()
+
+    def _latest(self, checksum, commit=COMMIT_A):
+        return {
+            "download_url": f"{LATEST_DL_BASE}/{EXECUTABLE_ASSET}",
+            "commit": commit,
+            "sha256": checksum,
+            "version": "2.1.7-beta",
+        }
+
+    def _downloaded_path(self, commit=COMMIT_A):
+        return self.data_dir / "update" / f"naiba-chat-{commit[:12]}.download"
+
+    def test_download_reports_progress_in_monotonic_chunks(self):
+        """下载必须按块上报进度（前端进度条/卡死提示的唯一数据源）。"""
+        payload, checksum = self._payload()
+        response = fake_download_response(payload)
+        self.manager._open = lambda request, timeout=None: response
+        seen = []
+        original = self.manager._advance_download
+        self.manager._advance_download = lambda received: (seen.append(received), original(received))[1]
+
+        path = self.manager._download(self._latest(checksum))
+
+        self.assertTrue(path.is_file(), "校验通过后必须保留安装包（等待用户选择重启时机）")
+        self.assertEqual(path.read_bytes()[:2], b"MZ")
+        self.assertEqual(seen, sorted(seen), "已下载字节必须单调递增")
+        self.assertEqual(seen[-1], len(payload), "最后一块必须等于文件总大小")
+        snapshot = self.manager._download_snapshot()
+        self.assertEqual(snapshot["total"], len(payload))
+        self.assertEqual(snapshot["percent"], 100)
+
+    def test_cancel_during_download_removes_partial_file(self):
+        """取消必须删掉半成品，绝不能让一个残缺 exe 留在数据目录里。"""
+        payload, checksum = self._payload(size=4 * 1024 * 1024)
+        response = fake_download_response(
+            payload, on_read=lambda reads: self.manager._cancel.set() if reads == 1 else None
+        )
+        self.manager._open = lambda request, timeout=None: response
+
+        with self.assertRaises(UpdateCancelled):
+            self.manager._download(self._latest(checksum))
+
+        self.assertFalse(self._downloaded_path().exists(), "半成品必须被清理")
+
+    def test_cancel_install_requires_downloading_phase(self):
+        with self.assertRaises(RuntimeError):
+            self.manager.cancel_install()
+
+    def test_download_snapshot_flags_stall_after_silence(self):
+        """长时间没有新字节 ⇒ stalled=True（前端据此把进度条标黄）。"""
+        self.manager.phase = "downloading"
+        self.manager._begin_download(1000)
+        self.manager._advance_download(100)
+        self.assertFalse(self.manager._download_snapshot()["stalled"])
+        self.manager.download["updated_at"] = time.time() - 60
+        self.assertTrue(self.manager._download_snapshot()["stalled"])
+        self.manager.phase = "idle"
+        self.assertFalse(self.manager._download_snapshot()["stalled"], "非下载态不该报卡死")
 
     @unittest.skipUnless(os.name == "nt", "一键安装路径仅适用于 Windows")
-    def test_start_install_latest_tag_uses_static_download(self):
+    def test_start_install_downloads_then_waits_for_user_restart(self):
+        """下载成功后进入 ready 态：不启动替换脚本、不写 pending 标记，等用户点「立即重启」。"""
         self.set_build("2.1.6-beta")
         self.manager.releases = [
             {"tag": LATEST_TAG, "version": "2.1.7-beta", "published_at": "",
@@ -333,15 +430,164 @@ class ExecutableUpdateTests(unittest.TestCase):
         self.manager._request_json = self.stub.route(
             latest=manifest_payload(), tag=lambda url: manifest_payload()
         )
-        self.manager._download = lambda latest: self.data_dir / "naiba-chat.exe"
-        self.manager._launch_replacer = lambda downloaded: None
+        staged = self._downloaded_path()
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(b"MZ" + b"\x00" * 1024)
+        launched = []
+        self.manager._download = lambda latest: staged
+        self.manager._launch_replacer = lambda downloaded: launched.append(downloaded)
+
         self.manager.start_install(LATEST_TAG)
         deadline = time.time() + 5
-        while self.manager.phase != "restarting" and time.time() < deadline:
+        while self.manager.phase not in {"ready", "error"} and time.time() < deadline:
             time.sleep(0.05)
-        self.assertEqual(self.manager.phase, "restarting")
+
+        self.assertEqual(self.manager.phase, "ready")
+        self.assertEqual(launched, [], "下载完成不得自动替换 exe（重启时机由用户决定）")
+        self.assertFalse((self.data_dir / "update" / "pending-update.json").exists(),
+                         "pending 标记只在真正安装那一刻写，否则失败/取消后会误报「上次更新校验失败」")
+        self.assertTrue((self.data_dir / "update" / READY_MARKER).is_file())
+        status = self.manager.status()
+        self.assertTrue(status["can_apply"])
+        self.assertEqual(status["ready"]["version"], "2.1.7-beta")
         self.assertTrue(any(url.startswith(f"{LATEST_DL_BASE}/") for url in self.stub.calls))
         self.assertFalse(any(url.startswith(API_RELEASES_URL) for url in self.stub.calls))
+
+    def test_ready_state_survives_restart_and_can_be_applied(self):
+        """待重启状态落盘：重启 App 后仍能一键应用，不必重新下载。"""
+        payload, checksum = self._payload()
+        staged = self._downloaded_path()
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(payload)
+        self.manager._mark_ready(self._latest(checksum), staged)
+
+        revived = UpdateManager(self.app_dir, self.data_dir)
+        status = revived.status()
+        self.assertTrue(status["can_apply"], "重启后必须还认得这份已下载的更新")
+        self.assertEqual(status["ready"]["version"], "2.1.7-beta")
+        self.assertEqual(status["ready"]["commit"], COMMIT_A)
+
+        launched = []
+        revived._launch_replacer = lambda downloaded: launched.append(downloaded)
+        result = revived.apply_ready()
+        self.assertEqual(revived.phase, "restarting")
+        self.assertEqual(launched, [staged])
+        self.assertTrue((self.data_dir / "update" / "pending-update.json").is_file())
+        self.assertFalse(result["can_apply"], "重启中不该再提供二次应用入口")
+
+    def test_corrupt_ready_marker_is_discarded_on_startup(self):
+        """哈希对不上的「待重启」必须静默丢弃：宁可让用户重下，也不能装一个坏包。"""
+        payload, _checksum = self._payload()
+        staged = self._downloaded_path()
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(payload)
+        (self.data_dir / "update" / READY_MARKER).write_text(
+            json.dumps({
+                "version": "2.1.7-beta",
+                "commit": COMMIT_A,
+                "sha256": "f" * 64,
+                "file": staged.name,
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        revived = UpdateManager(self.app_dir, self.data_dir)
+        self.assertFalse(revived.status()["can_apply"])
+        self.assertFalse((self.data_dir / "update" / READY_MARKER).exists())
+        self.assertFalse(staged.exists())
+
+    def test_discard_ready_removes_marker_and_installer(self):
+        payload, checksum = self._payload()
+        staged = self._downloaded_path()
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(payload)
+        self.manager._mark_ready(self._latest(checksum), staged)
+
+        status = self.manager.discard_ready()
+
+        self.assertFalse(status["can_apply"])
+        self.assertFalse(staged.exists())
+        self.assertFalse((self.data_dir / "update" / READY_MARKER).exists())
+
+
+class UpdateProxyOverrideTests(unittest.TestCase):
+    """「更新代理」scoped 覆盖项：只影响更新链路，且不改动全局网络策略。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.app_dir = root / "app"
+        self.data_dir = root / "data"
+        self.app_dir.mkdir()
+        self.data_dir.mkdir()
+        self.manager = UpdateManager(self.app_dir, self.data_dir)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_default_is_inherit(self):
+        self.assertEqual((self.manager.proxy_override or {}).get("mode"), None)
+        self.assertEqual(self.manager.status()["proxy"]["mode"], "inherit")
+
+    def test_configure_proxy_normalizes_unknown_mode_to_inherit(self):
+        self.manager.configure_proxy({"mode": "nonsense", "url": "http://127.0.0.1:7890"})
+        self.assertEqual(self.manager.proxy_override["mode"], "inherit")
+
+    def test_status_exposes_effective_route(self):
+        self.manager.configure_proxy({"mode": "manual", "url": "http://127.0.0.1:7890"})
+        proxy = self.manager.status()["proxy"]
+        self.assertEqual(proxy["mode"], "manual")
+        self.assertIn("127.0.0.1:7890", proxy["note"])
+        self.manager.configure_proxy({"mode": "direct"})
+        self.assertIn("直连", self.manager.status()["proxy"]["note"])
+        # note 是给前端拼「本次更新走：…」用的裸描述，不得自带「更新链路：」前缀，
+        # 否则界面会渲染成「本次更新走：更新链路：…」（2026-10-02 截图核对时抓到的文案重复）。
+        self.assertFalse(self.manager.status()["proxy"]["note"].startswith("更新链路："))
+
+    def test_error_message_reports_update_route(self):
+        self.manager.configure_proxy({"mode": "system"})
+        message = self.manager._with_proxy_context("安装更新失败：x")
+        self.assertIn("更新链路：系统代理", message)
+
+
+class ScopedOpenerTests(unittest.TestCase):
+    """net_io.open_scoped：inherit 回落全局，其余三态各自独立，manual 空地址退系统代理。"""
+
+    def test_inherit_falls_back_to_global_open(self):
+        from naiba import net as net_io
+
+        calls = []
+        original = net_io.registry.open
+        net_io.registry.open = lambda request, timeout=None: calls.append(timeout) or "sentinel"
+        try:
+            result = net_io.registry.open_scoped("https://api.github.com/x", override={"mode": "inherit"})
+        finally:
+            net_io.registry.open = original
+        self.assertEqual(result, "sentinel")
+        self.assertEqual(calls, [None])
+
+    def test_manual_without_url_falls_back_to_system(self):
+        from naiba import net as net_io
+
+        normalized = net_io.registry.normalize_override({"mode": "manual", "url": ""})
+        self.assertEqual(normalized["mode"], "system")
+
+    def test_invalid_override_is_treated_as_inherit(self):
+        from naiba import net as net_io
+
+        self.assertEqual(net_io.registry.normalize_override(None)["mode"], "inherit")
+        self.assertEqual(net_io.registry.normalize_override({"mode": "  "})["mode"], "inherit")
+        self.assertEqual(net_io.registry.normalize_override({"mode": "MANUAL", "url": "127.0.0.1:7890"})["mode"], "manual")
+
+    def test_scoped_opener_is_cached_per_mode_and_url(self):
+        from naiba import net as net_io
+
+        registry = net_io.NetIO()
+        first = registry._scoped_opener("system", "")
+        second = registry._scoped_opener("system", "")
+        self.assertIs(first, second, "同一策略必须复用同一个 opener（别每次请求都重建）")
+        registry.configure({"enabled": False, "url": ""})
+        self.assertIsNot(registry._scoped_opener("system", ""), first,
+                          "全局配置变更必须让 scoped 缓存整体失效")
 
 
 class SourceModeUpdateTests(unittest.TestCase):

@@ -340,6 +340,7 @@ verify/*
 !verify/tool_peek_smoke.py
 !verify/tool_prefix_prose_smoke.py
 !verify/topbar_smoke.cjs
+!verify/update_panel_smoke.cjs
 !verify/update_version_smoke.cjs
 !verify/update_version_smoke.py
 !verify/upload_smoke.py

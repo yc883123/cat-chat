@@ -348,6 +348,60 @@ export function renderUserContent(text) {
  * 摘→量→放回在同一帧内同步完成，不会闪；量高本来就强制一次同步布局，开销不变。
  */
 const MAX_COMPOSER_H = 180;
+// 展开态上限：占视口高度比例。与 styles.css 的
+// `.composer-wrap.is-expanded textarea { max-height: 72dvh }` 同值（改一处必改另一处）。
+const MAX_COMPOSER_H_EXPANDED_RATIO = 0.72;
+
+/* 输入框展开/折叠状态。只改高度上限、不动 DOM 结构：
+   · 底部 composer 向上生长（锚定视口底部）；
+   · 编辑模式下 composer 被搬进气泡、可能位于窗口顶部时向下生长（文档流推挤，
+     `.messages` 是滚动容器 ⇒ 只会滚动，永不截断）。
+   状态放在本模块是因为 `resizeTextarea()` 是高度的唯一写入点，两者必须同源。 */
+let composerExpanded = false;
+let composerResizeBound = false;
+
+export function isComposerExpanded() {
+  return composerExpanded;
+}
+
+function expandedCap() {
+  return Math.max(MAX_COMPOSER_H, Math.round(window.innerHeight * MAX_COMPOSER_H_EXPANDED_RATIO));
+}
+
+export function setComposerExpanded(next, { focus = false } = {}) {
+  composerExpanded = Boolean(next);
+  // 编辑模式下 composer-wrap 被搬进气泡：必须带 :not(.edit-placeholder) 排除底部那个
+  // hidden 占位锚点（它排在真节点前面，直接查 .composer-wrap 会抓错）。
+  const wrap = document.querySelector('.composer-wrap:not(.edit-placeholder)');
+  wrap?.classList.toggle('is-expanded', composerExpanded);
+  const button = $('#expandComposer');
+  if (button) {
+    button.setAttribute('aria-pressed', String(composerExpanded));
+    const label = composerExpanded ? '收起输入框' : '展开输入框';
+    button.title = label;
+    button.setAttribute('aria-label', label);
+  }
+  if (!composerResizeBound) {
+    composerResizeBound = true;
+    // 展开态的上限是按视口比例算的：窗口尺寸变化时必须重算，否则拖小窗口后
+    // 输入框会超出可视区（textarea 自己有滚动条，但会顶掉消息区）。
+    window.addEventListener('resize', () => {
+      if (composerExpanded) resizeTextarea();
+    });
+  }
+  resizeTextarea();
+  if (composerExpanded && focus) $('#messageInput')?.focus();
+}
+
+export function toggleComposerExpanded() {
+  setComposerExpanded(!composerExpanded, { focus: true });
+}
+
+/* 发送/确认编辑后收回折叠态：内容已清空，留着大输入框没有意义。 */
+export function collapseComposerIfExpanded() {
+  if (composerExpanded) setComposerExpanded(false);
+}
+
 export function resizeTextarea() {
   const input = $('#messageInput');
   if (!input) return;
@@ -355,7 +409,8 @@ export function resizeTextarea() {
   input.style.height = 'auto';
   if (placeholder) input.placeholder = '';
   try {
-    input.style.height = `${Math.min(input.scrollHeight, MAX_COMPOSER_H)}px`;
+    const cap = composerExpanded ? expandedCap() : MAX_COMPOSER_H;
+    input.style.height = `${Math.min(input.scrollHeight, cap)}px`;
   } finally {
     if (placeholder) input.placeholder = placeholder;
   }

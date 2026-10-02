@@ -124,6 +124,7 @@ KEEP = {
     "frozen_batch1_check.py",
     # 软件更新「目标版本」下拉冒烟（§六 已登记；Python 自编排 + Node 检查）
     "update_version_smoke.py", "update_version_smoke.cjs",
+    "update_panel_smoke.cjs",
     # 发版跟踪与 Release 资产核对（本机无 gh：走匿名 GitHub API）
     "release_watch.py",
     # 任务面板重做冒烟（§六 已登记；Python 自编排 + Node 检查 + 无浏览器渲染兜底）

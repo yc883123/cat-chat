@@ -74,6 +74,8 @@ class NetIO:
         self._direct_opener: urllib.request.OpenerDirector | None = None
         self._system_opener: urllib.request.OpenerDirector | None = None
         self._config_error: str = ""
+        # scoped 覆盖项（如「更新代理」）的 opener 缓存：键为 (mode, url)。
+        self._scoped_openers: dict[tuple[str, str], urllib.request.OpenerDirector] = {}
 
     # ---- 配置与状态 ----
 
@@ -86,6 +88,7 @@ class NetIO:
             self._manual_opener = None
             self._direct_opener = None
             self._system_opener = None
+            self._scoped_openers = {}
             self._config_error = ""
             if proxy_settings is None:
                 self._configured = None
@@ -219,6 +222,89 @@ class NetIO:
                 self._direct_opener = None
         return self._opener_for(host, local)
 
+    # ---- scoped 覆盖项（「更新代理」等按功能单独指定的出站策略） ----
+
+    def normalize_override(self, override: dict[str, Any] | None) -> dict[str, str]:
+        """归一化 scoped 覆盖项。``inherit``/缺失/非法值一律视为「跟随全局策略」。
+
+        ``manual`` 但地址为空时退回 ``system``（与全局代理「开了但没填地址」的
+        回退语义一致），避免出现「显式选了手动代理却静默直连」这种最难查的形态。
+        """
+        if not isinstance(override, dict):
+            return {"mode": "inherit", "url": ""}
+        mode = str(override.get("mode") or "inherit").strip().lower()
+        if mode not in {"inherit", "system", "direct", "manual"}:
+            mode = "inherit"
+        try:
+            url = _normalize_url(str(override.get("url") or ""))
+        except ValueError:
+            url = ""
+        if mode == "manual" and not url:
+            mode = "system"
+        return {"mode": mode, "url": url}
+
+    def _scoped_opener(self, mode: str, url: str) -> urllib.request.OpenerDirector:
+        """按 scoped 模式取（并缓存）独立 opener；与全局 opener 完全隔离。"""
+        key = (mode, url)
+        with self._lock:
+            cached = self._scoped_openers.get(key)
+            if cached is not None:
+                return cached
+        if mode == "direct":
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        elif mode == "manual":
+            opener = self._build_manual_opener(url)
+        else:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler())
+        with self._lock:
+            self._scoped_openers[key] = opener
+        return opener
+
+    def describe_override(self, override: dict[str, Any] | None) -> dict[str, str]:
+        """把 scoped 覆盖项翻译成给用户看的「本次请求走哪里」。"""
+        normalized = self.normalize_override(override)
+        mode = normalized["mode"]
+        if mode == "manual":
+            return {"mode": mode, "note": f"手动代理 {normalized['url']}"}
+        if mode == "system":
+            return {"mode": mode, "note": "系统代理"}
+        if mode == "direct":
+            return {"mode": mode, "note": "直连（忽略系统代理）"}
+        state = self.proxy_state()
+        note = str(state.get("note") or "").strip()
+        return {"mode": "inherit", "note": f"跟随全局设置（{note}）" if note else "跟随全局设置"}
+
+    def open_scoped(
+        self,
+        request: str | urllib.request.Request,
+        override: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ):
+        """按 scoped 覆盖项发起请求；覆盖项为 inherit 时回落全局策略。
+
+        与 ``open()`` 同语义：HTTPError 直接上抛不重试；网络类错误仅对幂等
+        请求重建 opener 后重试一次（下载/清单都是 GET）。
+        """
+        target = request
+        if isinstance(request, str):
+            target = urllib.request.Request(request)
+        normalized = self.normalize_override(override)
+        if normalized["mode"] == "inherit":
+            return self.open(target, timeout=timeout)
+        mode, url = normalized["mode"], normalized["url"]
+        opener = self._scoped_opener(mode, url)
+        try:
+            return opener.open(target, timeout=timeout)
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, OSError):
+            method_name = getattr(target, "get_method", lambda: "GET")().upper()
+            if method_name not in {"GET", "HEAD", "OPTIONS"}:
+                raise
+            with self._lock:
+                self._scoped_openers.pop((mode, url), None)
+            return self._scoped_opener(mode, url).open(target, timeout=timeout)
+
     # ---- 统一入口 ----
 
     def open(
@@ -280,3 +366,16 @@ def open(
     method: str | None = None,
 ):
     return registry.open(request, timeout=timeout, headers=headers, data=data, method=method)
+
+
+def open_scoped(
+    request: str | urllib.request.Request,
+    override: dict[str, Any] | None = None,
+    timeout: float | None = None,
+):
+    """按 scoped 覆盖项发起请求（见 :meth:`NetIO.open_scoped`）。"""
+    return registry.open_scoped(request, override=override, timeout=timeout)
+
+
+def describe_override(override: dict[str, Any] | None) -> dict[str, str]:
+    return registry.describe_override(override)

@@ -385,6 +385,11 @@ def default_config() -> dict[str, Any]:
             "model": "",
             "max_results": 5,
         },
+        # 「更新代理」：只作用于「检查更新 / 更新下载」这条链路（GitHub 直连在部分
+        # 网络下会长时间卡住），与全局 proxy 解耦——用户可能在 TUN 模式下让全局直连，
+        # 但仍需要给更新单独挂一个代理。mode=inherit 表示完全跟随全局 proxy（默认，
+        # 行为与引入该设置前逐字一致）。
+        "update_proxy": {"mode": "inherit", "url": ""},
     }
 
 
@@ -1175,7 +1180,7 @@ class ConfigStore:
             except (OSError, json.JSONDecodeError):
                 pass
         # 嵌套默认值合并：用户配置若只写了部分子字段，补齐缺失键。
-        for key in ("vision", "search", "appearance", "chat_background"):
+        for key in ("vision", "search", "appearance", "chat_background", "update_proxy"):
             merged = dict(default_config().get(key, {}))
             if isinstance(defaults.get(key), dict):
                 merged.update(defaults[key])
@@ -2088,6 +2093,7 @@ class ConfigStore:
             "vision",
             "search",
             "proxy",
+            "update_proxy",
             "workspaces",
             "appearance",
             "chat_background",
@@ -2332,6 +2338,33 @@ class ConfigStore:
                             "url": url,
                             "use_system_fallback": bool(incoming.get("use_system_fallback", True)),
                         }
+                    elif key == "update_proxy":
+                        # 「更新代理」四态：inherit（跟随全局）/ system / direct / manual。
+                        # 地址校验口径与全局 proxy 完全一致（仅 http/https、必须带端口）。
+                        incoming = values[key]
+                        if not isinstance(incoming, dict):
+                            raise ValueError("update_proxy 必须是对象")
+                        mode = str(incoming.get("mode") or "inherit").strip().lower()
+                        if mode not in {"inherit", "system", "direct", "manual"}:
+                            raise ValueError(
+                                "更新代理模式必须是 inherit、system、direct 或 manual"
+                            )
+                        url = str(incoming.get("url") or "").strip()
+                        if url and "://" not in url:
+                            url = f"http://{url}"
+                        if url:
+                            parts = urllib.parse.urlsplit(url)
+                            if parts.scheme not in {"http", "https"} or not parts.hostname:
+                                raise ValueError(
+                                    "更新代理地址格式不正确（仅支持 http/https，示例：http://127.0.0.1:7890）"
+                                )
+                            if not parts.port:
+                                raise ValueError(
+                                    f"更新代理地址缺少端口号：{url}（示例：http://127.0.0.1:7890）"
+                                )
+                        if mode == "manual" and not url:
+                            raise ValueError("更新代理选择了手动地址，但未填写代理地址")
+                        self.data[key] = {"mode": mode, "url": url}
                     elif key == "context_warning_percent":
                         # 0 = 关闭提醒；1-100 = 达到该百分比时前端弹窗提醒一次。
                         try:

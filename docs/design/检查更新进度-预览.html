@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>软件更新 · 进度/取消/代理/重启时机 交互预览</title>
+<style>
+:root {
+  --brand-500:#7C5CFF; --brand-600:#6D5AE6; --brand-100:#EDECFF;
+  --neutral-0:#FFFFFF; --neutral-50:#F8F9FC; --neutral-100:#F1F2F7;
+  --neutral-200:#E6E8F0; --neutral-300:#D2D6E3; --neutral-500:#7A8099; --neutral-800:#2A2E40;
+  --bg:var(--neutral-50); --surface:var(--neutral-0); --surface-2:var(--neutral-100);
+  --line:var(--neutral-200); --line-strong:var(--neutral-300);
+  --text:var(--neutral-800); --muted:var(--neutral-500);
+  --accent:var(--brand-500); --accent-solid:var(--brand-600); --accent-soft:var(--brand-100);
+  --success:#12A594; --warning:#E8930C; --danger:#DC4A46;
+  --r-lg:12px; --r-md:8px; --r-full:999px;
+  --shadow-2:0 4px 12px rgba(30,33,56,.08), 0 2px 4px rgba(30,33,56,.04);
+  --shadow-3:0 12px 32px rgba(30,33,56,.16);
+  /* 悬浮卡要让开的底部高度 ≈ 真实 composer 区域高度（含 meta 行） */
+  --composer-h: 118px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+/* 关键：作者样式里的 display:flex/block 会顶掉 [hidden] 的 UA 样式，必须显式压回 */
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body {
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: var(--bg); color: var(--text); min-height: 100dvh;
+}
+button { font: inherit; }
+
+.stage { max-width: 720px; margin: 0 auto; padding: 18px 14px 140px; }
+.hint-bar {
+  font-size: 12px; color: var(--muted); background: var(--accent-soft);
+  border: 1px solid var(--line); border-radius: var(--r-lg);
+  padding: 8px 12px; margin-bottom: 14px; line-height: 1.7;
+}
+.demo-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.demo-toggle {
+  font-size: 12px; padding: 6px 10px; border-radius: var(--r-full);
+  border: 1px solid var(--line-strong); background: var(--surface); color: var(--text); cursor: pointer;
+}
+.demo-toggle.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-solid); }
+
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); box-shadow: var(--shadow-2); padding: 16px; }
+.panel-head h3 { font-size: 16px; }
+.panel-head p { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.update-status { margin-top: 12px; border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; }
+.update-status > div { display: flex; gap: 10px; padding: 9px 12px; font-size: 13px; border-top: 1px solid var(--line); }
+.update-status > div:first-child { border-top: 0; }
+.update-status span { color: var(--muted); flex: none; width: 64px; }
+.update-status b { font-weight: 600; }
+.update-status select { font: inherit; font-size: 13px; padding: 2px 6px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--surface); }
+.update-notes { padding: 9px 12px; border-top: 1px solid var(--line); font-size: 12px; }
+.update-notes summary { cursor: pointer; color: var(--muted); }
+.update-notes ul { margin: 8px 0 0 18px; line-height: 1.8; }
+#updateMessage { padding: 10px 12px; font-size: 13px; border-top: 1px solid var(--line); }
+#updateMessage.error { color: var(--danger); }
+#updateMessage.ok { color: var(--success); }
+
+.progress-block { padding: 10px 12px 12px; border-top: 1px solid var(--line); }
+.progress-track { height: 8px; border-radius: var(--r-full); background: var(--surface-2); overflow: hidden; }
+.progress-fill { height: 100%; width: 0%; background: var(--accent-solid); border-radius: var(--r-full); transition: width .25s linear; }
+.progress-fill.stalled { background: var(--warning); }
+.progress-meta { display: flex; justify-content: space-between; margin-top: 6px; font-size: 12px; color: var(--muted); }
+.progress-meta .stall-hint { color: var(--warning); }
+
+.proxy-row { margin-top: 12px; border: 1px solid var(--line); border-radius: var(--r-md); padding: 10px 12px; }
+.proxy-row .proxy-title { font-size: 13px; font-weight: 600; }
+.proxy-row .proxy-hint { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.proxy-options { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; }
+.proxy-options label { display: flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; }
+.proxy-url-row { margin-top: 8px; }
+.proxy-url-row input {
+  width: 100%; font: inherit; font-size: 13px; padding: 6px 8px;
+  border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--surface);
+}
+.proxy-effective { margin-top: 8px; font-size: 12px; color: var(--muted); }
+.proxy-effective b { color: var(--text); }
+
+.form-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+.control-button, .primary-button, .danger-button {
+  font-size: 13px; padding: 8px 16px; border-radius: var(--r-md); cursor: pointer;
+  border: 1px solid var(--line-strong); background: var(--surface); color: var(--text);
+}
+.primary-button { background: var(--accent-solid); border-color: var(--accent-solid); color: #fff; }
+.danger-button { border-color: var(--danger); color: var(--danger); }
+.control-button:disabled, .primary-button:disabled { opacity: .5; cursor: default; }
+
+/* ── 悬浮卡位置规则 ──
+   桌面宽屏：右下角，但 bottom 抬高到 composer 之上（--composer-h），
+   不遮输入框/发送键、不遮消息正文（只盖住右侧留白与 turn rail 边缘）。
+   窄屏（≤760px）：composer 全宽贴底，右下角无论怎么放都会挡输入框
+   ⇒ 退化为**顶部胶囊**，吸附在顶栏下沿右侧，不挡任何输入区。 */
+.float-card {
+  position: fixed; right: 14px; bottom: calc(var(--composer-h) + max(14px, env(safe-area-inset-bottom)));
+  z-index: 900; width: min(320px, calc(100vw - 28px));
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-3); padding: 12px; cursor: pointer;
+  animation: card-in .2s ease-out;
+}
+@keyframes card-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.float-card .fc-title { font-size: 13px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.float-card .fc-title .fc-hint { font-size: 11px; color: var(--muted); font-weight: 400; }
+.float-card .progress-track { margin-top: 8px; }
+.float-card .fc-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; gap: 8px; }
+.float-card .fc-meta { font-size: 12px; color: var(--muted); }
+.float-card .fc-cancel, .float-card .fc-restart {
+  font-size: 12px; padding: 4px 10px; border-radius: var(--r-md); cursor: pointer; background: none;
+}
+.float-card .fc-cancel { border: 1px solid var(--danger); color: var(--danger); }
+.float-card .fc-restart { border: 1px solid var(--accent-solid); color: var(--accent-solid); }
+@media (max-width: 760px) {
+  .float-card {
+    top: calc(56px + env(safe-area-inset-top)); right: 10px; bottom: auto; left: auto;
+    width: auto; min-width: 210px; padding: 8px 12px; border-radius: var(--r-full);
+  }
+  .float-card .fc-title { font-size: 12px; }
+  .float-card .progress-track { margin-top: 6px; height: 6px; }
+}
+
+/* 待重启横幅（选了「稍后重启」后常驻设置面板顶部） */
+.ready-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 12px; padding: 10px 12px; font-size: 13px;
+  background: var(--accent-soft); border: 1px solid var(--accent); border-radius: var(--r-md);
+}
+
+.restart-overlay {
+  position: fixed; inset: 0; z-index: 1300; background: var(--bg);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px; color: var(--muted);
+}
+
+.toast {
+  position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%);
+  background: rgba(30,33,56,.92); color: #fff; font-size: 13px;
+  padding: 8px 14px; border-radius: var(--r-full); z-index: 1200; pointer-events: none;
+}
+</style>
+</head>
+<body>
+<div class="stage">
+  <div class="hint-bar">
+    新增两点：<b>① 悬浮卡位置规则</b>——桌面右下、抬到输入框之上；窄屏退化为顶部胶囊（把窗口拉窄或用手机看）。
+    <b>② 重启时机可选</b>——下载完成后不再立刻重启，给「立即重启 / 稍后重启」；稍后重启会留下待重启入口（设置横幅 + 悬浮卡），下次启动 App 也会提示。
+  </div>
+  <div class="demo-row">
+    <button class="demo-toggle" id="stallBtn" type="button">模拟网卡卡死</button>
+    <button class="demo-toggle" id="failBtn" type="button">模拟下载失败</button>
+    <button class="demo-toggle" id="closePanelBtn" type="button">关闭设置窗口</button>
+  </div>
+
+  <div class="ready-banner" id="readyBanner" hidden>
+    <span>✅ 3.2.0-beta 已下载并校验通过，重启后生效。</span>
+    <button class="primary-button" id="bannerRestart" type="button">立即重启</button>
+  </div>
+
+  <section class="panel" id="settingsPanel">
+    <div class="panel-head"><h3>软件更新</h3><p>点「检查更新」查询新版本，手动选择版本后点击「立即更新」；不会自动安装。</p></div>
+
+    <div class="update-status">
+      <div><span>当前版本</span><b>3.1.0-beta</b></div>
+      <div><span>新版本</span><b>3.2.0-beta</b></div>
+      <div><span>目标版本</span>
+        <select id="versionSelect">
+          <option>3.2.0-beta（最新）</option>
+          <option>3.1.0-beta</option>
+          <option>3.0.0-beta</option>
+        </select>
+      </div>
+      <details class="update-notes">
+        <summary>详细更新内容</summary>
+        <ul>
+          <li>更新下载带进度条与取消按钮，卡住可感知可中断。</li>
+          <li>下载完成后可立即重启，也可稍后手动重启。</li>
+          <li>新增「更新代理」开关，只作用于更新检查与下载。</li>
+        </ul>
+      </details>
+      <p id="updateMessage">发现新版本，可以立即安装。</p>
+      <div class="progress-block" id="progressBlock" hidden>
+        <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+        <div class="progress-meta">
+          <span id="progressText">0 / 96.1 MB</span>
+          <span id="progressSpeed">– MB/s</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="proxy-row">
+      <div class="proxy-title">更新代理</div>
+      <div class="proxy-hint">只作用于「检查更新 / 更新下载」，不影响模型与其他外部请求。</div>
+      <div class="proxy-options">
+        <label><input type="radio" name="updateProxy" value="inherit" checked>跟随全局</label>
+        <label><input type="radio" name="updateProxy" value="system">跟随系统</label>
+        <label><input type="radio" name="updateProxy" value="direct">强制直连</label>
+        <label><input type="radio" name="updateProxy" value="manual">手动地址</label>
+      </div>
+      <div class="proxy-url-row" id="proxyUrlRow" hidden>
+        <input id="proxyUrl" type="text" placeholder="http://127.0.0.1:7890" autocomplete="off">
+      </div>
+      <p class="proxy-effective">本次更新走：<b id="proxyEffective">全局代理设置（当前：强制直连）</b></p>
+    </div>
+
+    <div class="form-actions">
+      <button class="control-button" id="checkUpdate" type="button">检查更新</button>
+      <button class="primary-button" id="installUpdate" type="button">立即更新</button>
+      <button class="danger-button" id="cancelUpdate" type="button" hidden>取消下载</button>
+      <!-- 下载完成后：重启时机交给用户 -->
+      <button class="primary-button" id="restartNow" type="button" hidden>立即重启</button>
+      <button class="control-button" id="restartLater" type="button" hidden>稍后重启</button>
+    </div>
+  </section>
+</div>
+
+<!-- 悬浮卡：下载中=进度+取消；待重启=「立即重启」入口 -->
+<div class="float-card" id="floatCard" hidden>
+  <div class="fc-title"><span id="fcTitle">正在下载更新</span><span class="fc-hint">点我回到设置</span></div>
+  <div class="progress-track" id="fcTrack"><div class="progress-fill" id="floatFill"></div></div>
+  <div class="fc-actions">
+    <span class="fc-meta" id="floatMeta">0%</span>
+    <button class="fc-cancel" id="floatCancel" type="button">取消</button>
+    <button class="fc-restart" id="floatRestart" type="button" hidden>立即重启</button>
+  </div>
+</div>
+
+<div class="restart-overlay" id="restartOverlay" hidden>正在重启到 3.2.0-beta …（预览到此为止）</div>
+
+<script>
+const TOTAL = 96.1 * 1024 * 1024;
+const state = { phase: 'idle', received: 0, timer: null, lastTick: 0, lastReceived: 0, speed: 0, stall: false, failAt: -1, panelOpen: true };
+const $ = (id) => document.getElementById(id);
+const msg = $('updateMessage');
+
+function fmtMB(bytes) { return (bytes / 1024 / 1024).toFixed(1); }
+function toast(text) {
+  const el = document.createElement('div');
+  el.className = 'toast'; el.textContent = text;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 1800);
+}
+function setMsg(text, cls) { msg.textContent = text; msg.className = cls || ''; }
+
+const proxyLabels = { inherit: '全局代理设置（当前：强制直连）', system: '系统代理', direct: '直连（忽略系统代理）' };
+document.querySelectorAll('input[name="updateProxy"]').forEach((radio) => {
+  radio.addEventListener('change', () => {
+    const v = radio.value;
+    $('proxyUrlRow').hidden = v !== 'manual';
+    $('proxyEffective').textContent = v === 'manual'
+      ? ('手动代理 ' + ($('proxyUrl').value || '（未填写）'))
+      : proxyLabels[v];
+  });
+});
+$('proxyUrl').addEventListener('input', () => {
+  $('proxyEffective').textContent = '手动代理 ' + ($('proxyUrl').value || '（未填写）');
+});
+
+function syncFloatCard() {
+  /* 设置关着、且有进行中的下载或待重启 → 悬浮卡出现；位置由 CSS 媒体查询定（桌面右下/窄屏顶部胶囊） */
+  const show = !state.panelOpen && (state.phase === 'downloading' || state.phase === 'ready');
+  $('floatCard').hidden = !show;
+  if (!show) return;
+  const ready = state.phase === 'ready';
+  $('fcTitle').textContent = ready ? '更新待重启' : '正在下载更新';
+  $('fcTrack').style.display = ready ? 'none' : '';
+  $('floatCancel').hidden = ready;
+  $('floatRestart').hidden = !ready;
+  if (ready) $('floatMeta').textContent = '3.2.0-beta 已下载，重启后生效';
+}
+
+function tick() {
+  const now = Date.now();
+  const dt = (now - state.lastTick) / 1000;
+  state.lastTick = now;
+  if (!state.stall) {
+    const chunk = (0.6 + Math.random()) * 1024 * 1024 * dt * 4;
+    state.received = Math.min(TOTAL, state.received + chunk);
+  }
+  state.speed = (state.received - state.lastReceived) / Math.max(dt, 0.001);
+  state.lastReceived = state.received;
+
+  const pct = Math.round(state.received / TOTAL * 100);
+  $('progressFill').style.width = pct + '%';
+  $('floatFill').style.width = pct + '%';
+  $('progressText').textContent = fmtMB(state.received) + ' / ' + fmtMB(TOTAL) + ' MB';
+  $('progressSpeed').textContent = fmtMB(Math.max(state.speed, 0)) + ' MB/s';
+  if (state.phase === 'downloading') $('floatMeta').textContent = pct + '% · ' + fmtMB(Math.max(state.speed, 0)) + ' MB/s';
+
+  if (state.failAt > 0 && state.received >= state.failAt) { failDownload(); return; }
+  if (state.received >= TOTAL) { finishDownload(); return; }
+  state.timer = setTimeout(tick, 250);
+}
+
+setInterval(() => {
+  if (state.phase !== 'downloading') return;
+  const stalled = state.speed < 1024;
+  $('progressFill').classList.toggle('stalled', stalled);
+  $('floatFill').classList.toggle('stalled', stalled);
+  $('progressSpeed').innerHTML = stalled
+    ? '<span class="stall-hint">连接疑似卡死，可取消后检查「更新代理」</span>'
+    : fmtMB(state.speed) + ' MB/s';
+}, 1000);
+
+function startDownload() {
+  state.phase = 'downloading';
+  state.received = 0; state.lastReceived = 0; state.lastTick = Date.now();
+  state.speed = 0; state.stall = false; state.failAt = -1;
+  $('stallBtn').classList.remove('on'); $('failBtn').classList.remove('on');
+  $('progressBlock').hidden = false;
+  $('installUpdate').hidden = true;
+  $('cancelUpdate').hidden = false;
+  $('restartNow').hidden = true; $('restartLater').hidden = true;
+  $('checkUpdate').disabled = true;
+  $('versionSelect').disabled = true;
+  setMsg('正在下载并校验更新，可随时取消。');
+  syncFloatCard();
+  tick();
+}
+function resetButtons() {
+  clearTimeout(state.timer);
+  $('progressBlock').hidden = true;
+  $('installUpdate').hidden = false;
+  $('cancelUpdate').hidden = true;
+  $('checkUpdate').disabled = false;
+  $('versionSelect').disabled = false;
+}
+function cancelDownload() {
+  state.phase = 'idle';
+  resetButtons();
+  setMsg('已取消下载，未做任何更改。');
+  syncFloatCard();
+  toast('已取消下载');
+}
+function failDownload() {
+  state.phase = 'idle';
+  resetButtons();
+  setMsg('安装更新失败：连接被重置（本次更新走：' + $('proxyEffective').textContent + '）——可到下方「更新代理」切换后重试。', 'error');
+  syncFloatCard();
+}
+/* 下载完成：不立刻重启，交给用户选 */
+function finishDownload() {
+  state.phase = 'ready';
+  clearTimeout(state.timer);
+  $('progressBlock').hidden = true;
+  $('cancelUpdate').hidden = true;
+  $('installUpdate').hidden = true;
+  $('restartNow').hidden = false;
+  $('restartLater').hidden = false;
+  setMsg('3.2.0-beta 已下载并校验通过。立即重启完成更新，或稍后手动重启。', 'ok');
+  syncFloatCard();
+}
+function restartNow() {
+  $('restartOverlay').hidden = false;
+}
+function restartLater() {
+  $('restartNow').hidden = true;
+  $('restartLater').hidden = true;
+  $('readyBanner').hidden = false;          /* 设置面板常驻入口 */
+  setMsg('更新已就绪：重启应用后生效（设置顶部与悬浮卡都保留了「立即重启」入口）。');
+  syncFloatCard();                          /* 关窗时悬浮卡切换为「待重启」态 */
+  toast('已保留更新，重启后生效');
+}
+
+$('installUpdate').addEventListener('click', startDownload);
+$('cancelUpdate').addEventListener('click', cancelDownload);
+$('floatCancel').addEventListener('click', (e) => { e.stopPropagation(); cancelDownload(); });
+$('restartNow').addEventListener('click', restartNow);
+$('restartLater').addEventListener('click', restartLater);
+$('bannerRestart').addEventListener('click', restartNow);
+$('floatRestart').addEventListener('click', (e) => { e.stopPropagation(); restartNow(); });
+$('checkUpdate').addEventListener('click', () => toast('已是最新版本（预览）'));
+
+$('closePanelBtn').addEventListener('click', () => {
+  state.panelOpen = false;
+  $('settingsPanel').style.display = 'none';
+  $('readyBanner').style.display = 'none';
+  syncFloatCard();
+});
+$('floatCard').addEventListener('click', () => {
+  state.panelOpen = true;
+  $('settingsPanel').style.display = '';
+  $('readyBanner').style.display = '';
+  syncFloatCard();
+});
+
+$('stallBtn').addEventListener('click', () => {
+  if (state.phase !== 'downloading') { toast('先点「立即更新」开始下载'); return; }
+  state.stall = !state.stall;
+  $('stallBtn').classList.toggle('on', state.stall);
+  toast(state.stall ? '已注入卡死（0 字节）' : '恢复正常下载');
+});
+$('failBtn').addEventListener('click', () => {
+  if (state.phase !== 'downloading') { toast('先点「立即更新」开始下载'); return; }
+  state.failAt = Math.min(state.received + TOTAL * 0.1, TOTAL * 0.95);
+  toast('将在 10% 后失败');
+});
+</script>
+</body>
+</html>

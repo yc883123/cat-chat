@@ -7,12 +7,12 @@ import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarni
 import { branchMessage, cancelActiveEdit, cancelSessionStart, confirmActiveEdit, deleteMessageFlow, fillContextResetSeed, initTurnRail, isNearBottom, regenerateMessage, setStickToBottom, startEditMessage, startNewSession, undoLastDelete } from "./04-messages.js";
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
 import { switchPermissionMode } from "./06-tasks-plans.js";
-import { checkUpdate, closeAgentHelpPopover, closeComposerModelPicker, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, positionAgentHelpPopover, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleAgentHelpPopover, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
+import { checkUpdate, closeAgentHelpPopover, closeComposerModelPicker, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, applyUpdate, cancelUpdate, discardUpdate, dismissUpdateReady, saveUpdateProxy, syncUpdateFloat, syncUpdateProxyControls, renderUpdateProxyState, positionAgentHelpPopover, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleAgentHelpPopover, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
 import { applySidebarViewPref, bindSidebarDragDrop, cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeBranchChainPanel, closeConversationMenu, closeSidebarViewMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, openSidebarViewMenu, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, runFullTextSearch, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel, toggleConversationArchive, setTaskLogOpen, setTaskLogStick, setWorkspaceSearchMode, syncSearchModeUi, SEARCH_DEBOUNCE_MS } from "./08-conversations.js";
 import { addProvider, addSearchProfile, appearanceFormValues, applyProviderModelCapabilities, applyProviderPreset, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadUsageStats, loadWorkspaceTree, openAgentCard, openAgentToolEditorCurrent, openProviderCard, openProviderPresetKeyUrl, openVisionProviderForm, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, saveInterjectDirectSend, saveMcpServer, saveProvider, saveRuntimeSettings, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, setUsageChart, setUsageDim, setUsageGran, setUsageMetric, setUsageRange, showAgentForm, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAgentToolPeek, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, toggleToolOnlySelected, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint, applyUsageFilter, openUsagePrefsDialog, resetUsageFilter, saveUsagePrefs, selectUsageFilterRange, usageUnbindDialogViewport, refreshUsagePricingBadge, openUsagePricingDialog, pricingGoBackToList, pricingTogglePool, pricingConfirmCustomCurrency, pricingCloseCustomCurrency, pricingOpenCustomCurrency, pricingApplyGroupCurrency, pricingDropCurrency, pricingAddFromPool, pricingMarkRowDirty, pricingCycleRowCurrency, pricingSaveRow, pricingRemoveRow, pricingOpenGroup } from "./09-settings.js";
 import { addFolderChip, isFolderChip, readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
 import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handlePasteImage, clipboardPasteDriver, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState } from "./12-chat-input.js";
-import { commitSkillSelection, hideSkillPopup, insertSkillRefAtCursor, moveSkillPopupSelection, popupState, positionSkillPopup, renderInputMirror, resizeTextarea, setSkillPopupSelection, skillList, updateSkillPopup } from "./13-skill-refs.js";
+import { commitSkillSelection, hideSkillPopup, insertSkillRefAtCursor, moveSkillPopupSelection, popupState, positionSkillPopup, renderInputMirror, resizeTextarea, setSkillPopupSelection, skillList, toggleComposerExpanded, updateSkillPopup } from "./13-skill-refs.js";
 import { activateFileTab, activeFileTab, applyFilePanelOpenClass, cancelFileEdit, closeFilePanel, closeSidebar, convFileRawUrl, filePanelState, filePanelUsable, fileVersionToken, openFilePanel, openSidebar, removeFileTab, reopenFilePanel, restoreLeftSidebarCollapse, saveFileTab, setLeftSidebarCollapsed, sidebarDesktop, startFileEdit, updateFileTabsButton } from "./14-file-panel.js";
 import { handleFilePopupClick, handleFilePopupKey, positionFilePopup, updateFilePopup } from "./16-file-refs.js";
 import { guideAllInterjections, sendRunInterjection } from "./18-interjections.js";
@@ -2167,6 +2167,34 @@ export function bindEvents() {
   $('#saveToken').addEventListener('click', saveAccessToken);
   $('#checkUpdate').addEventListener('click', checkUpdate);
   $('#installUpdate').addEventListener('click', installUpdate);
+  $('#cancelUpdate').addEventListener('click', cancelUpdate);
+  $('#restartNow').addEventListener('click', applyUpdate);
+  $('#restartLater').addEventListener('click', dismissUpdateReady);
+  $('#readyApply').addEventListener('click', applyUpdate);
+  $('#readyDiscard').addEventListener('click', discardUpdate);
+  $('#updateFloatCancel').addEventListener('click', (event) => { event.stopPropagation(); cancelUpdate(); });
+  $('#updateFloatApply').addEventListener('click', (event) => { event.stopPropagation(); applyUpdate(); });
+  $('#updateFloatDiscard').addEventListener('click', (event) => { event.stopPropagation(); discardUpdate(); });
+  // 点悬浮卡回到设置：状态留在内存里，切到「软件更新」页即可看到完整信息。
+  $('#updateFloat').addEventListener('click', () => {
+    const dialog = $('#settingsDialog');
+    if (!dialog) return;
+    if (!dialog.open) dialog.showModal();
+    dialog.querySelector('[data-settings-tab="updates"]')?.click();
+  });
+  // 设置窗口关闭后，下载进度/待重启入口由悬浮卡接管（位置规则见 styles.css）。
+  $('#settingsDialog')?.addEventListener('close', () => syncUpdateFloat());
+  // 「更新代理」四态：单选即时保存；地址输入框失焦/回车时保存（手动地址模式）。
+  document.querySelectorAll('input[name="updateProxyMode"]').forEach((el) => {
+    el.addEventListener('change', () => {
+      const row = $('#updateProxyUrlRow');
+      if (row) row.hidden = el.value !== 'manual';
+      if (el.value !== 'manual' || String($('#updateProxyUrl')?.value || '').trim()) saveUpdateProxy();
+      else renderUpdateProxyState();
+    });
+  });
+  $('#updateProxyUrl').addEventListener('change', saveUpdateProxy);
+  $('#expandComposer').addEventListener('click', toggleComposerExpanded);
   $('#updateVersionSelect').addEventListener('change', () => renderUpdateStatus(state.bootstrap.update || {}));
   $('#openSkillImport').addEventListener('click', () => {
     setSkillImportStatus('');
@@ -2645,6 +2673,8 @@ export function switchSettingsTab(name) {
   if (name === 'updates') api('/api/update').then((status) => {
     state.bootstrap.update = status;
     renderUpdateStatus(status);
+    syncUpdateProxyControls();
+    syncUpdateFloat(status);
   }).catch((error) => toast(`读取更新状态失败：${error.message}`));
 }
 

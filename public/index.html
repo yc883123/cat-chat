@@ -226,6 +226,12 @@
                  运行中它没有备选入口，纯图标在小屏上是认不出来的。 -->
             <span class="interject-label">插话</span>
           </button>
+          <!-- 展开/折叠输入框（双三角）：原地放大编辑区。放在发送键旁的按钮列，
+               不遮挡文本、编辑态同样可用。展开方向由文档流决定（底部 composer 向上长、
+               被搬进气泡的编辑态 composer 向下长），因此位于窗口顶部时也不会被截断。 -->
+          <button class="icon-button expand-button" id="expandComposer" type="button" title="展开输入框" aria-pressed="false" aria-label="展开输入框">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 9l5-5 5 5"></path><path d="M7 15l5 5 5-5"></path></svg>
+          </button>
           <button class="send-button" id="sendButton" type="submit" title="发送" aria-label="发送">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>
           </button>
@@ -1022,6 +1028,13 @@
         </section>
         <section data-settings-panel="updates" hidden>
           <div class="settings-panel-head"><h3>软件更新</h3><p>点「检查更新」查询新版本，手动选择版本后点击「立即更新」；不会自动安装。</p></div>
+          <!-- 「已下载待重启」常驻入口：下载完成后一旦选择「稍后重启」，就常驻在这里，
+               重启 App 也不会消失（后端把标记落盘），不必重新下载。 -->
+          <div class="update-ready" id="updateReady" hidden>
+            <span id="updateReadyText">新版本已下载并校验通过，重启后生效。</span>
+            <button class="primary-button" id="readyApply" type="button">立即重启</button>
+            <button class="control-button" id="readyDiscard" type="button">放弃更新</button>
+          </div>
           <div class="update-status">
             <div><span>当前版本</span><b id="currentVersion">-</b></div>
             <div><span>新版本</span><b id="latestVersion">尚未检查</b></div>
@@ -1044,16 +1057,69 @@
               <ul id="updateNotesList"></ul>
             </details>
             <p id="updateMessage">点「检查更新」才会去查新版本（启动不再自动检查）；不会自动安装，请手动选择版本后点击「立即更新」。</p>
+            <!-- 下载进度：MB / 速度 / 卡死提示（长时间无新字节时进度条转黄） -->
+            <div class="update-progress" id="updateProgress" hidden>
+              <div class="update-progress-track"><div class="update-progress-fill" id="updateProgressFill"></div></div>
+              <div class="update-progress-meta">
+                <span id="updateProgressText">0 / 0 MB</span>
+                <span id="updateProgressSpeed">— MB/s</span>
+              </div>
+            </div>
           </div>
           <div class="form-actions update-actions">
             <button class="control-button" id="checkUpdate" type="button">检查更新</button>
             <button class="primary-button" id="installUpdate" type="button" hidden>立即更新</button>
+            <button class="danger-button" id="cancelUpdate" type="button" hidden>取消下载</button>
+            <button class="primary-button" id="restartNow" type="button" hidden>立即重启</button>
+            <button class="control-button" id="restartLater" type="button" hidden>稍后重启</button>
           </div>
-          <p class="hint">更新来自 yc883123/cat-chat（原 yc883123/naiba-chat，旧地址自动跳转）。EXE 会下载并校验所选版本；源码模式不支持一键更新，请在终端中执行 git pull --ff-only。完成后程序自动重启，聊天记录和设置不会被修改。</p>
+          <!-- 「更新代理」：只作用于更新链路，与全局网络代理解耦（TUN 模式下全局可直连、更新单独挂代理） -->
+          <div class="update-proxy">
+            <div class="update-proxy-head">
+              <b>更新代理</b>
+              <span class="hint">只作用于「检查更新 / 更新下载」，不影响模型与其他外部请求；保存后立即生效。</span>
+            </div>
+            <!-- 四态用「分段控件」而不是裸 radio 竖排：原生 radio 会被
+                 `.settings-dialog label input{height:var(--set-ctl-h)}`（38px）连同 1:1 比例
+                 放大成巨型圆点、并把选项文字挤成竖排（2026-10-02 真机实测 label 79×64、文字宽仅 13px）。
+                 这里沿用「主题模式」同款：radio 只做语义载体（铺满整格、视觉隐藏、仍可键盘 Tab 到）。 -->
+            <div class="update-proxy-options" role="radiogroup" aria-label="更新代理">
+              <label class="update-proxy-option"><input type="radio" name="updateProxyMode" value="inherit" id="updateProxyInherit"><span>跟随全局</span></label>
+              <label class="update-proxy-option"><input type="radio" name="updateProxyMode" value="system" id="updateProxySystem"><span>跟随系统</span></label>
+              <label class="update-proxy-option"><input type="radio" name="updateProxyMode" value="direct" id="updateProxyDirect"><span>强制直连</span></label>
+              <label class="update-proxy-option"><input type="radio" name="updateProxyMode" value="manual" id="updateProxyManual"><span>手动地址</span></label>
+            </div>
+            <label class="field-wide" id="updateProxyUrlRow" hidden>
+              <span class="sr-only">更新代理地址</span>
+              <input id="updateProxyUrl" type="text" placeholder="http://127.0.0.1:7890" autocomplete="off">
+              <small class="hint">仅支持 http/https，需包含端口号。</small>
+            </label>
+            <p class="hint" id="updateProxyState">本次更新走：跟随全局网络代理设置。</p>
+          </div>
+          <p class="hint">更新来自 yc883123/cat-chat（原 yc883123/naiba-chat，旧地址自动跳转）。EXE 会下载并校验所选版本；源码模式不支持一键更新，请在终端中执行 git pull --ff-only。下载完成后可选择立即重启或稍后手动重启，聊天记录和设置不会被修改。</p>
         </section>
       </div>
     </div>
   </dialog>
+
+  <!-- 更新进度悬浮卡：设置窗口关闭后仍能看到下载进度 / 应用待重启更新。
+       位置规则（styles.css）：宽屏右下角并抬高到输入框之上；≤760px 退化为顶部胶囊，
+       避免遮挡底部全宽输入框与发送键。 -->
+  <div class="update-float" id="updateFloat" hidden>
+    <div class="update-float-head">
+      <b id="updateFloatTitle">正在下载更新</b>
+      <span class="hint">点此回到设置</span>
+    </div>
+    <div class="update-progress-track" id="updateFloatTrack"><div class="update-progress-fill" id="updateFloatFill"></div></div>
+    <div class="update-float-actions">
+      <span class="hint" id="updateFloatMeta"></span>
+      <span class="update-float-buttons">
+        <button class="danger-button" id="updateFloatCancel" type="button">取消</button>
+        <button class="primary-button" id="updateFloatApply" type="button" hidden>立即重启</button>
+        <button class="control-button" id="updateFloatDiscard" type="button" hidden>放弃</button>
+      </span>
+    </div>
+  </div>
 
   <!-- API 供应商设置：卡片点开后才弹出，字段格式与既有实现逐字一致 -->
   <dialog id="providerDialog" class="provider-dialog">

@@ -2813,3 +2813,71 @@ html[data-theme="dark"] .usage-chip.active { color: var(--violet-deep); }
   .usage-dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
   .usage-dialog .usage-dialog-body { padding: 12px 14px 16px; }
 }
+
+/* ---- 输入框展开/折叠（原地放大：方向由文档流决定，顶部也只会滚动不截断）---- */
+/* 折叠态上限 180px 与 13-skill-refs.js 的 MAX_COMPOSER_H 同值；展开态 72dvh 与
+   MAX_COMPOSER_H_EXPANDED_RATIO 同值——两处必须同步改。 */
+.composer-wrap.is-expanded textarea { max-height: 72dvh; }
+/* 底部 composer 展开时抬高包裹层上限；编辑态 wrap 本身就是 max-height:none / overflow:visible，
+   用 :not(.is-inline-edit) 排除，免得把编辑态的纵向空间限制拉回来。 */
+.composer-wrap.is-expanded:not(.is-inline-edit) { max-height: 88dvh; }
+.expand-button[aria-pressed="true"] { color: var(--accent-solid); background: var(--accent-soft); }
+
+/* ---- 软件更新：下载进度 / 待重启入口 / 更新代理 ---- */
+/* 进度块是 .update-status 的直接子元素，而 `.update-status > div`（及 .settings-dialog 那版）
+   设了 display:flex —— 作者样式会顶掉 UA 对 hidden 的 display:none。这里两条规则必须成对写，
+   且 [hidden] 那条特异度更高：只写 display:block 会让进度条在没下载时就露出来，只写 [hidden]
+   又会被同特异度、后出现的 flex 规则压过去。 */
+.settings-dialog .update-status > div.update-progress { display: block; }
+.settings-dialog .update-status > div.update-progress[hidden] { display: none; }
+.update-progress { padding: 10px 14px 12px; border-top: 1px solid var(--line); }
+.update-progress-track { height: 8px; border-radius: var(--r-full); background: var(--surface-2); overflow: hidden; }
+.update-progress-fill { height: 100%; width: 0; border-radius: var(--r-full); background: var(--accent-solid); transition: width .25s linear; }
+.update-progress-fill.stalled { background: var(--warning); }
+.update-progress-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 6px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.update-stall { color: var(--warning); }
+/* 作者样式的 display:flex 会顶掉 UA 对 hidden 的 display:none，必须显式压回（同全项目写法）。 */
+.update-ready[hidden] { display: none; }
+.update-ready { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; padding: 10px 12px; font-size: 13px; background: var(--accent-soft); border: 1px solid var(--accent); border-radius: var(--r-md); }
+.update-proxy { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r-md); }
+.update-proxy-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.update-proxy-head .hint { margin: 0; }
+/* 四态做成「分段控件」（底槽 + 选中实心胶囊，与「主题模式」同款）：四格等宽填满面板，
+   窄屏退化为两列。原生 radio 只做语义载体——它会被 `.settings-dialog label input
+   { height: var(--set-ctl-h) }`（38px）连同 1:1 比例放大成 39×38 的巨型圆点，并挤得选项
+   文字只剩 1 字宽 ⇒ 竖排（2026-10-02 真机实测 label 79×64、文字宽 13px）。这里让它铺满整格
+   而不是 1px，点击/命中点才落在 radio 自己身上（Playwright 的 hit-target 校验不会误判）。 */
+.settings-dialog .update-proxy-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; margin-top: 10px; padding: 4px; border-radius: var(--r-lg); background: var(--surface-2); }
+.settings-dialog .update-proxy-option { position: relative; display: flex; align-items: center; justify-content: center; min-width: 0; padding: 9px 6px; border-radius: var(--r-sm); font-size: 13px; color: var(--text); cursor: pointer; transition: background var(--t-fast), color var(--t-fast); }
+.settings-dialog .update-proxy-option span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-dialog .update-proxy-option input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; opacity: 0; cursor: pointer; }
+.settings-dialog .update-proxy-option:has(input:checked) { background: var(--accent-solid); color: #fff; font-weight: 600; }
+.settings-dialog .update-proxy-option:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 760px) { .settings-dialog .update-proxy-options { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.update-proxy #updateProxyUrlRow { margin-top: 8px; }
+/* 生效说明与上面的选项/地址行拉开一点，避免和地址行的小字提示粘在一起。 */
+.update-proxy #updateProxyState { margin: 10px 0 0; }
+
+/* ---- 更新进度悬浮卡（设置窗口关闭后接管显示的入口）----
+   位置规则：宽屏贴右下角并**抬高到底部输入框之上**（不遮输入框/发送键）；
+   ≤760px 输入框是全宽贴底，右下角放什么都会挡输入，退化为顶部右侧的窄卡。 */
+.update-float[hidden] { display: none; }
+.update-float {
+  position: fixed; right: 14px; bottom: calc(140px + max(14px, env(safe-area-inset-bottom)));
+  z-index: 60; width: min(320px, calc(100vw - 28px));
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 12px; background: var(--surface); border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg); box-shadow: var(--shadow-2); cursor: pointer;
+}
+.update-float-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
+.update-float-head .hint { margin: 0; font-size: 11px; }
+.update-float-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.update-float-buttons { display: flex; align-items: center; gap: 8px; }
+.update-float .control-button, .update-float .danger-button, .update-float .primary-button { min-height: 28px; padding: 0 10px; font-size: 12px; }
+@media (max-width: 760px) {
+  .update-float {
+    top: calc(56px + env(safe-area-inset-top)); right: 10px; bottom: auto; left: auto;
+    width: auto; min-width: 200px; max-width: calc(100vw - 20px); padding: 9px 12px; gap: 6px;
+  }
+  .update-float-head { font-size: 12px; }
+}

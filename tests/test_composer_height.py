@@ -84,13 +84,20 @@ class ComposerHeightSourceTests(unittest.TestCase):
         self.assertLess(auto_at, measure_at, "必须先清成 auto 再量")
 
     def test_resize_caps_height_and_cap_matches_css(self):
-        """封顶值必须与 styles.css 的 `.composer textarea { max-height }` 同值。"""
+        """封顶值必须与 styles.css 的 `.composer textarea { max-height }` 同值。
+
+        2.10 起多了一档「展开态」上限（视口比例，见 test_update_proxy.py 的
+        ComposerExpandGuardTests）：折叠上限仍是 `MAX_COMPOSER_H`，且必须与 CSS 同值；
+        量高行统一用 `cap` 变量，避免出现第二条量高路径。
+        """
         body = _fn_body(self.skill_refs_js, "export function resizeTextarea() {")
         m = re.search(r"MAX_COMPOSER_H = (\d+);", self.skill_refs_js)
         self.assertIsNotNone(m, "封顶值要提成具名常量，别在量高行里藏魔数")
         cap = int(m.group(1))
-        self.assertIn("Math.min(input.scrollHeight, MAX_COMPOSER_H)", body,
+        self.assertIn("Math.min(input.scrollHeight, cap)", body,
                       "量高必须封顶，否则长草稿会把输入框顶穿屏幕")
+        self.assertIn("composerExpanded ? expandedCap() : MAX_COMPOSER_H", body,
+                      "折叠态上限必须仍是 MAX_COMPOSER_H（展开态另有按视口比例的上限）")
         self.assertRegex(
             self.css,
             r"\.composer textarea \{[^}]*max-height: %dpx" % cap,

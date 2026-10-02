@@ -303,7 +303,8 @@ export function renderUpdateStatus(status) {
     checking: '正在检查更新…',
     current: '当前已经是最新版本。',
     available: '发现新版本，可以立即安装。',
-    downloading: '正在下载并校验更新，请勿关闭程序。',
+    downloading: '正在下载并校验更新，可随时取消。',
+    ready: '更新已下载并校验通过，可选择立即重启或稍后手动重启。',
     restarting: '更新已准备好，程序即将重启。',
     error: status.error || '检查更新失败。',
   };
@@ -322,7 +323,7 @@ export function renderUpdateStatus(status) {
   } else if (selected && selected.current) {
     $('#updateMessage').textContent = '当前已安装该版本，无需更新。';
   } else if (status.phase === 'available' && selected) {
-    $('#updateMessage').textContent = `将安装 ${selected.version}，完成后程序自动重启。`;
+    $('#updateMessage').textContent = `将安装 ${selected.version}，下载完成后可选择立即重启。`;
   }
   if (manualDownload) {
     const message = $('#updateMessage');
@@ -334,11 +335,214 @@ export function renderUpdateStatus(status) {
     link.textContent = 'GitHub Release';
     message.append(link, document.createTextNode(' 手动下载。'));
   }
+  // ---- 下载进度（MB / 速度 / 卡死提示）----
+  const download = status.download || {};
+  const downloading = status.phase === 'downloading';
+  const progress = $('#updateProgress');
+  if (progress) progress.hidden = !downloading;
+  if (downloading) {
+    const percent = Math.max(0, Math.min(100, Number(download.percent) || 0));
+    const fill = $('#updateProgressFill');
+    if (fill) {
+      fill.style.width = `${percent}%`;
+      fill.classList.toggle('stalled', Boolean(download.stalled));
+    }
+    const text = $('#updateProgressText');
+    if (text) {
+      text.textContent = download.total
+        ? `${formatUpdateSize(download.received)} / ${formatUpdateSize(download.total)}`
+        : `${formatUpdateSize(download.received)} / 大小未知`;
+    }
+    const speed = $('#updateProgressSpeed');
+    if (speed) {
+      speed.innerHTML = download.stalled
+        ? '<span class="update-stall">连接疑似卡死，可取消后检查「更新代理」</span>'
+        : `${formatUpdateSize(download.speed)}/s`;
+    }
+  }
+  // ---- 下载中 / 已下载待重启：按钮与常驻入口 ----
+  const ready = status.ready && status.ready.version ? status.ready : null;
   const canInstall = status.supported && status.mode !== 'source'
-    && selected && !selected.current
+    && selected && !selected.current && !ready
     && !UPDATE_BUSY_PHASES.includes(status.phase);
+  const offerRestartChoice = Boolean(ready) && !updateReadyDismissed && status.phase !== 'restarting';
   $('#installUpdate').hidden = !canInstall;
+  $('#cancelUpdate').hidden = !Boolean(status.can_cancel);
+  $('#restartNow').hidden = !offerRestartChoice;
+  $('#restartLater').hidden = !offerRestartChoice;
+  const readyBanner = $('#updateReady');
+  if (readyBanner) {
+    // 点过「稍后重启」后转为常驻入口（跨重启也在：后端把标记落在数据目录）。
+    readyBanner.hidden = !(ready && updateReadyDismissed);
+    const label = $('#updateReadyText');
+    if (label && ready) label.textContent = `${ready.version} 已下载并校验通过，重启后生效。`;
+  }
   $('#checkUpdate').disabled = ['checking', 'downloading', 'restarting'].includes(status.phase);
+  renderUpdateProxyState();
+  syncUpdateFloat(status);
+}
+
+function formatUpdateSize(bytes) {
+  const value = Number(bytes) || 0;
+  if (value <= 0) return '0 MB';
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(0)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/* 「已下载待重启」的一次性提示已读标记：只在本次会话内有效——
+   点过「稍后重启」后切换为常驻横幅入口，避免两个位置重复出现同一动作。 */
+let updateReadyDismissed = false;
+let updatePollTimer = null;
+
+export function dismissUpdateReady() {
+  updateReadyDismissed = true;
+  renderUpdateStatus(state.bootstrap.update || {});
+}
+
+function updatePhaseBusy(status) {
+  return Boolean(status) && ['downloading', 'restarting'].includes(status.phase);
+}
+
+/* 下载/重启期间轮询更新状态：进度条、卡死提示、取消与待重启都靠它推进。
+   与设置窗口是否打开无关——关窗后由悬浮卡接着显示。 */
+export function startUpdatePoll() {
+  if (updatePollTimer) return;
+  const tick = async () => {
+    updatePollTimer = null;
+    let status;
+    try {
+      status = await api('/api/update');
+    } catch (_) {
+      return;
+    }
+    state.bootstrap.update = status;
+    renderUpdateStatus(status);
+    if (updatePhaseBusy(status)) updatePollTimer = setTimeout(tick, 500);
+  };
+  updatePollTimer = setTimeout(tick, 300);
+}
+
+/* 悬浮进度卡：设置窗口关闭时接管显示（下载中=进度+取消；待重启=立即重启/放弃）。 */
+export function syncUpdateFloat(status = state.bootstrap.update || {}) {
+  const card = $('#updateFloat');
+  if (!card) return;
+  const dialogOpen = Boolean($('#settingsDialog')?.open);
+  const downloading = status.phase === 'downloading';
+  const ready = Boolean(status.ready && status.ready.version) && status.phase !== 'restarting';
+  const show = !dialogOpen && (downloading || ready);
+  card.hidden = !show;
+  if (!show) return;
+  const title = $('#updateFloatTitle');
+  if (title) title.textContent = ready ? '更新待重启' : '正在下载更新';
+  const track = $('#updateFloatTrack');
+  if (track) track.hidden = ready;
+  if (downloading) {
+    const download = status.download || {};
+    const percent = Math.max(0, Math.min(100, Number(download.percent) || 0));
+    const fill = $('#updateFloatFill');
+    if (fill) {
+      fill.style.width = `${percent}%`;
+      fill.classList.toggle('stalled', Boolean(download.stalled));
+    }
+    const meta = $('#updateFloatMeta');
+    if (meta) {
+      meta.textContent = download.stalled
+        ? '连接疑似卡死'
+        : `${percent}% · ${formatUpdateSize(download.speed)}/s`;
+    }
+  } else {
+    const meta = $('#updateFloatMeta');
+    if (meta) meta.textContent = `${status.ready.version} 已下载，重启后生效`;
+  }
+  $('#updateFloatCancel').hidden = !downloading;
+  $('#updateFloatApply').hidden = !ready;
+  $('#updateFloatDiscard').hidden = !ready;
+}
+
+/* ---- 更新代理（只作用于更新链路，独立于全局网络代理） ---- */
+const UPDATE_PROXY_MODES = ['inherit', 'system', 'direct', 'manual'];
+
+export function syncUpdateProxyControls() {
+  const proxy = (state.bootstrap.settings || {}).update_proxy || {};
+  const mode = UPDATE_PROXY_MODES.includes(proxy.mode) ? proxy.mode : 'inherit';
+  for (const value of UPDATE_PROXY_MODES) {
+    const el = $(`#updateProxy${value.charAt(0).toUpperCase()}${value.slice(1)}`);
+    if (el) el.checked = value === mode;
+  }
+  const urlInput = $('#updateProxyUrl');
+  if (urlInput) urlInput.value = proxy.url || '';
+  const row = $('#updateProxyUrlRow');
+  if (row) row.hidden = mode !== 'manual';
+  renderUpdateProxyState();
+}
+
+export function renderUpdateProxyState() {
+  const note = (state.bootstrap.update || {}).proxy?.note || '';
+  const el = $('#updateProxyState');
+  if (!el) return;
+  el.textContent = note ? `本次更新走：${note}` : '本次更新走：跟随全局网络代理设置。';
+}
+
+/* 单键即时保存（与「插话直达」「侧栏分组排序」同款：POST /api/settings 单项提交）。 */
+export async function saveUpdateProxy() {
+  const mode = [...document.querySelectorAll('input[name="updateProxyMode"]')].find((el) => el.checked)?.value || 'inherit';
+  const payload = { mode, url: String($('#updateProxyUrl')?.value || '').trim() };
+  try {
+    const result = await api('/api/settings', { method: 'POST', body: { update_proxy: payload } });
+    if (result.settings) state.bootstrap.settings = result.settings;
+    toast('更新代理设置已保存');
+  } catch (error) {
+    toast(`保存失败：${error.message}`);
+  }
+  syncUpdateProxyControls();
+  try {
+    const status = await api('/api/update');
+    state.bootstrap.update = status;
+    renderUpdateStatus(status);
+  } catch (_) {
+    /* 状态刷新失败不影响已保存的设置 */
+  }
+}
+
+export async function cancelUpdate() {
+  const button = $('#cancelUpdate');
+  if (button) button.disabled = true;
+  try {
+    const status = await api('/api/update/cancel', { method: 'POST', body: {} });
+    state.bootstrap.update = status;
+    renderUpdateStatus(status);
+    startUpdatePoll();
+    toast('已取消下载，未做任何更改');
+  } catch (error) {
+    toast(`取消失败：${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+export async function applyUpdate() {
+  try {
+    const status = await api('/api/update/apply', { method: 'POST', body: {} });
+    state.bootstrap.update = status;
+    renderUpdateStatus(status);
+    toast('正在应用更新，程序即将重启');
+    startUpdatePoll();
+  } catch (error) {
+    toast(`重启失败：${error.message}`);
+  }
+}
+
+export async function discardUpdate() {
+  try {
+    const status = await api('/api/update/discard', { method: 'POST', body: {} });
+    state.bootstrap.update = status;
+    updateReadyDismissed = false;
+    renderUpdateStatus(status);
+    toast('已放弃本次更新');
+  } catch (error) {
+    toast(`放弃失败：${error.message}`);
+  }
 }
 
 export async function checkUpdate() {
@@ -397,7 +601,8 @@ export async function installUpdate() {
     const newStatus = await api('/api/update/install', { method: 'POST', body: { tag } });
     state.bootstrap.update = newStatus;
     renderUpdateStatus(newStatus);
-    toast('正在下载更新，完成后会自动重启');
+    toast('正在下载更新，可随时取消');
+    startUpdatePoll();
   } catch (error) {
     toast(`更新失败：${error.message}`);
     button.disabled = false;

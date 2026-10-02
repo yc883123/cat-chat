@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
-"""护栏：推理流流式缓冲（delta 块）与终态单 run 合流。
+"""护栏：推理流/正文流的流式合批（delta 块）与终态单 run 合流。
 
-背景：流式期必须以 delta 块快速落库保证前端平滑显示（合流窗口会切成碎片）；
+背景：流式期按「4096 字符 / 0.1s」合批落库——前端渲染本就被 scheduleStreamingMarkdown
+节流（40ms 起步、240ms 封顶），逐 chunk 落库只是让每条增量各付一次完整写事务；
 run 结束后由收尾（chat.py finally → store.compress_run_events）把该 run 的
 delta 事件合并为整段 reasoning（与迁移 v14 同口径），历史库不膨胀。
 本组测试守护：
-- 流式期：未达阈值（512 字符 / 0.1s）不落库；flush 后为 reasoning_delta 块；
-- 顺序：推理块先于正文块；整段 reasoning 事件透传不受缓冲影响；
+- 流式期：reasoning_delta 与 delta 一样走合批——未达阈值不落库，flush 后合并成一块；
+- 顺序：推理块先于正文块（跨通道按首字符到达时间排序）；整段 reasoning 事件透传不受缓冲影响；
+- 非增量事件到达前必须先 flush（缓冲不得把事件序打乱）；
 - 终态合流：仅 compress 指定 run、文本总量不变、幂等；
 - 终态（completed/failed/cancelled）收缩 snapshot 的 conversation_messages，
   interrupted 保留（恢复重建需要）。
@@ -42,13 +44,15 @@ class ReasoningStreamTests(unittest.TestCase):
         self.manager = RecordingManager()
         self.sink = _RunEventSink(self.manager, "r1", threading.Event())
 
-    def test_deltas_emitted_immediately(self):
-        # 流式期：reasoning_delta 到达即落库（保持逐词实时推送节奏），不做缓冲
+    def test_reasoning_deltas_buffered_and_merged(self):
+        # 流式期新契约：reasoning_delta 与正文同节奏合批（4096 字符 / 0.1s）——
+        # 逐 chunk 落库只是让每条增量各付一次完整写事务，界面节奏由前端节流器决定。
         for i in range(3):
             self.sink({"type": "reasoning_delta", "content": f"词{i}"})
-        self.assertEqual([e["type"] for e in self.manager.events], ["reasoning_delta"] * 3)
-        self.assertEqual(self.manager.events[0]["content"], "词0")
-        self.assertEqual(self.manager.events[2]["content"], "词2")
+        self.assertEqual(self.manager.events, [], "未达阈值不落库")
+        self.sink.flush()
+        self.assertEqual([e["type"] for e in self.manager.events], ["reasoning_delta"])
+        self.assertEqual(self.manager.events[0]["content"], "词0词1词2", "合批后文本不丢不乱")
 
     def test_reasoning_before_delta_ordering(self):
         self.sink({"type": "reasoning_delta", "content": "思考"})
@@ -62,8 +66,18 @@ class ReasoningStreamTests(unittest.TestCase):
         self.assertEqual(len(self.manager.events), 1)
         self.assertEqual(self.manager.events[0]["type"], "reasoning")
 
-    def test_reasoning_emitted_without_flush(self):
-        # 收尾 flush 只刷正文缓冲；推理已即刻落库，flush 不产生额外推理事件。
+    def test_non_delta_event_flushes_buffers_first(self):
+        # 缓冲不得把事件序打乱：status 到达前，两路缓冲必须先落库。
+        self.sink({"type": "reasoning_delta", "content": "思考"})
+        self.sink({"type": "delta", "content": "正文"})
+        self.sink({"type": "status", "message": "进行中"})
+        self.assertEqual(
+            [e["type"] for e in self.manager.events],
+            ["reasoning_delta", "delta", "status"],
+        )
+
+    def test_reasoning_flushed_with_content(self):
+        # 收尾 flush 把缓冲的推理一并刷出（取消/失败路径靠它不丢最后一段思考）。
         self.sink({"type": "reasoning_delta", "content": "未完成思考"})
         self.sink.flush()
         self.assertEqual(len(self.manager.events), 1)

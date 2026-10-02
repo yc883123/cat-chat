@@ -77,11 +77,20 @@ class EventBus:
         with self._lock:
             return self._conditions.setdefault(str(task_id), threading.Condition(self._lock))
 
-    def emit(self, task_id: str, payload: dict[str, Any], *, raise_on_error: bool = True) -> dict[str, Any]:
+    def emit(
+        self,
+        task_id: str,
+        payload: dict[str, Any],
+        *,
+        raise_on_error: bool = True,
+        db: Any = None,
+    ) -> dict[str, Any]:
         """写事件 + 唤醒等待者；返回带 run_id/sequence/created_at 的完整事件。
 
         ``raise_on_error`` 运行通道默认 True（契约/写入违规显式报错）；
         job 通道传 False 保持既有容错语义（记录违规告警，不打断 worker）。
+        ``db``：调用方（run sink）持有的长连接，给了就复用它落库（省掉每事件
+        开/关连接的整轮开销）；缺省走存储层每调用一条连接的默认路径。
         """
         if raise_on_error or strict_events_enabled():
             violations = validate_event_payload(payload)
@@ -89,7 +98,11 @@ class EventBus:
                 raise ValueError("事件契约违规：" + "; ".join(violations))
         elif validate_event_payload(payload):
             logger.warning("事件契约违规（已忽略）：%s", validate_event_payload(payload))
-        event = self.storage.append_run_event(task_id, payload)  # 运行不存在时抛 LookupError
+        if db is not None:
+            event = self.storage.append_run_event(task_id, payload, db=db)
+        else:
+            # 条件式传参：测试桩/旧存储的 append_run_event 不认识 db 参数，不能硬塞。
+            event = self.storage.append_run_event(task_id, payload)  # 运行不存在时抛 LookupError
         condition = self.ensure(task_id)
         with condition:
             condition.notify_all()

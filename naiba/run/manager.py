@@ -150,10 +150,13 @@ class ConversationRunManager(ConversationRunMixin):
             self._threads[run_id] = thread
         thread.start()
 
-    def emit(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def emit(self, run_id: str, payload: dict[str, Any], db: Any = None) -> dict[str, Any]:
         """事件发射（实现见 naiba/events.py EventBus）：单点写入 + 唤醒，
-        并按策略表同步 background_tasks.status/detail（终态由收尾路径显式维护）。"""
-        event = self.bus.emit(run_id, payload)
+        并按策略表同步 background_tasks.status/detail（终态由收尾路径显式维护）。
+
+        ``db``：sink 持有的长连接（见 storage.open_event_connection），只透传给事件落库；
+        状态同步的读/写仍走存储层默认连接（它们低频，不值得占这条连接）。"""
+        event = self.bus.emit(run_id, payload, db=db)
         sync = status_sync_for(str(payload.get("type") or ""), payload)
         if sync is not None:
             status, detail = sync
@@ -318,7 +321,10 @@ class ConversationRunManager(ConversationRunMixin):
 
     def _unregister_sink(self, run_id: str) -> None:
         with self._sinks_lock:
-            self._sinks.pop(run_id, None)
+            sink = self._sinks.pop(run_id, None)
+        # 关事件长连接（sink 持有，见 stream.py）：不关会让 WAL 长挂，泄漏随 run 数累积。
+        if sink is not None:
+            sink.close()
         # 顺带回收本 run 的 first_turn 落盘标记（不清会随会话数无限增长）。
         marker = getattr(self, "_first_turn_done", None)
         if marker is not None:

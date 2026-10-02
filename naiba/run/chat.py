@@ -1183,6 +1183,9 @@ class ConversationRunMixin:
             )
             self.emit(run_id, {"type": "error", "message": str(exc)})
         finally:
+            # 计划 run 的 sink 从未注册进 manager（chat 路径由 _unregister_sink 关连接），
+            # 它的事件长连接必须在这里亲手关——泄漏会让 WAL 长挂。
+            sink.close()
             try:
                 self.app.storage.compress_run_events(run_id)
             except Exception:

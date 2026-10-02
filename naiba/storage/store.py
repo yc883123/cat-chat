@@ -3578,31 +3578,68 @@ class ChatStorage:
             return None
         return value if isinstance(value, dict) and value else None
 
-    def append_run_event(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def open_event_connection(self) -> sqlite3.Connection:
+        """开一条供 run 事件流**复用**的长连接（调用方负责 close）。
+
+        动机：事件流高峰期（reasoning_delta 逐 chunk）每个事件走 `_connect()` 都要付
+        「开连接 + 两个 PRAGMA + 提交 + 关连接（最后一条连接关闭还会触发 WAL 建/收）」
+        一整轮——实测生成期每秒几十次。sink 在 run 存活期复用一条连接即可消掉这个周期。
+
+        `check_same_thread=False`：强制取消的看门狗线程也会经 `sink.flush()` 写这条连接，
+        跨线程串行由 sink 的锁保证（见 run/stream.py::_RunEventSink）。谁打开谁关闭：
+        泄漏会让 WAL 长挂在库里（不损坏数据，但失去它要省的那部分开销）。
+        """
+        connection = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA foreign_keys=ON")
+        return connection
+
+    def append_run_event(
+        self, run_id: str, payload: dict[str, Any], db: sqlite3.Connection | None = None
+    ) -> dict[str, Any]:
         now = int(time.time() * 1000)
         event_type = str(payload.get("type") or "event")
 
-        def _write() -> int:
-            with self._connect() as db:
-                db.execute("BEGIN IMMEDIATE")
-                exists = db.execute(
-                    "SELECT 1 FROM background_tasks WHERE id = ?", (run_id,)
-                ).fetchone()
-                if not exists:
-                    raise LookupError("运行不存在")
-                sequence = db.execute(
-                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_events WHERE run_id = ?",
-                    (run_id,),
-                ).fetchone()[0]
-                db.execute(
-                    "INSERT INTO run_events(run_id, sequence, event_type, payload, created_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (run_id, sequence, event_type, json.dumps(payload, ensure_ascii=False), now),
-                )
-                return int(sequence)
+        def _write(target: sqlite3.Connection) -> int:
+            target.execute("BEGIN IMMEDIATE")
+            exists = target.execute(
+                "SELECT 1 FROM background_tasks WHERE id = ?", (run_id,)
+            ).fetchone()
+            if not exists:
+                raise LookupError("运行不存在")
+            sequence = target.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM run_events WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()[0]
+            target.execute(
+                "INSERT INTO run_events(run_id, sequence, event_type, payload, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (run_id, sequence, event_type, json.dumps(payload, ensure_ascii=False), now),
+            )
+            return int(sequence)
 
-        # 瞬时故障重试：sequence 在事务内重算，重试不会写出重复或断号的事件。
-        sequence = int(self._write_with_retry(_write))
+        if db is not None:
+            # 复用 sink 的长连接（open_event_connection）：事务显式 begin/commit，
+            # 失败回滚后连接仍可继续用；瞬时故障由同一重试包装兜底（sequence 事务内重算，
+            # 重试不会写出重复或断号的事件）。
+            def _write_shared() -> int:
+                try:
+                    sequence = _write(db)
+                    db.commit()
+                    return sequence
+                except Exception:
+                    db.rollback()
+                    raise
+
+            sequence = int(self._write_with_retry(_write_shared))
+        else:
+            def _write_owned() -> int:
+                with self._connect() as conn:
+                    return _write(conn)
+
+            # 瞬时故障重试：sequence 在事务内重算，重试不会写出重复或断号的事件。
+            sequence = int(self._write_with_retry(_write_owned))
         return {**payload, "run_id": run_id, "sequence": sequence, "created_at": now}
 
     def list_run_events(self, run_id: str, after: int = 0, limit: int = 500) -> list[dict[str, Any]]:

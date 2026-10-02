@@ -15,10 +15,13 @@ from typing import Any
 
 from naiba.core.exceptions import TaskCancelled
 
-# 推理流采用「流式即刻落库 + 终态合流」：reasoning_delta 到达即落库并推送（保留
-# 模型一个词一个词的实时显示节奏）；run 结束后由收尾合流（chat.py「终态压缩」
-# → store.compress_run_events）把该 run 的 delta 事件重新整理为整段 reasoning
-# （与存量压缩迁移 v14 同口径），历史库不膨胀。
+# 推理流采用「流式合批落库 + 终态合流」：reasoning_delta 与正文 delta 同节奏合批
+# （≥4096 字符或 ≥0.1s，见 _RunEventSink）——前端渲染早已被 scheduleStreamingMarkdown
+# 节流（40ms 起步、240ms 封顶），逐 chunk 落库只是让每条增量各付一次完整写事务
+# （开连接 + INSERT + fsync + 关连接，实测生成期每秒几十次），行数降一个数量级而
+# 界面节奏不变；run 结束后由收尾合流（chat.py「终态压缩」→ store.compress_run_events）
+# 把该 run 的 delta 事件重新整理为整段 reasoning（与存量压缩迁移 v14 同口径），
+# 历史库不膨胀。
 
 
 def _safe_activity(
@@ -187,37 +190,110 @@ def _build_activity_timeline(
 
 
 class _RunEventSink:
-    """Persist model events while coalescing high-frequency text deltas."""
+    """Persist model events while coalescing high-frequency text deltas.
+
+    两条文本通道（正文 ``delta`` / 思考 ``reasoning_delta``）共用同一合批节奏
+    （≥4096 字符或 ≥0.1s 落库）；flush 先于任何非增量事件，保证事件序不被缓冲打乱。
+
+    事件落库复用一条长连接（``storage.open_event_connection``，懒加载）：run 存活期
+    省掉每事件「开连接 + PRAGMA + 关连接触发 WAL 建/收」的整轮周期。连接不可用
+    （测试桩 / 旧存储）时自动回落到逐条开关连接的默认路径。
+    """
+
+    _FLUSH_CHARS = 4096
+    _FLUSH_SECONDS = 0.1
 
     def __init__(self, manager: Any, run_id: str, cancel_event: threading.Event):
         self.manager = manager
         self.run_id = run_id
         self.cancel_event = cancel_event
         self._delta = ""
-        self._last_flush = time.monotonic()
+        self._reasoning = ""
+        # 双缓冲的「首字符到达序号」：flush 时按它决定两条通道的发射先后，
+        # 跨通道顺序因此不被合批反转（同通道内部由拼接顺序天然保证）。
+        # 不能用时间戳：time.monotonic() 对同一次 tick 内的两次到达会返回**相同值**，
+        # 平局落回列表构造顺序 = 恒 delta 在前（探针实测）。序号没有这个问题。
+        self._arrival = 0
+        self._delta_since = 0
+        self._reasoning_since = 0
+        now = time.monotonic()
+        self._last_flush = now
+        self._last_reasoning_flush = now
         self._announced_tools: set[str] = set()
         self.failure_message: str | None = None
         # Guard the delta buffer so the run thread and the watchdog thread can both
         # flush safely (the watchdog may persist the aborted message without the run
         # thread ever reaching its own flush path).
         self._flush_lock = threading.Lock()
+        # 事件落库的长连接：_conn_lock 串行化「run 线程 vs 看门狗线程」的并发写
+        # （连接由 open_event_connection 以 check_same_thread=False 开出）。
+        self._conn: Any = None
+        self._conn_unavailable = False
+        self._conn_lock = threading.Lock()
+
+    def _event_conn(self) -> Any:
+        """懒加载事件长连接；存储不支持/打开失败时返回 None（回落默认逐条连接路径）。"""
+        if self._conn is not None or self._conn_unavailable:
+            return self._conn
+        storage = getattr(getattr(self.manager, "app", None), "storage", None)
+        opener = getattr(storage, "open_event_connection", None)
+        if not callable(opener):
+            # 测试桩/旧存储没有这个方法：别再每个事件都探一次。
+            self._conn_unavailable = True
+            return None
+        try:
+            self._conn = opener()
+        except Exception:
+            self._conn_unavailable = True
+            return None
+        return self._conn
+
+    def _emit(self, payload: dict[str, Any]) -> None:
+        """单点发射：有长连接就走它（锁内串行），没有就走 manager 默认路径。"""
+        conn = self._event_conn()
+        if conn is None:
+            self.manager.emit(self.run_id, payload)
+            return
+        with self._conn_lock:
+            self.manager.emit(self.run_id, payload, db=conn)
+
+    def close(self) -> None:
+        """关闭事件长连接（幂等）。run 收尾必须调用，泄漏会让 WAL 长挂。"""
+        with self._conn_lock:
+            conn, self._conn = self._conn, None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def __call__(self, payload: dict[str, Any]) -> None:
         if self.cancel_event.is_set():
             raise TaskCancelled("任务已取消")
-        if str(payload.get("type") or "") == "delta":
+        kind = str(payload.get("type") or "")
+        if kind == "delta":
+            if not self._delta:
+                self._arrival += 1
+                self._delta_since = self._arrival
             self._delta += str(payload.get("content") or "")
             now = time.monotonic()
-            if len(self._delta) >= 4096 or now - self._last_flush >= 0.1:
+            if len(self._delta) >= self._FLUSH_CHARS or now - self._last_flush >= self._FLUSH_SECONDS:
                 self.flush()
             return
-        if str(payload.get("type") or "") == "reasoning_delta":
-            # 流式即刻落库：保留"一个词一个词"的实时推送节奏（落库即推送，
-            # _stream_run 每事件 flush）；最终形态由 run 收尾的终态合流整理。
-            self.manager.emit(self.run_id, payload)
+        if kind == "reasoning_delta":
+            # 与正文 delta 同节奏合批：前端渲染本来就被 scheduleStreamingMarkdown 节流
+            # （40ms 起步、240ms 封顶），逐 chunk 落库只是让每条增量各付一次完整写事务。
+            # 0.1s 合批 = 界面每秒最多 10 次增量，节奏变化肉眼不可辨；终态合流不受影响。
+            if not self._reasoning:
+                self._arrival += 1
+                self._reasoning_since = self._arrival
+            self._reasoning += str(payload.get("content") or "")
+            now = time.monotonic()
+            if (len(self._reasoning) >= self._FLUSH_CHARS
+                    or now - self._last_reasoning_flush >= self._FLUSH_SECONDS):
+                self.flush()
             return
         self.flush()
-        kind = str(payload.get("type") or "")
         if kind == "run_failed":
             self.failure_message = str(payload.get("error") or "任务执行失败")
         # SkillAgent emits a rich `tool_requested` event before dispatch and a
@@ -237,15 +313,26 @@ class _RunEventSink:
             if tool:
                 self._announced_tools.add(tool)
         # 视觉工具与其它工具同构：不再旁路为 vision_start/vision_done 状态事件。
-        self.manager.emit(self.run_id, payload)
+        self._emit(payload)
 
     def flush(self) -> None:
         with self._flush_lock:
-            if not self._delta:
+            delta, reasoning = self._delta, self._reasoning
+            if not delta and not reasoning:
                 return
-            content = self._delta
+            delta_since, reasoning_since = self._delta_since, self._reasoning_since
             self._delta = ""
-            self._last_flush = time.monotonic()
+            self._reasoning = ""
+            now = time.monotonic()
+            self._last_flush = now
+            self._last_reasoning_flush = now
         # Emit outside the lock: the content is already claimed above, so a
         # concurrent flush sees an empty buffer and returns without duplicating.
-        self.manager.emit(self.run_id, {"type": "delta", "content": content})
+        # 两条通道都有货时按「首字符到达时间」定发射先后，跨通道顺序不被合批反转。
+        pending = []
+        if delta:
+            pending.append((delta_since, {"type": "delta", "content": delta}))
+        if reasoning:
+            pending.append((reasoning_since, {"type": "reasoning_delta", "content": reasoning}))
+        for _since, payload in sorted(pending, key=lambda item: item[0]):
+            self._emit(payload)

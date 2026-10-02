@@ -46,6 +46,49 @@ class StubApp:
         self.storage = RecordingStorage()
 
 
+class SharedEventConnectionTests(unittest.TestCase):
+    """run 事件流复用长连接（storage.open_event_connection + append_run_event(db=...)）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.storage = ChatStorage(Path(self.tmp.name) / "chat.db")
+        convo = self.storage.create_conversation()
+        agent = {"id": "general", "name": "通用 Agent"}
+        self.run = self.storage.create_chat_run(
+            str(convo["id"]), "你好", [], agent, {"model_key": "online:demo"}, "craft"
+        )
+        self.run_id = str(self.run["id"])
+
+    def test_shared_connection_appends_and_stays_consistent(self):
+        conn = self.storage.open_event_connection()
+        try:
+            first = self.storage.append_run_event(
+                self.run_id, {"type": "status", "message": "开始"}, db=conn
+            )
+            second = self.storage.append_run_event(
+                self.run_id, {"type": "delta", "content": "字"}, db=conn
+            )
+        finally:
+            conn.close()
+        self.assertEqual((first["sequence"], second["sequence"]), (1, 2), "序号连续、不重号")
+        events = self.storage.list_run_events(self.run_id)
+        self.assertEqual([e["type"] for e in events], ["status", "delta"])
+
+    def test_shared_connection_unknown_run_still_raises(self):
+        conn = self.storage.open_event_connection()
+        try:
+            with self.assertRaises(LookupError):
+                self.storage.append_run_event("missing", {"type": "delta", "content": "x"}, db=conn)
+            # 失败后回滚，连接必须还能继续用（不能一次失败就报废整条 run 的事件流）。
+            event = self.storage.append_run_event(
+                self.run_id, {"type": "delta", "content": "仍可用"}, db=conn
+            )
+            self.assertEqual(event["sequence"], 1)
+        finally:
+            conn.close()
+
+
 class RunEventTests(unittest.TestCase):
     def setUp(self):
         self.storage = RecordingStorage()

@@ -153,7 +153,7 @@ class TraceStorageTests(unittest.TestCase):
 
         from naiba.run.chat import _frozen_history_for_run
 
-        frozen = _frozen_history_for_run(run, self.storage.get_conversation(
+        frozen = _frozen_history_for_run(run, snapshot, self.storage.get_conversation(
             str(self.conversation["id"])
         ))
         assistant = [m for m in frozen if m.get("metadata", {}).get("trace")]
@@ -161,12 +161,16 @@ class TraceStorageTests(unittest.TestCase):
         self.assertEqual(assistant[-1]["metadata"]["trace"], TRACE_A)
 
     def test_frozen_history_prefers_legacy_snapshot_copy(self) -> None:
-        """存量 run（快照里还有副本）必须优先用那份副本，保证升级后行为不变。"""
+        """存量 run（快照里还有副本）必须优先用那份副本，保证升级后行为不变。
+
+        旧副本在 **snapshot** 里——run 行字典只含表列、永远不带这个键；曾经误读
+        `run.get("conversation_messages")`，那是一条永远不触发的死分支。
+        """
         from naiba.run.chat import _frozen_history_for_run
 
         legacy = [{"id": "old1", "role": "user", "content": "旧副本", "metadata": {}}]
         frozen = _frozen_history_for_run(
-            {"conversation_messages": legacy, "input_message_id": "whatever"}, {}
+            {"input_message_id": "whatever"}, {"conversation_messages": legacy}, {}
         )
         self.assertEqual(frozen, legacy)
 
@@ -176,7 +180,7 @@ class TraceStorageTests(unittest.TestCase):
 
         messages = [{"id": "a", "role": "user", "content": "问", "metadata": {}}]
         frozen = _frozen_history_for_run(
-            {"input_message_id": "不存在的 id"}, {"messages": messages}
+            {"input_message_id": "不存在的 id"}, {}, {"messages": messages}
         )
         self.assertEqual(frozen, messages)
 

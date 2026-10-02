@@ -181,7 +181,9 @@ def _turn_index_for_run(snapshot: dict[str, Any], run: dict[str, Any]) -> int:
 
 
 def _frozen_history_for_run(
-    run: dict[str, Any], conversation: dict[str, Any] | None
+    run: dict[str, Any],
+    snapshot: dict[str, Any] | None,
+    conversation: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
     """本轮要喂给模型的**冻结历史**（不再从快照里读整段副本）。
 
@@ -193,13 +195,15 @@ def _frozen_history_for_run(
 
     所以取"提交那一刻的历史"= 取活会话里到 `input_message_id` 为止的前缀。
     ``snapshot["conversation_messages"]`` 只在**旧数据**（本次改动之前建的 run）里存在，
-    读到就直接用，保证升级后仍能重放中断/在跑的旧 run。
+    读到就直接用，保证升级后仍能重放中断/在跑的旧 run。注意旧副本在 **snapshot** 里
+    （run 行字典只含表列，永远不带这个键）——曾经误读 `run.get(...)`，那是一条永远
+    不触发的死分支，升级后的旧 run 会静默改走活会话前缀。
 
     为什么值得这么改：旧实现每轮把整段会话复制进 `background_tasks.snapshot`（终态再整块
     删掉），实测一轮 6 条 300KB 的历史就要 2×1.8MB 物理写入，且随会话变长线性增长——
     这是"运行期几百 MB 磁盘写入、库却不大"的最大单一来源。
     """
-    legacy = run.get("conversation_messages")
+    legacy = (snapshot or {}).get("conversation_messages")
     if isinstance(legacy, list) and legacy:
         return legacy
     messages = list((conversation or {}).get("messages") or [])
@@ -546,7 +550,7 @@ class ConversationRunMixin:
         # 冻结历史（不再从快照读整段副本）：取活会话里到 input_message_id 为止的前缀。
         # 这一次读是**每轮一次**，而旧实现是"提交时写一份进快照 + 终态整块删一份"。
         frozen_conversation = self.app.storage.get_conversation(conversation_id) or {}
-        run["conversation_messages"] = _frozen_history_for_run(run, frozen_conversation)
+        run["conversation_messages"] = _frozen_history_for_run(run, snapshot, frozen_conversation)
         mode = str(snapshot.get("interaction_mode") or run.get("interaction_mode") or "craft")
         plan_id = str(snapshot.get("plan_id") or run.get("plan_id") or "")
         sink = _RunEventSink(self, run_id, cancel_event)
@@ -1142,7 +1146,7 @@ class ConversationRunMixin:
             plan_conversation = self.app.storage.get_conversation(
                 str(run.get("conversation_id") or "")
             ) or {}
-            snapshot["conversation_messages"] = _frozen_history_for_run(run, plan_conversation)
+            snapshot["conversation_messages"] = _frozen_history_for_run(run, snapshot, plan_conversation)
             run_executor = self.executor_for_run(run_id, snapshot)
             plan = self.app.plans.run_execution(
                 plan_id, cancel_event, sink, snapshot, run_executor=run_executor

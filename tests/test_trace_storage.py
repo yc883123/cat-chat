@@ -258,6 +258,51 @@ class TraceStorageTests(unittest.TestCase):
         target = [m for m in loaded["messages"] if str(m["id"]) == str(message["id"])][0]
         self.assertNotIn("trace", target["metadata"])
 
+    # ---- 5.5 写回路径不丢 trace：删除撤销 / 分支复制 ----
+
+    def test_delete_restore_keeps_trace(self) -> None:
+        """删除→撤销必须保住 trace：快照带 trace_hash，restore 把它写回消息行。
+
+        丢了它，被撤销的消息在后续轮次失去 trace 权威回放（退回 message 兜底路径），
+        重放字节与原来不同——前缀缓存从这条起断链。这正是 `delete_message` docstring
+        承诺的「逐字节不变、前缀缓存不失效」的存储层那一半。
+        """
+        cid = str(self.conversation["id"])
+        self.storage.add_message(cid, "user", "问")
+        message = self._add(TRACE_A)
+        result = self.storage.delete_message(cid, str(message["id"]), "single")
+        snapshot = result["removed"][0]
+        self.assertTrue(snapshot.get("trace_hash"), "删除快照必须带 trace_hash")
+        # blob 本体不随删除消失（内容寻址：可能还有别的消息引用同一份）。
+        self.assertEqual(
+            [row[0] for row in self._trace_rows()], [snapshot["trace_hash"]]
+        )
+        self.storage.restore_messages(cid, result["removed"])
+        loaded = self.storage.get_conversation(cid)
+        restored = [m for m in loaded["messages"] if str(m["id"]) == str(message["id"])][0]
+        self.assertEqual(
+            restored["metadata"].get("trace"), TRACE_A, "撤销回来的消息必须照旧带 trace"
+        )
+
+    def test_branch_conversation_keeps_trace(self) -> None:
+        """分支复制的历史必须带 trace_hash（内容寻址共享，零复制成本）。
+
+        漏掉它 = 分支历史失去 trace 权威回放，与 `branch_conversation` docstring
+        「含 metadata，使 build_model_history 能重建一致上下文」的承诺直接冲突。
+        """
+        cid = str(self.conversation["id"])
+        self.storage.add_message(cid, "user", "问1")
+        self._add(TRACE_A)
+        second = self.storage.add_message(cid, "user", "问2")
+        branch = self.storage.branch_conversation(cid, str(second["id"]))
+        copied = [
+            m for m in branch["conversation"]["messages"] if m.get("role") == "assistant"
+        ]
+        self.assertTrue(copied, "前提：分支点之前的历史确实复制过去了")
+        self.assertEqual(
+            copied[0]["metadata"].get("trace"), TRACE_A, "分支历史必须照旧带 trace"
+        )
+
     # ---- 6. 整块替换怪癖：不得把 trace 塞回来 ----
 
     def test_update_message_metadata_lifts_trace_back_into_table(self) -> None:

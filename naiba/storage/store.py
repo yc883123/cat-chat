@@ -2083,7 +2083,7 @@ class ChatStorage:
             if not src:
                 raise LookupError("源对话不存在")
             rows = db.execute(
-                "SELECT id, role, content, metadata, created_at FROM messages "
+                "SELECT id, role, content, metadata, trace_hash, created_at FROM messages "
                 "WHERE conversation_id = ? ORDER BY created_at, rowid",
                 (source_id,),
             ).fetchall()
@@ -2146,10 +2146,14 @@ class ChatStorage:
                 ),
             )
             for m in branch_rows[:branch_idx]:
+                # trace_hash 一并复制：v23 起 trace 在 message_traces 表（内容寻址），
+                # 分支只带引用、共享同一份 blob，零复制成本。漏掉它 = 分支历史失去 trace
+                # 权威回放，重放退回 message 兜底路径，前缀缓存从分支点起与源会话分叉。
                 db.execute(
-                    "INSERT INTO messages(id, conversation_id, role, content, metadata, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (uuid.uuid4().hex, new_id, m["role"], m["content"], m["metadata"], m["created_at"]),
+                    "INSERT INTO messages(id, conversation_id, role, content, metadata, trace_hash, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (uuid.uuid4().hex, new_id, m["role"], m["content"], m["metadata"],
+                     str(m["trace_hash"] or ""), m["created_at"]),
                 )
             branch_meta = json.loads(branch_rows[branch_idx]["metadata"] or "{}")
             branch_message = {
@@ -2792,7 +2796,7 @@ class ChatStorage:
             raise ValueError("mode 必须是 single 或 turn")
         with self._connect() as db:
             target = db.execute(
-                "SELECT id, role, content, metadata, created_at, rowid AS rid FROM messages "
+                "SELECT id, role, content, metadata, trace_hash, created_at, rowid AS rid FROM messages "
                 "WHERE id = ? AND conversation_id = ?",
                 (message_id, conversation_id),
             ).fetchone()
@@ -2805,7 +2809,7 @@ class ChatStorage:
                 if str(target["role"]) != "user":
                     raise ValueError("只有用户消息支持整轮删除")
                 following = db.execute(
-                    "SELECT id, role, content, metadata, created_at, rowid AS rid FROM messages "
+                    "SELECT id, role, content, metadata, trace_hash, created_at, rowid AS rid FROM messages "
                     "WHERE conversation_id = ? "
                     "AND (created_at > ? OR (created_at = ? AND rowid > ?)) "
                     "ORDER BY created_at, rowid",
@@ -2933,14 +2937,15 @@ class ChatStorage:
                             )
                 for snapshot in pending:
                     db.execute(
-                        "INSERT INTO messages(id, conversation_id, role, content, metadata, created_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO messages(id, conversation_id, role, content, metadata, trace_hash, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (
                             snapshot["id"],
                             conversation_id,
                             snapshot["role"],
                             snapshot["content"],
                             snapshot["metadata_json"],
+                            snapshot["trace_hash"],
                             int(snapshot["created_at"]),
                         ),
                     )
@@ -2975,11 +2980,19 @@ class ChatStorage:
             original_rowid: int | None = int(row["rid"])
         except (IndexError, KeyError, TypeError, ValueError):
             original_rowid = None
+        # v23 起 trace 不在 metadata 文本里，而在 message_traces 表（消息行只留 trace_hash
+        # 引用）。快照必须带上这个引用，否则「删除→撤销」恢复出的行会永久丢掉 trace——
+        # 重放退回 message 兜底路径，字节与原来不同，前缀缓存从这条起断链。
+        try:
+            trace_hash = str(row["trace_hash"] or "")
+        except (IndexError, KeyError):
+            trace_hash = ""
         return {
             "id": str(row["id"]),
             "role": str(row["role"] or ""),
             "content": str(row["content"] or ""),
             "metadata_json": text,
+            "trace_hash": trace_hash,
             "created_at": int(row["created_at"] or 0),
             "rowid": original_rowid,
         }
@@ -3015,6 +3028,9 @@ class ChatStorage:
             "role": role,
             "content": str(item.get("content") or ""),
             "metadata_json": text,
+            # v23 起 trace 在 message_traces 表（内容寻址，blob 不随删除消失），
+            # 快照只需带回引用；老快照没有这个键，按"无 trace"处理。
+            "trace_hash": str(item.get("trace_hash") or ""),
             "created_at": created_at,
             "rowid": original_rowid,
         }

@@ -316,6 +316,8 @@ verify/*
 !verify/seed_media_message.py
 !verify/seed_turn_rail_chat.py
 !verify/seed_usage_message.py
+# 存量数据工具：按迁移口径收缩终态事件的重复消息副本（dry-run 默认，见维护说明 §7.3）
+!verify/slim_terminal_events.py
 !verify/send_button_smoke.cjs
 !verify/send_state_smoke.cjs
 !verify/session_start_smoke.cjs

@@ -73,6 +73,8 @@ KEEP = {
     # 数据维护 / 独立冒烟
     "backfill_media.py", "record_golden.py", "upload_smoke.py",
     "attachment_only_smoke.py",
+    # 存量数据工具：按迁移的全库口径收缩终态事件的重复消息副本（dry-run 默认，--apply 才改写）
+    "slim_terminal_events.py",
     # 上下文圆环/提醒冒烟（§六 已登记）
     "ring_usage_smoke.py", "ring_usage_smoke.cjs",
     # 工具分类改版冒烟（§六 已登记；Python 自编排 + Node 检查）

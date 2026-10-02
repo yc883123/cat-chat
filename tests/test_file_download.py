@@ -73,7 +73,9 @@ class _StubApp:
             resolve_workspace_dir=lambda *args, **kwargs: Path(workspace),
         )
         self._conversation = conversation
-        self.storage = SimpleNamespace(get_conversation=lambda _cid: self._conversation)
+        self.storage = SimpleNamespace(
+            get_conversation=lambda _cid, **_kwargs: self._conversation
+        )
 
 
 class DownloadHeaderRouteTests(unittest.TestCase):

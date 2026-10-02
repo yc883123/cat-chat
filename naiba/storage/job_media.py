@@ -121,7 +121,7 @@ class JobMediaWriter:
         self, conversation_id: str, run_id: str, parent: dict[str, Any]
     ) -> dict[str, Any] | None:
         """定位该 Run 落库的助手消息（优先 run detail.message_id，回退 metadata.run_id）。"""
-        conversation = self._storage.get_conversation(conversation_id)
+        conversation = self._storage.get_conversation(conversation_id, include_trace=False)
         messages = (conversation or {}).get("messages") or []
         detail = parent.get("detail") if isinstance(parent.get("detail"), dict) else {}
         message_id = str(detail.get("message_id") or "")

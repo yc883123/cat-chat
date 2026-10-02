@@ -122,6 +122,23 @@ class TraceStorageTests(unittest.TestCase):
         self.assertEqual(target["metadata"]["trace"], TRACE_A, "读回必须与写入逐字一致")
         self.assertNotIn("trace_hash", target, "trace_hash 是实现细节，不透给消费方")
 
+    def test_get_conversation_without_trace_skips_hydration(self) -> None:
+        """include_trace=False：不 hydrate（出网/按 id 扫描等不消费 trace 的路径）。
+
+        其余 metadata 必须原样保留、blob 本体不受影响；默认口径照旧 hydrate。
+        """
+        message = self._add(TRACE_A)
+        loaded = self.storage.get_conversation(
+            str(self.conversation["id"]), include_trace=False
+        )
+        target = [m for m in loaded["messages"] if str(m["id"]) == str(message["id"])][0]
+        self.assertNotIn("trace", target["metadata"], "关闭时不回读 blob")
+        self.assertEqual(target["metadata"].get("run_id"), "r1", "其余 metadata 原样保留")
+        self.assertEqual(len(self._trace_rows()), 1, "blob 本体不受影响")
+        full = self.storage.get_conversation(str(self.conversation["id"]))
+        full_target = [m for m in full["messages"] if str(m["id"]) == str(message["id"])][0]
+        self.assertEqual(full_target["metadata"]["trace"], TRACE_A, "默认口径照旧 hydrate")
+
     def test_build_model_history_replays_original_trace(self) -> None:
         from naiba.core.history import build_model_history
 
@@ -289,18 +306,30 @@ class TraceStorageTests(unittest.TestCase):
 
         漏掉它 = 分支历史失去 trace 权威回放，与 `branch_conversation` docstring
         「含 metadata，使 build_model_history 能重建一致上下文」的承诺直接冲突。
+        注意：`branch_conversation` 返回的 conversation 是出网形态（不 hydrate），
+        判据必须落在库里（hydrate 重读 + trace_hash 列）而不是这份响应上。
         """
         cid = str(self.conversation["id"])
         self.storage.add_message(cid, "user", "问1")
         self._add(TRACE_A)
         second = self.storage.add_message(cid, "user", "问2")
         branch = self.storage.branch_conversation(cid, str(second["id"]))
+        branch_id = str(branch["conversation"]["id"])
         copied = [
-            m for m in branch["conversation"]["messages"] if m.get("role") == "assistant"
+            m for m in self.storage.get_conversation(branch_id)["messages"]
+            if m.get("role") == "assistant"
         ]
         self.assertTrue(copied, "前提：分支点之前的历史确实复制过去了")
         self.assertEqual(
             copied[0]["metadata"].get("trace"), TRACE_A, "分支历史必须照旧带 trace"
+        )
+        with closing(sqlite3.connect(self.db_path)) as db:
+            copied_hash = db.execute(
+                "SELECT trace_hash FROM messages WHERE conversation_id = ? AND role = 'assistant'",
+                (branch_id,),
+            ).fetchone()[0]
+        self.assertEqual(
+            copied_hash, self._trace_rows()[0][0], "分支行必须指向同一份内容寻址 blob"
         )
 
     # ---- 6. 整块替换怪癖：不得把 trace 塞回来 ----

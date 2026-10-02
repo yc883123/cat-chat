@@ -346,7 +346,9 @@ class _AppGate:
 
     def __init__(self, workspace: Path, conversations: dict | None = None) -> None:
         self.config = SimpleNamespace(resolve_workspace_dir=lambda raw=None: Path(workspace))
-        self.storage = SimpleNamespace(get_conversation=lambda cid: (conversations or {}).get(cid))
+        self.storage = SimpleNamespace(
+            get_conversation=lambda cid, **_kwargs: (conversations or {}).get(cid)
+        )
         self._confirmed_folders: dict[str, set[str]] = {}
 
 

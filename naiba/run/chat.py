@@ -295,7 +295,7 @@ class ConversationRunMixin:
             raise ValueError(f"附件文件已丢失（可能已被缓存清理）：{shown}。请重新上传后再发送。")
 
         with self._submit_lock:
-            conversation = self.app.storage.get_conversation(conversation_id)
+            conversation = self.app.storage.get_conversation(conversation_id, include_trace=False)
             if not conversation:
                 raise LookupError("对话不存在")
             active = self.app.storage.active_run(conversation_id)
@@ -458,7 +458,7 @@ class ConversationRunMixin:
             active = self.app.storage.active_run(conversation_id)
             if active:
                 raise ActiveRunError(str(active["id"]))
-            conversation = self.app.storage.get_conversation(conversation_id)
+            conversation = self.app.storage.get_conversation(conversation_id, include_trace=False)
             if not conversation:
                 raise LookupError("发起计划的对话已删除")
             # Approving the reviewed plan exits Plan mode for subsequent turns.
@@ -1291,7 +1291,7 @@ class ConversationRunMixin:
         # 避免重复：该 run 若已入库过“已中止”消息（例如 forced-cancel 兜底已先写入），直接返回，
         # 防止“正常取消路径”与“看门狗兜底”各写一条。
         try:
-            conversation = self.app.storage.get_conversation(conversation_id)
+            conversation = self.app.storage.get_conversation(conversation_id, include_trace=False)
             for msg in (conversation or {}).get("messages", []) or []:
                 meta = msg.get("metadata") or {}
                 if meta.get("aborted") and str(meta.get("run_id") or "") == run_id:
@@ -1542,7 +1542,7 @@ class ConversationRunMixin:
             return None
         # 避免重复：该 run 若已入库过 partial 消息（例如重复收尾），直接返回。
         try:
-            conversation = self.app.storage.get_conversation(conversation_id)
+            conversation = self.app.storage.get_conversation(conversation_id, include_trace=False)
             for msg in (conversation or {}).get("messages", []) or []:
                 meta = msg.get("metadata") or {}
                 if meta.get("partial") and str(meta.get("run_id") or "") == run_id:

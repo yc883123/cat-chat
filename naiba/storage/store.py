@@ -2007,7 +2007,18 @@ class ChatStorage:
         meta["count"] = count
         return meta
 
-    def get_conversation(self, conversation_id: str, include_messages: bool = True) -> dict[str, Any] | None:
+    def get_conversation(
+        self,
+        conversation_id: str,
+        include_messages: bool = True,
+        include_trace: bool = True,
+    ) -> dict[str, Any] | None:
+        """读取会话（含消息）。``include_trace=False`` 跳过 trace 的 hydrate——
+
+        trace 是消息里体积最大的部分（单条可达几百 KB），不消费它的调用方
+        （出网响应在 HTTP 层还会再剥一遍、按 id 找消息的去重扫描等）不该为它
+        付"回读 blob + json.loads"的成本。模型历史回放路径必须保持默认 True。
+        """
         with self._connect() as db:
             row = db.execute(
                 "SELECT id, title, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, lightweight_mode, lightweight_disabled_features, title_customized, system_prompt, stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, interaction_mode, favorite, archived, sort_order, branched_from_id, branch_message_id, created_at, updated_at "
@@ -2032,7 +2043,8 @@ class ChatStorage:
                 # 同一批次内复用 trace blob（长会话里同一份 trace 可能被多条消息引用）。
                 trace_cache: dict[str, str] = {}
                 result["messages"] = [
-                    self._message_dict(db, message, trace_cache) for message in messages
+                    self._message_dict(db, message, trace_cache, include_trace)
+                    for message in messages
                 ]
             return result
 
@@ -2167,7 +2179,8 @@ class ChatStorage:
                 "folder_indexes": branch_meta.get("folder_indexes") or [],
             }
         return {
-            "conversation": self.get_conversation(new_id, include_messages=True),
+            # 这份会话只用于出网响应（HTTP 层还会再剥一遍 trace），不 hydrate。
+            "conversation": self.get_conversation(new_id, include_messages=True, include_trace=False),
             "branch_message": branch_message,
         }
 
@@ -4141,6 +4154,7 @@ class ChatStorage:
         db: sqlite3.Connection,
         row: sqlite3.Row,
         trace_cache: dict[str, str] | None = None,
+        include_trace: bool = True,
     ) -> dict[str, Any]:
         """把 messages 行转成消息字典，并把 trace 从独立表**透明补回** ``metadata``。
 
@@ -4150,6 +4164,10 @@ class ChatStorage:
 
         ``trace_cache`` 由一次批量读取（如 `get_conversation`）传入以复用同 blob，
         缺省时每次查询一次——同一 hash 在同一批次内极少重复，不额外挂全局缓存。
+
+        ``include_trace=False``：跳过 hydrate（一次不回读 blob、不 json.loads 大文本）。
+        只用于**不消费 trace** 的调用方（出网响应、按 id/run_id 找消息的去重扫描等）；
+        模型历史回放路径必须保持默认 True。
         """
         result = dict(row)
         try:
@@ -4159,7 +4177,7 @@ class ChatStorage:
         if not isinstance(metadata, dict):
             metadata = {}
         trace_hash = str(result.get("trace_hash") or "")
-        if trace_hash and "trace" not in metadata:
+        if include_trace and trace_hash and "trace" not in metadata:
             trace = _hydrate_trace(
                 db, trace_hash, trace_cache if trace_cache is not None else {}
             )

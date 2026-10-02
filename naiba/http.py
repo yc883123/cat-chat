@@ -343,7 +343,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path.startswith("/api/conversations/") and path.endswith("/file/open"):
             conversation_id = path.split("/")[-3]
             query = urllib.parse.parse_qs(parsed.query)
-            conversation = self.app.storage.get_conversation(conversation_id)
+            conversation = self.app.storage.get_conversation(conversation_id, include_trace=False)
             if not conversation:
                 self._json({"error": "对话不存在"}, HTTPStatus.NOT_FOUND)
                 return
@@ -356,7 +356,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path.startswith("/api/conversations/") and path.endswith("/file/raw"):
             conversation_id = path.split("/")[-3]
             query = urllib.parse.parse_qs(parsed.query)
-            conversation = self.app.storage.get_conversation(conversation_id)
+            conversation = self.app.storage.get_conversation(conversation_id, include_trace=False)
             if not conversation:
                 self._json({"error": "对话不存在"}, HTTPStatus.NOT_FOUND)
                 return
@@ -406,12 +406,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(info or {}, HTTPStatus.OK)
         elif path.startswith("/api/conversations/"):
             conversation_id = path.rsplit("/", 1)[-1]
-            conversation = self.app.storage.get_conversation(conversation_id)
+            conversation = self.app.storage.get_conversation(conversation_id, include_trace=False)
             if conversation and conversation.get("messages"):
                 backfill_turn_choice_groups(conversation["messages"])
                 # trace 是后端专用的线协议回放副本（`public/` 里零引用），却是最占体积的一份：
-                # 不发它，长会话每次打开/每轮收尾重载都能省掉几十 MB。写入回路的快照
-                # （/api/messages/delete 的 removed）不在此列——见 core.messages.strip_message_traces。
+                # 读取侧已跳过 hydrate（include_trace=False），这里再剥一遍只是兜底
+                # （存量行 metadata 里仍内联 trace 的极端形态）。
                 strip_message_traces(conversation["messages"])
             self._json(conversation or {"error": "对话不存在"}, HTTPStatus.OK if conversation else HTTPStatus.NOT_FOUND)
         elif path == "/api/plans":
@@ -610,7 +610,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             if not isinstance(raw_path, str) or not str(raw_path).strip():
                 self._json({"error": "path 不能为空"}, HTTPStatus.BAD_REQUEST)
                 return
-            conversation = self.app.storage.get_conversation(conversation_id)
+            conversation = self.app.storage.get_conversation(conversation_id, include_trace=False)
             if not conversation:
                 self._json({"error": "对话不存在"}, HTTPStatus.NOT_FOUND)
                 return

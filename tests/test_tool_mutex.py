@@ -106,7 +106,7 @@ class _FakeStorage:
         self.count = message_count
         self.writes: list[list[str]] = []
 
-    def get_conversation(self, conversation_id: str):
+    def get_conversation(self, conversation_id: str, **_kwargs):
         return self.conversation
 
     def message_count(self, conversation_id: str) -> int:

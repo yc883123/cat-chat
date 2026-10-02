@@ -170,7 +170,7 @@ def enable_conversation_tools(
     若会话尚未固化工具集，先按当前 Agent 规则固化成全集，再并集合并；已固化则直接并集。
     只加不删，用于"开始页安装skill"按钮临时/持久启用的能力工具与读写工具。
     """
-    conversation = app.storage.get_conversation(conversation_id)
+    conversation = app.storage.get_conversation(conversation_id, include_messages=False)
     if not conversation:
         raise LookupError("对话不存在")
     agent = app.config.get_agent(str(conversation.get("agent_id") or ""))

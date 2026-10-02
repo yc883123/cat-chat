@@ -386,7 +386,9 @@ class NaibaChatApp:
         """
         conversation: dict[str, Any] | None = None
         if str(conversation_id or "").strip():
-            conversation = self.storage.get_conversation(str(conversation_id).strip())
+            conversation = self.storage.get_conversation(
+                str(conversation_id).strip(), include_messages=False
+            )
             if not conversation:
                 raise LookupError("对话不存在")
         root = _conv_workspace_root(conversation, self.config)
@@ -432,7 +434,9 @@ class NaibaChatApp:
         """
         conversation: dict[str, Any] | None = None
         if str(conversation_id or "").strip():
-            conversation = self.storage.get_conversation(str(conversation_id).strip())
+            conversation = self.storage.get_conversation(
+                str(conversation_id).strip(), include_messages=False
+            )
             if not conversation:
                 raise LookupError("对话不存在")
         root = _conv_workspace_root(conversation, self.config)
@@ -794,7 +798,7 @@ class NaibaChatApp:
         # 会话已固化启用工具集后不允许会话内切换 Agent，否则工具集变化破坏前缀缓存。
         if agent_id is not None:
             try:
-                conv_row = self.storage.get_conversation(conversation_id)
+                conv_row = self.storage.get_conversation(conversation_id, include_messages=False)
             except Exception:  # noqa: BLE001 - 读取失败不应中断整个请求
                 conv_row = None
             current_agent_id = str((conv_row or {}).get("agent_id") or "")
@@ -1232,7 +1236,7 @@ class NaibaChatApp:
         if not conversation_id or not message_id:
             return self._reply({"error": "conversation_id 和 message_id 不能为空"}, HTTPStatus.BAD_REQUEST)
             return
-        conversation = self.storage.get_conversation(conversation_id)
+        conversation = self.storage.get_conversation(conversation_id, include_trace=False)
         if not conversation:
             return self._reply({"error": "对话不存在"}, HTTPStatus.NOT_FOUND)
             return
@@ -1709,7 +1713,9 @@ class NaibaChatApp:
                 # 会话回退：subagent 等 Job 的快照是 job_spec（没有 model 字段），
                 # 它们用的就是会话当前模型——从会话行取（chat run 在上一步已命中快照）。
                 try:
-                    conversation = self.storage.get_conversation(str(task.get("conversation_id") or "")) or {}
+                    conversation = self.storage.get_conversation(
+                        str(task.get("conversation_id") or ""), include_messages=False
+                    ) or {}
                 except Exception:  # noqa: BLE001 - 同上，维度字段拿不到就留空
                     conversation = {}
                 key = str(conversation.get("model_key") or "")

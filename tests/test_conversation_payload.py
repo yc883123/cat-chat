@@ -56,7 +56,7 @@ class _StubApp:
     def __init__(self, conversation: dict) -> None:
         self.config = SimpleNamespace(data={"access_token": ""})
         self.storage = SimpleNamespace(
-            get_conversation=lambda _cid, include_messages=True: json.loads(
+            get_conversation=lambda _cid, include_messages=True, include_trace=True: json.loads(
                 json.dumps(conversation)
             ),
             branch_conversation=lambda _cid, _mid, reset_agent=False: {

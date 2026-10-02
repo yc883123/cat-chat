@@ -471,7 +471,11 @@ class ExecutableUpdateTests(unittest.TestCase):
         revived._launch_replacer = lambda downloaded: launched.append(downloaded)
         result = revived.apply_ready()
         self.assertEqual(revived.phase, "restarting")
-        self.assertEqual(launched, [staged])
+        # 落盘标记只存文件名，恢复时用 `self.data_dir.resolve() / "update" / name` 重建路径；
+        # 而本次临时根是**未 resolve** 的（CI runner 的 TEMP 带 8.3 短名，如 RUNNER~1），
+        # 直接比会「本地全绿 CI 红」⇒ 按维护说明 §六③ 的口径，测试侧也 resolve 后再比。
+        # 复现自检：.venv\Scripts\python.exe verify\ci_short_path_check.py tests.test_updater
+        self.assertEqual(launched, [staged.resolve()])
         self.assertTrue((self.data_dir / "update" / "pending-update.json").is_file())
         self.assertFalse(result["can_apply"], "重启中不该再提供二次应用入口")
 

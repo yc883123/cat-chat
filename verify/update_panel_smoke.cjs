@@ -3,7 +3,7 @@
 // 与静态 public 服务的冒烟不同：本脚本要打 /api/update 与 /api/settings，必须连**真后端**。
 // 用法：
 //   1) NAIBA_TMP_PORT=8799 NAIBA_TMP_ROOT=verify/_tmp_upd_probe .venv\Scripts\python.exe verify\_serve_tmp.py
-//   2) $env:NODE_PATH="D:\naiba-chat\node_modules"; node verify\update_panel_smoke.cjs
+//   2) $env:NODE_PATH="<node_modules>"; node verify\update_panel_smoke.cjs
 //
 // 断言前先钉「缺陷前提成立」：
 //   · `#updateReady` 是 display:flex 的元素 —— 若没有 [hidden] 压回规则，页面一打开横幅就会

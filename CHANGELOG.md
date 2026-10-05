@@ -5,6 +5,17 @@
 
 ---
 
+## 3.1.2 Beta 主要能力
+- **展开有真实下限（本次重点）**：此前展开态高度只按内容算（`Math.min(scrollHeight, cap)`），空框 / 短草稿与折叠态同高，「点了像没点」。现在 `expandedMin()` = 可视视口高度 40% 且不低于 200px（`MIN_COMPOSER_H_EXPANDED_RATIO` / `MIN_COMPOSER_H_EXPANDED_PX`），高度取 `max(content, expandedMin())`；CSS 侧 `.composer-wrap.is-expanded textarea { min-height: 200px }` 只作「JS 未跑 / 首帧」兜底（必须写固定 px：软键盘弹起时 vh / dvh 都不缩，比例值会把 JS 的键盘适配顶回去）。
+- **手机展开不再白弹键盘（本次重点）**：`toggleComposerExpanded()` 的 `focus: true` 改为 `focus: !isCoarsePointer()`——粗指针（触摸）设备展开不抢焦点，不再「展开动作本身弹出软键盘、把刚展开的区域又压掉半屏」；桌面保持「点完直接能打字」。
+- **上限 / 下限随可视视口收缩**：新增 `visibleHeight()`（取 `visualViewport.height`，缺失回落 `innerHeight`），`expandedCap()` 改按它算；并补上 `visualViewport` 的 resize + scroll 监听（软键盘开合只改 visualViewport、不改 `window.innerHeight`——同类问题在设置页与绑定层修过，展开态是漏网的一处）。
+- **展开键挪入输入框右上角（迷你形态）**：`#expandComposer` 从发送键旁的按钮列搬到 `.composer-input` 内部（textarea 之后）、18px 迷你键 + 45° 斜双箭头（`rotate(45 12 12)`）；textarea 与 `#inputMirror` 各让出 26px `margin-right` 作排水沟（必须 margin——padding 推不开滚动条，也推不开按 right:0 定位的镜像层；textarea 宽度随之改 `calc(100% - 26px)`，不能改 auto，否则落回 cols 默认宽）。
+- **「清空后仍显 241px」疑点收口**：真机取数证实 241px 是草稿的换行撑高（DPR 1.25 下 7 行），并非残留；清空后回落到展开下限即为预期，冒烟把展开 / 折叠往返、清空回落、封顶与滚动后按钮位置逐项复验。
+- **原生工具调用轮不再吞正文（本次重点之二）**：`naiba/llm/stream.py` 删掉工具调用分支里的 `guard.detected = True`——它让流式守卫在首个 tool_call 后永久闭嘴，tool_call **之后**到达的正文（Anthropic 原生顺序允许 text 与 tool_use 交错）不再外发、末尾又被 `_build_action_from_native_tool_calls` 顶掉 ⇒ 界面只剩半句话；同 SSE 事件里 text 与 tool_calls 并存时（部分中转会合批），text 已被协议解析收走、不补即永久丢失——现在该分支补 `full_content_parts.append(text)` + `guard.feed(text, status)`。工具调用载荷走 `native_tool_calls` 累加器、不经守卫，不置位也不会泄漏成正文。
+- **出站请求逐字节不变**：字节级探针 `verify/_probe_toolcall_prose_bytes.py` 把同一段三轮原生工具调用对话在修前 / 修后各跑一遍，逐轮请求体 SHA-256 一致；`tests/test_llm_protocols.py` 新增缓存字节契约用例（工具轮 assistant 消息 content 恒为空串、正文不得回流请求体）。
+- **升级须知**：本次无数据库迁移、无数据格式变化，历史会话、收藏、分支、API 卡片、Agent、Skill 与 MCP 配置原样保留，直接覆盖安装即可。
+- **验证**：全量单测 2424 通过（本版新增 15 例：展开 9、原生工具调用正文 5、缓存字节契约 1；另扩写一条既有守门覆盖展开键的新落位）；`verify/composer_expand_smoke.cjs` 真机冒烟（真实服务隔离实例 + Playwright，桌面 1584×1067 与手机 360×780 双视口）32 项断言全绿。
+
 ## 3.1.1 Beta 主要能力
 - **更新进度与取消（本次重点）**：检查更新与下载过程中上报并展示「已下载 / 总量」、实时速度与百分比；超过 8 秒没有新字节判定为疑似卡死，进度条转黄并给出排查提示；取消走独立事件，中止后自动清理半成品安装包，不留残留状态。
 - **独立「更新代理」四态开关**：`settings.update_proxy` 是独立于全局网络策略的 scoped 覆盖项（跟随全局 / 跟随系统 / 强制直连 / 手动地址），只作用于检查更新与更新下载；实现走 `net_io.open_scoped()` 的独立 opener 缓存，全局 opener 一行未动。页面实时显示本次实际链路（例如「手动代理 http://127.0.0.1:7897」），出错文案也带上这条信息。

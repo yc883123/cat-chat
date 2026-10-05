@@ -10,12 +10,14 @@ not duplicate volatile test counts or historical section numbers.
 """
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MAINTENANCE_DOC = "项目维护说明（修改代码前必读）.md"
+MANIFEST = "naiba-chat-update.json"
 ENCODING_FILES = (".gitignore", "README.md", MAINTENANCE_DOC)
 
 # Keep the document small enough that every maintenance pass can read it in
@@ -25,11 +27,13 @@ MAX_DOC_LINES = 500
 
 # These are the durable promises that the compressed guide must retain. Do
 # not add incident-specific prose or dynamic counts here: those are exactly
-# what caused the guide and this check to grow together in the past.
+# what caused the guide and this check to grow together in the past. The
+# current-version line is volatile, so it is derived from the release manifest
+# below instead of being pinned here (the pinned literal stayed at 3.0.0 while
+# the guide moved on to 3.1.x, turning this check silently red).
 REQUIRED_ANCHORS = {
     "体积与内容边界": "## 0. 体积与内容边界（硬规则）",
     "容量政策": "主文上限：**120 KB / 500 行**",
-    "当前版本": "Cat Chat 3.0.0 Beta",
     "事件契约": "naiba/core/contracts.py",
     "Playwright 验收": "Playwright 前端验收（每次改动必做）",
     "路径纪律": "### 8.8 路径纪律：禁止本机绝对路径",
@@ -109,6 +113,18 @@ def main() -> int:
         failed = True
     else:
         print(f"PASS maintenance guide lines: {doc_lines} <= {MAX_DOC_LINES}")
+
+    # The version line is volatile: derive it from the release manifest so it
+    # tracks each release instead of rotting into a stale literal.
+    try:
+        version = json.loads((ROOT / MANIFEST).read_text(encoding="utf-8"))["version"]
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"FAIL anchor 当前版本: cannot read {MANIFEST}: {exc}")
+        return 1
+    version_token = f"Cat Chat {version.replace('-beta', '')} Beta"
+    present = version_token in doc
+    print(f"{'PASS' if present else 'FAIL'} anchor 当前版本: {version_token}")
+    failed = not present or failed
 
     for label, token in REQUIRED_ANCHORS.items():
         present = token in doc

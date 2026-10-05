@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 3.1.2-beta
-  RELEASE_TAG: v3.1.2-beta
+  RELEASE_VERSION: 3.1.3-beta
+  RELEASE_TAG: v3.1.3-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-3.1.2-beta-windows-x64
+  PACKAGE_NAME: cat-chat-3.1.3-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-3.1.2-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-3.1.3-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -104,11 +104,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 3.1.2 Beta release
+      - name: Publish 3.1.3 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 3.1.2 Beta
+          name: Cat Chat 3.1.3 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -118,21 +118,20 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 3.1.2 Beta Windows build from `${{ github.sha }}`。
+            Cat Chat 3.1.3 Beta Windows build from `${{ github.sha }}`。
             
             > **关于文件名的说明**：仓库已更名为 `cat-chat`（旧链接由 GitHub 自动跳转）。本次 Release 同时提供 `cat-chat.exe` 与 `naiba-chat.exe`——**这是同一个文件，SHA-256 完全相同**；两个 ZIP 内容也等价，只有包内 exe 的文件名不同。应用内自动更新仍使用 `naiba-chat.exe` 资产与原有清单协议，**你不需要做任何操作**，已安装的旧版本会照常收到更新。
             
-            **本次变化：把输入框「展开」修成真展开，并修掉原生工具调用轮吞正文。** 展开态此前只按内容长高——短草稿甚至空框和折叠态一样高，点了像没点；现在有了真实下限（可视视口高度的 40%、不低于 200px），内容再多按内容长、上限随可视视口收口。手机上点展开不再白弹一次键盘（触摸设备展开不抢焦点，展开即得全高，要打字点一下输入框）；软键盘开合、页面推挤都会实时重算高度，输入框不再伸到键盘底下。展开键挪到输入框右上角（18px 迷你双箭头），不再和发送键挤一排，长内容滚到底也压不到它。另一半：原生工具调用轮不再吞正文——工具调用之后到达的正文、以及同一 SSE 事件里与工具调用并存的正文，此前会被流式守卫永久咽掉（界面只剩半句话、甚至一个字都没有），现在该显示的正文照常显示；工具调用载荷走独立累加器，不会反向泄漏成正文；出站请求逐字节不变（字节探针三轮 SHA-256 一致）。本次无数据库迁移、无数据格式变化，历史会话、收藏、分支、API 卡片、Agent、Skill 与 MCP 配置原样保留，直接覆盖安装即可。
+            **本次变化：把手机端早有的轮次跳转下拉补到桌面顶栏（方案 A）。** 桌面端此前只有消息区右缘那道 26px 刻度轨，现在「第 N 轮 · 摘要」下拉落到顶栏左段中段——Agent 之后、[文件] 之前，复用同一个 `#turnJumpSelect` 元素与跳转逻辑，不新开模块、不搬动 DOM，刻度轨原样保留。代价是给顶栏腾地方：API 选择器此前过宽（`min(480px, 45vw)`），收窄到 `min(240px, 24vw)` 后左段余量交给操作区，中段才有位置。顺带修掉两处既有问题——顶栏 `min-width` 默认取 min-content，下拉一显示就把刷新键顶出可视区（1024 / 900 实测），置 0 后回到单元格宽度；空会话常驻的 78px「文件」按钮（`.file-reopen-button:not([hidden])` 的作者样式压过了 `[hidden]`）。761–999px 窄桌面下下拉会被压成一根看不懂的废桩，与其留着不如收掉——桌面刻度轨恒在，跳轮能力不丢。本次纯前端改动，后端、协议、数据格式一处未动，无数据库迁移，直接覆盖安装即可。
             
             本次更新（完整清单见 `release_notes.json` / 应用内「更新说明」）：
-            - **展开有真实下限**：点「展开」不再「点了像没点」——下限为可视视口高度 40%、不低于 200px；内容再多按内容长，上限随可视视口 72% 收口。
-            - **手机展开不再白弹键盘**：触摸设备展开不抢焦点，展开即得全高；桌面保持点完直接能打字。
-            - **上限随可视视口收缩**：软键盘开合、页面推挤实时重算，输入框不再伸到键盘底下。
-            - **展开键挪到输入框右上角**：18px 迷你对角双箭头，输入框让出 26px 排水沟，滚动到底也不会压到按钮。
-            - **原生工具调用轮不再吞正文**：工具调用前后到达的正文、同事件并存的正文都照常显示；工具调用载荷走独立累加器，不会泄漏成正文。
-            - **出站请求逐字节不变**：字节级探针修前 / 修后三轮请求体 SHA-256 逐轮一致，前缀缓存契约不受影响。
+            - **桌面也能跳轮次了**：手机端早有的「第 N 轮 · 摘要」下拉落到桌面顶栏左段中段（Agent 之后、[文件] 之前），复用同一元素与逻辑、刻度轨原样保留。
+            - **API 选择器收窄让位**：由 `flex: 1 1 180px`（select 撑到 480px）改为不 grow、上限 `min(240px, 24vw)`，让出的左段余量交给操作区。
+            - **顶栏窄宽溢出修复**：`min-width: 0` 让顶栏回到网格单元格宽度，刷新键不再被顶出可视区。
+            - **窄桌面收起下拉（有意取舍）**：761–999px 下拉让位刻度轨，避免压成一根看不懂的废桩。
+            - **顺带修「空会话常驻文件按钮」**：补同特异度成对规则，没开过文件的空会话不再常驻 78px 的「文件」按钮。
             
-            本地验证：全量单测 **2424** 通过（本版新增 15 例）；「输入框展开」真机冒烟（真实服务隔离实例 + Playwright，桌面 1584×1067 与手机 360×780 双视口）**32** 项断言全绿；原生工具调用正文字节探针通过。
+            本地验证：全量单测 **2425** 通过（本版新增 1 例守门）；`verify/mobile_shell_smoke.cjs` 五档视口（375 / 640 / 760 / 900 / 1440）A/B/C/D 四段 **40** 项断言全绿。
             
             The application verifies `naiba-chat.exe` against the SHA-256 value
             in `naiba-chat-update.json` before installing an update.

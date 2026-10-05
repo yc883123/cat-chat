@@ -5,6 +5,16 @@
 
 ---
 
+## 3.1.3 Beta 主要能力
+- **桌面顶栏补齐轮次跳转下拉（本次重点）**：手机端早有的「第 N 轮 · 摘要」下拉（`#turnJumpSelect`，此前挂 `.mobile-only`）改为桌面共用——去掉 `.mobile-only`，桌面端（第一个 `@media (max-width: 760px)` 块之外）加基态规则 `display: inline-block; flex: 0 1 auto; min-width: 0; margin-right: auto` + `[hidden] { display: none }` 成对规则。复用既有的 `renderTurnJump` / `scrollToTurn` / `collectTurns`，不新开模块、不搬动 DOM；桌面端 26px 刻度轨（`.turn-rail`）原样保留。
+- **落点 = 左段中段**：下拉作 `.topbar-actions` 的第一个子元素、靠 `margin-right: auto` 钉在操作区行首。`auto` 余量先于 `justify-content` 分配，所以稳定落在「Agent 之后、[文件] 之前」，不受右段对齐影响；吃的是 API 选择器让出来的余量，不额外占宽。
+- **API 选择器收窄让位 + 顶栏窄宽溢出修复**：`.model-control` 由 `flex: 1 1 180px` 改为 `flex: 0 1 auto; min-width: 0`，`.model-control select` 上限由 `min(480px, 45vw)` 收到 `min(240px, 24vw)`；`.agent-control` 加 `min-width: 0; flex: 0 1 170px`；`.topbar-actions` 改 `flex: 1 1 auto; min-width: 0; justify-content: flex-end`，其直接子元素 `flex: none` 保形贴右缘。顶栏是 `.chat-main` 网格单项、默认 `min-width: auto` 取 min-content——下拉一显示（min-content 含它 266px 的 max-width）顶栏就被撑得越过窗口右缘、把刷新键顶出可视区（1024 / 900 实测），补 `.topbar { min-width: 0 }` 后回到单元格宽度。
+- **窄桌面收起下拉（有意取舍）**：`@media (min-width: 761px) and (max-width: 999px) { .topbar-actions > .turn-jump-select { display: none } }`——761–999px 顶栏被 API + Agent + 4 个按钮占满，下拉会被压成「第 1 …」甚至一根箭头（900px 实测 75px、800px 仅 27px）；桌面端刻度轨恒在，跳轮能力不丢。
+- **flex-basis 必须写死（写清原理）**：`@media (min-width: 761px) { .topbar-actions > .turn-jump-select { flex: 0 100 260px } }`——`<select>` 在 Chromium 下 `auto` 基准取「上次渲染宽度」，窗口一缩被压到 0 后即使再放大也回不来（实测 1440→1100→1440 恒为 0），所以基态必须显式写 basis。
+- **顺带修「空会话常驻文件按钮」**：`.file-reopen-button:not([hidden])` 的作者样式 `display: inline-flex` 会压过 UA 的 `[hidden] { display: none }`，导致 `updateFileTabsButton()` 里 `button.hidden = true` 不生效——没开过文件的空会话也常驻一个 78px 的「文件」按钮。补同特异度成对规则 `.file-reopen-button[hidden] { display: none }`。
+- **升级须知**：纯前端 + 测试 / 冒烟改动，后端、协议、数据格式一处未动，无数据库迁移；历史会话、收藏、分支、API 卡片、Agent、Skill 与 MCP 配置原样保留，直接覆盖安装即可。手机端形态完全没动（显示规则仍写在既有 760 块内）。
+- **验证**：全量单测 2425 通过（本版新增 1 例守门 `test_file_button_hidden_really_hides`，钉住 `.file-reopen-button[hidden]` 那条并加反例护栏要求 `:not([hidden])` 那条也在；`test_turn_jump` 改判「不得再挂 `.mobile-only`」+ 桌面基态与窄桌面收起块，`test_topbar` / `test_mobile_topbar` 同步操作区 `flex: 1 1 auto` + `min-width: 0`）；`verify/mobile_shell_smoke.cjs` 五档视口（375 / 640 / 760 / 900 / 1440）A/B/C/D 四段 40 项断言全绿；桌面真机读数（播种 40 轮会话）1440 → 下拉 260px 可见、1024 → 147px 可见、900 → 收起。
+
 ## 3.1.2 Beta 主要能力
 - **展开有真实下限（本次重点）**：此前展开态高度只按内容算（`Math.min(scrollHeight, cap)`），空框 / 短草稿与折叠态同高，「点了像没点」。现在 `expandedMin()` = 可视视口高度 40% 且不低于 200px（`MIN_COMPOSER_H_EXPANDED_RATIO` / `MIN_COMPOSER_H_EXPANDED_PX`），高度取 `max(content, expandedMin())`；CSS 侧 `.composer-wrap.is-expanded textarea { min-height: 200px }` 只作「JS 未跑 / 首帧」兜底（必须写固定 px：软键盘弹起时 vh / dvh 都不缩，比例值会把 JS 的键盘适配顶回去）。
 - **手机展开不再白弹键盘（本次重点）**：`toggleComposerExpanded()` 的 `focus: true` 改为 `focus: !isCoarsePointer()`——粗指针（触摸）设备展开不抢焦点，不再「展开动作本身弹出软键盘、把刚展开的区域又压掉半屏」；桌面保持「点完直接能打字」。

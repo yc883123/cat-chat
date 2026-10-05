@@ -2,7 +2,7 @@
 // 13-skill-refs.js —— 拆分自 public/app.js 第 6069-6328 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, escapeHtml, notifyComposerChanged, state } from "./01-core.js";
+import { $, escapeHtml, isCoarsePointer, notifyComposerChanged, state } from "./01-core.js";
 import { markdown } from "./02-markdown.js";
 export function skillList() { return Array.isArray(state.bootstrap?.skills) ? state.bootstrap.skills : []; }
 
@@ -351,6 +351,11 @@ const MAX_COMPOSER_H = 180;
 // 展开态上限：占视口高度比例。与 styles.css 的
 // `.composer-wrap.is-expanded textarea { max-height: 72dvh }` 同值（改一处必改另一处）。
 const MAX_COMPOSER_H_EXPANDED_RATIO = 0.72;
+// 展开态下限：占**可视**视口高度比例，且不低于 MIN_COMPOSER_H_EXPANDED_PX。
+// 与 styles.css 的 `.composer-wrap.is-expanded textarea { min-height: 200px }` 兜底同源
+// （CSS 兜底只能取固定值：软键盘弹起时 vh/dvh 都不缩，比例值会把键盘收缩顶回去）。
+const MIN_COMPOSER_H_EXPANDED_RATIO = 0.40;
+const MIN_COMPOSER_H_EXPANDED_PX = 200;
 
 /* 输入框展开/折叠状态。只改高度上限、不动 DOM 结构：
    · 底部 composer 向上生长（锚定视口底部）；
@@ -364,8 +369,20 @@ export function isComposerExpanded() {
   return composerExpanded;
 }
 
+/* 统一的可视视口高度：软键盘弹起时 window.innerHeight 与 CSS dvh 都不缩，
+   只有 visualViewport.height 缩（Android 实测；09-settings / 15-bind-events 修过同类问题，
+   展开态曾是漏网的）。 */
+function visibleHeight() {
+  const vv = window.visualViewport;
+  return vv && vv.height ? Math.min(vv.height, window.innerHeight) : window.innerHeight;
+}
+
+function expandedMin() {
+  return Math.max(MIN_COMPOSER_H_EXPANDED_PX, Math.round(visibleHeight() * MIN_COMPOSER_H_EXPANDED_RATIO));
+}
+
 function expandedCap() {
-  return Math.max(MAX_COMPOSER_H, Math.round(window.innerHeight * MAX_COMPOSER_H_EXPANDED_RATIO));
+  return Math.max(expandedMin(), Math.round(visibleHeight() * MAX_COMPOSER_H_EXPANDED_RATIO));
 }
 
 export function setComposerExpanded(next, { focus = false } = {}) {
@@ -383,18 +400,26 @@ export function setComposerExpanded(next, { focus = false } = {}) {
   }
   if (!composerResizeBound) {
     composerResizeBound = true;
-    // 展开态的上限是按视口比例算的：窗口尺寸变化时必须重算，否则拖小窗口后
+    // 展开态上限/下限是按可视视口比例算的：窗口尺寸变化时必须重算，否则拖小窗口后
     // 输入框会超出可视区（textarea 自己有滚动条，但会顶掉消息区）。
-    window.addEventListener('resize', () => {
+    // 软键盘开合不改 window.innerHeight、只改 visualViewport，必须一并监听
+    // （resize + scroll——键盘推挤时 offsetTop 也变）。
+    const onViewportChange = () => {
       if (composerExpanded) resizeTextarea();
-    });
+    };
+    window.addEventListener('resize', onViewportChange);
+    const vv = window.visualViewport;
+    vv?.addEventListener('resize', onViewportChange);
+    vv?.addEventListener('scroll', onViewportChange);
   }
   resizeTextarea();
   if (composerExpanded && focus) $('#messageInput')?.focus();
 }
 
 export function toggleComposerExpanded() {
-  setComposerExpanded(!composerExpanded, { focus: true });
+  // 粗指针（手机/平板）：展开时抢焦点必弹软键盘，会把刚展开的区域又压掉一半 ⇒ 不抢；
+  // 细指针（桌面）：保持原行为，点完直接能打字。
+  setComposerExpanded(!composerExpanded, { focus: !isCoarsePointer() });
 }
 
 /* 发送/确认编辑后收回折叠态：内容已清空，留着大输入框没有意义。 */
@@ -409,8 +434,11 @@ export function resizeTextarea() {
   input.style.height = 'auto';
   if (placeholder) input.placeholder = '';
   try {
+    // 折叠态分支逐字不动（§九.128 契约）：上限仍是 MAX_COMPOSER_H，量与不量都由内容决定。
     const cap = composerExpanded ? expandedCap() : MAX_COMPOSER_H;
-    input.style.height = `${Math.min(input.scrollHeight, cap)}px`;
+    const content = Math.min(input.scrollHeight, cap);
+    const height = composerExpanded ? Math.max(content, expandedMin()) : content;
+    input.style.height = `${height}px`;
   } finally {
     if (placeholder) input.placeholder = placeholder;
   }

@@ -2,7 +2,9 @@
 """护栏：naiba/llm/protocols 协议适配行为规格（收官线 ① 第二件）。
 
 保护对象：各 request_format 的 wire 序列化/解析自 ModelRuntime 迁入 ProtocolMixins 时的
-行为等价（MRO 委派）。全部用例直接以 ProtocolMixins 静态方法调用（不经网络）。
+行为等价（MRO 委派）。全部用例直接以 ProtocolMixins 静态方法调用（不经网络）——
+T5（2026-10-05 乙篇）例外：附带一条 `naiba/skills/agent.py` 源码断言，钉住「原生工具轮
+正文只进界面、不进历史」的缓存字节契约。
 """
 
 import json
@@ -30,6 +32,43 @@ class LlmProtocolTests(unittest.TestCase):
         self.assertEqual(out[0]["tool_call_id"], "t1")
         self.assertEqual(out[1]["reasoning_content"], "在想")
         self.assertEqual(out[1]["tool_calls"][0]["function"]["name"], "read_file")
+
+    def test_native_tool_call_assistant_message_is_action_only(self):
+        """缓存字节契约（乙篇 T5，2026-10-05）：原生工具轮的 assistant 消息只由 action 构成。
+
+        2026-10-05 的修复只动「响应 → 界面」这一段（正文该显示就显示，见
+        tests/test_llm_stream.py 的 T1–T4）；**进历史的字节必须逐字节不变**，否则
+        前缀缓存断。本用例双向钉住：① 协议侧：该形态消息经 `_openai_messages` 进入
+        请求体后只有 tool_call 载荷、content 恒为空串；② 源头侧：`agent.py` 原生
+        工具轮的追加语句必须把 content 传空串 —— 若将来有人顺手把正文塞回历史，
+        这条会红，从而强制其先评估前缀缓存。
+        """
+        prose = "手机点双箭头却弹起键盘，这个交互确实反直觉。"
+        action = json.loads(P._build_action_from_native_tool_calls({
+            0: {"id": "call_1_0_deadbeef", "name": "list_directory",
+                "arguments": json.dumps({"path": "src"})},
+        }))
+        self.assertEqual(action["source"], "native")
+        self.assertEqual(action["tool"], "list_directory")
+        # agent.py 原生工具轮的历史消息形态：content 恒为空串，动作只走 tool_calls 字段。
+        out = P._openai_messages([
+            {"role": "user", "content": "看看目录"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "call_1_0_deadbeef", "name": action["tool"],
+                 "arguments": action["arguments"]},
+            ]},
+        ])
+        self.assertEqual(out[1]["content"], "", "工具轮正文只进界面展示，历史里 content 必须为空")
+        self.assertEqual(out[1]["tool_calls"][0]["function"]["name"], "list_directory")
+        self.assertEqual(json.loads(out[1]["tool_calls"][0]["function"]["arguments"]),
+                         {"path": "src"})
+        self.assertNotIn(prose, json.dumps(out, ensure_ascii=False),
+                         "流式外发的正文不得回流进请求体（前缀缓存字节契约）")
+        source = (Path(__file__).resolve().parents[1] / "naiba" / "skills" / "agent.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('messages.append(assistant_message("", tool_calls=native_calls))', source,
+                      "原生工具轮必须以空 content 入历史：正文只进界面展示，不进请求体")
 
     def test_openai_content_image_part(self):
         out = P._openai_content([{"type": "text", "text": "看图"},

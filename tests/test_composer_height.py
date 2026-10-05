@@ -98,6 +98,10 @@ class ComposerHeightSourceTests(unittest.TestCase):
                       "量高必须封顶，否则长草稿会把输入框顶穿屏幕")
         self.assertIn("composerExpanded ? expandedCap() : MAX_COMPOSER_H", body,
                       "折叠态上限必须仍是 MAX_COMPOSER_H（展开态另有按视口比例的上限）")
+        self.assertIn("Math.max(content, expandedMin())", body,
+                      "展开态必须有真实下限（S1）：短草稿点展开也得变高（否则「点了没反应」复发）")
+        self.assertRegex(self.skill_refs_js, r"MIN_COMPOSER_H_EXPANDED_RATIO = ([0-9.]+);",
+                         "展开下限比例要提成具名常量（与 styles.css 的固定值兜底同源）")
         self.assertRegex(
             self.css,
             r"\.composer textarea \{[^}]*max-height: %dpx" % cap,
@@ -171,6 +175,115 @@ class ComposerHeightSourceTests(unittest.TestCase):
                       "镜像层不刷 ⇒ `/ref` 高亮不显示")
         self.assertIn("notifyComposerChanged(input);", body,
                       "发送按钮状态要跟着变")
+
+
+class ComposerExpandS1S5GuardTests(unittest.TestCase):
+    """S1/S2/S4/S5（2026-10-05）：展开态真实下限 + 可视视口参照 + 手机焦点策略 + 按钮新形态。
+
+    背景：展开键上线后点它「完全没反应」——高度永远由内容决定，展开只抬高上限，
+    「你好」这种短草稿 scrollHeight=39px ⇒ 上限抬到再高也用不上（桌面/手机同形）。
+    S1 给展开态真实下限（可视视口 40%，绝对下限 200px），S4 在 CSS 加固定值兜底，
+    S2 让手机点展开不抢焦点（否则软键盘把刚展开的区域压掉一半），
+    S5 把按钮换成 18px 迷你键挪进输入框右上角的 margin 排水沟。
+    """
+
+    def setUp(self):
+        self.skill_refs_js = _read("public", "js", "13-skill-refs.js")
+        self.css = _read("public", "styles.css")
+        self.html = _read("public", "index.html")
+
+    def test_expanded_min_height_is_applied(self):
+        """展开态量高行必须把内容高与展开下限取大，且下限提成具名常量。"""
+        body = _fn_body(self.skill_refs_js, "export function resizeTextarea() {")
+        self.assertIn("Math.max(content, expandedMin())", body,
+                      "没有这一行 = 展开态又变回纯内容驱动，短草稿点了不变大")
+        self.assertRegex(self.skill_refs_js, r"const MIN_COMPOSER_H_EXPANDED_RATIO = [0-9.]+;")
+        self.assertRegex(self.skill_refs_js, r"const MIN_COMPOSER_H_EXPANDED_PX = \d+;")
+
+    def test_expanded_cap_uses_visual_viewport(self):
+        """上限/下限必须读 `visualViewport`；不得直接乘 `window.innerHeight`。
+
+        ⚠️ 只禁「相乘算上限」，不禁「取小作参照」——`visibleHeight()` 里
+        `Math.min(vv.height, window.innerHeight)` 是合法用法（软键盘弹起时
+        window.innerHeight / CSS dvh 都不缩，只有 visualViewport.height 缩）。
+        """
+        self.assertIn("window.visualViewport", self.skill_refs_js)
+        self.assertNotRegex(self.skill_refs_js, r"window\.innerHeight\s*\*",
+                            "键盘弹起时 window.innerHeight 不缩，不能拿它乘比例算上限")
+        self.assertNotRegex(self.skill_refs_js, r"innerHeight \* [0-9]",
+                            "比例必须乘 visibleHeight()，不能乘 innerHeight")
+
+    def test_expanded_binds_visual_viewport_listener(self):
+        """`setComposerExpanded` 必须挂 visualViewport 的 resize/scroll 监听（键盘开合只走它）。"""
+        body = _fn_body(self.skill_refs_js, "export function setComposerExpanded(")
+        self.assertIn("visualViewport", body)
+        self.assertIn("addEventListener('resize'", body)
+        self.assertIn("addEventListener('scroll'", body,
+                      "键盘推挤时 visualViewport 的 offsetTop 也变，scroll 也要重算")
+
+    def test_coarse_pointer_expand_does_not_autofocus(self):
+        """粗指针（手机/平板）展开时不得抢焦点：focus 必弹软键盘，把刚展开的区域压掉一半。"""
+        body = _fn_body(self.skill_refs_js, "export function toggleComposerExpanded() {")
+        self.assertIn("focus: !isCoarsePointer()", body,
+                      "焦点策略必须按指针类型分流（细指针保留点完能打字的原行为）")
+
+    def test_css_expanded_min_height_fallback(self):
+        """CSS 兜底必须是固定 px 且与 JS 常量同值；负向：不得用 vh/dvh 写展开态 min-height。
+
+        CSS min-height 优先于内联 style.height，而软键盘弹起时 vh/dvh 都不缩——
+        用比例值会把 JS 的「收到键盘上方」又顶回去。
+        """
+        m = re.search(r"MIN_COMPOSER_H_EXPANDED_PX = (\d+);", self.skill_refs_js)
+        self.assertIsNotNone(m, "展开绝对下限要提成具名常量")
+        px = int(m.group(1))
+        self.assertRegex(
+            self.css,
+            r"\.composer-wrap\.is-expanded textarea \{[^}]*min-height: %dpx" % px,
+            f"CSS 兜底必须写固定 {px}px 并与 MIN_COMPOSER_H_EXPANDED_PX 同值",
+        )
+        for block in re.findall(r"\.composer-wrap\.is-expanded[^{]*\{([^}]*)\}", self.css):
+            self.assertNotRegex(block, r"min-height:\s*[^;]*v[hd]",
+                                "展开态 min-height 不得用 vh/dvh 比例值（键盘弹起时它们不缩）")
+
+    def test_expand_button_lives_inside_composer_input(self):
+        """S5：按钮在 `.composer-input` 内绝对定位（右上角），HTML 顺序锚在 textarea 之后。"""
+        self.assertRegex(self.css, r"\.composer-input \{[^}]*position:\s*relative")
+        self.assertRegex(self.css, r"\.composer-input \.expand-button \{[^}]*position:\s*absolute")
+        expand_at = self.html.index('id="expandComposer"')
+        self.assertGreater(expand_at, self.html.index('id="messageInput"'),
+                           "按钮要排在 textarea 之后的同一容器里")
+        self.assertLess(expand_at, self.html.index('class="reasoning-wrap"'),
+                        "composer-input 之后的第一个兄弟是 reasoning-wrap；排在它前面 ⇒ 确在输入框内部")
+
+    def test_expand_button_uses_margin_gutter_not_padding(self):
+        """让位必须用 margin 排水沟（推得开滚动条/镜像层），padding 只推得开文字。"""
+        m = re.search(r"\.composer-input #messageInput[^{]*\{([^}]*)\}", self.css)
+        self.assertIsNotNone(m, "#messageInput 必须有排水沟规则")
+        block = m.group(1)
+        self.assertIn("margin-right", block,
+                      "排水沟必须落在 #messageInput 的 margin-right 上")
+        self.assertNotRegex(block, r"padding-right:\s*([2-9]\d|\d{3,})px",
+                            "负向：不得用大 padding-right 让位（推不开滚动条，预览实测暴露）")
+
+    def test_input_mirror_matches_textarea_gutter(self):
+        """镜像层与 textarea 的排水沟必须同值，且 textarea 宽度补偿与沟宽一致。"""
+        ta = re.search(r"\.composer-input #messageInput[^{]*\{[^}]*margin-right:\s*(\d+)px", self.css)
+        mi = re.search(r"\.composer-input #inputMirror[^{]*\{[^}]*margin-right:\s*(\d+)px", self.css)
+        self.assertIsNotNone(ta, "textarea 必须有 margin-right 排水沟")
+        self.assertIsNotNone(mi, "镜像层必须吃同样的 margin-right，否则高亮与文本换行点不同、整体错位")
+        self.assertEqual(ta.group(1), mi.group(1), "两处 margin-right 必须同值")
+        self.assertIn("calc(100%% - %spx)" % ta.group(1), self.css,
+                      "textarea 原 width:100% 叠 margin 会溢出父盒，必须用 calc 补回沟宽")
+
+    def test_expand_button_mini_diagonal_icon(self):
+        """S5 定稿形态：18×18 迷你键、svg 11px、45° 斜向双箭头（防被「顺手放大」改回去）。"""
+        block = re.search(r"\.composer-input \.expand-button \{([^}]*)\}", self.css)
+        self.assertIsNotNone(block, "展开键样式块必须存在")
+        self.assertRegex(block.group(1), r"width:\s*18px")
+        self.assertRegex(block.group(1), r"height:\s*18px")
+        self.assertRegex(self.css, r"\.composer-input \.expand-button svg \{[^}]*width:\s*11px")
+        self.assertIn("rotate(45 12 12)", self.html,
+                      "图标必须是 45° 斜向双箭头（现为双山形 SVG 外套 rotate(45 12 12)）")
 
 
 if __name__ == "__main__":

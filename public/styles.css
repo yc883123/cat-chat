@@ -2815,12 +2815,32 @@ html[data-theme="dark"] .usage-chip.active { color: var(--violet-deep); }
 }
 
 /* ---- 输入框展开/折叠（原地放大：方向由文档流决定，顶部也只会滚动不截断）---- */
-/* 折叠态上限 180px 与 13-skill-refs.js 的 MAX_COMPOSER_H 同值；展开态 72dvh 与
-   MAX_COMPOSER_H_EXPANDED_RATIO 同值——两处必须同步改。 */
-.composer-wrap.is-expanded textarea { max-height: 72dvh; }
+/* 折叠态上限 180px 与 13-skill-refs.js 的 MAX_COMPOSER_H 同值；展开态上限 72dvh 与
+   MAX_COMPOSER_H_EXPANDED_RATIO 同值、下限 200px 与 MIN_COMPOSER_H_EXPANDED_PX 同值。
+   展开态下限是「JS 未跑/首帧」的兜底，必须写固定 px：软键盘弹起时 vh/dvh 都不缩，
+   CSS min-height 优先于内联 style.height，写比例值会把 JS 的「收到键盘上方」顶回去。 */
+.composer-wrap.is-expanded textarea { min-height: 200px; max-height: 72dvh; }
 /* 底部 composer 展开时抬高包裹层上限；编辑态 wrap 本身就是 max-height:none / overflow:visible，
    用 :not(.is-inline-edit) 排除，免得把编辑态的纵向空间限制拉回来。 */
 .composer-wrap.is-expanded:not(.is-inline-edit) { max-height: 88dvh; }
+/* 展开键迷你形态（S5 定稿）：18px 迷你键浮在输入框右上角，图标 45° 斜双箭头（HTML 里
+   `rotate(45 12 12)`）。尺寸要显式压过两处既有规则——`.composer .icon-button`（38px）
+   与手机块里的 44px 最小点按；本段更靠后，同特异度后写即胜。 */
+.composer-input .expand-button {
+  position: absolute; top: 6px; right: 4px; z-index: 2;
+  width: 18px; height: 18px; min-width: 0; min-height: 0;
+  border-radius: var(--r-xs); color: var(--muted);
+}
+.composer-input .expand-button svg { width: 11px; height: 11px; }
+.composer-input .expand-button:hover { color: var(--text); }
+/* 「排水沟」：textarea 与镜像层 margin-right 同值 26px，按钮住在让出的窄条里。
+   必须用 margin 不能用 padding —— padding 推不开滚动条（它贴元素右缘），也推不开
+   镜像层（它按 right:0 定位）。注：textarea 原规则是 width:100%，margin 会让它按
+   100%+26px 溢出父盒，宽度必须一并改成 calc（不能改 auto —— textarea 在 auto 下
+   会落回 cols 默认宽 ~188px，不占满容器）。 */
+.composer-input #messageInput,
+.composer-input #inputMirror { margin-right: 26px; }
+.composer-input #messageInput { width: calc(100% - 26px); }
 .expand-button[aria-pressed="true"] { color: var(--accent-solid); background: var(--accent-soft); }
 
 /* ---- 软件更新：下载进度 / 待重启入口 / 更新代理 ---- */

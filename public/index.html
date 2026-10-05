@@ -190,6 +190,15 @@
             <div class="file-popup" id="filePopup" role="listbox" hidden></div>
             <div class="input-mirror" id="inputMirror" aria-hidden="true"></div>
             <textarea id="messageInput" rows="1" placeholder="输入消息" aria-label="消息" spellcheck="false"></textarea>
+            <!-- 展开/折叠输入框（45° 斜向双箭头）：浮在输入框右上角的「排水沟」里。
+                 排水沟由 #messageInput 与 #inputMirror 的 margin-right 让出（styles.css）：
+                 必须用 margin 不能用 padding —— padding 只推得开文字，推不开滚动条。
+                 按钮 z-index:2 低于 skill/file 弹层（40）；编辑态 composer 被搬进气泡时随之移动。
+                 展开方向由文档流决定（底部 composer 向上长、被搬进气泡的编辑态向下长），
+                 因此位于窗口顶部时也不会被截断。 -->
+            <button class="icon-button expand-button" id="expandComposer" type="button" title="展开输入框" aria-pressed="false" aria-label="展开输入框">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><g transform="rotate(45 12 12)"><path d="M7 9l5-5 5 5"></path><path d="M7 15l5 5 5-5"></path></g></svg>
+            </button>
           </div>
           <div class="reasoning-wrap">
             <button class="icon-button deep-reasoning-button" type="button" id="deepReasoningButton" title="思考强度：跟随 API（自动）" aria-label="思考强度" aria-pressed="false" aria-haspopup="menu" aria-expanded="false">
@@ -225,12 +234,6 @@
             <!-- 文字标签只在「手机 + 运行中」显形（≤760px 的 .composer.is-running 块）：
                  运行中它没有备选入口，纯图标在小屏上是认不出来的。 -->
             <span class="interject-label">插话</span>
-          </button>
-          <!-- 展开/折叠输入框（双三角）：原地放大编辑区。放在发送键旁的按钮列，
-               不遮挡文本、编辑态同样可用。展开方向由文档流决定（底部 composer 向上长、
-               被搬进气泡的编辑态 composer 向下长），因此位于窗口顶部时也不会被截断。 -->
-          <button class="icon-button expand-button" id="expandComposer" type="button" title="展开输入框" aria-pressed="false" aria-label="展开输入框">
-            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 9l5-5 5 5"></path><path d="M7 15l5 5 5-5"></path></svg>
           </button>
           <button class="send-button" id="sendButton" type="submit" title="发送" aria-label="发送">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>

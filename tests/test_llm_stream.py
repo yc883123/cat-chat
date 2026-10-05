@@ -25,6 +25,19 @@ def sse(chunk: dict) -> bytes:
     return ("data: " + json.dumps(chunk, ensure_ascii=False)).encode("utf-8")
 
 
+def tool_chunk(*, cid: str = "", name: str = "", args: str = "") -> bytes:
+    """openai_chat 风格的原生 tool_calls 增量事件（name 与 arguments 可拆包）。"""
+    function = {}
+    if name:
+        function["name"] = name
+    if args:
+        function["arguments"] = args
+    call = {"index": 0, "function": function}
+    if cid:
+        call["id"] = cid
+    return sse({"choices": [{"delta": {"tool_calls": [call]}}]})
+
+
 class StreamGuardTests(unittest.TestCase):
     def test_classify_text_vs_tool(self):
         self.assertEqual(StreamMixins._classify_agent_output("普通正文"), "text")
@@ -264,6 +277,101 @@ class StreamReaderTests(unittest.TestCase):
         ]
         result = StreamMixins._read_sse_response(response, "codex_responses", None)
         self.assertEqual(result["content"], "")
+
+    # ---- 原生 tool_calls 与正文交错（2026-10-05：claude-opus-5.5 走 codecraftapi
+    # 「每轮只吐几个字」的回归位）。旧代码在 tool_calls 分支里把 guard.detected 置位，
+    # 守卫永久闭嘴：tool_call **之后**的正文不再外发，又被终态 action 顶掉 ⇒ 只显示半句。
+    # 修复后：正文继续外发；同 chunk 共存的 text 也要补发（A 方案）。 ----
+
+    def test_sse_native_tool_call_keeps_prose_after_call(self):
+        """正文被 tool_call 劈成两段：两段都要外发、顺序拼接；返回 content 仍是 action。"""
+        events = []
+        response = [
+            sse({"choices": [{"delta": {"content": "手机点双箭头却弹起键盘，这个交"}}]}),
+            tool_chunk(cid="call_1", name="list_directory"),
+            tool_chunk(args='{"path": "/"}'),
+            sse({"choices": [{"delta": {"content": "互确实反直觉 — 先帮你把问题理清楚。"}}]}),
+            sse({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+        ]
+        result = StreamMixins._read_sse_response(response, "openai_chat", events.append)
+        deltas = "".join(str(e.get("content") or "") for e in events if e.get("type") == "delta")
+        self.assertEqual(
+            deltas, "手机点双箭头却弹起键盘，这个交互确实反直觉 — 先帮你把问题理清楚。",
+            "tool_call 之后到达的正文必须继续作为 delta 外发（不能只剩前半句）",
+        )
+        self.assertNotIn("list_directory", deltas, "tool_call 载荷不得泄漏进正文")
+        action = SkillAgent._parse_action(result["content"])
+        self.assertEqual(action["tool"], "list_directory")
+        self.assertEqual(action["arguments"], {"path": "/"})
+
+    def test_sse_native_tool_call_prose_boundary_mid_word(self):
+        """跨边界拼回完整词：「这个交」+「互」=「交互」——防有人改成只保留之后那段。"""
+        events = []
+        response = [
+            sse({"choices": [{"delta": {"content": "这个交"}}]}),
+            tool_chunk(cid="call_9", name="list_directory"),
+            sse({"choices": [{"delta": {"content": "互确实反直觉。"}}]}),
+            sse({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+        ]
+        StreamMixins._read_sse_response(response, "openai_chat", events.append)
+        deltas = "".join(str(e.get("content") or "") for e in events if e.get("type") == "delta")
+        self.assertEqual(deltas, "这个交互确实反直觉。")
+        self.assertIn("交互", deltas, "词被劈开的两半都要保留，顺序不能反")
+
+    def test_sse_same_chunk_text_and_tool_calls_both_kept(self):
+        """A 方案：同一 SSE 事件同时带 content 与 tool_calls（部分中转会合批），
+        该段 text 也要进 delta 与 full_content_parts，不能被 `continue` 吃掉。"""
+        events = []
+        response = [
+            sse({"choices": [{"delta": {"content": "先看目录结构，"}}]}),
+            sse({"choices": [{"delta": {
+                "content": "再决定改哪里。",
+                "tool_calls": [{"index": 0, "id": "call_5",
+                                "function": {"name": "list_directory", "arguments": '{"path": "/"}'}}],
+            }}]}),
+            sse({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+        ]
+        result = StreamMixins._read_sse_response(response, "openai_chat", events.append)
+        deltas = "".join(str(e.get("content") or "") for e in events if e.get("type") == "delta")
+        self.assertEqual(deltas, "先看目录结构，再决定改哪里。",
+                         "同 chunk 的 text 语义上先于 tool_calls，必须补发")
+        action = SkillAgent._parse_action(result["content"])
+        self.assertEqual(action["tool"], "list_directory")
+
+    def test_sse_native_tool_call_then_text_protocol_still_hidden(self):
+        """tool_call 之后若出现**文本协议**（围栏 JSON / <invoke> / Harmony），仍不得进 delta
+        ——守住「判定为协议后剩余正文不外发」这条既有语义不被本次修复破坏。"""
+        events = []
+        response = [
+            sse({"choices": [{"delta": {"content": "前半句正文。"}}]}),
+            tool_chunk(cid="call_7", name="pwsh"),
+            tool_chunk(args='{"command": "dir"}'),
+            sse({"choices": [{"delta": {"content": '{"type": "tool", "tool": "pwsh"}'}}]}),
+            sse({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+        ]
+        result = StreamMixins._read_sse_response(response, "openai_chat", events.append)
+        deltas = "".join(str(e.get("content") or "") for e in events if e.get("type") == "delta")
+        self.assertEqual(deltas, "前半句正文。",
+                         "tool_call 之后的文本协议必须继续被守卫吞掉")
+        action = SkillAgent._parse_action(result["content"])
+        self.assertEqual(action["tool"], "pwsh")
+
+    def test_sse_native_tool_call_only_after_call_no_leak(self):
+        """正文**全部**在 tool_call 之后（上游把 text block 排在 tool_use 之后）也必须
+        正常外发——这是旧代码「一个字都不显示、只剩工具卡片」的回归位。"""
+        events = []
+        response = [
+            tool_chunk(cid="call_2", name="read_file"),
+            tool_chunk(args='{"path": "a.txt"}'),
+            sse({"choices": [{"delta": {"content": "读完了，结论如下。"}}]}),
+            sse({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+        ]
+        result = StreamMixins._read_sse_response(response, "openai_chat", events.append)
+        deltas = "".join(str(e.get("content") or "") for e in events if e.get("type") == "delta")
+        self.assertEqual(deltas, "读完了，结论如下。",
+                         "tool_call 之后到达的正文一个字都不能丢")
+        action = SkillAgent._parse_action(result["content"])
+        self.assertEqual(action["tool"], "read_file")
 
 
 if __name__ == "__main__":

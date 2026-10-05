@@ -103,6 +103,9 @@ KEEP = {
     # 输入框高度（占位符不得算进内容高）冒烟（§六 已登记；自带静态 public/ 服务 + 无头 Edge，
     # 页面内真 import 前端模块，不需要后端也不需要隔离数据目录，见 §九.128）
     "composer_height_smoke.cjs",
+    # 输入框「展开/折叠」修复（S1–S5，2026-10-05）冒烟：展开态真实下限 / visualViewport 参照 /
+    # 粗指针不抢焦点 / 按钮排水沟不遮挡（静态 public/ 服务 + 无头 Edge，桌面 + 手机双视口）
+    "composer_expand_smoke.cjs",
     # 手机端四项体验修复（§九.135，§六 已登记；都是"静态 public/ 服务 + 页面内真 import"的轻量形态）：
     # ① 手机回车=换行 ② 运行中拆两行+插话键 ③ 下载（文件面板/灯箱） ④ 附件两入口 ⑤ 文件动作条 ⑥ 编辑区存活
     "composer_enter_mobile_smoke.cjs", "composer_running_layout.cjs",
@@ -113,6 +116,9 @@ KEEP = {
     # 图片缓存重复写入审计（只读）：按 sha256 量出 generated/uploads 的冗余字节，
     # 并验证 existing_content_path 不漏命中、不误判
     "_dedup_write_audit.py",
+    # 原生工具轮「吞正文」修复的缓存字节探针（2026-10-05，只读）：真 Agent 循环 + 假 SSE，
+    # 比对修复前后外发请求体逐字节一致（前缀缓存契约），并证明正文只在界面外发、不进请求体
+    "_probe_toolcall_prose_bytes.py",
     # 「运行中并发改会话」冒烟：真实服务 + 可暂停假后端，钉住 run 的"冻结快照自足"契约
     # （改 `create_chat_run` 不再固化整段会话之前必须先跑通它）
     "run_freeze_smoke.py",

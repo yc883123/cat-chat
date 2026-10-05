@@ -719,8 +719,17 @@ class StreamMixins:
                 reasoning_streamer.feed(reasoning)
             if tool_calls:
                 # Native OpenAI tool calls must not appear as answer text.
+                # ⚠️ 这里**不得**再 `guard.detected = True`（2026-10-05 修复）：那会让守卫
+                # 永久闭嘴，tool_call **之后**到达的正文（Anthropic 原生顺序允许 text 与
+                # tool_use 交错）不再外发，末尾又被 `_build_action_from_native_tool_calls`
+                # 顶掉 ⇒ 界面只剩半句话。tool_call 载荷走 native_tool_calls 累加器、
+                # 不经 guard，不置位也不会泄漏成正文。
+                if text:
+                    # 同一 SSE 事件里 text 与 tool_calls 并存（OpenAI 规范允许、部分中转
+                    # 会合批）：这段 text 已被 inline_parser 吃走，不补在这里就永久丢失。
+                    full_content_parts.append(text)
+                    guard.feed(text, status)
                 guard.finish(status)
-                guard.detected = True
                 for call in tool_calls:
                     slot = native_tool_calls.setdefault(
                         call.get("index", 0), {"id": "", "name": "", "arguments": ""}

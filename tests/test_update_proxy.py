@@ -223,13 +223,19 @@ class ComposerExpandGuardTests(unittest.TestCase):
         self.run_stream = _read("public", "js", "11-run-stream.js")
         self.bind_js = _read("public", "js", "15-bind-events.js")
 
-    def test_toggle_button_sits_in_button_row_before_send(self) -> None:
+    def test_toggle_button_lives_inside_composer_input_after_textarea(self) -> None:
+        """S5 挪位（2026-10-05）：展开键从按钮列挪进输入框的右上角排水沟。
+
+        「在 composer-input 内部」用两侧锚点证明：排在 textarea 之后、下一个兄弟
+        （reasoning-wrap）之前——字符串切片做真包含证明太脆，这两条顺序断言等价。
+        """
         html = self.html
         expand_at = html.index('id="expandComposer"')
-        send_at = html.index('id="sendButton"')
-        composer_at = html.index('<form class="composer" id="composerForm">')
-        self.assertGreater(expand_at, composer_at)
-        self.assertLess(expand_at, send_at, "双三角键必须在发送键旁的按钮列里（不遮挡文本）")
+        self.assertGreater(expand_at, html.index('<div class="composer-input">'))
+        self.assertGreater(expand_at, html.index('id="messageInput"'),
+                           "展开键必须排在 textarea 之后（同一容器内的右上角）")
+        self.assertLess(expand_at, html.index('class="reasoning-wrap"'),
+                        "composer-input 之后的第一个兄弟是 reasoning-wrap；排在它前面 ⇒ 确在输入框内部")
 
     def test_expanded_cap_matches_css(self) -> None:
         import re
@@ -258,6 +264,8 @@ class ComposerExpandGuardTests(unittest.TestCase):
     def test_resize_reads_expanded_state_from_dom(self) -> None:
         self.assertIn("composerExpanded ? expandedCap() : MAX_COMPOSER_H", self.skill_refs,
                       "高度唯一写入点必须区分折叠/展开上限")
+        self.assertIn("Math.max(content, expandedMin())", self.skill_refs,
+                      "展开态必须有真实下限（S1）：短草稿点展开也得变高，否则「点了没反应」复发")
 
     def test_send_collapses_expanded_composer(self) -> None:
         self.assertIn("collapseComposerIfExpanded()", self.run_stream,

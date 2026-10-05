@@ -5,7 +5,8 @@
 // 覆盖：
 //   A. 五档视口 375 / 640 / 760 / 900 / 1440：
 //      - ≤760：轮次下拉可见（刻度轨的等价出口）、刻度轨由 CSS 隐藏；
-//      - >760：轮次下拉被 .mobile-only 隐藏、刻度轨可见；
+//      - ≥1000（宽桌面）：轮次下拉同样可见（落在顶栏左段中段）、刻度轨可见；
+//      - 761–999（窄桌面）：顶栏被 API+Agent+4 按钮占满，轮次下拉收起、只留刻度轨；
 //      - 全程无横向滚动；顶栏文字标签一律保留（§九.44）；手机端操作区按钮触摸目标 ≥44px。
 //   B. 文件面板：手机上为全屏抽屉（fixed / 非 display:none），桌面上仍是右侧栏（非 fixed）。
 //   C. 侧栏：手机上为抽屉（点 #openSidebar 打开、点遮罩关闭），桌面上是常驻侧栏。
@@ -69,6 +70,27 @@ async function probeFilePanel(page) {
   });
 }
 
+// 轮次跳转用 behavior:'smooth'：几十轮的跨距在 Chromium 里要 ~1.5s 才落点，
+// 固定 waitForTimeout 会读到中途位置（选中项还挂在半路的轮次上）。等滚动真正停下来。
+async function waitForScrollSettle(page, timeout = 6000) {
+  const deadline = Date.now() + timeout;
+  let last = null;
+  let stable = 0;
+  while (Date.now() < deadline) {
+    const top = await page.evaluate(() => Math.round(document.querySelector('#messages')?.scrollTop ?? -1));
+    if (top === last) {
+      stable += 1;
+      if (stable >= 3) break;
+    } else {
+      stable = 0;
+      last = top;
+    }
+    await page.waitForTimeout(120);
+  }
+  await page.waitForTimeout(300);  // 落点后再留一帧给 applyTurnJump 的落点同步
+  return last;
+}
+
 async function turnJumpSnapshot(page) {
   return page.evaluate(() => {
     const select = document.querySelector('#turnJumpSelect');
@@ -89,12 +111,28 @@ async function turnJumpSnapshot(page) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   const pageErrors = [];
   page.on('pageerror', (err) => pageErrors.push(`pageerror: ${err.message}`));
-  page.on('console', (msg) => { if (msg.type() === 'error') pageErrors.push(`console.error: ${msg.text()}`); });
+  page.on('console', (msg) => {
+    if (msg.type() !== 'error') return;
+    const text = msg.text();
+    // 形态冒烟常跑在全新隔离数据根上：未配置供应商时 POST /api/providers/models 会返回 400，
+    // 浏览器把它记成 "Failed to load resource" 的 console.error。这是环境噪音，不是 JS 异常；
+    // 本冒烟只守 app 自身抛出的 console.error（真实 JS 回归）。
+    if (/Failed to load resource/i.test(text)) return;
+    pageErrors.push(`console.error: ${text}`);
+  });
 
   try {
     await page.goto(`${BASE}/`, { waitUntil: 'load', timeout: 20000 });
     await page.waitForSelector('#messageInput', { timeout: 20000 });
     await page.waitForTimeout(1000);
+
+    // 首启引导弹窗是 <dialog open>，会拦截一切 pointer 事件（冒烟常跑在全新隔离数据根上）。
+    // 它不是被测对象，先关掉再进入点击类断言，否则 C 段的 #openSidebar 会被挡住。
+    await page.evaluate(() => {
+      const d = document.querySelector('#onboardingDialog');
+      if (d && d.open) d.close();
+    });
+    await page.waitForTimeout(200);
 
     // ---- A. 五档视口：形态切换（数据无关）----
     for (const width of VIEWPORTS) {
@@ -127,7 +165,14 @@ async function turnJumpSnapshot(page) {
           layout.actions.length > 0 && layout.actions.every((item) => item.minHeight === '44px' || item.height >= 44),
           JSON.stringify(layout.actions));
       } else {
-        check(`[${width}px] 电脑形态：轮次下拉被 .mobile-only 隐藏`, jumpDisplay === 'none', jumpDisplay);
+        // 桌面：≥1000px 顶栏放得下轮次下拉（落在左段中段）；761–999px 顶栏被 API+Agent+4 按钮占满，
+        // 下拉会被压成看不清的废桩，故收掉、只留刻度轨（刻度轨桌面恒在，功能不丢）。
+        const wideDesktop = width >= 1000;
+        if (wideDesktop) {
+          check(`[${width}px] 电脑形态：轮次下拉可见（落在左段中段）`, jumpDisplay !== 'none' && jumpDisplay !== 'missing', jumpDisplay);
+        } else {
+          check(`[${width}px] 电脑形态（窄）：轮次下拉收起（让位刻度轨）`, jumpDisplay === 'none', jumpDisplay);
+        }
         check(`[${width}px] 电脑形态：刻度轨可见`, railDisplay !== 'none' && railDisplay !== 'missing', railDisplay);
         check(`[${width}px] 电脑形态：侧栏是常驻侧栏（非 fixed）`, layout.sidebarPosition !== 'fixed', layout.sidebarPosition);
       }
@@ -199,13 +244,13 @@ async function turnJumpSnapshot(page) {
         const lastIndex = jump.optionCount - 1;
         const beforeJump = jump.scrollTop;
         await page.selectOption('#turnJumpSelect', String(lastIndex));
-        await page.waitForTimeout(1200);
+        await waitForScrollSettle(page);
         const afterToBottom = await turnJumpSnapshot(page);
         check('选择最后一轮后选中项落在该轮（跳转后高亮不漂移）',
           afterToBottom.value === String(lastIndex), JSON.stringify({ want: lastIndex, got: afterToBottom.value }));
 
         await page.selectOption('#turnJumpSelect', '0');
-        await page.waitForTimeout(1200);
+        await waitForScrollSettle(page);
         const afterToTop = await turnJumpSnapshot(page);
         check('选择第 1 轮后选中项回到第 1 轮',
           afterToTop.value === '0', JSON.stringify(afterToTop));

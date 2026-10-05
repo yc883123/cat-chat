@@ -98,13 +98,33 @@ class TopbarStyleTests(unittest.TestCase):
         self.assertNotIn("var(--sidebar)", rule, "又用上侧栏深色底")
         self.assertNotIn("color: var(--sidebar-text)", rule)
 
+    def test_file_button_hidden_really_hides(self) -> None:
+        """`[hidden]` 必须显式 display:none。
+
+        真实事故：`.topbar-actions .control-button { display: inline-flex }`（作者样式）会压过
+        UA 的 `[hidden] { display: none }`，导致 `updateFileTabsButton()` 里 `button.hidden = true`
+        没生效——空会话也常驻一个 78px 的「文件」按钮，在窄桌面顶栏白占位、把轮次下拉挤出左段。
+        """
+        css = self._css()
+        self.assertIn(".file-reopen-button[hidden] { display: none; }", css)
+        # 反例护栏：不能只有 :not([hidden]) 那条。
+        self.assertIn(".file-reopen-button:not([hidden]) {", css)
+
     def test_topbar_buttons_do_not_wrap_or_shrink(self) -> None:
-        """顶栏操作区不被压缩、按钮文字不换行（否则会挤成竖排文字）。"""
+        """顶栏操作区吃左段余量且可被压缩，但压缩量只由「轮次下拉」吸收——
+        按钮一律 flex:none、文字不换行（否则窗口偏窄时会被挤成竖排文字）。"""
         css = self._css()
         actions = css[css.index(".topbar-actions {"):]
         actions = actions[: actions.index("}")]
-        self.assertIn("flex: none", actions)
-        self.assertIn(".topbar-actions > * { flex: none; }", css)
+        self.assertIn("flex: 1 1 auto", actions, "操作区吃余量、可压缩；压缩量由内部轮次下拉吸收")
+        self.assertIn("min-width: 0", actions, "min-width:0 否则操作区不收缩、顶栏溢出右缘")
+        self.assertIn(".topbar-actions > * { flex: none; }", css, "按钮默认不被压缩（保形、贴右缘）")
+        # 唯一例外：轮次下拉在桌面端显式允许收缩（shrink:100），先截断它、不动按钮。
+        self.assertIn(
+            ".topbar-actions > .turn-jump-select { flex: 0 100 260px; }",
+            css,
+            "桌面轮次下拉显式收缩，且 flex-basis 写死（auto 会触发 Chromium 收缩不回收）",
+        )
         base = css[css.index(".control-button, .mcp-button, .text-button {"):]
         base = base[: base.index("}")]
         self.assertIn("white-space: nowrap", base)
@@ -148,7 +168,7 @@ class TopbarStyleTests(unittest.TestCase):
         )
 
     def test_turn_jump_select_lives_in_topbar_actions(self) -> None:
-        """手机端轮次下拉在顶栏操作区（桌面由 .mobile-only 隐藏），细节见 test_turn_jump.py。"""
+        """轮次下拉在顶栏操作区（手机 / 桌面共用一个元素，桌面落在左段中段），细节见 test_turn_jump.py。"""
         index = self._index()
         actions = index[index.index('class="topbar-actions"'):]
         actions = actions[: actions.index("</header>")]

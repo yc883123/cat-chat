@@ -117,8 +117,10 @@
           <small>两条路任选其一即可，一般不需要同时开。Agent 的每个工具在设置页都有说明，不确定就先只读模式试试。</small>
         </div>
         <div class="topbar-actions">
-          <!-- 手机端：桌面刻度轨的等价形态（轮次下拉）；桌面由 .mobile-only 隐藏 -->
-          <select class="mobile-only turn-jump-select" id="turnJumpSelect" aria-label="跳转到对话轮次" title="跳转到对话轮次" hidden></select>
+          <!-- 轮次下拉：桌面刻度轨的等价形态，手机 / 桌面共用同一个元素。
+               手机端由 760 块顶到操作区行首；桌面端靠 margin-right:auto 落在
+               「Agent 之后、[文件] 之前」——即左段中段，不额外占宽。 -->
+          <select class="turn-jump-select" id="turnJumpSelect" aria-label="跳转到对话轮次" title="跳转到对话轮次" hidden></select>
           <button class="control-button file-reopen-button" id="openFileTabs" type="button" hidden title="重新打开文件面板（保留已打开的文件标签）">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8.5L19 7.5V21H6z"></path><path d="M14.5 3v4.5H19"></path></svg>
             <span id="fileTabsCount">0</span>

@@ -448,21 +448,53 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .turn-tip-index { margin-bottom: 4px; color: var(--muted); font-size: 11px; }
 .turn-tip-user { font-size: 13.5px; font-weight: 600; color: var(--text); display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
 .turn-tip-reply { margin-top: 5px; font-size: 11.5px; font-weight: 400; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.topbar { position: relative; z-index: 2; display: flex; align-items: center; gap: 14px; justify-content: space-between; padding: 0 20px; background: color-mix(in srgb, var(--surface) 94%, transparent); border-bottom: 1px solid var(--line); }
+/* min-width:0 是关键：顶栏是 .chat-main 网格里的单项，默认 min-width:auto 会取
+   min-content——一旦「轮次下拉」在桌面显示（min-content 含它那 266px 的 max-width），
+   顶栏就被撑到比单元格更宽、越过窗口右缘，把刷新键顶出可视区（1024/900 实测）。
+   置 0 后顶栏回到单元格宽度，收缩交给 .topbar-actions 里那个可 shrink 的下拉。 */
+.topbar { position: relative; z-index: 2; min-width: 0; display: flex; align-items: center; gap: 14px; justify-content: space-between; padding: 0 20px; background: color-mix(in srgb, var(--surface) 94%, transparent); border-bottom: 1px solid var(--line); }
 .workspace-control { min-width: 110px; max-width: 180px; height: 34px; display: flex; flex: 0 1 160px; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); color: var(--text); padding: 0 10px; text-align: left; overflow: hidden; }
 .workspace-control:hover { border-color: var(--line-strong); background: var(--surface-2); }
 .workspace-control span { color: var(--muted); font-size: 11px; flex: none; }
 .workspace-control b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
 /* 「模型 / Agent」标签：禁止被 flex 压缩、禁止换行，强制横向排版，避免挤压后变成竖排 */
 .model-control > span, .agent-control > span { flex: none; white-space: nowrap; writing-mode: horizontal-tb; }
-/* 顶栏「模型 / Agent」控件 */
-.model-control { min-width: 0; display: flex; flex: 1 1 180px; gap: 10px; align-items: center; color: var(--muted); font-size: 12px; }
-.agent-control { flex: 0 1 170px; }
-.model-control select { width: 100%; max-width: min(480px, 45vw); height: 34px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); color: var(--text); padding: 0 30px 0 10px; }
-/* 顶栏操作区：自身不被压缩（flex: none），子按钮也不被压缩 + 文字不换行——
-   否则窗口偏窄时按钮会被挤成竖排文字（实测「卸载模型/刷新」竖着排、「文件」拆成两行）。 */
-.topbar-actions { display: flex; gap: 8px; align-items: center; flex: none; }
+/* 顶栏「模型 / Agent」控件。
+   注意：API 控件曾用 flex:1 1 180px 独吞左段余量，把它的 select 撑到 480px（名字再短也照样
+   拉满），并把 Agent 顶到操作区旁边。改为不 grow + 收窄 max-width 后，余量交给
+   .topbar-actions 承载，轮次下拉才有「中段」可落（详见 .turn-jump-select）。 */
+.model-control { min-width: 0; display: flex; flex: 0 1 auto; gap: 10px; align-items: center; color: var(--muted); font-size: 12px; }
+.agent-control { min-width: 0; flex: 0 1 170px; }
+.model-control select { width: 100%; max-width: min(240px, 24vw); height: 34px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); color: var(--text); padding: 0 30px 0 10px; }
+/* 顶栏操作区：容器接管左段余量（flex:1），子按钮仍不被压缩 + 文字不换行——
+   否则窗口偏窄时按钮会被挤成竖排文字（实测「卸载模型/刷新」竖着排、「文件」拆成两行）。
+   justify-content:flex-end 保证「轮次下拉不足 2 轮被 hidden」时按钮依旧贴右缘。 */
+/* min-width:0 让操作区可被压缩；压缩量靠内部下拉的高 flex-shrink 全部吸收，
+   右侧按钮（flex:none）保形、贴右缘。 */
+.topbar-actions { display: flex; gap: 8px; align-items: center; flex: 1 1 auto; min-width: 0; justify-content: flex-end; }
 .topbar-actions > * { flex: none; }
+/* 桌面端「轮次」下拉：与手机端同一个 #turnJumpSelect（刻度轨的等价出口）。
+   margin-right:auto 把 auto 余量全吃掉 → 它钉在操作区行首，视觉落点 = Agent 之后、[文件] 之前
+   （左段中段）。auto 余量先于 justify-content 分配，故两种 justify 下都不受影响。
+   窗口变窄时允许收缩（覆盖 .topbar-actions > * 的 flex:none），先省略号截断，不挤掉右侧按钮。 */
+.turn-jump-select { display: inline-block; flex: 0 1 auto; min-width: 0; height: 34px; padding: 0 8px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); color: var(--text); font-family: inherit; font-size: 12px; text-overflow: ellipsis; cursor: pointer; margin-right: auto; }
+.turn-jump-select:hover { border-color: var(--line-strong); }
+.turn-jump-select[hidden] { display: none; }
+/* 桌面端轮次下拉：允许收缩（覆盖 .topbar-actions > * 的 flex:none），先截断下拉、
+   不动「模型 / Agent」名字，按钮（flex:none）永远最后。
+   关键：flex-basis 必须写死（260px），不能用 auto——`<select>` 在 Chromium 下 auto 基准
+   会取「上次渲染宽度」，窗口一缩被压到 0 后即使再放大也回不来（实测 1440→1100→1440 恒为 0）。
+   手机端形态完全不动（显示规则仍在既有 760 块内）。 */
+@media (min-width: 761px) {
+  .topbar-actions > .turn-jump-select { flex: 0 100 260px; }
+}
+/* 桌面顶栏再窄下去（视口 <1000px：顶栏要给 API + Agent + 4 个按钮让位），
+   下拉会被压成「第 1 …」甚至只剩一根箭头（900px 实测 75px、800px 仅 27px）——
+   与其留一根看不懂的废桩，不如收掉：桌面端刻度轨恒在，跳轮功能不丢。
+   注：按视口宽度判断，不感知侧栏是否收起（收窄到 1000 以下且侧栏展开时才隐藏）。 */
+@media (min-width: 761px) and (max-width: 999px) {
+  .topbar-actions > .turn-jump-select { display: none; }
+}
 .topbar-actions .control-button { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .topbar-actions .control-button svg { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 /* 顶栏折叠条：只在手机形态（≤760px 块）里出现，桌面端彻底不渲染。 */
@@ -489,6 +521,11 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .task-button #taskCount.is-idle { color: var(--muted); font-weight: 500; }
 /* 文件面板重开按钮：与其它顶栏按钮同款（此前用侧栏深色底，与浅色主题格格不入、hover 也不一致）。 */
 .file-reopen-button:not([hidden]) { display: inline-flex; align-items: center; gap: 6px; }
+/* [hidden] 必须显式关掉：上面 `.topbar-actions .control-button { display: inline-flex }`（作者样式）
+   会压过 UA 的 `[hidden] { display: none }`，导致没开过文件时空会话也常驻一个 78px 的「文件」按钮——
+   既与 `updateFileTabsButton()` 的 `button.hidden = !show` 意图相悖，又在窄桌面顶栏白占 78px
+   把「轮次」下拉挤到左段外（900px 实测重叠）。 */
+.file-reopen-button[hidden] { display: none; }
 #fileTabsCount { font-variant-numeric: tabular-nums; font-weight: 600; }
 .file-reopen-button #fileTabsCount[hidden] { display: none; }
 .file-reopen-button.has-tabs #fileTabsCount { color: var(--accent); }

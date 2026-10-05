@@ -218,7 +218,8 @@ class TopbarCollapseStyleTests(unittest.TestCase):
         css = self._css()
         actions = css[css.index(".topbar-actions {"):]
         actions = actions[: actions.index("}")]
-        self.assertIn("flex: none", actions)
+        self.assertIn("flex: 1 1 auto", actions, "操作区吃余量、可压缩（压缩量由内部轮次下拉吸收）")
+        self.assertIn("min-width: 0", actions)
         self.assertIn(".topbar-actions > * { flex: none; }", css)
         buttons = css[css.index(".control-button, .mcp-button, .text-button {"):]
         buttons = buttons[: buttons.index("}")]

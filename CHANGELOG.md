@@ -5,6 +5,14 @@
 
 ---
 
+## 3.1.4 Beta 主要能力
+- **「看看那个视频」稳定出卡（本次重点）**：意图判定的媒体词此前只认图片词，枚举类工具（列目录 / 搜文件）返回的视频、音频一律不出卡——出不出取决于话术里有没有碰巧带「图」字。现补入视频/影片/音频/音乐/语音与 mp4/webm/mov/mp3/wav 等扩展名（拉丁词带词边界，防「mov 命中 remove」类误伤），动作词补「播放/试听/听听」；「媒体词 + 动作词双命中才放行」的老约束不变，「我听说那个视频」这类仅提及仍不出卡。
+- **正斜杠路径补抓**：文本兜底正则的盘符段此前只认反斜杠，工具输出 `D:/out/a.mp4` 直接漏抓；现两种斜杠都认。
+- **JSON 散文内嵌路径补抓**：`{"msg": "已保存到 D:\a.mp4（完成）"}` 这类散文包路径此前被静默丢弃；scan 模式现在会从 JSON 字符串值里抠出内嵌路径出卡，structured 模式维持「严格不回退文本扫描」的既有契约。
+- **缓存零影响（三层验证）**：提取只读不改写工具结果；改前改后 `build_model_history` 产物 sha256 逐字节一致；teynex 真实三轮 `prompt_cache_hit_tokens` 0→128→128 命中正常。
+- **升级须知**：纯后端提取层改动（`core/attachments.py` + `storage/media_collect.py`），前端、协议、数据格式一处未动，无数据库迁移；历史会话、收藏、分支、API 卡片、Agent、Skill 与 MCP 配置原样保留，直接覆盖安装即可。
+- **验证**：全量单测 **2431** 通过（本版新增 8 例守门：`IntentTermTests` 意图命中矩阵 + `ExtractionWideningTests` 正斜杠 / JSON 散文 / 提取不改写 result）。
+
 ## 3.1.3 Beta 主要能力
 - **桌面顶栏补齐轮次跳转下拉（本次重点）**：手机端早有的「第 N 轮 · 摘要」下拉（`#turnJumpSelect`，此前挂 `.mobile-only`）改为桌面共用——去掉 `.mobile-only`，桌面端（第一个 `@media (max-width: 760px)` 块之外）加基态规则 `display: inline-block; flex: 0 1 auto; min-width: 0; margin-right: auto` + `[hidden] { display: none }` 成对规则。复用既有的 `renderTurnJump` / `scrollToTurn` / `collectTurns`，不新开模块、不搬动 DOM；桌面端 26px 刻度轨（`.turn-rail`）原样保留。
 - **落点 = 左段中段**：下拉作 `.topbar-actions` 的第一个子元素、靠 `margin-right: auto` 钉在操作区行首。`auto` 余量先于 `justify-content` 分配，所以稳定落在「Agent 之后、[文件] 之前」，不受右段对齐影响；吃的是 API 选择器让出来的余量，不额外占宽。

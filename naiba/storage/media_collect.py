@@ -51,7 +51,9 @@ _SOURCE_KEYS = ("path", "source", "url", "view_url", "file")
 _THUMB_KEYS = ("thumb_path", "thumbnail", "thumb_url")
 _NAME_KEYS = ("name", "filename")
 # 纯文本结果里的路径兜底（盘符路径与 URL）；截断尾部标点。
-_TEXT_PATH_RE = re.compile(r"(?:[A-Za-z]:\\[^\r\n\"']+|https?://[^\s\"']+)")
+# 盘符段同时认正斜杠与反斜杠（2026-10-06 出卡修复）：工具输出 `D:/out/a.mp4`
+# 与 `D:\out\a.mp4` 同样合法，只认反斜杠会漏抓正斜杠路径。
+_TEXT_PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/][^\r\n\"']+|https?://[^\s\"']+)")
 # 路径在中文/全角散文里会黏上后缀（write_file 返回「已写入 C:\a.png（12 字符）」，
 # 旧实现在这里判失败 → 写出的图片既无"修改文件"chip、也无媒体卡，产物彻底不可见）。
 # 截断点取首个散文终止符；**不含** `:`（盘符/URL 用）与空格（路径可含空格）。
@@ -306,6 +308,7 @@ def _candidates_from_result(result: str, extract: str, *, tool: str = "") -> lis
         _visit(payload, candidates)
         return candidates
     # scan：结构化优先，失败回退文本路径扫描（与旧 extract_attachments 口径一致）。
+    # JSON 解析成功时按 scan 口径递归（prose=True：字符串值里的散文内嵌路径也抓）。
     try:
         payload = json.loads(text)
     except (json.JSONDecodeError, TypeError, ValueError):
@@ -314,7 +317,7 @@ def _candidates_from_result(result: str, extract: str, *, tool: str = "") -> lis
             for source in _text_media_sources(text)
         ]
     candidates = []
-    _visit(payload, candidates)
+    _visit(payload, candidates, prose=True)
     return candidates
 
 
@@ -347,15 +350,25 @@ def _text_media_sources(text: str) -> list[str]:
     return sources
 
 
-def _visit(value: Any, out: list[dict[str, str]]) -> None:
-    """递归扫描结果，收集媒体来源（结构化记录优先，命中即不再深入该节点）。"""
+def _visit(value: Any, out: list[dict[str, str]], *, prose: bool = False) -> None:
+    """递归扫描结果，收集媒体来源（结构化记录优先，命中即不再深入该节点）。
+
+    ``prose=True``（仅 scan 模式传入）：字符串值整串不命中媒体扩展名时，回退
+    ``_text_media_sources`` 扫内嵌路径——JSON 里的散文（如
+    ``{"msg": "已保存到 D:\\a.mp4（完成）"}``）不再静默丢失。
+    structured 模式必须保持 ``prose=False``：严格不回退文本扫描是既有契约
+    （vision_analyze 分析形态返回散文是合法情形，散文里提到的路径不是本轮产物）。
+    """
     if isinstance(value, str):
         if media_kind_of(value):
             out.append({"source": value, "name": "", "thumb_path": ""})
+        elif prose:
+            for source in _text_media_sources(value):
+                out.append({"source": source, "name": "", "thumb_path": ""})
         return
     if isinstance(value, list):
         for item in value:
-            _visit(item, out)
+            _visit(item, out, prose=prose)
         return
     if not isinstance(value, dict):
         return
@@ -375,7 +388,7 @@ def _visit(value: Any, out: list[dict[str, str]]) -> None:
         out.append({"source": media_source, "name": name, "thumb_path": thumb})
         return
     for item in value.values():
-        _visit(item, out)
+        _visit(item, out, prose=prose)
 
 
 def _dedupe_candidates(candidates: list[dict[str, str]]) -> list[dict[str, str]]:

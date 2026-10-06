@@ -24,7 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from naiba.core.attachments import union_run_media  # noqa: E402
+from naiba.core.attachments import _image_intent, union_run_media  # noqa: E402
 from naiba.core.contracts import EVENT_PAYLOAD_KEYS, RUN_CONTEXT_KEYS  # noqa: E402
 from naiba.core.messages import MESSAGE_METADATA_KEYS, MetadataKeys  # noqa: E402
 from naiba.core.media_types import MEDIA_BUCKET_LIMITS  # noqa: E402
@@ -392,6 +392,77 @@ class UnionRunMediaTests(_TempCase):
     def test_legacy_runs_without_media(self) -> None:
         self.assertEqual(union_run_media([{"tool": "read_file", "result": "文本"}]), ([], None))
         self.assertEqual(union_run_media([]), ([], None))
+
+
+class IntentTermTests(unittest.TestCase):
+    """意图词表守门（2026-10-06 出卡修复）：媒体词补视频/音频，双词约束不变。
+
+    修复前 `_IMAGE_MEDIA_TERM_RE` 只有图片词 ⇒ 「看看那个视频」判无意图，
+    枚举类工具返回的视频/音频一律不出卡，出不出取决于话术里碰不碰巧带「图」字。
+    """
+
+    def test_video_audio_intents_hit(self) -> None:
+        for text in (
+            "看看那个视频",
+            "把生成的 mp3 给我",
+            "列出 D:/out 里的 mp4",
+            "播放刚才生成的 wav",
+            "试听一下这段 mp3",
+            "那个 webm 显示一下",
+            "看一下生成的图片",  # 图片词路径不得回归
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(_image_intent(text), f"应为媒体意图：{text}")
+
+    def test_mention_without_action_is_not_intent(self) -> None:
+        for text in (
+            "我听说那个视频",  # 「听说」不含「听听/试听」——单字「听」不入动作词的原因
+            "这个视频是谁做的",
+            "那个 mp4 文件挺大的吧",
+            "remove the old video file",  # 拉丁词必须有边界：mov 不得命中 remove
+            "关于图片的说明文档",  # 只是提及，无动作词
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(_image_intent(text), f"不应判为媒体意图：{text}")
+
+
+class ExtractionWideningTests(_TempCase):
+    """提取面放宽守门：正斜杠路径、JSON 散文内嵌路径、result 不可变。"""
+
+    def _make_mp4(self, name: str) -> Path:
+        path = self.src / name
+        path.write_bytes(b"fake mp4 bytes")
+        return path
+
+    def test_forward_slash_path_is_extracted(self) -> None:
+        target = self._make_mp4("fwd.mp4")
+        forward = str(target).replace("\\", "/")
+        collected = self.collector.collect(_run(f"已保存到 {forward}（完成）"), INLINE)
+        self.assertEqual(len(collected["media"]), 1, "正斜杠路径不得漏抓")
+        self.assertEqual(collected["media"][0]["kind"], "video")
+
+    def test_json_prose_path_extracted_in_scan_mode(self) -> None:
+        target = self._make_mp4("prose.mp4")
+        result = json.dumps({"msg": f"已保存到 {target}（完成）"}, ensure_ascii=False)
+        collected = self.collector.collect(_run(result), INLINE)
+        self.assertEqual(len(collected["media"]), 1, "JSON 散文里包的路径不得静默丢失")
+        self.assertEqual(collected["media"][0]["kind"], "video")
+
+    def test_structured_mode_still_rejects_prose(self) -> None:
+        """structured 模式严格不回退文本扫描的既有契约不得被本次放宽破坏。"""
+        target = self._make_mp4("strict.mp4")
+        result = json.dumps({"msg": f"已保存到 {target}（完成）"}, ensure_ascii=False)
+        self.assertEqual(self.collector.collect(_run(result), STRUCTURED)["media"], [])
+
+    def test_collect_does_not_mutate_result(self) -> None:
+        """提取只读不改写工具结果——wire 层字节稳定的根基（缓存命中验证第 1 层）。"""
+        target = self._make_png("frozen.png")
+        run = _run(f"已写入 {target}（12 字符）")
+        snapshot = run["result"]
+        self.collector.collect(run, INLINE)
+        self.collector.collect(run, STRUCTURED)
+        self.collector.collect(run, {"policy": "intent_gated", "extract": "scan"})
+        self.assertEqual(run["result"], snapshot)
 
 
 class AgentCollectorWiringTests(unittest.TestCase):

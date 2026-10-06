@@ -1,33 +1,32 @@
-# Cat Chat 3.1.3 Beta
+# Cat Chat 3.1.4 Beta
 
 <p align="center">
   <img src="docs/cat-chat-logo.png" alt="Cat Chat" width="520">
 </p>
 
-Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。3.1.3 Beta 的主题是**桌面顶栏补齐轮次跳转下拉**：手机端早有的「第 N 轮 · 摘要」下拉落到桌面顶栏左段中段（Agent 之后、[文件] 之前），复用同一元素与逻辑、刻度轨原样保留；顺带修掉空会话常驻「文件」按钮与顶栏窄宽溢出。
+Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。3.1.4 Beta 的主题是**媒体卡片「碰运气出卡」修复**：枚举工具返回的视频/音频不再因话术里没带「图」字而漏卡，正斜杠路径与 JSON 散文内嵌路径一并补抓，缓存零影响经三层验证。
 
 > Cat Chat 原名 Naiba Chat。显示名自 2.7.6 Beta 起为 Cat Chat；GitHub 仓库自 2.8.0 Beta 起更名为 `cat-chat`（旧地址自动跳转）。更新资产仍使用 `naiba-chat.exe` 与原有清单协议，既有数据位置不变，无需重新配置或搬迁数据。
 
-## 3.1.3 Beta 主要能力
-- **桌面也能跳轮次了（本次重点）**：手机端早有的「第 N 轮 · 摘要」下拉落到桌面顶栏左段中段（Agent 之后、[文件] 之前）——复用同一个 `#turnJumpSelect` 元素与 `renderTurnJump` / `scrollToTurn` 逻辑，不新开模块、不搬动 DOM，刻度轨原样保留。
-- **API 选择器收窄让位**：API 控件由 `flex: 1 1 180px`（select 被撑到 480px）改为不 grow、上限收到 `min(240px, 24vw)`，让出的左段余量交给操作区，中段才有位置。
-- **顶栏窄宽溢出修复**：顶栏默认 `min-width: auto` 取 min-content，下拉一显示就把顶栏撑得越过窗口右缘、把刷新键顶出可视区（1024 / 900 实测）；置 `min-width: 0` 后回到单元格宽度。
-- **窄桌面收起下拉（有意取舍）**：761–999px 顶栏被 API + Agent + 4 个按钮占满，下拉会被压成「第 1 …」甚至一根箭头（900px 实测 75px、800px 仅 27px）——与其留一根废桩，不如收掉；桌面端刻度轨恒在，跳轮能力不丢。
-- **顺带修「空会话常驻文件按钮」**：`.file-reopen-button:not([hidden])` 的作者样式压过 UA 的 `[hidden] { display: none }`，空会话也常驻一个 78px 的「文件」按钮；补一条同特异度成对规则压回。
-- **升级须知**：纯前端 + 测试 / 冒烟改动，后端、协议、数据格式一处未动，无数据库迁移；历史会话、收藏、分支、API 卡片、Agent、Skill 与 MCP 配置原样保留，直接覆盖安装即可。手机端形态完全没动。
-- **验证**：全量单测 **2425** 通过（本版新增 1 例守门 `test_file_button_hidden_really_hides`，`test_turn_jump` / `test_topbar` / `test_mobile_topbar` 三处守门同步改写判据）；`verify/mobile_shell_smoke.cjs` 五档视口（375 / 640 / 760 / 900 / 1440）A/B/C/D 四段 **40** 项断言全绿。
+## 3.1.4 Beta 主要能力
+- **「看看那个视频」稳定出卡（本次重点）**：意图判定的媒体词此前只认图片词，枚举类工具（列目录 / 搜文件）返回的视频、音频一律不出卡——出不出取决于话术里有没有碰巧带「图」字。现补入视频/影片/音频/音乐/语音与 mp4/webm/mov/mp3/wav 等扩展名（拉丁词带词边界，防「mov 命中 remove」类误伤），动作词补「播放/试听/听听」；「媒体词 + 动作词双命中才放行」的老约束不变，「我听说那个视频」这类仅提及仍不出卡。
+- **正斜杠路径补抓**：文本兜底正则的盘符段此前只认反斜杠，工具输出 `D:/out/a.mp4` 直接漏抓；现两种斜杠都认。
+- **JSON 散文内嵌路径补抓**：`{"msg": "已保存到 D:\a.mp4（完成）"}` 这类散文包路径此前被静默丢弃；scan 模式现在会从 JSON 字符串值里抠出内嵌路径出卡，structured 模式维持「严格不回退文本扫描」的既有契约。
+- **缓存零影响（三层验证）**：提取只读不改写工具结果；改前改后 `build_model_history` 产物 sha256 逐字节一致；teynex 真实三轮 `prompt_cache_hit_tokens` 0→128→128 命中正常。
+- **升级须知**：纯后端提取层改动（`core/attachments.py` + `storage/media_collect.py`），前端、协议、数据格式一处未动，无数据库迁移；历史会话、收藏、分支、API 卡片、Agent、Skill 与 MCP 配置原样保留，直接覆盖安装即可。
+- **验证**：全量单测 **2431** 通过（本版新增 8 例守门：`IntentTermTests` 意图命中矩阵 + `ExtractionWideningTests` 正斜杠 / JSON 散文 / 提取不改写 result）。
 > 各版本说明与历史更新日志见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 开始使用
 
 ### 使用 Windows 版本
 
-1. 下载 `cat-chat-3.1.2-beta-windows-x64.zip`。
+1. 下载 `cat-chat-3.1.4-beta-windows-x64.zip`。
 2. 解压到一个可写目录。
 3. 运行 `cat-chat.exe`。
 4. 在设置中添加在线 API 或本地模型服务。
 
-> 归档里也提供旧名 `naiba-chat-3.1.2-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
+> 归档里也提供旧名 `naiba-chat-3.1.4-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
 
 首次运行会创建本地数据目录。升级时请直接替换程序文件，不要删除原有 `data` 目录和配置文件。
 
@@ -113,14 +112,14 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 - `naiba-chat.exe` —— **自动更新链路唯一使用的资产，永久保留此文件名**
 - `naiba-chat-update.json` —— 更新清单，其中 `repository` 字段永久写 `yc883123/naiba-chat`
 - `cat-chat.exe` —— 与 `naiba-chat.exe` 是同一文件，SHA-256 完全相同
-- `cat-chat-3.1.2-beta-windows-x64.zip`
-- `naiba-chat-3.1.2-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
+- `cat-chat-3.1.4-beta-windows-x64.zip`
+- `naiba-chat-3.1.4-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
 
 更新器会验证清单中的仓库、提交、文件名和 SHA-256。下载文件还必须是有效的 Windows 可执行文件；任何一项不一致都会终止安装。**自动更新始终读取 `naiba-chat.exe` 与清单里的旧仓库名**（GitHub 对旧仓库地址做长期重定向），这是已发布客户端逐字校验的协议，仓库改名后也不改值。
 
 ## Beta 说明
 
-这是 3.1.2 Beta，适合实际使用和反馈，但仍有以下边界：
+这是 3.1.4 Beta，适合实际使用和反馈，但仍有以下边界：
 
 - 不内置 ComfyUI、模型权重或第三方生成服务，需用户自行安装和配置。
 - 不同模型的工具调用质量差异较大，小型模型可能无法稳定完成长链任务。
@@ -134,7 +133,7 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 ```powershell
 Get-ChildItem public\js\*.js | ForEach-Object { node --check $_.FullName }
 python -m unittest discover -s tests -q
-$env:NAIBA_BUILD_VERSION = "3.1.2-beta"
+$env:NAIBA_BUILD_VERSION = "3.1.4-beta"
 python -m PyInstaller --noconfirm --clean naiba-chat.spec
 ```
 

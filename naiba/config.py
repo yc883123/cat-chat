@@ -41,6 +41,18 @@ CHAT_FONT_SIZE_DEFAULT = 15
 # 自定义字体串只作为 font-family 片段注入 CSS 变量，截断长度是纵深防御。
 CHAT_FONT_FAMILY_CUSTOM_MAX = 100
 
+# ---- Skill 大小上限（设置项 skill_max_size_mb）----
+# 设置值 0 = 跟随下列内置默认（与引入该设置前散在 app.py / skills.install.py 里的
+# 硬编码逐字一致，老用户行为零变化）；设为 10~2048 的正数后各链路统一放宽到该值。
+# 这里的数值是**唯一事实来源**：app.py（UI 导入）与 skills/install.py（AI 帮装）
+# 的兜底值必须与这里一致（守门见 tests/test_skill_size_limit.py）。
+SKILL_ZIP_MAX_MB_DEFAULT = 80        # UI 上传 zip 包本体（/api/skills/install）
+SKILL_FOLDER_MAX_MB_DEFAULT = 300    # UI 上传文件夹总大小（/api/skills/install_folder）
+SKILL_UNPACKED_MAX_MB_DEFAULT = 500  # UI zip 解压后总大小
+SKILL_TOOL_MAX_MB_DEFAULT = 50       # AI 帮装（install_skill / unpack_skill_archive）
+SKILL_MAX_SIZE_MB_MAX = 2048         # 设置项允许的最大值（MB）
+SKILL_HTTP_BODY_MB_MIN = 130         # Skill 导入端点 HTTP 请求体兜底上限（= 全局默认）
+
 # ---- 侧栏「分组与排序」偏好（照 DeepSeek Harness 口径）----
 # 与 appearance 同款的小而稳的枚举：配置迁移与运行时更新共用同一份校验规则。
 # group：按工作区分组 / 单列表；sort：手动 / 最近更新 / 按名称；
@@ -189,6 +201,21 @@ def clamp_chat_font_size(value: Any) -> int:
 def clean_chat_font_family_custom(value: Any) -> str:
     """自定义字体串：去空白 + 截断。它只作为 font-family 栈片段注入 CSS 变量。"""
     return str(value or "").strip()[:CHAT_FONT_FAMILY_CUSTOM_MAX]
+
+
+def clamp_skill_max_size_mb(value: Any) -> int:
+    """Skill 大小上限（MB）：0 = 内置默认；其余夹回 10~2048，转不动回 0。
+
+    加载路径兜底（手改 config.json 的越界值静默夹回，不让整份配置加载失败）；
+    真正的"非法输入"由更新路径的 `_validated_skill_max_size` 显式拦住。
+    """
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return 0
+    if parsed == 0:
+        return 0
+    return max(10, min(SKILL_MAX_SIZE_MB_MAX, parsed))
 
 
 def normalize_appearance(appearance: Any) -> dict[str, Any]:
@@ -385,6 +412,12 @@ def default_config() -> dict[str, Any]:
             "model": "",
             "max_results": 5,
         },
+        # 「Skill 大小上限」（MB）：0 = 跟随内置默认（zip 包 80 / 文件夹 300 / 解压后 500 /
+        # AI 帮装 50 / Skill 导入 HTTP 请求体 130，与引入该设置前逐字一致，老用户零变化）。
+        # 设为 10~2048 后各链路统一放宽到该值；Skill 导入端点的 HTTP 请求体按 ×1.5
+        # 自动派生（base64 膨胀余量），只对这两个端点生效、聊天请求不动。
+        # 内置默认数值的唯一事实来源是本文件顶部 SKILL_*_MAX_MB_DEFAULT 常量。
+        "skill_max_size_mb": 0,
         # 「更新代理」：只作用于「检查更新 / 更新下载」这条链路（GitHub 直连在部分
         # 网络下会长时间卡住），与全局 proxy 解耦——用户可能在 TUN 模式下让全局直连，
         # 但仍需要给更新单独挂一个代理。mode=inherit 表示完全跟随全局 proxy（默认，
@@ -1260,6 +1293,10 @@ class ConfigStore:
                 imaging_defaults = dict(defaults.get("imaging") or {})
                 imaging_defaults["generated_clean_limit_mb"] = inherited
                 defaults["imaging"] = imaging_defaults
+        # Skill 大小上限：手改配置的越界/非法值静默夹回（0 或 10~2048），不让加载失败。
+        defaults["skill_max_size_mb"] = clamp_skill_max_size_mb(
+            defaults.get("skill_max_size_mb", 0)
+        )
         self.data = defaults
         self._migrate_conversation_prompt_presets()
         self._migrate_tool_sets()
@@ -1593,6 +1630,8 @@ class ConfigStore:
             }
             result["resolved_workspace_dir"] = str(self.resolve_workspace_dir())
             result["resolved_data_dir"] = str(self.resolve_data_dir())
+            # Skill 大小上限的当前生效值：导入对话框文案与前端预检都用这份服务端算好的值。
+            result["skill_size_limits"] = self.skill_size_limits()
             return result
 
     def get_skills_dirs(self) -> list[str]:
@@ -2083,6 +2122,7 @@ class ConfigStore:
             "reasoning_replay_max_chars",
             "reasoning_replay_turn_chars",
             "image_encode_cache_mb",
+            "skill_max_size_mb",
             "agent_step_limit",
             "interject_direct_send",
             "context_reset_seed_template",
@@ -2135,6 +2175,8 @@ class ConfigStore:
                         if not isinstance(values[key], bool):
                             raise ValueError("interject_direct_send 必须是布尔值")
                         self.data[key] = values[key]
+                    elif key == "skill_max_size_mb":
+                        self.data[key] = self._validated_skill_max_size(values[key])
                     elif key == "workspace_dir":
                         raw = str(values[key] or "").strip()
                         if not raw:
@@ -3154,6 +3196,52 @@ class ConfigStore:
         if not (CHAT_FONT_SIZE_MIN <= size <= CHAT_FONT_SIZE_MAX):
             raise ValueError(f"会话字号必须是 {CHAT_FONT_SIZE_MIN}-{CHAT_FONT_SIZE_MAX} 的整数")
         return size
+
+    @staticmethod
+    def _validated_skill_max_size(raw: Any) -> int:
+        """Skill 大小上限（写入路径）：0（= 内置默认）或 10~2048 的整数。
+
+        越界**报错**而不是夹回：这是显式设置动作，静默夹回会让用户看到
+        "设了没生效"却查不出原因。（配置文件被手改由加载路径的
+        clamp_skill_max_size_mb 兜底。）
+        """
+        hint = f"Skill 大小上限必须是 0 或 10-{SKILL_MAX_SIZE_MB_MAX} 的整数"
+        if isinstance(raw, bool):
+            raise ValueError(hint)
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError(hint) from None
+        if parsed != 0 and not (10 <= parsed <= SKILL_MAX_SIZE_MB_MAX):
+            raise ValueError(hint)
+        return parsed
+
+    def get_skill_max_size_mb(self) -> int:
+        """Skill 大小上限（MB）：0 = 跟随各链路内置默认（见 SKILL_*_MAX_MB_DEFAULT）。"""
+        with self.lock:
+            return clamp_skill_max_size_mb(self.data.get("skill_max_size_mb", 0))
+
+    def skill_size_limits(self) -> dict[str, int]:
+        """Skill 大小上限的当前生效值（MB），前端文案与导入预检统一用这份。
+
+        服务端算好整体下发，前端不做任何推算——避免「前端自算口径」与后端漂移。
+        """
+        setting = self.get_skill_max_size_mb()
+        if setting > 0:
+            return {
+                "zip_mb": setting,
+                "folder_mb": setting,
+                "unpacked_mb": setting,
+                "tool_mb": setting,
+                "setting_mb": setting,
+            }
+        return {
+            "zip_mb": SKILL_ZIP_MAX_MB_DEFAULT,
+            "folder_mb": SKILL_FOLDER_MAX_MB_DEFAULT,
+            "unpacked_mb": SKILL_UNPACKED_MAX_MB_DEFAULT,
+            "tool_mb": SKILL_TOOL_MAX_MB_DEFAULT,
+            "setting_mb": 0,
+        }
 
     @staticmethod
     def _positive_context_size(value: Any, field: str) -> int:

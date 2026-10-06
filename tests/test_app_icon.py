@@ -287,7 +287,8 @@ class AppIconHttpRouteTests(unittest.TestCase):
     def test_upload_is_split_before_json_read(self) -> None:
         """multipart 必须在 `_read_json` 之前分流，否则上传体会被当成 JSON 读坏。"""
         upload_at = self.http.index("self._app_icon_upload()")
-        self.assertLess(upload_at, self.http.index("body = self._read_json(max_size=130 * 1024 * 1024)"))
+        # do_POST 里唯一的 JSON 读取点（Skill 端点的上限派生也汇入这同一次调用）。
+        self.assertLess(upload_at, self.http.index("body = self._read_json("))
         self.assertIn('path == "/api/app-icon" and self.headers.get("Content-Type", "").lower().startswith("multipart/form-data")', self.http)
 
     def test_upload_size_cap_and_auth(self) -> None:

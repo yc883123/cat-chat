@@ -75,6 +75,16 @@ TERMINAL_EVENT_GRACE_SECONDS = 2.0
 _MEDIA_MIME_FALLBACK = dict(MIME_BY_EXT)
 
 
+def skill_import_body_limit_mb(setting_mb: int) -> int:
+    """Skill 导入端点的请求体上限（MB）：max(130, 设置值 × 1.5)。
+
+    文件先 base64 编码再进 JSON（膨胀约 1/3）+ JSON 结构开销，按 ×1.5 留余量；
+    设置 0（内置默认）= 全局默认 130MB，与引入该设置前逐字一致。只对
+    /api/skills/install 与 /api/skills/install_folder 生效，聊天等其他请求不动。
+    """
+    return max(130, int(max(0, int(setting_mb or 0)) * 1.5))
+
+
 def content_disposition_attachment(filename: str) -> str:
     """`Content-Disposition: attachment` 头（RFC 6266 + RFC 5987）。
 
@@ -518,7 +528,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
             self._app_icon_upload()
             return
-        body = self._read_json(max_size=130 * 1024 * 1024)
+        # Skill 导入两个端点的请求体上限跟随「Skill 大小上限」设置放宽：文件先
+        # base64 编码再进 JSON（膨胀约 1/3）+ JSON 结构开销，按 ×1.5 留余量。
+        # 设置 0 = 内置默认 130MB，与引入该设置前逐字一致；聊天等其他请求不动。
+        if path in {"/api/skills/install", "/api/skills/install_folder"}:
+            skill_mb = skill_import_body_limit_mb(self.app.config.get_skill_max_size_mb())
+            skill_max_size = skill_mb * 1024 * 1024
+            skill_oversize_error = (
+                f"Skill 上传内容超过当前上限（{skill_mb} MB，含 base64 编码膨胀）。"
+                "可在 设置 → Skills 管理 调大「Skill 大小上限」后重试"
+            )
+        else:
+            skill_max_size = 130 * 1024 * 1024
+            skill_oversize_error = None
+        body = self._read_json(max_size=skill_max_size, oversize_error=skill_oversize_error)
         if body is None:
             return
         if path == "/api/auth":
@@ -1172,11 +1195,18 @@ class RequestHandler(BaseHTTPRequestHandler):
     def _is_local_request(self) -> bool:
         return self.client_address[0] in {"127.0.0.1", "::1", "localhost"}
 
-    def _read_json(self, max_size: int = 2 * 1024 * 1024) -> dict[str, Any] | None:
+    def _read_json(
+        self,
+        max_size: int = 2 * 1024 * 1024,
+        oversize_error: str | None = None,
+    ) -> dict[str, Any] | None:
         try:
             size = int(self.headers.get("Content-Length", "0"))
             if size > max_size:
-                self._json({"error": "请求内容过大"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                self._json(
+                    {"error": oversize_error or "请求内容过大"},
+                    HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                )
                 return None
             payload = self.rfile.read(size) if size else b"{}"
             value = json.loads(payload.decode("utf-8"))

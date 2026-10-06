@@ -393,7 +393,7 @@
 
   <dialog id="skillImportDialog" class="panel-dialog skill-import-dialog">
     <div class="dialog-toolbar">
-      <div><h2>导入 Skill</h2><p>上传包含 SKILL.md 的文件夹、.zip 或单个 .md</p></div>
+      <div><h2>导入 Skill</h2><p>上传包含 SKILL.md 的文件夹、.zip 或单个 .md<span id="skillImportLimitHint"></span></p></div>
       <button class="icon-button" data-close="skillImportDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
     </div>
     <div class="skill-import-body">
@@ -919,6 +919,19 @@
         <section data-settings-panel="skills" class="settings-panel" hidden>
           <div class="form-actions skill-import-actions">
             <button class="primary-button" id="openSkillImport" type="button">导入 Skill</button>
+          </div>
+          <div class="settings-card">
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"></path><path d="M4 19h16"></path></svg></span><div><h4>Skill 大小上限</h4></div></div>
+            <div class="field-grid">
+              <label class="field-wide">上限（MB）
+                <input id="skillMaxSize" type="number" min="0" max="2048" step="1">
+                <small class="hint">0 = 使用内置默认（zip 包 80 MB / 文件夹 300 MB / 解压后 500 MB / AI 帮装 50 MB）。设为 10~2048 后所有 Skill 安装链路统一放宽到该值。过大可能占用较多内存。</small>
+              </label>
+            </div>
+            <div class="form-actions">
+              <button class="primary-button" id="saveSkillMaxSize" type="button">保存上限</button>
+            </div>
+            <p class="hint" id="skillMaxSizeResult"></p>
           </div>
           <div class="settings-card"><div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5 20 8v8l-8 4.5L4 16V8z"></path><path d="M12 12 20 8M12 12v8.5M12 12 4 8"></path></svg></span><div><h4>已加载 Skill（<span id="installedSkillCount">0</span>）</h4></div></div>
           <div class="skill-list" id="installedSkillList"></div></div>

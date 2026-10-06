@@ -36,7 +36,18 @@ SKILL_POLICY_MODES = {"auto", "pinned", "exclusive"}
 MAX_FILE_COUNT = 2000
 MAX_TOTAL_SIZE = 50 * 1024 * 1024          # 50 MB
 ZIP_BOMB_RATIO = 100                        # uncompressed > 100x compressed
-MAX_UNCOMPRESSED_ENTRY = 50 * 1024 * 1024  # 50 MB single entry
+
+# 各上限的内置默认唯一事实来源在 naiba/config.py（SKILL_*_MAX_MB_DEFAULT 常量），
+# 这里的 50MB 必须与 SKILL_TOOL_MAX_MB_DEFAULT 一致（守门见 tests/test_skill_size_limit.py）。
+# 「Skill 大小上限」设置项 > 0 时由调用方（capability.py）经 max_total_bytes 参数传入放宽值；
+# zip 炸弹比率与文件数上限是防攻击边界，不随设置放宽。
+
+
+def _resolve_total_limit(max_total_bytes: int | None) -> int:
+    """归一化总大小上限：None = 内置默认（50MB），其余取正整数。"""
+    if max_total_bytes is None:
+        return MAX_TOTAL_SIZE
+    return max(1, int(max_total_bytes))
 
 
 class _SkillInstallError(RuntimeError):
@@ -96,7 +107,13 @@ def _finalize_install(dest: Path, display_name: str | None = None) -> dict[str, 
     }
 
 
-def _install_folder(src: Path, managed_dir: Path, name: str | None) -> dict[str, Any]:
+def _install_folder(
+    src: Path,
+    managed_dir: Path,
+    name: str | None,
+    max_total_bytes: int | None = None,
+) -> dict[str, Any]:
+    limit = _resolve_total_limit(max_total_bytes)
     file_count = 0
     total = 0
     for item in src.rglob("*"):
@@ -105,8 +122,11 @@ def _install_folder(src: Path, managed_dir: Path, name: str | None) -> dict[str,
             total += item.stat().st_size
     if file_count > MAX_FILE_COUNT:
         raise _SkillInstallError(f"文件夹内文件数量过多（超过 {MAX_FILE_COUNT}）")
-    if total > MAX_TOTAL_SIZE:
-        raise _SkillInstallError("文件夹总大小超过 50 MB")
+    if total > limit:
+        raise _SkillInstallError(
+            f"文件夹总大小超过当前上限（{limit // (1024 * 1024)} MB）。"
+            "可在 设置 → Skills 管理 调大「Skill 大小上限」后重试"
+        )
     if not _folder_has_skill_md(src):
         raise _SkillInstallError("文件夹缺少 SKILL.md（需位于顶层或下一级目录）")
     dest = _unique_dir(managed_dir, name or src.name)
@@ -114,7 +134,13 @@ def _install_folder(src: Path, managed_dir: Path, name: str | None) -> dict[str,
     return _finalize_install(dest, name)
 
 
-def _install_zip(src: Path, managed_dir: Path, name: str | None) -> dict[str, Any]:
+def _install_zip(
+    src: Path,
+    managed_dir: Path,
+    name: str | None,
+    max_total_bytes: int | None = None,
+) -> dict[str, Any]:
+    limit = _resolve_total_limit(max_total_bytes)
     try:
         archive = zipfile.ZipFile(src)
     except zipfile.BadZipFile as exc:
@@ -127,14 +153,19 @@ def _install_zip(src: Path, managed_dir: Path, name: str | None) -> dict[str, An
         if len(members) > MAX_FILE_COUNT:
             raise _SkillInstallError(f"压缩包内文件数量过多（超过 {MAX_FILE_COUNT}）")
         total_uncompressed = sum(member.file_size for member in members)
-        if total_uncompressed > MAX_TOTAL_SIZE:
-            raise _SkillInstallError("压缩包解压后体积过大（超过 50 MB）")
+        if total_uncompressed > limit:
+            raise _SkillInstallError(
+                f"压缩包解压后体积超过当前上限（{limit // (1024 * 1024)} MB）。"
+                "可在 设置 → Skills 管理 调大「Skill 大小上限」后重试"
+            )
         compressed = src.stat().st_size
         if compressed > 0 and total_uncompressed > ZIP_BOMB_RATIO * compressed:
             raise _SkillInstallError("检测到可能的 zip 炸弹（解压体积远超压缩体积）")
         for member in members:
-            if member.file_size > MAX_UNCOMPRESSED_ENTRY:
-                raise _SkillInstallError(f"压缩包单文件解压后过大（超过 50 MB）：{member.filename}")
+            if member.file_size > limit:
+                raise _SkillInstallError(
+                    f"压缩包单文件解压后超过当前上限（{limit // (1024 * 1024)} MB）：{member.filename}"
+                )
             filename = member.filename
             parts = Path(filename).parts
             if (
@@ -196,6 +227,7 @@ def validate_and_install_skill(
     source_path: Any,
     managed_dir: Any,
     name: str | None = None,
+    max_total_bytes: int | None = None,
 ) -> dict[str, Any]:
     """校验并安装一个 Skill 来源（文件夹 / ZIP / 单个 .md）。
 
@@ -203,6 +235,9 @@ def validate_and_install_skill(
         source_path: 本地来源路径（文件夹、.zip 或 .md）。
         managed_dir: 应用托管的 skills 目录，安装目标。
         name: 可选的目标目录名覆盖。
+        max_total_bytes: 可选的总大小上限（字节）；None = 内置默认（50MB，
+            与 SKILL_TOOL_MAX_MB_DEFAULT 一致）。「Skill 大小上限」设置 > 0 时
+            由 capability.py 传入放宽值。
 
     Returns:
         {"success": True, "skill_id", "name", "path", "source": "managed", "error": None}
@@ -213,7 +248,7 @@ def validate_and_install_skill(
     managed.mkdir(parents=True, exist_ok=True)
     try:
         if src.is_dir():
-            return _install_folder(src, managed, name)
+            return _install_folder(src, managed, name, max_total_bytes)
         if src.suffix.lower() == ".md":
             return _install_single_md(src, managed, name)
         if src.suffix.lower() == ".zip":
@@ -229,16 +264,25 @@ def validate_and_extract_archive(
     archive_path: Any,
     target_dir: Any,
     name: str | None = None,
+    max_total_bytes: int | None = None,
 ) -> dict[str, Any]:
     """校验一个 zip 压缩包并在安全校验通过后解压到 target_dir（工作区专属子目录）。
 
     校验与 ``_install_zip`` 一致：zip 损坏、越界路径（绝对/``..``/盘符/UNC）、
     zip 炸弹比率、条目数/体积上限、解压后必须含 SKILL.md。校验失败抛 ``_SkillInstallError``。
 
+    Args:
+        archive_path: zip 压缩包路径。
+        target_dir: 解压目标目录（工作区专属子目录）。
+        name: 可选的解压子目录名覆盖。
+        max_total_bytes: 可选的总大小上限（字节）；None = 内置默认（50MB）。
+            「Skill 大小上限」设置 > 0 时由 capability.py 传入放宽值。
+
     Returns:
         {"success": True, "extracted_dir": str, "root_dir": str, "name": str}
         或 {"success": False, "error": str}
     """
+    limit = _resolve_total_limit(max_total_bytes)
     src = Path(archive_path).expanduser().resolve()
     if not src.is_file() or src.suffix.lower() != ".zip":
         return {"success": False, "error": "仅支持 .zip 压缩包（rar/7z 暂不支持，请转成 zip）"}
@@ -257,14 +301,26 @@ def validate_and_extract_archive(
             if len(members) > MAX_FILE_COUNT:
                 return {"success": False, "error": f"压缩包内文件数量过多（超过 {MAX_FILE_COUNT}）"}
             total_uncompressed = sum(member.file_size for member in members)
-            if total_uncompressed > MAX_TOTAL_SIZE:
-                return {"success": False, "error": "压缩包解压后体积过大（超过 50 MB）"}
+            if total_uncompressed > limit:
+                return {
+                    "success": False,
+                    "error": (
+                        f"压缩包解压后体积超过当前上限（{limit // (1024 * 1024)} MB）。"
+                        "可在 设置 → Skills 管理 调大「Skill 大小上限」后重试"
+                    ),
+                }
             compressed = src.stat().st_size
             if compressed > 0 and total_uncompressed > ZIP_BOMB_RATIO * compressed:
                 return {"success": False, "error": "检测到可能的 zip 炸弹（解压体积远超压缩体积）"}
             for member in members:
-                if member.file_size > MAX_UNCOMPRESSED_ENTRY:
-                    return {"success": False, "error": f"压缩包单文件解压后过大（超过 50 MB）：{member.filename}"}
+                if member.file_size > limit:
+                    return {
+                        "success": False,
+                        "error": (
+                            f"压缩包单文件解压后超过当前上限（{limit // (1024 * 1024)} MB）："
+                            f"{member.filename}"
+                        ),
+                    }
                 filename = member.filename
                 parts = Path(filename).parts
                 if (

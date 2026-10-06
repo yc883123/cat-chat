@@ -16,6 +16,15 @@ class CapabilityRuntime:
     def __init__(self, app: AppContext) -> None:
         self.app = app
 
+    def _skill_max_bytes(self) -> int | None:
+        """AI 帮装链路的大小上限（字节）：跟随「Skill 大小上限」设置。
+
+        设置 0（内置默认）传 None，skills/install.py 用内置 50MB 常量兜底——
+        与引入该设置前逐字一致；设置 > 0 时统一放宽到该值（MB → 字节）。
+        """
+        limit_mb = self.app.config.get_skill_max_size_mb()
+        return limit_mb * 1024 * 1024 if limit_mb > 0 else None
+
     def install_skill(
         self,
         arguments: dict[str, Any],
@@ -36,6 +45,7 @@ class CapabilityRuntime:
             source,
             destination,
             str(arguments.get("name") or "").strip() or None,
+            max_total_bytes=self._skill_max_bytes(),
         )
         if not result.get("success"):
             return False, str(result.get("error") or "Skill 安装失败")
@@ -90,7 +100,7 @@ class CapabilityRuntime:
         if not workspace:
             return False, "无法确定工作区目录"
         incoming = Path(workspace).expanduser().resolve() / ".skill_incoming"
-        result = validate_and_extract_archive(archive_path, incoming, name)
+        result = validate_and_extract_archive(archive_path, incoming, name, max_total_bytes=self._skill_max_bytes())
         if not result.get("success"):
             return False, str(result.get("error") or "解压校验失败")
         return True, json.dumps(result, ensure_ascii=False)

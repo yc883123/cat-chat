@@ -9,7 +9,7 @@ import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
 import { switchPermissionMode } from "./06-tasks-plans.js";
 import { checkUpdate, closeAgentHelpPopover, closeComposerModelPicker, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, applyUpdate, cancelUpdate, discardUpdate, dismissUpdateReady, saveUpdateProxy, syncUpdateFloat, syncUpdateProxyControls, renderUpdateProxyState, positionAgentHelpPopover, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleAgentHelpPopover, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
 import { applySidebarViewPref, bindSidebarDragDrop, cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeBranchChainPanel, closeConversationMenu, closeSidebarViewMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, openSidebarViewMenu, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, runFullTextSearch, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel, toggleConversationArchive, setTaskLogOpen, setTaskLogStick, setWorkspaceSearchMode, syncSearchModeUi, SEARCH_DEBOUNCE_MS } from "./08-conversations.js";
-import { addProvider, addSearchProfile, appearanceFormValues, applyProviderModelCapabilities, applyProviderPreset, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadUsageStats, loadWorkspaceTree, openAgentCard, openAgentToolEditorCurrent, openProviderCard, openProviderPresetKeyUrl, openVisionProviderForm, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, saveInterjectDirectSend, saveMcpServer, saveProvider, saveRuntimeSettings, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, setUsageChart, setUsageDim, setUsageGran, setUsageMetric, setUsageRange, showAgentForm, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAgentToolPeek, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, toggleToolOnlySelected, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint, applyUsageFilter, openUsagePrefsDialog, resetUsageFilter, saveUsagePrefs, selectUsageFilterRange, usageUnbindDialogViewport, refreshUsagePricingBadge, openUsagePricingDialog, pricingGoBackToList, pricingTogglePool, pricingConfirmCustomCurrency, pricingCloseCustomCurrency, pricingOpenCustomCurrency, pricingApplyGroupCurrency, pricingDropCurrency, pricingAddFromPool, pricingMarkRowDirty, pricingCycleRowCurrency, pricingSaveRow, pricingRemoveRow, pricingOpenGroup } from "./09-settings.js";
+import { addProvider, addSearchProfile, appearanceFormValues, applyProviderModelCapabilities, applyProviderPreset, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadUsageStats, loadWorkspaceTree, openAgentCard, openAgentToolEditorCurrent, openProviderCard, openProviderPresetKeyUrl, openVisionProviderForm, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, saveInterjectDirectSend, saveMcpServer, saveProvider, saveRuntimeSettings, saveSkillMaxSize, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, setUsageChart, setUsageDim, setUsageGran, setUsageMetric, setUsageRange, showAgentForm, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAgentToolPeek, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, toggleToolOnlySelected, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint, applyUsageFilter, openUsagePrefsDialog, resetUsageFilter, saveUsagePrefs, selectUsageFilterRange, usageUnbindDialogViewport, refreshUsagePricingBadge, openUsagePricingDialog, pricingGoBackToList, pricingTogglePool, pricingConfirmCustomCurrency, pricingCloseCustomCurrency, pricingOpenCustomCurrency, pricingApplyGroupCurrency, pricingDropCurrency, pricingAddFromPool, pricingMarkRowDirty, pricingCycleRowCurrency, pricingSaveRow, pricingRemoveRow, pricingOpenGroup } from "./09-settings.js";
 import { addFolderChip, isFolderChip, readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
 import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handlePasteImage, clipboardPasteDriver, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState } from "./12-chat-input.js";
 import { commitSkillSelection, hideSkillPopup, insertSkillRefAtCursor, moveSkillPopupSelection, popupState, positionSkillPopup, renderInputMirror, resizeTextarea, setSkillPopupSelection, skillList, toggleComposerExpanded, updateSkillPopup } from "./13-skill-refs.js";
@@ -2205,6 +2205,7 @@ export function bindEvents() {
   $('#clearSkillRecycle')?.addEventListener('click', clearSkillRecycle);
   $('#skillImportFolder').addEventListener('click', () => $('#skillImportFolderInput').click());
   $('#skillImportFiles').addEventListener('click', () => $('#skillImportFileInput').click());
+  $('#saveSkillMaxSize')?.addEventListener('click', saveSkillMaxSize);
   $('#skillImportFolderInput').addEventListener('change', (event) => { skillImportFolderFiles(event.target.files); event.target.value = ''; });
   $('#skillImportFileInput').addEventListener('change', (event) => {
     const file = event.target.files[0];
@@ -2250,6 +2251,16 @@ export function setSkillImportStatus(message, kind) {
   el.className = 'skill-import-status' + (kind ? ' ' + kind : '');
 }
 
+// 「Skill 大小上限」生效值（MB）：统一读服务端 settings.skill_size_limits 下发的口径，
+// 前端不做任何推算（与后端 config.skill_size_limits() 同源）。拿不到时返回 null =
+// 跳过前端预检，直接交给后端报错（旧版服务端没有该键时不阻断导入）。
+function skillLimitMb(kind) {
+  const limits = state.bootstrap?.settings?.skill_size_limits;
+  if (!limits) return null;
+  const value = Number(limits[kind]);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
 export function hasSkillFrontmatter(text) {
   const m = text.match(/^---\s*\n([\s\S]*?)\n---/);
   if (!m) return false;
@@ -2262,7 +2273,14 @@ export async function skillImportFolderFiles(fileList) {
   if (!files.length) return;
   if (files.length > 2000) { setSkillImportStatus('文件夹内文件数量过多（超过 2000）', 'error'); return; }
   const totalSize = files.reduce((sum, f) => sum + f.size, 0);
-  if (totalSize > 80 * 1024 * 1024) { setSkillImportStatus('文件夹总大小不能超过 80 MB', 'error'); return; }
+  const folderLimit = skillLimitMb('folder_mb');
+  if (folderLimit !== null && totalSize > folderLimit * 1024 * 1024) {
+    setSkillImportStatus(
+      `文件夹总大小超过当前上限（${folderLimit} MB）。可在 设置 → Skills 管理 调大「Skill 大小上限」后重试`,
+      'error',
+    );
+    return;
+  }
   setSkillImportStatus(`正在上传 ${files.length} 个文件…`);
   try {
     const payload = [];
@@ -2283,6 +2301,14 @@ export async function skillImportFolderFiles(fileList) {
 }
 
 export async function skillImportZipFile(file) {
+  const zipLimit = skillLimitMb('zip_mb');
+  if (zipLimit !== null && file.size > zipLimit * 1024 * 1024) {
+    setSkillImportStatus(
+      `压缩包超过当前上限（${zipLimit} MB）。可在 设置 → Skills 管理 调大「Skill 大小上限」后重试`,
+      'error',
+    );
+    return;
+  }
   setSkillImportStatus(`正在上传 ${file.name}…`);
   try {
     const data = await readAsDataUrl(file);

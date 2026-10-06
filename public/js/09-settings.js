@@ -1004,6 +1004,63 @@ export function populateRuntimeSettings() {
   renderWorkspaceControl();
 }
 
+// ---- Skill 大小上限（设置 → Skills 管理）----
+
+// 回显「Skill 大小上限」输入框并刷新导入对话框的上限文案。
+// 0 有意义（= 内置默认），不能用 `|| 默认值` 回填，必须原样回显。
+export function populateSkillSizeSetting() {
+  const settings = state.bootstrap?.settings || {};
+  if ($('#skillMaxSize')) $('#skillMaxSize').value = Number(settings.skill_max_size_mb ?? 0);
+  renderSkillSizeLimits();
+}
+
+// 导入对话框副标题与预检共用的生效上限（服务端 skill_size_limits 下发的口径，前端不推算）。
+export function skillSizeLimits() {
+  return state.bootstrap?.settings?.skill_size_limits || null;
+}
+
+export function renderSkillSizeLimits() {
+  const limits = skillSizeLimits();
+  const hint = $('#skillImportLimitHint');
+  if (hint) {
+    hint.textContent = limits
+      ? `（当前上限：压缩包 ${limits.zip_mb} MB / 文件夹 ${limits.folder_mb} MB，可在 设置 → Skills 管理 调整）`
+      : '';
+  }
+}
+
+// 保存「Skill 大小上限」：POST /api/settings 单项提交，以服务端回声为准
+// （回声里带 skill_size_limits 生效值时整体替换，保证文案与后端口径一致）。
+export async function saveSkillMaxSize() {
+  const input = $('#skillMaxSize');
+  const resultEl = $('#skillMaxSizeResult');
+  if (!input) return;
+  const raw = String(input.value ?? '').trim();
+  const value = raw === '' ? 0 : Number(raw);
+  try {
+    const result = await api('/api/settings', { method: 'POST', body: { skill_max_size_mb: value } });
+    const saved = result?.settings?.skill_max_size_mb;
+    const applied = typeof saved === 'number' ? saved : value;
+    if (state.bootstrap?.settings) {
+      state.bootstrap.settings.skill_max_size_mb = applied;
+      if (result?.settings?.skill_size_limits) {
+        state.bootstrap.settings.skill_size_limits = result.settings.skill_size_limits;
+      }
+    }
+    if ($('#skillMaxSize')) $('#skillMaxSize').value = applied;
+    renderSkillSizeLimits();
+    if (resultEl) {
+      resultEl.textContent = applied > 0
+        ? `已保存：所有 Skill 安装链路上限 ${applied} MB`
+        : '已保存：使用内置默认上限（zip 包 80 MB / 文件夹 300 MB / 解压后 500 MB / AI 帮装 50 MB）';
+    }
+    toast('Skill 大小上限已保存');
+  } catch (error) {
+    if (resultEl) resultEl.textContent = `保存失败：${error.message}`;
+    toast(`保存失败：${error.message}`);
+  }
+}
+
 /**
  * 「插话直达」开关：即时生效（与「侧栏分组与排序」同款——POST /api/settings 单项提交，
  * 服务端 settings 是唯一事实来源，不自造 localStorage 影子副本）。

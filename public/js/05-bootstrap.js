@@ -6,7 +6,7 @@ import { $, $$, api, initializeAppearance, setServerStatus, state, syncAppearanc
 import { loadTasks, startTaskSync } from "./06-tasks-plans.js";
 import { populateModels, renderAgents, renderUpdateStatus } from "./07-models-agents.js";
 import { loadConversationPromptPresets, loadConversations, restoreSidebarWidth, setSidebarScrollToActive, startConversationSync } from "./08-conversations.js";
-import { loadProviderPresets, migrateLegacyToolTemplates, populateAppearanceSettings, populateRuntimeSettings, populateSearchSettings, populateVisionSettings, renderAgentManager, renderMcp, renderProviders, renderSkills, startMcpPoll } from "./09-settings.js";
+import { loadProviderPresets, migrateLegacyToolTemplates, populateAppearanceSettings, populateRuntimeSettings, populateSearchSettings, populateSkillSizeSetting, populateVisionSettings, renderAgentManager, renderMcp, renderProviders, renderSkills, startMcpPoll } from "./09-settings.js";
 import { loadStarterPrompts } from "./12-chat-input.js";
 import { maybeShowOnboarding } from "./19-onboarding.js";
 export async function authenticate(token) {
@@ -93,6 +93,7 @@ export async function initialize() {
   populateRuntimeSettings();
   populateVisionSettings();
   populateSearchSettings();
+  populateSkillSizeSetting();
   renderSkills();
   renderProviders();
   renderMcp();

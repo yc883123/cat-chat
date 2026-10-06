@@ -2257,6 +2257,8 @@ class NaibaChatApp:
         if dest_err is not None:
             return dest_err
         dest_raw, dest = dest_resolved
+        # 文件夹总大小上限跟随「Skill 大小上限」设置（0 = 内置默认 300MB）。
+        folder_limit_mb = self.config.skill_size_limits()["folder_mb"]
         entries: list[tuple[list[str], bytes]] = []
         total = 0
         for item in files:
@@ -2279,9 +2281,14 @@ class NaibaChatApp:
                 return self._reply({"error": f"文件内容不是有效 Base64：{'/'.join(parts)}"}, HTTPStatus.BAD_REQUEST)
                 return
             total += len(data)
-            if total > 300 * 1024 * 1024:
+            if total > folder_limit_mb * 1024 * 1024:
                 return self._reply(
-                    {"error": "文件夹总大小不能超过 300 MB"},
+                    {
+                        "error": (
+                            f"文件夹总大小超过当前上限（{folder_limit_mb} MB）。"
+                            "可在 设置 → Skills 管理 调大「Skill 大小上限」后重试"
+                        )
+                    },
                     HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                 )
                 return
@@ -2345,8 +2352,21 @@ class NaibaChatApp:
         except ValueError:
             return self._reply({"error": "文件内容不是有效 Base64"}, HTTPStatus.BAD_REQUEST)
             return
-        if len(data) > 80 * 1024 * 1024:
-            return self._reply({"error": "Skill 压缩包不能超过 80 MB"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+        # 压缩包本体/解压后上限跟随「Skill 大小上限」设置
+        # （0 = 内置默认 80MB / 500MB，与引入该设置前逐字一致）。
+        limits = self.config.skill_size_limits()
+        zip_limit_mb = limits["zip_mb"]
+        unpacked_limit_mb = limits["unpacked_mb"]
+        oversize_hint = "可在 设置 → Skills 管理 调大「Skill 大小上限」后重试"
+        if len(data) > zip_limit_mb * 1024 * 1024:
+            return self._reply(
+                {
+                    "error": (
+                        f"Skill 压缩包超过当前上限（{zip_limit_mb} MB）。{oversize_hint}"
+                    )
+                },
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
             return
         dest_resolved, dest_err = self._resolve_skill_dest(body)
         if dest_err is not None:
@@ -2371,8 +2391,16 @@ class NaibaChatApp:
                 if len(members) > 5000:
                     return self._reply({"error": "压缩包内文件数量过多（超过 5000）"}, HTTPStatus.BAD_REQUEST)
                     return
-                if sum(member.file_size for member in members) > 500 * 1024 * 1024:
-                    return self._reply({"error": "压缩包解压后体积过大（超过 500 MB）"}, HTTPStatus.BAD_REQUEST)
+                if sum(member.file_size for member in members) > unpacked_limit_mb * 1024 * 1024:
+                    return self._reply(
+                        {
+                            "error": (
+                                f"压缩包解压后体积超过当前上限（{unpacked_limit_mb} MB）。"
+                                f"{oversize_hint}"
+                            )
+                        },
+                        HTTPStatus.BAD_REQUEST,
+                    )
                     return
                 # 顶层直接散放 SKILL.md 的压缩包同样必须先收进独立子目录，否则该 Skill 的
                 # root 就等于托管目录本身，删除时会连带移走整个目录下的所有 Skill。

@@ -41,6 +41,14 @@ CHAT_FONT_SIZE_DEFAULT = 15
 # 自定义字体串只作为 font-family 片段注入 CSS 变量，截断长度是纵深防御。
 CHAT_FONT_FAMILY_CUSTOM_MAX = 100
 
+# ---- 完成提示音 / 托盘完成卡片（appearance 段的三个 UI 偏好键）----
+# done_sound：AI 回复完成后前端合成一声短提示音（Web Audio，无音频资产）；
+# done_sound_volume：0-100 整数音量；tray_done_toast：窗口藏在托盘时弹「任务完成」卡片。
+# 校验口径与 chat_font_size 同款：加载期 clamp 兜底，写入路径显式报错。
+SOUND_VOLUME_MIN = 0
+SOUND_VOLUME_MAX = 100
+SOUND_VOLUME_DEFAULT = 60
+
 # ---- Skill 大小上限（设置项 skill_max_size_mb）----
 # 设置值 0 = 跟随下列内置默认（与引入该设置前散在 app.py / skills.install.py 里的
 # 硬编码逐字一致，老用户行为零变化）；设为 10~2048 的正数后各链路统一放宽到该值。
@@ -203,6 +211,19 @@ def clean_chat_font_family_custom(value: Any) -> str:
     return str(value or "").strip()[:CHAT_FONT_FAMILY_CUSTOM_MAX]
 
 
+def clamp_sound_volume(value: Any) -> int:
+    """提示音音量：能转成数值就夹回 0-100，转不动一律回默认值。
+
+    与 clamp_chat_font_size 同款约定：显示偏好越界不报错、静默夹回；
+    真正的"非法输入"由写入路径的 `_validated_sound_volume` 显式拦住。
+    """
+    try:
+        parsed = int(float(value))
+    except (TypeError, ValueError):
+        return SOUND_VOLUME_DEFAULT
+    return max(SOUND_VOLUME_MIN, min(SOUND_VOLUME_MAX, parsed))
+
+
 def clamp_skill_max_size_mb(value: Any) -> int:
     """Skill 大小上限（MB）：0 = 内置默认；其余夹回 10~2048，转不动回 0。
 
@@ -228,6 +249,8 @@ def normalize_appearance(appearance: Any) -> dict[str, Any]:
     theme = str(merged.get("theme") or "").strip().lower()
     skin = str(merged.get("skin") or "").strip().lower()
     family = str(merged.get("chat_font_family") or "").strip().lower()
+    done_sound = merged.get("done_sound")
+    tray_done_toast = merged.get("tray_done_toast")
     return {
         "theme": theme if theme in APPEARANCE_THEMES else "system",
         "skin": skin if skin in APPEARANCE_SKINS else "violet",
@@ -235,6 +258,11 @@ def normalize_appearance(appearance: Any) -> dict[str, Any]:
         "chat_font_family": family if family in APPEARANCE_CHAT_FONT_FAMILIES else "system",
         # 切换回非 custom 时保留用户输入过的串，避免"改一下又切回来"要重打一遍。
         "chat_font_family_custom": clean_chat_font_family_custom(merged.get("chat_font_family_custom")),
+        # 完成提示音（默认开）与音量；托盘「任务完成」卡片开关（默认开）。
+        # 布尔键收非布尔值（如手改配置）一律回默认，不让整份配置加载失败。
+        "done_sound": done_sound if isinstance(done_sound, bool) else True,
+        "done_sound_volume": clamp_sound_volume(merged.get("done_sound_volume", SOUND_VOLUME_DEFAULT)),
+        "tray_done_toast": tray_done_toast if isinstance(tray_done_toast, bool) else True,
     }
 
 
@@ -289,6 +317,11 @@ def default_config() -> dict[str, Any]:
             "chat_font_size": CHAT_FONT_SIZE_DEFAULT,
             "chat_font_family": "system",
             "chat_font_family_custom": "",
+            # 完成提示音：AI 回复结束后前端合成一声（无音频资产）；音量 0-100。
+            "done_sound": True,
+            "done_sound_volume": SOUND_VOLUME_DEFAULT,
+            # 窗口藏在托盘时，会话完成后弹「任务完成」悬浮卡片。
+            "tray_done_toast": True,
         },
         # 对话区自定义背景图：image = data_dir/uploads 内的绝对路径（"" = 不启用），
         # opacity = 该图层的透明度，position_x/y + zoom = 编辑器里调出来的取景
@@ -2199,6 +2232,7 @@ class ConfigStore:
                         unknown = set(incoming) - {
                             "theme", "skin",
                             "chat_font_size", "chat_font_family", "chat_font_family_custom",
+                            "done_sound", "done_sound_volume", "tray_done_toast",
                         }
                         if unknown:
                             names = ", ".join(sorted(map(str, unknown)))
@@ -2234,6 +2268,18 @@ class ConfigStore:
                             merged["chat_font_family_custom"] = clean_chat_font_family_custom(
                                 incoming["chat_font_family_custom"]
                             )
+                        if "done_sound" in incoming:
+                            if not isinstance(incoming["done_sound"], bool):
+                                raise ValueError("完成提示音开关必须是布尔值")
+                            merged["done_sound"] = incoming["done_sound"]
+                        if "done_sound_volume" in incoming:
+                            merged["done_sound_volume"] = self._validated_sound_volume(
+                                incoming["done_sound_volume"]
+                            )
+                        if "tray_done_toast" in incoming:
+                            if not isinstance(incoming["tray_done_toast"], bool):
+                                raise ValueError("任务完成悬浮卡开关必须是布尔值")
+                            merged["tray_done_toast"] = incoming["tray_done_toast"]
                         # 整体过一遍归一化：键集固定，前端可放心替换 state.appearance。
                         self.data[key] = normalize_appearance(merged)
                     elif key == "chat_background":
@@ -3196,6 +3242,25 @@ class ConfigStore:
         if not (CHAT_FONT_SIZE_MIN <= size <= CHAT_FONT_SIZE_MAX):
             raise ValueError(f"会话字号必须是 {CHAT_FONT_SIZE_MIN}-{CHAT_FONT_SIZE_MAX} 的整数")
         return size
+
+    @staticmethod
+    def _validated_sound_volume(raw: Any) -> int:
+        """提示音音量（写入路径）：必须是 0-100 的整数。
+
+        与 `_validated_chat_font_size` 同款口径：越界**报错**而不是夹回——
+        滑块送来的值永远在区间内，越界只可能是客户端算错或旧版前端发的。
+        （配置文件被手改的情况由加载路径的 clamp_sound_volume 兜底。）
+        """
+        hint = f"提示音音量必须是 {SOUND_VOLUME_MIN}-{SOUND_VOLUME_MAX} 的整数"
+        if isinstance(raw, bool):
+            raise ValueError(hint)
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError(hint) from None
+        if not (SOUND_VOLUME_MIN <= parsed <= SOUND_VOLUME_MAX):
+            raise ValueError(hint)
+        return parsed
 
     @staticmethod
     def _validated_skill_max_size(raw: Any) -> int:

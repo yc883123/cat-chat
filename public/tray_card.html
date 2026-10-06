@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Cat Chat · 任务完成</title>
+<style>
+  /* 「任务完成」悬浮卡片页：由 launcher 以 frameless + transparent 小窗打开。
+     页面本身透明，卡片才是可见主体；数据经 pywebview 桥拉取（不走 URL query，
+     会话名里什么字符都可能有）。 */
+  :root {
+    --brand-500:#7C5CFF; --brand-600:#6D5AE6; --brand-700:#5A47C4; --brand-200:#DCD3FF; --brand-100:#EDECFF;
+    --surface:#FFFFFF; --text:#2A2E40; --muted:#7A8099;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --surface:#171a24; --text:#e3e7ef; --muted:#8d96ad; --brand-200:rgba(124,92,255,.45); --brand-100:rgba(124,92,255,.16); }
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: transparent; overflow: hidden; }
+  body {
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    padding: 6px; user-select: none; cursor: default;
+  }
+  .card {
+    background: var(--surface); border: 1px solid var(--brand-200); border-radius: 12px;
+    box-shadow: 0 12px 32px rgba(30,33,56,.16), 0 4px 8px rgba(30,33,56,.08);
+    padding: 12px 13px 11px; position: relative; overflow: hidden;
+    transform: translateX(24px); opacity: 0;
+    transition: transform .28s cubic-bezier(.2,.9,.3,1.05), opacity .22s;
+  }
+  .card.in { transform: translateX(0); opacity: 1; }
+  .card::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: linear-gradient(180deg, var(--brand-500), var(--brand-700));
+    border-radius: 3px 0 0 3px;
+  }
+  .head { display: flex; align-items: center; gap: 9px; }
+  .appicon {
+    width: 30px; height: 30px; flex: none; border-radius: 8px;
+    background: linear-gradient(135deg, var(--brand-500), var(--brand-700));
+    display: grid; place-items: center; color: #fff; font-size: 14px; font-weight: 700;
+  }
+  .titles { min-width: 0; flex: 1; }
+  .title {
+    font-size: 13.5px; font-weight: 600; line-height: 1.35; color: var(--text);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .subtitle { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+  .close {
+    width: 22px; height: 22px; flex: none; border: 0; border-radius: 6px; background: transparent;
+    color: var(--muted); cursor: pointer; display: grid; place-items: center; font-size: 13px;
+    font-family: inherit; line-height: 1;
+  }
+  .close:hover { background: var(--brand-100); color: var(--brand-700); }
+  .foot { margin-top: 8px; display: flex; align-items: center; justify-content: space-between; }
+  .cta { font-size: 11.5px; font-weight: 600; color: var(--brand-600); }
+  .time { font-size: 11px; color: var(--muted); }
+</style>
+</head>
+<body>
+  <div class="card" id="card" role="button" tabindex="0" aria-label="任务完成，点击打开会话">
+    <div class="head">
+      <div class="appicon">C</div>
+      <div class="titles">
+        <div class="title" id="cardTitle">任务完成</div>
+        <div class="subtitle">Cat Chat · AI 已完成回复</div>
+      </div>
+      <button class="close" id="cardClose" title="关闭" aria-label="关闭">✕</button>
+    </div>
+    <div class="foot">
+      <span class="cta">点击打开会话</span>
+      <span class="time" id="cardTime">刚刚</span>
+    </div>
+  </div>
+<script>
+  const card = document.getElementById('card');
+
+  function close() {
+    try { window.pywebview?.api?.naibaCardClose(); } catch (_) { /* 桥没了就等窗口被回收 */ }
+  }
+  function open() {
+    try { window.pywebview?.api?.naibaCardOpen(); } catch (_) { close(); }
+  }
+  card.addEventListener('click', open);
+  card.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
+  });
+  document.getElementById('cardClose').addEventListener('click', (event) => {
+    event.stopPropagation();
+    close();
+  });
+
+  // 数据不走 URL（会话名任意字符），页面就绪后向桥拉取；桥没就绪等 pywebviewready。
+  let fetched = false;
+  function fetchData() {
+    if (fetched) return;
+    const bridge = window.pywebview && window.pywebview.api;
+    if (!bridge || typeof bridge.naibaCardData !== 'function') return;
+    Promise.resolve(bridge.naibaCardData()).then((data) => {
+      fetched = true;
+      const title = String((data && data.title) || '').trim() || 'Cat Chat';
+      document.getElementById('cardTitle').textContent = title; // textContent 防注入
+      document.title = `Cat Chat · ${title}`;
+    }).catch(() => { fetched = true; });
+  }
+  window.addEventListener('pywebviewready', fetchData);
+  fetchData();
+  // 兜底：再等一次（个别机器上 pywebviewready 晚于本脚本执行）
+  setTimeout(fetchData, 400);
+
+  document.getElementById('cardTime').textContent =
+    new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+
+  // 进场动画（下一帧再加类，否则 transition 不生效）
+  requestAnimationFrame(() => requestAnimationFrame(() => card.classList.add('in')));
+
+  // 4.2 秒自动消失：超时算"自动"，走 naibaCardClose 销毁窗口（后端清引用）。
+  setTimeout(close, 4200);
+</script>
+</body>
+</html>

@@ -251,10 +251,35 @@ class JsApi:
     （画图/Word/微信等）都能直接粘贴。
     """
 
-    def __init__(self, app=None) -> None:
+    def __init__(self, app=None, launcher: "Launcher | None" = None) -> None:
         # app = `srv.APP`（装配在 create_window 之前）。剪贴板粘贴的"本地文件 → 上传目录"
         # 要走 app._upload_spooled（拖入文件用的同一条落库管线），所以要能拿到它。
+        # launcher = 桌面壳本体：窗口隐藏状态与「完成卡片」弹出都归它管（可选依赖，
+        # 测试里直接 new JsApi(app) 的老调用点不受影响）。
         self._app = app
+        self._launcher = launcher
+
+    def naibaWindowHidden(self) -> dict:
+        """主窗口当前是否藏在托盘（Launcher 在 hide/show 时维护的真实状态）。
+
+        前端判断"要不要弹完成卡片"以此为准：SW_HIDE 下页面的
+        document.visibilityState 可能仍报 visible，前端自己判断不可信。
+        """
+        hidden = bool(getattr(self._launcher, "_window_hidden", False)) if self._launcher else False
+        return {"hidden": hidden}
+
+    def naibaNotifyTaskDone(self, title: str = "", conversation_id: str = "") -> dict:
+        """会话完成后弹出「任务完成」悬浮卡（标题 = 会话名称）。
+
+        由前端在流事件 done 且窗口确认隐藏后调用；浏览器模式没有桥，天然不会进来。
+        同一时刻只保留一张卡：新的完成覆盖旧卡（latest wins），不排队叠卡。
+        """
+        if not self._launcher:
+            return {"ok": False, "error": "桌面壳未就绪"}
+        return self._launcher.show_done_card(
+            str(title or "").strip() or "Cat Chat",
+            str(conversation_id or "").strip(),
+        )
 
     def copy_image_to_clipboard(self, base64_data: str) -> dict:
         import base64
@@ -539,6 +564,45 @@ class JsApi:
         return {"ok": True, "path": dest}
 
 
+def _screen_size() -> tuple[int, int]:
+    """主屏尺寸（像素）：完成卡片要贴着右下角弹。探测失败回退 1080p 常见值。"""
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        return int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1))
+    except Exception:
+        return 1920, 1080
+
+
+class DoneCardApi:
+    """「任务完成」卡片小窗口的 js_api：回数据、自毁、点卡片唤回主窗口。
+
+    卡片窗口是 frameless + on_top + transparent 的独立小页（public/tray_card.html），
+    数据不走 URL query（标题可能含任意字符，转义链路能少一条是一条），
+    而是页面就绪后主动来拉（pywebviewready → naibaCardData）。
+    """
+
+    def __init__(self, launcher: "Launcher", title: str, conversation_id: str) -> None:
+        self._launcher = launcher
+        self._title = title
+        self._conversation_id = conversation_id
+
+    def naibaCardData(self) -> dict:
+        return {"title": self._title, "conversation_id": self._conversation_id}
+
+    def naibaCardClose(self) -> dict:
+        # 4 秒自动消失 / 点 ✕ 都走这里：销毁窗口即结束，无需其它清理。
+        self._launcher._close_done_card()
+        return {"ok": True}
+
+    def naibaCardOpen(self) -> dict:
+        conversation_id = self._conversation_id
+        self._launcher._close_done_card()
+        self._launcher.open_main_window(conversation_id)
+        return {"ok": True}
+
+
 class Launcher:
     def __init__(self) -> None:
         self.httpd: ThreadingHTTPServer | None = None
@@ -547,6 +611,13 @@ class Launcher:
         self.should_quit = False
         self._exit_complete = threading.Event()
         self._exit_watchdog_started = False
+        # 主窗口是否藏在托盘（_on_window_closing 隐藏置 True，_show_window 唤回置 False）。
+        # 前端经 JsApi.naibaWindowHidden 读它，决定要不要弹「任务完成」卡片。
+        self._window_hidden = False
+        # 当前打开的完成卡片窗口（同一时刻最多一张，latest wins）。
+        self._done_card = None
+        # 主窗口页面地址（含端口；run() 里服务绑定成功后写入，卡片窗口复用同一地址）。
+        self.local_url = "http://127.0.0.1:8765"
 
     # ---- HTTP 服务（主线程绑定 + 后台线程服务） ----
     def _bind_server(self, host: str, port: int) -> None:
@@ -670,8 +741,89 @@ class Launcher:
             try:
                 self.window.show()
                 self.window.restore()
+                self._window_hidden = False
             except Exception:
                 pass
+
+    def open_main_window(self, conversation_id: str = "") -> None:
+        """唤回主窗口；带了会话 id 就顺带通知前端跳到该会话（完成卡片点击链路）。
+
+        evaluate_js 失败（窗口尚未就绪等）只影响"定位会话"这一步，唤回窗口不受影响。
+        """
+        self._show_window()
+        if not conversation_id or not self.window:
+            return
+        try:
+            import json as _json
+
+            payload = _json.dumps({"conversationId": str(conversation_id)})
+            self.window.evaluate_js(
+                f"window.dispatchEvent(new CustomEvent('naiba:open-conversation', {{detail: {payload}}}))"
+            )
+        except Exception:
+            pass
+
+    # ---- 「任务完成」悬浮卡片（托盘隐藏时） ----
+    def show_done_card(self, title: str, conversation_id: str) -> dict:
+        """弹一张完成卡片（frameless 小窗，右下角、托盘上方），4 秒自动消失。
+
+        最新完成覆盖旧卡（latest wins）：同一时刻只保留一张，避免排队叠卡打扰。
+        webview.create_window 允许在事件循环运行期间从其它线程调用（pywebview 官方口径），
+        js_api 回调正跑在那些线程里，这里直接建窗是安全的。
+        """
+        import webview
+
+        if self.should_quit:
+            return {"ok": False, "error": "程序正在退出"}
+        self._close_done_card()
+        width, height = 368, 128
+        screen_w, screen_h = _screen_size()
+        x = max(0, screen_w - width - 24)
+        y = max(0, screen_h - height - 76)  # 76 ≈ 任务栏高度 + 一点余量
+        api = DoneCardApi(self, title, conversation_id)
+        kwargs = dict(
+            width=width,
+            height=height,
+            x=x,
+            y=y,
+            js_api=api,
+            resizable=False,
+            frameless=True,
+            on_top=True,
+            transparent=True,
+            shadow=False,
+        )
+        try:
+            card = webview.create_window("naiba-done-card", f"{self.local_url}/tray_card.html", **kwargs)
+        except TypeError:
+            # 老版 pywebview 不认某个参数（transparent/shadow/x/y 等）：降级成不透明的
+            # 普通小窗——卡片还在、只是没有圆角悬浮效果，提醒功能不丢。
+            for key in ("transparent", "shadow", "on_top"):
+                kwargs.pop(key, None)
+            try:
+                card = webview.create_window("naiba-done-card", f"{self.local_url}/tray_card.html", **kwargs)
+            except Exception:
+                return {"ok": False, "error": "无法创建卡片窗口"}
+        except Exception:
+            return {"ok": False, "error": "无法创建卡片窗口"}
+        self._done_card = card
+        try:
+            card.events.closed += self._on_done_card_closed
+        except Exception:
+            pass
+        return {"ok": True}
+
+    def _close_done_card(self) -> None:
+        card, self._done_card = self._done_card, None
+        if card:
+            try:
+                card.destroy()
+            except Exception:
+                pass
+
+    def _on_done_card_closed(self) -> None:
+        # 用户点 ✕/超时自毁后清引用（窗口对象已死，留着会挡住下一张卡）。
+        self._done_card = None
 
     def _open_browser(self, url: str):
         def _open():
@@ -699,6 +851,7 @@ class Launcher:
         if self.window:
             try:
                 self.window.hide()
+                self._window_hidden = True
             except Exception:
                 pass
         return False  # 阻止真正关闭
@@ -842,6 +995,8 @@ class Launcher:
         token = str(srv.APP.config.data["access_token"])
         local_url = f"http://127.0.0.1:{port}"
         page_url = f"{local_url}/?token={token}"
+        # 卡片窗口（tray_card.html）与主窗口同源同端口；换端口重绑后同步刷新。
+        self.local_url = local_url
 
         server_thread = threading.Thread(target=self._serve, name="naiba-http", daemon=True)
         # 绑定在主线程完成：端口被占时这里是唯一能"说话"的地方（见 _bind_server）。
@@ -869,6 +1024,7 @@ class Launcher:
                     print(f"[launcher] 换端口后写回 config 失败（本次启动不受影响）：{write_exc!r}", file=sys.stderr)
                 local_url = f"http://127.0.0.1:{port}"
                 page_url = f"{local_url}/?token={token}"
+                self.local_url = local_url
         srv.write_status(host, port, str(srv.APP.config.data["access_token"]))
         server_thread.start()
         health = self._wait_healthy(local_url)
@@ -903,7 +1059,7 @@ class Launcher:
         self.window = webview.create_window(
             "Cat Chat",
             page_url,
-            js_api=JsApi(srv.APP),
+            js_api=JsApi(srv.APP, launcher=self),
             width=1280,
             height=860,
             min_size=(900, 600),

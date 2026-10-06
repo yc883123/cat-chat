@@ -59,7 +59,9 @@ class PasteActionWiringTests(unittest.TestCase):
         """
         self.assertIn("def naibaUploadLocalPaths(", self.launcher)
         self.assertIn("naibaUploadLocalPaths", self.chat)
-        self.assertIn("JsApi(srv.APP)", self.launcher, "桥要拿到 app 才能复用 _upload_spooled")
+        # 2026-10-06 起主窗口桥还带 launcher（完成卡片链路要读窗口隐藏状态），
+        # 这里只钉"app 必须传进去"这一意图，不锁死完整参数表。
+        self.assertIn("JsApi(srv.APP", self.launcher, "桥要拿到 app 才能复用 _upload_spooled")
 
     # ---- ② 粘贴动作必须走原生驱动 ----
     def test_paste_action_consults_the_native_driver(self) -> None:

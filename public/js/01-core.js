@@ -269,6 +269,13 @@ function clampMsgFontSize(value) {
   return Math.min(MSG_FONT_SIZE_MAX, Math.max(MSG_FONT_SIZE_MIN, size));
 }
 
+// 提示音音量 0-100（与后端 clamp_sound_volume 同口径；手改配置越界静默夹回）。
+function clampSoundVolume(value) {
+  const volume = Math.round(Number(value));
+  if (!Number.isFinite(volume)) return 60;
+  return Math.min(100, Math.max(0, volume));
+}
+
 // 「有值且是数字」才算候选值：null / undefined / '' / 非数字一律视为"这次没传"，
 // 交给调用方回落到旧值或默认值（?? 只在 null/undefined 时回落，所以要先归一成 null）。
 function numericOrNull(value) {
@@ -340,6 +347,17 @@ export function applyAppearance(appearance = {}) {
     chat_font_family_custom: typeof appearance.chat_font_family_custom === 'string'
       ? appearance.chat_font_family_custom.slice(0, 100)
       : (typeof previous.chat_font_family_custom === 'string' ? previous.chat_font_family_custom.slice(0, 100) : ''),
+    // 完成提示音 / 托盘完成卡片：布尔键「新值合法用新值 → 否则沿用旧值 → 再否则默认开」，
+    // 与上面字体键同一套回落约定（只传 theme/skin 的老调用点不会把这些开关悄悄重置）。
+    done_sound: typeof appearance.done_sound === 'boolean'
+      ? appearance.done_sound
+      : (typeof previous.done_sound === 'boolean' ? previous.done_sound : true),
+    done_sound_volume: clampSoundVolume(
+      numericOrNull(appearance.done_sound_volume) ?? numericOrNull(previous.done_sound_volume) ?? 60,
+    ),
+    tray_done_toast: typeof appearance.tray_done_toast === 'boolean'
+      ? appearance.tray_done_toast
+      : (typeof previous.tray_done_toast === 'boolean' ? previous.tray_done_toast : true),
   };
   state.appearance = next;
   const root = document.documentElement;
@@ -404,6 +422,10 @@ export function syncAppearanceFromBootstrap(bootstrap) {
     chat_font_size: configured?.chat_font_size ?? local.chat_font_size,
     chat_font_family: configured?.chat_font_family ?? local.chat_font_family,
     chat_font_family_custom: configured?.chat_font_family_custom ?? local.chat_font_family_custom,
+    // 完成提示音 / 托盘卡片：同款旧版兼容回落（本地缓存 → 再否则 applyAppearance 默认开）。
+    done_sound: configured?.done_sound ?? local.done_sound,
+    done_sound_volume: configured?.done_sound_volume ?? local.done_sound_volume,
+    tray_done_toast: configured?.tray_done_toast ?? local.tray_done_toast,
   });
   // 背景图与外观同一时机同步（同一个 settings 载荷，不必再等第二处调用）。
   // 内部自己做失效兜底，是 fire-and-forget，不阻塞首屏。

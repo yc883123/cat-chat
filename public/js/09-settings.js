@@ -6,6 +6,7 @@ import { $, $$, agentAvatarEmoji, agentAvatarSrc, api, applyAppearance, applyCha
 import { applyConversationAgent, populateComposerModels, populateModels, renderAgents, updateUnloadModelButton } from "./07-models-agents.js";
 import { closeAgentPromptPresetPanel, currentAgentFixedSkillIds, renderAgentPromptPresetList } from "./08-conversations.js";
 import { skillList } from "./13-skill-refs.js";
+import { playDoneSound } from "./20-sound.js";
 import { switchSettingsTab } from "./15-bind-events.js";
 
 // 「指定字体」radio 的占位值：只活在 DOM 里，**永不落库**（见 appearanceFormValues）。
@@ -38,6 +39,10 @@ export function populateAppearanceSettings() {
     chat_font_size: appearance.chat_font_size,
     chat_font_family: appearance.chat_font_family,
     chat_font_family_custom: appearance.chat_font_family_custom,
+    // 三个新键直接透传（undefined 时 applyAppearance 沿用当前值，见其回落约定）。
+    done_sound: appearance.done_sound,
+    done_sound_volume: appearance.done_sound_volume,
+    tray_done_toast: appearance.tray_done_toast,
   });
   // 选项先建好再回显：select 里没有对应 option 时 value 会被清空。
   buildChatFontPickOptions();
@@ -89,6 +94,20 @@ export function syncAppearanceControls() {
   // 无脑 value= 会把光标甩到行尾（改中间字符时最难受）。
   const customInput = $('#chatFontFamilyCustom');
   if (customInput && customInput.value !== custom) customInput.value = custom;
+  // 完成提示音 / 托盘完成卡片开关与音量回显（旧 index.html 没有这些节点时跳过）。
+  const doneSound = $('#doneSoundToggle');
+  if (doneSound) doneSound.checked = appearance.done_sound !== false;
+  const volume = $('#doneSoundVolume');
+  if (volume) {
+    const vol = Number(appearance.done_sound_volume);
+    const volValue = Number.isFinite(vol) ? Math.min(100, Math.max(0, Math.round(vol))) : 60;
+    if (volume.value !== String(volValue)) volume.value = String(volValue);
+    syncRangeFill(volume);
+    const output = $('#doneSoundVolumeValue');
+    if (output) output.textContent = `${volValue}%`;
+  }
+  const trayToast = $('#trayDoneToastToggle');
+  if (trayToast) trayToast.checked = appearance.tray_done_toast !== false;
 }
 
 // 「指定字体」下拉的选项：依 CHAT_FONT_PICKS 现建（字体清单不进 HTML），
@@ -1084,6 +1103,66 @@ export async function saveInterjectDirectSend(enabled) {
     toast(`保存失败：${error.message}`);
     return !value;
   }
+}
+
+/**
+ * 完成提示音 / 托盘完成卡片：即时生效（与「插话直达」同款——POST /api/settings 单项提交，
+ * checkbox 已经由用户点成新值，写失败必须回滚；服务端 settings 是唯一事实来源）。
+ * 走 appearance 段整体提交（saveAppearance），后端白名单校验新键。
+ */
+export async function saveDoneSound(enabled) {
+  const value = Boolean(enabled);
+  const previous = state.appearance?.done_sound !== false;
+  try {
+    await saveAppearance({ done_sound: value });
+    if ($('#doneSoundToggle')) $('#doneSoundToggle').checked = value;
+    toast(value ? '完成提示音已开启' : '完成提示音已关闭');
+    return value;
+  } catch (error) {
+    // saveAppearance 失败时本地保留的是乐观新值；功能开关必须回滚旧值，
+    // 否则"看着开了其实没开"（与「插话直达」同款教训）。
+    applyAppearance({ ...state.appearance, done_sound: previous });
+    syncAppearanceControls();
+    toast(`保存失败：${error.message}`);
+    return previous;
+  }
+}
+
+export async function saveDoneSoundVolume(percent) {
+  const raw = Number(percent);
+  const value = Number.isFinite(raw) ? Math.min(100, Math.max(0, Math.round(raw))) : 60;
+  const previous = Number(state.appearance?.done_sound_volume) || 60;
+  try {
+    await saveAppearance({ done_sound_volume: value });
+    syncAppearanceControls();
+    return value;
+  } catch (error) {
+    applyAppearance({ ...state.appearance, done_sound_volume: previous });
+    syncAppearanceControls();
+    toast(`保存失败：${error.message}`);
+    return previous;
+  }
+}
+
+export async function saveTrayDoneToast(enabled) {
+  const value = Boolean(enabled);
+  const previous = state.appearance?.tray_done_toast !== false;
+  try {
+    await saveAppearance({ tray_done_toast: value });
+    if ($('#trayDoneToastToggle')) $('#trayDoneToastToggle').checked = value;
+    toast(value ? '托盘完成卡片已开启' : '托盘完成卡片已关闭');
+    return value;
+  } catch (error) {
+    applyAppearance({ ...state.appearance, tray_done_toast: previous });
+    syncAppearanceControls();
+    toast(`保存失败：${error.message}`);
+    return previous;
+  }
+}
+
+/** 「试听」：无视开关直接播一声当前音量的提示音（挑音量时不用先开开关）。 */
+export function previewDoneSound() {
+  playDoneSound(Number(state.appearance?.done_sound_volume) || 60, { force: true });
 }
 
 /* ---------- 网络代理（出站请求） ---------- */

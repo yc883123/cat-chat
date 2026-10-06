@@ -234,8 +234,11 @@ class DesktopShellBrandingTests(unittest.TestCase):
 
     def test_window_title_rebranded(self):
         calls = _attr_calls(self.tree, "create_window", base_name="webview")
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(_const(calls[0].args[0]), BRAND, "桌面窗口标题应为显示名")
+        # 2026-10-06 起 launcher 还有「任务完成」卡片小窗（naiba-done-card，含降级重试
+        # 分支）——按首参标题过滤出品牌主窗口，仍应恰好一处。
+        branded = [c for c in calls if _const(c.args[0]) == BRAND]
+        self.assertEqual(len(branded), 1)
+        self.assertEqual(_const(branded[0].args[0]), BRAND, "桌面窗口标题应为显示名")
 
     def test_startup_error_messagebox_title_rebranded(self):
         calls = _attr_calls(self.tree, "MessageBoxW")

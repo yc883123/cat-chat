@@ -13,6 +13,7 @@ import { beginChoiceSubmit, closeQuickMessagePanel, commitChoiceSubmit, handleCh
 import { collapseComposerIfExpanded, hideSkillPopup, parseSkillReferences, renderInputMirror, resizeTextarea, stripSkillReferences } from "./13-skill-refs.js";
 import { hideFilePopup } from "./16-file-refs.js";
 import { sendRunInterjection } from "./18-interjections.js";
+import { notifyRunDone } from "./20-sound.js";
 
 // 发送前附件存在性校验的互斥标志（模块内私有，不对外共享）：
 // 校验要走一次本地 HTTP，await 期间连点发送不能被放过去。
@@ -358,6 +359,9 @@ export async function consumeRunStream(response, row, conversationId, runId, con
         }
         state.runSequence = Math.max(state.runSequence, Number(event.sequence || 0));
         handleChatEvent(event, row, conversationId, runId);
+        // 会话完成提醒（提示音 + 托盘悬浮卡）：只在成功 done 时，error/cancelled 不提醒。
+        // notifyRunDone 内部按 runId 去重，重连重放不会叮两声/弹两卡。
+        if (event.type === 'done') notifyRunDone(conversationId, eventRunId);
         if (eventRunId && ['done', 'error', 'cancelled'].includes(event.type)) {
           delete state.runEvents[eventRunId];
         }
@@ -371,7 +375,11 @@ export async function consumeRunStream(response, row, conversationId, runId, con
       } catch (_) {
         event = null;
       }
-      if (event && event.type !== 'heartbeat') handleChatEvent(event, row, conversationId, runId);
+      if (event && event.type !== 'heartbeat') {
+        handleChatEvent(event, row, conversationId, runId);
+        // 收尾缓冲区里也可能躺着 done（同上：只认成功结局）。
+        if (event.type === 'done') notifyRunDone(conversationId, String(event.run_id || runId || ''));
+      }
     }
   } finally {
     // 消费循环正常结束（done/代际失效/被 abort）都停止看门狗；finishRunSubscription 还会再兜底清一次。

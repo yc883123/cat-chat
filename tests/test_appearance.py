@@ -22,6 +22,10 @@ DEFAULTS = {
     "chat_font_size": 15,
     "chat_font_family": "system",
     "chat_font_family_custom": "",
+    # 完成提示音 / 托盘完成卡片（与 config.py normalize_appearance 的默认值一一对应）。
+    "done_sound": True,
+    "done_sound_volume": 60,
+    "tray_done_toast": True,
 }
 
 
@@ -192,6 +196,64 @@ class AppearanceConfigTests(unittest.TestCase):
             {**DEFAULTS, "theme": "dark", "chat_font_size": 16},
         )
         self.assertEqual(normalize_appearance(None), DEFAULTS)
+
+    # ---- 完成提示音 / 托盘完成卡片（done_sound / done_sound_volume / tray_done_toast） ----
+
+    def test_done_notify_defaults_and_round_trip(self):
+        """三个新键默认值正确，合法写入能落盘、能重载。"""
+        store = self._store()
+        self.assertEqual(store.data["appearance"]["done_sound"], True)
+        self.assertEqual(store.data["appearance"]["done_sound_volume"], 60)
+        self.assertEqual(store.data["appearance"]["tray_done_toast"], True)
+        store.update_settings({
+            "appearance": {"done_sound": False, "done_sound_volume": 30, "tray_done_toast": False}
+        })
+        reloaded = ConfigStore(self.path)
+        self.assertEqual(reloaded.data["appearance"]["done_sound"], False)
+        self.assertEqual(reloaded.data["appearance"]["done_sound_volume"], 30)
+        self.assertEqual(reloaded.data["appearance"]["tray_done_toast"], False)
+
+    def test_done_notify_rejects_invalid_values_on_update(self):
+        """写入路径显式报错（不夹回）：布尔键必须真布尔，音量必须 0-100 整数。"""
+        store = self._store()
+        bad_payloads = [
+            {"done_sound": "on"},
+            {"done_sound": 1},
+            {"done_sound": None},
+            {"tray_done_toast": "yes"},
+            {"done_sound_volume": True},   # bool 是 int 的子类，必须显式拦
+            {"done_sound_volume": -1},
+            {"done_sound_volume": 101},
+            {"done_sound_volume": "loud"},
+            {"done_sound_volume": None},
+        ]
+        for payload in bad_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    store.update_settings({"appearance": payload})
+        # 边界值必须放行（0 / 100 都在契约内）。
+        self.assertEqual(store.update_settings({"appearance": {"done_sound_volume": 0}})["appearance"]["done_sound_volume"], 0)
+        self.assertEqual(store.update_settings({"appearance": {"done_sound_volume": 100}})["appearance"]["done_sound_volume"], 100)
+
+    def test_done_notify_invalid_values_clamped_on_load(self):
+        """手改/旧配置里的非法值加载期回默认或夹回，绝不外泄给前端。"""
+        store = self._store({
+            "appearance": {"done_sound": "on", "done_sound_volume": 999, "tray_done_toast": 1}
+        })
+        self.assertEqual(store.data["appearance"]["done_sound"], True)
+        self.assertEqual(store.data["appearance"]["done_sound_volume"], 100)
+        self.assertEqual(store.data["appearance"]["tray_done_toast"], True)
+        store = self._store({"appearance": {"done_sound_volume": "no"}})
+        self.assertEqual(store.data["appearance"]["done_sound_volume"], 60)
+
+    def test_done_notify_partial_update_keeps_other_keys(self):
+        """单项提交不抹平其它键（前端音量滑条/开关各自单独 POST 的前提）。"""
+        store = self._store()
+        store.update_settings({"appearance": {"done_sound_volume": 20, "tray_done_toast": False}})
+        store.update_settings({"appearance": {"done_sound": False}})
+        self.assertEqual(store.data["appearance"]["done_sound"], False)
+        self.assertEqual(store.data["appearance"]["done_sound_volume"], 20)
+        self.assertEqual(store.data["appearance"]["tray_done_toast"], False)
 
 
 if __name__ == "__main__":

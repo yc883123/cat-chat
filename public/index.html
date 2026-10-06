@@ -743,6 +743,33 @@
             <p class="hint">数值越小背景越淡（最淡 5%）；100% 时背景图完全显示。「调整背景图」里可以拖动/缩放决定露出图片的哪一块。</p>
             <p class="hint" id="chatBackgroundStatus" role="status"></p>
           </div>
+          <div class="settings-card appearance-card">
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 9.5v5h3.5L12 19V5L7.5 9.5H4z"></path><path d="M15.5 9a4.2 4.2 0 0 1 0 6M18 6.8a7.5 7.5 0 0 1 0 10.4"></path></svg></span><div><h4>完成提示音</h4><p>AI 回复结束后播放一声短提示音；出错或手动停止时不响。改动立即生效，同一服务上的其他设备同样适用。</p></div></div>
+            <label class="checkbox-field">
+              <input id="doneSoundToggle" type="checkbox">
+              <span class="checkbox-text">
+                <b>播放完成提示音</b>
+                <small class="hint">默认开启。不想响的时候在这里关掉，无需静音整个系统。</small>
+              </span>
+            </label>
+            <div class="chat-font-size-row">
+              <label for="doneSoundVolume">音量</label>
+              <input id="doneSoundVolume" type="range" min="0" max="100" step="5" value="60" aria-describedby="doneSoundVolumeValue">
+              <output id="doneSoundVolumeValue" for="doneSoundVolume">60%</output>
+            </div>
+            <p class="hint">提示音由程序现场合成，不占用任何音频文件；点「试听」可以在开关关闭时预听效果。</p>
+            <div class="form-actions"><button class="control-button" id="previewDoneSound" type="button">试听</button></div>
+          </div>
+          <div class="settings-card appearance-card">
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2.5"></rect><path d="M9 21h6M12 17v4"></path></svg></span><div><h4>任务完成悬浮卡</h4><p>窗口藏在托盘时，会话完成后在屏幕右下角弹出一张完成卡片，点击即可回到会话。改动立即生效。</p></div></div>
+            <label class="checkbox-field">
+              <input id="trayDoneToastToggle" type="checkbox">
+              <span class="checkbox-text">
+                <b>托盘隐藏时弹出完成卡片</b>
+                <small class="hint">标题是会话名称，几秒后自动消失。桌面程序专属，浏览器打开时无效；出错或手动停止时不弹。</small>
+              </span>
+            </label>
+          </div>
         </section>
         <section data-settings-panel="models" hidden>
           <div class="settings-panel-head"><h3>API 供应商</h3><p>配置在线或本地模型服务；点开卡片可编辑模型、密钥与生成参数。</p></div>

@@ -362,6 +362,11 @@ export function renderUpdateStatus(status) {
   }
   // ---- 下载中 / 已下载待重启：按钮与常驻入口 ----
   const ready = status.ready && status.ready.version ? status.ready : null;
+  // "稍后重启"只对当时那个版本生效：又下完一个新版本就重新提醒（否则 vB 完成会被 vA 的稍后压成横幅）。
+  if (ready && updateReadyDismissed && String(ready.version) !== updateReadyDismissedVersion) {
+    updateReadyDismissed = false;
+    updateReadyDismissedVersion = '';
+  }
   const canInstall = status.supported && status.mode !== 'source'
     && selected && !selected.current && !ready
     && !UPDATE_BUSY_PHASES.includes(status.phase);
@@ -391,12 +396,16 @@ function formatUpdateSize(bytes) {
 }
 
 /* 「已下载待重启」的一次性提示已读标记：只在本次会话内有效——
-   点过「稍后重启」后切换为常驻横幅入口，避免两个位置重复出现同一动作。 */
+   点过「稍后重启」后切换为常驻横幅入口，避免两个位置重复出现同一动作。
+   dismissedVersion 记录"稍后"的是哪个版本：之后又下完**另一个**版本时重置已读，
+   否则新版本的完成提醒会被上一个版本的"稍后"误伤（vA 稍后 → vB 完成也不提醒）。 */
 let updateReadyDismissed = false;
+let updateReadyDismissedVersion = '';
 let updatePollTimer = null;
 
 export function dismissUpdateReady() {
   updateReadyDismissed = true;
+  updateReadyDismissedVersion = String(state.bootstrap.update?.ready?.version || '');
   renderUpdateStatus(state.bootstrap.update || {});
 }
 
@@ -430,7 +439,10 @@ export function syncUpdateFloat(status = state.bootstrap.update || {}) {
   const dialogOpen = Boolean($('#settingsDialog')?.open);
   const downloading = status.phase === 'downloading';
   const ready = Boolean(status.ready && status.ready.version) && status.phase !== 'restarting';
-  const show = !dialogOpen && (downloading || ready);
+  // ready 卡必须尊重「稍后重启」的已读标记：点过稍后还弹卡，等于把用户的选择当耳旁风
+  // （真实事故：设置页点稍后 → 关设置 → close 监听触发本函数 → 卡又弹出来）。
+  // downloading 不受影响——关窗看下载进度是刚需，与稍后重启的语义无关。
+  const show = !dialogOpen && (downloading || (ready && !updateReadyDismissed));
   card.hidden = !show;
   if (!show) return;
   const title = $('#updateFloatTitle');
@@ -538,6 +550,7 @@ export async function discardUpdate() {
     const status = await api('/api/update/discard', { method: 'POST', body: {} });
     state.bootstrap.update = status;
     updateReadyDismissed = false;
+    updateReadyDismissedVersion = '';
     renderUpdateStatus(status);
     toast('已放弃本次更新');
   } catch (error) {

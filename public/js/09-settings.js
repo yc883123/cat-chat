@@ -2,7 +2,7 @@
 // 09-settings.js —— 拆分自 public/app.js 第 3115-4672 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, agentAvatarEmoji, agentAvatarSrc, api, applyAppearance, applyChatBackground, CHAT_FONT_PICKS, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, isFontInstalled, localFileUrl, refreshChatBackgroundImageStatus, state, toast } from "./01-core.js";
+import { $, $$, agentAvatarEmoji, agentAvatarSrc, api, applyAppearance, applyChatBackground, CHAT_FONT_PICKS, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, isFontInstalled, localFileUrl, refreshChatBackgroundImageStatus, saveAppearance, state, toast } from "./01-core.js";
 import { applyConversationAgent, populateComposerModels, populateModels, renderAgents, updateUnloadModelButton } from "./07-models-agents.js";
 import { closeAgentPromptPresetPanel, currentAgentFixedSkillIds, renderAgentPromptPresetList } from "./08-conversations.js";
 import { skillList } from "./13-skill-refs.js";

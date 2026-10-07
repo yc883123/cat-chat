@@ -1463,8 +1463,19 @@ function turnJumpSelect() {
   return $('#turnJumpSelect');
 }
 
+// 选项摘要上限（全角字口径）：原生 <select> 弹层宽度=最长 option 且无法用 CSS 限宽，
+// 一条长消息会把所有条目撑成超宽行、尾部大片空白还被窗口右缘硬裁（2026-10-07 本人实测）。
+// 24 字 ≈ 顶栏闭合态 260px 能显示的量；完整原文不丢——桌面刻度轨 hover 的 turn-tip 仍显示全文。
+const TURN_JUMP_TEXT_LIMIT = 24;
+
 function turnJumpLabel(turn, index) {
-  return `第 ${index + 1} 轮 · ${turn?.user || '（无文字，仅附件）'}`;
+  const raw = String(turn?.user || '').replace(/\s+/g, ' ').trim();
+  const chars = [...raw]; // 按码点截：emoji / 生僻字不会被拦腰切碎
+  const summary =
+    chars.length > TURN_JUMP_TEXT_LIMIT
+      ? chars.slice(0, TURN_JUMP_TEXT_LIMIT).join('') + '…'
+      : raw;
+  return `第 ${index + 1} 轮 · ${summary || '（无文字，仅附件）'}`;
 }
 
 function hideTurnJump() {

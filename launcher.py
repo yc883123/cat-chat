@@ -564,15 +564,57 @@ class JsApi:
         return {"ok": True, "path": dest}
 
 
-def _screen_size() -> tuple[int, int]:
-    """主屏尺寸（像素）：完成卡片要贴着右下角弹。探测失败回退 1080p 常见值。"""
+def _card_origin_from_metrics(
+    phys_w: int, workarea_bottom: int, scale: float, card_w: int, card_h: int
+) -> tuple[int, int]:
+    """完成卡片左上角坐标（**逻辑像素**）——纯函数，量测见 _card_origin()。
+
+    口径警告（2026-10-07 实测坐实的坑）：pywebview 6.x 把 create_window 的 x/y 当
+    **逻辑像素**，内部再乘窗口 DPI scale（winforms.py:214-220「Convert logical pixel
+    coordinates to physical」）。而本进程被 pywebview SetProcessDPIAware 后
+    GetSystemMetrics 返回的是**物理像素**——直接把物理值喂过去等于坐标被放大两次，
+    125% 缩放屏幕上卡片会整个落到屏幕外（探针 verify/_probe_done_card_dpi.py 实测：
+    物理落点 2710,1545，越界 592/230px，本人观感=「弹在任务栏」）。
+    所以此处必须 ÷ scale 转回逻辑像素，下缘贴工作区（自动避开任意高度的任务栏）。
+    """
+    if scale <= 0:
+        scale = 1.0
+    logical_w = phys_w / scale
+    logical_bottom = workarea_bottom / scale
+    x = max(0, round(logical_w - card_w - 24))
+    y = max(0, round(logical_bottom - card_h - 12))
+    return x, y
+
+
+def _card_origin(card_w: int, card_h: int) -> tuple[int, int]:
+    """量测壳：物理屏幕 / 工作区 / 系统 DPI → 交给 _card_origin_from_metrics。
+
+    量测失败（非 Windows / 极老系统）回退旧口径：把 1080p 物理值直接当逻辑用，
+    与修复前行为同等退化，不会更糟。
+    """
     try:
         import ctypes
 
         user32 = ctypes.windll.user32
-        return int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1))
+
+        class _RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        phys_w = int(user32.GetSystemMetrics(0))
+        workarea = _RECT()
+        # SPI_GETWORKAREA = 0x0030：主屏工作区（去掉任务栏），物理像素。
+        if not user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(workarea), 0):
+            raise OSError("SPI_GETWORKAREA failed")
+        dpi = int(getattr(user32, "GetDpiForSystem", lambda: 96)())
+        scale = dpi / 96 if dpi else 1.0
+        return _card_origin_from_metrics(phys_w, int(workarea.bottom), scale, card_w, card_h)
     except Exception:
-        return 1920, 1080
+        return max(0, 1920 - card_w - 24), max(0, 1080 - card_h - 76)
 
 
 class DoneCardApi:
@@ -777,9 +819,8 @@ class Launcher:
             return {"ok": False, "error": "程序正在退出"}
         self._close_done_card()
         width, height = 368, 128
-        screen_w, screen_h = _screen_size()
-        x = max(0, screen_w - width - 24)
-        y = max(0, screen_h - height - 76)  # 76 ≈ 任务栏高度 + 一点余量
+        # x/y 是逻辑像素（pywebview 口径），量测与换算见 _card_origin。
+        x, y = _card_origin(width, height)
         api = DoneCardApi(self, title, conversation_id)
         kwargs = dict(
             width=width,

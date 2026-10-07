@@ -108,6 +108,37 @@ class DoneNotifyFrontendTests(unittest.TestCase):
         self.assertIn("js_api=JsApi(srv.APP, launcher=self)", launcher, "主窗口桥必须带 launcher（否则读不到隐藏状态）")
         self.assertIn("latest wins", launcher, "同刻只保留一张卡的约定要写在注释里防误删")
 
+    def test_done_card_origin_is_logical_pixels(self) -> None:
+        """完成卡片坐标必须是逻辑像素（2026-10-07 DPI 坐标系错配 bug 的守门）。
+
+        launcher 曾把 GetSystemMetrics 的**物理像素**直接喂给 pywebview 的
+        create_window(x=, y=)，而 pywebview 6.x 按逻辑像素再乘窗口 DPI scale——
+        125% 缩放屏幕上卡片整个落到屏幕外（本人观感=「弹在任务栏」）。
+        show_done_card 必须走 _card_origin（物理→逻辑换算 + 贴工作区）。
+        """
+        launcher = (ROOT / "launcher.py").read_text(encoding="utf-8")
+        card = launcher[launcher.index("def show_done_card"):]
+        card = card[: card.index("def _close_done_card")]
+        self.assertIn("_card_origin(width, height)", card, "弹卡坐标必须经 _card_origin 换算成逻辑像素")
+        self.assertNotIn("GetSystemMetrics", card, "show_done_card 里不得再裸取物理像素坐标")
+        self.assertIn("def _card_origin_from_metrics", launcher)
+        self.assertIn("SPI_GETWORKAREA", launcher, "下缘贴工作区，不硬编码任务栏高度")
+
+    def test_card_origin_math(self) -> None:
+        """纯函数几何：125% / 150% 两组实机口径数值 + 非法 scale 兜底。"""
+        import launcher
+
+        # 本机实测口径（2560×1440 @125%，工作区下缘 1380 物理px）：
+        # 逻辑宽 2048 → x = 2048-368-24 = 1656；逻辑工作区下缘 1104 → y = 1104-128-12 = 964。
+        x, y = launcher._card_origin_from_metrics(2560, 1380, 1.25, 368, 128)
+        self.assertEqual((x, y), (1656, 964))
+        # 150% 口径（1920×1080 物理，任务栏 60 物理px → 工作区下缘 1020）：
+        x, y = launcher._card_origin_from_metrics(1920, 1020, 1.5, 368, 128)
+        self.assertEqual((x, y), (888, 540))
+        # 非法 scale 不崩、按 1.0 处理。
+        x, y = launcher._card_origin_from_metrics(1920, 1004, 0.0, 368, 128)
+        self.assertEqual((x, y), (1528, 864))
+
     def test_main_window_dispatches_open_conversation_event(self) -> None:
         bind = self._bind()
         self.assertIn("naiba:open-conversation", bind, "卡片点击 → 主窗口跳会话的事件监听必须在")
@@ -125,6 +156,22 @@ class DoneNotifyFrontendTests(unittest.TestCase):
         for func in ("saveDoneSound", "saveDoneSoundVolume", "saveTrayDoneToast", "previewDoneSound"):
             self.assertIn(f"export async function {func}", settings) if func.startswith("save") else None
         self.assertIn("export function previewDoneSound", settings)
+
+    def test_settings_module_imports_save_appearance(self) -> None:
+        """09-settings 的三个即时保存函数都调 saveAppearance（定义在 01-core）。
+
+        2026-10-07 真事故：09-settings.js 的 import 清单漏了 saveAppearance，音量滑条
+        一拖就 `saveAppearance is not a function` → 回滚拽回 60（本人观感=「滑条锁死」
+        + 底部 toast 报错）。行为级探针 verify/_probe_volume_lock.cjs 复现并验证修复。
+        """
+        settings = self._settings()
+        first_import = settings[: settings.index('";') + 1]
+        self.assertIn("saveAppearance", first_import,
+                      "09-settings 必须从 01-core 导入 saveAppearance（漏了=滑条/开关保存全炸）")
+        for func in ("saveDoneSound", "saveDoneSoundVolume", "saveTrayDoneToast"):
+            body = settings[settings.index(f"export async function {func}"):]
+            body = body[: body.index("\n}")]
+            self.assertIn("await saveAppearance(", body)
 
     def test_appearance_state_carries_new_keys(self) -> None:
         """applyAppearance 是前端外观状态的固定键集：三个新键掉一个，开关就会「存了没生效」。"""

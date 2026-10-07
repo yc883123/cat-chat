@@ -93,6 +93,18 @@ class TurnJumpTests(unittest.TestCase):
         self.assertIn("select.replaceChildren()", render)
         self.assertIn("第 ${index + 1} 轮", source, "选项文案 = 第 N 轮 · 用户消息摘要")
 
+    def test_option_label_is_truncated_summary(self) -> None:
+        # 原生 <select> 弹层宽度=最长 option 且无法 CSS 限宽：整段原文会把所有条目撑成
+        # 超宽行（2026-10-07 本人实测截图）。选项文案必须在 turnJumpLabel 里截断。
+        source = self._messages()
+        self.assertIn("const TURN_JUMP_TEXT_LIMIT = 24", source, "摘要上限常量（要调只改一处）")
+        label = source[source.index("function turnJumpLabel("):]
+        label = label[: label.index("\n}")]
+        self.assertIn("replace(/\\s+/g, ' ')", label, "换行/连续空白先归一，不浪费摘要字数")
+        self.assertIn("[...raw]", label, "按码点截断（emoji 不被拦腰切碎）")
+        self.assertIn("TURN_JUMP_TEXT_LIMIT", label, "超上限必须截断加省略号")
+        self.assertIn("'…'", label)
+
     def test_hidden_below_two_turns_and_suppressed_while_jumping(self) -> None:
         source = self._messages()
         self.assertIn("function hideTurnJump()", source)

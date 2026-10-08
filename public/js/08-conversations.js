@@ -113,7 +113,7 @@ export function sidebarRowHtml(row) {
   if (row.type === 'header') {
     return `<div class="workspace-group ${row.isExp ? 'expanded' : ''}" data-workspace-name="${escapeHtml(row.wsName)}" data-workspace-dir="${escapeHtml(row.dir)}">
       <div class="workspace-group-header" data-action="toggle-group" title="${escapeHtml(row.dir ? `${row.label}（${row.dir}）` : row.label)}">
-        <span class="workspace-caret">▸</span>
+        <span class="workspace-caret"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M5 3.5 L11 8 L5 12.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
         <span class="workspace-group-name">${escapeHtml(row.label)}</span>
         <span class="workspace-count">${row.count}</span>
         ${row.isUngrouped || row.isFavorites ? '' : `<button class="workspace-delete" data-action="delete-workspace" data-workspace-name="${escapeHtml(row.wsName)}" title="删除工作区" aria-label="删除工作区">×</button>`}
@@ -121,7 +121,7 @@ export function sidebarRowHtml(row) {
     </div>`;
   }
   if (row.type === 'newchat') {
-    return `<button class="workspace-new-chat" data-action="new-in-group" data-workspace-group="${escapeHtml(row.wsName)}" data-workspace-dir="${escapeHtml(row.dir)}">＋ 新会话</button>`;
+    return `<button class="workspace-new-chat" data-action="new-in-group" data-workspace-group="${escapeHtml(row.wsName)}" data-workspace-dir="${escapeHtml(row.dir)}"><span class="nc-plus" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"><path d="M8 2.5 V13.5 M2.5 8 H13.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span><span class="nc-label">新会话</span></button>`;
   }
   if (row.type === 'showmore') {
     return `<button class="workspace-showmore" data-action="show-more" data-workspace-name="${escapeHtml(row.wsName)}">展开其余 ${row.remaining} 个会话</button>`;
@@ -179,7 +179,7 @@ export function renderSidebarWindow(targetScrollTop, { force = false } = {}) {
   if (!sidebarRowCache.length) {
     // 顶栏「新会话」按钮已移除（每个工作区分组自带「＋ 新会话」）；这里保留一个兜底入口，
     // 否则"一条会话都没有"时侧栏没有任何新建入口。
-    tree.innerHTML = '<div class="workspace-empty">暂无对话<button class="workspace-new-chat" data-action="new-chat" type="button">＋ 新建会话</button></div>';
+    tree.innerHTML = '<div class="workspace-empty">暂无对话<button class="workspace-new-chat" data-action="new-chat" type="button"><span class="nc-plus" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"><path d="M8 2.5 V13.5 M2.5 8 H13.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span><span class="nc-label">新建会话</span></button></div>';
     resetSidebarWindowRange();
     return;
   }

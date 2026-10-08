@@ -305,9 +305,13 @@ button:disabled { cursor: not-allowed; opacity: .55; }
    （display:none → inline-grid，20px 高于文字行）会把表头从 28px 撑到 32px，
    而虚拟列表的行高是启动时量一次并缓存下来的，高度突变会让窗口与滚动位置错位、
    整个侧栏跟着抖（实测闪烁根因）。padding-right 常驻预留按钮位置，避免与计数重叠。 */
-.workspace-group-header { position: relative; display: flex; align-items: center; gap: 6px; padding: 6px 26px 6px 8px; border-radius: var(--r-md); cursor: pointer; user-select: none; color: var(--sidebar-text); }
+.workspace-group-header { position: relative; display: flex; align-items: center; gap: 11px; padding: 6px 26px 6px 4px; border-radius: var(--r-md); cursor: pointer; user-select: none; color: var(--sidebar-text); }
+/* 左内边距 4px + 箭头 margin-left -5px：箭头 svg 左缘 = 加号盒左缘（16px），箭头整体压在加号/星标列上；
+   gap 11px 抵消负边距，让「未分组」文字与「新会话」文字（46px）保持对齐 */
 .workspace-group-header:hover { background: var(--sidebar-hover); }
-.workspace-caret { font-size: 10px; color: var(--sidebar-muted); transition: transform .15s; flex: none; }
+.workspace-caret { width: 20px; height: 20px; display: grid; place-items: center; margin-left: -5px; color: var(--sidebar-muted); transition: transform .15s; flex: none; }
+.workspace-caret svg { width: 18px; height: 18px; display: block; }
+.workspace-group-header:hover .workspace-caret { color: var(--sidebar-text); }
 .workspace-group.expanded .workspace-caret { transform: rotate(90deg); }
 .workspace-group-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
 .workspace-count { background: rgba(255,255,255,.08); color: var(--sidebar-muted); font-size: 10px; padding: 1px 6px; border-radius: 8px; flex: none; }
@@ -316,8 +320,13 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .workspace-delete:hover { background: var(--overlay-2); color: var(--danger-soft); }
 .workspace-group-body { display: none; margin-top: 2px; }
 .workspace-group.expanded .workspace-group-body { display: block; }
-.workspace-new-chat { width: 100%; text-align: left; border: 0; background: none; color: var(--sidebar-muted); font-size: 12px; padding: 6px 10px 6px 22px; border-radius: var(--r-md); cursor: pointer; }
+.workspace-new-chat { display: flex; align-items: center; gap: 4px; width: 100%; text-align: left; border: 0; background: none; color: var(--sidebar-muted); font-size: 12.5px; font-weight: 600; min-height: 34px; padding: 4px 10px 4px 8px; border-radius: var(--r-md); cursor: pointer; }
+/* 加号盒与 .conversation-star 同规格（26×26、图形 15px），使「＋ 新会话」与下方会话条目的星标同列对齐 */
+.workspace-new-chat .nc-plus { width: 26px; height: 26px; display: grid; place-items: center; flex: none; border-radius: var(--r-xs); }
+.workspace-new-chat .nc-plus svg { width: 15px; height: 15px; display: block; }
+.workspace-new-chat .nc-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-new-chat:hover { background: var(--sidebar-hover); color: var(--sidebar-text); }
+.workspace-new-chat:hover .nc-plus { background: rgba(255,255,255,.12); color: var(--sidebar-text); }
 .workspace-showmore { width: 100%; text-align: left; border: 0; background: none; color: var(--sidebar-muted); font-size: 12px; padding: 6px 10px 6px 22px; border-radius: var(--r-md); cursor: pointer; }
 .workspace-showmore:hover { background: var(--sidebar-hover); color: var(--sidebar-text); }
 .workspace-empty { color: var(--sidebar-muted); font-size: 12px; padding: 16px; text-align: center; }

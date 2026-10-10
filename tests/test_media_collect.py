@@ -39,6 +39,7 @@ PNG_BYTES = bytes.fromhex(
 
 INLINE = {"policy": "inline", "extract": "scan"}
 STRUCTURED = {"policy": "inline", "extract": "structured"}
+GATED = {"policy": "intent_gated", "extract": "scan"}
 
 
 class _ConfigStub:
@@ -102,6 +103,72 @@ class CollectGateTests(_TempCase):
         self.assertEqual(self.collector.collect(_run(result, tool="list_directory"), declaration)["media"], [])
         gated = self.collector.collect(_run(result, tool="list_directory"), declaration, intent=True)
         self.assertEqual(len(gated["media"]), 1)
+
+
+class IntentGatedScopeTests(_TempCase):
+    """intent_gated 附图范围（真实事故 2026-10 守门）：
+
+    共享工作区里的历史旧图被目录枚举结果自动附出。声明丢失的根因修复之外，
+    范围也要收紧——意图通过后只附**本轮枚举目录内**的媒体，偶然出现在
+    结果文本里的其他路径（如工作区根的旧图）不采集。
+    """
+
+    GATED = {"policy": "intent_gated", "extract": "scan"}
+
+    def test_scope_keeps_only_media_inside_enumerated_dir(self) -> None:
+        inside = self._make_png("inside.png")
+        outside_dir = self.root / "elsewhere"
+        outside_dir.mkdir(exist_ok=True)
+        outside = outside_dir / "outside.png"
+        outside.write_bytes(PNG_BYTES + b"1")
+        result = f"目录内容：\n{inside}\n{outside}"
+        collected = self.collector.collect(
+            _run(result, tool="list_directory"),
+            self.GATED,
+            intent=True,
+            scope_dirs=[self.src],
+        )
+        self.assertEqual([r["name"] for r in collected["media"]], ["inside.png"])
+
+    def test_scope_drops_urls(self) -> None:
+        target = self._make_png("local.png")
+        result = f"{target}\nhttp://127.0.0.1:8188/view?filename=remote.png&type=output"
+        collected = self.collector.collect(
+            _run(result, tool="list_directory"),
+            self.GATED,
+            intent=True,
+            scope_dirs=[self.src],
+        )
+        self.assertEqual([r["name"] for r in collected["media"]], ["local.png"])
+
+    def test_scope_all_outside_yields_no_media(self) -> None:
+        outside = self.root / "old.png"
+        outside.write_bytes(PNG_BYTES + b"2")
+        collected = self.collector.collect(
+            _run(f"目录内容：\n{outside}", tool="list_directory"),
+            self.GATED,
+            intent=True,
+            scope_dirs=[self.src],
+        )
+        self.assertEqual(collected["media"], [], "范围外候选一个也不得附出")
+
+    def test_no_scope_dirs_keeps_previous_behavior(self) -> None:
+        """无范围信息（scope_dirs=None）维持原行为（测试/兼容路径）。"""
+        target = self._make_png("any.png")
+        collected = self.collector.collect(
+            _run(str(target), tool="list_directory"), self.GATED, intent=True
+        )
+        self.assertEqual(len(collected["media"]), 1)
+
+    def test_inline_policy_ignores_scope(self) -> None:
+        """范围过滤只对 intent_gated 生效：inline（本轮真产物）不受影响。"""
+        inside = self._make_png("in.png")
+        outside = self.root / "out.png"
+        outside.write_bytes(PNG_BYTES + b"3")
+        collected = self.collector.collect(
+            _run(f"已写入 {inside}\n另见 {outside}"), INLINE, scope_dirs=[self.src]
+        )
+        self.assertEqual(sorted(r["name"] for r in collected["media"]), ["in.png", "out.png"])
 
     def test_structured_rejects_non_json(self) -> None:
         result = f"已写入 {self._make_png('e.png')}（3 字符）"
@@ -481,10 +548,17 @@ class AgentCollectorWiringTests(unittest.TestCase):
         def __init__(self, payload: dict | None = None, boom: bool = False) -> None:
             self.payload = payload or {"media": [], "truncated": None}
             self.boom = boom
-            self.calls: list[tuple[str, dict, bool]] = []
+            self.calls: list[tuple[str, dict, bool, object]] = []
 
-        def collect(self, run, declaration, *, intent=False):
-            self.calls.append((str(run.get("tool")), dict(declaration), bool(intent)))
+        def collect(self, run, declaration, *, intent=False, scope_dirs=None):
+            self.calls.append(
+                (
+                    str(run.get("tool")),
+                    dict(declaration),
+                    bool(intent),
+                    [Path(p) for p in scope_dirs] if scope_dirs is not None else None,
+                )
+            )
             if self.boom:
                 raise RuntimeError("采集失败（模拟）")
             return self.payload
@@ -525,6 +599,59 @@ class AgentCollectorWiringTests(unittest.TestCase):
         run = _run("C:\\a.png")
         agent._collect_media(run, self._Registry(INLINE), {})
         self.assertNotIn("media", run)
+
+    # ---- intent_gated 附图范围（真实事故 2026-10）：本轮枚举目录 ----
+
+    def test_intent_gated_scope_from_absolute_path_arg(self) -> None:
+        collector = self._Collector()
+        agent = self._agent(collector)
+        run = _run("nothing", tool="list_directory")
+        run["arguments"] = {"path": str(ROOT / "naiba")}
+        agent._collect_media(run, self._Registry(GATED), {
+            "media_intent": True, "workspace_dir": str(ROOT),
+        })
+        self.assertEqual(collector.calls[0][3], [(ROOT / "naiba").resolve()])
+
+    def test_intent_gated_scope_from_relative_path_arg(self) -> None:
+        collector = self._Collector()
+        agent = self._agent(collector)
+        run = _run("nothing", tool="search_files")
+        run["arguments"] = {"path": "sub/dir"}
+        agent._collect_media(run, self._Registry(GATED), {
+            "media_intent": True, "workspace_dir": str(ROOT),
+        })
+        self.assertEqual(collector.calls[0][3], [(ROOT / "sub" / "dir").resolve()])
+
+    def test_intent_gated_scope_defaults_to_workspace(self) -> None:
+        """无 path 参数（默认枚举工作区）→ 范围回落会话工作区。"""
+        collector = self._Collector()
+        agent = self._agent(collector)
+        run = _run("nothing", tool="grep")
+        run["arguments"] = {"pattern": "x"}
+        agent._collect_media(run, self._Registry(GATED), {
+            "media_intent": True, "workspace_dir": str(ROOT),
+        })
+        self.assertEqual(collector.calls[0][3], [ROOT.resolve()])
+
+    def test_intent_gated_without_scope_info_passes_none(self) -> None:
+        """无 path 且无工作区 → None（无范围信息，采集侧维持原行为）。"""
+        collector = self._Collector()
+        agent = self._agent(collector)
+        run = _run("nothing", tool="list_directory")
+        run["arguments"] = {}
+        agent._collect_media(run, self._Registry(GATED), {"media_intent": True})
+        self.assertIsNone(collector.calls[0][3])
+
+    def test_inline_declaration_gets_no_scope(self) -> None:
+        """inline（本轮真产物）不走范围过滤：scope_dirs 恒为 None。"""
+        collector = self._Collector()
+        agent = self._agent(collector)
+        run = _run("已写入 C:\\a.png（3 字符）", tool="write_file")
+        run["arguments"] = {"path": "C:\\a.png"}
+        agent._collect_media(run, self._Registry(INLINE), {
+            "media_intent": True, "workspace_dir": str(ROOT),
+        })
+        self.assertIsNone(collector.calls[0][3])
 
 
 class MediaContractTests(unittest.TestCase):

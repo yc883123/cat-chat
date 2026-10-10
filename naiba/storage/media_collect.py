@@ -64,6 +64,25 @@ _CJK_RE = re.compile(r"[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]")
 EMPTY_RESULT: dict[str, Any] = {"media": [], "truncated": None}
 
 
+def _within_scope_dirs(source: str, scope_dirs: list[Path]) -> bool:
+    """候选媒体是否落在 ``intent_gated`` 工具的本轮枚举范围内。
+
+    只认范围内的本地路径；URL（http/https）不属于任何目录，一律不采集。
+    路径解析失败按范围外处理（宁缺毋滥，不误报）。
+    """
+    text = str(source or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if lowered.startswith("http://") or lowered.startswith("https://"):
+        return False
+    try:
+        path = Path(text).expanduser().resolve()
+    except OSError:
+        return False
+    return any(path_within(path, root) for root in scope_dirs)
+
+
 class MediaCollector:
     """按声明提取工具产物媒体（宿主托管缓存），返回可内嵌进会话记录的小型记录。"""
 
@@ -85,11 +104,18 @@ class MediaCollector:
         declaration: dict[str, str],
         *,
         intent: bool = False,
+        scope_dirs: list[Path] | None = None,
     ) -> dict[str, Any]:
         """从一次工具调用的原始 run 提取媒体。
 
         返回 ``{"media": [record, ...], "truncated": {...} | None}``；
         record = ``{kind, name, source, thumb_path}``（仅路径/元数据，不含字节）。
+
+        ``scope_dirs``：``intent_gated`` 工具的附图范围（本轮枚举的目标目录，
+        解析后的绝对路径）。给出时只采集范围内的本地媒体——目录/文本里偶然
+        出现的其他历史图片路径不是本轮产物，不得自动成为附图（真实事故
+        2026-10：共享工作区里的旧图被目录枚举结果带出）。``None`` = 无范围
+        信息，维持原行为（inline 类工具不走这条过滤）。
         """
         policy = str((declaration or {}).get("policy") or "inline")
         extract = str((declaration or {}).get("extract") or "scan")
@@ -106,6 +132,22 @@ class MediaCollector:
         candidates = _candidates_from_result(text, extract, tool=str((run or {}).get("tool") or ""))
         if not candidates:
             return dict(EMPTY_RESULT)
+        if policy == "intent_gated" and scope_dirs is not None:
+            # root 也必须 resolve：CI 短路径环境（8.3 名，如 naiba~1）下调用方传来的
+            # 目录与候选文本里的路径形态可能不同，relative_to 是纯词法比较会全判范围外。
+            roots: list[Path] = []
+            for root in scope_dirs:
+                try:
+                    roots.append(Path(root).expanduser().resolve())
+                except OSError:
+                    continue
+            candidates = [
+                candidate
+                for candidate in candidates
+                if _within_scope_dirs(str(candidate.get("source") or ""), roots)
+            ]
+            if not candidates:
+                return dict(EMPTY_RESULT)
         deduped = _dedupe_candidates(candidates)
         kept, truncated = truncate_by_kind(deduped)
         data_dir = Path(self._config.resolve_data_dir()).resolve()

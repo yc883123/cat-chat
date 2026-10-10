@@ -219,6 +219,18 @@ class ToolRegistry:
 
     # ---- 注册 ----
     def register(self, spec: ToolSpec) -> None:
+        # 同名替换时继承旧 spec 的媒体声明：Provider 重建的同名 spec 通常不带
+        # metadata.media，整体替换会让装配期 declare_media 写入的声明丢失
+        # （真实事故 2026-10：CoreToolProvider 覆盖注册后 list_directory/search_files/
+        # read_file 回落 inline/scan，目录枚举结果里的历史旧图被自动附图展示）。
+        # 只继承 media 键；execute/policy 等仍以新 spec 为准（被覆盖是正确行为）。
+        existing = self._specs.get(spec.name)
+        if existing is not None and "media" not in (spec.metadata or {}):
+            inherited = (existing.metadata or {}).get("media")
+            if inherited is not None:
+                spec = replace(
+                    spec, metadata={**(spec.metadata or {}), "media": inherited}
+                )
         self._specs[spec.name] = spec
         # def 级别名并入别名表（查询层 resolve 归一）
         for alias in spec.aliases:

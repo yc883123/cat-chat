@@ -154,6 +154,39 @@ def _fence_outcome_text(result: Any) -> str:
     return text
 
 
+def _media_scope_dirs(run: dict[str, Any], run_context: RunContext | None) -> list[Path] | None:
+    """``intent_gated`` 工具的附图范围：本轮枚举的目标目录（绝对路径）。
+
+    取工具 ``path`` 参数解析结果；无 path（默认枚举工作区）时回落会话工作区。
+    两者都拿不到返回 ``None``（无范围信息，采集侧维持原行为）。解析失败返回
+    空表（范围外全部不采集，宁缺毋滥）。真实事故 2026-10：共享工作区里的
+    历史旧图被目录枚举结果自动附出——范围限定后，偶然出现在结果文本里的
+    其他路径不再成为本轮附图。
+    """
+    workspace: Path | None = None
+    if isinstance(run_context, dict):
+        ws_raw = str(run_context.get("workspace_dir") or "").strip()
+        if ws_raw:
+            workspace = Path(ws_raw)
+    args = run.get("arguments") if isinstance(run.get("arguments"), dict) else {}
+    raw = str(args.get("path") or "").strip()
+    candidate: Path | None = None
+    if raw:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            if workspace is None:
+                return None  # 相对路径且无工作区：无法界定范围，维持原行为
+            candidate = workspace / candidate
+    elif workspace is not None:
+        candidate = workspace
+    if candidate is None:
+        return None
+    try:
+        return [candidate.resolve()]
+    except OSError:
+        return []
+
+
 
 
 
@@ -574,8 +607,13 @@ class SkillAgent:
         if declaration.get("extract") == "none" or declaration.get("policy") == "never":
             return
         intent = bool((run_context or {}).get("media_intent")) if isinstance(run_context, dict) else False
+        scope_dirs = (
+            _media_scope_dirs(run, run_context)
+            if declaration.get("policy") == "intent_gated"
+            else None
+        )
         try:
-            collected = collector.collect(run, declaration, intent=intent)
+            collected = collector.collect(run, declaration, intent=intent, scope_dirs=scope_dirs)
         except Exception as exc:  # noqa: BLE001 - 采集失败必须记录且不阻断工具结果
             logger.exception("媒体采集失败（工具结果仍照常展示）：tool=%s error=%s", tool, exc)
             return

@@ -14,6 +14,7 @@ import re
 from typing import Any, Callable
 
 from naiba.core import text_fences
+from naiba.core.diagnostics import _debug_empty_stream_evidence
 from naiba.core.text_fences import (
     is_fence_close_line,
     parse_fence_open,
@@ -788,6 +789,10 @@ class StreamMixins:
             content = aggregated_action
         else:
             content = StreamMixins._clean_content("".join(full_content_parts))
+        if not content and not native_tool_calls and not aggregated_action:
+            # 空流（正文为空）时按 debug 开关留存脱敏响应证据（默认关闭）：
+            # 区分「上游真的没回内容」与「分片里有文本但解析丢了」。
+            _debug_empty_stream_evidence(request_format, chunks, status)
         return {
             "content": content,
             "reasoning": "".join(reasoning_parts),

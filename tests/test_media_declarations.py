@@ -157,6 +157,52 @@ class MediaDeclarationTests(unittest.TestCase):
         self.assertEqual(self.registry.media_declaration("write_file")["policy"], "inline")
         self.assertEqual(self.registry.media_declaration("web_search")["extract"], "none")
 
+    def test_startup_registration_order_preserves_declarations(self) -> None:
+        """真实启动顺序（build → 各域 Provider 覆盖注册）后声明必须原样存活。
+
+        真实事故 2026-10（外部用户 3.1.8-beta 排查报告）：CoreToolProvider 用
+        全新 spec 覆盖注册，装配期 declare_media 写入的声明整体丢失，
+        list_directory/search_files/read_file 回落默认 inline/scan——目录枚举
+        结果里的历史旧图被自动采集附图。只对账名单的守门拦不住这类覆盖，
+        必须按真实启动顺序注册后再逐名对账**取值**。
+        """
+        from naiba.tools.providers.core import CoreToolProvider, ToolContext
+        from naiba.tools.providers.documents import DocumentToolProvider
+        from naiba.tools.providers.video import VideoToolProvider
+
+        registry = registry_mod.build_tool_registry()
+        ctx = ToolContext(
+            workspace=ROOT,
+            python_executable=sys.executable,
+            command_timeout=120,
+            mcp_registry=None,
+        )
+        registry.register_provider(CoreToolProvider(ctx))
+        registry.register_provider(DocumentToolProvider(ctx, lambda: ROOT))
+        registry.register_provider(VideoToolProvider(ctx, lambda: ROOT))
+
+        # Provider 覆盖后名单不得增减（防 Provider 又引入未声明的新工具名）。
+        self.assertEqual(sorted(registry.names()), sorted(registry_mod.MEDIA_DECLARATIONS))
+        for name, declaration in registry_mod.MEDIA_DECLARATIONS.items():
+            with self.subTest(tool=name):
+                self.assertEqual(
+                    registry.media_declaration(name),
+                    media_mod.normalize_media_declaration(declaration),
+                )
+        # 本次事故最危险形态：读文本/列目录工具不得回落 inline（自动附图）。
+        self.assertEqual(
+            registry.media_declaration("read_file"), {"policy": "never", "extract": "none"}
+        )
+        self.assertEqual(
+            registry.media_declaration("read"), {"policy": "never", "extract": "none"}
+        )
+        self.assertEqual(
+            registry.media_declaration("list_directory")["policy"], "intent_gated"
+        )
+        self.assertEqual(
+            registry.media_declaration("search_files")["policy"], "intent_gated"
+        )
+
 
 class FrontendMediaListTests(unittest.TestCase):
     """前端不再各写扩展名名单：判定统一经 mediaKind() 读 /api/bootstrap.media_exts。"""

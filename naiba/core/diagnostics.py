@@ -26,6 +26,9 @@ CACHE_DEBUG_ON = False
 # 权限判定诊断总开关：默认关闭。需要调试时改为 True（或设 NAIBA_DEBUG_PERMISSION=1）。
 PERMISSION_DEBUG_ON = False
 
+# 空流证据诊断总开关：默认关闭。需要调试时改为 True（或设 NAIBA_DEBUG_STREAM=1）。
+STREAM_DEBUG_ON = False
+
 StatusCallback = Callable[[dict[str, Any]], None] | None
 
 
@@ -40,6 +43,53 @@ def _permission_debug_enabled() -> bool:
     开启后只写日志（``naiba.tools.*`` logger），不改变任何判定结果。
     """
     return bool(PERMISSION_DEBUG_ON) or os.environ.get("NAIBA_DEBUG_PERMISSION") == "1"
+
+
+def _stream_debug_enabled() -> bool:
+    """空流证据诊断开关：默认关闭；设 STREAM_DEBUG_ON=True 或 NAIBA_DEBUG_STREAM=1 开启。"""
+    return bool(STREAM_DEBUG_ON) or os.environ.get("NAIBA_DEBUG_STREAM") == "1"
+
+
+def _debug_empty_stream_evidence(
+    request_format: str,
+    chunks: list[Any],
+    status: StatusCallback = None,
+) -> None:
+    """空流（正文为空）时留存**脱敏**响应证据，区分「上游真的没回」与「解析丢失」。
+
+    默认关闭（STREAM_DEBUG_ON）或设 NAIBA_DEBUG_STREAM=1 时触发。输出：分片总数、
+    事件类型分布、最后若干个原始分片（超长字符串压成占位符，杜绝 base64/长文本刷屏）。
+    外部排查（2026-10 报告）指出空流报错「尚无原始响应证据区分上游空响应与流解析
+    兼容问题」——本诊断即为此补证据：分片里有文本而我们没解析出来 = 解析侧问题；
+    分片本来就空/只有错误事件 = 上游问题。优先经 ``status`` 回调推给前端
+    （``debug_stream`` 事件），无回调时写 stderr。只读不改流结果。
+    """
+    if not _stream_debug_enabled():
+        return
+    kinds: dict[str, int] = {}
+    for chunk in chunks or []:
+        if isinstance(chunk, dict):
+            kind = str(chunk.get("type") or ("choices" if "choices" in chunk else "?"))
+        else:
+            kind = type(chunk).__name__
+        kinds[kind] = kinds.get(kind, 0) + 1
+    lines = [
+        f"[STREAM] empty-stream evidence format={request_format} chunks={len(chunks or [])}",
+        f"[STREAM] kinds: {json.dumps(kinds, ensure_ascii=False, sort_keys=True)}",
+    ]
+    tail = list(chunks or [])[-30:]
+    if tail:
+        lines.append(f"[STREAM] last {len(tail)} chunks (sanitized):")
+        for index, chunk in enumerate(tail):
+            try:
+                text = json.dumps(_sanitize_payload(chunk, limit=120), ensure_ascii=False, default=str)
+            except Exception:
+                text = "<chunk dump failed>"
+            lines.append(f"    [{index}] {text[:2000]}")
+    if callable(status):
+        status({"type": "debug_stream", "label": "empty-stream", "lines": lines})
+    else:
+        print("\n".join(lines), file=sys.stderr, flush=True)
 
 
 def ensure_utf8_stdio(

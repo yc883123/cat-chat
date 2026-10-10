@@ -28,7 +28,12 @@ from typing import Any, Callable
 from naiba import net as net_io
 from naiba.core.diagnostics import _permission_debug_enabled
 from naiba.core.paths import path_within, path_within_any, within_detail
-from naiba.tools.registry import ToolSpec, build_core_tool_specs, build_harness_alias_specs
+from naiba.tools.registry import (
+    ToolSpec,
+    build_core_tool_specs,
+    build_harness_alias_specs,
+    media_declaration_for,
+)
 
 logger = logging.getLogger("naiba.tools.core")
 
@@ -1280,6 +1285,13 @@ class CoreToolProvider:
                     spec,
                     execute=execute,
                     policy=_make_core_policy(self._context, spec.name),
+                    # 双保险：spec 构造时直接带上声明表里的媒体声明（数据同源，
+                    # 防注册顺序变化导致声明丢失——媒体声明缺失会回落 inline/scan，
+                    # 让枚举类工具自动附出目录里的历史图片）。
+                    metadata={
+                        **(spec.metadata or {}),
+                        "media": media_declaration_for(spec.name),
+                    },
                 )
             )
         # Harness 兼容别名 def：与 canonical 同实现、同策略（单一定义，别名只存在于查询层归一）
@@ -1290,6 +1302,10 @@ class CoreToolProvider:
                     spec,
                     execute=_make_str_execute(self._context, _ALIAS_IMPLS[spec.name], spec.name),
                     policy=_make_core_policy(self._context, canonical),
+                    metadata={
+                        **(spec.metadata or {}),
+                        "media": media_declaration_for(spec.name),
+                    },
                 )
             )
         return results

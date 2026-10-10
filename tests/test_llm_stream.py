@@ -374,5 +374,80 @@ class StreamReaderTests(unittest.TestCase):
         self.assertEqual(action["tool"], "read_file")
 
 
+class EmptyStreamEvidenceTests(unittest.TestCase):
+    """空流证据诊断（STREAM_DEBUG_ON / NAIBA_DEBUG_STREAM=1，默认关闭）。
+
+    外部排查（2026-10 报告）：空流报错缺原始响应证据，分不清「上游没回」还是
+    「解析丢失」。开启后空流必须留存脱敏分片证据；默认关闭时零副作用。
+    """
+
+    EMPTY_RESPONSE = [
+        sse({"choices": [{"delta": {"role": "assistant"}}]}),
+        sse({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+        b"data: [DONE]",
+    ]
+
+    def tearDown(self):
+        import naiba.core.diagnostics as diagnostics
+
+        diagnostics.STREAM_DEBUG_ON = False
+
+    def _collect(self, response, events):
+        StreamMixins._read_sse_response(response, "openai_chat", events.append)
+
+    def test_disabled_by_default_no_evidence(self):
+        events = []
+        self._collect(self.EMPTY_RESPONSE, events)
+        self.assertEqual([e for e in events if e.get("type") == "debug_stream"], [],
+                         "诊断默认关闭，不得产生任何事件")
+
+    def test_enabled_empty_stream_emits_evidence(self):
+        import naiba.core.diagnostics as diagnostics
+
+        diagnostics.STREAM_DEBUG_ON = True
+        events = []
+        self._collect(self.EMPTY_RESPONSE, events)
+        evidence = [e for e in events if e.get("type") == "debug_stream"]
+        self.assertEqual(len(evidence), 1, "开启后空流必须留一份证据")
+        lines = evidence[0]["lines"]
+        self.assertTrue(any("chunks=2" in line for line in lines), f"证据应含分片数：{lines[:2]}")
+        self.assertTrue(any("choices" in line for line in lines), "证据应含事件类型分布")
+
+    def test_enabled_non_empty_stream_no_evidence(self):
+        import naiba.core.diagnostics as diagnostics
+
+        diagnostics.STREAM_DEBUG_ON = True
+        events = []
+        self._collect(
+            [
+                sse({"choices": [{"delta": {"content": "有正文"}}]}),
+                b"data: [DONE]",
+            ],
+            events,
+        )
+        self.assertEqual([e for e in events if e.get("type") == "debug_stream"], [],
+                         "有正文的流不留证据")
+
+    def test_evidence_sanitizes_long_fields(self):
+        import naiba.core.diagnostics as diagnostics
+
+        diagnostics.STREAM_DEBUG_ON = True
+        events = []
+        blob = "A" * 5000
+        self._collect(
+            [
+                sse({"choices": [{"delta": {"role": "assistant"}}]}),
+                sse({"type": "response.done", "blob": blob}),
+                b"data: [DONE]",
+            ],
+            events,
+        )
+        evidence = [e for e in events if e.get("type") == "debug_stream"]
+        self.assertEqual(len(evidence), 1)
+        text = "\n".join(evidence[0]["lines"])
+        self.assertNotIn(blob, text, "超长字段必须压成占位符（防刷屏）")
+        self.assertIn("<str:5000>", text)
+
+
 if __name__ == "__main__":
     unittest.main()

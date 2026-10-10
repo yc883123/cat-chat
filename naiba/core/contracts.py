@@ -226,6 +226,7 @@ class EventType(str, Enum):
     DONE = "done"
     ERROR = "error"
     DEBUG_CACHE = "debug_cache"
+    DEBUG_STREAM = "debug_stream"
     HEARTBEAT = "heartbeat"
     # ---- 插话（interjection）：运行中排队的新指令 ----
     # user_guidance 用户点了「引导」；interjection_consumed agent 已在某一步取走。
@@ -364,6 +365,7 @@ EVENT_PAYLOAD_KEYS: dict[str, frozenset[str] | None] = {
     "done": frozenset({"session_start", "followup_run_id", "plan"}),
     "error": frozenset({"message"}),
     "debug_cache": frozenset({"label", "lines"}),
+    "debug_stream": frozenset({"label", "lines"}),
     "heartbeat": frozenset(),
     # ---- 插话（interjection）----
     # user_guidance：用户点了「引导」→ 前端把队列行升格成正式消息行 + 撤销旧工具确认。

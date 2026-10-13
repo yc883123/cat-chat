@@ -82,6 +82,41 @@ class CoreToolsParityTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("ZZZ", target.read_text(encoding="utf-8"))
 
+    def test_read_file_empty_path_returns_guidance(self) -> None:
+        """空/空白 path 必须返回纠错文案（kimi-k3 空参死循环事故的守门）。
+
+        旧行为把空值 resolve 成工作区根本身再抛 PermissionError，对模型零指导价值，
+        实测连发 6 个 run 后触发「连续失败且重复」熔断。
+        """
+        for bad in ({}, {"path": ""}, {"path": "   "}):
+            with self.subTest(args=bad):
+                ok, out = self.executor.execute("read_file", bad, [])
+                self.assertTrue(ok)
+                self.assertIn("path", out)
+                self.assertIn("list_directory", out)
+                self.assertNotIn("PermissionError", out)
+
+    def test_read_file_directory_path_returns_guidance(self) -> None:
+        """目录 path 必须返回「请用 list_directory」文案，不得抛 PermissionError。"""
+        sub = self.workspace / "sub"
+        sub.mkdir()
+        ok, out = self.executor.execute("read_file", {"path": str(sub)}, [])
+        self.assertTrue(ok)
+        self.assertIn("list_directory", out)
+        self.assertNotIn("PermissionError", out)
+
+    def test_read_file_file_path_output_unchanged(self) -> None:
+        """成功路径字节不变（前缀缓存命中不变的前提）：带 path 读文件原样返回内容。"""
+        target = self.workspace / "sample.txt"
+        target.write_text("AAA\nBBB\n", encoding="utf-8")
+        ok, out = self.executor.execute("read_file", {"path": str(target)}, [])
+        self.assertTrue(ok)
+        self.assertEqual(out, "AAA\nBBB\n")
+        # def 直调与引擎分发同源（单一执行通道）。
+        ok2, out2 = self.specs["read_file"].execute({"path": str(target)}, [], None)
+        self.assertTrue(ok2)
+        self.assertEqual(out2, out)
+
     def test_engine_search_and_glob(self) -> None:
         (self.workspace / "codes.txt").write_text("alpha\nBETA\n", encoding="utf-8")
         ok, out = self.executor.execute(

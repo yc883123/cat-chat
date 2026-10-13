@@ -433,8 +433,26 @@ def _tool_read_file(ctx: ToolContext, args: dict[str, Any], active_skills: list[
 
     二进制防护：UTF-8 replace 直读会把 PDF/ZIP/图片的二进制灌成乱码进模型上下文——
     先嗅探（NUL + 控制字符比例），命中则明确报错并按文件类型给出工具引导。
+
+    入参防护（2026-10-13 kimi-k3 空参死循环事故）：模型违反 schema 的
+    ``required: ["path"]`` 发空调用时，旧行为把空值静默 resolve 成**工作区根本身**，
+    再以 ``PermissionError`` 回灌——该报错对模型零指导价值，实测同一空调用连发
+    6 个 run 后触发「连续失败且重复」熔断。现在空 path 直接返回纠错文案；resolve 后
+    是目录同样明说请用 list_directory。这两种输入在旧代码下必然失败（开目录必抛
+    OSError），故本防护不改变任何成功路径的输出字节。
     """
+    raw_path = str(args.get("path") or "").strip()
+    if not raw_path:
+        return (
+            "read_file 缺少 path 参数：必须提供文件路径（绝对路径，或工作区内相对路径）。"
+            "若要浏览目录里有哪些文件，请改用 list_directory（其 path 留空即工作区根）。"
+        )
     path = _resolve_read_path(ctx, args.get("path"), active_skills)
+    if path.is_dir():
+        return (
+            f"这是目录，不能按文本文件读取：{path}\n"
+            "请改用 list_directory 列出该目录内容后，对具体文件路径调用 read_file。"
+        )
     try:
         with path.open("rb") as handle:
             head = handle.read(_BINARY_SNIFF_BYTES)

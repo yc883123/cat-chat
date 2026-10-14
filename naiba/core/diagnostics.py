@@ -92,6 +92,52 @@ def _debug_empty_stream_evidence(
         print("\n".join(lines), file=sys.stderr, flush=True)
 
 
+def _debug_tool_call_census(
+    request_format: str,
+    chunks: list[Any],
+    native_tool_calls: dict[Any, dict[str, str]] | None,
+    status: StatusCallback = None,
+) -> None:
+    """codex_responses 工具调用事件普查（脱敏）：四类关键事件是否出现 + 各槽位参数长度。
+
+    背景（2026-10-14 会话 1c3ffe51 事故）：流式解析只认 ``output_item.added`` +
+    ``function_call_arguments.delta``；若中转只发 added/done/completed 而不发
+    delta，参数会被解析丢成 ``{}``——与「模型真发空参」无法区分。本普查在
+    STREAM_DEBUG_ON=True 或 NAIBA_DEBUG_STREAM=1 时输出事件计数与槽位参数长度
+    证据（done/completed 出现且槽位参数长度为 0 ⇒ 模型真发空参；done/completed
+    缺席 delta 缺席 ⇒ 中转流形态问题），供定责。只读不改流结果，默认关闭零开销。
+    """
+    if not _stream_debug_enabled():
+        return
+    watch = (
+        "response.output_item.added",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
+        "response.output_item.done",
+        "response.completed",
+    )
+    kinds = {key: 0 for key in watch}
+    for chunk in chunks or []:
+        if isinstance(chunk, dict):
+            kind = str(chunk.get("type") or "")
+            if kind in kinds:
+                kinds[kind] += 1
+    lines = [
+        f"[STREAM] tool-call census format={request_format} chunks={len(chunks or [])}",
+        f"[STREAM] events: {json.dumps(kinds, ensure_ascii=False)}",
+    ]
+    for index in sorted(native_tool_calls or {}):
+        slot = native_tool_calls[index]
+        lines.append(
+            f"    [slot {index}] name={slot.get('name')!r} "
+            f"args_len={len(str(slot.get('arguments') or ''))}"
+        )
+    if callable(status):
+        status({"type": "debug_stream", "label": "tool-call-census", "lines": lines})
+    else:
+        print("\n".join(lines), file=sys.stderr, flush=True)
+
+
 def ensure_utf8_stdio(
     streams=None, *, line_buffering: bool = False, write_through: bool = False
 ) -> None:

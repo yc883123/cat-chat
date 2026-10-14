@@ -14,7 +14,10 @@ import re
 from typing import Any, Callable
 
 from naiba.core import text_fences
-from naiba.core.diagnostics import _debug_empty_stream_evidence
+from naiba.core.diagnostics import (
+    _debug_empty_stream_evidence,
+    _debug_tool_call_census,
+)
 from naiba.core.text_fences import (
     is_fence_close_line,
     parse_fence_open,
@@ -780,6 +783,17 @@ class StreamMixins:
                 guard.feed(agg_text, status)
         guard.finish(status)
         reasoning_streamer.finish()
+        # codex_responses 工具调用事件普查（NAIBA_DEBUG_STREAM=1 才有输出，默认零开销）：
+        # 记录 added/delta/done/completed 四类事件是否出现与各槽位参数长度——
+        # 「模型真发空参」与「中转丢 delta 致解析丢参」从此可用证据定责。
+        # 只在确实收到原生工具调用时普查（无调用则无事可查，也不打扰既有证据口径）。
+        if request_format == "codex_responses" and native_tool_calls:
+            _debug_tool_call_census(request_format, chunks, native_tool_calls, status)
+            # 空参权威对账（2026-10-14 会话 1c3ffe51 事故）：部分中转只发
+            # output_item.added（arguments 恒空串）不发 function_call_arguments.delta，
+            # 全部调用被解析成 {}，模型空参连发至熔断。用流末权威事件回填「有名无参」
+            # 的槽位；delta 正常到达时槽位非空直接跳过，正常流零改动。
+            ProtocolMixins._codex_reconcile_empty_tool_args(chunks, native_tool_calls)
         usage = ProtocolMixins._online_usage(request_format, chunks)
         if native_tool_calls:
             # Convert to the internal action structure the Agent Loop consumes.

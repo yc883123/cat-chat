@@ -256,6 +256,91 @@ class StreamReaderTests(unittest.TestCase):
         self.assertEqual(payload["tool"], "pwsh")
         self.assertEqual(payload["arguments"], {"command": "dir"})
 
+    # ---- 空参权威对账（2026-10-14 会话 1c3ffe51 事故）：gpt-5.6-sol 经 TE CODEX
+    # 中转的 codex_responses 流式下，整轮全部工具调用被解析成空参数 {}（第 1 轮同
+    # 格式正常、schema 逐字节一致）。增量解析只认 output_item.added（arguments 恒
+    # 空串）+ function_call_arguments.delta；中转不发 delta 时参数只存在于
+    # function_call_arguments.done / response.completed 的权威 output 数组里，而
+    # 聚合回填仅在「增量路径一个调用都没收到」时启用，救不到这种半程情况。
+    # 修复后：流末对「有名无参」槽位做权威对账回填。 ----
+
+    def test_read_sse_reconciles_empty_args_from_completed(self):
+        """中转只发 added（参数恒空串）不发 delta：流末 response.completed 里的
+        function_call 参数必须回填「有名无参」的槽位（按 call_id 精确匹配）。"""
+        response = [
+            sse({"type": "response.output_item.added", "output_index": 0,
+                 "item": {"type": "function_call", "call_id": "call_a",
+                          "name": "read_file", "arguments": ""}}),
+            sse({"type": "response.output_item.added", "output_index": 1,
+                 "item": {"type": "function_call", "call_id": "call_b",
+                          "name": "list_directory", "arguments": ""}}),
+            sse({"type": "response.completed", "response": {"output": [
+                {"type": "reasoning", "id": "rs_1"},
+                {"type": "function_call", "call_id": "call_a", "name": "read_file",
+                 "arguments": json.dumps({"path": "D:/x/一号.png"})},
+                {"type": "function_call", "call_id": "call_b", "name": "list_directory",
+                 "arguments": json.dumps({"path": "D:/x"})},
+            ]}}),
+        ]
+        result = StreamMixins._read_sse_response(response, "codex_responses", None)
+        payload = json.loads(result["content"])
+        self.assertEqual(payload["type"], "tools")
+        calls = {c["tool"]: c["arguments"] for c in payload["calls"]}
+        self.assertEqual(calls["read_file"], {"path": "D:/x/一号.png"})
+        self.assertEqual(calls["list_directory"], {"path": "D:/x"})
+
+    def test_read_sse_reconcile_never_overwrites_delta_args(self):
+        """delta 正常到达时槽位非空：对账必须跳过，权威数组的同参不得追加（防双写
+        产生非法 JSON → parse_error）。"""
+        response = [
+            sse({"type": "response.output_item.added", "output_index": 0,
+                 "item": {"type": "function_call", "call_id": "call_a",
+                          "name": "read_file", "arguments": ""}}),
+            sse({"type": "response.function_call_arguments.delta", "output_index": 0,
+                 "item_id": "call_a", "delta": json.dumps({"path": "a.txt"})}),
+            sse({"type": "response.completed", "response": {"output": [
+                {"type": "function_call", "call_id": "call_a", "name": "read_file",
+                 "arguments": json.dumps({"path": "a.txt"})},
+            ]}}),
+        ]
+        result = StreamMixins._read_sse_response(response, "codex_responses", None)
+        payload = json.loads(result["content"])
+        self.assertEqual(payload["tool"], "read_file")
+        self.assertEqual(payload["arguments"], {"path": "a.txt"})
+
+    def test_read_sse_reconcile_keeps_truly_empty_args(self):
+        """权威数组里参数同样为空 ⇒ 模型真发空参：行为与现状一致（空参 action，
+        由上层纠错文案接手），不得伪造参数。"""
+        response = [
+            sse({"type": "response.output_item.added", "output_index": 0,
+                 "item": {"type": "function_call", "call_id": "call_a",
+                          "name": "read_file", "arguments": ""}}),
+            sse({"type": "response.completed", "response": {"output": [
+                {"type": "function_call", "call_id": "call_a", "name": "read_file",
+                 "arguments": ""},
+            ]}}),
+        ]
+        result = StreamMixins._read_sse_response(response, "codex_responses", None)
+        payload = json.loads(result["content"])
+        self.assertEqual(payload["tool"], "read_file")
+        self.assertEqual(payload["arguments"], {})
+
+    def test_read_sse_reconciles_empty_args_from_done_without_call_id(self):
+        """added 未携带 call_id 时按未占用的同名项兜底匹配；completed 缺席时回退
+        response.output_item.done。"""
+        response = [
+            sse({"type": "response.output_item.added", "output_index": 0,
+                 "item": {"type": "function_call", "name": "vision_analyze",
+                          "arguments": ""}}),
+            sse({"type": "response.output_item.done", "item": {
+                "type": "function_call", "call_id": "call_z", "name": "vision_analyze",
+                "arguments": json.dumps({"path": "D:/x/二号.png"})}}),
+        ]
+        result = StreamMixins._read_sse_response(response, "codex_responses", None)
+        payload = json.loads(result["content"])
+        self.assertEqual(payload["tool"], "vision_analyze")
+        self.assertEqual(payload["arguments"], {"path": "D:/x/二号.png"})
+
     def test_read_sse_incomplete_not_backfilled(self):
         """response.incomplete 属被截断的回答，不得作为成功正文回填。"""
         response = [

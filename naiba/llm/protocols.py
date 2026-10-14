@@ -584,6 +584,90 @@ class ProtocolMixins:
         }
         return json.dumps(payload, ensure_ascii=False)
 
+    @staticmethod
+    def _codex_reconcile_empty_tool_args(
+        chunks: list[dict[str, Any]],
+        native_tool_calls: dict[int, dict[str, str]],
+    ) -> list[str]:
+        """codex_responses 流末权威对账：回填「有名无参」槽位的工具参数。
+
+        背景（2026-10-14 会话 1c3ffe51 事故）：gpt-5.6-sol 经 TE CODEX 中转的
+        codex_responses 流式下，整轮全部工具调用被解析成空参数 ``{}``（第 1 轮同
+        格式正常、schema 逐字节一致）。增量解析只认 ``output_item.added``（其
+        ``arguments`` 恒为空串）与 ``function_call_arguments.delta``——若中转不发
+        delta、参数只出现在 ``function_call_arguments.done`` 或
+        ``response.completed`` 的权威 output 数组里，参数就丢了；而聚合回填路径
+        仅在「增量路径一个调用都没收到」时启用，救不到这种半程情况。
+
+        本对账只在 ``name`` 有值且 ``arguments`` 为空白的槽位上生效，用
+        ``response.completed``（优先，一次给全）或 ``response.output_item.done``
+        里的 ``function_call`` 项回填：先按 ``call_id`` 精确匹配，再按未占用的同名
+        项兜底。delta 正常到达的槽位非空、直接跳过，绝不覆盖，正常流零改动；模型
+        真发空参时权威数组同样为空，行为与现状一致。返回已回填槽位的说明（供诊断
+        日志定责），未命中返回空列表。
+        """
+        targets = [
+            slot for slot in native_tool_calls.values()
+            if str(slot.get("name") or "").strip()
+            and not str(slot.get("arguments") or "").strip()
+        ]
+        if not targets:
+            return []
+        items: list[dict[str, Any]] = []
+        for chunk in chunks or []:
+            if not isinstance(chunk, dict):
+                continue
+            if str(chunk.get("type") or "") != "response.completed":
+                continue
+            response = chunk.get("response")
+            if isinstance(response, dict):
+                for item in response.get("output") or []:
+                    if isinstance(item, dict) and item.get("type") == "function_call":
+                        items.append(item)
+        if not items:
+            for chunk in chunks or []:
+                if not isinstance(chunk, dict):
+                    continue
+                if str(chunk.get("type") or "") != "response.output_item.done":
+                    continue
+                item = chunk.get("item")
+                if isinstance(item, dict) and item.get("type") == "function_call":
+                    items.append(item)
+        if not items:
+            return []
+        filled: list[str] = []
+        used: set[int] = set()
+        for slot in targets:
+            pick: int | None = None
+            slot_id = str(slot.get("id") or "")
+            if slot_id:
+                pick = next(
+                    (i for i, item in enumerate(items)
+                     if i not in used
+                     and str(item.get("call_id") or item.get("id") or "") == slot_id),
+                    None,
+                )
+            if pick is None:
+                pick = next(
+                    (i for i, item in enumerate(items)
+                     if i not in used and str(item.get("name") or "") == slot["name"]),
+                    None,
+                )
+            if pick is None:
+                continue
+            used.add(pick)
+            raw = str(items[pick].get("arguments") or "")
+            if raw.strip():
+                slot["arguments"] = raw
+                filled.append(f"{slot['name']}({len(raw)} chars)")
+        if filled:
+            logger.warning(
+                "工具调用参数对账：从中转权威 output 回填 %d 个空参槽位（%s）"
+                "——增量流未携带 function_call_arguments.delta",
+                len(filled), ", ".join(filled),
+            )
+        return filled
+
 
     @staticmethod
     def _stream_delta(request_format: str, chunk: dict[str, Any]) -> tuple[str, str]:

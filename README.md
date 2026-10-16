@@ -1,30 +1,30 @@
-# Cat Chat 3.1.11 Beta
+# Cat Chat 3.2.0 Beta
 
 <p align="center">
   <img src="docs/cat-chat-logo.png" alt="Cat Chat" width="520">
 </p>
 
-Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。3.1.11 Beta 修复了 gpt-5.6-sol 真实会话实测复现的「codex_responses 中转不发参数增量事件 → 整轮工具调用被解析成空参数」缺陷：流末用权威事件回填空参槽位，正常流零改动；改动前后缓存命中逐字节不变（A/B 已验证）。
+Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。3.2.0 Beta 完成 Skills 管理页与 Skill 快速引用弹窗的界面改版，并为每个 Skill 新增「别名 / 备注」用户覆盖层：别名在列表、弹窗、详情三处同显，备注可被搜索命中；两者只改展示层，/引用、Agent 固定、注入 prompt 与前缀缓存逐字节不变。
 
 > Cat Chat 原名 Naiba Chat。显示名自 2.7.6 Beta 起为 Cat Chat；GitHub 仓库自 2.8.0 Beta 起更名为 `cat-chat`（旧地址自动跳转）。更新资产仍使用 `naiba-chat.exe` 与原有清单协议，既有数据位置不变，无需重新配置或搬迁数据。
 
-## 3.1.11 Beta 主要能力
-- **工具调用空参权威对账（本次重点）**：gpt-5.6-sol 经 codex_responses 中转的真实会话实测复现——流式解析只认 `output_item.added`（参数恒空串）+ `function_call_arguments.delta`，中转不发 delta 时整轮调用被解析成空参数 `{}`：空路径被解析成工作区根、vision_analyze 找不到图片，模型原地重发直至「连续返回相同结果」熔断。现在流末对「有名无参」槽位用 `response.completed` / `output_item.done` 的权威 output 数组回填参数（call_id 精确匹配、同名项兜底）。
-- **行为守恒**：delta 正常到达的槽位非空直接跳过（绝不双写成非法 JSON）；权威数组同样为空 ⇒ 模型真发空参，行为与现状一致，绝不伪造参数。
-- **缓存命中不变（已验证）**：改动前后出站载荷逐字节一致——新旧代码 A/B 对跑，产品自身构造的请求体三组 SHA-256 全部相同；实测中转缓存追加 / 重发 98.4%、工具回传续接 97.1%（tedschat/deepseek-v4.1-flash）。
-- **验证**：全量单测 **2491** 通过；本版新增 4 例守门测试（completed 回填、delta 不被覆盖、真空参守恒、done 回退+同名匹配）。
-> 各版本说明与历史更新日志见 [CHANGELOG.md](CHANGELOG.md)。
+## 3.2.0 Beta 主要能力
+- **Skills 别名与备注（本次重点）**：Skills 管理页新增用户覆盖层——每个 Skill 可设「别名」（列表/弹窗/详情三处同显，原名列旁）与「备注」（500 字，可被搜索命中）。只改展示层：`/引用`、Agent 固定、注入 prompt 与前缀缓存逐字节不变。落盘数据目录 `skill-overrides.json`，重启保留；彻底删除后自动清理。
+- **Skills 管理页改版**：搜索框（名称/引用/别名/备注/说明）+ 右侧详情卡（别名编辑、技能说明、meta 芯片、我的备注、打开目录 / 编辑 SKILL.md / 隐藏 / 两级删除拆分按钮），多目录提供提示条。
+- **Skill 快速引用弹窗改版**：桌面居中模态（640px、引用说明折叠、行尾 ⋯ 菜单=查看说明/隐藏、`Enter 插入 · Esc 关闭`、`/ 唤起`提示）；手机自动切换为底部抽屉（~70% 屏高 + 拖拽把手）；头部显示「N 个可用 · 本会话已引用 M 个」，行内「已引用」标签。
+- **验证**：全量单测 **2506** 通过（本版新增 `tests/test_skill_overrides.py` 15 例：覆盖层存取/残留清理、scan 合并、PATCH 校验、注入块字节不变）；新增 `verify/skills_ui_smoke.cjs` 浏览器冒烟（PATCH/scan 合并、管理页详情卡、桌面模态、手机抽屉）。
+
 
 ## 开始使用
 
 ### 使用 Windows 版本
 
-1. 下载 `cat-chat-3.1.11-beta-windows-x64.zip`。
+1. 下载 `cat-chat-3.2.0-beta-windows-x64.zip`。
 2. 解压到一个可写目录。
 3. 运行 `cat-chat.exe`。
 4. 在设置中添加在线 API 或本地模型服务。
 
-> 归档里也提供旧名 `naiba-chat-3.1.11-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
+> 归档里也提供旧名 `naiba-chat-3.2.0-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
 
 首次运行会创建本地数据目录。升级时请直接替换程序文件，不要删除原有 `data` 目录和配置文件。
 
@@ -110,14 +110,14 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 - `naiba-chat.exe` —— **自动更新链路唯一使用的资产，永久保留此文件名**
 - `naiba-chat-update.json` —— 更新清单，其中 `repository` 字段永久写 `yc883123/naiba-chat`
 - `cat-chat.exe` —— 与 `naiba-chat.exe` 是同一文件，SHA-256 完全相同
-- `cat-chat-3.1.11-beta-windows-x64.zip`
-- `naiba-chat-3.1.11-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
+- `cat-chat-3.2.0-beta-windows-x64.zip`
+- `naiba-chat-3.2.0-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
 
 更新器会验证清单中的仓库、提交、文件名和 SHA-256。下载文件还必须是有效的 Windows 可执行文件；任何一项不一致都会终止安装。**自动更新始终读取 `naiba-chat.exe` 与清单里的旧仓库名**（GitHub 对旧仓库地址做长期重定向），这是已发布客户端逐字校验的协议，仓库改名后也不改值。
 
 ## Beta 说明
 
-这是 3.1.11 Beta，适合实际使用和反馈，但仍有以下边界：
+这是 3.2.0 Beta，适合实际使用和反馈，但仍有以下边界：
 
 - 不内置 ComfyUI、模型权重或第三方生成服务，需用户自行安装和配置。
 - 不同模型的工具调用质量差异较大，小型模型可能无法稳定完成长链任务。
@@ -131,7 +131,7 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 ```powershell
 Get-ChildItem public\js\*.js | ForEach-Object { node --check $_.FullName }
 python -m unittest discover -s tests -q
-$env:NAIBA_BUILD_VERSION = "3.1.11-beta"
+$env:NAIBA_BUILD_VERSION = "3.2.0-beta"
 python -m PyInstaller --noconfirm --clean naiba-chat.spec
 ```
 

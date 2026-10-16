@@ -57,6 +57,7 @@ from naiba.skills.install import (
     _unique_dir, _zip_has_skill_md, clear_skill_recycle, delete_skill, list_skill_recycle,
     remove_skill_references, restore_skill_recycle_entry,
 )
+from naiba.skills.overrides import SkillOverrides
 from naiba.storage.backgrounds import ensure_background_presets, is_backgrounds_path
 from naiba.storage.media import (
     CACHE_SCOPES, SCOPE_GENERATED, SCOPE_UPLOADS,
@@ -213,12 +214,16 @@ class NaibaChatApp:
                     skills_sources.append("external")
             except ValueError:
                 logger.warning("已忽略不安全的 Skill 目录：%s", raw)
+        # 用户覆盖层（别名/备注）：落盘数据目录 skill-overrides.json，scan 合并后直出。
+        # 只改展示名，不碰 id/ref/frontmatter —— 见 overrides.py 模块注释。
+        self.skill_overrides = SkillOverrides(self._paths.data_dir / "skill-overrides.json")
         self.catalog = SkillCatalog(
             [Path(path) for path in skills_dirs],
             base_dir=self._paths.app_dir,
             hidden_ids=self.config.get_hidden_skill_ids(),
             package_dir=bundled_skills,
             sources=skills_sources,
+            override_merger=self.skill_overrides.apply_to_entries,
         )
         self.mcp = MCPRegistry(self.config.data.get("mcp_servers", []))
         self.executor = ToolExecutor(
@@ -539,7 +544,7 @@ class NaibaChatApp:
             "providers": self.config.public_providers(),
             "model_profiles": self.config.model_profiles(),
             "default_model_key": self.config.default_model_key(),
-            "skills": self.catalog.scan(),
+            "skills": self._skills_payload(),
             "mcp_servers": self.mcp.states(),
             "agents": self.config.public_agents(),
             "default_agent_id": self.config.default_agent_id(),
@@ -1185,6 +1190,12 @@ class NaibaChatApp:
                 self.config.upsert_agent(agent)
             except Exception:  # noqa: BLE001
                 pass
+        # 彻底删除后覆盖层条目已无主：立即清掉（回收/隐藏的保留，恢复后别名备注还在）。
+        if result.get("permanently_deleted"):
+            try:
+                self.skill_overrides.remove(skill_id)
+            except Exception:  # noqa: BLE001 - 清理失败不影响删除结果
+                logger.exception("清理已删除 Skill 的覆盖层失败")
         return self._reply(
             {
                 "ok": True,
@@ -1337,6 +1348,7 @@ class NaibaChatApp:
                 hidden_ids=[],
                 package_dir=self.catalog.package_dir,
                 sources=list(self.catalog.sources or []),
+                override_merger=self.skill_overrides.apply_to_entries,
             ).scan()
         except Exception:  # noqa: BLE001 - 隐藏列表只是展示信息，不应让扫描失败
             return []
@@ -1345,6 +1357,46 @@ class NaibaChatApp:
             for item in all_skills
             if str(item.get("id") or "") in hidden_ids
         ]
+
+    # ---- Skill 用户覆盖层（别名/备注，Skills 管理页改版 §1.2）----
+
+    def api_skill_override(self, skill_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], HTTPStatus]:
+        """PATCH /api/skills/{skill_id}/override：设置/清除单条别名与备注。
+
+        别名与备注只改展示层：不进注入 prompt、不改 id/ref（守门见
+        tests/test_skill_overrides.py）。未知 skill_id 返回 404。
+        """
+        skill_id = str(skill_id or "").strip()
+        skill = self.catalog.by_id().get(skill_id) if skill_id else None
+        if not skill:
+            return {"error": "Skill 不存在"}, HTTPStatus.NOT_FOUND
+        try:
+            entry = self.skill_overrides.set_override(
+                skill_id,
+                alias=body.get("alias"),
+                note=body.get("note"),
+            )
+        except ValueError as exc:
+            return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
+        except OSError as exc:
+            return {"error": f"保存覆盖层失败：{exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR
+        return {"ok": True, "skill_id": skill_id, "override": entry}, HTTPStatus.OK
+
+    def _prune_skill_overrides(self) -> None:
+        """扫描后清理已不存在的 skill_id 残留条目（失败不阻断）。"""
+        prune = getattr(self.skill_overrides, "prune_missing", None)
+        if not callable(prune):
+            return
+        try:
+            prune({str(item.get("id") or "") for item in self.catalog.scan()})
+        except Exception:  # noqa: BLE001 - 残留清理是尽力而为
+            logger.exception("清理 Skill 覆盖层残留失败")
+
+    def _skills_payload(self) -> list[dict[str, Any]]:
+        """scan + 残留覆盖层清理（bootstrap 时机调用一次，不在每轮 chat 扫描上挂钩）。"""
+        skills = self.catalog.scan()
+        self._prune_skill_overrides()
+        return skills
 
     def _install_dir(self, body: dict[str, Any]) -> None:
         raw = str(body.get("dir") or "").strip()

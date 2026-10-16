@@ -1119,6 +1119,9 @@ export async function openConversation(id) {
   if (id !== state.conversationId) {
     detachRunSubscription();
     hideChoiceButtons();
+    // 已引用 Skill 集合属于会话维度：切会话即清空（新会话由 skills 事件重新累计）。
+    // 弹窗列表不用这里刷新（避免 08→09 反向 import 成环），打开弹窗时会重渲染。
+    state.quotedSkillIds = [];
     // 文件面板属于当前会话；切换会话时收起并清空打开的标签
     closeFilePanel(true);
     // @ 引用弹层与目录缓存同样属于当前会话工作区

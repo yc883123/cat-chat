@@ -1080,6 +1080,22 @@ class RequestHandler(BaseHTTPRequestHandler):
         else:
             self._json({"error": "接口不存在"}, HTTPStatus.NOT_FOUND)
 
+    def do_PATCH(self) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        body = self._read_json()
+        if body is None:
+            return
+        if not self._authorized(parsed):
+            self._json({"error": "访问口令无效"}, HTTPStatus.UNAUTHORIZED)
+            return
+        if path.startswith("/api/skills/") and path.endswith("/override"):
+            # PATCH /api/skills/{skill_id}/override：别名/备注覆盖层（Skills 管理页改版）。
+            skill_id = path[len("/api/skills/"):-len("/override")]
+            self._json(*self.app.api_skill_override(skill_id, body))
+            return
+        self._json({"error": "接口不存在"}, HTTPStatus.NOT_FOUND)
+
     def do_PUT(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path

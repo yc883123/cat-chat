@@ -15,17 +15,38 @@ const CHAT_FONT_PICK_VALUE = '__pick__';
 // 结构三档：除它们之外的所有字体键（含 custom）都走「指定字体」下拉表达。
 const CHAT_FONT_BASE_FAMILIES = new Set(['system', 'serif', 'rounded']);
 
+// Skill 快速引用弹窗的搜索口径（与管理页一致）：name + alias + ref + description + note。
+export function skillMatchesQuery(skill, query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return true;
+  return `${skill.name || ''} ${skill.alias || ''} ${skill.ref || ''} ${skill.description || ''} ${skill.note || ''}`.toLowerCase().includes(q);
+}
+
+// 弹窗/管理页共用的「主显示名」：别名优先，原名列旁落（title 提示原名）。
+export function skillDisplayName(skill) {
+  return String(skill.alias || '').trim() || String(skill.name || '');
+}
+
 export function renderSkills(filter = '') {
   if (!state.bootstrap) return;
-  const query = filter.trim().toLowerCase();
   const fixed = new Set(currentAgentFixedSkillIds());
-  const skills = state.bootstrap.skills.filter((skill) =>
-    !query || `${skill.name} ${skill.description} ${skill.ref || ''}`.toLowerCase().includes(query));
-  $('#skillList').innerHTML = skills.map((skill) => `
-    <button type="button" class="skill-item skill-click" data-skill-insert="${skill.id}">
-      <span><b>${escapeHtml(skill.name)}</b>${fixed.has(skill.id) ? '<em>预设</em>' : ''}<p>${escapeHtml(skill.description || '')}</p></span>
-      <span class="skill-tag" title="点击插入到输入框">/${escapeHtml(skill.ref || skill.name)}</span>
-    </button>`).join('');
+  const quoted = new Set(state.quotedSkillIds || []);
+  const skills = state.bootstrap.skills.filter((skill) => skillMatchesQuery(skill, filter));
+  $('#skillList').innerHTML = skills.map((skill) => {
+    const main = skillDisplayName(skill);
+    const hasAlias = main !== skill.name;
+    return `
+    <button type="button" class="skill-item skill-click" data-skill-insert="${skill.id}" title="${escapeHtml(skill.name)}">
+      <span>
+        <b>${escapeHtml(main)}</b>${hasAlias ? `<em class="skill-alias-preview">本名 ${escapeHtml(skill.name)}</em>` : ''}${fixed.has(skill.id) ? '<em>预设</em>' : ''}${quoted.has(skill.id) ? '<em class="skill-quoted">已引用</em>' : ''}
+        <p class="quick-desc">${escapeHtml(skill.description || '')}</p>
+      </span>
+      <span class="skill-item-side">
+        <span class="skill-tag" title="点击插入到输入框">/${escapeHtml(skill.ref || skill.name)}</span>
+        <span class="icon-button skills-quick-more" data-skill-more="${skill.id}" role="button" tabindex="-1" title="更多操作"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="1.4"></circle><circle cx="12" cy="12" r="1.4"></circle><circle cx="12" cy="19" r="1.4"></circle></svg></span>
+      </span>
+    </button>`;
+  }).join('');
   updateSkillSummary();
 }
 
@@ -369,7 +390,10 @@ export function updateSkillSummary() {
   // 只填数字：按钮自带「Skill」文字标签（此前填「Skill N」→ 顶栏显示「Skill 8 Skill」）。
   $('#skillCount').textContent = String(state.bootstrap.skills.length);
   $('#skillPolicyHint').textContent = '点击某项即在输入框光标处插入 /技能 引用；发送后按“首轮注入 / 后续追加”注入';
-  $('#skillsSummary').textContent = `${state.bootstrap.skills.length} 个可用，当前 Agent 预设 ${fixedCount} 个（新建会话自动预填引用）`;
+  const quoted = (state.quotedSkillIds || []).length;
+  $('#skillsSummary').textContent = quoted
+    ? `${state.bootstrap.skills.length} 个可用 · 本会话已引用 ${quoted} 个（Agent 预设 ${fixedCount} 个，新建会话自动预填引用）`
+    : `${state.bootstrap.skills.length} 个可用，当前 Agent 预设 ${fixedCount} 个（新建会话自动预填引用）`;
 }
 
 /* ---------- API 供应商：卡片列表 + 点开才弹出的设置对话框 ---------- */

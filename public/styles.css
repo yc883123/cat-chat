@@ -1425,6 +1425,45 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .skill-policy-row > span { display: grid; min-width: 0; }
 .skill-policy-row small { color: var(--muted); margin-top: 3px; }
 .skill-policy-row select { width: min(230px, 48%); min-height: 34px; }
+
+/* ---- Skill 快速引用弹窗：桌面居中模态 / 手机底部抽屉（Skills UI 改版 §3）---- */
+.skills-quick-dialog { width: min(640px, calc(100vw - 30px)); height: min(640px, calc(100dvh - 30px)); }
+.skill-drawer-handle { display: none; }
+.skill-policy-details { margin: 4px 16px 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface-2); }
+.skill-policy-details summary { list-style: none; display: flex; align-items: center; gap: 8px; padding: 9px 12px; cursor: pointer; color: var(--text); font-size: 13px; }
+.skill-policy-details summary::-webkit-details-marker { display: none; }
+.skill-policy-details summary .set-ico { width: 16px; height: 16px; color: var(--muted); }
+.skill-policy-details summary .set-ico svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.skill-policy-details summary b { flex: none; }
+.skill-policy-details summary small { flex: 1; min-width: 0; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.skill-policy-details summary .chev { width: 15px; height: 15px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform var(--t-fast); }
+.skill-policy-details[open] summary .chev { transform: rotate(180deg); }
+.skill-policy-details p { margin: 0; padding: 0 12px 10px 36px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.skills-quick-search { position: relative; }
+.skills-quick-search .slash-hint { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: var(--muted); font-size: 11px; border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; pointer-events: none; }
+.skills-quick-list { height: auto; flex: 1; min-height: 0; overflow: auto; }
+.skills-quick-list .skill-item.skill-click { grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.skills-quick-list .skill-item .quick-desc { margin: 3px 0 0; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.skills-quick-list .skill-item .skill-quoted { margin-left: 6px; }
+.skills-quick-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 16px 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+.skills-quick-foot b { color: var(--text); font-weight: 600; }
+/* 行尾 ⋯ 菜单（查看说明 / 隐藏） */
+.skills-quick-more { position: relative; }
+.skills-quick-more-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 30; min-width: 120px; padding: 4px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: var(--shadow-3); }
+.skills-quick-more-menu button { display: flex; width: 100%; align-items: center; gap: 7px; border: 0; background: none; padding: 7px 9px; border-radius: 6px; font: inherit; font-size: 12px; color: var(--text); cursor: pointer; text-align: left; }
+.skills-quick-more-menu button:hover { background: var(--surface-2); }
+.skills-quick-more-menu svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.skills-quick-desc-full { padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); color: var(--text); font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+@media (max-width: 640px) {
+  /* 手机：底部抽屉形态（~70% 屏高 + 拖拽把手）。JS 打开弹窗时按 isCoarsePointer()
+     加 .is-drawer（桌面窄窗口不加，仍居中模态）；这里只对抽屉态生效。 */
+  .skills-quick-dialog.is-drawer { position: fixed; inset: auto 0 0 0; width: 100vw; max-width: none; height: 70dvh; max-height: none; margin: 0; border: 0; border-bottom: 0; border-radius: 16px 16px 0 0; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+  .skills-quick-dialog.is-drawer[open] { display: flex; flex-direction: column; }
+  .skills-quick-dialog.is-drawer::backdrop { background: rgba(0, 0, 0, .45); }
+  .skills-quick-dialog.is-drawer .skill-drawer-handle { display: flex; justify-content: center; padding: 8px 0 2px; }
+  .skill-drawer-handle span { width: 44px; height: 4px; border-radius: 999px; background: var(--line-strong); }
+  .skills-quick-dialog.is-drawer .dialog-toolbar { padding-top: 2px; }
+}
 .search-field { margin: 12px 16px; height: 38px; border: 1px solid var(--line); border-radius: var(--radius); display: flex; align-items: center; gap: 7px; padding: 0 10px; }
 .search-field input { margin: 0; height: auto; border: 0; outline: 0; }
 .skill-list { height: calc(100% - 189px); overflow: auto; padding: 0 10px 16px; }
@@ -1433,6 +1472,65 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .skill-item b { font-size: 13px; }
 .skill-item p { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .skill-item em { color: var(--amber); background: var(--amber-soft); padding: 2px 5px; border-radius: 3px; font-size: 10px; font-style: normal; }
+
+/* ---- Skills 管理页（设置 → Skills 管理）：左列表 + 右详情双栏 ---- */
+.skill-admin-grid { display: grid; grid-template-columns: minmax(260px, 380px) minmax(0, 1fr); gap: 14px; align-items: start; }
+.skill-admin-left { display: grid; gap: 4px; min-width: 0; }
+.skill-admin-search { margin: 0 0 6px; }
+.skill-admin-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 8px 2px 4px; }
+.skill-admin-section-head b { font-size: 13px; }
+.skill-admin-section-head small { color: var(--muted); font-size: 11px; }
+.skill-admin-recycle-head { align-items: center; }
+.skill-admin-list { height: auto; max-height: 300px; overflow: auto; padding: 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+.skill-admin-list .skill-item { display: flex; align-items: center; gap: 10px; width: 100%; border: 0; background: none; text-align: left; font: inherit; cursor: pointer; padding: 10px 10px; border-bottom: 1px solid var(--line); }
+.skill-admin-list .skill-item:last-child { border-bottom: 0; }
+.skill-admin-list .skill-item:hover { background: var(--surface-2); }
+.skill-admin-list .skill-item.selected { background: var(--accent-soft); }
+.skill-admin-icon { flex: none; width: 34px; height: 34px; border-radius: 9px; display: flex; align-items: center; justify-content: center; background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 15px; }
+.skill-admin-name-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.skill-admin-name-row b { font-size: 13px; word-break: break-word; }
+.skill-tag.skill-ref-tag { color: var(--skill-ref); border-color: var(--skill-ref); }
+.skill-tag.alias { color: var(--accent); border-color: var(--accent); }
+.skill-admin-list .skill-item > div { flex: 1; min-width: 0; }
+.skill-admin-meta { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+.skill-admin-chevron { flex: none; width: 16px; height: 16px; color: var(--muted); }
+.skill-admin-chevron svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+/* 详情卡芯片/操作/删除拆分按钮 */
+.skill-detail-chips .skill-tag { font-size: 11px; }
+.skill-detail-dup { margin: 8px 0 0; padding: 7px 10px; border-radius: var(--radius); background: var(--amber-soft); color: var(--amber); font-size: 12px; }
+.skill-delete-split { position: relative; display: inline-flex; }
+.skill-delete-split .danger-button:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.skill-delete-more { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 1px solid rgba(255, 255, 255, .18); padding: 0 6px; }
+.skill-delete-more svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; display: block; }
+.skill-delete-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 30; min-width: 190px; padding: 4px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius); box-shadow: var(--shadow-3); }
+.skill-delete-menu button { display: block; width: 100%; border: 0; background: none; padding: 8px 10px; border-radius: 6px; font: inherit; font-size: 12px; color: var(--text); cursor: pointer; text-align: left; }
+.skill-delete-menu button:hover { background: var(--surface-2); }
+.skill-delete-menu button.danger { color: var(--red); }
+.skill-detail-note.is-error-hint { color: var(--red); }
+.skill-admin-detail { display: grid; gap: 12px; min-width: 0; border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; background: var(--surface); }
+.skill-detail-name-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.skill-detail-name-row b { font-size: 15px; }
+.skill-detail-title-wrap { display: block; }
+.skill-detail-title-wrap input { width: 100%; }
+.skill-detail-title-wrap .hint { margin: 3px 0 0; }
+.skill-detail-actions { display: flex; gap: 8px; margin-top: 8px; }
+.skill-detail-meta { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
+.skill-detail-desc b { font-size: 13px; }
+.skill-detail-desc p { margin: 6px 0 8px; color: var(--text); font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.skill-detail-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.skill-detail-chips .chip { font-size: 11px; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); }
+.skill-detail-actions-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.skill-detail-note-head { display: flex; align-items: baseline; justify-content: space-between; }
+.skill-detail-note-head small { color: var(--muted); font-size: 11px; }
+.skill-detail-note { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; background: var(--surface-2); }
+.skill-detail-note textarea { width: 100%; margin-top: 6px; background: var(--surface); }
+.skill-detail-note .form-actions { justify-content: flex-end; margin-top: 6px; }
+.skill-detail-md-chip { cursor: pointer; font: inherit; font-size: 11px; }
+.skill-detail-md-chip:hover { color: var(--accent); border-color: var(--accent); }
+@media (max-width: 860px) {
+  .skill-admin-grid { grid-template-columns: 1fr; }
+  .skill-admin-detail { order: -1; }
+}
 .settings-layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); height: calc(100% - 65px); }
 .settings-nav { background: var(--surface-2); padding: 12px 10px 16px; border-right: 1px solid var(--line); overflow: auto; }
 .settings-nav button { position: relative; display: block; width: 100%; height: 36px; margin-bottom: 1px; border: 0; background: transparent; border-radius: var(--radius); text-align: left; padding: 0 10px 0 14px; color: var(--text); font-size: 13px; transition: background var(--t-fast); }

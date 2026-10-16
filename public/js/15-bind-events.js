@@ -2,14 +2,14 @@
 // 15-bind-events.js —— 拆分自 public/app.js 第 6658-7653 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, api, applyAppearance, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, hideTextContextMenu, isCoarsePointer, onChatBackgroundMissingChange, triggerDownload, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setClipboardPasteDriver, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer } from "./01-core.js";
+import { $, $$, api, applyAppearance, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, escapeHtml, hideTextContextMenu, isCoarsePointer, onChatBackgroundMissingChange, triggerDownload, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setClipboardPasteDriver, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer } from "./01-core.js";
 import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarning, ensureImageContextMenu, fileUrl, handleImageLightboxKey, hideFileActionMenu, hideImageContextMenu, initImageLightboxInteractions, isPywebview, openImageLightbox, positionContextUsagePopover, resetContextWarningResume, runImageContextAction, saveLocalFile, showFileActionMenu, showImageContextMenu, stepImageLightbox, toggleContextUsagePopover, updateSendButtonState } from "./03-media.js";
 import { branchMessage, cancelActiveEdit, cancelSessionStart, confirmActiveEdit, deleteMessageFlow, fillContextResetSeed, initTurnRail, isNearBottom, regenerateMessage, setStickToBottom, startEditMessage, startNewSession, undoLastDelete } from "./04-messages.js";
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
 import { switchPermissionMode } from "./06-tasks-plans.js";
 import { checkUpdate, closeAgentHelpPopover, closeComposerModelPicker, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, applyUpdate, cancelUpdate, discardUpdate, dismissUpdateReady, saveUpdateProxy, syncUpdateFloat, syncUpdateProxyControls, renderUpdateProxyState, positionAgentHelpPopover, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleAgentHelpPopover, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
 import { applySidebarViewPref, bindSidebarDragDrop, cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeBranchChainPanel, closeConversationMenu, closeSidebarViewMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, openSidebarViewMenu, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, runFullTextSearch, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel, toggleConversationArchive, setTaskLogOpen, setTaskLogStick, setWorkspaceSearchMode, syncSearchModeUi, SEARCH_DEBOUNCE_MS } from "./08-conversations.js";
-import { addProvider, addSearchProfile, appearanceFormValues, applyProviderModelCapabilities, applyProviderPreset, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadUsageStats, loadWorkspaceTree, openAgentCard, openAgentToolEditorCurrent, openProviderCard, openProviderPresetKeyUrl, openVisionProviderForm, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, previewDoneSound, saveDoneSound, saveDoneSoundVolume, saveInterjectDirectSend, saveMcpServer, saveTrayDoneToast, syncRangeFill, saveProvider, saveRuntimeSettings, saveSkillMaxSize, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, setUsageChart, setUsageDim, setUsageGran, setUsageMetric, setUsageRange, showAgentForm, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAgentToolPeek, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, toggleToolOnlySelected, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint, applyUsageFilter, openUsagePrefsDialog, resetUsageFilter, saveUsagePrefs, selectUsageFilterRange, usageUnbindDialogViewport, refreshUsagePricingBadge, openUsagePricingDialog, pricingGoBackToList, pricingTogglePool, pricingConfirmCustomCurrency, pricingCloseCustomCurrency, pricingOpenCustomCurrency, pricingApplyGroupCurrency, pricingDropCurrency, pricingAddFromPool, pricingMarkRowDirty, pricingCycleRowCurrency, pricingSaveRow, pricingRemoveRow, pricingOpenGroup } from "./09-settings.js";
+import { addProvider, addSearchProfile, appearanceFormValues, applyProviderModelCapabilities, applyProviderPreset, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, deleteVisionProvider, hideAgentForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadUsageStats, loadWorkspaceTree, openAgentCard, openAgentToolEditorCurrent, openProviderCard, openProviderPresetKeyUrl, openVisionProviderForm, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, previewDoneSound, saveDoneSound, saveDoneSoundVolume, saveInterjectDirectSend, saveMcpServer, saveTrayDoneToast, syncRangeFill, saveProvider, saveRuntimeSettings, saveSkillMaxSize, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, setUsageChart, setUsageDim, setUsageGran, setUsageMetric, setUsageRange, showAgentForm, skillDisplayName, skillMatchesQuery, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAgentToolPeek, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, toggleToolOnlySelected, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint, applyUsageFilter, openUsagePrefsDialog, resetUsageFilter, saveUsagePrefs, selectUsageFilterRange, usageUnbindDialogViewport, refreshUsagePricingBadge, openUsagePricingDialog, pricingGoBackToList, pricingTogglePool, pricingConfirmCustomCurrency, pricingCloseCustomCurrency, pricingOpenCustomCurrency, pricingApplyGroupCurrency, pricingDropCurrency, pricingAddFromPool, pricingMarkRowDirty, pricingCycleRowCurrency, pricingSaveRow, pricingRemoveRow, pricingOpenGroup } from "./09-settings.js";
 import { addFolderChip, isFolderChip, readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
 import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handlePasteImage, clipboardPasteDriver, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState } from "./12-chat-input.js";
 import { commitSkillSelection, hideSkillPopup, insertSkillRefAtCursor, moveSkillPopupSelection, popupState, positionSkillPopup, renderInputMirror, resizeTextarea, setSkillPopupSelection, skillList, toggleComposerExpanded, updateSkillPopup } from "./13-skill-refs.js";
@@ -1068,7 +1068,17 @@ export function bindEvents() {
   // 自动化脚本 / 程序化改值（page.selectOption）不经过浮层：change 后把触发按钮文案对齐一次。
   $('#composerModelSelect').addEventListener('change', () => syncComposerModelPicker());
   $('#agentSelect').addEventListener('change', saveAgentSelection);
-  $('#openSkills').addEventListener('click', () => $('#skillsDialog').showModal());
+  $('#openSkills').addEventListener('click', () => {
+    // 打开即重渲染：清掉上一会话可能残留的「已引用」标签与计数（quotedSkillIds
+    // 在 openConversation 里已重置，但列表内容是打开前渲染的）。
+    renderSkills($('#skillSearch')?.value || '');
+    // 桌面才显示「/ 唤起」与「Enter 插入 · Esc 关闭」提示（手机抽屉没有物理键盘）。
+    const coarse = isCoarsePointer();
+    if ($('#skillSlashHint')) $('#skillSlashHint').hidden = coarse;
+    if ($('#skillQuickKeys')) $('#skillQuickKeys').hidden = coarse;
+    $('#skillsDialog').classList.toggle('is-drawer', coarse);
+    $('#skillsDialog').showModal();
+  });
   $('#openTasks').addEventListener('click', () => $('#tasksDialog').showModal());
   // 显式刷新按钮：适配 EXE 内嵌 pywebview 无法使用 F5 的场景，EXE 与浏览器通用。
   $('#reloadPage')?.addEventListener('click', () => reloadPage());
@@ -1344,6 +1354,20 @@ export function bindEvents() {
     event.target.value = '';
   });
   $('#skillSearch').addEventListener('input', (event) => renderSkills(event.target.value));
+  // 桌面快捷键：搜索框内 Enter = 插入第一个匹配项（页脚提示「Enter 插入 · Esc 关闭」）。
+  // 粗指针（手机抽屉）无物理键盘，不绑，避免软键盘「换行/完成」误插。
+  $('#skillSearch').addEventListener('keydown', (event) => {
+    if (isCoarsePointer() || event.key !== 'Enter' || event.isComposing) return;
+    const first = $('#skillList')?.querySelector('[data-skill-insert]');
+    if (!first) return;
+    event.preventDefault();
+    const skill = skillList().find((s) => s.id === first.dataset.skillInsert);
+    if (!skill) return;
+    insertSkillRefAtCursor(skill);
+    renderInputMirror();
+    $('#skillsDialog').close();
+    $('#messageInput').focus();
+  });
   $('#composerForm').addEventListener('submit', (event) => {
     event.preventDefault();
     // 输入区在编辑态下已移到消息处，提交同一表单时确认当前编辑。
@@ -1432,6 +1456,14 @@ export function bindEvents() {
     if (idx !== popupState.selectedIndex) setSkillPopupSelection(idx);
   });
   $('#skillList').addEventListener('click', (event) => {
+    // 行尾 ⋯：展开完整 description / 隐藏（阻止冒泡，别触发行的插入）。
+    const more = event.target.closest('[data-skill-more]');
+    if (more) {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleSkillQuickMenu(more);
+      return;
+    }
     const button = event.target.closest('[data-skill-insert]');
     if (!button) return;
     const skill = skillList().find((s) => s.id === button.dataset.skillInsert);
@@ -1440,6 +1472,9 @@ export function bindEvents() {
     renderInputMirror();
     $('#skillsDialog').close();
     $('#messageInput').focus();
+  });
+  document.addEventListener('click', (event) => {
+    if (!event.target.closest('.skills-quick-more')) hideSkillQuickMenu();
   });
   // 附件按钮：手机上先问「照片/视频」还是「文件」（§九.135 第 4 项）。
   // 为什么：`#fileInput` 不带 accept 时"手机浏览器给什么入口"因设备/ROM 而异——部分 Android
@@ -2220,6 +2255,14 @@ export function bindEvents() {
   $('#skillDeleteRecycle')?.addEventListener('click', () => runInstalledSkillDelete('recycle'));
   $('#skillDeletePermanent')?.addEventListener('click', () => runInstalledSkillDelete('permanent'));
   $('#clearSkillRecycle')?.addEventListener('click', clearSkillRecycle);
+  // Skills 管理页：搜索框（name+alias+ref+note+description）、别名/备注保存、编辑重置。
+  $('#skillAdminSearch')?.addEventListener('input', (event) => {
+    adminSkillState.query = event.target.value;
+    renderInstalledSkills(lastInstalledSkills);
+  });
+  $('#skillDetailSaveAlias')?.addEventListener('click', saveSkillAlias);
+  $('#skillDetailCancelAlias')?.addEventListener('click', resetSkillAliasEditor);
+  $('#skillDetailSaveNote')?.addEventListener('click', saveSkillNote);
   $('#skillImportFolder').addEventListener('click', () => $('#skillImportFolderInput').click());
   $('#skillImportFiles').addEventListener('click', () => $('#skillImportFileInput').click());
   $('#saveSkillMaxSize')?.addEventListener('click', saveSkillMaxSize);
@@ -2376,6 +2419,69 @@ export function readDirectoryEntry(entry) {
   return walk(entry, '').then(() => files);
 }
 
+// ---- Skill 快速引用弹窗：行尾 ⋯ 菜单（查看说明 / 隐藏）----
+
+function hideSkillQuickMenu() {
+  $('#skillQuickMoreMenu')?.remove();
+}
+
+function toggleSkillQuickMenu(anchor) {
+  const existing = $('#skillQuickMoreMenu');
+  if (existing) {
+    const same = existing.dataset.anchor === anchor.dataset.skillMore;
+    existing.remove();
+    if (same) return;
+  }
+  const skillId = anchor.dataset.skillMore;
+  const skill = skillList().find((s) => s.id === skillId);
+  if (!skill) return;
+  const menu = document.createElement('span');
+  menu.id = 'skillQuickMoreMenu';
+  menu.className = 'skills-quick-more-menu';
+  menu.dataset.anchor = skillId;
+  const mkItem = (icon, text, onclick, danger = false) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${icon}"></path></svg>${escapeHtml(text)}`;
+    if (danger) btn.classList.add('danger');
+    btn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      hideSkillQuickMenu();
+      onclick();
+    });
+    return btn;
+  };
+  menu.append(
+    // 查看说明：临时展开完整描述（插到列表顶部，关菜单/重渲染即消失）。
+    mkItem('M8 6h13M8 12h13M8 18h13', '查看说明', () => {
+      let full = $('#skillQuickDescFull');
+      if (full && full.dataset.skillId === skillId) { full.remove(); return; }
+      full?.remove();
+      full = document.createElement('div');
+      full.id = 'skillQuickDescFull';
+      full.className = 'skills-quick-desc-full';
+      full.dataset.skillId = skillId;
+      full.textContent = `${skillDisplayName(skill)}：${skill.description || '未提供描述'}`;
+      $('#skillList').prepend(full);
+    }),
+    mkItem('M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', '隐藏', async () => {
+      if (!confirm(`隐藏 Skill「${skillDisplayName(skill)}」？可在 设置 → Skills 管理 中恢复。`)) return;
+      try {
+        const result = await api('/api/skills/delete', { method: 'POST', body: { skill_id: skill.id, mode: 'recycle' } });
+        if (result.skills) state.bootstrap.skills = result.skills;
+        renderInstalledSkills(result.skills || lastInstalledSkills);
+        renderSkills($('#skillSearch')?.value || '');
+        renderHiddenSkills(result.hidden_skills || []);
+        renderRecycledSkills(result.recycled_skills || []);
+        toast(result.hidden ? '已隐藏，可在设置 → Skills 管理 中恢复' : '操作完成');
+      } catch (error) {
+        toast(`隐藏失败：${error.message}`);
+      }
+    }),
+  );
+  anchor.append(menu);
+}
+
 export async function loadInstalledSkills(showToast) {
   try {
     const data = await api('/api/skills/scan', { method: 'POST', body: {} });
@@ -2389,11 +2495,69 @@ export async function loadInstalledSkills(showToast) {
   }
 }
 
+// ---- 覆盖层（别名/备注）保存 ----
+
+export async function saveSkillAlias() {
+  const skill = adminSelectedSkill();
+  if (!skill) return;
+  const value = $('#skillDetailName').value;
+  try {
+    await api(`/api/skills/${encodeURIComponent(skill.id)}/override`, { method: 'PATCH', body: { alias: value } });
+    toast(value.trim() ? '别名已保存' : '别名已清除');
+    await loadInstalledSkills(false);
+  } catch (error) {
+    toast(`保存别名失败：${error.message}`);
+  }
+}
+
+export function resetSkillAliasEditor() {
+  const skill = adminSelectedSkill();
+  if (!skill) return;
+  $('#skillDetailName').value = skillDisplayName(skill);
+  $('#skillDetailSaveAlias').hidden = true;
+  $('#skillDetailCancelAlias').hidden = true;
+}
+
+export async function saveSkillNote() {
+  const skill = adminSelectedSkill();
+  if (!skill) return;
+  const value = $('#skillDetailNote').value;
+  try {
+    await api(`/api/skills/${encodeURIComponent(skill.id)}/override`, { method: 'PATCH', body: { note: value } });
+    toast(value.trim() ? '备注已保存' : '备注已清除');
+    await loadInstalledSkills(false);
+  } catch (error) {
+    toast(`保存备注失败：${error.message}`);
+  }
+}
+
+// 详情卡「隐藏」入口：与旧行内删除同语义（隐藏 = 列表消失、可恢复）。
+async function unhideFlowHide(skill) {
+  if (!confirm(`隐藏 Skill「${skillDisplayName(skill)}」？可在「已隐藏 Skill」中恢复。`)) return;
+  await runInstalledSkillDeleteById(skill, 'recycle');
+}
+
 export let lastInstalledSkills = [];
+let lastHiddenSkills = [];
 let pendingSkillDelete = null;
+// Skills 管理页状态：搜索词 + 当前选中详情卡的 skill id（运行时状态，不落库）。
+const adminSkillState = { query: '', selectedId: '' };
 
 export function isSkillBuiltin(skill) {
   return skill.source === 'builtin';
+}
+
+// 管理页搜索口径：name + alias + ref + note（+ description，与弹窗同一套）。
+function adminSkillMatches(skill) {
+  return skillMatchesQuery(skill, adminSkillState.query);
+}
+
+// 详情卡当前对象（含已隐藏列表的查找：内置 Skill 隐藏后仍可查看/取消隐藏）。
+function adminSelectedSkill() {
+  if (!adminSkillState.selectedId) return null;
+  return lastInstalledSkills.find((s) => s.id === adminSkillState.selectedId)
+    || (lastHiddenSkills || []).find((s) => s.id === adminSkillState.selectedId)
+    || null;
 }
 
 export function renderInstalledSkills(skills) {
@@ -2408,48 +2572,210 @@ export function renderInstalledSkills(skills) {
   }
   const list = $('#installedSkillList');
   list.innerHTML = '';
-  $('#installedSkillCount').textContent = String(skills.length);
-  if (!skills.length) {
-    list.innerHTML = '<div class="connection-item"><small>未加载任何 Skill</small></div>';
+  const visible = lastInstalledSkills.filter(adminSkillMatches);
+  $('#installedSkillCount').textContent = String(lastInstalledSkills.length);
+  // 计数徽标显示「过滤后/总数」，与设计稿 8/8 口径一致。
+  if (adminSkillState.query) $('#installedSkillCount').textContent = `${visible.length}/${lastInstalledSkills.length}`;
+  if (!visible.length) {
+    list.innerHTML = `<div class="connection-item"><small>${lastInstalledSkills.length ? '没有匹配的 Skill' : '未加载任何 Skill'}</small></div>`;
+    // 过滤把选中项滤没了：清掉选中，让详情卡回退到空态提示。
+    if (adminSkillState.selectedId && !lastInstalledSkills.some((s) => s.id === adminSkillState.selectedId)) {
+      adminSkillState.selectedId = '';
+    }
+    renderSkillAdminDetail();
     return;
   }
-  skills.forEach((skill) => {
-    const item = document.createElement('div');
-    item.className = 'skill-item connection-item';
+  // 详情卡常驻（设计稿右侧始终有选中项）：没有选中或选中项已不在已安装列表时选第一个。
+  if (!adminSkillState.selectedId || !visible.some((s) => s.id === adminSkillState.selectedId)) {
+    adminSkillState.selectedId = visible[0].id;
+  }
+  visible.forEach((skill) => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'skill-item connection-item skill-admin-row';
+    item.dataset.skillAdminId = skill.id;
+    if (skill.id === adminSkillState.selectedId) item.classList.add('selected');
+    const icon = document.createElement('span');
+    icon.className = 'skill-admin-icon';
+    icon.textContent = (skillDisplayName(skill) || '?').trim().charAt(0).toUpperCase() || '?';
     const info = document.createElement('div');
+    const nameRow = document.createElement('div');
+    nameRow.className = 'skill-admin-name-row';
     const b = document.createElement('b');
-    b.textContent = skill.name;
-    const small = document.createElement('small');
-    small.textContent = skill.description || skill.path;
-    small.className = 'desc';
-    info.append(b, small);
-    item.append(info);
-    if (skill.source === 'builtin' || skill.source === 'external') {
-      const tag = document.createElement('span');
-      tag.className = 'skill-tag';
-      tag.textContent = skill.source === 'builtin' ? '内置' : '外部';
-      item.append(tag);
+    b.textContent = skillDisplayName(skill);
+    if (skill.alias) b.title = `本名：${skill.name}`;
+    nameRow.append(b);
+    const refTag = document.createElement('span');
+    refTag.className = 'skill-tag skill-ref-tag';
+    refTag.textContent = `/${skill.ref || skill.name}`;
+    nameRow.append(refTag);
+    const sourceTag = document.createElement('span');
+    sourceTag.className = 'skill-tag';
+    if (skill.source === 'builtin') { sourceTag.textContent = '内置'; sourceTag.classList.add('builtin'); }
+    else if (skill.source === 'external') sourceTag.textContent = '外部';
+    else sourceTag.textContent = '已安装';
+    nameRow.append(sourceTag);
+    if (skill.alias) {
+      const aliasTag = document.createElement('span');
+      aliasTag.className = 'skill-tag alias';
+      aliasTag.textContent = '别名';
+      nameRow.append(aliasTag);
     }
-    const dupDirs = Array.isArray(skill.duplicate_dirs) ? skill.duplicate_dirs : [];
-    // 内置 Skill 必有「打包一份 + 托管副本」两份，重复徽标只提示非内置的多目录重复。
-    if (dupDirs.length > 1 && skill.source !== 'builtin') {
-      const dup = document.createElement('span');
-      dup.className = 'skill-tag';
-      dup.textContent = `重复 ${dupDirs.length} 处`;
-      dup.title = `同一 Skill 在以下目录各有一份：\n${dupDirs.join('\n')}`;
-      item.append(dup);
+    if (skill.note) {
+      const noteTag = document.createElement('span');
+      noteTag.className = 'skill-tag alias';
+      noteTag.textContent = '备注';
+      nameRow.append(noteTag);
     }
-    const del = document.createElement('button');
-    del.className = 'skill-delete';
-    del.type = 'button';
-    del.title = skill.source === 'managed' && dupDirs.length <= 1
-      ? '删除 Skill（移动到回收目录）'
-      : '隐藏 Skill（可在「已隐藏」中恢复；多处副本一并隐藏）';
-    del.textContent = '删除';
-    del.addEventListener('click', () => openInstalledSkillDelete(skill));
-    item.append(del);
+    const meta = document.createElement('small');
+    meta.className = 'desc skill-admin-meta';
+    const parts = [`脚本 ${skill.script_count || 0} 个`, `约 ${(skill.char_count || 0) || 0} 字符`];
+    meta.textContent = parts.join(' · ');
+    if (skill.note) meta.title = `备注：${skill.note}`;
+    info.append(nameRow, meta);
+    const chev = document.createElement('span');
+    chev.className = 'skill-admin-chevron';
+    chev.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"></path></svg>';
+    item.append(icon, info, chev);
+    item.addEventListener('click', () => {
+      adminSkillState.selectedId = skill.id;
+      renderInstalledSkills(lastInstalledSkills);
+    });
     list.append(item);
   });
+  renderSkillAdminDetail();
+}
+
+// 多目录提供提示条文案（duplicate_dirs 非空时详情卡顶部展示）。
+function adminDupNotice(skill) {
+  const dirs = Array.isArray(skill?.duplicate_dirs) ? skill.duplicate_dirs : [];
+  if (dirs.length <= 1) return '';
+  return `同一 Skill 在 ${dirs.length} 个目录各有一份：\n${dirs.join('\n')}`;
+}
+
+// ---- 详情卡：别名编辑 + 备注 + 操作行（打开目录 / 编辑 SKILL.md / 隐藏 / 两级删除）----
+
+export function renderSkillAdminDetail() {
+  const card = $('#skillDetailCard');
+  if (!card) return;
+  const skill = adminSelectedSkill();
+  card.hidden = !skill;
+  $('#skillDetailEmpty').hidden = Boolean(skill);
+  if (!skill) return;
+  $('#skillDetailName').value = skillDisplayName(skill);
+  $('#skillDetailName').disabled = false;
+  $('#skillDetailOrig').textContent = skill.alias ? `原名 ${skill.name} · /${skill.ref || skill.name}` : `/${skill.ref || skill.name}`;
+  $('#skillDetailSaveAlias').hidden = true;
+  $('#skillDetailCancelAlias').hidden = true;
+  const aliasInput = $('#skillDetailName');
+  aliasInput.oninput = () => {
+    const changed = aliasInput.value.trim() !== (skill.alias || '');
+    $('#skillDetailSaveAlias').hidden = !changed;
+    $('#skillDetailCancelAlias').hidden = !changed;
+  };
+  $('#skillDetailDesc').textContent = skill.description || '未提供描述';
+  const dup = adminDupNotice(skill);
+  const dupBar = $('#skillDetailDup');
+  dupBar.hidden = !dup;
+  dupBar.textContent = `多目录提供：${dup.split('\n')[0]}`;
+  dupBar.title = dup;
+  // meta 芯片
+  const chips = $('#skillDetailChips');
+  chips.innerHTML = '';
+  const addChip = (text, title = '') => {
+    const chip = document.createElement('span');
+    chip.className = 'skill-tag';
+    chip.textContent = text;
+    if (title) chip.title = title;
+    chips.append(chip);
+  };
+  addChip(`/${skill.ref || skill.name}`);
+  addChip(`脚本 ${skill.script_count || 0} 个`);
+  addChip(`约 ${(skill.char_count || 0) || 0} 字符`);
+  if (skill.requires_mcp) addChip('需 MCP', `声明依赖 MCP 服务：${(skill.mcp_servers || []).join('、') || '未列明'}`);
+  // SKILL.md：芯片形态的查看入口（桌面原生打开；浏览器走 /api/file 预览）。
+  const mdChip = document.createElement('button');
+  mdChip.type = 'button';
+  mdChip.className = 'skill-tag skill-detail-md-chip';
+  mdChip.textContent = 'SKILL.md';
+  mdChip.title = '查看 SKILL.md 原文';
+  mdChip.addEventListener('click', () => {
+    const mdPath = skill.path || '';
+    if (!mdPath) return;
+    // 桌面壳：原生打开（/api/file 对内置/外部目录的 SKILL.md 会 403，它只服务工作区与 data 目录）。
+    if (isPywebview()) void callDesktopFileAction({ method: 'naibaOpenFile', args: [mdPath], failure: '无法打开文件' });
+    else window.open(`/api/file?path=${encodeURIComponent(mdPath)}`, '_blank');
+  });
+  chips.append(mdChip);
+  // 备注
+  const noteArea = $('#skillDetailNote');
+  noteArea.value = skill.note || '';
+  const counter = $('#skillDetailNoteCount');
+  counter.textContent = `${noteArea.value.length} / 500`;
+  $('#skillDetailSaveNote').hidden = true;
+  noteArea.oninput = () => {
+    const len = noteArea.value.length;
+    counter.textContent = `${len} / 500`;
+    counter.classList.toggle('is-error', len > 500);
+    $('#skillDetailSaveNote').hidden = noteArea.value === (skill.note || '');
+  };
+  // 操作行
+  $('#skillDetailActions').innerHTML = '';
+  const actions = $('#skillDetailActions');
+  const mkBtn = (cls, text, title, onclick) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = cls;
+    btn.textContent = text;
+    if (title) btn.title = title;
+    btn.addEventListener('click', onclick);
+    actions.append(btn);
+    return btn;
+  };
+  mkBtn('control-button', '打开目录', '在资源管理器中打开 Skill 目录', () => {
+    const root = skill.root || skill.path || '';
+    if (!root) return;
+    if (isPywebview()) void callDesktopFileAction({ method: 'naibaRevealInFolder', args: [root], failure: '无法打开文件夹' });
+    else void navigator.clipboard?.writeText(root).then(() => toast('已复制目录路径'));
+  });
+  mkBtn('control-button', '编辑 SKILL.md', '挂载文件工具，让模型在本会话中修改该 Skill 文件', () => startSkillEdit(skill));
+  mkBtn('control-button', '隐藏', '从列表隐藏（可在「已隐藏 Skill」中恢复）', () => unhideFlowHide(skill));
+  // 两级删除：主按钮 + 下拉（设计稿 split-button）。
+  const delWrap = document.createElement('span');
+  delWrap.className = 'skill-delete-split';
+  const delMain = document.createElement('button');
+  delMain.type = 'button';
+  delMain.className = 'danger-button';
+  delMain.textContent = '删除';
+  delMain.addEventListener('click', () => openInstalledSkillDelete(skill, 'recycle'));
+  const delMore = document.createElement('button');
+  delMore.type = 'button';
+  delMore.className = 'danger-button skill-delete-more';
+  delMore.title = '更多删除方式';
+  delMore.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg>';
+  const delMenu = document.createElement('span');
+  delMenu.className = 'skill-delete-menu';
+  delMenu.hidden = true;
+  const mkMenuItem = (text, mode, warning) => {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'skill-delete-menu-item';
+    item.textContent = text;
+    item.addEventListener('click', () => { delMenu.hidden = true; openInstalledSkillDelete(skill, mode); });
+    if (warning) item.classList.add('danger');
+    return item;
+  };
+  delMenu.append(
+    mkMenuItem('移到回收目录（可恢复）', 'recycle'),
+    mkMenuItem('彻底删除（不可恢复）', 'permanent', true),
+  );
+  delMore.addEventListener('click', (event) => {
+    event.stopPropagation();
+    delMenu.hidden = !delMenu.hidden;
+  });
+  document.addEventListener('click', () => { delMenu.hidden = true; }, { once: true });
+  delWrap.append(delMain, delMore, delMenu);
+  actions.append(delWrap);
 }
 
 export function openInstalledSkillDelete(skill) {
@@ -2487,10 +2813,16 @@ export function openInstalledSkillDelete(skill) {
 export async function runInstalledSkillDelete(mode) {
   const skill = pendingSkillDelete;
   if (!skill) return;
+  await runInstalledSkillDeleteById(skill, mode);
+  pendingSkillDelete = null;
+}
+
+// 按 id 执行两级删除（弹窗按钮与管理页详情卡共用）；成功后详情卡若还开着会自动跟随刷新。
+export async function runInstalledSkillDeleteById(skill, mode) {
   const dialog = $('#skillDeleteDialog');
   const recycle = $('#skillDeleteRecycle');
   const permanent = $('#skillDeletePermanent');
-  if (mode === 'permanent' && !confirm(`彻底删除 Skill「${skill.name}」的托管文件？此操作不可恢复。`)) return;
+  if (mode === 'permanent' && !confirm(`彻底删除 Skill「${skillDisplayName(skill)}」的托管文件？此操作不可恢复。`)) return;
   if (dialog?.open) dialog.close();
   if (recycle) recycle.disabled = true;
   if (permanent) permanent.disabled = true;
@@ -2514,7 +2846,6 @@ export async function runInstalledSkillDelete(mode) {
   } catch (error) {
     toast(`删除失败：${error.message}`);
   } finally {
-    pendingSkillDelete = null;
     if (recycle) recycle.disabled = false;
     if (permanent) permanent.disabled = false;
   }
@@ -2582,6 +2913,7 @@ export function renderHiddenSkills(hiddenSkills) {
   const list = $('#hiddenSkillList');
   if (!list) return;
   const items = Array.isArray(hiddenSkills) ? hiddenSkills : [];
+  lastHiddenSkills = items;
   const count = $('#hiddenSkillCount');
   if (count) count.textContent = String(items.length);
   list.innerHTML = '';
@@ -2591,22 +2923,32 @@ export function renderHiddenSkills(hiddenSkills) {
   }
   items.forEach((skill) => {
     const item = document.createElement('div');
-    item.className = 'skill-item connection-item';
+    item.className = 'skill-item connection-item skill-admin-row';
     const info = document.createElement('div');
+    const nameRow = document.createElement('div');
+    nameRow.className = 'skill-admin-name-row';
     const b = document.createElement('b');
-    b.textContent = skill.name;
+    b.textContent = skillDisplayName(skill);
+    nameRow.append(b);
+    const refTag = document.createElement('span');
+    refTag.className = 'skill-tag skill-ref-tag';
+    refTag.textContent = `/${skill.ref || skill.name}`;
+    nameRow.append(refTag);
+    const hiddenTag = document.createElement('span');
+    hiddenTag.className = 'skill-tag';
+    hiddenTag.textContent = '已隐藏';
+    nameRow.append(hiddenTag);
     const small = document.createElement('small');
-    small.textContent = skill.description || skill.path;
-    small.className = 'desc';
-    info.append(b, small);
-    item.append(info);
+    small.className = 'desc skill-admin-meta';
+    small.textContent = skill.description || skill.path || '';
+    info.append(nameRow, small);
     const unhide = document.createElement('button');
     unhide.className = 'skill-delete';
     unhide.type = 'button';
     unhide.title = '取消隐藏，恢复为可用的 Skill';
     unhide.textContent = '取消隐藏';
     unhide.addEventListener('click', () => unhideSkill(skill.id));
-    item.append(unhide);
+    item.append(info, unhide);
     list.append(item);
   });
 }

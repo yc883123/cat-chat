@@ -37,6 +37,9 @@ export const state = {
   conversations: [],
   conversationId: '',
   selectedSkills: storedSkillIds,
+  // 本会话已引用的 skill id（skills 事件权威累计，切会话清空）：弹窗头部
+  // 「本会话已引用 M 个」与行内「已引用」标签共用的同一份运行时状态。
+  quotedSkillIds: [],
   skillMode: initialSkillMode,
   pendingFiles: [],
   // 「编辑消息」态：同一套输入区移动到被编辑的消息处，文字与附件仍使用输入区的当前值。

@@ -335,7 +335,7 @@ export const SKILL_EDIT_PRESET =
   + '7. 若用户给的 Skill 不存在（inspect_installed_skill 返回未找到），向用户说明可用的 Skill，不要凭空编造。\n\n'
   + SKILL_SCRIPT_RULES;
 
-export async function startSkillEdit() {
+export async function startSkillEdit(skill = null) {
   if (state.chatRunId || state.abortController) {
     toast('请先等待当前任务结束或停止后再编辑 Skill');
     return;
@@ -352,7 +352,11 @@ export async function startSkillEdit() {
     toast(`启用编辑工具失败：${error.message}`);
     return;
   }
-  sendMessage(SKILL_EDIT_PRESET);
+  // 从管理页详情卡进入时可带目标 Skill：预填一条指向该 Skill 的编辑指令。
+  const target = skill && (skill.ref || skill.name)
+    ? `请编辑 Skill「/${skill.ref || skill.name}」（目录：${skill.root || skill.path || ''}）。`
+    : '';
+  sendMessage(target ? `${target}\n${SKILL_EDIT_PRESET}` : SKILL_EDIT_PRESET);
 }
 
 export async function sendMessage(textOverride = '') {
@@ -735,6 +739,12 @@ function handleStatusEvent(event, { setActivity }) {
 function handleSkillsEvent(event, { setActivity }) {
   const user = (event.skills || []).filter((s) => s?.source !== 'auto');
   const auto = (event.skills || []).filter((s) => s?.source === 'auto');
+  // 本会话已引用集合（弹窗头部计数 + 行内「已引用」标签）：skills 事件是后端
+  // 「本轮实际装载了哪些技能」的权威口径，并集跨轮累计，切会话时清空（见 clearQuotedSkills）。
+  const ids = (event.skills || []).map((s) => String(s?.id || '')).filter(Boolean);
+  if (ids.length) {
+    state.quotedSkillIds = [...new Set([...(state.quotedSkillIds || []), ...ids])];
+  }
   const parts = [];
   if (user.length) parts.push(`已启用 ${user.map((s) => s?.name).join('、')}`);
   if (auto.length) parts.push(`已自动匹配 ${auto.map((s) => s?.name).join('、')}`);

@@ -64,6 +64,7 @@ class SkillCatalog:
         hidden_ids: list[str] | set[str] | None = None,
         package_dir: Path | None = None,
         sources: list[str] | None = None,
+        override_merger: Callable[[list[dict[str, Any]]], list[dict[str, Any]]] | None = None,
     ):
         self.base_dir = base_dir or Path.cwd()
         self.directories = [self._resolve(directory) for directory in directories]
@@ -74,6 +75,10 @@ class SkillCatalog:
         # 显式来源标签（与 directories 一一对应）。缺省时沿用历史的位置约定：
         # 目录 0 = 内置、目录 1 = 托管、其余 = 外部。
         self.sources = [str(item) for item in sources] if sources else None
+        # 用户覆盖层合并器（装配根注入 naiba/skills/overrides.py 的 apply_to_entries）：
+        # scan 返回前统一补 alias/note 字段。缓存命中与全量扫描两条出口都要过它，
+        # 保证调用方拿到的条目形态一致；不注入时 scan 行为与旧版逐字节一致。
+        self.override_merger = override_merger
         self._package_cache: list[dict[str, Any]] | None = None
         self._scan_cache: list[dict[str, Any]] | None = None
         self._scan_signature: tuple[Any, ...] | None = None
@@ -180,7 +185,7 @@ class SkillCatalog:
         signature = (tuple(sorted(signature_rows)), tuple(sorted(self.hidden_ids)))
         with self._scan_lock:
             if self._scan_cache is not None and signature == self._scan_signature:
-                return [dict(item) for item in self._scan_cache]
+                return self._merge_overrides([dict(item) for item in self._scan_cache])
         found: dict[str, dict[str, Any]] = {}
         seen_files: set[str] = set()
         id_providers: dict[str, list[str]] = {}
@@ -266,8 +271,21 @@ class SkillCatalog:
         result = sorted(found.values(), key=lambda item: item["name"].lower())
         with self._scan_lock:
             self._scan_signature = signature
+            # 缓存存"未合并覆盖层"的底稿：合并器是读侧纯函数，别名/备注改动即时生效，
+            # 无须为覆盖层变化再设计缓存签名。
             self._scan_cache = [dict(item) for item in result]
-        return result
+        return self._merge_overrides(result)
+
+    def _merge_overrides(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        merger = self.override_merger
+        if merger is None:
+            return entries
+        try:
+            merged = merger(entries)
+        except Exception:  # noqa: BLE001 - 覆盖层是展示信息，合并失败不阻断扫描
+            logger.exception("合并 Skill 覆盖层失败（按未合并返回）")
+            return entries
+        return merged if isinstance(merged, list) else entries
 
     def read_skill_content(self, path: str | Path) -> str:
         """Read one Skill body with metadata-aware in-memory caching."""

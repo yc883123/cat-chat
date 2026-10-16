@@ -189,8 +189,9 @@ export function updateSkillPopup() {
   const token = currentSlashToken(input.value, input.selectionStart);
   if (!token) return hideSkillPopup();
   const query = token.typed.toLowerCase();
+  // 与弹窗/管理页同口径：别名与备注也参与匹配（note 只影响候选过滤，不改变插入的 /ref）。
   const items = skillList().filter((s) =>
-    !query || `${s.ref || ''} ${s.name || ''} ${s.description || ''}`.toLowerCase().includes(query));
+    !query || `${s.ref || ''} ${s.name || ''} ${s.alias || ''} ${s.note || ''} ${s.description || ''}`.toLowerCase().includes(query));
   items.sort((a, b) => {
     const ap = String(a.ref || '').toLowerCase().startsWith(query) ? 0 : 1;
     const bp = String(b.ref || '').toLowerCase().startsWith(query) ? 0 : 1;

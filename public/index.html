@@ -364,16 +364,22 @@
     </div>
   </dialog>
 
-  <dialog id="skillsDialog" class="panel-dialog">
+  <dialog id="skillsDialog" class="panel-dialog skills-quick-dialog">
+    <div class="skill-drawer-handle" aria-hidden="true"><span></span></div>
     <div class="dialog-toolbar">
       <div><h2>Skill 快速引用</h2><p id="skillsSummary"></p></div>
       <button class="icon-button" data-close="skillsDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
     </div>
-    <label class="skill-policy-row">
-      <span><b>Skill 引用</b><small id="skillPolicyHint">点击某项即在输入框光标处插入 /技能 引用；发送后按"首轮注入 / 后续追加"注入</small></span>
-    </label>
-    <label class="search-field"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg><input id="skillSearch" type="search" placeholder="搜索 Skill"></label>
-    <div class="skill-list" id="skillList"></div>
+    <details class="skill-policy-details" id="skillPolicyDetails">
+      <summary><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 8h.01M12 11v5"></path></svg></span><b>引用说明</b><small>点击插入 / 引用，发送后首轮注入、后续追加</small><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg></summary>
+      <p id="skillPolicyHint">点击某项即在输入框光标处插入 /技能 引用；发送后按"首轮注入 / 后续追加"注入</p>
+    </details>
+    <label class="search-field skills-quick-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg><input id="skillSearch" type="search" placeholder="搜索 Skill"><span class="slash-hint" id="skillSlashHint" hidden>/ 唤起</span></label>
+    <div class="skill-list skills-quick-list" id="skillList"></div>
+    <div class="skills-quick-foot">
+      <small>引用合计过大时会提示，不截断。</small>
+      <small class="skills-quick-keys" id="skillQuickKeys" hidden><b>Enter</b> 插入 · <b>Esc</b> 关闭</small>
+    </div>
   </dialog>
 
   <dialog id="starterPromptDialog" class="panel-dialog">
@@ -944,6 +950,46 @@
           </div>
         </section>
         <section data-settings-panel="skills" class="settings-panel" hidden>
+          <div class="skill-admin-grid" id="skillAdminCard">
+            <div class="skill-admin-left">
+              <label class="search-field skill-admin-search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3"></path></svg><input id="skillAdminSearch" type="search" placeholder="搜索技能（名称 / 引用 / 别名 / 备注）"></label>
+              <div class="skill-admin-section-head"><b>已安装</b><small><span id="installedSkillCount">0</span></small></div>
+              <div class="skill-list skill-admin-list" id="installedSkillList"></div>
+              <div class="skill-admin-section-head"><b>已隐藏的技能</b><small><span id="hiddenSkillCount">0</span> 个</small></div>
+              <div class="skill-list skill-admin-list" id="hiddenSkillList"><small class="hint">无已隐藏的 Skill</small></div>
+              <div class="skill-admin-section-head skill-admin-recycle-head"><b>回收目录（<span id="recycledSkillCount">0</span>）</b><button class="danger-button skill-recycle-clear" id="clearSkillRecycle" type="button">清空回收目录</button></div>
+              <div class="skill-list skill-admin-list" id="recycledSkillList"><small class="hint">回收目录为空</small></div>
+            </div>
+            <div class="skill-admin-detail" id="skillDetailCard" hidden>
+              <div class="skill-detail-head">
+                <label class="skill-detail-title-wrap">
+                  <input id="skillDetailName" type="text" maxlength="40" placeholder="别名（留空显示原名）">
+                </label>
+                <small class="hint" id="skillDetailOrig">-</small>
+                <small class="hint">别名仅改显示名，不影响 /引用、Agent 固定与会话引用。</small>
+                <div class="skill-detail-actions">
+                  <button class="control-button" id="skillDetailSaveAlias" type="button" hidden>保存</button>
+                  <button class="control-button" id="skillDetailCancelAlias" type="button" hidden>取消</button>
+                </div>
+              </div>
+              <div class="skill-detail-desc">
+                <b>技能说明</b>
+                <p id="skillDetailDesc">-</p>
+                <p class="hint" id="skillDetailDup" hidden></p>
+                <div class="skill-detail-chips" id="skillDetailChips"></div>
+              </div>
+              <div class="skill-detail-actions-row" id="skillDetailActions"></div>
+              <div class="skill-detail-note">
+                <div class="skill-detail-note-head"><b>我的备注</b><small id="skillDetailNoteCount">0 / 500</small></div>
+                <textarea id="skillDetailNote" rows="4" placeholder="记录这个技能的用法、注意事项……（备注可被搜索命中）"></textarea>
+                <div class="form-actions"><button class="control-button" id="skillDetailSaveNote" type="button" hidden>保存备注</button></div>
+              </div>
+              <p class="hint">引用方式：会话内输入 /引用 或在 Skill 弹窗中点击插入。</p>
+            </div>
+            <div class="skill-admin-detail" id="skillDetailEmpty">
+              <p class="hint">点击左侧列表中的技能查看详情、设置别名与备注。</p>
+            </div>
+          </div>
           <div class="form-actions skill-import-actions">
             <button class="primary-button" id="openSkillImport" type="button">导入 Skill</button>
           </div>
@@ -960,11 +1006,7 @@
             </div>
             <p class="hint" id="skillMaxSizeResult"></p>
           </div>
-          <div class="settings-card"><div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5 20 8v8l-8 4.5L4 16V8z"></path><path d="M12 12 20 8M12 12v8.5M12 12 4 8"></path></svg></span><div><h4>已加载 Skill（<span id="installedSkillCount">0</span>）</h4></div></div>
-          <div class="skill-list" id="installedSkillList"></div></div>
-          <div class="settings-card"><div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 3l18 18"></path><path d="M10.6 6.1A9.9 9.9 0 0 1 12 6c6 0 9.5 6 9.5 6a17 17 0 0 1-3.3 4"></path><path d="M6.4 7.7A16.6 16.6 0 0 0 2.5 12s3.5 6 9.5 6a9.6 9.6 0 0 0 3.6-.7"></path><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"></path></svg></span><div><h4>已隐藏 Skill（<span id="hiddenSkillCount">0</span>）</h4></div></div><div class="skill-list" id="hiddenSkillList"><small class="hint">无已隐藏的 Skill</small></div></div>
-          <div class="settings-card"><div class="subheading-row"><div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4.5 6.5h15M9.5 6.5V4.5h5v2M6.5 6.5l1 13.5h9l1-13.5"></path></svg></span><div><h4>回收目录（<span id="recycledSkillCount">0</span>）</h4></div></div><button class="danger-button skill-recycle-clear" id="clearSkillRecycle" type="button">清空回收目录</button></div><div class="skill-list" id="recycledSkillList"><small class="hint">回收目录为空</small></div>
-          <p class="hint">此前被隐藏的 Skill 会出现在这里；点击“取消隐藏”即可重新使用。回收目录中的内容可恢复，清空后将永久删除。</p></div>
+          <p class="hint">此前被隐藏的 Skill 可在「已隐藏的技能」中取消隐藏；回收目录中的内容可恢复，清空后将永久删除。</p>
         </section>
         <section data-settings-panel="datamigration" hidden>
           <div class="settings-panel-head"><h3>数据与迁移</h3><p>数据库、上传文件与 Skills 目录的存放位置与健康状态。</p></div>

@@ -46,6 +46,8 @@ KEEP = {
     "starter_reasoning_smoke.cjs", "mobile_shell_smoke.cjs", "mobile_ui_regression.cjs",
     # @ / 弹层 × 软键盘（visualViewport）冒烟：自带隔离实例（spawn _serve_tmp.py）
     "popup_keyboard_mobile_smoke.cjs",
+    # Skills UI 改版冒烟（覆盖层 PATCH/scan 合并、管理页详情卡、桌面模态、手机抽屉）
+    "skills_ui_smoke.cjs",
     # Agent 说明弹层 + 工作区路径/未注册分组提示冒烟（§六 已登记；Python 自编排 + Node 检查）
     "agent_help_popover.py", "agent_help_popover.cjs",
     # 应用内更换图标冒烟（§六 已登记；Python 自编排 + Node 检查 + 进程级重启解析）

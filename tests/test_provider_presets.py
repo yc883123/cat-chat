@@ -36,14 +36,14 @@ from naiba.llm.provider_presets import (  # noqa: E402
 
 REQUIRED_FIELDS = ("id", "kind", "name", "abbr", "base_url", "request_format", "model", "key_required", "key_url", "hint")
 # 名单顺序即界面顺序：大厂 → 中转 → 自定义 → 本地（在线在前）。
-EXPECTED_ONLINE_IDS = ("deepseek", "kimi", "zhipu", "qwen", "ark", "openai", "claude", "gemini", "te", "bailan", "custom")
+EXPECTED_ONLINE_IDS = ("deepseek", "kimi", "zhipu", "qwen", "ark", "openai", "claude", "gemini", "te", "custom")
 EXPECTED_LOCAL_IDS = ("ollama", "lm_studio", "llama_cpp", "unsloth")
 
 
 class PresetTableTests(unittest.TestCase):
     def test_fifteen_presets_in_declared_order(self):
         ids = [item["id"] for item in PROVIDER_PRESETS]
-        self.assertEqual(len(ids), 15, f"预设条数应为 15：{ids}")
+        self.assertEqual(len(ids), 14, f"预设条数应为 14：{ids}")
         self.assertEqual(len(set(ids)), len(ids), "预设 id 必须唯一")
         self.assertEqual(ids, list(EXPECTED_ONLINE_IDS) + list(EXPECTED_LOCAL_IDS))
 
@@ -88,17 +88,14 @@ class PresetTableTests(unittest.TestCase):
                 self.assertIn(parsed.netloc, item["hint"], f"{item['id']} 的 hint 里没写域名 {parsed.netloc}")
 
     def test_transit_presets_match_the_measured_cards(self):
-        """两条中转的参数照抄冻结版实测可用卡片（TE 默认 openai_chat，按用户决定）。"""
+        """中转预设的参数照抄冻结版实测可用卡片（TE 默认 openai_chat，按用户决定）。"""
         te = provider_preset("te")
         self.assertEqual(te["base_url"], "https://teynex.com")
         self.assertEqual(te["request_format"], "openai_chat")
         self.assertEqual(te["model"], "kimi-k3")
         self.assertIn("max_tokens", te["hint"], "TE 按 max_tokens 预扣费的风险要写进引导")
         self.assertIn("codex_responses", te["hint"], "GPT-5/Codex 系模型的切法要写进引导")
-        bailan = provider_preset("bailan")
-        self.assertEqual(bailan["base_url"], "https://api.bailan.store")
-        self.assertEqual(bailan["request_format"], "openai_chat")
-        self.assertEqual(bailan["model"], "grok-4.6")
+        self.assertIsNone(provider_preset("bailan"))
 
     def test_ark_preset_prefills_coding_plan_endpoint(self):
         """方舟预设预填 Coding Plan 端点（订阅制）；按量端点与计费区分必须写进引导。"""

@@ -214,12 +214,22 @@ class ReleaseVersionConsistencyTests(unittest.TestCase):
         first_line = README.read_text(encoding="utf-8").split("\n", 1)[0].strip()
         self.assertEqual(f"# Cat Chat {display}", first_line)
         head = json.loads(RELEASE_NOTES.read_text(encoding="utf-8"))[0]
-        self.assertTrue(
-            head.startswith(f"Cat Chat {display}"), f"更新说明头条没跟上版本：{head[:60]!r}"
+        # 静默更新（仅撤一条供应商预设，2026-10-17）不写新更新说明，头条停在 3.3.0——
+        # 守门从「头条 = 当前版」放宽为「头条版本号 <= 当前版」：不允许超前（下一版说明
+        # 抢跑），允许落后（显式登记的静默版）。
+        head_series = re.match(r"Cat Chat (\d+\.\d+\.\d+) Beta", head)
+        self.assertIsNotNone(head_series, f"更新说明头条不是版本开头：{head[:60]!r}")
+        self.assertLessEqual(
+            tuple(map(int, head_series.group(1).split("."))),
+            tuple(map(int, self.version.split("-")[0].split("."))),
+            f"更新说明头条版本超前于发布版本：{head_series.group(1)} > {self.version}",
         )
 
     def test_release_body_mentions_the_current_version(self) -> None:
-        """`body` 是手写正文，最容易漏改；至少要带上本版标题。"""
+        """`body` 是手写正文，最容易漏改；至少要带上本版标题。
+
+        静默更新同样适用本条：body 只需一句「本版构建 + 一句话缘由」，不展开更新说明。
+        """
         display = self.version.replace("-beta", "") + " Beta"
         self.assertIn(f"Cat Chat {display} Windows build", self.text)
 

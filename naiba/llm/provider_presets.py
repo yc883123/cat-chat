@@ -178,22 +178,6 @@ PROVIDER_PRESETS: tuple[dict[str, Any], ...] = (
             "codex_responses、URL 末尾补 /v1。"
         ),
     },
-    {
-        "id": "bailan",
-        "kind": "online",
-        "name": "摆烂中转",
-        "abbr": "摆",
-        "base_url": "https://api.bailan.store",
-        "request_format": "openai_chat",
-        "model": "grok-4.6",
-        "key_required": True,
-        "key_url": "https://bailan.store/",
-        "hint": (
-            "摆烂中转是一个 API 聚合站：注册一个账号，就能用一个 Key 调用 Grok、GPT 等"
-            "多家模型。使用方法：① 打开 bailan.store 注册账号；② 按站点规则领取/充值额度；"
-            "③ 到控制台「令牌」页创建令牌，复制 sk- 开头的字符串粘到下方 API Key 栏。"
-        ),
-    },
     # ---- 全手填 ----
     {
         "id": "custom",

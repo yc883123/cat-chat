@@ -118,6 +118,8 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 3.3.1 Beta Windows build from `${{ github.sha }}`。静默更新：仅调整内置供应商预设表，功能与 3.3.0 相同，无新增特性。
+            Cat Chat 3.3.1 Beta Windows build from `${{ github.sha }}`。内置供应商预设表变更，无新增功能。
 
-            验证：全量单测通过；供应商预设与发布清单相关守门已同步。
+            预设表调整：新增供应商时的模板名单有变动；已保存的供应商卡片不受影响——连接信息存在卡片本身，API Key 与地址原样保留，无需任何操作。其余内容与 3.3.0 相同。
+
+            验证：全量单测 2535 通过；供应商预设与发布清单相关守门已同步。

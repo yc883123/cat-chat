@@ -218,8 +218,11 @@ class TopbarCollapseStyleTests(unittest.TestCase):
         css = self._css()
         actions = css[css.index(".topbar-actions {"):]
         actions = actions[: actions.index("}")]
-        self.assertIn("flex: 1 1 auto", actions, "操作区吃余量、可压缩（压缩量由内部轮次下拉吸收）")
-        self.assertIn("min-width: 0", actions)
+        self.assertIn("flex: 1 1 auto", actions, "操作区吃余量")
+        # 3.3.2：从 min-width:0 改成 min-content —— 0 会让按钮组向左溢出盖住 API/Agent
+        # （右侧面板一开就复现）。详见 test_topbar.test_topbar_buttons_do_not_wrap_or_shrink。
+        self.assertIn("min-width: min-content", actions)
+        self.assertNotIn("min-width: 0", actions)
         self.assertIn(".topbar-actions > * { flex: none; }", css)
         buttons = css[css.index(".control-button, .mcp-button, .text-button {"):]
         buttons = buttons[: buttons.index("}")]

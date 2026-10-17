@@ -1433,4 +1433,48 @@ export function restoreTopbarCompact() {
   setTopbarCompact(collapsed);
 }
 
+// ---- 桌面顶栏容器降级（3.3.2）---------------------------------------------
+// 顶栏的降级**不能按视口宽度判**：右侧文件 / 辅助面板一开，视口没变、主区却被吃掉
+// 280-420px，媒体查询一条都不命中，于是在 1200 宽的窗口里就挤成一团（用户报障的截图）。
+// 这里观察 .chat-main 的**实际宽度**，分两档挂 data-tb，样式全在 styles.css 的
+// `@media (min-width: 761px)` 块里（手机端是 grid 多行布局，不需要也禁止收按钮文字）。
+// 阈值 800 / 700 的来历（真实源码实例实测，面板开 + 轮次下拉可见）：
+//   容器 ≥800 → 不降级：736 时操作区放得下（按钮全展开也只要 ~460px）；
+//   700-800   → tight：收图标按钮文字 + 轮次 96px + 模型下拉 120px；
+//   <700      → tightest：轮次 64px（还能认出「第 N 轮」）+ MCP 只留点 + 模型下拉 104px。
+export const TOPBAR_TIGHT_MAX = 800;
+export const TOPBAR_TIGHTEST_MAX = 700;
+
+export function applyTopbarWidth(width) {
+  const topbar = $('.topbar');
+  if (!topbar) return;
+  const px = Number(width);
+  const tier = !Number.isFinite(px) || px <= 0
+    ? ''
+    : (px < TOPBAR_TIGHTEST_MAX ? 'tightest' : (px < TOPBAR_TIGHT_MAX ? 'tight' : ''));
+  if (tier) topbar.setAttribute('data-tb', tier);
+  else topbar.removeAttribute('data-tb');
+}
+
+export function watchTopbarWidth() {
+  const main = $('.chat-main');
+  const topbar = $('.topbar');
+  if (!main || !topbar) return;
+  // 判档口径 = 主区那一格的宽度（.chat-main 没有内边距，contentRect 与
+  // getBoundingClientRect 等价；首帧那次用后者是因为拿不到 entry）。
+  // 首帧先算一次：刷新页面时面板可能本来就是开的（file-panel-open 已在 DOM 里），
+  // 不能等 ResizeObserver 的第一次回调——那会在首屏闪一下「未降级」的形态。
+  applyTopbarWidth(main.getBoundingClientRect().width);
+  if (typeof ResizeObserver !== 'function') {
+    window.addEventListener('resize', () => applyTopbarWidth(main.getBoundingClientRect().width));
+    return;
+  }
+  // 侧栏拖宽 / 文件面板开合 / 面板拖宽都只改 .chat-main 的宽度，不触发 window.resize。
+  new ResizeObserver((entries) => {
+    const entry = entries[entries.length - 1];
+    const box = entry?.contentRect;
+    applyTopbarWidth(box ? Math.round(box.width) : main.getBoundingClientRect().width);
+  }).observe(main);
+}
+
 // 单条组合正则 + 线性扫描：token 先 escape 再包 span，输出安全的 HTML。

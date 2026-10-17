@@ -30,8 +30,12 @@ export function filePanelUsable() {
 }
 
 export function filePanelWidthPx() {
-  const saved = parseFloat(localStorage.getItem('naibaChatFilePanelW') || ''); const max = Math.max(300, Math.floor(window.innerWidth * 0.5));
-  return Math.max(280, Math.min(max, Number.isFinite(saved) ? saved : Math.round(window.innerWidth * 0.36)));
+  // 上限按**窗口比例**收（3.3.2）：原来固定上限 innerWidth*0.5，1200 窗口能开到 600px，
+  // 主区被压到 300 出头、顶栏必然挤（用户截图就是面板 380 + 主区 548）。
+  // 现在 28% 封顶、280-420 之间取，用户拖过的宽度仍然优先（记忆值是第一顺位）。
+  const saved = parseFloat(localStorage.getItem('naibaChatFilePanelW') || '');
+  const max = Math.max(300, Math.min(420, Math.floor(window.innerWidth * 0.28)));
+  return Math.max(280, Math.min(max, Number.isFinite(saved) ? saved : Math.round(window.innerWidth * 0.28)));
 }
 
 export function applyFilePanelOpenClass() {
@@ -39,6 +43,11 @@ export function applyFilePanelOpenClass() {
   if (!shell) return;
   shell.classList.toggle('file-panel-open', filePanelState.open);
   if (filePanelState.open) shell.style.setProperty('--file-panel-w', `${filePanelWidthPx()}px`);
+  // 顶栏「文件 / 辅助」两个重开按钮都按 filePanelState.open 决定显隐，但它们分属两个模块
+  // （14 / 21，21 单向依赖 14）。用事件广播而不是互相 import，避免循环依赖，也保证
+  // closeFilePanel / Esc / 切会话这些散落入口都能触发重算。detail 带上当前开合态，
+  // 监听方不必再读一次模块状态。
+  document.dispatchEvent(new CustomEvent('naiba:file-panel-toggle', { detail: { open: filePanelState.open } }));
 }
 
 export function openFilePanel(rawPath) {

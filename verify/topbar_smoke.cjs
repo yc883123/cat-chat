@@ -25,12 +25,26 @@ const isSingleLine = (item) =>
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   const pageErrors = [];
   page.on('pageerror', (err) => pageErrors.push(`pageerror: ${err.message}`));
-  page.on('console', (msg) => { if (msg.type() === 'error') pageErrors.push(`console.error: ${msg.text()}`); });
+  page.on('console', (msg) => {
+    if (msg.type() !== 'error') return;
+    const text = msg.text();
+    // 隔离实例用的是 example.invalid 假供应商，/api/providers/models 必然 400 —— 环境噪声，
+    // 与本脚本要守的顶栏样式无关。真错误的形态是 pageerror 或非这条的 console.error。
+    if (/status of 400 \(Bad Request\)/.test(text)) return;
+    pageErrors.push(`console.error: ${text}`);
+  });
 
   try {
     await page.goto(`${BASE}/`, { waitUntil: 'load', timeout: 20000 });
     await page.waitForSelector('#messageInput', { timeout: 20000 });
     await page.waitForTimeout(1200);
+    // 全新数据目录（CI / 隔离实例）会弹首启向导，它盖在页面上会拦截 hover / click。
+    // 本冒烟只量顶栏几何，向导与它无关 —— 直接关掉，别让它变成一个假失败。
+    await page.evaluate(() => {
+      const dialog = document.querySelector('#onboardingDialog');
+      if (dialog && dialog.open) dialog.close();
+    });
+    await page.waitForTimeout(200);
 
     const snapshot = await page.evaluate(() => {
       const actions = document.querySelector('.topbar-actions');
@@ -130,6 +144,10 @@ const isSingleLine = (item) =>
     for (const width of [900, 640]) {
       await page.setViewportSize({ width, height: 800 });
       await page.waitForTimeout(400);
+      // 换视口会触发 resize 监听里的 updateFileTabsButton()，把 #openFileTabs 又设回 hidden
+      // （没有已打开文件时它本来就该隐藏）。这里只为量样式，重新强制显示。
+      await page.evaluate(() => { const btn = document.querySelector('#openFileTabs'); if (btn) btn.hidden = false; });
+      await page.waitForTimeout(120);
       const narrow = await page.evaluate(() => [...document.querySelectorAll('.topbar-actions .control-button, .topbar-actions .mcp-button')]
         .map((button) => {
           const rect = button.getBoundingClientRect();
@@ -147,6 +165,81 @@ const isSingleLine = (item) =>
         JSON.stringify(narrow));
     }
     await page.setViewportSize({ width: 1280, height: 900 });
+    await page.waitForTimeout(300);
+
+    // 右侧面板打开 × 窄主区：操作区**不得**压到 API / Agent 上，也不得冲出顶栏右缘。
+    // 3.3.2 的真 bug：操作区 min-width:0 时会被压到比内容还窄，justify-content:flex-end
+    // 于是把整组按钮向左溢出，盖住 Agent 下拉（1200 实测重叠 77px）。
+    // 这里强制显示轮次下拉（它是最占宽的一项，也是被误认为「吸收压缩」的那一项）。
+    await page.evaluate(() => {
+      document.querySelector('#openAuxChats') && (document.querySelector('#openAuxChats').hidden = false);
+      const s = document.querySelector('#turnJumpSelect');
+      if (s) {
+        s.hidden = false;
+        if (s.options.length < 2) {
+          s.innerHTML = '<option>第 1 轮 · 预览策略跟进已按计划文档追加</option>'
+            + '<option>第 2 轮 · 按 Qoder 参考文档对照结论</option>';
+        }
+      }
+    });
+    for (const width of [1400, 1280, 1200, 1100, 1024]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.evaluate(() => {
+        document.querySelector('#appShell').classList.add('file-panel-open');
+        const s = document.querySelector('#turnJumpSelect');
+        if (s) {
+          s.hidden = false;
+          if (s.options.length < 2) {
+            s.innerHTML = '<option>第 1 轮 · 预览策略跟进已按计划文档追加</option>'
+              + '<option>第 2 轮 · 按 Qoder 参考文档对照结论</option>';
+          }
+        }
+      });
+      await page.waitForTimeout(400);
+      // 轮次下拉的显隐由 04-messages.js 的 renderTurnJump/hideTurnJump 控制，切视口时
+      // 会被重算回 hidden（真实会话里 <2 轮就该隐藏）。本档只为量几何，量前再确保它可见。
+      await page.evaluate(() => {
+        const s = document.querySelector('#turnJumpSelect');
+        if (s) {
+          s.hidden = false;
+          if (s.options.length < 2) {
+            s.innerHTML = '<option>第 1 轮 · 预览策略跟进已按计划文档追加</option>'
+              + '<option>第 2 轮 · 按 Qoder 参考文档对照结论</option>';
+          }
+        }
+      });
+      await page.waitForTimeout(120);
+      const geo = await page.evaluate(() => {
+        const tb = document.querySelector('.topbar');
+        const tbr = tb.getBoundingClientRect();
+        const actions = document.querySelector('.topbar-actions');
+        const ar = actions.getBoundingClientRect();
+        const visible = [...actions.children]
+          .filter((el) => !el.hidden && el.getBoundingClientRect().width > 0.5);
+        const first = visible.length ? visible[0].getBoundingClientRect() : null;
+        const last = visible.length ? visible[visible.length - 1].getBoundingClientRect() : null;
+        const agent = document.querySelector('.agent-control').getBoundingClientRect();
+        const turn = document.querySelector('#turnJumpSelect').getBoundingClientRect();
+        return {
+          tier: tb.dataset.tb || '',
+          agentRight: Math.round(agent.right),
+          firstLeft: first ? Math.round(first.left) : 0,
+          lastRight: last ? Math.round(last.right) : 0,
+          topbarRight: Math.round(tbr.right),
+          overlap: first ? Math.round(agent.right - first.left) : 0,
+          rightOver: last ? Math.round(last.right - tbr.right) : 0,
+          turnWidth: Math.round(turn.width),
+        };
+      });
+      check(`面板打开 ${width}px：操作区不压住 Agent、不右溢（tier=${geo.tier || 'none'}）`,
+        geo.overlap <= 0 && geo.rightOver <= 0,
+        JSON.stringify(geo));
+      check(`面板打开 ${width}px：轮次下拉不低于 60px（不许变成一根箭头）`,
+        geo.turnWidth >= 60,
+        JSON.stringify(geo));
+    }
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.evaluate(() => document.querySelector('#appShell').classList.remove('file-panel-open'));
     await page.waitForTimeout(300);
 
     // 打开设置页不得污染顶栏任务徽标（真实 bug：历史数据管理里的运行记录与顶栏共用 id

@@ -523,9 +523,15 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 /* 顶栏操作区：容器接管左段余量（flex:1），子按钮仍不被压缩 + 文字不换行——
    否则窗口偏窄时按钮会被挤成竖排文字（实测「卸载模型/刷新」竖着排、「文件」拆成两行）。
    justify-content:flex-end 保证「轮次下拉不足 2 轮被 hidden」时按钮依旧贴右缘。 */
-/* min-width:0 让操作区可被压缩；压缩量靠内部下拉的高 flex-shrink 全部吸收，
-   右侧按钮（flex:none）保形、贴右缘。 */
-.topbar-actions { display: flex; gap: 8px; align-items: center; flex: 1 1 auto; min-width: 0; justify-content: flex-end; }
+/* min-width:min-content 是 3.3.2 的关键修正（此前是 0）。
+   旧注释写的是「压缩量靠内部下拉的高 flex-shrink 全部吸收」，但那只在**有**轮次下拉时成立，
+   而且下拉会被压到 18px（只剩一根箭头）之后照样把按钮组挤出去；新会话 / 单轮时下拉整个
+   hidden，更没有任何吸收者 → 容器小于内容，justify-content:flex-end 让整组按钮**向左溢出**，
+   盖在 API / Agent 下拉上（右侧辅助面板一开就复现，实测 1200 重叠 77px）。
+   min-content = 「按钮一个都不许被压掉」的硬底线：放不下时宁可让顶栏去挤压左段的
+   模型 / Agent（它们本身可收缩），也不让操作区压到别人身上。剩下的宽度由 .topbar[data-tb]
+   两档降级负责（见下方 761 桌面块尾部），手机端是 grid 布局、不受此处影响。 */
+.topbar-actions { display: flex; gap: 8px; align-items: center; flex: 1 1 auto; min-width: min-content; justify-content: flex-end; }
 .topbar-actions > * { flex: none; }
 /* 桌面端「轮次」下拉：与手机端同一个 #turnJumpSelect（刻度轨的等价出口）。
    margin-right:auto 把 auto 余量全吃掉 → 它钉在操作区行首，视觉落点 = Agent 之后、[文件] 之前
@@ -551,6 +557,45 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 }
 .topbar-actions .control-button { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .topbar-actions .control-button svg { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ── 顶栏容器降级阶梯（3.3.2）─────────────────────────────────────────────
+   为什么需要：原来的降级只有 `@media (max-width: 1100px)`（本文件下文），判的是**视口**。
+   右侧文件 / 辅助面板一开，视口没变、主区却被吃掉 280-420px ⇒ 一条规则都不命中，
+   顶栏在 1200 宽的窗口里就挤成一团（用户截图）。这里改判**容器**：JS 用 ResizeObserver
+   观察 .chat-main，把实际宽度分两档挂到 .topbar[data-tb] 上（见 01-core.js
+   watchTopbarWidth）。用属性选择器而不是媒体查询，是因为容器宽度与视口宽度根本不是一回事。
+   ⚠️ 只在桌面块内生效（min-width:761px）：手机端是 grid 多行布局，按钮换行即可，
+   且 760 块里明确禁止隐藏按钮文字（见 test_mobile_topbar）。 */
+@media (min-width: 761px) {
+  /* 第一档 tight（容器 < 800）：按钮文字只留「任务 / Skill」两个纯数字按钮之外的，
+     因为它们**有图标**（文件 / 辅助 / 刷新）；任务 / Skill 没有图标，收掉文字就只剩
+     一个裸数字（「13」「19」），认不出是什么 → 标了 .keep 的一律不动。 */
+  .topbar[data-tb="tight"] .topbar-actions .button-label:not(.keep),
+  .topbar[data-tb="tightest"] .topbar-actions .button-label:not(.keep) { display: none; }
+  .topbar[data-tb="tight"] .topbar-actions .control-button,
+  .topbar[data-tb="tightest"] .topbar-actions .control-button { padding: 0 9px; gap: 5px; }
+  /* 轮次下拉是操作区里最占宽的一项（flex-basis 260px）。不收它，`min-width:min-content`
+     会把整条顶栏顶出窗口右缘（实测 1280 右溢 80px、1024 右溢 245px）。
+     ⚠️ 必须把 flex-shrink 也写成 0：它的桌面基础规则是 `flex: 0 100 260px`（shrink 100），
+     只改 flex-basis 的话它仍会被压到 38px 变成一根箭头（3.3.2 冒烟实测），
+     降级等于白做。档位内它固定宽度、不再参与收缩，宽度不够由左段的模型/Agent 让。 */
+  .topbar[data-tb="tight"] .topbar-actions > .turn-jump-select { flex: 0 0 96px; max-width: 96px; }
+  .topbar[data-tb="tight"] .topbar .model-control select { max-width: 120px; }
+  /* API / Agent 两个小标签在窄容器里最不值钱：下拉框自己就写着模型 / 角色名。 */
+  .topbar[data-tb="tight"] .model-control > span,
+  .topbar[data-tb="tight"] .agent-control > span { display: none; }
+
+  /* 第二档 tightest（容器 < 700）：轮次下拉再收到 64px —— 仍然能认出「第 N 轮」，
+     不整个收掉（桌面虽然有右侧刻度轨，但顶栏下拉是最顺手的入口）。 */
+  .topbar[data-tb="tightest"] .topbar-actions > .turn-jump-select { flex: 0 0 64px; max-width: 64px; }
+  .topbar[data-tb="tightest"] .topbar .model-control select { max-width: 104px; }
+  /* MCP 只留状态点（颜色即状态，title 里有全文）；文字在 8px 圆点旁边已经多余。
+     收了文字按钮只剩 ~31px，低于 34px 的可点下限（verify/topbar_smoke.cjs 会判红）
+     → 显式给 min-width 并用居中对齐，把圆点放回按钮正中。 */
+  .topbar[data-tb="tightest"] .mcp-button { min-width: 34px; justify-content: center; }
+  .topbar[data-tb="tightest"] .mcp-button > span { display: none; }
+}
+
 /* 顶栏折叠条：只在手机形态（≤760px 块）里出现，桌面端彻底不渲染。 */
 .topbar-collapse-toggle { display: none; }
 /* 图标按钮内的线性 SVG 统一样式 */
@@ -583,6 +628,11 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 #fileTabsCount { font-variant-numeric: tabular-nums; font-weight: 600; }
 .file-reopen-button #fileTabsCount[hidden] { display: none; }
 .file-reopen-button.has-tabs #fileTabsCount { color: var(--accent); }
+/* 辅助对话重开按钮：与文件按钮完全同口径——面板开着时 updateAuxTabsButton() 会置 hidden，
+   这里必须显式关掉 [hidden]，否则 558 行 `.topbar-actions .control-button { display:inline-flex }`
+   （作者样式）会压过 UA 的 `[hidden] { display:none }`，按钮照常占 94px（3.3.2 挤压触发点）。 */
+.aux-reopen-button[hidden] { display: none; }
+#auxChatsCount { font-variant-numeric: tabular-nums; font-weight: 600; }
 
 /* 消息列在「扣掉刻度轨宽度」的区域里居中 → 整体左移半条轨道（约 13px），右边不显逼仄 */
 /* 不加 `scroll-behavior: smooth`：流式期间每次 delta/工具事件都会贴底，

@@ -111,26 +111,87 @@ class TopbarStyleTests(unittest.TestCase):
         self.assertIn(".file-reopen-button:not([hidden]) {", css)
 
     def test_topbar_buttons_do_not_wrap_or_shrink(self) -> None:
-        """顶栏操作区吃左段余量且可被压缩，但压缩量只由「轮次下拉」吸收——
-        按钮一律 flex:none、文字不换行（否则窗口偏窄时会被挤成竖排文字）。"""
+        """顶栏操作区吃左段余量，但**不得被压到内容宽度以下**——
+        按钮一律 flex:none、文字不换行（否则窗口偏窄时会被挤成竖排文字）。
+
+        3.3.2 修正：这里的 min-width 从 `0` 改成了 `min-content`。旧的 `0` 让操作区可以
+        被压到比内容还窄，`justify-content:flex-end` 于是把整组按钮**向左溢出**、盖住
+        API / Agent（右侧面板一开就复现：1200 实测重叠 77px）。`min-content` 保证
+        「按钮一个都不许被压掉」，放不下时由 `.topbar[data-tb]` 两档降级去收内容。
+        """
         css = self._css()
         actions = css[css.index(".topbar-actions {"):]
         actions = actions[: actions.index("}")]
-        self.assertIn("flex: 1 1 auto", actions, "操作区吃余量、可压缩；压缩量由内部轮次下拉吸收")
-        self.assertIn("min-width: 0", actions, "min-width:0 否则操作区不收缩、顶栏溢出右缘")
+        self.assertIn("flex: 1 1 auto", actions, "操作区吃余量")
+        self.assertIn(
+            "min-width: min-content", actions,
+            "操作区的最小宽度必须是 min-content：改成 0 会让按钮组向左溢出盖住 API/Agent",
+        )
+        self.assertNotIn(
+            "min-width: 0", actions,
+            "回退到 min-width:0 就是 3.3.1 的挤压 bug（面板一开就重叠）",
+        )
         self.assertIn(".topbar-actions > * { flex: none; }", css, "按钮默认不被压缩（保形、贴右缘）")
-        # 唯一例外：轮次下拉在桌面端显式允许收缩（shrink:100），先截断它、不动按钮。
+        # 轮次下拉仍显式写死 flex-basis（auto 会触发 Chromium 收缩不回收），
+        # 窄容器档位由 .topbar[data-tb] 覆盖成 96 / 64px。
         self.assertIn(
             ".topbar-actions > .turn-jump-select { flex: 0 100 260px; }",
             css,
             "桌面轮次下拉显式收缩，且 flex-basis 写死（auto 会触发 Chromium 收缩不回收）",
         )
+        self.assertIn(
+            '.topbar[data-tb="tight"] .topbar-actions > .turn-jump-select { flex: 0 0 96px;',
+            css,
+            "窄容器第一档必须把轮次下拉收窄，且 flex-shrink 写 0（否则又被压成一根箭头）",
+        )
+        self.assertIn(
+            '.topbar[data-tb="tightest"] .topbar-actions > .turn-jump-select { flex: 0 0 64px;',
+            css,
+            "窄容器第二档轮次下拉收到 64px（仍要能认出「第 N 轮」）",
+        )
         base = css[css.index(".control-button, .mcp-button, .text-button {"):]
         base = base[: base.index("}")]
         self.assertIn("white-space: nowrap", base)
-        self.assertNotIn("#openSkills .button-label", css, "窄屏不应再隐藏 Skill/任务文字标签")
+        self.assertNotIn("#openSkills .button-label", css, "不得按 id 单独隐藏 Skill 文字")
         self.assertNotIn("#openTasks .button-label", css)
         self.assertNotIn(".mcp-button span { display: none; }", css)
+
+    def test_narrow_container_tiers_keep_numbers_readable(self) -> None:
+        """窄容器降级只许收「有图标」的按钮文字。
+
+        任务 / Skill 是纯数字按钮（`13 任务` / `19 Skill`，没有 svg），一刀切收掉文字后
+        只剩裸数字「13」「19」，用户认不出是什么——所以它们带 `.keep` 类。
+        """
+        css = self._css()
+        self.assertIn(
+            '.topbar[data-tb="tight"] .topbar-actions .button-label:not(.keep),',
+            css,
+            "降级规则必须带 :not(.keep)，否则裸数字按钮失去语义",
+        )
+        index = (ROOT / "public/index.html").read_text(encoding="utf-8")
+        for button_id in ('id="openTasks"', 'id="openSkills"'):
+            with self.subTest(button=button_id):
+                start = index.index(button_id)
+                snippet = index[start: start + 260]
+                self.assertIn(
+                    'class="button-label keep"', snippet,
+                    f"{button_id} 的文字标签必须带 keep 类（纯数字按钮，收掉文字就只剩数字）",
+                )
+
+    def test_container_tiers_are_container_driven_not_viewport(self) -> None:
+        """降级必须按**容器**宽度判（ResizeObserver → data-tb），不能只按视口。
+
+        右侧面板一开，视口没变、主区却被吃掉 280-420px，媒体查询一条都不命中。
+        """
+        core = (ROOT / "public/js/01-core.js").read_text(encoding="utf-8")
+        self.assertIn("export function watchTopbarWidth()", core)
+        self.assertIn("export function applyTopbarWidth(width)", core)
+        self.assertIn("new ResizeObserver(", core)
+        self.assertIn('$(".chat-main")', core.replace("'", '"'), "观察对象必须是主区那一格")
+        self.assertIn("TOPBAR_TIGHT_MAX = 800", core)
+        self.assertIn("TOPBAR_TIGHTEST_MAX = 700", core)
+        bind = self._bind()
+        self.assertIn("watchTopbarWidth();", bind, "初始化时必须接线，否则首屏不降级")
 
     def test_topbar_control_button_icons_are_outlined(self) -> None:
         """搬回操作区的按钮必须有线性 SVG 样式，否则裸 SVG 会渲染成黑色实心块。"""

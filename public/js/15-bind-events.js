@@ -2,7 +2,7 @@
 // 15-bind-events.js —— 拆分自 public/app.js 第 6658-7653 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, api, applyAppearance, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, escapeHtml, hideTextContextMenu, isCoarsePointer, onChatBackgroundMissingChange, triggerDownload, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setClipboardPasteDriver, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer } from "./01-core.js";
+import { $, $$, api, applyAppearance, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, escapeHtml, hideTextContextMenu, isCoarsePointer, onChatBackgroundMissingChange, triggerDownload, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setClipboardPasteDriver, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer, watchTopbarWidth } from "./01-core.js";
 import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarning, ensureImageContextMenu, fileUrl, handleImageLightboxKey, hideFileActionMenu, hideImageContextMenu, initImageLightboxInteractions, isPywebview, openImageLightbox, positionContextUsagePopover, resetContextWarningResume, runImageContextAction, saveLocalFile, showFileActionMenu, showImageContextMenu, stepImageLightbox, toggleContextUsagePopover, updateSendButtonState } from "./03-media.js";
 import { branchMessage, cancelActiveEdit, cancelSessionStart, confirmActiveEdit, deleteMessageFlow, fillContextResetSeed, initTurnRail, isNearBottom, regenerateMessage, setStickToBottom, startEditMessage, startNewSession, undoLastDelete } from "./04-messages.js";
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
@@ -3085,6 +3085,9 @@ initialize();
 updateSendButtonState();
 restoreLeftSidebarCollapse();
 restoreTopbarCompact();
+// 桌面顶栏按「主区实际宽度」降级（3.3.2）：视口不变但面板开合会让主区变窄，
+// 媒体查询判不出来，必须观察容器。
+watchTopbarWidth();
 updateFileTabsButton();
 // 辅助对话（计划-辅助对话 §3.5）：事件委托接线 + 页面重载后恢复未关闭的标签。
 bindAuxChatEvents();

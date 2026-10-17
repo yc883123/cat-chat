@@ -10,6 +10,8 @@
 import { $, api, escapeHtml, state, toast } from "./01-core.js";
 import { markdown } from "./02-markdown.js";
 import { populateComposerModels, selectedProvider } from "./07-models-agents.js";
+// 面板宽度 / 开合状态只有一份实现（14-file-panel.js）。14 不 import 21，无循环依赖。
+import { applyFilePanelOpenClass, filePanelState, filePanelWidthPx, updateFileTabsButton } from "./14-file-panel.js";
 
 // 辅助对话自己的状态：tabs 是会话行（id/title），activeId 是当前标签。
 // messages 按会话 id 缓存（切换标签不丢已渲染内容）；runId 是当前流式 run。
@@ -122,32 +124,42 @@ export function openAuxPanel() {
   setDockGroup('aux');
   const shell = $('#appShell');
   if (!shell) return;
-  if (!shell.classList.contains('file-panel-open')) {
-    // 复用文件面板的开合链路（同一个 dock、同一宽度）；不自动开文件标签。
-    shell.classList.add('file-panel-open');
+  // 复用文件面板的开合链路（同一个 dock、同一宽度）；不自动开文件标签。
+  // 状态必须写回 filePanelState 再交给 applyFilePanelOpenClass()：以前这里直接 add class，
+  // 于是 filePanelState.open 仍是 false，两个「重开」按钮的显隐判断（都读这个值）全部失效。
+  if (!filePanelState.open) {
+    filePanelState.open = true;
     shell.style.setProperty('--file-panel-w', `${filePanelWidthPx()}px`);
   }
+  applyFilePanelOpenClass();
+  updateFileTabsButton();
+  updateAuxTabsButton();
   renderAuxChat();
 }
 
 export function closeAuxPanel() {
   // 与 closeFilePanel 同语义：收起整个 dock（两组一起收），分组记忆保留。
-  const shell = $('#appShell');
-  if (shell) shell.classList.remove('file-panel-open');
+  if (!filePanelState.open) return;
+  filePanelState.open = false;
+  applyFilePanelOpenClass();
+  // 收起后两个分组各自的重开入口要立刻回来，否则「文件 N / 辅助 N」都不见了。
+  updateFileTabsButton();
+  updateAuxTabsButton();
 }
 
-function filePanelWidthPx() {
-  const stored = parseFloat(localStorage.getItem('naibaChatFilePanelW') || '');
-  if (Number.isFinite(stored) && stored > 0) return Math.round(stored);
-  return 380;
-}
+// 面板宽度不再在这里维护第二份实现：本文件曾复制过一份 filePanelWidthPx()，
+// 但把钳制逻辑（min/max）丢了，于是「记忆值」可以是窗口一半以上、默认值固定 380 不随窗口收，
+// 主区被吃干净后顶栏只能挤成一团（3.3.2 用户报障的直接触发点）。统一走 14-file-panel.js。
 
 // ---- 渲染 -------------------------------------------------------------------
 
 function updateAuxTabsButton() {
   const button = $('#openAuxChats');
   if (!button) return;
-  button.hidden = auxChatState.tabs.length === 0;
+  // 面板已经开着（文件或辅助任一分组），顶栏不该再留一个「重新打开」的重复入口——
+  // 这与文件按钮同口径（14-file-panel.js 的 updateFileTabsButton 里有 !filePanelState.open）。
+  // 少了这个条件时，辅助按钮在面板打开期间白占 ~94px，正是本次挤压的触发点。
+  button.hidden = auxChatState.tabs.length === 0 || filePanelState.open;
   const count = $('#auxChatsCount');
   if (count) count.textContent = String(auxChatState.tabs.length);
 }
@@ -420,6 +432,9 @@ export function bindAuxChatEvents() {
   });
   $('#dockGroupAux')?.addEventListener('click', () => { setDockGroup('aux'); renderAuxChat(); });
   $('#dockGroupFiles')?.addEventListener('click', () => setDockGroup('files'));
+  // 面板开合 / 收起（文件分组点 ✕、Esc、切会话都会改）→ 辅助按钮跟着显示或隐藏。
+  // 事件由 14-file-panel.js 的 applyFilePanelOpenClass() 广播，避免两个模块互相 import。
+  document.addEventListener('naiba:file-panel-toggle', () => updateAuxTabsButton());
   $('#openAuxChats')?.addEventListener('click', () => openAuxPanel());
   // 「发送到主任务」：复制进主输入框并聚焦，不自动发送（守住不污染，§2）。
   $('#auxChatMessages')?.addEventListener('click', (event) => {

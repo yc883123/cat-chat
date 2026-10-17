@@ -16,6 +16,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[1]
 
 from naiba.plans import READONLY_TOOLS  # noqa: E402
 from naiba.run.session import resolve_allowed_tools  # noqa: E402
@@ -195,6 +196,65 @@ class AuxChatReadonlyTests(unittest.TestCase):
         tools = resolve_allowed_tools(self.app, "craft", {}, False, "", ["read_file"], "aux")
         self.assertEqual(tools, ["read_file"])
         self.assertTrue(set(tools) <= set(READONLY_TOOLS) | {"vision_analyze", "web_search"})
+
+
+class AuxChatPanelGeometryTests(unittest.TestCase):
+    """顶栏「辅助」按钮与面板宽度的不变量（3.3.2 挤压 bug）。
+
+    背景：右侧面板一开，顶栏就挤成一团（用户截图）。两条相关原因都在这里钉住：
+    ① 面板开着时顶栏还留一个 ~94px 的「辅助」重复入口；
+    ② 21-aux-chat.js 自己复制了一份 filePanelWidthPx()，把 clamp 丢了。
+    """
+
+    def _aux(self) -> str:
+        return (ROOT / "public/js/21-aux-chat.js").read_text(encoding="utf-8")
+
+    def _panel(self) -> str:
+        return (ROOT / "public/js/14-file-panel.js").read_text(encoding="utf-8")
+
+    def _css(self) -> str:
+        return (ROOT / "public/styles.css").read_text(encoding="utf-8")
+
+    def test_reopen_button_hides_while_panel_open(self):
+        aux = self._aux()
+        self.assertIn(
+            "auxChatState.tabs.length === 0 || filePanelState.open",
+            aux,
+            "面板开着时「辅助」按钮必须隐藏（与文件按钮同口径）",
+        )
+
+    def test_panel_state_is_shared_not_duplicated(self):
+        aux = self._aux()
+        self.assertIn('from "./14-file-panel.js"', aux)
+        self.assertNotIn("localStorage.getItem('naibaChatFilePanelW')", aux,
+                         "面板宽度只许有一份实现（复制品会丢 clamp）")
+        self.assertNotIn("return 380;", aux)
+
+    def test_panel_width_is_clamped_by_ratio(self):
+        panel = self._panel()
+        width_fn = panel[panel.index("export function filePanelWidthPx()"):]
+        width_fn = width_fn[: width_fn.index("\n}\n")]
+        self.assertIn("0.28", width_fn, "上限必须按窗口比例收（原来 0.5 能开到 600px）")
+        self.assertIn("Math.min(420", width_fn)
+        self.assertIn("Math.max(300", width_fn)
+
+    def test_aux_button_hidden_rule_overrides_author_display(self):
+        css = self._css()
+        self.assertIn(
+            ".aux-reopen-button[hidden] { display: none; }",
+            css,
+            "缺这条时 `.topbar-actions .control-button{display:inline-flex}` 会压过 [hidden]",
+        )
+
+    def test_panel_toggle_is_broadcast(self):
+        """开合状态要广播出去，两个模块各自的重开按钮才能同步（避免 21↔14 循环 import）。"""
+        panel = self._panel()
+        self.assertIn("naiba:file-panel-toggle", panel)
+        self.assertIn("naiba:file-panel-toggle", self._aux())
+        aux = self._aux()
+        # open/close 必须走 filePanelState + applyFilePanelOpenClass，不能只 add class
+        self.assertIn("filePanelState.open = true;", aux)
+        self.assertIn("applyFilePanelOpenClass();", aux)
 
 
 if __name__ == "__main__":

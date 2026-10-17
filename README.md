@@ -1,27 +1,29 @@
-# Cat Chat 3.3.1 Beta
+# Cat Chat 3.3.2 Beta
 
 <p align="center">
   <img src="docs/cat-chat-logo.png" alt="Cat Chat" width="520">
 </p>
 
-Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。3.3.0 Beta 新增「辅助对话」——主对话旁的轻量并行聊天窗口：标签随手开随手关、与主对话互不打扰，后端只读锁死，可独立换模型；同时升级文件预览：GBK 等非 UTF-8 文本可选编码重新打开、错误提示带可操作按钮。3.3.1 Beta 为小版本：内置供应商预设表变更，已保存的供应商卡片不受影响。
+Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。3.3.2 Beta 修好了顶栏挤压：右侧面板打开、主区变窄时，顶栏操作区不再整组左溢盖住 API / Agent——改为按主区实际宽度两档降级，面板宽度上限也一并收紧。
 
 > Cat Chat 原名 Naiba Chat。显示名自 2.7.6 Beta 起为 Cat Chat；GitHub 仓库自 2.8.0 Beta 起更名为 `cat-chat`（旧地址自动跳转）。更新资产仍使用 `naiba-chat.exe` 与原有清单协议，既有数据位置不变，无需重新配置或搬迁数据。
 
-## 3.3.1 Beta 主要能力
-- **内置供应商预设表变更**：新增供应商时的模板名单有变动；已保存的供应商卡片不受影响——连接信息存在卡片本身，API Key 与地址原样保留，无需任何操作。
-- **无新增功能**：其余内容与 3.3.0 相同（辅助对话、文件预览编码选择等详见 CHANGELOG）。
-- **验证**：全量单测 **2535** 通过。
+## 3.3.2 Beta 主要能力
+- **右侧面板打开后顶栏不再挤成一团（本次重点）**：面板（文件 / 辅助）一开，主区变窄，顶栏操作区此前会整组向左溢出、盖住 API 与 Agent 下拉——1200 宽实测重叠 77px、1100 重叠 104px、1024 重叠 142px。现在操作区有「不许比内容更窄」的硬底线，放不下时挤压左段的模型 / Agent，而不是让按钮压到别人身上。
+- **顶栏按主区宽度两档降级**：改成观察容器而不是视口（面板打开不会改变视口，按视口的规则一条都不命中）。窄档收起有图标按钮的文字、轮次下拉 260 → 96px；更窄一档收到 64px，并把 MCP 收成状态点。
+- **「辅助」重开按钮与文件按钮同口径**：面板打开即隐藏（此前常驻白占 94px），收起即自动回来。
+- **右侧面板宽度上限收紧**：从窗口一半收到 28%（280-420px），并去掉辅助对话里那份丢了边界钳制的宽度副本。
+- **验证**：全量单测 **2542** 通过（与改动前基线逐条一致、零新增失败）；本版新增窄容器降级与辅助按钮联动守门 7 例。
 ## 开始使用
 
 ### 使用 Windows 版本
 
-1. 下载 `cat-chat-3.3.1-beta-windows-x64.zip`。
+1. 下载 `cat-chat-3.3.2-beta-windows-x64.zip`。
 2. 解压到一个可写目录。
 3. 运行 `cat-chat.exe`。
 4. 在设置中添加在线 API 或本地模型服务。
 
-> 归档里也提供旧名 `naiba-chat-3.3.1-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
+> 归档里也提供旧名 `naiba-chat-3.3.2-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
 
 首次运行会创建本地数据目录。升级时请直接替换程序文件，不要删除原有 `data` 目录和配置文件。
 
@@ -107,8 +109,8 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 - `naiba-chat.exe` —— **自动更新链路唯一使用的资产，永久保留此文件名**
 - `naiba-chat-update.json` —— 更新清单，其中 `repository` 字段永久写 `yc883123/naiba-chat`
 - `cat-chat.exe` —— 与 `naiba-chat.exe` 是同一文件，SHA-256 完全相同
-- `cat-chat-3.3.1-beta-windows-x64.zip`
-- `naiba-chat-3.3.1-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
+- `cat-chat-3.3.2-beta-windows-x64.zip`
+- `naiba-chat-3.3.2-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
 
 更新器会验证清单中的仓库、提交、文件名和 SHA-256。下载文件还必须是有效的 Windows 可执行文件；任何一项不一致都会终止安装。**自动更新始终读取 `naiba-chat.exe` 与清单里的旧仓库名**（GitHub 对旧仓库地址做长期重定向），这是已发布客户端逐字校验的协议，仓库改名后也不改值。
 
@@ -128,7 +130,7 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 ```powershell
 Get-ChildItem public\js\*.js | ForEach-Object { node --check $_.FullName }
 python -m unittest discover -s tests -q
-$env:NAIBA_BUILD_VERSION = "3.3.1-beta"
+$env:NAIBA_BUILD_VERSION = "3.3.2-beta"
 python -m PyInstaller --noconfirm --clean naiba-chat.spec
 ```
 

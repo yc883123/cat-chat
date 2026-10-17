@@ -131,8 +131,11 @@
             <span id="auxChatsCount">0</span>
             <span class="button-label">辅助</span>
           </button>
-          <button class="control-button task-button" id="openTasks" title="查看异步任务"><span id="taskCount">0</span> <span class="button-label">任务</span></button>
-          <button class="control-button" id="openSkills" title="查看当前会话已选择的 Skill"><span id="skillCount">0</span> <span class="button-label">Skill</span></button>
+          <!-- 任务 / Skill 的 .button-label 带 .keep：它们是纯数字按钮（没有图标），
+               窄容器降级时收掉文字就只剩一个裸数字「13」「19」，认不出是什么。
+               有图标的（文件 / 辅助 / 刷新）才会被收掉。见 styles.css 的 data-tb 阶梯。 -->
+          <button class="control-button task-button" id="openTasks" title="查看异步任务"><span id="taskCount">0</span> <span class="button-label keep">任务</span></button>
+          <button class="control-button" id="openSkills" title="查看当前会话已选择的 Skill"><span id="skillCount">0</span> <span class="button-label keep">Skill</span></button>
           <button class="mcp-button" id="mcpStatus" title="查看 MCP 状态"><i></i><span>MCP</span></button>
           <button class="control-button" id="reloadPage" type="button" title="刷新页面（内嵌窗口无法使用 F5 时点击）">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><path d="M21 3v6h-6"></path></svg>

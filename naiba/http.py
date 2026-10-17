@@ -1253,8 +1253,17 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if not path.is_file():
             path = self.app.paths.public_dir / "index.html"
+        # onefile 资源目录失效降级：exe 打包（无 COLLECT，运行目录是 %TEMP%\_MEIxxxx）
+        # 在「更新重启窗口 / Temp 清理」后 _MEI 目录会被删除，进程却还活着占着端口——
+        # 桌面壳资源已在内存里照常可用，而手机端此时请求 / 会 FileNotFoundError→500 JSON
+        # 白屏（2026-10-17 用户手机截图实测）。这里返回内嵌的最小兜底页（不依赖任何文件），
+        # 告知原因与恢复方式，而不是一屏报错。
+        try:
+            data = path.read_bytes()
+        except OSError:
+            self._serve_static_degraded(requested_path)
+            return
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        data = path.read_bytes()
         if path.name == "index.html":
             data = data.replace(b"__ASSET_VERSION__", static_asset_version(self.app.paths.public_dir).encode("ascii"))
         self.send_response(HTTPStatus.OK)
@@ -1266,6 +1275,38 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(data)
+
+    def _serve_static_degraded(self, requested_path: str) -> None:
+        """资源目录失效时的内嵌兜底页（零文件依赖）。
+
+        典型成因：onefile 打包的 ``%TEMP%\\_MEIxxxx`` 资源目录在自动更新重启窗口或
+        Temp 清理后被删除，而服务进程还活着占着端口——桌面端不受影响（资源已在内存），
+        手机/局域网页面此时全部 500。返回 503 + 一个纯内嵌 HTML：不引任何外部资源
+        （此刻 js/css 都拿不到），自动重试加载，并给出明确的恢复指引。
+        """
+        page = (
+            "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            "<title>Cat Chat · 正在恢复</title>"
+            "<style>body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;display:flex;"
+            "align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f6f5f8;"
+            "color:#3a3a44}.box{max-width:420px;padding:28px 30px;background:#fff;border-radius:14px;"
+            "box-shadow:0 6px 24px rgba(0,0,0,.08);text-align:center}h1{font-size:17px;margin:0 0 10px}"
+            "p{font-size:13px;line-height:1.7;margin:6px 0;color:#6b6b76}b{color:#3a3a44}</style></head>"
+            "<body><div class=\"box\"><h1>Cat Chat 正在恢复</h1>"
+            "<p>页面资源暂时不可用——通常是应用<b>刚完成更新</b>或正在重启。</p>"
+            "<p>稍等几秒后本页会<b>自动重试</b>；若超过一分钟仍停留在此，"
+            "请在<b>电脑端完全退出 Cat Chat（含托盘）再重新打开</b>，然后刷新本页。</p>"
+            "</div><script>setTimeout(function(){location.reload()},5000);</script></body></html>"
+        )
+        body = page.encode("utf-8")
+        self.send_response(HTTPStatus.SERVICE_UNAVAILABLE)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Retry-After", "5")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _serve_local_file(self, source: str, download: bool = False) -> None:
         if source.startswith("http://127.0.0.1:8188/") or source.startswith("http://localhost:8188/"):

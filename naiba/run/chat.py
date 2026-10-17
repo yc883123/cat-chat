@@ -575,7 +575,7 @@ class ConversationRunMixin:
                         "id": str(item.get("id") or ""),
                         "name": str(item.get("name") or ""),
                         "source": str(item.get("source") or "auto"),
-                        # frozen：固化名单（全程有效）vs 本轮追加（仅当轮）。随 metadata
+                        # frozen：首轮固化（system 前端）vs 本轮追加（尾部指令）——两组都全程有效。随 metadata
                         # 落库，供历史消息渲染分组芯片；缺省 True 兼容旧事件（全部按固化显示）。
                         "frozen": bool(item.get("frozen", True)),
                     }

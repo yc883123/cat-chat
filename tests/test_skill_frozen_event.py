@@ -4,7 +4,8 @@
 保护对象（docs/skill-frozen-appended-badge-plan.md §2.2）：
 - ``SkillAgent.run()`` 发出的 ``skills`` 事件按集合归属带 ``frozen`` 标记：
   冻结集成员（policy["skill_ids"]，首轮固化全程有效）为 true，
-  本轮 /ref 引用但不在冻结集内的（referenced_ids 追加，仅当轮生效）为 false；
+  本轮 /ref 引用但不在冻结集内的（referenced_ids 追加，尾部指令注入）为 false；
+  两组都随 trace 全程留在上下文，frozen 只表达注入位置（用户确认的语义，2026-10-17）；
 - ``source`` 字段保留为 "user" 不动（旧前端/既有消费方兼容）；
 - 事件结构只加字段不改形态：entries 是带 id/name/source/frozen 的 dict 列表。
 """

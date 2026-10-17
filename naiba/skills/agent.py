@@ -673,7 +673,8 @@ class SkillAgent:
         usages: list[dict[str, int]] = []
         if active:
             # 技能均为用户显式启用/引用（无自动匹配），前端显示为“已启用 Skill”。
-            # frozen 标记区分「会话固化名单（全程有效）」与「本轮追加（仅当轮生效）」，
+            # frozen 标记区分「首轮固化（system 前端注入）」与「本轮追加（尾部指令注入）」——
+            # 两组都随 trace 全程留在上下文（差别只在注入位置与模型关注度），
             # 供消息行状态条分组显示；source 字段保留不动（既有消费方兼容）。
             frozen_set = {str(item) for item in policy["skill_ids"]}
             event({"type": "skills", "skills": [
@@ -1521,7 +1522,7 @@ class SkillAgent:
                             "name": item["name"],
                             "source": "user",
                             # 兜底路径补发的是「首次装载」的技能：冻结集成员全程有效，
-                            # 其余（本轮引用）仅当轮生效——与 run() 顶部的口径一致。
+                            # 其余（本轮引用）走尾部追加——与 run() 顶部的口径一致；两组都全程留在上下文。
                             "frozen": str(item.get("id") or "") in frozen_event_set,
                         }
                         for item in active

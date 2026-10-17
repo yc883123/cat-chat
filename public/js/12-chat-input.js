@@ -745,7 +745,11 @@ function handleSkillsEvent(event, { setActivity }) {
     state.quotedSkillIds = [...new Set([...(state.quotedSkillIds || []), ...ids])];
   }
   // 分组显示（docs/skill-frozen-appended-badge-plan.md）：
-  // frozen=true = 会话固化名单（首轮固化全程有效）；false = 本轮追加（仅当轮生效）。
+  // frozen=true = 会话固化名单（首轮固化全程有效）；false = 本轮追加。
+  // 追加技能同样随 trace 全程留在上下文里（与固化组同效），差别只在注入位置：
+  // 固化组进 system 前端（字节稳定、优先级最高），追加组以尾部系统指令进入历史，
+  // 模型注意力上的优先级/保真度略不同——所以这里只区分「哪一批、怎么注入」，
+  // 不再标注「仅当轮」（那是旧理解，实际全程有效）。
   // 兼容期：旧记录回放没有 frozen 字段时全部按固化组显示（frozen !== false 视为固化）。
   const frozen = all.filter((s) => s?.source !== 'auto' && s?.frozen !== false);
   const appended = all.filter((s) => s?.source !== 'auto' && s?.frozen === false);
@@ -754,7 +758,7 @@ function handleSkillsEvent(event, { setActivity }) {
   const names = (list, cls) => list.map((s) => chip(s?.name, cls)).join('');
   const parts = [];
   if (frozen.length) parts.push(`已启用固化 Skill：${names(frozen, 'ft-chip-skill')}`);
-  if (appended.length) parts.push(`本轮追加（仅当轮）：${names(appended, 'ft-chip-appended')}`);
+  if (appended.length) parts.push(`本轮追加：${names(appended, 'ft-chip-appended')}`);
   if (auto.length) parts.push(`已自动匹配 ${names(auto, 'ft-chip-skill')}`);
   // 无技能装载时不渲染任何内容（维持旧行为：空串即隐藏状态条）。
   setActivity(parts.join('<span class="skills-sep">·</span>'), true);

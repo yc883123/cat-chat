@@ -1352,6 +1352,7 @@ export function skillMarkup(skills = []) {
   // 与 12-chat-input.handleSkillsEvent 同口径的分组芯片（固化=紫、追加=琥珀）。
   // metadata.skills 由 run/chat.py 落库（带 frozen 字段）；旧消息没有该字段时
   // frozen !== false 一律按固化组显示，与实时路径的兼容分支一致。
+  // 追加组与固化组都是全程有效（随 trace 留在上下文），分组只表达注入位置不同。
   const chip = (name, cls) => `<span class="ft-chip ${cls}">${escapeHtml(String(name || ''))}</span>`;
   const names = (list, cls) => list.map((s) => chip(s?.name || s, cls)).join('');
   const parts = [];
@@ -1360,7 +1361,7 @@ export function skillMarkup(skills = []) {
   const frozen = user.filter((s) => s?.frozen !== false);
   const appended = user.filter((s) => s?.frozen === false);
   if (frozen.length) parts.push(`已启用固化 Skill：${names(frozen, 'ft-chip-skill')}`);
-  if (appended.length) parts.push(`本轮追加（仅当轮）：${names(appended, 'ft-chip-appended')}`);
+  if (appended.length) parts.push(`本轮追加：${names(appended, 'ft-chip-appended')}`);
   if (auto.length) parts.push(`已自动匹配 Skill：${names(auto, 'ft-chip-skill')}`);
   return parts.length ? `<div class="skill-usage">${parts.join('<span class="skills-sep">·</span>')}</div>` : '';
 }

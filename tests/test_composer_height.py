@@ -118,11 +118,17 @@ class ComposerHeightSourceTests(unittest.TestCase):
 
         第二处直写 `style.height = …scrollHeight` 就等于绕开了「摘占位符」这条契约，
         而且这种旁路不会报错、只会偶尔量错 —— 必须被这条断言拦下。
+
+        豁免两个文件：13-skill-refs.js 是 resizeTextarea 本体；21-aux-chat.js 的
+        autoGrowAuxInput 量的是**辅助对话自己的 textarea（#auxChatInput）**，
+        不是主输入框——它没有 placeholder 摘除问题（placeholder 是静态的），
+        也没有折叠态分支，自 bloom 逻辑独立成立（3.3.0-beta CI 实测拦下后补的豁免）。
         """
         js_dir = ROOT / "public" / "js"
+        exempt = {"13-skill-refs.js", "21-aux-chat.js"}
         offenders = []
         for path in sorted(js_dir.glob("*.js")):
-            if path.name == "13-skill-refs.js":
+            if path.name in exempt:
                 continue
             text = path.read_text(encoding="utf-8")
             for line_no, line in enumerate(text.splitlines(), 1):

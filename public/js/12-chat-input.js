@@ -737,18 +737,27 @@ function handleStatusEvent(event, { setActivity }) {
 }
 
 function handleSkillsEvent(event, { setActivity }) {
-  const user = (event.skills || []).filter((s) => s?.source !== 'auto');
-  const auto = (event.skills || []).filter((s) => s?.source === 'auto');
+  const all = event.skills || [];
   // 本会话已引用集合（弹窗头部计数 + 行内「已引用」标签）：skills 事件是后端
   // 「本轮实际装载了哪些技能」的权威口径，并集跨轮累计，切会话时清空（见 clearQuotedSkills）。
-  const ids = (event.skills || []).map((s) => String(s?.id || '')).filter(Boolean);
+  const ids = all.map((s) => String(s?.id || '')).filter(Boolean);
   if (ids.length) {
     state.quotedSkillIds = [...new Set([...(state.quotedSkillIds || []), ...ids])];
   }
+  // 分组显示（docs/skill-frozen-appended-badge-plan.md）：
+  // frozen=true = 会话固化名单（首轮固化全程有效）；false = 本轮追加（仅当轮生效）。
+  // 兼容期：旧记录回放没有 frozen 字段时全部按固化组显示（frozen !== false 视为固化）。
+  const frozen = all.filter((s) => s?.source !== 'auto' && s?.frozen !== false);
+  const appended = all.filter((s) => s?.source !== 'auto' && s?.frozen === false);
+  const auto = all.filter((s) => s?.source === 'auto');
+  const chip = (name, cls) => `<span class="ft-chip ${cls}">${escapeHtml(String(name || ''))}</span>`;
+  const names = (list, cls) => list.map((s) => chip(s?.name, cls)).join('');
   const parts = [];
-  if (user.length) parts.push(`已启用 ${user.map((s) => s?.name).join('、')}`);
-  if (auto.length) parts.push(`已自动匹配 ${auto.map((s) => s?.name).join('、')}`);
-  setActivity(parts.join('；'));
+  if (frozen.length) parts.push(`已启用固化 Skill：${names(frozen, 'ft-chip-skill')}`);
+  if (appended.length) parts.push(`本轮追加（仅当轮）：${names(appended, 'ft-chip-appended')}`);
+  if (auto.length) parts.push(`已自动匹配 ${names(auto, 'ft-chip-skill')}`);
+  // 无技能装载时不渲染任何内容（维持旧行为：空串即隐藏状态条）。
+  setActivity(parts.join('<span class="skills-sep">·</span>'), true);
 }
 
 function handleSkillWarningEvent(event, { setActivity }) {

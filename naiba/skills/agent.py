@@ -673,8 +673,16 @@ class SkillAgent:
         usages: list[dict[str, int]] = []
         if active:
             # 技能均为用户显式启用/引用（无自动匹配），前端显示为“已启用 Skill”。
+            # frozen 标记区分「会话固化名单（全程有效）」与「本轮追加（仅当轮生效）」，
+            # 供消息行状态条分组显示；source 字段保留不动（既有消费方兼容）。
+            frozen_set = {str(item) for item in policy["skill_ids"]}
             event({"type": "skills", "skills": [
-                {"id": item["id"], "name": item["name"], "source": "user"}
+                {
+                    "id": item["id"],
+                    "name": item["name"],
+                    "source": "user",
+                    "frozen": str(item.get("id") or "") in frozen_set,
+                }
                 for item in active
             ]})
 
@@ -729,6 +737,11 @@ class SkillAgent:
         skill_prompts = []
         loaded_skill_ids: set[str] = set()
         total_skill_chars = 0
+        # 兜底补发事件要用的固化集（与 run() 顶部 frozen_set 同口径）：run_context["skill_policy"]
+        # 在 run() 里写的是 normalize 后的完整 policy 副本；缺省时按「全部非固化」处理。
+        # 取值收进局部变量（契约守门扫描 run_context 裸键，嵌套字面量键不外露）。
+        run_policy = dict((run_context or {}).get("skill_policy") or {})
+        frozen_event_set = {str(item) for item in (run_policy.get("skill_ids") or [])}
 
         # 技能注入策略（会话冻结，为缓存与 ref 路由稳定）：
         # - 冻结政策里的技能（policy["skill_ids"]）始终以完整 SKILL.md 注入 system 前端，
@@ -1503,7 +1516,14 @@ class SkillAgent:
                 event({
                     "type": "skills",
                     "skills": [
-                        {"id": item["id"], "name": item["name"], "source": "user"}
+                        {
+                            "id": item["id"],
+                            "name": item["name"],
+                            "source": "user",
+                            # 兜底路径补发的是「首次装载」的技能：冻结集成员全程有效，
+                            # 其余（本轮引用）仅当轮生效——与 run() 顶部的口径一致。
+                            "frozen": str(item.get("id") or "") in frozen_event_set,
+                        }
                         for item in active
                     ],
                 })

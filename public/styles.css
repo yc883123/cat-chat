@@ -820,6 +820,11 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
 .tool-confirm-status { font-size: 13px; color: var(--muted); font-style: italic; }
 .activity { color: var(--muted); font-size: 13px; padding-top: 5px; }
 .activity::after { content: ""; display: inline-block; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); margin-left: 7px; animation: pulse 1s infinite alternate; }
+/* 消息行状态条里的 Skill 芯片（固化=品牌紫 / 本轮追加=琥珀），对齐会话气泡设计稿。 */
+.run-activity .ft-chip { display: inline-block; margin: 1px 3px 1px 0; padding: 1px 7px; border-radius: 10px; font-size: 11px; background: rgba(128, 128, 128, 0.12); color: var(--text); }
+.run-activity .ft-chip-skill { background: var(--accent-soft); color: var(--accent); }
+.run-activity .ft-chip-appended { background: var(--amber-soft); color: var(--amber); }
+.run-activity .skills-sep { margin: 0 6px; color: var(--muted); }
 @keyframes pulse { to { opacity: .2; } }
 .media-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-top: 12px; }
 .media-grid img, .media-grid video { width: 100%; max-height: 520px; object-fit: contain; background: var(--surface-2); border-radius: var(--radius); }

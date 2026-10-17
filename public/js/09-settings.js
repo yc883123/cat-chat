@@ -31,15 +31,22 @@ export function renderSkills(filter = '') {
   if (!state.bootstrap) return;
   const fixed = new Set(currentAgentFixedSkillIds());
   const quoted = new Set(state.quotedSkillIds || []);
+  const expandedId = state.skillQuickExpandedId || '';
   const skills = state.bootstrap.skills.filter((skill) => skillMatchesQuery(skill, filter));
   $('#skillList').innerHTML = skills.map((skill) => {
     const main = skillDisplayName(skill);
     const hasAlias = main !== skill.name;
+    // 「查看说明」展开态：完整说明原位替换该行的一行截断描述（列表不再跳位），
+    // 点说明块任意处收起（见 #skillList 点击委托里的 data-skill-desc 分支）。
+    const expanded = skill.id === expandedId;
+    const desc = expanded
+      ? `<p class="quick-desc quick-desc-full" data-skill-desc="${skill.id}" title="点击收起">${escapeHtml(skill.description || '未提供描述')}</p>`
+      : `<p class="quick-desc">${escapeHtml(skill.description || '')}</p>`;
     return `
-    <button type="button" class="skill-item skill-click" data-skill-insert="${skill.id}" title="${escapeHtml(skill.name)}">
+    <button type="button" class="skill-item skill-click${expanded ? ' desc-expanded' : ''}" data-skill-insert="${skill.id}" title="${escapeHtml(skill.name)}">
       <span>
         <b>${escapeHtml(main)}</b>${hasAlias ? `<em class="skill-alias-preview">本名 ${escapeHtml(skill.name)}</em>` : ''}${fixed.has(skill.id) ? '<em>预设</em>' : ''}${quoted.has(skill.id) ? '<em class="skill-quoted">已引用</em>' : ''}
-        <p class="quick-desc">${escapeHtml(skill.description || '')}</p>
+        ${desc}
       </span>
       <span class="skill-item-side">
         <span class="skill-tag" title="点击插入到输入框">/${escapeHtml(skill.ref || skill.name)}</span>
@@ -389,7 +396,7 @@ export function updateSkillSummary() {
   const fixedCount = currentAgentFixedSkillIds().length;
   // 只填数字：按钮自带「Skill」文字标签（此前填「Skill N」→ 顶栏显示「Skill 8 Skill」）。
   $('#skillCount').textContent = String(state.bootstrap.skills.length);
-  $('#skillPolicyHint').textContent = '点击某项即在输入框光标处插入 /技能 引用；发送后按“首轮注入 / 后续追加”注入';
+  $('#skillPolicyHint').textContent = '点行插入 /技能 引用：只对你写了 /技能 的那条消息装载该技能；Agent 固定的技能则整个会话全程可用';
   const quoted = (state.quotedSkillIds || []).length;
   $('#skillsSummary').textContent = quoted
     ? `${state.bootstrap.skills.length} 个可用 · 本会话已引用 ${quoted} 个（Agent 预设 ${fixedCount} 个，新建会话自动预填引用）`

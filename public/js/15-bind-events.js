@@ -1070,7 +1070,8 @@ export function bindEvents() {
   $('#agentSelect').addEventListener('change', saveAgentSelection);
   $('#openSkills').addEventListener('click', () => {
     // 打开即重渲染：清掉上一会话可能残留的「已引用」标签与计数（quotedSkillIds
-    // 在 openConversation 里已重置，但列表内容是打开前渲染的）。
+    // 在 openConversation 里已重置，但列表内容是打开前渲染的）；「查看说明」展开态同样回收。
+    state.skillQuickExpandedId = '';
     renderSkills($('#skillSearch')?.value || '');
     // 桌面才显示「/ 唤起」与「Enter 插入 · Esc 关闭」提示（手机抽屉没有物理键盘）。
     const coarse = isCoarsePointer();
@@ -1462,6 +1463,15 @@ export function bindEvents() {
       event.preventDefault();
       event.stopPropagation();
       toggleSkillQuickMenu(more);
+      return;
+    }
+    // 展开态的完整说明块：点击任意处即收起（收起也用重渲染，与展开同一条路径）。
+    const desc = event.target.closest('[data-skill-desc]');
+    if (desc) {
+      event.preventDefault();
+      event.stopPropagation();
+      state.skillQuickExpandedId = '';
+      renderSkills($('#skillSearch')?.value || '');
       return;
     }
     const button = event.target.closest('[data-skill-insert]');
@@ -2452,17 +2462,11 @@ function toggleSkillQuickMenu(anchor) {
     return btn;
   };
   menu.append(
-    // 查看说明：临时展开完整描述（插到列表顶部，关菜单/重渲染即消失）。
+    // 查看说明：切换该行「完整说明展开态」（state.skillQuickExpandedId 驱动重渲染，
+    // 说明原位替换一行截断描述，列表不跳位）；展开时点说明块本身即收起（见 #skillList 委托）。
     mkItem('M8 6h13M8 12h13M8 18h13', '查看说明', () => {
-      let full = $('#skillQuickDescFull');
-      if (full && full.dataset.skillId === skillId) { full.remove(); return; }
-      full?.remove();
-      full = document.createElement('div');
-      full.id = 'skillQuickDescFull';
-      full.className = 'skills-quick-desc-full';
-      full.dataset.skillId = skillId;
-      full.textContent = `${skillDisplayName(skill)}：${skill.description || '未提供描述'}`;
-      $('#skillList').prepend(full);
+      state.skillQuickExpandedId = state.skillQuickExpandedId === skillId ? '' : skillId;
+      renderSkills($('#skillSearch')?.value || '');
     }),
     mkItem('M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', '隐藏', async () => {
       if (!confirm(`隐藏 Skill「${skillDisplayName(skill)}」？可在 设置 → Skills 管理 中恢复。`)) return;

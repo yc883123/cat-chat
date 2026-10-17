@@ -79,9 +79,10 @@ class ConversationRunManager(ConversationRunMixin):
         web_search_enabled: bool,
         model_key: str = "",
         enabled_tool_ids: list[str] | None = None,
+        conv_kind: str = "main",
     ) -> list[str]:
         """Freeze one run's tools（实现见 naiba/run/session.py）。"""
-        return resolve_allowed_tools(self.app, mode, agent, web_search_enabled, model_key, enabled_tool_ids)
+        return resolve_allowed_tools(self.app, mode, agent, web_search_enabled, model_key, enabled_tool_ids, conv_kind)
 
     def _all_tool_names(self) -> list[str]:
         """全部可用工具 id（实现见 naiba/run/session.py）。"""

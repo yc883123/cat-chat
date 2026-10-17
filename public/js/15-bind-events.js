@@ -13,10 +13,13 @@ import { addProvider, addSearchProfile, appearanceFormValues, applyProviderModel
 import { addFolderChip, isFolderChip, readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
 import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handlePasteImage, clipboardPasteDriver, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState } from "./12-chat-input.js";
 import { commitSkillSelection, hideSkillPopup, insertSkillRefAtCursor, moveSkillPopupSelection, popupState, positionSkillPopup, renderInputMirror, resizeTextarea, setSkillPopupSelection, skillList, toggleComposerExpanded, updateSkillPopup } from "./13-skill-refs.js";
-import { activateFileTab, activeFileTab, applyFilePanelOpenClass, cancelFileEdit, closeFilePanel, closeSidebar, convFileRawUrl, filePanelState, filePanelUsable, fileVersionToken, openFilePanel, openSidebar, removeFileTab, reopenFilePanel, restoreLeftSidebarCollapse, saveFileTab, setLeftSidebarCollapsed, sidebarDesktop, startFileEdit, updateFileTabsButton } from "./14-file-panel.js";
+import { activateFileTab, activeFileTab, applyFilePanelOpenClass, cancelFileEdit, closeFilePanel, closeSidebar, convFileRawUrl, filePanelState, filePanelUsable, fileVersionToken, loadFileTab, openFilePanel, openSidebar, removeFileTab, reopenFilePanel, restoreLeftSidebarCollapse, saveFileTab, setLeftSidebarCollapsed, sidebarDesktop, startFileEdit, updateFileTabsButton } from "./14-file-panel.js";
 import { handleFilePopupClick, handleFilePopupKey, positionFilePopup, updateFilePopup } from "./16-file-refs.js";
 import { guideAllInterjections, sendRunInterjection } from "./18-interjections.js";
 import { dismissOnboarding, resetOnboarding, saveOnboardingProvider, selectOnboardingPreset, testOnboardingConnection } from "./19-onboarding.js";
+// 辅助对话 import 追加在 import 块末尾：守门测试（test_turn_rail / test_context_menu）
+// 按 import 区的**行号**断言 01-core / 04-messages 的位置，插在前面会把它们推后而报红。
+import { bindAuxChatEvents, restoreAuxChats, restoreDockGroup } from "./21-aux-chat.js";
 // ---- 聊天背景图（外观页） ----
 // 上传走同一个 /api/uploads（落盘 data/uploads/<日期>/，返回绝对路径），但**不进入
 // state.pendingFiles**——那是"随消息发送的附件"，背景图不该出现在输入框上方。
@@ -1825,6 +1828,15 @@ export function bindEvents() {
     if (event.target.closest('[data-file-edit]')) { startFileEdit(filePanelState.activeKey); return; }
     if (event.target.closest('[data-file-edit-cancel]')) { cancelFileEdit(filePanelState.activeKey); return; }
     if (event.target.closest('[data-file-save]')) { saveFileTab(filePanelState.activeKey); return; }
+    if (event.target.closest('[data-file-encoding-reopen]')) {
+      // 编码选择器「重新打开」（A.1）：带上所选编码强制重读当前标签。
+      const tab = activeFileTab();
+      const select = $('#fileEncodingSelect');
+      if (!tab || !select) return;
+      tab.encoding = select.value;
+      await loadFileTab(tab, true);
+      return;
+    }
     if (event.target.closest('[data-file-download]')) {
       // 下载走 /file/raw（后端据 `download=1` 发 attachment），而不是自己拼字节流：
       // 与内联预览共用同一条 URL 生成器，文件改名/换会话时不会两处漂移。
@@ -3074,3 +3086,7 @@ updateSendButtonState();
 restoreLeftSidebarCollapse();
 restoreTopbarCompact();
 updateFileTabsButton();
+// 辅助对话（计划-辅助对话 §3.5）：事件委托接线 + 页面重载后恢复未关闭的标签。
+bindAuxChatEvents();
+restoreDockGroup();
+void restoreAuxChats();

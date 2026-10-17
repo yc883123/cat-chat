@@ -335,6 +335,11 @@ class NaibaChatApp:
             self.runs.recover_interrupted_runs()
         except Exception:  # noqa: BLE001
             logger.exception("中断轮次恢复失败")
+        # 辅助对话不做长期留存：启动时按 updated_at 清扫超过 7 天的 aux 会话（计划 §3.1）。
+        try:
+            self.storage.delete_expired_aux_conversations(ttl_days=7)
+        except Exception:  # noqa: BLE001
+            logger.exception("辅助对话过期清扫失败")
         self.updater = UpdateManager(self._paths.app_dir, self._paths.data_dir)
         # 「更新代理」独立于全局 proxy：启动时注入一次，设置保存后再注入更新。
         self.updater.configure_proxy(self.config.data.get("update_proxy"))
@@ -779,6 +784,49 @@ class NaibaChatApp:
             ),
             HTTPStatus.CREATED,
         )
+
+    def api_create_aux_chat(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """创建辅助对话（标题自动「辅助对话 N」）。
+
+        与主对话的差异全在产品壳上：不进侧栏/搜索/统计（storage 层排除）、
+        只读锁死（工具决议按 conv_kind 收口）、不做长期留存（7 天清扫 + 关标签即删）。
+        权限档/工作区等入参一概忽略——后端唯一判定，不给前端留切换口（计划 §3.3）。
+        """
+        existing = self.storage.list_aux_conversations()
+        taken: set[int] = set()
+        for item in existing:
+            match = re.match(r"^辅助对话\s*(\d+)$", str(item.get("title") or ""))
+            if match:
+                taken.add(int(match.group(1)))
+        number = 1
+        while number in taken:
+            number += 1
+        title = f"辅助对话 {number}"
+        agent_id = str(body.get("agent_id") or self.config.default_agent_id())
+        if not self.config.get_agent(agent_id):
+            agent_id = self.config.default_agent_id()
+        provider_id = str(body.get("provider_id") or "")
+        model_key = str(body.get("model_key") or "")
+        model_name = body.get("model_name", "")
+        if not isinstance(model_name, str):
+            return {"error": "model_name 必须是文本"}, HTTPStatus.BAD_REQUEST
+        return (
+            self.storage.create_conversation(
+                title=title,
+                provider_id=provider_id,
+                agent_id=agent_id,
+                interaction_mode="craft",
+                model_key=model_key,
+                model_name=model_name.strip()[:256],
+                # 权限档强制 confirm（只读语义档）：入参不参与。
+                permission_mode="confirm",
+                conv_kind="aux",
+            ),
+            HTTPStatus.CREATED,
+        )
+
+    def api_list_aux_chats(self) -> tuple[dict[str, Any], int]:
+        return {"conversations": self.storage.list_aux_conversations()}, HTTPStatus.OK
 
     def api_update_conversation_settings(self, conversation_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         title = body.get("title")

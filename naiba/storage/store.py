@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import sys
 import time
+import traceback
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -27,7 +28,7 @@ _METADATA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
-CURRENT_SCHEMA_VERSION = 24
+CURRENT_SCHEMA_VERSION = 25
 
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
@@ -828,6 +829,20 @@ def _migrate_to_v24(db: sqlite3.Connection) -> None:
         _warn_data_migration(db, f"[naiba-storage] 迁移 v24 内容完成，VACUUM 未执行：{exc}")
 
 
+def _migrate_to_v25(db: sqlite3.Connection) -> None:
+    """辅助对话（aux chat）：conversations 加 conv_kind 列。
+
+    取值 'main'（默认，一切既有会话）| 'aux'（辅助对话：不进侧栏/搜索/统计的
+    轻量并行会话，见 计划-辅助对话.md）。纯加列：新列 NOT NULL DEFAULT 'main'，
+    存量行自动归为 main，无数据改写、无 VACUUM。
+    """
+    try:
+        db.execute("SELECT conv_kind FROM conversations LIMIT 1")
+    except sqlite3.OperationalError:
+        db.execute("ALTER TABLE conversations ADD COLUMN conv_kind TEXT NOT NULL DEFAULT 'main'")
+    db.commit()
+
+
 # 目标版本 -> 迁移函数。新增版本时在此追加并提升 CURRENT_SCHEMA_VERSION。
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
@@ -854,6 +869,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     22: _migrate_to_v22,
     23: _migrate_to_v23,
     24: _migrate_to_v24,
+    25: _migrate_to_v25,
 }
 
 
@@ -1164,6 +1180,7 @@ class ChatStorage:
                 CREATE TABLE IF NOT EXISTS conversations (
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
+                    conv_kind TEXT NOT NULL DEFAULT 'main',
                     mode TEXT NOT NULL DEFAULT 'online',
                     permission_mode TEXT NOT NULL DEFAULT 'confirm',
                     web_search_enabled INTEGER NOT NULL DEFAULT 0,
@@ -1526,23 +1543,26 @@ class ChatStorage:
         workspace_dir: str = "",
         workspace_group: str = "",
         reasoning_effort: str = "auto",
+        conv_kind: str = "main",
     ) -> dict[str, Any]:
         now = int(time.time() * 1000)
         conversation_id = uuid.uuid4().hex
         interaction_mode = "craft"
         if permission_mode not in ("confirm", "auto", "full"):
             permission_mode = "auto"
+        conv_kind = "aux" if str(conv_kind or "").strip() == "aux" else "main"
         resolved_model_key = str(model_key or "").strip()
         resolved_model_name = str(model_name or "").strip()[:256]
         if not resolved_model_key and provider_id:
             resolved_model_key = f"online:{provider_id}"
         with self._connect() as db:
             db.execute(
-                "INSERT INTO conversations(id, title, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, title_customized, system_prompt, stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, provider_id, model_key, model_name, agent_id, interaction_mode, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO conversations(id, title, conv_kind, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, title_customized, system_prompt, stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, provider_id, model_key, model_name, agent_id, interaction_mode, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     conversation_id,
                     title.strip() or "新对话",
+                    conv_kind,
                     "online",
                     permission_mode,
                     1 if web_search_enabled else 0,
@@ -1567,22 +1587,23 @@ class ChatStorage:
 
     def list_conversations(self, mode: str | None = None) -> list[dict[str, Any]]:
         columns = (
-            "id, title, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, "
+            "id, title, conv_kind, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, "
             "lightweight_mode, lightweight_disabled_features, title_customized, system_prompt, "
             "stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, "
             "skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, "
             "interaction_mode, favorite, archived, sort_order, branched_from_id, "
             "branch_message_id, created_at, updated_at"
         )
+        # 辅助对话（conv_kind='aux'）是随手开随手关的标签页，不进侧栏会话列表（§3.3 排除规则）。
         with self._connect() as db:
             if mode:
                 rows = db.execute(
-                    f"SELECT {columns} FROM conversations WHERE mode = ? ORDER BY updated_at DESC",
+                    f"SELECT {columns} FROM conversations WHERE mode = ? AND conv_kind = 'main' ORDER BY updated_at DESC",
                     (mode,),
                 ).fetchall()
             else:
                 rows = db.execute(
-                    f"SELECT {columns} FROM conversations ORDER BY updated_at DESC"
+                    f"SELECT {columns} FROM conversations WHERE conv_kind = 'main' ORDER BY updated_at DESC"
                 ).fetchall()
             items = [self._conversation_dict(row) for row in rows]
             # 分支计数与「源标题」一次带出（列表里已有全部标题，缺失的才回查一次），
@@ -1637,9 +1658,10 @@ class ChatStorage:
         limit = max(1, min(int(limit if limit is not None else 20), 50))
         needle = str(query or "").strip()
         params: list[Any] = []
-        where = ""
+        # 辅助对话不参与历史检索（§3.3 排除规则）：指定 id 打开仍可用（GET 走 get_conversation）。
+        where = "WHERE c.conv_kind = 'main' "
         if needle:
-            where = "WHERE instr(lower(c.title), lower(?)) > 0 "
+            where += "AND instr(lower(c.title), lower(?)) > 0 "
             params.append(needle)
         params.append(limit)
         with self._connect() as db:
@@ -1788,7 +1810,8 @@ class ChatStorage:
                 "         m.content AS content, m.created_at AS created_at, m.rowid AS rid, "
                 "         ROW_NUMBER() OVER (PARTITION BY m.conversation_id "
                 "                            ORDER BY m.created_at DESC, m.rowid DESC) AS rn "
-                "  FROM messages m WHERE instr(lower(m.content), lower(?)) > 0"
+                "  FROM messages m JOIN conversations c ON c.id = m.conversation_id "
+                "  WHERE instr(lower(m.content), lower(?)) > 0 AND c.conv_kind = 'main'"
                 ") "
                 "SELECT h.cid, h.mid, h.role, h.content, h.created_at, h.rid, h.rn, "
                 "       c.title, c.updated_at AS conv_updated, "
@@ -1799,7 +1822,8 @@ class ChatStorage:
                 (needle, max(1, min(int(per_conversation or 3), 10))),
             ).fetchall()
             total_hits = int(db.execute(
-                "SELECT COUNT(*) FROM messages WHERE instr(lower(content), lower(?)) > 0",
+                "SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id "
+                "WHERE instr(lower(m.content), lower(?)) > 0 AND c.conv_kind = 'main'",
                 (needle,),
             ).fetchone()[0] or 0)
             buckets: dict[str, dict[str, Any]] = {}
@@ -1902,10 +1926,10 @@ class ChatStorage:
             else:
                 # 全局口径默认**排除已归档会话**（照 DeepSeek Harness：归档=从搜索与
                 # 列表同时隐藏）。指定会话 id 的站内搜索不排除——归档会话仍可打开，
-                # 在它内部搜自己的历史必须照常工作。
+                # 在它内部搜自己的历史必须照常工作。辅助对话同理排除（§3.3）。
                 total = int(db.execute(
                     "SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id = m.conversation_id "
-                    "WHERE instr(lower(m.content), lower(?)) > 0 AND c.archived = 0",
+                    "WHERE instr(lower(m.content), lower(?)) > 0 AND c.archived = 0 AND c.conv_kind = 'main'",
                     (needle,),
                 ).fetchone()[0] or 0)
                 rows = db.execute(
@@ -1913,7 +1937,7 @@ class ChatStorage:
                     "       m.created_at AS created_at, m.rowid AS rid, "
                     "       c.id AS cid, c.title AS title, c.updated_at AS conv_updated "
                     "FROM messages m JOIN conversations c ON c.id = m.conversation_id "
-                    "WHERE instr(lower(m.content), lower(?)) > 0 AND c.archived = 0 "
+                    "WHERE instr(lower(m.content), lower(?)) > 0 AND c.archived = 0 AND c.conv_kind = 'main' "
                     "ORDER BY c.updated_at DESC, m.created_at DESC, m.rowid DESC LIMIT ?",
                     (needle, size),
                 ).fetchall()
@@ -2021,7 +2045,7 @@ class ChatStorage:
         """
         with self._connect() as db:
             row = db.execute(
-                "SELECT id, title, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, lightweight_mode, lightweight_disabled_features, title_customized, system_prompt, stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, interaction_mode, favorite, archived, sort_order, branched_from_id, branch_message_id, created_at, updated_at "
+                "SELECT id, title, conv_kind, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, lightweight_mode, lightweight_disabled_features, title_customized, system_prompt, stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, interaction_mode, favorite, archived, sort_order, branched_from_id, branch_message_id, created_at, updated_at "
                 "FROM conversations WHERE id = ?",
                 (conversation_id,),
             ).fetchone()
@@ -2136,15 +2160,15 @@ class ChatStorage:
             new_id = uuid.uuid4().hex
             db.execute(
                 "INSERT INTO conversations("
-                "id, title, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, "
+                "id, title, conv_kind, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, "
                 "lightweight_mode, lightweight_disabled_features, title_customized, system_prompt, "
                 "stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, "
                 "skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, interaction_mode, "
                 "branched_from_id, branch_message_id, "
                 "first_turn, created_at, updated_at"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    new_id, new_title, src["mode"], src["permission_mode"],
+                    new_id, new_title, "main", src["mode"], src["permission_mode"],
                     src["web_search_enabled"], src["deep_reasoning_enabled"], src["lightweight_mode"],
                     src["lightweight_disabled_features"], 1, src["system_prompt"], src["stream_enabled"],
                     src["workspace_dir"], src["workspace_group"], src["reasoning_effort"],
@@ -2739,6 +2763,46 @@ class ChatStorage:
         with self._connect() as db:
             cursor = db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
         return cursor.rowcount > 0
+
+    def delete_expired_aux_conversations(self, ttl_days: int = 7) -> int:
+        """清扫过期辅助对话（辅助对话不做长期留存，7 天兜底，见 计划-辅助对话.md §3.5）。
+
+        按 ``updated_at`` 判过期（最后一条消息的时间）；逐个走 ``delete_conversation``
+        复用其级联删除（messages / runs / 事件流一并清）。只动 ``conv_kind='aux'``，
+        main 会话永不触及。返回删除的会话数。服务启动时调用一次。
+        """
+        ttl_days = max(0, int(ttl_days))
+        cutoff = int(time.time() * 1000) - ttl_days * 24 * 60 * 60 * 1000
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id FROM conversations WHERE conv_kind = 'aux' AND updated_at < ?",
+                (cutoff,),
+            ).fetchall()
+        expired_ids = [str(row["id"]) for row in rows]
+        deleted = 0
+        for conversation_id in expired_ids:
+            try:
+                if self.delete_conversation(conversation_id):
+                    deleted += 1
+            except Exception:  # noqa: BLE001 - 单个清扫失败不阻断启动
+                traceback.print_exc()
+        return deleted
+
+    def list_aux_conversations(self) -> list[dict[str, Any]]:
+        """当前全部辅助对话（页面重载后恢复标签用），按最后活动倒序。"""
+        columns = (
+            "id, title, conv_kind, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, "
+            "lightweight_mode, lightweight_disabled_features, title_customized, system_prompt, "
+            "stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, "
+            "skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, "
+            "interaction_mode, favorite, archived, sort_order, branched_from_id, "
+            "branch_message_id, created_at, updated_at"
+        )
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT {columns} FROM conversations WHERE conv_kind = 'aux' ORDER BY updated_at DESC"
+            ).fetchall()
+        return [self._conversation_dict(row) for row in rows]
 
     @_retry_transient_write
     def clear_conversation_messages(self, conversation_id: str) -> int:
@@ -3757,6 +3821,9 @@ class ChatStorage:
         返回 totals / by_model / by_day / by_bucket / first_record_at；by_day 按
         **本地时区**归日（strftime + 'localtime'）。until_ms<=0 表示不设上界。
 
+        辅助对话（conv_kind='aux'）的用量默认排除（计划-辅助对话 §3.3）：
+        统计页是「正式任务的账本」，随手开随手关的问答不该混进去。
+
         注意 by_day / by_bucket 的粒度是**桶×模型**（同一模型键一行）：费用按
         模型单价计算，聚合到「桶」必须保留模型维度才能精确计价，折叠成桶级单行
         是调用方（app 层）算完费用之后的职责。by_day 恒为天级；``bucket="hour"``
@@ -3772,6 +3839,8 @@ class ChatStorage:
         if key:
             window += " AND model_key = ?"
             params.append(key)
+        # aux 排除走 EXISTS 子查询（usage_records 的 conversation_id 关回 conversations 表）。
+        window += " AND NOT EXISTS (SELECT 1 FROM conversations c WHERE c.id = usage_records.conversation_id AND c.conv_kind = 'aux')"
         agg = ", ".join(self._USAGE_AGG_COLUMNS)
         with self._connect() as db:
             totals = dict(db.execute(
@@ -4142,6 +4211,9 @@ class ChatStorage:
     def _conversation_dict(row: sqlite3.Row) -> dict[str, Any]:
         result = dict(row)
         result["interaction_mode"] = "craft"
+        # 会话种类：'main'（普通会话）| 'aux'（辅助对话，不进侧栏/搜索/统计）。
+        # 老库行对象可能缺列，统一补默认值，调用方只按字符串相等判断。
+        result["conv_kind"] = "aux" if str(result.get("conv_kind") or "") == "aux" else "main"
         # 轻量模式已退役（2026-09：工具/Skill 一律按 Agent 固化集，富文本恒开）：
         # 历史列仍留在表里，但不再对外暴露，避免旧值被前端误用。
         result.pop("lightweight_mode", None)

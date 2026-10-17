@@ -12,7 +12,7 @@ from naiba.core.contracts import AppContext
 import re
 from typing import Any
 
-from naiba.plans import normalize_interaction_mode, resolve_mode_tools
+from naiba.plans import READONLY_TOOLS, normalize_interaction_mode, resolve_mode_tools
 from naiba.tools.registry import RETIRED_TOOL_MAP
 from naiba.vision.runtime import IMAGE_SUFFIXES
 
@@ -79,11 +79,16 @@ def resolve_allowed_tools(
     web_search_enabled: bool,
     model_key: str = "",
     enabled_tool_ids: list[str] | None = None,
+    conv_kind: str = "main",
 ) -> list[str]:
     """Freeze one run's tools after applying mode, Agent scope, and availability.
 
     若传入 ``enabled_tool_ids``（会话启动时固化的启用工具集），则以它作为硬限制，
     不再叠加 base+system 并集（未固化/无快照时退回旧逻辑，保证迁移/旧会话兼容）。
+
+    辅助对话（``conv_kind='aux'``）**只读锁死**：无论固化集/Agent 范围/交互模式是什么，
+    最终都收口到只读工具白名单（含只读 MCP 工具）。这是后端唯一判定，不信任前端
+    任何权限切换参数（计划 §3.2 安全边界）。
     """
     if enabled_tool_ids:
         # 旧会话固化的工具集可能含退役名（如 glob_files）：按退役映射归一为新名，
@@ -125,7 +130,15 @@ def resolve_allowed_tools(
                     present.add(dep)
     # 互斥归一放在最后：**这一处就保证运行时绝不相同组双开**（无论工具集来自
     # 固化集、Agent scope 还是旧逻辑的兜底并集）。见 MUTUALLY_EXCLUSIVE_TOOL_GROUPS。
-    return normalize_tool_mutex(allowed_tools)
+    allowed_tools = normalize_tool_mutex(allowed_tools)
+    if str(conv_kind or "") == "aux":
+        # 只读锁死收口在互斥归一之后：白名单语义 = 交集，副作用工具（write_file /
+        # edit_file / pwsh / 各 Job 创建器 / vision_image_ops / comfyui_* / 能力工具）
+        # 一律剔除；web_search 是否保留仍受端点可用性约束（上面已处理）。
+        readonly = set(READONLY_TOOLS) | set(SYSTEM_TOOLS_READONLY)
+        readonly.update(str(name) for name in app.tool_registry.readonly_mcp_tools())
+        allowed_tools = [tool for tool in allowed_tools if tool in readonly]
+    return allowed_tools
 
 
 def all_tool_names(app: AppContext) -> list[str]:

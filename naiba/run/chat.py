@@ -356,9 +356,11 @@ class ConversationRunMixin:
                 chat_supports_images = False
             # 会话启动时固化启用工具集（Agent 工具集/旧会话全选），之后不可改，
             # 作为本轮 allowed_tools 的硬限制，替代 base+system 并集。
+            # 辅助对话（conv_kind='aux'）在工具决议里只读锁死（后端唯一判定，§3.2）。
+            conv_kind = str(conversation.get("conv_kind") or "main")
             enabled_tool_ids = self._bake_session_tool_ids(conversation, agent)
             allowed_tools = self._resolve_allowed_tools(
-                mode, agent, web_search_enabled, model_key, enabled_tool_ids
+                mode, agent, web_search_enabled, model_key, enabled_tool_ids, conv_kind
             )
             catalog_getter = getattr(getattr(self.app, "catalog", None), "scan", None)
             catalog = catalog_getter() if callable(catalog_getter) else []
@@ -410,6 +412,8 @@ class ConversationRunMixin:
                 "folder_indexes": folder_indexes,
                 "interaction_mode": mode,
                 "plan_id": plan_id,
+                # 会话种类（'main' | 'aux'）：_run_chat 据此选只读执行器 + 注入辅助对话说明。
+                "conv_kind": conv_kind,
                 # Freeze the conversation workspace into the run snapshot so
                 # concurrent conversations cannot change each other's roots.
                 "workspace_dir": str(
@@ -421,7 +425,10 @@ class ConversationRunMixin:
                 "deep_reasoning_enabled": bool(conversation.get("deep_reasoning_enabled", 0)),
                 "reasoning_effort": str(conversation.get("reasoning_effort") or ("medium" if conversation.get("deep_reasoning_enabled") else "auto")),
                 "allowed_tools": allowed_tools,
-                "permission_mode": str(conversation.get("permission_mode") or "confirm"),
+                # 辅助对话强制只读语义档（后端唯一判定，不接受前端权限切换参数，§3.2）。
+                "permission_mode": (
+                    "confirm" if conv_kind == "aux" else str(conversation.get("permission_mode") or "confirm")
+                ),
                 # 首轮标记（与 skill 冻结集同判据）：_run_chat 拼好最终 prompt 后写回
                 # first_turn（系统提示词 + 工具集），供前端会话顶部折叠卡展示。
                 "is_first_turn": not (conversation.get("messages") or []),
@@ -553,6 +560,8 @@ class ConversationRunMixin:
         run["conversation_messages"] = _frozen_history_for_run(run, snapshot, frozen_conversation)
         mode = str(snapshot.get("interaction_mode") or run.get("interaction_mode") or "craft")
         plan_id = str(snapshot.get("plan_id") or run.get("plan_id") or "")
+        # 会话种类（快照冻结）：辅助对话用只读执行器 + 专属说明（后端唯一判定，不信任快照外的任何来源）。
+        conv_kind = "aux" if str(snapshot.get("conv_kind") or "") == "aux" else "main"
         sink = _RunEventSink(self, run_id, cancel_event)
         self._register_sink(run_id, sink)
         skills: list[dict[str, str]] = []
@@ -727,6 +736,15 @@ class ConversationRunMixin:
             agent = snapshot.get("agent") or {}
             # 系统提示词只有一个来源：Agent（会话级系统提示词已移除，见维护说明 §四）。
             prompt = str(agent.get("system_prompt") or "").strip()
+            if conv_kind == "aux":
+                # 辅助对话说明（§3.2）：只读、与主对话隔离，紧跟 Agent 提示词之后常驻。
+                prompt = (
+                    prompt + "\n\n## 辅助对话\n"
+                    "当前是一个辅助对话：与主对话相互独立的轻量会话。只读锁死——你只能读取/搜索文件、"
+                    "列目录和发 GET/HEAD 请求，没有任何写入或副作用工具；请求写文件、跑命令等操作都会失败，"
+                    "不要尝试，可以告诉用户把结论复制回主任务执行。这里的讨论不会自动同步给主对话，"
+                    "也不会进入会话历史与搜索，关闭即清除。"
+                ).strip()
             if mode == "plan":
                 prompt = (prompt + "\n\n" + self.app.plans.prepare_prompt(self.app.plans.get(plan_id))).strip()
             # 联网搜索提示（PLAN4 §联网搜索）：只要会话固化工具集已声明 web_search、
@@ -787,7 +805,13 @@ class ConversationRunMixin:
                                    "命中标「当前会话·在上下文中」的可以直接引用；标「当前会话·已划出上下文」的"
                                    "是被「新会话」分割线划出模型上下文的老消息，必须当作历史材料重新核对，"
                                    "不要当成你已经知道的内容。会话 id 必须原样复制，不要编造。").strip()
-            executor = ReadOnlyToolExecutor(run_executor) if mode == "plan" else CraftToolExecutor(run_executor)
+            # 辅助对话只读锁死：运行层再用快照里的 conv_kind 复核一次（提交时 allowed_tools
+            # 已按只读收口，执行器层同样只挂只读包装——两层防线，快照被篡改也写不进文件）。
+            executor = (
+                ReadOnlyToolExecutor(run_executor)
+                if (mode == "plan" or conv_kind == "aux")
+                else CraftToolExecutor(run_executor)
+            )
             run_context: RunContext = {
                 "run_id": run_id,
                 "conversation_id": conversation_id,

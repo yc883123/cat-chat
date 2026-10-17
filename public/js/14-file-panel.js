@@ -84,6 +84,8 @@ export function ensureFileTab(rawPath, activate = false) {
       reloading: false, // 已有内容时的后台重读（保留旧内容渲染，不闪空态）
       refreshedAt: 0,   // 上次重读的发起时间，供 reloadFileTab 做节流
       error: '',
+      errorCode: '',    // 结构化预览错误码（A.2）：encoding_required / not_found / too_large / unsupported
+      encoding: '',     // 非默认编码重开时记住选择（A.1）
       editing: false,
       draft: null,
     };
@@ -114,15 +116,25 @@ export async function loadFileTab(tab, force = false) {
   else tab.error = '';
   renderFilePanel();
   try {
-    const info = await api(`/api/conversations/${encodeURIComponent(state.conversationId)}/file/open?path=${encodeURIComponent(tab.raw)}`);
+    // encoding：非 UTF-8 文件按用户所选编码重开（A.1）；未选时后端严格 UTF-8、失败回
+    // encoding_required，前端据此出编码选择器。error.payload 保留（code 字段渲染错误卡片）。
+    const encodingQuery = tab.encoding ? `&encoding=${encodeURIComponent(tab.encoding)}` : '';
+    const info = await api(`/api/conversations/${encodeURIComponent(state.conversationId)}/file/open?path=${encodeURIComponent(tab.raw)}${encodingQuery}`);
     tab.info = info;
     tab.draft = null;
     tab.editing = false;
     tab.error = '';
+    tab.errorCode = '';
   } catch (error) {
     const message = error.message || '读取文件失败';
-    if (hadInfo) toast(`重新读取失败，仍显示上次内容：${message}`);
-    else tab.error = message;
+    const code = String(error.payload?.code || '');
+    if (hadInfo && code !== 'encoding_required') toast(`重新读取失败，仍显示上次内容：${message}`);
+    else {
+      tab.error = message;
+      tab.errorCode = code;
+      // encoding_required 记住候选编码（gb18030 优先，Windows 中文环境覆盖最广的合法超集）。
+      if (code === 'encoding_required' && !tab.encoding) tab.encoding = 'gb18030';
+    }
   } finally {
     tab.loading = false;
     tab.reloading = false;
@@ -199,6 +211,8 @@ export function fileToolbarMeta(tab) {
   else if (info.kind === 'binary') parts.push('二进制');
   else if (tab.editing) parts.push('编辑中');
   else parts.push(FILE_MD_NAME_RE.test(info.name || '') ? 'Markdown' : '文本');
+  // 非 UTF-8 编码打开的文本：标注实际编码 + 只读（A.1，写回非 UTF-8 本轮不做）。
+  if (info.kind === 'text' && info.readonly && info.encoding) parts.push(`${info.encoding.toUpperCase()} · 只读`);
   if (info.size != null) parts.push(formatFileSize(info.size));
   if (info.truncated) parts.push('仅预览前 2MB');
   if (tab.reloading) parts.push('刷新中…');
@@ -224,7 +238,21 @@ export function renderFilePanelBody() {
     return;
   }
   if (tab.error && !info) {
-    body.innerHTML = `<div class="file-panel-hint">无法读取文件：${escapeHtml(tab.error)}</div>`;
+    // 结构化错误卡片（A.2）：按 code 给可操作按钮，不再只显示一句话。
+    const code = String(tab.errorCode || '');
+    if (code === 'encoding_required') {
+      const options = ['gb18030', 'gbk', 'big5', 'shift_jis', 'euc_kr', 'cp1252', 'utf-8']
+        .map((name) => `<option value="${name}"${name === (tab.encoding || 'gb18030') ? ' selected' : ''}>${name}</option>`)
+        .join('');
+      body.innerHTML = `<div class="file-panel-hint file-error-card"><p>这个文件不是 UTF-8 编码，直接打开会显示乱码。选择正确的编码重新打开：</p><div class="file-encoding-row"><select id="fileEncodingSelect" aria-label="选择文件编码">${options}</select><button type="button" class="control-button" data-file-encoding-reopen>重新打开</button></div></div>`;
+      return;
+    }
+    const actions = code === 'not_found'
+      ? '<p class="hint">文件可能已被删除或移动。</p>'
+      : (code === 'too_large' || code === 'unsupported')
+        ? '<button type="button" class="control-button" data-file-open-external>用默认应用打开</button>'
+        : '';
+    body.innerHTML = `<div class="file-panel-hint file-error-card"><p>无法读取文件：${escapeHtml(tab.error)}</p>${actions}</div>`;
     return;
   }
   if (!info) {

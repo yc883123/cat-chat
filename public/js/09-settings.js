@@ -396,7 +396,7 @@ export function updateSkillSummary() {
   const fixedCount = currentAgentFixedSkillIds().length;
   // 只填数字：按钮自带「Skill」文字标签（此前填「Skill N」→ 顶栏显示「Skill 8 Skill」）。
   $('#skillCount').textContent = String(state.bootstrap.skills.length);
-  $('#skillPolicyHint').textContent = '点某个 Skill 那一行，就会把它填进输入框；第一条消息发出后固定下来，整个会话有效，中途手输 /技能名 同样全程有效';
+  $('#skillPolicyHint').textContent = '点某个 Skill 那一行，就会把它填进输入框；第一条消息发出后固定下来，整个会话有效，中途手输 /技能名 同样全程有效。固化 Skill 加在系统提示词里，优先级更高、更不容易丢失细节；追加 Skill 只加在会话消息末尾，容易丢失细节';
   const quoted = (state.quotedSkillIds || []).length;
   $('#skillsSummary').textContent = quoted
     ? `${state.bootstrap.skills.length} 个可用 · 本会话已引用 ${quoted} 个（Agent 预设 ${fixedCount} 个，新建会话自动预填引用）`

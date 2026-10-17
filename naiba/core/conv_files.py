@@ -27,6 +27,22 @@ _CONV_FILE_READ_CAP = 2 * 1024 * 1024  # 单次读取/预览上限
 _CONV_FILE_SAVE_CAP = 8 * 1024 * 1024  # 单次写回上限
 _CONV_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"})
 
+# 文件面板可选的文本编码（A.1）：默认重开优先 gb18030（Windows 中文环境覆盖最广的合法超集）。
+# HTTP 层用这份名单校验 encoding 查询参数；前端下拉同源（值必须与这里逐字一致）。
+CONV_FILE_ENCODINGS: tuple[str, ...] = (
+    "gb18030", "gbk", "big5", "shift_jis", "euc_kr", "cp1252", "utf-8",
+)
+CONV_FILE_DEFAULT_ENCODING = "gb18030"
+
+
+class ConvFilePreviewError(ValueError):
+    """文件预览的结构化错误（A.2）：HTTP 层按 ``code`` 转 4xx + 结构化载荷，
+    前端按 ``code`` 渲染带操作按钮的错误卡片；字符串反推一律不做。"""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = str(code)
+
 # 工作区浏览：单目录最多返回条目数与恒定隐藏项（VCS/宿主写入探测目录）。
 WORKSPACE_BROWSE_LIMIT = 500
 _ALWAYS_HIDDEN_NAMES = frozenset({".git", ".naiba_write_test"})
@@ -113,13 +129,22 @@ def _conv_file_allow(
     return target, listed, within_root, root
 
 
-def _conv_file_open(conversation: dict[str, Any] | None, config: Any, raw_path: Any) -> dict[str, Any]:
-    """读取会话文件的预览信息（文本带内容；图片/二进制只给元数据）。"""
+def _conv_file_open(
+    conversation: dict[str, Any] | None, config: Any, raw_path: Any, encoding: Any = None
+) -> dict[str, Any]:
+    """读取会话文件的预览信息（文本带内容；图片/二进制只给元数据）。
+
+    编码口径（A.1）：先做 UTF-8 **严格**解码尝试——成功照旧（``encoding: "utf-8"``，
+    可保存）；失败说明不是 UTF-8（GBK 中文文件最典型），抛 ``encoding_required``
+    结构化错误让前端出编码选择器，绝不静默 ``errors="replace"`` 出一片 U+FFFD。
+    用户指定 ``encoding`` 后按该编码严格解码，仍失败继续抛；**非 UTF-8 打开的文本
+    一律只读**（``savable: False``），写回非 UTF-8 是新一轮风险，本轮不做。
+    """
     target, listed, within_root, _root = _conv_file_allow(conversation, config, raw_path)
     if target is None or not (listed or within_root):
-        raise ValueError("无权访问该文件：不在本会话改动记录中，也不在会话工作区内")
+        raise ConvFilePreviewError("forbidden", "无权访问该文件：不在本会话改动记录中，也不在会话工作区内")
     if not target.is_file():
-        raise FileNotFoundError(str(target))
+        raise ConvFilePreviewError("not_found", f"文件不存在或已被移动：{target}")
     stat = target.stat()
     suffix = target.suffix.lower()
     name = target.name
@@ -141,11 +166,37 @@ def _conv_file_open(conversation: dict[str, Any] | None, config: Any, raw_path: 
         info["kind"] = "binary"
         return info
     info["kind"] = "text"
-    info["savable"] = bool(listed and within_root)
     with target.open("rb") as handle:
         payload = handle.read(_CONV_FILE_READ_CAP + 1)
     info["truncated"] = len(payload) > _CONV_FILE_READ_CAP
-    info["content"] = payload[:_CONV_FILE_READ_CAP].decode("utf-8", errors="replace")
+    payload = payload[:_CONV_FILE_READ_CAP]
+    requested = str(encoding or "").strip().lower()
+    if requested:
+        if requested not in CONV_FILE_ENCODINGS:
+            raise ValueError(f"不支持的编码：{encoding}（可选：{' / '.join(CONV_FILE_ENCODINGS)}）")
+        try:
+            text = payload.decode(requested, errors="strict")
+        except (UnicodeDecodeError, LookupError) as exc:
+            raise ConvFilePreviewError(
+                "encoding_required", f"用 {requested} 解码失败：{exc}"
+            ) from exc
+        info["content"] = text
+        info["encoding"] = requested
+        # 非 UTF-8 打开 → 强制只读；写回该编码本轮不做（计划 A.1）。
+        info["savable"] = False
+        info["readonly"] = requested != "utf-8"
+        return info
+    # 未指定编码：先严格 UTF-8；失败抛 encoding_required（前端出编码选择器）。
+    try:
+        text = payload.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ConvFilePreviewError(
+            "encoding_required", f"文件不是 UTF-8 编码（{exc}），请选择正确编码重新打开"
+        ) from exc
+    info["content"] = text
+    info["encoding"] = "utf-8"
+    info["savable"] = bool(listed and within_root)
+    info["readonly"] = False
     return info
 
 

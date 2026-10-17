@@ -30,6 +30,7 @@ from naiba.app import NaibaChatApp
 from naiba.config import tool_catalog_entries, tool_group_entries, tool_preset_entries
 from naiba.core.choices import backfill_turn_choice_groups
 from naiba.core.conv_files import (
+    ConvFilePreviewError,
     FolderConfirmRequired,
     _conv_file_allow,
     _conv_file_open,
@@ -335,6 +336,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             mode = query.get("mode", [None])[0]
             self._json({"conversations": self.app.storage.list_conversations(mode=mode)})
+        elif path == "/api/aux-chats":
+            # 辅助对话列表：页面重载后恢复标签（计划-辅助对话 §3.3）。
+            self._json(*self.app.api_list_aux_chats())
         elif path == "/api/workspaces":
             self._json({"workspaces": self.app.config.data.get("workspaces", [])})
         elif path == "/api/starter-prompts":
@@ -358,7 +362,17 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json({"error": "对话不存在"}, HTTPStatus.NOT_FOUND)
                 return
             try:
-                self._json(_conv_file_open(conversation, self.app.config, query.get("path", [""])[0]))
+                self._json(_conv_file_open(
+                    conversation, self.app.config, query.get("path", [""])[0],
+                    encoding=query.get("encoding", [""])[0],
+                ))
+            except ConvFilePreviewError as exc:
+                # 结构化预览错误（A.2）：前端按 code 渲染带操作按钮的错误卡片。
+                status = {
+                    "not_found": HTTPStatus.NOT_FOUND,
+                    "encoding_required": HTTPStatus.UNPROCESSABLE_ENTITY,
+                }.get(exc.code, HTTPStatus.BAD_REQUEST)
+                self._json({"error": str(exc), "code": exc.code}, status)
             except FileNotFoundError as exc:
                 self._json({"error": f"文件不存在或已被移动：{exc}"}, HTTPStatus.NOT_FOUND)
             except (OSError, ValueError) as exc:
@@ -565,6 +579,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
         elif path == "/api/conversations":
             self._json(*self.app.api_create_conversation(body))
+        elif path == "/api/aux-chats":
+            # 辅助对话创建（计划-辅助对话 §3.3）：标题自动编号、权限档忽略入参强制只读。
+            try:
+                self._json(*self.app.api_create_aux_chat(body))
+            except (ValueError, TypeError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         elif path.startswith("/api/conversations/") and path.endswith("/branch"):
             conversation_id = path.split("/")[-2]
             message_id = str(body.get("message_id") or "")

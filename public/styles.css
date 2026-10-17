@@ -171,6 +171,51 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .file-panel-close:hover { color: var(--text); background: var(--surface); }
 .file-panel-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .file-panel-hint { margin: auto; max-width: 260px; padding: 20px 14px; text-align: center; color: var(--muted); font-size: 12px; line-height: 1.8; }
+
+/* ---- 右 dock 顶层分组（文件 | 辅助 共存，计划-辅助对话 §3.4）----
+   分组条在 dock 顶部，两个分组共享同一宽度与开合；各组保留自己的标签页栈。 */
+.dock-groups { display: flex; align-items: center; gap: 4px; min-height: 34px; padding: 4px 8px 0; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.dock-group-button { min-height: 28px; padding: 0 14px; border: 0; border-bottom: 2px solid transparent; border-radius: 6px 6px 0 0; background: transparent; color: var(--muted); font-size: 12.5px; cursor: pointer; }
+.dock-group-button:hover { color: var(--text); background: var(--surface); }
+.dock-group-button[aria-selected="true"] { color: var(--text); border-bottom-color: rgb(var(--brand-500-rgb)); font-weight: 600; }
+.file-panel-group { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.file-panel-group[hidden] { display: none; }
+
+/* ---- 辅助对话面板（§3.5）---- */
+.aux-panel-top .file-tabs { padding-top: 2px; }
+.aux-new-tab { flex: none; justify-content: center; min-width: 30px; padding: 0; color: var(--muted); font-size: 16px; }
+.aux-new-tab:hover { color: var(--text); }
+.aux-chat { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.aux-chat-messages { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; padding: 12px 12px 8px; display: flex; flex-direction: column; gap: 10px; }
+.aux-row { display: flex; align-items: flex-end; gap: 6px; }
+.aux-row-user { justify-content: flex-end; }
+.aux-row-ai { justify-content: flex-start; }
+.aux-bubble { max-width: 86%; min-width: 0; padding: 8px 11px; border-radius: 12px; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
+.aux-row-user .aux-bubble { background: rgb(var(--brand-500-rgb)); color: #fff; border-bottom-right-radius: 4px; }
+.aux-row-ai .aux-bubble { background: var(--surface-2); color: var(--text); border-bottom-left-radius: 4px; }
+.aux-bubble-text { min-width: 0; }
+/* AI 气泡正文直接用 .message-body 的字号（var(--msg-font-size)）：跟随用户的字体设置，
+   不写死字号——也绝不新增 `.xxx .message-body` 形态的选择器（子串会抢断 test_chat_font
+   的 _rule(".message-body") 首次命中，实测守门直接报红）。 */
+.aux-thinking { color: var(--muted); font-size: 12px; }
+.aux-send-to-main { min-height: 26px; padding: 0 9px; font-size: 11px; flex: none; margin-bottom: 2px; }
+.aux-chat-composer { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px; border-top: 1px solid var(--line); background: var(--surface-2); }
+/* 模型行：下拉占满整行（辅助对话可独立换模型，用户点名要求）。 */
+.aux-composer-model select { width: 100%; min-height: 30px; padding: 0 6px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--muted); font-size: 12px; text-overflow: ellipsis; }
+.aux-composer-model select:focus { outline: none; border-color: rgb(var(--brand-500-rgb)); color: var(--text); }
+.aux-composer-row { display: flex; align-items: flex-end; gap: 8px; }
+.aux-chat-composer textarea { flex: 1; min-width: 0; max-height: 140px; resize: none; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); font: inherit; font-size: 13px; line-height: 1.5; padding: 8px 10px; }
+.aux-chat-composer textarea:focus { outline: none; border-color: rgb(var(--brand-500-rgb)); }
+.aux-chat-composer .primary-button { min-height: 36px; padding: 0 14px; flex: none; }
+.aux-chat-composer .primary-button:disabled { opacity: .5; cursor: not-allowed; }
+/* 隔离提示横幅：辅助对话的「独立/只读/不留存」一句话说明（§3.5） */
+.aux-chat-banner { padding: 6px 12px; background: var(--surface-2); color: var(--muted); font-size: 11px; line-height: 1.6; border-bottom: 1px solid var(--line); }
+
+/* ---- 文件预览错误卡片 + 编码选择器（附录 A.1/A.2）---- */
+.file-error-card { max-width: 300px; }
+.file-error-card p { margin: 0 0 10px; }
+.file-encoding-row { display: flex; gap: 8px; justify-content: center; }
+.file-encoding-row select { min-height: 32px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: 12px; padding: 0 6px; }
 .file-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .file-view-toolbar { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 5px 10px; border-bottom: 1px solid var(--line); background: var(--surface); }
 .file-view-title { min-width: 0; }
@@ -1445,7 +1490,7 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .skill-policy-details summary .set-ico { width: 16px; height: 16px; color: var(--muted); }
 .skill-policy-details summary .set-ico svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
 .skill-policy-details summary b { flex: none; }
-.skill-policy-details summary small { flex: 1; min-width: 0; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.skill-policy-details summary small { flex: 1; min-width: 0; color: var(--muted); }
 .skill-policy-details summary .chev { width: 15px; height: 15px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform var(--t-fast); }
 .skill-policy-details[open] summary .chev { transform: rotate(180deg); }
 .skill-policy-details p { margin: 0; padding: 0 12px 10px 36px; color: var(--muted); font-size: 12px; line-height: 1.5; }

@@ -709,7 +709,12 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .message-sources a { color: var(--accent); overflow-wrap: anywhere; }
 .message-sources time { margin-left: 8px; font-size: 11px; }
 .message-sources p { margin: 2px 0 0; line-height: 1.45; }
-.skill-usage { margin: 0 0 8px; color: var(--accent); font-size: 12px; }
+.skill-usage { margin: 0 0 8px; color: var(--muted); font-size: 12px; }
+/* skill-usage 里的分组芯片与 run-activity 同一套（固化=紫 / 追加=琥珀），共用间距与分隔点。 */
+.skill-usage .ft-chip { display: inline-block; margin: 1px 3px 1px 0; padding: 1px 7px; border-radius: 10px; font-size: 11px; background: rgba(128, 128, 128, 0.12); color: var(--text); }
+.skill-usage .ft-chip-skill { background: var(--accent-soft); color: var(--accent); }
+.skill-usage .ft-chip-appended { background: var(--amber-soft); color: var(--amber); }
+.skill-usage .skills-sep { margin: 0 6px; color: var(--muted); }
 /* 首轮上下文折叠卡：会话顶部展示第一轮发送给模型的系统提示词与工具集 */
 .first-turn-card { margin: 0 0 14px; border: 1px solid var(--line); border-radius: var(--r-md, 8px); background: var(--surface-2, rgba(128,128,128,0.04)); padding: 8px 12px; }
 .first-turn-card summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--muted); }

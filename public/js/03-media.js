@@ -1349,12 +1349,20 @@ export function closeContextUsagePopover() {
 
 export function skillMarkup(skills = []) {
   if (!Array.isArray(skills) || !skills.length) return '';
+  // 与 12-chat-input.handleSkillsEvent 同口径的分组芯片（固化=紫、追加=琥珀）。
+  // metadata.skills 由 run/chat.py 落库（带 frozen 字段）；旧消息没有该字段时
+  // frozen !== false 一律按固化组显示，与实时路径的兼容分支一致。
+  const chip = (name, cls) => `<span class="ft-chip ${cls}">${escapeHtml(String(name || ''))}</span>`;
+  const names = (list, cls) => list.map((s) => chip(s?.name || s, cls)).join('');
   const parts = [];
   const user = skills.filter((s) => s?.source !== 'auto');
   const auto = skills.filter((s) => s?.source === 'auto');
-  if (user.length) parts.push(`已启用 Skill：${user.map((s) => escapeHtml(s?.name || s)).join('、')}`);
-  if (auto.length) parts.push(`已自动匹配 Skill：${auto.map((s) => escapeHtml(s?.name || s)).join('、')}`);
-  return parts.length ? `<div class="skill-usage">${parts.join('<br>')}</div>` : '';
+  const frozen = user.filter((s) => s?.frozen !== false);
+  const appended = user.filter((s) => s?.frozen === false);
+  if (frozen.length) parts.push(`已启用固化 Skill：${names(frozen, 'ft-chip-skill')}`);
+  if (appended.length) parts.push(`本轮追加（仅当轮）：${names(appended, 'ft-chip-appended')}`);
+  if (auto.length) parts.push(`已自动匹配 Skill：${names(auto, 'ft-chip-skill')}`);
+  return parts.length ? `<div class="skill-usage">${parts.join('<span class="skills-sep">·</span>')}</div>` : '';
 }
 
 export function sourcesMarkup(sources = []) {

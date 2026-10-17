@@ -1,37 +1,27 @@
-# Cat Chat 3.2.1 Beta
+# Cat Chat 3.2.2 Beta
 
 <p align="center">
   <img src="docs/cat-chat-logo.png" alt="Cat Chat" width="520">
 </p>
 
-Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。3.2.0 Beta 完成 Skills 管理页与 Skill 快速引用弹窗的界面改版，并为每个 Skill 新增「别名 / 备注」用户覆盖层：别名在列表、弹窗、详情三处同显，备注可被搜索命中；两者只改展示层，/引用、Agent 固定、注入 prompt 与前缀缓存逐字节不变。
+Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。3.2.2 Beta 修复了「应用更新后手机/局域网页面白屏报 JSON 错」的缺陷——onefile 临时资源目录在更新重启窗口被删而进程仍存活，现在返回自恢复引导页；并按真实语义修正技能说明：中途追加的技能同样全程有效，与首轮固化的差别只在注入位置。
 
 > Cat Chat 原名 Naiba Chat。显示名自 2.7.6 Beta 起为 Cat Chat；GitHub 仓库自 2.8.0 Beta 起更名为 `cat-chat`（旧地址自动跳转）。更新资产仍使用 `naiba-chat.exe` 与原有清单协议，既有数据位置不变，无需重新配置或搬迁数据。
 
-## 3.2.1 Beta 主要能力
-- **「查看说明」一步收起**：完整说明原位替换该行的一行截断描述，点说明块任意处即收起；此前收起要再走一遍菜单，体感要点两次。
-- **引用说明改白话**：第一条消息发出后引用的技能固定下来、整个会话有效；发送前可随意增删；中途手输 /技能名 仅当轮生效；Agent 固定技能第一条发出后同样全程有效。
-- **消息行「固化/追加」分组显示**：技能状态条区分为「已启用固化 Skill（紫色芯片）」与「本轮追加（仅当轮）（琥珀色芯片）」。
-- **验证**：全量单测 **2511** 通过；本版新增 `tests/test_skill_frozen_event.py` 5 例守门。
-## 3.2.0 Beta 主要能力
-- **Skills 别名与备注（本次重点）**：Skills 管理页新增用户覆盖层——每个 Skill 可设「别名」（列表/弹窗/详情三处同显，原名列旁）与「备注」（500 字，可被搜索命中）。只改展示层：`/引用`、Agent 固定、注入 prompt 与前缀缓存逐字节不变。落盘数据目录 `skill-overrides.json`，重启保留；彻底删除后自动清理。
-- **Skills 管理页改版**：搜索框（名称/引用/别名/备注/说明）+ 右侧详情卡（别名编辑、技能说明、meta 芯片、我的备注、打开目录 / 编辑 SKILL.md / 隐藏 / 两级删除拆分按钮），多目录提供提示条。
-- **Skill 快速引用弹窗改版**：桌面居中模态（640px、引用说明折叠、行尾 ⋯ 菜单=查看说明/隐藏、`Enter 插入 · Esc 关闭`、`/ 唤起`提示）；手机自动切换为底部抽屉（~70% 屏高 + 拖拽把手）；头部显示「N 个可用 · 本会话已引用 M 个」，行内「已引用」标签。
-- **验证**：全量单测 **2506** 通过（本版新增 `tests/test_skill_overrides.py` 15 例：覆盖层存取/残留清理、scan 合并、PATCH 校验、注入块字节不变）；新增 `verify/skills_ui_smoke.cjs` 浏览器冒烟（PATCH/scan 合并、管理页详情卡、桌面模态、手机抽屉）。
-
-
-> 各版本说明与历史更新日志见 [CHANGELOG.md](CHANGELOG.md)。
-
+## 3.2.2 Beta 主要能力
+- **手机白屏修复（本次重点）**：更新后电脑端正常、手机端白屏报错 `No such file or directory: …\Temp\_MEIxxxx\public\index.html`——onefile 临时资源目录在更新重启窗口被删而进程仍存活。现在返回内嵌引导页（原因 + 每 5 秒自动重试 + 恢复指引），不再报错。
+- **技能语义修正**：中途手输 /技能名 追加的技能同样全程有效（随对话历史留在上下文），与首轮固化的差别只在注入位置（固化=系统提示最前端、模型最优先；追加=补充指令进历史、关注度可能略低）；消息行分组去掉「仅当轮」标注。
+- **验证**：全量单测 **2511** 通过；本版新增 `tests/test_static_degraded.py` 5 例守门。
 ## 开始使用
 
 ### 使用 Windows 版本
 
-1. 下载 `cat-chat-3.2.1-beta-windows-x64.zip`。
+1. 下载 `cat-chat-3.2.2-beta-windows-x64.zip`。
 2. 解压到一个可写目录。
 3. 运行 `cat-chat.exe`。
 4. 在设置中添加在线 API 或本地模型服务。
 
-> 归档里也提供旧名 `naiba-chat-3.2.1-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
+> 归档里也提供旧名 `naiba-chat-3.2.2-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
 
 首次运行会创建本地数据目录。升级时请直接替换程序文件，不要删除原有 `data` 目录和配置文件。
 
@@ -117,8 +107,8 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 - `naiba-chat.exe` —— **自动更新链路唯一使用的资产，永久保留此文件名**
 - `naiba-chat-update.json` —— 更新清单，其中 `repository` 字段永久写 `yc883123/naiba-chat`
 - `cat-chat.exe` —— 与 `naiba-chat.exe` 是同一文件，SHA-256 完全相同
-- `cat-chat-3.2.1-beta-windows-x64.zip`
-- `naiba-chat-3.2.1-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
+- `cat-chat-3.2.2-beta-windows-x64.zip`
+- `naiba-chat-3.2.2-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
 
 更新器会验证清单中的仓库、提交、文件名和 SHA-256。下载文件还必须是有效的 Windows 可执行文件；任何一项不一致都会终止安装。**自动更新始终读取 `naiba-chat.exe` 与清单里的旧仓库名**（GitHub 对旧仓库地址做长期重定向），这是已发布客户端逐字校验的协议，仓库改名后也不改值。
 
@@ -138,7 +128,7 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 ```powershell
 Get-ChildItem public\js\*.js | ForEach-Object { node --check $_.FullName }
 python -m unittest discover -s tests -q
-$env:NAIBA_BUILD_VERSION = "3.2.1-beta"
+$env:NAIBA_BUILD_VERSION = "3.2.2-beta"
 python -m PyInstaller --noconfirm --clean naiba-chat.spec
 ```
 

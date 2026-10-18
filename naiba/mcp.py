@@ -9,6 +9,44 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import timedelta
 from typing import Any, Callable
 
+from naiba.core.contracts import (
+    MCP_START_TIMEOUT_MS_DEFAULT,
+    MCP_START_TIMEOUT_MS_MAX,
+    MCP_START_TIMEOUT_MS_MIN,
+)
+
+
+# ---- 「连接建立」超时（每服务可配，单位毫秒；常量登记在 core/contracts.py）----
+# 与 ``env["MCP_TOOL_TIMEOUT"]`` / ``call_timeout_seconds``（单次**工具调用**，默认 620 秒）
+# 是两件独立的事：拉包慢的 npx 服务、``rmg_navserver`` 这类重服务常常 20 秒建不上连接，
+# 而它们真正的工具调用可能一次跑几分钟。两个超时**不要合并**。
+#
+# 缺省仍是 20 秒：引入该配置之前所有服务的实际行为逐字不变（旧配置缺这个字段 = 20000）。
+
+
+def clamp_start_timeout_ms(value: Any) -> int:
+    """把启动超时夹到合法区间（毫秒）。
+
+    运行期只做夹取、不抛错：配置里存了脏值也不该让服务连不上；写入侧
+    （``ConfigStore.upsert_mcp_server``）才是严格校验那一关。
+    """
+    if isinstance(value, bool):
+        return MCP_START_TIMEOUT_MS_DEFAULT
+    try:
+        milliseconds = int(value)
+    except (TypeError, ValueError):
+        return MCP_START_TIMEOUT_MS_DEFAULT
+    return max(MCP_START_TIMEOUT_MS_MIN, min(MCP_START_TIMEOUT_MS_MAX, milliseconds))
+
+
+def _format_seconds(value: float) -> str:
+    """报错文案里的秒数：整数值不写成 ``30.0``（用户配的是毫秒，看到小数会以为配错了）。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return str(int(number)) if number.is_integer() else f"{number:g}"
+
 
 class MCPError(RuntimeError):
     """MCP 通用错误基类。"""
@@ -19,13 +57,31 @@ class MCPStartupError(MCPError):
 
 
 class MCPServerConnection:
-    def __init__(self, server_id: str, command: str, args: list[str], env: dict[str, str]):
+    def __init__(
+        self,
+        server_id: str,
+        command: str,
+        args: list[str],
+        env: dict[str, str],
+        start_timeout_ms: int = MCP_START_TIMEOUT_MS_DEFAULT,
+        hidden_tools: list[str] | None = None,
+    ):
         self.server_id = server_id
         self.command = command
         self.args = args
         self.env = env
+        # 工具屏蔽名单（config.json 的 mcp_servers[].hidden_tools）。
+        # 用途：某些 MCP 工具的参数 schema 嵌套过深（如 rea 的
+        # compare_web_captures 达 17 层），会被上游以
+        # "JSON schema exceeds the maximum nesting depth of 10 levels"
+        # 整单拒绝；屏蔽后这些工具不进入工具表、不进模型请求。
+        self.hidden_tools = {str(name).strip() for name in (hidden_tools or []) if str(name).strip()}
+        # 连接建立超时（秒）：per-server，缺省 20 秒（= 引入该配置前的硬编码值）。
+        self.start_timeout_ms = clamp_start_timeout_ms(start_timeout_ms)
+        self.start_timeout_seconds = self.start_timeout_ms / 1000
         # Video workflows can take longer than ordinary MCP calls.  A server
         # may opt in without extending timeouts for every other MCP service.
+        # 注意：这是**单次工具调用**超时，与上面的 start_timeout_ms 无关。
         try:
             self.call_timeout_seconds = max(20, int(env.get("MCP_TOOL_TIMEOUT", "620")))
         except (TypeError, ValueError):
@@ -55,7 +111,13 @@ class MCPServerConnection:
         self.activity: str = "idle"  # 取值 "calling" | "idle"
         self.last_used_at: float | None = None
 
-    def start(self, timeout: int = 20) -> None:
+    def start(self, timeout: float | None = None) -> None:
+        """启动连接；``timeout`` 为 None 时用该服务自己的 ``start_timeout_ms``。
+
+        显式传值的调用点行为不变（旧签名 ``start(timeout=20)`` 仍照旧生效）。
+        """
+        if timeout is None:
+            timeout = self.start_timeout_seconds
         if self._thread and self._thread.is_alive():
             return
         self.error = ""
@@ -69,7 +131,7 @@ class MCPServerConnection:
         self._thread = threading.Thread(target=self._thread_main, name=f"mcp-{self.server_id}", daemon=True)
         self._thread.start()
         if not self._ready.wait(timeout):
-            self.error = f"MCP 服务启动超过 {timeout} 秒"
+            self.error = f"MCP 服务启动超过 {_format_seconds(timeout)} 秒"
             raise MCPStartupError(self.error)
 
     def _thread_main(self) -> None:
@@ -149,14 +211,20 @@ class MCPServerConnection:
                     "annotations": annotations,
                 }
             )
+        # 屏蔽名单：从工具表里剔除（不影响服务本身的其它工具）。
+        if self.hidden_tools:
+            new_tools = [t for t in new_tools if t["name"] not in self.hidden_tools]
         # 工具列表变化时重新同步
         if [t["name"] for t in new_tools] != [t["name"] for t in self.tools]:
             self.tools = new_tools
             if self.on_tools_discovered:
                 self.on_tools_discovered(self.server_id, new_tools)
 
-    def reconnect_once(self, timeout: int = 20) -> bool:
-        """执行一次有界重连（无指数退避），成功返回 True。"""
+    def reconnect_once(self, timeout: float | None = None) -> bool:
+        """执行一次有界重连（无指数退避），成功返回 True。
+
+        ``timeout`` 缺省 None = 用该服务自己的启动超时。
+        """
         self._reset_thread()
         try:
             self.start(timeout=timeout)
@@ -178,7 +246,9 @@ class MCPServerConnection:
                     # 否则执行有界重连，再返回明确的启动/调用错误。
                     if self._thread is None and not self.error:
                         try:
-                            self.start(timeout=max(15, min(self.call_timeout_seconds, 45)))
+                            # 统一走 per-server 口径：lazy start 不再自带 15-45 秒推导，
+                            # 否则用户把启动超时调大后，第一次工具调用仍按旧值放弃。
+                            self.start()
                         except Exception as exc:
                             return False, f"启动 MCP 服务失败：{exc}"
                         if not self._session or not self._loop:
@@ -241,7 +311,7 @@ class MCPServerConnection:
             time.sleep(delay)
             self._reset_thread()
             try:
-                self.start(timeout=20)
+                self.start()
                 self._reconnect_attempts = 0
                 return
             except MCPError:
@@ -304,6 +374,12 @@ class MCPServerConnection:
             "active_calls": self.active_calls,
             "activity": self.activity,
             "last_used_at": self.last_used_at,
+            # 配置回显（列表/编辑表单要用）：env **只给 KEY**，值一律不出这个口子
+            # ——env 里常见 GITHUB_TOKEN 一类令牌，回显值等于把它们摊在接口响应里。
+            "command": self.command,
+            "args": list(self.args),
+            "env_keys": sorted(self.env.keys()),
+            "start_timeout_ms": self.start_timeout_ms,
         }
 
 
@@ -332,6 +408,9 @@ class MCPRegistry:
             str(config["command"]),
             [str(item) for item in config.get("args", [])],
             {str(key): str(value) for key, value in (config.get("env") or {}).items()},
+            # 旧配置没有这个字段 → 走缺省 20000（= 引入前的硬编码 20 秒），无需数据迁移。
+            start_timeout_ms=clamp_start_timeout_ms(config.get("start_timeout_ms")),
+            hidden_tools=config.get("hidden_tools") or [],
         )
         return connection
 
@@ -349,6 +428,8 @@ class MCPRegistry:
             "command": command,
             "args": [str(item) for item in config.get("args", [])],
             "env": {str(key): str(value) for key, value in (config.get("env") or {}).items()},
+            "start_timeout_ms": clamp_start_timeout_ms(config.get("start_timeout_ms")),
+            "hidden_tools": [str(item) for item in (config.get("hidden_tools") or [])],
             "enabled": bool(config.get("enabled", True)),
         }
         with self._lifecycle_lock:
@@ -424,7 +505,8 @@ class MCPRegistry:
                     st = connection.state()
                     if st.get("status") in {"error", "idle", "stopped"} and not connection._thread:
                         try:
-                            connection.start(timeout=20)
+                            # 不传 timeout：沿用每个服务自己的启动超时配置。
+                            connection.start()
                         except MCPError:
                             pass
                         except Exception:

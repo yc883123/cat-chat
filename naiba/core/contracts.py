@@ -117,6 +117,18 @@ DEFAULT_CHOICE_MODE = "single"
 EXPLICIT_CHOICE_FENCE = "naiba-choices"
 
 
+# ---- MCP 服务配置契约（config 写入 / mcp 运行期消费 / 前端列表与编辑表单回显）----
+# 「连接建立」超时（毫秒）：每个 MCP 服务可单独配，缺省 20000（= 引入该字段前的硬编码
+# 20 秒，旧配置零行为变化）。与 ``env["MCP_TOOL_TIMEOUT"]`` / ``call_timeout_seconds``
+# （单次**工具调用**，默认 620 秒）是两件事，**不要合并**。
+MCP_START_TIMEOUT_MS_DEFAULT = 20000
+MCP_START_TIMEOUT_MS_MIN = 5000
+MCP_START_TIMEOUT_MS_MAX = 600000
+# ``state()`` 回显的配置字段：env **只回显 KEY**（``env_keys``），值不出接口
+# ——env 里常见 GITHUB_TOKEN 一类令牌。
+MCP_STATE_CONFIG_KEYS: tuple[str, ...] = ("command", "args", "env_keys", "start_timeout_ms")
+
+
 @runtime_checkable
 class ConfigView(Protocol):
     """运行时对 config 的最小访问面（构建时校验；成员 ⊆ ConfigStore 实际面）。"""

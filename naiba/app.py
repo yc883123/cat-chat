@@ -523,7 +523,8 @@ class NaibaChatApp:
         if not connection:
             raise ValueError(f"未注册的 MCP 服务：{server_id}")
         connection.stop()
-        connection.start(timeout=20)
+        # 不传 timeout：用该服务自己的「连接建立」超时（用户可在 MCP 连接器里调）。
+        connection.start()
         return connection.state()
 
     def import_legacy_data(self, source: Path) -> dict[str, Any]:

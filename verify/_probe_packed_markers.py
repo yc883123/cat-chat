@@ -31,6 +31,18 @@ r"""一次性探针：核对「改过的前端文件 / 新增的内置 Skill 是
         public/js/09-settings.js（providerFormValue 不再带价格键；新增费用单价弹层整段逻辑）,
         public/js/15-bind-events.js（弹层接线 + 事件委托）
 
+    本轮（MCP 连接器分页：设置里 MCP 独立成页 + 每服务「连接建立」超时）改过 / 新增的文件：
+        naiba/mcp.py（state() 回显 command/args/env_keys/start_timeout_ms；start() 缺省走
+          per-server start_timeout_seconds；lazy start 与重连不再写死 20 秒）,
+        naiba/config.py（upsert_mcp_server 校验 start_timeout_ms；不传 env 时保留原环境变量）,
+        naiba/core/contracts.py（MCP_START_TIMEOUT_MS_* 常量登记）,
+        naiba/app.py（reconnect 用 per-server 超时）,
+        public/index.html（新增 data-settings-panel="mcp" 分页；connections 改名「局域网访问」并删掉 MCP 卡片）,
+        public/styles.css（.mcp-* 一整段）,
+        public/js/09-settings.js（renderMcpRows / splitArgs / parseMcpJson / openMcpForm / submitMcpForm）,
+        public/js/15-bind-events.js（顶栏跳 mcp + 新按钮接线）,
+        skills/cat-chat-guide（SKILL.md 与 00-手册要点.md 的设置入口文案；教程2 的镜像随 docs 回填）
+
 下面 CHANGED 里那 6 个前端文件是 2.9.0 轮次的重点比对项，仍逐字节核对 + 指纹，留作回归
 ——它们本轮没动，但**不该在包里走样**。
 """
@@ -83,13 +95,14 @@ SKILL_FINGERPRINTS = {
     "cat-chat-guide/SKILL.md": [
         "左下角侧栏底部",
         "设置 → Skills 管理",
-        "设置 → 连接状态 → MCP 服务",
+        "设置 → MCP 连接器",
         "80-教程8-3分钟认识教程助手.md",
     ],
     "cat-chat-guide/references/00-手册要点.md": [
         "左下角侧栏底部的 **⚙ 设置",
         "设置 → Skills 管理",
-        "设置 → 连接状态 → MCP 服务",
+        "设置 → MCP 连接器",
+        "设置 → 局域网访问",
         "六个内置 Agent 的分工",
     ],
     "cat-chat-guide/references/10-教程1-3分钟第一次对话.md": [
@@ -136,7 +149,11 @@ FINGERPRINTS = {
         # 2.9.7：清理按钮拆成两个，tooltip 也按目录各写一句（旧的「合并一句」已不存在）。
         "聊天背景图与历史消息里仍在使用的文件会自动保留",
         "历史消息与运行记录里仍在使用的文件会自动保留",
-        "设置 → 连接状态 → MCP 服务",
+        "设置 → MCP 连接器",
+        "mcpFormView",
+        "mcpSearchInput",
+        "mcpAddNew",
+        "局域网访问",
         "早期版本预置的",
         # 2.9.7：上传缓存 / 生成产物缓存拆成两行两阈值两按钮。
         "generatedCleanLimitMb",
@@ -165,6 +182,8 @@ FINGERPRINTS = {
                    ".usage-kpis", ".usage-chip", ".usage-tooltip", ".usage-dialog",
                    # 2.9.11：费用单价弹层（分组卡 / 二级行 / 币种条 + 自定义币种删除叉）。
                    ".pricing-dialog", ".pricing-group", ".pricing-row", ".pricing-cur-x",
+                   # 3.3.4：MCP 连接器分页（行头 grid / 单行截断的副标题 / 展开区）。
+                   ".mcp-rows", ".mcp-row-sub", ".mcp-row-body", ".mcp-seg",
                    # 3.3.5：辅助对话窄面板适配 + 跟随行 + 供应商/模型胶囊。
                    ".aux-msgs .message-row", ".aux-follow", ".aux-chip"],
     # emoji 头像判定入口（内置 Agent 用 emoji，上传图走 <img>）。
@@ -199,13 +218,18 @@ FINGERPRINTS = {
         "pricingBuildGroups",
         "pricingDropCurrency",
         "PRICING_BASE_CURRENCIES",
+        # 3.3.4：MCP 连接器（列表行渲染 / 引号感知切分 / 两种 JSON 粘贴 / 表单开关）。
+        "renderMcpRows",
+        "splitArgs",
+        "parseMcpJson",
+        "openMcpForm",
     ],
     # 2.9.7：进度 100% 未回响应时的「服务器处理中」+ 8 秒慢提示。
     "js/10-upload.js": ["SLOW_UPLOAD_HINT_MS", "服务器处理中", "file.slow"],
     # 2.9.8：滑杆按钮 / ⋯菜单归档项 / 侧栏拖拽接线。
     # 2.9.9：软键盘开合走 visualViewport，弹层重定位跟着它走；用量弹窗 close 统一摘 vv 监听。
     # 2.9.11：费用单价弹层接线（入口 / 返回 / 完成 / 事件委托 + 自定义币种删除）。
-    "js/15-bind-events.js": ["settingsToolbarSub", "cleanImageCache('generated')", "openSidebarViewMenu", "toggleConversationArchive", "bindSidebarDragDrop", "window.visualViewport?.addEventListener", "usageUnbindDialogViewport", "openUsagePricingDialog", "usagePricingDialog", "data-pricing-drop-currency"],
+    "js/15-bind-events.js": ["settingsToolbarSub", "cleanImageCache('generated')", "openSidebarViewMenu", "toggleConversationArchive", "bindSidebarDragDrop", "window.visualViewport?.addEventListener", "usageUnbindDialogViewport", "openUsagePricingDialog", "usagePricingDialog", "data-pricing-drop-currency", "handleMcpListClick", "switchSettingsTab('mcp')"],
     # 2.9.9：@ / 弹层定位可视视口感知 + hide 清内联 maxHeight（手机软键盘裁弹层修复）。
     "js/13-skill-refs.js": ["window.visualViewport", "style.removeProperty('max-height')"],
     "js/16-file-refs.js": ["style.removeProperty('max-height')"],

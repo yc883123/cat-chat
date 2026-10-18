@@ -285,6 +285,7 @@ verify/*
 !verify/interjection_smoke.py
 !verify/lightbox_smoke.cjs
 !verify/make_test_card.py
+!verify/mcp_connectors_smoke.cjs
 !verify/media_inline_smoke.cjs
 !verify/media_markup_check.mjs
 !verify/media_pipeline_audit.py

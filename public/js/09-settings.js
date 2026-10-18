@@ -4489,12 +4489,170 @@ export async function saveAccessToken() {
   toast('口令已更新，其他设备需用新口令登录');
 }
 
-export function mcpServerState(server) {
-  if (server.status === 'error' || server.error) return { text: '错误', color: '#e45e55' };
-  if (server.activity === 'calling' || (server.active_calls && server.active_calls > 0)) return { text: '使用中', color: '#3ecf8e' };
-  if (server.status === 'connecting' || server.status === 'reconnecting') return { text: '连接中', color: '#e0a13a' };
-  if (server.connected) return { text: '已就绪', color: '#3ecf8e' };
-  return { text: '待机', color: '#7d867d' };
+// ══ MCP 连接器（设置 → MCP 连接器）══════════════════════════════════════════
+// 列表一行一个服务：chevron + 首字母头像 + id + 状态点 + 一句副标题；命令 / 环境变量
+// KEY / 错误全文 / 工具 chips / 操作按钮全在展开区。
+//
+// 缺陷前提（旧实现）：`renderMcp()` 先把「id · 状态」和错误文本拼成一行，再事后
+// `append` 按钮到同一个 flex 行——长错误（如 spawn npx ENOENT 一整段）会把「测试 /
+// 重连 / 删除」挤成一坨。现在行头是固定三列 grid，副标题单独一行且单行截断。
+const MCP_AVATAR_CLASSES = ['c1', 'c2', 'c3', 'c4'];
+const MCP_MODE_FORM = 'form';
+const MCP_MODE_JSON = 'json';
+// 展开态与表单态都是「渲染之间的记忆」：轮询每 15 秒重绘一次列表，展开着的行不能被收起。
+const mcpOpenIds = new Set();
+let mcpFormMode = MCP_MODE_FORM;
+let mcpEditingId = '';
+let mcpJsonDraft = '';
+
+export function mcpRowStatus(server) {
+  if (server.status === 'error' || server.error) return { dot: 'is-bad', label: '连接失败', bad: true };
+  if (server.activity === 'calling' || (server.active_calls && server.active_calls > 0)) {
+    return { dot: 'is-busy', label: '使用中', bad: false };
+  }
+  if (server.status === 'connecting' || server.status === 'reconnecting') {
+    return { dot: 'is-warn', label: '连接中', bad: false };
+  }
+  if (server.connected) return { dot: 'is-ok', label: '已就绪', bad: false };
+  return { dot: '', label: '待机', bad: false };
+}
+
+function mcpLastUsedText(timestamp) {
+  const seconds = Math.round(Date.now() / 1000 - Number(timestamp));
+  if (!Number.isFinite(seconds) || seconds < 0) return '';
+  if (seconds < 60) return `${seconds} 秒前`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)} 分钟前`;
+  return `${Math.round(seconds / 3600)} 小时前`;
+}
+
+function mcpRowSubtitle(server) {
+  const status = mcpRowStatus(server);
+  if (status.bad) {
+    const error = String(server.error || '').trim();
+    return error ? `连接失败：${error}` : '连接失败';
+  }
+  const tools = Array.isArray(server.tools) ? server.tools.length : 0;
+  const parts = [status.label];
+  if (tools) parts.push(`${tools} 个工具`);
+  if (status.label === '使用中' && server.last_used_at) {
+    const lastUsed = mcpLastUsedText(server.last_used_at);
+    if (lastUsed) parts.push(`${lastUsed}调用`);
+  }
+  return parts.join(' · ');
+}
+
+function mcpCountText(servers) {
+  if (!servers.length) return '我的 MCP(0)';
+  const connected = servers.filter((server) => server.connected).length;
+  return `我的 MCP(${servers.length}) · ${connected} 个已连接`;
+}
+
+function mcpRowMatches(server, query) {
+  const haystack = [
+    server.id,
+    server.command,
+    ...(Array.isArray(server.args) ? server.args : []),
+    ...(Array.isArray(server.env_keys) ? server.env_keys : []),
+  ].join(' ').toLowerCase();
+  return haystack.includes(query);
+}
+
+function mcpRowBodyMarkup(server) {
+  const id = escapeHtml(server.id);
+  const parts = [];
+  const command = String(server.command || '').trim();
+  const args = Array.isArray(server.args) ? server.args.map((item) => String(item)) : [];
+  if (command) {
+    parts.push(`<code class="mcp-cmd"><span class="mcp-cmd-label">命令</span>${escapeHtml([command, ...args].join(' '))}</code>`);
+  }
+  const envKeys = (Array.isArray(server.env_keys) ? server.env_keys : []).filter(Boolean);
+  if (envKeys.length) {
+    // 只给 KEY：env 里常放 GITHUB_TOKEN 一类令牌，值只在「编辑」时由用户自己重填。
+    parts.push(`<div class="mcp-env">环境变量：${escapeHtml(envKeys.join('、'))}</div>`);
+  }
+  const timeoutMs = Number(server.start_timeout_ms || 0);
+  if (timeoutMs > 0) parts.push(`<div class="mcp-env">启动超时：${Math.round(timeoutMs / 1000)} 秒</div>`);
+  if (server.error) parts.push(`<div class="mcp-error">${escapeHtml(server.error)}</div>`);
+  const tools = Array.isArray(server.tools) ? server.tools : [];
+  if (tools.length) {
+    const shown = tools.slice(0, 40);
+    const chips = shown.map((tool) => `<code>${escapeHtml(tool.name || '')}</code>`).join('');
+    const more = tools.length > shown.length ? `<span class="mcp-tool-more">另有 ${tools.length - shown.length} 个</span>` : '';
+    parts.push(`<div class="mcp-tool-list">${chips}${more}</div>`);
+  }
+  parts.push(`<div class="mcp-row-actions">
+      <button class="control-button" type="button" data-mcp-action="test" data-mcp-id="${id}">测试</button>
+      <button class="control-button" type="button" data-mcp-action="reconnect" data-mcp-id="${id}">重连</button>
+      <button class="control-button" type="button" data-mcp-action="edit" data-mcp-id="${id}">编辑</button>
+      <button class="control-button mcp-remove" type="button" data-mcp-action="remove" data-mcp-id="${id}">删除</button>
+    </div>`);
+  return parts.join('');
+}
+
+function mcpRowMarkup(server, index) {
+  const id = escapeHtml(server.id);
+  const status = mcpRowStatus(server);
+  const open = mcpOpenIds.has(server.id);
+  const avatar = MCP_AVATAR_CLASSES[index % MCP_AVATAR_CLASSES.length];
+  const initial = escapeHtml(String(server.id || '?').slice(0, 1).toUpperCase());
+  return `<div class="mcp-row" data-mcp-id="${id}" data-open="${open ? '1' : '0'}">
+      <button class="mcp-row-head" type="button" data-mcp-toggle="${id}" aria-expanded="${open ? 'true' : 'false'}">
+        <span class="mcp-chevron" aria-hidden="true"></span>
+        <span class="mcp-avatar ${avatar}" aria-hidden="true">${initial}</span>
+        <span class="mcp-row-title"><b>${id}</b><span class="mcp-dot ${status.dot}" aria-hidden="true"></span></span>
+      </button>
+      <div class="mcp-row-sub${status.bad ? ' is-bad' : ''}" data-mcp-toggle="${id}"${open ? ' hidden' : ''}>${escapeHtml(mcpRowSubtitle(server))}</div>
+      <div class="mcp-row-body"${open ? '' : ' hidden'}>${mcpRowBodyMarkup(server)}</div>
+    </div>`;
+}
+
+export function renderMcpRows() {
+  const servers = state.bootstrap.mcp_servers || [];
+  const query = String($('#mcpSearchInput')?.value || '').trim().toLowerCase();
+  const visible = query ? servers.filter((server) => mcpRowMatches(server, query)) : servers;
+  const list = $('#mcpList');
+  if (list) {
+    list.innerHTML = visible.length
+      ? visible.map((server, index) => mcpRowMarkup(server, index)).join('')
+      : (servers.length ? '<p class="mcp-nomatch">没有匹配的 MCP 服务</p>' : '');
+  }
+  const empty = $('#mcpEmpty');
+  // 空态只在「一个服务都没有」时出现；搜索无结果另给一行提示，两者不重叠。
+  if (empty) empty.hidden = servers.length > 0;
+  const count = $('#mcpCount');
+  if (count) count.textContent = mcpCountText(servers);
+}
+
+export function toggleMcpRow(serverId) {
+  if (!serverId) return;
+  const row = $$('#mcpList .mcp-row').find((item) => item.dataset.mcpId === serverId);
+  if (!row) return;
+  const wasOpen = mcpOpenIds.has(serverId);
+  if (wasOpen) mcpOpenIds.delete(serverId); else mcpOpenIds.add(serverId);
+  row.dataset.open = wasOpen ? '0' : '1';
+  const head = row.querySelector('.mcp-row-head');
+  if (head) head.setAttribute('aria-expanded', String(!wasOpen));
+  const body = row.querySelector('.mcp-row-body');
+  if (body) body.hidden = wasOpen;
+  // 展开时副标题让位给正文（避免同一句话出现两遍）。
+  const sub = row.querySelector('.mcp-row-sub');
+  if (sub) sub.hidden = !wasOpen;
+}
+
+export function handleMcpListClick(event) {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const actionButton = target.closest('[data-mcp-action]');
+  if (actionButton) {
+    const serverId = actionButton.dataset.mcpId || '';
+    const action = actionButton.dataset.mcpAction || '';
+    if (action === 'edit') openMcpForm(serverId);
+    else if (action === 'remove') removeMcpServer(serverId);
+    else mcpAction(serverId, action);
+    return;
+  }
+  const toggle = target.closest('[data-mcp-toggle]');
+  if (toggle) toggleMcpRow(toggle.dataset.mcpToggle || '');
 }
 
 export function renderMcp() {
@@ -4502,70 +4660,37 @@ export function renderMcp() {
   // 顶栏 MCP 指示灯：**只看颜色**（绿=已连接 / 红=未连接或出错 / 黄=连接中 / 灰=未配置服务），
   // 文字恒为「MCP」，具体状态放 title 里（此前文字拼「MCP · 已就绪」等，啰嗦且占宽）。
   const mcpButton = $('#mcpStatus');
-  const label = mcpButton.querySelector('span');
+  const label = mcpButton?.querySelector('span');
   const anyError = servers.some((s) => s.status === 'error' || s.error);
   const anyCalling = servers.some((s) => s.activity === 'calling' || (s.active_calls && s.active_calls > 0));
   const anyConnecting = servers.some((s) => s.status === 'connecting' || s.status === 'reconnecting');
   const allConnected = servers.length > 0 && servers.every((s) => s.connected);
-  mcpButton.classList.remove('connected', 'calling', 'connecting', 'error', 'disconnected');
+  if (mcpButton) mcpButton.classList.remove('connected', 'calling', 'connecting', 'error', 'disconnected');
   let statusText;
   if (anyError) {
-    mcpButton.classList.add('error');
+    mcpButton?.classList.add('error');
     statusText = '连接错误';
   } else if (anyConnecting) {
-    mcpButton.classList.add('connecting');
+    mcpButton?.classList.add('connecting');
     statusText = '连接中';
   } else if (allConnected) {
-    mcpButton.classList.add(anyCalling ? 'calling' : 'connected');
+    mcpButton?.classList.add(anyCalling ? 'calling' : 'connected');
     statusText = anyCalling ? '使用中' : '已连接';
   } else if (servers.length) {
-    mcpButton.classList.add('disconnected');
+    mcpButton?.classList.add('disconnected');
     statusText = '未连接';
   } else {
     statusText = '未配置服务';
   }
   if (label) label.textContent = 'MCP';
-  mcpButton.title = `MCP：${statusText}（点击查看连接状态）`;
-
-  $('#mcpList').innerHTML = servers.map((server) => {
-    const st = mcpServerState(server);
-    const detail = server.connected
-      ? `${server.tools?.length ?? 0} 个工具`
-      : (server.status === 'idle' ? '仅在本轮激活的 Skill 需要 MCP 时连接' : escapeHtml(server.error || st.text));
-    return `<div class="connection-item">
-      <span><b>${escapeHtml(server.id)} · ${st.text}</b><small>${detail}</small></span>
-      <span class="status-mark" style="background:${st.color}"></span>
-    </div>`;
-  }).join('') || '<p class="activity">没有注册 MCP 服务</p>';
-  $$('#mcpList .connection-item').forEach((item, index) => {
-    const server = servers[index];
-    if (!server) return;
-    const actions = document.createElement('span');
-    actions.className = 'mcp-actions';
-    const test = document.createElement('button');
-    test.className = 'control-button mcp-test';
-    test.type = 'button';
-    test.textContent = '测试';
-    test.addEventListener('click', () => mcpAction(server.id, 'test'));
-    const reconnect = document.createElement('button');
-    reconnect.className = 'control-button mcp-reconnect';
-    reconnect.type = 'button';
-    reconnect.textContent = '重连';
-    reconnect.addEventListener('click', () => mcpAction(server.id, 'reconnect'));
-    const remove = document.createElement('button');
-    remove.className = 'control-button mcp-remove';
-    remove.type = 'button';
-    remove.textContent = '删除';
-    remove.addEventListener('click', () => removeMcpServer(server.id));
-    actions.append(test, reconnect, remove);
-    item.append(actions);
-  });
+  if (mcpButton) mcpButton.title = `MCP：${statusText}（点击打开 MCP 连接器）`;
+  renderMcpRows();
 }
 
 export async function mcpAction(serverId, action) {
   try {
     const result = await api('/api/mcp/' + action, { method: 'POST', body: { server_id: serverId } });
-    const server = state.bootstrap.mcp_servers.find((item) => item.id === serverId);
+    const server = (state.bootstrap.mcp_servers || []).find((item) => item.id === serverId);
     if (server) Object.assign(server, result);
     renderMcp();
     if (action === 'test') {
@@ -4587,6 +4712,8 @@ export async function removeMcpServer(serverId) {
   try {
     await api('/api/mcp/remove', { method: 'POST', body: { server_id: serverId } });
     state.bootstrap.mcp_servers = (state.bootstrap.mcp_servers || []).filter((item) => item.id !== serverId);
+    mcpOpenIds.delete(serverId);
+    if (mcpEditingId === serverId) closeMcpForm();
     renderMcp();
     toast(`MCP 服务「${serverId}」已删除`);
   } catch (error) {
@@ -4594,34 +4721,212 @@ export async function removeMcpServer(serverId) {
   }
 }
 
-export async function saveMcpServer() {
-  const id = $('#mcpNewId').value.trim();
-  const command = $('#mcpNewCommand').value.trim();
-  if (!id) { toast('请填写服务 ID'); return; }
-  if (!command) { toast('请填写命令（command）'); return; }
-  const env = {};
-  const comfyBin = $('#mcpNewComfyBin').value.trim();
-  if (comfyBin) env.COMFY_BIN = comfyBin;
-  const extraRaw = $('#mcpNewEnvJson').value.trim();
-  if (extraRaw) {
-    let extra;
-    try { extra = JSON.parse(extraRaw); }
-    catch (_e) { toast('环境变量 JSON 格式不正确'); return; }
-    if (!extra || typeof extra !== 'object' || Array.isArray(extra)) { toast('环境变量 JSON 必须是对象'); return; }
-    Object.assign(env, extra);
+// ── 表单：引号感知的参数切分 ────────────────────────────────────────────────
+// 「参数（空格分隔）」抄的是参考稿，但带空格的路径（"D:\Program Files\z"）必须整块留下，
+// 所以切分要认引号：成对的 " / ' 内的空格不切，引号本身不进入参数。
+export function splitArgs(text) {
+  const source = String(text || '');
+  const args = [];
+  let current = '';
+  let quote = '';
+  let pending = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (quote) {
+      if (char === quote) { quote = ''; continue; }
+      current += char;
+      continue;
+    }
+    if (char === '"' || char === "'") { quote = char; pending = true; continue; }
+    if (/\s/.test(char)) {
+      if (pending) { args.push(current); current = ''; pending = false; }
+      continue;
+    }
+    current += char;
+    pending = true;
   }
+  if (pending) args.push(current);
+  return args;
+}
+
+// ── 表单：JSON 模式解析 ────────────────────────────────────────────────────
+// 同时吃 {"server-name": {...}} 与 {"mcpServers": {"server-name": {...}}}（Claude 桌面
+// 客户端那种导出格式）；多条只取第一条并回报 ignored，由调用方提示。
+export function parseMcpJson(text) {
+  let parsed;
   try {
-    await api('/api/mcp/register', { method: 'POST', body: { id, command, args: [], env, enabled: true } });
-    $('#mcpNewId').value = '';
-    $('#mcpNewCommand').value = '';
-    $('#mcpNewComfyBin').value = '';
-    $('#mcpNewEnvJson').value = '';
-    $('#mcpAddForm').open = false;
-    state.bootstrap.mcp_servers = await loadMcpServers();
-    renderMcp();
-    toast(`MCP 服务「${id}」已注册`);
+    parsed = JSON.parse(String(text || '').trim() || '{}');
   } catch (error) {
-    toast('注册 MCP 服务失败：' + error.message);
+    throw new Error(`JSON 格式不正确：${error.message}`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('配置必须是一个 JSON 对象');
+  }
+  const nested = parsed.mcpServers;
+  const root = nested && typeof nested === 'object' && !Array.isArray(nested) ? nested : parsed;
+  const entries = Object.entries(root)
+    .filter(([, value]) => value && typeof value === 'object' && !Array.isArray(value));
+  if (!entries.length) {
+    throw new Error('没有找到服务配置：应为 {"名称": {"command": "..."}}');
+  }
+  const [rawId, body] = entries[0];
+  const id = String(rawId).trim();
+  const command = String(body.command || '').trim();
+  if (!command) throw new Error(`服务「${id}」缺少 command`);
+  const rawArgs = body.args;
+  const args = Array.isArray(rawArgs)
+    ? rawArgs.map((item) => String(item))
+    : (rawArgs ? splitArgs(String(rawArgs)) : []);
+  const payload = { id, command, args };
+  const timeout = body.start_timeout_ms ?? body.timeout_ms ?? body.timeout;
+  if (timeout !== undefined && timeout !== null && timeout !== '') {
+    payload.start_timeout_ms = Number(timeout);
+  }
+  if (body.env !== undefined && body.env !== null) {
+    if (typeof body.env !== 'object' || Array.isArray(body.env)) throw new Error('env 必须是 JSON 对象');
+    payload.env = Object.fromEntries(
+      Object.entries(body.env).map(([key, value]) => [String(key), String(value ?? '')]),
+    );
+  }
+  return { ...payload, ignored: entries.length - 1 };
+}
+
+function mcpFormDraftJson() {
+  const id = String($('#mcpFormId')?.value || '').trim() || 'my-mcp-server';
+  const body = {
+    type: 'stdio',
+    command: String($('#mcpFormCommand')?.value || ''),
+    args: splitArgs($('#mcpFormArgs')?.value || ''),
+    start_timeout_ms: Number(String($('#mcpFormTimeout')?.value ?? '').trim() || 30000),
+  };
+  return JSON.stringify({ [id]: body }, null, 2);
+}
+
+export function setMcpFormMode(mode) {
+  mcpFormMode = mode === MCP_MODE_JSON ? MCP_MODE_JSON : MCP_MODE_FORM;
+  $$('#mcpFormMode button').forEach((button) => {
+    const active = button.dataset.mcpMode === mcpFormMode;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+  });
+  if ($('#mcpFormFields')) $('#mcpFormFields').hidden = mcpFormMode !== MCP_MODE_FORM;
+  if ($('#mcpFormJson')) $('#mcpFormJson').hidden = mcpFormMode !== MCP_MODE_JSON;
+  // 切到 JSON 时按表单当前内容给一份草稿（只在用户没改过 JSON 时覆盖，避免吃掉手写内容）。
+  const area = $('#mcpFormJsonText');
+  if (mcpFormMode === MCP_MODE_JSON && area) {
+    const current = String(area.value || '');
+    if (!current.trim() || current === mcpJsonDraft) {
+      mcpJsonDraft = mcpFormDraftJson();
+      area.value = mcpJsonDraft;
+    }
+  }
+}
+
+// 新建（无参）或编辑（给 id，用 state() 回显的 command/args/start_timeout_ms 回填）。
+export function openMcpForm(serverId = '') {
+  const servers = state.bootstrap.mcp_servers || [];
+  const server = serverId ? servers.find((item) => item.id === serverId) : null;
+  mcpEditingId = server ? server.id : '';
+  if ($('#mcpFormTitle')) {
+    $('#mcpFormTitle').textContent = mcpEditingId ? `编辑 MCP 服务器：${mcpEditingId}` : '新建 MCP 服务器';
+  }
+  if ($('#mcpFormDesc')) {
+    $('#mcpFormDesc').textContent = mcpEditingId
+      ? '保存后立即按新配置重连；改名称等于换一个服务（旧条目会被删除）。'
+      : '填写新的 MCP 配置，保存后返回列表。';
+  }
+  if ($('#mcpFormId')) $('#mcpFormId').value = mcpEditingId;
+  if ($('#mcpFormCommand')) $('#mcpFormCommand').value = server ? String(server.command || '') : '';
+  if ($('#mcpFormArgs')) $('#mcpFormArgs').value = server && Array.isArray(server.args) ? server.args.join(' ') : '';
+  if ($('#mcpFormTimeout')) {
+    $('#mcpFormTimeout').value = String(server && server.start_timeout_ms ? server.start_timeout_ms : 30000);
+  }
+  if ($('#mcpFormEnv')) {
+    // 列表只回显 KEY（令牌不出接口），所以编辑时这里刻意留空：
+    // 留空 = 保持原有环境变量；填了 JSON 才整体替换。
+    $('#mcpFormEnv').value = '';
+  }
+  if ($('#mcpFormEnvHint')) {
+    const keys = server && Array.isArray(server.env_keys) ? server.env_keys : [];
+    $('#mcpFormEnvHint').textContent = keys.length
+      ? `留空 = 保持现有 ${keys.length} 个环境变量（${keys.join('、')}）；填 JSON 则整体替换。`
+      : '只回显 KEY，不显示值。';
+  }
+  mcpJsonDraft = mcpFormDraftJson();
+  if ($('#mcpFormJsonText')) $('#mcpFormJsonText').value = mcpJsonDraft;
+  setMcpFormMode(MCP_MODE_FORM);
+  if ($('#mcpListView')) $('#mcpListView').hidden = true;
+  if ($('#mcpFormView')) $('#mcpFormView').hidden = false;
+  $('#mcpFormId')?.focus();
+}
+
+export function closeMcpForm() {
+  mcpEditingId = '';
+  if ($('#mcpFormView')) $('#mcpFormView').hidden = true;
+  if ($('#mcpListView')) $('#mcpListView').hidden = false;
+  renderMcpRows();
+}
+
+function mcpEnvFromText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  let env;
+  try { env = JSON.parse(raw); }
+  catch (_error) { throw new Error('环境变量不是合法 JSON'); }
+  if (!env || typeof env !== 'object' || Array.isArray(env)) throw new Error('环境变量必须是 JSON 对象');
+  return Object.fromEntries(Object.entries(env).map(([key, value]) => [String(key), String(value ?? '')]));
+}
+
+function readMcpFormFields() {
+  const id = String($('#mcpFormId')?.value || '').trim();
+  if (!id) throw new Error('请填写名称（即服务 ID）');
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new Error('名称只能包含字母、数字、下划线或连字符');
+  const command = String($('#mcpFormCommand')?.value || '').trim();
+  if (!command) throw new Error('请填写启动命令');
+  const timeoutRaw = String($('#mcpFormTimeout')?.value ?? '').trim();
+  const timeout = timeoutRaw === '' ? 30000 : Number(timeoutRaw);
+  if (!Number.isInteger(timeout)) throw new Error('超时时间必须是整数（毫秒）');
+  const payload = {
+    id,
+    command,
+    args: splitArgs($('#mcpFormArgs')?.value || ''),
+    start_timeout_ms: timeout,
+    enabled: true,
+  };
+  const env = mcpEnvFromText($('#mcpFormEnv')?.value || '');
+  if (env) payload.env = env;
+  return payload;
+}
+
+function readMcpFormJson() {
+  const parsed = parseMcpJson($('#mcpFormJsonText')?.value || '');
+  if (parsed.ignored > 0) toast(`一次只能保存一个服务，已忽略另外 ${parsed.ignored} 个`);
+  const payload = { ...parsed, enabled: true };
+  delete payload.ignored;
+  return payload;
+}
+
+export async function submitMcpForm() {
+  let payload;
+  try {
+    payload = mcpFormMode === MCP_MODE_JSON ? readMcpFormJson() : readMcpFormFields();
+  } catch (error) {
+    toast(error.message);
+    return;
+  }
+  const previousId = mcpEditingId;
+  try {
+    await api('/api/mcp/register', { method: 'POST', body: payload });
+    // 改名 = 新建一条 + 删掉旧条目（id 是主键，upsert 不会跟着改名走）。
+    if (previousId && previousId !== payload.id) {
+      await api('/api/mcp/remove', { method: 'POST', body: { server_id: previousId } }).catch(() => {});
+      mcpOpenIds.delete(previousId);
+    }
+    state.bootstrap.mcp_servers = await loadMcpServers();
+    closeMcpForm();
+    toast(`MCP 服务「${payload.id}」已保存`);
+  } catch (error) {
+    toast('保存 MCP 服务失败：' + error.message);
   }
 }
 

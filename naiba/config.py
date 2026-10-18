@@ -11,6 +11,11 @@ import json, logging, os, re, secrets, threading, time, urllib.parse, uuid
 from pathlib import Path
 from typing import Any
 
+from naiba.core.contracts import (
+    MCP_START_TIMEOUT_MS_DEFAULT,
+    MCP_START_TIMEOUT_MS_MAX,
+    MCP_START_TIMEOUT_MS_MIN,
+)
 from naiba.core.paths import path_within
 from naiba.paths import PathContext
 
@@ -2539,6 +2544,12 @@ class ConfigStore:
             return result
 
     def upsert_mcp_server(self, values: dict[str, Any]) -> dict[str, Any]:
+        """新增或整体替换一条 MCP 服务配置（同 id 覆盖）。
+
+        ``env`` 的语义有一个**刻意的例外**：请求里**不带** ``env`` 键时，编辑已有服务会
+        保留原环境变量（新增时为空）。原因是列表接口只回显 env 的 KEY（令牌不外泄），
+        编辑表单因此拿不到值——用户没动环境变量那一栏，就不该把令牌清空。
+        """
         server_id = str(values.get("id") or "").strip()
         command = str(values.get("command") or "").strip()
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", server_id):
@@ -2546,25 +2557,88 @@ class ConfigStore:
         if not command:
             raise ValueError("MCP command 不能为空")
         args = values.get("args") or []
-        env = values.get("env") or {}
-        if not isinstance(args, list) or not isinstance(env, dict):
+        if not isinstance(args, list):
             raise ValueError("MCP args 必须是数组，env 必须是对象")
-        payload = {
-            "id": server_id,
-            "command": command,
-            "args": [str(item) for item in args],
-            "env": {str(key): str(value) for key, value in env.items()},
-            "enabled": bool(values.get("enabled", True)),
-        }
+        env_provided = "env" in values
+        env = values.get("env") or {}
+        if not isinstance(env, dict):
+            raise ValueError("MCP args 必须是数组，env 必须是对象")
+        start_timeout_ms = self._mcp_start_timeout_ms(values.get("start_timeout_ms"))
+        # 工具屏蔽名单：UI 不暴露（无对应控件），但保存时必须原样带过去，
+        # 否则在设置页点一次「保存」就会把 protection 静默抹掉。
+        if "hidden_tools" in values:
+            hidden_tools = self._mcp_hidden_tools(values.get("hidden_tools"))
+        else:
+            hidden_tools = None
         with self.lock:
             servers = self.data.setdefault("mcp_servers", [])
             index = next((i for i, item in enumerate(servers) if item.get("id") == server_id), None)
+            if not env_provided and index is not None:
+                env = dict(servers[index].get("env") or {})
+            if hidden_tools is None:
+                hidden_tools = (
+                    list(servers[index].get("hidden_tools") or [])
+                    if index is not None
+                    else []
+                )
+            payload = {
+                "id": server_id,
+                "command": command,
+                "args": [str(item) for item in args],
+                "env": {str(key): str(value) for key, value in env.items()},
+                "start_timeout_ms": start_timeout_ms,
+                "hidden_tools": hidden_tools,
+                "enabled": bool(values.get("enabled", True)),
+            }
             if index is None:
                 servers.append(payload)
             else:
                 servers[index] = payload
             self.save()
         return payload
+
+    @staticmethod
+    def _mcp_hidden_tools(value: Any) -> list[str]:
+        """校验「工具屏蔽名单」：字符串数组，去空去重，保持声明顺序。
+
+        这些工具不会进入工具表，也就不会出现在给模型的请求里。用于规避
+        上游对 JSON Schema 嵌套深度的硬限制（参见 ``naiba/mcp.py``）。
+        """
+        if value is None or value == "":
+            return []
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("MCP 工具屏蔽名单必须是数组")
+        result: list[str] = []
+        for item in value:
+            name = str(item or "").strip()
+            if name and name not in result:
+                result.append(name)
+        return result
+
+    @staticmethod
+    def _mcp_start_timeout_ms(value: Any) -> int:
+        """校验「连接建立」超时（毫秒）：缺省 20000，必须是 5000-600000 的整数。
+
+        与 ``env["MCP_TOOL_TIMEOUT"]``（单次工具调用，默认 620 秒）无关：这里只管
+        建连那一步。缺省值与引入该配置前的硬编码 20 秒逐字一致 ⇒ 旧配置零行为变化。
+        """
+        if value is None or value == "":
+            return MCP_START_TIMEOUT_MS_DEFAULT
+        if isinstance(value, bool):
+            raise ValueError("MCP 超时时间必须是整数（毫秒）")
+        try:
+            if isinstance(value, float) and not value.is_integer():
+                raise ValueError
+            milliseconds = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("MCP 超时时间必须是整数（毫秒）") from None
+        if not MCP_START_TIMEOUT_MS_MIN <= milliseconds <= MCP_START_TIMEOUT_MS_MAX:
+            raise ValueError(
+                f"MCP 超时时间必须在 {MCP_START_TIMEOUT_MS_MIN}-{MCP_START_TIMEOUT_MS_MAX} 毫秒之间"
+            )
+        return milliseconds
 
     def delete_mcp_server(self, server_id: str) -> bool:
         """Remove a registered MCP server from persistent config."""

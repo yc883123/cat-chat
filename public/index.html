@@ -111,7 +111,7 @@
           <p><b>路线一 · HTTP 直连（推荐，最省事）</b>：导演 Agent 开箱就带这套工具，切到它直接用即可。
             换成别的 Agent 才需要去「设置 → Agent」编辑它 → 工具集页，一键套用<b>「ComfyUI 联动」</b>预设
             （含 comfyui_prepare_workflow、comfyui_batch 和任务查询工具 job_output / job_status / job_wait）。</p>
-          <p><b>路线二 · MCP 连接</b>：在「设置 → 连接状态 → MCP 服务」里配置并连接 ComfyUI MCP 服务
+          <p><b>路线二 · MCP 连接</b>：在「设置 → MCP 连接器」里配置并连接 ComfyUI MCP 服务
             （可用开始页「设置本地 Comfy MCP」预设指令让 AI 帮你装）；连上后 MCP 引入的 comfy 工具
             会出现在「设置 → Agent → 工具集」里，手动勾选启用。</p>
           <small>两条路任选其一即可，一般不需要同时开。Agent 的每个工具在设置页都有说明，不确定就先只读模式试试。</small>
@@ -709,7 +709,8 @@
         <div class="settings-nav-group"><span class="settings-nav-heading">工具与联网</span>
           <button data-settings-tab="skills" data-settings-search="技能 导入"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 20 8v8l-8 4.5L4 16V8z"></path><path d="M12 12 20 8M12 12v8.5M12 12 4 8"></path></svg>Skills 管理</button>
           <button data-settings-tab="search" data-settings-search="联网 搜索 网络"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M3.5 12h17M12 3.5c2.5 2.6 2.5 14.4 0 17M12 3.5c-2.5 2.6-2.5 14.4 0 17"></path></svg>联网搜索</button>
-          <button data-settings-tab="connections" data-settings-search="MCP 手机 口令"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 14.5 14.5 9.5"></path><path d="M11 6.5 12.8 4.7a4.5 4.5 0 0 1 6.5 6.5L17.5 13"></path><path d="M13 17.5 11.2 19.3a4.5 4.5 0 0 1-6.5-6.5L6.5 11"></path></svg>连接状态</button>
+          <button data-settings-tab="mcp" data-settings-search="MCP 服务 连接器 工具 外部"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 14.5 14.5 9.5"></path><path d="M11 6.5 12.8 4.7a4.5 4.5 0 0 1 6.5 6.5L17.5 13"></path><path d="M13 17.5 11.2 19.3a4.5 4.5 0 0 1-6.5-6.5L6.5 11"></path></svg>MCP 连接器</button>
+          <button data-settings-tab="connections" data-settings-search="手机 局域网 口令 访问"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2.5"></rect><path d="M11 18.5h2"></path></svg>局域网访问</button>
         </div>
         <div class="settings-nav-group"><span class="settings-nav-heading">数据与隐私</span>
           <button data-settings-tab="usage" data-settings-search="用量 token 费用 统计 价格 单价"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"></path></svg>用量统计</button>
@@ -923,19 +924,60 @@
           </div>
           <div class="form-actions"><button class="primary-button" id="saveRuntime" type="button">保存参数</button></div>
         </section>
-        <section data-settings-panel="connections" class="settings-panel" hidden>
-          <div class="settings-panel-head"><h3>连接状态</h3><p>MCP 服务与局域网访问：手机与电脑连接同一网络后，可用浏览器打开下方地址。</p></div>
-          <div class="settings-card"><div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 3v6M15 3v6"></path><path d="M6.5 9h11v3.5a5.5 5.5 0 0 1-11 0z"></path><path d="M12 18v3"></path></svg></span><div><h4>MCP 服务</h4></div></div><div id="mcpList" class="connection-list"></div>
-          <details class="mcp-add-form" id="mcpAddForm">
-            <summary>新增 MCP 服务器</summary>
-            <div class="mcp-add-fields">
-              <label>服务 ID<input id="mcpNewId" type="text" placeholder="如 comfy-mcp" autocomplete="off"></label>
-              <label>命令（command）<input id="mcpNewCommand" type="text" placeholder="可执行文件的绝对路径或命令名" autocomplete="off"></label>
-              <label>环境变量 COMFY_BIN（可选）<input id="mcpNewComfyBin" type="text" placeholder="comfy 可执行文件的绝对路径" autocomplete="off"></label>
-              <label class="mcp-env-row"><input id="mcpNewEnvJson" type="text" placeholder='更多环境变量 JSON，如 {"KEY":"value"}' autocomplete="off"></label>
-              <div class="form-actions"><button class="primary-button" id="saveMcpServer" type="button">保存并注册</button></div>
+        <section data-settings-panel="mcp" class="settings-panel" hidden>
+          <div class="mcp-panel-head">
+            <div class="settings-panel-head"><h3>MCP 连接器</h3><p>接入外部 MCP 服务，为 AI 扩展更多工具能力。连上的工具在「Agent → 工具集」里勾选后才会真正可用。</p></div>
+            <button class="primary-button" id="mcpAddNew" type="button">＋ 新增 MCP</button>
+          </div>
+          <div id="mcpListView">
+            <div class="mcp-toolbar">
+              <span class="mcp-search">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+                <input id="mcpSearchInput" type="search" placeholder="搜索 MCP" autocomplete="off" aria-label="搜索 MCP">
+              </span>
+              <span class="mcp-count" id="mcpCount"></span>
             </div>
-          </details></div>
+            <div class="mcp-rows" id="mcpList"></div>
+            <div class="mcp-empty" id="mcpEmpty" hidden>
+              <b>还没有接入任何 MCP 服务</b>
+              <p>MCP 让 AI 能调用外部程序：读写文件、查 GitHub、连 ComfyUI 出图。也可以在开始页用「设置本地 Comfy MCP」让 AI 帮你装。</p>
+            </div>
+          </div>
+          <!-- 新建 / 编辑：表单模式与 JSON 模式共用同一个提交口径（/api/mcp/register 的 upsert 语义）。
+               名称即服务 ID；编辑时留空「环境变量」= 保持原有值（列表只回显 KEY，拿不到令牌原文）。 -->
+          <div id="mcpFormView" hidden>
+            <div class="mcp-panel-head">
+              <div class="settings-panel-head"><h3 id="mcpFormTitle">新建 MCP 服务器</h3><p id="mcpFormDesc">填写新的 MCP 配置，保存后返回列表。</p></div>
+              <div class="mcp-form-head-actions">
+                <div class="mcp-seg" id="mcpFormMode" role="tablist" aria-label="配置方式">
+                  <button class="active" type="button" data-mcp-mode="form" role="tab" aria-selected="true">表单</button>
+                  <button type="button" data-mcp-mode="json" role="tab" aria-selected="false">JSON</button>
+                </div>
+                <button class="control-button" id="mcpFormBack" type="button">返回列表</button>
+              </div>
+            </div>
+            <div class="settings-card">
+              <div id="mcpFormFields">
+                <div class="mcp-form-grid">
+                  <label>名称<input id="mcpFormId" type="text" placeholder="my-mcp-server" autocomplete="off" spellcheck="false"></label>
+                  <label>类型<select id="mcpFormType"><option value="stdio" selected>stdio（本地命令）</option></select></label>
+                  <label>超时时间 MS<input id="mcpFormTimeout" type="number" value="30000" min="5000" max="600000" step="1000"><small class="hint">连接建立的上限（5-600 秒）。首次要拉包的 npx 服务可以调大；它不影响单次工具调用的超时。</small></label>
+                  <label>启动命令<input id="mcpFormCommand" type="text" placeholder="npx" autocomplete="off" spellcheck="false"></label>
+                  <label class="mcp-span">参数（空格分隔）<input id="mcpFormArgs" type="text" placeholder="-y @modelcontextprotocol/server-memory" autocomplete="off" spellcheck="false"><small class="hint">带空格的路径用引号包起来，例如 "D:\Program Files\z"。</small></label>
+                  <label class="mcp-span">环境变量（可选，JSON 对象）<textarea id="mcpFormEnv" rows="4" spellcheck="false" placeholder='{"MY_API_KEY": "your-key"}'></textarea><small class="hint" id="mcpFormEnvHint">只回显 KEY，不显示值。</small></label>
+                </div>
+                <div class="form-actions"><button class="primary-button" id="mcpFormSave" type="button">保存</button><button class="control-button" id="mcpFormCancel" type="button">取消</button></div>
+              </div>
+              <div id="mcpFormJson" hidden>
+                <label class="mcp-json-label">完整配置<textarea id="mcpFormJsonText" class="mcp-json-area" spellcheck="false"></textarea></label>
+                <p class="mcp-json-hint">支持直接粘贴 <code>{"server-name": {...}}</code> 或 <code>{"mcpServers": {"server-name": {...}}}</code>。</p>
+                <div class="form-actions"><button class="primary-button" id="mcpFormJsonSave" type="button">保存</button><button class="control-button" id="mcpFormJsonCancel" type="button">取消</button></div>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section data-settings-panel="connections" class="settings-panel" hidden>
+          <div class="settings-panel-head"><h3>局域网访问</h3><p>手机与电脑连接同一网络后，可用浏览器打开下方地址。</p></div>
           <div class="settings-card"><div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.5"></rect><path d="M11 18.5h2"></path></svg></span><div><h4>手机访问</h4></div></div>
           <div class="connection-address" id="connectionAddress"></div>
           <p class="hint" id="connectionReason"></p>

@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>设置 → MCP 连接器 · 设计预览 v2（简洁版）</title>
+<link rel="stylesheet" href="../../public/styles.css">
+<style>
+  /* v2：按本人给的参考截图重做 —— 一行一个服务，行内只放「头像 + 名字 + 状态点 + 一句副标题」，
+     其余（命令 / 环境变量 / 错误 / 工具清单 / 操作按钮）全部收进行尾的展开区。
+     参考截图里的「启用开关」按本人指示去掉：MCP 工具的启停在 Agent → 工具集里管，这里不管。 */
+
+  body { background: var(--bg); min-height: 100dvh; padding: 0; }
+
+  .mock-shell { padding: 18px 22px 40px; }
+  .mock-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
+  .mock-head h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -.01em; }
+  .mock-head p { margin: 5px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.6; max-width: 86ch; }
+  .mock-bar { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; padding: 9px 13px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--shadow-1); margin-bottom: 16px; }
+  .mock-bar b { font-size: 12px; color: var(--muted); font-weight: 600; }
+  .mock-bar label { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; }
+  .mock-bar select { min-height: 28px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--surface); color: var(--text); font-size: 12.5px; }
+  dialog.settings-dialog { position: fixed; inset: 0; margin: auto; }
+
+  /* ───────────── v2 新 CSS（将来并入 styles.css 设置页作用域） ───────────── */
+
+  /* 面板头右侧的添加按钮与标题同行 */
+  .settings-dialog .mcp-panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+  .settings-dialog .mcp-panel-head .settings-panel-head { margin-bottom: 0; }
+
+  /* 工具条：搜索 + 计数 */
+  .settings-dialog .mcp-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .settings-dialog .mcp-toolbar .mcp-search { position: relative; flex: 1; max-width: 420px; }
+  .settings-dialog .mcp-toolbar .mcp-search svg { position: absolute; left: 10px; top: 50%; translate: 0 -50%; width: 14px; height: 14px; fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; }
+  .settings-dialog .mcp-toolbar .mcp-search input { width: 100%; height: 34px; padding: 0 10px 0 31px; border: 1px solid var(--line); border-radius: var(--set-r-ctl); background: var(--surface-2); color: var(--text); }
+  .settings-dialog .mcp-toolbar .mcp-count { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+
+  /* 一行一个服务 */
+  .settings-dialog .mcp-rows { display: grid; gap: 8px; }
+  .settings-dialog .mcp-row {
+    border: 1px solid var(--line); border-radius: var(--set-r-card); background: var(--surface);
+    transition: border-color var(--t-fast);
+  }
+  .settings-dialog .mcp-row:hover { border-color: var(--line-strong); }
+
+  .settings-dialog .mcp-row-head {
+    display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center;
+    gap: 11px; width: 100%; padding: 11px 14px; border: 0; background: none; color: inherit;
+    text-align: left; cursor: pointer; font: inherit;
+  }
+  .settings-dialog .mcp-row-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--set-r-card); }
+
+  .settings-dialog .mcp-chevron { flex: none; width: 0; height: 0; border-left: 5px solid var(--muted); border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform var(--t-fast); }
+  .settings-dialog .mcp-row[data-open="1"] .mcp-chevron { transform: rotate(90deg); }
+
+  /* 首字母头像：四个色轮换，装饰性 */
+  .settings-dialog .mcp-avatar { flex: none; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-size: 13px; font-weight: 700; }
+  .settings-dialog .mcp-avatar.c1 { background: var(--accent-soft); color: var(--accent); }
+  .settings-dialog .mcp-avatar.c2 { background: var(--danger-soft); color: var(--danger); }
+  .settings-dialog .mcp-avatar.c3 { background: var(--warning-soft); color: var(--warning); }
+  .settings-dialog .mcp-avatar.c4 { background: var(--success-soft); color: var(--success); }
+
+  .settings-dialog .mcp-row-title { display: flex; align-items: center; gap: 7px; min-width: 0; }
+  .settings-dialog .mcp-row-title b { font-size: 13.5px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .settings-dialog .mcp-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+  .settings-dialog .mcp-dot.is-ok { background: var(--success); }
+  .settings-dialog .mcp-dot.is-busy { background: var(--success); animation: mcp-pulse 1.5s ease-in-out infinite; }
+  .settings-dialog .mcp-dot.is-warn { background: var(--warning); animation: mcp-pulse 1.5s ease-in-out infinite; }
+  .settings-dialog .mcp-dot.is-bad { background: var(--danger); }
+  @keyframes mcp-pulse { 0%,100% { opacity: 1; } 50% { opacity: .32; } }
+
+  .settings-dialog .mcp-row-sub { margin-top: 2px; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .settings-dialog .mcp-row-sub.is-bad { color: var(--danger); }
+
+  /* 展开区：命令 / 环境变量 / 错误 / 工具 / 操作 全在这 */
+  .settings-dialog .mcp-row-body { display: grid; gap: 9px; padding: 2px 14px 13px 55px; }
+  .settings-dialog .mcp-row-body[hidden] { display: none; }
+  .settings-dialog .mcp-cmd {
+    padding: 7px 10px; border-radius: var(--set-r-ctl); background: var(--surface-2); border: 1px solid var(--line);
+    font-family: var(--font-mono); font-size: 11.5px; line-height: 1.55; color: var(--text); overflow-wrap: anywhere;
+  }
+  .settings-dialog .mcp-cmd .mcp-cmd-label { color: var(--muted); font-family: var(--font-sans); font-size: 11px; margin-right: 6px; }
+  .settings-dialog .mcp-env { color: var(--muted); font-size: 12px; font-family: var(--font-mono); overflow-wrap: anywhere; }
+  .settings-dialog .mcp-error { padding: 8px 10px; border: 1px solid var(--danger-soft); border-radius: var(--set-r-ctl); background: var(--danger-soft); color: var(--danger); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+  .settings-dialog .mcp-tool-list { display: flex; flex-wrap: wrap; gap: 5px; }
+  .settings-dialog .mcp-tool-list code { padding: 2px 7px; border-radius: var(--r-xs); background: var(--surface-2); border: 1px solid var(--line); font-family: var(--font-mono); font-size: 11px; color: var(--text); }
+  .settings-dialog .mcp-row-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 2px; }
+
+  /* 空状态 */
+  .settings-dialog .mcp-empty { padding: 26px 18px; border: 1px dashed var(--line-strong); border-radius: var(--set-r-card); text-align: center; background: var(--surface); }
+  .settings-dialog .mcp-empty b { display: block; font-size: 13.5px; margin-bottom: 5px; }
+  .settings-dialog .mcp-empty p { margin: 0 auto; max-width: 52ch; color: var(--muted); font-size: 12.5px; line-height: 1.6; }
+
+  /* 表单：抄参考稿 —— 单列字段 + 右上「表单/JSON」分段切换 */
+  .settings-dialog .mcp-seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--r-md); overflow: hidden; flex: none; }
+  .settings-dialog .mcp-seg button { border: 0; background: var(--surface); padding: 5px 14px; font-size: 12.5px; cursor: pointer; color: var(--muted); }
+  .settings-dialog .mcp-seg button + button { border-left: 1px solid var(--line); }
+  .settings-dialog .mcp-seg button.active { background: var(--accent-soft); color: var(--violet-deep); font-weight: 600; }
+  html[data-theme="dark"] .settings-dialog .mcp-seg button.active { color: var(--violet-deep); }
+  .settings-dialog .mcp-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; }
+  .settings-dialog .mcp-form-grid label { display: grid; gap: 6px; font-size: 12.5px; color: var(--muted); }
+  .settings-dialog .mcp-form-grid .mcp-span { grid-column: 1 / -1; }
+  .settings-dialog .mcp-form-grid input, .settings-dialog .mcp-form-grid select { min-height: 36px; border-radius: var(--set-r-ctl); }
+  .settings-dialog .mcp-form-grid textarea { min-height: 84px; resize: vertical; border-radius: var(--set-r-ctl); font-family: var(--font-mono); font-size: 12px; line-height: 1.6; }
+  .settings-dialog .mcp-json-area { width: 100%; min-height: 190px; resize: vertical; padding: 11px 12px; border: 1px solid var(--line); border-radius: var(--set-r-ctl); background: var(--surface-2); color: var(--text); font-family: var(--font-mono); font-size: 12.5px; line-height: 1.65; }
+  .settings-dialog .mcp-json-hint { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+  .settings-dialog .mcp-json-hint code { font-family: var(--font-mono); font-size: 11.5px; }
+
+  /* ── 现状对照（沿用仓库里真实的旧 class 渲染） ── */
+  .before-after { margin-top: 26px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); }
+  .before-after > summary { cursor: pointer; padding: 11px 15px; font-size: 13px; font-weight: 650; }
+  .before-after-body { padding: 0 15px 16px; }
+  .before-after-body > h5 { margin: 4px 0 8px; font-size: 12px; color: var(--muted); font-weight: 600; letter-spacing: .04em; }
+  .before-after-body .wrap { max-width: 520px; border: 1px solid var(--line); border-radius: var(--r-lg); padding: 14px; background: var(--surface); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="mock-shell">
+
+  <div class="mock-head">
+    <div>
+      <h1>设置 → MCP 连接器 · v2 简洁版</h1>
+      <p>按参考截图重做：一行一个服务，行内只留头像 / 名字 / 状态点 / 一句副标题，其余收进展开区。
+         <b>已去掉启停开关</b>——工具启停在 Agent → 工具集里管，这页只管「接入与连接」。</p>
+    </div>
+  </div>
+
+  <div class="mock-bar">
+    <b>场景</b>
+    <label><input type="radio" name="scene" value="list" checked> 有 4 个连接器</label>
+    <label><input type="radio" name="scene" value="form"> 新建表单（表单 / JSON）</label>
+    <label><input type="radio" name="scene" value="empty"> 空状态</label>
+    <span style="flex:1"></span>
+    <label>主题 <select id="themeSel"><option value="light">浅色</option><option value="dark">深色</option></select></label>
+    <label>皮肤 <select id="skinSel"><option value="violet">紫藤</option><option value="ocean">海洋</option><option value="rose">玫瑰</option><option value="forest">森林</option></select></label>
+  </div>
+
+  <dialog class="settings-dialog" open>
+    <div class="dialog-toolbar">
+      <div><h2>设置</h2><p id="settingsToolbarSub">MCP 连接器</p></div>
+      <button class="icon-button" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+    </div>
+    <div class="settings-layout">
+      <nav class="settings-nav" aria-label="设置分类">
+        <label class="settings-search"><span class="sr-only">搜索设置</span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg><input type="search" placeholder="搜索设置" autocomplete="off"></label>
+
+        <div class="settings-nav-group"><span class="settings-nav-heading">常规</span>
+          <button data-settings-tab="appearance"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="5"></rect><circle cx="12" cy="12" r="3.2"></circle></svg>外观</button>
+          <button data-settings-tab="runtime"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6h14M5 12h14M5 18h14"></path><circle cx="9" cy="6" r="2"></circle><circle cx="15" cy="12" r="2"></circle><circle cx="10" cy="18" r="2"></circle></svg>运行设置</button>
+        </div>
+        <div class="settings-nav-group"><span class="settings-nav-heading">模型与 Agent</span>
+          <button data-settings-tab="models"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3.5" width="18" height="7" rx="2.5"></rect><rect x="3" y="13.5" width="18" height="7" rx="2.5"></rect><path d="M7 7h.01M7 17h.01"></path></svg>API 供应商</button>
+          <button data-settings-tab="agent"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.6"></circle><path d="M4.5 20a7.5 7.5 0 0 1 15 0"></path></svg>Agent</button>
+          <button data-settings-tab="vision"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"></path><circle cx="12" cy="12" r="3"></circle></svg>视觉</button>
+        </div>
+        <div class="settings-nav-group"><span class="settings-nav-heading">工具与联网</span>
+          <button data-settings-tab="skills"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 20 8v8l-8 4.5L4 16V8z"></path><path d="M12 12 20 8M12 12v8.5M12 12 4 8"></path></svg>Skills 管理</button>
+          <button data-settings-tab="search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M3.5 12h17M12 3.5c2.5 2.6 2.5 14.4 0 17M12 3.5c-2.5 2.6-2.5 14.4 0 17"></path></svg>联网搜索</button>
+          <button class="active" data-settings-tab="mcp"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 14.5 14.5 9.5"></path><path d="M11 6.5 12.8 4.7a4.5 4.5 0 0 1 6.5 6.5L17.5 13"></path><path d="M13 17.5 11.2 19.3a4.5 4.5 0 0 1-6.5-6.5L6.5 11"></path></svg>MCP 连接器</button>
+          <button data-settings-tab="connections"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2.5"></rect><path d="M11 18.5h2"></path></svg>局域网访问</button>
+        </div>
+        <div class="settings-nav-group"><span class="settings-nav-heading">数据与隐私</span>
+          <button data-settings-tab="usage"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"></path></svg>用量统计</button>
+          <button data-settings-tab="datamigration"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7.5" ry="3"></ellipse><path d="M4.5 6v12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6"></path><path d="M4.5 12c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3"></path></svg>数据与迁移</button>
+        </div>
+        <div class="settings-nav-group"><span class="settings-nav-heading">关于</span>
+          <button data-settings-tab="updates"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4"></path><path d="M5 17.5v1A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5v-1"></path></svg>软件更新</button>
+        </div>
+      </nav>
+
+      <div class="settings-content">
+
+        <!-- ════ 场景 1：清单 ════ -->
+        <div data-scene="list">
+          <div class="mcp-panel-head">
+            <div class="settings-panel-head">
+              <h3>MCP 连接器</h3>
+              <p>接入外部 MCP 服务，为 AI 扩展更多工具能力。连上的工具在「Agent → 工具集」里勾选后才会真正可用。</p>
+            </div>
+            <button class="primary-button" type="button">＋ 新增 MCP</button>
+          </div>
+
+          <div class="mcp-toolbar">
+            <span class="mcp-search">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+              <input type="search" placeholder="搜索 MCP" autocomplete="off">
+            </span>
+            <span class="mcp-count">我的 MCP(4) · 1 个已连接</span>
+          </div>
+
+          <div class="mcp-rows">
+
+            <!-- 行 1：使用中（展开态示例） -->
+            <div class="mcp-row" data-open="1">
+              <button class="mcp-row-head" type="button" aria-expanded="true">
+                <span class="mcp-chevron" aria-hidden="true"></span>
+                <span class="mcp-avatar c1" aria-hidden="true">C</span>
+                <span class="mcp-row-title">
+                  <b>comfy-mcp</b>
+                  <span class="mcp-dot is-busy" aria-hidden="true"></span>
+                </span>
+              </button>
+              <div class="mcp-row-sub" style="padding:0 14px 11px 55px">使用中 · 12 个工具 · 12 秒前调用</div>
+              <div class="mcp-row-body">
+                <code class="mcp-cmd"><span class="mcp-cmd-label">命令</span>D:\ComfyUI\comfyui-mcp-env\Scripts\comfy-mcp.exe</code>
+                <div class="mcp-env">环境变量：COMFY_BIN=D:\ComfyUI</div>
+                <div class="mcp-tool-list">
+                  <code>comfyui_prepare_workflow</code><code>comfyui_batch</code><code>comfyui_inspect</code><code>job_output</code><code>job_status</code><code>job_wait</code><code>comfyui_queue</code><code>comfyui_history</code><code>comfyui_interrupt</code><code>comfyui_upload_image</code><code>comfyui_model_list</code><code>comfyui_system_stats</code>
+                </div>
+                <div class="mcp-row-actions">
+                  <button class="control-button" type="button">测试</button>
+                  <button class="control-button" type="button">重连</button>
+                  <button class="control-button" type="button">编辑</button>
+                  <button class="control-button mcp-remove" type="button">删除</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 行 2：出错 -->
+            <div class="mcp-row">
+              <button class="mcp-row-head" type="button" aria-expanded="false">
+                <span class="mcp-chevron" aria-hidden="true"></span>
+                <span class="mcp-avatar c2" aria-hidden="true">F</span>
+                <span class="mcp-row-title">
+                  <b>filesystem</b>
+                  <span class="mcp-dot is-bad" aria-hidden="true"></span>
+                </span>
+              </button>
+              <div class="mcp-row-sub is-bad" style="padding:0 14px 11px 55px">连接失败：spawn npx ENOENT —— 找不到可执行文件</div>
+            </div>
+
+            <!-- 行 3：待机 -->
+            <div class="mcp-row">
+              <button class="mcp-row-head" type="button" aria-expanded="false">
+                <span class="mcp-chevron" aria-hidden="true"></span>
+                <span class="mcp-avatar c3" aria-hidden="true">R</span>
+                <span class="mcp-row-title">
+                  <b>rea</b>
+                  <span class="mcp-dot" aria-hidden="true"></span>
+                </span>
+              </button>
+              <div class="mcp-row-sub" style="padding:0 14px 11px 55px">待机 · 207 个工具</div>
+            </div>
+
+            <!-- 行 4：已就绪 -->
+            <div class="mcp-row">
+              <button class="mcp-row-head" type="button" aria-expanded="false">
+                <span class="mcp-chevron" aria-hidden="true"></span>
+                <span class="mcp-avatar c4" aria-hidden="true">M</span>
+                <span class="mcp-row-title">
+                  <b>miora</b>
+                  <span class="mcp-dot is-ok" aria-hidden="true"></span>
+                </span>
+              </button>
+              <div class="mcp-row-sub" style="padding:0 14px 11px 55px">已就绪 · 8 个工具</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ════ 场景 2：新建表单（表单 / JSON 双模式，抄参考稿） ════ -->
+        <div data-scene="form" hidden>
+          <div class="mcp-panel-head">
+            <div class="settings-panel-head">
+              <h3>新建 MCP 服务器</h3>
+              <p>填写新的 MCP 配置，保存后返回列表。</p>
+            </div>
+            <div style="display:flex;align-items:center;gap:12px">
+              <div class="mcp-seg" id="formModeSeg" role="tablist">
+                <button type="button" class="active" data-mode="form">表单</button>
+                <button type="button" data-mode="json">JSON</button>
+              </div>
+              <button class="control-button" type="button">返回列表</button>
+            </div>
+          </div>
+
+          <div class="settings-card">
+            <!-- 表单模式 -->
+            <div id="formModeForm">
+              <div class="mcp-form-grid">
+                <label>名称
+                  <input type="text" placeholder="my-mcp-server" autocomplete="off">
+                </label>
+                <label>类型
+                  <select>
+                    <option selected>stdio（本地命令）</option>
+                  </select>
+                </label>
+                <label>超时时间 MS
+                  <input type="number" value="30000" step="1000" min="5000">
+                </label>
+                <label>启动命令
+                  <input type="text" placeholder="npx" autocomplete="off">
+                </label>
+                <label class="mcp-span">参数（空格分隔）
+                  <input type="text" placeholder="-y @modelcontextprotocol/server-memory" autocomplete="off">
+                </label>
+                <label class="mcp-span">环境变量（可选）
+                  <textarea spellcheck="false" placeholder='{
+  "MY_API_KEY": "your-key"
+}'>{ "MY_API_KEY": "your-key" }</textarea>
+                </label>
+              </div>
+              <div class="form-actions">
+                <button class="primary-button" type="button">保存</button>
+                <button class="control-button" type="button">取消</button>
+              </div>
+            </div>
+
+            <!-- JSON 模式 -->
+            <div id="formModeJson" hidden>
+              <div class="mcp-form-grid">
+                <label class="mcp-span">完整配置
+                  <textarea class="mcp-json-area" spellcheck="false">{
+  "my-mcp-server": {
+    "type": "stdio",
+    "command": "",
+    "args": []
+  }
+}</textarea>
+                </label>
+              </div>
+              <p class="mcp-json-hint">支持直接粘贴 <code>{"server-name": {...}}</code> 或 <code>{"mcpServers": {"server-name": {...}}}</code>。</p>
+              <div class="form-actions">
+                <button class="primary-button" type="button">保存</button>
+                <button class="control-button" type="button">取消</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ════ 场景 3：空状态 ════ -->
+        <div data-scene="empty" hidden>
+          <div class="mcp-panel-head">
+            <div class="settings-panel-head">
+              <h3>MCP 连接器</h3>
+              <p>接入外部 MCP 服务，为 AI 扩展更多工具能力。连上的工具在「Agent → 工具集」里勾选后才会真正可用。</p>
+            </div>
+            <button class="primary-button" type="button">＋ 新增 MCP</button>
+          </div>
+          <div class="mcp-empty">
+            <b>还没有接入任何 MCP 服务</b>
+            <p>MCP 让 AI 能调用外部程序：读写文件、查 GitHub、连 ComfyUI 出图。也可以在开始页用「设置本地 Comfy MCP」让 AI 帮你装。</p>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ══════════════ 现状对照 ══════════════ -->
+  <details class="before-after">
+    <summary>展开：现状对照（同一份数据，用现在仓库里真实的 .connection-item / .mcp-add-form 渲染）</summary>
+    <div class="before-after-body">
+      <h5>现在的样子 —— MCP 挤在「连接状态」里，和手机访问、访问口令共用一个分页</h5>
+      <div class="wrap">
+        <div class="settings-card">
+          <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 3v6M15 3v6"></path><path d="M6.5 9h11v3.5a5.5 5.5 0 0 1-11 0z"></path><path d="M12 18v3"></path></svg></span><div><h4>MCP 服务</h4></div></div>
+          <div class="connection-list">
+            <div class="connection-item">
+              <span><b>comfy-mcp · 使用中</b><small>12 个工具</small></span>
+              <span class="status-mark" style="background:#12A594"></span>
+              <span class="mcp-actions"><button class="control-button tiny">测试</button><button class="control-button tiny">重连</button><button class="control-button tiny mcp-remove">删除</button></span>
+            </div>
+            <div class="connection-item">
+              <span><b>filesystem · 错误</b><small>连接失败：spawn npx ENOENT —— 找不到可执行文件。请确认 npx 已加入 PATH，或把 command 写成绝对路径（例如 C:\Program Files\nodejs\npx.cmd）。</small></span>
+              <span class="status-mark" style="background:#DC4A46"></span>
+              <span class="mcp-actions"><button class="control-button tiny">测试</button><button class="control-button tiny">重连</button><button class="control-button tiny mcp-remove">删除</button></span>
+            </div>
+          </div>
+          <details class="mcp-add-form" open>
+            <summary>新增 MCP 服务器</summary>
+            <div class="mcp-add-fields">
+              <label>服务 ID<input type="text" placeholder="如 comfy-mcp" autocomplete="off"></label>
+              <label>命令（command）<input type="text" placeholder="可执行文件的绝对路径或命令名" autocomplete="off"></label>
+              <label>环境变量 COMFY_BIN（可选）<input type="text" placeholder="comfy 可执行文件的绝对路径" autocomplete="off"></label>
+              <label class="mcp-env-row"><input type="text" placeholder='更多环境变量 JSON，如 {"KEY":"value"}' autocomplete="off"></label>
+              <div class="form-actions"><button class="primary-button" type="button">保存并注册</button></div>
+            </div>
+          </details>
+        </div>
+        <p class="hint" style="margin-top:10px">注意 filesystem 那一行：长错误文本把「测试 / 重连 / 删除」挤成了一坨。这是现在的真实排版。</p>
+      </div>
+    </div>
+  </details>
+
+</div>
+
+<script>
+  document.querySelectorAll('input[name="scene"]').forEach((r) => {
+    r.addEventListener('change', () => {
+      document.querySelectorAll('[data-scene]').forEach((el) => { el.hidden = el.dataset.scene !== r.value; });
+    });
+  });
+  // 展开区：点行头收/开（mock 行为，真实现同样只切 hidden）
+  document.querySelectorAll('.mcp-row-head').forEach((head) => {
+    head.addEventListener('click', () => {
+      const row = head.closest('.mcp-row');
+      const open = row.dataset.open === '1';
+      row.dataset.open = open ? '0' : '1';
+      head.setAttribute('aria-expanded', String(!open));
+      const sub = row.querySelector('.mcp-row-sub');
+      const body = row.querySelector('.mcp-row-body');
+      if (sub) sub.hidden = !open;   // 副标题在展开时让位给正文，避免重复
+      if (body) body.hidden = open;
+    });
+  });
+  // 表单/JSON 分段切换
+  const seg = document.getElementById('formModeSeg');
+  if (seg) seg.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-mode]');
+    if (!btn) return;
+    seg.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b === btn));
+    document.getElementById('formModeForm').hidden = btn.dataset.mode !== 'form';
+    document.getElementById('formModeJson').hidden = btn.dataset.mode !== 'json';
+  });
+  document.getElementById('themeSel').addEventListener('change', (e) => {
+    document.documentElement.dataset.theme = e.target.value;
+  });
+  document.getElementById('skinSel').addEventListener('change', (e) => {
+    document.documentElement.dataset.skin = e.target.value;
+  });
+  if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+    document.documentElement.dataset.theme = 'dark';
+    document.getElementById('themeSel').value = 'dark';
+  }
+</script>
+</body>
+</html>

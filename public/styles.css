@@ -3169,3 +3169,111 @@ html[data-theme="dark"] .usage-chip.active { color: var(--violet-deep); }
   }
   .update-float-head { font-size: 12px; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   设置 → MCP 连接器（2026-10-18）
+   ───────────────────────────────────────────────────────────────────────
+   一行一个服务：chevron + 首字母头像 + id + 状态点 + 一句副标题；命令 /
+   环境变量 KEY / 错误全文 / 工具 chips / 操作按钮全收在展开区。
+
+   为什么行头是「固定三列 grid」而不是 flex 里事后 append 按钮：
+   旧实现把「测试 / 重连 / 删除」append 到与错误文本同一个 flex 行，长错误
+   （如 spawn npx ENOENT 一整段）会把按钮挤成一坨。这里副标题单独一行、
+   单行截断（overflow:hidden + ellipsis），行高恒定 —— 这是本段的回归锁。
+
+   作用域与配色口径同设置页：只消费语义变量，不引入新色值；深色与四套皮肤自动成立。
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.settings-dialog .mcp-panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.settings-dialog .mcp-panel-head .settings-panel-head { margin-bottom: 0; }
+.settings-dialog .mcp-panel-head > .primary-button { flex: none; }
+.settings-dialog .mcp-form-head-actions { display: flex; align-items: center; gap: 10px; flex: none; }
+
+/* ── 工具条：搜索 + 计数 ── */
+.settings-dialog .mcp-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.settings-dialog .mcp-toolbar .mcp-search { position: relative; flex: 1 1 auto; max-width: 420px; }
+.settings-dialog .mcp-toolbar .mcp-search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; pointer-events: none; }
+.settings-dialog .mcp-toolbar .mcp-search input { width: 100%; height: var(--set-ctl-h); padding: 0 10px 0 31px; border: 1px solid var(--line); border-radius: var(--set-r-ctl); background: var(--surface-2); color: var(--text); }
+.settings-dialog .mcp-toolbar .mcp-search input:focus { border-color: var(--accent); background: var(--surface); outline: 3px solid var(--set-ring); }
+.settings-dialog .mcp-count { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+
+/* ── 一行一个服务 ── */
+/* grid 轨道必须显式 `minmax(0, 1fr)`：隐式 auto 轨道按 max-content 撑开，副标题的
+   `nowrap` 长错误会把它推到几千像素宽（ellipsis 永远不生效，窄屏直接横向溢出）。 */
+.settings-dialog .mcp-rows { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.settings-dialog .mcp-row { border: 1px solid var(--line); border-radius: var(--set-r-card); background: var(--surface); transition: border-color var(--t-fast); }
+.settings-dialog .mcp-row:hover { border-color: var(--line-strong); }
+.settings-dialog .mcp-row-head { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: 11px; width: 100%; padding: 11px 14px 3px; border: 0; background: none; color: inherit; text-align: left; cursor: pointer; font: inherit; }
+.settings-dialog .mcp-row-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--set-r-card); }
+.settings-dialog .mcp-chevron { flex: none; width: 0; height: 0; border-left: 5px solid var(--muted); border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform var(--t-fast); }
+.settings-dialog .mcp-row[data-open="1"] .mcp-chevron { transform: rotate(90deg); }
+
+/* 首字母头像：四个色轮换，纯装饰 */
+.settings-dialog .mcp-avatar { flex: none; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-size: 13px; font-weight: 700; }
+.settings-dialog .mcp-avatar.c1 { background: var(--accent-soft); color: var(--accent); }
+.settings-dialog .mcp-avatar.c2 { background: var(--danger-soft); color: var(--danger); }
+.settings-dialog .mcp-avatar.c3 { background: var(--warning-soft); color: var(--warning); }
+.settings-dialog .mcp-avatar.c4 { background: var(--success-soft); color: var(--success); }
+.settings-dialog .mcp-row-title { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.settings-dialog .mcp-row-title b { font-size: 13.5px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-dialog .mcp-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.settings-dialog .mcp-dot.is-ok { background: var(--success); }
+.settings-dialog .mcp-dot.is-busy { background: var(--success); animation: mcp-dot-pulse 1.5s ease-in-out infinite; }
+.settings-dialog .mcp-dot.is-warn { background: var(--warning); animation: mcp-dot-pulse 1.5s ease-in-out infinite; }
+.settings-dialog .mcp-dot.is-bad { background: var(--danger); }
+@keyframes mcp-dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .32; } }
+
+/* 副标题：单行截断 —— 长错误文本必须被吃掉，不许把行撑高（旧版挤压问题的回归锁）。 */
+.settings-dialog .mcp-row-sub { padding: 0 14px 11px 55px; color: var(--muted); font-size: 12px; line-height: 1.6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.settings-dialog .mcp-row-sub.is-bad { color: var(--danger); }
+.settings-dialog .mcp-row-sub[hidden] { display: none; }
+
+/* 展开区：命令 / 环境变量 / 超时 / 错误 / 工具 / 操作 */
+.settings-dialog .mcp-row-body { display: grid; gap: 9px; padding: 2px 14px 13px 55px; }
+.settings-dialog .mcp-row-body[hidden] { display: none; }
+.settings-dialog .mcp-cmd { padding: 7px 10px; border-radius: var(--set-r-ctl); background: var(--surface-2); border: 1px solid var(--line); font-family: var(--font-mono); font-size: 11.5px; line-height: 1.55; color: var(--text); overflow-wrap: anywhere; }
+.settings-dialog .mcp-cmd-label { color: var(--muted); font-family: var(--font-sans); font-size: 11px; margin-right: 6px; }
+.settings-dialog .mcp-env { color: var(--muted); font-size: 12px; font-family: var(--font-mono); overflow-wrap: anywhere; }
+.settings-dialog .mcp-error { padding: 8px 10px; border: 1px solid var(--danger-soft); border-radius: var(--set-r-ctl); background: var(--danger-soft); color: var(--danger); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+.settings-dialog .mcp-tool-list { display: flex; flex-wrap: wrap; gap: 5px; }
+.settings-dialog .mcp-tool-list code { padding: 2px 7px; border-radius: var(--r-xs); background: var(--surface-2); border: 1px solid var(--line); font-family: var(--font-mono); font-size: 11px; color: var(--text); }
+.settings-dialog .mcp-tool-more { align-self: center; color: var(--muted); font-size: 11.5px; }
+.settings-dialog .mcp-row-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 7px; margin-top: 2px; }
+.settings-dialog .mcp-row-actions .control-button { min-height: 30px; }
+.settings-dialog .mcp-remove { color: var(--danger); }
+
+/* ── 空状态 / 搜索无结果 ── */
+.settings-dialog .mcp-empty { padding: 26px 18px; border: 1px dashed var(--line-strong); border-radius: var(--set-r-card); text-align: center; background: var(--surface); }
+.settings-dialog .mcp-empty[hidden] { display: none; }
+.settings-dialog .mcp-empty b { display: block; font-size: 13.5px; margin-bottom: 5px; }
+.settings-dialog .mcp-empty p { margin: 0 auto; max-width: 52ch; color: var(--muted); font-size: 12.5px; line-height: 1.6; }
+.settings-dialog .mcp-nomatch { margin: 0; padding: 18px 4px; color: var(--muted); font-size: 12.5px; text-align: center; }
+
+/* ── 新建 / 编辑：单列字段 + 右上「表单 / JSON」分段切换 ── */
+.settings-dialog .mcp-seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--r-md); overflow: hidden; flex: none; }
+.settings-dialog .mcp-seg button { border: 0; background: var(--surface); padding: 5px 14px; font-size: 12.5px; cursor: pointer; color: var(--muted); }
+.settings-dialog .mcp-seg button + button { border-left: 1px solid var(--line); }
+.settings-dialog .mcp-seg button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.settings-dialog .mcp-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; }
+.settings-dialog .mcp-form-grid label { display: grid; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.settings-dialog .mcp-form-grid .mcp-span { grid-column: 1 / -1; }
+.settings-dialog .mcp-form-grid input, .settings-dialog .mcp-form-grid select { min-height: var(--set-ctl-h); border-radius: var(--set-r-ctl); }
+.settings-dialog .mcp-form-grid textarea { min-height: 84px; resize: vertical; border-radius: var(--set-r-ctl); font-family: var(--font-mono); font-size: 12px; line-height: 1.6; }
+.settings-dialog .mcp-json-label { display: grid; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.settings-dialog .mcp-json-area { width: 100%; min-height: 190px; resize: vertical; padding: 11px 12px; border: 1px solid var(--line); border-radius: var(--set-r-ctl); background: var(--surface-2); color: var(--text); font-family: var(--font-mono); font-size: 12.5px; line-height: 1.65; }
+.settings-dialog .mcp-json-hint { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+.settings-dialog .mcp-json-hint code { font-family: var(--font-mono); font-size: 11.5px; }
+.settings-dialog #mcpListView[hidden],
+.settings-dialog #mcpFormView[hidden],
+.settings-dialog #mcpFormFields[hidden],
+.settings-dialog #mcpFormJson[hidden] { display: none; }
+
+@media (max-width: 760px) {
+  .settings-dialog .mcp-panel-head { flex-wrap: wrap; }
+  .settings-dialog .mcp-form-head-actions { flex-wrap: wrap; }
+  .settings-dialog .mcp-toolbar { flex-wrap: wrap; }
+  .settings-dialog .mcp-toolbar .mcp-search { max-width: none; }
+  .settings-dialog .mcp-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .settings-dialog .mcp-row-body, .settings-dialog .mcp-row-sub { padding-left: 14px; }
+  .settings-dialog .mcp-row-actions { justify-content: flex-start; }
+}

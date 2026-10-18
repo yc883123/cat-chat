@@ -48,6 +48,8 @@ KEEP = {
     "popup_keyboard_mobile_smoke.cjs",
     # Skills UI 改版冒烟（覆盖层 PATCH/scan 合并、管理页详情卡、桌面模态、手机抽屉）
     "skills_ui_smoke.cjs",
+    # MCP 连接器分页冒烟（设置独立分页、行高恒定回归锁、搜索与窄屏）
+    "mcp_connectors_smoke.cjs",
     # Agent 说明弹层 + 工作区路径/未注册分组提示冒烟（§六 已登记；Python 自编排 + Node 检查）
     "agent_help_popover.py", "agent_help_popover.cjs",
     # 应用内更换图标冒烟（§六 已登记；Python 自编排 + Node 检查 + 进程级重启解析）

@@ -156,12 +156,17 @@ export function closeAuxPanel() {
 function updateAuxTabsButton() {
   const button = $('#openAuxChats');
   if (!button) return;
-  // 面板已经开着（文件或辅助任一分组），顶栏不该再留一个「重新打开」的重复入口——
-  // 这与文件按钮同口径（14-file-panel.js 的 updateFileTabsButton 里有 !filePanelState.open）。
-  // 少了这个条件时，辅助按钮在面板打开期间白占 ~94px，正是本次挤压的触发点。
-  button.hidden = auxChatState.tabs.length === 0 || filePanelState.open;
+  // ⚠️ 不要在这里加 `|| auxChatState.tabs.length === 0` 之类的门槛（3.3.0~3.3.2 就是这么错的）：
+  // 顶栏这个按钮是**全新用户唯一的辅助对话入口**——新建辅助对话的 ＋ 在面板里，
+  // 面板又只能靠这个按钮打开，要求「先有标签」等于死锁，全新用户永远看不到辅助对话。
+  // 所以只在「面板已经开着」时隐藏（那会儿面板里自己就有 ＋ 和空态按钮，不需要重复入口）。
+  // 这与文件按钮的口径不同：文件按钮背后有「点消息里的文件」另一条入口，辅助没有。
+  button.hidden = filePanelState.open;
   const count = $('#auxChatsCount');
-  if (count) count.textContent = String(auxChatState.tabs.length);
+  if (count) {
+    // 0 时显示「＋」（引导新建），>0 显示数量；两者都不是裸 0。
+    count.textContent = auxChatState.tabs.length ? String(auxChatState.tabs.length) : '＋';
+  }
 }
 
 export function renderAuxChat() {
@@ -186,9 +191,14 @@ function renderAuxMessages() {
   if (!body) return;
   const tab = activeTab();
   if (!tab) {
+    // 空态必须有**可点的入口**：面板里除了这是一个状态说明，还得能直接开一个。
+    // （此前只有一行提示文字，加上顶栏按钮的门槛，全新用户等于进不来。）
     body.innerHTML = [
       '<div class="aux-chat-banner">辅助对话与主对话相互独立：只能读取和查询，不能修改文件；内容不会保留，关掉标签就清掉。</div>',
-      '<div class="file-panel-hint">开一个辅助对话，随手问一句。它和左边的对话互不打扰，主任务跑着也不受影响。</div>',
+      '<div class="aux-empty">',
+      '<button type="button" class="aux-empty-start" data-aux-new>＋ 开一个辅助对话</button>',
+      '<p class="aux-empty-hint">随手问一句就行。它和左边的对话互不打扰，主任务跑着也不受影响。</p>',
+      '</div>',
     ].join('');
     return;
   }
@@ -438,6 +448,8 @@ export function bindAuxChatEvents() {
   $('#openAuxChats')?.addEventListener('click', () => openAuxPanel());
   // 「发送到主任务」：复制进主输入框并聚焦，不自动发送（守住不污染，§2）。
   $('#auxChatMessages')?.addEventListener('click', (event) => {
+    // 空态里的「＋ 开一个辅助对话」按钮（与标签栏那个 ＋ 同一个动作）
+    if (event.target.closest('[data-aux-new]')) { void createAuxChat(); return; }
     const button = event.target.closest('[data-aux-to-main]');
     if (!button) return;
     const tab = activeTab();

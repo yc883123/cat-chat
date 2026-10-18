@@ -18,6 +18,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 ROOT = Path(__file__).resolve().parents[1]
 
+
+def _strip_js_comments(source: str) -> str:
+    """去掉 // 行注释与 /* */ 块注释：断言不该被注释里的反例文字误伤。"""
+    import re
+    source = re.sub(r"/\*.*?\*/", "", source, flags=re.S)
+    return re.sub(r"(?m)^\s*//.*$", "", source)
+
 from naiba.plans import READONLY_TOOLS  # noqa: E402
 from naiba.run.session import resolve_allowed_tools  # noqa: E402
 from naiba.storage.store import CURRENT_SCHEMA_VERSION, ChatStorage  # noqa: E402
@@ -199,11 +206,12 @@ class AuxChatReadonlyTests(unittest.TestCase):
 
 
 class AuxChatPanelGeometryTests(unittest.TestCase):
-    """顶栏「辅助」按钮与面板宽度的不变量（3.3.2 挤压 bug）。
+    """顶栏「辅助」按钮与面板宽度的不变量（3.3.2 挤压 bug + 3.3.3 入口死锁）。
 
-    背景：右侧面板一开，顶栏就挤成一团（用户截图）。两条相关原因都在这里钉住：
+    背景：右侧面板一开，顶栏就挤成一团（用户截图）。三条相关原因都在这里钉住：
     ① 面板开着时顶栏还留一个 ~94px 的「辅助」重复入口；
-    ② 21-aux-chat.js 自己复制了一份 filePanelWidthPx()，把 clamp 丢了。
+    ② 21-aux-chat.js 自己复制了一份 filePanelWidthPx()，把 clamp 丢了；
+    ③ 3.3.2 顺手加的门槛把**全新用户的唯一入口**关掉了（死锁，见下面那条用例）。
     """
 
     def _aux(self) -> str:
@@ -218,10 +226,49 @@ class AuxChatPanelGeometryTests(unittest.TestCase):
     def test_reopen_button_hides_while_panel_open(self):
         aux = self._aux()
         self.assertIn(
-            "auxChatState.tabs.length === 0 || filePanelState.open",
+            "button.hidden = filePanelState.open;",
             aux,
             "面板开着时「辅助」按钮必须隐藏（与文件按钮同口径）",
         )
+        # 反例：不得再按「有没有标签」决定显隐 —— 那就是 3.3.0~3.3.2 的死锁
+        self.assertNotIn(
+            "auxChatState.tabs.length === 0 || filePanelState.open",
+            aux,
+            "又按 tabs.length 卡入口了：全新用户永远进不去辅助对话",
+        )
+
+    def test_entry_is_reachable_with_zero_aux_chats(self):
+        """全新用户（0 个辅助对话）必须能从顶栏打开面板，且在空态里能直接新建。
+
+        3.3.0~3.3.2 的死锁：顶栏按钮要求 tabs.length > 0 才显示；而新建辅助对话的
+        ＋ 只在面板里；面板又只能靠这个按钮打开 ⇒ 没人能第一次用上这个功能。
+        """
+        aux = self._aux()
+        code = _strip_js_comments(aux)
+        button_fn = code[code.index("function updateAuxTabsButton()"):]
+        button_fn = button_fn[: button_fn.index("\n}\n")]
+        self.assertNotIn("tabs.length === 0", button_fn, "门槛又回来了（死锁）")
+        # 只许按「面板是否开着」决定显隐：`button.hidden = ...` 那一行里不得出现 tabs
+        hidden_line = next(
+            (line for line in button_fn.splitlines() if "button.hidden" in line), "")
+        self.assertIn("filePanelState.open", hidden_line)
+        self.assertNotIn("tabs", hidden_line, "显隐判断不得依赖有没有标签（死锁）")
+        # 空态里必须有可点的新建入口
+        self.assertIn("aux-empty-start", aux, "空态缺少「开一个辅助对话」按钮")
+        self.assertIn('data-aux-new', code[code.index("function renderAuxMessages()"):][:900])
+        # 标签栏与空态两个 ＋ 都要接上委托（否则点了没反应）
+        self.assertGreaterEqual(code.count("closest('[data-aux-new]')"), 2)
+
+    def test_zero_state_shows_plus_not_bare_zero(self):
+        """0 个辅助对话时计数显示「＋」（引导新建），不是看起来像故障的裸 0。"""
+        aux = self._aux()
+        self.assertIn("auxChatState.tabs.length ? String(auxChatState.tabs.length) : '＋'", aux)
+
+    def test_zero_state_button_is_styled(self):
+        """空态按钮与空态文案都要有样式，否则是个裸 button（UA 灰底）。"""
+        css = self._css()
+        self.assertIn(".aux-empty-start", css)
+        self.assertIn(".aux-empty-hint", css)
 
     def test_panel_state_is_shared_not_duplicated(self):
         aux = self._aux()

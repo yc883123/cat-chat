@@ -182,6 +182,13 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .file-panel-group[hidden] { display: none; }
 
 /* ---- 辅助对话面板（§3.5）---- */
+/* 空态（一个辅助对话都没有）时的「开一个」按钮：此前没有任何入口——顶栏「辅助」按钮
+   要求 tabs.length > 0 才显示，而新建辅助对话的 ＋ 又只在面板打开后才存在，
+   面板打开又只能靠那个按钮 ⇒ 全新用户永远进不去（3.3.3 修的死锁）。 */
+.aux-empty { margin: auto; max-width: 300px; padding: 8px 6px 20px; text-align: center; }
+.aux-empty-start { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 16px; border: 1px solid var(--accent); border-radius: var(--r-md); background: var(--accent); color: #fff; font-family: inherit; font-size: 13px; cursor: pointer; }
+.aux-empty-start:hover { background: var(--accent-solid); border-color: var(--accent-solid); }
+.aux-empty-hint { margin: 12px 0 0; color: var(--muted); font-size: 12px; line-height: 1.8; }
 .aux-panel-top .file-tabs { padding-top: 2px; }
 .aux-new-tab { flex: none; justify-content: center; min-width: 30px; padding: 0; color: var(--muted); font-size: 16px; }
 .aux-new-tab:hover { color: var(--text); }

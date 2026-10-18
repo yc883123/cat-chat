@@ -810,6 +810,13 @@ class NaibaChatApp:
         model_name = body.get("model_name", "")
         if not isinstance(model_name, str):
             return {"error": "model_name 必须是文本"}, HTTPStatus.BAD_REQUEST
+        # 跟随的主对话：只接受存在且为 main 的会话；指向 aux 或不存在一律忽略置空。
+        # 这是显示与切换联动的锚点，不改变上下文隔离。
+        parent_id = str(body.get("parent_id") or "").strip()
+        if parent_id:
+            parent = self.storage.get_conversation(parent_id, include_messages=False)
+            if not parent or str(parent.get("conv_kind") or "main") != "main":
+                parent_id = ""
         return (
             self.storage.create_conversation(
                 title=title,
@@ -821,6 +828,7 @@ class NaibaChatApp:
                 # 权限档强制 confirm（只读语义档）：入参不参与。
                 permission_mode="confirm",
                 conv_kind="aux",
+                parent_id=parent_id,
             ),
             HTTPStatus.CREATED,
         )

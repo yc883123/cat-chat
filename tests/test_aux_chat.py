@@ -60,15 +60,40 @@ class AuxChatStorageTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    # ---- 迁移 v25 ----
+    # ---- 迁移 v25 / v26 ----
 
-    def test_fresh_db_reaches_v25_with_conv_kind(self):
-        self.assertEqual(CURRENT_SCHEMA_VERSION, 25)
+    def test_fresh_db_reaches_v26_with_conv_kind_and_parent(self):
+        self.assertEqual(CURRENT_SCHEMA_VERSION, 26)
         with self.storage._connect() as db:
             columns = {row[1] for row in db.execute("PRAGMA table_info(conversations)")}
         self.assertIn("conv_kind", columns)
+        self.assertIn("parent_id", columns)
         conv = self.storage.create_conversation()
         self.assertEqual(conv["conv_kind"], "main")
+        self.assertEqual(conv["parent_id"], "")
+
+    def test_parent_id_round_trips(self):
+        """aux 会话的 parent_id 落库并在 list_aux_conversations 回显（前端跟随行靠它）。"""
+        main = self.storage.create_conversation(title="正式任务")
+        aux = self.storage.create_conversation(title="辅助对话 1", conv_kind="aux", parent_id=main["id"])
+        self.assertEqual(aux["parent_id"], main["id"])
+        listed = {item["id"]: item for item in self.storage.list_aux_conversations()}
+        self.assertEqual(listed[aux["id"]]["parent_id"], main["id"])
+        self.assertEqual(
+            self.storage.get_conversation(aux["id"], include_messages=False)["parent_id"], main["id"]
+        )
+
+    def test_aux_settings_store_own_provider_and_model(self):
+        """辅助对话的供应商/模型存在自己的会话行上（与主对话解耦）。"""
+        aux = self.storage.create_conversation(title="辅助对话 1", conv_kind="aux")
+        updated = self.storage.update_conversation_settings(
+            aux["id"], model_key="online:demo", model_name="demo-model"
+        )
+        self.assertEqual(updated["model_key"], "online:demo")
+        self.assertEqual(updated["model_name"], "demo-model")
+        listed = {item["id"]: item for item in self.storage.list_aux_conversations()}
+        self.assertEqual(listed[aux["id"]]["model_key"], "online:demo")
+        self.assertEqual(listed[aux["id"]]["model_name"], "demo-model")
 
     def test_legacy_db_gets_main_default(self):
         """存量库（v24，无 conv_kind 列）迁移后旧行自动归为 main。"""
@@ -155,6 +180,33 @@ class AuxChatStorageTests(unittest.TestCase):
         self.assertIsNone(self.storage.get_conversation(old_aux["id"], include_messages=False))
         self.assertIsNotNone(self.storage.get_conversation(fresh_aux["id"], include_messages=False))
         self.assertIsNotNone(self.storage.get_conversation(main["id"], include_messages=False))
+
+
+class AuxChatCreateApiTests(unittest.TestCase):
+    """创建接口的 parent_id 语义：只接受存在的主对话，aux / 不存在一律忽略。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        from naiba.app import NaibaChatApp
+        from naiba.paths import PathContext
+
+        self.app = NaibaChatApp(paths=PathContext.local(root, root / "config.json"))
+
+    def test_parent_id_accepts_main_conversation(self):
+        main = self.app.storage.create_conversation(title="正式任务")
+        payload, status = self.app.api_create_aux_chat({"parent_id": main["id"]})
+        self.assertEqual(int(status), 201)
+        self.assertEqual(payload["parent_id"], main["id"])
+
+    def test_parent_id_ignored_for_aux_or_missing(self):
+        other_aux = self.app.storage.create_conversation(title="辅助对话 9", conv_kind="aux")
+        for bad in (other_aux["id"], "does-not-exist", ""):
+            with self.subTest(parent_id=bad):
+                payload, status = self.app.api_create_aux_chat({"parent_id": bad})
+                self.assertEqual(int(status), 201)
+                self.assertEqual(payload["parent_id"], "")
 
 
 class AuxChatReadonlyTests(unittest.TestCase):
@@ -253,9 +305,11 @@ class AuxChatPanelGeometryTests(unittest.TestCase):
             (line for line in button_fn.splitlines() if "button.hidden" in line), "")
         self.assertIn("filePanelState.open", hidden_line)
         self.assertNotIn("tabs", hidden_line, "显隐判断不得依赖有没有标签（死锁）")
-        # 空态里必须有可点的新建入口
+        # 空态里必须有可点的新建入口（空态 HTML 已抽到 auxEmptyState()）
         self.assertIn("aux-empty-start", aux, "空态缺少「开一个辅助对话」按钮")
-        self.assertIn('data-aux-new', code[code.index("function renderAuxMessages()"):][:900])
+        empty_fn = code[code.index("function auxEmptyState()"):]
+        empty_fn = empty_fn[: empty_fn.index("\n}\n")]
+        self.assertIn('data-aux-new', empty_fn, "空态的新建按钮没有挂委托标记")
         # 标签栏与空态两个 ＋ 都要接上委托（否则点了没反应）
         self.assertGreaterEqual(code.count("closest('[data-aux-new]')"), 2)
 

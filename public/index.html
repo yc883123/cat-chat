@@ -347,14 +347,28 @@
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
             </button>
           </header>
-          <div class="aux-chat-messages" id="auxChatMessages" aria-live="polite"></div>
-          <div class="aux-chat-composer" id="auxChatComposer">
-            <div class="aux-composer-model">
-              <select id="auxModelSelect" aria-label="辅助对话模型" title="辅助对话用哪个模型回答"></select>
-            </div>
-            <div class="aux-composer-row">
+          <!-- 「跟随」行：这个辅助窗是从哪个主对话旁边开的。点标题跳回那个主对话；
+               只读与不留存是产品约束，写在同行右侧，避免再占一整条横幅。
+               「跟随」只表示它是从这个对话旁边开的，不代表能读到这个对话的内容。 -->
+          <div class="aux-follow" id="auxFollowRow" hidden title="辅助对话和主对话各自独立：它看不到主对话的历史，也不能修改文件；关掉标签内容就清掉。">
+            <span class="aux-follow-label">跟随</span>
+            <button class="aux-follow-target" id="auxFollowTarget" type="button" title="回到这个主对话"></button>
+            <span class="aux-follow-note">独立上下文 · 只读</span>
+          </div>
+          <div class="aux-chat-messages aux-msgs" id="auxChatMessages" aria-live="polite"></div>
+          <div class="aux-composer-shell" id="auxChatComposer">
+            <div class="aux-composer">
               <textarea id="auxChatInput" rows="1" placeholder="问点顺手的事（只读，不能改文件）" aria-label="辅助对话输入" spellcheck="false"></textarea>
-              <button class="primary-button" id="auxChatSend" type="button" title="发送">发送</button>
+              <button class="send-button" id="auxChatSend" type="button" title="发送" aria-label="发送">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>
+              </button>
+            </div>
+            <!-- 供应商与模型：辅助对话自己的选择，与顶栏/左侧供应商解耦。
+                 原生 select 直接做成胶囊，值来源唯一，不另造浮层。 -->
+            <div class="aux-meta">
+              <span class="aux-readonly-chip" title="辅助对话只能读取和查询，不能修改文件">只读</span>
+              <select class="aux-chip" id="auxProviderSelect" aria-label="辅助对话供应商" title="辅助对话用哪个 API 供应商"></select>
+              <select class="aux-chip" id="auxModelSelect" aria-label="辅助对话模型" title="辅助对话用哪个模型回答"></select>
             </div>
           </div>
         </div>

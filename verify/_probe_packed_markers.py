@@ -54,6 +54,7 @@ CHANGED = [
     "js/13-skill-refs.js",
     "js/15-bind-events.js",
     "js/16-file-refs.js",
+    "js/21-aux-chat.js",
 ]
 
 # 本轮新增 / 必须存在的内置 Skill（**必须在包里**，否则出厂绑定失效）。
@@ -154,12 +155,18 @@ FINGERPRINTS = {
         "usagePricingDialog",
         "usagePricingGroups",
         "usagePricingCurChips",
+        # 3.3.5：辅助面板重做（跟随行 + 供应商/模型胶囊 + 主对话同款发送键）。
+        "auxFollowRow",
+        "auxProviderSelect",
+        "aux-meta",
     ],
     "styles.css": ["--set-r-card", "agent-card-tag", "settings-card-head", "cache-ref-hint", "sidebar-view-menu", "is-archived",
                    # 2.9.9：分析视图全套样式（KPI 网格 / 工具行 chip / tooltip / 弹窗 dvh 兜底）。
                    ".usage-kpis", ".usage-chip", ".usage-tooltip", ".usage-dialog",
                    # 2.9.11：费用单价弹层（分组卡 / 二级行 / 币种条 + 自定义币种删除叉）。
-                   ".pricing-dialog", ".pricing-group", ".pricing-row", ".pricing-cur-x"],
+                   ".pricing-dialog", ".pricing-group", ".pricing-row", ".pricing-cur-x",
+                   # 3.3.5：辅助对话窄面板适配 + 跟随行 + 供应商/模型胶囊。
+                   ".aux-msgs .message-row", ".aux-follow", ".aux-chip"],
     # emoji 头像判定入口（内置 Agent 用 emoji，上传图走 <img>）。
     "js/01-core.js": ["agentAvatarEmoji", "agentAvatarFile", "normalizeSidebarPrefs"],
     # 2.9.8：bootstrap 时同步服务端 settings.sidebar 三项偏好。
@@ -202,6 +209,12 @@ FINGERPRINTS = {
     # 2.9.9：@ / 弹层定位可视视口感知 + hide 清内联 maxHeight（手机软键盘裁弹层修复）。
     "js/13-skill-refs.js": ["window.visualViewport", "style.removeProperty('max-height')"],
     "js/16-file-refs.js": ["style.removeProperty('max-height')"],
+    # 3.3.5：辅助对话改用主对话 messageElement 渲染 + 自己的供应商/模型 + 跟随主对话。
+    "js/21-aux-chat.js": [
+        'from "./04-messages.js"',
+        "auxProviderSelect",
+        "naiba:conversation-changed",
+    ],
 }
 
 # 打包时被 spec 排除的目录（private_skill_dirs / 产物），比对时同步跳过。

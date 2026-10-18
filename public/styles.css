@@ -193,29 +193,39 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .aux-new-tab { flex: none; justify-content: center; min-width: 30px; padding: 0; color: var(--muted); font-size: 16px; }
 .aux-new-tab:hover { color: var(--text); }
 .aux-chat { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.aux-chat-messages { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; padding: 12px 12px 8px; display: flex; flex-direction: column; gap: 10px; }
-.aux-row { display: flex; align-items: flex-end; gap: 6px; }
-.aux-row-user { justify-content: flex-end; }
-.aux-row-ai { justify-content: flex-start; }
-.aux-bubble { max-width: 86%; min-width: 0; padding: 8px 11px; border-radius: 12px; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
-.aux-row-user .aux-bubble { background: rgb(var(--brand-500-rgb)); color: #fff; border-bottom-right-radius: 4px; }
-.aux-row-ai .aux-bubble { background: var(--surface-2); color: var(--text); border-bottom-left-radius: 4px; }
-.aux-bubble-text { min-width: 0; }
-/* AI 气泡正文直接用 .message-body 的字号（var(--msg-font-size)）：跟随用户的字体设置，
-   不写死字号——也绝不新增 `.xxx .message-body` 形态的选择器（子串会抢断 test_chat_font
-   的 _rule(".message-body") 首次命中，实测守门直接报红）。 */
-.aux-thinking { color: var(--muted); font-size: 12px; }
-.aux-send-to-main { min-height: 26px; padding: 0 9px; font-size: 11px; flex: none; margin-bottom: 2px; }
-.aux-chat-composer { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px; border-top: 1px solid var(--line); background: var(--surface-2); }
-/* 模型行：下拉占满整行（辅助对话可独立换模型，用户点名要求）。 */
-.aux-composer-model select { width: 100%; min-height: 30px; padding: 0 6px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--muted); font-size: 12px; text-overflow: ellipsis; }
-.aux-composer-model select:focus { outline: none; border-color: rgb(var(--brand-500-rgb)); color: var(--text); }
-.aux-composer-row { display: flex; align-items: flex-end; gap: 8px; }
-.aux-chat-composer textarea { flex: 1; min-width: 0; max-height: 140px; resize: none; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); font: inherit; font-size: 13px; line-height: 1.5; padding: 8px 10px; }
-.aux-chat-composer textarea:focus { outline: none; border-color: rgb(var(--brand-500-rgb)); }
-.aux-chat-composer .primary-button { min-height: 36px; padding: 0 14px; flex: none; }
-.aux-chat-composer .primary-button:disabled { opacity: .5; cursor: not-allowed; }
-/* 隔离提示横幅：辅助对话的「独立/只读/不留存」一句话说明（§3.5） */
+/* 消息区：直接复用主对话的 .message-row / .message-card（04-messages.js 的 messageElement），
+   这里只做窄面板适配。绝不新增 `.xxx .message-body` 形态的选择器——子串会抢断
+   test_chat_font 的 _rule(".message-body") 首次命中，守门直接报红。 */
+.aux-chat-messages { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; padding: 14px 12px 8px; }
+.aux-msgs .message-row { grid-template-columns: 24px minmax(0, 1fr); gap: 8px; margin-bottom: 18px; }
+.aux-msgs .message-row.user { grid-template-columns: minmax(0, 1fr); }
+.aux-msgs .message-avatar { width: 24px; height: 24px; font-size: 10px; }
+.aux-msgs .message-avatar-emoji { font-size: 14px; }
+.aux-msgs .message-card { padding: 10px 12px; border-radius: var(--r-md); }
+.aux-msgs .tool-run pre { max-height: 140px; }
+.aux-msgs .message-actions { gap: 8px; }
+.aux-msgs .aux-send-to-main { min-height: 22px; padding: 0 7px; font-size: 11px; }
+/* 「跟随」行：辅助窗绑定的是哪个主对话。主对话已删时退化为纯文本提示。 */
+.aux-follow { display: flex; align-items: center; gap: 6px; padding: 5px 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); color: var(--muted); font-size: 11px; line-height: 1.5; }
+.aux-follow[hidden] { display: none; }
+.aux-follow-label { flex: none; }
+.aux-follow-target { min-width: 0; max-width: 60%; padding: 0; border: 0; background: none; color: var(--text); font: inherit; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aux-follow-target:hover { color: var(--accent); text-decoration: underline; }
+.aux-follow-target.is-missing { color: var(--muted); cursor: default; text-decoration: none; }
+.aux-follow-note { margin-left: auto; flex: none; }
+/* composer：输入框 + 主对话同款箭头发送键；供应商/模型收成底部小胶囊。 */
+.aux-composer-shell { flex: none; display: flex; flex-direction: column; gap: 6px; padding: 8px 10px 10px; border-top: 1px solid var(--line); background: var(--surface-2); }
+.aux-composer { display: flex; align-items: flex-end; gap: 8px; }
+.aux-composer textarea { flex: 1; min-width: 0; max-height: 140px; resize: none; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); font: inherit; font-size: 13px; line-height: 1.5; padding: 8px 10px; }
+.aux-composer textarea:focus { outline: none; border-color: rgb(var(--brand-500-rgb)); }
+.aux-composer .send-button { width: 36px; height: 36px; flex: none; display: grid; place-items: center; padding: 0; }
+.aux-composer .send-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.aux-meta { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.aux-readonly-chip { flex: none; padding: 1px 7px; border: 1px solid var(--line); border-radius: var(--r-full); background: var(--surface); color: var(--muted); font-size: 10.5px; line-height: 1.6; }
+.aux-chip { min-width: 0; max-width: 46%; min-height: 24px; padding: 0 4px; border: 1px solid var(--line); border-radius: var(--r-full); background: var(--surface); color: var(--muted); font: inherit; font-size: 11px; text-overflow: ellipsis; cursor: pointer; }
+.aux-chip:hover { color: var(--text); border-color: var(--line-strong); }
+.aux-chip:focus { outline: none; border-color: rgb(var(--brand-500-rgb)); color: var(--text); }
+/* 空态说明横幅（有消息时不再显示，改由 .aux-follow 的短注承担）。 */
 .aux-chat-banner { padding: 6px 12px; background: var(--surface-2); color: var(--muted); font-size: 11px; line-height: 1.6; border-bottom: 1px solid var(--line); }
 
 /* ---- 文件预览错误卡片 + 编码选择器（附录 A.1/A.2）---- */

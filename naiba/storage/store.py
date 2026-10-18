@@ -28,7 +28,7 @@ _METADATA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
-CURRENT_SCHEMA_VERSION = 25
+CURRENT_SCHEMA_VERSION = 26
 
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
@@ -843,6 +843,19 @@ def _migrate_to_v25(db: sqlite3.Connection) -> None:
     db.commit()
 
 
+def _migrate_to_v26(db: sqlite3.Connection) -> None:
+    """辅助对话记住「从哪个主对话旁边打开」：conversations 加 parent_id 列。
+
+    只用于界面显示「跟随：xxx」与切主对话时自动切换辅助窗，**不参与上下文隔离**
+    （aux 会话仍然读不到父会话的历史）。纯加列，默认空串，无数据改写、无 VACUUM。
+    """
+    try:
+        db.execute("SELECT parent_id FROM conversations LIMIT 1")
+    except sqlite3.OperationalError:
+        db.execute("ALTER TABLE conversations ADD COLUMN parent_id TEXT NOT NULL DEFAULT ''")
+    db.commit()
+
+
 # 目标版本 -> 迁移函数。新增版本时在此追加并提升 CURRENT_SCHEMA_VERSION。
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
@@ -870,6 +883,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     23: _migrate_to_v23,
     24: _migrate_to_v24,
     25: _migrate_to_v25,
+    26: _migrate_to_v26,
 }
 
 
@@ -1544,6 +1558,7 @@ class ChatStorage:
         workspace_group: str = "",
         reasoning_effort: str = "auto",
         conv_kind: str = "main",
+        parent_id: str = "",
     ) -> dict[str, Any]:
         now = int(time.time() * 1000)
         conversation_id = uuid.uuid4().hex
@@ -1557,12 +1572,13 @@ class ChatStorage:
             resolved_model_key = f"online:{provider_id}"
         with self._connect() as db:
             db.execute(
-                "INSERT INTO conversations(id, title, conv_kind, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, title_customized, system_prompt, stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, provider_id, model_key, model_name, agent_id, interaction_mode, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO conversations(id, title, conv_kind, parent_id, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, title_customized, system_prompt, stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, provider_id, model_key, model_name, agent_id, interaction_mode, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     conversation_id,
                     title.strip() or "新对话",
                     conv_kind,
+                    str(parent_id or "").strip(),
                     "online",
                     permission_mode,
                     1 if web_search_enabled else 0,
@@ -1592,7 +1608,7 @@ class ChatStorage:
             "stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, "
             "skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, "
             "interaction_mode, favorite, archived, sort_order, branched_from_id, "
-            "branch_message_id, created_at, updated_at"
+            "branch_message_id, parent_id, created_at, updated_at"
         )
         # 辅助对话（conv_kind='aux'）是随手开随手关的标签页，不进侧栏会话列表（§3.3 排除规则）。
         with self._connect() as db:
@@ -2045,7 +2061,7 @@ class ChatStorage:
         """
         with self._connect() as db:
             row = db.execute(
-                "SELECT id, title, conv_kind, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, lightweight_mode, lightweight_disabled_features, title_customized, system_prompt, stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, interaction_mode, favorite, archived, sort_order, branched_from_id, branch_message_id, created_at, updated_at "
+                "SELECT id, title, conv_kind, mode, permission_mode, web_search_enabled, deep_reasoning_enabled, lightweight_mode, lightweight_disabled_features, title_customized, system_prompt, stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, interaction_mode, favorite, archived, sort_order, branched_from_id, branch_message_id, parent_id, created_at, updated_at "
                 "FROM conversations WHERE id = ?",
                 (conversation_id,),
             ).fetchone()
@@ -2796,7 +2812,7 @@ class ChatStorage:
             "stream_enabled, workspace_dir, workspace_group, reasoning_effort, enabled_tool_ids, "
             "skill_policy, chat_supports_images, provider_id, model_key, model_name, agent_id, "
             "interaction_mode, favorite, archived, sort_order, branched_from_id, "
-            "branch_message_id, created_at, updated_at"
+            "branch_message_id, parent_id, created_at, updated_at"
         )
         with self._connect() as db:
             rows = db.execute(
@@ -4228,6 +4244,9 @@ class ChatStorage:
         # 前端只按「非空 = 是分支」判断，不必再判 undefined。
         result["branched_from_id"] = str(result.get("branched_from_id") or "")
         result["branch_message_id"] = str(result.get("branch_message_id") or "")
+        # 辅助对话的「跟随」父会话：只用于界面显示与切换联动，不参与上下文隔离。
+        # 老库行对象可能缺列，统一补空串。
+        result["parent_id"] = str(result.get("parent_id") or "")
         result.setdefault("branch_count", 0)
         try:
             parsed = json.loads(result.get("enabled_tool_ids") or "[]")

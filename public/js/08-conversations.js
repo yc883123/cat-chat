@@ -1098,6 +1098,9 @@ export async function createConversation(workspaceGroup = '', workspaceDir = '',
   // 折叠卡会错误地出现在新会话页面（该卡数据契约上只属于 openConversation 装载的会话）。
   state.firstTurnInfo = null;
   state.conversations.unshift(conversation);
+  // 辅助对话靠这条广播跟随当前主对话（21 监听；08 不 import 21，避免循环依赖）。
+  // 必须放在会话数据入 state 之后：辅助面板要按 id 在 state.conversations 里查父会话标题。
+  document.dispatchEvent(new CustomEvent('naiba:conversation-changed', { detail: { id: conversation.id } }));
   state.expandedGroups.add(currentConversationWorkspaceGroup());
   renderComposerWorkspace();
   sidebarScrollToActive = true;
@@ -1140,6 +1143,9 @@ export async function openConversation(id) {
   renderComposerWorkspace();
   const index = state.conversations.findIndex((item) => item.id === id);
   if (index >= 0) state.conversations[index] = { ...state.conversations[index], ...conversation };
+  // 辅助对话靠这条广播跟随当前主对话（21 监听；08 不 import 21，避免循环依赖）。
+  // 放在会话数据入 state 之后：辅助面板要按 id 查父会话标题。
+  document.dispatchEvent(new CustomEvent('naiba:conversation-changed', { detail: { id } }));
   state.conversationSnapshot = conversationSnapshot(conversation);
   console.log('[naiba] openConversation', id.slice(0, 8), '服务器返回消息数=', (conversation.messages || []).length);
   // 首轮上下文（系统提示词 + 工具集）折叠卡：单独拉取，失败静默（老会话无此数据）。

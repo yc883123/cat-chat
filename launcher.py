@@ -1263,6 +1263,36 @@ def _run_skill_script(argv: list[str]) -> int:
     return 0
 
 
+def _run_self_check() -> int:
+    """冻结版打包自检：把重依赖与惰性 Provider 全部导入一遍，确认 onefile 解包目录文件齐全。
+
+    发布流水线在打包后用 ``naiba-chat.exe --self-check`` 启动它：任何缺失的 DLL/扩展
+    都会在这里复现为导入失败，从而在发布前拦下。2026-10-19 的 3.4.1 正是因为打包时
+    PyMuPDF 大版本漂移、打出的 exe 缺少文件，单测全绿却一启动就崩，才加了这道闸。
+    """
+    import importlib
+
+    modules = (
+        "pymupdf",
+        "av",
+        "PIL.Image",
+        "webview",
+        "pystray",
+        "mcp",
+        "naiba.pdf",
+        "naiba.video",
+        "naiba.vision.runtime",
+        "naiba.subagent",
+        "naiba.tools.providers.core",
+        "naiba.tools.providers.documents",
+        "naiba.tools.providers.video",
+    )
+    for name in modules:
+        importlib.import_module(name)
+    print("SELF_CHECK_OK")
+    return 0
+
+
 def main() -> None:
     # 隐藏入口：冻结版执行 .py Skill 脚本。必须先于任何初始化处理，
     # 否则 naiba-chat.exe --run-skill-script <script> 会走到实例锁，
@@ -1271,6 +1301,9 @@ def main() -> None:
     if "--run-skill-script" in argv:
         idx = argv.index("--run-skill-script")
         raise SystemExit(_run_skill_script(argv[idx + 1 :]))
+    # 隐藏入口：冻结版打包自检（发布流水线用，不初始化 GUI/HTTP/实例锁）。
+    if "--self-check" in argv:
+        raise SystemExit(_run_self_check())
     Launcher().run()
 
 

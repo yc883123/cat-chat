@@ -1,28 +1,29 @@
-# Cat Chat 3.4.1 Beta
+# Cat Chat 3.4.2 Beta
 
 <p align="center">
   <img src="docs/cat-chat-logo.png" alt="Cat Chat" width="520">
 </p>
 
-Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。3.4.1 Beta 新增「百度千帆 Token Plan」供应商模板，并修好了一类把请求地址拼错、导致接口返回 404 的问题。
+Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。3.4.2 Beta 修复了 3.4.1 因打包依赖漂移导致的一启动就崩溃，并新增发布前产物自检；同时包含百度千帆 Token Plan 模板。
 
 > Cat Chat 原名 Naiba Chat。显示名自 2.7.6 Beta 起为 Cat Chat；GitHub 仓库自 2.8.0 Beta 起更名为 `cat-chat`（旧地址自动跳转）。更新资产仍使用 `naiba-chat.exe` 与原有清单协议，既有数据位置不变，无需重新配置或搬迁数据。
 
-## 3.4.1 Beta 主要能力
-- **新增「百度千帆 Token Plan」供应商模板（本次重点）**：点一下就把请求地址、请求格式、推荐模型填好，只需粘贴订阅页里的专属 API Key。该套餐把 DeepSeek、GLM 等模型打包成订阅制用量包。注意：必须用「我的订阅」里的专属 API Key（普通千帆 Key 会被拒绝）；该套餐没有模型目录接口，「检查模型」会失败，模型名需要手填（`deepseek-v4.1-flash`、`deepseek-v4-pro`、`glm-5.3` 等，控制台统一选模型时填 `qianfan-code-latest`），不影响保存与对话。
-- **修好「地址中间带版本号」的接口拼接（本次重点）**：千帆地址路径中间带版本号（`/v2/tokenplan/personal`），官方端点是在它后面直接接 `/chat/completions`、没有 `/v1`。此前「OpenAI 兼容」格式固定按「地址 + `/v1/chat/completions`」拼接，会拼出 `.../personal/v1/chat/completions` 被服务器以 404 拒绝，让人误以为地址或 Key 填错了。现在这种情况改为在版本号处直接接端点，拼出的就是官方路径。
-- **修复范围收敛**：只对「路径中间带 `/v2/` 这类版本段、且没有 `/v1`」的地址生效；其他供应商（方舟、智谱、Ollama、LM Studio 等）的拼接结果逐字不变。
-- **验证**：全量单测 **2572** 通过；本版新增地址拼接守门与千帆预设守门，并对既有供应商地址的拼接结果做了回归比对，逐字一致。
+## 3.4.2 Beta 主要能力
+- **修复 3.4.1 一启动就崩溃（本次重点）**：3.4.1 构建当天 PyMuPDF 发布 2.0 大版本，而发布流水线安装依赖时没有锁版本，把一个文件布局不完整的新版 PyMuPDF 打进了 exe。程序启动装配 PDF 工具时就报 `Failed to execute script 'launcher' ... [Errno 2] No such file or directory: ...\_MEI...`，根本进不到界面。这不是你的配置问题，也不需要删除数据。本版把打包依赖全部锁到 3.4.0 实测可用的版本。
+- **新增发布前产物自检**：打包出来的 exe 必须先以 `--self-check` 启动，把 PDF、视频、子代理等重依赖全部导入一遍，失败就直接停止发布。单测全绿但 exe 打不开的情况，以后在发布前就会暴露。
+- **安装过 3.4.1 的用户**：它无法自行更新，请直接下载本页 zip、用里面的 `cat-chat.exe` 覆盖原 exe；聊天记录、设置和 API Key 都在数据目录，不会被改动。3.4.0 及更早版本可正常自动更新。
+- **包含 3.4.1 的功能**：新增「百度千帆 Token Plan」供应商模板，并修好「地址中间带版本号」的接口拼接（`qianfan.baidubce.com/v2/tokenplan/personal` 不再被多拼 `/v1`）。
+- **验证**：全量单测 **2572** 通过；打包产物在本机与 CI 都执行了 `--self-check` 启动自检并通过。
 ## 开始使用
 
 ### 使用 Windows 版本
 
-1. 下载 `cat-chat-3.4.1-beta-windows-x64.zip`。
+1. 下载 `cat-chat-3.4.2-beta-windows-x64.zip`。
 2. 解压到一个可写目录。
 3. 运行 `cat-chat.exe`。
 4. 在设置中添加在线 API 或本地模型服务。
 
-> 归档里也提供旧名 `naiba-chat-3.4.1-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
+> 归档里也提供旧名 `naiba-chat-3.4.2-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
 
 首次运行会创建本地数据目录。升级时请直接替换程序文件，不要删除原有 `data` 目录和配置文件。
 
@@ -108,14 +109,14 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 - `naiba-chat.exe` —— **自动更新链路唯一使用的资产，永久保留此文件名**
 - `naiba-chat-update.json` —— 更新清单，其中 `repository` 字段永久写 `yc883123/naiba-chat`
 - `cat-chat.exe` —— 与 `naiba-chat.exe` 是同一文件，SHA-256 完全相同
-- `cat-chat-3.4.1-beta-windows-x64.zip`
-- `naiba-chat-3.4.1-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
+- `cat-chat-3.4.2-beta-windows-x64.zip`
+- `naiba-chat-3.4.2-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
 
 更新器会验证清单中的仓库、提交、文件名和 SHA-256。下载文件还必须是有效的 Windows 可执行文件；任何一项不一致都会终止安装。**自动更新始终读取 `naiba-chat.exe` 与清单里的旧仓库名**（GitHub 对旧仓库地址做长期重定向），这是已发布客户端逐字校验的协议，仓库改名后也不改值。
 
 ## Beta 说明
 
-这是 3.2.0 Beta，适合实际使用和反馈，但仍有以下边界：
+这是 3.4.2 Beta，适合实际使用和反馈，但仍有以下边界：
 
 - 不内置 ComfyUI、模型权重或第三方生成服务，需用户自行安装和配置。
 - 不同模型的工具调用质量差异较大，小型模型可能无法稳定完成长链任务。
@@ -129,7 +130,7 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 ```powershell
 Get-ChildItem public\js\*.js | ForEach-Object { node --check $_.FullName }
 python -m unittest discover -s tests -q
-$env:NAIBA_BUILD_VERSION = "3.4.1-beta"
+$env:NAIBA_BUILD_VERSION = "3.4.2-beta"
 python -m PyInstaller --noconfirm --clean naiba-chat.spec
 ```
 

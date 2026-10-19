@@ -4,6 +4,13 @@
 最新版本的要点见 [README.md](README.md)；应用内「设置 → 软件更新」的详细更新内容来自发布清单 `naiba-chat-update.json`，与本文件无关。
 
 ---
+## 3.4.2 Beta 主要能力
+- **修复 3.4.1 一启动就崩溃（本次重点）**：3.4.1 构建当天 PyMuPDF 发布 2.0 大版本，而发布流水线安装依赖时没有锁版本，把一个文件布局不完整的新版 PyMuPDF 打进了 exe。程序启动装配 PDF 工具时就报 `Failed to execute script 'launcher' ... [Errno 2] No such file or directory: ...\_MEI...`，根本进不到界面。这不是你的配置问题，也不需要删除数据。本版把打包依赖全部锁到 3.4.0 实测可用的版本。
+- **新增发布前产物自检**：打包出来的 exe 必须先以 `--self-check` 启动，把 PDF、视频、子代理等重依赖全部导入一遍，失败就直接停止发布。单测全绿但 exe 打不开的情况，以后在发布前就会暴露。
+- **安装过 3.4.1 的用户**：它无法自行更新，请直接下载本页 zip、用里面的 `cat-chat.exe` 覆盖原 exe；聊天记录、设置和 API Key 都在数据目录，不会被改动。3.4.0 及更早版本可正常自动更新。
+- **包含 3.4.1 的功能**：新增「百度千帆 Token Plan」供应商模板，并修好「地址中间带版本号」的接口拼接（`qianfan.baidubce.com/v2/tokenplan/personal` 不再被多拼 `/v1`）。
+- **验证**：全量单测 **2572** 通过；打包产物在本机与 CI 都执行了 `--self-check` 启动自检并通过。
+
 ## 3.4.1 Beta 主要能力
 - **新增「百度千帆 Token Plan」供应商模板（本次重点）**：点一下就把请求地址、请求格式、推荐模型填好，只需粘贴订阅页里的专属 API Key。该套餐把 DeepSeek、GLM 等模型打包成订阅制用量包。注意：必须用「我的订阅」里的专属 API Key（普通千帆 Key 会被拒绝）；该套餐没有模型目录接口，「检查模型」会失败，模型名需要手填（`deepseek-v4.1-flash`、`deepseek-v4-pro`、`glm-5.3` 等，控制台统一选模型时填 `qianfan-code-latest`），不影响保存与对话。
 - **修好「地址中间带版本号」的接口拼接（本次重点）**：千帆地址路径中间带版本号（`/v2/tokenplan/personal`），官方端点是在它后面直接接 `/chat/completions`、没有 `/v1`。此前「OpenAI 兼容」格式固定按「地址 + `/v1/chat/completions`」拼接，会拼出 `.../personal/v1/chat/completions` 被服务器以 404 拒绝，让人误以为地址或 Key 填错了。现在这种情况改为在版本号处直接接端点，拼出的就是官方路径。

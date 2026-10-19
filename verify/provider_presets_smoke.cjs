@@ -1,7 +1,7 @@
 // 供应商预设（「只填 API Key」）+ 首启引导向导冒烟（真后端）。
 //
 // 覆盖：
-//   ① 空供应商实例启动 → 向导自动弹出，1 步高亮，14 张模板卡（一行三张，可滚动），「还有 …」报总数；
+//   ① 空供应商实例启动 → 向导自动弹出，1 步高亮，15 张模板卡（一行三张，可滚动），「还有 …」报总数；
 //   ② 选 TE 中转 → 进第 2 步：recap 带域名、引导条三段式 ①②③、有「打开注册页」按钮（不真点）、
 //      只留 API Key 一个空（URL/模型随模板走，不显输入框）；无 Key 保存被挡；
 //   ③ 填 Key 保存 → 弹层关闭 + 卡片落库（base_url/请求格式/推荐模型/来源 preset_id 全对）；
@@ -145,14 +145,14 @@ async function waitFor(page, fn, deadlineMs = 6000) {
     console.log(`      （首屏到向导弹出的耗时：${Date.now() - startedAt} ms）`);
     let wizard = await wizardSnapshot(page);
     check('空供应商时首启向导自动弹出', booted && wizard.open === true, JSON.stringify(wizard));
-    check('预设表有 14 张模板卡', wizard.cardCount === 14, String(wizard.cardCount));
+    check('预设表有 15 张模板卡', wizard.cardCount === 15, String(wizard.cardCount));
     check('第 1 步高亮、第 2 步未高亮', wizard.stepPresetActive && !wizard.stepKeyActive, JSON.stringify(wizard));
     check('第 1 步在视觉上确实与第 2 步不同色（高亮不只是类名）',
       wizard.stepPresetColor !== '' && wizard.stepPresetColor !== wizard.stepKeyColor,
       JSON.stringify({ preset: wizard.stepPresetColor, key: wizard.stepKeyColor }));
     check('模板卡一行三张', wizard.columns === 3, String(wizard.columns));
-    check('网格两行装不下时是可滚动的（不把 14 张全铺开）', wizard.scrollable === true, String(wizard.scrollable));
-    check('「还有 …」提示报出模板总数', wizard.moreText.includes('共 14 个模板'), wizard.moreText);
+    check('网格两行装不下时是可滚动的（不把 15 张全铺开）', wizard.scrollable === true, String(wizard.scrollable));
+    check('「还有 …」提示报出模板总数', wizard.moreText.includes('共 15 个模板'), wizard.moreText);
     check('下拉版死控件已彻底移除', wizard.legacySelect === false, String(wizard.legacySelect));
     check('入口卡是 DeepSeek、末尾是本机 Unsloth（在线在前本地在后）',
       wizard.firstCardName === 'DeepSeek' && wizard.lastCardName === '本机 Unsloth',
@@ -238,7 +238,7 @@ async function waitFor(page, fn, deadlineMs = 6000) {
     await page.click('[data-provider-add]');
     await page.waitForTimeout(500);
     let dialog = await dialogSnapshot(page);
-    check('「添加 API」弹层渲染同一套模板网格（14 张）', dialog.open === true && dialog.cardCount === 14, JSON.stringify(dialog));
+    check('「添加 API」弹层渲染同一套模板网格（15 张）', dialog.open === true && dialog.cardCount === 15, JSON.stringify(dialog));
     check('新卡不预选任何模板（等价自定义配置）', dialog.activeCard === '' && dialog.name === '', JSON.stringify(dialog));
     check('标题与副标题说明「选模板后只填 Key」',
       dialog.title === '添加 API' && dialog.guideText.includes('选择上方任一模板'), JSON.stringify(dialog));
@@ -255,12 +255,20 @@ async function waitFor(page, fn, deadlineMs = 6000) {
       dialog.guideVisible && dialog.guideText.includes('open.bigmodel.cn') && dialog.keyButtonVisible && dialog.keyButtonPreset === 'zhipu',
       JSON.stringify({ text: dialog.guideText.slice(0, 40), visible: dialog.keyButtonVisible }));
 
-    await page.click('#providerPresetGrid [data-provider-preset="bailan"]');
+    // 百度千帆 Token Plan：地址路径中间带版本段（/v2/tokenplan/personal）且官方端点无 /v1，
+    // 是「中间版本段」拼接规则的唯一真实用例；这里同时守住模板卡回填与引导条。
+    await page.click('#providerPresetGrid [data-provider-preset="qianfan"]');
     await page.waitForTimeout(200);
     dialog = await dialogSnapshot(page);
-    check('切到摆烂中转后回填为 grok-4.6 / api.bailan.store',
-      dialog.activeCard === 'bailan' && dialog.baseUrl === 'https://api.bailan.store' && dialog.model === 'grok-4.6',
+    check('切到百度千帆 Token Plan 后回填地址/格式/推荐模型',
+      dialog.activeCard === 'qianfan'
+      && dialog.baseUrl === 'https://qianfan.baidubce.com/v2/tokenplan/personal'
+      && dialog.format === 'openai_chat' && dialog.model === 'deepseek-v4.1-flash',
       JSON.stringify(dialog));
+    check('千帆引导条写明专属 Key 与手填模型名的限制',
+      dialog.guideVisible && dialog.guideText.includes('专属') && dialog.guideText.includes('qianfan-code-latest')
+      && dialog.keyButtonVisible && dialog.keyButtonPreset === 'qianfan',
+      JSON.stringify({ text: dialog.guideText.slice(0, 40), visible: dialog.keyButtonVisible }));
 
     await page.click('#providerPresetGrid [data-provider-preset="custom"]');
     await page.waitForTimeout(200);
@@ -291,7 +299,7 @@ async function waitFor(page, fn, deadlineMs = 6000) {
     await page.waitForTimeout(300);
     // 收尾：清掉本轮建出来的卡片（隔离目录随后整体删除，这里只是保持语义干净）。
     for (const item of await providers()) {
-      if (['te', 'bailan', 'custom', 'zhipu'].includes(item.preset_id) || item.name === 'TE 中转') {
+      if (['te', 'qianfan', 'custom', 'zhipu'].includes(item.preset_id) || item.name === 'TE 中转') {
         await apiJson(`/api/providers/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
       }
     }

@@ -1012,7 +1012,14 @@ class ProtocolMixins:
                 path = target_path
                 break
         if not path:
-            path = base_path + target_path
+            # 版本段不在末尾、而在路径中间时同理（千帆 Token Plan 个人版
+            # /v2/tokenplan/personal 官方端点就是 {base}/chat/completions）：中间版本段
+            # 已经是端点前缀，同样剥掉 /v1 直接追加，否则会拼出
+            # .../personal/v1/chat/completions（404）。Gemini /v1beta 目标不匹配 /v1/ 前缀。
+            if target_path.startswith("/v1/") and re.search(r"/v\d+/", base_path):
+                path = base_path + target_path[len("/v1"):]
+            else:
+                path = base_path + target_path
         return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
 
 

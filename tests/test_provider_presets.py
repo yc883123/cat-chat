@@ -2,7 +2,7 @@
 """供应商预设（「只填 API Key」接入模板）的表完整性 + 回填语义 + 前端接线守门。
 
 背景：设置 → 模型 →「添加 API」原先是一张空表单，API URL / 请求格式 / 模型名全要自己填，
-新用户第一步就卡住。现在后端有一张 15 条的预设表（大厂 8 + 中转 2 + 自定义 + 本地 4），
+新用户第一步就卡住。现在后端有一张 15 条的预设表（大厂 9 + 中转 1 + 自定义 1 + 本地 4），
 前端两个弹层（设置弹层与首启引导向导）共用同一份名单：选中卡片即回填连接字段，
 标准用户只剩 API Key 一个空。
 
@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from naiba.config import ConfigStore, ONLINE_REQUEST_FORMATS, VALID_LOCAL_BACKENDS  # noqa: E402
+from naiba.llm.protocols import ProtocolMixins as P  # noqa: E402
 from naiba.llm.provider_presets import (  # noqa: E402
     PROVIDER_PRESETS, apply_preset_values, provider_preset, provider_preset_key_url,
     provider_presets_payload,
@@ -36,14 +37,14 @@ from naiba.llm.provider_presets import (  # noqa: E402
 
 REQUIRED_FIELDS = ("id", "kind", "name", "abbr", "base_url", "request_format", "model", "key_required", "key_url", "hint")
 # 名单顺序即界面顺序：大厂 → 中转 → 自定义 → 本地（在线在前）。
-EXPECTED_ONLINE_IDS = ("deepseek", "kimi", "zhipu", "qwen", "ark", "openai", "claude", "gemini", "te", "custom")
+EXPECTED_ONLINE_IDS = ("deepseek", "kimi", "zhipu", "qwen", "ark", "qianfan", "openai", "claude", "gemini", "te", "custom")
 EXPECTED_LOCAL_IDS = ("ollama", "lm_studio", "llama_cpp", "unsloth")
 
 
 class PresetTableTests(unittest.TestCase):
     def test_fifteen_presets_in_declared_order(self):
         ids = [item["id"] for item in PROVIDER_PRESETS]
-        self.assertEqual(len(ids), 14, f"预设条数应为 14：{ids}")
+        self.assertEqual(len(ids), 15, f"预设条数应为 15：{ids}")
         self.assertEqual(len(set(ids)), len(ids), "预设 id 必须唯一")
         self.assertEqual(ids, list(EXPECTED_ONLINE_IDS) + list(EXPECTED_LOCAL_IDS))
 
@@ -106,6 +107,19 @@ class PresetTableTests(unittest.TestCase):
         # 官方警告：Coding Plan 端点与按量端点用错会按量扣费——引导里必须能对出两个 URL。
         self.assertIn("ark.cn-beijing.volces.com/api/v3", ark["hint"], "按量端点切换要写进引导")
         self.assertIn("按量扣费", ark["hint"], "计费区分警告要写进引导")
+
+    def test_qianfan_preset_prefills_token_plan_endpoint(self):
+        """千帆 Token Plan 预填官方 OpenAI 兼容 Base（路径中间带 /v2，端点无 /v1）。"""
+        qianfan = provider_preset("qianfan")
+        self.assertEqual(qianfan["base_url"], "https://qianfan.baidubce.com/v2/tokenplan/personal")
+        self.assertEqual(qianfan["request_format"], "openai_chat")
+        self.assertEqual(qianfan["model"], "deepseek-v4.1-flash")
+        # 专属 Key 的硬要求与「没有目录接口、模型名手填」都要写进引导。
+        self.assertIn("专属", qianfan["hint"], "专属 API Key 的要求要写进引导")
+        self.assertIn("qianfan-code-latest", qianfan["hint"], "统一选模型的写法要写进引导")
+        # 官方端点 = base + /chat/completions，不得拼出 /v1（守门在 test_llm_protocols）。
+        self.assertEqual(P._with_endpoint(qianfan["base_url"], "/v1/chat/completions"),
+                         "https://qianfan.baidubce.com/v2/tokenplan/personal/chat/completions")
 
     def test_custom_preset_leaves_the_address_blank(self):
         custom = provider_preset("custom")

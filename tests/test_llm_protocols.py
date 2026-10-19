@@ -270,6 +270,23 @@ class LlmProtocolTests(unittest.TestCase):
         self.assertEqual(P._with_endpoint("https://api.anthropic.com", "/v1/messages"),
                          "https://api.anthropic.com/v1/messages")
 
+    def test_with_endpoint_version_segment_in_middle(self):
+        """版本段在路径中间（千帆 Token Plan /v2/tokenplan/personal）⇒ 同样剥 /v1 直接追加。
+
+        官方 OpenAI 兼容端点就是 {base}/chat/completions（无 /v1）；旧拼法会得到
+        .../personal/v1/chat/completions → 404。
+        """
+        qianfan = "https://qianfan.baidubce.com/v2/tokenplan/personal"
+        self.assertEqual(P._with_endpoint(qianfan, "/v1/chat/completions"),
+                         "https://qianfan.baidubce.com/v2/tokenplan/personal/chat/completions")
+        self.assertEqual(P._with_endpoint(qianfan, "/v1/models"),
+                         "https://qianfan.baidubce.com/v2/tokenplan/personal/models")
+        # 版本段本来就是 OpenAI 系 /v1 的旧拼法不受影响（走标记位规则，仍在版本段处重定根）。
+        self.assertEqual(P._with_endpoint("https://proxy.example.com/v1/relay", "/v1/chat/completions"),
+                         "https://proxy.example.com/v1/chat/completions")
+        self.assertEqual(P._with_endpoint("https://proxy.example.com/custom", "/v1/chat/completions"),
+                         "https://proxy.example.com/custom/v1/chat/completions")
+
     def test_online_usage_variants(self):
         self.assertEqual(P._online_usage("openai_chat", {
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}),

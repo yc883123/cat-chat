@@ -110,6 +110,25 @@ PROVIDER_PRESETS: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        "id": "qianfan",
+        "kind": "online",
+        "name": "百度千帆 Token Plan",
+        "abbr": "千帆",
+        "base_url": "https://qianfan.baidubce.com/v2/tokenplan/personal",
+        "request_format": "openai_chat",
+        "model": "deepseek-v4.1-flash",
+        "key_required": True,
+        "key_url": "https://console.bce.baidu.com/qianfan/resource/token-plan",
+        "hint": (
+            "百度智能云「千帆 Token Plan 个人版」是订阅制套餐：一次订阅、按 token 用量扣减，"
+            "可调用 DeepSeek、GLM 等模型。使用方法：① 打开 console.bce.baidu.com 登录百度智能云，"
+            "在千帆控制台的 Token Plan 个人版页开通订阅；② 在「我的订阅」里获取专属 API Key"
+            "（必须用这个专属 Key，普通千帆 Key 会被拒绝）；③ 把 Key 粘到下方 API Key 栏。"
+            "套餐没有模型目录接口，模型名需要手填：deepseek-v4.1-flash、deepseek-v4-pro、glm-5.3 等；"
+            "在控制台统一选模型时改填 qianfan-code-latest。"
+        ),
+    },
+    {
         "id": "openai",
         "kind": "online",
         "name": "OpenAI",

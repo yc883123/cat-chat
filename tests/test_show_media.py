@@ -630,7 +630,7 @@ class ShowMediaToolTests(unittest.TestCase):
         self.assertTrue(ok)
         payload = json.loads(result)
         self.assertEqual(payload["status"], "shown")
-        self.assertEqual(payload["source"], str(self.image))
+        self.assertEqual(payload["source"], str(self.image.resolve()))
         self.assertEqual(payload["thumb_path"], "")
 
     def test_policy_never_asks_for_confirmation(self) -> None:
@@ -903,7 +903,7 @@ class ShowMediaAgentLoopTests(unittest.TestCase):
 
         attachments, truncated = union_run_media(runs)
         self.assertIsNone(truncated)
-        self.assertEqual([item["source"] for item in attachments], [str(self.image)],
+        self.assertEqual([item["source"] for item in attachments], [str(self.image.resolve())],
                          "消息级 attachments 必须含目标（前端据此出卡）")
         self.assertEqual(attachments[0]["kind"], "image")
 

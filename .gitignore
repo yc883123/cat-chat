@@ -65,6 +65,8 @@ workspace/
 
 # Config with secrets
 config.json
+/config.json.bak-*
+/_diag_secret_*.json
 
 # PyInstaller
 *.manifest

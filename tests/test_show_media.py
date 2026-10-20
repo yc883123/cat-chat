@@ -47,6 +47,28 @@ def _make_file(root: Path, rel: str, size: int = 32) -> Path:
     return path
 
 
+def _windows_short_path(path: Path) -> Path:
+    """取真实 8.3 路径；卷未启用短名时明确跳过，不能拿字符串替换冒充别名。"""
+    if os.name != "nt":
+        raise unittest.SkipTest("Windows 8.3 路径回归仅适用于 Windows")
+    import ctypes
+    from ctypes import wintypes
+
+    get_short_path = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+    get_short_path.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    get_short_path.restype = wintypes.DWORD
+    length = get_short_path(str(path), None, 0)
+    if not length:
+        raise unittest.SkipTest("当前卷无法查询 8.3 短路径")
+    buffer = ctypes.create_unicode_buffer(length)
+    if not get_short_path(str(path), buffer, length):
+        raise unittest.SkipTest("当前卷无法取得 8.3 短路径")
+    short = Path(buffer.value)
+    if os.path.normcase(str(short)) == os.path.normcase(str(path)):
+        raise unittest.SkipTest("当前卷未给临时媒体生成 8.3 别名")
+    return short
+
+
 class ShowMediaIntentTests(unittest.TestCase):
     """意图门：正例放行、反例一律不放行（规则表驱动，不用单一包含词当承诺）。"""
 
@@ -193,6 +215,29 @@ class ShowMediaTargetTests(unittest.TestCase):
         )
         self.assertEqual(len(pool), 1, "同一来源（大小写不同写法）只保留一份")
 
+    def test_recorded_windows_short_path_matches_canonical_source(self) -> None:
+        image = _make_file(self.root, "long media directory/long-source-image-name.png")
+        short = _windows_short_path(image)
+        self.assertEqual(short.resolve(), image.resolve())
+        for recorded, requested in ((short, image), (image, short), (short, short)):
+            with self.subTest(recorded=recorded, requested=requested):
+                result = resolve_show_media_target(
+                    [str(requested)], workspace=self.root,
+                    candidates=self._candidates(str(recorded)),
+                )
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["source"], str(image.resolve()))
+
+    def test_windows_short_path_candidates_are_deduped(self) -> None:
+        image = _make_file(self.root, "long-source-image-name.png")
+        short = _windows_short_path(image)
+        pool = self._candidates(str(short), str(image))
+        self.assertEqual(len(pool), 1, "同一媒体的 8.3 别名不能变成两个歧义候选")
+        result = resolve_show_media_target(
+            ["刚才那张图"], workspace=self.root, candidates=pool,
+        )
+        self.assertTrue(result["ok"], result)
+
     def test_user_uploaded_media_counts_as_candidate(self) -> None:
         """用户上传的附件也是「会话已记录的媒体」——用户说「看刚才上传那张图」应当出卡。"""
         image = _make_file(self.root, "uploads/photo.png")
@@ -296,6 +341,34 @@ class ShowMediaTargetTests(unittest.TestCase):
                 candidates=[{"kind": "image", "name": "sneak.png", "source": str(sibling)}],
             )
         self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "outside_root")
+
+    def test_recorded_outside_short_path_matches_canonical_source(self) -> None:
+        with tempfile.TemporaryDirectory() as other:
+            image = _make_file(Path(other), "long-source-image-name.png")
+            short = _windows_short_path(image)
+            for recorded, requested in ((short, image), (image, short)):
+                with self.subTest(recorded=recorded, requested=requested):
+                    result = resolve_show_media_target(
+                        [str(requested)], workspace=self.root,
+                        candidates=self._candidates(str(recorded)),
+                    )
+                    self.assertTrue(result["ok"], result)
+                    self.assertEqual(result["source"], str(image.resolve()))
+
+    def test_recorded_outside_relative_path_rejected_when_cwd_is_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as other:
+            outside = _make_file(Path(other), "recorded.png")
+            raw = os.path.relpath(outside, self.root)
+            previous = Path.cwd()
+            try:
+                os.chdir(self.root)
+                result = resolve_show_media_target(
+                    [raw], workspace=self.root, candidates=self._candidates(str(outside)),
+                )
+            finally:
+                os.chdir(previous)
+        self.assertFalse(result["ok"], result)
         self.assertEqual(result["reason"], "outside_root")
 
     def test_symlink_escape_rejected(self) -> None:

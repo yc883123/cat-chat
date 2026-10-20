@@ -462,13 +462,18 @@ def _source_name(source: str) -> str:
 
 
 def _candidate_key(source: str) -> str:
-    """候选去重键：本地路径按 ``normalized_path_key``；URL 按原串（计划 §2.3.1）。"""
+    """候选去重键：本地路径按真实目标归一；URL 按原串（计划 §2.3.1）。"""
     text = str(source or "").strip()
     if not text:
         return ""
     if _is_http_url(text):
         return "url:" + text
-    return normalized_path_key(text)
+    try:
+        # 请求目标同样经过 resolve；8.3 短名、目录联接等别名必须按同一真实来源比较。
+        # normalized_path_key 的通用契约只做词法归一，因此仅在媒体授权处解析。
+        return normalized_path_key(Path(text).expanduser().resolve())
+    except (OSError, ValueError):
+        return ""
 
 
 def _media_record(source: str, name: str = "", thumb_path: str = "") -> dict[str, Any] | None:
@@ -847,10 +852,15 @@ def _resolve_local_request(
 def _trusted_local_record(raw: str, pool: list[dict[str, Any]]) -> dict[str, Any] | None:
     """精确解析本地参数并查找会话可信记录（可位于 workspace 外，如 uploads）。"""
     try:
-        path = Path(str(raw or "").strip()).expanduser().resolve()
+        path = Path(str(raw or "").strip()).expanduser()
+        # 相对参数必须交给 _local_target 按本轮工作区解析、检查边界，不能借进程 cwd 绕过。
+        if not path.is_absolute():
+            return None
+        path = path.resolve()
     except (OSError, ValueError):
         return None
-    return _find_candidate_by_source(pool, str(path))
+    record = _find_candidate_by_source(pool, str(path))
+    return {**record, "source": str(path)} if record is not None else None
 
 
 def _resolve_descriptive(

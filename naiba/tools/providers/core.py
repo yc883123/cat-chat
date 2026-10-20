@@ -1,4 +1,4 @@
-"""core 域工具 Provider：9 个核心工具「schema + 实现函数」单一定义。
+"""core 域工具 Provider：核心工具「schema + 实现函数」单一定义。
 
 实现函数自 ``ToolExecutor._tool_*`` 原样抽取（self → ctx，字节语义等价；Phase 3 双轨对拍：
 旧方法保留至 Phase 5，本模块为权威实现），共用的路径解析/规则函数随迁。
@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from naiba import net as net_io
+from naiba.core.attachments import resolve_show_media_target
 from naiba.core.diagnostics import _permission_debug_enabled
 from naiba.core.paths import path_within, path_within_any, within_detail
 from naiba.tools.registry import (
@@ -1058,6 +1059,66 @@ def _reset_context_ok(result: str) -> bool:
         return False
 
 
+def _tool_show_media(
+    ctx: ToolContext,
+    args: dict[str, Any],
+    active_skills: list[dict[str, Any]] | None = None,
+    run_context: dict[str, Any] | None = None,
+) -> str:
+    """指名出卡（show_media）：两道门都通过才返回 ``shown``，否则结构化 ``skipped``。
+
+    执行顺序刻意固定为「先门、后解析、最后才交给采集器」：
+
+    1. **用户意图门**：``run_context["show_media_intent"]`` 为假直接 ``intent_required``。
+       辅助对话 / Plan / 子 Agent / 后台 Job 的 RunContext 从不置位，因此这些形态
+       即使模型误调也拿不到卡（后端唯一判定，不靠系统提示劝模型别用）。
+    2. **目标授权门**：``resolve_show_media_target`` 只接受「会话已记录媒体」或
+       「用户原文里明确给出的工作区内路径」，并完成尺寸预检（80MB，只 stat）。
+    3. **落盘**：本函数**不复制文件**——真正的托管由 ``MediaCollector`` 在工具产出点
+       按 ``MEDIA_DECLARATIONS["show_media"]``（inline/structured）完成（内容哈希去重、
+       缩略图、generated 清理回调都在那里，行为与其它产物工具完全一致）。
+
+    失败绝不抛异常：结果文本统一是 JSON（``tools/agent._collect_media`` 与
+    ``core/tool_results`` 都按结构化读取），成败由 JSON 的 ``ok`` 判定。
+    """
+    intent = bool((run_context or {}).get("show_media_intent")) if isinstance(run_context, dict) else False
+    if not intent:
+        return json.dumps(
+            {"ok": False, "status": "skipped", "reason": "intent_required", "name": ""},
+            ensure_ascii=False,
+        )
+    workspace = str((run_context or {}).get("workspace_dir") or "") if isinstance(run_context, dict) else ""
+    candidates = (run_context or {}).get("show_media_candidates") if isinstance(run_context, dict) else []
+    # 用户原文里的路径已在装配期折进候选快照（`run/chat.py::build_show_media_candidates`），
+    # 这里不再读取任何"原文"——工具层只认 RunContext 里这一份已授权的候选快照。
+    result = resolve_show_media_target(
+        (args or {}).get("paths"),
+        workspace=workspace,
+        message_text="",
+        candidates=candidates if isinstance(candidates, list) else [],
+    )
+    return json.dumps(result, ensure_ascii=False)
+
+
+def _make_show_media_execute(ctx: ToolContext) -> Any:
+    """show_media 专用执行器：必须拿到 run_context（两道门都在里面），成败按 JSON ``ok``。"""
+    def execute(
+        arguments: dict[str, Any],
+        active_skills: list[dict[str, Any]],
+        run_context: dict[str, Any] | None = None,
+    ) -> tuple[bool, str]:
+        result = _tool_show_media(ctx, arguments or {}, active_skills, run_context)
+        return _show_media_ok(result), result
+    return execute
+
+
+def _show_media_ok(result: str) -> bool:
+    try:
+        return bool(json.loads(result).get("ok"))
+    except (TypeError, ValueError):
+        return False
+
+
 def _make_reset_context_execute(ctx: ToolContext) -> Any:
     """reset_context 专用执行器：必须拿到 run_context（置位重置请求），成败按结果里的 ok 判定。"""
     def execute(
@@ -1190,6 +1251,23 @@ def _make_dangerous_policy(reason: str) -> Any:
     return policy
 
 
+def _show_media_policy(
+    tool: str,
+    arguments: dict[str, Any],
+    active_skills: list[dict[str, Any]],
+    permission_mode: str,
+    run_context: dict[str, Any] | None,
+    workspace: Path | None = None,
+) -> str:
+    """show_media 的 def 级策略：**恒不弹确认**。
+
+    有意为之：真正的门在 ``execute`` 内部（意图 + 唯一候选 + 工作区 + 体积），失败安全；
+    在这里再要一次确认只会让"用户刚说『把那张图放出来』"变成一次多余的弹窗，
+    而且确认卡对"展示一个已存在的产物"没有额外的安全价值。
+    """
+    return ""
+
+
 def _make_core_policy(ctx: ToolContext, name: str) -> Any:
     """core 工具 def 级权限策略；None 表示走引擎默认（不应发生，防御性）。"""
     if name in _READ_FAMILY:
@@ -1198,6 +1276,8 @@ def _make_core_policy(ctx: ToolContext, name: str) -> Any:
         return _make_write_policy(ctx)
     if name == "http_request":
         return _http_request_policy
+    if name == "show_media":
+        return _show_media_policy
     reason = _CORE_CONFIRM_REASONS.get(name)
     if reason:
         return _make_dangerous_policy(reason)
@@ -1282,7 +1362,7 @@ def _result_success(name: str, result: str) -> bool:
 
 
 class CoreToolProvider:
-    """core 域 Provider：9 个核心工具的单一定义（schema + 实现函数绑定）。"""
+    """core 域 Provider：核心工具（读写/检索/命令/HTTP/登记/重置上下文/指名出卡）的单一定义。"""
 
     def __init__(self, context: ToolContext) -> None:
         self._context = context
@@ -1292,6 +1372,8 @@ class CoreToolProvider:
         for spec in build_core_tool_specs():
             if spec.name == "reset_context":
                 execute = _make_reset_context_execute(self._context)
+            elif spec.name == "show_media":
+                execute = _make_show_media_execute(self._context)
             elif spec.name in _STREAM_TOOL_FNS:
                 execute = _make_stream_execute(self._context, _STREAM_TOOL_FNS[spec.name], spec.name)
             elif spec.name in _STR_TOOL_FNS:

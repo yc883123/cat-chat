@@ -24,7 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from naiba.core.media_types import IMAGE_PROCESS_EXTS
+from naiba.core.media_types import IMAGE_PROCESS_EXTS, MEDIA_SHOW_MAX_BYTES
 from naiba.core.paths import normalized_path_key, path_within
 
 
@@ -37,7 +37,9 @@ THUMB_SOURCE_SUFFIXES = set(IMAGE_PROCESS_EXTS) | {".gif"}
 
 
 # 上传上限：与 app._upload 时代一致的 80MB（multipart 流式也在此拦截）。
-UPLOAD_MAX_BYTES = 80 * 1024 * 1024
+# 数值不是这里定的：单文件上限的唯一来源是 core/media_types.MEDIA_SHOW_MAX_BYTES
+# （show_media 同口径），两处各写一遍 80MB 早晚会漂移。
+UPLOAD_MAX_BYTES = MEDIA_SHOW_MAX_BYTES
 # 上传完成后的自动清理阈值：比手动清理（128MB）宽松，避免频繁误清用户近期引用。
 UPLOAD_AUTO_CLEAN_LIMIT = 256 * 1024 * 1024
 # 自动清理的保护窗口（秒）：最近这段时间内落盘/改动过的缓存组一律不参与自动删除。

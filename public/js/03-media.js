@@ -786,6 +786,57 @@ export function mediaMarkup(attachments = []) {
   return `<div class="media-grid">${items}</div>`;
 }
 
+// ---- 消息底部「本轮媒体产物」清单（计划 2026-10-20 §4.5）----
+// 媒体卡仍在工具调用处就地显示（toolMediaMarkup / 末尾 mediaMarkup），承担预览与播放；
+// 这里只是**并列的索引**：一行一个文件名 + 复用既有文件动作条（打开 / 打开文件夹 / 另存为）。
+// 数据只来自该条消息**现有的** metadata（attachments 与 tool_runs[].media）：
+// 不扫目录、不重读文件、不复制缓存、不新增 metadata 字段、不进模型历史——纯展示层派生。
+// 用户上传的附件不会混进来：本函数只用于助手消息，而助手消息的 attachments 是工具产物汇总。
+const MEDIA_PRODUCT_KEY_SEP = '\\';
+
+function mediaProductKey(source) {
+  const text = String(source || '').trim();
+  if (!text) return '';
+  // URL 按原串（与后端 show_media 的候选去重口径一致：URL 不做路径归一）。
+  if (/^https?:\/\//i.test(text)) return text;
+  // 本地路径按 Windows 语义归一：分隔符统一 + 大小写不敏感，避免同一个文件因写法不同列两遍。
+  return text.replace(/\//g, MEDIA_PRODUCT_KEY_SEP).toLowerCase();
+}
+
+export function mediaProducts(metadata = {}) {
+  const seen = new Set();
+  const items = [];
+  const add = (record) => {
+    if (!record || typeof record !== 'object') return;
+    const source = String(record.source || record.path || '');
+    if (!source) return;
+    const name = String(record.name || '') || source.split(/[\\/]/).filter(Boolean).pop() || source;
+    const kind = mediaKind(source, name);
+    if (kind === 'other') return;
+    const key = mediaProductKey(source);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    items.push({ kind, name, source, thumb_path: String(record.thumb_path || '') });
+  };
+  (Array.isArray(metadata.attachments) ? metadata.attachments : []).forEach(add);
+  (Array.isArray(metadata.tool_runs) ? metadata.tool_runs : []).forEach((run) => {
+    if (!run || typeof run !== 'object') return;
+    (Array.isArray(run.media) ? run.media : []).forEach(add);
+  });
+  return items;
+}
+
+export function mediaProductsMarkup(metadata = {}) {
+  const items = mediaProducts(metadata);
+  if (!items.length) return '';
+  // 每项是**清单行**而不是媒体卡：不产出 img / video / audio 标签（预览仍归原有的媒体卡）。
+  const rows = items.map((item) => `<div class="media-product" data-media-kind="${escapeHtml(item.kind)}">
+      <span class="media-product-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
+      ${fileActionBarMarkup(item.source, item.name)}
+    </div>`).join('');
+  return `<div class="media-products"><div class="media-products-label">本轮媒体产物</div><div class="media-products-list">${rows}</div></div>`;
+}
+
 export function toolRunMarkup(run = {}, markerClass = '') {
   // 工具块下方就地内嵌本次调用产出的媒体（P3）：媒体记录来自后端在产出点按声明
   // 采集的 run.media，流式与历史重放走同一份数据，位置天然一致。

@@ -70,6 +70,9 @@ SUBAGENT_BLOCKED_TOOLS = {
     "job_status",
     "job_wait",
     "job_kill",
+    # 指名出卡只属于「承载用户原始请求的普通主对话 Run」：子 Agent 的 RunContext 不置位
+    # show_media_intent，出卡也只能被拒。显式挡住，别让模型看到必失败的工具。
+    "show_media",
 }
 
 

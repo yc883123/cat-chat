@@ -553,10 +553,12 @@ def _tool_preset_scope(preset_id: str) -> list[str]:
     raise KeyError(f"未知工具预设：{preset_id}")
 
 
-# 提示词优化 Agent 的底稿不在任何预设里（只读 + 写稿，7 件）：显式列名，守门按同一份常量比对。
+# 提示词优化 Agent 的底稿不在任何预设里（只读 + 写稿，8 件）：显式列名，守门按同一份常量比对。
+# 「指名出卡」（show_media）是六样内置 Agent 共同的一项：用户说「把刚才那张图展示出来」时出卡。
 _PROMPTER_SCOPE = [
     "read_file", "list_directory", "search_files", "read_pdf",
     "vision_analyze", "write_file", "edit_file",
+    "show_media",
 ]
 
 # Skill 助手专用三件套（装 / 拆 / 查）。
@@ -596,7 +598,11 @@ def _built_in_agent_defs() -> list[dict[str, Any]]:
                 "工作区里的说明文档再回答，绝不编造按钮名字。每次回答末尾指出相关功能在软件的哪个页面。"
             ),
             "skill_ids": [_BUNDLED_SKILL_ID["cat-chat-guide"]],
-            "tool_scope": _tool_preset_scope("readonly"),
+            # 只读 6 件 + 指名出卡 1 件 = 7 件。show_media **不进** READONLY_TOOLS，
+            # 也不进 TOOL_PRESETS：它只是「把用户明确指名的已有媒体展示出来」这一个动作，
+            # 有本地缓存写入副作用（首次展示可能复制一份到应用媒体目录），
+            # 所以只作为内置 Agent 的显式成员，不随通用预设扩散。
+            "tool_scope": [*_tool_preset_scope("readonly"), "show_media"],
         },
         {
             "id": "master",
@@ -608,7 +614,8 @@ def _built_in_agent_defs() -> list[dict[str, Any]]:
                 "不确定就直接问，不要猜。"
             ),
             "skill_ids": [],
-            "tool_scope": _tool_preset_scope("longsession"),
+            # 长会话 22 件 + 指名出卡 1 件 = 23 件。
+            "tool_scope": [*_tool_preset_scope("longsession"), "show_media"],
         },
         {
             "id": "director",
@@ -627,7 +634,8 @@ def _built_in_agent_defs() -> list[dict[str, Any]]:
                 _BUNDLED_SKILL_ID["shortdramav2-rh"],
                 _BUNDLED_SKILL_ID["runninghub"],
             ],
-            "tool_scope": _tool_preset_scope("comfyui"),
+            # ComfyUI 20 件 + 指名出卡 1 件 = 21 件。
+            "tool_scope": [*_tool_preset_scope("comfyui"), "show_media"],
         },
         {
             "id": "prompter",
@@ -651,7 +659,8 @@ def _built_in_agent_defs() -> list[dict[str, Any]]:
                 "跑命令时，先说明改动范围，再执行。报错时先读完整报错再改，不要瞎猜乱试。"
             ),
             "skill_ids": [],
-            "tool_scope": _tool_preset_scope("standard"),
+            # 标准 18 件 + 指名出卡 1 件 = 19 件。
+            "tool_scope": [*_tool_preset_scope("standard"), "show_media"],
         },
         {
             "id": "skills",
@@ -665,13 +674,87 @@ def _built_in_agent_defs() -> list[dict[str, Any]]:
                 "修改已有 Skill 的文件前，先说明要改哪几个文件、改什么。"
             ),
             "skill_ids": [],
-            "tool_scope": [*_tool_preset_scope("standard"), *_SKILL_MANAGER_TOOLS],
+            # 标准 18 件 + 装/拆/查 3 件 + 指名出卡 1 件 = 22 件。
+            "tool_scope": [*_tool_preset_scope("standard"), *_SKILL_MANAGER_TOOLS, "show_media"],
         },
     ]
 
 
 def built_in_agent_ids() -> set[str]:
     return {agent["id"] for agent in built_in_agents()}
+
+
+# ---- 内置 Agent 「新增工具」合并迁移的历史基线（**冻结快照，永不更新**）----
+# 这次升级给六个内置 Agent 加了两批工具：后台任务五件套 与 指名出卡（show_media）。
+# 迁移的正确做法是「只给确实还是出厂设置的那份 scope 补齐」——用户加过/删过任何工具
+# 就视为定制、原样保留。判据必须落在**变更前的出厂 scope**上，所以这里冻结一份历史快照：
+#
+#   tutor     = readonly 6
+#   master    = longsession 17
+#   director  = comfyui 18
+#   prompter  = 7
+#   coder     = standard 13
+#   skills    = standard 13 + 装拆查 3 = 16
+#
+# ⚠️ **不要因为以后改了 TOOL_PRESETS 就回来改这里**：改了等于把"变更前的出厂设置"重新定义，
+# 已经在旧版本上被用户改过的配置会被重新误判成"没碰过"从而被覆盖。要加第三批新增工具，
+# 请追加一个新的常量与一个新的迁移函数。
+_BUILTIN_AGENT_BASELINE_SCOPE: dict[str, tuple[str, ...]] = {
+    "tutor": (
+        "read_file", "list_directory", "search_files",
+        "read_pdf", "probe_video",
+        "vision_analyze",
+    ),
+    "master": (
+        "read_file", "list_directory", "search_files",
+        "read_pdf", "pdf_render_pages", "pdf_zoom_region",
+        "probe_video", "extract_frames",
+        "write_file", "edit_file", "pwsh", "run_skill_script",
+        "vision_analyze",
+        "find_conversations", "recall_history", "read_conversation", "reset_context",
+    ),
+    "director": (
+        "read_file", "list_directory", "search_files",
+        "read_pdf", "pdf_render_pages", "pdf_zoom_region",
+        "probe_video", "extract_frames",
+        "write_file", "edit_file", "pwsh", "run_skill_script", "vision_analyze",
+        "comfyui_prepare_workflow", "comfyui_batch",
+        "job_output", "job_status", "job_wait",
+    ),
+    "prompter": (
+        "read_file", "list_directory", "search_files", "read_pdf",
+        "vision_analyze", "write_file", "edit_file",
+    ),
+    "coder": (
+        "read_file", "list_directory", "search_files",
+        "read_pdf", "pdf_render_pages", "pdf_zoom_region",
+        "probe_video", "extract_frames",
+        "write_file", "edit_file", "pwsh", "run_skill_script", "vision_analyze",
+    ),
+    "skills": (
+        "read_file", "list_directory", "search_files",
+        "read_pdf", "pdf_render_pages", "pdf_zoom_region",
+        "probe_video", "extract_frames",
+        "write_file", "edit_file", "pwsh", "run_skill_script", "vision_analyze",
+        "install_skill", "unpack_skill_archive", "inspect_installed_skill",
+    ),
+}
+# 后台任务创建器 + 完整查询/停止闭包（与 run/session.JOB_CREATOR_TOOL_DEPS 同口径）。
+_BUILTIN_AGENT_BACKGROUND_TOOLS: tuple[str, ...] = (
+    "run_in_background", "job_output", "job_status", "job_wait", "job_kill",
+)
+# 每个内置 Agent 需要补齐的新增工具（**按目标顺序**追加；缺哪个补哪个，幂等）。
+#   tutor / prompter：只加指名出卡（不获得任何后台工具）
+#   director：ComfyUI 工作流仍优先 comfyui_batch，只补通用后台入口与 job_kill
+#   master / coder / skills：后台五件套 + 指名出卡
+_BUILTIN_AGENT_NEW_TOOLS: dict[str, tuple[str, ...]] = {
+    "tutor": ("show_media",),
+    "master": (*_BUILTIN_AGENT_BACKGROUND_TOOLS, "show_media"),
+    "director": ("run_in_background", "job_kill", "show_media"),
+    "prompter": ("show_media",),
+    "coder": (*_BUILTIN_AGENT_BACKGROUND_TOOLS, "show_media"),
+    "skills": (*_BUILTIN_AGENT_BACKGROUND_TOOLS, "show_media"),
+}
 
 
 # ---- 工具目录（Agent 编辑页的可选工具集）----
@@ -700,6 +783,9 @@ _TOOL_GROUP = {
     "comfyui_prepare_workflow": _MCP_GROUP, "comfyui_batch": _MCP_GROUP,
     "register_mcp": _MCP_GROUP,
     "vision_analyze": "视觉与图片", "vision_image_ops": "视觉与图片",
+    # 指名出卡：用户明确指名的已有媒体出卡。归「视觉与图片」而不是「读取与检索」——
+    # 它确实会写本地缓存（首次展示可能复制一份到应用媒体目录），不该挂在"只读"分组下。
+    "show_media": "视觉与图片",
     "run_in_background": "任务与扩展", "job_output": "任务与扩展", "job_status": "任务与扩展",
     "job_wait": "任务与扩展", "job_kill": "任务与扩展", "subagent": "任务与扩展",
     # 子代理的两种上下文模式互斥（同组只能勾一个，见 run/session.py 的
@@ -723,9 +809,11 @@ def _mcp_subgroup(name: str) -> str:
 #
 # 文档 / 视频五件套（PDF 三件套 read_pdf / pdf_render_pages / pdf_zoom_region +
 # 视频抽帧两件套 probe_video / extract_frames）**已并入预设与默认勾选**：
-#   standard（13）/ longsession（17）/ comfyui（18）三档全收；
+#   standard（18）/ longsession（22）/ comfyui（20）三档全收；
 #   readonly 只收纯读取的两件（read_pdf / probe_video，side_effect=False）——
 #   会写产物文件的 pdf_render_pages / pdf_zoom_region / extract_frames 不进只读。
+# 后台任务五件套（run_in_background + 四个查询/停止工具）也已并入标准/长会话/ComfyUI：
+#   模型必须在**启动前**选择后台入口，应用不会把已开始的同步命令自动转后台。
 # ⚠️ 依赖闭包：extract_frames 抽了帧需要 vision_analyze 才能读，而收它的三档显式预设
 #    （standard / longsession / comfyui）本来都已含 vision_analyze（full 走 group:*），
 #    故闭包自洽；只读那档不收 extract_frames（守门见 tests/test_agent_cards.py）。
@@ -735,6 +823,7 @@ _DEFAULT_SELECTED_TOOLS = frozenset({
     "probe_video", "extract_frames",
     "write_file", "edit_file", "pwsh", "run_skill_script",
     "vision_analyze",
+    "run_in_background", "job_output", "job_status", "job_wait", "job_kill",
 })
 
 
@@ -771,7 +860,7 @@ def tool_catalog_entries(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "http_request", "web_search", "register_mcp",
         "comfyui_prepare_workflow", "comfyui_batch",
         # 视觉与图片
-        "vision_analyze", "vision_image_ops",
+        "vision_analyze", "vision_image_ops", "show_media",
         # 任务与扩展
         "run_in_background", "job_output", "job_status", "job_wait", "job_kill",
         "subagent", "subagent_spawn",
@@ -860,7 +949,7 @@ def tool_group_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 # ---- 工具集预设（Agent 编辑页：一键选中一批工具）----
-# 5 档：只读模式 6 / 标准模式 13 / 长会话模式 17 / ComfyUI 联动 18 / 全能模式 group:*（33），
+# 5 档：只读模式 6 / 标准模式 18 / 长会话模式 22 / ComfyUI 联动 20 / 全能模式 group:*，
 # 按能力从小到大排。
 # include 支持两种写法：具体工具名，或 "group:分类名"（"group:*" 表示所有分类）。
 # exclude 用于从已包含的分类里再剔除个别工具。
@@ -871,6 +960,11 @@ def tool_group_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # 写错的组名/工具名由 resolve_tool_preset 告警 + 守门测试兜住。
 # 另一个硬约束：预设的工具名必须**已经包含依赖闭包**（如 ComfyUI 预设显式带 job_output/
 # job_status/job_wait），否则「下拉显示的个数」与「套用后的实际个数」会不一致。
+# 后台任务五件套（run_in_background + job_output/job_status/job_wait/job_kill）进标准 /
+# 长会话 / ComfyUI 三档：任务型内置 Agent 才能在新会话里把长任务提交为后台 Job。
+# 注意这**不是**"应用会自动接管长任务"——只有模型在启动前主动选 run_in_background 才有 Job。
+# 「指名出卡」（show_media）**不在任何预设里**：它是有本地缓存写入副作用的动作，
+# 只作为内置 Agent 的显式成员（见 _built_in_agent_defs），不随通用预设扩散。
 TOOL_PRESETS: tuple[dict[str, Any], ...] = (
     {
         "id": "readonly",
@@ -889,13 +983,16 @@ TOOL_PRESETS: tuple[dict[str, Any], ...] = (
         "id": "standard",
         "name": "标准模式",
         "tagline": "日常推荐",
-        "desc": "读写文件 + 搜索 + 跑命令 + 看图 + 读 PDF / 抽视频帧，覆盖绝大多数本机任务。",
+        "desc": "读写文件 + 搜索 + 跑命令 + 看图 + 读 PDF / 抽视频帧 + 长任务放后台，覆盖绝大多数本机任务。",
         "include": [
             "read_file", "list_directory", "search_files",
             "read_pdf", "pdf_render_pages", "pdf_zoom_region",
             "probe_video", "extract_frames",
             "write_file", "edit_file", "pwsh", "run_skill_script",
             "vision_analyze",
+            # 后台任务：创建器 + 完整查询/停止闭包（JOB_CREATOR_TOOL_DEPS 同口径）。
+            # 必须显式列全，否则下拉显示的个数会小于套用后的实际个数（选中即被闭包补上）。
+            "run_in_background", "job_output", "job_status", "job_wait", "job_kill",
         ],
     },
     {
@@ -909,6 +1006,7 @@ TOOL_PRESETS: tuple[dict[str, Any], ...] = (
             "probe_video", "extract_frames",
             "write_file", "edit_file", "pwsh", "run_skill_script",
             "vision_analyze",
+            "run_in_background", "job_output", "job_status", "job_wait", "job_kill",
             "find_conversations", "recall_history", "read_conversation", "reset_context",
         ],
     },
@@ -916,7 +1014,7 @@ TOOL_PRESETS: tuple[dict[str, Any], ...] = (
         "id": "comfyui",
         "name": "ComfyUI 联动",
         "tagline": "批量出图",
-        "desc": "标准能力 + ComfyUI 工作流与批量出图，并带上任务查询工具。走 HTTP 通道直连本机 ComfyUI，不启用任何 MCP 连接。",
+        "desc": "标准能力 + ComfyUI 工作流与批量出图，并带上任务创建/查询工具。走 HTTP 通道直连本机 ComfyUI，不启用任何 MCP 连接。",
         "include": [
             "read_file", "list_directory", "search_files",
             "read_pdf", "pdf_render_pages", "pdf_zoom_region",
@@ -926,6 +1024,9 @@ TOOL_PRESETS: tuple[dict[str, Any], ...] = (
             # comfyui_batch 的依赖闭包（JOB_CREATOR_TOOL_DEPS / 前端 AGENT_TOOL_DEP_RULES）：
             # 必须显式列出，否则下拉显示的个数会小于套用后的实际个数（选中即被闭包补上）。
             "job_output", "job_status", "job_wait",
+            # 通用后台入口：ComfyUI 工作流仍优先 comfyui_batch；run_in_background 用于
+            # 其它支持的后台任务（job_kill 是它闭包里的最后一环）。
+            "run_in_background", "job_kill",
         ],
         "exclude_mcp": True,
     },
@@ -1348,6 +1449,9 @@ class ConfigStore:
         # 必须排在 _migrate_default_agent_skills() 之后：那个迁移会把历史默认挂在 general 上的
         # 领域 Skill 摘掉，摘完才与出厂定义一致，未改动的残留才能被判出来并清掉。
         self._migrate_retired_factory_agents()
+        # 内置 Agent 新增工具（后台五件套 / 指名出卡）：只补**仍是出厂设置**的那份 scope。
+        # 排在退役清理之后：先清掉残留的老三样，避免它们的 id 与内置 id 撞车时白干活。
+        self._migrate_builtin_agent_new_tools()
         tools = self.data.get("agent_tools")
         # run_command 已并入 pwsh：历史默认集里保存的是 run_command（而非 pwsh）。
         # 先统一映射死工具名，避免升级后通用 Agent 静默丢失命令执行能力。
@@ -1427,6 +1531,57 @@ class ConfigStore:
                 continue
             if agent.get("built_in") and str(agent.get("id") or "") not in built_in:
                 agent.pop("built_in", None)
+
+    def _migrate_builtin_agent_new_tools(self) -> None:
+        """给**仍是出厂设置**的内置 Agent 覆盖项补齐新增工具（后台五件套 / 指名出卡）。
+
+        为什么需要：内置 Agent 的工具档在版本升级里会演进（这次加了后台任务五件套与
+        ``show_media``），但 `public_agents()` 对已保存的覆盖项是**原样优先**——
+        用户点开编辑过一次内置 Agent，config.json 里就留下一条带旧 `tool_scope` 的覆盖版，
+        之后新出厂的工具永远进不去（用户看到的是"新版加了工具，我的 Agent 却没有"）。
+
+        判据（幂等，且能处理"只跑过其中一批"的中间态）：
+
+        1. 只处理 id 属于当前 6 个内置 Agent 的条目；
+        2. `tool_scope` 为空/缺省 = 「不限制」，保持原样（新工具对未限制的 Agent 自然可用）；
+        3. 记 `current = set(scope)`；
+        4. `current` 里出现任何**不在** `基线 ∪ 新增` 里的工具 → 用户定制，原样保留；
+        5. `基线 ⊄ current`（用户删过出厂工具）→ 用户定制，原样保留；
+        6. 否则按 `_BUILTIN_AGENT_NEW_TOOLS` 的顺序补齐缺失项，写回 `tool_scope`；
+        7. **只改 `tool_scope`**：名称、提示词、Skill、头像、顺序、其他工具一律不动；
+        8. 重复运行不重复追加。
+
+        于是「原始出厂 / 原始+show_media（A/B 任一先跑）/ 原始+后台工具」三种中间态
+        都能收敛到同一个目标集合，而任何用户改动都会被判成定制、原样保留。
+        """
+        agents = self.data.get("agents")
+        if not isinstance(agents, list):
+            return
+        changed: list[str] = []
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+            agent_id = str(agent.get("id") or "")
+            baseline = _BUILTIN_AGENT_BASELINE_SCOPE.get(agent_id)
+            additions = _BUILTIN_AGENT_NEW_TOOLS.get(agent_id)
+            if baseline is None or additions is None:
+                continue
+            scope = agent.get("tool_scope")
+            if not isinstance(scope, list) or not scope:
+                continue
+            current = [str(item) for item in scope if str(item).strip()]
+            current_set = set(current)
+            if current_set - (set(baseline) | set(additions)):
+                continue  # 用户加过别的工具 → 定制
+            if not set(baseline) <= current_set:
+                continue  # 用户删过出厂工具 → 定制
+            missing = [tool for tool in additions if tool not in current_set]
+            if not missing:
+                continue
+            agent["tool_scope"] = [*current, *missing]
+            changed.append(agent_id)
+        if changed:
+            print(f"[config] Built-in Agents 补齐新增工具：{', '.join(changed)}")
 
     def _migrate_retired_factory_agents(self) -> None:
         """清掉老用户配置里**从没被碰过**的历史出厂 Agent（通用 / 编程 / 短剧）。

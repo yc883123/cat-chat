@@ -239,6 +239,43 @@ def subagent_context_rule(allowed: set[str]) -> str:
     return ""
 
 
+def comfyui_script_guide_text(allowed_tools: set[str]) -> str:
+    """「ComfyUI/短剧自动化优先小型脚本路径」这条编排指引的**实际文案**（不满足条件返回空串）。
+
+    文案里点名的执行入口必须真的在本会话工具集里：内置预设各档不同、用户也可自定义，
+    点名一个不存在的工具等于让模型去撞墙（旧文案无条件写「再用 pwsh 或 run_in_background」）。
+    """
+    if not comfyui_script_guide_enabled(allowed_tools):
+        return ""
+    executors = [name for name in ("pwsh", "run_in_background") if name in allowed_tools]
+    if not executors:
+        return ""
+    return (
+        "ComfyUI/短剧自动化优先采用小型脚本路径：先用 write_file 生成或复用一个小型 Python 编排脚本，"
+        f"再用 {' 或 '.join(executors)} 执行。"
+    )
+
+
+# 能创建后台任务的工具（闭包由 run/session.JOB_CREATOR_TOOL_DEPS 保证：创建器在、查询工具就在）。
+BACKGROUND_CREATOR_TOOLS: tuple[str, ...] = (
+    "run_in_background", "comfyui_batch", "subagent", "subagent_spawn",
+)
+
+
+def background_creator_rule(allowed_tools: set[str]) -> str:
+    """「需要后台任务时必须先调用 …」这条规则；**没有可用创建器时返回空串**。
+
+    只点名本会话真实可用的创建器。旧写法是「只要 comfyui_batch / 子 Agent 工具在
+    就提 run_in_background」——工具集里没有 `run_in_background` 的会话（只读模式、
+    提示词优化 Agent、升级前已固化的老会话快照）会被指引去调一个不存在的工具
+    （计划 2026-10-20 §3.3.1）。
+    """
+    creators = [name for name in BACKGROUND_CREATOR_TOOLS if name in allowed_tools]
+    if not creators:
+        return ""
+    return "需要后台任务时必须先调用 " + "、".join(creators) + " 创建，再查询返回的真实 ID。"
+
+
 def comfyui_script_guide_enabled(allowed_tools: set[str]) -> bool:
     """是否注入「ComfyUI/短剧自动化优先小型脚本路径」这条编排指引。
 
@@ -877,9 +914,7 @@ class SkillAgent:
             guide_parts.append("多步骤任务用 todo_write 维护进度。")
         guide_parts.append("互不依赖的只读查询可以在同一轮并行调用。")
         if comfyui_script_guide_enabled(allowed):
-            guide_parts.append(
-                "ComfyUI/短剧自动化优先采用小型脚本路径：先用 write_file 生成或复用一个小型 Python 编排脚本，再用 pwsh 或 run_in_background 执行。"
-            )
+            guide_parts.append(comfyui_script_guide_text(allowed))
         if {"job_status", "job_wait", "job_output"} <= allowed:
             guide_parts.append("脚本负责解析素材、批量提交、轮询和校验，随后用 job_status/job_wait/job_output 查看结果。")
         if "comfyui_prepare_workflow" in allowed:
@@ -925,11 +960,10 @@ class SkillAgent:
             "描述提交/生成/连接等任务事实时只依据工具返回；引用历史的 Job ID 或 prompt_id 前，先用 job_status/"
             "job_output 核实其真实状态；未经验证的状态（已提交/已完成/已连接）不得声称。"
         )
-        if {"run_in_background", "comfyui_batch", "subagent", "subagent_spawn"} & allowed:
-            system_parts.append(
-                "需要后台任务时必须先调用 run_in_background、comfyui_batch 或子 Agent 工具"
-                "（subagent / subagent_spawn）创建，再查询返回的真实 ID。"
-            )
+        # 后台创建入口：只点名本会话**真实可用**的那几个（预设各档不同、用户也可自定义）。
+        background_rule = background_creator_rule(allowed)
+        if background_rule:
+            system_parts.append(background_rule)
         # 子 Agent 的成本与用法规则：放常驻区、不放工具描述（描述有 ≤100 字 / ≤3 句预算，§九.23）；
         # 只讲用户实际启用的那个工具（两种模式互斥二选一，模型不需要知道有另一种）。
         context_rule = subagent_context_rule(allowed)

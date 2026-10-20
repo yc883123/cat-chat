@@ -25,7 +25,13 @@ async function apiJson(path, options = {}) {
   const catalog = await apiJson('/api/tool_catalog');
   const allTools = (catalog.tools || []).map((tool) => tool.name);
   // 挑一套跨分类的工具（有 MCP 就排除，隔离实例没连 MCP）：24 个，模拟"自定义好的 Agent"。
-  const picked = allTools.filter((name) => !name.startsWith('mcp__')).slice(0, 24);
+  // **排除后台创建器**：它们带依赖闭包（run_in_background → job_output/job_status/job_wait/job_kill），
+  // 打开编辑器时前端会给 scope 补上闭包，探针就会被"多出来那一件"误判成不一致。
+  // 这与 product 行为无关，只是让这套播种集合自洽（数量变了也不影响断言）。
+  const CREATOR_TOOLS = new Set(['run_in_background', 'subagent', 'subagent_spawn', 'comfyui_batch']);
+  const picked = allTools
+    .filter((name) => !name.startsWith('mcp__') && !CREATOR_TOOLS.has(name))
+    .slice(0, 24);
   const groupOf = new Map();
   for (const group of catalog.groups || []) {
     for (const name of group.tools || []) groupOf.set(name, group.name);

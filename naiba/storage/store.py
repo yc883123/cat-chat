@@ -28,10 +28,17 @@ _METADATA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
-CURRENT_SCHEMA_VERSION = 26
+CURRENT_SCHEMA_VERSION = 27
 
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
+
+# 出厂内置 Agent 的 id（**存储层冻结常量**，供迁移判定用）。
+# 为什么不 import `naiba.config.built_in_agent_ids()`：存储层是低层，反向依赖配置层会破坏
+# `app → 领域模块` 的单向依赖红线（维护说明 §3）。这里的值与配置层的一致性由
+# `tests/test_storage_migration.py` 直接断言（`set(_BUILTIN_AGENT_IDS) == built_in_agent_ids()`），
+# 改了配置忘了改这里、或反过来，都会当场变红。
+_BUILTIN_AGENT_IDS: tuple[str, ...] = ("tutor", "master", "director", "prompter", "coder", "skills")
 
 # 「未结束」的任务状态（run 与 job 共用 background_tasks 表）。
 # 重启清理、活动列表查询与取消判定必须共用这一份定义：
@@ -856,6 +863,57 @@ def _migrate_to_v26(db: sqlite3.Connection) -> None:
     db.commit()
 
 
+def _migrate_to_v27(db: sqlite3.Connection) -> None:
+    """指名出卡（show_media）：给内置 Agent 的**既有主会话**固化工具集追加一件。
+
+    为什么需要：会话的 ``enabled_tool_ids`` 在首条消息时固化，之后不可改（保证模型
+    工具数组字节稳定、前缀缓存不断）。``show_media`` 是新出厂能力，若不迁移，
+    老用户升级后在这条会话里永远用不上——"新版说能指名出卡，我的会话却没有"。
+
+    边界（刻意收得很紧，计划 2026-10-20 §5.2）：
+
+    - 只动 ``conv_kind = 'main'``：辅助对话 / 计划会话的工具集恒被只读拓扑收口，
+      给它们塞工具只会造成"UI 快照与 allowed_tools 不一致"；
+    - 只动这 6 个**内置** Agent 的会话：自定义 Agent 是用户资产，升级不得扩权；
+    - ``enabled_tool_ids`` 必须能解析成**非空** JSON 数组；空列表/损坏 JSON 原样跳过
+      （空列表语义是"未固化"，写进去等于凭空固化一套工具）；
+    - **只追加 show_media 一件，绝不顺带补后台工具**：旧会话的后台能力保持原样，
+      避免对已固化的历史快照追溯扩权（计划 A 与 B 的合并边界）；
+    - 保留其余工具与顺序，重复运行不重复追加（幂等）。
+    """
+    ids = sorted(_BUILTIN_AGENT_IDS)
+    placeholders = ", ".join("?" for _ in ids)
+    rows = list(
+        db.execute(
+            f"SELECT id, enabled_tool_ids FROM conversations "
+            f"WHERE conv_kind = 'main' AND agent_id IN ({placeholders})",
+            ids,
+        )
+    )
+    updated = 0
+    for row in rows:
+        raw = row[1] if not isinstance(row, sqlite3.Row) else row["enabled_tool_ids"]
+        try:
+            parsed = json.loads(raw or "")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if not isinstance(parsed, list) or not parsed:
+            continue
+        tools = [str(item) for item in parsed if str(item).strip()]
+        if not tools or "show_media" in tools:
+            continue
+        tools.append("show_media")
+        conversation_id = row[0] if not isinstance(row, sqlite3.Row) else row["id"]
+        db.execute(
+            "UPDATE conversations SET enabled_tool_ids = ? WHERE id = ?",
+            (json.dumps(tools, ensure_ascii=False), conversation_id),
+        )
+        updated += 1
+    db.commit()
+    if updated:
+        print(f"[naiba-storage] v27：{updated} 个内置 Agent 主会话追加了 show_media")
+
+
 # 目标版本 -> 迁移函数。新增版本时在此追加并提升 CURRENT_SCHEMA_VERSION。
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
@@ -884,6 +942,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     24: _migrate_to_v24,
     25: _migrate_to_v25,
     26: _migrate_to_v26,
+    27: _migrate_to_v27,
 }
 
 

@@ -21,7 +21,11 @@ from naiba.run.chat import (  # noqa: E402
     VISION_OPS_GUIDE,
     vision_prompt_sections,
 )
-from naiba.skills.agent import comfyui_script_guide_enabled  # noqa: E402
+from naiba.skills.agent import (  # noqa: E402
+    background_creator_rule,
+    comfyui_script_guide_enabled,
+    comfyui_script_guide_text,
+)
 
 
 class VisionPromptGatingTests(unittest.TestCase):
@@ -92,6 +96,68 @@ class ComfyuiGuideGatingTests(unittest.TestCase):
     def test_unrelated_mcp_tool_does_not_enable(self):
         self.assertFalse(comfyui_script_guide_enabled({"mcp__other__ping", "pwsh"}))
 
+    def test_guide_text_names_only_available_executors(self):
+        """文案只点名**实际可用**的执行入口（预设各档不同、用户也可自定义）。"""
+        both = comfyui_script_guide_text({"comfyui_batch", "pwsh", "run_in_background"})
+        self.assertIn("pwsh 或 run_in_background", both)
+        only_pwsh = comfyui_script_guide_text({"comfyui_batch", "pwsh"})
+        self.assertIn("pwsh", only_pwsh)
+        self.assertNotIn("run_in_background", only_pwsh,
+                         "工具集里没有 run_in_background 时不得点名它")
+        only_bg = comfyui_script_guide_text({"comfyui_batch", "run_in_background"})
+        self.assertIn("run_in_background", only_bg)
+        self.assertNotIn("pwsh", only_bg)
+        self.assertEqual(comfyui_script_guide_text({"read_file"}), "",
+                         "不满足条件时返回空串（调用点按空串跳过注入）")
+
+
+class BackgroundCreatorGatingTests(unittest.TestCase):
+    """后台创建指引只点名**真实可用**的创建器（计划 2026-10-20 §3.3.1）。
+
+    旧写法是「只要 comfyui_batch / 子 Agent 工具在就提 run_in_background」——工具集里
+    没有 run_in_background 的会话（只读模式、提示词优化 Agent、升级前已固化的老会话）
+    会被系统提示指引去调一个不存在的工具。
+    """
+
+    def test_no_creator_no_rule(self):
+        for allowed in (set(), {"read_file", "vision_analyze"}, {"write_file", "pwsh"}):
+            with self.subTest(allowed=sorted(allowed)):
+                self.assertEqual(background_creator_rule(allowed), "",
+                                 "没有创建器就一个字都不提")
+
+    def test_rule_names_only_present_creators(self):
+        rule = background_creator_rule({"run_in_background", "job_output", "job_status",
+                                        "job_wait", "job_kill"})
+        self.assertIn("run_in_background", rule)
+        for absent in ("comfyui_batch", "subagent", "subagent_spawn"):
+            self.assertNotIn(absent, rule, "不得点名本会话不存在的创建器")
+
+    def test_comfyui_only_session_does_not_mention_run_in_background(self):
+        """只有 comfyui_batch 的会话：这条规则只提它自己。"""
+        rule = background_creator_rule({"comfyui_batch", "job_output", "job_status", "job_wait"})
+        self.assertIn("comfyui_batch", rule)
+        self.assertNotIn("run_in_background", rule)
+
+    def test_subagent_only_session_mentions_only_subagent(self):
+        rule = background_creator_rule({"subagent", "job_output"})
+        self.assertIn("subagent", rule)
+        self.assertNotIn("subagent_spawn", rule, "两种模式互斥，只提被启用的那个")
+        self.assertNotIn("run_in_background", rule)
+
+    def test_old_wide_condition_is_gone(self):
+        """源码级：旧的无条件点名文案与过宽条件不得复活。"""
+        source = (ROOT / "naiba/skills/agent.py").read_text(encoding="utf-8")
+        self.assertNotIn(
+            "需要后台任务时必须先调用 run_in_background、comfyui_batch 或子 Agent 工具",
+            source,
+        )
+        self.assertNotIn(
+            'if {"run_in_background", "comfyui_batch", "subagent", "subagent_spawn"} & allowed:',
+            source,
+            "过宽的「只要有一创建器就提全部」条件不得复活",
+        )
+        self.assertIn("background_creator_rule(allowed)", source)
+
 
 class VisionVariantConsistencyTests(unittest.TestCase):
     """文案与 schema 必须同口径：装载形态的 schema 说「装入本次对话」，文案也得这么说。"""
@@ -120,8 +186,20 @@ class PromptSourceWiringTests(unittest.TestCase):
     def test_agent_uses_comfyui_gate(self):
         source = (ROOT / "naiba/skills/agent.py").read_text(encoding="utf-8")
         self.assertIn("if comfyui_script_guide_enabled(allowed):", source)
+        self.assertIn("comfyui_script_guide_text(allowed)", source,
+                      "文案必须走同一个门（否则过门的那句话里仍可能点名不存在的工具）")
         self.assertNotIn('if {"write_file", "pwsh", "run_in_background"} & allowed:', source,
                          "旧的“有写文件/命令就提 ComfyUI”条件不得复活")
+
+    def test_show_media_prompt_is_tool_gated(self):
+        """指名出卡的编排规则只在 `show_media` 真在工具集里时注入（不破前缀缓存）。"""
+        source = (ROOT / "naiba/run/chat.py").read_text(encoding="utf-8")
+        self.assertIn('if "show_media" in allowed_tools:', source)
+        section = source[source.index('if "show_media" in allowed_tools:'):]
+        section = section[: section.index(".strip()")]
+        for phrase in ("show_media", "list_directory", "不要为了满足展示请求去扫描目录"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, section, "提示段要写清用途、边界与禁止事项")
 
 
 if __name__ == "__main__":

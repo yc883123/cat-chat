@@ -126,7 +126,7 @@ class ReadOnlyToolExecutor:
     只读约束会被确认链路整个绕开（实测：Plan + 围栏 ``http_request POST``）。
     """
 
-    BLOCKED_TOOLS = {"write_file", "edit_file", "pwsh", "run_skill_script", "register_mcp"}
+    BLOCKED_TOOLS = {"write_file", "edit_file", "pwsh", "run_skill_script", "register_mcp", "show_media"}
 
     def __init__(self, inner: ToolExecutor):
         self._inner = inner
@@ -795,9 +795,18 @@ class PlanManager:
             f"{step.get('detail') or ''}\n\n"
             "请专注完成当前步骤；完成后用中文简要汇报该步骤结果（不超过 3 句话）。"
         )
-        allowed_tools = [str(item) for item in frozen.get("allowed_tools") or resolve_mode_tools(
-            "craft", [str(t) for t in self.app.config.data.get("agent_tools", [])]
-        )]
+        allowed_tools = [
+            str(item)
+            for item in (
+                frozen.get("allowed_tools")
+                or resolve_mode_tools(
+                    "craft", [str(t) for t in self.app.config.data.get("agent_tools", [])]
+                )
+            )
+            # 计划执行不开放「指名出卡」：show_media 的 RunContext 授权只给承载用户原始请求的
+            # 普通主对话 Run；这里显式从工具集剔除，避免模型看到"声明在、调用必被拒"的工具。
+            if str(item) != "show_media"
+        ]
         executor = CraftToolExecutor(run_executor or self.app.executor)
         worker = SkillAgent(
             self.app.catalog,

@@ -109,6 +109,9 @@ MEDIA_DECLARATIONS: dict[str, dict[str, str]] = {
     "http_request": {"policy": "inline", "extract": "scan"},
     "register_mcp": {"policy": "never", "extract": "none"},
     "reset_context": {"policy": "never", "extract": "none"},
+    # 指名出卡（show_media）：结果必是结构化媒体记录（{ok,status,kind,name,source,thumb_path}），
+    # 只认 JSON 键——它的 source 是宿主出卡凭据，绝不能用文本扫描兜底（会把散文里的路径当产物）。
+    "show_media": {"policy": "inline", "extract": "structured"},
     "find_conversations": {"policy": "never", "extract": "none"},
     "read_conversation": {"policy": "never", "extract": "none"},
     # Harness 兼容别名（执行层归一，与规范名同口径）
@@ -396,7 +399,7 @@ def _string(desc: str, default: str = "") -> dict[str, Any]:
 
 
 def build_core_tool_specs() -> list[ToolSpec]:
-    """声明现有 9 个核心工具的 Harness 元数据。"""
+    """声明 core 域工具（读写/检索/命令/HTTP/登记/重置上下文/指名出卡）的 Harness 元数据。"""
     return [
         ToolSpec(
             name="read_file",
@@ -598,6 +601,31 @@ def build_core_tool_specs() -> list[ToolSpec]:
             retryable=False,
             timeout=30,
             permission="confirm",
+        ),
+        # 指名出卡（计划 2026-10-20）：用户明确要求把某个**已有**图片/视频/音频展示出来时，
+        # 把唯一匹配的文件作为本轮回复的媒体卡呈现。真正的门在 RunContext 授权与执行层
+        # 的唯一目标解析（描述只教"何时调用"，不能当权限）。
+        ToolSpec(
+            name="show_media",
+            description=(
+                "把用户明确指名的已有图片、视频或音频展示成当前回复的媒体卡。"
+                "单次只传一个明确目标；用户用「刚才那个视频」这类指代时原样传该指代词。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "目标路径、文件名或用户的指代词（单次最多 1 个）",
+                    },
+                },
+                "required": ["paths"],
+            },
+            side_effect=True,
+            retryable=False,
+            timeout=30,
+            permission="auto",
         ),
     ]
 

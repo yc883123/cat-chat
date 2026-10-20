@@ -51,7 +51,7 @@ const stub = {
 
 const factory = new Function(
   ...Object.keys(stub),
-  `${source}\n;return { toolRunMarkup, toolMediaMarkup, mediaTruncatedNotice, mediaMarkup, mediaKind, fileUrl, inlineMediaSources, remainingAttachments, uploadedFileMarkup, activityMarkup };`,
+  `${source}\n;return { toolRunMarkup, toolMediaMarkup, mediaTruncatedNotice, mediaMarkup, mediaKind, fileUrl, inlineMediaSources, remainingAttachments, uploadedFileMarkup, activityMarkup, mediaProducts, mediaProductsMarkup };`,
 );
 const media = factory(...Object.values(stub));
 
@@ -181,6 +181,44 @@ check(
     { type: 'prose', text: '最终答复。', request_index: 2 },
   ]).includes('reasoning-block'),
 );
+
+// 11. 消息底部「本轮媒体产物」清单（计划 2026-10-20 §4.5）：真执行断言
+// 这份清单是**并列的索引**，不是第二套媒体卡：必须是清单行 + 文件动作条，不能出现
+// <img>/<video>/<audio>（预览/播放仍归原位置的媒体卡）。
+const productsMeta = {
+  attachments: [
+    { kind: 'image', name: 'a.png', source: 'C:\\out\\a.png' },
+    { kind: 'video', name: 'v.mp4', source: 'C:\\out\\v.mp4' },
+    { kind: 'other', name: 'd.pdf', source: 'C:\\out\\d.pdf' },
+  ],
+  tool_runs: [
+    { tool: 'show_media', media: [{ kind: 'image', name: 'a.png', source: 'c:/OUT/A.PNG' }] },
+    { tool: 'show_media', media: [{ kind: 'audio', name: 'a.mp3', source: 'C:\\out\\a.mp3' }] },
+    { tool: 'read_file' },
+  ],
+};
+const products = media.mediaProducts(productsMeta);
+check('产出清单去重（大小写/分隔符写法不同视为同一份）', products.length === 3,
+  JSON.stringify(products.map((item) => item.source)));
+check('产出清单排除非媒体', !products.some((item) => item.name === 'd.pdf'),
+  JSON.stringify(products.map((item) => item.name)));
+check('产出清单保序（attachments 先、tool_runs 补漏）',
+  products.map((item) => item.name).join(',') === 'a.png,v.mp4,a.mp3',
+  products.map((item) => item.name).join(','));
+const productsHtml = media.mediaProductsMarkup(productsMeta);
+check('产出清单有标题', productsHtml.includes('本轮媒体产物'), productsHtml.slice(0, 160));
+check('产出清单是清单行', productsHtml.includes('class="media-product"'), productsHtml.slice(0, 240));
+check('产出清单不含 <img>/<video>/<audio>',
+  !/<img|<video|<audio/i.test(productsHtml), productsHtml);
+check('产出清单每项带文件动作条（打开/另存为）',
+  (productsHtml.match(/data-file-actions/g) || []).length === 3
+    && productsHtml.includes('data-file-save-as=') && productsHtml.includes('data-file-open='),
+  productsHtml);
+check('产出清单不含媒体卡样式', !productsHtml.includes('media-grid') && !productsHtml.includes('media-item'),
+  productsHtml);
+check('无媒体时清单为空', media.mediaProductsMarkup({}) === ''
+  && media.mediaProducts({ attachments: [{ kind: 'other', name: 'd.pdf', source: 'C:\\d.pdf' }] }).length === 0,
+  media.mediaProductsMarkup({}));
 
 console.log();
 console.log(`媒体渲染校验：${failures.length ? `${failures.length} 项失败 -> ${failures}` : '全部通过'}`);

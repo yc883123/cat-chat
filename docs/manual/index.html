@@ -534,6 +534,10 @@
 <ul>
 <li><strong>直接拖图片到输入框</strong> → 自动作为本轮附件。</li>
 <li><strong>让它看自己之前生成的图</strong> → 用缩略图右下角 ↩ 复用按钮发回输入框。</li>
+<li><strong>指名出卡</strong>：想再看某个已经存在的图片 / 视频 / 音频时，直接说「把刚才那张图展示出来」「播放刚才那段音频」，模型会调用 <code>show_media</code> 把它作为本轮的媒体卡呈现。</li>
+<li>一次只认<strong>一个明确目标</strong>；目标有歧义（同时有好几个视频）、找不到、或你只是提到媒体没要求展示时，它会先问，不会随便挑一个出卡。</li>
+<li>首次展示工作区里的文件时，应用可能把它复制一份进自己的媒体目录并生成缩略图（<strong>源文件不动</strong>，同样内容不会重复复制）。这是本地缓存写入，不是把文件塞进模型上下文。</li>
+<li>单文件上限 80 MB（与上传同一个上限）；超限会直接说明，不会偷偷整份读进内存。</li>
 <li><strong>多图分批</strong>：<code>vision_analyze</code> 单批 4 张，超出的自动分批并标注「共 N 张 / 已展示前 M 张」，模型不会误以为只有这几张。</li>
 <li><strong>PDF 三件套</strong>：<code>read_pdf</code> 抽文本层、<code>pdf_render_pages</code> 把页面渲成图、<code>pdf_zoom_region</code> 局部高清放大看小字和表格。扫描件（没文本层）会自动引导转页图，再让视觉模型识图。</li>
 </ul>
@@ -553,12 +557,14 @@
 </ul>
 <p><img alt="联网搜索设置" src="images/10-settings-search.png"></p>
 <h2 id="28">2.8 长任务放后台</h2>
-<p>对耗时任务（出图、出视频、跑大命令）AI 会自动用 <code>run_in_background</code> 启动后台 Job，按 <code>job_output</code> 轮询。</p>
+<p>长任务（批量出图、出视频、跑大命令、长脚本）<strong>在启动前</strong>由模型选择用 <code>run_in_background</code> 提交成后台 Job，之后按 <code>job_output</code> 轮询、用 <code>job_wait</code> 等终态。</p>
 <blockquote>
+<p>注意这是<strong>模型的选择</strong>，不是应用的自动接管：已经在跑的同步命令（<code>pwsh</code> / <code>run_skill_script</code>）不会被应用"到点转后台"；想让它在后台跑，就在开始前换成后台入口。</p>
 <p>顶栏「任务」按钮随时能看所有后台任务的历史和状态：</p>
 </blockquote>
 <p><img alt="异步任务面板" src="images/15-tasks-dialog.png"></p>
-<p><code>run_in_background</code> / <code>job_output</code> / <code>job_status</code> / <code>job_wait</code> / <code>job_kill</code> 五个工具覆盖完整生命周期。</p>
+<p><code>run_in_background</code> / <code>job_output</code> / <code>job_status</code> / <code>job_wait</code> / <code>job_kill</code> 五个工具覆盖完整生命周期。<strong>标准模式 / 长会话模式 / ComfyUI 联动</strong>三档预设已经带上这一组，对应的内置 Agent（全能 / 编程 / Skill 助手 / 导演）在新会话里开箱可用；只读模式和提示词优化 Agent 不获得后台工具。</p>
+<p>ComfyUI 工作流仍优先用 <code>comfyui_batch</code> 提交（它自带轮询与产物回收）；<code>run_in_background</code> 用于其它支持的后台任务。</p>
 <p><strong>后台跑着也能继续聊天</strong>：以前只要有一个长跑或卡住的异步任务，这个会话再发消息就会被拒掉（界面显示「当前对话已有 Run，已恢复其进度」，消息其实没入队）。现在<strong>只有顶层对话本身占住互斥位</strong>，后台 Job 不再阻塞下一轮——跑图的时候照样能接着问它有别的事。</p>
 <p><strong>任务面板的「停止」是真能停</strong>：点它会真正中止运行中的任务（不再只是个摆样子 disabled 的按钮）。顶层的对话仍走原来的「暂停 / 取消」。</p>
 <p><strong>重启不会把任务越搞越多</strong>：以前每重启一次，中断的任务就被再恢复一遍（1 → 2 → 4 → 8 成倍增长），实测能把一批 8 段生成放大成每对话 13 份。现在恢复后会给源任务打上持久标记，重复副本只保留最新一条、其余标记为已接续；你主动点的 retry / resume 不受影响。</p>
@@ -582,6 +588,7 @@
 <ul>
 <li><strong><code>新</code></strong> = 新建，<strong><code>改</code></strong> = 编辑。</li>
 <li><strong>多媒体产物</strong>（图片 / 视频 / 音频）走原附件卡片，<strong>不进 chip</strong>（避免重复）。</li>
+<li><strong>本轮媒体产物</strong>：媒体卡仍在工具调用位置就地显示（预览 / 播放归它们），消息底部另有一份<strong>索引清单</strong>——一行一个文件名，带「打开 / 打开文件夹 / 另存为」。它只列本轮工具真实产出的媒体，你自己上传的附件不会混进来。</li>
 <li><strong>点文件名</strong> → 右侧文件面板打开（见 2.12）。</li>
 <li><strong>中止/失败的轮次</strong>只要写盘成功也保留记录。</li>
 </ul>
@@ -1038,6 +1045,8 @@
 <p><strong>重要规则</strong>：<strong>工具集在首条消息固化，之后不可改</strong>。要换工具集就开新会话。</p>
 <p>「我的工具集」存在后端 <code>config.json</code>（不再存 localStorage），重启不会丢。
 想做长会话的话，工具集预设里直接选「<strong>长会话模式</strong>」（标准 + <code>find_conversations</code> / <code>recall_history</code> / <code>read_conversation</code> / <code>reset_context</code>）。</p>
+<p><strong>内置 Agent 自带「指名出卡」</strong>：六个内置 Agent 的出厂工具集里都有 <code>show_media</code>，所以它们能把已有媒体指名出卡。这个工具<strong>不在任何通用预设里</strong>（它有本地缓存写入副作用），只随内置 Agent 出厂。</p>
+<p>因此内置 Agent 的卡片会显示成「标准模式 + 指名出卡」这种形态（只影响显示）：点回纯「标准模式」卡片时，<code>show_media</code> 会按你的操作被移除——这是预期结果，不是 bug。想留着它就在工具列表里手动勾回去。</p>
 </blockquote>
 <h2 id="53">5.3 运行设置</h2>
 <p><img alt="运行设置" src="images/07-settings-runtime.png"></p>

@@ -256,6 +256,18 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .file-edit-hint { flex: 1; min-width: 0; }
 .file-edit-foot .control-button, .file-edit-foot .primary-button { min-height: 30px; padding: 0 11px; font-size: 12px; }
 
+/* 消息底部「本轮媒体产物」索引（计划 2026-10-20 §4.5）：
+   媒体卡仍在工具调用处就地显示（预览/播放归它们）；这里是并列的**清单**——
+   一行一个文件名 + 复用既有文件动作条。刻意不复用 .media-grid / .file-changes 的样式：
+   前者会把清单行变成第二套媒体卡，后者的圆角 chip 与「本轮修改文件」撞脸、分不清两块。 */
+.media-products { margin-top: 10px; border-top: 1px dashed var(--line-strong); padding-top: 8px; }
+.media-products-label { color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+.media-products-list { display: flex; flex-direction: column; gap: 4px; }
+.media-product { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; color: var(--text); }
+.media-product-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 清单行没有 chip 外框，动作条默认就显示（桌面也没有可悬停的高亮区可比）；
+   手机断点下沿用下方既有的 `.file-actions .file-action-more` 常驻「⋯」规则。 */
+.media-product > .file-actions { display: flex; }
 /* AI 改动的文件变更列表（在消息底部汇总） */
 .file-changes { margin-top: 12px; border-top: 1px dashed var(--line-strong); padding-top: 8px; }
 .file-changes-label { color: var(--muted); font-size: 11px; margin-bottom: 6px; }

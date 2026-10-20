@@ -186,7 +186,9 @@ class ToolGroupCatalogTests(unittest.TestCase):
         ], "视频抽帧与 PDF 三件套同组（读元信息 + 抽帧，都是「读取与检索」）")
         self.assertEqual(membership["文件写入与编辑"], ["write_file", "edit_file"])
         self.assertEqual(membership["命令与脚本执行"], ["pwsh", "run_skill_script"])
-        self.assertEqual(membership["视觉与图片"], ["vision_analyze", "vision_image_ops"])
+        self.assertEqual(membership["视觉与图片"], ["vision_analyze", "vision_image_ops", "show_media"],
+                         "指名出卡归「视觉与图片」：它确实是媒体展示，但有本地缓存写入副作用，"
+                         "因此不挂到标注「只读」的「读取与检索」下")
         self.assertEqual(membership["联网与外部服务"], [
             "http_request", "web_search", "register_mcp",
             "comfyui_prepare_workflow", "comfyui_batch",
@@ -267,15 +269,22 @@ class ToolGroupCatalogTests(unittest.TestCase):
             "read_pdf", "pdf_render_pages", "pdf_zoom_region",
             "probe_video", "extract_frames",
             "write_file", "edit_file", "pwsh", "run_skill_script", "vision_analyze",
+            "run_in_background", "job_output", "job_status", "job_wait", "job_kill",
         })
         self.assertFalse(presets["standard"] & {"http_request", "web_search"},
                          "标准模式仍不含联网工具")
         self.assertTrue(presets["standard"] >= {"read_pdf", "pdf_render_pages", "pdf_zoom_region",
                                                 "probe_video", "extract_frames"},
                         "标准模式已收 PDF 三件套 + 视频抽帧两件套")
+        self.assertTrue(presets["standard"] >= {"run_in_background", "job_output",
+                                                "job_status", "job_wait", "job_kill"},
+                        "标准模式已收后台任务五件套（长任务在启动前提交为 Job）")
         self.assertFalse(presets["readonly"] & {"pdf_render_pages", "pdf_zoom_region",
                                                 "extract_frames"},
                          "只读模式不得收会写产物的工具")
+        self.assertFalse(presets["readonly"] & {"run_in_background", "job_output",
+                                                "job_status", "job_wait", "job_kill"},
+                         "只读模式不得收任何后台任务工具")
         self.assertEqual(presets["longsession"], presets["standard"] | {
             "find_conversations", "recall_history", "read_conversation", "reset_context",
         }, "长会话模式 = 标准模式 + 翻历史三件套 + 重置上下文")
@@ -287,6 +296,19 @@ class ToolGroupCatalogTests(unittest.TestCase):
         }, "ComfyUI 联动 = 标准模式 + ComfyUI 两个工具 + 依赖的 Job 查询工具")
         self.assertFalse([n for n in presets["comfyui"] if n.startswith("mcp__")],
                          "ComfyUI 预设声明不启用 MCP")
+        # 「指名出卡」不得被**显式**列进任何通用预设：它有本地缓存写入副作用，只随内置
+        # Agent 出厂。用户点一下「标准模式」就顺带获得这个能力属于预期外的扩权。
+        # （「全能模式」是 group:* 的「全部工具」，自然包含它——这是那一档的定义，不冲突。）
+        for preset in TOOL_PRESETS:
+            with self.subTest(preset=preset["id"]):
+                self.assertNotIn(
+                    "show_media", [str(item) for item in (preset.get("include") or [])],
+                    "show_media 不得被显式列进任何通用预设（只作为内置 Agent 的显式成员）",
+                )
+        for preset_id in ("readonly", "standard", "longsession", "comfyui"):
+            with self.subTest(preset=preset_id):
+                self.assertNotIn("show_media", presets[preset_id],
+                                 "show_media 不进按能力分档的预设（只随内置 Agent 出厂）")
         # 全能模式 = 全部工具 − 互斥组内被显式 exclude 的那一个（subagent_spawn：
         # group:* 会把互斥的两个子代理工具同时展开，默认只留 fork，见 §九.116）。
         full_preset = next(p for p in TOOL_PRESETS if p["id"] == "full")
@@ -833,7 +855,11 @@ class AgentCardsMarkupTests(unittest.TestCase):
         label = label[: label.index("\n}")]
         self.assertIn("未限制（全部工具）", label, "空 tool_scope = 不限制")
         self.assertIn("自定义 · ", label)
-        self.assertIn("matchToolScope(tools)", label)
+        # 显示标签必须走「预设 / 工具集 + 指名出卡」的显示层匹配，而不是精确匹配：
+        # 内置 Agent 的出厂工具集是「预设 + show_media」，用精确匹配会全员显示成「自定义」。
+        self.assertIn("displayScopeMatch(raw)", label, "标签走显示层匹配（含 + 指名出卡）")
+        self.assertNotIn("matchToolScope(tools)", label,
+                         "显示层匹配不得退回精确匹配（否则内置 Agent 全变「自定义」）")
         # 退役/掉线工具名不参与匹配与计数：归一抽到 matchableTools 一处（matchToolScope /
         # toolScopeLabel / 删除工具集前的引用判定共用），标签只负责调用它。
         self.assertIn("matchableTools(raw)", label, "退役/掉线工具名不参与匹配与计数")
@@ -1073,6 +1099,63 @@ class AgentCardsMarkupTests(unittest.TestCase):
         ids = re.findall(r'\sid="([^"]+)"', self._index())
         duplicates = {value for value in ids if ids.count(value) > 1}
         self.assertFalse(duplicates, f"index.html 存在重复 id：{sorted(duplicates)}")
+
+
+class ToolScopeDisplayLabelTests(unittest.TestCase):
+    """工具集显示标签：「预设 + 指名出卡」只在**显示层**识别（计划 2026-10-20 §4.4）。
+
+    为什么显示与匹配必须分开：
+    - 显示：内置 Agent 的出厂工具集 = 预设 + `show_media`，精确匹配会全员显示成
+      「自定义 · N 个工具」，用户会以为工具集坏了；
+    - 匹配（`matchToolScope` / `matchToolPreset` / 删除工具集的引用判定）必须保持精确：
+      一旦放宽，「标准模式 + 指名出卡」会被当成标准模式，点回标准卡时不弹覆盖确认
+      就静默丢掉 `show_media`。
+    """
+
+    def _settings(self) -> str:
+        return (ROOT / "public/js/09-settings.js").read_text(encoding="utf-8")
+
+    def _fn(self, marker: str) -> str:
+        js = self._settings()
+        body = js[js.index(marker):]
+        return body[: body.index("\n}")]
+
+    def test_display_match_strips_only_show_media(self):
+        fn = self._fn("function displayScopeMatch(scope)")
+        self.assertIn("SHOW_MEDIA_TOOL", fn, "只认 show_media 这一件（不是任意工具）")
+        self.assertIn("raw.filter((name) => name !== SHOW_MEDIA_TOOL)", fn)
+        self.assertIn("+ ${SHOW_MEDIA_LABEL}", fn, "命中后显示成「原名 + 指名出卡」")
+        self.assertIn("matchToolScope(raw.filter", fn, "去件之后仍走同一套精确匹配")
+
+    def test_display_match_requires_exact_base(self):
+        """去掉 show_media 之后必须**整套**命中，多余/缺失一件都不算。"""
+        fn = self._fn("function displayScopeMatch(scope)")
+        self.assertIn("const base = matchToolScope(", fn)
+        self.assertIn("if (!base) return null;", fn)
+
+    def test_exact_match_is_not_relaxed(self):
+        body = self._fn("export function matchToolScope(scope)")
+        self.assertIn("tools.length === current.size && tools.every((t) => current.has(t))", body)
+        self.assertNotIn("show_media", body, "精确匹配不得为显示层放宽")
+
+    def test_overwrite_confirm_still_uses_exact_match(self):
+        fn = self._fn("function isUnsavedCustomScope()")
+        self.assertIn("!matchToolPreset()", fn,
+                      "「预设 + 指名出卡」仍算自定义未保存 ⇒ 点回纯预设卡时要先确认")
+
+    def test_label_and_summary_use_display_match(self):
+        label = self._fn("export function toolScopeLabel(scope)")
+        self.assertIn("displayScopeMatch(raw)", label)
+        summary = self._fn("function toolSetSummary()")
+        self.assertIn("displayScopeMatch(state.agentFormToolScope)", summary)
+        # 保底仍在：匹配不上时按实际勾选个数显示「自定义」。
+        self.assertIn("自定义 · ", label)
+        self.assertIn("自定义（未保存）", summary)
+
+    def test_show_media_label_is_the_documented_one(self):
+        js = self._settings()
+        self.assertIn("const SHOW_MEDIA_LABEL = '指名出卡';", js,
+                      "卡片标签文案是对外承诺（手册/教程都写「指名出卡」）")
 
 
 if __name__ == "__main__":

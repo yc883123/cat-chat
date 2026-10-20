@@ -77,6 +77,35 @@ def _vision_ops_summary(result: str) -> str:
     return str(result or "")
 
 
+def _show_media_summary(result: str) -> str:
+    """show_media：只留状态/原因/类型/展示名（剥掉 source / thumb_path / 绝对路径）。
+
+    为什么必须剥：``show_media`` 的原始结果里 source 是**工作区内的真实绝对路径**，
+    那是宿主出卡用的凭据。模型只需要知道"成了没有、是哪一个"，把路径回灌进上下文
+    等于每展示一次就多一段本机目录结构，也给了后续轮次"照着猜路径"的诱因。
+    候选展示名（choices）只回**文件名**，同样不含目录。
+    """
+    payload = _json_object(result)
+    if payload is None:
+        return str(result or "")
+    visible: dict[str, Any] = {
+        "status": str(payload.get("status") or ""),
+        "kind": str(payload.get("kind") or ""),
+        "name": str(payload.get("name") or ""),
+        "reason": str(payload.get("reason") or ""),
+    }
+    choices = [
+        str(item)
+        for item in (payload.get("choices") or [])
+        if isinstance(item, str) and item
+    ]
+    if choices:
+        visible["choices"] = choices[:8]
+    if payload.get("message"):
+        visible["message"] = str(payload.get("message") or "")
+    return json.dumps(visible, ensure_ascii=False)
+
+
 def model_visible_result(tool_name: str, result: str) -> str:
     """把工具原始 result 变为模型可见内容：按工具剥离机器字段 + 统一截断标记。
 
@@ -87,6 +116,8 @@ def model_visible_result(tool_name: str, result: str) -> str:
         value = _vision_load_summary(result)
     elif tool_name == "vision_image_ops":
         value = _vision_ops_summary(result)
+    elif tool_name == "show_media":
+        value = _show_media_summary(result)
     else:
         value = str(result or "")
     return truncate(value, MODEL_RESULT_MAX_CHARS)

@@ -201,5 +201,165 @@ class ToolSetStorageTests(unittest.TestCase):
         self.assertNotIn("tool_sets", store.public(), "走 bootstrap / 专用接口，不进 settings")
 
 
+class BuiltInAgentNewToolsMigrationTests(unittest.TestCase):
+    """内置 Agent「新增工具」合并迁移：原始出厂 → 补齐；碰过 → 原样保留。
+
+    背景（计划 2026-10-20）：这一版给内置 Agent 加了两批工具——后台任务五件套与
+    `show_media`（指名出卡）。`public_agents()` 对已保存的覆盖项是原样优先，所以
+    用户点开编辑过一次内置 Agent 后，新出厂的工具就再也进不去。
+
+    判据边界（本组要钉的东西）：
+    - 只对「`tool_scope` 里没有基线之外的工具，且基线一个不缺」的条目补齐；
+    - 用户加过/删过任何工具都算定制，一个字段都不许动；
+    - `tool_scope` 为空/缺省 = 「不限制」，保持原样（新工具对它自然可用）；
+    - 只改 `tool_scope`，名称/提示词/Skill/头像/顺序逐字段不变；
+    - 重复加载幂等；A/B 两批任意先后都能收敛到同一集合。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.config_path = self.root / "config.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _store(self, payload=None):
+        if payload is not None:
+            self.config_path.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+        return ConfigStore(self.config_path)
+
+    def _scope(self, store, agent_id):
+        for agent in store.data["agents"]:
+            if str(agent.get("id") or "") == agent_id:
+                return agent.get("tool_scope")
+        raise AssertionError(f"配置里找不到 Agent：{agent_id}")
+
+    def test_baseline_matches_historical_factory_scopes(self) -> None:
+        """冻结基线必须正好等于「本次改动前」的出厂 scope（多一个少一个都会误判定制）。"""
+        from naiba.config import _BUILTIN_AGENT_BASELINE_SCOPE
+
+        expected_counts = {
+            "tutor": 6, "master": 17, "director": 18, "prompter": 7, "coder": 13, "skills": 16,
+        }
+        self.assertEqual(
+            {key: len(value) for key, value in _BUILTIN_AGENT_BASELINE_SCOPE.items()},
+            expected_counts,
+        )
+        for agent_id, baseline in _BUILTIN_AGENT_BASELINE_SCOPE.items():
+            with self.subTest(agent=agent_id):
+                self.assertEqual(len(baseline), len(set(baseline)), "基线里不许有重复工具名")
+
+    def test_untouched_factory_scope_gets_both_batches(self) -> None:
+        from naiba.config import _BUILTIN_AGENT_BASELINE_SCOPE, _BUILTIN_AGENT_NEW_TOOLS, built_in_agents
+
+        factory = {agent["id"]: set(agent["tool_scope"]) for agent in built_in_agents()}
+        payload = {"agents": [
+            {"id": agent_id, "name": "我的名字", "system_prompt": "我的提示词",
+             "skill_ids": ["x"], "avatar": "🐱", "tool_scope": list(baseline)}
+            for agent_id, baseline in _BUILTIN_AGENT_BASELINE_SCOPE.items()
+        ]}
+        store = self._store(payload)
+        for agent_id, baseline in _BUILTIN_AGENT_BASELINE_SCOPE.items():
+            with self.subTest(agent=agent_id):
+                self.assertEqual(set(self._scope(store, agent_id)), factory[agent_id],
+                                 "原始出厂 scope 必须补齐到当前出厂集合")
+                self.assertTrue(set(_BUILTIN_AGENT_NEW_TOOLS[agent_id]) <= set(self._scope(store, agent_id)))
+
+    def test_only_tool_scope_changes(self) -> None:
+        from naiba.config import _BUILTIN_AGENT_BASELINE_SCOPE
+
+        original = {
+            "id": "coder", "name": "我的编程助手", "system_prompt": "自定义提示词",
+            "skill_ids": ["97e6e849bd844ed2"], "avatar": "🙂",
+            "tool_scope": list(_BUILTIN_AGENT_BASELINE_SCOPE["coder"]),
+        }
+        store = self._store({"agents": [dict(original)]})
+        migrated = next(a for a in store.data["agents"] if a["id"] == "coder")
+        for key in ("name", "system_prompt", "skill_ids", "avatar", "id"):
+            with self.subTest(field=key):
+                self.assertEqual(migrated[key], original[key], "迁移只许改 tool_scope")
+        self.assertEqual(migrated["tool_scope"][: len(original["tool_scope"])],
+                         original["tool_scope"], "工具原有顺序不得重排（只追加）")
+
+    def test_show_media_only_first_then_background(self) -> None:
+        """B 先跑的中间态（原始 + show_media）只补后台工具，不重复追加 show_media。"""
+        from naiba.config import _BUILTIN_AGENT_BASELINE_SCOPE
+
+        baseline = list(_BUILTIN_AGENT_BASELINE_SCOPE["master"])
+        store = self._store({"agents": [
+            {"id": "master", "name": "x", "system_prompt": "p", "skill_ids": [],
+             "tool_scope": [*baseline, "show_media"]},
+        ]})
+        scope = self._scope(store, "master")
+        self.assertEqual(scope.count("show_media"), 1, "幂等：不得重复追加")
+        for tool in ("run_in_background", "job_output", "job_status", "job_wait", "job_kill"):
+            self.assertIn(tool, scope)
+
+    def test_background_only_first_then_show_media(self) -> None:
+        """A 先跑的中间态（原始 + 后台五件）只补 show_media。"""
+        from naiba.config import _BUILTIN_AGENT_BASELINE_SCOPE
+
+        baseline = list(_BUILTIN_AGENT_BASELINE_SCOPE["coder"])
+        background = ["run_in_background", "job_output", "job_status", "job_wait", "job_kill"]
+        store = self._store({"agents": [
+            {"id": "coder", "name": "x", "system_prompt": "p", "skill_ids": [],
+             "tool_scope": [*baseline, *background]},
+        ]})
+        scope = self._scope(store, "coder")
+        self.assertEqual(scope.count("show_media"), 1)
+
+    def test_customized_scope_is_kept_verbatim(self) -> None:
+        from naiba.config import _BUILTIN_AGENT_BASELINE_SCOPE
+
+        baseline = list(_BUILTIN_AGENT_BASELINE_SCOPE["coder"])
+        cases = {
+            "added_other": [*baseline, "web_search"],
+            "removed_factory": [tool for tool in baseline if tool != "pwsh"],
+            "empty": [],
+        }
+        for label, scope in cases.items():
+            with self.subTest(case=label):
+                self.config_path.unlink(missing_ok=True)
+                store = self._store({"agents": [
+                    {"id": "coder", "name": "x", "system_prompt": "p", "skill_ids": [],
+                     "tool_scope": list(scope)},
+                ]})
+                self.assertEqual(self._scope(store, "coder"), list(scope),
+                                 "用户定制/未限制的 scope 必须逐项原样保留")
+
+    def test_missing_tool_scope_is_kept(self) -> None:
+        store = self._store({"agents": [
+            {"id": "tutor", "name": "x", "system_prompt": "p", "skill_ids": []},
+        ]})
+        agent = next(a for a in store.data["agents"] if a["id"] == "tutor")
+        self.assertNotIn("tool_scope", agent, "缺省 = 不限制，不得凭空写入固化集")
+
+    def test_custom_and_retired_agents_are_untouched(self) -> None:
+        from naiba.config import _BUILTIN_AGENT_BASELINE_SCOPE
+
+        mine_scope = list(_BUILTIN_AGENT_BASELINE_SCOPE["coder"])
+        store = self._store({"agents": [
+            {"id": "agent_0123456789ab", "name": "我的", "system_prompt": "",
+             "skill_ids": [], "tool_scope": mine_scope},
+        ]})
+        self.assertEqual(self._scope(store, "agent_0123456789ab"), mine_scope,
+                         "自定义 Agent 一个字都不许动")
+
+    def test_migration_is_idempotent_across_reloads(self) -> None:
+        from naiba.config import _BUILTIN_AGENT_BASELINE_SCOPE
+
+        self._store({"agents": [
+            {"id": "skills", "name": "x", "system_prompt": "p", "skill_ids": [],
+             "tool_scope": list(_BUILTIN_AGENT_BASELINE_SCOPE["skills"])},
+        ]})
+        first = list(self._scope(self._store(), "skills"))
+        second = list(self._scope(self._store(), "skills"))
+        self.assertEqual(first, second, "重复加载必须稳定（不重复追加、不重排）")
+        self.assertEqual(first.count("show_media"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

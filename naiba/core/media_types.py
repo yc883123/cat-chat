@@ -41,6 +41,13 @@ IMAGE_PROCESS_EXTS: frozenset[str] = frozenset(MEDIA_EXTS_BY_KIND["image"]) - {"
 # 并向前端标注"共 N 张，仅显示前 M 张"（静默截断 = 误导源，维护说明 §九.24）。
 MEDIA_BUCKET_LIMITS: dict[str, int] = {"image": 20, "video": 8, "audio": 8}
 
+# 单个媒体文件的体积上限（**唯一来源**）：上传与 ``show_media`` 共用同一口径。
+# 为什么必须有它：``show_media`` 允许模型按用户指名的路径展示工作区里任意已有媒体，
+# 而首次展示会经 ``MediaCollector`` 完整读取并复制到 data/generated 再生成缩略图。
+# 没有上限就等于"用户说一句「放出来」，宿主就可能整份读完一个几十 GB 的视频"。
+# 超限只在 ``stat`` 阶段拒绝（too_large），不读全文、不复制、不建缩略图、不写 generated。
+MEDIA_SHOW_MAX_BYTES = 80 * 1024 * 1024
+
 # 扩展名 → MIME：系统 mimetypes 未注册时由 /api/file 兜底（否则 <img>/<video> 因
 # application/octet-stream + nosniff 被拒渲染）。.m4v 曾漏登记导致视频可能不播。
 MEDIA_MIME_TYPES: dict[str, str] = {

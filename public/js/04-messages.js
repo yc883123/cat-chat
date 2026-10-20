@@ -4,7 +4,7 @@
 
 import { $, agentAvatarEmoji, agentAvatarSrc, api, draggedFileCache, emptyStateElement, escapeHtml, notifyComposerChanged, state, toast } from "./01-core.js";
 import { markdown } from "./02-markdown.js";
-import { activityMarkup, closeImageLightbox, fileChangesSummaryMarkup, fileUrl, folderIndexMarkup, mediaKind, mediaMarkup, mediaTruncatedNotice, reasoningMarkup, remainingAttachments, skillMarkup, sourcesMarkup, toolMarkup, truncationNotice, updateContextComposerLock, updateContextUsage, updateSendButtonState, uploadedFileMarkup, usageMarkup } from "./03-media.js";
+import { activityMarkup, closeImageLightbox, fileChangesSummaryMarkup, fileUrl, folderIndexMarkup, mediaKind, mediaMarkup, mediaProductsMarkup, mediaTruncatedNotice, reasoningMarkup, remainingAttachments, skillMarkup, sourcesMarkup, toolMarkup, truncationNotice, updateContextComposerLock, updateContextUsage, updateSendButtonState, uploadedFileMarkup, usageMarkup } from "./03-media.js";
 import { openConversation, syncCurrentConversation } from "./08-conversations.js";
 import { attachmentChips, folderChips, folderChipsFromIndexes, folderIndexMetadata, renderPendingFiles } from "./10-upload.js";
 import { hideChoiceButtons, sendMessage, showChoiceButtons } from "./12-chat-input.js";
@@ -197,6 +197,7 @@ export function messageElement(message, temporary = false) {
           ${temporary ? '' : sourcesMarkup(metadata.sources)}
           ${mediaMarkup(bottomAttachments)}
           ${bottomAttachments.length ? mediaTruncatedNotice(metadata.attachments_truncated) : ''}
+          ${temporary ? '' : mediaProductsMarkup(metadata)}
           ${temporary ? '' : fileChangesSummaryMarkup(metadata.files)}
           ${temporary ? '' : usageMarkup({ ...(metadata.usage || {}), performance: metadata.performance || metadata.usage?.performance }, message.created_at)}
           ${temporary ? '' : `<div class="message-actions"><button data-copy-message>复制</button>${regenerateButton}${deleteButton}${sessionButton}</div>`}

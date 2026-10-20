@@ -63,7 +63,9 @@ class AuxChatStorageTests(unittest.TestCase):
     # ---- 迁移 v25 / v26 ----
 
     def test_fresh_db_reaches_v26_with_conv_kind_and_parent(self):
-        self.assertEqual(CURRENT_SCHEMA_VERSION, 26)
+        # 库版本还会继续往前走（v27 是内置 Agent 主会话补 show_media，见
+        # tests/test_storage_migration.py）；本条只钉「辅助对话用的这两列存在」。
+        self.assertGreaterEqual(CURRENT_SCHEMA_VERSION, 26)
         with self.storage._connect() as db:
             columns = {row[1] for row in db.execute("PRAGMA table_info(conversations)")}
         self.assertIn("conv_kind", columns)
@@ -279,6 +281,7 @@ class AuxChatReadonlyTests(unittest.TestCase):
             "read_file", "write_file", "edit_file", "list_directory", "search_files",
             "http_request", "pwsh", "run_in_background", "job_output", "job_status",
             "job_wait", "subagent", "vision_analyze", "vision_image_ops", "web_search",
+            "show_media",
             "mcp__comfy__run_workflow",
         ]
 
@@ -293,8 +296,18 @@ class AuxChatReadonlyTests(unittest.TestCase):
         self.assertIn("vision_analyze", tools)
         self.assertIn("mcp__comfy__run_workflow", tools, "只读 MCP 工具应放行")
         for blocked in ("write_file", "edit_file", "pwsh", "run_in_background",
-                        "subagent", "vision_image_ops", "comfyui_prepare_workflow"):
+                        "subagent", "vision_image_ops", "comfyui_prepare_workflow",
+                        "show_media"):
             self.assertNotIn(blocked, tools)
+
+    def test_aux_never_gets_show_media(self):
+        """指名出卡只属于普通主对话：辅助对话不读宿主任意媒体，也不该有出卡入口。"""
+        tools = resolve_allowed_tools(
+            self.app, "craft", {"tool_scope": ["show_media", "read_file"]},
+            False, "", ["read_file", "show_media"], "aux",
+        )
+        self.assertNotIn("show_media", tools)
+        self.assertIn("read_file", tools)
 
     def test_aux_plain_http_request_only(self):
         tools = resolve_allowed_tools(

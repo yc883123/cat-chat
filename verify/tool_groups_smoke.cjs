@@ -162,8 +162,8 @@ async function scopeSnapshot(page) {
       JSON.stringify(cardState.cards));
     check('预设卡名称与个数正确', JSON.stringify(cardState.cards.filter((c) => c.preset).map((c) => [c.title, c.count]))
       === JSON.stringify([
-        ['只读模式', '6 个工具'], ['标准模式', '13 个工具'], ['长会话模式', '17 个工具'],
-        ['ComfyUI 联动', '18 个工具'],
+        ['只读模式', '6 个工具'], ['标准模式', '18 个工具'], ['长会话模式', '22 个工具'],
+        ['ComfyUI 联动', '20 个工具'],
         ['全能模式', `${presetToolCount('full')} 个工具`],
       ]), JSON.stringify(cardState.cards.map((c) => [c.title, c.count])));
     check('卡片态不展开工具列表', cardState.editorHidden === true, JSON.stringify(cardState));
@@ -172,7 +172,7 @@ async function scopeSnapshot(page) {
 
     // 点预设卡：不直接套用，而是「按下 → 卡片上移收起 → 列表从下方滑入」，命名栏预填该卡名字。
     const PRESET_NAMES = { readonly: '只读模式', standard: '标准模式', comfyui: 'ComfyUI 联动', full: '全能模式' };
-    for (const [value, expected] of [['readonly', 6], ['standard', 13], ['comfyui', 18],
+    for (const [value, expected] of [['readonly', 6], ['standard', 18], ['comfyui', 20],
       ['full', presetToolCount('full')]]) {
       await page.click(`[data-tool-preset-card="${value}"]`);
       // 防误触 confirm（仅当这个 Agent 的勾选是「自定义未保存」时才弹）默认被 accept；
@@ -225,7 +225,8 @@ async function scopeSnapshot(page) {
     }
 
     // 进入编辑态：点「添加自定义工具集」→ 卡片区收起、横条 + 工具列表展开、命名栏留空。
-    // 底稿 = **当前勾选**（改动前的旧行为是固定以「标准模式」13 个为起点，会把用户勾好的整套冲掉）。
+    // 底稿 = **当前勾选**（改动前的旧行为是固定以「标准模式」13 个为起点，会把用户勾好的整套冲掉；
+    // 标准模式现在 18 个——数量变了，但「以当前勾选为底稿」这条语义不变）。
     // 前提断言先落到一个与标准模式不同的数量上：先套一次「只读模式」（6 个）再点添加卡。
     await page.click('[data-tool-preset-card="readonly"]');
     await page.waitForTimeout(600);
@@ -235,7 +236,7 @@ async function scopeSnapshot(page) {
       summary: document.querySelector('#agentToolPresetState')?.textContent.trim() || '',
       checked: document.querySelectorAll('#agentToolScope .permission-grid input[type="checkbox"]:checked').length,
     }));
-    check('前提：点返回后停在「只读模式」（6 个，区别于标准模式 13 个）',
+    check('前提：点返回后停在「只读模式」（6 个，区别于标准模式 18 个）',
       addBase.summary.includes('只读模式') && addBase.checked === 6, JSON.stringify(addBase));
     await page.click('[data-tool-preset-add]');
     await page.waitForTimeout(120);
@@ -255,7 +256,7 @@ async function scopeSnapshot(page) {
     check('点添加卡进入编辑态（卡片收起 + 编辑区展开）',
       editorState.editorVisible && editorState.cardsHidden && editorState.hasName, JSON.stringify(editorState));
     check('「添加」卡命名栏留空', editorState.name === '', JSON.stringify(editorState));
-    check('「添加」卡以当前勾选为底稿（只读模式 6 个，不是标准模式 13 个）',
+    check('「添加」卡以当前勾选为底稿（只读模式 6 个，不是标准模式 18 个）',
       editorState.checked === 6 && JSON.stringify(editorState.tools) === JSON.stringify([
         'list_directory', 'probe_video', 'read_file', 'read_pdf', 'search_files', 'vision_analyze',
       ]), JSON.stringify(editorState));
@@ -653,8 +654,8 @@ async function scopeSnapshot(page) {
       checked: document.querySelectorAll('#agentToolScope .permission-grid input[type="checkbox"]:checked').length,
       name: document.querySelector('#agentToolSetName')?.value || '',
     }));
-    check('确认后进入编辑态且勾选 = 该预设（标准模式 13 个）',
-      afterAccept.editorVisible && afterAccept.checked === 13 && afterAccept.name === '标准模式',
+    check('确认后进入编辑态且勾选 = 该预设（标准模式 18 个）',
+      afterAccept.editorVisible && afterAccept.checked === 18 && afterAccept.name === '标准模式',
       JSON.stringify(afterAccept));
     await page.click('#agentToolEditorBack');
     await page.waitForTimeout(600);

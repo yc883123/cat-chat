@@ -385,5 +385,111 @@ class TerminalEventSlimMigrationTests(unittest.TestCase):
             self.assertEqual(payloads["error"]["message"], "HTTP 400")
 
 
+class ShowMediaToolMigrationTests(unittest.TestCase):
+    """v27：给内置 Agent 的**既有主会话**固化工具集追加一件 `show_media`。
+
+    背景（计划 2026-10-20 §5.2）：会话的 `enabled_tool_ids` 在首条消息时固化、之后不可改。
+    新出厂的「指名出卡」若不迁移，老用户升级后在这条会话里永远用不上。
+
+    边界刻意收得很紧（本组要钉的东西）：
+    - 只动 `conv_kind='main'` 且 `agent_id` 属于 6 个内置 Agent 的会话；
+    - `enabled_tool_ids` 必须能解析成**非空**数组（空/损坏原样跳过）；
+    - **只追加 show_media 一件，绝不补后台工具**（旧会话能力不变）；
+    - 保留其余工具与顺序；重复迁移稳定。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.storage = ChatStorage(self.root / "chat.db")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _tools(self, conversation_id: str) -> list[str]:
+        with closing(sqlite3.connect(self.root / "chat.db")) as db:
+            raw = db.execute(
+                "SELECT enabled_tool_ids FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()[0]
+        return json.loads(raw or "[]")
+
+    def test_version_and_id_constant(self) -> None:
+        self.assertEqual(CURRENT_SCHEMA_VERSION, 27)
+        from naiba.config import built_in_agent_ids
+        from naiba.storage.store import _BUILTIN_AGENT_IDS
+
+        self.assertEqual(set(_BUILTIN_AGENT_IDS), built_in_agent_ids(),
+                         "存储层冻结的内置 id 必须与配置层同源（改名漏改即静默不迁移）")
+
+    def test_built_in_main_conversations_get_show_media(self) -> None:
+        from naiba.storage.store import _BUILTIN_AGENT_IDS
+
+        base = ["read_file", "pwsh"]
+        expected = {}
+        for agent_id in _BUILTIN_AGENT_IDS:
+            conv = self.storage.create_conversation(agent_id=agent_id)
+            self.storage.set_enabled_tool_ids(conv["id"], list(base))
+            expected[conv["id"]] = agent_id
+        self.storage.set_user_version(26)
+        self.storage.apply_pending_migrations()
+        for conversation_id, agent_id in expected.items():
+            with self.subTest(agent=agent_id):
+                self.assertEqual(self._tools(conversation_id), [*base, "show_media"],
+                                 "只追加一件，其余工具与顺序不变")
+
+    def test_aux_plan_and_custom_agents_are_untouched(self) -> None:
+        base = ["read_file"]
+        aux = self.storage.create_conversation(conv_kind="aux", agent_id="master")
+        custom = self.storage.create_conversation(agent_id="agent_0123456789ab")
+        empty = self.storage.create_conversation(agent_id="coder")
+        for conversation_id in (aux["id"], custom["id"]):
+            self.storage.set_enabled_tool_ids(conversation_id, list(base))
+        self.storage.set_user_version(26)
+        self.storage.apply_pending_migrations()
+        self.assertEqual(self._tools(aux["id"]), base, "辅助对话的工具集恒被只读拓扑收口，不得扩权")
+        self.assertEqual(self._tools(custom["id"]), base, "自定义 Agent 是用户资产，升级不得扩权")
+        self.assertEqual(self._tools(empty["id"]), [], "空固化集语义是「未固化」，不得凭空写入")
+
+    def test_broken_json_row_is_skipped_not_fatal(self) -> None:
+        conv = self.storage.create_conversation(agent_id="master")
+        with closing(sqlite3.connect(self.root / "chat.db")) as db:
+            db.execute(
+                "UPDATE conversations SET enabled_tool_ids = ? WHERE id = ?",
+                ("{不是 JSON", conv["id"]),
+            )
+            db.commit()
+        self.storage.set_user_version(26)
+        self.storage.apply_pending_migrations()  # 不应抛异常
+        self.assertEqual(self.storage.get_user_version(), CURRENT_SCHEMA_VERSION)
+        with closing(sqlite3.connect(self.root / "chat.db")) as db:
+            raw = db.execute(
+                "SELECT enabled_tool_ids FROM conversations WHERE id = ?", (conv["id"],)
+            ).fetchone()[0]
+        self.assertEqual(raw, "{不是 JSON", "损坏 JSON 原样保留，不猜也不覆盖")
+
+    def test_migration_never_adds_background_tools(self) -> None:
+        """旧会话**只多 show_media**：后台工具是对已固化快照的追溯扩权，刻意不做。"""
+        conv = self.storage.create_conversation(agent_id="master")
+        self.storage.set_enabled_tool_ids(conv["id"], ["read_file"])
+        self.storage.set_user_version(26)
+        self.storage.apply_pending_migrations()
+        tools = set(self._tools(conv["id"]))
+        self.assertIn("show_media", tools)
+        self.assertEqual(
+            tools - {"read_file", "show_media"}, set(),
+            "迁移不得顺带补后台工具（旧会话能力保持不变）",
+        )
+
+    def test_v27_is_idempotent(self) -> None:
+        from naiba.storage.store import _migrate_to_v27
+
+        conv = self.storage.create_conversation(agent_id="master")
+        self.storage.set_enabled_tool_ids(conv["id"], ["read_file"])
+        with closing(sqlite3.connect(self.root / "chat.db")) as db:
+            _migrate_to_v27(db)
+            _migrate_to_v27(db)  # 二次重跑：不得重复追加
+        self.assertEqual(self._tools(conv["id"]), ["read_file", "show_media"])
+
+
 if __name__ == "__main__":
     unittest.main()

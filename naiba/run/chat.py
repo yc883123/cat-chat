@@ -24,7 +24,13 @@ from naiba.llm.local_probe import probe_local_context_window
 from naiba.skills.policy import normalize_skill_policy
 from naiba.core.exceptions import TaskCancelled
 from naiba.vision.runtime import VisionBudget
-from naiba.core.attachments import _image_intent, compose_user_content, union_run_media
+from naiba.core.attachments import (
+    _image_intent,
+    build_show_media_candidates,
+    compose_user_content,
+    show_media_intent,
+    union_run_media,
+)
 from naiba.core.conv_files import _conv_workspace_root, resolve_file_references
 from naiba.core.choices import detect_choice_groups
 from naiba.core.exceptions import ActiveRunError
@@ -222,6 +228,38 @@ def _frozen_history_for_run(
         str(run.get("id") or ""), boundary,
     )
     return messages
+
+
+def show_media_run_state(
+    *,
+    message: str,
+    mode: str,
+    conv_kind: str,
+    messages: list[dict[str, Any]] | None,
+    workspace: str = "",
+) -> tuple[bool, list[dict[str, Any]]]:
+    """本轮 RunContext 的「指名出卡」两枚键（计划 2026-10-20 §4.3）。
+
+    只有**承载用户原始请求的普通主对话 Run** 能置位：
+
+    - ``conv_kind != 'main'``（辅助对话）→ 假；
+    - ``mode == 'plan'``（计划准备）→ 假；
+    - 用户原文 ``show_media_intent()`` 不成立 → 假。
+
+    辅助对话 / Plan / 子 Agent / 后台 Job / 恢复回放路径一律为假——它们要么走别的
+    装配点（根本没有这两个键，缺省即假），要么在这里就被挡住。**绝不**用路由增强文本、
+    Agent 提示或历史助手文本作为授权来源（那正是"助手说过要展示"就能出卡的漏洞）。
+
+    候选快照只在意图成立时才构造（否则工具必然返回 ``intent_required``，扫一遍历史
+    附件纯属白做功）：会话已记录媒体 + 用户原文里明确给出的工作区内媒体路径。
+    """
+    if str(conv_kind or "") != "main":
+        return False, []
+    if str(mode or "").strip().lower() == "plan":
+        return False, []
+    if not show_media_intent(message):
+        return False, []
+    return True, build_show_media_candidates(messages, message, workspace)
 
 
 def _merge_usage_summary(
@@ -562,6 +600,16 @@ class ConversationRunMixin:
         plan_id = str(snapshot.get("plan_id") or run.get("plan_id") or "")
         # 会话种类（快照冻结）：辅助对话用只读执行器 + 专属说明（后端唯一判定，不信任快照外的任何来源）。
         conv_kind = "aux" if str(snapshot.get("conv_kind") or "") == "aux" else "main"
+        # 「指名出卡」的两道门在这里定稿（普通主对话 + 用户原文明确要求才算数）。
+        # 放在进入 try 之前：它只用冻结历史与用户原文，不需要模型 profile；
+        # 后续任何异常路径都不会留下"半边授权"（两枚键只在这一处赋值）。
+        show_media_allowed, show_media_candidates = show_media_run_state(
+            message=str(run.get("message") or ""),
+            mode=mode,
+            conv_kind=conv_kind,
+            messages=run.get("conversation_messages") or [],
+            workspace=str(snapshot.get("workspace_dir") or ""),
+        )
         sink = _RunEventSink(self, run_id, cancel_event)
         self._register_sink(run_id, sink)
         skills: list[dict[str, str]] = []
@@ -787,6 +835,16 @@ class ConversationRunMixin:
                                    "并把它的绝对路径传给 handoff_path——文档不存在或为空会被拒绝。"
                                    "成功后本轮立即结束，不要再调用其它工具，用一句话确认交接即可；"
                                    "下一条消息由用户确认后开始。").strip()
+            # 指名出卡指引：只在会话固化工具集含 show_media 时注入（同一会话内恒定，不破前缀缓存）。
+            # 这段只教「何时调用」；真正防误触的是 RunContext 授权、唯一候选解析与工作区/大小校验。
+            if "show_media" in allowed_tools:
+                prompt = (prompt + "\n\n指名展示已有媒体：用户明确要求把某张图、某段视频或某段音频"
+                                   "「拿出来看看 / 放出来 / 播放一下」时，用 show_media 把那个文件作为"
+                                   "本轮的媒体卡呈现；一次只传一个明确目标（路径、文件名，或用户用的那个"
+                                   "指代词）。目标有歧义、找不到或多于一个时，先用一句话问清是哪一个，"
+                                   "不要猜、不要连传多个。要发现目录里有什么仍用 list_directory；"
+                                   "不要为了满足展示请求去扫描目录。工具拒绝（越界、非媒体、超限、"
+                                   "意图不符）就如实说明原因，不要绕道用别的工具伪造展示。").strip()
             # 历史检索指引：只在会话固化工具集含长会话工具时注入，且逐条按"确实有这个工具"拼，
             # 避免让模型去调一个不在本会话工具集里的工具（与 web_search/PDF 同口径）。
             history_rules: list[str] = []
@@ -845,6 +903,9 @@ class ConversationRunMixin:
                 # 用户本轮是否明确要看图：枚举类工具的媒体声明 intent_gated 据此放行
                 # （判定用用户原文，不用路由增强文本——后者可能含历史助手措辞）。
                 "media_intent": _image_intent(message),
+                # 指名出卡：意图门 + 唯一候选门（两枚键只由本处赋值，缺省即拒绝）。
+                "show_media_intent": bool(show_media_allowed),
+                "show_media_candidates": list(show_media_candidates),
                 # 本轮是第几个用户轮次（1 起）：图片批注入标签用它标注「第 N 轮装载」，
                 # 让模型能区分「历史里装进来的旧图」与「当前成品图」（§九.150）。
                 # ⚠️ 取数点固定走 _turn_index_for_run（run 行的 input_message_id）——`message`

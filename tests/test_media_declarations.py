@@ -296,5 +296,64 @@ class FileChangeChipAlignmentTests(unittest.TestCase):
         self.assertEqual(paths, ["C:\\a.bmp", "C:\\a.txt"], "媒体产物不进'修改文件'，非媒体必须保留")
 
 
+class MessageMediaProductsTests(unittest.TestCase):
+    """消息底部「本轮媒体产物」索引（计划 2026-10-20 §4.5）：接线与边界。
+
+    媒体卡仍在工具调用处就地显示（预览/播放归它们）；底部是**并列的清单**——一行一个
+    文件名 + 复用既有文件动作条。数据只从该条消息已有的 metadata 派生：不扫目录、
+    不重读文件、不复制缓存、不新增 metadata 字段、不进模型历史。
+    渲染结果由 `verify/media_markup_check.mjs` 真执行校验，这里钉接线与禁用项。
+    """
+
+    def _read(self, name: str) -> str:
+        return (ROOT / "public" / "js" / name).read_text(encoding="utf-8")
+
+    def _fn(self, source: str, marker: str) -> str:
+        body = source[source.index(marker):]
+        return body[: body.index("\n}")]
+
+    def test_products_derive_from_message_metadata_only(self) -> None:
+        source = self._read("03-media.js")
+        self.assertIn("export function mediaProducts(", source)
+        fn = self._fn(source, "export function mediaProducts(metadata = {}) {")
+        self.assertIn("metadata.attachments", fn, "只读消息已有的附件记录")
+        self.assertIn("run.media", fn, "只读工具调用已有的媒体记录")
+        self.assertIn("seen.has(key)", fn, "按规范化来源去重")
+        self.assertIn("kind === 'other'", fn, "非媒体不进产物清单")
+        for forbidden in ("fetch(", "api(", "readFile", "copyFile", "localStorage"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, fn, "产物清单不得扫目录/重读文件/复制缓存")
+
+    def test_markup_is_list_rows_not_media_cards(self) -> None:
+        fn = self._fn(self._read("03-media.js"), "export function mediaProductsMarkup(metadata = {}) {")
+        self.assertIn("本轮媒体产物", fn)
+        self.assertIn("fileActionBarMarkup(", fn, "每项复用既有文件动作条（打开/另存为）")
+        self.assertIn("class=\"media-product\"", fn)
+        for tag in ("<img", "<video", "<audio", "media-grid", "<figure"):
+            with self.subTest(tag=tag):
+                self.assertNotIn(tag, fn, "清单行不得变成第二套媒体卡")
+
+    def test_rendered_after_media_grid_for_persisted_messages_only(self) -> None:
+        source = self._read("04-messages.js")
+        self.assertIn("${temporary ? '' : mediaProductsMarkup(metadata)}", source,
+                      "临时气泡不渲染（流式未收尾时没有稳定的 metadata）")
+        self.assertEqual(source.count("mediaProductsMarkup(metadata)"), 1,
+                         "只在助手消息那一支渲染一次（用户气泡不得出现产物清单）")
+        self.assertLess(
+            source.index("mediaMarkup(bottomAttachments)"),
+            source.index("mediaProductsMarkup(metadata)"),
+            "媒体卡是主要预览，产物索引排在它之后（并列补充，不替代）",
+        )
+
+    def test_styles_exist_and_do_not_touch_file_changes(self) -> None:
+        css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
+        for rule in (".media-products {", ".media-products-label {",
+                     ".media-products-list {", ".media-product {", ".media-product-name {"):
+            with self.subTest(rule=rule):
+                self.assertIn(rule, css)
+        # 不改既有「本轮修改文件」的样式：两块必须一眼分得清。
+        self.assertIn(".file-changes { margin-top: 12px;", css)
+
+
 if __name__ == "__main__":
     unittest.main()

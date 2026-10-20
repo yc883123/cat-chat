@@ -13,10 +13,18 @@
 from __future__ import annotations
 
 import re
+import urllib.parse
+from pathlib import Path
 from typing import Any
 
-from naiba.core.media_types import MEDIA_EXTS, is_media_path, media_kind_of, truncate_by_kind
-from naiba.core.paths import path_within  # noqa: F401  (re-export for callers)
+from naiba.core.media_types import (
+    MEDIA_EXTS,
+    MEDIA_SHOW_MAX_BYTES,
+    is_media_path,
+    media_kind_of,
+    truncate_by_kind,
+)
+from naiba.core.paths import normalized_path_key, path_within  # noqa: F401  (re-export for callers)
 
 # 多媒体产物（图片/视频/音频）走消息内产物卡片预览
 # （tool_run.media → metadata.attachments → mediaMarkup），不列入"修改文件"总结，
@@ -213,3 +221,733 @@ def union_run_media(
                 index_by_name[name_key] = len(ordered)
             ordered.append(record)
     return truncate_by_kind(ordered)
+
+
+# ============================================================
+# 「指名出卡」（show_media）：意图判定与目标解析（纯函数层）
+# ============================================================
+# 两道**独立**门槛（计划 2026-10-20 §2.1，任一失败都不产生媒体记录）：
+#   ① 用户意图门 `show_media_intent()`：本轮用户原文里确实有「明确要求展示某个媒体」；
+#   ② 目标授权门 `media_candidates_from_messages()` + `extract_media_targets_from_text()`：
+#      目标只能是会话已记录的媒体，或用户原文里明确给出的工作区内路径/文件名。
+# 模型自然语言推理不是安全边界：即使模型误调工具，执行层仍按这两道门 fail closed
+# （`tools/providers/core.py::_tool_show_media`），绝不产出半张卡。
+
+# 媒体词（与 `_IMAGE_MEDIA_TERM_RE` 分开维护：那个服务"目录枚举是否附图"的旧语义，
+# 语义一旦漂移会顺带改变 list_directory 的行为，计划 §4.1 明确要求不要动它）。
+# 「文件/附件/产物/素材」也算媒体词：用户常说「显示这个文件」，目标门会再确认它确实是媒体。
+_SHOW_MEDIA_TERM_RE = re.compile(
+    r"(图片|图像|照片|缩略图|位图|截图"
+    # 裸「图」：排除「地图/图纸/图表/网址/草图/截图/导图/流程图/框图」等非媒体词
+    # （与 _IMAGE_MEDIA_TERM_RE 的负向前瞻同口径，避免「这张图是谁画的」之类误判）。
+    r"|(?<![地纸表网草截导流框])图"
+    r"|视频|影片|录像"
+    r"|音频|音乐|语音|录音"
+    r"|媒体|多媒体|产物|素材|附件|文件"
+    r"|\b(?:image|picture|photo|video|audio|media|file|clip)\b"
+    r"|\b(?:mp4|webm|mov|m4v|ogv|png|jpe?g|webp|gif|mp3|wav|flac|ogg|m4a)\b)",
+    re.IGNORECASE,
+)
+
+# 正向展示动作：把某个**已经存在**的媒体呈现出来。
+# 刻意不收「查找/列出/浏览/翻看/确认/查询」——那些是枚举请求，走 list_directory；
+# 也不收裸「看看/看一下」（「看看这个视频讲了什么」是问内容，不是要出卡）。
+_SHOW_MEDIA_ACTION_RE = re.compile(
+    r"(展示|显示|播放|放出|放出来|放一下|打开|预览|贴出|贴一下|亮出|亮出来|秀一下|调出来"
+    r"|给我看看|给我看一下|给我看|让我看看|让我看一下|让我看|发给我|发出来|发我看)"
+)
+
+# 媒体词后紧跟这些「元信息名词」时不算展示请求（要的是路径/大小/内容，不是那张卡）。
+_SHOW_MEDIA_NON_TARGET_TAILS: tuple[str, ...] = (
+    "路径", "位置", "地址", "目录", "列表", "内容", "代码", "文本", "字节",
+    "大小", "时长", "名字", "文件名", "后缀", "格式", "数量", "总大小",
+)
+
+# 否定：出现在动作词**之前**（同一句读段内）即视为「不要展示」。
+_SHOW_MEDIA_NEGATIONS: tuple[str, ...] = (
+    "不要", "不用", "不想", "不需要", "无需", "无须", "不必", "没必要",
+    "禁止", "先别", "暂时别", "别", "勿", "甭", "不许", "不准", "不能", "不可",
+    "不把", "不将",
+)
+
+# 逗号前已完成的其他动作，不能把其否定错误地套到逗号后的展示请求上。
+# 「不要删掉这张图，把它展示出来」允许；「不要把那张图，展示出来」仍然拒绝。
+_SHOW_MEDIA_OTHER_ACTION_RE = re.compile(
+    r"删除|删掉|修改|改动|解释|分析|描述|询问|确认|下载|上传|移动|复制|重命名"
+    r"|转码|压缩|裁剪|生成|搜索|查找|执行|运行|问"
+)
+
+# 假设/条件：在**同一句**里出现即整句不放行（「如果把视频放出来会怎样」）。
+_SHOW_MEDIA_CONDITIONALS: tuple[str, ...] = (
+    "如果", "假如", "要是", "万一", "假设", "倘若", "若是", "若", "的话",
+    "会怎样", "会怎么样", "会不会", "能否", "是否能",
+)
+
+# 引用/转述：说明这句是别人说的，不是本轮用户自己的请求。
+_SHOW_MEDIA_REPORTING: tuple[str, ...] = (
+    "他说", "她说", "它说", "有人说", "听说", "据说", "提到", "写道", "写着",
+    "转述", "复述", "引用", "说过",
+)
+
+# 引号对：引号内的动作词不算本轮请求（但引号内的**路径**仍可作为目标，
+# 所以只在动作/否定/条件判定上掩码，媒体词判定用原文）。
+_QUOTE_PAIRS: tuple[tuple[str, str], ...] = (
+    ("「", "」"), ("『", "』"), ("“", "”"), ("‘", "’"),
+    ('"', '"'), ("'", "'"), ("`", "`"), ("《", "》"),
+)
+
+# 句子边界：只按强句读切分。**不按逗号切**——「请把刚才那个视频，展示出来」
+# 逗号前后同属一个请求，切开会把合法请求判成无意图。
+_SENTENCE_SPLIT_RE = re.compile(r"[。！？；;!?\n]+")
+
+# 路径字符（用于把散文中粘连的文件名切出来）：ASCII 路径字符 + CJK。
+_MEDIA_EXT_TAIL_RE = re.compile(
+    r"\.(?:" + "|".join(ext.lstrip(".") for ext in sorted(MEDIA_EXTS, key=len, reverse=True))
+    + r")(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_DRIVE_PREFIX_RE = re.compile(r"[A-Za-z]:[\\/]")
+
+# show_media 的拒绝原因（稳定枚举；模型据它决定「先问用户」还是「换目标」）。
+SHOW_MEDIA_REASONS: tuple[str, ...] = (
+    "intent_required", "ambiguous", "not_found", "not_media",
+    "outside_root", "over_limit", "too_large", "unreadable",
+)
+
+# 候选快照上限：超长会话（几百轮、每轮多条媒体）不该把整个历史附件全塞进 RunContext。
+SHOW_MEDIA_CANDIDATE_LIMIT = 300
+
+
+def _mask_quoted(text: str) -> str:
+    """把成对引号内的字符替换成等长空格（保持下标对齐，便于逐句对照原文）。"""
+    chars = list(text)
+    for opener, closer in _QUOTE_PAIRS:
+        start = 0
+        while True:
+            begin = text.find(opener, start)
+            if begin < 0:
+                break
+            end = text.find(closer, begin + 1)
+            if end < 0:
+                start = begin + 1
+                continue
+            for index in range(begin, min(end + 1, len(chars))):
+                chars[index] = " "
+            start = end + 1
+    return "".join(chars)
+
+
+def _showable_media_terms(text: str) -> bool:
+    """本句是否有「可被展示的媒体词」（排除「XX的路径/大小/内容」这类元信息请求）。"""
+    metadata_end = 0
+    for match in _SHOW_MEDIA_TERM_RE.finditer(text):
+        if match.start() < metadata_end:
+            continue  # 「图片的文件名」里的「文件」属于同一元信息目标，不能再次命中。
+        tail = text[match.end():]
+        prefix = re.match(r"\s*(?:的\s*)?", tail)
+        offset = prefix.end() if prefix is not None else 0
+        noun = next((word for word in _SHOW_MEDIA_NON_TARGET_TAILS if tail[offset:].startswith(word)), "")
+        if noun:
+            metadata_end = match.end() + offset + len(noun)
+            continue
+        return True
+    return False
+
+
+def _quoted_media_target(text: str) -> bool:
+    """引号内只允许作为紧邻展示动作的目标，不把被引话题借给其他请求。"""
+    for opener, closer in _QUOTE_PAIRS:
+        start = 0
+        while True:
+            begin = text.find(opener, start)
+            if begin < 0:
+                break
+            end = text.find(closer, begin + 1)
+            if end < 0:
+                break
+            value = text[begin + 1:end].strip()
+            tail = text[end + 1:end + 1 + 20].lstrip(" ，,、:：").removeprefix("的")
+            head = text[max(0, begin - 20):begin].rstrip(" ，,、:：")
+            metadata_tail = any(tail.startswith(word) for word in _SHOW_MEDIA_NON_TARGET_TAILS)
+            nearby_action = bool(
+                re.search(r"(?:把|将)?\s*$", head)
+                and _SHOW_MEDIA_ACTION_RE.match(tail)
+            ) or bool(_SHOW_MEDIA_ACTION_RE.search(head[-12:]))
+            has_media_target = media_kind_of(value) is not None or _showable_media_terms(value)
+            if has_media_target and nearby_action and not metadata_tail:
+                return True
+            start = end + 1
+    return False
+
+
+def _negation_before(text: str, position: int) -> bool:
+    """检查整句否定范围，不因长目标名或目标后的逗号丢掉否定。"""
+    clauses = re.split(r"[，,、：:]", text[:position])
+    for index in range(len(clauses) - 1, -1, -1):
+        clause = clauses[index]
+        ends = [
+            match.end()
+            for token in _SHOW_MEDIA_NEGATIONS
+            for match in re.finditer(re.escape(token), clause)
+        ]
+        if re.search(r"不\s*(?:再|继续|直接|自动)?\s*$", clause):
+            ends.append(len(clause))
+        if not ends:
+            continue
+        if index == len(clauses) - 1:
+            return True
+        scope = clause[max(ends):]
+        if _SHOW_MEDIA_ACTION_RE.search(scope) or _SHOW_MEDIA_OTHER_ACTION_RE.search(scope):
+            continue  # 前一分句已否定另一个动作；本分句是新的展示请求。
+        return True  # 「不要把那张图，展示出来」的否定仍覆盖当前动作。
+    return False
+
+
+def show_media_intent(text: str) -> bool:
+    """本轮用户原文是否**明确要求展示**某个已有媒体（show_media 的用户意图门）。
+
+    规则表驱动（计划 §4.1：不用单一包含词正则当承诺）。必须同时成立：
+
+    - 同一句里既有可展示的媒体词，又有**正向**展示动作词；
+    - 动作词不在引号内（引用/转述不是请求）；
+    - 动作词前没有否定词（不要/别/不用/无需/禁止…），且否定词与动作词之间没有句读；
+    - 同一句里没有假设/条件词（如果/假如/要是/若/的话/会怎样…）；
+    - 同一句里没有转述标记（他说/听说/提到/写着…）。
+
+    只在**承载用户原始请求的普通主对话 Run** 上调用（`run/chat.py` 装配处），
+    不得用路由增强文本、Agent 提示或历史助手文本作为授权来源。
+    """
+    raw = str(text or "")
+    if not raw.strip():
+        return False
+    masked = _mask_quoted(raw)
+    # 分隔符只从 masked 里取，原文按同一组索引切片。引号内的句号/换行已变为空格，
+    # 不会再让原文与掩码后的句子数组错位。
+    boundaries = [match for match in _SENTENCE_SPLIT_RE.finditer(masked)]
+    starts = [0, *(match.end() for match in boundaries)]
+    ends = [*(match.start() for match in boundaries), len(masked)]
+    for start, end in zip(starts, ends):
+        raw_sentence = raw[start:end]
+        masked_sentence = masked[start:end]
+        if not (_showable_media_terms(masked_sentence) or _quoted_media_target(raw_sentence)):
+            continue
+        if any(token in masked_sentence for token in _SHOW_MEDIA_CONDITIONALS):
+            continue
+        if any(token in masked_sentence for token in _SHOW_MEDIA_REPORTING):
+            continue
+        for match in _SHOW_MEDIA_ACTION_RE.finditer(masked_sentence):
+            if _negation_before(masked_sentence, match.start()):
+                continue
+            return True
+    return False
+
+
+def _is_http_url(value: str) -> bool:
+    return str(value or "").strip().lower().startswith(("http://", "https://"))
+
+
+def _source_name(source: str) -> str:
+    """来源的展示名（本地路径取文件名；URL 优先取 ?filename=，其次取路径尾段）。"""
+    text = str(source or "").strip()
+    if not text:
+        return ""
+    if _is_http_url(text):
+        try:
+            parsed = urllib.parse.urlsplit(text)
+        except ValueError:
+            return ""
+        filename = (urllib.parse.parse_qs(parsed.query).get("filename") or [""])[0]
+        return Path(filename).name if filename else Path(parsed.path or "").name
+    return Path(text).name
+
+
+def _candidate_key(source: str) -> str:
+    """候选去重键：本地路径按 ``normalized_path_key``；URL 按原串（计划 §2.3.1）。"""
+    text = str(source or "").strip()
+    if not text:
+        return ""
+    if _is_http_url(text):
+        return "url:" + text
+    return normalized_path_key(text)
+
+
+def _media_record(source: str, name: str = "", thumb_path: str = "") -> dict[str, Any] | None:
+    """构造一条候选记录（非媒体来源返回 None）。"""
+    text = str(source or "").strip()
+    if not text:
+        return None
+    kind = media_kind_of(text) or media_kind_of(name)
+    if not kind:
+        return None
+    return {
+        "kind": kind,
+        "name": str(name or "").strip() or _source_name(text),
+        "source": text,
+        "thumb_path": str(thumb_path or ""),
+    }
+
+
+def media_candidates_from_messages(messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """会话已记录的媒体候选（唯一来源：消息 ``metadata.attachments`` + ``tool_runs[].media``）。
+
+    **不扫工作区、不查其他会话、不搜宿主全局 generated、不凭 basename 到磁盘猜路径**。
+    返回 ``[{kind, name, source, thumb_path}]``，按规范化来源去重、保持出现顺序。
+    """
+    ordered: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        records: list[Any] = []
+        attachments = metadata.get("attachments")
+        if isinstance(attachments, list):
+            records.extend(attachments)
+        for run in metadata.get("tool_runs") or []:
+            if not isinstance(run, dict):
+                continue
+            media = run.get("media")
+            if isinstance(media, list):
+                records.extend(media)
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            entry = _media_record(
+                str(record.get("source") or record.get("path") or ""),
+                str(record.get("name") or ""),
+                str(record.get("thumb_path") or ""),
+            )
+            if entry is None:
+                continue
+            key = _candidate_key(entry["source"])
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            ordered.append(entry)
+    return ordered
+
+
+def _is_path_char(ch: str) -> bool:
+    if ch in "\\/:._-~":
+        return True
+    if ch.isascii() and ch.isalnum():
+        return True
+    code = ord(ch)
+    return 0x3400 <= code <= 0x4dbf or 0x4e00 <= code <= 0x9fff or 0xf900 <= code <= 0xfaff
+
+
+def _media_path_tokens(text: str) -> list[str]:
+    """从散文里切出「以受支持媒体扩展名结尾」的路径串（保持出现顺序，最多 20 条）。"""
+    tokens: list[str] = []
+    for match in _MEDIA_EXT_TAIL_RE.finditer(str(text or "")):
+        start = match.start()
+        while start > 0 and _is_path_char(text[start - 1]):
+            start -= 1
+        tokens.append(text[start:match.end()])
+        if len(tokens) >= 20:
+            break
+    return tokens
+
+
+def _is_cjk(ch: str) -> bool:
+    code = ord(ch) if ch else 0
+    return 0x3400 <= code <= 0x4dbf or 0x4e00 <= code <= 0x9fff or 0xf900 <= code <= 0xfaff
+
+
+def _token_forms(token: str) -> list[str]:
+    """一个粘连路径串的候选写法（按「越具体越优先」排序，去重保序）。
+
+    散文里的路径常与中文粘在一起（``把D:\\out\\a.png展示出来``、``把根图.png放出来``）：
+    先按盘符/UNC 锚点截，再试原串，最后**逐字**剥掉开头的 CJK
+    （只剥一个字、剥两个字……最多 8 次）——一次剥掉整段 CJK 会把文件名里的中文
+    （``根图.png``）也一起剥掉，于是永远解析不到。
+
+    带目录的路径绝不退成尾段或裸文件名：原路径不存在或越界时，不能授权另一份同名文件。
+    """
+    forms: list[str] = []
+    drive = _DRIVE_PREFIX_RE.search(token)
+    if drive:
+        value = token[drive.start():].strip().strip("，。；：、！？（）()【】「」『』“”‘’")
+        return [value] if value else []
+    unc = token.find("\\\\")
+    if unc >= 0:
+        value = token[unc:].strip().strip("，。；：、！？（）()【】「」『』“”‘’")
+        return [value] if value else []
+    forms.append(token)
+    head = token
+    for _ in range(8):
+        if not head or not _is_cjk(head[0]):
+            break
+        head = head[1:]
+        if head:
+            forms.append(head)
+    ordered: list[str] = []
+    for form in forms:
+        value = form.strip().strip("，。；：、！？（）()【】「」『』“”‘’")
+        if value and value not in ordered:
+            ordered.append(value)
+    return ordered[:16]
+
+
+def _resolve_declared_path(
+    token: str, workspace: str | Path | None
+) -> Path | None:
+    """把一个散文路径串解析成**工作区内真实存在的普通文件**；解析不到返回 None。"""
+    for form in _token_forms(token):
+        candidate = Path(form).expanduser()
+        if not candidate.is_absolute():
+            if not str(workspace or "").strip():
+                continue
+            candidate = Path(str(workspace)) / candidate
+        try:
+            resolved = candidate.resolve()
+        except (OSError, ValueError):
+            continue
+        if not media_kind_of(resolved.name):
+            continue
+        if str(workspace or "").strip():
+            try:
+                root = Path(str(workspace)).expanduser().resolve()
+            except (OSError, ValueError):
+                continue
+            if not path_within(resolved, root):
+                continue
+        try:
+            if not resolved.is_file():
+                continue
+        except OSError:
+            continue
+        return resolved
+    return None
+
+
+def extract_media_targets_from_text(
+    text: str, workspace: str | Path | None = None
+) -> list[dict[str, Any]]:
+    """本轮用户原文里**明确给出**的工作区媒体路径（目标授权门的第二个来源）。
+
+    只认「原文里真的写出来的路径/文件名」：不做目录扫描、不按 basename 到磁盘猜路径。
+    相对路径按本轮冻结工作区 ``workspace`` 解析；解析后必须仍在工作区内（符号链接按
+    真实目标判定）；必须是存在的普通文件且扩展名属于受支持媒体类型。
+    """
+    targets: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for token in _media_path_tokens(text):
+        resolved = _resolve_declared_path(token, workspace)
+        if resolved is None:
+            continue
+        key = _candidate_key(str(resolved))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        entry = _media_record(str(resolved), resolved.name)
+        if entry is not None:
+            targets.append(entry)
+    return targets
+
+
+def build_show_media_candidates(
+    messages: list[dict[str, Any]] | None,
+    message: str,
+    workspace: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """一轮 Run 的 ``run_context["show_media_candidates"]`` 快照（run/chat 装配处唯一入口）。
+
+    会话已记录媒体（``metadata.attachments`` / ``tool_runs[].media``）
+    ＋ 本轮用户原文里明确给出的工作区内媒体路径，按规范化来源去重；
+    只保留媒体类型，最多 ``SHOW_MEDIA_CANDIDATE_LIMIT`` 条（保留最新的那一批）。
+    """
+    pool = media_candidates_from_messages(messages)
+    seen = {_candidate_key(item["source"]) for item in pool}
+    for target in extract_media_targets_from_text(message, workspace):
+        key = _candidate_key(target["source"])
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        pool.append(target)
+    if len(pool) > SHOW_MEDIA_CANDIDATE_LIMIT:
+        pool = pool[-SHOW_MEDIA_CANDIDATE_LIMIT:]
+    return pool
+
+
+def _show_shown(record: dict[str, Any]) -> dict[str, Any]:
+    """成功结果（原始形态，供采集器按 ``structured`` 声明读出 source/thumb_path）。
+
+    本地来源在这里再走一次 ``_local_file_reason``：候选可能是**早就被缓存清理掉**的
+    老附件，直接回 ``shown`` 会让模型对用户说"已经展示了"，而采集器落地校验把这条丢掉、
+    用户什么也看不到（静默失败）。宁可回 ``not_found``/``unreadable`` 让模型如实说明。
+    """
+    source = str(record.get("source") or "")
+    if source and not _is_http_url(source):
+        reason = _local_file_reason(Path(source))
+        if reason:
+            return _show_skipped(reason, name=str(record.get("name") or ""))
+    return {
+        "ok": True,
+        "status": "shown",
+        "kind": str(record.get("kind") or media_kind_of(source) or ""),
+        "name": str(record.get("name") or "").strip() or _source_name(source),
+        "source": source,
+        "thumb_path": str(record.get("thumb_path") or ""),
+    }
+
+
+def _show_skipped(reason: str, choices: list[str] | None = None, name: str = "") -> dict[str, Any]:
+    """拒绝结果（稳定原因枚举 + 安全的候选展示名，供模型追问）。"""
+    value = reason if reason in SHOW_MEDIA_REASONS else "not_found"
+    payload: dict[str, Any] = {"ok": False, "status": "skipped", "reason": value, "name": name}
+    safe = []
+    for item in choices or []:
+        text = str(item or "").strip()
+        if text and text not in safe:
+            safe.append(text)
+    if safe:
+        payload["choices"] = safe[:8]
+    return payload
+
+
+def _local_file_reason(path: Path) -> str:
+    """本地目标的存在性/类型/体积预检（**只读 stat**，不读全文、不复制、不建缩略图）。
+
+    返回空串表示通过；否则返回 ``not_found`` / ``not_media`` / ``too_large`` / ``unreadable``。
+    """
+    try:
+        if not path.exists():
+            return "not_found"
+        if not path.is_file():
+            return "not_media"
+        if not media_kind_of(path.name):
+            return "not_media"
+        size = path.stat().st_size
+    except OSError:
+        return "unreadable"
+    if size > MEDIA_SHOW_MAX_BYTES:
+        return "too_large"
+    return ""
+
+
+def _find_candidate_by_source(
+    pool: list[dict[str, Any]], source: str
+) -> dict[str, Any] | None:
+    key = _candidate_key(source)
+    if not key:
+        return None
+    for record in pool:
+        if _candidate_key(str(record.get("source") or "")) == key:
+            return record
+    return None
+
+
+def _local_target(
+    raw: str, workspace: str | Path | None
+) -> tuple[Path | None, str]:
+    """把工具参数解析成本地路径；返回 ``(path, reason)``，二者必有其一为空。"""
+    text = str(raw or "").strip()
+    if not text:
+        return None, "not_found"
+    if _is_http_url(text):
+        return None, "not_found"
+    try:
+        candidate = Path(text).expanduser()
+    except (OSError, ValueError):
+        return None, "unreadable"
+    if not candidate.is_absolute():
+        if not str(workspace or "").strip():
+            return None, "not_found"
+        candidate = Path(str(workspace)) / candidate
+    try:
+        resolved = candidate.resolve()
+    except (OSError, ValueError):
+        return None, "unreadable"
+    # 越界判定先于存在性：符号链接按真实目标判定，只要解析后不在工作区内就一律拒绝
+    # （否则「工作区里放个指向 C:\ 的链接」就成了读任意路径的后门）。
+    if str(workspace or "").strip():
+        try:
+            root = Path(str(workspace)).expanduser().resolve()
+        except (OSError, ValueError):
+            root = None
+        if root is not None and not path_within(resolved, root):
+            return None, "outside_root"
+    reason = _local_file_reason(resolved)
+    if reason:
+        return None, reason
+    return resolved, ""
+
+
+def _looks_like_path(raw: str) -> bool:
+    text = str(raw or "").strip()
+    if not text:
+        return False
+    if _DRIVE_PREFIX_RE.match(text):
+        return True
+    if text.startswith(("\\\\", "~/", "~\\")):
+        return True
+    return "/" in text or "\\" in text
+
+
+def _kinds_mentioned(text: str) -> set[str]:
+    """文本里提到的媒体类型（用于「刚才那个视频」这类代词的按类型过滤）。"""
+    value = str(text or "").lower()
+    kinds: set[str] = set()
+    if re.search(r"(视频|影片|录像|video|clip|mp4|webm|mov|m4v|ogv)", value):
+        kinds.add("video")
+    if re.search(r"(音频|音乐|语音|录音|audio|music|mp3|wav|flac|ogg|m4a)", value):
+        kinds.add("audio")
+    if re.search(r"(图片|图像|照片|缩略图|位图|截图|image|picture|photo|png|jpe?g|webp|gif)", value):
+        kinds.add("image")
+    return kinds
+
+
+def _authorized_local(
+    path: Path,
+    pool: list[dict[str, Any]],
+    message_text: str,
+    workspace: str | Path | None,
+) -> bool:
+    """本地目标是否通过目标授权门（会话已记录媒体 / 用户原文明确给出）。"""
+    if _find_candidate_by_source(pool, str(path)) is not None:
+        return True
+    key = _candidate_key(str(path))
+    if not key:
+        return False
+    for target in extract_media_targets_from_text(message_text, workspace):
+        if _candidate_key(str(target.get("source") or "")) == key:
+            return True
+    return False
+
+
+def _resolve_local_request(
+    raw: str,
+    workspace: str | Path | None,
+    pool: list[dict[str, Any]],
+    message_text: str,
+) -> dict[str, Any] | None:
+    """显式本地路径/文件名 → 结果；返回 ``None`` 表示「它只是裸文件名，交给描述性指代」。
+
+    两种「找不到」要分开处理：
+
+    - 带分隔符/盘符的真路径：找不到就是 ``not_found``，**绝不**退到按名字猜候选
+      （否则「D:\\a\\b.png 不存在」会神奇地显示成工作区里另一张同名图）；
+    - 裸文件名（``a.png``）：先按工作区相对路径解析，解析不到再走候选展示名精确匹配
+      （同名多份 → ``ambiguous``），这也是计划 §2.3 要求的「仅 basename 冲突 → 歧义」。
+    """
+    resolved, reason = _local_target(raw, workspace)
+    if resolved is None:
+        if reason == "not_found" and not _looks_like_path(raw):
+            return None
+        return _show_skipped(reason)
+    if not _authorized_local(resolved, pool, message_text, workspace):
+        return _show_skipped("not_found")
+    record = _find_candidate_by_source(pool, str(resolved)) or {}
+    return _show_shown({**record, "source": str(resolved), "name": resolved.name})
+
+
+def _trusted_local_record(raw: str, pool: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """精确解析本地参数并查找会话可信记录（可位于 workspace 外，如 uploads）。"""
+    try:
+        path = Path(str(raw or "").strip()).expanduser().resolve()
+    except (OSError, ValueError):
+        return None
+    return _find_candidate_by_source(pool, str(path))
+
+
+def _resolve_descriptive(
+    raw: str, message_text: str, pool: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """代词/模糊指代（「刚才那个视频」）解析：**恰好一个**才允许展示。
+
+    多个候选一律 ``ambiguous``（返回安全的候选展示名，不挑最新、不挑第一个）；
+    零个 ``not_found``。基名精确匹配优先于「包含」匹配（同名不同路径仍是 ambiguous）。
+    """
+    hint = str(raw or "").strip()
+    kinds = _kinds_mentioned(hint) or _kinds_mentioned(message_text)
+    filtered = [item for item in pool if not kinds or str(item.get("kind") or "") in kinds]
+    base = hint.lower()
+    if base and not _looks_like_path(hint):
+        by_name = [
+            item for item in filtered
+            if str(item.get("name") or "").strip().lower() == base
+        ]
+        if len(by_name) == 1:
+            return _show_shown(by_name[0])
+        if len(by_name) > 1:
+            return _show_skipped("ambiguous", [str(item.get("name") or "") for item in by_name])
+        by_contains = [
+            item for item in filtered
+            if base and base in str(item.get("name") or "").strip().lower()
+        ]
+        if len(by_contains) == 1:
+            return _show_shown(by_contains[0])
+        if len(by_contains) > 1:
+            return _show_skipped("ambiguous", [str(item.get("name") or "") for item in by_contains])
+    if not filtered:
+        return _show_skipped("not_found")
+    if len(filtered) == 1:
+        return _show_shown(filtered[0])
+    return _show_skipped("ambiguous", [str(item.get("name") or "") for item in filtered])
+
+
+def resolve_show_media_target(
+    paths: Any,
+    *,
+    workspace: str | Path | None = None,
+    message_text: str = "",
+    candidates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """show_media 的目标授权门：把 ``paths`` 解析成**唯一**可展示目标。
+
+    返回 ``{"ok": True, "status": "shown", kind, name, source, thumb_path}``
+    或 ``{"ok": False, "status": "skipped", "reason": <枚举>, "name", "choices"?}``。
+
+    契约（计划 §2.2/§2.3）：
+    - ``paths`` 必须是字符串数组、**单次最多 1 项**；为空/非法/两项以上/重复项一律拒绝，
+      且**先完成全部校验再采集**（任一失败都不产生半张卡）；
+    - 空数组 = 「按用户原文里的代词指代解析」；
+    - 本地目标必须是工作区内真实存在的普通媒体文件（符号链接按真实目标判定）；
+    - 超过 ``MEDIA_SHOW_MAX_BYTES`` 返回 ``too_large``，只读 stat，不读全文、不复制。
+    """
+    pool = [item for item in (candidates or []) if isinstance(item, dict)]
+    raw_items: list[Any]
+    if paths is None:
+        raw_items = []
+    elif isinstance(paths, str):
+        raw_items = [paths]
+    elif isinstance(paths, (list, tuple)):
+        raw_items = list(paths)
+    else:
+        return _show_skipped("not_found")
+    if any(not isinstance(item, str) for item in raw_items):
+        return _show_skipped("not_found")
+    if len(raw_items) > 1:
+        return _show_skipped("over_limit")
+    if not raw_items:
+        return _resolve_descriptive("", message_text, pool)
+    raw = raw_items[0].strip()
+    if not raw:
+        return _show_skipped("not_found")
+
+    # ① URL 形态（ComfyUI /view 等）：只认会话里已记录的同串来源，不联网、不猜地址。
+    if _is_http_url(raw):
+        record = _find_candidate_by_source(pool, raw)
+        if record is None:
+            return _show_skipped("not_found")
+        return _show_shown(record)
+
+    # 会话已记录媒体（尤其是宿主 uploads/generated 缓存）可按精确来源复用，
+    # 即使其缓存目录位于工作区外。新声明路径仍由后续 _local_target 严格限制在 workspace。
+    trusted = _trusted_local_record(raw, pool)
+    if trusted is not None:
+        return _show_shown(trusted)
+
+    # ② 本地路径/文件名形态：按本轮冻结工作区解析，且必须通过授权（会话候选 / 原文明确给出）。
+    #    带分隔符/盘符的真路径只走这一条；裸文件名（a.png）解析不到时退回 ③ 按候选展示名匹配
+    #    ——「仅 basename 冲突 → ambiguous」正是从那里出来的。
+    if _looks_like_path(raw) or Path(raw).suffix:
+        resolved_result = _resolve_local_request(raw, workspace, pool, message_text)
+        if resolved_result is not None:
+            return resolved_result
+
+    # ③ 描述性指代（「刚才那个视频」/「a.png」）：候选集合里恰好一个才放行。
+    return _resolve_descriptive(raw, message_text, pool)

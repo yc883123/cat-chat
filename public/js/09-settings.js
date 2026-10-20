@@ -3408,6 +3408,28 @@ export function matchToolPreset() {
   return matchToolScope(state.agentFormToolScope);
 }
 
+// 「指名出卡」显示后缀（只影响显示，不参与任何匹配判定）。
+// 六个内置 Agent 的出厂工具集 = 对应预设 + show_media，因此它们在卡片上不该显示成
+// 「自定义 · N 个工具」——那会让人以为工具集坏了。识别规则是**只用于显示**的：
+//   · 整套精确命中预设 / 我的工具集        → 原名；
+//   · 去掉 show_media 后精确命中           → 「原名 + 指名出卡」；
+//   · 其余                                 → 自定义 · N 个工具。
+// why 不给 matchToolScope 放宽：卡片高亮、套用前的覆盖确认、删除工具集前的引用判定
+// 都必须保持**精确匹配**语义——否则「标准模式 + 指名出卡」会被当成标准模式，
+// 点回标准卡时不弹确认就静默丢掉 show_media。
+const SHOW_MEDIA_TOOL = 'show_media';
+const SHOW_MEDIA_LABEL = '指名出卡';
+
+function displayScopeMatch(scope) {
+  const exact = matchToolScope(scope);
+  if (exact) return exact;
+  const raw = Array.isArray(scope) ? scope.filter(Boolean) : [];
+  if (!raw.includes(SHOW_MEDIA_TOOL)) return null;
+  const base = matchToolScope(raw.filter((name) => name !== SHOW_MEDIA_TOOL));
+  if (!base) return null;
+  return { ...base, name: `${base.name} + ${SHOW_MEDIA_LABEL}` };
+}
+
 // 某个工具集（Agent 的 tool_scope）对应的名称：预设名 → 我的工具集名 → 未限制 / 自定义。
 // Agent 卡片用它在「固定 Skill」下方显示这一栏，一眼看出这个 Agent 开的是哪套工具。
 export function toolScopeLabel(scope) {
@@ -3415,7 +3437,7 @@ export function toolScopeLabel(scope) {
   if (!raw.length) return '未限制（全部工具）';
   const tools = matchableTools(raw);
   if (!tools.length) return `自定义 · ${raw.length} 个工具`;
-  const matched = matchToolScope(tools);
+  const matched = displayScopeMatch(raw);
   if (matched) return matched.name;
   return `自定义 · ${tools.length} 个工具`;
 }
@@ -3425,7 +3447,7 @@ function toolSetSummary() {
     return '当前：未限制（等同全能，以后新增的工具自动包含）';
   }
   const total = state.agentFormToolScope.length;
-  const matched = matchToolPreset();
+  const matched = displayScopeMatch(state.agentFormToolScope);
   if (matched) return `当前：${matched.name} · ${total} 个工具`;
   return `当前：自定义（未保存）· ${total} 个工具`;
 }

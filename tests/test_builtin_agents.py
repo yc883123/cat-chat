@@ -80,7 +80,23 @@ PRESET_BACKED = {
 SKILL_MANAGER_TOOLS = {"install_skill", "unpack_skill_archive", "inspect_installed_skill"}
 PROMPTER_SCOPE = {
     "read_file", "list_directory", "search_files", "read_pdf",
-    "vision_analyze", "write_file", "edit_file",
+    "vision_analyze", "write_file", "edit_file", "show_media",
+}
+# 六个内置 Agent 都自带「指名出卡」；它**不进任何 TOOL_PRESETS**，只随内置 Agent 出厂。
+SHOW_MEDIA = "show_media"
+# 后台任务创建器 + 完整查询/停止闭包（与 run/session.JOB_CREATOR_TOOL_DEPS 同口径）：
+# 标准 / 长会话 / ComfyUI 三档预设已带上它，因此任务型内置 Agent 在新会话开箱可用。
+BACKGROUND_TOOLS = {
+    "run_in_background", "job_output", "job_status", "job_wait", "job_kill",
+}
+# 各 Agent 相对「基础预设展开」额外多出来的工具（除 show_media 之外的差异项）。
+EXTRA_SCOPE = {
+    "tutor": set(),
+    "master": set(),
+    "director": {"run_in_background", "job_kill"},
+    "prompter": set(),
+    "coder": set(),
+    "skills": SKILL_MANAGER_TOOLS,
 }
 # 出厂绑定：Agent id → 随包 Skill 的 ref（前端 `/` 索引里的可手输别名）。
 EXPECTED_BINDINGS = {
@@ -170,27 +186,90 @@ class BuiltInAgentScopeTests(unittest.TestCase):
     """工具档：与预设一致 + 不含越权工具。"""
 
     def test_scope_matches_tool_preset(self) -> None:
+        """六个内置 scope 逐项等于「对应预设展开 + 各自额外项 + 指名出卡」。
+
+        为什么逐项而不是只比数量：少了/多了一个工具往往是预设改名或漏改的静默事故。
+        """
         agents = {agent["id"]: agent for agent in built_in_agents()}
         for agent_id, preset_id in PRESET_BACKED.items():
             with self.subTest(agent=agent_id, preset=preset_id):
                 self.assertEqual(
-                    set(agents[agent_id]["tool_scope"]), _preset_tools(preset_id),
-                    f"{agent_id} 的工具档必须与「{preset_id}」预设展开逐项一致",
+                    set(agents[agent_id]["tool_scope"]),
+                    _preset_tools(preset_id) | EXTRA_SCOPE[agent_id] | {SHOW_MEDIA},
+                    f"{agent_id} 的工具档必须与「{preset_id}」预设展开逐项一致（+ 指名出卡）",
                 )
         self.assertEqual(
             set(agents["skills"]["tool_scope"]),
-            _preset_tools("standard") | SKILL_MANAGER_TOOLS,
-            "Skill 助手 = 标准模式 + 装/拆/查三件套",
+            _preset_tools("standard") | SKILL_MANAGER_TOOLS | {SHOW_MEDIA},
+            "Skill 助手 = 标准模式 + 装/拆/查三件套 + 指名出卡",
         )
         self.assertEqual(set(agents["prompter"]["tool_scope"]), PROMPTER_SCOPE,
-                         "提示词优化 = 只读 + 写稿（7 件）")
+                         "提示词优化 = 只读 + 写稿 + 指名出卡（8 件）")
+
+    def test_every_builtin_agent_can_show_media(self) -> None:
+        """六个内置 Agent 必须都带 show_media（升级后老用户主会话也要能用）。"""
+        for agent in built_in_agents():
+            with self.subTest(agent=agent["id"]):
+                self.assertIn(SHOW_MEDIA, agent["tool_scope"],
+                              "内置 Agent 缺 show_media ⇒ 用户说「把刚才那张图展示出来」时无卡可出")
+
+    def test_show_media_is_not_in_any_tool_preset(self) -> None:
+        """show_media 只随内置 Agent 出厂，不得被显式列进通用预设（否则点一下预设就扩权）。
+
+        「全能模式」是 `group:*` 的「全部工具」，展开后自然包含它——那是那一档的定义，
+        与「不要显式塞进按能力分档的预设」不冲突，所以只对前四档断言展开结果。
+        """
+        from naiba.config import TOOL_PRESETS as _PRESETS
+
+        for preset in _PRESETS:
+            with self.subTest(preset=preset["id"]):
+                self.assertNotIn(
+                    SHOW_MEDIA, [str(item) for item in (preset.get("include") or [])],
+                    "通用预设不得显式包含 show_media（它有本地缓存写入副作用）",
+                )
+        for preset_id in ("readonly", "standard", "longsession", "comfyui"):
+            with self.subTest(preset=preset_id):
+                self.assertNotIn(
+                    SHOW_MEDIA, _preset_tools(preset_id),
+                    "按能力分档的四档预设都不得包含 show_media",
+                )
+
+    def test_background_tools_reach_the_task_agents_only(self) -> None:
+        """后台五件套只到任务型 Agent（master/coder/skills 全量，director 只补入口）。
+
+        只读的教程助手与提示词优化 Agent **不获得**后台工具：它们的职责与只读边界
+        决定了不该有创建 Job 的入口（计划 A §3.1）。
+        """
+        agents = {agent["id"]: set(agent["tool_scope"]) for agent in built_in_agents()}
+        for agent_id in ("master", "coder", "skills"):
+            with self.subTest(agent=agent_id):
+                self.assertTrue(BACKGROUND_TOOLS <= agents[agent_id],
+                                f"{agent_id} 应获得后台任务五件套")
+        # 导演 Agent：ComfyUI 预设本来就带 job_output/job_status/job_wait（comfyui_batch 的
+        # 查询闭包），这次只**新增** run_in_background + job_kill；合起来同样是五件套。
+        self.assertEqual(agents["director"] & BACKGROUND_TOOLS, BACKGROUND_TOOLS,
+                         "导演 Agent：ComfyUI 工作流走 comfyui_batch，通用后台入口也已补齐")
+        from naiba.config import _BUILTIN_AGENT_NEW_TOOLS
+
+        self.assertEqual(set(_BUILTIN_AGENT_NEW_TOOLS["director"]),
+                         {"run_in_background", "job_kill", "show_media"},
+                         "导演 Agent 的新增项只有通用后台入口 + 停止 + 指名出卡")
+        for agent_id in ("tutor", "prompter"):
+            with self.subTest(agent=agent_id):
+                self.assertEqual(agents[agent_id] & BACKGROUND_TOOLS, set(),
+                                 f"{agent_id} 不得获得任何后台任务工具")
 
     def test_scope_counts_match_plan(self) -> None:
-        """个数是对外说明（教程里会写"N 件"），与计划书 §二 逐项对齐。"""
-        expected = {"tutor": 6, "master": 17, "director": 18, "prompter": 7, "coder": 13, "skills": 16}
+        """个数是对外说明（教程/手册会写"N 件"），与计划书 §3.1/§3.2 逐项对齐。"""
+        expected = {"tutor": 7, "master": 23, "director": 21, "prompter": 8, "coder": 19, "skills": 22}
         for agent in built_in_agents():
             with self.subTest(agent=agent["id"]):
                 self.assertEqual(len(agent["tool_scope"]), expected[agent["id"]])
+        # 预设档位同样对外说明：6 / 18 / 22 / 20。
+        self.assertEqual(len(_preset_tools("readonly")), 6)
+        self.assertEqual(len(_preset_tools("standard")), 18)
+        self.assertEqual(len(_preset_tools("longsession")), 22)
+        self.assertEqual(len(_preset_tools("comfyui")), 20)
 
     def test_scope_never_grants_spawn_and_external_tools(self) -> None:
         """subagent/subagent_spawn 会烧 token（鱼群），MCP 与联网一律不进出厂档。

@@ -128,6 +128,11 @@ def resolve_allowed_tools(
                 if dep not in present:
                     allowed_tools.append(dep)
                     present.add(dep)
+    if normalize_interaction_mode(mode) == "plan":
+        # Plan（准备阶段）不开放「指名出卡」：计划期只做只读探索，出卡没有意义，而它的
+        # RunContext 也从不置位 show_media_intent。这里显式移除，避免「工具声明在、
+        # 调用必然 intent_required」的形态被写进模型可见的工具数组。
+        allowed_tools = [tool for tool in allowed_tools if tool != "show_media"]
     # 互斥归一放在最后：**这一处就保证运行时绝不相同组双开**（无论工具集来自
     # 固化集、Agent scope 还是旧逻辑的兜底并集）。见 MUTUALLY_EXCLUSIVE_TOOL_GROUPS。
     allowed_tools = normalize_tool_mutex(allowed_tools)

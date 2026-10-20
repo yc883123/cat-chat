@@ -246,9 +246,15 @@ async function waitForCardCount(page, expected, timeout = 15000) {
       // 与前端 toolScopeLabel 同口径：退役/掉线的工具名不参与匹配与计数。
       const tools = knownTools.size ? raw.filter((name) => knownTools.has(name)) : raw;
       if (!tools.length) return `自定义 · ${raw.length} 个工具`;
-      const hit = presets.find((preset) => (preset.tools || []).length === tools.length
-        && (preset.tools || []).every((name) => tools.includes(name)));
-      return hit ? hit.name : `自定义 · ${tools.length} 个工具`;
+      const exact = (list) => presets.find((preset) => (preset.tools || []).length === list.length
+        && (preset.tools || []).every((name) => list.includes(name)));
+      const hit = exact(tools);
+      if (hit) return hit.name;
+      // 与前端 displayScopeMatch 同口径：「预设 + 指名出卡（show_media）」显示成「原名 + 指名出卡」。
+      // 这是**只影响显示**的识别；卡片高亮与覆盖确认仍走精确匹配，所以下面还要按精确值判高亮。
+      if (!tools.includes('show_media')) return `自定义 · ${tools.length} 个工具`;
+      const base = exact(tools.filter((name) => name !== 'show_media'));
+      return base ? `${base.name} + 指名出卡` : `自定义 · ${tools.length} 个工具`;
     };
     check('每张卡片都在 Skill 下方显示工具集标签',
       cards.agents.every((card) => card.tools.startsWith('工具集：')), JSON.stringify(cards.agents.map((card) => card.tools)));

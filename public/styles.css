@@ -220,9 +220,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .aux-composer textarea:focus { outline: none; border-color: rgb(var(--brand-500-rgb)); }
 .aux-composer .send-button { width: 36px; height: 36px; flex: none; display: grid; place-items: center; padding: 0; }
 .aux-composer .send-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
-.aux-meta { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.aux-meta { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
 .aux-readonly-chip { flex: none; padding: 1px 7px; border: 1px solid var(--line); border-radius: var(--r-full); background: var(--surface); color: var(--muted); font-size: 10.5px; line-height: 1.6; }
-.aux-chip { min-width: 0; max-width: 46%; min-height: 24px; padding: 0 4px; border: 1px solid var(--line); border-radius: var(--r-full); background: var(--surface); color: var(--muted); font: inherit; font-size: 11px; text-overflow: ellipsis; cursor: pointer; }
+.aux-chip { flex: 1 1 70px; min-width: 0; max-width: none; min-height: 24px; padding: 0 4px; border: 1px solid var(--line); border-radius: var(--r-full); background: var(--surface); color: var(--muted); font: inherit; font-size: 11px; text-overflow: ellipsis; cursor: pointer; }
 .aux-chip:hover { color: var(--text); border-color: var(--line-strong); }
 .aux-chip:focus { outline: none; border-color: rgb(var(--brand-500-rgb)); color: var(--text); }
 /* 空态说明横幅（有消息时不再显示，改由 .aux-follow 的短注承担）。 */

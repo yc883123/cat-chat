@@ -363,10 +363,11 @@
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>
               </button>
             </div>
-            <!-- 供应商与模型：辅助对话自己的选择，与顶栏/左侧供应商解耦。
+            <!-- Agent / 供应商 / 模型：辅助对话自己的选择，与顶栏和主对话解耦。
                  原生 select 直接做成胶囊，值来源唯一，不另造浮层。 -->
             <div class="aux-meta">
               <span class="aux-readonly-chip" title="辅助对话只能读取和查询，不能修改文件">只读</span>
+              <select class="aux-chip" id="auxAgentSelect" aria-label="辅助对话 Agent" title="这条辅助对话由哪个 Agent 回答"></select>
               <select class="aux-chip" id="auxProviderSelect" aria-label="辅助对话供应商" title="辅助对话用哪个 API 供应商"></select>
               <select class="aux-chip" id="auxModelSelect" aria-label="辅助对话模型" title="辅助对话用哪个模型回答"></select>
             </div>

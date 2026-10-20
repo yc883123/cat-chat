@@ -859,14 +859,24 @@ class NaibaChatApp:
             return {"error": "agent_id 必须是文本"}, HTTPStatus.BAD_REQUEST
         if agent_id is not None and not self.config.get_agent(str(agent_id)):
             return {"error": "Agent 不存在"}, HTTPStatus.BAD_REQUEST
-        # 会话已固化启用工具集后不允许会话内切换 Agent，否则工具集变化破坏前缀缓存。
+        # 主对话已固化启用工具集后不允许会话内切换 Agent，否则工具集变化破坏前缀缓存。
+        # 辅助对话例外：它的工具集永远收口到只读白名单，切换 Agent 不可能扩权；
+        # 切换后按新 Agent 重建固化集即可（见 update 之后的处理）。
+        conv_row = None
+        current_agent_id = ""
+        conv_kind = "main"
         if agent_id is not None:
             try:
                 conv_row = self.storage.get_conversation(conversation_id, include_messages=False)
             except Exception:  # noqa: BLE001 - 读取失败不应中断整个请求
                 conv_row = None
             current_agent_id = str((conv_row or {}).get("agent_id") or "")
-            if agent_id != current_agent_id and (conv_row or {}).get("enabled_tool_ids"):
+            conv_kind = "aux" if str((conv_row or {}).get("conv_kind") or "") == "aux" else "main"
+            if (
+                agent_id != current_agent_id
+                and (conv_row or {}).get("enabled_tool_ids")
+                and conv_kind != "aux"
+            ):
                 return (
                     {"error": "该会话已固化启用工具集，暂不支持会话内切换 Agent；请新开对话后再切换"},
                     HTTPStatus.CONFLICT,
@@ -944,6 +954,20 @@ class NaibaChatApp:
             reasoning_effort=reasoning_effort, workspace_dir=workspace_dir,
             workspace_group=workspace_group,
         )
+        if updated and agent_id is not None and conv_kind == "aux" and agent_id != current_agent_id:
+            # 辅助对话切换 Agent：按新 Agent 的 tool_scope 重建固化集（再过一遍只读交集），
+            # 让下一条消息的工具清单与新的系统提示词同步。旧工具集是上一个 Agent 的，
+            # 留着会让「换了个 Agent」只换人设不换工具。
+            rebuilt_tools = self.runs._resolve_allowed_tools(
+                "craft",
+                self.config.get_agent(agent_id) or {},
+                bool(updated.get("web_search_enabled") or 0),
+                str(updated.get("model_key") or ""),
+                None,
+                "aux",
+            )
+            self.storage.set_enabled_tool_ids(conversation_id, rebuilt_tools)
+            updated = {**updated, "enabled_tool_ids": rebuilt_tools}
         if favorite is not None:
             # 收藏单独落库：只改标记、不推进 updated_at（否则侧栏顺序被重排）。
             # 会话不存在时 update_conversation_settings 已返回 None，这里保持一致语义。

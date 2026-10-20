@@ -6,8 +6,8 @@
 //
 // 消息渲染直接复用主对话的 messageElement()（04-messages.js）：辅助对话与主对话
 // 是同一套 `.message-row / .message-card` 皮，工具卡、用量、媒体全部同源。
-// 供应商与模型是**辅助对话自己的**：存在 aux 会话行上，发送时只读这里的值，
-// 顶栏/输入区的供应商变化不再影响它（只在新建那一刻继承一次初始值）。
+// Agent / 供应商 / 模型都是**辅助对话自己的**：存在 aux 会话行上，发送时只读这里的值，
+// 顶栏与主对话输入区的变化不再影响它（只在新建那一刻继承一次初始值）。
 // ============================================================
 
 import { $, api, copyText, escapeHtml, state, toast } from "./01-core.js";
@@ -18,10 +18,10 @@ import { openConversation } from "./08-conversations.js";
 // 面板宽度 / 开合状态只有一份实现（14-file-panel.js）。14 不 import 21，无循环依赖。
 import { applyFilePanelOpenClass, filePanelState, filePanelWidthPx, updateFileTabsButton } from "./14-file-panel.js";
 
-// 辅助对话自己的状态：tabs 是会话行（id/title/parentId/供应商/模型），activeId 是当前标签。
+// 辅助对话自己的状态：tabs 是会话行（id/title/parentId/Agent/供应商/模型），activeId 是当前标签。
 // messages 按会话 id 缓存（切换标签不丢已渲染内容）；sending 表示当前是否有 run 在流式。
 export const auxChatState = {
-  tabs: [],            // [{ id, title, parentId, providerKey, modelName, messages, loaded }]
+  tabs: [],            // [{ id, title, parentId, agentId, providerKey, modelName, messages, loaded }]
   activeId: '',
   group: 'files',      // dock 顶层分组记忆：'files' | 'aux'
   sending: false,      // 当前会话是否有 run 在流式（辅助对话同时只有一个）
@@ -76,6 +76,8 @@ function tabFromRow(row, known) {
     title: String(row.title || '辅助对话'),
     // 「跟随」的主对话 id：只用于显示与切换联动，不改变上下文隔离。
     parentId: String(row.parent_id || ''),
+    // 辅助对话自己的 Agent（系统提示词与人设）；工具集仍由后端强制收口为只读。
+    agentId: String(row.agent_id || ''),
     // 辅助对话自己的供应商（model_key）与模型名，存在 aux 会话行上。
     providerKey: String(row.model_key || ''),
     modelName: String(row.model_name || ''),
@@ -106,10 +108,14 @@ export async function createAuxChat() {
     // 新建时继承一次主对话当前的选择作为初始值；此后两边互不影响。
     const providerKey = String(selectedProviderKey() || '');
     const modelName = String($('#composerModelSelect')?.value || '').trim();
+    const currentAgentId = String(
+      state.conversations.find((item) => String(item.id) === String(state.conversationId || ''))?.agent_id || ''
+    );
     const result = await api('/api/aux-chats', {
       method: 'POST',
       body: {
         parent_id: String(state.conversationId || ''),
+        agent_id: currentAgentId || String(state.bootstrap?.default_agent_id || ''),
         model_key: providerKey,
         model_name: modelName,
       },
@@ -261,6 +267,7 @@ export function renderAuxChat() {
   renderAuxTabs();
   renderAuxFollow();
   renderAuxMessages();
+  renderAuxAgentSelect();
   renderAuxProviderSelect();
   renderAuxModelSelect();
 }
@@ -359,6 +366,89 @@ function updatePendingRow(tab, reply, index) {
     answer.innerHTML = reply.content
       ? markdown(reply.content)
       : '<span class="aux-thinking">思考中…</span>';
+  }
+}
+
+// ---- Agent（辅助对话自己的选择） ---------------------------------------------
+
+function auxAgents() {
+  return state.bootstrap?.agents || [];
+}
+
+function agentOptionValue(agent) {
+  return String(agent?.id || '').trim();
+}
+
+// 与后端 default_agent_id() 同口径：保存值失效时优先 master，再退到第一个。
+function fallbackAuxAgentId() {
+  const agents = auxAgents();
+  const configured = String(state.bootstrap?.default_agent_id || '');
+  if (agents.some((agent) => agentOptionValue(agent) === configured)) return configured;
+  if (agents.some((agent) => agentOptionValue(agent) === 'master')) return 'master';
+  return agentOptionValue(agents[0]) || '';
+}
+
+function renderAuxAgentSelect() {
+  const select = $('#auxAgentSelect');
+  if (!select) return;
+  const tab = activeTab();
+  const agents = auxAgents();
+  select.replaceChildren();
+  if (!tab) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = 'Agent';
+    select.append(option);
+    select.disabled = true;
+    return;
+  }
+  if (!agents.length) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = '暂无 Agent';
+    select.append(option);
+    select.disabled = true;
+    return;
+  }
+  agents.forEach((agent) => {
+    const id = agentOptionValue(agent);
+    if (!id) return;
+    const option = document.createElement('option');
+    option.value = id;
+    option.textContent = String(agent?.name || id);
+    select.append(option);
+  });
+  const saved = String(tab.agentId || '');
+  const effective = agents.some((agent) => agentOptionValue(agent) === saved)
+    ? saved
+    : fallbackAuxAgentId();
+  select.value = effective;
+  select.disabled = false;
+  select.title = '这条辅助对话由哪个 Agent 回答（下一条消息起生效，只读权限不变）';
+}
+
+function auxAgentName(agentId) {
+  return String(auxAgents().find((agent) => agentOptionValue(agent) === agentId)?.name || agentId);
+}
+
+async function handleAuxAgentChange() {
+  const tab = activeTab();
+  const select = $('#auxAgentSelect');
+  if (!tab || !select) return;
+  const next = String(select.value || '').trim();
+  if (!next || next === tab.agentId) return;
+  const previous = tab.agentId;
+  tab.agentId = next;
+  try {
+    await api(`/api/conversations/${encodeURIComponent(tab.id)}/settings`, {
+      method: 'POST',
+      body: { agent_id: next },
+    });
+    toast(`下一条消息起改用「${auxAgentName(next)}」回答`);
+  } catch (error) {
+    tab.agentId = previous;
+    renderAuxAgentSelect();
+    toast(`切换 Agent 失败：${error.message}`);
   }
 }
 
@@ -553,9 +643,11 @@ async function loadAuxMessages(tab) {
     if (String(conversation.parent_id || '') !== tab.parentId) {
       tab.parentId = String(conversation.parent_id || '');
     }
+    tab.agentId = String(conversation.agent_id || '');
     if (auxChatState.activeId === tab.id) {
       renderAuxFollow();
       renderAuxMessages();
+      renderAuxAgentSelect();
     }
   } catch (error) {
     console.debug('[naiba] 辅助对话读取消息失败:', error.message);
@@ -742,6 +834,7 @@ export function bindAuxChatEvents() {
   $('#auxChatSend')?.addEventListener('click', () => { void sendAuxMessage(); });
   $('#auxProviderSelect')?.addEventListener('change', () => { void handleAuxProviderChange(); });
   $('#auxModelSelect')?.addEventListener('change', () => { void handleAuxModelChange(); });
+  $('#auxAgentSelect')?.addEventListener('change', () => { void handleAuxAgentChange(); });
   // 主对话切会话 → 辅助窗跟着切到属于它的那个标签（08 只广播事件，不 import 本模块）。
   document.addEventListener('naiba:conversation-changed', () => syncAuxToConversation());
   const input = $('#auxChatInput');

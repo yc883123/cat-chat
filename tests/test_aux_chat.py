@@ -209,6 +209,66 @@ class AuxChatCreateApiTests(unittest.TestCase):
                 self.assertEqual(payload["parent_id"], "")
 
 
+class AuxChatAgentSwitchTests(unittest.TestCase):
+    """辅助面板可直接换 Agent：固化工具集后也允许，且按新 Agent 重建只读工具集。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        from naiba.app import NaibaChatApp
+        from naiba.paths import PathContext
+
+        self.app = NaibaChatApp(paths=PathContext.local(root, root / "config.json"))
+
+    def test_aux_switch_allowed_after_toolset_frozen(self):
+        aux = self.app.storage.create_conversation(
+            title="辅助对话 1", conv_kind="aux", agent_id="master"
+        )
+        # 模拟首轮已固化（含副作用工具），辅助对话仍必须能换 Agent。
+        self.app.storage.set_enabled_tool_ids(
+            aux["id"], ["read_file", "list_directory", "write_file", "pwsh"]
+        )
+        payload, status = self.app.api_update_conversation_settings(
+            aux["id"], {"agent_id": "tutor"}
+        )
+        self.assertEqual(int(status), 200, payload)
+        self.assertEqual(payload["agent_id"], "tutor")
+        # 新 Agent 的固化工具集仍只含只读工具（不因换人设而扩权）。
+        tool_ids = set(payload["enabled_tool_ids"])
+        self.assertIn("read_file", tool_ids)
+        self.assertNotIn("write_file", tool_ids)
+        self.assertNotIn("pwsh", tool_ids)
+        stored = self.app.storage.get_conversation(aux["id"], include_messages=False)
+        self.assertEqual(stored["agent_id"], "tutor")
+        self.assertEqual(set(stored["enabled_tool_ids"]), tool_ids)
+
+    def test_main_chat_still_locked_after_toolset_frozen(self):
+        main = self.app.storage.create_conversation(title="正式任务", agent_id="master")
+        self.app.storage.set_enabled_tool_ids(main["id"], ["read_file"])
+        payload, status = self.app.api_update_conversation_settings(
+            main["id"], {"agent_id": "tutor"}
+        )
+        self.assertEqual(int(status), 409, payload)
+
+
+class AuxChatAgentSelectorTests(unittest.TestCase):
+    """面板上的 Agent 下拉：标记、渲染、切换与新建时继承一次。"""
+
+    def test_panel_markup_has_agent_select(self):
+        html = (ROOT / "public/index.html").read_text(encoding="utf-8")
+        self.assertIn('id="auxAgentSelect"', html)
+
+    def test_frontend_renders_and_persists_agent(self):
+        source = (ROOT / "public/js/21-aux-chat.js").read_text(encoding="utf-8")
+        code = _strip_js_comments(source)
+        self.assertIn("function renderAuxAgentSelect()", code)
+        self.assertIn("renderAuxAgentSelect();", code)
+        self.assertIn("body: { agent_id: next }", code)
+        self.assertIn("agent_id: currentAgentId", code)
+        self.assertIn("agentId: String(row.agent_id || '')", code)
+
+
 class AuxChatReadonlyTests(unittest.TestCase):
     """只读锁死（§3.2）：工具决议收口到只读白名单（后端唯一判定）。"""
 

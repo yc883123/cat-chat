@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 3.5.0-beta
-  RELEASE_TAG: v3.5.0-beta
+  RELEASE_VERSION: 3.5.1-beta
+  RELEASE_TAG: v3.5.1-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-3.5.0-beta-windows-x64
+  PACKAGE_NAME: cat-chat-3.5.1-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-3.5.0-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-3.5.1-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -121,11 +121,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 3.5.0 Beta release
+      - name: Publish 3.5.1 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 3.5.0 Beta
+          name: Cat Chat 3.5.1 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -135,9 +135,10 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 3.5.0 Beta Windows build。支持按明确要求展示已有媒体，并完善后台工具与辅助对话的使用体验。
+            Cat Chat 3.5.1 Beta Windows build。媒体工具分流与「已附卡」事实回注，事件流断流不再改写正文。
 
-            - 主对话明确要求展示已记录的媒体，或指定工作区媒体文件路径并要求展示时，可通过 show_media 将图片、视频或音频作为附件呈现；单文件上限 80 MB。辅助对话、计划模式与子代理无法调用此工具。
-            - 消息底部增加媒体产物清单，复用既有文件操作入口，便于查找产物与继续处理文件。
-            - 标准、长对话与 ComfyUI 预设默认配备后台工具；升级只补齐未修改的出厂工具范围，自定义配置保留，已有会话不会追加后台工具。
-            - 辅助对话可独立选择 Agent，继续保持只读工具边界。
+            - 附卡事实回注（本次重点）：扫描/出卡类工具实际产出媒体卡后，模型可见的工具结果尾部会注明"已附媒体卡"及其类型与文件名。模型不再对同一文件重复要求出卡、也不会凭空声称"已经展示"；采集失败、被用户拒绝或结果为空时不会出现这条注——防止"模型自称已展示但用户看不到"的幻觉。
+            - 指名出卡解析更稳：用户说「看看 01-09.mp4」时直接出卡（不再先扫目录）；模型说不出具体文件名而留空时，按会话记录的媒体自动判定（唯一才出，多个会先问）；Windows 短路径与真实路径归一化修复了"会话里明明有这张图却提示找不到"。
+            - 视频目标分流：只要求展示/播放某个已指名的视频时直接出卡，不再默认抽帧；询问内容时才走 probe/抽帧/视觉分析。
+            - 事件流断流保护：连接中断只挂一行提示，不再把整段已生成的回复替换成「恢复 Run 失败」；重连后按游标重放，正文不会丢失或被改写。
+            - 本次改动的缓存影响经真实供应商预热对照（DeepSeek 官方 deepseek-chat，纯文本/扫描出卡/指名出卡三场景）：缓存命中率中位数 96.8%~97.4%，与 3.5.0 基线持平；全量单测 2689 例通过。

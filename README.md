@@ -1,19 +1,19 @@
-# Cat Chat 3.5.0 Beta
+# Cat Chat 3.5.1 Beta
 
 <p align="center">
   <img src="docs/cat-chat-logo.png" alt="Cat Chat" width="520">
 </p>
 
-Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。3.5.0 Beta 支持按明确要求展示已有媒体，增加消息底部媒体产物清单，完善后台工具的默认配置，并允许辅助对话独立选择 Agent。
+Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在线或本地模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。3.5.1 Beta 做好媒体流程分流与「已附卡」事实回注，并修复事件流断流改写正文的问题。
 
 > Cat Chat 原名 Naiba Chat。显示名自 2.7.6 Beta 起为 Cat Chat；GitHub 仓库自 2.8.0 Beta 起更名为 `cat-chat`（旧地址自动跳转）。更新资产仍使用 `naiba-chat.exe` 与原有清单协议，既有数据位置不变，无需重新配置或搬迁数据。
 
-## 3.5.0 Beta 主要能力
-
-- **按要求展示已有媒体**：在主对话中明确要求展示已记录的图片、视频或音频，或指定工作区媒体文件路径并要求展示时，可通过 `show_media` 生成附件；单文件上限 80 MB。辅助对话、计划模式与子代理不可调用此工具。
-- **消息底部媒体产物清单**：图片、视频、音频产物增加文件清单，复用既有文件操作入口，便于查看和继续处理。
-- **后台工具默认可用**：标准、长对话与 ComfyUI 预设默认配备后台工具；升级只补齐未修改的出厂工具范围，不覆盖自定义配置，也不会给已有会话追加后台工具。
-- **辅助对话独立选择 Agent**：辅助对话可选择自己的 Agent，同时保持只读工具边界。
+## 3.5.1 Beta 主要能力
+- **媒体附卡事实回注（本次重点）**：扫描、出卡类工具实际产出媒体卡后，模型可见的工具结果尾部会注明"已附媒体卡"及类型与文件名；模型不再对同一文件重复要求出卡，也不会凭空声称已展示。采集失败、被拒或空结果不出现该注。
+- **指名出卡解析更稳**：说「看看 01-09.mp4」直接出卡，不再先扫目录；模型说不出文件名留空时按会话记录自动判定（唯一才出、多个先问）；Windows 短路径与真实路径归一化，修复"会话里有这张图却提示找不到"。
+- **视频目标分流**：展示/播放已指名的视频直接出卡，不再默认抽帧；询问内容才走 probe/抽帧/视觉分析。
+- **事件流断流保护**：连接中断只挂一行提示，不再把已生成的整段回复替换成「恢复 Run 失败」；重连后按游标原样重放。
+- **前缀缓存实测**：真实供应商预热对照（DeepSeek 官方 `deepseek-chat`，纯文本/扫描出卡/指名出卡三场景）缓存命中率中位数 96.8%~97.4%，与 3.5.0 基线持平。全量单测 **2689** 通过。
 
 > 历史版本说明见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -21,12 +21,12 @@ Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把在�
 
 ### 使用 Windows 版本
 
-1. 下载 `cat-chat-3.5.0-beta-windows-x64.zip`。
+1. 下载 `cat-chat-3.5.1-beta-windows-x64.zip`。
 2. 解压到一个可写目录。
 3. 运行 `cat-chat.exe`。
 4. 在设置中添加在线 API 或本地模型服务。
 
-> 归档里也提供旧名 `naiba-chat-3.5.0-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
+> 归档里也提供旧名 `naiba-chat-3.5.1-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
 
 首次运行会创建本地数据目录。升级时请直接替换程序文件，不要删除原有 `data` 目录和配置文件。
 
@@ -112,14 +112,14 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 - `naiba-chat.exe` —— **自动更新链路唯一使用的资产，永久保留此文件名**
 - `naiba-chat-update.json` —— 更新清单，其中 `repository` 字段永久写 `yc883123/naiba-chat`
 - `cat-chat.exe` —— 与 `naiba-chat.exe` 是同一文件，SHA-256 完全相同
-- `cat-chat-3.5.0-beta-windows-x64.zip`
-- `naiba-chat-3.5.0-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
+- `cat-chat-3.5.1-beta-windows-x64.zip`
+- `naiba-chat-3.5.1-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
 
 更新器会验证清单中的仓库、提交、文件名和 SHA-256。下载文件还必须是有效的 Windows 可执行文件；任何一项不一致都会终止安装。**自动更新始终读取 `naiba-chat.exe` 与清单里的旧仓库名**（GitHub 对旧仓库地址做长期重定向），这是已发布客户端逐字校验的协议，仓库改名后也不改值。
 
 ## Beta 说明
 
-这是 3.5.0 Beta，适合实际使用和反馈，但仍有以下边界：
+这是 3.5.1 Beta，适合实际使用和反馈，但仍有以下边界：
 
 - 不内置 ComfyUI、模型权重或第三方生成服务，需用户自行安装和配置。
 - 不同模型的工具调用质量差异较大，小型模型可能无法稳定完成长链任务。
@@ -133,7 +133,7 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 ```powershell
 Get-ChildItem public\js\*.js | ForEach-Object { node --check $_.FullName }
 python -m unittest discover -s tests -q
-$env:NAIBA_BUILD_VERSION = "3.5.0-beta"
+$env:NAIBA_BUILD_VERSION = "3.5.1-beta"
 python -m PyInstaller --noconfirm --clean naiba-chat.spec
 ```
 

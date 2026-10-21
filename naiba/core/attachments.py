@@ -89,8 +89,8 @@ def upload_reference_lines(
 
     PDF 附件在 ``pdf_tools=True`` 时追加固定处理指引：提取文本用 read_pdf；扫描版/看图用
     pdf_render_pages 渲染页图后 vision_analyze；细节不清时 pdf_zoom_region 局部放大。
-    视频附件在 ``video_tools=True`` 时追加同类指引：probe_video 读元信息 → extract_frames
-    抽帧/生成联系表 → vision_analyze 识别内容。
+    视频附件在 ``video_tools=True`` 时追加内容分析指引：需要理解视频内容时，probe_video
+    读取元信息 → extract_frames 抽帧/生成联系表 → vision_analyze 识别内容；仅要求展示文件时不抽帧。
     该文本条件出现、每轮稳定，不改变非 PDF/非视频会话的前缀。
     会话工具集不含对应工具时传 ``pdf_tools=False`` / ``video_tools=False``：不再指引模型
     调用不存在的工具（系统提示的「PDF / 视频处理策略」段同口径，见 ``run/chat.py``）。
@@ -116,9 +116,9 @@ def upload_reference_lines(
         elif video_tools and media_kind_of(path) == "video":
             lines.append(
                 f"[用户上传文件：{path}]"
-                "（视频文件：先用 probe_video 读取时长与帧率，再用 extract_frames 抽帧"
+                "（询问视频内容时：用 probe_video 读取时长与帧率，再用 extract_frames 抽帧"
                 "（模式可选 times/interval/keyframes）并生成联系表，然后把联系表或帧图路径"
-                "交给 vision_analyze 识别内容）"
+                "交给 vision_analyze 识别内容；仅要求展示/播放这个文件时不要抽帧）"
             )
         else:
             lines.append(f"[用户上传文件：{path}]")
@@ -251,11 +251,13 @@ _SHOW_MEDIA_TERM_RE = re.compile(
 
 # 正向展示动作：把某个**已经存在**的媒体呈现出来。
 # 刻意不收「查找/列出/浏览/翻看/确认/查询」——那些是枚举请求，走 list_directory；
-# 也不收裸「看看/看一下」（「看看这个视频讲了什么」是问内容，不是要出卡）。
+# 裸「看看/看一下」只在用户明确给出媒体文件名时收取；没有文件名时仍可能是在问内容。
 _SHOW_MEDIA_ACTION_RE = re.compile(
     r"(展示|显示|播放|放出|放出来|放一下|打开|预览|贴出|贴一下|亮出|亮出来|秀一下|调出来"
     r"|给我看看|给我看一下|给我看|让我看看|让我看一下|让我看|发给我|发出来|发我看)"
 )
+_SHOW_MEDIA_BARE_LOOK_RE = re.compile(r"(?:看看|看一下|看下)")
+_SHOW_MEDIA_CONTENT_QUERY_RE = re.compile(r"(?:讲了什么|内容|画面|发生了什么|总结|概括|分析|是什么)")
 
 # 媒体词后紧跟这些「元信息名词」时不算展示请求（要的是路径/大小/内容，不是那张卡）。
 _SHOW_MEDIA_NON_TARGET_TAILS: tuple[str, ...] = (
@@ -438,6 +440,15 @@ def show_media_intent(text: str) -> bool:
         for match in _SHOW_MEDIA_ACTION_RE.finditer(masked_sentence):
             if _negation_before(masked_sentence, match.start()):
                 continue
+            return True
+        # 文件名明确且只说「看看」时，按展示已有文件处理；显式问内容仍走读取/分析工具。
+        bare_look = _SHOW_MEDIA_BARE_LOOK_RE.search(masked_sentence)
+        if (
+            _MEDIA_EXT_TAIL_RE.search(masked_sentence)
+            and bare_look is not None
+            and not _negation_before(masked_sentence, bare_look.start())
+            and not _SHOW_MEDIA_CONTENT_QUERY_RE.search(masked_sentence)
+        ):
             return True
     return False
 
@@ -792,6 +803,30 @@ def _looks_like_path(raw: str) -> bool:
     return "/" in text or "\\" in text
 
 
+_SENTENCE_MARKERS = "，,。；;！!？?、\n\t"
+
+# 一句「请求」比一条路径长得多；超过这个长度一律按句子处理（真实文件名极少这么长）。
+_SENTENCE_MAX_CHARS = 60
+
+
+def _is_sentence_like(raw: str) -> bool:
+    """输入像「一句话」而不是路径/文件名（含空白、句读，或明显过长）。
+
+    存在的理由（实测）：`paths` 是字符串数组、而模型又不知道「刚才那个视频」该写成什么，
+    于是会把用户整句话原样传进来（``paths: ["把刚才那张图展示出来"]``）。那种输入里常带
+    空格或中文句读，按路径解析必然 ``not_found``——本函数只用来**改走文本解析**，
+    不改变真路径的判定（真路径仍由 `_local_target` 逐条校验）。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return False
+    if len(text) > _SENTENCE_MAX_CHARS:
+        return True
+    if any(ch.isspace() for ch in text):
+        return True
+    return any(mark in text for mark in _SENTENCE_MARKERS)
+
+
 def _kinds_mentioned(text: str) -> set[str]:
     """文本里提到的媒体类型（用于「刚才那个视频」这类代词的按类型过滤）。"""
     value = str(text or "").lower()
@@ -800,7 +835,13 @@ def _kinds_mentioned(text: str) -> set[str]:
         kinds.add("video")
     if re.search(r"(音频|音乐|语音|录音|audio|music|mp3|wav|flac|ogg|m4a)", value):
         kinds.add("audio")
-    if re.search(r"(图片|图像|照片|缩略图|位图|截图|image|picture|photo|png|jpe?g|webp|gif)", value):
+    # 裸「图」也要认（「把刚才那张图展示出来」是最常见的说法），负向前瞻与
+    # `_SHOW_MEDIA_TERM_RE` 同口径，避免「地图/图纸/图表」被当成图片。
+    if re.search(
+        r"(图片|图像|照片|缩略图|位图|截图|(?<![地纸表网草截导流框])图"
+        r"|image|picture|photo|png|jpe?g|webp|gif)",
+        value,
+    ):
         kinds.add("image")
     return kinds
 
@@ -951,13 +992,22 @@ def resolve_show_media_target(
     if trusted is not None:
         return _show_shown(trusted)
 
-    # ② 本地路径/文件名形态：按本轮冻结工作区解析，且必须通过授权（会话候选 / 原文明确给出）。
-    #    带分隔符/盘符的真路径只走这一条；裸文件名（a.png）解析不到时退回 ③ 按候选展示名匹配
+    # ② 模型把用户原话整句塞进了 paths（实测常见）：那不是路径。
+    #    只从这句话里捡**已进候选**的路径（不引入新的授权来源），其余交给下文按候选判定。
+    if _is_sentence_like(raw):
+        for target in extract_media_targets_from_text(raw, workspace):
+            hit = _find_candidate_by_source(pool, str(target.get("source") or ""))
+            if hit is not None:
+                return _show_shown(hit)
+        return _resolve_descriptive("", f"{raw} {message_text}".strip(), pool)
+
+    # ③ 本地路径/文件名形态：按本轮冻结工作区解析，且必须通过授权（会话候选 / 原文明确给出）。
+    #    带分隔符/盘符的真路径只走这一条；裸文件名（a.png）解析不到时退回 ④ 按候选展示名匹配
     #    ——「仅 basename 冲突 → ambiguous」正是从那里出来的。
     if _looks_like_path(raw) or Path(raw).suffix:
         resolved_result = _resolve_local_request(raw, workspace, pool, message_text)
         if resolved_result is not None:
             return resolved_result
 
-    # ③ 描述性指代（「刚才那个视频」/「a.png」）：候选集合里恰好一个才放行。
+    # ④ 描述性指代（「刚才那个视频」/「a.png」）：候选集合里恰好一个才放行。
     return _resolve_descriptive(raw, message_text, pool)

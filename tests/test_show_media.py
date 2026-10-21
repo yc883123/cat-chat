@@ -82,6 +82,8 @@ class ShowMediaIntentTests(unittest.TestCase):
         "把 'just-created.png' 展示出来",
         "把 `just-created.png` 展示出来",
         "刚才那个视频给我看看",
+        "看看 01-09.mp4",
+        "看一下成品.png",
         "不要删掉这张图，把它展示出来",
         "不用再问我，请播放这个视频",
         "不要展示视频的大小，把视频展示出来",
@@ -89,8 +91,11 @@ class ShowMediaIntentTests(unittest.TestCase):
     NEGATIVES = (
         "这个视频不错",
         "这个视频讲了什么？",
+        "看看 01-09.mp4 讲了什么",
+        "看看 01-09.mp4 的内容",
         "询问一下视频的内容",
         "不要播放视频",
+        "不要看看 01-09.mp4",
         "别把那张图放出来",
         "如果把视频放出来会怎样",
         "假如展示了那张图会怎么样",
@@ -514,6 +519,71 @@ class ShowMediaTargetTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["name"], "b.mp4")
 
+    # ---- 模型把「用户那句话」当 paths 传进来（实测常见，2026-10-21 用户报障） ----
+
+    def test_empty_paths_resolves_pronoun_from_user_text(self) -> None:
+        """`[]` + 原文 → 按媒体类型与唯一性判定（模型说不出文件名时的正确用法）。"""
+        image = _make_file(self.root, "a.png")
+        pool = self._candidates(str(image))
+        result = resolve_show_media_target(
+            [], workspace=self.root, message_text="把刚才那张图展示出来", candidates=pool
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["name"], "a.png")
+
+    def test_empty_paths_prefers_mentioned_media_type(self) -> None:
+        image = _make_file(self.root, "a.png")
+        video = _make_file(self.root, "b.mp4")
+        pool = self._candidates(str(image), str(video))
+        result = resolve_show_media_target(
+            [], workspace=self.root, message_text="播放刚才那个视频", candidates=pool
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["kind"], "video")
+
+    def test_bare_pronoun_word_is_recognised_as_image(self) -> None:
+        """裸「图」必须算图片词（「把刚才那张图展示出来」是最常见的说法）。"""
+        image = _make_file(self.root, "a.png")
+        video = _make_file(self.root, "b.mp4")
+        pool = self._candidates(str(image), str(video))
+        result = resolve_show_media_target(
+            [], workspace=self.root, message_text="那张图放出来看看", candidates=pool
+        )
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["kind"], "image")
+
+    def test_sentence_in_paths_falls_back_to_text_resolution(self) -> None:
+        """整句请求塞进 paths：按句子解析，而不是直接 not_found。"""
+        image = _make_file(self.root, "out/a.png")
+        pool = self._candidates(str(image))
+        sentence = "把 out/a.png 展示出来"
+        self.assertTrue(
+            resolve_show_media_target(
+                [sentence], workspace=self.root, message_text=sentence, candidates=pool
+            )["ok"],
+            "句子里写出的路径（已在候选中）应当能出卡",
+        )
+        pronoun = "把刚才那张图展示出来"
+        self.assertTrue(
+            resolve_show_media_target(
+                [pronoun], workspace=self.root, message_text=pronoun, candidates=pool
+            )["ok"],
+            "整句代词请求也应退到候选判定",
+        )
+
+    def test_sentence_in_paths_does_not_widen_authorization(self) -> None:
+        """句子里的路径若**不在候选里**，仍不得出卡（句子不构成新的授权来源）。"""
+        _make_file(self.root, "out/a.png")
+        with tempfile.TemporaryDirectory() as other:
+            outsider = _make_file(Path(other), "secret.png")
+            sentence = f"把 {outsider} 展示出来"
+            result = resolve_show_media_target(
+                [sentence], workspace=self.root, message_text=sentence, candidates=[]
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn(result["reason"], {"not_found", "ambiguous"})
+        self.assertNotIn(str(outsider), json.dumps(result, ensure_ascii=False))
+
     # ---- URL 形态：只认会话里已记录的同串来源 ----
 
     def test_url_candidate_must_be_recorded(self) -> None:
@@ -743,12 +813,15 @@ class ShowMediaScopeTests(unittest.TestCase):
     def test_run_context_keys_registered(self) -> None:
         from naiba.core.contracts import RUN_CONTEXT_KEYS, default_run_context
 
-        self.assertIn("show_media_intent", RUN_CONTEXT_KEYS)
-        self.assertIn("show_media_candidates", RUN_CONTEXT_KEYS)
+        for key in ("show_media_intent", "show_media_candidates", "show_media_message"):
+            with self.subTest(key=key):
+                self.assertIn(key, RUN_CONTEXT_KEYS)
         defaults = default_run_context()
         self.assertIs(defaults["show_media_intent"], False,
                       "缺省必须拒绝出卡（忘装配退化成不出卡，而不是随便出卡）")
         self.assertEqual(defaults["show_media_candidates"], [])
+        self.assertEqual(defaults["show_media_message"], "",
+                         "缺省没有用户原文 ⇒ 代词无法解析 ⇒ 只会回 ambiguous/not_found，不会乱出卡")
 
 
 class _EmptyCatalog:

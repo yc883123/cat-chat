@@ -485,6 +485,8 @@ class AttachmentReferenceTests(unittest.TestCase):
         self.assertIn("probe_video", lines[0])
         self.assertIn("extract_frames", lines[0])
         self.assertIn("vision_analyze", lines[0])
+        self.assertIn("询问视频内容时", lines[0])
+        self.assertIn("仅要求展示/播放这个文件时不要抽帧", lines[0])
 
     def test_video_guidance_suppressed_without_tools(self) -> None:
         line = upload_reference_lines(self._upload(r"C:\media\clip.mp4"), video_tools=False)[0]
@@ -513,6 +515,12 @@ class AttachmentReferenceTests(unittest.TestCase):
         self.assertIn("probe_video", text)
         plain = compose_user_content("看看这个", self._upload(r"C:\m\c.webm"), video_tools=False)
         self.assertEqual(plain, "看看这个\n[用户上传文件：C:\\m\\c.webm]")
+
+    def test_video_system_guidance_prioritizes_display_over_frame_analysis(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "naiba/run/chat.py").read_text(encoding="utf-8")
+        self.assertIn("‘看看 01-09.mp4’", source)
+        self.assertIn("只调用 show_media 出媒体卡", source)
+        self.assertIn("询问视频内容、画面或摘要时才用", source)
 
 
 if __name__ == "__main__":

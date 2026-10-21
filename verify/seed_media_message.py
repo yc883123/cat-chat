@@ -197,11 +197,39 @@ def main() -> int:
     )
     _insert_run_row(p5_run_id, conversation_id, str(p5_assistant["id"]))
 
+    # 「已附媒体卡」短注冒烟（计划 2026-10-21）：真实落库形态里，show_media 的展示
+    # result 末尾带一条固定短注（core.tool_results.media_attached_note），media 单条。
+    shown = _make_png("seed_shown.png", (120, 200, 120))
+    note_tail = "[媒体附卡] 本轮已附媒体卡 1 张：图片 " + shown["name"]
+    STORAGE.add_message(conversation_id, "user", "把 seed_shown.png 展示出来")
+    STORAGE.add_message(
+        conversation_id,
+        "assistant",
+        "已经把 seed_shown.png 作为媒体卡附上。",
+        {
+            "tool_runs": [{
+                "tool": "show_media",
+                "success": True,
+                # 展示 run 的脱敏 result（_show_media_summary 形态）+ 短注尾行——模型上下文与此一字节。
+                "result": (
+                    json.dumps({
+                        "status": "shown", "kind": "image", "name": shown["name"], "reason": "",
+                    }, ensure_ascii=False) + "\n" + note_tail
+                ),
+                "arguments": {"paths": [shown["name"]]},
+                "reason": "用户指名展示",
+                "media": [shown],
+            }],
+            "attachments": [shown],
+        },
+    )
+
     print(json.dumps({
         "conversation_id": conversation_id,
         "title": TITLE,
         "inline_images": 3,
         "legacy_images": 1,
+        "note_tail": note_tail,
         "user_attachments": [video_main.name, audio_main.name, gif_main.name],
     }, ensure_ascii=False))
     return 0

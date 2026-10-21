@@ -610,6 +610,9 @@ class ConversationRunMixin:
             messages=run.get("conversation_messages") or [],
             workspace=str(snapshot.get("workspace_dir") or ""),
         )
+        # 本轮用户原文（show_media 解析代词用）：只有授权成立时才带进 RunContext——
+        # 子 Agent / Job / 辅助对话的缺省是空串，它们本来也没有这条通道。
+        show_media_message = str(run.get("message") or "") if show_media_allowed else ""
         sink = _RunEventSink(self, run_id, cancel_event)
         self._register_sink(run_id, sink)
         skills: list[dict[str, str]] = []
@@ -822,7 +825,10 @@ class ConversationRunMixin:
             # 视频理解策略：条件同 PDF——会话固化工具集含 extract_frames 才注入
             # （probe_video 是它的前置，同一套抽取参数下两者必然同进同出）。
             if video_tools_enabled:
-                prompt = (prompt + "\n\n视频理解策略：先用 probe_video 读时长与帧率；再按目标用 extract_frames 抽帧"
+                prompt = (prompt + "\n\n视频工具按用户目标分流：用户只要求展示/播放一个已指名的视频文件"
+                           "（如‘看看 01-09.mp4’），且本会话有 show_media 时，只调用 show_media 出媒体卡，"
+                           "不要 probe 或抽帧；用户询问视频内容、画面或摘要时才用 probe_video / extract_frames / "
+                           "vision_analyze 分析。分析时先用 probe_video 读时长与帧率，再按目标用 extract_frames 抽帧"
                            "（指定时间点用 mode=times，全面扫一遍用 mode=interval，找画面切换点用 mode=keyframes）；"
                            "先把返回的**联系表**交给 vision_analyze 概览全片，再对可疑片段抽单帧细看。"
                            "帧图的局部细节可用 vision_image_ops 裁剪放大。").strip()
@@ -836,15 +842,24 @@ class ConversationRunMixin:
                                    "成功后本轮立即结束，不要再调用其它工具，用一句话确认交接即可；"
                                    "下一条消息由用户确认后开始。").strip()
             # 指名出卡指引：只在会话固化工具集含 show_media 时注入（同一会话内恒定，不破前缀缓存）。
-            # 这段只教「何时调用」；真正防误触的是 RunContext 授权、唯一候选解析与工作区/大小校验。
+            # 这段只教「何时调用 + 参数怎么填」；真正防误触的是 RunContext 授权、唯一候选解析
+            # 与工作区/大小校验。工具结果末尾的「已附媒体卡」短注是附卡事实的唯一模型侧来源
+            # （core.tool_results.media_attached_note，只按实际采集记录生成）。
             if "show_media" in allowed_tools:
                 prompt = (prompt + "\n\n指名展示已有媒体：用户明确要求把某张图、某段视频或某段音频"
-                                   "「拿出来看看 / 放出来 / 播放一下」时，用 show_media 把那个文件作为"
-                                   "本轮的媒体卡呈现；一次只传一个明确目标（路径、文件名，或用户用的那个"
-                                   "指代词）。目标有歧义、找不到或多于一个时，先用一句话问清是哪一个，"
-                                   "不要猜、不要连传多个。要发现目录里有什么仍用 list_directory；"
-                                   "不要为了满足展示请求去扫描目录。工具拒绝（越界、非媒体、超限、"
-                                   "意图不符）就如实说明原因，不要绕道用别的工具伪造展示。").strip()
+                                   "展示/播放某个已有文件时（具体文件名后仅说‘看看/看一下’也算），用 show_media 把它作为本轮的"
+                                   "媒体卡呈现。paths 只放**一个**具体的文件路径或文件名（原样照抄你从"
+                                   "工具结果/附件里看到的那个名字）——绝不要把用户那句请求、你的理解"
+                                   "或任何描述性文字当成 paths 传进去。用户只用代词指代（「刚才那个"
+                                   "视频」「这张图」）而你说不出具体文件名时，paths 传空数组 []，"
+                                   "应用会按本轮候选的媒体类型与唯一性自行判定。若用户问‘这个视频讲了什么’"
+                                   "或要求总结/分析内容，应读取内容，不要把分析请求当成展示请求。"
+                                   "本轮工具结果末尾出现「已附媒体卡」标注时，表明那张卡已挂在本轮回复上；"
+                                   "对同一目标不要再调用 show_media 或扫描目录，直接告知用户卡片已在上方的结果卡片里。"
+                                   "目标有歧义、找不到或多于一个时，先用一句话问清是哪一个，不要猜、不要连传多个。要发现"
+                                   "目录里有什么仍用 list_directory；不要为了满足展示请求去扫描目录。"
+                                   "工具拒绝（越界、非媒体、超限、意图不符）就如实说明原因，不要绕道用"
+                                   "别的工具伪造展示。").strip()
             # 历史检索指引：只在会话固化工具集含长会话工具时注入，且逐条按"确实有这个工具"拼，
             # 避免让模型去调一个不在本会话工具集里的工具（与 web_search/PDF 同口径）。
             history_rules: list[str] = []
@@ -906,6 +921,8 @@ class ConversationRunMixin:
                 # 指名出卡：意图门 + 唯一候选门（两枚键只由本处赋值，缺省即拒绝）。
                 "show_media_intent": bool(show_media_allowed),
                 "show_media_candidates": list(show_media_candidates),
+                # 用户原文：只给工具解析「刚才那个视频」这类代词（不构成授权）。
+                "show_media_message": show_media_message,
                 # 本轮是第几个用户轮次（1 起）：图片批注入标签用它标注「第 N 轮装载」，
                 # 让模型能区分「历史里装进来的旧图」与「当前成品图」（§九.150）。
                 # ⚠️ 取数点固定走 _turn_index_for_run（run 行的 input_message_id）——`message`

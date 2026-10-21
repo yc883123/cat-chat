@@ -1089,12 +1089,15 @@ def _tool_show_media(
         )
     workspace = str((run_context or {}).get("workspace_dir") or "") if isinstance(run_context, dict) else ""
     candidates = (run_context or {}).get("show_media_candidates") if isinstance(run_context, dict) else []
-    # 用户原文里的路径已在装配期折进候选快照（`run/chat.py::build_show_media_candidates`），
-    # 这里不再读取任何"原文"——工具层只认 RunContext 里这一份已授权的候选快照。
+    # 用户原文只用来解析「刚才那个视频」这类代词（模型说不出具体文件名时传 `[]`）。
+    # 它**不构成授权**：能不能出卡仍由 show_media_intent + show_media_candidates 决定。
+    message_text = (
+        str((run_context or {}).get("show_media_message") or "") if isinstance(run_context, dict) else ""
+    )
     result = resolve_show_media_target(
         (args or {}).get("paths"),
         workspace=workspace,
-        message_text="",
+        message_text=message_text,
         candidates=candidates if isinstance(candidates, list) else [],
     )
     return json.dumps(result, ensure_ascii=False)

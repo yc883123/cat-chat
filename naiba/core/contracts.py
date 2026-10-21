@@ -27,8 +27,12 @@ RUN_CONTEXT_KEYS: tuple[str, ...] = (
     "model_has_vision", "tool_defs", "workspace_dir", "media_intent",
     # 「指名出卡」（show_media）的两道门（计划 2026-10-20 §2.1）：
     # show_media_intent —— 本轮用户原文是否明确要求展示某个已有媒体；
-    # show_media_candidates —— 本轮可授权展示的媒体候选快照（会话已记录媒体 + 原文明确路径）。
-    "show_media_intent", "show_media_candidates",
+    # show_media_candidates —— 本轮可授权展示的媒体候选快照（会话已记录媒体 + 原文明确路径）；
+    # show_media_message —— 本轮用户**原文**（只给 show_media 解析代词/文件名用）。
+    #   为什么需要它：用户常说「刚才那个视频」——模型拿不到指代对象，只能把整句塞进
+    #   `paths`。有了原文，工具就能按「媒体类型 + 候选唯一性」自己判定，模型传 `[]` 即可。
+    #   它只做**解析提示**，不构成授权：能不能出卡仍由 intent + candidates 两枚键决定。
+    "show_media_intent", "show_media_candidates", "show_media_message",
     "event_sink", "truncation", "partial",
     # 本 Run 是否有「工具确认」回路：普通对话/计划执行 True，子 Agent 与后台 Job False。
     # 围栏来源动作在 False 的形态下直接按原文收尾（不执行、不挂起、不等待超时）。
@@ -79,6 +83,8 @@ def default_run_context() -> dict[str, Any]:
         # 后台 Job 永不置位），因此"忘装配"退化成"不出卡"而不是"随便出卡"。
         "show_media_intent": False,
         "show_media_candidates": [],
+        # 本轮用户原文（只给 show_media 解析代词/文件名用；空 = 没有原文，按无指代处理）。
+        "show_media_message": "",
         # 用户轮次序号（1 起）：0 = 未提供（子代理/计划执行没有"轮"的概念）。
         "turn_index": 0,
         # 事件出口（可调用）：工具实现把「实时进度」交给它，由宿主统一落库 + SSE 广播。
@@ -217,6 +223,8 @@ class RunContext(TypedDict, total=False):
     # 可授权展示的媒体候选快照：[{kind, name, source, thumb_path}]；只来自会话已记录媒体
     # （metadata.attachments / tool_runs[].media）与本轮用户原文里明确给出的工作区路径。
     show_media_candidates: list[dict[str, Any]]
+    # 本轮用户原文：只给 show_media 解析「刚才那个视频」这类代词用（不构成授权）。
+    show_media_message: str
     # ---- 透明化/截断自述（工具实时进度出口 + 本轮答复截断信息）----
     event_sink: Any                  # 工具实时进度出口（callable(dict) -> None；缺省不报进度）
     truncation: dict[str, Any]       # 本轮答复截断信息（finish_reason / truncated / continued）

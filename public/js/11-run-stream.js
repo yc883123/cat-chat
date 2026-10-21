@@ -412,6 +412,40 @@ export async function finishRunSubscription(conversationId, controller) {
   }
 }
 
+// ---- 断流提示（**不得改写正文**）----
+// 断流只影响「连接这一跳」，不改变这一轮的成败：正文/思考/工具活动都已经在库里的
+// run_events 中，重连会按 after 游标把它们原样重放回来。因此这里只加一条**状态提示**，
+// 绝不写 `.answer-content`——旧行为会把已经生成好的整段回复换成一行
+// 「恢复 Run 失败：network error」，还要等下一次整轮重载才恢复（手机切后台/切网几乎必中）。
+const RUN_LINK_NOTICE = 'run-link-notice';
+
+export function clearRunLinkNotice(row) {
+  if (!row?.querySelectorAll) return;
+  row.querySelectorAll(`.${RUN_LINK_NOTICE}`).forEach((node) => node.remove());
+}
+
+export function showRunLinkNotice(row, text) {
+  if (!row?.querySelector) return;
+  const message = String(text || '').trim();
+  if (!message) return;
+  clearRunLinkNotice(row);
+  const node = document.createElement('div');
+  node.className = RUN_LINK_NOTICE;
+  node.textContent = message;
+  const answer = row.querySelector('.answer-content');
+  if (answer && answer.parentNode) answer.parentNode.insertBefore(node, answer);
+  else row.append(node);
+}
+
+// 断流原因的「说人话」版本：传输层失败各端措辞不同（Failed to fetch / network error /
+// Load failed / NetworkError），一律按「连接这一跳坏了」处理；HTTP 状态码是服务端明确拒绝，
+// 照实说出来（那是真失败，不是抖动）。
+export function runStreamFailureText(error) {
+  const message = String(error?.message || '').trim();
+  if (/^HTTP \d{3}$/.test(message)) return `恢复 Run 失败：${message}`;
+  return '连接中断，正在重连…';
+}
+
 export async function resumeRun(run, options = {}) {
   const conversationId = String(run?.conversation_id || '');
   const runId = String(run?.id || '');
@@ -437,10 +471,13 @@ export async function resumeRun(run, options = {}) {
         throw new Error(payload.error || `HTTP ${response.status}`);
       }
       setConnectionState('connected');   // 离开 reconnect 态即由状态机收走「重连中…」横幅
+      clearRunLinkNotice(row);           // 流重新建立：断流提示已经过期，别留在气泡里
       await consumeRunStream(response, row, conversationId, runId, controller, generation);
     } catch (error) {
       if (error.name !== 'AbortError' && !state.cancelRequested && state.conversationId === conversationId) {
-        row.querySelector('.answer-content').innerHTML = `<p>恢复 Run 失败：${escapeHtml(error.message)}</p>`;
+        console.warn('[naiba] Run 事件流中断:', error?.name || '', error?.message || '');
+        // 只挂状态提示，正文一个字都不动（重连会重放，整轮重载也会覆盖）。
+        showRunLinkNotice(row, runStreamFailureText(error));
       }
       if (error.name !== 'AbortError' && isRunGenerationActive(generation, controller)) {
         // 断线自动重连（指数退避 + 抖动 + 超限交还轮询）。

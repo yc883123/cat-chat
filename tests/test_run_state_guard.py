@@ -348,6 +348,52 @@ class FrontendStopChainTests(unittest.TestCase):
         )
 
 
+class RunStreamDisconnectTests(unittest.TestCase):
+    """断流只挂状态提示，**绝不改写正文**（2026-10-21 手机端报障）。
+
+    现场：手机上长回合跑到第 4 轮请求时，`resumeRun` 的 `fetchRunEvents` 被网络打断，
+    旧代码把当时已经渲染好的整段回复（含媒体卡）换成一行
+    「恢复 Run 失败：network error」——正文其实还在库里的 run_events 里，
+    重连会按 `after` 游标原样重放，但用户必须先整轮重载才看得到。
+
+    守门口径：
+    - `resumeRun` 的 catch 里不得写 `.answer-content`；
+    - 断流提示走独立节点 `.run-link-notice`，流重建成功后清掉；
+    - 传输层失败与「服务端明确 HTTP 拒绝」用不同措辞（后者是真失败）。
+    """
+
+    def test_resume_failure_does_not_clobber_answer_content(self) -> None:
+        body = _function_body(_read("11-run-stream.js"), "export async function resumeRun")
+        # 旧写法：把整段正文换成一行错误（`row.querySelector('.answer-content').innerHTML = ...`）。
+        self.assertNotIn(
+            "`.answer-content`).innerHTML = `<p>恢复 Run 失败",
+            body.replace("'", "`"),
+            "断流不得改写正文：正文在 run_events 里，重连会重放",
+        )
+        self.assertIn("showRunLinkNotice(row, runStreamFailureText(error))", body)
+
+    def test_notice_is_cleared_when_stream_comes_back(self) -> None:
+        body = _function_body(_read("11-run-stream.js"), "export async function resumeRun")
+        self.assertIn("clearRunLinkNotice(row)", body,
+                      "流重新建立后旧提示必须收走（否则气泡里长期挂一句过期的断流文案）")
+
+    def test_notice_node_is_additive_not_replacing(self) -> None:
+        helper = _function_body(_read("11-run-stream.js"), "export function showRunLinkNotice")
+        self.assertIn("insertBefore(node, answer)", helper,
+                      "提示插在正文之前，正文本身一个字不动")
+        self.assertNotIn("innerHTML", helper)
+
+    def test_failure_text_separates_transport_from_http(self) -> None:
+        helper = _function_body(_read("11-run-stream.js"), "export function runStreamFailureText")
+        self.assertIn("连接中断，正在重连…", helper, "传输层抖动要说人话，别喊「恢复失败」")
+        self.assertIn("^HTTP \\d{3}$", helper, "服务端明确拒绝（HTTP 状态码）才是真失败")
+        self.assertIn("恢复 Run 失败：", helper)
+
+    def test_notice_has_styles(self) -> None:
+        css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
+        self.assertIn(".run-link-notice {", css)
+
+
 class MaintenanceDocSyncTests(unittest.TestCase):
     """快照式文档必须与代码同步（项目规则：改代码即改写对应章节）。"""
 

@@ -156,6 +156,9 @@ KEEP = {
     "fence_action_smoke.py", "fence_action_smoke.cjs",
     # 隔离实例的公共 harness：维护说明「归档说明」点名要求留在 verify/（被 tasks_panel_smoke.py 依赖）
     "_serve_tmp.py",
+    # 工作台（Studio，_studio_plan_v2.md）三件套（2026-10-22 入库；.gitignore 对应位置有说明）：
+    # 转换器生成 public/studio/ 只读预设（可复现）；UI 冒烟与真连模型生成实测发版前各跑一遍
+    "studio_catalog_build.py", "studio_ui_smoke.cjs", "studio_live_ui_check.cjs",
     # 教程截图流水线三件套（§六 已登记；冻结版 exe + 隔离根 + 脱敏播种 + Playwright 驱动）：
     # `_tut_run.sh` 一键跑一篇，`_tutorial_serve.py` 是隔离实例与播种器（被前者调用），
     # `_tutorial_shots.cjs` 是各篇的拍摄脚本。删掉任何一个这条流水线就断。

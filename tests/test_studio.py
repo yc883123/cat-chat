@@ -554,7 +554,16 @@ class StudioRunnerTests(unittest.TestCase):
 
     def test_text_only_model_rejects_images_with_clear_error(self):
         runner = self._runner()
-        runner.app.vision = _StubVision(supports=False)
+
+        class _ExplicitNoVisionConfig(_StubConfig):
+            def profile(self, key):
+                return {
+                    **super().profile(key),
+                    "supports_images": False,
+                    "supports_images_explicit": False,
+                }
+
+        runner.app.config = _ExplicitNoVisionConfig()
         image = _write_png(Path(self.tmp.name) / "uploads" / "only.png")
         task = self.store.create_task({
             "content": "看图生成",
@@ -570,6 +579,37 @@ class StudioRunnerTests(unittest.TestCase):
         self.assertEqual(state["status"], "failed")
         self.assertIn("不支持图片输入", state["error"])
         self.assertEqual(self.models.messages, [])
+
+    def test_inferred_text_only_does_not_block_capable_models(self):
+        """推断为不支持但未显式声明：不能硬拦（冻结版 tedsres/grok 实测可用）。"""
+        runner = self._runner()
+
+        class _InferredNoVisionConfig(_StubConfig):
+            def profile(self, key):
+                return {
+                    **super().profile(key),
+                    "supports_images": False,
+                    "supports_images_explicit": None,
+                }
+
+        runner.app.config = _InferredNoVisionConfig()
+        self.models.behavior = lambda status_cb, options: "已按图生成"
+        image = _write_png(Path(self.tmp.name) / "uploads" / "capable.png")
+        task = self.store.create_task({
+            "content": "看图生成",
+            "model_key": "online:p1",
+            "model_name": "stub-model",
+            "images": [{"path": str(image), "thumb_path": "", "name": "图"}],
+        })
+        runner.submit(task["id"])
+        deadline = time.time() + 10
+        while time.time() < deadline and self.store.get_task(task["id"])["status"] not in {"done", "failed"}:
+            time.sleep(0.02)
+        state = self.store.get_task(task["id"])
+        self.assertEqual(state["status"], "done")
+        self.assertEqual(state["result"], "已按图生成")
+        content = self.models.messages[-1][0]["content"]
+        self.assertEqual([part.get("type") for part in content], ["text", "image", "text"])
 
 
 class StudioServiceApiTests(unittest.TestCase):

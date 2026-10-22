@@ -214,8 +214,15 @@ class StudioRunner:
         images = [ref for ref in (input_data.get("images") or []) if isinstance(ref, dict)]
         if images:
             # 带图生成：结构化多模态消息（图号与图片依次配对），不把路径拼成提示文本。
-            vision = getattr(self.app, "vision", None)
-            if vision is not None and not vision.brain_supports_images(profile):
+            # 能力门槛只认**显式声明**：冻结版实测 tedsres / grok 被推断成不支持，
+            # 实际都能正确识别图1/图2；反过来也有推断支持、端点只收 text 的情况。
+            # 推断值不能当硬闸门，显式 False 才拦，其余交给端点并把真实错误带回来。
+            explicit = profile.get("supports_images_explicit")
+            if explicit is None and "supports_images_explicit" not in profile:
+                inferred = profile.get("supports_images")
+                if isinstance(inferred, bool):
+                    explicit = inferred
+            if explicit is False:
                 raise RuntimeError(
                     "当前模型不支持图片输入：请换一个支持视觉的模型，"
                     "或先用「识别图片」把描述写进输入后再生成"

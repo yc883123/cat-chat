@@ -20,7 +20,23 @@
 <body>
   <div class="app-shell" id="appShell">
     <aside class="sidebar" id="sidebar" aria-label="对话导航">
-      <div class="workspace-header">
+      <!-- 应用级视图切换：对话（会话树）/ 工作台（Studio）。工作台是应用级视图，
+           入口放在侧栏顶部，不再占用顶栏的会话操作区。 -->
+      <div class="sidebar-mode-row">
+        <div class="sidebar-mode-switch" role="group" aria-label="视图">
+          <button class="sidebar-mode-btn active" id="openChatMode" type="button" aria-pressed="true">对话</button>
+          <button class="sidebar-mode-btn" id="openStudio" type="button" aria-pressed="false" title="工作台（模板检索与生成）">工作台</button>
+        </div>
+        <!-- 侧栏收放是两种视图共享的操作，因此跟模式切换留在同一行 -->
+        <button class="icon-button sidebar-collapse-btn" id="collapseSidebar" type="button" title="收起侧栏" aria-label="收起侧栏">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 6l-6 6 6 6"></path><path d="M19 6l-6 6 6 6"></path></svg>
+        </button>
+        <button class="icon-button mobile-only" id="closeSidebar" title="关闭导航" aria-label="关闭导航">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+        </button>
+      </div>
+      <!-- 以下搜索 / 分组 / 新建工作区是会话专用操作：工作台态由 CSS 隐藏 -->
+      <div class="workspace-header" id="sidebarWorkspaceHeader">
         <span class="workspace-title">工作区</span>
         <div class="workspace-header-actions">
           <button class="icon-button" id="workspaceSearch" title="搜索" aria-label="搜索">
@@ -32,12 +48,6 @@
           </button>
           <button class="icon-button" id="addWorkspace" title="新建工作区" aria-label="新建工作区">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
-          </button>
-          <button class="icon-button sidebar-collapse-btn" id="collapseSidebar" type="button" title="收起侧栏" aria-label="收起侧栏">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 6l-6 6 6 6"></path><path d="M19 6l-6 6 6 6"></path></svg>
-          </button>
-          <button class="icon-button mobile-only" id="closeSidebar" title="关闭导航" aria-label="关闭导航">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
           </button>
         </div>
       </div>
@@ -51,6 +61,10 @@
         <input class="workspace-search-input" id="workspaceSearchInput" type="text" placeholder="搜索对话" autocomplete="off">
       </div>
       <nav class="conversation-list" id="sidebarWorkspaceTree" aria-label="工作区"></nav>
+      <!-- 工作台态专用导航（对话态隐藏）：进入历史产出列表 -->
+      <nav class="sidebar-studio-nav" id="sidebarStudioNav" hidden aria-label="工作台">
+        <button class="sidebar-studio-link" id="studioNavHistory" type="button" data-studio-nav="history">历史产出</button>
+      </nav>
       <div class="sidebar-footer">
         <button class="address-button" id="copyAddress" title="复制手机访问地址">
           <i class="status-mark" id="serverDot" title="服务状态" aria-label="服务状态"></i>
@@ -135,10 +149,6 @@
                窄容器降级时收掉文字就只剩一个裸数字「13」「19」，认不出是什么。
                有图标的（文件 / 辅助 / 刷新）才会被收掉。见 styles.css 的 data-tb 阶梯。 -->
           <button class="control-button task-button" id="openTasks" title="查看异步任务"><span id="taskCount">0</span> <span class="button-label keep">任务</span></button>
-          <button class="control-button" id="openStudio" title="打开工作台（模板检索与生成）" aria-pressed="false">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h16"></path></svg>
-            <span class="button-label">工作台</span>
-          </button>
           <button class="control-button" id="openSkills" title="查看当前会话已选择的 Skill"><span id="skillCount">0</span> <span class="button-label keep">Skill</span></button>
           <button class="mcp-button" id="mcpStatus" title="查看 MCP 状态"><i></i><span>MCP</span></button>
           <button class="control-button" id="reloadPage" type="button" title="刷新页面（内嵌窗口无法使用 F5 时点击）">
@@ -188,58 +198,93 @@
 
       <div class="turn-rail" id="turnRail" hidden></div>
 
-      <!-- 工作台（Studio）：三区布局——模板列表 / 详情与参数 / 生成结果。
-           顶栏「工作台」按钮开关；body[data-studio="on"] 时铺 rows 2-4，普通对话区让位。 -->
+      <!-- 工作台（Studio）：独立模块视图，进入后占满主区，不继承对话顶栏。
+           模块级顶栏 = 模块名 + 分页导航（当前「模块库」，后续新功能各起一页）+ 本模块工具。
+           左边侧栏管历史产出；当前分页内再分三栏：模块库（纵向分类 + 列表）/ 详情与参数 / 结果。 -->
       <section class="studio-view" id="studioView" hidden aria-label="工作台">
         <header class="studio-topbar">
-          <div class="studio-tabs" id="studioTabs" role="tablist" aria-label="工作台分类"></div>
-          <label class="studio-search">
-            <input id="studioSearch" type="search" placeholder="搜索模板" aria-label="搜索模板">
-          </label>
-          <button class="control-button" id="studioCustomImport" type="button" title="把 .txt / .md / .json 导入为自定义条目（在「我的」里查看与管理）">导入</button>
-        </header>
-        <div class="studio-columns">
-          <div class="studio-list" id="studioList" role="list" aria-label="模板列表"></div>
-          <div class="studio-detail" id="studioDetail">
-            <div class="studio-detail-head">
-              <h2 id="studioDetailTitle"></h2>
-              <p id="studioDetailSummary"></p>
-              <div class="studio-detail-chips" id="studioDetailChips"></div>
-            </div>
-            <div class="studio-vars" id="studioVarsForm" style="display:none"></div>
-            <label class="studio-request-field">我的输入
-              <textarea id="studioUserRequest" rows="4" placeholder="把你的要求写在这里" aria-label="用户输入"></textarea>
+          <!-- 桌面端侧栏收起时，对话顶栏（#expandSidebar 所在）整体退场；
+               这里补一个同款展开按钮，保证工作台里仍能回到侧栏选「对话」。 -->
+          <button class="icon-button sidebar-expand-btn" id="studioExpandSidebar" type="button" title="展开侧栏" aria-label="展开侧栏">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6l6 6-6 6"></path><path d="M5 6l6 6-6 6"></path></svg>
+          </button>
+          <button class="icon-button mobile-only" id="studioOpenSidebar" type="button" title="打开导航" aria-label="打开导航">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"></path></svg>
+          </button>
+          <strong class="studio-brand">工作台</strong>
+          <nav class="studio-pages" id="studioPages" aria-label="工作台分页">
+            <button class="studio-page" type="button" aria-current="page" data-studio-page="library">模块库</button>
+          </nav>
+          <div class="studio-topbar-tools">
+            <label class="studio-search">
+              <input id="studioSearch" type="search" placeholder="搜索模板" aria-label="搜索模板">
             </label>
-            <div class="studio-model-row">
-              <label>模型配置
-                <select id="studioProviderSelect" aria-label="模型配置"></select>
-              </label>
-              <label>模型
-                <select id="studioModelSelect" aria-label="模型"></select>
-              </label>
-            </div>
-            <details class="studio-body-preview" id="studioBodyPreviewWrap" open>
-              <summary>正文预览<em id="studioBodyEditableHint" hidden>（可编辑，保存后生效）</em></summary>
-              <pre class="studio-body-text" id="studioBodyPreview"></pre>
-              <textarea class="studio-body-text" id="studioBodyEditor" rows="8" hidden></textarea>
-            </details>
-            <div class="studio-actions">
-              <button class="primary-button" id="studioGenerate" type="button">生成</button>
-              <button class="control-button" id="studioCancelTask" type="button" hidden>取消</button>
-              <button class="control-button" id="studioRetryTask" type="button" hidden>重试</button>
-              <button class="control-button" id="studioHandoff" type="button" hidden>继续追问…</button>
-              <button class="control-button" id="studioCustomSave" type="button" hidden>保存修改</button>
-              <button class="control-button" id="studioCustomDelete" type="button" hidden>删除</button>
-              <button class="control-button" id="studioCustomExport" type="button" hidden>导出</button>
-              <span class="studio-task-hint" id="studioTaskHint" role="status"></span>
-            </div>
+            <button class="control-button" id="studioCustomImport" type="button" title="把 .txt / .md / .json 导入为自定义条目（在「我的」里查看与管理）">导入</button>
           </div>
-          <div class="studio-result">
-            <header class="studio-result-header">
-              <p>生成结果<small id="studioResultMeta"></small></p>
-              <div class="studio-task-history" id="studioTaskHistory" aria-label="历史任务"></div>
-            </header>
-            <div class="studio-result-stream" id="studioResultStream" aria-live="polite"></div>
+        </header>
+
+        <!-- 分页：模块库 -->
+        <div class="studio-page-view" id="studioPageLibrary" data-studio-page-view="library">
+          <!-- 手机三档（≤760px 显示）：模板 / 参数 / 结果，一次只显示一档 -->
+          <div class="studio-panes" id="studioPanes" role="group" aria-label="工作台分档">
+            <button class="studio-pane-btn" type="button" aria-pressed="false" data-studio-pane="list">模板</button>
+            <button class="studio-pane-btn active" type="button" aria-pressed="true" data-studio-pane="form">参数</button>
+            <button class="studio-pane-btn" type="button" aria-pressed="false" data-studio-pane="result">结果</button>
+          </div>
+          <div class="studio-columns">
+            <div class="studio-library">
+              <div class="studio-cats" id="studioCats" role="group" aria-label="工作台分类"></div>
+              <div class="studio-list" id="studioList" role="list" aria-label="模板列表"></div>
+            </div>
+            <div class="studio-detail" id="studioDetail">
+              <div class="studio-detail-head">
+                <h2 id="studioDetailTitle"></h2>
+                <p id="studioDetailSummary"></p>
+                <div class="studio-detail-chips" id="studioDetailChips"></div>
+              </div>
+              <div class="studio-vars" id="studioVarsForm" style="display:none"></div>
+              <label class="studio-request-field">我的输入
+                <textarea id="studioUserRequest" rows="4" placeholder="把你的要求写在这里" aria-label="用户输入"></textarea>
+              </label>
+              <div class="studio-model-row">
+                <label>模型配置
+                  <select id="studioProviderSelect" aria-label="模型配置"></select>
+                </label>
+                <label>模型
+                  <select id="studioModelSelect" aria-label="模型"></select>
+                </label>
+              </div>
+              <details class="studio-body-preview" id="studioBodyPreviewWrap" open>
+                <summary>正文预览<em id="studioBodyEditableHint" hidden>（可编辑，保存后生效）</em></summary>
+                <pre class="studio-body-text" id="studioBodyPreview"></pre>
+                <textarea class="studio-body-text" id="studioBodyEditor" rows="8" hidden></textarea>
+              </details>
+              <div class="studio-actions">
+                <button class="primary-button" id="studioGenerate" type="button">生成</button>
+                <button class="control-button" id="studioCustomSave" type="button" hidden>保存修改</button>
+                <button class="control-button" id="studioCustomDelete" type="button" hidden>删除</button>
+                <button class="control-button" id="studioCustomExport" type="button" hidden>导出</button>
+              </div>
+            </div>
+            <div class="studio-result">
+              <header class="studio-result-header">
+                <p>
+                  <span id="studioResultTitle">生成结果</span>
+                  <small id="studioResultMeta"></small>
+                  <small id="studioHistoryRange" hidden>最近任务，最多显示 60 条</small>
+                </p>
+                <div class="studio-task-history" id="studioTaskHistory" aria-label="最近任务"></div>
+              </header>
+              <!-- 任务动作跟着任务走：结果档（手机）与结果栏（桌面）都可达 -->
+              <div class="studio-result-actions">
+                <button class="control-button" id="studioCancelTask" type="button" hidden>取消</button>
+                <button class="control-button" id="studioRetryTask" type="button" hidden>重试</button>
+                <button class="control-button" id="studioHandoff" type="button" hidden>继续追问…</button>
+                <span class="studio-task-hint" id="studioTaskHint" role="status"></span>
+              </div>
+              <div class="studio-history" id="studioHistoryList" hidden aria-label="历史产出"></div>
+              <div class="studio-result-stream" id="studioResultStream" aria-live="polite"></div>
+            </div>
           </div>
         </div>
       </section>

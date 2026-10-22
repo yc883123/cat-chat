@@ -268,13 +268,25 @@ class ConversationPromptRetiredTests(unittest.TestCase):
         self.assertIn("sidebarScrollForActive(rows, offsets, st, tree.clientHeight || 0)", source)
         self.assertNotIn("if (idx >= 0) st = offsets[idx];", source, "又退回「强制置顶」的旧写法")
 
-    def test_collapse_button_shares_workspace_header_row(self) -> None:
-        """收起按钮与搜索/排序/新建工作区同一行（独立空行很难看）。"""
+    def test_collapse_button_shares_mode_switch_row(self) -> None:
+        """收起按钮必须与某个常驻控件同一行（独立空行很难看）。
+
+        3.6.0 起它跟「对话 / 工作台」模式切换同一行：侧栏收放是两种视图共享的操作，
+        桌面折叠后仍能通过展开按钮回到模式切换；工作台态只隐藏会话专用操作，
+        不能连收起按钮一起藏掉。
+        """
         index = (ROOT / "public/index.html").read_text(encoding="utf-8")
         self.assertNotIn('class="sidebar-top"', index, "独立的 .sidebar-top 空行又回来了")
-        actions = index[index.index('class="workspace-header-actions"'):]
-        actions = actions[: actions.index("</div>")]
-        self.assertIn('id="collapseSidebar"', actions, "收起按钮不在「工作区」操作行内")
+        mode_row = index[index.index('class="sidebar-mode-row"'):]
+        mode_row = mode_row[: mode_row.index('id="sidebarWorkspaceHeader"')]
+        self.assertIn('id="collapseSidebar"', mode_row, "收起按钮应在模式切换行内（与模式按钮同一行）")
+        self.assertIn('class="sidebar-mode-switch"', mode_row, "模式切换行缺少模式按钮组")
+        css = (ROOT / "public/styles.css").read_text(encoding="utf-8")
+        self.assertIn(
+            'body[data-studio="on"] #sidebarWorkspaceHeader,',
+            css,
+            "工作台态只隐藏会话专用操作，收起按钮不跟着消失",
+        )
 
     def test_conversation_item_click_area_covers_whole_row(self) -> None:
         """整条都可点（含上下边缘）：判定区必须覆盖整个条目元素。"""

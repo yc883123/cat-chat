@@ -3294,45 +3294,160 @@ html[data-theme="dark"] .usage-chip.active { color: var(--violet-deep); }
 }
 
 /* ============ 工作台（Studio，22-studio.js + index.html #studioView） ============ */
-/* 视图开关由 body[data-studio] 表达；studio 视图占用 chat-main 的 rows 2-4（顶栏保持），
-   普通对话区（背景层/消息区/轮次轨/输入区）在 studio 态隐藏，返回时原样恢复。 */
+/* 工作台是独立模块：进入后**整个对话外壳退场**（顶栏 + 背景层 + 消息区 + 轮次轨 + 输入区），
+   由工作台自己的模块级顶栏接管主区全部行。这样对话的 API/Agent/文件/辅助/任务/Skill/MCP
+   不会侵入工作台，后续新增的工作台分页也挂在工作台顶栏里，不与会话操作混排。 */
 body[data-studio="on"] .chat-backdrop,
 body[data-studio="on"] .messages,
 body[data-studio="on"] .turn-rail,
-body[data-studio="on"] .composer-wrap { display: none; }
-body[data-studio="on"] .studio-view { display: grid; }
+body[data-studio="on"] .composer-wrap,
+body[data-studio="on"] .topbar { display: none; }
+body[data-studio="on"] .chat-main { grid-template-rows: minmax(0, 1fr); }
+body[data-studio="on"] .studio-view { display: flex; }
+
+/* 侧栏模式切换（对话 / 工作台）：应用级视图入口，不占顶栏会话操作区。 */
+.sidebar-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px 4px;
+}
+.sidebar-mode-switch {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--sidebar-line);
+  border-radius: var(--r-md);
+}
+.sidebar-mode-btn {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  border: 0;
+  border-radius: calc(var(--r-md) - 2px);
+  background: transparent;
+  color: var(--sidebar-muted);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: var(--t-fast);
+}
+.sidebar-mode-btn:hover { background: var(--sidebar-hover); color: var(--sidebar-text); }
+.sidebar-mode-btn.active { background: var(--sidebar-active); color: var(--brand-300, #fff); font-weight: 600; }
+.sidebar-mode-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sidebar-mode-row .sidebar-collapse-btn { flex: none; }
+
+/* 工作台态：侧栏只留模式切换 + 工作台导航 + 共享底部操作，会话内容全部让位。 */
+body[data-studio="on"] #sidebarWorkspaceHeader,
+body[data-studio="on"] #workspaceSearchRow,
+body[data-studio="on"] #sidebarWorkspaceTree { display: none; }
+.sidebar-studio-nav { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px 12px; }
+.sidebar-studio-nav[hidden] { display: none; }
+/* 工作台态会话树让位后，由工作台导航吃掉中间全部高度：
+   否则底部「手机访问 / 设置 / 应用图标」会直接顶到模式切换下面。 */
+body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.sidebar-studio-link {
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--sidebar-text);
+  font-size: 13px;
+  padding: 9px 10px;
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.sidebar-studio-link:hover { background: var(--sidebar-hover); color: #fff; }
+.sidebar-studio-link:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
 .studio-view {
-  grid-area: 2 / 1 / 4 / 2;
+  grid-area: 1 / 1 / -1 / 2;
   display: none;
   min-height: 0;
-  grid-template-rows: auto minmax(0, 1fr);
+  flex-direction: column;
   background: var(--bg);
 }
-.studio-topbar { display: flex; align-items: center; gap: var(--s-3); padding: 10px var(--s-4) 8px; border-bottom: 1px solid var(--line); }
-.studio-tabs { display: flex; flex-wrap: nowrap; gap: 6px; overflow-x: auto; scrollbar-width: thin; }
-.studio-tab {
-  border: 1px solid var(--line);
-  background: var(--surface);
+/* 模块级顶栏：模块名 + 分页导航 + 本模块工具。后续工作台分页都加在这里。 */
+.studio-topbar {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: 10px var(--s-4); border-bottom: 1px solid var(--line);
+  min-height: 56px; flex: none;
+}
+.studio-brand { font-size: 14px; font-weight: 700; color: var(--text); white-space: nowrap; flex: none; }
+/* 工作台顶栏的侧栏展开按钮：只在桌面侧栏收起时出现（对话顶栏此时整体退场），
+   位置在模块名左侧，不需要顶栏版本的负外边距。 */
+.studio-topbar .sidebar-expand-btn { margin-right: 0; }
+.studio-pages { display: flex; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
+.studio-page {
+  border: 1px solid transparent;
+  background: transparent;
   color: var(--muted);
-  border-radius: var(--r-full);
-  padding: 5px 12px;
+  border-radius: var(--r-md);
+  padding: 6px 12px;
   font-size: 12.5px;
   white-space: nowrap;
   cursor: pointer;
 }
-.studio-tab[aria-selected="true"] { background: var(--accent-soft); border-color: var(--violet-line); color: var(--violet-deep); font-weight: 600; }
-.studio-search { margin-left: auto; }
+.studio-page:hover { background: var(--surface-2); color: var(--text); }
+.studio-page[aria-selected="true"] { background: var(--accent-soft); border-color: var(--violet-line); color: var(--violet-deep); font-weight: 600; }
+.studio-page:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.studio-topbar-tools { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
 .studio-search input {
   width: 190px; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--r-md);
   background: var(--surface); color: var(--text); font-size: 13px;
 }
+
+/* 分页容器：同一时刻只显示一页，各页自己滚动。 */
+.studio-page-view { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.studio-page-view[hidden] { display: none; }
+
+/* 手机三档切换条：桌面隐藏（三栏常显） */
+.studio-panes { display: none; gap: 4px; padding: 6px var(--s-4); border-bottom: 1px solid var(--line); }
+.studio-pane-btn {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  border-radius: var(--r-md);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.studio-pane-btn.active { background: var(--accent-soft); border-color: var(--violet-line); color: var(--violet-deep); font-weight: 600; }
+
 .studio-columns {
   display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1.1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1.05fr) minmax(0, 1fr);
   gap: var(--s-3);
   padding: var(--s-3) var(--s-4) var(--s-4);
   min-height: 0;
+  flex: 1;
 }
+/* 模板库栏：纵向分类 + 模板列表，同一栏内两列（不新增第四栏） */
+.studio-library { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 8px; min-height: 0; }
+.studio-cats { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0; padding-right: 2px; }
+.studio-cat {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 6px 8px;
+  text-align: left;
+  cursor: pointer;
+}
+.studio-cat:hover { background: var(--surface-2); color: var(--text); }
+.studio-cat[aria-selected="true"] { background: var(--accent-soft); border-color: var(--violet-line); color: var(--violet-deep); font-weight: 600; }
+.studio-cat:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.studio-cat-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.studio-cat-count { font-style: normal; font-size: 10.5px; color: inherit; opacity: .75; flex: none; }
 .studio-list { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding-right: 2px; }
 .studio-row {
   display: block; width: 100%; text-align: left;
@@ -3384,13 +3499,39 @@ body[data-studio="on"] .studio-view { display: grid; }
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 10px var(--s-4); border-bottom: 1px solid var(--line);
 }
-.studio-result-header p { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); display: inline-flex; gap: 8px; align-items: baseline; }
+.studio-result-header p { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); display: inline-flex; gap: 8px; align-items: baseline; flex-wrap: wrap; min-width: 0; flex: none; }
 .studio-result-header small { font-weight: 400; font-size: 11.5px; color: var(--muted); }
-.studio-task-history { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
-.studio-task-row { font-size: 11px; border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); border-radius: var(--r-full); padding: 2px 9px; cursor: pointer; max-width: 190px; }
-.studio-task-row span { display: inline-block; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
-.studio-task-row em { font-style: normal; margin-left: 4px; }
+.studio-result-header small[hidden] { display: none; }
+/* 最近任务捷径：最多 3 条，独占标题下方一行；放不下就换行，不裁切、不压成碎片 */
+.studio-task-history {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  flex: 1 1 100%; min-width: 0;
+}
+.studio-task-history[hidden] { display: none; }
+.studio-task-row { display: inline-flex; align-items: baseline; gap: 4px; font-size: 11px; border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); border-radius: var(--r-full); padding: 2px 9px; cursor: pointer; max-width: 100%; flex: 0 0 auto; white-space: nowrap; }
+.studio-task-row span { display: block; max-width: 56px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.studio-task-row em { font-style: normal; flex: none; }
+.studio-result-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px var(--s-4); border-bottom: 1px solid var(--line); }
+.studio-result-actions[hidden] { display: none; }
 .studio-result-stream { flex: 1; min-height: 0; overflow-y: auto; padding: var(--s-4); font-size: 13px; line-height: 1.7; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+.studio-result-stream[hidden] { display: none; }
+
+/* 历史产出：作为右侧结果栏的一种模式显示，自己滚动 */
+.studio-history { flex: 1; min-height: 0; overflow-y: auto; padding: 8px var(--s-4) var(--s-4); display: flex; flex-direction: column; gap: 6px; }
+.studio-history[hidden] { display: none; }
+.studio-history-notice { margin: 4px; font-size: 12.5px; color: var(--muted); }
+.studio-history-error { margin: 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); font-size: 12px; color: var(--muted); line-height: 1.6; }
+.studio-history-error strong { color: var(--text); font-size: 12.5px; }
+.studio-history-row {
+  display: flex; flex-direction: column; gap: 4px; width: 100%; text-align: left;
+  border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface);
+  padding: 8px 10px; cursor: pointer; min-width: 0;
+}
+.studio-history-row:hover { border-color: var(--line-strong); background: var(--surface-2); }
+.studio-history-title { font-size: 12.5px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.studio-history-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 11px; color: var(--muted); }
+.studio-history-meta em { font-style: normal; }
+.studio-history-meta em + em::before { content: "·"; margin-right: 8px; }
 
 /* 追问交接框：初始无选中项，「创建会话并继续」禁用 */
 .studio-agent-dialog .studio-agent-body { display: grid; gap: var(--s-3); padding: 4px 0 0; }
@@ -3404,18 +3545,37 @@ body[data-studio="on"] .studio-view { display: grid; }
 .studio-agent-row small { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .studio-agent-row.active { border-color: var(--violet-line); background: var(--violet-softer); }
 
-/* 手机视口（375px）：单栏分步——顶栏 tab 可巡视，列表/详情/结果纵向顺排 */
+/* 手机视口（≤760px）：模板 / 参数 / 结果三档，一次只显示一档，各自独立滚动。
+   桌面三栏始终保持显示（下面的桌面规则在媒体查询之外，跨档位不清空内容）。 */
 @media (max-width: 760px) {
-  .studio-topbar { padding: 8px 10px 6px; gap: 6px; }
-  .studio-search { margin-left: 0; flex: 1; }
+  .studio-topbar { padding: 8px 10px; gap: 6px; flex-wrap: wrap; }
+  .studio-brand { font-size: 13px; }
+  .studio-pages { order: 1; flex: 1; }
+  .studio-topbar-tools { order: 3; flex: 1 1 100%; margin-left: 0; }
+  .studio-search { flex: 1; }
   .studio-search input { width: 100%; }
-  .studio-columns { grid-template-columns: minmax(0, 1fr); overflow-y: auto; padding: 10px; gap: 10px; }
-  .studio-list { max-height: 42vh; }
-  .studio-detail, .studio-result { overflow: visible; }
-  .studio-result-stream { max-height: 46vh; }
+  .studio-panes { display: flex; }
+  .studio-columns { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); padding: 10px; gap: 10px; overflow: hidden; }
+  /* 三档显隐：隐藏档不占布局、不参与键盘焦点 */
+  .studio-library,
+  .studio-detail,
+  .studio-result { display: none; min-height: 0; }
+  .studio-view[data-pane="list"] .studio-library,
+  .studio-view[data-pane="form"] .studio-detail,
+  .studio-view[data-pane="result"] .studio-result { display: flex; }
+  .studio-library { flex-direction: column; }
+  .studio-cats { flex: none; max-height: 32vh; }
+  .studio-list { flex: 1; min-height: 0; }
+  .studio-detail, .studio-result { flex-direction: column; overflow: hidden; }
+  .studio-detail { overflow-y: auto; }
+  .studio-result-stream { max-height: none; }
   .studio-request-field textarea { min-height: 64px; }
   .studio-agent-list { max-height: 42vh; }
+  .studio-history { padding: 8px 10px 10px; }
 }
+
+/* 桌面：三栏常显。手机档位只在 ≤760px 的媒体查询里隐藏面板，
+   因此跨过 760/761px 或横竖屏切换时不会残留隐藏状态、不清空内容。 */
 
 .studio-topbar .control-button {
   flex: none;

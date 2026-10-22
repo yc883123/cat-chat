@@ -236,5 +236,85 @@ class TopbarStyleTests(unittest.TestCase):
         self.assertIn('id="turnJumpSelect"', actions, "轮次下拉不在顶栏操作区")
 
 
+class StudioEntryTests(unittest.TestCase):
+    """工作台入口在侧栏模式切换里，不在顶栏会话操作区。
+
+    工作台是应用级视图：它替换整个主区、侧栏也跟着换导航，与会话操作（文件 / 辅助 /
+    任务 / Skill / MCP / 刷新）不是同类，挤在顶栏既占宽度又语义不清。
+    """
+
+    def _index(self) -> str:
+        return (ROOT / "public/index.html").read_text(encoding="utf-8")
+
+    def _css(self) -> str:
+        return (ROOT / "public/styles.css").read_text(encoding="utf-8")
+
+    def test_entry_is_unique_and_lives_in_sidebar(self) -> None:
+        index = self._index()
+        self.assertEqual(index.count('id="openStudio"'), 1, "全页只能有一个工作台入口（不保留隐藏旧按钮）")
+        header = index[index.index('<header class="topbar">'):index.index("</header>")]
+        self.assertNotIn('id="openStudio"', header, "工作台入口不能留在顶栏")
+        sidebar = index[index.index('<aside class="sidebar"'):index.index("</aside>")]
+        self.assertIn('id="openStudio"', sidebar, "工作台入口在侧栏")
+        self.assertIn('id="openChatMode"', sidebar, "侧栏必须有独立的「对话」返回按钮")
+
+    def test_studio_mode_swaps_sidebar_navigation(self) -> None:
+        index = self._index()
+        sidebar = index[index.index('<aside class="sidebar"'):index.index("</aside>")]
+        self.assertIn('id="sidebarStudioNav"', sidebar, "工作台态需要独立侧栏导航")
+        self.assertIn('id="studioNavHistory"', sidebar, "工作台侧栏必须有「历史产出」入口")
+        self.assertNotIn('id="studioNavTemplates"', sidebar, "「我的模板」快捷入口已按用户要求去掉")
+        self.assertIn('body[data-studio="on"] #sidebarWorkspaceTree { display: none; }', self._css(),
+                      "工作台态必须隐藏会话树")
+
+    def test_studio_is_an_independent_module_shell(self) -> None:
+        """工作台是独立模块：进入后整个对话外壳退场，由模块自己的顶栏接管。
+
+        之前把工作台塞进 chat-main 的第 2-4 行，对话的 API / Agent / 文件 / 辅助 /
+        任务 / Skill / MCP 就会一直悬在工作台上方，不符合独立模块的分层，
+        也让后续在工作台里加分页时无处安放。
+        """
+        css = self._css()
+        rule = css[css.index('body[data-studio="on"] .chat-backdrop'):]
+        rule = rule[: rule.index("}") + 1]
+        self.assertIn('body[data-studio="on"] .topbar', rule, "工作台态必须让对话顶栏整体退场")
+        self.assertIn("display: none", rule)
+        self.assertIn("body[data-studio=\"on\"] .chat-main { grid-template-rows: minmax(0, 1fr); }", css,
+                      "对话顶栏退场后主区只占一格，工作台铺满")
+        index = self._index()
+        studio = index[index.index('<section class="studio-view"'):index.index('<section class="composer-wrap"')]
+        self.assertIn('id="studioPages"', studio, "工作台模块顶栏必须有分页导航容器")
+        self.assertIn('data-studio-page="library"', studio, "分页「模块库」缺失")
+        self.assertIn("模块库", studio)
+        self.assertNotIn('id="modelSelect"', studio, "工作台顶栏不放对话模型选择")
+        self.assertNotIn('id="agentSelect"', studio, "工作台顶栏不放对话 Agent 选择")
+        # 历史产出由左侧栏管理，显示在右侧结果栏，不再占工作台分页
+        self.assertNotIn('data-studio-page="history"', studio, "历史产出不该是工作台分页")
+        self.assertIn('id="studioHistoryList"', studio, "历史列表仍在结果栏")
+        # 这些控件只是互斥选择，不是 tab；不要再声明需要方向键/roving tabindex 的 tabs 语义。
+        self.assertNotIn('role="tablist"', studio, "工作台控件不能声明未实现的 tabs 语义")
+        self.assertNotIn('role="tab"', studio, "工作台控件不能声明未实现的 tabs 语义")
+
+    def test_studio_keeps_a_desktop_sidebar_recovery_path(self) -> None:
+        """工作台隐藏对话顶栏后，桌面侧栏收起必须在工作台内恢复。
+
+        对话顶栏的 #expandSidebar 随顶栏一起退场；若工作台不补入口，收起侧栏后
+        就只剩刷新页面一条路，用户无法回到对话或历史产出。
+        """
+        index = self._index()
+        studio = index[index.index('<section class="studio-view"'):index.index('<section class="composer-wrap"')]
+        self.assertIn('id="studioExpandSidebar"', studio, "工作台顶栏必须有桌面侧栏展开入口")
+        js = (ROOT / "public/js/22-studio.js").read_text(encoding="utf-8")
+        self.assertIn('$("#studioExpandSidebar")?.addEventListener', js, "展开入口必须接线")
+        self.assertIn("setLeftSidebarCollapsed(false)", js, "展开入口必须真正取消侧栏折叠")
+
+    def test_studio_button_is_not_a_toggle(self) -> None:
+        """再点「工作台」不退出；返回对话只由「对话」按钮负责。"""
+        studio = (ROOT / "public/js/22-studio.js").read_text(encoding="utf-8")
+        self.assertIn('export function openStudioView()', studio)
+        self.assertIn("if (studio.open) return;", studio, "重复进入不得反向退出")
+        self.assertIn('$("#openChatMode")?.addEventListener', studio, "「对话」按钮必须接线")
+
+
 if __name__ == "__main__":
     unittest.main()

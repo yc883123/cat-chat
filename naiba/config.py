@@ -82,6 +82,18 @@ USAGE_DASH_PREF_CHARTS = frozenset({"bar", "area"})
 USAGE_DASH_PREF_METRICS = frozenset({"cost", "tokens"})
 USAGE_DASH_PREF_DEFAULTS = {"range": "1", "gran": "hour", "chart": "bar", "metric": "cost"}
 
+# ---- 工作台（Studio）偏好 ----
+# 独立配置键：只放「恢复上次选择」与「收藏」两类小而稳的状态，**不塞进** Chat 的
+# 收藏/外观字段。条目用「来源类型 + 稳定 ID」定位：内置条目走只读目录 ID，自定义
+# 条目走 custom-* ID；两者互不混淆。模板正文、用户输入、变量值一律不落库。
+STUDIO_SELECTION_KINDS = frozenset({"builtin", "custom"})
+STUDIO_PREF_PAGES = frozenset({"library"})
+STUDIO_PREF_MODULES = frozenset(
+    {"", "vs", "h3", "vi", "ec", "global", "script", "game", "style", "custom"}
+)
+STUDIO_PREF_MAX_FAVORITES = 200
+STUDIO_PREF_DEFAULTS = {"last_selection": None, "favorites": []}
+
 # ---- 聊天背景图（只铺对话区）----
 # 透明度滑杆范围：0.05 是「还能看见」的下限，1 = 完全不透明。
 CHAT_BACKGROUND_MIN_OPACITY = 0.05
@@ -276,6 +288,47 @@ def default_appearance() -> dict[str, Any]:
     return normalize_appearance({})
 
 
+def normalize_studio_prefs(value: Any) -> dict[str, Any]:
+    """工作台偏好归一化（配置加载与运行时更新共用）。
+
+    只保留「恢复上次选择」与「收藏」两类状态；手改配置里的非法枚举、缺键、重复
+    收藏都在这里收敛。条目定位只用「来源类型 + 稳定 ID」，不存模板正文/用户输入。
+    """
+    merged = dict(value) if isinstance(value, dict) else {}
+    selection = merged.get("last_selection")
+    normalized_selection: dict[str, str] | None = None
+    if isinstance(selection, dict):
+        kind = str(selection.get("kind") or "").strip()
+        item_id = str(selection.get("id") or "").strip()[:200]
+        module = str(selection.get("module") or "").strip()
+        page = str(selection.get("page") or "library").strip() or "library"
+        if (
+            kind in STUDIO_SELECTION_KINDS
+            and item_id
+            and module in STUDIO_PREF_MODULES
+            and page in STUDIO_PREF_PAGES
+        ):
+            normalized_selection = {"kind": kind, "id": item_id, "module": module, "page": page}
+    favorites: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    raw_favorites = merged.get("favorites")
+    for row in raw_favorites if isinstance(raw_favorites, list) else []:
+        if not isinstance(row, dict):
+            continue
+        kind = str(row.get("kind") or "").strip()
+        item_id = str(row.get("id") or "").strip()[:200]
+        if kind not in STUDIO_SELECTION_KINDS or not item_id:
+            continue
+        key = (kind, item_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        favorites.append({"kind": kind, "id": item_id})
+        if len(favorites) >= STUDIO_PREF_MAX_FAVORITES:
+            break
+    return {"last_selection": normalized_selection, "favorites": favorites}
+
+
 def validate_skills_dir(resolved: Path, *, app_dir: Path, public_dir: Path, data_dir: Path) -> None:
     """限制 Skill 目录范围，防止把高危目录暴露给扫描、解压和文件读取。"""
     resolved = resolved.resolve()
@@ -333,6 +386,8 @@ def default_config() -> dict[str, Any]:
         # （zoom 是相对「填满」的倍率；< 1 会四周留白，这正是"看全整张图"的手段）。
         # 图片以外的内容一律实底，所以不需要蒙层。
         "chat_background": default_chat_background(),
+        # 工作台（Studio）偏好：上次选中的条目 + 收藏清单。只存定位键，不存模板正文。
+        "studio": {"last_selection": None, "favorites": []},
         # Per-user reusable system prompts for conversation settings.  These
         # live in config.json instead of the conversation database by design.
         "conversation_prompt_presets": [],
@@ -1352,7 +1407,7 @@ class ConfigStore:
             except (OSError, json.JSONDecodeError):
                 pass
         # 嵌套默认值合并：用户配置若只写了部分子字段，补齐缺失键。
-        for key in ("vision", "search", "appearance", "chat_background", "update_proxy"):
+        for key in ("vision", "search", "appearance", "chat_background", "update_proxy", "studio"):
             merged = dict(default_config().get(key, {}))
             if isinstance(defaults.get(key), dict):
                 merged.update(defaults[key])
@@ -1364,6 +1419,10 @@ class ConfigStore:
                 # 手改过 / 旧配置（没有 position_x/y·zoom 三个键）都在这里补齐并归一化：
                 # 前端拿到什么就画什么，不能让 NaN、越界值或缺失键漏进公开设置。
                 merged = normalize_chat_background(merged)
+            elif key == "studio":
+                # 旧配置没有 studio 键也在这里补齐为空偏好；非法枚举/重复收藏静默收敛，
+                # 绝不让「上次选中的模板已不存在」这类状态阻止工作台打开。
+                merged = normalize_studio_prefs(merged)
             defaults[key] = merged
         # Build 74 changes the historical 120-second Run-wide vision budget
         # into a 180-second timeout for each individual visual request. Only
@@ -2332,6 +2391,7 @@ class ConfigStore:
             "chat_background",
             "sidebar",
             "usage_dash",
+            "studio",
         }
         with self.lock:
             for key in allowed:
@@ -2529,6 +2589,72 @@ class ConfigStore:
                                 raise ValueError("metric 必须是 cost 或 tokens")
                             merged["metric"] = metric
                         self.data[key] = merged
+                    elif key == "studio":
+                        # 工作台偏好：只接受「上次选择」与「收藏」两类结构化状态。
+                        # 严格校验（不静默吞非法值）：这两块由前端受控写入，契约对不上
+                        # 说明调用方写错了，让它显式报错比落库脏数据更难查。
+                        incoming = values[key]
+                        if not isinstance(incoming, dict):
+                            raise ValueError("studio 必须是对象")
+                        unknown = set(incoming) - {"last_selection", "favorites"}
+                        if unknown:
+                            names = ", ".join(sorted(map(str, unknown)))
+                            raise ValueError(f"studio 包含不支持的字段：{names}")
+                        current = normalize_studio_prefs(self.data.get("studio"))
+                        if "last_selection" in incoming:
+                            selection = incoming["last_selection"]
+                            if selection is None:
+                                current["last_selection"] = None
+                            elif not isinstance(selection, dict):
+                                raise ValueError("last_selection 必须是对象或 null")
+                            else:
+                                unknown_selection = set(selection) - {"kind", "id", "module", "page"}
+                                if unknown_selection:
+                                    names = ", ".join(sorted(map(str, unknown_selection)))
+                                    raise ValueError(f"last_selection 包含不支持的字段：{names}")
+                                kind = str(selection.get("kind") or "").strip()
+                                item_id = str(selection.get("id") or "").strip()
+                                module = str(selection.get("module") or "").strip()
+                                page = str(selection.get("page") or "library").strip() or "library"
+                                if kind not in STUDIO_SELECTION_KINDS:
+                                    raise ValueError("工作台条目来源必须是 builtin 或 custom")
+                                if not item_id or len(item_id) > 200:
+                                    raise ValueError("工作台条目 ID 非法")
+                                if module not in STUDIO_PREF_MODULES:
+                                    raise ValueError(f"工作台分类非法：{module or '（空）'}")
+                                if page not in STUDIO_PREF_PAGES:
+                                    raise ValueError(f"工作台分页非法：{page}")
+                                current["last_selection"] = {
+                                    "kind": kind, "id": item_id, "module": module, "page": page,
+                                }
+                        if "favorites" in incoming:
+                            favorites = incoming["favorites"]
+                            if not isinstance(favorites, list):
+                                raise ValueError("favorites 必须是数组")
+                            if len(favorites) > STUDIO_PREF_MAX_FAVORITES:
+                                raise ValueError(f"收藏最多 {STUDIO_PREF_MAX_FAVORITES} 条")
+                            normalized: list[dict[str, str]] = []
+                            seen: set[tuple[str, str]] = set()
+                            for row in favorites:
+                                if not isinstance(row, dict):
+                                    raise ValueError("收藏条目必须是对象")
+                                unknown_favorite = set(row) - {"kind", "id"}
+                                if unknown_favorite:
+                                    names = ", ".join(sorted(map(str, unknown_favorite)))
+                                    raise ValueError(f"收藏条目包含不支持的字段：{names}")
+                                kind = str(row.get("kind") or "").strip()
+                                item_id = str(row.get("id") or "").strip()
+                                if kind not in STUDIO_SELECTION_KINDS:
+                                    raise ValueError("收藏条目来源必须是 builtin 或 custom")
+                                if not item_id or len(item_id) > 200:
+                                    raise ValueError("收藏条目 ID 非法")
+                                key_pair = (kind, item_id)
+                                if key_pair in seen:
+                                    continue
+                                seen.add(key_pair)
+                                normalized.append({"kind": kind, "id": item_id})
+                            current["favorites"] = normalized
+                        self.data[key] = current
                     elif key in ("vision", "search", "imaging"):
                         incoming = values[key]
                         if not isinstance(incoming, dict):

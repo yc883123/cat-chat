@@ -211,7 +211,31 @@ class StudioRunner:
         profile = resolve_profile_with_override(
             self.app.config, str(input_data.get("model_key") or ""), str(input_data.get("model_name") or "")
         )
-        messages = [{"role": "user", "content": str(input_data.get("content") or "")}]
+        images = [ref for ref in (input_data.get("images") or []) if isinstance(ref, dict)]
+        if images:
+            # 带图生成：结构化多模态消息（图号与图片依次配对），不把路径拼成提示文本。
+            vision = getattr(self.app, "vision", None)
+            if vision is not None and not vision.brain_supports_images(profile):
+                raise RuntimeError(
+                    "当前模型不支持图片输入：请换一个支持视觉的模型，"
+                    "或先用「识别图片」把描述写进输入后再生成"
+                )
+            from naiba.vision.images import encode_image_file
+
+            parts: list[dict[str, Any]] = []
+            for index, ref in enumerate(images, 1):
+                part = encode_image_file(str(ref.get("path") or ""))
+                if part is None:
+                    raise RuntimeError(
+                        f"图{index}无法读取（文件可能已被清理）：请重新上传后再生成"
+                    )
+                label = str(ref.get("name") or "").strip() or f"图{index}"
+                parts.append({"type": "text", "text": f"\n\n图{index}（{label}）："})
+                parts.append(part)
+            parts.append({"type": "text", "text": "\n\n" + str(input_data.get("content") or "")})
+            messages = [{"role": "user", "content": parts}]
+        else:
+            messages = [{"role": "user", "content": str(input_data.get("content") or "")}]
         options = {
             "stream": True,
             "cancel_event": cancel_event,

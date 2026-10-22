@@ -15,6 +15,7 @@ from typing import Any
 from naiba.studio.catalog import CatalogError, StudioCatalog
 from naiba.studio.custom import CustomStore
 from naiba.studio.handoff import HandoffAdapter, compose_handoff_message
+from naiba.studio.images import StudioImageError, validate_image_refs
 from naiba.studio.jobs import StudioJobManager
 from naiba.studio.runner import StudioRunner
 from naiba.studio.store import StudioStore
@@ -44,6 +45,10 @@ class StudioService:
 
     def shutdown(self) -> None:
         self.jobs.shutdown()
+
+    def referenced_upload_paths(self) -> set[str]:
+        """缓存清理用的引用保护：工作台任务仍引用的上传图片（主图 + 缩略图）。"""
+        return self._store.referenced_upload_paths()
 
     # ---- 目录 ----
 
@@ -143,6 +148,11 @@ class StudioService:
         vars_raw = body.get("vars") or {}
         if not isinstance(vars_raw, dict):
             return {"error": "vars 必须是对象"}, 400
+        try:
+            # 图片引用是服务端权威校验：客户端只能给受管 uploads 里的真实图片。
+            images = validate_image_refs(self.app.paths.data_dir, body.get("images"))
+        except StudioImageError as exc:
+            return {"error": str(exc)}, 400
         title = ""
         source_body = ""
         origin_label = ""
@@ -197,6 +207,7 @@ class StudioService:
             "custom_id": custom_id,
             "vars": {str(k): str(v) for k, v in (vars_raw or {}).items()},
             "unresolved_vars": unresolved,
+            "images": images,
         }
         try:
             task = self.jobs.submit(input_data)
@@ -205,6 +216,61 @@ class StudioService:
         except LookupError as exc:
             return {"error": str(exc)}, 404
         return {"task": task, "unresolved_vars": unresolved}, 201
+
+    def api_vision(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """图片反推：复用共享视觉分析能力，逐图编号识别后返回可编辑文本。
+
+        逐张调用（而不是一次性把多图塞给模型）是为了让「图N → 描述」的对应关系
+        由我们保证，而不是靠模型自己在一段混合输出里划线。单张失败只影响该张，
+        其余结果照常返回；全部失败按 502 如实上报，绝不伪造已识图。
+        """
+        body = body if isinstance(body, dict) else {}
+        try:
+            images = validate_image_refs(self.app.paths.data_dir, body.get("images"))
+        except StudioImageError as exc:
+            return {"error": str(exc)}, 400
+        if not images:
+            return {"error": "请先上传图片"}, 400
+        question = str(body.get("question") or "").strip()[:2000]
+        results: list[dict[str, Any]] = []
+        failure_notes: list[str] = []
+        for index, ref in enumerate(images, 1):
+            prompt = (
+                f"这是第 {index} 张图（图{index}）。请只描述这一张图片：主体、构图、风格、"
+                "光线、画面中的文字（如有），以及可用于复现这张图的提示词要点。"
+            )
+            if question:
+                prompt += f"\n补充要求：{question}"
+            try:
+                text = str(self.app.vision.describe_files([ref["path"]], prompt) or "").strip()
+                if not text:
+                    raise RuntimeError("视觉模型返回空内容")
+                results.append({
+                    "index": index, "name": ref["name"], "path": ref["path"],
+                    "text": text, "error": "",
+                })
+            except Exception as exc:  # noqa: BLE001 - 单图失败不拖累其他图
+                message = str(exc) or "视觉识别失败"
+                results.append({
+                    "index": index, "name": ref["name"], "path": ref["path"],
+                    "text": "", "error": message,
+                })
+                failure_notes.append(f"图{index}：{message}")
+        analyzed = sum(1 for row in results if not row["error"])
+        text = "\n\n".join(
+            f"【图{row['index']}】\n{row['text']}" for row in results if not row["error"]
+        )
+        payload = {
+            "ok": analyzed == len(results),
+            "images": results,
+            "text": text,
+            "analyzed": analyzed,
+            "failed": len(results) - analyzed,
+        }
+        if not analyzed:
+            payload["error"] = "视觉识别全部失败：" + "；".join(failure_notes)
+            return payload, 502
+        return payload, 200
 
     def api_tasks(self, active_only: str = "") -> tuple[dict[str, Any], int]:
         rows = self.jobs.tasks(active_only=active_only in ("1", "true"))

@@ -37,6 +37,9 @@ class StudioStore:
     def __init__(self, data_dir: Path):
         self._dir = Path(data_dir) / "studio" / "tasks"
         self._lock = threading.RLock()
+        # 引用保护缓存：(单调时间, 路径键集合)。清理器对每个候选文件都会问一次
+        # 「这个文件还被 Studio 任务引用吗」，不能每次都重读全部任务 JSON。
+        self._ref_cache: tuple[float, set[str]] | None = None
 
     # ---- 路径 ----
 
@@ -88,6 +91,7 @@ class StudioStore:
             self._dir.mkdir(parents=True, exist_ok=True)
             self._write_json(self._record_path(task_id), record)
             self._events_path(task_id).touch(exist_ok=True)
+            self._ref_cache = None
         return record
 
     def get_task(self, task_id: str) -> dict[str, Any] | None:
@@ -220,3 +224,37 @@ class StudioStore:
             elif str(row.get("type") or "") == "done":
                 break
         return "".join(text_chunks)
+
+    # ---- 引用保护（缓存清理） ----
+
+    def referenced_upload_paths(self, ttl: float = 2.0) -> set[str]:
+        """任务里引用的上传图片路径键（主图 + 缩略图）。
+
+        任务仍可查看/重试期间，图片不能被通用缓存清理误删；调用方（app 的
+        ``_upload_path_in_use`` / ``_referenced_cache_keys``）只读本方法。
+        """
+        from naiba.studio.images import referenced_upload_paths
+
+        now = time.monotonic()
+        with self._lock:
+            cached = self._ref_cache
+            if cached and now - cached[0] < ttl:
+                return set(cached[1])
+        records: list[dict[str, Any]] = []
+        if self._dir.exists():
+            for path in sorted(self._dir.glob("st-*.json")):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if isinstance(payload, dict):
+                    records.append(payload)
+        keys = referenced_upload_paths(records)
+        with self._lock:
+            self._ref_cache = (now, set(keys))
+        return set(keys)
+
+    def invalidate_reference_cache(self) -> None:
+        """任务新增/改写后立刻失效（创建任务时调用，避免刚提交的图被旧缓存误判）。"""
+        with self._lock:
+            self._ref_cache = None

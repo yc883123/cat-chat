@@ -21,12 +21,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 ROOT = Path(__file__).resolve().parents[1]
 
 from naiba.core.exceptions import TaskCancelled  # noqa: E402
+from naiba.core.paths import normalized_path_key  # noqa: E402
+from naiba.config import ConfigStore  # noqa: E402
 from naiba.studio.catalog import CatalogError, StudioCatalog  # noqa: E402
 from naiba.studio.custom import CustomStore  # noqa: E402
 from naiba.studio.handoff import compose_handoff_message  # noqa: E402
+from naiba.studio.images import MAX_IMAGES, StudioImageError, validate_image_refs  # noqa: E402
 from naiba.studio.runner import StudioRunner  # noqa: E402
 from naiba.studio.service import StudioService, fill_vars  # noqa: E402
 from naiba.studio.store import StudioStore  # noqa: E402
+
+
+def _write_png(path: Path, color=(20, 120, 200), size=(16, 16)) -> Path:
+    from PIL import Image
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, color).save(path, format="PNG")
+    return path
 
 
 def _write_min_catalog(public_dir: Path, *, chars_with_vars: bool = True) -> None:
@@ -201,15 +212,151 @@ class CustomStoreTests(unittest.TestCase):
             self.store.import_body("broken.json", '{"title": 1')
 
 
+class StudioImageValidationTests(unittest.TestCase):
+    """图片引用校验：受管目录、真实图片、数量/大小上限、顺序与引用保护。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data_dir = Path(self.tmp.name) / "data"
+        self.uploads = self.data_dir / "uploads"
+        self.uploads.mkdir(parents=True)
+        self.png_a = _write_png(self.uploads / "a.png")
+        self.png_b = _write_png(self.uploads / "b.png", color=(1, 2, 3))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_keeps_client_order_and_normalizes(self):
+        refs = validate_image_refs(self.data_dir, [
+            {"path": str(self.png_a), "name": "第一张"},
+            str(self.png_b),
+        ])
+        self.assertEqual([row["path"] for row in refs], [str(self.png_a.resolve()), str(self.png_b.resolve())])
+        self.assertEqual(refs[0]["name"], "第一张")
+        self.assertEqual(refs[1]["name"], "b.png")
+
+    def test_rejects_paths_outside_managed_uploads(self):
+        outside = _write_png(Path(self.tmp.name) / "outside.png")
+        with self.assertRaises(StudioImageError):
+            validate_image_refs(self.data_dir, [str(outside)])
+
+    def test_rejects_non_image_and_missing_files(self):
+        fake = self.uploads / "fake.png"
+        fake.write_text("not an image", encoding="utf-8")
+        with self.assertRaises(StudioImageError):
+            validate_image_refs(self.data_dir, [str(fake)])
+        with self.assertRaises(StudioImageError):
+            validate_image_refs(self.data_dir, [str(self.uploads / "missing.png")])
+        bad_ext = self.uploads / "note.txt"
+        bad_ext.write_text("x", encoding="utf-8")
+        with self.assertRaises(StudioImageError):
+            validate_image_refs(self.data_dir, [str(bad_ext)])
+
+    def test_rejects_too_many_and_oversized(self):
+        with self.assertRaises(StudioImageError):
+            validate_image_refs(self.data_dir, [str(self.png_a)] * (MAX_IMAGES + 1))
+        huge = self.uploads / "huge.png"
+        with huge.open("wb") as handle:
+            handle.truncate(20 * 1024 * 1024 + 1)
+        with self.assertRaises(StudioImageError):
+            validate_image_refs(self.data_dir, [str(huge)])
+
+    def test_store_reports_referenced_paths(self):
+        store = StudioStore(self.data_dir)
+        store.create_task({
+            "content": "带图生成",
+            "images": [{"path": str(self.png_a), "thumb_path": str(self.png_b), "name": "a"}],
+        })
+        keys = store.referenced_upload_paths()
+        self.assertIn(normalized_path_key(self.png_a), keys)
+        self.assertIn(normalized_path_key(self.png_b), keys)
+
+
+class StudioPrefsConfigTests(unittest.TestCase):
+    """settings.studio：归一化、白名单、部分更新、旧配置兼容。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "config.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _store(self, payload=None):
+        if payload is not None:
+            self.path.write_text(json.dumps(payload), encoding="utf-8")
+        return ConfigStore(self.path)
+
+    def test_fresh_install_and_legacy_config_get_defaults(self):
+        self.assertEqual(self._store().data["studio"], {"last_selection": None, "favorites": []})
+        legacy = self._store({"appearance": {"theme": "dark"}})
+        self.assertEqual(legacy.data["studio"], {"last_selection": None, "favorites": []})
+
+    def test_corrupt_values_are_normalized(self):
+        store = self._store({
+            "studio": {
+                "last_selection": {"kind": "bogus", "id": "x", "module": "vs", "page": "library"},
+                "favorites": [
+                    {"kind": "builtin", "id": "vi-001"},
+                    {"kind": "builtin", "id": "vi-001"},
+                    {"kind": "bogus", "id": "x"},
+                    "junk",
+                ],
+            }
+        })
+        self.assertIsNone(store.data["studio"]["last_selection"])
+        self.assertEqual(store.data["studio"]["favorites"], [{"kind": "builtin", "id": "vi-001"}])
+
+    def test_partial_update_and_reload(self):
+        store = self._store()
+        store.update_settings({"studio": {"last_selection": {
+            "kind": "builtin", "id": "vi-001", "module": "vi", "page": "library",
+        }}})
+        store.update_settings({"studio": {"favorites": [{"kind": "custom", "id": "custom-x"}]}})
+        reloaded = ConfigStore(self.path)
+        self.assertEqual(reloaded.data["studio"]["last_selection"]["id"], "vi-001")
+        self.assertEqual(reloaded.data["studio"]["favorites"], [{"kind": "custom", "id": "custom-x"}])
+        # 清除上次选择：null 是合法值，收藏不受影响。
+        reloaded.update_settings({"studio": {"last_selection": None}})
+        self.assertIsNone(reloaded.data["studio"]["last_selection"])
+        self.assertEqual(reloaded.data["studio"]["favorites"], [{"kind": "custom", "id": "custom-x"}])
+
+    def test_invalid_payloads_rejected(self):
+        store = self._store()
+        invalid = [
+            {"studio": None},
+            {"studio": {"unknown": 1}},
+            {"studio": {"last_selection": "x"}},
+            {"studio": {"last_selection": {"kind": "bogus", "id": "a", "module": "", "page": "library"}}},
+            {"studio": {"last_selection": {"kind": "builtin", "id": "", "module": "", "page": "library"}}},
+            {"studio": {"last_selection": {"kind": "builtin", "id": "a", "module": "nope", "page": "library"}}},
+            {"studio": {"last_selection": {"kind": "builtin", "id": "a", "module": "", "page": "nope"}}},
+            {"studio": {"favorites": "x"}},
+            {"studio": {"favorites": [{"kind": "bogus", "id": "a"}]}},
+            {"studio": {"favorites": [{"kind": "builtin", "id": ""}]}},
+        ]
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    store.update_settings(payload)
+        # 重复收藏去重而不是拒绝（前端误发同一行两次不该阻断保存）。
+        result = store.update_settings({"studio": {"favorites": [
+            {"kind": "builtin", "id": "a"}, {"kind": "builtin", "id": "a"},
+        ]}})
+        self.assertEqual(result["studio"]["favorites"], [{"kind": "builtin", "id": "a"}])
+
+
 class _StubModels:
     """complete() 桩：按 options.cancel_event 与注入脚本决定行为。"""
 
     def __init__(self, behavior):
         self.behavior = behavior  # callable(status_cb, cancel_event, profile, messages, options)
         self.complete_kwargs = []
+        self.messages = []
 
     def complete(self, profile, messages, options, status_cb):
         self.complete_kwargs.append(profile)
+        self.messages.append(messages)
         return self.behavior(status_cb, options)
 
 
@@ -230,6 +377,22 @@ class _StubApp:
     def __init__(self, models, config):
         self.models = models
         self.config = config
+
+
+class _StubVision:
+    """视觉能力桩：逐图 analyze，记录调用参数；可指定某张失败。"""
+
+    def __init__(self, behavior=None, supports=True):
+        self.calls: list[tuple[list[str], str]] = []
+        self.supports = supports
+        self.behavior = behavior or (lambda path, question: f"{Path(path).stem} 的描述")
+
+    def describe_files(self, paths, question="", json_mode=False, cancel_event=None, vision_budget=None):
+        self.calls.append((list(paths), question))
+        return self.behavior(str(paths[0]), question)
+
+    def brain_supports_images(self, profile):
+        return self.supports
 
 
 class StudioRunnerTests(unittest.TestCase):
@@ -360,6 +523,54 @@ class StudioRunnerTests(unittest.TestCase):
         self.assertEqual(state_a["status"], "done")
         self.assertEqual(state_b["status"], "done")
 
+    def test_images_build_numbered_multimodal_message(self):
+        runner = self._runner()
+        first = _write_png(Path(self.tmp.name) / "uploads" / "one.png")
+        second = _write_png(Path(self.tmp.name) / "uploads" / "two.png", color=(4, 5, 6))
+        self.models.behavior = lambda status_cb, options: "ok"
+        task = self.store.create_task({
+            "content": "把两张图合成一张",
+            "model_key": "online:p1",
+            "model_name": "stub-model",
+            "images": [
+                {"path": str(first), "thumb_path": "", "name": "场景"},
+                {"path": str(second), "thumb_path": "", "name": "人物"},
+            ],
+        })
+        runner.submit(task["id"])
+        deadline = time.time() + 10
+        while time.time() < deadline and self.store.get_task(task["id"])["status"] not in {"done", "failed"}:
+            time.sleep(0.02)
+        state = self.store.get_task(task["id"])
+        self.assertEqual(state["status"], "done")
+        content = self.models.messages[-1][0]["content"]
+        self.assertIsInstance(content, list)
+        self.assertEqual([p.get("type") for p in content], ["text", "image", "text", "image", "text"])
+        self.assertIn("图1（场景）", content[0]["text"])
+        self.assertIn("图2（人物）", content[2]["text"])
+        self.assertEqual(content[1]["media_type"], "image/jpeg")
+        self.assertTrue(content[1]["data"])
+        self.assertIn("把两张图合成一张", content[4]["text"])
+
+    def test_text_only_model_rejects_images_with_clear_error(self):
+        runner = self._runner()
+        runner.app.vision = _StubVision(supports=False)
+        image = _write_png(Path(self.tmp.name) / "uploads" / "only.png")
+        task = self.store.create_task({
+            "content": "看图生成",
+            "model_key": "online:p1",
+            "model_name": "stub-model",
+            "images": [{"path": str(image), "thumb_path": "", "name": "图"}],
+        })
+        runner.submit(task["id"])
+        deadline = time.time() + 10
+        while time.time() < deadline and self.store.get_task(task["id"])["status"] not in {"done", "failed"}:
+            time.sleep(0.02)
+        state = self.store.get_task(task["id"])
+        self.assertEqual(state["status"], "failed")
+        self.assertIn("不支持图片输入", state["error"])
+        self.assertEqual(self.models.messages, [])
+
 
 class StudioServiceApiTests(unittest.TestCase):
     """service 层：生成输入定稿（自由输入/条目/变量）、任务恢复、handoff 组装。"""
@@ -385,6 +596,12 @@ class StudioServiceApiTests(unittest.TestCase):
         self.config = _StubConfig()
         self.app = _StubApp(self.models, self.config)
         self.app.paths = self.paths
+        self.uploads = base / "uploads"
+        self.uploads.mkdir(parents=True, exist_ok=True)
+        self.img_a = _write_png(self.uploads / "a.png")
+        self.img_b = _write_png(self.uploads / "b.png", color=(9, 9, 9))
+        self.vision = _StubVision()
+        self.app.vision = self.vision
         self.service = None
         self.created_conversations = []
         self.submitted_chats = []
@@ -428,6 +645,93 @@ class StudioServiceApiTests(unittest.TestCase):
         state = self._wait_done(task["id"])
         self.assertEqual(state["status"], "done")
         self.assertEqual(state["result"], "工作台结果")
+
+    def test_generate_persists_images_and_sends_numbered_multimodal(self):
+        payload, status = self.service.api_generate({
+            "user_request": "把这两张图合成一张海报",
+            "model_key": "online:p1",
+            "model_name": "stub-model",
+            "images": [
+                {"path": str(self.img_a), "name": "场景"},
+                {"path": str(self.img_b), "thumb_path": "", "name": "人物"},
+            ],
+        })
+        self.assertEqual(status, 201)
+        task = payload["task"]
+        self.assertEqual(
+            [row["path"] for row in task["input"]["images"]],
+            [str(self.img_a.resolve()), str(self.img_b.resolve())],
+        )
+        state = self._wait_done(task["id"])
+        self.assertEqual(state["status"], "done")
+        # runner 以同一顺序构造结构化多模态消息：图号文本 + 图片部件逐对出现。
+        content = self.models.messages[-1][0]["content"]
+        self.assertIsInstance(content, list)
+        kinds = [part.get("type") for part in content]
+        self.assertEqual(kinds, ["text", "image", "text", "image", "text"])
+        self.assertIn("图1（场景）", content[0]["text"])
+        self.assertIn("图2（人物）", content[2]["text"])
+        self.assertIn("合成一张海报", content[4]["text"])
+
+    def test_generate_rejects_unmanaged_image_path(self):
+        outside = _write_png(Path(self.tmp.name) / "outside.png")
+        payload, status = self.service.api_generate({
+            "user_request": "越权图片",
+            "model_key": "online:p1",
+            "model_name": "stub-model",
+            "images": [str(outside)],
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("受管上传目录", payload["error"])
+
+    def test_vision_returns_numbered_sections_in_order(self):
+        payload, status = self.service.api_vision({
+            "images": [str(self.img_a), str(self.img_b)],
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["analyzed"], 2)
+        self.assertIn("【图1】", payload["text"])
+        self.assertIn("【图2】", payload["text"])
+        self.assertLess(payload["text"].index("【图1】"), payload["text"].index("【图2】"))
+        # 逐张调用：每张都带明确的图号指令，而不是把多图混成一段。
+        self.assertEqual(len(self.vision.calls), 2)
+        self.assertIn("第 1 张图", self.vision.calls[0][1])
+        self.assertIn("第 2 张图", self.vision.calls[1][1])
+
+    def test_vision_partial_failure_keeps_successful_images(self):
+        def behavior(path, question):
+            if path.endswith("b.png"):
+                raise RuntimeError("后端识别超时")
+            return "一只橘猫坐在窗台"
+
+        self.vision.behavior = behavior
+        payload, status = self.service.api_vision({
+            "images": [str(self.img_a), str(self.img_b)],
+        })
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["analyzed"], 1)
+        self.assertEqual(payload["failed"], 1)
+        self.assertIn("一只橘猫", payload["text"])
+        self.assertNotIn("【图2】", payload["text"])
+        self.assertIn("后端识别超时", payload["images"][1]["error"])
+
+    def test_vision_all_failure_reports_502_without_faking(self):
+        self.vision.behavior = lambda path, question: (_ for _ in ()).throw(RuntimeError("视觉后端全部失败"))
+        payload, status = self.service.api_vision({"images": [str(self.img_a)]})
+        self.assertEqual(status, 502)
+        self.assertEqual(payload["analyzed"], 0)
+        self.assertIn("视觉识别全部失败", payload["error"])
+        self.assertEqual(payload["text"], "")
+
+    def test_vision_rejects_missing_or_invalid_images(self):
+        payload, status = self.service.api_vision({"images": []})
+        self.assertEqual(status, 400)
+        self.assertIn("上传图片", payload["error"])
+        outside = _write_png(Path(self.tmp.name) / "outside2.png")
+        payload, status = self.service.api_vision({"images": [str(outside)]})
+        self.assertEqual(status, 400)
 
     def test_catalog_generation_with_vars_and_unresolved_hint(self):
         body = "首段\n{{对象}} 尾行"

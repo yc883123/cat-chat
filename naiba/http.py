@@ -609,6 +609,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/studio/handoff":
             # 唯一跨进聊天域的路径：Agent 已显式确认后创建普通会话并提交首轮。
             self._json(*self.app.studio.api_handoff(body))
+        elif path == "/api/studio/vision":
+            # 图片反推：复用共享视觉能力逐图编号识别；结果只回前端，不建会话/任务。
+            self._json(*self.app.studio.api_vision(body))
         elif path == "/api/studio/custom/import":
             self._json(*self.app.studio.api_custom_import(body))
         elif path == "/api/studio/custom":

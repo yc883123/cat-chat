@@ -6,6 +6,10 @@
 // 取消只关闭不创建会话；无 pageerror / console.error。
 // 另含：桌面侧栏收起后的恢复入口、任务/自定义条目迟到响应、离开期间任务终结后重进恢复、
 // 搜索过滤、自由输入生成、取消接口契约。
+// 交接闭环（30 节，修复 3.6.1-beta「点确认什么都没发生」的回归守门）：
+// 确认真调 POST（恰一次/忙碌期重复触发不重复/完成前关弹窗不再加请求）、
+// 4xx 与缺 conversation_id 都留在工作台、会话详情读取失败不重发交接、
+// 成功后真打开注入的普通会话（弹窗关、工作台退场、消息区渲染，不等 Run 完成）。
 // 目录/任务/Agent/生成走路由注入（隔离装的模型目录连不出去）：不真连供应商、不真创建会话。
 // 运行（先起隔离源码实例 verify\_serve_tmp.py）：node verify\studio_ui_smoke.cjs
 const { chromium } = require('playwright');
@@ -38,6 +42,21 @@ const FAKE_AGENTS = [
 const FAKE_CUSTOM = [
   { id: 'cu-smoke-a', title: '自定义条目 A', summary: 'A 摘要', type: 'template', module: 'global', tags: [], genre: '', chars: 5, vars: [], body: '自定义条目 A 的正文。', created_at: 1, updated_at: 1 },
 ];
+
+const HANDOFF_CONV_ID = 'conv-smoke-handoff-1';
+const OPENFAIL_CONV_ID = 'conv-smoke-openfail-1';
+// 交接成功后 openConversation 读取的会话详情（messages/行形状同 storage._message_dict）。
+const FAKE_HANDOFF_CONVERSATION = {
+  id: HANDOFF_CONV_ID, title: '工作台·冒烟任务', conv_kind: 'main', mode: 'online', permission_mode: 'confirm',
+  web_search_enabled: 0, deep_reasoning_enabled: 0, lightweight_mode: 0, lightweight_disabled_features: '[]',
+  title_customized: 1, system_prompt: '', stream_enabled: 1, workspace_dir: '', reasoning_effort: 'off',
+  enabled_tool_ids: '', agent_id: 'agent-smoke-a', model_key: 'online:probe-te', model_name: 'probe-default',
+  created_at: 1750000010000, updated_at: 1750000010000,
+  messages: [{
+    id: 'msg-smoke-hand-1', conversation_id: HANDOFF_CONV_ID, role: 'user', metadata: {}, created_at: 1750000010000,
+    content: '【来自 Cat Chat 工作台的交接】\n- 我的输入：冒烟输入\n- 工作台生成结果：\n<<<\n这是一段冒烟生成的结果正文。\n>>>',
+  }],
+};
 
 const VIEWPORTS = [
   { name: 'desktop', width: 1280, height: 800 },
@@ -73,10 +92,31 @@ async function runViewport(browser, vp) {
   let eventRequests = 0;
   let cancelCalls = 0;
   const generateCalls = [];
+  const conversationGetCalls = [];
+  let conversationGetFails = 0;
+  // 交接接口注入状态机：forbid=默认熔断（点亮「不应触达」）、http-error=撤出真实 4xx、
+  // missing-id=200 但缺 conversation_id、ok-open-fail=返回 id 但会话详情读取 500、ok=成功返回。
+  let handoffBehavior = 'forbid';
+  let handoffDelayMs = 0;
+  // 注入预期的资源加载失败（端点+状态码配对豁免一次；console 顺序不定，不能按个数判）。
+  const routeErrorExemptions = [];
   // 迟到响应保护：这些任务 id 的详情接口延迟返回，用于验证快速切换不串台。
   const slowDetailMs = new Map();
   // 自定义条目列表接口的延迟（毫秒）：用于验证自定义条目迟到加载不覆盖新选择。
   let customDelayMs = 0;
+  // ---- 工作台偏好 / 收藏 / 图片（31 节起）----
+  // settings.studio 的测试态：POST 被拦截后只写这份内存对象，不污染隔离实例的 config。
+  let studioPrefsState = { last_selection: null, favorites: [] };
+  const settingsPosts = [];
+  let uploadCounter = 0;
+  let uploadFailuresLeft = 0;
+  let uploadDelayMs = 0;
+  let visionMode = 'ok'; // ok | partial | fail
+  const visionCalls = [];
+  const PIXEL_PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64',
+  );
   const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height } });
   page.on('pageerror', (err) => errors.push(`pageerror: ${err.message}`));
   page.on('console', (msg) => {
@@ -92,6 +132,17 @@ async function runViewport(browser, vp) {
       try { pathname = new URL(url).pathname; } catch { pathname = ''; }
       if (pathname === '/api/studio/tasks' && expectedConsole500 > 0) {
         expectedConsole500 -= 1;
+        return;
+      }
+    }
+    // 交接闭环注入的预期失败：按端点 + 状态码配对豁免一次，其余照旧报错。
+    const injectedStatus = text.match(/status of (\d+) \(/);
+    if (injectedStatus) {
+      let injectedPath = '';
+      try { injectedPath = new URL(url).pathname; } catch { injectedPath = ''; }
+      const idx = routeErrorExemptions.findIndex((row) => row.path === injectedPath && row.status === Number(injectedStatus[1]));
+      if (idx >= 0) {
+        routeErrorExemptions.splice(idx, 1);
         return;
       }
     }
@@ -162,9 +213,121 @@ async function runViewport(browser, vp) {
   await page.route('**/api/agents', (route) => {
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ agents: FAKE_AGENTS, default_agent_id: '' }) });
   });
-  await page.route('**/api/studio/handoff', async (route) => {
+  await page.route('**/api/studio/handoff', (route) => {
     handoffCalls.push(JSON.parse(route.request().postData() || '{}'));
-    return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: '冒烟注入：不应触达交接接口' }) });
+    const respond = () => {
+      if (handoffBehavior === 'ok') {
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ conversation_id: HANDOFF_CONV_ID, run_id: 'run-smoke-1' }) });
+      }
+      if (handoffBehavior === 'missing-id') {
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ run_id: 'run-smoke-none' }) });
+      }
+      if (handoffBehavior === 'ok-open-fail') {
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ conversation_id: OPENFAIL_CONV_ID, run_id: 'run-smoke-2' }) });
+      }
+      if (handoffBehavior === 'http-error') {
+        routeErrorExemptions.push({ path: '/api/studio/handoff', status: 400 });
+        return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: '冒烟注入：交接 4xx（演练）' }) });
+      }
+      return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: '冒烟注入：不应触达交接接口' }) });
+    };
+    if (handoffDelayMs) setTimeout(() => { void respond(); }, handoffDelayMs);
+    else { void respond(); }
+  });
+  // 交接成功/打开失败两份注入会话：openConversation 读详情 / first_turn / 轮询恢复。
+  await page.route(`**/api/conversations/${HANDOFF_CONV_ID}`, (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    conversationGetCalls.push(route.request().url());
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(FAKE_HANDOFF_CONVERSATION) });
+  });
+  await page.route(`**/api/conversations/${HANDOFF_CONV_ID}/first_turn`, (route) => {
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({}) });
+  });
+  await page.route(`**/api/conversations/${OPENFAIL_CONV_ID}`, (route) => {
+    routeErrorExemptions.push({ path: `/api/conversations/${OPENFAIL_CONV_ID}`, status: 500 });
+    conversationGetFails += 1;
+    return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: '冒烟注入：会话读取失败' }) });
+  });
+  // 新会话里允许首轮 Run 仍在运行：恢复轮询只查一次就绪状态，不串台真实任务事件。
+  await page.route('**/api/runs*', (route) => {
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ runs: [] }) });
+  });
+  // 工作台偏好：POST 拦截到内存对象；GET bootstrap 仍由隔离实例返回（本测试随后注入需要的值）。
+  await page.route('**/api/settings', (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const body = JSON.parse(route.request().postData() || '{}');
+    settingsPosts.push(body);
+    const patch = body.studio;
+    if (patch && typeof patch === 'object') {
+      if ('last_selection' in patch) studioPrefsState.last_selection = patch.last_selection;
+      if (Array.isArray(patch.favorites)) studioPrefsState.favorites = patch.favorites;
+    }
+    return route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ settings: { studio: studioPrefsState } }),
+    });
+  });
+  // 图片上传：不真落盘；按调用序号返回稳定的 path/thumb_path，供前端预览与任务 payload 断言。
+  await page.route('**/api/uploads', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    uploadCounter += 1;
+    if (uploadDelayMs) await new Promise((resolve) => setTimeout(resolve, uploadDelayMs));
+    if (uploadFailuresLeft > 0) {
+      uploadFailuresLeft -= 1;
+      routeErrorExemptions.push({ path: '/api/uploads', status: 500 });
+      return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: '冒烟注入：上传失败' }) });
+    }
+    const id = uploadCounter;
+    return route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({
+        name: `smoke-${id}.png`,
+        path: `C:\\smoke\\uploads\\smoke-${id}.png`,
+        thumb_path: `C:\\smoke\\uploads\\smoke-${id}_thumb.webp`,
+        size: 68,
+      }),
+    });
+  });
+  // 图片反推：ok / partial / fail 三种注入。
+  await page.route('**/api/studio/vision', (route) => {
+    const body = JSON.parse(route.request().postData() || '{}');
+    visionCalls.push(body);
+    const images = Array.isArray(body.images) ? body.images : [];
+    if (visionMode === 'fail') {
+      routeErrorExemptions.push({ path: '/api/studio/vision', status: 502 });
+      return route.fulfill({
+        status: 502, contentType: 'application/json',
+        body: JSON.stringify({
+          error: '冒烟注入：视觉后端不可用', analyzed: 0, failed: images.length, text: '',
+          images: images.map((_, index) => ({ index: index + 1, text: '', error: '视觉后端不可用' })),
+        }),
+      });
+    }
+    if (visionMode === 'partial') {
+      return route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({
+          ok: false, analyzed: 1, failed: Math.max(1, images.length - 1),
+          text: '【图1】\n第一张图的描述',
+          images: [
+            { index: 1, text: '第一张图的描述', error: '' },
+            { index: 2, text: '', error: '第二张识别超时' },
+          ],
+        }),
+      });
+    }
+    return route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({
+        ok: true, analyzed: images.length, failed: 0,
+        text: '【图1】\n第一张图的描述\n\n【图2】\n第二张图的描述',
+        images: images.map((_, index) => ({ index: index + 1, text: `第${index + 1}张图的描述`, error: '' })),
+      }),
+    });
+  });
+  // 预览图：统一返回 1×1 PNG，避免假路径产生破图/噪声。
+  await page.route('**/api/file*', (route) => {
+    return route.fulfill({ status: 200, contentType: 'image/png', body: PIXEL_PNG });
   });
 
   const failures = [];
@@ -667,10 +830,9 @@ async function runViewport(browser, vp) {
       pane: document.querySelector('#studioView').dataset.pane,
     }));
     check('任务详情 A 迟到时新建 B 不被覆盖',
-      lateGuard.historyHidden
-      && lateGuard.stream.includes('生成结果正文')
+      lateGuard.stream.includes('生成结果正文')
       && !lateGuard.stream.includes('第二条结果正文'),
-      JSON.stringify({ stream: lateGuard.stream.slice(0, 40) }));
+      JSON.stringify({ stream: lateGuard.stream.slice(0, 40), mode: lateGuard.historyHidden ? 'result' : 'history' }));
     slowDetailMs.delete('st-smoke-0006');
     check('生成请求带上用户输入（自由输入 → 生成）',
       generateCalls.length === 1 && String(generateCalls[0].user_request || '').includes('画一只猫'),
@@ -791,6 +953,447 @@ async function runViewport(browser, vp) {
       check('键盘 Enter 可切换对话/工作台', keyboardOn && keyboardOff,
         JSON.stringify({ keyboardOn, keyboardOff }));
     }
+
+    // 30. 手工交接闭环（修复回归守门）：真点「创建会话并继续」。
+    // 失败路径一律留在工作台、不重发交接；成功路径恰一次请求并真打开注入的普通会话，
+    // 不等首轮 Run 完成（打开会话的阻断点只是会话详情读取）。
+    await enterStudio();
+    await openHistory();
+    await page.click(`#studioHistoryList [data-studio-task="${TASK_ID}"]`);
+    await page.waitForTimeout(600);
+
+    // 30a 失败：接口 4xx —— 弹窗与工作台保留、按钮恢复、不跳转、不装作成功
+    handoffBehavior = 'http-error';
+    await page.click('#studioHandoff');
+    await page.waitForTimeout(500);
+    await page.click('.studio-agent-row');
+    await page.fill('#studioHandoffNote', '失败路径备注');
+    let callsBefore = handoffCalls.length;
+    await page.click('#studioHandoffConfirm');
+    await page.waitForTimeout(600);
+    const httpErrorState = await page.evaluate(() => ({
+      dialogOpen: document.querySelector('#studioAgentDialog').open,
+      studioOn: document.body.dataset.studio === 'on',
+      confirmDisabled: document.querySelector('#studioHandoffConfirm').disabled,
+      confirmText: document.querySelector('#studioHandoffConfirm').textContent,
+      toast: document.querySelector('#toast')?.textContent || '',
+    }));
+    check('交接 4xx：恰一次请求且请求体正确',
+      handoffCalls.length - callsBefore === 1
+      && handoffCalls.at(-1).task_id === TASK_ID
+      && handoffCalls.at(-1).agent_id === 'agent-smoke-a'
+      && handoffCalls.at(-1).note === '失败路径备注',
+      JSON.stringify(handoffCalls.at(-1)));
+    check('交接 4xx：弹窗与工作台保留、按钮恢复、报错误而非伪装成功',
+      httpErrorState.dialogOpen && httpErrorState.studioOn
+      && !httpErrorState.confirmDisabled && httpErrorState.confirmText === '创建会话并继续'
+      && httpErrorState.toast.includes('交接失败'),
+      JSON.stringify(httpErrorState));
+
+    // 30b 失败：响应缺 conversation_id —— 不调用会话详情端点、不退出到空白对话
+    handoffBehavior = 'missing-id';
+    callsBefore = handoffCalls.length;
+    let getsBefore = conversationGetCalls.length;
+    await page.click('#studioHandoffConfirm');
+    await page.waitForTimeout(600);
+    const missingIdState = await page.evaluate(() => ({
+      dialogOpen: document.querySelector('#studioAgentDialog').open,
+      studioOn: document.body.dataset.studio === 'on',
+      toast: document.querySelector('#toast')?.textContent || '',
+    }));
+    check('响应缺会话 id：请求发出但绝不读会话详情',
+      handoffCalls.length - callsBefore === 1 && conversationGetCalls.length - getsBefore === 0,
+      `calls=${handoffCalls.length} gets=${conversationGetCalls.length}`);
+    check('响应缺会话 id：留在工作台并提示',
+      missingIdState.dialogOpen && missingIdState.studioOn && missingIdState.toast.includes('没有会话标识'),
+      JSON.stringify(missingIdState));
+
+    // 30c 失败：交接成功但会话详情读取失败 —— 不重发交接、把失败讲清楚
+    handoffBehavior = 'ok-open-fail';
+    callsBefore = handoffCalls.length;
+    let failsBefore = conversationGetFails;
+    await page.click('#studioHandoffConfirm');
+    await page.waitForTimeout(1200);
+    const openFailState = await page.evaluate(async () => {
+      const mod = await import('/js/01-core.js');
+      return {
+        dialogOpen: document.querySelector('#studioAgentDialog').open,
+        studioOn: document.body.dataset.studio === 'on',
+        toast: document.querySelector('#toast')?.textContent || '',
+        convId: mod.state.conversationId,
+      };
+    });
+    check('会话打开失败：恰一次交接请求（不重发）+ 一次会话详情尝试',
+      handoffCalls.length - callsBefore === 1 && conversationGetFails - failsBefore === 1,
+      `calls=${handoffCalls.length} fails=${conversationGetFails}`);
+    check('会话打开失败：进入对话壳、不把失败说成已打开',
+      !openFailState.dialogOpen && !openFailState.studioOn
+      && openFailState.toast.includes('可能已创建') && openFailState.toast.includes('没能打开'),
+      JSON.stringify(openFailState));
+    check('会话打开失败：不把失败的 id 设为当前会话',
+      openFailState.convId !== OPENFAIL_CONV_ID, String(openFailState.convId));
+
+    // 30d 成功：真点确认 → 忙碌期防护 + 完成前关弹窗不加请求 → 打开注入的普通会话。
+    // 注入 600ms 延迟，让忙碌窗口可观察、重复触发与关弹窗可以插进去。
+    handoffBehavior = 'ok';
+    handoffDelayMs = 600;
+    await enterStudio();
+    await openHistory();
+    await page.click(`#studioHistoryList [data-studio-task="${TASK_ID}"]`);
+    await page.waitForTimeout(600);
+    await page.click('#studioHandoff');
+    await page.waitForTimeout(500);
+    await page.click('.studio-agent-row');
+    await page.fill('#studioHandoffNote', '冒烟交接成功');
+    callsBefore = handoffCalls.length;
+    getsBefore = conversationGetCalls.length;
+    await page.click('#studioHandoffConfirm');
+    await page.waitForTimeout(150);
+    const busyState = await page.evaluate(() => ({
+      disabled: document.querySelector('#studioHandoffConfirm').disabled,
+      text: document.querySelector('#studioHandoffConfirm').textContent,
+    }));
+    check('交接进行中：按钮进入忙碌/禁用态', busyState.disabled && busyState.text === '正在创建会话…',
+      JSON.stringify(busyState));
+    await page.dispatchEvent('#studioHandoffConfirm', 'click'); // 忙碌期的程序化重复触发
+    await page.click('#studioAgentDialog [data-close="studioAgentDialog"]'); // 完成前关弹窗
+    await page.waitForTimeout(2400);
+    const handoffSuccess = await page.evaluate(async () => {
+      const mod = await import('/js/01-core.js');
+      return {
+        dialogOpen: document.querySelector('#studioAgentDialog').open,
+        studioOn: document.body.dataset.studio === 'on',
+        chatSelected: document.querySelector('#openChatMode').getAttribute('aria-pressed'),
+        convId: mod.state.conversationId,
+        messageText: document.querySelector('#messages')?.textContent || '',
+        toast: document.querySelector('#toast')?.textContent || '',
+      };
+    });
+    check('交接成功：恰一次请求（忙碌期重复触发与关弹窗都不再加）',
+      handoffCalls.length - callsBefore === 1, `calls=${handoffCalls.length}`);
+    check('交接成功：请求体 task_id/agent_id/note 正确',
+      handoffCalls.at(-1).task_id === TASK_ID && handoffCalls.at(-1).agent_id === 'agent-smoke-a'
+      && handoffCalls.at(-1).note === '冒烟交接成功',
+      JSON.stringify(handoffCalls.at(-1)));
+    check('交接成功：返回的会话详情被读取（openConversation 完成）',
+      conversationGetCalls.length - getsBefore >= 1,
+      // 背景会话同步（bootstrap 每 1.8s 轮询当前会话）可能再读一次，属正常行为不计数。
+      `gets=${conversationGetCalls.length}`);
+    check('交接成功：Agent 弹窗关闭、退出工作台、进入对话模式',
+      !handoffSuccess.dialogOpen && !handoffSuccess.studioOn && handoffSuccess.chatSelected === 'true',
+      JSON.stringify({ dialogOpen: handoffSuccess.dialogOpen, studioOn: handoffSuccess.studioOn, chatSelected: handoffSuccess.chatSelected }));
+    check('交接成功：当前会话就是返回的会话',
+      handoffSuccess.convId === HANDOFF_CONV_ID, String(handoffSuccess.convId));
+    check('交接成功：消息区显示该会话内容（不等 Run 完成）',
+      handoffSuccess.messageText.includes('【来自 Cat Chat 工作台的交接】'),
+      handoffSuccess.messageText.slice(0, 60));
+    check('交接成功：有完成提示', handoffSuccess.toast.includes('已创建普通会话'), handoffSuccess.toast);
+    handoffBehavior = 'forbid';
+    handoffDelayMs = 0;
+
+    // ============================================================
+    // 31. 记住上次选中的模板（重载后恢复；失效 ID 回安全空态）
+    // ============================================================
+    await enterStudio();
+    await selectPane('list');
+    await page.click('#studioCats [data-studio-module="vs"]');
+    await page.waitForTimeout(700);
+    const restoreRow = page.locator('#studioList .studio-row').first();
+    const restoreTitle = (await restoreRow.locator('.studio-row-title').textContent()) || '';
+    const restoreId = await restoreRow.getAttribute('data-studio-pick');
+    await restoreRow.click();
+    await page.waitForTimeout(900);
+    await page.waitForTimeout(400); // 等偏好 POST 落定
+    check('选择条目会写入工作台偏好（来源+ID+分类）',
+      settingsPosts.some((post) => post.studio?.last_selection?.kind === 'builtin'
+        && post.studio.last_selection.id === restoreId
+        && post.studio.last_selection.module === 'vs'),
+      JSON.stringify(settingsPosts.filter((post) => post.studio).slice(-3)));
+
+    await page.reload({ waitUntil: 'load', timeout: 20000 });
+    await page.waitForTimeout(2600);
+    const onboardingAgain = await page.evaluate(() => document.querySelector('#onboardingDialog')?.open);
+    if (onboardingAgain) {
+      await page.click('#onboardingDialog [data-close="onboardingDialog"]');
+      await page.waitForTimeout(300);
+    }
+    // 隔离实例的 config 不被本测试污染：把测试态偏好注入 bootstrap。
+    await page.evaluate(async (prefs) => {
+      const mod = await import('/js/01-core.js');
+      mod.state.bootstrap.settings.studio = prefs;
+    }, studioPrefsState);
+    await enterStudio();
+    await page.waitForTimeout(1800);
+    const restoredState = await page.evaluate(() => ({
+      title: document.querySelector('#studioDetailTitle').textContent,
+      module: document.querySelector('#studioCats [aria-pressed="true"]')?.dataset.studioModule,
+    }));
+    check('重载后恢复上次选中的模板与分类',
+      restoredState.title === restoreTitle && restoredState.module === 'vs',
+      JSON.stringify({ ...restoredState, restoreTitle }));
+
+    await selectPane('list');
+    await page.click('#studioCats [data-studio-module=""]');
+    await page.waitForTimeout(500);
+    await page.evaluate(async () => {
+      const mod = await import('/js/01-core.js');
+      mod.state.bootstrap.settings.studio = {
+        last_selection: { kind: 'builtin', id: 'no-such-entry', module: 'vs', page: 'library' },
+        favorites: [],
+      };
+    });
+    // 预期内的一次 404：目录里确实没有这个条目。
+    routeErrorExemptions.push({ path: '/api/studio/catalog/no-such-entry', status: 404 });
+    await exitStudio();
+    await enterStudio();
+    await page.waitForTimeout(1400);
+    const invalidRestore = await page.evaluate(() => ({
+      title: document.querySelector('#studioDetailTitle').textContent,
+      toast: document.querySelector('#toast')?.textContent || '',
+    }));
+    check('失效的上次选择回到空状态并提示',
+      invalidRestore.title === '自由输入' && invalidRestore.toast.includes('已不存在'),
+      JSON.stringify(invalidRestore));
+
+    // ============================================================
+    // 32. 收藏：星标不触发行选择；筛选支持内置与自定义
+    // ============================================================
+    await selectPane('list');
+    await page.click('#studioCats [data-studio-module="vs"]');
+    await page.waitForTimeout(700);
+    const detailBeforeFav = await page.evaluate(() => document.querySelector('#studioDetailTitle').textContent);
+    await selectPane('list');
+    const favWrap = page.locator('#studioList .studio-row-wrap').first();
+    const favId = await favWrap.locator('.studio-row').getAttribute('data-studio-pick');
+    await favWrap.locator('.studio-row-fav').click();
+    await page.waitForTimeout(700);
+    const favState = await page.evaluate(() => ({
+      pressed: document.querySelector('#studioList .studio-row-fav')?.getAttribute('aria-pressed'),
+      detail: document.querySelector('#studioDetailTitle').textContent,
+      count: document.querySelectorAll('#studioList .studio-row').length,
+    }));
+    check('点星标只切收藏、不打开条目',
+      favState.pressed === 'true' && favState.detail === detailBeforeFav && favState.count > 0,
+      JSON.stringify({ ...favState, detailBeforeFav }));
+    check('收藏写入 settings.studio',
+      settingsPosts.some((post) => Array.isArray(post.studio?.favorites)
+        && post.studio.favorites.some((row) => row.kind === 'builtin' && row.id === favId)),
+      JSON.stringify(settingsPosts.filter((post) => post.studio?.favorites).slice(-2)));
+
+    await page.click('#studioFavFilter');
+    await page.waitForTimeout(700);
+    const favFiltered = await page.evaluate(() => ({
+      pressed: document.querySelector('#studioFavFilter').getAttribute('aria-pressed'),
+      rows: [...document.querySelectorAll('#studioList .studio-row')].map((row) => row.dataset.studioPick),
+    }));
+    check('收藏筛选只显示已收藏的内置条目',
+      favFiltered.pressed === 'true' && favFiltered.rows.length === 1 && favFiltered.rows[0] === favId,
+      JSON.stringify(favFiltered));
+
+    await page.click('#studioList .studio-row-fav');
+    await page.waitForTimeout(700);
+    const unfav = await page.evaluate(() => ({
+      rows: document.querySelectorAll('#studioList .studio-row').length,
+      text: document.querySelector('#studioList').textContent,
+    }));
+    check('取消收藏后行移除并显示空态',
+      unfav.rows === 0 && unfav.text.includes('还没有收藏'), JSON.stringify(unfav));
+    await page.click('#studioFavFilter');
+    await page.waitForTimeout(600);
+
+    await page.click('#studioCats [data-studio-module="custom"]');
+    await page.waitForTimeout(700);
+    await page.click('#studioList .studio-row-fav');
+    await page.waitForTimeout(700);
+    await page.click('#studioFavFilter');
+    await page.waitForTimeout(700);
+    const customFav = await page.evaluate(() => ({
+      rows: document.querySelectorAll('#studioList .studio-row').length,
+      kind: document.querySelector('#studioList .studio-row')?.dataset.studioKind,
+      pressed: document.querySelector('#studioList .studio-row-fav')?.getAttribute('aria-pressed'),
+    }));
+    check('收藏筛选同时支持自定义条目',
+      customFav.rows === 1 && customFav.kind === 'custom' && customFav.pressed === 'true',
+      JSON.stringify(customFav));
+    await page.click('#studioFavFilter');
+    await page.waitForTimeout(500);
+
+    // ============================================================
+    // 33. 定位模板库：清搜索/切分类/滚动高亮/失效提示
+    // ============================================================
+    await selectPane('list');
+    await page.click('#studioCats [data-studio-module="vs"]');
+    await page.waitForTimeout(700);
+    const locateRow = page.locator('#studioList .studio-row').nth(1);
+    const locateId = await locateRow.getAttribute('data-studio-pick');
+    await locateRow.click();
+    await page.waitForTimeout(800);
+    await selectPane('list');
+    await page.fill('#studioSearch', 'zzzz-无匹配');
+    await page.waitForTimeout(600);
+    await selectPane('form');
+    await page.click('#studioLocateEntry');
+    await page.waitForTimeout(1100);
+    const located = await page.evaluate((id) => {
+      const row = document.querySelector(`#studioList [data-studio-pick="${id}"]`);
+      return {
+        query: document.querySelector('#studioSearch').value,
+        highlighted: Boolean(row?.classList.contains('studio-row-locating')),
+        visible: Boolean(row),
+        pane: document.querySelector('#studioView').dataset.pane,
+      };
+    }, locateId);
+    check('定位会清空搜索并滚动高亮目标行',
+      located.visible && located.highlighted && located.query === '',
+      JSON.stringify({ ...located, locateId }));
+
+    // 从生成结果定位：结果属于别的分类时自动切分类
+    taskList[0].input = { ...(taskList[0].input || {}), item_id: locateId, custom_id: '', module: 'vs' };
+    await selectPane('list');
+    await page.click('#studioCats [data-studio-module="global"]');
+    await page.waitForTimeout(700);
+    await openHistory();
+    await page.click(`#studioHistoryList [data-studio-task="${TASK_ID}"]`);
+    await page.waitForTimeout(700);
+    check('结果里关联模板时「定位模板」可用',
+      await page.evaluate(() => !document.querySelector('#studioLocateResult').hidden));
+    await page.click('#studioLocateResult');
+    await page.waitForTimeout(1200);
+    const resultLocated = await page.evaluate((id) => ({
+      module: document.querySelector('#studioCats [aria-pressed="true"]')?.dataset.studioModule,
+      highlighted: Boolean(document.querySelector(`#studioList [data-studio-pick="${id}"]`)?.classList.contains('studio-row-locating')),
+      pane: document.querySelector('#studioView').dataset.pane,
+    }), locateId);
+    check('从结果定位会切到对应分类并高亮',
+      resultLocated.module === 'vs' && resultLocated.highlighted
+      && (!isMobile || resultLocated.pane === 'list'),
+      JSON.stringify(resultLocated));
+
+    taskList[0].input = { ...(taskList[0].input || {}), item_id: 'no-such-entry', custom_id: '', module: 'vs' };
+    await openHistory();
+    await page.click(`#studioHistoryList [data-studio-task="${TASK_ID}"]`);
+    await page.waitForTimeout(600);
+    await page.click('#studioLocateResult');
+    await page.waitForTimeout(800);
+    check('定位已不存在的模板会给出可理解提示', await page.evaluate(() =>
+      (document.querySelector('#toast')?.textContent || '').includes('已不存在')));
+
+    // ============================================================
+    // 34. 上传图片 + 视觉反推 + 带图生成
+    // ============================================================
+    await selectPane('form');
+    await page.click('#studioImagePick');
+    await page.waitForTimeout(400);
+    check('上传按钮打开多图弹窗',
+      await page.evaluate(() => document.querySelector('#studioImageDialog').open));
+
+    uploadFailuresLeft = 1;
+    await page.setInputFiles('#studioImageFileInput', { name: 'first.png', mimeType: 'image/png', buffer: PIXEL_PNG });
+    await page.waitForTimeout(800);
+    const failedUpload = await page.evaluate(() => ({
+      rows: document.querySelectorAll('#studioImageQueue .studio-image-queue-row').length,
+      error: document.querySelector('#studioImageQueue .studio-image-queue-info small')?.textContent || '',
+      retry: Boolean(document.querySelector('#studioImageQueue [data-studio-image-retry]')),
+    }));
+    check('单张上传失败保留在列表并可重试',
+      failedUpload.rows === 1 && failedUpload.error.includes('上传失败') && failedUpload.retry,
+      JSON.stringify(failedUpload));
+    await page.click('#studioImageQueue [data-studio-image-retry]');
+    await page.waitForTimeout(800);
+    check('重试后该图片就绪', await page.evaluate(() =>
+      !document.querySelector('#studioImageQueue [data-studio-image-retry]')
+      && (document.querySelector('#studioImageQueue .studio-image-queue-info small')?.textContent || '').includes('已就绪')));
+
+    uploadDelayMs = 700;
+    await page.setInputFiles('#studioImageFileInput', { name: 'second.png', mimeType: 'image/png', buffer: PIXEL_PNG });
+    await page.waitForTimeout(140);
+    check('上传进行中禁用「确定」',
+      await page.evaluate(() => document.querySelector('#studioImageConfirm').disabled));
+    await page.waitForTimeout(1000);
+    uploadDelayMs = 0;
+
+    await page.evaluate(() => {
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([new Uint8Array([137, 80, 78, 71])], 'drop.png', { type: 'image/png' }));
+      document.querySelector('#studioImageDrop').dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: transfer }));
+    });
+    await page.waitForTimeout(900);
+    check('拖拽可追加图片',
+      await page.evaluate(() => document.querySelectorAll('#studioImageQueue .studio-image-queue-row').length) === 3);
+
+    await page.click('#studioImageQueue .studio-image-queue-remove');
+    await page.waitForTimeout(300);
+    await page.click('#studioImageConfirm');
+    await page.waitForTimeout(700);
+    const confirmed = await page.evaluate(() => ({
+      dialogOpen: document.querySelector('#studioImageDialog').open,
+      previews: document.querySelectorAll('#studioImagePreview .studio-image-chip').length,
+      visionVisible: !document.querySelector('#studioVisionAnalyze').hidden,
+    }));
+    check('确定后关闭弹窗并在输入区显示缩略图',
+      !confirmed.dialogOpen && confirmed.previews === 2 && confirmed.visionVisible,
+      JSON.stringify(confirmed));
+
+    const inputBeforeVision = await page.inputValue('#studioUserRequest');
+    visionMode = 'fail';
+    await page.click('#studioVisionAnalyze');
+    await page.waitForTimeout(800);
+    const visionFailed = await page.evaluate(() => ({
+      input: document.querySelector('#studioUserRequest').value,
+      toast: document.querySelector('#toast')?.textContent || '',
+    }));
+    check('视觉失败如实报错且不改写输入',
+      visionFailed.toast.includes('图片识别失败') && visionFailed.input === inputBeforeVision,
+      JSON.stringify({ toast: visionFailed.toast }));
+
+    visionMode = 'partial';
+    await page.click('#studioVisionAnalyze');
+    await page.waitForTimeout(800);
+    const visionPartial = await page.evaluate(() => ({
+      input: document.querySelector('#studioUserRequest').value,
+      toast: document.querySelector('#toast')?.textContent || '',
+    }));
+    check('视觉部分失败保留图1结果并说明图2失败',
+      visionPartial.input.includes('【图1】') && !visionPartial.input.includes('【图2】')
+      && visionPartial.toast.includes('1 张失败') && visionPartial.toast.includes('图2'),
+      JSON.stringify({ toast: visionPartial.toast }));
+
+    visionMode = 'ok';
+    await page.click('#studioVisionAnalyze');
+    await page.waitForTimeout(800);
+    const visionOk = await page.evaluate(() => ({
+      input: document.querySelector('#studioUserRequest').value,
+      status: document.querySelector('#studioImageStatus').textContent,
+    }));
+    check('视觉成功按图1/图2 写入可编辑输入',
+      visionOk.input.includes('【参考图片识别结果】')
+      && visionOk.input.includes('【图1】') && visionOk.input.includes('【图2】')
+      && visionOk.status.includes('2 张参考图片'),
+      JSON.stringify({ status: visionOk.status, tail: visionOk.input.slice(-80) }));
+    check('视觉请求按顺序携带结构化图片引用',
+      visionCalls.length > 0
+      && visionCalls.at(-1).images.length === 2
+      && String(visionCalls.at(-1).images[0].path).includes('smoke-'),
+      JSON.stringify(visionCalls.at(-1) || {}));
+
+    await page.fill('#studioUserRequest', '用这两张图生成一张海报');
+    await page.click('#studioGenerate');
+    await page.waitForTimeout(1100);
+    const imageGenerate = generateCalls.at(-1) || {};
+    check('生成请求按图1/图2 顺序携带图片引用',
+      Array.isArray(imageGenerate.images) && imageGenerate.images.length === 2
+      && Boolean(imageGenerate.images[0].thumb_path),
+      JSON.stringify(imageGenerate));
+    check('Studio 图片不进入聊天待发送附件', await page.evaluate(async () => {
+      const mod = await import('/js/01-core.js');
+      return mod.state.pendingFiles.length === 0;
+    }));
+
+    await selectPane('form');
+    await page.click('#studioImagePreview .studio-image-chip .studio-image-remove');
+    await page.waitForTimeout(300);
+    check('输入区可移除单张图片', await page.evaluate(() =>
+      document.querySelectorAll('#studioImagePreview .studio-image-chip').length) === 1);
 
     for (const err of errors) failures.push(`console: ${err}`);
   } catch (e) {

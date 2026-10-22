@@ -219,6 +219,7 @@
             <label class="studio-search">
               <input id="studioSearch" type="search" placeholder="搜索模板" aria-label="搜索模板">
             </label>
+            <button class="control-button" id="studioFavFilter" type="button" aria-pressed="false" title="只显示已收藏的模板">收藏</button>
             <button class="control-button" id="studioCustomImport" type="button" title="把 .txt / .md / .json 导入为自定义条目（在「我的」里查看与管理）">导入</button>
           </div>
         </header>
@@ -246,6 +247,19 @@
               <label class="studio-request-field">我的输入
                 <textarea id="studioUserRequest" rows="4" placeholder="把你的要求写在这里" aria-label="用户输入"></textarea>
               </label>
+              <!-- 参考图片：Studio 自己的附件状态，不经过聊天输入区的待发送附件。
+                   点「上传图片」打开多图管理弹窗；「识别图片」走 Studio 的视觉反推接口。 -->
+              <div class="studio-image-block">
+                <div class="studio-image-head">
+                  <span>参考图片 <small>可选，最多 6 张</small></span>
+                  <div class="studio-image-head-actions">
+                    <button class="control-button" id="studioImagePick" type="button">上传图片</button>
+                    <button class="control-button" id="studioVisionAnalyze" type="button" hidden>识别图片</button>
+                  </div>
+                </div>
+                <div class="studio-image-preview" id="studioImagePreview" hidden aria-label="已选参考图片"></div>
+                <p class="studio-image-status" id="studioImageStatus" role="status"></p>
+              </div>
               <div class="studio-model-row">
                 <label>模型配置
                   <select id="studioProviderSelect" aria-label="模型配置"></select>
@@ -261,6 +275,7 @@
               </details>
               <div class="studio-actions">
                 <button class="primary-button" id="studioGenerate" type="button">生成</button>
+                <button class="control-button" id="studioLocateEntry" type="button" hidden>在模板库中定位</button>
                 <button class="control-button" id="studioCustomSave" type="button" hidden>保存修改</button>
                 <button class="control-button" id="studioCustomDelete" type="button" hidden>删除</button>
                 <button class="control-button" id="studioCustomExport" type="button" hidden>导出</button>
@@ -279,6 +294,7 @@
               <div class="studio-result-actions">
                 <button class="control-button" id="studioCancelTask" type="button" hidden>取消</button>
                 <button class="control-button" id="studioRetryTask" type="button" hidden>重试</button>
+                <button class="control-button" id="studioLocateResult" type="button" hidden>定位模板</button>
                 <button class="control-button" id="studioHandoff" type="button" hidden>继续追问…</button>
                 <span class="studio-task-hint" id="studioTaskHint" role="status"></span>
               </div>
@@ -566,6 +582,29 @@
       <div class="form-actions">
         <button class="control-button" type="button" data-close="studioAgentDialog">取消</button>
         <button class="primary-button" id="studioHandoffConfirm" type="button" disabled>创建会话并继续</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 工作台多图管理弹窗：拖拽 / 系统选择器都能一次加多张，也可多次追加；
+       列表顺序即发给模型的图号（图1、图2……）。确定后只回填 Studio 输入区，
+       不碰聊天输入区的待发送附件。 -->
+  <dialog id="studioImageDialog" class="panel-dialog studio-image-dialog">
+    <div class="dialog-toolbar">
+      <div><h2>上传参考图片</h2><p>可以一次选多张，也可以分批追加；列表顺序就是图1、图2……</p></div>
+      <button class="icon-button" data-close="studioImageDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+    </div>
+    <div class="studio-image-body">
+      <div class="studio-image-drop" id="studioImageDrop">
+        <p>把图片拖到这里</p>
+        <button class="control-button" id="studioImageChoose" type="button">选择图片</button>
+        <input id="studioImageFileInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+      </div>
+      <p class="hint">支持 PNG / JPG / WEBP / GIF；单张不超过 20MB，最多 6 张。</p>
+      <div class="studio-image-queue" id="studioImageQueue" role="list" aria-label="待加入的图片"></div>
+      <div class="form-actions">
+        <button class="control-button" type="button" data-close="studioImageDialog">取消</button>
+        <button class="primary-button" id="studioImageConfirm" type="button">确定</button>
       </div>
     </div>
   </dialog>

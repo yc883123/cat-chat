@@ -671,6 +671,20 @@ class AppLimitTests(unittest.TestCase):
         self.assertFalse(result.get("busy"))
         self.assertEqual(result["scopes"][SCOPE_UPLOADS]["trigger"], "manual")
 
+    def test_studio_task_images_are_protected_from_cleanup(self) -> None:
+        """工作台任务仍引用的图片：单文件复核与批量集合都必须保留（任务可查看/重试期间）。"""
+        uploads = self.app.paths.data_dir / "uploads"
+        uploads.mkdir(parents=True, exist_ok=True)
+        image = uploads / "studio-ref.png"
+        image.write_bytes(_png_bytes())
+        self.app.studio._store.create_task({
+            "content": "带图生成",
+            "images": [{"path": str(image), "thumb_path": "", "name": "参考图"}],
+        })
+        self.assertTrue(self.app._upload_path_in_use(image.resolve()))
+        keys = self.app._referenced_cache_keys([SCOPE_UPLOADS])
+        self.assertIn(normalized_path_key(image), keys)
+
 
 def _function_body(source: str, signature: str) -> str:
     """取顶层函数体（到下一个顶层 function / async function / export function 之前）。"""

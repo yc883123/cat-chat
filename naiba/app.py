@@ -2120,6 +2120,14 @@ class NaibaChatApp:
         """批量判定：一次扫表拿到被引用的缓存路径键集合（外加当前聊天背景图）。"""
         roots = [cache_scope_dir(self._paths.data_dir, item) for item in scopes]
         keys = self.storage.referenced_cache_paths(roots)
+        studio = getattr(self, "studio", None)
+        if studio is not None:
+            try:
+                # 工作台任务引用的图片同样受保护；批量集合漏判时还有
+                # `_upload_path_in_use` 的单文件复核兜住（方向只会是"多留"）。
+                keys.update(studio.referenced_upload_paths())
+            except (OSError, ValueError):
+                pass
         background = str(((self.config.data.get("chat_background") or {}).get("image") or "")).strip()
         if background:
             key = normalized_path_key(background)
@@ -2250,6 +2258,15 @@ class NaibaChatApp:
                 return True
         except (OSError, ValueError):
             return True  # 判定不了时宁可保留（与清理侧同向）
+        # 工作台任务（带图生成 / 图片反推）仍引用的图片同样不许删：Studio 任务记录在
+        # data_dir/studio/tasks，不在消息库里，storage 的引用判定看不到它们。
+        studio = getattr(self, "studio", None)
+        if studio is not None:
+            try:
+                if normalized_path_key(target) in studio.referenced_upload_paths():
+                    return True
+            except (OSError, ValueError):
+                return True  # 判定不了时宁可保留
         background = self.config.data.get("chat_background") or {}
         image = str(background.get("image") or "").strip()
         if not image:

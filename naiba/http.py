@@ -803,11 +803,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             try:
                 selected = body.get("provider_model_key")
                 selected_key = str(selected) if selected is not None else None
+                model_override = str(body.get("model") or "").strip()
                 probe = str(body.get("probe") or "vision").strip().lower()
                 if probe == "text":
-                    self._json(self.app.vision.probe_text(selected_key))
+                    self._json(self.app.vision.probe_text(selected_key, model_override))
                 elif probe == "vision":
-                    self._json(self.app.vision.probe(selected_key))
+                    self._json(self.app.vision.probe(selected_key, model_override))
                 else:
                     self._json({"ok": False, "reason": "Unsupported vision probe"}, HTTPStatus.BAD_REQUEST)
             except Exception as exc:  # noqa: BLE001

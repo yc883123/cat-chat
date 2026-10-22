@@ -1819,7 +1819,11 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 
 #enableLanActions { position:static; display:flex; justify-content:flex-start; flex-wrap:wrap; margin:12px 0 16px; }
 .tool-stack { position:static; width:100%; }
-.vision-provider-current { margin-bottom: 0; }
+.vision-provider-current { margin-bottom: 0; grid-template-columns: minmax(0, 1fr); }
+/* 视觉分页「供应商 + 模型」双下拉：容器窄时自动换行，避免新增媒体查询打断既有 760 块解析。 */
+.vision-picker { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 9px; min-width: 0; }
+.vision-picker label { min-width: 0; }
+.vision-picker select { width: 100%; min-width: 0; }
 .provider-divider { height: 1px; background: var(--line); margin: 2px 0 4px; }
 .provider-format-guide { margin: -3px 0 1px; padding: 9px 11px; border-left: 3px solid var(--accent); background: var(--accent-soft); color: var(--text); font-size: 12px; line-height: 1.55; }
 .provider-format-guide[hidden] { display: none; }
@@ -3348,18 +3352,40 @@ body[data-studio="on"] #sidebarWorkspaceTree { display: none; }
    否则底部「手机访问 / 设置 / 应用图标」会直接顶到模式切换下面。 */
 body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .sidebar-studio-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   width: 100%;
   text-align: left;
-  border: 0;
-  background: transparent;
+  border: 1px solid var(--sidebar-line);
+  background: rgba(255, 255, 255, .05);
   color: var(--sidebar-text);
   font-size: 13px;
-  padding: 9px 10px;
+  padding: 10px 11px;
   border-radius: var(--r-md);
   cursor: pointer;
+  transition: var(--t-fast);
 }
-.sidebar-studio-link:hover { background: var(--sidebar-hover); color: #fff; }
+.sidebar-studio-link:hover {
+  background: var(--sidebar-hover);
+  border-color: var(--accent);
+  color: #fff;
+}
 .sidebar-studio-link:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sidebar-studio-icon, .sidebar-studio-chevron {
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.sidebar-studio-icon { width: 18px; height: 18px; }
+.sidebar-studio-chevron { width: 14px; height: 14px; opacity: .6; }
+.sidebar-studio-text { display: grid; gap: 2px; flex: 1; min-width: 0; }
+.sidebar-studio-text b { font-size: 13px; font-weight: 600; }
+.sidebar-studio-text small { font-size: 11px; font-weight: 400; color: var(--sidebar-muted); }
+.sidebar-studio-link:hover .sidebar-studio-text small { color: inherit; opacity: .8; }
 
 .studio-view {
   grid-area: 1 / 1 / -1 / 2;
@@ -3457,6 +3483,7 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 /* 收藏星标与行本体并列（不嵌套 button）：点星标只切收藏，绝不顺带打开条目。 */
 .studio-row-wrap { position: relative; }
 .studio-row-wrap .studio-row { padding-right: 36px; }
+.studio-row-wrap.has-delete .studio-row { padding-right: 64px; }
 .studio-row-fav {
   position: absolute; top: 6px; right: 6px;
   width: 26px; height: 26px; border: 1px solid transparent; border-radius: var(--r-md);
@@ -3466,13 +3493,22 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .studio-row-fav:hover { background: var(--surface-2); color: var(--text); }
 .studio-row-fav.active { color: var(--warn, #c98a00); }
 .studio-row-fav:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* 自定义条目才有的删除入口：列表里直接可见，不必先选中再滚到详情底部。 */
+.studio-row-delete {
+  position: absolute; top: 6px; right: 34px;
+  width: 26px; height: 26px; border: 1px solid transparent; border-radius: var(--r-md);
+  background: transparent; color: var(--muted); cursor: pointer;
+  display: grid; place-items: center;
+}
+.studio-row-delete svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.studio-row-delete:hover { background: var(--danger-soft); color: var(--danger); }
+.studio-row-delete:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 /* 定位反馈：滚到可视区后短暂描边，让用户一眼看到目标行（不抢键盘焦点）。 */
 .studio-row-locating { animation: studio-row-locate 1.8s ease-out; }
 @keyframes studio-row-locate {
   0%, 55% { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); background: var(--violet-softer); }
   100% { border-color: var(--line); box-shadow: none; }
 }
-#studioFavFilter.active { background: var(--accent-soft); border-color: var(--violet-line); color: var(--violet-deep); font-weight: 600; }
 .studio-row:hover { border-color: var(--line-strong); box-shadow: var(--shadow-1); }
 .studio-row.active { border-color: var(--violet-line); background: var(--violet-softer); }
 .studio-row-head { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; min-width: 0; }
@@ -3558,6 +3594,16 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .studio-body-text { margin: 0; padding: 10px 12px; max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 12px; line-height: 1.6; color: var(--text); font-family: inherit; }
 .studio-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .studio-task-hint { font-size: 12px; color: var(--muted); }
+/* 结果动作行也带状态点：运行中脉冲、完成绿点、失败红点，不只靠文字。 */
+.studio-task-hint::before {
+  content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: currentColor; opacity: .55; margin-right: 5px; vertical-align: middle;
+}
+.studio-task-hint[data-status="done"]::before { background: #2e9e5b; opacity: 1; }
+.studio-task-hint[data-status="running"]::before,
+.studio-task-hint[data-status="queued"]::before { background: var(--accent); opacity: 1; animation: studio-hint-pulse 1s ease-in-out infinite; }
+.studio-task-hint[data-status="failed"]::before { background: var(--danger); opacity: 1; }
+@keyframes studio-hint-pulse { 50% { opacity: .3; } }
 
 .studio-result {
   min-height: 0; overflow: hidden; display: flex; flex-direction: column;
@@ -3570,15 +3616,44 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .studio-result-header p { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); display: inline-flex; gap: 8px; align-items: baseline; flex-wrap: wrap; min-width: 0; flex: none; }
 .studio-result-header small { font-weight: 400; font-size: 11.5px; color: var(--muted); }
 .studio-result-header small[hidden] { display: none; }
-/* 最近任务捷径：最多 3 条，独占标题下方一行；放不下就换行，不裁切、不压成碎片 */
+/* 历史产出态：标题栏右侧常驻「返回生成结果」，避免进了历史就出不来。 */
+.studio-back-result { margin-left: auto; flex: none; }
+/* 最近任务捷径：最多 3 条，标题下成组显示；卡片式外观 + 状态图标 + 相对时间，
+   让人一眼看出「可以点」「哪条最新」「在跑还是已完成」。 */
 .studio-task-history {
-  display: flex; flex-wrap: wrap; gap: 6px;
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: stretch;
   flex: 1 1 100%; min-width: 0;
 }
 .studio-task-history[hidden] { display: none; }
-.studio-task-row { display: inline-flex; align-items: baseline; gap: 4px; font-size: 11px; border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); border-radius: var(--r-full); padding: 2px 9px; cursor: pointer; max-width: 100%; flex: 0 0 auto; white-space: nowrap; }
-.studio-task-row span { display: block; max-width: 56px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.studio-task-row em { font-style: normal; flex: none; }
+.studio-task-history-label {
+  display: flex; align-items: baseline; gap: 6px; flex: 1 1 100%;
+  font-size: 11px; color: var(--muted);
+}
+.studio-task-history-label span { font-weight: 600; color: var(--text); }
+.studio-task-history-label small { font-size: 10.5px; opacity: .75; }
+.studio-task-row {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center;
+  gap: 7px; min-width: 168px; max-width: 270px; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text); text-align: left;
+  cursor: pointer; flex: 0 1 auto; transition: var(--t-fast);
+}
+.studio-task-row:hover { border-color: var(--accent); background: var(--accent-soft); }
+.studio-task-row.active { border-color: var(--violet-line); background: var(--violet-softer); }
+.studio-task-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.studio-task-icon { width: 16px; height: 16px; display: grid; place-items: center; flex: none; color: var(--muted); }
+.studio-task-icon svg { width: 16px; height: 16px; }
+.studio-task-icon.status-done { color: #2e9e5b; }
+.studio-task-icon.status-running { color: var(--accent); animation: studio-task-spin 1.1s linear infinite; }
+.studio-task-icon.status-failed { color: var(--danger); }
+.studio-task-icon.status-queued { color: var(--muted); }
+@keyframes studio-task-spin { to { transform: rotate(360deg); } }
+.studio-task-text { display: grid; gap: 2px; min-width: 0; }
+.studio-task-text b { font-size: 11.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.studio-task-text small { display: flex; gap: 6px; font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+.studio-task-text em { font-style: normal; }
+.studio-task-open { color: var(--muted); font-size: 14px; line-height: 1; flex: none; }
+.studio-task-row:hover .studio-task-open { color: var(--accent); }
 .studio-result-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px var(--s-4); border-bottom: 1px solid var(--line); }
 .studio-result-actions[hidden] { display: none; }
 .studio-result-stream { flex: 1; min-height: 0; overflow-y: auto; padding: var(--s-4); font-size: 13px; line-height: 1.7; color: var(--text); white-space: pre-wrap; word-break: break-word; }

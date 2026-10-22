@@ -488,6 +488,8 @@ def default_config() -> dict[str, Any]:
         # 视觉调用统一由模型驱动（vision_analyze 工具），无自动路由开关。
         "vision": {
             "provider_model_key": "",
+            # 供应商档案里的 model 只是默认值；视觉分页可以单独换模型（同一 API 下的视觉模型）。
+            "model": "",
             "fallback_models": [],
             "brain_supports_image": False,
             "timeout_ms": 180000,
@@ -2663,6 +2665,14 @@ class ConfigStore:
                         merged = dict(self.data.get(key, {}))
                         for sub_key, sub_value in incoming.items():
                             merged[str(sub_key)] = sub_value
+                        if key == "vision":
+                            # 视觉分页的「供应商 + 模型」双下拉：provider_model_key 选 API 档案，
+                            # model 允许在同一 API 下换模型（空 = 用档案自身配置的模型）。
+                            # 两者都只是标识串，做长度/空白收敛，避免脏值落库。
+                            merged["provider_model_key"] = str(
+                                merged.get("provider_model_key") or ""
+                            ).strip()[:256]
+                            merged["model"] = str(merged.get("model") or "").strip()[:256]
                         if key == "imaging":
                             merged["image_upload_original"] = bool(merged.get("image_upload_original", False))
                             for field in ("image_max_pixels", "thumbnail_max_pixels"):
@@ -2998,6 +3008,8 @@ class ConfigStore:
             vision = self.data.get("vision")
             if isinstance(vision, dict) and str(vision.get("provider_model_key") or "").endswith(f":{provider_id}"):
                 vision["provider_model_key"] = ""
+                # 档案没了，单独指定的视觉模型也一起失效，避免回落到别的 API 后用错模型名。
+                vision["model"] = ""
             self.save()
             return removed
 

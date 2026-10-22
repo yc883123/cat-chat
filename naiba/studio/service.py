@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from naiba.llm.profiles import resolve_profile_with_override
 from naiba.studio.catalog import CatalogError, StudioCatalog
 from naiba.studio.custom import CustomStore
 from naiba.studio.handoff import HandoffAdapter, compose_handoff_message
@@ -218,7 +219,7 @@ class StudioService:
         return {"task": task, "unresolved_vars": unresolved}, 201
 
     def api_vision(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
-        """图片反推：复用共享视觉分析能力，逐图编号识别后返回可编辑文本。
+        """图片反推：优先用当前参数里选中的模型，识别不了再用视觉配置兜底。
 
         逐张调用（而不是一次性把多图塞给模型）是为了让「图N → 描述」的对应关系
         由我们保证，而不是靠模型自己在一段混合输出里划线。单张失败只影响该张，
@@ -232,8 +233,23 @@ class StudioService:
         if not images:
             return {"error": "请先上传图片"}, 400
         question = str(body.get("question") or "").strip()[:2000]
+        model_key = str(body.get("model_key") or "").strip()
+        model_name = str(body.get("model_name") or "").strip()[:256]
+        selected_profile: dict[str, Any] | None = None
+        selected_note = ""
+        if model_key and model_name:
+            try:
+                candidate = resolve_profile_with_override(self.app.config, model_key, model_name)
+                if candidate.get("supports_images_explicit") is False:
+                    # 设置里明确标了纯文本：不浪费一次必然失败的请求，直接走视觉配置。
+                    selected_note = "当前模型在设置里标为不支持图片，已改用视觉 API"
+                else:
+                    selected_profile = candidate
+            except (ValueError, KeyError) as exc:
+                selected_note = f"当前模型配置不可用（{exc}），已改用视觉 API"
         results: list[dict[str, Any]] = []
         failure_notes: list[str] = []
+        fallback_used = 0
         for index, ref in enumerate(images, 1):
             prompt = (
                 f"这是第 {index} 张图（图{index}）。请只描述这一张图片：主体、构图、风格、"
@@ -241,21 +257,43 @@ class StudioService:
             )
             if question:
                 prompt += f"\n补充要求：{question}"
-            try:
-                text = str(self.app.vision.describe_files([ref["path"]], prompt) or "").strip()
-                if not text:
-                    raise RuntimeError("视觉模型返回空内容")
-                results.append({
-                    "index": index, "name": ref["name"], "path": ref["path"],
-                    "text": text, "error": "",
-                })
-            except Exception as exc:  # noqa: BLE001 - 单图失败不拖累其他图
-                message = str(exc) or "视觉识别失败"
-                results.append({
-                    "index": index, "name": ref["name"], "path": ref["path"],
-                    "text": "", "error": message,
-                })
-                failure_notes.append(f"图{index}：{message}")
+            text = ""
+            backend = ""
+            direct_error = ""
+            if selected_profile is not None:
+                try:
+                    text = str(
+                        self.app.vision.describe_files_with_profile(
+                            selected_profile, [ref["path"]], prompt
+                        ) or ""
+                    ).strip()
+                    if text:
+                        backend = "selected"
+                except Exception as exc:  # noqa: BLE001 - 失败后仍可用视觉配置兜底
+                    direct_error = str(exc) or "当前模型识别失败"
+            if not text:
+                # 当前参数模型没有识别成功（或明确不支持）→ 视觉配置兜底。
+                try:
+                    text = str(self.app.vision.describe_files([ref["path"]], prompt) or "").strip()
+                    if text:
+                        backend = "vision"
+                        fallback_used += 1
+                except Exception as exc:  # noqa: BLE001 - 单图失败不拖累其他图
+                    if direct_error:
+                        message = f"{direct_error}；视觉兜底也失败：{exc}"
+                    else:
+                        message = str(exc) or "视觉识别失败"
+                    results.append({
+                        "index": index, "name": ref["name"], "path": ref["path"],
+                        "text": "", "error": message, "backend": "",
+                    })
+                    failure_notes.append(f"图{index}：{message}")
+                    continue
+            results.append({
+                "index": index, "name": ref["name"], "path": ref["path"],
+                "text": text, "error": "", "backend": backend,
+                "fallback_reason": direct_error[:300] if backend == "vision" and direct_error else "",
+            })
         analyzed = sum(1 for row in results if not row["error"])
         text = "\n\n".join(
             f"【图{row['index']}】\n{row['text']}" for row in results if not row["error"]
@@ -266,6 +304,8 @@ class StudioService:
             "text": text,
             "analyzed": analyzed,
             "failed": len(results) - analyzed,
+            "fallback_used": fallback_used,
+            "selected_note": selected_note,
         }
         if not analyzed:
             payload["error"] = "视觉识别全部失败：" + "；".join(failure_notes)

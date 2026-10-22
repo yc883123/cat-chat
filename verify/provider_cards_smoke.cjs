@@ -237,19 +237,23 @@ async function waitForCardCount(page, expected, timeout = 15000) {
     await page.click('[data-provider-kind="online"]');
     await page.waitForTimeout(300);
 
-    // ---- 设置 → 视觉 → 「添加 API」的旧入口仍可用 ----
+    // ---- 设置 → 视觉：直接读 API 设置的双下拉，不再有添加/删除 API 按钮 ----
     await page.click('.settings-nav button[data-settings-tab="vision"]');
-    await page.waitForTimeout(400);
-    await page.click('#addVisionProvider');
     await page.waitForTimeout(500);
-    dialog = await dialogSnapshot(page);
-    const modelsVisible = await page.evaluate(() => !document.querySelector('[data-settings-panel="models"]').hidden);
-    check('视觉页「添加 API」仍能切回供应商页并打开新表单',
-      dialog.open === true && dialog.name === '' && modelsVisible === true,
-      JSON.stringify({ dialog, modelsVisible }));
-    await page.click('#cancelProvider');
-    const cancelled = await waitForClosed(page, 5000);
-    check('「取消」按钮关闭弹层', cancelled === true, '');
+    const visionUi = await page.evaluate(() => ({
+      provider: Boolean(document.querySelector('#visionProvider')),
+      model: Boolean(document.querySelector('#visionModel')),
+      add: Boolean(document.querySelector('#addVisionProvider')),
+      remove: Boolean(document.querySelector('#deleteVisionProvider')),
+    }));
+    check('视觉页只有供应商+模型双下拉（无添加/删除 API）',
+      visionUi.provider && visionUi.model && !visionUi.add && !visionUi.remove,
+      JSON.stringify(visionUi));
+
+    // 窄屏列数检查针对供应商卡片网格：先切回「API 供应商」，
+    // 否则面板隐藏时 getComputedStyle 拿到未展开的 repeat(...) 字面值，无法判断列数。
+    await page.click('.settings-nav button[data-settings-tab="models"]');
+    await page.waitForTimeout(400);
 
     // ---- 窄屏列数降级 ----
     await page.setViewportSize({ width: 900, height: 800 });

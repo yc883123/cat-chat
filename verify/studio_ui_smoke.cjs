@@ -248,6 +248,14 @@ async function runViewport(browser, vp) {
     conversationGetFails += 1;
     return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: '冒烟注入：会话读取失败' }) });
   });
+  // 隔离实例的供应商目录指向 example.invalid：模型目录返回固定列表，
+  // 让「识别图片」请求能带上具体模型名（真实环境里由供应商 /models 返回）。
+  await page.route('**/api/providers/models', (route) => {
+    return route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ models: ['probe-default'] }),
+    });
+  });
   // 新会话里允许首轮 Run 仍在运行：恢复轮询只查一次就绪状态，不串台真实任务事件。
   await page.route('**/api/runs*', (route) => {
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ runs: [] }) });
@@ -541,12 +549,24 @@ async function runViewport(browser, vp) {
     // 8. 一级输入位存在（用户视角的最终输入）
     check('「我的输入」可见', await page.locator('#studioUserRequest').isVisible());
 
-    // 9. 标题区最近任务最多 3 条（接口注入了 6 条）
+    // 9. 标题区最近任务最多 3 条（接口注入了 6 条），且有图标/状态/相对时间
     const recent = await page.evaluate(() => {
       const chips = [...document.querySelectorAll('#studioTaskHistory .studio-task-row')];
-      return { count: chips.length, labels: chips.map((el) => el.textContent.trim()) };
+      return {
+        count: chips.length,
+        chips: chips.map((el) => ({
+          name: el.querySelector('.studio-task-text b')?.textContent.trim() || '',
+          icon: Boolean(el.querySelector('.studio-task-icon')),
+          status: el.querySelector('.studio-task-text em')?.textContent.trim() || '',
+          time: el.querySelector('.studio-task-text small span:last-child')?.textContent.trim() || '',
+          chevron: Boolean(el.querySelector('.studio-task-open')),
+        })),
+      };
     });
     check('最近任务 chips 不超过 3 条', recent.count > 0 && recent.count <= 3, JSON.stringify(recent));
+    check('最近任务有状态图标、状态文字、相对时间和可点提示',
+      recent.chips.every((chip) => chip.name && chip.icon && chip.status && chip.time && chip.chevron),
+      JSON.stringify(recent.chips));
 
     // 10. 侧栏「历史产出」→ 完整列表（6 条），标题区捷径隐藏
     await openHistory();
@@ -580,6 +600,24 @@ async function runViewport(browser, vp) {
     check('状态中文化（不露英文码）',
       !Object.values(history.metaById).some((text) => /queued|running|failed|interrupted|cancelled|done/.test(text)),
       JSON.stringify(history.metaById));
+
+    // 10b. 历史产出态必须有「返回生成结果」按钮，不能进了历史就出不来
+    const backButton = await page.evaluate(() => ({
+      visible: !document.querySelector('#studioBackToResult').hidden,
+      label: document.querySelector('#studioBackToResult').textContent.trim(),
+    }));
+    check('历史产出有「返回生成结果」按钮', backButton.visible && backButton.label.includes('返回'), JSON.stringify(backButton));
+    await page.click('#studioBackToResult');
+    await page.waitForTimeout(500);
+    const backToResult = await page.evaluate(() => ({
+      historyHidden: document.querySelector('#studioHistoryList').hidden,
+      streamVisible: !document.querySelector('#studioResultStream').hidden,
+      backHidden: document.querySelector('#studioBackToResult').hidden,
+    }));
+    check('点「返回生成结果」回到结果态',
+      backToResult.historyHidden && backToResult.streamVisible && backToResult.backHidden,
+      JSON.stringify(backToResult));
+    await openHistory();
 
     // 11. 点历史行 → 回到结果态并显示结果；「继续追问」可用
     await page.click(`#studioHistoryList [data-studio-task="${TASK_ID}"]`);
@@ -730,12 +768,21 @@ async function runViewport(browser, vp) {
       await page.waitForTimeout(220);
     }
 
-    // 19. 侧栏工作台导航只有「历史产出」（模板入口已按用户要求去掉）
-    const nav = await page.evaluate(() => ({
-      labels: [...document.querySelectorAll('#sidebarStudioNav .sidebar-studio-link')].map((el) => el.textContent.trim()),
-    }));
+    // 19. 侧栏工作台导航只有「历史产出」，且是带图标/说明的按钮式入口（不是纯文本标题）
+    const nav = await page.evaluate(() => {
+      const items = [...document.querySelectorAll('#sidebarStudioNav .sidebar-studio-link')];
+      const first = items[0];
+      return {
+        labels: items.map((el) => el.querySelector('.sidebar-studio-text b')?.textContent.trim() || el.textContent.trim()),
+        icon: Boolean(first?.querySelector('.sidebar-studio-icon')),
+        hint: first?.querySelector('.sidebar-studio-text small')?.textContent.trim() || '',
+        border: first ? getComputedStyle(first).borderTopWidth : '0px',
+      };
+    });
     check('侧栏工作台导航只保留「历史产出」',
       nav.labels.length === 1 && nav.labels[0] === '历史产出', JSON.stringify(nav));
+    check('历史产出是按钮式入口（图标 + 说明 + 边框）',
+      nav.icon && nav.hint.includes('已生成') && nav.border !== '0px', JSON.stringify(nav));
 
     // 20. 轮询不覆盖历史列表；离开工作台停止轮询但不取消后端任务
     // 事件接口持续返回 running，才能真正验证「轮询在跑 + 离开后停」。
@@ -1132,9 +1179,14 @@ async function runViewport(browser, vp) {
       restoredState.title === restoreTitle && restoredState.module === 'vs',
       JSON.stringify({ ...restoredState, restoreTitle }));
 
-    await selectPane('list');
-    await page.click('#studioCats [data-studio-module=""]');
-    await page.waitForTimeout(500);
+    // 失效 ID：重载出新页面，避免沿用内存里已选中的条目（分类切换会保留选择）。
+    await page.reload({ waitUntil: 'load', timeout: 20000 });
+    await page.waitForTimeout(2600);
+    const onboardingInvalid = await page.evaluate(() => document.querySelector('#onboardingDialog')?.open);
+    if (onboardingInvalid) {
+      await page.click('#onboardingDialog [data-close="onboardingDialog"]');
+      await page.waitForTimeout(300);
+    }
     await page.evaluate(async () => {
       const mod = await import('/js/01-core.js');
       mod.state.bootstrap.settings.studio = {
@@ -1144,7 +1196,6 @@ async function runViewport(browser, vp) {
     });
     // 预期内的一次 404：目录里确实没有这个条目。
     routeErrorExemptions.push({ path: '/api/studio/catalog/no-such-entry', status: 404 });
-    await exitStudio();
     await enterStudio();
     await page.waitForTimeout(1400);
     const invalidRestore = await page.evaluate(() => ({
@@ -1171,52 +1222,57 @@ async function runViewport(browser, vp) {
       pressed: document.querySelector('#studioList .studio-row-fav')?.getAttribute('aria-pressed'),
       detail: document.querySelector('#studioDetailTitle').textContent,
       count: document.querySelectorAll('#studioList .studio-row').length,
+      // 分类栏「收藏」后面的数字：点完星标必须当场同步，不能等切分类或刷新。
+      catCount: document.querySelector('#studioCats [data-studio-module="fav"] .studio-cat-count')?.textContent,
     }));
     check('点星标只切收藏、不打开条目',
       favState.pressed === 'true' && favState.detail === detailBeforeFav && favState.count > 0,
       JSON.stringify({ ...favState, detailBeforeFav }));
+    check('点星标后分类栏「收藏」数字立即同步', favState.catCount === '1', JSON.stringify(favState));
     check('收藏写入 settings.studio',
       settingsPosts.some((post) => Array.isArray(post.studio?.favorites)
         && post.studio.favorites.some((row) => row.kind === 'builtin' && row.id === favId)),
       JSON.stringify(settingsPosts.filter((post) => post.studio?.favorites).slice(-2)));
 
-    await page.click('#studioFavFilter');
+    await page.click('#studioCats [data-studio-module="fav"]');
     await page.waitForTimeout(700);
-    const favFiltered = await page.evaluate(() => ({
-      pressed: document.querySelector('#studioFavFilter').getAttribute('aria-pressed'),
+    const favCategory = await page.evaluate(() => ({
+      label: document.querySelector('#studioCats [data-studio-module="fav"] .studio-cat-name')?.textContent,
+      count: document.querySelector('#studioCats [data-studio-module="fav"] .studio-cat-count')?.textContent,
       rows: [...document.querySelectorAll('#studioList .studio-row')].map((row) => row.dataset.studioPick),
     }));
-    check('收藏筛选只显示已收藏的内置条目',
-      favFiltered.pressed === 'true' && favFiltered.rows.length === 1 && favFiltered.rows[0] === favId,
-      JSON.stringify(favFiltered));
+    check('分类栏有「收藏」且只显示已收藏的内置条目',
+      favCategory.label === '收藏' && favCategory.count === '1'
+      && favCategory.rows.length === 1 && favCategory.rows[0] === favId,
+      JSON.stringify({ ...favCategory, favId }));
 
     await page.click('#studioList .studio-row-fav');
     await page.waitForTimeout(700);
     const unfav = await page.evaluate(() => ({
       rows: document.querySelectorAll('#studioList .studio-row').length,
       text: document.querySelector('#studioList').textContent,
+      catCount: document.querySelector('#studioCats [data-studio-module="fav"] .studio-cat-count')?.textContent,
     }));
-    check('取消收藏后行移除并显示空态',
+    check('在「收藏」里取消后行移除并显示空态',
       unfav.rows === 0 && unfav.text.includes('还没有收藏'), JSON.stringify(unfav));
-    await page.click('#studioFavFilter');
-    await page.waitForTimeout(600);
+    check('取消收藏后分类栏「收藏」数字立即归零', unfav.catCount === '0', JSON.stringify(unfav));
 
     await page.click('#studioCats [data-studio-module="custom"]');
     await page.waitForTimeout(700);
+    check('自定义条目在列表里有删除入口',
+      await page.evaluate(() => Boolean(document.querySelector('#studioList .studio-row-wrap.has-delete .studio-row-delete'))));
     await page.click('#studioList .studio-row-fav');
     await page.waitForTimeout(700);
-    await page.click('#studioFavFilter');
+    await page.click('#studioCats [data-studio-module="fav"]');
     await page.waitForTimeout(700);
     const customFav = await page.evaluate(() => ({
       rows: document.querySelectorAll('#studioList .studio-row').length,
       kind: document.querySelector('#studioList .studio-row')?.dataset.studioKind,
       pressed: document.querySelector('#studioList .studio-row-fav')?.getAttribute('aria-pressed'),
     }));
-    check('收藏筛选同时支持自定义条目',
+    check('「收藏」分类同时支持自定义条目',
       customFav.rows === 1 && customFav.kind === 'custom' && customFav.pressed === 'true',
       JSON.stringify(customFav));
-    await page.click('#studioFavFilter');
-    await page.waitForTimeout(500);
 
     // ============================================================
     // 33. 定位模板库：清搜索/切分类/滚动高亮/失效提示
@@ -1224,6 +1280,8 @@ async function runViewport(browser, vp) {
     await selectPane('list');
     await page.click('#studioCats [data-studio-module="vs"]');
     await page.waitForTimeout(700);
+    check('预设条目没有删除入口（内置只读）',
+      await page.evaluate(() => !document.querySelector('#studioList .studio-row-delete')));
     const locateRow = page.locator('#studioList .studio-row').nth(1);
     const locateId = await locateRow.getAttribute('data-studio-pick');
     await locateRow.click();
@@ -1243,8 +1301,9 @@ async function runViewport(browser, vp) {
         pane: document.querySelector('#studioView').dataset.pane,
       };
     }, locateId);
-    check('定位会清空搜索并滚动高亮目标行',
-      located.visible && located.highlighted && located.query === '',
+    check('参数区定位会清空搜索、切回模板档并高亮目标行',
+      located.visible && located.highlighted && located.query === ''
+      && (!isMobile || located.pane === 'list'),
       JSON.stringify({ ...located, locateId }));
 
     // 从生成结果定位：结果属于别的分类时自动切分类
@@ -1262,11 +1321,14 @@ async function runViewport(browser, vp) {
     const resultLocated = await page.evaluate((id) => ({
       module: document.querySelector('#studioCats [aria-pressed="true"]')?.dataset.studioModule,
       highlighted: Boolean(document.querySelector(`#studioList [data-studio-pick="${id}"]`)?.classList.contains('studio-row-locating')),
+      active: Boolean(document.querySelector(`#studioList [data-studio-pick="${id}"]`)?.classList.contains('active')),
+      title: document.querySelector('#studioDetailTitle')?.textContent || '',
       pane: document.querySelector('#studioView').dataset.pane,
     }), locateId);
-    check('从结果定位会切到对应分类并高亮',
-      resultLocated.module === 'vs' && resultLocated.highlighted
-      && (!isMobile || resultLocated.pane === 'list'),
+    check('从结果定位会切到对应分类、选中并高亮',
+      resultLocated.module === 'vs' && resultLocated.highlighted && resultLocated.active
+      && resultLocated.title.length > 0
+      && (!isMobile || resultLocated.pane === 'form'),
       JSON.stringify(resultLocated));
 
     taskList[0].input = { ...(taskList[0].input || {}), item_id: 'no-such-entry', custom_id: '', module: 'vs' };
@@ -1375,6 +1437,11 @@ async function runViewport(browser, vp) {
       && visionCalls.at(-1).images.length === 2
       && String(visionCalls.at(-1).images[0].path).includes('smoke-'),
       JSON.stringify(visionCalls.at(-1) || {}));
+    check('视觉请求优先携带当前参数模型',
+      visionCalls.length > 0
+      && visionCalls.at(-1).model_key === 'online:probe-te'
+      && visionCalls.at(-1).model_name === 'probe-default',
+      JSON.stringify({ model_key: visionCalls.at(-1)?.model_key, model_name: visionCalls.at(-1)?.model_name }));
 
     await page.fill('#studioUserRequest', '用这两张图生成一张海报');
     await page.click('#studioGenerate');

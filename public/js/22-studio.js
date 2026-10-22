@@ -14,6 +14,7 @@ import { closeSidebar, openSidebar, setLeftSidebarCollapsed, sidebarDesktop } fr
 // ---- 模块清单（目录条目 module -> 显示名；顺序即分类顺序） ----
 const MODULE_TABS = [
   { key: "", label: "全部" },
+  { key: "fav", label: "收藏" },
   { key: "vs", label: "文生图" },
   { key: "h3", label: "视频" },
   { key: "vi", label: "反推" },
@@ -84,8 +85,7 @@ const studio = {
   handoffInFlight: false, // 交接请求进行中：挡掉忙碌期的重复触发（不是服务端幂等保证）
   streamText: "",
   reasoningText: "",
-  // 工作台自己的筛选状态：收藏筛选是前端视图态，不落库。
-  favoritesOnly: false,
+  // 工作台自己的筛选状态：分类栏的「收藏」是独立分类，不再另设前端筛选开关。
   // 参考图片：images = 输入区里已确认的图片（顺序即图号）；imageQueue = 弹窗里正在编辑的副本。
   images: [],
   imageQueue: [],
@@ -133,20 +133,6 @@ function isFavoriteRef(kind, id) {
   return studioPrefs().favorites.some((row) => row.kind === kind && row.id === target);
 }
 
-function syncFavoritesFilterUi() {
-  const button = $("#studioFavFilter");
-  if (!button) return;
-  button.setAttribute("aria-pressed", String(studio.favoritesOnly));
-  button.classList.toggle("active", studio.favoritesOnly);
-  button.textContent = studio.favoritesOnly ? "只看收藏" : "收藏";
-}
-
-async function toggleFavoritesOnly() {
-  studio.favoritesOnly = !studio.favoritesOnly;
-  syncFavoritesFilterUi();
-  await renderStudioList();
-}
-
 async function toggleFavorite(kind, id) {
   const targetKind = kind === "custom" ? "custom" : "builtin";
   const targetId = String(id || "");
@@ -155,15 +141,18 @@ async function toggleFavorite(kind, id) {
   const index = favorites.findIndex((row) => row.kind === targetKind && row.id === targetId);
   if (index >= 0) favorites.splice(index, 1);
   else favorites.push({ kind: targetKind, id: targetId });
-  // 乐观更新：星标/列表立即反馈，保存失败会提示并按服务端值校正。
+  // 乐观更新：星标/列表/分类数字立即反馈，保存失败会提示并按服务端值校正。
   applyStudioPrefs({ ...studioPrefs(), favorites });
+  // 分类栏的「收藏」数字直接读偏好里的收藏条数，必须在列表重绘之外单独刷新，
+  // 否则在非「收藏」分类下点星标，数字要等下次切换分类或刷新才变。
+  renderStudioCategories();
   await renderStudioList();
-  // 重绘会重建行节点：把键盘焦点放回同一颗星标（取消收藏后被筛掉则回到筛选按钮）。
+  // 重绘会重建行节点：把键盘焦点放回同一颗星标（取消收藏后被「收藏」分类筛掉则回到分类项）。
   const star = document.querySelector(
     `#studioList [data-studio-fav="${selectorEscape(targetId)}"][data-studio-fav-kind="${targetKind}"]`,
   );
   if (star) star.focus();
-  else $("#studioFavFilter")?.focus();
+  else document.querySelector('#studioCats [data-studio-module="fav"]')?.focus();
   await saveStudioPrefs({ favorites });
 }
 
@@ -309,7 +298,6 @@ async function refreshStudio() {
   // 自定义条目计数要真实：先取一次（本地只读接口），不把未加载伪装成 0。
   await loadCustomItems();
   renderStudioCategories();
-  syncFavoritesFilterUi();
   // 上次选中的条目：只在还没有选中条目时恢复（重进工作台不覆盖当前选择）。
   // 条目已删除/不可读时 restoreStudioSelection 会回安全空态并清掉失效偏好。
   if (!studio.meta) await restoreStudioSelection();
@@ -354,6 +342,7 @@ function renderStudioCategories() {
     button.dataset.studioModule = tab.key;
     let count = "";
     if (tab.key === "custom") count = studio.customLoaded ? String(customCount()) : "";
+    else if (tab.key === "fav") count = String(studioPrefs().favorites.length);
     else if (tab.key === "") count = total === null ? "" : String(total);
     else count = counts[tab.key] ?? "";
     const name = document.createElement("span");
@@ -388,19 +377,11 @@ async function loadCustomItems() {
 
 async function selectStudioCategory(key) {
   studio.module = key;
-  studio.kind = key === "custom" ? "custom" : "free";
-  studio.itemId = "";
-  if (key === "custom") studio.customId = "";
-  // 换分类只换条目来源与详情展示；「我的输入」草稿、变量值和模型选择都保留，
-  // 不因为导航动作清空用户已填内容。
-  studio.meta = null;
-  studio.body = "";
-  studio.detailToken += 1;
+  // 分类只切换左侧列表的浏览范围：当前选中的模板、详情、变量和「我的输入」全部保留。
+  // 只有用户真的点了另一条模板（selectStudioEntry）才替换选择——切分类不该把已选内容弄丢。
   setResultMode("result");
   setStudioPane("list");
   renderStudioCategories();
-  renderStudioDetail();
-  saveStudioSelection();
   await renderStudioList();
 }
 
@@ -409,17 +390,73 @@ async function renderStudioList() {
   if (!list) return;
   list.replaceChildren(buildIndicator());
   const token = ++studio.listToken;
+  if (studio.module === "fav") {
+    // 「收藏」是一级分类：跨内置/自定义，按收藏时间倒序展示，删除或失效的条目跳过。
+    await loadCustomItems();
+    if (token !== studio.listToken) return;
+    renderStudioCategories();
+    const favorites = [...studioPrefs().favorites].reverse();
+    if (!favorites.length) {
+      list.replaceChildren(emptyListPanel("还没有收藏的模板", "点模板行右上角的星标即可收藏，内置和自定义条目都能收。"));
+      return;
+    }
+    let builtinItems = [];
+    try {
+      const params = new URLSearchParams();
+      if (studio.query) params.set("q", studio.query);
+      const response = await api(`/api/studio/catalog/items?${params}`);
+      if (token !== studio.listToken) return;
+      builtinItems = response.items || [];
+    } catch (error) {
+      if (token !== studio.listToken) return;
+      list.replaceChildren(emptyListPanel("目录读取失败", String(error.message || error)));
+      return;
+    }
+    const builtinById = new Map(builtinItems.map((row) => [row.id, row]));
+    const customById = new Map((studio.customItems || []).map((row) => [row.id, row]));
+    const rows = [];
+    let missing = 0;
+    for (const favorite of favorites) {
+      if (favorite.kind === "custom") {
+        const row = customById.get(favorite.id);
+        if (!row) { if (!studio.query) missing += 1; continue; }
+        if (!matchesQuery(row)) continue;
+        rows.push(studioListRow({
+          kind: "custom", id: row.id, title: row.title, summary: row.summary || row.body?.slice(0, 90) || "",
+          tags: row.tags, extra: row.module === "style" ? "词条" : TYPE_LABELS[row.type] || "",
+          genre: row.genre, chars: row.chars, active: studio.kind === "custom" && studio.customId === row.id,
+          favorite: true,
+        }));
+        continue;
+      }
+      const row = builtinById.get(favorite.id);
+      if (!row) { if (!studio.query) missing += 1; continue; }
+      const moduleLabel = MODULE_TABS.find((tab) => tab.key === row.module)?.label || row.module;
+      rows.push(studioListRow({
+        kind: "builtin", id: row.id, title: row.title, summary: row.summary,
+        tags: row.tags, extra: [moduleLabel, TYPE_LABELS[row.type]].filter(Boolean).join(" · "),
+        genre: row.genre, chars: row.chars, hasVars: row.has_vars,
+        active: studio.kind === "builtin" && studio.itemId === row.id,
+        favorite: true,
+      }));
+    }
+    if (!rows.length) {
+      list.replaceChildren(studio.query
+        ? emptyListPanel("没有匹配条目", "换个搜索词试试。")
+        : emptyListPanel("收藏的条目已不存在", "可能已被删除；可以取消收藏，或重新收藏其他条目。"));
+      return;
+    }
+    list.replaceChildren(...rows);
+    if (missing && !studio.query) {
+      list.append(emptyListPanel(`${missing} 条收藏已不存在`, "可能已被删除，已跳过。"));
+    }
+    return;
+  }
   if (studio.module === "custom") {
     await loadCustomItems();
     if (token !== studio.listToken) return;
     renderStudioCategories();
-    const rows = [...(studio.customItems || [])]
-      .filter((row) => matchesQuery(row))
-      .filter((row) => !studio.favoritesOnly || isFavoriteRef("custom", row.id));
-    if (!rows.length && studio.favoritesOnly) {
-      list.replaceChildren(emptyListPanel("还没有收藏的自定义条目", "点条目右上角的星标即可收藏。"));
-      return;
-    }
+    const rows = [...(studio.customItems || [])].filter((row) => matchesQuery(row));
     if (!rows.length && !studio.query) {
       list.replaceChildren(emptyListPanel("还没有自定义条目", '在上面"我的输入"里写下提示词，点"生成"后可以先入口；也可以把已存的自定义导出/导入。'));
       return;
@@ -439,20 +476,14 @@ async function renderStudioList() {
     if (studio.query) params.set("q", studio.query);
     const { items } = await api(`/api/studio/catalog/items?${params}`);
     if (token !== studio.listToken) return; // 分类/搜索已变，丢弃这次结果
-    // 收藏筛选是前端视图态：内置目录仍走同一次查询，只在这里按「来源+ID」收窄。
-    const visible = studio.favoritesOnly
-      ? items.filter((row) => isFavoriteRef("builtin", row.id))
-      : items;
     if (studio.module && items.length === 0 && studio.query) {
       toast("本模块没有匹配条目");
     }
-    if (!visible.length) {
-      list.replaceChildren(studio.favoritesOnly
-        ? emptyListPanel("还没有收藏的内置模板", "点条目右上角的星标即可收藏。")
-        : emptyListPanel("没有匹配条目", "换一个分类或搜索词。"));
+    if (!items.length) {
+      list.replaceChildren(emptyListPanel("没有匹配条目", "换一个分类或搜索词。"));
       return;
     }
-    const shown = visible.slice(0, 150);
+    const shown = items.slice(0, 150);
     list.replaceChildren(...shown.map((row) => studioListRow({
       kind: "builtin", id: row.id, title: row.title, summary: row.summary,
       tags: row.tags, extra: TYPE_LABELS[row.type] || "", genre: row.genre,
@@ -460,8 +491,8 @@ async function renderStudioList() {
       active: studio.kind === "builtin" && studio.itemId === row.id,
       favorite: isFavoriteRef("builtin", row.id),
     })));
-    if (visible.length > shown.length) {
-      list.append(emptyListPanel(`已显示前 ${shown.length} 条（共 ${visible.length}）`, "输入关键词缩小范围。"));
+    if (items.length > shown.length) {
+      list.append(emptyListPanel(`已显示前 ${shown.length} 条（共 ${items.length}）`, "输入关键词缩小范围。"));
     }
   } catch (error) {
     if (token !== studio.listToken) return;
@@ -495,10 +526,11 @@ function matchesQuery(row) {
 }
 
 function studioListRow({ kind, id, title, summary, tags, extra, genre, chars, hasVars, active, favorite }) {
-  // 行本体仍是整块可点按钮；收藏星标是与它并列的独立按钮（不能嵌套 button），
-  // 所以「点收藏」不会被当成「打开条目」。
+  // 行本体仍是整块可点按钮；收藏星标/删除按钮是与它并列的独立按钮（不能嵌套 button），
+  // 所以「点收藏/删除」不会被当成「打开条目」。
+  const canDelete = kind === "custom";
   const wrap = document.createElement("div");
-  wrap.className = "studio-row-wrap";
+  wrap.className = `studio-row-wrap${canDelete ? " has-delete" : ""}`;
   const button = document.createElement("button");
   button.type = "button";
   button.className = `studio-row${active ? " active" : ""}`;
@@ -537,6 +569,18 @@ function studioListRow({ kind, id, title, summary, tags, extra, genre, chars, ha
   fav.setAttribute("aria-label", `${favorite ? "取消收藏" : "收藏"}：${title || "（未命名）"}`);
   fav.textContent = favorite ? "★" : "☆";
   wrap.append(button, fav);
+  if (canDelete) {
+    // 自定义条目在列表里直接给删除入口：预设只读不能管，但导入的条目必须能删，
+    // 不能要求用户先选中它、再滚到详情底部找删除。
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "studio-row-delete";
+    del.dataset.studioDelete = id;
+    del.title = "删除这条自定义条目";
+    del.setAttribute("aria-label", `删除：${title || "（未命名）"}`);
+    del.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"></path><path d="M9 7V5h6v2"></path><path d="M6 7l1 13h10l1-13"></path><path d="M10 11v5M14 11v5"></path></svg>';
+    wrap.append(del);
+  }
   return wrap;
 }
 
@@ -778,22 +822,28 @@ async function saveCustomEdit() {
   }
 }
 
-async function deleteCustomEntry() {
-  if (!studio.customId) return;
-  const row = studio.customItems?.find((r) => r.id === studio.customId);
+async function deleteCustomEntry(itemId = studio.customId) {
+  const id = String(itemId || "").trim();
+  if (!id) return;
+  const row = studio.customItems?.find((r) => r.id === id);
   const title = row?.title || "这条条目";
   if (!window.confirm(`删除「${title}」？这条操作不能撤回`)) return;
+  const deletingSelected = studio.kind === "custom" && studio.customId === id;
   try {
-    await api(`/api/studio/custom/${studio.customId}`, { method: "DELETE" });
+    await api(`/api/studio/custom/${encodeURIComponent(id)}`, { method: "DELETE" });
     studio.customLoaded = false;
-    studio.kind = "custom";
-    studio.customId = "";
-    studio.meta = null;
-    studio.body = "";
+    if (deletingSelected) {
+      studio.kind = "custom";
+      studio.customId = "";
+      studio.meta = null;
+      studio.body = "";
+    }
     await loadCustomItems();
     renderStudioCategories();
-    renderStudioDetail();
-    saveStudioSelection();
+    if (deletingSelected) {
+      renderStudioDetail();
+      saveStudioSelection();
+    }
     await renderStudioList();
     toast("已删除");
   } catch (error) {
@@ -1121,17 +1171,23 @@ async function analyzeStudioImages() {
           thumb_path: image.thumb_path || "",
           name: image.name || "",
         })),
+        // 优先用参数里当前选中的模型识别；识别不了由后端回落到设置里的视觉 API。
+        model_key: $("#studioProviderSelect")?.value || "",
+        model_name: $("#studioModelSelect")?.value || "",
       },
     });
     const text = String(result?.text || "").trim();
     if (!text) throw new Error("视觉模型没有返回可用的描述");
     appendVisionResult(text);
     const failed = Number(result?.failed || 0);
-    if (failed) {
-      toast(`${result.analyzed} 张识别成功，${failed} 张失败：${visionFailureDetails(result) || "原因未知"}`);
-    } else {
-      toast("图片识别完成，逐图描述已写进「我的输入」，可继续编辑");
-    }
+    const fallback = Number(result?.fallback_used || 0);
+    const note = String(result?.selected_note || "").trim();
+    const parts = [];
+    if (failed) parts.push(`${result.analyzed} 张识别成功，${failed} 张失败：${visionFailureDetails(result) || "原因未知"}`);
+    else parts.push("图片识别完成，逐图描述已写进「我的输入」，可继续编辑");
+    if (fallback) parts.push(`${fallback} 张改用设置里的视觉 API`);
+    if (note) parts.push(note);
+    toast(parts.join("；"));
   } catch (error) {
     const details = visionFailureDetails(error?.payload);
     toast(`图片识别失败：${error.message}${details ? `（${details}）` : ""}`);
@@ -1370,6 +1426,7 @@ function renderResultPanel(task) {
       interrupted: "已中断（服务重启前）",
     };
     hint.textContent = map[task.status] || "";
+    hint.dataset.status = String(task.status || "");
   }
   const cancelBtn = $("#studioCancelTask");
   const retryBtn = $("#studioRetryTask");
@@ -1448,6 +1505,40 @@ function formatTaskTime(value) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+// 最近任务芯片用相对时间：一眼看出哪条是刚生成的（精确时间仍挂在 title 上）。
+function formatTaskRelative(value) {
+  const ms = Number(value);
+  if (!Number.isFinite(ms) || ms <= 0) return "时间未记录";
+  const delta = Math.max(0, Date.now() - ms);
+  if (delta < 60_000) return "刚刚";
+  if (delta < 3_600_000) return `${Math.floor(delta / 60_000)} 分钟前`;
+  if (delta < 86_400_000) return `${Math.floor(delta / 3_600_000)} 小时前`;
+  if (delta < 172_800_000) return "昨天";
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return "时间未记录";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+const TASK_STATUS_ICON_PATHS = {
+  queued: '<circle cx="12" cy="12" r="8"></circle><path d="M12 7v5l3 2"></path>',
+  running: '<circle cx="12" cy="12" r="8" opacity=".25"></circle><path d="M12 4a8 8 0 0 1 8 8"></path>',
+  done: '<path d="M20 6L9 17l-5-5"></path>',
+  failed: '<path d="M12 3l9 16H3z"></path><path d="M12 9v4M12 16h.01"></path>',
+  cancelled: '<circle cx="12" cy="12" r="8"></circle><path d="M7 7l10 10"></path>',
+  interrupted: '<circle cx="12" cy="12" r="8"></circle><path d="M10 9v6M14 9v6"></path>',
+};
+
+// 状态图标是「能不能一眼区分运行中/已完成」的主入口，不能只靠一行小字。
+function taskStatusIcon(status) {
+  const key = TASK_STATUS_ICON_PATHS[String(status)] ? String(status) : "interrupted";
+  const icon = document.createElement("span");
+  icon.className = `studio-task-icon status-${key}`;
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${TASK_STATUS_ICON_PATHS[key]}</svg>`;
+  return icon;
+}
+
 // 结果栏标题区：最近任务捷径，固定最多 3 条；历史列表打开时隐藏，避免重复导航。
 function renderRecentTasks() {
   const wrap = $("#studioTaskHistory");
@@ -1457,18 +1548,46 @@ function renderRecentTasks() {
     wrap.hidden = true;
     return;
   }
+  const recent = [...(studio.tasks || [])]
+    .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0))
+    .slice(0, RECENT_TASK_LIMIT);
+  if (!recent.length) {
+    wrap.replaceChildren();
+    wrap.hidden = true;
+    return;
+  }
   wrap.hidden = false;
-  const recent = (studio.tasks || []).slice(0, RECENT_TASK_LIMIT);
-  wrap.replaceChildren(...recent.map((task) => {
+  const heading = document.createElement("div");
+  heading.className = "studio-task-history-label";
+  const headingText = document.createElement("span");
+  headingText.textContent = "最近任务";
+  const headingHint = document.createElement("small");
+  headingHint.textContent = "点击查看";
+  heading.append(headingText, headingHint);
+  wrap.replaceChildren(heading, ...recent.map((task) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "studio-task-row";
+    const active = task.id === studio.activeTaskId;
+    button.className = `studio-task-row${active ? " active" : ""}`;
     button.dataset.studioTask = task.id;
-    const label = document.createElement("span");
-    label.textContent = taskTitle(task);
+    button.title = `点击查看：${taskTitle(task)} · ${taskStatusLabel(task.status)} · ${formatTaskTime(task.created_at)}`;
+    button.setAttribute("aria-label", button.title);
+    const text = document.createElement("span");
+    text.className = "studio-task-text";
+    const name = document.createElement("b");
+    name.textContent = taskTitle(task);
+    const meta = document.createElement("small");
     const status = document.createElement("em");
     status.textContent = taskStatusLabel(task.status);
-    button.append(label, status);
+    const time = document.createElement("span");
+    time.textContent = formatTaskRelative(task.created_at);
+    meta.append(status, time);
+    text.append(name, meta);
+    const open = document.createElement("span");
+    open.className = "studio-task-open";
+    open.setAttribute("aria-hidden", "true");
+    open.textContent = "›";
+    button.append(taskStatusIcon(task.status), text, open);
     return button;
   }));
 }
@@ -1484,10 +1603,12 @@ function setResultMode(mode) {
   const title = $("#studioResultTitle");
   const range = $("#studioHistoryRange");
   const meta = $("#studioResultMeta");
+  const backBtn = $("#studioBackToResult");
   if (historyList) historyList.hidden = !history;
   if (stream) stream.hidden = history;
   if (actions) actions.hidden = history;
   if (meta) meta.hidden = history;
+  if (backBtn) backBtn.hidden = !history;
   if (range) {
     range.hidden = !history;
     range.textContent = HISTORY_RANGE_HINT;
@@ -1626,7 +1747,7 @@ function selectorEscape(value) {
   return text.replace(/["\\]/g, "\\$&");
 }
 
-async function locateStudioEntry(kind, id, module) {
+async function locateStudioEntry(kind, id, module, { revealList = false } = {}) {
   const targetKind = kind === "custom" ? "custom" : "builtin";
   const targetId = String(id || "");
   if (!targetId) {
@@ -1656,28 +1777,31 @@ async function locateStudioEntry(kind, id, module) {
     if (search) search.value = "";
     filtersChanged = true;
   }
-  if (studio.favoritesOnly && !isFavoriteRef(targetKind, targetId)) {
-    // 目标没被收藏：收藏筛选开着就永远看不到它，必须显式关掉并说明。
-    studio.favoritesOnly = false;
-    syncFavoritesFilterUi();
-    filtersChanged = true;
-  }
   setResultMode("result");
   renderStudioCategories();
   if (targetKind === "custom") await loadCustomItems();
   await renderStudioList();
   const selector = `#studioList [data-studio-pick="${selectorEscape(targetId)}"][data-studio-kind="${targetKind}"]`;
-  const row = document.querySelector(selector);
+  let row = document.querySelector(selector);
   if (!row) {
     toast(targetKind === "custom" ? "这条自定义条目已不存在，可能已被删除" : "这条模板已不存在，可能已被删除");
     return;
   }
-  // 手机先回模板档，否则滚动的是隐藏容器；桌面端不抢键盘焦点。
-  setStudioPane("list");
+  // 定位不是只闪一下坐标：真正选中目标，详情/参数随之加载，列表行保持 active。
+  if (!sameSelection) {
+    await selectStudioEntry(targetKind, targetId);
+    row = document.querySelector(selector);
+    if (!row) return;
+  }
+  // 参数区来（revealList）→ 回模板档看行；结果区来 → 切到参数档看选中的模板详情。
+  setStudioPane(revealList ? "list" : "form");
   row.scrollIntoView({ block: "center", behavior: "smooth" });
   row.classList.add("studio-row-locating");
   window.setTimeout(() => row.classList.remove("studio-row-locating"), STUDIO_LOCATE_HIGHLIGHT_MS);
-  if (filtersChanged) toast("已调整分类/搜索/收藏筛选，定位到对应模板");
+  const title = String(studio.meta?.title || "").trim();
+  if (!sameSelection && title) toast(`已定位并选中「${title}」`);
+  else if (revealList && title) toast(`已在模板库中定位到「${title}」`);
+  else if (filtersChanged) toast("已调整分类/搜索/收藏筛选，定位到对应模板");
 }
 
 function locateCurrentStudioEntry() {
@@ -1687,7 +1811,7 @@ function locateCurrentStudioEntry() {
   }
   const kind = studio.kind === "custom" ? "custom" : "builtin";
   const id = kind === "custom" ? studio.customId : studio.itemId;
-  void locateStudioEntry(kind, id, studio.meta.module);
+  void locateStudioEntry(kind, id, studio.meta.module, { revealList: true });
 }
 
 function locateResultTemplate() {
@@ -1828,6 +1952,8 @@ export function bindStudioEvents() {
   studioEl?.addEventListener("click", (event) => {
     const historyRetry = event.target.closest("[data-studio-history-retry]");
     if (historyRetry) { void openHistoryList(); return; }
+    const deleteEntry = event.target.closest("[data-studio-delete]");
+    if (deleteEntry) { void deleteCustomEntry(deleteEntry.dataset.studioDelete); return; }
     // 收藏星标先于行选择判定：它是行旁边的独立按钮，点击绝不能顺带打开条目。
     const fav = event.target.closest("[data-studio-fav]");
     if (fav) { void toggleFavorite(fav.dataset.studioFavKind, fav.dataset.studioFav); return; }
@@ -1848,7 +1974,11 @@ export function bindStudioEvents() {
     if (event.target.closest("#studioRetryTask")) void retryStudioTask("");
     if (event.target.closest("#studioLocateEntry")) { locateCurrentStudioEntry(); return; }
     if (event.target.closest("#studioLocateResult")) { locateResultTemplate(); return; }
-    if (event.target.closest("#studioFavFilter")) { void toggleFavoritesOnly(); return; }
+    if (event.target.closest("#studioBackToResult")) {
+      setResultMode("result");
+      setStudioPane("result");
+      return;
+    }
     if (event.target.closest("#studioImagePick")) { openStudioImageDialog(); return; }
     if (event.target.closest("#studioVisionAnalyze")) { void analyzeStudioImages(); return; }
     if (event.target.closest("#studioCustomSave")) void saveCustomEdit();

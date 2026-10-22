@@ -30,6 +30,7 @@ from naiba.studio.images import MAX_IMAGES, StudioImageError, validate_image_ref
 from naiba.studio.runner import StudioRunner  # noqa: E402
 from naiba.studio.service import StudioService, fill_vars  # noqa: E402
 from naiba.studio.store import StudioStore  # noqa: E402
+from naiba.vision.runtime import VisionRouter  # noqa: E402
 
 
 def _write_png(path: Path, color=(20, 120, 200), size=(16, 16)) -> Path:
@@ -380,16 +381,24 @@ class _StubApp:
 
 
 class _StubVision:
-    """视觉能力桩：逐图 analyze，记录调用参数；可指定某张失败。"""
+    """视觉能力桩：分别记录「当前参数模型」与「视觉配置」两条调用路径。"""
 
     def __init__(self, behavior=None, supports=True):
         self.calls: list[tuple[list[str], str]] = []
+        self.selected_calls: list[tuple[dict, list[str], str]] = []
         self.supports = supports
         self.behavior = behavior or (lambda path, question: f"{Path(path).stem} 的描述")
+        self.selected_behavior = None
 
     def describe_files(self, paths, question="", json_mode=False, cancel_event=None, vision_budget=None):
         self.calls.append((list(paths), question))
         return self.behavior(str(paths[0]), question)
+
+    def describe_files_with_profile(self, profile, paths, question="", cancel_event=None, vision_budget=None):
+        self.selected_calls.append((dict(profile or {}), list(paths), question))
+        if self.selected_behavior is not None:
+            return self.selected_behavior(str(paths[0]), question)
+        return f"当前模型：{Path(paths[0]).stem} 的描述"
 
     def brain_supports_images(self, profile):
         return self.supports
@@ -739,6 +748,55 @@ class StudioServiceApiTests(unittest.TestCase):
         self.assertIn("第 1 张图", self.vision.calls[0][1])
         self.assertIn("第 2 张图", self.vision.calls[1][1])
 
+    def test_vision_uses_selected_model_before_vision_settings(self):
+        payload, status = self.service.api_vision({
+            "images": [str(self.img_a), str(self.img_b)],
+            "model_key": "online:p1",
+            "model_name": "stub-model",
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["fallback_used"], 0)
+        self.assertEqual([row["backend"] for row in payload["images"]], ["selected", "selected"])
+        self.assertEqual(len(self.vision.selected_calls), 2)
+        self.assertEqual(self.vision.calls, [], "当前模型成功时不应再触达视觉配置")
+        self.assertIn("当前模型", payload["text"])
+
+    def test_vision_falls_back_when_selected_model_cannot_see_images(self):
+        self.vision.selected_behavior = lambda path, question: (_ for _ in ()).throw(
+            RuntimeError("当前模型不支持图片输入")
+        )
+        payload, status = self.service.api_vision({
+            "images": [str(self.img_a), str(self.img_b)],
+            "model_key": "online:p1",
+            "model_name": "stub-model",
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["fallback_used"], 2)
+        self.assertEqual([row["backend"] for row in payload["images"]], ["vision", "vision"])
+        self.assertIn("不支持图片输入", payload["images"][0]["fallback_reason"])
+        self.assertEqual(len(self.vision.calls), 2)
+        self.assertIn("a 的描述", payload["text"])
+
+    def test_vision_skips_explicit_text_only_model(self):
+        class _ExplicitTextOnlyConfig(_StubConfig):
+            def profile(self, key):
+                return {
+                    **super().profile(key),
+                    "supports_images": False,
+                    "supports_images_explicit": False,
+                }
+
+        self.service.app.config = _ExplicitTextOnlyConfig()
+        payload, status = self.service.api_vision({
+            "images": [str(self.img_a)],
+            "model_key": "online:p1",
+            "model_name": "stub-model",
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(self.vision.selected_calls, [], "显式纯文本模型不应先发一次必然失败的请求")
+        self.assertEqual(payload["fallback_used"], 1)
+        self.assertIn("不支持图片", payload["selected_note"])
+
     def test_vision_partial_failure_keeps_successful_images(self):
         def behavior(path, question):
             if path.endswith("b.png"):
@@ -831,6 +889,43 @@ class StudioServiceApiTests(unittest.TestCase):
         task_state = self.store.get_task(task["id"])
         self.assertEqual(task_state["status"], "interrupted")
         self.assertIn("已生成前半", task_state["result_partial"])
+
+
+class VisionSettingsTests(unittest.TestCase):
+    """视觉分页「供应商 + 模型」：配置归一化与后端模型覆盖。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "config.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_vision_model_roundtrip_and_trim(self):
+        store = ConfigStore(self.path)
+        store.update_settings({"vision": {
+            "provider_model_key": " online:p1 ",
+            "model": " qwen-vl-max ",
+        }})
+        reloaded = ConfigStore(self.path)
+        self.assertEqual(reloaded.data["vision"]["provider_model_key"], "online:p1")
+        self.assertEqual(reloaded.data["vision"]["model"], "qwen-vl-max")
+
+    def test_vision_backends_apply_model_override(self):
+        class _Config:
+            data = {"vision": {"provider_model_key": "online:p1", "model": "override-a"}}
+
+            @staticmethod
+            def profile(key):
+                return {"name": "供应商", "model": "base-model", "request_format": "openai_chat"}
+
+        class _App:
+            config = _Config()
+
+        vision = VisionRouter(_App())
+        self.assertEqual(vision.vision_backends()[0]["model"], "override-a")
+        self.assertEqual(vision.vision_backends("online:p1", "explicit-b")[0]["model"], "explicit-b")
+        self.assertEqual(vision.vision_backends("online:p1")[0]["model"], "override-a")
 
 
 class FillVarsUnitTests(unittest.TestCase):

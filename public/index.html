@@ -61,9 +61,17 @@
         <input class="workspace-search-input" id="workspaceSearchInput" type="text" placeholder="搜索对话" autocomplete="off">
       </div>
       <nav class="conversation-list" id="sidebarWorkspaceTree" aria-label="工作区"></nav>
-      <!-- 工作台态专用导航（对话态隐藏）：进入历史产出列表 -->
+      <!-- 工作台态专用导航（对话态隐藏）：进入历史产出列表。
+           做成带图标的卡片式按钮 + 一句说明，避免用户把它当成不可点的纯文本标题。 -->
       <nav class="sidebar-studio-nav" id="sidebarStudioNav" hidden aria-label="工作台">
-        <button class="sidebar-studio-link" id="studioNavHistory" type="button" data-studio-nav="history">历史产出</button>
+        <button class="sidebar-studio-link" id="studioNavHistory" type="button" data-studio-nav="history" aria-label="历史产出：查看已生成的任务">
+          <svg class="sidebar-studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 4v5h5"></path><path d="M12 7v5l3 2"></path></svg>
+          <span class="sidebar-studio-text">
+            <b>历史产出</b>
+            <small>查看已生成的任务</small>
+          </span>
+          <svg class="sidebar-studio-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"></path></svg>
+        </button>
       </nav>
       <div class="sidebar-footer">
         <button class="address-button" id="copyAddress" title="复制手机访问地址">
@@ -219,7 +227,6 @@
             <label class="studio-search">
               <input id="studioSearch" type="search" placeholder="搜索模板" aria-label="搜索模板">
             </label>
-            <button class="control-button" id="studioFavFilter" type="button" aria-pressed="false" title="只显示已收藏的模板">收藏</button>
             <button class="control-button" id="studioCustomImport" type="button" title="把 .txt / .md / .json 导入为自定义条目（在「我的」里查看与管理）">导入</button>
           </div>
         </header>
@@ -288,6 +295,7 @@
                   <small id="studioResultMeta"></small>
                   <small id="studioHistoryRange" hidden>最近任务，最多显示 60 条</small>
                 </p>
+                <button class="control-button studio-back-result" id="studioBackToResult" type="button" hidden>返回生成结果</button>
                 <div class="studio-task-history" id="studioTaskHistory" aria-label="最近任务"></div>
               </header>
               <!-- 任务动作跟着任务走：结果档（手机）与结果栏（桌面）都可达 -->
@@ -1163,11 +1171,14 @@
           <div class="settings-card">
           <div class="field-grid">
             <div class="provider-current vision-provider-current field-wide">
-              <label>视觉供应商（留空 = OVH 免费链）
-                <select id="visionProvider"></select>
-              </label>
-              <button class="control-button" id="addVisionProvider" type="button">添加 API</button>
-              <button class="danger-button" id="deleteVisionProvider" type="button">删除 API</button>
+              <div class="vision-picker">
+                <label>视觉 API 供应商（留空 = OVH 免费链）
+                  <select id="visionProvider"></select>
+                </label>
+                <label>视觉模型
+                  <select id="visionModel"></select>
+                </label>
+              </div>
             </div>
             <label>单次视觉请求超时（毫秒）<input id="visionTimeout" type="number" min="1000" step="1000"></label>
             <label>最大图片数<input id="visionMaxImages" type="number" min="1" max="20" step="1"></label>

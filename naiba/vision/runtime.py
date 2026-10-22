@@ -102,6 +102,7 @@ class VisionBudget:
 def _default_vision_config() -> dict[str, Any]:
     return {
         "provider_model_key": "",
+        "model": "",
         "fallback_models": [],
         "brain_supports_image": False,
         "timeout_ms": DEFAULT_TIMEOUT_SECONDS * 1000,
@@ -146,8 +147,14 @@ class VisionRouter:
         return merged
 
     # ---- 视觉后端链 ----
-    def vision_backends(self, provider_model_key: str | None = None) -> list[dict[str, Any]]:
-        """返回视觉后端 profile 列表；显式选择时不静默切换到匿名链。"""
+    def vision_backends(
+        self, provider_model_key: str | None = None, model_override: str | None = None
+    ) -> list[dict[str, Any]]:
+        """返回视觉后端 profile 列表；显式选择时不静默切换到匿名链。
+
+        ``model_override`` 是设置页「视觉模型」下拉的值：选中某个 API 档案后，可以在
+        同一 API 下换一个视觉模型；为空时沿用档案自身配置的 model。
+        """
         cfg = self.config()
         backends: list[dict[str, Any]] = []
 
@@ -157,6 +164,11 @@ class VisionRouter:
             try:
                 profile = self.app.config.profile(user_key)
                 profile = {**profile, "name": str(profile.get("name") or "用户视觉供应商")}
+                override = str(
+                    model_override if model_override is not None else cfg.get("model") or ""
+                ).strip()
+                if override:
+                    profile["model"] = override
                 backends.append(profile)
             except (ValueError, KeyError):
                 logger.warning("vision: 配置的视觉供应商不可用：%s", user_key)
@@ -524,6 +536,48 @@ class VisionRouter:
         if not parts:
             raise ValueError("vision: 无法读取任何图片文件")
         return self.describe_parts(parts, question, json_mode, cancel_event, vision_budget)
+
+    def describe_files_with_profile(
+        self,
+        profile: dict[str, Any],
+        paths: list[str],
+        question: str = "",
+        cancel_event: threading.Event | None = None,
+        vision_budget: VisionBudget | None = None,
+    ) -> str:
+        """用**指定模型档案**分析图片（Studio「识别图片」优先当前参数模型）。
+
+        与 describe_files 的区别：不查视觉配置、不走默认链、不做链式降级——调用方
+        要能明确知道这次是否成功，失败后再自行决定是否回落到视觉配置。
+        """
+        parts = []
+        for path in paths:
+            part = encode_image_file(str(path))
+            if part:
+                parts.append(part)
+        if not parts:
+            raise ValueError("vision: 无法读取任何图片文件")
+        return self.describe_parts_with_profile(profile, parts, question, cancel_event, vision_budget)
+
+    def describe_parts_with_profile(
+        self,
+        profile: dict[str, Any],
+        image_parts: list[dict[str, Any]],
+        question: str = "",
+        cancel_event: threading.Event | None = None,
+        vision_budget: VisionBudget | None = None,
+    ) -> str:
+        if not image_parts:
+            raise ValueError("vision: 没有可用的图片")
+        prompt = (question or "").strip() or "请描述这张图片的内容。"
+        return self._budgeted_backend_call(
+            profile,
+            image_parts,
+            prompt,
+            cancel_event=cancel_event,
+            budget=vision_budget,
+            operation="vision_analyze:selected",
+        )
 
     def _describe_with_chain(
         self,
@@ -1284,8 +1338,9 @@ class VisionRouter:
         probe: str,
         image_parts: list[dict[str, Any]],
         prompt: str,
+        model_override: str | None = None,
     ) -> dict[str, Any]:
-        backends = self.vision_backends(provider_model_key)
+        backends = self.vision_backends(provider_model_key, model_override)
         if not backends:
             return {"ok": False, "probe": probe, "error_kind": "unknown", "reason": "No vision backend is configured."}
         try:
@@ -1325,16 +1380,17 @@ class VisionRouter:
             "endpoint": str(last.get("base_url") or "").rstrip("/"),
         }
 
-    def probe_text(self, provider_model_key: str | None = None) -> dict[str, Any]:
+    def probe_text(self, provider_model_key: str | None = None, model_override: str | None = None) -> dict[str, Any]:
         """Probe text inference independently from image-input capability."""
-        return self._probe(provider_model_key, "text", [], "\u53ea\u56de\u590d OK")
+        return self._probe(provider_model_key, "text", [], "\u53ea\u56de\u590d OK", model_override)
 
-    def probe(self, provider_model_key: str | None = None) -> dict[str, Any]:
+    def probe(self, provider_model_key: str | None = None, model_override: str | None = None) -> dict[str, Any]:
         """Probe actual image-input capability with a valid RGB JPEG."""
         image_part = {"type": "image", "media_type": "image/jpeg", "data": PROBE_JPEG_B64}
         return self._probe(
             provider_model_key, "vision", [image_part],
             "\u8fd9\u662f\u4e00\u5f20\u6d4b\u8bd5\u56fe\u3002\u8bf7\u53ea\u56de\u590d OK\u3002",
+            model_override,
         )
 
     def _legacy_probe(self, provider_model_key: str | None = None) -> dict[str, Any]:

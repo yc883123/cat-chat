@@ -2908,6 +2908,9 @@ export async function loadMcpServers() {
   return state.bootstrap.mcp_servers;
 }
 
+const visionModelsCache = new Map();
+let visionModelsToken = 0;
+
 export function populateVisionSettings() {
   const settings = state.bootstrap.settings || {};
   const vision = settings.vision || {};
@@ -2922,18 +2925,62 @@ export function populateVisionSettings() {
       const group = document.createElement('optgroup');
       group.label = kind === 'local' ? '本地 API / 模型' : '在线 API';
       for (const provider of list) {
-        const option = new Option(`${provider.name || provider.id} · ${provider.model || ''}`, provider.model_key || provider.id);
+        // 与 Studio 参数设置同口径：下拉只显示供应商名，模型交给右侧模型下拉。
+        const option = new Option(provider.name || provider.model_key || provider.id, provider.model_key || provider.id);
         group.append(option);
       }
       select.append(group);
     }
     const target = vision.provider_model_key || previous || '';
     if ([...select.options].some((option) => option.value === target)) select.value = target;
-    const deleteButton = $('#deleteVisionProvider');
-    if (deleteButton) deleteButton.disabled = !select.value;
+    void populateVisionModels(select.value, vision.model || '', true);
   }
   const timeout = $('#visionTimeout'); if (timeout) timeout.value = vision.timeout_ms || 180000;
   const maxImages = $('#visionMaxImages'); if (maxImages) maxImages.value = vision.max_images || 4;
+}
+
+/**
+ * 视觉模型下拉：按选中的 API 档案读取 /models。
+ * wantedModel 为空时用档案自身配置的 model 作为默认值；读取失败也保留这个值，
+ * 保证「供应商 + 模型」至少能显示用户原本配置的模型。
+ */
+export async function populateVisionModels(providerKey = '', wantedModel = '', useProfileDefault = false) {
+  const select = $('#visionModel');
+  if (!select) return;
+  const key = String(providerKey || '').trim();
+  if (!key) {
+    select.replaceChildren(new Option('OVH 默认链（自动）', ''));
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  const providers = state.bootstrap.model_profiles || state.bootstrap.providers || [];
+  const provider = providers.find((item) => (item.model_key || item.id) === key) || {};
+  const profileModel = String(provider.model || '').trim();
+  const target = String(wantedModel || (useProfileDefault ? profileModel : select.value) || profileModel).trim();
+  select.replaceChildren(new Option(target || '正在读取模型…', target));
+  const token = ++visionModelsToken;
+  let models = visionModelsCache.get(key);
+  if (!models) {
+    try {
+      ({ models } = await api('/api/providers/models', { method: 'POST', body: { model_key: key } }));
+    } catch (error) {
+      models = [];
+    }
+    visionModelsCache.set(key, models || []);
+  }
+  if (token !== visionModelsToken || ($('#visionProvider')?.value || '') !== key) return;
+  const ids = (models || [])
+    .map((entry) => (typeof entry === 'object' ? (entry.id ?? entry.model ?? entry.name) : String(entry)))
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  if (target && !ids.includes(target)) ids.unshift(target);
+  if (!ids.length) {
+    select.replaceChildren(new Option(target || '未检测到模型', target));
+    return;
+  }
+  select.replaceChildren(...ids.map((id) => new Option(id, id)));
+  select.value = ids.includes(target) ? target : ids[0];
 }
 
 export function populateSearchSettings() {
@@ -2998,6 +3045,7 @@ export async function saveVisionSettings(options = {}) {
   const payload = {
     vision: {
       provider_model_key: $('#visionProvider')?.value || '',
+      model: $('#visionModel')?.value || '',
       timeout_ms: Number($('#visionTimeout')?.value || 180000),
       max_images: Number($('#visionMaxImages')?.value || 4),
     },
@@ -3005,39 +3053,9 @@ export async function saveVisionSettings(options = {}) {
   try {
     const result = await api('/api/settings', { method: 'POST', body: payload });
     Object.assign(state.bootstrap.settings, result.settings);
-    const deleteButton = $('#deleteVisionProvider');
-    if (deleteButton) deleteButton.disabled = !payload.vision.provider_model_key;
     if (!options.quiet) toast('视觉设置已保存');
   } catch (error) {
     toast(`视觉设置保存失败：${error.message}`);
-  }
-}
-
-export function selectedVisionProvider() {
-  const key = $('#visionProvider')?.value || '';
-  return (state.bootstrap.model_profiles || state.bootstrap.providers || [])
-    .find((provider) => (provider.model_key || provider.id) === key) || null;
-}
-
-export function openVisionProviderForm() {
-  switchSettingsTab('models');
-  addProvider();
-}
-
-export async function deleteVisionProvider() {
-  const provider = selectedVisionProvider();
-  if (!provider) return;
-  if (!confirm(`删除 API 供应商“${provider.name || provider.id}”？这会同时移除模型配置。`)) return;
-  try {
-    await api(`/api/providers/${encodeURIComponent(provider.id)}`, { method: 'DELETE' });
-    const data = await api('/api/bootstrap');
-    state.bootstrap = { ...state.bootstrap, ...data };
-    populateModels();
-    renderProviders();
-    populateVisionSettings();
-    toast('API 供应商已删除');
-  } catch (error) {
-    toast(`删除 API 失败：${error.message}`);
   }
 }
 
@@ -3088,7 +3106,11 @@ export async function testVisionCapability(probe) {
   try {
     const result = await api('/api/vision/test', {
       method: 'POST',
-      body: { provider_model_key: $('#visionProvider')?.value || '', probe },
+      body: {
+        provider_model_key: $('#visionProvider')?.value || '',
+        model: $('#visionModel')?.value || '',
+        probe,
+      },
     });
     if (el) {
       const label = '视觉识别';

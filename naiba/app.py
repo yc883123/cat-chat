@@ -340,6 +340,19 @@ class NaibaChatApp:
             self.storage.delete_expired_aux_conversations(ttl_days=7)
         except Exception:  # noqa: BLE001
             logger.exception("辅助对话过期清扫失败")
+        # 工作台（Studio，_studio_plan_v2.md）：独立生成域，只依赖 shared config/llm；
+        # 组装根在此注入两个交接回调（唯一跨进聊天域的路径，见 naiba/studio/handoff.py）。
+        from naiba.studio.service import StudioService
+
+        self.studio = StudioService(
+            self,
+            self._studio_create_conversation,
+            lambda body: self.runs.submit_chat(body),
+        )
+        try:
+            self.studio.recover()
+        except Exception:  # noqa: BLE001 - Studio 启动恢复失败不阻断启动
+            logger.exception("Studio 任务启动恢复失败")
         self.updater = UpdateManager(self._paths.app_dir, self._paths.data_dir)
         # 「更新代理」独立于全局 proxy：启动时注入一次，设置保存后再注入更新。
         self.updater.configure_proxy(self.config.data.get("update_proxy"))
@@ -352,7 +365,18 @@ class NaibaChatApp:
         self.runs.shutdown()
         self.plans.shutdown()
         self.jobs.shutdown()
+        try:
+            self.studio.shutdown()
+        except Exception:  # noqa: BLE001 - 收尾不互相阻断
+            logger.exception("Studio 收尾失败")
         self.mcp.stop()
+
+    def _studio_create_conversation(self, body: dict[str, Any]) -> dict[str, Any]:
+        """工作台交接的普通会话创建回调：复用标准会话创建入口，出错向前传中文原因。"""
+        payload, status = self.api_create_conversation(body)
+        if status >= 400:
+            raise ValueError(str(payload.get("error") or f"创建会话失败（HTTP {status}）"))
+        return payload
 
     def register_mcp_server(self, values: dict[str, Any]) -> dict[str, Any]:
         config = self.config.upsert_mcp_server(values)

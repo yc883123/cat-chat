@@ -20,6 +20,9 @@ import { dismissOnboarding, resetOnboarding, saveOnboardingProvider, selectOnboa
 // 辅助对话 import 追加在 import 块末尾：守门测试（test_turn_rail / test_context_menu）
 // 按 import 区的**行号**断言 01-core / 04-messages 的位置，插在前面会把它们推后而报红。
 import { bindAuxChatEvents, restoreAuxChats, restoreDockGroup } from "./21-aux-chat.js";
+// 工作台（Studio）import 同样追加在末尾（_studio_plan_v2.md P4.1）。
+import { bindStudioEvents } from "./22-studio.js";
+// 工作台（Studio）import 同样追加在末尾（_studio_plan_v2.md P4.1）。
 // ---- 聊天背景图（外观页） ----
 // 上传走同一个 /api/uploads（落盘 data/uploads/<日期>/，返回绝对路径），但**不进入
 // state.pendingFiles**——那是"随消息发送的附件"，背景图不该出现在输入框上方。
@@ -3107,3 +3110,6 @@ updateFileTabsButton();
 bindAuxChatEvents();
 restoreDockGroup();
 void restoreAuxChats();
+// 工作台（_studio_plan_v2.md P4）：事件接线（组合根唯一装配点）。
+bindStudioEvents();
+// 工作台（_studio_plan_v2.md P4）：事件接线（组合根唯一装配点）。

@@ -135,6 +135,10 @@
                窄容器降级时收掉文字就只剩一个裸数字「13」「19」，认不出是什么。
                有图标的（文件 / 辅助 / 刷新）才会被收掉。见 styles.css 的 data-tb 阶梯。 -->
           <button class="control-button task-button" id="openTasks" title="查看异步任务"><span id="taskCount">0</span> <span class="button-label keep">任务</span></button>
+          <button class="control-button" id="openStudio" title="打开工作台（模板检索与生成）" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h16"></path></svg>
+            <span class="button-label">工作台</span>
+          </button>
           <button class="control-button" id="openSkills" title="查看当前会话已选择的 Skill"><span id="skillCount">0</span> <span class="button-label keep">Skill</span></button>
           <button class="mcp-button" id="mcpStatus" title="查看 MCP 状态"><i></i><span>MCP</span></button>
           <button class="control-button" id="reloadPage" type="button" title="刷新页面（内嵌窗口无法使用 F5 时点击）">
@@ -183,6 +187,62 @@
       </section>
 
       <div class="turn-rail" id="turnRail" hidden></div>
+
+      <!-- 工作台（Studio）：三区布局——模板列表 / 详情与参数 / 生成结果。
+           顶栏「工作台」按钮开关；body[data-studio="on"] 时铺 rows 2-4，普通对话区让位。 -->
+      <section class="studio-view" id="studioView" hidden aria-label="工作台">
+        <header class="studio-topbar">
+          <div class="studio-tabs" id="studioTabs" role="tablist" aria-label="工作台分类"></div>
+          <label class="studio-search">
+            <input id="studioSearch" type="search" placeholder="搜索模板" aria-label="搜索模板">
+          </label>
+          <button class="control-button" id="studioCustomImport" type="button" title="把 .txt / .md / .json 导入为自定义条目（在「我的」里查看与管理）">导入</button>
+        </header>
+        <div class="studio-columns">
+          <div class="studio-list" id="studioList" role="list" aria-label="模板列表"></div>
+          <div class="studio-detail" id="studioDetail">
+            <div class="studio-detail-head">
+              <h2 id="studioDetailTitle"></h2>
+              <p id="studioDetailSummary"></p>
+              <div class="studio-detail-chips" id="studioDetailChips"></div>
+            </div>
+            <div class="studio-vars" id="studioVarsForm" style="display:none"></div>
+            <label class="studio-request-field">我的输入
+              <textarea id="studioUserRequest" rows="4" placeholder="把你的要求写在这里" aria-label="用户输入"></textarea>
+            </label>
+            <div class="studio-model-row">
+              <label>模型配置
+                <select id="studioProviderSelect" aria-label="模型配置"></select>
+              </label>
+              <label>模型
+                <select id="studioModelSelect" aria-label="模型"></select>
+              </label>
+            </div>
+            <details class="studio-body-preview" id="studioBodyPreviewWrap" open>
+              <summary>正文预览<em id="studioBodyEditableHint" hidden>（可编辑，保存后生效）</em></summary>
+              <pre class="studio-body-text" id="studioBodyPreview"></pre>
+              <textarea class="studio-body-text" id="studioBodyEditor" rows="8" hidden></textarea>
+            </details>
+            <div class="studio-actions">
+              <button class="primary-button" id="studioGenerate" type="button">生成</button>
+              <button class="control-button" id="studioCancelTask" type="button" hidden>取消</button>
+              <button class="control-button" id="studioRetryTask" type="button" hidden>重试</button>
+              <button class="control-button" id="studioHandoff" type="button" hidden>继续追问…</button>
+              <button class="control-button" id="studioCustomSave" type="button" hidden>保存修改</button>
+              <button class="control-button" id="studioCustomDelete" type="button" hidden>删除</button>
+              <button class="control-button" id="studioCustomExport" type="button" hidden>导出</button>
+              <span class="studio-task-hint" id="studioTaskHint" role="status"></span>
+            </div>
+          </div>
+          <div class="studio-result">
+            <header class="studio-result-header">
+              <p>生成结果<small id="studioResultMeta"></small></p>
+              <div class="studio-task-history" id="studioTaskHistory" aria-label="历史任务"></div>
+            </header>
+            <div class="studio-result-stream" id="studioResultStream" aria-live="polite"></div>
+          </div>
+        </div>
+      </section>
 
       <section class="composer-wrap">
         <div class="active-task-bar" id="activeTaskBar" hidden></div>
@@ -442,6 +502,25 @@
       <div class="form-actions">
         <button class="control-button" type="button" data-close="starterPromptDialog">取消</button>
         <button class="primary-button" id="saveStarterPrompt" type="button">保存</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 工作台「继续追问」的必选 Agent 框：初始无选中项，「继续」不可用；
+       取消/关闭只回工作台，不创建会话（唯一跨域口是 /api/studio/handoff）。 -->
+  <dialog id="studioAgentDialog" class="panel-dialog studio-agent-dialog">
+    <div class="dialog-toolbar">
+      <div><h2>继续追问 · 选择 Agent</h2><p>新的普通对话会绑定这个 Agent，之后在这里继续聊</p></div>
+      <button class="icon-button" data-close="studioAgentDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+    </div>
+    <div class="studio-agent-body">
+      <div class="studio-agent-list" id="studioAgentList" role="listbox" aria-label="Agent 列表" aria-required="true"></div>
+      <label class="field-wide">说了接什么（可空）
+        <textarea id="studioHandoffNote" rows="3" placeholder="例如：接着把第 3 段的镜头改成仰拍"></textarea>
+      </label>
+      <div class="form-actions">
+        <button class="control-button" type="button" data-close="studioAgentDialog">取消</button>
+        <button class="primary-button" id="studioHandoffConfirm" type="button" disabled>创建会话并继续</button>
       </div>
     </div>
   </dialog>

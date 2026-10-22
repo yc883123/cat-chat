@@ -1,0 +1,134 @@
+{
+ "generated_at": "2026-10-22",
+ "counts": {
+  "expected_plan": 561,
+  "input": 561,
+  "output_index": 559,
+  "rejected": 2,
+  "sensitive": 2,
+  "empty": 0,
+  "dupes": 0
+ },
+ "sources": {
+  "qiyuan_assets.prompt_library": {
+   "input": 63,
+   "output": 63,
+   "dupes": 0,
+   "rejected": 0,
+   "expected": 63,
+   "empty_ids": [],
+   "sensitive_ids": [],
+   "dupes_ids": []
+  },
+  "chat_studio_extra": {
+   "input": 24,
+   "output": 23,
+   "dupes": 0,
+   "rejected": 1,
+   "expected": 24,
+   "empty_ids": [],
+   "sensitive_ids": [
+    "vs-121-anima"
+   ],
+   "dupes_ids": []
+  },
+  "qiyuan_assets.novel_templates": {
+   "input": 53,
+   "output": 53,
+   "dupes": 0,
+   "rejected": 0,
+   "dupes_ids": []
+  },
+  "qiyuan_assets.game_prompt_templates": {
+   "input": 24,
+   "output": 24,
+   "dupes": 0,
+   "rejected": 0,
+   "dupes_ids": []
+  },
+  "qiyuan_assets.style_libs": {
+   "input": 397,
+   "output": 396,
+   "dupes": 0,
+   "rejected": 1,
+   "per_lib": {
+    "gp": {
+     "input": 84,
+     "output": 84
+    },
+    "lb": {
+     "input": 180,
+     "output": 179
+    },
+    "vs": {
+     "input": 133,
+     "output": 133
+    }
+   },
+   "empty_ids": []
+  }
+ },
+ "descriptive_mentions": [
+  {
+   "id": "h3-001-manga4grid",
+   "source": "qiyuan_assets.prompt_library",
+   "markers": [
+    "群交"
+   ]
+  },
+  {
+   "id": "vs-101-k2-engine",
+   "source": "chat_studio_extra",
+   "markers": [
+    "nsfw",
+    "露点"
+   ]
+  }
+ ],
+ "products": {
+  "catalog_index.json": {
+   "items": 559,
+   "bytes": 731975
+  },
+  "bodies_prompt.json": {
+   "items": 86,
+   "bytes": 801325
+  },
+  "bodies_script.json": {
+   "items": 53,
+   "bytes": 24411
+  },
+  "bodies_game.json": {
+   "items": 24,
+   "bytes": 15727
+  },
+  "bodies_style.json": {
+   "items": 396,
+   "bytes": 265544
+  }
+ },
+ "anomalies": {
+  "note": "主库 4 条（vs-008-qwen50 / vs-027-xh2 / vs-029-guofeng-coll1 / vs-037-daily0621）原型截段 chars 与启元清洗后正文不一致，以启元清洗后正文与 chars 为准（cleaned 清单在条目里）",
+  "game_vars_placeholder_keys": []
+ },
+ "rejects": [
+  {
+   "id": "vs-121-anima",
+   "source": "chat_studio_extra",
+   "reason": [],
+   "sensitive": [
+    "全裸",
+    "nsfw",
+    "nude"
+   ]
+  },
+  {
+   "id": "style-lb-096",
+   "source": "qiyuan_assets.style_libs",
+   "reason": [],
+   "sensitive": [
+    "erotic"
+   ]
+  }
+ ]
+}

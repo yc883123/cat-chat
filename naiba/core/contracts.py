@@ -368,6 +368,21 @@ MESSAGE_ORDER_KEYS: tuple[str, ...] = ("created_at", "rowid")
 #   ② `storage.terminal_event_sequence` 查该 run 有没有落过终态事件（宽限判据）。
 TERMINAL_RUN_EVENT_TYPES: tuple[str, ...] = ("done", "cancelled", "error")
 
+# ---- Studio（工作台）任务事件契约 ----
+# Studio 生成任务走 naiba/studio 自己的生命周期（runner 用 ModelRuntime.complete() 的
+# status 回调转发增量），事件存 `data_dir/studio/tasks/<id>.events.jsonl`，由
+# `/api/studio/tasks/<id>/events?after=<n>` 提供 cursor 读取；与聊天 Run 的
+# TERMINAL_RUN_EVENT_TYPES / run_events 无关。
+STUDIO_TASK_EVENT_TYPES: tuple[str, ...] = (
+    "status", "reasoning_delta", "delta", "usage", "done", "cancelled", "error",
+)
+STUDIO_TERMINAL_TASK_EVENT_TYPES: tuple[str, ...] = ("done", "cancelled", "error")
+# 任务状态机（store/runner/jobs 与前端共用口径）：
+# queued → running → done | cancelled | failed；服务启动遗留 running 收敛为 interrupted。
+STUDIO_TASK_STATUSES: tuple[str, ...] = (
+    "queued", "running", "done", "cancelled", "failed", "interrupted",
+)
+
 EVENT_PAYLOAD_KEYS: dict[str, frozenset[str] | None] = {
     # ---- 对话流（前端 handleChatEvent 可处置）----
     "run_started": frozenset({"run_id"}),

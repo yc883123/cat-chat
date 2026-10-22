@@ -516,6 +516,30 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json({"servers": self.app.mcp.lightweight_status()})
         elif path == "/api/migration/health":
             self._json(self.app.migration_health())
+        elif path == "/api/studio/catalog":
+            # 工作台（Studio）预设目录：只读，返回索引摘要（条目明细走 /items）。
+            self._json(*self.app.studio.api_catalog_summary())
+        elif path == "/api/studio/catalog/items":
+            query = urllib.parse.parse_qs(parsed.query)
+            self._json(*self.app.studio.api_catalog_items(
+                module=str(query.get("module", [""])[0]),
+                item_type=str(query.get("type", [""])[0]),
+                query=str(query.get("q", [""])[0]),
+                has_vars=str(query.get("has_vars", [""])[0]),
+            ))
+        elif path.startswith("/api/studio/catalog/"):
+            self._json(*self.app.studio.api_catalog_item(path.rsplit("/", 1)[-1]))
+        elif path == "/api/studio/custom":
+            self._json(*self.app.studio.api_custom_list())
+        elif path == "/api/studio/tasks":
+            query = urllib.parse.parse_qs(parsed.query)
+            self._json(*self.app.studio.api_tasks(str(query.get("active_only", [""])[0])))
+        elif path.startswith("/api/studio/tasks/") and path.endswith("/events"):
+            task_id = path.split("/")[-2]
+            query = urllib.parse.parse_qs(parsed.query)
+            self._json(*self.app.studio.api_task_events(task_id, str(query.get("after", ["0"])[0])))
+        elif path.startswith("/api/studio/tasks/"):
+            self._json(*self.app.studio.api_task(path.rsplit("/", 1)[-1]))
         elif path.startswith("/api/"):
             self._json({"error": "接口不存在"}, HTTPStatus.NOT_FOUND)
         else:
@@ -579,6 +603,20 @@ class RequestHandler(BaseHTTPRequestHandler):
                 )
         elif path == "/api/conversations":
             self._json(*self.app.api_create_conversation(body))
+        elif path == "/api/studio/generate":
+            # 工作台生成：Studio 自有异步任务（不创建普通会话，不产生 chat Run）。
+            self._json(*self.app.studio.api_generate(body))
+        elif path == "/api/studio/handoff":
+            # 唯一跨进聊天域的路径：Agent 已显式确认后创建普通会话并提交首轮。
+            self._json(*self.app.studio.api_handoff(body))
+        elif path == "/api/studio/custom/import":
+            self._json(*self.app.studio.api_custom_import(body))
+        elif path == "/api/studio/custom":
+            self._json(*self.app.studio.api_custom_create(body))
+        elif path.startswith("/api/studio/tasks/") and path.endswith("/cancel"):
+            self._json(*self.app.studio.api_task_cancel(path.split("/")[-2]))
+        elif path.startswith("/api/studio/tasks/") and path.endswith("/retry"):
+            self._json(*self.app.studio.api_task_retry(path.split("/")[-2]))
         elif path == "/api/aux-chats":
             # 辅助对话创建（计划-辅助对话 §3.3）：标题自动编号、权限档忽略入参强制只读。
             try:
@@ -1114,6 +1152,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             skill_id = path[len("/api/skills/"):-len("/override")]
             self._json(*self.app.api_skill_override(skill_id, body))
             return
+        if path.startswith("/api/studio/custom/"):
+            self._json(*self.app.studio.api_custom_update(path.rsplit("/", 1)[-1], body))
+            return
         self._json({"error": "接口不存在"}, HTTPStatus.NOT_FOUND)
 
     def do_PUT(self) -> None:
@@ -1182,6 +1223,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path.startswith("/api/tool_sets/"):
             deleted = self.app.config.delete_tool_set(path.rsplit("/", 1)[-1])
             self._json({"ok": deleted}, HTTPStatus.OK if deleted else HTTPStatus.NOT_FOUND)
+        elif path.startswith("/api/studio/custom/"):
+            self._json(*self.app.studio.api_custom_delete(path.rsplit("/", 1)[-1]))
         elif path.startswith("/api/conversations/") and path.endswith("/messages"):
             conversation_id = path.split("/")[-2]
             if self.app.storage.list_background_tasks(conversation_id, active_only=True):

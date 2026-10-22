@@ -3292,3 +3292,133 @@ html[data-theme="dark"] .usage-chip.active { color: var(--violet-deep); }
   .settings-dialog .mcp-row-body, .settings-dialog .mcp-row-sub { padding-left: 14px; }
   .settings-dialog .mcp-row-actions { justify-content: flex-start; }
 }
+
+/* ============ 工作台（Studio，22-studio.js + index.html #studioView） ============ */
+/* 视图开关由 body[data-studio] 表达；studio 视图占用 chat-main 的 rows 2-4（顶栏保持），
+   普通对话区（背景层/消息区/轮次轨/输入区）在 studio 态隐藏，返回时原样恢复。 */
+body[data-studio="on"] .chat-backdrop,
+body[data-studio="on"] .messages,
+body[data-studio="on"] .turn-rail,
+body[data-studio="on"] .composer-wrap { display: none; }
+body[data-studio="on"] .studio-view { display: grid; }
+.studio-view {
+  grid-area: 2 / 1 / 4 / 2;
+  display: none;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: var(--bg);
+}
+.studio-topbar { display: flex; align-items: center; gap: var(--s-3); padding: 10px var(--s-4) 8px; border-bottom: 1px solid var(--line); }
+.studio-tabs { display: flex; flex-wrap: nowrap; gap: 6px; overflow-x: auto; scrollbar-width: thin; }
+.studio-tab {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  border-radius: var(--r-full);
+  padding: 5px 12px;
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.studio-tab[aria-selected="true"] { background: var(--accent-soft); border-color: var(--violet-line); color: var(--violet-deep); font-weight: 600; }
+.studio-search { margin-left: auto; }
+.studio-search input {
+  width: 190px; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text); font-size: 13px;
+}
+.studio-columns {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4) var(--s-4);
+  min-height: 0;
+}
+.studio-list { overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding-right: 2px; }
+.studio-row {
+  display: block; width: 100%; text-align: left;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md);
+  padding: 10px 12px; cursor: pointer;
+}
+.studio-row:hover { border-color: var(--line-strong); box-shadow: var(--shadow-1); }
+.studio-row.active { border-color: var(--violet-line); background: var(--violet-softer); }
+.studio-row-head { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; min-width: 0; }
+.studio-row-title { font-size: 13px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.studio-row-chips { display: inline-flex; flex-wrap: nowrap; gap: 4px; max-width: 55%; overflow: hidden; }
+.studio-row-chips em { font-style: normal; font-size: 10.5px; color: var(--muted); background: var(--surface-2); border-radius: var(--r-full); padding: 1px 6px; white-space: nowrap; }
+.studio-row-summary { margin: 6px 0 0; font-size: 12px; line-height: 1.55; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.studio-list-loading, .studio-empty { color: var(--muted); font-size: 12.5px; padding: 12px 10px; }
+
+.studio-detail {
+  min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: var(--s-3);
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg);
+  padding: var(--s-4);
+}
+.studio-detail-head h2 { margin: 0; font-size: 16px; color: var(--text); }
+.studio-detail-head p { margin: 6px 0 0; font-size: 12.5px; color: var(--muted); }
+.studio-detail-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.studio-chip { font-size: 11px; padding: 2px 8px; border-radius: var(--r-full); background: var(--accent-soft); color: var(--violet-deep); font-weight: 500; }
+.studio-chip.soft { background: var(--surface-2); color: var(--muted); font-weight: 400; }
+.studio-vars { display: grid; gap: 8px; }
+.studio-var-field { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 8px; font-size: 12.5px; color: var(--text); }
+.studio-var-field input { padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); color: var(--text); font-size: 12.5px; }
+.studio-request-field { display: grid; gap: 6px; font-size: 12.5px; color: var(--text); }
+.studio-request-field textarea {
+  min-height: 84px; resize: vertical; padding: 10px 12px; border: 1px solid var(--violet-line);
+  border-radius: var(--r-md); background: var(--violet-softer); color: var(--text); font-size: 13px; line-height: 1.6;
+}
+.studio-model-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.studio-model-row label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); min-width: 0; }
+.studio-model-row select { padding: 7px 8px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); color: var(--text); font-size: 12.5px; max-width: 100%; }
+.studio-body-preview { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); }
+.studio-body-preview summary { cursor: pointer; padding: 8px 12px; font-size: 12.5px; color: var(--muted); }
+.studio-body-preview[open] summary { border-bottom: 1px solid var(--line); }
+.studio-body-text { margin: 0; padding: 10px 12px; max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 12px; line-height: 1.6; color: var(--text); font-family: inherit; }
+.studio-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.studio-task-hint { font-size: 12px; color: var(--muted); }
+
+.studio-result {
+  min-height: 0; overflow: hidden; display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg);
+}
+.studio-result-header {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px var(--s-4); border-bottom: 1px solid var(--line);
+}
+.studio-result-header p { margin: 0; font-size: 13px; font-weight: 600; color: var(--text); display: inline-flex; gap: 8px; align-items: baseline; }
+.studio-result-header small { font-weight: 400; font-size: 11.5px; color: var(--muted); }
+.studio-task-history { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.studio-task-row { font-size: 11px; border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); border-radius: var(--r-full); padding: 2px 9px; cursor: pointer; max-width: 190px; }
+.studio-task-row span { display: inline-block; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.studio-task-row em { font-style: normal; margin-left: 4px; }
+.studio-result-stream { flex: 1; min-height: 0; overflow-y: auto; padding: var(--s-4); font-size: 13px; line-height: 1.7; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+
+/* 追问交接框：初始无选中项，「创建会话并继续」禁用 */
+.studio-agent-dialog .studio-agent-body { display: grid; gap: var(--s-3); padding: 4px 0 0; }
+.studio-agent-list { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
+.studio-agent-row {
+  display: flex; align-items: baseline; gap: 10px; text-align: left;
+  border: 1px solid var(--line); background: var(--surface-2); border-radius: var(--r-md);
+  padding: 9px 12px; cursor: pointer; min-width: 0;
+}
+.studio-agent-row span { font-weight: 600; color: var(--text); font-size: 13px; }
+.studio-agent-row small { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.studio-agent-row.active { border-color: var(--violet-line); background: var(--violet-softer); }
+
+/* 手机视口（375px）：单栏分步——顶栏 tab 可巡视，列表/详情/结果纵向顺排 */
+@media (max-width: 760px) {
+  .studio-topbar { padding: 8px 10px 6px; gap: 6px; }
+  .studio-search { margin-left: 0; flex: 1; }
+  .studio-search input { width: 100%; }
+  .studio-columns { grid-template-columns: minmax(0, 1fr); overflow-y: auto; padding: 10px; gap: 10px; }
+  .studio-list { max-height: 42vh; }
+  .studio-detail, .studio-result { overflow: visible; }
+  .studio-result-stream { max-height: 46vh; }
+  .studio-request-field textarea { min-height: 64px; }
+  .studio-agent-list { max-height: 42vh; }
+}
+
+.studio-topbar .control-button {
+  flex: none;
+  padding: 6px 12px;
+  border-radius: var(--r-md);
+}

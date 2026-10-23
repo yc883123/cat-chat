@@ -3165,6 +3165,26 @@ html[data-theme="dark"] .usage-chip.active { color: var(--violet-deep); }
 .update-progress-fill.stalled { background: var(--warning); }
 .update-progress-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 6px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .update-stall { color: var(--warning); }
+/* 「更新产物」：作为 .update-status 的直接子元素，同样要把 flex 压回块级——
+   否则路径会被 justify-content:space-between 拉到右边，长路径没有换行空间。 */
+.settings-dialog .update-status > div.update-artifacts { display: block; min-height: 0; }
+.update-artifacts { padding: 10px 14px 12px; border-top: 1px solid var(--line); }
+.update-artifacts-row { display: flex; align-items: flex-start; gap: 8px; }
+.update-artifacts-row > span { flex: none; color: var(--muted); font-size: 12px; line-height: 20px; }
+.update-artifacts-row code {
+  flex: 1 1 auto; min-width: 0; font-size: 12px; line-height: 20px; color: var(--text);
+  overflow-wrap: anywhere; user-select: text;
+}
+.update-artifacts-copy {
+  flex: none; width: 24px; height: 24px; padding: 0; display: inline-grid; place-items: center;
+  border: 0; border-radius: var(--r-sm); background: transparent; color: var(--muted); cursor: pointer;
+}
+.update-artifacts-copy:hover { background: var(--surface-2); color: var(--text); }
+.update-artifacts-copy:active { transform: scale(.94); }
+.update-artifacts-copy svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+/* 覆盖 `.update-status p`（12px 内边距 + 独立底色）：这里只是产物信息的一行说明。 */
+.update-artifacts p { margin: 2px 0 0; padding: 0; background: none; font-size: 12px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; user-select: text; }
+.update-artifacts p.update-artifacts-warn { color: var(--warning); }
 /* 作者样式的 display:flex 会顶掉 UA 对 hidden 的 display:none，必须显式压回（同全项目写法）。 */
 .update-ready[hidden] { display: none; }
 .update-ready { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; padding: 10px 12px; font-size: 13px; background: var(--accent-soft); border: 1px solid var(--accent); border-radius: var(--r-md); }

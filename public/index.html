@@ -1454,6 +1454,18 @@
                 <span id="updateProgressSpeed">— MB/s</span>
               </div>
             </div>
+            <!-- 更新产物：文件放在哪、现在占多大。只读展示（路径可选中复制），不提供打开目录的能力。 -->
+            <div class="update-artifacts" id="updateArtifacts">
+              <div class="update-artifacts-row">
+                <span>更新文件夹</span>
+                <code id="updateArtifactsDir">-</code>
+                <button type="button" class="update-artifacts-copy" id="copyUpdateArtifactsDir"
+                        aria-label="复制更新文件夹路径" title="复制更新文件夹路径">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15V5a2 2 0 0 1 2-2h10"></path></svg>
+                </button>
+              </div>
+              <p id="updateArtifactsFile">当前没有保留的更新包</p>
+            </div>
           </div>
           <div class="form-actions update-actions">
             <button class="control-button" id="checkUpdate" type="button">检查更新</button>

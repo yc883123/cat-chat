@@ -360,6 +360,8 @@ export function renderUpdateStatus(status) {
         : `${formatUpdateSize(download.speed)}/s`;
     }
   }
+  // ---- 更新产物：文件放在哪、占多大 ----
+  renderUpdateArtifacts(status.artifacts);
   // ---- 下载中 / 已下载待重启：按钮与常驻入口 ----
   const ready = status.ready && status.ready.version ? status.ready : null;
   // "稍后重启"只对当时那个版本生效：又下完一个新版本就重新提醒（否则 vB 完成会被 vA 的稍后压成横幅）。
@@ -367,11 +369,14 @@ export function renderUpdateStatus(status) {
     updateReadyDismissed = false;
     updateReadyDismissedVersion = '';
   }
-  const canInstall = status.supported && status.mode !== 'source'
-    && selected && !selected.current && !ready
-    && !UPDATE_BUSY_PHASES.includes(status.phase);
+  const canInstall = updateInstallAllowed(status, selected);
   const offerRestartChoice = Boolean(ready) && !updateReadyDismissed && status.phase !== 'restarting';
-  $('#installUpdate').hidden = !canInstall;
+  const installButton = $('#installUpdate');
+  installButton.hidden = !canInstall;
+  // disabled 必须和 hidden 一起翻。点「立即更新」时会先置灰防重复提交；此后若是下载中途
+  // 断网失败、或下载完选择「不要更新」，按钮会重新出现——这里若只清 hidden 不清 disabled，
+  // 它就会永远停在点不动的状态（2026-10-23 真实事故：断网失败/放弃更新后都无法再点）。
+  installButton.disabled = !canInstall || installRequestPending;
   $('#cancelUpdate').hidden = !Boolean(status.can_cancel);
   $('#restartNow').hidden = !offerRestartChoice;
   $('#restartLater').hidden = !offerRestartChoice;
@@ -395,6 +400,46 @@ function formatUpdateSize(bytes) {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/* 「更新产物」：目录 + 当前包名 + 实际体积。字段全部来自 /api/update 的 artifacts，
+   前端不自己拼路径；接口短暂缺这一段时保留上一次的有效信息，避免误报「已清理」。 */
+function renderUpdateArtifacts(artifacts) {
+  if (!artifacts || typeof artifacts !== 'object') return;
+  const directory = String(artifacts.directory || '');
+  const dirEl = $('#updateArtifactsDir');
+  if (dirEl) {
+    dirEl.textContent = directory || '未知';
+    dirEl.title = directory;
+  }
+  const fileEl = $('#updateArtifactsFile');
+  if (!fileEl) return;
+  const name = String(artifacts.file_name || '');
+  const size = formatUpdateSize(artifacts.size_bytes);
+  const state = String(artifacts.state || 'absent');
+  let text = '当前没有保留的更新包';
+  if (state === 'downloading' && name) {
+    text = `正在下载 ${name}（已写入 ${size}）`;
+  } else if (state === 'ready' && name) {
+    text = `${name} · ${size} · 重启后生效`;
+  } else if (state === 'cleanup_failed' && name) {
+    text = `未能清理 ${name}（${size}），文件可能仍被其他程序占用`;
+  }
+  fileEl.textContent = text;
+  fileEl.classList.toggle('update-artifacts-warn', state === 'cleanup_failed');
+}
+
+/* 「立即更新」是否可用：可见性与可点性必须走同一口径。
+   ready 非空时一律不给装——包已下好，该走「立即重启」。装包请求在途的禁用由调用方叠加。 */
+function updateInstallAllowed(status, selected) {
+  return Boolean(
+    status.supported
+    && status.mode !== 'source'
+    && selected
+    && !selected.current
+    && !(status.ready && status.ready.version)
+    && !UPDATE_BUSY_PHASES.includes(status.phase)
+  );
+}
+
 /* 「已下载待重启」的一次性提示已读标记：只在本次会话内有效——
    点过「稍后重启」后切换为常驻横幅入口，避免两个位置重复出现同一动作。
    dismissedVersion 记录"稍后"的是哪个版本：之后又下完**另一个**版本时重置已读，
@@ -402,6 +447,8 @@ function formatUpdateSize(bytes) {
 let updateReadyDismissed = false;
 let updateReadyDismissedVersion = '';
 let updatePollTimer = null;
+// 「立即更新」请求在途标记：防重复提交；结束后必须回到 false，否则按钮会一直保持置灰。
+let installRequestPending = false;
 
 export function dismissUpdateReady() {
   updateReadyDismissed = true;
@@ -423,6 +470,8 @@ export function startUpdatePoll() {
     try {
       status = await api('/api/update');
     } catch (_) {
+      // 单次取状态失败不能让进度条和「取消下载」就此停摆：只要后端仍在忙，继续轮询。
+      if (updatePhaseBusy(state.bootstrap.update)) updatePollTimer = setTimeout(tick, 1000);
       return;
     }
     state.bootstrap.update = status;
@@ -562,6 +611,9 @@ export async function checkUpdate() {
   const button = $('#checkUpdate');
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
+  // 重新检查更新视为放弃上一次悬挂的安装请求（断网时请求可能迟迟不返回），
+  // 否则那个在途标记会让「立即更新」一直保持置灰。
+  installRequestPending = false;
   button.disabled = true;
   state.updateAutoSelectLatest = true;
   renderUpdateStatus({ ...(state.bootstrap.update || {}), phase: 'checking' });
@@ -596,6 +648,7 @@ export async function checkUpdate() {
 }
 
 export async function installUpdate() {
+  if (installRequestPending) return;
   const button = $('#installUpdate');
   const select = $('#updateVersionSelect');
   const tag = select.value;
@@ -606,9 +659,10 @@ export async function installUpdate() {
     toast(selected ? '2.0.0 及更早版本请前往 GitHub Release 手动下载' : '请先选择要安装的版本');
     return;
   }
-  if (!confirm(`确定要安装版本 ${selected.version} 吗？更新完成后程序将自动重启。`)) {
+  if (!confirm(`确定要安装版本 ${selected.version} 吗？下载完成后可选择立即重启。`)) {
     return;
   }
+  installRequestPending = true;
   button.disabled = true;
   try {
     const newStatus = await api('/api/update/install', { method: 'POST', body: { tag } });
@@ -618,7 +672,13 @@ export async function installUpdate() {
     startUpdatePoll();
   } catch (error) {
     toast(`更新失败：${error.message}`);
-    button.disabled = false;
+  } finally {
+    installRequestPending = false;
+    // 请求结束必须按当前状态重算可点性：成功时新状态是 downloading（继续置灰由 phase 保证），
+    // 失败（含断网中断）则要立刻恢复可点，让用户能直接重试。
+    const latest = state.bootstrap.update || {};
+    const latestReleases = Array.isArray(latest.releases) ? latest.releases : [];
+    button.disabled = !updateInstallAllowed(latest, latestReleases.find((release) => release.tag === select.value));
   }
 }
 

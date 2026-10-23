@@ -4,7 +4,7 @@
 
 import { $, $$, api, initializeAppearance, setServerStatus, state, syncAppearanceFromBootstrap, syncSidebarPrefsFromBootstrap, toast } from "./01-core.js";
 import { loadTasks, startTaskSync } from "./06-tasks-plans.js";
-import { populateModels, renderAgents, renderUpdateStatus } from "./07-models-agents.js";
+import { populateModels, renderAgents, renderUpdateStatus, startUpdatePoll as startFastUpdatePoll } from "./07-models-agents.js";
 import { loadConversationPromptPresets, loadConversations, restoreSidebarWidth, setSidebarScrollToActive, startConversationSync } from "./08-conversations.js";
 import { loadProviderPresets, migrateLegacyToolTemplates, populateAppearanceSettings, populateRuntimeSettings, populateSearchSettings, populateSkillSizeSetting, populateVisionSettings, renderAgentManager, renderMcp, renderProviders, renderSkills, startMcpPoll } from "./09-settings.js";
 import { loadStarterPrompts } from "./12-chat-input.js";
@@ -113,16 +113,22 @@ export async function initialize() {
 }
 
 // 后台检查可能启动时才开始（checking 阶段），前端以 30 秒间隔轮询感知结果。
+const UPDATE_BUSY = ['checking', 'downloading', 'restarting'];
+const updateBusy = (status) => UPDATE_BUSY.includes((status || {}).phase);
 export function startUpdatePoll() {
   if (state.updatePollTimer) return;
+  // 处于检查/下载/重启中时必须接上 07 的 500ms 快速轮询：本函数下面的慢轮询遇到 busy 会
+  // 直接跳过，只靠它的话，重开页面或另一个客户端发起更新后，界面会永远停在旧进度上。
+  if (updateBusy(state.bootstrap.update)) startFastUpdatePoll();
   state.updatePollTimer = window.setInterval(async () => {
     const status = state.bootstrap.update || {};
-    if (['checking', 'downloading', 'restarting'].includes(status.phase)) return;
+    if (updateBusy(status)) return;
     try {
       const next = await api('/api/update');
       if (next.checked_at !== status.checked_at || next.phase !== status.phase) {
         state.bootstrap.update = next;
         renderUpdateStatus(next);
+        if (updateBusy(next)) startFastUpdatePoll();
       }
     } catch (_) { /* 网络抖动时忽略，下一轮重试 */ }
   }, 30000);

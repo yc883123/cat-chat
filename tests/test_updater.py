@@ -15,6 +15,7 @@ import time
 import unittest
 import urllib.error
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -407,6 +408,47 @@ class ExecutableUpdateTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.manager.cancel_install()
 
+    def test_network_failure_mid_download_removes_partial_file(self):
+        """断网中断（非用户取消）同样不许留半成品：重试时应从零重下，而不是占着磁盘。"""
+        payload, checksum = self._payload(size=4 * 1024 * 1024)
+
+        def boom(reads):
+            if reads == 2:
+                raise ConnectionResetError("network dropped")
+
+        response = fake_download_response(payload, on_read=boom)
+        self.manager._open = lambda request, timeout=None: response
+
+        with self.assertRaises(ConnectionResetError):
+            self.manager._download(self._latest(checksum))
+
+        self.assertFalse(self._downloaded_path().exists(), "断网留下的半成品必须被清理")
+
+    def test_install_failure_leaves_status_retryable(self):
+        """下载失败后必须回到可重试状态（error 而不是一直卡在 downloading）。"""
+        self.set_build("2.1.6-beta")
+        self.manager.releases = [
+            {"tag": LATEST_TAG, "version": "2.1.7-beta", "published_at": "",
+             "release_url": f"https://github.com/{REPOSITORY}/releases/latest",
+             "release_notes": [], "installable": True, "current": False}
+        ]
+        self.manager._request_json = self.stub.route(latest=manifest_payload())
+
+        def broken(_latest):
+            raise ConnectionResetError("network dropped")
+
+        self.manager._download = broken
+        self.manager.start_install(LATEST_TAG)
+        deadline = time.time() + 5
+        while self.manager.phase == "downloading" and time.time() < deadline:
+            time.sleep(0.05)
+
+        status = self.manager.status()
+        self.assertEqual(status["phase"], "error")
+        self.assertIn("安装更新失败", status["error"])
+        self.assertEqual(status["ready"], {}, "失败不能留下待重启标记")
+        self.assertFalse(status["can_cancel"])
+
     def test_download_snapshot_flags_stall_after_silence(self):
         """长时间没有新字节 ⇒ stalled=True（前端据此把进度条标黄）。"""
         self.manager.phase = "downloading"
@@ -452,6 +494,104 @@ class ExecutableUpdateTests(unittest.TestCase):
         self.assertEqual(status["ready"]["version"], "2.1.7-beta")
         self.assertTrue(any(url.startswith(f"{LATEST_DL_BASE}/") for url in self.stub.calls))
         self.assertFalse(any(url.startswith(API_RELEASES_URL) for url in self.stub.calls))
+
+    # ---------- 产物位置与占用（设置页「更新产物」一行） ----------
+
+    def test_artifacts_report_actual_update_directory(self):
+        """目录由 data_dir 推导（自定义数据目录同样成立），没有文件时报 absent。"""
+        artifacts = self.manager.status()["artifacts"]
+        self.assertEqual(artifacts["directory"], str(self.data_dir / "update"))
+        self.assertEqual(artifacts["state"], "absent")
+        self.assertEqual(artifacts["file_name"], "")
+        self.assertEqual(artifacts["size_bytes"], 0)
+
+    def test_artifacts_track_active_file_while_downloading(self):
+        """下载中要报出正在写的文件名与磁盘上已写入的大小。"""
+        payload, checksum = self._payload(size=4 * 1024 * 1024)
+        snapshots = []
+        response = fake_download_response(
+            payload,
+            on_read=lambda reads: snapshots.append(self.manager.status()["artifacts"]) if reads == 2 else None,
+        )
+        self.manager._open = lambda request, timeout=None: response
+        self.manager.phase = "downloading"
+
+        path = self.manager._download(self._latest(checksum))
+
+        self.assertEqual(snapshots[0]["state"], "downloading")
+        self.assertEqual(snapshots[0]["file_name"], path.name)
+        self.assertGreater(snapshots[0]["size_bytes"], 0, "至少要报出已经落盘的字节数")
+
+    def test_artifacts_ready_reports_package_size(self):
+        payload, checksum = self._payload()
+        staged = self._downloaded_path()
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(payload)
+        self.manager._mark_ready(self._latest(checksum), staged)
+
+        artifacts = self.manager.status()["artifacts"]
+        self.assertEqual(artifacts["state"], "ready")
+        self.assertEqual(artifacts["file_name"], staged.name)
+        self.assertEqual(artifacts["size_bytes"], len(payload))
+
+    def test_artifacts_rejects_ready_name_outside_update_dir(self):
+        """标记被改坏（带上级目录）时不得把更新目录之外的文件报给界面。"""
+        outside = self.data_dir / "secret.exe"
+        outside.write_bytes(b"MZ" + b"\x00" * 2048)
+        self.manager.ready = {"version": "2.1.7-beta", "commit": COMMIT_A, "file": "../secret.exe"}
+
+        artifacts = self.manager.status()["artifacts"]
+        self.assertEqual(artifacts["state"], "absent")
+        self.assertEqual(artifacts["file_name"], "", "越界文件不得出现在状态里")
+
+    def test_artifacts_after_cancel_matches_disk(self):
+        """取消后文件已删就该报 absent，不能声称还保留着。"""
+        payload, checksum = self._payload(size=4 * 1024 * 1024)
+        response = fake_download_response(
+            payload, on_read=lambda reads: self.manager._cancel.set() if reads == 1 else None
+        )
+        self.manager._open = lambda request, timeout=None: response
+        self.manager.phase = "downloading"
+
+        with self.assertRaises(UpdateCancelled):
+            self.manager._download(self._latest(checksum))
+
+        self.manager.phase = "available"
+        artifacts = self.manager.status()["artifacts"]
+        self.assertEqual(artifacts["state"], "absent")
+        self.assertEqual(artifacts["file_name"], "")
+
+    def test_artifacts_report_cleanup_failure_without_lying(self):
+        """删不掉时如实报残留与实际大小，而不是「已清理」。"""
+        update_dir = self.data_dir / "update"
+        update_dir.mkdir(parents=True, exist_ok=True)
+        leftover = update_dir / "naiba-chat-bbbbbbbbbbbb.download"
+        leftover.write_bytes(b"MZ" + b"\x00" * 4096)
+
+        with mock.patch.object(Path, "unlink", side_effect=PermissionError("locked")):
+            self.assertFalse(self.manager._remove_file(leftover))
+
+        artifacts = self.manager.status()["artifacts"]
+        self.assertEqual(artifacts["state"], "cleanup_failed")
+        self.assertEqual(artifacts["file_name"], leftover.name)
+        self.assertEqual(artifacts["size_bytes"], 4098)
+
+    def test_cleanup_failure_does_not_mask_original_download_error(self):
+        """清理异常不能盖掉真正的失败原因：断网时对外仍报网络错误。"""
+        payload, checksum = self._payload(size=2 * 1024 * 1024)
+
+        def drop_on_first_read(_reads):
+            raise ConnectionResetError("network dropped")
+
+        response = fake_download_response(payload, on_read=drop_on_first_read)
+        self.manager._open = lambda request, timeout=None: response
+
+        with mock.patch.object(Path, "unlink", side_effect=PermissionError("locked")):
+            with self.assertRaises(ConnectionResetError):
+                self.manager._download(self._latest(checksum))
+
+        self.assertTrue(self.manager._cleanup_failures, "删不掉要留下来给界面展示")
+        self.assertEqual(self.manager.status()["artifacts"]["state"], "cleanup_failed")
 
     def test_ready_state_survives_restart_and_can_be_applied(self):
         """待重启状态落盘：重启 App 后仍能一键应用，不必重新下载。"""

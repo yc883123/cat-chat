@@ -2260,6 +2260,17 @@ export function bindEvents() {
   initTurnRail();
   $('#saveToken').addEventListener('click', saveAccessToken);
   $('#checkUpdate').addEventListener('click', checkUpdate);
+  $('#copyUpdateArtifactsDir')?.addEventListener('click', async () => {
+    const path = $('#updateArtifactsDir')?.textContent || '';
+    if (!path || path === '未知' || path === '-') return;
+    try {
+      await copyText(path);
+      toast('已复制更新文件夹路径');
+    } catch (_) {
+      // 剪贴板被拒时把路径原样给出来，用户仍能手动选中复制。
+      toast(`复制失败，请手动选择路径：${path}`);
+    }
+  });
   $('#installUpdate').addEventListener('click', installUpdate);
   $('#cancelUpdate').addEventListener('click', cancelUpdate);
   $('#restartNow').addEventListener('click', applyUpdate);

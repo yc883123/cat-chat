@@ -98,6 +98,19 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_windows_executable(path: Path) -> bool:
+    """只读前两个字节判断 PE 头（MZ）。
+
+    历史实现用 ``path.read_bytes()[:2]``：为了两个字节把整个 exe（上百 MB）读进内存，
+    下载校验和每次启动恢复「待重启」状态都要吃一次这个开销。
+    """
+    try:
+        with path.open("rb") as handle:
+            return handle.read(2) == b"MZ"
+    except OSError:
+        return False
+
+
 def _release_body_to_notes(body: Any) -> list[str]:
     """把 GitHub Release body 转成结构化更新说明列表，供版本下拉展示。"""
     if not body:
@@ -132,6 +145,11 @@ class UpdateManager:
             "updated_at": 0.0,
         }
         self._cancel = threading.Event()
+        # 更新产物的磁盘视图（设置页展示「文件在哪、占多大」）：_package_file 是本次下载正在写的
+        # .download，校验通过后由 ready 元数据接管；_cleanup_failures 记录删不掉的文件（被占用/无权限），
+        # 只用于如实展示，绝不覆盖原始的下载/校验错误。
+        self._package_file: Path | None = None
+        self._cleanup_failures: dict[str, str] = {}
         self.build = self._read_build_info()
         # 「已下载待重启」状态：从磁盘标记恢复，重启 App 后仍可一键应用。
         self.ready: dict[str, Any] | None = self._load_ready()
@@ -331,6 +349,8 @@ class UpdateManager:
                 # 下载进度（前端进度条 / 卡死提示）与取消可用性。
                 "download": self._download_snapshot(),
                 "can_cancel": phase == "downloading",
+                # 产物位置与占用：目录由 data_dir 推导，文件名/体积只读 stat，不读包内容。
+                "artifacts": self._artifacts_summary(phase, ready),
                 # 已下载待重启：跨重启保留，用户可选「立即重启」或稍后手动重启。
                 "ready": {
                     "version": str(ready.get("version") or ""),
@@ -823,6 +843,83 @@ class UpdateManager:
             "stalled": stalled,
         }
 
+    # ---- 更新产物（位置 / 文件名 / 磁盘占用） ----
+
+    def _update_dir(self) -> Path:
+        return self.data_dir / "update"
+
+    def _safe_update_path(self, name: str) -> Path | None:
+        """把标记里的文件名映射到更新目录内；带目录、绝对路径或空名一律拒绝。
+
+        标记文件是本机数据，但仍按不可信输入处理：``../../x.exe`` 不能越出更新目录。
+        """
+        text = str(name or "").strip()
+        if not text or text != Path(text).name:
+            return None
+        return self._update_dir() / text
+
+    @staticmethod
+    def _file_size(path: Path) -> int:
+        try:
+            return int(path.stat().st_size)
+        except OSError:
+            return 0
+
+    def _remove_file(self, path: Path) -> bool:
+        """删除更新产物；失败不抛。
+
+        清理发生在下载失败/取消/放弃的收尾路径上，抛出去只会盖掉真正要告诉用户的错误。
+        删不掉（被杀毒软件或权限占住）时记下来，界面按「未能清理 + 实际大小」如实展示。
+        """
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            with self.lock:
+                self._cleanup_failures[str(path)] = str(exc)
+            return False
+        with self.lock:
+            self._cleanup_failures.pop(str(path), None)
+        return True
+
+    def _artifacts_summary(self, phase: str, ready: dict[str, Any]) -> dict[str, Any]:
+        """设置页「更新产物」一行：目录 + 当前包名 + 实际体积。
+
+        优先级：正在写的包 → 待重启的包 → 删不掉的残留 → 没有产物。只 stat，不读内容。
+        """
+        directory = self._update_dir()
+        active = self._package_file if phase == "downloading" else None
+        if active is not None and active.is_file():
+            return {
+                "directory": str(directory),
+                "file_name": active.name,
+                "size_bytes": self._file_size(active),
+                "state": "downloading",
+            }
+        ready_path = self._safe_update_path(str(ready.get("file") or "")) if ready else None
+        if ready_path is not None and ready_path.is_file():
+            return {
+                "directory": str(directory),
+                "file_name": ready_path.name,
+                "size_bytes": self._file_size(ready_path),
+                "state": "ready",
+            }
+        with self.lock:
+            leftovers = [Path(item) for item in self._cleanup_failures if Path(item).is_file()]
+        if leftovers:
+            leftover = leftovers[0]
+            return {
+                "directory": str(directory),
+                "file_name": leftover.name,
+                "size_bytes": self._file_size(leftover),
+                "state": "cleanup_failed",
+            }
+        return {
+            "directory": str(directory),
+            "file_name": "",
+            "size_bytes": 0,
+            "state": "absent",
+        }
+
     # ---- 取消下载 ----
 
     def cancel_install(self) -> dict[str, Any]:
@@ -834,7 +931,7 @@ class UpdateManager:
         return self.status()
 
     def _download(self, latest: dict[str, Any]) -> Path:
-        update_dir = self.data_dir / "update"
+        update_dir = self._update_dir()
         update_dir.mkdir(parents=True, exist_ok=True)
         target = update_dir / f"naiba-chat-{latest['commit'][:12]}.download"
         request = urllib.request.Request(
@@ -842,14 +939,16 @@ class UpdateManager:
             headers={"Accept": "application/octet-stream", "User-Agent": "naiba-chat-updater"},
         )
         self._cancel.clear()
+        with self.lock:
+            self._package_file = target
         received = 0
-        with self._open(request, timeout=120) as response, target.open("wb") as output:
-            try:
-                total = int(response.headers.get("Content-Length") or 0)
-            except (TypeError, ValueError):
-                total = 0
-            self._begin_download(total)
-            try:
+        try:
+            with self._open(request, timeout=120) as response, target.open("wb") as output:
+                try:
+                    total = int(response.headers.get("Content-Length") or 0)
+                except (TypeError, ValueError):
+                    total = 0
+                self._begin_download(total)
                 while True:
                     if self._cancel.is_set():
                         raise UpdateCancelled()
@@ -859,22 +958,30 @@ class UpdateManager:
                     output.write(chunk)
                     received += len(chunk)
                     self._advance_download(received)
-            except UpdateCancelled:
-                output.close()
-                target.unlink(missing_ok=True)
-                raise
-        if target.stat().st_size < 1024 * 1024 or target.read_bytes()[:2] != b"MZ":
-            target.unlink(missing_ok=True)
+        except BaseException:
+            # 断网 / 取消 / 写盘失败都别把半成品留在磁盘上（with 已先关闭文件句柄再删）。
+            self._remove_file(target)
+            self._clear_package_file(target)
+            raise
+        if target.stat().st_size < 1024 * 1024 or not _is_windows_executable(target):
+            self._remove_file(target)
+            self._clear_package_file(target)
             raise RuntimeError("下载的更新文件不是有效的 Windows 程序")
         if _sha256(target) != latest["sha256"]:
-            target.unlink(missing_ok=True)
+            self._remove_file(target)
+            self._clear_package_file(target)
             raise RuntimeError("更新文件校验失败，已拒绝安装")
         return target
+
+    def _clear_package_file(self, path: Path) -> None:
+        with self.lock:
+            if self._package_file == path:
+                self._package_file = None
 
     # ---- 「已下载待重启」状态 ----
 
     def _ready_marker_path(self) -> Path:
-        return self.data_dir / "update" / READY_MARKER
+        return self._update_dir() / READY_MARKER
 
     def _load_ready(self) -> dict[str, Any] | None:
         """启动时恢复「已下载待重启」：标记、文件存在且哈希一致才算数。"""
@@ -892,26 +999,27 @@ class UpdateManager:
         commit = str(data.get("commit") or "")
         sha256 = str(data.get("sha256") or "").lower()
         name = str(data.get("file") or "")
-        path = self.data_dir / "update" / name if name else None
+        path = self._safe_update_path(name) if name else None
         valid = bool(
             re.fullmatch(r"[0-9a-f]{40}", commit)
             and re.fullmatch(r"[0-9a-f]{64}", sha256)
             and path is not None
             and path.is_file()
             and path.stat().st_size >= 1024 * 1024
-            and path.read_bytes()[:2] == b"MZ"
+            and _is_windows_executable(path)
             and _sha256(path) == sha256
         )
         if not valid:
             # 半成品/损坏/被清理：静默丢弃，让用户重新下载，不留下误导性的待重启入口。
             marker.unlink(missing_ok=True)
             if path is not None:
-                path.unlink(missing_ok=True)
+                self._remove_file(path)
             return None
         if commit == str(self.build.get("commit") or ""):
             # 标记对应的版本已经是当前运行版本（说明更新已应用）：清掉残留。
             marker.unlink(missing_ok=True)
-            path.unlink(missing_ok=True)
+            if path is not None:
+                self._remove_file(path)
             return None
         return {
             "version": str(data.get("version") or commit[:7]),
@@ -938,6 +1046,7 @@ class UpdateManager:
             self.ready = payload
             self.phase = "ready"
             self.error = ""
+            self._package_file = None
             self._reset_download_progress()
 
     def discard_ready(self) -> dict[str, Any]:
@@ -949,9 +1058,9 @@ class UpdateManager:
             self.ready = None
             self.phase = "available" if self._update_pending() else "idle"
         self._ready_marker_path().unlink(missing_ok=True)
-        name = str(ready.get("file") or "")
-        if name:
-            (self.data_dir / "update" / name).unlink(missing_ok=True)
+        path = self._safe_update_path(str(ready.get("file") or ""))
+        if path is not None:
+            self._remove_file(path)
         return self.status()
 
     def _update_pending(self) -> bool:
@@ -966,8 +1075,8 @@ class UpdateManager:
             ready = dict(self.ready or {})
         if not ready:
             raise RuntimeError("没有已下载的更新，请先下载")
-        path = self.data_dir / "update" / str(ready.get("file") or "")
-        if not path.is_file() or _sha256(path) != str(ready.get("sha256") or ""):
+        path = self._safe_update_path(str(ready.get("file") or ""))
+        if path is None or not path.is_file() or _sha256(path) != str(ready.get("sha256") or ""):
             self.discard_ready()
             raise RuntimeError("更新文件已损坏或被清理，请重新下载")
         with self.lock:

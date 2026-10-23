@@ -291,13 +291,17 @@ async function apiSettings() {
   await sleep(300);
   check('⑦ 稍后重启：转为常驻待重启横幅', await visible('updateReady'));
   await closeSettings();
-  check('⑦ 稍后重启后关窗：悬浮卡转为「更新待重启」并给立即重启入口',
-    (await visible('updateFloat')) && (await visible('updateFloatApply')));
+  // 现行口径（syncUpdateFloat 注释里记的那次事故）：点过「稍后重启」就不再弹悬浮卡，
+  // 待重启入口常驻在设置页横幅里——本段原先断言「关窗后弹卡」，与现行为相反，已按现行为改写。
+  check('⑦ 稍后重启后关窗：不再弹悬浮卡（尊重「稍后」选择）', !(await visible('updateFloat')));
+  await openUpdatesTab();
+  check('⑦ 待重启入口常驻在设置页横幅里',
+    (await visible('updateReady')) && (await visible('readyApply')) && (await visible('readyDiscard')));
   await page.screenshot({ path: path.join(SHOT_DIR, 'update_panel_float_ready.png') });
 
-  await page.click('#updateFloatDiscard');
+  await page.click('#readyDiscard');
   await sleep(900);
-  check('⑦ 放弃更新：悬浮卡收起', !(await visible('updateFloat')));
+  check('⑦ 放弃更新：横幅收起', !(await visible('updateReady')));
 
   await page.unroute('**/api/update');
   await page.unroute('**/api/update/cancel');

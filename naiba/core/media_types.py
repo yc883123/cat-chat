@@ -186,6 +186,10 @@ JOB_MEDIA_DECLARATIONS: dict[str, dict[str, str]] = {
     "check": {"policy": "never", "extract": "none"},
     "http_poll": {"policy": "never", "extract": "none"},
     "subagent": {"policy": "never", "extract": "none"},
+    # 逐帧抽取：产物是成百上千帧，**刻意不自动采集/挂回**消息（计划 2026-10-22 §4.3）。
+    # 帧通过受权的 manifest 分页接口读取；自动挂卡会把消息与展示链路撑爆，
+    # 也会让"抽取完成"看起来像"已经看过每一帧"。
+    "video_frames": {"policy": "never", "extract": "none"},
 }
 
 

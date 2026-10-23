@@ -453,6 +453,74 @@ def show_media_intent(text: str) -> bool:
     return False
 
 
+# ============================================================
+# 「精确逐帧」（extract_video_frames_exact）：用户意图判定（纯函数层）
+# ============================================================
+# 这是一道**授权门**，不是"语义建议"：模型传什么参数都不能自证意图，只有承载本轮
+# 用户原文的普通主对话 Run 能置位（计划 2026-10-22 §4.2）。判定必须 fail closed：
+# 无法判断、含否定、只在附件/引用里出现「逐帧」字样 → 一律不放行。
+#
+# 设计取舍（与 show_media_intent 同构，但规则方向相反）：
+# show_media 是"有正向动作词才放行"；逐帧是"必须明确说出连续/每帧语义才放行"，
+# 因为它的代价是整段视频的每一帧落盘（几百到几千张 PNG），误判成本远高于一次出卡。
+_FRAME_INTENT_STRONG_TERMS: tuple[str, ...] = (
+    "逐帧", "每一帧", "每个帧", "每帧", "逐格", "每一格", "每个格",
+    "连续帧", "全部帧", "所有帧", "整段帧", "一帧不漏", "一帧不落",
+    "不要漏帧", "不漏帧", "帧序列", "帧号",
+    "frame by frame", "every frame", "all frames",
+)
+# 排除「逐帧」被当作"不要"对象的表述：这些词出现在**同一句**时整句不放行
+# （「不要逐帧」「不需要逐帧」是明确否定）。
+_FRAME_INTENT_NEGATIONS: tuple[str, ...] = (
+    "不要", "不用", "不想", "不需要", "无需", "无须", "不必", "没必要",
+    "禁止", "别", "勿", "甭", "不许", "不准", "不能", "不可", "算了",
+)
+# 概览类请求：即使句子里出现「帧」也只走抽样（extract_frames），不进精确工具。
+_FRAME_INTENT_SAMPLING_TERMS: tuple[str, ...] = (
+    "抽几帧", "抽一些帧", "抽几格", "关键帧", "概览", "快速看", "大致看",
+    "切镜点", "切镜", "转场", "代表帧",
+)
+# 引用/转述：别人说的不算本轮用户请求（同 show_media 口径）。
+_FRAME_INTENT_REPORTING: tuple[str, ...] = (
+    "他说", "她说", "它说", "有人说", "听说", "据说", "提到", "写道", "写着",
+    "转述", "复述", "引用", "说过", "原文里",
+)
+
+
+def video_frames_intent(text: str) -> bool:
+    """本轮用户原文是否**明确要求**逐帧/连续帧抽取（extract_video_frames_exact 的门）。
+
+    只在该工具已 opt-in 的普通主对话 Run 上调用（`run/chat.py` 装配处）。规则：
+
+    - 同一句里要有强逐帧词（逐帧/每一帧/连续帧/逐格/一帧不漏…）；
+    - 该句不含否定词（不要逐帧/不需要逐帧 → 拒绝）；
+    - 该句不含抽样/概览词（抽几帧/关键帧/概览 → 走 extract_frames）；
+    - 该句不含转述标记（他说/原文里/提到…）；
+    - 动作词与词本身都不在引号内（`_mask_quoted` 已把引号内容压成空格）。
+
+    无法判断时返回 False（fail closed）。附件里的指令、工具输出、模型自述都不作为来源。
+    """
+    raw = str(text or "")
+    if not raw.strip():
+        return False
+    masked = _mask_quoted(raw)
+    boundaries = [match for match in _SENTENCE_SPLIT_RE.finditer(masked)]
+    starts = [0, *(match.end() for match in boundaries)]
+    ends = [*(match.start() for match in boundaries), len(masked)]
+    for start, end in zip(starts, ends):
+        sentence = masked[start:end]
+        if not any(term in sentence for term in _FRAME_INTENT_STRONG_TERMS):
+            continue
+        if any(term in sentence for term in _FRAME_INTENT_NEGATIONS):
+            continue
+        if any(term in sentence for term in _FRAME_INTENT_SAMPLING_TERMS):
+            continue
+        if any(term in sentence for term in _FRAME_INTENT_REPORTING):
+            continue
+        return True
+    return False
+
+
 def _is_http_url(value: str) -> bool:
     return str(value or "").strip().lower().startswith(("http://", "https://"))
 

@@ -28,7 +28,7 @@ _METADATA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
-CURRENT_SCHEMA_VERSION = 27
+CURRENT_SCHEMA_VERSION = 28
 
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
@@ -914,6 +914,34 @@ def _migrate_to_v27(db: sqlite3.Connection) -> None:
         print(f"[naiba-storage] v27：{updated} 个内置 Agent 主会话追加了 show_media")
 
 
+def _migrate_to_v28(db: sqlite3.Connection) -> None:
+    """分离式（detached）Job：background_tasks 加 ``detached`` 与 ``origin_run_id`` 两列。
+
+    为什么不能只靠「parent_job_id 为空」表达 detached：现有 ``create_run`` / ``active_run``
+    的互斥判定都是「**顶层** = parent_job_id 为空」，一条空父 ID 的活动记录会被当成
+    正在回答的顶层 Run，从而占住会话输入互斥位、进入 ``list_primary``、被
+    ``_pending_background_jobs`` 等待。逐帧抽取 Job 必须与主聊天并行，所以需要一枚
+    独立的显式标记。
+
+    口径（计划 2026-10-22 §4.3）：
+    - ``detached = 1`` 的 Job 照常进 ``/api/tasks?jobs_only=1`` 列表，但**不**占
+      ``active_run`` 互斥位、不出现在 ``list_primary``、不被聊天收尾等待；
+    - ``origin_run_id`` 只记录发起它的 Run（审计/来源显示），**不建立**父子取消关系：
+      聊天取消/结束不级联取消它，任务面板的停止按钮才是唯一取消入口。
+
+    纯加列，默认 0/空串，存量行行为不变，无数据改写、无 VACUUM。
+    """
+    for column, definition in (
+        ("detached", "INTEGER NOT NULL DEFAULT 0"),
+        ("origin_run_id", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        try:
+            db.execute(f"SELECT {column} FROM background_tasks LIMIT 1")
+        except sqlite3.OperationalError:
+            db.execute(f"ALTER TABLE background_tasks ADD COLUMN {column} {definition}")
+    db.commit()
+
+
 # 目标版本 -> 迁移函数。新增版本时在此追加并提升 CURRENT_SCHEMA_VERSION。
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
@@ -943,6 +971,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     25: _migrate_to_v25,
     26: _migrate_to_v26,
     27: _migrate_to_v27,
+    28: _migrate_to_v28,
 }
 
 
@@ -3204,10 +3233,11 @@ class ChatStorage:
         )
 
     def active_run(self, conversation_id: str) -> dict[str, Any] | None:
-        """该对话当前的**顶层**运行中 Run（子 Job 不算）。
+        """该对话当前的**顶层**运行中 Run（子 Job 与分离式 Job 都不算）。
 
         与 create_run / create_chat_run 的 ACTIVE_RUN 互斥语义保持一致：只有顶层 Run
-        占用对话，后台子 Job（parent_job_id 非空）不阻塞用户继续对话。
+        占用对话，后台子 Job（parent_job_id 非空）与 detached Job（逐帧抽取等，显式
+        detached=1、可脱离聊天运行）都不阻塞用户继续对话。
         """
         with self._connect() as db:
             row = db.execute(
@@ -3217,6 +3247,7 @@ class ChatStorage:
                 "FROM background_tasks WHERE conversation_id = ? "
                 f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} "
                 "AND (parent_job_id IS NULL OR parent_job_id = '') "
+                "AND detached = 0 "
                 "ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 (conversation_id,),
             ).fetchone()
@@ -3522,7 +3553,8 @@ class ChatStorage:
                 active = db.execute(
                     "SELECT id FROM background_tasks WHERE conversation_id = ? "
                     f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} "
-                    "AND (parent_job_id IS NULL OR parent_job_id = '') LIMIT 1",
+                    "AND (parent_job_id IS NULL OR parent_job_id = '') "
+                    "AND detached = 0 LIMIT 1",
                     (conversation_id,),
                 ).fetchone()
                 if active:
@@ -3597,17 +3629,23 @@ class ChatStorage:
         plan_id: str = "",
         parent_job_id: str = "",
         owner_session_id: str = "",
+        detached: bool = False,
+        origin_run_id: str = "",
     ) -> dict[str, Any]:
         now = int(time.time() * 1000)
         task_id = uuid.uuid4().hex
         owner = owner_session_id or conversation_id
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            if not parent_job_id:
+            # detached 的任务与主聊天并行：它既不占顶层互斥位，也不做互斥检查。
+            # 判定必须用显式 detached 标记，不能只看 parent_job_id 为空（见
+            # _migrate_to_v28 的注释：空父 ID 的默认语义是"顶层 Run"）。
+            if not parent_job_id and not detached:
                 active = db.execute(
                     "SELECT id FROM background_tasks WHERE conversation_id = ? "
                     f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} "
-                    "AND (parent_job_id IS NULL OR parent_job_id = '') LIMIT 1",
+                    "AND (parent_job_id IS NULL OR parent_job_id = '') "
+                    "AND detached = 0 LIMIT 1",
                     (conversation_id,),
                 ).fetchone()
                 if active:
@@ -3616,8 +3654,8 @@ class ChatStorage:
                 "INSERT INTO background_tasks("
                 "id, conversation_id, kind, interaction_mode, input_message_id, plan_id, "
                 "agent_id, agent_name, status, message, snapshot, detail, created_at, updated_at, "
-                "parent_job_id, owner_session_id"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, '{}', ?, ?, ?, ?)",
+                "parent_job_id, owner_session_id, detached, origin_run_id"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, '{}', ?, ?, ?, ?, ?, ?)",
                 (
                     task_id,
                     conversation_id,
@@ -3633,6 +3671,8 @@ class ChatStorage:
                     now,
                     parent_job_id,
                     owner,
+                    1 if detached else 0,
+                    origin_run_id,
                 ),
             )
         return self.get_background_task(task_id) or {}
@@ -4122,7 +4162,8 @@ class ChatStorage:
                 "SELECT id, conversation_id, kind, interaction_mode, input_message_id, plan_id, "
 "agent_id, agent_name, status, message, detail, error, "
 "cancel_requested, created_at, started_at, updated_at, finished_at, "
-"parent_job_id, owner_session_id, progress, current_step, attempt, checkpoint, result "
+"parent_job_id, owner_session_id, progress, current_step, attempt, checkpoint, result, "
+"detached, origin_run_id "
                 "FROM background_tasks WHERE id = ?",
                 (task_id,),
             ).fetchone()
@@ -4153,7 +4194,8 @@ class ChatStorage:
                 "SELECT id, conversation_id, kind, interaction_mode, input_message_id, plan_id, "
 "agent_id, agent_name, status, message, detail, error, "
 "cancel_requested, created_at, started_at, updated_at, finished_at, "
-"parent_job_id, owner_session_id, progress, current_step, attempt, checkpoint, result "
+"parent_job_id, owner_session_id, progress, current_step, attempt, checkpoint, result, "
+"detached, origin_run_id "
                 f"FROM background_tasks {where} ORDER BY created_at DESC LIMIT ?",
                 parameters,
             ).fetchall()
@@ -4393,4 +4435,8 @@ class ChatStorage:
             result["progress"] = 0.0
         result["attempt"] = int(result.get("attempt") or 0)
         result["cancel_requested"] = bool(result.get("cancel_requested"))
+        # detached 是分离式 Job 的显式标记（不占会话互斥位、不进入"正在回答"）。
+        # 统一转成 bool，避免前端拿到 0/1 时把两种情况写成两套判断。
+        result["detached"] = bool(result.get("detached"))
+        result["origin_run_id"] = str(result.get("origin_run_id") or "")
         return result

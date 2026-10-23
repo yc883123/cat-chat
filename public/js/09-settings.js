@@ -3255,6 +3255,8 @@ export function showAgentForm(agent = null) {
   state.agentFormSkillIds = agent?.skill_ids ? [...agent.skill_ids] : [];
   state.agentFormIsNew = !agent;
   state.agentFormToolScope = agent?.tool_scope ? [...agent.tool_scope] : [];
+  // 单独授权：与 tool_scope 分开存放。旧数据没有这个键就是「一项都没授权」。
+  state.agentFormToolOptIns = Array.isArray(agent?.tool_opt_ins) ? [...agent.tool_opt_ins] : [];
   state.agentFormUnknownTools = [];
   // 旧 Agent 的 tool_scope 为空 = 不限制（运行时全放行，且以后新增的工具自动纳入）。
   // 界面上按“全选”展示，但只要用户没动过勾选就仍以空数组保存，避免被固化成死列表。
@@ -3591,13 +3593,18 @@ export function updateToolPresetUI() {
 }
 
 export function updateToolCounter() {
-  const total = (state.toolCatalog?.tools || []).length;
+  const allTools = state.toolCatalog?.tools || [];
+  const optInCount = allTools.filter((tool) => tool.opt_in).length;
+  const total = allTools.length - optInCount;
   const counter = $('#agentToolCount');
   const unrestricted = state.agentFormUnrestricted && !state.agentFormScopeTouched;
+  // 计数分开写：普通工具的「已选 N / 总数」与「单独授权 K 项」是两条独立通道，
+  // 合成一个分母会让人以为 opt-in 也被全选了。
+  const optInSuffix = optInCount ? ` · 单独授权 ${(state.agentFormToolOptIns || []).length} 项` : '';
   if (counter) {
-    counter.textContent = unrestricted
+    counter.textContent = (unrestricted
       ? `全部 ${total} 个（未限制）`
-      : `已选 ${state.agentFormToolScope.length} / ${total} 个工具`;
+      : `已选 ${state.agentFormToolScope.length} / ${total} 个工具`) + optInSuffix;
   }
   // 分区标签上的计数：切到别的页也能一眼看到勾了多少。
   const tabCount = $('#agentToolTabCount');
@@ -4046,11 +4053,24 @@ export async function renderAgentToolPicker() {
   // 打开工具集面板时强制取新：MCP 工具是运行时按需连接的，用启动时的旧目录会「看不见 MCP 工具」。
   await ensureToolCatalog({ maxAgeMs: 0 });
   const catalog = state.toolCatalog?.tools || [];
+  // 「单独授权」工具（opt_in）**不参与**普通勾选：全选、不限、预设展开都不该打开它。
+  // 目录里仍然列出它们（在专用区块里渲染），但这里先把它们从 tool_scope 里摘出去。
+  const optInNames = new Set(catalog.filter((tool) => tool.opt_in).map((tool) => tool.name));
+  const scopeCatalog = catalog.filter((tool) => !optInNames.has(tool.name));
+  if (state.agentFormToolScope.length) {
+    state.agentFormToolScope = state.agentFormToolScope.filter((name) => !optInNames.has(name));
+  }
+  // 只有目录里确实带着 opt_in 条目时才按目录收敛（目录拉取失败/是旧缓存时，
+  // 收敛会把已授权项静默清空，下一次保存就真丢授权了——宁可保留不显示）。
+  if (optInNames.size) {
+    state.agentFormToolOptIns = (state.agentFormToolOptIns || [])
+      .filter((name) => optInNames.has(name));
+  }
   // 兼容旧配置：挑出当前工具目录里已不存在的名字（老版本移除的工具、临时掉线的
   // MCP 工具等）单独保留。它们不参与勾选、计数与预设匹配，但保存时原样写回，
   // 这样旧 Agent 打开就能看到原本的勾选，不用重新配一遍。
   if (state.agentFormToolScope.length) {
-    const knownNames = new Set(catalog.map((tool) => tool.name));
+    const knownNames = new Set(scopeCatalog.map((tool) => tool.name));
     state.agentFormUnknownTools = [...new Set(
       state.agentFormToolScope.filter((name) => !knownNames.has(name)),
     )];
@@ -4059,8 +4079,8 @@ export async function renderAgentToolPicker() {
   // 仍未选择时：新 Agent 用后端默认选中集（=标准模式）；旧 Agent（空 tool_scope=不限制）按全选展示。
   if (!state.agentFormToolScope.length) {
     state.agentFormToolScope = state.agentFormIsNew
-      ? catalog.filter((t) => t.default_selected).map((t) => t.name)
-      : catalog.map((t) => t.name);
+      ? scopeCatalog.filter((tool) => tool.default_selected).map((tool) => tool.name)
+      : scopeCatalog.map((tool) => tool.name);
   }
   // 初始加载也应用依赖联动，让显示状态与运行时放行的 allowed_tools 一致。
   // 这里不置 touched：自动补依赖不算用户改配置，未限制的旧 Agent 仍按“不限制”保存。
@@ -4070,9 +4090,46 @@ export async function renderAgentToolPicker() {
   state.agentToolOnlySelected = false;
   swapToolView(false);
   resetAgentToolPeek();
+  renderAgentToolOptIns();
   renderAgentToolPresetCards();
   renderUnknownToolsHint();
   renderToolScopeList();
+}
+
+// 「单独授权」区块：只渲染工具目录里 opt_in=true 的项。
+// 它与 tool_scope 是两条独立通道：预设/全选/分组全选/依赖联动都不读也不写这里。
+export function renderAgentToolOptIns() {
+  const box = $('#agentToolOptIns');
+  if (!box) return;
+  const items = (state.toolCatalog?.tools || []).filter((tool) => tool.opt_in);
+  if (!items.length) {
+    box.hidden = true;
+    box.innerHTML = '';
+    return;
+  }
+  const selected = new Set(state.agentFormToolOptIns || []);
+  box.hidden = false;
+  box.innerHTML = `
+    <div class="agent-tool-optins-head">
+      <b>单独授权</b>
+      <small>这里的工具不会被预设或全选打开，只有在这里打勾才会对这台 Agent 生效</small>
+    </div>
+    <div class="agent-tool-optins-list">${items.map((tool) => `
+      <label class="agent-tool-optin-card">
+        <input type="checkbox" value="${escapeHtml(tool.name)}"${selected.has(tool.name) ? ' checked' : ''}>
+        <span><b>${escapeHtml(tool.name)}</b><i>需单独授权</i><p>${escapeHtml(tool.description || '')}</p></span>
+      </label>`).join('')}</div>`;
+  box.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      const next = new Set(state.agentFormToolOptIns || []);
+      if (cb.checked) next.add(cb.value);
+      else next.delete(cb.value);
+      state.agentFormToolOptIns = items
+        .map((tool) => tool.name)
+        .filter((name) => next.has(name));
+      updateToolCounter();
+    });
+  });
 }
 
 // 工具卡片（分组视图与搜索结果共用）：勾选框 + 名称 + 两行说明。
@@ -4336,12 +4393,29 @@ function renderFilteredScope(list, catalog, filter) {
   list.append(box);
 }
 
+// 「单独授权」工具不在普通清单里出现：分组视图、只看已选、搜索结果都先剔除它们，
+// 否则分类全选会把它们顺带勾进 tool_scope（那条通道与 opt-in 是分开的两件事）。
+function stripOptInGroups(groups, optInNames) {
+  if (!optInNames.size) return groups || [];
+  const keep = (names) => (names || []).filter((name) => !optInNames.has(name));
+  return (groups || []).map((group) => ({
+    ...group,
+    tools: keep(group.tools),
+    direct_tools: keep(group.direct_tools),
+    subgroups: (group.subgroups || [])
+      .map((sub) => ({ ...sub, tools: keep(sub.tools) }))
+      .filter((sub) => sub.tools.length),
+  })).filter((group) => (group.tools || []).length);
+}
+
 // 只重画工具列表（搜索框输入时调用）：不重拉目录、不改已选范围。
 export function renderToolScopeList() {
   const list = $('#agentToolScope');
   if (!list) return;
-  const catalog = state.toolCatalog?.tools || [];
-  const groups = state.toolCatalog?.groups || [];
+  const allTools = state.toolCatalog?.tools || [];
+  const optInNames = new Set(allTools.filter((tool) => tool.opt_in).map((tool) => tool.name));
+  const catalog = allTools.filter((tool) => !optInNames.has(tool.name));
+  const groups = stripOptInGroups(state.toolCatalog?.groups || [], optInNames);
   const toolMap = new Map(catalog.map((tool) => [tool.name, tool]));
   const filter = String(state.agentToolFilter || '').trim().toLowerCase();
   list.innerHTML = '';
@@ -4384,6 +4458,9 @@ export async function saveAgentForm() {
     tool_scope: keepUnrestricted
       ? []
       : [...new Set([...state.agentFormToolScope, ...state.agentFormUnknownTools])],
+    // 单独授权：独立通道，永远按实际勾选保存（"未限制"语义不覆盖它——
+    // 不限制指的是普通工具，不是"连整段视频逐帧落盘也一并放开"）。
+    tool_opt_ins: [...new Set(state.agentFormToolOptIns || [])],
   };
   try {
     const saved = await api('/api/agents', { method: 'POST', body: payload });

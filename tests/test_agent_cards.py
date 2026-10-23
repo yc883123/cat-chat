@@ -182,8 +182,9 @@ class ToolGroupCatalogTests(unittest.TestCase):
         self.assertEqual(membership["读取与检索"], [
             "read_file", "list_directory", "search_files",
             "read_pdf", "pdf_render_pages", "pdf_zoom_region",
-            "probe_video", "extract_frames",
-        ], "视频抽帧与 PDF 三件套同组（读元信息 + 抽帧，都是「读取与检索」）")
+            "probe_video", "extract_frames", "extract_video_frames_exact",
+        ], "视频抽帧与 PDF 三件套同组（读元信息 + 抽帧，都是「读取与检索」）；"
+           "精确逐帧跟随抽样抽帧，但只能单独授权")
         self.assertEqual(membership["文件写入与编辑"], ["write_file", "edit_file"])
         self.assertEqual(membership["命令与脚本执行"], ["pwsh", "run_skill_script"])
         self.assertEqual(membership["视觉与图片"], ["vision_analyze", "vision_image_ops", "show_media"],
@@ -310,11 +311,21 @@ class ToolGroupCatalogTests(unittest.TestCase):
                 self.assertNotIn("show_media", presets[preset_id],
                                  "show_media 不进按能力分档的预设（只随内置 Agent 出厂）")
         # 全能模式 = 全部工具 − 互斥组内被显式 exclude 的那一个（subagent_spawn：
-        # group:* 会把互斥的两个子代理工具同时展开，默认只留 fork，见 §九.116）。
+        # group:* 会把互斥的两个子代理工具同时展开，默认只留 fork，见 §九.116）
+        # − 需要「单独授权」的 opt-in 工具（它们绝不能被 group:* 顺带打开）。
         full_preset = next(p for p in TOOL_PRESETS if p["id"] == "full")
         self.assertEqual(list(full_preset.get("exclude") or []), ["subagent_spawn"],
                          "全能模式必须显式排除互斥组的后位者")
-        self.assertEqual(len(presets["full"]), len(known) - 1, "全能模式覆盖全部工具（除互斥排除项）")
+        from naiba.config import OPT_IN_TOOLS
+
+        self.assertFalse(
+            presets["full"] & set(OPT_IN_TOOLS),
+            "全能模式（group:*）不得打开 opt-in 工具：它们只能由 Agent 的单独授权开启",
+        )
+        self.assertEqual(
+            len(presets["full"]), len(known) - 1 - len(OPT_IN_TOOLS),
+            "全能模式覆盖全部工具（除互斥排除项与 opt-in 工具）",
+        )
 
     def test_default_selected_tools_equal_standard_preset(self) -> None:
         from naiba.config import TOOL_PRESETS, _DEFAULT_SELECTED_TOOLS

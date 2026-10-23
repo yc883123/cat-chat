@@ -2523,8 +2523,30 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 
 /* ── 工具分类改版（6 组 · 风险徽标 · MCP 二级分组 · 搜索框）──
    分类收敛为「作用对象 + 风险」单一维度；说明与徽标由后端 TOOL_GROUP_INFO 下发。 */
-.tool-filter-row { display: flex; align-items: center; gap: 8px; }
-.tool-filter-input {
+/* ── 单独授权（opt-in）区块 ──
+   只有工具目录里 opt_in=true 的项会出现在这里。它与上面的预设/全选完全独立：
+   因此视觉上也要分开——独立描边 + 提示条，避免被当成普通分类的一部分。 */
+.agent-tool-optins { padding: 10px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.agent-tool-optins[hidden] { display: none; }
+.agent-tool-optins-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
+.agent-tool-optins-head b { font-size: 12.5px; color: var(--text); }
+.agent-tool-optins-head small { font-size: 11px; line-height: 1.5; color: var(--muted); }
+.agent-tool-optins-list { display: grid; gap: 7px; }
+.agent-tool-optin-card {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 8px;
+  padding: 9px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius);
+  background: var(--surface); cursor: pointer;
+}
+.agent-tool-optin-card:hover { background: var(--surface-2); }
+.agent-tool-optin-card input[type="checkbox"] { width: 16px; height: 16px; margin: 1px 0 0; accent-color: var(--accent); cursor: pointer; }
+.agent-tool-optin-card span { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; min-width: 0; }
+.agent-tool-optin-card b { font-size: 12.5px; color: var(--text); word-break: break-all; }
+.agent-tool-optin-card i {
+  font-style: normal; font-size: 10.5px; line-height: 1.7; padding: 0 6px;
+  border-radius: 8px; border: 1px solid var(--amber); color: var(--amber); background: var(--amber-soft);
+}
+.agent-tool-optin-card p { flex-basis: 100%; margin: 0; font-size: 11px; line-height: 1.5; color: var(--muted); }
+.tool-filter-row { display: flex; align-items: center; gap: 8px; }.tool-filter-input {
   flex: 1; min-width: 0; min-height: 32px; padding: 0 10px; border: 1px solid var(--line-strong);
   border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: 12.5px;
 }

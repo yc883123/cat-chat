@@ -35,6 +35,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from naiba import net as net_io
@@ -119,6 +120,11 @@ class JobSpec:
     owner_session_id: str = ""
     resumable: bool = False
     checkpoint: dict[str, Any] | None = None
+    # 分离式 Job（逐帧抽取等）：与主聊天并行，不占 active-run 互斥位、不出现在
+    # list_primary、不被聊天收尾等待。`origin_run_id` 只记录来源（审计/展示），
+    # **不建立**父子取消关系——聊天取消不级联取消它。
+    detached: bool = False
+    origin_run_id: str = ""
 
 
 @dataclass
@@ -270,6 +276,7 @@ class JobRegistry:
             "http_poll": self._run_check,
             "comfyui": self._run_comfyui,
             "subagent": self._run_subagent,
+            "video_frames": self._run_video_frames,
         }
 
     # ---- 内部工具 ----
@@ -306,6 +313,10 @@ class JobRegistry:
             "started_at": job.get("started_at"),
             "updated_at": job.get("updated_at"),
             "finished_at": job.get("finished_at"),
+            # 分离式 Job 的显式标记与来源 Run：前端任务面板据此区分「与聊天并行的独立
+            # 任务」与「这一轮的子任务」。两者都只做展示/审计，不构成取消关系。
+            "detached": bool(job.get("detached")),
+            "origin_run_id": str(job.get("origin_run_id") or ""),
         }
 
     def _set_status(self, job_id: str, status: str, **fields: Any) -> None:
@@ -388,6 +399,8 @@ class JobRegistry:
             kind=spec.kind,
             parent_job_id=spec.parent_job_id or "",
             owner_session_id=owner,
+            detached=bool(spec.detached),
+            origin_run_id=str(spec.origin_run_id or ""),
         )
         job_id = str(run["id"])
         self.app.storage.update_job(
@@ -851,6 +864,95 @@ class JobRegistry:
                     proc.stdout.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    def _run_video_frames(self, job_id: str, spec: JobSpec, cancel: threading.Event) -> None:
+        """精确逐帧 Worker：一次调用处理完指定范围内的全部帧（内部小块提交）。
+
+        与 ``_run_shell`` 完全分离：逐帧解码必须走结构化范围与 ``naiba.video`` 的
+        顺序解码实现，不能让模型用 shell 命令自己拼 ffmpeg（那会绕过范围校验与
+        容量护栏，也无法产出带真实帧号的 manifest——计划 2026-10-22 §4.2）。
+
+        语义边界：
+        - 一次 Job 处理**完整范围**；模型不需要、也不能按块续页调用；
+        - 每块（EXACT_FRAME_CHUNK 帧）落盘后原子提交 manifest 并推进 checkpoint；
+        - 取消只在安全解码边界生效：已提交的帧保留，其余标为未完成，
+          **绝不**把半成品写成 ``range_complete=true``；
+        - 服务重启：本 worker 不在 ``resume_interrupted`` 的自动恢复白名单里
+          （那里只收 comfyui/check/http_poll 这类可确定性重建的），重启后转为
+          interrupted，由用户显式重试。checkpoint 仍保存，供 retry 无损续跑。
+        """
+        from naiba import video as video_svc
+
+        params = spec.params or {}
+        path_raw = str(params.get("path") or "").strip()
+        plan = params.get("plan") if isinstance(params.get("plan"), dict) else {}
+        if not path_raw or not plan:
+            self._set_status(job_id, "running", current_step="缺少视频路径或抽取范围")
+            self._finish(job_id, "failed", error="逐帧 Job 缺少 path 或 plan")
+            return
+        data_dir = getattr(getattr(self.app, "paths", None), "data_dir", None)
+        if data_dir is None:
+            self._finish(job_id, "failed", error="无法确定数据目录")
+            return
+        checkpoint = dict(spec.checkpoint or {})
+        # 先把 manifest 路径写进 checkpoint：路径是确定性的（范围 + 长边派生），
+        # 提前写进去，任务运行中用户就能通过 /api/jobs/<id>/manifest 分页读已提交的帧。
+        try:
+            manifest_path = video_svc.exact_manifest_path(
+                Path(data_dir), Path(path_raw), plan,
+                params.get("max_edge", video_svc.EXACT_DEFAULT_MAX_EDGE),
+            )
+            exact_state = checkpoint.get("exact") if isinstance(checkpoint.get("exact"), dict) else {}
+            checkpoint["exact"] = {**exact_state, "manifest": str(manifest_path)}
+            self.app.storage.update_job(job_id, checkpoint=checkpoint)
+        except Exception:  # noqa: BLE001 - 写不进 checkpoint 不影响抽取本身（HTTP 路由还能读 result）
+            logger.debug("逐帧 checkpoint 预写失败：job=%s", job_id, exc_info=True)
+        self._set_status(job_id, "running", current_step="开始逐帧抽取", progress=0)
+        try:
+            result = video_svc.extract_frames_exact(
+                Path(path_raw),
+                Path(data_dir),
+                plan=plan,
+                max_edge=params.get("max_edge", video_svc.EXACT_DEFAULT_MAX_EDGE),
+                cancel_check=cancel.is_set,
+                progress=lambda done, total: self._frames_progress(job_id, done, total),
+                checkpoint=checkpoint,
+            )
+        except video_svc.ExactRangeError as exc:
+            self._finish(job_id, "failed", error=str(exc))
+            return
+        except ValueError as exc:
+            # 业务校验类失败（文件不存在 / 缺 av / 无视频轨）本身就是给用户看的文本，
+            # 不加 "ValueError:" 前缀。
+            self._finish(job_id, "failed", error=str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - 工具边界：明确失败而不是裸栈
+            logger.exception("逐帧抽取失败：job=%s", job_id)
+            self._finish(job_id, "failed", error=f"{type(exc).__name__}: {exc}")
+            return
+        status = str(result.get("status") or "completed")
+        # 取消是终态 cancelled（保留已抽帧与 manifest）；其余按完成/部分完成区分。
+        if status == "cancelled" or cancel.is_set():
+            result["status"] = "cancelled"
+            self._finish(job_id, "cancelled", error="用户取消", result=result,
+                         detail={"message": "已取消，保留已抽取的帧"})
+            return
+        if not bool(result.get("range_complete")):
+            self._finish(job_id, "failed", error="逐帧抽取未完成（部分帧失败或范围不完整）", result=result)
+            return
+        self._set_status(job_id, "running", progress=100, current_step="逐帧抽取完成")
+        self._finish(job_id, "completed", result=result)
+
+    def _frames_progress(self, job_id: str, done: int, total: int) -> None:
+        """进度回报（失败不影响抽取）：total 为估计值时按估计显示，不谎称精确。"""
+        percent = min(99.0, done / total * 100) if total > 0 else 0.0
+        try:
+            self.app.storage.update_job(
+                job_id, progress=round(percent, 1),
+                current_step=f"已抽取 {done}" + (f"/约 {total} 帧" if total > 0 else " 帧"),
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("逐帧进度写入失败：job=%s", job_id, exc_info=True)
 
     def _run_check(self, job_id: str, spec: JobSpec, cancel: threading.Event) -> None:
         """通用 HTTP 提交 + 轮询检查 Worker（持续检查/唤醒）。

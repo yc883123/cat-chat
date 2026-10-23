@@ -24,6 +24,14 @@ from naiba.core.tool_results import model_visible_run
 MAX_SUBAGENT_DEPTH = 2
 MAX_CHILDREN_PER_PARENT = 4
 
+# ``run_in_background`` 接受的 Job 类型（与 ``JobRegistry._workers`` 的实际注册表对齐）。
+# 旧 schema 把子 Agent 类型展示成 `agent`，但注册表里只有 `subagent` worker——这里给出
+# 别名归一与创建前的类型白名单，避免"先报已提交、再被未知 worker 打成失败"。
+JOB_KIND_ALIASES: dict[str, str] = {"agent": "subagent"}
+JOB_SUPPORTED_KINDS: frozenset[str] = frozenset({
+    "shell", "check", "http_poll", "comfyui", "subagent",
+})
+
 # 子 Agent 默认开放的工具（排除任务/子 Agent 管理类工具，防止递归委派与越权作业管理）
 SUBAGENT_ALLOWED_TOOLS = [
     "read_file",
@@ -73,6 +81,9 @@ SUBAGENT_BLOCKED_TOOLS = {
     # 指名出卡只属于「承载用户原始请求的普通主对话 Run」：子 Agent 的 RunContext 不置位
     # show_media_intent，出卡也只能被拒。显式挡住，别让模型看到必失败的工具。
     "show_media",
+    # 精确逐帧是"单独授权 + 主对话发起"的工具：子 Agent 的 RunContext 不置位
+    # video_frames_intent，且整段视频逐帧落盘代价极高。显式挡住（工具自身也会拒绝）。
+    "extract_video_frames_exact",
 }
 
 
@@ -338,13 +349,50 @@ def job_tool_handler_factory(app: AppContext) -> dict[str, Callable[..., tuple[b
         spec_dict = (arguments or {}).get("spec") or {}
         if not isinstance(spec_dict, dict) or not spec_dict.get("kind"):
             return False, "spec 必须包含 kind"
+        # kind 归一 + 支持面校验必须在创建之前：旧 schema 把子 Agent 类型展示成 `agent`，
+        # 而 JobRegistry 只注册了 `subagent` worker。原样透传会让 Job 先被登记、再由
+        # `_run_unknown` 立刻失败（模型看到的是"已提交"然后一个失败任务）。
+        raw_kind = str(spec_dict.get("kind") or "").strip()
+        kind = JOB_KIND_ALIASES.get(raw_kind, raw_kind)
+        if kind not in JOB_SUPPORTED_KINDS:
+            return False, (
+                f"不支持的后台任务类型：{raw_kind}。"
+                f"可用类型：{'、'.join(sorted(JOB_SUPPORTED_KINDS))}。"
+            )
         owner = _owner(ctx)
-        params = dict(spec_dict.get("params", {}))
-        if str(spec_dict.get("kind") or "") == "comfyui" and not (
+        raw_params = spec_dict.get("params", {})
+        if raw_params is None:
+            raw_params = {}
+        if not isinstance(raw_params, dict):
+            return False, "spec.params 必须是对象"
+        params = dict(raw_params)
+        if kind == "shell":
+            command = params.get("command")
+            if not isinstance(command, str) or not command.strip():
+                return False, "shell Job 必须提供非空的 params.command"
+            params["command"] = command
+            # 工作区快照：缺省时把**当前 Run 的会话工作区**冻结进 params.cwd。不能在
+            # worker 启动时读全局配置——应用全局工作区后来变动会把已提交任务挪到别处。
+            cwd = str(params.get("cwd") or "").strip()
+            if not cwd:
+                cwd = str(ctx.get("workspace_dir") or "").strip()
+            if not cwd:
+                try:
+                    cwd = str(app.config.resolve_workspace_dir())
+                except Exception:  # noqa: BLE001 - 取不到就交给 worker 的兜底
+                    cwd = ""
+            if cwd:
+                params["cwd"] = cwd
+        if kind == "comfyui" and not (
             isinstance(params.get("workflow"), dict)
             or (isinstance(params.get("workflows"), list) and params.get("workflows"))
         ):
             return False, "comfyui Job 必须提供 workflow/workflows；已有 API 工作流时请优先调用 comfyui_batch"
+        if kind == "subagent":
+            # 子 Agent 的必需指令在创建前校验：否则 Job 登记后才在 runner 里因缺 instruction
+            # 静默结束（模型只看到一个 failed，没有可自诊的信息）。
+            if not str(params.get("instruction") or "").strip():
+                return False, "子 Agent Job 必须提供非空的 params.instruction"
         idempotency_key = str((arguments or {}).get("idempotency_key") or "").strip()[:200]
         if idempotency_key:
             for existing in jobs.list(owner=owner, active_only=True):
@@ -356,7 +404,7 @@ def job_tool_handler_factory(app: AppContext) -> dict[str, Callable[..., tuple[b
         params.setdefault("skill_policy", dict(ctx.get("skill_policy") or {"mode": "auto", "skill_ids": []}))
         params.setdefault("allowed_tools", [str(tool) for tool in ctx.get("allowed_tools") or []])
         spec = JobSpec(
-            kind=str(spec_dict["kind"]),
+            kind=kind,
             conversation_id=conversation_id,
             params=params,
             label=str(spec_dict.get("label") or "")[:120],
@@ -424,9 +472,28 @@ def job_tool_handler_factory(app: AppContext) -> dict[str, Callable[..., tuple[b
             return False, _missing_message(job_id)
         if not job:
             return False, _missing_message(job_id)
-        if job["status"] == "completed":
+        status = str(job.get("status") or "")
+        progress = float(job.get("progress") or 0)
+        step = str(job.get("current_step") or "")
+        if status == "completed":
             return True, f"Job 已完成：{json_dumps(job.get('result', {}))[:2000]}"
-        return False, f"Job 结束（{job['status']}）：{job.get('error', '')}"
+        if status in {"queued", "running", "waiting", "stopping", "cancelling"}:
+            # 「本次等待到期、任务仍在运行」是**正常快照**，不是失败：旧实现把它和真正的
+            # 失败统一成「Job 结束（running）」，模型据此认定任务失败并重复提交付费生成
+            # （计划 2026-10-22 §3.3）。这里返回运行中并给出下一步，不取消任务。
+            return True, (
+                f"本次等待到期，Job 仍在运行：status={status}, progress={progress:.0f}%, "
+                f"step={step}。可稍后再调用 job_wait / job_status 继续收集；不要重复创建同一任务。"
+            )
+        if status == "interrupted":
+            return False, (
+                f"Job 已中断（{job.get('error') or '如服务曾重启'}），不会自动续跑；"
+                "可只读查看其输出，需要时由用户决定是否重新发起。"
+            )
+        if status == "cancelled":
+            return False, f"Job 已被取消：{job.get('error') or '用户取消'}"
+        # failed：真正的失败，与「等待到期」区分开。
+        return False, f"Job 已失败：{job.get('error') or '原因未记录'}"
 
     def job_kill(arguments, active_skills, run_context: RunContext | None = None):
         # 写操作：保留归属，只能取消发起该 Job 的会话（跨对话不可取消）。

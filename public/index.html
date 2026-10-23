@@ -1698,6 +1698,9 @@
                 <button type="button" class="primary-button tiny" id="agentToolEditorSave">保存工具集</button>
               </div>
               <p class="hint tool-unknown-hint" id="agentToolUnknownHint" hidden></p>
+              <!-- 单独授权（opt-in）工具：与上面的预设/全选完全独立，只有这里的勾选能让它生效。
+                   条目由 09-settings.js 按工具目录里的 opt_in 标记渲染（目录为空时整块隐藏）。 -->
+              <div class="agent-tool-optins" id="agentToolOptIns" hidden></div>
               <div class="tool-filter-row">
                 <input id="agentToolFilter" class="tool-filter-input" type="search" autocomplete="off"
                        placeholder="搜索工具名或说明（如 vision、PDF、job）"

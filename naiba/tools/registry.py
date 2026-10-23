@@ -149,6 +149,9 @@ MEDIA_DECLARATIONS: dict[str, dict[str, str]] = {
     # video 域（帧图与联系表是抽帧产物，probe_video 只出文本元信息）
     "probe_video": {"policy": "never", "extract": "none"},
     "extract_frames": {"policy": "inline", "extract": "structured"},
+    # 精确逐帧：结果只给 compact 摘要（Job ID/范围/状态/结果接口引用），**不**把
+    # 几百条帧路径挂成媒体卡——那会把消息撑爆，也与"抽取≠分析"的边界冲突。
+    "extract_video_frames_exact": {"policy": "never", "extract": "none"},
 }
 
 
@@ -853,7 +856,32 @@ def build_job_tool_specs() -> list[ToolSpec]:
                 "properties": {
                     "spec": {
                         "type": "object",
-                        "description": "Job 规格：{kind: shell/http_poll/agent/subagent/comfyui, params, label, resumable, checkpoint}",
+                        # 只声明**壳**与已知键；种类的字段细节（shell 的 command/cwd/timeout）
+                        # 走系统提示里的唯一固定样例，避免在 schema 里堆条件分支（供应商对复杂
+                        # 条件 schema 支持不一，plan §3.2）。`agent` 是旧展示名，创建入口归一为
+                        # `subagent`；这里只列真正支持的 kind。
+                        "description": (
+                            "Job 规格：{kind: shell/check/http_poll/comfyui/subagent, "
+                            "params, label, resumable, checkpoint}"
+                        ),
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "enum": ["shell", "check", "http_poll", "comfyui", "subagent"],
+                                "description": "任务类型",
+                            },
+                            "label": {"type": "string", "description": "面向用户的简短任务名"},
+                            "params": {
+                                "type": "object",
+                                "description": (
+                                    "按 kind 填：shell 用 command/cwd/timeout；"
+                                    "comfyui 用 workflow/workflows；subagent 用 instruction"
+                                ),
+                            },
+                            "resumable": {"type": "boolean", "default": False},
+                            "checkpoint": {"type": "object"},
+                        },
+                        "required": ["kind"],
                     },
                     "parent_job_id": {"type": "string", "default": ""},
                     "idempotency_key": {"type": "string", "description": "可选去重键；同一会话中运行中的相同键直接返回已有 Job", "default": ""},
@@ -1254,6 +1282,29 @@ def build_video_tool_specs() -> list[ToolSpec]:
             retryable=True,
             timeout=180,
             permission="auto",
+        ),
+        ToolSpec(
+            name="extract_video_frames_exact",
+            description=(
+                "把视频指定范围内的每一帧按解码顺序抽成 PNG（逐帧连续，不抽样、不裁剪）。"
+                "只在用户明确要求逐帧/连续帧时使用；提交后是独立后台任务。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": _string("视频文件绝对路径"),
+                    "start": {"type": "number", "description": "起始时间（秒，含）；按时间区间抽取时使用"},
+                    "end": {"type": "number", "description": "结束时间（秒，不含）"},
+                    "start_frame": {"type": "integer", "description": "起始帧号（0 起、按解码顺序、含）；按帧区间抽取时使用"},
+                    "end_frame": {"type": "integer", "description": "结束帧号（不含）"},
+                    "max_edge": {"type": "integer", "description": "单帧长边像素上限", "default": 1600},
+                },
+                "required": ["path"],
+            },
+            side_effect=True,
+            retryable=False,
+            timeout=120,
+            permission="confirm",
         ),
     ]
 

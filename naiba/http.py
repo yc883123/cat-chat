@@ -316,6 +316,45 @@ class RequestHandler(BaseHTTPRequestHandler):
             job_id = path.split("/")[-2]
             job = self.app.jobs.get(job_id)
             self._json(job or {"error": "Job 不存在"}, HTTPStatus.OK if job else HTTPStatus.NOT_FOUND)
+        elif path.startswith("/api/jobs/") and path.endswith("/manifest"):
+            # 精确逐帧的帧清单分页读取（计划 2026-10-22 §4.3）。
+            # 路径**只能**由 Job ID 解析：不接受客户端传任意文件路径（否则等于开放任意读）。
+            job_id = path.split("/")[-2]
+            query = urllib.parse.parse_qs(parsed.query)
+            conversation_id = query.get("conversation_id", [""])[0]
+            try:
+                offset = max(0, int(query.get("offset", ["0"])[0]))
+                limit = max(1, min(500, int(query.get("limit", ["100"])[0])))
+            except ValueError:
+                self._json({"error": "offset/limit 必须是整数"}, HTTPStatus.BAD_REQUEST)
+                return
+            job = self.app.jobs.get(job_id)
+            if not job:
+                self._json({"error": "Job 不存在"}, HTTPStatus.NOT_FOUND)
+                return
+            owner = str(job.get("owner_session_id") or "")
+            # 传了会话 id 就必须是发起该任务的会话；不传按只读详情口径放行
+            # （与 /status、/events 一致：本机单用户应用，帧清单不含凭证）。
+            if conversation_id and conversation_id != owner:
+                self._json({"error": "无权读取该任务的帧清单"}, HTTPStatus.FORBIDDEN)
+                return
+            result = job.get("result") if isinstance(job.get("result"), dict) else {}
+            checkpoint = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
+            exact_state = checkpoint.get("exact") if isinstance(checkpoint.get("exact"), dict) else {}
+            manifest = str(result.get("manifest") or exact_state.get("manifest") or "")
+            if not manifest:
+                self._json({"error": "该任务没有可读取的帧清单"}, HTTPStatus.NOT_FOUND)
+                return
+            from naiba import video as video_svc
+
+            try:
+                payload = video_svc.read_exact_manifest(manifest, offset=offset, limit=limit)
+            except ValueError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+                return
+            payload["job_id"] = job_id
+            payload["job_status"] = str(job.get("status") or "")
+            self._json(payload)
         elif path == "/api/tools":
             self._json({"tools": self.app.tool_registry.schemas()})
         elif path == "/api/tool_catalog":

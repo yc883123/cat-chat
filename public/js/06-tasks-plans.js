@@ -18,6 +18,8 @@ export const TASK_KIND_LABELS = {
   http_poll: 'HTTP 轮询',
   check: '外部检查',
   subagent: 'AI 子任务',
+  // 精确逐帧是分离式 Job：与主聊天并行，不阻塞输入，在这里也照常可见可停。
+  video_frames: '视频逐帧抽取',
 };
 
 export function taskKindLabel(kind) {

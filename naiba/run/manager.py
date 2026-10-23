@@ -194,18 +194,22 @@ class ConversationRunManager(ConversationRunMixin):
         )
 
     def list_primary(self, conversation_id: str = "", active_only: bool = False) -> list[dict[str, Any]]:
-        """只返回**顶层对话 Run**（后台子 Job 不算）。
+        """只返回**顶层对话 Run**（后台子 Job 与分离式 Job 都不算）。
 
         子 Job 不占用会话的运行位，却会被 ``/api/runs`` 的前端消费者当成
         「会话正在回答」，把「分支 / 重新生成 / 新会话」三个救援入口全部挡住
         （2026-09-14 客户机实测：一个卡在 stopping 的子任务让用户只剩重启一条路）。
         与 ``storage.active_run`` 的顶层语义保持一致。
+
+        detached Job（逐帧抽取等，显式 ``detached=1``）同样排除：它的设计目标就是与
+        主聊天并行，跑到几十分钟也不该让这条会话显示「正在回答」。
         """
         return [
             item
             for item in self.list(conversation_id, active_only)
             if str(item.get("kind") or "") in PRIMARY_RUN_KINDS
             and not str(item.get("parent_job_id") or "")
+            and not bool(item.get("detached"))
         ]
 
     def get(self, run_id: str) -> dict[str, Any] | None:

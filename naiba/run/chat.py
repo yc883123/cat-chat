@@ -31,6 +31,7 @@ from naiba.core.attachments import (
     compose_user_content,
     show_media_intent,
     union_run_media,
+    video_frames_intent,
 )
 from naiba.core.conv_files import _conv_workspace_root, resolve_file_references
 from naiba.core.choices import detect_choice_groups
@@ -239,6 +240,26 @@ def show_media_run_state(
     return True, build_show_media_candidates(messages, message, workspace)
 
 
+def video_frames_run_state(*, message: str, mode: str, conv_kind: str) -> bool:
+    """本轮 RunContext 的「精确逐帧」授权门（计划 2026-10-22 §4.2）。
+
+    与 ``show_media_run_state`` 同构，但只产出一个布尔值（不需要候选快照）：
+
+    - ``conv_kind != 'main'``（辅助对话）→ 假；
+    - ``mode == 'plan'``（计划准备）→ 假；
+    - 用户原文 ``video_frames_intent()`` 不成立 → 假。
+
+    这枚键只影响「这次工具调用要不要产生副作用」，**不改** system / schema / 工具排序：
+    工具本身是否可见仍由 Agent 的单独授权（tool_opt_ins）与会话固化集决定。子 Agent 与
+    后台 Job 的 RunContext 不经过这里，缺省即假（fail closed）。
+    """
+    if str(conv_kind or "") != "main":
+        return False
+    if str(mode or "").strip().lower() == "plan":
+        return False
+    return video_frames_intent(message)
+
+
 def _merge_usage_summary(
     summary: dict[str, Any], latest: dict[str, Any]
 ) -> dict[str, Any]:
@@ -328,6 +349,9 @@ class ConversationRunMixin:
                 "skill_ids": [str(item) for item in agent.get("skill_ids", [])],
                 # 内置 Agent 携带 tool_scope；自定义 Agent 留空（表示不限制）。
                 "tool_scope": list(agent.get("tool_scope") or []),
+                # 单独授权必须跟着一起进固化：这里把 agent 收窄成四个字段，漏了它
+                # 就等于「设置页勾了、新会话永远拿不到」（逐帧工具就是唯一入口）。
+                "tool_opt_ins": [str(item) for item in agent.get("tool_opt_ins") or []],
             }
             # Plan mode is disabled. Legacy conversations always enter the normal chat path.
             mode = "craft"
@@ -493,6 +517,9 @@ class ConversationRunMixin:
                 "system_prompt": str(agent.get("system_prompt") or ""),
                 "skill_ids": [str(item) for item in agent.get("skill_ids", [])],
                 "tool_scope": list(agent.get("tool_scope") or []),
+                # 与提交路径保持一致：计划执行不产生 opt-in 副作用，但收窄字典时
+                # 不能悄悄丢掉这个字段（后续模式调整时它必须还在）。
+                "tool_opt_ins": [str(item) for item in agent.get("tool_opt_ins") or []],
             }
             model_key = str(conversation.get("model_key") or "")
             if not model_key:
@@ -590,6 +617,13 @@ class ConversationRunMixin:
         # 本轮用户原文（show_media 解析代词用）：只有授权成立时才带进 RunContext——
         # 子 Agent / Job / 辅助对话的缺省是空串，它们本来也没有这条通道。
         show_media_message = str(run.get("message") or "") if show_media_allowed else ""
+        # 「精确逐帧」授权门：同样只在本处定稿（普通主对话 + 非 Plan + 用户原话明确要求）。
+        # 工具执行层据此 fail closed：没有这枚键就不创建 Job、不写一帧。
+        video_frames_allowed = video_frames_run_state(
+            message=str(run.get("message") or ""),
+            mode=mode,
+            conv_kind=conv_kind,
+        )
         sink = _RunEventSink(self, run_id, cancel_event)
         self._register_sink(run_id, sink)
         skills: list[dict[str, str]] = []
@@ -900,6 +934,8 @@ class ConversationRunMixin:
                 "show_media_candidates": list(show_media_candidates),
                 # 用户原文：只给工具解析「刚才那个视频」这类代词（不构成授权）。
                 "show_media_message": show_media_message,
+                # 精确逐帧授权门（只影响副作用，不改变模型可见的工具集）。
+                "video_frames_intent": bool(video_frames_allowed),
                 # 本轮是第几个用户轮次（1 起）：图片批注入标签用它标注「第 N 轮装载」，
                 # 让模型能区分「历史里装进来的旧图」与「当前成品图」（§九.150）。
                 # ⚠️ 取数点固定走 _turn_index_for_run（run 行的 input_message_id）——`message`

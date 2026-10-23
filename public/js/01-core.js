@@ -104,6 +104,9 @@ export const state = {
   firstTurnInfo: null,
   agentFormSkillIds: [],
   agentFormToolScope: [],
+  // 「单独授权」（opt-in）工具：与 tool_scope 完全独立的一条通道。
+  // 普通勾选/预设/全选都不碰它；只有 Agent 编辑页那块独立复选框会写入。
+  agentFormToolOptIns: [],
   agentFormIsNew: false,
   // 旧配置兼容用：当前工具目录里已不存在的工具名（如已移除的 activate_skill、
   // 临时掉线的 MCP 工具）。原样保留、单独展示，不参与勾选/计数/预设匹配，

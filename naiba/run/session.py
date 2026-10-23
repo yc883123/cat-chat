@@ -16,6 +16,11 @@ from naiba.plans import READONLY_TOOLS, normalize_interaction_mode, resolve_mode
 from naiba.tools.registry import RETIRED_TOOL_MAP
 from naiba.vision.runtime import IMAGE_SUFFIXES
 
+# 需要「单独授权」的工具（唯一事实来源在 config.OPT_IN_TOOLS）。这里再导出一次是为了让
+# 本模块的三条放行路径（固化 / 兜底并集 / 快照）读同一份名单——三处各写一遍必然漂移。
+from naiba.config import OPT_IN_TOOLS as _OPT_IN_TOOLS
+_OPT_IN_TOOLS_SET = frozenset(_OPT_IN_TOOLS)
+
 
 # 系统工具（除 9 个基础 agent_tools 外，按模式追加到 allowed_tools）。
 # - Craft 模式：作业/子 Agent/视觉/搜索工具全部可用；
@@ -110,6 +115,9 @@ def resolve_allowed_tools(
         scope = set(agent.get("tool_scope") or [])
         if scope:
             allowed_tools = [tool for tool in allowed_tools if tool in scope]
+        # 无快照的兜底路径同样剔除 opt-in：它不能靠"工具在注册表里"就获得放行，
+        # 只有 Agent 的 tool_opt_ins（新会话固化时并入）或已固化的快照能带上它。
+        allowed_tools = [tool for tool in allowed_tools if tool not in _OPT_IN_TOOLS_SET]
     if "web_search" in allowed_tools and not app.web_search.is_available():
         # web_search 只靠"设置固化"：是否声明仅取决于搜索端点是否已配置
         # （会话固化工具集是否含 web_search 决定它是否进入 allowed_tools）。
@@ -132,7 +140,11 @@ def resolve_allowed_tools(
         # Plan（准备阶段）不开放「指名出卡」：计划期只做只读探索，出卡没有意义，而它的
         # RunContext 也从不置位 show_media_intent。这里显式移除，避免「工具声明在、
         # 调用必然 intent_required」的形态被写进模型可见的工具数组。
-        allowed_tools = [tool for tool in allowed_tools if tool != "show_media"]
+        # 单独授权工具同理：计划期不产生副作用，快照里带着也不放行。
+        allowed_tools = [
+            tool for tool in allowed_tools
+            if tool != "show_media" and tool not in _OPT_IN_TOOLS_SET
+        ]
     # 互斥归一放在最后：**这一处就保证运行时绝不相同组双开**（无论工具集来自
     # 固化集、Agent scope 还是旧逻辑的兜底并集）。见 MUTUALLY_EXCLUSIVE_TOOL_GROUPS。
     allowed_tools = normalize_tool_mutex(allowed_tools)
@@ -140,20 +152,34 @@ def resolve_allowed_tools(
         # 只读锁死收口在互斥归一之后：白名单语义 = 交集，副作用工具（write_file /
         # edit_file / pwsh / 各 Job 创建器 / vision_image_ops / comfyui_* / 能力工具）
         # 一律剔除；web_search 是否保留仍受端点可用性约束（上面已处理）。
+        # 单独授权工具（opt-in）在这里再显式剔除一次：辅助对话既不承载用户原始请求、
+        # 也不该发起"整段视频逐帧落盘"这类动作。
         readonly = set(READONLY_TOOLS) | set(SYSTEM_TOOLS_READONLY)
         readonly.update(str(name) for name in app.tool_registry.readonly_mcp_tools())
-        allowed_tools = [tool for tool in allowed_tools if tool in readonly]
+        allowed_tools = [
+            tool for tool in allowed_tools
+            if tool in readonly and tool not in _OPT_IN_TOOLS_SET
+        ]
     return allowed_tools
 
 
 def all_tool_names(app: AppContext) -> list[str]:
-    """全部可用的工具 id（含别名），用于旧会话/未配置 agent 的"全激活"固化。"""
+    """全部可用的工具 id（含别名），用于旧会话/未配置 agent 的"全激活"固化。
+
+    单独授权（opt-in）工具**不在**这里：它是一条显式授权通道，不能被"全激活/旧会话
+    回退"隐式打开（计划 2026-10-22 §4.4）。
+    """
     schemas = (
         app.tool_registry.schemas()
         if callable(getattr(app.tool_registry, "schemas", None))
         else []
     )
-    return [str(spec.get("name") or "") for spec in schemas if isinstance(spec, dict) and spec.get("name")]
+    return [
+        str(spec.get("name") or "")
+        for spec in schemas
+        if isinstance(spec, dict) and spec.get("name")
+        and str(spec.get("name")) not in _OPT_IN_TOOLS_SET
+    ]
 
 
 def bake_session_tool_ids(
@@ -162,8 +188,8 @@ def bake_session_tool_ids(
     """固化某会话的启用工具集（会话启动时写死，之后不可改）。
 
     - 已固化 → 直接返回；
-    - 旧会话（已有消息、未固化）→ 全部激活（迁移兼容，保持既有行为）；
-    - 新会话 → 按当前 Agent 的 tool_scope（空则回退为全量）。
+    - 旧会话（已有消息、未固化）→ 全部激活（迁移兼容，保持既有行为），但不含 opt-in；
+    - 新会话 → 按当前 Agent 的 tool_scope（空则回退为全量）+ 该 Agent 的 tool_opt_ins。
     """
     existing = conversation.get("enabled_tool_ids") or []
     if existing:
@@ -172,7 +198,16 @@ def bake_session_tool_ids(
         baked = all_tool_names(app)
     else:
         scope = [str(item) for item in (agent.get("tool_scope") or []) if str(item).strip()]
-        baked = scope or all_tool_names(app)
+        baked = [
+            name for name in (scope or all_tool_names(app))
+            if name not in _OPT_IN_TOOLS_SET
+        ]
+        # 新会话才并入 Agent 的单独授权：授权是"这台 Agent 被明确许过"，与工具范围独立。
+        # 旧会话不追溯（已固化的快照就是当时的授权事实，配置变更不改变历史会话能力）。
+        baked.extend(
+            str(item) for item in (agent.get("tool_opt_ins") or [])
+            if str(item) in _OPT_IN_TOOLS_SET
+        )
     # 落库的就必须是归一后的集合：前端显示与实际放行同源，不给"互斥的两个都开了"留洞。
     baked = normalize_tool_mutex(baked)
     baked = list(dict.fromkeys(str(item) for item in baked if item))

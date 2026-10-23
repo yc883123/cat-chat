@@ -242,17 +242,22 @@ def subagent_context_rule(allowed: set[str]) -> str:
 def comfyui_script_guide_text(allowed_tools: set[str]) -> str:
     """「ComfyUI/短剧自动化优先小型脚本路径」这条编排指引的**实际文案**（不满足条件返回空串）。
 
-    文案里点名的执行入口必须真的在本会话工具集里：内置预设各档不同、用户也可自定义，
-    点名一个不存在的工具等于让模型去撞墙（旧文案无条件写「再用 pwsh 或 run_in_background」）。
+    只回答「脚本怎么写」，**不再**把执行入口写成 `pwsh` 与后台任务的二选一（计划
+    2026-10-22 §3.1：「脚本可用 pwsh 或 run_in_background 执行」是含糊表述——编写与
+    执行是两个决定，执行入口由后台任务规则按耗时唯一裁定）。因此这里不点名任何执行工具。
     """
     if not comfyui_script_guide_enabled(allowed_tools):
         return ""
-    executors = [name for name in ("pwsh", "run_in_background") if name in allowed_tools]
-    if not executors:
-        return ""
+    # 只讲"脚本怎么写"：写文件工具可用时点名 write_file，否则不点名（避免让模型去用
+    # 本会话没有的工具）；执行入口一律交给 background_creator_rule 按耗时裁定。
+    if "write_file" in allowed_tools:
+        return (
+            "ComfyUI/短剧自动化优先采用小型脚本路径：用 write_file 生成或复用一个小型 Python 编排脚本，"
+            "把解析、批量提交、轮询和校验都写进脚本。"
+        )
     return (
-        "ComfyUI/短剧自动化优先采用小型脚本路径：先用 write_file 生成或复用一个小型 Python 编排脚本，"
-        f"再用 {' 或 '.join(executors)} 执行。"
+        "ComfyUI/短剧自动化优先采用小型脚本路径：生成或复用一个小型 Python 编排脚本，"
+        "把解析、批量提交、轮询和校验都写进脚本。"
     )
 
 
@@ -261,19 +266,58 @@ BACKGROUND_CREATOR_TOOLS: tuple[str, ...] = (
     "run_in_background", "comfyui_batch", "subagent", "subagent_spawn",
 )
 
+# 长任务的选用阈值（计划 2026-10-22 §3.1）：这是**模型选用**的建议阈值，不是同步执行器
+# 的硬超时，也不要求先跑一遍命令测时。写成固定文字、只按会话冻结工具集门控，保证同一
+# 工具集下 system 字节恒定（不按本轮任务内容动态改写，前缀缓存不断）。
+BACKGROUND_JOB_THRESHOLD_SECONDS = 30
+
+# 固定样例（唯一一处）：只教 shell Job 的 `spec` 结构，路径用语义根占位符，
+# 实际调用时由模型替换为当前已知绝对路径。放在系统提示常驻区而不是工具描述里——
+# 工具描述有 ≤100 字 / ≤3 句预算（§九.23）。
+BACKGROUND_SHELL_SPEC_EXAMPLE = (
+    'shell 后台任务的固定写法（路径替换为当前工作区绝对路径）：\n'
+    '{"spec": {"kind": "shell", "label": "运行批量处理脚本", "params": '
+    '{"command": "python -u \'<工作区绝对路径>/scripts/batch.py\'", '
+    '"cwd": "<工作区绝对路径>", "timeout": 3600}}}'
+)
+
 
 def background_creator_rule(allowed_tools: set[str]) -> str:
-    """「需要后台任务时必须先调用 …」这条规则；**没有可用创建器时返回空串**。
+    """「长任务先创建 Job」这条规则；**没有可用创建器时返回空串**。
 
-    只点名本会话真实可用的创建器。旧写法是「只要 comfyui_batch / 子 Agent 工具在
-    就提 run_in_background」——工具集里没有 `run_in_background` 的会话（只读模式、
+    只点名本会话真实可用的创建器与执行入口。旧写法是「只要 comfyui_batch / 子 Agent
+    工具在就提 run_in_background」——工具集里没有 `run_in_background` 的会话（只读模式、
     提示词优化 Agent、升级前已固化的老会话快照）会被指引去调一个不存在的工具
     （计划 2026-10-20 §3.3.1）。
+
+    计划 2026-10-22 §3.1 追加：把「脚本怎么写」与「用什么执行」拆成两个决定——
+    编写入口在 ComfyUI 编排指引里，执行入口由本规则按耗时唯一裁定，不再出现
+    「pwsh 或 run_in_background」这类等价表述。
     """
     creators = [name for name in BACKGROUND_CREATOR_TOOLS if name in allowed_tools]
     if not creators:
         return ""
-    return "需要后台任务时必须先调用 " + "、".join(creators) + " 创建，再查询返回的真实 ID。"
+    parts = [
+        "需要后台任务时必须先调用 " + "、".join(creators) + " 创建，再查询返回的真实 ID。"
+    ]
+    # 只有真能起 shell Job 的会话才谈「不要拿同步命令顶替」——否则等于让模型去撞墙。
+    if "run_in_background" in allowed_tools:
+        selection = (
+            f"预计超过 {BACKGROUND_JOB_THRESHOLD_SECONDS} 秒、需要持续轮询或等待外部生成、"
+            "或耗时不确定的长命令，必须在执行前创建后台 Job，而不是先同步执行再等；"
+            "创建成功后用真实 Job ID 查询，已提交不等于已完成。"
+        )
+        if "pwsh" in allowed_tools:
+            selection += (
+                "不得先用 pwsh 启动再等待，也不得用加大 pwsh 超时来代替 Job；"
+                "短的一次性检查或单次状态查询才用 pwsh。"
+            )
+        if "comfyui_batch" in allowed_tools:
+            selection += "已有 ComfyUI 工作流用 comfyui_batch，不要为它另建 shell 任务。"
+        parts.append(selection)
+        if "pwsh" in allowed_tools:
+            parts.append(BACKGROUND_SHELL_SPEC_EXAMPLE)
+    return "\n".join(parts)
 
 
 def comfyui_script_guide_enabled(allowed_tools: set[str]) -> bool:
@@ -904,11 +948,15 @@ class SkillAgent:
             )
         if {"write_file", "edit_file", "pwsh"} & allowed:
             guide_parts.append(
-                "涉及重复转换、批处理、轮询或结构化数据处理时，用 write_file/edit_file 生成或维护小型 Python/PowerShell 脚本，短任务用 pwsh。"
+                "涉及重复转换、批处理、轮询或结构化数据处理时，用 write_file/edit_file 生成或维护小型 Python/PowerShell 脚本；"
+                "脚本怎么写与用什么执行是两个决定，执行入口按耗时选（长任务走后台 Job）。"
             )
+        # 「耗时任务用 run_in_background」曾在这里又写一遍，与 background_creator_rule 的
+        # 长任务规则重复且口径不一（一处不管耗时、一处按 30 秒阈值）——统一的唯一一处
+        # 规则在 background_creator_rule，本段只补与它不重叠的收集动作。
         if {"run_in_background", "job_output", "job_status", "job_wait"} <= allowed:
             guide_parts.append(
-                "耗时任务用 run_in_background，随后用 job_status/job_wait/job_output 收集终态并验证产物。"
+                "后台 Job 提交后立即返回，不等终态；随后用 job_status/job_wait/job_output 收集终态并验证产物。"
             )
         if "todo_write" in allowed:
             guide_parts.append("多步骤任务用 todo_write 维护进度。")
@@ -1665,6 +1713,9 @@ class SkillAgent:
             str(job.get("id") or "")
             for job in jobs
             if str(job.get("parent_job_id") or "") == run_id
+            # 分离式 Job（逐帧抽取等）与主聊天并行，**不参与**本轮收尾等待：
+            # 它们本来就没有 parent_job_id，这里再显式挡一次（语义写实，不靠空父 ID 的隐式排除）。
+            and not bool(job.get("detached"))
             and str(job.get("status") or "") in active
             and job.get("id")
         ]

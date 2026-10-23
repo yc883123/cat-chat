@@ -22,6 +22,7 @@ from naiba.run.chat import (  # noqa: E402
     vision_prompt_sections,
 )
 from naiba.skills.agent import (  # noqa: E402
+    BACKGROUND_JOB_THRESHOLD_SECONDS,
     background_creator_rule,
     comfyui_script_guide_enabled,
     comfyui_script_guide_text,
@@ -97,16 +98,28 @@ class ComfyuiGuideGatingTests(unittest.TestCase):
         self.assertFalse(comfyui_script_guide_enabled({"mcp__other__ping", "pwsh"}))
 
     def test_guide_text_names_only_available_executors(self):
-        """文案只点名**实际可用**的执行入口（预设各档不同、用户也可自定义）。"""
-        both = comfyui_script_guide_text({"comfyui_batch", "pwsh", "run_in_background"})
-        self.assertIn("pwsh 或 run_in_background", both)
+        """文案只讲「脚本怎么写」，**不点名执行入口**（执行由后台任务规则唯一裁定）。
+
+        计划 2026-10-22 §3.1：「脚本可用 pwsh 或 run_in_background 执行」是含糊表述——
+        编写与执行是两个决定。执行入口统一交给 ``background_creator_rule``（见本类下方
+        的断言），所以这里的文案不得再出现 pwsh / run_in_background。
+        """
+        both = comfyui_script_guide_text({"comfyui_batch", "pwsh", "run_in_background", "write_file"})
+        self.assertNotIn("pwsh", both, "执行入口不在编排指引里点名")
+        self.assertNotIn("run_in_background", both, "执行入口不在编排指引里点名")
+        self.assertIn("write_file", both, "写文件工具可用时点名它（生成脚本的唯一入口）")
         only_pwsh = comfyui_script_guide_text({"comfyui_batch", "pwsh"})
-        self.assertIn("pwsh", only_pwsh)
-        self.assertNotIn("run_in_background", only_pwsh,
-                         "工具集里没有 run_in_background 时不得点名它")
+        self.assertIn("脚本", only_pwsh)
+        self.assertNotIn("write_file", only_pwsh,
+                         "工具集里没有 write_file 时不得点名它")
         only_bg = comfyui_script_guide_text({"comfyui_batch", "run_in_background"})
-        self.assertIn("run_in_background", only_bg)
-        self.assertNotIn("pwsh", only_bg)
+        self.assertIn("脚本", only_bg)
+        self.assertNotIn("run_in_background", only_bg)
+        # 执行入口的唯一出处：同一组工具下，后台任务规则给出 30 秒阈值与固定 shell 样例。
+        rule = background_creator_rule({"run_in_background", "pwsh", "comfyui_batch"})
+        self.assertIn(str(BACKGROUND_JOB_THRESHOLD_SECONDS), rule, "阈值必须出现（30 秒口径）")
+        self.assertIn("comfyui_batch", rule, "已有 ComfyUI 工作流走 comfyui_batch")
+        self.assertIn('"kind": "shell"', rule, "唯一固定样例要教 shell Job 的 spec 结构")
         self.assertEqual(comfyui_script_guide_text({"read_file"}), "",
                          "不满足条件时返回空串（调用点按空串跳过注入）")
 

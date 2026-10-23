@@ -47,6 +47,25 @@ VIDEO_SHEET_MAX_EDGE = 1600       # 联系表长边上限
 VIDEO_SHEET_GAP = 6
 VIDEO_SHEET_LABEL_HEIGHT = 18
 
+# ---- 精确逐帧（extract_video_frames_exact）----
+# 与上面的抽样口径**完全分离**：不走时间网格、不做 _trim_evenly、不做画面差异筛选。
+# 精确模式按实际解码顺序保留指定范围内**每一帧**，manifest 记录真实帧序号与 PTS。
+#
+# 抽样缓存的键版本 +1：manifest 里新增了 actual_t（真实帧时间）。旧 manifest 没有这个
+# 字段、也不能反推出来，所以键版本必须变——否则新代码会把旧清单当命中，交出一份缺少
+# 真实时间的"逐帧"结果。
+SAMPLE_CACHE_VERSION = 2
+# 精确模式自己的键版本（与抽样分开演进）。
+EXACT_CACHE_VERSION = 1
+# worker 内部的小块大小（资源控制，不是"逐帧分页模式"）：每块最多暂存/转换这么多帧，
+# 但一次调用必须处理完指定范围内的全部帧。
+EXACT_FRAME_CHUNK = 12
+# 单 Job 的帧数上限。精确逐帧的代价是每帧一张 PNG，不加护栏会把磁盘写满；
+# 超限在**创建前**整项拒绝（不截断、不谎称完整）。
+EXACT_MAX_FRAMES = 3000
+EXACT_DEFAULT_MAX_EDGE = 1600
+EXACT_CACHE_REL = "uploads/video_frames_exact"
+
 # 视频扩展名：唯一定义在 core/media_types.py（不另立名单）
 VIDEO_EXTS: tuple[str, ...] = tuple(MEDIA_EXTS_BY_KIND["video"])
 
@@ -174,6 +193,11 @@ def _video_cache_key(video_path: Path) -> str:
         stamp = "0:0"
     digest = hashlib.sha256(f"{resolved}|{stamp}".encode("utf-8")).hexdigest()
     return digest[:16]
+
+
+def video_fingerprint(video_path: Path) -> str:
+    """视频指纹（路径 + 大小 + mtime_ns 的短哈希）——供上层做"同一段视频"的幂等判定。"""
+    return _video_cache_key(_ensure_video_file(video_path))
 
 
 def _params_key(payload: dict[str, Any]) -> str:
@@ -534,7 +558,7 @@ def extract_frames(
                         f"times 全部落在 [start={start_value:g}, end={end_value:g}] 之外"
                     )
                 params_key = _params_key({
-                    "v": 1, "mode": mode, "times": plan, "max": max_count,
+                    "v": SAMPLE_CACHE_VERSION, "mode": mode, "times": plan, "max": max_count,
                     "max_edge": max_edge, "sheet": want_sheet,
                 })
             elif mode == "interval":
@@ -554,14 +578,14 @@ def extract_frames(
                 if not plan:
                     plan = [start_value]
                 params_key = _params_key({
-                    "v": 1, "mode": mode, "interval": interval_value,
+                    "v": SAMPLE_CACHE_VERSION, "mode": mode, "interval": interval_value,
                     "start": start_value, "end": end_value, "max": max_count,
                     "max_edge": max_edge, "sheet": want_sheet,
                 })
             else:
                 plan = []
                 params_key = _params_key({
-                    "v": 1, "mode": mode, "threshold": threshold_value,
+                    "v": SAMPLE_CACHE_VERSION, "mode": mode, "threshold": threshold_value,
                     "start": start_value, "end": end_value, "max": max_count,
                     "max_edge": max_edge, "sheet": want_sheet,
                 })
@@ -609,10 +633,12 @@ def extract_frames(
             for index, seconds in enumerate(picked):
                 target = cache_dir / f"frame_{index:03d}_t{seconds:.1f}.png"
                 image = None
+                actual = None
                 if not target.is_file() or target.stat().st_size <= 0:
                     frame = _decode_frame_at(container, stream, seconds)
                     if frame is None:
                         continue
+                    actual = _frame_seconds(frame, _stream_time_base(stream))
                     image = _fit_max_edge(_frame_to_image(frame), max_edge)
                     _save_png(image, target)
                 if image is None:
@@ -621,13 +647,19 @@ def extract_frames(
                     image = Image.open(target)
                     image.load()
                 entries.append((seconds, image))
-                frames.append({
+                record: dict[str, Any] = {
+                    # `t` 保持**请求**时间（旧字段语义不变，旧 manifest 与旧调用方零回归）。
                     "t": round(seconds, 3),
                     "path": str(target),
                     "thumb_path": _thumb(target),
                     "width": image.size[0],
                     "height": image.size[1],
-                })
+                }
+                # `actual_t` 只在本次真的解码过时写入真实帧时间：读回旧缓存时没有这个
+                # 信息，绝不伪造（计划 2026-10-22 §4.1：缺实际 PTS 不补假值）。
+                if actual is not None:
+                    record["actual_t"] = round(actual, 6)
+                frames.append(record)
             if not frames:
                 raise ValueError("没有抽到任何帧：可能是损坏文件，或时间点全部无法解码")
 
@@ -714,3 +746,404 @@ def _write_manifest(cache_dir: Path, result: dict[str, Any]) -> None:
     except OSError:
         # 清单只是幂等加速器：写失败不影响本次结果（下次重抽即可）
         pass
+
+
+# ============================================================
+# 精确逐帧（extract_video_frames_exact）：按解码顺序保留范围内每一帧
+# ============================================================
+# 与 extract_frames 的关系：**互不复用采样语义**。这里不构造时间网格、不裁剪候选、
+# 不做画面差异筛选；只按 `container.decode(stream)` 的实际输出顺序逐帧落盘。
+#
+# 为什么不能沿用 interval=1/fps：实测 24 fps 夹具上，`_interval_times` 把 0.042s 舍入成
+# 0.042，而 seek 取到的是 0.083333s 的帧，下一次请求 0.083s 又落到同一帧——既漏帧又重复
+# （计划 2026-10-22 §2.2 的实测结论）。逐帧只有一条正确路径：顺序解码 + 计数。
+
+def _exact_cache_dir(data_dir: Path, video_path: Path, params_key: str) -> Path:
+    return (Path(data_dir) / EXACT_CACHE_REL).resolve() / _video_cache_key(video_path) / params_key
+
+
+def exact_cache_key(params: dict[str, Any]) -> str:
+    """精确逐帧的参数键（含版本号）：范围/长边/帧号基准一变就是新目录。"""
+    return _params_key({"v": EXACT_CACHE_VERSION, **params})
+
+
+class ExactRangeError(ValueError):
+    """精确逐帧的范围/容量校验失败（在**创建 Job 之前**抛出，不产生任何写盘）。"""
+
+
+def resolve_exact_range(
+    video_path: Path,
+    *,
+    start: Any = None,
+    end: Any = None,
+    start_frame: Any = None,
+    end_frame: Any = None,
+) -> dict[str, Any]:
+    """把「时间区间」或「帧区间」解析成一个可校验的抽取计划（纯校验，不写盘）。
+
+    规则（计划 2026-10-22 §4.2）：
+    - 时间区间与帧区间**不能同时**传入（半开区间语义会互相矛盾，创建前拒绝）；
+    - 区间必须非空、非负、区间右端必须大于左端；
+    - 帧区间按「解码顺序的第 N 帧」理解（0 起、半开区间 [start_frame, end_frame)）；
+    - 两种区间都必须先过 `EXACT_MAX_FRAMES` 的容量预检，超限整项拒绝。
+
+    返回值里带 `mode`（time/frame）与规范化后的边界，供 worker 与快照复用。
+    """
+    path = _ensure_video_file(video_path)
+    time_given = start is not None or end is not None
+    frame_given = start_frame is not None or end_frame is not None
+    if time_given and frame_given:
+        raise ExactRangeError("start/end（时间区间）与 start_frame/end_frame（帧区间）不能同时指定")
+    if not time_given and not frame_given:
+        raise ExactRangeError("需要指定抽取范围：start/end（秒）或 start_frame/end_frame（帧号）")
+
+    av = _load_av()
+    try:
+        with av.open(str(path)) as container:
+            streams = list(container.streams.video)
+            if not streams:
+                raise ExactRangeError(f"文件不含视频轨道：{path}")
+            stream = streams[0]
+            duration = _stream_duration(container, stream)
+            fps = 0.0
+            rate = getattr(stream, "average_rate", None) or getattr(stream, "base_rate", None)
+            if rate:
+                try:
+                    fps = float(rate)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    fps = 0.0
+            if time_given:
+                start_value = 0.0 if start in (None, "") else _float_param(start, 0.0, "start")
+                end_value = duration if end in (None, "") else _float_param(end, duration, "end")
+                if start_value < 0:
+                    raise ExactRangeError("start 不能为负数")
+                if end_value <= start_value:
+                    raise ExactRangeError(f"end（{end_value:g}）必须大于 start（{start_value:g}）")
+                if duration > 0 and end_value > duration + 0.05:
+                    raise ExactRangeError(f"end 越界：视频时长 {duration:.3f} 秒，end={end_value:g}")
+                estimate = int(math.ceil((end_value - start_value) * fps)) if fps > 0 else 0
+                if estimate > EXACT_MAX_FRAMES:
+                    raise ExactRangeError(
+                        f"该区间预计 {estimate} 帧，超过单次精确逐帧上限 {EXACT_MAX_FRAMES} 帧；"
+                        "请缩小范围后分批处理"
+                    )
+                plan = {
+                    "mode": "time",
+                    "start": float(start_value),
+                    "end": float(end_value),
+                    "duration": round(duration, 3),
+                    "fps": round(fps, 3),
+                    "estimated_frames": estimate,
+                }
+            else:
+                start_value = _int_param(start_frame, 0, "start_frame")
+                end_value = _int_param(end_frame, 0, "end_frame")
+                if start_value < 0 or end_value < 0:
+                    raise ExactRangeError("帧号不能为负数")
+                if end_value <= start_value:
+                    raise ExactRangeError(
+                        f"end_frame（{end_value}）必须大于 start_frame（{start_value}）"
+                    )
+                if end_value - start_value > EXACT_MAX_FRAMES:
+                    raise ExactRangeError(
+                        f"该帧区间共 {end_value - start_value} 帧，超过单次上限 {EXACT_MAX_FRAMES} 帧；"
+                        "请缩小范围后分批处理"
+                    )
+                declared = int(getattr(stream, "frames", 0) or 0)
+                if declared > 0 and start_value >= declared:
+                    raise ExactRangeError(
+                        f"start_frame 越界：该视频声明 {declared} 帧，start_frame={start_value}"
+                    )
+                plan = {
+                    "mode": "frame",
+                    "start_frame": int(start_value),
+                    "end_frame": int(end_value),
+                    "duration": round(duration, 3),
+                    "fps": round(fps, 3),
+                    "declared_frames": declared,
+                    "estimated_frames": end_value - start_value,
+                }
+    except ExactRangeError:
+        raise
+    except _av_error_types(av) as exc:
+        raise _decode_error(exc) from exc
+    except ValueError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise _decode_error(exc) from exc
+    return plan
+
+
+def check_exact_capacity(data_dir: Path, video_path: Path, plan: dict[str, Any]) -> None:
+    """容量预检：精确逐帧占**独立**目录树，仍受 200/600 两级口径约束。
+
+    在创建 Job 之前调用：容量不够就整项拒绝，不自动截断、不删历史引用帧、不抽一部分
+    再谎称完整（计划 2026-10-22 §4.3）。
+    """
+    planned = int(plan.get("estimated_frames") or 0)
+    if planned <= 0:
+        return
+    root = (Path(data_dir) / EXACT_CACHE_REL).resolve() / _video_cache_key(video_path)
+    existing_video = _count_png(root)
+    if existing_video + planned > VIDEO_CACHE_MAX_PER_VIDEO:
+        raise ExactRangeError(
+            f"该视频的逐帧缓存合计将达 {existing_video + planned} 张，超过上限 "
+            f"{VIDEO_CACHE_MAX_PER_VIDEO} 张；请缩小范围，或先清理 uploads/video_frames_exact"
+        )
+
+
+def exact_params(plan: dict[str, Any], max_edge: Any = EXACT_DEFAULT_MAX_EDGE) -> dict[str, Any]:
+    """精确逐帧的缓存参数（范围 + 长边）。缓存目录/清单路径都由它派生，必须唯一。"""
+    return {
+        "mode": str(plan.get("mode") or ""),
+        "start": plan.get("start"),
+        "end": plan.get("end"),
+        "start_frame": plan.get("start_frame"),
+        "end_frame": plan.get("end_frame"),
+        "max_edge": _clamp_int(max_edge, EXACT_DEFAULT_MAX_EDGE, VIDEO_FRAME_MIN_EDGE, 4096, "max_edge"),
+    }
+
+
+def exact_manifest_path(
+    data_dir: Path, video_path: Path, plan: dict[str, Any], max_edge: Any = EXACT_DEFAULT_MAX_EDGE
+) -> Path:
+    """该计划对应的 manifest 路径（确定性：不需要等 Worker 跑完就能定位）。
+
+    供 Job Worker 在**开始抽取前**把路径写进 checkpoint——任务运行中也能分页读已提交的帧，
+    不必等到终态。
+    """
+    path = _ensure_video_file(video_path)
+    params = exact_params(plan, max_edge)
+    return _exact_cache_dir(data_dir, path, exact_cache_key(params)) / "manifest.json"
+
+
+def extract_frames_exact(
+    video_path: Path,
+    data_dir: Path,
+    *,
+    plan: dict[str, Any],
+    max_edge: Any = EXACT_DEFAULT_MAX_EDGE,
+    cancel_check: Any = None,
+    progress: Any = None,
+    checkpoint: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """按解码顺序抽取指定范围内的**每一帧**，写 manifest，返回抽取事实。
+
+    参数：
+    - ``plan``：`resolve_exact_range()` 的结果（时间区间或帧区间，半开）；
+    - ``cancel_check``：可调用，返回 True 表示已请求取消——只在**安全解码边界**
+      生效（当前这块帧落盘并原子提交之后再停）；
+    - ``progress``：可调用 ``(current, total) -> None``，用于任务面板进度；
+    - ``checkpoint``：上次已提交的进度（``last_frame`` / ``manifest``），支持续跑。
+
+    返回 ``{status, mode, range, frame_count, first_frame, last_frame, manifest,
+    failed_frames, range_complete, ...}``。抽取成功只代表帧文件与清单完整，
+    **不表示**视觉模型已逐帧分析或已生成提示词。
+    """
+    path = _ensure_video_file(video_path)
+    mode = str(plan.get("mode") or "")
+    if mode not in {"time", "frame"}:
+        raise ExactRangeError(f"非法的精确抽取计划：mode={mode!r}")
+    max_edge_value = _clamp_int(max_edge, EXACT_DEFAULT_MAX_EDGE, VIDEO_FRAME_MIN_EDGE, 4096, "max_edge")
+
+    params = exact_params(plan, max_edge_value)
+    cache_dir = _exact_cache_dir(data_dir, path, exact_cache_key(params))
+    manifest_path = cache_dir / "manifest.json"
+
+    resume = checkpoint if isinstance(checkpoint, dict) else {}
+    state = dict(resume.get("exact") or {}) if isinstance(resume.get("exact"), dict) else {}
+    # 帧序号口径：`decoded_index` 是"这条视频的第几帧"（0 起、按解码顺序），
+    # 与请求区间无关——同一视频的不同子区间共享同一套帧号，便于后续按帧号反向定位。
+    saved_frames: list[dict[str, Any]] = list(state.get("frames") or [])
+    next_index = int(state.get("next_index") or 0)
+    failed: list[dict[str, Any]] = list(state.get("failed") or [])
+
+    av = _load_av()
+    try:
+        with av.open(str(path)) as container:
+            streams = list(container.streams.video)
+            if not streams:
+                raise ExactRangeError(f"文件不含视频轨道：{path}")
+            stream = streams[0]
+            time_base = _stream_time_base(stream)
+            duration = _stream_duration(container, stream)
+            if mode == "time":
+                start_s = float(plan.get("start") or 0.0)
+                end_s = float(plan.get("end") or duration)
+            else:
+                start_s = None
+                end_s = None
+            start_index = int(plan.get("start_frame") or 0) if mode == "frame" else 0
+            end_index = int(plan.get("end_frame") or 0) if mode == "frame" else 0
+            total_hint = int(plan.get("estimated_frames") or 0)
+
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cancelled = False
+            decoded_index = 0
+            chunk: list[dict[str, Any]] = []
+
+            def _flush() -> None:
+                """把当前块原子提交：先写图、再更新 manifest，最后推进 checkpoint。"""
+                nonlocal saved_frames
+                if not chunk:
+                    return
+                saved_frames.extend(chunk)
+                payload = {
+                    "status": "running",
+                    "mode": mode,
+                    "range": params,
+                    "video": str(path),
+                    "duration": round(duration, 3),
+                    "frames": saved_frames,
+                    "failed_frames": failed,
+                }
+                _write_manifest_at(cache_dir, payload)
+                chunk.clear()
+                if callable(progress):
+                    try:
+                        progress(len(saved_frames), total_hint)
+                    except Exception:  # noqa: BLE001 - 进度回报失败不得打断抽取
+                        pass
+
+            for frame in container.decode(stream):
+                if cancel_check is not None and cancel_check():
+                    cancelled = True
+                    break
+                index = decoded_index
+                decoded_index += 1
+                seconds = _frame_seconds(frame, time_base)
+                # 范围筛选按**实际帧时间**（而不是请求时间点）：这正是不用时间网格的原因。
+                if mode == "time":
+                    if seconds is None:
+                        continue
+                    if seconds < float(start_s) - 1e-9:
+                        continue
+                    if seconds >= float(end_s) - 1e-9:
+                        break
+                else:
+                    if index < start_index:
+                        continue
+                    if index >= end_index:
+                        break
+                if index < next_index:
+                    continue  # 续跑：已提交过的帧跳过
+                target = cache_dir / f"frame_{index:06d}.png"
+                try:
+                    image = _fit_max_edge(_frame_to_image(frame), max_edge_value)
+                    _save_png(image, target)
+                except Exception as exc:  # noqa: BLE001 - 单帧失败记录后继续
+                    failed.append({
+                        "frame_index": index,
+                        "pts": int(getattr(frame, "pts", 0) or 0),
+                        "timestamp": round(float(seconds or 0.0), 6),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
+                    next_index = index + 1
+                    continue
+                record = {
+                    "frame_index": index,
+                    "pts": int(getattr(frame, "pts", 0) or 0),
+                    "timestamp": round(float(seconds or 0.0), 6),
+                    "path": str(target),
+                    "thumb_path": _thumb(target),
+                    "width": image.size[0],
+                    "height": image.size[1],
+                    "status": "extracted",
+                }
+                chunk.append(record)
+                next_index = index + 1
+                if len(chunk) >= EXACT_FRAME_CHUNK:
+                    _flush()
+            _flush()
+
+            expected = int(plan.get("estimated_frames") or 0)
+            if mode == "frame":
+                expected = end_index - start_index
+            # 帧区间是精确比对（帧号连续、可数）；时间区间只能与 fps 估计值比对：
+            # 估计值来自平均帧率，VFR 素材天然有偏差，所以给 5% + 2 帧的容差。
+            # 差异超出容差说明解码在中途断了（坏帧/流结束），不能写成 range_complete=true。
+            time_complete = len(saved_frames) > 0
+            if mode == "time" and expected > 0:
+                tolerance = max(2, int(math.ceil(expected * 0.05)))
+                time_complete = abs(len(saved_frames) - expected) <= tolerance
+            range_complete = bool(not cancelled and not failed and (
+                (mode == "frame" and len(saved_frames) >= expected)
+                or (mode == "time" and time_complete)
+            ))
+            status = "cancelled" if cancelled else ("completed" if range_complete else "partial")
+            # 终态清单必须**带上帧数组**：manifest 是分页读取的唯一数据源，
+            # 只写摘要会让「抽取完成」后读出来 0 帧（早期实现踩过这个坑）。
+            _write_manifest_at(cache_dir, {
+                "status": status,
+                "mode": mode,
+                "range": params,
+                "video": str(path),
+                "duration": round(duration, 3),
+                "frames": saved_frames,
+                "failed_frames": failed,
+                "range_complete": range_complete,
+            })
+            result = {
+                "status": status,
+                "mode": mode,
+                "range": params,
+                "video": str(path),
+                "duration": round(duration, 3),
+                "frame_count": len(saved_frames),
+                "first_frame": saved_frames[0]["frame_index"] if saved_frames else None,
+                "last_frame": saved_frames[-1]["frame_index"] if saved_frames else None,
+                "manifest": str(manifest_path),
+                "failed_frames": failed,
+                "range_complete": range_complete,
+                "extracted_paths_sample": [item["path"] for item in saved_frames[:4]],
+                "next_step": (
+                    "帧文件与清单已完整抽取。需要内容分析时另说：抽取不等于已逐帧分析、"
+                    "也不等于已生成提示词。"
+                ),
+            }
+            return result
+    except ExactRangeError:
+        raise
+    except _av_error_types(av) as exc:
+        raise _decode_error(exc) from exc
+    except ValueError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise _decode_error(exc) from exc
+
+
+def _write_manifest_at(cache_dir: Path, payload: dict[str, Any]) -> None:
+    """原子写 manifest（临时文件 + replace）：worker 分块提交时不能留半份 JSON。"""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / "manifest.json"
+    temp = target.with_suffix(".json.part")
+    temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(target)
+
+
+def read_exact_manifest(path: str | Path, *, offset: int = 0, limit: int = 100) -> dict[str, Any]:
+    """分页读精确逐帧 manifest（服务端按 Job ID + owner 定位后调用；不接受任意路径）。
+
+    游标语义固定为记录下标（不是帧号）：帧号可能因失败帧出现空洞，用下标才能保证
+    "无重复、无遗漏"的分页。
+    """
+    manifest = Path(path)
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        raise ValueError(f"manifest 不可读：{exc}") from exc
+    frames = payload.get("frames") if isinstance(payload.get("frames"), list) else []
+    start = max(0, int(offset))
+    count = max(1, min(int(limit), 500))
+    page = frames[start:start + count]
+    return {
+        "total": len(frames),
+        "offset": start,
+        "limit": count,
+        "frames": page,
+        "next_offset": start + len(page) if start + len(page) < len(frames) else None,
+        "status": payload.get("status") or "",
+        "range": payload.get("range") or {},
+        "failed_frames": payload.get("failed_frames") or [],
+        "range_complete": bool(payload.get("range_complete")),
+    }

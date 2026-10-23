@@ -595,6 +595,9 @@ def _is_untouched_factory_agent(agent: dict[str, Any], spec: dict[str, Any]) -> 
         return False
     if agent.get("tool_scope") not in (None, []):
         return False
+    # 单独授权（opt-in）非空 = 用户用过那枚复选框，属于真实改动，不能被出厂迁移清掉。
+    if agent.get("tool_opt_ins") not in (None, []):
+        return False
     if str(agent.get("avatar") or ""):
         return False
     return True
@@ -834,6 +837,9 @@ _TOOL_GROUP = {
     "read_conversation": _LONG_SESSION_GROUP, "reset_context": _LONG_SESSION_GROUP,
     "read_pdf": "读取与检索", "pdf_render_pages": "读取与检索", "pdf_zoom_region": "读取与检索",
     "probe_video": "读取与检索", "extract_frames": "读取与检索",
+    # 精确逐帧与抽样抽帧同为「读取」类动作（都是把视频变成帧），但它必须单独授权：
+    # 分组归属只决定展示位置，不构成授权（见 OPT_IN_TOOLS）。
+    "extract_video_frames_exact": "读取与检索",
     "write_file": "文件写入与编辑", "edit_file": "文件写入与编辑",
     "pwsh": "命令与脚本执行", "run_skill_script": "命令与脚本执行",
     "http_request": _MCP_GROUP, "web_search": _MCP_GROUP,
@@ -883,6 +889,18 @@ _DEFAULT_SELECTED_TOOLS = frozenset({
     "run_in_background", "job_output", "job_status", "job_wait", "job_kill",
 })
 
+# ---- 需要「单独授权」的工具（opt-in）----
+# 与普通工具的区别：**任何预设/全选/分组全选都不会打开它**，只有 Agent 编辑页里那枚
+# 独立复选框（存 `tool_opt_ins`）能授权。理由：这些工具一次调用会产生数量级更大的副作用，
+# 误开的代价远高于普通工具（逐帧抽取会把整段视频的每一帧写成 PNG）。
+#
+# 三条硬约束（改动前必读）：
+#   1. `resolve_tool_preset` 必须把 opt-in 从展开结果里剔除——`group:*` 也不得放行；
+#   2. `run/session.py` 的会话固化/兜底路径同样剔除，只有 Agent 的 `tool_opt_ins` 能加回来；
+#   3. 子 Agent 的 `SUBAGENT_BLOCKED_TOOLS` 要挡住它（子 Agent 不该发起这类任务）。
+OPT_IN_TOOLS: tuple[str, ...] = ("extract_video_frames_exact",)
+_OPT_IN_TOOLS_SET = frozenset(OPT_IN_TOOLS)
+
 
 def tool_catalog_entries(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """从 tool_registry schemas 构建 Agent 编辑页的工具目录（不显示 4 个 Harness 别名）。"""
@@ -900,7 +918,9 @@ def tool_catalog_entries(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "group": _TOOL_GROUP.get(name, _MCP_GROUP if name.startswith("mcp__") else "其他"),
             "subgroup": _mcp_subgroup(name),
             "model_target": "any",
-            "default_selected": name in _DEFAULT_SELECTED_TOOLS,
+            # opt-in 工具永远不是默认勾选：它的开关只存在于 Agent 编辑页的「单独授权」区。
+            "default_selected": name in _DEFAULT_SELECTED_TOOLS and name not in _OPT_IN_TOOLS_SET,
+            "opt_in": name in _OPT_IN_TOOLS_SET,
             "alias_of": _ALIAS_MAIN.get(name),
         })
     # 端到端顺序：与 TOOL_GROUP_INFO 的分组顺序一致，让每组内工具顺序稳定（避免逐轮随机）
@@ -909,6 +929,8 @@ def tool_catalog_entries(schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "read_file", "list_directory", "search_files",
         "read_pdf", "pdf_render_pages", "pdf_zoom_region",
         "probe_video", "extract_frames",
+        # 精确逐帧：紧跟抽样抽帧，但只能通过「单独授权」打开（见 OPT_IN_TOOLS）
+        "extract_video_frames_exact",
         # 文件写入与编辑
         "write_file", "edit_file",
         # 命令与脚本执行
@@ -1145,6 +1167,9 @@ def resolve_tool_preset(preset: dict[str, Any], entries: list[dict[str, Any]]) -
             n for n in selected
             if not n.startswith("mcp__") and n not in ("register_mcp",)
         }
+    # opt-in 工具：预设展开（含 group:*）一律不放行。它们只能由 Agent 的
+    # `tool_opt_ins` 单独授权——否则「点一下标准模式」就会顺带打开整段视频逐帧落盘。
+    selected -= _OPT_IN_TOOLS_SET
     order = {str(item.get("name")): i for i, item in enumerate(entries)}
     return sorted(selected, key=lambda name: order.get(name, 999))
 
@@ -3824,6 +3849,12 @@ class ConfigStore:
             list(dict.fromkeys(str(item) for item in raw_scope if str(item).strip()))
             if isinstance(raw_scope, list) else []
         )
+        # 单独授权（opt-in）：只保留白名单内的工具名，缺省 []。
+        # 与 tool_scope 完全独立：预设/全选/分组联动改的是 tool_scope，绝不能顺手把它清空
+        # 或补全。请求里没有该键时保留已存值（同 avatar 的处理，见下）。
+        raw_opt_ins = values.get("tool_opt_ins")
+        if raw_opt_ins is not None and not isinstance(raw_opt_ins, list):
+            raise ValueError("tool_opt_ins 必须是数组")
         payload = {
             "id": agent_id,
             "name": name[:80],
@@ -3851,6 +3882,16 @@ class ConfigStore:
                     avatar = (builtin or {}).get("avatar")
                 avatar = avatar or ""
             payload["avatar"] = str(avatar).strip()
+            # 单独授权：键缺省（None）= 保留已存值；显式传数组则按白名单过滤后覆盖。
+            # 「保留」而不是「清空」是硬要求：老客户端/其它保存路径不带这个键时，
+            # 用户勾过的单独授权不能被一次无关的表单保存抹掉。
+            if raw_opt_ins is None:
+                existing_opt_ins = agents[index].get("tool_opt_ins") if index is not None else []
+            else:
+                existing_opt_ins = raw_opt_ins
+            payload["tool_opt_ins"] = list(dict.fromkeys(
+                str(item) for item in (existing_opt_ins or []) if str(item) in _OPT_IN_TOOLS_SET
+            ))
             if index is None:
                 agents.append(payload)
             else:

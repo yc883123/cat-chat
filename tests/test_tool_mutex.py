@@ -229,14 +229,21 @@ class PresetAndToolSetGateTests(unittest.TestCase):
         return tool_catalog_entries(list(build_tool_registry().schemas()))
 
     def test_full_preset_expands_everything_except_the_loser(self) -> None:
-        """full 走 group:* ⇒ 必须显式 exclude 后位者，否则"一键全能"就是双开。"""
+        """full 走 group:* ⇒ 必须显式 exclude 后位者，否则"一键全能"就是双开。
+
+        opt-in 工具（单独授权）同样被排除：它们只能由 Agent 的 tool_opt_ins 打开，
+        `group:*` 不得顺带放行（见 config.OPT_IN_TOOLS）。
+        """
+        from naiba.config import OPT_IN_TOOLS
+
         entries = self._entries()
         known = {entry["name"] for entry in entries}
         full = next(preset for preset in TOOL_PRESETS if preset["id"] == "full")
         self.assertIn("subagent_spawn", list(full.get("exclude") or []))
         tools = set(resolve_tool_preset(full, entries))
-        self.assertEqual(tools, known - {PAIR[1]})
+        self.assertEqual(tools, known - {PAIR[1]} - set(OPT_IN_TOOLS))
         self.assertIn(PAIR[0], tools)
+        self.assertFalse(tools & set(OPT_IN_TOOLS), "全能模式不得打开 opt-in 工具")
 
     def test_other_presets_carry_neither_subagent_tool(self) -> None:
         entries = self._entries()

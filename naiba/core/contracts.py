@@ -33,6 +33,11 @@ RUN_CONTEXT_KEYS: tuple[str, ...] = (
     #   `paths`。有了原文，工具就能按「媒体类型 + 候选唯一性」自己判定，模型传 `[]` 即可。
     #   它只做**解析提示**，不构成授权：能不能出卡仍由 intent + candidates 两枚键决定。
     "show_media_intent", "show_media_candidates", "show_media_message",
+    # 「精确逐帧」（extract_video_frames_exact）的授权门（计划 2026-10-22 §4.2）：
+    # video_frames_intent —— 本轮用户原文是否**明确要求**逐帧/连续帧抽取；
+    # 只有承载原始请求的普通主对话 Run 置位，辅助对话/Plan/子 Agent/后台 Job 恒 False。
+    # 工具执行层据此 fail closed：没有这枚键就不创建 Job、不写一帧。
+    "video_frames_intent",
     "event_sink", "truncation", "partial",
     # 本 Run 是否有「工具确认」回路：普通对话/计划执行 True，子 Agent 与后台 Job False。
     # 围栏来源动作在 False 的形态下直接按原文收尾（不执行、不挂起、不等待超时）。
@@ -85,6 +90,9 @@ def default_run_context() -> dict[str, Any]:
         "show_media_candidates": [],
         # 本轮用户原文（只给 show_media 解析代词/文件名用；空 = 没有原文，按无指代处理）。
         "show_media_message": "",
+        # 精确逐帧授权门：缺省 False = 一律拒绝（"忘装配"退化成"不创建 Job"，
+        # 而不是"任何会话都能把整段视频抽成几千张图"）。
+        "video_frames_intent": False,
         # 用户轮次序号（1 起）：0 = 未提供（子代理/计划执行没有"轮"的概念）。
         "turn_index": 0,
         # 事件出口（可调用）：工具实现把「实时进度」交给它，由宿主统一落库 + SSE 广播。
@@ -225,6 +233,8 @@ class RunContext(TypedDict, total=False):
     show_media_candidates: list[dict[str, Any]]
     # 本轮用户原文：只给 show_media 解析「刚才那个视频」这类代词用（不构成授权）。
     show_media_message: str
+    # 精确逐帧授权门：本轮用户原文是否明确要求逐帧/连续帧抽取（只由普通主对话 Run 置位）
+    video_frames_intent: bool
     # ---- 透明化/截断自述（工具实时进度出口 + 本轮答复截断信息）----
     event_sink: Any                  # 工具实时进度出口（callable(dict) -> None；缺省不报进度）
     truncation: dict[str, Any]       # 本轮答复截断信息（finish_reason / truncated / continued）

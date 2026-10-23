@@ -414,7 +414,7 @@ class ShowMediaToolMigrationTests(unittest.TestCase):
         return json.loads(raw or "[]")
 
     def test_version_and_id_constant(self) -> None:
-        self.assertEqual(CURRENT_SCHEMA_VERSION, 27)
+        self.assertEqual(CURRENT_SCHEMA_VERSION, 28)
         from naiba.config import built_in_agent_ids
         from naiba.storage.store import _BUILTIN_AGENT_IDS
 
@@ -489,6 +489,78 @@ class ShowMediaToolMigrationTests(unittest.TestCase):
             _migrate_to_v27(db)
             _migrate_to_v27(db)  # 二次重跑：不得重复追加
         self.assertEqual(self._tools(conv["id"]), ["read_file", "show_media"])
+
+
+class DetachedJobMigrationTests(unittest.TestCase):
+    """v28：background_tasks 加 ``detached`` / ``origin_run_id``（分离式 Job 的显式标记）。
+
+    为什么需要这两列（计划 2026-10-22 §4.3）：现有「顶层 Run」的判据是 parent_job_id 为空，
+    一条空父 ID 的活动记录会占住会话互斥位、进入 list_primary、被聊天收尾等待。逐帧抽取
+    Job 必须与主聊天并行，所以需要一枚独立的显式标记，不能复用"空父 ID"表达。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _columns(self, db_path: Path) -> dict[str, tuple[str, str]]:
+        with closing(sqlite3.connect(db_path)) as db:
+            rows = db.execute("PRAGMA table_info(background_tasks)").fetchall()
+        return {str(row[1]): (str(row[2]), str(row[4])) for row in rows}
+
+    def test_new_database_has_columns_with_defaults(self) -> None:
+        db_path = self.root / "chat.db"
+        self.storage = ChatStorage(db_path)
+        self.assertEqual(self.storage.get_user_version(), CURRENT_SCHEMA_VERSION)
+        columns = self._columns(db_path)
+        self.assertIn("detached", columns)
+        self.assertIn("origin_run_id", columns)
+        self.assertIn("0", columns["detached"][1], "detached 必须默认 0（存量行为不变）")
+        self.assertIn("''", columns["origin_run_id"][1], "origin_run_id 必须默认空串")
+
+    def test_upgrade_from_v27_adds_columns_and_keeps_rows(self) -> None:
+        from naiba.storage.store import ChatStorage as Store
+
+        db_path = self.root / "chat.db"
+        storage = Store(db_path)
+        conv = storage.create_conversation(agent_id="master")
+        job = storage.create_run(
+            conv["id"], "旧任务", {"id": "master", "name": "Job", "system_prompt": "", "skill_ids": []},
+            {}, kind="shell",
+        )
+        # 模拟 v27 库：把 user_version 回退，迁移会重新走 v28（ALTER 前先查列，幂等）。
+        with closing(sqlite3.connect(db_path)) as db:
+            db.execute("ALTER TABLE background_tasks DROP COLUMN detached")
+            db.execute("ALTER TABLE background_tasks DROP COLUMN origin_run_id")
+            db.commit()
+        storage.set_user_version(27)
+        storage.apply_pending_migrations()
+        self.assertEqual(storage.get_user_version(), CURRENT_SCHEMA_VERSION)
+        columns = self._columns(db_path)
+        self.assertIn("detached", columns)
+        self.assertIn("origin_run_id", columns)
+        row = storage.get_background_task(str(job["id"]))
+        self.assertEqual(row["detached"], False, "存量行读出来必须是 False（不是 None/0）")
+        self.assertEqual(row["origin_run_id"], "")
+
+    def test_detached_run_does_not_occupy_active_slot(self) -> None:
+        db_path = self.root / "chat.db"
+        storage = ChatStorage(db_path)
+        conv = storage.create_conversation(agent_id="master")
+        agent = {"id": "master", "name": "Job", "system_prompt": "", "skill_ids": []}
+        blocking = storage.create_run(conv["id"], "普通 Run", agent, {}, kind="chat")
+        # detached 与主聊天并行：不占顶层互斥位，active_run 也看不到它。
+        detached = storage.create_run(
+            conv["id"], "逐帧", agent, {}, kind="video_frames", detached=True, origin_run_id=str(blocking["id"]),
+        )
+        self.assertEqual(str(storage.active_run(conv["id"])["id"]), str(blocking["id"]),
+                         "active_run 仍指向普通 Run（detached 不参与互斥）")
+        row = storage.get_background_task(str(detached["id"]))
+        self.assertTrue(row["detached"])
+        self.assertEqual(row["origin_run_id"], str(blocking["id"]))
 
 
 if __name__ == "__main__":

@@ -61,18 +61,16 @@
         <input class="workspace-search-input" id="workspaceSearchInput" type="text" placeholder="搜索对话" autocomplete="off">
       </div>
       <nav class="conversation-list" id="sidebarWorkspaceTree" aria-label="工作区"></nav>
-      <!-- 工作台态专用导航（对话态隐藏）：进入历史产出列表。
-           做成带图标的卡片式按钮 + 一句说明，避免用户把它当成不可点的纯文本标题。 -->
-      <nav class="sidebar-studio-nav" id="sidebarStudioNav" hidden aria-label="工作台">
-        <button class="sidebar-studio-link" id="studioNavHistory" type="button" data-studio-nav="history" aria-label="历史产出：查看已生成的任务">
-          <svg class="sidebar-studio-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 4v5h5"></path><path d="M12 7v5l3 2"></path></svg>
-          <span class="sidebar-studio-text">
-            <b>历史产出</b>
-            <small>查看已生成的任务</small>
-          </span>
-          <svg class="sidebar-studio-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"></path></svg>
-        </button>
-      </nav>
+      <!-- 工作台态的功能分页导航：左侧栏负责在各功能页之间切换。
+           当前只有「模块库」，后续新功能各加一项（不在顶栏再堆分页按钮）。 -->
+      <div class="sidebar-studio-nav" id="sidebarStudioNav" hidden>
+        <nav class="studio-pages" id="studioPages" aria-label="工作台分页">
+          <button class="studio-page" type="button" aria-current="page" data-studio-page="library">
+            <svg class="studio-page-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.5"></rect><rect x="13" y="4" width="7" height="7" rx="1.5"></rect><rect x="4" y="13" width="7" height="7" rx="1.5"></rect><rect x="13" y="13" width="7" height="7" rx="1.5"></rect></svg>
+            <span>模块库</span>
+          </button>
+        </nav>
+      </div>
       <div class="sidebar-footer">
         <button class="address-button" id="copyAddress" title="复制手机访问地址">
           <i class="status-mark" id="serverDot" title="服务状态" aria-label="服务状态"></i>
@@ -220,9 +218,6 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"></path></svg>
           </button>
           <strong class="studio-brand">工作台</strong>
-          <nav class="studio-pages" id="studioPages" aria-label="工作台分页">
-            <button class="studio-page" type="button" aria-current="page" data-studio-page="library">模块库</button>
-          </nav>
           <div class="studio-topbar-tools">
             <label class="studio-search">
               <input id="studioSearch" type="search" placeholder="搜索模板" aria-label="搜索模板">
@@ -246,7 +241,22 @@
             </div>
             <div class="studio-detail" id="studioDetail">
               <div class="studio-detail-head">
-                <h2 id="studioDetailTitle"></h2>
+                <div class="studio-title-row">
+                  <h2 id="studioDetailTitle"></h2>
+                  <!-- 自定义标题：只影响列表卡片显示名；模板原名仍在下方「原名」行保留。 -->
+                  <button class="icon-button studio-title-edit" id="studioTitleEdit" type="button"
+                          title="设置自定义标题" aria-label="设置自定义标题" hidden>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l10-10-4-4L4 16v4z"></path><path d="M14 6l4 4"></path></svg>
+                  </button>
+                </div>
+                <p class="studio-title-origin" id="studioDetailOriginTitle" hidden></p>
+                <div class="studio-title-editor" id="studioTitleEditor" hidden>
+                  <input id="studioTitleInput" type="text" maxlength="80" placeholder="给这条模板起个自己的名字"
+                         aria-label="自定义标题">
+                  <button class="control-button tiny" id="studioTitleSave" type="button">保存</button>
+                  <button class="control-button tiny" id="studioTitleClear" type="button" hidden>恢复原名</button>
+                  <button class="control-button tiny ghost" id="studioTitleCancel" type="button">取消</button>
+                </div>
                 <p id="studioDetailSummary"></p>
                 <div class="studio-detail-chips" id="studioDetailChips"></div>
               </div>
@@ -295,19 +305,46 @@
                   <small id="studioResultMeta"></small>
                   <small id="studioHistoryRange" hidden>最近任务，最多显示 60 条</small>
                 </p>
-                <button class="control-button studio-back-result" id="studioBackToResult" type="button" hidden>返回生成结果</button>
+                <div class="studio-header-actions">
+                  <button class="control-button studio-history-edit" id="studioHistoryEdit" type="button" hidden
+                          title="进入编辑模式，可多选删除历史产出">编辑</button>
+                  <button class="control-button studio-back-result" id="studioBackToResult" type="button" hidden>返回生成结果</button>
+                </div>
                 <div class="studio-task-history" id="studioTaskHistory" aria-label="最近任务"></div>
               </header>
+              <!-- 历史产出编辑模式：只出现在历史态；删除进行中的任务会被后端拒绝并提示跳过。 -->
+              <div class="studio-history-editbar" id="studioHistoryEditBar" hidden>
+                <label class="studio-history-selectall">
+                  <input type="checkbox" id="studioHistorySelectAll" class="studio-history-check">
+                  <span>全选</span>
+                </label>
+                <span class="studio-history-selected" id="studioHistorySelected">已选 0 项</span>
+                <button class="danger-button" id="studioHistoryDelete" type="button" disabled>删除选中</button>
+              </div>
               <!-- 任务动作跟着任务走：结果档（手机）与结果栏（桌面）都可达 -->
               <div class="studio-result-actions">
                 <button class="control-button" id="studioCancelTask" type="button" hidden>取消</button>
                 <button class="control-button" id="studioRetryTask" type="button" hidden>重试</button>
-                <button class="control-button" id="studioLocateResult" type="button" hidden>定位模板</button>
-                <button class="control-button" id="studioHandoff" type="button" hidden>继续追问…</button>
+                <button class="control-button" id="studioLocateResult" type="button" hidden>定位</button>
+                <button class="control-button" id="studioHandoff" type="button" hidden>追问</button>
+                <!-- 历史产出：图标按钮（只留图案），与两枚文字按钮同高同行 -->
+                <button class="control-button studio-icon-button" id="studioOpenHistory" type="button"
+                        title="历史产出" aria-label="历史产出">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"></path><path d="M3 4v5h5"></path><path d="M12 7v5l3 2"></path></svg>
+                </button>
                 <span class="studio-task-hint" id="studioTaskHint" role="status"></span>
               </div>
               <div class="studio-history" id="studioHistoryList" hidden aria-label="历史产出"></div>
-              <div class="studio-result-stream" id="studioResultStream" aria-live="polite"></div>
+              <!-- 生成结果正文 + 左上角的一键复制（透明浮层）：按钮与正文是兄弟节点，
+                   所以复制到的永远是结果原文，不会把按钮文字带进去。 -->
+              <div class="studio-result-body">
+                <button class="studio-copy-button" id="studioCopyResult" type="button" hidden
+                        aria-label="复制生成结果" title="复制生成结果">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15V5a2 2 0 0 1 2-2h10"></path></svg>
+                  <span>复制</span>
+                </button>
+                <div class="studio-result-stream" id="studioResultStream" aria-live="polite"></div>
+              </div>
             </div>
           </div>
         </div>

@@ -3370,44 +3370,23 @@ body[data-studio="on"] #workspaceSearchRow,
 body[data-studio="on"] #sidebarWorkspaceTree { display: none; }
 .sidebar-studio-nav { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px 12px; }
 .sidebar-studio-nav[hidden] { display: none; }
-/* 工作台态会话树让位后，由工作台导航吃掉中间全部高度：
+/* 工作台态会话树让位后，由分页导航吃掉中间全部高度：
    否则底部「手机访问 / 设置 / 应用图标」会直接顶到模式切换下面。 */
 body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
-.sidebar-studio-link {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  text-align: left;
-  border: 1px solid var(--sidebar-line);
-  background: rgba(255, 255, 255, .05);
-  color: var(--sidebar-text);
-  font-size: 13px;
-  padding: 10px 11px;
-  border-radius: var(--r-md);
-  cursor: pointer;
-  transition: var(--t-fast);
+/* 左侧栏里的分页导航是竖排列表（顶栏那套横排滚动规则不适用）。 */
+.sidebar-studio-nav .studio-pages { flex-direction: column; gap: 3px; overflow: visible; }
+.sidebar-studio-nav .studio-page {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 8px 10px; text-align: left; font-size: 13px;
 }
-.sidebar-studio-link:hover {
-  background: var(--sidebar-hover);
-  border-color: var(--accent);
-  color: #fff;
+.sidebar-studio-nav .studio-page-icon {
+  width: 17px; height: 17px; flex: none;
+  fill: none; stroke: currentColor; stroke-width: 1.7;
+  stroke-linecap: round; stroke-linejoin: round;
 }
-.sidebar-studio-link:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.sidebar-studio-icon, .sidebar-studio-chevron {
-  flex: none;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+.sidebar-studio-nav .studio-page[aria-current="page"] {
+  background: var(--sidebar-hover); color: var(--text); font-weight: 600;
 }
-.sidebar-studio-icon { width: 18px; height: 18px; }
-.sidebar-studio-chevron { width: 14px; height: 14px; opacity: .6; }
-.sidebar-studio-text { display: grid; gap: 2px; flex: 1; min-width: 0; }
-.sidebar-studio-text b { font-size: 13px; font-weight: 600; }
-.sidebar-studio-text small { font-size: 11px; font-weight: 400; color: var(--sidebar-muted); }
-.sidebar-studio-link:hover .sidebar-studio-text small { color: inherit; opacity: .8; }
 
 .studio-view {
   grid-area: 1 / 1 / -1 / 2;
@@ -3533,11 +3512,19 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 }
 .studio-row:hover { border-color: var(--line-strong); box-shadow: var(--shadow-1); }
 .studio-row.active { border-color: var(--violet-line); background: var(--violet-softer); }
-.studio-row-head { display: flex; align-items: baseline; gap: 8px; justify-content: space-between; min-width: 0; }
-.studio-row-title { font-size: 13px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.studio-row-chips { display: inline-flex; flex-wrap: nowrap; gap: 4px; max-width: 55%; overflow: hidden; }
-.studio-row-chips em { font-style: normal; font-size: 10.5px; color: var(--muted); background: var(--surface-2); border-radius: var(--r-full); padding: 1px 6px; white-space: nowrap; }
-.studio-row-summary { margin: 6px 0 0; font-size: 12px; line-height: 1.55; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* 卡片只放「标题 → 标签」两段：标题独占一行（不再被标签挤成「1. 新古装…」），
+   正文摘要不进列表（只在右侧详情展示），卡片高度只由标题与标签决定。
+   右上角是收藏/删除，靠 .studio-row 的右内边距让位。 */
+.studio-row-head { display: block; min-width: 0; }
+/* 标题最多两行：列表栏很窄，长标题单行仍然只剩「41. 图片反推命令提示（反…」，
+   看起来还是"只有点开才知道叫什么"。两行封顶兼顾可读性与列表密度。 */
+.studio-row-title {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  white-space: normal; overflow: hidden;
+  font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.4;
+}
+.studio-row-chips { display: flex; flex-wrap: nowrap; gap: 4px; margin-top: 4px; min-width: 0; overflow: hidden; }
+.studio-row-chips em { font-style: normal; font-size: 10.5px; color: var(--muted); background: var(--surface-2); border-radius: var(--r-full); padding: 1px 6px; white-space: nowrap; flex: none; }
 .studio-list-loading, .studio-empty { color: var(--muted); font-size: 12.5px; padding: 12px 10px; }
 
 .studio-detail {
@@ -3545,6 +3532,22 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg);
   padding: var(--s-4);
 }
+/* 标题行：标题 + 铅笔按钮；自定义后标题是别名，原名保留在下面一行小字里。 */
+.studio-title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.studio-title-row h2 { flex: 1; min-width: 0; }
+.studio-title-edit { flex: none; opacity: .55; }
+.studio-title-edit:hover, .studio-title-edit:focus-visible { opacity: 1; }
+.studio-title-edit[hidden] { display: none; }
+.studio-detail-head .studio-title-origin { margin: 2px 0 0; font-size: 11.5px; color: var(--muted); }
+.studio-title-origin[hidden] { display: none; }
+.studio-title-editor { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+.studio-title-editor[hidden] { display: none; }
+.studio-title-editor input {
+  flex: 1 1 160px; min-width: 0; min-height: 30px; padding: 0 9px;
+  border: 1px solid var(--line-strong); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text); font-size: 12.5px;
+}
+.studio-title-editor input:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; }
 .studio-detail-head h2 { margin: 0; font-size: 16px; color: var(--text); }
 .studio-detail-head p { margin: 6px 0 0; font-size: 12.5px; color: var(--muted); }
 .studio-detail-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
@@ -3639,7 +3642,45 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .studio-result-header small { font-weight: 400; font-size: 11.5px; color: var(--muted); }
 .studio-result-header small[hidden] { display: none; }
 /* 历史产出态：标题栏右侧常驻「返回生成结果」，避免进了历史就出不来。 */
-.studio-back-result { margin-left: auto; flex: none; }
+.studio-back-result { margin-left: 0; flex: none; }
+.studio-header-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: none; }
+.studio-header-actions .control-button { flex: none; }
+
+/* 历史产出编辑模式：勾选 + 批量删除。
+   一栏三段（全选 / 已选计数 / 删除），窄屏自动换行不挤压。 */
+.studio-history-editbar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px var(--s-4); border-bottom: 1px solid var(--line); background: var(--surface-2);
+}
+.studio-history-editbar[hidden] { display: none; }
+.studio-history-selectall { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); cursor: pointer; user-select: none; }
+.studio-history-selectall input, .studio-history-check {
+  width: 15px; height: 15px; margin: 0; accent-color: var(--accent); cursor: pointer;
+}
+/* 自定义勾选框：深色主题下原生 unchecked 勾选框几乎看不见（实测截图里像没有），
+   这里统一成「描边方块 + 选中填充强调色」的确定外观。 */
+.studio-history-check {
+  appearance: none; -webkit-appearance: none; flex: none; position: relative; box-sizing: border-box;
+  width: 16px; height: 16px; border: 1.5px solid var(--muted); border-radius: 5px;
+  background: var(--surface-2); transition: background .12s ease, border-color .12s ease;
+}
+.studio-history-check:hover { border-color: var(--accent); }
+.studio-history-check:checked { background: var(--accent); border-color: var(--accent); }
+.studio-history-check:checked::after {
+  content: ""; position: absolute; left: 4px; top: 1px; width: 5px; height: 9px;
+  border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.studio-history-check:disabled { opacity: .45; cursor: not-allowed; }
+.studio-history-check:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.studio-history-selected { font-size: 11.5px; color: var(--muted); }
+.studio-history-delete { margin-left: auto; }
+.studio-history-row.is-editing {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px;
+  cursor: pointer;
+}
+.studio-history-row.is-editing.is-selected { border-color: var(--accent); background: var(--surface-2); }
+.studio-history-row.is-editing.is-locked { opacity: .55; cursor: not-allowed; }
+.studio-history-row-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 /* 最近任务捷径：最多 3 条，标题下成组显示；卡片式外观 + 状态图标 + 相对时间，
    让人一眼看出「可以点」「哪条最新」「在跑还是已完成」。 */
 .studio-task-history {
@@ -3678,8 +3719,40 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .studio-task-row:hover .studio-task-open { color: var(--accent); }
 .studio-result-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px var(--s-4); border-bottom: 1px solid var(--line); }
 .studio-result-actions[hidden] { display: none; }
+/* 历史产出入口：只留图案，与左右两枚文字按钮同高（min-height 34px 来自 .control-button）。 */
+.studio-icon-button {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; min-width: 34px; padding: 0; flex: none;
+}
+.studio-icon-button svg {
+  width: 16px; height: 16px; fill: none; stroke: currentColor;
+  stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+}
 .studio-result-stream { flex: 1; min-height: 0; overflow-y: auto; padding: var(--s-4); font-size: 13px; line-height: 1.7; color: var(--text); white-space: pre-wrap; word-break: break-word; }
 .studio-result-stream[hidden] { display: none; }
+
+/* 生成结果：左上角「一键复制」透明浮层。
+   它是正文的兄弟节点（不参与 pre-wrap 文本流），所以复制内容永远只含结果原文；
+   平时几乎透明、悬停/键盘聚焦才显形，避免一直压着第一行文字。 */
+.studio-result-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.studio-result-body[hidden] { display: none; }
+.studio-result-body .studio-result-stream { padding-top: calc(var(--s-4) + 22px); }
+.studio-copy-button {
+  position: absolute; top: 8px; left: 8px; z-index: 2;
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 8px; border: 1px solid transparent; border-radius: var(--r-md);
+  background: transparent; color: var(--muted);
+  font-size: 11.5px; line-height: 1.4; cursor: pointer;
+  opacity: .38;
+  transition: opacity .15s ease, background .15s ease, border-color .15s ease, color .15s ease;
+}
+.studio-copy-button[hidden] { display: none; }
+.studio-copy-button svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.studio-result-body:hover .studio-copy-button,
+.studio-copy-button:focus-visible,
+.studio-copy-button.is-copied { opacity: 1; }
+.studio-copy-button:hover, .studio-copy-button:focus-visible { background: var(--surface-2); border-color: var(--line); color: var(--text); }
+.studio-copy-button.is-copied { color: var(--accent); }
 
 /* 历史产出：作为右侧结果栏的一种模式显示，自己滚动 */
 .studio-history { flex: 1; min-height: 0; overflow-y: auto; padding: 8px var(--s-4) var(--s-4); display: flex; flex-direction: column; gap: 6px; }

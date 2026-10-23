@@ -289,9 +289,11 @@ class StudioPrefsConfigTests(unittest.TestCase):
         return ConfigStore(self.path)
 
     def test_fresh_install_and_legacy_config_get_defaults(self):
-        self.assertEqual(self._store().data["studio"], {"last_selection": None, "favorites": []})
+        self.assertEqual(self._store().data["studio"],
+                         {"last_selection": None, "favorites": [], "titles": []})
         legacy = self._store({"appearance": {"theme": "dark"}})
-        self.assertEqual(legacy.data["studio"], {"last_selection": None, "favorites": []})
+        self.assertEqual(legacy.data["studio"],
+                         {"last_selection": None, "favorites": [], "titles": []})
 
     def test_corrupt_values_are_normalized(self):
         store = self._store({
@@ -303,10 +305,21 @@ class StudioPrefsConfigTests(unittest.TestCase):
                     {"kind": "bogus", "id": "x"},
                     "junk",
                 ],
+                "titles": [
+                    {"kind": "builtin", "id": "vi-001", "title": "我的标题"},
+                    {"kind": "builtin", "id": "vi-001", "title": "重复"},
+                    {"kind": "bogus", "id": "x", "title": "坏来源"},
+                    {"kind": "builtin", "id": "", "title": "空 ID"},
+                    {"kind": "builtin", "id": "vi-002", "title": "   "},
+                    "junk",
+                ],
             }
         })
         self.assertIsNone(store.data["studio"]["last_selection"])
         self.assertEqual(store.data["studio"]["favorites"], [{"kind": "builtin", "id": "vi-001"}])
+        self.assertEqual(store.data["studio"]["titles"],
+                         [{"kind": "builtin", "id": "vi-001", "title": "我的标题"}],
+                         "空标题/重复/坏来源都收敛掉，首条生效")
 
     def test_partial_update_and_reload(self):
         store = self._store()
@@ -345,6 +358,38 @@ class StudioPrefsConfigTests(unittest.TestCase):
             {"kind": "builtin", "id": "a"}, {"kind": "builtin", "id": "a"},
         ]}})
         self.assertEqual(result["studio"]["favorites"], [{"kind": "builtin", "id": "a"}])
+
+    def test_custom_titles_partial_update_and_clear(self):
+        store = self._store()
+        store.update_settings({"studio": {"favorites": [{"kind": "builtin", "id": "vi-001"}]}})
+        store.update_settings({"studio": {"titles": [
+            {"kind": "builtin", "id": "vi-001", "title": "古装定妆照"},
+        ]}})
+        reloaded = ConfigStore(self.path)
+        self.assertEqual(reloaded.data["studio"]["titles"],
+                         [{"kind": "builtin", "id": "vi-001", "title": "古装定妆照"}])
+        self.assertEqual(reloaded.data["studio"]["favorites"], [{"kind": "builtin", "id": "vi-001"}],
+                         "写标题不影响收藏")
+        # 空标题 = 恢复原名（前端「恢复原名」就发空串）。
+        reloaded.update_settings({"studio": {"titles": [
+            {"kind": "builtin", "id": "vi-001", "title": ""},
+        ]}})
+        self.assertEqual(reloaded.data["studio"]["titles"], [])
+        self.assertEqual(reloaded.data["studio"]["favorites"], [{"kind": "builtin", "id": "vi-001"}])
+
+    def test_invalid_custom_titles_rejected(self):
+        store = self._store()
+        too_long = "长" * 81
+        for payload in (
+            {"studio": {"titles": "x"}},
+            {"studio": {"titles": [{"kind": "bogus", "id": "a", "title": "x"}]}},
+            {"studio": {"titles": [{"kind": "builtin", "id": "", "title": "x"}]}},
+            {"studio": {"titles": [{"kind": "builtin", "id": "a", "title": too_long}]}},
+            {"studio": {"titles": [{"kind": "builtin", "id": "a", "title": "x", "extra": 1}]}},
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    store.update_settings(payload)
 
 
 class _StubModels:
@@ -941,6 +986,153 @@ class FillVarsUnitTests(unittest.TestCase):
     def test_user_request_block(self):
         text, _ = fill_vars("正文", "我的要求", {})
         self.assertIn("正文\n\n【我的输入】\n我的要求", text)
+
+
+class StudioTaskDeleteTests(unittest.TestCase):
+    """历史产出编辑模式的后端口径：只删记录、只删已结束、拒绝路径穿越。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name)
+        self.store = StudioStore(self.base)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _task(self, status: str = "done") -> str:
+        task = self.store.create_task({"content": "内容", "model_key": "online:p1", "model_name": "m"})
+        self.store.update_task(task["id"], status=status, result="结果")
+        return str(task["id"])
+
+    def _manager(self):
+        from naiba.studio.jobs import StudioJobManager
+
+        class _Runner:
+            def cancel(self, *args, **kwargs):
+                return True
+
+        return StudioJobManager(None, self.store, _Runner())
+
+    def test_store_delete_removes_record_and_events(self) -> None:
+        task_id = self._task()
+        self.store.append_event(task_id, {"type": "delta", "content": "x"})
+        self.assertTrue(self.store.delete_task(task_id))
+        self.assertIsNone(self.store.get_task(task_id))
+        self.assertFalse((self.base / "studio" / "tasks" / f"{task_id}.events.jsonl").exists())
+        self.assertFalse(self.store.delete_task(task_id), "重复删除返回 False 而不是抛错")
+
+    def test_store_rejects_path_traversal(self) -> None:
+        outside = self.base / "keep.json"
+        outside.write_text("{}", encoding="utf-8")
+        for bad in ("../keep", "..\\keep", "a/b", "", None):
+            with self.subTest(task_id=bad):
+                self.assertFalse(self.store.delete_task(bad))
+        self.assertTrue(outside.exists(), "越界 id 不得删到任务目录之外")
+
+    def test_jobs_delete_skips_active_tasks(self) -> None:
+        done = self._task("done")
+        cancelled = self._task("cancelled")
+        running = self._task("running")
+        queued = self._task("queued")
+        result = self._manager().delete([done, cancelled, running, queued, "st-missing"])
+        self.assertEqual(sorted(result["deleted"]), sorted([done, cancelled]))
+        reasons = {item["id"]: item["reason"] for item in result["skipped"]}
+        self.assertEqual(reasons[running], "active")
+        self.assertEqual(reasons[queued], "active")
+        self.assertEqual(reasons["st-missing"], "not_found")
+        self.assertIsNotNone(self.store.get_task(running), "进行中的任务记录必须保留")
+
+    def test_service_rejects_empty_ids(self) -> None:
+        from naiba.studio.service import StudioService
+
+        class _Stub:
+            pass
+
+        service = StudioService.__new__(StudioService)
+        service.jobs = _Stub()
+        payload, status = service.api_tasks_delete({"ids": []})
+        self.assertEqual(status, 400)
+        self.assertIn("ids", payload["error"])
+        payload, status = service.api_tasks_delete({})
+        self.assertEqual(status, 400)
+
+
+class StudioCustomTitleUiTests(unittest.TestCase):
+    """参数页自定义标题：只改列表显示名，模板原名仍在详情页保留。"""
+
+    def setUp(self) -> None:
+        self.html = (ROOT / "public/index.html").read_text(encoding="utf-8")
+        self.js = (ROOT / "public/js/22-studio.js").read_text(encoding="utf-8")
+
+    def test_title_controls_exist_in_detail_head(self) -> None:
+        for marker in ('id="studioTitleEdit"', 'id="studioDetailOriginTitle"',
+                       'id="studioTitleEditor"', 'id="studioTitleInput"'):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, self.html)
+
+    def test_list_uses_custom_title_but_detail_keeps_original(self) -> None:
+        self.assertIn("const displayTitle = displayTitleOf(kind, id, title);", self.js,
+                      "列表卡片必须用自定义标题覆盖显示名")
+        self.assertIn("titleEl.title = `原名：", self.js, "悬停可查原名")
+        self.assertIn("titleEl.textContent = customTitle || originalTitle;", self.js)
+        self.assertIn("originEl.textContent = customTitle ? `原名：${originalTitle}` : \"\";", self.js,
+                      "详情页必须保留原名，不能被自定义标题覆盖")
+
+    def test_titles_are_searchable_and_clearable(self) -> None:
+        self.assertIn("customTitleOf(\"builtin\", row.id)", self.js, "自定义标题参与搜索")
+        self.assertIn('toast(value ? "已保存自定义标题" : "已恢复原名");', self.js)
+        self.assertIn("filter((row) => !(row.kind === targetKind && row.id === targetId))", self.js,
+                      "保存/恢复都按 kind+id 覆盖同一条，不产生重复")
+
+
+class StudioCopyResultUiTests(unittest.TestCase):
+    """生成结果左上角的一键复制（静态契约，沿用仓库的源码断言风格）。
+
+    三条不变量：
+    1. 复制按钮与结果正文是**兄弟节点**（按钮文字不会被 textContent 复制进去）；
+    2. 按钮走共享的 copyText（WebView/LAN 环境有 execCommand 兜底，不另写一份剪贴板逻辑）；
+    3. 「已复制」反馈只在正文变化时复位——任务轮询会反复重渲染，每次复位会把反馈打回。
+    """
+
+    def setUp(self) -> None:
+        self.html = (ROOT / "public/index.html").read_text(encoding="utf-8")
+        self.js = (ROOT / "public/js/22-studio.js").read_text(encoding="utf-8")
+        self.css = (ROOT / "public/styles.css").read_text(encoding="utf-8")
+
+    def test_button_is_sibling_of_stream(self) -> None:
+        body = self.html[self.html.index('class="studio-result-body"'):]
+        body = body[: body.index("</div>", body.index("studioResultStream"))]
+        btn_pos = body.index('id="studioCopyResult"')
+        stream_pos = body.index('id="studioResultStream"')
+        self.assertLess(btn_pos, stream_pos, "按钮要在正文之前（左上角，且不进入正文节点）")
+        self.assertNotIn('id="studioResultStream"', body[:btn_pos], "按钮不能嵌在正文里")
+
+    def test_copy_uses_shared_clipboard_helper(self) -> None:
+        import_line = next(line for line in self.js.splitlines() if line.startswith("import {"))
+        self.assertIn("copyText", import_line, "studio 必须 import 共享的 copyText")
+        self.assertIn("await copyText(text)", self.js)
+        self.assertIn('event.target.closest("#studioCopyResult")', self.js, "点击必须接到共享处理器")
+
+    def test_feedback_only_resets_when_text_changes(self) -> None:
+        self.assertIn("if (value === lastCopySource) return;", self.js,
+                      "轮询重渲染不得把「已复制」反馈复位")
+        self.assertIn('if (label) label.textContent = "已复制";', self.js)
+
+    def test_history_mode_hides_the_body_and_button(self) -> None:
+        self.assertIn("if (body) body.hidden = history;", self.js)
+        self.assertIn("copyBtn.hidden = history", self.js)
+        self.assertIn(".studio-result-body[hidden] { display: none; }", self.css,
+                      "flex 容器必须显式处理 hidden，否则历史态会占掉一半高度")
+
+    def test_template_card_tags_are_on_their_own_line(self) -> None:
+        """模板卡片：只放「标题（最多两行）+ 标签行」，正文摘要不在卡片里。"""
+        self.assertNotIn("head.appendChild(chips);", self.js, "标签不能继续和标题同排")
+        self.assertIn("button.append(chips)", self.js, "标签要作为标题之后的独立一行")
+        self.assertIn(".studio-row-head { display: block;", self.css)
+        self.assertIn(".studio-row-chips { display: flex;", self.css)
+        self.assertIn("-webkit-line-clamp: 2", self.css, "长标题允许两行，不能只剩「41. 图片反推命令…」")
+        self.assertNotIn("button.append(summaryEl)", self.js, "正文摘要不进列表卡片")
+        self.assertNotIn(".studio-row-summary", self.css, "对应的摘要样式也应移除")
 
 
 import unittest.mock  # noqa: E402

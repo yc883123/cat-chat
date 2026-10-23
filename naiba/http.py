@@ -1232,7 +1232,13 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json({"error": "访问口令无效"}, HTTPStatus.UNAUTHORIZED)
             return
         path = parsed.path
-        if path == "/api/app-icon":
+        if path == "/api/studio/tasks":
+            # 批量删除历史产出（编辑模式多选删除）：只删记录，不动已生成文件。
+            body = self._read_json()
+            if body is None:
+                return
+            self._json(*self.app.studio.api_tasks_delete(body))
+        elif path == "/api/app-icon":
             # 恢复默认图标（只删 custom-icon.*，内置 icon.ico 不动）。
             self._json(*self.app.api_clear_app_icon())
         elif path == "/api/tasks/clear":

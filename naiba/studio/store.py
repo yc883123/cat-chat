@@ -123,6 +123,29 @@ class StudioStore:
             payload["status"] = "interrupted"
         return payload
 
+    def delete_task(self, task_id: str) -> bool:
+        """删除一条任务记录与它的事件流。
+
+        只删**记录**：结果正文、已生成文件与参考图可能被别的任务或聊天引用，
+        由各自的清理器按引用判定回收，这里不猜也不连带删除。
+        task_id 走字符白名单，杜绝「../」把删除带出任务目录。
+        """
+        task_id = str(task_id or "").strip()
+        if not task_id or not all(ch.isalnum() or ch in "-_" for ch in task_id):
+            return False
+        with self._lock:
+            removed = False
+            for path in (self._record_path(task_id), self._events_path(task_id)):
+                try:
+                    path.unlink()
+                    removed = True
+                except FileNotFoundError:
+                    continue
+            if removed:
+                # 引用保护缓存记录「任务还引用哪些文件」，记录没了必须重算。
+                self._ref_cache = None
+            return removed
+
     # ---- 事件流 ----
 
     def append_event(self, task_id: str, payload: dict[str, Any]) -> int:

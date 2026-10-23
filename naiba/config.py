@@ -92,7 +92,11 @@ STUDIO_PREF_MODULES = frozenset(
     {"", "vs", "h3", "vi", "ec", "global", "script", "game", "style", "custom"}
 )
 STUDIO_PREF_MAX_FAVORITES = 200
-STUDIO_PREF_DEFAULTS = {"last_selection": None, "favorites": []}
+# 自定义标题（只覆盖列表显示，不改模板本身）：{kind, id, title}，与收藏同一条来源口径。
+# 模板原地标题永远保留在详情页，这里存的是「用户起的别名」。
+STUDIO_PREF_MAX_TITLES = 500
+STUDIO_PREF_TITLE_MAX_CHARS = 80
+STUDIO_PREF_DEFAULTS = {"last_selection": None, "favorites": [], "titles": []}
 
 # ---- 聊天背景图（只铺对话区）----
 # 透明度滑杆范围：0.05 是「还能看见」的下限，1 = 完全不透明。
@@ -326,7 +330,25 @@ def normalize_studio_prefs(value: Any) -> dict[str, Any]:
         favorites.append({"kind": kind, "id": item_id})
         if len(favorites) >= STUDIO_PREF_MAX_FAVORITES:
             break
-    return {"last_selection": normalized_selection, "favorites": favorites}
+    titles: list[dict[str, str]] = []
+    seen_titles: set[tuple[str, str]] = set()
+    raw_titles = merged.get("titles")
+    for row in raw_titles if isinstance(raw_titles, list) else []:
+        if not isinstance(row, dict):
+            continue
+        kind = str(row.get("kind") or "").strip()
+        item_id = str(row.get("id") or "").strip()[:200]
+        title = str(row.get("title") or "").strip()[:STUDIO_PREF_TITLE_MAX_CHARS]
+        if kind not in STUDIO_SELECTION_KINDS or not item_id or not title:
+            continue  # 空标题 = 没有自定义，等价于删除
+        key = (kind, item_id)
+        if key in seen_titles:
+            continue
+        seen_titles.add(key)
+        titles.append({"kind": kind, "id": item_id, "title": title})
+        if len(titles) >= STUDIO_PREF_MAX_TITLES:
+            break
+    return {"last_selection": normalized_selection, "favorites": favorites, "titles": titles}
 
 
 def validate_skills_dir(resolved: Path, *, app_dir: Path, public_dir: Path, data_dir: Path) -> None:
@@ -387,7 +409,7 @@ def default_config() -> dict[str, Any]:
         # 图片以外的内容一律实底，所以不需要蒙层。
         "chat_background": default_chat_background(),
         # 工作台（Studio）偏好：上次选中的条目 + 收藏清单。只存定位键，不存模板正文。
-        "studio": {"last_selection": None, "favorites": []},
+        "studio": {"last_selection": None, "favorites": [], "titles": []},
         # Per-user reusable system prompts for conversation settings.  These
         # live in config.json instead of the conversation database by design.
         "conversation_prompt_presets": [],
@@ -2623,7 +2645,7 @@ class ConfigStore:
                         incoming = values[key]
                         if not isinstance(incoming, dict):
                             raise ValueError("studio 必须是对象")
-                        unknown = set(incoming) - {"last_selection", "favorites"}
+                        unknown = set(incoming) - {"last_selection", "favorites", "titles"}
                         if unknown:
                             names = ", ".join(sorted(map(str, unknown)))
                             raise ValueError(f"studio 包含不支持的字段：{names}")
@@ -2681,6 +2703,40 @@ class ConfigStore:
                                 seen.add(key_pair)
                                 normalized.append({"kind": kind, "id": item_id})
                             current["favorites"] = normalized
+                        if "titles" in incoming:
+                            # 自定义标题：只改列表显示名，不碰模板标题/正文。
+                            # 传空标题 = 删除该条覆盖（前端「恢复原名」用的就是它）。
+                            raw_titles = incoming["titles"]
+                            if not isinstance(raw_titles, list):
+                                raise ValueError("titles 必须是数组")
+                            if len(raw_titles) > STUDIO_PREF_MAX_TITLES:
+                                raise ValueError(f"自定义标题最多 {STUDIO_PREF_MAX_TITLES} 条")
+                            normalized_titles: list[dict[str, str]] = []
+                            seen_titles: set[tuple[str, str]] = set()
+                            for row in raw_titles:
+                                if not isinstance(row, dict):
+                                    raise ValueError("自定义标题条目必须是对象")
+                                unknown_title = set(row) - {"kind", "id", "title"}
+                                if unknown_title:
+                                    names = ", ".join(sorted(map(str, unknown_title)))
+                                    raise ValueError(f"自定义标题条目包含不支持的字段：{names}")
+                                kind = str(row.get("kind") or "").strip()
+                                item_id = str(row.get("id") or "").strip()
+                                title = str(row.get("title") or "").strip()
+                                if kind not in STUDIO_SELECTION_KINDS:
+                                    raise ValueError("自定义标题来源必须是 builtin 或 custom")
+                                if not item_id or len(item_id) > 200:
+                                    raise ValueError("自定义标题条目 ID 非法")
+                                if len(title) > STUDIO_PREF_TITLE_MAX_CHARS:
+                                    raise ValueError(f"自定义标题最长 {STUDIO_PREF_TITLE_MAX_CHARS} 字")
+                                if not title:
+                                    continue  # 空标题等号于恢复原名
+                                key_pair = (kind, item_id)
+                                if key_pair in seen_titles:
+                                    continue
+                                seen_titles.add(key_pair)
+                                normalized_titles.append({"kind": kind, "id": item_id, "title": title})
+                            current["titles"] = normalized_titles
                         self.data[key] = current
                     elif key in ("vision", "search", "imaging"):
                         incoming = values[key]

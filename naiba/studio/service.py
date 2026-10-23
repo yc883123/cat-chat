@@ -330,6 +330,26 @@ class StudioService:
             return {"error": "任务不存在"}, 404
         return {"task": task}, 200
 
+    def api_tasks_delete(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """批量删除历史产出（编辑模式多选删除）。
+
+        只接受任务 ID 列表；不存在与进行中的任务分别以 `not_found` / `active`
+        放进 `skipped`，调用方据此提示「跳过 N 条进行中的任务」。
+        """
+        raw = (body or {}).get("ids") if isinstance(body, dict) else None
+        if not isinstance(raw, list) or not raw:
+            return {"error": "ids 必须是非空数组"}, 400
+        ids = [str(item).strip() for item in raw if str(item).strip()][:200]
+        if not ids:
+            return {"error": "ids 必须是非空数组"}, 400
+        result = self.jobs.delete(ids)
+        return {
+            "ok": True,
+            "deleted": len(result["deleted"]),
+            "deleted_ids": result["deleted"],
+            "skipped": result["skipped"],
+        }, 200
+
     def api_task_events(self, task_id: str, after: Any) -> tuple[dict[str, Any], int]:
         task = self.jobs.task(task_id)
         if not task:

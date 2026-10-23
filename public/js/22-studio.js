@@ -6,7 +6,7 @@
 // 应用级视图：入口在侧栏「对话 / 工作台」模式切换，不再是顶栏会话按钮。
 // ============================================================
 
-import { $, api, localFileUrl, state, toast } from "./01-core.js";
+import { $, api, copyText, localFileUrl, state, toast } from "./01-core.js";
 import { populateComposerModels } from "./07-models-agents.js";
 import { openConversation, renderSidebar } from "./08-conversations.js";
 import { closeSidebar, openSidebar, setLeftSidebarCollapsed, sidebarDesktop } from "./14-file-panel.js";
@@ -76,6 +76,10 @@ const studio = {
   tasksError: "",
   resultMode: "result",
   historyState: "ready", // ready | loading | error
+  // 历史产出编辑模式：进入后可多选删除（只删任务记录，不动已生成文件）。
+  historyEditing: false,
+  historySelected: [],
+  historyBusy: false,
   pane: "form",
   activeTaskId: "",
   eventCursor: 0,
@@ -109,6 +113,8 @@ function studioPrefs() {
   return {
     last_selection: selection && typeof selection === "object" ? selection : null,
     favorites: Array.isArray(prefs?.favorites) ? prefs.favorites : [],
+    // 自定义标题：只覆盖「列表卡片上的显示名」，模板原名与正文都不改。
+    titles: Array.isArray(prefs?.titles) ? prefs.titles : [],
   };
 }
 
@@ -131,6 +137,37 @@ async function saveStudioPrefs(patch) {
 function isFavoriteRef(kind, id) {
   const target = String(id || "");
   return studioPrefs().favorites.some((row) => row.kind === kind && row.id === target);
+}
+
+// ---- 自定义标题（只覆盖列表显示名，模板原名保留在详情页）----
+
+function customTitleOf(kind, id) {
+  const targetKind = kind === "custom" ? "custom" : "builtin";
+  const targetId = String(id || "");
+  if (!targetId) return "";
+  const row = studioPrefs().titles.find((item) => item.kind === targetKind && item.id === targetId);
+  return row ? String(row.title || "") : "";
+}
+
+// 列表卡片显示名：有自定义就用自定义，否则用模板原名。
+function displayTitleOf(kind, id, original) {
+  return customTitleOf(kind, id) || String(original || "");
+}
+
+async function saveCustomTitle(kind, id, title) {
+  const targetKind = kind === "custom" ? "custom" : "builtin";
+  const targetId = String(id || "");
+  if (!targetId) return;
+  const value = String(title || "").trim().slice(0, 80);
+  const titles = studioPrefs().titles
+    .filter((row) => !(row.kind === targetKind && row.id === targetId));
+  if (value) titles.push({ kind: targetKind, id: targetId, title: value });
+  // 乐观更新：列表与详情立即生效；保存失败会提示并按服务端值校正（与收藏同口径）。
+  applyStudioPrefs({ ...studioPrefs(), titles });
+  renderStudioDetail();
+  await renderStudioList();
+  await saveStudioPrefs({ titles });
+  toast(value ? "已保存自定义标题" : "已恢复原名");
 }
 
 async function toggleFavorite(kind, id) {
@@ -224,6 +261,7 @@ function syncModeUi() {
     chatBtn.setAttribute("aria-pressed", String(!open));
     chatBtn.classList.toggle("active", !open);
   }
+  // 左侧栏在工作台态承担「功能分页导航」（当前只有模块库，后续新功能各加一项）。
   const nav = $("#sidebarStudioNav");
   if (nav) nav.hidden = !open;
 }
@@ -519,9 +557,11 @@ function emptyListPanel(title, hint) {
 }
 
 function matchesQuery(row) {
-  const needle = studio.query.trim().toLowerCase();
+  const needle = String(studio.query || "").trim().toLowerCase();
   if (!needle) return true;
-  const hay = [row.title, row.summary, row.genre, ...(row.tags || [])].join(" ").toLowerCase();
+  // 自定义标题也参与搜索：列表显示的既然是别名，按别名搜不到会很反直觉。
+  const aliases = [customTitleOf("builtin", row.id), customTitleOf("custom", row.id)].filter(Boolean);
+  const hay = [row.title, row.summary, row.genre, ...(row.tags || []), ...aliases].join(" ").toLowerCase();
   return hay.includes(needle);
 }
 
@@ -540,8 +580,13 @@ function studioListRow({ kind, id, title, summary, tags, extra, genre, chars, ha
   head.className = "studio-row-head";
   const titleEl = document.createElement("span");
   titleEl.className = "studio-row-title";
-  titleEl.textContent = title || "（未命名）";
+  const displayTitle = displayTitleOf(kind, id, title);
+  titleEl.textContent = displayTitle || "（未命名）";
+  // 用了自定义标题时，悬停提示原名——列表只显示别名，但原名随时可查。
+  if (customTitleOf(kind, id)) titleEl.title = `原名：${title || "（未命名）"}`;
   head.appendChild(titleEl);
+  // 标签单独占第二行：和标题挤在同一行时标题只剩一半宽度（「1. 新古装…」），
+  // 要点开才看得到全名。卡片整块只放「标题 → 标签」，不重复展示正文摘要。
   const chips = document.createElement("span");
   chips.className = "studio-row-chips";
   [extra, genre, hasVars ? "含变量" : ""].filter(Boolean).forEach((chip) => {
@@ -554,11 +599,9 @@ function studioListRow({ kind, id, title, summary, tags, extra, genre, chars, ha
     chipEl.textContent = tag;
     chips.appendChild(chipEl);
   });
-  head.appendChild(chips);
-  const summaryEl = document.createElement("p");
-  summaryEl.className = "studio-row-summary";
-  summaryEl.textContent = (summary || "").slice(0, 110);
-  button.append(head, summaryEl);
+  // 卡片只显示「标题 + 标签」：正文/摘要留在右侧详情里，列表靠标题就能认出来。
+  button.append(head);
+  if (chips.childElementCount) button.append(chips);
   const fav = document.createElement("button");
   fav.type = "button";
   fav.className = `studio-row-fav${favorite ? " active" : ""}`;
@@ -645,7 +688,28 @@ function renderStudioDetail() {
   wrap.hidden = false;
   if (selected) {
     const moduleLabel = MODULE_TABS.find((m) => m.key === studio.meta.module)?.label || studio.meta.module;
-    titleEl.textContent = studio.meta.title;
+    // 标题区：列表卡片用自定义标题，详情页同时给出「原名」——本来的标题不被覆盖。
+    const entryKind = studio.kind === "custom" ? "custom" : "builtin";
+    const entryId = String((entryKind === "custom" ? studio.customId : studio.itemId) || "");
+    const originalTitle = String(studio.meta.title || "");
+    const customTitle = customTitleOf(entryKind, entryId);
+    titleEl.textContent = customTitle || originalTitle;
+    const editTitleBtn = $("#studioTitleEdit");
+    const originEl = $("#studioDetailOriginTitle");
+    const titleEditor = $("#studioTitleEditor");
+    const titleInput = $("#studioTitleInput");
+    const clearTitleBtn = $("#studioTitleClear");
+    if (editTitleBtn) editTitleBtn.hidden = !entryId;
+    if (originEl) {
+      originEl.hidden = !customTitle;
+      originEl.textContent = customTitle ? `原名：${originalTitle}` : "";
+    }
+    if (titleEditor) titleEditor.hidden = true;
+    if (titleInput) {
+      titleInput.value = customTitle;
+      titleInput.placeholder = `给这条模板起个名字（原名：${originalTitle}）`;
+    }
+    if (clearTitleBtn) clearTitleBtn.hidden = !customTitle;
     summaryEl.textContent = studio.meta.summary || "";
     chipsEl.replaceChildren();
     [moduleLabel, TYPE_LABELS[studio.meta.type] || studio.meta.type].filter(Boolean).forEach((chip) => {
@@ -713,6 +777,10 @@ function renderStudioDetail() {
     titleEl.textContent = "自由输入";
     summaryEl.textContent = "不选模板，直接把需求写进来生成。";
     chipsEl.replaceChildren();
+    ["#studioTitleEdit", "#studioDetailOriginTitle", "#studioTitleEditor"].forEach((sel) => {
+      const el = $(sel);
+      if (el) el.hidden = true;
+    });
     bodyEl.hidden = true;
     bodyEl.textContent = "";
     ["#studioCustomSave", "#studioCustomDelete", "#studioCustomExport", "#studioBodyEditableHint"].forEach((sel) => { const el = $(sel); if (el) el.hidden = true; });
@@ -1387,6 +1455,46 @@ function updateResultStream(text) {
   if (!panel) return;
   panel.textContent = text;
   panel.scrollTop = panel.scrollHeight;
+  updateCopyResultButton(text);
+}
+
+// 一键复制按钮只在真有正文时出现。
+// 「已复制」反馈只在**正文真的换了**时复位：任务轮询会反复走 updateResultStream，
+// 每次都复位会把刚点出来的反馈瞬间打回「复制」。
+let lastCopySource = "";
+function updateCopyResultButton(text) {
+  const btn = $("#studioCopyResult");
+  if (!btn) return;
+  const value = String(text || "");
+  btn.hidden = !value.trim();
+  if (value === lastCopySource) return;
+  lastCopySource = value;
+  btn.classList.remove("is-copied");
+  const label = btn.querySelector("span");
+  if (label) label.textContent = "复制";
+}
+
+async function copyStudioResult() {
+  const text = String($("#studioResultStream")?.textContent || "").trim();
+  const btn = $("#studioCopyResult");
+  if (!text) {
+    toast("还没有可复制的结果");
+    return;
+  }
+  try {
+    await copyText(text);
+  } catch (error) {
+    toast(`复制失败：${error.message}`);
+    return;
+  }
+  if (!btn) return;
+  const label = btn.querySelector("span");
+  if (label) label.textContent = "已复制";
+  btn.classList.add("is-copied");
+  window.setTimeout(() => {
+    if (label) label.textContent = "复制";
+    btn.classList.remove("is-copied");
+  }, 1400);
 }
 
 function updateReasoningChip() {
@@ -1599,6 +1707,8 @@ function setResultMode(mode) {
   const history = next === "history";
   const historyList = $("#studioHistoryList");
   const stream = $("#studioResultStream");
+  const body = document.querySelector(".studio-result-body");
+  const copyBtn = $("#studioCopyResult");
   const actions = document.querySelector(".studio-result-actions");
   const title = $("#studioResultTitle");
   const range = $("#studioHistoryRange");
@@ -1606,6 +1716,10 @@ function setResultMode(mode) {
   const backBtn = $("#studioBackToResult");
   if (historyList) historyList.hidden = !history;
   if (stream) stream.hidden = history;
+  // 正文容器与复制按钮一起退场：历史产出态没有"当前结果"可复制，
+  // 留着 flex:1 的容器还会把历史列表挤成半高。
+  if (body) body.hidden = history;
+  if (copyBtn) copyBtn.hidden = history || !String(stream?.textContent || "").trim();
   if (actions) actions.hidden = history;
   if (meta) meta.hidden = history;
   if (backBtn) backBtn.hidden = !history;
@@ -1614,6 +1728,12 @@ function setResultMode(mode) {
     range.textContent = HISTORY_RANGE_HINT;
   }
   if (title) title.textContent = history ? "历史产出" : "生成结果";
+  // 离开历史态时退出编辑模式：多选状态不能带到「生成结果」里。
+  if (!history) {
+    studio.historyEditing = false;
+    studio.historySelected = [];
+  }
+  syncHistoryEditUi();
   renderRecentTasks();
   if (history && changed) renderHistoryList();
 }
@@ -1621,6 +1741,7 @@ function setResultMode(mode) {
 function renderHistoryList() {
   const wrap = $("#studioHistoryList");
   if (!wrap) return;
+  syncHistoryEditUi();
   if (studio.historyState === "loading") {
     wrap.replaceChildren(historyNotice("正在读取历史产出…"));
     return;
@@ -1669,23 +1790,144 @@ function historyErrorPanel() {
 }
 
 function historyRow(task) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "studio-history-row";
-  button.dataset.studioTask = task.id;
+  const editing = Boolean(studio.historyEditing);
+  const selected = editing && studio.historySelected.includes(task.id);
+  const active = ["queued", "running"].includes(String(task.status || ""));
+  const row = document.createElement(editing ? "label" : "button");
+  if (editing) {
+    // 编辑态用 label + 真复选框：点整行即切换勾选，键盘与读屏也能用。
+    row.className = `studio-history-row is-editing${selected ? " is-selected" : ""}${active ? " is-locked" : ""}`;
+    row.dataset.studioSelectRow = task.id;
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "studio-history-check";
+    box.dataset.studioSelectBox = task.id;
+    box.checked = selected;
+    box.disabled = active;
+    box.setAttribute("aria-label", `选择任务：${taskTitle(task)}`);
+    const body = document.createElement("span");
+    body.className = "studio-history-row-body";
+    body.append(historyRowContent(task, active));
+    row.append(box, body);
+    return row;
+  }
+  row.type = "button";
+  row.className = "studio-history-row";
+  row.dataset.studioTask = task.id;
+  row.append(historyRowContent(task, false));
+  return row;
+}
+
+function historyRowContent(task, active) {
+  const fragment = document.createDocumentFragment();
   const title = document.createElement("span");
   title.className = "studio-history-title";
   title.textContent = taskTitle(task);
   title.title = taskTitle(task);
   const metaLine = document.createElement("span");
   metaLine.className = "studio-history-meta";
-  [taskStatusLabel(task.status), formatTaskTime(task.created_at), taskOrigin(task)].forEach((part) => {
+  const parts = [taskStatusLabel(task.status), formatTaskTime(task.created_at), taskOrigin(task)];
+  if (active) parts.push("进行中，取消后才能删除");
+  parts.forEach((part) => {
     const item = document.createElement("em");
     item.textContent = part;
     metaLine.append(item);
   });
-  button.append(title, metaLine);
-  return button;
+  fragment.append(title, metaLine);
+  return fragment;
+}
+
+// ---- 历史产出编辑模式（多选删除）----
+
+function selectableHistoryTasks() {
+  return (studio.tasks || []).filter(
+    (task) => !["queued", "running"].includes(String(task.status || "")),
+  );
+}
+
+function syncHistoryEditUi() {
+  const editing = Boolean(studio.historyEditing) && studio.resultMode === "history";
+  const editBtn = $("#studioHistoryEdit");
+  if (editBtn) {
+    editBtn.hidden = studio.resultMode !== "history";
+    editBtn.textContent = studio.historyEditing ? "完成" : "编辑";
+    editBtn.classList.toggle("is-active", Boolean(studio.historyEditing));
+  }
+  const bar = $("#studioHistoryEditBar");
+  if (bar) bar.hidden = !editing;
+  // 选中集合随列表收敛：被删/已结束状态变化后不留幽灵 id。
+  const known = new Set(selectableHistoryTasks().map((task) => task.id));
+  studio.historySelected = (studio.historySelected || []).filter((id) => known.has(id));
+  const count = studio.historySelected.length;
+  const counter = $("#studioHistorySelected");
+  if (counter) counter.textContent = `已选 ${count} 项`;
+  const delBtn = $("#studioHistoryDelete");
+  if (delBtn) {
+    delBtn.disabled = !count || studio.historyBusy;
+    delBtn.textContent = studio.historyBusy ? "删除中…" : `删除选中${count ? `（${count}）` : ""}`;
+  }
+  const all = $("#studioHistorySelectAll");
+  if (all) {
+    const total = selectableHistoryTasks().length;
+    all.checked = total > 0 && count === total;
+    all.indeterminate = count > 0 && count < total;
+    all.disabled = total === 0;
+  }
+}
+
+function toggleHistoryEditing() {
+  if (studio.resultMode !== "history") return;
+  studio.historyEditing = !studio.historyEditing;
+  studio.historySelected = [];
+  renderHistoryList();
+}
+
+function setHistorySelection(taskId, checked) {
+  const id = String(taskId || "");
+  if (!id) return;
+  const next = new Set(studio.historySelected);
+  if (checked) next.add(id);
+  else next.delete(id);
+  studio.historySelected = [...next];
+  // 只更新受影响的那一行，避免整列表重画打断勾选手感。
+  const box = document.querySelector(`[data-studio-select-box="${selectorEscape(id)}"]`);
+  const row = box ? box.closest(".studio-history-row") : null;
+  if (row) row.classList.toggle("is-selected", checked);
+  syncHistoryEditUi();
+}
+
+function setAllHistorySelected(checked) {
+  studio.historySelected = checked ? selectableHistoryTasks().map((task) => task.id) : [];
+  renderHistoryList();
+}
+
+async function deleteSelectedHistory() {
+  const ids = [...(studio.historySelected || [])];
+  if (!ids.length || studio.historyBusy) return;
+  if (!confirm(`删除选中的 ${ids.length} 条历史产出？\n只删除任务记录，已生成的内容文件不受影响。`)) return;
+  studio.historyBusy = true;
+  syncHistoryEditUi();
+  try {
+    const result = await api("/api/studio/tasks", { method: "DELETE", body: { ids } });
+    const deleted = Number(result.deleted || 0);
+    const skipped = Array.isArray(result.skipped) ? result.skipped.length : 0;
+    toast(skipped ? `已删除 ${deleted} 条，跳过 ${skipped} 条（不存在或仍在运行）` : `已删除 ${deleted} 条历史产出`);
+    studio.historySelected = [];
+    if (deleted) {
+      // 正在看的结果被删掉时退回空态，避免右边还挂着一条已不存在的任务。
+      if (studio.activeTaskId && ids.includes(studio.activeTaskId)) {
+        studio.activeTaskId = "";
+        studio.streamText = "";
+        updateResultStream("");
+      }
+    }
+    await refreshTasks({ syncHistory: true });
+  } catch (error) {
+    toast(`删除失败：${error.message}`);
+  } finally {
+    studio.historyBusy = false;
+    renderHistoryList();
+  }
 }
 
 async function openHistoryList() {
@@ -1929,11 +2171,6 @@ export function bindStudioEvents() {
     closeStudioView();
     if (!sidebarDesktop()) closeSidebar();
   });
-  $("#sidebarStudioNav")?.addEventListener("click", (event) => {
-    const link = event.target.closest("[data-studio-nav]");
-    if (!link) return;
-    if (link.dataset.studioNav === "history") void openHistoryList();
-  });
   $("#studioCats")?.addEventListener("click", (event) => {
     const cat = event.target.closest("[data-studio-module]");
     if (!cat) return;
@@ -1970,6 +2207,7 @@ export function bindStudioEvents() {
       return;
     }
     if (event.target.closest("#studioGenerate")) void submitGenerate();
+    if (event.target.closest("#studioCopyResult")) { void copyStudioResult(); return; }
     if (event.target.closest("#studioCancelTask")) void cancelStudioTask();
     if (event.target.closest("#studioRetryTask")) void retryStudioTask("");
     if (event.target.closest("#studioLocateEntry")) { locateCurrentStudioEntry(); return; }
@@ -1977,6 +2215,29 @@ export function bindStudioEvents() {
     if (event.target.closest("#studioBackToResult")) {
       setResultMode("result");
       setStudioPane("result");
+      return;
+    }
+    if (event.target.closest("#studioHistoryEdit")) { toggleHistoryEditing(); return; }
+    if (event.target.closest("#studioHistoryDelete")) { void deleteSelectedHistory(); return; }
+    if (event.target.closest("#studioOpenHistory")) { void openHistoryList(); return; }
+    if (event.target.closest("#studioTitleEdit")) {
+      const editor = $("#studioTitleEditor");
+      if (editor) {
+        editor.hidden = false;
+        $("#studioTitleInput")?.focus();
+      }
+      return;
+    }
+    if (event.target.closest("#studioTitleCancel")) {
+      const editor = $("#studioTitleEditor");
+      if (editor) editor.hidden = true;
+      return;
+    }
+    if (event.target.closest("#studioTitleSave") || event.target.closest("#studioTitleClear")) {
+      const clear = Boolean(event.target.closest("#studioTitleClear"));
+      const kind = studio.kind === "custom" ? "custom" : "builtin";
+      const id = String((kind === "custom" ? studio.customId : studio.itemId) || "");
+      void saveCustomTitle(kind, id, clear ? "" : String($("#studioTitleInput")?.value || ""));
       return;
     }
     if (event.target.closest("#studioImagePick")) { openStudioImageDialog(); return; }
@@ -2001,6 +2262,26 @@ export function bindStudioEvents() {
   });
   $("#studioModelSelect")?.addEventListener("change", () => {
     studio.modelName = $("#studioModelSelect")?.value || "";
+  });
+  // 历史产出编辑模式：勾选（行内复选框）与「全选」都走 change 事件；
+  // 用委托挂在 #studioView 上，列表重画后无需重新绑定。
+  studioEl?.addEventListener("change", (event) => {
+    const selectAll = event.target.closest("#studioHistorySelectAll");
+    if (selectAll) { setAllHistorySelected(Boolean(selectAll.checked)); return; }
+    const box = event.target.closest("[data-studio-select-box]");
+    if (box) setHistorySelection(box.dataset.studioSelectBox, Boolean(box.checked));
+  });
+  // 自定义标题输入框：Enter 直接保存（Esc 收起），省一次点按钮。
+  $("#studioTitleInput")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const kind = studio.kind === "custom" ? "custom" : "builtin";
+      const id = String((kind === "custom" ? studio.customId : studio.itemId) || "");
+      void saveCustomTitle(kind, id, String($("#studioTitleInput")?.value || ""));
+    } else if (event.key === "Escape") {
+      const editor = $("#studioTitleEditor");
+      if (editor) editor.hidden = true;
+    }
   });
   bindHandoffDialogEvents();
   bindStudioImageDialogEvents();

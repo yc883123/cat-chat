@@ -82,6 +82,31 @@ class StudioJobManager:
     def cancel(self, task_id: str) -> bool:
         return self.runner.cancel(task_id, reason="用户取消")
 
+    def delete(self, task_ids: list[str]) -> dict[str, Any]:
+        """批量删除**已结束**的任务记录（编辑模式多选删除的后端口径）。
+
+        进行中（queued/running）的任务一律跳过：runner 还在写同一份记录，
+        「先取消再删」是用户的显式动作，不能被多选删除顺手做掉。
+        """
+        deleted: list[str] = []
+        skipped: list[dict[str, str]] = []
+        for raw in task_ids or []:
+            task_id = str(raw or "").strip()
+            if not task_id:
+                continue
+            task = self.store.get_task(task_id)
+            if task is None:
+                skipped.append({"id": task_id, "reason": "not_found"})
+                continue
+            if str(task.get("status") or "") in {"queued", "running"}:
+                skipped.append({"id": task_id, "reason": "active"})
+                continue
+            if self.store.delete_task(task_id):
+                deleted.append(task_id)
+            else:
+                skipped.append({"id": task_id, "reason": "not_found"})
+        return {"deleted": deleted, "skipped": skipped}
+
     def retry(self, task_id: str) -> dict[str, Any]:
         """失败/取消/中断任务的幂等重试：以原输入重建排队任务（原记录保留）。"""
         source = self.store.get_task(task_id)

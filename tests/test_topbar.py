@@ -262,7 +262,11 @@ class StudioEntryTests(unittest.TestCase):
         index = self._index()
         sidebar = index[index.index('<aside class="sidebar"'):index.index("</aside>")]
         self.assertIn('id="sidebarStudioNav"', sidebar, "工作台态需要独立侧栏导航")
-        self.assertIn('id="studioNavHistory"', sidebar, "工作台侧栏必须有「历史产出」入口")
+        self.assertIn('id="studioPages"', sidebar, "左侧栏承担功能分页导航（当前只有模块库）")
+        self.assertIn('data-studio-page="library"', sidebar, "分页「模块库」在左侧栏")
+        self.assertIn("模块库", sidebar)
+        self.assertNotIn('id="studioNavHistory"', sidebar,
+                         "历史产出已改成结果区图标按钮，不再占侧栏导航")
         self.assertNotIn('id="studioNavTemplates"', sidebar, "「我的模板」快捷入口已按用户要求去掉")
         self.assertIn('body[data-studio="on"] #sidebarWorkspaceTree { display: none; }', self._css(),
                       "工作台态必须隐藏会话树")
@@ -283,14 +287,19 @@ class StudioEntryTests(unittest.TestCase):
                       "对话顶栏退场后主区只占一格，工作台铺满")
         index = self._index()
         studio = index[index.index('<section class="studio-view"'):index.index('<section class="composer-wrap"')]
-        self.assertIn('id="studioPages"', studio, "工作台模块顶栏必须有分页导航容器")
-        self.assertIn('data-studio-page="library"', studio, "分页「模块库」缺失")
-        self.assertIn("模块库", studio)
+        sidebar = index[index.index('<aside class="sidebar"'):index.index("</aside>")]
+        self.assertIn('id="studioPages"', sidebar, "分页导航已移到左侧栏（模块级顶栏只留模块名与工具）")
+        self.assertIn('data-studio-page="library"', sidebar, "分页「模块库」缺失")
+        self.assertIn("模块库", sidebar)
+        self.assertNotIn('id="studioPages"', studio, "工作台顶栏不再堆分页按钮")
         self.assertNotIn('id="modelSelect"', studio, "工作台顶栏不放对话模型选择")
         self.assertNotIn('id="agentSelect"', studio, "工作台顶栏不放对话 Agent 选择")
-        # 历史产出由左侧栏管理，显示在右侧结果栏，不再占工作台分页
+        # 历史产出：图标按钮在结果区动作行（紧接着「追问」「定位」两枚文字按钮），不是分页。
         self.assertNotIn('data-studio-page="history"', studio, "历史产出不该是工作台分页")
         self.assertIn('id="studioHistoryList"', studio, "历史列表仍在结果栏")
+        self.assertIn('id="studioOpenHistory"', studio, "历史产出入口在结果区动作行")
+        self.assertIn(">追问<", studio, "继续追问按钮文案已简化为「追问」")
+        self.assertIn(">定位<", studio, "定位模板按钮文案已简化为「定位」")
         # 这些控件只是互斥选择，不是 tab；不要再声明需要方向键/roving tabindex 的 tabs 语义。
         self.assertNotIn('role="tablist"', studio, "工作台控件不能声明未实现的 tabs 语义")
         self.assertNotIn('role="tab"', studio, "工作台控件不能声明未实现的 tabs 语义")

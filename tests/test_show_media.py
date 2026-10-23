@@ -150,7 +150,8 @@ class ShowMediaTargetTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        # resolve：短路径 TEMP 下实现会展开 junction，比较必须同口径（§六 ③）。
+        self.root = Path(self.tmp.name).resolve()
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -283,7 +284,7 @@ class ShowMediaTargetTests(unittest.TestCase):
         _make_file(self.root, "secret.png")
         _make_file(self.root, "sub/secret.png")
         with tempfile.TemporaryDirectory() as other:
-            outside = _make_file(Path(other), "secret.png")
+            outside = _make_file(Path(other).resolve(), "secret.png")
             for raw in (
                 "missing/secret.png",
                 "missing/sub/secret.png",
@@ -462,6 +463,16 @@ class ShowMediaTargetTests(unittest.TestCase):
 
     def test_under_limit_passes(self) -> None:
         image = _make_file(self.root, "ok.png")
+        result = resolve_show_media_target(
+            [str(image)], workspace=self.root, candidates=self._candidates(str(image))
+        )
+        self.assertTrue(result["ok"], result)
+
+    def test_long_absolute_path_is_still_a_path(self) -> None:
+        """深层目录的绝对路径会超过 60 字符：不能因为「长」被当成句子（短路径 TEMP 实测）。"""
+        deep = self.root / ("d" * 30) / ("e" * 20)
+        image = _make_file(deep, "deep.png")
+        self.assertGreater(len(str(image)), 60, "用例前提：路径必须超过句子阈值")
         result = resolve_show_media_target(
             [str(image)], workspace=self.root, candidates=self._candidates(str(image))
         )

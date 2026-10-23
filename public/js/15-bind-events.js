@@ -22,6 +22,9 @@ import { dismissOnboarding, resetOnboarding, saveOnboardingProvider, selectOnboa
 import { bindAuxChatEvents, restoreAuxChats, restoreDockGroup } from "./21-aux-chat.js";
 // 工作台（Studio）import 同样追加在末尾（_studio_plan_v2.md P4.1）。
 import { bindStudioEvents } from "./22-studio.js";
+// 打标器（工作台第二个功能页）import 同样追加在末尾：
+// 23 只从 22 取 onStudioPageChange，22 不反向 import 23，不存在循环依赖。
+import { bindLabelerEvents } from "./23-labeler.js";
 // 工作台（Studio）import 同样追加在末尾（_studio_plan_v2.md P4.1）。
 // ---- 聊天背景图（外观页） ----
 // 上传走同一个 /api/uploads（落盘 data/uploads/<日期>/，返回绝对路径），但**不进入
@@ -3126,4 +3129,6 @@ restoreDockGroup();
 void restoreAuxChats();
 // 工作台（_studio_plan_v2.md P4）：事件接线（组合根唯一装配点）。
 bindStudioEvents();
+// 打标器（工作台第二个功能页）：事件接线（与 Studio 同一个组合根）。
+bindLabelerEvents();
 // 工作台（_studio_plan_v2.md P4）：事件接线（组合根唯一装配点）。

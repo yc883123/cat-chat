@@ -289,11 +289,12 @@ class StudioPrefsConfigTests(unittest.TestCase):
         return ConfigStore(self.path)
 
     def test_fresh_install_and_legacy_config_get_defaults(self):
+        # page 是打标器接入时新增的工作台功能页偏好，默认「模块库」。
         self.assertEqual(self._store().data["studio"],
-                         {"last_selection": None, "favorites": [], "titles": []})
+                         {"last_selection": None, "favorites": [], "titles": [], "page": "library"})
         legacy = self._store({"appearance": {"theme": "dark"}})
         self.assertEqual(legacy.data["studio"],
-                         {"last_selection": None, "favorites": [], "titles": []})
+                         {"last_selection": None, "favorites": [], "titles": [], "page": "library"})
 
     def test_corrupt_values_are_normalized(self):
         store = self._store({

@@ -573,6 +573,39 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/studio/tasks":
             query = urllib.parse.parse_qs(parsed.query)
             self._json(*self.app.studio.api_tasks(str(query.get("active_only", [""])[0])))
+        elif path == "/api/labeler/presets":
+            # 打标器：侧重预设 + 上限（前端只做提前提示，服务端仍逐项校验）。
+            self._json(*self.app.labeler.api_presets())
+        elif path == "/api/labeler/tasks/recent":
+            # 必须排在通用 /api/labeler/tasks/<id> 之前，否则 recent 会被当成任务 id。
+            query = urllib.parse.parse_qs(parsed.query)
+            self._json(*self.app.labeler.api_recent(str(query.get("limit", ["5"])[0])))
+        elif path == "/api/labeler/tasks":
+            query = urllib.parse.parse_qs(parsed.query)
+            self._json(*self.app.labeler.api_tasks(str(query.get("active_only", [""])[0])))
+        elif path.startswith("/api/labeler/tasks/") and path.endswith("/events"):
+            task_id = path.split("/")[-2]
+            query = urllib.parse.parse_qs(parsed.query)
+            self._json(*self.app.labeler.api_task_events(task_id, str(query.get("after", ["0"])[0])))
+        elif path.startswith("/api/labeler/tasks/"):
+            self._json(*self.app.labeler.api_task(path.rsplit("/", 1)[-1]))
+        elif path == "/api/labeler/tags":
+            query = urllib.parse.parse_qs(parsed.query)
+            self._json(*self.app.labeler.api_tags(str(query.get("limit", ["200"])[0])))
+        elif path == "/api/labeler/annotations":
+            query = urllib.parse.parse_qs(parsed.query)
+            self._json(*self.app.labeler.api_annotations(
+                path_key=str(query.get("path_key", [""])[0]),
+                q=str(query.get("q", [""])[0]),
+                task_id=str(query.get("task_id", [""])[0]),
+                limit=str(query.get("limit", ["500"])[0]),
+            ))
+        elif path == "/api/labeler/sentences/stats":
+            query = urllib.parse.parse_qs(parsed.query)
+            self._json(*self.app.labeler.api_sentence_stats(
+                q=str(query.get("q", [""])[0]),
+                limit=str(query.get("limit", ["300"])[0]),
+            ))
         elif path.startswith("/api/studio/tasks/") and path.endswith("/events"):
             task_id = path.split("/")[-2]
             query = urllib.parse.parse_qs(parsed.query)
@@ -615,6 +648,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 f"Skill 上传内容超过当前上限（{skill_mb} MB，含 base64 编码膨胀）。"
                 "可在 设置 → Skills 管理 调大「Skill 大小上限」后重试"
             )
+        elif path == "/api/labeler/tasks":
+            # 打标批次含最多 500 条受管图片引用（每条带路径/相对路径/大小），
+            # 远大于 2 MiB 通用上限；图片本体走 /api/uploads，不在这里传输。
+            skill_max_size = 16 * 1024 * 1024
+            skill_oversize_error = "打标批次内容过大（最多 500 张图片引用），请拆分批次后重试"
         else:
             skill_max_size = 130 * 1024 * 1024
             skill_oversize_error = None
@@ -659,6 +697,16 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(*self.app.studio.api_task_cancel(path.split("/")[-2]))
         elif path.startswith("/api/studio/tasks/") and path.endswith("/retry"):
             self._json(*self.app.studio.api_task_retry(path.split("/")[-2]))
+        elif path == "/api/labeler/tasks":
+            # 打标批次：受管 image_refs + 白名单 config（服务端会重新校验图片与模型）。
+            self._json(*self.app.labeler.api_submit(body))
+        elif path.startswith("/api/labeler/tasks/") and path.endswith("/cancel"):
+            self._json(*self.app.labeler.api_cancel(path.split("/")[-2]))
+        elif path.startswith("/api/labeler/tasks/") and path.endswith("/retry"):
+            self._json(*self.app.labeler.api_retry(path.split("/")[-2], body))
+        elif path == "/api/labeler/export":
+            # 只收记录 ID / 查询条件 / 格式；落点由服务端决定（data/labeler/exports）。
+            self._json(*self.app.labeler.api_export(body))
         elif path == "/api/aux-chats":
             # 辅助对话创建（计划-辅助对话 §3.3）：标题自动编号、权限档忽略入参强制只读。
             try:

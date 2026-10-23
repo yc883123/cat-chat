@@ -1062,12 +1062,20 @@ def resolve_show_media_target(
 
     # ② 模型把用户原话整句塞进了 paths（实测常见）：那不是路径。
     #    只从这句话里捡**已进候选**的路径（不引入新的授权来源），其余交给下文按候选判定。
+    #    例外：**确实指向文件（或超限/越界）的串按真路径判定**——目录一深，绝对路径很容易
+    #    超过 60 字符，不能因为「长」就被当成句子（短路径 TEMP 实测：78 字符的合法 mp4
+    #    被判 not_found）。只有「像路径但根本指不到文件」才回退到文本解析。
     if _is_sentence_like(raw):
-        for target in extract_media_targets_from_text(raw, workspace):
-            hit = _find_candidate_by_source(pool, str(target.get("source") or ""))
-            if hit is not None:
-                return _show_shown(hit)
-        return _resolve_descriptive("", f"{raw} {message_text}".strip(), pool)
+        treat_as_path = False
+        if _looks_like_path(raw):
+            probe, reason = _local_target(raw, workspace)
+            treat_as_path = probe is not None or reason in {"too_large", "outside_root", "unreadable"}
+        if not treat_as_path:
+            for target in extract_media_targets_from_text(raw, workspace):
+                hit = _find_candidate_by_source(pool, str(target.get("source") or ""))
+                if hit is not None:
+                    return _show_shown(hit)
+            return _resolve_descriptive("", f"{raw} {message_text}".strip(), pool)
 
     # ③ 本地路径/文件名形态：按本轮冻结工作区解析，且必须通过授权（会话候选 / 原文明确给出）。
     #    带分隔符/盘符的真路径只走这一条；裸文件名（a.png）解析不到时退回 ④ 按候选展示名匹配

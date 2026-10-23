@@ -30,7 +30,7 @@ const RELEASES = [
   { tag: 'v3.6.3-beta', version: '3.6.3-beta', published_at: '', release_url: '', release_notes: [], installable: true, current: true },
 ];
 
-const ARTIFACT_DIR = 'C:\\Users\\somebody\\AppData\\Local\\NaibaChat\\update';
+const ARTIFACT_DIR = 'C:\\Users\\user\\AppData\\Local\\NaibaChat\\update';
 const artifactsAbsent = { directory: ARTIFACT_DIR, file_name: '', size_bytes: 0, state: 'absent' };
 const artifactsDownloading = { directory: ARTIFACT_DIR, file_name: 'naiba-chat-aaaaaaaaaaaa.download', size_bytes: 31 * 1024 * 1024, state: 'downloading' };
 const artifactsReady = { directory: ARTIFACT_DIR, file_name: 'naiba-chat-ffffffffffff.download', size_bytes: 96 * 1024 * 1024, state: 'ready' };

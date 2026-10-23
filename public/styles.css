@@ -3440,6 +3440,8 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .studio-page[aria-selected="true"] { background: var(--accent-soft); border-color: var(--violet-line); color: var(--violet-deep); font-weight: 600; }
 .studio-page:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .studio-topbar-tools { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
+/* 按页隐藏顶栏工具：作者样式里的 display:flex 会盖掉 [hidden] 的 UA 规则，必须显式声明。 */
+.studio-topbar-tools[hidden] { display: none; }
 .studio-search input {
   width: 190px; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--r-md);
   background: var(--surface); color: var(--text); font-size: 13px;
@@ -3448,6 +3450,134 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 /* 分页容器：同一时刻只显示一页，各页自己滚动。 */
 .studio-page-view { display: flex; flex-direction: column; min-height: 0; flex: 1; }
 .studio-page-view[hidden] { display: none; }
+
+/* ============================================================
+   打标器分页（data-studio-page-view="labeler"）
+   三栏与模块库同一套节奏：批次 / 设置 / 结果。只新增最小集 .labeler-*。
+   ============================================================ */
+.labeler-columns {
+  display: grid;
+  grid-template-columns: minmax(220px, 272px) minmax(0, 1.05fr) minmax(0, 1fr);
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4) var(--s-4);
+  min-height: 0;
+  flex: 1;
+}
+.labeler-panes { display: none; gap: 4px; padding: 6px var(--s-4); border-bottom: 1px solid var(--line); }
+
+.labeler-queue, .labeler-config, .labeler-results {
+  display: flex; flex-direction: column; gap: 10px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md);
+  padding: 12px; min-height: 0; overflow: hidden;
+}
+.labeler-queue-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.labeler-queue-head strong { font-size: 13px; }
+.labeler-batch-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; min-height: 0; flex: 1; }
+.labeler-empty { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.labeler-batch {
+  display: grid; gap: 3px; width: 100%; text-align: left;
+  border: 1px solid var(--line); background: var(--surface-2); border-radius: var(--r-md);
+  padding: 8px 10px; cursor: pointer; color: var(--text);
+}
+.labeler-batch:hover { border-color: var(--violet-line); }
+.labeler-batch.active { border-color: var(--violet-line); background: var(--violet-softer); }
+.labeler-batch-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.labeler-batch-title { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.labeler-batch-state { font-size: 11px; color: var(--muted); flex: none; }
+.labeler-batch-meta { font-size: 11px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 8px; }
+
+.labeler-queue-status { display: grid; gap: 6px; border-top: 1px solid var(--line); padding-top: 10px; }
+.labeler-queue-status[hidden] { display: none; }
+.labeler-progress-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 12px; }
+.labeler-progress-track { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+.labeler-progress-track > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s ease; }
+.labeler-progress-note { margin: 0; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+
+.labeler-config { overflow-y: auto; }
+.labeler-dropzone {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+  border: 1.5px dashed var(--line); border-radius: var(--r-md);
+  padding: 18px 12px; text-align: center; cursor: pointer; background: var(--surface-2);
+  transition: border-color .15s ease, background .15s ease;
+}
+.labeler-dropzone:hover, .labeler-dropzone:focus-visible { border-color: var(--violet-line); background: var(--violet-softer); outline: none; }
+.labeler-dropzone.dragover { border-color: var(--accent); background: var(--accent-soft); }
+.labeler-dropzone-icon { width: 26px; height: 26px; fill: none; stroke: var(--muted); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.labeler-dropzone-title { margin: 0; font-size: 13px; font-weight: 600; }
+.labeler-dropzone-hint { margin: 0; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.labeler-pick-status { margin: 0; min-height: 16px; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+
+.labeler-selected { display: grid; gap: 6px; }
+.labeler-selected[hidden] { display: none; }
+.labeler-selected-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 12px; }
+.labeler-selected-strip { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
+.labeler-thumb { position: relative; flex: none; width: 64px; }
+.labeler-thumb img { width: 64px; height: 64px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); display: block; }
+.labeler-thumb span { display: block; font-size: 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.labeler-field-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.labeler-field-row label, .labeler-prompt-field { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+.labeler-field-row select, .labeler-field-row input, .labeler-prompt-field textarea,
+.labeler-results-head input, .labeler-results-head select {
+  width: 100%; border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface-2); color: var(--text); font-size: 12.5px; padding: 6px 8px;
+}
+.labeler-prompt-field textarea { resize: vertical; }
+.labeler-preset-desc { margin: 0; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.labeler-advanced { border: 1px solid var(--line); border-radius: var(--r-md); padding: 8px 10px; display: grid; gap: 8px; }
+.labeler-advanced > summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
+.labeler-advanced[open] > summary { color: var(--text); }
+.labeler-cost-note { margin: 0; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.labeler-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.labeler-actions > [hidden] { display: none; }
+.labeler-task-hint { margin: 0; min-height: 16px; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.labeler-task-hint.error { color: var(--danger, #c0392b); }
+
+.labeler-results-head { display: grid; gap: 8px; }
+.labeler-result-tabs { display: flex; gap: 4px; }
+.labeler-result-tab {
+  border: 1px solid transparent; background: transparent; color: var(--muted);
+  border-radius: var(--r-md); padding: 5px 11px; font-size: 12.5px; cursor: pointer;
+}
+.labeler-result-tab:hover { background: var(--surface-2); color: var(--text); }
+.labeler-result-tab.active { background: var(--accent-soft); border-color: var(--violet-line); color: var(--violet-deep); font-weight: 600; }
+.labeler-export { display: flex; gap: 6px; align-items: center; }
+.labeler-export .labeler-search-field { flex: 1; min-width: 0; }
+.labeler-export select { width: 108px; flex: none; }
+.labeler-export .control-button { flex: none; }
+.labeler-result-body { overflow-y: auto; min-height: 0; flex: 1; display: flex; flex-direction: column; gap: 8px; padding-top: 2px; }
+.labeler-anno {
+  border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2);
+  padding: 9px 11px; display: grid; gap: 5px;
+}
+.labeler-anno-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.labeler-anno-name { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.labeler-anno-path { font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.labeler-taglist { display: flex; flex-wrap: wrap; gap: 4px; }
+.labeler-tag {
+  font-size: 11px; border: 1px solid var(--line); border-radius: 999px;
+  padding: 1px 8px; background: var(--surface); color: var(--text);
+}
+.labeler-tag em { font-style: normal; color: var(--muted); margin-left: 4px; }
+.labeler-anno-desc { margin: 0; font-size: 11.5px; color: var(--muted); line-height: 1.55; white-space: pre-wrap; }
+.labeler-anno-state { font-size: 10.5px; color: var(--muted); }
+.labeler-anno-state.failed { color: var(--danger, #c0392b); }
+.labeler-tagcloud { display: flex; flex-wrap: wrap; gap: 6px; }
+.labeler-tagcloud .labeler-tag { cursor: pointer; font-size: 12px; padding: 3px 10px; }
+.labeler-tagcloud .labeler-tag.active { border-color: var(--violet-line); background: var(--accent-soft); color: var(--violet-deep); }
+.labeler-sentence { display: flex; gap: 10px; align-items: baseline; font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.labeler-sentence b { flex: none; font-size: 11px; color: var(--muted); font-weight: 600; min-width: 36px; text-align: right; }
+.labeler-sentence span { flex: 1; min-width: 0; line-height: 1.5; }
+.labeler-degraded { margin: 0 0 6px; font-size: 11px; color: var(--warn, #c98a00); }
+
+@media (max-width: 760px) {
+  .labeler-panes { display: flex; }
+  .labeler-columns { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); padding: 10px; gap: 10px; overflow: hidden; }
+  .labeler-queue, .labeler-config, .labeler-results { display: none; }
+  #studioPageLabeler[data-labeler-pane="queue"] .labeler-queue,
+  #studioPageLabeler[data-labeler-pane="config"] .labeler-config,
+  #studioPageLabeler[data-labeler-pane="results"] .labeler-results { display: flex; }
+}
 
 /* 手机三档切换条：桌面隐藏（三栏常显） */
 .studio-panes { display: none; gap: 4px; padding: 6px var(--s-4); border-bottom: 1px solid var(--line); }

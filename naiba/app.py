@@ -353,6 +353,15 @@ class NaibaChatApp:
             self.studio.recover()
         except Exception:  # noqa: BLE001 - Studio 启动恢复失败不阻断启动
             logger.exception("Studio 任务启动恢复失败")
+        # 打标器（docs/plans/2026-10-23-打标器接入工作台计划.md）：工作台的第二个功能页，
+        # 独立标注库（data/labeler/labeler.db）+ 独立任务目录；只依赖 shared config/llm。
+        from naiba.labeler.service import LabelerService
+
+        self.labeler = LabelerService(self)
+        try:
+            self.labeler.recover()
+        except Exception:  # noqa: BLE001 - 打标器恢复失败不阻断启动
+            logger.exception("打标器任务启动恢复失败")
         self.updater = UpdateManager(self._paths.app_dir, self._paths.data_dir)
         # 「更新代理」独立于全局 proxy：启动时注入一次，设置保存后再注入更新。
         self.updater.configure_proxy(self.config.data.get("update_proxy"))
@@ -369,6 +378,10 @@ class NaibaChatApp:
             self.studio.shutdown()
         except Exception:  # noqa: BLE001 - 收尾不互相阻断
             logger.exception("Studio 收尾失败")
+        try:
+            self.labeler.shutdown()
+        except Exception:  # noqa: BLE001 - 收尾不互相阻断
+            logger.exception("打标器收尾失败")
         self.mcp.stop()
 
     def _studio_create_conversation(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -2128,6 +2141,13 @@ class NaibaChatApp:
                 keys.update(studio.referenced_upload_paths())
             except (OSError, ValueError):
                 pass
+        labeler = getattr(self, "labeler", None)
+        if labeler is not None:
+            try:
+                # 打标器活跃/可继续任务引用的图片（同一条引用保护口径）。
+                keys.update(labeler.referenced_upload_paths())
+            except (OSError, ValueError):
+                pass
         background = str(((self.config.data.get("chat_background") or {}).get("image") or "")).strip()
         if background:
             key = normalized_path_key(background)
@@ -2264,6 +2284,13 @@ class NaibaChatApp:
         if studio is not None:
             try:
                 if normalized_path_key(target) in studio.referenced_upload_paths():
+                    return True
+            except (OSError, ValueError):
+                return True  # 判定不了时宁可保留
+        labeler = getattr(self, "labeler", None)
+        if labeler is not None:
+            try:
+                if normalized_path_key(target) in labeler.referenced_upload_paths():
                     return True
             except (OSError, ValueError):
                 return True  # 判定不了时宁可保留

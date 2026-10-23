@@ -42,6 +42,8 @@ const TASK_STATUS_LABELS = {
 const RESULT_MODES = ["result", "history"];
 // 手机三档：模板 / 参数 / 结果。
 const PANES = ["list", "form", "result"];
+// 侧栏功能页允许值：与后端 config.STUDIO_PAGE_VIEWS 和 index.html 的 data-studio-page 对齐。
+const STUDIO_PAGES = ["library", "labeler"];
 // 标题区最近任务捷径固定最多 3 条；完整列表走侧栏「历史产出」。
 const RECENT_TASK_LIMIT = 3;
 // 列表接口自身最多返回 60 条；这是展示范围提示，不是分页参数。
@@ -58,6 +60,9 @@ const STUDIO_LOCATE_HIGHLIGHT_MS = 1800;
 const studio = {
   providerModelsCache: new Map(),
   open: false,
+  // 功能页（侧栏分页导航）：library = 模块库，labeler = 打标器。
+  // 与 pane（手机三档）是两套互不相干的维度，不能混用。
+  page: "library",
   summary: null,
   module: "",
   query: "",
@@ -110,11 +115,14 @@ const studio = {
 function studioPrefs() {
   const prefs = state.bootstrap?.settings?.studio;
   const selection = prefs?.last_selection;
+  const page = String(prefs?.page || "");
   return {
     last_selection: selection && typeof selection === "object" ? selection : null,
     favorites: Array.isArray(prefs?.favorites) ? prefs.favorites : [],
     // 自定义标题：只覆盖「列表卡片上的显示名」，模板原名与正文都不改。
     titles: Array.isArray(prefs?.titles) ? prefs.titles : [],
+    // 上次所在功能页：冻结版 WebView2 不保证 localStorage 跨进程保留，只能落服务端。
+    page: STUDIO_PAGES.includes(page) ? page : "library",
   };
 }
 
@@ -261,20 +269,87 @@ function syncModeUi() {
     chatBtn.setAttribute("aria-pressed", String(!open));
     chatBtn.classList.toggle("active", !open);
   }
-  // 左侧栏在工作台态承担「功能分页导航」（当前只有模块库，后续新功能各加一项）。
+  // 左侧栏在工作台态承担「功能分页导航」（模块库 / 打标器）。
   const nav = $("#sidebarStudioNav");
   if (nav) nav.hidden = !open;
+  applyStudioPageUi();
+}
+
+// ============================================================
+// 功能页切换（模块库 / 打标器）
+// 与 pane 状态分离：pane 只决定「同一页内的手机三档」，page 决定「显示哪一页」。
+// 其它页的轮询必须暂停：打标器注册 onStudioPageChange 后自己停/起定时器。
+// ============================================================
+
+const studioPageListeners = [];
+
+/** 注册功能页切换回调（打标器用它暂停/恢复轮询）。返回注销函数。 */
+export function onStudioPageChange(listener) {
+  if (typeof listener !== "function") return () => {};
+  studioPageListeners.push(listener);
+  return () => {
+    const index = studioPageListeners.indexOf(listener);
+    if (index >= 0) studioPageListeners.splice(index, 1);
+  };
+}
+
+export function currentStudioPage() {
+  return studio.page;
+}
+
+function applyStudioPageUi() {
+  const page = STUDIO_PAGES.includes(studio.page) ? studio.page : "library";
+  document.querySelectorAll("#studioPages [data-studio-page]").forEach((btn) => {
+    const active = btn.dataset.studioPage === page;
+    btn.setAttribute("aria-current", active ? "page" : "false");
+    btn.classList.toggle("active", active);
+  });
+  document.querySelectorAll("#studioView .studio-page-view[data-studio-page-view]").forEach((view) => {
+    view.hidden = view.dataset.studioPageView !== page;
+  });
+  // 顶栏工具（搜索 / 导入）属模块库专有：切到别的页必须一并退场，否则点了会搜不到东西。
+  document.querySelectorAll("#studioView .studio-topbar-tools").forEach((tools) => {
+    tools.hidden = page !== "library";
+  });
+}
+
+/**
+ * 切到指定功能页：更新界面 + 记住选择 + 通知订阅者。
+ * `{ persist = true }` 时写服务端偏好（刷新/重启后仍停在这一页）。
+ */
+export function setStudioPage(page, { persist = true } = {}) {
+  const next = STUDIO_PAGES.includes(page) ? page : "library";
+  const changed = next !== studio.page;
+  studio.page = next;
+  applyStudioPageUi();
+  if (changed) {
+    emitStudioPage(next, { refresh: false });
+  }
+  if (persist) void saveStudioPrefs({ page: next });
+  return next;
+}
+
+function emitStudioPage(page, detail) {
+  for (const listener of [...studioPageListeners]) {
+    try {
+      listener(page, detail);
+    } catch (error) {
+      console.error("工作台功能页回调失败", error);
+    }
+  }
 }
 
 // 进入工作台：已在工作台时再点也不退出（退出由「对话」负责）。
 export function openStudioView() {
   if (studio.open) return;
   studio.open = true;
+  // 上次所在功能页由服务端偏好恢复（冻结版 WebView2 的 private mode 不保证 localStorage）。
+  studio.page = studioPrefs().page;
   syncModeUi();
   setStudioPane(studio.pane);
   if (!sidebarDesktop()) closeSidebar();
   void refreshStudio();
-  if (studio.pane === "form") focusStudioInput();
+  if (studio.page === "library" && studio.pane === "form") focusStudioInput();
 }
 
 export function closeStudioView() {
@@ -282,6 +357,8 @@ export function closeStudioView() {
   studio.open = false;
   syncModeUi();
   stopStudioPolling();
+  // 打标页的轮询也必须停：页面隐藏后继续轮询只是白耗请求。
+  emitStudioPage(studio.page, { closed: true });
   // 会话树在隐藏期间尺寸为 0，恢复显示后必须按真实可用高度重算虚拟窗口。
   renderSidebar();
 }
@@ -322,6 +399,12 @@ async function reconcileActiveTask() {
 }
 
 async function refreshStudio() {
+  // 切到打标器时，模块库的重活（目录 / 自定义 / 列表）一概不跑：
+  // 由 23-labeler.js 自己按服务端状态校准批次与队列。
+  if (studio.page === "labeler") {
+    emitStudioPage("labeler", { refresh: true });
+    return;
+  }
   // 离开期间任务可能已经结束：重进时以服务端最新状态为准，不拿可能过期的快照决定订阅。
   await reconcileActiveTask();
   if (!studio.catalogLoaded) {
@@ -2180,6 +2263,14 @@ export function bindStudioEvents() {
     const btn = event.target.closest("[data-studio-pane]");
     if (!btn) return;
     setStudioPane(btn.dataset.studioPane);
+  });
+  // 侧栏功能页导航：事件委托（后续新功能页加一项即可，不必再绑一根线）。
+  $("#studioPages")?.addEventListener("click", (event) => {
+    const btn = event.target.closest("[data-studio-page]");
+    if (!btn) return;
+    const page = setStudioPage(btn.dataset.studioPage);
+    void refreshStudio();
+    if (!sidebarDesktop() && page === "labeler") closeSidebar();
   });
   $("#studioSearch")?.addEventListener("input", () => {
     studio.query = String($("#studioSearch")?.value || "");

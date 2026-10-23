@@ -132,8 +132,9 @@ class ExecutableUpdateTests(unittest.TestCase):
         self._old_frozen = getattr(sys, "frozen", None)
         sys.frozen = True
         self._tmp = tempfile.TemporaryDirectory()
-        self.app_dir = Path(self._tmp.name) / "app"
-        self.data_dir = Path(self._tmp.name) / "data"
+        # resolve：短路径 TEMP 下 UpdateManager 内部会 resolve，比较需同口径（§六 ③）。
+        self.app_dir = (Path(self._tmp.name) / "app").resolve()
+        self.data_dir = (Path(self._tmp.name) / "data").resolve()
         self.app_dir.mkdir()
         self.data_dir.mkdir()
         self.manager = UpdateManager(self.app_dir, self.data_dir)

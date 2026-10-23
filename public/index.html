@@ -62,12 +62,16 @@
       </div>
       <nav class="conversation-list" id="sidebarWorkspaceTree" aria-label="工作区"></nav>
       <!-- 工作台态的功能分页导航：左侧栏负责在各功能页之间切换。
-           当前只有「模块库」，后续新功能各加一项（不在顶栏再堆分页按钮）。 -->
+           当前「模块库」+「打标器」，后续新功能各加一项（不在顶栏再堆分页按钮）。 -->
       <div class="sidebar-studio-nav" id="sidebarStudioNav" hidden>
         <nav class="studio-pages" id="studioPages" aria-label="工作台分页">
           <button class="studio-page" type="button" aria-current="page" data-studio-page="library">
             <svg class="studio-page-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.5"></rect><rect x="13" y="4" width="7" height="7" rx="1.5"></rect><rect x="4" y="13" width="7" height="7" rx="1.5"></rect><rect x="13" y="13" width="7" height="7" rx="1.5"></rect></svg>
             <span>模块库</span>
+          </button>
+          <button class="studio-page" type="button" aria-current="false" data-studio-page="labeler">
+            <svg class="studio-page-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12.5V5a1 1 0 0 1 1-1h7.5a1 1 0 0 1 .7.3l7 7a1 1 0 0 1 0 1.4l-7.5 7.5a1 1 0 0 1-1.4 0l-7-7a1 1 0 0 1-.3-.7Z"></path><circle cx="8.5" cy="8.5" r="1.3"></circle></svg>
+            <span>打标器</span>
           </button>
         </nav>
       </div>
@@ -346,6 +350,148 @@
                 <div class="studio-result-stream" id="studioResultStream" aria-live="polite"></div>
               </div>
             </div>
+          </div>
+        </div>
+
+        <!-- 分页：打标器 —— 批量给图片打标签/描述，落本地标注库，可导出 JSON / CSV / .txt。
+             左（批次与队列）、中（拖放与参数）、右（按图 / 按标签 / 句子库）三栏。
+             页面结构在这里定稿；交互与渲染由 public/js/23-labeler.js 接管。 -->
+        <div class="studio-page-view" id="studioPageLabeler" data-studio-page-view="labeler" hidden>
+          <div class="labeler-panes" id="labelerPanes" role="group" aria-label="打标器分档">
+            <button class="studio-pane-btn labeler-pane-btn" type="button" aria-pressed="false" data-labeler-pane="queue">批次</button>
+            <button class="studio-pane-btn labeler-pane-btn active" type="button" aria-pressed="true" data-labeler-pane="config">设置</button>
+            <button class="studio-pane-btn labeler-pane-btn" type="button" aria-pressed="false" data-labeler-pane="results">结果</button>
+          </div>
+          <div class="labeler-columns" id="labelerColumns">
+            <!-- 左：批次 / 队列 / 断点状态 -->
+            <aside class="labeler-queue" aria-label="批次与队列">
+              <div class="labeler-queue-head">
+                <strong>批次</strong>
+                <button class="control-button tiny" id="labelerRefreshRecent" type="button" title="重新读取最近批次">刷新</button>
+              </div>
+              <div class="labeler-batch-list" id="labelerBatchList" aria-label="最近批次">
+                <p class="labeler-empty" id="labelerBatchEmpty">还没有批次。拖入一个文件夹即可开始。</p>
+              </div>
+              <div class="labeler-queue-status" id="labelerQueueStatus" hidden aria-live="polite">
+                <div class="labeler-progress-head">
+                  <span id="labelerProgressLabel">准备中</span>
+                  <span id="labelerProgressCount">0 / 0</span>
+                </div>
+                <div class="labeler-progress-track"><i id="labelerProgressBar"></i></div>
+                <p class="labeler-progress-note" id="labelerProgressNote"></p>
+              </div>
+            </aside>
+
+            <!-- 中：文件夹拖放 + 打标侧重 + 模型与参数 -->
+            <section class="labeler-config" aria-label="打标设置">
+              <div class="labeler-dropzone" id="labelerDropzone" tabindex="0" role="button"
+                   aria-label="拖入文件夹或点击选择文件夹">
+                <svg class="labeler-dropzone-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"></path>
+                  <path d="M12 11v5M9.5 13.5 12 11l2.5 2.5"></path>
+                </svg>
+                <p class="labeler-dropzone-title">把文件夹拖到这里</p>
+                <p class="labeler-dropzone-hint">只读取其中的图片，按文件夹结构分组；也可点这里选择文件夹。</p>
+                <input type="file" id="labelerFolderInput" webkitdirectory directory multiple hidden>
+              </div>
+              <p class="labeler-pick-status" id="labelerPickStatus" role="status"></p>
+
+              <div class="labeler-selected" id="labelerSelected" hidden>
+                <div class="labeler-selected-head">
+                  <span id="labelerSelectedSummary">已选 0 张</span>
+                  <span class="labeler-selected-actions">
+                    <button class="control-button tiny" id="labelerRetryUpload" type="button" hidden>重试失败</button>
+                    <button class="control-button tiny" id="labelerClearSelected" type="button">清空</button>
+                  </span>
+                </div>
+                <div class="labeler-selected-strip" id="labelerSelectedStrip" aria-label="待打标图片"></div>
+              </div>
+
+              <div class="labeler-field-row">
+                <label>打标侧重
+                  <select id="labelerPreset" aria-label="打标侧重"></select>
+                </label>
+              </div>
+              <p class="labeler-preset-desc" id="labelerPresetDesc"></p>
+
+              <div class="labeler-field-row">
+                <label>模型配置
+                  <select id="labelerProviderSelect" aria-label="模型配置"></select>
+                </label>
+                <label>模型
+                  <select id="labelerModelSelect" aria-label="模型"></select>
+                </label>
+              </div>
+
+              <details class="labeler-advanced" id="labelerAdvanced">
+                <summary>高级设置</summary>
+                <div class="labeler-field-row">
+                  <label>输出形式
+                    <select id="labelerOutputMode" aria-label="输出形式">
+                      <option value="keywords">只要标签</option>
+                      <option value="description">只要描述</option>
+                      <option value="both">标签 + 描述</option>
+                    </select>
+                  </label>
+                  <label>最多标签数
+                    <input id="labelerMaxTags" type="number" min="1" max="64" step="1" value="24">
+                  </label>
+                </div>
+                <div class="labeler-field-row">
+                  <label>置信度门槛
+                    <input id="labelerConfidence" type="number" min="0" max="1" step="0.05" value="0.35">
+                  </label>
+                  <label>每张超时（秒）
+                    <input id="labelerTimeout" type="number" min="15" max="600" step="5" value="90">
+                  </label>
+                </div>
+                <div class="labeler-field-row">
+                  <label>失败重试次数
+                    <input id="labelerRetryLimit" type="number" min="0" max="5" step="1" value="2">
+                  </label>
+                  <label>同时处理
+                    <select id="labelerConcurrency" aria-label="同时处理">
+                      <option value="1">1 张（稳妥）</option>
+                    </select>
+                  </label>
+                </div>
+                <label class="labeler-prompt-field">补充要求（可选）
+                  <textarea id="labelerCustomPrompt" rows="2"
+                            placeholder="例如：一律用英文，名词短语，不要句子"></textarea>
+                </label>
+              </details>
+
+              <p class="labeler-cost-note" id="labelerCostNote"></p>
+              <div class="labeler-actions">
+                <button class="primary-button" id="labelerStart" type="button">开始打标</button>
+                <button class="control-button" id="labelerCancel" type="button" hidden>取消</button>
+                <button class="control-button" id="labelerContinue" type="button" hidden>继续未完成</button>
+              </div>
+              <p class="labeler-task-hint" id="labelerTaskHint" role="status"></p>
+            </section>
+
+            <!-- 右：结果三档（按图 / 按标签 / 句子库） -->
+            <section class="labeler-results" aria-label="打标结果">
+              <header class="labeler-results-head">
+                <div class="labeler-result-tabs" role="group" aria-label="结果视图">
+                  <button class="labeler-result-tab active" type="button" aria-pressed="true" data-labeler-result="images">按图</button>
+                  <button class="labeler-result-tab" type="button" aria-pressed="false" data-labeler-result="tags">按标签</button>
+                  <button class="labeler-result-tab" type="button" aria-pressed="false" data-labeler-result="sentences">句子库</button>
+                </div>
+                <div class="labeler-export">
+                  <label class="labeler-search-field">
+                    <input id="labelerSearch" type="search" placeholder="筛选标签或文件名" aria-label="筛选">
+                  </label>
+                  <select id="labelerExportFormat" aria-label="导出格式">
+                    <option value="json">JSON</option>
+                    <option value="csv">CSV</option>
+                    <option value="txt">.txt 标签</option>
+                  </select>
+                  <button class="control-button" id="labelerExport" type="button">导出</button>
+                </div>
+              </header>
+              <div class="labeler-result-body" id="labelerResultBody" aria-live="polite"></div>
+            </section>
           </div>
         </div>
       </section>

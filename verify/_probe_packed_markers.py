@@ -67,6 +67,9 @@ CHANGED = [
     "js/15-bind-events.js",
     "js/16-file-refs.js",
     "js/21-aux-chat.js",
+    # 3.6.x：工作台「打标器」功能页（分页骨架 + 拖放/上传/结果）。
+    "js/22-studio.js",
+    "js/23-labeler.js",
 ]
 
 # 本轮新增 / 必须存在的内置 Skill（**必须在包里**，否则出厂绑定失效）。
@@ -158,6 +161,11 @@ FINGERPRINTS = {
         # 2.9.7：上传缓存 / 生成产物缓存拆成两行两阈值两按钮。
         "generatedCleanLimitMb",
         "cleanGeneratedCache",
+        # 3.6.x：打标器页签与页面容器（模块库仍保留）。
+        "data-studio-page=\"labeler\"",
+        "studioPageLabeler",
+        "labelerDropzone",
+        "labelerPreset",
         # 2.9.8：侧栏「分组与排序」浮层菜单（滑杆按钮的新面板）。
         "sidebarViewMenu",
         "分组与排序",
@@ -185,7 +193,9 @@ FINGERPRINTS = {
                    # 3.3.4：MCP 连接器分页（行头 grid / 单行截断的副标题 / 展开区）。
                    ".mcp-rows", ".mcp-row-sub", ".mcp-row-body", ".mcp-seg",
                    # 3.3.5：辅助对话窄面板适配 + 跟随行 + 供应商/模型胶囊。
-                   ".aux-msgs .message-row", ".aux-follow", ".aux-chip"],
+                   ".aux-msgs .message-row", ".aux-follow", ".aux-chip",
+                   # 3.6.x：打标器三栏 + 按页隐藏顶栏工具的显式 display 规则。
+                   ".labeler-columns", ".studio-topbar-tools[hidden]", ".labeler-result-tab"],
     # emoji 头像判定入口（内置 Agent 用 emoji，上传图走 <img>）。
     "js/01-core.js": ["agentAvatarEmoji", "agentAvatarFile", "normalizeSidebarPrefs"],
     # 2.9.8：bootstrap 时同步服务端 settings.sidebar 三项偏好。
@@ -229,7 +239,7 @@ FINGERPRINTS = {
     # 2.9.8：滑杆按钮 / ⋯菜单归档项 / 侧栏拖拽接线。
     # 2.9.9：软键盘开合走 visualViewport，弹层重定位跟着它走；用量弹窗 close 统一摘 vv 监听。
     # 2.9.11：费用单价弹层接线（入口 / 返回 / 完成 / 事件委托 + 自定义币种删除）。
-    "js/15-bind-events.js": ["settingsToolbarSub", "cleanImageCache('generated')", "openSidebarViewMenu", "toggleConversationArchive", "bindSidebarDragDrop", "window.visualViewport?.addEventListener", "usageUnbindDialogViewport", "openUsagePricingDialog", "usagePricingDialog", "data-pricing-drop-currency", "handleMcpListClick", "switchSettingsTab('mcp')"],
+    "js/15-bind-events.js": ["settingsToolbarSub", "cleanImageCache('generated')", "openSidebarViewMenu", "toggleConversationArchive", "bindSidebarDragDrop", "window.visualViewport?.addEventListener", "usageUnbindDialogViewport", "openUsagePricingDialog", "usagePricingDialog", "data-pricing-drop-currency", "handleMcpListClick", "switchSettingsTab('mcp')", "bindLabelerEvents"],
     # 2.9.9：@ / 弹层定位可视视口感知 + hide 清内联 maxHeight（手机软键盘裁弹层修复）。
     "js/13-skill-refs.js": ["window.visualViewport", "style.removeProperty('max-height')"],
     "js/16-file-refs.js": ["style.removeProperty('max-height')"],
@@ -238,6 +248,12 @@ FINGERPRINTS = {
         'from "./04-messages.js"',
         "auxProviderSelect",
         "naiba:conversation-changed",
+    ],
+    # 3.6.x：功能页切换与打标器页（拖放递归枚举、逐批上传、结果三档）。
+    "js/22-studio.js": ["STUDIO_PAGES", "setStudioPage", "onStudioPageChange", "applyStudioPageUi"],
+    "js/23-labeler.js": [
+        "webkitGetAsEntry", "labelerDropzone", "bindLabelerEvents",
+        "uploadAll", "loadModelOptions", "loadSentences",
     ],
 }
 

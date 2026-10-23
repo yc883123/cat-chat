@@ -87,7 +87,11 @@ USAGE_DASH_PREF_DEFAULTS = {"range": "1", "gran": "hour", "chart": "bar", "metri
 # 收藏/外观字段。条目用「来源类型 + 稳定 ID」定位：内置条目走只读目录 ID，自定义
 # 条目走 custom-* ID；两者互不混淆。模板正文、用户输入、变量值一律不落库。
 STUDIO_SELECTION_KINDS = frozenset({"builtin", "custom"})
+# 条目定位里携带的 page 只服务于「模块库」内的条目（历史字段），不是功能页开关。
 STUDIO_PREF_PAGES = frozenset({"library"})
+# 工作台功能页（侧栏分页导航的允许值）：刷新与重启后按它恢复上次所在页。
+# 新增功能页时必须同步 public/index.html 的 data-studio-page 与前端 setStudioPage()。
+STUDIO_PAGE_VIEWS = ("library", "labeler")
 STUDIO_PREF_MODULES = frozenset(
     {"", "vs", "h3", "vi", "ec", "global", "script", "game", "style", "custom"}
 )
@@ -96,7 +100,7 @@ STUDIO_PREF_MAX_FAVORITES = 200
 # 模板原地标题永远保留在详情页，这里存的是「用户起的别名」。
 STUDIO_PREF_MAX_TITLES = 500
 STUDIO_PREF_TITLE_MAX_CHARS = 80
-STUDIO_PREF_DEFAULTS = {"last_selection": None, "favorites": [], "titles": []}
+STUDIO_PREF_DEFAULTS = {"last_selection": None, "favorites": [], "titles": [], "page": "library"}
 
 # ---- 聊天背景图（只铺对话区）----
 # 透明度滑杆范围：0.05 是「还能看见」的下限，1 = 完全不透明。
@@ -299,6 +303,9 @@ def normalize_studio_prefs(value: Any) -> dict[str, Any]:
     收藏都在这里收敛。条目定位只用「来源类型 + 稳定 ID」，不存模板正文/用户输入。
     """
     merged = dict(value) if isinstance(value, dict) else {}
+    # 功能页：只认侧栏里真实存在的页；非法/缺失一律回「模块库」。
+    page_value = str(merged.get("page") or "").strip()
+    normalized_page = page_value if page_value in STUDIO_PAGE_VIEWS else "library"
     selection = merged.get("last_selection")
     normalized_selection: dict[str, str] | None = None
     if isinstance(selection, dict):
@@ -348,7 +355,8 @@ def normalize_studio_prefs(value: Any) -> dict[str, Any]:
         titles.append({"kind": kind, "id": item_id, "title": title})
         if len(titles) >= STUDIO_PREF_MAX_TITLES:
             break
-    return {"last_selection": normalized_selection, "favorites": favorites, "titles": titles}
+    return {"last_selection": normalized_selection, "favorites": favorites, "titles": titles,
+            "page": normalized_page}
 
 
 def validate_skills_dir(resolved: Path, *, app_dir: Path, public_dir: Path, data_dir: Path) -> None:
@@ -408,8 +416,9 @@ def default_config() -> dict[str, Any]:
         # （zoom 是相对「填满」的倍率；< 1 会四周留白，这正是"看全整张图"的手段）。
         # 图片以外的内容一律实底，所以不需要蒙层。
         "chat_background": default_chat_background(),
-        # 工作台（Studio）偏好：上次选中的条目 + 收藏清单。只存定位键，不存模板正文。
-        "studio": {"last_selection": None, "favorites": [], "titles": []},
+        # 工作台（Studio）偏好：上次选中的条目 + 收藏清单 + 上次所在功能页。
+        # 只存定位键，不存模板正文；page 落库是为了冻结版 WebView2 重启后仍记得分页。
+        "studio": {"last_selection": None, "favorites": [], "titles": [], "page": "library"},
         # Per-user reusable system prompts for conversation settings.  These
         # live in config.json instead of the conversation database by design.
         "conversation_prompt_presets": [],
@@ -2639,17 +2648,22 @@ class ConfigStore:
                             merged["metric"] = metric
                         self.data[key] = merged
                     elif key == "studio":
-                        # 工作台偏好：只接受「上次选择」与「收藏」两类结构化状态。
-                        # 严格校验（不静默吞非法值）：这两块由前端受控写入，契约对不上
+                        # 工作台偏好：只接受「上次选择」「收藏」「自定义标题」「上次所在页」。
+                        # 严格校验（不静默吞非法值）：这些由前端受控写入，契约对不上
                         # 说明调用方写错了，让它显式报错比落库脏数据更难查。
                         incoming = values[key]
                         if not isinstance(incoming, dict):
                             raise ValueError("studio 必须是对象")
-                        unknown = set(incoming) - {"last_selection", "favorites", "titles"}
+                        unknown = set(incoming) - {"last_selection", "favorites", "titles", "page"}
                         if unknown:
                             names = ", ".join(sorted(map(str, unknown)))
                             raise ValueError(f"studio 包含不支持的字段：{names}")
                         current = normalize_studio_prefs(self.data.get("studio"))
+                        if "page" in incoming:
+                            page_value = str(incoming["page"] or "").strip()
+                            if page_value not in STUDIO_PAGE_VIEWS:
+                                raise ValueError(f"工作台功能页非法：{page_value or '（空）'}")
+                            current["page"] = page_value
                         if "last_selection" in incoming:
                             selection = incoming["last_selection"]
                             if selection is None:

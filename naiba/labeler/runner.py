@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 import traceback
@@ -21,7 +22,7 @@ from naiba.core.exceptions import TaskCancelled
 from naiba.llm.profiles import resolve_profile_with_override
 from naiba.labeler.engines import get_engine
 from naiba.labeler.engines.provider import build_prompt
-from naiba.labeler.presets import filter_tags, get_preset
+from naiba.labeler.presets import filter_tags, get_preset, normalize_tag
 from naiba.labeler.store import now_ms
 
 # 已验证可用的并发档位。P0-a 只通过了离线契约；在线小样本未执行前不开放 >1。
@@ -290,6 +291,7 @@ class LabelerRunner:
                 usage = dict(getattr(self.app.models, "last_usage", {}) or {})
                 finish_reason = str(getattr(self.app.models, "last_finish_reason", "") or "")
                 tags, confidences = self._finalize_tags(parsed, config, preset)
+                description = self._finalize_description(parsed, config, preset)
                 annotation = {
                     "path_key": item["path_key"],
                     "content_version": item["content_version"],
@@ -304,7 +306,7 @@ class LabelerRunner:
                     "model_name": str(config.get("model_name") or ""),
                     "tags": tags,
                     "confidences": confidences,
-                    "description": str(parsed.get("description") or ""),
+                    "description": description,
                 }
                 self.db.complete_item(
                     task_id, item_id,
@@ -381,6 +383,40 @@ class LabelerRunner:
                 break
         _ = item
         return out_tags, out_conf
+
+    @staticmethod
+    def _finalize_description(parsed: dict[str, Any], config: dict[str, Any],
+                              preset: dict[str, Any]) -> str:
+        """词组短语模式：按生成模式的忽略词逐个丢短语，其余原样保留。
+
+        自然语言描述不做规则拆句过滤（会切坏句子），靠提示词约束；
+        词组短语本身就是逗号分隔，能安全地逐项过滤。
+        """
+        text = str(parsed.get("description") or "").strip()
+        if str(config.get("output_mode") or "") != "phrases" or not text:
+            return text
+        subject_filter = config.get("subject_filter") or {}
+        extra_keywords: list[str] = []
+        strength = ""
+        if isinstance(subject_filter, dict) and subject_filter.get("enabled"):
+            extra_keywords = [str(word) for word in (subject_filter.get("keywords") or [])]
+            strength = str(subject_filter.get("strength") or "")
+        pieces = [piece.strip() for piece in re.split(r"[,，、;；\n]+", text) if piece.strip()]
+        if not pieces:
+            return ""
+        allowed = set(filter_tags(pieces, preset=preset, strength=strength,
+                                  extra_keywords=extra_keywords))
+        out: list[str] = []
+        seen: set[str] = set()
+        for piece in pieces:
+            key = normalize_tag(piece)
+            if key not in allowed or key in seen:
+                continue
+            seen.add(key)
+            out.append(piece)
+        # 描述语言决定分隔符：英文短语用英文逗号，中文（含中英混合的默认描述）用中文逗号。
+        separator = ", " if str(config.get("language") or "") == "en" else "，"
+        return separator.join(out)
 
     @staticmethod
     def _annotation_from_reusable(reusable: dict[str, Any], item: dict[str, Any],

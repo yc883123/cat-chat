@@ -69,9 +69,15 @@ class LabelerService:
         return {
             "presets": preset_list(),
             "output_modes": [
-                {"id": "keywords", "label": "只要标签"},
-                {"id": "description", "label": "只要描述"},
-                {"id": "both", "label": "标签 + 描述"},
+                {"id": "keywords", "label": "标签（逗号分隔的关键词）"},
+                {"id": "phrases", "label": "词组短语（逗号分隔的短句）"},
+                {"id": "description", "label": "自然语言（完整句子）"},
+                {"id": "both", "label": "标签 + 自然语言"},
+            ],
+            "languages": [
+                {"id": "mixed", "label": "中英混合（标签英文 / 描述中文）"},
+                {"id": "zh", "label": "中文"},
+                {"id": "en", "label": "英文"},
             ],
             "limits": {
                 "max_batch_images": MAX_BATCH_IMAGES,

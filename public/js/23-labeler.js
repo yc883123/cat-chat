@@ -199,7 +199,7 @@ async function ensurePresets() {
     }
     renderPresetDescription();
   } catch (error) {
-    setHint(`打标预设读取失败：${error.message}`, true);
+    setHint(`生成模式读取失败：${error.message}`, true);
   }
 }
 
@@ -207,7 +207,14 @@ function renderPresetDescription() {
   const node = $("#labelerPresetDesc");
   if (!node) return;
   const preset = labeler.presets.find((row) => row.id === labeler.presetId);
-  node.textContent = preset ? preset.description : "";
+  if (!preset) {
+    node.textContent = "";
+    return;
+  }
+  // 口径固定为「选什么就忽略什么」：先把要忽略的写清楚，再补说明。
+  node.textContent = preset.ignored
+    ? `描述会忽略：${preset.ignored}。${preset.description || ""}`
+    : (preset.description || "");
 }
 
 async function ensureModels() {
@@ -536,6 +543,7 @@ function collectConfig() {
   return {
     engine: "provider",
     output_mode: $("#labelerOutputMode")?.value || "keywords",
+    language: $("#labelerLanguage")?.value || "mixed",
     preset,
     model_key: String(providerSelect?.value || ""),
     model_name: String(modelSelect?.value || ""),
@@ -545,7 +553,7 @@ function collectConfig() {
     concurrency: Number($("#labelerConcurrency")?.value || 1),
     retry_limit: Number($("#labelerRetryLimit")?.value || 2),
     timeout_seconds: Number($("#labelerTimeout")?.value || 90),
-    prompt_version: 1,
+    prompt_version: 2,
   };
 }
 
@@ -782,7 +790,9 @@ function renderBatches() {
     const bits = [`${Number(progress.done || 0)}/${Number(progress.total || 0)} 完成`];
     if (Number(progress.failed || 0)) bits.push(`失败 ${progress.failed}`);
     if (Number(progress.uncertain || 0)) bits.push(`不确定 ${progress.uncertain}`);
-    bits.push(String(task.preset || ""));
+    // 批次历史显示用户能看懂的生成模式名，不暴露 face_lora 这类内部 ID。
+    const preset = labeler.presets.find((row) => row.id === task.preset);
+    bits.push(preset?.label || String(task.preset || ""));
     meta.textContent = bits.filter(Boolean).join(" · ");
     button.append(top, meta);
     return button;

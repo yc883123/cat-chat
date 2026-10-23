@@ -3524,6 +3524,15 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 }
 .labeler-prompt-field textarea { resize: vertical; }
 .labeler-preset-desc { margin: 0; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.labeler-mode-help {
+  border: 1px solid var(--line); border-radius: var(--r-md); padding: 6px 10px;
+  font-size: 11.5px; color: var(--muted); line-height: 1.6;
+}
+.labeler-mode-help > summary { cursor: pointer; font-size: 12px; color: var(--text); }
+.labeler-mode-help[open] { background: var(--surface-2); }
+.labeler-mode-help p { margin: 6px 0 0; }
+.labeler-mode-help ul { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 2px; }
+.labeler-mode-help strong { color: var(--text); }
 .labeler-advanced { border: 1px solid var(--line); border-radius: var(--r-md); padding: 8px 10px; display: grid; gap: 8px; }
 .labeler-advanced > summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
 .labeler-advanced[open] > summary { color: var(--text); }

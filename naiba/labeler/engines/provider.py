@@ -24,30 +24,70 @@ _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.S)
 _FENCE_RE = re.compile(r"^```[a-zA-Z0-9_-]*\s*|\s*```$", re.S)
 
 
+_LANGUAGE_RULES = {
+    "mixed": "输出语言：标签用小写英文名词短语（多个词用空格），description 用中文。",
+    "en": "输出语言：全部用英文。标签用小写英文名词短语（多个词用空格），description 也用英文。",
+    "zh": "输出语言：全部用中文。标签用中文名词短语，description 也用中文（品牌名、专有名词可保留原文）。",
+}
+
+
+def _language_rule(language: str) -> str:
+    return _LANGUAGE_RULES.get(str(language or ""), _LANGUAGE_RULES["mixed"])
+
+
+def _mode_rule(output_mode: str, language: str) -> str:
+    if output_mode == "keywords":
+        return '输出形式：只要标签。description 字段固定输出空字符串 ""。'
+    if output_mode == "phrases":
+        if str(language) == "en":
+            return (
+                "输出形式：词组短语。把画面内容写成 6-15 个用英文逗号分隔的英文短语，"
+                "短语是名词短语，不要完整句子、不要句号、不要编号。"
+                'tags 字段固定输出空数组 []，短语全部写进 description。'
+            )
+        return (
+            "输出形式：词组短语。把画面内容写成 6-15 个用中文逗号分隔的短语，"
+            "短语是名词短语，不要完整句子、不要句号、不要编号。"
+            'tags 字段固定输出空数组 []，短语全部写进 description。'
+        )
+    if output_mode == "description":
+        return (
+            "输出形式：自然语言。tags 字段固定输出空数组 []，"
+            "description 写 40-120 字（英文为 40-120 词）的连贯描述。"
+        )
+    return (
+        "输出形式：标签 + 自然语言描述。description 写 40-120 字"
+        "（英文为 40-120 词）的连贯描述，覆盖主体、构图、风格与光线。"
+    )
+
+
 def build_prompt(config: dict[str, Any], preset: dict[str, Any]) -> str:
-    """把侧重 + 用户补充要求拼成一条稳定的指令（结果影响 ``config_fingerprint``）。"""
+    """把生成模式（要忽略什么）+ 输出形式 + 语言 + 补充要求拼成一条稳定指令。
+
+    口径与 LoRA 训练一致：**描述里不包含的内容，才是模型要学习的内容**；
+    所以预设段落写成「必须忽略」，而不是「重点描述」。
+    """
     output_mode = str(config.get("output_mode") or "keywords")
+    language = str(config.get("language") or "mixed")
     max_tags = int(config.get("max_tags") or 24)
     threshold = float(config.get("confidence_threshold") or 0.0)
     parts = [
         "你是图片标注助手。请观察这张图，只输出一个 JSON 对象，不要输出任何解释或代码块标记。",
-        'JSON 结构：{"tags": [{"tag": "英文名词短语", "confidence": 0.0到1.0之间的小数}], '
-        '"description": "一句中文画面描述"}',
+        'JSON 结构：{"tags": [{"tag": "标签文本", "confidence": 0.0到1.0之间的小数}], '
+        '"description": "描述文本"}',
         f"标签最多 {max_tags} 个；confidence 低于 {threshold:g} 的标签不要输出。"
-        "标签用小写英文名词短语，多个词用空格，不要编号、不要整句。",
+        "标签不要编号、不要整句。",
+        _language_rule(language),
+        _mode_rule(output_mode, language),
     ]
-    if output_mode == "keywords":
-        parts.append('description 字段固定输出空字符串 ""（本期只要标签）。')
-    elif output_mode == "description":
-        parts.append("tags 字段固定输出空数组 []（本期只要描述），description 写 40-120 字。")
-    else:
-        parts.append("description 写 40-120 字，覆盖主体、构图、风格与光线。")
-    subject = preset.get("custom_prompt") if isinstance(preset, dict) else ""
-    if subject:
-        parts.append("打标侧重：" + str(subject))
+    ignore = ""
+    if isinstance(preset, dict):
+        ignore = str(preset.get("ignore_prompt") or preset.get("custom_prompt") or "").strip()
+    if ignore:
+        parts.append("生成模式（以下内容必须从标签和描述里省略）：" + ignore)
     extra = str(config.get("custom_prompt") or "").strip()
     if extra:
-        parts.append("用户补充要求（优先满足）：" + extra)
+        parts.append("用户补充要求（优先满足，可点名要忽略的元素）：" + extra)
     return "\n".join(parts)
 
 

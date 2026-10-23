@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from naiba.core.paths import normalized_path_key  # noqa: E402
 from naiba.labeler import LABELER_ITEM_STATES  # noqa: E402
 from naiba.labeler.db import LabelerDB  # noqa: E402
-from naiba.labeler.engines.provider import parse_response  # noqa: E402
+from naiba.labeler.engines.provider import build_prompt, parse_response  # noqa: E402
 from naiba.labeler.export import LabelerExportError, render, write_export  # noqa: E402
 from naiba.labeler.images import (  # noqa: E402
     MAX_BATCH_IMAGES,
@@ -115,6 +115,7 @@ def _base_config(**overrides):
     config = {
         "engine": "provider",
         "output_mode": "keywords",
+        "language": "mixed",
         "preset": DEFAULT_PRESET,
         "model_key": "online:stub",
         "model_name": "stub-model",
@@ -125,7 +126,7 @@ def _base_config(**overrides):
         "concurrency": 1,
         "retry_limit": 1,
         "timeout_seconds": 90,
-        "prompt_version": 1,
+        "prompt_version": 2,
     }
     config.update(overrides)
     return config
@@ -222,23 +223,69 @@ class LabelerConfigTests(unittest.TestCase):
         self.assertNotEqual(a["config_fingerprint"], c["config_fingerprint"])
 
     def test_preset_ids_are_all_known(self):
-        self.assertEqual(len(set(PRESET_IDS)), 6)
-        self.assertEqual(len(preset_list()), 6)
+        self.assertEqual(len(set(PRESET_IDS)), 7)
+        self.assertEqual(len(preset_list()), 7)
         with self.assertRaises(ValueError):
             get_preset("nope")
 
+    def test_rejects_unknown_language_and_phrase_mode_is_valid(self):
+        with self.assertRaises(LabelerTaskError):
+            normalize_config(self.app, _base_config(language="fr"))
+        config = normalize_config(self.app, _base_config(output_mode="phrases", language="en"))
+        self.assertEqual(config["output_mode"], "phrases")
+        self.assertEqual(config["language"], "en")
+
+    def test_language_changes_fingerprint(self):
+        zh = normalize_config(self.app, _base_config(language="zh"))
+        en = normalize_config(self.app, _base_config(language="en"))
+        self.assertNotEqual(zh["config_fingerprint"], en["config_fingerprint"])
+
 
 class LabelerPresetAndParseTests(unittest.TestCase):
-    def test_filter_drops_noise_and_duplicates(self):
+    def test_filter_drops_ignored_domain_and_duplicates(self):
+        # 选「画风」= 描述忽略画风：模型仍输出风格词时直接丢弃。
         preset = get_preset("style_lora")
-        tags = ["Oil painting", "oil painting", "high quality", "watercolor", "nice"]
+        tags = ["Woman", "woman", "red dress", "high quality", "oil painting", "watercolor"]
         out = filter_tags(tags, preset=preset)
-        self.assertEqual(out, ["oil painting", "watercolor"])
+        self.assertEqual(out, ["woman", "red dress"])
+
+    def test_face_preset_drops_face_words(self):
+        out = filter_tags(["smile", "blue eyes", "red dress", "妆容"],
+                          preset=get_preset("face_lora"))
+        self.assertEqual(out, ["red dress"])
 
     def test_subject_filter_extra_keywords(self):
         out = filter_tags(["cat", "dog", "person"], preset=get_preset("object_lora"),
                           extra_keywords=["dog"], strength="medium")
         self.assertNotIn("dog", out)
+
+    def test_prompt_uses_ignore_semantics(self):
+        # 口径：选「面部」= 描述忽略面部，而不是重点描述面部。
+        preset = get_preset("face_lora")
+        prompt = build_prompt(_base_config(preset="face_lora", output_mode="description"), preset)
+        self.assertIn("生成模式（以下内容必须从标签和描述里省略）", prompt)
+        self.assertIn("忽略面部", prompt)
+        self.assertNotIn("重点标出", prompt)
+
+    def test_prompt_general_preset_has_no_ignore_block(self):
+        prompt = build_prompt(_base_config(preset="general"), get_preset("general"))
+        self.assertNotIn("生成模式（以下内容必须从标签和描述里省略）", prompt)
+
+    def test_prompt_language_and_phrase_mode(self):
+        prompt = build_prompt(
+            _base_config(preset="general", output_mode="phrases", language="en"),
+            get_preset("general"),
+        )
+        self.assertIn("全部用英文", prompt)
+        self.assertIn("词组短语", prompt)
+        zh = build_prompt(
+            _base_config(preset="general", output_mode="description", language="zh"),
+            get_preset("general"),
+        )
+        self.assertIn("全部用中文", zh)
+        mixed = build_prompt(_base_config(preset="general"), get_preset("general"))
+        self.assertIn("标签用小写英文名词短语", mixed)
+        self.assertIn("description 用中文", mixed)
 
     def test_parse_json_with_code_fence(self):
         parsed = parse_response('```json\n{"tags":[{"tag":"cat","confidence":0.9}],"description":"d"}\n```')

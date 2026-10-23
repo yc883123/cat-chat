@@ -27,15 +27,17 @@ from naiba.labeler.images import stable_item_id, validate_image_refs
 from naiba.labeler.presets import DEFAULT_PRESET, PRESET_IDS
 from naiba.labeler.runner import DEFAULT_CONCURRENCY, VALIDATED_CONCURRENCY
 
-VALID_OUTPUT_MODES = ("keywords", "description", "both")
+VALID_OUTPUT_MODES = ("keywords", "phrases", "description", "both")
+# 输出语言：mixed = 标签英文 + 描述中文（历史默认）；zh / en = 标签与描述统一语言。
+VALID_LANGUAGES = ("mixed", "zh", "en")
 ALLOWED_CONFIG_KEYS = frozenset({
-    "engine", "output_mode", "preset", "model_key", "model_name",
+    "engine", "output_mode", "language", "preset", "model_key", "model_name",
     "confidence_threshold", "max_tags", "custom_prompt", "subject_filter",
     "concurrency", "retry_limit", "timeout_seconds", "prompt_version",
 })
 # 只进指纹的「影响结果」字段：换并发/重试次数/超时不该改变结果身份。
 FINGERPRINT_KEYS = (
-    "engine", "output_mode", "preset", "model_key", "model_name",
+    "engine", "output_mode", "language", "preset", "model_key", "model_name",
     "confidence_threshold", "max_tags", "custom_prompt", "subject_filter", "prompt_version",
 )
 VALID_STRENGTHS = ("low", "medium", "high")
@@ -79,7 +81,10 @@ def normalize_config(app: Any, raw: Any) -> dict[str, Any]:
         raise LabelerTaskError(f"未知的打标引擎：{engine}")
     output_mode = str(raw.get("output_mode") or "keywords").strip()
     if output_mode not in VALID_OUTPUT_MODES:
-        raise LabelerTaskError("output_mode 必须是 keywords / description / both")
+        raise LabelerTaskError("output_mode 必须是 keywords / phrases / description / both")
+    language = str(raw.get("language") or "mixed").strip().lower()
+    if language not in VALID_LANGUAGES:
+        raise LabelerTaskError("language 必须是 mixed / zh / en")
     preset = str(raw.get("preset") or DEFAULT_PRESET).strip() or DEFAULT_PRESET
     if preset not in PRESET_IDS:
         raise LabelerTaskError(f"未知的打标侧重：{preset}")
@@ -104,7 +109,7 @@ def normalize_config(app: Any, raw: Any) -> dict[str, Any]:
         retry_limit = int(raw.get("retry_limit", 2))
         timeout_seconds = int(raw.get("timeout_seconds", 90))
         concurrency = int(raw.get("concurrency", DEFAULT_CONCURRENCY))
-        prompt_version = int(raw.get("prompt_version", 1))
+        prompt_version = int(raw.get("prompt_version", 2))
     except (TypeError, ValueError):
         raise LabelerTaskError("max_tags / retry_limit / timeout_seconds / concurrency 必须是整数") from None
     if not 1 <= max_tags <= 64:
@@ -121,6 +126,7 @@ def normalize_config(app: Any, raw: Any) -> dict[str, Any]:
     config = {
         "engine": engine,
         "output_mode": output_mode,
+        "language": language,
         "preset": preset,
         "model_key": model_key,
         "model_name": model_name,

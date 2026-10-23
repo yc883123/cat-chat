@@ -408,11 +408,41 @@
               </div>
 
               <div class="labeler-field-row">
-                <label>打标侧重
-                  <select id="labelerPreset" aria-label="打标侧重"></select>
+                <label>生成模式（选什么就忽略什么）
+                  <select id="labelerPreset" aria-label="生成模式"></select>
                 </label>
               </div>
               <p class="labeler-preset-desc" id="labelerPresetDesc"></p>
+              <details class="labeler-mode-help" id="labelerModeHelp">
+                <summary>为什么「选什么就忽略什么」？</summary>
+                <p>反推提示词是给图片生成文字描述，这些描述会告诉模型「这张图里有什么」。
+                  训练 LoRA 时，描述里<strong>不包含</strong>的内容，才是模型要学习的对象。</p>
+                <ul>
+                  <li>训练面部 LoRA：选「忽略面部」，描述会略过五官、妆容和表情，面部留给模型学。</li>
+                  <li>训练画风 LoRA：选「忽略画风」，描述会略过媒介、笔触、色调与光影。</li>
+                  <li>训练场景 LoRA：选「忽略场景」，描述会略过地点、天气与背景环境。</li>
+                  <li>要忽略别的东西：在「高级设置 → 补充要求」里点名，例如「忽略红色手提包」。</li>
+                </ul>
+                <p>核心原则：描述里不写什么，模型就学什么。只想完整描述画面，选「通用描述」。</p>
+              </details>
+
+              <div class="labeler-field-row">
+                <label>输出形式
+                  <select id="labelerOutputMode" aria-label="输出形式">
+                    <option value="keywords">标签</option>
+                    <option value="phrases">词组短语</option>
+                    <option value="description">自然语言</option>
+                    <option value="both">标签 + 自然语言</option>
+                  </select>
+                </label>
+                <label>输出语言
+                  <select id="labelerLanguage" aria-label="输出语言">
+                    <option value="mixed">中英混合（标签英文 / 描述中文）</option>
+                    <option value="zh">中文</option>
+                    <option value="en">英文</option>
+                  </select>
+                </label>
+              </div>
 
               <div class="labeler-field-row">
                 <label>模型配置
@@ -426,38 +456,31 @@
               <details class="labeler-advanced" id="labelerAdvanced">
                 <summary>高级设置</summary>
                 <div class="labeler-field-row">
-                  <label>输出形式
-                    <select id="labelerOutputMode" aria-label="输出形式">
-                      <option value="keywords">只要标签</option>
-                      <option value="description">只要描述</option>
-                      <option value="both">标签 + 描述</option>
-                    </select>
-                  </label>
                   <label>最多标签数
                     <input id="labelerMaxTags" type="number" min="1" max="64" step="1" value="24">
                   </label>
-                </div>
-                <div class="labeler-field-row">
                   <label>置信度门槛
                     <input id="labelerConfidence" type="number" min="0" max="1" step="0.05" value="0.35">
                   </label>
+                </div>
+                <div class="labeler-field-row">
                   <label>每张超时（秒）
                     <input id="labelerTimeout" type="number" min="15" max="600" step="5" value="90">
                   </label>
-                </div>
-                <div class="labeler-field-row">
                   <label>失败重试次数
                     <input id="labelerRetryLimit" type="number" min="0" max="5" step="1" value="2">
                   </label>
+                </div>
+                <div class="labeler-field-row">
                   <label>同时处理
                     <select id="labelerConcurrency" aria-label="同时处理">
                       <option value="1">1 张（稳妥）</option>
                     </select>
                   </label>
                 </div>
-                <label class="labeler-prompt-field">补充要求（可选）
+                <label class="labeler-prompt-field">补充要求（可点名要忽略的元素）
                   <textarea id="labelerCustomPrompt" rows="2"
-                            placeholder="例如：一律用英文，名词短语，不要句子"></textarea>
+                            placeholder="例如：忽略红色手提包；或：描述控制在 60 字以内"></textarea>
                 </label>
               </details>
 

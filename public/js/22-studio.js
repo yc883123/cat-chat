@@ -350,6 +350,9 @@ export function openStudioView() {
   if (!sidebarDesktop()) closeSidebar();
   void refreshStudio();
   if (studio.page === "library" && studio.pane === "form") focusStudioInput();
+  // 恢复的功能页没有经历「切换」，订阅者（各页的轮询与首屏刷新）不知道页面
+  // 已可见——补发一次当前页事件，语义与其他切换一致（重复激活 = 重新校准）。
+  emitStudioPage(studio.page, { refresh: true });
 }
 
 export function closeStudioView() {

@@ -26,6 +26,8 @@ const comfyui = {
   importing: false,
   submitting: false,
   url: "",
+  modelCandidates: null,   // 模型候选缓存 {checkpoints, loras}；null = 还没拉过
+  deleting: new Set(),     // 正在「取消并删除」的任务 id，防重复提交
 };
 
 // ============================================================
@@ -53,7 +55,16 @@ export function bindComfyuiEvents() {
   $("#comfyuiImportFile")?.addEventListener("change", onImportFile);
   $("#comfyuiSubmit")?.addEventListener("click", () => void submitTask());
   $("#comfyuiClearTasks")?.addEventListener("click", () => void clearFinishedTasks());
+  $("#comfyuiParamsSave")?.addEventListener("click", () => void saveParamsConfig());
+  $("#comfyuiParamsCancel")?.addEventListener("click", closeParamsDialog);
+  $("#comfyuiParamsPicker")?.addEventListener("change", () => {
+    const error = $("#comfyuiParamsError");
+    if (error) error.textContent = "";
+  });
   $("#comfyuiWorkflowList")?.addEventListener("click", onWorkflowListClick);
+  $("#comfyuiParamForm")?.addEventListener("click", (event) => {
+    if (event.target.closest("[data-comfyui-edit-params]")) openParamsDialog();
+  });
   $("#comfyuiTaskList")?.addEventListener("click", onTaskListClick);
   $("#comfyuiOutputGrid")?.addEventListener("click", onOutputGridClick);
   $("#comfyuiPanes")?.addEventListener("click", onPaneClick);
@@ -63,6 +74,7 @@ async function enterPage() {
   void refreshHealth();
   void refreshWorkflows();
   void refreshTasks();
+  void loadModelCandidates();
   renderParamForm();
   scheduleBackgroundRefresh();
 }
@@ -265,19 +277,57 @@ async function selectWorkflow(id) {
   renderParamForm();
 }
 
-// 槽位渲染顺序：正向提示词 → 负向提示词 → 图片 → 其余（保持导入扫描顺序）。
-const ROLE_ORDER = { positive_prompt: 0, negative_prompt: 1, image: 2 };
-const ROLE_LABELS = { positive_prompt: "正向提示词", negative_prompt: "负向提示词" };
+// 槽位渲染顺序：正向提示词 → 负向提示词 → 模型 → LoRA → 图片 → 其余（保持导入扫描顺序）。
+const ROLE_ORDER = { positive_prompt: 0, negative_prompt: 1, checkpoint: 2, lora: 3, image: 4 };
+const ROLE_LABELS = {
+  positive_prompt: "正向提示词",
+  negative_prompt: "负向提示词",
+  sampler: "采样器",
+  scheduler: "调度器",
+  checkpoint: "模型（Checkpoint）",
+  lora: "LoRA 模型",
+};
+
+// 主表单默认显示的常用参数：提示词、种子、步数、采样器、调度器、模型、LoRA。
+// 其余已识别的参数留在数据里，用户可从「编辑参数」加进主表单。
+const DEFAULT_VISIBLE_ROLES = new Set([
+  "positive_prompt", "negative_prompt", "sampler", "scheduler", "checkpoint", "lora",
+]);
 
 function orderedSlots(slots) {
   return slots
     .map((slot, index) => ({ slot, index }))
     .sort((a, b) => {
-      const rankA = ROLE_ORDER[a.slot.role] ?? 3;
-      const rankB = ROLE_ORDER[b.slot.role] ?? 3;
+      const rankA = ROLE_ORDER[a.slot.role] ?? 5;
+      const rankB = ROLE_ORDER[b.slot.role] ?? 5;
       return rankA !== rankB ? rankA - rankB : a.index - b.index;
     })
     .map((item) => item.slot);
+}
+
+function slotKey(slot) {
+  return `${slot.node_id}|${slot.field_name}`;
+}
+
+function defaultVisibleKeys(slots) {
+  const set = new Set();
+  for (const slot of slots) {
+    if (DEFAULT_VISIBLE_ROLES.has(slot.role) || slot.field_type === "seed"
+        || slot.field_name === "steps") {
+      set.add(slotKey(slot));
+    }
+  }
+  return set;
+}
+
+// 主表单可见参数：按工作流保存过就用保存的；没保存过用常用参数默认集。
+function visibleKeySet() {
+  const slots = comfyui.detail?.params || [];
+  const stored = comfyui.detail?.visible_params;
+  if (Array.isArray(stored)) {
+    return new Set(stored.map((item) => `${item.node_id}|${item.field_name}`));
+  }
+  return defaultVisibleKeys(slots);
 }
 
 function renderParamForm() {
@@ -293,20 +343,159 @@ function renderParamForm() {
     form.append(empty);
     return;
   }
-  const slots = comfyui.detail.params || [];
+  const head = document.createElement("div");
+  head.className = "comfyui-param-heading-row";
   const heading = document.createElement("p");
   heading.className = "comfyui-param-heading";
   heading.textContent = comfyui.detail.name || "未命名工作流";
-  form.append(heading);
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.className = "control-button tiny";
+  edit.dataset.comfyuiEditParams = "1";
+  edit.textContent = "编辑参数";
+  edit.title = "选择要在主表单显示的参数";
+  head.append(heading, edit);
+  form.append(head);
+  const visible = visibleKeySet();
+  const slots = orderedSlots(comfyui.detail.params || []).filter(
+    (slot) => visible.has(slotKey(slot)));
   if (!slots.length) {
     const note = document.createElement("p");
     note.className = "comfyui-empty";
     note.textContent = "这份工作流没有可调的参数，直接点「开始生成」即可。";
     form.append(note);
   }
-  for (const slot of orderedSlots(slots)) {
+  for (const slot of slots) {
     form.append(renderSlot(slot));
   }
+}
+
+// ---- 编辑参数 ----
+
+function openParamsDialog() {
+  if (!comfyui.detail) return;
+  const dialog = $("#comfyuiParamsDialog");
+  if (!dialog) return;
+  renderParamsPicker();
+  const error = $("#comfyuiParamsError");
+  if (error) error.textContent = "";
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+function closeParamsDialog() {
+  const dialog = $("#comfyuiParamsDialog");
+  if (!dialog) return;
+  if (typeof dialog.close === "function") dialog.close();
+  else dialog.removeAttribute("open");
+}
+
+function renderParamsPicker() {
+  const picker = $("#comfyuiParamsPicker");
+  if (!picker) return;
+  picker.textContent = "";
+  const checked = visibleKeySet();
+  for (const slot of orderedSlots(comfyui.detail?.params || [])) {
+    const row = document.createElement("label");
+    row.className = "comfyui-params-item";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.dataset.paramKey = slotKey(slot);
+    box.checked = checked.has(slotKey(slot));
+    const text = document.createElement("span");
+    const roleLabel = ROLE_LABELS[slot.role];
+    text.textContent = roleLabel ? `${roleLabel} · ${slot.label}` : slot.label;
+    row.append(box, text);
+    picker.append(row);
+  }
+}
+
+async function saveParamsConfig() {
+  if (!comfyui.detail) return;
+  const picker = $("#comfyuiParamsPicker");
+  if (!picker) return;
+  const visible = [];
+  for (const box of picker.querySelectorAll("input[type=checkbox]")) {
+    if (box.checked && box.dataset.paramKey) {
+      const [nodeId, ...rest] = String(box.dataset.paramKey).split("|");
+      visible.push({ node_id: nodeId, field_name: rest.join("|") });
+    }
+  }
+  const button = $("#comfyuiParamsSave");
+  if (button) button.disabled = true;
+  try {
+    const payload = await api(
+      `/api/comfyui/workflows/${encodeURIComponent(comfyui.detail.id)}/params`,
+      { method: "POST", body: { visible } });
+    comfyui.detail = { ...comfyui.detail, visible_params: payload.visible_params || visible };
+    closeParamsDialog();
+    renderParamForm();
+    toast("参数显示已保存，这份工作流下次打开也照此显示");
+  } catch (error) {
+    const line = $("#comfyuiParamsError");
+    if (line) line.textContent = String(error.message || "保存失败");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+// ---- 模型候选（Checkpoint / LoRA）----
+
+async function loadModelCandidates(force = false) {
+  if (!force && comfyui.modelCandidates !== null) return;
+  try {
+    const payload = await api("/api/comfyui/models");
+    comfyui.modelCandidates = {
+      checkpoints: Array.isArray(payload.models) ? payload.models : [],
+      loras: Array.isArray(payload.loras) ? payload.loras : [],
+    };
+  } catch (_) {
+    // 候选拿不到就只留自由输入，不阻断编辑
+    comfyui.modelCandidates = { checkpoints: [], loras: [] };
+  }
+}
+
+function modelCandidatesFor(role) {
+  const cache = comfyui.modelCandidates;
+  if (!cache) return [];
+  return role === "lora" ? (cache.loras || []) : (cache.checkpoints || []);
+}
+
+// 给模型输入框挂可搜索候选下拉；候选不可用时静默，自由输入不受影响。
+function attachModelCombo(input, wrap, role) {
+  const list = document.createElement("div");
+  list.className = "comfyui-combo-list";
+  list.hidden = true;
+  wrap.append(list);
+  const renderMatches = () => {
+    const text = String(input.value || "").trim().toLowerCase();
+    const matches = modelCandidatesFor(role)
+      .filter((name) => !text || name.toLowerCase().includes(text))
+      .filter((name) => name !== input.value)
+      .slice(0, 30);
+    list.textContent = "";
+    if (!matches.length) {
+      list.hidden = true;
+      return;
+    }
+    for (const name of matches) {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "comfyui-combo-option";
+      option.textContent = name;
+      option.addEventListener("mousedown", (event) => {
+        // mousedown 抢在 blur 前：blur 会先收起下拉。
+        event.preventDefault();
+        input.value = name;
+        list.hidden = true;
+      });
+      list.append(option);
+    }
+    list.hidden = false;
+  };
+  input.addEventListener("focus", renderMatches);
+  input.addEventListener("input", renderMatches);
+  input.addEventListener("blur", () => { list.hidden = true; });
 }
 
 function renderSlot(slot) {
@@ -316,7 +505,7 @@ function renderSlot(slot) {
   title.className = "comfyui-param-label";
   const roleLabel = ROLE_LABELS[slot.role];
   if (roleLabel) {
-    // 主提示词槽位：角色名做主标签，原始槽位名退为备注。
+    // 主提示词等有角色的槽位：角色名做主标签，原始槽位名退为备注。
     title.textContent = roleLabel;
     title.title = slot.label || "";
   } else {
@@ -348,10 +537,11 @@ function renderSlot(slot) {
     wrap.append(input);
     return wrap;
   }
-  if (roleLabel) {
-    // 提示词是多行文本：单行 input 没法正常编辑长提示词。
+  if (slot.role === "positive_prompt" || slot.role === "negative_prompt") {
+    // 提示词是多行文本：单行 input 没法正常编辑长提示词；正向框给足高度，
+    // 用户还能拖动下缘继续调。其他有角色的槽位（采样器/调度器/模型）走单行。
     const area = document.createElement("textarea");
-    area.rows = slot.role === "positive_prompt" ? 5 : 3;
+    area.rows = slot.role === "positive_prompt" ? 9 : 5;
     area.dataset.comfyuiSlot = key;
     area.value = slot.default ?? "";
     area.spellcheck = false;
@@ -367,6 +557,14 @@ function renderSlot(slot) {
     input.value = "";
   } else {
     input.value = slot.default ?? "";
+  }
+  if (slot.role === "checkpoint" || slot.role === "lora") {
+    input.placeholder = slot.role === "lora"
+      ? "从 ComfyUI LoRA 里选，或直接输入文件名"
+      : "从 ComfyUI 模型里选，或直接输入文件名";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    attachModelCombo(input, wrap, slot.role);
   }
   wrap.append(input);
   return wrap;
@@ -440,6 +638,8 @@ function collectOverrides() {
   const overrides = [];
   for (const slot of comfyui.detail?.params || []) {
     const key = `${slot.node_id}|${slot.field_name}`;
+    // 只收主表单里渲染出来的输入：隐藏参数没有输入框，自然不会提交覆盖值，
+    // 生成时按工作流里原本的值执行。
     const input = document.querySelector(`[data-comfyui-slot="${CSS.escape(key)}"]`);
     if (!input) continue;
     const text = String(input.value ?? "").trim();
@@ -563,19 +763,64 @@ async function pollActiveTask() {
   } catch (_) { /* 下个周期重试 */ }
 }
 
+// 卡片指纹：状态/进度/错误/时间任一变化才算「变了」，指纹相同就保留现有 DOM，
+// 避免每次轮询整块重建造成闪屏。
+function taskFingerprint(row) {
+  const progress = row.progress || {};
+  return JSON.stringify([
+    row.status || "", row.detail || "", row.error || "",
+    Number(progress.done || 0), Number(progress.total || 0), Number(progress.failed || 0),
+    (row.result?.outputs || []).length,
+    Number(row.created_at || 0), Number(row.finished_at || 0),
+    Boolean(row.can_retry), Boolean(row.can_cancel),
+    comfyui.deleting.has(String(row.id || "")) ? "deleting" : "",
+  ]);
+}
+
 function renderTasks() {
   const list = $("#comfyuiTaskList");
   if (!list) return;
-  list.textContent = "";
-  if (!comfyui.tasks.length) {
-    const empty = document.createElement("p");
-    empty.className = "comfyui-empty";
-    empty.textContent = "还没有任务。选好工作流和参数后点「开始生成」。";
-    list.append(empty);
+  const rows = comfyui.tasks.slice(0, 12);
+  if (!rows.length) {
+    if (!list.dataset.empty) {
+      list.textContent = "";
+      list.dataset.empty = "1";
+      const empty = document.createElement("p");
+      empty.className = "comfyui-empty";
+      empty.textContent = "还没有任务。选好工作流和参数后点「开始生成」。";
+      list.append(empty);
+    }
     return;
   }
-  for (const row of comfyui.tasks.slice(0, 12)) {
-    list.append(renderTaskCard(row));
+  delete list.dataset.empty;
+  const existing = new Map();
+  for (const node of Array.from(list.children)) {
+    if (node.dataset?.taskId) existing.set(node.dataset.taskId, node);
+    else node.remove(); // 空态占位
+  }
+  const wanted = [];
+  for (const row of rows) {
+    const id = String(row.id || "");
+    const fingerprint = taskFingerprint(row);
+    let card = existing.get(id);
+    if (!card || card.dataset.fingerprint !== fingerprint) {
+      // 先摘掉旧卡片再放新的：map 引用被替换后旧节点不再被任何清理步骤覆盖。
+      card?.remove();
+      card = renderTaskCard(row);
+      card.dataset.taskId = id;
+      card.dataset.fingerprint = fingerprint;
+      existing.set(id, card);
+    }
+    wanted.push(id);
+  }
+  const wantedSet = new Set(wanted);
+  for (const [id, node] of existing) {
+    if (!wantedSet.has(id)) node.remove();
+  }
+  // 只在顺序真的变化时才重排：无变化轮询不触碰 DOM。
+  const currentOrder = Array.from(list.children).map((node) => node.dataset.taskId || "");
+  if (currentOrder.join("|") !== wanted.join("|")) {
+    for (const id of wanted) list.append(existing.get(id));
   }
 }
 
@@ -628,7 +873,12 @@ function renderTaskCard(row) {
   remove.type = "button";
   remove.className = "control-button tiny";
   remove.dataset.comfyuiDeleteTask = row.id;
-  remove.textContent = "删除";
+  if (comfyui.deleting.has(String(row.id || ""))) {
+    remove.disabled = true;
+    remove.textContent = "正在删除…";
+  } else {
+    remove.textContent = "删除";
+  }
   actions.append(remove);
   card.append(actions);
   return card;
@@ -646,15 +896,35 @@ function statusText(row) {
   return map[row.status] || row.status || "";
 }
 
+// 时间显示口径：当天只报时分，跨天补上日期；时间戳缺失不显示。
+function formatTime(ms) {
+  const stamp = Number(ms || 0);
+  if (!stamp) return "";
+  const date = new Date(stamp);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (value) => String(value).padStart(2, "0");
+  const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  if (date.toDateString() === new Date().toDateString()) return clock;
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${clock}`;
+}
+
 function taskMetaText(row) {
   const progress = row.progress || {};
   const done = Number(progress.done || 0);
   const total = Number(progress.total || row.shots || 0);
   const failed = Number(progress.failed || 0);
-  const pieces = [`${done}/${total} 段`];
+  const pieces = [];
+  const created = formatTime(row.created_at);
+  if (created) pieces.push(`创建 ${created}`);
+  pieces.push(`${done}/${total} 段`);
   if (failed) pieces.push(`失败 ${failed} 段`);
   const outputs = (row.result?.outputs || []).length;
   if (outputs) pieces.push(`${outputs} 个产物`);
+  // 完成/失败/取消/中断都算结束：结束时刻标出这一轮什么时候停的。
+  const finished = formatTime(row.finished_at);
+  if (finished && row.status !== "queued" && row.status !== "running") {
+    pieces.push(`结束 ${finished}`);
+  }
   return pieces.join(" · ");
 }
 
@@ -687,20 +957,45 @@ async function onTaskListClick(event) {
   }
   const remove = event.target.closest("[data-comfyui-delete-task]");
   if (remove) {
-    if (!window.confirm("删除这条任务和它已保存的产物文件？")) return;
-    try {
-      await api("/api/comfyui/tasks", {
-        method: "DELETE",
-        body: { task_ids: [remove.dataset.comfyuiDeleteTask] },
-      });
-      if (comfyui.activeTaskId === remove.dataset.comfyuiDeleteTask) {
-        comfyui.activeTaskId = "";
-        stopPolling();
-      }
-      await refreshTasks();
-    } catch (error) {
-      toast(`删除失败：${error.message}`);
+    await deleteTaskFlow(remove.dataset.comfyuiDeleteTask, remove);
+  }
+}
+
+async function deleteTaskFlow(taskId, button) {
+  const id = String(taskId || "");
+  if (!id || comfyui.deleting.has(id)) return;
+  const row = comfyui.tasks.find((item) => String(item.id) === id);
+  const active = row ? isTaskActive(row) : false;
+  const confirmText = active
+    ? "这条任务还在排队或生成中。会先取消它，等它停下来再删除任务和已保存的产物文件。继续吗？"
+    : "删除这条任务和它已保存的产物文件？";
+  if (!window.confirm(confirmText)) return;
+  comfyui.deleting.add(id);
+  if (button) {
+    button.disabled = true;
+    button.textContent = "正在删除…";
+  }
+  try {
+    const payload = await api("/api/comfyui/tasks", {
+      method: "DELETE",
+      body: { task_ids: [id], cancel_active: true },
+    });
+    comfyui.deleting.delete(id);
+    const failed = Array.isArray(payload.failed) ? payload.failed : [];
+    if (failed.length) {
+      toast(`没有删成：${failed[0]?.reason || "任务没能停下来"}`);
+    } else {
+      toast(active ? "已取消并删除这条任务" : "已删除这条任务");
     }
+    if (comfyui.activeTaskId === id) {
+      comfyui.activeTaskId = "";
+      stopPolling();
+    }
+    await refreshTasks();
+  } catch (error) {
+    comfyui.deleting.delete(id);
+    toast(`删除失败：${error.message}`);
+    await refreshTasks();
   }
 }
 
@@ -708,7 +1003,11 @@ async function clearFinishedTasks() {
   if (!window.confirm("删除全部已结束的任务和它们的产物文件？")) return;
   try {
     const payload = await api("/api/comfyui/tasks", { method: "DELETE", body: {} });
-    toast(`已删除 ${payload.deleted || 0} 条任务${payload.skipped?.length ? `，${payload.skipped.length} 条正在执行被跳过` : ""}`);
+    const parts = [`已删除 ${payload.deleted || 0} 条任务`];
+    if (payload.skipped?.length) parts.push(`${payload.skipped.length} 条正在执行，已跳过`);
+    const failed = Array.isArray(payload.failed) ? payload.failed : [];
+    if (failed.length) parts.push(`${failed.length} 条删除失败：${failed[0]?.reason || ""}`);
+    toast(parts.join("；"));
     await refreshTasks();
   } catch (error) {
     toast(`删除失败：${error.message}`);
@@ -720,27 +1019,56 @@ async function clearFinishedTasks() {
 async function renderLatestOutputs() {
   const grid = $("#comfyuiOutputGrid");
   if (!grid) return;
-  const finished = comfyui.tasks.filter((row) => (row.result?.outputs || []).length);
-  const names = [];
-  let owner = "";
-  for (const row of finished) {
-    for (const name of row.result.outputs || []) {
-      if (names.length >= 24) break;
-      names.push(name);
-      owner = owner || row.id;
+  // 每个产物各自记着它的任务 id：不同任务的产物用各自的文件地址，
+  // 同一任务的多张图逐项全展示（上限沿用 24 张）。
+  const items = [];
+  for (const row of comfyui.tasks) {
+    for (const name of row.result?.outputs || []) {
+      if (items.length >= 24) break;
+      if (!row.id || !name) continue;
+      items.push({ taskId: String(row.id), name: String(name) });
     }
   }
-  grid.textContent = "";
-  grid.dataset.taskId = owner;
-  if (!names.length) {
-    const empty = document.createElement("p");
-    empty.className = "comfyui-empty";
-    empty.textContent = "还没有生成结果。提交任务后，出好的图会出现在这里。";
-    grid.append(empty);
+  const wanted = [];
+  const seen = new Set();
+  for (const item of items) {
+    const key = `${item.taskId}\u0000${item.name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    wanted.push({ key, item });
+  }
+  if (!wanted.length) {
+    if (!grid.dataset.empty) {
+      grid.textContent = "";
+      grid.dataset.empty = "1";
+      const empty = document.createElement("p");
+      empty.className = "comfyui-empty";
+      empty.textContent = "还没有生成结果。提交任务后，出好的图会出现在这里。";
+      grid.append(empty);
+    }
     return;
   }
-  for (const name of names) {
-    grid.append(renderOutputCard(owner, name));
+  delete grid.dataset.empty;
+  const existing = new Map();
+  for (const node of Array.from(grid.children)) {
+    if (node.dataset?.outputKey) existing.set(node.dataset.outputKey, node);
+    else node.remove(); // 空态占位
+  }
+  for (const { key, item } of wanted) {
+    if (!existing.has(key)) {
+      const card = renderOutputCard(item.taskId, item.name);
+      card.dataset.outputKey = key;
+      existing.set(key, card);
+    }
+  }
+  for (const [key, node] of existing) {
+    if (!seen.has(key)) node.remove();
+  }
+  // 只在产物集合或顺序变化时才重排：无变化轮询不触碰媒体元素（图片不重载）。
+  const wantedOrder = wanted.map((entry) => entry.key);
+  const currentOrder = Array.from(grid.children).map((node) => node.dataset.outputKey || "");
+  if (currentOrder.join("|") !== wantedOrder.join("|")) {
+    for (const key of wantedOrder) grid.append(existing.get(key));
   }
 }
 

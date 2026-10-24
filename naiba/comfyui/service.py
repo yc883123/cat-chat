@@ -12,6 +12,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
+from naiba.comfyui import PARAMS_SCHEMA_VERSION
 from naiba.comfyui import client
 from naiba.comfyui.jobs import ComfyUIJobManager, ComfyUITaskError
 from naiba.comfyui.params import scan_params
@@ -114,6 +115,30 @@ class ComfyUIService:
             }, 200
         return {"ok": True, "url": normalized, "reachable": True, **stats}, 200
 
+    def api_models(self) -> tuple[dict[str, Any], int]:
+        """Checkpoint / LoRA 模型候选（只读辅助选择）。
+
+        ComfyUI 不可达或解析失败时返回空候选加说明——候选只是辅助，
+        不阻断工作流编辑和提交（用户仍可手动输入模型名）。
+        """
+        base = client.normalize_base_url(self.app.config.data.get("comfyui_url"))
+        checkpoints = client.checkpoint_names(base)
+        loras = client.lora_names(base)
+        if checkpoints or loras:
+            return {
+                "ok": True,
+                "models": checkpoints,
+                "loras": loras,
+                "count": len(checkpoints) + len(loras),
+            }, 200
+        return {
+            "ok": False,
+            "models": [],
+            "loras": [],
+            "count": 0,
+            "error": "暂时拿不到 ComfyUI 的模型列表：请确认 ComfyUI 已启动、地址正确。仍可以手动输入模型名。",
+        }, 200
+
     # ---- 工作流库 ----
 
     def api_workflows(self) -> tuple[dict[str, Any], int]:
@@ -124,12 +149,12 @@ class ComfyUIService:
         entry = self.store.get_workflow(workflow_id)
         if entry is None:
             return {"error": "工作流不存在或已被删除"}, 404
-        # 懒升级：主提示词识别（role 字段）是后加的，旧导入的工作流详情时重扫一次
-        # 并落盘；幂等，没有 role 字段才触发。
-        params = entry.get("params") or []
-        if params and not any("role" in slot for slot in params if isinstance(slot, dict)):
+        # 懒升级：参数识别规则升级后（PARAMS_SCHEMA_VERSION 递增），旧导入的
+        # 工作流详情时重扫一次并落盘；幂等，版本一致才跳过。
+        if int(entry.get("params_version") or 1) != PARAMS_SCHEMA_VERSION:
             prompt = entry.get("prompt") if isinstance(entry.get("prompt"), dict) else {}
             entry["params"] = scan_params(prompt)
+            entry["params_version"] = PARAMS_SCHEMA_VERSION
             self.store.save_workflow(entry)
         return {"workflow": entry}, 200
 
@@ -154,11 +179,40 @@ class ComfyUIService:
             "name": name,
             "prompt": prompt,
             "params": scan_params(prompt),
+            "params_version": PARAMS_SCHEMA_VERSION,
             "created_at": stamp,
             "updated_at": stamp,
         }
         self.store.save_workflow(entry)
         return {"ok": True, "workflow": entry}, 201
+
+    def api_workflow_params_set(self, workflow_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """保存这份工作流在主表单显示哪些参数（按工作流粒度持久化）。
+
+        ``visible`` 是 ``{node_id, field_name}`` 数组，只认扫描出的槽位；
+        没列出的参数不显示也不提交覆盖值，生成时按工作流原本的值执行。
+        """
+        entry = self.store.get_workflow(workflow_id)
+        if entry is None:
+            return {"error": "工作流不存在或已被删除"}, 404
+        body = body if isinstance(body, dict) else {}
+        raw = body.get("visible")
+        if not isinstance(raw, list):
+            return {"error": "visible 必须是参数数组"}, 400
+        slot_keys = {(str(slot.get("node_id") or ""), str(slot.get("field_name") or ""))
+                     for slot in entry.get("params") or [] if isinstance(slot, dict)}
+        visible: list[dict[str, str]] = []
+        for index, item in enumerate(raw, 1):
+            if not isinstance(item, dict):
+                return {"error": f"第 {index} 条参数格式必须是对象"}, 400
+            key = (str(item.get("node_id") or ""), str(item.get("field_name") or ""))
+            if key not in slot_keys:
+                return {"error": f"参数 {key[0]} · {key[1]} 不是这份工作流的可编辑槽位"}, 400
+            visible.append({"node_id": key[0], "field_name": key[1]})
+        entry["visible_params"] = visible
+        entry["updated_at"] = int(time.time() * 1000)
+        self.store.save_workflow(entry)
+        return {"ok": True, "visible_params": visible}, 200
 
     def api_workflow_delete(self, workflow_id: str) -> tuple[dict[str, Any], int]:
         entry = self.store.get_workflow(workflow_id)
@@ -234,8 +288,13 @@ class ComfyUIService:
         return {"task": self.jobs.task(str(task.get("id") or "")) or task}, 201
 
     def api_tasks_delete(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        body = body if isinstance(body, dict) else {}
         try:
-            result = self.jobs.delete_tasks(body if isinstance(body, dict) else {})
+            cancel_timeout = min(60.0, max(1.0, float(body.get("cancel_timeout") or 15.0)))
+        except (TypeError, ValueError):
+            cancel_timeout = 15.0
+        try:
+            result = self.jobs.delete_tasks(body, cancel_timeout=cancel_timeout)
         except (OSError, ComfyUIStoreError) as exc:
             return {"error": f"删除任务失败：{exc}"}, 500
         return {"ok": True, **result}, 200

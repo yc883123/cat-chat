@@ -13,14 +13,14 @@ checkpoint（已完成段不重复提交），清掉 errors 后把任务放回�
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from naiba.comfyui import (
     COMFYUI_ACTIVE_STATUSES,
     MAX_SHOTS,
 )
-from naiba.comfyui.params import scan_params
-from naiba.comfyui.store import ComfyUIStoreError
+from naiba.comfyui.store import ComfyUIStoreError, now_ms
 
 
 class ComfyUITaskError(ValueError):
@@ -58,6 +58,7 @@ class ComfyUIJobManager:
             )
             self.store.update_task(
                 task_id, status="interrupted", detail=detail,
+                finished_at=now_ms(),
                 progress={
                     "done": completed,
                     "total": shots,
@@ -206,6 +207,8 @@ class ComfyUIJobManager:
             raise ComfyUITaskError("所有段都已完成，没有需要重试的内容")
         self.store.update_task(
             task_id, status="queued", checkpoint=checkpoint, error="", detail="",
+            # 重试是新的一轮运行：清掉上一轮的结束时刻（开始时刻由 runner 重写）。
+            finished_at=None,
             progress={"done": done, "total": shots, "failed": 0},
         )
         self.store.append_event(task_id, {
@@ -214,9 +217,15 @@ class ComfyUIJobManager:
         self.runner.submit(task_id)
         return self.store.get_task(task_id) or task
 
-    def delete_tasks(self, body: dict[str, Any]) -> dict[str, Any]:
-        """批量删除历史任务（含产物目录）；执行中的任务跳过并回报。"""
+    def delete_tasks(self, body: dict[str, Any], *, cancel_timeout: float = 15.0) -> dict[str, Any]:
+        """删除任务记录、事件与产物目录。
+
+        - 未指定 id = 清全部：只删已结束的任务，执行中的跳过并回报（「清除已结束」语义）；
+        - 指定 id 且 ``cancel_active`` 为真：排队/运行中的任务先取消，等进入终态
+          后再删——等待超时或取消失败时如实回报失败原因，任务保留不删。
+        """
         ids = body.get("task_ids") if isinstance(body, dict) else None
+        cancel_active = bool(isinstance(body, dict) and body.get("cancel_active"))
         if isinstance(ids, list) and ids:
             targets = [str(item).strip() for item in ids[:200] if str(item).strip()]
         else:
@@ -225,16 +234,52 @@ class ComfyUIJobManager:
                        for task in self.store.list_tasks(limit=5000)]
         deleted = 0
         skipped: list[str] = []
+        failed: list[dict[str, str]] = []
         for task_id in targets:
             task = self.store.get_task(task_id)
             if task is None:
                 continue
             if str(task.get("status") or "") in COMFYUI_ACTIVE_STATUSES:
-                skipped.append(task_id)
-                continue
+                if not cancel_active:
+                    skipped.append(task_id)
+                    continue
+                reason = ""
+                try:
+                    cancelled = self.runner.cancel(task_id, reason="删除任务前自动取消")
+                except Exception as exc:  # noqa: BLE001 - 取消失败要如实回报
+                    cancelled = False
+                    reason = f"取消失败：{exc}"
+                if not cancelled:
+                    # 返回 False 多半是刚好已终态（竞态）：重查一次，真终态就继续删。
+                    task = self.store.get_task(task_id)
+                    if task is None:
+                        continue
+                    if str(task.get("status") or "") in COMFYUI_ACTIVE_STATUSES:
+                        failed.append({
+                            "id": task_id,
+                            "reason": reason or "任务无法取消，已保留这条任务",
+                        })
+                        continue
+                if not self._wait_terminal(task_id, timeout=cancel_timeout):
+                    failed.append({
+                        "id": task_id,
+                        "reason": "已发出取消，但任务迟迟没有停下来，先保留这条任务，稍后再删",
+                    })
+                    continue
             if self.store.delete_task(task_id):
                 deleted += 1
-        return {"deleted": deleted, "skipped": skipped}
+        return {"deleted": deleted, "skipped": skipped, "failed": failed}
+
+    def _wait_terminal(self, task_id: str, *, timeout: float, interval: float = 0.15) -> bool:
+        """等任务离开活动状态；超时返回 False（任务保留，由调用方回报）。"""
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            task = self.store.get_task(task_id)
+            if task is None or str(task.get("status") or "") not in COMFYUI_ACTIVE_STATUSES:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(interval)
 
     def delete_workflow(self, workflow_id: str) -> tuple[bool, str]:
         """删除工作流；被排队/执行中的任务引用时拒绝（历史任务用快照，不受影响）。"""

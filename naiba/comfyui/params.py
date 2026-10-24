@@ -21,6 +21,11 @@ from naiba.comfyui import MAX_WORKFLOW_PARAMS
 _SEED_FIELDS = ("seed", "noise_seed")
 ROLE_POSITIVE = "positive_prompt"
 ROLE_NEGATIVE = "negative_prompt"
+# 无专用元数据的常用字段：按明确字段名（必要时叠加节点类名）识别。
+ROLE_SAMPLER = "sampler"
+ROLE_SCHEDULER = "scheduler"
+ROLE_CHECKPOINT = "checkpoint"
+ROLE_LORA = "lora"
 # 采样器类节点：positive/negative 连线是主提示词的可靠锚点。
 _SAMPLER_CLASS_MARKERS = ("ksampler", "samplercustom")
 # 标题兜底关键词（连线追不到时用）。
@@ -111,19 +116,32 @@ def scan_params(prompt: dict[str, Any]) -> list[dict[str, Any]]:
             # 数组 = 来自上游节点的连线，不是控件值。
             if isinstance(value, list):
                 continue
-            field_type = _field_type(class_type, str(field_name), value)
+            name = str(field_name)
+            field_type = _field_type(class_type, name, value)
             if field_type is None:
                 continue
+            role = roles.get((str(node_id), name))
+            if not role:
+                # 采样器 / 调度器按字段名识别；checkpoint / LoRA 按字段名 + 节点
+                # 类名双重判定，避免把别处同名文本框误标成模型选择。
+                if name == "sampler_name":
+                    role = ROLE_SAMPLER
+                elif name == "scheduler":
+                    role = ROLE_SCHEDULER
+                elif name == "ckpt_name" and "checkpoint" in class_type.lower():
+                    role = ROLE_CHECKPOINT
+                elif name == "lora_name" and "lora" in class_type.lower():
+                    role = ROLE_LORA
             slots.append({
                 "node_id": str(node_id),
-                "field_name": str(field_name),
+                "field_name": name,
                 "field_type": field_type,
                 # seed 槽 default 置空：语义是「不填 = 每次随机」，不展示旧随机值。
                 "default": None if field_type == "seed" else value,
                 "node_title": node_title,
                 "class_type": class_type,
-                "role": roles.get((str(node_id), str(field_name)), ""),
-                "label": _slot_label(str(node_id), node_title, class_type, str(field_name)),
+                "role": role or "",
+                "label": _slot_label(str(node_id), node_title, class_type, name),
             })
             if len(slots) >= MAX_WORKFLOW_PARAMS:
                 return slots

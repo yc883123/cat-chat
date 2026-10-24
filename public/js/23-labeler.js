@@ -1137,6 +1137,10 @@ async function exportResults() {
   const body = { format };
   if (labeler.taskId) body.task_id = labeler.taskId;
   else if (labeler.search) body.q = labeler.search;
+  // 包名可选项：填了就叫这个名字；留空由服务端自动命名（同一文件夹时
+  // 直接用文件夹本来的名字，多个包一眼分清谁是谁的数据集）。
+  const customName = String($("#labelerExportName")?.value || "").trim();
+  if (customName) body.name = customName;
   const button = $("#labelerExport");
   if (button) button.disabled = true;
   try {

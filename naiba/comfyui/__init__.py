@@ -33,3 +33,6 @@ MAX_RESUBMIT = 1
 MAX_FILES_PER_SHOT = 40
 # 工作流条目参数槽位上限（防御超大工作流的扫描体积）。
 MAX_WORKFLOW_PARAMS = 500
+# 参数扫描的 schema 版本：升级识别规则（新增 role 等）后递增，工作流详情时
+# 对旧版本条目重扫一次并落盘（幂等懒升级）。
+PARAMS_SCHEMA_VERSION = 2

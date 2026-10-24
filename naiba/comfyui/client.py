@@ -249,6 +249,48 @@ def delete_queue_items(base: str, prompt_ids: list[str]) -> bool:
         return False
 
 
+def _enum_choices(base: str, class_type: str, field_name: str) -> list[str]:
+    """读一个节点在 ``/object_info/<类名>`` 里的枚举候选；失败一律空列表。
+
+    单节点响应比全量 object_info 小得多；任何网络/解析失败都返回空列表，
+    调用方按「候选暂不可用」处理，不阻断工作流操作。
+    """
+    url = f"{normalize_base_url(base)}/object_info/{urllib.parse.quote(class_type)}"
+    try:
+        with _DIRECT_OPENER.open(url, timeout=10) as resp:
+            data = json.loads(resp.read(1000000).decode("utf-8", errors="replace"))
+    except Exception:  # noqa: BLE001 - 候选拿不到不算错误
+        return []
+    if not isinstance(data, dict):
+        return []
+    node = data.get(class_type)
+    if not isinstance(node, dict):
+        return []
+    inputs = node.get("input") if isinstance(node.get("input"), dict) else {}
+    required = inputs.get("required") if isinstance(inputs.get("required"), dict) else {}
+    spec = required.get(field_name)
+    # 枚举输入的声明形如 [[候选...], {选项}]；候选项本身是字符串列表。
+    choices = spec[0] if isinstance(spec, (list, tuple)) and spec and isinstance(spec[0], (list, tuple)) else []
+    return [str(item) for item in choices if str(item or "").strip()]
+
+
+def checkpoint_names(base: str) -> list[str]:
+    """Checkpoint 模型候选（models/checkpoints 的文件清单，去重排序）。"""
+    return sorted(dict.fromkeys(_enum_choices(base, "CheckpointLoaderSimple", "ckpt_name")))
+
+
+def lora_names(base: str) -> list[str]:
+    """LoRA 候选（models/loras 的文件清单，去重排序）。
+
+    两个标准加载器的 ``lora_name`` 枚举都来自同一个目录，合并去重即覆盖
+    第三方加载器场景（它们的枚举内容一致）。
+    """
+    names: list[str] = []
+    for class_type in ("LoraLoader", "LoraLoaderModelOnly"):
+        names.extend(_enum_choices(base, class_type, "lora_name"))
+    return sorted(dict.fromkeys(names))
+
+
 def random_seed() -> int:
     return secrets.randbelow(SEED_RANDOM_MAX + 1)
 

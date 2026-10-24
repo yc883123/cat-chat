@@ -609,6 +609,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/comfyui/health":
             # 造梦机：连接测试（ComfyUI system_stats 摘要）。
             self._json(*self.app.comfyui.api_health())
+        elif path == "/api/comfyui/models":
+            # 造梦机：Checkpoint 模型候选（只读；不可达时空列表 + 说明）。
+            self._json(*self.app.comfyui.api_models())
         elif path == "/api/comfyui/workflows":
             self._json(*self.app.comfyui.api_workflows())
         elif path.startswith("/api/comfyui/workflows/"):
@@ -757,6 +760,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/comfyui/workflows":
             # 造梦机：导入工作流（API 格式校验 + 参数扫描 + 受管存储）。
             self._json(*self.app.comfyui.api_workflow_create(body))
+        elif path.startswith("/api/comfyui/workflows/") and path.endswith("/params"):
+            # 造梦机：保存这份工作流的主表单可见参数（按工作流粒度持久化）。
+            self._json(*self.app.comfyui.api_workflow_params_set(path.split("/")[-2], body))
         elif path == "/api/comfyui/url":
             # 造梦机：保存 ComfyUI 地址（comfyui_url 键）并立即测试连接。
             self._json(*self.app.comfyui.api_set_url(body))

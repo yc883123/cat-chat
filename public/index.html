@@ -509,6 +509,10 @@
                   <label class="labeler-search-field">
                     <input id="labelerSearch" type="search" placeholder="筛选标签或文件名" aria-label="筛选">
                   </label>
+                  <label class="labeler-export-name" title="填了就叫这个名字；留空自动用文件夹本来的名字命名">
+                    <input id="labelerExportName" type="text" maxlength="60"
+                           placeholder="包名（留空自动命名）" aria-label="导出包名（可选）">
+                  </label>
                   <select id="labelerExportFormat" aria-label="导出格式">
                     <option value="lora">LoRA 训练包（图片 + 同名 .txt）</option>
                     <option value="captions">逐图 .txt（与图片同名）</option>
@@ -591,6 +595,18 @@
                 <button class="control-button" type="button" id="comfyuiUrlCancel">取消</button>
               </div>
               <p class="comfyui-import-error" id="comfyuiUrlError" role="alert"></p>
+            </form>
+          </dialog>
+          <dialog class="comfyui-import-dialog comfyui-params-dialog" id="comfyuiParamsDialog" aria-label="选择主表单参数">
+            <form method="dialog" class="comfyui-import-form">
+              <h3>选择要在主表单显示的参数</h3>
+              <p class="comfyui-import-reminder">没勾选的参数不会出现在主表单，也不会被改动——生成时按工作流里原本的值执行。勾选结果按这份工作流保存，下次打开还是这个样子。</p>
+              <div class="comfyui-params-picker" id="comfyuiParamsPicker"></div>
+              <div class="comfyui-import-actions">
+                <button class="control-button" type="button" id="comfyuiParamsSave">保存</button>
+                <button class="control-button" type="button" id="comfyuiParamsCancel">取消</button>
+              </div>
+              <p class="comfyui-import-error" id="comfyuiParamsError" role="alert"></p>
             </form>
           </dialog>
           <dialog class="comfyui-import-dialog" id="comfyuiImportDialog" aria-label="导入工作流">

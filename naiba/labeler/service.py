@@ -277,6 +277,8 @@ class LabelerService:
         fmt = str(body.get("format") or "").strip().lower()
         task_id = str(body.get("task_id") or "").strip()
         query = str(body.get("q") or "").strip()[:200]
+        # 可选自定义包名：留空 = 自动命名（同一文件夹时用文件夹本来的名字）。
+        custom_name = str(body.get("name") or "").strip()[:120]
         raw_ids = body.get("annotation_ids")
         try:
             if isinstance(raw_ids, list) and raw_ids:
@@ -303,7 +305,7 @@ class LabelerService:
         try:
             artifact = write_export(
                 self._exports_dir, records, fmt, label=label,
-                data_dir=Path(self.app.paths.data_dir),
+                data_dir=Path(self.app.paths.data_dir), custom_name=custom_name,
             )
         except LabelerExportError as exc:
             return {"error": str(exc)}, 400

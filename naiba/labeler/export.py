@@ -81,6 +81,33 @@ def _safe_name(raw: str, fallback: str = "labeler") -> str:
     return (text or fallback)[:60]
 
 
+def _folder_part(records: list[dict[str, Any]]) -> str:
+    """导出包的自动命名：文件夹本来的名字（上传时选中的那个文件夹）。
+
+    打标批次来自一个文件夹，包名直接用它，导出目录里多个包才能一眼
+    分清谁是谁的数据集（否则只剩任务号和时间戳）。
+
+    - 全部记录共享同一个首段目录（即浏览器整包选择文件夹时
+      ``relative_path`` 的第一段）：就用这个名字，内部子目录不影响；
+    - 记录来自多个不同的首段目录（散选）：没有共同文件夹名，返回空串，
+      回落到「标注-时间戳」的老命名；
+    - 顶层散图（relative_path 没有目录段）同样返回空串。
+    """
+    first_segments: set[str] = set()
+    has_top_level = False
+    for row in records:
+        raw = str(row.get("relative_path") or row.get("name") or "").replace("\\", "/")
+        parts = [part for part in raw.split("/") if part not in ("", ".", "..")]
+        parts = [part for part in parts if not re.match(r"^[A-Za-z]:$", part)]
+        if len(parts) <= 1:
+            has_top_level = True  # 文件直接在所选层，没有文件夹段
+        else:
+            first_segments.add(parts[0])
+    if has_top_level or len(first_segments) != 1:
+        return ""
+    return _safe_name(next(iter(first_segments)), "")
+
+
 def _caption_text(row: dict[str, Any]) -> str:
     """逐图 txt 的内容：优先标签（训练常用），没有标签才用描述。"""
     tags = ", ".join(str(tag) for tag in (row.get("tags") or []) if str(tag).strip())
@@ -303,26 +330,58 @@ def render(records: list[dict[str, Any]], fmt: str, data_dir: Path | None = None
 
 
 def write_export(exports_dir: Path, records: list[dict[str, Any]], fmt: str,
-                 label: str = "", data_dir: Path | None = None) -> dict[str, Any]:
-    """把记录写成受管导出文件并返回元信息（路径只在本机 data 目录内）。"""
+                 label: str = "", data_dir: Path | None = None,
+                 custom_name: str = "") -> dict[str, Any]:
+    """把记录写成受管导出文件并返回元信息（路径只在本机 data 目录内）。
+
+    命名优先级：用户填了包名就叫用户的名字（撞名补序号，不覆盖）；没填
+    就自动命名——记录来自同一个文件夹时直接用**文件夹本来的名字**，取不到
+    文件夹名（散选/顶层散图）才回落到「标注-时间戳」的老命名。lora 格式在
+    自动命名时保留 ``lora-`` 前缀，和同文件夹的逐图 .txt 包区分开。
+    """
     payload = render(records, fmt, data_dir=data_dir)
     fmt = fmt.lower()
     exports_dir = Path(exports_dir)
     exports_dir.mkdir(parents=True, exist_ok=True)
-    stem = _safe_name(label, "labeler")
-    if fmt == "lora":
-        # 训练包在导出目录里一眼可辨：固定 lora- 前缀。
-        stem = f"lora-{stem}"
     # 逐图 txt 与训练包都是 zip 容器；其余格式与扩展名同名。
     extension = "zip" if fmt in ("captions", "lora") else fmt
-    name = f"{stem}-{time.strftime('%Y%m%d-%H%M%S')}.{extension}"
-    path = exports_dir / name
-    # 同名（同一秒内重复点导出）：补序号，绝不覆盖上一个产物。
-    counter = 1
-    while path.exists():
-        name = f"{stem}-{time.strftime('%Y%m%d-%H%M%S')}-{counter}.{extension}"
+    # 用户可能顺手把扩展名一起填进来：去掉尾缀，统一由格式决定扩展名。
+    stem = _safe_name(re.sub(r"\.[A-Za-z0-9]{2,8}$", "", custom_name or "").strip(), "")
+    if stem:
+        # 用户命名：就叫这个名字；撞名补序号，绝不覆盖上一个产物。
+        name = f"{stem}.{extension}"
+        counter = 2  # 从 -2 起：和浏览器「名字 (2)」的重复体验一致
         path = exports_dir / name
-        counter += 1
+        while path.exists():
+            name = f"{stem}-{counter}.{extension}"
+            path = exports_dir / name
+            counter += 1
+    else:
+        stem = _safe_name(label, "labeler")
+        folder_part = _folder_part(records)
+        if folder_part:
+            # 自动命名 = 文件夹本来的名字；重复导出同一文件夹补序号区分。
+            stem = folder_part
+        if fmt == "lora":
+            # 训练包在导出目录里一眼可辨：固定 lora- 前缀。
+            stem = f"lora-{stem}"
+        if folder_part:
+            name = f"{stem}.{extension}"
+            counter = 2
+            path = exports_dir / name
+            while path.exists():
+                name = f"{stem}-{counter}.{extension}"
+                path = exports_dir / name
+                counter += 1
+        else:
+            name = f"{stem}-{time.strftime('%Y%m%d-%H%M%S')}.{extension}"
+            path = exports_dir / name
+            # 同名（同一秒内重复点导出）：补序号，绝不覆盖上一个产物。
+            counter = 1
+            while path.exists():
+                name = f"{stem}-{time.strftime('%Y%m%d-%H%M%S')}-{counter}.{extension}"
+                path = exports_dir / name
+                counter += 1
     tmp = path.with_name(f".{name}.tmp")
     tmp.write_bytes(payload)
     tmp.replace(path)

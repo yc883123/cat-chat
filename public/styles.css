@@ -3556,6 +3556,11 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .labeler-result-tab.active { background: var(--accent-soft); border-color: var(--violet-line); color: var(--violet-deep); font-weight: 600; }
 .labeler-export { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .labeler-export .labeler-search-field { flex: 1; min-width: 0; }
+.labeler-export .labeler-export-name { flex: none; }
+.labeler-export .labeler-export-name input {
+  width: 150px; min-height: 30px; border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text); padding: 4px 8px; font-size: 12px;
+}
 .labeler-export select { width: 108px; flex: none; }
 .labeler-export .control-button { flex: none; }
 .labeler-result-body { overflow-y: auto; min-height: 0; flex: 1; display: flex; flex-direction: column; gap: 8px; padding-top: 2px; }
@@ -4044,6 +4049,7 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .comfyui-statusbar .status-mark.error { background: var(--danger, #c0392b); }
 .comfyui-run { flex: 1; min-height: 0; padding: 12px; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
 .comfyui-param-form { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 2px; }
+.comfyui-param-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .comfyui-param-heading { margin: 0; font-size: 12.5px; font-weight: 600; }
 .comfyui-param { display: grid; gap: 3px; font-size: 11.5px; color: var(--muted); }
 .comfyui-param input, .comfyui-param select, .comfyui-param textarea {
@@ -4052,6 +4058,31 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 }
 .comfyui-param textarea { resize: vertical; line-height: 1.5; font-family: inherit; }
 .comfyui-param:first-of-type .comfyui-param-label { color: var(--text); font-weight: 600; }
+/* Checkpoint 候选下拉：跟随输入框的浮层，候选为空时不出现（自由输入不受影响）。 */
+.comfyui-combo { position: relative; }
+.comfyui-combo-list {
+  position: absolute; z-index: 30; top: calc(100% + 2px); left: 0; right: 0;
+  max-height: 190px; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
+  display: flex; flex-direction: column; padding: 2px;
+}
+.comfyui-combo-option {
+  border: 0; background: transparent; color: var(--text); text-align: left;
+  font-size: 11.5px; padding: 5px 8px; border-radius: var(--r-sm, 4px);
+  cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.comfyui-combo-option:hover { background: var(--accent-soft, rgba(120, 100, 255, .12)); }
+/* 「编辑参数」对话框里的全量参数清单。 */
+.comfyui-params-picker {
+  display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: var(--r-md); padding: 6px 8px;
+}
+.comfyui-params-item {
+  display: flex; align-items: center; gap: 8px; font-size: 11.5px;
+  color: var(--text); padding: 3px 2px; cursor: pointer;
+}
+.comfyui-params-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .comfyui-submit-row { display: flex; align-items: center; gap: 10px; }
 .comfyui-shots-field { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
 .comfyui-shots-field input { width: 72px; min-height: 30px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); color: var(--text); padding: 4px 8px; }

@@ -722,6 +722,44 @@ class LabelerExportTests(unittest.TestCase):
         self.assertTrue(artifact["path"].endswith(".zip"))
         self.assertEqual(artifact["format"], "captions")
 
+    def test_write_export_auto_names_by_folder(self):
+        # 自动命名 = 文件夹本来的名字（relative_path 首段，内部子目录不影响）；
+        # 重复导出同一文件夹补 -2，绝不覆盖。
+        records = [
+            {"relative_path": "数据集A/pos/a.png", "name": "a.png", "tags": ["cat"]},
+            {"relative_path": "数据集A/neg/b.png", "name": "b.png", "tags": ["dog"]},
+        ]
+        artifact = write_export(self.dir / "exports", records, "captions", label="全部标注")
+        self.assertEqual(Path(artifact["path"]).name, "数据集A.zip")
+        artifact2 = write_export(self.dir / "exports", records, "captions", label="全部标注")
+        self.assertEqual(Path(artifact2["path"]).name, "数据集A-2.zip")
+
+    def test_write_export_custom_name_wins(self):
+        # 用户填了包名就叫用户的名字；顺手把扩展名一起填的会被剥掉，
+        # 由格式决定扩展名；撞名补 -2。
+        artifact = write_export(self.dir / "exports3", self._records(), "captions",
+                                custom_name="我的包.zip")
+        self.assertEqual(Path(artifact["path"]).name, "我的包.zip")
+        artifact2 = write_export(self.dir / "exports3", self._records(), "captions",
+                                 custom_name="我的包")
+        self.assertEqual(Path(artifact2["path"]).name, "我的包-2.zip")
+        # 包名同样过安全清洗：路径段进不了文件名。
+        artifact3 = write_export(self.dir / "exports4", self._records(), "json",
+                                 custom_name="../../etc/passwd")
+        path = Path(artifact3["path"]).resolve()
+        self.assertTrue(str(path).startswith(str((self.dir / "exports4").resolve())))
+
+    def test_write_export_without_folder_falls_back(self):
+        # 顶层散图/跨文件夹散选没有共同文件夹名：回落到「标注-时间戳」老命名。
+        records = [
+            {"relative_path": "a.png", "name": "a.png", "tags": ["cat"]},
+            {"relative_path": "其他集/b.png", "name": "b.png", "tags": ["dog"]},
+        ]
+        artifact = write_export(self.dir / "exports5", records, "captions", label="选中标注")
+        name = Path(artifact["path"]).name
+        self.assertTrue(name.startswith("选中标注-"), name)
+        self.assertTrue(name.endswith(".zip"), name)
+
     def test_open_export_dir_creates_managed_folder(self):
         from naiba.labeler import export as export_module
 
@@ -1036,6 +1074,23 @@ class LabelerLoraPackageTests(unittest.TestCase):
             write_export(exports2, [self._record(relative_path="b.png", name="b.png",
                                                  digest="")], "lora")
         self.assertEqual(list(exports2.glob("*")) if exports2.exists() else [], [])
+
+    def test_write_export_lora_auto_names_by_folder_with_prefix(self):
+        # lora 训练包自动命名 = 文件夹本来的名字，保留 lora- 前缀与
+        # 同文件夹的逐图 .txt 包区分开。
+        artifact = write_export(
+            self.dir / "exports-lora-folder",
+            [self._record(relative_path="数据集A/sub/a.png", name="a.png")],
+            "lora", label="任务x", data_dir=self.dir)
+        self.assertEqual(Path(artifact["path"]).name, "lora-数据集A.zip")
+
+    def test_write_export_lora_custom_name_has_no_prefix(self):
+        # 用户自己命名的训练包不加 lora- 前缀：填什么就叫什么。
+        artifact = write_export(
+            self.dir / "exports-lora-custom",
+            [self._record(relative_path="数据集A/a.png", name="a.png")],
+            "lora", label="任务x", data_dir=self.dir, custom_name="我的训练包")
+        self.assertEqual(Path(artifact["path"]).name, "我的训练包.zip")
 
 
 class LabelerUploadDigestTests(unittest.TestCase):

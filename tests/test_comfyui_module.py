@@ -186,6 +186,13 @@ class ParamsTests(unittest.TestCase):
         self.assertEqual(roles2.get(("11", "ckpt_name")), "")
         self.assertEqual(roles2.get(("11", "lora_name")), "")
 
+    def test_scan_roles_resolution_width_height(self):
+        # 出图分辨率也属于常用参数：宽/高标成 resolution，主表单默认显示。
+        roles = {(s["node_id"], s["field_name"]): s.get("role") for s in scan_params(_sample_prompt())}
+        self.assertEqual(roles[("5", "width")], "resolution")
+        self.assertEqual(roles[("5", "height")], "resolution")
+        self.assertEqual(roles.get(("5", "batch_size")), "", "批次大小不是分辨率")
+
     def test_prompt_roles_title_fallback(self):
         prompt = {
             "10": {"class_type": "CLIPTextEncode",
@@ -927,6 +934,24 @@ class ServiceApiTests(unittest.TestCase):
         self.assertEqual(len(rows["tasks"]), 1)
         self.assertNotIn("checkpoint", rows["tasks"][0])
         self.assertIn("workflow_name", rows["tasks"][0])
+
+    def test_slim_tasks_include_output_file_paths(self):
+        # 前端要拿绝对路径去走 /api/file：手机/局域网靠 URL 口令取字节，
+        # 桌面靠 path 参数弹原生「另存为」——只回文件名两条链路都断了。
+        task = self.service.store.create_task({"shots": 1, "prompt": {}, "overrides": []})
+        out_dir = self.service.store.task_output_dir(task["id"])
+        out_dir.mkdir(parents=True)
+        (out_dir / "a.png").write_bytes(b"x")
+        self.service.store.update_task(
+            task["id"], status="completed",
+            result={"completed": [], "outputs": ["a.png"]},
+        )
+        rows, _ = self.service.api_tasks()
+        row = next(item for item in rows["tasks"] if item["id"] == task["id"])
+        self.assertEqual(
+            row["output_files"],
+            [{"name": "a.png", "path": str(out_dir / "a.png")}],
+        )
 
 
 if __name__ == "__main__":

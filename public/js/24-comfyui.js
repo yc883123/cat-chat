@@ -5,7 +5,7 @@
 // 与聊天域零耦合：只调 /api/comfyui/*。
 // ============================================================
 
-import { $, api, toast } from "./01-core.js";
+import { $, api, localFileUrl, state, toast } from "./01-core.js";
 import { isPywebview, openImageLightbox, saveLocalFile } from "./03-media.js";
 import { currentStudioPage, onStudioPageChange } from "./22-studio.js";
 const POLL_MS = 1200;
@@ -286,12 +286,14 @@ const ROLE_LABELS = {
   scheduler: "调度器",
   checkpoint: "模型（Checkpoint）",
   lora: "LoRA 模型",
+  resolution: "分辨率",
 };
 
-// 主表单默认显示的常用参数：提示词、种子、步数、采样器、调度器、模型、LoRA。
+// 主表单默认显示的常用参数：提示词、种子、步数、采样器、调度器、模型、LoRA、分辨率。
 // 其余已识别的参数留在数据里，用户可从「编辑参数」加进主表单。
 const DEFAULT_VISIBLE_ROLES = new Set([
   "positive_prompt", "negative_prompt", "sampler", "scheduler", "checkpoint", "lora",
+  "resolution",
 ]);
 
 function orderedSlots(slots) {
@@ -503,7 +505,10 @@ function renderSlot(slot) {
   wrap.className = "comfyui-param";
   const title = document.createElement("span");
   title.className = "comfyui-param-label";
-  const roleLabel = ROLE_LABELS[slot.role];
+  // 宽/高两个槽位同属「分辨率」角色：主标签要分得清，否则表单里两行都叫「分辨率」。
+  const roleLabel = slot.role === "resolution"
+    ? (slot.field_name === "height" ? "分辨率（高）" : "分辨率（宽）")
+    : ROLE_LABELS[slot.role];
   if (roleLabel) {
     // 主提示词等有角色的槽位：角色名做主标签，原始槽位名退为备注。
     title.textContent = roleLabel;
@@ -1023,10 +1028,16 @@ async function renderLatestOutputs() {
   // 同一任务的多张图逐项全展示（上限沿用 24 张）。
   const items = [];
   for (const row of comfyui.tasks) {
-    for (const name of row.result?.outputs || []) {
+    // output_files 带本地绝对路径；老任务没有这个字段时退回任务 id + 文件名的直链。
+    const outputs = row.result?.outputs || [];
+    const files = Array.isArray(row.output_files) && row.output_files.length
+      ? row.output_files
+      : outputs.map((name) => ({ name, path: "" }));
+    for (const file of files) {
       if (items.length >= 24) break;
+      const name = String(file?.name || "");
       if (!row.id || !name) continue;
-      items.push({ taskId: String(row.id), name: String(name) });
+      items.push({ taskId: String(row.id), name, path: String(file?.path || "") });
     }
   }
   const wanted = [];
@@ -1056,7 +1067,7 @@ async function renderLatestOutputs() {
   }
   for (const { key, item } of wanted) {
     if (!existing.has(key)) {
-      const card = renderOutputCard(item.taskId, item.name);
+      const card = renderOutputCard(item.taskId, item.name, item.path);
       card.dataset.outputKey = key;
       existing.set(key, card);
     }
@@ -1072,9 +1083,22 @@ async function renderLatestOutputs() {
   }
 }
 
-function renderOutputCard(taskId, name) {
+// paint 由 CSS 的 .comfyui-output-save svg 单点声明（同 .file-action 口径）。
+const OUTPUT_SAVE_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10"></path><path d="M8 11l4 4 4-4"></path><path d="M5 19h14"></path></svg>';
+
+// 产物地址与聊天媒体卡片同一口径：走 /api/file（URL 自带口令 + 真实路径）。
+// 只拼 /api/comfyui/tasks/<id>/files/<name> 的话，手机/局域网访问一律 401 成破图，
+// 桌面的原生「另存为」也拿不到 path 参数（见 03-media 的 saveLocalFile）。
+function outputFileUrl(taskId, name, path) {
+  const local = String(path || "");
+  if (local) return localFileUrl(local);
+  const direct = `/api/comfyui/tasks/${encodeURIComponent(taskId)}/files/${encodeURIComponent(name)}`;
+  return state.token ? `${direct}?token=${encodeURIComponent(state.token)}` : direct;
+}
+
+function renderOutputCard(taskId, name, path) {
   const ext = `.${name.split(".").pop()?.toLowerCase() || ""}`;
-  const url = `/api/comfyui/tasks/${encodeURIComponent(taskId)}/files/${encodeURIComponent(name)}`;
+  const url = outputFileUrl(taskId, name, path);
   const card = document.createElement("figure");
   card.className = "comfyui-output";
   if (IMAGE_EXTS.has(ext)) {
@@ -1099,15 +1123,35 @@ function renderOutputCard(taskId, name) {
     card.append(link);
   }
   const caption = document.createElement("figcaption");
-  caption.textContent = name;
+  const label = document.createElement("span");
+  label.className = "comfyui-output-name";
+  label.textContent = name;
+  label.title = name;
+  // 手机上点图只是开大图，保存要另找入口；这里给每张产物一个直接的下载按钮。
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "comfyui-output-save";
+  save.dataset.comfyuiOutputSave = url;
+  save.dataset.comfyuiOutputName = name;
+  save.title = `下载 ${name}`;
+  save.setAttribute("aria-label", `下载 ${name}`);
+  save.innerHTML = OUTPUT_SAVE_ICON;
+  caption.append(label, save);
   card.append(caption);
   return card;
 }
 
 function onOutputGridClick(event) {
+  const save = event.target.closest("button[data-comfyui-output-save]");
+  if (save) {
+    if (!saveLocalFile(save.dataset.comfyuiOutputSave || "", save.dataset.comfyuiOutputName || "")) {
+      toast("这个产物没有可下载的地址");
+    }
+    return;
+  }
   const img = event.target.closest("img[data-comfyui-output-url]");
   if (img) {
-    openImageLightbox(img.dataset.comfyuiOutputUrl);
+    openImageLightbox(img.dataset.comfyuiOutputUrl, img);
     return;
   }
   const link = event.target.closest("a[href]");

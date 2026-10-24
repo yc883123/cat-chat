@@ -548,7 +548,10 @@ export function agentAvatarEmoji(agent) {
 export function agentAvatarSrc(agent) {
   const value = String(agent?.avatar || '').trim();
   if (!value || agentAvatarEmoji(agent)) return '';
-  return `/api/agents/avatar/${encodeURIComponent(value)}`;
+  // `<img src>` 带不了 Authorization 头：手机/局域网靠查询串口令（同 localFileUrl 口径），
+  // 否则头像请求一律 401，头像位上只剩破图。
+  const url = `/api/agents/avatar/${encodeURIComponent(value)}`;
+  return state.token ? `${url}?token=${encodeURIComponent(state.token)}` : url;
 }
 
 // 几何量缓存：取景要按「图片原始比例 q」与「对话区盒子比例 r」算百分比尺寸。

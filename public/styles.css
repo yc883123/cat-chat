@@ -4107,7 +4107,13 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .comfyui-output { margin: 0; border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--surface-2); }
 .comfyui-output img { display: block; width: 100%; height: 96px; object-fit: cover; cursor: zoom-in; }
 .comfyui-output video { display: block; width: 100%; max-height: 140px; }
-.comfyui-output figcaption { font-size: 9.5px; color: var(--muted); padding: 3px 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.comfyui-output figcaption { display: flex; align-items: center; gap: 4px; font-size: 9.5px; color: var(--muted); padding: 3px 4px 3px 6px; }
+.comfyui-output-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 产物下载：手机上点图只是开大图，保存必须有独立入口（与灯箱的下载按钮同一动作）。 */
+.comfyui-output-save { flex: none; width: 20px; height: 20px; display: grid; place-items: center; padding: 0; border: 0; border-radius: var(--r-xs); background: transparent; color: var(--muted); cursor: pointer; }
+.comfyui-output-save:hover { background: var(--accent-soft); color: var(--accent); }
+.comfyui-output-save:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.comfyui-output-save svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .comfyui-import-dialog, .comfyui-url-dialog { border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); color: var(--text); max-width: 520px; width: min(92vw, 520px); padding: 0; }
 .comfyui-import-dialog::backdrop, .comfyui-url-dialog::backdrop { background: rgba(10, 10, 24, .55); }
 .comfyui-import-form { display: flex; flex-direction: column; gap: 10px; padding: 16px; }

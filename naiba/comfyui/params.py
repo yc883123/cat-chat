@@ -26,6 +26,10 @@ ROLE_SAMPLER = "sampler"
 ROLE_SCHEDULER = "scheduler"
 ROLE_CHECKPOINT = "checkpoint"
 ROLE_LORA = "lora"
+# 出图分辨率：EmptyLatentImage 等节点上的宽/高。默认放进主表单——「换个尺寸再出一张」
+# 是日常操作，藏在「编辑参数」里不合理。
+ROLE_RESOLUTION = "resolution"
+_RESOLUTION_FIELDS = ("width", "height")
 # 采样器类节点：positive/negative 连线是主提示词的可靠锚点。
 _SAMPLER_CLASS_MARKERS = ("ksampler", "samplercustom")
 # 标题兜底关键词（连线追不到时用）。
@@ -132,6 +136,8 @@ def scan_params(prompt: dict[str, Any]) -> list[dict[str, Any]]:
                     role = ROLE_CHECKPOINT
                 elif name == "lora_name" and "lora" in class_type.lower():
                     role = ROLE_LORA
+                elif name in _RESOLUTION_FIELDS and field_type == "number":
+                    role = ROLE_RESOLUTION
             slots.append({
                 "node_id": str(node_id),
                 "field_name": name,

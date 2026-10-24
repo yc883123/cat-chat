@@ -291,10 +291,10 @@ class ComfyUIJobManager:
 
     # ---- 内部 ----
 
-    @staticmethod
-    def _slim(task: dict[str, Any]) -> dict[str, Any]:
+    def _slim(self, task: dict[str, Any]) -> dict[str, Any]:
         input_data = task.get("input") if isinstance(task.get("input"), dict) else {}
         checkpoint = task.get("checkpoint") if isinstance(task.get("checkpoint"), dict) else {}
+        result = task.get("result") if isinstance(task.get("result"), dict) else {"completed": [], "outputs": []}
         return {
             "id": task.get("id"),
             "status": task.get("status"),
@@ -306,7 +306,8 @@ class ComfyUIJobManager:
             "started_at": task.get("started_at"),
             "finished_at": task.get("finished_at"),
             "progress": task.get("progress") or {},
-            "result": task.get("result") or {"completed": [], "outputs": []},
+            "result": result,
+            "output_files": self._output_files(task.get("id"), result),
             "error": task.get("error") or "",
             "source_task_id": task.get("source_task_id") or "",
             "workflow_id": input_data.get("workflow_id") or "",
@@ -315,3 +316,21 @@ class ComfyUIJobManager:
             "done_segments": len(checkpoint.get("completed") or []),
             "failed_segments": len(checkpoint.get("errors") or []),
         }
+
+    def _output_files(self, task_id: Any, result: dict[str, Any]) -> list[dict[str, str]]:
+        """产物清单：文件名 + 本地绝对路径。
+
+        只有「任务 id + 文件名」不够用：前端要拿这条路径去走 `/api/file`——手机/局域网
+        靠 URL 上的口令才取得到字节，桌面端靠 `path` 参数才能弹原生「另存为」
+        （`<a download>` 在 WebView2 里点了没反应，见 03-media 的 saveLocalFile）。
+        这里只拼接、不校验存在性：文件被清理时交给请求侧 404，与图片 404 同一条链。
+        """
+        tid = str(task_id or "")
+        if not tid:
+            return []
+        base = self.store.task_output_dir(tid)
+        return [
+            {"name": str(name), "path": str(base / str(name))}
+            for name in (result.get("outputs") or [])
+            if str(name or "")
+        ]

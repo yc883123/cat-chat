@@ -136,6 +136,27 @@ def _prompt_roles(prompt: dict[str, Any]) -> dict[tuple[str, str], str]:
     return roles
 
 
+def _media_port_label(prompt: dict[str, Any], node_id: str) -> str:
+    """媒体槽下游端口名：查消费该节点输出的连线字段（计划 §4「媒体参数要找得到位置」）。
+
+    LoadImage/LoadAudio 的下游往往就是模型节点的固定端口（如 MiniMax H3 的
+    ``ref_images.ref_image_3``），用户按端口对位填图；只报节点号没法对应。
+    取第一个消费方的字段名；多个消费方时以「等 N 处」收尾。
+    """
+    ports: list[str] = []
+    for nid, node in (prompt or {}).items():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        for field_name, value in inputs.items():
+            if isinstance(value, list) and len(value) == 2 and str(value[0]) == str(node_id):
+                ports.append(str(field_name))
+    if not ports:
+        return ""
+    head = ports[0]
+    return head if len(ports) == 1 else f"{head} 等{len(ports)}处"
+
+
 def scan_params(prompt: dict[str, Any]) -> list[dict[str, Any]]:
     """从 API 工作流扫描全部可编辑槽位；顺序 = 节点在 JSON 里的原始顺序。"""
     prompt = prompt or {}
@@ -192,6 +213,12 @@ def scan_params(prompt: dict[str, Any]) -> list[dict[str, Any]]:
                 "role": role or "",
                 "label": _slot_label(str(node_id), node_title, class_type, name),
             })
+            # 媒体槽把下游端口名并进标签（如「→ ref_image_3」），用户才知道
+            # 这张图对应模型里的哪个参考位。
+            if field_type in ("image", "audio", "video"):
+                port = _media_port_label(prompt, str(node_id))
+                if port:
+                    slots[-1]["label"] = f"{slots[-1]['label']} → {port}"
             if len(slots) >= MAX_WORKFLOW_PARAMS:
                 return slots
     return slots

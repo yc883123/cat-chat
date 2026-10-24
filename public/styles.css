@@ -4052,7 +4052,7 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .comfyui-param-form { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 2px; }
 .comfyui-param-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .comfyui-param-heading { margin: 0; font-size: 12.5px; font-weight: 600; }
-.comfyui-param { display: grid; gap: 3px; font-size: 11.5px; color: var(--muted); }
+.comfyui-param { position: relative; display: grid; gap: 3px; font-size: 11.5px; color: var(--muted); }
 .comfyui-param input, .comfyui-param select, .comfyui-param textarea {
   min-height: 30px; border: 1px solid var(--line); border-radius: var(--r-md);
   background: var(--surface); color: var(--text); padding: 4px 8px; font-size: 12px;
@@ -4063,7 +4063,8 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .comfyui-combo { position: relative; }
 .comfyui-combo-list {
   position: absolute; z-index: 30; top: calc(100% + 2px); left: 0; right: 0;
-  max-height: 190px; overflow-y: auto;
+  /* 全量候选进滚动列表；手机上按视口封顶（dvh 跟随软键盘开合），列表内部滚动。 */
+  max-height: min(190px, 40dvh); overflow-y: auto; -webkit-overflow-scrolling: touch;
   border: 1px solid var(--line); border-radius: var(--r-md);
   background: var(--surface); box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
   display: flex; flex-direction: column; padding: 2px;
@@ -4072,6 +4073,8 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
   border: 0; background: transparent; color: var(--text); text-align: left;
   font-size: 11.5px; padding: 5px 8px; border-radius: var(--r-sm, 4px);
   cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  /* 手机上点候选项：按一次点击算，不要触发双击缩放/长按选中。 */
+  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
 }
 .comfyui-combo-option:hover { background: var(--accent-soft, rgba(120, 100, 255, .12)); }
 /* 媒体输入槽：预览 + 说明 + 选择/替换/清除（计划 §5.4）。 */
@@ -4086,6 +4089,9 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .comfyui-media-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .comfyui-media-actions { display: flex; align-items: center; gap: 6px; }
 .comfyui-media-pick { cursor: pointer; }
+/* 全局「label input」会把选择按钮里藏文件的 input 按 40px 文本框摆出来（hidden 的
+   UA 样式被作者样式盖掉），这里显式按掉——按钮自己就是点击入口。 */
+.comfyui-media-pick input { display: none !important; width: 0; height: 0; padding: 0; border: 0; margin: 0; }
 /* 「编辑参数」对话框里的全量参数清单。 */
 .comfyui-params-picker {
   display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto;

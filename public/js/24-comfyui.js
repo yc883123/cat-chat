@@ -398,8 +398,14 @@ function renderParamForm() {
     note.textContent = "这份工作流没有可调的参数，直接点「开始生成」即可。";
     form.append(note);
   }
+  // 同一角色出现多个槽位（如两个 LoRA 加载器）时，主标签要带节点信息才分得清
+  // ——与 ComfyUI 前端「控件长在各自节点上」的辨识口径一致。
+  const roleCounts = new Map();
   for (const slot of slots) {
-    form.append(renderSlot(slot));
+    if (slot.role) roleCounts.set(slot.role, (roleCounts.get(slot.role) || 0) + 1);
+  }
+  for (const slot of slots) {
+    form.append(renderSlot(slot, roleCounts));
   }
 }
 
@@ -509,15 +515,22 @@ function attachCandidateCombo(input, wrap, candidatesFn) {
   list.className = "comfyui-combo-list";
   list.hidden = true;
   wrap.append(list);
-  const renderMatches = () => {
+  // 聚焦先给列表（对齐 ComfyUI「下拉+搜索」：当前值不在候选里也能看到可选项），
+  // 输入按文本过滤；预览上限 30 条（用户拍板，列表可滚动），搜不到给提示行。
+  const renderMatches = (showAll = false) => {
     const text = String(input.value || "").trim().toLowerCase();
-    const matches = candidatesFn()
-      .filter((name) => !text || name.toLowerCase().includes(text))
-      .filter((name) => name !== input.value)
-      .slice(0, 30);
+    const all = candidatesFn();
+    const matched = showAll || !text
+      ? all
+      : all.filter((name) => name.toLowerCase().includes(text));
+    const matches = matched.slice(0, 30);
     list.textContent = "";
     if (!matches.length) {
-      list.hidden = true;
+      const empty = document.createElement("div");
+      empty.className = "comfyui-combo-option";
+      empty.textContent = "没有匹配的候选；直接填文件名也可以";
+      list.append(empty);
+      list.hidden = false;
       return;
     }
     for (const name of matches) {
@@ -535,12 +548,12 @@ function attachCandidateCombo(input, wrap, candidatesFn) {
     }
     list.hidden = false;
   };
-  input.addEventListener("focus", renderMatches);
-  input.addEventListener("input", renderMatches);
+  input.addEventListener("focus", () => renderMatches(true));
+  input.addEventListener("input", () => renderMatches(false));
   input.addEventListener("blur", () => { list.hidden = true; });
 }
 
-function renderSlot(slot) {
+function renderSlot(slot, roleCounts = new Map()) {
   const type = slot.field_type;
   // 媒体槽内部有自己的「选择文件」label：<label> 不能嵌 <label>，外层用 div。
   const isMedia = slot.control === "media" || MEDIA_FIELD_TYPES.has(type);
@@ -554,7 +567,15 @@ function renderSlot(slot) {
     : ROLE_LABELS[slot.role];
   if (roleLabel) {
     // 主提示词等有角色的槽位：角色名做主标签，原始槽位名退为备注。
-    title.textContent = roleLabel;
+    // 同角色有多个槽位时补上节点名（节点标题优先，没有就用节点号）。
+    if ((roleCounts.get(slot.role) || 0) > 1) {
+      const nodeRef = slot.node_title
+        ? `${slot.node_title}（节点 ${slot.node_id}）`
+        : `节点 ${slot.node_id}`;
+      title.textContent = `${roleLabel} · ${nodeRef}`;
+    } else {
+      title.textContent = roleLabel;
+    }
     title.title = slot.label || "";
   } else {
     title.textContent = slot.label || `${slot.node_id} · ${slot.field_name}`;
@@ -673,9 +694,12 @@ function renderMediaPicker(slot, key) {
   }
   const note = document.createElement("span");
   note.className = "comfyui-media-note";
+  const emptyInWorkflow = !String(slot.default ?? "").trim() || String(slot.default).trim() === "None";
   note.textContent = picked
     ? `已选择：${picked.name}`
-    : `还没选择${MEDIA_KIND_LABELS[kind] || "媒体"}文件：生成时按工作流里原本的文件执行`;
+    : emptyInWorkflow
+      ? "工作流里这个槽位是空的；不选文件就按空值提交"
+      : `还没选择${MEDIA_KIND_LABELS[kind] || "媒体"}文件：生成时按工作流里原本的文件执行`;
   note.title = note.textContent;
   const actions = document.createElement("div");
   actions.className = "comfyui-media-actions";

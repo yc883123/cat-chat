@@ -19,7 +19,7 @@ from typing import Any
 from naiba.comfyui import MAX_FILES_PER_SHOT, MAX_RESUBMIT, MAX_SHOTS, SHOT_TIMEOUT_SECONDS
 from naiba.comfyui import client
 from naiba.comfyui.params import apply_overrides, media_kind_of_field
-from naiba.comfyui.schema import NodeSchemaProvider
+from naiba.comfyui.schema import NodeSchemaProvider, input_is_optional
 from naiba.comfyui.store import now_ms
 
 POLL_INTERVAL_SECONDS = 1.5
@@ -337,11 +337,9 @@ class ComfyUIRunner:
             if not declarations:
                 continue
             for field_name, source_id in media_connections:
-                declaration = declarations.get(field_name)
-                if declaration is None:
-                    declaration = next((value for key, value in declarations.items()
-                                         if field_name.startswith(f"{key}.")), None)
-                if declaration and declaration.get("optional") is True:
+                # 与参数提示共用同一套可选性规则：普通 optional 直接放行，
+                # Autogrow 必须校验前缀/编号范围/min，模棱两可的不移除。
+                if input_is_optional(declarations, field_name) is True:
                     inputs.pop(field_name, None)
 
     def _apply_media(

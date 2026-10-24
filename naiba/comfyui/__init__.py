@@ -38,7 +38,9 @@ MAX_WORKFLOW_PARAMS = 500
 # v4：schema 增强扫描（多行/枚举候选/模型角色 unet/clip/vae/controlnet）+
 # 媒体槽显式映射（LoadImage/LoadAudio/LoadVideo/VHS_LoadVideo）。
 # v5：媒体槽标签并进下游端口名（如「→ ref_image_3」）。
-PARAMS_SCHEMA_VERSION = 5
+# v6：恢复「节点号 · 节点名 · 字段 → 目标输入端口」完整映射（全部连接、多输出
+# 索引），并给媒体槽补 media_optional（未选能否安全跳过，含 Autogrow 校验）。
+PARAMS_SCHEMA_VERSION = 6
 # 输入媒体单文件上限：与通用上传（80 MB）同口径；ComfyUI /upload/image 本身
 # 没有更严的服务端限制，取应用侧一致值。
 MEDIA_INPUT_MAX_BYTES = 80 * 1024 * 1024

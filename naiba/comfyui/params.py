@@ -20,10 +20,10 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from naiba.comfyui import MAX_WORKFLOW_PARAMS
+from naiba.comfyui.schema import input_is_optional
 
 _SEED_FIELDS = ("seed", "noise_seed")
 ROLE_POSITIVE = "positive_prompt"
@@ -137,42 +137,78 @@ def _prompt_roles(prompt: dict[str, Any]) -> dict[tuple[str, str], str]:
     return roles
 
 
-def _media_port_label(prompt: dict[str, Any], node_id: str) -> str:
-    """媒体槽下游端口名：查消费该节点输出的连线字段（计划 §4「媒体参数要找得到位置」）。
+def _connection_index(prompt: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """按来源节点建立反向连接索引（保存 API 工作流里的直连关系）。
 
-    LoadImage/LoadAudio 的下游往往就是模型节点的固定端口（如 MiniMax H3 的
-    ``ref_images.ref_image_3``），用户按端口对位填图；只报节点号没法对应。
-    取第一个消费方的字段名；多个消费方时以「等 N 处」收尾。
+    每条记录保留来源输出索引、目标节点号/类名/标题和目标字段。显示层只用
+    ``target_field``，目标节点信息留作内部去重与端口重名消歧。
     """
-    ports: list[str] = []
-    for nid, node in (prompt or {}).items():
+    connections: dict[str, list[dict[str, Any]]] = {}
+    for target_id, node in (prompt or {}).items():
         if not isinstance(node, dict):
             continue
-        inputs = node.get("inputs") if isinstance(node.get("inputs"), dict) else {}
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            continue
+        target_class = str(node.get("class_type") or "")
+        meta = node.get("_meta") if isinstance(node.get("_meta"), dict) else {}
+        target_title = str(meta.get("title") or "")
         for field_name, value in inputs.items():
-            if isinstance(value, list) and len(value) == 2 and str(value[0]) == str(node_id):
-                ports.append(str(field_name))
-    if not ports:
-        return ""
-    head = ports[0]
-    return head if len(ports) == 1 else f"{head} 等{len(ports)}处"
+            # API 节点引用固定是 [来源节点号, 输出索引]；其余数组不是连线。
+            if not isinstance(value, list) or len(value) != 2:
+                continue
+            source_id, output_index = value
+            if not isinstance(output_index, int) or isinstance(output_index, bool):
+                continue
+            source_id = str(source_id)
+            if source_id not in prompt:
+                continue
+            connections.setdefault(source_id, []).append({
+                "output_index": output_index,
+                "target_node_id": str(target_id),
+                "target_class_type": target_class,
+                "target_title": target_title,
+                "target_field": str(field_name),
+            })
+    return connections
 
 
-def _short_media_label(port: str, media: str) -> str:
-    match = re.search(r"(?:ref_image|ref_audio|ref_video|ref_video_audio)_(\d+)", port)
-    if not match:
-        return {"image": "图片输入", "audio": "音频输入", "video": "视频输入"}[media]
-    index = int(match.group(1)) + 1
-    if "video_audio" in port:
-        return f"视频音频 {index}"
-    noun = {"image": "参考图", "audio": "参考音频", "video": "参考视频"}[media]
-    return f"{noun} {index}"
+def _mapping_label(base: str, connections: list[dict[str, Any]]) -> str:
+    """生成「来源 → 目标端口」标签；多个目标逐一列出，不省略、不猜。"""
+    if not connections:
+        return base
+    port_counts: dict[str, int] = {}
+    for connection in connections:
+        port = str(connection.get("target_field") or "")
+        if port:
+            port_counts[port] = port_counts.get(port, 0) + 1
+    grouped: dict[int, list[str]] = {}
+    for connection in connections:
+        port = str(connection.get("target_field") or "")
+        if not port:
+            continue
+        if port_counts.get(port, 0) > 1:
+            # 不同目标节点恰好用同一个端口名时，才补节点号消歧。
+            port = f"{port}（节点 {connection.get('target_node_id') or '?'}）"
+        output_index = connection.get("output_index")
+        if not isinstance(output_index, int) or isinstance(output_index, bool):
+            output_index = 0
+        grouped.setdefault(output_index, []).append(port)
+    if not grouped:
+        return base
+    if len(grouped) == 1 and 0 in grouped:
+        return f"{base} → {'、'.join(grouped[0])}"
+    lines = [base]
+    for output_index, ports in grouped.items():
+        lines.append(f"输出 {output_index} → {'、'.join(ports)}")
+    return "\n".join(lines)
 
 
 def scan_params(prompt: dict[str, Any]) -> list[dict[str, Any]]:
     """从 API 工作流扫描全部可编辑槽位；顺序 = 节点在 JSON 里的原始顺序。"""
     prompt = prompt or {}
     roles = _prompt_roles(prompt)
+    connections_by_source = _connection_index(prompt)
     slots: list[dict[str, Any]] = []
     for node_id, node in prompt.items():
         if not isinstance(node, dict):
@@ -183,6 +219,7 @@ def scan_params(prompt: dict[str, Any]) -> list[dict[str, Any]]:
         class_type = str(node.get("class_type") or "")
         meta = node.get("_meta") if isinstance(node.get("_meta"), dict) else {}
         node_title = str(meta.get("title") or "")
+        connections = list(connections_by_source.get(str(node_id), []))
         for field_name, value in inputs.items():
             # 数组 = 来自上游节点的连线，不是控件值。
             if isinstance(value, list):
@@ -214,6 +251,7 @@ def scan_params(prompt: dict[str, Any]) -> list[dict[str, Any]]:
                     role = ROLE_CONTROLNET
                 elif name in _RESOLUTION_FIELDS and field_type == "number":
                     role = ROLE_RESOLUTION
+            base_label = _slot_label(str(node_id), node_title, class_type, name)
             slots.append({
                 "node_id": str(node_id),
                 "field_name": name,
@@ -223,38 +261,64 @@ def scan_params(prompt: dict[str, Any]) -> list[dict[str, Any]]:
                 "node_title": node_title,
                 "class_type": class_type,
                 "role": role or "",
-                "label": _slot_label(str(node_id), node_title, class_type, name),
+                "label": _mapping_label(base_label, connections),
+                "connections": connections,
             })
-            # 媒体槽把下游端口名并进标签（如「→ ref_image_3」），用户才知道
-            # 这张图对应模型里的哪个参考位。
-            if field_type in ("image", "audio", "video"):
-                port = _media_port_label(prompt, str(node_id))
-                if port:
-                    slots[-1]["label"] = _short_media_label(port, field_type)
-                else:
-                    slots[-1]["label"] = {
-                        "image": "图片输入", "audio": "音频输入", "video": "视频输入",
-                    }[field_type]
             if len(slots) >= MAX_WORKFLOW_PARAMS:
                 return slots
     return slots
 
 
+def _media_slot_optional(slot: dict[str, Any], provider: Any) -> bool | None:
+    """媒体槽未选时能否安全跳过：全部目标端口都可省略才返回 True。
+
+    None 表示无法确认（没连目标、schema 拿不到、目标字段不匹配等）；调用方
+    只能保守显示，不承诺跳过。
+    """
+    connections = slot.get("connections")
+    if not isinstance(connections, list):
+        return None
+    if not connections:
+        return True
+    if provider is None:
+        return None
+    results: list[bool | None] = []
+    for connection in connections:
+        if not isinstance(connection, dict):
+            results.append(None)
+            continue
+        target_class = str(connection.get("target_class_type") or "")
+        target_field = str(connection.get("target_field") or "")
+        try:
+            declarations = provider.node_inputs(target_class)
+        except Exception:  # noqa: BLE001 - schema 失败按无法确认处理
+            declarations = None
+        results.append(input_is_optional(declarations, target_field))
+    if any(result is False for result in results):
+        return False
+    if any(result is None for result in results):
+        return None
+    return True
+
+
 def enrich_slots(slots: list[dict[str, Any]], provider: Any) -> list[dict[str, Any]]:
     """用节点输入声明补充控件语义（计划 §3.1/§3.3）；拿不到声明的槽位原样保留。
 
-    只写显示层元数据（``control`` / ``candidates``），不改 ``field_type`` /
-    ``default`` / ``role``——override 仍按槽位当前值的原类型保真转换（计划 §3.4）：
+    只写显示层元数据（``control`` / ``candidates`` / ``media_optional``），不改
+    ``field_type`` / ``default`` / ``role``——override 仍按槽位当前值的原类型
+    保真转换（计划 §3.4）：
     - 声明为枚举（COMBO / 旧式列表 / STRING+options）→ ``control=combo`` + 候选；
       当前值不在候选里也保留（前端不静默替换，提交按原值转换）；
     - 声明为 multiline STRING → ``control=multiline``（多行提示词框）；
-    - 媒体槽（显式映射）→ ``control=media`` + ``media`` 类型，与 schema 无关。
+    - 媒体槽（显式映射）→ ``control=media`` + ``media`` 类型，并按下游目标声明
+      确认未选时能否跳过（``media_optional``），与执行端的移除判断共用规则。
     """
     for slot in slots:
         field_type = str(slot.get("field_type") or "")
         if field_type in ("image", "audio", "video"):
             slot["control"] = "media"
             slot["media"] = field_type
+            slot["media_optional"] = _media_slot_optional(slot, provider)
             continue
         decls = provider.node_inputs(str(slot.get("class_type") or "")) if provider else None
         decl = (decls or {}).get(str(slot.get("field_name") or "")) if decls else None

@@ -398,14 +398,10 @@ function renderParamForm() {
     note.textContent = "这份工作流没有可调的参数，直接点「开始生成」即可。";
     form.append(note);
   }
-  // 同一角色出现多个槽位（如两个 LoRA 加载器）时，主标签要带节点信息才分得清
-  // ——与 ComfyUI 前端「控件长在各自节点上」的辨识口径一致。
-  const roleCounts = new Map();
+  // 同一角色出现多个槽位（如两个 LoRA 加载器）时，完整标签本身带节点号与节点名，
+  // 不再额外拼一次节点信息。
   for (const slot of slots) {
-    if (slot.role) roleCounts.set(slot.role, (roleCounts.get(slot.role) || 0) + 1);
-  }
-  for (const slot of slots) {
-    form.append(renderSlot(slot, roleCounts));
+    form.append(renderSlot(slot));
   }
 }
 
@@ -587,7 +583,7 @@ function attachCandidateCombo(input, wrap, candidatesFn) {
   input.addEventListener("blur", hideList);
 }
 
-function renderSlot(slot, roleCounts = new Map()) {
+function renderSlot(slot) {
   const type = slot.field_type;
   // 媒体槽内部有自己的「选择文件」label：<label> 不能嵌 <label>，外层用 div。
   const isMedia = slot.control === "media" || MEDIA_FIELD_TYPES.has(type);
@@ -599,21 +595,10 @@ function renderSlot(slot, roleCounts = new Map()) {
   const roleLabel = slot.role === "resolution"
     ? (slot.field_name === "height" ? "分辨率（高）" : "分辨率（宽）")
     : ROLE_LABELS[slot.role];
-  if (roleLabel) {
-    // 主提示词等有角色的槽位：角色名做主标签，原始槽位名退为备注。
-    // 同角色有多个槽位时补上节点名（节点标题优先，没有就用节点号）。
-    if ((roleCounts.get(slot.role) || 0) > 1) {
-      const nodeRef = slot.node_title
-        ? `${slot.node_title}（节点 ${slot.node_id}）`
-        : `节点 ${slot.node_id}`;
-      title.textContent = `${roleLabel} · ${nodeRef}`;
-    } else {
-      title.textContent = roleLabel;
-    }
-    title.title = slot.label || "";
-  } else {
-    title.textContent = slot.label || `${slot.node_id} · ${slot.field_name}`;
-  }
+  const fullLabel = slot.label || `${slot.node_id} · ${slot.field_name}`;
+  // 有用途角色的槽位也要显示完整来源与端口映射；角色名只做前缀，不覆盖映射。
+  title.textContent = roleLabel ? `${roleLabel} · ${fullLabel}` : fullLabel;
+  title.title = fullLabel;
   wrap.append(title);
   const key = `${slot.node_id}|${slot.field_name}`;
   wrap.dataset.paramKey = key;
@@ -729,12 +714,19 @@ function renderMediaPicker(slot, key) {
   const note = document.createElement("span");
   note.className = "comfyui-media-note";
   const emptyInWorkflow = !String(slot.default ?? "").trim() || String(slot.default).trim() === "None";
-  note.textContent = picked
-    ? `已选：${picked.name}`
-    : emptyInWorkflow
-      ? "未选"
-      : "未选则沿用工作流素材";
-  note.title = note.textContent;
+  const skipSafe = slot.media_optional === true;
+  let status = "";
+  if (picked) {
+    status = `已选：${picked.name}`;
+  } else if (skipSafe) {
+    status = "未选即跳过";
+  } else if (emptyInWorkflow) {
+    status = "请选择文件";
+  } else {
+    status = "未选沿用原文件";
+  }
+  note.textContent = status;
+  note.title = status;
   const actions = document.createElement("div");
   actions.className = "comfyui-media-actions";
   const pickLabel = document.createElement("label");
@@ -752,7 +744,11 @@ function renderMediaPicker(slot, key) {
     clear.type = "button";
     clear.className = "control-button tiny";
     clear.textContent = "清除";
-    clear.title = "取消选择：生成时按工作流里原本的文件执行";
+    clear.title = skipSafe
+      ? "清除选择：生成时跳过这个输入"
+      : emptyInWorkflow
+        ? "清除选择：回到工作流里的空值"
+        : "清除选择：生成时按工作流原本的文件执行";
     clear.addEventListener("click", () => {
       comfyui.mediaSelection.delete(key);
       rerenderParamForm();
@@ -881,7 +877,7 @@ function collectOverrides() {
 }
 
 // 媒体槽已选的受管文件（提交时随任务走受管引用，执行前由服务端转传 ComfyUI）。
-// 清除/未选的槽不提交——生成时按工作流里原本的文件执行。
+// 未选的槽不提交：声明为可选的连接由执行端移除，其余按工作流原本的值执行。
 function collectMediaInputs() {
   const items = [];
   for (const slot of comfyui.detail?.params || []) {
@@ -1007,7 +1003,7 @@ async function pollActiveTask() {
 function taskFingerprint(row) {
   const progress = row.progress || {};
   return JSON.stringify([
-    row.status || "", row.detail || "", row.error || "",
+    row.workflow_name || "", row.status || "", row.detail || "", row.error || "",
     Number(progress.done || 0), Number(progress.total || 0), Number(progress.failed || 0),
     (row.result?.outputs || []).length,
     Number(row.created_at || 0), Number(row.finished_at || 0),

@@ -4058,6 +4058,8 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
   background: var(--surface); color: var(--text); padding: 4px 8px; font-size: 12px;
 }
 .comfyui-param textarea { resize: vertical; line-height: 1.5; font-family: inherit; }
+/* 完整映射可能带换行（多输出/多目标）：保留换行并允许长端口名断行。 */
+.comfyui-param-label { white-space: pre-line; overflow-wrap: anywhere; line-height: 1.5; }
 .comfyui-param:first-of-type .comfyui-param-label { color: var(--text); font-weight: 600; }
 /* Checkpoint 候选下拉：跟随输入框的浮层，候选为空时不出现（自由输入不受影响）。 */
 .comfyui-combo { position: relative; }
@@ -4089,7 +4091,7 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 }
 .comfyui-media-preview audio { width: 100%; height: 34px; display: block; }
 .comfyui-media-preview:empty { display: none; }
-.comfyui-media-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.comfyui-media-note { overflow-wrap: anywhere; white-space: normal; }
 .comfyui-media-actions { display: flex; align-items: center; gap: 6px; }
 .comfyui-media-pick { cursor: pointer; }
 /* 全局「label input」会把选择按钮里藏文件的 input 按 40px 文本框摆出来（hidden 的
@@ -4104,7 +4106,7 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
   display: flex; align-items: center; gap: 8px; font-size: 11.5px;
   color: var(--text); padding: 3px 2px; cursor: pointer;
 }
-.comfyui-params-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.comfyui-params-item span { overflow-wrap: anywhere; white-space: pre-line; line-height: 1.45; }
 /* 全局「label input」按文本框渲染（width:100% + 40px 高 + 边框），会把这行的勾选框
    撑成大方块；这里还原成原生小勾选框。 */
 .comfyui-params-item input[type="checkbox"] {

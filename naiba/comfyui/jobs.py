@@ -263,10 +263,12 @@ class ComfyUIJobManager:
         task = self.store.get_task(task_id)
         if task is None:
             return None
-        task = dict(task)
-        task["can_retry"] = str(task.get("status") or "") in {"failed", "cancelled", "interrupted"}
-        task["can_cancel"] = str(task.get("status") or "") in COMFYUI_ACTIVE_STATUSES
-        return task
+        # 与 tasks() 返回同一套精简字段：详情轮询会直接替换列表里的行，
+        # 两边形状不一致会让卡片标题在「任务」和工作流名之间来回闪。
+        row = self._slim(task)
+        row["can_retry"] = str(task.get("status") or "") in {"failed", "cancelled", "interrupted"}
+        row["can_cancel"] = str(task.get("status") or "") in COMFYUI_ACTIVE_STATUSES
+        return row
 
     def events(self, task_id: str, after: int = 0) -> list[dict[str, Any]]:
         return self.store.read_events(task_id, after=after)

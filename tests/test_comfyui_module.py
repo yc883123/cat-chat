@@ -31,7 +31,12 @@ from naiba.comfyui import PARAMS_SCHEMA_VERSION  # noqa: E402
 from naiba.comfyui.jobs import ComfyUIJobManager, ComfyUITaskError  # noqa: E402
 from naiba.comfyui.params import apply_overrides, enrich_slots, media_kind_of_field, scan_params  # noqa: E402
 from naiba.comfyui.runner import ComfyUIRunner  # noqa: E402
-from naiba.comfyui.schema import NodeSchemaProvider, parse_input_decl  # noqa: E402
+from naiba.comfyui.schema import (  # noqa: E402
+    NodeSchemaProvider,
+    input_is_optional,
+    parse_autogrow_decl,
+    parse_input_decl,
+)
 from naiba.comfyui.service import (  # noqa: E402
     ComfyUIService,
     UI_FORMAT_ERROR,
@@ -61,6 +66,22 @@ def _sample_prompt() -> dict:
                "inputs": {"lora_name": "my.safetensors", "strength_model": 1.0,
                           "strength_clip": 1.0, "model": ["4", 0], "clip": ["4", 1]},
                "_meta": {"title": "LoRA"}},
+    }
+
+
+def _autogrow_decl(prefix: str, minimum: int = 0, maximum: int = 9,
+                   template_required: bool = True) -> dict:
+    """测试用 Autogrow 组声明（与真实 /object_info 形状一致）。"""
+    return {
+        "kind": "autogrow",
+        "optional": True,
+        "autogrow": {
+            "prefix": prefix,
+            "names": [],
+            "min": minimum,
+            "max": maximum,
+            "template_required": template_required,
+        },
     }
 
 
@@ -242,7 +263,7 @@ class ParamsTests(unittest.TestCase):
         self.assertEqual(media_kind_of_field("LoadImage", "image"), "image")
         self.assertIsNone(media_kind_of_field("LoadImage", "other"))
 
-    def test_media_slot_labels_are_short_and_numbered(self):
+    def test_media_slot_labels_show_source_and_port(self):
         prompt = {
             "1": {"class_type": "LoadImage", "inputs": {"image": "None"}},
             "2": {"class_type": "LoadAudio", "inputs": {"audio": "None"}},
@@ -255,12 +276,55 @@ class ParamsTests(unittest.TestCase):
                 "ref_video_audios.ref_video_audio_2": ["4", 0],
             }},
         }
-        labels = {(slot["node_id"], slot["field_name"]): slot["label"]
-                  for slot in scan_params(prompt)}
-        self.assertEqual(labels[("1", "image")], "参考图 4")
-        self.assertEqual(labels[("2", "audio")], "参考音频 2")
-        self.assertEqual(labels[("3", "video")], "参考视频 1")
-        self.assertEqual(labels[("4", "audio")], "视频音频 3")
+        slots = {(slot["node_id"], slot["field_name"]): slot
+                 for slot in scan_params(prompt)}
+        self.assertEqual(slots[("1", "image")]["label"],
+                         "1 · LoadImage · image → ref_images.ref_image_3")
+        self.assertEqual(slots[("2", "audio")]["label"],
+                         "2 · LoadAudio · audio → ref_audios.ref_audio_1")
+        self.assertEqual(slots[("3", "video")]["label"],
+                         "3 · VHS_LoadVideo · video → ref_videos.ref_video_0")
+        self.assertEqual(slots[("4", "audio")]["label"],
+                         "4 · LoadAudio · audio → ref_video_audios.ref_video_audio_2")
+        # 结构化连接保留目标节点与输出索引，显示层不重复目标节点名。
+        connection = slots[("1", "image")]["connections"][0]
+        self.assertEqual(connection["target_node_id"], "20")
+        self.assertEqual(connection["target_class_type"], "MiniMaxH3ReferenceToVideo")
+        self.assertEqual(connection["target_field"], "ref_images.ref_image_3")
+        self.assertEqual(connection["output_index"], 0)
+
+    def test_slot_label_lists_all_connections_and_output_indexes(self):
+        prompt = {
+            "10": {"class_type": "LoadImage", "inputs": {"image": "a.png"},
+                   "_meta": {"title": "載入圖片"}},
+            "20": {"class_type": "H3", "inputs": {
+                "ref_images.ref_image_0": ["10", 0],
+                "ref_images.ref_image_1": ["10", 0],
+            }},
+            "21": {"class_type": "MaskA", "inputs": {"mask": ["10", 0]}},
+            "22": {"class_type": "MaskB", "inputs": {"mask": ["10", 0]}},
+        }
+        slot = next(s for s in scan_params(prompt) if s["node_id"] == "10")
+        self.assertEqual(
+            slot["label"],
+            "10 · 載入圖片 · image → ref_images.ref_image_0、ref_images.ref_image_1"
+            "、mask（节点 21）、mask（节点 22）",
+        )
+        self.assertEqual(len(slot["connections"]), 4)
+
+        split = {
+            "30": {"class_type": "SplitNode", "inputs": {"x": 1}},
+            "40": {"class_type": "A", "inputs": {"left": ["30", 0]}},
+            "41": {"class_type": "B", "inputs": {"right": ["30", 1]}},
+        }
+        split_slot = next(s for s in scan_params(split) if s["node_id"] == "30")
+        self.assertEqual(split_slot["label"],
+                         "30 · SplitNode · x\n输出 0 → left\n输出 1 → right")
+
+    def test_non_media_slot_also_gets_downstream_ports(self):
+        slot = next(s for s in scan_params(_sample_prompt())
+                    if s["node_id"] == "3" and s["field_name"] == "seed")
+        self.assertIn("· 采样 · seed → samples", slot["label"])
 
     def test_scan_model_loader_roles_offline_fallback(self):
         # UNET/CLIP/VAE/ControlNet 加载字段：字段名 + 类名双重判定（离线回退路径）。
@@ -331,6 +395,64 @@ class SchemaAndEnrichTests(unittest.TestCase):
         for spec in (["IMAGE", {}], ["MODEL", {}], ["MY_CUSTOM_TYPE", {}], None, [], "x",
                      [["a", 1]], ["COMBO", {"options": []}]):
             self.assertIsNone(parse_input_decl(spec), spec)
+
+    def test_parse_autogrow_decl_prefix_names_and_bad_shapes(self):
+        spec = ["COMFY_AUTOGROW_V3", {"template": {
+            "input": {"required": {"ref_image": ["IMAGE", {}]}},
+            "prefix": "ref_image_", "min": 0, "max": 9,
+        }}]
+        parsed = parse_autogrow_decl(spec)
+        self.assertEqual(parsed["prefix"], "ref_image_")
+        self.assertEqual(parsed["names"], [])
+        self.assertEqual(parsed["min"], 0)
+        self.assertEqual(parsed["max"], 9)
+        self.assertTrue(parsed["template_required"])
+        names = parse_autogrow_decl(["COMFY_AUTOGROW_V3", {"template": {
+            "input": {"optional": {"ref": ["IMAGE", {}]}},
+            "names": ["a", "b"], "min": 1,
+        }}])
+        self.assertEqual(names["names"], ["a", "b"])
+        self.assertEqual(names["max"], 2)
+        self.assertFalse(names["template_required"])
+        for bad in (["IMAGE", {}], ["COMFY_AUTOGROW_V3", {}],
+                    ["COMFY_AUTOGROW_V3", {"template": {}}], None, "x"):
+            self.assertIsNone(parse_autogrow_decl(bad), bad)
+
+    def test_input_is_optional_autogrow_range_min_and_prefix(self):
+        decls = {"ref_images": _autogrow_decl("ref_image_", minimum=2, maximum=4)}
+        # 0/1 是 min 要求的必填槽，不能承诺跳过。
+        self.assertFalse(input_is_optional(decls, "ref_images.ref_image_0"))
+        self.assertFalse(input_is_optional(decls, "ref_images.ref_image_1"))
+        self.assertTrue(input_is_optional(decls, "ref_images.ref_image_2"))
+        # 越界、前导零、前缀不符、组名本身都不是可确认的槽位。
+        for field in ("ref_images.ref_image_4", "ref_images.ref_image_01",
+                      "ref_images.other_2", "ref_images"):
+            self.assertIsNone(input_is_optional(decls, field), field)
+
+    def test_input_is_optional_exact_and_unknown_group(self):
+        decls = {
+            "vae": {"kind": "unknown", "optional": True},
+            "image": {"kind": "unknown", "optional": False},
+            "ref_images": {"kind": "unknown", "optional": True},
+        }
+        self.assertTrue(input_is_optional(decls, "vae"))
+        self.assertFalse(input_is_optional(decls, "image"))
+        # 只有「组在 optional 块」不足以证明动态槽可省略。
+        self.assertIsNone(input_is_optional(decls, "ref_images.ref_image_0"))
+        self.assertIsNone(input_is_optional(None, "ref_images.ref_image_0"))
+
+    def test_provider_parses_autogrow_group_from_object_info(self):
+        provider = NodeSchemaProvider("http://127.0.0.1:1")
+        payload = {"input": {"optional": {"ref_images": ["COMFY_AUTOGROW_V3", {
+            "template": {"input": {"required": {"ref_image": ["IMAGE", {}]}},
+                         "prefix": "ref_image_", "min": 0, "max": 9},
+        }]}}}
+        with mock.patch.object(comfyui_client, "object_info_node", return_value=payload):
+            fields = provider._fetch("MiniMaxH3ReferenceToVideo")
+        self.assertEqual(fields["ref_images"]["kind"], "autogrow")
+        self.assertTrue(fields["ref_images"]["optional"])
+        self.assertEqual(fields["ref_images"]["autogrow"]["min"], 0)
+        self.assertTrue(input_is_optional(fields, "ref_images.ref_image_0"))
 
     def _provider_with(self, payload_or_error):
         provider = NodeSchemaProvider("http://127.0.0.1:1")
@@ -403,6 +525,56 @@ class SchemaAndEnrichTests(unittest.TestCase):
         media = enrich_slots(slots, None)
         self.assertEqual(media[0]["control"], "media")
         self.assertEqual(media[0]["media"], "image")
+        # 没有下游消费者：未选跳过不会影响任何节点。
+        self.assertTrue(media[0]["media_optional"])
+
+    def test_enrich_slots_media_optional_requires_all_consumers_optional(self):
+        prompt = {
+            "10": {"class_type": "LoadImage", "inputs": {"image": "None"}},
+            "20": {"class_type": "OptionalConsumer", "inputs": {
+                "ref_images.ref_image_0": ["10", 0]}},
+            "21": {"class_type": "RequiredConsumer", "inputs": {
+                "ref_images.ref_image_1": ["10", 0]}},
+        }
+        slots = scan_params(prompt)
+        media = next(s for s in slots if s["node_id"] == "10")
+        self.assertEqual(len(media["connections"]), 2)
+
+        class _Provider:
+            def node_inputs(self, class_type):
+                if class_type == "OptionalConsumer":
+                    return {"ref_images": _autogrow_decl("ref_image_")}
+                if class_type == "RequiredConsumer":
+                    return {"ref_images": _autogrow_decl("ref_image_", minimum=2)}
+                return None
+
+        enrich_slots(slots, _Provider())
+        self.assertFalse(media["media_optional"],
+                         "混有必需消费者时不能承诺整份素材会跳过")
+
+        # 两个消费者都 optional 才允许跳过。
+        class _AllOptional:
+            def node_inputs(self, class_type):
+                return {"ref_images": _autogrow_decl("ref_image_")}
+
+        enrich_slots(slots, _AllOptional())
+        self.assertTrue(media["media_optional"])
+
+    def test_enrich_slots_media_optional_unknown_when_schema_missing(self):
+        prompt = {
+            "10": {"class_type": "LoadImage", "inputs": {"image": "None"}},
+            "20": {"class_type": "UnknownConsumer", "inputs": {
+                "ref_images.ref_image_0": ["10", 0]}},
+        }
+        slots = scan_params(prompt)
+        media = next(s for s in slots if s["node_id"] == "10")
+
+        class _Unknown:
+            def node_inputs(self, class_type):
+                return None
+
+        enrich_slots(slots, _Unknown())
+        self.assertIsNone(media["media_optional"])
 
 
 class ServiceImportTests(unittest.TestCase):
@@ -625,9 +797,10 @@ class RunnerTests(unittest.TestCase):
         }
         declarations = {
             "MiniMaxH3ReferenceToVideo": {
-                key: {"optional": True} for key in (
-                    "ref_images", "ref_audios", "ref_videos", "ref_video_audios",
-                )
+                "ref_images": _autogrow_decl("ref_image_"),
+                "ref_audios": _autogrow_decl("ref_audio_"),
+                "ref_videos": _autogrow_decl("ref_video_"),
+                "ref_video_audios": _autogrow_decl("ref_video_audio_"),
             }
         }
         class_provider = type("Provider", (), {
@@ -662,6 +835,32 @@ class RunnerTests(unittest.TestCase):
             self.runner._remove_unselected_optional_media(prompt, [], "http://127.0.0.1:8188")
         self.assertEqual(prompt["20"]["inputs"]["image"], ["10", 0])
         self.assertEqual(prompt["21"]["inputs"]["image"], ["10", 0])
+
+    def test_unselected_media_cleanup_honors_autogrow_min_and_unknown_groups(self):
+        prompt = {
+            "10": {"class_type": "LoadImage", "inputs": {"image": "None"}},
+            "11": {"class_type": "LoadImage", "inputs": {"image": "None"}},
+            "20": {"class_type": "AutogrowConsumer", "inputs": {
+                "ref_images.ref_image_0": ["10", 0],
+                "ref_images.ref_image_2": ["11", 0],
+            }},
+            "21": {"class_type": "UnknownGroupConsumer", "inputs": {
+                "ref_images.ref_image_1": ["10", 0]}},
+        }
+        declarations = {
+            # min=2：0/1 号槽位是 required，即使连接未选也不能移除。
+            "AutogrowConsumer": {"ref_images": _autogrow_decl("ref_image_", minimum=2)},
+            # 只有 optional 归属、没有可解析的 Autogrow：保守保留。
+            "UnknownGroupConsumer": {"ref_images": {"kind": "unknown", "optional": True}},
+        }
+        class_provider = type("Provider", (), {
+            "node_inputs": lambda self, class_type: declarations.get(class_type),
+        })
+        with mock.patch("naiba.comfyui.runner.NodeSchemaProvider", return_value=class_provider()):
+            self.runner._remove_unselected_optional_media(prompt, [], "http://127.0.0.1:8188")
+        self.assertIn("ref_images.ref_image_0", prompt["20"]["inputs"])
+        self.assertNotIn("ref_images.ref_image_2", prompt["20"]["inputs"])
+        self.assertIn("ref_images.ref_image_1", prompt["21"]["inputs"])
 
     def test_media_inputs_uploaded_once_and_backfilled(self):
         # 计划 §5.2：执行前上传受管资产并回填进提交副本；同一任务同资产只传一次；
@@ -1145,6 +1344,50 @@ class ServiceApiTests(unittest.TestCase):
         again = self.service.store.get_workflow(entry["id"])
         self.assertEqual(again.get("params_version"), PARAMS_SCHEMA_VERSION)
 
+    def test_detail_retries_unconfirmed_media_optionality(self):
+        prompt = {
+            "10": {"class_type": "LoadImage", "inputs": {"image": "None"}},
+            "20": {"class_type": "H3", "inputs": {
+                "ref_images.ref_image_0": ["10", 0]}},
+        }
+        entry = self.service.store.save_workflow({
+            "id": self.service.store.new_workflow_id(), "name": "媒体升级",
+            "prompt": prompt, "params": scan_params(prompt),
+            "params_version": PARAMS_SCHEMA_VERSION,
+            "created_at": 1, "updated_at": 1,
+        })
+        media_before = next(s for s in entry["params"] if s["node_id"] == "10")
+        self.assertNotIn("media_optional", media_before)
+
+        # 升级时 ComfyUI 离线：不查 schema、不落盘假结论。
+        with mock.patch("naiba.comfyui.service.client.reachable", return_value=None), \
+             mock.patch.object(NodeSchemaProvider, "_fetch") as fetch:
+            detail, _status = self.service.api_workflow(entry["id"])
+            fetch.assert_not_called()
+        media_offline = next(s for s in detail["workflow"]["params"] if s["node_id"] == "10")
+        self.assertIsNone(media_offline.get("media_optional"))
+
+        # 下次打开详情且 ComfyUI 可达：只补媒体可选性并落盘。
+        fields = {"ref_images": _autogrow_decl("ref_image_")}
+
+        def _fetch(class_type):
+            return fields if class_type == "H3" else None
+
+        with mock.patch("naiba.comfyui.service.client.reachable", return_value={"ok": True}), \
+             mock.patch.object(NodeSchemaProvider, "_fetch", side_effect=_fetch) as fetch:
+            detail, _status = self.service.api_workflow(entry["id"])
+            self.assertGreaterEqual(fetch.call_count, 1)
+        media_online = next(s for s in detail["workflow"]["params"] if s["node_id"] == "10")
+        self.assertTrue(media_online["media_optional"])
+        saved = next(s for s in self.service.store.get_workflow(entry["id"])["params"]
+                     if s["node_id"] == "10")
+        self.assertTrue(saved["media_optional"])
+
+        # 结论已确认后不再反复探测 schema。
+        with mock.patch("naiba.comfyui.service.client.reachable",
+                        side_effect=AssertionError("已确认的媒体槽不应再探 ComfyUI")):
+            self.service.api_workflow(entry["id"])
+
     def test_workflow_visible_params_saved_and_restored(self):
         entry = self.service.store.save_workflow({
             "id": self.service.store.new_workflow_id(), "name": "n",
@@ -1344,6 +1587,10 @@ class ServiceApiTests(unittest.TestCase):
         self.assertIn("mediaKind(", js)
         self.assertIn("attachmentThumbUrl(", js)
         self.assertIn('createElement("audio")', js)
+        self.assertIn("slot.media_optional === true", js)
+        self.assertIn("未选即跳过", js)
+        self.assertIn("未选沿用原文件", js)
+        self.assertIn("请选择文件", js)
 
     def test_free_models_reports_pending_when_tasks_active(self):
         import naiba.comfyui.service as service_module
@@ -1376,6 +1623,13 @@ class ServiceApiTests(unittest.TestCase):
         self.assertEqual(len(rows["tasks"]), 1)
         self.assertNotIn("checkpoint", rows["tasks"][0])
         self.assertIn("workflow_name", rows["tasks"][0])
+        # 详情轮询与列表返回同一套精简字段，否则第一张任务卡的标题会在
+        # 「任务」和工作流名之间来回闪。
+        detail, _ = self.service.api_task(rows["tasks"][0]["id"])
+        self.assertNotIn("checkpoint", detail["task"])
+        self.assertEqual(detail["task"]["workflow_name"], "n")
+        self.assertEqual(detail["task"]["shots"], 1)
+        self.assertIn("can_cancel", detail["task"])
 
     def test_slim_tasks_include_output_file_paths(self):
         # 前端要拿绝对路径去走 /api/file：手机/局域网靠 URL 口令取字节，

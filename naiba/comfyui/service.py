@@ -119,6 +119,40 @@ class ComfyUIService:
         except Exception:  # noqa: BLE001 - 增强失败不阻断导入/详情
             return slots
 
+    @staticmethod
+    def _unconfirmed_media_slots(params: list[Any]) -> list[dict[str, Any]]:
+        """还没查清「未选能否跳过」的媒体槽（升级时 ComfyUI 离线的那批）。"""
+        pending: list[dict[str, Any]] = []
+        for slot in params:
+            if not isinstance(slot, dict):
+                continue
+            if str(slot.get("field_type") or "") not in ("image", "audio", "video"):
+                continue
+            if slot.get("media_optional") is None:
+                pending.append(slot)
+        return pending
+
+    def _refresh_unconfirmed_media(self, entry: dict[str, Any]) -> bool:
+        """只补媒体槽的可选性元数据；不重扫参数、不动用户配置。
+
+        返回是否至少有一个槽从「无法确认」变成了明确结论。若 ComfyUI 仍离线或
+        目标节点声明缺失，返回 False 且不落盘，下次打开详情再试。
+        """
+        params = entry.get("params")
+        if not isinstance(params, list):
+            return False
+        pending = self._unconfirmed_media_slots(params)
+        if not pending:
+            return False
+        base = client.normalize_base_url(self.app.config.data.get("comfyui_url"))
+        if client.reachable(base, timeout=3) is None:
+            return False
+        try:
+            enrich_slots(pending, NodeSchemaProvider(base))
+        except Exception:  # noqa: BLE001 - 补元数据失败不阻断详情
+            return False
+        return any(slot.get("media_optional") is not None for slot in pending)
+
     def api_health(self) -> tuple[dict[str, Any], int]:
         base = client.normalize_base_url(self.app.config.data.get("comfyui_url"))
         # 交互探测用短超时：可达时 /system_stats 毫秒级返回；连不上（尤其被
@@ -199,10 +233,14 @@ class ComfyUIService:
             return {"error": "工作流不存在或已被删除"}, 404
         # 懒升级：参数识别规则升级后（PARAMS_SCHEMA_VERSION 递增），旧导入的
         # 工作流详情时重扫一次并落盘；幂等，版本一致才跳过。
+        # v6 另外补一个只针对媒体槽可选性的重试：升级时 ComfyUI 离线的工作流，
+        # 下次打开详情时只补 media_optional，不重扫、不动用户参数配置。
         if int(entry.get("params_version") or 1) != PARAMS_SCHEMA_VERSION:
             prompt = entry.get("prompt") if isinstance(entry.get("prompt"), dict) else {}
             entry["params"] = self._scan_params_current(prompt)
             entry["params_version"] = PARAMS_SCHEMA_VERSION
+            self.store.save_workflow(entry)
+        elif self._refresh_unconfirmed_media(entry):
             self.store.save_workflow(entry)
         return {"workflow": entry}, 200
 

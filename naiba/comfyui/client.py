@@ -20,6 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from pathlib import Path
 from typing import Any
 
 import urllib.request as _urllib_request
@@ -105,6 +106,23 @@ def reachable(base: str, timeout: int = 10) -> dict[str, Any] | None:
         "os": str(system.get("os") or ""),
         "devices": devices,
     }
+
+
+def object_info_node(base: str, class_type: str, timeout: int = 8) -> dict[str, Any] | None:
+    """读单个节点的 ``/object_info/<类名>`` 声明；拿不到返回 None（调用方降级）。
+
+    供参数扫描的 schema 增强使用：只在导入 / schema 刷新时调用，不进任务轮询。
+    单节点响应远小于全量 object_info；离线 / 节点未安装 / 格式变化都等价于
+    「声明不可用」，不算错误。
+    """
+    url = f"{normalize_base_url(base)}/object_info/{urllib.parse.quote(class_type)}"
+    try:
+        with _DIRECT_OPENER.open(url, timeout=timeout) as resp:
+            data = json.loads(resp.read(2000000).decode("utf-8", errors="replace"))
+    except Exception:  # noqa: BLE001 - 声明拿不到就走降级路径
+        return None
+    node = data.get(class_type) if isinstance(data, dict) else None
+    return node if isinstance(node, dict) else None
 
 
 def submit(base: str, workflow: dict[str, Any]) -> tuple[str, str]:
@@ -233,6 +251,25 @@ def interrupt(base: str) -> bool:
         return False
 
 
+def free_models(base: str, timeout: int = 20) -> tuple[bool, str]:
+    """请求 ComfyUI 卸载全部已加载模型并清执行缓存（``POST /free``）。
+
+    ComfyUI 的语义：不打断正在执行的任务——队列有空档时才真正卸载，所以
+    「已受理」不等于「此刻已释放」。响应体各版本形状不一，只取受理状态。
+    """
+    request = urllib.request.Request(
+        f"{normalize_base_url(base)}/free",
+        data=json.dumps({"unload_models": True, "free_memory": True}).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with _DIRECT_OPENER.open(request, timeout=timeout) as resp:
+            resp.read(100000)
+    except Exception as exc:  # noqa: BLE001 - 网络层失败由调用方转成可读文案
+        return False, f"{type(exc).__name__}: {exc}"
+    return True, ""
+
+
 def delete_queue_items(base: str, prompt_ids: list[str]) -> bool:
     """从 ComfyUI 队列移除指定 prompt（两步取消的第二步）。"""
     if not prompt_ids:
@@ -293,6 +330,53 @@ def lora_names(base: str) -> list[str]:
 
 def random_seed() -> int:
     return secrets.randbelow(SEED_RANDOM_MAX + 1)
+
+
+def upload_media(base: str, path: str, timeout: int = 300) -> tuple[str, str]:
+    """上传一个本地媒体文件到 ComfyUI 输入目录（``POST /upload/image``）。
+
+    图片/视频/音频共用这个端点：核心加载节点（LoadImage/LoadAudio/LoadVideo）
+    与 VHS 的文件枚举都来自 ComfyUI 的 ``input`` 目录，上传后即可被枚举到
+    （目标环境 2026-10-24 逐一确认）。
+
+    返回 (引用值, 失败原因)；成功时原因空串。引用值取自 ComfyUI 响应的
+    ``name``/``subfolder``（subfolder 非空时为 ``subfolder/name``），直接写入
+    工作流副本的对应字段。不传 overwrite：同名不同内容的文件由 ComfyUI
+    改名存放，响应里的 name 是权威值，避免同任务在途引用被静默顶替。
+    """
+    file = Path(path)
+    try:
+        data = file.read_bytes()
+    except OSError as exc:
+        return "", f"读取本地文件失败：{exc}"
+    boundary = "----NaibaChatBoundary" + uuid.uuid4().hex
+    header = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="image"; filename="{file.name}"\r\n'
+        f"Content-Type: application/octet-stream\r\n\r\n"
+    ).encode("utf-8")
+    body = header + data + f"\r\n--{boundary}--\r\n".encode("utf-8")
+    request = urllib.request.Request(
+        f"{normalize_base_url(base)}/upload/image", data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    try:
+        with _DIRECT_OPENER.open(request, timeout=timeout) as resp:
+            payload = json.loads(resp.read(200000).decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read(2000).decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 - 读不到响应体只报状态码
+            detail = ""
+        return "", f"HTTP {exc.code} {detail[:300]}".strip()
+    except Exception as exc:  # noqa: BLE001 - 网络异常带上类型便于诊断
+        return "", f"{type(exc).__name__}: {exc}"
+    name = str((payload or {}).get("name") or "")
+    subfolder = str((payload or {}).get("subfolder") or "")
+    if not name:
+        return "", "ComfyUI 上传响应缺少 name"
+    return (f"{subfolder}/{name}" if subfolder else name), ""
 
 
 def content_digest(data: bytes) -> str:

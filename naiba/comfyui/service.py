@@ -7,16 +7,24 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import time
 import urllib.parse
 from pathlib import Path
 from typing import Any
 
-from naiba.comfyui import PARAMS_SCHEMA_VERSION
+from naiba.comfyui import (
+    COMFYUI_ACTIVE_STATUSES,
+    COMFYUI_RESUMABLE_STATUSES,
+    PARAMS_SCHEMA_VERSION,
+)
 from naiba.comfyui import client
 from naiba.comfyui.jobs import ComfyUIJobManager, ComfyUITaskError
-from naiba.comfyui.params import scan_params
+from naiba.comfyui.params import enrich_slots, scan_params
 from naiba.comfyui.runner import ComfyUIRunner
+from naiba.comfyui.schema import NodeSchemaProvider
 from naiba.comfyui.store import ComfyUIStore, ComfyUIStoreError
 
 # 工作流 JSON 上限（对齐聊天域 _load_comfyui_workflow 的 20 MB 文件上限）。
@@ -45,6 +53,16 @@ def normalize_api_workflow(value: Any) -> dict[str, Any]:
     return candidate
 
 
+def _open_folder(target: Path) -> None:
+    """用系统文件管理器打开目录（单拆出来便于测试打桩，与打标器同实现）。"""
+    if sys.platform.startswith("win"):
+        os.startfile(str(target))  # type: ignore[attr-defined]  # 仅 Windows 有
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(target)])
+    else:
+        subprocess.Popen(["xdg-open", str(target)])
+
+
 class ComfyUIService:
     def __init__(self, app: Any):
         self.app = app
@@ -62,14 +80,44 @@ class ComfyUIService:
         self.runner.shutdown()
 
     def referenced_upload_paths(self) -> set[str]:
-        """缓存清理的引用保护（与 Studio/打标器同一口径）。
+        """缓存清理的引用保护（计划 §5.3）：任务仍引用的输入媒体文件。
 
-        本期造梦机不消费 uploads（图片输入是 P5，接入后这里返回任务引用的
-        上传图集合）；先接入保护入口，方向是「多留不误删」。
+        覆盖排队/执行中（活动）与可重试（interrupted/failed）任务——重试要从
+        快照引用重新上传，文件被清掉重试就断了。completed/cancelled 不保护：
+        资产回收沿用通用 uploads 清理，不另造生命周期。
         """
-        return set()
+        from naiba.core.paths import normalized_path_key
+
+        protected = (*COMFYUI_ACTIVE_STATUSES, *COMFYUI_RESUMABLE_STATUSES)
+        keys: set[str] = set()
+        for task in self.store.list_tasks(limit=5000):
+            if str(task.get("status") or "") not in protected:
+                continue
+            input_data = task.get("input") if isinstance(task.get("input"), dict) else {}
+            for ref in input_data.get("media_inputs") or []:
+                if not isinstance(ref, dict):
+                    continue
+                key = normalized_path_key(Path(str(ref.get("path") or "")).expanduser())
+                if key:
+                    keys.add(key)
+        return keys
 
     # ---- 连接 ----
+
+    def _scan_params_current(self, prompt: dict[str, Any]) -> list[dict[str, Any]]:
+        """按当前识别规则扫描 + 节点声明增强（计划 §3.1）。
+
+        增强只在导入 / schema 刷新时访问 /object_info（按节点类缓存）；ComfyUI
+        离线时退回纯规则扫描，不阻断工作流读取。
+        """
+        slots = scan_params(prompt)
+        base = client.normalize_base_url(self.app.config.data.get("comfyui_url"))
+        if client.reachable(base, timeout=3) is None:
+            return slots
+        try:
+            return enrich_slots(slots, NodeSchemaProvider(base))
+        except Exception:  # noqa: BLE001 - 增强失败不阻断导入/详情
+            return slots
 
     def api_health(self) -> tuple[dict[str, Any], int]:
         base = client.normalize_base_url(self.app.config.data.get("comfyui_url"))
@@ -153,7 +201,7 @@ class ComfyUIService:
         # 工作流详情时重扫一次并落盘；幂等，版本一致才跳过。
         if int(entry.get("params_version") or 1) != PARAMS_SCHEMA_VERSION:
             prompt = entry.get("prompt") if isinstance(entry.get("prompt"), dict) else {}
-            entry["params"] = scan_params(prompt)
+            entry["params"] = self._scan_params_current(prompt)
             entry["params_version"] = PARAMS_SCHEMA_VERSION
             self.store.save_workflow(entry)
         return {"workflow": entry}, 200
@@ -178,7 +226,7 @@ class ComfyUIService:
             "id": self.store.new_workflow_id(),
             "name": name,
             "prompt": prompt,
-            "params": scan_params(prompt),
+            "params": self._scan_params_current(prompt),
             "params_version": PARAMS_SCHEMA_VERSION,
             "created_at": stamp,
             "updated_at": stamp,
@@ -300,6 +348,34 @@ class ComfyUIService:
         return {"ok": True, **result}, 200
 
     # ---- 产物文件 ----
+
+    def api_free_models(self) -> tuple[dict[str, Any], int]:
+        """请求 ComfyUI 卸载已加载模型，释放显存与内存（``POST /free``）。
+
+        ComfyUI 不会因此打断正在执行的任务——队列空下来才真正卸载，所以
+        还有任务在跑时给前端 pending 提示，文案讲清楚「稍后生效」。
+        """
+        base = client.normalize_base_url(self.app.config.data.get("comfyui_url"))
+        if client.reachable(base, timeout=3) is None:
+            return {
+                "ok": False,
+                "error": "连不上 ComfyUI：请确认它已启动，地址是否是设置里的 ComfyUI 地址",
+            }, 200
+        ok, reason = client.free_models(base)
+        if not ok:
+            return {"ok": False, "error": f"ComfyUI 没有响应模型释放请求：{reason}"}, 500
+        pending = bool(self.store.list_tasks(active_only=True, limit=1))
+        return {"ok": True, "pending": pending}, 200
+
+    def api_reveal_outputs(self) -> tuple[dict[str, Any], int]:
+        """在运行本应用的电脑上打开产物根目录（路径固定，不收客户端参数）。"""
+        try:
+            target = self.store.outputs_dir.resolve()
+            target.mkdir(parents=True, exist_ok=True)
+            _open_folder(target)
+        except OSError as exc:
+            return {"error": f"无法打开产物文件夹：{exc}"}, 500
+        return {"ok": True, "path": str(target)}, 200
 
     def task_file(self, task_id: str, name: str) -> Path | None:
         """解析任务产物文件的本地路径；名字含路径分隔符或文件不存在一律 None。"""

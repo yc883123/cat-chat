@@ -35,4 +35,9 @@ MAX_FILES_PER_SHOT = 40
 MAX_WORKFLOW_PARAMS = 500
 # 参数扫描的 schema 版本：升级识别规则（新增 role 等）后递增，工作流详情时
 # 对旧版本条目重扫一次并落盘（幂等懒升级）。v3：宽/高识别为 resolution（分辨率）。
-PARAMS_SCHEMA_VERSION = 3
+# v4：schema 增强扫描（多行/枚举候选/模型角色 unet/clip/vae/controlnet）+
+# 媒体槽显式映射（LoadImage/LoadAudio/LoadVideo/VHS_LoadVideo）。
+PARAMS_SCHEMA_VERSION = 4
+# 输入媒体单文件上限：与通用上传（80 MB）同口径；ComfyUI /upload/image 本身
+# 没有更严的服务端限制，取应用侧一致值。
+MEDIA_INPUT_MAX_BYTES = 80 * 1024 * 1024

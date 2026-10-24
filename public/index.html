@@ -547,7 +547,7 @@
                 <button class="control-button tiny" id="comfyuiImportBtn" type="button">导入</button>
                 <button class="control-button tiny" id="comfyuiRefreshWorkflows" type="button" title="重新读取工作流列表">刷新</button>
               </div>
-              <p class="comfyui-reminder">这份工作流请先在你自己的 ComfyUI 里完整跑出过结果，再导出到这里。没跑通过的工作流，在这里失败时你看不到 ComfyUI 那边的报错画面，排查会很难。</p>
+              <p class="comfyui-reminder">请先在自己的 ComfyUI 里跑通，再用「导出（API）」存成 JSON 导入。自定义节点的参数默认不进主表单，要用「编辑参数」手动勾选。</p>
               <div class="comfyui-workflow-list" id="comfyuiWorkflowList" aria-label="工作流列表"></div>
             </aside>
             <!-- 中：连接状态 / 参数表单 / 提交 -->
@@ -573,7 +573,11 @@
               <div class="comfyui-tasks" id="comfyuiTasksSection">
                 <div class="comfyui-tasks-head">
                   <strong>任务</strong>
-                  <button class="control-button tiny" id="comfyuiClearTasks" type="button" title="删除已结束的任务和它们的产物">清除已结束</button>
+                  <span class="comfyui-tasks-actions">
+                    <button class="control-button tiny" id="comfyuiFreeModels" type="button" title="让 ComfyUI 卸载已加载的模型，释放显存与内存；正在执行的任务不受影响，会在任务结束后卸载">释放模型</button>
+                    <button class="control-button tiny" id="comfyuiOpenOutputs" type="button" title="在运行 Cat Chat 的电脑上打开产物文件夹">产物</button>
+                    <button class="control-button tiny" id="comfyuiClearTasks" type="button" title="删除已结束的任务和它们的产物">清除</button>
+                  </span>
                 </div>
                 <div class="comfyui-task-list" id="comfyuiTaskList" aria-label="任务列表"></div>
               </div>

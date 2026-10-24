@@ -6,12 +6,10 @@
 // ============================================================
 
 import { $, api, localFileUrl, state, toast } from "./01-core.js";
-import { isPywebview, openImageLightbox, saveLocalFile } from "./03-media.js";
+import { attachmentThumbUrl, isPywebview, mediaKind, saveLocalFile } from "./03-media.js";
 import { currentStudioPage, onStudioPageChange } from "./22-studio.js";
 const POLL_MS = 1200;
 const REFRESH_MS = 5000;
-const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
-const VIDEO_EXTS = new Set([".mp4", ".webm", ".mov"]);
 
 const comfyui = {
   workflows: [],
@@ -28,6 +26,8 @@ const comfyui = {
   url: "",
   modelCandidates: null,   // 模型候选缓存 {checkpoints, loras}；null = 还没拉过
   deleting: new Set(),     // 正在「取消并删除」的任务 id，防重复提交
+  mediaSelection: new Map(), // 媒体槽已选文件 {slotKey: {path, name, thumb_path}}；切工作流清空
+  uploadingSlot: "",       // 正在上传的媒体槽 key（防并发点选）
 };
 
 // ============================================================
@@ -55,6 +55,8 @@ export function bindComfyuiEvents() {
   $("#comfyuiImportFile")?.addEventListener("change", onImportFile);
   $("#comfyuiSubmit")?.addEventListener("click", () => void submitTask());
   $("#comfyuiClearTasks")?.addEventListener("click", () => void clearFinishedTasks());
+  $("#comfyuiFreeModels")?.addEventListener("click", () => void freeModels());
+  $("#comfyuiOpenOutputs")?.addEventListener("click", () => void openOutputsFolder());
   $("#comfyuiParamsSave")?.addEventListener("click", () => void saveParamsConfig());
   $("#comfyuiParamsCancel")?.addEventListener("click", closeParamsDialog);
   $("#comfyuiParamsPicker")?.addEventListener("change", () => {
@@ -266,6 +268,7 @@ async function onWorkflowListClick(event) {
 
 async function selectWorkflow(id) {
   comfyui.selectedId = id;
+  comfyui.mediaSelection.clear();
   renderWorkflowList();
   try {
     const payload = await api(`/api/comfyui/workflows/${encodeURIComponent(id)}`);
@@ -277,8 +280,11 @@ async function selectWorkflow(id) {
   renderParamForm();
 }
 
-// 槽位渲染顺序：正向提示词 → 负向提示词 → 模型 → LoRA → 图片 → 其余（保持导入扫描顺序）。
-const ROLE_ORDER = { positive_prompt: 0, negative_prompt: 1, checkpoint: 2, lora: 3, image: 4 };
+// 槽位渲染顺序：正向提示词 → 负向提示词 → 模型 → 媒体输入 → 其余（保持导入扫描顺序）。
+const ROLE_ORDER = {
+  positive_prompt: 0, negative_prompt: 1, checkpoint: 2, lora: 3,
+  unet: 3, clip: 3, vae: 3, controlnet: 3, image: 4,
+};
 const ROLE_LABELS = {
   positive_prompt: "正向提示词",
   negative_prompt: "负向提示词",
@@ -286,22 +292,34 @@ const ROLE_LABELS = {
   scheduler: "调度器",
   checkpoint: "模型（Checkpoint）",
   lora: "LoRA 模型",
+  unet: "模型（UNET）",
+  clip: "模型（CLIP）",
+  vae: "模型（VAE）",
+  controlnet: "模型（ControlNet）",
   resolution: "分辨率",
 };
 
-// 主表单默认显示的常用参数：提示词、种子、步数、采样器、调度器、模型、LoRA、分辨率。
-// 其余已识别的参数留在数据里，用户可从「编辑参数」加进主表单。
-const DEFAULT_VISIBLE_ROLES = new Set([
-  "positive_prompt", "negative_prompt", "sampler", "scheduler", "checkpoint", "lora",
-  "resolution",
-]);
+// 媒体输入槽位（后端显式映射的加载节点）：field_type 即媒体类型。
+const MEDIA_FIELD_TYPES = new Set(["image", "audio", "video"]);
+const MEDIA_ACCEPT = {
+  image: ".png,.jpg,.jpeg,.webp,.gif",
+  audio: ".wav,.mp3,.m4a,.ogg,.flac",
+  video: ".mp4,.webm,.mov,.m4v,.ogv",
+};
+
+function slotRank(slot) {
+  if (ROLE_ORDER[slot.role] !== undefined) return ROLE_ORDER[slot.role];
+  // 媒体输入排在无角色参数之前（计划 §4：媒体参数放在用户容易找到的位置）。
+  if (MEDIA_FIELD_TYPES.has(slot.field_type)) return 4;
+  return 5;
+}
 
 function orderedSlots(slots) {
   return slots
     .map((slot, index) => ({ slot, index }))
     .sort((a, b) => {
-      const rankA = ROLE_ORDER[a.slot.role] ?? 5;
-      const rankB = ROLE_ORDER[b.slot.role] ?? 5;
+      const rankA = slotRank(a.slot);
+      const rankB = slotRank(b.slot);
       return rankA !== rankB ? rankA - rankB : a.index - b.index;
     })
     .map((item) => item.slot);
@@ -311,11 +329,18 @@ function slotKey(slot) {
   return `${slot.node_id}|${slot.field_name}`;
 }
 
+// 主表单默认显示的常用参数：提示词、种子、步数、采样器、调度器、模型、LoRA、分辨率。
+// 其余已识别的参数留在数据里，用户可从「编辑参数」加进主表单。
+const DEFAULT_VISIBLE_ROLES = new Set([
+  "positive_prompt", "negative_prompt", "sampler", "scheduler", "checkpoint", "lora",
+  "resolution",
+]);
+
 function defaultVisibleKeys(slots) {
   const set = new Set();
   for (const slot of slots) {
     if (DEFAULT_VISIBLE_ROLES.has(slot.role) || slot.field_type === "seed"
-        || slot.field_name === "steps") {
+        || MEDIA_FIELD_TYPES.has(slot.field_type) || slot.field_name === "steps") {
       set.add(slotKey(slot));
     }
   }
@@ -327,7 +352,13 @@ function visibleKeySet() {
   const slots = comfyui.detail?.params || [];
   const stored = comfyui.detail?.visible_params;
   if (Array.isArray(stored)) {
-    return new Set(stored.map((item) => `${item.node_id}|${item.field_name}`));
+    const set = new Set(stored.map((item) => `${item.node_id}|${item.field_name}`));
+    // 媒体输入是后加能力：旧工作流保存过的显示集里不会有它们，合并进来保证
+    // 「图片/音频/视频输入」始终可见（用户仍可在「编辑参数」里去掉）。
+    for (const slot of slots) {
+      if (MEDIA_FIELD_TYPES.has(slot.field_type)) set.add(slotKey(slot));
+    }
+    return set;
   }
   return defaultVisibleKeys(slots);
 }
@@ -463,15 +494,24 @@ function modelCandidatesFor(role) {
   return role === "lora" ? (cache.loras || []) : (cache.checkpoints || []);
 }
 
-// 给模型输入框挂可搜索候选下拉；候选不可用时静默，自由输入不受影响。
-function attachModelCombo(input, wrap, role) {
+// 槽位候选：节点声明里带来的枚举优先（schema 增强）；模型加载槽离线时回退
+// /api/comfyui/models 的目录清单；都没有就自由输入。
+function slotCandidates(slot) {
+  const declared = Array.isArray(slot.candidates) ? slot.candidates : [];
+  if (declared.length) return declared;
+  if (slot.role === "checkpoint" || slot.role === "lora") return modelCandidatesFor(slot.role);
+  return [];
+}
+
+// 给输入框挂可搜索候选下拉；候选不可用时静默，自由输入不受影响。
+function attachCandidateCombo(input, wrap, candidatesFn) {
   const list = document.createElement("div");
   list.className = "comfyui-combo-list";
   list.hidden = true;
   wrap.append(list);
   const renderMatches = () => {
     const text = String(input.value || "").trim().toLowerCase();
-    const matches = modelCandidatesFor(role)
+    const matches = candidatesFn()
       .filter((name) => !text || name.toLowerCase().includes(text))
       .filter((name) => name !== input.value)
       .slice(0, 30);
@@ -501,8 +541,11 @@ function attachModelCombo(input, wrap, role) {
 }
 
 function renderSlot(slot) {
-  const wrap = document.createElement("label");
-  wrap.className = "comfyui-param";
+  const type = slot.field_type;
+  // 媒体槽内部有自己的「选择文件」label：<label> 不能嵌 <label>，外层用 div。
+  const isMedia = slot.control === "media" || MEDIA_FIELD_TYPES.has(type);
+  const wrap = document.createElement(isMedia ? "div" : "label");
+  wrap.className = "comfyui-param" + (isMedia ? " comfyui-param-media" : "");
   const title = document.createElement("span");
   title.className = "comfyui-param-label";
   // 宽/高两个槽位同属「分辨率」角色：主标签要分得清，否则表单里两行都叫「分辨率」。
@@ -519,7 +562,10 @@ function renderSlot(slot) {
   wrap.append(title);
   const key = `${slot.node_id}|${slot.field_name}`;
   wrap.dataset.paramKey = key;
-  const type = slot.field_type;
+  if (isMedia) {
+    wrap.append(renderMediaPicker(slot, key));
+    return wrap;
+  }
   if (type === "bool") {
     const select = document.createElement("select");
     select.dataset.comfyuiSlot = key;
@@ -533,17 +579,8 @@ function renderSlot(slot) {
     wrap.append(select);
     return wrap;
   }
-  if (type === "image") {
-    const input = document.createElement("input");
-    input.type = "text";
-    input.dataset.comfyuiSlot = key;
-    input.value = slot.default ?? "";
-    input.placeholder = "已在 ComfyUI 输入目录里的图片文件名";
-    wrap.append(input);
-    return wrap;
-  }
   if (slot.role === "positive_prompt" || slot.role === "negative_prompt") {
-    // 提示词是多行文本：单行 input 没法正常编辑长提示词；正向框给足高度，
+    // 主提示词是多行文本：单行 input 没法正常编辑长提示词；正向框给足高度，
     // 用户还能拖动下缘继续调。其他有角色的槽位（采样器/调度器/模型）走单行。
     const area = document.createElement("textarea");
     area.rows = slot.role === "positive_prompt" ? 9 : 5;
@@ -551,6 +588,26 @@ function renderSlot(slot) {
     area.value = slot.default ?? "";
     area.spellcheck = false;
     wrap.append(area);
+    return wrap;
+  }
+  if (slot.control === "multiline") {
+    // 节点声明为多行字符串（如自定义多行文本节点）：同样给多行框。
+    const area = document.createElement("textarea");
+    area.rows = 4;
+    area.dataset.comfyuiSlot = key;
+    area.value = slot.default ?? "";
+    area.spellcheck = false;
+    wrap.append(area);
+    return wrap;
+  }
+  if (type === "image") {
+    // 声明拿不到时的兜底：老数据里的 image 槽按普通字符串处理。
+    const input = document.createElement("input");
+    input.type = "text";
+    input.dataset.comfyuiSlot = key;
+    input.value = slot.default ?? "";
+    input.placeholder = "已在 ComfyUI 输入目录里的图片文件名";
+    wrap.append(input);
     return wrap;
   }
   const input = document.createElement("input");
@@ -563,16 +620,120 @@ function renderSlot(slot) {
   } else {
     input.value = slot.default ?? "";
   }
-  if (slot.role === "checkpoint" || slot.role === "lora") {
-    input.placeholder = slot.role === "lora"
-      ? "从 ComfyUI LoRA 里选，或直接输入文件名"
-      : "从 ComfyUI 模型里选，或直接输入文件名";
+  const candidates = slotCandidates(slot);
+  if (slot.control === "combo" || slot.role === "checkpoint" || slot.role === "lora") {
+    // 枚举/模型槽：可搜索下拉；候选不可用或当前值不在候选里也照常编辑提交，
+    // 不静默替换（计划 §4）。
     input.autocomplete = "off";
     input.spellcheck = false;
-    attachModelCombo(input, wrap, slot.role);
+    if (slot.role === "checkpoint" || slot.role === "lora") {
+      input.placeholder = slot.role === "lora"
+        ? "从 ComfyUI LoRA 里选，或直接输入文件名"
+        : "从 ComfyUI 模型里选，或直接输入文件名";
+    }
+    attachCandidateCombo(input, wrap, () => slotCandidates(slot));
   }
   wrap.append(input);
   return wrap;
+}
+
+// ---- 媒体输入槽（图片/音频/视频）：选择受管文件 + 预览 + 替换/清除 ----
+
+const MEDIA_KIND_LABELS = { image: "图片", audio: "音频", video: "视频" };
+
+function renderMediaPicker(slot, key) {
+  const kind = slot.media || slot.field_type;
+  const wrap = document.createElement("div");
+  wrap.className = "comfyui-media";
+  wrap.dataset.comfyuiMediaSlot = key;
+  const picked = comfyui.mediaSelection.get(key) || null;
+  const preview = document.createElement("div");
+  preview.className = "comfyui-media-preview";
+  if (picked) {
+    const record = { path: picked.path, thumb_path: picked.thumb_path || "", name: picked.name || "" };
+    if (mediaKind(record.path, record.name) === "image") {
+      const img = document.createElement("img");
+      img.src = attachmentThumbUrl(record);
+      img.alt = record.name;
+      img.loading = "lazy";
+      preview.append(img);
+    } else if (mediaKind(record.path, record.name) === "video") {
+      const video = document.createElement("video");
+      video.src = localFileUrl(record.path);
+      video.controls = true;
+      video.preload = "metadata";
+      preview.append(video);
+    } else {
+      const audio = document.createElement("audio");
+      audio.src = localFileUrl(record.path);
+      audio.controls = true;
+      audio.preload = "metadata";
+      preview.append(audio);
+    }
+  }
+  const note = document.createElement("span");
+  note.className = "comfyui-media-note";
+  note.textContent = picked
+    ? `已选择：${picked.name}`
+    : `还没选择${MEDIA_KIND_LABELS[kind] || "媒体"}文件：生成时按工作流里原本的文件执行`;
+  note.title = note.textContent;
+  const actions = document.createElement("div");
+  actions.className = "comfyui-media-actions";
+  const pickLabel = document.createElement("label");
+  pickLabel.className = "control-button tiny comfyui-media-pick";
+  pickLabel.textContent = picked ? "替换" : `选择${MEDIA_KIND_LABELS[kind] || "文件"}`;
+  const file = document.createElement("input");
+  file.type = "file";
+  file.accept = MEDIA_ACCEPT[kind] || "";
+  file.hidden = true;
+  file.addEventListener("change", () => void onMediaPicked(slot, key, file));
+  pickLabel.append(file);
+  actions.append(pickLabel);
+  if (picked) {
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "control-button tiny";
+    clear.textContent = "清除";
+    clear.title = "取消选择：生成时按工作流里原本的文件执行";
+    clear.addEventListener("click", () => {
+      comfyui.mediaSelection.delete(key);
+      rerenderParamForm();
+    });
+    actions.append(clear);
+  }
+  wrap.append(preview, note, actions);
+  return wrap;
+}
+
+async function onMediaPicked(slot, key, fileInput) {
+  const file = fileInput.files?.[0];
+  fileInput.value = "";
+  if (!file) return;
+  if (comfyui.uploadingSlot) {
+    toast("上一个文件还在上传，请稍候");
+    return;
+  }
+  comfyui.uploadingSlot = key;
+  const form = new FormData();
+  form.append("file", file, file.name);
+  try {
+    const payload = await api("/api/comfyui/media", { method: "POST", body: form });
+    comfyui.mediaSelection.set(key, {
+      path: String(payload.path || ""),
+      name: String(payload.name || file.name),
+      thumb_path: String(payload.thumb_path || ""),
+    });
+  } catch (error) {
+    toast(`上传失败：${error.message}`);
+  } finally {
+    comfyui.uploadingSlot = "";
+    rerenderParamForm();
+  }
+}
+
+function rerenderParamForm() {
+  // 只重画表单：不动 comfyui.detail / mediaSelection（选择状态由调用方维护）。
+  renderParamForm();
 }
 
 // ---- 导入 ----
@@ -661,6 +822,20 @@ function collectOverrides() {
   return overrides;
 }
 
+// 媒体槽已选的受管文件（提交时随任务走受管引用，执行前由服务端转传 ComfyUI）。
+// 清除/未选的槽不提交——生成时按工作流里原本的文件执行。
+function collectMediaInputs() {
+  const items = [];
+  for (const slot of comfyui.detail?.params || []) {
+    if ((slot.control || "") !== "media" && !MEDIA_FIELD_TYPES.has(slot.field_type)) continue;
+    const picked = comfyui.mediaSelection.get(slotKey(slot));
+    if (picked?.path) {
+      items.push({ node_id: slot.node_id, field_name: slot.field_name, path: picked.path });
+    }
+  }
+  return items;
+}
+
 async function submitTask() {
   if (comfyui.submitting || !comfyui.detail) return;
   const shotsInput = $("#comfyuiShots");
@@ -677,6 +852,7 @@ async function submitTask() {
       body: {
         workflow_id: comfyui.detail.id,
         overrides: collectOverrides(),
+        media_inputs: collectMediaInputs(),
         shots,
       },
     });
@@ -1004,6 +1180,37 @@ async function deleteTaskFlow(taskId, button) {
   }
 }
 
+// 请求 ComfyUI 卸载已加载模型，释放显存/内存。ComfyUI 不打断执行中的任务：
+// 还有任务在跑时它会在队列空下来才卸载，文案要把「稍后生效」讲清楚。
+async function freeModels() {
+  const button = $("#comfyuiFreeModels");
+  if (button) button.disabled = true;
+  try {
+    const payload = await api("/api/comfyui/free", { method: "POST", body: {} });
+    toast(payload?.pending
+      ? "已请求释放模型：还有任务在执行，ComfyUI 会在任务结束后卸载"
+      : "已请求 ComfyUI 释放模型，显存和内存会随之释放");
+  } catch (error) {
+    toast(`释放失败：${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+// 在运行 Cat Chat 的电脑上打开产物根目录（手机端会被服务端拒绝）。
+async function openOutputsFolder() {
+  const button = $("#comfyuiOpenOutputs");
+  if (button) button.disabled = true;
+  try {
+    const payload = await api("/api/comfyui/outputs/open", { method: "POST", body: {} });
+    toast(payload?.path ? `已打开产物文件夹：${payload.path}` : "已打开产物文件夹");
+  } catch (error) {
+    toast(`无法打开产物文件夹：${error.message}`);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 async function clearFinishedTasks() {
   if (!window.confirm("删除全部已结束的任务和它们的产物文件？")) return;
   try {
@@ -1096,25 +1303,38 @@ function outputFileUrl(taskId, name, path) {
   return state.token ? `${direct}?token=${encodeURIComponent(state.token)}` : direct;
 }
 
+// 产物卡与聊天媒体卡同一套类型判定与展示语义（计划 §6）：图片缩略+灯箱、
+// 视频/音频就地播放、其他类型文件 chip。mediaKind 走 /api/bootstrap.media_exts
+// 的公共名单，不再各写一份扩展名正则（.bmp/.svg 曾因名单漂移彻底不可见）。
 function renderOutputCard(taskId, name, path) {
-  const ext = `.${name.split(".").pop()?.toLowerCase() || ""}`;
   const url = outputFileUrl(taskId, name, path);
   const card = document.createElement("figure");
   card.className = "comfyui-output";
-  if (IMAGE_EXTS.has(ext)) {
+  const kind = mediaKind(String(path || url), name);
+  if (kind === "image") {
     const img = document.createElement("img");
+    // 造梦机产物没有侧车缩略图（attachmentThumbUrl 会推导 <stem>_thumb.webp 而
+    // 404 破图），直接用原图地址，靠 loading=lazy 控制加载压力。
     img.src = url;
     img.alt = name;
     img.loading = "lazy";
-    img.dataset.comfyuiOutputUrl = url;
+    img.dataset.largeUrl = url;
     img.dataset.comfyuiOutputName = name;
     card.append(img);
-  } else if (VIDEO_EXTS.has(ext)) {
+  } else if (kind === "video") {
     const video = document.createElement("video");
     video.src = url;
     video.controls = true;
+    video.playsInline = true;
     video.preload = "metadata";
     card.append(video);
+  } else if (kind === "audio") {
+    // 音频产物此前退化为下载链接；现在与聊天媒体卡一致，就地播放。
+    const audio = document.createElement("audio");
+    audio.src = url;
+    audio.controls = true;
+    audio.preload = "metadata";
+    card.append(audio);
   } else {
     const link = document.createElement("a");
     link.href = url;
@@ -1149,11 +1369,8 @@ function onOutputGridClick(event) {
     }
     return;
   }
-  const img = event.target.closest("img[data-comfyui-output-url]");
-  if (img) {
-    openImageLightbox(img.dataset.comfyuiOutputUrl, img);
-    return;
-  }
+  // 图片放大走 03-media 的 document 级 data-large-url 委托（与聊天媒体卡同一入口），
+  // 这里不再自己开一次灯箱，避免双触发。
   const link = event.target.closest("a[href]");
   if (link && isPywebview()) {
     void saveLocalFile(link.href, link.textContent || "output.bin");

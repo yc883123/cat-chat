@@ -1,14 +1,20 @@
 """工作流参数扫描：导入时从 API 工作流自动派生可编辑槽位（不要求手写模板）。
 
-扫描规则（绘影的 adapter 设计子集，按 Cat Chat 口径收敛）：
-- 遍历每个节点的 ``inputs``；**值是数组的 = 节点连线**，跳过；
-- 标量值（str/int/float/bool）是控件槽位，按原值类型分类：text / number / bool；
+两层识别（计划 §3.1，显式规则是稳定基线，schema 是增强）：
+- 基线（离线可用）：遍历每个节点的 ``inputs``，标量值按原值类型分类；
+  seed / 提示词 / 采样器 / 模型 / 分辨率 / 媒体槽按字段名 + 类名 + 连线回溯识别；
+- 增强（``enrich_slots``，需 ComfyUI 可达）：读 ``/object_info`` 的节点输入声明，
+  补充多行文本与枚举候选语义；任何拿不到声明的槽位保持基线行为，不阻断。
+- 媒体槽（LoadImage 等显式映射）：field_type 为 image/audio/video，前端渲染
+  文件选择与预览，提交时走受管资产引用 + 执行前上传（不进 overrides）。
+
+扫描规则细节（基线）：
+- **值是数组的 = 节点连线**，跳过；
 - ``seed`` / ``noise_seed`` 数值槽标为 seed 类：默认每次随机（上限 2^50，
   沿用 2026-09-20 教训），用户也可以固定；
-- ``LoadImage.filename`` 标为图片槽位（只标记，本期不上传，P5 再接）；
-- **主提示词识别置顶**（绘影函数 h 的规则子集）：从采样器节点的 ``positive`` /
-  ``negative`` 连线回溯到来源节点的 text 槽，标为 positive_prompt / negative_prompt；
-  连线追不到时按节点/标题名兜底；提示词槽位前端用多行输入框渲染并置顶；
+- **主提示词识别置顶**：从采样器节点的 ``positive`` / ``negative`` 连线回溯到
+  来源节点的 text 槽，标为 positive_prompt / negative_prompt；连线追不到时按
+  节点/标题名兜底；提示词槽位前端用多行输入框渲染并置顶；
 - 节点 ``_meta.title`` 用于生成人类可读的槽位标签。
 """
 
@@ -26,6 +32,12 @@ ROLE_SAMPLER = "sampler"
 ROLE_SCHEDULER = "scheduler"
 ROLE_CHECKPOINT = "checkpoint"
 ROLE_LORA = "lora"
+# 其余模型加载器：schema 的枚举候选作下拉；字段名 + 节点类名双重判定作离线回退
+# （计划 §3.3：映射优先用节点 schema 的枚举，显式已知字段作离线识别回退）。
+ROLE_UNET = "unet"
+ROLE_CLIP = "clip"
+ROLE_VAE = "vae"
+ROLE_CONTROLNET = "controlnet"
 # 出图分辨率：EmptyLatentImage 等节点上的宽/高。默认放进主表单——「换个尺寸再出一张」
 # 是日常操作，藏在「编辑参数」里不合理。
 ROLE_RESOLUTION = "resolution"
@@ -37,6 +49,27 @@ _POSITIVE_TITLE_MARKERS = ("正向", "正面", "positive")
 _NEGATIVE_TITLE_MARKERS = ("负向", "负面", "negative")
 _TITLE_PROMPT_MARKERS = ("提示词", "prompt")
 
+# 显式媒体加载节点映射（计划 §5.1）：节点类（小写）→ (媒体类型, 可上传字段名)。
+# 目标环境 ComfyUI 0.42.0 于 2026-10-24 经 /object_info 逐一确认：
+# LoadImage.image（老导出可能是 filename）、LoadAudio.audio、LoadVideo.file、
+# VHS_LoadVideo.video —— 文件枚举都来自 input 目录，/upload/image 上传后可见。
+# VHS_LoadAudio.audio_file 是路径字符串输入（协议不同），**刻意不映射**：
+# 保留自由输入，不凭字段名猜上传协议。
+_MEDIA_NODE_FIELDS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "loadimage": ("image", ("image", "filename")),
+    "loadaudio": ("audio", ("audio",)),
+    "loadvideo": ("video", ("file",)),
+    "vhs_loadvideo": ("video", ("video",)),
+}
+
+
+def media_kind_of_field(node_class: str, field_name: str) -> str | None:
+    """显式映射判定：返回 "image"/"audio"/"video"；映射外的字段一律 None。"""
+    entry = _MEDIA_NODE_FIELDS.get(str(node_class or "").lower())
+    if entry and str(field_name) in entry[1]:
+        return entry[0]
+    return None
+
 
 def _field_type(node_class: str, field_name: str, value: Any) -> str | None:
     if isinstance(value, bool):
@@ -46,8 +79,9 @@ def _field_type(node_class: str, field_name: str, value: Any) -> str | None:
             return "seed"
         return "number"
     if isinstance(value, str):
-        if node_class == "LoadImage" and field_name == "filename":
-            return "image"
+        media = media_kind_of_field(node_class, field_name)
+        if media:
+            return media
         return "text"
     return None
 
@@ -126,8 +160,9 @@ def scan_params(prompt: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             role = roles.get((str(node_id), name))
             if not role:
-                # 采样器 / 调度器按字段名识别；checkpoint / LoRA 按字段名 + 节点
-                # 类名双重判定，避免把别处同名文本框误标成模型选择。
+                # 采样器 / 调度器按字段名识别；checkpoint / LoRA / UNET / CLIP /
+                # VAE / ControlNet 按字段名 + 节点类名双重判定，避免把别处同名
+                # 文本框误标成模型选择。
                 if name == "sampler_name":
                     role = ROLE_SAMPLER
                 elif name == "scheduler":
@@ -136,6 +171,14 @@ def scan_params(prompt: dict[str, Any]) -> list[dict[str, Any]]:
                     role = ROLE_CHECKPOINT
                 elif name == "lora_name" and "lora" in class_type.lower():
                     role = ROLE_LORA
+                elif name == "unet_name" and "unetloader" in class_type.lower():
+                    role = ROLE_UNET
+                elif name == "clip_name" and "cliploader" in class_type.lower():
+                    role = ROLE_CLIP
+                elif name == "vae_name" and "vaeloader" in class_type.lower():
+                    role = ROLE_VAE
+                elif name == "control_net_name" and "controlnetloader" in class_type.lower():
+                    role = ROLE_CONTROLNET
                 elif name in _RESOLUTION_FIELDS and field_type == "number":
                     role = ROLE_RESOLUTION
             slots.append({
@@ -151,6 +194,34 @@ def scan_params(prompt: dict[str, Any]) -> list[dict[str, Any]]:
             })
             if len(slots) >= MAX_WORKFLOW_PARAMS:
                 return slots
+    return slots
+
+
+def enrich_slots(slots: list[dict[str, Any]], provider: Any) -> list[dict[str, Any]]:
+    """用节点输入声明补充控件语义（计划 §3.1/§3.3）；拿不到声明的槽位原样保留。
+
+    只写显示层元数据（``control`` / ``candidates``），不改 ``field_type`` /
+    ``default`` / ``role``——override 仍按槽位当前值的原类型保真转换（计划 §3.4）：
+    - 声明为枚举（COMBO / 旧式列表 / STRING+options）→ ``control=combo`` + 候选；
+      当前值不在候选里也保留（前端不静默替换，提交按原值转换）；
+    - 声明为 multiline STRING → ``control=multiline``（多行提示词框）；
+    - 媒体槽（显式映射）→ ``control=media`` + ``media`` 类型，与 schema 无关。
+    """
+    for slot in slots:
+        field_type = str(slot.get("field_type") or "")
+        if field_type in ("image", "audio", "video"):
+            slot["control"] = "media"
+            slot["media"] = field_type
+            continue
+        decls = provider.node_inputs(str(slot.get("class_type") or "")) if provider else None
+        decl = (decls or {}).get(str(slot.get("field_name") or "")) if decls else None
+        if decl is None:
+            continue
+        if decl.get("kind") == "combo":
+            slot["control"] = "combo"
+            slot["candidates"] = list(decl.get("candidates") or [])
+        elif decl.get("kind") == "text" and decl.get("multiline"):
+            slot["control"] = "multiline"
     return slots
 
 

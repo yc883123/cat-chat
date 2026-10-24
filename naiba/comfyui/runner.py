@@ -137,6 +137,11 @@ class ComfyUIRunner:
         prompt = input_data.get("prompt") if isinstance(input_data.get("prompt"), dict) else {}
         overrides = [item for item in (input_data.get("overrides") or [])
                      if isinstance(item, dict)]
+        media_inputs = [item for item in (input_data.get("media_inputs") or [])
+                        if isinstance(item, dict)]
+        # 同一任务执行周期内同一资产只上传一次（计划 §5.2）：任务重试/续跑会
+        # 重新进入 _run_task，从快照引用重新读取并按需重新上传。
+        media_upload_cache: dict[str, str] = {}
         base = self._base_url()
         cancel_event = threading.Event()
         with self._registry_lock:
@@ -190,6 +195,23 @@ class ComfyUIRunner:
                 if index in done_indexes:
                     continue
                 workflow = apply_overrides(prompt, overrides, randomize_seeds=True)
+                media_error = self._apply_media(
+                    base, workflow, media_inputs, media_upload_cache,
+                )
+                if media_error:
+                    message = f"第 {index + 1} 段媒体输入处理失败：{media_error}"
+                    errors.append({"index": index, "error": message})
+                    checkpoint.update(errors=errors)
+                    self.store.update_task(
+                        task_id, checkpoint=checkpoint,
+                        progress=self._progress_counts(checkpoint, shots),
+                        detail=message,
+                    )
+                    self.store.append_event(task_id, {
+                        "type": "shot_failed", "index": index, "error": message,
+                    })
+                    self._fail_task(task_id, message)
+                    return
                 prompt_id, reason = client.submit(base, workflow)
                 if not prompt_id:
                     message = f"第 {index + 1} 段提交失败：{reason}" if reason \
@@ -216,7 +238,7 @@ class ComfyUIRunner:
                 })
                 ok, files, fail_reason = self._wait_shot(
                     base, task_id, index, prompt_id, cancel_event, resubmits,
-                    checkpoint, prompt, overrides,
+                    checkpoint, prompt, overrides, media_inputs, media_upload_cache,
                 )
                 if cancel_event.is_set():
                     break
@@ -270,6 +292,40 @@ class ComfyUIRunner:
             with self._registry_lock:
                 self._cancel_events.pop(task_id, None)
 
+    def _apply_media(
+        self,
+        base: str,
+        workflow: dict[str, Any],
+        media_inputs: list[dict[str, Any]],
+        upload_cache: dict[str, str],
+    ) -> str:
+        """把媒体输入上传 ComfyUI 并回填进工作流副本（计划 §5.2）。
+
+        - 只改提交用的 prompt 副本，不碰工作流库快照与后续任务；
+        - 同一任务执行周期内同一资产只上传一次：``upload_cache`` 按
+          受管引用路径复用 ComfyUI 返回的文件名；
+        - 上传失败返回带媒体类型/节点/字段的错误说明，调用方按该段失败处理；
+          **不回退旧文件名继续提交**。
+        """
+        for item in media_inputs:
+            node_id = str(item.get("node_id") or "")
+            field_name = str(item.get("field_name") or "")
+            path = str(item.get("path") or "")
+            media = str(item.get("media") or "image")
+            node = workflow.get(node_id)
+            if not isinstance(node, dict) or not isinstance(node.get("inputs"), dict) \
+                    or field_name not in node["inputs"]:
+                return (f"{media} 输入（节点 {node_id} · {field_name}）"
+                        "不在这份工作流里，无法回填")
+            reference = upload_cache.get(path)
+            if reference is None:
+                reference, reason = client.upload_media(base, path)
+                if not reference:
+                    return (f"{media} 上传失败（节点 {node_id} · {field_name}）：{reason}")
+                upload_cache[path] = reference
+            node["inputs"][field_name] = reference
+        return ""
+
     def _adopt_submitted(
         self,
         base: str,
@@ -319,6 +375,8 @@ class ComfyUIRunner:
         checkpoint: dict[str, Any],
         prompt: dict[str, Any],
         overrides: list[dict[str, Any]],
+        media_inputs: list[dict[str, Any]],
+        media_upload_cache: dict[str, str],
     ) -> tuple[bool, list[str], str]:
         """轮询一段直到成功 / 失败 / 丢失重提交 / 超时。返回 (ok, 本地文件名, 失败原因)。"""
         deadline = now_ms() + SHOT_TIMEOUT_SECONDS * 1000
@@ -354,6 +412,11 @@ class ComfyUIRunner:
             used = int(resubmits.get(str(index), 0) or 0)
             if used < MAX_RESUBMIT:
                 workflow = apply_overrides(prompt, overrides, randomize_seeds=True)
+                media_error = self._apply_media(
+                    base, workflow, media_inputs, media_upload_cache,
+                )
+                if media_error:
+                    return False, [], f"第 {index + 1} 段媒体输入处理失败：{media_error}"
                 new_prompt_id, _reason = client.submit(base, workflow)
                 if new_prompt_id:
                     resubmits[str(index)] = used + 1

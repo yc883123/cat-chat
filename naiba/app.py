@@ -33,7 +33,7 @@ from naiba.core.migration import (
     _copy_legacy_data, _database_has_conversations, _merge_data_tree,
     _sync_bundled_skills, migrate_legacy_data,
 )
-from naiba.core.media_types import media_exts_payload
+from naiba.core.media_types import MEDIA_EXTS, media_exts_payload
 from naiba.core.network import network_access_status
 from naiba.core.conv_files import (
     FolderConfirmRequired,
@@ -1805,6 +1805,35 @@ class NaibaChatApp:
             SCOPE_UPLOADS,
             # 本次刚落盘的附件无条件保留：它此刻还没落库（引用保护对它无效），
             # 只有保护窗口 + 这条显式保护能拦住"上传即被清理"。
+            protect_paths=[p for p in (result.get("path"), result.get("thumb_path")) if p],
+        )
+        return {**result, "clean_pending": clean_pending}, HTTPStatus.OK
+
+    def _upload_comfyui_spooled(self, spool_path: str, original_name: str) -> tuple[dict[str, Any], int]:
+        """造梦机输入媒体落库（计划 §5.3）：字节保真进 uploads + 后台清理触发。
+
+        与通用上传的差别：ComfyUI 输入媒体要**原样**进工作流（重编码会改变生成
+        结果），imaging 传「保留原图」配置——主文件字节不动，缩略图照常生成供
+        参数表单预览。只收图片/视频/音频扩展名，其他类型直接拒绝。
+        """
+        spool = Path(spool_path)
+        try:
+            data = spool.read_bytes()
+        except OSError as exc:
+            spool.unlink(missing_ok=True)
+            return {"error": f"上传临时文件读取失败：{exc}"}, HTTPStatus.BAD_REQUEST
+        finally:
+            spool.unlink(missing_ok=True)
+        if len(data) > 80 * 1024 * 1024:
+            return {"error": "单个文件不能超过 80 MB"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+        suffix = Path(original_name or "").suffix.lower()
+        if suffix not in MEDIA_EXTS:
+            return {"error": "只支持图片、视频或音频文件"}, HTTPStatus.BAD_REQUEST
+        result = store_uploaded_file(data, original_name, self._paths.data_dir,
+                                     {"image_upload_original": True})
+        clean_pending = self._trigger_cache_clean(
+            SCOPE_UPLOADS,
+            # 本次刚落盘的文件无条件保留：还没被任务引用，引用保护对它无效。
             protect_paths=[p for p in (result.get("path"), result.get("thumb_path")) if p],
         )
         return {**result, "clean_pending": clean_pending}, HTTPStatus.OK

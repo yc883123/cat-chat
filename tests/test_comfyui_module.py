@@ -29,8 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from naiba.comfyui import client as comfyui_client  # noqa: E402
 from naiba.comfyui import PARAMS_SCHEMA_VERSION  # noqa: E402
 from naiba.comfyui.jobs import ComfyUIJobManager, ComfyUITaskError  # noqa: E402
-from naiba.comfyui.params import apply_overrides, scan_params  # noqa: E402
+from naiba.comfyui.params import apply_overrides, enrich_slots, media_kind_of_field, scan_params  # noqa: E402
 from naiba.comfyui.runner import ComfyUIRunner  # noqa: E402
+from naiba.comfyui.schema import NodeSchemaProvider, parse_input_decl  # noqa: E402
 from naiba.comfyui.service import (  # noqa: E402
     ComfyUIService,
     UI_FORMAT_ERROR,
@@ -218,6 +219,43 @@ class ParamsTests(unittest.TestCase):
         self.assertEqual(kinds[("10", "filename")], "image")
         self.assertEqual(kinds[("10", "image_upload")], "bool")
 
+    def test_media_slots_explicit_mapping_only(self):
+        # 显式映射（目标环境 2026-10-24 逐一确认）：LoadImage/LoadAudio/LoadVideo/
+        # VHS_LoadVideo 是媒体槽；映射外的字段（含同名 image/audio/video、
+        # VHS_LoadAudio 的路径字符串）一律保持普通文本，不凭字段名猜上传协议。
+        prompt = {
+            "10": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+            "11": {"class_type": "LoadAudio", "inputs": {"audio": "a.wav"}},
+            "12": {"class_type": "LoadVideo", "inputs": {"file": "a.mp4"}},
+            "13": {"class_type": "VHS_LoadVideo", "inputs": {"video": "a.mp4"}},
+            "14": {"class_type": "CustomNode", "inputs": {"image": "x.png", "audio": "x.wav"}},
+            "15": {"class_type": "VHS_LoadAudio", "inputs": {"audio_file": "input/a.wav"}},
+        }
+        kinds = {(s["node_id"], s["field_name"]): s["field_type"] for s in scan_params(prompt)}
+        self.assertEqual(kinds[("10", "image")], "image")
+        self.assertEqual(kinds[("11", "audio")], "audio")
+        self.assertEqual(kinds[("12", "file")], "video")
+        self.assertEqual(kinds[("13", "video")], "video")
+        self.assertEqual(kinds[("14", "image")], "text")
+        self.assertEqual(kinds[("14", "audio")], "text")
+        self.assertEqual(kinds[("15", "audio_file")], "text")
+        self.assertEqual(media_kind_of_field("LoadImage", "image"), "image")
+        self.assertIsNone(media_kind_of_field("LoadImage", "other"))
+
+    def test_scan_model_loader_roles_offline_fallback(self):
+        # UNET/CLIP/VAE/ControlNet 加载字段：字段名 + 类名双重判定（离线回退路径）。
+        prompt = {
+            "20": {"class_type": "UNETLoader", "inputs": {"unet_name": "m.safetensors"}},
+            "21": {"class_type": "CLIPLoader", "inputs": {"clip_name": "t.safetensors"}},
+            "22": {"class_type": "VAELoader", "inputs": {"vae_name": "v.safetensors"}},
+            "23": {"class_type": "ControlNetLoader", "inputs": {"control_net_name": "c.safetensors"}},
+        }
+        roles = {(s["node_id"], s["field_name"]): s.get("role") for s in scan_params(prompt)}
+        self.assertEqual(roles[("20", "unet_name")], "unet")
+        self.assertEqual(roles[("21", "clip_name")], "clip")
+        self.assertEqual(roles[("22", "vae_name")], "vae")
+        self.assertEqual(roles[("23", "control_net_name")], "controlnet")
+
     def test_apply_overrides_preserves_types_and_original(self):
         prompt = _sample_prompt()
         workflow = apply_overrides(prompt, [
@@ -245,6 +283,91 @@ class ParamsTests(unittest.TestCase):
         negative = apply_overrides(prompt, [{"node_id": "3", "field_name": "seed", "value": -1}],
                                    randomize_seeds=False)
         self.assertNotEqual(negative["3"]["inputs"]["seed"], -1)
+
+
+class SchemaAndEnrichTests(unittest.TestCase):
+    """节点声明解析与参数扫描增强（计划 §3.1-§3.3）：拿不到声明一律降级。"""
+
+    def test_parse_decl_both_combo_styles(self):
+        legacy = parse_input_decl([["a.png", "b.png"], {}])
+        self.assertEqual(legacy, {"kind": "combo", "candidates": ["a.png", "b.png"],
+                                  "multiline": False})
+        modern = parse_input_decl(["COMBO", {"multiselect": False,
+                                             "options": ["x.wav", "y.wav"]}])
+        self.assertEqual(modern["kind"], "combo")
+        self.assertEqual(modern["candidates"], ["x.wav", "y.wav"])
+
+    def test_parse_decl_text_multiline_and_scalars(self):
+        self.assertEqual(parse_input_decl(["STRING", {"multiline": True, "default": ""}]),
+                         {"kind": "text", "candidates": None, "multiline": True})
+        self.assertEqual(parse_input_decl(["STRING", {"default": "x"}]),
+                         {"kind": "text", "candidates": None, "multiline": False})
+        self.assertEqual(parse_input_decl(["INT", {}])["kind"], "number")
+        self.assertEqual(parse_input_decl(["FLOAT", {}])["kind"], "number")
+        self.assertEqual(parse_input_decl(["BOOLEAN", {}])["kind"], "bool")
+
+    def test_parse_decl_connections_and_unknown_rejected(self):
+        # 连线端口（IMAGE/MODEL/…）与没有 options 的未知自定义类型：不是可编辑控件。
+        for spec in (["IMAGE", {}], ["MODEL", {}], ["MY_CUSTOM_TYPE", {}], None, [], "x",
+                     [["a", 1]], ["COMBO", {"options": []}]):
+            self.assertIsNone(parse_input_decl(spec), spec)
+
+    def _provider_with(self, payload_or_error):
+        provider = NodeSchemaProvider("http://127.0.0.1:1")
+        patcher = mock.patch.object(
+            NodeSchemaProvider, "_fetch", side_effect=lambda cls: payload_or_error,
+        )
+        return provider, patcher
+
+    def test_provider_caches_per_class_and_degrades(self):
+        fields = {"image": {"kind": "combo", "candidates": ["a.png"], "multiline": False}}
+
+        def _fetch(class_type):
+            return fields if class_type == "LoadImage" else None
+
+        provider = NodeSchemaProvider("http://127.0.0.1:1")
+        with mock.patch.object(NodeSchemaProvider, "_fetch", side_effect=_fetch) as fetch:
+            self.assertEqual(provider.node_inputs("LoadImage"), fields)
+            self.assertEqual(provider.node_inputs("LoadImage"), fields)
+            self.assertEqual(fetch.call_count, 1, "同一节点类只取一次（按类缓存）")
+        self.assertIsNone(provider.node_inputs("NoSuchNode"), "未安装节点降级为 None")
+
+    def test_provider_fetch_failure_degrades(self):
+        provider, patcher = self._provider_with(None)
+        with patcher:
+            self.assertIsNone(provider.node_inputs("LoadImage"))
+
+    def test_enrich_slots_combo_and_multiline(self):
+        prompt = {
+            "1": {"class_type": "MyPromptNode", "inputs": {"text": "p"}},
+            "2": {"class_type": "KSampler", "inputs": {"sampler_name": "euler", "seed": 1}},
+        }
+        slots = scan_params(prompt)
+        decls = {
+            "MyPromptNode": {"text": {"kind": "text", "candidates": None, "multiline": True}},
+            "KSampler": {"sampler_name": {"kind": "combo",
+                                          "candidates": ["euler", "dpm++2m"], "multiline": False}},
+        }
+
+        class _Provider:
+            def node_inputs(self, class_type):
+                return decls.get(class_type)
+
+        enriched = enrich_slots(slots, _Provider())
+        by_key = {(s["node_id"], s["field_name"]): s for s in enriched}
+        self.assertEqual(by_key[("1", "text")]["control"], "multiline")
+        self.assertEqual(by_key[("2", "sampler_name")]["control"], "combo")
+        self.assertEqual(by_key[("2", "sampler_name")]["candidates"], ["euler", "dpm++2m"])
+        # 语义字段不被增强改动（计划 §3.4：override 仍按原值类型转换）。
+        self.assertEqual(by_key[("2", "seed")].get("field_type"), "seed")
+        self.assertNotIn("control", by_key[("2", "seed")], "声明拿不到的槽位保持基线")
+
+    def test_enrich_slots_media_control_wins_over_schema(self):
+        prompt = {"10": {"class_type": "LoadImage", "inputs": {"image": "a.png"}}}
+        slots = scan_params(prompt)
+        media = enrich_slots(slots, None)
+        self.assertEqual(media[0]["control"], "media")
+        self.assertEqual(media[0]["media"], "image")
 
 
 class ServiceImportTests(unittest.TestCase):
@@ -450,6 +573,55 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("seed 超上限", done["error"])
         self.assertEqual(fake.submitted, [], "提交失败后不再提交后续段")
 
+    def test_media_inputs_uploaded_once_and_backfilled(self):
+        # 计划 §5.2：执行前上传受管资产并回填进提交副本；同一任务同资产只传一次；
+        # 工作流库快照不被污染。
+        fake = _FakeComfy()
+        prompt = dict(_sample_prompt())
+        prompt["30"] = {"class_type": "LoadImage", "inputs": {"image": "base.png"}}
+        uploads = self.dir / "uploads"
+        uploads.mkdir(exist_ok=True)
+        ref = uploads / "ref.png"
+        ref.write_bytes(b"PNG")
+        media = [{"node_id": "30", "field_name": "image", "path": str(ref.resolve()),
+                  "media": "image", "name": "ref.png", "size": 3}]
+        task = self._make_task(shots=2, prompt=prompt, media_inputs=media)
+        uploads_called = []
+
+        def _upload(base, path, timeout=300):
+            uploads_called.append(path)
+            return "ref.png", ""
+
+        with fake.patch() as patcher:
+            fake.wire(patcher)
+            with mock.patch.object(comfyui_client, "upload_media", side_effect=_upload):
+                self.runner.submit(task["id"])
+                done = self._run_to_terminal(task["id"])
+        self.assertEqual(done["status"], "completed")
+        self.assertEqual(len(uploads_called), 1, "两段共用同一资产：只上传一次")
+        for record in fake.submitted:
+            self.assertEqual(record["workflow"]["30"]["inputs"]["image"], "ref.png")
+        self.assertEqual(prompt["30"]["inputs"]["image"], "base.png", "库快照不被污染")
+
+    def test_media_upload_failure_stops_segment_with_reason(self):
+        fake = _FakeComfy()
+        prompt = dict(_sample_prompt())
+        prompt["30"] = {"class_type": "LoadImage", "inputs": {"image": "base.png"}}
+        media = [{"node_id": "30", "field_name": "image", "path": "X:/missing.png",
+                  "media": "image", "name": "missing.png", "size": 3}]
+        task = self._make_task(shots=2, prompt=prompt, media_inputs=media)
+        with fake.patch() as patcher:
+            fake.wire(patcher)
+            with mock.patch.object(comfyui_client, "upload_media",
+                                   return_value=("", "HTTP 500 boom")):
+                self.runner.submit(task["id"])
+                done = self._run_to_terminal(task["id"])
+        self.assertEqual(done["status"], "failed")
+        self.assertIn("媒体输入处理失败", done["error"])
+        self.assertIn("节点 30 · image", done["error"])
+        self.assertIn("HTTP 500 boom", done["error"])
+        self.assertEqual(fake.submitted, [], "上传失败不提交该段，也不回退旧文件名")
+
     def test_history_error_status_fails_task(self):
         fake = _FakeComfy(history_status="error")
         task = self._make_task(shots=1)
@@ -632,6 +804,89 @@ class JobsTests(unittest.TestCase):
             self.jobs.submit({
                 "workflow_id": self.entry["id"],
                 "overrides": [{"node_id": "3", "field_name": "steps", "value": "abc"}],
+            })
+
+    # ---- 媒体输入校验（计划 §5.2/§5.3）----
+
+    def _media_entry(self):
+        prompt = dict(_sample_prompt())
+        prompt["30"] = {"class_type": "LoadImage", "inputs": {"image": "base.png"}}
+        prompt["31"] = {"class_type": "LoadAudio", "inputs": {"audio": "base.wav"}}
+        return self.store.save_workflow({
+            "id": self.store.new_workflow_id(), "name": "媒体工作流",
+            "prompt": prompt, "params": enrich_slots(scan_params(prompt), None),
+            "params_version": PARAMS_SCHEMA_VERSION,
+            "created_at": 1, "updated_at": 1,
+        })
+
+    def _make_upload(self, name: str, data: bytes = b"PNG") -> Path:
+        uploads = self.dir / "uploads"
+        uploads.mkdir(exist_ok=True)
+        target = uploads / name
+        target.write_bytes(data)
+        return target
+
+    def test_media_inputs_accepted_into_snapshot(self):
+        entry = self._media_entry()
+        image = self._make_upload("ref.png")
+        audio = self._make_upload("clip.wav", b"WAV")
+        task = self.jobs.submit({
+            "workflow_id": entry["id"], "shots": 1,
+            "media_inputs": [
+                {"node_id": "30", "field_name": "image", "path": str(image)},
+                {"node_id": "31", "field_name": "audio", "path": str(audio)},
+            ],
+        })
+        media = task["input"]["media_inputs"]
+        self.assertEqual(len(media), 2)
+        self.assertEqual(media[0]["media"], "image")
+        self.assertEqual(media[0]["name"], "ref.png")
+        self.assertEqual(media[0]["path"], str(image.resolve()))
+        self.assertEqual(media[1]["media"], "audio")
+
+    def test_media_inputs_reject_arbitrary_and_missing_paths(self):
+        entry = self._media_entry()
+        image = self._make_upload("ref.png")
+        outside = self.dir / "outside.png"
+        outside.write_bytes(b"PNG")
+        cases = [
+            # 任意本机路径（不在 uploads 树内）——即使文件真实存在。
+            {"node_id": "30", "field_name": "image", "path": str(outside)},
+            # 路径穿越形态：文本合法但解析后不在受管树内。
+            {"node_id": "30", "field_name": "image", "path": "C:/Windows/explorer.png"},
+            # 受管树内但文件不存在。
+            {"node_id": "30", "field_name": "image",
+             "path": str(self.dir / "uploads" / "missing.png")},
+            # 类型不匹配：图片槽给了音频文件。
+            {"node_id": "30", "field_name": "image", "path": str(self._make_upload("bad.wav", b"WAV"))},
+            # 不是扫描出的媒体槽。
+            {"node_id": "6", "field_name": "text", "path": str(image)},
+            # 空路径。
+            {"node_id": "30", "field_name": "image", "path": ""},
+        ]
+        for index, media in enumerate(cases):
+            with self.assertRaises(ComfyUITaskError, msg=f"case {index}"):
+                self.jobs.submit({
+                    "workflow_id": entry["id"], "shots": 1, "media_inputs": [media],
+                })
+
+    def test_media_inputs_oversize_rejected(self):
+        entry = self._media_entry()
+        image = self._make_upload("big.png")
+        with mock.patch("naiba.comfyui.jobs.MEDIA_INPUT_MAX_BYTES", 2):
+            with self.assertRaises(ComfyUITaskError):
+                self.jobs.submit({
+                    "workflow_id": entry["id"], "shots": 1,
+                    "media_inputs": [{"node_id": "30", "field_name": "image",
+                                      "path": str(image)}],
+                })
+
+    def test_media_slot_override_rejected(self):
+        entry = self._media_entry()
+        with self.assertRaises(ComfyUITaskError):
+            self.jobs.submit({
+                "workflow_id": entry["id"], "shots": 1,
+                "overrides": [{"node_id": "30", "field_name": "image", "value": "x.png"}],
             })
 
     def test_retry_keeps_completed_and_clears_errors(self):
@@ -923,6 +1178,94 @@ class ServiceApiTests(unittest.TestCase):
         self.assertIsNone(self.service.task_file(task["id"], ".hidden"))
         self.assertIsNone(self.service.task_file(task["id"], "missing.png"))
         self.assertIsNone(self.service.task_file("cf-none", "ok.png"))
+
+    def test_reveal_outputs_opens_managed_dir(self):
+        import naiba.comfyui.service as service_module
+
+        with mock.patch.object(service_module, "_open_folder") as opener:
+            payload, status = self.service.api_reveal_outputs()
+        self.assertEqual(status, 200)
+        expected = self.service.store.outputs_dir.resolve()
+        self.assertEqual(payload["path"], str(expected))
+        self.assertTrue(expected.is_dir(), "目录不存在时要先建出来")
+        opener.assert_called_once_with(expected)
+
+    def test_reveal_outputs_reports_oserror(self):
+        import naiba.comfyui.service as service_module
+
+        with mock.patch.object(service_module, "_open_folder", side_effect=OSError("boom")):
+            payload, status = self.service.api_reveal_outputs()
+        self.assertEqual(status, 500)
+        self.assertIn("无法打开产物文件夹", payload["error"])
+
+    def test_referenced_upload_paths_protects_active_and_retryable(self):
+        # 计划 §5.3：排队/运行中 + 可重试（interrupted/failed）任务引用的输入媒体
+        # 受缓存清理保护；completed/cancelled 不保护（沿用通用清理策略）。
+        from naiba.core.paths import normalized_path_key
+
+        ref = {"node_id": "30", "field_name": "image", "path": "C:/data/uploads/a.png",
+               "media": "image", "name": "a.png", "size": 3}
+        task = self.service.store.create_task({
+            "shots": 1, "prompt": {}, "overrides": [], "media_inputs": [ref],
+        })
+        expected = {normalized_path_key("C:/data/uploads/a.png")}
+        for status in ("queued", "failed", "interrupted"):
+            self.service.store.update_task(task["id"], status=status)
+            self.assertEqual(self.service.referenced_upload_paths(), expected, status)
+        for status in ("completed", "cancelled"):
+            self.service.store.update_task(task["id"], status=status)
+            self.assertEqual(self.service.referenced_upload_paths(), set(), status)
+
+    def test_outputs_folder_button_wired_in_ui(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public/index.html").read_text(encoding="utf-8")
+        js = (root / "public/js/24-comfyui.js").read_text(encoding="utf-8")
+        self.assertIn('id="comfyuiOpenOutputs"', html)
+        self.assertIn('id="comfyuiFreeModels"', html)
+        self.assertIn("/api/comfyui/outputs/open", js)
+        self.assertIn("/api/comfyui/free", js)
+        self.assertIn("#comfyuiOpenOutputs", js)
+        self.assertIn("#comfyuiFreeModels", js)
+        # 按钮名按用户拍板用短名；完整含义放在 title 里。
+        self.assertIn(">产物</button>", html)
+        self.assertIn(">清除</button>", html)
+        self.assertIn(">释放模型</button>", html)
+
+    def test_media_controls_wired_in_ui(self):
+        # 计划 §4-§6 前端接线：媒体选择上传、多行/下拉控件、提交带 media_inputs、
+        # 产物卡走公共 mediaKind（音频可播）。
+        root = Path(__file__).resolve().parents[1]
+        js = (root / "public/js/24-comfyui.js").read_text(encoding="utf-8")
+        self.assertIn('"/api/comfyui/media"', js)
+        self.assertIn("media_inputs: collectMediaInputs()", js)
+        self.assertIn("attachCandidateCombo", js)
+        self.assertIn('slot.control === "multiline"', js)
+        self.assertIn("renderMediaPicker", js)
+        self.assertIn('slot.control === "combo"', js)
+        self.assertIn("mediaKind(", js)
+        self.assertIn("attachmentThumbUrl(", js)
+        self.assertIn('createElement("audio")', js)
+
+    def test_free_models_reports_pending_when_tasks_active(self):
+        import naiba.comfyui.service as service_module
+
+        with mock.patch.object(service_module.client, "reachable", return_value={}), \
+             mock.patch.object(service_module.client, "free_models", return_value=(True, "")) as free:
+            payload, status = self.service.api_free_models()
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        free.assert_called_once()
+        # 无活动任务：不需要「稍后生效」提示。
+        self.assertFalse(payload["pending"])
+
+    def test_free_models_unreachable_keeps_message(self):
+        import naiba.comfyui.service as service_module
+
+        with mock.patch.object(service_module.client, "reachable", return_value=None):
+            payload, status = self.service.api_free_models()
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["ok"])
+        self.assertIn("连不上 ComfyUI", payload["error"])
 
     def test_slim_tasks_hide_checkpoint(self):
         self.service.store.save_workflow({

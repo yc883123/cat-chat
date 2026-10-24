@@ -656,6 +656,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
             self._upload_request(labeler=True)
             return
+        # 造梦机输入媒体上传（字节保真进受管 uploads；执行任务前再转传 ComfyUI）：
+        # 同样必须在 JSON 读取前分流。
+        if path == "/api/comfyui/media" and self.headers.get("Content-Type", "").lower().startswith("multipart/form-data"):
+            if not self._authorized(parsed):
+                self._json({"error": "访问口令无效"}, HTTPStatus.UNAUTHORIZED)
+                return
+            self._upload_request(comfyui=True)
+            return
         # Agent 头像同样走 multipart（小体积、进内存），也必须在 JSON 读取前分流。
         if path == "/api/agents/avatar" and self.headers.get("Content-Type", "").lower().startswith("multipart/form-data"):
             if not self._authorized(parsed):
@@ -773,6 +781,18 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(*self.app.comfyui.api_cancel(path.split("/")[-2]))
         elif path.startswith("/api/comfyui/tasks/") and path.endswith("/retry"):
             self._json(*self.app.comfyui.api_retry(path.split("/")[-2]))
+        elif path == "/api/comfyui/free":
+            # 造梦机：请求 ComfyUI 卸载模型释放显存/内存（不打断执行中的任务）。
+            self._json(*self.app.comfyui.api_free_models())
+        elif path == "/api/comfyui/outputs/open":
+            # 打开的是运行本应用的电脑上的文件夹：手机浏览器点了只会弹在看不见的 PC 上。
+            if not self._is_local_request():
+                self._json(
+                    {"error": "产物文件夹在运行 Cat Chat 的电脑上，手机端打不开"},
+                    HTTPStatus.FORBIDDEN,
+                )
+            else:
+                self._json(*self.app.comfyui.api_reveal_outputs())
         elif path == "/api/aux-chats":
             # 辅助对话创建（计划-辅助对话 §3.3）：标题自动编号、权限档忽略入参强制只读。
             try:
@@ -1811,7 +1831,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def _upload_request(self, labeler: bool = False) -> None:
+    def _upload_request(self, labeler: bool = False, comfyui: bool = False) -> None:
         """multipart/form-data 流式上传：解析到临时 spool 后交给 app 落盘。
 
         设计：python_multipart 流式回调（不整包进内存），文件 part 字节直接写
@@ -1960,7 +1980,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json({"error": "上传中断或未收到文件内容"}, HTTPStatus.BAD_REQUEST)
             return
         try:
-            if labeler:
+            if comfyui:
+                self._json(*self.app._upload_comfyui_spooled(spool_path, state["filename"]))
+            elif labeler:
                 self._json(*self.app._upload_labeler_spooled(spool_path, state["filename"]))
             else:
                 self._json(*self.app._upload_spooled(spool_path, state["filename"]))

@@ -4,6 +4,8 @@
 - 只接受库里的工作流 id（不接受内联 prompt）——工作流库是唯一入口，
   导入时已做过 API 格式校验与参数扫描；
 - overrides 只接受扫描出的槽位，值按槽位类型保真转换（转不动=400）；
+- media_inputs 只接受扫描出的媒体槽 + 宿主 uploads 受管文件引用（拒绝任意
+  本机路径），类型/体积/存在性在此校验（计划 §5.2/§5.3）；
 - shots ≤ 200（对齐聊天域批量口径）；
 - 任务 JSON 保存工作流快照（prompt 副本 + 名称），删除工作流不破坏历史任务。
 
@@ -14,13 +16,17 @@ checkpoint（已完成段不重复提交），清掉 errors 后把任务放回�
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any
 
 from naiba.comfyui import (
     COMFYUI_ACTIVE_STATUSES,
+    MEDIA_INPUT_MAX_BYTES,
     MAX_SHOTS,
 )
 from naiba.comfyui.store import ComfyUIStoreError, now_ms
+from naiba.core.media_types import media_kind_of
+from naiba.storage.media import is_uploads_path
 
 
 class ComfyUITaskError(ValueError):
@@ -90,6 +96,7 @@ class ComfyUIJobManager:
         except (TypeError, ValueError):
             raise ComfyUITaskError("shots 必须是正整数") from None
         overrides = self._validate_overrides(entry, body.get("overrides"))
+        media_inputs = self._validate_media_inputs(entry, body.get("media_inputs"))
         input_data = {
             "workflow_id": workflow_id,
             "workflow_name": str(entry.get("name") or ""),
@@ -97,6 +104,7 @@ class ComfyUIJobManager:
             "prompt": entry.get("prompt") or {},
             "params": entry.get("params") or [],
             "overrides": overrides,
+            "media_inputs": media_inputs,
             "shots": shots,
         }
         task = self.store.create_task(input_data)
@@ -124,6 +132,13 @@ class ComfyUIJobManager:
             if slot is None:
                 raise ComfyUITaskError(
                     f"参数 {node_id} · {field_name} 不是这份工作流的可编辑槽位"
+                )
+            if str(slot.get("control") or "") == "media":
+                # 媒体槽必须走 media_inputs（受管引用 + 执行前上传回填），
+                # 不接受裸字符串直传——绕过上传等于绕过校验。
+                raise ComfyUITaskError(
+                    f"参数 {slot.get('label')} 是媒体输入，请通过文件选择上传，"
+                    "不接受文本值"
                 )
             value = item.get("value")
             field_type = str(slot.get("field_type") or "text")
@@ -166,6 +181,75 @@ class ComfyUIJobManager:
             out.append({
                 "node_id": node_id, "field_name": field_name,
                 "value": "" if value is None else str(value),
+            })
+        return out
+
+    def _validate_media_inputs(self, entry: dict[str, Any], raw: Any) -> list[dict[str, Any]]:
+        """媒体输入校验（计划 §5.2/§5.3）：受管引用 + 类型/体积/存在性。
+
+        - 只认扫描出的媒体槽（control=media，显式映射的加载节点）；
+        - 路径必须位于宿主 uploads 受管树内且文件存在——**拒绝任意本机路径**，
+          否则等于把客户端路径直接写进执行环境；
+        - 文件扩展名要与槽位媒体类型一致，单文件 ≤ MEDIA_INPUT_MAX_BYTES；
+        - 校验通过后把归一化的绝对路径存进任务快照；执行前上传 + 回填见 runner。
+        """
+        if raw is None:
+            return []
+        if not isinstance(raw, list):
+            raise ComfyUITaskError("media_inputs 必须是数组")
+        params = entry.get("params") or []
+        slot_map: dict[tuple[str, str], dict[str, Any]] = {
+            (str(slot.get("node_id") or ""), str(slot.get("field_name") or "")): slot
+            for slot in params if isinstance(slot, dict)
+        }
+        data_dir = Path(self.app.paths.data_dir)
+        out: list[dict[str, Any]] = []
+        for index, item in enumerate(raw, 1):
+            if not isinstance(item, dict):
+                raise ComfyUITaskError(f"第 {index} 条媒体输入格式非法")
+            node_id = str(item.get("node_id") or "")
+            field_name = str(item.get("field_name") or "")
+            slot = slot_map.get((node_id, field_name))
+            # control 由 schema 增强写入（在线导入）；离线导入只有 field_type。
+            is_media_slot = str(slot.get("control") or "") == "media" if slot else False
+            if slot is None or (
+                not is_media_slot
+                and str(slot.get("field_type") or "") not in ("image", "audio", "video")
+            ):
+                raise ComfyUITaskError(
+                    f"媒体输入 {node_id} · {field_name} 不是这份工作流的可上传槽位"
+                )
+            kind = str(slot.get("media") or slot.get("field_type") or "")
+            path = str(item.get("path") or "").strip()
+            label = str(slot.get("label") or f"{node_id} · {field_name}")
+            if not path:
+                raise ComfyUITaskError(f"媒体输入 {label} 还没有选择文件")
+            target = Path(path).expanduser()
+            if not is_uploads_path(data_dir, target):
+                raise ComfyUITaskError(
+                    f"媒体输入 {label} 必须是通过本应用上传的文件（受管引用），"
+                    "不接受任意的本机路径"
+                )
+            target = target.resolve()
+            actual_kind = media_kind_of(str(target))
+            if actual_kind != kind:
+                raise ComfyUITaskError(
+                    f"媒体输入 {label} 的文件类型不对：槽位要 {kind}，文件是 "
+                    f"{actual_kind or '非媒体类型'}"
+                )
+            size = target.stat().st_size
+            if size > MEDIA_INPUT_MAX_BYTES:
+                raise ComfyUITaskError(
+                    f"媒体输入 {label} 超过单文件上限 "
+                    f"{MEDIA_INPUT_MAX_BYTES // (1024 * 1024)} MB"
+                )
+            out.append({
+                "node_id": node_id,
+                "field_name": field_name,
+                "path": str(target),
+                "media": kind,
+                "name": target.name,
+                "size": size,
             })
         return out
 

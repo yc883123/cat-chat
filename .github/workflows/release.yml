@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 3.7.4-beta
-  RELEASE_TAG: v3.7.4-beta
+  RELEASE_VERSION: 3.7.5-beta
+  RELEASE_TAG: v3.7.5-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-3.7.4-beta-windows-x64
+  PACKAGE_NAME: cat-chat-3.7.5-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-3.7.4-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-3.7.5-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -121,11 +121,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 3.7.4 Beta release
+      - name: Publish 3.7.5 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 3.7.4 Beta
+          name: Cat Chat 3.7.5 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -135,12 +135,11 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 3.7.4 Beta：造梦机媒体槽按本次选择执行，参数下拉与结果预览修复
-            ① 造梦机：本次没选的参考素材不再跟着工作流里的旧文件一起提交——生成前读取 ComfyUI 节点声明，只移除「声明为可选」的未选连接（参考图、参考音频、参考视频、视频配套音频）；已选素材、必需输入与声明不明的节点保持原样，工作流原件和槽位序号不变
-            ② 造梦机：参数候选下拉贴合输入框展开——此前参数行没有定位祖先，下拉被锚到视口、聚焦也看不到；现在浮层跟随输入框，下方空间不足时向上展开，列表逐行滚动，聚焦即列出全部候选（可搜索过滤，预览前 30 条）
-            ③ 造梦机：媒体槽标签改为短名称「参考图 4」「参考音频 2」「视频音频 3」，直接对应模型参考位编号；未选提示缩短为「未选」「未选则沿用工作流素材」；同一角色的多个槽位在主标签上带节点名区分
-            ④ 造梦机：结果区图片按原始比例显示（限制最大高度、不再固定高度裁切）；结果卡片按自身内容高度布局，竖图不再把同一行的视频卡撑出空白
-            ⑤ 造梦机：修复媒体槽原生「选择文件」按钮被全局样式露出来的问题
-            ⑥ 工作台：左侧导航「模块库」更名为「提词库」，页面功能与内部标识不变
-            ⑦ 验证：全量单测 3010 通过；候选下拉、媒体槽短标签与可选输入清理均有离线单元测试覆盖；本次没有再提交真实 ComfyUI 生成任务
-            Cat Chat 3.7.4 Beta Windows build。本版修打造梦机的媒体槽、参数下拉与结果预览：本次没选的参考素材不再跟工作流旧文件一起提交、候选下拉贴合输入框、结果图片按原始比例显示。全量单测 **3010** 通过。
+            Cat Chat 3.7.5 Beta：造梦机恢复完整节点/端口映射与未选跳过提示
+            ① 造梦机：媒体槽恢复完整映射「节点号 · 节点名 · 字段 → 目标输入端口」（如 43 · 載入圖片 · image → ref_images.ref_image_3），不再用「参考图 4」这类短名称代替；一个加载器连接多个端口时全部列出，多输出节点标出输出索引
+            ② 造梦机：未选提示与实际执行一致——全部相关输入可省略时显示「未选即跳过」；无法确认可跳过且工作流保留原文件时显示「未选沿用原文件」，工作流为空时显示「请选择文件」；已选显示「已选：文件名」，清除按钮说明同步
+            ③ 造梦机：可选性判断按 ComfyUI 节点声明核对，Autogrow 动态输入校验前缀、编号范围与最小数量；混有必需输入或声明不明时不承诺跳过，提示与执行端共用同一套规则
+            ④ 造梦机：旧工作流打开时自动升级参数缓存（v5→v6）恢复完整映射；升级时 ComfyUI 离线的工作流，下次打开只补媒体可选性，不重置参数勾选或工作流内容
+            ⑤ 造梦机：修复任务列表第一张卡片标题在「任务」与工作流名之间来回闪烁——任务详情轮询与列表现在返回同一套精简字段，标题稳定显示工作流名
+            ⑥ 验证：全量单测 3020 通过；隔离实例实测 H3 工作流桌面与 375px 映射、四种未选状态、编辑参数清单、选择与清除；未提交真实 ComfyUI 生成任务
+            Cat Chat 3.7.5 Beta Windows build。本版恢复造梦机的完整节点/端口映射，并让未选参考素材的提示与实际执行一致。全量单测 **3020** 通过。

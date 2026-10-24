@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 3.7.1-beta
-  RELEASE_TAG: v3.7.1-beta
+  RELEASE_VERSION: 3.7.2-beta
+  RELEASE_TAG: v3.7.2-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-3.7.1-beta-windows-x64
+  PACKAGE_NAME: cat-chat-3.7.2-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-3.7.1-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-3.7.2-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -121,11 +121,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 3.7.1 Beta release
+      - name: Publish 3.7.2 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 3.7.1 Beta
+          name: Cat Chat 3.7.2 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -135,15 +135,10 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 3.7.1 Beta：造梦机参数精简与模型下拉 + 打标器导出包命名
-            ① 造梦机参数表单默认精简：主表单只显示常用参数（正向/负向提示词、种子、步数、采样器、调度器、模型、LoRA），其余参数不占位、也不会被改动——生成时按工作流里原本的值执行；工作流标题旁新增「编辑参数」，勾选要在主表单显示的参数，选择按工作流保存、下次打开照旧
-            ② 提示词输入框加大：正向提示词 9 行起步，仍可拖动下缘继续调整
-            ③ 模型与 LoRA 可搜索选择：模型（Checkpoint）与 LoRA 输入框支持从 ComfyUI 的模型列表里按关键字筛选并点选；ComfyUI 连不上或拿不到列表时仍可手动输入，不影响编辑和提交
-            ④ 删除任务更稳：删除排队中或生成中的任务会先自动取消，等它停下来再删除任务记录和产物文件；取消失败或迟迟没停下来时会明确说明原因并保留任务，不会假装删掉了
-            ⑤ 修复：同一任务出多张图时，结果区只显示部分且可能指向别的任务的文件——现在多图全部逐张显示，各自指向所属任务的文件
-            ⑥ 修复：结果区闪屏——轮询不再整块重建任务列表和图片网格，画面没变化时不重新加载图片；任务卡片只在内容实际变化时更新
-            ⑦ 任务卡片显示时间：显示创建时间，结束后显示结束时刻；重试会清掉上一轮的结束时间，应用重启后恢复的任务也会补上结束时刻
-            ⑧ 修复：刷新页面后停在工作台「造梦机」或「打标」页时页面不初始化（列表空着、进度不走）——现在刷新后停在哪个功能页都会正常加载
-            ⑨ 打标器导出包命名：导出时可选填自定义包名，填了就叫这个名字；不填则自动用数据集文件夹本来的名字（如「数据集A.zip」），重复导出补 -2 序号；LoRA 训练包自动命名保留 lora- 前缀，与同文件夹的逐图 .txt 包区分
-            ⑩ 验证：全量单测 2982 通过；造梦机优化隔离 UI 冒烟 39 项（参数精简/编辑持久化/模型与 LoRA 下拉/多图归属/差量刷新/任务时间/删除流程）与既有造梦机冒烟 26 项通过；打标器导出命名新增 6 条回归
-            Cat Chat 3.7.1 Beta Windows build。造梦机参数与结果区体验按 2026-10-24 优化计划实施；打标器导出包名可自定义，自动命名直接用数据集文件夹的名字。全量单测 **2982** 通过。
+            Cat Chat 3.7.2 Beta：修复手机/局域网访问下的产物图与头像，补上产物下载
+            ① 修复：造梦机「结果」里的产物图在手机或别的电脑上（局域网访问）显示成破图——产物地址现在带上访问口令，手机也能正常看图
+            ② 修复：手机上没法保存造梦机产物——每张任务产物新增下载按钮，点开大图后的下载按钮同样可用；电脑上点下载会弹「另存为」，手机上直接存进下载目录
+            ③ 造梦机：出图分辨率（宽 / 高）加入主表单默认显示的常用参数，不用再进「编辑参数」勾选；此前导入的工作流打开时会按新规则自动重扫一次
+            ④ 修复：Agent 头像在手机或局域网访问时显示成破图（头像地址同样补上了访问口令）
+            ⑤ 验证：全量单测 2984 通过；局域网条件（非 127.0.0.1，与手机同一套鉴权）的隔离 UI 冒烟 15 项通过，覆盖产物出图、卡片下载、大图下载与分辨率默认显示
+            Cat Chat 3.7.2 Beta Windows build。本次修复手机与局域网访问下的产物图与头像显示、补上产物下载，并让出图分辨率默认出现在主表单。全量单测 **2984** 通过。

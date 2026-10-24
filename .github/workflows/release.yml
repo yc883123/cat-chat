@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 3.7.3-beta
-  RELEASE_TAG: v3.7.3-beta
+  RELEASE_VERSION: 3.7.4-beta
+  RELEASE_TAG: v3.7.4-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-3.7.3-beta-windows-x64
+  PACKAGE_NAME: cat-chat-3.7.4-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-3.7.3-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-3.7.4-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -121,11 +121,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 3.7.3 Beta release
+      - name: Publish 3.7.4 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 3.7.3 Beta
+          name: Cat Chat 3.7.4 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -135,13 +135,12 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 3.7.3 Beta：造梦机控件与媒体输入闭环，新增释放模型与产物入口
-            ① 造梦机：自定义文本节点（如提示词中转、质量词拼接、MOSS 负向块）的参数现在按节点声明自动变多行输入框；此前只有主正/负提示词是多行，自定义节点的长文本挤在单行框里
-            ② 造梦机：模型与采样参数接入节点声明候选——采样器、调度器、UNET / CLIP / VAE / ControlNet 加载器与自定义节点的枚举参数都有可搜索下拉，候选不可用时保留自由输入；此前导入的工作流打开时会自动重扫一次
-            ③ 造梦机：图片、音频、视频输入闭环——媒体槽可从本机选文件（带预览、可替换/清除），提交后自动上传到 ComfyUI 再执行；文件先存进应用受管目录并做类型与大小校验，不接受任意的本机路径；上传失败会停在对应段并说明原因，不会拿错文件继续生成
-            ④ 造梦机：生成结果复用聊天媒体卡——音频产物就地播放（此前只能下载），媒体类型判定与聊天一致
-            ⑤ 造梦机：任务面板新增「释放模型」按钮，一键让 ComfyUI 卸载已加载的模型、释放显存与内存；正在执行的任务不受影响，会在任务结束后卸载
-            ⑥ 造梦机：任务面板新增「产物」按钮，直接打开电脑上的产物文件夹（手机端访问会提示打不开）；按钮精简为「产物」「清除」
-            ⑦ 修复：「编辑参数」弹窗的勾选框被全局样式撑成大方块，恢复为正常大小
-            ⑧ 验证：全量单测 3006 通过；造梦机后端、产物区、控件优化三组隔离冒烟通过；MOSS 两份真实工作流与 Qwen 图像编辑样例的控件分类逐一核对（多行框、候选下拉、媒体槽）
-            Cat Chat 3.7.3 Beta Windows build。本版让造梦机的参数控件按节点声明自动匹配（多行提示词框与模型候选下拉）、打通图片/音频/视频输入到 ComfyUI 的上传执行，并新增释放模型与打开产物文件夹的入口。全量单测 **3006** 通过。
+            Cat Chat 3.7.4 Beta：造梦机媒体槽按本次选择执行，参数下拉与结果预览修复
+            ① 造梦机：本次没选的参考素材不再跟着工作流里的旧文件一起提交——生成前读取 ComfyUI 节点声明，只移除「声明为可选」的未选连接（参考图、参考音频、参考视频、视频配套音频）；已选素材、必需输入与声明不明的节点保持原样，工作流原件和槽位序号不变
+            ② 造梦机：参数候选下拉贴合输入框展开——此前参数行没有定位祖先，下拉被锚到视口、聚焦也看不到；现在浮层跟随输入框，下方空间不足时向上展开，列表逐行滚动，聚焦即列出全部候选（可搜索过滤，预览前 30 条）
+            ③ 造梦机：媒体槽标签改为短名称「参考图 4」「参考音频 2」「视频音频 3」，直接对应模型参考位编号；未选提示缩短为「未选」「未选则沿用工作流素材」；同一角色的多个槽位在主标签上带节点名区分
+            ④ 造梦机：结果区图片按原始比例显示（限制最大高度、不再固定高度裁切）；结果卡片按自身内容高度布局，竖图不再把同一行的视频卡撑出空白
+            ⑤ 造梦机：修复媒体槽原生「选择文件」按钮被全局样式露出来的问题
+            ⑥ 工作台：左侧导航「模块库」更名为「提词库」，页面功能与内部标识不变
+            ⑦ 验证：全量单测 3010 通过；候选下拉、媒体槽短标签与可选输入清理均有离线单元测试覆盖；本次没有再提交真实 ComfyUI 生成任务
+            Cat Chat 3.7.4 Beta Windows build。本版修打造梦机的媒体槽、参数下拉与结果预览：本次没选的参考素材不再跟工作流旧文件一起提交、候选下拉贴合输入框、结果图片按原始比例显示。全量单测 **3010** 通过。

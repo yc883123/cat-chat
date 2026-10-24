@@ -11,18 +11,21 @@ from pathlib import Path
 from typing import Any
 
 from naiba.labeler.db import LabelerDB, LabelerDBError
-from naiba.labeler.export import LabelerExportError, write_export
+from naiba.labeler.export import LabelerExportError, open_export_dir, write_export
 from naiba.labeler.images import (
     MAX_BATCH_BYTES,
     MAX_BATCH_IMAGES,
     MAX_IMAGE_BYTES,
     LabelerImageError,
+    verify_image_bytes,
 )
 from naiba.labeler.jobs import LabelerJobManager, LabelerTaskError
+from naiba.labeler.originals import archive_original, prune_unreferenced
 from naiba.labeler.presets import preset_list
 from naiba.labeler.runner import DEFAULT_CONCURRENCY, VALIDATED_CONCURRENCY, LabelerRunner
 from naiba.labeler.sentences import sentence_stats
 from naiba.labeler.store import LabelerStore
+from naiba.storage.media import store_uploaded_file
 
 EXPORT_MAX_RECORDS = 5000
 
@@ -40,7 +43,23 @@ class LabelerService:
     # ---- 生命周期 ----
 
     def recover(self) -> int:
-        return self.jobs.recover_interrupted()
+        recovered = self.jobs.recover_interrupted()
+        self._prune_originals()
+        return recovered
+
+    def _prune_originals(self) -> dict[str, int]:
+        """原图留存生命周期：没有任何标注/任务项引用且超过保护窗口的才删。
+
+        查询或清理失败都按「不清理」处理：宁可多留，不能因为清理动作影响启动。
+        """
+        try:
+            referenced = self.db.referenced_original_digests()
+        except (OSError, ValueError, LabelerDBError):
+            return {"removed": 0, "kept": 0, "freed": 0}
+        try:
+            return prune_unreferenced(Path(self.app.paths.data_dir), referenced)
+        except OSError:
+            return {"removed": 0, "kept": 0, "freed": 0}
 
     def shutdown(self) -> None:
         self.runner.shutdown()
@@ -62,6 +81,50 @@ class LabelerService:
         except (OSError, ValueError, LabelerDBError):
             pass
         return keys
+
+    # ---- 上传（打标专用：原图留存 + 不去重） ----
+
+    def api_upload(self, spool_path: str, name: str) -> tuple[dict[str, Any], int]:
+        """打标专用上传的落库入口（multipart spool 已由 http 层落好）。
+
+        - 原始字节按 SHA-256 内容寻址存进 ``data/labeler/originals/``：训练包导出时
+          按摘要取字节校验，缩放/压缩后的缓存图不能替代原图；
+        - 缓存副本不做内容级去重：同内容但来源不同的图片必须落成两个文件，
+          否则两个样本会共享 path_key，提交批次时第二条就被合并掉了。
+        """
+        spool = Path(spool_path)
+        try:
+            data = spool.read_bytes()
+        except OSError as exc:
+            return {"error": f"上传临时文件读取失败：{exc}"}, 400
+        finally:
+            spool.unlink(missing_ok=True)
+        try:
+            verify_image_bytes(name, data)
+        except LabelerImageError as exc:
+            return {"error": str(exc)}, 400
+        data_dir = Path(self.app.paths.data_dir)
+        try:
+            archived = archive_original(data_dir, data)
+        except OSError as exc:
+            return {"error": f"原图留存失败：{exc}"}, 500
+        imaging = {}
+        config = getattr(self.app, "config", None)
+        if config is not None:
+            imaging = dict((getattr(config, "data", {}) or {}).get("imaging") or {})
+        try:
+            result = store_uploaded_file(data, name, data_dir, imaging, dedupe=False)
+        except OSError as exc:
+            return {"error": f"上传保存失败：{exc}"}, 500
+        return {
+            "name": result.get("name") or "",
+            "path": result.get("path") or "",
+            "size": result.get("size") or 0,
+            "thumb_path": result.get("thumb_path") or "",
+            "deduped": False,
+            "original_sha256": archived["sha256"],
+            "original_size": archived["size"],
+        }, 200
 
     # ---- 配置 ----
 
@@ -238,9 +301,20 @@ class LabelerService:
         if not records:
             return {"error": "没有可导出的标注"}, 400
         try:
-            artifact = write_export(self._exports_dir, records, fmt, label=label)
+            artifact = write_export(
+                self._exports_dir, records, fmt, label=label,
+                data_dir=Path(self.app.paths.data_dir),
+            )
         except LabelerExportError as exc:
             return {"error": str(exc)}, 400
         except OSError as exc:
             return {"error": f"导出文件写入失败：{exc}"}, 500
         return {"ok": True, **artifact}, 201
+
+    def api_reveal_exports(self) -> tuple[dict[str, Any], int]:
+        """在运行本应用的电脑上打开受管导出目录（路径固定，不收客户端参数）。"""
+        try:
+            path = open_export_dir(self._exports_dir)
+        except OSError as exc:
+            return {"error": f"无法打开导出文件夹：{exc}"}, 500
+        return {"ok": True, "path": path}, 200

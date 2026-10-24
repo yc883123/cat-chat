@@ -73,6 +73,10 @@
             <svg class="studio-page-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12.5V5a1 1 0 0 1 1-1h7.5a1 1 0 0 1 .7.3l7 7a1 1 0 0 1 0 1.4l-7.5 7.5a1 1 0 0 1-1.4 0l-7-7a1 1 0 0 1-.3-.7Z"></path><circle cx="8.5" cy="8.5" r="1.3"></circle></svg>
             <span>打标器</span>
           </button>
+          <button class="studio-page" type="button" aria-current="false" data-studio-page="comfyui">
+            <svg class="studio-page-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"></circle><path d="M12 2.8v3.4M12 17.8v3.4M2.8 12h3.4M17.8 12h3.4M5.5 5.5l2.4 2.4M16.1 16.1l2.4 2.4M18.5 5.5l-2.4 2.4M7.9 16.1l-2.4 2.4"></path></svg>
+            <span>造梦机</span>
+          </button>
         </nav>
       </div>
       <div class="sidebar-footer">
@@ -506,16 +510,109 @@
                     <input id="labelerSearch" type="search" placeholder="筛选标签或文件名" aria-label="筛选">
                   </label>
                   <select id="labelerExportFormat" aria-label="导出格式">
+                    <option value="lora">LoRA 训练包（图片 + 同名 .txt）</option>
+                    <option value="captions">逐图 .txt（与图片同名）</option>
                     <option value="json">JSON</option>
                     <option value="csv">CSV</option>
-                    <option value="txt">.txt 标签</option>
+                    <option value="txt">.txt 汇总</option>
                   </select>
                   <button class="control-button" id="labelerExport" type="button">导出</button>
+                  <button class="control-button" id="labelerOpenExports" type="button"
+                          title="在资源管理器中打开应用里的导出文件夹">打开文件夹</button>
                 </div>
               </header>
               <div class="labeler-result-body" id="labelerResultBody" aria-live="polite"></div>
             </section>
           </div>
+        </div>
+
+        <!-- 分页：造梦机 —— 导入自己在 ComfyUI 里跑通的 API 格式工作流，填几个参数反复出图/出片。
+             三栏：左（工作流库 + 导入）、中（连接状态 / 参数表单 / 提交）、右（任务与产物结果）。
+             页面结构在这里定稿；交互与渲染由 public/js/24-comfyui.js 接管。 -->
+        <div class="studio-page-view" id="studioPageComfyui" data-studio-page-view="comfyui" hidden>
+          <div class="comfyui-panes" id="comfyuiPanes" role="group" aria-label="造梦机分档">
+            <button class="studio-pane-btn comfyui-pane-btn" type="button" aria-pressed="false" data-comfyui-pane="workflows">工作流</button>
+            <button class="studio-pane-btn comfyui-pane-btn active" type="button" aria-pressed="true" data-comfyui-pane="run">提交</button>
+            <button class="studio-pane-btn comfyui-pane-btn" type="button" aria-pressed="false" data-comfyui-pane="tasks">结果</button>
+          </div>
+          <div class="comfyui-columns" id="comfyuiColumns">
+            <!-- 左：工作流库 -->
+            <aside class="comfyui-library" aria-label="工作流库">
+              <div class="comfyui-library-head">
+                <strong>工作流</strong>
+                <button class="control-button tiny" id="comfyuiImportBtn" type="button">导入</button>
+                <button class="control-button tiny" id="comfyuiRefreshWorkflows" type="button" title="重新读取工作流列表">刷新</button>
+              </div>
+              <p class="comfyui-reminder">这份工作流请先在你自己的 ComfyUI 里完整跑出过结果，再导出到这里。没跑通过的工作流，在这里失败时你看不到 ComfyUI 那边的报错画面，排查会很难。</p>
+              <div class="comfyui-workflow-list" id="comfyuiWorkflowList" aria-label="工作流列表"></div>
+            </aside>
+            <!-- 中：连接状态 / 参数表单 / 提交 -->
+            <section class="comfyui-run-col" aria-label="生成参数">
+              <div class="comfyui-statusbar" id="comfyuiStatusbar">
+                <i class="status-mark" id="comfyuiStatusDot" title="ComfyUI 连接状态"></i>
+                <span class="comfyui-status-text" id="comfyuiStatusText">ComfyUI 未连接</span>
+                <button class="control-button tiny" id="comfyuiEditUrl" type="button">改地址</button>
+                <button class="control-button tiny" id="comfyuiTestConn" type="button">测试连接</button>
+              </div>
+              <div class="comfyui-run" id="comfyuiRunSection">
+                <div class="comfyui-param-form" id="comfyuiParamForm" aria-label="工作流参数"></div>
+                <div class="comfyui-submit-row">
+                  <label class="comfyui-shots-field">张数
+                    <input id="comfyuiShots" type="number" min="1" max="200" value="1" aria-label="生成张数">
+                  </label>
+                  <button class="control-button" id="comfyuiSubmit" type="button" disabled>开始生成</button>
+                </div>
+              </div>
+            </section>
+            <!-- 右：任务与产物（结果栏，随任务进度实时更新） -->
+            <section class="comfyui-results-col" aria-label="生成结果">
+              <div class="comfyui-tasks" id="comfyuiTasksSection">
+                <div class="comfyui-tasks-head">
+                  <strong>任务</strong>
+                  <button class="control-button tiny" id="comfyuiClearTasks" type="button" title="删除已结束的任务和它们的产物">清除已结束</button>
+                </div>
+                <div class="comfyui-task-list" id="comfyuiTaskList" aria-label="任务列表"></div>
+              </div>
+              <div class="comfyui-outputs" id="comfyuiOutputsSection" aria-label="产物">
+                <div class="comfyui-outputs-head"><strong>生成结果</strong></div>
+                <div class="comfyui-output-grid" id="comfyuiOutputGrid" aria-label="生成结果"></div>
+              </div>
+            </section>
+          </div>
+          <dialog class="comfyui-url-dialog" id="comfyuiUrlDialog" aria-label="ComfyUI 地址">
+            <form method="dialog" class="comfyui-import-form">
+              <h3>ComfyUI 地址</h3>
+              <p class="comfyui-import-reminder">填 ComfyUI 服务的地址，例如 http://127.0.0.1:8188。保存后会立即测试连接；正在生成的任务不受影响。</p>
+              <label class="comfyui-import-name">地址
+                <input id="comfyuiUrlInput" type="text" maxlength="300" placeholder="http://127.0.0.1:8188">
+              </label>
+              <div class="comfyui-import-actions">
+                <button class="control-button" type="button" id="comfyuiUrlSave">保存并测试</button>
+                <button class="control-button" type="button" id="comfyuiUrlCancel">取消</button>
+              </div>
+              <p class="comfyui-import-error" id="comfyuiUrlError" role="alert"></p>
+            </form>
+          </dialog>
+          <dialog class="comfyui-import-dialog" id="comfyuiImportDialog" aria-label="导入工作流">
+            <form method="dialog" class="comfyui-import-form">
+              <h3>导入 ComfyUI 工作流</h3>
+              <p class="comfyui-import-reminder">请先在你自己的 ComfyUI 里完整跑出过结果，再用「导出（API）」把工作流存成 JSON 导入到这里。界面格式的文件（编辑器里保存的那种）这里用不了。</p>
+              <label class="comfyui-import-name">名字
+                <input id="comfyuiImportName" type="text" maxlength="120" placeholder="例如：Qwen 文生图（已跑通）">
+              </label>
+              <label class="comfyui-import-file">从文件导入
+                <input id="comfyuiImportFile" type="file" accept=".json,application/json">
+              </label>
+              <label class="comfyui-import-paste">或粘贴 JSON 内容
+                <textarea id="comfyuiImportText" rows="8" placeholder='{"3": {"class_type": "KSampler", "inputs": {…}}, …}'></textarea>
+              </label>
+              <div class="comfyui-import-actions">
+                <button class="control-button" type="button" id="comfyuiImportConfirm">导入</button>
+                <button class="control-button" type="button" id="comfyuiImportCancel">取消</button>
+              </div>
+              <p class="comfyui-import-error" id="comfyuiImportError" role="alert"></p>
+            </form>
+          </dialog>
         </div>
       </section>
 

@@ -3,11 +3,11 @@
 // 批量打标（模型来自设置里的 provider，云端与本地后端都算）：
 // 文件夹拖入 → 逐批上传到受管 uploads → 提交批次 → 逐图进度 →
 // 结果三档（按图 / 按标签 / 句子库）→ 导出 JSON / CSV / .txt。
-// 与聊天域零耦合；只调 /api/labeler/* 与既有 /api/uploads。
+// 与聊天域零耦合；只调 /api/labeler/*（含打标专用上传）。
 // ============================================================
 
 import { $, $$, api, state, toast, triggerDownload } from "./01-core.js";
-import { fileUrl } from "./03-media.js";
+import { fileUrl, isPywebview } from "./03-media.js";
 import { currentStudioPage, onStudioPageChange } from "./22-studio.js";
 
 // ---- 与服务端一致的批量上限（前端只做提前提示，服务端仍逐项校验） ----
@@ -426,6 +426,7 @@ async function acceptFiles(picked) {
     progress: 0,
     path: "",
     thumb_path: "",
+    original_sha256: "",
     error: "",
     xhr: null,
   }));
@@ -458,7 +459,9 @@ function uploadOne(row, token) {
     row.status = "uploading";
     row.progress = 0;
     row.error = "";
-    xhr.open("POST", "/api/uploads");
+    // 打标专用上传：服务端会另存一份未经缩放的原图（训练包导出用），
+    // 且不做内容去重——同内容但不同文件夹的两张图必须保持两条样本。
+    xhr.open("POST", "/api/labeler/uploads");
     if (state.token) xhr.setRequestHeader("Authorization", `Bearer ${state.token}`);
     xhr.upload.onprogress = (event) => {
       if (!event.lengthComputable) return;
@@ -475,8 +478,9 @@ function uploadOne(row, token) {
         row.status = "uploaded";
         row.path = String(payload.path);
         row.thumb_path = String(payload.thumb_path || "");
+        row.original_sha256 = String(payload.original_sha256 || "");
         row.progress = 100;
-        // 服务端按内容去重，可能返回同内容已存在的文件名：以服务端为准。
+        // 服务端落盘名以返回为准（含安全字符清洗）。
         if (payload.name) row.name = String(payload.name);
       } else {
         row.status = "failed";
@@ -585,6 +589,7 @@ async function startTask() {
           thumb_path: row.thumb_path || "",
           name: row.name,
           relative_path: row.relative_path,
+          original_sha256: row.original_sha256 || "",
         })),
         config,
       },
@@ -1128,7 +1133,7 @@ function emptyPanel(title, hint) {
 // ============================================================
 
 async function exportResults() {
-  const format = $("#labelerExportFormat")?.value || "json";
+  const format = $("#labelerExportFormat")?.value || "captions";
   const body = { format };
   if (labeler.taskId) body.task_id = labeler.taskId;
   else if (labeler.search) body.q = labeler.search;
@@ -1137,11 +1142,31 @@ async function exportResults() {
   try {
     const payload = await api("/api/labeler/export", { method: "POST", body });
     if (payload?.path) {
-      triggerDownload(fileUrl(payload.path));
-      setHint(`已生成导出文件：${payload.name}（${payload.count} 条）`);
+      const noun = format === "lora" ? "张" : "条";
+      if (isPywebview()) {
+        // 桌面端不下载副本：WebView2 不处理 <a download>，点了也没反应；
+        // 文件已经在应用数据目录里，直接告诉用户位置，交给「打开文件夹」。
+        setHint(`已导出 ${payload.count} ${noun}：${payload.name}，位置：${payload.path}`);
+      } else {
+        triggerDownload(fileUrl(payload.path));
+        setHint(`已导出 ${payload.count} ${noun}：${payload.name}（已开始下载）`);
+      }
     }
   } catch (error) {
     setHint(`导出失败：${error.message}`, true);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function openExportFolder() {
+  const button = $("#labelerOpenExports");
+  if (button) button.disabled = true;
+  try {
+    const payload = await api("/api/labeler/exports/open", { method: "POST", body: {} });
+    setHint(payload?.path ? `已打开导出文件夹：${payload.path}` : "已打开导出文件夹");
+  } catch (error) {
+    setHint(`无法打开导出文件夹：${error.message}`, true);
   } finally {
     if (button) button.disabled = false;
   }
@@ -1258,6 +1283,7 @@ export function bindLabelerEvents() {
     }, SEARCH_DEBOUNCE_MS);
   });
   $("#labelerExport")?.addEventListener("click", () => { void exportResults(); });
+  $("#labelerOpenExports")?.addEventListener("click", () => { void openExportFolder(); });
 
   // 功能页切换：切走暂停轮询，切回来按服务端校准。
   onStudioPageChange((next, detail) => {

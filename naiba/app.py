@@ -362,6 +362,15 @@ class NaibaChatApp:
             self.labeler.recover()
         except Exception:  # noqa: BLE001 - 打标器恢复失败不阻断启动
             logger.exception("打标器任务启动恢复失败")
+        # 造梦机（docs/plans/2026-10-23-ComfyUI自动化工作台模块计划.md）：工作台第三个
+        # 功能页；独立工作流库（data/comfyui/）+ 串行 runner，不触碰聊天域 jobs.py。
+        from naiba.comfyui.service import ComfyUIService
+
+        self.comfyui = ComfyUIService(self)
+        try:
+            self.comfyui.recover()
+        except Exception:  # noqa: BLE001 - 造梦机恢复失败不阻断启动
+            logger.exception("造梦机任务启动恢复失败")
         self.updater = UpdateManager(self._paths.app_dir, self._paths.data_dir)
         # 「更新代理」独立于全局 proxy：启动时注入一次，设置保存后再注入更新。
         self.updater.configure_proxy(self.config.data.get("update_proxy"))
@@ -382,6 +391,10 @@ class NaibaChatApp:
             self.labeler.shutdown()
         except Exception:  # noqa: BLE001 - 收尾不互相阻断
             logger.exception("打标器收尾失败")
+        try:
+            self.comfyui.shutdown()
+        except Exception:  # noqa: BLE001 - 收尾不互相阻断
+            logger.exception("造梦机收尾失败")
         self.mcp.stop()
 
     def _studio_create_conversation(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -1796,6 +1809,21 @@ class NaibaChatApp:
         )
         return {**result, "clean_pending": clean_pending}, HTTPStatus.OK
 
+    def _upload_labeler_spooled(self, spool_path: str, original_name: str) -> tuple[dict[str, Any], int]:
+        """打标器专用 multipart 落库：原图留存 + 不去重缓存副本（labeler.api_upload）。
+
+        与通用上传的唯一差别在落库语义；uploads 的后台清理触发完全一致——
+        打标缓存副本同样占 uploads 额度，落盘后同样要保护刚写入的文件。
+        """
+        payload, status = self.labeler.api_upload(spool_path, original_name)
+        if status == HTTPStatus.OK and isinstance(payload, dict):
+            clean_pending = self._trigger_cache_clean(
+                SCOPE_UPLOADS,
+                protect_paths=[p for p in (payload.get("path"), payload.get("thumb_path")) if p],
+            )
+            payload["clean_pending"] = clean_pending
+        return payload, status
+
     # ---- 缓存清理（uploads / generated 分开；自动路径异步、手动路径同步） ----
 
     def _cache_bytes_payload(self) -> dict[str, int]:
@@ -2148,6 +2176,14 @@ class NaibaChatApp:
                 keys.update(labeler.referenced_upload_paths())
             except (OSError, ValueError):
                 pass
+        comfyui = getattr(self, "comfyui", None)
+        if comfyui is not None:
+            try:
+                # 造梦机本期不消费 uploads（P5 图片输入接入后由它返回引用集合）；
+                # 保护入口先并进来，方向只会是「多留」。
+                keys.update(comfyui.referenced_upload_paths())
+            except (OSError, ValueError):
+                pass
         background = str(((self.config.data.get("chat_background") or {}).get("image") or "")).strip()
         if background:
             key = normalized_path_key(background)
@@ -2291,6 +2327,13 @@ class NaibaChatApp:
         if labeler is not None:
             try:
                 if normalized_path_key(target) in labeler.referenced_upload_paths():
+                    return True
+            except (OSError, ValueError):
+                return True  # 判定不了时宁可保留
+        comfyui = getattr(self, "comfyui", None)
+        if comfyui is not None:
+            try:
+                if normalized_path_key(target) in comfyui.referenced_upload_paths():
                     return True
             except (OSError, ValueError):
                 return True  # 判定不了时宁可保留

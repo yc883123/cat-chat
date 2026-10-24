@@ -108,6 +108,7 @@ class LabelerDB:
                     name TEXT NOT NULL DEFAULT '',
                     size INTEGER NOT NULL DEFAULT 0,
                     mtime_ns INTEGER NOT NULL DEFAULT 0,
+                    original_sha256 TEXT NOT NULL DEFAULT '',
                     state TEXT NOT NULL DEFAULT 'queued',
                     attempt_count INTEGER NOT NULL DEFAULT 0,
                     error_category TEXT NOT NULL DEFAULT '',
@@ -131,6 +132,7 @@ class LabelerDB:
                     path TEXT NOT NULL,
                     relative_path TEXT NOT NULL DEFAULT '',
                     name TEXT NOT NULL DEFAULT '',
+                    original_sha256 TEXT NOT NULL DEFAULT '',
                     engine TEXT NOT NULL,
                     output_mode TEXT NOT NULL,
                     preset TEXT,
@@ -151,6 +153,17 @@ class LabelerDB:
                     ON annotations(source_task_id);
                 """
             )
+            # 旧库迁移：original_sha256 是训练包原图留存（2026-10-23）新增列，
+            # 老库 ALTER 补列，历史行留空串（导出训练包时按「没有原图记录」拒绝）。
+            for table in ("task_items", "annotations"):
+                columns = {
+                    str(row["name"])
+                    for row in db.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                if "original_sha256" not in columns:
+                    db.execute(
+                        f"ALTER TABLE {table} ADD COLUMN original_sha256 TEXT NOT NULL DEFAULT ''"
+                    )
 
     # ---- 逐图状态 ----
 
@@ -168,6 +181,7 @@ class LabelerDB:
                 task_id, item["item_id"], ordinal, item["path"], item["path_key"],
                 item["content_version"], item.get("relative_path") or "", item.get("name") or "",
                 int(item.get("size") or 0), int(item.get("mtime_ns") or 0),
+                str(item.get("original_sha256") or ""),
                 state, 0, "", "", "{}", item.get("annotation_id"),
                 config_fingerprint,
                 int(item.get("started_at") or 0) or None,
@@ -178,10 +192,10 @@ class LabelerDB:
                 """
                 INSERT INTO task_items (
                     task_id, item_id, ordinal, path, path_key, content_version,
-                    relative_path, name, size, mtime_ns, state, attempt_count,
-                    error_category, error, usage_json, annotation_id,
+                    relative_path, name, size, mtime_ns, original_sha256, state,
+                    attempt_count, error_category, error, usage_json, annotation_id,
                     config_fingerprint, started_at, finished_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(task_id, item_id) DO NOTHING
                 """,
                 rows,
@@ -251,7 +265,9 @@ class LabelerDB:
                     """
                     UPDATE annotations SET
                         tags_json=?, confidences_json=?, description=?, usage_json=?,
-                        model_key=?, model_name=?, relative_path=?, name=?, updated_at=?
+                        model_key=?, model_name=?, relative_path=?, name=?,
+                        original_sha256=CASE WHEN original_sha256='' THEN ? ELSE original_sha256 END,
+                        updated_at=?
                       WHERE id=?
                     """,
                     (
@@ -263,6 +279,7 @@ class LabelerDB:
                         str(annotation.get("model_name") or ""),
                         str(annotation.get("relative_path") or ""),
                         str(annotation.get("name") or ""),
+                        str(annotation.get("original_sha256") or ""),
                         stamp, annotation_id,
                     ),
                 )
@@ -271,15 +288,17 @@ class LabelerDB:
                     """
                     INSERT INTO annotations (
                         item_id, source_task_id, path_key, content_version, path,
-                        relative_path, name, engine, output_mode, preset, prompt_version,
-                        model_key, model_name, config_fingerprint, tags_json,
-                        confidences_json, description, usage_json, created_at, updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        relative_path, name, original_sha256, engine, output_mode,
+                        preset, prompt_version, model_key, model_name,
+                        config_fingerprint, tags_json, confidences_json, description,
+                        usage_json, created_at, updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         item_id, task_id, annotation["path_key"], annotation["content_version"],
                         annotation["path"], annotation.get("relative_path") or "",
-                        annotation.get("name") or "", annotation.get("engine") or "provider",
+                        annotation.get("name") or "", str(annotation.get("original_sha256") or ""),
+                        annotation.get("engine") or "provider",
                         annotation.get("output_mode") or "keywords", annotation.get("preset") or "",
                         int(annotation.get("prompt_version") or 1),
                         annotation.get("model_key") or "", annotation.get("model_name") or "",
@@ -457,6 +476,24 @@ class LabelerDB:
             ).fetchall()
         return {str(row["path"]) for row in rows if row["path"]}
 
+    def referenced_original_digests(self) -> set[str]:
+        """原图留存引用集：所有标注与逐图任务项记录的原图摘要。
+
+        原图清理（``originals.prune_unreferenced``）据此保留在用文件；
+        任务项行含未完成任务，所以「刚上传还没跑完」的原图也不会被清。
+        """
+        out: set[str] = set()
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT original_sha256 AS digest FROM annotations "
+                "UNION SELECT original_sha256 FROM task_items"
+            ).fetchall()
+        for row in rows:
+            text = str(row["digest"] or "").strip().lower()
+            if text:
+                out.add(text)
+        return out
+
     # ---- 行 → dict ----
 
     @staticmethod
@@ -472,6 +509,7 @@ class LabelerDB:
             "name": str(row["name"] or ""),
             "size": int(row["size"] or 0),
             "mtime_ns": int(row["mtime_ns"] or 0),
+            "original_sha256": str(row["original_sha256"] or ""),
             "state": str(row["state"]),
             "attempt_count": int(row["attempt_count"] or 0),
             "error_category": str(row["error_category"] or ""),
@@ -494,6 +532,7 @@ class LabelerDB:
             "path": str(row["path"]),
             "relative_path": str(row["relative_path"] or ""),
             "name": str(row["name"] or ""),
+            "original_sha256": str(row["original_sha256"] or ""),
             "engine": str(row["engine"]),
             "output_mode": str(row["output_mode"]),
             "preset": str(row["preset"] or ""),

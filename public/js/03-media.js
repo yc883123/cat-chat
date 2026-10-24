@@ -100,7 +100,8 @@ export function openImageLightbox(largeUrl, sourceEl = null) {
   const box = $('#imageLightbox');
   const url = String(largeUrl || '');
   if (!img || !box || !url) return;
-  if (!/^(\/api\/file|https?:\/\/)/i.test(url)) return;
+  // 宿主托管的图片链接：/api/file（uploads/generated 等）与 /api/comfyui/tasks/（造梦机产物）。
+  if (!/^(\/api\/file|\/api\/comfyui\/tasks\/|https?:\/\/)/i.test(url)) return;
   const inConversation = Boolean(sourceEl && sourceEl.closest && sourceEl.closest('#messages'));
   lightboxItems = inConversation ? collectConversationImages() : [];
   lightboxIndex = lightboxItems.findIndex((item) => item.url === url);

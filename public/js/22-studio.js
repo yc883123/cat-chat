@@ -43,7 +43,7 @@ const RESULT_MODES = ["result", "history"];
 // 手机三档：模板 / 参数 / 结果。
 const PANES = ["list", "form", "result"];
 // 侧栏功能页允许值：与后端 config.STUDIO_PAGE_VIEWS 和 index.html 的 data-studio-page 对齐。
-const STUDIO_PAGES = ["library", "labeler"];
+const STUDIO_PAGES = ["library", "labeler", "comfyui"];
 // 标题区最近任务捷径固定最多 3 条；完整列表走侧栏「历史产出」。
 const RECENT_TASK_LIMIT = 3;
 // 列表接口自身最多返回 60 条；这是展示范围提示，不是分页参数。

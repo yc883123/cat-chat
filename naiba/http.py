@@ -606,6 +606,28 @@ class RequestHandler(BaseHTTPRequestHandler):
                 q=str(query.get("q", [""])[0]),
                 limit=str(query.get("limit", ["300"])[0]),
             ))
+        elif path == "/api/comfyui/health":
+            # 造梦机：连接测试（ComfyUI system_stats 摘要）。
+            self._json(*self.app.comfyui.api_health())
+        elif path == "/api/comfyui/workflows":
+            self._json(*self.app.comfyui.api_workflows())
+        elif path.startswith("/api/comfyui/workflows/"):
+            self._json(*self.app.comfyui.api_workflow(path.rsplit("/", 1)[-1]))
+        elif path == "/api/comfyui/tasks":
+            query = urllib.parse.parse_qs(parsed.query)
+            self._json(*self.app.comfyui.api_tasks(str(query.get("active_only", [""])[0])))
+        elif path.startswith("/api/comfyui/tasks/") and path.endswith("/events"):
+            # 固定后缀排在通用任务详情之前，events 不会被当成任务 id。
+            task_id = path.split("/")[-2]
+            query = urllib.parse.parse_qs(parsed.query)
+            self._json(*self.app.comfyui.api_task_events(task_id, str(query.get("after", ["0"])[0])))
+        elif path.startswith("/api/comfyui/tasks/") and "/files/" in path:
+            # 产物文件：/api/comfyui/tasks/<id>/files/<name>（本地落盘字节）。
+            middle = path[len("/api/comfyui/tasks/"):]
+            task_id, _, name = middle.partition("/files/")
+            self._serve_comfyui_task_file(task_id, name)
+        elif path.startswith("/api/comfyui/tasks/"):
+            self._json(*self.app.comfyui.api_task(path.rsplit("/", 1)[-1]))
         elif path.startswith("/api/studio/tasks/") and path.endswith("/events"):
             task_id = path.split("/")[-2]
             query = urllib.parse.parse_qs(parsed.query)
@@ -623,6 +645,13 @@ class RequestHandler(BaseHTTPRequestHandler):
         # 上传接口改 multipart 流式（不再走 JSON base64）：跳过 JSON 读取分流。
         if path == "/api/uploads" and self.headers.get("Content-Type", "").lower().startswith("multipart/form-data"):
             self._upload_request()
+            return
+        # 打标器专用上传（原图留存 + 不去重缓存副本）：同样必须在 JSON 读取前分流。
+        if path == "/api/labeler/uploads" and self.headers.get("Content-Type", "").lower().startswith("multipart/form-data"):
+            if not self._authorized(parsed):
+                self._json({"error": "访问口令无效"}, HTTPStatus.UNAUTHORIZED)
+                return
+            self._upload_request(labeler=True)
             return
         # Agent 头像同样走 multipart（小体积、进内存），也必须在 JSON 读取前分流。
         if path == "/api/agents/avatar" and self.headers.get("Content-Type", "").lower().startswith("multipart/form-data"):
@@ -653,6 +682,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             # 远大于 2 MiB 通用上限；图片本体走 /api/uploads，不在这里传输。
             skill_max_size = 16 * 1024 * 1024
             skill_oversize_error = "打标批次内容过大（最多 500 张图片引用），请拆分批次后重试"
+        elif path == "/api/comfyui/workflows":
+            # 造梦机工作流导入：整个 API 工作流 JSON 在这里传输，上限对齐
+            # 聊天域 _load_comfyui_workflow 的 20 MB 文件上限；任务提交走默认上限。
+            skill_max_size = 20 * 1024 * 1024
+            skill_oversize_error = "工作流内容过大（上限 20 MB），请精简后重新导出再导入"
         else:
             skill_max_size = 130 * 1024 * 1024
             skill_oversize_error = None
@@ -707,6 +741,32 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/labeler/export":
             # 只收记录 ID / 查询条件 / 格式；落点由服务端决定（data/labeler/exports）。
             self._json(*self.app.labeler.api_export(body))
+        elif path == "/api/labeler/exports/open":
+            # 打开的是运行本应用的电脑上的文件夹：手机浏览器点了只会弹在看不见的 PC 上。
+            if not self._is_local_request():
+                self._json(
+                    {"error": "导出文件夹在运行 Cat Chat 的电脑上，手机端打不开"},
+                    HTTPStatus.FORBIDDEN,
+                )
+            else:
+                self._json(*self.app.labeler.api_reveal_exports())
+        elif path == "/api/labeler/uploads":
+            # 打标上传走 multipart 流式（见 do_POST 开头的分流）；走到这里说明
+            # 客户端发的是 JSON 等其它格式，一律拒绝。
+            self._json({"error": "请以 multipart 表单上传图片"}, HTTPStatus.BAD_REQUEST)
+        elif path == "/api/comfyui/workflows":
+            # 造梦机：导入工作流（API 格式校验 + 参数扫描 + 受管存储）。
+            self._json(*self.app.comfyui.api_workflow_create(body))
+        elif path == "/api/comfyui/url":
+            # 造梦机：保存 ComfyUI 地址（comfyui_url 键）并立即测试连接。
+            self._json(*self.app.comfyui.api_set_url(body))
+        elif path == "/api/comfyui/tasks":
+            # 造梦机：提交任务（库里选工作流 + 覆盖参数 + 段数）。
+            self._json(*self.app.comfyui.api_submit(body))
+        elif path.startswith("/api/comfyui/tasks/") and path.endswith("/cancel"):
+            self._json(*self.app.comfyui.api_cancel(path.split("/")[-2]))
+        elif path.startswith("/api/comfyui/tasks/") and path.endswith("/retry"):
+            self._json(*self.app.comfyui.api_retry(path.split("/")[-2]))
         elif path == "/api/aux-chats":
             # 辅助对话创建（计划-辅助对话 §3.3）：标题自动编号、权限档忽略入参强制只读。
             try:
@@ -1286,6 +1346,14 @@ class RequestHandler(BaseHTTPRequestHandler):
             if body is None:
                 return
             self._json(*self.app.studio.api_tasks_delete(body))
+        elif path == "/api/comfyui/tasks":
+            # 造梦机：批量删除历史任务（执行中跳过）；产物目录随任务一起删。
+            body = self._read_json()
+            if body is None:
+                return
+            self._json(*self.app.comfyui.api_tasks_delete(body))
+        elif path.startswith("/api/comfyui/workflows/"):
+            self._json(*self.app.comfyui.api_workflow_delete(path.rsplit("/", 1)[-1]))
         elif path == "/api/app-icon":
             # 恢复默认图标（只删 custom-icon.*，内置 icon.ico 不动）。
             self._json(*self.app.api_clear_app_icon())
@@ -1467,6 +1535,14 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Retry-After", "5")
         self.end_headers()
         self.wfile.write(body)
+
+    def _serve_comfyui_task_file(self, task_id: str, name: str) -> None:
+        """造梦机产物文件：只服务 data/comfyui/outputs/<task_id>/ 下的受管字节。"""
+        path = self.app.comfyui.task_file(task_id, urllib.parse.unquote(str(name or "")))
+        if path is None:
+            self._json({"error": "产物文件不存在"}, HTTPStatus.NOT_FOUND)
+            return
+        self._serve_local_file(str(path))
 
     def _serve_local_file(self, source: str, download: bool = False) -> None:
         if source.startswith("http://127.0.0.1:8188/") or source.startswith("http://localhost:8188/"):
@@ -1729,11 +1805,13 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def _upload_request(self) -> None:
+    def _upload_request(self, labeler: bool = False) -> None:
         """multipart/form-data 流式上传：解析到临时 spool 后交给 app 落盘。
 
         设计：python_multipart 流式回调（不整包进内存），文件 part 字节直接写
-        spool（uploads 根下的 .part），完成后 _upload_spooled 做去重/落盘/图片处理。
+        spool（uploads 根下的 .part），完成后按入口分流：通用上传走
+        ``_upload_spooled``（去重 + 按设置压缩）；打标器上传走
+        ``_upload_labeler_spooled``（原图留存 + 不去重）。
         客户端中断（abort）时解析不完整 → spool 清理，不留垃圾。
         """
         from python_multipart import MultipartParser
@@ -1876,7 +1954,10 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json({"error": "上传中断或未收到文件内容"}, HTTPStatus.BAD_REQUEST)
             return
         try:
-            self._json(*self.app._upload_spooled(spool_path, state["filename"]))
+            if labeler:
+                self._json(*self.app._upload_labeler_spooled(spool_path, state["filename"]))
+            else:
+                self._json(*self.app._upload_spooled(spool_path, state["filename"]))
         except OSError as exc:
             self._json({"error": f"上传保存失败：{exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
 

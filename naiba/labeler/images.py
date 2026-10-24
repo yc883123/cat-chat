@@ -13,10 +13,12 @@
 from __future__ import annotations
 
 import hashlib
+import io
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from naiba.core.paths import normalized_path_key
+from naiba.labeler.originals import normalize_digest
 from naiba.storage.media import is_uploads_path
 
 ALLOWED_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif"})
@@ -74,6 +76,31 @@ def _verify_image(path: Path, label: str) -> None:
         raise LabelerImageError(f"{label}不是可读取的图片：{exc}") from exc
 
 
+def verify_image_bytes(name: str, data: bytes) -> None:
+    """上传入口的字节级校验：与 ``_verify_image`` 同口径，只是数据已在内存里。
+
+    打标专用上传在落盘前先拦（格式 / 空文件 / 20 MiB / Pillow 真解码一次），
+    让用户在上传阶段就看到和提交阶段一致的错误，而不是等提交批次才失败。
+    """
+    suffix = Path(str(name or "")).suffix.lower()
+    if suffix not in ALLOWED_IMAGE_EXTS:
+        raise LabelerImageError("格式不支持（只接受 PNG、JPG、WEBP、GIF）")
+    if not data:
+        raise LabelerImageError("是空文件")
+    if len(data) > MAX_IMAGE_BYTES:
+        limit_mb = MAX_IMAGE_BYTES // (1024 * 1024)
+        raise LabelerImageError(f"超过 {limit_mb}MB 上限")
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(data)) as image:
+            image.verify()
+    except ImportError as exc:  # pragma: no cover - 打包版必带 Pillow
+        raise LabelerImageError("图片校验组件不可用") from exc
+    except (OSError, ValueError) as exc:
+        raise LabelerImageError(f"不是可读取的图片：{exc}") from exc
+
+
 def content_version(size: int, mtime_ns: int) -> str:
     """内容版本：大小 + 修改时间（不读全文哈希，批量场景下够用且便宜）。"""
     return f"{int(size)}:{int(mtime_ns)}"
@@ -127,11 +154,17 @@ def validate_image_refs(data_dir: Path, refs: Any) -> list[dict[str, Any]]:
             )
         name = str(ref.get("name") or path.name).strip()[:NAME_MAX] or path.name
         relative = _clean_relative_path(ref.get("relative_path")) or name
+        # 原图摘要（训练包导出的字节校验依据）：前端上传时由服务端算好返回；
+        # 缺省允许为空（旧记录兼容），但传了就必须是合法格式，防脏数据入库。
+        digest = normalize_digest(ref.get("original_sha256"))
+        if ref.get("original_sha256") and not digest:
+            raise LabelerImageError(f"{label}原图校验值非法")
         out.append({
             "path": str(path),
             "path_key": key,
             "name": name,
             "relative_path": relative[:RELATIVE_PATH_MAX],
+            "original_sha256": digest,
             "size": int(stat.st_size),
             "mtime_ns": int(stat.st_mtime_ns),
             "content_version": content_version(stat.st_size, stat.st_mtime_ns),

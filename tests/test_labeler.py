@@ -11,13 +11,19 @@
 6. 导出与句子库：三格式、CSV 公式注入防护、受管落点、degraded 标记。
 """
 
+import hashlib
+import io
 import json
+import os
+import sqlite3
 import sys
 import tempfile
 import threading
 import time
 import unittest
+import zipfile
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -25,7 +31,13 @@ from naiba.core.paths import normalized_path_key  # noqa: E402
 from naiba.labeler import LABELER_ITEM_STATES  # noqa: E402
 from naiba.labeler.db import LabelerDB  # noqa: E402
 from naiba.labeler.engines.provider import build_prompt, parse_response  # noqa: E402
-from naiba.labeler.export import LabelerExportError, render, write_export  # noqa: E402
+from naiba.labeler.export import (  # noqa: E402
+    LabelerExportError,
+    open_export_dir,
+    render,
+    render_lora_package,
+    write_export,
+)
 from naiba.labeler.images import (  # noqa: E402
     MAX_BATCH_IMAGES,
     LabelerImageError,
@@ -38,9 +50,11 @@ from naiba.labeler.jobs import (  # noqa: E402
     config_fingerprint,
     normalize_config,
 )
+from naiba.labeler.originals import archive_original, original_path, prune_unreferenced  # noqa: E402
 from naiba.labeler.presets import DEFAULT_PRESET, PRESET_IDS, filter_tags, get_preset, preset_list  # noqa: E402
 from naiba.labeler.runner import LabelerRunner, aggregate_usage, classify_error  # noqa: E402
 from naiba.labeler.sentences import sentence_stats, split_sentences  # noqa: E402
+from naiba.labeler.service import LabelerService  # noqa: E402
 from naiba.labeler.store import LabelerStore  # noqa: E402
 
 
@@ -685,6 +699,58 @@ class LabelerExportTests(unittest.TestCase):
         with self.assertRaises(LabelerExportError):
             render(self._records(), "xml")
 
+    def test_captions_zip_matches_image_names(self):
+        records = [
+            {"relative_path": "dataset/sub/a.png", "name": "a.png",
+             "tags": ["cat", "red dress"], "description": ""},
+            {"relative_path": "dataset/b.jpg", "name": "b.jpg",
+             "tags": [], "description": "一只猫。", "output_mode": "description"},
+            {"relative_path": "dataset/sub/a.png", "name": "a.png",
+             "tags": ["dog"], "description": ""},
+        ]
+        payload = render(records, "captions")
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            names = archive.namelist()
+            self.assertIn("dataset/sub/a.txt", names)
+            self.assertIn("dataset/b.txt", names)
+            self.assertIn("dataset/sub/a-2.txt", names)
+            self.assertEqual(archive.read("dataset/sub/a.txt").decode("utf-8"), "cat, red dress")
+            self.assertEqual(archive.read("dataset/b.txt").decode("utf-8"), "一只猫。")
+
+    def test_captions_export_uses_zip_extension(self):
+        artifact = write_export(self.dir / "exports", self._records(), "captions", label="train")
+        self.assertTrue(artifact["path"].endswith(".zip"))
+        self.assertEqual(artifact["format"], "captions")
+
+    def test_open_export_dir_creates_managed_folder(self):
+        from naiba.labeler import export as export_module
+
+        with mock.patch.object(export_module, "_open_folder") as opener:
+            path = open_export_dir(self.dir / "exports")
+        self.assertTrue(Path(path).is_dir())
+        opener.assert_called_once()
+
+    def test_reveal_exports_returns_managed_path(self):
+        from naiba.labeler.service import LabelerService
+
+        service = LabelerService.__new__(LabelerService)
+        service._exports_dir = self.dir / "exports"
+        with mock.patch("naiba.labeler.service.open_export_dir",
+                        return_value=str(service._exports_dir)) as opener:
+            payload, status = service.api_reveal_exports()
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["path"], str(service._exports_dir))
+        opener.assert_called_once_with(service._exports_dir)
+
+    def test_export_folder_button_wired_in_ui(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public/index.html").read_text(encoding="utf-8")
+        js = (root / "public/js/23-labeler.js").read_text(encoding="utf-8")
+        self.assertIn('id="labelerOpenExports"', html)
+        self.assertIn('value="captions"', html)
+        self.assertIn("/api/labeler/exports/open", js)
+        self.assertIn("#labelerOpenExports", js)
+
 
 class LabelerSentenceTests(unittest.TestCase):
     def test_split_chinese_and_english(self):
@@ -702,6 +768,529 @@ class LabelerSentenceTests(unittest.TestCase):
     def test_query_filter(self):
         stats = sentence_stats([{"description": "一只猫。天空很蓝。"}], query="猫")
         self.assertEqual(len(stats["items"]), 1)
+
+
+def _png_bytes(color=(90, 30, 200), size=(12, 12)) -> bytes:
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", size, color).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+class LabelerOriginalsTests(unittest.TestCase):
+    """原图留存：内容寻址、幂等、路径防穿越、生命周期清理。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_archive_is_content_addressed_and_idempotent(self):
+        data = _png_bytes()
+        first = archive_original(self.dir, data)
+        second = archive_original(self.dir, data)
+        self.assertEqual(first["sha256"], hashlib.sha256(data).hexdigest())
+        self.assertEqual(first["path"], second["path"])
+        self.assertEqual(first["size"], len(data))
+        path = Path(first["path"])
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.parent.name, first["sha256"][:2])
+        self.assertEqual(path.read_bytes(), data)
+
+    def test_original_path_rejects_bad_digest(self):
+        data = _png_bytes()
+        archive_original(self.dir, data)
+        digest = hashlib.sha256(data).hexdigest()
+        self.assertIsNotNone(original_path(self.dir, digest))
+        self.assertIsNotNone(original_path(self.dir, digest.upper()))
+        for bad in ("", "abc", "../etc/passwd", f"{digest}extra", 123):
+            self.assertIsNone(original_path(self.dir, bad))
+
+    def test_prune_keeps_referenced_and_young_files(self):
+        keep_data, drop_data = _png_bytes((1, 2, 3)), _png_bytes((4, 5, 6))
+        keep = archive_original(self.dir, keep_data)
+        drop = archive_original(self.dir, drop_data)
+        old = time.time() - 25 * 60 * 60
+        os.utime(drop["path"], (old, old))
+        stats = prune_unreferenced(self.dir, {keep["sha256"]})
+        self.assertEqual(stats["removed"], 1)
+        self.assertTrue(Path(keep["path"]).is_file())
+        self.assertFalse(Path(drop["path"]).is_file())
+
+    def test_prune_spares_unreferenced_but_recent(self):
+        data = _png_bytes((9, 9, 9))
+        fresh = archive_original(self.dir, data)
+        stats = prune_unreferenced(self.dir, set())
+        self.assertEqual(stats["removed"], 0)
+        self.assertTrue(Path(fresh["path"]).is_file())
+
+    def test_prune_leaves_unrecognized_files_alone(self):
+        stray = self.dir / "labeler" / "originals" / "zz" / "not-a-digest.txt"
+        stray.parent.mkdir(parents=True)
+        stray.write_text("keep me", encoding="utf-8")
+        prune_unreferenced(self.dir, set())
+        self.assertTrue(stray.is_file())
+
+    def test_service_prune_originals_uses_db_references(self):
+        db = LabelerDB(self.dir)
+        data = _png_bytes((7, 7, 7))
+        archived = archive_original(self.dir, data)
+        stale = archive_original(self.dir, _png_bytes((8, 8, 8)))
+        os.utime(stale["path"], (time.time() - 25 * 60 * 60,) * 2)
+        db.complete_item(
+            "t1", "it1",
+            annotation={
+                "path_key": "k", "content_version": "1:1", "path": "/x.png",
+                "relative_path": "d/a.png", "name": "a.png",
+                "original_sha256": archived["sha256"],
+                "engine": "provider", "output_mode": "keywords",
+                "model_key": "m", "model_name": "m",
+                "tags": [], "confidences": [], "description": "",
+            },
+            usage={}, config_fingerprint="cfg",
+        )
+        service = LabelerService.__new__(LabelerService)
+        service.app = _StubApp(self.dir)
+        service.db = db
+        stats = service._prune_originals()
+        self.assertEqual(stats["removed"], 1)
+        self.assertTrue(Path(archived["path"]).is_file())
+        self.assertEqual(
+            service.db.referenced_original_digests(), {archived["sha256"]}
+        )
+
+
+class LabelerLoraPackageTests(unittest.TestCase):
+    """LoRA 训练包：短名配对、原字节保真、manifest 可追溯、缺口整包拒绝。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.uploads = self.dir / "uploads"
+        self.original = _png_bytes((10, 20, 30))
+        self.digest = hashlib.sha256(self.original).hexdigest()
+        self.archived = archive_original(self.dir, self.original)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _record(self, *, relative_path, name, path=None, digest=None,
+                path_key=None, content_version="1:1", ann_id=1, tags=None,
+                description="", task_id="tg-x"):
+        return {
+            "id": ann_id,
+            "source_task_id": task_id,
+            "path": str(path or self.uploads / "cache.bin"),
+            "path_key": path_key or f"key-{ann_id}",
+            "content_version": content_version,
+            "relative_path": relative_path,
+            "name": name,
+            "original_sha256": self.digest if digest is None else digest,
+            "tags": tags if tags is not None else ["cat"],
+            "confidences": [0.9] if tags else [],
+            "description": description,
+        }
+
+    def test_same_content_two_sources_exports_two_pairs(self):
+        # 同内容、不同来源：两条样本各自导出图片与 caption（用户拍板的口径）。
+        records = [
+            self._record(relative_path="folder-one/a.png", name="a.png", ann_id=1),
+            self._record(relative_path="folder-two/a.png", name="a.png", ann_id=2),
+        ]
+        payload = render_lora_package(records, self.dir)
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            names = archive.namelist()
+            self.assertIn("000001.png", names)
+            self.assertIn("000001.txt", names)
+            self.assertIn("000002.png", names)
+            self.assertIn("000002.txt", names)
+            self.assertIn("manifest.json", names)
+            self.assertEqual(archive.read("000001.png"), self.original)
+            self.assertEqual(archive.read("000002.png"), self.original)
+            self.assertEqual(archive.read("000001.txt"), b"cat")
+            self.assertEqual(archive.read("000002.txt"), b"cat")
+            manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+        self.assertEqual(manifest["count"], 2)
+        self.assertEqual([e["image"] for e in manifest["entries"]],
+                         ["000001.png", "000002.png"])
+        for entry in manifest["entries"]:
+            self.assertEqual(entry["sha256"], self.digest)
+            self.assertEqual(entry["size"], len(self.original))
+            self.assertEqual(entry["caption_source"], "tags")
+        self.assertEqual(manifest["entries"][0]["relative_path"], "folder-one/a.png")
+        self.assertEqual(manifest["entries"][1]["relative_path"], "folder-two/a.png")
+
+    def test_caption_prefers_tags_then_description(self):
+        records = [
+            self._record(relative_path="a.png", name="a.png", ann_id=1, tags=["cat", "dog"]),
+            self._record(relative_path="b.png", name="b.png", ann_id=2, tags=[],
+                         description="一只猫在睡觉。"),
+            self._record(relative_path="c.png", name="c.png", ann_id=3, tags=[],
+                         description=""),
+        ]
+        payload = render_lora_package(records, self.dir)
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            self.assertEqual(archive.read("000001.txt").decode("utf-8"), "cat, dog")
+            self.assertEqual(archive.read("000002.txt").decode("utf-8"), "一只猫在睡觉。")
+            self.assertEqual(archive.read("000003.txt").decode("utf-8"), "")
+            manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+        sources = [entry["caption_source"] for entry in manifest["entries"]]
+        self.assertEqual(sources, ["tags", "description", ""])
+
+    def test_naming_is_stable_and_follows_fixed_order(self):
+        records = [
+            self._record(relative_path="b.png", name="b.png", ann_id=9),
+            self._record(relative_path="a.png", name="a.png", ann_id=2),
+        ]
+        first = render_lora_package(records, self.dir)
+        second = render_lora_package(list(reversed(records)), self.dir)
+        # 命名与顺序稳定（ZIP 头/manifest 里的时间戳会随渲染时刻变化，比语义内容）。
+        with zipfile.ZipFile(io.BytesIO(first)) as a, zipfile.ZipFile(io.BytesIO(second)) as b:
+            self.assertEqual(a.namelist(), b.namelist())
+            for name in a.namelist():
+                if name == "manifest.json":
+                    continue
+                self.assertEqual(a.read(name), b.read(name), name)
+            manifest_a = json.loads(a.read("manifest.json").decode("utf-8"))
+            manifest_b = json.loads(b.read("manifest.json").decode("utf-8"))
+            manifest_a.pop("created_at")
+            manifest_b.pop("created_at")
+            self.assertEqual(manifest_a, manifest_b)
+        self.assertEqual([e["relative_path"] for e in manifest_a["entries"]], ["a.png", "b.png"])
+        self.assertEqual([e["annotation_id"] for e in manifest_a["entries"]], [2, 9])
+
+    def test_extension_follows_source_image(self):
+        original = _png_bytes((3, 4, 5))
+        digest = hashlib.sha256(original).hexdigest()
+        archive_original(self.dir, original)
+        record = self._record(relative_path="a.webp", name="a.webp", digest=digest)
+        payload = render_lora_package([record], self.dir)
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            self.assertIn("000001.webp", archive.namelist())
+            self.assertIn("000001.txt", archive.namelist())
+
+    def test_legacy_record_without_digest_rejects_whole_package(self):
+        records = [
+            self._record(relative_path="a.png", name="a.png", ann_id=1),
+            self._record(relative_path="b.png", name="b.png", ann_id=2, digest=""),
+        ]
+        with self.assertRaises(LabelerExportError) as ctx:
+            render_lora_package(records, self.dir)
+        self.assertIn("没有原图记录", str(ctx.exception))
+        self.assertIn("重新打标", str(ctx.exception))
+
+    def test_same_sample_twice_rejects_whole_package(self):
+        records = [
+            self._record(relative_path="a.png", name="a.png", ann_id=1,
+                         path_key="same-key"),
+            self._record(relative_path="a.png", name="a.png", ann_id=2,
+                         path_key="same-key"),
+        ]
+        with self.assertRaises(LabelerExportError) as ctx:
+            render_lora_package(records, self.dir)
+        self.assertIn("多条记录", str(ctx.exception))
+
+    def test_missing_original_everywhere_rejects(self):
+        Path(self.archived["path"]).unlink()
+        record = self._record(relative_path="a.png", name="a.png",
+                              path=self.uploads / "gone.png")
+        with self.assertRaises(LabelerExportError) as ctx:
+            render_lora_package([record], self.dir)
+        self.assertIn("原图文件已缺失", str(ctx.exception))
+
+    def test_scaled_cache_image_cannot_replace_original(self):
+        # 留存池里没有原图；缓存图是缩放过的另一份字节：摘要对不上，必须拒绝。
+        Path(self.archived["path"]).unlink()
+        scaled = _png_bytes((10, 20, 30), size=(6, 6))
+        cache = self.uploads / "scaled.png"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_bytes(scaled)
+        self.assertNotEqual(hashlib.sha256(scaled).hexdigest(), self.digest)
+        record = self._record(relative_path="a.png", name="a.png", path=cache)
+        with self.assertRaises(LabelerExportError):
+            render_lora_package([record], self.dir)
+
+    def test_cache_image_with_matching_bytes_is_accepted(self):
+        # 留存池被清但缓存图字节与原图一致（未缩放）：按摘要校验通过后可用。
+        cache = self.uploads / "same.png"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_bytes(self.original)
+        Path(self.archived["path"]).unlink()
+        record = self._record(relative_path="a.png", name="a.png", path=cache)
+        payload = render_lora_package([record], self.dir)
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            self.assertEqual(archive.read("000001.png"), self.original)
+
+    def test_write_export_lora_names_zip_and_atomic_rejection(self):
+        exports = self.dir / "exports"
+        artifact = write_export(exports, [self._record(relative_path="a.png", name="a.png")],
+                                "lora", label="任务x", data_dir=self.dir)
+        self.assertTrue(Path(artifact["path"]).name.startswith("lora-任务x"))
+        self.assertTrue(artifact["path"].endswith(".zip"))
+        # 整包拒绝：渲染失败时目录里不能留下半个包。
+        exports2 = self.dir / "exports2"
+        with self.assertRaises(LabelerExportError):
+            write_export(exports2, [self._record(relative_path="b.png", name="b.png",
+                                                 digest="")], "lora")
+        self.assertEqual(list(exports2.glob("*")) if exports2.exists() else [], [])
+
+
+class LabelerUploadDigestTests(unittest.TestCase):
+    """原图摘要贯穿：上传留存 → refs 校验 → 落库 → 标注行 → 导出可用。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.uploads = self.dir / "uploads"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_validate_refs_carries_digest_and_rejects_bad_format(self):
+        data = _png_bytes()
+        first = _write_png(self.uploads / "d1" / "a.png")
+        second = _write_png(self.uploads / "d2" / "a.png")
+        first.write_bytes(data)
+        second.write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest()
+        refs = validate_image_refs(self.dir, [
+            {"path": str(first), "relative_path": "f1/a.png", "original_sha256": digest},
+            {"path": str(second), "relative_path": "f2/a.png", "original_sha256": digest.upper()},
+        ])
+        self.assertEqual(len(refs), 2)
+        self.assertEqual([ref["original_sha256"] for ref in refs], [digest, digest])
+        self.assertNotEqual(refs[0]["path_key"], refs[1]["path_key"])
+        with self.assertRaises(LabelerImageError):
+            validate_image_refs(self.dir, [
+                {"path": str(first), "relative_path": "f1/a.png",
+                 "original_sha256": "not-a-digest"},
+            ])
+
+    def test_service_upload_archives_original_without_dedup(self):
+        service = LabelerService.__new__(LabelerService)
+        service.app = _StubApp(self.dir)
+        data = _png_bytes((42, 1, 2))
+        digest = hashlib.sha256(data).hexdigest()
+        spool_a = self.dir / "a.part"
+        spool_a.write_bytes(data)
+        payload_a, status_a = service.api_upload(str(spool_a), "a.png")
+        self.assertEqual(status_a, 200)
+        self.assertEqual(payload_a["original_sha256"], digest)
+        self.assertEqual(payload_a["original_size"], len(data))
+        self.assertFalse(payload_a["deduped"])
+        # 同内容第二个来源：缓存副本不去重（两条样本），原图留存复用同一份字节。
+        spool_b = self.dir / "b.part"
+        spool_b.write_bytes(data)
+        payload_b, status_b = service.api_upload(str(spool_b), "b.png")
+        self.assertEqual(status_b, 200)
+        self.assertNotEqual(payload_a["path"], payload_b["path"])
+        self.assertTrue(Path(payload_a["path"]).is_file())
+        self.assertTrue(Path(payload_b["path"]).is_file())
+        self.assertTrue(Path(payload_a["original_sha256"]) is not None)
+        archived = original_path(self.dir, digest)
+        self.assertIsNotNone(archived)
+        self.assertEqual(archived.read_bytes(), data)
+        self.assertFalse(spool_a.exists())
+        self.assertFalse(spool_b.exists())
+
+    def test_service_upload_rejects_non_image(self):
+        service = LabelerService.__new__(LabelerService)
+        service.app = _StubApp(self.dir)
+        spool = self.dir / "x.part"
+        spool.write_bytes(b"not an image")
+        payload, status = service.api_upload(str(spool), "x.png")
+        self.assertEqual(status, 400)
+        self.assertIn("不是可读取", payload["error"])
+        self.assertEqual(list((self.dir / "labeler" / "originals").rglob("*")) or [], [])
+
+    def test_complete_item_persists_digest_and_reuse_fills_blank(self):
+        db = LabelerDB(self.dir)
+        data = _png_bytes((5, 5, 5))
+        digest = hashlib.sha256(data).hexdigest()
+        db.add_items("t1", [{
+            "item_id": "it1", "path": "/x.png", "path_key": "k1",
+            "content_version": "10:20", "relative_path": "d/a.png", "name": "a.png",
+            "size": len(data), "mtime_ns": 20, "original_sha256": digest,
+        }], "cfg")
+        annotation = {
+            "path_key": "k1", "content_version": "10:20", "path": "/x.png",
+            "relative_path": "d/a.png", "name": "a.png",
+            "original_sha256": digest,
+            "engine": "provider", "output_mode": "keywords",
+            "model_key": "m", "model_name": "m",
+            "tags": ["cat"], "confidences": [0.9], "description": "",
+        }
+        ann_id, reused = db.complete_item("t1", "it1", annotation=annotation,
+                                          usage={}, config_fingerprint="cfg")
+        self.assertFalse(reused)
+        rows = db.annotations(task_id="t1")
+        self.assertEqual(rows[0]["original_sha256"], digest)
+        items = db.list_items("t1")
+        self.assertEqual(items[0]["original_sha256"], digest)
+        # 旧版本产出的行（摘要为空）被重跑复用时补齐，不覆盖已有值。
+        blank = dict(annotation, original_sha256="")
+        ann_id2, reused2 = db.complete_item("t2", "it2", annotation=blank,
+                                            usage={}, config_fingerprint="cfg")
+        self.assertTrue(reused2)
+        self.assertEqual(ann_id2, ann_id)
+        self.assertEqual(db.annotations_by_ids([ann_id])[0]["original_sha256"], digest)
+        newer = dict(annotation, original_sha256=hashlib.sha256(b"other").hexdigest())
+        db.complete_item("t3", "it3", annotation=newer, usage={},
+                         config_fingerprint="cfg")
+        self.assertEqual(db.annotations_by_ids([ann_id])[0]["original_sha256"], digest)
+
+    def test_legacy_database_gets_digest_columns(self):
+        # 模拟旧库：没有 original_sha256 列也能打开并自动补列。
+        root = self.dir / "labeler"
+        root.mkdir(parents=True)
+        connection = sqlite3.connect(root / "labeler.db")
+        connection.executescript(
+            """
+            CREATE TABLE task_items (
+                task_id TEXT NOT NULL, item_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL DEFAULT 0, path TEXT NOT NULL,
+                path_key TEXT NOT NULL, content_version TEXT NOT NULL,
+                relative_path TEXT NOT NULL DEFAULT '', name TEXT NOT NULL DEFAULT '',
+                size INTEGER NOT NULL DEFAULT 0, mtime_ns INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL DEFAULT 'queued',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                error_category TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+                usage_json TEXT NOT NULL DEFAULT '{}', annotation_id INTEGER,
+                config_fingerprint TEXT NOT NULL DEFAULT '',
+                started_at INTEGER, finished_at INTEGER,
+                PRIMARY KEY (task_id, item_id)
+            );
+            CREATE TABLE annotations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id TEXT NOT NULL, source_task_id TEXT NOT NULL,
+                path_key TEXT NOT NULL, content_version TEXT NOT NULL,
+                path TEXT NOT NULL, relative_path TEXT NOT NULL DEFAULT '',
+                name TEXT NOT NULL DEFAULT '', engine TEXT NOT NULL,
+                output_mode TEXT NOT NULL, preset TEXT,
+                prompt_version INTEGER NOT NULL DEFAULT 1,
+                model_key TEXT NOT NULL, model_name TEXT NOT NULL,
+                config_fingerprint TEXT NOT NULL, tags_json TEXT NOT NULL DEFAULT '[]',
+                confidences_json TEXT NOT NULL DEFAULT '[]',
+                description TEXT NOT NULL DEFAULT '',
+                usage_json TEXT NOT NULL DEFAULT '{}',
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+            );
+            """
+        )
+        connection.commit()
+        connection.close()
+        db = LabelerDB(self.dir)
+        digest = hashlib.sha256(_png_bytes()).hexdigest()
+        db.add_items("t1", [{
+            "item_id": "it1", "path": "/x", "path_key": "k",
+            "content_version": "1:1", "relative_path": "a.png", "name": "a.png",
+            "size": 1, "mtime_ns": 1, "original_sha256": digest,
+        }], "cfg")
+        db.complete_item(
+            "t1", "it1",
+            annotation={
+                "path_key": "k", "content_version": "1:1", "path": "/x",
+                "relative_path": "a.png", "name": "a.png",
+                "original_sha256": digest,
+                "engine": "provider", "output_mode": "keywords",
+                "model_key": "m", "model_name": "m",
+                "tags": [], "confidences": [], "description": "",
+            },
+            usage={}, config_fingerprint="cfg",
+        )
+        self.assertEqual(db.annotations(task_id="t1")[0]["original_sha256"], digest)
+
+    def test_runner_annotation_carries_item_digest(self):
+        item = {"path_key": "k", "content_version": "1:1", "path": "/x.png",
+                "relative_path": "d/a.png", "name": "a.png",
+                "original_sha256": "a" * 64}
+        config = {"engine": "provider", "output_mode": "keywords", "preset": "",
+                  "prompt_version": 1, "model_key": "m", "model_name": "m"}
+        reusable = {"engine": "provider", "output_mode": "keywords", "preset": "",
+                    "prompt_version": 1, "model_key": "m", "model_name": "m",
+                    "tags": ["cat"], "confidences": [0.9], "description": ""}
+        merged = LabelerRunner._annotation_from_reusable(reusable, item, config)
+        self.assertEqual(merged["original_sha256"], "a" * 64)
+
+    def test_service_export_lora_end_to_end_from_db(self):
+        db = LabelerDB(self.dir)
+        data = _png_bytes((11, 22, 33))
+        digest = hashlib.sha256(data).hexdigest()
+        archived = archive_original(self.dir, data)
+        cache = self.uploads / "d" / "a.png"
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(data)
+        db.add_items("tg-1", [{
+            "item_id": "it-1", "path": str(cache), "path_key": "k1",
+            "content_version": "1:1", "relative_path": "set/a.png", "name": "a.png",
+            "size": len(data), "mtime_ns": 1, "original_sha256": digest,
+        }], "cfg")
+        db.complete_item(
+            "tg-1", "it-1",
+            annotation={
+                "path_key": "k1", "content_version": "1:1", "path": str(cache),
+                "relative_path": "set/a.png", "name": "a.png",
+                "original_sha256": digest,
+                "engine": "provider", "output_mode": "keywords",
+                "model_key": "m", "model_name": "m",
+                "tags": ["cat"], "confidences": [0.9], "description": "",
+            },
+            usage={}, config_fingerprint="cfg",
+        )
+        service = LabelerService.__new__(LabelerService)
+        service.app = _StubApp(self.dir)
+        service.db = db
+        service._exports_dir = self.dir / "labeler" / "exports"
+        rows = db.annotations(task_id="tg-1")
+        payload, status = service.api_export(
+            {"format": "lora", "annotation_ids": [rows[0]["id"]]}
+        )
+        self.assertEqual(status, 201)
+        self.assertTrue(payload["path"].endswith(".zip"))
+        with zipfile.ZipFile(payload["path"]) as archive:
+            self.assertEqual(archive.read("000001.png"), data)
+            self.assertEqual(archive.read("000001.txt"), b"cat")
+        # 历史遗留（无摘要）记录导出训练包：整包拒绝且错误可读。
+        db2 = LabelerDB(self.dir / "legacy")
+        db2.add_items("tg-2", [{
+            "item_id": "it-1", "path": str(cache), "path_key": "k2",
+            "content_version": "1:1", "relative_path": "old/a.png", "name": "a.png",
+            "size": 1, "mtime_ns": 1, "original_sha256": "",
+        }], "cfg")
+        db2.complete_item(
+            "tg-2", "it-1",
+            annotation={
+                "path_key": "k2", "content_version": "1:1", "path": str(cache),
+                "relative_path": "old/a.png", "name": "a.png",
+                "original_sha256": "",
+                "engine": "provider", "output_mode": "keywords",
+                "model_key": "m", "model_name": "m",
+                "tags": ["cat"], "confidences": [0.9], "description": "",
+            },
+            usage={}, config_fingerprint="cfg",
+        )
+        service2 = LabelerService.__new__(LabelerService)
+        service2.app = _StubApp(self.dir)
+        service2.db = db2
+        service2._exports_dir = self.dir / "labeler" / "exports"
+        rows2 = db2.annotations(task_id="tg-2")
+        payload2, status2 = service2.api_export(
+            {"format": "lora", "annotation_ids": [rows2[0]["id"]]}
+        )
+        self.assertEqual(status2, 400)
+        self.assertIn("没有原图记录", payload2["error"])
+
+    def test_training_package_ui_wired(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public/index.html").read_text(encoding="utf-8")
+        js = (root / "public/js/23-labeler.js").read_text(encoding="utf-8")
+        self.assertIn('value="lora"', html)
+        self.assertIn("LoRA 训练包", html)
+        self.assertIn("/api/labeler/uploads", js)
+        self.assertIn("original_sha256", js)
 
 
 if __name__ == "__main__":

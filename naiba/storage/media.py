@@ -71,11 +71,16 @@ def store_uploaded_file(
     filename: str,
     data_dir: Path,
     imaging: dict[str, Any] | None = None,
+    dedupe: bool = True,
 ) -> dict[str, str | int]:
     """存储一次上传：图片处理 → 内容级去重 → 分日目录原子落盘。
 
     幂等语义：相同内容（处理后字节）已存在于 uploads 时，不重复写盘，
     直接返回既有文件信息（同内容不同来源复用同一份缓存）。
+
+    ``dedupe=False`` 供打标器上传使用：训练包要求「同内容但来源不同的图片是两条
+    独立样本」，按内容去重会把两个来源合并成同一个缓存文件，下游按 path_key
+    去重时第二条样本就被丢掉了；跳过去重让每个来源落成自己的文件。
 
     返回 {name, path, size, thumb_path, deduped}（deduped=True 表示命中既有缓存）。
     """
@@ -87,7 +92,7 @@ def store_uploaded_file(
     main_bytes, thumb_name, thumb_bytes = _process_uploaded_image(data, name, imaging)
     digest = hashlib.sha256(main_bytes).hexdigest()
     # 内容级去重（uploads 内）：同大小候选再比内容哈希（避免全目录哈希开销）。
-    existing = _find_duplicate(uploads_root, len(main_bytes), digest)
+    existing = _find_duplicate(uploads_root, len(main_bytes), digest) if dedupe else None
     if existing is not None:
         return {
             "name": existing.name,
@@ -100,7 +105,8 @@ def store_uploaded_file(
     # 跨 scope 去重：同一份字节若已作为**工具产物**收在 generated 里，直接复用原位，
     # 不再重编码/复制进 uploads。同一张图"既被采集又被前端上传"是常见的双份来源
     # （实测 generated 与 uploads 各存了一份同内容大图）；复用后只需补侧车缩略图。
-    shared = _find_generated_duplicate(data_dir, len(main_bytes), digest)
+    # dedupe=False（打标器）时同样跳过：落到 generated 的路径会让两个来源共享 path_key。
+    shared = _find_generated_duplicate(data_dir, len(main_bytes), digest) if dedupe else None
     if shared is not None:
         thumb_path = _thumb_path_for(shared)
         if not thumb_path:

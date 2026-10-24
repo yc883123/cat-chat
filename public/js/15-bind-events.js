@@ -22,9 +22,12 @@ import { dismissOnboarding, resetOnboarding, saveOnboardingProvider, selectOnboa
 import { bindAuxChatEvents, restoreAuxChats, restoreDockGroup } from "./21-aux-chat.js";
 // 工作台（Studio）import 同样追加在末尾（_studio_plan_v2.md P4.1）。
 import { bindStudioEvents } from "./22-studio.js";
+// 工作台（Studio）import 同样追加在末尾（_studio_plan_v2.md P4.1）。
 // 打标器（工作台第二个功能页）import 同样追加在末尾：
 // 23 只从 22 取 onStudioPageChange，22 不反向 import 23，不存在循环依赖。
 import { bindLabelerEvents } from "./23-labeler.js";
+// 造梦机（工作台第三个功能页）：24 只从 01/03/22 取公共函数，无循环依赖。
+import { bindComfyuiEvents } from "./24-comfyui.js";
 // 工作台（Studio）import 同样追加在末尾（_studio_plan_v2.md P4.1）。
 // ---- 聊天背景图（外观页） ----
 // 上传走同一个 /api/uploads（落盘 data/uploads/<日期>/，返回绝对路径），但**不进入
@@ -3131,4 +3134,6 @@ void restoreAuxChats();
 bindStudioEvents();
 // 打标器（工作台第二个功能页）：事件接线（与 Studio 同一个组合根）。
 bindLabelerEvents();
+// 造梦机（工作台第三个功能页）：事件接线（与 Studio 同一个组合根）。
+bindComfyuiEvents();
 // 工作台（_studio_plan_v2.md P4）：事件接线（组合根唯一装配点）。

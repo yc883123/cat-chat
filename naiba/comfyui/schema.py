@@ -90,6 +90,8 @@ class NodeSchemaProvider:
             block = inputs.get(scope) if isinstance(inputs.get(scope), dict) else {}
             for field_name, spec in block.items():
                 parsed = parse_input_decl(spec)
-                if parsed is not None:
-                    fields[str(field_name)] = parsed
+                fields[str(field_name)] = {
+                    **(parsed or {"kind": "unknown"}),
+                    "optional": scope == "optional",
+                }
         return fields

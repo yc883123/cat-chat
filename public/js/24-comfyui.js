@@ -514,9 +514,42 @@ function attachCandidateCombo(input, wrap, candidatesFn) {
   const list = document.createElement("div");
   list.className = "comfyui-combo-list";
   list.hidden = true;
-  wrap.append(list);
-  // 聚焦先给列表（对齐 ComfyUI「下拉+搜索」：当前值不在候选里也能看到可选项），
-  // 输入按文本过滤；预览上限 30 条（用户拍板，列表可滚动），搜不到给提示行。
+  const positionList = () => {
+    if (list.hidden || !list.isConnected) return;
+    const rect = input.getBoundingClientRect();
+    const maxHeight = Math.min(190, window.innerHeight * 0.4);
+    const below = window.innerHeight - rect.bottom - 8;
+    const above = rect.top - 8;
+    const openAbove = below < Math.min(maxHeight, 120) && above > below;
+    const available = Math.max(80, Math.min(maxHeight, openAbove ? above : below));
+    list.style.left = `${rect.left}px`;
+    list.style.width = `${rect.width}px`;
+    list.style.maxHeight = `${available}px`;
+    list.style.top = openAbove
+      ? `${Math.max(8, rect.top - available - 2)}px`
+      : `${rect.bottom + 2}px`;
+  };
+  const trackPosition = () => {
+    window.addEventListener("scroll", positionList, true);
+    window.addEventListener("resize", positionList);
+  };
+  const stopTracking = () => {
+    window.removeEventListener("scroll", positionList, true);
+    window.removeEventListener("resize", positionList);
+  };
+  const showList = () => {
+    list.hidden = false;
+    if (!list.isConnected) {
+      document.body.append(list);
+      trackPosition();
+    }
+    positionList();
+  };
+  const hideList = () => {
+    list.hidden = true;
+    list.remove();
+    stopTracking();
+  };
   const renderMatches = (showAll = false) => {
     const text = String(input.value || "").trim().toLowerCase();
     const all = candidatesFn();
@@ -525,12 +558,14 @@ function attachCandidateCombo(input, wrap, candidatesFn) {
       : all.filter((name) => name.toLowerCase().includes(text));
     const matches = matched.slice(0, 30);
     list.textContent = "";
+    list.style.height = "auto";
+    list.style.maxHeight = "";
     if (!matches.length) {
       const empty = document.createElement("div");
       empty.className = "comfyui-combo-option";
       empty.textContent = "没有匹配的候选；直接填文件名也可以";
       list.append(empty);
-      list.hidden = false;
+      showList();
       return;
     }
     for (const name of matches) {
@@ -539,18 +574,17 @@ function attachCandidateCombo(input, wrap, candidatesFn) {
       option.className = "comfyui-combo-option";
       option.textContent = name;
       option.addEventListener("mousedown", (event) => {
-        // mousedown 抢在 blur 前：blur 会先收起下拉。
         event.preventDefault();
         input.value = name;
-        list.hidden = true;
+        hideList();
       });
       list.append(option);
     }
-    list.hidden = false;
+    showList();
   };
   input.addEventListener("focus", () => renderMatches(true));
   input.addEventListener("input", () => renderMatches(false));
-  input.addEventListener("blur", () => { list.hidden = true; });
+  input.addEventListener("blur", hideList);
 }
 
 function renderSlot(slot, roleCounts = new Map()) {
@@ -696,10 +730,10 @@ function renderMediaPicker(slot, key) {
   note.className = "comfyui-media-note";
   const emptyInWorkflow = !String(slot.default ?? "").trim() || String(slot.default).trim() === "None";
   note.textContent = picked
-    ? `已选择：${picked.name}`
+    ? `已选：${picked.name}`
     : emptyInWorkflow
-      ? "工作流里这个槽位是空的；不选文件就按空值提交"
-      : `还没选择${MEDIA_KIND_LABELS[kind] || "媒体"}文件：生成时按工作流里原本的文件执行`;
+      ? "未选"
+      : "未选则沿用工作流素材";
   note.title = note.textContent;
   const actions = document.createElement("div");
   actions.className = "comfyui-media-actions";

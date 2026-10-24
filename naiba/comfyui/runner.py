@@ -18,7 +18,8 @@ from typing import Any
 
 from naiba.comfyui import MAX_FILES_PER_SHOT, MAX_RESUBMIT, MAX_SHOTS, SHOT_TIMEOUT_SECONDS
 from naiba.comfyui import client
-from naiba.comfyui.params import apply_overrides
+from naiba.comfyui.params import apply_overrides, media_kind_of_field
+from naiba.comfyui.schema import NodeSchemaProvider
 from naiba.comfyui.store import now_ms
 
 POLL_INTERVAL_SECONDS = 1.5
@@ -195,6 +196,7 @@ class ComfyUIRunner:
                 if index in done_indexes:
                     continue
                 workflow = apply_overrides(prompt, overrides, randomize_seeds=True)
+                self._remove_unselected_optional_media(workflow, media_inputs, base)
                 media_error = self._apply_media(
                     base, workflow, media_inputs, media_upload_cache,
                 )
@@ -291,6 +293,56 @@ class ComfyUIRunner:
             cancel_event.set()
             with self._registry_lock:
                 self._cancel_events.pop(task_id, None)
+
+    @staticmethod
+    def _remove_unselected_optional_media(
+        workflow: dict[str, Any],
+        media_inputs: list[dict[str, Any]],
+        base: str,
+    ) -> None:
+        """Omit unselected media connections only where ComfyUI declares them optional."""
+        selected = {
+            (str(item.get("node_id") or ""), str(item.get("field_name") or ""))
+            for item in media_inputs
+            if item.get("path")
+        }
+        schemas = NodeSchemaProvider(base)
+        for node in workflow.values():
+            if not isinstance(node, dict):
+                continue
+            inputs = node.get("inputs")
+            if not isinstance(inputs, dict):
+                continue
+            media_connections: list[tuple[str, str]] = []
+            for field_name, connection in inputs.items():
+                if not (isinstance(connection, list) and len(connection) == 2):
+                    continue
+                source_id = str(connection[0])
+                source = workflow.get(source_id)
+                if not isinstance(source, dict):
+                    continue
+                source_inputs = source.get("inputs")
+                if not isinstance(source_inputs, dict):
+                    continue
+                source_class = str(source.get("class_type") or "")
+                media_fields = [
+                    key for key in source_inputs
+                    if media_kind_of_field(source_class, str(key))
+                ]
+                if len(media_fields) == 1 and (source_id, media_fields[0]) not in selected:
+                    media_connections.append((str(field_name), source_id))
+            if not media_connections:
+                continue
+            declarations = schemas.node_inputs(str(node.get("class_type") or ""))
+            if not declarations:
+                continue
+            for field_name, source_id in media_connections:
+                declaration = declarations.get(field_name)
+                if declaration is None:
+                    declaration = next((value for key, value in declarations.items()
+                                         if field_name.startswith(f"{key}.")), None)
+                if declaration and declaration.get("optional") is True:
+                    inputs.pop(field_name, None)
 
     def _apply_media(
         self,
@@ -412,6 +464,7 @@ class ComfyUIRunner:
             used = int(resubmits.get(str(index), 0) or 0)
             if used < MAX_RESUBMIT:
                 workflow = apply_overrides(prompt, overrides, randomize_seeds=True)
+                self._remove_unselected_optional_media(workflow, media_inputs, base)
                 media_error = self._apply_media(
                     base, workflow, media_inputs, media_upload_cache,
                 )

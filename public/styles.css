@@ -4062,19 +4062,22 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 /* Checkpoint 候选下拉：跟随输入框的浮层，候选为空时不出现（自由输入不受影响）。 */
 .comfyui-combo { position: relative; }
 .comfyui-combo-list {
-  position: absolute; z-index: 30; top: calc(100% + 2px); left: 0; right: 0;
-  /* 全量候选进滚动列表；手机上按视口封顶（dvh 跟随软键盘开合），列表内部滚动。 */
-  max-height: min(190px, 40dvh); overflow-y: auto; -webkit-overflow-scrolling: touch;
+  position: fixed; z-index: 1400; left: 0; top: 0;
+  max-height: min(190px, 40dvh); overflow-y: auto; overflow-x: hidden;
+  -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
   border: 1px solid var(--line); border-radius: var(--r-md);
   background: var(--surface); box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
-  display: flex; flex-direction: column; padding: 2px;
+  display: block; padding: 3px;
 }
+.comfyui-combo-list[hidden] { display: none !important; }
 .comfyui-combo-option {
-  border: 0; background: transparent; color: var(--text); text-align: left;
-  font-size: 11.5px; padding: 5px 8px; border-radius: var(--r-sm, 4px);
-  cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  /* 手机上点候选项：按一次点击算，不要触发双击缩放/长按选中。 */
-  touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+  display: block; box-sizing: border-box; width: 100%; min-width: 0; height: auto;
+  min-height: 30px; flex: none; padding: 6px 8px; margin: 0;
+  border: 0; border-radius: var(--r-sm, 4px); background: transparent;
+  color: var(--text); font-family: inherit; font-size: 11.5px;
+  font-weight: 400; line-height: 18px; text-align: left;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
 }
 .comfyui-combo-option:hover { background: var(--accent-soft, rgba(120, 100, 255, .12)); }
 /* 媒体输入槽：预览 + 说明 + 选择/替换/清除（计划 §5.4）。 */
@@ -4129,8 +4132,8 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .comfyui-outputs-head { display: flex; align-items: center; padding: 10px 12px 4px; }
 .comfyui-outputs-head strong { font-size: 13px; }
 .comfyui-output-grid { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 12px 12px; display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; align-content: start; }
-.comfyui-output { margin: 0; border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--surface-2); }
-.comfyui-output img { display: block; width: 100%; height: 96px; object-fit: cover; cursor: zoom-in; }
+.comfyui-output { align-self: start; margin: 0; border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--surface-2); }
+.comfyui-output img { display: block; width: 100%; height: auto; max-height: 220px; object-fit: contain; cursor: zoom-in; background: var(--surface-2); }
 .comfyui-output video { display: block; width: 100%; max-height: 140px; }
 .comfyui-output audio { display: block; width: 100%; height: 34px; }
 .comfyui-output figcaption { display: flex; align-items: center; gap: 4px; font-size: 9.5px; color: var(--muted); padding: 3px 4px 3px 6px; }

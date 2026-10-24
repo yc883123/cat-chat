@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from naiba.comfyui import MAX_WORKFLOW_PARAMS
@@ -157,6 +158,17 @@ def _media_port_label(prompt: dict[str, Any], node_id: str) -> str:
     return head if len(ports) == 1 else f"{head} 等{len(ports)}处"
 
 
+def _short_media_label(port: str, media: str) -> str:
+    match = re.search(r"(?:ref_image|ref_audio|ref_video|ref_video_audio)_(\d+)", port)
+    if not match:
+        return {"image": "图片输入", "audio": "音频输入", "video": "视频输入"}[media]
+    index = int(match.group(1)) + 1
+    if "video_audio" in port:
+        return f"视频音频 {index}"
+    noun = {"image": "参考图", "audio": "参考音频", "video": "参考视频"}[media]
+    return f"{noun} {index}"
+
+
 def scan_params(prompt: dict[str, Any]) -> list[dict[str, Any]]:
     """从 API 工作流扫描全部可编辑槽位；顺序 = 节点在 JSON 里的原始顺序。"""
     prompt = prompt or {}
@@ -218,7 +230,11 @@ def scan_params(prompt: dict[str, Any]) -> list[dict[str, Any]]:
             if field_type in ("image", "audio", "video"):
                 port = _media_port_label(prompt, str(node_id))
                 if port:
-                    slots[-1]["label"] = f"{slots[-1]['label']} → {port}"
+                    slots[-1]["label"] = _short_media_label(port, field_type)
+                else:
+                    slots[-1]["label"] = {
+                        "image": "图片输入", "audio": "音频输入", "video": "视频输入",
+                    }[field_type]
             if len(slots) >= MAX_WORKFLOW_PARAMS:
                 return slots
     return slots

@@ -242,6 +242,26 @@ class ParamsTests(unittest.TestCase):
         self.assertEqual(media_kind_of_field("LoadImage", "image"), "image")
         self.assertIsNone(media_kind_of_field("LoadImage", "other"))
 
+    def test_media_slot_labels_are_short_and_numbered(self):
+        prompt = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "None"}},
+            "2": {"class_type": "LoadAudio", "inputs": {"audio": "None"}},
+            "3": {"class_type": "VHS_LoadVideo", "inputs": {"video": ""}},
+            "4": {"class_type": "LoadAudio", "inputs": {"audio": "None"}},
+            "20": {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
+                "ref_images.ref_image_3": ["1", 0],
+                "ref_audios.ref_audio_1": ["2", 0],
+                "ref_videos.ref_video_0": ["3", 0],
+                "ref_video_audios.ref_video_audio_2": ["4", 0],
+            }},
+        }
+        labels = {(slot["node_id"], slot["field_name"]): slot["label"]
+                  for slot in scan_params(prompt)}
+        self.assertEqual(labels[("1", "image")], "参考图 4")
+        self.assertEqual(labels[("2", "audio")], "参考音频 2")
+        self.assertEqual(labels[("3", "video")], "参考视频 1")
+        self.assertEqual(labels[("4", "audio")], "视频音频 3")
+
     def test_scan_model_loader_roles_offline_fallback(self):
         # UNET/CLIP/VAE/ControlNet 加载字段：字段名 + 类名双重判定（离线回退路径）。
         prompt = {
@@ -320,7 +340,11 @@ class SchemaAndEnrichTests(unittest.TestCase):
         return provider, patcher
 
     def test_provider_caches_per_class_and_degrades(self):
-        fields = {"image": {"kind": "combo", "candidates": ["a.png"], "multiline": False}}
+        fields = {
+            "image": {"kind": "combo", "candidates": ["a.png"], "multiline": False,
+                      "optional": False},
+            "ref_images": {"kind": "unknown", "optional": True},
+        }
 
         def _fetch(class_type):
             return fields if class_type == "LoadImage" else None
@@ -331,6 +355,17 @@ class SchemaAndEnrichTests(unittest.TestCase):
             self.assertEqual(provider.node_inputs("LoadImage"), fields)
             self.assertEqual(fetch.call_count, 1, "同一节点类只取一次（按类缓存）")
         self.assertIsNone(provider.node_inputs("NoSuchNode"), "未安装节点降级为 None")
+
+    def test_provider_preserves_required_and_optional_input_scope(self):
+        provider = NodeSchemaProvider("http://127.0.0.1:1")
+        payload = {"input": {
+            "required": {"image": ["IMAGE", {}]},
+            "optional": {"ref_images.ref_image_0": ["IMAGE", {}]},
+        }}
+        with mock.patch.object(comfyui_client, "object_info_node", return_value=payload):
+            fields = provider._fetch("MiniMaxH3ReferenceToVideo")
+        self.assertFalse(fields["image"]["optional"])
+        self.assertTrue(fields["ref_images.ref_image_0"]["optional"])
 
     def test_provider_fetch_failure_degrades(self):
         provider, patcher = self._provider_with(None)
@@ -572,6 +607,61 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("第 1 段提交失败", done["error"])
         self.assertIn("seed 超上限", done["error"])
         self.assertEqual(fake.submitted, [], "提交失败后不再提交后续段")
+
+    def test_unselected_optional_media_inputs_are_removed_without_reindexing(self):
+        prompt = {
+            "10": {"class_type": "LoadImage", "inputs": {"image": "None"}},
+            "11": {"class_type": "LoadImage", "inputs": {"image": "ref.png"}},
+            "12": {"class_type": "LoadAudio", "inputs": {"audio": "None"}},
+            "13": {"class_type": "VHS_LoadVideo", "inputs": {"video": ""}},
+            "14": {"class_type": "LoadAudio", "inputs": {"audio": "song.wav"}},
+            "20": {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {
+                "ref_images.ref_image_0": ["10", 0],
+                "ref_images.ref_image_1": ["11", 0],
+                "ref_audios.ref_audio_0": ["12", 0],
+                "ref_videos.ref_video_0": ["13", 0],
+                "ref_video_audios.ref_video_audio_1": ["14", 0],
+            }},
+        }
+        declarations = {
+            "MiniMaxH3ReferenceToVideo": {
+                key: {"optional": True} for key in (
+                    "ref_images", "ref_audios", "ref_videos", "ref_video_audios",
+                )
+            }
+        }
+        class_provider = type("Provider", (), {
+            "node_inputs": lambda self, class_type: declarations.get(class_type),
+        })
+        with mock.patch("naiba.comfyui.runner.NodeSchemaProvider", return_value=class_provider()):
+            self.runner._remove_unselected_optional_media(prompt, [
+                {"node_id": "11", "field_name": "image", "path": "uploads/ref.png"},
+                {"node_id": "14", "field_name": "audio", "path": "uploads/song.wav"},
+            ], "http://127.0.0.1:8188")
+        h3_inputs = prompt["20"]["inputs"]
+        self.assertNotIn("ref_images.ref_image_0", h3_inputs)
+        self.assertEqual(h3_inputs["ref_images.ref_image_1"], ["11", 0])
+        self.assertNotIn("ref_audios.ref_audio_0", h3_inputs)
+        self.assertNotIn("ref_videos.ref_video_0", h3_inputs)
+        self.assertEqual(h3_inputs["ref_video_audios.ref_video_audio_1"], ["14", 0])
+
+    def test_unselected_media_cleanup_keeps_required_and_unknown_inputs(self):
+        prompt = {
+            "10": {"class_type": "LoadImage", "inputs": {"image": "None"}},
+            "20": {"class_type": "RequiredConsumer", "inputs": {"image": ["10", 0]}},
+            "21": {"class_type": "UnknownConsumer", "inputs": {"image": ["10", 0]}},
+        }
+        declarations = {
+            "RequiredConsumer": {"image": {"optional": False}},
+            "UnknownConsumer": None,
+        }
+        class_provider = type("Provider", (), {
+            "node_inputs": lambda self, class_type: declarations.get(class_type),
+        })
+        with mock.patch("naiba.comfyui.runner.NodeSchemaProvider", return_value=class_provider()):
+            self.runner._remove_unselected_optional_media(prompt, [], "http://127.0.0.1:8188")
+        self.assertEqual(prompt["20"]["inputs"]["image"], ["10", 0])
+        self.assertEqual(prompt["21"]["inputs"]["image"], ["10", 0])
 
     def test_media_inputs_uploaded_once_and_backfilled(self):
         # 计划 §5.2：执行前上传受管资产并回填进提交副本；同一任务同资产只传一次；
@@ -1239,6 +1329,15 @@ class ServiceApiTests(unittest.TestCase):
         self.assertIn('"/api/comfyui/media"', js)
         self.assertIn("media_inputs: collectMediaInputs()", js)
         self.assertIn("attachCandidateCombo", js)
+        css = (root / "public/styles.css").read_text(encoding="utf-8")
+        menu_rule = css.split(".comfyui-combo-list {", 1)[1].split("}", 1)[0]
+        self.assertIn("position: fixed", menu_rule)
+        self.assertIn("display: block", menu_rule)
+        self.assertIn("overflow-y: auto", menu_rule)
+        hidden_rule = css.split(".comfyui-combo-list[hidden] {", 1)[1].split("}", 1)[0]
+        self.assertIn("display: none", hidden_rule)
+        self.assertIn("document.body.append(list)", js)
+        self.assertIn("getBoundingClientRect()", js)
         self.assertIn('slot.control === "multiline"', js)
         self.assertIn("renderMediaPicker", js)
         self.assertIn('slot.control === "combo"', js)

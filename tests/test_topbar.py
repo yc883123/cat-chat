@@ -262,9 +262,9 @@ class StudioEntryTests(unittest.TestCase):
         index = self._index()
         sidebar = index[index.index('<aside class="sidebar"'):index.index("</aside>")]
         self.assertIn('id="sidebarStudioNav"', sidebar, "工作台态需要独立侧栏导航")
-        self.assertIn('id="studioPages"', sidebar, "左侧栏承担功能分页导航（当前只有模块库）")
-        self.assertIn('data-studio-page="library"', sidebar, "分页「模块库」在左侧栏")
-        self.assertIn("模块库", sidebar)
+        self.assertIn('id="studioPages"', sidebar, "左侧栏承担功能分页导航（当前只有提词库）")
+        self.assertIn('data-studio-page="library"', sidebar, "分页「提词库」在左侧栏")
+        self.assertIn("提词库", sidebar)
         self.assertNotIn('id="studioNavHistory"', sidebar,
                          "历史产出已改成结果区图标按钮，不再占侧栏导航")
         self.assertNotIn('id="studioNavTemplates"', sidebar, "「我的模板」快捷入口已按用户要求去掉")
@@ -289,8 +289,8 @@ class StudioEntryTests(unittest.TestCase):
         studio = index[index.index('<section class="studio-view"'):index.index('<section class="composer-wrap"')]
         sidebar = index[index.index('<aside class="sidebar"'):index.index("</aside>")]
         self.assertIn('id="studioPages"', sidebar, "分页导航已移到左侧栏（模块级顶栏只留模块名与工具）")
-        self.assertIn('data-studio-page="library"', sidebar, "分页「模块库」缺失")
-        self.assertIn("模块库", sidebar)
+        self.assertIn('data-studio-page="library"', sidebar, "分页「提词库」缺失")
+        self.assertIn("提词库", sidebar)
         self.assertNotIn('id="studioPages"', studio, "工作台顶栏不再堆分页按钮")
         self.assertNotIn('id="modelSelect"', studio, "工作台顶栏不放对话模型选择")
         self.assertNotIn('id="agentSelect"', studio, "工作台顶栏不放对话 Agent 选择")

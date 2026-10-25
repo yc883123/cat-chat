@@ -984,6 +984,21 @@ class ProtocolMixins:
         base_path = parsed.path.rstrip("/")
         if base_path.endswith(target_path):
             return base_url
+        # base 本身就是完整的对话端点（末段 /chat/completions）：对话请求原样使用。
+        # 不这样处理会掉进下面「末段等于 rest」的重定根规则，把
+        # .../tokenplan/personal/chat/completions 改写成 .../v1/chat/completions（404）。
+        if base_path.endswith("/chat/completions") and target_path.endswith("/chat/completions"):
+            return base_url
+        # 千帆 Token Plan 的两条路径深度不一样：对话端点是 {base}/chat/completions（不带 /v1），
+        # 模型目录却是 {base}/v1/models（带 /v1）。这类 base 的版本段在路径中间（/v2/tokenplan/…），
+        # 通用规则会剥掉 /v1 而拼成 .../personal/models（404）⇒ 目录拉不到、输入区判定模型未验证。
+        # base 写成完整对话端点时先退回目录，再补 /v1/models。
+        if target_path == "/v1/models" and re.search(r"/tokenplan(/|$)", base_path):
+            root = base_path
+            if root.endswith("/chat/completions"):
+                root = root[: -len("/chat/completions")]
+            path = f"{root}/v1/models"
+            return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
         # base 已自带版本段（火山方舟 /api/v3、/api/coding/v3，智谱 /api/paas/v4 等）且目标是
         # OpenAI 系 /v1/ 路径时，版本段本身就是端点前缀：剥掉 /v1 直接追加，避免拼出
         # .../api/coding/v3/v1/chat/completions 这类双重版本路径（官方路径是 {base}/chat/completions）。

@@ -273,19 +273,52 @@ class LlmProtocolTests(unittest.TestCase):
     def test_with_endpoint_version_segment_in_middle(self):
         """版本段在路径中间（千帆 Token Plan /v2/tokenplan/personal）⇒ 同样剥 /v1 直接追加。
 
-        官方 OpenAI 兼容端点就是 {base}/chat/completions（无 /v1）；旧拼法会得到
+        官方 [OI] 兼容端点就是 {base}/chat/completions（无 /v1）；旧拼法会得到
         .../personal/v1/chat/completions → 404。
         """
         qianfan = "https://qianfan.baidubce.com/v2/tokenplan/personal"
         self.assertEqual(P._with_endpoint(qianfan, "/v1/chat/completions"),
                          "https://qianfan.baidubce.com/v2/tokenplan/personal/chat/completions")
-        self.assertEqual(P._with_endpoint(qianfan, "/v1/models"),
-                         "https://qianfan.baidubce.com/v2/tokenplan/personal/models")
-        # 版本段本来就是 OpenAI 系 /v1 的旧拼法不受影响（走标记位规则，仍在版本段处重定根）。
+        # 版本段本来就是 [OI] 系 /v1 的旧拼法不受影响（走标记位规则，仍在版本段处重定根）。
         self.assertEqual(P._with_endpoint("https://proxy.example.com/v1/relay", "/v1/chat/completions"),
                          "https://proxy.example.com/v1/chat/completions")
         self.assertEqual(P._with_endpoint("https://proxy.example.com/custom", "/v1/chat/completions"),
                          "https://proxy.example.com/custom/v1/chat/completions")
+
+    def test_with_endpoint_tokenplan_models_keeps_v1(self):
+        """千帆 Token Plan 的两条路径深度不一样：对话无 /v1，模型目录有 /v1。
+
+        对话 POST …/personal/chat/completions；模型表 GET …/personal/v1/models。
+        通用「中间版本段剥 /v1」规则对对话是对的，对模型目录就会拼出
+        …/personal/models（404）——目录拉不到 → 输入区判定模型未验证 → 发送被拦。
+        """
+        qianfan = "https://qianfan.baidubce.com/v2/tokenplan/personal"
+        self.assertEqual(P._with_endpoint(qianfan, "/v1/models"),
+                         "https://qianfan.baidubce.com/v2/tokenplan/personal/v1/models")
+        # Anthropic 兼容地址同样属于 tokenplan，拼写不变（本就没有中间版本段）。
+        anthropic = "https://qianfan.baidubce.com/anthropic/tokenplan/personal"
+        self.assertEqual(P._with_endpoint(anthropic, "/v1/models"),
+                         "https://qianfan.baidubce.com/anthropic/tokenplan/personal/v1/models")
+        self.assertEqual(P._with_endpoint(anthropic, "/v1/messages"),
+                         "https://qianfan.baidubce.com/anthropic/tokenplan/personal/v1/messages")
+        # 非 tokenplan 的中间版本段仍走原规则（模型目录不补 /v1）。
+        self.assertEqual(P._with_endpoint("https://proxy.example.com/v2/relay", "/v1/models"),
+                         "https://proxy.example.com/v2/relay/models")
+
+    def test_with_endpoint_full_chat_endpoint_base_used_as_is(self):
+        """base 直接写成完整对话端点时，对话请求原样使用，不再被重定位到 /v1/chat/completions。
+
+        末段等于 rest 的重定根规则会把 …/personal/chat/completions 改写成
+        …/v1/chat/completions（丢掉了整条前缀路径，404）。模型目录则退回目录再补 /v1/models。
+        """
+        full = "https://qianfan.baidubce.com/v2/tokenplan/personal/chat/completions"
+        self.assertEqual(P._with_endpoint(full, "/v1/chat/completions"), full)
+        self.assertEqual(P._with_endpoint(full, "/v1/models"),
+                         "https://qianfan.baidubce.com/v2/tokenplan/personal/v1/models")
+        # 普通供应商把完整对话端点当 base 粘贴时的既有行为不变。
+        self.assertEqual(P._with_endpoint("https://api.openai.com/v1/chat/completions", "/v1/chat/completions"),
+                         "https://api.openai.com/v1/chat/completions")
+
 
     def test_online_usage_variants(self):
         self.assertEqual(P._online_usage("openai_chat", {

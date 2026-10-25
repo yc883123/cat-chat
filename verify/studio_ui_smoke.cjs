@@ -149,15 +149,20 @@ async function runViewport(browser, vp) {
     errors.push(`console.error: ${text}${url ? ` @ ${url}` : ''}`);
   });
   // 任务/Agent/交接/生成注入（隔离实例天然没有已完成的生成任务）。
-  await page.route('**/api/studio/tasks', (route) => {
-    if (route.request().method() !== 'GET') return route.fallback();
-    if (historyFailuresLeft > 0) {
-      historyFailuresLeft -= 1;
-      expectedConsole500 += 1;
-      return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: '冒烟注入：历史读取失败' }) });
-    }
-    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ tasks: taskList }) });
-  });
+  // 用谓词而不是 glob：模块库现在请求 /api/studio/tasks?exclude_module=novel，
+  // glob `**/api/studio/tasks` 不匹配带查询串的 URL，会漏掉注入打到真实接口。
+  await page.route(
+    (url) => url.pathname === '/api/studio/tasks',
+    (route) => {
+      if (route.request().method() !== 'GET') return route.fallback();
+      if (historyFailuresLeft > 0) {
+        historyFailuresLeft -= 1;
+        expectedConsole500 += 1;
+        return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: '冒烟注入：历史读取失败' }) });
+      }
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ tasks: taskList }) });
+    },
+  );
   await page.route('**/api/studio/tasks/st-*', (route) => {
     if (route.request().method() !== 'GET') return route.fallback();
     const id = route.request().url().split('/').pop().split('?')[0];
@@ -799,8 +804,8 @@ async function runViewport(browser, vp) {
       await page.waitForTimeout(220);
     }
 
-    // 19. 侧栏工作台导航是三个功能页签（3.7.x 起侧栏承担分页）；「历史产出」
-    //     入口移到结果栏标题区，是带 title 的图标按钮。
+    // 19. 侧栏工作台导航是功能页签（3.7.x 起侧栏承担分页；创作场是第四个）；
+    //     「历史产出」入口移到结果栏标题区，是带 title 的图标按钮。
     if (isMobile) await selectPane('result');
     const nav = await page.evaluate(() => {
       const tabs = [...document.querySelectorAll('#studioPages .studio-page')].map((btn) => ({
@@ -814,9 +819,9 @@ async function runViewport(browser, vp) {
         historyVisible: Boolean(historyBtn && historyBtn.getBoundingClientRect().width > 0),
       };
     });
-    check('侧栏工作台导航是 提词库/打标器/造梦机 三个页签',
-      nav.tabs.length === 3
-      && nav.tabs.map((t) => t.text).join('/') === '提词库/打标器/造梦机',
+    check('侧栏工作台导航是 提词库/打标器/造梦机/创作场 四个页签',
+      nav.tabs.length === 4
+      && nav.tabs.map((t) => t.text).join('/') === '提词库/打标器/造梦机/创作场',
       JSON.stringify(nav));
     check('「历史产出」是结果栏标题区的图标按钮',
       nav.historyTitle === '历史产出' && nav.historyVisible, JSON.stringify(nav));

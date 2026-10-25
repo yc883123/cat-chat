@@ -43,7 +43,10 @@ const RESULT_MODES = ["result", "history"];
 // 手机三档：模板 / 参数 / 结果。
 const PANES = ["list", "form", "result"];
 // 侧栏功能页允许值：与后端 config.STUDIO_PAGE_VIEWS 和 index.html 的 data-studio-page 对齐。
-const STUDIO_PAGES = ["library", "labeler", "comfyui"];
+const STUDIO_PAGES = ["library", "labeler", "comfyui", "novel"];
+// 任务分区：模块库看不到创作场（novel）的任务，各分区各 60 条、互不挤占。
+// 创作场页自己请求 `?module=novel`（见 25-novel.js），两边不会串台。
+const STUDIO_TASKS_URL = "/api/studio/tasks?exclude_module=novel";
 // 标题区最近任务捷径固定最多 3 条；完整列表走侧栏「历史产出」。
 const RECENT_TASK_LIMIT = 3;
 // 列表接口自身最多返回 60 条；这是展示范围提示，不是分页参数。
@@ -1654,7 +1657,7 @@ function renderResultPanel(task) {
 
 async function refreshTasks({ syncHistory = false } = {}) {
   try {
-    const { tasks } = await api("/api/studio/tasks");
+    const { tasks } = await api(STUDIO_TASKS_URL);
     studio.tasks = Array.isArray(tasks) ? tasks : [];
     studio.tasksLoaded = true;
     studio.tasksError = "";
@@ -2026,7 +2029,7 @@ async function openHistoryList() {
   studio.historyState = studio.tasksLoaded ? "ready" : "loading";
   renderHistoryList();
   try {
-    const { tasks } = await api("/api/studio/tasks");
+    const { tasks } = await api(STUDIO_TASKS_URL);
     if (token !== studio.historyToken) return;
     studio.tasks = Array.isArray(tasks) ? tasks : [];
     studio.tasksLoaded = true;

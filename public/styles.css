@@ -4378,3 +4378,342 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
   #studioPageComfyui[data-comfyui-pane="tasks"] .comfyui-results-col { display: flex; }
   #studioPageComfyui[data-comfyui-pane="tasks"] .comfyui-tasks { max-height: 40%; }
 }
+
+/* ============================================================
+   创作场（data-studio-page-view="novel"，小说改编阶段一）
+   三栏与打标器/造梦机同一套节奏：作品与章节 / 当前阶段编辑 / 预览与下一步。
+   手机横屏（844x390、812x375）保留三栏；竖屏（<=760px）改三档分段控件。
+   全部复用既有语义变量，不新增小说专用色板。
+   ============================================================ */
+.novel-stages {
+  display: flex; gap: 4px; padding: 8px var(--s-4) 0;
+  overflow-x: auto; scrollbar-width: none;
+}
+.novel-stages::-webkit-scrollbar { display: none; }
+.novel-stage {
+  flex: none; min-height: 30px; padding: 0 12px;
+  border: 1px solid transparent; border-radius: var(--r-md);
+  background: transparent; color: var(--muted); font-size: 12.5px; cursor: pointer;
+}
+.novel-stage:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+.novel-stage.active {
+  border-color: var(--violet-line); background: var(--accent-soft);
+  color: var(--violet-deep); font-weight: 600;
+}
+/* 阶段二、三未接入：显式禁用，不靠颜色暗示「点得动」。 */
+.novel-stage:disabled { opacity: .55; cursor: not-allowed; }
+
+.novel-panes { display: none; gap: 4px; padding: 6px var(--s-4); border-bottom: 1px solid var(--line); }
+
+.novel-columns {
+  display: grid;
+  grid-template-columns: minmax(200px, 258px) minmax(0, 1.35fr) minmax(180px, 246px);
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4) var(--s-4);
+  min-height: 0;
+  flex: 1;
+}
+
+.novel-panel {
+  display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: hidden;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-md); padding: 10px;
+}
+.novel-panel-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  flex: none; padding-bottom: 6px; border-bottom: 1px solid var(--line);
+}
+.novel-panel-head strong { font-size: 13px; }
+.novel-panel-head small { font-size: 11px; color: var(--muted); }
+
+/* ---- 左栏：作品摘要 + 筛选 + 章节列表 ---- */
+.novel-book-summary { flex: none; display: grid; gap: 8px; }
+.novel-book-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.novel-book-cover {
+  flex: none; display: grid; place-items: center; width: 34px; height: 34px;
+  border: 1px solid var(--violet-line); border-radius: var(--r-md);
+  background: var(--accent-soft); color: var(--violet-deep); font-size: 13px; font-weight: 700;
+}
+.novel-book-title > div:last-child { min-width: 0; }
+.novel-book-title strong {
+  display: block; font-size: 12.5px; line-height: 1.3;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.novel-book-title small {
+  display: block; margin-top: 2px; font-size: 10.5px; color: var(--muted); line-height: 1.4;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.novel-book-stats { display: flex; gap: 6px; }
+.novel-book-stat {
+  flex: 1; min-width: 0; padding: 5px 6px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-2);
+  text-align: center;
+}
+.novel-book-stat b {
+  display: block; font-size: 12px; line-height: 1.25;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.novel-book-stat span { display: block; margin-top: 1px; font-size: 9.5px; color: var(--muted); }
+
+.novel-toolbar { flex: none; display: flex; gap: 6px; flex-wrap: wrap; }
+.novel-toolbar .control-button { flex: 1 1 auto; min-width: 0; }
+.novel-filter { flex: none; }
+.novel-filter input {
+  width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text); font-size: 12px;
+}
+
+.novel-chapter-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.novel-chapter-row {
+  display: flex; align-items: center; gap: 7px; width: 100%;
+  min-height: 38px; padding: 5px 6px; text-align: left;
+  border: 1px solid transparent; border-radius: var(--r-sm);
+  background: transparent; color: var(--text); cursor: pointer;
+}
+.novel-chapter-row:hover { background: var(--surface-2); }
+.novel-chapter-row.active { border-color: var(--violet-line); background: var(--accent-soft); }
+.novel-chapter-row.picked { background: var(--surface-2); }
+/* 章节行是 <label>，会被全局 `label input { width:100%; height:40px }` 命中：
+   复选框必须显式复位成原生尺寸，否则整行只剩一个大方块、标题被挤成 0 宽。 */
+.novel-chapter-row input[type="checkbox"] {
+  flex: none; display: inline-block; width: 14px; height: 14px;
+  margin: 0; padding: 0; border: 0; background: none;
+  accent-color: var(--accent); cursor: pointer;
+}
+.novel-chapter-copy { flex: 1; min-width: 0; display: grid; gap: 1px; }
+/* 章节标题最多两行，第二行放字数/状态（总计划 5.6.4）。 */
+.novel-chapter-copy strong {
+  font-size: 11.5px; font-weight: 600; line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; word-break: break-word;
+}
+.novel-chapter-copy small { font-size: 9.5px; color: var(--muted); }
+.novel-chapter-no { flex: none; font-size: 9.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.novel-empty { margin: 6px 2px; font-size: 11px; line-height: 1.6; color: var(--muted); }
+
+/* ---- 中栏：编辑区 ---- */
+.novel-editor-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+.novel-placeholder {
+  margin: auto; padding: 16px; max-width: 340px; text-align: center; color: var(--muted);
+}
+.novel-placeholder strong { display: block; color: var(--text); font-size: 13px; }
+.novel-placeholder p { margin: 6px 0 0; font-size: 11.5px; line-height: 1.65; }
+.novel-editor-fields { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
+/* display 会覆盖浏览器默认的 [hidden] 规则，必须显式声明一次（导入块同理）。 */
+.novel-editor-fields[hidden], .novel-block[hidden], .novel-pick-actions[hidden] { display: none; }
+.novel-field { display: grid; gap: 4px; font-size: 11px; color: var(--muted); }
+.novel-field input, .novel-field textarea {
+  width: 100%; padding: 7px 9px;
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text); font-size: 12.5px;
+}
+.novel-field-body { flex: 1; min-height: 0; }
+.novel-field-body textarea {
+  flex: 1; min-height: 220px; resize: none; line-height: 1.7;
+  font-family: var(--font); overflow-y: auto;
+}
+.novel-editor-meta { display: flex; gap: 6px; flex-wrap: wrap; }
+.novel-meta-item {
+  flex: 1 1 88px; min-width: 0; padding: 5px 7px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-2);
+}
+.novel-meta-item span { display: block; font-size: 9.5px; color: var(--muted); }
+.novel-meta-item b {
+  display: block; margin-top: 2px; font-size: 10.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.novel-editor-actions { flex: none; display: flex; gap: 6px; flex-wrap: wrap; padding-top: 2px; }
+
+/* ---- 右栏：预览与下一步 ---- */
+.novel-preview-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.novel-block {
+  display: grid; gap: 6px; padding: 8px 9px;
+  border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2);
+}
+.novel-block-title { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+.novel-block-title strong { font-size: 11.5px; }
+.novel-block-title small { font-size: 9.5px; color: var(--muted); }
+.novel-note { margin: 0; font-size: 10.5px; line-height: 1.6; color: var(--muted); }
+.novel-pick-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.novel-pick-actions .control-button { flex: 1 1 auto; min-width: 0; }
+
+/* ---- 作品列表弹窗 ---- */
+.novel-dialog {
+  width: min(460px, calc(100vw - 32px)); max-height: calc(100vh - 64px);
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text); padding: 0;
+}
+.novel-dialog::backdrop { background: rgba(0, 0, 0, .38); }
+.novel-dialog-form { display: grid; gap: 10px; padding: 14px; }
+.novel-dialog-form h3 { margin: 0; font-size: 14px; }
+.novel-book-list { display: flex; flex-direction: column; gap: 4px; max-height: 52vh; overflow-y: auto; }
+.novel-book-row {
+  display: flex; align-items: center; gap: 8px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); padding: 4px 6px;
+}
+.novel-book-row.active { border-color: var(--violet-line); background: var(--accent-soft); }
+.novel-book-open {
+  flex: 1; min-width: 0; display: grid; gap: 2px; padding: 4px;
+  border: none; background: transparent; color: var(--text); text-align: left; cursor: pointer;
+}
+.novel-book-open strong {
+  font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.novel-book-open small { font-size: 10px; color: var(--muted); }
+.novel-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.novel-dialog-error { margin: 0; min-height: 14px; font-size: 11px; color: var(--danger, #c0392b); }
+
+/* 手机横屏（844x390 / 812x375）：三栏同时可见，只压缩留白与辅助文案。 */
+@media (max-width: 960px) and (orientation: landscape) {
+  .novel-stages { padding: 5px 10px 0; }
+  .novel-stage { min-height: 26px; padding: 0 9px; font-size: 11px; }
+  .novel-columns {
+    grid-template-columns: 170px minmax(0, 1fr) 198px;
+    gap: 7px; padding: 7px 9px 9px;
+  }
+  .novel-panel { padding: 7px 8px; gap: 6px; }
+  .novel-panel-head { padding-bottom: 4px; }
+  .novel-panel-head strong { font-size: 11.5px; }
+  .novel-panel-head small { display: none; }
+  .novel-book-title small { display: none; }
+  .novel-book-cover { width: 28px; height: 28px; font-size: 11px; }
+  .novel-book-stat { padding: 4px 5px; }
+  .novel-book-stat b { font-size: 11px; }
+  .novel-book-stat span { font-size: 9px; }
+  .novel-chapter-row { min-height: 32px; padding: 4px 5px; }
+  .novel-chapter-copy strong { font-size: 10.5px; }
+  .novel-chapter-copy small { font-size: 9px; }
+  .novel-field-body textarea { min-height: 120px; font-size: 11.5px; line-height: 1.6; }
+  .novel-note { font-size: 9.5px; }
+  .novel-block { padding: 6px 7px; }
+  .novel-editor-actions .control-button { min-height: 26px; font-size: 10.5px; }
+}
+
+/* 手机竖屏（390x844 / 375x812）：改三档分段控件，同一时刻只显示一个面板。 */
+@media (max-width: 760px) {
+  .novel-panes { display: flex; }
+  .novel-columns {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    padding: 8px 9px 9px; gap: 8px; overflow: hidden;
+  }
+  .novel-chapters, .novel-editor, .novel-preview { display: none; }
+  #novelColumns[data-novel-pane="chapters"] .novel-chapters,
+  #novelColumns[data-novel-pane="editor"] .novel-editor,
+  #novelColumns[data-novel-pane="preview"] .novel-preview { display: flex; }
+  .novel-field-body textarea { min-height: 200px; }
+}
+
+/* ---- 阶段二：要素 / 大纲生成面板 ---- */
+.novel-stage-panel { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
+/* display 会覆盖浏览器默认的 [hidden] 规则。 */
+.novel-stage-panel[hidden], .novel-stage-task[hidden], .novel-stage-saved[hidden] { display: none; }
+.novel-stage-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.novel-stage-head strong { font-size: 12.5px; }
+.novel-stage-head small { font-size: 10.5px; color: var(--muted); }
+.novel-stage-meta { display: flex; gap: 6px; flex-wrap: wrap; }
+.novel-stage-model { display: flex; align-items: flex-end; gap: 8px; }
+.novel-stage-model .novel-field { flex: 1; min-width: 0; }
+.novel-stage-model .control-button { flex: none; }
+.novel-stage-panel select {
+  width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text); font-size: 12.5px;
+}
+.novel-stage-panel textarea {
+  width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text); font-size: 12.5px;
+  font-family: var(--font); resize: vertical;
+}
+.novel-stage-task, .novel-stage-saved {
+  display: flex; flex-direction: column; gap: 6px; min-height: 0; flex: 1;
+  padding: 8px 9px; border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+.novel-stage-task-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+}
+.novel-stage-task-head > span:first-child { font-size: 11.5px; font-weight: 600; }
+.novel-stage-task-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.novel-stage-task-actions .control-button[hidden] { display: none; }
+/* 结果正文：等宽、保留换行、独立滚动；不撑破面板。 */
+.novel-stage-result {
+  flex: 1; min-height: 90px; margin: 0; overflow: auto;
+  padding: 8px 9px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--text);
+  font-family: var(--font); font-size: 12px; line-height: 1.65; white-space: pre-wrap; word-break: break-word;
+}
+
+@media (max-width: 960px) and (orientation: landscape) {
+  .novel-stage-panel { gap: 5px; }
+  .novel-stage-result { min-height: 60px; font-size: 11px; }
+  .novel-stage-head strong { font-size: 11.5px; }
+  .novel-stage-head small { display: none; }
+  /* 横屏高度只有 390px：生成表单是固定开销，必须压到最小，否则场次列表一点都看不到。
+     补充要求收成两行、模型行紧凑，把省下的高度全留给场次列表与编辑区。 */
+  /* 全局 `label textarea { min-height: 120px }` 会把「补充要求」撑成半屏，
+     横屏必须显式压回去（这里的选择器权重更高）。 */
+  .novel-stage-panel label textarea,
+  .novel-scene-edit label textarea { min-height: 44px; height: 44px; font-size: 11px; padding: 5px 7px; }
+  .novel-stage-panel select { padding: 5px 7px; font-size: 11.5px; }
+  .novel-stage-meta .novel-meta-item { padding: 3px 5px; }
+  .novel-stage-meta .novel-meta-item span { font-size: 9px; }
+  .novel-stage-meta .novel-meta-item b { font-size: 10px; }
+  /* 横屏高度只有 390px：字段名（「补充要求」「模型」）靠 placeholder / aria-label 表达，
+     不再各占一行；省下的高度全给场次列表。 */
+  .novel-stage-panel > .novel-field { font-size: 0; gap: 0; }
+  .novel-stage-panel > .novel-field textarea { margin-top: 0; }
+  .novel-stage-model .novel-field { font-size: 0; gap: 0; }
+  .novel-stage-model { gap: 6px; }
+  .novel-scene-list { max-height: 96px; }
+  .novel-field-scene textarea { min-height: 64px; }
+}
+
+/* ---- 阶段三：剧本场次列表 ---- */
+.novel-export-menu {
+  position: absolute; z-index: 20; display: grid; gap: 2px;
+  margin-top: 2px; padding: 4px; min-width: 220px;
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); box-shadow: 0 6px 18px rgba(0, 0, 0, .16);
+}
+.novel-export-menu[hidden] { display: none; }
+.novel-export-menu button {
+  padding: 7px 9px; border: none; border-radius: var(--r-sm);
+  background: transparent; color: var(--text); font-size: 12px; text-align: left; cursor: pointer;
+}
+.novel-export-menu button:hover { background: var(--surface-2); }
+.novel-chapters { position: relative; }
+
+.novel-scene-block { display: flex; flex-direction: column; gap: 6px; min-height: 0; flex: 1; }
+.novel-scene-block[hidden] { display: none; }
+.novel-scene-list { display: flex; flex-direction: column; gap: 3px; min-height: 0; overflow-y: auto; }
+.novel-scene-row {
+  display: flex; align-items: center; gap: 6px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); padding: 3px 5px;
+  background: var(--surface);
+}
+.novel-scene-row.active { border-color: var(--violet-line); background: var(--accent-soft); }
+.novel-scene-open {
+  flex: 1; min-width: 0; display: grid; gap: 2px; padding: 3px 4px;
+  border: none; background: transparent; color: var(--text); text-align: left; cursor: pointer;
+}
+.novel-scene-open strong {
+  font-size: 11.5px; font-weight: 600; line-height: 1.35;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.novel-scene-open small { font-size: 9.5px; color: var(--muted); }
+.novel-scene-actions { display: flex; gap: 3px; flex: none; }
+.novel-scene-actions .control-button { min-width: 26px; padding: 0 5px; }
+.novel-scene-edit {
+  display: flex; flex-direction: column; gap: 6px; min-height: 0;
+  padding: 7px 8px; border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+.novel-scene-edit[hidden] { display: none; }
+.novel-field-scene textarea { min-height: 120px; resize: vertical; line-height: 1.6; }
+
+@media (max-width: 960px) and (orientation: landscape) {
+  .novel-scene-open strong { font-size: 10.5px; }
+  .novel-field-scene textarea { min-height: 80px; font-size: 11px; }
+  .novel-scene-actions .control-button { min-width: 22px; font-size: 10px; }
+}

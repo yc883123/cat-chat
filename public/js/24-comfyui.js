@@ -64,6 +64,14 @@ export function bindComfyuiEvents() {
     const error = $("#comfyuiParamsError");
     if (error) error.textContent = "";
   });
+  // 上下移按钮走 click 委托（行是每次打开重建的）；拖拽在 bindParamsPickerDrag 里。
+  $("#comfyuiParamsPicker")?.addEventListener("click", (event) => {
+    const button = event.target.closest?.("[data-move]");
+    if (!button) return;
+    event.preventDefault();
+    movePickerRow(button.closest(".comfyui-params-item"), button.dataset.move);
+  });
+  bindParamsPickerDrag();
   $("#comfyuiWorkflowList")?.addEventListener("click", onWorkflowListClick);
   $("#comfyuiParamForm")?.addEventListener("click", (event) => {
     if (event.target.closest("[data-comfyui-edit-params]")) openParamsDialog();
@@ -316,9 +324,22 @@ function slotRank(slot) {
 }
 
 function orderedSlots(slots) {
+  // 用户拖过顺序的工作流按保存的顺序排；没拖过的仍按角色优先级 + 导入顺序。
+  // 保存过顺序之后新扫出来的槽（换了工作流版本）排在已排序的后面，不会被藏掉。
+  const saved = savedOrderIndex();
   return slots
     .map((slot, index) => ({ slot, index }))
     .sort((a, b) => {
+      if (saved.size) {
+        const rankA = saved.get(slotKey(a.slot));
+        const rankB = saved.get(slotKey(b.slot));
+        if (rankA !== undefined || rankB !== undefined) {
+          if (rankA === undefined) return 1;
+          if (rankB === undefined) return -1;
+          if (rankA !== rankB) return rankA - rankB;
+          return a.index - b.index;
+        }
+      }
       const rankA = slotRank(a.slot);
       const rankB = slotRank(b.slot);
       return rankA !== rankB ? rankA - rankB : a.index - b.index;
@@ -328,6 +349,18 @@ function orderedSlots(slots) {
 
 function slotKey(slot) {
   return `${slot.node_id}|${slot.field_name}`;
+}
+
+// 「编辑参数」里拖出来的先后顺序（按工作流保存）：参数键 → 序号。
+function savedOrderIndex() {
+  const rows = comfyui.detail?.param_order;
+  const map = new Map();
+  if (!Array.isArray(rows)) return map;
+  for (const item of rows) {
+    if (!item) continue;
+    map.set(`${item.node_id}|${item.field_name}`, map.size);
+  }
+  return map;
 }
 
 // 主表单默认显示的常用参数：提示词、种子、步数、采样器、调度器、模型、LoRA、分辨率。
@@ -410,7 +443,7 @@ function renderParamForm() {
   edit.className = "control-button tiny";
   edit.dataset.comfyuiEditParams = "1";
   edit.textContent = "编辑参数";
-  edit.title = "选择要在主表单显示的参数";
+  edit.title = "选择要在主表单显示的参数，并调整它们的先后顺序";
   head.append(heading, edit);
   form.append(head);
   const visible = visibleKeySet();
@@ -485,16 +518,97 @@ function renderParamsPicker() {
   for (const slot of orderedSlots(comfyui.detail?.params || [])) {
     const row = document.createElement("label");
     row.className = "comfyui-params-item";
+    row.draggable = true;
+    row.dataset.paramKey = slotKey(slot);
+    const handle = document.createElement("span");
+    handle.className = "comfyui-params-handle";
+    handle.textContent = "⠿";
+    handle.setAttribute("aria-hidden", "true");
     const box = document.createElement("input");
     box.type = "checkbox";
     box.dataset.paramKey = slotKey(slot);
     box.checked = checked.has(slotKey(slot));
     const text = document.createElement("span");
+    text.className = "comfyui-params-text";
     const roleLabel = ROLE_LABELS[slot.role];
     text.textContent = roleLabel ? `${roleLabel} · ${slot.label}` : slot.label;
-    row.append(box, text);
+    row.append(handle, box, text, moveButtons(row));
     picker.append(row);
   }
+}
+
+// 触屏和键盘没法拖：给每行配一对上下移按钮，落序与拖拽走同一份 DOM 顺序。
+function moveButtons(row) {
+  const wrap = document.createElement("span");
+  wrap.className = "comfyui-params-move";
+  for (const [dir, label, title] of [["up", "↑", "上移"], ["down", "↓", "下移"]]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "comfyui-params-move-btn";
+    button.dataset.move = dir;
+    button.textContent = label;
+    button.title = title;
+    button.setAttribute("aria-label", title);
+    wrap.append(button);
+  }
+  return wrap;
+}
+
+function movePickerRow(row, direction) {
+  const picker = $("#comfyuiParamsPicker");
+  if (!picker || !row) return;
+  const sibling = direction === "up" ? row.previousElementSibling : row.nextElementSibling;
+  if (!sibling) return;
+  if (direction === "up") picker.insertBefore(row, sibling);
+  else picker.insertBefore(sibling, row);
+  clearParamsError();
+  row.querySelector("input[type=checkbox]")?.focus();
+}
+
+function clearParamsError() {
+  const error = $("#comfyuiParamsError");
+  if (error) error.textContent = "";
+}
+
+// 「编辑参数」清单的拖拽落序：行是每次打开重建的，事件委托在容器上。
+function bindParamsPickerDrag() {
+  const picker = $("#comfyuiParamsPicker");
+  if (!picker) return;
+  let dragging = null;
+  picker.addEventListener("dragstart", (event) => {
+    const row = event.target.closest?.(".comfyui-params-item");
+    if (!row) return;
+    dragging = row;
+    row.classList.add("is-dragging");
+    event.dataTransfer.effectAllowed = "move";
+    try { event.dataTransfer.setData("text/plain", row.dataset.paramKey || ""); } catch (_) { /* 老浏览器不认 */ }
+  });
+  picker.addEventListener("dragend", () => {
+    picker.querySelectorAll(".is-dragging, .drop-target")
+      .forEach((el) => el.classList.remove("is-dragging", "drop-target"));
+    dragging = null;
+  });
+  picker.addEventListener("dragover", (event) => {
+    if (!dragging) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const over = event.target.closest?.(".comfyui-params-item");
+    picker.querySelectorAll(".drop-target").forEach((el) => el.classList.remove("drop-target"));
+    if (!over || over === dragging) return;
+    over.classList.add("drop-target");
+  });
+  picker.addEventListener("drop", (event) => {
+    if (!dragging) return;
+    event.preventDefault();
+    const over = event.target.closest?.(".comfyui-params-item");
+    picker.querySelectorAll(".drop-target").forEach((el) => el.classList.remove("drop-target"));
+    if (!over || over === dragging) return;
+    // 落在目标行的下半部分就插到它后面，和肉眼看到的插入位置一致。
+    const rect = over.getBoundingClientRect();
+    const after = event.clientY > rect.top + rect.height / 2;
+    picker.insertBefore(dragging, after ? over.nextElementSibling : over);
+    clearParamsError();
+  });
 }
 
 async function saveParamsConfig() {
@@ -502,24 +616,31 @@ async function saveParamsConfig() {
   const picker = $("#comfyuiParamsPicker");
   if (!picker) return;
   const visible = [];
+  const order = [];
+  // DOM 顺序就是用户拖出来的顺序：勾选决定显示哪些，顺序决定主表单里谁在上面。
   for (const box of picker.querySelectorAll("input[type=checkbox]")) {
-    if (box.checked && box.dataset.paramKey) {
-      const [nodeId, ...rest] = String(box.dataset.paramKey).split("|");
-      visible.push({ node_id: nodeId, field_name: rest.join("|") });
-    }
+    if (!box.dataset.paramKey) continue;
+    const [nodeId, ...rest] = String(box.dataset.paramKey).split("|");
+    const row = { node_id: nodeId, field_name: rest.join("|") };
+    order.push(row);
+    if (box.checked) visible.push(row);
   }
   const button = $("#comfyuiParamsSave");
   if (button) button.disabled = true;
   try {
     const payload = await api(
       `/api/comfyui/workflows/${encodeURIComponent(comfyui.detail.id)}/params`,
-      { method: "POST", body: { visible } });
-    comfyui.detail = { ...comfyui.detail, visible_params: payload.visible_params || visible };
+      { method: "POST", body: { visible, order } });
+    comfyui.detail = {
+      ...comfyui.detail,
+      visible_params: payload.visible_params || visible,
+      param_order: payload.param_order || order,
+    };
     // 从此这份工作流的显示集就是「知道媒体槽」的新格式：按实际勾选执行。
     markVisibleSetKnowsMedia();
     closeParamsDialog();
     renderParamForm();
-    toast("参数显示已保存，这份工作流下次打开也照此显示");
+    toast("参数显示与顺序已保存，这份工作流下次打开也照此显示");
   } catch (error) {
     const line = $("#comfyuiParamsError");
     if (line) line.textContent = String(error.message || "保存失败");

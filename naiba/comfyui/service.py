@@ -273,10 +273,12 @@ class ComfyUIService:
         return {"ok": True, "workflow": entry}, 201
 
     def api_workflow_params_set(self, workflow_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
-        """保存这份工作流在主表单显示哪些参数（按工作流粒度持久化）。
+        """保存这份工作流在主表单显示哪些参数、按什么顺序显示（按工作流粒度持久化）。
 
         ``visible`` 是 ``{node_id, field_name}`` 数组，只认扫描出的槽位；
         没列出的参数不显示也不提交覆盖值，生成时按工作流原本的值执行。
+        ``order`` 可选，是「编辑参数」清单的完整顺序（含没勾选的行），用户拖出来的
+        先后顺序据此保存；不传时保留原有顺序，避免旧前端把排序清掉。
         """
         entry = self.store.get_workflow(workflow_id)
         if entry is None:
@@ -287,18 +289,39 @@ class ComfyUIService:
             return {"error": "visible 必须是参数数组"}, 400
         slot_keys = {(str(slot.get("node_id") or ""), str(slot.get("field_name") or ""))
                      for slot in entry.get("params") or [] if isinstance(slot, dict)}
-        visible: list[dict[str, str]] = []
-        for index, item in enumerate(raw, 1):
-            if not isinstance(item, dict):
-                return {"error": f"第 {index} 条参数格式必须是对象"}, 400
-            key = (str(item.get("node_id") or ""), str(item.get("field_name") or ""))
-            if key not in slot_keys:
-                return {"error": f"参数 {key[0]} · {key[1]} 不是这份工作流的可编辑槽位"}, 400
-            visible.append({"node_id": key[0], "field_name": key[1]})
+
+        def _clean(items: Any, label: str) -> tuple[list[dict[str, str]], str]:
+            out: list[dict[str, str]] = []
+            seen: set[tuple[str, str]] = set()
+            for index, item in enumerate(items, 1):
+                if not isinstance(item, dict):
+                    return [], f"第 {index} 条{label}格式必须是对象"
+                key = (str(item.get("node_id") or ""), str(item.get("field_name") or ""))
+                if key not in slot_keys:
+                    return [], f"{label} {key[0]} · {key[1]} 不是这份工作流的可编辑槽位"
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append({"node_id": key[0], "field_name": key[1]})
+            return out, ""
+
+        visible, error = _clean(raw, "参数")
+        if error:
+            return {"error": error}, 400
+        order = entry.get("param_order")
+        raw_order = body.get("order")
+        if raw_order is not None:
+            if not isinstance(raw_order, list):
+                return {"error": "order 必须是参数数组"}, 400
+            order, error = _clean(raw_order, "排序")
+            if error:
+                return {"error": error}, 400
         entry["visible_params"] = visible
+        if order is not None:
+            entry["param_order"] = order
         entry["updated_at"] = int(time.time() * 1000)
         self.store.save_workflow(entry)
-        return {"ok": True, "visible_params": visible}, 200
+        return {"ok": True, "visible_params": visible, "param_order": entry.get("param_order") or []}, 200
 
     def api_workflow_delete(self, workflow_id: str) -> tuple[dict[str, Any], int]:
         entry = self.store.get_workflow(workflow_id)

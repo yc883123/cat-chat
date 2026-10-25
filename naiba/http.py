@@ -769,7 +769,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             # 造梦机：导入工作流（API 格式校验 + 参数扫描 + 受管存储）。
             self._json(*self.app.comfyui.api_workflow_create(body))
         elif path.startswith("/api/comfyui/workflows/") and path.endswith("/params"):
-            # 造梦机：保存这份工作流的主表单可见参数（按工作流粒度持久化）。
+            # 造梦机：保存这份工作流的主表单可见参数与显示顺序（按工作流粒度持久化）。
             self._json(*self.app.comfyui.api_workflow_params_set(path.split("/")[-2], body))
         elif path == "/api/comfyui/url":
             # 造梦机：保存 ComfyUI 地址（comfyui_url 键）并立即测试连接。

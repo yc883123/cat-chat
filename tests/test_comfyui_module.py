@@ -1419,6 +1419,50 @@ class ServiceApiTests(unittest.TestCase):
             self.assertIn("error", payload)
         self.assertNotIn("visible_params", self.service.store.get_workflow(entry["id"]))
 
+    def test_workflow_param_order_saved_and_restored(self):
+        # 用户口径（2026-10-25）：编辑参数清单能拖拽排序，保存后主表单按这个顺序显示。
+        entry = self.service.store.save_workflow({
+            "id": self.service.store.new_workflow_id(), "name": "n",
+            "prompt": _sample_prompt(), "params": scan_params(_sample_prompt()),
+            "params_version": PARAMS_SCHEMA_VERSION,
+            "created_at": 1, "updated_at": 1,
+        })
+        order = [{"node_id": "3", "field_name": "steps"},
+                 {"node_id": "6", "field_name": "text"},
+                 {"node_id": "3", "field_name": "seed"}]
+        visible = order[:2]
+        payload, status = self.service.api_workflow_params_set(
+            entry["id"], {"visible": visible, "order": order})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["param_order"], order)
+        # 顺序与勾选分开存：没勾选的行也保留在顺序里，下次打开清单还是这个次序。
+        detail, _status = self.service.api_workflow(entry["id"])
+        self.assertEqual(detail["workflow"]["param_order"], order)
+        self.assertEqual(detail["workflow"]["visible_params"], visible)
+
+    def test_workflow_param_order_optional_and_validated(self):
+        entry = self.service.store.save_workflow({
+            "id": self.service.store.new_workflow_id(), "name": "n",
+            "prompt": _sample_prompt(), "params": scan_params(_sample_prompt()),
+            "params_version": PARAMS_SCHEMA_VERSION,
+            "created_at": 1, "updated_at": 1,
+        })
+        order = [{"node_id": "6", "field_name": "text"}]
+        self.service.api_workflow_params_set(entry["id"], {"visible": order, "order": order})
+        # 不传 order 的旧调用方只改勾选，不把已有顺序清掉。
+        payload, status = self.service.api_workflow_params_set(entry["id"], {"visible": []})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["param_order"], order)
+        self.assertEqual(self.service.store.get_workflow(entry["id"])["param_order"], order)
+        # 越权槽位与格式错误一律 400，且不落盘半份配置。
+        for bad in ({"visible": [], "order": "nope"},
+                    {"visible": [], "order": [{"node_id": "99", "field_name": "x"}]},
+                    {"visible": [], "order": ["not-an-object"]}):
+            payload, status = self.service.api_workflow_params_set(entry["id"], bad)
+            self.assertEqual(status, 400, bad)
+            self.assertIn("error", payload)
+        self.assertEqual(self.service.store.get_workflow(entry["id"])["param_order"], order)
+
     def test_api_models_unreachable_returns_empty_with_error(self):
         # ComfyUI 不可达：空候选 + 说明；不阻断工作流编辑与提交（前端有自由输入）。
         with mock.patch.object(comfyui_client, "checkpoint_names", return_value=[]), \
@@ -1792,6 +1836,61 @@ class MediaGroupCardTests(unittest.TestCase):
         self.assertIn("MEDIA_FIELD_TYPES.has(slot.field_type)) set.add(slotKey(slot))", visible)
         save = self._fn("async function saveParamsConfig() {")
         self.assertIn("markVisibleSetKnowsMedia();", save)
+
+
+class ParamsPickerOrderTests(unittest.TestCase):
+    """「编辑参数」清单拖拽排序（2026-10-25 用户需求）。
+
+    源码层断言：行可拖、拖拽落序走 DOM、保存时把整份顺序发给后端、主表单按保存的
+    顺序渲染；触屏另给上下移按钮，落序口径与拖拽一致。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        root = Path(__file__).resolve().parents[1]
+        cls.js = (root / "public/js/24-comfyui.js").read_text(encoding="utf-8")
+        cls.css = (root / "public/styles.css").read_text(encoding="utf-8")
+
+    def _fn(self, signature):
+        return self.js.split(signature, 1)[1].split("\nfunction ", 1)[0]
+
+    def test_picker_rows_are_draggable(self):
+        picker = self._fn("function renderParamsPicker() {")
+        self.assertIn("row.draggable = true", picker)
+        self.assertIn('row.dataset.paramKey = slotKey(slot)', picker)
+        self.assertIn("moveButtons(row)", picker)
+        # 拖拽与上下移都改 DOM 顺序，保存读的也是 DOM 顺序，两条路径不会各存一份。
+        drag = self._fn("function bindParamsPickerDrag() {")
+        self.assertIn('addEventListener("dragstart"', drag)
+        self.assertIn('addEventListener("dragover"', drag)
+        self.assertIn("picker.insertBefore(dragging,", drag)
+        self.assertIn("event.clientY > rect.top + rect.height / 2", drag)
+        move = self._fn("function movePickerRow(row, direction) {")
+        self.assertIn("picker.insertBefore(row, sibling)", move)
+        self.assertIn("picker.insertBefore(sibling, row)", move)
+
+    def test_save_sends_order_and_form_renders_it(self):
+        save = self._fn("async function saveParamsConfig() {")
+        self.assertIn("order.push(row)", save)
+        self.assertIn("body: { visible, order }", save)
+        self.assertIn("param_order: payload.param_order || order", save)
+        order_fn = self._fn("function orderedSlots(slots) {")
+        self.assertIn("savedOrderIndex()", order_fn)
+        # 没拖过的槽（换了工作流版本新扫出来的）排在已排序之后，不会被藏掉。
+        self.assertIn("if (rankA === undefined) return 1;", order_fn)
+        self.assertIn("function savedOrderIndex() {", self.js)
+
+    def test_drag_handle_and_move_buttons_styled(self):
+        item_rule = self.css.split(".comfyui-params-item {", 1)[1].split("}", 1)[0]
+        self.assertIn("border-radius", item_rule)
+        handle_rule = self.css.split(".comfyui-params-handle {", 1)[1].split("}", 1)[0]
+        self.assertIn("cursor: grab", handle_rule)
+        self.assertIn("flex: none", handle_rule)
+        move_rule = self.css.split(".comfyui-params-move {", 1)[1].split("}", 1)[0]
+        self.assertIn("flex: none", move_rule)
+        # 触屏没有 hover：上下移按钮必须常显，否则手机上没法排序。
+        touch = self.css.split("@media (hover: none) {", 1)[1]
+        self.assertIn(".comfyui-params-move { opacity: 1; }", touch)
 
 
 class TaskCardLayoutTests(unittest.TestCase):

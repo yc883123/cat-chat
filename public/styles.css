@@ -4288,9 +4288,32 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 }
 .comfyui-params-item {
   display: flex; align-items: center; gap: 8px; font-size: 11.5px;
-  color: var(--text); padding: 3px 2px; cursor: pointer;
+  color: var(--text); padding: 3px 2px; cursor: pointer; border-radius: var(--r-sm, 4px);
 }
 .comfyui-params-item span { overflow-wrap: anywhere; white-space: pre-line; line-height: 1.45; }
+/* 说明文字占满中间，把上下移按钮推到行尾。 */
+.comfyui-params-item > span.comfyui-params-text { flex: 1 1 auto; min-width: 0; }
+/* 拖拽排序：抓手常显，拖动中的行淡一点，落点行顶部给一条强调线。 */
+.comfyui-params-handle {
+  flex: none; color: var(--muted); cursor: grab; font-size: 12px; line-height: 1;
+  letter-spacing: -1px; user-select: none;
+}
+.comfyui-params-item.is-dragging { opacity: .45; }
+.comfyui-params-item.drop-target { box-shadow: inset 0 2px 0 var(--accent); }
+.comfyui-params-move { flex: none; display: flex; gap: 2px; opacity: 0; transition: opacity .12s; }
+.comfyui-params-item:hover .comfyui-params-move,
+.comfyui-params-item:focus-within .comfyui-params-move { opacity: 1; }
+.comfyui-params-move-btn {
+  width: 20px; height: 20px; padding: 0; line-height: 1; font-size: 11px;
+  border: 1px solid var(--line); border-radius: var(--r-sm, 4px);
+  background: var(--surface); color: var(--muted); cursor: pointer;
+}
+.comfyui-params-move-btn:hover { color: var(--text); border-color: var(--accent); }
+/* 触屏没有 hover：上下移按钮常显，否则没法排序。 */
+@media (hover: none) {
+  .comfyui-params-move { opacity: 1; }
+  .comfyui-params-move-btn { width: 24px; height: 24px; }
+}
 /* 全局「label input」按文本框渲染（width:100% + 40px 高 + 边框），会把这行的勾选框
    撑成大方块；这里还原成原生小勾选框。 */
 .comfyui-params-item input[type="checkbox"] {

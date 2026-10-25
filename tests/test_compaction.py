@@ -203,7 +203,7 @@ GOOD_SUMMARY = """## 当前目标
 - 补浏览器冒烟。
 
 ## 关键工具结果与文件路径
-- D:/naiba-chat/naiba/labeler/jobs.py::delete_tasks
+- naiba/labeler/jobs.py::delete_tasks
 
 ## 尚不确定的事项
 - 是否需要批量选择。

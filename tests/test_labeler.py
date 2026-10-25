@@ -240,10 +240,20 @@ class LabelerConfigTests(unittest.TestCase):
         self.assertNotEqual(a["config_fingerprint"], c["config_fingerprint"])
 
     def test_preset_ids_are_all_known(self):
-        self.assertEqual(len(set(PRESET_IDS)), 7)
-        self.assertEqual(len(preset_list()), 7)
+        self.assertEqual(len(set(PRESET_IDS)), 9)
+        self.assertEqual(len(preset_list()), 9)
         with self.assertRaises(ValueError):
             get_preset("nope")
+
+    def test_legacy_concept_preset_maps_to_action(self):
+        # 概念档已按用户反馈改成「训练动作 LoRA · 忽略动作」，旧 id 只读兼容。
+        self.assertEqual(get_preset("concept_lora")["id"], "action_lora")
+        self.assertEqual(get_preset("action_lora")["label"], "训练动作 LoRA · 忽略动作")
+        # 旧任务续跑必须能过校验，且落库/指纹用现行 id。
+        config = normalize_config(self.app, _base_config(preset="concept_lora"))
+        self.assertEqual(config["preset"], "action_lora")
+        self.assertEqual(config["config_fingerprint"],
+                         normalize_config(self.app, _base_config(preset="action_lora"))["config_fingerprint"])
 
     def test_rejects_unknown_language_and_phrase_mode_is_valid(self):
         with self.assertRaises(LabelerTaskError):
@@ -322,6 +332,26 @@ class LabelerPresetAndParseTests(unittest.TestCase):
         out = filter_tags(["cat", "dog", "person"], preset=get_preset("object_lora"),
                           extra_keywords=["dog"], strength="medium")
         self.assertNotIn("dog", out)
+
+    def test_character_preset_drops_face_hair_and_body(self):
+        out = filter_tags(["long hair", "slender", "young woman", "red dress", "forest"],
+                          preset=get_preset("character_lora"))
+        self.assertEqual(out, ["red dress", "forest"])
+
+    def test_outfit_preset_drops_clothing_but_keeps_color(self):
+        # 服装档只丢服装本身；颜色不丢（颜色在人物/场景里仍然有用）。
+        out = filter_tags(["white shirt", "lace", "necklace", "red", "smile"],
+                          preset=get_preset("outfit_lora"))
+        self.assertEqual(out, ["red", "smile"])
+
+    def test_action_preset_drops_actions_but_keeps_emotion(self):
+        # 动作档只丢动作本身；情绪不是动作，保留（与旧概念档的区别就在这里）。
+        preset = get_preset("action_lora")
+        out = filter_tags(["running", "waving hand", "sad", "red dress"], preset=preset)
+        self.assertEqual(out, ["sad", "red dress"])
+        prompt = build_prompt(_base_config(preset="action_lora", output_mode="description"), preset)
+        self.assertIn("忽略动作", prompt)
+        self.assertNotIn("概念", prompt)
 
     def test_prompt_uses_ignore_semantics(self):
         # 口径：选「面部」= 描述忽略面部，而不是重点描述面部。

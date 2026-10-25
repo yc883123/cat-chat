@@ -1,4 +1,4 @@
-"""打标生成模式（七档）：选什么，描述就忽略什么。
+"""打标生成模式（九档）：选什么，描述就忽略什么。
 
 LoRA 训练的核心口径：**描述里不包含的内容，才是模型要学习的内容**。
 所以每一档产出的不是「要重点写什么」，而是「要刻意不写什么」：
@@ -37,7 +37,7 @@ _FACE_WORDS = (
 _BODY_WORDS = (
     "body", "figure", "pose", "posture", "gesture", "standing", "sitting", "lying",
     "walking", "running", "arms", "legs", "hands", "fingers", "shoulders", "waist",
-    "hips", "muscular", "slim", "curvy",
+    "hips", "muscular", "slim", "slender", "curvy",
     "体型", "身材", "体态", "姿态", "姿势", "动作", "站姿", "坐姿", "躺姿", "手臂", "双腿",
     "双手", "手指", "肩膀", "腰", "臀", "比例",
 )
@@ -63,10 +63,41 @@ _OBJECT_WORDS = (
     "object", "item", "product", "prop", "thing",
     "物体", "物品", "道具", "产品", "东西",
 )
-_CONCEPT_WORDS = (
-    "action", "pose", "gesture", "emotion", "mood", "expression", "storytelling",
-    "narrative", "symbolism", "concept",
-    "动作", "姿态", "情绪", "心情", "故事", "叙事", "象征", "概念", "氛围",
+# 「忽略动作」只收动作本身，不收情绪/叙事——情绪不是动作，描述里保留它不影响学动作。
+_ACTION_WORDS = (
+    "action", "motion", "movement", "gesture", "dynamic",
+    "running", "walking", "jumping", "dancing", "fighting", "flying", "falling",
+    "sitting", "standing", "lying", "kneeling", "crouching", "leaning",
+    "reaching", "holding", "waving", "hugging", "kissing", "turning",
+    "动作", "姿态", "姿势", "手势", "运动", "动态", "奔跑", "跑步", "行走", "跳跃",
+    "舞蹈", "跳舞", "打斗", "战斗", "拥抱", "亲吻", "挥手", "伸手", "举起", "转身",
+    "回眸", "坐姿", "站姿", "躺姿", "蹲姿", "俯身", "倾斜",
+)
+# 人物档在面部 + 人体之外，再收发型与年龄：这三类合起来才是「这个人的长相」。
+_HAIR_AGE_WORDS = (
+    "hair", "hairstyle", "haircut", "bangs", "ponytail", "braid", "beard", "mustache",
+    "age", "young", "teenager", "adult", "elderly",
+    "头发", "发型", "发色", "长发", "短发", "卷发", "直发", "马尾", "刘海", "辫子",
+    "胡须", "胡子", "年龄", "年轻", "年长", "少年", "少女",
+)
+# 服装档：品类、面料、图案结构、配饰。不收颜色——颜色在人物/场景里也用得上。
+_OUTFIT_WORDS = (
+    "clothing", "clothes", "outfit", "garment", "attire", "costume", "uniform",
+    "dress", "shirt", "blouse", "sweater", "hoodie", "jacket", "coat", "raincoat",
+    "skirt", "pants", "trousers", "jeans", "shorts", "suit", "vest", "robe",
+    "kimono", "cheongsam", "qipao", "lingerie", "underwear", "stockings", "socks",
+    "shoes", "boots", "heels", "sandals", "gloves", "scarf", "belt", "necktie",
+    "ribbon", "fabric", "textile", "silk", "cotton", "leather", "denim", "velvet",
+    "knit", "lace", "embroidery", "buttons", "zipper", "collar", "sleeve", "hemline",
+    "pleat", "accessory", "accessories", "jewelry", "necklace", "earrings",
+    "bracelet", "handbag", "backpack", "hat", "glasses",
+    "服装", "衣服", "服饰", "衣着", "穿搭", "上衣", "外套", "大衣", "风衣", "衬衫",
+    "毛衣", "卫衣", "裙子", "短裙", "长裙", "连衣裙", "裤", "牛仔裤", "短裤", "西装",
+    "制服", "礼服", "旗袍", "汉服", "和服", "内衣", "丝袜", "袜子", "鞋子", "靴子",
+    "高跟鞋", "手套", "围巾", "腰带", "领带", "丝带", "蕾丝", "面料", "布料", "丝绸",
+    "棉", "皮革", "牛仔", "天鹅绒", "针织", "刺绣", "纽扣", "拉链", "领口", "袖口",
+    "袖子", "裙摆", "褶皱", "配饰", "首饰", "项链", "耳环", "手链", "戒指", "手提包",
+    "背包", "帽子", "眼镜",
 )
 
 PRESETS: tuple[dict[str, Any], ...] = (
@@ -80,9 +111,22 @@ PRESETS: tuple[dict[str, Any], ...] = (
         "filter_strength": "low",
     },
     {
+        "id": "character_lora",
+        "label": "训练人物 LoRA · 忽略人物",
+        "description": "描述里略过长相、发型、体型与年龄，人物本身留给模型学习；指代人物时只写「一个人」。",
+        "ignored": "人物（长相、五官、发型、体型、年龄）",
+        "ignore_prompt": (
+            "忽略人物本身：不要描述长相、五官、肤色、发型发色、体型身材与年龄，"
+            "也不要评价美丑。需要指代人物时只写「一个人」「人物」这类泛称，把笔墨放在服装、"
+            "动作、场景、光线和其他物体上。"
+        ),
+        "filter_keywords": _COMMON_NOISE + _FACE_WORDS + _BODY_WORDS + _HAIR_AGE_WORDS,
+        "filter_strength": "medium",
+    },
+    {
         "id": "face_lora",
         "label": "训练面部 LoRA · 忽略面部",
-        "description": "描述里略过脸型、五官、妆容与表情，面部留给模型当作要学的概念。",
+        "description": "描述里略过脸型、五官、妆容与表情，面部留给模型学习。",
         "ignored": "面部（五官、妆容、表情）",
         "ignore_prompt": (
             "忽略面部：不要描述脸型、五官、眼睛、眉毛、鼻子、嘴唇、牙齿、肤色、妆容和表情。"
@@ -102,6 +146,19 @@ PRESETS: tuple[dict[str, Any], ...] = (
             "把笔墨放在面部特征、发型、服装细节、场景与光线上。"
         ),
         "filter_keywords": _COMMON_NOISE + _BODY_WORDS,
+        "filter_strength": "medium",
+    },
+    {
+        "id": "outfit_lora",
+        "label": "训练服装 LoRA · 忽略服装",
+        "description": "描述里略过服装的品类、面料、图案与配饰，服装留给模型学习。",
+        "ignored": "服装（品类、面料、图案、配饰）",
+        "ignore_prompt": (
+            "忽略服装：不要描述衣服的品类（裙子、衬衫、外套、制服等）、面料材质、图案花纹、"
+            "版型剪裁与配饰（帽子、眼镜、首饰、包）。需要指代穿着时只写「一身衣服」"
+            "「穿着服装」，把笔墨放在人物特征、动作、场景与光线上。"
+        ),
+        "filter_keywords": _COMMON_NOISE + _OUTFIT_WORDS,
         "filter_strength": "medium",
     },
     {
@@ -143,15 +200,16 @@ PRESETS: tuple[dict[str, Any], ...] = (
         "filter_strength": "medium",
     },
     {
-        "id": "concept_lora",
-        "label": "训练概念 LoRA · 忽略动作概念",
-        "description": "描述里略过动作、情绪与叙事含义，概念留给模型学习。",
-        "ignored": "动作与概念（动作、情绪、叙事）",
+        "id": "action_lora",
+        "label": "训练动作 LoRA · 忽略动作",
+        "description": "描述里略过人物在做什么、动作方向与姿态变化，动作留给模型学习。",
+        "ignored": "动作（动作过程、手势、姿态变化）",
         "ignore_prompt": (
-            "忽略动作与概念：不要描述人物在做什么、动作方向、情绪状态，也不要解释叙事"
-            "或象征含义。只描述画面里稳定可见的元素：人物外观、发型、服装、物体与场景。"
+            "忽略动作：不要描述人物在做什么、动作方向与过程、手势、身体运动轨迹与姿态变化"
+            "（例如「奔跑」「挥手」「拥抱」「转身」），也不要解释画面讲的故事。只描述人物外观、"
+            "服装、物体、场景与画面风格；情绪和氛围可以正常写。"
         ),
-        "filter_keywords": _COMMON_NOISE + _CONCEPT_WORDS,
+        "filter_keywords": _COMMON_NOISE + _ACTION_WORDS,
         "filter_strength": "medium",
     },
 )
@@ -159,6 +217,16 @@ PRESETS: tuple[dict[str, Any], ...] = (
 PRESET_IDS = tuple(item["id"] for item in PRESETS)
 DEFAULT_PRESET = "general"
 VALID_STRENGTHS = ("low", "medium", "high")
+
+# 旧 id 只读兼容：历史任务、续跑配置与旧标注里还存着 ``concept_lora``（已改名 action_lora）。
+# 只在读取时映射，不写回库；导出仍能看到当时真实用的档位。
+LEGACY_PRESET_ALIASES: dict[str, str] = {"concept_lora": "action_lora"}
+
+
+def canonical_preset_id(preset_id: Any) -> str:
+    """把历史 id 映射到现行 id；空值返回空串（默认档由调用方决定）。"""
+    target = str(preset_id or "").strip()
+    return LEGACY_PRESET_ALIASES.get(target, target)
 
 
 def preset_list() -> list[dict[str, Any]]:
@@ -180,7 +248,7 @@ def preset_list() -> list[dict[str, Any]]:
 
 
 def get_preset(preset_id: str) -> dict[str, Any]:
-    target = str(preset_id or DEFAULT_PRESET).strip() or DEFAULT_PRESET
+    target = canonical_preset_id(preset_id) or DEFAULT_PRESET
     for item in PRESETS:
         if item["id"] == target:
             return item

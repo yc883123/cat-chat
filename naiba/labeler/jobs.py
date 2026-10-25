@@ -25,7 +25,7 @@ from naiba.llm.profiles import resolve_profile_with_override
 from naiba.labeler import LABELER_ACTIVE_STATUSES, LABELER_RESUMABLE_STATUSES
 from naiba.labeler.engines import DEFAULT_ENGINE, ENGINE_IDS
 from naiba.labeler.images import stable_item_id, validate_image_refs
-from naiba.labeler.presets import DEFAULT_PRESET, PRESET_IDS
+from naiba.labeler.presets import DEFAULT_PRESET, PRESET_IDS, canonical_preset_id
 from naiba.labeler.runner import DEFAULT_CONCURRENCY, VALIDATED_CONCURRENCY
 
 VALID_OUTPUT_MODES = ("keywords", "phrases", "description", "both")
@@ -120,7 +120,8 @@ def normalize_config(app: Any, raw: Any, *, allow_legacy_language: bool = False)
         raise LabelerTaskError(
             "输出语言与输出形式不匹配：「英文标签 + 中文描述」只在「标签 + 自然语言」下可选"
         )
-    preset = str(raw.get("preset") or DEFAULT_PRESET).strip() or DEFAULT_PRESET
+    # 旧任务里的 concept_lora 先映射成 action_lora 再校验，续跑不会因改名被挡。
+    preset = canonical_preset_id(raw.get("preset")) or DEFAULT_PRESET
     if preset not in PRESET_IDS:
         raise LabelerTaskError(f"未知的打标侧重：{preset}")
     model_key = str(raw.get("model_key") or "").strip()
@@ -449,7 +450,8 @@ class LabelerJobManager:
             "source_task_id": task.get("source_task_id") or "",
             "image_count": len(refs),
             "label": LabelerJobManager._label_for(task, refs),
-            "preset": config.get("preset") or "",
+            # 批次历史按现行档位显示（旧任务存的 concept_lora 也要显示成「动作」）。
+            "preset": canonical_preset_id(config.get("preset")),
             "model_name": config.get("model_name") or "",
             "output_mode": config.get("output_mode") or "",
         }

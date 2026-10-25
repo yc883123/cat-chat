@@ -46,6 +46,53 @@ class NovelHeadingTests(unittest.TestCase):
         self.assertFalse(ns._looks_like_heading(long_title), "超长行应当正文，不当标题")
 
 
+class NovelMainMarkerTests(unittest.TestCase):
+    """主章节标记：一本书用一种写法，混进来的异构行属于正文。
+
+    真书取证（《恐怖副本：大BOSS是恋爱脑》157 个「第N章」+ 29 条编号规则列表）：
+    副本里的「1.需要穿着正装…」与「第9节 是秦西西的英语课。」都会被宽松规则当成章节，
+    把正文切成 190 章（比真实的 157 多出 33 条假章节）。
+    """
+
+    def test_dominant_marker_detected(self):
+        text = "".join(f"第{i}章 标题{i}\n正文。\n" for i in range(1, 12))
+        self.assertEqual(ns._pick_heading_marker(text), "章")
+
+    def test_marker_undecided_on_mixed_forms(self):
+        """两种写法势均力敌时不下判断，退回宽松行为（避免误删真章节）。"""
+        text = "".join(f"第{i}章 标题{i}\n正文。\n" for i in range(1, 6))
+        text += "".join(f"第{i}节 标题{i}\n正文。\n" for i in range(1, 6))
+        self.assertEqual(ns._pick_heading_marker(text), "")
+
+    def test_marker_undecided_on_short_book(self):
+        text = "第1章 甲\n正文。\n第2章 乙\n正文。\n"
+        self.assertEqual(ns._pick_heading_marker(text), "")
+
+    def test_numbered_list_not_split_when_chapters_dominate(self):
+        """副本规则列表（1. 2. 3.）是正文，不是章节。"""
+        rules = "".join(f"{i}.第{i}条规则内容。\n" for i in range(1, 6))
+        text = "".join(f"第{i}章 标题{i}\n正文{i}。\n" for i in range(1, 12))
+        mixed = text.replace("正文3。", f"正文3。\n{rules}")
+        rows = ns.split_chapters(mixed)
+        titles = [r["title"] for r in rows]
+        self.assertEqual(len(rows), 11, f"规则列表被当成章节了：{titles}")
+        self.assertIn("1.第1条规则内容。", str(rows[2]["body"]), "规则原文必须留在正文里")
+
+    def test_section_heading_not_split_when_chapter_dominates(self):
+        """「第9节 是秦西西的英语课。」这类正文句子不当章节。"""
+        text = "".join(f"第{i}章 标题{i}\n正文{i}。\n" for i in range(1, 12))
+        mixed = text.replace("正文3。", "正文3。\n第9节 是秦西西的英语课。\n课上有几个刺头学生。")
+        rows = ns.split_chapters(mixed)
+        self.assertEqual(len(rows), 11, [r["title"] for r in rows])
+        self.assertIn("秦西西", str(rows[2]["body"]))
+
+    def test_numeric_title_still_works_without_dominant_marker(self):
+        """整本用「12. 标题」写法时仍按章节切（不能被主标记规则误伤）。"""
+        text = "".join(f"{i}. 标题{i}\n正文{i}。\n" for i in range(1, 7))
+        rows = ns.split_chapters(text)
+        self.assertEqual(len(rows), 6, [r["title"] for r in rows])
+
+
 class NovelSplitTests(unittest.TestCase):
     def test_two_headings_split(self):
         text = "第一章 离乡\n少年走出村口。\n\n第二章 进城\n城门口人来人往。"
@@ -62,6 +109,17 @@ class NovelSplitTests(unittest.TestCase):
             ["第一卷 平庸少年 · 第一章 离乡", "第一卷 平庸少年 · 第二章 进城"],
         )
         self.assertTrue(all(r["body"].strip() for r in rows), "卷合并后不应产生空章")
+
+    def test_heading_only_trailing_marker_is_dropped(self):
+        """只有标题没有正文的收尾标记行不算章节。
+
+        真书里常见末尾一行「（番外完）」「全文完」：它被标题正则命中，但后面没有正文。
+        留着会得到一个 0 字章节——导出一片空白，还会占掉「一次带 N 章」的额度。
+        """
+        text = "第1章 甲\n正文甲。\n第2章 乙\n正文乙。\n（番外完）\n"
+        rows = ns.split_chapters(text)
+        self.assertEqual([r["title"] for r in rows], ["第1章 甲", "第2章 乙"])
+        self.assertTrue(all(r["body"].strip() for r in rows), "不能留下空正文的章节")
 
     def test_single_heading_still_splits(self):
         # 只识别到一个标题：仍按它切，好过乱切（第③级降级）。

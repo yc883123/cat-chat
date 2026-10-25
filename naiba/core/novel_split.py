@@ -82,6 +82,60 @@ def _looks_like_heading(line: str) -> bool:
     return bool(CHAPTER_RE.match(stripped))
 
 
+# 主章节标记：取「第N章 / 第N回 / 第N节」里出现最多的那个字。
+# 一本书通常只用一种；混进来的其它标记多半是正文（见 `_pick_heading_marker`）。
+_MAIN_MARKER_RE = re.compile(r"^[\s　]*[（(【\[]?\s*第\s*[0-9０-９零一二三四五六七八九十百千万两]{1,12}\s*([章回节節])")
+_NUMERIC_LIST_RE = re.compile(r"^[\s　]*[0-9０-９]{1,12}\s*[.、,，]\s*\S")
+# 主导标记占比达到这个数，才算「这本书用的是它」。
+_MAIN_MARKER_RATIO = 0.8
+# 主标记至少出现这么多次，样本才够判断（太短的书不做这种降级）。
+_MAIN_MARKER_MIN_HITS = 8
+
+
+def _pick_heading_marker(text: str) -> str:
+    """判断这本书的**主章节标记**（章/回/节）。
+
+    真书里常见两类误判，都会把正文当章节切碎：
+
+    - 副本规则那种编号列表（``1.需要穿着正装…``）被「12. 标题」这条规则命中；
+    - 正文句子 ``第9节 是秦西西的英语课。`` 被「第N节」这条规则命中。
+
+    一本书只会用其中一种写法当章节标记。所以统计「第N章/回/节」里出现最多的那个，
+    占比 ≥80% 且样本够多时，用它当主标记：**其它写法一律当正文**，不再当章节标题。
+    判定不了（样本太少 / 几种写法势均力敌）就返回空串，退回原有宽松行为。
+    """
+    counts: dict[str, int] = {}
+    for line in str(text or "").splitlines():
+        match = _MAIN_MARKER_RE.match(line.strip())
+        if match:
+            counts[match.group(1)] = counts.get(match.group(1), 0) + 1
+    if not counts:
+        return ""
+    marker, hits = max(counts.items(), key=lambda item: item[1])
+    total = sum(counts.values())
+    if hits < _MAIN_MARKER_MIN_HITS or hits / total < _MAIN_MARKER_RATIO:
+        return ""
+    return marker
+
+
+def _looks_like_heading_with_marker(line: str, marker: str) -> bool:
+    """带主标记约束的标题判定（`marker` 为空时等于 `_looks_like_heading`）。
+
+    有主标记时：`第N<主标记>` 照常认；其它章节标记与「N. 标题」式编号一律不认
+    ——它们在这本书里是正文。
+    """
+    if not _looks_like_heading(line):
+        return False
+    if not marker:
+        return True
+    stripped = line.strip()
+    match = _MAIN_MARKER_RE.match(stripped)
+    if match:
+        return match.group(1) == marker
+    # 「N. 标题」式：主标记是「第N章」这类写法时，编号列表属于正文。
+    return not _NUMERIC_LIST_RE.match(stripped)
+
+
 def _clip_title(text: str) -> str:
     title = _norm_title(text)
     return title[:MAX_TITLE_CHARS] if len(title) > MAX_TITLE_CHARS else title
@@ -108,7 +162,7 @@ def strip_head(text: str) -> str:
     return text[line_end + 1:]
 
 
-def _split_by_heads(text: str) -> list[tuple[str, str]]:
+def _split_by_heads(text: str, marker: str = "") -> list[tuple[str, str]]:
     """按章节标题切分；卷标题并进所属章标题，不产生空章。"""
     lines = text.splitlines(keepends=True)
     chapters: list[tuple[str, str]] = []
@@ -138,7 +192,7 @@ def _split_by_heads(text: str) -> list[tuple[str, str]]:
             pending_vol = _norm_title(stripped)
             title = ""
             continue
-        if _looks_like_heading(line):
+        if _looks_like_heading_with_marker(line, marker):
             flush()
             title = _norm_title(stripped)
             continue
@@ -153,7 +207,10 @@ def _split_by_heads(text: str) -> list[tuple[str, str]]:
             first_title, first_body = chapters[0]
             chapters[0] = (first_title, (lead_body + "\n" + first_body).strip())
     del _PRE_TITLE_SLACK  # 说明性常量，实际归并靠上面的 flush 顺序
-    return [(t, b) for t, b in chapters if b.strip() or (t and t != "正文")]
+    # 只留**有正文**的章节：只有标题没有正文的（例如全书末尾的「（番外完）」、
+    # 「全文完」这类收尾标记行）不是章节。留着会得到一个 0 字章节，导出一片空白，
+    # 还会占掉「一次带 N 章」的额度。
+    return [(t, b) for t, b in chapters if b.strip()]
 
 
 # 符号分节的首字符集：古籍/论坛贴常用这些起行分节。
@@ -275,14 +332,17 @@ def split_chapters(text: str, max_len: int = DEFAULT_MAX_LEN) -> list[dict[str, 
     if not body.strip():
         body = raw
 
-    heads = [line for line in body.splitlines() if _looks_like_heading(line)]
+    # 主章节标记（章/回/节）：这本书用哪个当章节标记，其它写法就当正文。
+    # 判定不了时为空串，下面的判定完全退回原来的宽松行为。
+    marker = _pick_heading_marker(body)
+    heads = [line for line in body.splitlines() if _looks_like_heading_with_marker(line, marker)]
     if len(heads) >= 2:
-        chapters = _split_by_heads(body)
+        chapters = _split_by_heads(body, marker)
     else:
         chapters = _split_by_sep(body)
         if not chapters:
             if len(heads) == 1:
-                chapters = _split_by_heads(body)
+                chapters = _split_by_heads(body, marker)
             else:
                 chapters = _split_by_len(body, max_len)
     if not chapters:
@@ -302,3 +362,25 @@ def outline(text: str, max_len: int = DEFAULT_MAX_LEN) -> list[dict[str, object]
         {"i": index, "title": str(row["title"]), "len": len(str(row["body"]))}
         for index, row in enumerate(rows)
     ]
+
+
+def detect_level(text: str, max_len: int = DEFAULT_MAX_LEN) -> str:
+    """复算这次拆分实际走的降级级别：``heading`` / ``sep`` / ``single`` / ``len``。
+
+    ``split_chapters`` 返回的章节不带级别标记，而脚本与工作台都必须**明示**降级
+    ——按符号分节或按字数等分时，用户要知道这不是常规章节识别。判定用的是与
+    ``split_chapters`` 同一批谓词、同一顺序，放在本模块供两边共用：各写一套就会漂，
+    而「脚本拆的结果 = 工作台拆的结果」是硬要求。
+    """
+    body = strip_head(str(text or ""))
+    if not body.strip():
+        body = str(text or "")
+    marker = _pick_heading_marker(body)
+    heads = [line for line in body.splitlines() if _looks_like_heading_with_marker(line, marker)]
+    if len(heads) >= 2:
+        return "heading"
+    if _split_by_sep(body):
+        return "sep"
+    if len(heads) == 1:
+        return "single"
+    return "len"

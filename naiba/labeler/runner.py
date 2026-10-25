@@ -292,6 +292,14 @@ class LabelerRunner:
                 finish_reason = str(getattr(self.app.models, "last_finish_reason", "") or "")
                 tags, confidences = self._finalize_tags(parsed, config, preset)
                 description = self._finalize_description(parsed, config, preset)
+                # 触发词前缀在置信度/预设过滤与格式化之后统一应用：不参与过滤，
+                # 标签列表放首位（置信度补 -1 保持与标签按位对齐），描述放最前。
+                trigger = self._trigger_word(config)
+                if trigger:
+                    if tags:
+                        tags, confidences = self._apply_trigger_to_tags(trigger, tags, confidences)
+                    if description:
+                        description = self._apply_trigger_to_description(trigger, description, config)
                 annotation = {
                     "path_key": item["path_key"],
                     "content_version": item["content_version"],
@@ -348,6 +356,34 @@ class LabelerRunner:
                     "error": str(exc)[:500], "category": category,
                 })
                 return {}
+
+    @staticmethod
+    def _trigger_word(config: dict[str, Any]) -> str:
+        """配置里启用的触发词；未启用或没内容返回空串。"""
+        trigger = config.get("trigger_word")
+        if not isinstance(trigger, dict) or not trigger.get("enabled"):
+            return ""
+        return str(trigger.get("value") or "").strip()
+
+    @staticmethod
+    def _apply_trigger_to_tags(word: str, tags: list[str],
+                               confidences: list[float]) -> tuple[list[str], list[float]]:
+        """触发词作为一条完整标签放在列表首位；首标签已是它时不重复加。
+
+        置信度补 -1.0（模型没给）：标签与置信度必须按位对齐。
+        """
+        if tags and normalize_tag(tags[0]) == normalize_tag(word):
+            return tags, confidences
+        return [word, *tags], [-1.0, *confidences]
+
+    @staticmethod
+    def _apply_trigger_to_description(word: str, text: str, config: dict[str, Any]) -> str:
+        """触发词放描述最前，分隔符跟输出语言（英文逗号 + 空格 / 中文逗号）。"""
+        text = str(text or "").strip()
+        if not text or text.casefold().startswith(word.casefold()):
+            return text
+        separator = ", " if str(config.get("language") or "") == "en" else "，"
+        return f"{word}{separator}{text}"
 
     @staticmethod
     def _finalize_tags(parsed: dict[str, Any], config: dict[str, Any],

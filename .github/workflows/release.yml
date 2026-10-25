@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 3.8.0-beta
-  RELEASE_TAG: v3.8.0-beta
+  RELEASE_VERSION: 3.8.1-beta
+  RELEASE_TAG: v3.8.1-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-3.8.0-beta-windows-x64
+  PACKAGE_NAME: cat-chat-3.8.1-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-3.8.0-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-3.8.1-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -121,11 +121,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 3.8.0 Beta release
+      - name: Publish 3.8.1 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 3.8.0 Beta
+          name: Cat Chat 3.8.1 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -135,17 +135,11 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 3.8.0 Beta：创作场（小说改编工作台）
-            ① 新增「创作场」：工作台第四个功能页，把一本 TXT 小说做成可继续加工的作品——导入自动拆章、勾选要保留的章节、保存为作品，之后可逐章查看和修改正文，也能整本导出
-            ② 导入拆章不用模型：同一本书、同一参数，结果永远一致，不烧 token，也不需要应用在运行。除了工作台，还能直接用命令行拆：python scripts/split_novel.py 书.txt，或 dist\naiba-chat.exe --run-skill-script scripts\split_novel.py 书.txt
-            ③ 拆章规则按真书校准：一本书通常只用一种章节标记（第X章 / 第X回 / 第X节），认定主标记后，混进来的编号列表（副本规则那种「1.需要穿着正装…」）与「第9节 是秦西西的英语课。」这类正文句子不再被当成章节；只有标题没有正文的收尾行（如「（番外完）」）也不再单独成章
-            ④ 作品数据分开存：每本一个目录，每章一个文件，改一章不重写整本，某一章文件损坏也不会连累其它章；清单是权威来源，缺失或损坏的章节会明确标为「数据异常」，不会悄悄补空正文
-            ⑤ 新增「要素」阶段：从勾选章节整理人物、场景和道具，结果可以写回作品；生成任务在后台排队，作品页面不会被锁住
-            ⑥ 新增「大纲」阶段：把勾选章节整理成三幕改编大纲（建置 / 对抗 / 结局），同样可写回作品
-            ⑦ 新增「剧本」阶段：把勾选章节改编成标准剧本场次（INT./EXT. 场景行 + 动作 + 对白），场次可逐条编辑、删除、上下移动调整顺序；识别不出场次结构时整段原样保存，并明确告诉你没有自动切分
-            ⑧ 长文不会一次塞满：一次只带勾选的那几章，单章正文有上限，超出会明确说明「超了多少字」；多批生成时自动带上前面几章的摘要，帮助保持跨章一致。剧本生成还会带上大纲与人物设定，避免同一个角色换个名字
-            ⑨ 创作场任务与模块库分开：两边的历史各自成区、各 60 条互不挤占，创作场任务不会混进模块库历史。历史列表的「来源」一栏也修好了，不再一律显示「来源未记录」
-            ⑩ 全书导出：TXT 或 Markdown，可选是否附上要素与大纲附录；导出顺序与章节清单一致，标题不重复也不漏章
-            ⑪ 百度千帆 Token Plan 的地址拼接补两条规则：模型目录改用 …/tokenplan/personal/v1/models（此前被拼成 …/personal/models 而 404，导致「检查模型」失败、发送被拦）；把完整对话端点直接填进地址时也不再被改写成别的路径。其他供应商的拼接结果逐字不变
-            ⑫ 验证：全量单测 3286 通过；用一本 39 万字的真实网文跑通（157 章），命令行与工作台两条路径的章数、标题、字数逐项一致；浏览器实测创作场 76 项、工作台四视口与顶栏冒烟全通过，桌面与手机横竖屏、浅色深色逐一验收
-            Cat Chat 3.8.0 Beta Windows build。本版新增创作场：把一本 TXT 小说拆章、保存为作品，再生成要素、改编大纲与可编辑的剧本场次，并支持全书导出。全量单测 **3286** 通过。
+            Cat Chat 3.8.1 Beta：创作场可选供应商与完整模型列表
+            ① 创作场（小说改编工作台）的模型选择改成和提词库一样的两级：先选供应商，再选这家供应商目录里的模型。此前只能选到每个供应商配置的那一个模型，现在能选到该供应商的完整模型列表
+            ② 模型目录读不到时（网络不通、供应商没有目录接口），自动回退到卡片上配置的那个模型名，不会变成一个空下拉框
+            ③ 同一个供应商的模型目录只拉一次并缓存；首屏、进创作场、切阶段连续触发时也不会重复请求
+            ④ 换作品、换阶段都保留当前选择，不用每次都重新选模型
+            ⑤ 手机横屏下供应商、模型与「生成」按钮保持在同一行，不会被挤到看不见的地方
+            ⑥ 验证：全量单测 3286 通过；创作场浏览器实测 83 项（新增 7 项模型选择相关）、工作台四视口与顶栏冒烟全通过；桌面 1440/1280、手机横屏 844/812、竖屏 390/375，浅色深色逐一验收
+            Cat Chat 3.8.1 Beta Windows build。本版把创作场的模型选择改成与提词库同口径的两级：先选供应商，再选该供应商的完整模型列表。全量单测 **3286** 通过。

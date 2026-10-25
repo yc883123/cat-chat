@@ -1650,5 +1650,170 @@ class ServiceApiTests(unittest.TestCase):
         )
 
 
+class MediaGroupCardTests(unittest.TestCase):
+    """造梦机媒体输入「按类型分组卡片 + 拖拽」（2026-10-26 计划 §5 自动化）。
+
+    前端渲染层源码断言：分组归堆、块形态与四态文案、拖拽接线、触屏常驻按钮、
+    身份键与提交结构不变（后端契约零改动）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        root = Path(__file__).resolve().parents[1]
+        cls.js = (root / "public/js/24-comfyui.js").read_text(encoding="utf-8")
+        cls.css = (root / "public/styles.css").read_text(encoding="utf-8")
+
+    def _rule(self, marker):
+        return self.css.split(marker, 1)[1].split("}", 1)[0]
+
+    def _fn(self, signature):
+        return self.js.split(signature, 1)[1].split("\nfunction ", 1)[0]
+
+    def test_media_slots_grouped_by_kind(self):
+        # 归堆判定沿用 control/field_type 口径，与节点号、节点名、端口名解耦。
+        self.assertIn('const MEDIA_GROUP_ORDER = ["image", "audio", "video"]', self.js)
+        self.assertIn('slot.control !== "media" && !MEDIA_FIELD_TYPES.has(slot.field_type)', self.js)
+        # 三组按图片→音频→视频出卡；没有该类型槽就不出该卡。
+        self.assertIn("function renderMediaGroup(kind, slots)", self.js)
+        self.assertIn("if (groupSlots.length) form.append(renderMediaGroup(kind, groupSlots));", self.js)
+        # 组内保持 orderedSlots() 的原顺序（只按进入顺序归堆，不再排序）。
+        self.assertIn("mediaGroups.get(kind).push(slot);", self.js)
+        # 非媒体槽照旧逐槽渲染，顺序不变。
+        self.assertIn("form.append(renderSlot(item.slot));", self.js)
+        # 边缘数据（control=media 但类型不在三集合）走老行渲染，不丢控件。
+        picker = self._fn("function renderMediaPicker(slot, key) {")
+        self.assertIn("comfyui-media-preview", picker)
+        self.assertIn('createElement("audio")', picker)
+
+    def test_media_tile_status_and_port_text(self):
+        # 四态文案一字不改；判定仍是 slot.media_optional === true。
+        self.assertIn("slot.media_optional === true", self.js)
+        self.assertIn("`已选：${picked.name}`", self.js)
+        for text in ("未选即跳过", "请选择文件", "未选沿用原文件"):
+            self.assertIn(text, self.js)
+        status = self._fn("function mediaSlotStatus(slot, picked) {")
+        self.assertIn('badge: "已选"', status)
+        self.assertIn('badge: "未选即跳过"', status)
+        self.assertIn('badge: "请选择文件"', status)
+        self.assertIn('badge: "沿用原文件"', status)
+        # 块底端口小字带来源节点与目标端口；完整映射保留在块 title。
+        self.assertIn("target_field", self.js)
+        self.assertIn("mediaPortText(slot)", self.js)
+        self.assertIn("tile.title = `${slot.label", self.js)
+        # 沿用原文件的槽按实块渲染（不是虚线空块）。
+        self.assertIn("const keepOriginal = !picked && status.cls === \"keep\";", self.js)
+
+    def test_media_drag_drop_wiring(self):
+        # 块与卡片都挂 dragover/dragleave/drop，dragover 与 drop 都 preventDefault
+        # （不声明「这里可以放」就收不到 drop）。
+        for signature in ("function wireMediaTileDrop(tile, key, kind) {",
+                          "function wireMediaGroupDrop(group, tiles, slots, kind) {"):
+            block = self._fn(signature)
+            for name in ("dragover", "dragleave", "drop"):
+                self.assertIn(f'"{name}"', block, signature)
+            self.assertEqual(block.count("event.preventDefault()"), 2, signature)
+        # 块的 drop 不冒泡给卡片；卡片按空位顺序填、多的拒绝并提示。
+        tile_drop = self._fn("function wireMediaTileDrop(tile, key, kind) {")
+        self.assertIn("event.stopPropagation()", tile_drop)
+        self.assertIn("const empties = slots.filter", self.js)
+        self.assertIn("slotKey(empties[index])", self.js)
+        self.assertIn("多出的", self.js)
+        self.assertIn("请拖到具体块上替换", self.js)
+        # 类型不匹配拒绝并指明应拖到哪张卡；目录拖放直接拒绝。
+        self.assertIn("function toastMediaKindMismatch(file, kind) {", self.js)
+        # 指路必须是文件自己类型的卡（音频拖到图片卡要说「请拖到音频卡」），
+        # 不是当前拖到的目标卡。
+        self.assertIn("请拖到${MEDIA_KIND_LABELS[actual]}卡", self.js)
+        self.assertIn("不支持拖文件夹", self.js)
+        self.assertIn("function dropHasDirectory(event) {", self.js)
+        # 多文件串行上传（单槽锁锁整批），全部完成后只重绘一次。
+        upload = self.js.split("async function uploadMediaFiles(items) {", 1)[1] \
+            .split("\nfunction renderMediaPicker", 1)[0]
+        self.assertIn("for (const { key, file } of items) {", upload)
+        self.assertEqual(upload.count("rerenderParamForm()"), 1)
+        self.assertIn('comfyui.uploadingSlot = items.map((item) => item.key).join("|")', upload)
+        # 点选路径共用同一上传实现。
+        picked = self._fn("async function onMediaPicked(slot, key, fileInput) {")
+        self.assertIn("await uploadMediaFiles([{ key, file }]);", picked)
+
+    def test_touch_devices_keep_tile_actions_visible(self):
+        # 触屏没有 hover：替换/清除常驻显示，命中区 ≥22px（§4.4）。
+        # styles.css 里有多个 (hover: none) 媒体块，取包含本模块规则的那一块。
+        media_blocks = [
+            block.split("\n}", 1)[0]
+            for block in self.css.split("@media (hover: none) {")[1:]
+        ]
+        hover = next(block for block in media_blocks if ".comfyui-media-tile .t-actions" in block)
+        self.assertIn(".comfyui-media-tile .t-actions { display: flex; }", hover)
+        self.assertIn(".comfyui-media-tile .t-actions button { width: 22px; height: 22px; }", hover)
+
+    def test_media_tile_grid_and_states_css(self):
+        tiles = self._rule(".comfyui-media-tiles {")
+        self.assertIn("repeat(auto-fill, minmax(96px, 1fr))", tiles)
+        empty = self._rule(".comfyui-media-tile.empty {")
+        self.assertIn("border-style: dashed", empty)
+        collapsed = self.css.split(
+            ".comfyui-media-group.collapsed .comfyui-media-tiles,", 1)[1].split("}", 1)[0]
+        self.assertIn("display: none", collapsed)
+        dragover = self._rule(".comfyui-media-tile.dragover {")
+        self.assertIn("border-color: var(--accent)", dragover)
+        card_drop = self._rule(".comfyui-media-tiles.card-drop {")
+        self.assertIn("var(--accent)", card_drop)
+        hint = self._rule(".comfyui-media-tiles.card-drop + .comfyui-media-drop-hint {")
+        self.assertIn("display: block", hint)
+        audio_flat = self._rule(".comfyui-media-tile.empty.audio {")
+        self.assertIn("min-height: 58px", audio_flat)
+
+    def test_media_group_head_and_collapse(self):
+        group = self._fn("function renderMediaGroup(kind, slots) {")
+        self.assertIn("comfyui.mediaGroupsCollapsed[kind] === true", group)
+        self.assertIn("aria-expanded", group)
+        self.assertIn("`${pickedCount}/${slots.length} 已选`", group)
+        self.assertIn("`${slots.length} 个输入`", group)
+        # 折叠只是内存态：不落盘、不进 visible_params（saveParamsConfig 不碰它）。
+        save = self._fn("async function saveParamsConfig() {")
+        self.assertNotIn("mediaGroupsCollapsed", save)
+
+    def test_media_identity_and_submit_path_unchanged(self):
+        # 身份键仍是 node_id|field_name；collectMediaInputs 输出结构不变。
+        self.assertIn("return `${slot.node_id}|${slot.field_name}`;", self.js)
+        collect = self._fn("function collectMediaInputs() {")
+        self.assertIn(
+            '(slot.control || "") !== "media" && !MEDIA_FIELD_TYPES.has(slot.field_type)',
+            collect)
+        self.assertIn(
+            "items.push({ node_id: slot.node_id, field_name: slot.field_name, path: picked.path })",
+            collect)
+        self.assertIn("media_inputs: collectMediaInputs()", self.js)
+        # 首次导入默认可见：旧格式显示集仍强制合并媒体 key，分组卡无需重新导入；
+        # 保存过一次（v2 标记）后按用户实际勾选执行——取消勾选的媒体槽要能消失。
+        visible = self._fn("function visibleKeySet() {")
+        self.assertIn("if (!visibleSetKnowsMedia()) {", visible)
+        self.assertIn("MEDIA_FIELD_TYPES.has(slot.field_type)) set.add(slotKey(slot))", visible)
+        save = self._fn("async function saveParamsConfig() {")
+        self.assertIn("markVisibleSetKnowsMedia();", save)
+
+
+class TaskCardLayoutTests(unittest.TestCase):
+    def test_long_workflow_title_shrinks_before_status_badge(self):
+        """任务标题行必须允许标题收缩并省略，不能压到状态标签上。
+
+        任务数一多、结果栏出现纵向滚动条时，任务卡可用宽度会再窄一截；flex 子项
+        默认 min-width:auto，长的 workflow_name 会溢出自己的盒子，与右侧状态标签、
+        相邻卡片边界叠在一起。标题显式 min-width:0 + flex:1 才能省略。
+        """
+        root = Path(__file__).resolve().parents[1]
+        css = (root / "public/styles.css").read_text(encoding="utf-8")
+        head_rule = css.split(".comfyui-task-head {", 1)[1].split("}", 1)[0]
+        self.assertIn("min-width: 0", head_rule, "标题行本身也不能撑破网格列")
+        title_rule = css.split(".comfyui-task-head strong {", 1)[1].split("}", 1)[0]
+        self.assertIn("min-width: 0", title_rule, "标题必须能缩到内容宽度以下才会省略")
+        self.assertIn("flex: 1 1 auto", title_rule)
+        self.assertIn("text-overflow: ellipsis", title_rule)
+        self.assertIn("white-space: nowrap", title_rule)
+        status_rule = css.split(".comfyui-task-status {", 1)[1].split("}", 1)[0]
+        self.assertIn("flex: none", status_rule, "状态标签保持自身宽度，不被标题挤压")
+
+
 if __name__ == "__main__":
     unittest.main()

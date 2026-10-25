@@ -27,7 +27,8 @@ const comfyui = {
   modelCandidates: null,   // 模型候选缓存 {checkpoints, loras}；null = 还没拉过
   deleting: new Set(),     // 正在「取消并删除」的任务 id，防重复提交
   mediaSelection: new Map(), // 媒体槽已选文件 {slotKey: {path, name, thumb_path}}；切工作流清空
-  uploadingSlot: "",       // 正在上传的媒体槽 key（防并发点选）
+  uploadingSlot: "",       // 正在上传的媒体槽 key（防并发点选；批量拖拽时是各 key 拼接，仍为真值即锁住）
+  mediaGroupsCollapsed: {}, // 媒体分组卡折叠状态 {kind: true}；只存内存，不落盘、不进 visible_params
 };
 
 // ============================================================
@@ -348,15 +349,38 @@ function defaultVisibleKeys(slots) {
 }
 
 // 主表单可见参数：按工作流保存过就用保存的；没保存过用常用参数默认集。
+// 媒体槽合并只对「媒体支持之前保存的旧显示集」生效：saveParamsConfig 保存成功后
+// 会打 v2 标记（localStorage，按工作流 id），带标记的显示集按用户实际勾选执行，
+// 「编辑参数」里取消勾选的媒体槽不再被强制合并回来（2026-10-26 计划 §4.5）。
+const VISIBLE_MEDIA_V2_PREFIX = "comfyui.visibleMediaV2:";
+
+function visibleSetKnowsMedia() {
+  const id = String(comfyui.detail?.id || "");
+  try {
+    return localStorage.getItem(VISIBLE_MEDIA_V2_PREFIX + id) === "1";
+  } catch (_) {
+    return false;
+  }
+}
+
+function markVisibleSetKnowsMedia() {
+  const id = String(comfyui.detail?.id || "");
+  try {
+    localStorage.setItem(VISIBLE_MEDIA_V2_PREFIX + id, "1");
+  } catch (_) { /* 隐私模式存不进：退回旧合并行为，不影响功能 */ }
+}
+
 function visibleKeySet() {
   const slots = comfyui.detail?.params || [];
   const stored = comfyui.detail?.visible_params;
   if (Array.isArray(stored)) {
     const set = new Set(stored.map((item) => `${item.node_id}|${item.field_name}`));
-    // 媒体输入是后加能力：旧工作流保存过的显示集里不会有它们，合并进来保证
-    // 「图片/音频/视频输入」始终可见（用户仍可在「编辑参数」里去掉）。
-    for (const slot of slots) {
-      if (MEDIA_FIELD_TYPES.has(slot.field_type)) set.add(slotKey(slot));
+    if (!visibleSetKnowsMedia()) {
+      // 媒体输入是后加能力：旧工作流保存过的显示集里不会有它们，合并进来保证
+      // 「图片/音频/视频输入」始终可见。
+      for (const slot of slots) {
+        if (MEDIA_FIELD_TYPES.has(slot.field_type)) set.add(slotKey(slot));
+      }
     }
     return set;
   }
@@ -398,10 +422,38 @@ function renderParamForm() {
     note.textContent = "这份工作流没有可调的参数，直接点「开始生成」即可。";
     form.append(note);
   }
+  // 媒体槽不逐槽渲染，按 field_type 归堆成「图片 / 音频 / 视频」分组卡（§4.1）：
+  // orderedSlots() 里全部媒体槽同属 rank 4，卡片插在第一个媒体槽的位置一次性放好；
+  // 非媒体槽照旧逐槽渲染，相对顺序与现在完全一致。归堆只认 field_type，
+  // 与节点号、节点名、端口名解耦——工作流节点怎么命名都不影响分组。
   // 同一角色出现多个槽位（如两个 LoRA 加载器）时，完整标签本身带节点号与节点名，
   // 不再额外拼一次节点信息。
+  const mediaGroups = new Map();
+  const rowItems = [];
+  let groupsPlaced = false;
   for (const slot of slots) {
-    form.append(renderSlot(slot));
+    const kind = mediaKindOfSlot(slot);
+    if (kind) {
+      if (!groupsPlaced) {
+        rowItems.push({ groups: true });
+        groupsPlaced = true;
+      }
+      if (!mediaGroups.has(kind)) mediaGroups.set(kind, []);
+      mediaGroups.get(kind).push(slot);
+      continue;
+    }
+    rowItems.push({ slot });
+  }
+  for (const item of rowItems) {
+    if (item.slot) {
+      form.append(renderSlot(item.slot));
+    } else {
+      // 没有该类型节点就不生成该类型的卡（§3.1）。
+      for (const kind of MEDIA_GROUP_ORDER) {
+        const groupSlots = mediaGroups.get(kind) || [];
+        if (groupSlots.length) form.append(renderMediaGroup(kind, groupSlots));
+      }
+    }
   }
 }
 
@@ -463,6 +515,8 @@ async function saveParamsConfig() {
       `/api/comfyui/workflows/${encodeURIComponent(comfyui.detail.id)}/params`,
       { method: "POST", body: { visible } });
     comfyui.detail = { ...comfyui.detail, visible_params: payload.visible_params || visible };
+    // 从此这份工作流的显示集就是「知道媒体槽」的新格式：按实际勾选执行。
+    markVisibleSetKnowsMedia();
     closeParamsDialog();
     renderParamForm();
     toast("参数显示已保存，这份工作流下次打开也照此显示");
@@ -677,10 +731,461 @@ function renderSlot(slot) {
   return wrap;
 }
 
-// ---- 媒体输入槽（图片/音频/视频）：选择受管文件 + 预览 + 替换/清除 ----
+// ---- 媒体输入槽（图片/音频/视频）：按类型分组卡片 + 槽位块 + 拖拽/点选上传 ----
 
 const MEDIA_KIND_LABELS = { image: "图片", audio: "音频", video: "视频" };
+// 三张卡的先后顺序：图片 → 音频 → 视频（沿用 ROLE_ORDER 的媒体顺序）。
+const MEDIA_GROUP_ORDER = ["image", "audio", "video"];
+// MEDIA_ACCEPT 是 ".png,.jpg" 形态；拖拽校验要的是扩展名集合。
+const MEDIA_EXT_SETS = {};
+for (const [kind, accept] of Object.entries(MEDIA_ACCEPT)) {
+  MEDIA_EXT_SETS[kind] = new Set(accept.split(",").map((item) => item.trim().toLowerCase()));
+}
 
+const MEDIA_GROUP_ICONS = {
+  image: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>',
+  audio: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>',
+  video: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="2" y="4" width="14" height="16" rx="2"/><path d="M16 10l6-3v10l-6-3z"/></svg>',
+};
+const MEDIA_PLAY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+
+// 判定口径与 renderSlot 的 isMedia 完全一致：control 声明或 field_type 命中即媒体槽；
+// kind 取 slot.media（后端显式映射）优先。类型不在三集合里的边缘数据返回 ""，
+// 继续走 renderSlot → renderMediaPicker 的老行渲染，不至于丢失控件。
+function mediaKindOfSlot(slot) {
+  if (slot.control !== "media" && !MEDIA_FIELD_TYPES.has(slot.field_type)) return "";
+  const kind = slot.media || slot.field_type;
+  return MEDIA_GROUP_ORDER.includes(kind) ? kind : "";
+}
+
+// 四态口径唯一实现（分组块与兜底行共用）：判定与文案一字不改（§3.2）。
+// full 用于块 title/兜底行的整句；badge 是块上角标的短文案；
+// clearTitle 是已选块「清除」按钮的三种说明（与旧版一致）。
+function mediaSlotStatus(slot, picked) {
+  const emptyInWorkflow = !String(slot.default ?? "").trim() || String(slot.default).trim() === "None";
+  const skipSafe = slot.media_optional === true;
+  if (picked) {
+    return {
+      badge: "已选",
+      cls: "ok",
+      full: `已选：${picked.name}`,
+      clearTitle: skipSafe
+        ? "清除选择：生成时跳过这个输入"
+        : emptyInWorkflow
+          ? "清除选择：回到工作流里的空值"
+          : "清除选择：生成时按工作流原本的文件执行",
+    };
+  }
+  if (skipSafe) return { badge: "未选即跳过", cls: "", full: "未选即跳过" };
+  if (emptyInWorkflow) return { badge: "请选择文件", cls: "", full: "请选择文件" };
+  return { badge: "沿用原文件", cls: "keep", full: "未选沿用原文件" };
+}
+
+// 块底端口小字：节点号 · 节点名 → 目标端口（截断省略；完整映射在块 title 与「编辑参数」里）。
+function mediaPortText(slot) {
+  const ports = Array.isArray(slot.connections)
+    ? slot.connections.map((item) => String(item?.target_field || "")).filter(Boolean)
+    : [];
+  const target = ports.length ? ports.join("、") : String(slot.field_name || "");
+  const head = String(slot.node_title || slot.class_type || "");
+  const base = head ? `${slot.node_id} · ${head}` : String(slot.node_id);
+  return target ? `${base} → ${target}` : base;
+}
+
+function renderMediaGroup(kind, slots) {
+  const group = document.createElement("section");
+  group.className = "comfyui-media-group";
+  group.dataset.comfyuiMediaGroup = kind;
+  const collapsed = comfyui.mediaGroupsCollapsed[kind] === true;
+  if (collapsed) group.classList.add("collapsed");
+  const pickedCount = slots.filter(
+    (slot) => comfyui.mediaSelection.get(slotKey(slot))?.path).length;
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "comfyui-media-group-head";
+  head.setAttribute("aria-expanded", String(!collapsed));
+  const icon = document.createElement("span");
+  icon.className = "g-icon";
+  icon.innerHTML = MEDIA_GROUP_ICONS[kind];
+  const name = document.createElement("span");
+  name.className = "g-name";
+  name.textContent = MEDIA_KIND_LABELS[kind] || "媒体";
+  const count = document.createElement("span");
+  count.className = "g-count";
+  count.textContent = `${slots.length} 个输入`;
+  // 0/N 灰、部分选橙、全选绿：一眼看出这组还差几个（§3.1）。
+  const fill = document.createElement("span");
+  fill.className = "g-fill"
+    + (pickedCount === 0 ? " idle" : pickedCount < slots.length ? " warn" : " ok");
+  fill.textContent = `${pickedCount}/${slots.length} 已选`;
+  const caret = document.createElement("span");
+  caret.className = "caret";
+  caret.textContent = "▾";
+  head.append(icon, name, count, fill, caret);
+  head.addEventListener("click", () => {
+    comfyui.mediaGroupsCollapsed[kind] = !collapsed;
+    rerenderParamForm();
+  });
+  const tiles = document.createElement("div");
+  tiles.className = "comfyui-media-tiles";
+  for (const slot of slots) tiles.append(renderMediaTile(slot, slotKey(slot), kind));
+  const hint = document.createElement("p");
+  hint.className = "comfyui-media-drop-hint";
+  hint.textContent = "把文件拖到卡片任意处，会按槽位顺序依次填进空位";
+  group.append(head, tiles, hint);
+  wireMediaGroupDrop(group, tiles, slots, kind);
+  return group;
+}
+
+function renderMediaTile(slot, key, kind) {
+  const picked = comfyui.mediaSelection.get(key) || null;
+  const status = mediaSlotStatus(slot, picked);
+  // 「沿用原文件」的槽按实块渲染（占位图标 + 原文件名），不是虚线空块（§3.4）。
+  const keepOriginal = !picked && status.cls === "keep";
+  const tile = document.createElement("div");
+  tile.className = "comfyui-media-tile"
+    + (kind === "audio" ? " audio" : kind === "video" ? " video" : "");
+  if (!picked && !keepOriginal) tile.classList.add("empty");
+  tile.dataset.comfyuiMediaTile = key;
+  tile.title = `${slot.label || ""}\n${status.full}`;
+  const file = document.createElement("input");
+  file.type = "file";
+  file.accept = MEDIA_ACCEPT[kind] || "";
+  file.hidden = true;
+  file.addEventListener("change", () => void onMediaPicked(slot, key, file));
+
+  const badge = document.createElement("span");
+  badge.className = "t-status" + (status.cls ? ` ${status.cls}` : "");
+  badge.textContent = status.badge;
+
+  if (picked || keepOriginal) {
+    const thumb = document.createElement("div");
+    thumb.className = "thumb";
+    const actions = document.createElement("div");
+    actions.className = "t-actions";
+    const replace = document.createElement("button");
+    replace.type = "button";
+    replace.textContent = "⇄";
+    replace.title = picked ? "替换这个文件" : `选择文件替换（当前沿用 ${slot.default}）`;
+    replace.setAttribute("aria-label", replace.title);
+    replace.addEventListener("click", (event) => {
+      event.stopPropagation();
+      file.click();
+    });
+    actions.append(replace);
+    if (picked) {
+      const clear = document.createElement("button");
+      clear.type = "button";
+      clear.textContent = "✕";
+      clear.title = status.clearTitle;
+      clear.setAttribute("aria-label", clear.title);
+      clear.addEventListener("click", (event) => {
+        event.stopPropagation();
+        comfyui.mediaSelection.delete(key);
+        rerenderParamForm();
+      });
+      actions.append(clear);
+    }
+    if (picked) {
+      const record = { path: picked.path, thumb_path: picked.thumb_path || "", name: picked.name || "" };
+      if (kind === "image") {
+        const img = document.createElement("img");
+        img.src = attachmentThumbUrl(record);
+        img.alt = record.name;
+        img.loading = "lazy";
+        // 放大走 03-media 的 document 级灯箱委托（与产物卡同一入口）。
+        img.dataset.largeUrl = localFileUrl(record.path);
+        thumb.append(img);
+      } else if (kind === "video") {
+        // 块只有 ~96px 宽，内嵌控件没法用：preload=metadata 的首帧当海报 +
+        // 播放按钮，点块走放大播放浮层（§4.2）。
+        const video = document.createElement("video");
+        video.src = localFileUrl(record.path);
+        video.preload = "metadata";
+        video.muted = true;
+        video.playsInline = true;
+        thumb.append(video);
+        const play = document.createElement("span");
+        play.className = "play";
+        play.innerHTML = MEDIA_PLAY_ICON;
+        thumb.append(play);
+        const duration = document.createElement("span");
+        duration.className = "t-duration";
+        video.addEventListener("loadedmetadata", () => {
+          duration.textContent = formatMediaDuration(video.duration);
+        });
+        thumb.append(duration);
+        tile.addEventListener("click", (event) => {
+          if (event.target.closest(".t-actions")) return;
+          openMediaPreviewOverlay(localFileUrl(record.path), "video");
+        });
+      } else {
+        const icon = document.createElement("span");
+        icon.className = "ph-icon";
+        icon.innerHTML = MEDIA_PLAY_ICON;
+        thumb.append(icon);
+        tile.addEventListener("click", (event) => {
+          if (event.target.closest(".t-actions")) return;
+          openMediaPreviewOverlay(localFileUrl(record.path), "audio");
+        });
+      }
+    } else {
+      const icon = document.createElement("span");
+      icon.className = "ph-icon";
+      icon.innerHTML = MEDIA_GROUP_ICONS[kind];
+      thumb.append(icon);
+      tile.addEventListener("click", (event) => {
+        if (event.target.closest(".t-actions")) return;
+        file.click();
+      });
+    }
+    const name = document.createElement("div");
+    name.className = "t-name";
+    name.textContent = picked ? picked.name : String(slot.default ?? "");
+    name.title = name.textContent;
+    const port = document.createElement("div");
+    port.className = "t-port";
+    port.textContent = mediaPortText(slot);
+    tile.append(thumb, badge, actions, name, port);
+  } else {
+    // 空块：虚线格，点它即唤起系统选择器；音频是扁平小条，端口并进标签行。
+    const plus = document.createElement("span");
+    plus.className = "plus";
+    plus.textContent = "＋";
+    const label = document.createElement("span");
+    label.className = "plus-label";
+    label.textContent = kind === "audio"
+      ? `选择${MEDIA_KIND_LABELS[kind]} · ${mediaPortText(slot)}`
+      : `选择${MEDIA_KIND_LABELS[kind] || "文件"}`;
+    const dropLabel = document.createElement("span");
+    dropLabel.className = "drop-label";
+    dropLabel.textContent = "松开即上传";
+    const wrap = document.createElement("div");
+    wrap.className = "plus-wrap";
+    wrap.append(plus, label, dropLabel);
+    tile.append(badge, wrap);
+    if (kind !== "audio") {
+      const port = document.createElement("div");
+      port.className = "t-port";
+      port.textContent = mediaPortText(slot);
+      tile.append(port);
+    }
+    tile.addEventListener("click", () => file.click());
+  }
+  tile.append(file);
+  wireMediaTileDrop(tile, key, kind);
+  return tile;
+}
+
+function formatMediaDuration(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  const minutes = Math.floor(total / 60);
+  const rest = total % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+}
+
+// 视频/音频放大播放浮层：动态建节点（本模块不改 index.html），点遮罩或 Esc 关闭。
+function openMediaPreviewOverlay(url, kind) {
+  document.querySelector(".comfyui-media-preview-overlay")?.remove();
+  const overlay = document.createElement("div");
+  overlay.className = "comfyui-media-preview-overlay";
+  const media = document.createElement(kind === "video" ? "video" : "audio");
+  media.src = url;
+  media.controls = true;
+  media.autoplay = true;
+  if (kind === "video") media.playsInline = true;
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "comfyui-media-preview-close";
+  close.textContent = "✕";
+  close.title = "关闭";
+  close.setAttribute("aria-label", "关闭预览");
+  const shutdown = () => {
+    overlay.remove();
+    document.removeEventListener("keydown", onKey);
+  };
+  const onKey = (event) => {
+    if (event.key === "Escape") shutdown();
+  };
+  close.addEventListener("click", shutdown);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) shutdown();
+  });
+  document.addEventListener("keydown", onKey);
+  overlay.append(media, close);
+  document.body.append(overlay);
+}
+
+// ---- 拖拽（桌面增强；触屏不派发 HTML5 drag 事件，点选才是主路径）----
+
+function dragHasFiles(event) {
+  return Boolean(event.dataTransfer?.types?.includes("Files"));
+}
+
+// 目录拖放一律拒绝：媒体槽只收单文件，不进文件夹索引那套链路（§4.3）。
+function dropHasDirectory(event) {
+  for (const item of event.dataTransfer?.items || []) {
+    const entry = typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null;
+    if (entry?.isDirectory) return true;
+  }
+  return false;
+}
+
+function fileMatchesMediaKind(file, kind) {
+  const name = String(file?.name || "").toLowerCase();
+  const dot = name.lastIndexOf(".");
+  const ext = dot >= 0 ? name.slice(dot) : "";
+  return (MEDIA_EXT_SETS[kind] || new Set()).has(ext);
+}
+
+function fileKindOf(file) {
+  for (const kind of MEDIA_GROUP_ORDER) {
+    if (fileMatchesMediaKind(file, kind)) return kind;
+  }
+  return "";
+}
+
+// 类型不符的统一提示：指明拖的是什么、该去哪张卡（§3.5）——目标卡是文件自己的类型卡，
+// 不是当前拖到的这张（音频拖到图片卡要说「请拖到音频卡」）。
+function toastMediaKindMismatch(file, kind) {
+  const actual = fileKindOf(file);
+  toast(actual
+    ? `这是${MEDIA_KIND_LABELS[actual]}，请拖到${MEDIA_KIND_LABELS[actual]}卡`
+    : `这个文件不是${MEDIA_KIND_LABELS[kind]}，请换${MEDIA_KIND_LABELS[kind]}文件`);
+}
+
+function wireMediaTileDrop(tile, key, kind) {
+  tile.addEventListener("dragover", (event) => {
+    if (!dragHasFiles(event)) return;
+    // dragover 也要 preventDefault：不声明「这里可以放」，drop 根本不会派发。
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    tile.classList.add("dragover");
+  });
+  tile.addEventListener("dragleave", (event) => {
+    if (event.relatedTarget && tile.contains(event.relatedTarget)) return;
+    tile.classList.remove("dragover");
+  });
+  tile.addEventListener("drop", (event) => {
+    if (!dragHasFiles(event)) return;
+    event.preventDefault();
+    // 块自己收下，不再冒泡给卡片按空位填。
+    event.stopPropagation();
+    tile.classList.remove("dragover");
+    void handleTileMediaDrop(event, key, kind);
+  });
+}
+
+async function handleTileMediaDrop(event, key, kind) {
+  const files = Array.from(event.dataTransfer?.files || []);
+  if (!files.length) return;
+  if (dropHasDirectory(event)) {
+    toast("媒体输入只收单个文件，不支持拖文件夹");
+    return;
+  }
+  const bad = files.find((file) => !fileMatchesMediaKind(file, kind));
+  if (bad) {
+    toastMediaKindMismatch(bad, kind);
+    return;
+  }
+  if (files.length > 1) {
+    toast(`一次拖了 ${files.length} 个文件，只有第一个进入这个输入；要批量请拖到卡片空白处`);
+  }
+  await uploadMediaFiles([{ key, file: files[0] }]);
+}
+
+function wireMediaGroupDrop(group, tiles, slots, kind) {
+  const setCardDrop = (on) => {
+    tiles.classList.toggle("card-drop", on);
+    group.classList.toggle("card-drop", on);
+  };
+  group.addEventListener("dragover", (event) => {
+    if (!dragHasFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setCardDrop(true);
+  });
+  group.addEventListener("dragleave", (event) => {
+    if (event.relatedTarget && group.contains(event.relatedTarget)) return;
+    setCardDrop(false);
+  });
+  group.addEventListener("drop", (event) => {
+    if (!dragHasFiles(event)) return;
+    event.preventDefault();
+    setCardDrop(false);
+    void handleGroupMediaDrop(event, slots, kind);
+  });
+}
+
+async function handleGroupMediaDrop(event, slots, kind) {
+  const files = Array.from(event.dataTransfer?.files || []);
+  if (!files.length) return;
+  if (dropHasDirectory(event)) {
+    toast("媒体输入只收单个文件，不支持拖文件夹");
+    return;
+  }
+  const bad = files.find((file) => !fileMatchesMediaKind(file, kind));
+  if (bad) {
+    toastMediaKindMismatch(bad, kind);
+    return;
+  }
+  // 「沿用原文件」但本次没选的槽也算空位：拖进来的文件优先用上。
+  const empties = slots.filter((slot) => !comfyui.mediaSelection.get(slotKey(slot))?.path);
+  if (!empties.length) {
+    toast("这张卡的输入都已选好，请拖到具体块上替换");
+    return;
+  }
+  const assignCount = Math.min(files.length, empties.length);
+  if (files.length > empties.length) {
+    toast(`空位不够：先填 ${empties.length} 个空位，多出的 ${files.length - empties.length} 个请拖到具体块上替换`);
+  }
+  await uploadMediaFiles(files.slice(0, assignCount).map((file, index) => ({
+    key: slotKey(empties[index]),
+    file,
+  })));
+}
+
+// 串行上传 + 单槽锁：批量拖拽逐个 await，全部完成后只重绘一次（§4.3），
+// 避免逐槽重绘造成闪烁。失败逐个 toast，成功的照常写入 mediaSelection。
+async function uploadMediaFiles(items) {
+  if (comfyui.uploadingSlot) {
+    toast("上一个文件还在上传，请稍候");
+    return 0;
+  }
+  comfyui.uploadingSlot = items.map((item) => item.key).join("|");
+  let okCount = 0;
+  try {
+    for (const { key, file } of items) {
+      const form = new FormData();
+      form.append("file", file, file.name);
+      try {
+        const payload = await api("/api/comfyui/media", { method: "POST", body: form });
+        comfyui.mediaSelection.set(key, {
+          path: String(payload.path || ""),
+          name: String(payload.name || file.name),
+          thumb_path: String(payload.thumb_path || ""),
+        });
+        okCount += 1;
+      } catch (error) {
+        toast(`上传失败：${error.message}`);
+      }
+    }
+  } finally {
+    comfyui.uploadingSlot = "";
+    rerenderParamForm();
+  }
+  return okCount;
+}
+
+async function onMediaPicked(slot, key, fileInput) {
+  const file = fileInput.files?.[0];
+  fileInput.value = "";
+  if (!file) return;
+  await uploadMediaFiles([{ key, file }]);
+}
+
+// 兜底渲染：control=media 但类型不在图片/音频/视频里（手改存档等边缘数据）仍按
+// 老的三件套行渲染，不至于丢控件；正常媒体槽都走 renderMediaGroup/renderMediaTile。
 function renderMediaPicker(slot, key) {
   const kind = slot.media || slot.field_type;
   const wrap = document.createElement("div");
@@ -713,20 +1218,9 @@ function renderMediaPicker(slot, key) {
   }
   const note = document.createElement("span");
   note.className = "comfyui-media-note";
-  const emptyInWorkflow = !String(slot.default ?? "").trim() || String(slot.default).trim() === "None";
-  const skipSafe = slot.media_optional === true;
-  let status = "";
-  if (picked) {
-    status = `已选：${picked.name}`;
-  } else if (skipSafe) {
-    status = "未选即跳过";
-  } else if (emptyInWorkflow) {
-    status = "请选择文件";
-  } else {
-    status = "未选沿用原文件";
-  }
-  note.textContent = status;
-  note.title = status;
+  const status = mediaSlotStatus(slot, picked);
+  note.textContent = status.full;
+  note.title = status.full;
   const actions = document.createElement("div");
   actions.className = "comfyui-media-actions";
   const pickLabel = document.createElement("label");
@@ -744,11 +1238,7 @@ function renderMediaPicker(slot, key) {
     clear.type = "button";
     clear.className = "control-button tiny";
     clear.textContent = "清除";
-    clear.title = skipSafe
-      ? "清除选择：生成时跳过这个输入"
-      : emptyInWorkflow
-        ? "清除选择：回到工作流里的空值"
-        : "清除选择：生成时按工作流原本的文件执行";
+    clear.title = status.clearTitle;
     clear.addEventListener("click", () => {
       comfyui.mediaSelection.delete(key);
       rerenderParamForm();
@@ -757,32 +1247,6 @@ function renderMediaPicker(slot, key) {
   }
   wrap.append(preview, note, actions);
   return wrap;
-}
-
-async function onMediaPicked(slot, key, fileInput) {
-  const file = fileInput.files?.[0];
-  fileInput.value = "";
-  if (!file) return;
-  if (comfyui.uploadingSlot) {
-    toast("上一个文件还在上传，请稍候");
-    return;
-  }
-  comfyui.uploadingSlot = key;
-  const form = new FormData();
-  form.append("file", file, file.name);
-  try {
-    const payload = await api("/api/comfyui/media", { method: "POST", body: form });
-    comfyui.mediaSelection.set(key, {
-      path: String(payload.path || ""),
-      name: String(payload.name || file.name),
-      thumb_path: String(payload.thumb_path || ""),
-    });
-  } catch (error) {
-    toast(`上传失败：${error.message}`);
-  } finally {
-    comfyui.uploadingSlot = "";
-    rerenderParamForm();
-  }
 }
 
 function rerenderParamForm() {

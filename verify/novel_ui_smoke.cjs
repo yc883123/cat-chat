@@ -103,6 +103,12 @@ async function main() {
   let deletedBook = false;
   let stageSubmit = null;
   let applySubmit = null;
+  // 两级模型选择：记录每次 /api/providers/models 请求，并回两家不同的目录。
+  const modelRequests = [];
+  const MODEL_CATALOG = {
+    'online:probe-te': ['probe-alpha', 'probe-beta', 'probe-gamma'],
+    'online:probe-moda': ['qwen-max', 'qwen-plus'],
+  };
   let scenePatch = null;
   let reorderSubmit = null;
   const exportQueries = [];
@@ -166,6 +172,27 @@ async function main() {
       return route.fulfill({
         status: 200, contentType: 'application/json',
         body: JSON.stringify({ task: stageTaskState }),
+      });
+    },
+  );
+
+  // 模型目录：按 model_key 回不同目录，用来验证「换供应商就换目录」。
+  await page.route(
+    (url) => url.pathname === '/api/providers/models',
+    (route) => {
+      const body = JSON.parse(route.request().postData() || '{}');
+      const key = String(body.model_key || '');
+      modelRequests.push({ model_key: key });
+      const models = MODEL_CATALOG[key];
+      if (!models) {
+        return route.fulfill({
+          status: 400, contentType: 'application/json',
+          body: JSON.stringify({ error: '冒烟注入：没有这个供应商的目录' }),
+        });
+      }
+      return route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({ models: models.map((id) => ({ id, name: id })) }),
       });
     },
   );
@@ -403,9 +430,41 @@ async function main() {
     (await page.locator('#novelStageMeta').innerText()).includes('2 章'),
     await page.locator('#novelStageMeta').innerText());
 
-  // 模型下拉来自 bootstrap 的供应商模型
-  const modelOptions = await page.locator('#novelStageModel option').count();
-  check('模型下拉有可选项', modelOptions > 0, `options=${modelOptions}`);
+  // 模型选择与提词库同口径：先选供应商，再选该供应商目录里的模型
+  check('供应商下拉有可选项',
+    (await page.locator('#novelStageProvider option').count()) > 0);
+  const providerValue = await page.locator('#novelStageProvider').inputValue();
+  check('供应商已选中一项', Boolean(providerValue), providerValue);
+  const modelOptions = await page.locator('#novelStageModel option').allInnerTexts();
+  check('模型下拉拉到了该供应商的完整目录',
+    modelOptions.length === 3 && modelOptions.includes('probe-default') === false,
+    JSON.stringify(modelOptions));
+  check('模型请求带 model_key',
+    modelRequests.some((row) => row.model_key === providerValue),
+    JSON.stringify(modelRequests));
+  check('模型已选中一项',
+    Boolean(await page.locator('#novelStageModel').inputValue()));
+
+  // 切换供应商 → 重新拉那一家的目录（缓存过的不再请求）
+  await page.locator('#novelStageProvider').selectOption('online:probe-moda');
+  await page.waitForTimeout(700);
+  const secondModels = await page.locator('#novelStageModel option').allInnerTexts();
+  check('换供应商后模型目录跟着换',
+    secondModels.includes('qwen-max') && !secondModels.includes('probe-alpha'),
+    JSON.stringify(secondModels));
+  check('换供应商会重新请求目录',
+    modelRequests.filter((row) => row.model_key === 'online:probe-moda').length === 1,
+    JSON.stringify(modelRequests));
+  // 切回原供应商：命中缓存，创作场不再发请求。
+  // 注意：`/api/providers/models` 也被聊天输入区（populateComposerModels）与提词库
+  // （syncStudioModel）调用，所以这里只统计「创作场自己发的」次数——按调用时序对不上，
+  // 改用请求去重后比较：切回前记下次数，切回后必须不变。
+  const beforeSwitchBack = modelRequests.length;
+  await page.locator('#novelStageProvider').selectOption(providerValue);
+  await page.waitForTimeout(600);
+  check('切回已缓存供应商不重复请求',
+    modelRequests.length === beforeSwitchBack,
+    `${beforeSwitchBack} → ${modelRequests.length}`);
 
   // 生成：断言任务契约字段
   await page.locator('#novelStageGenerate').click();

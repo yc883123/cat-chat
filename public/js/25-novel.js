@@ -51,6 +51,11 @@ const novel = {
   streamText: "",
   stageWarnings: [],
   stageBusy: false,
+  // 模型选择（与提词库同口径）：先选供应商，再按供应商拉完整模型目录。
+  stageProviderKey: "",
+  stageModelName: "",
+  stageModelsCache: new Map(),
+  stageModelInflight: new Map(),
   // 剧本阶段：当前正在编辑的场次号（0 = 未在编辑）。
   sceneEditing: 0,
   sceneBusy: false,
@@ -406,6 +411,7 @@ function renderStagePanel() {
     if (novel.staged) lines.push("先把导入的章节保存为作品，再生成。");
     else if (!novel.bookId) lines.push("先打开或保存一个作品。");
     else if (!picked.length) lines.push("在左侧勾选至少一章作为素材。");
+    else if (!novel.stageModelName) lines.push("还没有可用模型，请到设置里检查模型。");
     else if (picked.length > MAX_STAGE_CHAPTERS) {
       lines.push(`一次最多带 ${MAX_STAGE_CHAPTERS} 章（已选 ${picked.length} 章，多了 ${picked.length - MAX_STAGE_CHAPTERS} 章），请分批生成。`);
     }
@@ -603,53 +609,135 @@ async function moveScene(sceneNo, direction) {
   }
 }
 
-/** 模型下拉：沿用聊天/工作台同一份模型配置（不新增模型选择通道）。 */
-function fillStageModels() {
-  const select = $("#novelStageModel");
+/**
+ * 模型选择与提词库同口径：先选供应商，再选该供应商目录里的模型。
+ *
+ * 供应商列表来自 `bootstrap.model_profiles`（带 model_key，与提词库同一份）；
+ * 模型列表对选中的供应商调 `POST /api/providers/models` 拉**完整目录**——
+ * 只读卡片上那个 `model` 字段的话，一个供应商就只能选到一个模型。
+ * 目录拉不到时（网络不通 / 供应商没有目录接口）回退到卡片上配置的模型，
+ * 那是用户自己填的、能直接用的名字，比给一个空下拉框有用。
+ */
+function fillStageProviders() {
+  const select = $("#novelStageProvider");
   if (!select) return;
-  const providers = Array.isArray(state.bootstrap?.providers) ? state.bootstrap.providers : [];
-  const rows = [];
-  for (const provider of providers) {
-    const models = Array.isArray(provider?.models) ? provider.models : [];
-    const names = new Set();
-    for (const model of models) {
-      const name = String(model?.name || model?.id || "").trim();
-      if (name) names.add(name);
-    }
-    // 目录拉不到时（网络不通、供应商没有目录接口）回退到卡片上配置的模型：
-    // 那是用户自己填的、能直接用的名字，比给一个空下拉框有用。
-    const configured = String(provider?.model || "").trim();
-    if (configured) names.add(configured);
-    for (const name of names) {
-      rows.push({
-        key: `online:${provider.id}`,
-        name,
-        label: `${provider.name || provider.id} · ${name}`,
-      });
-    }
-  }
-  const previous = select.value;
+  const profiles = Array.isArray(state.bootstrap?.model_profiles)
+    ? state.bootstrap.model_profiles
+    : (Array.isArray(state.bootstrap?.providers) ? state.bootstrap.providers : []);
+  const rows = profiles
+    .map((row) => ({
+      key: String(row?.model_key || `online:${row?.id || ""}`),
+      label: String(row?.name || row?.model_key || row?.id || ""),
+    }))
+    .filter((row) => row.key && row.label);
+  const previous = select.value || novel.stageProviderKey;
   select.replaceChildren(...rows.map((row) => {
     const option = document.createElement("option");
-    option.value = `${row.key}|${row.name}`;
+    option.value = row.key;
     option.textContent = row.label;
     return option;
   }));
   if (!rows.length) {
     const option = document.createElement("option");
     option.value = "";
-    option.textContent = "先在设置里检查模型";
+    option.textContent = "请先在设置中添加模型";
     select.append(option);
+    novel.stageProviderKey = "";
     return;
   }
-  if (previous && rows.some((row) => `${row.key}|${row.name}` === previous)) select.value = previous;
+  // 优先沿用上次选择，其次是会话当前模型，最后落到第一个。
+  const preferred = [
+    previous,
+    $("#modelSelect")?.value || "",
+    state.bootstrap?.default_model_key || "",
+  ].find((key) => key && rows.some((row) => row.key === key));
+  select.value = preferred || rows[0].key;
+  novel.stageProviderKey = select.value;
+}
+
+/** 按当前供应商拉完整模型目录，填进模型下拉。 */
+async function fillStageModelOptions() {
+  const select = $("#novelStageModel");
+  if (!select) return;
+  const key = novel.stageProviderKey || $("#novelStageProvider")?.value || "";
+  if (!key) {
+    select.replaceChildren(new Option("请先在设置中添加模型", ""));
+    novel.stageModelName = "";
+    return;
+  }
+  let models = novel.stageModelsCache.get(key);
+  if (!models) {
+    // 同一供应商的并发请求只发一次（首屏与切页会连续触发两次），
+    // 否则缓存还没写回就又发一遍，白拉一次目录。
+    const inflight = novel.stageModelInflight.get(key);
+    if (inflight) {
+      models = await inflight;
+    } else {
+      const task = (async () => {
+        try {
+          const payload = await api("/api/providers/models", {
+            method: "POST",
+            body: { model_key: key },
+          });
+          return Array.isArray(payload?.models) ? payload.models : [];
+        } catch (error) {
+          return [];
+        }
+      })();
+      novel.stageModelInflight.set(key, task);
+      try {
+        models = await task;
+      } finally {
+        novel.stageModelInflight.delete(key);
+      }
+      novel.stageModelsCache.set(key, models);
+    }
+  }
+  const names = [];
+  for (const entry of models) {
+    const id = typeof entry === "object"
+      ? String(entry?.id ?? entry?.model ?? entry?.name ?? "")
+      : String(entry ?? "");
+    const clean = id.trim();
+    if (clean && !names.includes(clean)) names.push(clean);
+  }
+  if (!names.length) {
+    // 目录读不到：回退到这张卡片上配置的模型名（用户自己填的，能直接用）。
+    const profile = (state.bootstrap?.model_profiles || []).find((row) => row.model_key === key);
+    const configured = String(profile?.model || "").trim();
+    if (configured) names.push(configured);
+  }
+  const previous = novel.stageModelName || select.value;
+  select.replaceChildren(...names.map((name) => new Option(name, name)));
+  if (!names.length) {
+    select.replaceChildren(new Option("模型目录读取失败，请到设置里检查", ""));
+    novel.stageModelName = "";
+    return;
+  }
+  select.value = names.includes(previous) ? previous : names[0];
+  novel.stageModelName = select.value;
+}
+
+/**
+ * 重画两级下拉（供应商同步 + 模型目录异步）。
+ *
+ * 串行化：首屏、进页、切阶段都会调它，并发进入时后一次等前一次跑完再走，
+ * 这样目录只拉一次（缓存写回后再判断命中），不会因为「缓存还没写就重进」而重复请求。
+ */
+let stageModelsChain = Promise.resolve();
+function fillStageModels() {
+  stageModelsChain = stageModelsChain.then(async () => {
+    fillStageProviders();
+    await fillStageModelOptions();
+  }).catch(() => {});
+  return stageModelsChain;
 }
 
 function readStageModel() {
-  const raw = String($("#novelStageModel")?.value || "");
-  const index = raw.indexOf("|");
-  if (index < 0) return { model_key: "", model_name: "" };
-  return { model_key: raw.slice(0, index), model_name: raw.slice(index + 1) };
+  return {
+    model_key: novel.stageProviderKey || String($("#novelStageProvider")?.value || ""),
+    model_name: novel.stageModelName || String($("#novelStageModel")?.value || ""),
+  };
 }
 
 function stopTaskPolling() {
@@ -1298,6 +1386,17 @@ export function bindNovelEvents() {
   $("#novelStageCancel")?.addEventListener("click", () => void cancelStageTask());
   $("#novelStageRetry")?.addEventListener("click", () => void retryStageTask());
   $("#novelStageApply")?.addEventListener("click", () => void applyStageResult());
+  // 两级模型选择：换供应商要重新拉那一家的模型目录（与提词库同口径）。
+  $("#novelStageProvider")?.addEventListener("change", async () => {
+    novel.stageProviderKey = String($("#novelStageProvider")?.value || "");
+    novel.stageModelName = "";
+    await fillStageModelOptions();
+    renderStagePanel();
+  });
+  $("#novelStageModel")?.addEventListener("change", () => {
+    novel.stageModelName = String($("#novelStageModel")?.value || "");
+    renderStagePanel();
+  });
 
   // ---- 阶段三：剧本场次 ----
   $("#novelSceneList")?.addEventListener("click", (event) => {

@@ -4613,9 +4613,10 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .novel-stage-head strong { font-size: 12.5px; }
 .novel-stage-head small { font-size: 10.5px; color: var(--muted); }
 .novel-stage-meta { display: flex; gap: 6px; flex-wrap: wrap; }
-.novel-stage-model { display: flex; align-items: flex-end; gap: 8px; }
-.novel-stage-model .novel-field { flex: 1; min-width: 0; }
-.novel-stage-model .control-button { flex: none; }
+/* 两级选择：供应商 + 模型各占一份，按钮靠右；窄屏自动换行，不挤压下拉。 */
+.novel-stage-model { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.novel-stage-model .novel-field { flex: 1 1 120px; min-width: 0; }
+.novel-stage-model .control-button { flex: 0 0 auto; }
 .novel-stage-panel select {
   width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: var(--r-md);
   background: var(--surface); color: var(--text); font-size: 12.5px;
@@ -4664,7 +4665,15 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
   .novel-stage-panel > .novel-field { font-size: 0; gap: 0; }
   .novel-stage-panel > .novel-field textarea { margin-top: 0; }
   .novel-stage-model .novel-field { font-size: 0; gap: 0; }
-  .novel-stage-model { gap: 6px; }
+  /* 横屏高度只有 390px：两个下拉必须并排一行，换行会把「生成」挤出可见区。
+     中栏在 844 宽下只有约 400px，供应商名短、模型名长，按 2:3 分配宽度，
+     并且都保留一个能看清名字的最小宽度（再窄就只剩「de…」）。 */
+  .novel-stage-model { gap: 5px; flex-wrap: nowrap; }
+  .novel-stage-model .novel-field { flex: 1 1 0; min-width: 0; }
+  .novel-stage-model .novel-field:first-of-type { flex-grow: 2; }
+  .novel-stage-model .novel-field:last-of-type { flex-grow: 3; }
+  .novel-stage-model .control-button { flex: 0 0 auto; padding: 0 8px; }
+  .novel-stage-model select { padding: 5px 5px; font-size: 11px; }
   .novel-scene-list { max-height: 96px; }
   .novel-field-scene textarea { min-height: 64px; }
 }

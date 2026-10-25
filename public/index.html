@@ -751,7 +751,11 @@
                     <textarea id="novelStageNote" rows="2" maxlength="800"
                               placeholder="例如：人物只保留有名有姓的；场景按出现顺序排。"></textarea>
                   </label>
+                  <!-- 模型选择与提词库同口径：先选供应商，再选该供应商目录里的模型。 -->
                   <div class="novel-stage-model">
+                    <label class="novel-field">供应商
+                      <select id="novelStageProvider" aria-label="生成用的供应商"></select>
+                    </label>
                     <label class="novel-field">模型
                       <select id="novelStageModel" aria-label="生成用的模型"></select>
                     </label>

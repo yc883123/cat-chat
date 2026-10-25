@@ -256,6 +256,29 @@ async function runViewport(browser, vp) {
       body: JSON.stringify({ models: ['probe-default'] }),
     });
   });
+  // 模型档案夹具：「识别图片」断言期望请求携带 online:probe-te，但隔离实例的 config
+  // 由各次冒烟自行准备，唯一模型不一定是它（2026-10-25 评审复跑时是 online:review-smoke，
+  // 四视口同断言失败）。这里改写 bootstrap 的模型档案为固定一份 + 同步默认模型，
+  // 冒烟不再依赖实例配置怎么准备；模型名由上面的 /api/providers/models mock 配对提供。
+  await page.route('**/api/bootstrap', async (route) => {
+    const response = await route.fetch();
+    let body;
+    try { body = await response.json(); } catch { return route.fulfill({ response }); }
+    const key = 'online:probe-te';
+    const profiles = Array.isArray(body.model_profiles) && body.model_profiles.length
+      ? body.model_profiles
+      : (Array.isArray(body.providers) ? body.providers : []);
+    const fake = {
+      ...(profiles.length ? { ...profiles[0] } : { kind: 'online' }),
+      model_key: key,
+      name: 'probe-te 冒烟模型',
+      kind: (profiles[0] && profiles[0].kind) || 'online',
+    };
+    if (Array.isArray(body.model_profiles)) body.model_profiles = [fake];
+    if (Array.isArray(body.providers)) body.providers = [fake];
+    body.default_model_key = key;
+    return route.fulfill({ response, body: JSON.stringify(body) });
+  });
   // 新会话里允许首轮 Run 仍在运行：恢复轮询只查一次就绪状态，不串台真实任务事件。
   await page.route('**/api/runs*', (route) => {
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ runs: [] }) });
@@ -367,8 +390,16 @@ async function runViewport(browser, vp) {
     await page.waitForTimeout(500);
   };
   const openHistory = async () => {
-    await openDrawerIfMobile();
-    await page.click('#studioNavHistory');
+    // 「历史产出」入口已从侧栏移到结果栏标题区（侧栏现在是功能页签）：
+    // 手机先切「结果」档。已在历史态时入口随操作行隐藏，先「返回生成结果」
+    // 退出去再进，保证每次进入都重新拉取列表。
+    if (isMobile) await selectPane('result');
+    const already = await page.evaluate(() => !document.querySelector('#studioHistoryList').hidden);
+    if (already) {
+      await page.click('#studioBackToResult');
+      await page.waitForTimeout(500);
+    }
+    await page.click('#studioOpenHistory');
     await page.waitForTimeout(800);
   };
   const selectPane = async (pane) => {
@@ -445,8 +476,8 @@ async function runViewport(browser, vp) {
       isolation.chatTopbar === 'none' && isolation.composer === 'none'
       && isolation.studioTopbar !== 'none' && isolation.studioTop === isolation.mainTop,
       JSON.stringify(isolation));
-    check('工作台顶层分页为「模块库」（可扩展 tab）',
-      isolation.pages.length === 1 && isolation.pages[0] === '模块库' && !isolation.hasApiSelect,
+    check('工作台顶层分页首项为「提词库」（可扩展 tab；3.7.4 起由「模块库」更名，页签可多于一页）',
+      isolation.pages.length >= 1 && isolation.pages[0] === '提词库' && !isolation.hasApiSelect,
       JSON.stringify(isolation));
 
     // 3. 重复点「工作台」不退出
@@ -768,21 +799,27 @@ async function runViewport(browser, vp) {
       await page.waitForTimeout(220);
     }
 
-    // 19. 侧栏工作台导航只有「历史产出」，且是带图标/说明的按钮式入口（不是纯文本标题）
+    // 19. 侧栏工作台导航是三个功能页签（3.7.x 起侧栏承担分页）；「历史产出」
+    //     入口移到结果栏标题区，是带 title 的图标按钮。
+    if (isMobile) await selectPane('result');
     const nav = await page.evaluate(() => {
-      const items = [...document.querySelectorAll('#sidebarStudioNav .sidebar-studio-link')];
-      const first = items[0];
+      const tabs = [...document.querySelectorAll('#studioPages .studio-page')].map((btn) => ({
+        text: btn.textContent.trim(),
+        current: btn.getAttribute('aria-current') === 'page',
+      }));
+      const historyBtn = document.querySelector('#studioOpenHistory');
       return {
-        labels: items.map((el) => el.querySelector('.sidebar-studio-text b')?.textContent.trim() || el.textContent.trim()),
-        icon: Boolean(first?.querySelector('.sidebar-studio-icon')),
-        hint: first?.querySelector('.sidebar-studio-text small')?.textContent.trim() || '',
-        border: first ? getComputedStyle(first).borderTopWidth : '0px',
+        tabs,
+        historyTitle: historyBtn?.getAttribute('title') || '',
+        historyVisible: Boolean(historyBtn && historyBtn.getBoundingClientRect().width > 0),
       };
     });
-    check('侧栏工作台导航只保留「历史产出」',
-      nav.labels.length === 1 && nav.labels[0] === '历史产出', JSON.stringify(nav));
-    check('历史产出是按钮式入口（图标 + 说明 + 边框）',
-      nav.icon && nav.hint.includes('已生成') && nav.border !== '0px', JSON.stringify(nav));
+    check('侧栏工作台导航是 提词库/打标器/造梦机 三个页签',
+      nav.tabs.length === 3
+      && nav.tabs.map((t) => t.text).join('/') === '提词库/打标器/造梦机',
+      JSON.stringify(nav));
+    check('「历史产出」是结果栏标题区的图标按钮',
+      nav.historyTitle === '历史产出' && nav.historyVisible, JSON.stringify(nav));
 
     // 20. 轮询不覆盖历史列表；离开工作台停止轮询但不取消后端任务
     // 事件接口持续返回 running，才能真正验证「轮询在跑 + 离开后停」。

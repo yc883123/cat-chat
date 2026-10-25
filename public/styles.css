@@ -3498,15 +3498,27 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 }
 .labeler-queue-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .labeler-queue-head strong { font-size: 13px; }
+.labeler-queue-head-actions { display: flex; align-items: center; gap: 6px; }
 .labeler-batch-list { display: flex; flex-direction: column; gap: 6px; overflow-y: auto; min-height: 0; flex: 1; }
 .labeler-empty { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .labeler-batch {
-  display: grid; gap: 3px; width: 100%; text-align: left;
+  display: flex; align-items: stretch; gap: 6px; width: 100%;
   border: 1px solid var(--line); background: var(--surface-2); border-radius: var(--r-md);
-  padding: 8px 10px; cursor: pointer; color: var(--text);
+  padding: 8px 10px; color: var(--text);
 }
 .labeler-batch:hover { border-color: var(--violet-line); }
 .labeler-batch.active { border-color: var(--violet-line); background: var(--violet-softer); }
+.labeler-batch-main {
+  flex: 1; min-width: 0; display: grid; gap: 3px; text-align: left;
+  border: 0; background: none; padding: 0; cursor: pointer; color: inherit; font: inherit;
+}
+/* 终态批次的删除按钮：贴右、不抢主按钮的可点面积。 */
+.labeler-batch-delete {
+  flex: none; align-self: center; border: 1px solid var(--line); background: var(--surface);
+  color: var(--muted); border-radius: var(--r-sm); padding: 2px 8px; font-size: 11px;
+  cursor: pointer; line-height: 1.5;
+}
+.labeler-batch-delete:hover { color: var(--danger, #c0392b); border-color: currentColor; }
 .labeler-batch-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .labeler-batch-title { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .labeler-batch-state { font-size: 11px; color: var(--muted); flex: none; }
@@ -3543,6 +3555,11 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 
 .labeler-field-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
 .labeler-field-row label, .labeler-prompt-field { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+/* 触发词行：开关 + 输入框。开关是行内组合（复选框不占整列宽度）。 */
+.labeler-trigger-toggle { align-content: center; }
+.labeler-trigger-switch { display: flex; align-items: center; gap: 6px; min-height: 31px; }
+.labeler-trigger-switch input { width: auto; height: auto; margin: 0; accent-color: var(--accent); }
+.labeler-trigger-switch input:disabled ~ span { color: var(--muted); }
 .labeler-field-row select, .labeler-field-row input, .labeler-prompt-field textarea,
 .labeler-results-head input, .labeler-results-head select {
   width: 100%; border: 1px solid var(--line); border-radius: var(--r-md);
@@ -4119,6 +4136,151 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 /* 全局「label input」会把选择按钮里藏文件的 input 按 40px 文本框摆出来（hidden 的
    UA 样式被作者样式盖掉），这里显式按掉——按钮自己就是点击入口。 */
 .comfyui-media-pick input { display: none !important; width: 0; height: 0; padding: 0; border: 0; margin: 0; }
+/* ---- 媒体输入分组卡（图片/音频/视频各一张）与槽位块（2026-10-26 计划 §4.2/§4.4） ---- */
+/* flex:none 必须有：卡片 overflow:hidden 会让 flex 自动最小尺寸归零，表单一超高
+   整张卡就被压成几像素高（其它参数行有 min-content 下限不受影响）。 */
+.comfyui-media-group { flex: none; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); overflow: hidden; }
+.comfyui-media-group-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 10px; border: 0; background: transparent; color: inherit;
+  font: inherit; text-align: left; cursor: pointer; user-select: none;
+}
+.comfyui-media-group-head:hover { background: var(--surface-inset); }
+.comfyui-media-group-head .g-icon {
+  width: 22px; height: 22px; flex: none; display: grid; place-items: center;
+  border-radius: var(--r-sm); background: var(--accent-soft); color: var(--accent);
+}
+.comfyui-media-group-head .g-icon svg { width: 13px; height: 13px; }
+.comfyui-media-group-head .g-name { font-size: 12px; font-weight: 600; color: var(--text); }
+.comfyui-media-group-head .g-count {
+  font-size: 10.5px; color: var(--muted); border: 1px solid var(--line);
+  border-radius: var(--r-full); padding: 0 7px; line-height: 16px; flex: none;
+}
+.comfyui-media-group-head .g-fill { font-size: 10.5px; color: var(--success); flex: none; }
+.comfyui-media-group-head .g-fill.warn { color: var(--warning); }
+.comfyui-media-group-head .g-fill.idle { color: var(--muted); }
+.comfyui-media-group-head .caret { margin-left: auto; color: var(--muted); font-size: 10px; transition: transform .15s ease; }
+.comfyui-media-group.collapsed .caret { transform: rotate(-90deg); }
+.comfyui-media-group.collapsed .comfyui-media-tiles,
+.comfyui-media-group.collapsed .comfyui-media-drop-hint { display: none; }
+.comfyui-media-tiles {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px; padding: 0 10px 10px;
+}
+/* 整卡作为落点（拖到卡片空白处/卡片头 → 按槽位顺序填空位）。 */
+.comfyui-media-tiles.card-drop {
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  box-shadow: inset 0 0 0 1px var(--accent); border-radius: var(--r-sm);
+}
+.comfyui-media-drop-hint { display: none; margin: 0; padding: 2px 10px 8px; font-size: 10px; color: var(--accent); text-align: center; }
+.comfyui-media-tiles.card-drop + .comfyui-media-drop-hint { display: block; }
+.comfyui-media-group.card-drop > .comfyui-media-group-head { background: var(--accent-soft); }
+/* ---- 槽位块 ---- */
+.comfyui-media-tile {
+  position: relative; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--surface-inset); overflow: hidden; cursor: pointer;
+}
+.comfyui-media-tile:hover { border-color: var(--accent); }
+.comfyui-media-tile .thumb {
+  height: 64px; display: grid; place-items: center; position: relative;
+  background: linear-gradient(135deg, var(--surface-2), var(--surface-inset));
+}
+.comfyui-media-tile.audio .thumb { height: 40px; }
+.comfyui-media-tile .thumb img, .comfyui-media-tile .thumb video {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+.comfyui-media-tile .thumb .ph-icon { color: var(--muted); }
+.comfyui-media-tile .thumb .ph-icon svg { width: 22px; height: 22px; }
+.comfyui-media-tile .thumb .play {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: 26px; height: 26px; border-radius: 50%;
+  background: rgba(17, 21, 34, .72); border: 1px solid rgba(255, 255, 255, .18);
+  display: grid; place-items: center;
+}
+.comfyui-media-tile .thumb .play svg { width: 11px; height: 11px; fill: #fff; }
+.comfyui-media-tile .thumb:hover .play { background: var(--accent); border-color: var(--accent); }
+.comfyui-media-tile .t-duration {
+  position: absolute; right: 4px; bottom: 4px; z-index: 1;
+  font-size: 9px; line-height: 14px; padding: 0 5px; border-radius: 4px;
+  background: rgba(17, 21, 34, .82); color: var(--text);
+}
+.comfyui-media-tile .t-name {
+  font-size: 10.5px; color: var(--text); padding: 4px 6px 2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.comfyui-media-tile .t-port {
+  font-size: 9.5px; color: var(--muted); padding: 0 6px 5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.comfyui-media-tile.empty .t-port {
+  position: absolute; left: 0; right: 0; bottom: 0; padding: 0 4px 4px; text-align: center;
+}
+.comfyui-media-tile .t-status {
+  position: absolute; top: 4px; left: 4px; z-index: 2;
+  max-width: calc(100% - 8px); font-size: 9px; line-height: 14px; padding: 0 6px;
+  border-radius: var(--r-full); background: rgba(17, 21, 34, .82); color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; backdrop-filter: blur(2px);
+}
+.comfyui-media-tile .t-status.ok { color: var(--success); }
+.comfyui-media-tile .t-status.keep { color: var(--warning); }
+.comfyui-media-tile .t-actions { position: absolute; top: 3px; right: 3px; z-index: 2; display: none; gap: 4px; }
+.comfyui-media-tile:hover .t-actions, .comfyui-media-tile:focus-within .t-actions { display: flex; }
+.comfyui-media-tile .t-actions button {
+  width: 20px; height: 20px; border: 0; border-radius: 5px; padding: 0;
+  background: rgba(17, 21, 34, .85); color: var(--text); font-size: 10px; line-height: 1; cursor: pointer;
+}
+.comfyui-media-tile .t-actions button:hover { background: var(--accent); color: #fff; }
+/* 空块：虚线格（音频是扁平小条）；点它即唤起系统选择器。 */
+.comfyui-media-tile.empty {
+  border-style: dashed; border-color: var(--line-strong);
+  display: grid; place-items: center; min-height: 74px;
+  color: var(--muted); background: transparent;
+}
+.comfyui-media-tile.empty:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.comfyui-media-tile.empty.audio { min-height: 58px; display: flex; align-items: center; justify-content: center; padding-top: 10px; }
+.comfyui-media-tile.empty .plus-wrap {
+  display: grid; place-items: center; gap: 3px; padding: 0 6px;
+  min-width: 0; max-width: 100%;
+}
+.comfyui-media-tile.empty.audio .plus-wrap { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.comfyui-media-tile.empty .plus { font-size: 18px; line-height: 1; }
+.comfyui-media-tile.empty.audio .plus { font-size: 15px; }
+.comfyui-media-tile.empty .plus-label {
+  font-size: 10.5px; min-width: 0; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 空块底部要留出端口小字的位置，别让「＋选择图片」压上去。 */
+.comfyui-media-tile.empty:not(.audio) .plus-wrap { margin-bottom: 13px; }
+.comfyui-media-tile.empty .drop-label { display: none; font-size: 10.5px; }
+/* 拖着文件悬停在块上：换文案 + 高亮。 */
+.comfyui-media-tile.dragover .drop-label { display: block; }
+.comfyui-media-tile.dragover .plus-label { display: none; }
+.comfyui-media-tile.dragover {
+  border-color: var(--accent); background: var(--accent-soft);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+/* ---- 视频/音频块放大播放浮层（图片走 03-media 灯箱） ---- */
+.comfyui-media-preview-overlay {
+  position: fixed; inset: 0; z-index: 1900; background: rgba(10, 12, 20, .82);
+  display: grid; place-items: center;
+}
+.comfyui-media-preview-overlay video {
+  max-width: min(92vw, 1200px); max-height: 86vh; border-radius: var(--r-md); background: #000;
+}
+.comfyui-media-preview-overlay audio { width: min(560px, 86vw); }
+.comfyui-media-preview-close {
+  position: absolute; top: 18px; right: 22px; width: 32px; height: 32px;
+  border: 1px solid var(--line-strong); border-radius: 50%;
+  background: rgba(17, 21, 34, .8); color: var(--text); font-size: 14px; cursor: pointer;
+}
+.comfyui-media-preview-close:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* 触屏没有 hover：替换/清除常驻显示，按钮命中区加大（计划 §4.4）。 */
+@media (hover: none) {
+  .comfyui-media-tile .t-actions { display: flex; }
+  .comfyui-media-tile .t-actions button { width: 22px; height: 22px; }
+  .comfyui-media-tile.empty .plus { font-size: 20px; }
+  .comfyui-media-tile .t-port { font-size: 9px; }
+}
 /* 「编辑参数」对话框里的全量参数清单。 */
 .comfyui-params-picker {
   display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto;
@@ -4141,8 +4303,10 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .comfyui-tasks { flex: none; max-height: 46%; display: flex; flex-direction: column; border-bottom: 1px solid var(--line); }
 .comfyui-task-list { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px; display: flex; flex-direction: column; gap: 8px; }
 .comfyui-task-card { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); padding: 8px 10px; display: grid; gap: 4px; }
-.comfyui-task-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.comfyui-task-head strong { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 标题必须能收缩：flex 子项默认 min-width:auto，长工作流名会把状态标签挤出卡片
+   （任务多到出现纵向滚动条、可用宽度再窄一点时最容易被看到）。 */
+.comfyui-task-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-width: 0; }
+.comfyui-task-head strong { flex: 1 1 auto; min-width: 0; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .comfyui-task-status { flex: none; font-size: 10.5px; color: var(--muted); }
 .comfyui-task-card.status-completed .comfyui-task-status { color: var(--ok, #2e9e5b); }
 .comfyui-task-card.status-failed .comfyui-task-status,

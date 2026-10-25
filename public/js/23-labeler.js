@@ -28,6 +28,8 @@ const STATUS_LABELS = {
   cancelled: "已取消",
   interrupted: "已中断",
 };
+// 终态批次才可删除；排队/打标中的先取消，等结束再删（打标按图计费，取消必须显式）。
+const TERMINAL_BATCH_STATUSES = new Set(["done", "failed", "cancelled", "interrupted"]);
 const ITEM_STATE_LABELS = {
   queued: "待处理",
   running: "处理中",
@@ -537,8 +539,34 @@ async function uploadAll({ retryFailed = false } = {}) {
 }
 
 // ============================================================
-// 提交批次 / 轮询
+// 配置收集 / 提交
 // ============================================================
+
+// 输出形式 ↔ 输出语言联动（2026-10-26 计划）：语言选项只显示当前形式下
+// 有明确含义的；「英文标签 + 中文描述（mixed）」只在「标签 + 自然语言」出现，
+// 文案随之切换（全中文 / 全英文），隐藏值绝不保留生效。
+const LABELER_LANGUAGE_LABELS = {
+  single: { zh: "中文", en: "英文" },
+  both: { zh: "全中文", en: "全英文", mixed: "英文标签 + 中文描述" },
+};
+
+function syncLanguageOptions() {
+  const modeSelect = $("#labelerOutputMode");
+  const langSelect = $("#labelerLanguage");
+  if (!modeSelect || !langSelect) return;
+  const mode = String(modeSelect.value || "keywords");
+  const labels = mode === "both" ? LABELER_LANGUAGE_LABELS.both : LABELER_LANGUAGE_LABELS.single;
+  for (const option of Array.from(langSelect.options)) {
+    const value = String(option.value || "");
+    option.hidden = !(value in labels);
+    if (value in labels) option.textContent = labels[value];
+  }
+  // 语言值必须始终映射到当前可见选项：mixed 在单一形式下按计划规则映射
+  // （切到「标签」选英文，切到「词组短语 / 自然语言」选中文）。
+  if (!(String(langSelect.value || "") in labels)) {
+    langSelect.value = mode === "keywords" ? "en" : "zh";
+  }
+}
 
 function collectConfig() {
   const preset = $("#labelerPreset")?.value || labeler.presetId || "";
@@ -554,6 +582,10 @@ function collectConfig() {
     confidence_threshold: Number($("#labelerConfidence")?.value || 0.35),
     max_tags: Number($("#labelerMaxTags")?.value || 24),
     custom_prompt: String($("#labelerCustomPrompt")?.value || "").trim(),
+    trigger_word: {
+      enabled: Boolean($("#labelerTriggerEnabled")?.checked),
+      value: String($("#labelerTriggerWord")?.value || "").trim(),
+    },
     concurrency: Number($("#labelerConcurrency")?.value || 1),
     retry_limit: Number($("#labelerRetryLimit")?.value || 2),
     timeout_seconds: Number($("#labelerTimeout")?.value || 90),
@@ -570,6 +602,10 @@ async function startTask() {
   const config = collectConfig();
   if (!config.model_key || !config.model_name) {
     setHint("请选择模型配置与模型", true);
+    return;
+  }
+  if (config.trigger_word.enabled && !config.trigger_word.value) {
+    setHint("启用触发词后，请先填写触发词内容", true);
     return;
   }
   const failed = labeler.selected.filter((row) => row.status !== "uploaded").length;
@@ -776,9 +812,12 @@ function renderBatches() {
   }
   if (empty) empty.hidden = true;
   const rows = labeler.batches.map((task) => {
+    // 行容器：主按钮（选批次）+ 终态批次的删除按钮，不能是按钮套按钮。
+    const row = document.createElement("div");
+    row.className = "labeler-batch" + (task.id === labeler.taskId ? " active" : "");
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "labeler-batch" + (task.id === labeler.taskId ? " active" : "");
+    button.className = "labeler-batch-main";
     button.dataset.labelerTask = String(task.id || "");
     const top = document.createElement("div");
     top.className = "labeler-batch-top";
@@ -796,13 +835,81 @@ function renderBatches() {
     if (Number(progress.failed || 0)) bits.push(`失败 ${progress.failed}`);
     if (Number(progress.uncertain || 0)) bits.push(`不确定 ${progress.uncertain}`);
     // 批次历史显示用户能看懂的生成模式名，不暴露 face_lora 这类内部 ID。
-    const preset = labeler.presets.find((row) => row.id === task.preset);
+    const preset = labeler.presets.find((row2) => row2.id === task.preset);
     bits.push(preset?.label || String(task.preset || ""));
     meta.textContent = bits.filter(Boolean).join(" · ");
     button.append(top, meta);
-    return button;
+    row.append(button);
+    if (TERMINAL_BATCH_STATUSES.has(String(task.status || ""))) {
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "labeler-batch-delete";
+      del.dataset.labelerDelete = String(task.id || "");
+      del.textContent = "删除";
+      del.title = "删除这条批次记录（已生成的标注仍保留在标注库，可继续查询和导出）";
+      row.append(del);
+    }
+    return row;
   });
   list.replaceChildren(...rows);
+}
+
+// 删除的是批次记录与逐图运行行；标注库按「图片内容 + 配置」全局复用，不受影响。
+async function deleteBatchTask(taskId) {
+  const id = String(taskId || "");
+  if (!id) return;
+  const row = labeler.batches.find((item) => String(item.id) === id);
+  if (!window.confirm(
+    `删除批次「${row?.label || id}」？\n已生成的标注仍保留在标注库，可继续查询和导出。`,
+  )) return;
+  try {
+    const payload = await api("/api/labeler/tasks", { method: "DELETE", body: { task_ids: [id] } });
+    if (Array.isArray(payload.skipped) && payload.skipped.length) {
+      toast("这条批次还在排队或打标中，没有删除；请先取消，等它结束后再删");
+    } else {
+      toast("已删除这条批次记录（标注库不受影响）");
+    }
+  } catch (error) {
+    toast(`删除失败：${error.message}`);
+  }
+  if (labeler.taskId === id) clearSelectedBatch();
+  await refreshBatches();
+}
+
+async function clearFinishedBatches() {
+  const finished = labeler.batches.filter(
+    (row) => TERMINAL_BATCH_STATUSES.has(String(row.status || "")));
+  if (!finished.length) {
+    toast("没有已结束的批次可清理");
+    return;
+  }
+  if (!window.confirm(
+    `清理 ${finished.length} 条已结束的批次记录？\n排队或打标中的批次不会动；已生成的标注仍保留在标注库，可继续查询和导出。`,
+  )) return;
+  try {
+    const payload = await api("/api/labeler/tasks", { method: "DELETE", body: {} });
+    const skipped = Array.isArray(payload.skipped) ? payload.skipped.length : 0;
+    toast(`已清理 ${Number(payload.deleted || 0)} 条批次记录${skipped ? `，${skipped} 条还在执行已跳过` : ""}`);
+  } catch (error) {
+    toast(`清理失败：${error.message}`);
+  }
+  if (finished.some((row) => String(row.id) === labeler.taskId)) clearSelectedBatch();
+  await refreshBatches();
+}
+
+// 正在查看的批次被删掉时：停轮询、清选择与结果缓存，界面回到未选批次的空态。
+function clearSelectedBatch() {
+  stopPolling();
+  labeler.taskId = "";
+  labeler.task = null;
+  labeler.items = [];
+  labeler.annotations = [];
+  labeler.tagMatches = [];
+  labeler.tags = [];
+  labeler.sentences = [];
+  const box = $("#labelerQueueStatus");
+  if (box) box.hidden = true;
+  renderResultBody();
 }
 
 async function openBatch(taskId) {
@@ -1252,11 +1359,26 @@ export function bindLabelerEvents() {
   $("#labelerModelSelect")?.addEventListener("change", () => {
     labeler.modelName = String($("#labelerModelSelect")?.value || "");
   });
+  // 输出形式变化 → 同步输出语言的可见选项与有效值（隐藏值不保留生效）。
+  $("#labelerOutputMode")?.addEventListener("change", syncLanguageOptions);
+  syncLanguageOptions();
+  // 触发词开关：打开才可填；提交前 startTask 会校验「启用必须已填写」。
+  const triggerEnabled = $("#labelerTriggerEnabled");
+  const triggerWord = $("#labelerTriggerWord");
+  triggerEnabled?.addEventListener("change", () => {
+    if (triggerWord) triggerWord.disabled = !triggerEnabled.checked;
+  });
   $("#labelerStart")?.addEventListener("click", () => { void startTask(); });
   $("#labelerCancel")?.addEventListener("click", () => { void cancelTask(); });
   $("#labelerContinue")?.addEventListener("click", () => { void continueTask(); });
   $("#labelerRefreshRecent")?.addEventListener("click", () => { void refreshBatches(); });
+  $("#labelerClearFinished")?.addEventListener("click", () => { void clearFinishedBatches(); });
   $("#labelerBatchList")?.addEventListener("click", (event) => {
+    const del = event.target.closest("[data-labeler-delete]");
+    if (del) {
+      void deleteBatchTask(del.dataset.labelerDelete);
+      return;
+    }
     const button = event.target.closest("[data-labeler-task]");
     if (!button) return;
     void openBatch(button.dataset.labelerTask);

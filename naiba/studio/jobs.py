@@ -51,8 +51,12 @@ class StudioJobManager:
 
     # ---- 查询 ----
 
-    def tasks(self, active_only: bool = False, limit: int = 60) -> list[dict[str, Any]]:
-        return self.store.list_tasks(active_only=active_only, limit=limit)
+    def tasks(self, active_only: bool = False, limit: int = 60,
+              module: str = "", exclude_module: str = "") -> list[dict[str, Any]]:
+        return self.store.list_tasks(
+            active_only=active_only, limit=limit,
+            module=module, exclude_module=exclude_module,
+        )
 
     def task(self, task_id: str) -> dict[str, Any] | None:
         return self.store.get_task(task_id)

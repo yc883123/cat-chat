@@ -312,16 +312,34 @@ class StudioService:
             return payload, 502
         return payload, 200
 
-    def api_tasks(self, active_only: str = "") -> tuple[dict[str, Any], int]:
-        rows = self.jobs.tasks(active_only=active_only in ("1", "true"))
-        slim = [
-            {
+    def api_tasks(self, active_only: str = "", module: str = "",
+                  exclude_module: str = "") -> tuple[dict[str, Any], int]:
+        """任务列表（按模块分区）。
+
+        `module` / `exclude_module` 是分区参数：模块库传 `exclude_module=novel`、
+        创作场传 `module=novel`，各看各的、各 60 条。不传参保持原有全量行为。
+
+        `module` / `origin_label` **从 `input` 提升到顶层**：这两个字段一直只写在任务
+        input 里（`api_generate`），落库记录顶层从来没有；列表 slim 却按顶层取，于是
+        历史列表「来源」恒为「来源未记录」。提升放这里而不是改存储结构，老任务
+        （input 里已有值）也一并修好。
+        """
+        rows = self.jobs.tasks(
+            active_only=active_only in ("1", "true"),
+            module=module, exclude_module=exclude_module,
+        )
+        slim = []
+        for row in rows:
+            input_data = row.get("input") if isinstance(row.get("input"), dict) else {}
+            item = {
                 k: row.get(k)
-                for k in ("id", "status", "detail", "title", "module", "origin_label",
-                          "created_at", "updated_at", "result", "result_partial", "error", "handoff", "usage")
+                for k in ("id", "status", "detail", "title", "created_at", "updated_at",
+                          "result", "result_partial", "error", "handoff", "usage")
             }
-            for row in rows
-        ]
+            # 顶层有值就用顶层（将来真落库时不用再改这里），否则从 input 取。
+            item["module"] = row.get("module") or input_data.get("module") or ""
+            item["origin_label"] = row.get("origin_label") or input_data.get("origin_label") or ""
+            slim.append(item)
         return {"tasks": slim}, 200
 
     def api_task(self, task_id: str) -> tuple[dict[str, Any], int]:

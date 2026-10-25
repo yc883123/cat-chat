@@ -91,7 +91,7 @@ STUDIO_SELECTION_KINDS = frozenset({"builtin", "custom"})
 STUDIO_PREF_PAGES = frozenset({"library"})
 # 工作台功能页（侧栏分页导航的允许值）：刷新与重启后按它恢复上次所在页。
 # 新增功能页时必须同步 public/index.html 的 data-studio-page 与前端 setStudioPage()。
-STUDIO_PAGE_VIEWS = ("library", "labeler", "comfyui")
+STUDIO_PAGE_VIEWS = ("library", "labeler", "comfyui", "novel")
 STUDIO_PREF_MODULES = frozenset(
     {"", "vs", "h3", "vi", "ec", "global", "script", "game", "style", "custom"}
 )

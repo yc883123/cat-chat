@@ -377,6 +377,16 @@ class NaibaChatApp:
             self.comfyui.recover()
         except Exception:  # noqa: BLE001 - 造梦机恢复失败不阻断启动
             logger.exception("造梦机任务启动恢复失败")
+        # 创作场（小说改编，2026-10-25 总计划）：工作台第四个功能页。阶段一是文件处理
+        # 工具（导入/拆章/勾选/编辑/导出），**不创建 Studio 任务**；作品数据在
+        # data/studio/novel/，业务逻辑独立在 naiba/novel/。
+        from naiba.novel.service import NovelService
+
+        self.novel = NovelService(self)
+        try:
+            self.novel.recover()
+        except Exception:  # noqa: BLE001 - 导入暂存清理失败不阻断启动
+            logger.exception("创作场导入暂存清理失败")
         self.updater = UpdateManager(self._paths.app_dir, self._paths.data_dir)
         # 「更新代理」独立于全局 proxy：启动时注入一次，设置保存后再注入更新。
         self.updater.configure_proxy(self.config.data.get("update_proxy"))

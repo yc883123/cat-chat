@@ -572,7 +572,41 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(*self.app.studio.api_custom_list())
         elif path == "/api/studio/tasks":
             query = urllib.parse.parse_qs(parsed.query)
-            self._json(*self.app.studio.api_tasks(str(query.get("active_only", [""])[0])))
+            self._json(*self.app.studio.api_tasks(
+                str(query.get("active_only", [""])[0]),
+                module=str(query.get("module", [""])[0]),
+                exclude_module=str(query.get("exclude_module", [""])[0]),
+            ))
+        # ---- 创作场（小说改编，阶段一：文件处理，零 AI） ----
+        # 两段式硬契约：列表与详情只回索引，正文只有单章接口给。
+        elif path == "/api/novel/books":
+            self._json(*self.app.novel.api_list_books())
+        elif path.startswith("/api/novel/imports/"):
+            # 导入暂存的单章正文（勾选前预览）：/api/novel/imports/<id>/chapters/<i>
+            parts = path.split("/")
+            if len(parts) == 7 and parts[3] == "imports" and parts[5] == "chapters":
+                self._json(*self.app.novel.api_import_chapter(parts[4], parts[6]))
+            else:
+                self._json({"error": "接口不存在"}, HTTPStatus.NOT_FOUND)
+        elif path.startswith("/api/novel/books/") and path.endswith("/export"):
+            # 整本导出：返回文本，前端落 Blob（不新增后端下载接口）。
+            book_id = path[len("/api/novel/books/"):-len("/export")]
+            query = urllib.parse.parse_qs(parsed.query)
+            self._json(*self.app.novel.api_export_book(
+                book_id,
+                str(query.get("format", ["txt"])[0]),
+                str(query.get("with_extras", [""])[0]),
+            ))
+        elif path.startswith("/api/novel/books/") and path.endswith("/script"):
+            # 剧本场次列表（阶段三）。
+            book_id = path[len("/api/novel/books/"):-len("/script")]
+            self._json(*self.app.novel.api_list_script(book_id))
+        elif path.startswith("/api/novel/books/") and "/chapters/" in path:
+            head, _, chapter_no = path.partition("/chapters/")
+            book_id = head[len("/api/novel/books/"):]
+            self._json(*self.app.novel.api_get_chapter(book_id, chapter_no))
+        elif path.startswith("/api/novel/books/"):
+            self._json(*self.app.novel.api_get_book(path[len("/api/novel/books/"):]))
         elif path == "/api/labeler/presets":
             # 打标器：侧重预设 + 上限（前端只做提前提示，服务端仍逐项校验）。
             self._json(*self.app.labeler.api_presets())
@@ -678,6 +712,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
             self._app_icon_upload()
             return
+        # 创作场导入 TXT：文件进内存后交给小说域拆章（上限 60 MiB，与算法层同源）。
+        if path == "/api/novel/import" and self.headers.get("Content-Type", "").lower().startswith("multipart/form-data"):
+            if not self._authorized(parsed):
+                self._json({"error": "访问口令无效"}, HTTPStatus.UNAUTHORIZED)
+                return
+            self._novel_import_upload()
+            return
         # Skill 导入两个端点的请求体上限跟随「Skill 大小上限」设置放宽：文件先
         # base64 编码再进 JSON（膨胀约 1/3）+ JSON 结构开销，按 ×1.5 留余量。
         # 设置 0 = 内置默认 130MB，与引入该设置前逐字一致；聊天等其他请求不动。
@@ -738,6 +779,21 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(*self.app.studio.api_custom_import(body))
         elif path == "/api/studio/custom":
             self._json(*self.app.studio.api_custom_create(body))
+        # ---- 创作场（小说改编，阶段一） ----
+        elif path == "/api/novel/books":
+            # 勾选章节入库（暂存 → 正式作品目录）；阶段一是文件处理，不建 Studio 任务。
+            self._json(*self.app.novel.api_create_book(body))
+        # ---- 创作场（阶段二）：要素 / 大纲生成走 Studio 任务队列 ----
+        elif path == "/api/novel/stage":
+            self._json(*self.app.novel.api_stage(body))
+        elif path.startswith("/api/novel/books/") and path.endswith("/apply"):
+            # 把任务结果写回作品（要素 / 大纲 / 剧本）：POST /api/novel/books/<id>/apply
+            book_id = path[len("/api/novel/books/"):-len("/apply")]
+            self._json(*self.app.novel.api_apply(book_id, body))
+        elif path.startswith("/api/novel/books/") and path.endswith("/script/reorder"):
+            # 场次重排：只改顺序，保留来源章节。
+            book_id = path[len("/api/novel/books/"):-len("/script/reorder")]
+            self._json(*self.app.novel.api_reorder_script(book_id, body))
         elif path.startswith("/api/studio/tasks/") and path.endswith("/cancel"):
             self._json(*self.app.studio.api_task_cancel(path.split("/")[-2]))
         elif path.startswith("/api/studio/tasks/") and path.endswith("/retry"):
@@ -1391,6 +1447,17 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/studio/custom/"):
             self._json(*self.app.studio.api_custom_update(path.rsplit("/", 1)[-1], body))
             return
+        if path.startswith("/api/novel/books/") and "/chapters/" in path:
+            head, _, chapter_no = path.partition("/chapters/")
+            book_id = head[len("/api/novel/books/"):]
+            self._json(*self.app.novel.api_update_chapter(book_id, chapter_no, body))
+            return
+        if path.startswith("/api/novel/books/") and "/script/" in path:
+            # 改单条场次：PATCH /api/novel/books/<id>/script/<i>
+            head, _, scene_no = path.partition("/script/")
+            book_id = head[len("/api/novel/books/"):]
+            self._json(*self.app.novel.api_update_scene(book_id, scene_no, body))
+            return
         self._json({"error": "接口不存在"}, HTTPStatus.NOT_FOUND)
 
     def do_PUT(self) -> None:
@@ -1446,6 +1513,19 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(*self.app.labeler.api_tasks_delete(body))
         elif path.startswith("/api/comfyui/workflows/"):
             self._json(*self.app.comfyui.api_workflow_delete(path.rsplit("/", 1)[-1]))
+        # ---- 创作场（小说改编，阶段一） ----
+        elif path.startswith("/api/novel/books/") and "/script/" in path:
+            # 删单条场次：DELETE /api/novel/books/<id>/script/<i>
+            head, _, scene_no = path.partition("/script/")
+            book_id = head[len("/api/novel/books/"):]
+            self._json(*self.app.novel.api_delete_scene(book_id, scene_no))
+        elif path.startswith("/api/novel/books/") and "/chapters/" in path:
+            head, _, chapter_no = path.partition("/chapters/")
+            book_id = head[len("/api/novel/books/"):]
+            self._json(*self.app.novel.api_delete_chapter(book_id, chapter_no))
+        elif path.startswith("/api/novel/books/"):
+            # 删作品：只作用于该作品目录，不动 Studio 历史任务记录。
+            self._json(*self.app.novel.api_delete_book(path[len("/api/novel/books/"):]))
         elif path == "/api/app-icon":
             # 恢复默认图标（只删 custom-icon.*，内置 icon.ico 不动）。
             self._json(*self.app.api_clear_app_icon())
@@ -1865,6 +1945,25 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         fields, data = parsed
         self._json(*self.app.api_set_agent_avatar(fields.get("agent_id", ""), data))
+
+    def _novel_import_upload(self) -> None:
+        """创作场导入 TXT：multipart 小体积进内存 → 小说域拆章并落导入暂存。
+
+        上限用算法层的 `MAX_FILE_BYTES`（60 MiB）：小说 TXT 体积不大，进内存比流式
+        spool 简单，也不会在 uploads 里留下需要清理的副本。
+        """
+        from naiba.core.novel_split import MAX_FILE_BYTES as NOVEL_MAX_BYTES
+
+        parsed = self._read_multipart_small(NOVEL_MAX_BYTES)
+        if parsed is None:
+            return
+        fields, data = parsed
+        # 文件名在 multipart 头里是 latin-1 字节流；`_read_multipart_small` 只回字段
+        # 字典，文件名由前端额外放在 filename 字段里（避免二次编码猜测）。
+        filename = str(fields.get("filename") or fields.get("name") or "未命名.txt")
+        self._json(*self.app.novel.api_import(
+            filename=filename, data=data, max_len=fields.get("max_len"),
+        ))
 
     def _app_icon_upload(self) -> None:
         """应用图标上传（multipart 小体积进内存 → storage/app_icon 归一化落盘）。"""

@@ -220,7 +220,15 @@ class StudioStore:
 
     # ---- 列表与恢复 ----
 
-    def list_tasks(self, active_only: bool = False, limit: int = 60) -> list[dict[str, Any]]:
+    def list_tasks(self, active_only: bool = False, limit: int = 60,
+                   module: str = "", exclude_module: str = "") -> list[dict[str, Any]]:
+        """任务列表（按更新时间倒序）。
+
+        `module` / `exclude_module` 按任务 `input.module` 分区：**先过滤再 limit**，
+        这样每个分区各 60 条、互不挤占。不传参保持原有全量行为（老调用方不受影响）。
+        """
+        wanted = str(module or "").strip()
+        excluded = str(exclude_module or "").strip()
         rows: list[dict[str, Any]] = []
         if self._dir.exists():
             for path in sorted(self._dir.glob("st-*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
@@ -233,6 +241,16 @@ class StudioStore:
                 payload = self._sanitize(payload)
                 if active_only and payload["status"] not in {"queued", "running"}:
                     continue
+                if wanted or excluded:
+                    # module 只写在 input 里（记录顶层从来没有这一列），分区一律按 input 判。
+                    input_data = payload.get("input")
+                    row_module = ""
+                    if isinstance(input_data, dict):
+                        row_module = str(input_data.get("module") or "").strip()
+                    if wanted and row_module != wanted:
+                        continue
+                    if excluded and row_module == excluded:
+                        continue
                 rows.append(payload)
                 if len(rows) >= limit:
                     break

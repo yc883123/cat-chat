@@ -50,6 +50,7 @@ def _assembled_test_registry() -> Any:
     from naiba.tools.providers import core as core_provider
     from naiba.tools.providers import documents as documents_provider
     from naiba.tools.providers import jobs as jobs_provider
+    from naiba.tools.providers import novel as novel_provider
     from naiba.tools.providers import search as search_provider
     from naiba.tools.providers import video as video_provider
     from naiba.tools.providers import vision as vision_provider
@@ -93,6 +94,18 @@ def _assembled_test_registry() -> Any:
                 mcp_register=None,
             ),
             lambda: Path(tempfile.mkdtemp(prefix="naiba-doc-data-")),
+        )
+    )
+    # 拆书匠（TXT 按章拆分）：ctx 与 documents 同构；算法是纯字符串，不需要额外桩。
+    reg.register_provider(
+        novel_provider.NovelToolProvider(
+            core_provider.ToolContext(
+                workspace=Path(tempfile.mkdtemp(prefix="naiba-novel-ws-")),
+                python_executable=sys.executable,
+                command_timeout=60,
+                mcp_registry=None,
+                mcp_register=None,
+            )
         )
     )
     # video 域（视频抽帧）：与 documents 域同构的桩装配（不加载 av，仅绑 def）。

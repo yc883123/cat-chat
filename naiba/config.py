@@ -858,6 +858,17 @@ _BUILTIN_AGENT_NEW_TOOLS: dict[str, tuple[str, ...]] = {
     "skills": (*_BUILTIN_AGENT_BACKGROUND_TOOLS, "show_media"),
 }
 
+# 第三批新增（2026-10-26）：拆书匠三件套。**不改上面的基线常量**——改了等于把
+# "变更前的出厂设置"重新定义，老用户被改过的配置会被重新误判成"没碰过"而覆盖。
+# prompter 不在这一批：它是只读 + 写稿的窄口径 Agent，不收拆书匠。
+_BUILTIN_AGENT_NOVEL_TOOLS: dict[str, tuple[str, ...]] = {
+    "tutor": ("novel_outline", "novel_chunks", "novel_split_text"),
+    "master": ("novel_outline", "novel_chunks", "novel_split_text"),
+    "director": ("novel_outline", "novel_chunks", "novel_split_text"),
+    "coder": ("novel_outline", "novel_chunks", "novel_split_text"),
+    "skills": ("novel_outline", "novel_chunks", "novel_split_text"),
+}
+
 
 # ---- 工具目录（Agent 编辑页的可选工具集）----
 # 分类是**单一维度**（作用对象 + 风险），共 7 组：读取 / 写入 / 执行 / 联网 / 视觉 / 任务与扩展 / 长会话。
@@ -878,6 +889,9 @@ _TOOL_GROUP = {
     "find_conversations": _LONG_SESSION_GROUP, "recall_history": _LONG_SESSION_GROUP,
     "read_conversation": _LONG_SESSION_GROUP, "reset_context": _LONG_SESSION_GROUP,
     "read_pdf": "读取与检索", "pdf_render_pages": "读取与检索", "pdf_zoom_region": "读取与检索",
+    # 拆书匠：只读文本、按章返回，归「读取与检索」。
+    "novel_outline": "读取与检索", "novel_chunks": "读取与检索",
+    "novel_split_text": "读取与检索",
     "probe_video": "读取与检索", "extract_frames": "读取与检索",
     # 精确逐帧与抽样抽帧同为「读取」类动作（都是把视频变成帧），但它必须单独授权：
     # 分组归属只决定展示位置，不构成授权（见 OPT_IN_TOOLS）。
@@ -925,6 +939,7 @@ def _mcp_subgroup(name: str) -> str:
 _DEFAULT_SELECTED_TOOLS = frozenset({
     "read_file", "list_directory", "search_files",
     "read_pdf", "pdf_render_pages", "pdf_zoom_region",
+    "novel_outline", "novel_chunks", "novel_split_text",
     "probe_video", "extract_frames",
     "write_file", "edit_file", "pwsh", "run_skill_script",
     "vision_analyze",
@@ -1097,6 +1112,8 @@ TOOL_PRESETS: tuple[dict[str, Any], ...] = (
         "include": [
             "read_file", "list_directory", "search_files",
             "read_pdf", "probe_video",
+            # 拆书匠：只读文本、只回 JSON 章节，不写任何文件（side_effect=False）。
+            "novel_outline", "novel_chunks", "novel_split_text",
             "vision_analyze",
         ],
     },
@@ -1108,6 +1125,7 @@ TOOL_PRESETS: tuple[dict[str, Any], ...] = (
         "include": [
             "read_file", "list_directory", "search_files",
             "read_pdf", "pdf_render_pages", "pdf_zoom_region",
+            "novel_outline", "novel_chunks", "novel_split_text",
             "probe_video", "extract_frames",
             "write_file", "edit_file", "pwsh", "run_skill_script",
             "vision_analyze",
@@ -1124,6 +1142,7 @@ TOOL_PRESETS: tuple[dict[str, Any], ...] = (
         "include": [
             "read_file", "list_directory", "search_files",
             "read_pdf", "pdf_render_pages", "pdf_zoom_region",
+            "novel_outline", "novel_chunks", "novel_split_text",
             "probe_video", "extract_frames",
             "write_file", "edit_file", "pwsh", "run_skill_script",
             "vision_analyze",
@@ -1139,6 +1158,7 @@ TOOL_PRESETS: tuple[dict[str, Any], ...] = (
         "include": [
             "read_file", "list_directory", "search_files",
             "read_pdf", "pdf_render_pages", "pdf_zoom_region",
+            "novel_outline", "novel_chunks", "novel_split_text",
             "probe_video", "extract_frames",
             "write_file", "edit_file", "pwsh", "run_skill_script", "vision_analyze",
             "comfyui_prepare_workflow", "comfyui_batch",
@@ -1581,6 +1601,7 @@ class ConfigStore:
         # 内置 Agent 新增工具（后台五件套 / 指名出卡）：只补**仍是出厂设置**的那份 scope。
         # 排在退役清理之后：先清掉残留的老三样，避免它们的 id 与内置 id 撞车时白干活。
         self._migrate_builtin_agent_new_tools()
+        self._migrate_builtin_agent_novel_tools()
         tools = self.data.get("agent_tools")
         # run_command 已并入 pwsh：历史默认集里保存的是 run_command（而非 pwsh）。
         # 先统一映射死工具名，避免升级后通用 Agent 静默丢失命令执行能力。
@@ -1711,6 +1732,47 @@ class ConfigStore:
             changed.append(agent_id)
         if changed:
             print(f"[config] Built-in Agents 补齐新增工具：{', '.join(changed)}")
+
+    def _migrate_builtin_agent_novel_tools(self) -> None:
+        """第三批：给仍是出厂设置的内置 Agent 补拆书匠三件套（2026-10-26）。
+
+        判据与 ``_migrate_builtin_agent_new_tools`` 完全同构，只是「新增集合」换成
+        ``_BUILTIN_AGENT_NOVEL_TOOLS``，且**允许前两批已经补过**——所以判据里
+        「用户定制」的边界取 ``基线 ∪ 第一批 ∪ 第二批 ∪ 第三批``：
+        只要 current 里没有这四者之外的任何工具，就说明用户没动过，可以补。
+
+        幂等：重复运行不重复追加；两批各自只跑过一半的中间态也能收敛。
+        """
+        agents = self.data.get("agents")
+        if not isinstance(agents, list):
+            return
+        changed: list[str] = []
+        for agent in agents:
+            if not isinstance(agent, dict):
+                continue
+            agent_id = str(agent.get("id") or "")
+            baseline = _BUILTIN_AGENT_BASELINE_SCOPE.get(agent_id)
+            additions = _BUILTIN_AGENT_NOVEL_TOOLS.get(agent_id)
+            if baseline is None or additions is None:
+                continue
+            scope = agent.get("tool_scope")
+            if not isinstance(scope, list) or not scope:
+                continue
+            current = [str(item) for item in scope if str(item).strip()]
+            current_set = set(current)
+            earlier = set(_BUILTIN_AGENT_NEW_TOOLS.get(agent_id) or ())
+            allowed = set(baseline) | earlier | set(additions)
+            if current_set - allowed:
+                continue  # 用户加过别的工具 → 定制
+            if not set(baseline) <= current_set:
+                continue  # 用户删过出厂工具 → 定制
+            missing = [tool for tool in additions if tool not in current_set]
+            if not missing:
+                continue
+            agent["tool_scope"] = [*current, *missing]
+            changed.append(agent_id)
+        if changed:
+            print(f"[config] Built-in Agents 补齐拆书匠工具：{', '.join(changed)}")
 
     def _migrate_retired_factory_agents(self) -> None:
         """清掉老用户配置里**从没被碰过**的历史出厂 Agent（通用 / 编程 / 短剧）。

@@ -273,6 +273,12 @@ class NaibaChatApp:
         self.tool_registry.register_provider(
             DocumentToolProvider(core_tool_context, lambda: self._paths.data_dir)
         )
+        # 拆书匠 Provider（TXT 小说按章拆分）：novel_outline / novel_chunks /
+        # novel_split_text。算法在 core/novel_split.py（纯字符串），本层只做读盘、
+        # 编码嗅探、缓存与预算。
+        from naiba.tools.providers.novel import NovelToolProvider
+
+        self.tool_registry.register_provider(NovelToolProvider())
         # video 域 Provider（视频抽帧）：probe_video/extract_frames 单一定义；
         # 帧图缓存走 uploads/video_frames（被 /api/imaging/clean 与统计自动覆盖）。
         from naiba.tools.providers.video import VideoToolProvider

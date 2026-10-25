@@ -261,15 +261,17 @@ class BuiltInAgentScopeTests(unittest.TestCase):
 
     def test_scope_counts_match_plan(self) -> None:
         """个数是对外说明（教程/手册会写"N 件"），与计划书 §3.1/§3.2 逐项对齐。"""
-        expected = {"tutor": 7, "master": 23, "director": 21, "prompter": 8, "coder": 19, "skills": 22}
+        # 2026-10-26 加拆书匠三件套（novel_outline / novel_chunks / novel_split_text）：
+        # 除 prompter（只读 + 写稿，未收拆书匠）外各档 +3。
+        expected = {"tutor": 10, "master": 26, "director": 24, "prompter": 8, "coder": 22, "skills": 25}
         for agent in built_in_agents():
             with self.subTest(agent=agent["id"]):
                 self.assertEqual(len(agent["tool_scope"]), expected[agent["id"]])
-        # 预设档位同样对外说明：6 / 18 / 22 / 20。
-        self.assertEqual(len(_preset_tools("readonly")), 6)
-        self.assertEqual(len(_preset_tools("standard")), 18)
-        self.assertEqual(len(_preset_tools("longsession")), 22)
-        self.assertEqual(len(_preset_tools("comfyui")), 20)
+        # 预设档位同样对外说明：9 / 21 / 25 / 23（各档都收了拆书匠三件套）。
+        self.assertEqual(len(_preset_tools("readonly")), 9)
+        self.assertEqual(len(_preset_tools("standard")), 21)
+        self.assertEqual(len(_preset_tools("longsession")), 25)
+        self.assertEqual(len(_preset_tools("comfyui")), 23)
 
     def test_scope_never_grants_spawn_and_external_tools(self) -> None:
         """subagent/subagent_spawn 会烧 token（鱼群），MCP 与联网一律不进出厂档。

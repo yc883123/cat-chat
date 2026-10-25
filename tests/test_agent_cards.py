@@ -179,12 +179,14 @@ class ToolGroupCatalogTests(unittest.TestCase):
         self.assertEqual(len(placed), len(set(placed)))
         # 各分类成员固定：合并后的归属一目了然；调整归属必须同步本断言。
         membership = {group["name"]: group["tools"] for group in groups}
+        # 顺序 = 工具注册顺序（registry 里 novel 在 video 之后）。
         self.assertEqual(membership["读取与检索"], [
             "read_file", "list_directory", "search_files",
             "read_pdf", "pdf_render_pages", "pdf_zoom_region",
             "probe_video", "extract_frames", "extract_video_frames_exact",
+            "novel_chunks", "novel_outline", "novel_split_text",
         ], "视频抽帧与 PDF 三件套同组（读元信息 + 抽帧，都是「读取与检索」）；"
-           "精确逐帧跟随抽样抽帧，但只能单独授权")
+           "精确逐帧跟随抽样抽帧，但只能单独授权；拆书匠三件套也是纯读取")
         self.assertEqual(membership["文件写入与编辑"], ["write_file", "edit_file"])
         self.assertEqual(membership["命令与脚本执行"], ["pwsh", "run_skill_script"])
         self.assertEqual(membership["视觉与图片"], ["vision_analyze", "vision_image_ops", "show_media"],
@@ -262,12 +264,17 @@ class ToolGroupCatalogTests(unittest.TestCase):
                 self.assertEqual(closed, set(tools), f"{preset_id} 预设缺少依赖闭包")
         # 只读边界以 side_effect 为准：纯读取两件（read_pdf / probe_video）在，
         # 会写产物文件的三件（pdf_render_pages / pdf_zoom_region / extract_frames）不在。
+        # 拆书匠三件套（novel_outline / novel_chunks / novel_split_text）都是纯读取
+        # （side_effect=False），所以只读模式也收。
         self.assertEqual(presets["readonly"],
                          {"read_file", "list_directory", "search_files",
-                          "read_pdf", "probe_video", "vision_analyze"})
+                          "read_pdf", "probe_video",
+                          "novel_outline", "novel_chunks", "novel_split_text",
+                          "vision_analyze"})
         self.assertEqual(presets["standard"], {
             "read_file", "list_directory", "search_files",
             "read_pdf", "pdf_render_pages", "pdf_zoom_region",
+            "novel_outline", "novel_chunks", "novel_split_text",
             "probe_video", "extract_frames",
             "write_file", "edit_file", "pwsh", "run_skill_script", "vision_analyze",
             "run_in_background", "job_output", "job_status", "job_wait", "job_kill",

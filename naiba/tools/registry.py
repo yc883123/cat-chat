@@ -144,6 +144,10 @@ MEDIA_DECLARATIONS: dict[str, dict[str, str]] = {
     "recall_history": {"policy": "never", "extract": "none"},
     # documents 域（页图/局部图是渲染产物，read_pdf 只出文本）
     "read_pdf": {"policy": "never", "extract": "none"},
+    # 拆书匠：只读文本、只回 JSON 章节，不产出媒体文件。
+    "novel_outline": {"policy": "never", "extract": "none"},
+    "novel_chunks": {"policy": "never", "extract": "none"},
+    "novel_split_text": {"policy": "never", "extract": "none"},
     "pdf_render_pages": {"policy": "inline", "extract": "structured"},
     "pdf_zoom_region": {"policy": "inline", "extract": "structured"},
     # video 域（帧图与联系表是抽帧产物，probe_video 只出文本元信息）
@@ -1165,6 +1169,79 @@ def build_capability_tool_specs() -> list[ToolSpec]:
     ]
 
 
+def build_novel_tool_specs() -> list[ToolSpec]:
+    """拆书匠工具声明：novel_outline（章节索引）+ novel_chunks（指定章正文）
+    + novel_split_text（AI 生成文本直接拆章）。执行逻辑在 providers/novel.py，
+    算法在 core/novel_split.py（纯字符串、不做 IO）。
+
+    两段式是硬约束：outline **绝不带正文**，否则长会话会被整本书撑爆。"""
+    return [
+        ToolSpec(
+            name="novel_outline",
+            description=(
+                "读取本地 TXT 小说，返回章节索引（序号、标题、字数），不含正文；"
+                "章节多时分页并给出 next_offset，要正文用 novel_chunks 按索引取。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": _string("小说 TXT 文件路径（绝对路径，或工作区内的相对路径）"),
+                    "offset": {"type": "integer", "description": "从第几条索引开始（0 起始）", "default": 0},
+                    "limit": {"type": "integer", "description": "本次返回多少条（默认 200，上限 1000）"},
+                    "max_len": {"type": "integer", "description": "单章最大字数（默认 6000），超出会再切块"},
+                },
+                "required": ["path"],
+            },
+            side_effect=False,
+            retryable=True,
+            timeout=60,
+            permission="confirm",
+        ),
+        ToolSpec(
+            name="novel_chunks",
+            description=(
+                "按章节索引取正文（索引来自 novel_outline）；超预算时返回 remaining_idx 供续取。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": _string("小说 TXT 文件路径"),
+                    "idx": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": "要取正文的章节索引数组（来自 novel_outline 的 i 字段）",
+                    },
+                    "max_len": {"type": "integer", "description": "单章最大字数，必须与取索引时一致（默认 6000）"},
+                },
+                "required": ["path", "idx"],
+            },
+            side_effect=False,
+            retryable=True,
+            timeout=60,
+            permission="confirm",
+        ),
+        ToolSpec(
+            name="novel_split_text",
+            description=(
+                "把一段长文本直接按章节拆开，不需要先存文件；outline_only=true 只返回索引。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "text": _string("要拆分的文本内容"),
+                    "max_len": {"type": "integer", "description": "单章最大字数（默认 6000），超出会再切块"},
+                    "outline_only": {"type": "boolean", "description": "只返回索引、不带正文", "default": False},
+                },
+                "required": ["text"],
+            },
+            side_effect=False,
+            retryable=True,
+            timeout=60,
+            permission="auto",
+        ),
+    ]
+
+
 def build_document_tool_specs() -> list[ToolSpec]:
     """文档域工具声明：read_pdf（文本层提取）+ pdf_render_pages（整页渲染）
     + pdf_zoom_region（局部高清放大）。执行逻辑在 naiba.pdf 服务 + documents Provider。
@@ -1320,6 +1397,7 @@ def build_tool_registry() -> ToolRegistry:
     registry.register_many(build_search_tool_specs())
     registry.register_many(build_history_tool_specs())
     registry.register_many(build_document_tool_specs())
+    registry.register_many(build_novel_tool_specs())
     registry.register_many(build_video_tool_specs())
     # 别名表在查询层归一（Phase 5 后唯一来源；当前与 ToolExecutor.TOOL_ALIASES 双轨一致）
     registry.register_alias_map(HARNESS_ALIASES)

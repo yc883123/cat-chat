@@ -15,6 +15,8 @@
 - 弹卡前必须问后端 `naibaWindowHidden`（visibilityState 在 SW_HIDE 下不可信）；
 - 卡片标题写 DOM 必须走 `textContent`（会话名任意字符，innerHTML 即 XSS 面）；
 - Launcher 维护 `_window_hidden` 真值：hide 置 True、show 置 False；
+- 普通最小化也算「没显示」，与托盘隐藏同一口径（窗口状态以后端为准）；
+- 前台窗口占满显示器时后端不建卡（全屏游戏/演示不被置顶卡打断）；
 - 「稍后重启」按版本重置：新版本 ready 必须重新提醒。
 """
 from __future__ import annotations
@@ -22,6 +24,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -179,6 +182,79 @@ class DoneNotifyFrontendTests(unittest.TestCase):
         for key in ("done_sound", "done_sound_volume", "tray_done_toast"):
             self.assertIn(key, core)
             self.assertIn(key, (ROOT / "public/js/09-settings.js").read_text(encoding="utf-8"))
+
+    # ---- 窗口状态：托盘隐藏 + 普通最小化 ----
+
+    def test_window_counts_tray_hidden_and_minimized_as_not_shown(self) -> None:
+        """藏托盘与最小化都必须报告「没显示」；恢复后重新报告显示。"""
+        import launcher
+
+        iconic = lambda hwnd: hwnd == 42
+        self.assertTrue(launcher._window_display_hidden(True, None, iconic), "藏托盘算没显示")
+        self.assertTrue(launcher._window_display_hidden(False, 42, iconic), "最小化算没显示")
+        self.assertFalse(launcher._window_display_hidden(False, 7, iconic), "正常窗口算显示")
+        self.assertFalse(launcher._window_display_hidden(False, None, iconic), "未拿到句柄不误报")
+
+        instance = launcher.Launcher()
+        instance._window_hidden = True
+        self.assertTrue(instance.window_display_hidden())
+        instance._window_hidden = False
+        with mock.patch.object(launcher, "_is_iconic", side_effect=lambda hwnd: hwnd == 42):
+            instance._window_hwnd = 42
+            self.assertTrue(instance.window_display_hidden(), "最小化态要报告没显示")
+            instance._window_hwnd = 7
+            self.assertFalse(instance.window_display_hidden(), "从托盘/最小化恢复后要重新报告显示")
+
+    def test_window_state_iconic_failure_is_not_hidden(self) -> None:
+        """最小化查询失败按「显示中」处理：不因此多弹一张卡。"""
+        import launcher
+
+        def boom(hwnd):
+            raise OSError("IsIconic failed")
+
+        self.assertFalse(launcher._window_display_hidden(False, 42, boom))
+
+    # ---- 全屏前台抑制 ----
+
+    def test_fullscreen_geometry_requires_covering_the_monitor(self) -> None:
+        """全屏判定只看几何：盖满显示器才算，最大化到工作区/窗口化都不算。"""
+        import launcher
+
+        monitor = (0, 0, 2560, 1440)
+        self.assertTrue(launcher._rect_covers_monitor((0, 0, 2560, 1440), monitor))
+        self.assertFalse(
+            launcher._rect_covers_monitor((0, 0, 2560, 1380), monitor),
+            "最大化窗口只到工作区下缘（任务栏上方），不是全屏",
+        )
+        self.assertFalse(launcher._rect_covers_monitor((80, 80, 2480, 1360), monitor))
+
+    def test_done_card_creation_is_skipped_for_fullscreen_foreground(self) -> None:
+        """前台全屏时后端直接拒绝建卡，不创建任何窗口。"""
+        import launcher
+
+        instance = launcher.Launcher()
+        with mock.patch.object(launcher, "_foreground_window_is_fullscreen", return_value=True):
+            result = instance.show_done_card("会话", "conv-1")
+        self.assertFalse(result.get("ok"))
+        self.assertTrue(result.get("suppressed"))
+        self.assertIsNone(instance._done_card)
+
+    def test_show_done_card_checks_fullscreen_before_creating_window(self) -> None:
+        launcher_src = (ROOT / "launcher.py").read_text(encoding="utf-8")
+        body = launcher_src[launcher_src.index("def show_done_card"):]
+        body = body[: body.index("def _close_done_card")]
+        self.assertIn("_foreground_window_is_fullscreen()", body)
+        self.assertLess(
+            body.index("_foreground_window_is_fullscreen()"),
+            body.index('webview.create_window("naiba-done-card"'),
+            "全屏判断必须在建窗前执行（否则卡已经弹出来了）",
+        )
+        self.assertIn("self._capture_window_handle()", launcher_src, "窗口加载时要记下 HWND")
+        self.assertIn(
+            "_window_display_hidden(self._window_hidden, self._window_hwnd, _is_iconic)",
+            launcher_src,
+            "托盘隐藏 + 最小化统一走这一个判定",
+        )
 
     # ---- 稍后重启悬浮卡修复 ----
 

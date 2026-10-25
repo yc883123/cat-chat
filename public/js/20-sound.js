@@ -81,8 +81,9 @@ export function notifyRunDone(conversationId, runId) {
   const appearance = state.appearance || {};
   if (appearance.done_sound !== false) playDoneSound(appearance.done_sound_volume);
 
-  // 托盘卡片：桌面壳专属。窗口是否真的藏在托盘由**后端**说了算（launcher 知道自己
-  // 有没有 hide 过窗口）——SW_HIDE 下 visibilityState 可能仍报 visible，不可信。
+  // 托盘卡片：桌面壳专属。窗口是否"没显示"（藏托盘或普通最小化）由**后端**说了算
+  // （launcher 知道自己有没有 hide 过窗口、主窗口是否最小化）——SW_HIDE 下
+  // visibilityState 可能仍报 visible，不可信。
   const bridge = window.pywebview?.api;
   if (appearance.tray_done_toast === false || !bridge?.naibaNotifyTaskDone) return;
   if (typeof bridge.naibaWindowHidden === "function") {

@@ -108,6 +108,31 @@ class RevealInFolderTests(_BridgeBase):
         self.assertIn("无法打开文件夹", result["error"])
 
 
+class OpenFolderTests(_BridgeBase):
+    def test_opens_directory_without_selecting_a_file(self) -> None:
+        folder = self.base / "技能目录"
+        folder.mkdir()
+        with mock.patch("subprocess.Popen") as popen:
+            result = self.api.naibaOpenFolder(str(folder))
+        self.assertEqual(result, {"ok": True})
+        popen.assert_called_once_with(["explorer", str(folder)])
+
+    def test_rejects_file_and_missing_path(self) -> None:
+        target = self._file_named("技能.md")
+        with mock.patch("subprocess.Popen") as popen:
+            self.assertFalse(self.api.naibaOpenFolder(str(target))["ok"])
+            self.assertFalse(self.api.naibaOpenFolder(str(self.base / "missing"))["ok"])
+        popen.assert_not_called()
+
+    def test_popen_failure_is_reported(self) -> None:
+        folder = self.base / "技能目录"
+        folder.mkdir()
+        with mock.patch("subprocess.Popen", side_effect=OSError("no explorer")):
+            result = self.api.naibaOpenFolder(str(folder))
+        self.assertFalse(result["ok"])
+        self.assertIn("无法打开文件夹", result["error"])
+
+
 class SaveFileAsTests(_BridgeBase):
     def _window(self, chosen):
         window = mock.MagicMock()
@@ -200,7 +225,7 @@ class FrontendWiringTests(unittest.TestCase):
     def test_frontend_calls_match_bridge_methods(self) -> None:
         js = self.JS.read_text(encoding="utf-8")
         api = launcher.JsApi()
-        for name in ("naibaOpenFile", "naibaRevealInFolder", "naibaSaveFileAs"):
+        for name in ("naibaOpenFile", "naibaRevealInFolder", "naibaOpenFolder", "naibaSaveFileAs"):
             self.assertTrue(hasattr(api, name), f"launcher.JsApi 缺少 {name}")
             self.assertIn(f"'{name}'", js, f"前端没有调用 {name}")
 

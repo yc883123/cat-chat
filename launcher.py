@@ -260,12 +260,13 @@ class JsApi:
         self._launcher = launcher
 
     def naibaWindowHidden(self) -> dict:
-        """主窗口当前是否藏在托盘（Launcher 在 hide/show 时维护的真实状态）。
+        """主窗口当前是否没显示：藏在托盘或普通最小化都算。
 
         前端判断"要不要弹完成卡片"以此为准：SW_HIDE 下页面的
         document.visibilityState 可能仍报 visible，前端自己判断不可信。
         """
-        hidden = bool(getattr(self._launcher, "_window_hidden", False)) if self._launcher else False
+        launcher = self._launcher
+        hidden = bool(launcher.window_display_hidden()) if launcher else False
         return {"hidden": hidden}
 
     def naibaNotifyTaskDone(self, title: str = "", conversation_id: str = "") -> dict:
@@ -523,6 +524,24 @@ class JsApi:
             return {"ok": False, "error": f"无法打开文件夹：{exc}"}
         return {"ok": True}
 
+    def naibaOpenFolder(self, path: str) -> dict:
+        """在资源管理器中直接打开目录。"""
+        import subprocess
+
+        raw = str(path or "").strip()
+        if not raw:
+            return {"ok": False, "error": "没有可打开的文件夹路径"}
+        target = Path(raw)
+        if not target.is_dir():
+            if target.exists():
+                return {"ok": False, "error": "目标不是文件夹"}
+            return {"ok": False, "error": "文件夹已不存在（可能已被移动或删除）"}
+        try:
+            subprocess.Popen(["explorer", str(target)])
+        except Exception as exc:  # pragma: no cover - 环境相关
+            return {"ok": False, "error": f"无法打开文件夹：{exc}"}
+        return {"ok": True}
+
     def naibaSaveFileAs(self, path: str, default_name: str = "") -> dict:
         """把该文件复制到用户选定的位置（弹出系统保存对话框）。
 
@@ -617,6 +636,134 @@ def _card_origin(card_w: int, card_h: int) -> tuple[int, int]:
         return max(0, 1920 - card_w - 24), max(0, 1080 - card_h - 76)
 
 
+# ---- 完成提醒的窗口状态 / 全屏判定 ----
+# 桌面外壳窗口的矩形同样铺满显示器，但它们不是"全屏应用"：用户关掉主窗口回到桌面时，
+# 不能因为桌布窗口盖住屏幕就把完成卡片吞掉。
+_SHELL_WINDOW_CLASSES = frozenset({"Progman", "WorkerW", "Shell_TrayWnd"})
+_DWMWA_EXTENDED_FRAME_BOUNDS = 9
+_MONITOR_DEFAULTTONEAREST = 2
+
+
+def _is_iconic(hwnd: int) -> bool:
+    """窗口是否最小化（Win32 IsIconic）；非 Windows / 句柄失效一律视为未最小化。"""
+    try:
+        return bool(ctypes.windll.user32.IsIconic(int(hwnd)))
+    except Exception:
+        return False
+
+
+def _window_display_hidden(window_hidden: bool, hwnd, is_iconic) -> bool:
+    """主窗口是否可视为"没显示"：藏在托盘或普通最小化。
+
+    ``is_iconic`` 注入是为了单测不用真的建窗口；生产入口固定传 :func:`_is_iconic`。
+    """
+    if window_hidden:
+        return True
+    if not hwnd:
+        return False
+    try:
+        return bool(is_iconic(hwnd))
+    except Exception:
+        return False
+
+
+def _rect_covers_monitor(
+    window_rect: tuple[int, int, int, int], monitor_rect: tuple[int, int, int, int]
+) -> bool:
+    """窗口矩形是否把显示器四边全部包住（全屏判定的纯几何部分）。"""
+    left, top, right, bottom = window_rect
+    mon_left, mon_top, mon_right, mon_bottom = monitor_rect
+    return left <= mon_left and top <= mon_top and right >= mon_right and bottom >= mon_bottom
+
+
+def _dwm_frame_rect(hwnd: int) -> tuple[int, int, int, int] | None:
+    """窗口的可见边框（DWM 扩展边框），失败返回 None。
+
+    不能直接用 GetWindowRect：Win10/11 的最大化窗口会带一圈透明的缩放边框，
+    GetWindowRect 量出来比显示器还大，会被误判成全屏、把完成卡片吞掉。
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        rect = wintypes.RECT()
+        dwmapi = ctypes.WinDLL("dwmapi")
+        result = dwmapi.DwmGetWindowAttribute(
+            wintypes.HWND(hwnd),
+            _DWMWA_EXTENDED_FRAME_BOUNDS,
+            ctypes.byref(rect),
+            ctypes.sizeof(rect),
+        )
+        if result != 0:
+            return None
+        return (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom))
+    except Exception:
+        return None
+
+
+def _foreground_window_is_fullscreen() -> bool:
+    """Windows 前台窗口是否占满它所在的显示器（只看几何，不识别应用名）。
+
+    完成卡片是置顶窗：用户在全屏游戏/演示里时弹出来会打断全屏体验，所以这里先问
+    一句再决定建不建。检测失败按"全屏"处理——宁可少提醒一次，也不抢焦点。
+    坐标系口径：launcher 进程已由 pywebview 设为 DPI aware，DWM 边框与
+    GetMonitorInfoW 返回的都是物理像素；若改到非 DPI aware 环境运行，
+    两套坐标会差一个缩放比，必须先把进程/线程 DPI 上下文对齐。
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _MONITORINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        user32 = ctypes.WinDLL("user32")
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.IsIconic.argtypes = [wintypes.HWND]
+        user32.IsIconic.restype = wintypes.BOOL
+        user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user32.MonitorFromWindow.restype = wintypes.HANDLE
+        user32.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+        user32.GetMonitorInfoW.restype = wintypes.BOOL
+
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        if not user32.IsWindowVisible(hwnd) or user32.IsIconic(hwnd):
+            return False
+
+        class_name = ctypes.create_unicode_buffer(128)
+        user32.GetClassNameW(hwnd, class_name, len(class_name))
+        if class_name.value in _SHELL_WINDOW_CLASSES:
+            return False
+
+        monitor = user32.MonitorFromWindow(hwnd, _MONITOR_DEFAULTTONEAREST)
+        if not monitor:
+            return True
+        info = _MONITORINFO()
+        info.cbSize = ctypes.sizeof(_MONITORINFO)
+        if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return True
+
+        frame = _dwm_frame_rect(int(hwnd))
+        if frame is None:
+            return True
+        rc = info.rcMonitor
+        return _rect_covers_monitor(frame, (int(rc.left), int(rc.top), int(rc.right), int(rc.bottom)))
+    except Exception:
+        return True
+
+
 class DoneCardApi:
     """「任务完成」卡片小窗口的 js_api：回数据、自毁、点卡片唤回主窗口。
 
@@ -656,6 +803,9 @@ class Launcher:
         # 主窗口是否藏在托盘（_on_window_closing 隐藏置 True，_show_window 唤回置 False）。
         # 前端经 JsApi.naibaWindowHidden 读它，决定要不要弹「任务完成」卡片。
         self._window_hidden = False
+        # 主窗口 HWND（_on_window_loaded 在窗口线程上记一次）：普通最小化也算"没显示"，
+        # 之后只拿这个句柄问 Win32 IsIconic，不跨线程访问 pywebview 的 .NET 对象。
+        self._window_hwnd = None
         # 当前打开的完成卡片窗口（同一时刻最多一张，latest wins）。
         self._done_card = None
         # 主窗口页面地址（含端口；run() 里服务绑定成功后写入，卡片窗口复用同一地址）。
@@ -787,6 +937,29 @@ class Launcher:
             except Exception:
                 pass
 
+    def window_display_hidden(self) -> bool:
+        """主窗口是否可视为"没显示"：藏托盘或普通最小化。
+
+        完成提醒（提示音以外的悬浮卡）只认这一个口径；前端不再自己猜
+        visibilityState。最小化查询失败按"显示中"处理，宁可少弹一张卡。
+        """
+        return _window_display_hidden(self._window_hidden, self._window_hwnd, _is_iconic)
+
+    def _capture_window_handle(self) -> None:
+        """在窗口线程上记下主窗口 HWND（之后最小化判断只走 Win32）。"""
+        try:
+            native = getattr(self.window, "native", None)
+            handle = getattr(native, "Handle", None)
+            if handle is None:
+                self._window_hwnd = None
+                return
+            try:
+                self._window_hwnd = int(handle)
+            except (TypeError, ValueError):
+                self._window_hwnd = int(handle.ToInt64())
+        except Exception:
+            self._window_hwnd = None
+
     def open_main_window(self, conversation_id: str = "") -> None:
         """唤回主窗口；带了会话 id 就顺带通知前端跳到该会话（完成卡片点击链路）。
 
@@ -805,19 +978,24 @@ class Launcher:
         except Exception:
             pass
 
-    # ---- 「任务完成」悬浮卡片（托盘隐藏时） ----
+    # ---- 「任务完成」悬浮卡片（托盘隐藏 / 最小化时） ----
     def show_done_card(self, title: str, conversation_id: str) -> dict:
         """弹一张完成卡片（frameless 小窗，右下角、托盘上方），4 秒自动消失。
 
         最新完成覆盖旧卡（latest wins）：同一时刻只保留一张，避免排队叠卡打扰。
+        前台应用占满显示器（全屏游戏/演示）时不建卡：置顶窗会打断全屏体验，
+        也违背"不抢焦点"的约定。全屏只看几何，窗口化的游戏/应用不抑制。
         webview.create_window 允许在事件循环运行期间从其它线程调用（pywebview 官方口径），
         js_api 回调正跑在那些线程里，这里直接建窗是安全的。
         """
-        import webview
-
         if self.should_quit:
             return {"ok": False, "error": "程序正在退出"}
+        if _foreground_window_is_fullscreen():
+            return {"ok": False, "suppressed": True, "reason": "foreground_fullscreen"}
         self._close_done_card()
+
+        import webview
+
         width, height = 368, 128
         # x/y 是逻辑像素（pywebview 口径），量测与换算见 _card_origin。
         x, y = _card_origin(width, height)
@@ -906,6 +1084,7 @@ class Launcher:
         把这类外部启动方式的隐藏标记抹平。
         """
         self._show_window()
+        self._capture_window_handle()
         self._register_drop_listener()
 
     # ---- 拖入文件夹（桌面壳专属：只有这里拿得到真实绝对路径） ----

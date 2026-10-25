@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 from naiba.llm.profiles import resolve_profile_with_override
@@ -34,14 +35,19 @@ ALLOWED_CONFIG_KEYS = frozenset({
     "engine", "output_mode", "language", "preset", "model_key", "model_name",
     "confidence_threshold", "max_tags", "custom_prompt", "subject_filter",
     "concurrency", "retry_limit", "timeout_seconds", "prompt_version",
+    "trigger_word",
 })
 # 只进指纹的「影响结果」字段：换并发/重试次数/超时不该改变结果身份。
+# trigger_word 进指纹，但「关闭」时按缺省处理（config_fingerprint 里归一化），
+# 这样默认关闭的配置与旧任务指纹一致，已有标注照常复用、不重复计费。
 FINGERPRINT_KEYS = (
     "engine", "output_mode", "language", "preset", "model_key", "model_name",
     "confidence_threshold", "max_tags", "custom_prompt", "subject_filter", "prompt_version",
+    "trigger_word",
 )
 VALID_STRENGTHS = ("low", "medium", "high")
 MAX_CUSTOM_PROMPT = 2000
+MAX_TRIGGER_WORD = 200
 
 
 class LabelerTaskError(ValueError):
@@ -68,8 +74,33 @@ def _normalize_subject_filter(raw: Any) -> dict[str, Any]:
     return {"enabled": enabled, "keywords": keywords, "strength": strength}
 
 
-def normalize_config(app: Any, raw: Any) -> dict[str, Any]:
-    """白名单校验并归一化 config；顺带校验模型 profile（不落任何密钥）。"""
+def _normalize_trigger_word(raw: Any) -> dict[str, Any]:
+    """触发词前缀：用户明确指定的字符串，不进模型提示词、只加在结果最前。
+
+    空白折叠成单空格、换行全部抹掉：逐图 caption 是一行文本，触发词带换行会
+    破坏「图片同名 txt 一图一文件」的约定。启用但没填内容直接拒（前端同样拦截）。
+    """
+    if raw is None:
+        return {"enabled": False, "value": ""}
+    if not isinstance(raw, dict):
+        raise LabelerTaskError("trigger_word 必须是对象")
+    unknown = set(raw) - {"enabled", "value"}
+    if unknown:
+        names = ", ".join(sorted(map(str, unknown)))
+        raise LabelerTaskError(f"trigger_word 包含不支持的字段：{names}")
+    enabled = bool(raw.get("enabled"))
+    value = re.sub(r"\s+", " ", str(raw.get("value") or "")).strip()[:MAX_TRIGGER_WORD]
+    if enabled and not value:
+        raise LabelerTaskError("启用触发词后需要填写触发词内容")
+    return {"enabled": enabled, "value": value}
+
+
+def normalize_config(app: Any, raw: Any, *, allow_legacy_language: bool = False) -> dict[str, Any]:
+    """白名单校验并归一化 config；顺带校验模型 profile（不落任何密钥）。
+
+    ``allow_legacy_language``：继续/恢复旧任务时放行「英文标签 + 中文描述（mixed）+
+    非标签加自然语言」的历史组合——新任务不允许提交这种组合，但老配置必须原样执行。
+    """
     if not isinstance(raw, dict):
         raise LabelerTaskError("config 必须是对象")
     unknown = set(raw) - ALLOWED_CONFIG_KEYS
@@ -85,6 +116,10 @@ def normalize_config(app: Any, raw: Any) -> dict[str, Any]:
     language = str(raw.get("language") or "mixed").strip().lower()
     if language not in VALID_LANGUAGES:
         raise LabelerTaskError("language 必须是 mixed / zh / en")
+    if language == "mixed" and output_mode != "both" and not allow_legacy_language:
+        raise LabelerTaskError(
+            "输出语言与输出形式不匹配：「英文标签 + 中文描述」只在「标签 + 自然语言」下可选"
+        )
     preset = str(raw.get("preset") or DEFAULT_PRESET).strip() or DEFAULT_PRESET
     if preset not in PRESET_IDS:
         raise LabelerTaskError(f"未知的打标侧重：{preset}")
@@ -134,6 +169,7 @@ def normalize_config(app: Any, raw: Any) -> dict[str, Any]:
         "max_tags": max_tags,
         "custom_prompt": custom_prompt,
         "subject_filter": _normalize_subject_filter(raw.get("subject_filter")),
+        "trigger_word": _normalize_trigger_word(raw.get("trigger_word")),
         "concurrency": concurrency,
         "retry_limit": retry_limit,
         "timeout_seconds": timeout_seconds,
@@ -144,8 +180,16 @@ def normalize_config(app: Any, raw: Any) -> dict[str, Any]:
 
 
 def config_fingerprint(config: dict[str, Any]) -> str:
-    """结果身份：只含影响标注内容的字段，不含并发/重试/超时/密钥。"""
+    """结果身份：只含影响标注内容的字段，不含并发/重试/超时/密钥。
+
+    触发词「关闭」时按缺省处理（不含触发词键）：默认关闭的新配置与
+    旧任务指纹一致，已有标注照常复用；启用或关闭都会在开启时区分。
+    """
     payload = {key: config.get(key) for key in FINGERPRINT_KEYS}
+    trigger = payload.get("trigger_word")
+    if not (isinstance(trigger, dict) and trigger.get("enabled")
+            and str(trigger.get("value") or "").strip()):
+        payload.pop("trigger_word", None)
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "cfg-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
 
@@ -268,6 +312,35 @@ class LabelerJobManager:
             return False
         return self.runner.cancel(task_id, reason="用户取消")
 
+    # ---- 删除 / 清理（2026-10-26 计划）----
+
+    def delete_tasks(self, task_ids: list[str] | None) -> dict[str, Any]:
+        """删除已结束任务的记录、事件与逐图行。
+
+        - 指定 id：只删已结束的；排队/执行中的跳过并回报（打标按图计费，
+          取消必须显式，不做「删除时自动取消」）；
+        - 不指定 id：清理全部已结束任务（「清理已完成」语义）；
+        - 标注库（annotations）不动：标注按内容 + 配置指纹全局复用，删除任务后
+          仍可查询、导出；原图留存保护由剩余标注行承担。
+        """
+        if task_ids is not None:
+            targets = [str(item).strip() for item in task_ids[:200] if str(item).strip()]
+        else:
+            targets = [str(task.get("id") or "") for task in self.store.list_tasks(limit=5000)]
+        deleted = 0
+        skipped: list[str] = []
+        for task_id in targets:
+            task = self.store.get_task(task_id)
+            if task is None:
+                continue
+            if str(task.get("status") or "") in LABELER_ACTIVE_STATUSES:
+                skipped.append(task_id)
+                continue
+            if self.store.delete_task(task_id):
+                self.db.delete_items(task_id)
+                deleted += 1
+        return {"deleted": deleted, "skipped": skipped}
+
     def continue_task(self, task_id: str, *, mode: str = "unfinished",
                       confirm_uncertain: bool = False) -> dict[str, Any]:
         """「继续未完成」：新建关联任务，只复制未完成/失败/（已确认的）不确定项。"""
@@ -318,8 +391,9 @@ class LabelerJobManager:
         # 重新校验受管引用：原图可能已被缓存清理（引用保护失效的极端情况）。
         config = dict(source_input.get("config") or {})
         # 重试沿用原快照；模型配置若已失效，提交时解析会明确报错。
+        # 历史快照可能带「mixed + 非标签加自然语言」的旧默认组合：继续时原样放行。
         config.pop("config_fingerprint", None)
-        config = normalize_config(self.app, config)
+        config = normalize_config(self.app, config, allow_legacy_language=True)
         refs = validate_image_refs(self.app.paths.data_dir, wanted)
         task = self._create_task(
             {"image_refs": refs, "config": config}, source_task_id=task_id,

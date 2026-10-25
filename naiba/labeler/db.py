@@ -353,6 +353,17 @@ class LabelerDB:
             return int(cursor.rowcount or 0)
 
     @_retry_transient
+    def delete_items(self, task_id: str) -> int:
+        """删除一个任务的逐图运行行（任务删除用，2026-10-26 计划 §3）。
+
+        ``annotations`` 不动：标注按「内容 + 配置指纹」全局复用、归属第一个产出
+        它的任务，删除任务后仍可通过标注库查询与导出。
+        """
+        with self._connect() as db:
+            cursor = db.execute("DELETE FROM task_items WHERE task_id=?", (task_id,))
+            return int(cursor.rowcount or 0)
+
+    @_retry_transient
     def mark_running_as_uncertain(self, task_id: str = "") -> int:
         """启动恢复：``running`` 说明请求已发出但结果没落库（可能已计费）。"""
         with self._connect() as db:

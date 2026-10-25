@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from naiba.core.paths import normalized_path_key  # noqa: E402
 from naiba.labeler import LABELER_ITEM_STATES  # noqa: E402
-from naiba.labeler.db import LabelerDB  # noqa: E402
+from naiba.labeler.db import LabelerDB, LabelerDBError  # noqa: E402
 from naiba.labeler.engines.provider import build_prompt, parse_response  # noqa: E402
 from naiba.labeler.export import (  # noqa: E402
     LabelerExportError,
@@ -126,10 +126,13 @@ class _StubApp:
 
 
 def _base_config(**overrides):
+    # 默认语言 en：2026-10-26 联动计划起「英文标签 + 中文描述（mixed）」只在
+    # 「标签 + 自然语言」下可选，旧默认 mixed + keywords 属历史组合（详见
+    # test_language_mixed_only_valid_for_both_mode 与继续兼容用例）。
     config = {
         "engine": "provider",
         "output_mode": "keywords",
-        "language": "mixed",
+        "language": "en",
         "preset": DEFAULT_PRESET,
         "model_key": "online:stub",
         "model_name": "stub-model",
@@ -254,6 +257,53 @@ class LabelerConfigTests(unittest.TestCase):
         en = normalize_config(self.app, _base_config(language="en"))
         self.assertNotEqual(zh["config_fingerprint"], en["config_fingerprint"])
 
+    def test_language_mixed_only_valid_for_both_mode(self):
+        # 「英文标签 + 中文描述」只在「标签 + 自然语言」下可选；新任务提交
+        # 其余组合直接 400（2026-10-26 输出形式与语言联动计划）。
+        for mode in ("keywords", "phrases", "description"):
+            with self.assertRaises(LabelerTaskError):
+                normalize_config(self.app, _base_config(output_mode=mode, language="mixed"))
+        both = normalize_config(self.app, _base_config(output_mode="both", language="mixed"))
+        self.assertEqual(both["language"], "mixed")
+        # 历史任务（mixed + 单一形式的旧默认组合）继续/恢复时原样放行。
+        legacy = normalize_config(
+            self.app, _base_config(output_mode="keywords", language="mixed"),
+            allow_legacy_language=True)
+        self.assertEqual(legacy["language"], "mixed")
+
+    def test_trigger_word_normalization_and_validation(self):
+        # 默认关闭；启用必须填内容；空白折叠、长度封顶；未知字段拒绝。
+        disabled = normalize_config(self.app, _base_config())
+        self.assertEqual(disabled["trigger_word"], {"enabled": False, "value": ""})
+        enabled = normalize_config(self.app, _base_config(
+            trigger_word={"enabled": True, "value": "  my_ohwx \n style "}))
+        self.assertEqual(enabled["trigger_word"], {"enabled": True, "value": "my_ohwx style"})
+        with self.assertRaises(LabelerTaskError):
+            normalize_config(self.app, _base_config(trigger_word={"enabled": True, "value": " "}))
+        with self.assertRaises(LabelerTaskError):
+            normalize_config(self.app, _base_config(trigger_word={"enabled": True, "oops": 1}))
+        with self.assertRaises(LabelerTaskError):
+            normalize_config(self.app, _base_config(trigger_word="ohwx"))
+        long = normalize_config(self.app, _base_config(
+            trigger_word={"enabled": True, "value": "x" * 300}))
+        self.assertEqual(len(long["trigger_word"]["value"]), 200)
+
+    def test_trigger_word_fingerprint_rules(self):
+        # 关闭 = 缺省：与完全没有该键的旧配置指纹一致（默认关闭不复用不重复计费）；
+        # 启用即改变结果身份；关闭但留值不影响身份。
+        disabled = normalize_config(self.app, _base_config())
+        legacy_payload = {key: disabled.get(key) for key in disabled if key != "trigger_word"}
+        self.assertEqual(disabled["config_fingerprint"], config_fingerprint(legacy_payload))
+        disabled_with_value = normalize_config(self.app, _base_config(
+            trigger_word={"enabled": False, "value": "ohwx"}))
+        self.assertEqual(disabled["config_fingerprint"], disabled_with_value["config_fingerprint"])
+        enabled = normalize_config(self.app, _base_config(
+            trigger_word={"enabled": True, "value": "ohwx"}))
+        self.assertNotEqual(disabled["config_fingerprint"], enabled["config_fingerprint"])
+        other = normalize_config(self.app, _base_config(
+            trigger_word={"enabled": True, "value": "other"}))
+        self.assertNotEqual(enabled["config_fingerprint"], other["config_fingerprint"])
+
 
 class LabelerPresetAndParseTests(unittest.TestCase):
     def test_filter_drops_ignored_domain_and_duplicates(self):
@@ -297,7 +347,11 @@ class LabelerPresetAndParseTests(unittest.TestCase):
             get_preset("general"),
         )
         self.assertIn("全部用中文", zh)
-        mixed = build_prompt(_base_config(preset="general"), get_preset("general"))
+        # mixed（英文标签 + 中文描述）是与「标签 + 自然语言」配套的合法组合。
+        mixed = build_prompt(
+            _base_config(preset="general", output_mode="both", language="mixed"),
+            get_preset("general"),
+        )
         self.assertIn("标签用小写英文名词短语", mixed)
         self.assertIn("description 用中文", mixed)
 
@@ -319,6 +373,61 @@ class LabelerPresetAndParseTests(unittest.TestCase):
         self.assertEqual(classify_error(RuntimeError("400 bad request")), "bad_request")
         self.assertEqual(classify_error(RuntimeError("任务已取消")), "cancelled")
         self.assertEqual(classify_error(RuntimeError("weird thing")), "permanent")
+
+
+    def test_prompt_combinations_consistent_for_valid_languages(self):
+        # 4 种输出形式 × 各自可见语言：语言规则与形式规则同现且不矛盾
+        # （2026-10-26 联动计划验收）。旧任务 mixed + 标签仍能组出提示词。
+        cases = [
+            ("keywords", "zh", "全部用中文"),
+            ("keywords", "en", "全部用英文"),
+            ("phrases", "zh", "中文逗号"),
+            ("phrases", "en", "英文逗号"),
+            ("description", "zh", "全部用中文"),
+            ("description", "en", "全部用英文"),
+            ("both", "mixed", "标签用小写英文名词短语"),
+            ("both", "zh", "全部用中文。标签用中文名词短语"),
+            ("both", "en", "全部用英文。标签用小写英文名词短语"),
+        ]
+        for mode, language, marker in cases:
+            prompt = build_prompt(
+                _base_config(output_mode=mode, language=language), get_preset(DEFAULT_PRESET))
+            self.assertIn(marker, prompt, f"{mode}/{language}")
+        legacy = build_prompt(
+            _base_config(output_mode="keywords", language="mixed"), get_preset(DEFAULT_PRESET))
+        self.assertIn("输出形式：只要标签", legacy)
+
+
+class LabelerTriggerAndLanguageUiTests(unittest.TestCase):
+    """触发词控件与输出形式/语言联动的前端接线（源码断言）。"""
+
+    def test_trigger_word_controls_wired_in_ui(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public/index.html").read_text(encoding="utf-8")
+        js = (root / "public/js/23-labeler.js").read_text(encoding="utf-8")
+        # 控件在配置区（输出语言行与模型配置行之间），默认关闭（disabled）。
+        self.assertIn('id="labelerTriggerEnabled"', html)
+        self.assertIn('id="labelerTriggerWord"', html)
+        self.assertLess(html.index('id="labelerLanguage"'), html.index('id="labelerTriggerEnabled"'))
+        self.assertLess(html.index('id="labelerTriggerEnabled"'), html.index('id="labelerProviderSelect"'))
+        self.assertIn('disabled aria-label="触发词"', html)
+        # 配置收集带 trigger_word；启用未填写不允许开始任务。
+        self.assertIn("trigger_word: {", js)
+        self.assertIn("启用触发词后，请先填写触发词内容", js)
+        self.assertIn("triggerWord.disabled = !triggerEnabled.checked", js)
+
+    def test_language_options_follow_output_mode(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public/index.html").read_text(encoding="utf-8")
+        js = (root / "public/js/23-labeler.js").read_text(encoding="utf-8")
+        # mixed 只作为 both 的选项（文案改为「英文标签 + 中文描述」，不再叫中英混合）。
+        self.assertNotIn("中英混合", html)
+        self.assertIn("英文标签 + 中文描述", html)
+        # 联动：选项可见性 + 值映射（标签→英文，短语/自然语言→中文），隐藏值不生效。
+        self.assertIn("function syncLanguageOptions()", js)
+        self.assertIn('$("#labelerOutputMode")?.addEventListener("change", syncLanguageOptions)', js)
+        self.assertIn("option.hidden = !(value in labels)", js)
+        self.assertIn('langSelect.value = mode === "keywords" ? "en" : "zh"', js)
 
 
 class LabelerDBTests(unittest.TestCase):
@@ -613,6 +722,164 @@ class LabelerRunnerTests(unittest.TestCase):
         state = self._wait(task["id"], timeout=15)
         self.assertEqual(state["status"], "done")
         self.assertEqual(app.runs.calls, 0, "在线 provider 不需要礼让查询")
+
+
+class LabelerTriggerWordTests(unittest.TestCase):
+    """触发词前缀（2026-10-26 计划）：过滤后统一加前缀、复用隔离、导出包含前缀。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name)
+        self.uploads = self.data_dir / "uploads"
+        self.images = [
+            _write_png(self.uploads / "d" / f"a{i}.png", color=(10 * i, 100, 200))
+            for i in range(2)
+        ]
+        self.store = LabelerStore(self.data_dir)
+        self.db = LabelerDB(self.data_dir)
+        self.app = _StubApp(self.data_dir, models=_StubModels())
+
+    def _jobs(self):
+        runner = LabelerRunner(self.app, self.store, self.db)
+        self.addCleanup(runner.shutdown)
+        return LabelerJobManager(self.app, self.store, self.db, runner)
+
+    def _submit(self, jobs, config):
+        refs = [
+            {"path": str(path), "name": path.name, "relative_path": f"d/{path.name}"}
+            for path in self.images[:1]
+        ]
+        return jobs, jobs.submit({"image_refs": refs, "config": config})
+
+    def _wait(self, task_id, timeout=10.0):
+        deadline = time.time() + timeout
+        state = None
+        while time.time() < deadline:
+            state = self.store.get_task(task_id)
+            if state and state.get("status") in {"done", "failed", "cancelled", "interrupted"}:
+                return state
+            time.sleep(0.02)
+        return state
+
+    def _annotation_of(self, task_id):
+        ids = self.db.annotation_ids_for_task(task_id)
+        return self.db.annotations_by_ids(ids)[0]
+
+    def test_both_mode_prefixes_tags_and_description(self):
+        _, task = self._submit(self._jobs(), _base_config(
+            output_mode="both", language="mixed",
+            trigger_word={"enabled": True, "value": "my_ohwx"}))
+        state = self._wait(task["id"])
+        self.assertEqual(state["status"], "done")
+        annotation = self._annotation_of(task["id"])
+        # 标签首位是触发词，置信度补 -1 保持按位对齐；描述最前加前缀（中文逗号）。
+        self.assertEqual(annotation["tags"], ["my_ohwx", "cat"])
+        self.assertEqual(annotation["confidences"], [-1.0, 0.9])
+        self.assertEqual(annotation["description"], "my_ohwx，一只猫")
+
+    def test_english_description_uses_english_separator(self):
+        _, task = self._submit(self._jobs(), _base_config(
+            output_mode="both", language="en",
+            trigger_word={"enabled": True, "value": "ohwx"}))
+        self._wait(task["id"])
+        annotation = self._annotation_of(task["id"])
+        self.assertEqual(annotation["description"], "ohwx, 一只猫")
+
+    def test_no_duplicate_when_already_prefixed(self):
+        def behavior(profile, messages, options, status):
+            return ('{"tags":[{"tag":"My_Ohwx","confidence":0.9}],'
+                    '"description":"my_ohwx, 一只猫"}')
+
+        self.app = _StubApp(self.data_dir, models=_StubModels(behavior))
+        _, task = self._submit(self._jobs(), _base_config(
+            output_mode="both", language="en",
+            trigger_word={"enabled": True, "value": "my_ohwx"}))
+        self._wait(task["id"])
+        annotation = self._annotation_of(task["id"])
+        # 首标签已是触发词（大小写不同也算）、描述已以其开头：都不重复加。
+        self.assertEqual(annotation["tags"], ["My_Ohwx"])
+        self.assertEqual(annotation["confidences"], [0.9])
+        self.assertEqual(annotation["description"], "my_ohwx, 一只猫")
+
+    def test_phrases_mode_prefixes_description_only(self):
+        def behavior(profile, messages, options, status):
+            return '{"tags":[],"description":"一只橘猫, 阳光, 木地板"}'
+
+        self.app = _StubApp(self.data_dir, models=_StubModels(behavior))
+        _, task = self._submit(self._jobs(), _base_config(
+            output_mode="phrases", language="zh",
+            trigger_word={"enabled": True, "value": "mystyle"}))
+        self._wait(task["id"])
+        annotation = self._annotation_of(task["id"])
+        self.assertEqual(annotation["tags"], [])
+        self.assertTrue(annotation["description"].startswith("mystyle，"))
+        self.assertIn("一只橘猫", annotation["description"])
+
+    def test_disabled_trigger_keeps_results_and_reuse(self):
+        jobs = self._jobs()
+        _, task = self._submit(jobs, _base_config(output_mode="both", language="mixed"))
+        self._wait(task["id"])
+        annotation = self._annotation_of(task["id"])
+        self.assertEqual(annotation["tags"], ["cat"])
+        self.assertEqual(annotation["description"], "一只猫")
+        # 关闭状态下与旧任务指纹一致：同图同配置继续复用，不重复调用模型。
+        calls_before = len(self.app.models.calls)
+        _, task2 = self._submit(jobs, _base_config(output_mode="both", language="mixed"))
+        self._wait(task2["id"])
+        self.assertEqual(len(self.app.models.calls), calls_before)
+
+    def test_enabled_trigger_disables_cross_config_reuse(self):
+        jobs = self._jobs()
+        base = _base_config(output_mode="both", language="mixed")
+        _, task = self._submit(jobs, base)
+        self._wait(task["id"])
+        calls_before = len(self.app.models.calls)
+        _, task2 = self._submit(jobs, _base_config(
+            output_mode="both", language="mixed",
+            trigger_word={"enabled": True, "value": "ohwx"}))
+        state = self._wait(task2["id"])
+        self.assertEqual(state["status"], "done")
+        self.assertEqual(len(self.app.models.calls), calls_before + 1,
+                         "不同触发词配置不得复用旧标注")
+        annotation = self._annotation_of(task2["id"])
+        self.assertEqual(annotation["tags"][0], "ohwx")
+
+    def test_captions_export_carries_prefix(self):
+        _, task = self._submit(self._jobs(), _base_config(
+            output_mode="both", language="mixed",
+            trigger_word={"enabled": True, "value": "my_ohwx"}))
+        self._wait(task["id"])
+        annotation = self._annotation_of(task["id"])
+        records = [dict(annotation)]
+        payload = render(records, "captions")
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            text = archive.read("d/a0.txt").decode("utf-8")
+        # 逐图 caption 一行：触发词在最前（训练包同名 txt 走同一 _caption_text）。
+        self.assertTrue(text.startswith("my_ohwx,"))
+        self.assertIn("cat", text)
+
+    def test_continue_task_preserves_legacy_mixed_language(self):
+        def behavior(profile, messages, options, status):
+            raise RuntimeError("401 unauthorized")
+
+        self.app = _StubApp(self.data_dir, models=_StubModels(behavior))
+        jobs = self._jobs()
+        # 直接落一条历史任务：mixed + 标签（旧默认组合），跳过新任务校验。
+        legacy_config = normalize_config(
+            self.app, _base_config(output_mode="keywords", language="mixed"),
+            allow_legacy_language=True)
+        refs = validate_image_refs(self.data_dir, [{
+            "path": str(self.images[0]), "name": self.images[0].name,
+            "relative_path": f"d/{self.images[0].name}",
+        }])
+        task = jobs._create_task({"image_refs": refs, "config": legacy_config}, source_task_id="")
+        state = self._wait(task["id"])
+        self.assertEqual(state["status"], "failed")
+        continued = jobs.continue_task(task["id"])
+        stored = self.store.get_task(continued["id"])
+        self.assertEqual(stored["input"]["config"]["language"], "mixed")
+        self.assertEqual(stored["source_task_id"], task["id"])
 
 
 class LabelerStoreTests(unittest.TestCase):
@@ -1346,6 +1613,161 @@ class LabelerUploadDigestTests(unittest.TestCase):
         self.assertIn("LoRA 训练包", html)
         self.assertIn("/api/labeler/uploads", js)
         self.assertIn("original_sha256", js)
+
+
+class LabelerTaskDeleteTests(unittest.TestCase):
+    """删除与一键清理（docs/plans/2026-10-26-打标器任务删除与清理计划.md）。
+
+    口径：删任务 JSON + 事件文件 + task_items；annotations 全局复用、保留可导出；
+    排队/打标中的跳过并回报（打标按图计费，取消必须显式）。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name)
+        self.uploads = self.data_dir / "uploads"
+        self.images = [
+            _write_png(self.uploads / "d" / f"del{i}.png", color=(30 * i, 90, 210))
+            for i in range(2)
+        ]
+        self.store = LabelerStore(self.data_dir)
+        self.db = LabelerDB(self.data_dir)
+        app = _StubApp(self.data_dir)
+        runner = LabelerRunner(app, self.store, self.db)
+        self.addCleanup(runner.shutdown)
+        self.jobs = LabelerJobManager(app, self.store, self.db, runner)
+
+    def _submit(self, images=None):
+        refs = [
+            {"path": str(path), "name": path.name, "relative_path": f"d/{path.name}"}
+            for path in (images if images is not None else self.images)
+        ]
+        return self.jobs.submit({"image_refs": refs, "config": _base_config()})
+
+    def _wait(self, task_id, timeout=10.0):
+        deadline = time.time() + timeout
+        state = None
+        while time.time() < deadline:
+            state = self.store.get_task(task_id)
+            if state and state.get("status") in {"done", "failed", "cancelled", "interrupted"}:
+                return state
+            time.sleep(0.02)
+        return state
+
+    def test_store_delete_task_removes_record_and_events(self):
+        task = self.store.create_task({"image_refs": [], "config": {}})
+        self.store.append_event(task["id"], {"type": "status", "message": "queued"})
+        self.assertTrue(self.store.delete_task(task["id"]))
+        self.assertIsNone(self.store.get_task(task["id"]))
+        self.assertFalse((self.data_dir / "labeler" / "tasks" / f"{task['id']}.json").exists())
+        self.assertFalse((self.data_dir / "labeler" / "tasks" / f"{task['id']}.events.jsonl").exists())
+
+    def test_store_delete_task_rejects_non_task_ids(self):
+        self.assertFalse(self.store.delete_task("../config.json"))
+        self.assertFalse(self.store.delete_task(""))
+        self.assertFalse(self.store.delete_task("nonexistent-id"))
+
+    def test_delete_finished_task_keeps_annotations(self):
+        task = self._submit()
+        self._wait(task["id"])
+        annotation_ids = self.db.annotation_ids_for_task(task["id"])
+        self.assertTrue(annotation_ids)
+        result = self.jobs.delete_tasks([task["id"]])
+        self.assertEqual(result, {"deleted": 1, "skipped": []})
+        self.assertIsNone(self.store.get_task(task["id"]))
+        self.assertEqual(self.db.counts(task["id"])["total"], 0)
+        # 标注库保留：可按 id 读取，导出与查询不受任务删除影响。
+        rows = self.db.annotations_by_ids(annotation_ids)
+        self.assertEqual(len(rows), len(annotation_ids))
+
+    def test_delete_active_task_is_skipped_and_intact(self):
+        release = threading.Event()
+
+        def behavior(profile, messages, options, status):
+            release.wait(timeout=10)
+            return '{"tags":[{"tag":"cat","confidence":0.9}],"description":""}'
+
+        app = _StubApp(self.data_dir, models=_StubModels(behavior=behavior))
+        runner = LabelerRunner(app, self.store, self.db)
+        self.addCleanup(runner.shutdown)
+        jobs = LabelerJobManager(app, self.store, self.db, runner)
+        refs = [{"path": str(path), "name": path.name} for path in self.images]
+        task = jobs.submit({"image_refs": refs, "config": _base_config()})
+        result = jobs.delete_tasks([task["id"]])
+        self.assertEqual(result["deleted"], 0)
+        self.assertEqual(result["skipped"], [task["id"]])
+        self.assertIsNotNone(self.store.get_task(task["id"]))
+        self.assertGreater(self.db.counts(task["id"])["total"], 0)
+        release.set()
+        self._wait(task["id"])
+
+    def test_delete_without_ids_clears_all_finished_only(self):
+        done = self._submit(self.images[:1])
+        self._wait(done["id"])
+        release = threading.Event()
+
+        def behavior(profile, messages, options, status):
+            release.wait(timeout=10)
+            return '{"tags":[{"tag":"cat","confidence":0.9}],"description":""}'
+
+        app = _StubApp(self.data_dir, models=_StubModels(behavior=behavior))
+        runner = LabelerRunner(app, self.store, self.db)
+        self.addCleanup(runner.shutdown)
+        jobs = LabelerJobManager(app, self.store, self.db, runner)
+        refs = [{"path": str(path), "name": path.name} for path in self.images]
+        active = jobs.submit({"image_refs": refs, "config": _base_config()})
+        result = jobs.delete_tasks(None)
+        self.assertEqual(result["deleted"], 1)
+        self.assertEqual(result["skipped"], [active["id"]])
+        self.assertIsNone(self.store.get_task(done["id"]))
+        self.assertIsNotNone(self.store.get_task(active["id"]))
+        release.set()
+        self._wait(active["id"])
+
+    def test_delete_ignores_unknown_ids(self):
+        result = self.jobs.delete_tasks(["tg-does-not-exist"])
+        self.assertEqual(result, {"deleted": 0, "skipped": []})
+
+    def test_service_delete_contract(self):
+        service = LabelerService.__new__(LabelerService)
+        service.app = _StubApp(self.data_dir)
+        service.store = self.store
+        service.db = self.db
+        service.jobs = self.jobs
+        task = self._submit(self.images[:1])
+        self._wait(task["id"])
+        payload, status = service.api_tasks_delete({"task_ids": [task["id"]]})
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["deleted"], 1)
+        self.assertEqual(payload["skipped"], [])
+        # 不带 task_ids = 清理全部已结束。
+        task2 = self._submit(self.images[1:])
+        self._wait(task2["id"])
+        payload, status = service.api_tasks_delete({})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["deleted"], 1)
+        # 标注库繁忙如实回报 503，不谎报成功。
+        with mock.patch.object(self.jobs, "delete_tasks", side_effect=LabelerDBError("busy")):
+            payload, status = service.api_tasks_delete({})
+        self.assertEqual(status, 503)
+        self.assertIn("标注库繁忙", payload["error"])
+
+    def test_delete_ui_wired(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public/index.html").read_text(encoding="utf-8")
+        js = (root / "public/js/23-labeler.js").read_text(encoding="utf-8")
+        http = (root / "naiba/http.py").read_text(encoding="utf-8")
+        self.assertIn('id="labelerClearFinished"', html)
+        self.assertIn("清理已完成", html)
+        self.assertIn("labeler-batch-delete", js)
+        self.assertIn("TERMINAL_BATCH_STATUSES", js)
+        self.assertIn("clearSelectedBatch", js)
+        self.assertIn('method: "DELETE"', js)
+        delete_section = http.split("def do_DELETE", 1)[1].split("def do_PATCH", 1)[0]             if "def do_PATCH" in http.split("def do_DELETE", 1)[1]             else http.split("def do_DELETE", 1)[1]
+        self.assertIn('path == "/api/labeler/tasks"', delete_section)
+
 
 
 if __name__ == "__main__":

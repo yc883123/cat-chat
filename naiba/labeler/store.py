@@ -150,6 +150,30 @@ class LabelerStore:
             self._write_json(self._record_path(task_id), current)
         return current
 
+    def delete_task(self, task_id: str) -> bool:
+        """删除任务记录与事件文件（2026-10-26 删除计划 §3）。
+
+        标注库不受影响：标注按「内容 + 配置指纹」全局复用，删除任务后仍可
+        查询与导出。只认 ``tg-`` 前缀 id，避免误删目录里其他文件。
+        """
+        task_id = str(task_id or "").strip()
+        if not task_id.startswith("tg-"):
+            return False
+        removed = False
+        with self._lock:
+            for path in (self._record_path(task_id), self._events_path(task_id)):
+                for attempt in range(4):
+                    try:
+                        path.unlink(missing_ok=True)
+                        removed = True
+                        break
+                    except PermissionError:
+                        # 界面轮询详情时的共享冲突：短退避重试（同 _write_json 的口径）。
+                        if attempt == 3:
+                            raise
+                        time.sleep(0.02 * (attempt + 1))
+        return removed
+
     @staticmethod
     def _sanitize(payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("status") not in LABELER_TASK_STATUSES:

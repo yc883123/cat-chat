@@ -138,10 +138,31 @@ class LabelerService:
                 {"id": "both", "label": "标签 + 自然语言"},
             ],
             "languages": [
-                {"id": "mixed", "label": "中英混合（标签英文 / 描述中文）"},
                 {"id": "zh", "label": "中文"},
                 {"id": "en", "label": "英文"},
+                {"id": "mixed", "label": "英文标签 + 中文描述"},
             ],
+            # 语言选项按输出形式联动（2026-10-26 计划）：mixed 只在「标签 + 自然语言」
+            # 下可选，单一形式的文案不带「全」字。前端静态选项与此同口径。
+            "languages_by_mode": {
+                "keywords": [
+                    {"id": "zh", "label": "中文"},
+                    {"id": "en", "label": "英文"},
+                ],
+                "phrases": [
+                    {"id": "zh", "label": "中文"},
+                    {"id": "en", "label": "英文"},
+                ],
+                "description": [
+                    {"id": "zh", "label": "中文"},
+                    {"id": "en", "label": "英文"},
+                ],
+                "both": [
+                    {"id": "zh", "label": "全中文"},
+                    {"id": "en", "label": "全英文"},
+                    {"id": "mixed", "label": "英文标签 + 中文描述"},
+                ],
+            },
             "limits": {
                 "max_batch_images": MAX_BATCH_IMAGES,
                 "max_image_bytes": MAX_IMAGE_BYTES,
@@ -209,6 +230,22 @@ class LabelerService:
         if not self.jobs.cancel(task_id):
             return {"error": "任务无法取消（可能已结束）"}, 409
         return {"ok": True}, 200
+
+    def api_tasks_delete(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """批量删除已结束任务；不带 id = 清理全部已结束（对齐造梦机口径）。
+
+        标注库与原图留存不受影响；排队/执行中的跳过并回报。
+        """
+        body = body if isinstance(body, dict) else {}
+        raw = body.get("task_ids")
+        task_ids = raw if isinstance(raw, list) and raw else None
+        try:
+            result = self.jobs.delete_tasks(task_ids)
+        except LabelerDBError as exc:
+            return {"error": f"标注库繁忙，请稍后重试：{exc}"}, 503
+        except OSError as exc:
+            return {"error": f"删除任务失败：{exc}"}, 500
+        return {"ok": True, **result}, 200
 
     def api_retry(self, task_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         body = body if isinstance(body, dict) else {}

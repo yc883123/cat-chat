@@ -417,6 +417,28 @@ def encode_image_for_model(source: str) -> dict[str, str] | None:
 CONTENT_READ_TOOLS = frozenset({"read_file", "search_files", "vision_analyze", "vision_read_folder"})
 
 
+# ---- 自动压缩上下文：摘要消息的回放模板（docs/plans/2026-10-26-自动压缩上下文计划.md）----
+# 摘要在落标记时一次定格；这里是模型视图重放的唯一格式，逐字节稳定（前缀缓存从摘要
+# 之后继续有效）。模板与指令常量放 history 而不是 compaction，避免后者反向依赖。
+COMPACTION_REPLAY_PREAMBLE = (
+    "以下是本对话较早内容的自动整理摘要，作为既定背景使用，不必复述，"
+    "直接接续后面的消息继续当前任务："
+)
+COMPACTION_SUMMARY_OPEN = "<compacted-summary>"
+COMPACTION_SUMMARY_CLOSE = "</compacted-summary>"
+
+
+def compaction_replay_message(summary_text: str) -> dict[str, Any]:
+    """整理标记 → 模型视图里唯一的开场消息（role=user，固定格式）。"""
+    return {
+        "role": "user",
+        "content": (
+            f"{COMPACTION_REPLAY_PREAMBLE}\n{COMPACTION_SUMMARY_OPEN}\n"
+            f"{str(summary_text or '').strip()}\n{COMPACTION_SUMMARY_CLOSE}"
+        ),
+    }
+
+
 def _content_read_tool_outputs(tool_runs: list[dict[str, Any]]) -> str:
     """把某条 assistant 消息里"内容读取类"工具的结果，按**轮次中原生**的
     ``<untrusted_tool_result>`` 格式还原，供模型跨轮引用。
@@ -562,6 +584,14 @@ def build_model_history(
     replay_seq = 0
     for item in conversation_messages:
         metadata = item.get("metadata") or {}
+        # 自动压缩上下文（2026-10-26 计划）：整理标记出现在**被整理区间最后一条消息**上。
+        # 遇到它：此前历史（含本条）替换为一条固定格式的摘要消息，后续消息照常追加。
+        # 摘要在落标记时一次定格，这里逐字节重放——前缀缓存从摘要之后继续有效；
+        # 多个标记最后生效（与 SESSION_START 同口径）。
+        compaction = metadata.get(MetadataKeys.COMPACTION)
+        if isinstance(compaction, dict) and str(compaction.get("summary") or "").strip():
+            history = [compaction_replay_message(str(compaction["summary"]))]
+            continue
         # 「新会话开始」边界：从这里重算上下文（此前的消息一条都不进模型请求，
         # 聊天记录本身仍在库里/界面上）。多个边界取最后一个。
         if metadata.get(MetadataKeys.SESSION_START):

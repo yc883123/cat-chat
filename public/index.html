@@ -371,7 +371,10 @@
             <aside class="labeler-queue" aria-label="批次与队列">
               <div class="labeler-queue-head">
                 <strong>批次</strong>
-                <button class="control-button tiny" id="labelerRefreshRecent" type="button" title="重新读取最近批次">刷新</button>
+                <span class="labeler-queue-head-actions">
+                  <button class="control-button tiny" id="labelerClearFinished" type="button" title="删除全部已结束的批次记录（已生成的标注不受影响）">清理已完成</button>
+                  <button class="control-button tiny" id="labelerRefreshRecent" type="button" title="重新读取最近批次">刷新</button>
+                </span>
               </div>
               <div class="labeler-batch-list" id="labelerBatchList" aria-label="最近批次">
                 <p class="labeler-empty" id="labelerBatchEmpty">还没有批次。拖入一个文件夹即可开始。</p>
@@ -440,11 +443,27 @@
                   </select>
                 </label>
                 <label>输出语言
+                  <!-- 选项可见性与文案由 23-labeler.js 按输出形式联动：
+                       mixed（英文标签 + 中文描述）只在「标签 + 自然语言」下出现；
+                       默认「标签 + 英文」对齐旧默认 mixed 在标签模式下的实际效果。 -->
                   <select id="labelerLanguage" aria-label="输出语言">
-                    <option value="mixed">中英混合（标签英文 / 描述中文）</option>
                     <option value="zh">中文</option>
-                    <option value="en">英文</option>
+                    <option value="en" selected>英文</option>
+                    <option value="mixed">英文标签 + 中文描述</option>
                   </select>
+                </label>
+              </div>
+
+              <div class="labeler-field-row labeler-trigger-row">
+                <label class="labeler-trigger-toggle" title="启用后，触发词会加在每张图标注结果的最前面，并写进 LoRA 训练包的同名 txt；不会加进发给模型的提示词。">
+                  <span class="labeler-trigger-switch">
+                    <input id="labelerTriggerEnabled" type="checkbox">
+                    <span>添加触发词</span>
+                  </span>
+                </label>
+                <label>触发词
+                  <input id="labelerTriggerWord" type="text" maxlength="200"
+                    placeholder="例如 my_ohwx_style" disabled aria-label="触发词">
                 </label>
               </div>
 
@@ -1343,6 +1362,16 @@
             <div class="field-grid">
               <label>命令超时（秒）<input id="commandTimeout" type="number" min="10" max="900" step="10"><small class="hint">仅工具与命令执行有效；不控制在线或本地模型的响应超时。</small></label>
               <label>上下文提醒阈值（%）<input id="contextWarningPercent" type="number" min="0" max="100" step="5"><small class="hint">上下文用量达到该百分比时弹窗提醒一次；0 = 关闭提醒。</small></label>
+              <label>自动整理上下文
+                <select id="autoCompactionMode">
+                  <option value="auto">自动整理（默认）</option>
+                  <option value="remind">整理前先提醒</option>
+                  <option value="off">关闭</option>
+                </select>
+                <small class="hint">对话接近模型上下文上限时，把较早的内容换成一份交接总结，让当前对话继续往下走。整理时会用**当前对话正在用的这个模型**额外发一次总结请求（不换模型、不需要另配），所以会多花一次调用；完整聊天记录一条不删，整理位置会出现一张可展开、可撤销的整理卡。</small>
+              </label>
+              <label>自动整理触发阈值（%）<input id="autoCompactionThreshold" type="number" min="30" max="95" step="5"><small class="hint">上下文估算用量达到模型窗口的该百分比时开始整理。默认 70：整理要额外发一次总结请求、之后还要正常回复，所以要留出空间，不要等到快满再整理。</small></label>
+              <label>整理时保留最近几轮对话<input id="autoCompactionRetain" type="number" min="1" max="20" step="1"><small class="hint">按「完整轮次」保留：最近这几轮你的提问连同回复一起原样留下，只整理更早的部分。留得越多越不容易丢上下文，但释放的空间越少。</small></label>
               <label>本地首字节超时（秒）<input id="localFirstByteTimeout" type="number" min="0" max="1800" step="10"><small class="hint">本地模型做 prefill 时往往长时间不输出内容，与「一直做不完」在界面上无法区分。连续该时长没有输出任何正文（链路的保活注释不算）即断开并报错。0 = 关闭（退回等满 30 分钟总超时的旧行为）。</small></label>
               <label>Agent 最大步数<input id="agentStepLimit" type="number" min="0" max="1000" step="10"><small class="hint">单轮回复允许的模型调用次数上限（每次工具调用算一步）。达到上限会停止并说明原因，避免模型反复调工具停不下来。0 = 不限制。</small></label>
               <label>图片编码记忆上限（MB）<input id="imageEncodeCacheMb" type="number" min="0" max="4096" step="64"><small class="hint">每轮发消息前，历史里的每张图片都要重新「读盘 → 解码 → 压到 1600px → base64」。这项把编码结果按「路径 + 大小 + 修改时间」在内存里记住，同一张图一个会话只编码一次（真实出图 3.9MB PNG 单张中位约 77ms，12 张一轮约 0.92 秒）。<b>只影响速度与内存，不影响发给模型的字节</b>，因此不会打断前缀缓存。图片被重新生成会自动重编码。0 = 关闭记忆。</small></label>

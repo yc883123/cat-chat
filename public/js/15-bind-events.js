@@ -4,7 +4,7 @@
 
 import { $, $$, api, applyAppearance, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, escapeHtml, hideTextContextMenu, isCoarsePointer, onChatBackgroundMissingChange, triggerDownload, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setClipboardPasteDriver, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer, watchTopbarWidth } from "./01-core.js";
 import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarning, ensureImageContextMenu, fileUrl, handleImageLightboxKey, hideFileActionMenu, hideImageContextMenu, initImageLightboxInteractions, isPywebview, openImageLightbox, positionContextUsagePopover, resetContextWarningResume, runImageContextAction, saveLocalFile, showFileActionMenu, showImageContextMenu, stepImageLightbox, toggleContextUsagePopover, updateSendButtonState } from "./03-media.js";
-import { branchMessage, cancelActiveEdit, cancelSessionStart, confirmActiveEdit, deleteMessageFlow, fillContextResetSeed, initTurnRail, isNearBottom, regenerateMessage, setStickToBottom, startEditMessage, startNewSession, undoLastDelete } from "./04-messages.js";
+import { branchMessage, cancelActiveEdit, cancelCompaction, cancelSessionStart, confirmActiveEdit, deleteMessageFlow, fillContextResetSeed, initTurnRail, isNearBottom, regenerateMessage, setStickToBottom, startEditMessage, startNewSession, undoLastDelete } from "./04-messages.js";
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
 import { switchPermissionMode } from "./06-tasks-plans.js";
 import { checkUpdate, closeAgentHelpPopover, closeComposerModelPicker, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, applyUpdate, cancelUpdate, discardUpdate, dismissUpdateReady, saveUpdateProxy, syncUpdateFloat, syncUpdateProxyControls, renderUpdateProxyState, positionAgentHelpPopover, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleAgentHelpPopover, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
@@ -1772,6 +1772,11 @@ export function bindEvents() {
       cancelSessionStart(cancelSessionButton.closest('.message-row')?.dataset.messageId);
       return;
     }
+    const cancelCompactionButton = event.target.closest('[data-cancel-compaction]');
+    if (cancelCompactionButton) {
+      cancelCompaction(cancelCompactionButton.closest('.message-row')?.dataset.messageId);
+      return;
+    }
     const seedButton = event.target.closest('[data-fill-reset-seed]');
     if (seedButton) {
       const divider = seedButton.closest('.message-row.session-divider');
@@ -2788,7 +2793,7 @@ export function renderSkillAdminDetail() {
   mkBtn('control-button', '打开目录', '在资源管理器中打开 Skill 目录', () => {
     const root = skill.root || skill.path || '';
     if (!root) return;
-    if (isPywebview()) void callDesktopFileAction({ method: 'naibaRevealInFolder', args: [root], failure: '无法打开文件夹' });
+    if (isPywebview()) void callDesktopFileAction({ method: 'naibaOpenFolder', args: [root], failure: '无法打开文件夹' });
     else void navigator.clipboard?.writeText(root).then(() => toast('已复制目录路径'));
   });
   mkBtn('control-button', '编辑 SKILL.md', '挂载文件工具，让模型在本会话中修改该 Skill 文件', () => startSkillEdit(skill));

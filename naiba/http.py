@@ -822,6 +822,65 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
                 return
             self._json(result, HTTPStatus.CREATED)
+        elif path.startswith("/api/conversations/") and path.endswith("/compact"):
+            # 手动整理上下文：与自动整理同一套逻辑（用该会话当前的模型发一次隐藏总结），
+            # 标记落在「被整理区间最后一条消息」上，重放端据此以摘要开场。
+            conversation_id = path.split("/")[-2]
+            conversation = self.app.storage.get_conversation(conversation_id)
+            if not conversation:
+                self._json({"error": "对话不存在"}, HTTPStatus.NOT_FOUND)
+                return
+            from naiba.core import compaction as compaction_mod
+            from naiba.llm.profiles import resolve_profile_with_override
+
+            settings = compaction_mod.resolve_settings(
+                (getattr(self.app.config, "data", {}) or {}).get("auto_compaction"))
+            model_key = str(conversation.get("model_key") or "")
+            model_name = str(conversation.get("model_name") or "")
+            if not model_key or not model_name:
+                self._json({"error": "这个对话还没有记录模型，先发一条消息再整理"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                profile = resolve_profile_with_override(self.app.config, model_key, model_name)
+            except (ValueError, KeyError) as exc:
+                self._json({"error": f"模型配置不可用：{exc}"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                result = compaction_mod.compact_conversation(
+                    self.app,
+                    conversation_id=conversation_id,
+                    rows=list(conversation.get("messages") or []),
+                    settings=settings,
+                    profile=profile,
+                    model_key=model_key,
+                    model_name=model_name,
+                    source="manual",
+                    force=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - 整理失败如实回报，不动对话
+                self._json({"error": f"整理失败：{exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            # 不合格时把原因带回去，前端能说清「为什么没整理」。
+            reason_text = {
+                "region_too_small": "更早的消息太少，还没有可整理的内容",
+                "region_empty": "更早的消息里没有可整理的内容",
+                "freed_too_small": "摘要没有比原文更短，整理没有意义",
+                "summary_too_short": "模型返回的交接总结太短，没有采用",
+                "summary_too_long": "模型返回的交接总结过长，没有采用",
+                "summary_not_structured": "模型返回的内容不是结构化交接格式，没有采用",
+                "marker_write_failed": "保存整理结果失败",
+            }.get(str(result.get("reason") or ""), "")
+            if not result.get("compacted") and str(result.get("reason") or "").startswith("summary_failed"):
+                reason_text = "总结请求失败，本轮没有整理"
+            if not result.get("compacted") and str(result.get("reason") or "").startswith("summary_missing_sections"):
+                reason_text = "模型返回的交接总结缺少关键分区，没有采用"
+            payload = {"ok": bool(result.get("compacted")), **result}
+            if reason_text:
+                payload["message"] = reason_text
+            self._json(
+                payload,
+                HTTPStatus.CREATED if result.get("compacted") else HTTPStatus.CONFLICT,
+            )
         elif path.startswith("/api/conversations/") and path.endswith("/session_start"):
             # 手动「新会话」分割线：标在指定消息上（不新增行、不删消息），
             # 重放侧遇到该标记即从此条之后重算上下文。
@@ -1378,6 +1437,13 @@ class RequestHandler(BaseHTTPRequestHandler):
             if body is None:
                 return
             self._json(*self.app.comfyui.api_tasks_delete(body))
+        elif path == "/api/labeler/tasks":
+            # 打标器：批量删除已结束任务（执行中跳过）；标注库与原图留存不受影响。
+            # 不带 task_ids = 清理全部已结束（与造梦机同口径）。
+            body = self._read_json()
+            if body is None:
+                return
+            self._json(*self.app.labeler.api_tasks_delete(body))
         elif path.startswith("/api/comfyui/workflows/"):
             self._json(*self.app.comfyui.api_workflow_delete(path.rsplit("/", 1)[-1]))
         elif path == "/api/app-icon":
@@ -1422,6 +1488,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json({"error": "当前对话仍有运行中的任务，无法清空"}, HTTPStatus.CONFLICT)
                 return
             self._json({"deleted": self.app.storage.clear_conversation_messages(conversation_id)})
+        elif path.startswith("/api/compaction/"):
+            # 撤销自动整理标记：旧消息全部回到模型上下文（下轮前缀缓存重预热一次）。
+            message_id = path.rsplit("/", 1)[-1]
+            deleted = self.app.storage.clear_compaction_marker(message_id)
+            self._json({"ok": deleted}, HTTPStatus.OK if deleted else HTTPStatus.NOT_FOUND)
         elif path.startswith("/api/session_start/"):
             # 撤销分割线：先按遗留标记行删（role=session），否则清掉消息 metadata 上的标记。
             message_id = path.rsplit("/", 1)[-1]

@@ -674,6 +674,9 @@ const CHAT_EVENT_HANDLERS = {
   cancelled: handleCancelledEvent,
   run_failed: handleRunFailedEvent,
   context_full: handleContextFullEvent,
+  // 自动整理上下文（2026-10-26 计划）：hint = 提醒模式提示；compacted = 已整理，
+  // 本轮结束后会重载会话，整理卡由消息 metadata 渲染。
+  compaction: handleCompactionEvent,
   done: handleDoneEvent,
   error: handleErrorEvent,
   usage: handleUsageEvent,
@@ -1108,6 +1111,24 @@ function handleRunFailedEvent(event, { answer, setActivity }) {
   $('#runtimeStatus').textContent = '执行失败';
   // 失败同样意味着一轮结束：队列不再有消费者，冻结成「已停止」（同时撤掉引导按钮）。
   freezeQueuedInterjections();
+}
+
+function handleCompactionEvent(event, { setActivity }) {
+  const action = String(event.action || '');
+  if (action === 'hint') {
+    // 提醒模式：只提示、不整理，本轮照常发请求。用户可在设置里改成自动整理。
+    setActivity('');
+    toast('上下文接近上限：可在「设置 → 运行设置」把自动整理设为「自动整理」，或点消息上的「新会话」重开上下文');
+    return false;
+  }
+  if (action === 'compacted') {
+    const region = Number(event.region_messages || 0);
+    toast(region
+      ? `已把较早的 ${region} 条消息整理成摘要，对话继续往下走（完整记录都在）`
+      : '已整理较早的对话内容，对话继续往下走（完整记录都在）');
+    return false;
+  }
+  return false;
 }
 
 function handleContextFullEvent() {

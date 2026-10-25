@@ -809,6 +809,28 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .session-divider-seed { flex: none; border: 0; background: none; color: var(--muted); padding: 2px 5px; font-size: 11.5px; cursor: pointer; }
 .session-divider-seed:hover { color: var(--accent); }
 .session-divider-hint { margin: 3px 0 0; color: var(--muted); font-size: 11px; text-align: center; word-break: break-all; }
+/* 「上下文已整理」卡片（标在某条消息 metadata 上，渲染在其正下方）：此线以上的消息
+   已被换成一份本地摘要、仍在模型上下文里；聊天记录一条不删，可展开看摘要、可撤销 */
+.message-row.compaction-card { grid-template-columns: minmax(0, 1fr); margin: -6px 0 18px; }
+.compaction-details {
+  border: 1px solid var(--line-strong); border-left: 3px solid var(--accent);
+  border-radius: var(--r-md); background: var(--surface-2); padding: 8px 12px;
+}
+.compaction-summary { display: flex; align-items: baseline; gap: 10px; cursor: pointer; font-size: 12px; color: var(--text); }
+.compaction-summary::-webkit-details-marker { display: none; }
+.compaction-label { font-weight: 600; flex: none; }
+.compaction-meta { color: var(--muted); font-size: 11px; }
+.compaction-body {
+  margin-top: 8px; padding: 8px 10px; border-radius: var(--r-sm); background: var(--surface);
+  color: var(--text); font-size: 12px; line-height: 1.65; white-space: pre-wrap; word-break: break-word;
+  max-height: 320px; overflow: auto;
+}
+.compaction-hint { margin: 6px 0 0; color: var(--muted); font-size: 11px; }
+.compaction-cancel {
+  margin-top: 6px; border: 1px solid var(--line); background: var(--surface); color: var(--muted);
+  border-radius: var(--r-sm); padding: 2px 8px; font-size: 11.5px; cursor: pointer;
+}
+.compaction-cancel:hover { color: var(--accent); border-color: var(--accent); }
 .usage-line { margin-top: 8px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 /* 流式期间常驻消息尾端的用量框：首次请求完成时挂载、之后原位更新 */
 .usage-stream { margin-top: 6px; padding: 4px 10px; border-radius: 8px; background: rgba(128, 128, 128, 0.06); }

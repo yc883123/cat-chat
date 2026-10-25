@@ -726,6 +726,40 @@ class ConversationRunMixin:
                 **self.app.config.reasoning_replay_options(),
                 **self.app.config.image_encode_cache_options(),
             )
+            # 自动压缩上下文（2026-10-26 计划）：估算 →（auto）整理 → 从存储重读并原生重建
+            # 本轮模型视图。必须在 vision 清洗**之前**：整理后的重建走同一条 build 链路，
+            # 图片编码 / 视觉处理对最终视图只跑一次；估算只读不写，off / 未触线的会话
+            # 请求字节与没有这个功能时完全一致（前缀缓存零影响）。
+            compaction_info: dict[str, Any] = {}
+            try:
+                compaction_info = self._maybe_compact_context(
+                    run=run, snapshot=snapshot, conversation_id=conversation_id,
+                    conv_kind=conv_kind, frozen_conversation=frozen_conversation,
+                    history=history, profile=profile, effective=effective,
+                    model_key=model_key, model_name=model_name,
+                    pdf_tools=pdf_tools_enabled, video_tools=video_tools_enabled,
+                    event=event, cancel_event=cancel_event,
+                )
+            except Exception as exc:  # noqa: BLE001 - 整理失败保留当前内容（fail-open）
+                if cancel_event.is_set():
+                    raise TaskCancelled("任务已取消")
+                event({"type": "status", "message": f"自动整理上下文未完成（{exc}），本轮按原样继续"})
+            if compaction_info.get("rebuilt"):
+                frozen_conversation = self.app.storage.get_conversation(conversation_id) or {}
+                run["conversation_messages"] = _frozen_history_for_run(run, snapshot, frozen_conversation)
+                history = build_model_history(
+                    run.get("conversation_messages") or [], event,
+                    pdf_tools=pdf_tools_enabled, video_tools=video_tools_enabled,
+                    local_image_brain=local_brain(profile),
+                    **self.app.config.reasoning_replay_options(),
+                    **self.app.config.image_encode_cache_options(),
+                )
+            elif compaction_info.get("hint"):
+                event({
+                    "type": "compaction", "action": "hint",
+                    "used": int(compaction_info.get("used") or 0),
+                    "limit": int(compaction_info.get("limit") or 0),
+                })
             # 视觉统一由模型驱动（自动路由已移除）：文本大脑不支持看图时，只把图片改写为
             # 安全文本占位（路径引用 + 工具提示），由模型按需主动调用 vision_analyze；
             # 纯文本大脑绝不会收到原始 image_url，也不会再有后台自动识图。
@@ -1316,6 +1350,78 @@ class ConversationRunMixin:
             # 用量台账：计划执行与主对话同一口径（最后一条 usage 事件 = 累计汇总）。
             self.app.record_run_usage(run_id)
             self._finish(run_id)
+
+    def _maybe_compact_context(
+        self, *, run: dict[str, Any], snapshot: dict[str, Any], conversation_id: str,
+        conv_kind: str, frozen_conversation: dict[str, Any], history: list[dict[str, Any]],
+        profile: dict[str, Any], effective: str, model_key: str = "", model_name: str = "",
+        pdf_tools: bool = True, video_tools: bool = True,
+        event: Any, cancel_event: threading.Event,
+    ) -> dict[str, Any]:
+        """自动压缩上下文的轮首检查（docs/plans/2026-10-26-自动压缩上下文计划.md）。
+
+        触发时用**本轮实际选中的同一个 profile** 发一条隐藏的交接总结请求
+        （``models.complete``，不挂工具、不流式），摘要定稿后写进标记；正式对话仍走原路径。
+        不请求另一个模型、不需要额外配置。
+
+        返回 {} = 无动作；{"hint","used","limit"} = 提醒模式超线；
+        {"rebuilt": True} = 已整理，调用方需重读会话并重建模型视图。
+        估算口径与轮首闸门同源（SkillAgent._context_fits）；off / aux 会话直接返回，
+        不做任何读写——请求字节与没有该功能时一致。
+        """
+        from naiba.core import compaction as compaction_mod
+
+        settings = compaction_mod.resolve_settings(
+            (getattr(self.app.config, "data", {}) or {}).get("auto_compaction"))
+        mode = compaction_mod.effective_mode(settings, frozen_conversation)
+        if mode == compaction_mod.MODE_OFF or conv_kind == "aux":
+            return {}
+        rows = run.get("conversation_messages") or []
+        if not rows:
+            return {}
+        allowed_names = {str(item) for item in (snapshot.get("allowed_tools") or [])}
+        schemas_getter = getattr(self.app.tool_registry, "schemas", None)
+        tools_estimate = [
+            spec for spec in (schemas_getter() if callable(schemas_getter) else [])
+            if isinstance(spec, dict) and str(spec.get("name") or "") in allowed_names
+        ]
+        # 本轮用户输入算进「已用」；系统提示/工具 schema 的固定成本不进 used——它们由
+        # _context_fits 单独从窗口里扣掉（体现在 budget 上），重复计一次会让短会话也被
+        # 判成「接近上限」。这里只按「历史 + 本轮输入」判断真实占用。
+        extra_tokens = SkillAgent._estimate_content_tokens(effective)
+        _fits, limit, used, budget = SkillAgent._context_fits(
+            history, profile, {"tools": tools_estimate}, "", extra_tokens=extra_tokens,
+        )
+        # 预留 = 窗口里「不属于历史预算」的那部分（输出预留 + 系统提示/工具 schema 固定成本）。
+        # 触发点据此提前：整理本身要花一次总结请求的输出，整理完本轮还要正常回复，
+        # 两者都必须有空间，否则会出现「刚整理完立刻又撞窗口」。
+        # ⚠️ 不能用 budget - used：那是「历史还剩多少」，与回复空间无关，会把任何会话
+        # 都判成需要整理（曾经写成这样，测试当场抓住）。
+        reserve = max(0, int(limit) - int(budget))
+        if not compaction_mod.should_compact(
+            settings, used=used, limit=limit, reserve=reserve,
+        ):
+            return {}
+        if mode == compaction_mod.MODE_REMIND:
+            return {"hint": True, "used": used, "limit": limit}
+        if cancel_event.is_set():
+            raise TaskCancelled("任务已取消")
+        event({"type": "status", "message": "上下文接近上限，正在整理较早对话…"})
+        result = compaction_mod.compact_conversation(
+            self.app, conversation_id=conversation_id, rows=rows, settings=settings,
+            profile=profile, model_key=model_key, model_name=model_name,
+            pdf_tools=pdf_tools, video_tools=video_tools,
+            source="auto", limit=limit, used=used, cancel_event=cancel_event,
+        )
+        if result.get("compacted"):
+            event({
+                "type": "compaction", "action": "compacted",
+                "region_messages": int(result.get("region_messages") or 0),
+                "freed_est": int(result.get("freed_est") or 0),
+                "used": used, "limit": limit,
+            })
+            return {"rebuilt": True}
+        return {}
 
     def _record_local_image_demotions(
         self, conversation_id: str, demotions: list[dict[str, Any]]

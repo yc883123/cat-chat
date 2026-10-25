@@ -2745,6 +2745,35 @@ class ChatStorage:
         return True
 
     @_retry_transient_write
+    def clear_compaction_marker(self, message_id: str) -> bool:
+        """撤销一条「自动整理」标记（只摘 compaction 键，消息与其余 metadata 保留）。
+
+        撤销后旧消息全部回到模型上下文；代价是下一轮的前缀缓存从整理前位置重预热。
+        """
+        now = int(time.time() * 1000)
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT conversation_id, metadata FROM messages WHERE id = ?", (message_id,)
+            ).fetchone()
+            if not row:
+                return False
+            metadata = json.loads(row["metadata"] or "{}")
+            if not isinstance(metadata, dict) or MetadataKeys.COMPACTION not in metadata:
+                return False
+            # 与 clear_session_start 同口径：json_remove 只删自己的键，不整块写回。
+            db.execute(
+                "UPDATE messages SET metadata = "
+                f"json_remove(COALESCE(NULLIF(metadata, ''), '{{}}'), '$.{MetadataKeys.COMPACTION}') "
+                "WHERE id = ?",
+                (message_id,),
+            )
+            db.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (now, row["conversation_id"]),
+            )
+        return True
+
+    @_retry_transient_write
     def delete_session_start(self, message_id: str) -> bool:
         """删除**遗留形态**的边界标记行（role=session；只允许删该角色，避免误删对话消息）。"""
         now = int(time.time() * 1000)

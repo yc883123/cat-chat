@@ -453,6 +453,17 @@ def default_config() -> dict[str, Any]:
         "command_timeout": 120,
         # 上下文用量提醒阈值（%）：圆环达到该百分比时前端弹窗提醒一次；0=关闭提醒。
         "context_warning_percent": 80,
+        # 自动压缩上下文（docs/plans/2026-10-26-自动压缩上下文计划.md）：
+        # mode=auto 自动整理 / remind 整理前提醒 / off 关闭；threshold_percent 触发阈值
+        # （窗口百分比，默认 70——整理要额外发一次总结请求、之后还要正常回复，必须提前）；
+        # retain_turns 逐字保留的最近**完整轮次**数；summary_max_tokens 总结请求输出上限。
+        # 总结用当前会话同一模型（不引入摘要模型）。兜底见 core.compaction.resolve_settings。
+        "auto_compaction": {
+            "mode": "auto",
+            "threshold_percent": 70,
+            "retain_turns": 3,
+            "summary_max_tokens": 2048,
+        },
         # 本地模型「首字节超时」（秒）：本地后端在 prefill 期间一个字节都不吐，
         # 「正在 prefill」和「永远做不完」在界面上无法区分。本地请求总超时是 1800 秒，
         # 不加这道闸用户要干等半小时才知道这一轮没戏（客户机实测整条会话看似永久卡死）。
@@ -1465,7 +1476,8 @@ class ConfigStore:
             except (OSError, json.JSONDecodeError):
                 pass
         # 嵌套默认值合并：用户配置若只写了部分子字段，补齐缺失键。
-        for key in ("vision", "search", "appearance", "chat_background", "update_proxy", "studio"):
+        for key in ("vision", "search", "appearance", "chat_background", "update_proxy",
+                    "studio", "auto_compaction"):
             merged = dict(default_config().get(key, {}))
             if isinstance(defaults.get(key), dict):
                 merged.update(defaults[key])
@@ -2428,6 +2440,7 @@ class ConfigStore:
             "agent_tools",
             "command_timeout",
             "context_warning_percent",
+            "auto_compaction",
             "local_first_byte_timeout_seconds",
             "reasoning_replay_max_chars",
             "reasoning_replay_turn_chars",
@@ -2853,6 +2866,20 @@ class ConfigStore:
                         if percent < 0 or percent > 100:
                             raise ValueError("上下文提醒阈值必须在 0-100 之间")
                         self.data[key] = percent
+                    elif key == "auto_compaction":
+                        # 白名单校验：未知键拒绝；数值按范围收紧（resolve_settings 再兜底）。
+                        from naiba.core.compaction import VALID_MODES, resolve_settings
+                        raw = values[key]
+                        if not isinstance(raw, dict):
+                            raise ValueError("自动整理设置必须是对象")
+                        allowed = {"mode", "threshold_percent", "retain_turns", "summary_max_tokens"}
+                        unknown = set(raw) - allowed - {"digest_max_chars", "retain_messages"}
+                        if unknown:
+                            raise ValueError(f"自动整理设置包含不支持的字段：{', '.join(sorted(unknown))}")
+                        mode = str(raw.get("mode") or "").strip().lower()
+                        if mode not in VALID_MODES:
+                            raise ValueError("自动整理模式必须是 auto / remind / off")
+                        self.data[key] = resolve_settings(raw)
                     elif key == "local_first_byte_timeout_seconds":
                         # 0 = 关闭；否则 5-1800 秒。留空按默认值处理（避免误清空导致闸门失效）。
                         raw = values[key]

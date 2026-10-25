@@ -268,6 +268,9 @@ class EventType(str, Enum):
     RUN_FAILED = "run_failed"
     RUN_STARTED = "run_started"
     CONTEXT_FULL = "context_full"
+    # 自动压缩上下文（docs/plans/2026-10-26-自动压缩上下文计划.md）：
+    # action=hint 提醒模式超线；action=compacted 已整理（前端据此 toast，整理卡走消息 metadata）。
+    COMPACTION = "compaction"
     DONE = "done"
     ERROR = "error"
     DEBUG_CACHE = "debug_cache"
@@ -314,6 +317,11 @@ class EventPayload(TypedDict, total=False):
     # done 事件里的「新会话」重置信息（模型调 reset_context 成功时才有）：终态事件不再带
     # 完整消息，前端要靠它在收尾瞬间把种子消息预填进输入框（重载路径只画分割线、不填）。
     session_start: dict[str, Any]
+    # 自动压缩上下文（compaction 事件）：action=hint / compacted；region_messages 与
+    # freed_est 是整理条数与预计释放量（前端 toast 与整理卡摘要用）。
+    action: str
+    region_messages: int
+    freed_est: int
     # 存量形态（v24 前的 cancelled/error 事件会带，新契约不再发射；前端仍容忍重放旧事件流）。
     partial_message: dict[str, Any]
     # 工具流
@@ -419,6 +427,9 @@ EVENT_PAYLOAD_KEYS: dict[str, frozenset[str] | None] = {
     "cancelled": frozenset({"message"}),
     "run_failed": frozenset({"error"}),
     "context_full": frozenset({"limit", "used", "budget"}),
+    # 自动整理：action=hint（提醒）/ compacted（已整理）；region_messages/freed_est 是
+    # 整理条数与预计释放量，used/limit 是触发时的估算口径。
+    "compaction": frozenset({"action", "region_messages", "freed_est", "used", "limit"}),
     # done **不带** `message`：终态消息由前端收尾时重载会话（GET /api/conversations/<id>）
     # 拿到，事件里带着它等于把整份消息（含 metadata.trace，实测最长 318KB）写进 run_events
     # 再被终态瘦身删掉。这里只放"只有事件能给的即时动作"字段。

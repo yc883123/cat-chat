@@ -108,6 +108,47 @@ export function sessionDividerElement(message) {
   return row;
 }
 
+// 「自动整理上下文」卡片：标在**被整理区间最后一条消息**的 metadata 上（compaction），
+// 渲染在该消息正下方。语义 = 此线以上的消息已被替换成一份本地摘要，仍在模型上下文里；
+// 聊天记录一条不删，点「撤销整理」可让它们重新进入上下文。
+// 摘要由本地抽取生成（不调用任何模型），卡内可展开查看原文。
+export function compactionCardElement(message) {
+  const info = (message.metadata || {}).compaction || {};
+  const at = Number(info.at || message.created_at || 0);
+  const time = at ? new Date(at).toLocaleString('zh-CN', { hour12: false }) : '';
+  const summary = String(info.summary || '');
+  const region = Number(info.region_messages || 0);
+  const freed = Number(info.freed_est || 0);
+  // 生成方式如实说明：模型总结 vs 本地抽取（旧版本写入的标记是本地抽取）。
+  const modelName = String(info.model_name || '');
+  const modelLine = String(info.generator || '') === 'model-summary'
+    ? `这段交接总结由${modelName ? `「${escapeHtml(modelName)}」` : '当前模型'}生成，整理后原样复用、不会每轮重写；`
+    : '这段摘要由本地抽取生成；';
+  const row = document.createElement('article');
+  row.className = 'message-row compaction-card';
+  row.dataset.messageId = message.id || '';
+  row.dataset.compactionCard = message.id || '';
+  row.innerHTML = `
+    <details class="compaction-details">
+      <summary class="compaction-summary">
+        <span class="compaction-label">上下文已整理${time ? ` · ${escapeHtml(time)}` : ''}</span>
+        <span class="compaction-meta">${region ? `较早的 ${region} 条消息` : '较早消息'}${freed ? ` · 约省 ${freed} tokens` : ''}</span>
+      </summary>
+      <div class="compaction-body">${escapeHtml(summary) || '（摘要为空）'}</div>
+      <p class="compaction-hint">${modelLine}上方聊天记录一条没删。</p>
+      ${message.id ? '<button type="button" class="compaction-cancel" data-cancel-compaction title="撤销整理：被整理的旧消息重新进入模型上下文（下一轮会重建一次缓存）">撤销整理</button>' : ''}
+    </details>`;
+  return row;
+}
+
+// 该消息下方是否要跟一张整理卡（与「新会话」分割线互不冲突：两种标记可以同时存在）。
+export function compactionAfter(message) {
+  if (!message || message.role === 'session') return null;
+  const info = (message.metadata || {}).compaction;
+  if (!info || typeof info !== 'object' || !String(info.summary || '').trim()) return null;
+  return compactionCardElement(message);
+}
+
 // 该消息下方是否要跟一条分割线（遗留标记行由 messageElement 直接渲染，不在此列）。
 export function sessionDividerAfter(message) {
   if (!message || message.role === 'session') return null;
@@ -120,6 +161,8 @@ export function replaceWithMessage(target, message, temporary = false) {
   target.replaceWith(element);
   const divider = sessionDividerAfter(message);
   if (divider) element.insertAdjacentElement('afterend', divider);
+  const card = compactionAfter(message);
+  if (card) (divider || element).insertAdjacentElement('afterend', card);
   return element;
 }
 
@@ -858,6 +901,20 @@ export async function cancelSessionStart(messageId) {
   }
 }
 
+// 撤销自动整理：删掉消息上的 compaction 标记，被整理的旧消息全部回到模型上下文。
+// 代价讲清楚：下一轮前缀缓存会从整理前的位置重建一次。
+export async function cancelCompaction(messageId) {
+  if (!messageId) return;
+  if (!window.confirm('撤销这次整理？\n\n被整理的旧消息会重新进入模型上下文；下一轮对话会重建一次缓存。')) return;
+  try {
+    await api(`/api/compaction/${encodeURIComponent(messageId)}`, { method: 'DELETE' });
+    await syncCurrentConversation();
+    toast('已撤销整理，旧消息重新进入上下文');
+  } catch (error) {
+    toast(`撤销失败：${error.message}`);
+  }
+}
+
 export let stickToBottom = true;
 
 // ESM 下 import 绑定只读：跨文件写入经 setter（读点保持直接引用不变）。
@@ -1063,6 +1120,8 @@ function messageRangeFragment(messages, start, end) {
     fragment.append(messageElement(message));
     const divider = sessionDividerAfter(message);
     if (divider) fragment.append(divider);
+    const card = compactionAfter(message);
+    if (card) fragment.append(card);
   }
   markChoicePreviewAnsweredState(fragment, messages);
   return fragment;

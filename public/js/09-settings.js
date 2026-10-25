@@ -1013,6 +1013,17 @@ export function populateRuntimeSettings() {
   if ($('#contextWarningPercent')) {
     $('#contextWarningPercent').value = Number(settings.context_warning_percent ?? 80);
   }
+  // 自动整理上下文：三项都要原样回显（off / 30 等都不是「空值回落」场景）。
+  const compaction = settings.auto_compaction || {};
+  if ($('#autoCompactionMode')) {
+    $('#autoCompactionMode').value = String(compaction.mode || 'auto');
+  }
+  if ($('#autoCompactionThreshold')) {
+    $('#autoCompactionThreshold').value = Number(compaction.threshold_percent ?? 70);
+  }
+  if ($('#autoCompactionRetain')) {
+    $('#autoCompactionRetain').value = Number(compaction.retain_turns ?? 3);
+  }
   // 本地首字节超时 / Agent 最大步数：0 有意义（分别表示「关闭本层」「不限制」），
   // 因此不能用 `|| 默认值` 回填，必须原样回显。
   if ($('#localFirstByteTimeout')) {
@@ -4530,6 +4541,16 @@ export async function saveRuntimeSettings() {
   const payload = {
     command_timeout: Number($('#commandTimeout')?.value || 120),
     context_warning_percent: warningRaw === '' ? 80 : Number(warningRaw),
+    // 总结请求的输出上限（summary_max_tokens）没有界面入口：保存时沿用当前值，
+    // 不因为「这次没提交」被重置回默认（服务端 resolve_settings 只兜底不记忆）。
+    auto_compaction: {
+      mode: String($('#autoCompactionMode')?.value || 'auto'),
+      threshold_percent: Number($('#autoCompactionThreshold')?.value || 70),
+      retain_turns: Number($('#autoCompactionRetain')?.value || 3),
+      ...(Number(state.bootstrap?.settings?.auto_compaction?.summary_max_tokens) > 0
+        ? { summary_max_tokens: Number(state.bootstrap.settings.auto_compaction.summary_max_tokens) }
+        : {}),
+    },
     local_first_byte_timeout_seconds: firstByteRaw === '' ? 120 : Number(firstByteRaw),
     // 思考回放限长：0 有意义（关闭限长），只有「留空」才回落到默认值。
     reasoning_replay_max_chars: replayMaxRaw === '' ? 4000 : Number(replayMaxRaw),

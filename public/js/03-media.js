@@ -61,8 +61,7 @@ function fileExtension(value) {
 let lightboxItems = [];
 let lightboxIndex = -1;
 
-function collectConversationImages() {
-  const container = $('#messages');
+function collectImages(container) {
   if (!container) return [];
   const seen = new Set();
   const items = [];
@@ -73,6 +72,14 @@ function collectConversationImages() {
     items.push({ url, name: String(img.getAttribute('alt') || '') });
   });
   return items;
+}
+
+function collectConversationImages() {
+  return collectImages($('#messages'));
+}
+
+function collectComfyuiOutputImages() {
+  return collectImages($('#comfyuiOutputGrid'));
 }
 
 function renderLightboxFrame() {
@@ -102,8 +109,11 @@ export function openImageLightbox(largeUrl, sourceEl = null) {
   if (!img || !box || !url) return;
   // 宿主托管的图片链接：/api/file（uploads/generated 等）与 /api/comfyui/tasks/（造梦机产物）。
   if (!/^(\/api\/file|\/api\/comfyui\/tasks\/|https?:\/\/)/i.test(url)) return;
-  const inConversation = Boolean(sourceEl && sourceEl.closest && sourceEl.closest('#messages'));
-  lightboxItems = inConversation ? collectConversationImages() : [];
+  const inConversation = Boolean(sourceEl?.closest?.('#messages'));
+  const inComfyuiOutputs = Boolean(sourceEl?.closest?.('#comfyuiOutputGrid'));
+  lightboxItems = inConversation
+    ? collectConversationImages()
+    : (inComfyuiOutputs ? collectComfyuiOutputImages() : []);
   lightboxIndex = lightboxItems.findIndex((item) => item.url === url);
   if (lightboxIndex < 0) {
     // 不在会话列表内（输入区附件、文件面板）或列表为空：按单张展示，不显示左右按钮。

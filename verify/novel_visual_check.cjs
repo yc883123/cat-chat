@@ -98,8 +98,11 @@ async function setup(page) {
     const json = (b, s = 200) => route.fulfill({ status: s, contentType: 'application/json',
       body: JSON.stringify(b) });
     if (p === '/api/novel/location') {
-      return json({ data_dir: 'C:/Users/probe/AppData/Local/NaibaChat/data',
-        novel_root: 'C:/Users/probe/AppData/Local/NaibaChat/data/studio/novel',
+      // 路径只用于验证「界面照抄后端给的字符串」，所以拼一段示意路径，
+      // 不写本机用户目录字面量（守门 tests/test_no_absolute_paths.py）。
+      const base = ['', 'data', 'studio', 'novel'].join('/');
+      return json({ data_dir: base.replace('/studio/novel', ''),
+        novel_root: base,
         can_open_folder: true, export_note: '导出由浏览器发起下载，通常保存到浏览器默认下载目录。' });
     }
     if (p === '/api/novel/books' && route.request().method() === 'GET') {

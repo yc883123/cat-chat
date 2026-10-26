@@ -162,6 +162,9 @@ KEEP = {
     # 创作场（小说改编阶段一、二，2026-10-25/26 入库；.gitignore 对应位置有说明）：
     # 导入 → 拆章 → 勾选 → 保存 → 单章编辑 → 导出 + 要素/大纲生成与写回的前端冒烟。
     "novel_ui_smoke.cjs",
+    # 创作场整改（2026-10-26 入库）：6 视口 × 浅深色截图 + 阶段面板截图 + 冻结版资源自检。
+    # 前者只报告横向溢出，排版靠人看；冻结自检用 `exe --run-skill-script <本文件>` 跑。
+    "novel_visual_check.cjs", "novel_stage_shots.cjs", "frozen_novel_rework_check.py",
     # 教程截图流水线三件套（§六 已登记；冻结版 exe + 隔离根 + 脱敏播种 + Playwright 驱动）：
     # `_tut_run.sh` 一键跑一篇，`_tutorial_serve.py` 是隔离实例与播种器（被前者调用），
     # `_tutorial_shots.cjs` 是各篇的拍摄脚本。删掉任何一个这条流水线就断。

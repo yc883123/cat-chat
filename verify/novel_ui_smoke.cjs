@@ -17,10 +17,21 @@ const SHOT_DIR = process.env.NAIBA_SMOKE_SHOTS || '';
 const IMPORT_ID = 'import-20260101-abcdefabcdef';
 const BOOK_ID = 'book-20260101-abcdefabcdef';
 const CHAPTERS = [
-  { i: 1, title: '第1章 雨夜来客', len: 4860 },
-  { i: 2, title: '第2章 灯下密信', len: 5120 },
-  { i: 3, title: '第3章 不归桥', len: 4402 },
+  { i: 1, title: '第1章 雨夜来客', len: 4860, manuscript_count: 1, adapted_count: 0,
+    base_manuscript_id: 'ms-aaaaaaaaaaa1', base_kind: 'original', base_kind_label: '原文' },
+  { i: 2, title: '第2章 灯下密信', len: 5120, manuscript_count: 1, adapted_count: 0,
+    base_manuscript_id: 'ms-aaaaaaaaaaa2', base_kind: 'original', base_kind_label: '原文' },
+  { i: 3, title: '第3章 不归桥', len: 4402, manuscript_count: 1, adapted_count: 0,
+    base_manuscript_id: 'ms-aaaaaaaaaaa3', base_kind: 'original', base_kind_label: '原文' },
 ];
+// 章节稿件：每章一份原文；保存编辑后追加改编稿（与服务端契约一致）。
+const MANUSCRIPTS = {
+  1: [{
+    id: 'ms-aaaaaaaaaaa1', kind: 'original', kind_label: '原文', no: 0, label: '原文',
+    len: 64, created_at: 1750000000000, source_manuscript_id: '', task_id: '', user_request: '',
+    broken: false,
+  }],
+};
 const IMPORT_PAYLOAD = {
   import_id: IMPORT_ID,
   name: '长夜灯.txt',
@@ -63,6 +74,13 @@ const BOOK = {
 const CHAPTER_BODY = {
   i: 1, title: '第1章 雨夜来客', len: 4860, revision: 1,
   content: '雨下到三更，青石街尽头的灯笼只剩一盏。沈砚撑伞走过长桥时，听见桥下传来三声极轻的叩击。',
+  base_manuscript_id: 'ms-aaaaaaaaaaa1',
+  content_manuscript_id: 'ms-aaaaaaaaaaa1',
+  manuscripts: [{
+    id: 'ms-aaaaaaaaaaa1', kind: 'original', kind_label: '原文', no: 0, label: '原文',
+    len: 44, created_at: 1750000000000, source_manuscript_id: '', task_id: '', user_request: '',
+    broken: false,
+  }],
 };
 
 // ---- 阶段二：要素 / 大纲 ----
@@ -102,6 +120,19 @@ async function main() {
 
   const errors = [];
   page.on('pageerror', (error) => errors.push(`pageerror: ${error.message}`));
+  // 页面内错误监听：Playwright 的 pageerror 不带文件名/行号，
+  // 这里补一份，失败时能直接定位到前端哪一行。
+  await page.addInitScript(() => {
+    window.__novelErrors = [];
+    window.addEventListener("error", (event) => {
+      window.__novelErrors.push({
+        message: event.message,
+        file: String(event.filename || "").split("/").pop(),
+        line: event.lineno,
+        col: event.colno,
+      });
+    });
+  });
   page.on('console', (message) => {
     if (message.type() !== 'error') return;
     const text = message.text();
@@ -135,6 +166,13 @@ async function main() {
   let stageTaskState = { ...STAGE_TASK, status: 'queued', result: '', result_partial: '' };
   let stageTaskPolls = 0;
   const studioTaskQueries = [];
+  let previewSubmit = null;
+  let recordsDelete = null;
+  let tasksDelete = null;
+  let revealCalled = false;
+  // 章节标题与稿件一样是要能被 PATCH 改掉的（真实后端就是这样）：
+  // mock 若永远回旧标题，前端「保存后列表标题同步」会被误判成失败。
+  const CHAPTER_TITLES = Object.fromEntries(CHAPTERS.map((row) => [row.i, row.title]));
 
   // 工作台任务分区：记录请求过的 query，据此回不同分区（验证两边互不串台）。
   // 注意用谓词而不是 glob：glob 里的 `?` 是单字符通配，`tasks?*` 会把
@@ -241,7 +279,77 @@ async function main() {
       return json({ ok: true });
     }
     if (path === `/api/novel/books/${BOOK_ID}` && method === 'GET') {
-      return json({ book: BOOK, chapters: CHAPTERS, broken: [] });
+      // 章节索引的标题要跟着 PATCH 更新（真实后端就是这样）：
+      // mock 若固守旧标题，前端重新读作品后列表标题会被判成没同步。
+      const chapters = CHAPTERS.map((row) => ({ ...row, title: CHAPTER_TITLES[row.i] || row.title }));
+      return json({ book: BOOK, chapters, broken: [], location: 'X:/smoke/book' });
+    }
+    if (path === '/api/novel/location') {
+      return json({
+        data_dir: 'X:/smoke/data', novel_root: 'X:/smoke/data/studio/novel',
+        can_open_folder: true, export_note: '导出由浏览器发起下载，通常保存到浏览器默认下载目录。',
+      });
+    }
+    // 提交前预检：返回真实形态的预算报告（界面只用它渲染，不自己算）。
+    if (path === '/api/novel/stage/preview' && method === 'POST') {
+      previewSubmit = JSON.parse(request.postData() || '{}');
+      const bodyChars = Number(previewSubmit.body_chars || 3000);
+      return json({
+        stage: previewSubmit.stage,
+        limits: { body_chars: bodyChars, max_chapters: Number(previewSubmit.max_chapters || 6) },
+        warnings: stageWarnings,
+        chapters: (previewSubmit.chapter_ids || []).map((no) => ({
+          i: no, title: CHAPTERS[no - 1]?.title || `第${no}章`,
+          manuscript_id: (previewSubmit.manuscripts || {})[String(no)] || '',
+          manuscript_label: (previewSubmit.manuscripts || {})[String(no)] ? '改编稿 1' : '原文',
+          manuscript_kind: (previewSubmit.manuscripts || {})[String(no)] ? 'manual' : 'original',
+          total_chars: 8000, used_chars: Math.min(8000, bodyChars),
+          dropped_chars: Math.max(0, 8000 - bodyChars),
+        })),
+        sources: { chapters: [], elements_version: 0, outline_version: 0,
+          uses_outline: false, uses_characters: false, has_summaries: false },
+        budget: {
+          chars: 9000, total_source_chars: 8000 * (previewSubmit.chapter_ids || []).length,
+          used_chars: Math.min(8000, bodyChars) * (previewSubmit.chapter_ids || []).length,
+          dropped_chars: Math.max(0, 8000 - bodyChars) * (previewSubmit.chapter_ids || []).length,
+          estimated_tokens: 9200, estimate_note: '字数是字符数；token 为估算值，不等于实际用量',
+          context_window: 128000, context_known: true, output_reserve: 4096,
+          available_tokens: 123904, fits: true, suggestions: [],
+          body_limit: bodyChars, max_chapters: Number(previewSubmit.max_chapters || 6),
+          chapter_count: (previewSubmit.chapter_ids || []).length,
+        },
+      });
+    }
+    // 管理记录清单
+    if (path === `/api/novel/books/${BOOK_ID}/records` && method === 'GET') {
+      return json({
+        book: BOOK,
+        chapters: CHAPTERS.map((row) => ({ i: row.i, title: row.title })),
+        broken: [],
+        manuscripts: Object.entries(MANUSCRIPTS).flatMap(([no, rows]) => rows.map((row) => ({
+          ...row, chapter_no: Number(no),
+          chapter_title: CHAPTERS[Number(no) - 1]?.title || '',
+        }))),
+        elements: [{ id: 'el-000000000001', version: 1, len: 40, updated_at: 1750000400000,
+          task_id: 'old-elements', chapter_ids: [1], manuscripts: [], kind: 'elements' }],
+        outlines: [{ id: 'ol-000000000001', version: 1, len: 20, updated_at: 1750000400000,
+          task_id: 'old-outline', chapter_ids: [1], manuscripts: [], kind: 'outline' }],
+        scripts: [{ id: 'sc-000000000001', version: 1, scene_count: 1, updated_at: 1750000400000,
+          task_id: 'old-script', chapter_ids: [1], manuscripts: [], kind: 'script' }],
+        location: 'X:/smoke/book',
+      });
+    }
+    if (path === '/api/novel/records/delete' && method === 'POST') {
+      recordsDelete = JSON.parse(request.postData() || '{}');
+      return json({ ok: true, removed: recordsDelete.items || [], book: BOOK });
+    }
+    if (path === '/api/novel/tasks/delete' && method === 'POST') {
+      tasksDelete = JSON.parse(request.postData() || '{}');
+      return json({ deleted: tasksDelete.task_ids || [], skipped: [] });
+    }
+    if (path === '/api/novel/reveal' && method === 'POST') {
+      revealCalled = true;
+      return json({ ok: true, path: 'X:/smoke/data/studio/novel' });
     }
     if (path === `/api/novel/books/${BOOK_ID}/export`) {
       exportQueries.push(url.search);
@@ -322,18 +430,66 @@ async function main() {
       const no = Number(chapterMatch[1]);
       if (method === 'PATCH') {
         savedBody = JSON.parse(request.postData() || '{}');
+        // 新增一份人工改编稿，原文保留（与后端同一契约）。
+        const rows = MANUSCRIPTS[no] || [{ ...CHAPTER_BODY.manuscripts[0], id: `ms-aaaaaaaaaa${no}${no}` }];
+        const created = {
+          id: `ms-manual00000${no}`, kind: 'manual', kind_label: '人工改编稿',
+          no: rows.filter((row) => row.kind === 'manual' || row.kind === 'ai').length + 1,
+          label: '', len: String(savedBody.content || '').length,
+          created_at: 1750000500000, source_manuscript_id: savedBody.base_manuscript_id || rows[0].id,
+          task_id: '', user_request: '', broken: false,
+        };
+        created.label = `改编稿 ${created.no}`;
+        const duplicate = rows.some((row) => row.content === savedBody.content
+          && row.source_manuscript_id === created.source_manuscript_id);
+        if (!duplicate) rows.push(created);
+        MANUSCRIPTS[no] = rows;
+        if (savedBody.title) CHAPTER_TITLES[no] = savedBody.title;
         return json({
           chapter: {
             i: no,
-            title: savedBody.title ?? `第${no}章`,
+            title: CHAPTER_TITLES[no] ?? `第${no}章`,
             len: String(savedBody.content || '').length,
-            content: savedBody.content ?? '',
             revision: 2,
+            base_manuscript_id: rows[0].id,
+            manuscript_rows_ignored: true,
+            manuscripts: rows.map((row) => ({ ...row })),
+            created_manuscript: duplicate ? null : created,
           },
         });
       }
       if (method === 'DELETE') return json({ ok: true, chapter_count: 2 });
-      return json({ ...CHAPTER_BODY, i: no, title: CHAPTERS[no - 1]?.title || CHAPTER_BODY.title });
+      const rows = MANUSCRIPTS[no] || CHAPTER_BODY.manuscripts;
+      return json({
+        ...CHAPTER_BODY,
+        i: no,
+        title: CHAPTER_TITLES[no] || CHAPTERS[no - 1]?.title || CHAPTER_BODY.title,
+        base_manuscript_id: rows[0].id,
+        content_manuscript_id: rows[0].id,
+        manuscripts: rows.map((row) => ({ ...row })),
+      });
+    }
+    const manuscriptMatch = path.match(new RegExp(`^/api/novel/books/${BOOK_ID}/chapters/(\\d+)/manuscripts/([^/]+)$`));
+    if (manuscriptMatch) {
+      const no = Number(manuscriptMatch[1]);
+      const id = decodeURIComponent(manuscriptMatch[2]);
+      if (method === 'POST') {
+        const body = JSON.parse(request.postData() || '{}');
+        const rows = MANUSCRIPTS[no] || CHAPTER_BODY.manuscripts;
+        const created = {
+          id: 'ms-ai0000000001', kind: body.kind || 'ai', kind_label: 'AI 改编稿', no: 2,
+          label: '改编稿 2', len: String(body.content || '').length,
+          created_at: 1750000600000, source_manuscript_id: body.source_manuscript_id || '',
+          task_id: body.task_id || '', user_request: body.user_request || '', broken: false,
+          content: body.content,
+        };
+        rows.push(created);
+        MANUSCRIPTS[no] = rows;
+        return json({ manuscript: created, duplicate: false, revision: 3,
+          book: { ...BOOK, revision: (BOOK.revision || 0) + 1 } }, 201);
+      }
+      const row = (MANUSCRIPTS[no] || []).find((item) => item.id === id);
+      return row ? json({ ...row, i: no }) : json({ error: '稿件不存在' }, 404);
     }
     return json({ error: `未注入的接口：${method} ${path}` }, 404);
   });
@@ -393,16 +549,72 @@ async function main() {
   check('作品态显示已保存', (await page.locator('#novelStatState').innerText()) === '已保存');
   check('自动打开第一章', (await page.locator('#novelChapterTitle').inputValue()).includes('第1章'));
 
-  // ---- 4. 编辑与保存 ----
+  // ---- 4. 原文卡片与改编稿 ----
+  const cards = page.locator('#novelManuscripts .novel-manuscript-card');
+  check('打开章节先看到一张原文卡', (await cards.count()) === 1,
+    String(await cards.count()));
+  check('原文卡标出「原文」', (await cards.first().innerText()).includes('原文'));
+  check('原文卡默认展开', await cards.first().locator('.novel-manuscript-body').isVisible());
+  // 「正文紧不紧跟卡片标题」按卡片自身的标题栏量，而不是量到面板头——
+  // 面板头下面还有章节标题、元信息与卡片操作行，那是必要信息，不是留白。
+  const bodyTop = await page.evaluate(() => {
+    const card = document.querySelector('#novelManuscripts .novel-manuscript-card');
+    const body = card?.querySelector('.novel-manuscript-body');
+    const head = card?.querySelector('.novel-manuscript-head');
+    if (!body || !head) return null;
+    return Math.round(body.getBoundingClientRect().top - head.getBoundingClientRect().bottom);
+  });
+  check('正文紧跟在卡片标题下方，没有大块留白',
+    bodyTop !== null && bodyTop < 90, `间距 ${bodyTop}px`);
+  check('编辑框默认不出现', await page.locator('#novelManuscriptEdit').isHidden());
+
+  // 连续展开／收起三次，验证能反复折叠
+  const toggle = cards.first().locator('[data-novel-manuscript-toggle]');
+  for (let round = 1; round <= 3; round += 1) {
+    await toggle.click();
+    await page.waitForTimeout(100);
+    const collapsed = !(await cards.first().locator('.novel-manuscript-body').isVisible());
+    await toggle.click();
+    await page.waitForTimeout(100);
+    const expanded = await cards.first().locator('.novel-manuscript-body').isVisible();
+    check(`第 ${round} 轮收起后能重新展开`, collapsed && expanded);
+  }
+
+  // 编辑 → 保存 → 新增改编稿，原文保留
+  await cards.first().locator('[data-novel-manuscript-action="edit"]').click();
+  await page.waitForTimeout(200);
+  check('点编辑才出现输入框', await page.locator('#novelManuscriptEdit').isVisible());
+  // 标题与正文都要在进入编辑态之后填：点「编辑」会重渲染一次，
+  // 之前填的值会被覆盖（真实用户也是先点编辑再改内容）。
   await page.locator('#novelChapterTitle').fill('第1章 改过的标题');
   await page.locator('#novelChapterBody').fill('改过的正文内容。');
   await page.waitForTimeout(150);
   check('有未保存修改时保存按钮可用', !(await page.locator('#novelSaveChapter').isDisabled()));
   await page.locator('#novelSaveChapter').click();
-  await page.waitForFunction(() => document.querySelector('#novelSaveState')?.textContent === '已保存', null, { timeout: 5000 });
+  await page.waitForTimeout(1500);
+  check('保存后状态回写为已保存',
+    (await page.locator('#novelSaveState').innerText()) === '已保存',
+    `${await page.locator('#novelSaveState').innerText()} / ${await page.locator('#novelSaveNote').innerText()} / ${JSON.stringify(savedBody)}`);
   check('保存请求带上 revision', savedBody && savedBody.revision === 1, JSON.stringify(savedBody));
-  check('保存后列表标题同步', (await page.locator('#novelChapterList').innerText()).includes('改过的标题'));
+  check('保存请求标明基于哪份稿件',
+    Boolean(savedBody?.base_manuscript_id), JSON.stringify(savedBody));
+  check('保存后多出一张改编稿卡', (await cards.count()) === 2, String(await cards.count()));
+  check('原文卡仍在', (await cards.first().innerText()).includes('原文'));
+  check('新卡标出改编稿 1',
+    (await page.locator('#novelManuscripts').innerText()).includes('改编稿 1'));
+  check('保存后列表标题同步', (await page.locator('#novelChapterList').innerText()).includes('改过的标题'),
+    await page.locator('#novelChapterList').innerText());
   check('保存状态显示已保存', (await page.locator('#novelSaveState').innerText()) === '已保存');
+
+  // 无改动保存不重复建卡：内容逐字相同时「保存改编稿」直接不可点，
+  // 服务端也会按「同来源 + 同正文」判定重复，不会悄悄多出一张卡。
+  await cards.nth(1).locator('[data-novel-manuscript-action="edit"]').click();
+  await page.waitForTimeout(250);
+  check('内容没改动时保存按钮不可点', await page.locator('#novelSaveChapter').isDisabled());
+  check('没改动时不会多出卡片', (await cards.count()) === 2, String(await cards.count()));
+  await page.locator('#novelRevertChapter').click();
+  await page.waitForTimeout(250);
+  check('取消编辑不创建记录', (await cards.count()) === 2, String(await cards.count()));
 
   // ---- 5. 章节筛选 ----
   await page.locator('#novelChapterFilter').fill('不归');
@@ -537,6 +749,35 @@ async function main() {
   check('创作场任务列表不含模块库任务',
     !(await page.locator('#novelStageResult').innerText()).includes('模板生成结果'));
 
+  // ---- 7b-2. 双滑条：真实改变提交参数 ----
+  check('每章字数滑条默认 3000',
+    (await page.locator('#novelBodyChars').inputValue()) === '3000');
+  await page.locator('#novelBodyChars').fill('6000');
+  await page.locator('#novelBodyChars').dispatchEvent('input');
+  await page.waitForTimeout(400);
+  check('字数滑条值实时显示', (await page.locator('#novelBodyCharsValue').innerText()) === '6000');
+  check('滑条值进入预检请求', previewSubmit && Number(previewSubmit.body_chars) === 6000,
+    JSON.stringify(previewSubmit && previewSubmit.body_chars));
+  check('右栏显示实际引用字数',
+    (await page.locator('#novelPlanBody').innerText()).includes('发送正文'),
+    await page.locator('#novelPlanBody').innerText());
+
+  // 章数上限：可超过旧上限 6
+  await page.locator('#novelMaxChapters').fill('7');
+  await page.locator('#novelMaxChapters').dispatchEvent('input');
+  await page.waitForTimeout(300);
+  check('章数上限可以设为 7', (await page.locator('#novelMaxChaptersValue').innerText()) === '7');
+  check('章数上限进入预检请求', previewSubmit && Number(previewSubmit.max_chapters) === 7,
+    JSON.stringify(previewSubmit && previewSubmit.max_chapters));
+
+  // ---- 7b-3. 逐章稿件选择 ----
+  check('每个勾选章节都有稿件选择',
+    (await page.locator('#novelPickManuscripts [data-novel-pick-manuscript]').count()) === 2,
+    String(await page.locator('#novelPickManuscripts [data-novel-pick-manuscript]').count()));
+  check('右栏逐章列出使用哪份稿件',
+    (await page.locator('#novelPlanBody').innerText()).includes('本次素材'),
+    await page.locator('#novelPlanBody').innerText());
+
   // ---- 7c. 大纲阶段共用同一套面板 ----
   await page.locator('#novelStages [data-novel-stage="outline"]').click();
   await page.waitForTimeout(600);
@@ -633,6 +874,60 @@ async function main() {
   await page.waitForTimeout(400);
   check('切回拆章阶段', !(await page.locator('#novelStagePanel').isVisible()));
 
+  // ---- 7e. 管理记录 ----
+  check('阶段栏最右侧有管理记录入口', await page.locator('#novelManageBtn').isVisible());
+  await page.locator('#novelManageBtn').click();
+  await page.waitForTimeout(700);
+  check('管理记录面板打开', await page.locator('#novelManageDialog').isVisible());
+  check('管理记录标明只管理当前作品',
+    (await page.locator('#novelManageScope').innerText()).includes('长夜灯'));
+  check('章节稿件页签有记录',
+    (await page.locator('#novelManageList .novel-manage-row').count()) >= 2,
+    `${await page.locator('#novelManageList .novel-manage-row').count()} 行 / 错误「${await page.locator('#novelManageError').innerText()}」/ 列表「${await page.locator('#novelManageList').innerText()}」`);
+  await page.locator('#novelManageTabs [data-novel-manage-tab="elements"]').click();
+  await page.waitForTimeout(300);
+  check('要素页签显示要素版本',
+    (await page.locator('#novelManageList').innerText()).includes('要素 第 1 版'),
+    await page.locator('#novelManageList').innerText());
+  await page.locator('#novelManageTabs [data-novel-manage-tab="task"]').click();
+  await page.waitForTimeout(300);
+  check('生成记录页签列出任务',
+    (await page.locator('#novelManageList').innerText()).includes('长夜灯'),
+    await page.locator('#novelManageList').innerText());
+  await page.locator('#novelManageTabs [data-novel-manage-tab="manuscript"]').click();
+  await page.waitForTimeout(300);
+  // 多选 + 全选当前筛选 + 删除（确认框里写明范围）
+  await page.locator('#novelManageSelectAll').click();
+  await page.waitForTimeout(300);
+  check('全选当前筛选有明确数量',
+    (await page.locator('#novelManageSelection').innerText()).includes('已选'),
+    await page.locator('#novelManageSelection').innerText());
+  check('全选后可删除',
+    !(await page.locator('#novelManageDelete').isDisabled()),
+    `${await page.locator('#novelManageSelection').innerText()} / 行数 ${await page.locator('#novelManageList .novel-manage-row').count()} / ${await page.locator('#novelManageList').innerText()}`);
+  const confirmTexts = [];
+  page.on('dialog', (dialog) => { confirmTexts.push(dialog.message()); dialog.accept(); });
+  await page.locator('#novelManageDelete').click();
+  await page.waitForTimeout(900);
+  check('删除请求带上选中记录', Boolean(recordsDelete) && (recordsDelete.items || []).length > 0,
+    JSON.stringify(recordsDelete));
+  check('删除确认说明不可撤销',
+    confirmTexts.some((text) => text.includes('不能撤销')), JSON.stringify(confirmTexts));
+  check('删除确认说明不影响原文',
+    confirmTexts.some((text) => text.includes('不会删除原文')), JSON.stringify(confirmTexts));
+  await page.locator('#novelManageClose').click();
+  await page.waitForTimeout(300);
+  check('管理记录关闭回到原阶段', !(await page.locator('#novelManageDialog').isVisible()));
+
+  // ---- 7f. 保存位置与导出说明 ----
+  const locationText = await page.locator('#novelLocationPath').innerText();
+  check('保存位置显示后端解析路径', locationText.includes('studio') && locationText.includes('novel'),
+    locationText);
+  check('保存位置可复制', await page.locator('#novelCopyPath').isVisible());
+  check('导出菜单说明下载去向',
+    (await page.locator('#novelExportNote').innerText()).includes('浏览器默认下载目录'),
+    await page.locator('#novelExportNote').innerText());
+
   // ---- 8. 桌面截图 ----
   if (SHOT_DIR) {
     await page.screenshot({ path: `${SHOT_DIR}/novel_desktop_light.png`, fullPage: false });
@@ -720,7 +1015,9 @@ async function main() {
 
   // ---- 12. 无 pageerror / console.error ----
   const realErrors = errors.filter((line) => !/favicon|ERR_INTERNET|net::ERR/.test(line));
-  check('无 pageerror / console.error', realErrors.length === 0, realErrors.join(' | '));
+  const pageErrors = await page.evaluate(() => window.__novelErrors || []);
+  check('无 pageerror / console.error', realErrors.length === 0,
+    `${realErrors.join(' | ')} || 页面内明细：${JSON.stringify(pageErrors)}`);
 
   await browser.close();
 

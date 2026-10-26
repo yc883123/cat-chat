@@ -661,15 +661,19 @@
           </dialog>
         </div>
 
-        <!-- 创作场（小说改编，阶段一）：页面结构在这里定稿；交互与渲染由
-             public/js/25-novel.js 接管。阶段一只有「拆章」是真功能，要素/大纲/剧本
-             三档在阶段二、三接入 Studio 任务后才启用。 -->
+        <!-- 创作场（小说改编）：页面结构在这里定稿；交互与渲染由
+             public/js/25-novel.js 接管。阶段栏左侧是四个创作阶段，
+             最右侧固定「管理记录」（窄屏时阶段按钮自己滚动，它不被挤走）。 -->
         <div class="studio-page-view" id="studioPageNovel" data-studio-page-view="novel" hidden>
-          <div class="novel-stages" id="novelStages" role="group" aria-label="创作阶段">
-            <button class="novel-stage active" type="button" aria-pressed="true" data-novel-stage="split">拆章</button>
-            <button class="novel-stage" type="button" aria-pressed="false" data-novel-stage="elements">要素</button>
-            <button class="novel-stage" type="button" aria-pressed="false" data-novel-stage="outline">大纲</button>
-            <button class="novel-stage" type="button" aria-pressed="false" data-novel-stage="script">剧本</button>
+          <div class="novel-stagebar">
+            <div class="novel-stages" id="novelStages" role="group" aria-label="创作阶段">
+              <button class="novel-stage active" type="button" aria-pressed="true" data-novel-stage="split">拆章</button>
+              <button class="novel-stage" type="button" aria-pressed="false" data-novel-stage="elements">要素</button>
+              <button class="novel-stage" type="button" aria-pressed="false" data-novel-stage="outline">大纲</button>
+              <button class="novel-stage" type="button" aria-pressed="false" data-novel-stage="script">剧本</button>
+            </div>
+            <button class="novel-manage-entry" id="novelManageBtn" type="button"
+                    title="集中管理原文、改编稿、要素、大纲、剧本与生成记录">管理记录</button>
           </div>
           <div class="novel-panes" id="novelPanes" role="group" aria-label="创作场分档">
             <button class="studio-pane-btn novel-pane-btn" type="button" aria-pressed="false" data-novel-pane="chapters">章节</button>
@@ -708,6 +712,7 @@
                 <button type="button" role="menuitem" data-novel-export="txt">导出 TXT（全书）</button>
                 <button type="button" role="menuitem" data-novel-export="md">导出 Markdown（全书）</button>
                 <button type="button" role="menuitem" data-novel-export="md-extras">导出 Markdown（含要素与大纲）</button>
+                <p class="novel-note" id="novelExportNote">导出由浏览器发起下载，通常保存到浏览器默认下载目录。</p>
               </div>
               <div class="novel-filter">
                 <input type="search" id="novelChapterFilter" placeholder="筛选章节" aria-label="筛选章节">
@@ -728,18 +733,50 @@
                   <strong>还没有打开章节</strong>
                   <p>导入一本 TXT 小说，自动拆章后勾选要保留的章节，保存为作品；之后在左侧点任意一章即可查看和修改。</p>
                 </div>
+                <!-- 拆章阶段：原文与改编稿卡片。正文只读展示，「编辑」才出输入框。 -->
                 <div class="novel-editor-fields" id="novelEditorFields" hidden>
-                  <label class="novel-field">章节标题
+                  <label class="novel-field novel-field-title">章节标题
                     <input type="text" id="novelChapterTitle" maxlength="200" autocomplete="off">
                   </label>
                   <div class="novel-editor-meta" id="novelEditorMeta"></div>
-                  <label class="novel-field novel-field-body">正文
-                    <textarea id="novelChapterBody" spellcheck="false"></textarea>
-                  </label>
-                  <div class="novel-editor-actions">
-                    <button class="control-button" id="novelSaveChapter" type="button">保存本章</button>
-                    <button class="control-button tiny" id="novelRevertChapter" type="button" title="放弃未保存的修改，重新读取本章">放弃修改</button>
-                    <button class="control-button tiny danger" id="novelDeleteChapter" type="button" title="从作品里删除这一章">删除本章</button>
+                  <div class="novel-manuscripts" id="novelManuscripts" aria-label="章节稿件"></div>
+                  <div class="novel-manuscript-edit" id="novelManuscriptEdit" hidden>
+                    <div class="novel-stage-head">
+                      <strong id="novelManuscriptEditHead">编辑稿件</strong>
+                      <small id="novelManuscriptEditNote"></small>
+                    </div>
+                    <label class="novel-field novel-field-body">正文
+                      <textarea id="novelChapterBody" spellcheck="false"></textarea>
+                    </label>
+                    <div class="novel-editor-actions">
+                      <button class="control-button" id="novelSaveChapter" type="button">保存改编稿</button>
+                      <button class="control-button tiny" id="novelRevertChapter" type="button" title="放弃这次修改，不创建新稿件">取消</button>
+                      <button class="control-button tiny danger" id="novelDeleteChapter" type="button" title="从作品里删除这一章">删除本章</button>
+                    </div>
+                    <p class="novel-note" id="novelManuscriptEditNoteBody"></p>
+                  </div>
+                  <div class="novel-ai-edit" id="novelAiEdit" hidden>
+                    <div class="novel-stage-head">
+                      <strong id="novelAiEditHead">AI 润色 / 改编</strong>
+                      <small>原文会保留，结果保存后新增一张卡片</small>
+                    </div>
+                    <label class="novel-field">你希望怎么改
+                      <textarea id="novelAiRequest" rows="3" maxlength="800"
+                                placeholder="例如：把这一章改写成更紧凑的悬疑节奏，保留原有对话。"></textarea>
+                    </label>
+                    <div class="novel-stage-model">
+                      <label class="novel-field">供应商
+                        <select id="novelAiProvider" aria-label="AI 改编用的供应商"></select>
+                      </label>
+                      <label class="novel-field">模型
+                        <select id="novelAiModel" aria-label="AI 改编用的模型"></select>
+                      </label>
+                    </div>
+                    <div class="novel-editor-actions">
+                      <button class="control-button" id="novelAiSubmit" type="button">开始改编</button>
+                      <button class="control-button tiny" id="novelAiCancel" type="button">取消</button>
+                    </div>
+                    <p class="novel-note" id="novelAiWarning" role="status"></p>
                   </div>
                 </div>
                 <!-- 阶段二：要素 / 大纲生成（同一套编辑区，按阶段切换内容） -->
@@ -747,6 +784,20 @@
                   <!-- 阶段标题与提示由中栏面板头（#novelEditorHead / #novelEditorHint）承担，
                        这里不再重复一遍，否则同一句「要素」上下各出现一次。 -->
                   <div class="novel-stage-meta" id="novelStageMeta"></div>
+                  <!-- 逐章稿件选择：每章一次只选一份，默认原文。 -->
+                  <div class="novel-pick-manuscripts" id="novelPickManuscripts" aria-label="本次使用的章节稿件"></div>
+                  <div class="novel-limits" id="novelLimits">
+                    <label class="novel-limit">
+                      <span>每章正文上限 <b id="novelBodyCharsValue">3000</b> 字</span>
+                      <input type="range" id="novelBodyChars" min="3000" max="15000" step="500" value="3000"
+                             aria-label="每章正文上限（字）">
+                    </label>
+                    <label class="novel-limit">
+                      <span>一次最多选择 <b id="novelMaxChaptersValue">6</b> 章</span>
+                      <input type="range" id="novelMaxChapters" min="1" max="20" step="1" value="6"
+                             aria-label="一次最多选择章节数">
+                    </label>
+                  </div>
                   <div class="novel-stage-context" data-novel-context="script" hidden>
                     <label>人物设定版本<select data-context-elements aria-label="剧本使用的人物设定版本"></select></label>
                     <label>改编大纲版本<select data-context-outline aria-label="剧本使用的改编大纲版本"></select></label>
@@ -812,11 +863,11 @@
               </div>
             </section>
 
-            <!-- 右：作品预览 / 任务结果 / 下一步 -->
-            <aside class="novel-panel novel-preview" aria-label="作品预览与下一步">
+            <!-- 右：本次说明 / 任务结果 / 保存状态 -->
+            <aside class="novel-panel novel-preview" aria-label="本次生成说明与保存状态">
               <div class="novel-panel-head">
-                <strong>作品预览</strong>
-                <small>按需加载</small>
+                <strong>本次生成说明</strong>
+                <small id="novelPreviewStage">拆章</small>
               </div>
               <div class="novel-preview-body">
                 <section class="novel-block" id="novelImportBlock" hidden>
@@ -827,13 +878,24 @@
                     <button class="control-button tiny" id="novelCancelImport" type="button">放弃</button>
                   </div>
                 </section>
+                <!-- 动态说明：随阶段、选章、选稿与保存状态变化（替换固定文案）。 -->
+                <section class="novel-block" id="novelPlanBlock">
+                  <div class="novel-block-title"><strong>这次会做什么</strong><small id="novelPlanState">—</small></div>
+                  <div class="novel-plan" id="novelPlanBody"></div>
+                </section>
                 <section class="novel-block">
                   <div class="novel-block-title"><strong>保存状态</strong><small id="novelSaveState">—</small></div>
                   <p class="novel-note" id="novelSaveNote">打开或导入作品后，这里显示保存与读取状态。</p>
                 </section>
-                <section class="novel-block">
-                  <div class="novel-block-title"><strong>下一步</strong><small>阶段二</small></div>
-                  <p class="novel-note">保存作品后，可以在「要素」里整理人物、场景和道具，再生成改编大纲。生成任务会在后台排队，作品页面不会被锁住。</p>
+                <section class="novel-block" id="novelLocationBlock">
+                  <div class="novel-block-title"><strong>作品保存在哪里</strong><small>本机路径</small></div>
+                  <p class="novel-note" id="novelLocationNote">打开作品后，这里显示这台电脑上的实际保存目录。</p>
+                  <p class="novel-path" id="novelLocationPath" hidden></p>
+                  <div class="novel-pick-actions">
+                    <button class="control-button tiny" id="novelCopyPath" type="button" hidden>复制路径</button>
+                    <button class="control-button tiny" id="novelOpenFolder" type="button" hidden
+                            title="在运行应用的电脑上打开这个文件夹">打开保存位置</button>
+                  </div>
                 </section>
               </div>
             </aside>
@@ -847,6 +909,34 @@
               </div>
               <p class="novel-dialog-error" id="novelBooksError" role="alert"></p>
             </form>
+          </dialog>
+          <!-- 管理记录：桌面宽弹窗 / 手机全屏。默认只管理当前作品。 -->
+          <dialog class="novel-dialog novel-manage-dialog" id="novelManageDialog" aria-label="管理记录">
+            <div class="novel-manage-form">
+              <div class="novel-manage-head">
+                <h3>管理记录<small id="novelManageScope">当前作品</small></h3>
+                <button class="control-button tiny" type="button" id="novelManageClose">关闭</button>
+              </div>
+              <p class="novel-note" id="novelManageNote"></p>
+              <!-- 分类切换用普通按钮 + aria-selected 表达当前态；
+                   工作台壳不声明 tabs 语义（守门 tests/test_topbar.py 已钉住）。 -->
+              <div class="novel-manage-tabs" id="novelManageTabs" role="group" aria-label="记录分类">
+                <button type="button" class="active" aria-pressed="true" data-novel-manage-tab="manuscript">章节稿件</button>
+                <button type="button" aria-pressed="false" data-novel-manage-tab="elements">要素</button>
+                <button type="button" aria-pressed="false" data-novel-manage-tab="outline">大纲</button>
+                <button type="button" aria-pressed="false" data-novel-manage-tab="script">剧本</button>
+                <button type="button" aria-pressed="false" data-novel-manage-tab="task">生成记录</button>
+              </div>
+              <div class="novel-manage-tools">
+                <input type="search" id="novelManageFilter" placeholder="按章节或关键字筛选" aria-label="筛选记录">
+                <button class="control-button tiny" type="button" id="novelManageSelectAll">全选当前筛选</button>
+                <button class="control-button tiny" type="button" id="novelManageClear">取消选择</button>
+                <button class="control-button tiny danger" type="button" id="novelManageDelete" disabled>删除选中</button>
+              </div>
+              <p class="novel-note" id="novelManageSelection" role="status"></p>
+              <div class="novel-manage-list" id="novelManageList" aria-label="记录列表"></div>
+              <p class="novel-dialog-error" id="novelManageError" role="alert"></p>
+            </div>
           </dialog>
           <input type="file" id="novelFileInput" accept=".txt,text/plain" hidden>
         </div>

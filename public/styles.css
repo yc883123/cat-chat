@@ -4386,9 +4386,14 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
    手机横屏（844x390、812x375）保留三栏；竖屏（<=760px）改三档分段控件。
    全部复用既有语义变量，不新增小说专用色板。
    ============================================================ */
+.novel-stagebar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px var(--s-4) 0;
+}
 .novel-stages {
-  display: flex; gap: 4px; padding: 8px var(--s-4) 0;
+  display: flex; gap: 4px; min-width: 0;
   overflow-x: auto; scrollbar-width: none;
+  flex: 1 1 auto;
 }
 .novel-stages::-webkit-scrollbar { display: none; }
 .novel-stage {
@@ -4397,12 +4402,22 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
   background: transparent; color: var(--muted); font-size: 12.5px; cursor: pointer;
 }
 .novel-stage:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+.novel-stage:focus-visible { outline: 2px solid var(--violet-line); outline-offset: 1px; }
 .novel-stage.active {
   border-color: var(--violet-line); background: var(--accent-soft);
   color: var(--violet-deep); font-weight: 600;
 }
 /* 阶段二、三未接入：显式禁用，不靠颜色暗示「点得动」。 */
 .novel-stage:disabled { opacity: .55; cursor: not-allowed; }
+/* 管理记录：固定在阶段栏最右侧；阶段按钮自己滚动，它不会被挤到看不见的位置。 */
+.novel-manage-entry {
+  flex: none; min-height: 30px; padding: 0 11px;
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text); font-size: 12px; cursor: pointer;
+  white-space: nowrap;
+}
+.novel-manage-entry:hover { background: var(--surface-2); border-color: var(--violet-line); }
+.novel-manage-entry:focus-visible { outline: 2px solid var(--violet-line); outline-offset: 1px; }
 
 .novel-panes { display: none; gap: 4px; padding: 6px var(--s-4); border-bottom: 1px solid var(--line); }
 
@@ -4494,29 +4509,38 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .novel-empty { margin: 6px 2px; font-size: 11px; line-height: 1.6; color: var(--muted); }
 
 /* ---- 中栏：编辑区 ---- */
+/* 阅读态与编辑态分开：正文区本身不撑高，短章也从顶部开始，不留大块中间空白。 */
 .novel-editor-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
 .novel-placeholder {
   margin: auto; padding: 16px; max-width: 340px; text-align: center; color: var(--muted);
 }
 .novel-placeholder strong { display: block; color: var(--text); font-size: 13px; }
 .novel-placeholder p { margin: 6px 0 0; font-size: 11.5px; line-height: 1.65; }
-.novel-editor-fields { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
+.novel-editor-fields { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
 /* display 会覆盖浏览器默认的 [hidden] 规则，必须显式声明一次（导入块同理）。 */
-.novel-editor-fields[hidden], .novel-block[hidden], .novel-pick-actions[hidden] { display: none; }
+.novel-editor-fields[hidden], .novel-block[hidden], .novel-pick-actions[hidden],
+.novel-manuscript-edit[hidden], .novel-ai-edit[hidden], .novel-pick-manuscripts[hidden],
+.novel-location-path[hidden], .novel-manage-row[hidden] { display: none; }
 .novel-field { display: grid; gap: 4px; font-size: 11px; color: var(--muted); }
 .novel-field input, .novel-field textarea {
   width: 100%; padding: 7px 9px;
   border: 1px solid var(--line); border-radius: var(--r-md);
   background: var(--surface); color: var(--text); font-size: 12.5px;
 }
-.novel-field-body { flex: 1; min-height: 0; }
+.novel-field-title { flex: none; }
+/* 编辑框只在点「编辑」后出现，按内容高度自适应、最多占半边高，不把阅读器撑成空表单。 */
+.novel-manuscript-edit, .novel-ai-edit {
+  flex: none; display: grid; gap: 7px; padding: 8px 9px;
+  border: 1px solid var(--violet-line); border-radius: var(--r-md); background: var(--surface);
+}
+.novel-field-body { min-height: 0; }
 .novel-field-body textarea {
-  flex: 1; min-height: 220px; resize: none; line-height: 1.7;
+  min-height: 160px; max-height: 44vh; resize: vertical; line-height: 1.7;
   font-family: var(--font); overflow-y: auto;
 }
 .novel-editor-meta { display: flex; gap: 6px; flex-wrap: wrap; }
 .novel-meta-item {
-  flex: 1 1 88px; min-width: 0; padding: 5px 7px;
+  flex: 1 1 72px; min-width: 0; padding: 5px 7px;
   border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-2);
 }
 .novel-meta-item span { display: block; font-size: 9.5px; color: var(--muted); }
@@ -4526,7 +4550,50 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 }
 .novel-editor-actions { flex: none; display: flex; gap: 6px; flex-wrap: wrap; padding-top: 2px; }
 
-/* ---- 右栏：预览与下一步 ---- */
+/* ---- 章节稿件卡片（原文 / 改编稿） ---- */
+.novel-manuscripts { display: flex; flex-direction: column; gap: 6px; }
+.novel-manuscript-card {
+  display: grid; gap: 5px; padding: 7px 9px;
+  border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface);
+}
+.novel-manuscript-card.base { border-color: var(--violet-line); }
+.novel-manuscript-card.legacy { border-style: dashed; }
+.novel-manuscript-card.broken { border-color: var(--danger, #c0392b); }
+.novel-manuscript-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.novel-manuscript-toggle {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: 0; background: transparent; color: var(--text);
+  font-size: 12px; cursor: pointer; padding: 2px 0; text-align: left;
+}
+.novel-manuscript-toggle:focus-visible { outline: 2px solid var(--violet-line); outline-offset: 1px; }
+.novel-manuscript-caret { color: var(--muted); font-size: 10px; width: 10px; }
+.novel-manuscript-meta { flex: 1 1 100%; font-size: 9.5px; color: var(--muted); }
+.novel-manuscript-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.novel-manuscript-inuse { font-size: 9.5px; color: var(--violet-deep); }
+.novel-manuscript-body {
+  margin: 0; padding: 7px 9px; max-height: 44vh; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-2);
+  font-family: var(--font); font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-word;
+}
+.novel-origin-missing { padding: 6px 8px; border-radius: var(--r-sm); background: var(--surface-2); }
+
+/* ---- 逐章稿件选择与双滑条 ---- */
+.novel-pick-manuscripts { display: grid; gap: 5px; }
+.novel-pick-manuscript {
+  display: flex; align-items: center; gap: 7px; justify-content: space-between;
+  font-size: 11px; color: var(--muted);
+}
+.novel-pick-manuscript span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.novel-pick-manuscript select { flex: 0 0 auto; max-width: 55%; padding: 4px 7px; font-size: 11px; }
+.novel-limits { display: grid; gap: 7px; }
+.novel-limit { display: grid; gap: 3px; font-size: 11px; color: var(--muted); }
+.novel-limit b { color: var(--text); font-variant-numeric: tabular-nums; }
+.novel-limit input[type="range"] {
+  width: 100%; accent-color: var(--violet, #7c5cff); cursor: pointer;
+}
+.novel-limit input[type="range"]:focus-visible { outline: 2px solid var(--violet-line); outline-offset: 2px; }
+
+/* ---- 右栏：本次生成说明 ---- */
 .novel-preview-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
 .novel-block {
   display: grid; gap: 6px; padding: 8px 9px;
@@ -4538,6 +4605,16 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .novel-note { margin: 0; font-size: 10.5px; line-height: 1.6; color: var(--muted); }
 .novel-pick-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .novel-pick-actions .control-button { flex: 1 1 auto; min-width: 0; }
+.novel-plan { display: grid; gap: 7px; }
+.novel-plan-block strong { display: block; font-size: 10.5px; color: var(--text); }
+.novel-plan-block ul { margin: 3px 0 0; padding-left: 15px; display: grid; gap: 2px; }
+.novel-plan-block li { font-size: 10.5px; line-height: 1.6; color: var(--muted); }
+.novel-path {
+  margin: 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--surface); font-family: var(--font-mono, monospace); font-size: 10px;
+  line-height: 1.5; word-break: break-all; user-select: all;
+}
+.novel-export-menu .novel-note { padding: 6px 9px 4px; }
 
 /* ---- 作品列表弹窗 ---- */
 .novel-dialog {
@@ -4650,16 +4727,114 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
   background: var(--surface); color: var(--text);
   font-family: var(--font); font-size: 12px; line-height: 1.65; white-space: pre-wrap; word-break: break-word;
 }
-.novel-task-history { display: grid; gap: 4px; max-height: 112px; overflow-y: auto; }
+/* 最近任务：提词库同口径的紧凑行，最多 3 条；完整历史在「管理记录」。 */
+.novel-task-history { display: grid; gap: 3px; max-height: 150px; overflow-y: auto; }
+.novel-task-history[hidden] { display: none; }
 .novel-task-history:empty { display: none; }
-.novel-task-history-card {
-  display: flex; justify-content: space-between; align-items: center; gap: 8px;
-  min-width: 0; padding: 5px 7px; border: 1px solid var(--line); border-radius: var(--r-sm);
+.novel-task-history-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  font-size: 10px; color: var(--muted);
+}
+.novel-link-button {
+  border: 0; background: transparent; color: var(--violet-deep);
+  font-size: 10px; cursor: pointer; padding: 1px 2px; text-decoration: underline;
+}
+.novel-link-button:focus-visible { outline: 2px solid var(--violet-line); outline-offset: 1px; }
+.novel-task-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px 8px;
+  min-width: 0; padding: 4px 7px; border: 1px solid var(--line); border-radius: var(--r-sm);
   background: var(--surface); color: var(--text); text-align: left; cursor: pointer;
 }
-.novel-task-history-card.active { border-color: var(--accent-line, var(--line)); background: var(--accent-soft); }
-.novel-task-history-card strong { flex: 0 0 auto; font-size: 10.5px; }
-.novel-task-history-card span { min-width: 0; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.novel-task-row.active { border-color: var(--accent-line, var(--line)); background: var(--accent-soft); }
+.novel-task-row:hover { background: var(--surface-2); }
+/* 「查看」放右上角、标题在左：网格按行号显式落位，
+   否则 DOM 顺序会让「查看」挤到标题前面。 */
+.novel-task-row b {
+  grid-column: 1; grid-row: 1;
+  min-width: 0; overflow: hidden; font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap;
+}
+.novel-task-row small {
+  grid-column: 1; grid-row: 2; display: flex; align-items: center; gap: 6px;
+  font-size: 9.5px; color: var(--muted);
+}
+.novel-task-row small em { font-style: normal; }
+.novel-task-open {
+  grid-column: 2; grid-row: 1 / span 2; align-self: center;
+  font-size: 9.5px; color: var(--muted); white-space: nowrap;
+}
+
+/* ---- 管理记录（桌面宽弹窗 / 手机全屏） ---- */
+.novel-manage-dialog {
+  width: min(720px, calc(100vw - 32px)); max-height: calc(100vh - 56px);
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text); padding: 0;
+  overflow: hidden;
+}
+.novel-manage-form { display: flex; flex-direction: column; gap: 8px; padding: 14px; min-height: 0; }
+.novel-manage-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.novel-manage-head h3 { margin: 0; font-size: 14px; display: flex; align-items: baseline; gap: 7px; }
+.novel-manage-head h3 small { font-size: 10.5px; color: var(--muted); font-weight: 400; }
+.novel-manage-tabs { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; }
+.novel-manage-tabs::-webkit-scrollbar { display: none; }
+.novel-manage-tabs button {
+  flex: none; min-height: 28px; padding: 0 10px;
+  border: 1px solid transparent; border-radius: var(--r-md);
+  background: transparent; color: var(--muted); font-size: 11.5px; cursor: pointer;
+}
+.novel-manage-tabs button:hover { background: var(--surface-2); color: var(--text); }
+.novel-manage-tabs button.active {
+  border-color: var(--violet-line); background: var(--accent-soft);
+  color: var(--violet-deep); font-weight: 600;
+}
+.novel-manage-tabs button:focus-visible { outline: 2px solid var(--violet-line); outline-offset: 1px; }
+.novel-manage-tools { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.novel-manage-tools input[type="search"] {
+  flex: 1 1 140px; min-width: 0; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); color: var(--text); font-size: 11.5px;
+}
+.novel-manage-list {
+  flex: 1; min-height: 140px; max-height: 52vh; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 2px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2);
+}
+.novel-manage-row {
+  display: flex; align-items: flex-start; gap: 7px;
+  padding: 5px 7px; border-radius: var(--r-sm); background: var(--surface); cursor: pointer;
+}
+.novel-manage-row:hover { background: var(--surface-2); }
+/* 全局 `label input { width:100%; height:40px }` 会把这一行的复选框撑成整行高方块，
+   这里必须显式还原成行内小复选框。 */
+.novel-manage-row input[type="checkbox"] {
+  flex: none; width: 14px; height: 14px; min-height: 0;
+  margin: 3px 0 0; padding: 0; border-radius: 3px;
+}
+.novel-manage-row > span { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.novel-manage-row strong {
+  font-size: 11px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.novel-manage-row small { font-size: 9.5px; line-height: 1.5; color: var(--muted); }
+.novel-manage-locked {
+  font-size: 9px; font-style: normal; color: var(--danger, #c0392b);
+}
+
+@media (max-width: 760px) {
+  /* 手机：管理面板全屏，关闭后回到原阶段原位置。 */
+  .novel-manage-dialog {
+    width: 100vw; max-width: 100vw; height: 100vh; max-height: 100vh;
+    border: 0; border-radius: 0; margin: 0;
+  }
+  .novel-manage-form { height: 100%; padding: 10px 10px 12px; }
+  .novel-manage-list { max-height: none; }
+  /* 手机分档按钮：未选中也要看得出能点；按下与键盘焦点都有明确反馈。 */
+  .novel-pane-btn {
+    min-height: 34px; border-color: var(--line); color: var(--text); background: var(--surface);
+  }
+  .novel-pane-btn:hover { background: var(--surface-2); }
+  .novel-pane-btn:active { background: var(--accent-soft); border-color: var(--violet-line); }
+  .novel-pane-btn.active { border-color: var(--violet-line); background: var(--accent-soft); color: var(--violet-deep); font-weight: 600; }
+  .novel-pane-btn:focus-visible { outline: 2px solid var(--violet-line); outline-offset: 1px; }
+}
 
 @media (max-width: 960px) and (orientation: landscape) {
   .novel-stage-panel { gap: 5px; }

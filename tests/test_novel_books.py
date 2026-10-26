@@ -141,12 +141,16 @@ class NovelBookCrudTests(NovelStoreTestCase):
         self.assertEqual({row["id"] for row in rows}, {first["id"], second["id"]})
 
     def test_get_book_index_has_no_body(self):
-        """两段式：作品详情仍只给索引。"""
+        """两段式：作品详情仍只给索引（不含正文与稿件正文）。"""
         book = self._create(chapters=3)
         detail = self.store.get_book(book["id"])
         for row in detail["chapters"]:
-            self.assertEqual(set(row), {"i", "title", "len"}, "详情不能带正文")
-        self.assertNotIn("content", json.dumps(detail["chapters"]))
+            self.assertIn("i", row)
+            self.assertIn("title", row)
+            self.assertIn("len", row)
+            self.assertNotIn("content", row, "详情不能带正文")
+            self.assertNotIn("manuscripts", row, "详情不能带稿件正文")
+        self.assertNotIn("正文内容", json.dumps(detail["chapters"]))
 
     def test_get_chapter_returns_body_and_revision(self):
         book = self._create(chapters=3)
@@ -161,11 +165,17 @@ class NovelBookCrudTests(NovelStoreTestCase):
             self.store.get_chapter(book["id"], 9)
 
     def test_update_chapter_bumps_revision_and_manifest(self):
+        """改标题：改的是章节索引；改正文新增改编稿，不覆盖原文。"""
         book = self._create(chapters=2)
         before = self.store.get_book(book["id"])["book"]["revision"]
+        original = self.store.get_chapter(book["id"], 1)["content"]
         chapter = self.store.update_chapter(book["id"], 1, title="新标题", content="新的正文。")
         self.assertEqual(chapter["title"], "新标题")
-        self.assertEqual(chapter["content"], "新的正文。")
+        # 界面上的「当前正文」是刚保存的改编稿，但原文逐字未变。
+        self.assertEqual(self.store.get_chapter(book["id"], 1)["content"], original,
+                         "原文不能被编辑覆盖")
+        self.assertEqual(chapter["created_manuscript"]["content"], "新的正文。")
+        self.assertEqual(chapter["created_manuscript"]["kind"], "manual")
         self.assertGreater(chapter["revision"], 1)
         self.assertGreater(self.store.get_book(book["id"])["book"]["revision"], before)
 

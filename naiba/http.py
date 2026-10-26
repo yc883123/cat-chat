@@ -577,10 +577,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                 module=str(query.get("module", [""])[0]),
                 exclude_module=str(query.get("exclude_module", [""])[0]),
             ))
-        # ---- 创作场（小说改编，阶段一：文件处理，零 AI） ----
-        # 两段式硬契约：列表与详情只回索引，正文只有单章接口给。
+        # ---- 创作场（小说改编） ----
+        # 两段式硬契约：列表与详情只回索引；单章接口给基础稿件正文，
+        # 其它稿件按 /manuscripts/<id> 单独取（一份原作可能有很多份改编稿）。
         elif path == "/api/novel/books":
             self._json(*self.app.novel.api_list_books())
+        elif path == "/api/novel/location":
+            # 数据目录与导出说明（路径由后端解析，前端不猜）。
+            self._json(*self.app.novel.api_location())
         elif path.startswith("/api/novel/imports/"):
             # 导入暂存的单章正文（勾选前预览）：/api/novel/imports/<id>/chapters/<i>
             parts = path.split("/")
@@ -592,15 +596,32 @@ class RequestHandler(BaseHTTPRequestHandler):
             # 整本导出：返回文本，前端落 Blob（不新增后端下载接口）。
             book_id = path[len("/api/novel/books/"):-len("/export")]
             query = urllib.parse.parse_qs(parsed.query)
+            manuscripts_raw = None
+            if query.get("manuscripts"):
+                try:
+                    manuscripts_raw = json.loads(str(query.get("manuscripts", ["{}"])[0]))
+                except (ValueError, TypeError):
+                    manuscripts_raw = None
             self._json(*self.app.novel.api_export_book(
                 book_id,
                 str(query.get("format", ["txt"])[0]),
                 str(query.get("with_extras", [""])[0]),
+                manuscripts_raw,
             ))
+        elif path.startswith("/api/novel/books/") and path.endswith("/records"):
+            # 管理记录：原文/改编稿/要素/大纲/剧本全量清单（不含正文）。
+            book_id = path[len("/api/novel/books/"):-len("/records")]
+            self._json(*self.app.novel.api_records(book_id))
         elif path.startswith("/api/novel/books/") and path.endswith("/script"):
             # 剧本场次列表（阶段三）。
             book_id = path[len("/api/novel/books/"):-len("/script")]
             self._json(*self.app.novel.api_list_script(book_id))
+        elif path.startswith("/api/novel/books/") and "/manuscripts/" in path:
+            # 单份稿件正文：/api/novel/books/<id>/chapters/<i>/manuscripts/<ms-id>
+            head, _, manuscript_id = path.partition("/manuscripts/")
+            book_id, _, chapter_no = head.rpartition("/chapters/")
+            book_id = book_id[len("/api/novel/books/"):]
+            self._json(*self.app.novel.api_get_manuscript(book_id, chapter_no, manuscript_id))
         elif path.startswith("/api/novel/books/") and "/chapters/" in path:
             head, _, chapter_no = path.partition("/chapters/")
             book_id = head[len("/api/novel/books/"):]
@@ -779,17 +800,35 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(*self.app.studio.api_custom_import(body))
         elif path == "/api/studio/custom":
             self._json(*self.app.studio.api_custom_create(body))
-        # ---- 创作场（小说改编，阶段一） ----
+        # ---- 创作场（小说改编） ----
         elif path == "/api/novel/books":
             # 勾选章节入库（暂存 → 正式作品目录）；阶段一是文件处理，不建 Studio 任务。
             self._json(*self.app.novel.api_create_book(body))
-        # ---- 创作场（阶段二）：要素 / 大纲生成走 Studio 任务队列 ----
+        # ---- 创作场（阶段二、三）：生成走 Studio 任务队列 ----
         elif path == "/api/novel/stage":
             self._json(*self.app.novel.api_stage(body))
+        elif path == "/api/novel/stage/preview":
+            # 提交前预检：真实读稿、按滑条值算引用范围与 token 估算（不建任务）。
+            self._json(*self.app.novel.api_stage_preview(body))
+        elif path == "/api/novel/records/delete":
+            # 批量删除管理记录（稿件 / 要素 / 大纲 / 剧本版本）。
+            self._json(*self.app.novel.api_delete_records(str(body.get("book_id") or ""), body))
+        elif path == "/api/novel/tasks/delete":
+            # 删除生成记录：只清任务记录，不删从它保存的内容。
+            self._json(*self.app.novel.api_delete_tasks(body))
+        elif path == "/api/novel/reveal":
+            # 打开作品保存目录（路径由服务端决定，不收客户端参数）。
+            self._json(*self.app.novel.api_reveal())
         elif path.startswith("/api/novel/books/") and path.endswith("/apply"):
-            # 把任务结果写回作品（要素 / 大纲 / 剧本）：POST /api/novel/books/<id>/apply
+            # 把任务结果写回作品（要素 / 大纲 / 剧本 / 单章改编）
             book_id = path[len("/api/novel/books/"):-len("/apply")]
             self._json(*self.app.novel.api_apply(book_id, body))
+        elif path.startswith("/api/novel/books/") and path.endswith("/manuscripts"):
+            # 保存一份改编稿：POST /api/novel/books/<id>/chapters/<i>/manuscripts
+            head = path[:-len("/manuscripts")]
+            book_id, _, chapter_no = head.rpartition("/chapters/")
+            book_id = book_id[len("/api/novel/books/"):]
+            self._json(*self.app.novel.api_save_manuscript(book_id, chapter_no, body))
         elif path.startswith("/api/novel/books/") and path.endswith("/script/reorder"):
             # 场次重排：只改顺序，保留来源章节。
             book_id = path[len("/api/novel/books/"):-len("/script/reorder")]
@@ -1513,7 +1552,13 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(*self.app.labeler.api_tasks_delete(body))
         elif path.startswith("/api/comfyui/workflows/"):
             self._json(*self.app.comfyui.api_workflow_delete(path.rsplit("/", 1)[-1]))
-        # ---- 创作场（小说改编，阶段一） ----
+        # ---- 创作场（小说改编） ----
+        elif path.startswith("/api/novel/books/") and "/manuscripts/" in path:
+            # 删一份稿件：DELETE /api/novel/books/<id>/chapters/<i>/manuscripts/<ms-id>
+            head, _, manuscript_id = path.partition("/manuscripts/")
+            book_id, _, chapter_no = head.rpartition("/chapters/")
+            book_id = book_id[len("/api/novel/books/"):]
+            self._json(*self.app.novel.api_delete_manuscript(book_id, chapter_no, manuscript_id))
         elif path.startswith("/api/novel/books/") and "/script/" in path:
             # 删单条场次：DELETE /api/novel/books/<id>/script/<i>
             head, _, scene_no = path.partition("/script/")

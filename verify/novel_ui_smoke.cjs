@@ -45,6 +45,20 @@ const BOOK = {
     split_level: 'heading', split_level_label: '按章节标题识别',
     max_len: 6000, total_len: 14382,
   },
+  elements: { characters: ['沈砚：书生'], scenes: [], props: [], raw: '## 人物\\n· 沈砚：书生', updated_at: 1750000400000, task_id: 'old-elements', version: 1 },
+  elements_versions: [
+    { version: 1, raw: '## 人物\\n· 旧版人物', updated_at: 1750000400000, task_id: 'old-elements', chapter_ids: [1] },
+    { version: 2, raw: '## 人物\\n· 沈砚：书生', updated_at: 1750000500000, task_id: 'new-elements', chapter_ids: [1, 2] },
+  ],
+  outline: '', outline_versions: [],
+  script_version: 2,
+  script: [
+    { i: 1, scene: 'INT. 新场景 - 夜', content: '新版场次。', from_chapter: 1 },
+  ],
+  script_versions: [
+    { version: 1, script: [{ i: 1, scene: 'INT. 旧场景 - 夜', content: '旧版场次。', from_chapter: 1 }], updated_at: 1750000400000, task_id: 'old-script', chapter_ids: [1] },
+    { version: 2, script: [{ i: 1, scene: 'INT. 新场景 - 夜', content: '新版场次。', from_chapter: 1 }], updated_at: 1750000500000, task_id: 'new-script', chapter_ids: [1, 2] },
+  ],
 };
 const CHAPTER_BODY = {
   i: 1, title: '第1章 雨夜来客', len: 4860, revision: 1,
@@ -59,6 +73,7 @@ const STAGE_TASK = {
   title: '《长夜灯》· 要素', module: 'novel', origin_label: '创作场',
   result: STAGE_ELEMENTS_TEXT, result_partial: '', usage: {},
   created_at: 1750000200000, updated_at: 1750000300000,
+  novel: { book_id: BOOK_ID, stage: 'elements', chapter_ids: [1, 2] },
   input: {
     content: '素材', model_key: 'online:probe-te', model_name: 'probe-default',
     title: '《长夜灯》· 要素', module: 'novel', origin_label: '创作场',
@@ -114,8 +129,7 @@ async function main() {
   const exportQueries = [];
   // 剧本场次的服务端状态（删除/重排后要能反映出来）。
   let scriptState = [
-    { i: 1, scene: 'INT. 老宅书房 - 夜', content: '沈砚推门进来。', from_chapter: 1 },
-    { i: 2, scene: 'EXT. 长桥 - 清晨', content: '雾还没散。', from_chapter: 1 },
+    { i: 1, scene: 'INT. 新场景 - 夜', content: '新版场次。', from_chapter: 1 },
   ];
   let stageWarnings = [];
   let stageTaskState = { ...STAGE_TASK, status: 'queued', result: '', result_partial: '' };
@@ -236,21 +250,25 @@ async function main() {
     // 阶段二：生成提交（记录请求体，供断言任务契约字段）
     if (path === '/api/novel/stage' && method === 'POST') {
       stageSubmit = JSON.parse(request.postData() || '{}');
-      return json({ task: { ...STAGE_TASK, status: 'queued', result: '', result_partial: '' }, warnings: stageWarnings }, 201);
+      return json({ task: { ...STAGE_TASK, status: 'queued', result: '', result_partial: '' }, warnings: stageWarnings, book_revision: BOOK.revision }, 201);
     }
     // 阶段二：写回（记录请求体）。要素与剧本各自返回对应结构。
     if (path === `/api/novel/books/${BOOK_ID}/apply` && method === 'POST') {
       applySubmit = JSON.parse(request.postData() || '{}');
       const nextRevision = (BOOK.revision || 0) + 1;
       if (applySubmit.stage === 'script') {
+        const nextScript = [
+          { i: 1, scene: 'INT. 新场景 - 夜', content: '新版场次。', from_chapter: 1 },
+          { i: 2, scene: 'EXT. 长桥 - 清晨', content: '雾还没散。', from_chapter: 1 },
+        ];
+        scriptState = nextScript;
         return json({
           book: {
             ...BOOK, revision: nextRevision,
             elements: BOOK.elements, outline: BOOK.outline, summaries: {},
-            script: [
-              { i: 1, scene: 'INT. 老宅书房 - 夜', content: '沈砚推门进来。', from_chapter: 1 },
-              { i: 2, scene: 'EXT. 长桥 - 清晨', content: '雾还没散。', from_chapter: 1 },
-            ],
+            script: nextScript,
+            script_version: 3,
+            script_versions: [...BOOK.script_versions, { version: 3, script: nextScript, updated_at: 1750000600000, task_id: 'new-script-2', chapter_ids: [1, 2] }],
             script_parsed: true,
           },
         });
@@ -261,8 +279,9 @@ async function main() {
           elements: {
             characters: ['沈砚：书生，谨慎', '老周：船夫'],
             scenes: ['长桥：第1章'], props: ['无名信：推动调查'],
-            raw: STAGE_ELEMENTS_TEXT, updated_at: 1750000400000, task_id: STAGE_TASK_ID,
+            raw: STAGE_ELEMENTS_TEXT, updated_at: 1750000600000, task_id: STAGE_TASK_ID, version: 3,
           },
+          elements_versions: [...BOOK.elements_versions, { version: 3, raw: STAGE_ELEMENTS_TEXT, updated_at: 1750000600000, task_id: STAGE_TASK_ID, chapter_ids: [1, 2] }],
           outline: '', summaries: {}, script: [],
         },
       });
@@ -380,7 +399,7 @@ async function main() {
   await page.waitForTimeout(150);
   check('有未保存修改时保存按钮可用', !(await page.locator('#novelSaveChapter').isDisabled()));
   await page.locator('#novelSaveChapter').click();
-  await page.waitForTimeout(500);
+  await page.waitForFunction(() => document.querySelector('#novelSaveState')?.textContent === '已保存', null, { timeout: 5000 });
   check('保存请求带上 revision', savedBody && savedBody.revision === 1, JSON.stringify(savedBody));
   check('保存后列表标题同步', (await page.locator('#novelChapterList').innerText()).includes('改过的标题'));
   check('保存状态显示已保存', (await page.locator('#novelSaveState').innerText()) === '已保存');
@@ -502,6 +521,15 @@ async function main() {
   check('已保存结果含人物',
     (await page.locator('#novelStageSavedBody').innerText()).includes('沈砚'),
     await page.locator('#novelStageSavedBody').innerText());
+  const elementVersionLabels = await page.locator('#novelStageVersion option').allInnerTexts();
+  check('要素版本选项包含时间和来源章节',
+    elementVersionLabels.some((label) => label.includes('2025-06-15') && label.includes('第 1 章')),
+    JSON.stringify(elementVersionLabels));
+  await page.locator('#novelStageVersion').selectOption('1');
+  check('切换要素版本后显示对应正文',
+    (await page.locator('#novelStageSavedBody').innerText()).includes('旧版人物'),
+    await page.locator('#novelStageSavedBody').innerText());
+  check('保存后无活动任务时任务历史仍显示', await page.locator('#novelTaskHistory').isVisible());
 
   // 分区：创作场只请求 module=novel
   check('创作场任务请求带 module=novel',
@@ -514,12 +542,18 @@ async function main() {
   await page.waitForTimeout(600);
   check('切到大纲阶段', (await page.locator('#novelEditorHead').innerText()) === '改编大纲');
   check('大纲阶段仍显示生成入口', await page.locator('#novelStageGenerate').isVisible());
+  check('大纲使用独立生成面板', await page.locator('[data-stage-panel="outline"]#novelStagePanel').count() === 1);
+  check('要素结果框与大纲结果框分离', await page.locator('[data-stage-panel="outline"] #novelStageResult').count() === 1);
+  check('大纲不依赖要素版本', await page.locator('[data-stage-panel="outline"] [data-novel-context="outline"]').count() === 0);
 
   // ---- 7d. 阶段三：剧本场次 ----
   await page.locator('#novelStages [data-novel-stage="script"]').click();
   await page.waitForTimeout(500);
   check('切到剧本阶段', (await page.locator('#novelEditorHead').innerText()) === '剧本');
   check('剧本阶段显示场次区', await page.locator('#novelSceneBlock').isVisible());
+  check('剧本可分别选择人物和大纲版本',
+    await page.locator('[data-stage-panel="script"] [data-novel-context="script"] [data-context-elements]').count() === 1
+    && await page.locator('[data-stage-panel="script"] [data-novel-context="script"] [data-context-outline]').count() === 1);
 
   // 生成剧本（复用阶段二的提交契约，stage=script）
   await page.locator('#novelStageGenerate').click();
@@ -542,6 +576,18 @@ async function main() {
   await page.locator('#novelSceneList [data-novel-scene-open="1"]').click();
   await page.waitForTimeout(300);
   check('点场次展开编辑区', await page.locator('#novelSceneEdit').isVisible());
+  await page.locator('#novelScriptVersion').selectOption('1');
+  check('剧本版本下拉包含时间和来源章节',
+    (await page.locator('#novelScriptVersion option').first().innerText()).includes('第 1 章'));
+  check('切到历史剧本后显示旧版且只读',
+    (await page.locator('#novelSceneList').innerText()).includes('旧场景')
+      && await page.locator('#novelSceneEdit').isHidden()
+      && await page.locator('#novelSceneList [data-novel-scene-open]').isDisabled());
+  await page.locator('#novelScriptVersion').selectOption('3');
+  check('切回最新剧本后可编辑当前版本',
+    (await page.locator('#novelSceneList').innerText()).includes('新场景'));
+  await page.locator('#novelSceneList [data-novel-scene-open="1"]').click();
+  check('切回最新后重新打开场次编辑区', await page.locator('#novelSceneEdit').isVisible());
   await page.locator('#novelSceneHead').fill('INT. 改过的地点 - 夜');
   await page.locator('#novelSceneSave').click();
   await page.waitForTimeout(600);

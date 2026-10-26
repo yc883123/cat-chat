@@ -4613,6 +4613,11 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 .novel-stage-head strong { font-size: 12.5px; }
 .novel-stage-head small { font-size: 10.5px; color: var(--muted); }
 .novel-stage-meta { display: flex; gap: 6px; flex-wrap: wrap; }
+.novel-stage-context { display: flex; gap: 8px; flex-wrap: wrap; }
+.novel-stage-context[hidden] { display: none; }
+.novel-stage-context label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+.novel-stage-context select, .novel-version-tools select { width: auto; padding: 4px 7px; font-size: 11px; }
+.novel-version-tools { display: flex; align-items: center; gap: 7px; }
 /* 两级选择：供应商 + 模型各占一份，按钮靠右；窄屏自动换行，不挤压下拉。 */
 .novel-stage-model { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
 .novel-stage-model .novel-field { flex: 1 1 120px; min-width: 0; }
@@ -4644,6 +4649,16 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
   background: var(--surface); color: var(--text);
   font-family: var(--font); font-size: 12px; line-height: 1.65; white-space: pre-wrap; word-break: break-word;
 }
+.novel-task-history { display: grid; gap: 4px; max-height: 112px; overflow-y: auto; }
+.novel-task-history:empty { display: none; }
+.novel-task-history-card {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  min-width: 0; padding: 5px 7px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--text); text-align: left; cursor: pointer;
+}
+.novel-task-history-card.active { border-color: var(--accent-line, var(--line)); background: var(--accent-soft); }
+.novel-task-history-card strong { flex: 0 0 auto; font-size: 10.5px; }
+.novel-task-history-card span { min-width: 0; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 
 @media (max-width: 960px) and (orientation: landscape) {
   .novel-stage-panel { gap: 5px; }
@@ -4685,6 +4700,8 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
   border: 1px solid var(--line); border-radius: var(--r-md);
   background: var(--surface); box-shadow: 0 6px 18px rgba(0, 0, 0, .16);
 }
+.novel-toolbar { position: relative; }
+.novel-export-menu { top: 100%; left: auto; right: 0; margin-top: 2px; }
 .novel-export-menu[hidden] { display: none; }
 .novel-export-menu button {
   padding: 7px 9px; border: none; border-radius: var(--r-sm);

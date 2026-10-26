@@ -157,6 +157,30 @@ class ScriptStoreTests(unittest.TestCase):
         book = self.store.apply_script(self.book["id"], task_id="st-2", text=SCRIPT_OK, from_chapter=1)
         self.assertEqual(len(book["script"]), 2, "同一章重新生成应当替换，不该叠加")
 
+    def test_regenerating_multiple_chapters_replaces_all_selected(self):
+        self.store.apply_script(self.book["id"], task_id="st-1", text=SCRIPT_OK, from_chapter=2)
+        self.store.apply_script(self.book["id"], task_id="st-2", text=SCRIPT_OK, from_chapter=3)
+        book = self.store.apply_script(self.book["id"], task_id="st-3", text=SCRIPT_OK,
+                                       from_chapter=2, chapter_ids=[2, 3])
+        self.assertEqual(len(book["script"]), 2)
+        self.assertEqual(book["script_versions"][-1]["chapter_ids"], [2, 3])
+
+    def test_legacy_script_metadata_is_preserved_in_first_snapshot(self):
+        book_dir = self.store._book_dir(self.book["id"])
+        manifest = self.store._load_manifest(self.book["id"])
+        manifest["script"] = [{"i": 1, "scene": "INT. 旧场景 - 夜", "content": "旧内容", "from_chapter": 1}]
+        manifest["script_task_id"] = "old-task"
+        manifest["script_updated_at"] = 123456
+        self.store._write_json(book_dir / "book.json", manifest)
+        result = self.store.apply_script(self.book["id"], task_id="new-task", text=SCRIPT_OK, from_chapter=2)
+        self.assertEqual(result["script_versions"][0]["task_id"], "old-task")
+        self.assertEqual(result["script_versions"][0]["updated_at"], 123456)
+
+    def test_same_task_cannot_create_duplicate_script_version(self):
+        self.store.apply_script(self.book["id"], task_id="same-task", text=SCRIPT_OK, from_chapter=1)
+        with self.assertRaises(NovelConflictError):
+            self.store.apply_script(self.book["id"], task_id="same-task", text=SCRIPT_OK, from_chapter=1)
+
     def test_different_chapters_accumulate(self):
         self.store.apply_script(self.book["id"], task_id="st-1", text=SCRIPT_OK, from_chapter=1)
         book = self.store.apply_script(self.book["id"], task_id="st-2", text=SCRIPT_OK, from_chapter=2)

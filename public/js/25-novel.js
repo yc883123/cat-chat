@@ -51,6 +51,13 @@ const novel = {
   streamText: "",
   stageWarnings: [],
   stageBusy: false,
+  // 每个阶段各自保存当前任务和流式结果。切换阶段不再共用一个“活动任务槽”，
+  // 这样要素、大纲、剧本可以各自生成、查看和再次生成。
+  stageStates: {
+    elements: { activeTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0, firstDeltaAt: 0, recentDeltas: [] },
+    outline: { activeTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0, firstDeltaAt: 0, recentDeltas: [] },
+    script: { activeTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0, firstDeltaAt: 0, recentDeltas: [] },
+  },
   // 模型选择（与提词库同口径）：先选供应商，再按供应商拉完整模型目录。
   stageProviderKey: "",
   stageModelName: "",
@@ -64,11 +71,13 @@ const novel = {
   chapterToken: 0,
   booksToken: 0,
   taskToken: 0,
+  selectedVersions: { elements: 0, outline: 0, script: 0 },
 };
 
 // 阶段二起：一次生成最多带几章（与服务端 prompts.MAX_CHAPTERS_PER_CALL 一致）。
 const MAX_STAGE_CHAPTERS = 6;
 const STAGE_TASKS_URL = "/api/studio/tasks?module=novel";
+const LAST_BOOK_KEY = "naibaNovelLastBookId";
 const TASK_STATUS_LABELS = {
   queued: "排队中",
   running: "生成中",
@@ -116,6 +125,12 @@ function setSaveState(text, note = "") {
   if (noteEl && note) noteEl.textContent = note;
 }
 
+function closeExportMenu() {
+  const menu = $("#novelExportMenu");
+  if (menu) menu.hidden = true;
+  $("#novelExportBtn")?.setAttribute("aria-expanded", "false");
+}
+
 function setBusy(busy) {
   novel.busy = busy;
   const btn = $("#novelSaveBook");
@@ -127,6 +142,64 @@ function fail(prefix, error) {
   const message = String(error?.message || error || "未知错误");
   toast(`${prefix}：${message}`);
   return message;
+}
+
+function stageState(stage = novel.stage) {
+  return novel.stageStates[stage] || novel.stageStates.elements;
+}
+
+const STAGE_PANEL_CONTROL_IDS = [
+  "novelStageMeta", "novelStageNote", "novelStageProvider", "novelStageModel",
+  "novelStageGenerate", "novelStageWarning", "novelStageTask", "novelStageTaskState",
+  "novelStageCancel", "novelStageRetry", "novelStageApply", "novelStageTaskNote",
+  "novelStageResult", "novelStageSaved", "novelStageSavedAt", "novelStageSavedBody", "novelStageVersion",
+  "novelTaskHistory",
+  "novelSceneBlock", "novelSceneCount", "novelSceneNote", "novelSceneList", "novelSceneEdit",
+  "novelSceneHead", "novelSceneBody", "novelSceneSave", "novelSceneCancel", "novelScriptVersion",
+];
+
+function activateStagePanel(stage) {
+  const host = document.querySelector("#novelEditorBody");
+  if (!host) return;
+  const panels = [...host.querySelectorAll("[data-stage-panel]")];
+  const active = panels.find((panel) => panel.dataset.stagePanel === stage) || panels[0];
+  for (const panel of panels) {
+    panel.hidden = panel !== active;
+    panel.removeAttribute("id");
+    for (const id of STAGE_PANEL_CONTROL_IDS) {
+      panel.querySelectorAll(`[data-novel-control="${id}"]`).forEach((el) => el.removeAttribute("id"));
+    }
+  }
+  if (!active) return;
+  active.id = "novelStagePanel";
+  for (const id of STAGE_PANEL_CONTROL_IDS) {
+    const el = active.querySelector(`[data-novel-control="${id}"]`);
+    if (el) el.id = id;
+  }
+}
+
+function prepareStagePanels() {
+  const first = $("#novelStagePanel");
+  if (!first || first.dataset.stagePanelsReady) return;
+  const host = first.parentElement;
+  const ids = ["novelStagePanel", ...STAGE_PANEL_CONTROL_IDS];
+  const markControls = (panel) => {
+    for (const id of ids) {
+      const el = id === "novelStagePanel" ? panel : panel.querySelector(`#${id}`);
+      if (el) el.dataset.novelControl = id;
+    }
+  };
+  first.dataset.stagePanel = "elements";
+  markControls(first);
+  for (const stage of ["outline", "script"]) {
+    const clone = first.cloneNode(true);
+    clone.removeAttribute("id");
+    clone.dataset.stagePanel = stage;
+    markControls(clone);
+    clone.querySelectorAll("[id]").forEach((el) => el.removeAttribute("id"));
+    host.append(clone);
+  }
+  first.dataset.stagePanelsReady = "true";
 }
 
 // ============================================================
@@ -307,6 +380,7 @@ function renderEditor() {
   if (fields) fields.hidden = stageMode || !chapter;
   if (placeholder) placeholder.hidden = stageMode || Boolean(chapter);
   if (stageMode) {
+    activateStagePanel(novel.stage);
     const copy = STAGE_COPY[novel.stage];
     if (head) head.textContent = copy.title;
     if (hint) hint.textContent = copy.hint;
@@ -355,9 +429,31 @@ function metaItem(label, value) {
 // 阶段二：要素 / 大纲生成
 // ============================================================
 
+function versionStamp(row) {
+  const ms = Number(row?.updated_at || 0);
+  if (!ms) return "保存时间未知";
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return "保存时间未知";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function versionLabel(row) {
+  const chapters = Array.isArray(row?.chapter_ids) ? row.chapter_ids : [];
+  return `第 ${row.version} 版 · ${versionStamp(row)}${chapters.length ? ` · 第 ${chapters.join("、")} 章` : " · 来源未记录"}`;
+}
+
+function selectedStageVersion(stage) {
+  const versions = stage === "elements" ? novel.book?.elements_versions : novel.book?.outline_versions;
+  const selectedNumber = novel.selectedVersions[stage];
+  return versions?.find((row) => Number(row.version) === selectedNumber) || versions?.at(-1) || null;
+}
+
 function stageSavedText(stage) {
   if (!novel.book) return "";
   if (stage === "elements") {
+    const version = selectedStageVersion(stage);
+    if (version?.raw) return String(version.raw);
     const elements = novel.book.elements || {};
     if (elements.raw) return String(elements.raw);
     const lines = [];
@@ -371,23 +467,19 @@ function stageSavedText(stage) {
     push("道具", elements.props);
     return lines.join("\n");
   }
+  const version = selectedStageVersion(stage);
+  if (version?.text) return String(version.text);
   return String(novel.book.outline || "");
 }
 
 function stageSavedAt(stage) {
-  if (!novel.book) return "";
-  const ms = stage === "elements"
-    ? Number(novel.book.elements?.updated_at || 0)
-    : Number(novel.book.outline_updated_at || 0);
-  if (!ms) return "";
-  const date = new Date(ms);
-  if (Number.isNaN(date.getTime())) return "";
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const selected = selectedStageVersion(stage);
+  return selected ? versionLabel(selected) : "";
 }
 
 function renderStagePanel() {
   const stage = novel.stage;
+  const stageData = stageState(stage);
   // 阶段标题与提示由中栏面板头承担（renderEditor 里写），这里只管内容区。
 
   // 素材勾选状态：用左栏已勾的章节；导入暂存态不允许生成。
@@ -401,9 +493,34 @@ function renderStagePanel() {
       metaItem("上限", `最多 ${MAX_STAGE_CHAPTERS} 章`),
     );
   }
+  document.querySelectorAll("#novelStagePanel [data-novel-context]").forEach((section) => {
+    section.hidden = section.dataset.novelContext !== stage || !novel.book;
+    const elements = novel.book?.elements_versions || [];
+    const outlines = novel.book?.outline_versions || [];
+    const legacyElements = novel.book?.elements?.raw ? [{ version: novel.book.elements.version || 1 }] : [];
+    const legacyOutline = novel.book?.outline ? [{ version: novel.book.outline_version || 1 }] : [];
+    const elementRows = elements.length ? elements : legacyElements;
+    const outlineRows = outlines.length ? outlines : legacyOutline;
+    const elementSelect = section.querySelector("[data-context-elements]");
+    const outlineSelect = section.querySelector("[data-context-outline]");
+    if (elementSelect) {
+      elementSelect.replaceChildren(...elementRows.map((row) => new Option(versionLabel(row), String(row.version))));
+      if (!elementRows.length) elementSelect.append(new Option("尚无已保存要素", ""));
+      elementSelect.disabled = !elementRows.length;
+      elementSelect.value = String(novel.selectedVersions.elements || elementRows.at(-1)?.version || "");
+    }
+    if (outlineSelect) {
+      outlineSelect.replaceChildren(...outlineRows.map((row) => new Option(versionLabel(row), String(row.version))));
+      if (!outlineRows.length) outlineSelect.append(new Option("尚无已保存大纲", ""));
+      outlineSelect.disabled = !outlineRows.length;
+      outlineSelect.value = String(novel.selectedVersions.outline || outlineRows.at(-1)?.version || "");
+    }
+  });
   const generate = $("#novelStageGenerate");
   if (generate) {
-    generate.disabled = !ready || novel.stageBusy || picked.length > MAX_STAGE_CHAPTERS;
+    generate.disabled = !ready || stageData.busy || picked.length > MAX_STAGE_CHAPTERS;
+    generate.textContent = stage === "script" ? "生成剧本" : `生成${STAGE_COPY[stage].title}`;
+    generate.title = "每次点击都会新建一条任务；可以在结果确认后再次生成，不会锁死本阶段。";
   }
   const warning = $("#novelStageWarning");
   if (warning) {
@@ -415,14 +532,14 @@ function renderStagePanel() {
     else if (picked.length > MAX_STAGE_CHAPTERS) {
       lines.push(`一次最多带 ${MAX_STAGE_CHAPTERS} 章（已选 ${picked.length} 章，多了 ${picked.length - MAX_STAGE_CHAPTERS} 章），请分批生成。`);
     }
-    for (const note of novel.stageWarnings) lines.push(note);
+    for (const note of stageData.warnings) lines.push(note);
     warning.textContent = lines.join(" ");
   }
 
   // 任务区：进行中显示进度与取消；完成显示结果与写回；失败显示原因与重试。
   const taskBox = $("#novelStageTask");
   const savedBox = $("#novelStageSaved");
-  const task = novel.tasks.find((row) => row.id === novel.activeTaskId) || null;
+  const task = novel.tasks.find((row) => row.id === stageData.activeTaskId) || null;
   if (taskBox) taskBox.hidden = !task;
   if (task) {
     const stateEl = $("#novelStageTaskState");
@@ -433,14 +550,27 @@ function renderStagePanel() {
     const note = $("#novelStageTaskNote");
     if (note) {
       const bits = [];
-      if (status === "queued") bits.push("生成任务在后台排队，作品页面不会被锁住。");
-      if (status === "running") bits.push("正在生成，可以切到别的阶段继续做别的事。");
+      const elapsed = stageData.submittedAt ? Math.max(0, Math.floor((Date.now() - stageData.submittedAt) / 1000)) : 0;
+      if (status === "queued") bits.push(`生成任务在后台排队${elapsed >= 5 ? `，已等待 ${elapsed} 秒` : ""}。作品页面不会被锁住。`);
+      if (status === "running") {
+        if (!bodyHasText(stageData, task)) {
+          bits.push(elapsed >= 8
+            ? `模型仍在处理，已等待 ${elapsed} 秒，尚未返回正文；中转较慢时页面会继续等待，你可以取消任务。`
+            : "正在连接模型并等待首段回复，可以切到别的阶段继续操作。");
+        } else {
+          const samples = stageData.recentDeltas;
+          const span = samples.length > 1 ? (samples[samples.length - 1].at - samples[0].at) / 1000 : 0;
+          const chars = samples.reduce((sum, row) => sum + row.chars, 0);
+          const speed = span > 0 ? Math.max(1, Math.round(chars / span)) : 0;
+          bits.push(`已生成 ${stageData.streamText.length || String(task.result_partial || "").length} 字${speed ? `，最近约 ${speed} 字/秒` : ""}。`);
+        }
+      }
       if (status === "failed" && task.error) bits.push(String(task.error));
       if (status === "cancelled") bits.push("任务已取消。");
       if (status === "interrupted") bits.push("服务重启让任务中断了，可以重试。");
       note.textContent = bits.join(" ");
     }
-    const body = String(novel.streamText || task.result || task.result_partial || "");
+    const body = String(stageData.streamText || task.result || task.result_partial || "");
     const result = $("#novelStageResult");
     if (result) result.textContent = body;
     const cancel = $("#novelStageCancel");
@@ -449,20 +579,62 @@ function renderStagePanel() {
     if (retry) retry.hidden = !["failed", "cancelled", "interrupted"].includes(status);
     const apply = $("#novelStageApply");
     // 只有「已完成且结果非空」才能写回：写回是覆盖动作，不能拿空结果覆盖已有成果。
-    if (apply) apply.hidden = !(status === "done" && body.trim());
+    if (apply) {
+      apply.hidden = !(status === "done" && body.trim());
+      apply.textContent = stage === "script" ? "保存为新剧本版本" : `保存为新${STAGE_COPY[stage].title}版本`;
+      apply.title = "保存会新增一个版本并保留旧版；后续阶段可选择使用哪个版本。";
+    }
   }
+  renderStageTaskHistory(stage, stageData.activeTaskId);
 
   // 「作品里已保存的结果」只给要素/大纲用；剧本阶段由场次列表承担，
   // 否则同一块区域会先把大纲原文摆出来、把场次挤到下面去。
   const saved = stage === "script" ? "" : stageSavedText(stage);
   if (savedBox) savedBox.hidden = !saved;
   if (saved) {
+    const versionSelect = $("#novelStageVersion");
+    const versions = stage === "elements" ? (novel.book?.elements_versions || []) : (novel.book?.outline_versions || []);
+    if (versionSelect) {
+      const currentNumber = stage === "elements" ? novel.book?.elements?.version : novel.book?.outline_version;
+      const rows = versions.length ? versions : [{ version: currentNumber || 1 }];
+      versionSelect.replaceChildren(...rows.map((row) => new Option(versionLabel(row), String(row.version))));
+      versionSelect.value = String(novel.selectedVersions[stage] || rows.at(-1).version);
+      versionSelect.hidden = rows.length < 2;
+    }
     const savedBody = $("#novelStageSavedBody");
     if (savedBody) savedBody.textContent = saved;
     const savedAt = $("#novelStageSavedAt");
-    if (savedAt) savedAt.textContent = stageSavedAt(stage) || "";
+    if (savedAt) savedAt.textContent = stageSavedAt(stage);
   }
   renderSceneBlock(stage === "script");
+}
+
+function renderStageTaskHistory(stage, activeTaskId) {
+  const list = $("#novelTaskHistory");
+  if (!list) return;
+  const rows = novel.tasks.filter((row) => row.module === "novel"
+    && row.novel?.book_id === novel.bookId && row.novel?.stage === stage);
+  if (!rows.length) {
+    list.replaceChildren();
+    return;
+  }
+  list.replaceChildren(...rows.map((task) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "novel-task-history-card";
+    button.dataset.novelTask = task.id;
+    button.classList.toggle("active", task.id === activeTaskId);
+    const title = document.createElement("strong");
+    title.textContent = TASK_STATUS_LABELS[task.status] || "状态未知";
+    const detail = document.createElement("span");
+    detail.textContent = `${task.title || STAGE_COPY[stage].title} · ${new Date(Number(task.updated_at || task.created_at || 0)).toLocaleString()}`;
+    button.append(title, detail);
+    return button;
+  }));
+}
+
+function bodyHasText(stageData, task) {
+  return Boolean(String(stageData.streamText || task.result || task.result_partial || "").trim());
 }
 
 // ============================================================
@@ -474,23 +646,38 @@ function renderSceneBlock(visible) {
   if (!block) return;
   block.hidden = !visible;
   if (!visible) return;
-  const rows = Array.isArray(novel.book?.script) ? novel.book.script : [];
+  const versions = Array.isArray(novel.book?.script_versions) ? novel.book.script_versions : [];
+  const latestVersion = Number(novel.book?.script_version || versions.at(-1)?.version || 0);
+  const selectedVersion = novel.selectedVersions.script || latestVersion;
+  const historical = selectedVersion !== latestVersion;
+  const versionRow = versions.find((row) => Number(row.version) === selectedVersion);
+  const rows = historical ? (versionRow?.script || []) : (Array.isArray(novel.book?.script) ? novel.book.script : []);
+  const versionSelect = $("#novelScriptVersion");
+  if (versionSelect) {
+    const options = versions.length ? versions : (rows.length ? [{ version: latestVersion || 1 }] : []);
+    versionSelect.replaceChildren(...options.map((row) => new Option(versionLabel(row), String(row.version))));
+    versionSelect.hidden = options.length < 2;
+    if (options.length) versionSelect.value = String(selectedVersion || options.at(-1).version);
+  }
+  if (novel.sceneEditing && historical) novel.sceneEditing = 0;
   const list = $("#novelSceneList");
   const count = $("#novelSceneCount");
-  if (count) count.textContent = rows.length ? `共 ${rows.length} 场` : "";
+  if (count) count.textContent = versionRow ? versionLabel(versionRow) : (rows.length ? `共 ${rows.length} 场` : "");
   const note = $("#novelSceneNote");
   if (note) {
     if (!rows.length) {
       note.textContent = STAGE_COPY.script.empty;
-    } else if (novel.book?.script_parsed === false) {
-      // 解析失败时如实说明：整段保存，没有臆造场次切分。
-      note.textContent = "上次生成的剧本没能识别出场次结构，已按整段保存；可以手动编辑成 INT./EXT. 场景行。";
     } else {
-      note.textContent = "点一场可以编辑；↑↓ 调整顺序，改动会立刻保存。";
+      note.textContent = historical
+        ? `正在查看第 ${selectedVersion} 版（只读）；切回最新版本后可编辑。`
+        : (novel.book?.script_parsed === false
+          ? "上次生成的剧本没能识别出场次结构，已按整段保存；可以手动编辑成 INT./EXT. 场景行。"
+          : "点一场可以编辑；↑↓ 调整顺序，改动会立刻保存。");
     }
   }
   if (!list) return;
   list.replaceChildren(...rows.map(sceneRow));
+  list.querySelectorAll("[data-novel-scene-action], [data-novel-scene-open]").forEach((button) => { button.disabled = historical; });
   renderSceneEdit();
 }
 
@@ -535,9 +722,13 @@ function sceneRow(row) {
 function renderSceneEdit() {
   const box = $("#novelSceneEdit");
   if (!box) return;
-  const rows = Array.isArray(novel.book?.script) ? novel.book.script : [];
+  const latestVersion = Number(novel.book?.script_version || novel.book?.script_versions?.at(-1)?.version || 0);
+  const historical = Number(novel.selectedVersions.script || latestVersion) !== latestVersion;
+  const rows = historical
+    ? (novel.book?.script_versions?.find((item) => Number(item.version) === novel.selectedVersions.script)?.script || [])
+    : (Array.isArray(novel.book?.script) ? novel.book.script : []);
   const row = rows.find((item) => Number(item.i) === novel.sceneEditing);
-  box.hidden = !row;
+  box.hidden = historical || !row;
   if (!row) return;
   const headInput = $("#novelSceneHead");
   if (headInput && document.activeElement !== headInput) headInput.value = String(row.scene || "");
@@ -546,7 +737,8 @@ function renderSceneEdit() {
 }
 
 async function saveScene() {
-  if (!novel.bookId || !novel.sceneEditing) return;
+  const latestVersion = Number(novel.book?.script_version || novel.book?.script_versions?.at(-1)?.version || 0);
+  if (!novel.bookId || !novel.sceneEditing || Number(novel.selectedVersions.script || latestVersion) !== latestVersion) return;
   const scene = String($("#novelSceneHead")?.value || "").trim();
   const content = String($("#novelSceneBody")?.value ?? "");
   novel.sceneBusy = true;
@@ -748,6 +940,8 @@ function stopTaskPolling() {
 }
 
 async function refreshStageTasks() {
+  const stage = novel.stage;
+  const stageData = stageState(stage);
   try {
     const { tasks } = await api(STAGE_TASKS_URL);
     novel.tasks = Array.isArray(tasks) ? tasks : [];
@@ -757,15 +951,17 @@ async function refreshStageTasks() {
     return;
   }
   // 没有指定活动任务时，自动接上最近一条属于当前作品的同阶段任务。
-  if (!novel.activeTaskId && novel.bookId) {
+  if (!stageData.activeTaskId && novel.bookId) {
+    const expectedTitle = `《${novel.book?.title || ""}》· ${STAGE_COPY[stage]?.title || ""}`;
     const hit = novel.tasks.find((row) => {
       const info = row.novel || {};
-      return info.book_id === novel.bookId && info.stage === novel.stage;
+      return (info.book_id === novel.bookId && info.stage === stage)
+        || (row.module === "novel" && row.title === expectedTitle);
     });
     if (hit) {
-      novel.activeTaskId = hit.id;
-      novel.streamText = "";
-      novel.taskCursor = 0;
+      stageData.activeTaskId = hit.id;
+      stageData.streamText = "";
+      stageData.taskCursor = 0;
     }
   }
   renderStagePanel();
@@ -774,17 +970,18 @@ async function refreshStageTasks() {
 
 function scheduleTaskPolling() {
   stopTaskPolling();
-  const task = novel.tasks.find((row) => row.id === novel.activeTaskId);
+  const task = novel.tasks.find((row) => row.id === stageState().activeTaskId);
   if (!task || TERMINAL_TASK_STATUSES.has(String(task.status || ""))) return;
   novel.taskPollTimer = setTimeout(() => void pollActiveTask(), 1200);
 }
 
 async function pollActiveTask() {
-  if (novel.taskPollBusy || !novel.activeTaskId) return;
+  const stageData = stageState();
+  if (novel.taskPollBusy || !stageData.activeTaskId) return;
   novel.taskPollBusy = true;
   const token = novel.taskToken;
   try {
-    const { task } = await api(`/api/studio/tasks/${encodeURIComponent(novel.activeTaskId)}`);
+    const { task } = await api(`/api/studio/tasks/${encodeURIComponent(stageData.activeTaskId)}`);
     if (token !== novel.taskToken) return;
     const index = novel.tasks.findIndex((row) => row.id === task.id);
     if (index >= 0) novel.tasks[index] = { ...novel.tasks[index], ...task };
@@ -792,11 +989,17 @@ async function pollActiveTask() {
     // 增量事件只取正文片段，不重复拉全量结果。
     try {
       const events = await api(
-        `/api/studio/tasks/${encodeURIComponent(novel.activeTaskId)}/events?after=${novel.taskCursor}`
+        `/api/studio/tasks/${encodeURIComponent(stageData.activeTaskId)}/events?after=${stageData.taskCursor}`
       );
       for (const row of events.events || []) {
-        if (row.type === "delta" && row.content) novel.streamText += String(row.content);
-        if (typeof row.seq === "number") novel.taskCursor = Math.max(novel.taskCursor, row.seq);
+        if (row.type === "delta" && row.content) {
+          const chunk = String(row.content);
+          stageData.streamText += chunk;
+          if (!stageData.firstDeltaAt) stageData.firstDeltaAt = Date.now();
+          stageData.recentDeltas.push({ at: Date.now(), chars: chunk.length });
+          stageData.recentDeltas = stageData.recentDeltas.filter((sample) => Date.now() - sample.at <= 10000);
+        }
+        if (typeof row.seq === "number") stageData.taskCursor = Math.max(stageData.taskCursor, row.seq);
       }
     } catch (_error) {
       // 事件流读不到时退回用任务记录里的 result_partial，不影响终态判断。
@@ -812,6 +1015,8 @@ async function pollActiveTask() {
 
 async function generateStage() {
   if (!novel.bookId) return;
+  const stage = novel.stage;
+  const stageData = stageState(stage);
   const picked = [...novel.picked].sort((a, b) => a - b);
   if (!picked.length) {
     toast("先勾选至少一章作为素材");
@@ -826,40 +1031,49 @@ async function generateStage() {
     toast("先在设置里检查模型，再回来选择");
     return;
   }
-  novel.stageBusy = true;
-  novel.stageWarnings = [];
+  stageData.busy = true;
+  stageData.warnings = [];
   renderStagePanel();
   try {
     const payload = await api("/api/novel/stage", {
       method: "POST",
       body: {
         book_id: novel.bookId,
-        stage: novel.stage,
+        stage,
         chapter_ids: picked,
         extra_note: String($("#novelStageNote")?.value || ""),
         model_key: model.model_key,
         model_name: model.model_name,
+        elements_version: novel.selectedVersions.elements || undefined,
+        outline_version: novel.selectedVersions.outline || undefined,
       },
     });
-    novel.activeTaskId = payload.task?.id || "";
-    novel.streamText = "";
-    novel.taskCursor = 0;
-    novel.stageWarnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+    stageData.activeTaskId = payload.task?.id || "";
+    stageData.streamText = "";
+    stageData.taskCursor = 0;
+    stageData.warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+    stageData.submittedAt = Date.now();
+    stageData.firstDeltaAt = 0;
+    stageData.recentDeltas = [];
+    if (novel.book && Number.isInteger(Number(payload.book_revision))) {
+      novel.book.revision = Number(payload.book_revision);
+    }
     if (payload.task) novel.tasks.unshift(payload.task);
     renderStagePanel();
     scheduleTaskPolling();
   } catch (error) {
     fail("提交生成失败", error);
   } finally {
-    novel.stageBusy = false;
+    stageData.busy = false;
     renderStagePanel();
   }
 }
 
 async function cancelStageTask() {
-  if (!novel.activeTaskId) return;
+  const stageData = stageState();
+  if (!stageData.activeTaskId) return;
   try {
-    await api(`/api/studio/tasks/${encodeURIComponent(novel.activeTaskId)}/cancel`, {
+    await api(`/api/studio/tasks/${encodeURIComponent(stageData.activeTaskId)}/cancel`, {
       method: "POST", body: {},
     });
     toast("已取消");
@@ -870,15 +1084,16 @@ async function cancelStageTask() {
 }
 
 async function retryStageTask() {
-  if (!novel.activeTaskId) return;
+  const stageData = stageState();
+  if (!stageData.activeTaskId) return;
   try {
     // 重发的是当时素材快照：改了章节再重试不会带新素材（与工作台其它任务同口径）。
-    const { task } = await api(`/api/studio/tasks/${encodeURIComponent(novel.activeTaskId)}/retry`, {
+    const { task } = await api(`/api/studio/tasks/${encodeURIComponent(stageData.activeTaskId)}/retry`, {
       method: "POST", body: {},
     });
-    novel.activeTaskId = task?.id || "";
-    novel.streamText = "";
-    novel.taskCursor = 0;
+    stageData.activeTaskId = task?.id || "";
+    stageData.streamText = "";
+    stageData.taskCursor = 0;
     await refreshStageTasks();
     toast("已重新排队");
   } catch (error) {
@@ -887,33 +1102,36 @@ async function retryStageTask() {
 }
 
 async function applyStageResult() {
-  if (!novel.activeTaskId || !novel.bookId) return;
-  const task = novel.tasks.find((row) => row.id === novel.activeTaskId);
-  const text = String(novel.streamText || task?.result || task?.result_partial || "");
+  const stage = novel.stage;
+  const stageData = stageState(stage);
+  if (!stageData.activeTaskId || !novel.bookId) return;
+  const task = novel.tasks.find((row) => row.id === stageData.activeTaskId);
+  const text = String(stageData.streamText || task?.result || task?.result_partial || "");
   if (!text.trim()) {
     toast("这个任务没有结果可写回");
     return;
   }
-  const label = STAGE_COPY[novel.stage].title;
-  if (!window.confirm(`把这次的${label}结果写回作品吗？作品里已有的${label}会被覆盖。`)) return;
+  const label = STAGE_COPY[stage].title;
+  const destination = stage === "script" ? "场次列表" : "作品资料";
+  if (!window.confirm(`把这次的${label}保存为${destination}的新版本吗？已有版本会保留。`)) return;
   try {
     const payload = await api(`/api/novel/books/${encodeURIComponent(novel.bookId)}/apply`, {
       method: "POST",
       body: {
-        stage: novel.stage,
-        task_id: novel.activeTaskId,
+        stage,
+        task_id: stageData.activeTaskId,
         text,
         revision: novel.book?.revision,
       },
     });
     novel.book = payload.book;
-    novel.activeTaskId = "";
-    novel.streamText = "";
-    novel.taskCursor = 0;
+    stageData.activeTaskId = "";
+    stageData.streamText = "";
+    stageData.taskCursor = 0;
     novel.sceneEditing = 0;
     setSaveState("已保存", `${label}已写回作品。`);
     renderAll();
-    toast(`${label}已写回作品`);
+    toast(`${label}已保存到作品`);
   } catch (error) {
     // 409 = 任务/阶段不符或作品已被改过；如实提示，不覆盖。
     fail(`写回${label}失败`, error);
@@ -923,7 +1141,7 @@ async function applyStageResult() {
 function setStage(stage) {
   const next = ["split", "elements", "outline", "script"].includes(stage) ? stage : "split";
   novel.stage = next;
-  novel.stageWarnings = [];
+  stageState(next).warnings = [];
   document.querySelectorAll("#novelStages [data-novel-stage]").forEach((btn) => {
     const active = btn.dataset.novelStage === next;
     btn.classList.toggle("active", active);
@@ -932,6 +1150,7 @@ function setStage(stage) {
   if (next !== "split") {
     // 进阶段页：接上这个作品当前阶段的任务，避免「切回来什么也看不到」。
     void refreshStageTasks();
+    void fillStageModels();
   } else {
     stopTaskPolling();
   }
@@ -972,6 +1191,8 @@ async function openBook(bookId) {
     const payload = await api(`/api/novel/books/${encodeURIComponent(bookId)}`);
     if (token !== novel.bookToken) return;
     novel.bookId = bookId;
+    novel.selectedVersions = { elements: 0, outline: 0, script: 0 };
+    try { localStorage.setItem(LAST_BOOK_KEY, bookId); } catch (_error) { /* storage may be unavailable */ }
     novel.book = payload.book;
     novel.chapters = payload.chapters || [];
     novel.broken = payload.broken || [];
@@ -980,14 +1201,20 @@ async function openBook(bookId) {
     novel.chapter = null;
     novel.chapterNo = 0;
     novel.dirty = false;
-    novel.activeTaskId = "";
-    novel.streamText = "";
-    novel.taskCursor = 0;
-    novel.stageWarnings = [];
+    for (const data of Object.values(novel.stageStates)) {
+      data.activeTaskId = "";
+      data.streamText = "";
+      data.taskCursor = 0;
+      data.warnings = [];
+      data.busy = false;
+      data.submittedAt = 0;
+      data.firstDeltaAt = 0;
+      data.recentDeltas = [];
+    }
     setSaveState("已读取", `作品《${novel.book.title}》共 ${novel.chapters.length} 章。` +
       (novel.broken.length ? `有 ${novel.broken.length} 章读取失败（数据异常），需要重新导入或删除。` : ""));
     renderAll();
-    if (novel.chapters.length) void openChapter(novel.chapters[0].i);
+    if (novel.chapters.length) await openChapter(novel.chapters[0].i);
     if (novel.stage !== "split") void refreshStageTasks();
   } catch (error) {
     if (token !== novel.bookToken) return;
@@ -1145,6 +1372,7 @@ async function deleteBook(bookId, title) {
     await api(`/api/novel/books/${encodeURIComponent(bookId)}`, { method: "DELETE" });
     if (novel.bookId === bookId) {
       novel.bookId = "";
+      try { localStorage.removeItem(LAST_BOOK_KEY); } catch (_error) { /* storage may be unavailable */ }
       novel.book = null;
       novel.chapters = [];
       novel.broken = [];
@@ -1295,6 +1523,7 @@ function markDirty() {
 
 export function bindNovelEvents() {
   if (novel.initialized) return;
+  prepareStagePanels();
   novel.initialized = true;
 
   $("#novelImportBtn")?.addEventListener("click", () => $("#novelFileInput")?.click());
@@ -1330,12 +1559,24 @@ export function bindNovelEvents() {
   $("#novelExportMenu")?.addEventListener("click", (event) => {
     const btn = event.target.closest("[data-novel-export]");
     if (!btn) return;
-    const menu = $("#novelExportMenu");
-    if (menu) menu.hidden = true;
-    $("#novelExportBtn")?.setAttribute("aria-expanded", "false");
+    closeExportMenu();
     const kind = btn.dataset.novelExport;
     if (kind === "md-extras") void exportBook("md", true);
     else void exportBook(kind === "md" ? "md" : "txt", false);
+  });
+  document.addEventListener("click", (event) => {
+    const menu = $("#novelExportMenu");
+    if (!menu || menu.hidden) return;
+    if (event.target.closest("#novelExportMenu, #novelExportBtn")) return;
+    closeExportMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    const menu = $("#novelExportMenu");
+    if (menu && !menu.hidden) {
+      closeExportMenu();
+      $("#novelExportBtn")?.focus();
+    }
   });
   $("#novelBooksBtn")?.addEventListener("click", () => {
     const dialog = $("#novelBooksDialog");
@@ -1376,32 +1617,54 @@ export function bindNovelEvents() {
     void openChapter(Number(btn.dataset.novelChapter));
   });
 
+  $("#novelEditorBody")?.addEventListener("click", (event) => {
+    const card = event.target.closest("[data-novel-task]");
+    if (!card) return;
+    const task = novel.tasks.find((row) => row.id === card.dataset.novelTask);
+    if (!task || task.novel?.stage !== novel.stage) return;
+    const data = stageState();
+    data.activeTaskId = task.id;
+    data.streamText = String(task.result || task.result_partial || "");
+    data.taskCursor = 0;
+    novel.taskToken += 1;
+    renderStagePanel();
+    scheduleTaskPolling();
+  });
+  $("#novelEditorBody")?.addEventListener("change", (event) => {
+    const target = event.target;
+    if (target.matches("[data-context-elements]")) novel.selectedVersions.elements = Number(target.value) || 0;
+    else if (target.matches("[data-context-outline]")) novel.selectedVersions.outline = Number(target.value) || 0;
+    else if (target.id === "novelStageVersion") novel.selectedVersions[novel.stage] = Number(target.value) || 0;
+    else if (target.id === "novelScriptVersion") novel.selectedVersions.script = Number(target.value) || 0;
+    else return;
+    renderStagePanel();
+  });
+
   // ---- 阶段二：阶段切换与生成 ----
   $("#novelStages")?.addEventListener("click", (event) => {
     const btn = event.target.closest("[data-novel-stage]");
     if (!btn || btn.disabled) return;
     setStage(btn.dataset.novelStage);
   });
-  $("#novelStageGenerate")?.addEventListener("click", () => void generateStage());
-  $("#novelStageCancel")?.addEventListener("click", () => void cancelStageTask());
-  $("#novelStageRetry")?.addEventListener("click", () => void retryStageTask());
-  $("#novelStageApply")?.addEventListener("click", () => void applyStageResult());
-  // 两级模型选择：换供应商要重新拉那一家的模型目录（与提词库同口径）。
-  $("#novelStageProvider")?.addEventListener("change", async () => {
-    novel.stageProviderKey = String($("#novelStageProvider")?.value || "");
-    novel.stageModelName = "";
-    await fillStageModelOptions();
-    renderStagePanel();
-  });
-  $("#novelStageModel")?.addEventListener("change", () => {
-    novel.stageModelName = String($("#novelStageModel")?.value || "");
-    renderStagePanel();
-  });
-
-  // ---- 阶段三：剧本场次 ----
-  $("#novelSceneList")?.addEventListener("click", (event) => {
+  document.querySelectorAll("#novelEditorBody [data-stage-panel]").forEach((panel) => {
+    panel.querySelector('[data-novel-control="novelStageGenerate"]')?.addEventListener("click", () => void generateStage());
+    panel.querySelector('[data-novel-control="novelStageCancel"]')?.addEventListener("click", () => void cancelStageTask());
+    panel.querySelector('[data-novel-control="novelStageRetry"]')?.addEventListener("click", () => void retryStageTask());
+    panel.querySelector('[data-novel-control="novelStageApply"]')?.addEventListener("click", () => void applyStageResult());
+    panel.querySelector('[data-novel-control="novelStageProvider"]')?.addEventListener("change", async (event) => {
+      novel.stageProviderKey = String(event.target.value || "");
+      novel.stageModelName = "";
+      await fillStageModelOptions();
+      renderStagePanel();
+    });
+    panel.querySelector('[data-novel-control="novelStageModel"]')?.addEventListener("change", (event) => {
+      novel.stageModelName = String(event.target.value || "");
+      renderStagePanel();
+    });
+    panel.querySelector('[data-novel-control="novelSceneList"]')?.addEventListener("click", (event) => {
     const action = event.target.closest("[data-novel-scene-action]");
     if (action) {
+      if (novel.selectedVersions.script && novel.selectedVersions.script !== Number(novel.book?.script_version || 0)) return;
       const no = Number(action.dataset.novelSceneNo);
       const kind = action.dataset.novelSceneAction;
       if (kind === "delete") void deleteScene(no);
@@ -1410,15 +1673,17 @@ export function bindNovelEvents() {
     }
     const open = event.target.closest("[data-novel-scene-open]");
     if (!open) return;
+    if (novel.selectedVersions.script && novel.selectedVersions.script !== Number(novel.book?.script_version || 0)) return;
     const no = Number(open.dataset.novelSceneOpen);
     // 再点同一场就收起编辑区（不重复展开）。
     novel.sceneEditing = novel.sceneEditing === no ? 0 : no;
     renderSceneBlock(true);
-  });
-  $("#novelSceneSave")?.addEventListener("click", () => void saveScene());
-  $("#novelSceneCancel")?.addEventListener("click", () => {
-    novel.sceneEditing = 0;
-    renderSceneBlock(true);
+    });
+    panel.querySelector('[data-novel-control="novelSceneSave"]')?.addEventListener("click", () => void saveScene());
+    panel.querySelector('[data-novel-control="novelSceneCancel"]')?.addEventListener("click", () => {
+      novel.sceneEditing = 0;
+      renderSceneBlock(true);
+    });
   });
 
   $("#novelBookList")?.addEventListener("click", (event) => {
@@ -1460,7 +1725,12 @@ export function bindNovelEvents() {
     // 模型下拉依赖 bootstrap 的供应商配置：首屏时它可能还没到，进页面时重算一次。
     fillStageModels();
     if (novel.bookId) void openBook(novel.bookId);
-    else if (novel.stage !== "split") void refreshStageTasks();
+    else {
+      let remembered = "";
+      try { remembered = localStorage.getItem(LAST_BOOK_KEY) || ""; } catch (_error) { /* storage may be unavailable */ }
+      if (remembered) void openBook(remembered);
+      else if (novel.stage !== "split") void refreshStageTasks();
+    }
   });
 
   setPane(novel.pane);

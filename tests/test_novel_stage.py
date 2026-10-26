@@ -277,6 +277,35 @@ class ApplyResultTests(unittest.TestCase):
         self.assertEqual(book["elements"]["props"], ["无名信：推动调查"])
         self.assertEqual(book["elements"]["raw"], raw, "原文必须整段留存")
 
+    def test_apply_elements_appends_versions(self):
+        first = self.store.apply_elements(self.book["id"], task_id="st-1", raw="## 人物\n- 旧版人物")
+        second = self.store.apply_elements(self.book["id"], task_id="st-2", raw="## 人物\n- 新版人物")
+        self.assertEqual([row["version"] for row in second["elements_versions"]], [1, 2])
+        self.assertIn("旧版人物", second["elements_versions"][0]["raw"])
+        self.assertIn("新版人物", second["elements_versions"][1]["raw"])
+        self.assertEqual(second["elements"]["version"], 2)
+
+    def test_same_task_cannot_create_duplicate_version(self):
+        self.store.apply_elements(self.book["id"], task_id="same-task", raw="## 人物\n- 人物")
+        with self.assertRaises(NovelConflictError):
+            self.store.apply_elements(self.book["id"], task_id="same-task", raw="## 人物\n- 人物")
+
+    def test_book_list_omits_version_payloads_but_detail_keeps_them(self):
+        self.store.apply_elements(self.book["id"], task_id="st-1", raw="旧版完整正文")
+        listing = self.store.list_books()["books"][0]
+        detail = self.store.get_book(self.book["id"])["book"]
+        self.assertEqual(listing["elements_versions"], [])
+        self.assertEqual(detail["elements_versions"][0]["raw"], "旧版完整正文")
+
+    def test_stage_version_selection_rejects_invalid_values(self):
+        from naiba.novel.service import NovelService
+        versions = [{"version": 1}, {"version": 2}]
+        with self.assertRaises(NovelServiceError):
+            NovelService._selected_version({"outline_version": "abc"}, "outline_version", versions, 2)
+        with self.assertRaises(NovelServiceError):
+            NovelService._selected_version({"outline_version": 99}, "outline_version", versions, 2)
+        self.assertEqual(NovelService._selected_version({}, "outline_version", versions, 2), 2)
+
     def test_apply_elements_keeps_unparsable_raw(self):
         raw = "这段没有标题也没有列表项，只是普通文字。"
         book = self.store.apply_elements(self.book["id"], task_id="st-1", raw=raw)
@@ -293,6 +322,13 @@ class ApplyResultTests(unittest.TestCase):
         book = self.store.apply_outline(self.book["id"], task_id="st-9", text="## 第一幕 建置\n- 要点")
         self.assertIn("第一幕", book["outline"])
         self.assertEqual(book["outline_task_id"], "st-9")
+
+    def test_apply_outline_appends_versions(self):
+        self.store.apply_outline(self.book["id"], task_id="st-1", text="第一版")
+        book = self.store.apply_outline(self.book["id"], task_id="st-2", text="第二版")
+        self.assertEqual([row["version"] for row in book["outline_versions"]], [1, 2])
+        self.assertEqual(book["outline_versions"][0]["text"], "第一版")
+        self.assertEqual(book["outline"], "第二版")
 
     def test_apply_revision_conflict(self):
         """A 未完又生成 B：revision 对不上就拒绝覆盖。"""

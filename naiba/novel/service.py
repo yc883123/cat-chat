@@ -36,7 +36,7 @@ from naiba.core import novel_split
 from naiba.novel import prompts
 from naiba.tools.providers.novel import NovelError, read_text_auto
 
-# 数据形状版本：字段升级必须显式迁移，不按缺字段静默猜测。
+# 版本历史是 schema 1 的可选追加字段；读取旧清单时保留现有成果，缺失的历史来源不推断。
 SCHEMA_VERSION = 1
 # 作品 ID：时间戳 + 随机后缀，禁止用户文件名穿越目录（与 custom.py 同构）。
 BOOK_ID_PATTERN = re.compile(r"^book-[0-9]{8}-[0-9a-f]{12}$")
@@ -234,12 +234,14 @@ class NovelStore:
         return manifest
 
     @staticmethod
-    def _public_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    def _public_manifest(manifest: dict[str, Any], *, include_versions: bool = True) -> dict[str, Any]:
         """对外清单视图：去掉内部字段，章节索引单独给。"""
         source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
         chapter_ids = [int(n) for n in manifest.get("chapter_ids") or []]
         # 阶段二起才有改编成果；老作品没有这些字段时给空值，前端不用做 undefined 判断。
         elements = manifest.get("elements") if isinstance(manifest.get("elements"), dict) else {}
+        element_versions = manifest.get("elements_versions") if isinstance(manifest.get("elements_versions"), list) else []
+        outline_versions = manifest.get("outline_versions") if isinstance(manifest.get("outline_versions"), list) else []
         script = manifest.get("script") if isinstance(manifest.get("script"), list) else []
         return {
             "id": str(manifest.get("id") or ""),
@@ -268,13 +270,19 @@ class NovelStore:
                 "raw": str(elements.get("raw") or ""),
                 "updated_at": int(elements.get("updated_at") or 0),
                 "task_id": str(elements.get("task_id") or ""),
+                "version": int(elements.get("version") or (len(element_versions) or 1 if elements.get("raw") else 0)),
             },
+            "elements_versions": [dict(row) for row in element_versions if isinstance(row, dict)] if include_versions else [],
             "outline": str(manifest.get("outline") or ""),
+            "outline_version": int(manifest.get("outline_version") or (len(outline_versions) or 1 if manifest.get("outline") else 0)),
+            "outline_versions": [dict(row) for row in outline_versions if isinstance(row, dict)] if include_versions else [],
             "outline_task_id": str(manifest.get("outline_task_id") or ""),
             "outline_updated_at": int(manifest.get("outline_updated_at") or 0),
             "summaries": {str(k): str(v) for k, v in (manifest.get("summaries") or {}).items()},
             # 阶段三成果：剧本场次。
             "script": list(script),
+            "script_versions": [dict(row) for row in (manifest.get("script_versions") or []) if isinstance(row, dict)] if include_versions else [],
+            "script_version": int(manifest.get("script_version") or 0),
         }
 
     # ---- 章节 ----
@@ -496,7 +504,7 @@ class NovelStore:
                 except (LookupError, NovelServiceError):
                     corrupt.append(path.name)
                     continue
-                rows.append(self._public_manifest(manifest))
+                rows.append(self._public_manifest(manifest, include_versions=False))
         rows.sort(key=lambda row: int(row.get("updated_at") or 0), reverse=True)
         return {"books": rows, "corrupt": corrupt}
 
@@ -651,7 +659,7 @@ class NovelStore:
         return {"manifest": manifest, "chapters": chapters, "chapter_ids": picked}
 
     def apply_elements(self, book_id: str, *, task_id: str, raw: str,
-                       expected_revision: Any = None) -> dict[str, Any]:
+                       expected_revision: Any = None, chapter_ids: list[int] | None = None) -> dict[str, Any]:
         """要素写回：原文整段留存 + 尽力拆成人物/场景/道具三类。
 
         拆分只按列表项前缀归并，识别不了就整段留在 `raw` 里——**不猜、不编**，
@@ -662,7 +670,21 @@ class NovelStore:
         text = str(raw or "")
         if not text.strip():
             raise NovelServiceError("要素结果为空，没有可写回的内容")
+        self._reject_duplicate_task(manifest.get("elements_versions"), task_id)
         buckets = _split_elements(text)
+        versions = manifest.get("elements_versions") if isinstance(manifest.get("elements_versions"), list) else []
+        if not versions and str((manifest.get("elements") or {}).get("raw") or "").strip():
+            previous = manifest["elements"]
+            versions = [{
+                "version": 1, "raw": str(previous.get("raw") or ""),
+                "updated_at": int(previous.get("updated_at") or 0),
+                "task_id": str(previous.get("task_id") or ""),
+            }]
+        version = len(versions) + 1
+        entry = {"version": version, "raw": text, "updated_at": _now_ms(), "task_id": str(task_id or "")}
+        entry["chapter_ids"] = list(chapter_ids or [])
+        versions.append(entry)
+        manifest["elements_versions"] = versions
         manifest["elements"] = {
             "characters": buckets["characters"],
             "scenes": buckets["scenes"],
@@ -670,20 +692,33 @@ class NovelStore:
             "raw": text,
             "updated_at": _now_ms(),
             "task_id": str(task_id or ""),
+            "version": version,
         }
         with self._lock:
             self._bump_manifest(book_dir, manifest)
         return self._public_manifest(manifest)
 
     def apply_outline(self, book_id: str, *, task_id: str, text: str,
-                      expected_revision: Any = None) -> dict[str, Any]:
+                      expected_revision: Any = None, chapter_ids: list[int] | None = None) -> dict[str, Any]:
         """大纲写回（三幕结构整段留存，阶段三按它生成场次）。"""
         manifest = self._check_apply_revision(book_id, expected_revision)
         book_dir = self._book_dir(book_id)
         body = str(text or "")
         if not body.strip():
             raise NovelServiceError("大纲结果为空，没有可写回的内容")
+        self._reject_duplicate_task(manifest.get("outline_versions"), task_id)
+        versions = manifest.get("outline_versions") if isinstance(manifest.get("outline_versions"), list) else []
+        if not versions and str(manifest.get("outline") or "").strip():
+            versions = [{
+                "version": 1, "text": str(manifest.get("outline") or ""),
+                "updated_at": int(manifest.get("outline_updated_at") or 0),
+                "task_id": str(manifest.get("outline_task_id") or ""),
+            }]
+        version = len(versions) + 1
+        versions.append({"version": version, "text": body, "updated_at": _now_ms(), "task_id": str(task_id or ""), "chapter_ids": list(chapter_ids or [])})
+        manifest["outline_versions"] = versions
         manifest["outline"] = body
+        manifest["outline_version"] = version
         manifest["outline_task_id"] = str(task_id or "")
         manifest["outline_updated_at"] = _now_ms()
         with self._lock:
@@ -691,8 +726,9 @@ class NovelStore:
         return self._public_manifest(manifest)
 
     def apply_script(self, book_id: str, *, task_id: str, text: str,
-                     from_chapter: int = 0, expected_revision: Any = None) -> dict[str, Any]:
-        """剧本写回：能解析成场次就存场次列表，解析不了整段原样存。
+                     from_chapter: int = 0, chapter_ids: list[int] | None = None,
+                     expected_revision: Any = None) -> dict[str, Any]:
+        """剧本写回：解析并保存场次快照，按所选章节替换现有场次。
 
         解析失败时 `scene` 留空、`parsed=False`，前端明示「未能识别场次结构，
         已按整段保存」——**绝不臆造场次切分**（《阶段三》§五 P1）。
@@ -702,15 +738,20 @@ class NovelStore:
         body = str(text or "")
         if not body.strip():
             raise NovelServiceError("剧本结果为空，没有可写回的内容")
-        scenes, parsed = prompts.parse_scenes(body, from_chapter=from_chapter)
+        versions = manifest.get("script_versions") if isinstance(manifest.get("script_versions"), list) else []
+        self._reject_duplicate_task(versions, task_id)
+        source_chapters = sorted({int(value) for value in (chapter_ids or [])})
+        if not source_chapters and from_chapter:
+            source_chapters = [int(from_chapter)]
+        primary_chapter = source_chapters[0] if source_chapters else int(from_chapter or 0)
+        previous_task_id = str(manifest.get("script_task_id") or "")
+        previous_updated_at = int(manifest.get("script_updated_at") or 0)
+        scenes, parsed = prompts.parse_scenes(body, from_chapter=primary_chapter)
         if not parsed:
-            scenes = [{"scene": "", "content": body, "from_chapter": int(from_chapter or 0)}]
+            scenes = [{"scene": "", "content": body, "from_chapter": primary_chapter}]
         existing = manifest.get("script") if isinstance(manifest.get("script"), list) else []
-        # 重新生成同一章时替换该章的旧场次，不叠加（否则会越生成越长）。
-        kept = [
-            row for row in existing
-            if int(row.get("from_chapter") or 0) != int(from_chapter or 0)
-        ] if from_chapter else []
+        replacement_chapters = set(source_chapters)
+        kept = [row for row in existing if int(row.get("from_chapter") or 0) not in replacement_chapters] if replacement_chapters else []
         merged = kept + scenes
         manifest["script"] = [
             {**row, "i": index}
@@ -719,11 +760,36 @@ class NovelStore:
         manifest["script_task_id"] = str(task_id or "")
         manifest["script_updated_at"] = _now_ms()
         manifest["script_parsed"] = bool(parsed)
+        if not versions and existing:
+            versions = [{"version": 1, "script": existing, "updated_at": previous_updated_at,
+                        "task_id": previous_task_id, "chapter_ids": []}]
+        version = len(versions) + 1
+        versions.append({"version": version, "script": manifest["script"], "updated_at": _now_ms(),
+                         "task_id": str(task_id or ""), "chapter_ids": source_chapters})
+        manifest["script_versions"] = versions
+        manifest["script_version"] = version
         with self._lock:
             self._bump_manifest(book_dir, manifest)
         result = self._public_manifest(manifest)
         result["script_parsed"] = bool(parsed)
         return result
+
+    @staticmethod
+    def _sync_latest_script_version(manifest: dict[str, Any]) -> None:
+        versions = manifest.get("script_versions")
+        current = int(manifest.get("script_version") or 0)
+        if isinstance(versions, list):
+            for row in versions:
+                if isinstance(row, dict) and int(row.get("version") or 0) == current:
+                    row["script"] = list(manifest.get("script") or [])
+                    break
+
+    @staticmethod
+    def _reject_duplicate_task(versions: Any, task_id: str) -> None:
+        if task_id and isinstance(versions, list) and any(
+            isinstance(row, dict) and str(row.get("task_id") or "") == task_id for row in versions
+        ):
+            raise NovelConflictError("这个任务已经保存过，不能重复创建版本")
 
     def _check_apply_revision(self, book_id: str, expected_revision: Any) -> dict[str, Any]:
         """写回前核对作品版本：对不上说明别处已经改过（A 未完又生成 B），拒绝覆盖。"""
@@ -773,6 +839,7 @@ class NovelStore:
             raise NovelServiceError("场景行与正文不能同时为空")
         rows[index] = row
         manifest["script"] = rows
+        self._sync_latest_script_version(manifest)
         with self._lock:
             self._bump_manifest(book_dir, manifest)
         return {"scene": row, "revision": int(manifest.get("revision") or 0)}
@@ -785,6 +852,7 @@ class NovelStore:
         rows.pop(index)
         # 重排编号：i 从 1 连续，避免删掉中间一条后编号出现空洞。
         manifest["script"] = [{**row, "i": pos} for pos, row in enumerate(rows, start=1)]
+        self._sync_latest_script_version(manifest)
         with self._lock:
             self._bump_manifest(book_dir, manifest)
         return {"ok": True, "count": len(manifest["script"])}
@@ -973,6 +1041,15 @@ class NovelService:
             material = self.store.stage_material(book_id, raw_ids)
             manifest = material["manifest"]
             elements = manifest.get("elements") if isinstance(manifest.get("elements"), dict) else {}
+            element_versions = manifest.get("elements_versions") if isinstance(manifest.get("elements_versions"), list) else []
+            outline_versions = manifest.get("outline_versions") if isinstance(manifest.get("outline_versions"), list) else []
+            elements_version = self._selected_version(body, "elements_version", element_versions, elements.get("version", 0))
+            outline_version = self._selected_version(body, "outline_version", outline_versions, manifest.get("outline_version", 0))
+            selected_elements = next((row for row in element_versions if int(row.get("version") or 0) == elements_version), None)
+            selected_outline = next((row for row in outline_versions if int(row.get("version") or 0) == outline_version), None)
+            characters = list(elements.get("characters") or [])
+            if selected_elements:
+                characters = _split_elements(str(selected_elements.get("raw") or ""))["characters"]
             built = prompts.build_stage_content(
                 stage=stage,
                 book_title=str(manifest.get("title") or "未命名作品"),
@@ -981,8 +1058,8 @@ class NovelService:
                 summaries=manifest.get("summaries") or {},
                 extra_note=str(body.get("extra_note") or ""),
                 # 剧本必带大纲与人物槽：不带就会同一个角色换个名字（阶段三 §三/§五）。
-                outline=str(manifest.get("outline") or ""),
-                characters=list(elements.get("characters") or []),
+                outline=str(selected_outline.get("text") if selected_outline else manifest.get("outline") or ""),
+                characters=characters,
             )
         except LookupError as exc:
             return {"error": str(exc)}, 404
@@ -1005,6 +1082,8 @@ class NovelService:
                 "chapter_ids": material["chapter_ids"],
                 # 提交时的作品版本：写回时据此判「A 未完又生成 B」的竞态。
                 "book_revision": int(material["manifest"].get("revision") or 0),
+                "elements_version": elements_version,
+                "outline_version": outline_version,
             },
         }
         try:
@@ -1023,7 +1102,30 @@ class NovelService:
         except (LookupError, NovelServiceError):
             # 摘要只是辅助原料，写不进去不该让已经排上队的任务失败。
             pass
-        return {"task": task, "warnings": built["warnings"]}, 201
+        # 摘要写入会递增作品 revision；把写入后的权威版本回给前端，
+        # 否则用户完成任务后会拿生成前版本写回，触发由本次生成造成的假冲突。
+        try:
+            current = self.store.get_book(book_id)["book"]
+            book_revision = int(current.get("revision") or 0)
+        except (LookupError, NovelServiceError):
+            book_revision = int(material["manifest"].get("revision") or 0)
+        return {"task": task, "warnings": built["warnings"], "book_revision": book_revision}, 201
+
+    @staticmethod
+    def _selected_version(body: dict[str, Any], key: str, versions: list[Any], current: Any) -> int:
+        raw = body.get(key)
+        if raw is None or raw == "":
+            return int(versions[-1].get("version", 0) if versions else current or 0)
+        if isinstance(raw, bool):
+            raise NovelServiceError(f"{key} 必须是正整数")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise NovelServiceError(f"{key} 必须是正整数") from None
+        known = any(isinstance(row, dict) and int(row.get("version") or 0) == value for row in versions)
+        if value < 1 or (not known and value != int(current or 0)):
+            raise NovelServiceError(f"{key} 指定的版本不存在")
+        return value
 
     def api_apply(self, book_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         """把任务结果写回作品（要素 / 大纲）。
@@ -1061,20 +1163,21 @@ class NovelService:
                 book = self.store.apply_elements(
                     book_id, task_id=task_id, raw=text,
                     expected_revision=body.get("revision"),
+                    chapter_ids=novel_input.get("chapter_ids") or [],
                 )
             elif stage == "script":
-                # 剧本按章写回：`from_chapter` 决定替换哪一章的旧场次。
                 chapter_ids = novel_input.get("chapter_ids") or []
                 from_chapter = int(chapter_ids[0]) if chapter_ids else 0
                 book = self.store.apply_script(
                     book_id, task_id=task_id, text=text,
-                    from_chapter=from_chapter,
+                    from_chapter=from_chapter, chapter_ids=chapter_ids,
                     expected_revision=body.get("revision"),
                 )
             else:
                 book = self.store.apply_outline(
                     book_id, task_id=task_id, text=text,
                     expected_revision=body.get("revision"),
+                    chapter_ids=novel_input.get("chapter_ids") or [],
                 )
             return {"book": book}, 200
         except LookupError as exc:

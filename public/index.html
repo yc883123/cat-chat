@@ -747,6 +747,10 @@
                   <!-- 阶段标题与提示由中栏面板头（#novelEditorHead / #novelEditorHint）承担，
                        这里不再重复一遍，否则同一句「要素」上下各出现一次。 -->
                   <div class="novel-stage-meta" id="novelStageMeta"></div>
+                  <div class="novel-stage-context" data-novel-context="script" hidden>
+                    <label>人物设定版本<select data-context-elements aria-label="剧本使用的人物设定版本"></select></label>
+                    <label>改编大纲版本<select data-context-outline aria-label="剧本使用的改编大纲版本"></select></label>
+                  </div>
                   <label class="novel-field">补充要求（可选）
                     <textarea id="novelStageNote" rows="2" maxlength="800"
                               placeholder="例如：人物只保留有名有姓的；场景按出现顺序排。"></textarea>
@@ -768,16 +772,17 @@
                       <span class="novel-stage-task-actions">
                         <button class="control-button tiny" id="novelStageCancel" type="button" hidden>取消</button>
                         <button class="control-button tiny" id="novelStageRetry" type="button" hidden>重试</button>
-                        <button class="control-button" id="novelStageApply" type="button" hidden>写回作品</button>
+                        <button class="control-button" id="novelStageApply" type="button" hidden>保存为新版本</button>
                       </span>
                     </div>
                     <p class="novel-note" id="novelStageTaskNote"></p>
                     <pre class="novel-stage-result" id="novelStageResult" aria-live="polite"></pre>
                   </div>
+                  <div class="novel-task-history" id="novelTaskHistory" aria-label="本阶段生成任务"></div>
                   <div class="novel-stage-saved" id="novelStageSaved" hidden>
                     <div class="novel-stage-head">
-                      <strong>作品里已保存的结果</strong>
-                      <small id="novelStageSavedAt"></small>
+                      <strong>作品已保存版本</strong>
+                      <span class="novel-version-tools"><select id="novelStageVersion" aria-label="选择已保存版本"></select><small id="novelStageSavedAt"></small></span>
                     </div>
                     <pre class="novel-stage-result" id="novelStageSavedBody"></pre>
                   </div>
@@ -785,7 +790,7 @@
                   <div class="novel-scene-block" id="novelSceneBlock" hidden>
                     <div class="novel-stage-head">
                       <strong>已保存的场次</strong>
-                      <small id="novelSceneCount"></small>
+                      <span class="novel-version-tools"><select id="novelScriptVersion" aria-label="选择剧本版本" hidden></select><small id="novelSceneCount"></small></span>
                     </div>
                     <p class="novel-note" id="novelSceneNote"></p>
                     <div class="novel-scene-list" id="novelSceneList" aria-label="剧本场次"></div>

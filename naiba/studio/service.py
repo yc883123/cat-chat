@@ -339,6 +339,13 @@ class StudioService:
             # 顶层有值就用顶层（将来真落库时不用再改这里），否则从 input 取。
             item["module"] = row.get("module") or input_data.get("module") or ""
             item["origin_label"] = row.get("origin_label") or input_data.get("origin_label") or ""
+            novel = input_data.get("novel") if isinstance(input_data.get("novel"), dict) else None
+            if novel:
+                item["novel"] = {
+                    "book_id": str(novel.get("book_id") or ""),
+                    "stage": str(novel.get("stage") or ""),
+                    "chapter_ids": list(novel.get("chapter_ids") or []),
+                }
             slim.append(item)
         return {"tasks": slim}, 200
 

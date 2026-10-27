@@ -2,7 +2,7 @@
 // 15-bind-events.js —— 拆分自 public/app.js 第 6658-7653 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, api, applyAppearance, previewModelSkinFor, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, escapeHtml, hideTextContextMenu, isCoarsePointer, onChatBackgroundMissingChange, triggerDownload, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setClipboardPasteDriver, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer, watchTopbarWidth } from "./01-core.js";
+import { $, $$, api, applyAppearance, applyModelSkinFor, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, escapeHtml, hideTextContextMenu, isCoarsePointer, onChatBackgroundMissingChange, triggerDownload, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setClipboardPasteDriver, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer, watchTopbarWidth } from "./01-core.js";
 import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarning, ensureImageContextMenu, fileUrl, handleImageLightboxKey, hideFileActionMenu, hideImageContextMenu, initImageLightboxInteractions, isPywebview, openImageLightbox, positionContextUsagePopover, resetContextWarningResume, runImageContextAction, saveLocalFile, showFileActionMenu, showImageContextMenu, stepImageLightbox, toggleContextUsagePopover, updateSendButtonState } from "./03-media.js";
 import { branchMessage, cancelActiveEdit, cancelCompaction, cancelSessionStart, confirmActiveEdit, deleteMessageFlow, fillContextResetSeed, initTurnRail, isNearBottom, regenerateMessage, setStickToBottom, startEditMessage, startNewSession, undoLastDelete } from "./04-messages.js";
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
@@ -1231,33 +1231,46 @@ export function bindEvents() {
   });
   // 外观面板控件为可选增强：旧版 index.html 没有这些节点时不影响其它事件。
   const appearanceReset = $('#resetAppearance');
-  const appearanceSave = $('#saveAppearance');
   const setAppearanceStatus = (text) => {
     const status = $('#appearanceStatus'); if (status) status.textContent = text;
   };
-  // 会话字体卡片在下一张卡片里，单独给一行反馈，用户不用回头看上面那张卡。
   const setFontStatus = (text) => {
     const status = $('#chatFontStatus'); if (status) status.textContent = text;
   };
-  // 预览（本地即时生效，不落库）+ 回显控件。字号滑块拖动是高频事件，
-  // 走这条路径就绝不会每像素打一次 API；落库统一由「保存外观」完成，
-  // 与主题/皮肤保持同一种交互（面板里不出现"有的即时存、有的要点击"）。
-  const previewAppearance = (dirty) => {
+  let appearanceStatusTimer = 0;
+  const flashSaved = () => {
+    setAppearanceStatus('已保存');
+    clearTimeout(appearanceStatusTimer);
+    appearanceStatusTimer = setTimeout(() => setAppearanceStatus(''), 1800);
+  };
+  // 只应用不落库：字号滑块拖动、自定义字体逐字符输入这类高频事件走这里，
+  // 逐像素打接口既无意义也拖慢输入。
+  const previewAppearance = () => {
     applyAppearance(appearanceFormValues());
     syncAppearanceControls();
-    if (dirty) setAppearanceStatus('有未保存的外观更改');
-    if (dirty) setFontStatus('有未保存的会话字体更改');
   };
-  $$('input[name="appearanceTheme"], input[name="appearanceSkin"], input[name="appearanceChatFont"]').forEach((input) => input.addEventListener('change', () => previewAppearance(true)));
-  // 皮肤跟随方式（自动 / 手动）：只是模式切换，皮肤本身不动，但同样算「未保存的更改」。
-  // 切回自动时**立即按当前模型同步一次**（计划里明确要求的即时生效，不必等下次换模型）。
-  // 用 previewModelSkinFor 而不是 applyModelSkinFor：面板内的改动一律攒到「保存外观」
-  // 统一提交，此刻就落库会把还没保存的主题/字体一起写进服务端。
-  $$('input[name="appearanceSkinMode"]').forEach((input) => input.addEventListener('change', () => {
+  // 即时落库：外观面板的每一次「确定」改动都立刻保存。
+  // 为什么不再有「保存外观」按钮：聊天背景、提示音本来就是即时的，皮肤选中也立刻生效，
+  // 只留主题/字体需要点按钮时，用户根本不知道自己漏存了什么（而且按钮还夹在卡片中间）。
+  // 现在整页统一为「改了就是改了」，底部只留「恢复默认外观」。
+  const commitAppearance = async () => {
+    const values = appearanceFormValues();
+    applyAppearance(values);
+    syncAppearanceControls();
+    try {
+      await saveAppearance(values);
+      flashSaved();
+    } catch (error) {
+      toast(`保存外观失败：${error.message}`);
+    }
+  };
+  $$('input[name="appearanceTheme"], input[name="appearanceChatFont"]')
+    .forEach((input) => input.addEventListener('change', () => { void commitAppearance(); }));
+  // 皮肤跟随方式：先落库模式，再（切回自动时）按当前模型同步一次皮肤。
+  $$('input[name="appearanceSkinMode"]').forEach((input) => input.addEventListener('change', async () => {
     if (!input.checked) return;
-    if (input.value === 'auto') previewModelSkinFor(composerModelChoice());
-    // 同步之后再回显控件，否则卡片选中态会停在切换前的皮肤上。
-    previewAppearance(true);
+    await commitAppearance();
+    if (input.value === 'auto') await applyModelSkinFor(composerModelChoice());
   }));
   // 模型皮肤卡片：点一下 = 选中该皮肤，并**同时切到手动模式**（用户手挑的结果不能被
   // 模型规则立刻覆盖）。同时清掉配色皮肤的 radio，保证面板里只有一个选中项。
@@ -1272,7 +1285,7 @@ export function bindEvents() {
     });
     const mode = $('input[name="appearanceSkinMode"][value="manual"]');
     if (mode) mode.checked = true;
-    previewAppearance(true);
+    void commitAppearance();
   });
   // 点配色皮肤 radio = 也在手挑，同样切到手动模式（否则保存后又被模型规则覆盖）。
   $$('input[name="appearanceSkin"]').forEach((input) => input.addEventListener('change', () => {
@@ -1283,12 +1296,16 @@ export function bindEvents() {
     });
     const mode = $('input[name="appearanceSkinMode"][value="manual"]');
     if (mode) mode.checked = true;
+    void commitAppearance();
   }));
-  $('#chatFontSize')?.addEventListener('input', () => previewAppearance(true));
-  // 点选字体（原生 select：手机上弹系统选择器，不必打字）；选到「手动填写…」时
-  // syncAppearanceControls 会把文本框那一行展开，走的是同一条预览/落库路径。
-  $('#chatFontPick')?.addEventListener('change', () => previewAppearance(true));
-  $('#chatFontFamilyCustom')?.addEventListener('input', () => previewAppearance(true));
+  // 字号滑块：拖动时只预览，松手（change）才落库。
+  $('#chatFontSize')?.addEventListener('input', () => previewAppearance());
+  $('#chatFontSize')?.addEventListener('change', () => { void commitAppearance(); });
+  // 点选字体（原生 select：手机上弹系统选择器，不必打字）。
+  $('#chatFontPick')?.addEventListener('change', () => { void commitAppearance(); });
+  // 自定义字体名：边打边预览，失焦/回车（change）才落库。
+  $('#chatFontFamilyCustom')?.addEventListener('input', () => previewAppearance());
+  $('#chatFontFamilyCustom')?.addEventListener('change', () => { void commitAppearance(); });
   // 完成提示音 / 托盘完成卡片：即时保存（与「插话直达」同款，不走「保存外观」统一落库——
   // 功能开关要的是"点了就生效"，跟主题预览那种"攒一批再存"是两种交互）。
   // 音量滑条用 change（松手才存）而不是 input（拖动过程每格打一次 API）。
@@ -1306,22 +1323,15 @@ export function bindEvents() {
     const id = String(event.detail?.conversationId || '');
     if (id && id !== state.conversationId) void openConversation(id);
   });
-  appearanceSave?.addEventListener('click', async () => {
-    try {
-      await saveAppearance(appearanceFormValues());
-      syncAppearanceControls();
-      setAppearanceStatus('外观设置已保存');
-      setFontStatus('会话字体已保存');
-    } catch (error) { toast(`保存外观失败：${error.message}`); }
-  });
   appearanceReset?.addEventListener('click', async () => {
     try {
       // 恢复默认必须连 skin_mode 一起回默认（auto），否则「恢复默认」之后皮肤虽然变回
       // 紫藤，模式却还停在手动，用户下次换模型时皮肤不会跟着变——看起来像没恢复干净。
+      // 聊天背景**不动**：那是用户上传/挑的图，删掉就找不回来了；要清用「清除背景」。
       await saveAppearance({ theme: 'system', skin: 'violet', skin_mode: 'auto', chat_font_size: 15, chat_font_family: 'system', chat_font_family_custom: '' });
       syncAppearanceControls();
-      setAppearanceStatus('已恢复默认外观');
-      setFontStatus('已恢复默认字体');
+      setAppearanceStatus('已恢复默认主题、皮肤与字体（聊天背景保留）');
+      setFontStatus('');
     } catch (error) { toast(`恢复默认失败：${error.message}`); }
   });
   // 聊天背景：选图（走 /api/uploads，不进待发送附件列表）、强度滑杆、清除。

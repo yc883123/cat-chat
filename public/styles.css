@@ -1771,6 +1771,9 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 /* 皮肤跟随方式（自动 / 手动）：两栏，与上面配色皮肤同一种卡片密度。 */
 .appearance-skin-mode { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-bottom:8px; }
 .appearance-skin-group-label { margin:14px 0 8px; color:var(--muted); font-size:11.5px; font-weight:600; letter-spacing:.02em; }
+/* 外观页底部操作区：外观全部即时保存，这里只留「恢复默认外观」与状态提示。 */
+.appearance-footer { display:flex; align-items:center; flex-wrap:wrap; gap:12px; margin:2px 0 10px; }
+.appearance-footer .hint { margin:0; }
 /* 模型皮肤：18 张缩略图卡片。缩略图直接取 /skins 里的 webp（浏览器缩放，不额外生成小图），
    加载失败时露出底色，不会撑破网格。 */
 .appearance-model-skin-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; max-height:320px; overflow-y:auto; padding-right:2px; }

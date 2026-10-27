@@ -1554,8 +1554,11 @@
               <label class="appearance-option"><input type="radio" name="appearanceTheme" value="dark"><span><b>夜间</b><small>低亮护眼</small></span></label>
             </div>
           </div>
-          <div class="settings-card appearance-card">
-            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="8" height="8" rx="2.2"></rect><rect x="12.5" y="3.5" width="8" height="8" rx="2.2"></rect><rect x="3.5" y="12.5" width="8" height="8" rx="2.2"></rect><rect x="12.5" y="12.5" width="8" height="8" rx="2.2"></rect></svg></span><div><h4>界面皮肤</h4><p>配色皮肤只换强调色；模型皮肤是整张角色插画，对话区和工作台都会铺满。</p></div></div>
+          <!-- 背景与皮肤合成一张卡：界面皮肤与聊天背景都是「填满对话区/工作台背景」的
+               同一件事，分开两张卡会让用户以为要各设一遍（而且两者互斥）。
+               改动一律即时保存，页面底部只留「恢复默认外观」。 -->
+          <div class="settings-card appearance-card" id="chatBackgroundCard">
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="8" height="8" rx="2.2"></rect><rect x="12.5" y="3.5" width="8" height="8" rx="2.2"></rect><rect x="3.5" y="12.5" width="8" height="8" rx="2.2"></rect><rect x="12.5" y="12.5" width="8" height="8" rx="2.2"></rect></svg></span><div><h4>背景与皮肤</h4><p>对话区和工作台的背景从这里选：可以用角色插画皮肤，也可以用自己的图片或内置背景。两者互斥，模型的皮肤会优先显示；用图片时会自动切回配色皮肤。</p></div></div>
             <div class="appearance-skin-mode" role="radiogroup" aria-label="皮肤跟随方式">
               <label class="appearance-option"><input type="radio" name="appearanceSkinMode" value="auto"><span><b>跟随模型</b><small>换模型时自动换皮肤</small></span></label>
               <label class="appearance-option"><input type="radio" name="appearanceSkinMode" value="manual"><span><b>手动选择</b><small>换模型不改皮肤</small></span></label>
@@ -1572,8 +1575,33 @@
             <!-- 18 个模型皮肤卡片由 09-settings.js 依 MODEL_SKINS 现建（清单不进 HTML，
                  避免两处各写一份漂移）。 -->
             <div class="appearance-model-skin-grid" id="appearanceModelSkinGrid" role="radiogroup" aria-label="模型皮肤"></div>
-            <div class="form-actions"><button class="control-button" id="resetAppearance" type="button">恢复默认</button><button class="primary-button" id="saveAppearance" type="button">保存外观</button></div>
-            <p class="hint" id="appearanceStatus" role="status"></p>
+            <div class="appearance-skin-group-label">聊天背景</div>
+            <div class="chat-background-actions">
+              <div class="chat-background-preview" id="chatBackgroundPreview" role="button" tabindex="0" title="点击调整取景" hidden>
+                <span class="chat-bg-blur" aria-hidden="true"></span>
+                <span class="chat-bg-surface chat-background-preview-layer" aria-hidden="true"></span>
+                <span class="chat-background-preview-label">点击调整</span>
+              </div>
+              <div class="chat-background-buttons">
+                <button class="control-button" id="pickChatBackground" type="button">选择图片</button>
+                <button class="control-button" id="editChatBackground" type="button">调整背景图</button>
+                <button class="control-button" id="clearChatBackground" type="button">清除背景</button>
+                <input type="file" id="chatBackgroundFile" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/avif" hidden>
+              </div>
+            </div>
+            <p class="hint" id="chatBackgroundMissingHint" role="status" hidden></p>
+            <p class="hint" id="chatBackgroundSkinHint" role="status" hidden></p>
+            <div class="chat-background-presets" id="chatBackgroundPresets" hidden>
+              <span class="chat-background-presets-label">内置背景（点一下即应用）</span>
+              <div class="chat-background-presets-row" id="chatBackgroundPresetsRow" role="radiogroup" aria-label="内置背景图"></div>
+            </div>
+            <label class="chat-background-slider" for="chatBackgroundOpacity">
+              <span>背景强度</span>
+              <input type="range" id="chatBackgroundOpacity" min="0.05" max="1" step="0.05" value="0.35">
+              <output id="chatBackgroundOpacityValue" for="chatBackgroundOpacity">35%</output>
+            </label>
+            <p class="hint">数值越小背景越淡（最淡 5%）；100% 时背景图完全显示。「调整背景图」里可以拖动/缩放决定露出图片的哪一块。支持 PNG / JPG / WebP / GIF / BMP / AVIF。</p>
+            <p class="hint" id="chatBackgroundStatus" role="status"></p>
           </div>
           <div class="settings-card appearance-card">
             <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 6.5V5h14v1.5M12 5v14M8.5 19h7"></path></svg></span><div><h4>会话字体</h4><p>只影响消息区的正文与气泡，界面其它部分和代码块字体保持不变。</p></div></div>
@@ -1602,35 +1630,6 @@
             <p class="chat-font-sample" id="chatFontSample">这是一段示例文字，用来预览当前字号与字体。The quick brown fox jumps over the lazy dog.</p>
             <p class="hint" id="chatFontStatus" role="status"></p>
           </div>
-          <div class="settings-card appearance-card" id="chatBackgroundCard">
-            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"></rect><circle cx="9" cy="10" r="1.6"></circle><path d="M4 17.5 8.5 13l4.5 4.5 3-3 4 4"></path></svg></span><div><h4>聊天背景</h4><p>对话区和工作台都会铺上同一张背景图；对话顶栏与输入区保持原样，消息气泡、AI 回复与卡片都是实底，不会被背景图透上来。支持 PNG / JPG / WebP / GIF / BMP / AVIF。</p></div></div>
-            <div class="chat-background-actions">
-              <div class="chat-background-preview" id="chatBackgroundPreview" role="button" tabindex="0" title="点击调整取景" hidden>
-                <span class="chat-bg-blur" aria-hidden="true"></span>
-                <span class="chat-bg-surface chat-background-preview-layer" aria-hidden="true"></span>
-                <span class="chat-background-preview-label">点击调整</span>
-              </div>
-              <div class="chat-background-buttons">
-                <button class="control-button" id="pickChatBackground" type="button">选择图片</button>
-                <button class="control-button" id="editChatBackground" type="button">调整背景图</button>
-                <button class="control-button" id="clearChatBackground" type="button">清除背景</button>
-                <input type="file" id="chatBackgroundFile" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/avif" hidden>
-              </div>
-            </div>
-            <p class="hint" id="chatBackgroundMissingHint" role="status" hidden></p>
-            <p class="hint" id="chatBackgroundSkinHint" role="status" hidden></p>
-            <div class="chat-background-presets" id="chatBackgroundPresets" hidden>
-              <span class="chat-background-presets-label">内置背景（点一下即应用）</span>
-              <div class="chat-background-presets-row" id="chatBackgroundPresetsRow" role="radiogroup" aria-label="内置背景图"></div>
-            </div>
-            <label class="chat-background-slider" for="chatBackgroundOpacity">
-              <span>背景强度</span>
-              <input type="range" id="chatBackgroundOpacity" min="0.05" max="1" step="0.05" value="0.35">
-              <output id="chatBackgroundOpacityValue" for="chatBackgroundOpacity">35%</output>
-            </label>
-            <p class="hint">数值越小背景越淡（最淡 5%）；100% 时背景图完全显示。「调整背景图」里可以拖动/缩放决定露出图片的哪一块。</p>
-            <p class="hint" id="chatBackgroundStatus" role="status"></p>
-          </div>
           <div class="settings-card appearance-card">
             <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 9.5v5h3.5L12 19V5L7.5 9.5H4z"></path><path d="M15.5 9a4.2 4.2 0 0 1 0 6M18 6.8a7.5 7.5 0 0 1 0 10.4"></path></svg></span><div><h4>完成提示音</h4><p>AI 回复结束后播放一声短提示音；出错或手动停止时不响。改动立即生效，同一服务上的其他设备同样适用。</p></div></div>
             <label class="checkbox-field">
@@ -1657,7 +1656,13 @@
                 <small class="hint">标题是会话名称，几秒后自动消失。桌面程序专属，浏览器打开时无效；出错或手动停止时不弹。</small>
               </span>
             </label>
-          </div>
+          </div>            <!-- 外观全部即时保存，所以这里只留一个「恢复默认外观」；状态提示也放这里，
+                 不再夹在中间卡片里让人以为下面的设置要另外保存。 -->
+            <div class="appearance-footer">
+              <button class="control-button" id="resetAppearance" type="button">恢复默认外观</button>
+              <p class="hint" id="appearanceStatus" role="status"></p>
+            </div>
+
         </section>
         <section data-settings-panel="models" hidden>
           <div class="settings-panel-head"><h3>API 供应商</h3><p>配置在线或本地模型服务；点开卡片可编辑模型、密钥与生成参数。</p></div>

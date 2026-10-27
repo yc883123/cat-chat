@@ -198,14 +198,23 @@ class ChatFontFrontendTests(unittest.TestCase):
         # 只有手动填写时才带上用户串，否则不动它（用户打过的串要留住）。
         self.assertIn("fontFamily === 'custom' && customInput", form)
 
-    def test_slider_input_previews_without_persisting(self):
-        """拖动滑块/点选字体只做本地预览；落库统一由「保存外观」完成（别每像素打 API）。"""
+    def test_slider_input_previews_and_change_persists(self):
+        """拖动滑块只做本地预览（别每像素打 API）；松手 change 才落库。
+
+        3.9.1 起外观面板整体改成即时保存（去掉了夹在卡片中间的「保存外观」按钮），
+        所以「预览」与「落库」拆成两条路径：input → previewAppearance（不落库）、
+        change → commitAppearance（落库）。
+        """
         bind = self._bind()
         self.assertIn("$('#chatFontSize')?.addEventListener('input'", bind)
+        self.assertIn("$('#chatFontSize')?.addEventListener('change'", bind)
         self.assertIn("$('#chatFontPick')?.addEventListener('change'", bind)
-        preview = bind[bind.index("const previewAppearance"):bind.index("$$('input[name=\"appearanceTheme\"")]
+        preview = bind[bind.index("const previewAppearance"):bind.index("const commitAppearance")]
         self.assertNotIn("saveAppearance", preview)
         self.assertIn("applyAppearance(appearanceFormValues())", preview)
+        # 「确定」那条路径必须真的落库
+        commit = bind[bind.index("const commitAppearance"):bind.index("$$('input[name=\"appearanceTheme\"")]
+        self.assertIn("await saveAppearance(values)", commit)
 
     def test_reset_covers_font_keys(self):
         bind = self._bind()

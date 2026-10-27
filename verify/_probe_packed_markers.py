@@ -171,6 +171,9 @@ FINGERPRINTS = {
         # 3.9.1：背景让位的说明文案 + 工作台聊天背景层。
         "chatBackgroundSkinHint",
         "studio-bg-layer",
+        # 3.9.1：皮肤与聊天背景合并为一张卡，外观全页即时保存、底部只留恢复默认。
+        "背景与皮肤",
+        "appearance-footer",
         # 2.9.7：清理按钮拆成两个，tooltip 也按目录各写一句（旧的「合并一句」已不存在）。
         "聊天背景图与历史消息里仍在使用的文件会自动保留",
         "历史消息与运行记录里仍在使用的文件会自动保留",
@@ -213,7 +216,9 @@ FINGERPRINTS = {
                    # 3.9.1：模型皮肤与聊天背景互斥（皮肤生效时盖住旧背景层）。
                    "html[data-model-skin=\"on\"] .chat-backdrop .chat-bg-surface",
                    # 3.9.1：工作台也铺聊天背景（同变量、同层级口径）。
-                   ".studio-bg-layer", 'html[data-chat-bg="on"] .studio-view', 
+                   ".studio-bg-layer", 'html[data-chat-bg="on"] .studio-view',
+                   # 3.9.1：外观页底部操作区。
+                   ".appearance-footer",
                    # 2.9.9：分析视图全套样式（KPI 网格 / 工具行 chip / tooltip / 弹窗 dvh 兜底）。
                    ".usage-kpis", ".usage-chip", ".usage-tooltip", ".usage-dialog",
                    # 2.9.11：费用单价弹层（分组卡 / 二级行 / 币种条 + 自定义币种删除叉）。
@@ -283,7 +288,9 @@ FINGERPRINTS = {
                              # 3.9.0：皮肤跟随方式的模式切换 + 模型皮肤卡片点选（顺手切手动）。
                              "appearanceSkinMode", "appearance-model-skin-card", "previewModelSkinFor",
                              # 3.9.1：设置搜索也搜设置项正文（不只搜左侧栏目名）。
-                             "applySettingsSearch", "settingsPanelSearchText"],
+                             "applySettingsSearch", "settingsPanelSearchText",
+                             # 3.9.1：外观面板即时保存（去掉了「保存外观」按钮）。
+                             "commitAppearance"],
     # 2.9.9：@ / 弹层定位可视视口感知 + hide 清内联 maxHeight（手机软键盘裁弹层修复）。
     "js/13-skill-refs.js": ["window.visualViewport", "style.removeProperty('max-height')"],
     "js/16-file-refs.js": ["style.removeProperty('max-height')"],

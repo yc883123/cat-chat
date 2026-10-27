@@ -4836,6 +4836,11 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
   font-size: 11px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .novel-manage-row small { font-size: 9.5px; line-height: 1.5; color: var(--muted); }
+/* 生成记录的内容预览：结果开头一行，比 meta 再淡一档，超出截断。 */
+.novel-manage-row .novel-manage-preview {
+  font-size: 9.5px; line-height: 1.5; color: var(--muted); opacity: .8;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .novel-manage-locked {
   font-size: 9px; font-style: normal; color: var(--danger, #c0392b);
 }

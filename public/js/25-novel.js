@@ -1912,15 +1912,27 @@ function manageRowLabel(row) {
   return "记录";
 }
 
+// 生成记录的任务来源阶段（row.novel.stage）；老任务没有 novel 字段时回空串。
+function taskStageLabel(row) {
+  const stage = String(row.novel?.stage || "");
+  if (stage === "adapt") return "单章改编";
+  if (stage === "split") return "拆章";
+  return String(STAGE_COPY[stage]?.title || "");
+}
+
 function manageRowMeta(row) {
   if (row.type === "task") {
     const bits = [TASK_STATUS_LABELS[row.status] || "状态未知", fmtTime(row.updated_at || row.created_at)];
+    // 素材章节让同阶段任务也能互相区分（如「第 3、4 章」）。
+    const chapters = Array.isArray(row.novel?.chapter_ids) ? row.novel.chapter_ids : [];
+    if (chapters.length) bits.push(`第 ${chapters.join("、")} 章`);
+    const stage = taskStageLabel(row);
+    if (stage) bits.push(stage);
     const saved = (novel.manage.records?.elements || []).some((item) => item.task_id === row.id)
       || (novel.manage.records?.outlines || []).some((item) => item.task_id === row.id)
       || (novel.manage.records?.scripts || []).some((item) => item.task_id === row.id)
       || (novel.manage.records?.manuscripts || []).some((item) => item.task_id === row.id);
     bits.push(saved ? "已保存为作品内容" : "未保存到作品");
-    bits.push("删除只清任务记录，不删已保存内容");
     return bits.join(" · ");
   }
   const bits = [];
@@ -1942,6 +1954,15 @@ function manageRowKey(row) {
   if (row.type === "task") return `task:${row.id}`;
   if (row.chapter_no) return `manuscript:${row.chapter_no}:${row.id}`;
   return `${row.kind}:${row.id}`;
+}
+
+// 生成记录的内容预览：结果开头一小段，让「这条任务是出了什么」一眼可辨。
+// 长结果只截开头（完整内容在对应阶段的「查看」里）；没结果的任务不显示这行。
+function taskPreviewText(row) {
+  const text = String(row.result || row.result_partial || "").trim();
+  if (!text) return "";
+  const line = text.split("\n").find((part) => part.trim()) || "";
+  return line.length > 80 ? `${line.slice(0, 80)}…` : line;
 }
 
 function manageRowSelectable(row) {
@@ -2014,6 +2035,16 @@ function renderManage() {
       const small = document.createElement("small");
       small.textContent = manageRowMeta(row);
       copy.append(strong, small);
+      // 生成记录带结果开头一行做预览；作品内容版本行 small 里已经有来源，不重复。
+      if (row.type === "task") {
+        const preview = taskPreviewText(row);
+        if (preview) {
+          const snippet = document.createElement("small");
+          snippet.className = "novel-manage-preview";
+          snippet.textContent = preview;
+          copy.append(snippet);
+        }
+      }
       if (!selectable) {
         const tag = document.createElement("em");
         tag.className = "novel-manage-locked";

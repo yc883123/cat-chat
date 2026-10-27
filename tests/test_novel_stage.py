@@ -226,6 +226,7 @@ class TaskFieldPromotionTests(unittest.TestCase):
         row = payload["tasks"][0]
         self.assertEqual(row["module"], "novel", "module 必须从 input 提升")
         self.assertEqual(row["origin_label"], "创作场", "origin_label 必须从 input 提升")
+        self.assertEqual(row["title"], "《书》· 要素", "title 必须从 input 提升，否则列表全退化为「生成任务」")
 
     def test_missing_fields_fall_back_to_empty(self):
         tmp = tempfile.TemporaryDirectory()

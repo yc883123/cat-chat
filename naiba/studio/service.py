@@ -339,6 +339,9 @@ class StudioService:
             # 顶层有值就用顶层（将来真落库时不用再改这里），否则从 input 取。
             item["module"] = row.get("module") or input_data.get("module") or ""
             item["origin_label"] = row.get("origin_label") or input_data.get("origin_label") or ""
+            # title 同理：落库时只写 input.title（如《书名》· 阶段名），顶层从没有；
+            # 不提升的话列表里所有创作场任务都退化成前端兜底的「生成任务」。
+            item["title"] = row.get("title") or input_data.get("title") or ""
             novel = input_data.get("novel") if isinstance(input_data.get("novel"), dict) else None
             if novel:
                 item["novel"] = {

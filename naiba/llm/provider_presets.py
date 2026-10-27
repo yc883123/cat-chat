@@ -184,17 +184,24 @@ PROVIDER_PRESETS: tuple[dict[str, Any], ...] = (
         "abbr": "TE",
         "base_url": "https://teynex.com",
         "request_format": "openai_chat",
-        "model": "kimi-k3",
+        # 推荐模型跟用户在用的 TE 中转卡片走（OpenAI 兼容对话口 / Gemini 模型）；
+        # 这里只是初值，保存前可在弹层里改成 GPT、Claude 等其它模型。
+        "model": "gemini-3.8-flash",
         "key_required": True,
         "key_url": "https://teynex.com/",
         "hint": (
             "TE 中转是一个 API 聚合站：注册一个账号、充一份余额，就能用一个 Key 调用 "
-            "GPT、Claude、Kimi 等多家模型。使用方法：① 打开 teynex.com 注册账号；"
-            "② 在「钱包/充值」充入少量余额（按量计费，几分钱就能试）；"
-            "③ 到控制台「令牌」页点「添加令牌」，复制 sk- 开头的字符串粘到下方 API Key 栏。"
+            "Gemini、GPT、Claude 等多家模型。\n"
+            "使用方法：① 打开 teynex.com 注册账号；② 在「钱包/充值」选档位充值"
+            "（10 元 / 50 元 / 200 元，最低 10 元起，充一次就能试）；③ 到控制台「令牌」页点「添加令牌」——分组要选对："
+            "分组决定这个 Key 能调哪些模型，要调 Gemini 就选 Gemini 分组，选错会报模型不存在/无权限；"
+            "建好后复制 sk- 开头的字符串粘到下方 API Key 栏。\n"
+            "模板默认填 gemini-3.8-flash（请求格式「OpenAI 兼容」、URL 不带 /v1）。"
+            "换模型请在保存后到设置里改，并按模型把两处一起改：\n"
+            "· Gemini / Claude / Kimi 等普通对话模型：格式保持「OpenAI 兼容」，URL 不带 /v1；\n"
+            "· GPT-5 / Codex 系：格式改成「Codex /v1/responses」，URL 末尾补 /v1。\n"
             "注意：该站按 max_tokens 预扣费，余额不足时请求会被拒绝（报 403）——"
-            "这不是配置错了，去充值就好。用 GPT-5/Codex 系模型请把请求格式改为 "
-            "codex_responses、URL 末尾补 /v1。"
+            "这不是配置错了，去充值就好。"
         ),
     },
     # ---- 全手填 ----

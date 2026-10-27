@@ -75,7 +75,8 @@ export function selectOnboardingPreset(presetId) {
   $('#onboardingKeyRow').hidden = false;
   $('#onboardingRecap').textContent = local
     ? `已选 ${preset.name}（${url || '本机地址'}）：本地服务免 Key，确认地址与模型名后保存即可。`
-    : `已选 ${preset.name}（${url}）${preset.model ? `，默认使用模型 ${preset.model}` : ''}。`;
+    : `已选 ${preset.name}（${url}）${preset.model ? `，默认使用模型 ${preset.model}` : ''}。`
+      + '保存后可在设置里换模型，换 GPT / Codex 系模型时请求格式和 URL 要一起改（见上方说明）。';
   fillProviderPresetGuide($('#onboardingGuide'), preset, { fallback: '' });
   $('#onboardingUrlField').hidden = !(local || custom);
   $('#onboardingBaseUrl').value = url;

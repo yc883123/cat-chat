@@ -168,12 +168,14 @@ async function waitFor(page, fn, deadlineMs = 6000) {
     check('第 2 步高亮后颜色方向随之翻转（不是两步同色）',
       wizard.stepKeyColor !== wizard.stepPresetColor,
       JSON.stringify({ preset: wizard.stepPresetColor, key: wizard.stepKeyColor }));
-    check('recap 写明已选供应商与域名', wizard.recap.includes('TE 中转') && wizard.recap.includes('teynex.com'), wizard.recap);
+    check('recap 写明已选供应商、域名与推荐模型',
+      wizard.recap.includes('TE 中转') && wizard.recap.includes('teynex.com') && wizard.recap.includes('gemini-3.8-flash'),
+      wizard.recap);
     check('引导条三段式（①注册 ②充值 ③令牌建 Key）',
       wizard.guideVisible && wizard.guideText.includes('①') && wizard.guideText.includes('②') && wizard.guideText.includes('③'),
       wizard.guideText);
-    check('引导条写明 403 预扣费风险与 codex 切法',
-      wizard.guideText.includes('max_tokens') && wizard.guideText.includes('codex_responses'), wizard.guideText);
+    check('引导条写明 403 预扣费风险与 Codex 切法',
+      wizard.guideText.includes('max_tokens') && wizard.guideText.includes('Codex /v1/responses'), wizard.guideText);
     check('「打开注册页」按钮出现且指向 TE 预设',
       wizard.keyButtonVisible && wizard.keyButtonPreset === 'te', JSON.stringify({ v: wizard.keyButtonVisible, p: wizard.keyButtonPreset }));
     check('正常路径只剩 API Key 一个空（URL/模型随模板走）',
@@ -199,7 +201,7 @@ async function waitFor(page, fn, deadlineMs = 6000) {
     const te = cards.find((item) => item.preset_id === 'te') || {};
     check('TE 卡片已落库', Boolean(saved && te.id), JSON.stringify(cards.map((c) => c.id)));
     check('落库字段来自模板（名称/地址/格式/推荐模型）',
-      te.name === 'TE 中转' && te.base_url === 'https://teynex.com' && te.request_format === 'openai_chat' && te.model === 'kimi-k3',
+      te.name === 'TE 中转' && te.base_url === 'https://teynex.com' && te.request_format === 'openai_chat' && te.model === 'gemini-3.8-flash',
       JSON.stringify({ name: te.name, url: te.base_url, format: te.request_format, model: te.model }));
     check('卡片记住来源模板（下次点开可反显）', te.preset_id === 'te', String(te.preset_id));
     check('API Key 已写入（不显示明文）', te.has_api_key === true && te.api_key === '', JSON.stringify({ has: te.has_api_key, plain: te.api_key }));

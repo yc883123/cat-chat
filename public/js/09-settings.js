@@ -741,6 +741,12 @@ export function updateProviderFormatGuide() {
   const guide = $('#providerFormatGuide');
   const format = $('#providerFormat').value;
   const guides = {
+    // 在线格式：回答「URL 到底带不带 /v1」和「哪类模型用这个格式」——同一张卡里换模型时，
+    // 格式和地址必须一起改（Gemini/Claude/Kimi 走 OpenAI 兼容口，GPT-5/Codex 才走 Responses）。
+    openai_chat: '地址照站点文档填：OpenAI 官方与多数中转站要带 /v1；DeepSeek 官方、TE 根地址这类不带 /v1。应用只补 /chat/completions 端点路径，不会改你填的版本段。',
+    codex_responses: 'GPT-5 / Codex 系模型专用：请求打到 /v1/responses，URL 末尾一般要补 /v1（如 https://中转站/v1）。Gemini、Claude、Kimi 等普通模型请改回「OpenAI 兼容」。',
+    gemini: 'Gemini 官方格式：URL 填到域名（https://generativelanguage.googleapis.com），不要带 /v1beta，路径由应用补全。中转站里的 Gemini 模型多数走「OpenAI 兼容」，不是这个格式。',
+    claude: 'Claude 官方格式：URL 填 https://api.anthropic.com，不要带 /v1，路径由应用补 /v1/messages。中转站里的 Claude 模型多数走「OpenAI 兼容」。',
     ollama: '先启动 Ollama。API URL 通常填写 http://127.0.0.1:11434/v1；API Key 可留空；模型名称可通过 ollama list 查看，然后点击“检查模型”。',
     lm_studio: '先在 LM Studio 的 Developer / Local Server 页面启动服务并加载模型。API URL 通常填写 http://127.0.0.1:1234/v1；API Key 可留空，然后点击“检查模型”。',
     llama_cpp: '先启动 llama.cpp server。API URL 通常填写 http://127.0.0.1:8080/v1；API Key 可留空，然后点击“检查模型”。',

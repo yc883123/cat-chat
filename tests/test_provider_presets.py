@@ -89,13 +89,19 @@ class PresetTableTests(unittest.TestCase):
                 self.assertIn(parsed.netloc, item["hint"], f"{item['id']} 的 hint 里没写域名 {parsed.netloc}")
 
     def test_transit_presets_match_the_measured_cards(self):
-        """中转预设的参数照抄冻结版实测可用卡片（TE 默认 openai_chat，按用户决定）。"""
+        """中转预设的参数照抄冻结版实测可用卡片（TE 默认 openai_chat + Gemini 模型，按用户决定）。"""
         te = provider_preset("te")
         self.assertEqual(te["base_url"], "https://teynex.com")
         self.assertEqual(te["request_format"], "openai_chat")
-        self.assertEqual(te["model"], "kimi-k3")
+        self.assertEqual(te["model"], "gemini-3.8-flash")
         self.assertIn("max_tokens", te["hint"], "TE 按 max_tokens 预扣费的风险要写进引导")
-        self.assertIn("codex_responses", te["hint"], "GPT-5/Codex 系模型的切法要写进引导")
+        self.assertIn("Codex /v1/responses", te["hint"], "GPT-5/Codex 系的格式与端点要写进引导")
+        # 建令牌时的「分组」决定 Key 能调哪些模型——选错分组的报错误导过用户，必须写进引导。
+        self.assertIn("分组", te["hint"], "令牌分组与模型可用性的关系要写进引导")
+        self.assertIn("/v1", te["hint"], "URL 带不带 /v1 的差异要写进引导")
+        # 该站是固定档位充值（10/50/200 元），不是「几分钱就能试」——写错会让人以为免费。
+        self.assertIn("10 元", te["hint"], "充值档位与最低额度要按实际写")
+        self.assertNotIn("几分钱", te["hint"], "不能再说「几分钱就能试」")
         self.assertIsNone(provider_preset("bailan"))
 
     def test_ark_preset_prefills_coding_plan_endpoint(self):
@@ -158,7 +164,7 @@ class ApplyPresetTests(unittest.TestCase):
         self.assertEqual(merged["name"], "TE 中转")
         self.assertEqual(merged["base_url"], "https://teynex.com")
         self.assertEqual(merged["request_format"], "openai_chat")
-        self.assertEqual(merged["model"], "kimi-k3")
+        self.assertEqual(merged["model"], "gemini-3.8-flash")
         self.assertEqual(merged["api_key"], "sk-test")
         self.assertEqual(merged["preset_id"], "te")
 
@@ -217,7 +223,7 @@ class PresetRoundTripTests(unittest.TestCase):
         self.assertEqual(saved["kind"], "online")
         self.assertEqual(saved["base_url"], "https://teynex.com")
         self.assertEqual(saved["request_format"], "openai_chat")
-        self.assertEqual(saved["model"], "kimi-k3")
+        self.assertEqual(saved["model"], "gemini-3.8-flash")
         self.assertTrue(saved["has_api_key"])
         reloaded = ConfigStore(self.path).data["providers"][0]
         self.assertEqual(reloaded["preset_id"], "te", "卡片要记住来源模板，编辑时才能反显")
@@ -414,6 +420,18 @@ class FrontendWiringTests(unittest.TestCase):
         self.assertIn("renderProviderPresetGrid('providerPresetGrid'", settings)
         self.assertIn("setProviderPresetSelection(provider.preset_id || '')", settings)
 
+    def test_format_guide_explains_url_and_protocol_for_online_formats(self):
+        """请求格式下拉下方要就地解释「URL 带不带 /v1」与「哪类模型用这个格式」。"""
+        settings = self._settings()
+        guides = settings[settings.index("const guides = {"):]
+        guides = guides[: guides.index("};")]
+        for key in ("openai_chat", "codex_responses", "gemini", "claude"):
+            with self.subTest(key=key):
+                self.assertIn(f"{key}:", guides)
+        self.assertIn("/v1/responses", guides, "Codex 格式要写明打到 /v1/responses")
+        self.assertIn("/v1beta", guides, "Gemini 格式要写明不带 /v1beta")
+        self.assertIn("OpenAI 兼容", guides, "要写明普通对话模型走 OpenAI 兼容口")
+
     def test_wizard_module_is_new_and_wired(self):
         onboarding = self._onboarding()
         self.assertIn("export async function maybeShowOnboarding(", onboarding)
@@ -426,6 +444,8 @@ class FrontendWiringTests(unittest.TestCase):
         # 跳过状态记 localStorage，且名单拿不到时不弹空窗。
         self.assertIn("naibaOnboardingDismissed", onboarding)
         self.assertIn("localStorage.setItem(ONBOARDING_DISMISS_KEY", onboarding)
+        # 向导里模型名是模板带的、输入框隐藏——必须提前说清「保存后到设置里换模型」。
+        self.assertIn("保存后可在设置里换模型", onboarding)
         self.assertLess(onboarding.index("await loadProviderPresets()"), onboarding.index("dialog.showModal()"))
 
     def test_bindings_delegate_and_close_remembers(self):

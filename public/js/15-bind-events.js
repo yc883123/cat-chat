@@ -2,12 +2,12 @@
 // 15-bind-events.js —— 拆分自 public/app.js 第 6658-7653 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, api, applyAppearance, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, escapeHtml, hideTextContextMenu, isCoarsePointer, onChatBackgroundMissingChange, triggerDownload, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setClipboardPasteDriver, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer, watchTopbarWidth } from "./01-core.js";
+import { $, $$, api, applyAppearance, previewModelSkinFor, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, escapeHtml, hideTextContextMenu, isCoarsePointer, onChatBackgroundMissingChange, triggerDownload, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setClipboardPasteDriver, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer, watchTopbarWidth } from "./01-core.js";
 import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarning, ensureImageContextMenu, fileUrl, handleImageLightboxKey, hideFileActionMenu, hideImageContextMenu, initImageLightboxInteractions, isPywebview, openImageLightbox, positionContextUsagePopover, resetContextWarningResume, runImageContextAction, saveLocalFile, showFileActionMenu, showImageContextMenu, stepImageLightbox, toggleContextUsagePopover, updateSendButtonState } from "./03-media.js";
 import { branchMessage, cancelActiveEdit, cancelCompaction, cancelSessionStart, confirmActiveEdit, deleteMessageFlow, fillContextResetSeed, initTurnRail, isNearBottom, regenerateMessage, setStickToBottom, startEditMessage, startNewSession, undoLastDelete } from "./04-messages.js";
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
 import { switchPermissionMode } from "./06-tasks-plans.js";
-import { checkUpdate, closeAgentHelpPopover, closeComposerModelPicker, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, applyUpdate, cancelUpdate, discardUpdate, dismissUpdateReady, saveUpdateProxy, syncUpdateFloat, syncUpdateProxyControls, renderUpdateProxyState, positionAgentHelpPopover, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleAgentHelpPopover, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
+import { checkUpdate, closeAgentHelpPopover, closeComposerModelPicker, composerModelChoice, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, applyUpdate, cancelUpdate, discardUpdate, dismissUpdateReady, saveUpdateProxy, syncUpdateFloat, syncUpdateProxyControls, renderUpdateProxyState, positionAgentHelpPopover, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleAgentHelpPopover, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
 import { applySidebarViewPref, bindSidebarDragDrop, cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeBranchChainPanel, closeConversationMenu, closeSidebarViewMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, openSidebarViewMenu, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, runFullTextSearch, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel, toggleConversationArchive, setTaskLogOpen, setTaskLogStick, setWorkspaceSearchMode, syncSearchModeUi, SEARCH_DEBOUNCE_MS } from "./08-conversations.js";
 import { addProvider, addSearchProfile, appearanceFormValues, applyProviderModelCapabilities, applyProviderPreset, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, hideAgentForm, handleMcpListClick, closeMcpForm, openMcpForm, setMcpFormMode, submitMcpForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadUsageStats, loadWorkspaceTree, openAgentCard, openAgentToolEditorCurrent, openProviderCard, openProviderPresetKeyUrl, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderMcp, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, previewDoneSound, saveDoneSound, saveDoneSoundVolume, saveInterjectDirectSend, saveTrayDoneToast, syncRangeFill, saveProvider, saveRuntimeSettings, saveSkillMaxSize, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, setUsageChart, setUsageDim, setUsageGran, setUsageMetric, setUsageRange, showAgentForm, skillDisplayName, skillMatchesQuery, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAgentToolPeek, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, toggleToolOnlySelected, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint, applyUsageFilter, openUsagePrefsDialog, resetUsageFilter, saveUsagePrefs, selectUsageFilterRange, usageUnbindDialogViewport, refreshUsagePricingBadge, openUsagePricingDialog, pricingGoBackToList, pricingTogglePool, pricingConfirmCustomCurrency, pricingCloseCustomCurrency, pricingOpenCustomCurrency, pricingApplyGroupCurrency, pricingDropCurrency, pricingAddFromPool, pricingMarkRowDirty, pricingCycleRowCurrency, pricingSaveRow, pricingRemoveRow, pricingOpenGroup, populateVisionModels } from "./09-settings.js";
 import { addFolderChip, isFolderChip, readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
@@ -1244,6 +1244,41 @@ export function bindEvents() {
     if (dirty) setFontStatus('有未保存的会话字体更改');
   };
   $$('input[name="appearanceTheme"], input[name="appearanceSkin"], input[name="appearanceChatFont"]').forEach((input) => input.addEventListener('change', () => previewAppearance(true)));
+  // 皮肤跟随方式（自动 / 手动）：只是模式切换，皮肤本身不动，但同样算「未保存的更改」。
+  // 切回自动时**立即按当前模型同步一次**（计划里明确要求的即时生效，不必等下次换模型）。
+  // 用 previewModelSkinFor 而不是 applyModelSkinFor：面板内的改动一律攒到「保存外观」
+  // 统一提交，此刻就落库会把还没保存的主题/字体一起写进服务端。
+  $$('input[name="appearanceSkinMode"]').forEach((input) => input.addEventListener('change', () => {
+    if (!input.checked) return;
+    if (input.value === 'auto') previewModelSkinFor(composerModelChoice());
+    // 同步之后再回显控件，否则卡片选中态会停在切换前的皮肤上。
+    previewAppearance(true);
+  }));
+  // 模型皮肤卡片：点一下 = 选中该皮肤，并**同时切到手动模式**（用户手挑的结果不能被
+  // 模型规则立刻覆盖）。同时清掉配色皮肤的 radio，保证面板里只有一个选中项。
+  $('#appearanceModelSkinGrid')?.addEventListener('click', (event) => {
+    const card = event.target.closest('.appearance-model-skin-card');
+    if (!card?.dataset.skin) return;
+    $$('input[name="appearanceSkin"]').forEach((input) => { input.checked = false; });
+    $$('#appearanceModelSkinGrid .appearance-model-skin-card').forEach((item) => {
+      const active = item === card;
+      item.classList.toggle('is-active', active);
+      item.setAttribute('aria-checked', active ? 'true' : 'false');
+    });
+    const mode = $('input[name="appearanceSkinMode"][value="manual"]');
+    if (mode) mode.checked = true;
+    previewAppearance(true);
+  });
+  // 点配色皮肤 radio = 也在手挑，同样切到手动模式（否则保存后又被模型规则覆盖）。
+  $$('input[name="appearanceSkin"]').forEach((input) => input.addEventListener('change', () => {
+    if (!input.checked) return;
+    $$('#appearanceModelSkinGrid .appearance-model-skin-card').forEach((item) => {
+      item.classList.remove('is-active');
+      item.setAttribute('aria-checked', 'false');
+    });
+    const mode = $('input[name="appearanceSkinMode"][value="manual"]');
+    if (mode) mode.checked = true;
+  }));
   $('#chatFontSize')?.addEventListener('input', () => previewAppearance(true));
   // 点选字体（原生 select：手机上弹系统选择器，不必打字）；选到「手动填写…」时
   // syncAppearanceControls 会把文本框那一行展开，走的是同一条预览/落库路径。
@@ -1276,7 +1311,9 @@ export function bindEvents() {
   });
   appearanceReset?.addEventListener('click', async () => {
     try {
-      await saveAppearance({ theme: 'system', skin: 'violet', chat_font_size: 15, chat_font_family: 'system', chat_font_family_custom: '' });
+      // 恢复默认必须连 skin_mode 一起回默认（auto），否则「恢复默认」之后皮肤虽然变回
+      // 紫藤，模式却还停在手动，用户下次换模型时皮肤不会跟着变——看起来像没恢复干净。
+      await saveAppearance({ theme: 'system', skin: 'violet', skin_mode: 'auto', chat_font_size: 15, chat_font_family: 'system', chat_font_family_custom: '' });
       syncAppearanceControls();
       setAppearanceStatus('已恢复默认外观');
       setFontStatus('已恢复默认字体');
@@ -3105,10 +3142,10 @@ export function switchSettingsTab(name) {
   const content = $('.settings-dialog .settings-content');
   if (content) content.scrollTop = 0;
   if (name === 'appearance') {
-    const theme = state.appearance?.theme || 'system';
-    const skin = state.appearance?.skin || 'violet';
-    $$('input[name="appearanceTheme"]').forEach((el) => { el.checked = el.value === theme; });
-    $$('input[name="appearanceSkin"]').forEach((el) => { el.checked = el.value === skin; });
+    // 回显一律走 syncAppearanceControls：皮肤选中态现在跨「配色 radio + 模型皮肤卡片」
+    // 两处表达，模式也有独立 radio。只回显 appearanceSkin 会让模型皮肤与模式在
+    // 切回本页时看起来都没选中（状态其实是对的，纯粹是漏回显）。
+    syncAppearanceControls();
   }
   if (name === 'agent') renderAgentManager();
   if (name === 'skills') loadInstalledSkills(false);

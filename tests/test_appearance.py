@@ -12,6 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from naiba.config import (  # noqa: E402
     APPEARANCE_CHAT_FONT_FAMILIES,
     APPEARANCE_CHAT_FONT_PRESETS,
+    APPEARANCE_COLOR_SKINS,
+    APPEARANCE_MODEL_SKIN_FILES,
+    APPEARANCE_SKINS,
     ConfigStore,
     normalize_appearance,
 )
@@ -19,6 +22,8 @@ from naiba.config import (  # noqa: E402
 DEFAULTS = {
     "theme": "system",
     "skin": "violet",
+    # 皮肤跟随模型：默认自动（见 APPEARANCE_SKIN_MODE_DEFAULT）。
+    "skin_mode": "auto",
     "chat_font_size": 15,
     "chat_font_family": "system",
     "chat_font_family_custom": "",
@@ -254,6 +259,81 @@ class AppearanceConfigTests(unittest.TestCase):
         self.assertEqual(store.data["appearance"]["done_sound"], False)
         self.assertEqual(store.data["appearance"]["done_sound_volume"], 20)
         self.assertEqual(store.data["appearance"]["tray_done_toast"], False)
+
+    # ---- 模型皮肤与「皮肤跟随模型」（skin_mode） ----
+
+    def test_model_skin_ids_are_accepted_and_round_trip(self):
+        """18 个模型皮肤键都必须能存能读（它们与配色皮肤共用 appearance.skin）。"""
+        self.assertEqual(18, len(APPEARANCE_MODEL_SKIN_FILES))
+        self.assertEqual(
+            set(APPEARANCE_COLOR_SKINS), {"violet", "ocean", "rose", "forest"}
+        )
+        # 配色皮肤与模型皮肤并集就是全部合法值，不多不少。
+        self.assertEqual(
+            set(APPEARANCE_SKINS),
+            set(APPEARANCE_COLOR_SKINS) | set(APPEARANCE_MODEL_SKIN_FILES),
+        )
+        store = self._store()
+        for skin in APPEARANCE_MODEL_SKIN_FILES:
+            with self.subTest(skin=skin):
+                saved = store.update_settings({"appearance": {"skin": skin}})
+                self.assertEqual(saved["appearance"]["skin"], skin)
+                self.assertEqual(
+                    ConfigStore(self.path).data["appearance"]["skin"], skin
+                )
+
+    def test_model_skin_files_exist_in_public_skins(self):
+        """每个皮肤键对应的 WebP 必须真的在 public/skins 里，否则用户选中就是一片空白。"""
+        skins_dir = Path(__file__).resolve().parents[1] / "public" / "skins"
+        self.assertTrue(skins_dir.is_dir(), "public/skins 目录不存在")
+        for skin, file_stem in APPEARANCE_MODEL_SKIN_FILES.items():
+            with self.subTest(skin=skin):
+                target = skins_dir / f"{file_stem}.webp"
+                self.assertTrue(target.is_file(), f"缺少皮肤文件：{target.name}")
+                self.assertGreater(target.stat().st_size, 0)
+
+    def test_skin_mode_default_and_round_trip(self):
+        store = self._store()
+        self.assertEqual(store.data["appearance"]["skin_mode"], "auto")
+        saved = store.update_settings({"appearance": {"skin_mode": "manual"}})
+        self.assertEqual(saved["appearance"]["skin_mode"], "manual")
+        self.assertEqual(
+            ConfigStore(self.path).data["appearance"]["skin_mode"], "manual"
+        )
+
+    def test_skin_mode_rejects_unknown_value(self):
+        store = self._store()
+        for payload in ("AUTO_ALWAYS", "off", "", 1, None):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    store.update_settings({"appearance": {"skin_mode": payload}})
+
+    def test_unknown_skin_mode_is_normalized_on_load(self):
+        """手改配置里的非法模式在加载期收回 auto，绝不外泄给前端。"""
+        store = self._store({"appearance": {"skin_mode": "sometimes"}})
+        self.assertEqual(store.data["appearance"]["skin_mode"], "auto")
+
+    def test_skin_mode_update_keeps_other_appearance_keys(self):
+        """切模式只改模式，不能顺手抹掉皮肤/字体等其它键。"""
+        store = self._store()
+        store.update_settings({
+            "appearance": {"skin": "07_gpt_sol_astra", "chat_font_family": "serif"}
+        })
+        store.update_settings({"appearance": {"skin_mode": "manual"}})
+        appearance = store.data["appearance"]
+        self.assertEqual(appearance["skin"], "07_gpt_sol_astra")
+        self.assertEqual(appearance["chat_font_family"], "serif")
+        self.assertEqual(appearance["skin_mode"], "manual")
+
+    def test_skin_error_message_lists_every_option(self):
+        """报错文案由集合动态生成：加一款皮肤不能忘了同步文案。"""
+        store = self._store()
+        with self.assertRaises(ValueError) as ctx:
+            store.update_settings({"appearance": {"skin": "no-such-skin"}})
+        message = str(ctx.exception)
+        for skin in APPEARANCE_SKINS:
+            with self.subTest(skin=skin):
+                self.assertIn(skin, message)
 
 
 if __name__ == "__main__":

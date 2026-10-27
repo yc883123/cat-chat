@@ -72,6 +72,18 @@ CHANGED = [
     "js/23-labeler.js",
     # 3.7.0：工作台「造梦机」功能页（ComfyUI 出图，本期只做文生图）。
     "js/24-comfyui.js",
+    # 3.9.0：模型皮肤映射唯一真源（家族/档位识别与皮肤键解析）。
+    "js/26-model-skin.js",
+]
+
+# 3.9.0：模型皮肤图片必须在包里（18 张 WebP，缺一张对应模型就换不出皮肤）。
+# 逐张校验存在性 + 非空，并抽查魔数（RIFF....WEBP），避免打包时被当成文本处理坏掉。
+REQUIRED_SKINS = [
+    "01_DeepSeek", "02_DeepSeek_Mini", "03_Gemini_Pro", "04_Gemini_Flash",
+    "05_Claude_Opus_Fable_Mythos", "06_Claude_Haiku_Sonnet",
+    "07_GPT_Sol_Astra", "08_GPT_Luna_Terra", "09_Grok_Heavy", "10_Grok_Mini_Fast",
+    "11_GLM", "12_GLM_Flash", "13_Kimi_Pro", "14_Kimi",
+    "15_Minimax_M", "16_Minimax_M_Flash", "17_Qwen", "18_Qwen_Flash",
 ]
 
 # 本轮新增 / 必须存在的内置 Skill（**必须在包里**，否则出厂绑定失效）。
@@ -151,6 +163,11 @@ FINGERPRINTS = {
     # 2.9.2 再加上「弹层里老三样那句改成『已退役』口径」。
     "index.html": [
         "set-ico",
+        # 3.9.0：模型皮肤图层（对话区 + 工作台同层）+ 模式控件 + 卡片容器。
+        "model-skin-layer",
+        "studio-skin-layer",
+        "appearanceSkinMode",
+        "appearanceModelSkinGrid",
         # 2.9.7：清理按钮拆成两个，tooltip 也按目录各写一句（旧的「合并一句」已不存在）。
         "聊天背景图与历史消息里仍在使用的文件会自动保留",
         "历史消息与运行记录里仍在使用的文件会自动保留",
@@ -188,6 +205,8 @@ FINGERPRINTS = {
         "aux-meta",
     ],
     "styles.css": ["--set-r-card", "agent-card-tag", "settings-card-head", "cache-ref-hint", "sidebar-view-menu", "is-archived",
+                   # 3.9.0：皮肤层（对话区 + 工作台 isolation 堆叠上下文）与 18 张卡片网格。
+                   ".model-skin-layer", ".studio-skin-layer", "appearance-model-skin-grid", "isolation: isolate",
                    # 2.9.9：分析视图全套样式（KPI 网格 / 工具行 chip / tooltip / 弹窗 dvh 兜底）。
                    ".usage-kpis", ".usage-chip", ".usage-tooltip", ".usage-dialog",
                    # 2.9.11：费用单价弹层（分组卡 / 二级行 / 币种条 + 自定义币种删除叉）。
@@ -199,7 +218,11 @@ FINGERPRINTS = {
                    # 3.6.x：打标器三栏 + 按页隐藏顶栏工具的显式 display 规则。
                    ".labeler-columns", ".studio-topbar-tools[hidden]", ".labeler-result-tab"],
     # emoji 头像判定入口（内置 Agent 用 emoji，上传图走 <img>）。
-    "js/01-core.js": ["agentAvatarEmoji", "agentAvatarFile", "normalizeSidebarPrefs"],
+    "js/01-core.js": [
+        "agentAvatarEmoji", "agentAvatarFile", "normalizeSidebarPrefs",
+        # 3.9.0：模型皮肤渲染通道（变量写入 + 自动/手动两条换肤路径）。
+        "MODEL_SKINS", "modelSkinImageUrl", "--model-skin-image", "applyModelSkinFor", "previewModelSkinFor",
+    ],
     # 2.9.8：bootstrap 时同步服务端 settings.sidebar 三项偏好。
     "js/05-bootstrap.js": ["syncSidebarPrefsFromBootstrap"],
     # 2.9.8：分组/排序/归档三件套（面板开合、归档切换、拖拽落序）。
@@ -235,13 +258,19 @@ FINGERPRINTS = {
         "splitArgs",
         "parseMcpJson",
         "openMcpForm",
+        # 3.9.0：18 张模型皮肤预设卡片（现建 + 统一回显两处选中态）。
+        "buildModelSkinCards",
+        "appearanceModelSkinGrid",
+        "activePickerSkin",
     ],
     # 2.9.7：进度 100% 未回响应时的「服务器处理中」+ 8 秒慢提示。
     "js/10-upload.js": ["SLOW_UPLOAD_HINT_MS", "服务器处理中", "file.slow"],
     # 2.9.8：滑杆按钮 / ⋯菜单归档项 / 侧栏拖拽接线。
     # 2.9.9：软键盘开合走 visualViewport，弹层重定位跟着它走；用量弹窗 close 统一摘 vv 监听。
     # 2.9.11：费用单价弹层接线（入口 / 返回 / 完成 / 事件委托 + 自定义币种删除）。
-    "js/15-bind-events.js": ["settingsToolbarSub", "cleanImageCache('generated')", "openSidebarViewMenu", "toggleConversationArchive", "bindSidebarDragDrop", "window.visualViewport?.addEventListener", "usageUnbindDialogViewport", "openUsagePricingDialog", "usagePricingDialog", "data-pricing-drop-currency", "handleMcpListClick", "switchSettingsTab('mcp')", "bindLabelerEvents"],
+    "js/15-bind-events.js": ["settingsToolbarSub", "cleanImageCache('generated')", "openSidebarViewMenu", "toggleConversationArchive", "bindSidebarDragDrop", "window.visualViewport?.addEventListener", "usageUnbindDialogViewport", "openUsagePricingDialog", "usagePricingDialog", "data-pricing-drop-currency", "handleMcpListClick", "switchSettingsTab('mcp')", "bindLabelerEvents",
+                             # 3.9.0：皮肤跟随方式的模式切换 + 模型皮肤卡片点选（顺手切手动）。
+                             "appearanceSkinMode", "appearance-model-skin-card", "previewModelSkinFor"],
     # 2.9.9：@ / 弹层定位可视视口感知 + hide 清内联 maxHeight（手机软键盘裁弹层修复）。
     "js/13-skill-refs.js": ["window.visualViewport", "style.removeProperty('max-height')"],
     "js/16-file-refs.js": ["style.removeProperty('max-height')"],
@@ -256,6 +285,15 @@ FINGERPRINTS = {
     "js/23-labeler.js": [
         "webkitGetAsEntry", "labelerDropzone", "bindLabelerEvents",
         "uploadAll", "loadModelOptions", "loadSentences",
+    ],
+    # 3.9.0：模型皮肤（家族/档位识别纯函数 + 缺档回落 + 非对话模型排除）。
+    "js/26-model-skin.js": [
+        "resolveModelSkin",
+        "FAMILY_WORDS",
+        "FAMILY_SKINS",
+        "isNonChatModel",
+        "07_gpt_sol_astra",
+        "18_qwen_flash",
     ],
 }
 
@@ -372,9 +410,24 @@ def main() -> int:
                 print("       !! 缺指纹", mark)
 
     print("=" * 72)
-    print("四、launcher JsApi 反射（既有对照项）")
+    print("四、模型皮肤图片必须在包里（3.9.0）")
     print("=" * 72)
-    jsapi = None
+    for stem in REQUIRED_SKINS:
+        packed = root / "public" / "skins" / ("%s.webp" % stem)
+        if not packed.is_file() or packed.stat().st_size == 0:
+            fails.append("public/skins/%s.webp：包里缺失或为空（该模型换不出皮肤）" % stem)
+            print("  MISS public/skins/%s.webp" % stem)
+            continue
+        head = packed.read_bytes()[:12]
+        # WebP 魔数：RIFF....WEBP。长度不足或魔数不符 = 打包时被当文本处理坏了。
+        if len(head) < 12 or head[:4] != b"RIFF" or head[8:12] != b"WEBP":
+            fails.append("public/skins/%s.webp：不是有效的 WebP（魔数不符）" % stem)
+            print("  BAD  public/skins/%s.webp  head=%r" % (stem, head))
+    print("  校验 %d 张皮肤" % len(REQUIRED_SKINS))
+
+    print("=" * 72)
+    print("五、launcher JsApi 反射（既有对照项）")
+    print("=" * 72)
     frame = sys._getframe()
     while frame is not None and jsapi is None:
         jsapi = frame.f_globals.get("JsApi")

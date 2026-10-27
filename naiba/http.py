@@ -1702,6 +1702,17 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.FORBIDDEN)
             return
         if not path.is_file():
+            # 带扩展名的**资源**请求（图片 / 脚本 / 样式）不能回落成 index.html：
+            # 浏览器会拿到一张 HTML 当图片用（或被 nosniff 直接拒掉），表现为静默破图，
+            # 排查时很难看出是「文件不存在」而不是「路径写错」。这里明确回 404。
+            # 两个例外保持原有语义：
+            # - 根路径（relative == index.html）本身就是要首页；
+            # - public 目录整体不存在（onefile 的 _MEI 被清）时，仍走下面的降级兜底页，
+            #   否则用户在资源目录失效时只会看到一屏 404，不知道该怎么办。
+            wants_asset = bool(Path(relative).suffix) and relative != "index.html"
+            if wants_asset and self.app.paths.public_dir.is_dir():
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
             path = self.app.paths.public_dir / "index.html"
         # onefile 资源目录失效降级：exe 打包（无 COLLECT，运行目录是 %TEMP%\_MEIxxxx）
         # 在「更新重启窗口 / Temp 清理」后 _MEI 目录会被删除，进程却还活着占着端口——

@@ -494,6 +494,36 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 }
 .chat-backdrop-layer { position: absolute; inset: 0; }
 
+/* ── 模型皮肤（模型角色插画） ──
+   18 张 5120×2880 WebP 由 01-core.js 的 applyAppearance() 写到 html 上的
+   --model-skin-image；配色皮肤（violet/ocean/rose/forest）不设该变量，所以这条
+   规则对它们完全无作用——两类皮肤互斥，不叠加。
+   铺放口径与聊天背景一致：独立图层 + cover 居中，超出部分由 .chat-backdrop 裁掉。
+   不用 background-attachment: fixed（移动端失效且触发整屏重绘）。
+   只在对话区显示；工作台等其它视图隐藏（见文件末尾 body[data-studio] 规则）。 */
+.chat-backdrop .model-skin-layer {
+  position: absolute;
+  inset: 0;
+  display: none;
+  background-image: var(--model-skin-image, none);
+  background-size: cover;
+  background-position: 50% 38%;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+html[data-model-skin="on"] .chat-backdrop .model-skin-layer { display: block; }
+/* 插画偏亮时压一层薄蒙，保证消息气泡与正文的对比度；暗色主题下压得更重。
+   用伪元素而不是给图片本身叠 filter：filter 会让整层参与合成，长会话滚动时开销明显。 */
+.chat-backdrop .model-skin-layer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.34));
+}
+html[data-theme="dark"] .chat-backdrop .model-skin-layer::after {
+  background: linear-gradient(180deg, rgba(9,11,18,.52), rgba(9,11,18,.70));
+}
+
 /* 模糊填充层：取景没铺满对话区时（zoom < 1 / 完整显示），未覆盖的地方用**同一张图的模糊放大版**
    补上，而不是露一条页面底色的纸带（电视与短视频的常规做法）。
    只在需要时显示：applyChatBackground() 会写 :root 的 data-chat-bg-cover="0"。
@@ -1728,6 +1758,18 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .skin-option { flex-direction:column; align-items:flex-start; }
 .skin-swatch { width:100%; height:28px; border-radius:6px; background:var(--accent); }
 .skin-violet .skin-swatch { background:#7c5cff; } .skin-ocean .skin-swatch { background:#168aad; } .skin-rose .skin-swatch { background:#d45d79; } .skin-forest .skin-swatch { background:#4c956c; }
+/* 皮肤跟随方式（自动 / 手动）：两栏，与上面配色皮肤同一种卡片密度。 */
+.appearance-skin-mode { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-bottom:8px; }
+.appearance-skin-group-label { margin:14px 0 8px; color:var(--muted); font-size:11.5px; font-weight:600; letter-spacing:.02em; }
+/* 模型皮肤：18 张缩略图卡片。缩略图直接取 /skins 里的 webp（浏览器缩放，不额外生成小图），
+   加载失败时露出底色，不会撑破网格。 */
+.appearance-model-skin-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; max-height:320px; overflow-y:auto; padding-right:2px; }
+.appearance-model-skin-card { position:relative; display:flex; flex-direction:column; gap:5px; padding:0; border:1px solid var(--line); border-radius:var(--radius); background:var(--surface-2); color:var(--text); cursor:pointer; overflow:hidden; text-align:left; }
+.appearance-model-skin-card:hover { border-color:var(--accent); }
+.appearance-model-skin-card.is-active { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-soft); }
+.appearance-model-skin-thumb { display:block; width:100%; aspect-ratio:16/9; object-fit:cover; background:var(--surface-inset); }
+.appearance-model-skin-name { padding:0 8px 7px; font-size:11.5px; line-height:1.35; }
+@media (max-width:560px) { .appearance-model-skin-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 /* 会话字体（设置 → 外观）：字号滑杆 + 字体族单选 + 自定义串 + 实时样例。
    样例块直接消费 --msg-font-size / --msg-font-family，就是消息区看到的字号字体。 */
 .chat-font-size-row { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:10px; margin:0 0 10px; font-size:13px; color:var(--text); }
@@ -3440,7 +3482,44 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
   min-height: 0;
   flex-direction: column;
   background: var(--bg);
+  /* 模型皮肤的定位上下文：皮肤层（.studio-skin-layer）绝对铺满这里，z-index 0。
+     所有真实内容靠 .studio-content 抬到 z-index 1，因此皮肤永远在控件下面，
+     不可能挡住任何按钮或输入框。 */
+  position: relative;
+  isolation: isolate;
 }
+/* 工作台的模型皮肤层：与对话区共用 html 上的 --model-skin-image（同一个变量、同一张图），
+   两者层级口径一致——都是「铺满容器的最底层」，内容各自盖在上面。
+   配色皮肤不设该变量 → display:none，工作台看不到这一层（与对话区一致）。 */
+.studio-view .studio-skin-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: none;
+  background-image: var(--model-skin-image, none);
+  background-size: cover;
+  background-position: 50% 38%;
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+html[data-model-skin="on"] .studio-view .studio-skin-layer { display: block; }
+/* 有模型皮肤时容器底色要让位：.studio-view 默认是不透明的 var(--bg)，会盖住皮肤层。
+   只在启用模型皮肤时清空，配色皮肤下保持原样（视觉零变化）。 */
+html[data-model-skin="on"] .studio-view { background: transparent; }
+/* 压一层薄蒙保住文字对比度，口径与对话区那条一致（浅色轻、暗色重）。 */
+.studio-view .studio-skin-layer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.34));
+}
+html[data-theme="dark"] .studio-view .studio-skin-layer::after {
+  background: linear-gradient(180deg, rgba(9,11,18,.52), rgba(9,11,18,.70));
+}
+/* 工作台的真实内容整体抬到皮肤层之上。.studio-view 的直接子元素只有
+   顶栏与各分页容器，统一处理即可；分页容器内部的层级不受影响。 */
+.studio-view > .studio-topbar,
+.studio-view > .studio-page-view { position: relative; z-index: 1; }
 /* 模块级顶栏：模块名 + 分页导航 + 本模块工具。后续工作台分页都加在这里。 */
 .studio-topbar {
   display: flex; align-items: center; gap: var(--s-3);

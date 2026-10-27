@@ -2,7 +2,7 @@
 // 09-settings.js —— 拆分自 public/app.js 第 3115-4672 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, agentAvatarEmoji, agentAvatarSrc, api, applyAppearance, applyChatBackground, CHAT_FONT_PICKS, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, isFontInstalled, localFileUrl, refreshChatBackgroundImageStatus, saveAppearance, state, toast } from "./01-core.js";
+import { $, $$, agentAvatarEmoji, agentAvatarSrc, api, applyAppearance, applyChatBackground, CHAT_FONT_PICKS, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, isFontInstalled, localFileUrl, MODEL_SKINS, modelSkinImageUrl, refreshChatBackgroundImageStatus, saveAppearance, state, toast } from "./01-core.js";
 import { applyConversationAgent, populateComposerModels, populateModels, renderAgents, updateUnloadModelButton } from "./07-models-agents.js";
 import { closeAgentPromptPresetPanel, currentAgentFixedSkillIds, renderAgentPromptPresetList } from "./08-conversations.js";
 import { skillList } from "./13-skill-refs.js";
@@ -64,6 +64,9 @@ export function populateAppearanceSettings() {
   applyAppearance({
     theme: appearance.theme || 'system',
     skin: appearance.skin || 'violet',
+    // 旧版服务端没有 skin_mode（undefined）→ applyAppearance 沿用当前值，
+    // 不会出现「打开一次设置就重置成自动」。
+    skin_mode: appearance.skin_mode,
     chat_font_size: appearance.chat_font_size,
     chat_font_family: appearance.chat_font_family,
     chat_font_family_custom: appearance.chat_font_family_custom,
@@ -72,8 +75,9 @@ export function populateAppearanceSettings() {
     done_sound_volume: appearance.done_sound_volume,
     tray_done_toast: appearance.tray_done_toast,
   });
-  // 选项先建好再回显：select 里没有对应 option 时 value 会被清空。
+  // 选项先建好再回显：select / 模型皮肤卡片里没有对应项时 value 会被清空。
   buildChatFontPickOptions();
+  buildModelSkinCards();
   syncAppearanceControls();
   populateChatBackgroundSettings();
 }
@@ -93,15 +97,57 @@ export function syncRangeFill(input) {
 // 把 state.appearance 回显到外观面板的所有控件（主题 / 皮肤 / 会话字号 / 字体族）。
 // 设置弹窗打开（populateAppearanceSettings）与保存/恢复默认之后都要调它，
 // 否则"保存成功了但控件还显示旧值"。
+// 模型皮肤卡片：依 MODEL_SKINS 现建，清单一律不进 HTML（与 CHAT_FONT_PICKS 同款约定）。
+// 缩略图直接用 /skins 里的原图（浏览器自己缩放），不额外生成小图——省一条构建链路，
+// 也避免小图与原图不同步。loading="lazy" 让面板打开时只加载可视区域内的几张。
+export function buildModelSkinCards() {
+  const grid = $('#appearanceModelSkinGrid');
+  if (!grid) return;
+  grid.textContent = '';
+  Object.entries(MODEL_SKINS).forEach(([key, entry]) => {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'appearance-model-skin-card';
+    card.dataset.skin = key;
+    card.setAttribute('role', 'radio');
+    card.setAttribute('aria-checked', 'false');
+    const img = document.createElement('img');
+    img.className = 'appearance-model-skin-thumb';
+    img.loading = 'lazy';
+    img.alt = '';
+    img.src = modelSkinImageUrl(key);
+    const name = document.createElement('span');
+    name.className = 'appearance-model-skin-name';
+    name.textContent = entry.label;
+    card.append(img, name);
+    grid.append(card);
+  });
+}
+
 export function syncAppearanceControls() {
   const appearance = state.appearance || {};
   const theme = appearance.theme || 'system';
   const skin = appearance.skin || 'violet';
+  const skinMode = appearance.skin_mode || 'auto';
   const size = Number(appearance.chat_font_size) || 15;
   const family = appearance.chat_font_family || 'system';
   const custom = appearance.chat_font_family_custom || '';
   $$('input[name="appearanceTheme"]').forEach((input) => { input.checked = input.value === theme; });
+  $$('input[name="appearanceSkinMode"]').forEach((input) => { input.checked = input.value === skinMode; });
+  // 皮肤选中态跨两处表达：配色皮肤用 radio，模型皮肤用卡片上的 is-active。
+  // 两边都要按当前 skin 回显，且**同一次同步里互斥**——否则面板会出现两个选中项。
   $$('input[name="appearanceSkin"]').forEach((input) => { input.checked = input.value === skin; });
+  $$('#appearanceModelSkinGrid .appearance-model-skin-card').forEach((card) => {
+    const active = card.dataset.skin === skin;
+    card.classList.toggle('is-active', active);
+    card.setAttribute('aria-checked', active ? 'true' : 'false');
+  });
+  const skinModeHint = $('#appearanceSkinModeHint');
+  if (skinModeHint) {
+    skinModeHint.textContent = skinMode === 'auto'
+      ? '跟随模型时，只有你主动换模型才换皮肤；识别不出家族的模型会保持当前皮肤。'
+      : '手动选择时，换模型不会改变皮肤；下面点哪个就用哪个。';
+  }
   // 结构三档各有自己的 radio；**任何预置字体键都落到「指定字体」那一项**（含 custom），
   // 由下面的 select 表达具体是谁——两层显隐分开：radio 管 select 行、select 管手动行。
   const usingPick = !CHAT_FONT_BASE_FAMILIES.has(family);
@@ -173,13 +219,24 @@ export function appearanceFormValues() {
   }
   return {
     theme: $('input[name="appearanceTheme"]:checked')?.value || 'system',
-    skin: $('input[name="appearanceSkin"]:checked')?.value || 'violet',
+    // 皮肤选择有两处来源：模型皮肤卡片（data-skin 自定义属性）与配色皮肤 radio。
+    // 优先读卡片上的选中态——它是模型皮肤的**唯一**表达方式（没有 radio 能装 18 个键）。
+    skin: activePickerSkin() || 'violet',
+    skin_mode: $('input[name="appearanceSkinMode"]:checked')?.value || undefined,
     chat_font_size: slider ? Number(slider.value) : undefined,
     chat_font_family: fontFamily || undefined,
     // 只有「手动填写」时才带上用户串：选了预置字体就不去动它，
     // 用户上次打过的串因此原样留在库里，切回来还在。
     chat_font_family_custom: fontFamily === 'custom' && customInput ? customInput.value : undefined,
   };
+}
+
+// 当前面板里「选中的那个皮肤键」：配色皮肤读 radio，模型皮肤读卡片的 is-active。
+// 两者互斥：点任一侧时另一侧会被清掉，所以这里能安全地「先看卡片、再看 radio」。
+function activePickerSkin() {
+  const card = $('#appearanceModelSkinGrid .appearance-model-skin-card.is-active');
+  if (card?.dataset.skin) return card.dataset.skin;
+  return $('input[name="appearanceSkin"]:checked')?.value || '';
 }
 
 // ---- 聊天背景（外观页） ----

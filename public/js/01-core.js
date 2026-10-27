@@ -3,6 +3,7 @@
 // ============================================================
 
 import { resizeTextarea } from "./13-skill-refs.js";
+import { resolveModelSkin } from "./26-model-skin.js";
 export const urlToken = new URLSearchParams(location.search).get('token') || '';
 if (urlToken) {
   localStorage.setItem('naibaChatToken', urlToken);
@@ -191,7 +192,54 @@ export const draggedFileCache = new Map();
 // 服务端值在 bootstrap 返回后覆盖它，从而在同一实例的桌面/手机端保持一致。
 const APPEARANCE_KEY = 'naibaChatAppearance';
 const THEMES = new Set(['system', 'light', 'dark']);
-const SKINS = new Set(['violet', 'ocean', 'rose', 'forest']);
+// 配色皮肤（只换 CSS 色相，无图片）与模型皮肤（整张角色插画）共用 appearance.skin。
+// 模型皮肤的键与文件名映射必须与后端 naiba/config.py 的 APPEARANCE_MODEL_SKIN_FILES 一致
+// （守门：tests/test_appearance_skin.py）。
+const COLOR_SKINS = ['violet', 'ocean', 'rose', 'forest'];
+// 模型皮肤的键 → 图片文件名与界面标签。键名与文件名映射必须与后端
+// naiba/config.py 的 APPEARANCE_MODEL_SKIN_FILES 一致（守门：tests/test_appearance_skin.py）。
+// 标签用用户视角的模型名，不写皮肤键或文件名。
+export const MODEL_SKINS = {
+  '01_deepseek': { file: '01_DeepSeek', label: 'DeepSeek' },
+  '02_deepseek_mini': { file: '02_DeepSeek_Mini', label: 'DeepSeek 轻量' },
+  '03_gemini_pro': { file: '03_Gemini_Pro', label: 'Gemini Pro' },
+  '04_gemini_flash': { file: '04_Gemini_Flash', label: 'Gemini Flash' },
+  '05_claude_opus_fable_mythos': { file: '05_Claude_Opus_Fable_Mythos', label: 'Claude 高阶' },
+  '06_claude_haiku_sonnet': { file: '06_Claude_Haiku_Sonnet', label: 'Claude 轻量' },
+  '07_gpt_sol_astra': { file: '07_GPT_Sol_Astra', label: 'GPT 高阶' },
+  '08_gpt_luna_terra': { file: '08_GPT_Luna_Terra', label: 'GPT 轻量' },
+  '09_grok_heavy': { file: '09_Grok_Heavy', label: 'Grok 高阶' },
+  '10_grok_mini_fast': { file: '10_Grok_Mini_Fast', label: 'Grok 轻量' },
+  '11_glm': { file: '11_GLM', label: 'GLM' },
+  '12_glm_flash': { file: '12_GLM_Flash', label: 'GLM 轻量' },
+  '13_kimi_pro': { file: '13_Kimi_Pro', label: 'Kimi 高阶' },
+  '14_kimi': { file: '14_Kimi', label: 'Kimi' },
+  '15_minimax_m': { file: '15_Minimax_M', label: 'MiniMax' },
+  '16_minimax_m_flash': { file: '16_Minimax_M_Flash', label: 'MiniMax 轻量' },
+  '17_qwen': { file: '17_Qwen', label: 'Qwen' },
+  '18_qwen_flash': { file: '18_Qwen_Flash', label: 'Qwen 轻量' },
+};
+const SKINS = new Set([...COLOR_SKINS, ...Object.keys(MODEL_SKINS)]);
+const SKIN_MODES = new Set(['auto', 'manual']);
+export const SKIN_MODE_DEFAULT = 'auto';
+
+/** 该皮肤键是否用整张图片渲染（true = 模型皮肤，false = CSS 配色皮肤）。 */
+export function isModelSkin(skin) {
+  return Object.prototype.hasOwnProperty.call(MODEL_SKINS, String(skin || ''));
+}
+
+/** 皮肤键 → 图片地址；配色皮肤返回空串。 */
+export function modelSkinImageUrl(skin) {
+  const entry = MODEL_SKINS[String(skin || '')];
+  return entry ? `skins/${entry.file}.webp` : '';
+}
+
+/** 皮肤键 → 界面显示名（配色皮肤走各自的固定中文名）。 */
+export function skinLabel(skin) {
+  const key = String(skin || '');
+  if (MODEL_SKINS[key]) return MODEL_SKINS[key].label;
+  return { violet: '紫藤', ocean: '海洋', rose: '玫瑰', forest: '森林' }[key] || '紫藤';
+}
 // 会话区字体族：后端只存枚举键，真正的 font-family 栈在这里（唯一真相）。
 // serif 优先思源宋体/Noto Serif，Windows 落到 SimSun；rounded 取各平台默认的
 // 现代无衬线（PingFang / 雅黑 UI / HarmonyOS），三者都自带 --font-sans 兜底。
@@ -314,6 +362,7 @@ function readStoredAppearance() {
     return {
       theme: THEMES.has(raw.theme) ? raw.theme : 'system',
       skin: SKINS.has(raw.skin) ? raw.skin : 'violet',
+      skin_mode: SKIN_MODES.has(raw.skin_mode) ? raw.skin_mode : SKIN_MODE_DEFAULT,
       chat_font_size: clampMsgFontSize(raw.chat_font_size),
       chat_font_family: MSG_FONT_FAMILY_KEYS.has(raw.chat_font_family) ? raw.chat_font_family : 'system',
       chat_font_family_custom: typeof raw.chat_font_family_custom === 'string'
@@ -324,6 +373,7 @@ function readStoredAppearance() {
     return {
       theme: 'system',
       skin: 'violet',
+      skin_mode: SKIN_MODE_DEFAULT,
       chat_font_size: MSG_FONT_SIZE_DEFAULT,
       chat_font_family: 'system',
       chat_font_family_custom: '',
@@ -342,6 +392,10 @@ export function applyAppearance(appearance = {}) {
   const next = {
     theme: THEMES.has(appearance.theme) ? appearance.theme : (THEMES.has(previous.theme) ? previous.theme : 'system'),
     skin: SKINS.has(appearance.skin) ? appearance.skin : (SKINS.has(previous.skin) ? previous.skin : 'violet'),
+    // 皮肤是否跟随模型：非法值沿用旧值，再否则默认 auto（与后端归一化同口径）。
+    skin_mode: SKIN_MODES.has(appearance.skin_mode)
+      ? appearance.skin_mode
+      : (SKIN_MODES.has(previous.skin_mode) ? previous.skin_mode : SKIN_MODE_DEFAULT),
     // 会话字体同样遵循「新值合法用新值 → 否则沿用旧值 → 再否则默认」，
     // 这样只传 theme/skin 的老调用点（设置面板、恢复默认）不会把字体悄悄重置。
     chat_font_size: clampMsgFontSize(
@@ -373,6 +427,18 @@ export function applyAppearance(appearance = {}) {
   root.dataset.theme = actualTheme;
   root.dataset.themeMode = next.theme;
   root.dataset.skin = next.skin;
+  // 模型皮肤：在 html 上挂 --model-skin-image，由 styles.css 那一条规则统一铺到对话区。
+  // 配色皮肤把变量清空（= none），所以两类皮肤互斥、不会叠在一起。
+  // 用相对 URL（不带前导斜杠）而不是绝对路径：静态资源与页面同源，手机端经局域网访问时
+  // 也能正确解析，不必拼接 token。
+  const skinImage = modelSkinImageUrl(next.skin);
+  if (skinImage) {
+    root.style.setProperty('--model-skin-image', `url("${skinImage}")`);
+    root.dataset.modelSkin = 'on';
+  } else {
+    root.style.removeProperty('--model-skin-image');
+    delete root.dataset.modelSkin;
+  }
   root.style.colorScheme = actualTheme;
   // 会话区字体：挂 :root 变量（不是 body 字号），只被 .message-body 消费，
   // 侧栏/按钮/设置弹窗与代码块的 --font-mono 都不受影响。
@@ -425,6 +491,9 @@ export function syncAppearanceFromBootstrap(bootstrap) {
   const next = applyAppearance({
     theme: configured?.theme ?? local.theme,
     skin: configured?.skin ?? local.skin,
+    // 旧版服务端没有 skin_mode → undefined → applyAppearance 退回本地缓存值，
+    // 不会出现「连上旧版实例就重置成自动」。
+    skin_mode: configured?.skin_mode ?? local.skin_mode,
     // 旧版服务端没有这三个键 → undefined → applyAppearance 退回本地缓存值，
     // 不会出现"连上旧版实例就重置字体"。
     chat_font_size: configured?.chat_font_size ?? local.chat_font_size,
@@ -439,6 +508,40 @@ export function syncAppearanceFromBootstrap(bootstrap) {
   // 内部自己做失效兜底，是 fire-and-forget，不阻塞首屏。
   void syncChatBackgroundFromBootstrap(bootstrap);
   return next;
+}
+
+// ---- 皮肤跟随模型（自动模式）----
+// 用户**主动**选择具体模型后调用（在面板外，所以即时落库）。
+// 初始化、模型目录刷新、切换会话、恢复会话模型都不走这里——那些是「恢复既有选择」，
+// 不是「用户换了模型」。
+export async function applyModelSkinFor(modelId) {
+  const appearance = state.appearance || {};
+  if (appearance.skin_mode !== 'auto') return { applied: false, reason: 'manual' };
+  const skin = resolveModelSkin(modelId);
+  // 识别不出家族/档位（或属于画图/语音模型）→ 保持当前皮肤，不猜测。
+  if (!skin) return { applied: false, reason: 'unmapped' };
+  if (skin === appearance.skin) return { applied: false, reason: 'unchanged' };
+  // 只改 skin：主题、字体、提示音等其它外观字段原样带过去。
+  await saveAppearance({ skin });
+  return { applied: true, reason: 'applied', skin };
+}
+
+// 设置面板里「切回跟随模型」用的：只按当前模型**本地应用**皮肤，不落库。
+// 为什么不落库：面板里的改动一律攒到「保存外观」一次性提交（见 previewAppearance 的
+// 说明），此刻只落皮肤会把用户还没保存的主题/字体一并写进服务端。
+export function previewModelSkinFor(modelId) {
+  const appearance = state.appearance || {};
+  if (appearance.skin_mode !== 'auto') return { applied: false, reason: 'manual' };
+  const skin = resolveModelSkin(modelId);
+  if (!skin || skin === appearance.skin) return { applied: false, reason: skin ? 'unchanged' : 'unmapped' };
+  applyAppearance({ ...appearance, skin });
+  return { applied: true, reason: 'applied', skin };
+}
+
+// 用户在皮肤选择器里主动挑皮肤 → 同步切到手动模式，避免选择结果立刻被模型规则覆盖。
+// 注意：面板内的手挑走预览 + 「保存外观」，这个函数留给面板外的直接调用（如快捷键）。
+export async function selectSkinManually(skin) {
+  return saveAppearance({ skin, skin_mode: 'manual' });
 }
 
 export async function saveAppearance(patch = {}) {

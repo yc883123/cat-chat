@@ -125,6 +125,37 @@ class StaticDegradedTests(unittest.TestCase):
         self.assertEqual(result["errored"][0], HTTPStatus.FORBIDDEN)
         self.assertIsNone(result["status"])
 
+    def test_missing_asset_returns_404_instead_of_index_html(self):
+        """带扩展名的资源缺失时不能回落成首页。
+
+        回落成 index.html 的表现是「一张 HTML 被当图片/脚本」，浏览器侧静默破图或被
+        nosniff 拒掉——排查时几乎看不出是文件不存在（模型皮肤正是踩这个坑的场景：
+        皮肤键写错只会让图空着，不报任何错）。
+        """
+        public = self.root / "public"
+        (public / "js").mkdir(parents=True)
+        (public / "index.html").write_bytes(b"<html>__ASSET_VERSION__</html>")
+        (public / "js" / "main.js").write_bytes(b"// ok")
+        (public / "styles.css").write_bytes(b"body{}")
+        handler = _StubHandler(public)
+        for requested in ("/skins/99_missing.webp", "/js/nope.js", "/styles-nope.css"):
+            with self.subTest(requested=requested):
+                result = _drive(handler, requested)
+                self.assertEqual(HTTPStatus.NOT_FOUND, result["errored"][0])
+                self.assertIsNone(result["status"])
+
+    def test_missing_route_without_extension_still_serves_index(self):
+        """无扩展名的路径仍走 SPA 兜底（刷新子页 / 前端路由不能变成 404）。"""
+        public = self.root / "public"
+        (public / "js").mkdir(parents=True)
+        (public / "index.html").write_bytes(b"<html>__ASSET_VERSION__</html>")
+        (public / "js" / "main.js").write_bytes(b"// ok")
+        (public / "styles.css").write_bytes(b"body{}")
+        handler = _StubHandler(public)
+        result = _drive(handler, "/some/route")
+        self.assertEqual(HTTPStatus.OK, result["status"])
+        self.assertIn(b"<html>", result["body"])
+
 
 if __name__ == "__main__":
     unittest.main()

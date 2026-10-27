@@ -6,12 +6,21 @@
   <meta name="theme-color" content="#f4f5f2">
   <script>
     // 首屏预设主题，待模块加载后由 01-core.js 与服务端配置校正。
+    // 皮肤白名单在这里也要有一份：首屏还没有 JS 模块，若不预置 data-skin，
+    // 模型皮肤会在模块加载后被重刷一次（闪一下）。清单须与 01-core.js 的
+    // COLOR_SKINS / MODEL_SKINS 一致（守门：tests/test_appearance_skin.py）。
     (() => { try {
       const a = JSON.parse(localStorage.getItem('naibaChatAppearance') || '{}');
       const theme = ['light', 'dark'].includes(a.theme) ? a.theme
         : (window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
       document.documentElement.dataset.theme = theme;
-      document.documentElement.dataset.skin = ['violet','ocean','rose','forest'].includes(a.skin) ? a.skin : 'violet';
+      const skins = new Set(['violet','ocean','rose','forest',
+        '01_deepseek','02_deepseek_mini','03_gemini_pro','04_gemini_flash',
+        '05_claude_opus_fable_mythos','06_claude_haiku_sonnet','07_gpt_sol_astra','08_gpt_luna_terra',
+        '09_grok_heavy','10_grok_mini_fast','11_glm','12_glm_flash',
+        '13_kimi_pro','14_kimi','15_minimax_m','16_minimax_m_flash',
+        '17_qwen','18_qwen_flash']);
+      document.documentElement.dataset.skin = skins.has(a.skin) ? a.skin : 'violet';
     } catch (_) {} })();
   </script>
   <title>Cat Chat</title>
@@ -188,10 +197,12 @@
 
       <!-- 对话区背景图层：与 .messages 占同一格（grid-row 2），只铺对话区；
            内容一律实底（AI 卡 / 用户气泡 / starter 卡），所以不需要蒙层压暗。
-           两层结构：.chat-bg-blur（取景没铺满时补两侧的模糊底）+ .chat-bg-surface（真正的取景）。
+           三层结构：.chat-bg-blur（取景没铺满时补两侧的模糊底）+ .model-skin-layer
+           （模型皮肤插画，仅模型皮肤时显示）+ .chat-bg-surface（真正的取景）。
            .chat-bg-surface 是取景渲染规则的唯一样式来源（编辑器预览、设置卡缩略图同挂它）。 -->
       <div class="chat-backdrop" id="chatBackdrop" aria-hidden="true">
         <span class="chat-bg-blur"></span>
+        <span class="model-skin-layer"></span>
         <span class="chat-bg-surface chat-backdrop-layer"></span>
       </div>
 
@@ -220,6 +231,10 @@
            模块级顶栏 = 模块名 + 分页导航（当前「模块库」，后续新功能各起一页）+ 本模块工具。
            左边侧栏管历史产出；当前分页内再分三栏：模块库（纵向分类 + 列表）/ 详情与参数 / 结果。 -->
       <section class="studio-view" id="studioView" hidden aria-label="工作台">
+        <!-- 工作台模型皮肤层：与对话区共用 html 上的 --model-skin-image，
+             绝对铺满本容器的最底层（z-index 0），真实内容整体抬到 z-index 1，
+             所以皮肤不会挡住任何控件。配色皮肤下这一层不显示。 -->
+        <div class="studio-skin-layer" aria-hidden="true"></div>
         <header class="studio-topbar">
           <!-- 桌面端侧栏收起时，对话顶栏（#expandSidebar 所在）整体退场；
                这里补一个同款展开按钮，保证工作台里仍能回到侧栏选「对话」。 -->
@@ -1533,13 +1548,23 @@
             </div>
           </div>
           <div class="settings-card appearance-card">
-            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="8" height="8" rx="2.2"></rect><rect x="12.5" y="3.5" width="8" height="8" rx="2.2"></rect><rect x="3.5" y="12.5" width="8" height="8" rx="2.2"></rect><rect x="12.5" y="12.5" width="8" height="8" rx="2.2"></rect></svg></span><div><h4>界面皮肤</h4><p>强调色会应用到按钮、选中状态和消息气泡。</p></div></div>
-            <div class="appearance-skin-options" role="radiogroup" aria-label="界面皮肤">
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="8" height="8" rx="2.2"></rect><rect x="12.5" y="3.5" width="8" height="8" rx="2.2"></rect><rect x="3.5" y="12.5" width="8" height="8" rx="2.2"></rect><rect x="12.5" y="12.5" width="8" height="8" rx="2.2"></rect></svg></span><div><h4>界面皮肤</h4><p>配色皮肤只换强调色；模型皮肤是整张角色插画，只铺在对话区。</p></div></div>
+            <div class="appearance-skin-mode" role="radiogroup" aria-label="皮肤跟随方式">
+              <label class="appearance-option"><input type="radio" name="appearanceSkinMode" value="auto"><span><b>跟随模型</b><small>换模型时自动换皮肤</small></span></label>
+              <label class="appearance-option"><input type="radio" name="appearanceSkinMode" value="manual"><span><b>手动选择</b><small>换模型不改皮肤</small></span></label>
+            </div>
+            <p class="hint" id="appearanceSkinModeHint">跟随模型时，只有你主动换模型才换皮肤；识别不出家族的模型会保持当前皮肤。</p>
+            <div class="appearance-skin-group-label">配色皮肤</div>
+            <div class="appearance-skin-options" role="radiogroup" aria-label="配色皮肤">
               <label class="skin-option skin-violet"><input type="radio" name="appearanceSkin" value="violet"><span class="skin-swatch"></span><b>紫藤</b></label>
               <label class="skin-option skin-ocean"><input type="radio" name="appearanceSkin" value="ocean"><span class="skin-swatch"></span><b>海洋</b></label>
               <label class="skin-option skin-rose"><input type="radio" name="appearanceSkin" value="rose"><span class="skin-swatch"></span><b>玫瑰</b></label>
               <label class="skin-option skin-forest"><input type="radio" name="appearanceSkin" value="forest"><span class="skin-swatch"></span><b>森林</b></label>
             </div>
+            <div class="appearance-skin-group-label">模型皮肤</div>
+            <!-- 18 个模型皮肤卡片由 09-settings.js 依 MODEL_SKINS 现建（清单不进 HTML，
+                 避免两处各写一份漂移）。 -->
+            <div class="appearance-model-skin-grid" id="appearanceModelSkinGrid" role="radiogroup" aria-label="模型皮肤"></div>
             <div class="form-actions"><button class="control-button" id="resetAppearance" type="button">恢复默认</button><button class="primary-button" id="saveAppearance" type="button">保存外观</button></div>
             <p class="hint" id="appearanceStatus" role="status"></p>
           </div>

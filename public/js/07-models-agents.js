@@ -2,7 +2,7 @@
 // 07-models-agents.js —— 拆分自 public/app.js 第 1966-2329 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, api, state, toast } from "./01-core.js";
+import { $, api, applyModelSkinFor, state, toast } from "./01-core.js";
 import { renderSidebar } from "./08-conversations.js";
 import { renderSkills } from "./09-settings.js";
 import { appendPresetSkillsToComposer } from "./13-skill-refs.js";
@@ -886,6 +886,10 @@ export async function saveComposerModelSelection() {
   } catch (error) {
     toast(`保存模型失败：${error.message}`);
   }
+  // 自动换肤：只有走到这里才是「用户主动换了具体模型」——初始化、目录刷新、
+  // 会话恢复都在别处（renderComposerModels / applyConversationModel）赋值，
+  // 不经过本函数，因此不会误触发。识别不出家族时内部直接返回，皮肤保持不动。
+  await applyModelSkinFor(composerModelChoice());
 }
 
 // ---- 输入区模型「可搜索下拉」 -------------------------------------------------

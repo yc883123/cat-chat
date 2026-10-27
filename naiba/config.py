@@ -25,7 +25,39 @@ logger = logging.getLogger("naiba.config")
 # values in one place lets both config migration and runtime updates apply the
 # same validation rules.
 APPEARANCE_THEMES = frozenset({"system", "light", "dark"})
-APPEARANCE_SKINS = frozenset({"violet", "ocean", "rose", "forest"})
+# 皮肤分两类，共用同一个 appearance.skin 字段：
+# - 配色皮肤（violet / ocean / rose / forest）：只换 CSS 色相，无图片资源。
+# - 模型皮肤（01_deepseek … 18_qwen_flash）：整张角色插画，一张图对应一个模型家族的一个档位。
+# 键名一律小写（normalize_appearance 会把入参转小写）；对应图片文件名见
+# APPEARANCE_MODEL_SKIN_FILES，前端据同一份映射拼 /skins/<文件名>.webp。
+APPEARANCE_COLOR_SKINS = ("violet", "ocean", "rose", "forest")
+APPEARANCE_MODEL_SKIN_FILES = {
+    "01_deepseek": "01_DeepSeek",
+    "02_deepseek_mini": "02_DeepSeek_Mini",
+    "03_gemini_pro": "03_Gemini_Pro",
+    "04_gemini_flash": "04_Gemini_Flash",
+    "05_claude_opus_fable_mythos": "05_Claude_Opus_Fable_Mythos",
+    "06_claude_haiku_sonnet": "06_Claude_Haiku_Sonnet",
+    "07_gpt_sol_astra": "07_GPT_Sol_Astra",
+    "08_gpt_luna_terra": "08_GPT_Luna_Terra",
+    "09_grok_heavy": "09_Grok_Heavy",
+    "10_grok_mini_fast": "10_Grok_Mini_Fast",
+    "11_glm": "11_GLM",
+    "12_glm_flash": "12_GLM_Flash",
+    "13_kimi_pro": "13_Kimi_Pro",
+    "14_kimi": "14_Kimi",
+    "15_minimax_m": "15_Minimax_M",
+    "16_minimax_m_flash": "16_Minimax_M_Flash",
+    "17_qwen": "17_Qwen",
+    "18_qwen_flash": "18_Qwen_Flash",
+}
+APPEARANCE_SKINS = frozenset(
+    (*APPEARANCE_COLOR_SKINS, *APPEARANCE_MODEL_SKIN_FILES)
+)
+# 皮肤跟随模型的模式。auto = 用户主动选具体模型时按模型家族/档位换肤；
+# manual = 模型变化不影响皮肤，用户自己在皮肤选择器里挑。
+APPEARANCE_SKIN_MODES = frozenset({"auto", "manual"})
+APPEARANCE_SKIN_MODE_DEFAULT = "auto"
 # 会话区（消息气泡/正文）字体：字号是像素整数，字体族只存枚举键，
 # 具体的 font-family 栈由前端常量映射（后端不碰 CSS，避免两端各写一份真相）。
 # 结构三档：跟随界面 / 衬线 / 圆润。
@@ -273,12 +305,15 @@ def normalize_appearance(appearance: Any) -> dict[str, Any]:
     merged = dict(appearance) if isinstance(appearance, dict) else {}
     theme = str(merged.get("theme") or "").strip().lower()
     skin = str(merged.get("skin") or "").strip().lower()
+    skin_mode = str(merged.get("skin_mode") or "").strip().lower()
     family = str(merged.get("chat_font_family") or "").strip().lower()
     done_sound = merged.get("done_sound")
     tray_done_toast = merged.get("tray_done_toast")
     return {
         "theme": theme if theme in APPEARANCE_THEMES else "system",
         "skin": skin if skin in APPEARANCE_SKINS else "violet",
+        # 跟随模式：非法/缺失一律回默认（auto），与皮肤回落口径一致。
+        "skin_mode": skin_mode if skin_mode in APPEARANCE_SKIN_MODES else APPEARANCE_SKIN_MODE_DEFAULT,
         "chat_font_size": clamp_chat_font_size(merged.get("chat_font_size", CHAT_FONT_SIZE_DEFAULT)),
         "chat_font_family": family if family in APPEARANCE_CHAT_FONT_FAMILIES else "system",
         # 切换回非 custom 时保留用户输入过的串，避免"改一下又切回来"要重打一遍。
@@ -2586,6 +2621,7 @@ class ConfigStore:
                             "theme", "skin",
                             "chat_font_size", "chat_font_family", "chat_font_family_custom",
                             "done_sound", "done_sound_volume", "tray_done_toast",
+                            "skin_mode",
                         }
                         if unknown:
                             names = ", ".join(sorted(map(str, unknown)))
@@ -2599,8 +2635,18 @@ class ConfigStore:
                         if "skin" in incoming:
                             skin = str(incoming["skin"] or "").strip().lower()
                             if skin not in APPEARANCE_SKINS:
-                                raise ValueError("皮肤必须是 violet、ocean、rose 或 forest")
+                                # 文案从集合动态生成：加一款皮肤不必再改一遍文案
+                                # （写死清单每加一个键都要同步多处，必漏一处）。
+                                raise ValueError(
+                                    "皮肤必须是以下之一："
+                                    + "、".join(sorted(APPEARANCE_SKINS))
+                                )
                             merged["skin"] = skin
+                        if "skin_mode" in incoming:
+                            skin_mode = str(incoming["skin_mode"] or "").strip().lower()
+                            if skin_mode not in APPEARANCE_SKIN_MODES:
+                                raise ValueError("皮肤跟随模式必须是 auto 或 manual")
+                            merged["skin_mode"] = skin_mode
                         if "chat_font_size" in incoming:
                             merged["chat_font_size"] = self._validated_chat_font_size(
                                 incoming["chat_font_size"]

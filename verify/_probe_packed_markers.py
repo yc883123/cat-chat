@@ -168,8 +168,9 @@ FINGERPRINTS = {
         "studio-skin-layer",
         "appearanceSkinMode",
         "appearanceModelSkinGrid",
-        # 3.9.1：背景让位的说明文案。
+        # 3.9.1：背景让位的说明文案 + 工作台聊天背景层。
         "chatBackgroundSkinHint",
+        "studio-bg-layer",
         # 2.9.7：清理按钮拆成两个，tooltip 也按目录各写一句（旧的「合并一句」已不存在）。
         "聊天背景图与历史消息里仍在使用的文件会自动保留",
         "历史消息与运行记录里仍在使用的文件会自动保留",
@@ -211,6 +212,8 @@ FINGERPRINTS = {
                    ".model-skin-layer", ".studio-skin-layer", "appearance-model-skin-grid", "isolation: isolate",
                    # 3.9.1：模型皮肤与聊天背景互斥（皮肤生效时盖住旧背景层）。
                    "html[data-model-skin=\"on\"] .chat-backdrop .chat-bg-surface",
+                   # 3.9.1：工作台也铺聊天背景（同变量、同层级口径）。
+                   ".studio-bg-layer", 'html[data-chat-bg="on"] .studio-view', 
                    # 2.9.9：分析视图全套样式（KPI 网格 / 工具行 chip / tooltip / 弹窗 dvh 兜底）。
                    ".usage-kpis", ".usage-chip", ".usage-tooltip", ".usage-dialog",
                    # 2.9.11：费用单价弹层（分组卡 / 二级行 / 币种条 + 自定义币种删除叉）。
@@ -228,6 +231,8 @@ FINGERPRINTS = {
         "MODEL_SKINS", "modelSkinImageUrl", "--model-skin-image", "applyModelSkinFor", "previewModelSkinFor",
         # 3.9.1：设聊天背景时模型皮肤让位，退回最近用过的配色皮肤。
         "lastColorSkinOrDefault", "naibaChatLastColorSkin",
+        # 3.9.1：工作台也铺聊天背景（背景图存在标记）。
+        "dataset.chatBg",
     ],
     # 2.9.8：bootstrap 时同步服务端 settings.sidebar 三项偏好。
     "js/05-bootstrap.js": ["syncSidebarPrefsFromBootstrap"],

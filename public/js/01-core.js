@@ -881,6 +881,9 @@ export function applyChatBackground(background = {}) {
   state.chatBackground = next;
   const root = document.documentElement;
   root.style.setProperty('--chat-bg-opacity', String(next.opacity));
+  // 有没有背景图是「另一层背景要不要显示」的总开关：工作台也铺聊天背景，
+  // 容器底色需要据此让位（见 styles.css 的 data-chat-bg 规则）。
+  root.dataset.chatBg = next.image ? 'on' : 'off';
   const fit = next.image ? chatBackgroundFit(chatBackgroundCrop(next)) : null;
   // 取景块形状 ≠ 对话区形状时铺不满，留白交给同图的模糊底（"完整显示"等状态本来就这样）。
   root.dataset.chatBgCover = !next.image || !fit || fit.covered ? '1' : '0';

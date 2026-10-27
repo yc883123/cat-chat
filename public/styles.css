@@ -3530,6 +3530,26 @@ html[data-theme="dark"] .studio-view .studio-skin-layer::after {
    顶栏与各分页容器，统一处理即可；分页容器内部的层级不受影响。 */
 .studio-view > .studio-topbar,
 .studio-view > .studio-page-view { position: relative; z-index: 1; }
+
+/* ── 工作台的聊天背景层 ──
+   与对话区共用 --chat-bg-* 变量（applyChatBackground 是唯一写入点），所以同一张图、
+   同一取景、同一强度在两处同时生效，设置里改一次不必再改第二处。
+   内部复用 .chat-bg-surface / .chat-bg-blur，取景与模糊补边的规则也只有一份。
+   层级口径与模型皮肤一致：绝对铺满 + z-index 0 + 不接收鼠标事件，内容永远盖在上面。 */
+.studio-view .studio-bg-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: none;
+  overflow: hidden;
+  pointer-events: none;
+}
+html[data-chat-bg="on"] .studio-view .studio-bg-layer { display: block; }
+/* 模型皮肤优先：皮肤生效时不显示聊天背景（与对话区同一套优先级，不叠两层）。 */
+html[data-model-skin="on"] .studio-view .studio-bg-layer { display: none; }
+.studio-view .studio-bg-fill { position: absolute; inset: 0; }
+/* 有背景图时容器底色让位，否则不透明的 var(--bg) 会把背景层整个盖住。 */
+html[data-chat-bg="on"] .studio-view { background: transparent; }
 /* 模块级顶栏：模块名 + 分页导航 + 本模块工具。后续工作台分页都加在这里。 */
 .studio-topbar {
   display: flex; align-items: center; gap: var(--s-3);

@@ -231,6 +231,13 @@
            模块级顶栏 = 模块名 + 分页导航（当前「模块库」，后续新功能各起一页）+ 本模块工具。
            左边侧栏管历史产出；当前分页内再分三栏：模块库（纵向分类 + 列表）/ 详情与参数 / 结果。 -->
       <section class="studio-view" id="studioView" hidden aria-label="工作台">
+        <!-- 工作台的聊天背景层：与对话区共用 --chat-bg-* 变量（同一张图、同一取景），
+             所以设置里改一次两处同步。模型皮肤优先：皮肤生效时本层不显示。
+             与 .studio-skin-layer 同样固定在 z-index 0，内容层在其上，不会挡控件。 -->
+        <div class="studio-bg-layer" aria-hidden="true">
+          <span class="chat-bg-blur"></span>
+          <span class="chat-bg-surface studio-bg-fill"></span>
+        </div>
         <!-- 工作台模型皮肤层：与对话区共用 html 上的 --model-skin-image，
              绝对铺满本容器的最底层（z-index 0），真实内容整体抬到 z-index 1，
              所以皮肤不会挡住任何控件。配色皮肤下这一层不显示。 -->
@@ -1548,7 +1555,7 @@
             </div>
           </div>
           <div class="settings-card appearance-card">
-            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="8" height="8" rx="2.2"></rect><rect x="12.5" y="3.5" width="8" height="8" rx="2.2"></rect><rect x="3.5" y="12.5" width="8" height="8" rx="2.2"></rect><rect x="12.5" y="12.5" width="8" height="8" rx="2.2"></rect></svg></span><div><h4>界面皮肤</h4><p>配色皮肤只换强调色；模型皮肤是整张角色插画，只铺在对话区。</p></div></div>
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="8" height="8" rx="2.2"></rect><rect x="12.5" y="3.5" width="8" height="8" rx="2.2"></rect><rect x="3.5" y="12.5" width="8" height="8" rx="2.2"></rect><rect x="12.5" y="12.5" width="8" height="8" rx="2.2"></rect></svg></span><div><h4>界面皮肤</h4><p>配色皮肤只换强调色；模型皮肤是整张角色插画，对话区和工作台都会铺满。</p></div></div>
             <div class="appearance-skin-mode" role="radiogroup" aria-label="皮肤跟随方式">
               <label class="appearance-option"><input type="radio" name="appearanceSkinMode" value="auto"><span><b>跟随模型</b><small>换模型时自动换皮肤</small></span></label>
               <label class="appearance-option"><input type="radio" name="appearanceSkinMode" value="manual"><span><b>手动选择</b><small>换模型不改皮肤</small></span></label>
@@ -1596,7 +1603,7 @@
             <p class="hint" id="chatFontStatus" role="status"></p>
           </div>
           <div class="settings-card appearance-card" id="chatBackgroundCard">
-            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"></rect><circle cx="9" cy="10" r="1.6"></circle><path d="M4 17.5 8.5 13l4.5 4.5 3-3 4 4"></path></svg></span><div><h4>聊天背景</h4><p>只铺在对话区，顶栏与输入区保持原样；消息气泡、AI 回复与卡片都是实底，不会被背景图透上来。支持 PNG / JPG / WebP / GIF / BMP / AVIF。</p></div></div>
+            <div class="settings-card-head"><span class="set-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"></rect><circle cx="9" cy="10" r="1.6"></circle><path d="M4 17.5 8.5 13l4.5 4.5 3-3 4 4"></path></svg></span><div><h4>聊天背景</h4><p>对话区和工作台都会铺上同一张背景图；对话顶栏与输入区保持原样，消息气泡、AI 回复与卡片都是实底，不会被背景图透上来。支持 PNG / JPG / WebP / GIF / BMP / AVIF。</p></div></div>
             <div class="chat-background-actions">
               <div class="chat-background-preview" id="chatBackgroundPreview" role="button" tabindex="0" title="点击调整取景" hidden>
                 <span class="chat-bg-blur" aria-hidden="true"></span>

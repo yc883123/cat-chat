@@ -561,8 +561,13 @@ html[data-model-skin="on"] .chat-backdrop .chat-bg-blur {
 /* 每根线一个**固定尺寸的透明块**：块本身就是判定区（鼠标落在块内任意位置都命中），
    悬停/高亮只改内层线的尺寸 → 块大小恒定，所有条的位置不随悬停抖动。 */
 .turn-tick { pointer-events: auto; width: var(--turn-rail-w, 26px); height: 9px; flex: none; padding: 0; border: 0; background: transparent; cursor: pointer; display: flex; align-items: center; justify-content: flex-end; }
-.turn-tick-line { display: block; width: 20px; height: 3px; border-radius: 2px; background: var(--line-strong); transition: width .12s ease, height .12s ease, background .12s ease; }
-.turn-tick:hover .turn-tick-line { width: 26px; height: 5px; background: var(--muted); }
+/* 条的颜色不能吃 --line-strong / --muted：那两个是为「组件自有底色」调的描边色，
+   刻度轨却是直接压在对话区背景上的——后面一旦铺了背景图或模型皮肤插画，
+   亮图配暗主题、暗图配亮主题都会撞成一片，条直接消失。
+   改用主题前景色 + 半透明（不透明度足够高），再给一圈取自页面底色的 1px 光晕：
+   底色吃掉条时由光晕勾出形，底色被条压住时条本身就够亮，两种撞色都能看见。 */
+.turn-tick-line { display: block; width: 20px; height: 3px; border-radius: 2px; background: color-mix(in srgb, var(--text) 62%, transparent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--bg) 45%, transparent); transition: width .12s ease, height .12s ease, background .12s ease; }
+.turn-tick:hover .turn-tick-line { width: 26px; height: 5px; background: color-mix(in srgb, var(--text) 85%, transparent); }
 .turn-tick.active .turn-tick-line { width: 26px; height: 5px; background: var(--text); }
 /* 悬停概要：fixed 挂 body，定位在刻度左侧（项目惯例，见教训 §九.27）。
    不再写「用户 / AI」标签——靠字号字重区分：用户消息大而粗、AI 回复小而浅。 */

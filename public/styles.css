@@ -4823,7 +4823,9 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 }
 
 /* ---- 阶段二：要素 / 大纲生成面板 ---- */
-.novel-stage-panel { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
+/* flex: 1 0 auto —— 有空间时铺满，没空间时按内容长高、交给外层编辑区滚动。
+   只写 flex: 1 会让面板在内容超高时被压缩，子项的溢出内容压到后面的场次区上。 */
+.novel-stage-panel { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1 0 auto; }
 /* display 会覆盖浏览器默认的 [hidden] 规则。 */
 .novel-stage-panel[hidden], .novel-stage-task[hidden], .novel-stage-saved[hidden] { display: none; }
 .novel-stage-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
@@ -4849,7 +4851,7 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
   font-family: var(--font); resize: vertical;
 }
 .novel-stage-task, .novel-stage-saved {
-  display: flex; flex-direction: column; gap: 6px; min-height: 0; flex: 1;
+  display: flex; flex-direction: column; gap: 6px; min-height: 0; flex: 1 0 auto;
   padding: 8px 9px; border: 1px solid var(--line); border-radius: var(--r-md);
   background: var(--surface-2);
 }
@@ -4857,11 +4859,34 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
   display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
 }
 .novel-stage-task-head > span:first-child { font-size: 11.5px; font-weight: 600; }
+/* 标题变成可点开关后，状态文字由按钮承载，字号字重要显式补回来。 */
+.novel-stage-task-head .novel-collapse-toggle { font-size: 11.5px; font-weight: 600; }
+/* 收起后不再参与「铺满剩余高度」：否则卡片会留一大块灰色空白，
+   下方的任务历史与场次区被推到很远。展开态才继续 flex-grow。 */
+.novel-stage-task.is-collapsed, .novel-stage-saved.is-collapsed { flex: 0 0 auto; }
+/* 结果/已保存区块的标题即折叠开关：默认展开，点一次收起正文，再点展开。
+   状态以 aria-expanded 为准（轮询重画只更新内容，不改折叠态）。 */
+.novel-collapse-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 0; border: 0; background: none; color: inherit;
+  font: inherit; text-align: left; cursor: pointer;
+}
+.novel-collapse-toggle:hover { color: var(--accent); }
+.novel-collapse-toggle:focus-visible { outline: 2px solid var(--violet-line); outline-offset: 2px; border-radius: var(--r-xs); }
+.novel-collapse-caret {
+  flex: none; width: 0; height: 0;
+  border-left: 4px solid transparent; border-right: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  transition: transform .12s ease;
+}
+.novel-collapse-toggle[aria-expanded="false"] .novel-collapse-caret { transform: rotate(-90deg); }
 .novel-stage-task-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .novel-stage-task-actions .control-button[hidden] { display: none; }
-/* 结果正文：等宽、保留换行、独立滚动；不撑破面板。 */
+/* 结果正文：等宽、保留换行、独立滚动；不撑破面板。
+   上限必须写死：只靠 flex 收缩时，任务区会被压到比结果框的 min-height 还矮，
+   结果正文就溢出到下面的「最近任务 / 已保存的场次」上（实测重叠 60+px）。 */
 .novel-stage-result {
-  flex: 1; min-height: 90px; margin: 0; overflow: auto;
+  flex: 1 1 auto; min-height: 90px; max-height: 42vh; margin: 0; overflow: auto;
   padding: 8px 9px; border: 1px solid var(--line); border-radius: var(--r-sm);
   background: var(--surface); color: var(--text);
   font-family: var(--font); font-size: 12px; line-height: 1.65; white-space: pre-wrap; word-break: break-word;
@@ -4961,6 +4986,23 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .novel-manage-locked {
   font-size: 9px; font-style: normal; color: var(--danger, #c0392b);
 }
+/* 行内「查看」区：整块可点，点开在下方就地显示内容；勾选框仍单独管批量删除。 */
+.novel-manage-open {
+  flex: 1; min-width: 0; display: grid; gap: 1px;
+  padding: 0; border: 0; background: none; color: inherit;
+  font: inherit; text-align: left; cursor: pointer;
+}
+.novel-manage-open:hover strong { color: var(--accent); }
+/* 查看区容器（与行内那条结果摘要是两个东西，类名不能复用）。 */
+.novel-manage-preview-box {
+  flex: none; display: grid; gap: 6px; max-height: 32vh;
+  padding: 7px 9px; border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface);
+}
+.novel-manage-preview-box[hidden] { display: none; }
+.novel-manage-preview-box .novel-stage-result { max-height: 24vh; min-height: 0; }
+/* AI 润色的生成结果就地展示：高度收住，按钮和滑条始终可见。 */
+.novel-ai-result { flex: none; min-height: 0; max-height: 220px; }
 
 @media (max-width: 760px) {
   /* 手机：管理面板全屏，关闭后回到原阶段原位置。 */

@@ -793,10 +793,24 @@
                         <select id="novelAiModel" aria-label="AI 改编用的模型"></select>
                       </label>
                     </div>
+                    <!-- 单章 AI 润色的正文截取上限：与阶段面板里的「每章正文上限」是同一个值
+                         （状态只有 novel.bodyChars 一份），这里单独一个滑条是因为拆章阶段
+                         整个阶段面板是隐藏的，而润色恰恰发生在拆章。 -->
+                    <div class="novel-limits" id="novelAiLimits">
+                      <label class="novel-limit">
+                        <span>本次正文上限 <b id="novelAiBodyCharsValue">3000</b> 字</span>
+                        <input type="range" id="novelAiBodyChars" min="3000" max="15000" step="500" value="3000"
+                               aria-label="AI 润色的正文上限（字）">
+                      </label>
+                    </div>
+                    <!-- 生成结果就地显示：先看稿、满意再点「保存改编稿」进作品。
+                         按钮放在结果之前，结果再长也不会把「保存改编稿」挤出视野。 -->
                     <div class="novel-editor-actions">
                       <button class="control-button" id="novelAiSubmit" type="button">开始改编</button>
                       <button class="control-button tiny" id="novelAiCancel" type="button">取消</button>
                     </div>
+                    <p class="novel-note" id="novelAiNote"></p>
+                    <pre class="novel-stage-result novel-ai-result" id="novelAiResult" aria-live="polite" hidden></pre>
                     <p class="novel-note" id="novelAiWarning" role="status"></p>
                   </div>
                 </div>
@@ -840,7 +854,12 @@
                   <p class="novel-note" id="novelStageWarning" role="status"></p>
                   <div class="novel-stage-task" id="novelStageTask" hidden>
                     <div class="novel-stage-task-head">
-                      <span id="novelStageTaskState">排队中</span>
+                      <!-- 点头部收起/展开结果正文：标题本身就是开关，操作按钮在右侧不受影响。 -->
+                      <button type="button" class="novel-collapse-toggle" data-novel-collapse="task"
+                              aria-expanded="true" title="收起或展开生成结果">
+                        <span class="novel-collapse-caret" aria-hidden="true"></span>
+                        <span id="novelStageTaskState">排队中</span>
+                      </button>
                       <span class="novel-stage-task-actions">
                         <button class="control-button tiny" id="novelStageCancel" type="button" hidden>取消</button>
                         <button class="control-button tiny" id="novelStageRetry" type="button" hidden>重试</button>
@@ -853,7 +872,11 @@
                   <div class="novel-task-history" id="novelTaskHistory" aria-label="本阶段生成任务"></div>
                   <div class="novel-stage-saved" id="novelStageSaved" hidden>
                     <div class="novel-stage-head">
-                      <strong>作品已保存版本</strong>
+                      <button type="button" class="novel-collapse-toggle" data-novel-collapse="saved"
+                              aria-expanded="true" title="收起或展开已保存内容">
+                        <span class="novel-collapse-caret" aria-hidden="true"></span>
+                        <strong>作品已保存版本</strong>
+                      </button>
                       <span class="novel-version-tools"><select id="novelStageVersion" aria-label="选择已保存版本"></select><small id="novelStageSavedAt"></small></span>
                     </div>
                     <pre class="novel-stage-result" id="novelStageSavedBody"></pre>
@@ -956,6 +979,14 @@
               </div>
               <p class="novel-note" id="novelManageSelection" role="status"></p>
               <div class="novel-manage-list" id="novelManageList" aria-label="记录列表"></div>
+              <!-- 点一行就地看内容：稿件读正文，要素/大纲/剧本读对应版本，生成记录读任务结果。 -->
+              <div class="novel-manage-preview-box" id="novelManagePreview" hidden>
+                <div class="novel-stage-head">
+                  <strong id="novelManagePreviewHead">记录内容</strong>
+                  <small id="novelManagePreviewMeta"></small>
+                </div>
+                <pre class="novel-stage-result" id="novelManagePreviewBody" aria-live="polite"></pre>
+              </div>
               <p class="novel-dialog-error" id="novelManageError" role="alert"></p>
             </div>
           </dialog>

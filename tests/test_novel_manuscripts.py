@@ -471,5 +471,122 @@ class BudgetTests(unittest.TestCase):
         self.assertIn("第 7 章", built["content"])
 
 
+class SplitStageBodyLimitUITests(unittest.TestCase):
+    """拆章阶段的 AI 润色也要能调「正文上限」（body_chars 就是它的截取上限）。
+
+    契约：润色面板里有一份同状态的滑条；阶段面板里的那份在拆章是整块隐藏的。
+    实现上**不能**把阶段面板的滑条节点搬进润色面板——阶段面板是按阶段克隆的
+    （`activateStagePanel` 每轮重挂 id），搬节点会让两个面板各留一份、把剧本场次区
+    挤成 0 高（实测点不到场次）。
+    """
+
+    def _read(self, rel: str) -> str:
+        return (ROOT / rel).read_text(encoding="utf-8")
+
+    def test_ai_polish_panel_carries_its_own_body_limit_slider(self):
+        index = self._read("public/index.html")
+        ai_block = index[index.index('id="novelAiEdit"'):]
+        ai_block = ai_block[: ai_block.index('id="novelStagePanel"')]
+        self.assertIn('id="novelAiLimits"', ai_block, "润色面板要有自己的正文上限滑条")
+        self.assertIn('id="novelAiBodyChars"', ai_block)
+        self.assertIn("本次正文上限", ai_block, "文案要说清这是这一次润色的上限")
+
+    def test_both_sliders_share_one_state_and_handler(self):
+        js = self._read("public/js/25-novel.js")
+        self.assertIn('event?.target?.id === "novelAiBodyChars"', js, "两份滑条要写同一份 novel.bodyChars")
+        self.assertIn('$("#novelAiBodyChars")?.addEventListener("input", onLimits)', js)
+        self.assertIn('const aiBody = $("#novelAiBodyChars")', js, "renderLimits 要同步润色滑条的取值")
+        self.assertNotIn("function placeLimits()", js, "不要再搬移阶段面板的滑条节点（面板是克隆的）")
+        self.assertIn("renderLimits();", js.split("function renderEditor(")[1].split("if (stageMode)")[0],
+                      "拆章分支也要同步滑条")
+
+    def test_ai_polish_request_carries_body_limit(self):
+        js = self._read("public/js/25-novel.js")
+        submit = js[js.index("async function submitAiAdapt("):]
+        submit = submit[: submit.index("\n}")] if "\n}" in submit else submit
+        self.assertIn("body_chars: novel.bodyChars", submit, "润色请求必须带上滑条值")
+
+
+class ResultVisibilityUITests(unittest.TestCase):
+    """「生成结果在哪看」：AI 润色结果就地显示；管理记录点一行就地看内容。
+
+    两处都是「内容其实已经在内存/接口里，但界面上没有出口」的缺口：
+    - 润色结果此前只能先保存成改编稿、再点「编辑」才看得到；
+    - 管理记录的行只能勾选删除，看不到稿件正文/版本内容/任务结果。
+    """
+
+    def _read(self, rel: str) -> str:
+        return (ROOT / rel).read_text(encoding="utf-8")
+
+    def test_ai_polish_result_is_rendered_in_the_panel(self):
+        index = self._read("public/index.html")
+        ai_block = index[index.index('id="novelAiEdit"'):]
+        ai_block = ai_block[: ai_block.index('id="novelStagePanel"')]
+        self.assertIn('id="novelAiResult"', ai_block, "润色面板要有结果区")
+        self.assertIn('id="novelAiNote"', ai_block)
+        js = self._read("public/js/25-novel.js")
+        editor = js[js.index("function renderAiEditor("):]
+        editor = editor[: editor.index("\nfunction renderEditor(")]
+        self.assertIn('const draft = String(slot.streamText || task?.result || "")', editor)
+        self.assertIn('result.textContent = draft', editor, "结果要写进面板里的结果区")
+        self.assertIn('result.hidden = !draft.trim()', editor)
+        # 以前把说明写进「手动编辑」面板的 note 里，润色面板自己什么都没有。
+        self.assertNotIn("novelManuscriptEditNoteBody", editor)
+
+    def test_manage_records_open_content_in_place(self):
+        index = self._read("public/index.html")
+        dialog = index[index.index('id="novelManageDialog"'):]
+        self.assertIn('id="novelManagePreview"', dialog, "管理记录要有查看区")
+        self.assertIn('id="novelManagePreviewBody"', dialog)
+        js = self._read("public/js/25-novel.js")
+        self.assertIn('copy.dataset.novelManageOpen = key', js, "整行要可点开查看")
+        self.assertIn('$("#novelManageList")?.addEventListener("click"', js)
+        self.assertIn("async function openManageRecord(row)", js)
+        # 三类记录各走各的读法：稿件读正文、版本读作品里的对应版本、任务读结果。
+        self.assertIn("await ensureManuscriptBody(row)", js)
+        self.assertIn("function manageVersionText(row)", js)
+        self.assertIn('row.result || row.result_partial', js)
+
+    def test_result_and_saved_blocks_collapse_repeatably(self):
+        """生成结果与「已保存版本」要能反复收起/展开，且不能被轮询重新撑开。
+
+        坑：这三块共用按阶段克隆的面板，折叠开关不能绑单个面板节点（切阶段后 id 会搬家），
+        所以用 class + 事件委托，状态存在 novel.collapsed 里。
+        """
+        index = self._read("public/index.html")
+        block = index[index.index('id="novelStageTask"'):]
+        block = block[: block.index('id="novelSceneBlock"')]
+        self.assertIn('data-novel-collapse="task"', block, "生成结果标题要是折叠开关")
+        self.assertIn('data-novel-collapse="saved"', block, "已保存版本标题要是折叠开关")
+        js = self._read("public/js/25-novel.js")
+        self.assertIn("function applyStageCollapse()", js)
+        self.assertIn("novel.collapsed", js)
+        self.assertIn('$("#novelEditorBody")?.addEventListener("click"', js, "折叠开关要委托在稳定的编辑区容器上")
+        self.assertIn('collapsed: new Set()', js)
+        # 只有「提交新任务 / 刚保存新版本」才自动展开，轮询重画不动折叠态。
+        self.assertIn('novel.collapsed.delete(`${stage}:task`)', js)
+        self.assertIn('novel.collapsed.delete(`${stage}:saved`)', js)
+        # 收起态必须退出「铺满剩余高度」，否则卡片里留一大块灰底空白。
+        css = self._read("public/styles.css")
+        self.assertIn(".novel-stage-task.is-collapsed, .novel-stage-saved.is-collapsed { flex: 0 0 auto; }", css)
+
+    def test_long_result_scrolls_instead_of_overlapping_scene_block(self):
+        """结果正文被压到比 min-height 还矮时会溢出任务区、压在场次区上（实测 60+px）。
+
+        三处必须一起成立：阶段面板与任务区都不许被压缩到内容以下（flex-shrink: 0），
+        结果区自己收住高度并内部滚动；超出部分交给外层编辑区滚动。
+        """
+        css = self._read("public/styles.css")
+        panel = css[css.index(".novel-stage-panel {"):]
+        panel = panel[: panel.index("}")]
+        self.assertIn("flex: 1 0 auto", panel, "阶段面板不能被压缩到内容以下")
+        task = css[css.index(".novel-stage-task, .novel-stage-saved {"):]
+        task = task[: task.index("}")]
+        self.assertIn("flex: 1 0 auto", task, "任务区不能被压缩到比结果框还矮")
+        result = css[css.index(".novel-stage-result {"):]
+        result = result[: result.index("}")]
+        self.assertIn("max-height: 42vh", result, "结果区要自己收高度并在内部滚动")
+
+
 if __name__ == "__main__":
     unittest.main()

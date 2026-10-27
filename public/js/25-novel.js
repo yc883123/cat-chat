@@ -69,6 +69,8 @@ const novel = {
   busy: false,
   // 阶段（拆章 / 要素 / 大纲 / 剧本）。
   stage: "split",
+  // 结果区折叠态：键是 `<阶段>:task|saved`。轮询只重画内容，不能把收起的区块撑开。
+  collapsed: new Set(),
   // 生成态：任务只取创作场分区（module=novel），与模块库互不串台。
   tasks: [],
   // 最近任务只显示 3 条紧凑行（提词库同口径）；完整历史在「管理记录」。
@@ -655,31 +657,39 @@ function renderAiEditor() {
   const source = manuscriptRows().find((row) => row.id === novel.aiTargetId);
   const head = $("#novelAiEditHead");
   if (head) head.textContent = source ? `AI 润色「${manuscriptLabel(source)}」` : "AI 润色 / 改编";
-  const note = $("#novelManuscriptEditNoteBody");
+  const note = $("#novelAiNote");
+  const result = $("#novelAiResult");
   const warning = $("#novelAiWarning");
   const slot = novel.adaptTask;
   const task = novel.tasks.find((row) => row.id === slot.activeTaskId);
+  const status = String(task?.status || "");
+  // 生成过程与终稿都就地显示：先看到稿子，再决定是否「保存改编稿」进作品。
+  const draft = String(slot.streamText || task?.result || "");
+  if (result) {
+    result.textContent = draft;
+    result.hidden = !draft.trim();
+  }
   const bits = [];
   if (source) bits.push("AI 会根据这份稿件和你的要求生成新稿，原文会保留。");
   if (task) {
-    const status = String(task.status || "");
     bits.push(`任务${TASK_STATUS_LABELS[status] || "状态未知"}。`);
-    if (status === "done" && String(slot.streamText || task.result || "").trim()) {
-      bits.push("结果还没保存；保存后才会新增稿件卡片。");
-    }
+    if (status === "done" && draft.trim()) bits.push("结果还没保存；保存后才会新增稿件卡片。");
   }
   if (warning) {
     const lines = [...bits];
-    for (const note of slot.warnings || []) lines.push(note);
+    for (const noteRow of slot.warnings || []) lines.push(noteRow);
     warning.textContent = lines.join(" ");
   }
   if (note) {
-    note.textContent = "生成中、失败或取消只产生任务记录；成功的稿子要点「保存改编稿」才会进作品。";
+    note.textContent = draft.trim()
+      ? "上面是生成结果，还没进作品；点「保存改编稿」才会新增一张稿件卡片。"
+      : (status === "queued" || status === "running"
+        ? "正在生成，结果会实时显示在这里。"
+        : "生成中、失败或取消只产生任务记录；成功的结果会先显示在这里，点「保存改编稿」才进作品。");
   }
   const submit = $("#novelAiSubmit");
   if (submit) {
-    const status = String(task?.status || "");
-    const ready = status === "done" && String(slot.streamText || task?.result || "").trim();
+    const ready = status === "done" && draft.trim();
     submit.textContent = ready ? "保存改编稿" : "开始改编";
     submit.disabled = novel.busy || (!ready && (!novel.aiModelName || !String($("#novelAiRequest")?.value || "").trim()));
   }
@@ -697,6 +707,8 @@ function renderEditor() {
   if (stagePanel) stagePanel.hidden = !stageMode;
   if (fields) fields.hidden = stageMode || !chapter;
   if (placeholder) placeholder.hidden = stageMode || Boolean(chapter);
+  // 拆章也要同步滑条：润色面板里的那份用的是同一份状态。
+  renderLimits();
   if (stageMode) {
     activateStagePanel(novel.stage);
     const copy = STAGE_COPY[novel.stage];
@@ -875,11 +887,15 @@ async function loadChapterRoster(chapterNo) {
 }
 
 function renderLimits() {
+  const limits = novel.limits;
   const body = $("#novelBodyChars");
   const bodyValue = $("#novelBodyCharsValue");
   const maxChapters = $("#novelMaxChapters");
   const maxValue = $("#novelMaxChaptersValue");
-  const limits = novel.limits;
+  // 拆章阶段用润色面板里的那份滑条（阶段面板整块隐藏）；两份滑条共享 novel.bodyChars，
+  // 这里同时同步它们的取值与范围，避免一处改了另一处显示旧值。
+  const aiBody = $("#novelAiBodyChars");
+  const aiValue = $("#novelAiBodyCharsValue");
   if (body) {
     body.min = String(limits.min);
     body.max = String(limits.max);
@@ -893,6 +909,13 @@ function renderLimits() {
     if (document.activeElement !== maxChapters) maxChapters.value = String(novel.maxChapters);
   }
   if (maxValue) maxValue.textContent = String(novel.maxChapters);
+  if (aiBody) {
+    aiBody.min = String(limits.min);
+    aiBody.max = String(limits.max);
+    aiBody.step = String(limits.step);
+    if (document.activeElement !== aiBody) aiBody.value = String(novel.bodyChars);
+  }
+  if (aiValue) aiValue.textContent = String(novel.bodyChars);
 }
 
 function renderStagePanel() {
@@ -1026,6 +1049,29 @@ function renderStagePanel() {
     if (savedAt) savedAt.textContent = stageSavedAt(stage);
   }
   renderSceneBlock(stage === "script");
+  applyStageCollapse();
+}
+
+// 结果/已保存区块的折叠态：每个阶段各自记，键 `阶段:task|saved`。
+// 只隐藏正文（结果 pre / 说明 / 已保存正文），标题与操作按钮始终在。
+function applyStageCollapse() {
+  const kinds = { task: "#novelStageTask", saved: "#novelStageSaved" };
+  for (const [kind, panelSelector] of Object.entries(kinds)) {
+    const collapsed = novel.collapsed.has(`${novel.stage}:${kind}`);
+    const toggle = document.querySelector(`#novelStagePanel [data-novel-collapse="${kind}"]`);
+    if (toggle) toggle.setAttribute("aria-expanded", String(!collapsed));
+    const panel = $(panelSelector);
+    if (panel) panel.classList.toggle("is-collapsed", collapsed);
+    if (kind === "task") {
+      const body = $("#novelStageResult");
+      if (body) body.hidden = collapsed;
+      const note = $("#novelStageTaskNote");
+      if (note) note.hidden = collapsed;
+    } else {
+      const body = $("#novelStageSavedBody");
+      if (body) body.hidden = collapsed;
+    }
+  }
 }
 
 /** 最近任务：紧凑行，最多 3 条；完整历史在「管理记录」的生成记录页签。 */
@@ -1691,6 +1737,8 @@ async function generateStage({ confirmLarge = false } = {}) {
     stageData.submittedAt = Date.now();
     stageData.firstDeltaAt = 0;
     stageData.recentDeltas = [];
+    // 新任务提交后展开结果区：上一轮用户收起来过，也不该挡住这次的新结果。
+    novel.collapsed.delete(`${stage}:task`);
     novel.budget = payload.budget || novel.budget;
     if (novel.book && Number.isInteger(Number(payload.book_revision))) {
       novel.book.revision = Number(payload.book_revision);
@@ -1741,6 +1789,7 @@ async function retryStageTask() {
     slot.activeTaskId = task?.id || "";
     slot.streamText = "";
     slot.taskCursor = 0;
+    novel.collapsed.delete(`${novel.stage}:task`);
     await refreshStageTasks();
     toast("已重新排队");
   } catch (error) {
@@ -1776,6 +1825,8 @@ async function applyStageResult() {
     stageData.streamText = "";
     stageData.taskCursor = 0;
     novel.sceneEditing = 0;
+    // 刚保存的新版本要让用户看见：如果之前收起了「已保存版本」，这里重新展开。
+    novel.collapsed.delete(`${stage}:saved`);
     setSaveState("已保存", `${label}已写回作品。`);
     renderAll();
     toast(`${label}已保存到作品`);
@@ -1838,7 +1889,7 @@ async function submitAiAdapt() {
     if (payload.task) novel.tasks.unshift(payload.task);
     renderAiEditor();
     scheduleTaskPolling();
-    toast("已提交改编任务，结果会在这一点开显示");
+    toast("已提交改编任务，结果会显示在下方");
   } catch (error) {
     fail("提交改编失败", error);
   } finally {
@@ -1996,7 +2047,7 @@ function renderManage() {
   const note = $("#novelManageNote");
   if (note) {
     note.textContent = novel.bookId
-      ? "只管理当前作品。删除改编稿不会删除原文；删除生成记录不会删除已保存的内容。全选只作用于当前筛选范围。"
+      ? "只管理当前作品。点一行可以就地查看内容；勾选框用于批量删除。删除改编稿不会删除原文；删除生成记录不会删除已保存的内容。全选只作用于当前筛选范围。"
       : "还没有打开作品。先关闭这里，在左上角打开或保存一个作品。";
   }
   document.querySelectorAll("#novelManageTabs [data-novel-manage-tab]").forEach((btn) => {
@@ -2019,7 +2070,7 @@ function renderManage() {
     }));
   } else {
     list.replaceChildren(...rows.map((row) => {
-      const wrap = document.createElement("label");
+      const wrap = document.createElement("div");
       wrap.className = "novel-manage-row";
       const key = manageRowKey(row);
       const selectable = manageRowSelectable(row);
@@ -2029,7 +2080,12 @@ function renderManage() {
       box.checked = selectable && novel.manage.selected.has(key);
       box.disabled = !selectable;
       box.setAttribute("aria-label", `选择 ${manageRowLabel(row)}`);
-      const copy = document.createElement("span");
+      // 勾选框只管批量删除；点这一行本身就地查看内容。
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "novel-manage-open";
+      copy.dataset.novelManageOpen = key;
+      copy.title = "查看这条记录的内容";
       const strong = document.createElement("strong");
       strong.textContent = manageRowLabel(row);
       const small = document.createElement("small");
@@ -2067,8 +2123,54 @@ function renderManage() {
   if (del) del.disabled = count === 0 || !novel.bookId;
 }
 
-async function loadManageRecords() {
-  if (!novel.bookId) {
+// ---- 管理记录：点一行就地看内容 ----
+// 记录清单按设计不带正文（`list_records` 只给索引），所以按类型各走各的读法：
+// 稿件读单稿正文、要素/大纲/剧本读作品里对应版本、生成记录读任务结果。
+function manageVersionText(row) {
+  const versions = row.kind === "elements" ? novel.book?.elements_versions
+    : row.kind === "outline" ? novel.book?.outline_versions
+      : row.kind === "script" ? novel.book?.script_versions
+        : null;
+  const rows = Array.isArray(versions) ? versions : [];
+  const hit = rows.find((item) => String(item.id || "") === String(row.id || ""))
+    || rows.find((item) => Number(item.version) === Number(row.version));
+  if (!hit) return "";
+  if (row.kind === "elements") return String(hit.raw || "");
+  if (row.kind === "outline") return String(hit.text || "");
+  const scenes = Array.isArray(hit.script) ? hit.script : [];
+  return scenes
+    .map((scene, index) => `${index + 1}. ${String(scene.scene || "（没有场景行）")}\n${String(scene.content || "")}`)
+    .join("\n\n");
+}
+
+async function openManageRecord(row) {
+  const box = $("#novelManagePreview");
+  const body = $("#novelManagePreviewBody");
+  if (!box || !body || !row) return;
+  const head = $("#novelManagePreviewHead");
+  const meta = $("#novelManagePreviewMeta");
+  if (head) head.textContent = manageRowLabel(row);
+  if (meta) meta.textContent = manageRowMeta(row);
+  box.hidden = false;
+  body.textContent = "正在读取…";
+  let text = "";
+  if (row.type === "task") {
+    text = String(row.result || row.result_partial || "").trim();
+    if (!text) {
+      const status = String(row.status || "");
+      text = status === "queued" || status === "running"
+        ? "任务还在执行，完成后这里会显示结果。"
+        : "这条任务没有留下结果正文。";
+    }
+  } else if (row.chapter_no) {
+    text = await ensureManuscriptBody(row);
+  } else {
+    text = manageVersionText(row);
+  }
+  body.textContent = String(text || "").trim() || "这条记录没有可显示的内容。";
+}
+
+async function loadManageRecords() {  if (!novel.bookId) {
     novel.manage.records = null;
     renderManage();
     return;
@@ -2101,6 +2203,8 @@ function openManage(tab = "") {
   novel.manage.open = true;
   const errorEl = $("#novelManageError");
   if (errorEl) errorEl.textContent = "";
+  const preview = $("#novelManagePreview");
+  if (preview) preview.hidden = true;
   renderManage();
   // 记录清单与任务列表各拉各的：任一方失败都不该把另一方拖成空面板。
   void loadManageRecords();
@@ -2937,15 +3041,19 @@ export function bindNovelEvents() {
   });
 
   // ---- 双滑条：值变化立即反馈，并保存为后续默认值 ----
-  const onLimits = () => {
-    novel.bodyChars = Number($("#novelBodyChars")?.value || novel.bodyChars);
+  const onLimits = (event) => {
+    // 拆章阶段的润色面板和阶段面板各有一份「正文上限」滑条，两份都写同一个状态。
+    const source = event?.target?.id === "novelAiBodyChars" ? $("#novelAiBodyChars") : $("#novelBodyChars");
+    novel.bodyChars = Number(source?.value || novel.bodyChars);
     novel.maxChapters = Number($("#novelMaxChapters")?.value || novel.maxChapters);
     saveLimits();
     renderLimits();
-    renderStagePanel();
+    // 拆章阶段滑条挂在 AI 润色面板上，阶段面板是隐藏的，不必（也不该）重画它。
+    if (novel.stage !== "split") renderStagePanel();
     void refreshPreviewBudget();
   };
   $("#novelBodyChars")?.addEventListener("input", onLimits);
+  $("#novelAiBodyChars")?.addEventListener("input", onLimits);
   $("#novelMaxChapters")?.addEventListener("input", onLimits);
 
   // ---- 阶段切换与生成 ----
@@ -2962,11 +3070,20 @@ export function bindNovelEvents() {
     if (!btn) return;
     novel.manage.tab = btn.dataset.novelManageTab;
     novel.manage.selected.clear();
+    const preview = $("#novelManagePreview");
+    if (preview) preview.hidden = true;
     renderManage();
   });
   $("#novelManageFilter")?.addEventListener("input", (event) => {
     novel.manage.filter = String(event.target.value || "");
     renderManage();
+  });
+  $("#novelManageList")?.addEventListener("click", (event) => {
+    const open = event.target.closest("[data-novel-manage-open]");
+    if (!open) return;
+    const key = open.dataset.novelManageOpen || "";
+    const row = filteredManageRows().find((item) => manageRowKey(item) === key);
+    if (row) void openManageRecord(row);
   });
   $("#novelManageList")?.addEventListener("change", (event) => {
     const box = event.target.closest("[data-novel-manage-row]");
@@ -2992,6 +3109,17 @@ export function bindNovelEvents() {
       openManage(all.dataset.novelManageTab || "task");
       return;
     }
+  });
+
+  // 结果/已保存区块的折叠开关。面板是按阶段克隆的，所以委托在稳定的编辑区容器上，
+  // 而不是绑某个阶段的 DOM 节点。
+  $("#novelEditorBody")?.addEventListener("click", (event) => {
+    const btn = event.target.closest("[data-novel-collapse]");
+    if (!btn || novel.stage === "split") return;
+    const key = `${novel.stage}:${btn.dataset.novelCollapse}`;
+    if (novel.collapsed.has(key)) novel.collapsed.delete(key);
+    else novel.collapsed.add(key);
+    renderStagePanel();
   });
 
   document.querySelectorAll("#novelEditorBody [data-stage-panel]").forEach((panel) => {

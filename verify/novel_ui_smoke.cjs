@@ -98,6 +98,14 @@ const STAGE_TASK = {
     novel: { book_id: BOOK_ID, stage: 'elements', chapter_ids: [1, 2] },
   },
 };
+// 单章 AI 润色的任务：结果直接是终态，用来验证「结果就地显示、按钮变保存改编稿」。
+const ADAPT_TASK = {
+  id: 'st-novel-adapt1', status: 'done', detail: '', error: '',
+  title: '《长夜灯》· 单章改编', module: 'novel', origin_label: '创作场',
+  result: 'AI 润色结果正文：他把伞收进门廊，雨水顺着袖口往下淌。', result_partial: '', usage: {},
+  created_at: 1750000700000, updated_at: 1750000800000,
+  novel: { book_id: BOOK_ID, stage: 'adapt', chapter_ids: [1] },
+};
 // 模块库分区的任务：创作场页绝不能看到它（分区互不串台）。
 const LIBRARY_TASK = {
   id: 'st-library-0001', status: 'done', title: '模板任务', module: 'global',
@@ -186,7 +194,7 @@ async function main() {
       if (url.searchParams.get('module') === 'novel') {
         return route.fulfill({
           status: 200, contentType: 'application/json',
-          body: JSON.stringify({ tasks: [stageTaskState] }),
+          body: JSON.stringify({ tasks: [ADAPT_TASK, stageTaskState] }),
         });
       }
       if (url.searchParams.get('exclude_module') === 'novel') {
@@ -213,6 +221,12 @@ async function main() {
         return route.fulfill({
           status: 200, contentType: 'application/json',
           body: JSON.stringify({ events: [], next: 0, terminal: stageTaskState.status === 'done' }),
+        });
+      }
+      if (url.pathname.endsWith('st-novel-adapt1')) {
+        return route.fulfill({
+          status: 200, contentType: 'application/json',
+          body: JSON.stringify({ task: ADAPT_TASK }),
         });
       }
       stageTaskPolls += 1;
@@ -358,6 +372,9 @@ async function main() {
     // 阶段二：生成提交（记录请求体，供断言任务契约字段）
     if (path === '/api/novel/stage' && method === 'POST') {
       stageSubmit = JSON.parse(request.postData() || '{}');
+      if (stageSubmit.stage === 'adapt') {
+        return json({ task: ADAPT_TASK, warnings: [], book_revision: BOOK.revision }, 201);
+      }
       return json({ task: { ...STAGE_TASK, status: 'queued', result: '', result_partial: '' }, warnings: stageWarnings, book_revision: BOOK.revision }, 201);
     }
     // 阶段二：写回（记录请求体）。要素与剧本各自返回对应结构。
@@ -616,6 +633,54 @@ async function main() {
   await page.waitForTimeout(250);
   check('取消编辑不创建记录', (await cards.count()) === 2, String(await cards.count()));
 
+  // ---- 4b. 拆章阶段的 AI 润色：正文上限滑条也在润色面板里 ----
+  // 滑条控制的是「单章改编时正文截取多少字」，拆章才是它的使用场景；阶段面板里的
+  // 那份在拆章是整块隐藏的，所以润色面板带一份同一状态的滑条。
+  await cards.first().locator('[data-novel-manuscript-action="ai"]').click();
+  await page.waitForTimeout(300);
+  check('AI 润色面板打开', await page.locator('#novelAiEdit').isVisible());
+  check('拆章阶段也能看到正文上限滑条', await page.locator('#novelAiLimits').isVisible());
+  const limitsHost = await page.evaluate(() => document.querySelector('#novelAiLimits')?.parentElement?.id || '');
+  check('润色滑条在 AI 润色面板里', limitsHost === 'novelAiEdit', limitsHost);
+  check('润色滑条带出当前正文上限',
+    (await page.locator('#novelAiBodyCharsValue').innerText()) === '3000',
+    await page.locator('#novelAiBodyCharsValue').innerText());
+  await page.locator('#novelAiBodyChars').fill('4500');
+  await page.locator('#novelAiBodyChars').dispatchEvent('input');
+  await page.waitForTimeout(200);
+  check('拆章滑条值实时更新', (await page.locator('#novelAiBodyCharsValue').innerText()) === '4500');
+  if (SHOT_DIR) {
+    await page.screenshot({ path: `${SHOT_DIR}/novel_split_ai_limits.png`, fullPage: false });
+  }
+  check('两份滑条共享同一个值',
+    (await page.locator('#novelBodyChars').inputValue()) === '4500',
+    await page.locator('#novelBodyChars').inputValue());
+  // 还原默认值，后面的阶段断言按 3000 校验
+  await page.locator('#novelAiBodyChars').fill('3000');
+  await page.locator('#novelAiBodyChars').dispatchEvent('input');
+  await page.waitForTimeout(150);
+
+  // ---- 4c. 润色结果就地显示（不必先保存成稿件）----
+  await page.fill('#novelAiRequest', '把这段写得更紧凑');
+  await page.locator('#novelAiSubmit').click();
+  await page.waitForTimeout(900);
+  check('润色结果就地显示在面板里', await page.locator('#novelAiResult').isVisible());
+  check('结果正文来自任务结果',
+    (await page.locator('#novelAiResult').innerText()).includes('AI 润色结果正文'),
+    await page.locator('#novelAiResult').innerText());
+  check('有结果后按钮变成「保存改编稿」',
+    (await page.locator('#novelAiSubmit').innerText()) === '保存改编稿',
+    await page.locator('#novelAiSubmit').innerText());
+  check('提示写明保存后才进作品',
+    (await page.locator('#novelAiNote').innerText()).includes('保存改编稿'),
+    await page.locator('#novelAiNote').innerText());
+  if (SHOT_DIR) {
+    await page.screenshot({ path: `${SHOT_DIR}/novel_ai_result.png`, fullPage: false });
+  }
+  await page.locator('#novelAiCancel').click();
+  await page.waitForTimeout(250);
+  check('关闭润色面板后滑条随之隐藏', await page.locator('#novelAiLimits').isHidden());
+
   // ---- 5. 章节筛选 ----
   await page.locator('#novelChapterFilter').fill('不归');
   await page.waitForTimeout(200);
@@ -743,6 +808,16 @@ async function main() {
     await page.locator('#novelStageSavedBody').innerText());
   check('保存后无活动任务时任务历史仍显示', await page.locator('#novelTaskHistory').isVisible());
 
+  // 已保存版本可反复折叠：标题即开关，收起后正文不占高度，再点回来。
+  await page.locator('#novelStagePanel [data-novel-collapse="saved"]').click();
+  await page.waitForTimeout(200);
+  check('已保存版本可收起',
+    await page.locator('#novelStageSavedBody').isHidden()
+    && (await page.locator('#novelStagePanel [data-novel-collapse="saved"]').getAttribute('aria-expanded')) === 'false');
+  await page.locator('#novelStagePanel [data-novel-collapse="saved"]').click();
+  await page.waitForTimeout(200);
+  check('已保存版本可再展开', await page.locator('#novelStageSavedBody').isVisible());
+
   // 分区：创作场只请求 module=novel
   check('创作场任务请求带 module=novel',
     studioTaskQueries.some((q) => q.includes('module=novel')), JSON.stringify(studioTaskQueries));
@@ -802,6 +877,44 @@ async function main() {
   check('剧本提交带 stage=script', stageSubmit && stageSubmit.stage === 'script',
     JSON.stringify(stageSubmit));
   await page.waitForTimeout(4200);
+
+  // 任务结果可反复折叠：收起后正文不占高度，再点回来（轮询只更新内容，不改折叠态）。
+  await page.locator('#novelStagePanel [data-novel-collapse="task"]').click();
+  await page.waitForTimeout(200);
+  check('生成结果可收起',
+    await page.locator('#novelStageResult').isHidden()
+    && (await page.locator('#novelStagePanel [data-novel-collapse="task"]').getAttribute('aria-expanded')) === 'false');
+  // 收起后卡片要按内容收拢，不能继续撑满剩余高度（会留一大块灰色空白）。
+  const collapsedTaskH = await page.locator('#novelStageTask').evaluate((el) => Math.round(el.getBoundingClientRect().height));
+  check('收起后任务卡不留空白', collapsedTaskH < 100, String(collapsedTaskH));
+  if (SHOT_DIR) {
+    await page.screenshot({ path: `${SHOT_DIR}/novel_collapsed_result.png`, fullPage: false });
+  }
+  await page.locator('#novelStagePanel [data-novel-collapse="task"]').click();
+  await page.waitForTimeout(200);
+  check('生成结果可再展开', await page.locator('#novelStageResult').isVisible());
+  const expandedTaskH = await page.locator('#novelStageTask').evaluate((el) => Math.round(el.getBoundingClientRect().height));
+  check('展开后任务卡重新铺满', expandedTaskH > collapsedTaskH + 60,
+    `${collapsedTaskH} → ${expandedTaskH}`);
+
+  // 结果很长时必须由「编辑区整体滚动」承接，不能让结果正文溢出任务区压到场次区上。
+  const resultLayout = await page.evaluate(() => {
+    const pre = document.querySelector('#novelStageResult');
+    if (!pre) return null;
+    const keep = pre.textContent;
+    pre.textContent = ('很长的剧本文本。'.repeat(40) + String.fromCharCode(10)).repeat(30);
+    const task = document.querySelector('#novelStageTask').getBoundingClientRect();
+    const preRect = pre.getBoundingClientRect();
+    const scene = document.querySelector('#novelSceneBlock').getBoundingClientRect();
+    pre.textContent = keep;
+    return {
+      preOverTask: Math.round(preRect.bottom - task.bottom),
+      preOverScene: Math.round(preRect.bottom - scene.top),
+    };
+  });
+  check('长结果不溢出任务区、不压到场次区',
+    Boolean(resultLayout) && resultLayout.preOverTask <= 0 && resultLayout.preOverScene <= 0,
+    JSON.stringify(resultLayout));
 
   // 写回：解析成两场
   page.once('dialog', (dialog) => dialog.accept());
@@ -884,16 +997,37 @@ async function main() {
   check('章节稿件页签有记录',
     (await page.locator('#novelManageList .novel-manage-row').count()) >= 2,
     `${await page.locator('#novelManageList .novel-manage-row').count()} 行 / 错误「${await page.locator('#novelManageError').innerText()}」/ 列表「${await page.locator('#novelManageList').innerText()}」`);
+
+  // 点一行就地看内容：稿件读正文、要素读对应版本、生成记录读任务结果。
+  await page.locator('#novelManageList [data-novel-manage-open]').first().click();
+  await page.waitForTimeout(500);
+  check('点记录立即就地显示内容', await page.locator('#novelManagePreview').isVisible());
+  const previewText = await page.locator('#novelManagePreviewBody').innerText();
+  check('稿件记录读到的是正文', previewText.length > 8 && !previewText.includes('正在读取'),
+    previewText.slice(0, 60));
+  if (SHOT_DIR) {
+    await page.screenshot({ path: `${SHOT_DIR}/novel_manage_preview.png`, fullPage: false });
+  }
   await page.locator('#novelManageTabs [data-novel-manage-tab="elements"]').click();
   await page.waitForTimeout(300);
   check('要素页签显示要素版本',
     (await page.locator('#novelManageList').innerText()).includes('要素 第 1 版'),
     await page.locator('#novelManageList').innerText());
+  await page.locator('#novelManageList [data-novel-manage-open]').first().click();
+  await page.waitForTimeout(400);
+  check('要素记录读到对应版本内容',
+    (await page.locator('#novelManagePreviewBody').innerText()).includes('旧版人物'),
+    await page.locator('#novelManagePreviewBody').innerText());
   await page.locator('#novelManageTabs [data-novel-manage-tab="task"]').click();
   await page.waitForTimeout(300);
   check('生成记录页签列出任务',
     (await page.locator('#novelManageList').innerText()).includes('长夜灯'),
     await page.locator('#novelManageList').innerText());
+  await page.locator('#novelManageList [data-novel-manage-open]').first().click();
+  await page.waitForTimeout(400);
+  check('生成记录读到任务结果',
+    (await page.locator('#novelManagePreviewBody').innerText()).includes('AI 润色结果正文'),
+    await page.locator('#novelManagePreviewBody').innerText());
   await page.locator('#novelManageTabs [data-novel-manage-tab="manuscript"]').click();
   await page.waitForTimeout(300);
   // 多选 + 全选当前筛选 + 删除（确认框里写明范围）

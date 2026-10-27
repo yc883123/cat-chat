@@ -163,6 +163,9 @@ export async function closeAuxChat(id, { silent = false } = {}) {
 // ---- 打开/收起面板 -----------------------------------------------------------
 
 export function openAuxPanel() {
+  // 工作台态不开辅助面板（独立模块口径）：守卫读 body[data-studio]，
+  // 与 14-file-panel.js 的 filePanelUsable() 同一判据，不引入 22 的依赖。
+  if (document.body.dataset.studio === 'on') return false;
   setDockGroup('aux');
   const shell = $('#appShell');
   if (!shell) return;

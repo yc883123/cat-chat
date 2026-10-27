@@ -9,7 +9,7 @@
 import { $, api, copyText, localFileUrl, state, toast } from "./01-core.js";
 import { populateComposerModels } from "./07-models-agents.js";
 import { openConversation, renderSidebar } from "./08-conversations.js";
-import { closeSidebar, openSidebar, setLeftSidebarCollapsed, sidebarDesktop } from "./14-file-panel.js";
+import { applyFilePanelOpenClass, closeSidebar, filePanelState, openSidebar, setLeftSidebarCollapsed, sidebarDesktop } from "./14-file-panel.js";
 
 // ---- 模块清单（目录条目 module -> 显示名；顺序即分类顺序） ----
 const MODULE_TABS = [
@@ -346,6 +346,13 @@ function emitStudioPage(page, detail) {
 export function openStudioView() {
   if (studio.open) return;
   studio.open = true;
+  // 工作台是独立模块，不继承对话的右侧面板：开着「文件/辅助」进来会把中间栏
+  // 挤窄，而它的重开按钮又只存在于对话顶栏（工作台态隐藏）。收起时保留标签，
+  // 回到对话用顶栏按钮原样重开。
+  if (filePanelState.open) {
+    filePanelState.open = false;
+    applyFilePanelOpenClass();
+  }
   // 上次所在功能页由服务端偏好恢复（冻结版 WebView2 的 private mode 不保证 localStorage）。
   studio.page = studioPrefs().page;
   syncModeUi();

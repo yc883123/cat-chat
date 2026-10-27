@@ -26,6 +26,9 @@ export const NARROW_VIEWPORT_MAX = 760;
 // 文件面板能不能用，只看面板是否存在：手机上它是全屏抽屉形态，不再是「不可用」。
 // （此前按视口宽度大于 760 直接判死，手机端因此整体丢失「打开文件」能力。）
 export function filePanelUsable() {
+  // 工作台态（body[data-studio="on"]）整个 dock 退场：重开按钮随对话顶栏一起隐藏，
+  // 面板也不再打开（进入工作台时已统一收起，见 22-studio.js 的 openStudioView）。
+  if (document.body.dataset.studio === 'on') return false;
   return !!$('#filePanel');
 }
 

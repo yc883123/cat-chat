@@ -547,18 +547,6 @@ export async function applyModelSkinFor(modelId) {
   return { applied: true, reason: 'applied', skin };
 }
 
-// 设置面板里「切回跟随模型」用的：只按当前模型**本地应用**皮肤，不落库。
-// 为什么不落库：面板里的改动一律攒到「保存外观」一次性提交（见 previewAppearance 的
-// 说明），此刻只落皮肤会把用户还没保存的主题/字体一并写进服务端。
-export function previewModelSkinFor(modelId) {
-  const appearance = state.appearance || {};
-  if (appearance.skin_mode !== 'auto') return { applied: false, reason: 'manual' };
-  const skin = resolveModelSkin(modelId);
-  if (!skin || skin === appearance.skin) return { applied: false, reason: skin ? 'unchanged' : 'unmapped' };
-  applyAppearance({ ...appearance, skin });
-  return { applied: true, reason: 'applied', skin };
-}
-
 // 用户在皮肤选择器里主动挑皮肤 → 同步切到手动模式，避免选择结果立刻被模型规则覆盖。
 // 注意：面板内的手挑走预览 + 「保存外观」，这个函数留给面板外的直接调用（如快捷键）。
 export async function selectSkinManually(skin) {

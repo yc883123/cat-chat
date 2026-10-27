@@ -233,7 +233,7 @@ FINGERPRINTS = {
     "js/01-core.js": [
         "agentAvatarEmoji", "agentAvatarFile", "normalizeSidebarPrefs",
         # 3.9.0：模型皮肤渲染通道（变量写入 + 自动/手动两条换肤路径）。
-        "MODEL_SKINS", "modelSkinImageUrl", "--model-skin-image", "applyModelSkinFor", "previewModelSkinFor",
+        "MODEL_SKINS", "modelSkinImageUrl", "--model-skin-image", "applyModelSkinFor",
         # 3.9.1：设聊天背景时模型皮肤让位，退回最近用过的配色皮肤。
         "lastColorSkinOrDefault", "naibaChatLastColorSkin",
         # 3.9.1：工作台也铺聊天背景（背景图存在标记）。
@@ -286,7 +286,7 @@ FINGERPRINTS = {
     # 2.9.11：费用单价弹层接线（入口 / 返回 / 完成 / 事件委托 + 自定义币种删除）。
     "js/15-bind-events.js": ["settingsToolbarSub", "cleanImageCache('generated')", "openSidebarViewMenu", "toggleConversationArchive", "bindSidebarDragDrop", "window.visualViewport?.addEventListener", "usageUnbindDialogViewport", "openUsagePricingDialog", "usagePricingDialog", "data-pricing-drop-currency", "handleMcpListClick", "switchSettingsTab('mcp')", "bindLabelerEvents",
                              # 3.9.0：皮肤跟随方式的模式切换 + 模型皮肤卡片点选（顺手切手动）。
-                             "appearanceSkinMode", "appearance-model-skin-card", "previewModelSkinFor",
+                             "appearanceSkinMode", "appearance-model-skin-card",
                              # 3.9.1：设置搜索也搜设置项正文（不只搜左侧栏目名）。
                              "applySettingsSearch", "settingsPanelSearchText",
                              # 3.9.1：外观面板即时保存（去掉了「保存外观」按钮）。

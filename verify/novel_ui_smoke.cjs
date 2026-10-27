@@ -106,6 +106,15 @@ const ADAPT_TASK = {
   created_at: 1750000700000, updated_at: 1750000800000,
   novel: { book_id: BOOK_ID, stage: 'adapt', chapter_ids: [1] },
 };
+// 分镜生图（阶段四）任务：结果按「【第 N 场】」逐场一条，供逐场勾选与发送。
+const STORYBOARD_TASK = {
+  id: 'st-novel-story1', status: 'done', detail: '', error: '',
+  title: '《长夜灯》· 分镜生图', module: 'novel', origin_label: '创作场',
+  result: '【第 1 场】INT. 新场景 - 夜\n昏暗的老宅书房，油灯摇曳，一名书生俯身翻看桌上的信件，面部特写。\n\n【第 2 场】EXT. 长桥 - 黄昏\n夕阳把长桥染成金色，两名身影并肩走过桥面，远景剪影。',
+  result_partial: '', usage: {},
+  created_at: 1750000900000, updated_at: 1750001000000,
+  novel: { book_id: BOOK_ID, stage: 'storyboard', scene_ids: [1] },
+};
 // 模块库分区的任务：创作场页绝不能看到它（分区互不串台）。
 const LIBRARY_TASK = {
   id: 'st-library-0001', status: 'done', title: '模板任务', module: 'global',
@@ -229,6 +238,12 @@ async function main() {
           body: JSON.stringify({ task: ADAPT_TASK }),
         });
       }
+      if (url.pathname.endsWith('st-novel-story1')) {
+        return route.fulfill({
+          status: 200, contentType: 'application/json',
+          body: JSON.stringify({ task: STORYBOARD_TASK }),
+        });
+      }
       stageTaskPolls += 1;
       if (stageTaskPolls >= 3) {
         stageTaskState = { ...STAGE_TASK, status: 'done', result: STAGE_ELEMENTS_TEXT };
@@ -241,6 +256,42 @@ async function main() {
       });
     },
   );
+
+  // 造梦机（ComfyUI 分页）最小 mock：分镜交接要切到该页并选一个带正向提示词
+  // 的工作流。健康/任务/模型候选回空态即可，工作流回一份带正向提示词槽的假详情。
+  await page.route((url) => url.pathname.startsWith('/api/comfyui/'), (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const path = url.pathname;
+    const json = (body, status = 200) => route.fulfill({
+      status, contentType: 'application/json', body: JSON.stringify(body),
+    });
+    if (path === '/api/comfyui/health') {
+      return json({ ok: true, url: 'http://127.0.0.1:8188', version: 'smoke-0', devices: [{ name: 'cpu' }] });
+    }
+    if (path === '/api/comfyui/workflows' && request.method() === 'GET') {
+      return json({ workflows: [{ id: 'wf-smoke-1', name: '文生图-冒烟', node_count: 3, param_count: 2 }] });
+    }
+    if (path === '/api/comfyui/workflows/wf-smoke-1' && request.method() === 'GET') {
+      return json({
+        workflow: {
+          id: 'wf-smoke-1', name: '文生图-冒烟', node_count: 3,
+          param_order: [],
+          params: [
+            { node_id: '6', field_name: 'text', field_type: 'string', role: 'positive_prompt', default: '', label: '6 · text' },
+            { node_id: '3', field_name: 'seed', field_type: 'seed', default: 0, label: '3 · seed' },
+          ],
+        },
+      });
+    }
+    if (path === '/api/comfyui/tasks') {
+      return json({ tasks: [] });
+    }
+    if (path === '/api/comfyui/models') {
+      return json({ models: [], loras: [], unets: [], clips: [], vaes: [], controlnets: [] });
+    }
+    return json({ error: `未注入的造梦机接口：${request.method()} ${path}` }, 404);
+  });
 
   // 模型目录：按 model_key 回不同目录，用来验证「换供应商就换目录」。
   await page.route(
@@ -331,6 +382,7 @@ async function main() {
           available_tokens: 123904, fits: true, suggestions: [],
           body_limit: bodyChars, max_chapters: Number(previewSubmit.max_chapters || 6),
           chapter_count: (previewSubmit.chapter_ids || []).length,
+          kg_entities: 2, system_chars: 120, overhead_chars: 0,
         },
       });
     }
@@ -374,6 +426,13 @@ async function main() {
       stageSubmit = JSON.parse(request.postData() || '{}');
       if (stageSubmit.stage === 'adapt') {
         return json({ task: ADAPT_TASK, warnings: [], book_revision: BOOK.revision }, 201);
+      }
+      if (stageSubmit.stage === 'storyboard') {
+        return json({
+          task: { ...STORYBOARD_TASK, status: 'queued', result: '', result_partial: '' },
+          warnings: [], book_revision: BOOK.revision,
+          sources: { kg_entities: 2, scene_count: 1, chapters: [] },
+        }, 201);
       }
       return json({ task: { ...STAGE_TASK, status: 'queued', result: '', result_partial: '' }, warnings: stageWarnings, book_revision: BOOK.revision }, 201);
     }
@@ -531,10 +590,10 @@ async function main() {
   await page.waitForTimeout(300);
   check('创作场页面可见', await page.locator('#studioPageNovel').isVisible());
   check('其它页隐藏', !(await page.locator('#studioPageLibrary').isVisible()));
-  check('阶段导航四项', (await page.locator('#novelStages .novel-stage').count()) === 4);
-  // 阶段二接入后「要素/大纲」可用；「剧本」属阶段三，仍未接入、必须显式禁用。
-  // 阶段二、三都已接入：四个阶段全部可用，没有禁用项。
-  check('四个阶段全部可用',
+  check('阶段导航五项', (await page.locator('#novelStages .novel-stage').count()) === 5);
+  // 阶段二接入后「要素/大纲」可用；「剧本」属阶段三，「分镜」属阶段四，均已接入：
+  // 五个阶段全部可用，没有禁用项。
+  check('五个阶段全部可用',
     (await page.locator('#novelStages .novel-stage:disabled').count()) === 0);
 
   // ---- 2. 导入全链路 ----
@@ -967,6 +1026,75 @@ async function main() {
   await page.locator('#novelSceneList [data-novel-scene-action="delete"]').first().click();
   await page.waitForTimeout(700);
   check('删除后只剩一场', (await page.locator('#novelSceneList .novel-scene-row').count()) === 1);
+
+  // ---- 8b. 阶段四：分镜生图（逐场提示词 + 交接造梦机） ----
+  await page.locator('#novelStages [data-novel-stage="storyboard"]').click();
+  await page.waitForTimeout(400);
+  check('切到分镜阶段', (await page.locator('#novelEditorHead').innerText()) === '分镜生图');
+  check('分镜用独立生成面板', await page.locator('[data-stage-panel="storyboard"]#novelStagePanel').count() === 1);
+  check('分镜面板不显示逐章选稿', await page.locator('#novelPickManuscripts').isHidden());
+  check('分镜面板不显示正文上限滑条',
+    (await page.locator('#novelStagePanel .novel-limits').isHidden()) === true);
+  check('生成分镜提示词按钮存在',
+    (await page.locator('#novelStageGenerate').innerText()) === '生成分镜提示词');
+  check('有场次时分镜说明给出场次计数',
+    (await page.locator('#novelStoryboardNote').innerText()).includes('共 1 场'),
+    await page.locator('#novelStoryboardNote').innerText());
+  check('分镜阶段没有写回按钮', await page.locator('#novelStageApply').isHidden());
+  await page.locator('#novelStageGenerate').click();
+  await page.waitForTimeout(500);
+  check('分镜提交带 stage=storyboard 与场次选择',
+    stageSubmit && stageSubmit.stage === 'storyboard' && Array.isArray(stageSubmit.scene_ids),
+    JSON.stringify(stageSubmit));
+  check('分镜提交不要求勾选章节', stageSubmit && !Array.isArray(stageSubmit.chapter_ids),
+    JSON.stringify(stageSubmit));
+  // 轮询走到 done 后逐场行渲染；mock 的结果有两场，全部默认勾选。
+  await page.waitForFunction(
+    () => document.querySelectorAll('#novelStoryboardList .novel-storyboard-row').length >= 2,
+    null, { timeout: 6000 },
+  );
+  check('分镜结果逐场显示', (await page.locator('.novel-storyboard-row').count()) === 2);
+  check('逐场行带场景行文本',
+    (await page.locator('.novel-storyboard-row').first().innerText()).includes('INT. 新场景 - 夜'));
+  check('默认全部勾选', (await page.locator('[data-novel-storyboard-row]:checked').count()) === 2);
+  check('发送按钮带条数',
+    (await page.locator('#novelStoryboardSend').innerText()).includes('（2 条）'));
+  // 取消勾选第二场：按钮条数同步；再全选回来。
+  await page.locator('[data-novel-storyboard-row]').nth(1).uncheck();
+  await page.waitForTimeout(150);
+  check('取消勾选后条数同步',
+    (await page.locator('#novelStoryboardSend').innerText()).includes('（1 条）'));
+  await page.locator('#novelStoryboardAll').click();
+  await page.waitForTimeout(150);
+  check('全选恢复两条',
+    (await page.locator('#novelStoryboardSend').innerText()).includes('（2 条）'));
+  // 发送到造梦机：切页 + 队列条出现。
+  await page.locator('#novelStoryboardSend').click();
+  await page.waitForTimeout(700);
+  check('发送后切到造梦机页', await page.locator('#studioPageComfyui').isVisible());
+  check('分镜队列条出现', await page.locator('#comfyuiStoryboard').isVisible());
+  check('队列条带两条提示词',
+    (await page.locator('.comfyui-storyboard-item').count()) === 2);
+  check('队列条带场次说明',
+    (await page.locator('.comfyui-storyboard-item').first().innerText()).includes('第 1 场'));
+  // 选工作流后填入：正向提示词框拿到第一条的内容。
+  await page.locator('.comfyui-workflow-card .comfyui-workflow-title').first().click();
+  await page.waitForTimeout(500);
+  const promptArea = page.locator('[data-comfyui-slot="6|text"]');
+  check('工作流参数表单出现正向提示词框', (await promptArea.count()) === 1);
+  await page.locator('.comfyui-storyboard-item .control-button').first().click();
+  await page.waitForTimeout(250);
+  check('填入把提示词写进正向提示词框',
+    (await promptArea.inputValue()).includes('昏暗的老宅书房'),
+    await promptArea.inputValue());
+  check('填过后条目标记已填',
+    (await page.locator('.comfyui-storyboard-item.filled').count()) === 1);
+  await page.locator('#comfyuiStoryboardClear').click();
+  await page.waitForTimeout(200);
+  check('清空后队列条隐藏', await page.locator('#comfyuiStoryboard').isHidden());
+  // 回创作场继续后续流程。
+  await page.locator('#studioPages [data-studio-page="novel"]').click();
+  await page.waitForTimeout(500);
 
   // 导出菜单
   await page.locator('#novelExportBtn').click();

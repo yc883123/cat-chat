@@ -7,7 +7,7 @@
 
 import { $, api, localFileUrl, state, toast } from "./01-core.js";
 import { attachmentThumbUrl, isPywebview, mediaKind, saveLocalFile } from "./03-media.js";
-import { currentStudioPage, onStudioPageChange } from "./22-studio.js";
+import { currentStudioPage, onStudioPageChange, setStudioPage } from "./22-studio.js";
 const POLL_MS = 1200;
 const REFRESH_MS = 5000;
 
@@ -29,6 +29,7 @@ const comfyui = {
   mediaSelection: new Map(), // 媒体槽已选文件 {slotKey: {path, name, thumb_path}}；切工作流清空
   uploadingSlot: "",       // 正在上传的媒体槽 key（防并发点选；批量拖拽时是各 key 拼接，仍为真值即锁住）
   mediaGroupsCollapsed: {}, // 媒体分组卡折叠状态 {kind: true}；只存内存，不落盘、不进 visible_params
+  storyboardQueue: [],    // 创作场「分镜生图」发来的提示词；只存内存，刷新即清
 };
 
 // ============================================================
@@ -79,6 +80,17 @@ export function bindComfyuiEvents() {
   $("#comfyuiTaskList")?.addEventListener("click", onTaskListClick);
   $("#comfyuiOutputGrid")?.addEventListener("click", onOutputGridClick);
   $("#comfyuiPanes")?.addEventListener("click", onPaneClick);
+  // 分镜队列：创作场跨页交接 + 逐条填入正向提示词。
+  document.addEventListener("naiba:storyboard-handoff", onStoryboardHandoff);
+  $("#comfyuiStoryboardClear")?.addEventListener("click", () => {
+    comfyui.storyboardQueue = [];
+    renderStoryboardQueue();
+  });
+  $("#comfyuiStoryboardList")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-comfyui-storyboard-fill]");
+    if (!button) return;
+    fillStoryboardPrompt(Number(button.dataset.comfyuiStoryboardFill));
+  });
 }
 
 async function enterPage() {
@@ -87,6 +99,7 @@ async function enterPage() {
   void refreshTasks();
   void loadModelCandidates();
   renderParamForm();
+  renderStoryboardQueue();
   scheduleBackgroundRefresh();
 }
 
@@ -2032,4 +2045,74 @@ function onOutputGridClick(event) {
   if (link && isPywebview()) {
     void saveLocalFile(link.href, link.textContent || "output.bin");
   }
+}
+
+// ============================================================
+// 分镜队列（创作场「分镜生图」跨页交接）：逐条填进正向提示词，不做剪贴板中转。
+// 队列只存内存：刷新页面即清空，产物不在这里长期保存。
+// ============================================================
+
+function onStoryboardHandoff(event) {
+  const raw = Array.isArray(event.detail?.items) ? event.detail.items : [];
+  const items = raw
+    .map((item, index) => ({
+      no: Number(item?.no) || index + 1,
+      head: String(item?.head || ""),
+      prompt: String(item?.prompt || "").trim(),
+    }))
+    .filter((item) => item.prompt);
+  if (!items.length) return;
+  comfyui.storyboardQueue = items;
+  renderStoryboardQueue();
+  if (currentStudioPage() !== "comfyui") setStudioPage("comfyui");
+  toast(`已带入 ${items.length} 条分镜提示词；选好工作流后逐条「填入」出图`);
+}
+
+function renderStoryboardQueue() {
+  const box = $("#comfyuiStoryboard");
+  const list = $("#comfyuiStoryboardList");
+  if (!box || !list) return;
+  const items = comfyui.storyboardQueue;
+  box.hidden = !items.length;
+  list.replaceChildren(...items.map((item, index) => {
+    const row = document.createElement("div");
+    row.className = "comfyui-storyboard-item";
+    row.classList.toggle("filled", Boolean(item.filled));
+    const fill = document.createElement("button");
+    fill.type = "button";
+    fill.className = "control-button tiny";
+    fill.dataset.comfyuiStoryboardFill = String(index);
+    fill.textContent = item.filled ? "再填入" : "填入";
+    fill.title = "把这条提示词写进当前工作流的正向提示词框";
+    const copy = document.createElement("span");
+    copy.className = "comfyui-storyboard-copy";
+    const head = document.createElement("strong");
+    head.textContent = `第 ${item.no} 场${item.head ? ` · ${item.head}` : ""}`;
+    const small = document.createElement("small");
+    small.textContent = item.prompt;
+    copy.append(head, small);
+    row.append(fill, copy);
+    return row;
+  }));
+}
+
+function fillStoryboardPrompt(index) {
+  const item = comfyui.storyboardQueue[index];
+  if (!item) return;
+  const slot = (comfyui.detail?.params || []).find((row) => row?.role === "positive_prompt");
+  if (!comfyui.detail || !slot) {
+    toast("先在左侧选择一个工作流，再填入分镜提示词");
+    return;
+  }
+  const key = `${slot.node_id}|${slot.field_name}`;
+  const area = document.querySelector(`[data-comfyui-slot="${CSS.escape(key)}"]`);
+  if (!area) {
+    toast("这个工作流的主表单里没有正向提示词框；用「编辑参数」把它加进来再填");
+    return;
+  }
+  area.value = item.prompt;
+  area.dispatchEvent(new Event("input", { bubbles: true }));
+  item.filled = true;
+  renderStoryboardQueue();
+  toast(`已填入第 ${item.no} 场的提示词，确认参数后点「开始生成」`);
 }

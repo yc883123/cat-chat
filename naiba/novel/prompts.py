@@ -51,7 +51,23 @@ MAX_CHAPTERS_MAX = 20
 # 输出预留（token）：给模型回复留的空间，预算预检按它扣减可用上下文。
 OUTPUT_RESERVE_TOKENS = 4096
 
+# ---- 阶段四 ----
+# 4A 分块续写：单章改编的正文超上限时按块顺序生成，一个任务内多轮调用。
+# 块数上限是硬闸门：超出只取前 N 块，剩余字数必须明说，绝不静默。
+ADAPT_CHUNK_LIMIT = 20
+# 上一轮已生成的改编稿带进下一轮的结尾字数（保持前后块衔接）。
+CONTINUITY_TAIL_CHARS = 500
+# 4B-1 图谱反哺：已保存要素的实体进系统提示词（不是用户消息，不污染正文语气）。
+KG_ENTITY_LIMIT = 20
+KG_LINE_CHARS = 80
+KG_SLOT_CHARS = 1200
+KG_HEADER = "【全书设定参考（来自已保存要素，仅供保持人物与设定一致，不是本次素材）】"
+# 4C 分镜生图：单场剧本正文进提示词的裁剪上限。
+STORYBOARD_SCENE_CHARS = 4000
+
 # 阶段名与中文标题（前端阶段导航、任务标题共用）。
+# 注意 `STAGES` 只收「按章节素材生成」的阶段：build_stage_content 的分槽/摘要链
+# 只对它们有意义；单章改编与分镜生图走各自的组装函数。
 STAGE_LABELS = {
     "elements": "要素",
     "outline": "改编大纲",
@@ -60,7 +76,9 @@ STAGE_LABELS = {
 STAGES = tuple(STAGE_LABELS)
 # 单章 AI 改编是小说域新增的阶段，只作用于一份稿件（不参与多章素材选择）。
 ADAPT_STAGE = "adapt"
-ALL_STAGES = STAGES + (ADAPT_STAGE,)
+STORYBOARD_STAGE = "storyboard"
+ALL_STAGES = STAGES + (ADAPT_STAGE, STORYBOARD_STAGE)
+STORYBOARD_LABEL = "分镜生图"
 
 
 class PromptError(ValueError):
@@ -251,6 +269,10 @@ _ADAPT_INSTRUCTION = """你是影视改编的编剧。请根据下面这份单�
 用户要求：
 {user_request}"""
 
+_ADAPT_CHUNK_NOTE = """这一份稿件太长，已经按段落切成 {total} 块，按顺序逐块改写。
+本次只改写给出的这一块原稿：输出这一块对应的改编正文，不要提前写后面块的内容，
+不要复述前一块已生成的部分；块与块之间要像同一篇稿子一样衔接。"""
+
 _INSTRUCTIONS = {
     "elements": _ELEMENTS_INSTRUCTION,
     "outline": _OUTLINE_INSTRUCTION,
@@ -394,6 +416,260 @@ def build_adapt_content(*, book_title: str, chapter_no: int, chapter_title: str,
     }
 
 
+# ---- 4A 分块续写 ----
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？；!?;\n])")
+# 全角数字 → 半角，识别「【第 ３ 场】」这类写法。
+_FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+
+
+def _hard_split(text: str, limit: int) -> list[str]:
+    """单段超限时按句子硬切（句子仍超长再按字符硬切），保证每块 ≤ limit。"""
+    parts: list[str] = []
+    buf = ""
+    for sentence in _SENTENCE_SPLIT_RE.split(text):
+        if not sentence:
+            continue
+        if len(buf) + len(sentence) <= limit:
+            buf += sentence
+            continue
+        if buf:
+            parts.append(buf)
+            buf = ""
+        while len(sentence) > limit:
+            parts.append(sentence[:limit])
+            sentence = sentence[limit:]
+        buf = sentence
+    if buf:
+        parts.append(buf)
+    return parts
+
+
+def split_body_chunks(content: str, limit: int,
+                      max_chunks: int = ADAPT_CHUNK_LIMIT) -> tuple[list[str], int]:
+    """把超上限的单章正文按段落贪心打包成多块；返回 ``(块列表, 未纳入的字符数)``。
+
+    未纳入 > 0 表示块数顶到了 `max_chunks`：调用方必须明说「最后 X 字未纳入」，
+    绝不静默丢内容。limit 内的内容原样成一块，不做无谓切分。
+    """
+    limit = int(limit)
+    text = str(content or "")
+    if limit <= 0 or len(text) <= limit:
+        return ([text] if text else []), 0
+    chunks: list[str] = []
+    buf = ""
+    for line in text.splitlines(keepends=True):
+        if len(line) > limit:
+            if buf:
+                chunks.append(buf)
+                buf = ""
+            chunks.extend(_hard_split(line, limit))
+            continue
+        if buf and len(buf) + len(line) > limit:
+            chunks.append(buf)
+            buf = ""
+        buf += line
+    if buf:
+        chunks.append(buf)
+    chunks = [chunk for chunk in chunks if chunk.strip()]
+    if len(chunks) <= max_chunks:
+        return chunks, 0
+    kept = chunks[:max_chunks]
+    dropped = sum(len(chunk) for chunk in chunks[max_chunks:])
+    return kept, dropped
+
+
+def build_adapt_chunks(*, book_title: str, chapter_no: int, chapter_title: str,
+                       manuscript_label: str, content: str,
+                       user_request: str, body_limit: int = BODY_SLOT_CHARS) -> dict[str, Any]:
+    """单章改编的分块组装：正文超上限时按块顺序生成，逐块拼接，绝不静默截断。
+
+    返回 ``{chunked, content, warnings, chapters, overhead_chars}``。`chunked` 是
+    runner 的多轮契约（见 StudioRunner）；`content` 是静态部分的拼合（任务快照与
+    预算预检用）；`overhead_chars` 是各轮衔接上下文的额外字符，预算按它补足，
+    避免估算比实际发送量偏小。
+    """
+    limit = clamp_body_limit(body_limit)
+    check_chapter_budget([int(chapter_no)], 1)
+    blocks, dropped = split_body_chunks(content, limit)
+    total = len(blocks)
+    instruction = _ADAPT_INSTRUCTION.replace(
+        "{user_request}", user_request.strip() or "（用户没有写额外要求，请只做文字润色与通顺化处理）"
+    )
+    header_parts = [
+        f"作品：《{book_title}》",
+        instruction,
+        _ADAPT_CHUNK_NOTE.replace("{total}", str(total)),
+        f"【本次稿件】第 {chapter_no} 章 {chapter_title} · {manuscript_label}",
+    ]
+    prefix = "\n\n".join(header_parts)
+    notes = [
+        f"第 {chapter_no} 章《{chapter_title}》正文超出单章上限 {limit} 字，已按 {total} 块顺序生成"
+    ] if total > 1 else [f"第 {chapter_no} 章《{chapter_title}》正文按单块顺序生成"]
+    if dropped:
+        notes.append(f"正文过长，最后 {dropped} 字未纳入本次生成（块数上限 {ADAPT_CHUNK_LIMIT} 块）")
+    used_chars = len(str(content or "")) - dropped
+    return {
+        "chunked": {
+            "blocks": blocks,
+            "prefix": prefix,
+            "continuity_chars": CONTINUITY_TAIL_CHARS,
+            "continuity_label": "【已生成改编稿的结尾（新内容必须紧接它继续，不要重复）】",
+        },
+        "content": prefix + "\n\n" + "\n\n".join(blocks),
+        "warnings": notes,
+        "chapters": [{
+            "i": int(chapter_no), "title": str(chapter_title),
+            "total_chars": len(str(content or "")),
+            "used_chars": used_chars,
+            "dropped_chars": dropped,
+        }],
+        "overhead_chars": max(0, total - 1) * (CONTINUITY_TAIL_CHARS + 40),
+    }
+
+
+# ---- 4B-1 图谱反哺 ----
+
+_KG_BUCKETS = (("characters", "人物"), ("scenes", "场景"), ("props", "道具"))
+
+
+def kg_entities(elements: Any) -> list[str]:
+    """从要素三类取最多 `KG_ENTITY_LIMIT` 条实体（人物优先，其次场景、道具）。
+
+    每条压成一行并裁到 `KG_LINE_CHARS`——反哺是「保持一致」的参考，不是素材。
+    """
+    if not isinstance(elements, dict):
+        return []
+    rows: list[str] = []
+    for key, label in _KG_BUCKETS:
+        items = elements.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            text = re.sub(r"\s+", " ", str(item or "")).strip()
+            if not text:
+                continue
+            if len(text) > KG_LINE_CHARS:
+                text = text[:KG_LINE_CHARS] + "…"
+            rows.append(f"· {label}：{text}")
+            if len(rows) >= KG_ENTITY_LIMIT:
+                return rows
+    return rows
+
+
+def build_kg_context(elements: Any) -> str:
+    """图谱反哺的系统提示词；没有可用要素时返回空串（调用方不注入）。"""
+    rows = kg_entities(elements)
+    if not rows:
+        return ""
+    body = "\n".join(rows)
+    if len(body) > KG_SLOT_CHARS:
+        body = body[:KG_SLOT_CHARS] + "…"
+    return f"{KG_HEADER}\n{body}"
+
+
+# ---- 4C 分镜生图 ----
+
+_STORYBOARD_INSTRUCTION = """你是分镜师。请把下面给出的每一场剧本，逐场转成一条「文生图提示词」。
+
+要求：
+1. 每一场输出一块，块的第一行写「【第 N 场】场景行」：N 用剧本里给出的场次号，场景行原样照抄。
+2. 提示词正文只写画面本身：地点与景物、出场人物的外观与动作、景别与构图、光线与氛围，60–150 字。
+3. 不要写对话内容，不要写台词字幕，不要虚构剧本里没有的人物长相。
+4. 人物名字与剧本保持一致；场次顺序与剧本一致，一场都不跳过。
+5. 只输出分块提示词，不要写说明、不要复述剧本。"""
+
+# 「【第 3 场】INT. 老宅书房 - 夜」这类分块头。
+STORYBOARD_HEAD_RE = re.compile(r"^[\s　]*【\s*第\s*([0-9]+)\s*场\s*】\s*(.*)$")
+
+
+def parse_storyboard(text: str) -> tuple[list[dict[str, Any]], bool]:
+    """把分镜提示词拆成逐场条目，返回 ``(rows, parsed)``。
+
+    `parsed=False` 表示没有识别到「【第 N 场】」结构：调用方整段原样显示并如实
+    说明，绝不臆造切分（与 `parse_scenes` 同口径）。
+    """
+    raw = str(text or "")
+    if not raw.strip():
+        return [], False
+    rows: list[dict[str, Any]] = []
+    current_no = 0
+    current_head = ""
+    buffer: list[str] = []
+
+    def flush() -> None:
+        nonlocal current_no, current_head
+        body = "\n".join(buffer).strip()
+        if current_no or current_head or body:
+            rows.append({
+                "scene_no": int(current_no or 0),
+                "scene_head": current_head,
+                "prompt": body,
+            })
+        buffer.clear()
+
+    for line in raw.splitlines():
+        match = STORYBOARD_HEAD_RE.match(line.translate(_FULLWIDTH_DIGITS))
+        if match:
+            flush()
+            current_no = int(match.group(1))
+            current_head = match.group(2).strip()
+            continue
+        buffer.append(line)
+    flush()
+    if not any(row["scene_no"] for row in rows):
+        return [], False
+    return rows, True
+
+
+def build_storyboard_content(*, book_title: str, scenes: list[dict[str, Any]],
+                             scene_ids: list[int] | None = None,
+                             extra_note: str = "") -> dict[str, Any]:
+    """组装分镜生成的 content：逐场给正文，模型逐场回出图提示词。
+
+    `scene_ids` 缺省 = 全部场次（取已保存剧本的最新场次）；给了不存在的场次号
+    直接报错，不静默跳过。
+    """
+    rows = [row for row in (scenes or []) if isinstance(row, dict)]
+    if not rows:
+        raise PromptError("这个作品还没有剧本场次；请先在剧本阶段生成并保存场次")
+    known = {int(row.get("i") or 0) for row in rows}
+    wanted = [int(n) for n in (scene_ids or [])] if scene_ids else sorted(known)
+    if not wanted:
+        raise PromptError("至少选择一场来生成分镜提示词")
+    for no in wanted:
+        if no not in known:
+            raise PromptError(f"场次不存在：{no}")
+    parts = [f"作品：《{book_title}》", _STORYBOARD_INSTRUCTION]
+    warnings: list[str] = []
+    stats: list[dict[str, Any]] = []
+    blocks: list[str] = []
+    for no in wanted:
+        row = next(item for item in rows if int(item.get("i") or 0) == no)
+        head = str(row.get("scene") or "（没有场景行）")
+        body, dropped = _clip(str(row.get("content") or ""), STORYBOARD_SCENE_CHARS)
+        if dropped:
+            warnings.append(f"第 {no} 场正文超出单场 {STORYBOARD_SCENE_CHARS} 字上限，已省略后 {dropped} 字")
+        blocks.append(f"【第 {no} 场】{head}\n{body}")
+        stats.append({
+            "scene_no": no, "head": head,
+            "total_chars": len(str(row.get("content") or "")),
+            "used_chars": len(body), "dropped_chars": dropped,
+        })
+    parts.append("【剧本场次】\n" + "\n\n".join(blocks))
+    note, note_dropped = _clip(str(extra_note or "").strip(), EXTRA_NOTE_CHARS)
+    if note:
+        parts.append(f"【补充要求】\n{note}")
+    if note_dropped:
+        warnings.append(f"补充要求超出 {EXTRA_NOTE_CHARS} 字上限，已省略后 {note_dropped} 字")
+    return {
+        "content": "\n\n".join(parts),
+        "warnings": warnings,
+        "scenes": stats,
+        "scene_ids": wanted,
+    }
+
+
 def estimate_input_tokens(text: str) -> int:
     """估算一次输入的 token 量。
 
@@ -409,14 +685,23 @@ def estimate_input_tokens(text: str) -> int:
 def budget_report(*, content: str, chapters: list[dict[str, Any]], warnings: list[str],
                   body_limit: int, max_chapters: int,
                   context_window: int = 0,
-                  output_reserve: int = OUTPUT_RESERVE_TOKENS) -> dict[str, Any]:
+                  output_reserve: int = OUTPUT_RESERVE_TOKENS,
+                  system: str = "", overhead_chars: int = 0,
+                  kg_count: int = 0) -> dict[str, Any]:
     """提交前预检：把这次输入与模型容量对照，给出可执行建议。
 
     `context_window` 未知（0）时如实标为未知，**不伪造模型上限**；此时大输入
     需要用户确认后才提交（前端据此弹确认，服务端不拦）。
+
+    `system` 是随任务注入的系统提示词（图谱反哺），`overhead_chars` 是分块生成
+    各轮衔接上下文的额外字符——两者都是真实会发送的输入，估算必须计入。
     """
-    tokens = estimate_input_tokens(content)
-    chars = len(content)
+    system_text = str(system or "")
+    overhead = max(0, int(overhead_chars or 0))
+    tokens = estimate_input_tokens(content) + (
+        estimate_input_tokens(system_text) if system_text else 0
+    ) + overhead
+    chars = len(content) + len(system_text) + overhead
     total_chars = sum(int(row.get("total_chars") or 0) for row in chapters)
     used_chars = sum(int(row.get("used_chars") or 0) for row in chapters)
     dropped_chars = sum(int(row.get("dropped_chars") or 0) for row in chapters)
@@ -453,6 +738,9 @@ def budget_report(*, content: str, chapters: list[dict[str, Any]], warnings: lis
         "body_limit": clamp_body_limit(body_limit),
         "max_chapters": clamp_chapter_limit(max_chapters),
         "chapter_count": len(chapters),
+        "kg_entities": max(0, int(kg_count or 0)),
+        "system_chars": len(system_text),
+        "overhead_chars": overhead,
         "chapters": [
             {
                 "i": int(row.get("i") or 0),
@@ -473,4 +761,6 @@ def task_title(book_title: str, stage: str) -> str:
     """任务标题：`《书名》· 阶段名`（与总计划 §5.3 的字段契约一致）。"""
     if stage == ADAPT_STAGE:
         return f"《{book_title}》· 单章改编"
+    if stage == STORYBOARD_STAGE:
+        return f"《{book_title}》· {STORYBOARD_LABEL}"
     return f"《{book_title}》· {STAGE_LABELS.get(stage, stage)}"

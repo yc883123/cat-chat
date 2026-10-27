@@ -606,6 +606,16 @@
                 <button class="control-button tiny" id="comfyuiTestConn" type="button">测试连接</button>
               </div>
               <div class="comfyui-run" id="comfyuiRunSection">
+                <!-- 创作场「分镜生图」发来的提示词队列：逐条填进正向提示词，
+                     不做剪贴板中转。只存内存，刷新页面即清空。 -->
+                <div class="comfyui-storyboard" id="comfyuiStoryboard" hidden>
+                  <div class="comfyui-storyboard-head">
+                    <strong>分镜队列</strong>
+                    <small>从创作场发来的出图提示词；点「填入」写进正向提示词，填过的会打勾。</small>
+                    <button class="control-button tiny" id="comfyuiStoryboardClear" type="button">清空</button>
+                  </div>
+                  <div class="comfyui-storyboard-list" id="comfyuiStoryboardList" aria-label="分镜提示词队列"></div>
+                </div>
                 <div class="comfyui-param-form" id="comfyuiParamForm" aria-label="工作流参数"></div>
                 <div class="comfyui-submit-row">
                   <label class="comfyui-shots-field">张数
@@ -692,6 +702,7 @@
               <button class="novel-stage" type="button" aria-pressed="false" data-novel-stage="elements">要素</button>
               <button class="novel-stage" type="button" aria-pressed="false" data-novel-stage="outline">大纲</button>
               <button class="novel-stage" type="button" aria-pressed="false" data-novel-stage="script">剧本</button>
+              <button class="novel-stage" type="button" aria-pressed="false" data-novel-stage="storyboard">分镜</button>
             </div>
             <button class="novel-manage-entry" id="novelManageBtn" type="button"
                     title="集中管理原文、改编稿、要素、大纲、剧本与生成记录">管理记录</button>
@@ -836,6 +847,16 @@
                   <div class="novel-stage-context" data-novel-context="script" hidden>
                     <label>人物设定版本<select data-context-elements aria-label="剧本使用的人物设定版本"></select></label>
                     <label>改编大纲版本<select data-context-outline aria-label="剧本使用的改编大纲版本"></select></label>
+                  </div>
+                  <!-- 分镜生图专用（阶段四）：场次说明与逐场提示词结果；
+                       发送按钮把勾选的提示词批量带到造梦机。其余阶段不显示。 -->
+                  <div class="novel-storyboard-block" data-novel-context="storyboard" hidden>
+                    <p class="novel-note" data-novel-control="novelStoryboardNote"></p>
+                    <div class="novel-storyboard-list" data-novel-control="novelStoryboardList" aria-label="分镜提示词"></div>
+                    <div class="novel-editor-actions">
+                      <button class="control-button tiny" data-novel-control="novelStoryboardAll" type="button" hidden>全选</button>
+                      <button class="control-button" data-novel-control="novelStoryboardSend" type="button" hidden>发送到造梦机</button>
+                    </div>
                   </div>
                   <label class="novel-field">补充要求（可选）
                     <textarea id="novelStageNote" rows="2" maxlength="800"

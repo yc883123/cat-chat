@@ -4228,6 +4228,32 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .comfyui-statusbar .status-mark.ok { background: var(--ok, #2e9e5b); }
 .comfyui-statusbar .status-mark.error { background: var(--danger, #c0392b); }
 .comfyui-run { flex: 1; min-height: 0; padding: 12px; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
+/* 分镜队列（创作场跨页交接）：参数表单上方的提示词条列。 */
+.comfyui-storyboard {
+  display: grid; gap: 6px; flex: none; max-height: 34%;
+  padding: 8px 9px; border: 1px solid var(--violet-line); border-radius: var(--r-md);
+  background: var(--accent-soft);
+}
+.comfyui-storyboard[hidden] { display: none; }
+.comfyui-storyboard-head { display: flex; align-items: center; gap: 8px; }
+.comfyui-storyboard-head strong { font-size: 12px; }
+.comfyui-storyboard-head small { flex: 1; min-width: 0; font-size: 10px; color: var(--muted); }
+.comfyui-storyboard-list { display: grid; gap: 4px; overflow-y: auto; }
+.comfyui-storyboard-item {
+  display: flex; align-items: flex-start; gap: 7px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  padding: 5px 7px; background: var(--surface);
+}
+.comfyui-storyboard-item.filled { border-color: var(--ok, #2e9e5b); }
+.comfyui-storyboard-item .control-button { flex: none; }
+.comfyui-storyboard-copy { display: grid; gap: 2px; min-width: 0; }
+.comfyui-storyboard-copy strong {
+  font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.comfyui-storyboard-copy small {
+  font-size: 10px; color: var(--muted); line-height: 1.5;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
 .comfyui-param-form { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 2px; }
 .comfyui-param-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .comfyui-param-heading { margin: 0; font-size: 12.5px; font-weight: 600; }
@@ -4725,6 +4751,8 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .novel-pick-manuscript span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .novel-pick-manuscript select { flex: 0 0 auto; max-width: 55%; padding: 4px 7px; font-size: 11px; }
 .novel-limits { display: grid; gap: 7px; }
+/* 分镜生图阶段整块隐藏滑条：display 规则会盖掉 [hidden] 的默认行为，必须显式写。 */
+.novel-limits[hidden] { display: none; }
 .novel-limit { display: grid; gap: 3px; font-size: 11px; color: var(--muted); }
 .novel-limit b { color: var(--text); font-variant-numeric: tabular-nums; }
 .novel-limit input[type="range"] {
@@ -5099,6 +5127,26 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 }
 .novel-scene-edit[hidden] { display: none; }
 .novel-field-scene textarea { min-height: 120px; resize: vertical; line-height: 1.6; }
+
+/* 分镜生图（阶段四）：逐场提示词行（勾选后发送到造梦机）。 */
+.novel-storyboard-block { display: grid; gap: 6px; }
+.novel-storyboard-block[hidden] { display: none; }
+.novel-storyboard-list { display: grid; gap: 4px; max-height: 300px; overflow-y: auto; }
+.novel-storyboard-row {
+  display: flex; align-items: flex-start; gap: 7px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  padding: 6px 8px; background: var(--surface); cursor: pointer;
+}
+.novel-storyboard-row input[type="checkbox"] { width: 14px; height: 14px; flex: none; margin-top: 2px; }
+.novel-storyboard-copy { display: grid; gap: 3px; min-width: 0; }
+.novel-storyboard-copy strong {
+  font-size: 11.5px; font-weight: 600; line-height: 1.35;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.novel-storyboard-copy small {
+  font-size: 10.5px; color: var(--muted); line-height: 1.55;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
 
 @media (max-width: 960px) and (orientation: landscape) {
   .novel-scene-open strong { font-size: 10.5px; }

@@ -69,9 +69,30 @@ class _DeltaBuffer:
         self._emit(payload)
 
 
+def _system_message(input_data: dict[str, Any]) -> list[dict[str, str]]:
+    """可选系统提示词（图谱反哺等）：为空时消息列表与旧契约完全一致。"""
+    system_text = str(input_data.get("system") or "").strip()
+    if not system_text:
+        return []
+    return [{"role": "system", "content": system_text}]
+
+
+def _merge_usage(total: dict[str, Any], incoming: Any) -> dict[str, Any]:
+    """多轮任务的用量累加：数值字段求和，非数值字段以后一轮为准。"""
+    if not isinstance(incoming, dict):
+        return total
+    for key, value in incoming.items():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            total[key] = total.get(key, 0) + value
+        elif value:
+            total[key] = value
+    return total
+
+
 class StudioRunner:
     """串行执行队列。enqueue 由 jobs 做；这里只负责跑到终态并落事件/状态。"""
-
     def __init__(self, app: Any, store: Any):
         self.app = app
         self.store = store
@@ -155,13 +176,16 @@ class StudioRunner:
         with self._registry_lock:
             self._cancel_events[task_id] = cancel_event
         buffer = _DeltaBuffer(self._make_emitter(task_id))
+        # 分块任务的用量跨轮累加；单轮任务与旧行为一致（用 last_usage）。
+        usage_sink: dict[str, Any] = {}
         try:
             self.store.update_task(task_id, status="running", started_at=now_ms(), detail="")
             self.store.append_event(task_id, {"type": "status", "message": "生成任务开始执行"})
-            content = self._complete(task.get("input") or {}, buffer.forward, cancel_event)
+            content = self._complete(task.get("input") or {}, buffer.forward, cancel_event, usage_sink)
             buffer.flush()
             result_partial = ""
-            self._finish_terminal(task_id, "done", {"type": "done"}, result=content)
+            self._finish_terminal(task_id, "done", {"type": "done"}, result=content,
+                                  usage_override=dict(usage_sink) if usage_sink else None)
             _ = result_partial
         except Exception as exc:
             buffer.flush()
@@ -206,11 +230,16 @@ class StudioRunner:
             return self._cancel_events.get(task_id) or threading.Event()
 
     def _complete(
-        self, input_data: dict[str, Any], status_provider: Any, cancel_event: threading.Event
+        self, input_data: dict[str, Any], status_provider: Any, cancel_event: threading.Event,
+        usage_sink: dict[str, Any] | None = None,
     ) -> str:
+        chunked = input_data.get("chunked")
+        if isinstance(chunked, dict) and isinstance(chunked.get("blocks"), list) and chunked.get("blocks"):
+            return self._complete_chunked(input_data, chunked, status_provider, cancel_event, usage_sink)
         profile = resolve_profile_with_override(
             self.app.config, str(input_data.get("model_key") or ""), str(input_data.get("model_name") or "")
         )
+        system_message = _system_message(input_data)
         images = [ref for ref in (input_data.get("images") or []) if isinstance(ref, dict)]
         if images:
             # 带图生成：结构化多模态消息（图号与图片依次配对），不把路径拼成提示文本。
@@ -240,22 +269,75 @@ class StudioRunner:
                 parts.append({"type": "text", "text": f"\n\n图{index}（{label}）："})
                 parts.append(part)
             parts.append({"type": "text", "text": "\n\n" + str(input_data.get("content") or "")})
-            messages = [{"role": "user", "content": parts}]
+            messages = [*system_message, {"role": "user", "content": parts}]
         else:
-            messages = [{"role": "user", "content": str(input_data.get("content") or "")}]
+            messages = [*system_message, {"role": "user", "content": str(input_data.get("content") or "")}]
         options = {
             "stream": True,
             "cancel_event": cancel_event,
             "lock_label": "工作台生成",
             **(self.app.config.runtime_guard_options() or {}),
         }
-        return self.app.models.complete(profile, messages, options, status_provider)
+        content = self.app.models.complete(profile, messages, options, status_provider)
+        if usage_sink is not None:
+            _merge_usage(usage_sink, getattr(self.app.models, "last_usage", {}))
+        return content
+
+    def _complete_chunked(
+        self, input_data: dict[str, Any], chunked: dict[str, Any], status_provider: Any,
+        cancel_event: threading.Event, usage_sink: dict[str, Any] | None = None,
+    ) -> str:
+        """分块续写：一个任务内多轮调用，逐块拼接（4A）。
+
+        - 每轮开始发 status 事件（「正在生成第 i/N 块」），前端可显示进度。
+        - 轮与轮之间补一个 `\n\n` delta：事件流重建的 partial 与最终结果同构，
+          中途取消/失败时已完成块不丢。
+        - 第 2 块起带上一轮输出的结尾（continuity），要求紧接续写不重复。
+        - 用量跨轮累加，费用汇总不因此少记。
+        """
+        profile = resolve_profile_with_override(
+            self.app.config, str(input_data.get("model_key") or ""), str(input_data.get("model_name") or "")
+        )
+        system_message = _system_message(input_data)
+        blocks = [str(block) for block in chunked.get("blocks") or [] if str(block)]
+        prefix = str(chunked.get("prefix") or "")
+        try:
+            tail_chars = max(0, int(chunked.get("continuity_chars") or 0))
+        except (TypeError, ValueError):
+            tail_chars = 0
+        label = str(chunked.get("continuity_label") or "")
+        total = len(blocks)
+        options = {
+            "stream": True,
+            "cancel_event": cancel_event,
+            "lock_label": "工作台生成",
+            **(self.app.config.runtime_guard_options() or {}),
+        }
+        outputs: list[str] = []
+        for index, block in enumerate(blocks, 1):
+            status_provider({"type": "status", "message": f"正在生成第 {index}/{total} 块"})
+            segments: list[str] = []
+            if index > 1 and tail_chars:
+                previous = outputs[-1].strip()
+                if previous:
+                    tail = previous[-tail_chars:]
+                    segments.append(f"{label}\n{tail}" if label else tail)
+            segments.append(f"{prefix}\n\n{block}" if prefix else block)
+            messages = [*system_message, {"role": "user", "content": "\n\n".join(segments)}]
+            text = self.app.models.complete(profile, messages, options, status_provider)
+            outputs.append(str(text).strip())
+            if usage_sink is not None:
+                _merge_usage(usage_sink, getattr(self.app.models, "last_usage", {}))
+            if index < total:
+                status_provider({"type": "delta", "content": "\n\n"})
+        return "\n\n".join(outputs)
 
     # ---- 终态 ----
 
     def _finish_terminal(
         self, task_id: str, status: str, terminal_payload: dict[str, Any], *,
         result: str = "", result_partial: str = "", detail: str = "", error: str = "",
+        usage_override: dict[str, Any] | None = None,
     ) -> None:
         usage: dict[str, Any] = {}
         reasoning: list[str] = []
@@ -267,7 +349,8 @@ class StudioRunner:
             if current and current["status"] in {"cancelled", "failed", "interrupted"}:
                 return
             # 串行队列保证此刻读 last_* 是本任务自己的读数（P0 并发边界）。
-            usage = dict(getattr(self.app.models, "last_usage", {}) or {})
+            # 分块任务传 usage_override（跨轮累加值），单轮任务继续读 last_usage。
+            usage = dict(usage_override) if usage_override else dict(getattr(self.app.models, "last_usage", {}) or {})
             reasoning_text = str(getattr(self.app.models, "last_reasoning", "") or "")
             reasoning = [reasoning_text] if reasoning_text else []
             performance = dict(getattr(self.app.models, "last_diagnostics", {}) or {})

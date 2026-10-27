@@ -1683,6 +1683,14 @@ class NovelService:
         if stage not in prompts.ALL_STAGES:
             raise NovelServiceError(f"未知阶段：{stage or '（空）'}")
         book_id = str(body.get("book_id") or "").strip()
+        context_window = self._context_window(str(body.get("model_key") or ""))
+        extra_note = str(body.get("extra_note") or "")
+        if stage == prompts.STORYBOARD_STAGE:
+            # 分镜生图吃的是已保存剧本场次，不吃章节素材，也不参与逐章选稿。
+            return self._build_storyboard(
+                book_id=book_id, body=body, extra_note=extra_note,
+                context_window=context_window,
+            )
         raw_ids = body.get("chapter_ids")
         if stage != prompts.ADAPT_STAGE:
             if not isinstance(raw_ids, list) or not raw_ids:
@@ -1690,8 +1698,6 @@ class NovelService:
         wanted = self._manuscripts_by_chapter(body.get("manuscripts"))
         body_limit = prompts.clamp_body_limit(body.get("body_chars"))
         max_chapters = prompts.clamp_chapter_limit(body.get("max_chapters"))
-        extra_note = str(body.get("extra_note") or "")
-        context_window = self._context_window(str(body.get("model_key") or ""))
         if stage == prompts.ADAPT_STAGE:
             return self._build_adapt(
                 book_id=book_id, body=body, wanted=wanted, body_limit=body_limit,
@@ -1711,6 +1717,9 @@ class NovelService:
         if selected_elements:
             characters = _split_elements(str(selected_elements.get("raw") or ""))["characters"]
         manuscript_ids = {int(row["i"]): str(row.get("manuscript_id") or "") for row in material["chapters"]}
+        # 图谱反哺（4B-1）：已保存要素的实体进系统提示词，保持人物与设定一致。
+        kg_buckets = self._kg_elements(manifest, selected_elements)
+        kg = prompts.build_kg_context(kg_buckets)
         built = prompts.build_stage_content(
             stage=stage,
             book_title=str(manifest.get("title") or "未命名作品"),
@@ -1724,11 +1733,13 @@ class NovelService:
             max_chapters=max_chapters,
             manuscript_ids=manuscript_ids,
         )
+        built["system"] = kg
         budget = prompts.budget_report(
             content=built["content"], chapters=built["chapters"], warnings=built["warnings"],
             body_limit=body_limit, max_chapters=max_chapters, context_window=context_window,
+            system=kg, kg_count=len(prompts.kg_entities(kg_buckets)),
         )
-        return {
+        prepared = {
             "stage": stage,
             "book_id": book_id,
             "manifest": manifest,
@@ -1744,11 +1755,16 @@ class NovelService:
             "sources": self._source_rows(manifest, material, elements_version, outline_version,
                                          selected_elements, selected_outline, stage),
         }
+        prepared["sources"]["kg_entities"] = int(budget.get("kg_entities") or 0)
+        return prepared
 
     def _build_adapt(self, *, book_id: str, body: dict[str, Any],
                      wanted: dict[int, str], body_limit: int, max_chapters: int,
                      extra_note: str, context_window: int) -> dict[str, Any]:
-        """单章 AI 改编：固定一份稿件来源，不接管多章选择。"""
+        """单章 AI 改编：固定一份稿件来源，不接管多章选择。
+
+        正文超上限时走分块续写（4A）：按段落切块顺序生成，绝不静默截断。
+        """
         raw_chapter = body.get("chapter_ids")
         chapter_no = 0
         if isinstance(raw_chapter, list) and len(raw_chapter) == 1:
@@ -1760,21 +1776,40 @@ class NovelService:
         material = self.store.stage_material(book_id, [chapter_no], wanted)
         manifest = material["manifest"]
         row = material["chapters"][0]
-        built = prompts.build_adapt_content(
-            book_title=str(manifest.get("title") or "未命名作品"),
-            chapter_no=chapter_no,
-            chapter_title=str(row.get("title") or ""),
-            manuscript_label=str(row.get("manuscript_label") or ""),
-            content=str(row.get("content") or ""),
-            user_request=extra_note,
-            body_limit=body_limit,
-        )
+        content_text = str(row.get("content") or "")
+        kg_buckets = self._kg_elements(manifest, None)
+        kg = prompts.build_kg_context(kg_buckets)
+        overhead_chars = 0
+        if len(content_text) > body_limit:
+            built = prompts.build_adapt_chunks(
+                book_title=str(manifest.get("title") or "未命名作品"),
+                chapter_no=chapter_no,
+                chapter_title=str(row.get("title") or ""),
+                manuscript_label=str(row.get("manuscript_label") or ""),
+                content=content_text,
+                user_request=extra_note,
+                body_limit=body_limit,
+            )
+            overhead_chars = int(built.get("overhead_chars") or 0)
+        else:
+            built = prompts.build_adapt_content(
+                book_title=str(manifest.get("title") or "未命名作品"),
+                chapter_no=chapter_no,
+                chapter_title=str(row.get("title") or ""),
+                manuscript_label=str(row.get("manuscript_label") or ""),
+                content=content_text,
+                user_request=extra_note,
+                body_limit=body_limit,
+            )
+        built["system"] = kg
         budget = prompts.budget_report(
             content=built["content"], chapters=built["chapters"], warnings=built["warnings"],
             body_limit=body_limit, max_chapters=max_chapters, context_window=context_window,
+            system=kg, kg_count=len(prompts.kg_entities(kg_buckets)),
+            overhead_chars=overhead_chars,
         )
         manuscript_ids = {chapter_no: str(row.get("manuscript_id") or "")}
-        return {
+        prepared = {
             "stage": prompts.ADAPT_STAGE,
             "book_id": book_id,
             "manifest": manifest,
@@ -1790,6 +1825,89 @@ class NovelService:
             "sources": self._source_rows(manifest, material, 0, 0, None, None,
                                          prompts.ADAPT_STAGE),
         }
+        prepared["sources"]["kg_entities"] = int(budget.get("kg_entities") or 0)
+        return prepared
+
+    def _build_storyboard(self, *, book_id: str, body: dict[str, Any],
+                          extra_note: str, context_window: int) -> dict[str, Any]:
+        """分镜生图（4C）：把已保存剧本的最新场次逐场转成出图提示词。
+
+        吃的是剧本场次而不是章节素材；不写回作品——生成结果直接发给造梦机出图。
+        """
+        # 公开清单视图就够用：场次、书名与要素都在里面，不必翻 store 私有层。
+        manifest = self.store.get_book(book_id)["book"]
+        scenes = manifest.get("script") if isinstance(manifest.get("script"), list) else []
+        if not scenes:
+            raise NovelServiceError("这个作品还没有剧本场次；请先在剧本阶段生成并保存场次，再来生成分镜")
+        raw_ids = body.get("scene_ids")
+        if raw_ids is None or raw_ids == "":
+            scene_ids: list[int] = []
+        else:
+            if not isinstance(raw_ids, list):
+                raise NovelServiceError("scene_ids 必须是场次号数组")
+            scene_ids = [self._scene_no(raw) for raw in raw_ids]
+        built = prompts.build_storyboard_content(
+            book_title=str(manifest.get("title") or "未命名作品"),
+            scenes=scenes, scene_ids=scene_ids, extra_note=extra_note,
+        )
+        kg_buckets = self._kg_elements(manifest, None)
+        kg = prompts.build_kg_context(kg_buckets)
+        built["system"] = kg
+        budget = prompts.budget_report(
+            content=built["content"], chapters=[], warnings=built["warnings"],
+            body_limit=prompts.BODY_SLOT_CHARS, max_chapters=1,
+            context_window=context_window,
+            system=kg, kg_count=len(prompts.kg_entities(kg_buckets)),
+        )
+        wanted = set(built["scene_ids"])
+        snapshot = [
+            {"i": int(row.get("i") or 0), "scene": str(row.get("scene") or ""),
+             "len": len(str(row.get("content") or ""))}
+            for row in scenes if int(row.get("i") or 0) in wanted
+        ]
+        sources = {
+            "chapters": [],
+            "scene_ids": built["scene_ids"],
+            "scene_count": len(built["scene_ids"]),
+            "uses_outline": False,
+            "uses_characters": False,
+            "has_summaries": False,
+            "elements_version": 0,
+            "elements_label": "",
+            "outline_version": 0,
+            "outline_label": "",
+        }
+        sources["kg_entities"] = int(budget.get("kg_entities") or 0)
+        return {
+            "stage": prompts.STORYBOARD_STAGE,
+            "book_id": book_id,
+            "manifest": manifest,
+            "material": {"chapter_ids": [], "chapters": []},
+            "built": built,
+            "chapters": [],
+            "warnings": built["warnings"],
+            "budget": budget,
+            "limits": {"body_chars": prompts.BODY_SLOT_CHARS, "max_chapters": 1},
+            "manuscript_ids": {},
+            "elements_version": 0,
+            "outline_version": 0,
+            "sources": sources,
+            "scene_snapshot": snapshot,
+        }
+
+    @staticmethod
+    def _kg_elements(manifest: dict[str, Any],
+                     selected_elements: dict[str, Any] | None) -> dict[str, list[str]]:
+        """图谱反哺的实体来源：优先用本次选定的要素版本，否则用当前要素。"""
+        raw = ""
+        if selected_elements is not None:
+            raw = str(selected_elements.get("raw") or "")
+        else:
+            elements = manifest.get("elements") if isinstance(manifest.get("elements"), dict) else {}
+            raw = str(elements.get("raw") or "")
+        if not raw.strip():
+            return {}
+        return _split_elements(raw)
 
     @staticmethod
     def _source_rows(manifest: dict[str, Any], material: dict[str, Any],
@@ -1894,6 +2012,10 @@ class NovelService:
             "chapter_snapshot": prepared["chapters"],
             "sources": prepared["sources"],
         }
+        if stage == prompts.STORYBOARD_STAGE:
+            # 分镜生图：场次选择与快照进任务，重试按同一批场次重放。
+            novel_payload["scene_ids"] = list(prepared["built"].get("scene_ids") or [])
+            novel_payload["scene_snapshot"] = prepared.get("scene_snapshot") or []
         input_data = {
             "content": built["content"],
             "model_key": str(body.get("model_key") or ""),
@@ -1904,6 +2026,14 @@ class NovelService:
             "user_request": str(body.get("extra_note") or ""),
             "novel": novel_payload,
         }
+        system_text = str(built.get("system") or "")
+        if system_text.strip():
+            # 图谱反哺：系统提示词随任务落盘，重试原样重放（与素材快照同口径）。
+            input_data["system"] = system_text
+        chunked = built.get("chunked")
+        if isinstance(chunked, dict) and chunked.get("blocks"):
+            # 分块续写（4A）：多轮契约进任务；content 保留静态拼合作快照。
+            input_data["chunked"] = chunked
         try:
             task = self.app.studio.jobs.submit(input_data)
         except ValueError as exc:
@@ -1991,6 +2121,9 @@ class NovelService:
         text = body.get("text")
         if stage not in prompts.ALL_STAGES:
             return {"error": f"未知阶段：{stage or '（空）'}"}, 400
+        if stage == prompts.STORYBOARD_STAGE:
+            # 分镜提示词不进作品：结果在任务里，直接发送到造梦机出图。
+            return {"error": "分镜提示词不写回作品；请在结果里勾选后发送到造梦机"}, 400
         if not task_id:
             return {"error": "缺少 task_id：写回必须指明是哪个任务的结果"}, 400
         if not isinstance(text, str):

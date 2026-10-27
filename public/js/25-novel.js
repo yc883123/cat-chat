@@ -15,7 +15,7 @@
 // ============================================================
 
 import { $, api, applyModelSkinFor, state, toast } from "./01-core.js";
-import { onStudioPageChange } from "./22-studio.js";
+import { onStudioPageChange, setStudioPage } from "./22-studio.js";
 
 // 与服务端一致的上限（前端只做提前提示，服务端仍逐项校验）。
 const MAX_FILE_BYTES = 60 * 1024 * 1024;
@@ -82,9 +82,11 @@ const novel = {
     elements: { activeTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0, firstDeltaAt: 0, recentDeltas: [] },
     outline: { activeTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0, firstDeltaAt: 0, recentDeltas: [] },
     script: { activeTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0, firstDeltaAt: 0, recentDeltas: [] },
+    // 分镜生图（阶段四）：多存逐场解析结果与勾选集（解析一次，轮询不重算）。
+    storyboard: { activeTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0, firstDeltaAt: 0, recentDeltas: [], progressNote: "", rows: [], parsed: false, checked: new Set() },
   },
   // 单章 AI 改编写在拆章阶段，但有自己的一条任务槽。
-  adaptTask: { activeTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0 },
+  adaptTask: { activeTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0, progressNote: "" },
   // 模型选择（与提词库同口径）：先选供应商，再按供应商拉完整模型目录。
   stageProviderKey: "",
   stageModelName: "",
@@ -153,6 +155,12 @@ const STAGE_COPY = {
     savedLabel: "已保存的场次",
     empty: "还没有生成剧本。勾选章节后点「生成」。",
   },
+  storyboard: {
+    title: "分镜生图",
+    hint: "把已保存的剧本场次逐场转成出图提示词，发给造梦机出图",
+    savedLabel: "",
+    empty: "还没有生成分镜提示词。点「生成分镜提示词」。",
+  },
 };
 
 // 各阶段的右栏说明：随阶段、选章、选稿与保存状态变化（计划 §7.2）。
@@ -161,6 +169,7 @@ const STAGE_PLAN_COPY = {
   elements: "根据本次选择的章节稿件整理人物、场景和道具，不要求事先有大纲。",
   outline: "可以直接根据章节稿件生成三幕大纲，不强制先生成要素。",
   script: "没有保存要素或大纲也能直接生成剧本；有保存内容时按这里明确选择的版本加入人物设定和改编大纲。",
+  storyboard: "把剧本里已保存的最新场次逐场转成出图提示词，每场一条；生成后勾选需要的场次，发送到造梦机逐条出图。分镜提示词不写回作品。",
 };
 
 // ============================================================
@@ -234,6 +243,7 @@ const STAGE_PANEL_CONTROL_IDS = [
   "novelMaxChapters", "novelMaxChaptersValue",
   "novelSceneBlock", "novelSceneCount", "novelSceneNote", "novelSceneList", "novelSceneEdit",
   "novelSceneHead", "novelSceneBody", "novelSceneSave", "novelSceneCancel", "novelScriptVersion",
+  "novelStoryboardNote", "novelStoryboardList", "novelStoryboardAll", "novelStoryboardSend",
 ];
 
 function activateStagePanel(stage) {
@@ -269,7 +279,7 @@ function prepareStagePanels() {
   };
   first.dataset.stagePanel = "elements";
   markControls(first);
-  for (const stage of ["outline", "script"]) {
+  for (const stage of ["outline", "script", "storyboard"]) {
     const clone = first.cloneNode(true);
     clone.removeAttribute("id");
     clone.dataset.stagePanel = stage;
@@ -671,6 +681,7 @@ function renderAiEditor() {
   }
   const bits = [];
   if (source) bits.push("AI 会根据这份稿件和你的要求生成新稿，原文会保留。");
+  if (slot.progressNote) bits.push(slot.progressNote);
   if (task) {
     bits.push(`任务${TASK_STATUS_LABELS[status] || "状态未知"}。`);
     if (status === "done" && draft.trim()) bits.push("结果还没保存；保存后才会新增稿件卡片。");
@@ -813,7 +824,8 @@ function renderPickManuscripts() {
   const host = $("#novelPickManuscripts");
   if (!host) return;
   const picked = [...novel.picked].sort((a, b) => a - b);
-  if (novel.stage === "split" || !picked.length) {
+  // 拆章与分镜生图不按章节选稿：分镜吃的是已保存剧本场次，没有逐章素材。
+  if (novel.stage === "split" || novel.stage === "storyboard" || !picked.length) {
     host.replaceChildren();
     host.hidden = true;
     return;
@@ -921,19 +933,28 @@ function renderLimits() {
 function renderStagePanel() {
   const stage = novel.stage;
   const stageData = stageState(stage);
+  const isStoryboard = stage === "storyboard";
   renderLimits();
   renderPickManuscripts();
+  // 分镜生图不吃章节素材：正文上限滑条对它没有意义，整块让位。
+  document.querySelector("#novelStagePanel .novel-limits")?.toggleAttribute("hidden", isStoryboard);
 
   // 素材勾选状态：用左栏已勾的章节；导入暂存态不允许生成。
+  // 分镜生图看的是剧本场次数，不是勾选章节。
   const picked = [...novel.picked].sort((a, b) => a - b);
+  const sceneCount = Array.isArray(novel.book?.script) ? novel.book.script.length : 0;
   const overLimit = picked.length > novel.maxChapters;
-  const ready = Boolean(novel.bookId) && picked.length > 0 && !novel.staged && !overLimit;
+  const ready = isStoryboard
+    ? Boolean(novel.bookId) && sceneCount > 0 && !novel.staged
+    : Boolean(novel.bookId) && picked.length > 0 && !novel.staged && !overLimit;
   const meta = $("#novelStageMeta");
   if (meta) {
     meta.replaceChildren(
       metaItem("作品", novel.book ? `《${novel.book.title}》` : "未打开"),
-      metaItem("素材章节", picked.length ? `${picked.length} 章` : "未选择"),
-      metaItem("上限", `最多 ${novel.maxChapters} 章`),
+      ...(isStoryboard
+        ? [metaItem("剧本场次", sceneCount ? `${sceneCount} 场` : "还没有场次")]
+        : [metaItem("素材章节", picked.length ? `${picked.length} 章` : "未选择"),
+           metaItem("上限", `最多 ${novel.maxChapters} 章`)]),
     );
   }
   document.querySelectorAll("#novelStagePanel [data-novel-context]").forEach((section) => {
@@ -962,7 +983,8 @@ function renderStagePanel() {
   const generate = $("#novelStageGenerate");
   if (generate) {
     generate.disabled = !ready || stageData.busy;
-    generate.textContent = stage === "script" ? "生成剧本" : `生成${stageLabel(stage)}`;
+    generate.textContent = stage === "script" ? "生成剧本"
+      : (isStoryboard ? "生成分镜提示词" : `生成${stageLabel(stage)}`);
     generate.title = "每次点击都会新建一条任务；可以在结果确认后再次生成，不会锁死本阶段。";
   }
   const warning = $("#novelStageWarning");
@@ -970,9 +992,10 @@ function renderStagePanel() {
     const lines = [];
     if (novel.staged) lines.push("先把导入的章节保存为作品，再生成。");
     else if (!novel.bookId) lines.push("先打开或保存一个作品。");
-    else if (!picked.length) lines.push("在左侧勾选至少一章作为素材。");
+    else if (isStoryboard && !sceneCount) lines.push("这个作品还没有剧本场次；先到「剧本」阶段生成并保存场次。");
+    else if (!isStoryboard && !picked.length) lines.push("在左侧勾选至少一章作为素材。");
     else if (!novel.stageModelName) lines.push("还没有可用模型，请到设置里检查模型。");
-    else if (overLimit) {
+    else if (!isStoryboard && overLimit) {
       lines.push(`一次最多带 ${novel.maxChapters} 章（已选 ${picked.length} 章，多了 ${picked.length - novel.maxChapters} 章），请分批生成或调高上限。`);
     }
     for (const note of stageData.warnings) lines.push(note);
@@ -1022,16 +1045,18 @@ function renderStagePanel() {
     if (retry) retry.hidden = !["failed", "cancelled", "interrupted"].includes(status);
     const apply = $("#novelStageApply");
     // 只有「已完成且结果非空」才能写回：写回是覆盖动作，不能拿空结果覆盖已有成果。
+    // 分镜提示词不写回作品（结果直接发给造梦机），所以这一阶段不出现写回按钮。
     if (apply) {
-      apply.hidden = !(status === "done" && body.trim());
+      apply.hidden = isStoryboard || !(status === "done" && body.trim());
       apply.textContent = stage === "script" ? "保存为新剧本版本" : `保存为新${stageLabel(stage)}版本`;
       apply.title = "保存会新增一个版本并保留旧版；后续阶段可选择使用哪个版本。";
     }
   }
   renderStageTaskHistory(stage, stageData.activeTaskId);
 
-  // 「作品里已保存的结果」只给要素/大纲用；剧本阶段由场次列表承担。
-  const saved = stage === "script" ? "" : stageSavedText(stage);
+  // 「作品里已保存的结果」只给要素/大纲用；剧本阶段由场次列表承担；
+  // 分镜生图不写回作品，没有已保存版本。
+  const saved = stage === "script" || isStoryboard ? "" : stageSavedText(stage);
   if (savedBox) savedBox.hidden = !saved;
   if (saved) {
     const versionSelect = $("#novelStageVersion");
@@ -1049,6 +1074,7 @@ function renderStagePanel() {
     if (savedAt) savedAt.textContent = stageSavedAt(stage);
   }
   renderSceneBlock(stage === "script");
+  renderStoryboard(stageData, novel.tasks.find((row) => row.id === stageData.activeTaskId) || null);
   applyStageCollapse();
 }
 
@@ -1194,13 +1220,31 @@ function renderPlan() {
 
   // 预算与实际输入：数值全部来自服务端预检，不在前端重算。
   const budget = novel.budget;
-  if (budget) {
+  if (novel.stage === "storyboard") {
+    // 分镜生图没有「每章上限」概念，说明按场次口径来写。
+    const scenes = Array.isArray(novel.book?.script) ? novel.book.script : [];
+    const kgCount = Number(budget?.kg_entities || 0);
+    const lines = [
+      `按剧本里已保存的 ${scenes.length} 场生成，每场一条出图提示词。`,
+      budget ? `这次发送的场次正文与说明约 ${fmtChars(budget.chars)} 字。` : "",
+      kgCount
+        ? `已加入已保存要素里的 ${kgCount} 条设定参考，帮助人物与场景在这组图里保持一致。`
+        : "还没有已保存要素；提示词只按场次内容来写。",
+      budget?.context_known
+        ? `估算输入约 ${budget.estimated_tokens} tokens，模型可用约 ${budget.available_tokens} tokens。`
+        : (budget ? "模型上下文容量未知：无法确认能否容纳本次输入。" : ""),
+    ].filter(Boolean);
+    push("实际输入与限制", lines.length ? lines : ["勾选章节后这里会显示实际输入。"]);
+  } else if (budget) {
     const lines = [
       `每章上限 ${budget.body_limit} 字，一次最多 ${budget.max_chapters} 章。`,
       `这次发送正文约 ${fmtChars(budget.used_chars)} 字（原文共 ${fmtChars(budget.total_source_chars)} 字）。`,
     ];
     if (budget.dropped_chars > 0) {
       lines.push(`有 ${fmtChars(budget.dropped_chars)} 字因每章上限被省略；生成前就已经知道，不会等排队后才说。`);
+    }
+    if (Number(budget.kg_entities) > 0) {
+      lines.push(`已加入已保存要素里的 ${budget.kg_entities} 条设定参考，帮助人物与设定保持一致。`);
     }
     lines.push(budget.context_known
       ? `估算输入约 ${budget.estimated_tokens} tokens，模型可用约 ${budget.available_tokens} tokens。`
@@ -1436,6 +1480,146 @@ async function moveScene(sceneNo, direction) {
 }
 
 // ============================================================
+// 分镜生图（阶段四）：逐场解析与发送到造梦机
+// ============================================================
+
+/** 逐场行在勾选集里的键：场次号 + 序号，模型漏号/重号也不会互相顶掉。 */
+function storyboardRowKey(row, index) {
+  return `${Number(row?.scene_no) || 0}:${index}`;
+}
+
+/** 与后端 parse_storyboard 同口径的逐场拆分；识别不到结构就 parsed=false 整段显示。 */
+function parseStoryboardClient(text) {
+  const raw = String(text || "");
+  if (!raw.trim()) return { rows: [], parsed: false };
+  const rows = [];
+  let current = null;
+  let buffer = [];
+  const flush = () => {
+    if (!current) return;
+    rows.push({ scene_no: current.scene_no, scene_head: current.scene_head, prompt: buffer.join("\n").trim() });
+    current = null;
+    buffer = [];
+  };
+  for (const line of raw.split(/\r?\n/)) {
+    const match = line.match(/^[ \t　]*【\s*第\s*(\d+)\s*场\s*】\s*(.*)$/);
+    if (match) {
+      flush();
+      current = { scene_no: Number(match[1]), scene_head: match[2].trim() };
+      continue;
+    }
+    if (current) buffer.push(line);
+  }
+  flush();
+  if (!rows.some((row) => row.scene_no)) return { rows: [], parsed: false };
+  return { rows, parsed: true };
+}
+
+/** 任务完成后把结果解析成逐场行（每个任务只解析一次，轮询重画不重算）。 */
+function syncStoryboardRows(stageData, task) {
+  if (!task || String(task.status || "") !== "done") return;
+  if (stageData.rowsForTaskId === task.id) return;
+  const text = String(stageData.streamText || task.result || task.result_partial || "");
+  const { rows, parsed } = parseStoryboardClient(text);
+  stageData.rows = rows;
+  stageData.parsed = parsed;
+  stageData.checked = new Set(rows.map((row, index) => storyboardRowKey(row, index)));
+  stageData.rowsForTaskId = task.id;
+}
+
+function storyboardRow(row, index, stageData) {
+  const key = storyboardRowKey(row, index);
+  const wrap = document.createElement("label");
+  wrap.className = "novel-storyboard-row";
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.dataset.novelStoryboardRow = key;
+  box.checked = stageData.checked.has(key);
+  box.setAttribute("aria-label", `发送第 ${row.scene_no} 场提示词`);
+  const copy = document.createElement("span");
+  copy.className = "novel-storyboard-copy";
+  const head = document.createElement("strong");
+  head.textContent = row.scene_head || `第 ${row.scene_no} 场`;
+  const body = document.createElement("small");
+  body.textContent = row.prompt;
+  copy.append(head, body);
+  wrap.append(box, copy);
+  return wrap;
+}
+
+function renderStoryboard(stageData, task) {
+  const note = $("#novelStoryboardNote");
+  const list = $("#novelStoryboardList");
+  const send = $("#novelStoryboardSend");
+  const all = $("#novelStoryboardAll");
+  if (!note || !list || !send || !all) return;
+  const scenes = Array.isArray(novel.book?.script) ? novel.book.script : [];
+  const status = String(task?.status || "");
+  const setNoteOnly = (text) => {
+    note.textContent = text;
+    list.replaceChildren();
+    send.hidden = true;
+    all.hidden = true;
+  };
+  if (!scenes.length) {
+    setNoteOnly("这个作品还没有剧本场次。先到「剧本」阶段生成并保存场次，再回来生成分镜。");
+    return;
+  }
+  if (!task || status !== "done") {
+    setNoteOnly(!task
+      ? `共 ${scenes.length} 场。点「生成分镜提示词」，模型会把每一场转成一条出图提示词。`
+      : "生成完成后，这里会按场列出提示词。");
+    return;
+  }
+  syncStoryboardRows(stageData, task);
+  if (!stageData.parsed) {
+    setNoteOnly("没能识别出「【第 N 场】」的场次结构，上面是模型原文，没有强行拆分。可以点「重试」再生成一次。");
+    return;
+  }
+  const rows = stageData.rows;
+  list.replaceChildren(...rows.map((row, index) => storyboardRow(row, index, stageData)));
+  const checkedCount = stageData.checked.size;
+  send.hidden = false;
+  send.textContent = checkedCount ? `发送到造梦机（${checkedCount} 条）` : "发送到造梦机";
+  send.disabled = !checkedCount;
+  all.hidden = rows.length < 2;
+  all.textContent = checkedCount === rows.length ? "清空勾选" : "全选";
+  note.textContent = `共 ${rows.length} 场提示词。勾选后发送到造梦机，在造梦机里逐条「填入」正向提示词出图；提示词不写回作品。`;
+}
+
+/** 把勾选的分镜提示词批量带到造梦机（跨页交接，不做剪贴板中转）。 */
+function sendStoryboardToComfyui() {
+  const stageData = stageState();
+  const task = novel.tasks.find((row) => row.id === stageData.activeTaskId) || null;
+  syncStoryboardRows(stageData, task);
+  if (!stageData.parsed || !stageData.rows.length) {
+    toast("还没有可发送的分镜提示词");
+    return;
+  }
+  const items = stageData.rows
+    .map((row, index) => ({ row, key: storyboardRowKey(row, index) }))
+    .filter((item) => stageData.checked.has(item.key))
+    .map((item) => ({ no: item.row.scene_no, head: item.row.scene_head || "", prompt: item.row.prompt }));
+  if (!items.length) {
+    toast("先勾选要发送的场次");
+    return;
+  }
+  document.dispatchEvent(new CustomEvent("naiba:storyboard-handoff", { detail: { items } }));
+  setStudioPage("comfyui");
+  toast(`已把 ${items.length} 条分镜提示词带到造梦机`);
+}
+
+function toggleStoryboardAll() {
+  const stageData = stageState();
+  if (stageData.checked.size >= stageData.rows.length) stageData.checked.clear();
+  else {
+    stageData.rows.forEach((row, index) => stageData.checked.add(storyboardRowKey(row, index)));
+  }
+  const task = novel.tasks.find((row) => row.id === stageData.activeTaskId) || null;
+  renderStoryboard(stageData, task);
+}
+
+// ============================================================
 // 模型选择（与提词库同口径）
 // ============================================================
 
@@ -1621,6 +1805,8 @@ async function pollActiveTask() {
             slot.recentDeltas = slot.recentDeltas.filter((sample) => Date.now() - sample.at <= 10000);
           }
         }
+        // 分块续写（4A）的进度事件：「正在生成第 i/N 块」。
+        if (row.type === "status" && row.message) slot.progressNote = String(row.message);
         if (typeof row.seq === "number") slot.taskCursor = Math.max(slot.taskCursor, row.seq);
       }
     } catch (_error) {
@@ -1642,13 +1828,15 @@ async function pollActiveTask() {
 
 /** 提交前预检：把右栏说明刷新成真实输入（不建任务、不计费）。 */
 async function refreshPreviewBudget() {
-  if (!novel.bookId || novel.stage === "split") {
+  const stage = novel.stage;
+  if (!novel.bookId || stage === "split") {
     novel.budget = null;
     refreshPreview();
     return;
   }
+  // 分镜生图吃剧本场次，不要求勾选章节。
   const picked = [...novel.picked].sort((a, b) => a - b);
-  if (!picked.length) {
+  if (stage !== "storyboard" && !picked.length) {
     novel.budget = null;
     refreshPreview();
     return;
@@ -1660,15 +1848,19 @@ async function refreshPreviewBudget() {
       method: "POST",
       body: {
         book_id: novel.bookId,
-        stage: novel.stage,
-        chapter_ids: picked,
-        manuscripts: manuscriptsPayload(),
-        body_chars: novel.bodyChars,
-        max_chapters: novel.maxChapters,
+        stage,
+        ...(stage === "storyboard"
+          ? { scene_ids: [] }
+          : {
+              chapter_ids: picked,
+              manuscripts: manuscriptsPayload(),
+              body_chars: novel.bodyChars,
+              max_chapters: novel.maxChapters,
+              elements_version: novel.selectedVersions.elements || undefined,
+              outline_version: novel.selectedVersions.outline || undefined,
+            }),
         extra_note: String($("#novelStageNote")?.value || ""),
         model_key: model.model_key,
-        elements_version: novel.selectedVersions.elements || undefined,
-        outline_version: novel.selectedVersions.outline || undefined,
       },
     });
     if (token !== novel.budgetToken) return;
@@ -1695,14 +1887,18 @@ async function generateStage({ confirmLarge = false } = {}) {
   if (!novel.bookId) return;
   const stage = novel.stage;
   const stageData = stageState(stage);
+  const isStoryboard = stage === "storyboard";
+  // 分镜生图的素材是已保存剧本场次，不勾选章节。
   const picked = [...novel.picked].sort((a, b) => a - b);
-  if (!picked.length) {
-    toast("先勾选至少一章作为素材");
-    return;
-  }
-  if (picked.length > novel.maxChapters) {
-    toast(`一次最多带 ${novel.maxChapters} 章，请分批生成或调高上限`);
-    return;
+  if (!isStoryboard) {
+    if (!picked.length) {
+      toast("先勾选至少一章作为素材");
+      return;
+    }
+    if (picked.length > novel.maxChapters) {
+      toast(`一次最多带 ${novel.maxChapters} 章，请分批生成或调高上限`);
+      return;
+    }
   }
   const model = readStageModel();
   if (!model.model_name) {
@@ -1718,15 +1914,19 @@ async function generateStage({ confirmLarge = false } = {}) {
       body: {
         book_id: novel.bookId,
         stage,
-        chapter_ids: picked,
-        manuscripts: manuscriptsPayload(),
-        body_chars: novel.bodyChars,
-        max_chapters: novel.maxChapters,
+        ...(isStoryboard
+          ? { scene_ids: [] }
+          : {
+              chapter_ids: picked,
+              manuscripts: manuscriptsPayload(),
+              body_chars: novel.bodyChars,
+              max_chapters: novel.maxChapters,
+              elements_version: novel.selectedVersions.elements || undefined,
+              outline_version: novel.selectedVersions.outline || undefined,
+            }),
         extra_note: String($("#novelStageNote")?.value || ""),
         model_key: model.model_key,
         model_name: model.model_name,
-        elements_version: novel.selectedVersions.elements || undefined,
-        outline_version: novel.selectedVersions.outline || undefined,
         confirm_large: confirmLarge ? 1 : undefined,
       },
     });
@@ -1737,6 +1937,11 @@ async function generateStage({ confirmLarge = false } = {}) {
     stageData.submittedAt = Date.now();
     stageData.firstDeltaAt = 0;
     stageData.recentDeltas = [];
+    stageData.progressNote = "";
+    stageData.rows = [];
+    stageData.parsed = false;
+    stageData.checked = new Set();
+    stageData.rowsForTaskId = "";
     // 新任务提交后展开结果区：上一轮用户收起来过，也不该挡住这次的新结果。
     novel.collapsed.delete(`${stage}:task`);
     novel.budget = payload.budget || novel.budget;
@@ -1789,6 +1994,13 @@ async function retryStageTask() {
     slot.activeTaskId = task?.id || "";
     slot.streamText = "";
     slot.taskCursor = 0;
+    slot.progressNote = "";
+    if (slot.rows) {
+      slot.rows = [];
+      slot.parsed = false;
+      slot.checked = new Set();
+      slot.rowsForTaskId = "";
+    }
     novel.collapsed.delete(`${novel.stage}:task`);
     await refreshStageTasks();
     toast("已重新排队");
@@ -1799,6 +2011,10 @@ async function retryStageTask() {
 
 async function applyStageResult() {
   const stage = novel.stage;
+  if (stage === "storyboard") {
+    toast("分镜提示词不写回作品；勾选后发送到造梦机出图");
+    return;
+  }
   const stageData = stageState(stage);
   if (!stageData.activeTaskId || !novel.bookId) return;
   const task = novel.tasks.find((row) => row.id === stageData.activeTaskId);
@@ -1882,7 +2098,12 @@ async function submitAiAdapt() {
     slot.streamText = "";
     slot.taskCursor = 0;
     slot.warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+    const kgCount = Number(payload.sources?.kg_entities || 0);
+    if (kgCount > 0) {
+      slot.warnings.push(`已加入已保存要素里的 ${kgCount} 条设定参考，帮助人物与设定保持一致。`);
+    }
     slot.submittedAt = Date.now();
+    slot.progressNote = "";
     if (novel.book && Number.isInteger(Number(payload.book_revision))) {
       novel.book.revision = Number(payload.book_revision);
     }
@@ -2291,7 +2512,7 @@ async function deleteManageSelection() {
 // ============================================================
 
 function setStage(stage) {
-  const next = ["split", "elements", "outline", "script"].includes(stage) ? stage : "split";
+  const next = ["split", "elements", "outline", "script", "storyboard"].includes(stage) ? stage : "split";
   novel.stage = next;
   stageState(next).warnings = [];
   novel.stageWarnings = [];
@@ -2395,10 +2616,17 @@ async function openBook(bookId) {
       data.submittedAt = 0;
       data.firstDeltaAt = 0;
       data.recentDeltas = [];
+      data.progressNote = "";
+      if (data.rows) {
+        data.rows = [];
+        data.parsed = false;
+        data.checked = new Set();
+        data.rowsForTaskId = "";
+      }
     }
     novel.adaptTask = {
       activeTaskId: "", taskCursor: 0, streamText: "", warnings: [],
-      busy: false, submittedAt: 0,
+      busy: false, submittedAt: 0, progressNote: "",
     };
     const recovery = novel.book?.origin_recovery || {};
     const legacy = Array.isArray(recovery.legacy) ? recovery.legacy : [];
@@ -3010,6 +3238,15 @@ export function bindNovelEvents() {
   });
 
   $("#novelEditorBody")?.addEventListener("click", (event) => {
+    // 分镜生图：发送到造梦机 / 全选（按钮跟着活动面板搬 id，必须用容器委托）。
+    if (event.target.closest("#novelStoryboardSend")) {
+      sendStoryboardToComfyui();
+      return;
+    }
+    if (event.target.closest("#novelStoryboardAll")) {
+      toggleStoryboardAll();
+      return;
+    }
     const card = event.target.closest("[data-novel-task]");
     if (!card) return;
     const task = novel.tasks.find((row) => row.id === card.dataset.novelTask);
@@ -3034,6 +3271,14 @@ export function bindNovelEvents() {
       if (value) novel.manuscriptChoice.set(chapterNo, value);
       else novel.manuscriptChoice.delete(chapterNo);
       void refreshPreviewBudget();
+      return;
+    } else if (target.matches("[data-novel-storyboard-row]")) {
+      // 分镜逐场勾选：只改发送范围，不触发预检。
+      const stageData = stageState();
+      const key = String(target.dataset.novelStoryboardRow || "");
+      if (target.checked) stageData.checked.add(key);
+      else stageData.checked.delete(key);
+      renderStoryboard(stageData, novel.tasks.find((row) => row.id === stageData.activeTaskId) || null);
       return;
     } else return;
     renderStagePanel();

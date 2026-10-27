@@ -2,7 +2,7 @@
 // 09-settings.js —— 拆分自 public/app.js 第 3115-4672 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, agentAvatarEmoji, agentAvatarSrc, api, applyAppearance, applyChatBackground, CHAT_FONT_PICKS, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, isFontInstalled, localFileUrl, MODEL_SKINS, modelSkinImageUrl, refreshChatBackgroundImageStatus, saveAppearance, state, toast } from "./01-core.js";
+import { $, $$, agentAvatarEmoji, agentAvatarSrc, api, applyAppearance, applyChatBackground, CHAT_FONT_PICKS, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, isFontInstalled, isModelSkin, localFileUrl, MODEL_SKINS, modelSkinImageUrl, refreshChatBackgroundImageStatus, saveAppearance, state, toast } from "./01-core.js";
 import { applyConversationAgent, populateComposerModels, populateModels, renderAgents, updateUnloadModelButton } from "./07-models-agents.js";
 import { closeAgentPromptPresetPanel, currentAgentFixedSkillIds, renderAgentPromptPresetList } from "./08-conversations.js";
 import { skillList } from "./13-skill-refs.js";
@@ -182,6 +182,9 @@ export function syncAppearanceControls() {
   }
   const trayToast = $('#trayDoneToastToggle');
   if (trayToast) trayToast.checked = appearance.tray_done_toast !== false;
+  // 皮肤与聊天背景互斥：换皮肤时同步刷新那张卡上的说明（模型皮肤盖住背景 / 切回配色恢复）。
+  // 面板还没建出背景控件时 updateChatBackgroundControls 自身会安全跳过。
+  updateChatBackgroundControls();
 }
 
 // 「指定字体」下拉的选项：依 CHAT_FONT_PICKS 现建（字体清单不进 HTML），
@@ -284,6 +287,17 @@ export function updateChatBackgroundControls() {
   }
   const previewLabel = preview?.querySelector('.chat-background-preview-label');
   if (previewLabel) previewLabel.textContent = imageMissing ? '文件暂不可用' : '点击调整';
+  // 「当前用的是模型皮肤」提示：模型皮肤与聊天背景互斥（两者都铺对话区整块背景），
+  // 模型皮肤生效时背景图不渲染。设置与图片都保留着，切回配色皮肤立刻恢复——
+  // 不说清楚的话，用户会以为背景图丢了或设置没保存。
+  const skinHint = $('#chatBackgroundSkinHint');
+  if (skinHint) {
+    const modelSkinActive = isModelSkin(state.appearance?.skin);
+    skinHint.hidden = !modelSkinActive;
+    skinHint.textContent = modelSkinActive
+      ? '当前使用的是模型皮肤，它会盖住聊天背景，所以背景图暂时不显示（设置和图片都还在）。在这里选一张背景图或点一个内置背景，会自动切回你用过的配色皮肤并显示背景；也可以在上面「界面皮肤」里手选一个配色皮肤。'
+      : '';
+  }
   const clear = $('#clearChatBackground');
   if (clear) clear.disabled = !background.image;
   const pick = $('#pickChatBackground');

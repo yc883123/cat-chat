@@ -524,6 +524,16 @@ html[data-theme="dark"] .chat-backdrop .model-skin-layer::after {
   background: linear-gradient(180deg, rgba(9,11,18,.52), rgba(9,11,18,.70));
 }
 
+/* 模型皮肤与聊天背景互斥（二者都是对话区整块背景，叠在一起会互相糊住）。
+   规则：**模型皮肤优先**——它是用户明确选中的整套外观，且是完整插画；聊天背景的
+   设置原样保留、只是不渲染，切回配色皮肤后立刻恢复，不需要重新选图。
+   只作用于对话区（.chat-backdrop）里的那两层：设置卡的缩略图、背景编辑器白板
+   仍要显示背景图，否则用户没法预览和调取景。 */
+html[data-model-skin="on"] .chat-backdrop .chat-bg-surface,
+html[data-model-skin="on"] .chat-backdrop .chat-bg-blur {
+  display: none;
+}
+
 /* 模糊填充层：取景没铺满对话区时（zoom < 1 / 完整显示），未覆盖的地方用**同一张图的模糊放大版**
    补上，而不是露一条页面底色的纸带（电视与短视频的常规做法）。
    只在需要时显示：applyChatBackground() 会写 :root 的 data-chat-bg-cover="0"。

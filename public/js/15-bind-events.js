@@ -106,6 +106,9 @@ async function handleChatBackgroundFile(file) {
     reclaimBackgroundFile(previous);
   }
   updateChatBackgroundControls();
+  // 设背景会让模型皮肤让位（退回配色皮肤），皮肤选中态要跟着刷新，否则面板里
+  // 卡片还高亮着模型皮肤、对话区却已经是配色皮肤。
+  syncAppearanceControls();
   setChatBackgroundStatus('背景图已更新');
   resetChatBackgroundFileInput();
 }
@@ -132,6 +135,8 @@ async function applyChatBackgroundPreset(path) {
   } finally {
     buttons.forEach((button) => { button.disabled = false; });
     updateChatBackgroundControls();
+    // 同「选图」：应用内置背景也可能让模型皮肤让位，皮肤选中态要同步。
+    syncAppearanceControls();
   }
 }
 

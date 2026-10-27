@@ -222,6 +222,22 @@ export const MODEL_SKINS = {
 const SKINS = new Set([...COLOR_SKINS, ...Object.keys(MODEL_SKINS)]);
 const SKIN_MODES = new Set(['auto', 'manual']);
 export const SKIN_MODE_DEFAULT = 'auto';
+// 上一次用过的配色皮肤：模型皮肤会盖住聊天背景，用户一旦去设背景就说明他想用背景，
+// 这时自动退回这个配色皮肤（而不是硬切紫藤，免得把用户挑的色相也一起改掉）。
+const LAST_COLOR_SKIN_KEY = 'naibaChatLastColorSkin';
+let lastColorSkin = (() => {
+  try {
+    const saved = localStorage.getItem(LAST_COLOR_SKIN_KEY) || '';
+    return COLOR_SKINS.includes(saved) ? saved : 'violet';
+  } catch (_) {
+    return 'violet';
+  }
+})();
+
+/** 当前应退回的配色皮肤（模型皮肤让位给聊天背景时用）。 */
+export function lastColorSkinOrDefault() {
+  return COLOR_SKINS.includes(lastColorSkin) ? lastColorSkin : 'violet';
+}
 
 /** 该皮肤键是否用整张图片渲染（true = 模型皮肤，false = CSS 配色皮肤）。 */
 export function isModelSkin(skin) {
@@ -422,6 +438,11 @@ export function applyAppearance(appearance = {}) {
       : (typeof previous.tray_done_toast === 'boolean' ? previous.tray_done_toast : true),
   };
   state.appearance = next;
+  // 记住最近一次用过的配色皮肤：模型皮肤让位给聊天背景时退回这一个，而不是硬切紫藤。
+  if (COLOR_SKINS.includes(next.skin)) {
+    lastColorSkin = next.skin;
+    try { localStorage.setItem(LAST_COLOR_SKIN_KEY, next.skin); } catch (_) { /* storage disabled */ }
+  }
   const root = document.documentElement;
   const actualTheme = resolvedTheme(next.theme);
   root.dataset.theme = actualTheme;
@@ -1023,6 +1044,12 @@ export async function saveChatBackground(patch = {}) {
   if (state.bootstrap?.settings) state.bootstrap.settings.chat_background = saved || next;
   // 图片路径被写入（换图 / 撤销旋转）→ 重探可用性：新图刚上传过，旧图却未必还在磁盘上。
   if ('image' in payload) void refreshChatBackgroundImageStatus();
+  // 用户一旦设了聊天背景，就说明他想用背景——模型皮肤会让位（两者都铺对话区整块，
+  // 叠在一起会互相糊住）。退回最近用过的配色皮肤，不硬切紫藤。
+  // 只在**确实有背景图**且当前是模型皮肤时才让位：清空背景、单改取景/强度都不触发。
+  if (String(state.chatBackground?.image || '').trim() && isModelSkin(state.appearance?.skin)) {
+    await saveAppearance({ skin: lastColorSkinOrDefault() });
+  }
   return state.chatBackground;
 }
 

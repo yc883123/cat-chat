@@ -213,6 +213,9 @@ async function refreshWorkflows() {
   } catch (error) {
     toast(`读取工作流列表失败：${error.message}`);
   }
+  // 「刷新」是用户在 ComfyUI 侧动过之后的显式动作：模型目录清单一并重拉，
+  // 参数栏的模型/LoRA 下拉下一次展开就是新目录（下拉是展开时现读缓存）。
+  void loadModelCandidates(true);
 }
 
 function renderWorkflowList() {
@@ -658,25 +661,40 @@ async function loadModelCandidates(force = false) {
     comfyui.modelCandidates = {
       checkpoints: Array.isArray(payload.models) ? payload.models : [],
       loras: Array.isArray(payload.loras) ? payload.loras : [],
+      unets: Array.isArray(payload.unets) ? payload.unets : [],
+      clips: Array.isArray(payload.clips) ? payload.clips : [],
+      vaes: Array.isArray(payload.vaes) ? payload.vaes : [],
+      controlnets: Array.isArray(payload.controlnets) ? payload.controlnets : [],
     };
   } catch (_) {
     // 候选拿不到就只留自由输入，不阻断编辑
-    comfyui.modelCandidates = { checkpoints: [], loras: [] };
+    comfyui.modelCandidates = { checkpoints: [], loras: [], unets: [], clips: [], vaes: [], controlnets: [] };
   }
 }
+
+// 各模型加载角色对应的后端候选清单键；不在表里的角色没有离线兜底。
+const ROLE_CANDIDATE_KEYS = {
+  checkpoint: "checkpoints",
+  lora: "loras",
+  unet: "unets",
+  clip: "clips",
+  vae: "vaes",
+  controlnet: "controlnets",
+};
 
 function modelCandidatesFor(role) {
   const cache = comfyui.modelCandidates;
   if (!cache) return [];
-  return role === "lora" ? (cache.loras || []) : (cache.checkpoints || []);
+  const key = ROLE_CANDIDATE_KEYS[role];
+  return key ? (cache[key] || []) : [];
 }
 
 // 槽位候选：节点声明里带来的枚举优先（schema 增强）；模型加载槽离线时回退
-// /api/comfyui/models 的目录清单；都没有就自由输入。
+// /api/comfyui/models 的对应目录清单；都没有就自由输入。
 function slotCandidates(slot) {
   const declared = Array.isArray(slot.candidates) ? slot.candidates : [];
   if (declared.length) return declared;
-  if (slot.role === "checkpoint" || slot.role === "lora") return modelCandidatesFor(slot.role);
+  if (ROLE_CANDIDATE_KEYS[slot.role]) return modelCandidatesFor(slot.role);
   return [];
 }
 
@@ -836,15 +854,15 @@ function renderSlot(slot) {
     input.value = slot.default ?? "";
   }
   const candidates = slotCandidates(slot);
-  if (slot.control === "combo" || slot.role === "checkpoint" || slot.role === "lora") {
+  if (slot.control === "combo" || ROLE_CANDIDATE_KEYS[slot.role]) {
     // 枚举/模型槽：可搜索下拉；候选不可用或当前值不在候选里也照常编辑提交，
     // 不静默替换（计划 §4）。
     input.autocomplete = "off";
     input.spellcheck = false;
-    if (slot.role === "checkpoint" || slot.role === "lora") {
-      input.placeholder = slot.role === "lora"
-        ? "从 ComfyUI LoRA 里选，或直接输入文件名"
-        : "从 ComfyUI 模型里选，或直接输入文件名";
+    if (slot.role === "lora") {
+      input.placeholder = "从 ComfyUI LoRA 里选，或直接输入文件名";
+    } else if (ROLE_CANDIDATE_KEYS[slot.role]) {
+      input.placeholder = "从 ComfyUI 模型里选，或直接输入文件名";
     }
     attachCandidateCombo(input, wrap, () => slotCandidates(slot));
   }

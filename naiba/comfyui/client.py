@@ -328,6 +328,38 @@ def lora_names(base: str) -> list[str]:
     return sorted(dict.fromkeys(names))
 
 
+def unet_names(base: str) -> list[str]:
+    """UNET/扩散模型候选（models/unet、models/diffusion_models 的文件清单）。"""
+    names: list[str] = []
+    for class_type, field in (("UNETLoader", "unet_name"),
+                              ("UnetLoaderGGUF", "unet_name")):
+        names.extend(_enum_choices(base, class_type, field))
+    return sorted(dict.fromkeys(names))
+
+
+def clip_names(base: str) -> list[str]:
+    """CLIP/文本编码器候选（models/clip、models/text_encoders）。"""
+    names: list[str] = []
+    for class_type, field in (("CLIPLoader", "clip_name"),
+                              ("DualCLIPLoader", "clip_name")):
+        names.extend(_enum_choices(base, class_type, field))
+    return sorted(dict.fromkeys(names))
+
+
+def vae_names(base: str) -> list[str]:
+    """VAE 候选（models/vae）。"""
+    return sorted(dict.fromkeys(_enum_choices(base, "VAELoader", "vae_name")))
+
+
+def controlnet_names(base: str) -> list[str]:
+    """ControlNet 候选（models/controlnet）。"""
+    names: list[str] = []
+    for class_type, field in (("ControlNetLoader", "control_net_name"),
+                              ("ControlNetLoaderAdvanced", "control_net_name")):
+        names.extend(_enum_choices(base, class_type, field))
+    return sorted(dict.fromkeys(names))
+
+
 def random_seed() -> int:
     return secrets.randbelow(SEED_RANDOM_MAX + 1)
 

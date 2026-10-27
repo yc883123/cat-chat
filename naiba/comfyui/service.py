@@ -198,25 +198,40 @@ class ComfyUIService:
         return {"ok": True, "url": normalized, "reachable": True, **stats}, 200
 
     def api_models(self) -> tuple[dict[str, Any], int]:
-        """Checkpoint / LoRA 模型候选（只读辅助选择）。
+        """模型候选（只读辅助选择）：checkpoint / LoRA 之外再带 unet / clip /
+        vae / controlnet 各自的目录清单。
 
-        ComfyUI 不可达或解析失败时返回空候选加说明——候选只是辅助，
-        不阻断工作流编辑和提交（用户仍可手动输入模型名）。
+        各类候选来自对应标准加载器在 /object_info 里的枚举；ComfyUI 不可达或
+        解析失败时返回空候选加说明——候选只是辅助，不阻断工作流编辑和提交
+        （用户仍可手动输入模型名）。任一类非空即算 ok。
         """
         base = client.normalize_base_url(self.app.config.data.get("comfyui_url"))
         checkpoints = client.checkpoint_names(base)
         loras = client.lora_names(base)
-        if checkpoints or loras:
+        unets = client.unet_names(base)
+        clips = client.clip_names(base)
+        vaes = client.vae_names(base)
+        controlnets = client.controlnet_names(base)
+        total = sum(len(group) for group in (checkpoints, loras, unets, clips, vaes, controlnets))
+        if total:
             return {
                 "ok": True,
                 "models": checkpoints,
                 "loras": loras,
-                "count": len(checkpoints) + len(loras),
+                "unets": unets,
+                "clips": clips,
+                "vaes": vaes,
+                "controlnets": controlnets,
+                "count": total,
             }, 200
         return {
             "ok": False,
             "models": [],
             "loras": [],
+            "unets": [],
+            "clips": [],
+            "vaes": [],
+            "controlnets": [],
             "count": 0,
             "error": "暂时拿不到 ComfyUI 的模型列表：请确认 ComfyUI 已启动、地址正确。仍可以手动输入模型名。",
         }, 200

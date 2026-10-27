@@ -6,7 +6,7 @@
 // 与聊天域零耦合；只调 /api/labeler/*（含打标专用上传）。
 // ============================================================
 
-import { $, $$, api, state, toast, triggerDownload } from "./01-core.js";
+import { $, $$, api, applyModelSkinFor, state, toast, triggerDownload } from "./01-core.js";
 import { fileUrl, isPywebview } from "./03-media.js";
 import { currentStudioPage, onStudioPageChange } from "./22-studio.js";
 
@@ -1358,6 +1358,8 @@ export function bindLabelerEvents() {
   });
   $("#labelerModelSelect")?.addEventListener("change", () => {
     labeler.modelName = String($("#labelerModelSelect")?.value || "");
+    // 打标器换模型也跟随皮肤（规则与主对话一致：自动模式才生效，识别不出家族不换）。
+    void applyModelSkinFor(labeler.modelName);
   });
   // 输出形式变化 → 同步输出语言的可见选项与有效值（隐藏值不保留生效）。
   $("#labelerOutputMode")?.addEventListener("change", syncLanguageOptions);

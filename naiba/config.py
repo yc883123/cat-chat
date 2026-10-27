@@ -124,6 +124,10 @@ STUDIO_PREF_PAGES = frozenset({"library"})
 # 工作台功能页（侧栏分页导航的允许值）：刷新与重启后按它恢复上次所在页。
 # 新增功能页时必须同步 public/index.html 的 data-studio-page 与前端 setStudioPage()。
 STUDIO_PAGE_VIEWS = ("library", "labeler", "comfyui", "novel")
+# 上次停在哪一侧：对话（chat）/ 工作台（studio）。退出后重开按它恢复视图，
+# 否则在造梦机里关掉程序、下次打开又跳回对话，用户会以为状态没保存。
+STUDIO_VIEWS = ("chat", "studio")
+STUDIO_VIEW_DEFAULT = "chat"
 STUDIO_PREF_MODULES = frozenset(
     {"", "vs", "h3", "vi", "ec", "global", "script", "game", "style", "custom"}
 )
@@ -341,6 +345,10 @@ def normalize_studio_prefs(value: Any) -> dict[str, Any]:
     # 功能页：只认侧栏里真实存在的页；非法/缺失一律回「模块库」。
     page_value = str(merged.get("page") or "").strip()
     normalized_page = page_value if page_value in STUDIO_PAGE_VIEWS else "library"
+    # 上次停在哪个视图：对话 / 工作台。退出再打开要回到原处（用户在工作台造梦机里
+    # 关掉程序，重开却跳回对话，会显得「工作台没记住我停在哪」）。
+    view_value = str(merged.get("view") or "").strip().lower()
+    normalized_view = view_value if view_value in STUDIO_VIEWS else STUDIO_VIEW_DEFAULT
     selection = merged.get("last_selection")
     normalized_selection: dict[str, str] | None = None
     if isinstance(selection, dict):
@@ -391,7 +399,7 @@ def normalize_studio_prefs(value: Any) -> dict[str, Any]:
         if len(titles) >= STUDIO_PREF_MAX_TITLES:
             break
     return {"last_selection": normalized_selection, "favorites": favorites, "titles": titles,
-            "page": normalized_page}
+            "page": normalized_page, "view": normalized_view}
 
 
 def validate_skills_dir(resolved: Path, *, app_dir: Path, public_dir: Path, data_dir: Path) -> None:
@@ -453,7 +461,7 @@ def default_config() -> dict[str, Any]:
         "chat_background": default_chat_background(),
         # 工作台（Studio）偏好：上次选中的条目 + 收藏清单 + 上次所在功能页。
         # 只存定位键，不存模板正文；page 落库是为了冻结版 WebView2 重启后仍记得分页。
-        "studio": {"last_selection": None, "favorites": [], "titles": [], "page": "library"},
+        "studio": {"last_selection": None, "favorites": [], "titles": [], "page": "library", "view": "chat"},
         # Per-user reusable system prompts for conversation settings.  These
         # live in config.json instead of the conversation database by design.
         "conversation_prompt_presets": [],
@@ -2775,7 +2783,7 @@ class ConfigStore:
                         incoming = values[key]
                         if not isinstance(incoming, dict):
                             raise ValueError("studio 必须是对象")
-                        unknown = set(incoming) - {"last_selection", "favorites", "titles", "page"}
+                        unknown = set(incoming) - {"last_selection", "favorites", "titles", "page", "view"}
                         if unknown:
                             names = ", ".join(sorted(map(str, unknown)))
                             raise ValueError(f"studio 包含不支持的字段：{names}")
@@ -2785,6 +2793,11 @@ class ConfigStore:
                             if page_value not in STUDIO_PAGE_VIEWS:
                                 raise ValueError(f"工作台功能页非法：{page_value or '（空）'}")
                             current["page"] = page_value
+                        if "view" in incoming:
+                            view_value = str(incoming["view"] or "").strip().lower()
+                            if view_value not in STUDIO_VIEWS:
+                                raise ValueError(f"工作台视图非法：{view_value or '（空）'}")
+                            current["view"] = view_value
                         if "last_selection" in incoming:
                             selection = incoming["last_selection"]
                             if selection is None:

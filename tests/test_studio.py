@@ -290,11 +290,12 @@ class StudioPrefsConfigTests(unittest.TestCase):
 
     def test_fresh_install_and_legacy_config_get_defaults(self):
         # page 是打标器接入时新增的工作台功能页偏好，默认「提词库」（3.7.4 前叫「模块库」，内部标识仍为 library）。
-        self.assertEqual(self._store().data["studio"],
-                         {"last_selection": None, "favorites": [], "titles": [], "page": "library"})
+        # view 是「上次停在对话还是工作台」：默认对话（不记住的话，在工作台里关掉程序
+        # 重开永远跳回对话，用户会以为状态没保存）。
+        defaults = {"last_selection": None, "favorites": [], "titles": [], "page": "library", "view": "chat"}
+        self.assertEqual(self._store().data["studio"], defaults)
         legacy = self._store({"appearance": {"theme": "dark"}})
-        self.assertEqual(legacy.data["studio"],
-                         {"last_selection": None, "favorites": [], "titles": [], "page": "library"})
+        self.assertEqual(legacy.data["studio"], defaults)
 
     def test_corrupt_values_are_normalized(self):
         store = self._store({
@@ -321,6 +322,31 @@ class StudioPrefsConfigTests(unittest.TestCase):
         self.assertEqual(store.data["studio"]["titles"],
                          [{"kind": "builtin", "id": "vi-001", "title": "我的标题"}],
                          "空标题/重复/坏来源都收敛掉，首条生效")
+
+    def test_studio_view_round_trip_and_normalization(self):
+        """视图（对话 / 工作台）要能存能读：否则在工作台里关掉程序，重开又跳回对话。
+
+        默认对话（首次安装/旧配置都是对话态，行为零变化）；非法值在写入路径显式报错、
+        在加载路径静默收回默认，两条路径分工与其他偏好字段一致。
+        """
+        store = self._store()
+        self.assertEqual(store.data["studio"]["view"], "chat")
+        saved = store.update_settings({"studio": {"view": "studio", "page": "comfyui"}})
+        self.assertEqual(saved["studio"]["view"], "studio")
+        self.assertEqual(saved["studio"]["page"], "comfyui")
+        reloaded = ConfigStore(self.path)
+        self.assertEqual(reloaded.data["studio"]["view"], "studio")
+        self.assertEqual(reloaded.data["studio"]["page"], "comfyui")
+        # 切回对话同样能落库
+        reloaded.update_settings({"studio": {"view": "chat"}})
+        self.assertEqual(ConfigStore(self.path).data["studio"]["view"], "chat")
+        # 写入路径：非法视图必须报错（前端受控写入，契约对不上要能立刻发现）
+        with self.assertRaises(ValueError):
+            store.update_settings({"studio": {"view": "workbench"}})
+        # 加载路径：手改配置的非法视图收回默认，不外泄给前端
+        legacy = self._store({"studio": {"view": "workbench", "page": "nope"}})
+        self.assertEqual(legacy.data["studio"]["view"], "chat")
+        self.assertEqual(legacy.data["studio"]["page"], "library")
 
     def test_partial_update_and_reload(self):
         store = self._store()

@@ -14,7 +14,7 @@
 // - 卡片展开状态按稿件 ID 记录，轮询或切阶段返回都不会把它强行撑开。
 // ============================================================
 
-import { $, api, state, toast } from "./01-core.js";
+import { $, api, applyModelSkinFor, state, toast } from "./01-core.js";
 import { onStudioPageChange } from "./22-studio.js";
 
 // 与服务端一致的上限（前端只做提前提示，服务端仍逐项校验）。
@@ -2780,6 +2780,9 @@ export function bindNovelEvents() {
   });
   $("#novelAiModel")?.addEventListener("change", (event) => {
     novel.aiModelName = String(event.target.value || "");
+    // 创作场换模型也跟随皮肤（与主对话同一条规则：只在自动模式下生效，
+    // 识别不出家族时保持当前皮肤）。下同。
+    void applyModelSkinFor(novel.aiModelName);
     renderAiEditor();
   });
   $("#novelAiRequest")?.addEventListener("input", () => renderAiEditor());
@@ -3005,6 +3008,7 @@ export function bindNovelEvents() {
     });
     panel.querySelector('[data-novel-control="novelStageModel"]')?.addEventListener("change", (event) => {
       novel.stageModelName = String(event.target.value || "");
+      void applyModelSkinFor(novel.stageModelName);
       renderStagePanel();
       void refreshPreviewBudget();
     });

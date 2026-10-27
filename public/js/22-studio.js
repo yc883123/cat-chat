@@ -6,7 +6,7 @@
 // 应用级视图：入口在侧栏「对话 / 工作台」模式切换，不再是顶栏会话按钮。
 // ============================================================
 
-import { $, api, copyText, localFileUrl, state, toast } from "./01-core.js";
+import { $, api, applyModelSkinFor, copyText, localFileUrl, state, toast } from "./01-core.js";
 import { populateComposerModels } from "./07-models-agents.js";
 import { openConversation, renderSidebar } from "./08-conversations.js";
 import { applyFilePanelOpenClass, closeSidebar, filePanelState, openSidebar, setLeftSidebarCollapsed, sidebarDesktop } from "./14-file-panel.js";
@@ -119,6 +119,7 @@ function studioPrefs() {
   const prefs = state.bootstrap?.settings?.studio;
   const selection = prefs?.last_selection;
   const page = String(prefs?.page || "");
+  const view = String(prefs?.view || "").toLowerCase();
   return {
     last_selection: selection && typeof selection === "object" ? selection : null,
     favorites: Array.isArray(prefs?.favorites) ? prefs.favorites : [],
@@ -126,6 +127,9 @@ function studioPrefs() {
     titles: Array.isArray(prefs?.titles) ? prefs.titles : [],
     // 上次所在功能页：冻结版 WebView2 不保证 localStorage 跨进程保留，只能落服务端。
     page: STUDIO_PAGES.includes(page) ? page : "library",
+    // 上次停在对话还是工作台：退出再打开要回到原处（在工作台造梦机里关掉程序，
+    // 重开却跳回对话会显得「没记住」）。
+    view: view === "studio" ? "studio" : "chat",
   };
 }
 
@@ -342,6 +346,12 @@ function emitStudioPage(page, detail) {
   }
 }
 
+// 记住当前停在哪个视图（对话 / 工作台）。只在真的变了才写，避免每次切换都打一次接口。
+function persistStudioView(view) {
+  if (studioPrefs().view === view) return;
+  void saveStudioPrefs({ view });
+}
+
 // 进入工作台：已在工作台时再点也不退出（退出由「对话」负责）。
 export function openStudioView() {
   if (studio.open) return;
@@ -358,6 +368,7 @@ export function openStudioView() {
   syncModeUi();
   setStudioPane(studio.pane);
   if (!sidebarDesktop()) closeSidebar();
+  persistStudioView("studio");
   void refreshStudio();
   if (studio.page === "library" && studio.pane === "form") focusStudioInput();
   // 恢复的功能页没有经历「切换」，订阅者（各页的轮询与首屏刷新）不知道页面
@@ -372,8 +383,16 @@ export function closeStudioView() {
   stopStudioPolling();
   // 打标页的轮询也必须停：页面隐藏后继续轮询只是白耗请求。
   emitStudioPage(studio.page, { closed: true });
+  persistStudioView("chat");
   // 会话树在隐藏期间尺寸为 0，恢复显示后必须按真实可用高度重算虚拟窗口。
   renderSidebar();
+}
+
+// bootstrap 完成后调用一次：上次停在哪个视图就回到哪个视图。
+// 只在「上次是工作台」时动作；对话是默认态，什么都不用做。
+export function restoreStudioViewFromPrefs() {
+  if (studioPrefs().view !== "studio") return;
+  openStudioView();
 }
 
 function focusStudioInput() {
@@ -2366,6 +2385,8 @@ export function bindStudioEvents() {
   });
   $("#studioModelSelect")?.addEventListener("change", () => {
     studio.modelName = $("#studioModelSelect")?.value || "";
+    // 工作台换模型同样跟随皮肤：皮层层就在工作台容器里，切换即时可见。
+    void applyModelSkinFor(studio.modelName);
   });
   // 历史产出编辑模式：勾选（行内复选框）与「全选」都走 change 事件；
   // 用委托挂在 #studioView 上，列表重画后无需重新绑定。

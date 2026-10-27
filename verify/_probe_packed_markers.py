@@ -276,7 +276,9 @@ FINGERPRINTS = {
     # 2.9.11：费用单价弹层接线（入口 / 返回 / 完成 / 事件委托 + 自定义币种删除）。
     "js/15-bind-events.js": ["settingsToolbarSub", "cleanImageCache('generated')", "openSidebarViewMenu", "toggleConversationArchive", "bindSidebarDragDrop", "window.visualViewport?.addEventListener", "usageUnbindDialogViewport", "openUsagePricingDialog", "usagePricingDialog", "data-pricing-drop-currency", "handleMcpListClick", "switchSettingsTab('mcp')", "bindLabelerEvents",
                              # 3.9.0：皮肤跟随方式的模式切换 + 模型皮肤卡片点选（顺手切手动）。
-                             "appearanceSkinMode", "appearance-model-skin-card", "previewModelSkinFor"],
+                             "appearanceSkinMode", "appearance-model-skin-card", "previewModelSkinFor",
+                             # 3.9.1：设置搜索也搜设置项正文（不只搜左侧栏目名）。
+                             "applySettingsSearch", "settingsPanelSearchText"],
     # 2.9.9：@ / 弹层定位可视视口感知 + hide 清内联 maxHeight（手机软键盘裁弹层修复）。
     "js/13-skill-refs.js": ["window.visualViewport", "style.removeProperty('max-height')"],
     "js/16-file-refs.js": ["style.removeProperty('max-height')"],
@@ -287,10 +289,14 @@ FINGERPRINTS = {
         "naiba:conversation-changed",
     ],
     # 3.6.x：功能页切换与打标器页（拖放递归枚举、逐批上传、结果三档）。
-    "js/22-studio.js": ["STUDIO_PAGES", "setStudioPage", "onStudioPageChange", "applyStudioPageUi"],
+    "js/22-studio.js": ["STUDIO_PAGES", "setStudioPage", "onStudioPageChange", "applyStudioPageUi",
+                        # 3.9.1：退出重开恢复上次视图（对话/工作台）+ 工作台换模型也跟随皮肤。
+                        "restoreStudioViewFromPrefs", "persistStudioView", 'persistStudioView("studio")'],
     "js/23-labeler.js": [
         "webkitGetAsEntry", "labelerDropzone", "bindLabelerEvents",
         "uploadAll", "loadModelOptions", "loadSentences",
+        # 3.9.1：打标器换模型也跟随皮肤。
+        "applyModelSkinFor(labeler.modelName)",
     ],
     # 3.9.0：模型皮肤（家族/档位识别纯函数 + 缺档回落 + 非对话模型排除）。
     "js/26-model-skin.js": [

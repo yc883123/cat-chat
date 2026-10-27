@@ -8,6 +8,7 @@ import { populateModels, renderAgents, renderUpdateStatus, startUpdatePoll as st
 import { loadConversationPromptPresets, loadConversations, restoreSidebarWidth, setSidebarScrollToActive, startConversationSync } from "./08-conversations.js";
 import { loadProviderPresets, migrateLegacyToolTemplates, populateAppearanceSettings, populateRuntimeSettings, populateSearchSettings, populateSkillSizeSetting, populateVisionSettings, renderAgentManager, renderMcp, renderProviders, renderSkills, startMcpPoll } from "./09-settings.js";
 import { loadStarterPrompts } from "./12-chat-input.js";
+import { restoreStudioViewFromPrefs } from "./22-studio.js";
 import { maybeShowOnboarding } from "./19-onboarding.js";
 export async function authenticate(token) {
   const response = await fetch('/api/auth', {
@@ -100,6 +101,9 @@ export async function initialize() {
   renderUpdateStatus(state.bootstrap.update || {});
   await loadConversationPromptPresets();
   await loadConversations();
+  // 上次停在哪个视图（对话 / 工作台）由服务端偏好恢复：放在会话加载之后，
+  // 侧栏与各功能页才有数据可渲染；早于会话说不上「回到原处」。
+  restoreStudioViewFromPrefs();
   await loadStarterPrompts();
   await loadTasks();
   startTaskSync();

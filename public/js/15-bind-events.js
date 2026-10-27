@@ -2086,17 +2086,14 @@ export function bindEvents() {
     if (parent && parent !== current) loadWorkspaceTree(parent);
   });
   $$('.settings-nav button').forEach((button) => button.addEventListener('click', () => switchSettingsTab(button.dataset.settingsTab)));
+  // 设置搜索：**同时搜左侧栏目名、栏目关键词、以及该页设置项的正文**。
+  // 只搜按钮文字的话，「上下文」「圆环」这种只出现在设置项说明里的词永远搜不到，
+  // 用户看到「没有匹配的设置」会以为功能不存在。
   $('#settingsSearch')?.addEventListener('input', (event) => {
-    const query = String(event.target.value || '').trim().toLowerCase();
-    let visible = 0;
-    $$('.settings-nav button[data-settings-tab]').forEach((button) => {
-      const haystack = `${button.textContent} ${button.dataset.settingsSearch || ''}`.toLowerCase();
-      const match = !query || haystack.includes(query);
-      button.hidden = !match;
-      if (match) visible += 1;
-    });
-    $$('.settings-nav-group').forEach((group) => { group.hidden = !group.querySelector('button[data-settings-tab]:not([hidden])'); });
-    const empty = $('#settingsNavEmpty'); if (empty) empty.hidden = visible > 0;
+    const query = String(event.target.value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    clearTimeout(settingsSearchTimer);
+    // 轻量防抖：搜索要读整页 textContent，逐字符读会把长页面（Skills / 用量）拖卡。
+    settingsSearchTimer = setTimeout(() => applySettingsSearch(query), SETTINGS_SEARCH_DEBOUNCE_MS);
   });
   // API 供应商卡片：整张卡可点即打开设置弹层；右上角 × 删除；末尾「添加 API」卡片新建。
   $('#providerCards').addEventListener('click', (event) => {
@@ -3163,6 +3160,55 @@ export function switchSettingsTab(name) {
     syncUpdateProxyControls();
     syncUpdateFloat(status);
   }).catch((error) => toast(`读取更新状态失败：${error.message}`));
+}
+
+// ---- 设置搜索 ----
+// 搜三层：左侧栏目名、栏目关键词（data-settings-search）、以及**该页设置项的正文**。
+// 只搜前两层时，「上下文」「圆环」这类只写在设置项说明里的词永远搜不到，
+// 用户看到「没有匹配的设置」会以为功能不存在。
+const SETTINGS_SEARCH_DEBOUNCE_MS = 120;
+let settingsSearchTimer = 0;
+// 正文索引缓存（WeakMap：面板节点被回收时一起释放）。
+// 用 textContent 而不是 innerText —— innerText 会强制布局，把面板逐个读一遍会让输入卡顿；
+// 缓存带短 TTL 是因为部分页面的内容会在会话里变化（技能列表异步加载、用量统计刷新）。
+const SETTINGS_PANEL_TEXT_TTL_MS = 4000;
+const settingsPanelTextCache = new WeakMap();
+
+function settingsPanelSearchText(panel) {
+  const now = Date.now();
+  const cached = settingsPanelTextCache.get(panel);
+  if (cached && now - cached.at < SETTINGS_PANEL_TEXT_TTL_MS) return cached.text;
+  const text = String(panel.textContent || '').toLowerCase().replace(/\s+/g, ' ');
+  settingsPanelTextCache.set(panel, { text, at: now });
+  return text;
+}
+
+function applySettingsSearch(query) {
+  const panels = new Map();
+  $$('[data-settings-panel]').forEach((panel) => {
+    panels.set(String(panel.dataset.settingsPanel || ''), panel);
+  });
+  let visible = 0;
+  $$('.settings-nav button[data-settings-tab]').forEach((button) => {
+    let match = !query;
+    if (query) {
+      const own = `${button.textContent} ${button.dataset.settingsSearch || ''}`
+        .toLowerCase().replace(/\s+/g, ' ');
+      if (own.includes(query)) {
+        match = true;
+      } else {
+        const panel = panels.get(String(button.dataset.settingsTab || ''));
+        match = Boolean(panel) && settingsPanelSearchText(panel).includes(query);
+      }
+    }
+    button.hidden = !match;
+    if (match) visible += 1;
+  });
+  $$('.settings-nav-group').forEach((group) => {
+    group.hidden = !group.querySelector('button[data-settings-tab]:not([hidden])');
+  });
+  const empty = $('#settingsNavEmpty');
+  if (empty) empty.hidden = visible > 0;
 }
 
 bindEvents();

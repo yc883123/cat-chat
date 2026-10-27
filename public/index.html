@@ -461,17 +461,16 @@
                 </label>
               </div>
 
-              <div class="labeler-field-row labeler-trigger-row">
-                <label class="labeler-trigger-toggle" title="启用后，触发词会加在每张图标注结果的最前面，并写进 LoRA 训练包的同名 txt；不会加进发给模型的提示词。">
-                  <span class="labeler-trigger-switch">
+              <div class="labeler-trigger-field">
+                <span>触发词</span>
+                <div class="labeler-trigger-line" title="启用后，触发词会加在每张图标注结果的最前面，并写进 LoRA 训练包的同名 txt；不会加进发给模型的提示词。">
+                  <label class="labeler-trigger-switch">
                     <input id="labelerTriggerEnabled" type="checkbox">
                     <span>添加触发词</span>
-                  </span>
-                </label>
-                <label>触发词
+                  </label>
                   <input id="labelerTriggerWord" type="text" maxlength="200"
                     placeholder="例如 my_ohwx_style" disabled aria-label="触发词">
-                </label>
+                </div>
               </div>
 
               <div class="labeler-field-row">

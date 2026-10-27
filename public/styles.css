@@ -3555,10 +3555,32 @@ body[data-studio="on"] .sidebar-studio-nav { flex: 1 1 auto; min-height: 0; over
 
 .labeler-field-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
 .labeler-field-row label, .labeler-prompt-field { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
-/* 触发词行：开关 + 输入框。开关是行内组合（复选框不占整列宽度）。 */
-.labeler-trigger-toggle { align-content: center; }
-.labeler-trigger-switch { display: flex; align-items: center; gap: 6px; min-height: 31px; }
-.labeler-trigger-switch input { width: auto; height: auto; margin: 0; accent-color: var(--accent); }
+/* 触发词：标签 + 同一行「开关 + 输入框」，开关渲染成胶囊（同设置对话框）。 */
+.labeler-trigger-field { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+.labeler-trigger-line { display: flex; align-items: center; gap: 8px; min-height: 31px; }
+.labeler-trigger-switch { display: flex; align-items: center; gap: 8px; flex: none; cursor: pointer; }
+.labeler-trigger-field .labeler-trigger-switch input {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  width: 40px;
+  height: 22px;
+  flex: none;
+  margin: 0;
+  border: 0;
+  border-radius: var(--r-full);
+  background: var(--line-strong);
+  cursor: pointer;
+  transition: background var(--t-fast);
+}
+.labeler-trigger-field .labeler-trigger-switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .28); transition: transform var(--t-fast); }
+.labeler-trigger-field .labeler-trigger-switch input:checked { background: var(--accent); }
+.labeler-trigger-field .labeler-trigger-switch input:checked::after { transform: translateX(18px); }
+.labeler-trigger-field .labeler-trigger-switch input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.labeler-trigger-field .labeler-trigger-switch input:disabled { cursor: default; }
+.labeler-trigger-switch > span { white-space: nowrap; color: var(--text); }
+.labeler-trigger-switch input:disabled ~ span { color: var(--muted); }
+.labeler-trigger-field .labeler-trigger-line input[type="text"] { flex: 1; min-width: 0; }
 .labeler-trigger-switch input:disabled ~ span { color: var(--muted); }
 .labeler-field-row select, .labeler-field-row input, .labeler-prompt-field textarea,
 .labeler-results-head input, .labeler-results-head select {

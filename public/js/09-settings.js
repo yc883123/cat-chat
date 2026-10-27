@@ -295,7 +295,7 @@ export function updateChatBackgroundControls() {
     const modelSkinActive = isModelSkin(state.appearance?.skin);
     skinHint.hidden = !modelSkinActive;
     skinHint.textContent = modelSkinActive
-      ? '当前使用的是模型皮肤，它会盖住聊天背景，所以背景图暂时不显示（设置和图片都还在）。在这里选一张背景图或点一个内置背景，会自动切回你用过的配色皮肤并显示背景；也可以在上面「界面皮肤」里手选一个配色皮肤。'
+      ? '当前使用的是模型皮肤，它会盖住聊天背景，所以背景图暂时不显示（设置和图片都还在）。在这里选一张背景图或点一个内置背景，会自动切回你用过的配色皮肤并显示背景（同时改成手动选择，之后换模型也不会再盖回来）；也可以在上面「界面皮肤」里手选一个配色皮肤。'
       : '';
   }
   const clear = $('#clearChatBackground');

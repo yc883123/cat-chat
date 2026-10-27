@@ -1045,10 +1045,19 @@ export async function saveChatBackground(patch = {}) {
   // 图片路径被写入（换图 / 撤销旋转）→ 重探可用性：新图刚上传过，旧图却未必还在磁盘上。
   if ('image' in payload) void refreshChatBackgroundImageStatus();
   // 用户一旦设了聊天背景，就说明他想用背景——模型皮肤会让位（两者都铺对话区整块，
-  // 叠在一起会互相糊住）。退回最近用过的配色皮肤，不硬切紫藤。
-  // 只在**确实有背景图**且当前是模型皮肤时才让位：清空背景、单改取景/强度都不触发。
-  if (String(state.chatBackground?.image || '').trim() && isModelSkin(state.appearance?.skin)) {
-    await saveAppearance({ skin: lastColorSkinOrDefault() });
+  // 叠在一起会互相糊住）。
+  // 两件事必须一起做，缺一个都会出问题：
+  // 1) 当前是模型皮肤 → 换成最近用过的配色皮肤，不硬切紫藤（别把用户挑的色相也改掉）；
+  // 2) **切到手动模式**。只换皮肤不够：模式若还是 auto，用户下次一换模型，自动换肤
+  //    又会把皮肤切回模型皮肤、把他刚设好的背景重新盖住——这一步是「设背景」这个
+  //    动作在语义上就属于手动选择。
+  // 只在**确实有背景图**时才动：清空背景、单改取景/强度都不触发。
+  if (String(state.chatBackground?.image || '').trim()) {
+    const appearance = state.appearance || {};
+    const patch = {};
+    if (isModelSkin(appearance.skin)) patch.skin = lastColorSkinOrDefault();
+    if (appearance.skin_mode !== 'manual') patch.skin_mode = 'manual';
+    if (Object.keys(patch).length) await saveAppearance(patch);
   }
   return state.chatBackground;
 }

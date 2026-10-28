@@ -50,6 +50,10 @@ RUN_CONTEXT_KEYS: tuple[str, ...] = (
     # 给图片批注入标签标注「第 N 轮装载」——标签会被 trace 重放进后续每一轮，不带轮次就分不清
     # 「历史旧图」与「当前成品」（§九.150）。
     "turn_index",
+    # Agent 循环内自动整理的入口（run/chat 只给普通主对话与计划置位；aux 恒缺省）：
+    # callable(messages, trace_start, limit, budget, used) -> {"history", "limit", "budget"}。
+    # skills/agent 在步与步之间调用；返回 history 为空 = 本步不整理，照常发请求。
+    "compact_context",
 )
 
 # 运行期保持 dict 形态（零行为变化）；"带默认值/校验"经由工厂与校验函数落地，
@@ -75,6 +79,8 @@ def default_run_context() -> dict[str, Any]:
         # agent 侧的消费点会直接跳过（子 Agent/计划等形态不排队插话）。
         "pull_interjections": None,
         "mark_interjections_consumed": None,
+        # 自动整理入口（run/chat 只给非 aux 的 Run 置位）：缺省 None = 循环内不整理。
+        "compact_context": None,
         "mcp_active": False,
         "trace_messages": [],
         "plan_exit_content": "",
@@ -244,6 +250,7 @@ class RunContext(TypedDict, total=False):
     trace_system: str                # SkillAgent 带出的完整系统提示词原文（first_turn 落盘用）
     context_reset: dict[str, Any]    # reset_context 的本轮重置请求 → 消息 metadata.session_start
     turn_index: int                  # 本轮是第几个用户轮次（1 起）→ 图片批标签「第N轮装载」
+    compact_context: Any             # Agent 循环内自动整理入口（callable；缺省 None = 本步不整理）
 
 
 class EventType(str, Enum):
@@ -269,7 +276,7 @@ class EventType(str, Enum):
     RUN_STARTED = "run_started"
     CONTEXT_FULL = "context_full"
     # 自动压缩上下文（docs/plans/2026-10-26-自动压缩上下文计划.md）：
-    # action=hint 提醒模式超线；action=compacted 已整理（前端据此 toast，整理卡走消息 metadata）。
+    # action=hint / started / compacted / failed；完成时整理卡走消息 metadata。
     COMPACTION = "compaction"
     DONE = "done"
     ERROR = "error"
@@ -427,9 +434,8 @@ EVENT_PAYLOAD_KEYS: dict[str, frozenset[str] | None] = {
     "cancelled": frozenset({"message"}),
     "run_failed": frozenset({"error"}),
     "context_full": frozenset({"limit", "used", "budget"}),
-    # 自动整理：action=hint（提醒）/ compacted（已整理）；region_messages/freed_est 是
-    # 整理条数与预计释放量，used/limit 是触发时的估算口径。
-    "compaction": frozenset({"action", "region_messages", "freed_est", "used", "limit"}),
+    # 自动整理：action=hint / started / compacted / failed；region_messages/freed_est 为摘要信息。
+    "compaction": frozenset({"action", "region_messages", "freed_est", "used", "limit", "message"}),
     # done **不带** `message`：终态消息由前端收尾时重载会话（GET /api/conversations/<id>）
     # 拿到，事件里带着它等于把整份消息（含 metadata.trace，实测最长 318KB）写进 run_events
     # 再被终态瘦身删掉。这里只放"只有事件能给的即时动作"字段。

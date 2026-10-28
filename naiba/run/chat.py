@@ -975,13 +975,18 @@ class ConversationRunMixin:
                 # ⚠️ 取数点固定走 _turn_index_for_run（run 行的 input_message_id）——`message`
                 # 在这里是**字符串**，拿它取 id 会 AttributeError（§九.151）。
                 "turn_index": _turn_index_for_run(snapshot, run),
-                # 工具实时进度出口（pwsh / run_skill_script 逐行 stdout+stderr）。
-                # 工具实现只依赖这一个 callable，不直接持有 manager——run 的内部结构
-                # 不向工具层泄漏，换实现（SSE/落库策略）时工具侧零改动。
                 "event_sink": event,
-                # 普通对话与计划执行都有前端确认卡承接：围栏来源动作可在此征得授权。
                 "confirmation_ui": True,
             }
+            if conv_kind != "aux":
+                run_context["compact_context"] = lambda messages, trace_start, limit, budget, used: self._compact_agent_context(
+                    run=run, snapshot=snapshot, conversation_id=conversation_id,
+                    conv_kind=conv_kind, frozen_conversation=frozen_conversation,
+                    messages=messages, trace_start=trace_start, profile=profile,
+                    model_key=model_key, model_name=model_name,
+                    pdf_tools=pdf_tools_enabled, video_tools=video_tools_enabled,
+                    limit=limit, budget=budget, used=used, event=event, cancel_event=cancel_event,
+                )
             worker = SkillAgent(
                 self.app.catalog,
                 executor,
@@ -1351,12 +1356,69 @@ class ConversationRunMixin:
             self.app.record_run_usage(run_id)
             self._finish(run_id)
 
+    def _compact_agent_context(
+        self, *, run: dict[str, Any], snapshot: dict[str, Any], conversation_id: str,
+        conv_kind: str, frozen_conversation: dict[str, Any], messages: list[dict[str, Any]],
+        trace_start: int, profile: dict[str, Any], model_key: str, model_name: str,
+        limit: int, budget: int, used: int, event: Any, cancel_event: threading.Event,
+    ) -> dict[str, Any]:
+        """Agent 下一次模型请求前整理持久化历史，并返回重建后的历史前缀。"""
+        from naiba.core import compaction as compaction_mod
+
+        settings = compaction_mod.resolve_settings(
+            (getattr(self.app.config, "data", {}) or {}).get("auto_compaction"))
+        if not compaction_mod.should_compact(
+            settings, used=used, limit=limit, reserve=max(0, int(limit) - int(budget)),
+        ):
+            return {}
+        mode = compaction_mod.effective_mode(settings, frozen_conversation)
+        if mode == compaction_mod.MODE_REMIND:
+            event({"type": "compaction", "action": "hint", "used": used, "limit": limit})
+            return {}
+        if mode != compaction_mod.MODE_AUTO:
+            return {}
+        if run.get("_compaction_attempted"):
+            return {}
+        run["_compaction_attempted"] = True
+        history = [item for item in messages[1:] if isinstance(item, dict)]
+        try:
+            result = self._maybe_compact_context(
+                run=run, snapshot=snapshot, conversation_id=conversation_id,
+                conv_kind=conv_kind, frozen_conversation=frozen_conversation,
+                history=history, profile=profile, effective="",
+                model_key=model_key, model_name=model_name,
+                pdf_tools=pdf_tools, video_tools=video_tools,
+                event=event, cancel_event=cancel_event,
+                usage_override={"used": used, "limit": limit, "budget": budget},
+            )
+        except Exception as exc:  # noqa: BLE001 - 整理失败不应丢弃当前轮轨迹
+            if cancel_event.is_set():
+                raise TaskCancelled("任务已取消")
+            event({
+                "type": "compaction", "action": "failed",
+                "message": f"上下文整理没有完成（{type(exc).__name__}），本轮将沿用原上下文继续。",
+            })
+            return {}
+        if not result.get("rebuilt"):
+            return {}
+        fresh = self.app.storage.get_conversation(conversation_id) or {}
+        run["conversation_messages"] = _frozen_history_for_run(run, snapshot, fresh)
+        rebuilt_history = build_model_history(
+            run["conversation_messages"], event,
+            pdf_tools=pdf_tools, video_tools=video_tools,
+            local_image_brain=local_brain(profile),
+            **self.app.config.reasoning_replay_options(),
+            **self.app.config.image_encode_cache_options(),
+        )
+        return {"history": rebuilt_history, "limit": limit, "budget": budget}
+
     def _maybe_compact_context(
         self, *, run: dict[str, Any], snapshot: dict[str, Any], conversation_id: str,
         conv_kind: str, frozen_conversation: dict[str, Any], history: list[dict[str, Any]],
         profile: dict[str, Any], effective: str, model_key: str = "", model_name: str = "",
         pdf_tools: bool = True, video_tools: bool = True,
         event: Any, cancel_event: threading.Event,
+        usage_override: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """自动压缩上下文的轮首检查（docs/plans/2026-10-26-自动压缩上下文计划.md）。
 
@@ -1392,6 +1454,10 @@ class ConversationRunMixin:
         _fits, limit, used, budget = SkillAgent._context_fits(
             history, profile, {"tools": tools_estimate}, "", extra_tokens=extra_tokens,
         )
+        if usage_override:
+            used = max(used, int(usage_override.get("used") or 0))
+            limit = int(usage_override.get("limit") or limit)
+            budget = int(usage_override.get("budget") or budget)
         # 预留 = 窗口里「不属于历史预算」的那部分（输出预留 + 系统提示/工具 schema 固定成本）。
         # 触发点据此提前：整理本身要花一次总结请求的输出，整理完本轮还要正常回复，
         # 两者都必须有空间，否则会出现「刚整理完立刻又撞窗口」。
@@ -1406,7 +1472,7 @@ class ConversationRunMixin:
             return {"hint": True, "used": used, "limit": limit}
         if cancel_event.is_set():
             raise TaskCancelled("任务已取消")
-        event({"type": "status", "message": "上下文接近上限，正在整理较早对话…"})
+        event({"type": "compaction", "action": "started", "message": "正在整理较早的对话，当前轮会继续…"})
         result = compaction_mod.compact_conversation(
             self.app, conversation_id=conversation_id, rows=rows, settings=settings,
             profile=profile, model_key=model_key, model_name=model_name,
@@ -1421,6 +1487,10 @@ class ConversationRunMixin:
                 "used": used, "limit": limit,
             })
             return {"rebuilt": True}
+        event({
+            "type": "compaction", "action": "failed",
+            "message": "上下文整理没有完成，本轮将沿用原上下文继续。",
+        })
         return {}
 
     def _record_local_image_demotions(

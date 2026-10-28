@@ -409,6 +409,56 @@ class LoopContextGuardTests(unittest.TestCase):
         self.assertIn("新会话", response)
         self.assertIn("上下文", response)
 
+    def test_agent_compacts_between_steps_without_replaying_current_user(self) -> None:
+        events: list[dict] = []
+        calls: list[list[dict]] = []
+
+        class _Runtime:
+            last_reasoning = ""
+            last_reasoning_id = ""
+            last_usage = {"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100}
+            last_finish_reason = "tool_calls"
+
+            def complete(self, profile, messages, options, event):
+                calls.append([dict(item) for item in messages])
+                if len(calls) <= 2:
+                    self.last_finish_reason = "tool_calls"
+                    return '{"type":"tool","tool":"echo","arguments":{"text":"result"}}'
+                self.last_finish_reason = "stop"
+                return "done"
+
+        runtime = _Runtime()
+        run_context = {
+            "compact_context": lambda messages, trace_start, limit, budget, used: {
+                "history": [{"role": "user", "content": "摘要中已保留当前问题"}],
+                "limit": limit,
+                "budget": budget,
+            },
+        }
+        worker = SkillAgent(_LoopCatalog(), None, runtime.complete, None)
+        response, runs, _reasonings, _usage = worker.run(
+            "当前问题",
+            [],
+            {"kind": "online", "model": "m", "context_window": 128000},
+            {"stream": False, "max_tokens": 1024, "max_steps": 10},
+            {"mode": "auto", "skill_ids": []}, [], "", ["echo"], events.append,
+            None, tool_registry=_EchoRegistry("result"), run_context=run_context,
+        )
+        self.assertEqual(response, "done")
+        self.assertEqual(len(calls), 3)
+        compacted_users = [item for item in calls[1] if item.get("role") == "user"]
+        self.assertEqual(compacted_users[0]["content"], "摘要中已保留当前问题")
+        self.assertEqual(sum(item["content"] == "摘要中已保留当前问题" for item in compacted_users), 1)
+        self.assertTrue(any("以下是工具返回" in str(item.get("content") or "") for item in calls[1]))
+        third_users = [item for item in calls[2] if item.get("role") == "user"]
+        self.assertEqual(third_users[0]["content"], "摘要中已保留当前问题")
+        self.assertTrue(any("以下是工具返回" in str(item.get("content") or "") for item in calls[2]))
+        self.assertEqual(len(calls[2]), len(calls[1]) + 2)
+        trace = run_context.get("trace_messages") or []
+
+        self.assertTrue(any("以下是工具返回" in str(item.get("content") or "") for item in trace))
+        self.assertEqual(len(runs), 2)
+
     def test_loop_unaffected_when_within_budget(self) -> None:
         """窗口充裕时循环内复查不得提前打断（回归：不能变成「一律只跑一步」）。"""
         events: list[dict] = []

@@ -729,9 +729,10 @@ function handleRunStartedEvent(event, { row, conversationId }) {
   row.dataset.runId = state.chatRunId;
 }
 
-function handleStatusEvent(event, { setActivity }) {
+function handleStatusEvent(event, { setActivity, row }) {
   clearVisionProgress();
   const statusMessage = String(event.message || '');
+  if (!statusMessage.includes('正在整理较早的对话')) clearCompactionIndicator(row);
   setActivity(statusMessage);
   // 思考等待计时：显示 “正在思考 … · 已等待 X 秒”，收到进展事件即清除。
   // 走统一入口并标记来源 'status'——与重连计时区分，避免重连恢复后状态栏被
@@ -1113,15 +1114,41 @@ function handleRunFailedEvent(event, { answer, setActivity }) {
   freezeQueuedInterjections();
 }
 
-function handleCompactionEvent(event, { setActivity }) {
+function clearCompactionIndicator(row = null) {
+  row?.classList.remove('compaction-running');
+  $('#runtimeStatus')?.classList.remove('compaction-running');
+  $('#contextUsageRing')?.classList.remove('compaction-running');
+}
+
+function handleCompactionEvent(event, { setActivity, row }) {
   const action = String(event.action || '');
+  const runtimeStatus = $('#runtimeStatus');
+  const ring = $('#contextUsageRing');
   if (action === 'hint') {
-    // 提醒模式：只提示、不整理，本轮照常发请求。用户可在设置里改成自动整理。
     setActivity('');
+    clearCompactionIndicator(row);
     toast('上下文接近上限：可在「设置 → 运行设置」把自动整理设为「自动整理」，或点消息上的「新会话」重开上下文');
     return false;
   }
-  if (action === 'compacted') {
+  if (action === 'started') {
+    if (row) row.classList.add('compaction-running');
+    if (runtimeStatus) {
+      runtimeStatus.textContent = event.message || '正在整理上下文…';
+      runtimeStatus.classList.add('compaction-running');
+    }
+    if (ring) ring.classList.add('compaction-running');
+    setActivity(event.message || '正在整理较早的对话，当前轮会继续…');
+    return false;
+  }
+  if (action === 'compacted' || action === 'failed') {
+    clearCompactionIndicator(row);
+    if (action === 'failed') {
+      const message = event.message || '上下文整理没有完成，本轮将沿用原上下文继续。';
+      setActivity(message);
+      toast(message);
+      return false;
+    }
+    setActivity('上下文已整理，正在继续本轮…');
     const region = Number(event.region_messages || 0);
     toast(region
       ? `已把较早的 ${region} 条消息整理成摘要，对话继续往下走（完整记录都在）`

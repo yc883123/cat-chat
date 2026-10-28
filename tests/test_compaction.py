@@ -542,6 +542,8 @@ class CompactionConfigWiringTests(unittest.TestCase):
         messages_js = (ROOT / "public/js/04-messages.js").read_text(encoding="utf-8")
         bind_js = (ROOT / "public/js/15-bind-events.js").read_text(encoding="utf-8")
         chat_js = (ROOT / "public/js/12-chat-input.js").read_text(encoding="utf-8")
+        stream_js = (ROOT / "public/js/11-run-stream.js").read_text(encoding="utf-8")
+        css = (ROOT / "public/styles.css").read_text(encoding="utf-8")
         self.assertIn('id="autoCompactionMode"', html)
         self.assertIn("自动整理", html)
         self.assertIn("完整轮次", html)
@@ -551,6 +553,12 @@ class CompactionConfigWiringTests(unittest.TestCase):
         self.assertIn("cancelCompaction", bind_js)
         self.assertIn("handleCompactionEvent", chat_js)
         self.assertIn("compaction: handleCompactionEvent", chat_js)
+        self.assertIn("action === 'started'", chat_js)
+        self.assertIn("action === 'compacted' || action === 'failed'", chat_js)
+        self.assertIn("contextUsageRing", chat_js)
+        self.assertIn("compaction-running", chat_js)
+        self.assertIn("document.querySelectorAll('.compaction-running')", stream_js)
+        self.assertIn("#contextUsageRing.compaction-running", css)
 
 
 class CompactionHookTests(unittest.TestCase):

@@ -1135,6 +1135,8 @@ class SkillAgent:
         )
         context_extra_tokens = 0
         context_watermark = trace_start
+        context_history_end = trace_start
+        compacted_trace_prefix: list[dict[str, Any]] = []
         # 轮首闸门算出的 limit/budget 与这里同源（同一 profile/options/system），直接复用。
         context_limit = limit
         context_budget = budget
@@ -1224,7 +1226,7 @@ class SkillAgent:
             # 把本轮已累积的模型消息（工具调用/结果/推理）写入 trace，供“已中止”消息携带，
             # 让中止后的 AI 也能精确重放这轮轨迹。
             if isinstance(run_context, dict):
-                run_context["trace_messages"] = messages[trace_start:]
+                run_context["trace_messages"] = [*compacted_trace_prefix, *messages[trace_start:]]
             raise TaskCancelled("任务已取消")
 
         while True:
@@ -1242,7 +1244,7 @@ class SkillAgent:
                 logger.warning("Agent 步数达到上限 %s，已停止本轮", step_limit)
                 event({"type": "run_failed", "error": message})
                 if isinstance(run_context, dict):
-                    run_context["trace_messages"] = messages[trace_start:]
+                    run_context["trace_messages"] = [*compacted_trace_prefix, *messages[trace_start:]]
                 return message, runs, reasonings, self._summarize_usage(usages)
             # 循环内上下文复查：轮首闸门只看了一眼「历史 + 本轮提问」，循环里的工具结果
             # 还在不断加长请求体。越界就**优雅收尾**而不是发出注定失败的请求——与轮首
@@ -1252,6 +1254,31 @@ class SkillAgent:
                     context_extra_tokens += self._replay_footprint_tokens(item)
             context_watermark = len(messages)
             context_used = context_base_tokens + context_extra_tokens
+            compact_context = (run_context or {}).get("compact_context")
+            if step > 0 and callable(compact_context):
+                compacted = compact_context(
+                    messages, trace_start, context_limit, context_budget, context_used,
+                )
+                if isinstance(compacted, dict) and compacted.get("history") is not None:
+                    in_flight = messages[trace_start:]
+                    compacted_trace_prefix.extend(in_flight)
+                    messages[:] = [messages[0], *compacted["history"], *in_flight]
+                    context_history_end = 1 + len(compacted["history"])
+                    trace_start = context_history_end
+                    context_base_tokens = sum(
+                        self._replay_footprint_tokens(item)
+                        for item in messages[1:context_history_end]
+                        if isinstance(item, dict) and item.get("role") in {"user", "assistant", "tool"}
+                    )
+                    context_extra_tokens = sum(
+                        self._replay_footprint_tokens(item)
+                        for item in messages[context_history_end:]
+                        if isinstance(item, dict) and item.get("role") in {"user", "assistant", "tool"}
+                    )
+                    context_watermark = len(messages)
+                    context_limit = int(compacted.get("limit") or context_limit)
+                    context_budget = int(compacted.get("budget") or context_budget)
+                    context_used = context_base_tokens + context_extra_tokens
             if context_used > context_budget:
                 event({
                     "type": "context_full",
@@ -1266,7 +1293,7 @@ class SkillAgent:
                 )
                 content = "\n\n".join([*continued_parts, _CONTEXT_LOOP_NOTICE]).strip()
                 if isinstance(run_context, dict):
-                    run_context["trace_messages"] = messages[trace_start:]
+                    run_context["trace_messages"] = [*compacted_trace_prefix, *messages[trace_start:]]
                 return content, runs, reasonings, self._summarize_usage(usages)
             step += 1
             # 每步开头先把已「引导」的插话取进本轮 messages（旧实现挂载位，语义不变）：
@@ -1364,9 +1391,10 @@ class SkillAgent:
                         "attempts": parse_error_count,
                     }
                     messages.append(assistant_message(truncated_answer))
-                    run_context["trace_messages"] = messages[trace_start:]
+                    run_context["trace_messages"] = [*compacted_trace_prefix, *messages[trace_start:]]
                 return (
                     truncated_answer,
+
                     runs,
                     reasonings,
                     self._summarize_usage(usages),
@@ -1437,20 +1465,12 @@ class SkillAgent:
                 if repeat_notice:
                     logger.warning("[repeat-answer] 本次答复与上一轮逐字相同（长度 %s）", len(content))
                     event({"type": "status", "message": repeat_notice})
-                if isinstance(run_context, dict):
-                    run_context["truncation"] = dict(truncation_state)
                 if reasoning:
                     event({"type": "reasoning", "content": reasoning})
-                # 不要把最终答复截断在 2000 字符：done 事件的 message（完整 assistant
-                # 消息）是前端重建最终答复正文的事件源，截断会让长答复（如 H3 多段提示词）在
-                # “正文到某处就消失、只显示到冒号”的 bug 中显示不全。
-                # 让 trace 成为这一轮发给模型的完整字节序列：把最终答复也纳入 messages，
-                # 使 trace = 线上最后一步请求 + 答复。这样重放端只需重放 trace，就能逐字节
-                # 还原整轮上下文，不必再依赖“答复不在 trace 里”这条容易失效的隐式约定
-                # （一旦未来把答复先 append 再设 trace，就会出现答复重复、前缀错位）。
                 if isinstance(run_context, dict):
+                    run_context["truncation"] = dict(truncation_state)
                     messages.append(assistant_message(content))
-                    run_context["trace_messages"] = messages[trace_start:]
+                    run_context["trace_messages"] = [*compacted_trace_prefix, *messages[trace_start:]]
                     if _cache_debug_enabled():
                         _debug_message_digest(messages[trace_start:], "trace-persist", event)
                     logger.info(
@@ -1541,6 +1561,7 @@ class SkillAgent:
                     return self._finish_with_unexecuted_fence(
                         fence_marker, raw, event, runs, reasonings, usages,
                         run_context, messages, trace_start, assistant_message,
+                        compacted_trace_prefix,
                     )
                 # 原始 run（tool/arguments/result 原文/success/reason）只供宿主收尾
                 # （附件提取、file_changes、step 图片注入）；模型与前端均以
@@ -1676,7 +1697,8 @@ class SkillAgent:
                 if reasoning:
                     event({"type": "reasoning", "content": reasoning})
                 messages.append(assistant_message(content))
-                run_context["trace_messages"] = messages[trace_start:]
+                if isinstance(run_context, dict):
+                    run_context["trace_messages"] = [*compacted_trace_prefix, *messages[trace_start:]]
                 if _cache_debug_enabled():
                     _debug_message_digest(messages[trace_start:], "trace-persist-reset", event)
                 logger.info("[context_reset] 本轮收尾，交接文档=%s", (reset_info or {}).get("handoff_path"))
@@ -1876,6 +1898,7 @@ class SkillAgent:
         messages: list[dict[str, Any]],
         trace_start: int,
         build_message: Callable[..., dict[str, Any]],
+        compacted_trace_prefix: list[dict[str, Any]],
     ) -> tuple[str, list[dict[str, Any]], list[str], dict[str, Any]]:
         """围栏动作未执行时的收尾：以原文为正文，附加一行「未执行」说明。
 
@@ -1898,7 +1921,7 @@ class SkillAgent:
         answer = f"{body}\n\n（{note}）" if body else note
         if isinstance(run_context, dict):
             messages.append(build_message(answer))
-            run_context["trace_messages"] = messages[trace_start:]
+            run_context["trace_messages"] = [*compacted_trace_prefix, *messages[trace_start:]]
         return answer, runs, reasonings, self._summarize_usage(usages)
 
 

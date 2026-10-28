@@ -398,6 +398,7 @@ export async function finishRunSubscription(conversationId, controller) {
     state.runConversationId = '';
     state.runSequence = 0;
     state.runRow = null;
+    document.querySelectorAll('.compaction-running').forEach((node) => node.classList.remove('compaction-running'));
     state.runAttempt = 0;
     state.runReconnectAt = 0;
     state.runProbeMisses = 0;

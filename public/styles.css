@@ -1021,6 +1021,9 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
 .run-activity .ft-chip-skill { background: var(--accent-soft); color: var(--accent); }
 .run-activity .ft-chip-appended { background: var(--amber-soft); color: var(--amber); }
 .run-activity .skills-sep { margin: 0 6px; color: var(--muted); }
+.message-row.compaction-running .run-activity { color: var(--amber); font-weight: 600; }
+#runtimeStatus.compaction-running { color: var(--amber); font-weight: 700; }
+#contextUsageRing.compaction-running { filter: drop-shadow(0 0 4px var(--amber)); animation: pulse 1s infinite alternate; }
 /* 断流提示：一行**附加**状态，不替代正文（正文本体重连后会重放回来）。
    样式刻意低调：手机切后台/切网时它会短暂出现，不该看起来像"这一轮失败了"。 */
 .run-link-notice { margin: 8px 0 2px; padding: 5px 10px; border-radius: var(--r-xs); background: var(--surface-2); color: var(--muted); font-size: 12px; border-left: 3px solid var(--warning); }

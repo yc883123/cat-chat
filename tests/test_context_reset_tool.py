@@ -195,7 +195,7 @@ class ResetContextWiringTests(unittest.TestCase):
         source = (ROOT / "naiba" / "skills" / "agent.py").read_text(encoding="utf-8")
         start = source.index('reset_info = (run_context or {}).get("context_reset")')
         block = source[start:start + 1400]
-        self.assertIn('run_context["trace_messages"] = messages[trace_start:]', block,
+        self.assertIn('run_context["trace_messages"] = [*compacted_trace_prefix, *messages[trace_start:]]', block,
                       "收尾必须把 trace 定稿（含最终确认语）")
         self.assertIn('event({"type": "status"', block, "要告诉用户上下文已重置")
         self.assertIn("return content, runs, reasonings", block, "成功后本轮立即结束")

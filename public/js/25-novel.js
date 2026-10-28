@@ -1178,6 +1178,15 @@ function renderPlan() {
   if (stateEl) {
     stateEl.textContent = novel.staged ? "待保存作品" : (novel.bookId ? "已保存为作品" : "未打开作品");
   }
+  // 页面头的状态文字：作品状态 + 当前阶段，给不看右栏的人一个当前坐标。
+  const pageState = $("#novelPageState");
+  if (pageState) {
+    const book = novel.staged
+      ? "待保存作品"
+      : (novel.bookId ? `《${novel.book?.title || "已打开作品"}》已保存` : "未打开作品");
+    pageState.textContent = `${book} · ${stageLabel(novel.stage)}`;
+    pageState.title = pageState.textContent;
+  }
   const blocks = [];
   const push = (title, lines) => {
     const rows = (lines || []).filter((line) => String(line || "").trim());

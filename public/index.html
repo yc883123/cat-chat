@@ -691,9 +691,36 @@
         </div>
 
         <!-- 创作场（小说改编）：页面结构在这里定稿；交互与渲染由
-             public/js/25-novel.js 接管。阶段栏左侧是四个创作阶段，
-             最右侧固定「管理记录」（窄屏时阶段按钮自己滚动，它不被挤走）。 -->
+             public/js/25-novel.js 接管。页面头放定位与全局操作，
+             接着是五个创作阶段，再往下是三栏工作区。 -->
         <div class="studio-page-view" id="studioPageNovel" data-studio-page-view="novel" hidden>
+          <!-- 页面头：面包屑 + 标题 + 全局操作。导入 / 作品 / 导出从左上「作品与章节」
+               工具栏搬到这儿，原有 id 全部保留，事件绑定不变；导出菜单跟着按钮进
+               .novel-page-actions，以这个容器为定位基准，不再依赖左栏。 -->
+          <header class="novel-page-head">
+            <div class="novel-page-title">
+              <span class="novel-breadcrumb">工作台 / 创作场</span>
+              <div class="novel-page-title-row">
+                <h2>创作场</h2>
+                <span class="novel-page-state" id="novelPageState">未打开作品 · 拆章</span>
+              </div>
+            </div>
+            <div class="novel-page-actions">
+              <button class="control-button novel-manage-entry" id="novelManageBtn" type="button"
+                      title="集中管理原文、改编稿、要素、大纲、剧本与生成记录">管理记录</button>
+              <button class="control-button" id="novelImportBtn" type="button" title="导入一本 TXT 小说并自动拆章">导入 TXT</button>
+              <button class="control-button" id="novelBooksBtn" type="button" title="打开已保存的作品列表">作品</button>
+              <button class="control-button" id="novelExportBtn" type="button"
+                      title="导出全书：TXT / Markdown，可附要素与大纲" aria-haspopup="menu"
+                      aria-expanded="false" disabled>导出</button>
+              <div class="novel-export-menu" id="novelExportMenu" role="menu" hidden>
+                <button type="button" role="menuitem" data-novel-export="txt">导出 TXT（全书）</button>
+                <button type="button" role="menuitem" data-novel-export="md">导出 Markdown（全书）</button>
+                <button type="button" role="menuitem" data-novel-export="md-extras">导出 Markdown（含要素与大纲）</button>
+                <p class="novel-note" id="novelExportNote">导出由浏览器发起下载，通常保存到浏览器默认下载目录。</p>
+              </div>
+            </div>
+          </header>
           <div class="novel-stagebar">
             <div class="novel-stages" id="novelStages" role="group" aria-label="创作阶段">
               <button class="novel-stage active" type="button" aria-pressed="true" data-novel-stage="split">拆章</button>
@@ -702,8 +729,6 @@
               <button class="novel-stage" type="button" aria-pressed="false" data-novel-stage="script">剧本</button>
               <button class="novel-stage" type="button" aria-pressed="false" data-novel-stage="storyboard">分镜</button>
             </div>
-            <button class="novel-manage-entry" id="novelManageBtn" type="button"
-                    title="集中管理原文、改编稿、要素、大纲、剧本与生成记录">管理记录</button>
           </div>
           <div class="novel-panes" id="novelPanes" role="group" aria-label="创作场分档">
             <button class="studio-pane-btn novel-pane-btn" type="button" aria-pressed="false" data-novel-pane="chapters">章节</button>
@@ -731,19 +756,8 @@
                   <div class="novel-book-stat"><b id="novelStatState">未导入</b><span>状态</span></div>
                 </div>
               </div>
-              <div class="novel-toolbar">
-                <button class="control-button tiny" id="novelImportBtn" type="button" title="导入一本 TXT 小说并自动拆章">导入 TXT</button>
-                <button class="control-button tiny" id="novelBooksBtn" type="button" title="打开已保存的作品列表">作品</button>
-                <button class="control-button tiny" id="novelExportBtn" type="button"
-                        title="导出全书：TXT / Markdown，可附要素与大纲" aria-haspopup="menu"
-                        aria-expanded="false" disabled>导出</button>
-              </div>
-              <div class="novel-export-menu" id="novelExportMenu" role="menu" hidden>
-                <button type="button" role="menuitem" data-novel-export="txt">导出 TXT（全书）</button>
-                <button type="button" role="menuitem" data-novel-export="md">导出 Markdown（全书）</button>
-                <button type="button" role="menuitem" data-novel-export="md-extras">导出 Markdown（含要素与大纲）</button>
-                <p class="novel-note" id="novelExportNote">导出由浏览器发起下载，通常保存到浏览器默认下载目录。</p>
-              </div>
+              <!-- 导入 / 作品 / 导出已搬到页面头。容器保留但隐藏，回退成本低。 -->
+              <div class="novel-toolbar" hidden></div>
               <div class="novel-filter">
                 <input type="search" id="novelChapterFilter" placeholder="筛选章节" aria-label="筛选章节">
               </div>
@@ -763,28 +777,17 @@
                   <strong>还没有打开章节</strong>
                   <p>导入一本 TXT 小说，自动拆章后勾选要保留的章节，保存为作品；之后在左侧点任意一章即可查看和修改。</p>
                 </div>
-                <!-- 拆章阶段：原文与改编稿卡片。正文只读展示，「编辑」才出输入框。 -->
+                <!-- 拆章阶段：先改写、再落到卡片。正文只读展示，「编辑」才出输入框。 -->
                 <div class="novel-editor-fields" id="novelEditorFields" hidden>
-                  <label class="novel-field novel-field-title">章节标题
-                    <input type="text" id="novelChapterTitle" maxlength="200" autocomplete="off">
-                  </label>
-                  <div class="novel-editor-meta" id="novelEditorMeta"></div>
-                  <div class="novel-manuscripts" id="novelManuscripts" aria-label="章节稿件"></div>
-                  <div class="novel-manuscript-edit" id="novelManuscriptEdit" hidden>
-                    <div class="novel-stage-head">
-                      <strong id="novelManuscriptEditHead">编辑稿件</strong>
-                      <small id="novelManuscriptEditNote"></small>
-                    </div>
-                    <label class="novel-field novel-field-body">正文
-                      <textarea id="novelChapterBody" spellcheck="false"></textarea>
+                  <section class="novel-stage-group">
+                    <div class="novel-group-head"><strong>章节信息</strong><small>标题、字数与版本</small></div>
+                    <label class="novel-field novel-field-title">章节标题
+                      <input type="text" id="novelChapterTitle" maxlength="200" autocomplete="off">
                     </label>
-                    <div class="novel-editor-actions">
-                      <button class="control-button" id="novelSaveChapter" type="button">保存改编稿</button>
-                      <button class="control-button tiny" id="novelRevertChapter" type="button" title="放弃这次修改，不创建新稿件">取消</button>
-                      <button class="control-button tiny danger" id="novelDeleteChapter" type="button" title="从作品里删除这一章">删除本章</button>
-                    </div>
-                    <p class="novel-note" id="novelManuscriptEditNoteBody"></p>
-                  </div>
+                    <div class="novel-editor-meta" id="novelEditorMeta"></div>
+                  </section>
+                  <!-- AI 改编：从稿件卡片上点「AI 润色」才展开，自带标题与主操作区，
+                       不和下面的稿件卡片挤在同一张卡里。 -->
                   <div class="novel-ai-edit" id="novelAiEdit" hidden>
                     <div class="novel-stage-head">
                       <strong id="novelAiEditHead">AI 润色 / 改编</strong>
@@ -813,73 +816,104 @@
                       </label>
                     </div>
                     <!-- 生成结果就地显示：先看稿、满意再点「保存改编稿」进作品。
-                         按钮放在结果之前，结果再长也不会把「保存改编稿」挤出视野。 -->
-                    <div class="novel-editor-actions">
-                      <button class="control-button" id="novelAiSubmit" type="button">开始改编</button>
+                         主操作区固定在分组底部，结果再长也把它留在视野里。 -->
+                    <div class="novel-editor-actions novel-action-bar">
+                      <button class="control-button novel-primary" id="novelAiSubmit" type="button">开始改编</button>
                       <button class="control-button tiny" id="novelAiCancel" type="button">取消</button>
                     </div>
                     <p class="novel-note" id="novelAiNote"></p>
                     <pre class="novel-stage-result novel-ai-result" id="novelAiResult" aria-live="polite" hidden></pre>
                     <p class="novel-note" id="novelAiWarning" role="status"></p>
                   </div>
+                  <section class="novel-stage-group">
+                    <div class="novel-group-head"><strong>稿件与任务</strong><small>原文只读，改编稿逐份保存</small></div>
+                    <div class="novel-manuscripts" id="novelManuscripts" aria-label="章节稿件"></div>
+                    <div class="novel-manuscript-edit" id="novelManuscriptEdit" hidden>
+                      <div class="novel-stage-head">
+                        <strong id="novelManuscriptEditHead">编辑稿件</strong>
+                        <small id="novelManuscriptEditNote"></small>
+                      </div>
+                      <label class="novel-field novel-field-body">正文
+                        <textarea id="novelChapterBody" spellcheck="false"></textarea>
+                      </label>
+                      <div class="novel-editor-actions novel-action-bar">
+                        <button class="control-button novel-primary" id="novelSaveChapter" type="button">保存改编稿</button>
+                        <button class="control-button tiny" id="novelRevertChapter" type="button" title="放弃这次修改，不创建新稿件">取消</button>
+                        <button class="control-button tiny danger" id="novelDeleteChapter" type="button" title="从作品里删除这一章">删除本章</button>
+                      </div>
+                      <p class="novel-note" id="novelManuscriptEditNoteBody"></p>
+                    </div>
+                  </section>
                 </div>
                 <!-- 阶段二：要素 / 大纲生成（同一套编辑区，按阶段切换内容） -->
                 <div class="novel-stage-panel" id="novelStagePanel" hidden>
                   <!-- 阶段标题与提示由中栏面板头（#novelEditorHead / #novelEditorHint）承担，
                        这里不再重复一遍，否则同一句「要素」上下各出现一次。 -->
-                  <div class="novel-stage-meta" id="novelStageMeta"></div>
-                  <!-- 逐章稿件选择：每章一次只选一份，默认原文。 -->
-                  <div class="novel-pick-manuscripts" id="novelPickManuscripts" aria-label="本次使用的章节稿件"></div>
-                  <div class="novel-limits" id="novelLimits">
-                    <label class="novel-limit">
-                      <span>每章正文上限 <b id="novelBodyCharsValue">3000</b> 字</span>
-                      <input type="range" id="novelBodyChars" min="3000" max="15000" step="500" value="3000"
-                             aria-label="每章正文上限（字）">
-                    </label>
-                    <label class="novel-limit">
-                      <span>一次最多选择 <b id="novelMaxChaptersValue">6</b> 章</span>
-                      <input type="range" id="novelMaxChapters" min="1" max="20" step="1" value="6"
-                             aria-label="一次最多选择章节数">
-                    </label>
-                  </div>
-                  <div class="novel-stage-context" data-novel-context="script" hidden>
-                    <label>人物设定版本<select data-context-elements aria-label="剧本使用的人物设定版本"></select></label>
-                    <label>改编大纲版本<select data-context-outline aria-label="剧本使用的改编大纲版本"></select></label>
-                  </div>
-                  <!-- 分镜生图专用（阶段四）：写法（系统提示词）可编辑、逐场结果；
-                       发送按钮把勾选的提示词批量带到造梦机。其余阶段不显示。 -->
-                  <div class="novel-storyboard-block" data-novel-context="storyboard" hidden>
-                    <label class="novel-field">
-                      <span class="novel-storyboard-system-label">出图提示词写法（系统提示词）
-                        <small>留空用内置分镜写法；可以手动编辑，也可以在提词库选中模板后点「发送到分镜生图」导入，改了立即保存</small>
-                      </span>
-                      <textarea data-novel-control="novelStoryboardSystem" rows="7" spellcheck="false"
-                                placeholder="留空 = 内置分镜写法：每场转成一条出图提示词，写清地点景物、人物外观与动作、景别构图、光线氛围，不写台词字幕。&#10;也可以在这里粘贴你自己的模板要求。"></textarea>
-                    </label>
-                    <div class="novel-editor-actions">
-                      <button class="control-button tiny" data-novel-control="novelStoryboardReset" type="button" hidden
-                              title="清空自定义写法，恢复内置分镜写法">恢复默认写法</button>
+                  <section class="novel-stage-group">
+                    <div class="novel-group-head"><strong>生成参数</strong><small>素材范围与正文长度</small></div>
+                    <div class="novel-stage-meta" id="novelStageMeta"></div>
+                    <!-- 逐章稿件选择：每章一次只选一份，默认原文。 -->
+                    <div class="novel-pick-manuscripts" id="novelPickManuscripts" aria-label="本次使用的章节稿件"></div>
+                    <div class="novel-limits" id="novelLimits">
+                      <label class="novel-limit">
+                        <span>每章正文上限 <b id="novelBodyCharsValue">3000</b> 字</span>
+                        <input type="range" id="novelBodyChars" min="3000" max="15000" step="500" value="3000"
+                               aria-label="每章正文上限（字）">
+                      </label>
+                      <label class="novel-limit">
+                        <span>一次最多选择 <b id="novelMaxChaptersValue">6</b> 章</span>
+                        <input type="range" id="novelMaxChapters" min="1" max="20" step="1" value="6"
+                               aria-label="一次最多选择章节数">
+                      </label>
                     </div>
+                  </section>
+                  <section class="novel-stage-group">
+                    <div class="novel-group-head"><strong>生成设置</strong><small>版本、要求与模型</small></div>
+                    <div class="novel-stage-context" data-novel-context="script" hidden>
+                      <label>人物设定版本<select data-context-elements aria-label="剧本使用的人物设定版本"></select></label>
+                      <label>改编大纲版本<select data-context-outline aria-label="剧本使用的改编大纲版本"></select></label>
+                    </div>
+                    <!-- 分镜生图专用（阶段四）：写法（系统提示词）可编辑，改了立即保存。
+                         逐场结果在下面单独一块，主操作区之后。其余阶段都不显示。 -->
+                    <div class="novel-storyboard-block" data-novel-context="storyboard" hidden>
+                      <label class="novel-field">
+                        <span class="novel-storyboard-system-label">出图提示词写法（系统提示词）
+                          <small>留空用内置分镜写法；可以手动编辑，也可以在提词库选中模板后点「发送到分镜生图」导入，改了立即保存</small>
+                        </span>
+                        <textarea data-novel-control="novelStoryboardSystem" rows="7" spellcheck="false"
+                                  placeholder="留空 = 内置分镜写法：每场转成一条出图提示词，写清地点景物、人物外观与动作、景别构图、光线氛围，不写台词字幕。&#10;也可以在这里粘贴你自己的模板要求。"></textarea>
+                      </label>
+                      <div class="novel-editor-actions">
+                        <button class="control-button tiny" data-novel-control="novelStoryboardReset" type="button" hidden
+                                title="清空自定义写法，恢复内置分镜写法">恢复默认写法</button>
+                      </div>
+                    </div>
+                    <label class="novel-field">补充要求（可选）
+                      <textarea id="novelStageNote" rows="2" maxlength="800"
+                                placeholder="例如：人物只保留有名有姓的；场景按出现顺序排。"></textarea>
+                    </label>
+                    <!-- 模型选择与提词库同口径：先选供应商，再选该供应商目录里的模型。 -->
+                    <div class="novel-stage-model">
+                      <label class="novel-field">供应商
+                        <select id="novelStageProvider" aria-label="生成用的供应商"></select>
+                      </label>
+                      <label class="novel-field">模型
+                        <select id="novelStageModel" aria-label="生成用的模型"></select>
+                      </label>
+                    </div>
+                  </section>
+                  <!-- 主操作区：每个阶段只有这一个主按钮，文案随阶段变化（生成要素 / 生成大纲 / 生成剧本 / 生成分镜提示词）。 -->
+                  <div class="novel-stage-actions novel-action-bar">
+                    <button class="control-button novel-primary" id="novelStageGenerate" type="button">生成</button>
+                  </div>
+                  <!-- 分镜结果与发送：勾选后批量带到造梦机；没有结果时整块隐藏。 -->
+                  <div class="novel-storyboard-block novel-storyboard-results" data-novel-context="storyboard" hidden>
                     <p class="novel-note" data-novel-control="novelStoryboardNote"></p>
                     <div class="novel-storyboard-list" data-novel-control="novelStoryboardList" aria-label="分镜提示词"></div>
                     <div class="novel-editor-actions">
                       <button class="control-button tiny" data-novel-control="novelStoryboardAll" type="button" hidden>全选</button>
                       <button class="control-button" data-novel-control="novelStoryboardSend" type="button" hidden>发送到造梦机</button>
                     </div>
-                  </div>
-                  <label class="novel-field">补充要求（可选）
-                    <textarea id="novelStageNote" rows="2" maxlength="800"
-                              placeholder="例如：人物只保留有名有姓的；场景按出现顺序排。"></textarea>
-                  </label>
-                  <!-- 模型选择与提词库同口径：先选供应商，再选该供应商目录里的模型。 -->
-                  <div class="novel-stage-model">
-                    <label class="novel-field">供应商
-                      <select id="novelStageProvider" aria-label="生成用的供应商"></select>
-                    </label>
-                    <label class="novel-field">模型
-                      <select id="novelStageModel" aria-label="生成用的模型"></select>
-                    </label>
-                    <button class="control-button" id="novelStageGenerate" type="button">生成</button>
                   </div>
                   <p class="novel-note" id="novelStageWarning" role="status"></p>
                   <div class="novel-stage-task" id="novelStageTask" hidden>

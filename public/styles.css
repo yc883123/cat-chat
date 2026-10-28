@@ -4587,59 +4587,84 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
    手机横屏（844x390、812x375）保留三栏；竖屏（<=760px）改三档分段控件。
    全部复用既有语义变量，不新增小说专用色板。
    ============================================================ */
+/* ---- 页面头：面包屑 + 标题 + 全局操作（导入 / 作品 / 导出 / 管理记录） ---- */
+.novel-page-head {
+  flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--s-4);
+  min-height: 72px; padding: 0 var(--s-6);
+  border-bottom: 1px solid var(--line); background: var(--surface);
+}
+.novel-page-title { display: grid; gap: 2px; min-width: 0; }
+.novel-breadcrumb { font-size: 11px; line-height: 1.4; color: var(--muted); }
+.novel-page-title-row { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.novel-page-title-row h2 {
+  flex: none; margin: 0; font-size: 20px; font-weight: 600; line-height: 1.3; color: var(--text);
+}
+.novel-page-state {
+  min-width: 0; font-size: 11.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 导出菜单以本容器为定位基准（position: relative），按钮搬家后菜单不会漂到左栏。 */
+.novel-page-actions {
+  position: relative; flex: none;
+  display: flex; align-items: center; gap: 8px;
+}
+.novel-page-actions .control-button { min-height: 36px; padding: 0 14px; font-size: 12.5px; }
+
+/* ---- 五阶段导航 ---- */
 .novel-stagebar {
-  display: flex; align-items: center; gap: 6px;
-  padding: 8px var(--s-4) 0;
+  flex: none; display: flex; align-items: center; gap: 8px;
+  min-height: 52px; padding: 0 var(--s-6);
+  border-bottom: 1px solid var(--line); background: var(--surface);
 }
 .novel-stages {
-  display: flex; gap: 4px; min-width: 0;
+  display: flex; align-items: center; gap: 6px; min-width: 0;
   overflow-x: auto; scrollbar-width: none;
   flex: 1 1 auto;
 }
 .novel-stages::-webkit-scrollbar { display: none; }
 .novel-stage {
-  flex: none; min-height: 30px; padding: 0 12px;
+  flex: none; height: 32px; padding: 0 16px;
   border: 1px solid transparent; border-radius: var(--r-md);
-  background: transparent; color: var(--muted); font-size: 12.5px; cursor: pointer;
+  background: var(--surface-2); color: var(--muted); font-size: 12.5px; cursor: pointer;
+  white-space: nowrap;
 }
-.novel-stage:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
-.novel-stage:focus-visible { outline: 2px solid var(--violet-line); outline-offset: 1px; }
+.novel-stage:hover:not(:disabled) { background: var(--accent-soft); color: var(--text); }
+.novel-stage:focus-visible { outline: 2px solid var(--violet-line); outline-offset: 2px; }
+/* 当前阶段：主色实底 + 白字，扫一眼就知道在哪一页。 */
 .novel-stage.active {
-  border-color: var(--violet-line); background: var(--accent-soft);
-  color: var(--violet-deep); font-weight: 600;
+  border-color: var(--accent-solid); background: var(--accent-solid);
+  color: #fff; font-weight: 600;
 }
 /* 阶段二、三未接入：显式禁用，不靠颜色暗示「点得动」。 */
 .novel-stage:disabled { opacity: .55; cursor: not-allowed; }
-/* 管理记录：固定在阶段栏最右侧；阶段按钮自己滚动，它不会被挤到看不见的位置。 */
-.novel-manage-entry {
-  flex: none; min-height: 30px; padding: 0 11px;
-  border: 1px solid var(--line); border-radius: var(--r-md);
-  background: var(--surface); color: var(--text); font-size: 12px; cursor: pointer;
-  white-space: nowrap;
-}
-.novel-manage-entry:hover { background: var(--surface-2); border-color: var(--violet-line); }
-.novel-manage-entry:focus-visible { outline: 2px solid var(--violet-line); outline-offset: 1px; }
+/* 管理记录：页面头里唯一带紫色描边的操作，与导入 / 导出区分开。 */
+.novel-manage-entry { border-color: var(--violet-line); color: var(--violet-deep); }
+.novel-manage-entry:hover { background: var(--accent-soft); border-color: var(--violet-line); }
+.novel-manage-entry:focus-visible { outline: 2px solid var(--violet-line); outline-offset: 2px; }
 
 .novel-panes { display: none; gap: 4px; padding: 6px var(--s-4); border-bottom: 1px solid var(--line); }
 
+/* 桌面三栏：章节导航 / 当前阶段工作区 / 阶段说明，中间固定主区。 */
 .novel-columns {
   display: grid;
-  grid-template-columns: minmax(200px, 258px) minmax(0, 1.35fr) minmax(180px, 246px);
-  gap: var(--s-3);
-  padding: var(--s-3) var(--s-4) var(--s-4);
+  grid-template-columns: 248px minmax(0, 1fr) 280px;
+  gap: 16px;
+  padding: 20px;
   min-height: 0;
   flex: 1;
 }
 
 .novel-panel {
-  display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: hidden;
+  display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow: hidden;
   background: var(--surface); border: 1px solid var(--line);
-  border-radius: var(--r-md); padding: 10px;
+  border-radius: var(--r-md); padding: 12px;
 }
 .novel-panel-head {
-  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
-  flex: none; padding-bottom: 6px; border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  flex: none; padding-bottom: 10px; border-bottom: 1px solid var(--line);
 }
+/* 左栏面板头固定 56px：作品摘要和章节列表从同一条基线上开始。 */
+.novel-chapters .novel-panel-head { min-height: 56px; }
 .novel-panel-head strong { font-size: 13px; }
 .novel-panel-head small { font-size: 11px; color: var(--muted); }
 
@@ -4672,18 +4697,19 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 }
 .novel-book-stat span { display: block; margin-top: 1px; font-size: 9.5px; color: var(--muted); }
 
-.novel-toolbar { flex: none; display: flex; gap: 6px; flex-wrap: wrap; }
-.novel-toolbar .control-button { flex: 1 1 auto; min-width: 0; }
+/* 导入 / 作品 / 导出已搬到页面头：容器留在原地但整体隐藏（也盖掉 [hidden] 的默认规则差异）。 */
+.novel-toolbar { display: none; }
 .novel-filter { flex: none; }
 .novel-filter input {
-  width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--r-md);
-  background: var(--surface); color: var(--text); font-size: 12px;
+  width: 100%; height: 34px; padding: 0 9px;
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface-2); color: var(--text); font-size: 12px;
 }
 
-.novel-chapter-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.novel-chapter-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 3px; }
 .novel-chapter-row {
-  display: flex; align-items: center; gap: 7px; width: 100%;
-  min-height: 38px; padding: 5px 6px; text-align: left;
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  min-height: 46px; padding: 6px 8px; text-align: left;
   border: 1px solid transparent; border-radius: var(--r-sm);
   background: transparent; color: var(--text); cursor: pointer;
 }
@@ -4698,13 +4724,15 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
   accent-color: var(--accent); cursor: pointer;
 }
 .novel-chapter-copy { flex: 1; min-width: 0; display: grid; gap: 1px; }
-/* 章节标题最多两行，第二行放字数/状态（总计划 5.6.4）。 */
+/* 标题只在自己这一列里截断：绝不允许把右侧的章节号 / 状态挤出去。 */
 .novel-chapter-copy strong {
-  font-size: 11.5px; font-weight: 600; line-height: 1.35;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-  overflow: hidden; word-break: break-word;
+  font-size: 12px; font-weight: 600; line-height: 1.35; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.novel-chapter-copy small { font-size: 9.5px; color: var(--muted); }
+.novel-chapter-copy small {
+  min-width: 0; font-size: 9.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .novel-chapter-no { flex: none; font-size: 9.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 .novel-empty { margin: 6px 2px; font-size: 11px; line-height: 1.6; color: var(--muted); }
@@ -4717,23 +4745,39 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 }
 .novel-placeholder strong { display: block; color: var(--text); font-size: 13px; }
 .novel-placeholder p { margin: 6px 0 0; font-size: 11.5px; line-height: 1.65; }
-.novel-editor-fields { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.novel-editor-fields { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
 /* display 会覆盖浏览器默认的 [hidden] 规则，必须显式声明一次（导入块同理）。 */
 .novel-editor-fields[hidden], .novel-block[hidden], .novel-pick-actions[hidden],
 .novel-manuscript-edit[hidden], .novel-ai-edit[hidden], .novel-pick-manuscripts[hidden],
-.novel-location-path[hidden], .novel-manage-row[hidden] { display: none; }
+.novel-location-path[hidden], .novel-manage-row[hidden],
+.novel-stage-group[hidden], .novel-group-head[hidden] { display: none; }
+
+/* 参数分组：标题区 + 表单 + 主操作区，一张卡一组，扫读时不用在长表单里找按钮。 */
+.novel-stage-group {
+  flex: none; display: grid; gap: 10px;
+  padding: 12px; border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--surface);
+}
+.novel-group-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.novel-group-head strong { flex: none; font-size: 12.5px; color: var(--text); white-space: nowrap; }
+.novel-group-head small {
+  min-width: 0; font-size: 10.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 .novel-field { display: grid; gap: 4px; font-size: 11px; color: var(--muted); }
 .novel-field input, .novel-field textarea {
   width: 100%; padding: 7px 9px;
   border: 1px solid var(--line); border-radius: var(--r-md);
-  background: var(--surface); color: var(--text); font-size: 12.5px;
+  background: var(--surface-2); color: var(--text); font-size: 12.5px;
 }
 .novel-field-title { flex: none; }
 /* 编辑框只在点「编辑」后出现，按内容高度自适应、最多占半边高，不把阅读器撑成空表单。 */
 .novel-manuscript-edit, .novel-ai-edit {
-  flex: none; display: grid; gap: 7px; padding: 8px 9px;
+  flex: none; display: grid; gap: 8px; padding: 12px;
   border: 1px solid var(--violet-line); border-radius: var(--r-md); background: var(--surface);
 }
+.novel-ai-edit .novel-field textarea { min-height: 72px; }
 .novel-field-body { min-height: 0; }
 .novel-field-body textarea {
   min-height: 160px; max-height: 44vh; resize: vertical; line-height: 1.7;
@@ -4750,6 +4794,29 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .novel-editor-actions { flex: none; display: flex; gap: 6px; flex-wrap: wrap; padding-top: 2px; }
+
+/* ---- 主操作区：浅紫底、固定紧跟表单分组，右侧只放一个主按钮 ----
+   中栏内容比一屏长时，主操作区贴住滚动容器底部，翻到哪都能一眼看到按钮。 */
+.novel-action-bar, .novel-stage-actions {
+  flex: none; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 12px; border: 1px solid var(--violet-line); border-radius: var(--r-md);
+  background: var(--accent-soft);
+  position: sticky; bottom: 0; z-index: 3;
+  box-shadow: 0 -10px 16px -14px rgba(0, 0, 0, .38);
+}
+.novel-action-bar .novel-primary, .novel-stage-actions .novel-primary {
+  order: 2; margin-left: auto;
+}
+/* 主按钮：每屏只有一个，纯色实底 + 白字。副操作留在左侧、保持轻量。 */
+.novel-primary {
+  min-height: 40px; padding: 0 20px;
+  border: 1px solid var(--accent-solid); border-radius: var(--r-md);
+  background: var(--accent-solid); color: #fff;
+  font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap;
+}
+.novel-primary:hover:not(:disabled) { background: var(--accent-solid); border-color: var(--accent-solid); filter: brightness(1.06); }
+.novel-primary:focus-visible { outline: 2px solid var(--violet-line); outline-offset: 2px; }
+.novel-primary:disabled { opacity: .55; cursor: not-allowed; }
 
 /* ---- 章节稿件卡片（原文 / 改编稿） ---- */
 .novel-manuscripts { display: flex; flex-direction: column; gap: 6px; }
@@ -4797,11 +4864,13 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .novel-limit input[type="range"]:focus-visible { outline: 2px solid var(--violet-line); outline-offset: 2px; }
 
 /* ---- 右栏：本次生成说明 ---- */
-.novel-preview-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.novel-preview-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
 .novel-block {
-  display: grid; gap: 6px; padding: 8px 9px;
+  display: grid; gap: 8px; padding: 10px 11px;
   border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2);
 }
+/* 本地保存路径沉到右栏底部：上面是「这次会做什么」，最下面是「东西存在哪」。 */
+#novelLocationBlock { margin-top: auto; }
 .novel-block-title { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
 .novel-block-title strong { font-size: 11.5px; }
 .novel-block-title small { font-size: 9.5px; color: var(--muted); }
@@ -4845,16 +4914,23 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .novel-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .novel-dialog-error { margin: 0; min-height: 14px; font-size: 11px; color: var(--danger, #c0392b); }
 
-/* 手机横屏（844x390 / 812x375）：三栏同时可见，只压缩留白与辅助文案。 */
+/* 手机横屏（844x390 / 812x375）：三栏同时可见，只压缩留白与辅助文案。
+   横屏高度只有 390px：页面头与阶段条压到最小，省下的高度全给三栏。 */
 @media (max-width: 960px) and (orientation: landscape) {
-  .novel-stages { padding: 5px 10px 0; }
-  .novel-stage { min-height: 26px; padding: 0 9px; font-size: 11px; }
+  .novel-page-head { min-height: 44px; padding: 0 12px; gap: 10px; }
+  .novel-breadcrumb { display: none; }
+  .novel-page-title-row h2 { font-size: 15px; }
+  .novel-page-state { font-size: 10.5px; }
+  .novel-page-actions .control-button { min-height: 28px; padding: 0 10px; font-size: 11px; }
+  .novel-stagebar { min-height: 40px; padding: 0 12px; }
+  .novel-stage { height: 26px; padding: 0 10px; font-size: 11px; }
   .novel-columns {
     grid-template-columns: 170px minmax(0, 1fr) 198px;
-    gap: 7px; padding: 7px 9px 9px;
+    gap: 8px; padding: 8px 12px 10px;
   }
-  .novel-panel { padding: 7px 8px; gap: 6px; }
+  .novel-panel { padding: 7px 8px; gap: 7px; }
   .novel-panel-head { padding-bottom: 4px; }
+  .novel-chapters .novel-panel-head { min-height: 0; }
   .novel-panel-head strong { font-size: 11.5px; }
   .novel-panel-head small { display: none; }
   .novel-book-title small { display: none; }
@@ -4862,17 +4938,33 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
   .novel-book-stat { padding: 4px 5px; }
   .novel-book-stat b { font-size: 11px; }
   .novel-book-stat span { font-size: 9px; }
+  .novel-filter input { height: 30px; }
   .novel-chapter-row { min-height: 32px; padding: 4px 5px; }
   .novel-chapter-copy strong { font-size: 10.5px; }
   .novel-chapter-copy small { font-size: 9px; }
   .novel-field-body textarea { min-height: 120px; font-size: 11.5px; line-height: 1.6; }
   .novel-note { font-size: 9.5px; }
   .novel-block { padding: 6px 7px; }
+  .novel-stage-group { padding: 8px; gap: 7px; }
+  .novel-group-head small { display: none; }
+  .novel-action-bar, .novel-stage-actions { padding: 7px 8px; }
+  .novel-primary { min-height: 30px; padding: 0 12px; font-size: 11.5px; }
   .novel-editor-actions .control-button { min-height: 26px; font-size: 10.5px; }
 }
 
 /* 手机竖屏（390x844 / 375x812）：改三档分段控件，同一时刻只显示一个面板。 */
 @media (max-width: 760px) {
+  /* 竖屏放不下一行标题 + 四个操作：标题占一行，操作另起一行并可横向滚动。 */
+  .novel-page-head {
+    flex-direction: column; align-items: stretch; gap: 8px;
+    min-height: 0; padding: 10px 12px;
+  }
+  .novel-page-title-row h2 { font-size: 17px; }
+  .novel-page-actions { overflow-x: auto; scrollbar-width: none; }
+  .novel-page-actions::-webkit-scrollbar { display: none; }
+  .novel-page-actions .control-button { flex: none; }
+  .novel-stagebar { min-height: 46px; padding: 0 12px; }
+  .novel-stage { height: 30px; padding: 0 12px; }
   .novel-panes { display: flex; }
   .novel-columns {
     grid-template-columns: minmax(0, 1fr);
@@ -4889,30 +4981,34 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 /* ---- 阶段二：要素 / 大纲生成面板 ---- */
 /* flex: 1 0 auto —— 有空间时铺满，没空间时按内容长高、交给外层编辑区滚动。
    只写 flex: 1 会让面板在内容超高时被压缩，子项的溢出内容压到后面的场次区上。 */
-.novel-stage-panel { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1 0 auto; }
+.novel-stage-panel { display: flex; flex-direction: column; gap: 12px; min-height: 0; flex: 1 0 auto; }
 /* display 会覆盖浏览器默认的 [hidden] 规则。 */
 .novel-stage-panel[hidden], .novel-stage-task[hidden], .novel-stage-saved[hidden] { display: none; }
 .novel-stage-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .novel-stage-head strong { font-size: 12.5px; }
 .novel-stage-head small { font-size: 10.5px; color: var(--muted); }
 .novel-stage-meta { display: flex; gap: 6px; flex-wrap: wrap; }
-.novel-stage-context { display: flex; gap: 8px; flex-wrap: wrap; }
+.novel-stage-context { display: flex; gap: 12px; flex-wrap: wrap; }
 .novel-stage-context[hidden] { display: none; }
-.novel-stage-context label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
-.novel-stage-context select, .novel-version-tools select { width: auto; padding: 4px 7px; font-size: 11px; }
+/* 与其它字段同一口径：标签在上、控件在下，两张下拉各占一列。 */
+.novel-stage-context label { display: grid; gap: 4px; flex: 1 1 150px; min-width: 0; color: var(--muted); font-size: 11px; }
+.novel-stage-context select { width: 100%; }
+.novel-version-tools select { width: auto; padding: 4px 7px; font-size: 11px; }
 .novel-version-tools { display: flex; align-items: center; gap: 7px; }
-/* 两级选择：供应商 + 模型各占一份，按钮靠右；窄屏自动换行，不挤压下拉。 */
-.novel-stage-model { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
-.novel-stage-model .novel-field { flex: 1 1 120px; min-width: 0; }
+/* 两级选择：供应商 + 模型双列 1fr 1fr，按钮在主操作区；窄屏自动换行，不挤压下拉。 */
+.novel-stage-model { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.novel-stage-model .novel-field { flex: 1 1 0; min-width: 120px; }
 .novel-stage-model .control-button { flex: 0 0 auto; }
 .novel-stage-panel select {
   width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: var(--r-md);
-  background: var(--surface); color: var(--text); font-size: 12.5px;
+  background: var(--surface-2); color: var(--text); font-size: 12.5px;
 }
+/* 全局 `label textarea { min-height: 120px }` 会把「补充要求」撑成半屏、把主按钮挤出视野；
+   这里按 rows 给高度（分镜写法的 110px 由 .novel-storyboard-block 单独覆盖）。 */
 .novel-stage-panel textarea {
   width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: var(--r-md);
-  background: var(--surface); color: var(--text); font-size: 12.5px;
-  font-family: var(--font); resize: vertical;
+  background: var(--surface-2); color: var(--text); font-size: 12.5px;
+  font-family: var(--font); resize: vertical; min-height: 56px;
 }
 .novel-stage-task, .novel-stage-saved {
   display: flex; flex-direction: column; gap: 6px; min-height: 0; flex: 1 0 auto;
@@ -5126,7 +5222,7 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
   border: 1px solid var(--line); border-radius: var(--r-md);
   background: var(--surface); box-shadow: 0 6px 18px rgba(0, 0, 0, .16);
 }
-.novel-toolbar { position: relative; }
+/* 导出菜单以页面头的 .novel-page-actions 为定位基准（按钮与菜单同在一个 relative 容器里）。 */
 .novel-export-menu { top: 100%; left: auto; right: 0; margin-top: 2px; }
 .novel-export-menu[hidden] { display: none; }
 .novel-export-menu button {
@@ -5167,6 +5263,13 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 /* 分镜生图（阶段四）：逐场提示词行（勾选后发送到造梦机）。 */
 .novel-storyboard-block { display: grid; gap: 6px; }
 .novel-storyboard-block[hidden] { display: none; }
+/* 分镜结果独立成块（主操作区之后）：逐场提示词自己滚动，发送按钮留在块底部。 */
+.novel-storyboard-results {
+  flex: 1 1 auto; min-height: 0; gap: 8px; padding: 12px;
+  border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface);
+}
+.novel-storyboard-results .novel-storyboard-list { max-height: 340px; }
+.novel-storyboard-results .novel-editor-actions { justify-content: flex-end; }
 .novel-storyboard-system-label small { display: block; font-weight: 400; line-height: 1.5; }
 .novel-storyboard-system-label + textarea,
 .novel-storyboard-block textarea { min-height: 110px; resize: vertical; line-height: 1.55; }

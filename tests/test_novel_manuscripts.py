@@ -547,6 +547,94 @@ class ResultVisibilityUITests(unittest.TestCase):
         self.assertIn("function manageVersionText(row)", js)
         self.assertIn('row.result || row.result_partial', js)
 
+
+class CreativeFieldLayoutUITests(unittest.TestCase):
+    """创作场排版：页面头承载全局操作，五阶段横条 + 三栏工作区，主操作区固定在分组底部。
+
+    这批断言钉的是「结构与落点」，不是像素：按钮搬家后 id 不变（事件绑定按 id），
+    三栏比例与主操作区的粘底行为写进 CSS，避免以后改样式时又把主按钮挤到看不见。
+    """
+
+    def _read(self, rel: str) -> str:
+        return (ROOT / rel).read_text(encoding="utf-8")
+
+    def _page(self) -> str:
+        index = self._read("public/index.html")
+        return index[index.index('id="studioPageNovel"'):]
+
+    def test_page_head_holds_global_actions_with_same_ids(self):
+        page = self._page()
+        head = page[page.index('class="novel-page-head"'):]
+        head = head[: head.index('class="novel-stagebar"')]
+        self.assertIn("工作台 / 创作场", head, "页面头要有面包屑")
+        self.assertIn('id="novelPageState"', head, "页面头要显示当前作品与阶段")
+        for ident in ("novelManageBtn", "novelImportBtn", "novelBooksBtn",
+                      "novelExportBtn", "novelExportMenu"):
+            self.assertIn(f'id="{ident}"', head, f"{ident} 应搬到页面头")
+        # 导出菜单跟按钮一起进 .novel-page-actions，菜单才有正确的定位基准。
+        actions = head[head.index('class="novel-page-actions"'):]
+        self.assertIn('id="novelExportMenu"', actions)
+        self.assertNotIn('id="novelImportBtn"', page[page.index('class="novel-toolbar"'):][:400],
+                         "左栏工具栏只是保留容器，按钮已经搬走")
+
+    def test_columns_and_stage_bar_follow_the_new_grid(self):
+        css = self._read("public/styles.css")
+        head = css[css.index(".novel-page-head {"):]
+        head = head[: head.index("}")]
+        self.assertIn("min-height: 72px", head)
+        actions = css[css.index(".novel-page-actions {"):]
+        actions = actions[: actions.index("}")]
+        self.assertIn("position: relative", actions, "导出菜单以页面头操作区为定位基准")
+        columns = css[css.index(".novel-columns {"):]
+        columns = columns[: columns.index("}")]
+        for piece in ("248px minmax(0, 1fr) 280px", "gap: 16px", "padding: 20px"):
+            self.assertIn(piece, columns, "桌面三栏比例与间距")
+        stage = css[css.index(".novel-stage {"):]
+        stage = stage[: stage.index("}")]
+        self.assertIn("height: 32px", stage)
+        active = css[css.index(".novel-stage.active {"):]
+        active = active[: active.index("}")]
+        self.assertIn("background: var(--accent-solid)", active, "当前阶段用主色实底，换肤跟着走")
+        self.assertIn("color: #fff", active)
+        self.assertIn(".novel-toolbar { display: none; }", css, "左栏工具栏保留但不占位")
+
+    def test_primary_action_bar_sticks_to_the_editor_bottom(self):
+        css = self._read("public/styles.css")
+        bar = css[css.index(".novel-action-bar, .novel-stage-actions {"):]
+        bar = bar[: bar.index("}")]
+        self.assertIn("position: sticky", bar)
+        self.assertIn("bottom: 0", bar)
+        self.assertIn("background: var(--accent-soft)", bar, "主操作区用弱强调底色，不写死颜色")
+        primary = css[css.index("\n.novel-primary {"):]
+        primary = primary[: primary.index("}")]
+        self.assertIn("background: var(--accent-solid)", primary)
+        self.assertIn("min-height: 40px", primary)
+        page = self._page()
+        panel = page[page.index('class="novel-stage-panel"'):]
+        generate = panel[: panel.index('id="novelStageWarning"')]
+        self.assertIn('id="novelStageGenerate"', generate)
+        self.assertIn("novel-primary", generate, "生成按钮是各阶段唯一的主按钮")
+        self.assertIn("novel-action-bar", generate)
+
+    def test_storyboard_results_sit_after_the_primary_action(self):
+        """分镜结果与「发送到造梦机」放在主操作区之后：先点生成，再在下面逐场勾选。"""
+        page = self._page()
+        panel = page[page.index('class="novel-stage-panel"'):]
+        panel = panel[: panel.index('id="novelStageTask"')]
+        generate_at = panel.index('id="novelStageGenerate"')
+        note_at = panel.index("novelStoryboardNote")
+        send_at = panel.index("novelStoryboardSend")
+        self.assertLess(generate_at, note_at)
+        self.assertLess(note_at, send_at)
+        self.assertEqual(panel.count("novelStoryboardNote"), 1, "结果说明只出现一次")
+
+    def test_page_state_tracks_book_and_stage(self):
+        js = self._read("public/js/25-novel.js")
+        plan = js[js.index("function renderPlan("):]
+        plan = plan[: plan.index("const blocks = [];")]
+        self.assertIn('$("#novelPageState")', plan)
+        self.assertIn("stageLabel(novel.stage)", plan)
+
     def test_result_and_saved_blocks_collapse_repeatably(self):
         """生成结果与「已保存版本」要能反复收起/展开，且不能被轮询重新撑开。
 

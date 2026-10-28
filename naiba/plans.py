@@ -753,10 +753,28 @@ class PlanManager:
         profile = self.app.config.profile(model_key)
         # 与主对话/子代理同参数（plan 模式当前已封存，但签名与口径保持一致，
         # 复活时不会因为只走默认值而让同一会话出现两种回放字节）。
-        # profile 因此必须先解析：`local_image_brain` 决定「图片降级旗标」是否回放，
+        allowed_tools = [
+            str(item)
+            for item in (
+                frozen.get("allowed_tools")
+                or resolve_mode_tools(
+                    "craft", [str(t) for t in self.app.config.data.get("agent_tools", [])]
+                )
+            )
+            # 计划执行不开放「指名出卡」：show_media 的 RunContext 授权只给承载用户原始请求的
+            # 普通主对话 Run；这里显式从工具集剔除，避免模型看到"声明在、调用必被拒"的工具。
+            if str(item) != "show_media"
+        ]
+        # PDF/视频处理指引按「本次实际可用工具名集合」收窄（与主对话同口径）：
+        # 工具集必须先定稿再构建历史——历史是本轮请求前缀的来源，先建历史再定稿工具集
+        # 会让指引按未过滤的默认全集展开，同一会话出现两种回放字节（前缀缓存断）。
+        allowed_names = {str(t) for t in allowed_tools}
+        # profile 必须先解析：`local_image_brain` 决定「图片降级旗标」是否回放，
         # 同会话内三处 build 调用点必须按同一个判据传值（core.history.local_brain）。
         history = build_model_history(
             frozen.get("conversation_messages") or conversation.get("messages", []),
+            pdf_tools="read_pdf" in allowed_names,
+            video_tools="extract_frames" in allowed_names,
             local_image_brain=local_brain(profile),
             **self.app.config.reasoning_replay_options(),
             **self.app.config.image_encode_cache_options(),
@@ -795,18 +813,6 @@ class PlanManager:
             f"{step.get('detail') or ''}\n\n"
             "请专注完成当前步骤；完成后用中文简要汇报该步骤结果（不超过 3 句话）。"
         )
-        allowed_tools = [
-            str(item)
-            for item in (
-                frozen.get("allowed_tools")
-                or resolve_mode_tools(
-                    "craft", [str(t) for t in self.app.config.data.get("agent_tools", [])]
-                )
-            )
-            # 计划执行不开放「指名出卡」：show_media 的 RunContext 授权只给承载用户原始请求的
-            # 普通主对话 Run；这里显式从工具集剔除，避免模型看到"声明在、调用必被拒"的工具。
-            if str(item) != "show_media"
-        ]
         executor = CraftToolExecutor(run_executor or self.app.executor)
         worker = SkillAgent(
             self.app.catalog,

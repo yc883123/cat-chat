@@ -1360,7 +1360,8 @@ class ConversationRunMixin:
         self, *, run: dict[str, Any], snapshot: dict[str, Any], conversation_id: str,
         conv_kind: str, frozen_conversation: dict[str, Any], messages: list[dict[str, Any]],
         trace_start: int, profile: dict[str, Any], model_key: str, model_name: str,
-        limit: int, budget: int, used: int, event: Any, cancel_event: threading.Event,
+        pdf_tools: bool, video_tools: bool, limit: int, budget: int, used: int,
+        event: Any, cancel_event: threading.Event,
     ) -> dict[str, Any]:
         """Agent 下一次模型请求前整理持久化历史，并返回重建后的历史前缀。"""
         from naiba.core import compaction as compaction_mod

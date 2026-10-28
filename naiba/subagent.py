@@ -118,6 +118,17 @@ def run_subagent_agent(
         provider_id = str(conversation.get("provider_id") or "")
         model_key = f"online:{provider_id}" if provider_id else ""
     profile = app.config.profile(model_key)
+    # 工具集先定稿再构建历史：历史是本轮请求前缀的来源，先建历史再定稿工具集会让
+    # PDF/视频处理指引按未过滤的默认全集展开，同一会话出现两种回放字节（前缀缓存断）。
+    requested = [str(t) for t in (params.get("allowed_tools") or [])]
+    if "allowed_tools" in params:
+        allowed_tools = [t for t in requested if t not in SUBAGENT_BLOCKED_TOOLS]
+    else:
+        allowed_tools = list(SUBAGENT_ALLOWED_TOOLS)
+    allowed_tools = [t for t in allowed_tools if t not in SUBAGENT_BLOCKED_TOOLS]
+    # PDF/视频处理指引按「本次实际可用工具名集合」收窄（与主对话同口径）：
+    # 默认工具集不含 read_pdf / extract_frames，指引就不展开。
+    allowed_names = {str(t) for t in allowed_tools}
     # fork=true（`subagent` 工具）：回放父会话历史，思考回放限长必须与主对话同参数，
     # 否则同一会话出现两种回放字节（前缀缓存断 + 行为不一致）。
     # fork=false（`subagent_spawn` 工具）：fresh child，不播种父历史（对齐 dsh 的 seed
@@ -127,6 +138,8 @@ def run_subagent_agent(
     if _coerce_fork(params.get("fork", True)):
         history = build_model_history(
             conversation.get("messages", []),
+            pdf_tools="read_pdf" in allowed_names,
+            video_tools="extract_frames" in allowed_names,
             local_image_brain=local_brain(profile),
             **app.config.reasoning_replay_options(),
             **app.config.image_encode_cache_options(),
@@ -150,12 +163,6 @@ def run_subagent_agent(
     combined_prompt = str(agent.get("system_prompt") or "").strip() or str(
         app.config.data.get("agent_system_prompt", "")
     )
-    requested = [str(t) for t in (params.get("allowed_tools") or [])]
-    if "allowed_tools" in params:
-        allowed_tools = [t for t in requested if t not in SUBAGENT_BLOCKED_TOOLS]
-    else:
-        allowed_tools = list(SUBAGENT_ALLOWED_TOOLS)
-    allowed_tools = [t for t in allowed_tools if t not in SUBAGENT_BLOCKED_TOOLS]
     skill_policy = params.get("skill_policy") or {"mode": "auto", "skill_ids": []}
 
     emit({"type": "job_status", "status": "running", "current_step": "推理中"})

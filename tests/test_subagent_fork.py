@@ -41,6 +41,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from naiba.jobs import JobSpec  # noqa: E402
+from naiba.core.history import build_model_history  # noqa: E402
 from naiba.skills.agent import (  # noqa: E402
     SUBAGENT_COMMON_RULES,
     SUBAGENT_FORK_RULE,
@@ -211,6 +212,73 @@ class SubagentContextModeRunnerTests(unittest.TestCase):
         for fork in (True, False):
             with self.subTest(fork=fork):
                 self.assertEqual(self._run({"instruction": "干活", "fork": fork}).call_args.args[1], [])
+
+
+class SubagentHistoryToolSwitchTests(unittest.TestCase):
+    """子代理历史构建按「本次实际可用工具名集合」收窄 PDF/视频处理指引。
+
+    工具集必须先定稿再构建历史：先建历史再定稿会让指引按未过滤的默认全集展开，
+    同一会话出现两种回放字节（前缀缓存断）。
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.workspace = Path(self.tmp.name)
+        self.app = _make_app(
+            _conversation([
+                {"role": "user", "content": "看看这份 PDF 说了什么"},
+                {"role": "assistant", "content": "好的"},
+            ]),
+            self.workspace,
+        )
+
+    def _history_kwargs(self, params: dict) -> tuple[dict, list[str]]:
+        captured: dict = {}
+
+        def spy(messages, **kwargs):
+            captured.update(kwargs)
+            return build_model_history(messages, **kwargs)
+
+        spec = JobSpec(kind="subagent", conversation_id="conv-1", params=params, label="子任务")
+        with mock.patch("naiba.skills.agent.SkillAgent") as agent_cls, \
+                mock.patch("naiba.subagent.build_model_history", side_effect=spy):
+            agent_cls.return_value.run.return_value = ("结果", [], [], {})
+            run_subagent_agent(self.app, "job-1", spec, None, lambda event: None)
+            allowed = agent_cls.return_value.run.call_args.args[7]
+        return captured, allowed
+
+    def test_default_tool_set_has_no_pdf_or_video_guidance(self) -> None:
+        """默认子代理工具集不含 read_pdf / extract_frames：指引不展开。"""
+        kwargs, allowed = self._history_kwargs({"instruction": "干活", "fork": True})
+        self.assertFalse(kwargs["pdf_tools"])
+        self.assertFalse(kwargs["video_tools"])
+        self.assertEqual(allowed, list(SUBAGENT_ALLOWED_TOOLS))
+
+    def test_guidance_follows_narrowed_child_tools(self) -> None:
+        """模型给子代理收窄工具集：指引只按收窄后的定稿集合展开。"""
+        kwargs, allowed = self._history_kwargs({
+            "instruction": "读一下这份 PDF", "fork": True,
+            "allowed_tools": ["read_file", "read_pdf"],
+        })
+        self.assertTrue(kwargs["pdf_tools"])
+        self.assertFalse(kwargs["video_tools"])
+        self.assertEqual(allowed, ["read_file", "read_pdf"])
+
+    def test_blocked_tools_do_not_count(self) -> None:
+        """被子代理封禁名单剔除的工具不算「可用」——即便请求里带着。"""
+        kwargs, allowed = self._history_kwargs({
+            "instruction": "干活", "fork": True,
+            "allowed_tools": ["read_pdf", "extract_frames", "subagent"],
+        })
+        self.assertTrue(kwargs["pdf_tools"])
+        self.assertTrue(kwargs["video_tools"])
+        self.assertNotIn("subagent", allowed)
+
+    def test_spawn_does_not_build_history(self) -> None:
+        """spawn 不播种父历史：本就不构建，开关无副作用。"""
+        kwargs, _ = self._history_kwargs({"instruction": "干活", "fork": False})
+        self.assertEqual(kwargs, {})
 
 
 class SubagentContextModeHandlerTests(unittest.TestCase):

@@ -535,6 +535,10 @@ class CompactionConfigWiringTests(unittest.TestCase):
         # 手动整理必须用该会话自己的模型（不引入摘要模型）。
         compact_section = http.split('path.endswith("/compact")', 1)[1].split("/session_start", 1)[0]
         self.assertIn("resolve_profile_with_override", compact_section)
+        # 工具开关按「本次实际可用工具名集合」收窄：用会话固化的 enabled_tool_ids 走
+        # 运行路径同一个 resolver，不手拼全局 agent_tools（否则 PDF/视频指引两种口径）。
+        self.assertIn("resolve_allowed_tools", compact_section)
+        self.assertIn('conversation.get("enabled_tool_ids")', compact_section)
 
     def test_frontend_wired(self):
         html = (ROOT / "public/index.html").read_text(encoding="utf-8")
@@ -625,6 +629,24 @@ class CompactionHookTests(unittest.TestCase):
         result = self._call(history=short)
         self.assertEqual(result, {})
         self.mixin.app.models.complete.assert_not_called()
+
+    def test_in_loop_check_accepts_production_keyword_arguments(self):
+        from naiba.run.chat import ConversationRunMixin
+
+        mixin = ConversationRunMixin()
+        mixin.app = mock.Mock()
+        mixin.app.config.data = {"auto_compaction": {"mode": "auto", "threshold_percent": 95}}
+        result = mixin._compact_agent_context(
+            run={"conversation_messages": []}, snapshot={"allowed_tools": []},
+            conversation_id="c1", conv_kind="main", frozen_conversation={},
+            messages=[{"role": "system", "content": "test"}, {"role": "user", "content": "short"}],
+            trace_start=1, profile={"context_window": 128000, "kind": "online"},
+            model_key="online:probe", model_name="probe", pdf_tools=False, video_tools=False,
+            limit=128000, budget=100000, used=1000, event=mock.Mock(),
+            cancel_event=mock.Mock(is_set=lambda: False),
+        )
+        self.assertEqual(result, {})
+        mixin.app.models.complete.assert_not_called()
 
     def test_auto_mode_uses_same_profile_and_reports_rebuild(self):
         self.mixin.app.config.data = {"auto_compaction": {"mode": "auto", "threshold_percent": 30}}

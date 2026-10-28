@@ -941,6 +941,21 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json({"error": f"模型配置不可用：{exc}"}, HTTPStatus.BAD_REQUEST)
                 return
             try:
+                # PDF/视频处理指引按「本次实际可用工具名集合」收窄：手动整理不发请求、
+                # 不建 run，没有本次 allowed_tools 快照，就用会话固化的 enabled_tool_ids
+                # 走运行路径同一个 resolver（固化集为空时由 resolver 内部退回旧逻辑）。
+                # 不再手拼全局 agent_tools 兜底——固化集就是该会话当时的授权事实。
+                from naiba.run.session import resolve_allowed_tools
+                agent = self.app.config.get_agent(str(conversation.get("agent_id") or ""))
+                allowed_tools = set(resolve_allowed_tools(
+                    self.app,
+                    str(conversation.get("interaction_mode") or "craft"),
+                    agent if isinstance(agent, dict) else {},
+                    bool(conversation.get("web_search_enabled", False)),
+                    model_key,
+                    [str(item) for item in (conversation.get("enabled_tool_ids") or [])],
+                    str(conversation.get("conv_kind") or "main"),
+                ))
                 result = compaction_mod.compact_conversation(
                     self.app,
                     conversation_id=conversation_id,
@@ -949,6 +964,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                     profile=profile,
                     model_key=model_key,
                     model_name=model_name,
+                    pdf_tools="read_pdf" in allowed_tools,
+                    video_tools="extract_frames" in allowed_tools,
                     source="manual",
                     force=True,
                 )

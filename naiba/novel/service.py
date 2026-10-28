@@ -1833,6 +1833,8 @@ class NovelService:
         """分镜生图（4C）：把已保存剧本的最新场次逐场转成出图提示词。
 
         吃的是剧本场次而不是章节素材；不写回作品——生成结果直接发给造梦机出图。
+        `system_prompt` 是用户自定义写法（提词库模板或手动编辑），空 = 内置分镜写法；
+        图谱反哺（KG）作为参考段拼在写法之后，同走系统消息。
         """
         # 公开清单视图就够用：场次、书名与要素都在里面，不必翻 store 私有层。
         manifest = self.store.get_book(book_id)["book"]
@@ -1849,15 +1851,19 @@ class NovelService:
         built = prompts.build_storyboard_content(
             book_title=str(manifest.get("title") or "未命名作品"),
             scenes=scenes, scene_ids=scene_ids, extra_note=extra_note,
+            system_prompt=str(body.get("system_prompt") or ""),
         )
         kg_buckets = self._kg_elements(manifest, None)
         kg = prompts.build_kg_context(kg_buckets)
-        built["system"] = kg
+        system_text = str(built.get("system") or "")
+        if kg:
+            built["system"] = f"{system_text}\n\n{kg}" if system_text else kg
+            system_text = built["system"]
         budget = prompts.budget_report(
             content=built["content"], chapters=[], warnings=built["warnings"],
             body_limit=prompts.BODY_SLOT_CHARS, max_chapters=1,
             context_window=context_window,
-            system=kg, kg_count=len(prompts.kg_entities(kg_buckets)),
+            system=system_text, kg_count=len(prompts.kg_entities(kg_buckets)),
         )
         wanted = set(built["scene_ids"])
         snapshot = [
@@ -1876,6 +1882,7 @@ class NovelService:
             "elements_label": "",
             "outline_version": 0,
             "outline_label": "",
+            "system_custom": bool(built.get("system_custom")),
         }
         sources["kg_entities"] = int(budget.get("kg_entities") or 0)
         return {

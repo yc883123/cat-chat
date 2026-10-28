@@ -854,8 +854,10 @@ function renderStudioDetail() {
     const deleteBtn = $("#studioCustomDelete");
     const exportBtn = $("#studioCustomExport");
     const locateBtn = $("#studioLocateEntry");
+    const sendStoryboardBtn = $("#studioSendStoryboard");
     const isCustom = studio.kind === "custom" && studio.customId;
     if (locateBtn) locateBtn.hidden = false;
+    if (sendStoryboardBtn) sendStoryboardBtn.hidden = false;
     if (editor) {
       editor.hidden = !isCustom;
       if (isCustom) editor.value = studio.body;
@@ -903,6 +905,8 @@ function renderStudioDetail() {
     if (editorFree) editorFree.hidden = true;
     const locateFree = $("#studioLocateEntry");
     if (locateFree) locateFree.hidden = true;
+    const sendFree = $("#studioSendStoryboard");
+    if (sendFree) sendFree.hidden = true;
     varsEl.replaceChildren();
     varsEl.style.display = "none";
     requestField.placeholder = "把你的要求写在这里";
@@ -2171,6 +2175,27 @@ function locateCurrentStudioEntry() {
   void locateStudioEntry(kind, id, studio.meta.module, { revealList: true });
 }
 
+/** 把当前模板正文发到创作场「分镜生图」，作为它的系统提示词（写法）。
+ * 跨模块不 import：走 document 自定义事件，25-novel.js 自己接（与造梦机分镜队列同套路）。
+ * 自定义模板正在编辑时以编辑框里的现值为准——发过去的就是用户眼前这份。 */
+function sendModuleToStoryboard() {
+  if (!studio.meta && studio.kind !== "custom") {
+    toast("先选中一条模板");
+    return;
+  }
+  const editor = $("#studioBodyEditor");
+  const text = String(studio.body || editor?.value || "").trim();
+  if (!text) {
+    toast("这条模板还没有正文；先选一条有内容的模板");
+    return;
+  }
+  const title = String($("#studioDetailTitle")?.textContent || studio.meta?.title || "").trim();
+  document.dispatchEvent(new CustomEvent("naiba:library-to-storyboard", {
+    detail: { text, title },
+  }));
+  toast(`已把「${title || "模板"}」发送到创作场·分镜生图`);
+}
+
 function locateResultTemplate() {
   const input = studio.lastResult?.input || {};
   const id = String(input.custom_id || input.item_id || "");
@@ -2330,6 +2355,7 @@ export function bindStudioEvents() {
       return;
     }
     if (event.target.closest("#studioGenerate")) void submitGenerate();
+    if (event.target.closest("#studioSendStoryboard")) { sendModuleToStoryboard(); return; }
     if (event.target.closest("#studioCopyResult")) { void copyStudioResult(); return; }
     if (event.target.closest("#studioCancelTask")) void cancelStudioTask();
     if (event.target.closest("#studioRetryTask")) void retryStudioTask("");

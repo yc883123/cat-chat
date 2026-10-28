@@ -5131,6 +5131,9 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 /* 分镜生图（阶段四）：逐场提示词行（勾选后发送到造梦机）。 */
 .novel-storyboard-block { display: grid; gap: 6px; }
 .novel-storyboard-block[hidden] { display: none; }
+.novel-storyboard-system-label small { display: block; font-weight: 400; line-height: 1.5; }
+.novel-storyboard-system-label + textarea,
+.novel-storyboard-block textarea { min-height: 110px; resize: vertical; line-height: 1.55; }
 .novel-storyboard-list { display: grid; gap: 4px; max-height: 300px; overflow-y: auto; }
 .novel-storyboard-row {
   display: flex; align-items: flex-start; gap: 7px;

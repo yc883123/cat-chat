@@ -98,6 +98,8 @@ const novel = {
   bodyChars: 3000,
   maxChapters: 6,
   limits: { min: 3000, max: 15000, step: 500, chaptersMin: 1, chaptersMax: 20, chaptersDefault: 6 },
+  // 分镜生图的写法（系统提示词）：空 = 内置分镜写法；非空 = 手动编辑或提词库导入的模板。
+  storyboardSystem: "",
   // 逐章稿件选择：`<章号>` → 稿件 ID；空值表示该章用基础稿件（原文）。
   manuscriptChoice: new Map(),
   // 剧本阶段：当前正在编辑的场次号（0 = 未在编辑）。
@@ -127,6 +129,8 @@ const novel = {
 const STAGE_TASKS_URL = "/api/studio/tasks?module=novel";
 const LAST_BOOK_KEY = "naibaNovelLastBookId";
 const LIMITS_KEY = "naibaNovelLimits";
+// 分镜生图的自定义写法（系统提示词）：大多数情况用户会挂提词库模板，跨会话保留。
+const STORYBOARD_SYSTEM_KEY = "naibaNovelStoryboardSystem";
 const TASK_STATUS_LABELS = {
   queued: "排队中",
   running: "生成中",
@@ -244,6 +248,7 @@ const STAGE_PANEL_CONTROL_IDS = [
   "novelSceneBlock", "novelSceneCount", "novelSceneNote", "novelSceneList", "novelSceneEdit",
   "novelSceneHead", "novelSceneBody", "novelSceneSave", "novelSceneCancel", "novelScriptVersion",
   "novelStoryboardNote", "novelStoryboardList", "novelStoryboardAll", "novelStoryboardSend",
+  "novelStoryboardSystem", "novelStoryboardReset",
 ];
 
 function activateStagePanel(stage) {
@@ -1075,6 +1080,11 @@ function renderStagePanel() {
   }
   renderSceneBlock(stage === "script");
   renderStoryboard(stageData, novel.tasks.find((row) => row.id === stageData.activeTaskId) || null);
+  // 写法（系统提示词）：有自定义就显示在编辑框里并提供「恢复默认写法」。
+  const systemBox = $("#novelStoryboardSystem");
+  if (systemBox && document.activeElement !== systemBox) systemBox.value = novel.storyboardSystem;
+  const resetBtn = $("#novelStoryboardReset");
+  if (resetBtn) resetBtn.hidden = !novel.storyboardSystem;
   applyStageCollapse();
 }
 
@@ -1226,6 +1236,9 @@ function renderPlan() {
     const kgCount = Number(budget?.kg_entities || 0);
     const lines = [
       `按剧本里已保存的 ${scenes.length} 场生成，每场一条出图提示词。`,
+      novel.storyboardSystem
+        ? `使用自定义写法（约 ${fmtChars(novel.storyboardSystem.length)} 字），生成时作为系统提示词发送。`
+        : "使用内置分镜写法；要换模板，到提词库选中后点「发送到分镜生图」，或直接在分镜面板里编辑。",
       budget ? `这次发送的场次正文与说明约 ${fmtChars(budget.chars)} 字。` : "",
       kgCount
         ? `已加入已保存要素里的 ${kgCount} 条设定参考，帮助人物与场景在这组图里保持一致。`
@@ -1850,7 +1863,7 @@ async function refreshPreviewBudget() {
         book_id: novel.bookId,
         stage,
         ...(stage === "storyboard"
-          ? { scene_ids: [] }
+          ? { scene_ids: [], system_prompt: novel.storyboardSystem }
           : {
               chapter_ids: picked,
               manuscripts: manuscriptsPayload(),
@@ -1915,7 +1928,7 @@ async function generateStage({ confirmLarge = false } = {}) {
         book_id: novel.bookId,
         stage,
         ...(isStoryboard
-          ? { scene_ids: [] }
+          ? { scene_ids: [], system_prompt: novel.storyboardSystem }
           : {
               chapter_ids: picked,
               manuscripts: manuscriptsPayload(),
@@ -3059,6 +3072,20 @@ function saveLimits() {
   } catch (_error) { /* storage may be unavailable */ }
 }
 
+function saveStoryboardSystem() {
+  try {
+    localStorage.setItem(STORYBOARD_SYSTEM_KEY, novel.storyboardSystem || "");
+  } catch (_error) { /* storage may be unavailable */ }
+}
+
+function restoreStoryboardSystem() {
+  try {
+    novel.storyboardSystem = String(localStorage.getItem(STORYBOARD_SYSTEM_KEY) || "");
+  } catch (_error) {
+    novel.storyboardSystem = "";
+  }
+}
+
 function restoreLimits() {
   try {
     const raw = localStorage.getItem(LIMITS_KEY);
@@ -3081,6 +3108,7 @@ export function bindNovelEvents() {
   if (novel.initialized) return;
   prepareStagePanels();
   restoreLimits();
+  restoreStoryboardSystem();
   novel.initialized = true;
 
   $("#novelImportBtn")?.addEventListener("click", () => $("#novelFileInput")?.click());
@@ -3238,13 +3266,20 @@ export function bindNovelEvents() {
   });
 
   $("#novelEditorBody")?.addEventListener("click", (event) => {
-    // 分镜生图：发送到造梦机 / 全选（按钮跟着活动面板搬 id，必须用容器委托）。
+    // 分镜生图：发送到造梦机 / 全选 / 恢复默认写法（按钮跟着活动面板搬 id，必须用容器委托）。
     if (event.target.closest("#novelStoryboardSend")) {
       sendStoryboardToComfyui();
       return;
     }
     if (event.target.closest("#novelStoryboardAll")) {
       toggleStoryboardAll();
+      return;
+    }
+    if (event.target.closest("#novelStoryboardReset")) {
+      novel.storyboardSystem = "";
+      saveStoryboardSystem();
+      renderStagePanel();
+      toast("已恢复内置分镜写法");
       return;
     }
     const card = event.target.closest("[data-novel-task]");
@@ -3430,6 +3465,31 @@ export function bindNovelEvents() {
   });
 
   $("#novelChapterBody")?.addEventListener("input", markDirty);
+
+  // 分镜生图的写法（系统提示词）：输入即保存（与滑条同口径）；预检跟着刷新，
+  // 右栏的实际输入字数才能反映模板长度。
+  $("#novelEditorBody")?.addEventListener("input", (event) => {
+    if (event.target.id !== "novelStoryboardSystem") return;
+    novel.storyboardSystem = String(event.target.value || "");
+    saveStoryboardSystem();
+    const resetBtn = $("#novelStoryboardReset");
+    if (resetBtn) resetBtn.hidden = !novel.storyboardSystem;
+    void refreshPreviewBudget();
+  });
+
+  // 提词库「发送到分镜生图」：把模板正文落到写法编辑框并切到分镜阶段。
+  // 22-studio 不能反向 import 本文件（会循环），所以走 document 自定义事件。
+  document.addEventListener("naiba:library-to-storyboard", (event) => {
+    const text = String(event.detail?.text || "").trim();
+    if (!text) return;
+    novel.storyboardSystem = text;
+    saveStoryboardSystem();
+    setStudioPage("novel");
+    setStage("storyboard");
+    renderStagePanel();
+    const label = String(event.detail?.title || "").trim();
+    toast(label ? `已导入模板「${label}」作为分镜写法，可再手动修改` : "已导入模板作为分镜写法，可再手动修改");
+  });
 
   // 横竖屏切换会改变三栏/分档布局，inert 必须跟着重算，否则转屏后整栏点不动。
   if (typeof window.matchMedia === "function") {

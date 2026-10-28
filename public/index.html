@@ -326,6 +326,8 @@
               </details>
               <div class="studio-actions">
                 <button class="primary-button" id="studioGenerate" type="button">生成</button>
+                <button class="control-button" id="studioSendStoryboard" type="button"
+                        title="把这条模板的正文作为创作场「分镜生图」的系统提示词（写法）">发送到分镜生图</button>
                 <button class="control-button" id="studioLocateEntry" type="button" hidden>在模板库中定位</button>
                 <button class="control-button" id="studioCustomSave" type="button" hidden>保存修改</button>
                 <button class="control-button" id="studioCustomDelete" type="button" hidden>删除</button>
@@ -848,9 +850,20 @@
                     <label>人物设定版本<select data-context-elements aria-label="剧本使用的人物设定版本"></select></label>
                     <label>改编大纲版本<select data-context-outline aria-label="剧本使用的改编大纲版本"></select></label>
                   </div>
-                  <!-- 分镜生图专用（阶段四）：场次说明与逐场提示词结果；
+                  <!-- 分镜生图专用（阶段四）：写法（系统提示词）可编辑、逐场结果；
                        发送按钮把勾选的提示词批量带到造梦机。其余阶段不显示。 -->
                   <div class="novel-storyboard-block" data-novel-context="storyboard" hidden>
+                    <label class="novel-field">
+                      <span class="novel-storyboard-system-label">出图提示词写法（系统提示词）
+                        <small>留空用内置分镜写法；可以手动编辑，也可以在提词库选中模板后点「发送到分镜生图」导入，改了立即保存</small>
+                      </span>
+                      <textarea data-novel-control="novelStoryboardSystem" rows="7" spellcheck="false"
+                                placeholder="留空 = 内置分镜写法：每场转成一条出图提示词，写清地点景物、人物外观与动作、景别构图、光线氛围，不写台词字幕。&#10;也可以在这里粘贴你自己的模板要求。"></textarea>
+                    </label>
+                    <div class="novel-editor-actions">
+                      <button class="control-button tiny" data-novel-control="novelStoryboardReset" type="button" hidden
+                              title="清空自定义写法，恢复内置分镜写法">恢复默认写法</button>
+                    </div>
                     <p class="novel-note" data-novel-control="novelStoryboardNote"></p>
                     <div class="novel-storyboard-list" data-novel-control="novelStoryboardList" aria-label="分镜提示词"></div>
                     <div class="novel-editor-actions">

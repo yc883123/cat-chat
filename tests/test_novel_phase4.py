@@ -426,6 +426,58 @@ class Phase4ServiceTests(unittest.TestCase):
         self.assertFalse(parsed)
         self.assertEqual(rows, [])
 
+    def test_storyboard_system_prompt_custom_vs_builtin(self):
+        """自定义写法（模板）进系统消息，正文只留格式要求；留空用内置写法。"""
+        self._save_script()
+        template = "你是 H3 出图提示词写手：每场一条，画面描述按镜头语言组织。"
+        built = prompts.build_storyboard_content(
+            book_title="书", scenes=[{"i": 1, "scene": "INT. A - 夜", "content": "内容"}],
+            system_prompt=template,
+        )
+        self.assertEqual(built["system"], template)
+        self.assertTrue(built["system_custom"])
+        self.assertIn("输出格式", built["content"])
+        self.assertIn("【第 1 场】INT. A - 夜", built["content"])
+        self.assertNotIn("你是分镜师", built["content"], "自定义写法时内置指令不再发送")
+        default = prompts.build_storyboard_content(
+            book_title="书", scenes=[{"i": 1, "scene": "INT. A - 夜", "content": "内容"}],
+        )
+        self.assertIn("你是分镜师", default["system"])
+        self.assertFalse(default["system_custom"])
+        self.assertIn("输出格式", default["content"])
+
+    def test_storyboard_system_prompt_is_clipped(self):
+        self._save_script()
+        big = "很" * (prompts.STORYBOARD_SYSTEM_CHARS + 300)
+        built = prompts.build_storyboard_content(
+            book_title="书", scenes=[{"i": 1, "scene": "INT. A - 夜", "content": "内容"}],
+            system_prompt=big,
+        )
+        self.assertEqual(len(built["system"]), prompts.STORYBOARD_SYSTEM_CHARS)
+        self.assertTrue(any("已省略后 300 字" in row for row in built["warnings"]))
+
+    def test_storyboard_submit_with_template_system_prompt(self):
+        self._save_script()
+        self._save_elements()
+        template = "你是 H3 出图提示词写手：每场一条。"
+        payload, status = self.service.api_stage({
+            "book_id": self.book_id, "stage": "storyboard",
+            "system_prompt": template,
+            "model_key": "online:probe", "model_name": "probe-default",
+        })
+        self.assertEqual(status, 201)
+        input_data = payload["task"]["input"]
+        # 自定义写法在前、图谱反哺参考在后，同走系统消息。
+        self.assertTrue(input_data["system"].startswith(template))
+        self.assertIn("【全书设定参考", input_data["system"])
+        self.assertTrue(payload["sources"]["system_custom"])
+        preview, _ = self.service.api_stage_preview({
+            "book_id": self.book_id, "stage": "storyboard",
+            "system_prompt": template, "model_key": "online:probe",
+        })
+        self.assertTrue(preview["sources"]["system_custom"])
+        self.assertGreater(preview["budget"]["system_chars"], len(template))
+
     # ---- 4A 改编分块 ----
 
     def test_long_adapt_goes_chunked_with_snapshot(self):

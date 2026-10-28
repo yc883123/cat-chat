@@ -1041,11 +1041,20 @@ async function main() {
     (await page.locator('#novelStoryboardNote').innerText()).includes('共 1 场'),
     await page.locator('#novelStoryboardNote').innerText());
   check('分镜阶段没有写回按钮', await page.locator('#novelStageApply').isHidden());
+  // 写法（系统提示词）：可编辑、随提交发送、可一键恢复默认。
+  check('写法编辑框可见', await page.locator('#novelStoryboardSystem').isVisible());
+  check('无自定义写法时恢复按钮隐藏', await page.locator('#novelStoryboardReset').isHidden());
+  await page.locator('#novelStoryboardSystem')
+    .fill('自定义模板写法：每场一条，水彩风格，画面描述按镜头语言组织。');
+  await page.waitForTimeout(300);
   await page.locator('#novelStageGenerate').click();
   await page.waitForTimeout(500);
   check('分镜提交带 stage=storyboard 与场次选择',
     stageSubmit && stageSubmit.stage === 'storyboard' && Array.isArray(stageSubmit.scene_ids),
     JSON.stringify(stageSubmit));
+  check('分镜提交带自定义写法',
+    stageSubmit && stageSubmit.system_prompt === '自定义模板写法：每场一条，水彩风格，画面描述按镜头语言组织。',
+    JSON.stringify(stageSubmit && stageSubmit.system_prompt));
   check('分镜提交不要求勾选章节', stageSubmit && !Array.isArray(stageSubmit.chapter_ids),
     JSON.stringify(stageSubmit));
   // 轮询走到 done 后逐场行渲染；mock 的结果有两场，全部默认勾选。
@@ -1092,9 +1101,16 @@ async function main() {
   await page.locator('#comfyuiStoryboardClear').click();
   await page.waitForTimeout(200);
   check('清空后队列条隐藏', await page.locator('#comfyuiStoryboard').isHidden());
-  // 回创作场继续后续流程。
+  // 回创作场：写法还在，可一键恢复默认。
   await page.locator('#studioPages [data-studio-page="novel"]').click();
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(600);
+  check('回到创作场后写法仍在',
+    (await page.locator('#novelStoryboardSystem').inputValue()).includes('自定义模板写法'),
+    await page.locator('#novelStoryboardSystem').inputValue());
+  await page.locator('#novelStoryboardReset').click();
+  await page.waitForTimeout(250);
+  check('恢复默认写法清空编辑框', (await page.locator('#novelStoryboardSystem').inputValue()) === '');
+  check('清空后恢复按钮隐藏', await page.locator('#novelStoryboardReset').isHidden());
 
   // 导出菜单
   await page.locator('#novelExportBtn').click();
@@ -1261,11 +1277,26 @@ async function main() {
     await page.screenshot({ path: `${SHOT_DIR}/novel_landscape_844.png`, fullPage: false });
   }
 
-  // ---- 11. 切页不丢状态 ----
+  // ---- 11. 切页不丢状态 + 提词库「发送到分镜生图」交接 ----
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.waitForTimeout(300);
   await page.locator('#studioPages [data-studio-page="library"]').click();
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(700);
+  // 选中一条模板，把正文发到分镜生图当写法：应切到创作场分镜阶段且编辑框已带入。
+  await page.locator('#studioList .studio-row').first().click();
+  await page.waitForTimeout(700);
+  check('提词库详情出现发送到分镜生图按钮', await page.locator('#studioSendStoryboard').isVisible());
+  await page.locator('#studioSendStoryboard').click();
+  await page.waitForTimeout(700);
+  check('发送后切到创作场', await page.locator('#studioPageNovel').isVisible());
+  check('发送后落在分镜阶段', (await page.locator('#novelEditorHead').innerText()) === '分镜生图');
+  check('模板正文进入写法编辑框',
+    (await page.locator('#novelStoryboardSystem').inputValue()).length > 10,
+    await page.locator('#novelStoryboardSystem').inputValue());
+  check('导入后出现恢复默认按钮', !(await page.locator('#novelStoryboardReset').isHidden()));
+  await page.locator('#novelStoryboardReset').click();
+  await page.waitForTimeout(250);
+  check('导入的写法可一键恢复默认', (await page.locator('#novelStoryboardSystem').inputValue()) === '');
   await page.locator('#studioPages [data-studio-page="novel"]').click();
   await page.waitForTimeout(400);
   check('切页返回后作品仍在', (await page.locator('#novelBookTitle').innerText()).includes('长夜灯'));

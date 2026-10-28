@@ -64,6 +64,8 @@ KG_SLOT_CHARS = 1200
 KG_HEADER = "【全书设定参考（来自已保存要素，仅供保持人物与设定一致，不是本次素材）】"
 # 4C 分镜生图：单场剧本正文进提示词的裁剪上限。
 STORYBOARD_SCENE_CHARS = 4000
+# 4C 分镜生图：用户自定义的系统提示词（模板）上限——模板可能很长，但也不能无界。
+STORYBOARD_SYSTEM_CHARS = 8000
 
 # 阶段名与中文标题（前端阶段导航、任务标题共用）。
 # 注意 `STAGES` 只收「按章节素材生成」的阶段：build_stage_content 的分槽/摘要链
@@ -582,6 +584,15 @@ _STORYBOARD_INSTRUCTION = """你是分镜师。请把下面给出的每一场剧
 # 「【第 3 场】INT. 老宅书房 - 夜」这类分块头。
 STORYBOARD_HEAD_RE = re.compile(r"^[\s　]*【\s*第\s*([0-9]+)\s*场\s*】\s*(.*)$")
 
+# 输出格式要求始终随正文发送：按场拆分依赖「【第 N 场】」块头，写法（模板）
+# 换成什么都不能破坏这个格式。
+_STORYBOARD_FORMAT_NOTE = (
+    "输出格式（必须严格遵守，否则无法按场拆分）："
+    "每一场输出一块，块的第一行写「【第 N 场】场景行」，N 用上面给出的场次号、"
+    "场景行原样照抄；块内是这一场的提示词正文；场与场之间空一行。"
+    "只输出分块提示词，不要写说明。"
+)
+
 
 def parse_storyboard(text: str) -> tuple[list[dict[str, Any]], bool]:
     """把分镜提示词拆成逐场条目，返回 ``(rows, parsed)``。
@@ -624,11 +635,17 @@ def parse_storyboard(text: str) -> tuple[list[dict[str, Any]], bool]:
 
 def build_storyboard_content(*, book_title: str, scenes: list[dict[str, Any]],
                              scene_ids: list[int] | None = None,
-                             extra_note: str = "") -> dict[str, Any]:
+                             extra_note: str = "",
+                             system_prompt: str = "") -> dict[str, Any]:
     """组装分镜生成的 content：逐场给正文，模型逐场回出图提示词。
 
     `scene_ids` 缺省 = 全部场次（取已保存剧本的最新场次）；给了不存在的场次号
     直接报错，不静默跳过。
+
+    写法（系统提示词）与正文分离：`system_prompt` 非空时作为**用户自定义写法**
+    （通常来自提词库模板或手动编辑）进系统消息；为空时用内置分镜写法。两者都
+    放系统消息，正文里只保留按场拆分所必需的输出格式要求——模板怎么换，
+    「【第 N 场】」的解析契约都不受影响。
     """
     rows = [row for row in (scenes or []) if isinstance(row, dict)]
     if not rows:
@@ -640,8 +657,16 @@ def build_storyboard_content(*, book_title: str, scenes: list[dict[str, Any]],
     for no in wanted:
         if no not in known:
             raise PromptError(f"场次不存在：{no}")
-    parts = [f"作品：《{book_title}》", _STORYBOARD_INSTRUCTION]
     warnings: list[str] = []
+    user_system = str(system_prompt or "").strip()
+    if len(user_system) > STORYBOARD_SYSTEM_CHARS:
+        warnings.append(
+            f"自定义写法超出 {STORYBOARD_SYSTEM_CHARS} 字上限，已省略后 "
+            f"{len(user_system) - STORYBOARD_SYSTEM_CHARS} 字"
+        )
+        user_system = user_system[:STORYBOARD_SYSTEM_CHARS]
+    system = user_system if user_system else _STORYBOARD_INSTRUCTION
+    parts = [f"作品：《{book_title}》", _STORYBOARD_FORMAT_NOTE]
     stats: list[dict[str, Any]] = []
     blocks: list[str] = []
     for no in wanted:
@@ -664,6 +689,8 @@ def build_storyboard_content(*, book_title: str, scenes: list[dict[str, Any]],
         warnings.append(f"补充要求超出 {EXTRA_NOTE_CHARS} 字上限，已省略后 {note_dropped} 字")
     return {
         "content": "\n\n".join(parts),
+        "system": system,
+        "system_custom": bool(user_system),
         "warnings": warnings,
         "scenes": stats,
         "scene_ids": wanted,

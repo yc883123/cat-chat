@@ -326,6 +326,38 @@ class RecordsApiTests(ServiceTestCase):
         rows = self.service.store.get_chapter(self.book_id, 1)["manuscripts"]
         self.assertEqual(len(rows), 2, "整批校验失败时不能删掉一部分")
 
+    def test_delete_records_never_removes_chapters(self):
+        """批量删除不能移除章节：某章只剩最后一份稿件时整批拒绝（防一键删空整本书）。"""
+        original = next(row for row in self.service.store.get_chapter(self.book_id, 2)["manuscripts"]
+                        if row["kind"] == manuscripts.KIND_ORIGINAL)
+        payload, status = self.service.api_delete_records(self.book_id, {
+            "items": [{"type": "manuscript", "chapter_no": 2, "id": original["id"]}],
+        })
+        self.assertEqual(status, 400, payload)
+        self.assertIn("不能移除章节", payload["error"])
+        self.assertIn("第 2 章", payload["error"])
+        rows = self.service.store.get_chapter(self.book_id, 2)["manuscripts"]
+        self.assertEqual(len(rows), 1, "章节不能被批量删除移除")
+
+    def test_delete_records_rejects_mixed_batch_with_chapter_removal(self):
+        """混着「会移除章节」的项时整批拒绝，正常项也不能删（防半成品状态）。"""
+        adapted = self.service.store.save_manuscript(
+            self.book_id, 1, content="要删的改编稿。",
+        )["manuscript"]
+        original = next(row for row in self.service.store.get_chapter(self.book_id, 3)["manuscripts"]
+                        if row["kind"] == manuscripts.KIND_ORIGINAL)
+        payload, status = self.service.api_delete_records(self.book_id, {
+            "items": [
+                {"type": "manuscript", "chapter_no": 1, "id": adapted["id"]},
+                {"type": "manuscript", "chapter_no": 3, "id": original["id"]},
+            ],
+        })
+        self.assertEqual(status, 400, payload)
+        chapter1 = self.service.store.get_chapter(self.book_id, 1)["manuscripts"]
+        chapter3 = self.service.store.get_chapter(self.book_id, 3)["manuscripts"]
+        self.assertEqual(len(chapter1), 2, "整批拒绝时改编稿不能被删掉")
+        self.assertEqual(len(chapter3), 1, "章节不能被批量删除移除")
+
     def test_delete_tasks_refuses_active(self):
         payload, _ = self._submit(chapter_ids=[1])
         task_id = payload["task"]["id"]  # 替身默认是 queued

@@ -592,7 +592,7 @@ html[data-model-skin="on"] .chat-backdrop .chat-bg-blur {
    拉满），并把 Agent 顶到操作区旁边。改为不 grow + 收窄 max-width 后，余量交给
    .topbar-actions 承载，轮次下拉才有「中段」可落（详见 .turn-jump-select）。 */
 .model-control { min-width: 0; display: flex; flex: 0 1 auto; gap: 10px; align-items: center; color: var(--muted); font-size: 12px; }
-.agent-control { min-width: 0; flex: 0 1 170px; }
+.agent-control { min-width: 0; flex: 0 0 auto; }
 .model-control select { width: 100%; max-width: min(240px, 24vw); height: 34px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); color: var(--text); padding: 0 30px 0 10px; }
 /* 顶栏操作区：容器接管左段余量（flex:1），子按钮仍不被压缩 + 文字不换行——
    否则窗口偏窄时按钮会被挤成竖排文字（实测「卸载模型/刷新」竖着排、「文件」拆成两行）。
@@ -654,15 +654,14 @@ html[data-model-skin="on"] .chat-backdrop .chat-bg-blur {
      只改 flex-basis 的话它仍会被压到 38px 变成一根箭头（3.3.2 冒烟实测），
      降级等于白做。档位内它固定宽度、不再参与收缩，宽度不够由左段的模型/Agent 让。 */
   .topbar[data-tb="tight"] .topbar-actions > .turn-jump-select { flex: 0 0 96px; max-width: 96px; }
-  .topbar[data-tb="tight"] .topbar .model-control select { max-width: 120px; }
-  /* API / Agent 两个小标签在窄容器里最不值钱：下拉框自己就写着模型 / 角色名。 */
-  .topbar[data-tb="tight"] .model-control > span,
-  .topbar[data-tb="tight"] .agent-control > span { display: none; }
+  .topbar[data-tb="tight"] .topbar .model-control:not(.agent-control) select { max-width: 120px; }
+  /* 顶栏只保留模型控件时收起其标签；Agent 名称保留，便于区分岗位。 */
+  .topbar[data-tb="tight"] .model-control:not(.agent-control) > span { display: none; }
 
   /* 第二档 tightest（容器 < 700）：轮次下拉再收到 64px —— 仍然能认出「第 N 轮」，
      不整个收掉（桌面虽然有右侧刻度轨，但顶栏下拉是最顺手的入口）。 */
   .topbar[data-tb="tightest"] .topbar-actions > .turn-jump-select { flex: 0 0 64px; max-width: 64px; }
-  .topbar[data-tb="tightest"] .topbar .model-control select { max-width: 104px; }
+  .topbar[data-tb="tightest"] .topbar .model-control:not(.agent-control) select { max-width: 104px; }
   /* MCP 只留状态点（颜色即状态，title 里有全文）；文字在 8px 圆点旁边已经多余。
      收了文字按钮只剩 ~31px，低于 34px 的可点下限（verify/topbar_smoke.cjs 会判红）
      → 显式给 min-width 并用居中对齐，把圆点放回按钮正中。 */
@@ -1298,6 +1297,11 @@ body.is-editing-message .composer-wrap:not(.is-inline-edit) { visibility: hidden
 .interject-button:disabled { border-color: var(--line); background: var(--surface-2); color: var(--muted); cursor: not-allowed; opacity: .55; }
 .composer-meta { min-height: 22px; display: flex; align-items: center; color: var(--muted); font-size: 11px; padding: 4px 2px 0; gap: 12px; white-space: nowrap; }
 .composer-meta-left { min-width: 0; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+/* 输入区下方的 API 供应商选择：与工作区、模型并列，桌面按「工作区 → API → 模型」排列。 */
+.composer-provider { min-width: 0; display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
+.composer-provider > span { flex: none; }
+.composer-provider select { display: block; width: 150px; min-width: 0; max-width: min(180px, 18vw); height: 22px; margin-top: 0; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); color: var(--text); padding: 0 20px 0 6px; font-size: 11px; text-overflow: ellipsis; }
+
 .composer-model { position: relative; min-width: 0; display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
 .composer-model > span { flex: none; }
 /* 输入区模型控件：原生 select 降级为「隐藏的值容器」，它仍是**唯一值来源**——composerModelChoice /
@@ -1974,7 +1978,7 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .agent-basic-row .agent-name-field { flex: 1; min-width: 220px; }
 .agent-avatar-row { display: flex; align-items: center; gap: 8px; flex: none; }
 .agent-control { min-width: 0; display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 12px; }
-.agent-control select { max-width: min(220px, 20vw); height: 34px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 0 28px 0 10px; }
+.agent-control select { width: auto; min-width: 0; max-width: 220px; flex: 0 1 auto; height: 34px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); padding: 0 28px 0 10px; }
 .agent-form { display: flex; flex-direction: column; flex: 1; min-height: 0; max-height: inherit; }
 .agent-form label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
 .agent-form input[type="text"], .agent-form textarea { width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); color: var(--text); }
@@ -2296,7 +2300,7 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   .topbar {
     position: relative;
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr);
     grid-template-rows: auto auto;
     align-items: center;
     gap: 6px 6px;
@@ -2308,9 +2312,9 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   .workspace-control { display: none; }
   .model-control > span, .agent-control > span { display: none; }
   .model-control, .agent-control { position: static; width: auto; min-width: 0; max-width: none; overflow: hidden; z-index: auto; }
-  .model-control { grid-column: 2; grid-row: 1; }
-  .agent-control { grid-column: 3; grid-row: 1; }
-  .model-control select, .agent-control select { max-width: 100%; width: 100%; min-width: 0; min-height: 44px; padding: 0 24px 0 8px; text-overflow: ellipsis; }
+  .agent-control { grid-column: 2; grid-row: 1; justify-self: end; width: fit-content; max-width: 100%; }
+  .model-control:not(.agent-control) select { max-width: 100%; width: 100%; min-width: 0; min-height: 44px; padding: 0 24px 0 8px; text-overflow: ellipsis; }
+  .agent-control select { width: auto; max-width: min(220px, calc(100vw - 76px)); min-width: 0; min-height: 44px; padding: 0 24px 0 8px; text-overflow: ellipsis; }
   /* 手机端第二行左侧是「轮次」下拉：桌面刻度轨的等价形态（桌面由 .mobile-only 隐藏）。
      选项自带「第 N 轮 · 摘要」文字，因此不再另加标签；margin-right:auto 把它顶到行首。 */
   .turn-jump-select { display: inline-block; margin-right: auto; min-width: 0; max-width: min(42vw, 200px); min-height: 44px; padding: 0 6px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: 12px; text-overflow: ellipsis; }
@@ -2411,6 +2415,9 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   .composer.is-running #interjectButton .interject-label { display: inline; font-size: 12px; font-weight: 600; }
   .composer-meta { display: flex; flex-wrap: nowrap; gap: 8px; }
   .composer-meta-left { min-width: 0; flex: 1 1 auto; }
+  .composer-provider { margin-left: auto; }
+  .composer-provider > span { display: none; }
+  .composer-provider select { width: 150px; max-width: min(180px, 42vw); min-height: 22px; height: 22px; padding: 0 20px 0 6px; }
   #runtimeStatus { flex: none; margin-left: auto; }
   .choice-buttons { max-height: min(38dvh, 310px); overflow-y: auto; overscroll-behavior: contain; padding: 8px 2px; animation: none; }
   .choice-options { display: grid; grid-template-columns: 1fr; gap: 7px; }
@@ -2480,14 +2487,40 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   .file-action-menu button { height: 44px; font-size: 14px; }
 }
 
+@media (max-width: 600px) {
+  .composer-meta { flex-wrap: wrap; }
+  .composer-meta-left {
+    display: grid;
+    width: 100%;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 7px;
+  }
+  .composer-workspace { grid-column: 1; grid-row: 1; justify-self: start; }
+  .composer-provider { grid-column: 2; grid-row: 1; justify-self: end; margin-left: 0; }
+  .composer-provider > span { display: none; }
+  .composer-provider select { width: min(150px, 42vw); max-width: 100%; min-height: 22px; height: 22px; padding: 0 20px 0 6px; }
+  .composer-model { grid-column: 1; grid-row: 2; min-width: 0; }
+  #permissionModeSwitch { grid-column: 2; grid-row: 2; justify-self: end; }
+  .composer-meta-more { grid-column: 1 / -1; grid-row: 3; }
+  .composer-meta-right { width: 100%; margin-left: 0; justify-content: flex-end; }
+}
+
 @media (max-width: 380px) {
   .topbar { grid-template-columns: auto minmax(0, 1fr); }
-  .agent-control { grid-column: 2; grid-row: 2; }
-  .topbar-actions { grid-row: 3; }
-  .topbar { grid-template-rows: auto auto auto; }
+  .model-control.agent-control { grid-column: 2; grid-row: 1; justify-self: end; width: fit-content; max-width: 100%; }
+  .agent-control select { max-width: 220px; }
+  .topbar-actions { grid-row: 2; }
+  .topbar { grid-template-rows: auto auto; }
   .composer-meta { flex-wrap: wrap; gap: 5px; }
   .composer-meta-left { width: 100%; }
-  .composer-workspace, .composer-model, .permission-mode-switch { max-width: 100%; }
+  .composer-workspace { grid-column: 1; grid-row: 1; justify-self: start; }
+  .composer-provider { grid-column: 2; grid-row: 1; justify-self: end; margin-left: 0; min-width: 0; }
+  .composer-provider select { width: min(150px, 42vw); min-width: 0; max-width: 100%; min-height: 22px; height: 22px; padding: 0 18px 0 6px; }
+  .composer-model { grid-column: 1; grid-row: 2; min-width: 0; max-width: 100%; }
+  .composer-model-trigger { min-width: 0; max-width: min(150px, 38vw); }
+  #permissionModeSwitch { grid-column: 2; grid-row: 2; justify-self: end; }
+  .composer-meta-more { grid-column: 1 / -1; grid-row: 3; }
   #composerWorkspaceSelect { max-width: min(150px, 55vw); }
   #runtimeStatus { justify-self: start; }
 }

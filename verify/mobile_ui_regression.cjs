@@ -1,6 +1,5 @@
 // 移动端三处回归验证（静态 public/ 服务，端口 8799）：
-//   ① 顶栏「下沉箭头」收起后必须**只剩它自己**（API / Agent 两个下拉、操作区、侧栏按钮全部让位），
-//      并亮出「展开顶栏」文字；点一次全部恢复。
+//   ① 顶栏收起后必须只剩折叠条；Agent / 操作区一起让位，输入区 API 保持可用，点一次全部恢复。
 //   ② 输入框粘贴：手机经局域网 http:// 打开时是**非安全上下文**，网页读不到剪贴板。
 //      正确形态是「触摸长按不拦截 → 交给系统菜单」，桌面鼠标右键仍走自定义菜单；
 //      两条程序化通道都不可用时，提示必须给可行动作（Ctrl+V / 长按系统菜单）。
@@ -71,12 +70,17 @@ function waitForServer(deadline = 15) {
       document.querySelector('#authDialog')?.close();
       const ms = document.querySelector('#modelSelect');
       const as = document.querySelector('#agentSelect');
+      const ts = document.querySelector('#turnJumpSelect');
       if (ms) { ms.innerHTML = '<option>deepseek-v4.1-flash</option>'; ms.hidden = false; }
-      if (as) { as.innerHTML = '<option>nsfagent</option>'; as.hidden = false; }
+      if (as) { as.innerHTML = '<option value="all">全能助手 Agent</option><option value="director">导演 Agent</option><option value="prompt">提示词优化 Agent</option>'; as.value = 'all'; }
+      if (ts) {
+        ts.innerHTML = '<option>第 1 轮 · 用于布局检查的示例摘要</option><option>第 2 轮 · 第二个示例摘要</option>';
+        ts.hidden = false;
+      }
     });
 
     // ---- ① 顶栏折叠 ----
-    // 展开态截图（此时是「API 栏 + Agent 栏 + 操作区 + 折叠条」的正常形态）
+    // 展开态顶栏有 Agent 与操作区；API 已移到输入区元信息行。
     const expandedPath = path.join(ROOT, 'verify', 'topbar_mobile_expanded.png');
     await page.screenshot({ path: expandedPath, fullPage: false });
 
@@ -88,14 +92,61 @@ function waitForServer(deadline = 15) {
         const r = el.getBoundingClientRect();
         return st.display !== 'none' && st.visibility !== 'hidden' && r.width > 0 && r.height > 0;
       };
+      const viewportWidth = window.innerWidth;
       const topbar = document.querySelector('.topbar');
       const rect = topbar.getBoundingClientRect();
-      return { height: Math.round(rect.height), model: vis('.model-control'), agent: vis('.agent-control'), actions: vis('.topbar-actions') };
+      const agent = document.querySelector('.agent-control');
+      const agentSelect = document.querySelector('#agentSelect');
+      const apiSelect = document.querySelector('#modelSelect');
+      const turn = document.querySelector('#turnJumpSelect');
+      const actions = document.querySelector('.topbar-actions');
+      const provider = document.querySelector('.composer-provider');
+      const workspace = document.querySelector('.composer-workspace');
+      const agentRect = agent.getBoundingClientRect();
+      const agentSelectRect = agentSelect.getBoundingClientRect();
+      const turnRect = turn.getBoundingClientRect();
+      const actionsRect = actions.getBoundingClientRect();
+      const providerRect = provider.getBoundingClientRect();
+      const providerSelectRect = apiSelect.getBoundingClientRect();
+      const workspaceRect = workspace.getBoundingClientRect();
+      const expectedAgentWidth = Math.min(220, Math.ceil(agentSelect.scrollWidth) + 36);
+      const buttonRects = [...actions.querySelectorAll(':scope > button:not([hidden])')]
+        .map((button) => button.getBoundingClientRect());
+      const overlapsButtons = buttonRects.some((r) => turnRect.left < r.right && turnRect.right > r.left);
+      const turnAfterAgent = viewportWidth > 760
+        ? turnRect.left >= agentRect.right
+        : Math.abs(turnRect.top - actionsRect.top) < 8;
+      const turnBeforeButtons = viewportWidth > 760
+        ? turnRect.right <= actionsRect.right
+        : buttonRects.every((r) => turnRect.right <= r.left || turnRect.left >= r.right);
+      return {
+        width: viewportWidth,
+        height: Math.round(rect.height),
+        agent: vis('.topbar #agentSelect'),
+        actions: vis('.topbar-actions'),
+        provider: vis('.composer-provider'),
+        providerInTopbar: Boolean(topbar.querySelector('#modelSelect')),
+        providerSameRowAsWorkspace: Math.abs(providerRect.top - workspaceRect.top) < 8,
+        providerRightOfWorkspace: providerRect.left >= workspaceRect.right,
+        providerSelectHeight: Math.round(providerSelectRect.height),
+        providerSelectIsCompact: providerSelectRect.height <= 24,
+        agentWidth: Math.round(agentRect.width),
+        agentWidthFitsText: agentRect.width <= expectedAgentWidth,
+        turn: vis('#turnJumpSelect') && !turn.hidden,
+        turnAfterAgent,
+        turnBeforeButtons,
+        turnOverlapsButtons: overlapsButtons,
+      };
     });
-    if (expandedLayout.model && expandedLayout.agent && expandedLayout.actions) {
-      pass(`展开态：API / Agent / 操作区都在（顶栏高 ${expandedLayout.height}px）`);
+    if (expandedLayout.agent && expandedLayout.actions && expandedLayout.provider && !expandedLayout.providerInTopbar && expandedLayout.providerSameRowAsWorkspace && expandedLayout.providerRightOfWorkspace && expandedLayout.providerSelectIsCompact && expandedLayout.agentWidthFitsText) {
+      pass(`展开态（${expandedLayout.width}px）：Agent 按名称收紧至 ${expandedLayout.agentWidth}px，API 高 ${expandedLayout.providerSelectHeight}px 且在工作区右侧`);
     } else {
-      fail('展开态基线', JSON.stringify(expandedLayout));
+      fail('展开态 API / Agent 布局', JSON.stringify(expandedLayout));
+    }
+    if (expandedLayout.turn && expandedLayout.turnAfterAgent && expandedLayout.turnBeforeButtons && !expandedLayout.turnOverlapsButtons) {
+      pass(`轮次选择在 ${expandedLayout.width > 760 ? 'Agent 之后、按钮之前' : '手机操作行开头'}`);
+    } else {
+      fail('轮次选择位置或重叠', JSON.stringify(expandedLayout));
     }
 
     // 通过真实点击折叠条切到收起态（按钮事件绑定也在验证范围内）。
@@ -106,12 +157,12 @@ function waitForServer(deadline = 15) {
     const collapsedPath = path.join(ROOT, 'verify', 'topbar_mobile_collapsed.png');
     await page.screenshot({ path: collapsedPath, fullPage: false });
 
-    // 布局断言：收起后只留下拉箭头，API / Agent / 操作区 / 侧栏按钮全部隐藏。
+    // 布局断言：API 在输入区第一行与工作区同排；收起顶栏只隐藏顶栏自身控件。
     const layout = await page.evaluate(() => {
       const topbar = document.querySelector('.topbar');
       const vis = (sel) => {
         const el = document.querySelector(sel);
-        if (!el) return 'missing';
+        if (!el) return false;
         const st = getComputedStyle(el);
         const r = el.getBoundingClientRect();
         return (st.display !== 'none' && st.visibility !== 'hidden' && r.width > 0 && r.height > 0);
@@ -126,8 +177,10 @@ function waitForServer(deadline = 15) {
       return {
         compact: topbar?.classList.contains('compact'),
         actions: vis('.topbar-actions'),
-        model: vis('.model-control'),
-        agent: vis('.agent-control'),
+        apiInTopbar: vis('.topbar #modelSelect'),
+        apiInComposer: vis('.composer-provider #modelSelect'),
+        agent: vis('.topbar #agentSelect'),
+        provider: vis('.composer-provider'),
         openSidebar: vis('#openSidebar'),
         toggle: vis('#toggleTopbarCompact'),
         visibleChildren,
@@ -152,10 +205,12 @@ function waitForServer(deadline = 15) {
     if (layout.compact) pass('顶栏已切换为 compact 态');
     else fail('顶栏 compact 态');
 
-    for (const [key, label] of [['actions', '操作区'], ['model', 'API 下拉'], ['agent', 'Agent 下拉'], ['openSidebar', '侧栏按钮']]) {
+    for (const [key, label] of [['actions', '操作区'], ['apiInTopbar', '顶栏 API 下拉'], ['agent', 'Agent 下拉'], ['openSidebar', '侧栏按钮']]) {
       if (layout[key] === false) pass(`收起后${label}已隐藏`);
       else fail(`收起后${label}隐藏`, String(layout[key]));
     }
+    if (layout.apiInComposer === true) pass('收起顶栏后，输入区 API 仍可见');
+    else fail('收起顶栏后输入区 API 仍可见', String(layout.apiInComposer));
     if (layout.visibleChildren.length === 1 && layout.visibleChildren[0] === 'toggleTopbarCompact') {
       pass('收起后顶栏只剩折叠条一个可见子元素');
     } else {
@@ -179,7 +234,7 @@ function waitForServer(deadline = 15) {
     if (layout.ariaExpanded === 'false') pass('收起后 aria-expanded=false');
     else fail('收起后 aria-expanded', String(layout.ariaExpanded));
 
-    // 再点一次箭头，展开后 API / Agent / 操作区应全部恢复。
+    // 再点一次箭头，展开后 Agent / 操作区恢复，API 始终留在输入区。
     await page.click('#toggleTopbarCompact');
     await page.waitForTimeout(500);
     const restored = await page.evaluate(() => {
@@ -193,13 +248,14 @@ function waitForServer(deadline = 15) {
       return {
         compact: document.querySelector('.topbar')?.classList.contains('compact'),
         actions: vis('.topbar-actions'),
-        model: vis('.model-control'),
-        agent: vis('.agent-control'),
+        apiInTopbar: vis('.topbar #modelSelect'),
+        apiInComposer: vis('.composer-provider #modelSelect'),
+        agent: vis('.topbar #agentSelect'),
         ariaExpanded: document.querySelector('#toggleTopbarCompact')?.getAttribute('aria-expanded'),
       };
     });
-    if (!restored.compact && restored.actions && restored.model && restored.agent && restored.ariaExpanded === 'true') {
-      pass('再点箭头后 API / Agent / 操作区全部恢复');
+    if (!restored.compact && restored.actions && !restored.apiInTopbar && restored.apiInComposer && restored.agent && restored.ariaExpanded === 'true') {
+      pass('展开后 Agent / 操作区恢复，API 继续留在输入区');
     } else {
       fail('展开恢复', JSON.stringify(restored));
     }

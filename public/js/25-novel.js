@@ -2250,10 +2250,25 @@ function taskPreviewText(row) {
   return line.length > 80 ? `${line.slice(0, 80)}…` : line;
 }
 
+// 章节只剩最后一份稿件的记录：批量删除不让选——删掉它会把整章连根移除，
+// 「全选 + 删除」一下就能把整本书删空；移除章节只能走章节上的显式删除（后端同样整批拒绝）。
+function chapterRemovingManuscriptIds() {
+  const rows = novel.manage.records?.manuscripts || [];
+  const counts = new Map();
+  for (const row of rows) {
+    if (!row.chapter_no) continue;
+    counts.set(row.chapter_no, (counts.get(row.chapter_no) || 0) + 1);
+  }
+  return new Set(rows
+    .filter((row) => row.chapter_no && counts.get(row.chapter_no) === 1)
+    .map((row) => row.id));
+}
+
 function manageRowSelectable(row) {
   if (row.type === "task") {
     return !["queued", "running"].includes(String(row.status || ""));
   }
+  if (row.chapter_no && chapterRemovingManuscriptIds().has(row.id)) return false;
   return Boolean(row.id);
 }
 
@@ -2281,7 +2296,7 @@ function renderManage() {
   const note = $("#novelManageNote");
   if (note) {
     note.textContent = novel.bookId
-      ? "只管理当前作品。点一行可以就地查看内容；勾选框用于批量删除。删除改编稿不会删除原文；删除生成记录不会删除已保存的内容。全选只作用于当前筛选范围。"
+      ? "只管理当前作品。点一行可以就地查看内容；勾选框用于批量删除。删除改编稿不会删除原文；删除生成记录不会删除已保存的内容。全选只作用于当前筛选范围。章节只剩最后一份稿件时不进批量删除；要移除章节请在章节上单独删除。"
       : "还没有打开作品。先关闭这里，在左上角打开或保存一个作品。";
   }
   document.querySelectorAll("#novelManageTabs [data-novel-manage-tab]").forEach((btn) => {
@@ -2338,7 +2353,8 @@ function renderManage() {
       if (!selectable) {
         const tag = document.createElement("em");
         tag.className = "novel-manage-locked";
-        tag.textContent = "执行中";
+        tag.textContent = row.chapter_no ? "章节仅此一份" : "执行中";
+        tag.title = row.chapter_no ? "这一章只剩最后一份稿件，批量删除不能移除章节；要移除章节请在章节上单独删除" : "";
         copy.append(tag);
       }
       wrap.append(box, copy);
@@ -2479,7 +2495,7 @@ async function deleteManageSelection() {
     items.length ? "删除改编稿不会删除原文或已保存的要素、大纲、剧本。" : "",
     taskIds.length ? "删除生成记录只清任务记录，不删除从它保存的内容。" : "",
     items.length && items.some((row) => row.type === "manuscript")
-      ? "如果删掉某章最后一份稿件，这一章会从作品里移除。" : "",
+      ? "批量删除不会移除章节；要移除章节请在章节上单独删除。" : "",
   ].filter(Boolean).join("\n");
   if (!window.confirm(confirmText)) return;
   const errorEl = $("#novelManageError");
@@ -3291,6 +3307,9 @@ export function bindNovelEvents() {
     data.streamText = String(task.result || task.result_partial || "");
     data.taskCursor = 0;
     novel.taskToken += 1;
+    // 点「查看」就是想看这条任务的结果：之前收起过的状态不能挡住它，
+    // 否则面板以收起态出现、只剩标题条，看起来像打不开（实测复现）。
+    novel.collapsed.delete(`${novel.stage}:task`);
     renderStagePanel();
     scheduleTaskPolling();
   });

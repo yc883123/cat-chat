@@ -117,10 +117,6 @@
         <button class="icon-button mobile-only" id="openSidebar" title="打开导航" aria-label="打开导航">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"></path></svg>
         </button>
-        <label class="model-control">
-          <span>API</span>
-          <select id="modelSelect" aria-label="当前 API"></select>
-        </label>
         <label class="model-control agent-control">
           <button class="agent-help-button" id="agentHelpButton" type="button"
                   title="Agent 是什么？点击查看说明" aria-label="Agent 使用说明" aria-expanded="false">?</button>
@@ -1103,6 +1099,10 @@
                 <option value="">未分组</option>
               </select>
             </div>
+            <label class="composer-provider">
+              <span>API</span>
+              <select id="modelSelect" aria-label="当前 API"></select>
+            </label>
             <!-- 模型控件：原生 select 降级为「隐藏的值容器」（唯一值来源，样式见 styles.css），
                  可视化层是触发按钮 + 可搜索浮层——中转站未分组时目录能返回 400+ 个模型，
                  原生下拉只能靠滚动定位。浮层 fixed + 打开时挂 body，避免被 .composer-wrap 裁剪。

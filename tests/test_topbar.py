@@ -202,14 +202,22 @@ class TopbarStyleTests(unittest.TestCase):
         self.assertIn("fill: none", rule)
         self.assertIn("stroke: currentColor", rule)
 
-    def test_api_stays_in_topbar_and_model_selector_stays_by_composer(self) -> None:
-        """API 负责选连接配置，实际模型在输入区从「当前 API 的模型目录」里选，不再手动填写。"""
+    def test_api_sits_between_workspace_and_model_in_composer(self) -> None:
+        """API 选择放在输入区元信息行，桌面与手机都按「工作区 → API → 模型」排列。"""
         index = self._index()
         topbar = index[index.index('<header class="topbar">'):index.index('</header>')]
-        self.assertIn('<span>API</span>', topbar)
-        self.assertIn('id="modelSelect"', topbar)
+        self.assertNotIn('id="modelSelect"', topbar)
+        agent_start = topbar.index('<label class="model-control agent-control">')
+        agent_end = topbar.index('</label>', agent_start)
+        self.assertIn('id="agentSelect"', topbar[agent_start:agent_end])
         composer = index[index.index('<div class="composer-meta">'):index.index('</section>', index.index('<div class="composer-meta">'))]
-        self.assertIn('id="composerModelSelect"', composer)
+        workspace_pos = composer.index('id="composerWorkspaceSelect"')
+        provider_pos = composer.index('id="modelSelect"')
+        model_pos = composer.index('id="composerModelSelect"')
+        self.assertLess(workspace_pos, provider_pos)
+        self.assertLess(provider_pos, model_pos)
+        self.assertIn('class="composer-provider"', composer)
+        self.assertIn('<span>API</span>', composer)
         self.assertNotIn('id="composerModelCustom"', index, "手动输入模型名称已移除")
         self.assertNotIn("手动输入模型名称", index)
         bind = self._bind()
@@ -227,6 +235,38 @@ class TopbarStyleTests(unittest.TestCase):
             stream,
             "提交必须发送原始选择（'' = 跟随），否则跟随会被静默固化成覆盖",
         )
+
+    def test_composer_provider_has_desktop_and_mobile_layout_rules(self) -> None:
+        css = self._css()
+        self.assertIn('.composer-provider {', css)
+        self.assertIn(".agent-control { min-width: 0; flex: 0 0 auto; }", css)
+        agent_select = css[css.index(".agent-control select {"):]
+        agent_select = agent_select[:agent_select.index("}")]
+        self.assertIn("width: auto", agent_select)
+        self.assertNotIn("width: 100%", agent_select)
+        mobile = css[css.index('@media (max-width: 760px) {'):]
+        mobile = mobile[:mobile.index("\n}")]
+        self.assertIn('.composer-provider select {', mobile)
+        self.assertIn('min-height: 22px; height: 22px;', mobile)
+        self.assertNotIn('.composer-provider select { width: 150px; max-width: min(180px, 42vw); min-height: 44px;', mobile)
+        narrow_phone = css[css.index('@media (max-width: 600px) {'):]
+        narrow_phone = narrow_phone[:narrow_phone.index("\n}")]
+        self.assertIn('min-height: 22px; height: 22px;', narrow_phone)
+        narrow = css[css.index('@media (max-width: 380px) {'):]
+        self.assertIn('.composer-provider select', narrow)
+
+    def test_agent_and_turn_picker_keep_compact_mobile_layout(self) -> None:
+        css = self._css()
+        mobile = css[css.index('@media (max-width: 760px) {'):]
+        mobile = mobile[:mobile.index("\n}")]
+        self.assertIn(".agent-control { grid-column: 2; grid-row: 1; justify-self: end;", mobile)
+        self.assertIn(".agent-control select { width: auto;", mobile)
+        self.assertIn(".turn-jump-select { display: inline-block;", mobile)
+        self.assertIn("grid-column: 1 / -1;", mobile[mobile.index(".topbar-actions {"):])
+        narrow = css[css.index('@media (max-width: 380px) {'):]
+        narrow = narrow[:narrow.index("\n}")]
+        self.assertIn(".agent-control { grid-column: 2; grid-row: 1;", narrow)
+        self.assertIn(".topbar-actions { grid-row: 2; }", narrow)
 
     def test_turn_jump_select_lives_in_topbar_actions(self) -> None:
         """轮次下拉在顶栏操作区（手机 / 桌面共用一个元素，桌面落在左段中段），细节见 test_turn_jump.py。"""

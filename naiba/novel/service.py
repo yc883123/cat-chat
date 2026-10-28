@@ -1366,12 +1366,16 @@ class NovelStore:
 
         统一校验：作品归属、记录存在、允许的删除范围。无效项**不执行任何删除**，
         整批拒绝——避免「删了一半」这种半成品状态（计划 §6.3）。
+        批量删除**不能移除章节**：删掉某章最后一份稿件会把整章连根移除，
+        「全选 + 删除」一下就能把整本书删空（2026-10-28 157 章变 1 章的事故路径）。
+        所以这种项整批拒绝，移除章节只能走章节上的显式删除。
         """
         if not isinstance(items, list) or not items:
             raise NovelServiceError("请选择要删除的记录")
         manifest = self._check_apply_revision(book_id, expected_revision)
         book_dir = self._book_dir(book_id)
         plans: list[tuple[str, dict[str, Any]]] = []
+        removing_chapters: list[int] = []
         for raw in items:
             if not isinstance(raw, dict):
                 raise NovelServiceError("删除项必须是对象")
@@ -1383,11 +1387,19 @@ class NovelStore:
                 manuscript_id = str(raw.get("id") or "").strip()
                 index = self._load_chapter_index(book_dir, chapter_no)
                 resolved = self._resolve_manuscript_id(index, manuscript_id)
+                if len(index.get("manuscript_ids") or []) <= 1:
+                    removing_chapters.append(chapter_no)
                 plans.append(("manuscript", {"chapter_no": chapter_no, "id": resolved}))
             elif kind in ("elements", "outline", "script"):
                 plans.append((kind, {"id": str(raw.get("id") or "").strip()}))
             else:
                 raise NovelServiceError(f"不支持的删除类型：{kind or '（空）'}")
+        if removing_chapters:
+            raise NovelServiceError(
+                "这些稿件是所在章节的最后一份，删除会把章节一起移除："
+                + "、".join(f"第 {n} 章" for n in sorted(set(removing_chapters)))
+                + "。批量删除不能移除章节；要移除章节请在章节上单独删除。"
+            )
         # 全部校验通过后才开始改盘。
         removed: list[dict[str, Any]] = []
         if any(kind == "manuscript" for kind, _ in plans):

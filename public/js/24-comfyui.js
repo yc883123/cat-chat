@@ -27,6 +27,7 @@ const comfyui = {
   modelCandidates: null,   // 模型候选缓存 {checkpoints, loras}；null = 还没拉过
   deleting: new Set(),     // 正在「取消并删除」的任务 id，防重复提交
   mediaSelection: new Map(), // 媒体槽已选文件 {slotKey: {path, name, thumb_path}}；切工作流清空
+  drafts: new Map(),       // 主表单用户已填的值 {工作流id|node_id|field_name: value}；重绘与刷新都保留，点「默认」才清
   uploadingSlot: "",       // 正在上传的媒体槽 key（防并发点选；批量拖拽时是各 key 拼接，仍为真值即锁住）
   mediaGroupsCollapsed: {}, // 媒体分组卡折叠状态 {kind: true}；只存内存，不落盘、不进 visible_params
   storyboardQueue: [],    // 创作场「分镜生图」发来的提示词；只存内存，刷新即清
@@ -76,7 +77,16 @@ export function bindComfyuiEvents() {
   $("#comfyuiWorkflowList")?.addEventListener("click", onWorkflowListClick);
   $("#comfyuiParamForm")?.addEventListener("click", (event) => {
     if (event.target.closest("[data-comfyui-edit-params]")) openParamsDialog();
+    else if (event.target.closest("[data-comfyui-reset-params]")) resetParamValues();
   });
+  // 用户边填边记草稿：重绘（切页回来、传完媒体、保存显示集）时按草稿复原。
+  for (const type of ["input", "change"]) {
+    $("#comfyuiParamForm")?.addEventListener(type, (event) => {
+      const input = event.target.closest?.("[data-comfyui-slot]");
+      if (!input) return;
+      rememberDraft(String(input.dataset.comfyuiSlot || ""), input.value);
+    });
+  }
   $("#comfyuiTaskList")?.addEventListener("click", onTaskListClick);
   $("#comfyuiOutputGrid")?.addEventListener("click", onOutputGridClick);
   $("#comfyuiPanes")?.addEventListener("click", onPaneClick);
@@ -98,6 +108,7 @@ async function enterPage() {
   void refreshWorkflows();
   void refreshTasks();
   void loadModelCandidates();
+  watchComfyuiWidth();
   renderParamForm();
   renderStoryboardQueue();
   scheduleBackgroundRefresh();
@@ -107,6 +118,38 @@ function onPaneClick(event) {
   const btn = event.target.closest("[data-comfyui-pane]");
   if (!btn) return;
   setComfyuiPane(btn.dataset.comfyuiPane);
+}
+
+// 三栏放不下时改回三档（工作流 / 提交 / 结果），中栏才拿得到整页宽度。
+// 判档口径是**这一页自己的宽度**而不是视口：侧栏拖宽、文件面板打开都会让页面变窄
+// 而视口不变（与顶栏 watchTopbarWidth 同一教训）。阈值来自实测：页面 1000px 以下
+// 中栏就只剩 250px 上下——状态栏虽然换行兜住不再溢出，参数表单也已经没法用。
+const NARROW_PAGE_WIDTH = 1000;
+let comfyuiWidthObserver = null;
+
+function watchComfyuiWidth() {
+  const root = $("#studioPageComfyui");
+  if (!root) return;
+  const apply = (width) => {
+    const narrow = width > 0 && width < NARROW_PAGE_WIDTH;
+    if (narrow) root.dataset.comfyuiNarrow = "1";
+    else delete root.dataset.comfyuiNarrow;
+  };
+  apply(root.getBoundingClientRect().width);
+  if (typeof ResizeObserver !== "function") {
+    window.addEventListener("resize", () => apply(root.getBoundingClientRect().width));
+    return;
+  }
+  comfyuiWidthObserver?.disconnect();
+  comfyuiWidthObserver = new ResizeObserver((entries) => {
+    const box = entries[entries.length - 1]?.contentRect;
+    apply(box ? Math.round(box.width) : root.getBoundingClientRect().width);
+  });
+  comfyuiWidthObserver.observe(root);
+}
+
+function narrowPanes() {
+  return $("#studioPageComfyui")?.dataset.comfyuiNarrow === "1";
 }
 
 function setComfyuiPane(pane) {
@@ -287,7 +330,7 @@ async function onWorkflowListClick(event) {
   if (title) {
     const id = title.closest("[data-workflow-id]")?.dataset.workflowId || "";
     await selectWorkflow(id);
-    if (window.matchMedia("(max-width: 760px)").matches) setComfyuiPane("run");
+    if (narrowPanes()) setComfyuiPane("run");
   }
 }
 
@@ -454,13 +497,24 @@ function renderParamForm() {
   const heading = document.createElement("p");
   heading.className = "comfyui-param-heading";
   heading.textContent = comfyui.detail.name || "未命名工作流";
+  const actions = document.createElement("span");
+  actions.className = "comfyui-param-heading-actions";
+  // 「默认」只把已填的内容还原成工作流里原本的值；「编辑」保存的是显示哪些参数、
+  // 按什么顺序排，两者互不覆盖（用户口径 2026-10-29）。
+  const reset = document.createElement("button");
+  reset.type = "button";
+  reset.className = "control-button tiny";
+  reset.dataset.comfyuiResetParams = "1";
+  reset.textContent = "默认";
+  reset.title = "把填过的参数还原成工作流里原本的值；「编辑」保存的显示项与顺序不受影响";
   const edit = document.createElement("button");
   edit.type = "button";
   edit.className = "control-button tiny";
   edit.dataset.comfyuiEditParams = "1";
-  edit.textContent = "编辑参数";
+  edit.textContent = "编辑";
   edit.title = "选择要在主表单显示的参数，并调整它们的先后顺序";
-  head.append(heading, edit);
+  actions.append(reset, edit);
+  head.append(heading, actions);
   form.append(head);
   const visible = visibleKeySet();
   const slots = orderedSlots(comfyui.detail.params || []).filter(
@@ -789,6 +843,40 @@ function attachCandidateCombo(input, wrap, candidatesFn) {
   input.addEventListener("blur", hideList);
 }
 
+// 主表单已填内容的来源：有草稿用草稿，否则用工作流里原本的值。
+// 表单每次重绘（切页、传完媒体、改完「编辑」）都会重建控件，只认草稿才不会把
+// 用户刚填的提示词打回工作流默认值（用户口径 2026-10-29）。
+// 草稿键带工作流 id：不同工作流常有同名节点端口（如 3|seed），不隔离会互相串值。
+function draftKey(key) {
+  return `${comfyui.detail?.id || ""}|${key}`;
+}
+
+function savedDraft(key) {
+  return comfyui.drafts.get(draftKey(key));
+}
+
+function initialFieldValue(slot, key) {
+  const draft = savedDraft(key);
+  return draft !== undefined ? draft : (slot.default ?? "");
+}
+
+// 用户改一个槽就记一条：重绘后仍按这里复原，刷新触发再也不会把提示词打回原值。
+function rememberDraft(key, value) {
+  comfyui.drafts.set(draftKey(key), String(value ?? ""));
+}
+
+// 「默认」：只把参数值还原成工作流原本的值，清空这份工作流的草稿后重绘；
+// 「编辑」保存的显示项与顺序在 comfyui.detail 里，不受这条路径影响。
+function resetParamValues() {
+  if (!comfyui.detail) return;
+  const prefix = `${comfyui.detail.id || ""}|`;
+  for (const key of [...comfyui.drafts.keys()]) {
+    if (key.startsWith(prefix)) comfyui.drafts.delete(key);
+  }
+  renderParamForm();
+  toast("已还原成工作流里原本的参数值");
+}
+
 function renderSlot(slot) {
   const type = slot.field_type;
   // 媒体槽内部有自己的「选择文件」label：<label> 不能嵌 <label>，外层用 div。
@@ -821,7 +909,10 @@ function renderSlot(slot) {
       option.textContent = text;
       select.append(option);
     }
-    select.value = slot.default ? "true" : "false";
+    const draft = savedDraft(key);
+    select.value = draft === "true" || draft === "false"
+      ? draft
+      : (slot.default ? "true" : "false");
     wrap.append(select);
     return wrap;
   }
@@ -831,7 +922,7 @@ function renderSlot(slot) {
     const area = document.createElement("textarea");
     area.rows = slot.role === "positive_prompt" ? 9 : 5;
     area.dataset.comfyuiSlot = key;
-    area.value = slot.default ?? "";
+    area.value = initialFieldValue(slot, key);
     area.spellcheck = false;
     wrap.append(area);
     return wrap;
@@ -841,7 +932,7 @@ function renderSlot(slot) {
     const area = document.createElement("textarea");
     area.rows = 4;
     area.dataset.comfyuiSlot = key;
-    area.value = slot.default ?? "";
+    area.value = initialFieldValue(slot, key);
     area.spellcheck = false;
     wrap.append(area);
     return wrap;
@@ -851,7 +942,7 @@ function renderSlot(slot) {
     const input = document.createElement("input");
     input.type = "text";
     input.dataset.comfyuiSlot = key;
-    input.value = slot.default ?? "";
+    input.value = initialFieldValue(slot, key);
     input.placeholder = "已在 ComfyUI 输入目录里的图片文件名";
     wrap.append(input);
     return wrap;
@@ -862,9 +953,9 @@ function renderSlot(slot) {
   input.dataset.comfyuiSlot = key;
   if (type === "seed") {
     input.placeholder = "留空 = 每次随机；填数字 = 固定种子";
-    input.value = "";
+    input.value = savedDraft(key) ?? "";
   } else {
-    input.value = slot.default ?? "";
+    input.value = initialFieldValue(slot, key);
   }
   const candidates = slotCandidates(slot);
   if (slot.control === "combo" || ROLE_CANDIDATE_KEYS[slot.role]) {
@@ -1532,7 +1623,7 @@ async function submitTask() {
     renderTasks();
     await refreshTasks();
     startPolling();
-    if (window.matchMedia("(max-width: 760px)").matches) setComfyuiPane("tasks");
+    if (narrowPanes()) setComfyuiPane("tasks");
     toast("已提交，正在排队执行");
   } catch (error) {
     toast(`提交失败：${error.message}`);

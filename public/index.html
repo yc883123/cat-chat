@@ -578,7 +578,7 @@
         <!-- 分页：造梦机 —— 导入自己在 ComfyUI 里跑通的 API 格式工作流，填几个参数反复出图/出片。
              三栏：左（工作流库 + 导入）、中（连接状态 / 参数表单 / 提交）、右（任务与产物结果）。
              页面结构在这里定稿；交互与渲染由 public/js/24-comfyui.js 接管。 -->
-        <div class="studio-page-view" id="studioPageComfyui" data-studio-page-view="comfyui" hidden>
+        <div class="studio-page-view" id="studioPageComfyui" data-studio-page-view="comfyui" data-comfyui-pane="run" hidden>
           <div class="comfyui-panes" id="comfyuiPanes" role="group" aria-label="造梦机分档">
             <button class="studio-pane-btn comfyui-pane-btn" type="button" aria-pressed="false" data-comfyui-pane="workflows">工作流</button>
             <button class="studio-pane-btn comfyui-pane-btn active" type="button" aria-pressed="true" data-comfyui-pane="run">提交</button>

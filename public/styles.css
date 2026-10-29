@@ -4244,7 +4244,7 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .comfyui-panes { display: none; gap: 4px; padding: 6px var(--s-4); border-bottom: 1px solid var(--line); }
 .comfyui-columns {
   display: grid;
-  grid-template-columns: minmax(230px, 290px) minmax(0, 1fr) minmax(280px, 360px);
+  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(260px, 340px);
   gap: var(--s-3);
   padding: var(--s-3) var(--s-4) var(--s-4);
   min-height: 0;
@@ -4289,11 +4289,20 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 }
 .comfyui-workflow-delete:hover { color: var(--danger, #c0392b); border-color: var(--danger, #c0392b); }
 .comfyui-empty { margin: 4px 0; font-size: 12px; color: var(--muted); line-height: 1.6; }
+/* 状态栏：地址文字可以压缩省略，但两个按钮绝不越出卡片边框。
+   中间栏窄到放不下「圆点 + 地址 + 改地址 + 测试连接」时整行换行——按钮留在卡片里，
+   而不是被 min-content 顶到右边界之外（用户 2026-10-29 反馈电脑端与手机端都被挤出边框）。 */
 .comfyui-statusbar {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 9px 12px; border-bottom: 1px solid var(--line);
 }
-.comfyui-status-text { font-size: 12px; color: var(--muted); margin-right: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.comfyui-status-text {
+  font-size: 12px; color: var(--muted); margin-right: auto;
+  /* flex-basis 必须是小值：换行容器按 max-content 排布，长地址会独占一整行、
+     把两个按钮挤到第二行。给 120px 基准后地址与按钮同行，地址自己省略。 */
+  flex: 1 1 120px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.comfyui-statusbar .control-button { flex: none; }
 .comfyui-statusbar .status-mark.ok { background: var(--ok, #2e9e5b); }
 .comfyui-statusbar .status-mark.error { background: var(--danger, #c0392b); }
 .comfyui-run { flex: 1; min-height: 0; padding: 12px; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
@@ -4325,7 +4334,9 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 }
 .comfyui-param-form { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 2px; }
 .comfyui-param-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.comfyui-param-heading { margin: 0; font-size: 12.5px; font-weight: 600; }
+.comfyui-param-heading { margin: 0; font-size: 12.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 「默认 / 编辑」两个按钮一组：标题可以省略，按钮始终留在卡片内、不换行。 */
+.comfyui-param-heading-actions { display: flex; align-items: center; gap: 6px; flex: none; }
 .comfyui-param { position: relative; display: grid; gap: 3px; font-size: 11.5px; color: var(--muted); }
 .comfyui-param input, .comfyui-param select, .comfyui-param textarea {
   min-height: 30px; border: 1px solid var(--line); border-radius: var(--r-md);
@@ -4603,6 +4614,25 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 }
 .comfyui-import-form textarea { font-family: var(--mono, monospace); resize: vertical; }
 .comfyui-import-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* 三栏留给中栏的宽度必须够放参数表单：左右两栏只做目录与结果，
+   中栏被挤到几十像素时（旧口径 1024 视口实测只有 46px）连「改地址 / 测试连接」都放不下。
+   判档口径是**这一页自己的宽度**而不是视口：侧栏拖宽、文件面板打开都会让页面变窄而视口不变
+   （与顶栏 watchTopbarWidth 同一教训）。data-comfyui-narrow 由 24-comfyui.js 的
+   watchComfyuiWidth 写入；窄档改回三档分段（与手机同一套 pane），中栏始终占满可用宽度。 */
+#studioPageComfyui[data-comfyui-narrow="1"] .comfyui-panes { display: flex; }
+#studioPageComfyui[data-comfyui-narrow="1"] .comfyui-columns {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  padding: 10px; gap: 10px; overflow: hidden;
+}
+#studioPageComfyui[data-comfyui-narrow="1"] .comfyui-library,
+#studioPageComfyui[data-comfyui-narrow="1"] .comfyui-run-col,
+#studioPageComfyui[data-comfyui-narrow="1"] .comfyui-results-col { display: none; }
+#studioPageComfyui[data-comfyui-narrow="1"][data-comfyui-pane="workflows"] .comfyui-library,
+#studioPageComfyui[data-comfyui-narrow="1"][data-comfyui-pane="run"] .comfyui-run-col,
+#studioPageComfyui[data-comfyui-narrow="1"][data-comfyui-pane="tasks"] .comfyui-results-col { display: flex; }
+#studioPageComfyui[data-comfyui-narrow="1"][data-comfyui-pane="tasks"] .comfyui-tasks { max-height: 40%; }
 
 @media (max-width: 760px) {
   .comfyui-panes { display: flex; }

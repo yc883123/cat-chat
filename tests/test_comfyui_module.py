@@ -1893,6 +1893,115 @@ class ParamsPickerOrderTests(unittest.TestCase):
         self.assertIn(".comfyui-params-move { opacity: 1; }", touch)
 
 
+class ParamValueDraftTests(unittest.TestCase):
+    """主表单参数值的保留与「默认」还原（用户口径 2026-10-29）。
+
+    一条规则拆两半：
+    1. 值有草稿——表单一重绘（切页回来、传完媒体、保存显示集）就按草稿复位，
+       刷新不会再把手填的提示词打回工作流原值；
+    2. 「默认」只管值，不动「编辑」保存的显示项与顺序。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        root = Path(__file__).resolve().parents[1]
+        cls.js = (root / "public/js/24-comfyui.js").read_text(encoding="utf-8")
+
+    def _fn(self, signature):
+        return self.js.split(signature, 1)[1].split("\nfunction ", 1)[0]
+
+    def _bind(self):
+        return self.js.split("export function bindComfyuiEvents() {", 1)[1].split("\n}\n", 1)[0]
+
+    def test_slot_values_come_from_draft_first(self):
+        self.assertIn("drafts: new Map()", self.js)
+        initial = self._fn("function initialFieldValue(slot, key) {")
+        self.assertIn("savedDraft(key)", initial)
+        self.assertIn('slot.default ?? ""', initial)
+        # 草稿键带工作流 id：不同工作流的同名节点端口（3|seed）不能互相串值。
+        draft_key = self._fn("function draftKey(key) {")
+        self.assertIn('comfyui.detail?.id || ""', draft_key)
+        # 每种带值的控件都走同一个取值入口，不能只改一半。
+        slot_fn = self._fn("function renderSlot(slot) {")
+        self.assertEqual(slot_fn.count("initialFieldValue(slot, key)"), 4, slot_fn)
+        self.assertIn("savedDraft(key)", slot_fn)
+
+    def test_typing_records_draft(self):
+        bind = self._bind()
+        self.assertIn('for (const type of ["input", "change"])', bind)
+        self.assertIn("rememberDraft(", bind)
+        remember = self._fn("function rememberDraft(key, value) {")
+        self.assertIn("drafts.set(draftKey(key)", remember)
+
+    def test_default_button_only_resets_values(self):
+        reset = self._fn("function resetParamValues() {")
+        # 只清这份工作流的草稿，再按工作流原值重绘。
+        self.assertIn("comfyui.drafts.delete(key)", reset)
+        self.assertIn("renderParamForm()", reset)
+        # 不许碰「编辑」保存的显示项与顺序。
+        self.assertNotIn("visible_params", reset)
+        self.assertNotIn("param_order", reset)
+        self.assertNotIn("/params", reset)
+        render = self._fn("function renderParamForm() {")
+        # 「编辑」按钮文案收短成「编辑」，「默认」并排放在同一组里。
+        self.assertIn('edit.textContent = "编辑"', render)
+        self.assertIn('reset.textContent = "默认"', render)
+        self.assertIn('dataset.comfyuiResetParams = "1"', render)
+        self.assertIn('dataset.comfyuiEditParams = "1"', render)
+        self.assertIn("actions.append(reset, edit)", render)
+
+    def test_default_click_wired(self):
+        bind = self._bind()
+        self.assertIn('"[data-comfyui-reset-params]"', bind)
+        self.assertIn("resetParamValues()", bind)
+
+
+class ComfyuiStatusbarLayoutTests(unittest.TestCase):
+    """「改地址 / 测试连接」不许越出卡片（用户 2026-10-29：电脑端与手机端都被挤出边框）。
+
+    根因是三栏网格：左右两栏各自有固定上限，中栏被压到几十像素（1024 视口实测 46px），
+    两个按钮的 min-content 只能溢出。修法两条并用：状态栏允许换行兜住极端宽度；
+    页面自身宽度不足时改三档分页，中栏拿满宽度。判档口径是**页面宽度**而不是视口。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        root = Path(__file__).resolve().parents[1]
+        cls.js = (root / "public/js/24-comfyui.js").read_text(encoding="utf-8")
+        cls.css = (root / "public/styles.css").read_text(encoding="utf-8")
+        cls.html = (root / "public/index.html").read_text(encoding="utf-8")
+
+    def _rule(self, marker):
+        return self.css.split(marker, 1)[1].split("}", 1)[0]
+
+    def test_statusbar_wraps_instead_of_overflowing(self):
+        bar = self._rule(".comfyui-statusbar {")
+        self.assertIn("flex-wrap: wrap", bar)
+        text = self._rule(".comfyui-status-text {")
+        # 基准必须是小值：换行容器按 max-content 排布，长地址会独占一整行、
+        # 把两个按钮挤到第二行（1200px 视口实测过）。
+        self.assertIn("flex: 1 1 120px", text)
+        self.assertIn("min-width: 0", text)
+        self.assertIn("text-overflow: ellipsis", text)
+        # 按钮保持自身宽度、参与换行而不是被压扁或顶出边界。
+        self.assertIn(".comfyui-statusbar .control-button { flex: none; }", self.css)
+
+    def test_narrow_mode_uses_page_width(self):
+        self.assertIn("NARROW_PAGE_WIDTH", self.js)
+        watch = self.js.split("function watchComfyuiWidth() {", 1)[1].split("\nfunction ", 1)[0]
+        self.assertIn("ResizeObserver", watch)
+        self.assertIn("getBoundingClientRect().width", watch)
+        self.assertIn('root.dataset.comfyuiNarrow = "1"', watch)
+        # 判档必须挂在页面宽度上，不许再回到 matchMedia(视口)。
+        self.assertNotIn('matchMedia("(max-width: 760px)")', self.js)
+        self.assertIn('data-comfyui-narrow="1"', self.css)
+        # 窄档下三档条可见、三栏只显示一栏。
+        self.assertIn('#studioPageComfyui[data-comfyui-narrow="1"] .comfyui-panes { display: flex; }', self.css)
+        self.assertIn('[data-comfyui-narrow="1"][data-comfyui-pane="run"] .comfyui-run-col', self.css)
+        # 页面初始就带档位，首帧不会先按三栏渲染再跳。
+        self.assertIn('data-comfyui-pane="run"', self.html)
+
+
 class TaskCardLayoutTests(unittest.TestCase):
     def test_long_workflow_title_shrinks_before_status_badge(self):
         """任务标题行必须允许标题收缩并省略，不能压到状态标签上。

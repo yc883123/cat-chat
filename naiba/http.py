@@ -19,6 +19,7 @@ import sqlite3
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -247,6 +248,16 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(self.app.bootstrap())
         elif path == "/api/update":
             self._json(self.app.updater.status())
+        elif path == "/api/update/notes":
+            # 按需补某个版本的更新说明：静态发布页补进来的条目没有说明，点选那一版才去取。
+            query = urllib.parse.parse_qs(parsed.query)
+            tag = (query.get("tag") or [""])[0]
+            try:
+                self._json(self.app.updater.notes_for_tag(tag))
+            except RuntimeError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_GATEWAY)
         elif path == "/api/agents":
             self._json({"agents": self.app.config.public_agents(), "default_agent_id": self.app.config.default_agent_id()})
         elif path == "/api/provider-presets":

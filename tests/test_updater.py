@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """updater.py 更新流程的标准库单元测试（无网络，全部通过桩函数拦截请求）。
 
-覆盖：磁盘缓存读回/回退、latest 静态直连兜底、合成 latest 条目、
+覆盖：三级数据源（API 翻页 / 静态发布页兜底 / 磁盘缓存）与合并去重、缓存 meta 读写与
+老格式兼容、latest 静态直连兜底、合成 latest 条目、按需补更新说明、
 错误提示分级、清单校验失败直连失败不降级，以及正常 API 路径与源码模式回归。
 """
 
@@ -21,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from naiba.updater import (  # noqa: E402
     EXECUTABLE_ASSET,
+    FALLBACK_TTL_SECONDS,
     LATEST_TAG,
     MANIFEST_ASSET,
     READY_MARKER,
@@ -31,6 +33,7 @@ from naiba.updater import (  # noqa: E402
 
 
 API_RELEASES_URL = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=100"
+HTML_RELEASES_URL = f"https://github.com/{REPOSITORY}/releases?page="
 TAG_DL_BASE = f"https://github.com/{REPOSITORY}/releases/download"
 LATEST_DL_BASE = f"https://github.com/{REPOSITORY}/releases/latest/download"
 COMMIT_A = "a" * 40
@@ -71,6 +74,16 @@ def http_error(code=403, body="", headers=None, url="https://api.github.com/x"):
     return urllib.error.HTTPError(url, code, "err", headers or {}, fp)
 
 
+def release_html_page(tags, published="2026-10-29T00:00:00Z"):
+    """构造 github.com 发布页的近似 HTML（只保留解析器关心的版本链接与 relative-time）。"""
+    rows = "".join(
+        f'<section><h2><a href="/yc883123/cat-chat/releases/tag/{tag}">{tag}</a></h2>'
+        f'<relative-time datetime="{published}"></relative-time></section>'
+        for tag in tags
+    )
+    return f"<html><body>{rows}</body></html>"
+
+
 class RequestStub:
     """按 URL 分发的桩；记录全部被请求的 URL。"""
 
@@ -88,6 +101,19 @@ class RequestStub:
             if url.startswith(f"{TAG_DL_BASE}/"):
                 return self._resolve(tag, url)
             raise AssertionError(f"unexpected url: {url}")
+
+        return dispatch
+
+    def route_text(self, html=None):
+        """``_request_text``（静态发布页兜底）的桩：默认 403，模拟配额耗尽时页面也拿不到。"""
+
+        def dispatch(url, **_kwargs):
+            self.calls.append(url)
+            if url.startswith(HTML_RELEASES_URL):
+                if html is None:
+                    raise http_error(403, body="API rate limit exceeded", url=url)
+                return self._resolve(html, url)
+            raise AssertionError(f"unexpected text url: {url}")
 
         return dispatch
 
@@ -139,6 +165,8 @@ class ExecutableUpdateTests(unittest.TestCase):
         self.data_dir.mkdir()
         self.manager = UpdateManager(self.app_dir, self.data_dir)
         self.stub = RequestStub()
+        # 静态发布页兜底默认不可用（403）：只有显式给 html 的用例才会走到解析逻辑。
+        self.manager._request_text = self.stub.route_text()
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -154,6 +182,12 @@ class ExecutableUpdateTests(unittest.TestCase):
         cache = self.data_dir / "update" / "releases.json"
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+        return cache
+
+    def write_cache_payload(self, payload):
+        cache = self.data_dir / "update" / "releases.json"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         return cache
 
     def cache_entry(self, tag, installable=True, notes=None):
@@ -236,7 +270,7 @@ class ExecutableUpdateTests(unittest.TestCase):
         result = self.manager._fetch_releases(force=True)
         self.assertEqual([item["tag"] for item in result], ["v2.1.7-beta", "v2.1.6-beta"])
         self.assertFalse(self.manager._releases_from_cache)
-        self.assertIn(API_RELEASES_URL, self.stub.calls)
+        self.assertTrue(any(url.startswith(API_RELEASES_URL) for url in self.stub.calls))
 
     def test_corrupt_cache_ignored_then_api(self):
         corrupt_payloads = [
@@ -256,7 +290,7 @@ class ExecutableUpdateTests(unittest.TestCase):
                 self.manager._request_json = self.stub.route(api=api_payload)
                 result = self.manager._fetch_releases()
                 self.assertEqual([item["tag"] for item in result], ["v2.1.7-beta"])
-                self.assertIn(API_RELEASES_URL, self.stub.calls)
+                self.assertTrue(any(url.startswith(API_RELEASES_URL) for url in self.stub.calls))
                 self.assertFalse(self.manager._releases_from_cache)
 
     def test_api_failure_falls_back_to_cache_even_when_stale(self):
@@ -267,11 +301,185 @@ class ExecutableUpdateTests(unittest.TestCase):
         result = self.manager._fetch_releases()
         self.assertEqual([item["tag"] for item in result], ["v2.1.6-beta"])
         self.assertTrue(self.manager._releases_from_cache)
+        # 回退不再把「已 fresh」刷成 6 小时：10 分钟后下一次检查要真的重试。
+        self.assertEqual(self.manager.releases_ttl_seconds, FALLBACK_TTL_SECONDS)
+        self.assertEqual(self.manager.releases_meta["source"], "cache")
+        self.assertTrue(self.manager.releases_meta["truncated"], "缓存兜底必须自报可能不全")
 
     def test_api_failure_without_cache_raises(self):
         self.manager._request_json = self.stub.route(api=http_error(403))
         with self.assertRaises(urllib.error.HTTPError):
             self.manager._fetch_releases()
+
+    # ---------- 三级数据源：静态发布页兜底 / 翻页 / 合并 ----------
+
+    def test_html_fallback_fills_version_gap_when_api_is_rate_limited(self):
+        """API 配额打满时，静态发布页必须把「最新一条」与旧缓存之间的断层补出来。"""
+        self.set_build("2.1.10-beta")
+        self.write_cache([self.cache_entry("v2.1.3-beta", notes=["缓存里的说明"])])
+        page_one = release_html_page([f"v2.1.{index}-beta" for index in range(10, 0, -1)])
+        page_two = release_html_page(["v2.1.0-beta"])
+        self.manager._request_json = self.stub.route(api=http_error(403, body="rate limit"))
+        self.manager._request_text = self.stub.route_text(
+            html=lambda url: page_one if url.endswith("page=1") else page_two
+        )
+
+        result = self.manager._fetch_releases(force=True)
+        versions = [item["version"] for item in result]
+
+        for expected in ("2.1.10-beta", "2.1.9-beta", "2.1.5-beta", "2.1.3-beta", "2.1.0-beta"):
+            self.assertIn(expected, versions, "断层必须被补上")
+        self.assertEqual(
+            versions,
+            sorted(versions, key=UpdateManager._release_version_key, reverse=True),
+            "合并结果必须按版本倒序",
+        )
+        self.assertEqual(len(versions), len(set(versions)), "同一版本只能出现一次")
+        self.assertEqual(self.manager.releases_meta["source"], "html")
+        self.assertTrue(self.manager._releases_from_cache)
+        self.assertTrue(self.manager.releases_meta["truncated"])
+        self.assertTrue(all(item["installable"] for item in result))
+        kept = next(item for item in result if item["version"] == "2.1.3-beta")
+        self.assertEqual(kept["release_notes"], ["缓存里的说明"], "有说明的一条不能被只有版本号的覆盖")
+
+    def test_html_parser_is_failure_safe(self):
+        self.assertEqual(self.manager._parse_release_tags_html(""), [])
+        self.assertEqual(self.manager._parse_release_tags_html(None), [])
+        self.assertEqual(self.manager._parse_release_tags_html("<html>没有发布页链接</html>"), [])
+        self.assertEqual(
+            self.manager._parse_release_tags_html(
+                '<a href="/yc883123/cat-chat/releases/tag/not-a-version">x</a>'
+            ),
+            [],
+            "结构变更/非版本链接不得被当成版本",
+        )
+        # 取页失败（默认桩 403）时返回空列表，绝不把异常抛给调用方。
+        self.assertEqual(self.manager._fetch_release_tags_html(), [])
+
+    def test_html_parser_reads_date_across_long_release_body(self):
+        """发布正文很长时日期仍要取到（实测一条正文能拉开 1 万多个字符）。"""
+        long_body = "正文" * 6000
+        html = (
+            '<section><h2><a href="/yc883123/cat-chat/releases/tag/v2.1.7-beta">x</a></h2>'
+            f'{long_body}<relative-time datetime="2026-10-24T00:00:00Z"></relative-time></section>'
+            '<section><h2><a href="/yc883123/cat-chat/releases/tag/v2.1.6-beta">x</a></h2>'
+            '<relative-time datetime="2026-10-20T00:00:00Z"></relative-time></section>'
+        )
+
+        items = self.manager._parse_release_tags_html(html)
+
+        self.assertEqual([item["version"] for item in items], ["2.1.7-beta", "2.1.6-beta"])
+        self.assertEqual(items[0]["published_at"], "2026-10-24T00:00:00Z")
+        self.assertEqual(items[1]["published_at"], "2026-10-20T00:00:00Z", "不得串到下一条发布的日期")
+
+    def test_merge_prefers_fuller_entry_and_dedupes(self):
+        base = {
+            "tag": "v2.1.7-beta",
+            "version": "2.1.7-beta",
+            "published_at": "",
+            "release_url": "",
+            "release_notes": [],
+            "installable": True,
+            "current": False,
+        }
+        html_entry = dict(base, published_at="2026-10-24T00:00:00Z")
+        cache_entry = dict(base, release_notes=["说明 A", "说明 B"], installable=False)
+
+        merged = UpdateManager._normalize_releases(
+            UpdateManager._merge_releases([base], [html_entry], [cache_entry])
+        )
+
+        self.assertEqual(len(merged), 1, "同一版本只能留一条")
+        item = merged[0]
+        self.assertEqual(item["release_notes"], ["说明 A", "说明 B"])
+        self.assertEqual(item["published_at"], "2026-10-24T00:00:00Z", "缺的字段要互相补齐")
+        self.assertTrue(item["installable"], "任一路来源可安装即可安装")
+
+    def test_api_pagination_until_short_page(self):
+        full_page = [api_release_item(f"v2.1.{index}") for index in range(99, -1, -1)]
+        last_page = [api_release_item("v2.2.0")]
+        requested = []
+
+        def handler(url):
+            requested.append(url)
+            return full_page if url.endswith("page=1") else last_page
+
+        self.manager._request_json = self.stub.route(api=handler)
+        result = self.manager._fetch_releases(force=True)
+        versions = [item["version"] for item in result]
+
+        self.assertIn("2.2.0", versions)
+        self.assertIn("2.1.99", versions)
+        self.assertIn("2.1.0", versions)
+        self.assertEqual(len(requested), 2, "满页后必须继续翻页")
+        self.assertFalse(self.manager.releases_meta["truncated"])
+
+    def test_cache_is_written_with_meta_and_legacy_array_still_reads(self):
+        self.manager._request_json = self.stub.route(api=api_releases("v2.1.7-beta"))
+        self.manager._fetch_releases(force=True)
+
+        cache = self.data_dir / "update" / "releases.json"
+        payload = json.loads(cache.read_text(encoding="utf-8"))
+        self.assertIsInstance(payload, dict, "新格式必须带来源/时间，前端据此显示来源条")
+        self.assertEqual(payload["source"], "api")
+        self.assertGreater(payload["saved_at"], 0)
+        self.assertEqual([item["tag"] for item in payload["items"]], ["v2.1.7-beta"])
+
+        # 老用户升级前写的是裸数组：必须继续可读，不得因格式变化丢列表。
+        cache.write_text(
+            json.dumps([self.cache_entry("v2.1.6-beta")], ensure_ascii=False), encoding="utf-8"
+        )
+        releases, meta = self.manager._read_releases_cache(cache)
+        self.assertEqual([item["tag"] for item in releases], ["v2.1.6-beta"])
+        self.assertTrue(meta["legacy"])
+
+    def test_cache_with_bad_saved_at_still_reads(self):
+        """缓存里的时间被改坏不能连累整份列表：按「时间未知」继续用。"""
+        cache = self.write_cache_payload(
+            {"saved_at": "oops", "source": "api", "items": [self.cache_entry("v2.1.6-beta")]}
+        )
+
+        releases, meta = self.manager._read_releases_cache(cache)
+
+        self.assertEqual([item["tag"] for item in releases], ["v2.1.6-beta"])
+        self.assertEqual(meta["saved_at"], 0)
+
+    def test_status_exposes_releases_meta(self):
+        self.assertEqual(self.manager.status()["releases_meta"]["source"], "none")
+        self.manager._request_json = self.stub.route(api=api_releases("v2.1.7-beta"))
+        self.manager._fetch_releases(force=True)
+        meta = self.manager.status()["releases_meta"]
+        self.assertEqual(meta["source"], "api")
+        self.assertGreater(meta["fetched_at"], 0)
+        self.assertFalse(meta["legacy_cache"])
+
+    def test_notes_for_tag_backfills_from_static_manifest(self):
+        self.manager.releases = [
+            {
+                "tag": "v2.1.5-beta",
+                "version": "2.1.5-beta",
+                "published_at": "2026-10-20T00:00:00Z",
+                "release_url": "",
+                "release_notes": [],
+                "installable": True,
+                "synthetic": False,
+                "current": False,
+            }
+        ]
+        self.manager._request_json = self.stub.route(
+            tag=lambda url: manifest_payload(version="2.1.5-beta")
+        )
+
+        payload = self.manager.notes_for_tag("v2.1.5-beta")
+
+        self.assertEqual(payload["release_notes"], ["更新说明 A", "更新说明 B"])
+        self.assertEqual(
+            self.manager.releases[0]["release_notes"],
+            ["更新说明 A", "更新说明 B"],
+            "取到说明后要回填，同一版本不重复请求",
+        )
+        with self.assertRaises(RuntimeError):
+            self.manager.notes_for_tag("v0.0.1")
 
     # ---------- check() 回退与合成条目 ----------
 
@@ -287,6 +495,7 @@ class ExecutableUpdateTests(unittest.TestCase):
         self.assertEqual(top["tag"], LATEST_TAG)
         self.assertTrue(top["installable"])
         self.assertFalse(top["current"])
+        self.assertTrue(top["synthetic"], "合成的 latest 必须自报不是真实发布，前端才能如实标注")
         # API 列表确实被请求并失败（无缓存），随后成功回退到 latest 静态清单
         self.assertTrue(any(url.startswith(API_RELEASES_URL) for url in self.stub.calls))
         latest_calls = [url for url in self.stub.calls if url.startswith(f"{LATEST_DL_BASE}/")]

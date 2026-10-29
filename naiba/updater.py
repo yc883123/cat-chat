@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable
@@ -30,6 +31,16 @@ EXECUTABLE_ASSET = "naiba-chat.exe"
 # ==================================================================================
 # 内存/磁盘发布列表在此时长内视为新鲜，命中即复用，减少对 GitHub API 配额的无谓消耗。
 CACHE_TTL_SECONDS = 6 * 3600
+# 只能用旧缓存兜底时的有效期：短到让下一次「检查更新」真的重试，而不是 6 小时不再问。
+FALLBACK_TTL_SECONDS = 10 * 60
+# 发布列表最多翻几页：API 每页 100 条（5 页覆盖现有全部 tag），
+# 静态发布页每页 10 条（3 页 = 30 条，足够补上一次版本跨度）。
+MAX_RELEASE_PAGES = 5
+HTML_RELEASE_PAGES = 3
+# 静态发布页里版本链接的仓库段：仓库改名后 GitHub 页面用新名，但旧地址仍可访问。
+_RELEASE_TAG_HREF_RE = re.compile(
+    r'href="/[^"/]+/(?:naiba-chat|cat-chat)/releases/tag/([^"?#]+)"'
+)
 # 合成发布条目的 tag；安装该条目时始终走 releases/latest/download 静态直连，不占 API 配额。
 LATEST_TAG = "latest"
 MANUAL_RELEASE_VERSION = (2, 0, 0)
@@ -126,6 +137,15 @@ class UpdateManager:
         self.latest: dict[str, Any] | None = None
         self.releases: list[dict[str, Any]] = []
         self.releases_loaded_at = 0
+        # 本次列表的有效期：实时来源用 6 小时，纯缓存兜底降到 10 分钟（见 FALLBACK_TTL_SECONDS）。
+        self.releases_ttl_seconds = CACHE_TTL_SECONDS
+        # 列表来源说明（前端「来源条」据此如实展示，不再让用户靠版本号跳变自己发现过期）。
+        self.releases_meta: dict[str, Any] = {
+            "source": "none",
+            "fetched_at": 0,
+            "legacy_cache": False,
+            "truncated": False,
+        }
         self.phase = "idle"
         self.error = ""
         self.checked_at = 0
@@ -344,6 +364,8 @@ class UpdateManager:
                 "manual_release_url": self.manual_release_url or MANUAL_RELEASE_URL,
                 "manual_update_message": ("2.0.0 属于大版本更新，请前往 GitHub Release 手动下载。" if self.manual_update_available else ""),
                 "releases": list(self.releases),
+                # 列表是哪来的 / 什么时候拉的 / 是否可能不全：前端「来源条」直接展示。
+                "releases_meta": dict(self.releases_meta),
                 "pending_verification": self.pending_verification,
                 "source_dirty": self._source_dirty(),
                 # 下载进度（前端进度条 / 卡死提示）与取消可用性。
@@ -438,25 +460,45 @@ class UpdateManager:
             "release_notes": release_notes,
         }
 
-    def _load_cached_releases(self, cache: Path) -> list[dict[str, Any]] | None:
-        """读取并结构校验磁盘发布列表缓存；缺失、损坏、空或字段异常的缓存视为不存在。"""
+    def _read_releases_cache(self, cache: Path) -> tuple[list[dict[str, Any]] | None, dict[str, Any]]:
+        """读取磁盘发布列表缓存，返回 ``(列表, 元信息)``。
+
+        新格式写成 ``{"saved_at", "source", "count", "items"}``；老版本写的是裸数组，
+        按 legacy 识别后照旧解析——升级用户不能因为格式变化丢掉历史版本列表。
+        """
+        meta: dict[str, Any] = {"legacy": False, "saved_at": 0, "source": "cache"}
         try:
             if not cache.is_file():
-                return None
+                return None, meta
             value = json.loads(cache.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return None
+            return None, meta
+        if isinstance(value, dict) and isinstance(value.get("items"), list):
+            try:
+                meta["saved_at"] = int(value.get("saved_at") or 0)
+            except (TypeError, ValueError):
+                meta["saved_at"] = 0
+            meta["source"] = str(value.get("source") or "cache")
+            value = value["items"]
+        elif isinstance(value, list):
+            meta["legacy"] = True
+            try:
+                meta["saved_at"] = int(cache.stat().st_mtime)
+            except OSError:
+                pass
+        else:
+            return None, meta
         if not isinstance(value, list) or not value:
-            return None
+            return None, meta
         releases: list[dict[str, Any]] = []
         for item in value:
             if not isinstance(item, dict):
-                return None
+                return None, meta
             tag = str(item.get("tag") or "")
             version = str(item.get("version") or "")
             installable = item.get("installable")
             if not tag or not version or not isinstance(installable, bool):
-                return None
+                return None, meta
             raw_notes = item.get("release_notes")
             if isinstance(raw_notes, str):
                 release_notes = [line.strip() for line in raw_notes.splitlines() if line.strip()]
@@ -472,10 +514,31 @@ class UpdateManager:
                     "release_url": str(item.get("release_url") or ""),
                     "release_notes": release_notes[:50],
                     "installable": installable,
+                    "synthetic": False,
                     "current": False,
                 }
             )
-        return self._normalize_releases(releases) or None
+        return (self._normalize_releases(releases) or None), meta
+
+    def _load_cached_releases(self, cache: Path) -> list[dict[str, Any]] | None:
+        """只要列表的兼容入口（元信息由 ``_read_releases_cache`` 提供）。"""
+        return self._read_releases_cache(cache)[0]
+
+    def _write_releases_cache(
+        self, cache: Path, releases: list[dict[str, Any]], source: str
+    ) -> None:
+        """带 meta 落盘；写失败不影响本次结果（缓存只是加速与兜底）。"""
+        payload = {
+            "saved_at": int(time.time()),
+            "source": source,
+            "count": len(releases),
+            "items": releases,
+        }
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
 
     def _mark_current(self, releases: list[dict[str, Any]]) -> list[dict[str, Any]]:
         current_version = self.build.get("version", "")
@@ -488,40 +551,12 @@ class UpdateManager:
             )
         return releases
 
-    def _fetch_releases(self, force: bool = False) -> list[dict[str, Any]]:
-        """返回发布列表。优先复用 6 小时内的内存/磁盘缓存；API 失败时回退读取缓存。"""
-        cache = self.data_dir / "update" / "releases.json"
-        if not force and self.releases_loaded_at and time.time() - self.releases_loaded_at < CACHE_TTL_SECONDS:
-            return self.releases
-        if not force and not self.releases_loaded_at:
-            # 启动场景：磁盘缓存较新则直接复用，避免无谓请求 API 消耗配额。
-            try:
-                cache_fresh = cache.is_file() and time.time() - cache.stat().st_mtime < CACHE_TTL_SECONDS
-            except OSError:
-                cache_fresh = False
-            if cache_fresh:
-                cached = self._load_cached_releases(cache)
-                if cached is not None:
-                    self.releases = self._mark_current(cached)
-                    self.releases_loaded_at = int(time.time())
-                    self._releases_from_cache = True
-                    return self.releases
-        try:
-            url = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=100"
-            data = self._request_json(url, opener=self._open)
-        except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
-            # API 限流/网络抖动时回退读缓存，保留历史版本下拉项。
-            cached = self._load_cached_releases(cache)
-            if cached is not None:
-                self.releases = self._mark_current(cached)
-                self.releases_loaded_at = int(time.time())
-                self._releases_from_cache = True
-                return self.releases
-            raise
-        if not isinstance(data, list):
-            raise RuntimeError("更新服务器返回了无效数据")
+    @staticmethod
+    def _parse_api_releases(data: list[Any]) -> list[dict[str, Any]]:
         releases: list[dict[str, Any]] = []
         for item in data:
+            if not isinstance(item, dict):
+                continue
             tag = str(item.get("tag_name") or "")
             if not tag:
                 continue
@@ -535,23 +570,244 @@ class UpdateManager:
                     "release_url": str(item.get("html_url") or ""),
                     "release_notes": _release_body_to_notes(item.get("body")),
                     "installable": MANIFEST_ASSET in asset_names and EXECUTABLE_ASSET in asset_names,
+                    "synthetic": False,
                     "current": False,
                 }
             )
-        releases = self._normalize_releases(releases)
-        self._mark_current(releases)
-        try:
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps(releases, ensure_ascii=False), encoding="utf-8")
-        except OSError:
-            pass
-        self.releases = releases
-        self.releases_loaded_at = int(time.time())
-        self._releases_from_cache = False
         return releases
 
+    def _fetch_releases_api(self) -> tuple[list[dict[str, Any]], bool]:
+        """翻页拉取 API 发布列表；返回 ``(列表, 是否因页数上限可能被截断)``。"""
+        base = f"https://api.github.com/repos/{REPOSITORY}/releases?per_page=100"
+        releases: list[dict[str, Any]] = []
+        for page in range(1, MAX_RELEASE_PAGES + 1):
+            data = self._request_json(f"{base}&page={page}", opener=self._open)
+            if not isinstance(data, list):
+                raise RuntimeError("更新服务器返回了无效数据")
+            releases.extend(self._parse_api_releases(data))
+            if len(data) < 100:
+                return releases, False
+        return releases, True
+
+    def _request_text(self, url: str, timeout: int = 20) -> str:
+        """取纯文本/HTML（兜底数据源用）；与 ``_request_json`` 共用「更新代理」出口。"""
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml",
+                "User-Agent": "naiba-chat-updater",
+            },
+        )
+        with self._open(request, timeout) as response:
+            raw = response.read()
+        return raw.decode("utf-8", errors="replace")
+
+    def _parse_release_tags_html(self, html: str) -> list[dict[str, Any]]:
+        """从 github.com 静态发布页解析版本条目；解析不到返回空列表，绝不抛。"""
+        if not isinstance(html, str) or not html:
+            return []
+        releases: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        matches = list(_RELEASE_TAG_HREF_RE.finditer(html))
+        for index, match in enumerate(matches):
+            try:
+                tag = urllib.parse.unquote(match.group(1)).strip()
+            except (TypeError, ValueError):
+                continue
+            if not tag or tag in seen:
+                continue
+            version = tag.lstrip("v")
+            if self._release_version_key(version) is None:
+                continue
+            seen.add(tag)
+            # 日期是 best-effort：只看「本条发布」的范围（到下一个版本链接为止）。
+            # 发布正文可以很长（实测一条正文就能拉开 1 万多个字符），固定窗口会取不到日期；
+            # 以下一个版本链接为边界既能跨过长正文，也不会串到下一版的日期。
+            boundary = (
+                matches[index + 1].start()
+                if index + 1 < len(matches)
+                else min(len(html), match.end() + 40000)
+            )
+            date_match = re.search(r'datetime="([^"]+)"', html[match.end(): boundary])
+            releases.append(
+                {
+                    "tag": tag,
+                    "version": version,
+                    "published_at": date_match.group(1) if date_match else "",
+                    "release_url": f"https://github.com/{REPOSITORY}/releases/tag/{tag}",
+                    # 静态页面只有版本号，没有资产清单：按版本号判定可自动更新（>= 2.0.1）。
+                    "release_notes": [],
+                    "installable": self._is_auto_update_version(version),
+                    "synthetic": False,
+                    "current": False,
+                }
+            )
+        return releases
+
+    def _fetch_release_tags_html(self, pages: int = HTML_RELEASE_PAGES) -> list[dict[str, Any]]:
+        """兜底数据源：github.com 静态发布页不受 API 配额限制，按页取版本号。
+
+        只做兜底：任何一页失败或结构变化都静默跳过，绝不把异常抛给调用方，也不污染缓存。
+        """
+        releases: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for page in range(1, max(1, int(pages)) + 1):
+            url = f"https://github.com/{REPOSITORY}/releases?page={page}"
+            try:
+                html = self._request_text(url)
+            except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError):
+                continue
+            page_items = [
+                item for item in self._parse_release_tags_html(html) if item["tag"] not in seen
+            ]
+            if not page_items:
+                break
+            seen.update(item["tag"] for item in page_items)
+            releases.extend(page_items)
+            if len(page_items) < 10:
+                break
+        return releases
+
+    @staticmethod
+    def _release_info_score(release: dict[str, Any]) -> tuple[int, int, int, int]:
+        """合并时挑「信息更全」的一条：有更新说明 > 说明更多 > 有发布日期 > 可安装。"""
+        notes = release.get("release_notes") or []
+        return (
+            1 if notes else 0,
+            len(notes),
+            1 if release.get("published_at") else 0,
+            1 if release.get("installable") else 0,
+        )
+
+    @classmethod
+    def _merge_releases(cls, *groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """按版本去重合并多路来源；同一版本保留信息更全的一条，缺的字段互相补齐。"""
+        merged: dict[str, dict[str, Any]] = {}
+        for group in groups:
+            for release in group or []:
+                if not isinstance(release, dict):
+                    continue
+                version = str(release.get("version") or "").strip()
+                if not version:
+                    continue
+                key = version.lower()
+                candidate = dict(release)
+                candidate["current"] = False
+                candidate.setdefault("synthetic", False)
+                existing = merged.get(key)
+                if existing is None:
+                    merged[key] = candidate
+                    continue
+                best, other = (
+                    (candidate, existing)
+                    if cls._release_info_score(candidate) > cls._release_info_score(existing)
+                    else (existing, candidate)
+                )
+                merged_entry = {**best}
+                if not merged_entry.get("release_notes") and other.get("release_notes"):
+                    merged_entry["release_notes"] = other["release_notes"]
+                for key_name in ("published_at", "release_url"):
+                    if not merged_entry.get(key_name) and other.get(key_name):
+                        merged_entry[key_name] = other[key_name]
+                # 任一路来源认为可安装即可安装：只有 API 能给出真实资产清单，
+                # 静态页按版本号判定，旧缓存是上一次 API 的结论——取并集不会凭空造出资产。
+                merged_entry["installable"] = bool(
+                    best.get("installable") or other.get("installable")
+                )
+                merged[key] = merged_entry
+        return list(merged.values())
+
+    def _set_releases_meta(
+        self,
+        source: str,
+        *,
+        fetched_at: int = 0,
+        legacy_cache: bool = False,
+        truncated: bool = False,
+    ) -> None:
+        self.releases_meta = {
+            "source": source,
+            "fetched_at": int(fetched_at or 0),
+            "legacy_cache": bool(legacy_cache),
+            "truncated": bool(truncated),
+        }
+
+    def _fetch_releases(self, force: bool = False) -> list[dict[str, Any]]:
+        """返回发布列表。
+
+        数据源按可用性合并：GitHub API（含翻页）→ 静态发布页（配额打满时兜底）→ 磁盘缓存。
+        任何一路拿到的条目都先按版本去重，避免「最新一条 + 5 天前旧快照」之间的断层。
+        """
+        cache = self.data_dir / "update" / "releases.json"
+        if not force and self.releases_loaded_at and time.time() - self.releases_loaded_at < self.releases_ttl_seconds:
+            return self.releases
+        if not force and not self.releases_loaded_at:
+            # 启动场景：磁盘缓存较新则直接复用，避免无谓请求 API 消耗配额。
+            try:
+                cache_fresh = cache.is_file() and time.time() - cache.stat().st_mtime < CACHE_TTL_SECONDS
+            except OSError:
+                cache_fresh = False
+            if cache_fresh:
+                cached, cache_meta = self._read_releases_cache(cache)
+                if cached is not None:
+                    self.releases = self._mark_current(cached)
+                    self.releases_loaded_at = int(time.time())
+                    self._releases_from_cache = True
+                    self.releases_ttl_seconds = CACHE_TTL_SECONDS
+                    self._set_releases_meta(
+                        "cache",
+                        fetched_at=cache_meta.get("saved_at", 0),
+                        legacy_cache=cache_meta.get("legacy", False),
+                        truncated=True,
+                    )
+                    return self.releases
+        api_error: Exception | None = None
+        api_releases: list[dict[str, Any]] = []
+        api_truncated = False
+        try:
+            api_releases, api_truncated = self._fetch_releases_api()
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError, ValueError) as exc:
+            api_error = exc
+        html_releases: list[dict[str, Any]] = []
+        if not api_releases:
+            # API 限流/网络抖动时补静态发布页：不受配额限制，解析失败静默返回空列表。
+            html_releases = self._fetch_release_tags_html()
+        cached, cache_meta = self._read_releases_cache(cache)
+        groups = [group for group in (api_releases, html_releases, cached or []) if group]
+        if not groups:
+            if api_error is not None:
+                raise api_error
+            raise RuntimeError("更新服务器返回了无效数据")
+        merged = self._normalize_releases(self._merge_releases(*groups))
+        if not merged:
+            if api_error is not None:
+                raise api_error
+            raise RuntimeError("更新服务器返回了无效数据")
+        self._mark_current(merged)
+        source = "api" if api_releases else ("html" if html_releases else "cache")
+        if api_releases or html_releases:
+            # 实时来源才回写缓存；纯缓存回退不刷新内容与 mtime（否则过期快照会一直「装新」）。
+            self._write_releases_cache(cache, merged, source)
+        self.releases = merged
+        self.releases_loaded_at = int(time.time())
+        self._releases_from_cache = source != "api"
+        self.releases_ttl_seconds = (
+            CACHE_TTL_SECONDS if api_releases or html_releases else FALLBACK_TTL_SECONDS
+        )
+        self._set_releases_meta(
+            source,
+            fetched_at=int(time.time()) if api_releases or html_releases else cache_meta.get("saved_at", 0),
+            legacy_cache=bool(cache_meta.get("legacy")),
+            truncated=bool(api_truncated) if api_releases else True,
+        )
+        return merged
+
     def _release_from_manifest(self, manifest: dict[str, Any]) -> dict[str, Any]:
-        """依据已校验的 latest 清单生成合成的可安装发布条目，供下拉框一键安装。"""
+        """依据已校验的 latest 清单生成合成的可安装发布条目，供版本列表一键安装。
+
+        ``synthetic`` 标出「这不是一条真实发布」：它来自静态直连清单而不是发布列表，
+        前端据此如实标注「最新 · 来自直连清单」，不让它假装与其它条目同源。
+        """
         version = str(manifest.get("version") or "")
         return {
             "tag": LATEST_TAG,
@@ -560,7 +816,45 @@ class UpdateManager:
             "release_url": str(manifest.get("release_url") or ""),
             "release_notes": manifest.get("release_notes", []),
             "installable": True,
+            "synthetic": True,
             "current": version == self.build.get("version", "") and bool(manifest.get("commit")) and manifest.get("commit") == self.build.get("commit", ""),
+        }
+
+    def notes_for_tag(self, tag: str) -> dict[str, Any]:
+        """按需补齐某个版本的更新说明（列表来自静态发布页时没有说明）。
+
+        走 ``releases/download/{tag}/naiba-chat-update.json`` 静态直连，不消耗 API 配额；
+        拿到后回填内存条目，同一版本不重复请求。
+        """
+        target = str(tag or "").strip()
+        if not target:
+            raise RuntimeError("目标版本不存在")
+        with self.lock:
+            release = next((item for item in self.releases if item.get("tag") == target), None)
+        if release is None:
+            raise RuntimeError("目标版本不存在")
+        notes = [
+            str(note).strip()
+            for note in (release.get("release_notes") or [])
+            if str(note).strip()
+        ]
+        if not notes:
+            if target == LATEST_TAG:
+                raise RuntimeError("该版本没有更新说明")
+            manifest = self._fetch_manifest_for_tag(target)
+            notes = [
+                str(note).strip()
+                for note in (manifest.get("release_notes") or [])
+                if str(note).strip()
+            ]
+            with self.lock:
+                release["release_notes"] = notes
+        return {
+            "tag": target,
+            "version": str(release.get("version") or ""),
+            "published_at": str(release.get("published_at") or ""),
+            "release_url": str(release.get("release_url") or ""),
+            "release_notes": notes,
         }
 
     def _manifest_base(self, tag: str) -> str:
@@ -629,7 +923,7 @@ class UpdateManager:
 
     def check(self, force: bool = False) -> dict[str, Any]:
         with self.lock:
-            if not force and self.checked_at and time.time() - self.checked_at < 6 * 3600:
+            if not force and self.checked_at and time.time() - self.checked_at < self.releases_ttl_seconds:
                 return self.status()
             self.phase = "checking"
             self.error = ""

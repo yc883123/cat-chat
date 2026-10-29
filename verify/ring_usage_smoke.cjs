@@ -60,7 +60,13 @@ const signal = (step) => { if (STEP) fs.writeFileSync(STEP, String(step)); };
   });
   const pageErrors = [];
   page.on('pageerror', (err) => pageErrors.push(`pageerror: ${err.message}`));
-  page.on('console', (msg) => { if (msg.type() === 'error') pageErrors.push(`console.error: ${msg.text()}`); });
+  // 浏览器自动请求 /favicon.ico，源码实例没有这条路由（HTTP 层 404），控制台必然出现一条
+  // 「Failed to load resource」。那是浏览器噪音、不是应用错误——与 browser_smoke.cjs 同口径排除。
+  page.on('console', (msg) => {
+    if (msg.type() !== 'error') return;
+    if (/Failed to load resource/.test(msg.text())) return;
+    pageErrors.push(`console.error: ${msg.text()}`);
+  });
 
   try {
     await page.goto(`${BASE}/`, { waitUntil: 'load', timeout: 20000 });

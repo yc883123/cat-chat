@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 3.9.9-beta
-  RELEASE_TAG: v3.9.9-beta
+  RELEASE_VERSION: 3.9.10-beta
+  RELEASE_TAG: v3.9.10-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-3.9.9-beta-windows-x64
+  PACKAGE_NAME: cat-chat-3.9.10-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-3.9.9-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-3.9.10-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -121,11 +121,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 3.9.9 Beta release
+      - name: Publish 3.9.10 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 3.9.9 Beta
+          name: Cat Chat 3.9.10 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -135,11 +135,11 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 3.9.9 Beta：上下文圆环在回复过程中就显示真实进度，长任务不再漏掉自动整理
-            ① 实时进度不再缺窗口信息：以前回复还在进行时，用量事件不带上下文窗口，圆环只能用历史消息估算，百分比可能明显偏低；现在每完成一次模型请求就把本轮窗口一起推送，回复期间圆环显示的就是真实进度
-            ② 步间自动整理更准：判断「该不该整理」改用最近一次请求的真实输入量，而不是本轮折叠估算值。长会话历史多、缓存命中高时，估算值偏小会让该整理的时候不整理，任务跑到一半撞上限
-            ③ 估算与真实值取大者：估算和真实输入量两个口径都参与判断，任一达到阈值就整理，不会因为一个口径偏低而漏判；多次请求的输入也不再累加，避免虚高
-            ④ 整理没做成时能查到原因：此前只提示「上下文整理没有完成」，现在事件里带上内部原因码，排障时不用再翻日志反推
-            ⑤ 验证：全量单测 3452 项通过；隔离实例基础冒烟（桌面 + 375px 手机）通过；上下文圆环与弹窗提醒冒烟全通过
-            ⑥ 边界：请求发给模型的内容一处未改，整理阈值默认值与设置项不变；本次只补事件字段与阈值取数口径
-            Cat Chat 3.9.9 Beta Windows build。本版让上下文圆环在回复过程中就显示真实进度——实时用量事件补上了本轮窗口，不再只按历史消息估算；同时把步间自动整理的判据改成最近一次请求的真实输入量，长会话缓存命中高时也不会漏掉整理。全量单测 **3452** 通过。
+            Cat Chat 3.9.10 Beta：自动整理更可靠——不再误拒合格的交接总结，失败也不再盲目重试
+            ① 交接总结不再被误拒：以前要求模型按固定九个分区、一字不差地输出，措辞稍有不同就被判不合格，整轮整理失败；现在只要求把该交代的说清楚（目标、约定、进度、欠账、关键路径、下一步），组织方式由模型自定
+            ② 整理请求超出窗口能自救：总结请求本身偶尔会超出模型窗口，以前直接失败；现在会自动缩小要总结的范围再试（最多两次），被缩小出去的原文一条不丢，仍原样保留在对话里
+            ③ 不再盲目重试：其他原因导致的整理失败只尝试一次，不会拿着同样的请求反复花钱；点「停止」随时能中止整理
+            ④ 失败可查原因：整理失败时，事件里带上每次尝试的请求规模和失败类别，排障不用再猜
+            ⑤ 验证：全量单测 3469 项通过；真实供应商实测（整理前稳态缓存命中 99.45%、整理后稳定 95–96%、摘要一次尝试即通过）；未触发整理时，发给模型的内容逐字节不变
+            ⑥ 边界：整理阈值默认值与设置项不变；聊天记录依旧一条不删，整理卡可随时撤销
+            Cat Chat 3.9.10 Beta Windows build。本版修复长对话自动整理连续失败的问题——摘要校验不再卡固定格式，整理请求超出窗口时自动缩小范围重试，其他失败不再盲目重试。全量单测 **3469** 通过。

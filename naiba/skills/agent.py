@@ -1326,6 +1326,12 @@ class SkillAgent:
                 # 实时用量：每完成一次请求即推送最新汇总（最后一次请求口径的命中率 +
                 # 累计请求次数、本次请求耗时与逐次明细），前端在流式末尾的用量框就地更新。
                 live = self._summarize_usage(usages)
+                if isinstance(run_context, dict):
+                    live["model_key"] = str(run_context.get("model_key") or "")
+                    live["context_limit"] = int(run_context.get("context_limit") or 0)
+                    live["context_limit_source"] = str(
+                        run_context.get("context_limit_source") or "unknown"
+                    )
                 event({"type": "usage", "usage": live})
                 logger.info(
                     "[per-request] step=%s in=%s cached=%s out=%s appended=%s",

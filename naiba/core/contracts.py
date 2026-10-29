@@ -54,6 +54,7 @@ RUN_CONTEXT_KEYS: tuple[str, ...] = (
     # callable(messages, trace_start, limit, budget, used) -> {"history", "limit", "budget"}。
     # skills/agent 在步与步之间调用；返回 history 为空 = 本步不整理，照常发请求。
     "compact_context",
+    "model_key", "context_limit", "context_limit_source",
 )
 
 # 运行期保持 dict 形态（零行为变化）；"带默认值/校验"经由工厂与校验函数落地，
@@ -81,6 +82,9 @@ def default_run_context() -> dict[str, Any]:
         "mark_interjections_consumed": None,
         # 自动整理入口（run/chat 只给非 aux 的 Run 置位）：缺省 None = 循环内不整理。
         "compact_context": None,
+        "model_key": "",
+        "context_limit": 0,
+        "context_limit_source": "unknown",
         "mcp_active": False,
         "trace_messages": [],
         "plan_exit_content": "",
@@ -251,6 +255,9 @@ class RunContext(TypedDict, total=False):
     context_reset: dict[str, Any]    # reset_context 的本轮重置请求 → 消息 metadata.session_start
     turn_index: int                  # 本轮是第几个用户轮次（1 起）→ 图片批标签「第N轮装载」
     compact_context: Any             # Agent 循环内自动整理入口（callable；缺省 None = 本步不整理）
+    model_key: str                   # 本轮模型键（供实时用量事件标记）
+    context_limit: int                # 本轮有效窗口（profile 或类型回退）
+    context_limit_source: str         # 窗口来源（profile / local_default / unknown）
 
 
 class EventType(str, Enum):
@@ -435,7 +442,7 @@ EVENT_PAYLOAD_KEYS: dict[str, frozenset[str] | None] = {
     "run_failed": frozenset({"error"}),
     "context_full": frozenset({"limit", "used", "budget"}),
     # 自动整理：action=hint / started / compacted / failed；region_messages/freed_est 为摘要信息。
-    "compaction": frozenset({"action", "region_messages", "freed_est", "used", "limit", "message"}),
+    "compaction": frozenset({"action", "region_messages", "freed_est", "used", "limit", "message", "reason"}),
     # done **不带** `message`：终态消息由前端收尾时重载会话（GET /api/conversations/<id>）
     # 拿到，事件里带着它等于把整份消息（含 metadata.trace，实测最长 318KB）写进 run_events
     # 再被终态瘦身删掉。这里只放"只有事件能给的即时动作"字段。

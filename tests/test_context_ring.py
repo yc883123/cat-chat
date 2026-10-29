@@ -49,6 +49,12 @@ class ContextRingRefreshTests(unittest.TestCase):
         )
         self.assertIn("usageMarkup(event.usage", body, "消息尾端用量框仍要更新")
 
+    def test_live_usage_event_has_context_window_metadata(self) -> None:
+        source = (ROOT / "naiba" / "run" / "chat.py").read_text(encoding="utf-8")
+        context = _function_body(source, '"confirmation_ui": True,')
+        for key in ('"model_key": model_key', '"context_limit":', '"context_limit_source":'):
+            self.assertIn(key, context, f"run_context 必须给实时 usage 提供 {key}")
+
     def test_context_usage_state_has_single_writer(self) -> None:
         source = _read("03-media.js")
         writes = re.findall(r"state\.contextUsage\s*=", source)

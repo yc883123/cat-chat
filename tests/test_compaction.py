@@ -648,6 +648,46 @@ class CompactionHookTests(unittest.TestCase):
         self.assertEqual(result, {})
         mixin.app.models.complete.assert_not_called()
 
+    def test_agent_compaction_uses_latest_reported_input_without_accumulating(self):
+        self.mixin.app.config.data = {"auto_compaction": {"mode": "auto", "threshold_percent": 70}}
+        self.mixin._maybe_compact_context = mock.Mock(return_value={})
+        run = {}
+        result = self.mixin._compact_agent_context(
+            run=run, snapshot={"allowed_tools": []}, conversation_id="c1", conv_kind="main",
+            frozen_conversation={}, messages=[{"role": "system"}, {"role": "user", "content": "x"}],
+            trace_start=1, profile={"context_window": 8000, "kind": "online"},
+            model_key="online:probe", model_name="probe", pdf_tools=False, video_tools=False,
+            limit=8000, budget=7000, used=1200, latest_input_tokens=6000,
+            event=mock.Mock(), cancel_event=mock.Mock(is_set=lambda: False),
+        )
+        self.assertEqual(result, {})
+        self.mixin._maybe_compact_context.assert_called_once()
+        override = self.mixin._maybe_compact_context.call_args.kwargs["usage_override"]
+        self.assertEqual(override["used"], 6000)
+        self.assertEqual(override["limit"], 8000)
+        self.assertEqual(override["budget"], 7000)
+        self.assertTrue(run["_compaction_attempted"])
+
+    def test_compaction_failure_event_includes_internal_reason(self):
+        self.mixin.app.config.data = {"auto_compaction": {"mode": "auto", "threshold_percent": 30}}
+        self.mixin.app.models.complete.return_value = GOOD_SUMMARY
+        self.mixin.app.storage.merge_message_metadata.return_value = False
+        event = mock.Mock()
+        result = self.mixin._compact_agent_context(
+            run={"conversation_messages": self.rows}, snapshot={"allowed_tools": []},
+            conversation_id="c1", conv_kind="main", frozen_conversation={},
+            messages=[{"role": "system"}, *self.history], trace_start=1,
+            profile={"context_window": 8000, "kind": "online"},
+            model_key="online:probe-te", model_name="probe-default", pdf_tools=True,
+            video_tools=True, limit=8000, budget=7000, used=6000,
+            event=event, cancel_event=mock.Mock(is_set=lambda: False),
+        )
+        self.assertEqual(result, {})
+        payload = next(call.args[0] for call in event.call_args_list
+                       if call.args[0].get("action") == "failed")
+        self.assertEqual(payload["reason"], "marker_write_failed")
+        self.assertIn("本轮将沿用原上下文继续", payload["message"])
+
     def test_auto_mode_uses_same_profile_and_reports_rebuild(self):
         self.mixin.app.config.data = {"auto_compaction": {"mode": "auto", "threshold_percent": 30}}
         self.mixin.app.storage.merge_message_metadata.return_value = True

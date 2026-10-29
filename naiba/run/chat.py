@@ -977,6 +977,19 @@ class ConversationRunMixin:
                 "turn_index": _turn_index_for_run(snapshot, run),
                 "event_sink": event,
                 "confirmation_ui": True,
+                "model_key": model_key,
+                "context_limit": max(
+                    0, int(profile.get("context_window") or fallback_context_window(profile)),
+                ),
+                "context_limit_source": (
+                    str(profile.get("context_window_source") or "unknown")
+                    if int(profile.get("context_window") or 0)
+                    else (
+                        "local_default"
+                        if str(profile.get("kind") or "").strip().lower() == "local"
+                        else "unknown"
+                    )
+                ),
             }
             if conv_kind != "aux":
                 run_context["compact_context"] = lambda messages, trace_start, limit, budget, used: self._compact_agent_context(
@@ -986,6 +999,9 @@ class ConversationRunMixin:
                     model_key=model_key, model_name=model_name,
                     pdf_tools=pdf_tools_enabled, video_tools=video_tools_enabled,
                     limit=limit, budget=budget, used=used, event=event, cancel_event=cancel_event,
+                    latest_input_tokens=int(
+                        ((getattr(self.app.models, "last_usage", {}) or {}).get("input_tokens") or 0)
+                    ),
                 )
             worker = SkillAgent(
                 self.app.catalog,
@@ -1361,20 +1377,21 @@ class ConversationRunMixin:
         conv_kind: str, frozen_conversation: dict[str, Any], messages: list[dict[str, Any]],
         trace_start: int, profile: dict[str, Any], model_key: str, model_name: str,
         pdf_tools: bool, video_tools: bool, limit: int, budget: int, used: int,
-        event: Any, cancel_event: threading.Event,
+        event: Any, cancel_event: threading.Event, latest_input_tokens: int = 0,
     ) -> dict[str, Any]:
         """Agent 下一次模型请求前整理持久化历史，并返回重建后的历史前缀。"""
         from naiba.core import compaction as compaction_mod
 
         settings = compaction_mod.resolve_settings(
             (getattr(self.app.config, "data", {}) or {}).get("auto_compaction"))
+        effective_used = max(int(used), max(0, int(latest_input_tokens or 0)))
         if not compaction_mod.should_compact(
-            settings, used=used, limit=limit, reserve=max(0, int(limit) - int(budget)),
+            settings, used=effective_used, limit=limit, reserve=max(0, int(limit) - int(budget)),
         ):
             return {}
         mode = compaction_mod.effective_mode(settings, frozen_conversation)
         if mode == compaction_mod.MODE_REMIND:
-            event({"type": "compaction", "action": "hint", "used": used, "limit": limit})
+            event({"type": "compaction", "action": "hint", "used": effective_used, "limit": limit})
             return {}
         if mode != compaction_mod.MODE_AUTO:
             return {}
@@ -1390,7 +1407,11 @@ class ConversationRunMixin:
                 model_key=model_key, model_name=model_name,
                 pdf_tools=pdf_tools, video_tools=video_tools,
                 event=event, cancel_event=cancel_event,
-                usage_override={"used": used, "limit": limit, "budget": budget},
+                usage_override={
+                    "used": effective_used,
+                    "limit": limit,
+                    "budget": budget,
+                },
             )
         except Exception as exc:  # noqa: BLE001 - 整理失败不应丢弃当前轮轨迹
             if cancel_event.is_set():
@@ -1398,6 +1419,7 @@ class ConversationRunMixin:
             event({
                 "type": "compaction", "action": "failed",
                 "message": f"上下文整理没有完成（{type(exc).__name__}），本轮将沿用原上下文继续。",
+                "reason": type(exc).__name__,
             })
             return {}
         if not result.get("rebuilt"):
@@ -1491,6 +1513,7 @@ class ConversationRunMixin:
         event({
             "type": "compaction", "action": "failed",
             "message": "上下文整理没有完成，本轮将沿用原上下文继续。",
+            "reason": str(result.get("reason") or "unknown"),
         })
         return {}
 

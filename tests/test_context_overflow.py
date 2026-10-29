@@ -429,6 +429,9 @@ class LoopContextGuardTests(unittest.TestCase):
 
         runtime = _Runtime()
         run_context = {
+            "model_key": "online:probe",
+            "context_limit": 128000,
+            "context_limit_source": "profile",
             "compact_context": lambda messages, trace_start, limit, budget, used: {
                 "history": [{"role": "user", "content": "摘要中已保留当前问题"}],
                 "limit": limit,
@@ -446,6 +449,12 @@ class LoopContextGuardTests(unittest.TestCase):
         )
         self.assertEqual(response, "done")
         self.assertEqual(len(calls), 3)
+        usage_events = [item["usage"] for item in events if item.get("type") == "usage"]
+        self.assertEqual(len(usage_events), 3)
+        self.assertTrue(all(item["model_key"] == "online:probe" for item in usage_events))
+        self.assertTrue(all(item["context_limit"] == 128000 for item in usage_events))
+        self.assertTrue(all(item["context_limit_source"] == "profile" for item in usage_events))
+        self.assertNotIn("context_limit", calls[0][0])
         compacted_users = [item for item in calls[1] if item.get("role") == "user"]
         self.assertEqual(compacted_users[0]["content"], "摘要中已保留当前问题")
         self.assertEqual(sum(item["content"] == "摘要中已保留当前问题" for item in compacted_users), 1)

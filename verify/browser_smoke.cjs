@@ -16,8 +16,18 @@ async function runViewport(browser, vp) {
   const errors = [];
   const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height } });
   page.on('pageerror', (err) => errors.push(`pageerror: ${err.message}`));
+  // 浏览器会自己去请求 /favicon.ico，而源码实例没有这条路由（HTTP 层 404）。
+  // 那是浏览器的资源噪音、不是应用错误：按 URL 排除，其余 4xx/5xx 仍照旧判红。
+  page.on('response', (response) => {
+    if (response.status() >= 400 && !response.url().endsWith('/favicon.ico')) {
+      errors.push(`HTTP ${response.status()} ${response.url()}`);
+    }
+  });
   page.on('console', (msg) => {
-    if (msg.type() === 'error') errors.push(`console.error: ${msg.text()}`);
+    if (msg.type() !== 'error') return;
+    // 「Failed to load resource」由上面的 response 监听按 URL 统计，这里只收应用自身打印的错误。
+    if (/Failed to load resource/.test(msg.text())) return;
+    errors.push(`console.error: ${msg.text()}`);
   });
   try {
     await page.goto(`${BASE}/`, { waitUntil: 'load', timeout: 20000 });

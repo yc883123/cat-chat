@@ -146,9 +146,12 @@ export function sidebarRowHtml(row) {
   // 「已收藏」这类特殊分组的定位/断言（不参与任何业务逻辑）。
   // 手动排序 + 单列表模式下整行可拖拽（dragover/drop 委托在 #sidebarWorkspaceTree 上）。
   const archived = Number(c.archived || 0) === 1;
+  const isRunActive = state.activeConversationRunIds?.has(String(c.id))
+    || String(state.runConversationId || '') === String(c.id) && Boolean(state.chatRunId || state.abortController);
   return `<div class="conversation-item ${c.id === state.conversationId ? 'active' : ''}${archived ? ' is-archived' : ''}" data-conversation-id="${c.id}" data-group="${escapeHtml(row.wsName || '')}"${row.flat && state.workspaceSort === 'manual' ? ' draggable="true"' : ''}>
     <button class="conversation-star ${favorite ? 'is-favorite' : ''}" data-action="toggle-favorite" title="${favorite ? '取消收藏' : '收藏会话'}" aria-label="${escapeHtml(c.title)} ${favorite ? '取消收藏' : '收藏'}" aria-pressed="${favorite}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.6l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.8l5.9-.9z"></path></svg></button>
     ${branchBadge}
+    ${isRunActive ? '<span class="conversation-run-status" role="img" aria-label="正在回复"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5a6.5 6.5 0 1 0 6.5 6.5"/><path d="M8 4v4l2.5 1.5"/></svg></span>' : ''}
     <button class="conversation-open" title="${escapeHtml(c.title)}">${escapeHtml(c.title)}</button>
     ${branchCountBadge}
     ${archived ? '<span class="archived-tag">已归档</span>' : ''}

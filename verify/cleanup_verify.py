@@ -42,7 +42,7 @@ KEEP = {
     "p4_display_smoke.cjs", "p5_writeback_smoke.cjs", "p6_comfy_render_smoke.cjs",
     "provider_cards_smoke.cjs", "agent_cards_smoke.cjs", "agent_avatar_smoke.cjs",
     "context_menu_smoke.cjs", "_check_turn_rail.cjs", "_check_tool_cards_compact.cjs",
-    "sidebar_favorites_smoke.cjs", "agent_prompt_smoke.cjs", "quick_msg_smoke.cjs",
+    "sidebar_favorites_smoke.cjs", "sidebar_run_status_smoke.cjs", "agent_prompt_smoke.cjs", "quick_msg_smoke.cjs",
     "starter_reasoning_smoke.cjs", "mobile_shell_smoke.cjs", "mobile_ui_regression.cjs",
     # @ / 弹层 × 软键盘（visualViewport）冒烟：自带隔离实例（spawn _serve_tmp.py）
     "popup_keyboard_mobile_smoke.cjs",

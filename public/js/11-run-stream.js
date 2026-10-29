@@ -5,8 +5,8 @@
 import { $, api, escapeHtml, notifyComposerChanged, state, toast } from "./01-core.js";
 import { pendingContextWarning, showContextWarning } from "./03-media.js";
 import { messageElement, scrollToBottom, setStickToBottom } from "./04-messages.js";
-import { loadTasks } from "./06-tasks-plans.js";
-import { createConversation, loadConversations, openConversation } from "./08-conversations.js";
+import { loadTasks, scheduleTaskSync } from "./06-tasks-plans.js";
+import { createConversation, loadConversations, openConversation, renderSidebar } from "./08-conversations.js";
 import { composerModelChoice, composerModelIsValidated, selectedProvider } from "./07-models-agents.js";
 import { attachmentChips, folderChips, folderIndexMetadata, missingAttachmentPaths, renderPendingFiles } from "./10-upload.js";
 import { beginChoiceSubmit, closeQuickMessagePanel, commitChoiceSubmit, handleChatEvent, rollbackChoiceSubmit, setBusy } from "./12-chat-input.js";
@@ -405,6 +405,9 @@ export async function finishRunSubscription(conversationId, controller) {
     state.checkRunEligible = false;
     setConnectionState('connected');
     setBusy(false);
+    state.activeConversationRunIds?.delete(String(conversationId || ''));
+    renderSidebar();
+    scheduleTaskSync(0);
   }
   await loadTasks();
   if (state.conversationId === conversationId && !state.abortController) {
@@ -461,6 +464,9 @@ export async function resumeRun(run, options = {}) {
   state.abortController = controller;
   state.chatRunId = runId;
   state.runConversationId = conversationId;
+  state.activeConversationRunIds ||= new Set();
+  state.activeConversationRunIds.add(conversationId);
+  renderSidebar();
   if (!sameRun) state.runSequence = 0;
   setBusy(true);
   void (async () => {
@@ -621,6 +627,9 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
   const runGeneration = ++state.runGeneration; // 本段对话流的新一代
   state.abortController = controller;
   state.runConversationId = conversationId;
+  state.activeConversationRunIds ||= new Set();
+  state.activeConversationRunIds.add(String(conversationId || ''));
+  renderSidebar();
   state.runSequence = 0;
   state.cancelRequested = false;
   state.cancelConversationId = '';

@@ -5,7 +5,7 @@
 import { $, $$, api, escapeHtml, state, toast } from "./01-core.js";
 import { markdown } from "./02-markdown.js";
 import { fileUrl } from "./03-media.js";
-import { renderRunTasks, syncCurrentConversation } from "./08-conversations.js";
+import { renderRunTasks, renderSidebar, syncCurrentConversation } from "./08-conversations.js";
 import { RUN_RECONNECT_COOLDOWN, clearElapsedStatus, resumeRun, setConnectionState, stopRunWatchdog } from "./11-run-stream.js";
 import { cancelCurrentRun, closePermissionModeMenu, setBusy } from "./12-chat-input.js";
 export const activeTaskStatuses = new Set(['queued', 'running', 'waiting', 'stopping', 'cancelling']);
@@ -56,6 +56,7 @@ export async function loadTasks() {
     state.taskSyncFailed = '';
     state.taskSyncedAt = Date.now();
     renderRunTasks();
+    await syncActiveConversationRuns();
     for (const task of state.tasks) {
       if (previous.has(task.id) && previous.get(task.id) !== task.status && ['completed', 'failed', 'cancelled'].includes(task.status)) {
         if (task.status === 'completed') toast(`${taskKindLabel(task.kind)}已完成`);
@@ -69,6 +70,24 @@ export async function loadTasks() {
     renderRunTasks();
   } finally {
     state.taskPollInFlight = false;
+  }
+}
+
+export async function syncActiveConversationRuns() {
+  try {
+    const result = await api('/api/runs?active_only=1');
+    const next = new Set((result.runs || [])
+      .filter((run) => !String(run.parent_job_id || '').trim()
+        && !Boolean(run.detached)
+        && ['chat', 'plan_execute'].includes(String(run.kind || '')))
+      .map((run) => String(run.conversation_id || ''))
+      .filter(Boolean));
+    const previous = state.activeConversationRunIds || new Set();
+    const changed = next.size !== previous.size || [...next].some((id) => !previous.has(id));
+    state.activeConversationRunIds = next;
+    if (changed) renderSidebar();
+  } catch (error) {
+    console.debug('[naiba] 活跃对话状态同步失败:', error.message);
   }
 }
 
@@ -124,7 +143,7 @@ export async function maybeRecoverRunFromPoll() {
 export function startTaskSync() {
   if (state.taskPolling) return;
   state.taskPolling = true;
-  scheduleTaskSync(1500);
+  scheduleTaskSync(0);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') {
       if (state.taskTimer) window.clearTimeout(state.taskTimer);
@@ -138,7 +157,8 @@ export function startTaskSync() {
 export function scheduleTaskSync(delay = null) {
   if (!state.taskPolling || document.visibilityState === 'hidden') return;
   if (state.taskTimer) window.clearTimeout(state.taskTimer);
-  const active = state.checkRunEligible || state.tasks.some((task) => activeTaskStatuses.has(task.status));
+  const active = state.checkRunEligible || Boolean(state.activeConversationRunIds?.size)
+    || state.tasks.some((task) => activeTaskStatuses.has(task.status));
   const interval = active ? 1500 : 10000;
   state.taskTimer = window.setTimeout(async () => {
     state.taskTimer = null;

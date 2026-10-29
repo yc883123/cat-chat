@@ -8,7 +8,7 @@ import { setContextUsage, toolMediaMarkup, updateContextComposerLock, updateCont
 import { fillContextResetSeed, getStreamingProseSegment, messageElement, moveBottomProseInline, refreshFirstTurnCard, replaceWithMessage, scheduleStreamingMarkdown, scrollToBottom } from "./04-messages.js";
 import { loadTasks, renderPermissionModeSwitch } from "./06-tasks-plans.js";
 import { updateUnloadModelButton } from "./07-models-agents.js";
-import { createConversation, openConversation } from "./08-conversations.js";
+import { createConversation, openConversation, renderSidebar } from "./08-conversations.js";
 import { uploadFiles, renderPendingFiles } from "./10-upload.js";
 import { SKILL_INSTALL_PRESET, SKILL_SCRIPT_RULES, clearElapsedStatus, clearRunReconnectTimers, clearVisionProgress, collapseToolReasoningBlock, createStreamingReasoningBlock, detachRunConnection, sendChatMessage, setConnectionState, settleReconnectStatus, showElapsedStatus, stopRunWatchdog } from "./11-run-stream.js";
 import { insertTextAtCursor, renderInputMirror, resizeTextarea, updateSkillPopup } from "./13-skill-refs.js";
@@ -726,6 +726,9 @@ function handleDebugCacheEvent(event) {
 function handleRunStartedEvent(event, { row, conversationId }) {
   state.chatRunId = String(event.run_id || '');
   state.runConversationId = conversationId;
+  state.activeConversationRunIds ||= new Set();
+  state.activeConversationRunIds.add(String(conversationId || ''));
+  renderSidebar();
   row.dataset.runId = state.chatRunId;
 }
 

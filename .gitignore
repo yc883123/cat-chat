@@ -352,6 +352,7 @@ verify/*
 !verify/lazy_messages_smoke.cjs
 !verify/lazy_messages_smoke.py
 !verify/sidebar_favorites_smoke.cjs
+!verify/sidebar_run_status_smoke.cjs
 !verify/sitecustomize.py
 !verify/skill_prompt_check.mjs
 !verify/starter_reasoning_smoke.cjs

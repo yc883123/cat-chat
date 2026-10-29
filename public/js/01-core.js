@@ -52,6 +52,7 @@ export const state = {
   abortController: null,
   chatRunId: '',
   runConversationId: '',
+  activeConversationRunIds: new Set(),
   runSequence: 0,
   runEvents: {},
   runRow: null,

@@ -327,6 +327,9 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .conversation-group-items { padding-left: 4px; }
 .conversation-item { display: flex; align-items: center; gap: 4px; min-height: 34px; padding-left: 8px; border-radius: var(--r-md); color: var(--sidebar-text); cursor: pointer; }
 .conversation-item:hover, .conversation-item.active { background: var(--sidebar-hover); color: white; }
+.conversation-run-status { width: 14px; height: 14px; flex: none; display: grid; place-items: center; color: var(--accent); }
+.conversation-run-status svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; animation: conversation-run-spin 1.2s linear infinite; }
+@keyframes conversation-run-spin { to { transform: rotate(360deg); } }
 .sidebar-footer { min-height: 56px; border-top: 1px solid var(--sidebar-line); padding: 10px 12px; display: flex; gap: 8px; align-items: center; }
 .address-button { min-width: 0; flex: 1; background: none; border: 0; color: white; display: flex; gap: 9px; align-items: center; text-align: left; padding: 4px 5px; }
 .address-button span:last-child { min-width: 0; }

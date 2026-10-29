@@ -694,16 +694,14 @@
              public/js/25-novel.js 接管。页面头放定位与全局操作，
              接着是五个创作阶段，再往下是三栏工作区。 -->
         <div class="studio-page-view" id="studioPageNovel" data-studio-page-view="novel" hidden>
-          <!-- 页面头：面包屑 + 标题 + 全局操作。导入 / 作品 / 导出从左上「作品与章节」
+          <!-- 页面头：标题 + 当前作品与阶段 + 全局操作。导入 / 作品 / 导出从左上「作品与章节」
                工具栏搬到这儿，原有 id 全部保留，事件绑定不变；导出菜单跟着按钮进
-               .novel-page-actions，以这个容器为定位基准，不再依赖左栏。 -->
+               .novel-page-actions，以这个容器为定位基准，不再依赖左栏。
+               不再放「工作台 / 创作场」面包屑：上方工作台标识与下方标题已经说明了位置。 -->
           <header class="novel-page-head">
-            <div class="novel-page-title">
-              <span class="novel-breadcrumb">工作台 / 创作场</span>
-              <div class="novel-page-title-row">
-                <h2>创作场</h2>
-                <span class="novel-page-state" id="novelPageState">未打开作品 · 拆章</span>
-              </div>
+            <div class="novel-page-title-row">
+              <h2>创作场</h2>
+              <span class="novel-page-state" id="novelPageState">未打开作品 · 拆章</span>
             </div>
             <div class="novel-page-actions">
               <button class="control-button novel-manage-entry" id="novelManageBtn" type="button"

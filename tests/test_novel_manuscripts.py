@@ -566,7 +566,7 @@ class CreativeFieldLayoutUITests(unittest.TestCase):
         page = self._page()
         head = page[page.index('class="novel-page-head"'):]
         head = head[: head.index('class="novel-stagebar"')]
-        self.assertIn("工作台 / 创作场", head, "页面头要有面包屑")
+        self.assertNotIn("novel-breadcrumb", head, "上方已有工作台标识、下方有标题，中间不再放面包屑")
         self.assertIn('id="novelPageState"', head, "页面头要显示当前作品与阶段")
         for ident in ("novelManageBtn", "novelImportBtn", "novelBooksBtn",
                       "novelExportBtn", "novelExportMenu"):
@@ -581,7 +581,7 @@ class CreativeFieldLayoutUITests(unittest.TestCase):
         css = self._read("public/styles.css")
         head = css[css.index(".novel-page-head {"):]
         head = head[: head.index("}")]
-        self.assertIn("min-height: 72px", head)
+        self.assertIn("min-height: 56px", head, "页面头只有标题与操作一行，不再留面包屑的高度")
         actions = css[css.index(".novel-page-actions {"):]
         actions = actions[: actions.index("}")]
         self.assertIn("position: relative", actions, "导出菜单以页面头操作区为定位基准")

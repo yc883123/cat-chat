@@ -4587,14 +4587,14 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
    手机横屏（844x390、812x375）保留三栏；竖屏（<=760px）改三档分段控件。
    全部复用既有语义变量，不新增小说专用色板。
    ============================================================ */
-/* ---- 页面头：面包屑 + 标题 + 全局操作（导入 / 作品 / 导出 / 管理记录） ---- */
+/* ---- 页面头：标题 + 当前作品与阶段 + 全局操作（导入 / 作品 / 导出 / 管理记录） ----
+   不再单列一行「工作台 / 创作场」面包屑：上面是工作台标识、下面是「创作场」标题，
+   中间再放一句就是重复。省下的这一行高度全部交给下面的三栏。 */
 .novel-page-head {
   flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--s-4);
-  min-height: 72px; padding: 0 var(--s-6);
+  min-height: 56px; padding: 0 var(--s-5);
   border-bottom: 1px solid var(--line); background: var(--surface);
 }
-.novel-page-title { display: grid; gap: 2px; min-width: 0; }
-.novel-breadcrumb { font-size: 11px; line-height: 1.4; color: var(--muted); }
 .novel-page-title-row { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .novel-page-title-row h2 {
   flex: none; margin: 0; font-size: 20px; font-weight: 600; line-height: 1.3; color: var(--text);
@@ -4917,8 +4917,7 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 /* 手机横屏（844x390 / 812x375）：三栏同时可见，只压缩留白与辅助文案。
    横屏高度只有 390px：页面头与阶段条压到最小，省下的高度全给三栏。 */
 @media (max-width: 960px) and (orientation: landscape) {
-  .novel-page-head { min-height: 44px; padding: 0 12px; gap: 10px; }
-  .novel-breadcrumb { display: none; }
+  .novel-page-head { min-height: 38px; padding: 0 12px; gap: 10px; }
   .novel-page-title-row h2 { font-size: 15px; }
   .novel-page-state { font-size: 10.5px; }
   .novel-page-actions .control-button { min-height: 28px; padding: 0 10px; font-size: 11px; }
@@ -4957,7 +4956,7 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
   /* 竖屏放不下一行标题 + 四个操作：标题占一行，操作另起一行并可横向滚动。 */
   .novel-page-head {
     flex-direction: column; align-items: stretch; gap: 8px;
-    min-height: 0; padding: 10px 12px;
+    min-height: 0; padding: 8px 12px;
   }
   .novel-page-title-row h2 { font-size: 17px; }
   .novel-page-actions { overflow-x: auto; scrollbar-width: none; }

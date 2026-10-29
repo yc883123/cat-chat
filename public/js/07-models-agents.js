@@ -66,172 +66,203 @@ function versionLabel(release) {
   return release.published_at ? `${label} · ${String(release.published_at).slice(0, 10)}` : label;
 }
 
-function syncUpdateVersionCombobox(options, selectedValue, disabled) {
-  const wrap = $('#updateVersionCombobox');
-  const trigger = $('#updateVersionTrigger');
-  const label = $('#updateVersionLabel');
-  const menu = $('#updateVersionMenu');
-  const native = $('#updateVersionSelect');
-  if (!wrap || !trigger || !label || !menu || !native) return;
-  wrap.hidden = false;
-  trigger.disabled = disabled || !options.length;
-  const selected = options.find((item) => item.value === selectedValue) || options[0];
-  label.textContent = selected ? selected.textContent : '尚未检查';
-  trigger.setAttribute('aria-expanded', menu.hidden ? 'false' : 'true');
-  menu.replaceChildren(...options.map((item, index) => {
-    const node = document.createElement('div');
-    node.className = 'update-version-option';
-    node.id = `update-version-option-${index}`;
-    node.setAttribute('role', 'option');
-    node.dataset.value = item.value;
-    node.textContent = item.textContent;
-    node.setAttribute('aria-selected', item.value === selectedValue ? 'true' : 'false');
-    node.addEventListener('mousedown', (event) => event.preventDefault());
-    node.addEventListener('click', () => {
-      native.value = item.value;
+/* ---- 版本列表（左栏）与更新说明（右栏） ----
+   选中值仍写回原生 #updateVersionSelect：installUpdate() 读 select.value 的逻辑一行不动。
+   筛选词与按需取到的说明都放在模块内，重渲染不丢。 */
+let updateVersionFilterValue = '';
+const updateNotesCache = new Map();
+let updateNotesPendingTag = '';
+
+function formatUpdateDate(value) {
+  const text = String(value || '').trim();
+  return text ? text.slice(0, 10) : '';
+}
+
+/* 「来源条」用本地时间展示拉到列表的时刻（epoch 秒 → M-D HH:MM）。 */
+function formatUpdateFetchedAt(seconds) {
+  const value = Number(seconds) || 0;
+  if (!value) return '';
+  const date = new Date(value * 1000);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (part) => String(part).padStart(2, '0');
+  return `${date.getMonth() + 1}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function renderUpdateSource(meta) {
+  const text = $('#updateSourceText');
+  if (!text) return;
+  const info = meta && typeof meta === 'object' ? meta : {};
+  const labels = {
+    api: '版本列表来自 GitHub',
+    html: '版本列表来自 GitHub 发布页',
+    cache: '版本列表来自本地缓存',
+  };
+  let message = labels[String(info.source || '')] || '版本列表来自 GitHub';
+  const when = formatUpdateFetchedAt(info.fetched_at);
+  if (when) message += `（${when}）`;
+  if (String(info.source || '') === 'cache' || info.truncated) message += '，可能不全';
+  if (info.legacy_cache) message += '，缓存沿用旧格式';
+  text.textContent = message;
+}
+
+function renderUpdateVersionList(options, releases, selectedTag, disabled) {
+  const list = $('#updateVersionList');
+  const count = $('#updateVersionCount');
+  if (!list) return;
+  const query = String(updateVersionFilterValue || '').trim().toLowerCase();
+  const visible = query
+    ? options.filter((option) => option.text.toLowerCase().includes(query))
+    : options;
+  if (count) {
+    count.textContent = query
+      ? `匹配 ${visible.length} / ${options.length} 个版本`
+      : `可安装版本 ${options.length} 个`;
+  }
+  if (!visible.length) {
+    const empty = document.createElement('p');
+    empty.className = 'update-version-empty';
+    empty.textContent = options.length ? '没有匹配的版本' : '暂无可安装版本';
+    list.replaceChildren(empty);
+    return;
+  }
+  const byTag = new Map(releases.map((release) => [release.tag, release]));
+  list.replaceChildren(...visible.map((option) => {
+    const release = byTag.get(option.value) || {};
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'update-version-item';
+    item.dataset.value = option.value;
+    item.setAttribute('role', 'option');
+    item.setAttribute('aria-selected', option.value === selectedTag ? 'true' : 'false');
+    const name = document.createElement('span');
+    name.className = 'update-version-name';
+    name.textContent = release.version || option.text;
+    item.append(name);
+    if (release.current) {
+      const badge = document.createElement('span');
+      badge.className = 'update-version-badge is-current';
+      badge.textContent = '当前';
+      item.append(badge);
+    } else if (release.synthetic) {
+      // 合成条目来自静态直连清单，不是发布列表里的一条：如实标注，别让它假装是同源发布。
+      const badge = document.createElement('span');
+      badge.className = 'update-version-badge is-latest';
+      badge.textContent = '最新';
+      item.append(badge);
+    }
+    const date = formatUpdateDate(release.published_at);
+    if (date) {
+      const when = document.createElement('span');
+      when.className = 'update-version-date';
+      when.textContent = date.slice(5);
+      item.append(when);
+    }
+    item.disabled = disabled;
+    item.addEventListener('click', () => {
+      const native = $('#updateVersionSelect');
+      if (!native || native.value === option.value) return;
+      native.value = option.value;
+      // 选中值统一走 change 事件：15-bind-events.js 已在该事件上重渲染，
+      // 这里再直接调用会渲染两次。
       native.dispatchEvent(new Event('change', { bubbles: true }));
-      closeUpdateVersionMenu();
     });
-    return node;
+    return item;
   }));
+  list.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
 }
 
-function closeUpdateVersionMenu() {
-  const menu = $('#updateVersionMenu');
-  const trigger = $('#updateVersionTrigger');
-  if (!menu || !trigger) return;
-  menu.hidden = true;
-  trigger.setAttribute('aria-expanded', 'false');
-  // 顶层宿主留空即退出顶层，避免它继续盖住对话框上的其它内容。
-  const host = $('#updateVersionMenuHost');
-  if (host && typeof host.hidePopover === 'function' && host.matches(':popover-open')) {
-    try {
-      host.hidePopover();
-    } catch (error) {
-      /* 已关闭或浏览器拒绝：无副作用，忽略 */
-    }
+function renderUpdateNotes(release, latestVersion) {
+  const versionEl = $('#updateNotesVersion');
+  const dateEl = $('#updateNotesDate');
+  const badgeEl = $('#updateNotesBadge');
+  const linkEl = $('#updateNotesLink');
+  const body = $('#updateNotesBody');
+  if (!body) return;
+  if (!release) {
+    if (versionEl) versionEl.textContent = '未选择版本';
+    if (dateEl) dateEl.textContent = '';
+    if (badgeEl) badgeEl.hidden = true;
+    if (linkEl) linkEl.hidden = true;
+    body.replaceChildren();
+    return;
   }
+  const version = String(release.version || release.tag || '');
+  if (versionEl) versionEl.textContent = version || '—';
+  const date = formatUpdateDate(release.published_at);
+  if (dateEl) dateEl.textContent = date ? `发布于 ${date}` : '';
+  const isLatest = Boolean(latestVersion) && version === String(latestVersion);
+  if (badgeEl) {
+    badgeEl.hidden = !isLatest;
+    badgeEl.textContent = release.synthetic ? '最新 · 来自直连清单' : '最新';
+  }
+  if (linkEl) {
+    const url = String(release.release_url || '').trim();
+    linkEl.hidden = !url;
+    if (url) linkEl.href = url;
+  }
+  const notes = Array.isArray(release.release_notes)
+    ? release.release_notes.map((note) => String(note || '').trim()).filter(Boolean)
+    : (release.release_notes ? [String(release.release_notes).trim()] : []);
+  if (!notes.length) {
+    const empty = document.createElement('p');
+    empty.className = 'update-notes-empty';
+    empty.textContent = '该版本没有更新说明。';
+    body.replaceChildren(empty);
+    return;
+  }
+  // 首行作为标题、其余逐条列出（与 GitHub Release 正文的写法一致）。
+  const title = document.createElement('p');
+  title.className = 'update-notes-title';
+  title.textContent = notes[0];
+  const list = document.createElement('ul');
+  for (const note of notes.slice(1)) {
+    const item = document.createElement('li');
+    item.textContent = note;
+    list.append(item);
+  }
+  body.replaceChildren(title, list);
 }
 
-/* 版本菜单 = fixed 定位 + 顶层宿主挂载，两个坑一次解决（教训 §九.27 + §九.50）。
-   坑一（裁剪）：留在 #updateVersionCombobox 里会被两层祖先裁掉——`.update-status{overflow:hidden}`
-   切掉一半选项，设置面板内容区又是 overflow:auto，滚动时菜单不跟手；fixed 让包含块变成视口。
-   坑二（层级）：设置页本身是模态 <dialog>（top layer），body 上的 fixed 弹层同样盖不过它，
-   所以挂载点取 #updateVersionMenuHost（popover 顶层宿主，见 updateVersionMenuHost()）。
-   注意：fixed 只在祖先没有 transform/filter/contain 时相对视口生效——宿主用 display: contents
-   不产生盒子，满足该前提。 */
-const UPDATE_VERSION_MENU_GAP = 4;
-// 触发按钮与视口之间至少留出的边距，避免菜单贴死屏幕边缘。
-const UPDATE_VERSION_MENU_MARGIN = 12;
-
-/* 选中菜单的挂载容器：优先设置面板里的 popover 顶层宿主（能盖住模态 dialog），
-   没有（例如宿主被裁掉、浏览器不支持 popover）则退回 body。
-   注意不能用 `:popover-open` 做存在性判断——未 showPopover() 时它匹配不到任何元素。 */
-function updateVersionMenuHost() {
-  const host = $('#updateVersionMenuHost');
-  if (!host) return document.body;
-  if (typeof host.showPopover !== 'function') return document.body;
+/* 列表来自静态发布页时没有更新说明：选中那一版时才去取（走静态清单，不占 API 配额）。 */
+async function ensureUpdateNotes(tag) {
+  const status = state.bootstrap.update || {};
+  const releases = Array.isArray(status.releases) ? status.releases : [];
+  const release = releases.find((item) => item.tag === tag);
+  if (!release || tag === 'latest') return;
+  if (updateNotesCache.has(tag) || updateNotesPendingTag === tag) return;
+  updateNotesPendingTag = tag;
   try {
-    if (!host.matches(':popover-open')) host.showPopover();
-  } catch (error) {
-    return document.body;
+    const data = await api(`/api/update/notes?tag=${encodeURIComponent(tag)}`);
+    const notes = Array.isArray(data?.release_notes)
+      ? data.release_notes.map((note) => String(note || '').trim()).filter(Boolean)
+      : [];
+    updateNotesCache.set(tag, notes);
+    release.release_notes = notes;
+    // 用户已经切到别的版本就别把旧说明画回来。
+    if ($('#updateVersionSelect')?.value === tag) renderUpdateNotes(release, status.latest_version);
+  } catch (_) {
+    // 取不到就保留占位文案，不影响其它交互。
+    updateNotesCache.set(tag, []);
+  } finally {
+    updateNotesPendingTag = '';
   }
-  return host;
 }
 
-function positionUpdateVersionMenu() {
-  const menu = $('#updateVersionMenu');
-  const trigger = $('#updateVersionTrigger');
-  if (!menu || !trigger || menu.hidden) return;
-  const box = trigger.getBoundingClientRect();
-  const width = Math.max(box.width, 220);
-  const viewportHeight = window.innerHeight;
-  const naturalHeight = menu.offsetHeight;
-  const roomBelow = viewportHeight - box.bottom - UPDATE_VERSION_MENU_GAP - UPDATE_VERSION_MENU_MARGIN;
-  const roomAbove = box.top - UPDATE_VERSION_MENU_GAP - UPDATE_VERSION_MENU_MARGIN;
-  // 先尽量完整放下：下方优先，下方放不下但上方能放下则翻转。
-  // 两侧都放不下时（面板本身很矮或菜单很长），选空间更大的一侧贴边，
-  // 并把高度压到可用空间——否则菜单会整段伸出视口，底部选项根本点不到。
-  let height = naturalHeight;
-  let top;
-  if (naturalHeight <= roomBelow) {
-    top = box.bottom + UPDATE_VERSION_MENU_GAP;
-  } else if (naturalHeight <= roomAbove) {
-    top = box.top - naturalHeight - UPDATE_VERSION_MENU_GAP;
-  } else if (roomBelow >= roomAbove) {
-    height = Math.max(0, roomBelow);
-    top = box.bottom + UPDATE_VERSION_MENU_GAP;
-  } else {
-    height = Math.max(0, roomAbove);
-    top = box.top - height - UPDATE_VERSION_MENU_GAP;
+function initUpdateBrowserControls() {
+  const filter = $('#updateVersionFilter');
+  if (filter && !filter.dataset.bound) {
+    filter.dataset.bound = '1';
+    filter.addEventListener('input', () => {
+      updateVersionFilterValue = filter.value;
+      renderUpdateStatus(state.bootstrap.update || {});
+    });
   }
-  const maxLeft = Math.max(UPDATE_VERSION_MENU_MARGIN, window.innerWidth - width - UPDATE_VERSION_MENU_MARGIN);
-  menu.style.position = 'fixed';
-  menu.style.width = `${width}px`;
-  menu.style.maxHeight = `${Math.round(height)}px`;
-  menu.style.top = `${Math.round(top)}px`;
-  menu.style.left = `${Math.round(Math.min(Math.max(UPDATE_VERSION_MENU_MARGIN, box.left), maxLeft))}px`;
-}
-
-function openUpdateVersionMenu() {
-  const menu = $('#updateVersionMenu');
-  const trigger = $('#updateVersionTrigger');
-  if (!menu || !trigger || trigger.disabled) return;
-  const host = updateVersionMenuHost();
-  if (menu.parentElement !== host) host.appendChild(menu);
-  menu.hidden = false;
-  positionUpdateVersionMenu();
-  trigger.setAttribute('aria-expanded', 'true');
-  const selected = menu.querySelector('[aria-selected="true"]');
-  selected?.scrollIntoView({ block: 'nearest' });
-}
-
-function initUpdateVersionCombobox() {
-  const trigger = $('#updateVersionTrigger');
-  const menu = $('#updateVersionMenu');
-  const native = $('#updateVersionSelect');
-  if (!trigger || !menu || !native || trigger.dataset.bound) return;
-  trigger.dataset.bound = '1';
-  trigger.addEventListener('click', () => (menu.hidden ? openUpdateVersionMenu() : closeUpdateVersionMenu()));
-  trigger.addEventListener('keydown', (event) => {
-    const items = [...menu.querySelectorAll('[role="option"]')];
-    if (!items.length) return;
-    let index = items.findIndex((item) => item.getAttribute('aria-selected') === 'true');
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      // preventDefault 是必需的：空间键之外，方向键默认还会滚动祖先容器，
-      // 菜单现在挂在 body 下（fixed），祖先滚动会把菜单推离触发按钮。
-      event.preventDefault();
-      if (menu.hidden) openUpdateVersionMenu();
-      index = (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
-      native.value = items[index].dataset.value;
-      native.dispatchEvent(new Event('change', { bubbles: true }));
-    } else if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
-      event.preventDefault();
-      menu.hidden ? openUpdateVersionMenu() : closeUpdateVersionMenu();
-    } else if (event.key === 'Escape') {
-      event.preventDefault();
-      closeUpdateVersionMenu();
-    }
-  });
-  trigger.addEventListener('blur', () => {
-    setTimeout(() => {
-      // 菜单已挂到 body 下，不再是 combobox 的后代：祖先判定要同时放行菜单自身。
-      const active = document.activeElement;
-      if (!active?.closest('#updateVersionCombobox') && !active?.closest('#updateVersionMenu')) {
-        closeUpdateVersionMenu();
-      }
-    }, 0);
-  });
-  document.addEventListener('click', (event) => {
-    if (!event.target.closest('#updateVersionCombobox') && !event.target.closest('#updateVersionMenu')) {
-      closeUpdateVersionMenu();
-    }
-  });
-  // 页面/面板滚动或窗口变化时重新贴合触发按钮（fixed 不会跟着祖先滚动）。
-  const reposition = () => { if (!menu.hidden) positionUpdateVersionMenu(); };
-  window.addEventListener('scroll', reposition, true);
-  window.addEventListener('resize', reposition);
-  initUpdateVersionCombobox._ready = true;
+  const refresh = $('#refreshUpdateList');
+  if (refresh && !refresh.dataset.bound) {
+    refresh.dataset.bound = '1';
+    // 复用「检查更新」：它就是 force 拉取，列表与最新版判断一起刷新，不需要新路由。
+    refresh.addEventListener('click', () => { checkUpdate(); });
+  }
 }
 
 export function renderUpdateStatus(status) {
@@ -246,7 +277,7 @@ export function renderUpdateStatus(status) {
     : (status.phase === 'current' ? `${current}（当前）`
       : (status.phase === 'checking' ? '正在检查…' : '尚未检查'));
   const previousValue = select.value;
-  // 重建版本下拉：仅保留可安装项，当前版本标记为「当前」。
+  // 重建版本列表（原生 select 只做选中值载体）：仅保留可安装项。
   const options = releases
     .filter(updateVersionAllowed)
     .map((release) => {
@@ -284,20 +315,19 @@ export function renderUpdateStatus(status) {
   }
   const selectedTag = select.value;
   const selected = releases.find((release) => release.tag === selectedTag);
-  initUpdateVersionCombobox();
-  syncUpdateVersionCombobox(options, selectedTag, select.disabled);
-  const notes = selected && Array.isArray(selected.release_notes)
-    ? selected.release_notes.filter((note) => String(note || '').trim())
-    : (selected && selected.release_notes ? [String(selected.release_notes)] : []);
-  const notesPanel = $('#updateNotes');
-  const notesList = $('#updateNotesList');
-  notesList.replaceChildren(...notes.map((note) => {
-    const item = document.createElement('li');
-    item.textContent = note;
-    return item;
-  }));
-  // 仅根据是否存在更新内容显示/隐藏详情；不重置用户已展开/收起状态
-  notesPanel.hidden = notes.length === 0;
+  initUpdateBrowserControls();
+  // 未拿到任何可安装版本时保持上面的单栏概览卡，不出现空的两栏框。
+  const browser = $('#updateBrowser');
+  if (browser) browser.hidden = options.length === 0;
+  renderUpdateSource(status.releases_meta);
+  const refreshButton = $('#refreshUpdateList');
+  if (refreshButton) refreshButton.disabled = UPDATE_BUSY_PHASES.includes(status.phase);
+  renderUpdateVersionList(options, releases, selectedTag, select.disabled);
+  renderUpdateNotes(selected, latestVersion);
+  // 列表来自静态发布页时条目没有说明：选中那一刻按需取（同一版本只取一次）。
+  if (selected && !(selected.release_notes || []).length && !updateNotesCache.has(selectedTag)) {
+    ensureUpdateNotes(selectedTag);
+  }
   const messages = {
     idle: '点「检查更新」才会去查新版本（启动不再自动检查）；不会自动安装，请手动选择版本后点击「立即更新」。',
     checking: '正在检查更新…',
@@ -373,6 +403,10 @@ export function renderUpdateStatus(status) {
   const offerRestartChoice = Boolean(ready) && !updateReadyDismissed && status.phase !== 'restarting';
   const installButton = $('#installUpdate');
   installButton.hidden = !canInstall;
+  // 文案跟着所选版本走：同一屏里左侧选哪一版，按钮就写清会装哪一版。
+  installButton.textContent = selected && !selected.current
+    ? `立即更新到 ${selected.version}`
+    : '立即更新';
   // disabled 必须和 hidden 一起翻。点「立即更新」时会先置灰防重复提交；此后若是下载中途
   // 断网失败、或下载完选择「不要更新」，按钮会重新出现——这里若只清 hidden 不清 disabled，
   // 它就会永远停在点不动的状态（2026-10-23 真实事故：断网失败/放弃更新后都无法再点）。

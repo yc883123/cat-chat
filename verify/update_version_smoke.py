@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""冒烟：软件更新「目标版本」下拉（源码 server，端口 8801）。
+"""冒烟：软件更新「版本列表」两栏（源码 server，端口 8801）。
 
 编排（全自动，跑完还原现场）：
 1. config.json 的 data_dir 临时指向 verify/update_version_smoke_tmp_<pid>/，避开本机

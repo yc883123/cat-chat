@@ -1602,11 +1602,6 @@
   </dialog>
 
   <dialog id="settingsDialog" class="settings-dialog">
-    <!-- 顶层宿主：模态 dialog 会进入顶层（top layer），body 下的菜单即使 z-index 再高
-         也会被 dialog 与 ::backdrop 盖住。把「目标版本」菜单放进这个 popover 宿主，
-         open 时它同样进入顶层且晚于 dialog，从而稳稳浮在设置面板之上。
-         （popover 定位由 JS 以 fixed + top/left 指定；宿主本身不拦截指针。） -->
-    <div id="updateVersionMenuHost" popover="manual" class="update-version-menu-host"></div>
     <div class="dialog-toolbar">
       <div><h2>设置</h2><p id="settingsToolbarSub">外观</p></div>
       <button class="icon-button" data-close="settingsDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
@@ -2163,24 +2158,6 @@
           <div class="update-status">
             <div><span>当前版本</span><b id="currentVersion">-</b></div>
             <div><span>新版本</span><b id="latestVersion">尚未检查</b></div>
-            <div class="update-latest-row">
-              <span>目标版本</span>
-              <div class="update-latest-value">
-                <select id="updateVersionSelect" class="update-version-select update-version-native" disabled aria-hidden="true" tabindex="-1">
-                  <option value="">尚未检查</option>
-                </select>
-                <div class="update-version-combobox" id="updateVersionCombobox" hidden>
-                  <button type="button" class="update-version-trigger" id="updateVersionTrigger" aria-haspopup="listbox" aria-expanded="false" disabled>
-                    <span id="updateVersionLabel">尚未检查</span><span aria-hidden="true">▾</span>
-                  </button>
-                  <div class="update-version-menu" id="updateVersionMenu" role="listbox" tabindex="-1" hidden></div>
-                </div>
-              </div>
-            </div>
-            <details class="update-notes" id="updateNotes" hidden>
-              <summary>详细更新内容</summary>
-              <ul id="updateNotesList"></ul>
-            </details>
             <p id="updateMessage">点「检查更新」才会去查新版本（启动不再自动检查）；不会自动安装，请手动选择版本后点击「立即更新」。</p>
             <!-- 下载进度：MB / 速度 / 卡死提示（长时间无新字节时进度条转黄） -->
             <div class="update-progress" id="updateProgress" hidden>
@@ -2201,6 +2178,38 @@
                 </button>
               </div>
               <p id="updateArtifactsFile">当前没有保留的更新包</p>
+            </div>
+          </div>
+          <!-- 版本浏览：左侧选版本、右侧看说明；只在拿到版本列表后出现。
+               未检查时维持上面的单栏概览卡，不出现空框。 -->
+          <div class="update-browser" id="updateBrowser" hidden>
+            <div class="update-side">
+              <!-- 来源条：列表从哪来、什么时候拉的；可能不全时如实说明，不让用户靠版本号跳变自己发现 -->
+              <div class="update-source" id="updateSource">
+                <span id="updateSourceText">版本列表来自 GitHub</span>
+                <button type="button" class="update-source-refresh" id="refreshUpdateList">重新拉取</button>
+              </div>
+              <div class="update-side-head">
+                <p class="update-side-count" id="updateVersionCount">可安装版本 0 个</p>
+                <label class="update-version-search">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
+                  <input id="updateVersionFilter" type="search" placeholder="筛选版本，如 3.9" aria-label="筛选版本" autocomplete="off">
+                </label>
+              </div>
+              <div class="update-version-list" id="updateVersionList" role="listbox" aria-label="可选版本"></div>
+              <!-- 选中值载体：installUpdate() 继续读 select.value，安装逻辑不受排版影响 -->
+              <select id="updateVersionSelect" class="update-version-native" aria-hidden="true" tabindex="-1">
+                <option value="">尚未检查</option>
+              </select>
+            </div>
+            <div class="update-notes-panel">
+              <div class="update-notes-head">
+                <b id="updateNotesVersion">—</b>
+                <span class="update-notes-date" id="updateNotesDate"></span>
+                <span class="update-notes-badge" id="updateNotesBadge" hidden>最新</span>
+                <a class="update-notes-link" id="updateNotesLink" href="https://github.com/yc883123/cat-chat/releases" target="_blank" rel="noopener">在 GitHub 查看</a>
+              </div>
+              <div class="update-notes-body" id="updateNotesBody"></div>
             </div>
           </div>
           <div class="form-actions update-actions">

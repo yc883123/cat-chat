@@ -2080,60 +2080,88 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 #connectionReason { margin: 8px 0 14px; }
 .update-status { display: grid; gap: 1px; border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; background: var(--line); box-shadow: var(--shadow-1); }
 .update-status > div { min-height: 52px; padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; gap: 18px; background: var(--surface); }
-.update-latest-value { min-width: 0; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 5px 12px; }
-.update-notes-toggle { display: inline-flex; align-items: center; gap: 4px; padding: 3px 0; border: 0; background: transparent; color: var(--accent); cursor: pointer; font: inherit; font-size: 12px; white-space: nowrap; }
-.update-notes-arrow { display: inline-block; font-size: 16px; line-height: 1; transform: translateY(-1px); transition: transform .18s ease; }
-.update-notes-toggle[aria-expanded="true"] .update-notes-arrow { transform: rotate(180deg) translateY(1px); }
-.update-notes { padding: 0; background: var(--surface); border-top: 1px solid var(--line); }
-.update-notes[hidden] { display: none; }
-.update-notes summary { cursor: pointer; padding: 11px 12px; color: var(--accent); font-size: 12px; list-style: none; display: flex; align-items: center; gap: 4px; }
-.update-notes summary::-webkit-details-marker { display: none; }
-.update-notes ul { margin: 0; padding: 0 12px 11px 28px; color: var(--muted); font-size: 12px; line-height: 1.65; }
-.update-notes li + li { margin-top: 3px; }
-@media (max-width: 520px) {
-  .update-latest-row { align-items: flex-start; }
-  .update-latest-value { justify-content: flex-end; }
-}
 .update-status span { color: var(--muted); font-size: 12px; }
 .update-status b { min-width: 0; overflow-wrap: anywhere; text-align: right; font-size: 13px; }
-.update-version-select {
-  max-width: 300px;
-  padding: 5px 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface);
-  color: var(--text);
-  font: inherit;
-  font-size: 13px;
-  text-align: right;
-}
+/* 选中值载体：视觉隐藏，只供 installUpdate() 读 value（排版换了两栏也不动安装逻辑）。 */
 .update-version-native { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-.update-version-combobox { position: relative; width: min(300px, 100%); }
-.update-version-trigger {
-  width: 100%; min-height: 34px; display: inline-flex; align-items: center; justify-content: space-between;
-  gap: 8px; padding: 5px 8px; border: 1px solid var(--line); border-radius: var(--radius);
-  background: var(--surface); color: var(--text); font: inherit; font-size: 13px; text-align: right; cursor: pointer;
+
+/* ---- 版本浏览（两栏）：左栏版本列表 + 右栏更新说明 ----
+   只在拿到版本列表后出现（JS 翻 #updateBrowser[hidden]）；未检查时维持上面的单栏概览卡。 */
+.update-browser {
+  display: grid;
+  grid-template-columns: 236px minmax(0, 1fr);
+  gap: 1px;
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--line);
+  overflow: hidden;
 }
-.update-version-trigger:disabled { opacity: .6; cursor: default; }
-.update-version-trigger:focus-visible { outline: 2px solid rgba(var(--brand-500-rgb), .25); border-color: var(--accent); }
-/* 菜单由 JS 挂进顶层宿主（#updateVersionMenuHost，缺失时退回 body）并改用 fixed 定位
-   （top/left/width/max-height 由 positionUpdateVersionMenu 写入，内联值优先于本规则）。
-   这里只声明弹出外观与高度契约：
-   - 20 行 = 20 * 34px（border-box，全局 * 已设 box-sizing:border-box，含上下边框与外边距）；
-   - 同时受视口高度约束（- 80px 留给触发按钮与安全边距），避免小窗口下菜单伸出屏幕。 */
-.update-version-menu {
-  position: fixed; z-index: 60; max-height: min(calc(20 * 34px), calc(100dvh - 80px));
-  overflow-y: auto; padding: 3px; border: 1px solid var(--line); border-radius: var(--radius);
-  background: var(--surface); box-shadow: 0 8px 24px rgba(0,0,0,.28);
+/* author 样式设了 display 就会顶掉 UA 的 [hidden]，必须显式压回。 */
+.update-browser[hidden] { display: none; }
+.update-side { position: relative; min-width: 0; display: flex; flex-direction: column; background: var(--surface); }
+.update-source {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--surface-2);
+  color: var(--muted); font-size: 11.5px; line-height: 1.4;
 }
-/* 无 JS 兜底：菜单留在 combobox 内时按祖先定位（会被祖先裁剪，仅保证不彻底漏出）。 */
-.update-version-combobox .update-version-menu { position: absolute; top: calc(100% + 4px); left: 0; right: 0; }
-/* popover 顶层宿主：只作为定位容器，不得产生任何可交互/可绘制区域，
-   否则它会在 dialog 之上铺一层看不见的拦截（菜单之外的点击会被吞掉）。 */
-.update-version-menu-host { display: contents; margin: 0; border: 0; padding: 0; background: transparent; overflow: visible; }
-.update-version-menu[hidden] { display: none; }
-.update-version-option { min-height: 32px; display: flex; align-items: center; padding: 4px 8px; border-radius: var(--r-sm); color: var(--text); font-size: 13px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.update-version-option:hover, .update-version-option[aria-selected="true"] { background: rgba(var(--brand-500-rgb), .16); color: var(--accent); }
+.update-source span { min-width: 0; overflow-wrap: anywhere; }
+.update-source-refresh {
+  flex: none; padding: 2px 8px; border: 1px solid var(--line); border-radius: var(--r-full);
+  background: transparent; color: var(--accent); font: inherit; font-size: 11.5px; cursor: pointer;
+}
+.update-source-refresh:disabled { opacity: .55; cursor: default; }
+.update-side-head { padding: 9px 10px 8px; border-bottom: 1px solid var(--line); }
+.update-side-count { margin: 0 0 6px; font-size: 11px; color: var(--muted); }
+.update-version-search { position: relative; display: block; }
+.update-version-search svg {
+  position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
+  width: 13px; height: 13px; fill: none; stroke: var(--muted); stroke-width: 1.8; pointer-events: none;
+}
+.update-version-search input {
+  width: 100%; height: 30px; padding: 0 9px 0 27px;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--text); font: inherit; font-size: 12.5px;
+}
+.update-version-search input:focus { border-color: var(--accent); outline: none; }
+.update-version-list {
+  flex: 1 1 auto; min-height: 0; max-height: 296px; overflow-y: auto;
+  padding: 6px; display: flex; flex-direction: column; gap: 2px;
+}
+.update-version-item {
+  display: flex; align-items: center; gap: 6px; width: 100%; padding: 7px 9px;
+  border: 0; border-radius: var(--r-sm); background: transparent; color: var(--text);
+  font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
+}
+.update-version-item:hover { background: var(--surface-2); }
+.update-version-item:disabled { opacity: .6; cursor: default; }
+.update-version-item[aria-selected="true"] { background: var(--accent-soft); color: var(--accent); box-shadow: inset 2px 0 0 var(--accent); }
+.update-version-name { min-width: 0; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.update-version-badge {
+  flex: none; padding: 0 5px; border: 1px solid var(--line); border-radius: var(--r-full);
+  color: var(--muted); font-size: 10px; line-height: 15px;
+}
+.update-version-badge.is-latest { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.update-version-badge.is-current { color: var(--muted); border-color: var(--line); background: var(--surface-2); }
+.update-version-date { margin-left: auto; flex: none; color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.update-version-empty { margin: 0; padding: 18px 12px; text-align: center; color: var(--muted); font-size: 12px; }
+.update-notes-panel { min-width: 0; display: flex; flex-direction: column; background: var(--surface); }
+.update-notes-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+.update-notes-head b { font-size: 13px; }
+.update-notes-date { color: var(--muted); font-size: 11.5px; }
+.update-notes-badge {
+  padding: 0 5px; border: 1px solid var(--accent); border-radius: var(--r-full);
+  color: var(--accent); background: var(--accent-soft); font-size: 10px; line-height: 15px;
+}
+.update-notes-link { margin-left: auto; color: var(--accent); font-size: 11.5px; text-decoration: none; }
+.update-notes-link:hover { text-decoration: underline; }
+.update-notes-body { flex: 1 1 auto; min-height: 0; max-height: 296px; overflow-y: auto; padding: 11px 12px 13px; }
+.update-notes-title { margin: 0 0 8px; font-size: 13px; font-weight: 600; line-height: 1.6; }
+.update-notes-body ul { margin: 0; padding: 0; list-style: none; }
+.update-notes-body li { position: relative; margin-bottom: 6px; padding-left: 15px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.update-notes-body li::before { content: ""; position: absolute; left: 4px; top: 8px; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); }
+.update-notes-body li:last-child { margin-bottom: 0; }
+.update-notes-empty { margin: 0; padding: 24px 12px; text-align: center; color: var(--muted); font-size: 12px; }
 .update-status p { margin: 0; padding: 12px; background: var(--surface); color: var(--muted); font-size: 13px; line-height: 1.5; }
 .update-actions { justify-content: flex-start; margin: 14px 0; }
 .toast {
@@ -3053,6 +3081,7 @@ body { font-family: var(--font-sans); }
 
 /* ── 键值表（「数据与迁移」信息块 / 「软件更新」状态块） ── */
 .settings-dialog .update-status { border-radius: var(--set-r-card); }
+.settings-dialog .update-browser { border-radius: var(--set-r-card); }
 .settings-dialog .update-status > div { min-height: 48px; padding: 11px 14px; }
 .settings-dialog .update-status b { font-weight: 600; }
 
@@ -3078,6 +3107,10 @@ body { font-family: var(--font-sans); }
   .settings-dialog .appearance-theme-options .appearance-option { padding: 8px 9px; }
   .settings-dialog .appearance-theme-options .appearance-option small { display: none; }
   .settings-dialog .skin-option { padding: 8px 10px; }
+  /* 「软件更新」两栏在窄屏收成上下两栏：版本列表限高，说明接在其下。 */
+  .update-browser { grid-template-columns: minmax(0, 1fr); }
+  .update-version-list { max-height: 180px; }
+  .update-notes-body { max-height: 220px; }
 }
 
 /* ---- 用量统计（设置页）---- */

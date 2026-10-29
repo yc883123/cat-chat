@@ -332,10 +332,12 @@ class EventPayload(TypedDict, total=False):
     # 完整消息，前端要靠它在收尾瞬间把种子消息预填进输入框（重载路径只画分割线、不填）。
     session_start: dict[str, Any]
     # 自动压缩上下文（compaction 事件）：action=hint / compacted；region_messages 与
-    # freed_est 是整理条数与预计释放量（前端 toast 与整理卡摘要用）。
+    # freed_est 是整理条数与预计释放量（前端 toast 与整理卡摘要用）；attempts 是失败时
+    # 每次总结尝试的输入/输出规模与原因类别（旁路诊断，只进事件流，不进模型请求）。
     action: str
     region_messages: int
     freed_est: int
+    attempts: list[dict[str, Any]]
     # 存量形态（v24 前的 cancelled/error 事件会带，新契约不再发射；前端仍容忍重放旧事件流）。
     partial_message: dict[str, Any]
     # 工具流
@@ -442,7 +444,7 @@ EVENT_PAYLOAD_KEYS: dict[str, frozenset[str] | None] = {
     "run_failed": frozenset({"error"}),
     "context_full": frozenset({"limit", "used", "budget"}),
     # 自动整理：action=hint / started / compacted / failed；region_messages/freed_est 为摘要信息。
-    "compaction": frozenset({"action", "region_messages", "freed_est", "used", "limit", "message", "reason"}),
+    "compaction": frozenset({"action", "region_messages", "freed_est", "used", "limit", "message", "reason", "attempts"}),
     # done **不带** `message`：终态消息由前端收尾时重载会话（GET /api/conversations/<id>）
     # 拿到，事件里带着它等于把整份消息（含 metadata.trace，实测最长 318KB）写进 run_events
     # 再被终态瘦身删掉。这里只放"只有事件能给的即时动作"字段。

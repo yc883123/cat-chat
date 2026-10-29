@@ -164,6 +164,30 @@ class RequestPrefixStabilityTests(unittest.TestCase):
         # 紧凑结果不回传帧路径清单
         self.assertNotIn("frame_000001.png", compact)
 
+    def test_compaction_hook_wiring_does_not_change_payload(self) -> None:
+        """自动整理接线的硬门槛：compact_context 钩子在 run_context 里存在与否、
+        以及它在未触发时返回空，都不得改变模型实际收到的任何字节。"""
+        allowed = _standard_tools(with_exact=True)
+        plain = self._capture("逐帧导出", allowed)
+        # 与 run/chat.py 相同的接线：非 aux 会话总会挂上 compact_context（本例它不触发）。
+        model = _CapturingModel()
+        worker = SkillAgent(_EmptyCatalog(), self.executor, model, None)
+        worker.run(
+            "逐帧导出", [], PROFILE, {"stream": False, "max_tokens": 64, "max_steps": 1},
+            {"mode": "auto", "skill_ids": []}, [], "", allowed,
+            lambda _payload: None, None,
+            tool_registry=self.registry,
+            run_context={
+                "run_id": "probe", "conversation_id": "probe",
+                "executor": self.executor, "workspace_dir": str(self.workspace),
+                "confirmation_ui": True,
+                "compact_context": lambda messages, trace_start, limit, budget, used: {},
+            },
+        )
+        hooked = model.calls[0]
+        self.assertEqual(self._sha(plain["messages"]), self._sha(hooked["messages"]))
+        self.assertEqual(self._sha(plain["tools"]), self._sha(hooked["tools"]))
+
 
 if __name__ == "__main__":
     unittest.main()

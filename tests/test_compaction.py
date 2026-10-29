@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from naiba.core import compaction  # noqa: E402
+from naiba.core.exceptions import TaskCancelled  # noqa: E402
 from naiba.core.history import (  # noqa: E402
     COMPACTION_REPLAY_PREAMBLE,
     build_model_history,
@@ -157,15 +158,19 @@ class CompactionSummaryRequestTests(unittest.TestCase):
         ]
         messages = compaction.build_summary_messages(history)
         self.assertEqual(messages[-1]["role"], "user")
-        self.assertIn("交接总结", messages[-1]["content"])
+        self.assertIn("交接", messages[-1]["content"])
         self.assertEqual([m["role"] for m in messages[:3]], ["user", "assistant", "tool"])
         self.assertEqual(messages[2]["tool_call_id"], "t1", "工具调用结构必须带上")
 
-    def test_instruction_covers_all_required_sections(self):
+    def test_instruction_covers_handoff_aspects_without_fixed_headings(self):
         instruction = compaction.SUMMARIZE_INSTRUCTION
-        for keyword in compaction.REQUIRED_SECTION_KEYWORDS:
-            self.assertIn(keyword, instruction, f"指令必须覆盖分区：{keyword}")
+        # 要交代哪些方面必须点到；但**不再**要求固定标题/分区名照抄（按关键词卡标题
+        # 会反复误拒措辞不同但内容完整的摘要，冻结版实测连续 summary_missing_sections）。
+        for keyword in ("目标", "限制", "事实", "决定", "路径", "接下来"):
+            self.assertIn(keyword, instruction, f"指令必须覆盖交接方面：{keyword}")
         self.assertIn("<compacted-summary>", instruction, "必须要求合并旧摘要")
+        self.assertNotIn("分区名原样照抄", instruction)
+        self.assertNotIn("九个分区", instruction)
 
     def test_images_become_text_markers(self):
         history = [{"role": "user", "content": [
@@ -181,7 +186,7 @@ class CompactionSummaryRequestTests(unittest.TestCase):
     def test_empty_history_still_returns_instruction(self):
         messages = compaction.build_summary_messages([])
         self.assertEqual(len(messages), 1)
-        self.assertIn("交接总结", messages[0]["content"])
+        self.assertIn("交接", messages[0]["content"])
 
 
 GOOD_SUMMARY = """## 当前目标
@@ -223,21 +228,56 @@ class CompactionValidationTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "summary_too_short")
 
-    def test_unstructured_prose_rejected(self):
-        prose = "这是一段没有分区的散文，" * 20
-        ok, reason = compaction.validate_summary(prose)
-        self.assertFalse(ok)
-        self.assertTrue(
-            reason == "summary_not_structured" or reason.startswith("summary_missing_sections"),
-            reason,
+    def test_reworded_headings_pass(self):
+        """措辞变了但内容完整的交接照样通过：校验只判可用性，不卡固定标题。"""
+        reworded = (
+            "# 任务\n\n把打标器的任务删除功能做完并补齐测试。\n\n"
+            "# 用户怎么说的\n\n「UI 文案要用户视角，不要实现视角术语。」\n\n"
+            "# 查明了什么\n\n标注库按内容 + 配置指纹全局复用（naiba/labeler/jobs.py）。\n\n"
+            "# 定下来的\n\n删除任务不动 annotations，理由是历史统计还要用。\n\n"
+            "# 现在到哪了\n\n后端接口与前端按钮已完成并手测通过。\n\n"
+            "# 还欠什么\n\n浏览器冒烟没跑；批量选择是否要做等用户确认。\n\n"
+            "# 接下来\n\n跑全量单测。"
         )
+        ok, reason = compaction.validate_summary(reworded)
+        self.assertTrue(ok, reason)
 
-    def test_missing_sections_rejected(self):
-        # 有标题但只覆盖一两个分区：不合格。
-        partial = "## 目标\n- 做点事\n\n## 下一步\n- 继续\n" + "补充说明。" * 60
-        ok, reason = compaction.validate_summary(partial)
+    def test_plain_prose_passes_if_usable(self):
+        """没有 Markdown 标题但内容可用的长摘要也放行（不再以「结构化」误拒）。"""
+        prose = (
+            "任务是把打标器的删除功能做完。用户要求 UI 文案用用户视角。" 
+            "已确认标注库按内容加配置指纹全局复用。已决定删除任务不动 annotations。"
+        ) * 2
+        ok, reason = compaction.validate_summary(prose)
+        self.assertTrue(ok, reason)
+
+    def test_apology_refusal_rejected(self):
+        padded = "抱歉，我做不到你要求的输出。" + "补充说明内容。" * 30
+        ok, reason = compaction.validate_summary(padded)
         self.assertFalse(ok)
-        self.assertTrue(reason.startswith("summary_missing_sections"), reason)
+        self.assertEqual(reason, "summary_refusal")
+
+    def test_cannot_summarize_refusal_rejected(self):
+        padded = "我无法总结这段对话的内容。" + "补充说明内容。" * 30
+        ok, reason = compaction.validate_summary(padded)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "summary_refusal")
+
+    def test_role_disclaimer_refusal_rejected(self):
+        padded = "作为一个AI助手，我不能继续这次任务。" + "补充说明内容。" * 30
+        ok, reason = compaction.validate_summary(padded)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "summary_refusal")
+
+    def test_business_unreachable_is_not_refusal(self):
+        """正文里「无法登录」「无法处理」是业务陈述，不能误判成拒答。"""
+        summary = (
+            "当前目标是排查登录失败。用户报告：合法账号无法登录，且该账号此前也无法处理图片上传。"
+            "已核实服务日志出现 500。已决定先看网关层。已完成日志抓取。还欠链路追踪。"
+            "关键路径 /var/log/gateway.log。下一步用 grep 过滤 500。"
+        )
+        ok, reason = compaction.validate_summary(summary)
+        self.assertTrue(ok, reason)
 
     def test_too_long_rejected(self):
         ok, reason = compaction.validate_summary(GOOD_SUMMARY + "x" * 30000)
@@ -264,22 +304,29 @@ class _FakeStorage:
 
 
 class _FakeModels:
-    def __init__(self, reply=None, raises=None):
+    def __init__(self, reply=None, raises=None, script=None):
         self.reply = reply
         self.raises = raises
+        # script：逐次消耗的「回复或异常」序列；耗尽后回落到 reply/raises。
+        self.script = list(script or [])
         self.calls = []
 
     def complete(self, profile, messages, options, status=None):
         self.calls.append({"profile": profile, "messages": messages, "options": options})
+        if self.script:
+            step = self.script.pop(0)
+            if isinstance(step, Exception):
+                raise step
+            return step
         if self.raises:
             raise self.raises
         return self.reply
 
 
 class _FakeApp:
-    def __init__(self, reply=None, raises=None):
+    def __init__(self, reply=None, raises=None, script=None):
         self.storage = _FakeStorage()
-        self.models = _FakeModels(reply=reply, raises=raises)
+        self.models = _FakeModels(reply=reply, raises=raises, script=script)
         self.config = None
 
 
@@ -346,6 +393,7 @@ class CompactionCompactConversationTests(unittest.TestCase):
         self.assertFalse(result["compacted"])
         self.assertEqual(result["reason"], "summary_too_short")
         self.assertEqual(self.app.storage.calls, [])
+        self.assertEqual(len(self.app.models.calls), 1, "校验失败不重试：同一输入重发只多花钱")
 
     def test_region_too_small_writes_nothing(self):
         result = self._compact(rows=self._rows(turns=1))
@@ -379,9 +427,169 @@ class CompactionCompactConversationTests(unittest.TestCase):
         self.assertEqual(result["reason"], "marker_write_failed")
 
     def test_cancel_event_passed_to_request(self):
-        token = mock.Mock()
+        token = mock.Mock(is_set=lambda: False)
         self._compact(cancel_event=token)
         self.assertIs(self.app.models.calls[0]["options"]["cancel_event"], token)
+
+    def test_summary_request_options_are_independent_and_clean(self):
+        """输出预算独立于正常回复；请求 options 只带 stream/max_tokens/cancel_event，
+        诊断元数据不得混进请求。"""
+        self._compact(cancel_event=mock.Mock(is_set=lambda: False))
+        options = self.app.models.calls[0]["options"]
+        self.assertEqual(
+            set(options) - {"cancel_event"}, {"stream", "max_tokens"},
+            "总结请求 options 不得夹带诊断/窗口字段",
+        )
+        self.assertFalse(options["stream"])
+        self.assertEqual(options["max_tokens"], self.settings["summary_max_tokens"])
+
+
+class CompactionRecoveryTests(unittest.TestCase):
+    """有界恢复：只有「明确超窗口 + 区间真的变小」才允许重试；其余失败一次终止。"""
+
+    OVERFLOW = RuntimeError(
+        "This model's maximum context length is 4096 tokens. "
+        "However, your messages resulted in 5200 tokens."
+    )
+
+    def setUp(self):
+        self.settings = compaction.resolve_settings({"retain_turns": 1})
+        self.profile = {"kind": "online", "model": "probe-default",
+                        "model_key": "online:probe-te", "context_window": 8000}
+
+    def _rows(self, turns=6):
+        filler = "这是一段较长的历史正文，用来模拟真实长会话里的大段工具输出与讨论。" * 20
+        rows = []
+        for turn in range(turns):
+            rows.append(_row("user", f"第{turn}轮：{filler}", row_id=f"u{turn}"))
+            rows.append(_row("assistant", f"第{turn}轮回复：{filler}", row_id=f"a{turn}"))
+        return rows
+
+    def _compact(self, app, **overrides):
+        kwargs = dict(
+            conversation_id="c1", rows=self._rows(), settings=self.settings,
+            profile=self.profile, model_key="online:probe-te", model_name="probe-default",
+            limit=8000, used=7000,
+        )
+        kwargs.update(overrides)
+        return compaction.compact_conversation(app, **kwargs)
+
+    def test_shrink_boundary_cuts_before_a_user_row(self):
+        rows = self._rows()
+        new_end = compaction.shrink_boundary(rows, 9)
+        self.assertEqual(rows[new_end + 1]["role"], "user", "切点后必须从一轮提问开始，不能劈开轮次")
+        self.assertGreater(compaction.MIN_REGION_MESSAGES, 0)
+        self.assertLess(new_end, 9, "区间必须真的变小")
+
+    def test_shrink_boundary_returns_negative_when_unsplittable(self):
+        rows = self._rows(turns=1)
+        self.assertEqual(compaction.shrink_boundary(rows, 1), -1)
+
+    def test_overflow_retries_with_shrunk_region_then_succeeds(self):
+        app = _FakeApp(script=[self.OVERFLOW, GOOD_SUMMARY])
+        rows = self._rows()
+        result = self._compact(app, rows=rows)
+        self.assertTrue(result["compacted"], result)
+        self.assertEqual(len(app.models.calls), 2, "溢出后允许一次「区间收窄」的恢复")
+        first_inputs = compaction.estimate_messages_tokens(app.models.calls[0]["messages"])
+        second_inputs = compaction.estimate_messages_tokens(app.models.calls[1]["messages"])
+        self.assertLess(second_inputs, first_inputs, "重试前输入必须实际变小")
+        # 标记落在收窄后区间的最后一条上；被收窄掉的部分留在重放区，原文不丢。
+        self.assertEqual(app.storage.calls[0][1], "a1")
+        self.assertLess(result["region_messages"], 10)
+        self.assertEqual([item["reason"] for item in result["attempts"]],
+                         ["context_overflow", "accepted"])
+
+    def test_overflow_recovery_is_bounded(self):
+        app = _FakeApp(script=[self.OVERFLOW, self.OVERFLOW, self.OVERFLOW])
+        result = self._compact(app)
+        self.assertFalse(result["compacted"])
+        self.assertEqual(result["reason"], "summary_failed:RuntimeError")
+        self.assertEqual(len(app.models.calls), compaction.MAX_SUMMARY_ATTEMPTS)
+        self.assertEqual(len(result["attempts"]), compaction.MAX_SUMMARY_ATTEMPTS)
+        self.assertEqual(app.storage.calls, [], "失败不得留下任何标记")
+        inputs = [item["input_tokens"] for item in result["attempts"]]
+        self.assertEqual(inputs, sorted(inputs, reverse=True), "每次尝试的输入必须递减")
+
+    def test_overflow_without_splittable_region_does_not_retry(self):
+        app = _FakeApp(raises=self.OVERFLOW)
+        result = self._compact(app, rows=self._rows(turns=2), force=True)
+        self.assertFalse(result["compacted"])
+        self.assertEqual(len(app.models.calls), 1, "区间没法再收窄时不得重发同一输入")
+        self.assertEqual(app.storage.calls, [])
+
+    def test_non_overflow_runtime_error_never_retries(self):
+        app = _FakeApp(raises=RuntimeError("HTTP 502 Bad Gateway"))
+        result = self._compact(app)
+        self.assertFalse(result["compacted"])
+        self.assertEqual(result["reason"], "summary_failed:RuntimeError")
+        self.assertEqual(len(app.models.calls), 1, "非溢出失败不重试：同输入重发是盲目烧钱")
+        self.assertEqual(app.storage.calls, [])
+        self.assertEqual(result["attempts"][0]["reason"], "RuntimeError")
+
+    def test_attempts_carry_input_and_output_scale(self):
+        app = _FakeApp(script=[self.OVERFLOW, GOOD_SUMMARY])
+        result = self._compact(app)
+        for item in result["attempts"]:
+            self.assertIn("input_tokens", item)
+            self.assertIn("output_tokens", item)
+            self.assertIn("region_messages", item)
+            self.assertGreater(item["input_tokens"], 0)
+
+    def test_cancelled_before_request_raises(self):
+        app = _FakeApp(reply=GOOD_SUMMARY)
+        cancel = mock.Mock(is_set=lambda: True)
+        with self.assertRaises(TaskCancelled):
+            self._compact(app, cancel_event=cancel)
+        self.assertEqual(app.models.calls, [], "已取消时连总结请求都不该发")
+        self.assertEqual(app.storage.calls, [])
+
+    def test_cancelled_mid_request_raises(self):
+        app = _FakeApp(raises=RuntimeError("任务已取消"))
+        cancel = mock.Mock(is_set=lambda: True)
+        with self.assertRaises(TaskCancelled):
+            self._compact(app, cancel_event=cancel)
+        self.assertEqual(app.storage.calls, [])
+
+    def test_plain_failure_without_cancel_stays_fail_open(self):
+        """运行时失败（非取消）：不抛断本轮对话，只按失败收场、不动对话。"""
+        app = _FakeApp(raises=RuntimeError("HTTP 502"))
+        cancel = mock.Mock(is_set=lambda: False)
+        result = self._compact(app, cancel_event=cancel)
+        self.assertFalse(result["compacted"])
+        self.assertEqual(app.storage.calls, [])
+
+
+class CompactionFailureHistoryTests(unittest.TestCase):
+    """失败不改前缀：任何失败路径之后，重放出的模型历史必须与整理前逐字节一致。"""
+
+    def _rows(self):
+        filler = "较长的历史正文。" * 40
+        rows = []
+        for turn in range(4):
+            rows.append(_row("user", f"第{turn}轮：{filler}", row_id=f"u{turn}"))
+            rows.append(_row("assistant", f"第{turn}轮回复：{filler}", row_id=f"a{turn}"))
+        return rows
+
+    def test_failed_compaction_keeps_history_bytes_identical(self):
+        from naiba.core.history import build_model_history as build
+
+        rows = self._rows()
+        before = build_model_history(rows)
+        settings = compaction.resolve_settings({"retain_turns": 1})
+        app = _FakeApp(raises=RuntimeError("HTTP 502"))
+        result = compaction.compact_conversation(
+            app, conversation_id="c1", rows=rows, settings=settings,
+            profile={"kind": "online", "model": "probe"}, model_key="online:p",
+            model_name="probe", limit=8000, used=7000,
+        )
+        self.assertFalse(result["compacted"])
+        self.assertEqual(app.storage.calls, [])
+        self.assertEqual(
+            [(m["role"], str(m.get("content"))) for m in build(rows)],
+            [(m["role"], str(m.get("content"))) for m in before],
+            "整理失败后原历史必须原样重放（请求前缀不得变化）",
+        )
 
 
 class CompactionReplayTests(unittest.TestCase):
@@ -601,6 +809,7 @@ class CompactionHookTests(unittest.TestCase):
             cancel_event=mock.Mock(is_set=lambda: False),
         )
         kwargs.update(overrides)
+        self.last_event = kwargs["event"]
         return self.mixin._maybe_compact_context(**kwargs)
 
     def test_off_mode_does_nothing(self):
@@ -629,6 +838,9 @@ class CompactionHookTests(unittest.TestCase):
         result = self._call(history=short)
         self.assertEqual(result, {})
         self.mixin.app.models.complete.assert_not_called()
+        # 硬门槛：未触发整理时零请求差异——不发事件、不碰存储。
+        self.last_event.assert_not_called()
+        self.mixin.app.storage.merge_message_metadata.assert_not_called()
 
     def test_in_loop_check_accepts_production_keyword_arguments(self):
         from naiba.run.chat import ConversationRunMixin
@@ -687,6 +899,11 @@ class CompactionHookTests(unittest.TestCase):
                        if call.args[0].get("action") == "failed")
         self.assertEqual(payload["reason"], "marker_write_failed")
         self.assertIn("本轮将沿用原上下文继续", payload["message"])
+        # 尝试诊断是旁路数据：只进事件流，绝不进会话消息或后续请求。
+        self.assertIsInstance(payload.get("attempts"), list)
+        for message in self.mixin.app.models.complete.call_args[0][1]:
+            self.assertNotIn("attempts", message)
+            self.assertNotIn("region_tokens", message)
 
     def test_auto_mode_uses_same_profile_and_reports_rebuild(self):
         self.mixin.app.config.data = {"auto_compaction": {"mode": "auto", "threshold_percent": 30}}

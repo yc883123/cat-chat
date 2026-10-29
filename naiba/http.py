@@ -990,13 +990,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "freed_too_small": "摘要没有比原文更短，整理没有意义",
                 "summary_too_short": "模型返回的交接总结太短，没有采用",
                 "summary_too_long": "模型返回的交接总结过长，没有采用",
-                "summary_not_structured": "模型返回的内容不是结构化交接格式，没有采用",
+                "summary_refusal": "模型没有按要求输出交接总结，没有采用",
                 "marker_write_failed": "保存整理结果失败",
             }.get(str(result.get("reason") or ""), "")
             if not result.get("compacted") and str(result.get("reason") or "").startswith("summary_failed"):
                 reason_text = "总结请求失败，本轮没有整理"
-            if not result.get("compacted") and str(result.get("reason") or "").startswith("summary_missing_sections"):
-                reason_text = "模型返回的交接总结缺少关键分区，没有采用"
             payload = {"ok": bool(result.get("compacted")), **result}
             if reason_text:
                 payload["message"] = reason_text

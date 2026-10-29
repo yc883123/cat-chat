@@ -14,8 +14,11 @@
   不是只总结原始消息。
 - **保留完整轮次**：保留最近 N 个完整轮次（一条 user 消息及其后的全部内容）原文，
   不按消息行数硬切。
-- **失败 fail-open**：请求失败、输出不合格（缺分区 / 过短 / 没变短）都不写标记，
-  本轮按原历史继续。
+- **失败 fail-open**：请求失败、输出不合格（过短 / 拒答 / 没变短）都不写标记，
+  本轮按原历史继续；失败绝不改写、裁剪原历史。
+- **恢复有界且只认真实缩减**：摘要请求报「输入超窗口」时，允许把被总结区间向前收窄
+  （被收窄掉的部分作为原样消息继续重放，不丢内容）后重试；其他失败一律不重试——
+  同一输入、同一提示重发只会再花一次钱。
 
 纯逻辑与编排都在这里；``run/chat.py`` 负责在 ``build_model_history`` 之后调用。
 """
@@ -26,6 +29,7 @@ import re
 import time
 from typing import Any
 
+from naiba.core.exceptions import TaskCancelled
 from naiba.core.history import build_model_history, local_brain
 from naiba.core.messages import MetadataKeys
 
@@ -50,11 +54,18 @@ LEGACY_SETTING_KEYS = frozenset({"digest_max_chars", "retain_messages"})
 # 摘要正文的长度闸门：太短说明没按要求输出，太长说明它在抄原文（白花一次请求）。
 MIN_SUMMARY_CHARS = 120
 MAX_SUMMARY_CHARS = 20000
-# 交接摘要必须覆盖的分区关键词：至少命中这么多个才算合格（容忍措辞差异，不卡死标题）。
-REQUIRED_SECTION_KEYWORDS: tuple[str, ...] = (
-    "目标", "约束", "事实", "决定", "进度", "待办", "路径", "不确定",
+# 拒答识别只看**开头**：交接材料不可能以道歉或「我无法总结」开场；正文里出现
+# 「无法登录」「无法处理」这类业务陈述不算拒答（按全文匹配会误杀正常摘要）。
+_REFUSAL_APOLOGY_RE = re.compile(r"^\s*(?:好的|好的[，,])?\s*(?:抱歉|对不起|很抱歉|不好意思)")
+_REFUSAL_CANNOT_RE = re.compile(
+    r"^\s*(?:我|本模型|AI|作为AI)?\s*(?:无法|不能|没法|难以)[^。\n]{0,12}"
+    r"(?:总结|摘要|概括|交接|输出|生成)"
 )
-MIN_SECTION_HITS = 4
+_REFUSAL_ROLE_RE = re.compile(r"作为(?:一个)?(?:AI|人工智能|语言模型|助手)")
+
+# 摘要请求最多发几次：1 次正常尝试 + 最多 2 次「区间实际收窄后」的恢复。
+# 只有「明确报输入超窗口、且区间真的变小了」才允许进入下一次；其余失败一次终止。
+MAX_SUMMARY_ATTEMPTS = 3
 
 # 区间下限：太小不值得花一次请求，也不该重置前缀缓存。
 MIN_REGION_MESSAGES = 2
@@ -177,43 +188,27 @@ def _looks_like_image(name: str) -> bool:
 
 # ---- 总结请求 ----
 
-# 结构化交接分区：总结请求的固定指令。分区名会同时用于格式校验（关键词命中）。
-SUMMARIZE_INSTRUCTION = """你现在负责给这段对话做一次交接总结：把上面的内容压缩成一份结构化交接材料，让另一个模型能无缝接续工作。
+# 交接材料指令：只规定**要交代哪些方面**，不规定固定标题——按关键词命中数卡标题
+# 会把措辞不同但内容完整的合格摘要拒之门外（实测多次 summary_missing_sections /
+# summary_not_structured 误拒），可用性交给 validate_summary 的长度与拒答闸门。
+SUMMARIZE_INSTRUCTION = """你现在负责给这段对话做一次交接：把上面的内容压缩成一份给「接手者」看的交接材料，读它的人要能不看原对话就直接继续工作。
 
-严格按下面九个分区输出（用 Markdown 二级标题，分区名原样照抄，顺序不变；某个分区没有内容就写“(无)”，绝不能省略分区）：
+材料需要交代清楚下面这些方面（有内容的写，没有的略过；标题措辞和组织方式自定，不必照抄任何固定格式，但要让人一眼能找到对应内容）：
 
-## 当前目标
-- 用户现在到底要完成什么；目标变过的话按时间顺序说明怎么变的。
-
-## 用户约束
-- 用户明确提出的限制、偏好、禁止事项、必须遵守的口径（原文关键处直接引用）。
-
-## 已确认事实
-- 已经核实过的结论、数据、环境信息（区分「已验证」与「推测」）。
-
-## 已作决定
-- 已经拍板的选择及其理由；被否决的方案也要写，避免后面重复讨论。
-
-## 完成进度
-- 哪些已经做完并且确认有效。
-
-## 待办事项
-- 还没做、做了一半、或需要回头补的事项。
-
-## 关键工具结果与文件路径
-- 重要的命令输出结论、文件绝对路径、函数名、配置项、报错原文。
-- 路径、标识符、数值、报错字符串必须原样保留，不要改写或省略。
-
-## 尚不确定的事项
-- 存疑的结论、待用户确认的问题、可能出错的地方。
-
-## 下一步
-- 紧接着该做的第一件事（没有就写“(无)”）。
+- 当前的任务目标是什么，中途变过没有；
+- 用户定下的要求、限制和偏好（关键处直接引用原话）；
+- 已经核实过的事实、数据、环境信息和文件位置；
+- 已经定下的决定及理由，包括被否决的方案，避免接手者重复讨论；
+- 哪些已经做完并且确认有效；哪些做了一半、失败过、还欠着；
+- 重要的命令输出、报错原文、文件路径、函数名、配置项；
+- 还没解决的问题、存疑的地方，以及接下来该做的第一件事。
 
 规则：
+- 用 Markdown 组织（标题或编号列表都行），不要输出成一大段散文。
+- 路径、标识符、数值、报错字符串必须原样保留，不要改写或省略。
 - 只输出这份交接材料本身：不要调用任何工具，不要写开场白或结束语。
 - 不要提及「总结」「压缩」「摘要」这些动作，也不要说上下文被截断。
-- 上面对话开头若已有一份 <compacted-summary> 旧摘要，它是之前整理的结果：保留其中仍然成立的
+- 上面对话开头若已有一份 <compacted-summary> 旧摘要，它是之前交接的结果：保留其中仍然成立的
   信息，把这次新出现的内容合并进去，输出一份完整的合并版，不要只写新增部分，也不要照抄旧摘要。
 - 用简洁中文；技术名词、路径、命令、代码片段保持原样。"""
 
@@ -255,7 +250,6 @@ def build_summary_messages(region_history: list[dict[str, Any]]) -> list[dict[st
 
 
 _FENCE_RE = re.compile(r"^```[a-zA-Z0-9_-]*\s*\n|\n```$")
-_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s*(.+?)\s*$", re.M)
 
 
 def clean_summary(text: Any) -> str:
@@ -269,23 +263,84 @@ def clean_summary(text: Any) -> str:
 
 
 def validate_summary(summary: str, *, max_chars: int = MAX_SUMMARY_CHARS) -> tuple[bool, str]:
-    """格式与长度校验：不合格就不整理（fail-open，宁可这轮不整理也不写坏标记）。
+    """可用性校验：不合格就不整理（fail-open，宁可这轮不整理也不写坏标记）。
 
-    返回 ``(ok, reason)``。判据：
+    返回 ``(ok, reason)``。只判**能不能用**，不强迫模型逐字输出某套标题——按固定
+    分区关键词命中数卡摘要，会反复误拒措辞不同但内容完整的输出（冻结版实测
+    ``summary_missing_sections`` / ``summary_not_structured`` 连续失败）。判据：
     - 长度在 [MIN_SUMMARY_CHARS, max_chars] 内；
-    - 分区关键词至少命中 MIN_SECTION_HITS 个（容忍模型改写标题措辞）；
-    - 至少有两个 Markdown 标题（确认是结构化输出而不是一段散文）。
+    - 不是拒答或敷衍（交接材料不会以道歉、「我无法总结」开场）。
+    「摘要确实比输入短」由 compact_conversation 的 freed_est 闸门单独把关。
     """
     if len(summary) < MIN_SUMMARY_CHARS:
         return False, "summary_too_short"
     if len(summary) > max_chars:
         return False, "summary_too_long"
-    hits = sum(1 for keyword in REQUIRED_SECTION_KEYWORDS if keyword in summary)
-    if hits < MIN_SECTION_HITS:
-        return False, f"summary_missing_sections({hits})"
-    if len(_HEADING_RE.findall(summary)) < 2:
-        return False, "summary_not_structured"
+    head = summary[:200]
+    if _REFUSAL_APOLOGY_RE.match(head) or _REFUSAL_CANNOT_RE.match(head):
+        return False, "summary_refusal"
+    if _REFUSAL_ROLE_RE.search(head):
+        return False, "summary_refusal"
     return True, ""
+
+
+def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
+    """估算一次总结请求的输入规模（诊断记录用，与 estimate_rows_tokens 同一启发式）。"""
+    total = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        total += estimate_text_tokens(message.get("content"))
+        for call in message.get("tool_calls") or []:
+            if isinstance(call, dict) and isinstance(call.get("function"), dict):
+                total += estimate_text_tokens(call["function"].get("arguments"))
+    return total
+
+
+def _last_output_tokens(app: Any) -> int:
+    """最近一次模型请求的输出 token（旁路诊断，读不到就记 0，绝不影响主流程）。"""
+    usage = getattr(getattr(app, "models", None), "last_usage", None)
+    try:
+        return int((usage or {}).get("output_tokens") or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
+def _is_cancellation(exc: BaseException, cancel_event: Any) -> bool:
+    if isinstance(exc, TaskCancelled):
+        return True
+    if cancel_event is not None and cancel_event.is_set():
+        return True
+    return str(exc) == "任务已取消"
+
+
+def _failure_category(exc: BaseException) -> str:
+    """失败的细分类别（只进诊断记录，不改写对外的 summary_failed:<类型> 原因码）。"""
+    from naiba.llm.stream import ContextOverflowError, is_context_overflow
+
+    if isinstance(exc, ContextOverflowError) or is_context_overflow(str(exc)):
+        return "context_overflow"
+    return type(exc).__name__
+
+
+def shrink_boundary(rows: list[dict[str, Any]], end: int) -> int:
+    """把被整理区间的终点向前挪到「中点附近某个完整轮次」的末尾，返回新终点下标。
+
+    总结请求报输入超窗口时的恢复手段：新区间终点**之前的**消息交给模型总结，
+    之后的（含被收窄掉的部分）原样重放，不丢任何内容。切点必须卡在某条 user 消息
+    的前一行（与 ``retain_boundary`` 同一条不变量），否则重放会出现
+    「tool 结果找不到前面的 tool_calls」这类协议断裂。挪不动返回 -1。
+    """
+    user_indices = [
+        index for index, row in enumerate(rows[: end + 1])
+        if isinstance(row, dict) and str(row.get("role") or "") == "user"
+    ]
+    candidates = [index - 1 for index in user_indices if index > 0]
+    target = end - max(MIN_REGION_MESSAGES, (end + 1) // 2)
+    for candidate in sorted(candidates, key=lambda index: abs(index - target)):
+        if candidate < end and candidate + 1 >= MIN_REGION_MESSAGES:
+            return candidate
+    return -1
 
 
 def build_region_history(
@@ -362,8 +417,14 @@ def compact_conversation(
 ) -> dict[str, Any]:
     """整理一次：隐藏总结请求 → 校验 → 写标记。
 
-    返回 ``{compacted, reason, region_messages, freed_est, summary}``。
+    返回 ``{compacted, reason, region_messages, freed_est, summary, attempts}``。
     只有「请求成功 + 校验通过 + 确实变短」才写标记；其余情况一律不动对话。
+
+    恢复规则（严格有界，见 MAX_SUMMARY_ATTEMPTS）：
+    - 只有「明确报输入超窗口」的失败才允许重试，且每次重试前必须先把被总结区间
+      真实收窄（shrink_boundary），输入没变就不重发——同一输入重试只会再花一次钱；
+    - 校验失败、其他运行时失败、写标记失败都一次终止，不重试；
+    - 每次尝试的输入/输出规模与失败类别记进 ``attempts``（旁路诊断，不进模型请求）。
     """
     boundary = retain_boundary(rows, int(settings.get("retain_turns") or 3))
     if boundary < 0:
@@ -371,53 +432,107 @@ def compact_conversation(
     region_rows = rows[: boundary + 1]
     if len(region_rows) < MIN_REGION_MESSAGES:
         return {"compacted": False, "reason": "region_too_small"}
-    region_tokens = estimate_rows_tokens(region_rows)
-    if not force and region_tokens < MIN_REGION_TOKENS:
+    if not force and estimate_rows_tokens(region_rows) < MIN_REGION_TOKENS:
         return {"compacted": False, "reason": "region_too_small"}
-    region_history = build_region_history(
-        app, region_rows, profile=profile, pdf_tools=pdf_tools, video_tools=video_tools,
-    )
-    if not region_history:
-        return {"compacted": False, "reason": "region_empty"}
-    messages = build_summary_messages(region_history)
+    # 输出预算**独立**于正常回复：摘要请求不挂工具、不流式，max_tokens 只来自
+    # auto_compaction 设置（summary_max_tokens），不继承本轮对话的输出上限。
     options: dict[str, Any] = {
         "stream": False,
         "max_tokens": int(settings.get("summary_max_tokens") or 2048),
     }
     if cancel_event is not None:
         options["cancel_event"] = cancel_event
-    try:
-        raw = app.models.complete(profile, messages, options)
-    except Exception as exc:  # noqa: BLE001 - 总结失败不阻断本轮对话
-        return {"compacted": False, "reason": f"summary_failed:{type(exc).__name__}"}
-    summary = clean_summary(raw)
-    ok, reason = validate_summary(summary, max_chars=MAX_SUMMARY_CHARS)
-    if not ok:
-        return {"compacted": False, "reason": reason}
-    summary_tokens = estimate_text_tokens(summary)
-    freed_est = region_tokens - summary_tokens
-    if freed_est <= 0:
-        # 摘要没比原文短：写了也没释放空间，还白白让前缀失效。
-        return {"compacted": False, "reason": "freed_too_small"}
-    marker_row_id = str(region_rows[-1].get("id") or "")
-    if not marker_row_id:
-        return {"compacted": False, "reason": "missing_marker_row"}
-    payload = marker_payload(
-        summary, source=source, model_key=model_key, model_name=model_name,
-        region_messages=len(region_rows), region_tokens=region_tokens,
-        freed_est=freed_est, limit=limit, used=used,
-    )
-    try:
-        if not app.storage.merge_message_metadata(
-            conversation_id, marker_row_id, {MetadataKeys.COMPACTION: payload},
-        ):
-            return {"compacted": False, "reason": "marker_write_failed"}
-    except Exception:  # noqa: BLE001 - 存储异常按整理失败处理，不动对话
-        return {"compacted": False, "reason": "marker_write_failed"}
-    return {
-        "compacted": True,
-        "region_messages": len(region_rows),
-        "freed_est": freed_est,
-        "summary": summary,
-        "marker_message_id": marker_row_id,
-    }
+
+    def cancelled() -> bool:
+        return cancel_event is not None and cancel_event.is_set()
+
+    attempts: list[dict[str, Any]] = []
+    # current_rows 恒为 rows 的前缀：收窄只挪终点，标记永远落在 current_rows[-1] 上，
+    # 被收窄掉的部分留在重放区，原文一条不丢。
+    current_rows = region_rows
+    while True:
+        if cancelled():
+            raise TaskCancelled("任务已取消")
+        current_tokens = estimate_rows_tokens(current_rows)
+        region_history = build_region_history(
+            app, current_rows, profile=profile, pdf_tools=pdf_tools, video_tools=video_tools,
+        )
+        if not region_history:
+            return {"compacted": False, "reason": "region_empty", "attempts": attempts}
+        messages = build_summary_messages(region_history)
+        input_tokens = estimate_messages_tokens(messages)
+        try:
+            raw = app.models.complete(profile, messages, options)
+        except Exception as exc:  # noqa: BLE001 - 总结失败不阻断本轮对话
+            if _is_cancellation(exc, cancel_event):
+                raise TaskCancelled("任务已取消") from exc
+            category = _failure_category(exc)
+            attempts.append({
+                "region_messages": len(current_rows),
+                "input_tokens": input_tokens,
+                "output_tokens": _last_output_tokens(app),
+                "reason": category,
+            })
+            if category == "context_overflow" and len(attempts) < MAX_SUMMARY_ATTEMPTS:
+                new_end = shrink_boundary(rows, len(current_rows) - 1)
+                if new_end >= 0:
+                    current_rows = rows[: new_end + 1]
+                    continue  # 输入确实变小了，允许这一次有界恢复
+            return {
+                "compacted": False,
+                "reason": f"summary_failed:{type(exc).__name__}",
+                "attempts": attempts,
+            }
+        summary = clean_summary(raw)
+        ok, reason = validate_summary(summary, max_chars=MAX_SUMMARY_CHARS)
+        if not ok:
+            attempts.append({
+                "region_messages": len(current_rows),
+                "input_tokens": input_tokens,
+                "output_tokens": _last_output_tokens(app),
+                "reason": reason,
+            })
+            # 校验失败不重试：同一输入、同一提示重发不会得到不同结果。
+            return {"compacted": False, "reason": reason, "attempts": attempts}
+        summary_tokens = estimate_text_tokens(summary)
+        freed_est = current_tokens - summary_tokens
+        if freed_est <= 0:
+            # 摘要没比原文短：写了也没释放空间，还白白让前缀失效。
+            attempts.append({
+                "region_messages": len(current_rows),
+                "input_tokens": input_tokens,
+                "output_tokens": _last_output_tokens(app),
+                "reason": "freed_too_small",
+            })
+            return {"compacted": False, "reason": "freed_too_small", "attempts": attempts}
+        marker_row_id = str(current_rows[-1].get("id") or "")
+        if not marker_row_id:
+            return {"compacted": False, "reason": "missing_marker_row", "attempts": attempts}
+        payload = marker_payload(
+            summary, source=source, model_key=model_key, model_name=model_name,
+            region_messages=len(current_rows), region_tokens=current_tokens,
+            freed_est=freed_est, limit=limit, used=used,
+        )
+        try:
+            if not app.storage.merge_message_metadata(
+                conversation_id, marker_row_id, {MetadataKeys.COMPACTION: payload},
+            ):
+                return {
+                    "compacted": False, "reason": "marker_write_failed", "attempts": attempts,
+                }
+        except Exception:  # noqa: BLE001 - 存储异常按整理失败处理，不动对话
+            return {"compacted": False, "reason": "marker_write_failed", "attempts": attempts}
+        attempts.append({
+            "region_messages": len(current_rows),
+            "input_tokens": input_tokens,
+            "output_tokens": _last_output_tokens(app),
+            "reason": "accepted",
+        })
+        return {
+            "compacted": True,
+            "region_messages": len(current_rows),
+            "freed_est": freed_est,
+            "summary": summary,
+            "marker_message_id": marker_row_id,
+            "attempts": attempts,
+        }

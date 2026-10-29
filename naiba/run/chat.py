@@ -1514,6 +1514,10 @@ class ConversationRunMixin:
             "type": "compaction", "action": "failed",
             "message": "上下文整理没有完成，本轮将沿用原上下文继续。",
             "reason": str(result.get("reason") or "unknown"),
+            # 每次尝试的输入/输出规模与失败类别：旁路诊断（只进事件流，不进模型请求）。
+            "attempts": [
+                item for item in (result.get("attempts") or []) if isinstance(item, dict)
+            ],
         })
         return {}
 

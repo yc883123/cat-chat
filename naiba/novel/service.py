@@ -2041,7 +2041,9 @@ class NovelService:
             "model_name": model_name,
             "title": title,
             "module": "novel",
-            "origin_label": "创作场",
+            # 显示名已从「创作场」改为「拆书匠」（内部标识 module="novel" 不变）；
+            # 旧任务记录不重写，展示层按 module 统一兼容显示。
+            "origin_label": "拆书匠",
             "user_request": str(body.get("extra_note") or ""),
             "novel": novel_payload,
         }

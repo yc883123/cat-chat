@@ -3,7 +3,7 @@
 
 覆盖：
 - 长文策略：分章节 + 分槽上限 + 摘要链 + 超限明示（截断绝不静默）
-- 任务契约：input 必须带 module=novel / origin_label=创作场 / novel 字段
+- 任务契约：input 必须带 module=novel / origin_label=拆书匠 / novel 字段
 - 分区：module / exclude_module 先过滤再 limit，各分区互不挤占
 - 字段提升：列表 slim 的 module / origin_label 从 input 取（修「来源未记录」）
 - 写回：任务 id 与阶段核对、revision 乐观并发、要素分类拆分
@@ -204,7 +204,7 @@ class TaskFieldPromotionTests(unittest.TestCase):
         store = StudioStore(Path(tmp.name))
         store.create_task({
             "content": "x", "model_key": "online:k", "model_name": "m",
-            "title": "《书》· 要素", "module": "novel", "origin_label": "创作场",
+            "title": "《书》· 要素", "module": "novel", "origin_label": "拆书匠",
         })
 
         # api_tasks 只需要 jobs.tasks；用最小替身装配，不启动整个 App。
@@ -212,9 +212,10 @@ class TaskFieldPromotionTests(unittest.TestCase):
             def __init__(self, backing):
                 self.backing = backing
 
-            def tasks(self, active_only=False, module="", exclude_module=""):
+            def tasks(self, active_only=False, module="", exclude_module="", exclude_modules=""):
                 return self.backing.list_tasks(
                     active_only=active_only, module=module, exclude_module=exclude_module,
+                    exclude_modules=exclude_modules,
                 )
 
         from naiba.studio.service import StudioService
@@ -225,7 +226,7 @@ class TaskFieldPromotionTests(unittest.TestCase):
         self.assertEqual(status, 200)
         row = payload["tasks"][0]
         self.assertEqual(row["module"], "novel", "module 必须从 input 提升")
-        self.assertEqual(row["origin_label"], "创作场", "origin_label 必须从 input 提升")
+        self.assertEqual(row["origin_label"], "拆书匠", "origin_label 必须从 input 提升")
         self.assertEqual(row["title"], "《书》· 要素", "title 必须从 input 提升，否则列表全退化为「生成任务」")
 
     def test_missing_fields_fall_back_to_empty(self):
@@ -238,9 +239,10 @@ class TaskFieldPromotionTests(unittest.TestCase):
             def __init__(self, backing):
                 self.backing = backing
 
-            def tasks(self, active_only=False, module="", exclude_module=""):
+            def tasks(self, active_only=False, module="", exclude_module="", exclude_modules=""):
                 return self.backing.list_tasks(
                     active_only=active_only, module=module, exclude_module=exclude_module,
+                    exclude_modules=exclude_modules,
                 )
 
         from naiba.studio.service import StudioService

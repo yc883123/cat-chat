@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""护栏：创作场阶段四——分块续写（4A）、图谱反哺（4B-1）、分镜生图（4C）。
+"""护栏：拆书匠（module=novel）阶段四——分块续写（4A）、图谱反哺（4B-1）、分镜生图（4C）。
 
 覆盖（对应《2026-10-28-创作场阶段四》计划 §五）：
 
@@ -382,7 +382,8 @@ class Phase4ServiceTests(unittest.TestCase):
         self.assertEqual(task["title"], "《长夜灯》· 分镜生图")
         input_data = task["input"]
         self.assertEqual(input_data["module"], "novel")
-        self.assertEqual(input_data["origin_label"], "创作场")
+        # 显示名已从「创作场」改为「拆书匠」（内部标识 module="novel" 不变）。
+        self.assertEqual(input_data["origin_label"], "拆书匠")
         self.assertEqual(input_data["novel"]["stage"], "storyboard")
         self.assertEqual(input_data["novel"]["scene_ids"], [1, 2])
         self.assertEqual(len(input_data["novel"]["scene_snapshot"]), 2)

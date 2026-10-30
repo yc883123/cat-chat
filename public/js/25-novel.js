@@ -1,5 +1,5 @@
 // ============================================================
-// 25-novel.js —— 工作台「创作场」功能页（小说改编）
+// 25-novel.js —— 工作台「拆书匠」功能页（小说改编，内部标识 module="novel"）
 // 导入 TXT → 自动拆章（零 AI）→ 勾选章节 → 保存为作品 → 原文/改编稿管理 → 生成要素/大纲/剧本 → 导出。
 //
 // 边界（《小说改编工作台总计划》§5.1、§5.6）：
@@ -1786,7 +1786,7 @@ async function refreshStageTasks() {
     novel.tasks = Array.isArray(tasks) ? tasks : [];
   } catch (error) {
     // 读不到任务列表不该挡住生成面板的其它操作，只如实提示。
-    fail("读取创作场任务失败", error);
+    fail("读取拆书匠任务失败", error);
     return;
   }
   renderStagePanel();

@@ -43,10 +43,11 @@ const RESULT_MODES = ["result", "history"];
 // 手机三档：模板 / 参数 / 结果。
 const PANES = ["list", "form", "result"];
 // 侧栏功能页允许值：与后端 config.STUDIO_PAGE_VIEWS 和 index.html 的 data-studio-page 对齐。
-const STUDIO_PAGES = ["library", "labeler", "comfyui", "novel"];
-// 任务分区：模块库看不到创作场（novel）的任务，各分区各 60 条、互不挤占。
-// 创作场页自己请求 `?module=novel`（见 25-novel.js），两边不会串台。
-const STUDIO_TASKS_URL = "/api/studio/tasks?exclude_module=novel";
+const STUDIO_PAGES = ["library", "labeler", "comfyui", "novel", "writer"];
+// 任务分区：模块库看不到拆书匠（novel）与织书台（writer）的任务，各分区各 60 条、互不挤占。
+// 拆书匠页自己请求 `?module=novel`、织书台页请求 `?module=writer`（见 25-novel.js / 27-writer.js），
+// 三边不会串台。
+const STUDIO_TASKS_URL = "/api/studio/tasks?exclude_modules=novel,writer";
 // 标题区最近任务捷径固定最多 3 条；完整列表走侧栏「历史产出」。
 const RECENT_TASK_LIMIT = 3;
 // 列表接口自身最多返回 60 条；这是展示范围提示，不是分页参数。
@@ -1714,9 +1715,14 @@ function taskStatusLabel(status) {
 }
 
 function taskOrigin(task) {
+  const module = String(task.module || "").trim();
+  // 功能页改名后由 module 决定显示名：novel→拆书匠、writer→织书台。
+  // 历史任务 input 里的 origin_label 可能还是旧名「创作场」，展示层统一按 module 映射，
+  // 记录本身不重写。
+  if (module === "novel") return "拆书匠";
+  if (module === "writer") return "织书台";
   const label = String(task.origin_label || "").trim();
   if (label) return label;
-  const module = String(task.module || "").trim();
   // 「全部」是分类导航的汇总项，不是任务的真实来源；module 缺失时不能回退到它。
   const hit = module ? MODULE_TABS.find((m) => m.key === module) : null;
   if (hit) return hit.label;
@@ -2175,7 +2181,7 @@ function locateCurrentStudioEntry() {
   void locateStudioEntry(kind, id, studio.meta.module, { revealList: true });
 }
 
-/** 把当前模板正文发到创作场「分镜生图」，作为它的系统提示词（写法）。
+/** 把当前模板正文发到拆书匠「分镜生图」，作为它的系统提示词（写法）。
  * 跨模块不 import：走 document 自定义事件，25-novel.js 自己接（与造梦机分镜队列同套路）。
  * 自定义模板正在编辑时以编辑框里的现值为准——发过去的就是用户眼前这份。 */
 function sendModuleToStoryboard() {
@@ -2193,7 +2199,7 @@ function sendModuleToStoryboard() {
   document.dispatchEvent(new CustomEvent("naiba:library-to-storyboard", {
     detail: { text, title },
   }));
-  toast(`已把「${title || "模板"}」发送到创作场·分镜生图`);
+  toast(`已把「${title || "模板"}」发送到拆书匠·分镜生图`);
 }
 
 function locateResultTemplate() {

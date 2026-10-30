@@ -30,7 +30,7 @@ const comfyui = {
   drafts: new Map(),       // 主表单用户已填的值 {工作流id|node_id|field_name: value}；重绘与刷新都保留，点「默认」才清
   uploadingSlot: "",       // 正在上传的媒体槽 key（防并发点选；批量拖拽时是各 key 拼接，仍为真值即锁住）
   mediaGroupsCollapsed: {}, // 媒体分组卡折叠状态 {kind: true}；只存内存，不落盘、不进 visible_params
-  storyboardQueue: [],    // 创作场「分镜生图」发来的提示词；只存内存，刷新即清
+  storyboardQueue: [],    // 拆书匠「分镜生图」发来的提示词；只存内存，刷新即清
 };
 
 // ============================================================
@@ -90,7 +90,7 @@ export function bindComfyuiEvents() {
   $("#comfyuiTaskList")?.addEventListener("click", onTaskListClick);
   $("#comfyuiOutputGrid")?.addEventListener("click", onOutputGridClick);
   $("#comfyuiPanes")?.addEventListener("click", onPaneClick);
-  // 分镜队列：创作场跨页交接 + 逐条填入正向提示词。
+  // 分镜队列：拆书匠跨页交接 + 逐条填入正向提示词。
   document.addEventListener("naiba:storyboard-handoff", onStoryboardHandoff);
   $("#comfyuiStoryboardClear")?.addEventListener("click", () => {
     comfyui.storyboardQueue = [];
@@ -2139,7 +2139,7 @@ function onOutputGridClick(event) {
 }
 
 // ============================================================
-// 分镜队列（创作场「分镜生图」跨页交接）：逐条填进正向提示词，不做剪贴板中转。
+// 分镜队列（拆书匠「分镜生图」跨页交接）：逐条填进正向提示词，不做剪贴板中转。
 // 队列只存内存：刷新页面即清空，产物不在这里长期保存。
 // ============================================================
 

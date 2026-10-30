@@ -88,7 +88,11 @@
           </button>
           <button class="studio-page" type="button" aria-current="false" data-studio-page="novel">
             <svg class="studio-page-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4.5h9a3 3 0 0 1 3 3V19H8a3 3 0 0 0-3 3Z"></path><path d="M5 4.5v17.2M8.5 8.5h6M8.5 12h6"></path></svg>
-            <span>创作场</span>
+            <span>拆书匠</span>
+          </button>
+          <button class="studio-page" type="button" aria-current="false" data-studio-page="writer">
+            <svg class="studio-page-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16"></path><path d="M15.5 4.6a2.1 2.1 0 0 1 3 3L9.8 16.8 5.5 18l1.2-4.3Z"></path></svg>
+            <span>织书台</span>
           </button>
         </nav>
       </div>
@@ -323,7 +327,7 @@
               <div class="studio-actions">
                 <button class="primary-button" id="studioGenerate" type="button">生成</button>
                 <button class="control-button" id="studioSendStoryboard" type="button"
-                        title="把这条模板的正文作为创作场「分镜生图」的系统提示词（写法）">发送到分镜生图</button>
+                        title="把这条模板的正文作为拆书匠「分镜生图」的系统提示词（写法）">发送到分镜生图</button>
                 <button class="control-button" id="studioLocateEntry" type="button" hidden>在模板库中定位</button>
                 <button class="control-button" id="studioCustomSave" type="button" hidden>保存修改</button>
                 <button class="control-button" id="studioCustomDelete" type="button" hidden>删除</button>
@@ -604,12 +608,12 @@
                 <button class="control-button tiny" id="comfyuiTestConn" type="button">测试连接</button>
               </div>
               <div class="comfyui-run" id="comfyuiRunSection">
-                <!-- 创作场「分镜生图」发来的提示词队列：逐条填进正向提示词，
+                <!-- 拆书匠「分镜生图」发来的提示词队列：逐条填进正向提示词，
                      不做剪贴板中转。只存内存，刷新页面即清空。 -->
                 <div class="comfyui-storyboard" id="comfyuiStoryboard" hidden>
                   <div class="comfyui-storyboard-head">
                     <strong>分镜队列</strong>
-                    <small>从创作场发来的出图提示词；点「填入」写进正向提示词，填过的会打勾。</small>
+                    <small>从拆书匠发来的出图提示词；点「填入」写进正向提示词，填过的会打勾。</small>
                     <button class="control-button tiny" id="comfyuiStoryboardClear" type="button">清空</button>
                   </div>
                   <div class="comfyui-storyboard-list" id="comfyuiStoryboardList" aria-label="分镜提示词队列"></div>
@@ -690,17 +694,17 @@
           </dialog>
         </div>
 
-        <!-- 创作场（小说改编）：页面结构在这里定稿；交互与渲染由
+        <!-- 拆书匠（小说改编，内部标识 module="novel" 不变）：页面结构在这里定稿；交互与渲染由
              public/js/25-novel.js 接管。页面头放定位与全局操作，
              接着是五个创作阶段，再往下是三栏工作区。 -->
         <div class="studio-page-view" id="studioPageNovel" data-studio-page-view="novel" hidden>
           <!-- 页面头：标题 + 当前作品与阶段 + 全局操作。导入 / 作品 / 导出从左上「作品与章节」
                工具栏搬到这儿，原有 id 全部保留，事件绑定不变；导出菜单跟着按钮进
                .novel-page-actions，以这个容器为定位基准，不再依赖左栏。
-               不再放「工作台 / 创作场」面包屑：上方工作台标识与下方标题已经说明了位置。 -->
+               不再放「工作台 / 拆书匠」面包屑：上方工作台标识与下方标题已经说明了位置。 -->
           <header class="novel-page-head">
             <div class="novel-page-title-row">
-              <h2>创作场</h2>
+              <h2>拆书匠</h2>
               <span class="novel-page-state" id="novelPageState">未打开作品 · 拆章</span>
             </div>
             <div class="novel-page-actions">
@@ -728,7 +732,7 @@
               <button class="novel-stage" type="button" aria-pressed="false" data-novel-stage="storyboard">分镜</button>
             </div>
           </div>
-          <div class="novel-panes" id="novelPanes" role="group" aria-label="创作场分档">
+          <div class="novel-panes" id="novelPanes" role="group" aria-label="拆书匠分档">
             <button class="studio-pane-btn novel-pane-btn" type="button" aria-pressed="false" data-novel-pane="chapters">章节</button>
             <button class="studio-pane-btn novel-pane-btn active" type="button" aria-pressed="true" data-novel-pane="editor">编辑</button>
             <button class="studio-pane-btn novel-pane-btn" type="button" aria-pressed="false" data-novel-pane="preview">预览</button>
@@ -1053,6 +1057,418 @@
             </div>
           </dialog>
           <input type="file" id="novelFileInput" accept=".txt,text/plain" hidden>
+        </div>
+
+        <!-- 织书台（原创写作，内部标识 module="writer"）：页面结构在这里定稿；交互与渲染由
+             public/js/27-writer.js 接管。三阶段（设定 → 大纲 → 正文），
+             三栏：左=作品与目录、中=阶段工作区、右=说明与状态。
+             不放面包屑：上方工作台标识与下方标题已经说明了位置（与拆书匠同一拍板）。 -->
+        <div class="studio-page-view" id="studioPageWriter" data-studio-page-view="writer" hidden>
+          <header class="writer-page-head">
+            <div class="writer-page-title-row">
+              <h2>织书台</h2>
+              <span class="writer-page-state" id="writerPageState">未打开作品</span>
+            </div>
+            <div class="writer-page-actions">
+              <button class="control-button writer-manage-entry" id="writerManageBtn" type="button"
+                      title="集中管理设定、大纲、章节正文与生成记录">管理记录</button>
+              <button class="control-button" id="writerImportBtn" type="button"
+                      title="导入启元的「作品存档.json」，先预览再入库">导入存档</button>
+              <button class="control-button" id="writerBooksBtn" type="button" title="打开已保存的作品列表">作品</button>
+              <button class="control-button" id="writerExportBtn" type="button"
+                      title="导出全书：TXT / Markdown，可附设定与大纲" aria-haspopup="menu"
+                      aria-expanded="false" disabled>导出</button>
+              <div class="writer-export-menu" id="writerExportMenu" role="menu" hidden>
+                <button type="button" role="menuitem" data-writer-export="txt">导出 TXT（全书）</button>
+                <button type="button" role="menuitem" data-writer-export="md">导出 Markdown（全书）</button>
+                <button type="button" role="menuitem" data-writer-export="md-extras">导出 Markdown（含设定与大纲）</button>
+                <p class="writer-hint" id="writerExportNote">导出由浏览器发起下载，通常保存到浏览器默认下载目录。</p>
+              </div>
+              <button class="control-button primary" id="writerNewBookBtn" type="button"
+                      title="从一句话创意开始一本新书">新建作品</button>
+            </div>
+          </header>
+          <div class="writer-stagebar">
+            <div class="writer-stages" id="writerStages" role="group" aria-label="原创写作阶段">
+              <button class="writer-stage active" type="button" aria-pressed="true" data-writer-stage="setup">设定</button>
+              <button class="writer-stage" type="button" aria-pressed="false" data-writer-stage="outline">大纲</button>
+              <button class="writer-stage" type="button" aria-pressed="false" data-writer-stage="draft">正文</button>
+            </div>
+            <span class="writer-stagebar-note">三阶段：先把书写明白，再按章写完</span>
+          </div>
+          <div class="writer-panes" id="writerPanes" role="group" aria-label="织书台分档">
+            <button class="studio-pane-btn writer-pane-btn" type="button" aria-pressed="false" data-writer-pane="book">作品</button>
+            <button class="studio-pane-btn writer-pane-btn active" type="button" aria-pressed="true" data-writer-pane="editor">编辑</button>
+            <button class="studio-pane-btn writer-pane-btn" type="button" aria-pressed="false" data-writer-pane="notes">说明</button>
+          </div>
+          <div class="writer-columns" id="writerColumns" data-writer-pane="editor">
+            <!-- 左：作品与目录 -->
+            <aside class="writer-panel writer-book" aria-label="作品与目录">
+              <div class="writer-panel-head">
+                <strong>作品与目录</strong>
+                <small id="writerTocMeta">还没有打开作品</small>
+              </div>
+              <div class="writer-book-summary" id="writerBookSummary" hidden>
+                <div class="writer-book-title">
+                  <div class="writer-book-cover" id="writerBookCover" aria-hidden="true">织</div>
+                  <div>
+                    <strong id="writerBookTitle">未打开作品</strong>
+                    <small id="writerBookMeta">新建或从「作品」里打开</small>
+                  </div>
+                </div>
+                <div class="writer-book-stats">
+                  <div class="writer-book-stat"><b id="writerStatChapters">0</b><span>章节</span></div>
+                  <div class="writer-book-stat"><b id="writerStatDone">0</b><span>已成稿</span></div>
+                  <div class="writer-book-stat"><b id="writerStatChars">0</b><span>总字数</span></div>
+                </div>
+                <div class="writer-plan-row">
+                  <span>进度</span>
+                  <span class="writer-progress"><i id="writerProgressBar"></i></span>
+                  <span id="writerProgressText">0 / 0</span>
+                </div>
+              </div>
+              <div class="writer-panel-head writer-toc-head">
+                <strong>目录</strong>
+                <small>点一章查看与写作</small>
+              </div>
+              <div class="writer-scroll">
+                <div class="writer-chapter-list" id="writerChapterList" aria-label="章节列表"></div>
+                <p class="writer-empty" id="writerChapterEmpty">还没有打开作品。点右上「新建作品」或「作品」。</p>
+              </div>
+            </aside>
+
+            <!-- 中：当前阶段工作区 -->
+            <section class="writer-panel writer-editor" aria-label="阶段工作区">
+              <div class="writer-panel-head">
+                <strong id="writerEditorHead">设定</strong>
+                <small id="writerEditorHint">先告诉它你要写一本什么书</small>
+              </div>
+              <div class="writer-scroll writer-editor-body" id="writerEditorBody">
+                <div class="writer-placeholder" id="writerEditorPlaceholder">
+                  <strong>还没有打开作品</strong>
+                  <p>点右上「新建作品」从一句话创意开始，或点「作品」打开已保存的书。设定、大纲和正文的每一版都会自动保留，随时可以切回。</p>
+                </div>
+
+                <!-- ===== 阶段一：设定 ===== -->
+                <div class="writer-stage-panel" id="writerSetupPanel" data-writer-stage-panel="setup" hidden>
+                  <div class="writer-stage-group">
+                    <div class="writer-group-head"><strong>故事创意</strong><small>一句话就能开局，写多写少都行</small></div>
+                    <label class="writer-field">一句话创意
+                      <textarea id="writerIdea" rows="3" placeholder="示例：修船工在父亲留下的旧船里，翻出一张二十年前的船员合影，照片上多了一个人。"></textarea>
+                    </label>
+                    <div class="writer-grid-2">
+                      <label class="writer-field">参考作品 / 想靠近的味道
+                        <input type="text" id="writerVibe" placeholder="例：《漫长的季节》那种旧工业城的潮湿感">
+                      </label>
+                      <label class="writer-field">雷区（一定不要写）
+                        <input type="text" id="writerAvoid" placeholder="例：不要灵异、不要系统文">
+                      </label>
+                    </div>
+                  </div>
+                  <div class="writer-stage-group">
+                    <div class="writer-group-head"><strong>基本设定</strong><small>生成后可以逐条改，改完保存为新版本</small></div>
+                    <div class="writer-grid-2">
+                      <label class="writer-field">书名
+                        <input type="text" id="writerTitle" maxlength="120">
+                      </label>
+                      <label class="writer-field">题材
+                        <input type="text" id="writerGenreCat" placeholder="例：东方玄幻">
+                      </label>
+                      <label class="writer-field">基调
+                        <input type="text" id="writerGenreTone" placeholder="例：热血隐忍">
+                      </label>
+                      <label class="writer-field">写作风格
+                        <select id="writerStyle" aria-label="写作风格"></select>
+                      </label>
+                    </div>
+                    <label class="writer-field">题材标签（逗号分隔，最多 5 个）
+                      <input type="text" id="writerTags" placeholder="例：废柴流, 退婚, 宗门">
+                    </label>
+                    <label class="writer-field">简介
+                      <textarea id="writerBlurb" rows="2"></textarea>
+                    </label>
+                    <div class="writer-candidates" id="writerTitleCandidates" hidden>
+                      <span class="writer-field-label">书名候选（点一下采用）</span>
+                      <div class="writer-candidate-row" id="writerTitleCandidateList"></div>
+                    </div>
+                    <div class="writer-candidates" id="writerBlurbCandidates" hidden>
+                      <span class="writer-field-label">简介候选（点一下采用）</span>
+                      <div class="writer-candidate-row" id="writerBlurbCandidateList"></div>
+                    </div>
+                  </div>
+                  <div class="writer-stage-group">
+                    <div class="writer-group-head"><strong>角色</strong><small>最多 10 人；生成后可逐条修改</small></div>
+                    <div class="writer-char-list" id="writerCharList"></div>
+                    <div class="writer-action-bar">
+                      <button class="control-button tiny" type="button" id="writerCharAdd">加一个角色</button>
+                      <button class="control-button tiny" type="button" id="writerTemplateBtn">从模板套用</button>
+                      <button class="control-button tiny" type="button" id="writerSetupClear">清空表单</button>
+                    </div>
+                  </div>
+                  <div class="writer-stage-group">
+                    <div class="writer-group-head"><strong>世界观</strong><small>写正文时会自动压缩成摘要带上</small></div>
+                    <label class="writer-field">世界观设定
+                      <textarea id="writerWorldview" rows="4"></textarea>
+                    </label>
+                  </div>
+                  <div class="writer-stage-group">
+                    <div class="writer-group-head"><strong>生成整套设定</strong><small>六步自动链：题材 → 书名 → 简介 → 世界观 → 角色 → 大纲</small></div>
+                    <div class="writer-grid-2">
+                      <label class="writer-field">供应商
+                        <select id="writerSetupProvider" aria-label="设定供应商"></select>
+                      </label>
+                      <label class="writer-field">模型
+                        <select id="writerSetupModel" aria-label="设定模型"></select>
+                      </label>
+                    </div>
+                    <div class="writer-limits">
+                      <label class="writer-limit">
+                        <span>角色数量 <b id="writerCharCountValue">4</b> 人</span>
+                        <input type="range" id="writerCharCount" min="1" max="10" step="1" value="4" aria-label="角色数量">
+                      </label>
+                      <label class="writer-limit">
+                        <span>大纲章节数 <b id="writerChapterCountValue">12</b> 章</span>
+                        <input type="range" id="writerChapterCount" min="5" max="30" step="1" value="12" aria-label="大纲章节数">
+                      </label>
+                    </div>
+                    <label class="writer-field">补充要求（只在第一步「题材推断」生效）
+                      <input type="text" id="writerSetupNote" placeholder="想强调的要求，可留空">
+                    </label>
+                    <div class="writer-action-bar">
+                      <button class="control-button writer-primary" type="button" id="writerSetupGenerate">生成整套设定</button>
+                      <button class="control-button" type="button" id="writerSetupSave">保存修改为新版本</button>
+                    </div>
+                    <p class="writer-hint">生成的是整套设定并自动接着写大纲；每完成一步都存一版，失败时保留前面已完成的步骤。重新点会再出一版，旧版本全部保留。</p>
+                  </div>
+                </div>
+
+                <!-- ===== 阶段二：大纲 ===== -->
+                <div class="writer-stage-panel" id="writerOutlinePanel" data-writer-stage-panel="outline" hidden>
+                  <div class="writer-stage-group">
+                    <div class="writer-group-head"><strong>生成全书大纲</strong><small>按当前设定写出每一章的走向</small></div>
+                    <div class="writer-grid-2">
+                      <label class="writer-field">供应商
+                        <select id="writerOutlineProvider" aria-label="大纲供应商"></select>
+                      </label>
+                      <label class="writer-field">模型
+                        <select id="writerOutlineModel" aria-label="大纲模型"></select>
+                      </label>
+                    </div>
+                    <div class="writer-limits">
+                      <label class="writer-limit">
+                        <span>大纲章节数 <b id="writerOutlineChapterCountValue">12</b> 章</span>
+                        <input type="range" id="writerOutlineChapterCount" min="5" max="30" step="1" value="12" aria-label="大纲章节数">
+                      </label>
+                    </div>
+                    <label class="writer-field">补充要求
+                      <input type="text" id="writerOutlineNote" placeholder="想强调的要求，可留空">
+                    </label>
+                    <label class="writer-check">
+                      <input type="checkbox" id="writerOutlineAllowDrop">
+                      <span>重新生成时，允许删除已被移出大纲的章节（含其正文；仍会再确认一次）</span>
+                    </label>
+                    <div class="writer-action-bar">
+                      <button class="control-button writer-primary" type="button" id="writerOutlineGenerate">生成全书大纲</button>
+                      <button class="control-button" type="button" id="writerSyncBtn" title="按当前大纲重建章节目录；已有正文不会被动覆盖">按当前大纲同步章节</button>
+                    </div>
+                    <p class="writer-hint">大纲只写每章走向，不写正文；生成完会自动同步章节目录。已有正文不会被静默删除：要删有正文的章节需先勾选上面的确认。</p>
+                  </div>
+                  <div class="writer-stage-group">
+                    <div class="writer-group-head"><strong>章节梗概</strong><small id="writerOutlineMeta">还没有大纲</small></div>
+                    <div class="writer-outline-list" id="writerOutlineList"></div>
+                    <div class="writer-action-bar">
+                      <button class="control-button" type="button" id="writerOutlineSave" disabled>保存大纲修改</button>
+                    </div>
+                  </div>
+                  <div class="writer-stage-group" id="writerOutlineVersionsGroup" hidden>
+                    <div class="writer-group-head"><strong>历史版本</strong><small>切换后立即生效，可随时切回</small></div>
+                    <label class="writer-field">大纲版本
+                      <select id="writerOutlineVersion" aria-label="大纲版本"></select>
+                    </label>
+                  </div>
+                </div>
+
+                <!-- ===== 阶段三：正文 ===== -->
+                <div class="writer-stage-panel" id="writerDraftPanel" data-writer-stage-panel="draft" hidden>
+                  <div class="writer-stage-group">
+                    <div class="writer-group-head"><strong id="writerDraftTitle">还没有选择章节</strong><small>点左侧目录选一章</small></div>
+                    <p class="writer-hint" id="writerDraftBeat"></p>
+                    <div class="writer-grid-2">
+                      <label class="writer-field">供应商
+                        <select id="writerDraftProvider" aria-label="正文供应商"></select>
+                      </label>
+                      <label class="writer-field">模型
+                        <select id="writerDraftModel" aria-label="正文模型"></select>
+                      </label>
+                    </div>
+                    <label class="writer-field">这一章要发生什么（补充要求）
+                      <input type="text" id="writerDraftNote" placeholder="想强调的情节要求，可留空">
+                    </label>
+                    <div class="writer-action-bar">
+                      <button class="control-button writer-primary" type="button" id="writerDraftGenerate">写这一章</button>
+                      <button class="control-button" type="button" id="writerDraftSegs" title="先拆 2–4 个段落要点，再按段顺序生成">分段写</button>
+                      <button class="control-button" type="button" id="writerDraftContinue">续写</button>
+                      <button class="control-button" type="button" id="writerDraftRewrite">重写本章</button>
+                      <button class="control-button tiny" type="button" id="writerDraftPrev">上一章</button>
+                      <button class="control-button tiny" type="button" id="writerDraftNext">下一章</button>
+                    </div>
+                    <p class="writer-hint">整章一次写完；分段写会先拆段落要点再顺序生成。续写接在当前稿结尾；重写会出一版新稿，旧稿保留。</p>
+                  </div>
+                  <div class="writer-stage-group">
+                    <div class="writer-group-head"><strong>当前正文</strong><small id="writerDraftMeta">还没有正文</small></div>
+                    <label class="writer-field">正文（可直接改；保存会生成新版本，不覆盖旧稿）
+                      <textarea id="writerDraftContent" rows="14" spellcheck="false"></textarea>
+                    </label>
+                    <div class="writer-action-bar">
+                      <button class="control-button" type="button" id="writerDraftSave">保存为新版本</button>
+                      <button class="control-button tiny" type="button" id="writerDraftReload">放弃修改</button>
+                    </div>
+                  </div>
+                  <div class="writer-stage-group" id="writerDraftVersionsGroup" hidden>
+                    <div class="writer-group-head"><strong>正文版本</strong><small>切换后立即生效，可随时切回</small></div>
+                    <label class="writer-field">版本
+                      <select id="writerDraftVersion" aria-label="正文版本"></select>
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <!-- 右：说明与状态 -->
+            <aside class="writer-panel writer-notes" aria-label="说明与状态">
+              <div class="writer-panel-head">
+                <strong>这次会做什么</strong>
+                <small id="writerPlanState">—</small>
+              </div>
+              <div class="writer-scroll">
+                <section class="writer-block" id="writerPlanBlock">
+                  <div class="writer-block-title"><strong>输入来源</strong><small id="writerBudgetMeta"></small></div>
+                  <div class="writer-plan" id="writerPlanBody"></div>
+                </section>
+                <section class="writer-block" id="writerPipelineBlock" hidden>
+                  <div class="writer-block-title"><strong>生成进度</strong><small id="writerPipelineStepsLabel"></small></div>
+                  <div class="writer-pipeline-status">
+                    <span class="writer-pill" id="writerPipelineStatus">进行中</span>
+                    <span class="writer-kv-line" id="writerPipelineModel"></span>
+                  </div>
+                  <p class="writer-note" id="writerPipelineTask">—</p>
+                  <pre class="writer-stream" id="writerPipelineStream" hidden></pre>
+                  <p class="writer-note writer-error" id="writerPipelineError" hidden></p>
+                  <div class="writer-pick-actions">
+                    <button class="control-button tiny" type="button" id="writerPipelineCancel">取消生成</button>
+                    <button class="control-button tiny" type="button" id="writerPipelineRetry" hidden>重试本步</button>
+                  </div>
+                </section>
+                <section class="writer-block">
+                  <div class="writer-block-title"><strong>保存状态</strong><small id="writerSaveState">—</small></div>
+                  <p class="writer-note" id="writerSaveNote">打开作品后，这里显示保存与读取状态。</p>
+                </section>
+                <section class="writer-block" id="writerLocationBlock">
+                  <div class="writer-block-title"><strong>作品保存在哪里</strong><small>本机路径</small></div>
+                  <p class="writer-note" id="writerLocationNote">打开作品后，这里显示这台电脑上的实际保存目录。</p>
+                  <p class="writer-path" id="writerLocationPath" hidden></p>
+                  <div class="writer-pick-actions">
+                    <button class="control-button tiny" type="button" id="writerCopyPath" hidden>复制路径</button>
+                    <button class="control-button tiny" type="button" id="writerOpenFolder" hidden
+                            title="在运行应用的电脑上打开这个文件夹">打开保存位置</button>
+                  </div>
+                </section>
+              </div>
+            </aside>
+          </div>
+
+          <dialog class="writer-dialog" id="writerBooksDialog" aria-label="原创作品">
+            <form method="dialog" class="writer-dialog-form">
+              <h3>原创作品</h3>
+              <div class="writer-book-create">
+                <input type="text" id="writerNewTitle" placeholder="新书名（可留空，默认「未命名作品」）" aria-label="新书名">
+                <button class="control-button" type="button" id="writerCreateBtn">新建</button>
+              </div>
+              <div class="writer-book-list" id="writerBookList" aria-label="作品列表"></div>
+              <div class="writer-dialog-actions">
+                <button class="control-button" type="button" id="writerBooksClose">关闭</button>
+              </div>
+              <p class="writer-dialog-error" id="writerBooksError" role="alert"></p>
+            </form>
+          </dialog>
+
+          <dialog class="writer-dialog writer-template-dialog" id="writerTemplateDialog" aria-label="题材模板">
+            <div class="writer-manage-form">
+              <div class="writer-manage-head">
+                <h3>题材模板<small id="writerTplCount"></small></h3>
+                <button class="control-button tiny" type="button" id="writerTemplateClose">关闭</button>
+              </div>
+              <p class="writer-note">套用只把模板内容填进左侧设定表单，确认满意后点「保存修改为新版本」才真正入库。</p>
+              <div class="writer-tpl-tools">
+                <div class="writer-tpl-channels" id="writerTplChannels" role="group" aria-label="频道">
+                  <button type="button" class="active" aria-pressed="true" data-writer-tpl-channel="">全部</button>
+                  <button type="button" aria-pressed="false" data-writer-tpl-channel="male">男频</button>
+                  <button type="button" aria-pressed="false" data-writer-tpl-channel="female">女频</button>
+                </div>
+                <select id="writerTplCat" aria-label="模板分类"></select>
+                <input type="search" id="writerTplSearch" placeholder="搜索模板" aria-label="搜索模板">
+                <button class="control-button tiny" type="button" id="writerTplReroll" title="在当前筛选里随机换一批">换一版</button>
+              </div>
+              <div class="writer-tpl-list" id="writerTplList" aria-label="模板列表"></div>
+              <div class="writer-manage-preview-box" id="writerTplDetail" hidden>
+                <div class="writer-stage-head">
+                  <strong id="writerTplDetailName">模板</strong>
+                  <small id="writerTplDetailMeta"></small>
+                </div>
+                <pre class="writer-stage-result" id="writerTplDetailBody" aria-live="polite"></pre>
+                <div class="writer-pick-actions">
+                  <button class="control-button" type="button" id="writerTplApply">套用到设定表单</button>
+                </div>
+              </div>
+              <p class="writer-dialog-error" id="writerTplError" role="alert"></p>
+            </div>
+          </dialog>
+
+          <dialog class="writer-dialog" id="writerImportDialog" aria-label="导入启元存档">
+            <form method="dialog" class="writer-dialog-form">
+              <h3>导入启元存档</h3>
+              <div class="writer-import-preview" id="writerImportPreview"></div>
+              <p class="writer-dialog-error" id="writerImportError" role="alert"></p>
+              <div class="writer-dialog-actions">
+                <button class="control-button" type="button" id="writerImportCommit">确认导入为新作品</button>
+                <button class="control-button" type="button" id="writerImportCancel">取消</button>
+              </div>
+            </form>
+          </dialog>
+
+          <!-- 管理记录：桌面宽弹窗 / 手机全屏。默认只管理当前作品。 -->
+          <dialog class="writer-dialog writer-manage-dialog" id="writerManageDialog" aria-label="管理记录">
+            <div class="writer-manage-form">
+              <div class="writer-manage-head">
+                <h3>管理记录<small id="writerManageScope">当前作品</small></h3>
+                <button class="control-button tiny" type="button" id="writerManageClose">关闭</button>
+              </div>
+              <p class="writer-note" id="writerManageNote"></p>
+              <div class="writer-manage-tabs" id="writerManageTabs" role="group" aria-label="记录分类">
+                <button type="button" class="active" aria-pressed="true" data-writer-manage-tab="setup">设定版本</button>
+                <button type="button" aria-pressed="false" data-writer-manage-tab="outline">大纲版本</button>
+                <button type="button" aria-pressed="false" data-writer-manage-tab="chapter">正文版本</button>
+                <button type="button" aria-pressed="false" data-writer-manage-tab="task">生成记录</button>
+              </div>
+              <div class="writer-manage-tools">
+                <input type="search" id="writerManageFilter" placeholder="筛选记录" aria-label="筛选记录">
+                <button class="control-button tiny" type="button" id="writerManageSelectAll">全选当前筛选</button>
+                <button class="control-button tiny" type="button" id="writerManageClear">取消选择</button>
+                <button class="control-button tiny danger" type="button" id="writerManageDelete" disabled>删除选中</button>
+              </div>
+              <p class="writer-note" id="writerManageSelection" role="status"></p>
+              <div class="writer-manage-list" id="writerManageList" aria-label="记录列表"></div>
+              <div class="writer-manage-preview-box" id="writerManagePreview" hidden>
+                <div class="writer-stage-head">
+                  <strong id="writerManagePreviewHead">记录内容</strong>
+                  <small id="writerManagePreviewMeta"></small>
+                </div>
+                <pre class="writer-stage-result" id="writerManagePreviewBody" aria-live="polite"></pre>
+              </div>
+              <p class="writer-dialog-error" id="writerManageError" role="alert"></p>
+            </div>
+          </dialog>
+          <input type="file" id="writerImportFile" accept=".json,application/json" hidden>
         </div>
       </section>
 

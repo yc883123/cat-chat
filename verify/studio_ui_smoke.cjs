@@ -819,9 +819,9 @@ async function runViewport(browser, vp) {
         historyVisible: Boolean(historyBtn && historyBtn.getBoundingClientRect().width > 0),
       };
     });
-    check('侧栏工作台导航是 提词库/打标器/造梦机/创作场 四个页签',
-      nav.tabs.length === 4
-      && nav.tabs.map((t) => t.text).join('/') === '提词库/打标器/造梦机/创作场',
+    check('侧栏工作台导航是 提词库/打标器/造梦机/拆书匠/织书台 五个页签',
+      nav.tabs.length === 5
+      && nav.tabs.map((t) => t.text).join('/') === '提词库/打标器/造梦机/拆书匠/织书台',
       JSON.stringify(nav));
     check('「历史产出」是结果栏标题区的图标按钮',
       nav.historyTitle === '历史产出' && nav.historyVisible, JSON.stringify(nav));

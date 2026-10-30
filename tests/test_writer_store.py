@@ -218,6 +218,56 @@ class OutlineAndChapterTests(WriterStoreTestCase):
         self.assertTrue(result["text"].startswith("# md书"))
         self.assertIn("## 第1章", result["text"])
 
+    def test_export_reports_has_body_separately(self):
+        """「有没有正文」与「文件是否为空」是两件事：md 光标题就非空，前端不能靠字节数猜。"""
+        book = self._book("空书")
+        self.store.save_outline(book["id"], chapters=self._outline_rows(2), sync=True)
+        empty = self.store.export_book(book["id"], fmt="md", with_extras=True)
+        self.assertFalse(empty["has_body"])
+        self.assertGreater(len(empty["text"]), 0)
+        self.assertEqual(empty["missing_chapters"], [1, 2])
+        self.store.save_chapter_version(book["id"], 1, content="有正文了", kind="manual")
+        filled = self.store.export_book(book["id"], fmt="md", with_extras=True)
+        self.assertTrue(filled["has_body"])
+        self.assertEqual(filled["missing_chapters"], [2])
+
+    def test_export_to_file_writes_real_bytes_and_never_overwrites(self):
+        """桌面端「另存为」要靠这个真文件：同一秒连导两次不能互相覆盖。"""
+        book = self._book("落盘书")
+        self.store.save_outline(book["id"], chapters=self._outline_rows(1), sync=True)
+        self.store.save_chapter_version(book["id"], 1, content="第一章正文", kind="manual")
+        first = self.store.export_to_file(book["id"], fmt="txt")
+        path = Path(first["path"])
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.parent.name, "_exports")
+        self.assertEqual(first["bytes"], path.stat().st_size)
+        self.assertGreater(first["bytes"], 0)
+        self.assertTrue(first["has_content"])
+        self.assertEqual(first["suggested_name"], "落盘书.txt")
+        self.assertEqual(path.read_text(encoding="utf-8"),
+                         self.store.export_book(book["id"], fmt="txt")["text"])
+        second = self.store.export_to_file(book["id"], fmt="txt")
+        self.assertNotEqual(first["path"], second["path"])
+        self.assertTrue(Path(second["path"]).is_file())
+
+    def test_export_to_file_flags_empty_book(self):
+        book = self._book("还没写")
+        self.store.save_outline(book["id"], chapters=self._outline_rows(2), sync=True)
+        result = self.store.export_to_file(book["id"], fmt="txt")
+        self.assertFalse(result["has_content"])
+        self.assertEqual(result["bytes"], 0)
+        self.assertEqual(result["missing_chapters"], [1, 2])
+
+    def test_exports_dir_is_not_listed_as_book(self):
+        """_exports 落在作品根下：不能被作品列表当成一本损坏的书。"""
+        book = self._book("落盘书")
+        self.store.save_outline(book["id"], chapters=self._outline_rows(1), sync=True)
+        self.store.save_chapter_version(book["id"], 1, content="正文", kind="manual")
+        self.store.export_to_file(book["id"], fmt="txt")
+        listing = self.store.list_books()
+        self.assertEqual(listing["corrupt"], [])
+        self.assertEqual([row["id"] for row in listing["books"]], [book["id"]])
+
 
 class PipelineRecordTests(WriterStoreTestCase):
     def test_update_pipeline_guarded_by_id_and_attempt(self):

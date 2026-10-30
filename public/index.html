@@ -1082,7 +1082,7 @@
                 <button type="button" role="menuitem" data-writer-export="txt">导出 TXT（全书）</button>
                 <button type="button" role="menuitem" data-writer-export="md">导出 Markdown（全书）</button>
                 <button type="button" role="menuitem" data-writer-export="md-extras">导出 Markdown（含设定与大纲）</button>
-                <p class="writer-hint" id="writerExportNote">导出由浏览器发起下载，通常保存到浏览器默认下载目录。</p>
+                <p class="writer-hint" id="writerExportNote">导出会先在保存目录的 _exports 里生成文件，桌面端随后弹出「另存为」；手机/浏览器直接下载。</p>
               </div>
               <button class="control-button primary" id="writerNewBookBtn" type="button"
                       title="从一句话创意开始一本新书">新建作品</button>
@@ -1265,7 +1265,7 @@
                     </label>
                     <label class="writer-check">
                       <input type="checkbox" id="writerOutlineAllowDrop">
-                      <span>重新生成时，允许删除已被移出大纲的章节（含其正文；仍会再确认一次）</span>
+                      <span>允许删除已被移出大纲的章节（含其正文；勾选后生成/保存/同步都不再二次确认）</span>
                     </label>
                     <div class="writer-action-bar">
                       <button class="control-button writer-primary" type="button" id="writerOutlineGenerate">生成全书大纲</button>

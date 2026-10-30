@@ -147,7 +147,7 @@ async function runViewport(browser, vp) {
   currentBookId = BOOK_ID;
   const errors = [];
   const checks = [];
-  const recorded = { pipelines: [], setups: [], cancels: 0, exports: 0, creates: 0, commits: 0, settingsPosts: 0 };
+  const recorded = { pipelines: [], setups: [], cancels: 0, exports: 0, creates: 0, commits: 0, settingsPosts: 0, exportPosts: [] };
   const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height } });
   page.on('pageerror', (err) => errors.push(`pageerror: ${err.message}`));
   page.on('console', (msg) => {
@@ -223,12 +223,26 @@ async function runViewport(browser, vp) {
     }
     return route.fallback();
   });
+  // 导出改走「后端落盘 → 原生另存为」：POST /export-file 才是有副作用的那条。
+  // exportEmpty=true 时模拟「整本没有正文」，用来锁「不弹空壳、要明确提示」。
+  let exportEmpty = false;
   await page.route('**/api/writer/books/wb-*/export*', (route) => {
     recorded.exports += 1;
-    return route.fulfill(json({
-      format: 'txt', text: '第一章 归港的旧船\n\n正文。\n\n', missing_chapters: [2],
-      filename: '雾港旧事.txt', book: FAKE_BOOK_MANIFEST, location: FAKE_LOCATION,
-    }));
+    const request = route.request();
+    let body = {};
+    try { body = JSON.parse(request.postData() || '{}'); } catch { body = {}; }
+    recorded.exportPosts.push({ method: request.method(), url: request.url(), body });
+    const shape = {
+      format: body.format || 'txt',
+      dir: 'D:\\fake-data\\studio\\writer\\_exports',
+      path: 'D:\\fake-data\\studio\\writer\\_exports\\雾港旧事-20261030-220000.txt',
+      filename: '雾港旧事-20261030-220000.txt',
+      suggested_name: '雾港旧事.txt',
+      book: FAKE_BOOK_MANIFEST, location: FAKE_LOCATION,
+    };
+    return route.fulfill(json(exportEmpty
+      ? { ...shape, bytes: 0, missing_chapters: [1, 2], has_content: false }
+      : { ...shape, bytes: 2048, missing_chapters: [2], has_content: true }));
   });
   await page.route('**/api/writer/books/wb-*/pipeline', (route) => route.fulfill(json({ pipeline: currentPipeline() })));
   await page.route('**/api/writer/books/wb-*/pipelines', (route) => {
@@ -301,9 +315,16 @@ async function runViewport(browser, vp) {
       await page.click('#onboardingDialog [data-close="onboardingDialog"]');
       await page.waitForTimeout(400);
     }
-    // 清掉上一轮视口留下的「最近打开作品」记录：桌面跑完会把它写进 localStorage，
+    // 清掉上一轮视口留下的「最近打开作品」与草稿记录：桌面跑完会把它写进 localStorage，
     // 手机轮打开织书台时会自动去读这本旧书，与脚本随后新建作品的 openBook 竞态。
-    await page.evaluate(() => { try { localStorage.removeItem('naibaWriterLastBookId'); } catch (_e) { /* ignore */ } });
+    await page.evaluate(() => {
+      try {
+        localStorage.removeItem('naibaWriterLastBookId');
+        for (const key of Object.keys(localStorage)) {
+          if (key.startsWith('naibaWriterDraft:')) localStorage.removeItem(key);
+        }
+      } catch (_e) { /* ignore */ }
+    });
     // 手机先进抽屉才点得到侧栏入口；桌面侧栏常驻。
     // 注意：上一轮桌面跑会把「工作台」视图偏好写进隔离实例的 settings，
     // 手机这轮冷启动就停在工作台态 —— 汉堡按钮要用工作台自己的 #studioOpenSidebar。
@@ -419,6 +440,25 @@ async function runViewport(browser, vp) {
     check('大纲列表渲染 2 章', (await page.$$eval('#writerOutlineList .writer-outline-item', (els) => els.length)) === 2);
     check('大纲版本下拉有历史版本', (await page.$$eval('#writerOutlineVersion option', (els) => els.length)) >= 1);
 
+    // 5b) 「允许删除已被移出大纲的章节」复选框必须真的进请求体（以前勾了等于没勾）
+    check('不勾复选框时请求体不带 allow_drop', !('allow_drop' in (recorded.pipelines[0] || {})),
+      JSON.stringify(recorded.pipelines[0] || {}));
+    const pipelinesBeforeDrop = recorded.pipelines.length;
+    await page.check('#writerOutlineAllowDrop');
+    await page.click('#writerOutlineGenerate');
+    await page.waitForTimeout(500);
+    const dropBody = recorded.pipelines.at(-1) || {};
+    check('勾选后生成大纲的请求体带 allow_drop=true',
+      recorded.pipelines.length === pipelinesBeforeDrop + 1 && dropBody.kind === 'outline'
+      && dropBody.allow_drop === true,
+      JSON.stringify(dropBody));
+    await page.uncheck('#writerOutlineAllowDrop');
+    // 这一步只为拿请求体：立刻收回运行态，否则后面所有 submitPipeline 都会被「已有生成在跑」拦住。
+    await gotoNotesPane();
+    await page.click('#writerPipelineCancel');
+    await page.waitForTimeout(400);
+    await backToEditorPane();
+
     // 6) 正文阶段：点目录第一章 → 内容与版本（手机先切「作品」档才能点到目录）
     if (isMobile) {
       await page.click('[data-writer-pane="book"]');
@@ -459,6 +499,61 @@ async function runViewport(browser, vp) {
       JSON.stringify(recorded.setups[0] || {}).slice(0, 140));
     check('自动保存后照常提交生成', recorded.pipelines.length === pipelinesBefore + 1);
 
+    // 7c) 草稿暂存（本轮三件之一）：改设定/大纲后切阶段、切功能页都不许归零。
+    // 这一段的 dirty 状态必须在下一步「导入存档」之前收尾——openBook 换书会强制清脏。
+    const typedIdea = '修船工在雾港捡到一封写给自己的信';
+    const beatSel = '#writerOutlineList [data-writer-outline-beat]';
+    await page.fill('#writerIdea', typedIdea);
+    await page.click('[data-writer-stage="outline"]');
+    await page.waitForTimeout(250);
+    await page.click('[data-writer-stage="setup"]');
+    await page.waitForTimeout(250);
+    check('切阶段后设定草稿还在', (await page.inputValue('#writerIdea')) === typedIdea);
+    check('页头标注「有未保存修改」', (await page.textContent('#writerPageState')).includes('有未保存修改'),
+      await page.textContent('#writerPageState'));
+
+    await page.click('[data-writer-stage="outline"]');
+    await page.waitForTimeout(250);
+    await page.fill(beatSel, '他决定查清这封信是谁写的');
+    await page.click('[data-writer-stage="draft"]');
+    await page.waitForTimeout(250);
+    await page.click('[data-writer-stage="outline"]');
+    await page.waitForTimeout(250);
+    check('切阶段后大纲梗概改动还在', (await page.inputValue(beatSel)).includes('查清这封信'));
+
+    // 切到别的功能页再回来：进页会重新 openBook，keepEdits/keepStage 必须把草稿与阶段留住。
+    if (isMobile) {
+      await page.click('#studioOpenSidebar');
+      await page.waitForTimeout(400);
+    }
+    await page.click('[data-studio-page="novel"]');
+    await page.waitForTimeout(600);
+    if (isMobile) {
+      const drawerOpen = await page.evaluate(() => document.querySelector('#sidebar')?.classList.contains('open'));
+      if (!drawerOpen) {
+        await page.click('#studioOpenSidebar');
+        await page.waitForTimeout(400);
+      }
+    }
+    await page.click('[data-studio-page="writer"]');
+    await page.waitForTimeout(900);
+    if (isMobile) {
+      const drawerOpen = await page.evaluate(() => document.querySelector('#sidebar')?.classList.contains('open'));
+      if (drawerOpen) {
+        await page.click('#sidebarBackdrop', { position: { x: 340, y: 300 } });
+        await page.waitForTimeout(350);
+      }
+    }
+    const afterSwitch = await page.evaluate(() => ({
+      stage: document.querySelector('[data-writer-stage].active')?.dataset.writerStage,
+      idea: document.querySelector('#writerIdea')?.value,
+      beat: document.querySelector('#writerOutlineList [data-writer-outline-beat]')?.value,
+    }));
+    check('切功能页再回来，设定草稿还在', afterSwitch.idea === typedIdea, afterSwitch.idea);
+    check('切功能页再回来，大纲梗概还在（且回到大纲阶段）',
+      String(afterSwitch.beat || '').includes('查清这封信') && afterSwitch.stage === 'outline',
+      JSON.stringify(afterSwitch));
+
     // 8) 导入存档（两段式）
     await page.click('#writerImportBtn');
     await page.waitForTimeout(300);
@@ -471,13 +566,39 @@ async function runViewport(browser, vp) {
     await page.click('#writerImportCommit');
     await page.waitForTimeout(400);
     check('确认导入提交了 commit', recorded.commits === 1);
+    check('换书后表单不串上一本的草稿', (await page.inputValue('#writerIdea')) !== typedIdea,
+      await page.inputValue('#writerIdea'));
 
-    // 9) 导出菜单
+    // 9) 导出：后端落盘 + 原生另存为（exe 里 <a download> 会被 pywebview 静默取消）
     await page.click('#writerExportBtn');
-    await page.waitForTimeout(200);
+    await page.waitForTimeout(250);
     await page.click('[data-writer-export="txt"]');
-    await page.waitForTimeout(400);
-    check('导出 TXT 触发了一次导出请求', recorded.exports === 1);
+    await page.waitForTimeout(500);
+    const firstExport = recorded.exportPosts[0] || {};
+    check('导出改走 POST /export-file（不再靠浏览器 blob 下载）',
+      recorded.exportPosts.length === 1 && firstExport.method === 'POST'
+      && String(firstExport.url || '').includes('/export-file'),
+      JSON.stringify(firstExport).slice(0, 160));
+    check('导出请求带 format=txt', firstExport.body?.format === 'txt', JSON.stringify(firstExport.body || {}));
+    check('导出成功后右栏报出文件名与大小',
+      (await page.textContent('#writerSaveState')).includes('已导出')
+      && (await page.textContent('#writerSaveNote')).includes('2.0 KB'),
+      await page.textContent('#writerSaveNote'));
+
+    // 9b) 整本没有正文：不弹保存框（空壳文件正是「导出又坏了」的来源），明确提示换一种导出
+    exportEmpty = true;
+    await page.click('#writerExportBtn');
+    await page.waitForTimeout(250);
+    await page.click('[data-writer-export="md-extras"]');
+    await page.waitForTimeout(500);
+    check('空正文不假装导出成功，明确提示「没有正文」',
+      (await page.textContent('#writerSaveState')).includes('没有正文'),
+      await page.textContent('#writerSaveState'));
+    const lastExport = recorded.exportPosts.at(-1) || {};
+    check('「含设定与大纲」导出带 format=md 与 extras=1',
+      lastExport.body?.format === 'md' && lastExport.body?.extras === '1',
+      JSON.stringify(lastExport.body || {}));
+    exportEmpty = false;
 
     // 10) 手机分档：作品 / 编辑 / 说明 三档互斥
     if (vp.width <= 760) {

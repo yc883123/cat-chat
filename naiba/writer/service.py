@@ -402,6 +402,32 @@ class WriterService:
         except WriterStoreError as exc:
             return {"error": str(exc)}, 400
 
+    def api_export_file(self, book_id: str, body: Any) -> tuple[dict[str, Any], int]:
+        """导出成真实文件（POST：有落盘副作用，不能用 GET）。
+
+        前端拿到 path 后交给桌面端「另存为」，浏览器/手机则走 `/api/file?download=1`。
+        没有正文时不写「看起来成功」的空文件，直接把 has_content=False 交给前端提示。
+        """
+        if not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
+        fmt = str(body.get("format") or "txt").strip().lower()
+        if fmt not in ("txt", "md"):
+            return {"error": "导出格式只支持 txt 或 md"}, 400
+        extras = str(body.get("extras") or "").strip().lower() in ("1", "true", "yes", "on")
+        try:
+            result = self.store.export_to_file(book_id, fmt=fmt, with_extras=extras)
+            result["book"] = self.store.get_book(book_id)["book"]
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+        except WriterStoreError as exc:
+            return {"error": str(exc)}, 400
+        except OSError as exc:
+            return {"error": f"写导出文件失败：{exc}"}, 500
+        result["format"] = fmt
+        result["with_extras"] = extras
+        result["location"] = self.data_location()
+        return result, 200
+
     def data_location(self) -> dict[str, Any]:
         return {
             "data_dir": str(Path(self.app.paths.data_dir).resolve()),
@@ -411,7 +437,8 @@ class WriterService:
     def api_location(self) -> tuple[dict[str, Any], int]:
         payload = self.data_location()
         payload["can_open_folder"] = os.name == "nt"
-        payload["export_note"] = "导出由浏览器发起下载，通常保存到浏览器默认下载目录。"
+        payload["export_note"] = ("导出先在保存目录的 _exports 里生成文件，桌面端随后弹出「另存为」；"
+                                  "手机/浏览器直接下载。")
         return payload, 200
 
     def api_reveal(self) -> tuple[dict[str, Any], int]:

@@ -329,6 +329,31 @@ class ServiceTestCase(unittest.TestCase):
         self.assertIn("第1章", payload["text"])
         self.assertEqual(payload["missing_chapters"], [2, 3])
 
+    def test_export_file_api_returns_real_path(self):
+        """导出落盘口：状态码、字段形状、文件真的存在（桌面端另存为全指望它）。"""
+        self.service.store.save_chapter_version(self.book_id, 1, content="第一章正文", kind="manual")
+        payload, status = self.service.api_export_file(
+            self.book_id, {"format": "txt", "extras": ""})
+        self.assertEqual(status, 200)
+        self.assertTrue(Path(payload["path"]).is_file())
+        self.assertEqual(payload["filename"], Path(payload["path"]).name)
+        self.assertEqual(payload["suggested_name"], "服务测.txt")
+        self.assertEqual(payload["bytes"], Path(payload["path"]).stat().st_size)
+        self.assertTrue(payload["has_content"])
+        self.assertEqual(payload["missing_chapters"], [2, 3])
+        self.assertIn("writer_root", payload["location"])
+        # 格式白名单、坏 body、不存在的作品。
+        self.assertEqual(self.service.api_export_file(self.book_id, {"format": "pdf"})[1], 400)
+        self.assertEqual(self.service.api_export_file(self.book_id, "not-a-dict")[1], 400)
+        self.assertEqual(
+            self.service.api_export_file("wb-20990101-0123456789ab", {"format": "txt"})[1], 404)
+
+    def test_export_file_flags_book_without_body(self):
+        payload, status = self.service.api_export_file(self.book_id, {"format": "txt"})
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["has_content"])
+        self.assertEqual(payload["bytes"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

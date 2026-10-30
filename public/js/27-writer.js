@@ -10,7 +10,8 @@
 // - 只从 01-core / 22-studio 取公共能力，22 不反向 import 本文件，无循环依赖。
 // ============================================================
 
-import { $, api, applyModelSkinFor, state, toast } from "./01-core.js";
+import { $, api, applyModelSkinFor, localFileUrl, state, toast } from "./01-core.js";
+import { isPywebview, saveLocalFile } from "./03-media.js";
 import { onStudioPageChange } from "./22-studio.js";
 
 const WRITER_TASKS_URL = "/api/studio/tasks?module=writer";
@@ -115,6 +116,9 @@ const writer = {
   providerModelInflight: new Map(),
   // 设定表单编辑态：套用模板 / 手改后为 true，保存或放弃后复位。
   setupDirty: false,
+  // 大纲列表编辑态：改过梗概/标题后为 true。与 setupDirty 一样是「DOM 才是最新值」的标记，
+  // 渲染函数必须让路，否则切阶段/切页重建整列会把改动抹掉。
+  outlineDirty: false,
   // 当前打开章节与正文。
   chapterNo: 0,
   chapter: null,
@@ -162,6 +166,14 @@ function fmtChars(count) {
   const value = Number(count) || 0;
   if (value >= 10000) return `${(value / 10000).toFixed(1)}万`;
   return String(value);
+}
+
+/** 导出文件大小：只用于提示「存下来的东西不是 0 字节」。 */
+function fmtBytes(count) {
+  const value = Number(count) || 0;
+  if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${value} 字节`;
 }
 
 function fmtTime(ms) {
@@ -347,6 +359,8 @@ function renderPageState() {
   el.textContent = running
     ? `${title} · ${kindLabel(writer.pipeline.kind)} · ${stageName}`
     : `${title} · ${stageName}`;
+  // 表单/大纲里有还没写进作品的改动：页头必须能看出来，否则用户会以为已经存了。
+  if (writer.setupDirty || writer.outlineDirty) el.textContent += " · 有未保存修改";
 }
 
 function renderBookSummary() {
@@ -459,6 +473,7 @@ function fillSetupForm() {
       const input = $("#writerTitle");
       if (input) input.value = text;
       writer.setupDirty = true;
+      scheduleDraftSave();
       toast(`书名已改为「${text}」，保存后生效`);
     });
   renderCandidates("#writerBlurbCandidates", "#writerBlurbCandidateList", setup.blurb_candidates,
@@ -466,6 +481,7 @@ function fillSetupForm() {
       const input = $("#writerBlurb");
       if (input) input.value = text;
       writer.setupDirty = true;
+      scheduleDraftSave();
       toast("简介已替换为该候选，保存后生效");
     });
 }
@@ -588,15 +604,20 @@ function collectSetup() {
 function renderOutline() {
   const list = $("#writerOutlineList");
   if (!list) return;
-  const rows = Array.isArray(writer.outline?.chapters) ? writer.outline.chapters : [];
+  // 有未保存修改时，DOM 里的输入才是最新值：只刷新提示与按钮，不重建整列。
+  const dirty = Boolean(writer.outlineDirty);
+  const rows = dirty
+    ? collectOutline()
+    : (Array.isArray(writer.outline?.chapters) ? writer.outline.chapters : []);
   const meta = $("#writerOutlineMeta");
   if (meta) {
     meta.textContent = rows.length
-      ? `${rows.length} 章 · 改完点「保存大纲修改」`
+      ? `${rows.length} 章 · ${dirty ? "有未保存修改，" : ""}改完点「保存大纲修改」`
       : (writer.bookId ? "还没有大纲。点「生成全书大纲」。" : "打开作品后再生成大纲");
   }
   const save = $("#writerOutlineSave");
   if (save) save.disabled = !rows.length || writer.busy;
+  if (dirty) return;
   if (!rows.length) {
     const empty = document.createElement("p");
     empty.className = "writer-empty";
@@ -727,7 +748,7 @@ function renderEditor() {
   if (head) head.textContent = heads[writer.stage][0];
   const hint = $("#writerEditorHint");
   if (hint) hint.textContent = heads[writer.stage][1];
-  if (writer.stage === "setup") fillSetupForm();
+  if (writer.stage === "setup" && !writer.setupDirty) fillSetupForm();
   if (writer.stage === "outline") { renderOutline(); renderOutlineVersions(); }
   if (writer.stage === "draft") renderDraft();
 }
@@ -943,7 +964,13 @@ function renderPipeline() {
   if (error) {
     const showError = pipeline.error && pipeline.status !== "running";
     error.hidden = !showError;
-    if (showError) error.textContent = String(pipeline.error || "");
+    if (showError) {
+      // 后端原文只是一句「已有正文，大纲里却没有它」；不告诉用户开关在哪，等于让人卡死。
+      const raw = String(pipeline.error || "");
+      error.textContent = raw.includes("已有正文")
+        ? `${raw}　要删这些章节（含正文），勾选「允许删除已被移出大纲的章节」后重试；不想删就把它们写回大纲。`
+        : raw;
+    }
   }
   const cancel = $("#writerPipelineCancel");
   if (cancel) cancel.hidden = pipeline.status !== "running";
@@ -1088,6 +1115,7 @@ async function saveSetupBeforeGenerate() {
     writer.setup = payload.setup;
     writer.book = payload.book;
     writer.setupDirty = false;
+    persistDraftAfterSave();
     toast("已自动把表单里的设定存为新版本，接着开始生成");
     return true;
   } catch (error) {
@@ -1190,6 +1218,93 @@ async function retryPipeline() {
 }
 
 // ============================================================
+// 草稿暂存（切阶段 / 切页 / 刷新都不丢）
+// ============================================================
+//
+// 三层事实源，顺序固定：DOM（用户正在打字） > localStorage 草稿 > 服务端已保存版本。
+// dirty 标记就是「DOM 更新」的旗子：置真后渲染函数必须让路，否则重建整列/重填表单
+// 会把用户刚输入的内容抹掉（这就是「填了一半切走再回来归零」的根因）。
+
+const DRAFT_KEY_PREFIX = "naibaWriterDraft:";
+const DRAFT_FLUSH_MS = 800;
+let draftTimer = 0;
+
+function writerDraftKey(bookId) {
+  return `${DRAFT_KEY_PREFIX}${bookId}`;
+}
+
+function readWriterDraft(bookId) {
+  if (!bookId) return null;
+  try {
+    const raw = localStorage.getItem(writerDraftKey(bookId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function clearWriterDraft(bookId) {
+  if (!bookId) return;
+  if (draftTimer) {
+    clearTimeout(draftTimer);
+    draftTimer = 0;
+  }
+  try { localStorage.removeItem(writerDraftKey(bookId)); } catch (_error) { /* storage may be unavailable */ }
+}
+
+/** 把草稿写进 localStorage。bookId 由调用方锁定：延时写入期间换了书也不能串稿。 */
+function writeWriterDraft(bookId) {
+  if (!bookId || bookId !== writer.bookId) return;
+  if (!writer.setupDirty && !writer.outlineDirty) return;
+  const payload = { revision: writer.book?.revision ?? null, saved_at: Date.now() };
+  if (writer.setupDirty) payload.setup = collectSetup();
+  if (writer.outlineDirty) payload.outline = collectOutline();
+  try { localStorage.setItem(writerDraftKey(bookId), JSON.stringify(payload)); } catch (_error) { /* 存不下就不存 */ }
+}
+
+function scheduleDraftSave() {
+  if (!writer.bookId || (!writer.setupDirty && !writer.outlineDirty)) return;
+  const bookId = writer.bookId;
+  if (draftTimer) clearTimeout(draftTimer);
+  draftTimer = setTimeout(() => {
+    draftTimer = 0;
+    writeWriterDraft(bookId);
+  }, DRAFT_FLUSH_MS);
+  renderPageState();
+}
+
+/** 保存成功后收拾草稿：还有别的脏数据就重写成「只剩它」的一份（版本号此时已更新），
+ *  全干净了才整条删掉。这样保存设定不会顺带把大纲草稿一起删掉。 */
+function persistDraftAfterSave() {
+  if (writer.setupDirty || writer.outlineDirty) writeWriterDraft(writer.bookId);
+  else clearWriterDraft(writer.bookId);
+}
+
+/** 打开作品时尝试恢复草稿：只认版本号对得上的那份，其余一律当过期丢掉。 */
+function applyWriterDraft(bookId, book) {
+  const draft = readWriterDraft(bookId);
+  if (!draft) return { setup: false, outline: false };
+  const serverRevision = book?.revision ?? null;
+  if (draft.revision === undefined || String(draft.revision) !== String(serverRevision)) {
+    clearWriterDraft(bookId);
+    return { setup: false, outline: false };
+  }
+  let setup = false;
+  let outline = false;
+  if (draft.setup && typeof draft.setup === "object") {
+    writer.setup = draft.setup;
+    setup = true;
+  }
+  if (Array.isArray(draft.outline) && draft.outline.length) {
+    writer.outline = { ...(writer.outline || {}), chapters: draft.outline };
+    outline = true;
+  }
+  return { setup, outline };
+}
+
+// ============================================================
 // 作品：打开 / 新建 / 重命名 / 删除
 // ============================================================
 
@@ -1241,6 +1356,7 @@ async function openBook(bookId, { keepEdits = false, keepStage = false } = {}) {
   try {
     const payload = await api(`/api/writer/books/${encodeURIComponent(bookId)}`);
     if (token !== writer.bookToken) return;
+    const sameBook = writer.bookId === bookId;
     writer.bookId = bookId;
     writer.book = payload.book;
     writer.setup = payload.setup;
@@ -1248,11 +1364,22 @@ async function openBook(bookId, { keepEdits = false, keepStage = false } = {}) {
     writer.chapters = payload.chapters || [];
     writer.broken = payload.broken || [];
     writer.pipeline = payload.book?.active_pipeline || null;
-    if (!keepEdits) {
+    // 换书一律重填：上一本的 dirty 标记留着会让表单/大纲停在上一本的内容上（串稿）。
+    const keep = sameBook && keepEdits;
+    if (!keep) {
       writer.setupDirty = false;
       writer.draftDirty = false;
+      writer.outlineDirty = false;
     }
+    // 刷新/重启后恢复没保存的草稿；版本对不上（已保存过或在别处改过）就丢弃，避免复活旧内容。
+    const restored = keep
+      ? { setup: false, outline: false }
+      : applyWriterDraft(bookId, payload.book);
     if (!keepStage) writer.stage = "setup";
+    // 草稿数据已经写进 writer.setup / writer.outline：先清标记让 renderAll 按它重建 DOM
+    // （守卫只在 dirty 时让路），重建完再把标记置回。
+    if (restored.setup) writer.setupDirty = false;
+    if (restored.outline) writer.outlineDirty = false;
     // 活动流水线的流式缓冲与新作品/新状态对齐。
     writer.streamTaskId = String(writer.pipeline?.current_task_id || "");
     writer.streamText = "";
@@ -1261,6 +1388,13 @@ async function openBook(bookId, { keepEdits = false, keepStage = false } = {}) {
     try { localStorage.setItem(LAST_BOOK_KEY, bookId); } catch (_error) { /* storage may be unavailable */ }
     setSaveState("已打开", `《${writer.book?.title || ""}》已打开（第 ${writer.book?.revision ?? "?"} 版）。`);
     renderAll();
+    if (restored.setup) writer.setupDirty = true;
+    if (restored.outline) writer.outlineDirty = true;
+    if (restored.setup || restored.outline) {
+      renderPageState();
+      renderOutline();
+      setSaveState("有未保存修改", "已恢复上次没保存的草稿；点「保存」才会写进作品。");
+    }
     schedulePipelinePolling();
     // 打开的章节还在作品里就重新取一份（版本可能已更新）；不在了就清掉。
     if (writer.chapterNo && !writer.chapters.some((row) => Number(row.no) === writer.chapterNo)) {
@@ -1338,6 +1472,7 @@ async function deleteBook(bookId, title) {
       writer.chapterNo = 0;
       writer.pipeline = null;
       stopPipelinePolling();
+      clearWriterDraft(bookId);
       try { localStorage.removeItem(LAST_BOOK_KEY); } catch (_error) { /* storage may be unavailable */ }
       renderAll();
     }
@@ -1552,6 +1687,7 @@ async function saveSetupManual() {
     writer.setup = payload.setup;
     writer.book = payload.book;
     writer.setupDirty = false;
+    persistDraftAfterSave();
     toast("设定已保存为新版本");
     setSaveState("已保存", "设定按新版本保存；旧版本保留，可在「管理记录」里切回。");
     renderAll();
@@ -1570,6 +1706,12 @@ async function saveSetupManual() {
   }
 }
 
+/** 大纲页的「允许删除已被移出大纲的章节」开关：勾了就一路带到流水线 / 保存 / 同步。
+ *  它是**用户显式授权**，勾着的时候不再弹二次 confirm（否则等于同一个意思问两遍）。 */
+function allowDropChecked() {
+  return Boolean($("#writerOutlineAllowDrop")?.checked);
+}
+
 async function saveOutlineManual() {
   if (!writer.bookId) return;
   const chapters = collectOutline();
@@ -1577,7 +1719,7 @@ async function saveOutlineManual() {
     toast("大纲是空的；先生成或填写章节");
     return;
   }
-  await saveOutlineRows(chapters, false);
+  await saveOutlineRows(chapters, allowDropChecked());
 }
 
 async function saveOutlineRows(chapters, allowDrop) {
@@ -1594,6 +1736,8 @@ async function saveOutlineRows(chapters, allowDrop) {
     });
     writer.outline = { ...(writer.outline || {}), ...payload.outline_version_id ? {} : {}, chapters };
     writer.book = payload.book;
+    writer.outlineDirty = false;
+    persistDraftAfterSave();
     toast("大纲已保存为新版本，章节目录已同步");
     setSaveState("已保存", "大纲按新版本保存，章节目录已按它重建（已有正文保留）。");
     await reloadBookIndex();
@@ -1602,7 +1746,8 @@ async function saveOutlineRows(chapters, allowDrop) {
   } catch (error) {
     const message = String(error?.message || error || "");
     if (message.includes("已有正文，大纲里却没有它")) {
-      if (window.confirm(`${message}\n\n确认删除这些章节（含正文）并继续保存吗？`)) {
+      // 已经勾了开关还失败，说明不是「没授权」；再弹一次 confirm 只会让人以为是死循环。
+      if (!allowDrop && window.confirm(`${message}\n\n确认删除这些章节（含正文）并继续保存吗？`)) {
         await saveOutlineRows(chapters, true);
         return;
       }
@@ -1622,7 +1767,7 @@ async function saveOutlineRows(chapters, allowDrop) {
 
 async function syncChapters() {
   if (!writer.bookId) return;
-  await syncChaptersRequest(false);
+  await syncChaptersRequest(allowDropChecked());
 }
 
 async function syncChaptersRequest(allowDrop) {
@@ -1640,7 +1785,7 @@ async function syncChaptersRequest(allowDrop) {
   } catch (error) {
     const message = String(error?.message || error || "");
     if (message.includes("已有正文，大纲里却没有它")) {
-      if (window.confirm(`${message}\n\n确认删除这些章节（含正文）并继续吗？`)) {
+      if (!allowDrop && window.confirm(`${message}\n\n确认删除这些章节（含正文）并继续吗？`)) {
         await syncChaptersRequest(true);
         return;
       }
@@ -1872,6 +2017,9 @@ function applyTemplate() {
   };
   writer.setupDirty = true;
   closeDialog("#writerTemplateDialog");
+  // 程序化改 writer.setup 之后必须自己重填一次：renderEditor 的 dirty 守卫只给「用户正在打字」让路，
+  // 否则套用模板只会改内存，表单还停在旧内容上（切阶段才丢内容的同一个坑的另一面）。
+  fillSetupForm();
   setStage("setup");
   toast(`已套用模板「${row.name}」；点「保存修改为新版本」入库，或直接点生成（会自动先保存）`);
 }
@@ -1972,34 +2120,45 @@ async function commitImport() {
   }
 }
 
+/** 导出：后端先把整本落成一个真实文件，再由这里决定怎么交给用户。
+ *
+ * 不再用 `URL.createObjectURL` + `<a download>`：exe 里 pywebview 的 ALLOW_DOWNLOADS
+ * 默认 False，WebView2 收到 DownloadStarting 直接 Cancel——点了等于没点（用户实测）。
+ * 桌面端只能把「已存在的文件路径」交给 pywebview 的原生另存为；浏览器/手机照旧下载。
+ */
 async function exportBook(fmt = "txt", withExtras = false) {
   if (!writer.bookId) return;
-  // 字符类里的 `/` 要写成 `\/`：esm_graph_check 的正则扫描按「第一个未转义斜杠」收尾，
-  // 类内裸斜杠会让它提前闭合、引号配对错位，后面的字符串被当成代码（误报 import 漏引）。
-  const safeTitle = (writer.book?.title || "作品").replace(/[\\\/:*?"<>|]/g, "_");
-  const name = `${safeTitle}.${fmt}`;
+  const label = `${fmt.toUpperCase()}${withExtras ? "（含设定与大纲）" : "（全书）"}`;
   try {
-    const query = new URLSearchParams({ format: fmt });
-    if (withExtras) query.set("extras", "1");
     const payload = await api(
-      `/api/writer/books/${encodeURIComponent(writer.bookId)}/export?${query.toString()}`,
+      `/api/writer/books/${encodeURIComponent(writer.bookId)}/export-file`,
+      { method: "POST", body: { format: fmt, extras: withExtras ? "1" : "" } },
     );
-    const filename = String(payload?.filename || name);
-    const mime = fmt === "md" ? "text/markdown;charset=utf-8" : "text/plain;charset=utf-8";
     const missing = Array.isArray(payload?.missing_chapters) ? payload.missing_chapters : [];
-    // triggerDownload 只接受 URL；这里落的是内存文本，直接造临时 blob 链接。
-    const url = URL.createObjectURL(new Blob([payload.text || ""], { type: mime }));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = filename;
-    link.rel = "noopener";
-    document.body.append(link);
-    link.click();
-    link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setSaveState("已导出",
-      `已交给浏览器下载「${filename}」（${fmt.toUpperCase()}${withExtras ? "，含设定与大纲" : "，全书"}）。`
-      + (missing.length ? `注意：第 ${missing.slice(0, 8).join("、")} 章没有正文，未包含在文件里。` : ""));
+    const bytes = Number(payload?.bytes || 0);
+    // 没有正文：不弹保存框。弹了也只是让人存一个空壳，正是「导出又坏了」的来源。
+    if (!bytes || payload?.has_content === false) {
+      setSaveState("没有正文可导出",
+        `《${writer.book?.title || "作品"}》还没有任何一章写成正文，这样导出只会得到一个空文件。`
+        + "改选「导出 Markdown（含设定与大纲）」可以先把设定和大纲带走。");
+      toast("还没有正文；可改选「导出 Markdown（含设定与大纲）」");
+      return;
+    }
+    const filename = String(payload?.suggested_name || payload?.filename || "");
+    const mode = saveLocalFile(localFileUrl(payload.path), filename);
+    const missingNote = missing.length
+      ? `注意：第 ${missing.slice(0, 8).join("、")} 章没有正文，未包含在文件里。`
+      : "";
+    if (mode === "saved") {
+      setSaveState("已导出",
+        `已弹出「另存为」：${filename}（${label}，${fmtBytes(bytes)}）。`
+        + `无论存到哪，导出目录里都留了一份：${payload.dir || "导出目录"}。${missingNote}`);
+    } else if (mode === "download") {
+      setSaveState("已导出", `已交给浏览器下载「${filename}」（${label}，${fmtBytes(bytes)}）。${missingNote}`);
+    } else {
+      setSaveState("导出失败",
+        `没能把文件交给你；但它已经写好（${fmtBytes(bytes)}），可以从「保存位置」那个目录里自己取。`);
+    }
   } catch (error) {
     fail("导出失败", error);
   }
@@ -2529,10 +2688,14 @@ export function bindWriterEvents() {
   // ---- 设定表单 ----
   for (const id of ["writerIdea", "writerTitle", "writerBlurb", "writerWorldview", "writerGenreCat",
     "writerGenreTone", "writerVibe", "writerAvoid", "writerTags"]) {
-    $(`#${id}`)?.addEventListener("input", () => { writer.setupDirty = true; });
+    $(`#${id}`)?.addEventListener("input", () => {
+      writer.setupDirty = true;
+      scheduleDraftSave();
+    });
   }
   $("#writerStyle")?.addEventListener("change", (event) => {
     writer.setupDirty = true;
+    scheduleDraftSave();
     void applyModelSkinFor(String(event.target.value || ""));
   });
   $("#writerCharAdd")?.addEventListener("click", () => {
@@ -2545,7 +2708,14 @@ export function bindWriterEvents() {
       name: "", role: "", identity: "", goal: "", traits: "", speech: "", arc: "", background: "",
     }] };
     writer.setupDirty = true;
+    scheduleDraftSave();
     renderCharacters();
+  });
+  // 角色卡的字段是动态生成的，不在上面那批 id 里：单独委托，否则改角色同样算「未保存」漏掉。
+  $("#writerCharList")?.addEventListener("input", (event) => {
+    if (!event.target.closest("[data-writer-char-field]")) return;
+    writer.setupDirty = true;
+    scheduleDraftSave();
   });
   $("#writerCharList")?.addEventListener("click", (event) => {
     const remove = event.target.closest("[data-writer-char-remove]");
@@ -2555,14 +2725,17 @@ export function bindWriterEvents() {
     chars.splice(index, 1);
     writer.setup = { ...(writer.setup || {}), characters: chars };
     writer.setupDirty = true;
+    scheduleDraftSave();
     renderCharacters();
   });
   $("#writerSetupClear")?.addEventListener("click", () => {
     if (writer.setupDirty && !window.confirm("设定表单里有未保存的修改，确定清空吗？")) return;
     writer.setup = null;
     writer.setupDirty = false;
+    clearWriterDraft(writer.bookId);
     fillSetupForm();
     renderCharacters();
+    renderPageState();
     toast("已清空设定表单（作品里已保存的版本不受影响）");
   });
   $("#writerSetupSave")?.addEventListener("click", () => void saveSetupManual());
@@ -2642,7 +2815,16 @@ export function bindWriterEvents() {
   $("#writerTplApply")?.addEventListener("click", () => applyTemplate());
 
   // ---- 大纲 ----
-  $("#writerOutlineGenerate")?.addEventListener("click", () => void submitPipeline("outline"));
+  $("#writerOutlineGenerate")?.addEventListener("click", () => void submitPipeline("outline", {
+    allowDrop: allowDropChecked(),
+  }));
+  // 改梗概/标题/钩子即置脏：否则切阶段重建整列会把改动抹掉（renderOutline 的守卫认这个标记）。
+  $("#writerOutlineList")?.addEventListener("input", (event) => {
+    if (!event.target.closest("[data-writer-outline-title], [data-writer-outline-beat], [data-writer-outline-hook]")) return;
+    writer.outlineDirty = true;
+    renderOutline();
+    scheduleDraftSave();
+  });
   $("#writerSyncBtn")?.addEventListener("click", () => void syncChapters());
   $("#writerOutlineSave")?.addEventListener("click", () => void saveOutlineManual());
   $("#writerOutlineChapterCount")?.addEventListener("input", (event) => {
@@ -2763,18 +2945,36 @@ export function bindWriterEvents() {
       // 切走就停轮询：页面隐藏后继续轮询只是白耗请求。
       writer.visible = false;
       stopPipelinePolling();
+      // 切走时立刻把草稿落一次：延时写入的定时器活不过这一次切换。
+      if (draftTimer) {
+        clearTimeout(draftTimer);
+        draftTimer = 0;
+        writeWriterDraft(writer.bookId);
+      }
       return;
     }
     writer.visible = true;
     // 模型下拉依赖 bootstrap 的供应商配置：首屏时它可能还没到，进页面时重算一次。
     fillProviderModels();
     void loadLocation();
-    if (writer.bookId) void openBook(writer.bookId);
+    // 进页不重填：草稿/未保存修改一律优先于服务端已保存版本（keepStage 同理，
+    // 否则在正文页切走再回来会被踢回设定页）。
+    const unsaved = writer.setupDirty || writer.draftDirty || writer.outlineDirty;
+    if (writer.bookId) void openBook(writer.bookId, { keepEdits: unsaved, keepStage: true });
     else {
       let remembered = "";
       try { remembered = localStorage.getItem(LAST_BOOK_KEY) || ""; } catch (_error) { /* storage may be unavailable */ }
       if (remembered) void openBook(remembered);
     }
+  });
+
+  // 页面被刷新/关窗时把草稿落一次（定时器来不及跑）。
+  window.addEventListener("pagehide", () => {
+    if (draftTimer) {
+      clearTimeout(draftTimer);
+      draftTimer = 0;
+    }
+    writeWriterDraft(writer.bookId);
   });
 
   renderAll();
@@ -2783,13 +2983,21 @@ export function bindWriterEvents() {
 function renderExportNote() {
   const noteEl = $("#writerExportNote");
   if (!noteEl) return;
+  // 字符类里的 `/` 要写成 `\/`：esm_graph_check 的正则扫描按「第一个未转义斜杠」收尾，
+  // 类内裸斜杠会让它提前闭合、引号配对错位，后面的字符串被当成代码（误报 import 漏引）。
   const title = (writer.book?.title || "作品").replace(/[\\\/:*?"<>|]/g, "_");
   const count = writer.chapters.length;
   const missing = writer.chapters.filter((row) => Number(row.len || 0) <= 0).length;
-  noteEl.textContent = count
-    ? `全书 ${count} 章${missing ? `（${missing} 章还没有正文，导出时会跳过）` : ""}。`
-      + `文件名「${title}.txt」或「${title}.md」；下载交给浏览器处理，通常保存到浏览器默认下载目录。`
-    : "导出由浏览器发起下载，通常保存到浏览器默认下载目录。";
+  const parts = [];
+  if (count) parts.push(`全书 ${count} 章${missing ? `（${missing} 章还没有正文，导出时会跳过）` : ""}。`);
+  if (count && missing === count) {
+    parts.push("整本还没有正文，纯正文导出会是空文件；要带走设定与大纲请选「导出 Markdown（含设定与大纲）」。");
+  }
+  // 端不同，落点就不同：桌面是「另存为」，手机/浏览器是下载。写死了只会误导一半用户。
+  parts.push(isPywebview()
+    ? `导出会先在保存目录的 _exports 里生成文件（默认名「${title}.txt」/「${title}.md」），随后弹出系统「另存为」。`
+    : `导出由浏览器下载，文件名「${title}.txt」或「${title}.md」，通常保存到浏览器默认下载目录。`);
+  noteEl.textContent = parts.join("");
 }
 
 function stepChapter(direction) {

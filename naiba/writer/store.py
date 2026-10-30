@@ -1136,6 +1136,9 @@ class WriterStore:
         if fmt == "md":
             parts.append(f"# {title}\n")
         missing: list[int] = []
+        # 「有没有正文」与「文件是否为空」是两件事：md 带书名标题，空书也非 0 字节。
+        # 前端要按前者决定弹不弹保存框，所以单独回一个 has_body。
+        has_body = False
         for chapter_no in (int(n) for n in manifest.get("chapter_ids") or []):
             try:
                 index = self._load_chapter_index(book_dir, chapter_no)
@@ -1152,6 +1155,7 @@ class WriterStore:
             if not body.strip():
                 missing.append(chapter_no)
                 continue
+            has_body = True
             chapter_title = str(index.get("title") or f"第 {chapter_no} 章")
             if fmt == "md":
                 parts.append(f"## {chapter_title}\n\n{body}\n")
@@ -1160,8 +1164,41 @@ class WriterStore:
         if with_extras:
             parts.append(self._extras_block(book_id, manifest, fmt))
         text = "".join(parts)
-        return {"text": text, "missing_chapters": missing,
+        return {"text": text, "missing_chapters": missing, "has_body": has_body,
                 "filename": f"{clean_title(title)}.{fmt}"}
+
+    def export_to_file(self, book_id: str, *, fmt: str = "txt",
+                       with_extras: bool = False) -> dict[str, Any]:
+        """把整本导出成一个真实文件，返回路径与字节数（桌面端「另存为」要用）。
+
+        为什么要先落盘：exe 里 WebView2 的 `<a download>` 被 pywebview 静默取消
+        （ALLOW_DOWNLOADS 默认 False），而 `naibaSaveFileAs` 只认「已经存在的文件路径」。
+        落在 `_exports/`（不进作品目录，不会被打包进作品）；文件名带时间戳，
+        同秒重复导出再加序号，绝不覆盖上一次的结果——用户常常是在对比两份。
+        """
+        result = self.export_book(book_id, fmt=fmt, with_extras=with_extras)
+        text = str(result.get("text") or "")
+        filename = str(result.get("filename") or f"export.{fmt}")
+        stem = filename[: -(len(fmt) + 1)] if filename.endswith(f".{fmt}") else "export"
+        exports_dir = self._root / "_exports"
+        exports_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        target = exports_dir / f"{stem}-{stamp}.{fmt}"
+        seq = 1
+        while target.exists():
+            target = exports_dir / f"{stem}-{stamp}-{seq}.{fmt}"
+            seq += 1
+        target.write_text(text, encoding="utf-8")
+        return {
+            "path": str(target),
+            "dir": str(exports_dir),
+            "filename": target.name,
+            # 另存为对话框里的默认名：不要时间戳，用户要的是「书名.txt」。
+            "suggested_name": filename,
+            "bytes": target.stat().st_size,
+            "missing_chapters": result.get("missing_chapters") or [],
+            "has_content": bool(result.get("has_body")),
+        }
 
     def _extras_block(self, book_id: str, manifest: dict[str, Any], fmt: str) -> str:
         setup = self.load_setup(book_id, manifest=manifest)

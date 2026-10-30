@@ -119,6 +119,22 @@ class WriterPageStructureTests(unittest.TestCase):
                       "轮询读服务端流水线")
         self.assertIn("setTimeout(() => void pollPipelineTick()", js)
 
+    def test_setup_and_outline_renders_yield_to_unsaved_edits(self):
+        """切阶段/切页丢内容的根因是渲染函数无条件重填：守卫必须写在渲染入口。"""
+        js = (ROOT / "public" / "js" / "27-writer.js").read_text(encoding="utf-8")
+        self.assertIn('if (writer.stage === "setup" && !writer.setupDirty) fillSetupForm();', js)
+        self.assertIn("outlineDirty", js, "大纲列表也要有 dirty 标记")
+        self.assertIn("applyWriterDraft", js, "刷新/重启后能用按书存的草稿恢复")
+        self.assertIn("keepEdits: unsaved", js, "进页时把没保存的修改带上")
+
+    def test_export_goes_through_backend_and_native_save(self):
+        """exe 里 <a download> 会被 pywebview 静默取消（ALLOW_DOWNLOADS 默认 False）：
+        导出只能「后端落盘 → saveLocalFile 交给原生另存为」。"""
+        js = (ROOT / "public" / "js" / "27-writer.js").read_text(encoding="utf-8")
+        self.assertIn("/export-file", js)
+        self.assertIn("saveLocalFile(", js)
+        self.assertNotIn("URL.createObjectURL(", js, "不再造 blob 链接（桌面端点了等于没点）")
+
     def test_css_has_writer_section_and_mobile_panes(self):
         css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
         for piece in (".writer-columns {", "248px minmax(0, 1fr) 280px",
@@ -162,8 +178,18 @@ class WriterBackendRoutesTests(unittest.TestCase):
         for piece in ('"/api/writer/books"', '"/api/writer/import"', "/commit\"",
                       '"/pipelines"', '"/pipeline/cancel"', '"/pipeline/retry"',
                       '"/versions/select"', '"/sync"', '"/api/writer/location"',
-                      '"/api/writer/reveal"'):
+                      '"/api/writer/reveal"', '"/export-file"'):
             self.assertIn(piece, self.http, piece)
+
+    def test_export_file_route_is_post_and_before_catch_all(self):
+        """导出落盘有副作用 → 只能挂在 do_POST 里；GET 的 /export 仍在（老客户端与单测在用）。"""
+        post_start = self.http.index("def do_POST(self)")
+        put_start = self.http.index("def do_PUT(self)") if "def do_PUT(self)" in self.http else len(self.http)
+        dispatch = self.http[post_start:put_start]
+        self.assertIn("api_export_file", dispatch, "导出落盘走 POST 分支")
+        self.assertIn('path.endswith("/export-file")', dispatch)
+        get_part = self.http[:post_start]
+        self.assertIn("api_export_book", get_part, "GET 纯文本导出保留")
 
     def test_import_is_multipart_gated(self):
         self.assertIn("_writer_import_upload", self.http)

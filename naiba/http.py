@@ -890,6 +890,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path.startswith("/api/writer/import/") and path.endswith("/commit"):
             self._json(*self.app.writer.api_commit_import(
                 {"import_id": path[len("/api/writer/import/"):-len("/commit")]}))
+        elif path.startswith("/api/writer/books/") and path.endswith("/export-file"):
+            # 导出成真实文件再交给桌面端「另存为」：有落盘副作用，所以是 POST。
+            self._json(*self.app.writer.api_export_file(
+                path[len("/api/writer/books/"):-len("/export-file")], body))
         elif path.startswith("/api/writer/books/") and path.endswith("/pipelines"):
             self._json(*self.app.writer.api_start_pipeline(
                 path[len("/api/writer/books/"):-len("/pipelines")], body))

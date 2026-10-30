@@ -93,6 +93,18 @@ class WriterService:
                     expected_revision=body.get("revision"),
                 )
                 return {"book": book}, 200
+            if "parts" in body:
+                # 分部文字大纲（3.9.13）：不再同步章节，章节由拆章产出。
+                return self.store.save_outline(
+                    book_id, parts=body.get("parts"), kind="manual", task_id="",
+                    expected_revision=body.get("revision"),
+                ), 200
+            if "chapter_plan" in body:
+                plan = body.get("chapter_plan") if isinstance(body.get("chapter_plan"), dict) else {}
+                return self.store.set_chapter_plan(
+                    book_id, chars=plan.get("chars"), ending=plan.get("ending"),
+                    expected_revision=body.get("revision"),
+                ), 200
             if "outline" in body:
                 allow_drop = str(body.get("allow_drop") or "").lower() in ("1", "true", "yes")
                 return self.store.save_outline(
@@ -144,6 +156,24 @@ class WriterService:
                 expected_revision=body.get("revision"),
             )
             return payload, (200 if payload.get("duplicate") else 201)
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+        except WriterConflictError as exc:
+            return {"error": str(exc)}, 409
+        except WriterStoreError as exc:
+            return {"error": str(exc)}, 400
+
+    def api_update_chapter_meta(self, book_id: str, chapter_no: Any,
+                                body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """改章节标题/简述/钩子（章节页「章节简述」逐行可改）。"""
+        if not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
+        try:
+            return self.store.update_chapter_meta(
+                book_id, self._chapter_no(chapter_no),
+                title=body.get("title"), beat=body.get("beat"), hook=body.get("hook"),
+                expected_revision=body.get("revision"),
+            ), 200
         except LookupError as exc:
             return {"error": str(exc)}, 404
         except WriterConflictError as exc:
@@ -319,6 +349,11 @@ class WriterService:
                 outline_version_id=str(body.get("outline_version_id") or ""),
                 extra_note=str(body.get("extra_note") or ""),
                 allow_drop=str(body.get("allow_drop") or "").lower() in ("1", "true", "yes"),
+                part_no=self._int_or(body.get("part_no"), 0),
+                part_title=str(body.get("part_title") or ""),
+                target_chars=self._int_or(body.get("target_chars"), 0),
+                want_count=self._int_or(body.get("want_count"), 0),
+                from_no=self._int_or(body.get("from_no"), 0),
                 base_revision=body.get("revision"),
                 chapter_revision=body.get("chapter_revision"),
             )

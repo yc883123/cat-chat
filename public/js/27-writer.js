@@ -44,6 +44,8 @@ const KIND_LABELS = {
   setup_all: "生成整套设定",
   setup_step: "单步设定",
   outline: "生成全书大纲",
+  outline_text: "生成本部大纲",
+  split: "拆分章节",
   chapter: "整章正文",
   chapter_segs: "分段正文",
   chapter_continue: "续写正文",
@@ -58,6 +60,8 @@ const STEP_LABELS = {
   world: "世界观设定",
   chars: "角色设定",
   outline: "章节大纲",
+  outline_text: "全篇大纲",
+  split: "拆章",
   segs: "段落要点",
   draft: "正文",
 };
@@ -65,6 +69,36 @@ const STEP_LABELS = {
 // 写作风格（与服务端 STYLE_PRESETS 对齐）。
 const STYLE_OPTIONS = [
   ["web", "网文爽文（默认）"],
+  ["webnovel", "网络爽文"],
+  ["hardboiled", "硬汉派（冷硬派）"],
+  ["thriller", "悬疑惊悚"],
+  ["realism", "现实主义"],
+  ["romance", "浪漫主义"],
+  ["magic_real", "魔幻现实主义"],
+  ["stream", "意识流"],
+  ["black_humor", "黑色幽默"],
+  ["gothic", "哥特式"],
+  ["minimal", "极简主义"],
+  ["baroque", "巴洛克式"],
+  ["existential", "存在主义"],
+  ["satire", "讽刺主义"],
+  ["naturalism", "自然主义"],
+  ["epic", "史诗风格"],
+  ["pastoral", "田园牧歌"],
+  ["cyberpunk", "赛博朋克"],
+  ["steampunk", "蒸汽朋克"],
+  ["wuxia", "武侠风格"],
+  ["xianxia", "仙侠风格"],
+  ["lightnovel", "轻小说风格"],
+  ["epistolary", "书信体 / 日记体"],
+  ["metafiction", "元小说"],
+  ["postmodern", "后现代主义"],
+  ["new_sensation", "新感觉派"],
+  ["local", "乡土文学"],
+  ["hard_sf", "科幻硬核"],
+  ["space_opera", "太空歌剧"],
+  ["aesthetic", "唯美主义"],
+  ["absurd", "荒诞派"],
   ["jinyong", "历史正剧 · 金庸式"],
   ["strict", "严肃历史（严格考据）"],
   ["light", "轻松幽默"],
@@ -79,15 +113,26 @@ const VERSION_KIND_LABELS = {
 };
 
 const CHAR_FIELDS = [
-  ["name", "名字"],
-  ["role", "身份定位"],
-  ["identity", "一句话简介"],
+  ["name", "全名"],
+  ["alias", "别称"],
+  ["age", "年龄"],
+  ["origin", "出身"],
+  ["identity", "身份"],
+  ["costume", "服装"],
+  ["personality", "性格"],
+  ["voice", "声音"],
+  ["relations", "关系网"],
+  ["intro", "人物介绍"],
   ["goal", "目标动机"],
-  ["traits", "性格特点"],
-  ["speech", "说话风格"],
   ["arc", "成长弧线"],
-  ["background", "背景故事"],
 ];
+// 卡片默认折叠时只露这几个（其余点「展开全部字段」）。
+const CHAR_BRIEF_FIELDS = new Set(["name", "identity", "personality", "voice"]);
+const LEAD_MAX = 9;
+const SIDE_MAX = 99;
+const TAGS_MAX = 20;
+const REFS_MAX = 8;
+const REF_DIMS = ["故事背景", "世界观", "叙事节奏", "人物关系", "语言风格"];
 
 const writer = {
   initialized: false,
@@ -104,21 +149,31 @@ const writer = {
   location: null,
   stage: "setup",
   pane: "editor",
+  // 大纲当前编辑的部（多部作品切部编辑；单部作品永远是 1）。
+  partNo: 1,
+  // 部标题/大纲文字的编辑态：DOM 是最新值，渲染函数要让路（与 setupDirty 同一套规则）。
+  partsDirty: false,
   // 生成参数（滑条），本地保留。
-  charCount: 4,
-  chapterCount: 12,
+  charCount: 2,
+  sideCount: 4,
+  chapterCount: 30,
   outlineChapterCount: 12,
   // 模型选择（与拆书匠同口径）：先选供应商，再按供应商拉完整模型目录。
   setupProviderKey: "", setupModelName: "",
   outlineProviderKey: "", outlineModelName: "",
+  chapterProviderKey: "", chapterModelName: "",
   draftProviderKey: "", draftModelName: "",
   providerModelsCache: new Map(),
   providerModelInflight: new Map(),
   // 设定表单编辑态：套用模板 / 手改后为 true，保存或放弃后复位。
   setupDirty: false,
-  // 大纲列表编辑态：改过梗概/标题后为 true。与 setupDirty 一样是「DOM 才是最新值」的标记，
-  // 渲染函数必须让路，否则切阶段/切页重建整列会把改动抹掉。
-  outlineDirty: false,
+  // 批次三：题材树 / 标签多选 / 参考作品 / 角色分区。
+  charTab: "lead",
+  tags: [],
+  refs: [],
+  genrePick: { channel: "", cat: "", sub_cat: "" },
+  genres: null,
+  tagPool: null,
   // 当前打开章节与正文。
   chapterNo: 0,
   chapter: null,
@@ -325,6 +380,7 @@ function fillProviderModels() {
     const pairs = [
       ["writerSetupProvider", "writerSetupModel", "setupProviderKey", "setupModelName"],
       ["writerOutlineProvider", "writerOutlineModel", "outlineProviderKey", "outlineModelName"],
+      ["writerChapterProvider", "writerChapterModel", "chapterProviderKey", "chapterModelName"],
       ["writerDraftProvider", "writerDraftModel", "draftProviderKey", "draftModelName"],
     ];
     for (const [providerId, modelId, providerField, modelField] of pairs) {
@@ -354,13 +410,13 @@ function renderPageState() {
     return;
   }
   const title = `《${writer.book?.title || "未命名作品"}》`;
-  const stageName = { setup: "设定", outline: "大纲", draft: "正文" }[writer.stage] || "设定";
+  const stageName = { setup: "设定", outline: "大纲", chapter: "章节", draft: "正文" }[writer.stage] || "设定";
   const running = writer.pipeline?.status === "running";
   el.textContent = running
     ? `${title} · ${kindLabel(writer.pipeline.kind)} · ${stageName}`
     : `${title} · ${stageName}`;
   // 表单/大纲里有还没写进作品的改动：页头必须能看出来，否则用户会以为已经存了。
-  if (writer.setupDirty || writer.outlineDirty) el.textContent += " · 有未保存修改";
+  if (writer.setupDirty || writer.partsDirty) el.textContent += " · 有未保存修改";
 }
 
 function renderBookSummary() {
@@ -447,6 +503,377 @@ function renderChapters() {
   list.replaceChildren(...writer.chapters.map(chapterRow));
 }
 
+// ---- 左栏：按阶段切换（设定=作品与版本 · 大纲=设定汇总 · 章节=大纲汇总 · 正文=目录） ----
+
+function renderSide() {
+  const stage = writer.stage;
+  for (const side of document.querySelectorAll("[data-writer-side]")) {
+    side.hidden = side.dataset.writerSide !== stage;
+  }
+  if (stage === "setup") renderSetupVersions();
+  if (stage === "outline") renderSetupSummary();
+  if (stage === "chapter") renderChapterOutlineSummary();
+}
+
+function renderSetupVersions() {
+  const list = $("#writerSetupVersionList");
+  const empty = $("#writerSetupVersionEmpty");
+  if (!list) return;
+  const rows = Array.isArray(writer.book?.setup_versions) ? writer.book.setup_versions : [];
+  if (empty) empty.hidden = rows.length > 0;
+  const current = String(writer.book?.current_setup_version_id || "");
+  list.replaceChildren(...rows.slice().reverse().map((row) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = `writer-version-row${String(row.id) === current ? " active" : ""}`;
+    item.dataset.writerSetupVersion = String(row.id || "");
+    const title = document.createElement("strong");
+    title.textContent = `v${row.version} · ${VERSION_KIND_LABELS[row.kind] || row.kind || "版本"}`;
+    const meta = document.createElement("small");
+    meta.textContent = `${fmtTime(row.updated_at)} · ${fmtChars(row.len)} 字`;
+    item.append(title, meta);
+    return item;
+  }));
+}
+
+function summaryLine(label, value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const row = document.createElement("p");
+  row.className = "writer-summary-row";
+  const key = document.createElement("span");
+  key.textContent = label;
+  const val = document.createElement("b");
+  val.textContent = text;
+  row.append(key, val);
+  return row;
+}
+
+function renderSetupSummary() {
+  const box = $("#writerSetupSummary");
+  if (!box) return;
+  const setup = writer.setup || {};
+  const genre = setup.genre || {};
+  const chars = (setup.characters || []).filter((row) => row && String(row.name || "").trim());
+  const rows = [
+    summaryLine("创意", String(setup.idea || "").slice(0, 160)),
+    summaryLine("书名", setup.title),
+    summaryLine("题材", [genre.channel === "female" ? "女生类" : genre.channel === "male" ? "男生类" : "",
+      genre.cat, genre.sub_cat].filter(Boolean).join(" › ")),
+    summaryLine("基调", genre.tone),
+    summaryLine("标签", (setup.genre_tags || []).join(" · ")),
+    summaryLine("风格", styleLabelOf(setup.style)),
+    summaryLine("雷区", String(setup.constraints?.avoid || "").slice(0, 120)),
+    summaryLine("角色", chars.length ? chars.map((row) => String(row.name)).join("、") : ""),
+    summaryLine("世界观", String(setup.worldview || "").slice(0, 200)),
+  ].filter(Boolean);
+  if (!rows.length) {
+    const empty = document.createElement("p");
+    empty.className = "writer-empty";
+    empty.textContent = "还没有设定内容。回「设定」页写一句创意，或从模板套用。";
+    box.replaceChildren(empty);
+    return;
+  }
+  box.replaceChildren(...rows);
+}
+
+function renderChapterOutlineSummary() {
+  const box = $("#writerChapterOutlineText");
+  const meta = $("#writerChapterOutlineMeta");
+  if (!box) return;
+  const parts = outlineParts();
+  const legacy = hasLegacyOutline() ? writer.outline.chapters : [];
+  if (meta) {
+    meta.textContent = parts.length
+      ? `${parts.length} 部 · ${fmtChars(parts.reduce((n, row) => n + String(row.text || "").length, 0))} 字`
+      : (legacy.length ? "逐章大纲（旧版）" : "还没有大纲");
+  }
+  if (parts.length) {
+    box.replaceChildren(...parts.map((row) => {
+      const block = document.createElement("section");
+      block.className = "writer-outline-part";
+      const head = document.createElement("strong");
+      head.textContent = `第 ${row.no} 部 · ${row.title || "未命名"}`;
+      const body = document.createElement("div");
+      body.className = "writer-outline-part-text";
+      body.textContent = String(row.text || "").trim() || "（这一部还没有内容）";
+      block.append(head, body);
+      return block;
+    }));
+    return;
+  }
+  if (legacy.length) {
+    box.replaceChildren(...legacy.map((row) => {
+      const p = document.createElement("p");
+      p.className = "writer-outline-legacy";
+      p.textContent = `第${row.no}章 ${row.title || ""}：${String(row.beat || "").slice(0, 80)}`;
+      return p;
+    }));
+    return;
+  }
+  const empty = document.createElement("p");
+  empty.className = "writer-empty";
+  empty.textContent = "还没有大纲。回「大纲」页写，或直接生成。";
+  box.replaceChildren(empty);
+}
+
+function chapterPlan() {
+  const plan = writer.book?.chapter_plan || {};
+  return { chars: Number(plan.chars || 0), ending: String(plan.ending || "suspense") };
+}
+
+const ENDING_LABELS = { suspense: "留悬念", natural: "自然收", hook: "留钩子 + 预告" };
+
+function renderTocLimits() {
+  const box = $("#writerTocLimits");
+  const label = $("#writerTocLimit");
+  const plan = chapterPlan();
+  const count = writer.chapters.length;
+  const done = writer.chapters.filter((row) => Number(row.len) > 0).length;
+  if (label) label.textContent = `${count} 章 · ${done} 章已成稿`;
+  if (!box) return;
+  box.textContent = count
+    ? `${count} 章${plan.chars ? ` · 单章 ≤ ${fmtChars(plan.chars)} 字` : " · 单章不限"} · ${ENDING_LABELS[plan.ending] || plan.ending}`
+    : "还没有章节。去「章节」页按大纲拆分。";
+}
+
+// ---- 章节页：拆分 + 简述 ----
+
+function renderChapterStage() {
+  const plan = chapterPlan();
+  const charsEl = $("#writerChapterChars");
+  if (charsEl) charsEl.value = String(plan.chars);
+  const endingEl = $("#writerChapterEnding");
+  if (endingEl) endingEl.value = plan.ending;
+  renderParts();
+  renderBriefList();
+}
+
+function renderBriefList() {
+  const list = $("#writerBriefList");
+  const meta = $("#writerBriefMeta");
+  if (!list) return;
+  const rows = writer.chapters;
+  if (meta) {
+    meta.textContent = rows.length
+      ? `${rows.length} 章 · 点行可改标题与简述`
+      : "还没有章节";
+  }
+  if (!rows.length) {
+    const empty = document.createElement("p");
+    empty.className = "writer-empty";
+    empty.textContent = "先在上面按大纲拆分，章节目录会出现在这里；已有正文的章节不会被覆盖。";
+    list.replaceChildren(empty);
+    return;
+  }
+  list.replaceChildren(...rows.map((row) => {
+    const item = document.createElement("div");
+    item.className = "writer-brief-row";
+    item.dataset.writerBrief = String(row.no);
+    const head = document.createElement("div");
+    head.className = "writer-brief-head";
+    const no = document.createElement("button");
+    no.type = "button";
+    no.className = "writer-brief-no";
+    no.dataset.writerBriefOpen = String(row.no);
+    no.title = "去正文页写这一章";
+    no.textContent = `第${row.no}章`;
+    const title = document.createElement("input");
+    title.type = "text";
+    title.dataset.writerBriefTitle = String(row.no);
+    title.value = String(row.title || "");
+    title.setAttribute("aria-label", `第${row.no}章标题`);
+    head.append(no, title);
+    const beat = document.createElement("textarea");
+    beat.rows = 2;
+    beat.dataset.writerBriefBeat = String(row.no);
+    beat.value = String(row.beat || "");
+    beat.placeholder = "这一章发生什么（80—150 字）";
+    beat.setAttribute("aria-label", `第${row.no}章简述`);
+    item.append(head, beat);
+    return item;
+  }));
+}
+
+// ---- 批次三：题材树 / 标签 / 参考作品 ----
+
+async function loadGenres() {
+  if (writer.genres) return writer.genres;
+  try {
+    const res = await fetch(`${TEMPLATES_URL.replace("templates.json", "genres.json")}`);
+    writer.genres = res.ok ? await res.json() : { channels: [] };
+  } catch (_error) {
+    writer.genres = { channels: [] };
+  }
+  return writer.genres;
+}
+
+async function loadTagPool() {
+  if (writer.tagPool) return writer.tagPool;
+  try {
+    const res = await fetch(`${TEMPLATES_URL.replace("templates.json", "tags.json")}`);
+    const data = res.ok ? await res.json() : { tags: [] };
+    writer.tagPool = Array.isArray(data.tags) ? data.tags : [];
+  } catch (_error) {
+    writer.tagPool = [];
+  }
+  return writer.tagPool;
+}
+
+function genreChip(label, active, data) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = `writer-genre-cat${active ? " active" : ""}`;
+  Object.assign(btn.dataset, data);
+  btn.textContent = label;
+  return btn;
+}
+
+function renderGenrePicker() {
+  const box = $("#writerGenrePicker");
+  if (!box) return;
+  const data = writer.genres;
+  if (!data) {
+    box.textContent = "正在读取题材树…";
+    return;
+  }
+  const pick = writer.genrePick;
+  const channel = pick.channel || "male";
+  const channels = Array.isArray(data.channels) ? data.channels : [];
+  const blocks = channels.map((ch) => {
+    const wrap = document.createElement("div");
+    wrap.className = `writer-genre-col${ch.key === channel ? " active" : ""}`;
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "writer-genre-channel";
+    head.dataset.writerGenreChannel = String(ch.key);
+    head.textContent = String(ch.label || "");
+    const cats = document.createElement("div");
+    cats.className = "writer-genre-cats";
+    for (const cat of ch.cats || []) {
+      cats.append(genreChip(String(cat.label || ""),
+        ch.key === channel && pick.cat === String(cat.label || ""),
+        { writerGenreCat: String(cat.label || ""), writerGenreChannel: String(ch.key) }));
+    }
+    wrap.append(head, cats);
+    return wrap;
+  });
+  const subs = document.createElement("div");
+  subs.className = "writer-genre-subs";
+  const activeCh = channels.find((ch) => ch.key === channel);
+  const activeCat = (activeCh?.cats || []).find((cat) => String(cat.label) === pick.cat);
+  for (const sub of activeCat?.subs || []) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `writer-genre-sub${pick.sub_cat === sub ? " active" : ""}`;
+    btn.dataset.writerGenreSub = String(sub);
+    btn.textContent = String(sub);
+    subs.append(btn);
+  }
+  if (activeCat) subs.append(genreChip("不限二级", !pick.sub_cat, { writerGenreSub: "" }));
+  box.replaceChildren(...blocks, subs);
+  const catEl = $("#writerGenreCat");
+  if (catEl) catEl.value = pick.cat || "";
+  const subEl = $("#writerGenreSubCat");
+  if (subEl) subEl.value = pick.sub_cat || "";
+  const chEl = $("#writerGenreChannel");
+  if (chEl) chEl.value = pick.channel || "";
+}
+
+function tagChip(label, selected) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = `writer-tag${selected ? " on" : ""}`;
+  btn.dataset.writerTag = String(label);
+  btn.setAttribute("aria-pressed", String(selected));
+  btn.textContent = selected ? `${label} ×` : String(label);
+  return btn;
+}
+
+function renderTags() {
+  const box = $("#writerTagBox");
+  if (!box) return;
+  const query = String($("#writerTagSearch")?.value || "").trim();
+  const selected = writer.tags.slice();
+  const pool = (writer.tagPool || []).filter((tag) => !selected.includes(tag)
+    && (!query || String(tag).includes(query)));
+  const chips = [
+    ...selected.map((tag) => tagChip(tag, true)),
+    ...pool.slice(0, query ? 80 : 36).map((tag) => tagChip(tag, false)),
+  ];
+  if (!chips.length) {
+    const empty = document.createElement("p");
+    empty.className = "writer-hint";
+    empty.textContent = writer.tagPool ? "没有匹配的标签；可以直接用上面的自定义题材描述。" : "正在读取标签库…";
+    box.replaceChildren(empty);
+  } else {
+    box.replaceChildren(...chips);
+  }
+  const stat = $("#writerTagStat");
+  if (stat) stat.textContent = `已选 ${selected.length} / ${TAGS_MAX}`;
+  const hidden = $("#writerTags");
+  if (hidden) hidden.value = selected.join(", ");
+}
+
+function renderRefs() {
+  const box = $("#writerRefList");
+  if (!box) return;
+  if (!writer.refs.length) {
+    const empty = document.createElement("p");
+    empty.className = "writer-hint";
+    empty.textContent = "还没有参考作品。点下面「+ 再加一本参考」写一本（可留空不填）。";
+    box.replaceChildren(empty);
+    return;
+  }
+  box.replaceChildren(...writer.refs.map((ref, index) => {
+    const card = document.createElement("div");
+    card.className = "writer-ref";
+    card.dataset.writerRef = String(index);
+    const head = document.createElement("div");
+    head.className = "writer-ref-head";
+    const title = document.createElement("input");
+    title.type = "text";
+    title.value = String(ref.title || "");
+    title.placeholder = "作品名，例：《长夜难明》";
+    title.dataset.writerRefTitle = String(index);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "control-button tiny";
+    remove.dataset.writerRefRemove = String(index);
+    remove.textContent = "删除";
+    head.append(title, remove);
+    const dims = document.createElement("div");
+    dims.className = "writer-chips";
+    for (const dim of REF_DIMS) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = `writer-chip${(ref.dims || []).includes(dim) ? " on" : ""}`;
+      btn.dataset.writerRefDim = dim;
+      btn.dataset.writerRefIndex = String(index);
+      btn.textContent = dim;
+      dims.append(btn);
+    }
+    const note = document.createElement("input");
+    note.type = "text";
+    note.value = String(ref.note || "");
+    note.placeholder = "怎么参考，例：学它「查案推进 + 每章一个旧账」的结构";
+    note.dataset.writerRefNote = String(index);
+    const same = document.createElement("label");
+    same.className = "writer-check";
+    const sameBox = document.createElement("input");
+    sameBox.type = "checkbox";
+    sameBox.checked = Boolean(ref.same_fanfic);
+    sameBox.dataset.writerRefSame = String(index);
+    const sameText = document.createElement("span");
+    sameText.textContent = "本作品同人（改写自己已有的书）";
+    same.append(sameBox, sameText);
+    card.append(head, dims, note, same);
+    return card;
+  }));
+}
+
+// ---- 设定表单：填充 / 收集 ----
+
 function fillSetupForm() {
   const setup = writer.setup || {};
   const value = (id, text) => {
@@ -457,11 +884,29 @@ function fillSetupForm() {
   value("writerTitle", setup.title);
   value("writerBlurb", setup.blurb);
   value("writerWorldview", setup.worldview);
-  value("writerGenreCat", setup.genre?.cat);
   value("writerGenreTone", setup.genre?.tone);
+  value("writerGenreCustom", setup.genre?.cat && setup.genre?.custom ? setup.genre.cat : "");
   value("writerVibe", setup.constraints?.vibe);
   value("writerAvoid", setup.constraints?.avoid);
-  value("writerTags", (setup.genre_tags || []).join(", "));
+  // 题材树 / 标签 / 参考作品 / 角色分区
+  writer.genrePick = {
+    channel: String(setup.genre?.channel || ""),
+    cat: String(setup.genre?.cat || ""),
+    sub_cat: String(setup.genre?.sub_cat || ""),
+  };
+  writer.tags = Array.isArray(setup.genre_tags) ? setup.genre_tags.slice(0, TAGS_MAX) : [];
+  writer.refs = (Array.isArray(setup.references) ? setup.references : []).map((row) => ({
+    title: String(row?.title || ""),
+    dims: Array.isArray(row?.dims) ? row.dims.slice() : [],
+    note: String(row?.note || ""),
+    same_fanfic: Boolean(row?.same_fanfic),
+  }));
+  (async () => {
+    await Promise.all([loadGenres(), loadTagPool()]);
+    renderGenrePicker();
+    renderTags();
+  })();
+  renderRefs();
   const style = $("#writerStyle");
   if (style) {
     style.replaceChildren(...STYLE_OPTIONS.map(([key, label]) => new Option(label, key)));
@@ -500,7 +945,7 @@ function renderCandidates(boxId, listId, candidates, onPick) {
     chip.className = "writer-candidate";
     chip.title = "点一下采用这条候选";
     chip.textContent = String(text || "").length > 60
-      ? `${String(text).slice(0, 60)}…`
+      ? `${String(text || "").slice(0, 60)}…`
       : String(text || "");
     chip.addEventListener("click", () => onPick(String(text || "")));
     return chip;
@@ -511,52 +956,79 @@ function renderCharacters() {
   const list = $("#writerCharList");
   if (!list) return;
   const chars = (writer.setup?.characters || []).filter((row) => row && typeof row === "object");
+  const leads = chars.filter((row) => (row.role || "lead") === "lead").length;
+  const sides = chars.length - leads;
+  const leadEl = $("#writerLeadTabCount");
+  if (leadEl) leadEl.textContent = `${leads} / ${LEAD_MAX}`;
+  const sideEl = $("#writerSideTabCount");
+  if (sideEl) sideEl.textContent = `${sides} / ${SIDE_MAX}`;
+  document.querySelectorAll("#writerCharTabs [data-writer-char-tab]").forEach((btn) => {
+    const active = btn.dataset.writerCharTab === writer.charTab;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-pressed", String(active));
+  });
   if (!chars.length) {
     const empty = document.createElement("p");
     empty.className = "writer-empty";
-    empty.textContent = "还没有角色。生成设定、从模板套用，或点「加一个角色」手写。";
+    empty.textContent = "还没有角色。生成设定、从模板套用，或点「+ 加一个角色」手写。";
     list.replaceChildren(empty);
     return;
   }
   list.replaceChildren(...chars.map((row, index) => {
+    const role = (row.role || "lead") === "lead" ? "lead" : "side";
     const card = document.createElement("div");
     card.className = "writer-char-card";
     card.dataset.writerCharIndex = String(index);
+    card.dataset.writerCharRole = role;
+    card.hidden = role !== writer.charTab;
     const head = document.createElement("div");
     head.className = "writer-char-head";
+    const badge = document.createElement("span");
+    badge.className = `writer-char-badge ${role}`;
+    badge.textContent = role === "lead" ? "主角" : "配角";
     const strong = document.createElement("strong");
     strong.textContent = row.name || `角色 ${index + 1}`;
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "control-button tiny";
+    toggle.dataset.writerCharToggle = String(index);
+    toggle.textContent = "展开全部字段";
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "control-button tiny danger";
     remove.dataset.writerCharRemove = String(index);
     remove.textContent = "删除";
-    head.append(strong, remove);
+    head.append(badge, strong, toggle, remove);
     const grid = document.createElement("div");
     grid.className = "writer-grid-2";
     for (const [key, label] of CHAR_FIELDS) {
-      if (key === "background") continue;
-      const field = document.createElement("label");
-      field.className = "writer-field";
-      field.textContent = label;
-      const input = document.createElement("input");
-      input.type = "text";
-      input.dataset.writerCharField = key;
-      input.value = String(row[key] || "");
-      field.append(input);
-      grid.append(field);
+      if (!CHAR_BRIEF_FIELDS.has(key)) continue;
+      grid.append(charField(row, key, label, false));
     }
-    const backgroundField = document.createElement("label");
-    backgroundField.className = "writer-field";
-    backgroundField.textContent = "背景故事";
-    const backgroundInput = document.createElement("textarea");
-    backgroundInput.rows = 2;
-    backgroundInput.dataset.writerCharField = "background";
-    backgroundInput.value = String(row.background || "");
-    backgroundField.append(backgroundInput);
-    card.append(head, grid, backgroundField);
+    const more = document.createElement("div");
+    more.className = "writer-grid-2 writer-char-more";
+    more.hidden = true;
+    for (const [key, label] of CHAR_FIELDS) {
+      if (CHAR_BRIEF_FIELDS.has(key)) continue;
+      const isLong = key === "intro" || key === "relations";
+      more.append(charField(row, key, label, isLong));
+    }
+    card.append(head, grid, more);
     return card;
   }));
+}
+
+function charField(row, key, label, longText) {
+  const field = document.createElement("label");
+  field.className = "writer-field";
+  field.textContent = label;
+  const input = document.createElement(longText ? "textarea" : "input");
+  if (longText) input.rows = 2;
+  else input.type = "text";
+  input.dataset.writerCharField = key;
+  input.value = String(row[key] || "");
+  field.append(input);
+  return field;
 }
 
 function collectCharacters() {
@@ -564,7 +1036,7 @@ function collectCharacters() {
   if (!list) return [];
   const rows = [];
   for (const card of list.querySelectorAll(".writer-char-card")) {
-    const row = {};
+    const row = { role: card.dataset.writerCharRole === "side" ? "side" : "lead" };
     for (const [key] of CHAR_FIELDS) {
       const input = card.querySelector(`[data-writer-char-field="${key}"]`);
       row[key] = String(input?.value || "").trim();
@@ -575,24 +1047,31 @@ function collectCharacters() {
 }
 
 function collectSetup() {
-  const splitTags = String($("#writerTags")?.value || "")
-    .split(/[,，、]/).map((tag) => tag.trim()).filter(Boolean).slice(0, 5);
   return {
     idea: String($("#writerIdea")?.value || ""),
     genre: {
-      channel: String(writer.setup?.genre?.channel || ""),
-      cat: String($("#writerGenreCat")?.value || "").trim(),
-      sub_cat: String(writer.setup?.genre?.sub_cat || ""),
+      channel: String(writer.genrePick.channel || ""),
+      cat: String(writer.genrePick.cat || "").trim(),
+      sub_cat: String(writer.genrePick.sub_cat || "").trim(),
       tone: String($("#writerGenreTone")?.value || "").trim(),
       hook: String(writer.setup?.genre?.hook || ""),
     },
-    genre_tags: splitTags,
+    genre_tags: writer.tags.slice(0, TAGS_MAX),
     title: String($("#writerTitle")?.value || "").trim(),
     title_candidates: Array.isArray(writer.setup?.title_candidates) ? writer.setup.title_candidates : [],
     blurb: String($("#writerBlurb")?.value || ""),
     blurb_candidates: Array.isArray(writer.setup?.blurb_candidates) ? writer.setup.blurb_candidates : [],
     worldview: String($("#writerWorldview")?.value || ""),
     characters: collectCharacters(),
+    references: writer.refs
+      .filter((ref) => String(ref.title || "").trim())
+      .slice(0, REFS_MAX)
+      .map((ref) => ({
+        title: String(ref.title).trim(),
+        dims: (ref.dims || []).filter((dim) => REF_DIMS.includes(dim)),
+        note: String(ref.note || "").trim(),
+        same_fanfic: Boolean(ref.same_fanfic),
+      })),
     style: String($("#writerStyle")?.value || "web"),
     constraints: {
       vibe: String($("#writerVibe")?.value || "").trim(),
@@ -601,80 +1080,119 @@ function collectSetup() {
   };
 }
 
-function renderOutline() {
-  const list = $("#writerOutlineList");
-  if (!list) return;
-  // 有未保存修改时，DOM 里的输入才是最新值：只刷新提示与按钮，不重建整列。
-  const dirty = Boolean(writer.outlineDirty);
-  const rows = dirty
-    ? collectOutline()
-    : (Array.isArray(writer.outline?.chapters) ? writer.outline.chapters : []);
-  const meta = $("#writerOutlineMeta");
-  if (meta) {
-    meta.textContent = rows.length
-      ? `${rows.length} 章 · ${dirty ? "有未保存修改，" : ""}改完点「保存大纲修改」`
-      : (writer.bookId ? "还没有大纲。点「生成全书大纲」。" : "打开作品后再生成大纲");
-  }
-  const save = $("#writerOutlineSave");
-  if (save) save.disabled = !rows.length || writer.busy;
-  if (dirty) return;
-  if (!rows.length) {
-    const empty = document.createElement("p");
-    empty.className = "writer-empty";
-    empty.textContent = writer.bookId
-      ? "还没有大纲。点上面的「生成全书大纲」。"
-      : "先打开或新建作品。";
-    list.replaceChildren(empty);
-    return;
-  }
-  list.replaceChildren(...rows.map((row) => {
-    const item = document.createElement("label");
-    item.className = "writer-outline-item";
-    const head = document.createElement("div");
-    head.className = "writer-outline-head";
-    const no = document.createElement("span");
-    no.textContent = `第${row.no}章`;
-    const title = document.createElement("input");
-    title.type = "text";
-    title.dataset.writerOutlineTitle = String(row.no);
-    title.value = String(row.title || "");
-    title.setAttribute("aria-label", `第${row.no}章标题`);
-    head.append(no, title);
-    const beat = document.createElement("textarea");
-    beat.rows = 2;
-    beat.dataset.writerOutlineBeat = String(row.no);
-    beat.value = String(row.beat || "");
-    beat.placeholder = "这一章发生什么";
-    beat.setAttribute("aria-label", `第${row.no}章梗概`);
-    const hook = document.createElement("input");
-    hook.type = "text";
-    hook.dataset.writerOutlineHook = String(row.no);
-    hook.value = String(row.hook || "");
-    hook.placeholder = "章末钩子（可留空）";
-    hook.setAttribute("aria-label", `第${row.no}章钩子`);
-    item.append(head, beat, hook);
-    return item;
-  }));
+// ---- 大纲：分部文字（3.9.13 起大纲不再等于章节表） ----
+
+/** 当前大纲的分部；老作品没有 parts 时返回空数组。 */
+function outlineParts() {
+  const parts = Array.isArray(writer.outline?.parts) ? writer.outline.parts : [];
+  return parts.filter((row) => row && typeof row === "object");
 }
 
-function collectOutline() {
-  const list = $("#writerOutlineList");
-  if (!list) return [];
-  const rows = [];
-  for (const item of list.querySelectorAll(".writer-outline-item")) {
-    const title = item.querySelector("[data-writer-outline-title]");
-    const beat = item.querySelector("[data-writer-outline-beat]");
-    const hook = item.querySelector("[data-writer-outline-hook]");
-    const no = Number(title?.dataset.writerOutlineTitle || 0);
-    if (!no) continue;
-    rows.push({
-      no,
-      title: String(title?.value || "").trim() || `第 ${no} 章`,
-      beat: String(beat?.value || "").trim(),
-      hook: String(hook?.value || "").trim(),
-    });
+/** 老作品：只有逐章大纲、没有分部文字。 */
+function hasLegacyOutline() {
+  return !outlineParts().length
+    && Array.isArray(writer.outline?.chapters) && writer.outline.chapters.length > 0;
+}
+
+function currentPart() {
+  const parts = outlineParts();
+  return parts.find((row) => Number(row.no) === Number(writer.partNo)) || parts[0] || null;
+}
+
+function renderParts() {
+  const box = $("#writerOutlineParts");
+  const parts = outlineParts();
+  if (box) {
+    box.hidden = !parts.length;
+    box.replaceChildren(...parts.map((row) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      const active = Number(row.no) === Number(writer.partNo);
+      btn.className = `writer-part${active ? " active" : ""}`;
+      btn.dataset.writerPart = String(row.no);
+      btn.setAttribute("aria-pressed", String(active));
+      const chars = String(row.text || "").length;
+      btn.textContent = `第 ${row.no} 部 · ${row.title || "未命名"}` + (chars ? ` · ${fmtChars(chars)} 字` : " · 空");
+      return btn;
+    }));
   }
-  return rows;
+  const select = $("#writerSplitPart");
+  if (select) {
+    const list = parts.length ? parts : [{ no: 1, title: "第 1 部" }];
+    select.replaceChildren(...list.map((row) => new Option(`第 ${row.no} 部 · ${row.title || "未命名"}`, String(row.no))));
+    select.value = String(writer.partNo || 1);
+  }
+}
+
+/** 把当前部的值写回表单；partsDirty 时让路（DOM 才是最新值）。 */
+function fillPartForm() {
+  if (writer.partsDirty) return;
+  const part = currentPart();
+  const noEl = $("#writerPartNo");
+  if (noEl) noEl.value = String(part?.no || writer.partNo || 1);
+  const titleEl = $("#writerPartTitle");
+  if (titleEl) titleEl.value = String(part?.title || "");
+  const textEl = $("#writerOutlineText");
+  if (textEl) textEl.value = String(part?.text || "");
+  renderOutlineStat();
+}
+
+function renderOutlineStat() {
+  const el = $("#writerOutlineStat");
+  if (!el) return;
+  const text = String($("#writerOutlineText")?.value || "");
+  const total = outlineParts().reduce((sum, row) => sum + String(row.text || "").length, 0);
+  const count = outlineParts().length || 1;
+  el.textContent = `${count} 部 · 本部 ${fmtChars(text.length)} 字 · 合计 ${fmtChars(total)} 字`
+    + (writer.partsDirty ? " · 有未保存修改" : "");
+}
+
+/** 收当前编辑态：把表单里的部标题/正文覆盖进分部数组。 */
+function collectParts() {
+  const parts = outlineParts().map((row) => ({
+    no: Number(row.no) || 0,
+    title: String(row.title || ""),
+    text: String(row.text || ""),
+  }));
+  const no = Number(writer.partNo || 1);
+  const title = String($("#writerPartTitle")?.value || "").trim() || `第 ${no} 部`;
+  const text = String($("#writerOutlineText")?.value || "");
+  const idx = parts.findIndex((row) => row.no === no);
+  if (idx >= 0) parts[idx] = { no, title, text };
+  else parts.push({ no, title, text });
+  return parts.sort((a, b) => a.no - b.no);
+}
+
+function renderOutline() {
+  renderParts();
+  fillPartForm();
+  const legacyRows = hasLegacyOutline() ? writer.outline.chapters : [];
+  const group = $("#writerLegacyOutlineGroup");
+  if (group) group.hidden = !legacyRows.length;
+  const list = $("#writerLegacyOutlineList");
+  if (list) {
+    if (!legacyRows.length) list.replaceChildren();
+    else {
+      list.replaceChildren(...legacyRows.map((row) => {
+        const item = document.createElement("div");
+        item.className = "writer-outline-item readonly";
+        const head = document.createElement("div");
+        head.className = "writer-outline-head";
+        const no = document.createElement("span");
+        no.textContent = `第${row.no}章`;
+        const title = document.createElement("strong");
+        title.textContent = String(row.title || "");
+        head.append(no, title);
+        const beat = document.createElement("p");
+        beat.className = "writer-hint";
+        beat.textContent = String(row.beat || "");
+        item.append(head, beat);
+        return item;
+      }));
+    }
+  }
+  const textEl = $("#writerOutlineText");
+  if (textEl) textEl.disabled = false;
 }
 
 function renderOutlineVersions() {
@@ -741,8 +1259,9 @@ function renderEditor() {
   }
   const heads = {
     setup: ["设定", "先告诉它你要写一本什么书"],
-    outline: ["全书大纲", "按设定包写出每一章的走向"],
-    draft: ["正文", "写正文时自动带上设定摘要与前文衔接"],
+    outline: ["全书大纲", "只写故事怎么走，不写章节"],
+    chapter: ["章节", "按大纲拆出章节目录，逐章可改简述"],
+    draft: ["正文", "单章编写：自动带上设定摘要与前文衔接"],
   };
   const head = $("#writerEditorHead");
   if (head) head.textContent = heads[writer.stage][0];
@@ -750,13 +1269,16 @@ function renderEditor() {
   if (hint) hint.textContent = heads[writer.stage][1];
   if (writer.stage === "setup" && !writer.setupDirty) fillSetupForm();
   if (writer.stage === "outline") { renderOutline(); renderOutlineVersions(); }
+  if (writer.stage === "chapter") renderChapterStage();
   if (writer.stage === "draft") renderDraft();
 }
 
 function renderAll() {
   renderPageState();
   renderBookSummary();
+  renderSide();
   renderChapters();
+  renderTocLimits();
   renderEditor();
   renderPipeline();
   refreshPlan();
@@ -855,12 +1377,14 @@ function renderPlan() {
 
 const PLAN_EMPTY_TEXT = {
   setup: "还没打开作品。生成前会先在这里列出六步链第一步（题材推断）的输入来源。",
-  outline: "还没打开作品。生成前会先在这里列出大纲步的输入来源（当前设定 + 章节数）。",
+  outline: "还没打开作品。生成前会先在这里列出大纲步的输入来源（当前设定 + 分部）。",
+  chapter: "还没打开作品。拆章前会先在这里列出实际带上的大纲与设定。",
   draft: "先打开作品并选一章。生成前会在这里列出实际带上的设定、摘要、上一章结尾与本章梗概。",
 };
 const PLAN_MODEL_FIELDS = {
   setup: ["setupProviderKey", "setupModelName"],
   outline: ["outlineProviderKey", "outlineModelName"],
+  chapter: ["chapterProviderKey", "chapterModelName"],
   draft: ["draftProviderKey", "draftModelName"],
 };
 
@@ -872,7 +1396,7 @@ async function refreshPlan() {
   }
   const kinds = {
     setup: "genre",
-    outline: "outline",
+    outline: "outline_text",
     draft: "chapter",
   };
   const kind = kinds[writer.stage];
@@ -1130,14 +1654,18 @@ async function saveSetupBeforeGenerate() {
   }
 }
 
-async function submitPipeline(kind, { chapterNo = 0, allowDrop = false } = {}) {
+async function submitPipeline(kind, opts = {}) {
+  const {
+    chapterNo = 0, allowDrop = false, partNo = 0, partTitle = "",
+    targetChars = 0, wantCount = 0, fromNo = 0, extraNote = "", model: preset = null,
+  } = opts;
   if (!writer.bookId) return;
   if (writer.pipeline?.status === "running") {
     toast("这部作品已有正在进行的生成，请先取消或等它结束");
     return;
   }
   const modelFields = PLAN_MODEL_FIELDS[writer.stage] || ["setupProviderKey", "setupModelName"];
-  const model = readModel(...modelFields);
+  const model = preset && preset.model_name ? preset : readModel(...modelFields);
   if (!model.model_name) {
     toast("先在设置里检查模型，再回来选择");
     return;
@@ -1151,6 +1679,10 @@ async function submitPipeline(kind, { chapterNo = 0, allowDrop = false } = {}) {
       const saved = await saveSetupBeforeGenerate();
       if (!saved) return;
     }
+    const fallbackNote = writer.stage === "setup" ? $("#writerSetupNote")?.value || ""
+      : writer.stage === "outline" ? $("#writerOutlineNote")?.value || ""
+        : writer.stage === "chapter" ? $("#writerChapterNote")?.value || ""
+          : $("#writerDraftNote")?.value || "";
     const payload = await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}/pipelines`, {
       method: "POST",
       body: {
@@ -1160,11 +1692,12 @@ async function submitPipeline(kind, { chapterNo = 0, allowDrop = false } = {}) {
         model_name: model.model_name,
         char_count: writer.charCount,
         chapter_count: writer.stage === "setup" ? writer.chapterCount : writer.outlineChapterCount,
-        extra_note: String(
-          writer.stage === "setup" ? $("#writerSetupNote")?.value || ""
-            : writer.stage === "outline" ? $("#writerOutlineNote")?.value || ""
-              : $("#writerDraftNote")?.value || ""
-        ),
+        part_no: partNo || undefined,
+        part_title: partTitle || undefined,
+        target_chars: targetChars || undefined,
+        want_count: wantCount || undefined,
+        from_no: fromNo || undefined,
+        extra_note: extraNote || fallbackNote,
         allow_drop: allowDrop || undefined,
         revision: writer.book?.revision,
         chapter_revision: chapterNo ? writer.chapter?.revision : undefined,
@@ -1257,15 +1790,18 @@ function clearWriterDraft(bookId) {
 /** 把草稿写进 localStorage。bookId 由调用方锁定：延时写入期间换了书也不能串稿。 */
 function writeWriterDraft(bookId) {
   if (!bookId || bookId !== writer.bookId) return;
-  if (!writer.setupDirty && !writer.outlineDirty) return;
+  if (!writer.setupDirty && !writer.partsDirty) return;
   const payload = { revision: writer.book?.revision ?? null, saved_at: Date.now() };
   if (writer.setupDirty) payload.setup = collectSetup();
-  if (writer.outlineDirty) payload.outline = collectOutline();
+  if (writer.partsDirty) {
+    payload.parts = collectParts();
+    payload.part_no = Number(writer.partNo || 1);
+  }
   try { localStorage.setItem(writerDraftKey(bookId), JSON.stringify(payload)); } catch (_error) { /* 存不下就不存 */ }
 }
 
 function scheduleDraftSave() {
-  if (!writer.bookId || (!writer.setupDirty && !writer.outlineDirty)) return;
+  if (!writer.bookId || (!writer.setupDirty && !writer.partsDirty)) return;
   const bookId = writer.bookId;
   if (draftTimer) clearTimeout(draftTimer);
   draftTimer = setTimeout(() => {
@@ -1278,7 +1814,7 @@ function scheduleDraftSave() {
 /** 保存成功后收拾草稿：还有别的脏数据就重写成「只剩它」的一份（版本号此时已更新），
  *  全干净了才整条删掉。这样保存设定不会顺带把大纲草稿一起删掉。 */
 function persistDraftAfterSave() {
-  if (writer.setupDirty || writer.outlineDirty) writeWriterDraft(writer.bookId);
+  if (writer.setupDirty || writer.partsDirty) writeWriterDraft(writer.bookId);
   else clearWriterDraft(writer.bookId);
 }
 
@@ -1297,8 +1833,9 @@ function applyWriterDraft(bookId, book) {
     writer.setup = draft.setup;
     setup = true;
   }
-  if (Array.isArray(draft.outline) && draft.outline.length) {
-    writer.outline = { ...(writer.outline || {}), chapters: draft.outline };
+  if (Array.isArray(draft.parts) && draft.parts.length) {
+    writer.outline = { ...(writer.outline || {}), schema: 2, parts: draft.parts, chapters: [] };
+    writer.partNo = Number(draft.part_no || 1);
     outline = true;
   }
   return { setup, outline };
@@ -1369,7 +1906,7 @@ async function openBook(bookId, { keepEdits = false, keepStage = false } = {}) {
     if (!keep) {
       writer.setupDirty = false;
       writer.draftDirty = false;
-      writer.outlineDirty = false;
+      writer.partsDirty = false;
     }
     // 刷新/重启后恢复没保存的草稿；版本对不上（已保存过或在别处改过）就丢弃，避免复活旧内容。
     const restored = keep
@@ -1379,7 +1916,7 @@ async function openBook(bookId, { keepEdits = false, keepStage = false } = {}) {
     // 草稿数据已经写进 writer.setup / writer.outline：先清标记让 renderAll 按它重建 DOM
     // （守卫只在 dirty 时让路），重建完再把标记置回。
     if (restored.setup) writer.setupDirty = false;
-    if (restored.outline) writer.outlineDirty = false;
+    if (restored.outline) writer.partsDirty = false;
     // 活动流水线的流式缓冲与新作品/新状态对齐。
     writer.streamTaskId = String(writer.pipeline?.current_task_id || "");
     writer.streamText = "";
@@ -1389,7 +1926,7 @@ async function openBook(bookId, { keepEdits = false, keepStage = false } = {}) {
     setSaveState("已打开", `《${writer.book?.title || ""}》已打开（第 ${writer.book?.revision ?? "?"} 版）。`);
     renderAll();
     if (restored.setup) writer.setupDirty = true;
-    if (restored.outline) writer.outlineDirty = true;
+    if (restored.outline) writer.partsDirty = true;
     if (restored.setup || restored.outline) {
       renderPageState();
       renderOutline();
@@ -1706,55 +2243,39 @@ async function saveSetupManual() {
   }
 }
 
-/** 大纲页的「允许删除已被移出大纲的章节」开关：勾了就一路带到流水线 / 保存 / 同步。
- *  它是**用户显式授权**，勾着的时候不再弹二次 confirm（否则等于同一个意思问两遍）。 */
-function allowDropChecked() {
-  return Boolean($("#writerOutlineAllowDrop")?.checked);
+/** 风格键 → 中文标签（右栏预检与设定汇总共用）。 */
+function styleLabelOf(key) {
+  const row = STYLE_OPTIONS.find(([value]) => String(value) === String(key || ""));
+  return row ? row[1] : "";
 }
 
-async function saveOutlineManual() {
+// ---- 大纲：分部文字的保存与生成 ----
+
+async function savePartsManual() {
   if (!writer.bookId) return;
-  const chapters = collectOutline();
-  if (!chapters.length) {
-    toast("大纲是空的；先生成或填写章节");
+  const parts = collectParts();
+  if (!parts.some((row) => String(row.text || "").trim())) {
+    toast("大纲还是空的；先写点内容或点「生成这一部大纲」");
     return;
   }
-  await saveOutlineRows(chapters, allowDropChecked());
-}
-
-async function saveOutlineRows(chapters, allowDrop) {
   setBusy(true);
   try {
     const payload = await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}`, {
       method: "PATCH",
-      body: {
-        outline: chapters,
-        revision: writer.book?.revision,
-        sync: true,
-        allow_drop: allowDrop || undefined,
-      },
+      body: { parts, revision: writer.book?.revision },
     });
-    writer.outline = { ...(writer.outline || {}), ...payload.outline_version_id ? {} : {}, chapters };
     writer.book = payload.book;
-    writer.outlineDirty = false;
+    writer.outline = { ...(writer.outline || {}), schema: 2, parts, chapters: [] };
+    writer.partsDirty = false;
     persistDraftAfterSave();
-    toast("大纲已保存为新版本，章节目录已同步");
-    setSaveState("已保存", "大纲按新版本保存，章节目录已按它重建（已有正文保留）。");
-    await reloadBookIndex();
-    renderOutline();
+    toast("大纲已保存为新版本");
+    setSaveState("已保存", "大纲按版本保存；拆章只改章节目录，不动大纲本身。");
+    renderAll();
     void refreshPlan();
   } catch (error) {
-    const message = String(error?.message || error || "");
-    if (message.includes("已有正文，大纲里却没有它")) {
-      // 已经勾了开关还失败，说明不是「没授权」；再弹一次 confirm 只会让人以为是死循环。
-      if (!allowDrop && window.confirm(`${message}\n\n确认删除这些章节（含正文）并继续保存吗？`)) {
-        await saveOutlineRows(chapters, true);
-        return;
-      }
-      return;
-    }
     if (error?.status === 409) {
       if (window.confirm("作品在别处被修改过（版本冲突）。\n要重新读取最新内容吗？（你的大纲修改会丢失）")) {
+        writer.partsDirty = false;
         await openBook(writer.bookId, { keepStage: true });
       }
       return;
@@ -1765,40 +2286,182 @@ async function saveOutlineRows(chapters, allowDrop) {
   }
 }
 
-async function syncChapters() {
+/** 生成当前这一部的整篇大纲（outline_text 流水线）。 */
+async function generatePartText() {
   if (!writer.bookId) return;
-  await syncChaptersRequest(allowDropChecked());
+  const model = readModel("outlineProviderKey", "outlineModelName");
+  if (!model.model_name) {
+    toast("先在设置里检查模型，再回来选择");
+    return;
+  }
+  if (writer.partsDirty) await savePartsManual();
+  try {
+    await submitPipeline("outline_text", {
+      partNo: Number(writer.partNo || 1),
+      partTitle: String($("#writerPartTitle")?.value || "").trim(),
+      targetChars: 8000,
+      model,
+    });
+  } catch (_error) {
+    // submitPipeline 自己会 toast；这里只防未捕获。
+  }
 }
 
-async function syncChaptersRequest(allowDrop) {
-  setBusy(true);
+function addPart() {
+  const parts = collectParts();
+  if (parts.length >= 20) {
+    toast("最多 20 部");
+    return;
+  }
+  const nextNo = parts.length + 1;
+  parts.push({ no: nextNo, title: `第 ${nextNo} 部`, text: "" });
+  writer.partNo = nextNo;
+  writer.partsDirty = true;
+  writer.outline = { ...(writer.outline || {}), schema: 2, parts, chapters: [] };
+  renderOutline();
+  renderOutlineStat();
+  toast(`已加第 ${nextNo} 部；写完点「保存大纲修改」`);
+}
+
+function removePart() {
+  const parts = collectParts();
+  if (parts.length <= 1) {
+    toast("至少要留一部");
+    return;
+  }
+  const no = Number(writer.partNo || 1);
+  const rest = parts.filter((row) => Number(row.no) !== no)
+    .map((row, index) => ({ ...row, no: index + 1 }));
+  writer.outline = { ...(writer.outline || {}), schema: 2, parts: rest, chapters: [] };
+  writer.partNo = Math.max(1, no - 1);
+  writer.partsDirty = true;
+  renderOutline();
+  toast(`已删除第 ${no} 部；保存后生效`);
+}
+
+/** 老作品：把逐章大纲拼成一段文字，升级为分部大纲（不改动原版本）。 */
+async function upgradeLegacyOutline() {
+  const rows = hasLegacyOutline() ? writer.outline.chapters : [];
+  if (!rows.length) {
+    toast("没有可升级的逐章大纲");
+    return;
+  }
+  if (!window.confirm(
+    `要把这 ${rows.length} 章的逐章大纲合并成一段大纲文字吗？\n合并后可以逐字修改，再按新大纲拆章；老版本仍保留在历史里。`,
+  )) return;
+  const text = rows.map((row) => `第${row.no}章 ${row.title || ""}：${String(row.beat || "").trim()}`)
+    .join("\n");
+  writer.partNo = 1;
+  writer.outline = {
+    ...(writer.outline || {}), schema: 2,
+    parts: [{ no: 1, title: "第 1 部", text }], chapters: [],
+  };
+  writer.partsDirty = true;
+  renderOutline();
+  await savePartsManual();
+}
+
+// ---- 章节：拆分 ----
+
+async function saveChapterPlan() {
+  if (!writer.bookId) return;
+  const chars = Number($("#writerChapterChars")?.value || 0);
+  const ending = String($("#writerChapterEnding")?.value || "suspense");
+  const plan = chapterPlan();
+  if (plan.chars === chars && plan.ending === ending) return;
   try {
-    const payload = await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}/sync`, {
-      method: "POST",
-      body: { revision: writer.book?.revision, allow_drop: allowDrop || undefined },
+    const payload = await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}`, {
+      method: "PATCH",
+      body: { chapter_plan: { chars, ending }, revision: writer.book?.revision },
     });
     writer.book = payload.book;
-    toast("章节目录已按当前大纲同步");
-    setSaveState("已同步", "章节目录已按当前大纲重建（已有正文保留）。");
-    await reloadBookIndex();
-    renderAll();
+    renderTocLimits();
+    setSaveState("已保存", `单章字数${chars ? ` ≤ ${chars} 字` : "不限"} · 结尾${ENDING_LABELS[ending] || ending}`);
   } catch (error) {
-    const message = String(error?.message || error || "");
-    if (message.includes("已有正文，大纲里却没有它")) {
-      if (!allowDrop && window.confirm(`${message}\n\n确认删除这些章节（含正文）并继续吗？`)) {
-        await syncChaptersRequest(true);
-        return;
-      }
-      return;
+    fail("保存章节设置失败", error);
+  }
+}
+
+/** 拆一批：从「当前最大章号 + 1」开始，按 wantCount 与 200 上限切批。 */
+async function startSplit() {
+  if (!writer.bookId) return;
+  const want = Number($("#writerSplitCount")?.value || 0);
+  if (!want || want < 1) {
+    toast("先填要拆成多少章（1–9999）");
+    return;
+  }
+  if (writer.chapters.length && !window.confirm(
+    `现在已有 ${writer.chapters.length} 章；拆章只会「追加还没的章号」，已有章节（含正文）不会被覆盖。继续吗？`,
+  )) return;
+  await saveChapterPlan();
+  const model = readModel("chapterProviderKey", "chapterModelName");
+  if (!model.model_name) {
+    toast("先在设置里检查模型，再回来选择");
+    return;
+  }
+  const fromNo = writer.chapters.reduce((max, row) => Math.max(max, Number(row.no) || 0), 0) + 1;
+  const partNo = Number($("#writerSplitPart")?.value || writer.partNo || 1);
+  await submitSplitBatch({ fromNo, partNo, model });
+}
+
+/** 继续拆：还剩多少就再拆一批（每批 ≤200）。 */
+async function continueSplit() {
+  const target = Number($("#writerSplitCount")?.value || 0);
+  if (!target) return;
+  const fromNo = writer.chapters.reduce((max, row) => Math.max(max, Number(row.no) || 0), 0) + 1;
+  if (fromNo > target) {
+    toast("已经拆到目标章数了");
+    return;
+  }
+  const model = readModel("chapterProviderKey", "chapterModelName");
+  if (!model.model_name) {
+    toast("先在设置里检查模型，再回来选择");
+    return;
+  }
+  await submitSplitBatch({
+    fromNo, partNo: Number($("#writerSplitPart")?.value || 1), model,
+  });
+}
+
+async function submitSplitBatch({ fromNo, partNo, model }) {
+  const target = Number($("#writerSplitCount")?.value || 0);
+  const remaining = Math.max(1, target - fromNo + 1);
+  const wantCount = Math.min(200, remaining);
+  try {
+    await submitPipeline("split", {
+      partNo,
+      wantCount,
+      fromNo,
+      model,
+      extraNote: String($("#writerChapterNote")?.value || ""),
+    });
+    const btn = $("#writerSplitContinue");
+    if (btn) btn.hidden = fromNo + wantCount > target;
+    setSaveState("已提交拆分",
+      `第 ${fromNo} 章起拆 ${wantCount} 章（目标 ${target} 章）；完成后章节目录会自动刷新。`);
+  } catch (_error) {
+    // submitPipeline 已提示
+  }
+}
+
+/** 改章节标题/简述（失焦保存）。 */
+async function updateChapterMeta(chapterNo, patch) {
+  if (!writer.bookId || !chapterNo) return;
+  try {
+    const payload = await api(
+      `/api/writer/books/${encodeURIComponent(writer.bookId)}/chapters/${chapterNo}/meta`,
+      { method: "PATCH", body: { ...patch, revision: writer.book?.revision } },
+    );
+    writer.book = payload.book;
+    const row = writer.chapters.find((item) => Number(item.no) === Number(chapterNo));
+    if (row && payload.chapter) {
+      row.title = payload.chapter.title;
+      row.beat = payload.chapter.beat;
     }
-    if (error?.status === 409) {
-      toast("作品在别处被修改过；已重新读取");
-      await openBook(writer.bookId, { keepEdits: true, keepStage: true });
-      return;
-    }
-    fail("同步章节失败", error);
-  } finally {
-    setBusy(false);
+    renderChapters();
+    setSaveState("已保存", `第 ${chapterNo} 章的标题/简述已更新。`);
+  } catch (error) {
+    fail("保存章节简述失败", error);
   }
 }
 
@@ -2506,7 +3169,7 @@ function closeDialog(selector) {
 }
 
 function setStage(stage) {
-  const next = ["setup", "outline", "draft"].includes(stage) ? stage : "setup";
+  const next = ["setup", "outline", "chapter", "draft"].includes(stage) ? stage : "setup";
   writer.stage = next;
   stageAtRequest = next;
   document.querySelectorAll("#writerStages [data-writer-stage]").forEach((btn) => {
@@ -2515,7 +3178,9 @@ function setStage(stage) {
     btn.setAttribute("aria-pressed", String(active));
   });
   renderEditor();
+  renderSide();
   renderChapters();
+  renderTocLimits();
   renderPageState();
   void refreshPlan();
 }
@@ -2686,8 +3351,8 @@ export function bindWriterEvents() {
   });
 
   // ---- 设定表单 ----
-  for (const id of ["writerIdea", "writerTitle", "writerBlurb", "writerWorldview", "writerGenreCat",
-    "writerGenreTone", "writerVibe", "writerAvoid", "writerTags"]) {
+  for (const id of ["writerIdea", "writerTitle", "writerBlurb", "writerWorldview",
+    "writerGenreTone", "writerGenreCustom", "writerVibe", "writerAvoid"]) {
     $(`#${id}`)?.addEventListener("input", () => {
       writer.setupDirty = true;
       scheduleDraftSave();
@@ -2698,15 +3363,119 @@ export function bindWriterEvents() {
     scheduleDraftSave();
     void applyModelSkinFor(String(event.target.value || ""));
   });
-  $("#writerCharAdd")?.addEventListener("click", () => {
-    const chars = collectCharacters();
-    if (chars.length >= 10) {
-      toast("最多 10 个角色");
+
+  // 题材树：点频道 / 分类 / 二级
+  $("#writerGenrePicker")?.addEventListener("click", (event) => {
+    const channelBtn = event.target.closest("[data-writer-genre-channel]");
+    const catBtn = event.target.closest("[data-writer-genre-cat]");
+    const subBtn = event.target.closest("[data-writer-genre-sub]");
+    if (channelBtn && !catBtn) {
+      writer.genrePick = { channel: String(channelBtn.dataset.writerGenreChannel || "male"), cat: "", sub_cat: "" };
+    } else if (catBtn) {
+      writer.genrePick = {
+        channel: String(catBtn.dataset.writerGenreChannel || writer.genrePick.channel || "male"),
+        cat: String(catBtn.dataset.writerGenreCat || ""),
+        sub_cat: "",
+      };
+    } else if (subBtn) {
+      writer.genrePick = { ...writer.genrePick, sub_cat: String(subBtn.dataset.writerGenreSub || "") };
+    } else {
       return;
     }
-    writer.setup = { ...(writer.setup || {}), characters: [...chars, {
-      name: "", role: "", identity: "", goal: "", traits: "", speech: "", arc: "", background: "",
-    }] };
+    writer.setupDirty = true;
+    renderGenrePicker();
+    scheduleDraftSave();
+  });
+
+  // 标签：搜索 + 多选（上限 20）
+  $("#writerTagSearch")?.addEventListener("input", () => renderTags());
+  $("#writerTagBox")?.addEventListener("click", (event) => {
+    const chip = event.target.closest("[data-writer-tag]");
+    if (!chip) return;
+    const tag = String(chip.dataset.writerTag || "");
+    if (!tag) return;
+    const index = writer.tags.indexOf(tag);
+    if (index >= 0) {
+      writer.tags.splice(index, 1);
+    } else {
+      if (writer.tags.length >= TAGS_MAX) {
+        toast(`最多选 ${TAGS_MAX} 个标签`);
+        return;
+      }
+      writer.tags.push(tag);
+    }
+    writer.setupDirty = true;
+    renderTags();
+    scheduleDraftSave();
+  });
+
+  // 参考作品
+  $("#writerRefAdd")?.addEventListener("click", () => {
+    if (writer.refs.length >= REFS_MAX) {
+      toast(`最多 ${REFS_MAX} 本参考`);
+      return;
+    }
+    writer.refs.push({ title: "", dims: [], note: "", same_fanfic: false });
+    writer.setupDirty = true;
+    renderRefs();
+    scheduleDraftSave();
+  });
+  $("#writerRefList")?.addEventListener("input", (event) => {
+    const titleEl = event.target.closest("[data-writer-ref-title]");
+    const noteEl = event.target.closest("[data-writer-ref-note]");
+    const sameEl = event.target.closest("[data-writer-ref-same]");
+    if (titleEl) writer.refs[Number(titleEl.dataset.writerRefTitle)] && (writer.refs[Number(titleEl.dataset.writerRefTitle)].title = String(titleEl.value || ""));
+    else if (noteEl) writer.refs[Number(noteEl.dataset.writerRefNote)] && (writer.refs[Number(noteEl.dataset.writerRefNote)].note = String(noteEl.value || ""));
+    else if (sameEl) writer.refs[Number(sameEl.dataset.writerRefSame)] && (writer.refs[Number(sameEl.dataset.writerRefSame)].same_fanfic = Boolean(sameEl.checked));
+    else return;
+    writer.setupDirty = true;
+    scheduleDraftSave();
+  });
+  $("#writerRefList")?.addEventListener("click", (event) => {
+    const remove = event.target.closest("[data-writer-ref-remove]");
+    if (remove) {
+      writer.refs.splice(Number(remove.dataset.writerRefRemove), 1);
+      writer.setupDirty = true;
+      renderRefs();
+      scheduleDraftSave();
+      return;
+    }
+    const dim = event.target.closest("[data-writer-ref-dim]");
+    if (!dim) return;
+    const index = Number(dim.dataset.writerRefIndex);
+    const ref = writer.refs[index];
+    if (!ref) return;
+    const value = String(dim.dataset.writerRefDim || "");
+    ref.dims = ref.dims || [];
+    const at = ref.dims.indexOf(value);
+    if (at >= 0) ref.dims.splice(at, 1);
+    else ref.dims.push(value);
+    writer.setupDirty = true;
+    renderRefs();
+    scheduleDraftSave();
+  });
+
+  // 角色分区：主角 / 配角
+  $("#writerCharTabs")?.addEventListener("click", (event) => {
+    const btn = event.target.closest("[data-writer-char-tab]");
+    if (!btn) return;
+    writer.charTab = String(btn.dataset.writerCharTab || "lead");
+    renderCharacters();
+  });
+  $("#writerCharAdd")?.addEventListener("click", () => {
+    const chars = collectCharacters();
+    const tab = writer.charTab === "side" ? "side" : "lead";
+    const used = chars.filter((row) => row.role === tab).length;
+    if (tab === "lead" && used >= LEAD_MAX) {
+      toast(`主角最多 ${LEAD_MAX} 人`);
+      return;
+    }
+    if (tab === "side" && used >= SIDE_MAX) {
+      toast(`配角最多 ${SIDE_MAX} 人`);
+      return;
+    }
+    chars.push({ name: "", role: tab });
+    writer.setup = { ...(writer.setup || {}), characters: chars };
     writer.setupDirty = true;
     scheduleDraftSave();
     renderCharacters();
@@ -2718,6 +3487,16 @@ export function bindWriterEvents() {
     scheduleDraftSave();
   });
   $("#writerCharList")?.addEventListener("click", (event) => {
+    const toggle = event.target.closest("[data-writer-char-toggle]");
+    if (toggle) {
+      const card = toggle.closest(".writer-char-card");
+      const more = card?.querySelector(".writer-char-more");
+      if (more) {
+        more.hidden = !more.hidden;
+        toggle.textContent = more.hidden ? "展开全部字段" : "收起字段";
+      }
+      return;
+    }
     const remove = event.target.closest("[data-writer-char-remove]");
     if (!remove) return;
     const index = Number(remove.dataset.writerCharRemove);
@@ -2740,10 +3519,11 @@ export function bindWriterEvents() {
   });
   $("#writerSetupSave")?.addEventListener("click", () => void saveSetupManual());
   $("#writerSetupGenerate")?.addEventListener("click", () => void submitPipeline("setup_all"));
-  for (const id of ["writerCharCount", "writerChapterCount"]) {
+  for (const id of ["writerCharCount", "writerSideCount", "writerChapterCount"]) {
     $(`#${id}`)?.addEventListener("input", (event) => {
       const value = Number(event.target.value || 0);
       if (id === "writerCharCount") writer.charCount = value;
+      else if (id === "writerSideCount") writer.sideCount = value;
       else writer.chapterCount = value;
       const label = $(`#${id}Value`);
       if (label) label.textContent = String(value);
@@ -2756,6 +3536,7 @@ export function bindWriterEvents() {
   for (const [providerId, modelId, providerField, modelField] of [
     ["writerSetupProvider", "writerSetupModel", "setupProviderKey", "setupModelName"],
     ["writerOutlineProvider", "writerOutlineModel", "outlineProviderKey", "outlineModelName"],
+    ["writerChapterProvider", "writerChapterModel", "chapterProviderKey", "chapterModelName"],
     ["writerDraftProvider", "writerDraftModel", "draftProviderKey", "draftModelName"],
   ]) {
     $(`#${providerId}`)?.addEventListener("change", async (event) => {
@@ -2814,28 +3595,59 @@ export function bindWriterEvents() {
   });
   $("#writerTplApply")?.addEventListener("click", () => applyTemplate());
 
-  // ---- 大纲 ----
-  $("#writerOutlineGenerate")?.addEventListener("click", () => void submitPipeline("outline", {
-    allowDrop: allowDropChecked(),
-  }));
-  // 改梗概/标题/钩子即置脏：否则切阶段重建整列会把改动抹掉（renderOutline 的守卫认这个标记）。
-  $("#writerOutlineList")?.addEventListener("input", (event) => {
-    if (!event.target.closest("[data-writer-outline-title], [data-writer-outline-beat], [data-writer-outline-hook]")) return;
-    writer.outlineDirty = true;
+  // ---- 大纲（分部文字） ----
+  $("#writerOutlineParts")?.addEventListener("click", (event) => {
+    const btn = event.target.closest("[data-writer-part]");
+    if (!btn) return;
+    if (writer.partsDirty && !window.confirm("这一部有未保存的修改，切部会丢掉。继续吗？")) return;
+    writer.partNo = Number(btn.dataset.writerPart || 1);
+    writer.partsDirty = false;
     renderOutline();
-    scheduleDraftSave();
   });
-  $("#writerSyncBtn")?.addEventListener("click", () => void syncChapters());
-  $("#writerOutlineSave")?.addEventListener("click", () => void saveOutlineManual());
-  $("#writerOutlineChapterCount")?.addEventListener("input", (event) => {
-    writer.outlineChapterCount = Number(event.target.value || 0);
-    const label = $("#writerOutlineChapterCountValue");
-    if (label) label.textContent = String(writer.outlineChapterCount);
-    saveLimits();
-  });
+  // 部标题/大纲正文改动即置脏：渲染让路，避免切阶段把输入抹掉。
+  for (const id of ["writerPartTitle", "writerOutlineText"]) {
+    $(`#${id}`)?.addEventListener("input", () => {
+      writer.partsDirty = true;
+      renderOutlineStat();
+      scheduleDraftSave();
+    });
+  }
+  $("#writerOutlineGenerate")?.addEventListener("click", () => void generatePartText());
+  $("#writerOutlineSave")?.addEventListener("click", () => void savePartsManual());
+  $("#writerPartAdd")?.addEventListener("click", () => addPart());
+  $("#writerPartRemove")?.addEventListener("click", () => removePart());
+  $("#writerOutlineUpgrade")?.addEventListener("click", () => void upgradeLegacyOutline());
+  $("#writerGotoChapter")?.addEventListener("click", () => setStage("chapter"));
   $("#writerOutlineNote")?.addEventListener("change", () => void refreshPlan());
   $("#writerOutlineVersion")?.addEventListener("change", (event) => {
     void selectOutlineVersion(String(event.target.value || ""));
+  });
+
+  // ---- 章节（拆分 + 简述） ----
+  $("#writerSplitStart")?.addEventListener("click", () => void startSplit());
+  $("#writerSplitContinue")?.addEventListener("click", () => void continueSplit());
+  for (const id of ["writerChapterChars", "writerChapterEnding"]) {
+    $(`#${id}`)?.addEventListener("change", () => void saveChapterPlan());
+  }
+  // 简述/标题失焦保存（input 不落盘：改一个字就发一次请求既慢又容易撞 revision）。
+  $("#writerBriefList")?.addEventListener("change", (event) => {
+    const titleEl = event.target.closest("[data-writer-brief-title]");
+    const beatEl = event.target.closest("[data-writer-brief-beat]");
+    if (titleEl) {
+      const no = Number(titleEl.dataset.writerBriefTitle || 0);
+      void updateChapterMeta(no, { title: String(titleEl.value || "") });
+      return;
+    }
+    if (beatEl) {
+      const no = Number(beatEl.dataset.writerBriefBeat || 0);
+      void updateChapterMeta(no, { beat: String(beatEl.value || "") });
+    }
+  });
+  $("#writerBriefList")?.addEventListener("click", (event) => {
+    const open = event.target.closest("[data-writer-brief-open]");
+    if (!open) return;
+    setStage("draft");
+    void openChapter(Number(open.dataset.writerBriefOpen || 0));
   });
 
   // ---- 正文 ----
@@ -2959,7 +3771,7 @@ export function bindWriterEvents() {
     void loadLocation();
     // 进页不重填：草稿/未保存修改一律优先于服务端已保存版本（keepStage 同理，
     // 否则在正文页切走再回来会被踢回设定页）。
-    const unsaved = writer.setupDirty || writer.draftDirty || writer.outlineDirty;
+    const unsaved = writer.setupDirty || writer.draftDirty || writer.partsDirty;
     if (writer.bookId) void openBook(writer.bookId, { keepEdits: unsaved, keepStage: true });
     else {
       let remembered = "";
@@ -3013,10 +3825,13 @@ function restoreLimits() {
     const raw = localStorage.getItem(LIMITS_KEY);
     if (!raw) return;
     const saved = JSON.parse(raw);
-    if (Number.isFinite(Number(saved.char_count)) && Number(saved.char_count) >= 1 && Number(saved.char_count) <= 10) {
+    if (Number.isFinite(Number(saved.char_count)) && Number(saved.char_count) >= 1 && Number(saved.char_count) <= LEAD_MAX) {
       writer.charCount = Number(saved.char_count);
     }
-    if (Number.isFinite(Number(saved.chapter_count)) && Number(saved.chapter_count) >= 5 && Number(saved.chapter_count) <= 30) {
+    if (Number.isFinite(Number(saved.side_count)) && Number(saved.side_count) >= 0 && Number(saved.side_count) <= 20) {
+      writer.sideCount = Number(saved.side_count);
+    }
+    if (Number.isFinite(Number(saved.chapter_count)) && Number(saved.chapter_count) >= 1 && Number(saved.chapter_count) <= 200) {
       writer.chapterCount = Number(saved.chapter_count);
       writer.outlineChapterCount = Number(saved.chapter_count);
     }
@@ -3027,6 +3842,10 @@ function restoreLimits() {
   if (charRange) charRange.value = String(writer.charCount);
   const charLabel = $("#writerCharCountValue");
   if (charLabel) charLabel.textContent = String(writer.charCount);
+  const sideRange = $("#writerSideCount");
+  if (sideRange) sideRange.value = String(writer.sideCount);
+  const sideLabel = $("#writerSideCountValue");
+  if (sideLabel) sideLabel.textContent = String(writer.sideCount);
   const chapterRange = $("#writerChapterCount");
   if (chapterRange) chapterRange.value = String(writer.chapterCount);
   const chapterLabel = $("#writerChapterCountValue");
@@ -3041,6 +3860,7 @@ function saveLimits() {
   try {
     localStorage.setItem(LIMITS_KEY, JSON.stringify({
       char_count: writer.charCount,
+      side_count: writer.sideCount,
       chapter_count: writer.chapterCount,
     }));
   } catch (_error) {

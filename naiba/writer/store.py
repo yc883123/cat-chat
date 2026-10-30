@@ -58,6 +58,16 @@ IMPORT_TTL_SECONDS = 24 * 3600
 CHAPTER_CONTENT_MAX_CHARS = 200_000
 # 设定 / 大纲单版本文本槽上限（防御性，与 prompts 的槽位预算分层）。
 SETUP_TEXT_MAX_CHARS = 60_000
+# 批次三（设定细化）：标签 5→20、雷区 200→5000、参考作品、角色分主配。
+TAGS_MAX = 20
+AVOID_MAX = 5_000
+VIBE_MAX = 500
+REFS_MAX = 8
+REF_DIMS = ("故事背景", "世界观", "叙事节奏", "人物关系", "语言风格")
+LEAD_MAX = 9
+SIDE_MAX = 99
+CHAR_TEXT_MAX = 200
+CHAR_LONG_MAX = 1_000
 
 # 流水线状态：running 推进中；done/failed/cancelled/interrupted/conflict 为终态。
 PIPELINE_STATUSES = ("running", "done", "failed", "cancelled", "interrupted", "conflict")
@@ -90,11 +100,162 @@ def clean_title(name: str) -> str:
     return cleaned[:80] or "未命名"
 
 
+# 分部大纲（3.9.13）：大纲从「章节数组」变成「几万字的文字，可分部」。
+PARTS_MAX = 20
+PART_TEXT_MAX = 200_000
+# 单章字数限制（0 = 不限）与结尾策略，跟着作品走（章节页设定，正文页使用）。
+CHAPTER_CHARS_CHOICES = (0, 2000, 3000, 4000, 6000)
+ENDING_CHOICES = ("suspense", "natural", "hook")
+
+
+def normalize_outline_parts(raw: Any, *, min_parts: int = 1,
+                            max_parts: int = PARTS_MAX) -> list[dict[str, Any]]:
+    """把分部大纲收敛成 `{no,title,text}` 列表；部号必须唯一且连续。"""
+    if not isinstance(raw, list):
+        raise WriterStoreError("大纲分部必须是数组")
+    parts: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise WriterStoreError("大纲分部必须是对象数组")
+        no_raw = item.get("no", len(parts) + 1)
+        if isinstance(no_raw, bool) or not isinstance(no_raw, int):
+            raise WriterStoreError("部号必须是整数")
+        text = str(item.get("text") or "")
+        if len(text) > PART_TEXT_MAX:
+            raise WriterStoreError(f"第 {no_raw} 部大纲超过 {PART_TEXT_MAX} 字符上限")
+        title = str(item.get("title") or "").strip()[:80] or f"第 {no_raw} 部"
+        parts.append({"no": no_raw, "title": title, "text": text})
+    if not min_parts <= len(parts) <= max_parts:
+        raise WriterStoreError(f"分部数需要在 {min_parts}–{max_parts} 之间（当前 {len(parts)}）")
+    nos = [int(row["no"]) for row in parts]
+    if len(set(nos)) != len(nos):
+        raise WriterStoreError("部号不能重复")
+    ordered = sorted(nos)
+    if ordered != list(range(1, len(ordered) + 1)):
+        raise WriterStoreError("部号必须从 1 开始连续")
+    return sorted(parts, key=lambda row: int(row["no"]))
+
+
+def normalize_chapter_plan(manifest: dict[str, Any]) -> dict[str, Any]:
+    """章节计划（单章字数 / 结尾策略）的归一与默认值。"""
+    plan = manifest.get("chapter_plan") if isinstance(manifest.get("chapter_plan"), dict) else {}
+    try:
+        chars = int(plan.get("chars") or 0)
+    except (TypeError, ValueError):
+        chars = 0
+    ending = str(plan.get("ending") or "suspense")
+    return {
+        "chars": chars if chars in CHAPTER_CHARS_CHOICES else 0,
+        "ending": ending if ending in ENDING_CHOICES else "suspense",
+    }
+
+
+def outline_parts_text(parts: list[dict[str, Any]]) -> str:
+    """拼接成一整篇文字（单部作品直接就是这一篇）。"""
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return str(parts[0].get("text") or "")
+    return "\n\n".join(
+        f"【{row.get('title') or ('第 %d 部' % int(row.get('no') or 0))}】\n{row.get('text') or ''}"
+        for row in parts
+    )
+
+
 def _clamp_text(value: Any, limit: int, *, what: str) -> str:
     text = str(value or "")
     if len(text) > limit:
         raise WriterStoreError(f"{what}超过 {limit} 字符上限")
     return text
+
+
+def _norm_role(raw_role: Any, fallback_label: str, *, lead_used: int) -> tuple[str, str]:
+    """角色分区：lead（主角，≤9）/ side（配角，≤99）。老数据没有角色分区时按顺序补。"""
+    text = str(raw_role or "").strip()
+    if text in ("lead", "side"):
+        return text, str(fallback_label or "").strip()[:40]
+    label = str(fallback_label or "").strip() or text
+    if "主" in label:
+        return "lead", label[:40]
+    if label:
+        return "side", label[:40]
+    # 完全没写角色：先补满 9 个主角，其余当配角（老版本最多 10 人）。
+    return ("lead" if lead_used < LEAD_MAX else "side"), ""
+
+
+def _normalize_characters(raw: Any) -> list[dict[str, Any]]:
+    """角色：主角 ≤9 / 配角 ≤99，字段扩到 12 个（旧字段 traits/speech/background 保留兼容）。"""
+    characters: list[dict[str, Any]] = []
+    lead_used = 0
+    side_used = 0
+    for item in (raw if isinstance(raw, list) else []):
+        if isinstance(item, str):
+            item = {"name": item}
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        role, role_label = _norm_role(item.get("role"), item.get("role_label") or "", lead_used=lead_used)
+        if role == "lead":
+            if lead_used >= LEAD_MAX:
+                role = "side"
+            else:
+                lead_used += 1
+        if role == "side":
+            if side_used >= SIDE_MAX:
+                continue
+            side_used += 1
+
+        def field(key: str, limit: int = CHAR_TEXT_MAX, *, alt: str = "") -> str:
+            value = item.get(key)
+            if (value is None or str(value) == "") and alt:
+                value = item.get(alt)
+            return str(value or "").strip()[:limit]
+
+        characters.append({
+            "name": name[:60],
+            "alias": field("alias", 120),
+            "role": role,
+            "role_label": role_label,
+            "age": field("age", 40),
+            "origin": field("origin", 200),
+            "identity": field("identity"),
+            "costume": field("costume"),
+            "intro": field("intro", CHAR_LONG_MAX, alt="background"),
+            "personality": field("personality", CHAR_TEXT_MAX, alt="traits"),
+            "relations": field("relations", CHAR_LONG_MAX),
+            "voice": field("voice", CHAR_TEXT_MAX, alt="speech"),
+            "goal": field("goal"),
+            "arc": field("arc"),
+            # 旧字段保留：老提示词与老页面还认这几个键。
+            "traits": field("traits"),
+            "speech": field("speech"),
+            "background": field("background", CHAR_LONG_MAX, alt="intro"),
+        })
+    return characters
+
+
+def _normalize_references(raw: Any) -> list[dict[str, Any]]:
+    """参考作品：只学结构不抄内容。每本可选 5 个参考维度 + 一句话怎么参考。"""
+    refs: list[dict[str, Any]] = []
+    for item in (raw if isinstance(raw, list) else []):
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()[:120]
+        if not title:
+            continue
+        dims_raw = item.get("dims") if isinstance(item.get("dims"), list) else []
+        dims = [str(dim).strip() for dim in dims_raw if str(dim).strip() in REF_DIMS]
+        refs.append({
+            "title": title,
+            "dims": list(dict.fromkeys(dims))[: len(REF_DIMS)],
+            "note": str(item.get("note") or "").strip()[:500],
+            "same_fanfic": bool(item.get("same_fanfic")),
+        })
+        if len(refs) >= REFS_MAX:
+            break
+    return refs
 
 
 def normalize_setup(payload: Any, *, base: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -111,30 +272,10 @@ def normalize_setup(payload: Any, *, base: dict[str, Any] | None = None) -> dict
         text = str(item or "").strip()
         if text and text not in tags:
             tags.append(text)
-        if len(tags) >= 5:
+        if len(tags) >= TAGS_MAX:
             break
-    characters: list[dict[str, str]] = []
-    chars_raw = raw.get("characters") if isinstance(raw.get("characters"), list) else []
-    for item in chars_raw:
-        if isinstance(item, str):
-            item = {"name": item}
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "").strip()
-        if not name:
-            continue
-        characters.append({
-            "name": name[:60],
-            "role": str(item.get("role") or "").strip()[:40],
-            "identity": str(item.get("identity") or "").strip()[:200],
-            "goal": str(item.get("goal") or "").strip()[:200],
-            "traits": str(item.get("traits") or "").strip()[:200],
-            "speech": str(item.get("speech") or "").strip()[:200],
-            "arc": str(item.get("arc") or "").strip()[:200],
-            "background": str(item.get("background") or "").strip()[:1000],
-        })
-        if len(characters) >= 10:
-            break
+    characters = _normalize_characters(raw.get("characters"))
+    references = _normalize_references(raw.get("references"))
     base = base if isinstance(base, dict) else {}
     merged = {
         "idea": _clamp_text(raw.get("idea") if raw.get("idea") is not None else base.get("idea"),
@@ -165,14 +306,15 @@ def normalize_setup(payload: Any, *, base: dict[str, Any] | None = None) -> dict
             raw.get("worldview") if raw.get("worldview") is not None else base.get("worldview"),
             SETUP_TEXT_MAX_CHARS, what="世界观"),
         "characters": characters,
+        "references": references,
         "style": str(raw.get("style") if raw.get("style") is not None else base.get("style") or "").strip()[:20],
         "constraints": {
             "vibe": _clamp_text((raw.get("constraints") or {}).get("vibe")
                                 if isinstance(raw.get("constraints"), dict) else "",
-                                200, what="参考气质"),
+                                VIBE_MAX, what="参考气质"),
             "avoid": _clamp_text((raw.get("constraints") or {}).get("avoid")
                                  if isinstance(raw.get("constraints"), dict) else "",
-                                 200, what="回避项"),
+                                 AVOID_MAX, what="雷区"),
         },
     }
     return merged
@@ -405,6 +547,8 @@ class WriterStore:
              "kind": str(row.get("kind") or ""), "updated_at": int(row.get("updated_at") or 0),
              "task_id": str(row.get("task_id") or ""), "len": int(row.get("len") or 0),
              "chapter_count": int(row.get("chapter_count") or 0),
+             "parts_count": int(row.get("parts_count") or 0),
+             "schema": int(row.get("schema") or 1),
              "source_setup_version_id": str(row.get("source_setup_version_id") or "")}
             for row in outline_versions
         ]
@@ -416,6 +560,7 @@ class WriterStore:
             "chapter_count": len([n for n in manifest.get("chapter_ids") or []]),
             "current_setup_version_id": str(manifest.get("current_setup_version_id") or ""),
             "current_outline_version_id": str(manifest.get("current_outline_version_id") or ""),
+            "chapter_plan": normalize_chapter_plan(manifest),
             "setup_versions": published_setup if include_versions else [],
             "outline_versions": published_outline if include_versions else [],
             "active_pipeline": dict(pipeline) if isinstance(pipeline, dict) else None,
@@ -514,6 +659,7 @@ class WriterStore:
                 "title": str(index.get("title") or ""),
                 "beat": str(index.get("beat") or ""),
                 "hook": str(index.get("hook") or ""),
+                "part_no": int(index.get("part_no") or 0),
                 "revision": int(index.get("revision") or 0),
                 "current_version_id": current_id,
                 "current_kind": current_kind,
@@ -608,47 +754,77 @@ class WriterStore:
     # ---- 大纲版本 ----
 
     def _write_outline_locked(self, book_dir: Path, manifest: dict[str, Any],
-                              chapters: list[dict[str, Any]], *, kind: str, task_id: str,
-                              source_setup_version_id: str) -> str:
+                              chapters: list[dict[str, Any]] | None, *, kind: str, task_id: str,
+                              source_setup_version_id: str,
+                              parts: list[dict[str, Any]] | None = None) -> str:
+        """写一版大纲。
+
+        schema 2 = 分部文字大纲（`parts`，`chapters` 为空）；schema 1 = 老的逐章大纲，
+        只为兼容既有作品与老 kind。两种都在同一个版本目录里，靠 `schema` 区分。
+        """
         versions = manifest.get("outline_versions") if isinstance(manifest.get("outline_versions"), list) else []
         version_no = (max((int(row.get("version") or 0) for row in versions if isinstance(row, dict)),
                           default=0) + 1)
         vid = new_version_id("ol")
+        is_parts = parts is not None
+        chapter_rows = list(chapters or [])
+        part_rows = list(parts or [])
         record = {
             "id": vid, "version": version_no, "kind": str(kind or "generated"),
             "updated_at": _now_ms(), "task_id": str(task_id or ""),
             "source_setup_version_id": str(source_setup_version_id or ""),
-            "chapters": chapters,
+            "schema": 2 if is_parts else 1,
+            "chapters": chapter_rows,
         }
+        if is_parts:
+            record["parts"] = part_rows
         self._write_json(self._outline_path(book_dir, vid), record)
-        versions.append({"id": vid, "version": version_no, "kind": str(kind or "generated"),
-                         "updated_at": record["updated_at"], "task_id": str(task_id or ""),
-                         "len": sum(len(row["title"] + row["beat"]) for row in chapters),
-                         "chapter_count": len(chapters),
-                         "source_setup_version_id": str(source_setup_version_id or "")})
+        entry = {"id": vid, "version": version_no, "kind": str(kind or "generated"),
+                 "updated_at": record["updated_at"], "task_id": str(task_id or ""),
+                 "len": (sum(len(str(row.get("text") or "")) for row in part_rows) if is_parts
+                         else sum(len(row["title"] + row["beat"]) for row in chapter_rows)),
+                 "chapter_count": len(chapter_rows),
+                 "parts_count": len(part_rows),
+                 "schema": 2 if is_parts else 1,
+                 "source_setup_version_id": str(source_setup_version_id or "")}
+        versions.append(entry)
         manifest["outline_versions"] = versions
         manifest["current_outline_version_id"] = vid
         return vid
 
-    def save_outline(self, book_id: str, *, chapters: Any, kind: str = "generated",
-                     task_id: str = "", source_setup_version_id: str = "",
-                     expected_revision: Any = None,
+    def save_outline(self, book_id: str, *, chapters: Any = None, parts: Any = None,
+                     kind: str = "generated", task_id: str = "",
+                     source_setup_version_id: str = "", expected_revision: Any = None,
                      sync: bool = False, allow_drop: bool = False) -> dict[str, Any]:
-        """写一份新大纲版本；`sync=True` 时同步章节索引（计划 §5.3）。"""
+        """写一份新大纲版本。
+
+        `parts`（分部文字，schema 2）与 `chapters`（逐章，schema 1）**二选一**：
+        - parts 模式不再同步章节——章节由拆章（split）单独产出，两者互不覆盖；
+        - chapters 模式保留旧的 `sync=True` 行为（老 kind `outline` 走这条）。
+        """
+        if (parts is None) == (chapters is None):
+            raise WriterStoreError("大纲要么给 parts（分部文字），要么给 chapters（逐章），不能都给或都不给")
         manifest = self._load_manifest(book_id)
         self._check_revision(manifest, expected_revision)
         book_dir = self._book_dir(book_id)
-        rows = normalize_outline_chapters(chapters)
+        parts_rows = normalize_outline_parts(parts) if parts is not None else None
+        chapter_rows = normalize_outline_chapters(chapters) if chapters is not None else []
+        if parts_rows is not None and sync:
+            raise WriterStoreError("分部大纲不同步章节；请用拆章接口产出章节目录")
         with self._lock:
-            vid = self._write_outline_locked(book_dir, manifest, rows, kind=kind,
-                                             task_id=task_id,
-                                             source_setup_version_id=source_setup_version_id)
+            vid = self._write_outline_locked(
+                book_dir, manifest,
+                chapter_rows if parts_rows is None else None,
+                kind=kind, task_id=task_id,
+                source_setup_version_id=source_setup_version_id, parts=parts_rows,
+            )
             synced: list[int] = []
-            if sync:
-                synced = self._sync_chapters_locked(book_dir, manifest, rows, allow_drop=allow_drop)
+            if sync and parts_rows is None:
+                synced = self._sync_chapters_locked(book_dir, manifest, chapter_rows, allow_drop=allow_drop)
             self._bump_manifest(book_dir, manifest)
         return {"book": self._public_manifest(manifest), "outline_version_id": vid,
-                "synced_chapter_ids": synced}
+                "synced_chapter_ids": synced,
+                "parts_count": len(parts_rows or [])}
 
     def load_outline(self, book_id: str, *, manifest: dict[str, Any] | None = None,
                      version_id: str = "") -> dict[str, Any]:
@@ -747,6 +923,111 @@ class WriterStore:
             ordered = self._sync_chapters_locked(book_dir, manifest, rows, allow_drop=allow_drop)
             self._bump_manifest(book_dir, manifest)
         return {"book": self._public_manifest(manifest), "chapter_ids": ordered}
+
+    # ---- 章节计划（单章字数 / 结尾策略） ----
+
+    def chapter_plan(self, manifest: dict[str, Any]) -> dict[str, Any]:
+        return normalize_chapter_plan(manifest)
+
+    def set_chapter_plan(self, book_id: str, *, chars: Any = None, ending: Any = None,
+                         expected_revision: Any = None) -> dict[str, Any]:
+        """写章节计划（章节页设定，正文页按它生成）。"""
+        manifest = self._load_manifest(book_id)
+        self._check_revision(manifest, expected_revision)
+        plan = self.chapter_plan(manifest)
+        if chars is not None:
+            try:
+                value = int(chars)
+            except (TypeError, ValueError):
+                raise WriterStoreError("单章字数限制必须是整数") from None
+            if value not in CHAPTER_CHARS_CHOICES:
+                raise WriterStoreError(f"单章字数限制只能是 {list(CHAPTER_CHARS_CHOICES)} 之一（0 = 不限）")
+            plan["chars"] = value
+        if ending is not None:
+            value = str(ending or "").strip()
+            if value not in ENDING_CHOICES:
+                raise WriterStoreError(f"章节结尾策略只能是 {list(ENDING_CHOICES)} 之一")
+            plan["ending"] = value
+        book_dir = self._book_dir(book_id)
+        with self._lock:
+            manifest["chapter_plan"] = plan
+            self._bump_manifest(book_dir, manifest)
+        return {"book": self._public_manifest(manifest), "chapter_plan": plan}
+
+    # ---- 拆章：把大纲拆出来的章节追加进目录 ----
+
+    def append_chapters(self, book_id: str, rows: Any, *, part_no: int = 0,
+                        expected_revision: Any = None) -> dict[str, Any]:
+        """把一批「拆章」结果追加成章节索引（已存在的章号一律跳过，绝不覆盖正文）。
+
+        为什么是追加而不是重建：9999 章要按批拆，每批只知道自己那一段；
+        重建会把前面几批的正文保护逻辑全部重跑一遍，代价大且容易误删。
+        """
+        if not isinstance(rows, list) or not rows:
+            raise WriterStoreError("拆章结果不能为空")
+        manifest = self._load_manifest(book_id)
+        self._check_revision(manifest, expected_revision)
+        book_dir = self._book_dir(book_id)
+        existing = {int(n) for n in manifest.get("chapter_ids") or []}
+        appended: list[int] = []
+        now = _now_ms()
+        with self._lock:
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                if not title:
+                    continue
+                no_raw = item.get("no")
+                no = int(no_raw) if isinstance(no_raw, int) and not isinstance(no_raw, bool) else (
+                    (max(existing) + 1) if existing else 1)
+                if no < 1 or no > 9999:
+                    raise WriterStoreError(f"章节号越界：{no}（上限 9999）")
+                if no in existing:
+                    continue
+                index = {
+                    "no": no, "title": title[:200],
+                    "beat": str(item.get("beat") or "").strip()[:2000],
+                    "hook": str(item.get("hook") or "").strip()[:500],
+                    "part_no": int(part_no or 0),
+                    "revision": 1, "version_ids": [], "current_version_id": "",
+                    "created_at": now, "updated_at": now,
+                }
+                self._write_chapter_index(book_dir, index)
+                existing.add(no)
+                appended.append(no)
+            manifest["chapter_ids"] = sorted(existing)
+            self._bump_manifest(book_dir, manifest)
+        return {"book": self._public_manifest(manifest), "appended": appended,
+                "chapter_count": len(manifest.get("chapter_ids") or [])}
+
+    def update_chapter_meta(self, book_id: str, chapter_no: int, *, title: Any = None,
+                            beat: Any = None, hook: Any = None,
+                            expected_revision: Any = None) -> dict[str, Any]:
+        """改章节标题/简述/钩子（章节页「章节简述」逐行可改）。不动正文版本。"""
+        manifest = self._load_manifest(book_id)
+        self._check_revision(manifest, expected_revision)
+        book_dir = self._book_dir(book_id)
+        if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
+            raise LookupError("章节不存在")
+        with self._lock:
+            index = self._load_chapter_index(book_dir, chapter_no)
+            if title is not None:
+                text = str(title).strip()
+                if not text:
+                    raise WriterStoreError("章节标题不能为空")
+                index["title"] = text[:200]
+            if beat is not None:
+                index["beat"] = str(beat).strip()[:2000]
+            if hook is not None:
+                index["hook"] = str(hook).strip()[:500]
+            index["updated_at"] = _now_ms()
+            self._write_chapter_index(book_dir, index)
+            self._bump_manifest(book_dir, manifest)
+        return {"book": self._public_manifest(manifest),
+                "chapter": {"no": chapter_no, "title": str(index.get("title") or ""),
+                            "beat": str(index.get("beat") or ""),
+                            "hook": str(index.get("hook") or "")}}
 
     # ---- 章节 ----
 

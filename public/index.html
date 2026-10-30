@@ -1092,9 +1092,10 @@
             <div class="writer-stages" id="writerStages" role="group" aria-label="原创写作阶段">
               <button class="writer-stage active" type="button" aria-pressed="true" data-writer-stage="setup">设定</button>
               <button class="writer-stage" type="button" aria-pressed="false" data-writer-stage="outline">大纲</button>
+              <button class="writer-stage" type="button" aria-pressed="false" data-writer-stage="chapter">章节</button>
               <button class="writer-stage" type="button" aria-pressed="false" data-writer-stage="draft">正文</button>
             </div>
-            <span class="writer-stagebar-note">三阶段：先把书写明白，再按章写完</span>
+            <span class="writer-stagebar-note">四个阶段：设定 → 大纲 → 章节 → 正文</span>
           </div>
           <div class="writer-panes" id="writerPanes" role="group" aria-label="织书台分档">
             <button class="studio-pane-btn writer-pane-btn" type="button" aria-pressed="false" data-writer-pane="book">作品</button>
@@ -1102,10 +1103,11 @@
             <button class="studio-pane-btn writer-pane-btn" type="button" aria-pressed="false" data-writer-pane="notes">说明</button>
           </div>
           <div class="writer-columns" id="writerColumns" data-writer-pane="editor">
-            <!-- 左：作品与目录 -->
+            <!-- 左：按阶段切换（设定=作品与版本 · 大纲=设定汇总 · 章节=大纲汇总 · 正文=目录） -->
             <aside class="writer-panel writer-book" aria-label="作品与目录">
+              <div class="writer-side" data-writer-side="setup" hidden>
               <div class="writer-panel-head">
-                <strong>作品与目录</strong>
+                <strong>作品</strong>
                 <small id="writerTocMeta">还没有打开作品</small>
               </div>
               <div class="writer-book-summary" id="writerBookSummary" hidden>
@@ -1128,13 +1130,46 @@
                 </div>
               </div>
               <div class="writer-panel-head writer-toc-head">
-                <strong>目录</strong>
-                <small>点一章查看与写作</small>
+                <strong>设定版本</strong>
+                <small>点一版切回</small>
               </div>
               <div class="writer-scroll">
-                <div class="writer-chapter-list" id="writerChapterList" aria-label="章节列表"></div>
-                <p class="writer-empty" id="writerChapterEmpty">还没有打开作品。点右上「作品」新建或打开。</p>
+                <div class="writer-version-list" id="writerSetupVersionList"></div>
+                <p class="writer-empty" id="writerSetupVersionEmpty">还没有保存过设定版本。</p>
               </div>
+              </div><!-- /side setup -->
+
+              <div class="writer-side" data-writer-side="outline" hidden>
+                <div class="writer-panel-head">
+                  <strong>设定汇总</strong>
+                  <small>写大纲时对着看</small>
+                </div>
+                <div class="writer-scroll">
+                  <div class="writer-summary" id="writerSetupSummary"></div>
+                </div>
+              </div><!-- /side outline -->
+
+              <div class="writer-side" data-writer-side="chapter" hidden>
+                <div class="writer-panel-head">
+                  <strong>大纲汇总</strong>
+                  <small id="writerChapterOutlineMeta">拆章时对着看</small>
+                </div>
+                <div class="writer-scroll">
+                  <div class="writer-outline-view" id="writerChapterOutlineText"></div>
+                </div>
+              </div><!-- /side chapter -->
+
+              <div class="writer-side" data-writer-side="draft" hidden>
+                <div class="writer-panel-head">
+                  <strong>目录</strong>
+                  <small id="writerTocLimit">章节数量与字数限制</small>
+                </div>
+                <div class="writer-toc-limits" id="writerTocLimits"></div>
+                <div class="writer-scroll">
+                  <div class="writer-chapter-list" id="writerChapterList" aria-label="章节列表"></div>
+                  <p class="writer-empty" id="writerChapterEmpty">还没有打开作品。点右上「作品」新建或打开。</p>
+                </div>
+              </div><!-- /side draft -->
             </aside>
 
             <!-- 中：当前阶段工作区 -->
@@ -1152,38 +1187,44 @@
                 <!-- ===== 阶段一：设定 ===== -->
                 <div class="writer-stage-panel" id="writerSetupPanel" data-writer-stage-panel="setup" hidden>
                   <div class="writer-stage-group">
-                    <div class="writer-group-head"><strong>故事创意</strong><small>一句话就能开局，写多写少都行</small></div>
+                    <div class="writer-group-head"><strong>故事创意</strong><small>主要输入区：人、事、场景都能写，不限字数</small></div>
                     <label class="writer-field">一句话创意
-                      <textarea id="writerIdea" rows="3" placeholder="示例：修船工在父亲留下的旧船里，翻出一张二十年前的船员合影，照片上多了一个人。"></textarea>
+                      <textarea id="writerIdea" rows="5" spellcheck="false" placeholder="示例：修船工在父亲留下的旧船里，翻出一张二十年前的船员合影，照片上多了一个人。&#10;可以写人物、写场景、写你想要的那种氛围，写多长都行。"></textarea>
                     </label>
-                    <div class="writer-grid-2">
-                      <label class="writer-field">参考作品 / 想靠近的味道
-                        <input type="text" id="writerVibe" placeholder="例：《漫长的季节》那种旧工业城的潮湿感">
-                      </label>
-                      <label class="writer-field">雷区（一定不要写）
-                        <input type="text" id="writerAvoid" placeholder="例：不要灵异、不要系统文">
-                      </label>
+                    <label class="writer-field">雷区（负面提示词，不限字数）
+                      <textarea id="writerAvoid" rows="2" spellcheck="false" placeholder="例：不要灵异、不要系统文、不要血腥分尸；不要出现真实城市名"></textarea>
+                    </label>
+                    <label class="writer-field">参考气质（一句话，可留空）
+                      <input type="text" id="writerVibe" placeholder="例：《漫长的季节》那种旧工业城的潮湿感">
+                    </label>
+                  </div>
+
+                  <div class="writer-stage-group">
+                    <div class="writer-group-head"><strong>参考作品</strong><small>只学结构，不抄内容；最多 8 本</small></div>
+                    <div class="writer-ref-list" id="writerRefList"></div>
+                    <div class="writer-action-bar">
+                      <button class="control-button tiny" type="button" id="writerRefAdd">+ 再加一本参考</button>
                     </div>
                   </div>
+
                   <div class="writer-stage-group">
                     <div class="writer-group-head"><strong>基本设定</strong><small>生成后可以逐条改，改完保存为新版本</small></div>
                     <div class="writer-grid-2">
                       <label class="writer-field">书名
                         <input type="text" id="writerTitle" maxlength="120">
                       </label>
-                      <label class="writer-field">题材
-                        <input type="text" id="writerGenreCat" placeholder="例：东方玄幻">
-                      </label>
                       <label class="writer-field">基调
                         <input type="text" id="writerGenreTone" placeholder="例：热血隐忍">
                       </label>
-                      <label class="writer-field">写作风格
-                        <select id="writerStyle" aria-label="写作风格"></select>
-                      </label>
                     </div>
-                    <label class="writer-field">题材标签（逗号分隔，最多 5 个）
-                      <input type="text" id="writerTags" placeholder="例：废柴流, 退婚, 宗门">
-                    </label>
+                    <div class="writer-field">
+                      <span class="writer-field-label">题材（点选；树里没有的写法用下面的「自定义」）</span>
+                      <div class="writer-genre-picker" id="writerGenrePicker"></div>
+                      <input type="text" id="writerGenreCustom" placeholder="自定义题材（可留空）">
+                      <input type="hidden" id="writerGenreCat">
+                      <input type="hidden" id="writerGenreSubCat">
+                      <input type="hidden" id="writerGenreChannel">
+                    </div>
                     <label class="writer-field">简介
                       <textarea id="writerBlurb" rows="2"></textarea>
                     </label>
@@ -1196,21 +1237,43 @@
                       <div class="writer-candidate-row" id="writerBlurbCandidateList"></div>
                     </div>
                   </div>
+
                   <div class="writer-stage-group">
-                    <div class="writer-group-head"><strong>角色</strong><small>最多 10 人；生成后可逐条修改</small></div>
+                    <div class="writer-group-head"><strong>标签</strong><small>最多 20 个；选中项直接进提示词</small></div>
+                    <input type="search" id="writerTagSearch" placeholder="搜标签：刑侦 / 赛博朋克 / 权谋…" aria-label="搜索标签">
+                    <div class="writer-tag-box" id="writerTagBox"></div>
+                    <input type="hidden" id="writerTags">
+                    <p class="writer-hint" id="writerTagStat">已选 0 / 20</p>
+                  </div>
+
+                  <div class="writer-stage-group">
+                    <div class="writer-group-head"><strong>写作风格</strong><small>每种都带约束提示词，不是只换个名字</small></div>
+                    <label class="writer-field">风格
+                      <select id="writerStyle" aria-label="写作风格"></select>
+                    </label>
+                  </div>
+
+                  <div class="writer-stage-group">
+                    <div class="writer-group-head"><strong>角色</strong><small>主角 ≤9 人 · 配角 ≤99 人；生成后可逐条修改</small></div>
+                    <div class="writer-char-tabs" id="writerCharTabs" role="group" aria-label="角色分区">
+                      <button class="writer-char-tab active" type="button" data-writer-char-tab="lead" aria-pressed="true">主角 <b id="writerLeadTabCount">0 / 9</b></button>
+                      <button class="writer-char-tab" type="button" data-writer-char-tab="side" aria-pressed="false">配角 <b id="writerSideTabCount">0 / 99</b></button>
+                    </div>
                     <div class="writer-char-list" id="writerCharList"></div>
                     <div class="writer-action-bar">
-                      <button class="control-button tiny" type="button" id="writerCharAdd">加一个角色</button>
+                      <button class="control-button tiny" type="button" id="writerCharAdd">+ 加一个角色</button>
                       <button class="control-button tiny" type="button" id="writerTemplateBtn">从模板套用</button>
                       <button class="control-button tiny" type="button" id="writerSetupClear">清空表单</button>
                     </div>
                   </div>
+
                   <div class="writer-stage-group">
                     <div class="writer-group-head"><strong>世界观</strong><small>写正文时会自动压缩成摘要带上</small></div>
                     <label class="writer-field">世界观设定
                       <textarea id="writerWorldview" rows="4"></textarea>
                     </label>
                   </div>
+
                   <div class="writer-stage-group">
                     <div class="writer-group-head"><strong>生成整套设定</strong><small>六步自动链：题材 → 书名 → 简介 → 世界观 → 角色 → 大纲</small></div>
                     <div class="writer-grid-2">
@@ -1223,12 +1286,16 @@
                     </div>
                     <div class="writer-limits">
                       <label class="writer-limit">
-                        <span>角色数量 <b id="writerCharCountValue">4</b> 人</span>
-                        <input type="range" id="writerCharCount" min="1" max="10" step="1" value="4" aria-label="角色数量">
+                        <span>主角数量 <b id="writerCharCountValue">2</b> 人</span>
+                        <input type="range" id="writerCharCount" min="1" max="9" step="1" value="2" aria-label="主角数量">
                       </label>
                       <label class="writer-limit">
-                        <span>大纲章节数 <b id="writerChapterCountValue">12</b> 章</span>
-                        <input type="range" id="writerChapterCount" min="5" max="30" step="1" value="12" aria-label="大纲章节数">
+                        <span>配角数量 <b id="writerSideCountValue">4</b> 人</span>
+                        <input type="range" id="writerSideCount" min="0" max="20" step="1" value="4" aria-label="配角数量">
+                      </label>
+                      <label class="writer-limit">
+                        <span>大纲章数（拆章目标） <b id="writerChapterCountValue">30</b> 章</span>
+                        <input type="range" id="writerChapterCount" min="1" max="200" step="1" value="30" aria-label="拆章目标">
                       </label>
                     </div>
                     <label class="writer-field">补充要求（只在第一步「题材推断」生效）
@@ -1238,14 +1305,28 @@
                       <button class="control-button writer-primary" type="button" id="writerSetupGenerate">生成整套设定</button>
                       <button class="control-button" type="button" id="writerSetupSave">保存修改为新版本</button>
                     </div>
-                    <p class="writer-hint">生成的是整套设定并自动接着写大纲；每完成一步都存一版，失败时保留前面已完成的步骤。重新点会再出一版，旧版本全部保留。表单里有还没保存的修改时（例如刚套用模板），点生成会先自动存一版再开始。</p>
+                    <p class="writer-hint">生成的是整套设定；每完成一步都存一版，失败时保留前面已完成的步骤。重新点会再出一版，旧版本全部保留。表单里有还没保存的修改时（例如刚套用模板），点生成会先自动存一版再开始。</p>
                   </div>
                 </div>
 
-                <!-- ===== 阶段二：大纲 ===== -->
+                <!-- ===== 阶段二：大纲（分部文字，几万字也行） ===== -->
                 <div class="writer-stage-panel" id="writerOutlinePanel" data-writer-stage-panel="outline" hidden>
                   <div class="writer-stage-group">
-                    <div class="writer-group-head"><strong>生成全书大纲</strong><small>按当前设定写出每一章的走向</small></div>
+                    <div class="writer-group-head"><strong>全书大纲</strong><small>只写故事怎么走，不写章节</small></div>
+                    <div class="writer-parts" id="writerOutlineParts" role="group" aria-label="分部"></div>
+                    <div class="writer-grid-2">
+                      <label class="writer-field">这一部的部号
+                        <input type="text" id="writerPartNo" readonly aria-label="部号">
+                      </label>
+                      <label class="writer-field">部标题
+                        <input type="text" id="writerPartTitle" placeholder="例：第一部 雾港">
+                      </label>
+                    </div>
+                    <label class="writer-field">这一部的大纲正文（主线 / 本部目标 / 阶段推进 / 关键转折 / 结尾落点）
+                      <textarea id="writerOutlineText" rows="14" spellcheck="false"
+                                placeholder="例：【主线】陈砚在父亲旧船里翻出 1998 年的合影……&#10;【本部目标】查清照片上的第六个人是谁。&#10;一、旧船与照片……"></textarea>
+                    </label>
+                    <p class="writer-hint" id="writerOutlineStat">还没有内容</p>
                     <div class="writer-grid-2">
                       <label class="writer-field">供应商
                         <select id="writerOutlineProvider" aria-label="大纲供应商"></select>
@@ -1254,37 +1335,89 @@
                         <select id="writerOutlineModel" aria-label="大纲模型"></select>
                       </label>
                     </div>
-                    <div class="writer-limits">
-                      <label class="writer-limit">
-                        <span>大纲章节数 <b id="writerOutlineChapterCountValue">12</b> 章</span>
-                        <input type="range" id="writerOutlineChapterCount" min="5" max="30" step="1" value="12" aria-label="大纲章节数">
-                      </label>
-                    </div>
                     <label class="writer-field">补充要求
                       <input type="text" id="writerOutlineNote" placeholder="想强调的要求，可留空">
                     </label>
-                    <label class="writer-check">
-                      <input type="checkbox" id="writerOutlineAllowDrop">
-                      <span>允许删除已被移出大纲的章节（含其正文；勾选后生成/保存/同步都不再二次确认）</span>
-                    </label>
                     <div class="writer-action-bar">
-                      <button class="control-button writer-primary" type="button" id="writerOutlineGenerate">生成全书大纲</button>
-                      <button class="control-button" type="button" id="writerSyncBtn" title="按当前大纲重建章节目录；已有正文不会被动覆盖">按当前大纲同步章节</button>
+                      <button class="control-button writer-primary" type="button" id="writerOutlineGenerate">生成这一部大纲</button>
+                      <button class="control-button" type="button" id="writerOutlineSave">保存大纲修改</button>
+                      <button class="control-button tiny" type="button" id="writerPartAdd">+ 增加一部</button>
+                      <button class="control-button tiny" type="button" id="writerPartRemove">删除这一部</button>
                     </div>
-                    <p class="writer-hint">大纲只写每章走向，不写正文；生成完会自动同步章节目录。已有正文不会被静默删除：要删有正文的章节需先勾选上面的确认。</p>
-                  </div>
-                  <div class="writer-stage-group">
-                    <div class="writer-group-head"><strong>章节梗概</strong><small id="writerOutlineMeta">还没有大纲</small></div>
-                    <div class="writer-outline-list" id="writerOutlineList"></div>
-                    <div class="writer-action-bar">
-                      <button class="control-button" type="button" id="writerOutlineSave" disabled>保存大纲修改</button>
-                    </div>
+                    <p class="writer-hint">大纲就是这一部几万字的文字，不逐章罗列。单部作品只有「第 1 部」；多部作品按部补，互不覆盖。</p>
                   </div>
                   <div class="writer-stage-group" id="writerOutlineVersionsGroup" hidden>
                     <div class="writer-group-head"><strong>历史版本</strong><small>切换后立即生效，可随时切回</small></div>
                     <label class="writer-field">大纲版本
                       <select id="writerOutlineVersion" aria-label="大纲版本"></select>
                     </label>
+                  </div>
+                  <div class="writer-stage-group" id="writerLegacyOutlineGroup" hidden>
+                    <div class="writer-group-head"><strong>逐章大纲（旧版）</strong><small>只读；老作品可以一键升级成文字大纲</small></div>
+                    <div class="writer-outline-list" id="writerLegacyOutlineList"></div>
+                    <div class="writer-action-bar">
+                      <button class="control-button" type="button" id="writerOutlineUpgrade">升级为文字大纲</button>
+                    </div>
+                    <p class="writer-hint">升级会把这些章节的标题与梗概拼成一段大纲文字，放进「第 1 部」；升级后可逐字修改，再按新大纲拆章。老版本仍保留在历史里。</p>
+                  </div>
+                  <div class="writer-stage-group">
+                    <div class="writer-group-head"><strong>下一步：拆章</strong><small>大纲写好后，按部拆出章节目录（最多 9999 章）</small></div>
+                    <div class="writer-action-bar">
+                      <button class="control-button" type="button" id="writerGotoChapter">去章节页拆章 ›</button>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- ===== 阶段三：章节（拆分 + 章节简述） ===== -->
+                <div class="writer-stage-panel" id="writerChapterPanel" data-writer-stage-panel="chapter" hidden>
+                  <div class="writer-stage-group">
+                    <div class="writer-group-head"><strong>正文章节拆分</strong><small>拆多少章、每章多长、结尾怎么收</small></div>
+                    <div class="writer-grid-2">
+                      <label class="writer-field">拆成多少章（上限 9999）
+                        <input type="number" id="writerSplitCount" min="1" max="9999" step="1" value="30">
+                      </label>
+                      <label class="writer-field">拆哪一部
+                        <select id="writerSplitPart" aria-label="拆哪一部"></select>
+                      </label>
+                    </div>
+                    <div class="writer-grid-2">
+                      <label class="writer-field">单章字数限制
+                        <select id="writerChapterChars" aria-label="单章字数限制">
+                          <option value="0">不限</option>
+                          <option value="2000">2000 字</option>
+                          <option value="3000">3000 字</option>
+                          <option value="4000">4000 字</option>
+                          <option value="6000">6000 字</option>
+                        </select>
+                      </label>
+                      <label class="writer-field">章节结尾
+                        <select id="writerChapterEnding" aria-label="章节结尾策略">
+                          <option value="suspense">留悬念</option>
+                          <option value="natural">自然收</option>
+                          <option value="hook">留钩子 + 预告</option>
+                        </select>
+                      </label>
+                    </div>
+                    <div class="writer-grid-2">
+                      <label class="writer-field">供应商
+                        <select id="writerChapterProvider" aria-label="拆分供应商"></select>
+                      </label>
+                      <label class="writer-field">模型
+                        <select id="writerChapterModel" aria-label="拆分模型"></select>
+                      </label>
+                    </div>
+                    <label class="writer-field">补充要求
+                      <input type="text" id="writerChapterNote" placeholder="想强调的拆分要求，可留空">
+                    </label>
+                    <div class="writer-action-bar">
+                      <button class="control-button writer-primary" type="button" id="writerSplitStart">开始拆分</button>
+                      <button class="control-button" type="button" id="writerSplitContinue" hidden>继续拆下一批</button>
+                    </div>
+                    <p class="writer-hint" id="writerSplitHint">每批最多 200 章，可中断续拆；已存在的章节（含已有正文）一律跳过，不会被覆盖。</p>
+                  </div>
+                  <div class="writer-stage-group">
+                    <div class="writer-group-head"><strong>章节简述</strong><small id="writerBriefMeta">还没有章节</small></div>
+                    <div class="writer-brief-list" id="writerBriefList"></div>
                   </div>
                 </div>
 

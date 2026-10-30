@@ -1,0 +1,737 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>织书台 批次二 + 批次三 · 视觉方案（评审稿）</title>
+<style>
+  :root{
+    --bg:#F8F9FC; --surface:#FFF; --surface-2:#F1F2F7; --inset:#F8F9FC;
+    --line:#E6E8F0; --line-strong:#D2D6E3;
+    --text:#2A2E40; --muted:#7A8099; --muted-2:#5A6079;
+    --accent:#7C5CFF; --accent-solid:#6D5AE6; --accent-soft:#EDECFF; --accent-soft2:#EAE4FF;
+    --ok:#12A594; --warn:#E8930C; --danger:#DC4A46; --ok-soft:#DCF4F0; --warn-soft:#FCF0E0;
+    --r-sm:6px; --r-md:8px; --r-lg:12px; --r-full:999px;
+    --sh1:0 1px 2px rgba(30,33,56,.06),0 1px 3px rgba(30,33,56,.04);
+    --sh2:0 4px 12px rgba(30,33,56,.08),0 2px 4px rgba(30,33,56,.04);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:#EEF0F6;
+    color:var(--text);
+    font:13px/1.55 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .page{max-width:1360px;margin:0 auto;padding:18px 18px 40px}
+  .doc-head{display:flex;align-items:flex-end;gap:14px;margin:2px 0 14px}
+  .doc-head h1{font-size:17px;margin:0;letter-spacing:.2px}
+  .doc-head p{margin:0;color:var(--muted);font-size:12px}
+  .doc-head .pill{background:var(--accent-soft);color:var(--accent-solid);border-radius:var(--r-full);
+    padding:2px 9px;font-size:11px;font-weight:600}
+
+  /* ---------- 应用外壳（模拟工作台内页） ---------- */
+  .app{background:var(--surface);border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:var(--sh2)}
+  .app-top{display:flex;align-items:center;gap:14px;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--surface)}
+  .app-top h2{margin:0;font-size:15px;font-weight:700}
+  .app-top .state{font-size:12px;color:var(--muted)}
+  .app-top .spacer{flex:1}
+  .btn{border:1px solid var(--line-strong);background:var(--surface);color:var(--text);border-radius:var(--r-sm);
+    padding:5px 11px;font-size:12px;cursor:default}
+  .btn.primary{background:var(--accent-solid);border-color:var(--accent-solid);color:#fff;font-weight:600}
+  .btn.tiny{padding:3px 8px;font-size:11px}
+  .btn.ghost{border-style:dashed;color:var(--muted-2)}
+  .stagebar{display:flex;align-items:center;gap:12px;padding:9px 16px;border-bottom:1px solid var(--line);background:var(--surface)}
+  .stages{display:inline-flex;background:var(--surface-2);border-radius:var(--r-full);padding:3px}
+  .stages button{border:0;background:transparent;color:var(--muted-2);font:inherit;font-size:12.5px;
+    padding:5px 16px;border-radius:var(--r-full);cursor:pointer}
+  .stages button.active{background:var(--surface);color:var(--accent-solid);font-weight:700;box-shadow:var(--sh1)}
+  .stagebar .note{font-size:11.5px;color:var(--muted)}
+
+  .cols{display:grid;grid-template-columns:248px minmax(0,1fr) 280px;min-height:720px}
+  /* 正文阶段四栏：目录 | 章节参数 | 正文 | 说明（反馈截图批注「左侧的正文改成章节，右侧增加正文」） */
+  .cols.four{grid-template-columns:248px 320px minmax(0,1fr) 252px}
+  .col{border-right:1px solid var(--line);display:flex;flex-direction:column;min-width:0}
+  .col:last-child{border-right:0}
+  .col-head{display:flex;align-items:baseline;gap:8px;padding:11px 14px 9px;border-bottom:1px solid var(--line)}
+  .col-head strong{font-size:12.5px}
+  .col-head small{color:var(--muted);font-size:11px;margin-left:auto}
+  .body{padding:14px;overflow:auto}
+  .body.tight{padding:10px}
+
+  /* 左栏：作品摘要 */
+  .book{padding:12px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--inset)}
+  .book-top{display:flex;gap:10px;align-items:center}
+  .cover{width:38px;height:46px;border-radius:6px;background:linear-gradient(160deg,#8B7BFF,#5A47C4);
+    color:#fff;display:grid;place-items:center;font-weight:700;font-size:15px}
+  .book-top strong{display:block;font-size:13px}
+  .book-top small{color:var(--muted);font-size:11px}
+  .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px}
+  .stat{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm);padding:6px 4px;text-align:center}
+  .stat b{display:block;font-size:13px}
+  .stat span{font-size:10.5px;color:var(--muted)}
+  .prog{display:flex;gap:8px;align-items:center;margin-top:9px;font-size:11px;color:var(--muted)}
+  .bar{flex:1;height:5px;border-radius:var(--r-full);background:var(--surface-2);overflow:hidden}
+  .bar i{display:block;height:100%;background:var(--accent)}
+
+  /* 左栏：列表（版本 / 分卷 / 目录） */
+  .list{display:flex;flex-direction:column;gap:4px}
+  .row{display:flex;gap:8px;align-items:flex-start;padding:7px 8px;border-radius:var(--r-sm);border:1px solid transparent;cursor:default}
+  .row:hover{background:var(--surface-2)}
+  .row.active{background:var(--accent-soft);border-color:#D6CDFF}
+  .row .t{font-size:12px;line-height:1.35}
+  .row .m{font-size:11px;color:var(--muted)}
+  .row .no{width:18px;flex:none;color:var(--muted);font-size:11px;text-align:right}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--line-strong);margin-top:6px;flex:none}
+  .dot.done{background:var(--ok)} .dot.run{background:var(--warn)}
+  .group-label{font-size:11px;color:var(--muted);margin:10px 2px 4px;letter-spacing:.4px}
+  .pager{display:flex;gap:6px;align-items:center;justify-content:center;padding:8px 0 2px;font-size:11px;color:var(--muted)}
+  .pager b{color:var(--text)}
+
+  /* 表单 ---------- */
+  .sec{border:1px solid var(--line);border-radius:var(--r-lg);margin-bottom:12px;overflow:hidden;background:var(--surface)}
+  .sec > .h{display:flex;align-items:center;gap:8px;padding:9px 12px;background:var(--inset);border-bottom:1px solid var(--line)}
+  .sec > .h strong{font-size:12.5px}
+  .sec > .h small{color:var(--muted);font-size:11px}
+  .sec > .h .tag{font-size:10.5px;padding:1px 6px;border-radius:var(--r-full);background:var(--accent-soft);color:var(--accent-solid);font-weight:600}
+  .sec > .b{padding:11px 12px}
+  .field{display:block;margin-bottom:10px}
+  .field:last-child{margin-bottom:0}
+  .label{display:flex;align-items:baseline;gap:8px;font-size:11.5px;color:var(--muted-2);margin-bottom:4px}
+  .label .req{color:var(--danger)}
+  .label .hint{margin-left:auto;color:var(--muted);font-size:10.5px}
+  input[type=text],textarea,select{
+    width:100%;border:1px solid var(--line-strong);border-radius:var(--r-sm);background:var(--surface);
+    padding:6px 8px;font:inherit;font-size:12.5px;color:var(--text)}
+  textarea{resize:vertical;line-height:1.6}
+  textarea.tall{min-height:104px}
+  textarea.hero{min-height:132px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .counters{display:flex;gap:10px;font-size:10.5px;color:var(--muted);margin-top:3px}
+  .counters b{color:var(--muted-2)}
+
+  .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .chip{border:1px solid var(--line-strong);background:var(--surface);border-radius:var(--r-full);
+    padding:2px 9px;font-size:11.5px;color:var(--muted-2)}
+  .chip.on{background:var(--accent-soft);border-color:#C9BCF5;color:var(--accent-solid);font-weight:600}
+  .chip.add{border-style:dashed;color:var(--muted)}
+
+  /* 题材树 */
+  .tree{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .tree-col{border:1px solid var(--line);border-radius:var(--r-md);overflow:hidden}
+  .tree-col > strong{display:block;padding:6px 9px;background:var(--inset);font-size:11.5px;border-bottom:1px solid var(--line)}
+  .tree-items{display:flex;flex-wrap:wrap;gap:4px;padding:8px}
+  .tag-btn{border:1px solid transparent;background:var(--surface-2);color:var(--muted-2);border-radius:var(--r-sm);
+    padding:2px 7px;font-size:11px}
+  .tag-btn.on{background:var(--accent-solid);color:#fff;font-weight:600}
+  .tag-btn.sub{background:transparent;border-color:var(--line-strong)}
+
+  /* 角色卡 */
+  .char{border:1px solid var(--line);border-radius:var(--r-md);margin-bottom:8px;overflow:hidden}
+  .char-head{display:flex;align-items:center;gap:8px;padding:6px 9px;background:var(--inset);border-bottom:1px solid var(--line)}
+  .char-head strong{font-size:12px}
+  .badge{font-size:10px;padding:1px 6px;border-radius:var(--r-full);font-weight:700}
+  .badge.lead{background:var(--accent-soft);color:var(--accent-solid)}
+  .badge.side{background:var(--surface-2);color:var(--muted-2)}
+  .char-head .spacer{flex:1}
+  .char-body{padding:9px;display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .mini{font-size:11px;color:var(--muted);margin-bottom:2px}
+  .quote{font-size:11.5px;color:var(--muted-2);background:var(--inset);border-left:2px solid var(--accent-soft2);
+    padding:6px 8px;border-radius:0 var(--r-sm) var(--r-sm) 0}
+
+  /* 大纲：部 tabs + 文本 + 拆章卡 */
+  .parts{display:flex;gap:6px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
+  .part{border:1px solid var(--line-strong);background:var(--surface);border-radius:var(--r-sm);
+    padding:4px 10px;font-size:12px;color:var(--muted-2)}
+  .part.on{background:var(--accent-soft);border-color:#C9BCF5;color:var(--accent-solid);font-weight:700}
+  .split{border:1px solid #E3D9FF;background:linear-gradient(180deg,#FBFAFF,#F6F4FF);border-radius:var(--r-lg);padding:12px}
+  .split h4{margin:0 0 3px;font-size:12.5px}
+  .split p{margin:0 0 10px;font-size:11.5px;color:var(--muted-2)}
+  .presets{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 10px}
+  .preset{border:1px solid var(--line-strong);background:#fff;border-radius:var(--r-full);padding:3px 10px;font-size:11.5px}
+  .preset.on{background:var(--accent-solid);border-color:var(--accent-solid);color:#fff;font-weight:600}
+  .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
+  .metric{background:#fff;border:1px solid var(--line);border-radius:var(--r-md);padding:7px 9px}
+  .metric b{display:block;font-size:14px}
+  .metric span{font-size:10.5px;color:var(--muted)}
+  .warnbox{display:flex;gap:8px;align-items:flex-start;background:var(--warn-soft);border:1px solid #F3D9AE;
+    border-radius:var(--r-md);padding:8px 10px;font-size:11.5px;color:#8A5300}
+
+  /* 右栏 */
+  .note{border:1px solid var(--line);border-radius:var(--r-md);padding:9px 10px;margin-bottom:9px;background:var(--inset)}
+  .note strong{display:block;font-size:11.5px;margin-bottom:5px}
+  .kv{display:flex;flex-direction:column;gap:4px}
+  .kv .r{display:flex;justify-content:space-between;font-size:11px;color:var(--muted-2)}
+  .kv .r b{font-weight:600}
+  .empty{color:var(--muted);font-size:11.5px}
+  .statusbar{display:flex;align-items:center;gap:8px;padding:8px 14px;border-top:1px solid var(--line);
+    background:var(--inset);font-size:11.5px;color:var(--muted)}
+  .statusbar b{color:var(--text)}
+
+  .annot{display:flex;gap:8px;align-items:flex-start;margin:10px 2px 0;font-size:11.5px;color:var(--muted-2)}
+  .annot .n{flex:none;width:16px;height:16px;border-radius:50%;background:var(--accent-soft);color:var(--accent-solid);
+    font-size:10.5px;font-weight:700;display:grid;place-items:center;margin-top:1px}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--muted);margin:0 2px 12px}
+  .legend span::before{content:"·";margin-right:5px;color:var(--accent)}
+  .screen{display:none}
+  .screen.on{display:block}
+  .kbd{font:11px/1 ui-monospace,Consolas,monospace;background:var(--surface-2);border:1px solid var(--line-strong);
+    border-bottom-width:2px;border-radius:4px;padding:1px 4px;color:var(--muted-2)}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="doc-head">
+    <h1>织书台 · 批次二 + 批次三 视觉方案</h1>
+    <span class="pill">评审稿 · 未改真实代码</span>
+    <p>上面四个标签：设定 → 大纲 → 章节 → 正文，点开看各自长什么样</p>
+  </div>
+
+  <div class="legend">
+    <span><b>阶段从三个变四个</b>：设定 → 大纲 → 章节 → 正文（原「正文」改名「章节」，右侧新增「正文」）</span>
+    <span>左栏按阶段变：设定=作品与版本（不要目录）· 大纲=设定汇总 · <b>章节=大纲汇总</b> · <b>正文=章节数量与字数限制+目录</b></span>
+    <span>大纲=几万字文字+分部；章节页=正文章节拆分+简述；正文页=单章编写</span>
+    <span>批次三：题材树 · 标签 20 · 风格 30 种 · 角色 9/99 + 10 字段 · 参考作品</span>
+  </div>
+
+  <div class="app">
+    <div class="app-top">
+      <h2>织书台</h2>
+      <span class="state">《雾港旧事》 · <span id="topStage">设定</span></span>
+      <span class="spacer"></span>
+      <button class="btn">管理记录</button>
+      <button class="btn">导入存档</button>
+      <button class="btn">作品</button>
+      <button class="btn">导出</button>
+      <button class="btn primary">新建作品</button>
+    </div>
+    <div class="stagebar">
+      <div class="stages" id="stages">
+        <button data-stage="setup" class="active">设定</button>
+        <button data-stage="outline">大纲</button>
+        <button data-stage="chapter">章节</button>
+        <button data-stage="draft">正文</button>
+      </div>
+      <span class="note" id="stageNote">先把书写明白，再按章写完</span>
+    </div>
+
+    <!-- ================= 设定 ================= -->
+    <section class="screen on" data-screen="setup">
+      <div class="cols">
+        <!-- 左：作品 + 设定版本（不再放章节目录） -->
+        <aside class="col">
+          <div class="col-head"><strong>作品</strong><small>设定版本</small></div>
+          <div class="body tight">
+            <div class="book">
+              <div class="book-top">
+                <div class="cover">雾</div>
+                <div><strong>雾港旧事</strong><small>都市悬疑 · 克制冷峻</small></div>
+              </div>
+              <div class="stats">
+                <div class="stat"><b>2</b><span>分卷</span></div>
+                <div class="stat"><b>148</b><span>章节</span></div>
+                <div class="stat"><b>39.2万</b><span>总字数</span></div>
+              </div>
+              <div class="prog"><span>进度</span><span class="bar"><i style="width:34%"></i></span><span>51 / 148</span></div>
+            </div>
+            <div class="group-label">设定版本</div>
+            <div class="list">
+              <div class="row active"><span class="dot done"></span><div><div class="t">v4 · 人工 · 刚刚</div><div class="m">书名、题材、角色有改动</div></div></div>
+              <div class="row"><span class="dot"></span><div><div class="t">v3 · AI 生成 · 22:10</div><div class="m">整套设定（六步）</div></div></div>
+              <div class="row"><span class="dot"></span><div><div class="t">v2 · 模板 · 21:48</div><div class="m">套用「港城悬疑」</div></div></div>
+            </div>
+            <div class="annot"><span class="n">1</span><div>设定阶段左栏只有<b>作品与设定版本</b>，不再挂一份跟正文抢位置的章节目录。</div></div>
+          </div>
+        </aside>
+
+        <!-- 中：设定表单 -->
+        <div class="col">
+          <div class="col-head"><strong>设定</strong><small>先告诉它你要写一本什么书</small></div>
+          <div class="body">
+            <div class="sec">
+              <div class="h"><strong>故事创意</strong><span class="tag">无字数上限</span><small>主要输入区：人、事、场景都可以写</small>
+                <span style="flex:1"></span>
+                <button class="btn tiny" style="white-space:nowrap">从模板套用（53 个）</button></div>
+              <div class="b">
+                <textarea class="hero">修船工陈砚在父亲留下的旧船里翻出一张二十年前的合影，照片上多了一个不该存在的人。
+他顺着照片找到港务局废弃的档案室，发现整座雾港的户籍在那一夜被重写过一遍。
+——想写成克制冷峻的都市悬疑，不靠血腥，靠「日常里少了一个人」的错位感。</textarea>
+                <div class="counters"><span>已输入 <b>128</b> 字</span><span>·</span><span>不再截断（原上限 2000）</span><span>·</span><span>从模板套用只填表单，点保存/生成才入库</span></div>
+              </div>
+            </div>
+
+            <div class="sec">
+              <div class="h"><strong>参考作品</strong><span class="tag">批次三新增</span><small>只学结构，不抄内容</small></div>
+              <div class="b">
+                <div class="grid2">
+                  <label class="field"><span class="label">作品名</span><input type="text" value="《长夜难明》"></label>
+                  <label class="field"><span class="label">参考维度</span>
+                    <div class="chips">
+                      <span class="chip on">故事背景</span><span class="chip on">世界观架构</span>
+                      <span class="chip on">叙事节奏</span><span class="chip">人物关系</span><span class="chip">语言风格</span>
+                    </div>
+                  </label>
+                </div>
+                <label class="field"><span class="label">怎么参考 <span class="hint">可留空，留空就按上面勾的维度走</span></span>
+                  <input type="text" value="学它「查案推进 + 每章一个旧账」的结构，不学案件本身"></label>
+                <div class="chips">
+                  <span class="chip add">+ 再加一本参考</span>
+                  <span class="chip">☑ 本作品同人（改写自己已有的书）</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="sec">
+              <div class="h"><strong>基本设定</strong><small>强正向提示词，生成后不轻易变动</small></div>
+              <div class="b">
+                <div class="grid2">
+                  <label class="field"><span class="label">书名</span><input type="text" value="雾港旧事"></label>
+                  <label class="field"><span class="label">基调</span><input type="text" value="克制冷峻，克制到近乎冷淡"></label>
+                </div>
+                <label class="field"><span class="label">雷区（负面提示词）<span class="tag" style="margin-left:6px">无字数上限</span></span>
+                  <textarea class="tall">不要血腥分尸描写；不要主角开挂式推理；不要女性角色只作被救对象；不要方言对白堆砌；不要出现真实城市名与真实案件。</textarea></label>
+                <label class="field"><span class="label">世界观</span>
+                  <textarea class="tall">雾港是一座靠修船业活着的港口小城，一年有 214 天大雾。1998 年港口改制后，一批人的户籍被「技术性注销」……</textarea></label>
+              </div>
+            </div>
+
+            <div class="sec">
+              <div class="h"><strong>题材</strong><span class="tag">树形选择</span><small>男频 17 类 / 女频 11 类，可再选二级</small></div>
+              <div class="b">
+                <div class="tree">
+                  <div class="tree-col">
+                    <strong>男生类</strong>
+                    <div class="tree-items">
+                      <span class="tag-btn">东方玄幻</span><span class="tag-btn">东方仙侠</span><span class="tag-btn">西方奇幻</span>
+                      <span class="tag-btn">西方魔幻</span><span class="tag-btn">传统武侠</span><span class="tag-btn on">都市</span>
+                      <span class="tag-btn sub on">悬疑</span><span class="tag-btn">现实</span><span class="tag-btn">历史（正）</span>
+                      <span class="tag-btn">历史（架空）</span><span class="tag-btn">军事</span><span class="tag-btn">游戏</span>
+                      <span class="tag-btn">体育</span><span class="tag-btn">科幻</span><span class="tag-btn">悬疑灵异</span>
+                      <span class="tag-btn">轻小说</span><span class="tag-btn">短篇</span><span class="tag-btn">诸天无限</span>
+                    </div>
+                  </div>
+                  <div class="tree-col">
+                    <strong>女生类</strong>
+                    <div class="tree-items">
+                      <span class="tag-btn">古代言情</span><span class="tag-btn">现代言情</span><span class="tag-btn">玄幻言情</span>
+                      <span class="tag-btn">悬疑推理</span><span class="tag-btn">浪漫青春</span><span class="tag-btn">仙侠奇缘</span>
+                      <span class="tag-btn">科幻空间</span><span class="tag-btn">游戏竞技</span><span class="tag-btn">轻小说</span>
+                      <span class="tag-btn">短篇</span><span class="tag-btn">现实生活</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="counters" style="margin-top:6px"><span>当前：<b>男生类 › 都市 › 悬疑</b></span><span>·</span><span>树里没有的写法可以点「自定义」打字（老作品原文保留）</span></div>
+              </div>
+            </div>
+
+            <div class="sec">
+              <div class="h"><strong>标签</strong><span class="tag">5 → 20</span><small>内置 144 个字库标签，可搜索</small></div>
+              <div class="b">
+                <input type="text" placeholder="搜索标签：刑侦 / 赛博朋克 / 权谋…" style="margin-bottom:8px">
+                <div class="chips">
+                  <span class="chip on">刑侦 ×</span><span class="chip on">权谋 ×</span><span class="chip on">群像 ×</span>
+                  <span class="chip on">年代 ×</span><span class="chip on">无系统 ×</span>
+                  <span class="chip">克苏鲁</span><span class="chip">赛博朋克</span><span class="chip">悬疑</span>
+                  <span class="chip">探案推理</span><span class="chip">硬科幻</span><span class="chip">末世</span>
+                  <span class="chip">民国</span><span class="chip">港娱</span><span class="chip">异能</span><span class="chip">养成</span>
+                  <span class="chip add">+ 展开 144 个</span>
+                </div>
+                <div class="counters"><span>已选 <b>5</b> / 20</span><span>·</span><span>选中项会直接进提示词，越多越容易把风格拉偏</span></div>
+              </div>
+            </div>
+
+            <div class="sec">
+              <div class="h"><strong>写作风格</strong><span class="tag">30 种</span><small>每种都带约束提示词，不是只换个名字</small></div>
+              <div class="b">
+                <label class="field"><span class="label">风格</span>
+                  <select>
+                    <option>硬汉派（冷硬派）— 语言简练冷峻，主角多为边缘侦探</option>
+                    <option>现实主义 / 浪漫主义 / 魔幻现实主义 / 意识流…</option>
+                  </select></label>
+                <div class="quote">当前风格约束：语言简练、冷峻，少形容词；对话承担信息量；暴力点到为止；主角不解释情绪，只写他做了什么。</div>
+              </div>
+            </div>
+
+            <div class="sec">
+              <div class="h"><strong>角色</strong><span class="tag">主角 ≤9 / 配角 ≤99</span><small>每个角色 10 个字段</small></div>
+              <div class="b">
+                <div class="chips" style="margin-bottom:9px">
+                  <span class="chip on">主角 2 / 9</span><span class="chip">配角 6 / 99</span><span class="chip add">+ 加主角</span><span class="chip add">+ 加配角</span>
+                </div>
+                <div class="counters" style="margin:-4px 0 9px"><span>「从模板套用」会连角色一起填好；也可以只加主角/配角，或单独用 AI 重跑角色</span></div>
+                <div class="char">
+                  <div class="char-head"><strong>陈砚</strong><span class="badge lead">主角</span><span class="spacer"></span>
+                    <button class="btn tiny">展开全部字段</button><button class="btn tiny">删除</button></div>
+                  <div class="char-body">
+                    <label><div class="mini">全名 / 别称</div><input type="text" value="陈砚 · 阿砚（港上人叫他）"></label>
+                    <label><div class="mini">年龄 / 出身</div><input type="text" value="34 · 修船工之子，港校辍学"></label>
+                    <label><div class="mini">身份</div><input type="text" value="雾港三号船坞修船工"></label>
+                    <label><div class="mini">服装</div><input type="text" value="油渍工装、右手常年缠胶布"></label>
+                    <label><div class="mini">性格</div><input type="text" value="沉默、记性好、认死理"></label>
+                    <label><div class="mini">声音</div><input type="text" value="低、慢、句尾下沉"></label>
+                    <label style="grid-column:1/-1"><div class="mini">人物介绍 / 关系网</div>
+                      <textarea rows="2">父亲陈守义 1998 年在港务局改制中「技术性注销」户籍。与档案员林蔓是旧识，互不信任但互为唯一信息来源。</textarea></label>
+                  </div>
+                </div>
+                <div class="char">
+                  <div class="char-head"><strong>林蔓</strong><span class="badge side">配角</span><span class="spacer"></span>
+                    <button class="btn tiny">展开全部字段</button><button class="btn tiny">删除</button></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="sec">
+              <div class="h"><strong>生成整套设定</strong><small>六步链：题材 → 书名 → 简介 → 世界观 → 角色 → 大纲</small></div>
+              <div class="b">
+                <div class="grid2">
+                  <label class="field"><span class="label">供应商</span><select><option>TE中转</option></select></label>
+                  <label class="field"><span class="label">模型</span><select><option>deepseek-v4.1-flash</option></select></label>
+                </div>
+                <div class="grid2">
+                  <label class="field"><span class="label">主角数量 <span class="hint">1–9</span></span><input type="text" value="2"></label>
+                  <label class="field"><span class="label">配角数量 <span class="hint">0–99</span></span><input type="text" value="6"></label>
+                </div>
+                <div class="chips"><span class="chip on">生成完自动跳到大纲</span><span class="chip">只重跑角色</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 右：预检 -->
+        <aside class="col">
+          <div class="col-head"><strong>这次会带上什么</strong><small>提交前先看</small></div>
+          <div class="body">
+            <div class="note"><strong>本次会带上</strong>
+              <div class="kv">
+                <div class="r"><span>故事创意</span><b>128 字</b></div>
+                <div class="r"><span>雷区</span><b>96 字</b></div>
+                <div class="r"><span>世界观</span><b>612 字 → 摘要 800</b></div>
+                <div class="r"><span>参考作品 ×1</span><b>3 个维度</b></div>
+                <div class="r"><span>题材 / 标签</span><b>都市›悬疑 · 5 个</b></div>
+                <div class="r"><span>角色</span><b>主角 2 / 配角 6</b></div>
+              </div>
+            </div>
+            <div class="note"><strong>预计输入</strong><div class="kv">
+              <div class="r"><span>tokens</span><b>≈ 3,180</b></div>
+              <div class="r"><span>模型</span><b>deepseek-v4.1-flash</b></div>
+              <div class="r"><span>状态</span><b style="color:var(--ok)">可以生成</b></div>
+            </div></div>
+            <div class="warnbox">标签从 5 放到 20 后，全部选满会让题材信号互相打架；建议 5–8 个。</div>
+          </div>
+        </aside>
+      </div>
+      <div class="statusbar"><span>状态</span><b>有未保存修改</b><span>·</span><span>设定按版本保存，旧版本随时切回</span></div>
+    </section>
+
+    <!-- ================= 大纲 ================= -->
+    <section class="screen" data-screen="outline">
+      <div class="cols">
+        <!-- 左：设定汇总（写大纲时看设定，不看章节） -->
+        <aside class="col">
+          <div class="col-head"><strong>设定汇总</strong><small>写大纲时对着看</small></div>
+          <div class="body tight">
+            <div class="note" style="margin-bottom:9px">
+              <strong>故事创意</strong>
+              <p style="margin:0;font-size:11.5px;color:var(--muted-2)">修船工陈砚在父亲旧船里翻出 1998 年的合影，照片上多出一个不该存在的人……</p>
+            </div>
+            <div class="note" style="margin-bottom:9px">
+              <strong>题材 / 风格</strong>
+              <div class="kv">
+                <div class="r"><span>题材</span><b>都市 › 悬疑</b></div>
+                <div class="r"><span>风格</span><b>硬汉派</b></div>
+                <div class="r"><span>基调</span><b>克制冷峻</b></div>
+                <div class="r"><span>标签</span><b>刑侦·权谋·群像·年代·无系统</b></div>
+              </div>
+            </div>
+            <div class="note" style="margin-bottom:9px">
+              <strong>角色（主角 2 / 配角 6）</strong>
+              <div class="kv">
+                <div class="r"><span>陈砚</span><b>修船工 · 主角</b></div>
+                <div class="r"><span>林蔓</span><b>档案员 · 主角</b></div>
+                <div class="r"><span>老周</span><b>退休同事 · 配角</b></div>
+                <div class="r"><span>还有 5 个配角</span><b>展开</b></div>
+              </div>
+            </div>
+            <div class="note"><strong>雷区</strong>
+              <p style="margin:0;font-size:11.5px;color:var(--muted-2)">不要血腥分尸；不要主角开挂推理；不要方言堆砌……</p>
+            </div>
+            <div class="group-label">大纲版本</div>
+            <div class="list">
+              <div class="row active"><span class="dot done"></span><div><div class="t">v2 · 人工 · 刚刚</div><div class="m">改了第一部第三章的走向</div></div></div>
+              <div class="row"><span class="dot"></span><div><div class="t">v1 · AI 生成 · 22:31</div><div class="m">2 部 · 13,600 字</div></div></div>
+            </div>
+            <div class="annot"><span class="n">2</span><div>大纲页左栏按批注改成<b>设定汇总</b>：写大纲时要看的是设定（创意/题材/角色/雷区），不是一列章节；<b>分部</b>挪到中栏顶部当标签。</div></div>
+          </div>
+        </aside>
+
+        <!-- 中：大纲文字 + 拆章 -->
+        <div class="col">
+          <div class="col-head"><strong>全书大纲</strong><small>这里只写「故事怎么走」，不写章节</small></div>
+          <div class="body">
+            <div class="parts">
+              <span class="part on">第 1 部 · 雾港</span>
+              <span class="part">第 2 部 · 归墟</span>
+              <span class="part" style="border-style:dashed;color:var(--muted)">+ 增加一部</span>
+            </div>
+
+            <div class="sec" style="margin-bottom:10px">
+              <div class="h"><strong>第一部 · 雾港</strong><small>自由文本，几万字也行</small>
+                <span class="tag" style="margin-left:auto">8,420 字</span></div>
+              <div class="b">
+                <textarea class="hero" style="min-height:280px">【主线】陈砚在父亲旧船里翻出 1998 年的合影，照片上多出一个人——港务局档案里这个人的户籍在 1998 年 9 月 14 日被「技术性注销」。
+【第一部目标】查清「照片上的第六个人是谁」，以及在改制中被注销户籍的那批人去了哪里。
+一、旧船与照片：陈砚修船时发现父亲藏在龙骨里的铁盒，照片背面有父亲的笔迹「别查」。
+二、档案室：林蔓带他进入已废弃的港务局档案室，1998 年 9 月的户籍册整册缺失，只剩一页复写纸。
+三、改制旧账：当年负责改制的会计已迁往外地，留下的账本显示有一笔「人员安置补偿」发给了不存在的人。
+四、第一次威胁：陈砚的车被撬，唯一被拿走的是那张合影。
+五、父亲的老同事：退休老周承认当年「有人让我们把那批人的名字划掉」，但不敢说是谁。
+六、转折：林蔓其实一直在替另一方查这批人的下落，她递给陈砚的档案是筛选过的。
+七、第一部结尾：陈砚在雾里看到第六个人——那人已经死了二十年，但户籍仍在更新。</textarea>
+                <div class="counters"><span>已写 <b>8,420</b> 字</span><span>·</span><span>目标 6,000–10,000 字</span><span>·</span><span>自动保存为草稿</span></div>
+              </div>
+            </div>
+
+            <div class="split" style="background:linear-gradient(180deg,#F7FBF9,#F2FAF6);border-color:#CFEDE2">
+              <h4>大纲写完了吗？</h4>
+              <p>下一步「按大纲拆出章节目录」在<b>章节页</b>做——在那里你能同时定章数、单章字数和结尾策略。大纲这里只管把故事讲清楚。</p>
+              <button class="btn primary">去章节页拆章 ›</button>
+            </div>
+
+            <div class="annot"><span class="n">3</span><div>「大纲章节数」这个说法在这里消失：<b>大纲是文字，章节是正文页拆出来的产物</b>。9999 不是一次生成——按批拆（每批 200 章），可中断可续。</div></div>
+          </div>
+        </div>
+
+        <aside class="col">
+          <div class="col-head"><strong>大纲概览</strong><small>2 部</small></div>
+          <div class="body">
+            <div class="note"><strong>体量</strong>
+              <div class="kv">
+                <div class="r"><span>第一部</span><b>8,420 字</b></div>
+                <div class="r"><span>第二部</span><b>5,180 字</b></div>
+                <div class="r"><span>合计</span><b>13,600 字</b></div>
+                <div class="r"><span>预计可拆</span><b>≈ 130–180 章</b></div>
+              </div>
+            </div>
+            <div class="note"><strong>本次会带上</strong><div class="kv">
+              <div class="r"><span>设定摘要</span><b>1,120 字</b></div>
+              <div class="r"><span>角色</span><b>主角 2 / 配角 6</b></div>
+              <div class="r"><span>参考作品</span><b>1 本 · 3 维度</b></div>
+            </div></div>
+            <div class="warnbox">几万字的大纲一次生成会超窗口：超过 12,000 字时按部生成，一部一部补。</div>
+          </div>
+        </aside>
+      </div>
+      <div class="statusbar"><span>状态</span><b>已保存</b><span>·</span><span>大纲按版本保存；拆章只改章节目录，不动已有正文</span></div>
+    </section>
+
+    <!-- ================= 章节（新阶段） ================= -->
+    <section class="screen" data-screen="chapter">
+      <div class="cols">
+        <!-- 左：大纲汇总（图4 批注） -->
+        <aside class="col">
+          <div class="col-head"><strong>大纲汇总</strong><small>拆章时对着看</small></div>
+          <div class="body tight">
+            <div class="parts" style="margin-bottom:8px">
+              <span class="part on">第 1 部 · 雾港</span>
+              <span class="part">第 2 部 · 归墟</span>
+            </div>
+            <div class="quote" style="max-height:520px;overflow:auto">
+              <b>【主线】</b>陈砚在父亲旧船里翻出 1998 年的合影，照片上多出一个人——港务局档案里这个人的户籍在 1998 年 9 月 14 日被「技术性注销」。<br><br>
+              <b>【第 1 部目标】</b>查清「照片上的第六个人是谁」，以及改制中被注销户籍的那批人去了哪里。<br><br>
+              一、旧船与照片：陈砚修船时发现父亲藏在龙骨里的铁盒，照片背面有父亲的笔迹「别查」。<br>
+              二、档案室：林蔓带他进入已废弃的港务局档案室，1998 年 9 月的户籍册整册缺失，只剩一页复写纸。<br>
+              三、改制旧账：当年负责改制的会计已迁往外地，留下的账本显示有一笔「人员安置补偿」发给了不存在的人。<br>
+              四、第一次威胁：陈砚的车被撬，唯一被拿走的是那张合影。<br>
+              五、父亲的老同事：退休老周承认当年「有人让我们把那批人的名字划掉」。<br>
+              六、转折：林蔓其实一直在替另一方查这批人的下落。<br>
+              七、第一部结尾：陈砚在雾里看到第六个人——那人已经死了二十年，户籍却仍在更新。
+            </div>
+            <div class="counters" style="margin-top:6px"><span>第一部 <b>8,420</b> 字</span><span>·</span><span>要改大纲去「大纲」页</span></div>
+            <div class="annot"><span class="n">4</span><div>图4（<b>章节页面</b>）：左侧栏 = <b>大纲汇总</b>——拆章时能一边看大纲原文一边对章。</div></div>
+          </div>
+        </aside>
+
+        <!-- 中：正文章节拆分 + 章节简述（图4 批注） -->
+        <div class="col">
+          <div class="col-head"><strong>正文章节拆分</strong><small>拆多少章、每章多长、结尾怎么收</small></div>
+          <div class="body">
+            <div class="split">
+              <div class="metrics">
+                <div class="metric"><b>148</b><span>当前章节（全书）</span></div>
+                <div class="metric"><b>96 / 52</b><span>第一部 / 第二部</span></div>
+                <div class="metric"><b>9,999</b><span>上限</span></div>
+              </div>
+              <label class="field"><span class="label">正式作品要拆分多少章
+                <span class="hint">按部拆时只算当前部</span></span>
+                <input type="text" value="150">
+              </label>
+              <div class="presets">
+                <span class="preset">30</span><span class="preset on">150</span><span class="preset">300</span>
+                <span class="preset">1000</span><span class="preset">3000</span><span class="preset">9999</span>
+              </div>
+              <label class="field"><span class="label">单章作品字数限制</span>
+                <div class="chips"><span class="chip">2000</span><span class="chip on">3000</span><span class="chip">4000</span><span class="chip">不限</span></div>
+              </label>
+              <label class="field"><span class="label">章节结尾</span>
+                <div class="chips"><span class="chip on">留悬念</span><span class="chip">自然收</span><span class="chip">留钩子+预告</span></div>
+              </label>
+              <div class="chips" style="margin-bottom:10px">
+                <span class="chip on">只拆第 1 部（96 章）</span><span class="chip">全书两卷一起拆</span>
+                <span class="chip">按现有章节补拆（保留已有正文）</span>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center">
+                <button class="btn primary">开始拆分</button>
+                <button class="btn">预览拆分结果</button>
+                <span style="font-size:11px;color:var(--muted)">上一批：第 1–96 章 · 22:36 完成</span>
+              </div>
+            </div>
+
+            <div class="sec" style="margin-top:12px">
+              <div class="h"><strong>章节简述</strong><small>拆分结果，逐行可改；点章号跳正文</small>
+                <span class="tag" style="margin-left:auto">第 1 部 · 96 章</span></div>
+              <div class="b" style="padding:0">
+                <div class="list" style="padding:8px">
+                  <div class="row"><span class="no">1</span><div style="flex:1"><div class="t">归港的旧船</div>
+                    <div class="m">陈砚在修船时发现父亲藏在龙骨里的铁盒，盒里是一张 1998 年的合影。</div></div></div>
+                  <div class="row"><span class="no">2</span><div style="flex:1"><div class="t">照片上的第六个人</div>
+                    <div class="m">他数了三遍：那天去合影的是五个人，照片上却有六个人。背面写着「别查」。</div></div></div>
+                  <div class="row"><span class="no">3</span><div style="flex:1"><div class="t">技术性注销</div>
+                    <div class="m">林蔓调出户籍档案：第六个人的名字在 1998 年 9 月 14 日被「技术性注销」。</div></div></div>
+                  <div class="row"><span class="no">4</span><div style="flex:1"><div class="t">复写纸上的名字</div>
+                    <div class="m">档案室整册缺失，只剩一页复写纸，上面是七个被划掉的名字。</div></div></div>
+                </div>
+                <div class="pager"><span>‹</span><span><b>1</b> / 10 页 · 每页 4 条</span><span>›</span></div>
+              </div>
+            </div>
+            <div class="annot"><span class="n">5</span><div>图4：中栏是「<b>正文章节拆分以及简述</b>」——上面定拆多少章 / 单章字数 / 结尾留悬念，下面是逐章简述。</div></div>
+          </div>
+        </div>
+
+        <aside class="col">
+          <div class="col-head"><strong>拆分进度</strong><small>可中断</small></div>
+          <div class="body">
+            <div class="note"><strong>第 1 部 · 已拆 96 / 100</strong>
+              <div class="kv">
+                <div class="r"><span>第 1–50 章</span><b style="color:var(--ok)">完成</b></div>
+                <div class="r"><span>第 51–96 章</span><b style="color:var(--ok)">完成</b></div>
+                <div class="r"><span>第 97–100 章</span><b style="color:var(--warn)">排队中</b></div>
+              </div>
+            </div>
+            <div class="note"><strong>本次会带上</strong><div class="kv">
+              <div class="r"><span>第一部大纲</span><b>8,420 字</b></div>
+              <div class="r"><span>设定摘要</span><b>1,120 字</b></div>
+              <div class="r"><span>角色</span><b>主角 2 / 配角 6</b></div>
+            </div></div>
+            <button class="btn" style="width:100%">取消本批</button>
+            <div class="warnbox" style="margin-top:10px">9,999 章不是一次生成：按批拆（200 章/批），可中断、可续拆。</div>
+          </div>
+        </aside>
+      </div>
+      <div class="statusbar"><span>状态</span><b>已保存</b><span>·</span><span>拆分只改章节目录与简述，不动已有正文</span></div>
+    </section>
+
+    <!-- ================= 正文（第四个阶段） ================= -->
+    <section class="screen" data-screen="draft">
+      <div class="cols">
+        <aside class="col">
+          <div class="col-head"><strong>目录</strong><small>章节数量与字数限制</small></div>
+          <div class="body tight">
+            <div class="note" style="margin-bottom:8px">
+              <strong>设定好的章节数量与字数限制</strong>
+              <div class="kv">
+                <div class="r"><span>章节数量</span><b>148 章</b></div>
+                <div class="r"><span>单章字数</span><b>≤ 3,000 字</b></div>
+                <div class="r"><span>结尾策略</span><b>留悬念</b></div>
+              </div>
+            </div>
+            <div class="group-label">第一部 · 雾港（96 章）</div>
+            <div class="list">
+              <div class="row"><span class="dot done"></span><span class="no">1</span><div><div class="t">归港的旧船</div><div class="m">3,120 字 · 已成稿</div></div></div>
+              <div class="row active"><span class="dot done"></span><span class="no">2</span><div><div class="t">照片上的第六个人</div><div class="m">2,880 字 · 已成稿</div></div></div>
+              <div class="row"><span class="dot run"></span><span class="no">3</span><div><div class="t">技术性注销</div><div class="m">生成中 · 第 2/4 段</div></div></div>
+              <div class="row"><span class="dot"></span><span class="no">4</span><div><div class="t">复写纸上的名字</div><div class="m">待写 · 梗概已有</div></div></div>
+            </div>
+            <div class="pager"><span>‹</span><span><b>1</b> / 10 页 · 每页 10 章</span><span>›</span></div>
+            <div class="annot"><span class="n">6</span><div>图5（<b>正文页面</b>）：左侧栏 = <b>设定好的章节数量以及章节字数限制</b>，下面接目录选章。</div></div>
+          </div>
+        </aside>
+
+        <div class="col">
+          <div class="col-head"><strong>单章编写 · 第2章 照片上的第六个人</strong><small>梗概：陈砚在铁盒里找到合影，背面写着「别查」</small></div>
+          <div class="body">
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+              <span style="font-size:11.5px;color:var(--muted)">2,880 字 / 上限 3,000</span>
+              <span style="flex:1"></span>
+              <span class="chip">3 个版本</span>
+              <button class="btn tiny">恢复旧版</button>
+              <button class="btn tiny">上一章</button>
+              <button class="btn tiny">下一章</button>
+            </div>
+            <textarea style="min-height:470px">雨是从四点四十分开始下的。陈砚把扳手丢进工具箱，抬头看了一眼天。
+
+雾比雨先到。港口的灯被雾吞掉一半，只剩下一圈发白的边。他蹲在船坞里，手指顺着龙骨的接缝摸过去，摸到一处不该有的凸起。
+
+铁盒比手掌小一点，锈得厉害，晃一晃，里面有东西在响。
+
+盒盖撬开的时候，掉出来一张照片。边角被水泡过，人像已经有点发糊，但还能看清——六个人站在港务局门口，父亲在正中间，右手搭在一个陌生人的肩上。
+
+他数了三遍。父亲说过，那天去合影的是五个人。……</textarea>
+            <div class="counters" style="margin-top:6px">
+              <span>已写 <b>2,880</b> 字</span><span>·</span><span>未保存修改 12 字</span><span>·</span><span>超上限只提示，不硬截断</span>
+            </div>
+            <div class="chips" style="margin-top:8px"><span class="chip on">保存</span><span class="chip">放弃修改</span><span class="chip">续写到底部</span><span class="chip">整章重写</span></div>
+            <div class="annot"><span class="n">7</span><div>图5：中栏 = <b>单章编写</b>，只放写作区与版本；拆分与参数都在「章节」页。</div></div>
+          </div>
+        </div>
+
+        <aside class="col">
+          <div class="col-head"><strong>说明</strong><small>这次带上了什么</small></div>
+          <div class="body">
+            <div class="note"><strong>本次会带上</strong><div class="kv">
+              <div class="r"><span>设定摘要</span><b>612 字</b></div>
+              <div class="r"><span>上一章结尾</span><b>400 字</b></div>
+              <div class="r"><span>本章梗概</span><b>120 字</b></div>
+              <div class="r"><span>所属分卷</span><b>第一部 · 雾港</b></div>
+            </div></div>
+            <div class="note"><strong>章节信息</strong><div class="kv">
+              <div class="r"><span>章号</span><b>第 2 章 / 全书 148</b></div>
+              <div class="r"><span>分卷</span><b>第 1 部</b></div>
+              <div class="r"><span>版本</span><b>v3（当前）</b></div>
+              <div class="r"><span>结尾策略</span><b>留悬念</b></div>
+            </div></div>
+          </div>
+        </aside>
+      </div>
+      <div class="statusbar"><span>状态</span><b>已打开</b><span>·</span><span>正文按章逐版本保存，旧稿永不原地改写</span></div>
+    </section>
+  </div>
+
+  <p style="font-size:11.5px;color:var(--muted);margin:14px 2px 0">
+    依据（按你口述逐条对齐，5 张图）<br>
+    图1：没有红字——说的是<b>切换页面丢状态</b>（已由批次一修掉）。<br>
+    图2：左边红框=<b>不要目录</b>；右中栏=<b>设定界面，应该全是设定内容</b>。<br>
+    图3：大纲页——左侧栏=<b>设定汇总</b>；中栏靠上=<b>大纲设定，几万字，分几部作品</b>；中栏靠下=<b>章节大纲：单部作品大纲、多部作品大纲，几万字的文字展示即可</b>。<br>
+    图4：<b>章节页面</b>——左侧栏=<b>大纲汇总</b>；中栏=<b>正文章节拆分以及简述，可以选择正式作品要拆分多少章作品，单章作品有字数限制，章节结尾选择留有悬念</b>。<br>
+    图5：<b>正文页面</b>——上排改成<b>设定 / 大纲 / 章节 / 正文</b>；左侧栏=<b>设定好的章节数量以及章节字数限制</b>；中栏=<b>单章编写</b>。<br>
+  </p>
+</div>
+
+<script>
+  const notes = {
+    setup: '先把书写明白，再按章写完',
+    outline: '大纲只写走向，几万字也行；分几部就在这里定',
+    chapter: '先按大纲拆出章节目录，再定这一章怎么生',
+    draft: '写正文时自动带上设定摘要与前文衔接'
+  };
+  const topNames = { setup: '设定', outline: '大纲', chapter: '章节', draft: '正文' };
+  document.getElementById('stages').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-stage]');
+    if (!btn) return;
+    const stage = btn.dataset.stage;
+    document.querySelectorAll('#stages button').forEach((b) => b.classList.toggle('active', b === btn));
+    document.querySelectorAll('.screen').forEach((s) => s.classList.toggle('on', s.dataset.screen === stage));
+    document.getElementById('stageNote').textContent = notes[stage];
+    document.getElementById('topStage').textContent = topNames[stage];
+  });
+</script>
+</body>
+</html>

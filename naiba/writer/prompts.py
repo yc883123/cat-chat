@@ -24,7 +24,9 @@ from naiba.writer.store import WriterStoreError
 # 六步自动链：题材 → 书名 → 简介 → 世界观 → 角色 → 大纲（与启元 NV.start() 同序；
 # 大纲是第 6 步，落大纲版本并同步章节索引）。
 SETUP_STEPS: tuple[str, ...] = ("genre", "title", "blurb", "world", "chars", "outline")
-ALL_STEPS: tuple[str, ...] = (*SETUP_STEPS, "segs", "draft")
+# 3.9.13 起「大纲」不再等于章节表：大纲是一整篇文字（可分部），章节由独立的 split 步拆出来。
+TEXT_STEPS: tuple[str, ...] = ("outline_text", "split")
+ALL_STEPS: tuple[str, ...] = (*SETUP_STEPS, *TEXT_STEPS, "segs", "draft")
 
 STEP_LABELS = {
     "genre": "题材推断",
@@ -33,13 +35,27 @@ STEP_LABELS = {
     "world": "世界观设定",
     "chars": "角色设定",
     "outline": "章节大纲",
+    "outline_text": "全篇大纲",
+    "split": "拆章",
     "segs": "段落要点",
     "draft": "正文",
 }
 
 CHARS_MIN, CHARS_MAX = 1, 10
+# 旧的「大纲=章节表」上限，只服务于老 kind（outline）的兼容路径。
 OUTLINE_MIN, OUTLINE_MAX = 5, 30
 SEGS_MIN, SEGS_MAX = 2, 4
+# 分部大纲：部数 1–20，每部正文上限 20 万字符（"几万字"够用，再大必然超窗口）。
+PARTS_MIN, PARTS_MAX = 1, 20
+PART_TEXT_MAX = 200_000
+# 拆章：一部最多 9999 章；单批最多 200 章。
+SPLIT_MIN, SPLIT_MAX = 1, 9999
+SPLIT_BATCH_MAX = 200
+# 单章字数限制的合法取值（0 = 不限）。
+CHAPTER_CHARS_CHOICES = (0, 2000, 3000, 4000, 6000)
+# 章节结尾策略。
+ENDING_CHOICES = ("suspense", "natural", "hook")
+ENDING_LABELS = {"suspense": "留悬念", "natural": "自然收", "hook": "留钩子+预告"}
 
 # ---- 写作风格约束（整理自启元 NV.stylePrompt，逐字保留） ----
 
@@ -62,6 +78,37 @@ STYLE_PRESETS = {
     "sus": ("悬疑烧脑",
             "【悬疑烧脑】每 2—3 章埋一个伏笔，章末必留钩子，信息释放有节奏，"
             "关键真相延迟到后段揭晓。"),
+    # ---- 3.9.13：按反馈补到 30 种（统一模板 + 每风格 2–3 句差异） ----
+    "realism": ("现实主义", "客观冷静地写日常，细节要真，社会现状与人物处境比情节反转更重要；不美化也不煽情。"),
+    "romance": ("浪漫主义", "情感与想象优先，允许理想化与英雄气；自然景物可以承载情绪，但别写成散文。"),
+    "magic_real": ("魔幻现实主义", "把神奇事件当日常写：超自然现象不做解释、不惊讶，人物照常过日子。"),
+    "stream": ("意识流", "贴着人物内心走，允许跳跃与重复，时间可不线性；但每段仍要有一个可抓的动作或物件。"),
+    "black_humor": ("黑色幽默", "用荒诞与反讽讲严肃甚至悲惨的事，语调冷静；不解释笑点，让读者自己品。"),
+    "gothic": ("哥特式", "阴郁、神秘、衰败氛围；古堡旧宅、雾、旧物、传闻；恐怖来自不安而非血腥。"),
+    "hardboiled": ("硬汉派（冷硬派）", "语言简练冷峻，短句多；主角多为边缘人，靠行动推进；暴力点到为止，情绪不外露。"),
+    "minimal": ("极简主义", "文字精炼，省略背景与解释；靠对话和动作暗示，留白多，忌形容词堆砌。"),
+    "baroque": ("巴洛克式", "辞藻华丽、句式繁复、感官描写密集；但每段仍要推进情节，不能只有装饰。"),
+    "existential": ("存在主义", "写人的孤独、自由与选择，带思辨；允许人物自省，但不写成论文。"),
+    "satire": ("讽刺主义", "用夸张与反语揭短，语调可诙谐可尖锐；讽刺对象要具体，不空喊。"),
+    "naturalism": ("自然主义", "比现实主义更冷：环境与出身决定命运，底层生活不粉饰；不安排廉价的转机。"),
+    "epic": ("史诗风格", "格局大、时间跨度长，涉族群与历史命运；叙事庄重，忌轻佻调侃。"),
+    "pastoral": ("田园牧歌", "乡村的宁静与秩序，四季与劳作入景；冲突来自人心与外部世界的侵入，节奏舒缓。"),
+    "thriller": ("悬疑惊悚", "每段留一个问题，节奏快；信息分批给，忌一次解释完；恐惧来自未知而非血腥。"),
+    "cyberpunk": ("赛博朋克", "高科技低生活，霓虹与潮湿的街；技术异化人，身份可被改写；术语密度适中。"),
+    "steampunk": ("蒸汽朋克", "维多利亚美学 + 蒸汽机械；齿轮、黄铜、飞艇；技术设定自洽，别混入电力魔法。"),
+    "wuxia": ("武侠风格", "江湖义气与门派规矩；打斗写招式与分寸，不写能量条；语言半文半白，意境留白。"),
+    "xianxia": ("仙侠风格", "道门与修真体系，境界与代价要对得上；语言飘逸，忌现代口语与网络梗。"),
+    "lightnovel": ("轻小说风格", "语言轻快，内心独白多，角色个性鲜明；段落短、对白多，严肃处也要收着写。"),
+    "epistolary": ("书信体 / 日记体", "用信件、日记、记录推进叙事；主观视角，允许不可靠叙述，时间可跳跃。"),
+    "metafiction": ("元小说", "作者身份可进入文本，讨论创作本身；但故事仍要能读下去，不能只剩炫技。"),
+    "postmodern": ("后现代主义", "碎片化、拼贴、戏仿；消解单一意义，允许断裂结构，但要给读者可跟随的线索。"),
+    "new_sensation": ("新感觉派", "重主观感受与新奇比喻，抓瞬间印象与城市节奏；语言敏感，忌陈词。"),
+    "local": ("乡土文学", "扎根特定地域，方言与风俗克制使用；人情与土地的重量大于情节爽感。"),
+    "hard_sf": ("科幻硬核", "严格遵循已知科学，技术细节要能自圆其说；推演优先于奇观，术语首次出现要解释。"),
+    "space_opera": ("太空歌剧", "宇宙尺度 + 冒险浪漫，科学不必精确；重戏剧冲突与阵营对立，场面要大。"),
+    "aesthetic": ("唯美主义", "追求形式与感官之美，语言精致；情节可以为意境让路，但不写成空转抒情。"),
+    "absurd": ("荒诞派", "人与世界的疏离，情节不合逻辑，对话答非所问；荒诞之下要有真实的痛感。"),
+    "webnovel": ("网络爽文", "节奏极快，三章内给第一个爽点；主角成长与逆袭清晰，章末必留钩子；语言直白。"),
 }
 
 
@@ -113,13 +160,24 @@ def _characters_text(setup: dict[str, Any], *, limit: int = CHARS_SLOT_CHARS,
                      count: int = CHARS_SLOT_COUNT) -> str:
     rows = [row for row in (setup.get("characters") or []) if isinstance(row, dict)
             and str(row.get("name") or "").strip()]
+    # 主角先带（占比有限），配角按数组顺序补足。
+    rows.sort(key=lambda row: 0 if str(row.get("role") or "") == "lead" else 1)
     lines = []
     for row in rows[:count]:
         role = str(row.get("role") or "").strip()
+        role_text = {"lead": "主角", "side": "配角"}.get(role, role)
         identity = str(row.get("identity") or "").strip()
         goal = str(row.get("goal") or "").strip()
-        line = f"{row['name']}" + (f"（{role}）" if role else "")
-        detail = "；".join(bit for bit in (identity, goal) if bit)
+        age = str(row.get("age") or "").strip()
+        origin = str(row.get("origin") or "").strip()
+        personality = str(row.get("personality") or row.get("traits") or "").strip()
+        relations = str(row.get("relations") or "").strip()
+        voice = str(row.get("voice") or row.get("speech") or "").strip()
+        line = f"{row['name']}" + (f"（{role_text}）" if role_text else "")
+        detail = "；".join(bit for bit in (
+            identity, f"{age} 岁" if age else "", origin, personality,
+            f"关系：{relations}" if relations else "", f"说话：{voice}" if voice else "", goal,
+        ) if bit)
         if detail:
             line += f"：{detail}"
         lines.append(line)
@@ -149,6 +207,21 @@ def _constraints_block(setup: dict[str, Any], *, include_style: bool = True) -> 
         blocks.append(f"【参考气质】{vibe}")
     if avoid:
         blocks.append(f"【回避项】{avoid}")
+    refs = [row for row in (setup.get("references") or []) if isinstance(row, dict)
+            and str(row.get("title") or "").strip()]
+    if refs:
+        lines = []
+        for row in refs:
+            dims = "、".join(str(dim) for dim in (row.get("dims") or []) if str(dim).strip())
+            note = str(row.get("note") or "").strip()
+            same = "（本作品同人）" if row.get("same_fanfic") else ""
+            bit = f"《{row['title']}》{same}"
+            if dims:
+                bit += f"：只参考{dims}"
+            if note:
+                bit += f"；{note}"
+            lines.append(bit)
+        blocks.append("【参考作品】（只学结构与手法，不抄情节与文字）\n" + "\n".join(lines))
     return ("\n\n".join(blocks) + "\n") if blocks else ""
 
 
@@ -197,6 +270,17 @@ STEP_SYSTEM = {
         '{"chapters":[{"no":1,"title":"第一章 标题","beat":"本章爽点/兑付点","hook":"章末钩子"}]}\n'
         "title 必须以「第X章」开头；爽点密度每章至少一个；"
         "章末钩子八式轮换（悬念/期待/危机/反转/情感/代价/信息/挑衅），同式不得连续使用。"
+    ),
+    "outline_text": (
+        "你是网文大纲策划师。按创作提示词、世界观与角色，写这一「部」的整篇大纲（不要分章、不要 JSON）：\n"
+        "用「主线 / 本部目标 / 阶段推进（一、二、三…）/ 关键转折 / 结尾落点」组织，允许长句叙事；\n"
+        "目标是让人读完就知道故事怎么走，不写逐章条目，也不要写正文对白。\n"
+        "直接输出大纲正文。"
+    ),
+    "split": (
+        "你是网文章节拆分师。把给定的大纲正文拆成章节目录，输出 JSON 对象：\n"
+        '{"chapters":[{"no":1,"title":"第1章 标题","beat":"本章发生什么（80—150字）","hook":"章末钩子"}]}\n'
+        "严格按大纲顺序推进，不跳过、不重复、不编造大纲之外的重大情节；章标题不超过 20 字。"
     ),
     "segs": (
         "你是网文章节策划。把一章的梗概拆成 2—4 个段落要点，输出 JSON 数组："
@@ -261,6 +345,92 @@ def build_step_user(step: str, setup: dict[str, Any], *, char_count: int = 4,
     elif step == "outline":
         parts.append(f"请输出 {chapter_count} 章大纲（JSON 对象）。")
     return "\n\n".join(parts)
+
+
+# ---- 分部大纲与拆章（3.9.13） ----
+
+
+def build_outline_text_user(setup: dict[str, Any], *, part_no: int = 1,
+                            part_title: str = "", target_chars: int = 8000,
+                            extra_note: str = "") -> str:
+    """整篇大纲的用户消息：**不要 JSON**，只要一段能读的大纲文字（按部）。"""
+    parts = [f"【创作提示词】\n{idea_text(setup)}"]
+    if str(setup.get("worldview") or "").strip():
+        parts.append(f"【世界观摘要】\n{_worldview_text(setup, limit=1200)}")
+    chars_text = _characters_text(setup, limit=800, count=CHARS_SLOT_COUNT)
+    has_chars = any(isinstance(r, dict) and str(r.get("name") or "").strip()
+                    for r in (setup.get("characters") or []))
+    if has_chars:
+        parts.append(f"【角色】\n{chars_text}")
+    title = str(setup.get("title") or "").strip()
+    if title:
+        parts.append(f"【书名】{title}")
+    blurb = str(setup.get("blurb") or "").strip()
+    if blurb:
+        parts.append(f"【简介】\n{blurb[:600]}")
+    label = f"第 {part_no} 部" + (f" · {part_title}" if part_title else "")
+    parts.append(f"【本部】{label}；目标篇幅约 {int(target_chars or 8000)} 字")
+    if extra_note.strip():
+        parts.append(f"【补充要求】\n{extra_note.strip()[:500]}")
+    style_block = _constraints_block(setup)
+    if style_block:
+        parts.append(style_block.rstrip())
+    parts.append("请直接输出这一部的大纲正文（不要 JSON、不要逐章罗列）。")
+    return "\n\n".join(parts)
+
+
+def parse_outline_text(text: str, *, limit: int = PART_TEXT_MAX) -> str:
+    """整篇大纲：只去围栏、不解析结构；空结果如实失败。"""
+    raw = str(text or "").strip()
+    if not raw:
+        raise PromptError("模型没有返回大纲内容")
+    fence = _FENCE_PATTERN.match(raw)
+    body = fence.group(1).strip() if fence else raw
+    if not body:
+        raise PromptError("模型返回的大纲为空")
+    if len(body) > limit:
+        raise PromptError(f"大纲超过 {limit} 字符上限；请拆成多部或精简后重试")
+    return body
+
+
+def build_split_user(setup: dict[str, Any], *, part_text: str, want_count: int,
+                     from_no: int = 1, part_label: str = "",
+                     extra_note: str = "") -> str:
+    """拆章的用户消息：给定这一部的大纲正文，按顺序拆出 want_count 章。"""
+    parts = [f"【大纲正文】{('· ' + part_label) if part_label else ''}\n{part_text}"]
+    if str(setup.get("worldview") or "").strip():
+        parts.append(f"【世界观摘要】\n{_worldview_text(setup, limit=600)}")
+    parts.append(f"【本次任务】从第 {int(from_no)} 章开始，拆 {int(want_count)} 章")
+    if extra_note.strip():
+        parts.append(f"【补充要求】\n{extra_note.strip()[:300]}")
+    parts.append('请输出 JSON：{"chapters":[{"no":%d,"title":"第%d章 …","beat":"…","hook":"…"}]}'
+                 % (int(from_no), int(from_no)))
+    return "\n\n".join(parts)
+
+
+def parse_split(text: str, *, from_no: int = 1, want_count: int = 1) -> list[dict[str, Any]]:
+    """拆章结果：允许少于 want_count（一批拆不完可以续），但一条都没有就失败。"""
+    payload = extract_json_payload(text)
+    rows_raw = payload.get("chapters") if isinstance(payload, dict) else payload
+    if not isinstance(rows_raw, list):
+        raise PromptError("拆章结果必须是含 chapters 数组的 JSON 对象")
+    rows: list[dict[str, Any]] = []
+    for item in rows_raw:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        rows.append({
+            "title": title[:200],
+            "beat": str(item.get("beat") or "").strip()[:2000],
+            "hook": str(item.get("hook") or "").strip()[:500],
+        })
+    if not rows:
+        raise PromptError("拆章结果没有任何章节；请重试或换模型")
+    if len(rows) > want_count:
+        rows = rows[:want_count]
+    return [{"no": int(from_no) + index, **row} for index, row in enumerate(rows)]
 
 
 # ---- 正文写作的上下文 ----

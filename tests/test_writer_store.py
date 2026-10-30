@@ -101,7 +101,10 @@ class SetupVersionTests(WriterStoreTestCase):
         })
         characters = payload["setup"]["characters"]
         self.assertEqual([row["name"] for row in characters], ["张三", "纯字符串角色"])
-        self.assertEqual(len(payload["setup"]["genre_tags"]), 5)
+        # 3.9.13 起标签上限 5 → 20（反馈「五个太少」）。
+        self.assertEqual(len(payload["setup"]["genre_tags"]), 6)
+        # 角色分区：写了「主角」→ lead；纯字符串角色没写角色 → 默认补主角。
+        self.assertEqual([row["role"] for row in characters], ["lead", "lead"])
 
     def test_revision_conflict_rejected(self):
         book = self._book()

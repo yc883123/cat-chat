@@ -1583,6 +1583,13 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(*self.app.novel.api_update_chapter(book_id, chapter_no, body))
             return
         # ---- 织书台（原创写作） ----
+        if path.startswith("/api/writer/books/") and "/chapters/" in path and path.endswith("/meta"):
+            # 只改章节标题/简述/钩子（章节页逐行编辑），不动正文版本。
+            head, _, rest = path.partition("/chapters/")
+            book_id = head[len("/api/writer/books/"):]
+            self._json(*self.app.writer.api_update_chapter_meta(
+                book_id, rest[: -len("/meta")], body))
+            return
         if path.startswith("/api/writer/books/") and "/chapters/" in path:
             head, _, chapter_no = path.partition("/chapters/")
             book_id = head[len("/api/writer/books/"):]

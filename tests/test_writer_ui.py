@@ -123,9 +123,29 @@ class WriterPageStructureTests(unittest.TestCase):
         """切阶段/切页丢内容的根因是渲染函数无条件重填：守卫必须写在渲染入口。"""
         js = (ROOT / "public" / "js" / "27-writer.js").read_text(encoding="utf-8")
         self.assertIn('if (writer.stage === "setup" && !writer.setupDirty) fillSetupForm();', js)
-        self.assertIn("outlineDirty", js, "大纲列表也要有 dirty 标记")
+        self.assertIn("partsDirty", js, "分部大纲也要有 dirty 标记")
         self.assertIn("applyWriterDraft", js, "刷新/重启后能用按书存的草稿恢复")
         self.assertIn("keepEdits: unsaved", js, "进页时把没保存的修改带上")
+
+    def test_four_stages_and_side_by_stage(self):
+        """批次二：阶段从三个变四个（设定/大纲/章节/正文），左栏按阶段切换。"""
+        js = (ROOT / "public" / "js" / "27-writer.js").read_text(encoding="utf-8")
+        self.assertIn('["setup", "outline", "chapter", "draft"]', js, "四个阶段的白名单")
+        self.assertIn("function renderSide()", js)
+        for side in ("setup", "outline", "chapter", "draft"):
+            self.assertIn(f'data-writer-side="{side}"', self.page, f"左栏 {side}")
+        for panel in ("writerSetupPanel", "writerOutlinePanel", "writerChapterPanel", "writerDraftPanel"):
+            self.assertIn(f'id="{panel}"', self.page)
+        self.assertIn('data-writer-stage="chapter"', self.page)
+
+    def test_outline_is_text_not_chapters(self):
+        """大纲是分部文字；章节由拆章产出（页面不再有「大纲章节数」滑条）。"""
+        js = (ROOT / "public" / "js" / "27-writer.js").read_text(encoding="utf-8")
+        self.assertIn("function renderParts()", js)
+        self.assertIn("outline_text", js, "整篇大纲走 outline_text 流水线")
+        self.assertIn('submitPipeline("split"', js, "章节页提交拆章")
+        self.assertIn('id="writerOutlineText"', self.page)
+        self.assertNotIn('id="writerOutlineChapterCount"', self.page, "大纲章节数已删除")
 
     def test_export_goes_through_backend_and_native_save(self):
         """exe 里 <a download> 会被 pywebview 静默取消（ALLOW_DOWNLOADS 默认 False）：

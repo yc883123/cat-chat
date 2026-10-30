@@ -34,13 +34,16 @@ from naiba.writer.store import (
 
 # 流水线 kind：整套设定 / 单步设定 / 大纲 / 整章 / 分段 / 续写 / 重写。
 PIPELINE_KINDS = (
-    "setup_all", "setup_step", "outline",
+    "setup_all", "setup_step", "outline", "outline_text", "split",
     "chapter", "chapter_segs", "chapter_continue", "chapter_rewrite",
 )
 # 各 kind 的步骤序列（segs → draft 两步；draft 复用 Studio chunked 顺序生成各段）。
 KIND_STEPS = {
     "setup_all": tuple(prompts.SETUP_STEPS),
     "outline": ("outline",),
+    # 3.9.13：整篇大纲（按部）与拆章各是一条单步流水线，互不耦合。
+    "outline_text": ("outline_text",),
+    "split": ("split",),
     "chapter": ("draft",),
     "chapter_segs": ("segs", "draft"),
     "chapter_continue": ("draft",),
@@ -107,6 +110,8 @@ class WriterPipelineManager:
                        char_count: int = 4, chapter_count: int = 10,
                        setup_version_id: str = "", outline_version_id: str = "",
                        extra_note: str = "", allow_drop: bool = False,
+                       part_no: int = 0, part_title: str = "", target_chars: int = 0,
+                       want_count: int = 0, from_no: int = 0,
                        base_revision: Any = None, chapter_revision: Any = None) -> dict[str, Any]:
         """创建并启动一条流水线：快照固化全部输入，重试不因页面当前选择变化而换料。"""
         if kind not in PIPELINE_KINDS:
@@ -134,7 +139,7 @@ class WriterPipelineManager:
                 setup = self.store.load_setup(book_id, manifest=manifest, version_id=setup_version_id)
             except (LookupError, WriterStoreError):
                 setup = None
-        if steps[0] in ("segs", "draft", "outline") and not setup:
+        if steps[0] in ("segs", "draft", "outline", "outline_text", "split") and not setup:
             raise WriterPipelineError("请先生成或保存设定，再生成大纲与正文")
         # 设定链的起点是创意：已保存设定里没有创意时，模型只能编出「未提供创意/未指定」
         # 这类占位结果，白烧 token 还落一版垃圾（真实反馈）。在排队前如实拒绝。
@@ -159,6 +164,21 @@ class WriterPipelineManager:
             chapter_revision = None
         char_count = self._clamp(int(char_count or 4), prompts.CHARS_MIN, prompts.CHARS_MAX, 4)
         chapter_count = self._clamp(int(chapter_count or 10), prompts.OUTLINE_MIN, prompts.OUTLINE_MAX, 10)
+        # 拆分参数：只在 outline_text / split 有意义，其余 kind 归一成 0。
+        part_no = int(part_no or 0)
+        target_chars = int(target_chars or 0)
+        want_count = int(want_count or 0)
+        from_no = int(from_no or 0)
+        if kind == "outline_text":
+            if part_no < 1:
+                raise WriterPipelineError("请指定要生成第几部的大纲")
+            target_chars = self._clamp(target_chars or 8000, 1000, 60000, 8000)
+        if kind == "split":
+            if want_count < 1:
+                raise WriterPipelineError("请指定要拆多少章")
+            want_count = self._clamp(want_count, prompts.SPLIT_MIN, prompts.SPLIT_BATCH_MAX,
+                                     prompts.SPLIT_BATCH_MAX)
+            from_no = max(1, from_no or 1)
         book_title = str(manifest.get("title") or "未命名作品")
         snapshot = {
             "kind": kind,
@@ -169,6 +189,11 @@ class WriterPipelineManager:
             "model_name": str(model_name or "").strip(),
             "char_count": char_count,
             "chapter_count": chapter_count,
+            "part_no": part_no,
+            "part_title": str(part_title or "")[:80],
+            "target_chars": target_chars,
+            "want_count": want_count,
+            "from_no": from_no,
             "setup_version_id": setup_version_id,
             "outline_version_id": outline_version_id,
             "extra_note": str(extra_note or "")[:500],
@@ -430,6 +455,14 @@ class WriterPipelineManager:
             return prompts.parse_characters(result, wanted=int(snapshot.get("char_count") or 4))
         if step == "outline":
             return prompts.parse_outline(result, wanted=int(snapshot.get("chapter_count") or 10))
+        if step == "outline_text":
+            return prompts.parse_outline_text(result)
+        if step == "split":
+            return prompts.parse_split(
+                result,
+                from_no=int(snapshot.get("from_no") or 1),
+                want_count=int(snapshot.get("want_count") or 10),
+            )
         if step == "segs":
             return prompts.parse_segs(result)
         if step == "draft":
@@ -479,7 +512,8 @@ class WriterPipelineManager:
                     )
             # ---- 条件 5：写回本步成果（每步成功才落盘；失败保留前序成果） ----
             if output is not None:
-                if step in ("genre", "title", "blurb", "world", "chars", "outline"):
+                if step in ("genre", "title", "blurb", "world", "chars", "outline",
+                            "outline_text", "split"):
                     self._apply_setup_or_outline_step(book_id, record, step, output, task_id)
                 elif step == "segs":
                     outputs = dict(record.get("step_outputs") or {})
@@ -518,6 +552,36 @@ class WriterPipelineManager:
                 book_id, chapters=output, kind="generated", task_id=task_id,
                 source_setup_version_id=str(source.get("setup") or ""),
                 sync=True, allow_drop=bool(snapshot.get("allow_drop")),
+            )
+            return
+        if step == "outline_text":
+            # 只替换这一部，其它部原样保留（多部作品一部一部补）。
+            source = record.get("source_version_ids") if isinstance(record.get("source_version_ids"), dict) else {}
+            part_no = int(snapshot.get("part_no") or 1)
+            current = self.store.load_outline(book_id)
+            by_no: dict[int, dict[str, Any]] = {}
+            for row in current.get("parts") or []:
+                if isinstance(row, dict) and str(row.get("text") or "").strip():
+                    by_no[int(row.get("no") or 0)] = {
+                        "no": int(row.get("no") or 0),
+                        "title": str(row.get("title") or ""),
+                        "text": str(row.get("text") or ""),
+                    }
+            title = str(snapshot.get("part_title") or "").strip() or (
+                by_no.get(part_no, {}).get("title") or f"第 {part_no} 部")
+            by_no[part_no] = {"no": part_no, "title": title, "text": str(output)}
+            # 补齐中间空部（先生成第 2 部时第 1 部留空占位，保证部号连续）。
+            filled: list[dict[str, Any]] = []
+            for no in range(1, max(by_no) + 1):
+                filled.append(by_no.get(no) or {"no": no, "title": f"第 {no} 部", "text": ""})
+            self.store.save_outline(
+                book_id, parts=filled, kind="generated", task_id=task_id,
+                source_setup_version_id=str(source.get("setup") or ""),
+            )
+            return
+        if step == "split":
+            self.store.append_chapters(
+                book_id, output, part_no=int(snapshot.get("part_no") or 0),
             )
             return
         merged = self._accumulated_setup(book_id, record)
@@ -577,7 +641,42 @@ class WriterPipelineManager:
         chapter_no = int(snapshot.get("chapter_no") or 0)
         system_text = prompts.step_system(step)
         chunked: dict[str, Any] | None = None
-        if step in ("genre", "title", "blurb", "world", "chars", "outline"):
+        if step == "outline_text":
+            setup = self._accumulated_setup(book_id, pipeline)
+            part_no = int(snapshot.get("part_no") or 1)
+            content = prompts.build_outline_text_user(
+                setup,
+                part_no=part_no,
+                part_title=str(snapshot.get("part_title") or ""),
+                target_chars=int(snapshot.get("target_chars") or 8000),
+                extra_note=extra_note,
+            )
+            task_title = f"《{book_title}》· 第 {part_no} 部大纲"
+        elif step == "split":
+            setup = self.store.load_setup(
+                book_id, version_id=str(snapshot.get("setup_version_id") or ""))
+            outline = self.store.load_outline(book_id)
+            part_no = int(snapshot.get("part_no") or 1)
+            part = next((row for row in (outline.get("parts") or [])
+                         if isinstance(row, dict) and int(row.get("no") or 0) == part_no), None)
+            part_text = str((part or {}).get("text") or "").strip()
+            if not part_text:
+                # 老作品（逐章大纲）也能拆：把章节标题+梗概拼成一段文字喂进去。
+                legacy = [row for row in (outline.get("chapters") or []) if isinstance(row, dict)]
+                part_text = "\n".join(
+                    f"第{row.get('no')}章 {row.get('title')}：{row.get('beat')}" for row in legacy
+                ).strip()
+            if not part_text:
+                raise WriterPipelineError("这一部还没有大纲内容，先生成或填写大纲再拆章")
+            from_no = int(snapshot.get("from_no") or 1)
+            want_count = int(snapshot.get("want_count") or 10)
+            content = prompts.build_split_user(
+                setup, part_text=part_text, want_count=want_count, from_no=from_no,
+                part_label=f"第 {part_no} 部" if part_no else "",
+                extra_note=extra_note,
+            )
+            task_title = f"《{book_title}》· 拆章（第 {from_no} 章起 {want_count} 章）"
+        elif step in ("genre", "title", "blurb", "world", "chars", "outline"):
             setup = self._accumulated_setup(book_id, pipeline)
             content = prompts.build_step_user(
                 step, setup,

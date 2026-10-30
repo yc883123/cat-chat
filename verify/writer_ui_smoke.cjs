@@ -147,7 +147,7 @@ async function runViewport(browser, vp) {
   currentBookId = BOOK_ID;
   const errors = [];
   const checks = [];
-  const recorded = { pipelines: [], setups: [], cancels: 0, exports: 0, creates: 0, commits: 0, settingsPosts: 0, exportPosts: [] };
+  const recorded = { pipelines: [], setups: [], parts: [], plans: [], cancels: 0, exports: 0, creates: 0, commits: 0, settingsPosts: 0, exportPosts: [] };
   const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height } });
   page.on('pageerror', (err) => errors.push(`pageerror: ${err.message}`));
   page.on('console', (msg) => {
@@ -191,6 +191,14 @@ async function runViewport(browser, vp) {
     if (method === 'DELETE') return route.fulfill(json({ ok: true }));
     if (method === 'PATCH') {
       const body = JSON.parse(route.request().postData() || '{}');
+      if ('parts' in body) {
+        recorded.parts.push(body.parts || []);
+        return route.fulfill(json({ book: FAKE_BOOK_MANIFEST, outline_version_id: 'ol-parts', parts_count: (body.parts || []).length }));
+      }
+      if ('chapter_plan' in body) {
+        recorded.plans.push(body.chapter_plan || {});
+        return route.fulfill(json({ book: { ...FAKE_BOOK_MANIFEST, chapter_plan: body.chapter_plan }, chapter_plan: body.chapter_plan }));
+      }
       if ('outline' in body) {
         return route.fulfill(json({ book: FAKE_BOOK_MANIFEST, outline_version_id: 'ol-new', synced_chapter_ids: [1, 2] }));
       }
@@ -264,6 +272,14 @@ async function runViewport(browser, vp) {
   });
   await page.route('**/api/writer/books/wb-*/versions/select', (route) => route.fulfill(json({ book: FAKE_BOOK_MANIFEST })));
   await page.route('**/api/writer/books/wb-*/sync', (route) => route.fulfill(json({ book: FAKE_BOOK_MANIFEST, chapter_ids: [1, 2] })));
+  await page.route('**/api/writer/books/wb-*/chapters/*/meta', (route) => {
+    const body = JSON.parse(route.request().postData() || '{}');
+    const no = Number(route.request().url().match(/chapters\/(\d+)\/meta/)?.[1] || 1);
+    return route.fulfill(json({
+      book: FAKE_BOOK_MANIFEST,
+      chapter: { no, title: body.title ?? FAKE_CHAPTERS[0].title, beat: body.beat ?? FAKE_CHAPTERS[0].beat, hook: '' },
+    }));
+  });
   await page.route('**/api/writer/books/wb-*/chapters/*', (route) => {
     if (route.request().method() === 'PATCH') {
       return route.fulfill(json({ chapter_no: 1, version: { id: 'cv-new', version: 2, kind: 'manual', updated_at: 1750000700000, task_id: '', len: 100, finish_reason: '' }, duplicate: false, chapter_revision: 3 }), 201);
@@ -393,9 +409,9 @@ async function runViewport(browser, vp) {
     check('书名候选芯片可见', await page.isVisible('#writerTitleCandidates'));
     await page.click('#writerSetupGenerate');
     await page.waitForTimeout(500);
-    check('生成整套设定提交 kind=setup_all（含角色数/章节数）',
+    check('生成整套设定提交 kind=setup_all（含主角数/拆章目标）',
       recorded.pipelines.length === 1 && recorded.pipelines[0].kind === 'setup_all'
-      && Number(recorded.pipelines[0].char_count) === 4 && Number(recorded.pipelines[0].chapter_count) === 12,
+      && Number(recorded.pipelines[0].char_count) === 2 && Number(recorded.pipelines[0].chapter_count) === 30,
       JSON.stringify(recorded.pipelines[0] || {}));
     // 生成进度区在右栏（手机上是「说明」档）：进度相关断言先切到那个档。
     const gotoNotesPane = async () => {
@@ -434,32 +450,43 @@ async function runViewport(browser, vp) {
     pipelineState = 'none';
     await backToEditorPane();
 
-    // 5) 大纲阶段
+    // 5) 大纲阶段：新模型是「分部文字」，老数据（逐章大纲）走只读 + 升级入口
     await page.click('[data-writer-stage="outline"]');
     await page.waitForTimeout(300);
-    check('大纲列表渲染 2 章', (await page.$$eval('#writerOutlineList .writer-outline-item', (els) => els.length)) === 2);
+    check('大纲页左栏切成「设定汇总」', (await page.$$eval('[data-writer-side]',
+      (els) => els.filter((e) => !e.hidden).map((e) => e.dataset.writerSide))).join() === 'outline');
+    check('老作品的逐章大纲只读展示 + 升级入口可见',
+      await page.isVisible('#writerLegacyOutlineGroup')
+      && (await page.$$eval('#writerLegacyOutlineList .writer-outline-item', (els) => els.length)) === 2
+      && await page.isVisible('#writerOutlineUpgrade'));
     check('大纲版本下拉有历史版本', (await page.$$eval('#writerOutlineVersion option', (els) => els.length)) >= 1);
+    check('大纲页提供「去章节页拆章」', await page.isVisible('#writerGotoChapter'));
 
-    // 5b) 「允许删除已被移出大纲的章节」复选框必须真的进请求体（以前勾了等于没勾）
-    check('不勾复选框时请求体不带 allow_drop', !('allow_drop' in (recorded.pipelines[0] || {})),
-      JSON.stringify(recorded.pipelines[0] || {}));
-    const pipelinesBeforeDrop = recorded.pipelines.length;
-    await page.check('#writerOutlineAllowDrop');
-    await page.click('#writerOutlineGenerate');
-    await page.waitForTimeout(500);
-    const dropBody = recorded.pipelines.at(-1) || {};
-    check('勾选后生成大纲的请求体带 allow_drop=true',
-      recorded.pipelines.length === pipelinesBeforeDrop + 1 && dropBody.kind === 'outline'
-      && dropBody.allow_drop === true,
-      JSON.stringify(dropBody));
-    await page.uncheck('#writerOutlineAllowDrop');
-    // 这一步只为拿请求体：立刻收回运行态，否则后面所有 submitPipeline 都会被「已有生成在跑」拦住。
-    await gotoNotesPane();
-    await page.click('#writerPipelineCancel');
-    await page.waitForTimeout(400);
-    await backToEditorPane();
+    // 5b) 写一段分部大纲 → 切走再回来不丢（DOM 优先于服务端快照）
+    const typedOutline = '第一部主线：陈砚查照片上的第六个人。';
+    await page.fill('#writerOutlineText', typedOutline);
+    await page.waitForTimeout(250);
+    await page.click('[data-writer-stage="setup"]');
+    await page.waitForTimeout(200);
+    await page.click('[data-writer-stage="outline"]');
+    await page.waitForTimeout(250);
+    check('切阶段后分部大纲草稿还在',
+      (await page.inputValue('#writerOutlineText')) === typedOutline, await page.inputValue('#writerOutlineText'));
 
-    // 6) 正文阶段：点目录第一章 → 内容与版本（手机先切「作品」档才能点到目录）
+    // 5c) 章节页：拆分卡与章节简述
+    await page.click('[data-writer-stage="chapter"]');
+    await page.waitForTimeout(300);
+    check('章节页左栏切成「大纲汇总」', (await page.$$eval('[data-writer-side]',
+      (els) => els.filter((e) => !e.hidden).map((e) => e.dataset.writerSide))).join() === 'chapter');
+    check('章节页有拆分卡与章节简述',
+      await page.isVisible('#writerSplitCount') && await page.isVisible('#writerChapterChars')
+      && await page.isVisible('#writerChapterEnding') && (await page.$$eval('#writerBriefList .writer-brief-row',
+        (els) => els.length)) === 2);
+    check('拆分卡默认带出章节计划', (await page.inputValue('#writerChapterChars')) === '0');
+
+    // 6) 正文阶段：先切到「正文」（目录只在正文页可见），再点目录第一章
+    await page.click('[data-writer-stage="draft"]');
+    await page.waitForTimeout(350);
     if (isMobile) {
       await page.click('[data-writer-pane="book"]');
       await page.waitForTimeout(250);
@@ -502,7 +529,7 @@ async function runViewport(browser, vp) {
     // 7c) 草稿暂存（本轮三件之一）：改设定/大纲后切阶段、切功能页都不许归零。
     // 这一段的 dirty 状态必须在下一步「导入存档」之前收尾——openBook 换书会强制清脏。
     const typedIdea = '修船工在雾港捡到一封写给自己的信';
-    const beatSel = '#writerOutlineList [data-writer-outline-beat]';
+    const typedPart = '第二部主线：陈砚去了归墟港，发现户籍册的另一半。';
     await page.fill('#writerIdea', typedIdea);
     await page.click('[data-writer-stage="outline"]');
     await page.waitForTimeout(250);
@@ -514,12 +541,12 @@ async function runViewport(browser, vp) {
 
     await page.click('[data-writer-stage="outline"]');
     await page.waitForTimeout(250);
-    await page.fill(beatSel, '他决定查清这封信是谁写的');
-    await page.click('[data-writer-stage="draft"]');
+    await page.fill('#writerOutlineText', typedPart);
+    await page.click('[data-writer-stage="chapter"]');
     await page.waitForTimeout(250);
     await page.click('[data-writer-stage="outline"]');
     await page.waitForTimeout(250);
-    check('切阶段后大纲梗概改动还在', (await page.inputValue(beatSel)).includes('查清这封信'));
+    check('切阶段后大纲文字改动还在', (await page.inputValue('#writerOutlineText')).includes('归墟港'));
 
     // 切到别的功能页再回来：进页会重新 openBook，keepEdits/keepStage 必须把草稿与阶段留住。
     if (isMobile) {
@@ -547,11 +574,11 @@ async function runViewport(browser, vp) {
     const afterSwitch = await page.evaluate(() => ({
       stage: document.querySelector('[data-writer-stage].active')?.dataset.writerStage,
       idea: document.querySelector('#writerIdea')?.value,
-      beat: document.querySelector('#writerOutlineList [data-writer-outline-beat]')?.value,
+      beat: document.querySelector('#writerOutlineText')?.value,
     }));
     check('切功能页再回来，设定草稿还在', afterSwitch.idea === typedIdea, afterSwitch.idea);
-    check('切功能页再回来，大纲梗概还在（且回到大纲阶段）',
-      String(afterSwitch.beat || '').includes('查清这封信') && afterSwitch.stage === 'outline',
+    check('切功能页再回来，大纲文字还在（且回到大纲阶段）',
+      String(afterSwitch.beat || '').includes('归墟港') && afterSwitch.stage === 'outline',
       JSON.stringify(afterSwitch));
 
     // 8) 导入存档（两段式）

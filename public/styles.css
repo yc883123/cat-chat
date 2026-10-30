@@ -5452,6 +5452,123 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .writer-placeholder strong { display: block; font-size: 13px; margin-bottom: 4px; }
 .writer-placeholder p { margin: 0; font-size: 11.5px; line-height: 1.7; color: var(--muted); }
 
+/* ---- 左栏：按阶段切换的四块 ---- */
+/* 每块自带列布局；[hidden] 必须显式压掉 display:flex（原生 hidden 打不过它）。 */
+.writer-side { display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0; }
+.writer-side[hidden] { display: none; }
+.writer-version-list { display: flex; flex-direction: column; gap: 6px; }
+.writer-version-row {
+  display: flex; flex-direction: column; gap: 2px; text-align: left;
+  padding: 7px 9px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--surface); cursor: pointer;
+}
+.writer-version-row:hover { border-color: var(--violet-line); background: var(--accent-soft); }
+.writer-version-row.active { border-color: var(--accent-solid); background: var(--accent-soft); }
+.writer-version-row strong { font-size: 12px; }
+.writer-version-row small { font-size: 10.5px; color: var(--muted); }
+.writer-summary { display: flex; flex-direction: column; gap: 8px; }
+.writer-summary-row {
+  display: flex; gap: 8px; margin: 0; font-size: 11.5px; line-height: 1.6;
+  padding-bottom: 7px; border-bottom: 1px dashed var(--line);
+}
+.writer-summary-row span { flex: none; width: 42px; color: var(--muted); }
+.writer-summary-row b { font-weight: 500; color: var(--text); word-break: break-word; }
+.writer-outline-view { display: flex; flex-direction: column; gap: 10px; }
+.writer-outline-part { display: flex; flex-direction: column; gap: 4px; }
+.writer-outline-part strong { font-size: 11.5px; color: var(--accent-solid); }
+.writer-outline-part-text {
+  font-size: 11.5px; line-height: 1.75; color: var(--muted-strong, var(--text));
+  white-space: pre-wrap; word-break: break-word;
+}
+.writer-outline-legacy { margin: 0 0 6px; font-size: 11px; line-height: 1.6; color: var(--muted); }
+.writer-toc-limits {
+  flex: none; margin: 0 -12px; padding: 6px 12px; font-size: 11px; color: var(--muted);
+  background: var(--surface-2); border-bottom: 1px solid var(--line);
+}
+
+/* ---- 设定：题材树 / 标签 / 参考作品 / 角色分区 ---- */
+.writer-genre-picker { display: flex; flex-direction: column; gap: 8px; }
+.writer-genre-col { border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; }
+.writer-genre-col.active { border-color: var(--violet-line); }
+.writer-genre-channel {
+  display: block; width: 100%; text-align: left; padding: 6px 9px; border: 0;
+  background: var(--surface-2); color: var(--muted-strong, var(--text));
+  font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.writer-genre-col.active .writer-genre-channel { background: var(--accent-soft); color: var(--accent-solid); }
+.writer-genre-cats { display: flex; flex-wrap: wrap; gap: 5px; padding: 8px; }
+.writer-genre-cat, .writer-genre-sub {
+  padding: 3px 9px; border: 1px solid var(--line-strong); border-radius: var(--r-full);
+  background: var(--surface); color: var(--muted); font-size: 11.5px; cursor: pointer;
+}
+.writer-genre-cat:hover, .writer-genre-sub:hover { border-color: var(--violet-line); color: var(--text); }
+.writer-genre-cat.active, .writer-genre-sub.active {
+  border-color: var(--accent-solid); background: var(--accent-solid); color: #fff; font-weight: 600;
+}
+.writer-genre-subs { display: flex; flex-wrap: wrap; gap: 5px; }
+
+.writer-tag-box { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 6px; max-height: 168px; overflow-y: auto; }
+.writer-tag {
+  padding: 3px 9px; border: 1px solid var(--line-strong); border-radius: var(--r-full);
+  background: var(--surface); color: var(--muted); font-size: 11.5px; cursor: pointer;
+}
+.writer-tag:hover { border-color: var(--violet-line); color: var(--text); }
+.writer-tag.on { border-color: var(--accent-solid); background: var(--accent-soft); color: var(--accent-solid); font-weight: 600; }
+
+.writer-ref-list { display: flex; flex-direction: column; gap: 8px; }
+.writer-ref { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 8px; }
+.writer-ref-head { display: flex; gap: 6px; align-items: center; }
+.writer-ref-head input { flex: 1; min-width: 0; }
+.writer-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.writer-chip {
+  padding: 2px 8px; border: 1px solid var(--line-strong); border-radius: var(--r-full);
+  background: var(--surface); color: var(--muted); font-size: 11px; cursor: pointer;
+}
+.writer-chip.on { border-color: var(--accent-solid); background: var(--accent-soft); color: var(--accent-solid); font-weight: 600; }
+
+.writer-char-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
+.writer-char-tab {
+  padding: 5px 12px; border: 1px solid var(--line-strong); border-radius: var(--r-full);
+  background: var(--surface); color: var(--muted); font-size: 12px; cursor: pointer;
+}
+.writer-char-tab.active { border-color: var(--accent-solid); background: var(--accent-soft); color: var(--accent-solid); font-weight: 600; }
+.writer-char-tab b { font-weight: 700; margin-left: 4px; }
+.writer-char-badge {
+  flex: none; padding: 1px 7px; border-radius: var(--r-full); font-size: 10.5px; font-weight: 700;
+}
+.writer-char-badge.lead { background: var(--accent-soft); color: var(--accent-solid); }
+.writer-char-badge.side { background: var(--surface-2); color: var(--muted); }
+.writer-char-card[hidden] { display: none; }
+.writer-char-more[hidden] { display: none; }
+
+/* ---- 大纲：部标签 + 章节拆分 + 简述 ---- */
+.writer-parts { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.writer-parts[hidden] { display: none; }
+.writer-part {
+  padding: 5px 12px; border: 1px solid var(--line-strong); border-radius: var(--r-full);
+  background: var(--surface); color: var(--muted); font-size: 12px; cursor: pointer;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.writer-part:hover { border-color: var(--violet-line); color: var(--text); }
+.writer-part.active {
+  border-color: var(--accent-solid); background: var(--accent-soft); color: var(--accent-solid); font-weight: 600;
+}
+.writer-brief-list { display: flex; flex-direction: column; gap: 8px; }
+.writer-brief-row {
+  display: flex; flex-direction: column; gap: 4px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); padding: 7px 9px;
+}
+.writer-brief-head { display: flex; align-items: center; gap: 8px; }
+.writer-brief-no {
+  flex: none; padding: 2px 6px; border: 1px solid var(--line-strong); border-radius: var(--r-xs);
+  background: var(--surface-2); color: var(--muted); font-size: 11px; cursor: pointer;
+}
+.writer-brief-no:hover { border-color: var(--accent-solid); color: var(--accent-solid); }
+.writer-brief-head input { flex: 1; min-width: 0; }
+.writer-brief-row textarea { width: 100%; font-size: 11.5px; line-height: 1.6; }
+.writer-outline-item.readonly { cursor: default; }
+.writer-outline-item.readonly strong { font-size: 12px; }
+
 /* ---- 左栏：作品摘要 + 目录 ---- */
 .writer-book-summary { flex: none; display: grid; gap: 8px; }
 .writer-book-title { display: flex; align-items: center; gap: 8px; min-width: 0; }

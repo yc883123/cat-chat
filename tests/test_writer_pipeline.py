@@ -115,6 +115,21 @@ class PipelineTestCase(unittest.TestCase):
 
 
 class SetupChainTests(PipelineTestCase):
+    def setUp(self):
+        super().setUp()
+        # 设定链的起点是已保存设定里的创意（空创意在排队前会被如实拒绝：
+        # 「请先在『设定 → 故事创意』里写一句话…」）——这里按真实使用先存一版。
+        self.store.save_setup(self.book_id, content={"idea": "一句话创意"}, kind="manual")
+
+    def test_empty_idea_refused_before_queue(self):
+        """空创意的设定链在排队前拒绝，不白烧 token 换占位结果（真实反馈的回归锁）。"""
+        fresh = self.store.create_book(title="没有创意")
+        with self.assertRaises(Exception) as ctx:
+            self.manager.start_pipeline(
+                fresh["id"], kind="setup_all", model_key="online:probe", model_name="probe")
+        self.assertIn("创意", str(ctx.exception))
+        self.assertIsNone(self.store.get_active_pipeline(fresh["id"]))
+
     def test_six_steps_advance_in_order_and_write_versions(self):
         pipeline = self.start()
         self.assertEqual(pipeline["steps"], list(prompts.SETUP_STEPS))
@@ -152,8 +167,8 @@ class SetupChainTests(PipelineTestCase):
         self.assertEqual(record["status"], "done")
         # 每步都落了设定版本；大纲步落大纲版本并同步章节。
         detail = self.store.get_book(self.book_id)
-        # 设定五步各落一份设定版本；大纲步落大纲版本。
-        self.assertEqual(len(detail["book"]["setup_versions"]), 5)
+        # 种子 1 版 + 设定五步各落一份设定版本；大纲步落大纲版本。
+        self.assertEqual(len(detail["book"]["setup_versions"]), 6)
         self.assertEqual(len(detail["book"]["outline_versions"]), 1)
         self.assertEqual([row["no"] for row in detail["chapters"]], [1, 2, 3, 4, 5])
         setup = detail["setup"]
@@ -182,9 +197,9 @@ class SetupChainTests(PipelineTestCase):
         record = self.current_pipeline()
         self.assertEqual(record["status"], "failed")
         self.assertIn("JSON", record["error"])
-        # 前序成果保留：第 1 步的设定版本在。
+        # 前序成果保留：种子版 + 第 1 步的设定版本都在。
         detail = self.store.get_book(self.book_id)
-        self.assertEqual(len(detail["book"]["setup_versions"]), 1)
+        self.assertEqual(len(detail["book"]["setup_versions"]), 2)
         self.assertEqual(detail["setup"]["genre"]["cat"], "玄幻")
 
     def test_non_done_task_stops_with_real_status(self):
@@ -208,7 +223,8 @@ class SetupChainTests(PipelineTestCase):
         self.tick()
         self.assertEqual(self.current_pipeline()["status"], "failed")
         detail = self.store.get_book(self.book_id)
-        self.assertEqual(len(detail["book"]["setup_versions"]), 0)
+        # 只有种子版；被伪造的任务结果没有写回。
+        self.assertEqual(len(detail["book"]["setup_versions"]), 1)
 
     def test_cancel_stops_chain_and_late_result_ignored(self):
         self.start()
@@ -221,7 +237,7 @@ class SetupChainTests(PipelineTestCase):
         self.app.studio.jobs.finish(task_id, '{"channel":"male","cat":"玄幻"}')
         self.tick()
         self.assertEqual(self.current_pipeline()["status"], "cancelled")
-        self.assertEqual(len(self.store.get_book(self.book_id)["book"]["setup_versions"]), 0)
+        self.assertEqual(len(self.store.get_book(self.book_id)["book"]["setup_versions"]), 1)
         self.assertEqual(len(self.app.studio.jobs.submitted), 1, "取消后不得提交下一步")
 
     def test_retry_resubmits_failed_step_only(self):
@@ -248,7 +264,7 @@ class SetupChainTests(PipelineTestCase):
         self.app.studio.jobs.finish(second_task, '["书名"]')
         self.tick()
         self.assertEqual(self.current_pipeline()["step_index"], 1)
-        self.assertEqual(len(self.store.get_book(self.book_id)["book"]["setup_versions"]), 1)
+        self.assertEqual(len(self.store.get_book(self.book_id)["book"]["setup_versions"]), 2)
 
     def test_retry_requires_rebase_for_conflict(self):
         self.start()

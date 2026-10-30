@@ -141,9 +141,13 @@ const VIEWPORTS = [
 ];
 
 async function runViewport(browser, vp) {
+  // 每轮视口都从干净状态开始：pipelineState/currentBookId 是模块级变量，
+  // 桌面轮结束时它们是 running/成品 id，会污染手机轮注入的「作品详情」。
+  pipelineState = 'none';
+  currentBookId = BOOK_ID;
   const errors = [];
   const checks = [];
-  const recorded = { pipelines: [], cancels: 0, exports: 0, creates: 0, commits: 0, settingsPosts: 0 };
+  const recorded = { pipelines: [], setups: [], cancels: 0, exports: 0, creates: 0, commits: 0, settingsPosts: 0 };
   const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height } });
   page.on('pageerror', (err) => errors.push(`pageerror: ${err.message}`));
   page.on('console', (msg) => {
@@ -190,6 +194,7 @@ async function runViewport(browser, vp) {
       if ('outline' in body) {
         return route.fulfill(json({ book: FAKE_BOOK_MANIFEST, outline_version_id: 'ol-new', synced_chapter_ids: [1, 2] }));
       }
+      if ('setup' in body) recorded.setups.push(body.setup || {});
       return route.fulfill(json({ book: FAKE_BOOK_MANIFEST, setup: FAKE_SETUP, setup_version_id: 'su-new' }));
     }
     return route.fulfill(json(FAKE_BOOK_DETAIL()));
@@ -296,6 +301,9 @@ async function runViewport(browser, vp) {
       await page.click('#onboardingDialog [data-close="onboardingDialog"]');
       await page.waitForTimeout(400);
     }
+    // 清掉上一轮视口留下的「最近打开作品」记录：桌面跑完会把它写进 localStorage，
+    // 手机轮打开织书台时会自动去读这本旧书，与脚本随后新建作品的 openBook 竞态。
+    await page.evaluate(() => { try { localStorage.removeItem('naibaWriterLastBookId'); } catch (_e) { /* ignore */ } });
     // 手机先进抽屉才点得到侧栏入口；桌面侧栏常驻。
     // 注意：上一轮桌面跑会把「工作台」视图偏好写进隔离实例的 settings，
     // 手机这轮冷启动就停在工作台态 —— 汉堡按钮要用工作台自己的 #studioOpenSidebar。
@@ -434,6 +442,16 @@ async function runViewport(browser, vp) {
     await page.click('#writerTplApply');
     await page.waitForTimeout(300);
     check('套用模板把创意写进表单', (await page.inputValue('#writerIdea')) !== ideaBefore);
+
+    // 7b) 套用模板后直接点生成：先把表单里的创意自动存成一版，再提交流水线
+    //（真实反馈的回归锁：以前不先存，服务端拿空设定生成，只会回「未提供创意」）。
+    const pipelinesBefore = recorded.pipelines.length;
+    await page.click('#writerSetupGenerate');
+    await page.waitForTimeout(700);
+    check('套用模板后直接生成会先自动保存设定',
+      recorded.setups.length === 1 && String(recorded.setups[0].idea || '').includes('写一部'),
+      JSON.stringify(recorded.setups[0] || {}).slice(0, 140));
+    check('自动保存后照常提交生成', recorded.pipelines.length === pipelinesBefore + 1);
 
     // 8) 导入存档（两段式）
     await page.click('#writerImportBtn');

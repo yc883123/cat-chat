@@ -1065,6 +1065,43 @@ function gateByBudget(model) {
   return true;
 }
 
+/** 生成前把表单里未保存的设定改动先存成一版（人工）。
+ *
+ * 为什么必须有这一步：流水线读的是**服务端已保存的设定版本**，不是表单。
+ * 套用模板或手改后直接点生成，如果不先存，用户眼前的创意会被静默忽略——
+ * 模型拿空设定开场，只会回「未提供创意 / 未指定」这类占位结果（真实踩过）。
+ * 返回 true = 可以继续提交；false = 已提示原因，调用方应中止。
+ */
+async function saveSetupBeforeGenerate() {
+  const setup = collectSetup();
+  const hasContent = String(setup.idea || "").trim() || String(setup.title || "").trim()
+    || String(setup.worldview || "").trim() || setup.characters.length;
+  if (!hasContent) {
+    toast("先在「故事创意」里写一句话，或从模板套用，再点生成");
+    return false;
+  }
+  try {
+    const payload = await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}`, {
+      method: "PATCH",
+      body: { setup, revision: writer.book?.revision },
+    });
+    writer.setup = payload.setup;
+    writer.book = payload.book;
+    writer.setupDirty = false;
+    toast("已自动把表单里的设定存为新版本，接着开始生成");
+    return true;
+  } catch (error) {
+    if (error?.status === 409) {
+      toast("作品在别处被修改过（版本冲突）；已重新读取，请再看一眼表单后重试");
+      writer.setupDirty = false;
+      await openBook(writer.bookId, { keepStage: true });
+    } else {
+      fail("先保存设定失败", error);
+    }
+    return false;
+  }
+}
+
 async function submitPipeline(kind, { chapterNo = 0, allowDrop = false } = {}) {
   if (!writer.bookId) return;
   if (writer.pipeline?.status === "running") {
@@ -1080,6 +1117,12 @@ async function submitPipeline(kind, { chapterNo = 0, allowDrop = false } = {}) {
   if (!gateByBudget(model)) return;
   setBusy(true);
   try {
+    // 表单里有未保存的设定改动（例：刚套用模板）：先自动存一版再提交，
+    // 否则流水线仍用旧的已保存设定。
+    if (writer.setupDirty) {
+      const saved = await saveSetupBeforeGenerate();
+      if (!saved) return;
+    }
     const payload = await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}/pipelines`, {
       method: "POST",
       body: {
@@ -1811,22 +1854,26 @@ function applyTemplate() {
     toast("先在列表里选一个模板");
     return;
   }
-  // 只改状态、不直接改输入框：setStage 里的 fillSetupForm 以 writer.setup 为唯一事实源，
-  // 先写状态再重渲染，表单值才不会被旧状态盖回去。
+  // 先收下表单里的现值，再把模板字段覆盖上去：整栏会重渲染一次（人物卡等内容要一起更新），
+  // 这一步保证用户手填的其它字段（参考气质、雷区、风格等）不会被这次刷新吞掉。
+  const current = collectSetup();
+  // 模板的角色串是散文，机械切分可能切不出条目；切不出时保留用户已有的角色卡，不用空数组盖掉。
+  const templateChars = parseTemplateCharacters(row.characters);
   writer.setup = {
     ...(writer.setup || {}),
+    ...current,
     idea: String(row.prompt || ""),
     title: String(row.title || "").replace(/^《|》$/g, ""),
     blurb: String(row.blurb || ""),
     worldview: String(row.worldview || ""),
-    genre: { ...(writer.setup?.genre || {}), cat: String(row.sub || "") },
+    genre: { ...(current.genre || {}), cat: String(row.sub || "") },
     genre_tags: (Array.isArray(row.tags) ? row.tags : []).map((tag) => String(tag || "").trim()).filter(Boolean).slice(0, 5),
-    characters: parseTemplateCharacters(row.characters),
+    characters: templateChars.length ? templateChars : current.characters,
   };
   writer.setupDirty = true;
   closeDialog("#writerTemplateDialog");
   setStage("setup");
-  toast(`已套用模板「${row.name}」；确认内容后点「保存修改为新版本」入库`);
+  toast(`已套用模板「${row.name}」；点「保存修改为新版本」入库，或直接点生成（会自动先保存）`);
 }
 
 // ============================================================

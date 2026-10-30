@@ -136,6 +136,14 @@ class WriterPipelineManager:
                 setup = None
         if steps[0] in ("segs", "draft", "outline") and not setup:
             raise WriterPipelineError("请先生成或保存设定，再生成大纲与正文")
+        # 设定链的起点是创意：已保存设定里没有创意时，模型只能编出「未提供创意/未指定」
+        # 这类占位结果，白烧 token 还落一版垃圾（真实反馈）。在排队前如实拒绝。
+        if kind in ("setup_all", "setup_step") \
+                and not str((setup or {}).get("idea") or "").strip():
+            raise WriterPipelineError(
+                "请先在「设定 → 故事创意」里写一句话（或从模板套用后再生成）；"
+                "还没有创意时，模型只能给出占位结果"
+            )
         if steps[0] == "draft":
             outline_version_id = str(outline_version_id or "").strip() or str(
                 manifest.get("current_outline_version_id") or "")

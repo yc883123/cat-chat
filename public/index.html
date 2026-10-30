@@ -1238,7 +1238,7 @@
                       <button class="control-button writer-primary" type="button" id="writerSetupGenerate">生成整套设定</button>
                       <button class="control-button" type="button" id="writerSetupSave">保存修改为新版本</button>
                     </div>
-                    <p class="writer-hint">生成的是整套设定并自动接着写大纲；每完成一步都存一版，失败时保留前面已完成的步骤。重新点会再出一版，旧版本全部保留。</p>
+                    <p class="writer-hint">生成的是整套设定并自动接着写大纲；每完成一步都存一版，失败时保留前面已完成的步骤。重新点会再出一版，旧版本全部保留。表单里有还没保存的修改时（例如刚套用模板），点生成会先自动存一版再开始。</p>
                   </div>
                 </div>
 
@@ -1398,7 +1398,7 @@
                 <h3>题材模板<small id="writerTplCount"></small></h3>
                 <button class="control-button tiny" type="button" id="writerTemplateClose">关闭</button>
               </div>
-              <p class="writer-note">套用只把模板内容填进左侧设定表单，确认满意后点「保存修改为新版本」才真正入库。</p>
+              <p class="writer-note">套用会把模板内容填进左侧设定表单（你已手填的其它字段保留），表单会刷新一次以显示套用后的内容；确认后点「保存修改为新版本」入库，或直接点生成——生成前会自动先保存。</p>
               <div class="writer-tpl-tools">
                 <div class="writer-tpl-channels" id="writerTplChannels" role="group" aria-label="频道">
                   <button type="button" class="active" aria-pressed="true" data-writer-tpl-channel="">全部</button>

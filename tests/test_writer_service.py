@@ -86,6 +86,8 @@ class ServiceTestCase(unittest.TestCase):
         self.service.pipeline = WriterPipelineManager(self.app, self.service.store)
         self.book = self.service.store.create_book(title="服务测")
         self.book_id = self.book["id"]
+        # 设定链的起点是已保存设定里的创意（空创意排队前会被拒），按真实使用先存一版。
+        self.service.store.save_setup(self.book_id, content={"idea": "一句话创意"}, kind="manual")
         rows = [{"no": i, "title": f"第{i}章", "beat": f"梗概{i}", "hook": ""} for i in range(1, 4)]
         self.service.store.save_outline(self.book_id, chapters=rows, kind="generated", sync=True)
 
@@ -186,6 +188,17 @@ class ServiceTestCase(unittest.TestCase):
 
     def test_start_pipeline_requires_model(self):
         payload, status = self.service.api_start_pipeline(self.book_id, {"kind": "chapter", "chapter_no": 1})
+        self.assertEqual(status, 400)
+
+    def test_start_setup_refused_without_idea(self):
+        """空创意在排队前 400——模型拿不到创意只会回占位结果（真实反馈的回归锁）。"""
+        empty = self.service.store.create_book(title="没有创意")
+        payload, status = self.service.api_start_pipeline(
+            empty["id"], {"kind": "setup_all", "model_name": "probe"})
+        self.assertEqual(status, 400)
+        self.assertIn("创意", payload["error"])
+        payload, status = self.service.api_start_pipeline(
+            empty["id"], {"kind": "setup_step", "step": "genre", "model_name": "probe"})
         self.assertEqual(status, 400)
 
     def test_start_pipeline_clamps_counts(self):

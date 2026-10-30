@@ -126,6 +126,14 @@ class WriterPageStructureTests(unittest.TestCase):
             self.assertIn(piece, css, piece)
         self.assertIn(".writer-page-actions {\n  position: relative", css,
                       "导出菜单以页面头操作区为定位基准")
+        # 窄屏页头与拆书匠同一套：只留 4 个按钮、阶段说明收起。
+        # 缺任一条，5 个按钮（382）+ 说明（176）会把整页最小宽度顶到 406px，
+        # 360 宽手机上右边被裁 46px（2026-10-30 实测）。
+        for piece in ("#writerNewBookBtn { display: none; }",
+                      ".writer-stagebar-note { display: none; }"):
+            self.assertIn(piece, css, piece)
+        self.assertIn(".writer-book-summary[hidden], .writer-candidates[hidden], .writer-block[hidden]", css,
+                      "自带 display: grid 的容器必须补 [hidden] 守卫，否则空卡/假进度块仍占位")
 
 
 class WriterTemplateAssetTests(unittest.TestCase):

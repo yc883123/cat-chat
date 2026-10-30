@@ -5518,6 +5518,10 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 
 /* 候选（书名 / 简介）：可点的小芯片。 */
 .writer-candidates { display: grid; gap: 5px; }
+/* 自带 display: grid 的容器会盖掉原生 [hidden]（作者样式优先于 UA 样式），没数据时仍占位。
+   逐个补守卫：作品摘要空卡、候选空条、右栏「生成进度」假块（无流水线时也常显
+   「进行中 + 取消生成」，点了没反应）——360px 手机实测前两者白占一屏。 */
+.writer-book-summary[hidden], .writer-candidates[hidden], .writer-block[hidden] { display: none; }
 .writer-candidate-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .writer-candidate {
   max-width: 100%; padding: 4px 10px; border: 1px solid var(--line); border-radius: var(--r-full);
@@ -5776,6 +5780,12 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
   .writer-page-actions { overflow-x: auto; scrollbar-width: none; }
   .writer-page-actions::-webkit-scrollbar { display: none; }
   .writer-page-actions .control-button { flex: none; min-height: 32px; }
+  /* 与拆书匠同一套窄屏页头：只放 4 个按钮——「新建作品」的入口在「作品」弹窗里
+     （顶部有书名输入 + 新建），页面上不必再占一格。
+     阶段说明是桌面提示，窄屏必须收起：5 个按钮（382）+ 说明（176）会把整页的
+     最小宽度顶到 406px，360 宽手机上右边会被裁 46px（2026-10-30 实测）。 */
+  #writerNewBookBtn { display: none; }
+  .writer-stagebar-note { display: none; }
   .writer-stagebar { min-height: 46px; padding: 0 12px; }
   .writer-stage { height: 30px; padding: 0 12px; }
   .writer-panes { display: flex; }

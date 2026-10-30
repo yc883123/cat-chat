@@ -351,8 +351,14 @@ async function runViewport(browser, vp) {
     check('页面标题是「织书台」', (await page.textContent('#studioPageWriter h2')).trim() === '织书台');
     check('未打开作品时显示占位与空目录', await page.isVisible('#writerEditorPlaceholder'));
 
-    // 2) 新建作品（走注入的 POST）
-    await page.click('#writerNewBookBtn');
+    // 2) 新建作品（走注入的 POST）。手机页头与拆书匠同一套：页面上没有「新建作品」，
+    //    入口在「作品」弹窗顶部的书名输入 + 新建。
+    if (isMobile) {
+      await page.click('#writerBooksBtn');
+      await page.waitForTimeout(300);
+    } else {
+      await page.click('#writerNewBookBtn');
+    }
     await page.fill('#writerNewTitle', '雾港旧事');
     await page.click('#writerCreateBtn');
     await page.waitForTimeout(400);
@@ -484,6 +490,24 @@ async function runViewport(browser, vp) {
       await page.click('[data-writer-pane="notes"]');
       await page.waitForTimeout(200);
       check('说明档：只有右栏可见', await page.isVisible('.writer-notes') && !(await page.isVisible('.writer-book')));
+
+      // 页头窄屏与拆书匠同一套：只留 4 个按钮，整页不得被顶宽。
+      // 判据用「页面宽 = 视口宽」，而不是肉眼看截图：5 个按钮 + 阶段说明会把最小宽度顶到 406px，
+      // 在 360/375 宽手机上右边被整块裁掉（2026-10-30 实测）。
+      const mobileLayout = await page.evaluate(() => {
+        const pageEl = document.querySelector('#studioPageWriter');
+        const actions = document.querySelector('.writer-page-actions');
+        return {
+          pageW: Math.round(pageEl.getBoundingClientRect().width),
+          vw: window.innerWidth,
+          actionsOverflow: actions.scrollWidth - actions.clientWidth,
+          newBook: getComputedStyle(document.querySelector('#writerNewBookBtn')).display,
+          note: getComputedStyle(document.querySelector('.writer-stagebar-note')).display,
+        };
+      });
+      check('手机：整页宽度等于视口（无横向裁切）', mobileLayout.pageW <= mobileLayout.vw, JSON.stringify(mobileLayout));
+      check('手机：页头按钮不横向溢出', mobileLayout.actionsOverflow <= 0, `overflow=${mobileLayout.actionsOverflow}`);
+      check('手机：隐藏「新建作品」与阶段说明（同拆书匠）', mobileLayout.newBook === 'none' && mobileLayout.note === 'none');
     } else {
       check('桌面三栏同显', await page.isVisible('.writer-book') && await page.isVisible('.writer-editor') && await page.isVisible('.writer-notes'));
     }

@@ -417,7 +417,7 @@ function renderChapters() {
     list.replaceChildren();
     if (empty) {
       empty.hidden = false;
-      empty.textContent = "还没有打开作品。点右上「新建作品」或「作品」。";
+      empty.textContent = "还没有打开作品。点右上「作品」新建或打开。";
     }
     return;
   }

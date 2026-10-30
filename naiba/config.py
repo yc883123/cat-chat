@@ -123,7 +123,7 @@ STUDIO_SELECTION_KINDS = frozenset({"builtin", "custom"})
 STUDIO_PREF_PAGES = frozenset({"library"})
 # 工作台功能页（侧栏分页导航的允许值）：刷新与重启后按它恢复上次所在页。
 # 新增功能页时必须同步 public/index.html 的 data-studio-page 与前端 setStudioPage()。
-STUDIO_PAGE_VIEWS = ("library", "labeler", "comfyui", "novel")
+STUDIO_PAGE_VIEWS = ("library", "labeler", "comfyui", "novel", "writer")
 # 上次停在哪一侧：对话（chat）/ 工作台（studio）。退出后重开按它恢复视图，
 # 否则在造梦机里关掉程序、下次打开又跳回对话，用户会以为状态没保存。
 STUDIO_VIEWS = ("chat", "studio")

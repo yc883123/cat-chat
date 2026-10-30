@@ -313,11 +313,13 @@ class StudioService:
         return payload, 200
 
     def api_tasks(self, active_only: str = "", module: str = "",
-                  exclude_module: str = "") -> tuple[dict[str, Any], int]:
+                  exclude_module: str = "", exclude_modules: str = "") -> tuple[dict[str, Any], int]:
         """任务列表（按模块分区）。
 
-        `module` / `exclude_module` 是分区参数：模块库传 `exclude_module=novel`、
-        创作场传 `module=novel`，各看各的、各 60 条。不传参保持原有全量行为。
+        `module` / `exclude_module` / `exclude_modules` 是分区参数：模块库传
+        `exclude_modules=novel,writer`、拆书匠传 `module=novel`、织书台传
+        `module=writer`，各看各的、各 60 条。不传参保持原有全量行为；
+        单数 `exclude_module` 保留，老调用方不受影响。
 
         `module` / `origin_label` **从 `input` 提升到顶层**：这两个字段一直只写在任务
         input 里（`api_generate`），落库记录顶层从来没有；列表 slim 却按顶层取，于是
@@ -327,6 +329,7 @@ class StudioService:
         rows = self.jobs.tasks(
             active_only=active_only in ("1", "true"),
             module=module, exclude_module=exclude_module,
+            exclude_modules=exclude_modules,
         )
         slim = []
         for row in rows:
@@ -348,6 +351,14 @@ class StudioService:
                     "book_id": str(novel.get("book_id") or ""),
                     "stage": str(novel.get("stage") or ""),
                     "chapter_ids": list(novel.get("chapter_ids") or []),
+                }
+            writer = input_data.get("writer") if isinstance(input_data.get("writer"), dict) else None
+            if writer:
+                item["writer"] = {
+                    "book_id": str(writer.get("book_id") or ""),
+                    "pipeline_id": str(writer.get("pipeline_id") or ""),
+                    "step": str(writer.get("step") or ""),
+                    "chapter_no": int(writer.get("chapter_no") or 0),
                 }
             slim.append(item)
         return {"tasks": slim}, 200

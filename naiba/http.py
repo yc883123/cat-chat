@@ -587,7 +587,29 @@ class RequestHandler(BaseHTTPRequestHandler):
                 str(query.get("active_only", [""])[0]),
                 module=str(query.get("module", [""])[0]),
                 exclude_module=str(query.get("exclude_module", [""])[0]),
+                exclude_modules=str(query.get("exclude_modules", [""])[0]),
             ))
+        # ---- 织书台（原创写作） ----
+        # 两段式硬契约与拆书匠一致：列表与详情不回整本正文；正文只有单章接口给。
+        elif path == "/api/writer/books":
+            self._json(*self.app.writer.api_list_books())
+        elif path == "/api/writer/location":
+            self._json(*self.app.writer.api_location())
+        elif path.startswith("/api/writer/books/") and path.endswith("/export"):
+            query = urllib.parse.parse_qs(parsed.query)
+            book_id = path[len("/api/writer/books/"):-len("/export")]
+            self._json(*self.app.writer.api_export_book(
+                book_id,
+                fmt=str(query.get("fmt", ["txt"])[0]),
+                with_extras=str(query.get("extras", [""])[0]),
+            ))
+        elif path.startswith("/api/writer/books/") and path.endswith("/pipeline"):
+            self._json(*self.app.writer.api_get_pipeline(path[len("/api/writer/books/"):-len("/pipeline")]))
+        elif path.startswith("/api/writer/books/") and "/chapters/" in path:
+            head, _sep, tail = path[len("/api/writer/books/"):].partition("/chapters/")
+            self._json(*self.app.writer.api_get_chapter(head, tail))
+        elif path.startswith("/api/writer/books/"):
+            self._json(*self.app.writer.api_get_book(path[len("/api/writer/books/"):]))
         # ---- 创作场（小说改编） ----
         # 两段式硬契约：列表与详情只回索引；单章接口给基础稿件正文，
         # 其它稿件按 /manuscripts/<id> 单独取（一份原作可能有很多份改编稿）。
@@ -751,6 +773,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 return
             self._novel_import_upload()
             return
+        # 织书台导入启元存档：JSON 进内存后由 writer 域解析预览（上限 20 MiB）。
+        if path == "/api/writer/import" and self.headers.get("Content-Type", "").lower().startswith("multipart/form-data"):
+            if not self._authorized(parsed):
+                self._json({"error": "访问口令无效"}, HTTPStatus.UNAUTHORIZED)
+                return
+            self._writer_import_upload()
+            return
         # Skill 导入两个端点的请求体上限跟随「Skill 大小上限」设置放宽：文件先
         # base64 编码再进 JSON（膨胀约 1/3）+ JSON 结构开销，按 ×1.5 留余量。
         # 设置 0 = 内置默认 130MB，与引入该设置前逐字一致；聊天等其他请求不动。
@@ -844,6 +873,38 @@ class RequestHandler(BaseHTTPRequestHandler):
             # 场次重排：只改顺序，保留来源章节。
             book_id = path[len("/api/novel/books/"):-len("/script/reorder")]
             self._json(*self.app.novel.api_reorder_script(book_id, body))
+        # ---- 织书台（原创写作） ----
+        elif path == "/api/writer/books":
+            self._json(*self.app.writer.api_create_book(body))
+        elif path == "/api/writer/reveal":
+            # 打开作品保存目录（路径由服务端决定，不收客户端参数）。
+            if not self._is_local_request():
+                self._json(
+                    {"error": "作品文件夹在运行 Cat Chat 的电脑上，手机端打不开"},
+                    HTTPStatus.FORBIDDEN,
+                )
+            else:
+                self._json(*self.app.writer.api_reveal())
+        elif path == "/api/writer/generate/preview":
+            self._json(*self.app.writer.api_preview(body))
+        elif path.startswith("/api/writer/import/") and path.endswith("/commit"):
+            self._json(*self.app.writer.api_commit_import(
+                {"import_id": path[len("/api/writer/import/"):-len("/commit")]}))
+        elif path.startswith("/api/writer/books/") and path.endswith("/pipelines"):
+            self._json(*self.app.writer.api_start_pipeline(
+                path[len("/api/writer/books/"):-len("/pipelines")], body))
+        elif path.startswith("/api/writer/books/") and path.endswith("/pipeline/cancel"):
+            self._json(*self.app.writer.api_cancel_pipeline(
+                path[len("/api/writer/books/"):-len("/pipeline/cancel")]))
+        elif path.startswith("/api/writer/books/") and path.endswith("/pipeline/retry"):
+            self._json(*self.app.writer.api_retry_pipeline(
+                path[len("/api/writer/books/"):-len("/pipeline/retry")], body))
+        elif path.startswith("/api/writer/books/") and path.endswith("/sync"):
+            self._json(*self.app.writer.api_sync_chapters(
+                path[len("/api/writer/books/"):-len("/sync")], body))
+        elif path.startswith("/api/writer/books/") and path.endswith("/versions/select"):
+            self._json(*self.app.writer.api_select_version(
+                path[len("/api/writer/books/"):-len("/versions/select")], body))
         elif path.startswith("/api/studio/tasks/") and path.endswith("/cancel"):
             self._json(*self.app.studio.api_task_cancel(path.split("/")[-2]))
         elif path.startswith("/api/studio/tasks/") and path.endswith("/retry"):
@@ -1517,6 +1578,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             book_id = head[len("/api/novel/books/"):]
             self._json(*self.app.novel.api_update_chapter(book_id, chapter_no, body))
             return
+        # ---- 织书台（原创写作） ----
+        if path.startswith("/api/writer/books/") and "/chapters/" in path:
+            head, _, chapter_no = path.partition("/chapters/")
+            book_id = head[len("/api/writer/books/"):]
+            self._json(*self.app.writer.api_save_chapter(book_id, chapter_no, body))
+            return
+        if path.startswith("/api/writer/books/"):
+            self._json(*self.app.writer.api_patch_book(path[len("/api/writer/books/"):], body))
+            return
         if path.startswith("/api/novel/books/") and "/script/" in path:
             # 改单条场次：PATCH /api/novel/books/<id>/script/<i>
             head, _, scene_no = path.partition("/script/")
@@ -1597,6 +1667,13 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path.startswith("/api/novel/books/"):
             # 删作品：只作用于该作品目录，不动 Studio 历史任务记录。
             self._json(*self.app.novel.api_delete_book(path[len("/api/novel/books/"):]))
+        # ---- 织书台（原创写作） ----
+        elif path.startswith("/api/writer/books/") and "/chapters/" in path:
+            head, _, chapter_no = path.partition("/chapters/")
+            book_id = head[len("/api/writer/books/"):]
+            self._json(*self.app.writer.api_delete_chapter(book_id, chapter_no))
+        elif path.startswith("/api/writer/books/"):
+            self._json(*self.app.writer.api_delete_book(path[len("/api/writer/books/"):]))
         elif path == "/api/app-icon":
             # 恢复默认图标（只删 custom-icon.*，内置 icon.ico 不动）。
             self._json(*self.app.api_clear_app_icon())
@@ -2046,6 +2123,17 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._json(*self.app.novel.api_import(
             filename=filename, data=data, max_len=fields.get("max_len"),
         ))
+
+    def _writer_import_upload(self) -> None:
+        """织书台导入启元存档：multipart 小体积进内存 → writer 域解析预览。"""
+        from naiba.writer.store import MAX_IMPORT_BYTES
+
+        parsed = self._read_multipart_small(MAX_IMPORT_BYTES)
+        if parsed is None:
+            return
+        fields, data = parsed
+        filename = str(fields.get("filename") or fields.get("name") or "作品存档.json")
+        self._json(*self.app.writer.api_import(filename=filename, data=data))
 
     def _app_icon_upload(self) -> None:
         """应用图标上传（multipart 小体积进内存 → storage/app_icon 归一化落盘）。"""

@@ -387,6 +387,19 @@ class NaibaChatApp:
             self.novel.recover()
         except Exception:  # noqa: BLE001 - 导入暂存清理失败不阻断启动
             logger.exception("创作场导入暂存清理失败")
+        # 织书台（原创写作，docs/plans/2026-10-30-写书匠（原创写作）接入实施计划.md）：
+        # 工作台第五个功能页。作品数据在 data/studio/writer/，业务逻辑独立在 naiba/writer/；
+        # 模型调用复用 Studio 任务队列，不另建模型 API。
+        from naiba.writer.service import WriterService
+
+        self.writer = WriterService(self)
+        try:
+            writer_recovery = self.writer.recover()
+            self.writer.start()
+        except Exception:  # noqa: BLE001 - 织书台恢复失败不阻断启动
+            logger.exception("织书台流水线启动恢复失败")
+            writer_recovery = None
+        _ = writer_recovery
         self.updater = UpdateManager(self._paths.app_dir, self._paths.data_dir)
         # 「更新代理」独立于全局 proxy：启动时注入一次，设置保存后再注入更新。
         self.updater.configure_proxy(self.config.data.get("update_proxy"))
@@ -399,6 +412,10 @@ class NaibaChatApp:
         self.runs.shutdown()
         self.plans.shutdown()
         self.jobs.shutdown()
+        try:
+            self.writer.shutdown()
+        except Exception:  # noqa: BLE001 - 收尾不互相阻断
+            logger.exception("织书台收尾失败")
         try:
             self.studio.shutdown()
         except Exception:  # noqa: BLE001 - 收尾不互相阻断

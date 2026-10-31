@@ -83,6 +83,8 @@ KEEP = {
     "slim_terminal_events.py",
     # 上下文圆环/提醒冒烟（§六 已登记）
     "ring_usage_smoke.py", "ring_usage_smoke.cjs",
+    # 上下文自动压缩 E2E（§六 已登记；Python 自编排起实例 + Node 检查）
+    "auto_compaction_e2e.py", "auto_compaction_e2e.cjs",
     # 工具分类改版冒烟（§六 已登记；Python 自编排 + Node 检查）
     "tool_groups_smoke.py", "tool_groups_smoke.cjs",
     # 工具集「已配好再打开要看清用了哪些工具」冒烟（§六 已登记；Python 自编排起隔离实例 +

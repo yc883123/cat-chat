@@ -69,6 +69,9 @@ async function snapshot(page) {
     });
     // 「新会话」「撤销分割线」都走 window.confirm。
     page.on('dialog', (dialog) => dialog.accept());
+    // 首启引导向导（19-onboarding.js）在隔离实例（无可用供应商）必然弹出，会拦截
+    // 后续所有点击——预置 dismiss 标记跳过它（与本冒烟的断言无关）。
+    await page.addInitScript(() => localStorage.setItem('naibaOnboardingDismissed', '1'));
 
     await page.goto(`${BASE}/index.html`, { waitUntil: 'load', timeout: 30000 });
     await page.waitForSelector('#sidebarWorkspaceTree .conversation-item', { timeout: 30000 });

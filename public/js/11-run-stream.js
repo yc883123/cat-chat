@@ -409,10 +409,26 @@ export async function finishRunSubscription(conversationId, controller) {
     renderSidebar();
     scheduleTaskSync(0);
   }
-  await loadTasks();
+  // 任务面板只是附属同步，不能阻断当前对话的终态重载：任务接口偶发超时/断开时，
+  // 旧写法会在这里提前抛出，活动行已经收掉但完整助手消息要等用户手动刷新才出现。
+  try {
+    await loadTasks();
+  } catch (error) {
+    console.debug('[naiba] 终态任务同步失败，不阻断对话重载:', error?.message || error);
+  }
   if (state.conversationId === conversationId && !state.abortController) {
-    await loadConversations();
-    if (state.conversationId === conversationId) await openConversation(conversationId);
+    try {
+      await loadConversations();
+    } catch (error) {
+      console.debug('[naiba] 终态会话列表同步失败，继续重载当前会话:', error?.message || error);
+    }
+    if (state.conversationId === conversationId) {
+      try {
+        await openConversation(conversationId);
+      } catch (error) {
+        console.debug('[naiba] 终态会话重载失败:', error?.message || error);
+      }
+    }
   }
 }
 

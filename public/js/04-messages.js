@@ -942,32 +942,22 @@ export function forceScrollToBottom() {
   if (messages) withInstantScroll(messages, () => { messages.scrollTop = messages.scrollHeight; });
 }
 
-// 流式 markdown 渲染的自适应节流。
-// 每次渲染都是「整段 raw 重跑 markdown + 整体 innerHTML」，单次成本随回复长度线性增长，
-// 而事件频率大致恒定（token 速率不变）⇒ 总成本随长度呈 O(n²)，长回复后半段明显掉帧。
-// 所以按当前累积长度拉长节流间隔：短回复保持 40ms（跟手），每累积 4000 字 +50ms，
-// 240ms 封顶（间隔再大就肉眼可见"一段一段蹦"，得不偿失）。
-export const STREAMING_RENDER_MIN_MS = 40;
-const STREAMING_RENDER_STEP_CHARS = 4000;
-const STREAMING_RENDER_STEP_MS = 50;
-const STREAMING_RENDER_MAX_MS = 240;
-
-export function streamingRenderDelay(raw) {
-  const length = String(raw || '').length;
-  const steps = Math.floor(length / STREAMING_RENDER_STEP_CHARS);
-  return Math.min(STREAMING_RENDER_MAX_MS, STREAMING_RENDER_MIN_MS + steps * STREAMING_RENDER_STEP_MS);
-}
-
+// 流式正文只做轻量的逐帧文本绘制，完整 Markdown 留到本轮结束后的会话重载再渲染。
+// 以前每个 delta 都把累计全文重新跑一遍 markdown 并整体替换 innerHTML：回复越长，
+// 总成本越接近 O(n²)，最终表现为主线程卡顿后成段吐出。流式阶段只更新一个文本节点，
+// 用 requestAnimationFrame 合并同一帧内的多个 delta；终态 renderMessages 仍会按原规则
+// 把同一份 raw 内容排版成 Markdown，因此不会改变最终消息的格式。
 export function scheduleStreamingMarkdown(element, raw) {
   if (!element) return;
-  element.dataset.raw = raw;
+  element.dataset.raw = String(raw || '');
   if (element.dataset.renderScheduled === '1') return;
   element.dataset.renderScheduled = '1';
-  window.setTimeout(() => {
+  window.requestAnimationFrame(() => {
     element.dataset.renderScheduled = '0';
-    element.innerHTML = markdown(element.dataset.raw || '');
+    if (!element.isConnected) return;
+    element.textContent = element.dataset.raw || '';
     scrollToBottom();
-  }, streamingRenderDelay(raw));
+  });
 }
 
 // 把“中途正文”作为独立兄弟块插到 answer 之前，按时间顺序与思考块/工具块交错显示。

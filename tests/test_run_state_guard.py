@@ -393,6 +393,12 @@ class RunStreamDisconnectTests(unittest.TestCase):
         css = (ROOT / "public" / "styles.css").read_text(encoding="utf-8")
         self.assertIn(".run-link-notice {", css)
 
+    def test_terminal_reload_does_not_depend_on_task_sync(self) -> None:
+        body = _function_body(_read("11-run-stream.js"), "export async function finishRunSubscription")
+        self.assertIn("终态任务同步失败，不阻断对话重载", body)
+        self.assertIn("终态会话列表同步失败，继续重载当前会话", body)
+        self.assertIn("终态会话重载失败", body)
+
 
 class MaintenanceDocSyncTests(unittest.TestCase):
     """快照式文档必须与代码同步（项目规则：改代码即改写对应章节）。"""

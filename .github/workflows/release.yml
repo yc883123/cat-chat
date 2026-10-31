@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 3.9.15-beta
-  RELEASE_TAG: v3.9.15-beta
+  RELEASE_VERSION: 3.9.16-beta
+  RELEASE_TAG: v3.9.16-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-3.9.15-beta-windows-x64
+  PACKAGE_NAME: cat-chat-3.9.16-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-3.9.15-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-3.9.16-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -121,11 +121,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 3.9.15 Beta release
+      - name: Publish 3.9.16 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 3.9.15 Beta
+          name: Cat Chat 3.9.16 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -135,10 +135,10 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 3.9.15 Beta：自动整理上下文口径校准——触发对齐真实用量、圆环不再来回翻转
-            ① 触发对齐真实用量：自动整理的触发判定过去只按字符估算（系统提示与工具定义不在内），真实占用先越线时估算追不上——圆环已经 80%、整理还没动静。现在轮首判定读取上一轮最后一次请求的真实输入 token（与圆环同一份数据）参与判定，触发点回到真实用量的 70%，与「80% 提醒弹窗」的先后也理顺了
-            ② 圆环不再变来变去：运行中历史重渲染曾把圆环拽回上一轮的落库旧值，在实时值与旧值之间来回跳；现在运行中一律保留实时值，显式「新会话」重置仍立即归零解锁
-            ③ 整理让位新会话：同一条消息上既有「新会话」分割线又落下整理标记时，分割线优先——已划出上下文的内容不再以摘要形式绕回模型视野
-            ④ 验证：全量单测 3654 项通过；上下文重置锁、圆环用量两组真浏览器冒烟通过（含运行中护栏与重置解锁回归）
-            ⑤ 边界：会话不足 4 次提问（单轮长任务）结构上仍不会自动整理；总结请求瞬时失败仍不重试（整理失败不影响本轮对话）
-            Cat Chat 3.9.15 Beta Windows build。本版校准「自动整理上下文」的触发口径并修圆环显示：整理触发改看上一轮请求的真实 API 用量（此前按字符估算、经常晚触发，圆环 80% 了整理还没动静），运行中的圆环不再被上一轮旧值来回覆盖，「新会话」分割线优先于同一条消息上的整理标记。全量单测 3654 项通过。
+            Cat Chat 3.9.16 Beta：修复对话流式回复卡顿与偶发刷新后才显示
+            ① 流式回复改为逐帧轻量绘制：收到增量内容后只更新纯文本节点，不再对累计全文反复跑 Markdown 并整体替换 DOM；长回复不再越输出越卡、停顿后成段吐出
+            ② 最终排版不变：本轮结束并重载会话后，完整消息仍按原有 Markdown、代码块、表格和媒体规则渲染
+            ③ 收尾更稳：任务面板同步偶发失败时不再阻断当前会话的终态重载，避免回复已经落库但界面要等手动刷新才出现
+            ④ 验证：新增流式渲染守门；流式、断流、事件、重渲染专项测试通过；隔离流式重渲染冒烟通过；全部前端脚本语法检查通过
+            ⑤ 边界：流式阶段为保证跟手显示暂不渲染 Markdown，完整 Markdown 排版在本轮结束后的正常会话渲染中完成
+            Cat Chat 3.9.16 Beta Windows build。本版修复对话流式回复卡顿与偶发刷新后才显示：流式阶段改用逐帧轻量绘制，最终仍按 Markdown 完整排版；终态任务同步失败不再阻断当前会话重载。

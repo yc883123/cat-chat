@@ -37,6 +37,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from naiba.core.fsutil import atomic_write_bytes, atomic_write_json
+
 # 作品清单版本：首版为 1。
 SCHEMA_VERSION = 1
 # 作品 / 导入 ID：前缀 + 日期 + 随机后缀，禁止用户输入参与路径（与拆书匠同构）。
@@ -445,17 +447,8 @@ class WriterStore:
 
     @staticmethod
     def _write_json(path: Path, payload: dict[str, Any]) -> None:
-        """同目录临时文件 + 原子替换；失败不覆盖已有内容。"""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_name(f".{uuid.uuid4().hex}.tmp")
-        try:
-            tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
-            os.replace(tmp_path, path)
-        finally:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        """同目录临时文件 + 原子替换（撞上被占用的目标短暂重试）；失败不覆盖已有内容。"""
+        atomic_write_json(path, payload)
 
     @staticmethod
     def _read_json(path: Path, *, what: str) -> dict[str, Any]:
@@ -1323,15 +1316,7 @@ class WriterStore:
         import_dir = self._imports / import_id
         with self._lock:
             import_dir.mkdir(parents=True, exist_ok=False)
-            tmp_path = import_dir / f".{uuid.uuid4().hex}.tmp"
-            try:
-                tmp_path.write_bytes(data)
-                os.replace(tmp_path, import_dir / "archive.json")
-            finally:
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            atomic_write_bytes(import_dir / "archive.json", data)
             meta = {
                 "schema_version": SCHEMA_VERSION,
                 "import_id": import_id,

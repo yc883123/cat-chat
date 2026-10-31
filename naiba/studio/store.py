@@ -1,6 +1,7 @@
 """Studio 任务持久化：data_dir/studio/tasks/<task_id>.json + <task_id>.events.jsonl。
 
-- `*.json`：任务记录（状态/输入摘要/结果/用量/交接指针），同目录临时文件 + os.replace 原子替换。
+- `*.json`：任务记录（状态/输入摘要/结果/用量/交接指针），同目录临时文件 + 原子替换
+  （`core.fsutil`，替换撞上被占用的目标时短暂重试）。
 - `*.events.jsonl`：逐行事件流（结构见 contracts.STUDIO_TASK_EVENT_TYPES），追加写。
   行末可能因断电半截——读取端逐行容错，坏行跳过不回滚。
 - 任务文件不进 SQLite：Studio 生成的结果/事件不打消息库的任何主意。
@@ -9,7 +10,6 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 import uuid
@@ -21,6 +21,7 @@ from naiba.core.contracts import (
     STUDIO_TASK_EVENT_TYPES,
     STUDIO_TASK_STATUSES,
 )
+from naiba.core.fsutil import atomic_write_json
 
 
 class StudioStoreError(ValueError):
@@ -53,16 +54,8 @@ class StudioStore:
         return f"st-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:12]}"
 
     def _write_json(self, path: Path, payload: dict) -> None:
-        self._dir.mkdir(parents=True, exist_ok=True)
-        tmp_path = path.with_name(f".{uuid.uuid4().hex}.tmp")
-        try:
-            tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
-            os.replace(tmp_path, path)
-        finally:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        # fsutil：替换被占用（本服务轮询读/杀软握着句柄）时短暂重试，见模块注释。
+        atomic_write_json(path, payload)
 
     # ---- 任务记录 ----
 
@@ -96,7 +89,8 @@ class StudioStore:
 
     def get_task(self, task_id: str) -> dict[str, Any] | None:
         try:
-            payload = json.loads(self._record_path(task_id).read_text(encoding="utf-8"))
+            with self._lock:
+                payload = json.loads(self._record_path(task_id).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
         if not isinstance(payload, dict):
@@ -236,32 +230,35 @@ class StudioStore:
             part.strip() for part in str(exclude_modules or "").split(",") if part.strip()
         }
         rows: list[dict[str, Any]] = []
-        if self._dir.exists():
-            for path in sorted(self._dir.glob("st-*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-                try:
-                    payload = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    continue
-                if not isinstance(payload, dict) or not str(payload.get("id") or "").startswith("st-"):
-                    continue
-                payload = self._sanitize(payload)
-                if active_only and payload["status"] not in {"queued", "running"}:
-                    continue
-                if wanted or excluded or excluded_many:
-                    # module 只写在 input 里（记录顶层从来没有这一列），分区一律按 input 判。
-                    input_data = payload.get("input")
-                    row_module = ""
-                    if isinstance(input_data, dict):
-                        row_module = str(input_data.get("module") or "").strip()
-                    if wanted and row_module != wanted:
+        # 读也进锁：写侧的原子替换撞上「正被打开的目标」是毫秒级占用（WinError 5），
+        # 锁内读写互斥让本服务自己永远不再撞自己；外部占用由 fsutil 的重试兜底。
+        with self._lock:
+            if self._dir.exists():
+                for path in sorted(self._dir.glob("st-*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+                    try:
+                        payload = json.loads(path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
                         continue
-                    if excluded and row_module == excluded:
+                    if not isinstance(payload, dict) or not str(payload.get("id") or "").startswith("st-"):
                         continue
-                    if excluded_many and row_module in excluded_many:
+                    payload = self._sanitize(payload)
+                    if active_only and payload["status"] not in {"queued", "running"}:
                         continue
-                rows.append(payload)
-                if len(rows) >= limit:
-                    break
+                    if wanted or excluded or excluded_many:
+                        # module 只写在 input 里（记录顶层从来没有这一列），分区一律按 input 判。
+                        input_data = payload.get("input")
+                        row_module = ""
+                        if isinstance(input_data, dict):
+                            row_module = str(input_data.get("module") or "").strip()
+                        if wanted and row_module != wanted:
+                            continue
+                        if excluded and row_module == excluded:
+                            continue
+                        if excluded_many and row_module in excluded_many:
+                            continue
+                    rows.append(payload)
+                    if len(rows) >= limit:
+                        break
         return rows
 
     def partial_from_events(self, task_id: str) -> str:
@@ -290,14 +287,16 @@ class StudioStore:
             if cached and now - cached[0] < ttl:
                 return set(cached[1])
         records: list[dict[str, Any]] = []
-        if self._dir.exists():
-            for path in sorted(self._dir.glob("st-*.json")):
-                try:
-                    payload = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                    continue
-                if isinstance(payload, dict):
-                    records.append(payload)
+        # 全量扫描也进锁，与写侧原子替换互斥（同 list_tasks）。
+        with self._lock:
+            if self._dir.exists():
+                for path in sorted(self._dir.glob("st-*.json")):
+                    try:
+                        payload = json.loads(path.read_text(encoding="utf-8"))
+                    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+                    if isinstance(payload, dict):
+                        records.append(payload)
         keys = referenced_upload_paths(records)
         with self._lock:
             self._ref_cache = (now, set(keys))

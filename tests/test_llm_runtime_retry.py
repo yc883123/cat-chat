@@ -52,9 +52,18 @@ def sse(chunk: dict) -> bytes:
 
 # 空流：completed 事件但 output 为空 → 正文/思考/action 皆空。
 EMPTY_CODEX_STREAM = [sse({"type": "response.completed", "response": {"output": []}})]
-DELTA_CODEX_STREAM = [sse({"type": "response.output_text.delta", "delta": "答复"})]
+# 有正文的「正常流」必须以收尾事件结束（completed / [DONE]）：2026-10-31 起
+# 三无流（无终止原因/无用量/无收尾事件）按被掐断处理，会自动重发一次——
+# 夹具还原真实流的形态，别让正常流被误判。
+DELTA_CODEX_STREAM = [
+    sse({"type": "response.output_text.delta", "delta": "答复"}),
+    sse({"type": "response.completed", "response": {}}),
+]
 EMPTY_OPENAI_STREAM = [sse({"choices": [{"delta": {}}]})]
-DELTA_OPENAI_STREAM = [sse({"choices": [{"delta": {"content": "答复"}}]})]
+DELTA_OPENAI_STREAM = [
+    sse({"choices": [{"delta": {"content": "答复"}}]}),
+    b"data: [DONE]",
+]
 # 只有思考、没有正文：mimo-v2.5 这类推理模型长思考后可能整轮只回 reasoning_content，
 # 正文为空的流对用户等于「气泡里什么都没有」，必须当空流重试而不是直接判失败。
 REASONING_ONLY_OPENAI_STREAM = [
@@ -197,6 +206,39 @@ class OnlineRetryTests(unittest.TestCase):
         calls, _content, error = self._run([http_error(400, "bad request", "Bad Request")])
         self.assertEqual(len(calls), 1, "普通 400 不得重试")
         self.assertIsNotNone(error)
+
+    # ---- 三无流（无终止原因/无用量/无收尾事件）按被掐断处理（2026-10-31） ----
+
+    def test_stream_cut_once_is_retried_and_returns_content(self) -> None:
+        """被掐断的半截稿（三无流）不当正常完成：自动重发一次，重发成功就返回。"""
+        events: list[dict] = []
+        cut = [sse({"choices": [{"delta": {"content": "半截"}}]})]  # 无 [DONE]/usage/finish_reason
+        good = [sse({"choices": [{"delta": {"content": "完整"}}]}), b"data: [DONE]"]
+        calls, content, error = self._run(
+            [cut, good], status=events.append,
+            options={"stream": True}, profile=PROFILE_GPT)
+        self.assertIsNone(error)
+        self.assertEqual(content, "完整", "半截稿不能当结果，重发的完整稿才是结果")
+        self.assertEqual(len(calls), 2)
+        notes = [str(e.get("message") or "") for e in events if e.get("type") == "status"]
+        self.assertTrue(any("掐断" in note for note in notes), f"必须告知用户掐断重发，实际：{notes}")
+
+    def test_stream_cut_twice_fails_with_clear_message(self) -> None:
+        """重发仍被掐断：如实失败，不无限重发；文案要点名「疑似线路抖动」。"""
+        cut = [sse({"choices": [{"delta": {"content": "半截"}}]})]
+        calls, _content, error = self._run([cut], options={"stream": True}, profile=PROFILE_GPT)
+        self.assertIsNotNone(error)
+        self.assertIn("掐断", str(error))
+        self.assertIn("重发", str(error))
+        self.assertEqual(len(calls), 2, "只自动重发一次")
+
+    def test_stream_without_done_but_with_finish_reason_is_normal(self) -> None:
+        """有终止原因/有用量任一即正常完成：对不回 [DONE] 的网关不误伤。"""
+        stream = [sse({"choices": [{"delta": {"content": "答复"}, "finish_reason": "stop"}]})]
+        calls, content, error = self._run([stream], options={"stream": True}, profile=PROFILE_GPT)
+        self.assertIsNone(error)
+        self.assertEqual(content, "答复")
+        self.assertEqual(len(calls), 1)
 
     def test_5xx_dumps_sanitized_payload(self) -> None:
         long_image = "A" * 200_000

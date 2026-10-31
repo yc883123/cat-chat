@@ -48,6 +48,22 @@ class FinishReasonParsingTests(unittest.TestCase):
         ]
         self.assertEqual(ProtocolMixins._online_finish_reason("openai_chat", chunks), "stop")
 
+    def test_claude_message_delta_stop_reason_is_picked_up(self):
+        """Claude 流的终止原因在 message_delta.delta 里，不能漏（三无流根治点之一）。"""
+        chunks = [
+            {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "……"}},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 10}},
+        ]
+        self.assertEqual(ProtocolMixins._online_finish_reason("claude", chunks), "end_turn")
+
+    def test_claude_max_tokens_maps_to_length(self):
+        chunks = [
+            {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "半截"}},
+            {"type": "message_delta", "delta": {"stop_reason": "max_tokens"}, "usage": {}},
+        ]
+        self.assertEqual(ProtocolMixins._online_finish_reason("claude", chunks), "length")
+
 
 class LastFinishReasonPropertyTests(unittest.TestCase):
     def test_defaults_to_empty(self):

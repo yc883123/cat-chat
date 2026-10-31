@@ -785,6 +785,12 @@ class ProtocolMixins:
             if isinstance(chunk.get("response"), dict):
                 # Responses 流：status / incomplete_details 嵌在 response 对象里。
                 holders.append(chunk["response"])
+            if isinstance(chunk.get("delta"), dict):
+                # Claude 流：终止原因在 message_delta 事件的 delta 里
+                # （{"type":"message_delta","delta":{"stop_reason":"end_turn"}}）。
+                # 此前只扫顶层与 choices，Claude 流的 stop_reason 一直被漏掉，
+                # 截断（max_tokens）在 finish_reason 上根本看不出来。
+                holders.append(chunk["delta"])
             for holder in holders:
                 for key in ("done_reason", "finish_reason", "stop_reason", "finishReason", "status"):
                     value = holder.get(key)

@@ -126,6 +126,16 @@ class LocalModelFirstByteTimeout(RuntimeError):
     """
 
 
+class StreamCutError(RuntimeError):
+    """流结束却「三无」：没有终止原因、没有用量、连正常收尾事件都没有。
+
+    正常收尾 = [DONE]（OpenAI 系）/ message_stop（Claude）/ response.completed
+    （Responses）/ done:true（Ollama）。三者全缺时，这份「看似完整」的输出极可能
+    是被中继半路掐断的半截稿——按可自愈抖动处理，自动重发一次；对从不回这三个
+    信号的网关，代价是多等一次重发，不会循环。
+    """
+
+
 def local_first_byte_timeout_error(seconds: float) -> LocalModelFirstByteTimeout:
     """首字节超时的统一文案（生成器与调用方共用，避免两处措辞漂移）。"""
     return LocalModelFirstByteTimeout(
@@ -1566,6 +1576,9 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
         current_effort = reasoning_effort
         effort_lowered_on_retry = False
         empty_stream_reason_chars = 0
+        # 「三无流」（无终止原因/无用量/无收尾事件）的自动重发只允许一次：
+        # 同一轮里第二次被掐断就如实失败，避免对抖动线路无限翻倍计费。
+        stream_cut_retried = False
         if diagnostics is not None:
             parsed = urllib.parse.urlsplit(endpoint)
             try:
@@ -1715,6 +1728,14 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                                 raise EmptyModelStreamError(empty_stream_phrase)
                             else:
                                 raise RuntimeError(empty_stream_phrase)
+                        if (not streamed.get("finish_reason") and not streamed.get("usage")
+                                and not streamed.get("saw_done")):
+                            # 三无流 = 中继把流掐断在半路（正常收尾的 [DONE] /
+                            # message_stop / completed 都没出现）。半截稿绝不当完整结果，
+                            # 抛 StreamCutError 走自动重发（见下方 except）。
+                            raise StreamCutError(
+                                "在线模型输出流被中途掐断（没有终止原因、没有用量、没有收尾事件）"
+                            )
                         _record_finish_reason(streamed.get("finish_reason"))
                         return content, reasoning, str(streamed.get("reasoning_id") or ""), streamed["usage"]
                     raw_response = ModelRuntime._read_response_cancelable(
@@ -2141,6 +2162,28 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                         "请把思考强度调低或精简上下文后重新生成）"
                     )
                 raise
+
+            except StreamCutError:
+                # 三无流：中继掐断的半截稿。只自动重发一次（与空流降档互不占用）；
+                # 重发仍被掐断就如实失败，由上层把「疑似线路抖动」讲给用户。
+                if connection_test or attempt + 1 >= attempts or stream_cut_retried:
+                    raise RuntimeError(
+                        "在线模型输出流被中途掐断（没有终止原因与用量），已自动重发一次仍失败；"
+                        "请重试，或换一条线路/中转"
+                    ) from None
+                stream_cut_retried = True
+                delay = min(1.5 * (attempt + 1), 5.0)
+                if status:
+                    status({"type": "status", "message": (
+                        f"输出流疑似被线路抖动掐断，{delay:g} 秒后自动重发"
+                        f"（{attempt + 1}/{attempts - 1}）"
+                    )})
+                if cancel_event:
+                    if cancel_event.wait(delay):
+                        raise RuntimeError("任务已取消")
+                else:
+                    time.sleep(delay)
+                continue
 
             finally:
                 if diagnostics is not None:

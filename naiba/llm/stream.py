@@ -677,12 +677,19 @@ class StreamMixins:
         reasoning_streamer = _ReasoningStreamer(status, reasoning_parts)
         native_tool_calls: dict[int, dict[str, str]] = {}
         inline_parser = _InlineReasoningParser()
+        # 流是否走到了「正常收尾」：OpenAI 系的 [DONE]、Claude 的 message_stop、
+        # Responses 的 completed/incomplete、Ollama 的 done:true。三无流（没有终止
+        # 原因、没有用量、也没有收尾事件）= 中途被掐断，调用方据此判异常重发。
+        saw_done = False
         for raw_line in response:
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line.startswith("data:"):
                 continue
             data = line[5:].strip()
-            if not data or data == "[DONE]":
+            if not data:
+                continue
+            if data == "[DONE]":
+                saw_done = True
                 continue
             try:
                 chunk = json.loads(data)
@@ -702,6 +709,14 @@ class StreamMixins:
                 )
             chunks.append(chunk)
             event_type = str(chunk.get("type") or "")
+            if event_type == "message_stop" or (
+                request_format == "codex_responses"
+                and event_type in ("response.completed", "response.incomplete")
+            ):
+                saw_done = True
+            if chunk.get("done") is True:
+                # Ollama 原生流：最后一个 chunk 带 done:true。
+                saw_done = True
             # 捕获 reasoning item 的服务端唯一 id：output_item.added 事件携带 item
             # 对象；delta 事件以 item_id 兜底（OpenAI 规范字段）。回传时需要（官方
             # schema reasoning item 的 id 为必填；缺失在多轮长链实测 400）。
@@ -813,6 +828,7 @@ class StreamMixins:
             "reasoning_id": reasoning_ids[-1] if reasoning_ids else "",
             "usage": usage,
             "finish_reason": ProtocolMixins._online_finish_reason(request_format, chunks),
+            "saw_done": saw_done,
         }
 
 

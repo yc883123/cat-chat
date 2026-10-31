@@ -76,6 +76,11 @@ def text_chunk(text: str) -> bytes:
     return sse({"choices": [{"delta": {"content": text}}]})
 
 
+# 有正文的流都要以 [DONE] 收尾（真实 OpenAI 流的形态）。2026-10-31 起「三无流」
+# （无终止原因/无用量/无收尾事件）按被掐断处理并自动重发，夹具不带收尾事件会被误判。
+DONE = b"data: [DONE]"
+
+
 class TrackedStreamResponse:
     """可迭代 SSE 响应替身：记录**已被消费的行数**，用来证明「提前中断」真的提前了。"""
 
@@ -202,7 +207,7 @@ class ReasoningBreakTests(_Harness):
     def test_runaway_reasoning_is_cut_early_and_retried_lowered(self) -> None:
         long_run = [reasoning_chunk("思" * 200) for _ in range(500)]  # 10 万字符
         requests, responses, content, error = self._run(
-            [long_run, [text_chunk("答复")]],
+            [long_run, [text_chunk("答复"), DONE]],
             options={"stream": True},
             profile={**PROFILE_GPT, "reasoning_effort": "high"},
         )
@@ -221,6 +226,7 @@ class ReasoningBreakTests(_Harness):
         """正文一旦出现即解除熔断：思考 + 正文正常输出是合法形态，绝不误伤。"""
         stream = [reasoning_chunk("思" * 200) for _ in range(400)]
         stream.insert(10, text_chunk("开头就出正文"))  # 早期就有正文，之后推理再多也不熔断
+        stream.append(DONE)
         requests, responses, content, error = self._run(
             [stream], options={"stream": True},
             profile={**PROFILE_GPT, "reasoning_effort": "high"},
@@ -248,7 +254,7 @@ class ReasoningBreakTests(_Harness):
         """覆盖项必须叫 ``reasoning_stream_break_chars``（写成别的名字会静默失效）。"""
         stream = [reasoning_chunk("思" * 200) for _ in range(500)]
         requests, responses, _content, _error = self._run(
-            [stream, [text_chunk("答复")]],
+            [stream, [text_chunk("答复"), DONE]],
             options={"stream": True, "reasoning_stream_break_chars": 2000},
             profile={**PROFILE_GPT, "reasoning_effort": "high"},
         )
@@ -259,7 +265,7 @@ class ReasoningBreakTests(_Harness):
         events: list[dict] = []
         long_run = [reasoning_chunk("思" * 200) for _ in range(500)]
         self._run(
-            [long_run, [text_chunk("答复")]],
+            [long_run, [text_chunk("答复"), DONE]],
             options={"stream": True}, profile={**PROFILE_GPT, "reasoning_effort": "high"},
             status=events.append,
         )
@@ -333,7 +339,7 @@ class StreamTotalTimeoutTests(_Harness):
     def test_slow_stream_is_cut_and_retried(self) -> None:
         slow = [reasoning_chunk("思" * 50) for _ in range(20)]  # 20 × 0.03s = 0.6s
         requests, responses, _content, error = self._run(
-            [self._slow(slow, 0.03), [text_chunk("答复")]],
+            [self._slow(slow, 0.03), [text_chunk("答复"), DONE]],
             options={"stream": True, "stream_total_timeout_seconds": 0.15},
             profile={**PROFILE_GPT, "reasoning_effort": "high"},
         )
@@ -349,7 +355,7 @@ class StreamTotalTimeoutTests(_Harness):
 
     def test_fast_stream_is_unaffected(self) -> None:
         requests, _responses, content, error = self._run(
-            [[text_chunk("答"), text_chunk("复")]],
+            [[text_chunk("答"), text_chunk("复"), DONE]],
             options={"stream": True, "stream_total_timeout_seconds": 5},
             profile=PROFILE_GPT,
         )
@@ -359,6 +365,7 @@ class StreamTotalTimeoutTests(_Harness):
 
     def test_zero_disables_total_timeout(self) -> None:
         slow = [text_chunk("答") for _ in range(6)]
+        slow.append(DONE)
         requests, responses, content, error = self._run(
             [self._slow(slow, 0.03)],
             options={"stream": True, "stream_total_timeout_seconds": 0},
@@ -384,6 +391,7 @@ class StreamTotalTimeoutTests(_Harness):
     def test_timeout_error_type_is_distinct(self) -> None:
         """总时长超时是**独立异常类型**，不能与首字节超时混为一谈。"""
         slow = [text_chunk("答") for _ in range(20)]
+        slow.append(DONE)
         events: list[dict] = []
         self._run(
             [self._slow(slow, 0.03)],

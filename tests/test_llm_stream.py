@@ -166,6 +166,29 @@ class StreamReaderTests(unittest.TestCase):
         self.assertEqual(result["content"], "回答")
         self.assertEqual(result["reasoning"], "")
         self.assertTrue(any(e.get("type") == "delta" for e in events))
+        self.assertTrue(result["saw_done"])
+
+    def test_read_sse_reports_missing_done_marker(self):
+        """没有 [DONE] / message_stop / completed 的流要如实报告：三无流判定的依据。"""
+        events = []
+        response = [
+            'data: {"choices": [{"delta": {"content": "半截"}, "finish_reason": null}]}'.encode("utf-8"),
+        ]
+        result = StreamMixins._read_sse_response(response, "openai_chat", events.append)
+        self.assertEqual(result["content"], "半截")
+        self.assertFalse(result["saw_done"])
+
+    def test_read_sse_claude_message_stop_marks_done(self):
+        events = []
+        response = [
+            'data: {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "正文"}}'.encode("utf-8"),
+            'data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 3}}'.encode("utf-8"),
+            'data: {"type": "message_stop"}'.encode("utf-8"),
+        ]
+        result = StreamMixins._read_sse_response(response, "claude", events.append)
+        self.assertEqual(result["content"], "正文")
+        self.assertEqual(result["finish_reason"], "end_turn")
+        self.assertTrue(result["saw_done"])
 
     def test_read_sse_hides_split_kimi_harmony_protocol(self):
         events = []

@@ -1521,10 +1521,17 @@ function onImportFile(event) {
   const file = event.target.files?.[0];
   if (!file) return;
   file.text().then((text) => {
+    // 选文件视为换内容：无条件覆盖粘贴框与名称。只填空框的话，第一次导入
+    // 失败后残留的旧稿会顶掉重选的文件，让人误以为换文件也没用。
     const paste = $("#comfyuiImportText");
-    if (paste && !paste.value.trim()) paste.value = text;
+    if (paste) paste.value = text;
     const name = $("#comfyuiImportName");
-    if (name && !name.value.trim()) name.value = file.name.replace(/\.json$/i, "");
+    if (name) name.value = file.name.replace(/\.json$/i, "");
+    const error = $("#comfyuiImportError");
+    if (error) error.textContent = "";
+  }).catch((caught) => {
+    const error = $("#comfyuiImportError");
+    if (error) error.textContent = `读取文件失败：${caught?.message || caught}`;
   });
 }
 

@@ -5424,10 +5424,14 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 
 .writer-panes { display: none; gap: 4px; padding: 6px var(--s-4); border-bottom: 1px solid var(--line); }
 
-/* 桌面三栏：作品与目录 / 当前阶段工作区 / 说明与状态。 */
+/* 桌面三栏：作品与目录 / 当前阶段工作区 / 说明与状态。
+   行高必须钉死成 minmax(0,1fr)：auto 行会被长内容（如几千字的创意预览）撑高，
+   外层 overflow:hidden 直接裁掉，内部 .writer-scroll 永远达不到滚动阈值——
+   表现就是「设定汇总没有滑块，浏览不了全部」（第二次反馈 §四）。 */
 .writer-columns {
   display: grid;
   grid-template-columns: 248px minmax(0, 1fr) 280px;
+  grid-template-rows: minmax(0, 1fr);
   gap: 16px;
   padding: 20px;
   min-height: 0;
@@ -5471,7 +5475,13 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
   display: flex; gap: 8px; margin: 0; font-size: 11.5px; line-height: 1.6;
   padding-bottom: 7px; border-bottom: 1px dashed var(--line);
 }
+/* 创意/世界观是长文：标签顶格、正文换行保留换行符（预览要能看全，容器可滚动）。 */
+.writer-summary-row { align-items: flex-start; }
+.writer-summary-row b { white-space: pre-wrap; }
 .writer-summary-row span { flex: none; width: 42px; color: var(--muted); }
+/* 覆盖重拆等破坏性按钮的统一红样式（弹窗里用）。 */
+.control-button.danger { border-color: #c0392b; color: #c0392b; }
+.control-button.danger:hover { border-color: #c0392b; background: rgba(192, 57, 43, .08); }
 .writer-summary-row b { font-weight: 500; color: var(--text); word-break: break-word; }
 .writer-outline-view { display: flex; flex-direction: column; gap: 10px; }
 .writer-outline-part { display: flex; flex-direction: column; gap: 4px; }

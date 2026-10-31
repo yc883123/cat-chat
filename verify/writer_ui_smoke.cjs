@@ -409,9 +409,10 @@ async function runViewport(browser, vp) {
     check('书名候选芯片可见', await page.isVisible('#writerTitleCandidates'));
     await page.click('#writerSetupGenerate');
     await page.waitForTimeout(500);
-    check('生成整套设定提交 kind=setup_all（含主角数/拆章目标）',
+    check('生成整套设定提交 kind=setup_all（含主角/配角数；不再带大纲章数）',
       recorded.pipelines.length === 1 && recorded.pipelines[0].kind === 'setup_all'
-      && Number(recorded.pipelines[0].char_count) === 2 && Number(recorded.pipelines[0].chapter_count) === 30,
+      && Number(recorded.pipelines[0].char_count) === 2 && Number(recorded.pipelines[0].side_count) === 4
+      && recorded.pipelines[0].chapter_count === undefined,
       JSON.stringify(recorded.pipelines[0] || {}));
     // 生成进度区在右栏（手机上是「说明」档）：进度相关断言先切到那个档。
     const gotoNotesPane = async () => {

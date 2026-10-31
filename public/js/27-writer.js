@@ -45,6 +45,7 @@ const KIND_LABELS = {
   setup_step: "单步设定",
   outline: "生成全书大纲",
   outline_text: "生成本部大纲",
+  outline_all: "一次生成全部大纲",
   split: "拆分章节",
   chapter: "整章正文",
   chapter_segs: "分段正文",
@@ -153,11 +154,10 @@ const writer = {
   partNo: 1,
   // 部标题/大纲文字的编辑态：DOM 是最新值，渲染函数要让路（与 setupDirty 同一套规则）。
   partsDirty: false,
-  // 生成参数（滑条），本地保留。
+  // 生成参数（滑条），本地保留。设定链只出设定（第二次反馈），
+  // 「大纲章数」滑条已删——大纲没有章节概念，章节由拆章产出。
   charCount: 2,
   sideCount: 4,
-  chapterCount: 30,
-  outlineChapterCount: 12,
   // 模型选择（与拆书匠同口径）：先选供应商，再按供应商拉完整模型目录。
   setupProviderKey: "", setupModelName: "",
   outlineProviderKey: "", outlineModelName: "",
@@ -255,6 +255,7 @@ function fail(prefix, error) {
 function setBusy(busy) {
   writer.busy = busy;
   for (const id of ["writerSetupGenerate", "writerSetupSave", "writerOutlineGenerate", "writerOutlineSave",
+    "writerOutlineGenerateAll", "writerPartsApply", "writerImportSettingsBtn",
     "writerSyncBtn", "writerDraftGenerate", "writerDraftSegs", "writerDraftContinue", "writerDraftRewrite",
     "writerDraftSave", "writerImportCommit", "writerExportBtn", "writerManageBtn",
     "writerImportBtn", "writerBooksBtn", "writerNewBookBtn"]) {
@@ -555,17 +556,18 @@ function renderSetupSummary() {
   const setup = writer.setup || {};
   const genre = setup.genre || {};
   const chars = (setup.characters || []).filter((row) => row && String(row.name || "").trim());
+  // 创意/世界观不再截断（第二次反馈 §四：预览要能看全）——容器本身可滚动。
   const rows = [
-    summaryLine("创意", String(setup.idea || "").slice(0, 160)),
+    summaryLine("创意", String(setup.idea || "")),
     summaryLine("书名", setup.title),
     summaryLine("题材", [genre.channel === "female" ? "女生类" : genre.channel === "male" ? "男生类" : "",
       genre.cat, genre.sub_cat].filter(Boolean).join(" › ")),
     summaryLine("基调", genre.tone),
     summaryLine("标签", (setup.genre_tags || []).join(" · ")),
     summaryLine("风格", styleLabelOf(setup.style)),
-    summaryLine("雷区", String(setup.constraints?.avoid || "").slice(0, 120)),
+    summaryLine("雷区", String(setup.constraints?.avoid || "")),
     summaryLine("角色", chars.length ? chars.map((row) => String(row.name)).join("、") : ""),
-    summaryLine("世界观", String(setup.worldview || "").slice(0, 200)),
+    summaryLine("世界观", String(setup.worldview || "")),
   ].filter(Boolean);
   if (!rows.length) {
     const empty = document.createElement("p");
@@ -587,6 +589,19 @@ function renderChapterOutlineSummary() {
     meta.textContent = parts.length
       ? `${parts.length} 部 · ${fmtChars(parts.reduce((n, row) => n + String(row.text || "").length, 0))} 字`
       : (legacy.length ? "逐章大纲（旧版）" : "还没有大纲");
+  }
+  // 章节页也要能切大纲版本（第二次反馈）：切了版本，下面的汇总与拆章就跟着换。
+  const versionGroup = $("#writerChapterOutlineVersionGroup");
+  const versionSelect = $("#writerChapterOutlineVersion");
+  const versions = Array.isArray(writer.book?.outline_versions) ? writer.book.outline_versions : [];
+  if (versionGroup) versionGroup.hidden = versions.length < 2;
+  if (versionSelect) {
+    const current = String(writer.book?.current_outline_version_id || "");
+    versionSelect.replaceChildren(...versions.map((row) => new Option(
+      `v${row.version} · ${versionKindLabel(row.kind)} · ${row.parts_count ? `${row.parts_count} 部` : `${row.chapter_count} 章`} · ${fmtTime(row.updated_at)}`,
+      String(row.id || ""),
+    )));
+    if (versions.length) versionSelect.value = current || String(versions.at(-1).id || "");
   }
   if (parts.length) {
     box.replaceChildren(...parts.map((row) => {
@@ -1102,6 +1117,11 @@ function currentPart() {
 function renderParts() {
   const box = $("#writerOutlineParts");
   const parts = outlineParts();
+  // 部数计划输入框跟着当前作品走（正在输入时别打扰）。
+  const targetInput = $("#writerPartsTarget");
+  if (targetInput && document.activeElement !== targetInput) {
+    targetInput.value = String(parts.length || 1);
+  }
   if (box) {
     box.hidden = !parts.length;
     box.replaceChildren(...parts.map((row) => {
@@ -1376,7 +1396,7 @@ function renderPlan() {
 }
 
 const PLAN_EMPTY_TEXT = {
-  setup: "还没打开作品。生成前会先在这里列出六步链第一步（题材推断）的输入来源。",
+  setup: "还没打开作品。生成前会先在这里列出设定链第一步（题材推断）的输入来源。",
   outline: "还没打开作品。生成前会先在这里列出大纲步的输入来源（当前设定 + 分部）。",
   chapter: "还没打开作品。拆章前会先在这里列出实际带上的大纲与设定。",
   draft: "先打开作品并选一章。生成前会在这里列出实际带上的设定、摘要、上一章结尾与本章梗概。",
@@ -1416,7 +1436,7 @@ async function refreshPlan() {
         chapter_no: writer.stage === "draft" ? writer.chapterNo : undefined,
         model_key: model.model_key,
         char_count: writer.charCount,
-        chapter_count: writer.stage === "setup" ? writer.chapterCount : writer.outlineChapterCount,
+        side_count: writer.sideCount,
         extra_note: String(
           writer.stage === "setup" ? $("#writerSetupNote")?.value || ""
             : writer.stage === "outline" ? $("#writerOutlineNote")?.value || ""
@@ -1470,9 +1490,11 @@ function renderPipeline() {
   const taskLine = $("#writerPipelineTask");
   if (taskLine) {
     const taskStatus = String(pipeline.task_status || writer.pipelineTask?.status || "");
+    // 失败态只留红色错误行（writerPipelineError）：这里重复一遍 error 原文，
+    // 用户会在三处看到同一段话（第二次反馈）。白色行只回答「当前任务在干嘛」。
     taskLine.textContent = pipeline.status === "running"
       ? `当前任务：${taskStatus ? TASK_STATUS_LABELS[taskStatus] || taskStatus : "查询中"}`
-      : (pipeline.error || "—");
+      : "—";
   }
   const stream = $("#writerPipelineStream");
   if (stream) {
@@ -1565,15 +1587,23 @@ async function pollPipelineTick() {
     writer.pipeline = fresh;
     renderPipeline();
     if (wasRunning && fresh.status !== "running") {
-      // 终态：流水线可能已写回新版本，重读作品刷新目录与编辑区（保留未保存的编辑）。
+      // 终态：流水线可能已写回新版本，重读作品刷新目录与编辑区。
+      // 成功完成的阶段，其「未保存修改」标记要让位——否则生成前留下的脏标记
+      // 会挡住表单回填，看起来就是「生成完了，内容却不显示」（第二次反馈实锤）。
+      if (fresh.status === "done") {
+        if (fresh.kind === "setup_all" || fresh.kind === "setup_step") writer.setupDirty = false;
+        if (fresh.kind === "outline_text" || fresh.kind === "outline_all") writer.partsDirty = false;
+        persistDraftAfterSave();
+      }
       await openBook(bookId, { keepEdits: true, keepStage: true });
       if (fresh.status === "done") {
         toast(`生成完成：${kindLabel(fresh.kind)}`);
         setSaveState("生成完成", "本轮生成的内容已写回作品（可在目录与各阶段里看到）。");
       } else {
         const label = PIPELINE_STATUS_LABELS[String(fresh.status || "")] || fresh.status;
-        toast(`生成${label}：${fresh.error || "可重试"}`);
-        setSaveState("生成未完成", String(fresh.error || ""));
+        toast(`生成${label}：可重试`);
+        // 失败原因只写在右栏红色错误行（writerPipelineError），这里不再重复原文。
+        setSaveState("生成未完成", `详情见右栏「生成进度」里的红色错误行。`);
       }
       renderAll();
     }
@@ -1658,6 +1688,7 @@ async function submitPipeline(kind, opts = {}) {
   const {
     chapterNo = 0, allowDrop = false, partNo = 0, partTitle = "",
     targetChars = 0, wantCount = 0, fromNo = 0, extraNote = "", model: preset = null,
+    partPlan = null,
   } = opts;
   if (!writer.bookId) return;
   if (writer.pipeline?.status === "running") {
@@ -1691,12 +1722,13 @@ async function submitPipeline(kind, opts = {}) {
         model_key: model.model_key,
         model_name: model.model_name,
         char_count: writer.charCount,
-        chapter_count: writer.stage === "setup" ? writer.chapterCount : writer.outlineChapterCount,
+        side_count: writer.sideCount,
         part_no: partNo || undefined,
         part_title: partTitle || undefined,
         target_chars: targetChars || undefined,
         want_count: wantCount || undefined,
         from_no: fromNo || undefined,
+        part_plan: Array.isArray(partPlan) && partPlan.length ? partPlan : undefined,
         extra_note: extraNote || fallbackNote,
         allow_drop: allowDrop || undefined,
         revision: writer.book?.revision,
@@ -2307,6 +2339,55 @@ async function generatePartText() {
   }
 }
 
+/** 按填的部数重建分部目录：多退少补，已有内容的部原样保留。 */
+function applyPartsTarget() {
+  const target = Math.min(20, Math.max(1, Number($("#writerPartsTarget")?.value || 1)));
+  const parts = collectParts();
+  if (target === parts.length) {
+    toast(`已经是 ${target} 部了`);
+    return;
+  }
+  const next = [];
+  for (let no = 1; no <= target; no += 1) {
+    next.push(parts[no - 1] || { no, title: `第 ${no} 部`, text: "" });
+  }
+  writer.outline = { ...(writer.outline || {}), schema: 2, parts: next, chapters: [] };
+  writer.partNo = Math.min(Number(writer.partNo || 1), target);
+  writer.partsDirty = true;
+  renderOutline();
+  renderOutlineStat();
+  toast(`已按 ${target} 部重排目录${target > parts.length ? "；新增的部是空的，点「一次性生成全部大纲」或逐部填写" : ""}；保存后生效`);
+}
+
+/** 一次性生成全部部的大纲（outline_all）：每步一部，后面的部接住前面的线。 */
+async function generateAllParts() {
+  if (!writer.bookId) return;
+  const model = readModel("outlineProviderKey", "outlineModelName");
+  if (!model.model_name) {
+    toast("先在设置里检查模型，再回来选择");
+    return;
+  }
+  if (writer.partsDirty) {
+    await savePartsManual();
+    // 保存失败（如版本冲突已重新读取）就不带着旧目录继续生成。
+    if (writer.partsDirty) return;
+  }
+  const plan = collectParts().map((row) => ({ no: row.no, title: row.title }));
+  if (!plan.length) {
+    toast("先填好各部的部标题（或点「按部数生成目录」）");
+    return;
+  }
+  const withText = collectParts().filter((row) => String(row.text || "").trim()).length;
+  if (withText && !window.confirm(
+    `要按 ${plan.length} 部一次性生成全部大纲吗？\n已写过内容的部会被新生成的内容替换（旧版本保留在历史里）；后面的部会衔接前面的部，保证故事连贯。`,
+  )) return;
+  try {
+    await submitPipeline("outline_all", { partPlan: plan, targetChars: 8000, model });
+  } catch (_error) {
+    // submitPipeline 自己会 toast。
+  }
+}
+
 function addPart() {
   const parts = collectParts();
   if (parts.length >= 20) {
@@ -2382,7 +2463,9 @@ async function saveChapterPlan() {
   }
 }
 
-/** 拆一批：从「当前最大章号 + 1」开始，按 wantCount 与 200 上限切批。 */
+const SPLIT_BATCH_MAX = 999;
+
+/** 拆一批：按 wantCount 与 999 上限切批；接续拆分会带上已拆章节的衔接上下文（服务端）。 */
 async function startSplit() {
   if (!writer.bookId) return;
   const want = Number($("#writerSplitCount")?.value || 0);
@@ -2390,21 +2473,74 @@ async function startSplit() {
     toast("先填要拆成多少章（1–9999）");
     return;
   }
-  if (writer.chapters.length && !window.confirm(
-    `现在已有 ${writer.chapters.length} 章；拆章只会「追加还没的章号」，已有章节（含正文）不会被覆盖。继续吗？`,
-  )) return;
   await saveChapterPlan();
   const model = readModel("chapterProviderKey", "chapterModelName");
   if (!model.model_name) {
     toast("先在设置里检查模型，再回来选择");
     return;
   }
-  const fromNo = writer.chapters.reduce((max, row) => Math.max(max, Number(row.no) || 0), 0) + 1;
-  const partNo = Number($("#writerSplitPart")?.value || writer.partNo || 1);
-  await submitSplitBatch({ fromNo, partNo, model });
+  if (!writer.chapters.length) {
+    await submitSplitBatch({ fromNo: 1, partNo: splitPartNo(), model });
+    return;
+  }
+  // 已有章节：让用户选「接续」（从下一章继续）或「覆盖重拆」（清空后从第 1 章开始）。
+  const existing = writer.chapters.length;
+  const hasBody = writer.chapters.some((row) => Number(row.len || 0) > 0);
+  const note = $("#writerSplitDialogNote");
+  if (note) {
+    note.textContent = `现在已有 ${existing} 章${hasBody ? "（部分已有正文）" : ""}。`
+      + "接续＝保留现有章节，从它们的下一章继续拆；覆盖重拆＝清空现有章节目录（含全部正文，不能恢复），从第 1 章重新拆。";
+  }
+  const dialog = $("#writerSplitDialog");
+  if (!dialog || typeof dialog.showModal !== "function") {
+    // 弹窗不可用（老内核）：退回 window.confirm 的接续/取消二选一。
+    if (window.confirm(`现在已有 ${existing} 章；接续拆分会从第 ${existing + 1} 章继续（已有章节不会被覆盖）。继续吗？`)) {
+      await submitSplitBatch({ fromNo: existing + 1, partNo: splitPartNo(), model });
+    }
+    return;
+  }
+  const continueBtn = $("#writerSplitContinueChoice");
+  const overwriteBtn = $("#writerSplitOverwriteChoice");
+  const cancelBtn = $("#writerSplitCancelChoice");
+  // signal：弹窗一结束就把本轮监听全部摘掉；once 残留下轮会串选择。
+  const signal = new AbortController().signal;
+  const done = await new Promise((resolve) => {
+    const settle = dialog.addEventListener.bind(dialog);
+    settle("close", () => resolve("cancel"), { once: true, signal });
+    continueBtn?.addEventListener("click", () => resolve("continue"), { once: true, signal });
+    overwriteBtn?.addEventListener("click", () => resolve("overwrite"), { once: true, signal });
+    cancelBtn?.addEventListener("click", () => resolve("cancel"), { once: true, signal });
+  });
+  dialog.close();
+  if (done === "continue") {
+    await submitSplitBatch({ fromNo: existing + 1, partNo: splitPartNo(), model });
+    return;
+  }
+  if (done === "overwrite") {
+    if (!window.confirm(
+      `要清空现有 ${existing} 章吗？\n章节目录与全部正文版本都会删除，不能恢复；之后从第 1 章重新拆。`,
+    )) return;
+    try {
+      await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}/chapters/clear`, {
+        method: "POST",
+        body: { revision: writer.book?.revision },
+      });
+      writer.chapters = [];
+      writer.chapter = null;
+      writer.chapterNo = 0;
+      toast("已清空章节目录；开始覆盖重拆");
+      await submitSplitBatch({ fromNo: 1, partNo: splitPartNo(), model });
+    } catch (error) {
+      fail("清空章节失败", error);
+    }
+  }
 }
 
-/** 继续拆：还剩多少就再拆一批（每批 ≤200）。 */
+function splitPartNo() {
+  return Number($("#writerSplitPart")?.value || writer.partNo || 1);
+}
+
+/** 继续拆：还剩多少就再拆一批（每批 ≤999）。 */
 async function continueSplit() {
   const target = Number($("#writerSplitCount")?.value || 0);
   if (!target) return;
@@ -2419,14 +2555,14 @@ async function continueSplit() {
     return;
   }
   await submitSplitBatch({
-    fromNo, partNo: Number($("#writerSplitPart")?.value || 1), model,
+    fromNo, partNo: splitPartNo(), model,
   });
 }
 
 async function submitSplitBatch({ fromNo, partNo, model }) {
   const target = Number($("#writerSplitCount")?.value || 0);
   const remaining = Math.max(1, target - fromNo + 1);
-  const wantCount = Math.min(200, remaining);
+  const wantCount = Math.min(SPLIT_BATCH_MAX, remaining);
   try {
     await submitPipeline("split", {
       partNo,
@@ -2494,7 +2630,7 @@ async function selectOutlineVersion(versionId) {
       body: { kind: "outline", version_id: versionId, revision: writer.book?.revision },
     });
     writer.book = payload.book;
-    toast("已切换大纲版本；要更新章节目录请点「按当前大纲同步章节」");
+    toast("已切换大纲版本；大纲汇总与拆分会跟着这一版走");
     await openBook(writer.bookId, { keepStage: true });
   } catch (error) {
     if (error?.status === 409) {
@@ -2717,6 +2853,61 @@ async function importArchive(file) {
   }
 }
 
+/** 设定集文件夹导入（第二次反馈 §一/§六）：整个文件夹的 .md 一次读入并解析。 */
+async function importSettingsFolder(fileList) {
+  if (!writer.bookId) {
+    toast("先打开（或新建）一部作品，再导入设定集");
+    return;
+  }
+  const files = [...(fileList || [])].filter((file) => /\.(md|markdown|txt)$/i.test(file.name));
+  if (!files.length) {
+    toast("文件夹里没有 .md / .txt 文件；请选择设定集文件夹");
+    return;
+  }
+  files.sort((a, b) => String(a.name).localeCompare(String(b.name), "zh-Hans-CN"));
+  const totalBytes = files.reduce((sum, file) => sum + Number(file.size || 0), 0);
+  if (totalBytes > 12 * 1024 * 1024) {
+    toast(`设定集太大（${fmtBytes(totalBytes)}），上限 12 MB；请删减后重试`);
+    return;
+  }
+  setBusy(true);
+  setSaveState("正在导入设定集", `正在读取 ${files.length} 个文件，请稍候。`);
+  try {
+    const contents = await Promise.all(files.map(async (file) => ({
+      name: String(file.webkitRelativePath || file.name || "").split("/").pop() || file.name,
+      content: await file.text(),
+    })));
+    const payload = await api(
+      `/api/writer/books/${encodeURIComponent(writer.bookId)}/import-settings`,
+      { method: "POST", body: { files: contents, revision: writer.book?.revision } },
+    );
+    writer.book = payload.book;
+    writer.importPreview = null;
+    await openBook(writer.bookId, { keepStage: true });
+    const preview = payload.preview || {};
+    const bits = [
+      `识别角色 ${preview.character_count || 0} 人`,
+      `分部大纲 ${preview.parts_count || 0} 部`,
+      `章节框架 ${preview.chapter_count || 0} 章`,
+    ];
+    if (preview.plan_chars) bits.push(`单章约 ${preview.plan_chars} 字`);
+    const warnings = Array.isArray(preview.warnings) ? preview.warnings : [];
+    setSaveState("设定集已导入", bits.join(" · ")
+      + (warnings.length ? `。注意：${warnings.join("；")}` : ""));
+    toast(`设定集导入完成：${bits.join("，")}`);
+    // 识别到什么就停在哪一步：有章节框架直接到章节页，有分部大纲到大纲页。
+    if ((preview.appended_chapters || []).length) setStage("chapter");
+    else if (preview.parts_count) setStage("outline");
+    else setStage("setup");
+    renderAll();
+  } catch (error) {
+    fail("导入设定集失败", error);
+    setSaveState("设定集导入失败", String(error?.message || error));
+  } finally {
+    setBusy(false);
+  }
+}
+
 function renderImportPreview() {
   const box = $("#writerImportPreview");
   if (!box) return;
@@ -2871,7 +3062,17 @@ function filteredManageRows() {
 }
 
 function manageRowSelectable(row) {
-  return writer.manage.tab === "task";
+  // 设定 / 大纲版本与生成记录都可勾选删除；章节行删的是整章（走章节自己的删除入口）。
+  return writer.manage.tab !== "chapter";
+}
+
+function manageTabNote() {
+  return {
+    setup: "设定版本逐条保留；「设为当前」立即切换。勾选后可删除不要的版本（删除不能恢复；删的是版本文件本身）。",
+    outline: "大纲版本逐条保留；「设为当前」立即切换。勾选后可删除不要的版本（删除不能恢复）。",
+    chapter: "点一章展开它的正文版本；「设为当前」立即切换正文。展开后可以勾选删除单个正文版本。",
+    task: "织书台这一本作品的生成记录；删除只清任务记录，不删已保存的内容。",
+  }[writer.manage.tab] || "";
 }
 
 function renderManage() {
@@ -2886,14 +3087,7 @@ function renderManage() {
   if (!list) return;
   const scope = $("#writerManageScope");
   if (scope) scope.textContent = writer.bookId ? `《${writer.book?.title || ""}》` : "先打开作品";
-  if (noteEl) {
-    noteEl.textContent = {
-      setup: "设定版本逐条保留；「设为当前」立即切换，内容不会丢失。",
-      outline: "大纲版本逐条保留；切换后要点大纲页的「按当前大纲同步章节」才会更新章节目录。",
-      chapter: "点一章展开它的正文版本；「设为当前」立即切换正文。",
-      task: "织书台这一本作品的生成记录；删除只清任务记录，不删已保存的内容。",
-    }[writer.manage.tab] || "";
-  }
+  if (noteEl) noteEl.textContent = manageTabNote();
   if (!writer.bookId) {
     list.replaceChildren(Object.assign(document.createElement("p"), {
       className: "writer-empty",
@@ -2967,8 +3161,9 @@ function renderManage() {
   }
   const selection = $("#writerManageSelection");
   if (selection) {
+    const nouns = { setup: "个设定版本", outline: "个大纲版本", chapter: "章", task: "条生成记录" };
     selection.textContent = writer.manage.selected.size
-      ? `已选 ${writer.manage.selected.size} 条生成记录` : "";
+      ? `已选 ${writer.manage.selected.size} ${nouns[writer.manage.tab] || "条"}（删除不能恢复）` : "";
   }
   const del = $("#writerManageDelete");
   if (del) del.disabled = !writer.manage.selected.size;
@@ -2995,6 +3190,12 @@ async function renderChapterVersionRows() {
     for (const row of payload.versions || []) {
       const item = document.createElement("div");
       item.className = "writer-manage-row";
+      // 正文版本也能勾选删除（第二次反馈：管理记录要能管理正文版本）。
+      const check = document.createElement("input");
+      check.type = "checkbox";
+      check.dataset.writerManageCheck = `chapterver:${no}:${row.id}`;
+      check.checked = writer.manage.selected.has(`chapterver:${no}:${row.id}`);
+      item.append(check);
       const open = document.createElement("button");
       open.type = "button";
       open.className = "writer-manage-open";
@@ -3130,23 +3331,87 @@ async function deleteManageSelection() {
   const keys = [...writer.manage.selected];
   if (!keys.length) return;
   const taskIds = keys.filter((key) => key.startsWith("task:")).map((key) => key.slice(5));
-  if (!taskIds.length) {
-    toast("只有「生成记录」可以删除；版本请用切换而不是删除");
+  const versionKeys = keys.filter((key) => key.startsWith("version:"));
+  const chapterVerKeys = keys.filter((key) => key.startsWith("chapterver:"));
+  if (!taskIds.length && !versionKeys.length && !chapterVerKeys.length) {
+    toast("先勾选要删除的记录");
     return;
   }
-  if (!window.confirm(
-    `要删除 ${taskIds.length} 条生成记录吗？\n只删任务记录，不删除从它保存的设定、大纲或正文。`,
-  )) return;
   const errorEl = $("#writerManageError");
   if (errorEl) errorEl.textContent = "";
+  // 任务记录：只清记录不删内容。
+  if (taskIds.length) {
+    if (versionKeys.length || chapterVerKeys.length) {
+      toast("任务记录和版本要分开删：先删一种，再删另一种");
+      return;
+    }
+    if (!window.confirm(
+      `要删除 ${taskIds.length} 条生成记录吗？\n只删任务记录，不删除从它保存的设定、大纲或正文。`,
+    )) return;
+    try {
+      await api("/api/studio/tasks", { method: "DELETE", body: { ids: taskIds } });
+      writer.manage.selected.clear();
+      await loadManageTasks();
+      toast("已删除选中的生成记录");
+    } catch (error) {
+      if (errorEl) errorEl.textContent = String(error?.message || error);
+      fail("删除记录失败", error);
+    }
+    return;
+  }
+  // 正文版本：一章一接口，按章分组。
+  if (chapterVerKeys.length) {
+    const byChapter = new Map();
+    for (const key of chapterVerKeys) {
+      const [, no, vid] = key.split(":");
+      const list = byChapter.get(Number(no)) || [];
+      list.push(vid);
+      byChapter.set(Number(no), list);
+    }
+    if (!window.confirm(
+      `要删除 ${chapterVerKeys.length} 个正文版本吗？\n正文版本文件会一并删除，不能恢复；删到当前版本时指针会落到最新剩余版本。`,
+    )) return;
+    try {
+      for (const [no, ids] of byChapter) {
+        // 正文版本走章节自己的 revision（与「设为当前」同一口径）。
+        const chapterRow = writer.chapters.find((row) => Number(row.no) === no);
+        await api(
+          `/api/writer/books/${encodeURIComponent(writer.bookId)}/chapters/${no}/versions/delete`,
+          { method: "POST", body: { version_ids: ids, revision: chapterRow?.revision } },
+        );
+      }
+      writer.manage.selected.clear();
+      await openBook(writer.bookId, { keepStage: true });
+      renderManage();
+      toast(`已删除 ${chapterVerKeys.length} 个正文版本`);
+    } catch (error) {
+      if (errorEl) errorEl.textContent = String(error?.message || error);
+      fail("删除正文版本失败", error);
+    }
+    return;
+  }
+  // 设定 / 大纲版本。
+  const kind = writer.manage.tab === "outline" ? "outline" : "setup";
+  const ids = versionKeys.map((key) => key.slice("version:".length));
+  const currentId = kind === "setup"
+    ? String(writer.book?.current_setup_version_id || "")
+    : String(writer.book?.current_outline_version_id || "");
+  if (!window.confirm(
+    `要删除 ${ids.length} 个${kind === "setup" ? "设定" : "大纲"}版本吗？\n`
+    + `版本文件会一并删除，不能恢复${ids.includes(currentId) ? "；当前版本被删时会自动切到最新剩余版本" : ""}。`,
+  )) return;
   try {
-    await api("/api/studio/tasks", { method: "DELETE", body: { ids: taskIds } });
+    await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}/versions/delete`, {
+      method: "POST",
+      body: { kind, version_ids: ids, revision: writer.book?.revision },
+    });
     writer.manage.selected.clear();
-    await loadManageTasks();
-    toast("已删除选中的生成记录");
+    await openBook(writer.bookId, { keepStage: true });
+    renderManage();
+    toast(`已删除 ${ids.length} 个${kind === "setup" ? "设定" : "大纲"}版本`);
   } catch (error) {
     if (errorEl) errorEl.textContent = String(error?.message || error);
-    fail("删除记录失败", error);
+    fail("删除版本失败", error);
   }
 }
 
@@ -3275,6 +3540,19 @@ export function bindWriterEvents() {
     if (del) void deleteBook(del.dataset.writerDeleteBook, del.dataset.writerDeleteTitle);
   });
   $("#writerImportBtn")?.addEventListener("click", () => $("#writerImportFile")?.click());
+  // 设定集文件夹导入：webkitdirectory 选择整个文件夹，读取其中全部 .md。
+  $("#writerImportSettingsBtn")?.addEventListener("click", () => {
+    if (!writer.bookId) {
+      toast("先打开（或新建）一部作品，再导入设定集");
+      return;
+    }
+    $("#writerImportSettingsInput")?.click();
+  });
+  $("#writerImportSettingsInput")?.addEventListener("change", (event) => {
+    const files = event.target?.files;
+    void importSettingsFolder(files);
+    if (event.target) event.target.value = "";
+  });
   $("#writerImportFile")?.addEventListener("change", (event) => {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -3519,18 +3797,28 @@ export function bindWriterEvents() {
   });
   $("#writerSetupSave")?.addEventListener("click", () => void saveSetupManual());
   $("#writerSetupGenerate")?.addEventListener("click", () => void submitPipeline("setup_all"));
-  for (const id of ["writerCharCount", "writerSideCount", "writerChapterCount"]) {
+  for (const id of ["writerCharCount", "writerSideCount"]) {
     $(`#${id}`)?.addEventListener("input", (event) => {
       const value = Number(event.target.value || 0);
       if (id === "writerCharCount") writer.charCount = value;
-      else if (id === "writerSideCount") writer.sideCount = value;
-      else writer.chapterCount = value;
+      else writer.sideCount = value;
       const label = $(`#${id}Value`);
       if (label) label.textContent = String(value);
       saveLimits();
+      void refreshPlan();
     });
   }
   $("#writerSetupNote")?.addEventListener("change", () => void refreshPlan());
+  // 左栏「设定版本」：点一版切回。这一列此前漏绑了点击事件（点了一直没反应）；
+  // 表单有未保存修改时先确认，别让切换默默丢稿。
+  $("#writerSetupVersionList")?.addEventListener("click", (event) => {
+    const row = event.target.closest("[data-writer-setup-version]");
+    if (!row) return;
+    const versionId = String(row.dataset.writerSetupVersion || "");
+    if (!versionId || versionId === String(writer.book?.current_setup_version_id || "")) return;
+    if (writer.setupDirty && !window.confirm("设定表单有还没保存的修改，切版本会丢掉这些修改。继续吗？")) return;
+    void selectSetupVersion(versionId);
+  });
 
   // ---- 模型选择 ----
   for (const [providerId, modelId, providerField, modelField] of [
@@ -3613,6 +3901,8 @@ export function bindWriterEvents() {
     });
   }
   $("#writerOutlineGenerate")?.addEventListener("click", () => void generatePartText());
+  $("#writerOutlineGenerateAll")?.addEventListener("click", () => void generateAllParts());
+  $("#writerPartsApply")?.addEventListener("click", () => applyPartsTarget());
   $("#writerOutlineSave")?.addEventListener("click", () => void savePartsManual());
   $("#writerPartAdd")?.addEventListener("click", () => addPart());
   $("#writerPartRemove")?.addEventListener("click", () => removePart());
@@ -3648,6 +3938,10 @@ export function bindWriterEvents() {
     if (!open) return;
     setStage("draft");
     void openChapter(Number(open.dataset.writerBriefOpen || 0));
+  });
+  // 章节页左栏切大纲版本：切换后汇总与「拆哪一部」都会跟着新版本走。
+  $("#writerChapterOutlineVersion")?.addEventListener("change", (event) => {
+    void selectOutlineVersion(String(event.target.value || ""));
   });
 
   // ---- 正文 ----
@@ -3691,8 +3985,11 @@ export function bindWriterEvents() {
     renderManage();
   });
   $("#writerManageSelectAll")?.addEventListener("click", () => {
+    // 当前页签里所有可勾选的行（设定/大纲版本页=版本，任务页=生成记录）。
+    const prefix = writer.manage.tab === "task" ? "task:"
+      : writer.manage.tab === "chapter" ? "chapter:" : "version:";
     for (const row of filteredManageRows()) {
-      if (manageRowSelectable(row)) writer.manage.selected.add(`task:${row.id}`);
+      if (manageRowSelectable(row)) writer.manage.selected.add(`${prefix}${row.id}`);
     }
     renderManage();
   });
@@ -3831,10 +4128,6 @@ function restoreLimits() {
     if (Number.isFinite(Number(saved.side_count)) && Number(saved.side_count) >= 0 && Number(saved.side_count) <= 20) {
       writer.sideCount = Number(saved.side_count);
     }
-    if (Number.isFinite(Number(saved.chapter_count)) && Number(saved.chapter_count) >= 1 && Number(saved.chapter_count) <= 200) {
-      writer.chapterCount = Number(saved.chapter_count);
-      writer.outlineChapterCount = Number(saved.chapter_count);
-    }
   } catch (_error) {
     // 存储不可用或值损坏：保持默认值。
   }
@@ -3846,14 +4139,6 @@ function restoreLimits() {
   if (sideRange) sideRange.value = String(writer.sideCount);
   const sideLabel = $("#writerSideCountValue");
   if (sideLabel) sideLabel.textContent = String(writer.sideCount);
-  const chapterRange = $("#writerChapterCount");
-  if (chapterRange) chapterRange.value = String(writer.chapterCount);
-  const chapterLabel = $("#writerChapterCountValue");
-  if (chapterLabel) chapterLabel.textContent = String(writer.chapterCount);
-  const outlineRange = $("#writerOutlineChapterCount");
-  if (outlineRange) outlineRange.value = String(writer.outlineChapterCount);
-  const outlineLabel = $("#writerOutlineChapterCountValue");
-  if (outlineLabel) outlineLabel.textContent = String(writer.outlineChapterCount);
 }
 
 function saveLimits() {
@@ -3861,7 +4146,6 @@ function saveLimits() {
     localStorage.setItem(LIMITS_KEY, JSON.stringify({
       char_count: writer.charCount,
       side_count: writer.sideCount,
-      chapter_count: writer.chapterCount,
     }));
   } catch (_error) {
     // 存储不可用：参数只在本次会话内生效。

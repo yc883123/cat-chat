@@ -21,9 +21,10 @@ from naiba.writer.store import WriterStoreError
 
 # ---- 步骤定义 ----
 
-# 六步自动链：题材 → 书名 → 简介 → 世界观 → 角色 → 大纲（与启元 NV.start() 同序；
-# 大纲是第 6 步，落大纲版本并同步章节索引）。
-SETUP_STEPS: tuple[str, ...] = ("genre", "title", "blurb", "world", "chars", "outline")
+# 设定自动链：题材 → 书名 → 简介 → 世界观 → 角色（第二次反馈：设定只出设定，
+# 大纲与章节不在设定链里——「大纲章数」曾让章节目录在设定阶段就凭空多出 30 章）。
+# 老的「大纲」步保留：只服务于老 kind `outline`（逐章大纲）的兼容路径。
+SETUP_STEPS: tuple[str, ...] = ("genre", "title", "blurb", "world", "chars")
 # 3.9.13 起「大纲」不再等于章节表：大纲是一整篇文字（可分部），章节由独立的 split 步拆出来。
 TEXT_STEPS: tuple[str, ...] = ("outline_text", "split")
 ALL_STEPS: tuple[str, ...] = (*SETUP_STEPS, *TEXT_STEPS, "segs", "draft")
@@ -42,15 +43,19 @@ STEP_LABELS = {
 }
 
 CHARS_MIN, CHARS_MAX = 1, 10
+SIDE_COUNT_MAX = 99
 # 旧的「大纲=章节表」上限，只服务于老 kind（outline）的兼容路径。
 OUTLINE_MIN, OUTLINE_MAX = 5, 30
 SEGS_MIN, SEGS_MAX = 2, 4
 # 分部大纲：部数 1–20，每部正文上限 20 万字符（"几万字"够用，再大必然超窗口）。
 PARTS_MIN, PARTS_MAX = 1, 20
 PART_TEXT_MAX = 200_000
-# 拆章：一部最多 9999 章；单批最多 200 章。
+# 拆章：一部最多 9999 章；单批最多 999 章（第二次反馈：200 不够用）。
 SPLIT_MIN, SPLIT_MAX = 1, 9999
-SPLIT_BATCH_MAX = 200
+SPLIT_BATCH_MAX = 999
+# 接续拆分时带上的「已拆章节」衔接上下文：最多最近 8 章、总量上限（防撑窗口）。
+SPLIT_PREV_MAX_CHAPTERS = 8
+SPLIT_PREV_MAX_CHARS = 2400
 # 单章字数限制的合法取值（0 = 不限）。
 CHAPTER_CHARS_CHOICES = (0, 2000, 3000, 4000, 6000)
 # 章节结尾策略。
@@ -263,7 +268,8 @@ STEP_SYSTEM = {
         '[{"name":"姓名","role":"主角/配角/反派","identity":"身份一句话",'
         '"goal":"核心诉求一句话","traits":"性格标签","speech":"说话习惯",'
         '"arc":"人物弧光一句话","background":"背景与秘密"}]\n'
-        "角色之间要有利益冲突或情感张力，反派动机必须合理。所有值纯中文。"
+        "按用户消息要求的主角与配角数量给足，一个都不能少；配角也要有独立的动机与"
+        "生活，不做工具人。角色之间要有利益冲突或情感张力，反派动机必须合理。所有值纯中文。"
     ),
     "outline": (
         "你是网文大纲策划师。基于创作提示词与世界观，输出 JSON 对象：\n"
@@ -305,9 +311,16 @@ def step_system(step: str) -> str:
 # ---- 设定各步的用户提示词（预检与正式提交共用） ----
 
 def build_step_user(step: str, setup: dict[str, Any], *, char_count: int = 4,
-                    chapter_count: int = 10, extra_note: str = "") -> str:
-    """六步设定的用户消息。`setup` 是选定设定版本的内容。"""
-    if step not in SETUP_STEPS:
+                    side_count: int = 0, chapter_count: int = 10,
+                    extra_note: str = "") -> str:
+    """设定各步的用户消息。`setup` 是选定设定版本的内容。
+
+    `char_count` / `side_count` 只在角色步生效：主角与配角数量都要给足
+    （第二次反馈：只报主角数会让 20 个配角一个都不出）。
+
+    `outline` 步不在设定链里了，但老的 `outline` 流水线 kind 还会走这里，保留。
+    """
+    if step not in (*SETUP_STEPS, "outline"):
         raise PromptError(f"未知设定步骤：{step}")
     idea = idea_text(setup)
     style_block = _constraints_block(setup)
@@ -341,7 +354,12 @@ def build_step_user(step: str, setup: dict[str, Any], *, char_count: int = 4,
     elif step == "world":
         parts.append("请输出世界观设定。")
     elif step == "chars":
-        parts.append(f"请输出 {char_count} 个角色（JSON 数组）。")
+        lead = max(1, int(char_count or 1))
+        side = max(0, int(side_count or 0))
+        if side:
+            parts.append(f"请输出 {lead} 个主角和 {side} 个配角（共 {lead + side} 个，JSON 数组）。")
+        else:
+            parts.append(f"请输出 {lead} 个角色（JSON 数组）。")
     elif step == "outline":
         parts.append(f"请输出 {chapter_count} 章大纲（JSON 对象）。")
     return "\n\n".join(parts)
@@ -352,8 +370,13 @@ def build_step_user(step: str, setup: dict[str, Any], *, char_count: int = 4,
 
 def build_outline_text_user(setup: dict[str, Any], *, part_no: int = 1,
                             part_title: str = "", target_chars: int = 8000,
-                            extra_note: str = "") -> str:
-    """整篇大纲的用户消息：**不要 JSON**，只要一段能读的大纲文字（按部）。"""
+                            extra_note: str = "",
+                            prev_parts: list[dict[str, Any]] | None = None) -> str:
+    """整篇大纲的用户消息：**不要 JSON**，只要一段能读的大纲文字（按部）。
+
+    `prev_parts` 是已生成好的前几部大纲（一次生成全部时保证七部互相衔接，
+    不会各写各的）——每部只带开头一段，防止撑爆窗口。
+    """
     parts = [f"【创作提示词】\n{idea_text(setup)}"]
     if str(setup.get("worldview") or "").strip():
         parts.append(f"【世界观摘要】\n{_worldview_text(setup, limit=1200)}")
@@ -368,6 +391,17 @@ def build_outline_text_user(setup: dict[str, Any], *, part_no: int = 1,
     blurb = str(setup.get("blurb") or "").strip()
     if blurb:
         parts.append(f"【简介】\n{blurb[:600]}")
+    if prev_parts:
+        blocks = []
+        for row in prev_parts:
+            text = str(row.get("text") or "").strip()
+            if not text:
+                continue
+            label = f"第 {row.get('no')} 部" + (f" · {row.get('title')}" if str(row.get("title") or "").strip() else "")
+            blocks.append(f"《{label}》（节选）\n{text[:1200]}")
+        if blocks:
+            parts.append("【已定稿的前几部大纲】（本部必须与它们衔接：接住前一部留下的线，不重复、不矛盾）\n"
+                         + "\n\n".join(blocks))
     label = f"第 {part_no} 部" + (f" · {part_title}" if part_title else "")
     parts.append(f"【本部】{label}；目标篇幅约 {int(target_chars or 8000)} 字")
     if extra_note.strip():
@@ -395,11 +429,31 @@ def parse_outline_text(text: str, *, limit: int = PART_TEXT_MAX) -> str:
 
 def build_split_user(setup: dict[str, Any], *, part_text: str, want_count: int,
                      from_no: int = 1, part_label: str = "",
-                     extra_note: str = "") -> str:
-    """拆章的用户消息：给定这一部的大纲正文，按顺序拆出 want_count 章。"""
+                     extra_note: str = "",
+                     prev_chapters: list[dict[str, Any]] | None = None) -> str:
+    """拆章的用户消息：给定这一部的大纲正文，按顺序拆出 want_count 章。
+
+    `prev_chapters` 是已拆好的章节（接续拆分时必有）：不带这个，第 31 章起
+    拆的章会当故事从头讲——这正是「前 30 章和 31 章不衔接」的根因之一。
+    """
     parts = [f"【大纲正文】{('· ' + part_label) if part_label else ''}\n{part_text}"]
     if str(setup.get("worldview") or "").strip():
         parts.append(f"【世界观摘要】\n{_worldview_text(setup, limit=600)}")
+    if prev_chapters:
+        lines = []
+        for row in prev_chapters:
+            line = f"第{row.get('no')}章 {row.get('title') or ''}"
+            beat = str(row.get("beat") or "").strip()
+            hook = str(row.get("hook") or "").strip()
+            if beat:
+                line += f"：{beat}"
+            if hook:
+                line += f"（章末：{hook}）"
+            lines.append(line)
+        prev_text = "\n".join(lines)
+        if len(prev_text) > SPLIT_PREV_MAX_CHARS:
+            prev_text = "……\n" + prev_text[-SPLIT_PREV_MAX_CHARS:]
+        parts.append(f"【已拆好的前文】（新章必须从这里继续：接住上一章的钩子，不重讲、不跳跃）\n{prev_text}")
     parts.append(f"【本次任务】从第 {int(from_no)} 章开始，拆 {int(want_count)} 章")
     if extra_note.strip():
         parts.append(f"【补充要求】\n{extra_note.strip()[:300]}")

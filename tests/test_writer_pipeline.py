@@ -130,9 +130,11 @@ class SetupChainTests(PipelineTestCase):
         self.assertIn("创意", str(ctx.exception))
         self.assertIsNone(self.store.get_active_pipeline(fresh["id"]))
 
-    def test_six_steps_advance_in_order_and_write_versions(self):
+    def test_five_steps_advance_in_order_and_write_versions(self):
+        """设定链五步化（第二次反馈）：设定只出设定，不再带大纲步、不凭空出章节。"""
         pipeline = self.start()
         self.assertEqual(pipeline["steps"], list(prompts.SETUP_STEPS))
+        self.assertNotIn("outline", pipeline["steps"])
         results = {
             "genre": '{"channel":"male","cat":"玄幻","subCat":"东方","tone":"热血","hook":"卖点","tags":["a"]}',
             "title": '["书名甲","书名乙","书名丙"]',
@@ -155,27 +157,65 @@ class SetupChainTests(PipelineTestCase):
             self.assertEqual(writer["step"], step)
             self.assertEqual(task["input"]["module"], "writer")
             self.assertEqual(task["input"]["origin_label"], "织书台")
-            if step == "outline":
-                chapters = [{"no": i, "title": f"第{i}章", "beat": "梗概", "hook": "钩"}
-                            for i in range(1, 6)]
-                self.app.studio.jobs.finish(
-                    task_id, json.dumps({"chapters": chapters}, ensure_ascii=False))
-            else:
-                self.app.studio.jobs.finish(task_id, results[step])
+            self.app.studio.jobs.finish(task_id, results[step])
             self.tick()
         record = self.current_pipeline()
         self.assertEqual(record["status"], "done")
-        # 每步都落了设定版本；大纲步落大纲版本并同步章节。
+        # 每步都落了设定版本；设定链不再产生大纲版本与章节。
         detail = self.store.get_book(self.book_id)
-        # 种子 1 版 + 设定五步各落一份设定版本；大纲步落大纲版本。
+        # 种子 1 版 + 设定五步各落一份设定版本。
         self.assertEqual(len(detail["book"]["setup_versions"]), 6)
-        self.assertEqual(len(detail["book"]["outline_versions"]), 1)
-        self.assertEqual([row["no"] for row in detail["chapters"]], [1, 2, 3, 4, 5])
+        self.assertEqual(len(detail["book"]["outline_versions"]), 0)
+        self.assertEqual(detail["chapters"], [])
         setup = detail["setup"]
         self.assertEqual(setup["genre"]["cat"], "玄幻")
         self.assertEqual(setup["title"], "书名甲")
         self.assertEqual(setup["worldview"], "世界观正文")
         self.assertEqual(len(setup["characters"]), 2)
+
+    def test_chars_step_requests_leads_and_sides(self):
+        """配角数量要进角色步的请求与校验：只报主角数会让配角一个都不出（第二次反馈）。"""
+        pipeline = self.start(side_count=20)
+        task_id = self.current_pipeline()["current_task_id"]
+        # 依次喂完前四步，看角色步的任务内容。
+        results = {
+            "genre": '{"channel":"male","cat":"玄幻"}',
+            "title": '["书名甲"]',
+            "blurb": '["简介甲"]',
+            "world": "世界观正文",
+        }
+        for step in ("genre", "title", "blurb", "world"):
+            record = self.current_pipeline()
+            task_id = record["current_task_id"]
+            self.assertEqual(record["steps"][record["step_index"]], step)
+            self.app.studio.jobs.finish(task_id, results[step])
+            self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["steps"][record["step_index"]], "chars")
+        content = self.app.studio.jobs.tasks[record["current_task_id"]]["input"]["content"]
+        self.assertIn("2 个主角和 20 个配角", content)
+        self.assertIn("共 22 个", content)
+        # 模型只回 2 个角色 → 不足 22 个，如实失败不落版本。
+        self.app.studio.jobs.finish(
+            record["current_task_id"],
+            json.dumps([{"name": f"角色{i}", "role": "主角"} for i in range(1, 3)],
+                       ensure_ascii=False))
+        self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "failed")
+        self.assertIn("22", record["error"])
+        # 回满 22 个 → 通过。
+        self.manager.retry_pipeline(self.book_id)
+        record = self.current_pipeline()
+        rows = [{"name": f"主角{i}", "role": "主角"} for i in range(1, 3)]
+        rows += [{"name": f"配角{i}", "role": "配角"} for i in range(1, 21)]
+        self.app.studio.jobs.finish(
+            record["current_task_id"], json.dumps(rows, ensure_ascii=False))
+        self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "done")
+        setup = self.store.get_book(self.book_id)["setup"]
+        self.assertEqual(len(setup["characters"]), 22)
 
     def test_queued_task_does_not_advance(self):
         self.start()

@@ -308,6 +308,7 @@ class WriterService:
             content = prompts.build_step_user(
                 step, setup,
                 char_count=self._int_or(body.get("char_count"), 4),
+                side_count=self._int_or(body.get("side_count"), 0),
                 chapter_count=self._int_or(body.get("chapter_count"), 10),
                 extra_note=str(body.get("extra_note") or ""),
             )
@@ -344,6 +345,7 @@ class WriterService:
                 model_key=str(body.get("model_key") or ""),
                 model_name=model_name,
                 char_count=self._int_or(body.get("char_count"), 4),
+                side_count=self._int_or(body.get("side_count"), 0),
                 chapter_count=self._int_or(body.get("chapter_count"), 10),
                 setup_version_id=str(body.get("setup_version_id") or ""),
                 outline_version_id=str(body.get("outline_version_id") or ""),
@@ -354,6 +356,7 @@ class WriterService:
                 target_chars=self._int_or(body.get("target_chars"), 0),
                 want_count=self._int_or(body.get("want_count"), 0),
                 from_no=self._int_or(body.get("from_no"), 0),
+                part_plan=body.get("part_plan"),
                 base_revision=body.get("revision"),
                 chapter_revision=body.get("chapter_revision"),
             )
@@ -411,6 +414,101 @@ class WriterService:
             return self.store.commit_import(str(body.get("import_id") or "")), 201
         except LookupError as exc:
             return {"error": str(exc)}, 404
+        except WriterStoreError as exc:
+            return {"error": str(exc)}, 400
+
+    # ---- 版本删除 / 清空章节 / 设定集导入（第二次反馈） ----
+
+    def api_delete_versions(self, book_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """删除设定或大纲版本（管理记录里勾选删除；删当前版本时指针落到最新一版）。"""
+        if not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
+        kind = str(body.get("kind") or "").strip()
+        if kind not in ("setup", "outline"):
+            return {"error": "kind 必须是 setup 或 outline"}, 400
+        try:
+            if kind == "setup":
+                return self.store.delete_setup_versions(
+                    book_id, body.get("version_ids"),
+                    expected_revision=body.get("revision"),
+                ), 200
+            return self.store.delete_outline_versions(
+                book_id, body.get("version_ids"),
+                expected_revision=body.get("revision"),
+            ), 200
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+        except WriterConflictError as exc:
+            return {"error": str(exc)}, 409
+        except WriterStoreError as exc:
+            return {"error": str(exc)}, 400
+
+    def api_delete_chapter_versions(self, book_id: str, chapter_no: Any,
+                                    body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """删除某一章的正文版本（管理记录里展开章后勾选删除）。"""
+        if not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
+        try:
+            return self.store.delete_chapter_versions(
+                book_id, self._chapter_no(chapter_no), body.get("version_ids"),
+                expected_revision=body.get("revision"),
+            ), 200
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+        except WriterConflictError as exc:
+            return {"error": str(exc)}, 409
+        except WriterStoreError as exc:
+            return {"error": str(exc)}, 400
+
+    def api_clear_chapters(self, book_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """清空全部章节（覆盖重拆前让位；前端弹窗已让用户确认过）。"""
+        if not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
+        try:
+            return self.store.clear_chapters(
+                book_id, expected_revision=body.get("revision"),
+            ), 200
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+        except WriterConflictError as exc:
+            return {"error": str(exc)}, 409
+        except WriterStoreError as exc:
+            return {"error": str(exc)}, 400
+
+    def api_import_settings(self, book_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """设定集文件夹导入：解析 .md 文件并把设定/大纲/章节并入当前作品。"""
+        if not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
+        files = body.get("files")
+        if not isinstance(files, list) or not files:
+            return {"error": "没有读到任何设定集文件"}, 400
+        cleaned: list[dict[str, str]] = []
+        total = 0
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            content = str(item.get("content") or "")
+            if not name or not content.strip():
+                continue
+            suffix = name.lower().rsplit(".", 1)
+            suffix = f".{suffix[-1]}" if len(suffix) == 2 else ""
+            if suffix not in (".md", ".markdown", ".txt"):
+                continue
+            cleaned.append({"name": name[:200], "content": content})
+            total += len(content)
+        if not cleaned:
+            return {"error": "文件夹里没有 .md / .txt 文件；请选择设定集文件夹"}, 400
+        if total > 3_000_000:
+            return {"error": "设定集内容超过 300 万字符上限；请删减后重试"}, 400
+        try:
+            return self.store.import_settings_folder(
+                book_id, cleaned, expected_revision=body.get("revision"),
+            ), 200
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+        except WriterConflictError as exc:
+            return {"error": str(exc)}, 409
         except WriterStoreError as exc:
             return {"error": str(exc)}, 400
 

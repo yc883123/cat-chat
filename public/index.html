@@ -1154,6 +1154,9 @@
                   <strong>大纲汇总</strong>
                   <small id="writerChapterOutlineMeta">拆章时对着看</small>
                 </div>
+                <label class="writer-field" id="writerChapterOutlineVersionGroup" hidden>大纲版本
+                  <select id="writerChapterOutlineVersion" aria-label="大纲版本"></select>
+                </label>
                 <div class="writer-scroll">
                   <div class="writer-outline-view" id="writerChapterOutlineText"></div>
                 </div>
@@ -1197,6 +1200,13 @@
                     <label class="writer-field">参考气质（一句话，可留空）
                       <input type="text" id="writerVibe" placeholder="例：《漫长的季节》那种旧工业城的潮湿感">
                     </label>
+                    <div class="writer-action-bar">
+                      <button class="control-button tiny" type="button" id="writerImportSettingsBtn"
+                              title="选择一个全是 .md 的设定集文件夹，织书台读取其中的设定、分部大纲与章节框架">上传设定集（.md 文件夹）</button>
+                      <input type="file" id="writerImportSettingsInput" webkitdirectory multiple hidden
+                             aria-label="选择设定集文件夹">
+                    </div>
+                    <p class="writer-hint" id="writerImportSettingsNote">已有 Agent 生成的设定集？直接导入整个文件夹，识别出的角色、分卷大纲与章节框架会填进织书台。</p>
                   </div>
 
                   <div class="writer-stage-group">
@@ -1275,7 +1285,7 @@
                   </div>
 
                   <div class="writer-stage-group">
-                    <div class="writer-group-head"><strong>生成整套设定</strong><small>六步自动链：题材 → 书名 → 简介 → 世界观 → 角色 → 大纲</small></div>
+                    <div class="writer-group-head"><strong>生成整套设定</strong><small>五步自动链：题材 → 书名 → 简介 → 世界观 → 角色（大纲到「大纲」页生成，不在这里）</small></div>
                     <div class="writer-grid-2">
                       <label class="writer-field">供应商
                         <select id="writerSetupProvider" aria-label="设定供应商"></select>
@@ -1293,10 +1303,6 @@
                         <span>配角数量 <b id="writerSideCountValue">4</b> 人</span>
                         <input type="range" id="writerSideCount" min="0" max="20" step="1" value="4" aria-label="配角数量">
                       </label>
-                      <label class="writer-limit">
-                        <span>大纲章数（拆章目标） <b id="writerChapterCountValue">30</b> 章</span>
-                        <input type="range" id="writerChapterCount" min="1" max="200" step="1" value="30" aria-label="拆章目标">
-                      </label>
                     </div>
                     <label class="writer-field">补充要求（只在第一步「题材推断」生效）
                       <input type="text" id="writerSetupNote" placeholder="想强调的要求，可留空">
@@ -1305,7 +1311,7 @@
                       <button class="control-button writer-primary" type="button" id="writerSetupGenerate">生成整套设定</button>
                       <button class="control-button" type="button" id="writerSetupSave">保存修改为新版本</button>
                     </div>
-                    <p class="writer-hint">生成的是整套设定；每完成一步都存一版，失败时保留前面已完成的步骤。重新点会再出一版，旧版本全部保留。表单里有还没保存的修改时（例如刚套用模板），点生成会先自动存一版再开始。</p>
+                    <p class="writer-hint">生成的是整套设定（主角与配角都会按上面的数量出）；每完成一步都存一版，失败时保留前面已完成的步骤。这里不再出大纲与章节——大纲请到「大纲」页生成，章节由拆章产出。</p>
                   </div>
                 </div>
 
@@ -1314,6 +1320,14 @@
                   <div class="writer-stage-group">
                     <div class="writer-group-head"><strong>全书大纲</strong><small>只写故事怎么走，不写章节</small></div>
                     <div class="writer-parts" id="writerOutlineParts" role="group" aria-label="分部"></div>
+                    <div class="writer-grid-2">
+                      <label class="writer-field">计划分几部（1–20；单部作品填 1）
+                        <input type="number" id="writerPartsTarget" min="1" max="20" step="1" value="1" aria-label="计划分几部">
+                      </label>
+                      <label class="writer-field">&nbsp;
+                        <button class="control-button" type="button" id="writerPartsApply">按部数生成目录</button>
+                      </label>
+                    </div>
                     <div class="writer-grid-2">
                       <label class="writer-field">这一部的部号
                         <input type="text" id="writerPartNo" readonly aria-label="部号">
@@ -1340,11 +1354,13 @@
                     </label>
                     <div class="writer-action-bar">
                       <button class="control-button writer-primary" type="button" id="writerOutlineGenerate">生成这一部大纲</button>
+                      <button class="control-button" type="button" id="writerOutlineGenerateAll"
+                              title="按上面各部的部标题，一次性把全部部的大纲顺序生成；后面的部会接住前面几部留下的线">一次性生成全部大纲</button>
                       <button class="control-button" type="button" id="writerOutlineSave">保存大纲修改</button>
                       <button class="control-button tiny" type="button" id="writerPartAdd">+ 增加一部</button>
                       <button class="control-button tiny" type="button" id="writerPartRemove">删除这一部</button>
                     </div>
-                    <p class="writer-hint">大纲就是这一部几万字的文字，不逐章罗列。单部作品只有「第 1 部」；多部作品按部补，互不覆盖。</p>
+                    <p class="writer-hint">单部作品只生成一部大纲即可；多部作品建议「一次性生成全部」，保证七部之间互相衔接。大纲不逐章罗列，章节由拆章产出。</p>
                   </div>
                   <div class="writer-stage-group" id="writerOutlineVersionsGroup" hidden>
                     <div class="writer-group-head"><strong>历史版本</strong><small>切换后立即生效，可随时切回</small></div>
@@ -1413,7 +1429,7 @@
                       <button class="control-button writer-primary" type="button" id="writerSplitStart">开始拆分</button>
                       <button class="control-button" type="button" id="writerSplitContinue" hidden>继续拆下一批</button>
                     </div>
-                    <p class="writer-hint" id="writerSplitHint">每批最多 200 章，可中断续拆；已存在的章节（含已有正文）一律跳过，不会被覆盖。</p>
+                    <p class="writer-hint" id="writerSplitHint">每批最多 999 章，可中断续拆；拆分时会带上已拆章节的衔接上下文。已存在的章节可接续（从下一章继续）或覆盖重拆，由你确认。</p>
                   </div>
                   <div class="writer-stage-group">
                     <div class="writer-group-head"><strong>章节简述</strong><small id="writerBriefMeta">还没有章节</small></div>
@@ -1565,6 +1581,21 @@
               <div class="writer-dialog-actions">
                 <button class="control-button" type="button" id="writerImportCommit">确认导入为新作品</button>
                 <button class="control-button" type="button" id="writerImportCancel">取消</button>
+              </div>
+            </form>
+          </dialog>
+
+          <!-- 拆分遇到已有章节：接续（从下一章继续）或覆盖重拆（清空现有章节目录）。 -->
+          <dialog class="writer-dialog" id="writerSplitDialog" aria-label="已有章节，怎么拆">
+            <form method="dialog" class="writer-dialog-form">
+              <h3>已有章节，这次怎么拆？</h3>
+              <p class="writer-note" id="writerSplitDialogNote"></p>
+              <div class="writer-dialog-actions">
+                <button class="control-button" type="button" id="writerSplitContinueChoice"
+                        title="保留现有章节，从它们的下一章继续往下拆，衔接已有内容">接续拆分</button>
+                <button class="control-button danger" type="button" id="writerSplitOverwriteChoice"
+                        title="清空现有章节目录（含全部正文），从第 1 章重新拆">覆盖重拆</button>
+                <button class="control-button" type="button" id="writerSplitCancelChoice">取消</button>
               </div>
             </form>
           </dialog>

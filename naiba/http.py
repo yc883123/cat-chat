@@ -800,6 +800,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             # 聊天域 _load_comfyui_workflow 的 20 MB 文件上限；任务提交走默认上限。
             skill_max_size = 20 * 1024 * 1024
             skill_oversize_error = "工作流内容过大（上限 20 MB），请精简后重新导出再导入"
+        elif path.startswith("/api/writer/books/") and path.endswith("/import-settings"):
+            # 织书台设定集文件夹导入：几十个 .md 全文进 JSON，服务端总字数上限
+            # 300 万字符（UTF-8 约 9 MB），16 MB 留出转义余量。
+            skill_max_size = 16 * 1024 * 1024
+            skill_oversize_error = "设定集内容过大（上限 16 MB），请删减文件后重试"
         else:
             skill_max_size = 130 * 1024 * 1024
             skill_oversize_error = None
@@ -909,6 +914,24 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path.startswith("/api/writer/books/") and path.endswith("/versions/select"):
             self._json(*self.app.writer.api_select_version(
                 path[len("/api/writer/books/"):-len("/versions/select")], body))
+        elif path.startswith("/api/writer/books/") and path.endswith("/versions/delete"):
+            # 管理记录里勾选删除设定 / 大纲版本。
+            self._json(*self.app.writer.api_delete_versions(
+                path[len("/api/writer/books/"):-len("/versions/delete")], body))
+        elif path.startswith("/api/writer/books/") and path.endswith("/chapters/clear"):
+            # 覆盖重拆前的「清空章节目录」：正文一并删除，前端已让用户确认。
+            self._json(*self.app.writer.api_clear_chapters(
+                path[len("/api/writer/books/"):-len("/chapters/clear")], body))
+        elif path.startswith("/api/writer/books/") and "/chapters/" in path \
+                and path.endswith("/versions/delete"):
+            # 管理记录里展开一章后勾选删除正文版本。
+            head, _sep, tail = path[len("/api/writer/books/"):].partition("/chapters/")
+            self._json(*self.app.writer.api_delete_chapter_versions(
+                head, tail[:-len("/versions/delete")], body))
+        elif path.startswith("/api/writer/books/") and path.endswith("/import-settings"):
+            # 设定集文件夹导入：几十个 .md 的全文 JSON，比照造梦机放宽到 16 MB。
+            self._json(*self.app.writer.api_import_settings(
+                path[len("/api/writer/books/"):-len("/import-settings")], body))
         elif path.startswith("/api/studio/tasks/") and path.endswith("/cancel"):
             self._json(*self.app.studio.api_task_cancel(path.split("/")[-2]))
         elif path.startswith("/api/studio/tasks/") and path.endswith("/retry"):

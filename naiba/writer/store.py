@@ -961,38 +961,154 @@ class WriterStore:
         manifest = self._load_manifest(book_id)
         self._check_revision(manifest, expected_revision)
         book_dir = self._book_dir(book_id)
-        existing = {int(n) for n in manifest.get("chapter_ids") or []}
-        appended: list[int] = []
-        now = _now_ms()
         with self._lock:
-            for item in rows:
-                if not isinstance(item, dict):
-                    continue
-                title = str(item.get("title") or "").strip()
-                if not title:
-                    continue
-                no_raw = item.get("no")
-                no = int(no_raw) if isinstance(no_raw, int) and not isinstance(no_raw, bool) else (
-                    (max(existing) + 1) if existing else 1)
-                if no < 1 or no > 9999:
-                    raise WriterStoreError(f"章节号越界：{no}（上限 9999）")
-                if no in existing:
-                    continue
-                index = {
-                    "no": no, "title": title[:200],
-                    "beat": str(item.get("beat") or "").strip()[:2000],
-                    "hook": str(item.get("hook") or "").strip()[:500],
-                    "part_no": int(part_no or 0),
-                    "revision": 1, "version_ids": [], "current_version_id": "",
-                    "created_at": now, "updated_at": now,
-                }
-                self._write_chapter_index(book_dir, index)
-                existing.add(no)
-                appended.append(no)
-            manifest["chapter_ids"] = sorted(existing)
+            appended, skipped = self._append_chapters_locked(book_dir, manifest, rows, part_no=part_no)
             self._bump_manifest(book_dir, manifest)
         return {"book": self._public_manifest(manifest), "appended": appended,
+                "skipped": skipped,
                 "chapter_count": len(manifest.get("chapter_ids") or [])}
+
+    def _append_chapters_locked(self, book_dir: Path, manifest: dict[str, Any],
+                                rows: list[Any], *, part_no: int = 0) -> tuple[list[int], list[int]]:
+        """append_chapters 的锁内实现（设定集导入共用）：返回（新增章号, 跳过章号）。"""
+        existing = {int(n) for n in manifest.get("chapter_ids") or []}
+        appended: list[int] = []
+        skipped: list[int] = []
+        now = _now_ms()
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            if not title:
+                continue
+            no_raw = item.get("no")
+            no = int(no_raw) if isinstance(no_raw, int) and not isinstance(no_raw, bool) else (
+                (max(existing) + 1) if existing else 1)
+            if no < 1 or no > 9999:
+                raise WriterStoreError(f"章节号越界：{no}（上限 9999）")
+            if no in existing:
+                skipped.append(no)
+                continue
+            index = {
+                "no": no, "title": title[:200],
+                "beat": str(item.get("beat") or "").strip()[:2000],
+                "hook": str(item.get("hook") or "").strip()[:500],
+                "part_no": int(part_no or 0),
+                "revision": 1, "version_ids": [], "current_version_id": "",
+                "created_at": now, "updated_at": now,
+            }
+            self._write_chapter_index(book_dir, index)
+            existing.add(no)
+            appended.append(no)
+        manifest["chapter_ids"] = sorted(existing)
+        return appended, skipped
+
+    def clear_chapters(self, book_id: str, *, expected_revision: Any = None) -> dict[str, Any]:
+        """清空全部章节目录（含全部正文版本）——「覆盖重拆」前的显式动作。
+
+        与逐章删除不同：这里没有「至少留一章」的保护，因为覆盖重拆的前提就是
+        把旧目录整个让位；调用方（前端弹窗）必须先让用户确认过。
+        """
+        manifest = self._load_manifest(book_id)
+        self._check_revision(manifest, expected_revision)
+        book_dir = self._book_dir(book_id)
+        removed = 0
+        with self._lock:
+            nos = [int(n) for n in manifest.get("chapter_ids") or []]
+            removed = len(nos)
+            for no in nos:
+                shutil.rmtree(self._chapter_version_dir(book_dir, no), ignore_errors=True)
+                try:
+                    self._chapter_dir(book_dir, no).unlink(missing_ok=True)
+                except OSError as exc:
+                    raise WriterStoreError(f"清空章节目录失败：{exc}") from exc
+            manifest["chapter_ids"] = []
+            self._bump_manifest(book_dir, manifest)
+        return {"ok": True, "removed": removed}
+
+    # ---- 版本删除（管理记录里勾选删除；删的是文件+清单条目，不可恢复） ----
+
+    def delete_setup_versions(self, book_id: str, version_ids: Any, *,
+                              expected_revision: Any = None) -> dict[str, Any]:
+        return self._delete_book_versions(book_id, "setup", version_ids,
+                                          expected_revision=expected_revision)
+
+    def delete_outline_versions(self, book_id: str, version_ids: Any, *,
+                                expected_revision: Any = None) -> dict[str, Any]:
+        return self._delete_book_versions(book_id, "outline", version_ids,
+                                          expected_revision=expected_revision)
+
+    def _delete_book_versions(self, book_id: str, kind: str, version_ids: Any, *,
+                              expected_revision: Any = None) -> dict[str, Any]:
+        ids = [str(v or "").strip() for v in (version_ids if isinstance(version_ids, list) else [])]
+        ids = list(dict.fromkeys(v for v in ids if v))
+        if not ids:
+            raise WriterStoreError("请先勾选要删除的版本")
+        manifest = self._load_manifest(book_id)
+        self._check_revision(manifest, expected_revision)
+        book_dir = self._book_dir(book_id)
+        list_key = "setup_versions" if kind == "setup" else "outline_versions"
+        current_key = ("current_setup_version_id" if kind == "setup"
+                       else "current_outline_version_id")
+        versions = [row for row in (manifest.get(list_key) or []) if isinstance(row, dict)]
+        known = {str(row.get("id") or "") for row in versions}
+        unknown = [vid for vid in ids if vid not in known]
+        if unknown:
+            raise WriterStoreError(f"版本不存在：{unknown[0]}")
+        with self._lock:
+            for vid in ids:
+                path = (self._setup_path(book_dir, vid) if kind == "setup"
+                        else self._outline_path(book_dir, vid))
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    raise WriterStoreError(f"删除版本文件失败：{exc}") from exc
+            removed = set(ids)
+            remaining = [row for row in versions if str(row.get("id") or "") not in removed]
+            manifest[list_key] = remaining
+            if str(manifest.get(current_key) or "") in removed:
+                # 当前指针被删：落到清单里最新的一版（列表按版本号递增追加）；全删光则清空。
+                manifest[current_key] = str(remaining[-1]["id"]) if remaining else ""
+            self._bump_manifest(book_dir, manifest)
+        return {"book": self._public_manifest(manifest), "deleted": sorted(removed)}
+
+    def delete_chapter_versions(self, book_id: str, chapter_no: int, version_ids: Any, *,
+                                expected_revision: Any = None) -> dict[str, Any]:
+        """删某一章的正文版本；当前版本被删时指针落到最新剩余版本或清空。"""
+        ids = [str(v or "").strip() for v in (version_ids if isinstance(version_ids, list) else [])]
+        ids = list(dict.fromkeys(v for v in ids if v))
+        if not ids:
+            raise WriterStoreError("请先勾选要删除的正文版本")
+        manifest = self._load_manifest(book_id)
+        if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
+            raise LookupError("章节不存在")
+        book_dir = self._book_dir(book_id)
+        with self._lock:
+            index = self._load_chapter_index(book_dir, chapter_no)
+            if expected_revision is not None and expected_revision != "":
+                self._check_revision({"revision": index.get("revision")}, expected_revision,
+                                     what=f"第 {chapter_no} 章")
+            versions = [row for row in (index.get("version_ids") or []) if isinstance(row, dict)]
+            known = {str(row.get("id") or "") for row in versions}
+            unknown = [vid for vid in ids if vid not in known]
+            if unknown:
+                raise WriterStoreError(f"第 {chapter_no} 章没有这份正文版本：{unknown[0]}")
+            removed = set(ids)
+            for vid in ids:
+                try:
+                    self._chapter_version_path(book_dir, chapter_no, vid).unlink(missing_ok=True)
+                except OSError as exc:
+                    raise WriterStoreError(f"删除正文版本文件失败：{exc}") from exc
+            remaining = [row for row in versions if str(row.get("id") or "") not in removed]
+            index["version_ids"] = remaining
+            if str(index.get("current_version_id") or "") in removed:
+                index["current_version_id"] = str(remaining[-1]["id"]) if remaining else ""
+            index["revision"] = int(index.get("revision") or 0) + 1
+            index["updated_at"] = _now_ms()
+            self._write_chapter_index(book_dir, index)
+            self._bump_manifest(book_dir, manifest)
+        return {"book": self._public_manifest(manifest), "deleted": sorted(removed),
+                "chapter_no": chapter_no}
 
     def update_chapter_meta(self, book_id: str, chapter_no: int, *, title: Any = None,
                             beat: Any = None, hook: Any = None,
@@ -1391,6 +1507,60 @@ class WriterStore:
             shutil.rmtree(path, ignore_errors=True)
             removed += 1
         return removed
+
+    # ---- 设定集文件夹导入（第二次反馈 §一/§六） ----
+
+    def import_settings_folder(self, book_id: str, files: Any, *,
+                               expected_revision: Any = None) -> dict[str, Any]:
+        """把整个设定集文件夹（.md 文件）解析后并入当前作品。
+
+        全部走「新增版本 / 追加章节」，不覆盖任何已有内容：设定与大纲各落一版
+        imported 版本（旧版本保留），章节按章号追加（已有的章跳过并在结果里报告）。
+        章节框架里带每章字数标注时，顺手把单章字数限制收敛到可选档位。
+        """
+        from naiba.writer.settings_import import parse_settings_folder
+
+        parsed = parse_settings_folder(files)
+        manifest = self._load_manifest(book_id)
+        self._check_revision(manifest, expected_revision)
+        book_dir = self._book_dir(book_id)
+        with self._lock:
+            setup_version_id = ""
+            if parsed["has_setup"]:
+                setup_version_id = self._write_setup_locked(
+                    book_dir, manifest, normalize_setup(parsed["setup"]),
+                    kind="imported", task_id="",
+                )
+            outline_version_id = ""
+            if parsed["parts"]:
+                outline_version_id = self._write_outline_locked(
+                    book_dir, manifest, None, kind="imported", task_id="",
+                    source_setup_version_id=setup_version_id, parts=parsed["parts"],
+                )
+            appended: list[int] = []
+            skipped: list[int] = []
+            if parsed["chapters"]:
+                appended, skipped = self._append_chapters_locked(
+                    book_dir, manifest, parsed["chapters"], part_no=0,
+                )
+            plan_chars = int(parsed.get("plan_chars") or 0)
+            if plan_chars and plan_chars in CHAPTER_CHARS_CHOICES:
+                manifest["chapter_plan"] = {
+                    **normalize_chapter_plan(manifest), "chars": plan_chars,
+                }
+            self._bump_manifest(book_dir, manifest)
+        preview = dict(parsed["preview"])
+        preview["appended_chapters"] = appended
+        preview["skipped_chapters"] = skipped
+        if skipped:
+            preview["warnings"] = [*preview.get("warnings", []),
+                                   f"已有 {len(skipped)} 章同章号被跳过（不覆盖）；要重拆请用章节页的「覆盖重拆」"]
+        return {
+            "book": self._public_manifest(manifest),
+            "setup_version_id": setup_version_id,
+            "outline_version_id": outline_version_id,
+            "preview": preview,
+        }
 
     # ---- 导出 ----
 

@@ -885,8 +885,8 @@ class LabelerTriggerWordTests(unittest.TestCase):
         payload = render(records, "captions")
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             text = archive.read("d/a0.txt").decode("utf-8")
-        # 逐图 caption 一行：触发词在最前（训练包同名 txt 走同一 _caption_text）。
-        self.assertTrue(text.startswith("my_ohwx,"))
+        # both 模式逐图 caption：触发词只出现一次（标签首位那份），描述跟在标签后。
+        self.assertEqual(text, "my_ohwx, cat, 一只猫")
         self.assertIn("cat", text)
 
     def test_continue_task_preserves_legacy_mixed_language(self):
@@ -983,8 +983,39 @@ class LabelerExportTests(unittest.TestCase):
         self.assertIn("d/a.png", text)
 
     def test_txt_is_comma_separated(self):
+        # both 模式：汇总 txt 一行 = 路径 + 标签 + 描述（描述非空就带上）。
         text = render(self._records(), "txt").decode("utf-8")
-        self.assertEqual(text.strip(), "d/a.png, =cmd, cat")
+        self.assertEqual(text.strip(), "d/a.png, =cmd, cat, 一只猫")
+
+    def test_txt_carries_description_without_tags(self):
+        # 描述/短语形式标签数组为空：汇总 txt 不能只剩路径，描述要跟上。
+        records = [dict(self._records()[0], tags=[], confidences=[],
+                        output_mode="description")]
+        text = render(records, "txt").decode("utf-8")
+        self.assertEqual(text.strip(), "d/a.png, 一只猫")
+
+    def test_captions_combine_tags_and_description_in_both_mode(self):
+        base = self._records()[0]
+        records = [
+            # 触发词场景：描述开头与首标签同词，拼接时去掉描述里重复的那段。
+            dict(base, relative_path="d/a.png", name="a.png",
+                 tags=["my_ohwx", "cat"], confidences=[-1.0, 0.9],
+                 description="my_ohwx，一只猫"),
+            # 无触发词：描述原样跟在标签后面。
+            dict(base, relative_path="d/b.png", name="b.png",
+                 tags=["white figure"], confidences=[0.9],
+                 description="A full-body mannequin."),
+            # 描述只是「以首标签开头」而非同词：不能误删（cat vs cats）。
+            dict(base, relative_path="d/c.png", name="c.png",
+                 tags=["cat"], confidences=[0.9],
+                 description="cats like milk."),
+        ]
+        payload = render(records, "captions")
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            self.assertEqual(archive.read("d/a.txt").decode("utf-8"), "my_ohwx, cat, 一只猫")
+            self.assertEqual(archive.read("d/b.txt").decode("utf-8"),
+                             "white figure, A full-body mannequin.")
+            self.assertEqual(archive.read("d/c.txt").decode("utf-8"), "cat, cats like milk.")
 
     def test_write_export_stays_in_managed_dir(self):
         artifact = write_export(self.dir / "exports", self._records(), "json", label="../../etc/passwd")
@@ -1214,7 +1245,7 @@ class LabelerLoraPackageTests(unittest.TestCase):
 
     def _record(self, *, relative_path, name, path=None, digest=None,
                 path_key=None, content_version="1:1", ann_id=1, tags=None,
-                description="", task_id="tg-x"):
+                description="", task_id="tg-x", output_mode=""):
         return {
             "id": ann_id,
             "source_task_id": task_id,
@@ -1227,6 +1258,7 @@ class LabelerLoraPackageTests(unittest.TestCase):
             "tags": tags if tags is not None else ["cat"],
             "confidences": [0.9] if tags else [],
             "description": description,
+            "output_mode": output_mode,
         }
 
     def test_same_content_two_sources_exports_two_pairs(self):
@@ -1274,6 +1306,18 @@ class LabelerLoraPackageTests(unittest.TestCase):
             manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
         sources = [entry["caption_source"] for entry in manifest["entries"]]
         self.assertEqual(sources, ["tags", "description", ""])
+
+    def test_caption_combines_tags_and_description_in_both_mode(self):
+        # both 模式训练包 caption = 标签 + 描述；触发词只出现一次（标签里那份）。
+        record = self._record(relative_path="a.png", name="a.png",
+                              tags=["my_ohwx", "cat"], description="my_ohwx，一只猫",
+                              output_mode="both")
+        payload = render_lora_package([record], self.dir)
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            self.assertEqual(archive.read("000001.txt").decode("utf-8"),
+                             "my_ohwx, cat, 一只猫")
+            manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+        self.assertEqual(manifest["entries"][0]["caption_source"], "tags+description")
 
     def test_naming_is_stable_and_follows_fixed_order(self):
         records = [

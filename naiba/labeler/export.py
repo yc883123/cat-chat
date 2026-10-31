@@ -3,8 +3,9 @@
 落点固定为 ``data_dir/labeler/exports/``，前端用 ``/api/file?path=…&download=1`` 下载。
 - JSON：含置信度（原始结构）；
 - CSV：扁平一行一图，UTF-8 with BOM（Excel 直接打开不乱码）；
-- TXT：一行一图，``相对路径, 标签1, 标签2, …``；
-- captions：逐图 ``.txt`` 打包（只有 caption，不含图片）；
+- TXT：一行一图，``相对路径`` + caption（内容跟打标输出形式：标签 / 描述，
+  两者都有就拼成一段）；
+- captions：逐图 ``.txt`` 打包（只有 caption，不含图片；内容规则同 TXT）；
 - lora：**LoRA 训练包**——按留存的原图字节逐张导出 ``000001.png`` + 同主干
   ``000001.txt`` 配对，附 manifest（原始名称/相对路径/导出名/SHA-256 映射）。
   任何记录缺原图、同一样本出现多条、原图字节对不上时**整包拒绝**，不生成半包。
@@ -108,12 +109,38 @@ def _folder_part(records: list[dict[str, Any]]) -> str:
     return _safe_name(next(iter(first_segments)), "")
 
 
+def _strip_leading_tag(description: str, tag: str) -> str:
+    """描述开头与标签同词时去掉该段前缀（触发词会同时写进标签首位与描述开头）。"""
+    lead = tag.strip()
+    if not lead or description[:len(lead)].casefold() != lead.casefold():
+        return description
+    rest = description[len(lead):]
+    # 前缀后必须紧跟分隔符才算同词开头：别把「cat」开头的「cats like …」误伤。
+    if rest and rest[0] not in "，,、;； \t":
+        return description
+    return rest.lstrip("，,、;； \t").strip()
+
+
 def _caption_text(row: dict[str, Any]) -> str:
-    """逐图 txt 的内容：优先标签（训练常用），没有标签才用描述。"""
-    tags = ", ".join(str(tag) for tag in (row.get("tags") or []) if str(tag).strip())
-    text = tags or str(row.get("description") or "").strip()
+    """逐图 txt 的内容：跟着打标时的输出形式走。
+
+    - 标签形式：只有标签；描述/短语形式：只有描述（短语存在 description 里）；
+    - 「标签 + 自然语言」两种都有时拼成「标签, 描述」——描述开头若与首个
+      标签同词（触发词在两处各写了一次），把描述里那段前缀去掉再拼。
+    """
+    tag_list = [str(tag).strip() for tag in (row.get("tags") or []) if str(tag).strip()]
+    description = str(row.get("description") or "").strip()
+    mode = str(row.get("output_mode") or "")
+    segments: list[str] = []
+    if tag_list:
+        segments.append(", ".join(tag_list))
+    if description and (not tag_list or mode == "both"):
+        if tag_list:
+            description = _strip_leading_tag(description, tag_list[0])
+        if description:
+            segments.append(description)
     # 一行一条 caption：换行会破坏「图片同名 txt」的一图一文件约定。
-    return re.sub(r"\s*\r?\n\s*", " ", text).strip()
+    return re.sub(r"\s*\r?\n\s*", " ", ", ".join(segments)).strip()
 
 
 def _caption_member(row: dict[str, Any]) -> str:
@@ -157,9 +184,13 @@ def _record_label(row: dict[str, Any]) -> str:
 
 
 def _caption_source(row: dict[str, Any]) -> str:
-    if any(str(tag or "").strip() for tag in (row.get("tags") or [])):
+    has_tags = any(str(tag or "").strip() for tag in (row.get("tags") or []))
+    has_desc = bool(str(row.get("description") or "").strip())
+    if has_tags and has_desc and str(row.get("output_mode") or "") == "both":
+        return "tags+description"
+    if has_tags:
         return "tags"
-    if str(row.get("description") or "").strip():
+    if has_desc:
         return "description"
     return ""
 
@@ -213,7 +244,7 @@ def render_lora_package(records: list[dict[str, Any]], data_dir: Path) -> bytes:
 
     - 短名：按 ``relative_path, 标注 id`` 固定排序后从 1 递增（``000001.png``），
       同一批输入无论导出几次命名都一致；
-    - 配对：图片与 .txt 共用短名主干，caption 优先标签、无标签用描述；
+    - 配对：图片与 .txt 共用短名主干，caption 跟输出形式走（both 模式标签+描述拼接）；
     - manifest：逐条记录原始名称、相对路径、导出名、原图 SHA-256 与标注归属；
     - 拒绝条件：同一样本（path_key + content_version）出现多条、记录没有原图
       摘要、原图字节取不到或校验不一致——任何一条命中都不写任何文件。
@@ -323,9 +354,9 @@ def render(records: list[dict[str, Any]], fmt: str, data_dir: Path | None = None
         return ("\ufeff" + buffer.getvalue()).encode("utf-8")
     lines: list[str] = []
     for row in records:
-        tags = ", ".join(str(tag) for tag in (row.get("tags") or []))
+        caption = _caption_text(row)
         name = str(row.get("relative_path") or row.get("name") or "")
-        lines.append(f"{name}, {tags}" if tags else name)
+        lines.append(f"{name}, {caption}" if caption else name)
     return ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
 
 

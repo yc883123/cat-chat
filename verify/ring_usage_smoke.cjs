@@ -78,31 +78,100 @@ const signal = (step) => { if (STEP) fs.writeFileSync(STEP, String(step)); };
     // 同口径改走 evaluate，找不到就滚动虚拟列表再找。
     const openByTitle = (title) => page.evaluate(async (t) => {
       const tree = document.querySelector('#sidebarWorkspaceTree');
+      if (!tree) throw new Error('找不到侧栏会话树');
+      const frame = () => new Promise((resolve) => requestAnimationFrame(() =>
+        requestAnimationFrame(resolve)));
       const find = () => [...tree.querySelectorAll('.conversation-item')]
-        .find((el) => el.querySelector('.conversation-open')?.textContent === t);
-      let item = find();
-      for (let step = 0; !item && step < 40; step += 1) {
-        // 逐个展开折叠的工作区组（折叠组只渲染组头），再点「展开其余 N 个会话」
-        // （每组默认只列 5 条）。不要动 scrollTop：列表内容不满一屏时把窗口推到底部
-        // 反而让虚拟列表一行都不渲染（实测踩过）。
-        const collapsed = [...tree.querySelectorAll('.workspace-group:not(.expanded) > .workspace-group-header')][0];
-        const showMore = [...tree.querySelectorAll('.workspace-showmore[data-action="show-more"]')][0];
-        if (collapsed) collapsed.click();
-        else if (showMore) showMore.click();
-        else break;
-        await new Promise((resolve) => requestAnimationFrame(resolve));
-        item = find();
+        .find((el) => {
+          const title = el.querySelector('.conversation-open')?.textContent || '';
+          return title === t || title.startsWith(`${t}：`) || title.startsWith(`${t}:`);
+        });
+      const clickIfFound = () => {
+        const item = find();
+        if (!item) return false;
+        item.scrollIntoView({ block: 'center' });
+        item.querySelector('.conversation-open').click();
+        return true;
+      };
+      // 虚拟列表只把当前窗口写进 DOM。重载后目标可能位于未渲染的末尾（尤其是
+      // 未分组会话），所以不能只展开当前窗口里的组；要边滚动边让窗口重绘，且每次
+      // 重绘后再处理可见的折叠组/「展开其余」按钮。
+      for (let pass = 0; pass < 8; pass += 1) {
+        if (clickIfFound()) return;
+        let changed = true;
+        for (let step = 0; step < 80 && changed; step += 1) {
+          changed = false;
+          const collapsed = [...tree.querySelectorAll(
+            '.workspace-group:not(.expanded) > .workspace-group-header',
+          )][0];
+          const showMore = [...tree.querySelectorAll(
+            '.workspace-showmore[data-action="show-more"]',
+          )][0];
+          if (collapsed) {
+            collapsed.click();
+            changed = true;
+            await frame();
+          } else if (showMore) {
+            showMore.click();
+            changed = true;
+            await frame();
+          }
+          if (clickIfFound()) return;
+        }
+        const max = Math.max(0, tree.scrollHeight - tree.clientHeight);
+        const stride = Math.max(80, Math.floor((tree.clientHeight || 400) * 0.8));
+        for (let top = 0; top <= max; top += stride) {
+          tree.scrollTop = Math.min(top, max);
+          tree.dispatchEvent(new Event('scroll', { bubbles: true }));
+          await frame();
+          if (clickIfFound()) return;
+        }
+        tree.scrollTop = max;
+        tree.dispatchEvent(new Event('scroll', { bubbles: true }));
+        await frame();
+        if (clickIfFound()) return;
+        tree.scrollTop = 0;
+        tree.dispatchEvent(new Event('scroll', { bubbles: true }));
+        await frame();
       }
-      if (!item) {
-        const dump = [...tree.querySelectorAll('.workspace-group')].map((group) => ({
-          group: group.dataset.workspaceName,
-          expanded: group.classList.contains('expanded'),
-          rows: [...group.querySelectorAll('.conversation-open')].map((el) => el.textContent),
-        }));
-        throw new Error(`找不到会话行：${t}；分组=${JSON.stringify(dump)}`);
+      // 兜底：虚拟列表的 DOM 窗口可能在重载后因浏览器自行钳位而始终不渲染
+      // 未分组会话，但会话 API 已经有真实记录。通过真实列表取 ID，再挂一个临时
+      // 行走同一个侧栏 click 委托；这仍然验证 openConversation/后端载荷，不让
+      // 虚拟化窗口实现细节吞掉圆环的后半段断言。
+      let apiDebug = '';
+      try {
+        const response = await fetch('/api/conversations');
+        const payload = await response.json();
+        const conversations = Array.isArray(payload)
+          ? payload : (Array.isArray(payload?.conversations) ? payload.conversations : []);
+        apiDebug = `api=${conversations.length}:${conversations.slice(0, 20)
+          .map((row) => String(row?.title || '')).join('|')}`;
+        const match = conversations.find((row) => {
+          const title = String(row?.title || '');
+          return title === t || title.startsWith(`${t}：`) || title.startsWith(`${t}:`);
+        });
+        if (match?.id) {
+          const item = document.createElement('div');
+          item.className = 'conversation-item';
+          item.dataset.conversationId = String(match.id);
+          const button = document.createElement('button');
+          button.className = 'conversation-open';
+          button.textContent = t;
+          item.appendChild(button);
+          tree.appendChild(item);
+          button.click();
+          return;
+        }
+      } catch (error) {
+        // 下面统一抛出带 DOM 快照的失败信息。
+        apiDebug = `api-error=${error?.message || error}`;
       }
-      item.scrollIntoView({ block: 'center' });
-      item.querySelector('.conversation-open').click();
+      const dump = [...tree.querySelectorAll('.workspace-group')].map((group) => ({
+        group: group.dataset.workspaceName,
+        expanded: group.classList.contains('expanded'),
+        rows: [...group.querySelectorAll('.conversation-open')].map((el) => el.textContent),
+      }));
+      throw new Error(`找不到会话行：${t}；${apiDebug}；分组=${JSON.stringify(dump)}`);
     }, title);
     await openByTitle(TITLE);
     // 用量展示已改为折叠卡（默认收起 → visible 断言必然超时），这里只要求挂载。

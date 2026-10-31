@@ -32,6 +32,15 @@ async function runViewport(browser, vp) {
   try {
     await page.goto(`${BASE}/`, { waitUntil: 'load', timeout: 20000 });
     await page.waitForTimeout(3500);
+    // 应用会恢复上次停留的顶层视图；用户可能上次停在工作台，
+    // 这时 #messages/#messageInput 仍在 DOM 中但被整个对话视图隐藏。
+    // 基础冒烟验证的是对话壳本身，先显式切回「对话」再检查，避免把
+    // 合法的视图恢复状态误报成前端缺失。
+    const chatMode = page.locator('#openChatMode');
+    if (await chatMode.count() && !(await chatMode.getAttribute('aria-pressed'))?.toLowerCase().includes('true')) {
+      await chatMode.click();
+      await page.waitForTimeout(700);
+    }
     const state = await page.evaluate(() => {
       // 「可见」= 已渲染（存在、非 display:none、非 visibility:hidden、有非零盒子）。
       // 手机端侧栏是 position:fixed + translateX(-102%) 的离屏抽屉，computed visibility

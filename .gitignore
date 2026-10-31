@@ -223,6 +223,8 @@ verify/*
 # 用正式版供应商自身台账结算 base（HEAD 归档）vs new 的命中率/cached/uncached 中位数。
 !verify/probe_media_cache.py
 !verify/_release_check.py
+!verify/auto_compaction_e2e.py
+!verify/auto_compaction_e2e.cjs
 !verify/_serve_tmp.py
 !verify/run_freeze_smoke.py
 # 工作台（Studio）资产转换与冒烟（2026-10-22 入库）：

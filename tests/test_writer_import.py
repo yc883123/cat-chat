@@ -21,10 +21,16 @@ from naiba.writer.store import (  # noqa: E402
 )
 
 
-def _archive(*, chapters_content=None, outline_count=3):
-    """构造一份最小启元存档（完整应用 state 的形状）。"""
+def _archive(*, chapters_content=None, outline_count=3, outline_nos=None):
+    """构造一份最小启元存档（完整应用 state 的形状）。
+
+    `outline_nos` 用来模拟真档变体：真档的 `no` 可能是中文数字字符串（'一'）。
+    """
     outline = [{"no": i, "title": f"第{i}章 标题{i}", "beat": f"梗概{i}", "hook": f"钩{i}"}
                for i in range(1, outline_count + 1)]
+    if outline_nos is not None:
+        for row, no in zip(outline, outline_nos):
+            row["no"] = no
     chapters = []
     for index, row in enumerate(outline, start=1):
         content = chapters_content.get(index, row["beat"]) if chapters_content else row["beat"]
@@ -84,6 +90,30 @@ class ParseArchiveTests(unittest.TestCase):
             parse_qiyuan_archive({"totally": "different"})
         with self.assertRaises(WriterStoreError):
             parse_qiyuan_archive({"novel": "不是对象"})
+
+    def test_chinese_numeral_outline_nos(self):
+        """真档回归：启元把 outlineMeta 的 no 写成中文数字字符串（'一'~'八'）。"""
+        parsed = parse_qiyuan_archive(
+            _archive(outline_nos=["一", "二", "三"], chapters_content={2: "第二章正文。"}))
+        self.assertEqual([row["no"] for row in parsed["outline_chapters"]], [1, 2, 3])
+        self.assertEqual(parsed["chapters"][0]["no"], 2)
+        # 数字字符串与混合形态同样按数值理解。
+        parsed = parse_qiyuan_archive(_archive(outline_nos=["1", "二", 3]))
+        self.assertEqual([row["no"] for row in parsed["outline_chapters"]], [1, 2, 3])
+
+    def test_garbage_outline_no_falls_back_to_position(self):
+        """章号完全解不出：按数组位置编号，绝不抛原始异常（真档曾以 500 退出）。"""
+        parsed = parse_qiyuan_archive(_archive(outline_nos=["第？章", None, ""]))
+        self.assertEqual([row["no"] for row in parsed["outline_chapters"]], [1, 2, 3])
+
+    def test_stage_import_accepts_utf8_bom(self):
+        """真档可能被 Windows 记事本另存成带 BOM 的 UTF-8，导入不得报「不是有效的 JSON」。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WriterStore(Path(tmp))
+            staged = store.stage_import(
+                filename="作品存档.json",
+                data=b"\xef\xbb\xbf" + json.dumps(_archive(), ensure_ascii=False).encode("utf-8"))
+            self.assertEqual(staged["title"], "长夜灯")
 
 
 class ImportFlowTests(unittest.TestCase):

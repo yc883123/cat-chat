@@ -1312,7 +1312,8 @@ class WriterStore:
                 f"文件太大（{len(data) / 1024 / 1024:.1f} MB），上限 {MAX_IMPORT_BYTES // 1024 // 1024} MB"
             )
         try:
-            payload = json.loads(data.decode("utf-8"))
+            # utf-8-sig：Windows 应用另存的 JSON 常带 BOM，直接 utf-8 解会炸。
+            payload = json.loads(data.decode("utf-8-sig"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise WriterStoreError("不是有效的 JSON 文件，请选择启元的「作品存档.json」") from exc
         if not isinstance(payload, dict):
@@ -1532,6 +1533,42 @@ class WriterStore:
 
 # ---- 启元存档解析（纯函数，便于单测） ----
 
+_ZH_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9}
+_ZH_UNITS = {"十": 10, "百": 100, "千": 1000}
+
+
+def _zh_number(text: str) -> int:
+    """中文数字转整数（'一'~'九千九百九十九'）；解不出返回 0。"""
+    total = 0
+    current = 0
+    matched = False
+    for ch in text:
+        if ch in _ZH_DIGITS:
+            current = _ZH_DIGITS[ch]
+            matched = True
+        elif ch in _ZH_UNITS:
+            total += max(current, 1) * _ZH_UNITS[ch]
+            current = 0
+            matched = True
+        else:
+            return 0
+    return total + current if matched else 0
+
+
+def _outline_no(raw: Any, index: int) -> int:
+    """大纲章号：真档里 `no` 可能是中文数字字符串（'一'），解不出就按数组位置。"""
+    if isinstance(raw, bool):
+        return index
+    if isinstance(raw, int):
+        return raw if raw >= 1 else index
+    text = str(raw or "").strip()
+    if text.isdigit():
+        return int(text)
+    zh = _zh_number(text)
+    return zh if zh >= 1 else index
+
+
 def parse_qiyuan_archive(payload: dict[str, Any]) -> dict[str, Any]:
     """解析启元 `作品存档.json`（完整应用 state）：取 `novel` 与 `chapters` 作品字段。
 
@@ -1565,7 +1602,7 @@ def parse_qiyuan_archive(payload: dict[str, Any]) -> dict[str, Any]:
         if not title:
             continue
         outline_rows.append({
-            "no": int(item.get("no") or index),
+            "no": _outline_no(item.get("no"), index),
             "title": title[:200],
             "beat": str(item.get("beat") or "").strip()[:2000],
             "hook": str(item.get("hook") or "").strip()[:500],

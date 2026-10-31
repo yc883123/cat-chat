@@ -2105,7 +2105,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             return None
         file_data = state.get("file_data") or b""
         if not state["complete"] or not file_data:
-            self._json({"error": "上传中断或未收到图片内容"}, HTTPStatus.BAD_REQUEST)
+            # 该助手被头像/图标/拆书匠/织书台共用，文案保持「文件」通用。
+            self._json({"error": "上传中断或未收到文件内容"}, HTTPStatus.BAD_REQUEST)
             return None
         return fields, file_data
 

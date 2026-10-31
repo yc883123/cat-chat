@@ -4535,6 +4535,9 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
   display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto;
   border: 1px solid var(--line); border-radius: var(--r-md); padding: 6px 8px;
 }
+/* 参数搜索：清单几百行时按关键字直达；没匹配时在清单上方提示。 */
+.comfyui-params-search { display: grid; gap: 4px; font-size: 11.5px; color: var(--muted); margin-bottom: 6px; }
+.comfyui-params-search-empty { margin: 0 0 6px; font-size: 11.5px; color: var(--warning); }
 .comfyui-params-item {
   display: flex; align-items: center; gap: 8px; font-size: 11.5px;
   color: var(--text); padding: 3px 2px; cursor: pointer; border-radius: var(--r-sm, 4px);

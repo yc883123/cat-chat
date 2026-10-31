@@ -2023,5 +2023,27 @@ class TaskCardLayoutTests(unittest.TestCase):
         self.assertIn("flex: none", status_rule, "状态标签保持自身宽度，不被标题挤压")
 
 
+class ParamsPickerSearchTests(unittest.TestCase):
+    """「编辑参数」弹窗的搜索过滤（几百个参数逐个翻页没法用）。"""
+
+    def setUp(self):
+        self.root = Path(__file__).resolve().parents[1]
+        self.index = (self.root / "public/index.html").read_text(encoding="utf-8")
+        self.js = (self.root / "public/js/24-comfyui.js").read_text(encoding="utf-8")
+
+    def test_dialog_has_search_field(self):
+        self.assertIn('id="comfyuiParamsSearch"', self.index)
+        self.assertIn('id="comfyuiParamsSearchEmpty"', self.index, "空结果提示")
+
+    def test_filter_is_hide_not_delete(self):
+        """过滤只藏行不删行：保存时 DOM 里仍要能读到全部勾选与顺序。"""
+        self.assertIn("function filterParamsPicker()", self.js)
+        self.assertIn('row.style.display = hit ? "" : "none"', self.js,
+                      "用 style.display 而不是 hidden 属性（display:flex 会盖掉 [hidden]）")
+        self.assertIn('$("#comfyuiParamsSearch")?.addEventListener("input", filterParamsPicker)', self.js)
+        self.assertIn("filterParamsPicker();", self.js,
+                      "打开弹窗与重渲染清单后要按当前搜索词重过滤")
+
+
 if __name__ == "__main__":
     unittest.main()

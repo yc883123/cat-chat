@@ -664,6 +664,10 @@
             <form method="dialog" class="comfyui-import-form">
               <h3>选择要在主表单显示的参数</h3>
               <p class="comfyui-import-reminder">没勾选的参数不会出现在主表单，也不会被改动——生成时按工作流里原本的值执行。拖动行首的 ⠿ 可以调整先后顺序（也可以用行尾的 ↑↓），勾选结果和顺序都按这份工作流保存，下次打开还是这个样子。</p>
+              <label class="comfyui-params-search">搜索参数（节点号 / 节点名 / 字段都行）
+                <input id="comfyuiParamsSearch" type="text" placeholder="例：时长、seed、放大图片" autocomplete="off">
+              </label>
+              <p class="comfyui-params-search-empty" id="comfyuiParamsSearchEmpty" hidden>没有匹配的参数；清掉搜索词或换个说法试试。</p>
               <div class="comfyui-params-picker" id="comfyuiParamsPicker"></div>
               <div class="comfyui-import-actions">
                 <button class="control-button" type="button" id="comfyuiParamsSave">保存</button>

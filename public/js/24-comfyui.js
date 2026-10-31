@@ -62,6 +62,8 @@ export function bindComfyuiEvents() {
   $("#comfyuiOpenOutputs")?.addEventListener("click", () => void openOutputsFolder());
   $("#comfyuiParamsSave")?.addEventListener("click", () => void saveParamsConfig());
   $("#comfyuiParamsCancel")?.addEventListener("click", closeParamsDialog);
+  // 参数清单搜索：边输边滤（行是每次打开重建的，过滤只藏不删）。
+  $("#comfyuiParamsSearch")?.addEventListener("input", filterParamsPicker);
   $("#comfyuiParamsPicker")?.addEventListener("change", () => {
     const error = $("#comfyuiParamsError");
     if (error) error.textContent = "";
@@ -567,6 +569,11 @@ function openParamsDialog() {
   const dialog = $("#comfyuiParamsDialog");
   if (!dialog) return;
   renderParamsPicker();
+  const search = $("#comfyuiParamsSearch");
+  if (search) {
+    search.value = "";
+    filterParamsPicker();
+  }
   const error = $("#comfyuiParamsError");
   if (error) error.textContent = "";
   if (typeof dialog.showModal === "function") dialog.showModal();
@@ -605,6 +612,23 @@ function renderParamsPicker() {
     row.append(handle, box, text, moveButtons(row));
     picker.append(row);
   }
+}
+
+// 搜索过滤：按行文本（节点号 · 节点名 · 字段 → 端口）匹配，不动的行只是暂时藏起来，
+// 勾选与顺序都还在 DOM 里，保存时全量照收。隐藏用 style.display 而不是 hidden 属性——
+// .comfyui-params-item 的 display:flex 会盖掉 [hidden]。
+function filterParamsPicker() {
+  const picker = $("#comfyuiParamsPicker");
+  if (!picker) return;
+  const query = String($("#comfyuiParamsSearch")?.value || "").trim().toLowerCase();
+  let shown = 0;
+  for (const row of picker.querySelectorAll(".comfyui-params-item")) {
+    const hit = !query || String(row.textContent || "").toLowerCase().includes(query);
+    row.style.display = hit ? "" : "none";
+    if (hit) shown += 1;
+  }
+  const empty = $("#comfyuiParamsSearchEmpty");
+  if (empty) empty.hidden = shown > 0;
 }
 
 // 触屏和键盘没法拖：给每行配一对上下移按钮，落序与拖拽走同一份 DOM 顺序。

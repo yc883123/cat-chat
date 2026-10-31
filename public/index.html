@@ -1359,7 +1359,9 @@
                     <div class="writer-action-bar">
                       <button class="control-button writer-primary" type="button" id="writerOutlineGenerate">生成这一部大纲</button>
                       <button class="control-button" type="button" id="writerOutlineGenerateAll"
-                              title="按上面各部的部标题，一次性把全部部的大纲顺序生成；后面的部会接住前面几部留下的线">一次性生成全部大纲</button>
+                              title="按上面各部的部标题，一次性把全部部的大纲顺序生成；后面的部会接住前面几部留下的线。再点一次就是重新生成">一次性生成全部大纲</button>
+                      <button class="control-button" type="button" id="writerOutlineReview"
+                              title="把已写好的各部大纲放在一起互相核对：修掉部与部之间接不上、对不齐、重复的桥段；每部按新版本保存，可随时切回">多部统一复核梳理</button>
                       <button class="control-button" type="button" id="writerOutlineSave">保存大纲修改</button>
                       <button class="control-button tiny" type="button" id="writerPartAdd">+ 增加一部</button>
                       <button class="control-button tiny" type="button" id="writerPartRemove">删除这一部</button>
@@ -1408,6 +1410,8 @@
                           <option value="3000">3000 字</option>
                           <option value="4000">4000 字</option>
                           <option value="6000">6000 字</option>
+                          <option value="8000">8000 字</option>
+                          <option value="9000">9000 字</option>
                         </select>
                       </label>
                       <label class="writer-field">章节结尾
@@ -1416,6 +1420,12 @@
                           <option value="natural">自然收</option>
                           <option value="hook">留钩子 + 预告</option>
                         </select>
+                      </label>
+                    </div>
+                    <div class="writer-grid-2">
+                      <label class="writer-field">本部目标总字数（= 章数 × 单章字数，自动联动）
+                        <input type="number" id="writerSplitTotalChars" min="0" step="1000" inputmode="numeric"
+                               placeholder="改这里会反推章数；单章不限时先选单章字数" aria-label="本部目标总字数">
                       </label>
                     </div>
                     <div class="writer-grid-2">
@@ -1433,7 +1443,7 @@
                       <button class="control-button writer-primary" type="button" id="writerSplitStart">开始拆分</button>
                       <button class="control-button" type="button" id="writerSplitContinue" hidden>继续拆下一批</button>
                     </div>
-                    <p class="writer-hint" id="writerSplitHint">每批最多 999 章，可中断续拆；拆分时会带上已拆章节的衔接上下文。已存在的章节可接续（从下一章继续）或覆盖重拆，由你确认。</p>
+                    <p class="writer-hint" id="writerSplitHint">章数 × 单章字数就是本部目标总字数，三个数字互相联动。大批量拆章会自动按每批 20 章连拆、每批带上前文衔接，中断后可续拆；已存在的章节可接续（从下一章继续）或覆盖重拆，由你确认。</p>
                   </div>
                   <div class="writer-stage-group">
                     <div class="writer-group-head"><strong>章节简述</strong><small id="writerBriefMeta">还没有章节</small></div>

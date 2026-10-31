@@ -46,6 +46,7 @@ const KIND_LABELS = {
   outline: "生成全书大纲",
   outline_text: "生成本部大纲",
   outline_all: "一次生成全部大纲",
+  outline_review: "多部统一复核梳理",
   split: "拆分章节",
   chapter: "整章正文",
   chapter_segs: "分段正文",
@@ -62,10 +63,14 @@ const STEP_LABELS = {
   chars: "角色设定",
   outline: "章节大纲",
   outline_text: "全篇大纲",
+  outline_review: "复核梳理",
   split: "拆章",
   segs: "段落要点",
   draft: "正文",
 };
+
+// 拆章自动分批：与服务端 prompts.SPLIT_STEP_CHAPTERS 对齐（提示文案用）。
+const SPLIT_STEP_CHAPTERS = 20;
 
 // 写作风格（与服务端 STYLE_PRESETS 对齐）。
 const STYLE_OPTIONS = [
@@ -152,6 +157,9 @@ const writer = {
   pane: "editor",
   // 大纲当前编辑的部（多部作品切部编辑；单部作品永远是 1）。
   partNo: 1,
+  // 拆分面板「拆哪一部」自己的选择：不跟大纲页当前部走（第三次反馈⑥）。
+  // 0 = 还没选过（打开作品时按当时的当前部初始化一次）。
+  splitPartNo: 0,
   // 部标题/大纲文字的编辑态：DOM 是最新值，渲染函数要让路（与 setupDirty 同一套规则）。
   partsDirty: false,
   // 生成参数（滑条），本地保留。设定链只出设定（第二次反馈），
@@ -661,6 +669,7 @@ function renderChapterStage() {
   const endingEl = $("#writerChapterEnding");
   if (endingEl) endingEl.value = plan.ending;
   renderParts();
+  syncSplitTotalChars();
   renderBriefList();
 }
 
@@ -1140,7 +1149,15 @@ function renderParts() {
   if (select) {
     const list = parts.length ? parts : [{ no: 1, title: "第 1 部" }];
     select.replaceChildren(...list.map((row) => new Option(`第 ${row.no} 部 · ${row.title || "未命名"}`, String(row.no))));
-    select.value = String(writer.partNo || 1);
+    // 「拆哪一部」是拆分面板自己的选择，不跟大纲页正在看的部走——第三次反馈⑥：
+    // 任何一次重渲染都把它拽回 writer.partNo，用户选好的第 1 部会被悄悄换成别的部。
+    // 只在还没选过（刚打开作品）时借一次当前部做初值，之后记住用户的选择；
+    // 选中的部在这版大纲里不存在了（切了版本/删了部）才回落到第一部。
+    if (!Number(writer.splitPartNo || 0)) writer.splitPartNo = Number(writer.partNo || 1);
+    if (!list.some((row) => Number(row.no) === Number(writer.splitPartNo))) {
+      writer.splitPartNo = Number(list[0]?.no || 1);
+    }
+    select.value = String(writer.splitPartNo);
   }
 }
 
@@ -1592,7 +1609,8 @@ async function pollPipelineTick() {
       // 会挡住表单回填，看起来就是「生成完了，内容却不显示」（第二次反馈实锤）。
       if (fresh.status === "done") {
         if (fresh.kind === "setup_all" || fresh.kind === "setup_step") writer.setupDirty = false;
-        if (fresh.kind === "outline_text" || fresh.kind === "outline_all") writer.partsDirty = false;
+        if (fresh.kind === "outline_text" || fresh.kind === "outline_all"
+          || fresh.kind === "outline_review") writer.partsDirty = false;
         persistDraftAfterSave();
       }
       await openBook(bookId, { keepEdits: true, keepStage: true });
@@ -1928,6 +1946,8 @@ async function openBook(bookId, { keepEdits = false, keepStage = false } = {}) {
     const sameBook = writer.bookId === bookId;
     writer.bookId = bookId;
     writer.book = payload.book;
+    // 换书时「拆哪一部」的选择也跟着换：上一部作品的部号对这一本没有意义。
+    if (!sameBook) writer.splitPartNo = 0;
     writer.setup = payload.setup;
     writer.outline = payload.outline;
     writer.chapters = payload.chapters || [];
@@ -2286,9 +2306,17 @@ function styleLabelOf(key) {
 async function savePartsManual() {
   if (!writer.bookId) return;
   const parts = collectParts();
-  if (!parts.some((row) => String(row.text || "").trim())) {
-    toast("大纲还是空的；先写点内容或点「生成这一部大纲」");
-    return;
+  const hasText = parts.some((row) => String(row.text || "").trim());
+  if (!hasText) {
+    // 只排了部目录（部数与标题）也算内容：第三次反馈②之前「目录没正文就存不了」，
+    // 用户只能靠逐部生成硬凑目录。单部默认名且没字才真的没东西可存。
+    const meaningful = parts.length > 1
+      || (parts[0] && String(parts[0].title || "").trim()
+        && String(parts[0].title || "").trim() !== `第 ${parts[0].no} 部`);
+    if (!meaningful) {
+      toast("大纲还是空的；先写点内容或点「生成这一部大纲」");
+      return;
+    }
   }
   setBusy(true);
   try {
@@ -2300,8 +2328,10 @@ async function savePartsManual() {
     writer.outline = { ...(writer.outline || {}), schema: 2, parts, chapters: [] };
     writer.partsDirty = false;
     persistDraftAfterSave();
-    toast("大纲已保存为新版本");
-    setSaveState("已保存", "大纲按版本保存；拆章只改章节目录，不动大纲本身。");
+    toast(hasText ? "大纲已保存为新版本" : "部目录已保存；各部正文可以之后再生成");
+    setSaveState("已保存", hasText
+      ? "大纲按版本保存；拆章只改章节目录，不动大纲本身。"
+      : "部目录已保存；生成大纲时按这些部逐部写。");
     renderAll();
     void refreshPlan();
   } catch (error) {
@@ -2318,6 +2348,17 @@ async function savePartsManual() {
   }
 }
 
+/** 生成前把大纲目录先落库：有正文才值得存一版；纯目录（还没写）不用存，
+ *  流水线每步写回时会带上部清单把目录重建出来（第三次反馈①②）。
+ *  返回 true = 可以继续提交；false = 保存失败（如版本冲突），调用方应中止。 */
+async function ensurePartsSavedBeforeGenerate() {
+  if (!writer.partsDirty) return true;
+  const parts = collectParts();
+  if (!parts.some((row) => String(row.text || "").trim())) return true;
+  await savePartsManual();
+  return !writer.partsDirty;
+}
+
 /** 生成当前这一部的整篇大纲（outline_text 流水线）。 */
 async function generatePartText() {
   if (!writer.bookId) return;
@@ -2326,7 +2367,7 @@ async function generatePartText() {
     toast("先在设置里检查模型，再回来选择");
     return;
   }
-  if (writer.partsDirty) await savePartsManual();
+  if (!await ensurePartsSavedBeforeGenerate()) return;
   try {
     await submitPipeline("outline_text", {
       partNo: Number(writer.partNo || 1),
@@ -2337,6 +2378,21 @@ async function generatePartText() {
   } catch (_error) {
     // submitPipeline 自己会 toast；这里只防未捕获。
   }
+}
+
+/** 程序性改部（增/删/按部数重排/升级）后把表单强制对齐当前部。
+ *  fillPartForm 的 dirty 守卫是给「用户正在打字」让路的；这里刚换了个部，
+ *  表单必须跟着换——否则旧标题/旧正文还留在输入框里，下一次 collectParts
+ *  会把它们盖到当前部头上（第三次反馈③「第4部·第3部」就是这么来的）。 */
+function syncPartFormToCurrent() {
+  const part = currentPart();
+  const noEl = $("#writerPartNo");
+  if (noEl) noEl.value = String(part?.no || writer.partNo || 1);
+  const titleEl = $("#writerPartTitle");
+  if (titleEl) titleEl.value = String(part?.title || "");
+  const textEl = $("#writerOutlineText");
+  if (textEl) textEl.value = String(part?.text || "");
+  renderOutlineStat();
 }
 
 /** 按填的部数重建分部目录：多退少补，已有内容的部原样保留。 */
@@ -2355,11 +2411,12 @@ function applyPartsTarget() {
   writer.partNo = Math.min(Number(writer.partNo || 1), target);
   writer.partsDirty = true;
   renderOutline();
-  renderOutlineStat();
+  syncPartFormToCurrent();
   toast(`已按 ${target} 部重排目录${target > parts.length ? "；新增的部是空的，点「一次性生成全部大纲」或逐部填写" : ""}；保存后生效`);
 }
 
-/** 一次性生成全部部的大纲（outline_all）：每步一部，后面的部接住前面的线。 */
+/** 一次性生成全部部的大纲（outline_all）：每步一部，后面的部接住前面的线。
+ *  再点一次就是重新生成（抽卡）：已写过内容的部会被替换，旧版本留在历史里。 */
 async function generateAllParts() {
   if (!writer.bookId) return;
   const model = readModel("outlineProviderKey", "outlineModelName");
@@ -2367,11 +2424,7 @@ async function generateAllParts() {
     toast("先在设置里检查模型，再回来选择");
     return;
   }
-  if (writer.partsDirty) {
-    await savePartsManual();
-    // 保存失败（如版本冲突已重新读取）就不带着旧目录继续生成。
-    if (writer.partsDirty) return;
-  }
+  if (!await ensurePartsSavedBeforeGenerate()) return;
   const plan = collectParts().map((row) => ({ no: row.no, title: row.title }));
   if (!plan.length) {
     toast("先填好各部的部标题（或点「按部数生成目录」）");
@@ -2379,10 +2432,40 @@ async function generateAllParts() {
   }
   const withText = collectParts().filter((row) => String(row.text || "").trim()).length;
   if (withText && !window.confirm(
-    `要按 ${plan.length} 部一次性生成全部大纲吗？\n已写过内容的部会被新生成的内容替换（旧版本保留在历史里）；后面的部会衔接前面的部，保证故事连贯。`,
+    `要按 ${plan.length} 部一次性重新生成全部大纲吗？\n已写过内容的部会被新生成的内容替换（旧版本保留在历史里）；后面的部会衔接前面的部，保证故事连贯。`,
   )) return;
   try {
     await submitPipeline("outline_all", { partPlan: plan, targetChars: 8000, model });
+  } catch (_error) {
+    // submitPipeline 自己会 toast。
+  }
+}
+
+/** 多部统一复核梳理（outline_review）：把已写好的各部放在一起互相核对，
+ *  逐部修订衔接、矛盾与重复；每部存一版新大纲，旧版本可切回。 */
+async function generateOutlineReview() {
+  if (!writer.bookId) return;
+  const model = readModel("outlineProviderKey", "outlineModelName");
+  if (!model.model_name) {
+    toast("先在设置里检查模型，再回来选择");
+    return;
+  }
+  if (!await ensurePartsSavedBeforeGenerate()) return;
+  const parts = collectParts().filter((row) => String(row.text || "").trim());
+  if (parts.length < 2) {
+    toast("多部复核梳理至少要两部已写好的大纲；先逐部生成或填写");
+    return;
+  }
+  if (!window.confirm(
+    `要对照其余各部，逐部复核梳理这 ${parts.length} 部大纲吗？\n` +
+    "它会修掉部与部之间接不上、对不齐、重复的桥段，只做必要修改；\n" +
+    "每部修订后都按新版本保存，旧版本留在历史里，不满意可随时切回。",
+  )) return;
+  try {
+    await submitPipeline("outline_review", {
+      partPlan: parts.map((row) => ({ no: row.no, title: row.title })),
+      model,
+    });
   } catch (_error) {
     // submitPipeline 自己会 toast。
   }
@@ -2400,8 +2483,8 @@ function addPart() {
   writer.partsDirty = true;
   writer.outline = { ...(writer.outline || {}), schema: 2, parts, chapters: [] };
   renderOutline();
-  renderOutlineStat();
-  toast(`已加第 ${nextNo} 部；写完点「保存大纲修改」`);
+  syncPartFormToCurrent();
+  toast(`已加第 ${nextNo} 部，部标题已自动编好号；写完点「保存大纲修改」`);
 }
 
 function removePart() {
@@ -2417,7 +2500,8 @@ function removePart() {
   writer.partNo = Math.max(1, no - 1);
   writer.partsDirty = true;
   renderOutline();
-  toast(`已删除第 ${no} 部；保存后生效`);
+  syncPartFormToCurrent();
+  toast(`已删除第 ${no} 部，后面的部已重新编号；保存后生效`);
 }
 
 /** 老作品：把逐章大纲拼成一段文字，升级为分部大纲（不改动原版本）。 */
@@ -2439,6 +2523,9 @@ async function upgradeLegacyOutline() {
   };
   writer.partsDirty = true;
   renderOutline();
+  // 表单里还留着升级前那一部的旧内容；不先对齐到第 1 部，collectParts 会把
+  // 输入框里的旧文盖掉刚拼好的大纲。
+  syncPartFormToCurrent();
   await savePartsManual();
 }
 
@@ -2464,6 +2551,39 @@ async function saveChapterPlan() {
 }
 
 const SPLIT_BATCH_MAX = 999;
+
+// ---- 拆分字数联动：拆成多少章 × 单章字数 = 本部目标总字数（第三次反馈⑤） ----
+
+function splitChapterChars() {
+  return Number($("#writerChapterChars")?.value || 0);
+}
+
+/** 由「章数 × 单章」刷出总字数框；单章不限时公式不成立，框留空。 */
+function syncSplitTotalChars() {
+  const totalEl = $("#writerSplitTotalChars");
+  if (!totalEl || document.activeElement === totalEl) return;
+  const chars = splitChapterChars();
+  const count = Number($("#writerSplitCount")?.value || 0);
+  totalEl.value = chars && count ? String(count * chars) : "";
+}
+
+/** 由总字数反推章数（四舍五入，至少 1 章），再把总字数框对齐成整数结果。 */
+function applySplitTotalChars() {
+  const totalEl = $("#writerSplitTotalChars");
+  if (!totalEl) return;
+  const total = Number(totalEl.value || 0);
+  if (!total || total < 1) return;
+  const chars = splitChapterChars();
+  if (!chars) {
+    toast("单章字数现在是「不限」，没法由总字数反推章数；先选一个单章字数");
+    syncSplitTotalChars();
+    return;
+  }
+  const count = Math.min(9999, Math.max(1, Math.round(total / chars)));
+  const countEl = $("#writerSplitCount");
+  if (countEl) countEl.value = String(count);
+  totalEl.value = String(count * chars);
+}
 
 /** 拆一批：按 wantCount 与 999 上限切批；接续拆分会带上已拆章节的衔接上下文（服务端）。 */
 async function startSplit() {
@@ -2537,7 +2657,8 @@ async function startSplit() {
 }
 
 function splitPartNo() {
-  return Number($("#writerSplitPart")?.value || writer.partNo || 1);
+  // 状态优先（renderParts 会把 DOM 对齐到它），DOM 只是兜底。
+  return Number(writer.splitPartNo || $("#writerSplitPart")?.value || writer.partNo || 1);
 }
 
 /** 继续拆：还剩多少就再拆一批（每批 ≤999）。 */
@@ -2573,8 +2694,10 @@ async function submitSplitBatch({ fromNo, partNo, model }) {
     });
     const btn = $("#writerSplitContinue");
     if (btn) btn.hidden = fromNo + wantCount > target;
+    const batches = wantCount > SPLIT_STEP_CHAPTERS
+      ? `，会自动按每批 ${SPLIT_STEP_CHAPTERS} 章连拆` : "";
     setSaveState("已提交拆分",
-      `第 ${fromNo} 章起拆 ${wantCount} 章（目标 ${target} 章）；完成后章节目录会自动刷新。`);
+      `拆「第 ${partNo} 部」：第 ${fromNo} 章起拆 ${wantCount} 章（目标 ${target} 章）${batches}；完成后章节目录会自动刷新。`);
   } catch (_error) {
     // submitPipeline 已提示
   }
@@ -3902,6 +4025,7 @@ export function bindWriterEvents() {
   }
   $("#writerOutlineGenerate")?.addEventListener("click", () => void generatePartText());
   $("#writerOutlineGenerateAll")?.addEventListener("click", () => void generateAllParts());
+  $("#writerOutlineReview")?.addEventListener("click", () => void generateOutlineReview());
   $("#writerPartsApply")?.addEventListener("click", () => applyPartsTarget());
   $("#writerOutlineSave")?.addEventListener("click", () => void savePartsManual());
   $("#writerPartAdd")?.addEventListener("click", () => addPart());
@@ -3916,8 +4040,19 @@ export function bindWriterEvents() {
   // ---- 章节（拆分 + 简述） ----
   $("#writerSplitStart")?.addEventListener("click", () => void startSplit());
   $("#writerSplitContinue")?.addEventListener("click", () => void continueSplit());
+  // 「拆哪一部」是独立选择：记住它，别让任何重渲染把它拽回大纲页当前部（第三次反馈⑥）。
+  $("#writerSplitPart")?.addEventListener("change", (event) => {
+    writer.splitPartNo = Number(event.target.value || 1);
+  });
+  // 字数联动：改章数或单章字数 → 总字数跟着变；改总字数 → 反推章数（第三次反馈⑤）。
+  $("#writerSplitCount")?.addEventListener("input", syncSplitTotalChars);
+  $("#writerSplitTotalChars")?.addEventListener("input", syncSplitTotalChars);
+  $("#writerSplitTotalChars")?.addEventListener("change", applySplitTotalChars);
   for (const id of ["writerChapterChars", "writerChapterEnding"]) {
-    $(`#${id}`)?.addEventListener("change", () => void saveChapterPlan());
+    $(`#${id}`)?.addEventListener("change", () => {
+      void saveChapterPlan();
+      syncSplitTotalChars();
+    });
   }
   // 简述/标题失焦保存（input 不落盘：改一个字就发一次请求既慢又容易撞 revision）。
   $("#writerBriefList")?.addEventListener("change", (event) => {

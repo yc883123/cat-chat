@@ -229,5 +229,57 @@ class WriterBackendRoutesTests(unittest.TestCase):
         self.assertIn('kind="manual"', patch)
 
 
+class WriterRound3UiTests(unittest.TestCase):
+    """第三次反馈（2026-10-31）的前端契约：复核梳理按钮、拆分字数联动、
+    「拆哪一部」独立选中、增加一部表单同步。"""
+
+    def setUp(self):
+        self.index = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+        start = self.index.index('id="studioPageWriter"')
+        self.page = self.index[start: self.index.index('</section>', self.index.index('id="writerImportFile"'))]
+        self.js = (ROOT / "public" / "js" / "27-writer.js").read_text(encoding="utf-8")
+
+    def test_review_button_and_kind_wired(self):
+        self.assertIn('id="writerOutlineReview"', self.page, "多部统一复核梳理按钮")
+        self.assertIn('$("#writerOutlineReview")?.addEventListener("click", () => void generateOutlineReview())', self.js)
+        self.assertIn('submitPipeline("outline_review"', self.js)
+        self.assertIn("outline_review: \"多部统一复核梳理\"", self.js, "KIND_LABELS 有中文标签")
+        self.assertIn("outline_review: \"复核梳理\"", self.js, "STEP_LABELS 有中文标签")
+
+    def test_split_part_dropdown_is_independent(self):
+        """「拆哪一部」不再镜像大纲页当前部：有独立状态 + change 监听（第三次反馈⑥）。"""
+        self.assertIn("splitPartNo: 0", self.js, "状态里有拆分面板自己的部号")
+        self.assertNotIn("select.value = String(writer.partNo || 1);", self.js,
+                         "renderParts 不得再把拆哪一部拽回大纲页当前部")
+        self.assertIn('$("#writerSplitPart")?.addEventListener("change"', self.js)
+        self.assertIn("if (!Number(writer.splitPartNo || 0)) writer.splitPartNo = Number(writer.partNo || 1);",
+                      self.js, "只在没选过时借一次当前部做初值")
+        self.assertIn("if (!sameBook) writer.splitPartNo = 0;", self.js, "换书重置")
+        self.assertIn("拆「第 ${partNo} 部」", self.js, "提交后的保存状态要写明拆的是哪一部")
+
+    def test_part_mutations_sync_form(self):
+        """加部/删部/按部数重排后表单必须跟着换部，防旧内容盖到新部头上（第三次反馈③）。"""
+        self.assertIn("function syncPartFormToCurrent()", self.js)
+        for fn in ("addPart", "removePart", "applyPartsTarget"):
+            block = self.js[self.js.index(f"function {fn}("):]
+            block = block[:block.index("\n}", 1) + 2]
+            self.assertIn("syncPartFormToCurrent()", block, f"{fn} 之后要同步表单")
+
+    def test_split_chars_formula_linked(self):
+        self.assertIn('id="writerSplitTotalChars"', self.page, "本部目标总字数输入框")
+        for option in ('<option value="8000">8000 字</option>', '<option value="9000">9000 字</option>'):
+            self.assertIn(option, self.page, "单章字数新档（阅读平台常见 4000–9000）")
+        self.assertIn("function syncSplitTotalChars()", self.js)
+        self.assertIn("function applySplitTotalChars()", self.js)
+        self.assertIn('$("#writerSplitCount")?.addEventListener("input", syncSplitTotalChars)', self.js)
+        self.assertIn("SPLIT_STEP_CHAPTERS = 20", self.js, "与服务端分批常量对齐（提示文案用）")
+
+    def test_generate_skips_empty_catalog_presave(self):
+        """一次性生成全部大纲不再被「大纲还是空的」挡住：纯目录不先存（第三次反馈①）。"""
+        self.assertIn("async function ensurePartsSavedBeforeGenerate()", self.js)
+        self.assertIn("if (!await ensurePartsSavedBeforeGenerate()) return;", self.js)
+        self.assertIn("部目录已保存", self.js, "空目录也允许人工保存（只存部数与标题）")
+
+
 if __name__ == "__main__":
     unittest.main()

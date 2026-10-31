@@ -26,7 +26,7 @@ from naiba.writer.store import WriterStoreError
 # 老的「大纲」步保留：只服务于老 kind `outline`（逐章大纲）的兼容路径。
 SETUP_STEPS: tuple[str, ...] = ("genre", "title", "blurb", "world", "chars")
 # 3.9.13 起「大纲」不再等于章节表：大纲是一整篇文字（可分部），章节由独立的 split 步拆出来。
-TEXT_STEPS: tuple[str, ...] = ("outline_text", "split")
+TEXT_STEPS: tuple[str, ...] = ("outline_text", "split", "outline_review")
 ALL_STEPS: tuple[str, ...] = (*SETUP_STEPS, *TEXT_STEPS, "segs", "draft")
 
 STEP_LABELS = {
@@ -37,6 +37,7 @@ STEP_LABELS = {
     "chars": "角色设定",
     "outline": "章节大纲",
     "outline_text": "全篇大纲",
+    "outline_review": "多部复核梳理",
     "split": "拆章",
     "segs": "段落要点",
     "draft": "正文",
@@ -50,14 +51,18 @@ SEGS_MIN, SEGS_MAX = 2, 4
 # 分部大纲：部数 1–20，每部正文上限 20 万字符（"几万字"够用，再大必然超窗口）。
 PARTS_MIN, PARTS_MAX = 1, 20
 PART_TEXT_MAX = 200_000
-# 拆章：一部最多 9999 章；单批最多 999 章（第二次反馈：200 不够用）。
+# 拆章：一部最多 9999 章；单条流水线最多 999 章（第二次反馈：200 不够用）。
 SPLIT_MIN, SPLIT_MAX = 1, 9999
 SPLIT_BATCH_MAX = 999
+# 拆章自动分批（第三次反馈⑦）：一次让模型拆 180 章，它会先在思考里把全书推演一遍，
+# 正文一个字没出就撞「思考异常冗长」熔断。切成小批连拆，每批落一次盘、带上前文衔接。
+SPLIT_STEP_CHAPTERS = 20
 # 接续拆分时带上的「已拆章节」衔接上下文：最多最近 8 章、总量上限（防撑窗口）。
 SPLIT_PREV_MAX_CHAPTERS = 8
 SPLIT_PREV_MAX_CHARS = 2400
-# 单章字数限制的合法取值（0 = 不限）。
-CHAPTER_CHARS_CHOICES = (0, 2000, 3000, 4000, 6000)
+# 单章字数限制的合法取值（0 = 不限）。8000/9000 档是第三次反馈补的：
+# 阅读平台按章订阅，常见单章 4000–9000 字。
+CHAPTER_CHARS_CHOICES = (0, 2000, 3000, 4000, 6000, 8000, 9000)
 # 章节结尾策略。
 ENDING_CHOICES = ("suspense", "natural", "hook")
 ENDING_LABELS = {"suspense": "留悬念", "natural": "自然收", "hook": "留钩子+预告"}
@@ -283,6 +288,16 @@ STEP_SYSTEM = {
         "目标是让人读完就知道故事怎么走，不写逐章条目，也不要写正文对白。\n"
         "直接输出大纲正文。"
     ),
+    "outline_review": (
+        "你是网文大纲主编。给你一部小说的分部大纲：一部是本部（要由你修订的），其余各部是上下文。\n"
+        "任务：把本部放到整本书里复核梳理——只修本部，不动其他部：\n"
+        "1. 衔接：本部开头必须接住前一部结尾留下的线，本部结尾要给后一部留出接续空间；\n"
+        "2. 矛盾：时间线、人物状态、力量/资源水平与前后部冲突的地方，以整体故事为准改本部；\n"
+        "3. 重复：前后部已经写过的桥段、反转、爽点，本部不再复用；\n"
+        "4. 保留：本部原有的结构、主线走向和关键转折尽量不动，只做必要修改。\n"
+        "输出要求与「全篇大纲」相同：用「主线 / 本部目标 / 阶段推进 / 关键转折 / 结尾落点」组织，"
+        "不要分章、不要 JSON、不要输出复核说明，直接输出修订后的本部大纲正文。"
+    ),
     "split": (
         "你是网文章节拆分师。把给定的大纲正文拆成章节目录，输出 JSON 对象：\n"
         '{"chapters":[{"no":1,"title":"第1章 标题","beat":"本章发生什么（80—150字）","hook":"章末钩子"}]}\n'
@@ -410,6 +425,56 @@ def build_outline_text_user(setup: dict[str, Any], *, part_no: int = 1,
     if style_block:
         parts.append(style_block.rstrip())
     parts.append("请直接输出这一部的大纲正文（不要 JSON、不要逐章罗列）。")
+    return "\n\n".join(parts)
+
+
+def build_outline_review_user(setup: dict[str, Any], *, part_no: int, part_title: str,
+                              part_text: str, prev_parts: list[dict[str, Any]] | None = None,
+                              next_parts: list[dict[str, Any]] | None = None,
+                              extra_note: str = "") -> str:
+    """多部复核梳理的用户消息：本部全文 + 其余各部节选，让模型对照全书修订本部。
+
+    与 build_outline_text_user 的区别：本部的大纲文字是**输入**而不是让模型现写；
+    前后各部都要带（复核要往后看，只带前几部会漏掉「后面的部已经用过这个反转」）。
+    """
+    parts = [f"【创作提示词】\n{idea_text(setup)}"]
+    if str(setup.get("worldview") or "").strip():
+        parts.append(f"【世界观摘要】\n{_worldview_text(setup, limit=1200)}")
+    chars_text = _characters_text(setup, limit=800, count=CHARS_SLOT_COUNT)
+    has_chars = any(isinstance(r, dict) and str(r.get("name") or "").strip()
+                    for r in (setup.get("characters") or []))
+    if has_chars:
+        parts.append(f"【角色】\n{chars_text}")
+    title = str(setup.get("title") or "").strip()
+    if title:
+        parts.append(f"【书名】{title}")
+    blurb = str(setup.get("blurb") or "").strip()
+    if blurb:
+        parts.append(f"【简介】\n{blurb[:600]}")
+    others: list[str] = []
+    for row in (prev_parts or []):
+        text = str(row.get("text") or "").strip()
+        if not text:
+            continue
+        label = f"第 {row.get('no')} 部" + (f" · {row.get('title')}" if str(row.get("title") or "").strip() else "")
+        others.append(f"《{label}》（在它之前，节选）\n{text[:1200]}")
+    for row in (next_parts or []):
+        text = str(row.get("text") or "").strip()
+        if not text:
+            continue
+        label = f"第 {row.get('no')} 部" + (f" · {row.get('title')}" if str(row.get("title") or "").strip() else "")
+        others.append(f"《{label}》（在它之后，节选）\n{text[:600]}")
+    if others:
+        parts.append("【整本书的其余各部】（本部要和它们互相衔接：不重复、不矛盾、接得上）\n"
+                     + "\n\n".join(others))
+    label = f"第 {part_no} 部" + (f" · {part_title}" if part_title else "")
+    parts.append(f"【本部（要复核梳理的就是这一部）】{label}\n{str(part_text or '').strip()}")
+    if extra_note.strip():
+        parts.append(f"【补充要求】\n{extra_note.strip()[:500]}")
+    style_block = _constraints_block(setup)
+    if style_block:
+        parts.append(style_block.rstrip())
+    parts.append("请直接输出修订后的本部大纲正文（不要 JSON、不要逐章罗列、不要复核说明）。")
     return "\n\n".join(parts)
 
 

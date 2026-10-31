@@ -106,7 +106,8 @@ def clean_title(name: str) -> str:
 PARTS_MAX = 20
 PART_TEXT_MAX = 200_000
 # 单章字数限制（0 = 不限）与结尾策略，跟着作品走（章节页设定，正文页使用）。
-CHAPTER_CHARS_CHOICES = (0, 2000, 3000, 4000, 6000)
+# 8000/9000 是第三次反馈补的档：阅读平台按章订阅，常见单章 4000–9000 字。
+CHAPTER_CHARS_CHOICES = (0, 2000, 3000, 4000, 6000, 8000, 9000)
 ENDING_CHOICES = ("suspense", "natural", "hook")
 
 

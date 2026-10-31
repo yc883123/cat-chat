@@ -85,6 +85,24 @@ class ContextRingRefreshTests(unittest.TestCase):
         setter = _function_body(_read("03-media.js"), "export function setContextUsage")
         self.assertIn("contextUsageConversationId", setter, "写入点要记录实时值所属会话")
 
+    def test_history_rerender_never_overrides_live_value_while_busy(self) -> None:
+        """回归：旧护栏只防「扫到空」，扫到上一轮落库旧值照样覆盖——圆环在实时值与
+        上一轮值之间来回翻转（变来变去），吃圆环百分比的提醒弹窗跟着抖。运行中
+        （同会话）历史扫描现在必须整体跳过，落库值永远不比实时值新。"""
+        body = _function_body(_read("03-media.js"), "export function updateContextUsage")
+        self.assertIn(
+            "if (message === null) return;", body, "历史重渲染路径运行中必须整体跳过"
+        )
+        self.assertIn(
+            "if (!usage) return;", body, "终态消息没带 usage（失败收尾）也不得清掉实时值"
+        )
+        guard = body[body.index("!contextReset && state.chatBusy"):]
+        self.assertLess(
+            guard.index("if (message === null) return;"),
+            guard.index("setContextUsage("),
+            "两条跳过分支必须挡在唯一写入点之前",
+        )
+
     def test_ring_percent_written_only_by_renderer(self) -> None:
         source = _read("03-media.js")
         body = _function_body(source, "export function renderContextUsage")

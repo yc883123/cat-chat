@@ -584,6 +584,16 @@ def build_model_history(
     replay_seq = 0
     for item in conversation_messages:
         metadata = item.get("metadata") or {}
+        # 「新会话开始」边界：从这里重算上下文（此前的消息一条都不进模型请求，
+        # 聊天记录本身仍在库里/界面上）。多个边界取最后一个。
+        # 判定必须排在整理标记**之前**：分割线是用户的显式重置意图（这条及以前全部
+        # 出上下文）。同一行后来又落下整理标记时（按键原子合并会这样叠加：分割线行
+        # 恰好成为被整理区间的终点），被划出的内容绝不能以摘要形态绕回上下文；整理端
+        # build_region_history 走同一条重放链，区间会整体判空（region_empty），
+        # 一次总结请求都白花不出去。
+        if metadata.get(MetadataKeys.SESSION_START):
+            history = []
+            continue
         # 自动压缩上下文（2026-10-26 计划）：整理标记出现在**被整理区间最后一条消息**上。
         # 遇到它：此前历史（含本条）替换为一条固定格式的摘要消息，后续消息照常追加。
         # 摘要在落标记时一次定格，这里逐字节重放——前缀缓存从摘要之后继续有效；
@@ -591,11 +601,6 @@ def build_model_history(
         compaction = metadata.get(MetadataKeys.COMPACTION)
         if isinstance(compaction, dict) and str(compaction.get("summary") or "").strip():
             history = [compaction_replay_message(str(compaction["summary"]))]
-            continue
-        # 「新会话开始」边界：从这里重算上下文（此前的消息一条都不进模型请求，
-        # 聊天记录本身仍在库里/界面上）。多个边界取最后一个。
-        if metadata.get(MetadataKeys.SESSION_START):
-            history = []
             continue
         # 插话（interjection）：落库形态是普通 role=user 行，但**只有被 agent 消费过的
         # 才允许进上下文**。pending（等用户点「引导」）与 stopped（运行取消后冻结）必须

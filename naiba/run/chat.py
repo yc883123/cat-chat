@@ -1470,13 +1470,19 @@ class ConversationRunMixin:
             spec for spec in (schemas_getter() if callable(schemas_getter) else [])
             if isinstance(spec, dict) and str(spec.get("name") or "") in allowed_names
         ]
-        # 本轮用户输入算进「已用」；系统提示/工具 schema 的固定成本不进 used——它们由
-        # _context_fits 单独从窗口里扣掉（体现在 budget 上），重复计一次会让短会话也被
-        # 判成「接近上限」。这里只按「历史 + 本轮输入」判断真实占用。
+        # 本轮用户输入算进「已用」；系统提示/工具 schema 的固定成本不进**估算**的 used——
+        # 它们由 _context_fits 单独从窗口里扣掉（体现在 budget 上），重复计一次会让短会话
+        # 也被判成「接近上限」。但估算口径因此系统性偏低，所以下面再吃一份真实用量取大。
         extra_tokens = SkillAgent._estimate_content_tokens(effective)
         _fits, limit, used, budget = SkillAgent._context_fits(
             history, profile, {"tools": tools_estimate}, "", extra_tokens=extra_tokens,
         )
+        # 轮首也吃**真实用量**：上一轮最后一次请求的真实 input_tokens（读落库 usage，与
+        # 前端圆环同源）+ 本轮输入，与估算取大——循环内路径（usage_override）本来就这么
+        # 做。没有这份矫正，真实占用先越线时估算永远追不上（圆环 80%、触发还停在 57%）。
+        real_used = compaction_mod.latest_real_input_tokens(rows)
+        if real_used:
+            used = max(used, real_used + max(0, extra_tokens))
         if usage_override:
             used = max(used, int(usage_override.get("used") or 0))
             limit = int(usage_override.get("limit") or limit)

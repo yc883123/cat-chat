@@ -9,7 +9,9 @@
 - **旧摘要不丢**：再次整理时交给模型的是「旧摘要 + 新进入区间的历史」。
 覆盖：
 1. 设置解析/校验；2. 触发判断与按轮次切分；3. 总结请求构造与校验；
-4. 标记写入与重放（含旧摘要合并）；5. 撤销；6. 接线；7. chat 钩子。
+4. 标记写入与重放（含旧摘要合并）；5. 撤销；6. 接线；7. chat 钩子；
+8. 触发判定的真实用量矫正（latest_real_input_tokens：落库 usage 参与取大，
+   标记/分割线之前的旧口径不参与）。
 """
 
 import json
@@ -145,6 +147,58 @@ class CompactionRegionTests(unittest.TestCase):
             {"tool": "read_file", "success": True, "result": "x" * 400},
         ]})]
         self.assertGreater(compaction.estimate_rows_tokens(rows), 100)
+
+
+class LatestRealInputTokensTests(unittest.TestCase):
+    """真实用量读取：触发判定的估算矫正数据源（与前端圆环同一份落库 usage）。"""
+
+    def test_returns_last_assistant_usage(self):
+        rows = [
+            _row("user", "问", row_id="a"),
+            _row("assistant", "答一", {MetadataKeys.USAGE: {"input_tokens": 111}}, row_id="b"),
+            _row("user", "再问", row_id="c"),
+            _row("assistant", "答二", {MetadataKeys.USAGE: {"input_tokens": 222}}, row_id="d"),
+        ]
+        self.assertEqual(compaction.latest_real_input_tokens(rows), 222)
+
+    def test_usage_older_than_marker_is_ignored(self):
+        # 整理标记之后的 usage 才可信：标记**之前**的 usage 是整理前的口径（偏大），
+        # 信了它会在整理后的下一轮立刻再触发一次整理。
+        rows = [
+            _row("assistant", "答", {MetadataKeys.USAGE: {"input_tokens": 99999}}, row_id="a"),
+            _row("assistant", "带标记", _marker("摘要"), row_id="b"),
+            _row("user", "新问题", row_id="c"),
+        ]
+        self.assertEqual(compaction.latest_real_input_tokens(rows), 0)
+
+    def test_usage_above_session_divider_is_ignored(self):
+        rows = [
+            _row("assistant", "老回答", {MetadataKeys.USAGE: {"input_tokens": 99999}}, row_id="a"),
+            _row("user", "新问题", {MetadataKeys.SESSION_START: {"at": 1}}, row_id="b"),
+            _row("assistant", "分割线后还没有 usage", {}, row_id="c"),
+        ]
+        self.assertEqual(compaction.latest_real_input_tokens(rows), 0)
+
+    def test_legacy_session_row_stops_the_scan(self):
+        # 遗留形态：独立 role=session 分割线行。线以上的 usage 不得越过它被读到。
+        rows = [
+            _row("assistant", "老回答", {MetadataKeys.USAGE: {"input_tokens": 99999}}, row_id="a"),
+            {"id": "b", "role": "session", "content": "", "metadata": {}},
+            _row("user", "新问题", row_id="c"),
+            _row("assistant", "分割线后还没有 usage", {}, row_id="d"),
+        ]
+        self.assertEqual(compaction.latest_real_input_tokens(rows), 0)
+
+    def test_malformed_and_nonpositive_usage_skipped(self):
+        rows = [
+            _row("assistant", "坏 usage", {MetadataKeys.USAGE: {"input_tokens": "abc"}}, row_id="a"),
+            _row("assistant", "零 usage", {MetadataKeys.USAGE: {"input_tokens": 0}}, row_id="b"),
+            _row("assistant", "没 usage", {}, row_id="c"),
+        ]
+        self.assertEqual(compaction.latest_real_input_tokens(rows), 0)
+
+    def test_empty_rows(self):
+        self.assertEqual(compaction.latest_real_input_tokens([]), 0)
 
 
 class CompactionSummaryRequestTests(unittest.TestCase):
@@ -655,14 +709,18 @@ class CompactionReplayTests(unittest.TestCase):
         self.assertEqual(first, second, "摘要消息必须逐字节稳定（前缀缓存）")
 
     def test_compaction_and_session_start_coexist(self):
-        # 同一行同时带两种标记时，整理优先（摘要开场），不会又清空一次。
+        # 同一行同时带两种标记时，分割线优先：它是用户的显式重置意图（这条及以前全部
+        # 出上下文），被划出的内容不能以摘要形态绕回上下文。这一行恰好成为整理区间
+        # 终点时，重放从分割线之后重算，旧摘要不出现。
         history = build_model_history([
             _row("user", "老问题", row_id="a"),
             _row("assistant", "老回答", {**_marker("摘要"), MetadataKeys.SESSION_START: {"at": 1}},
                  row_id="b"),
             _row("user", "新问题", row_id="c"),
         ])
-        self.assertIn("<compacted-summary>", history[0]["content"])
+        self.assertNotIn("<compacted-summary>", "".join(
+            item.get("content") or "" for item in history
+        ), "分割线必须压过同一行的整理标记——被划出的历史不得借摘要回归")
         self.assertEqual(history[-1]["content"], "新问题")
 
 
@@ -830,6 +888,35 @@ class CompactionHookTests(unittest.TestCase):
         self.assertTrue(result.get("hint"))
         self.mixin.app.models.complete.assert_not_called()
         self.mixin.app.storage.merge_message_metadata.assert_not_called()
+
+    def test_turn_start_uses_real_usage_when_estimate_lags(self):
+        # 估算不含系统提示/工具 schema，真实占用先越线时估算追不上——上一轮最后一次
+        # 请求的落库 input_tokens 必须参与判定（与前端圆环同一份数据）。
+        self.mixin.app.config.data = {"auto_compaction": {"mode": "remind", "threshold_percent": 70}}
+        short = [{"role": "user", "content": "短短一句话"}]
+        # 无落库 usage（估算口径）→ 远低于触发线，不触发。
+        self.assertEqual(self._call(history=short), {})
+        # 落库 usage 显示上一轮真实输入 6000（窗口 8000）→ 触发，used 用真实值。
+        rows = [*self.rows, _row(
+            "assistant", "上一轮回复",
+            {MetadataKeys.USAGE: {"input_tokens": 6000}}, row_id="m-last",
+        )]
+        result = self._call(history=short, run={"conversation_messages": rows})
+        self.assertTrue(result.get("hint"))
+        self.assertGreaterEqual(result["used"], 6000)
+
+    def test_turn_start_ignores_usage_older_than_marker(self):
+        # 整理标记之后的 usage 才可信：标记前的 usage 是整理前口径（偏大），信了它
+        # 会在整理后的下一轮立刻再触发一次整理。
+        self.mixin.app.config.data = {"auto_compaction": {"mode": "remind", "threshold_percent": 70}}
+        short = [{"role": "user", "content": "短短一句话"}]
+        rows = [
+            _row("assistant", "整理前的最后回复",
+                 {MetadataKeys.USAGE: {"input_tokens": 6000}}, row_id="m-old"),
+            _row("assistant", "带整理标记", _marker("摘要"), row_id="m-mark"),
+            _row("user", "新问题", row_id="m-new"),
+        ]
+        self.assertEqual(self._call(history=short, run={"conversation_messages": rows}), {})
 
     def test_below_threshold_does_nothing(self):
         self.mixin.app.config.data = {"auto_compaction": {"mode": "auto", "threshold_percent": 95}}

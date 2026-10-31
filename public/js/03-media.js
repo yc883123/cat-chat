@@ -1097,11 +1097,15 @@ export function updateContextUsage(messages = null, message = null) {
   }
   const usage = target?.metadata?.usage || null;
   const conversationId = String(state.conversationId || '');
-  // 运行中：历史重渲染（会话/任务轮询）不得把实时圆环擦回「暂无数据」——本轮尚未
-  // 落库，messages 里当然没有 usage；只有会话真正切换时才用新会话的历史值覆盖。
-  // 例外：`contextReset` 是「上下文已被显式重置」的确证（分割线已落库），此刻即使
-  // 还在收尾（chatBusy 尚未落下）也必须归零解锁，否则重置后满量锁会一直挂着。
-  if (!usage && !contextReset && state.chatBusy && state.contextUsageConversationId === conversationId) return;
+  // 运行中（同会话）：已落库的值一律不得覆盖实时值。本轮尚未落库，历史扫描最多只能
+  // 看到上一轮的 usage——它比 usage 事件刚写入的实时值旧，扫到空更是会把实时值擦成
+  // 「暂无数据」。两条路都放行，圆环就会在「实时↔上一轮」之间来回翻转（变来变去），
+  // 吃圆环百分比的提醒弹窗也跟着抖。例外：`contextReset` 是「上下文已被显式重置」的
+  // 确证（分割线已落库），此刻即使还在收尾（chatBusy 尚未落下）也必须归零解锁。
+  if (!contextReset && state.chatBusy && state.contextUsageConversationId === conversationId) {
+    if (message === null) return; // 历史重渲染（会话/任务轮询）：落库值永远不比实时值新
+    if (!usage) return; // 终态消息但没带 usage（失败/中止收尾）：保留实时值
+  }
   setContextUsage(usage, conversationId);
 }
 

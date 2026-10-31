@@ -186,6 +186,39 @@ def _looks_like_image(name: str) -> bool:
     return name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"))
 
 
+def latest_real_input_tokens(rows: list[dict[str, Any]]) -> int:
+    """最近一次**真实**模型请求的输入 token（读落库 usage，与前端圆环同一份数据）。
+
+    触发判定过去只靠字符估算，而估算不含系统提示与工具 schema——真实占用经常先越线
+    （圆环已经 80%、触发估算还停在 57%），轮首整理因此系统性晚触发。这里取上一轮最后
+    一次请求的真实 ``input_tokens`` 参与判定，与估算取大。
+
+    只认「晚于最近一次整理标记、且在最新会话分割线之后」的 usage：标记/分割线**之前**
+    的 usage 是整理前（或已划出上下文）的口径、只偏大——信了它会在整理后的下一轮立刻
+    再触发一次整理。没扫到可信值返回 0（调用方退回纯估算）。
+    """
+    for row in reversed(rows):
+        if not isinstance(row, dict):
+            continue
+        metadata = row.get("metadata") or {}
+        if metadata.get(MetadataKeys.COMPACTION) or metadata.get(MetadataKeys.SESSION_START):
+            return 0
+        if str(row.get("role") or "") == "session":  # 遗留形态：独立的分割线行
+            return 0
+        if str(row.get("role") or "") != "assistant":
+            continue
+        usage = metadata.get(MetadataKeys.USAGE)
+        if not isinstance(usage, dict):
+            continue
+        try:
+            value = int(usage.get("input_tokens") or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return 0
+
+
 # ---- 总结请求 ----
 
 # 交接材料指令：只规定**要交代哪些方面**，不规定固定标题——按关键词命中数卡标题

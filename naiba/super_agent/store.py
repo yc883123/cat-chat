@@ -12,6 +12,7 @@ from naiba.super_agent.models import (
     EVENT_TYPES,
     NODE_STATUSES,
     NODE_TERMINAL_STATUSES,
+    THREAD_TERMINAL_STATUSES,
     THREAD_STATUSES,
     NODE_TRANSITIONS,
     THREAD_TRANSITIONS,
@@ -470,7 +471,11 @@ class SuperAgentStore:
                         updates["output_refs"] = (payload or {}).get("output_refs")
                     self._update_node_db(db, node_id, owner_id, updates, expected_attempt=attempt)
                     applied = True
-                    if next_status == "succeeded":
+                    if next_status == "failed":
+                        thread_status = str(thread_row["status"])
+                        if thread_status not in THREAD_TERMINAL_STATUSES and thread_status not in {"paused", "cancelled"}:
+                            db.execute("UPDATE super_threads SET status='failed', version=version+1, updated_at=? WHERE thread_id=? AND owner_id=?", (now, thread_id, owner_id))
+                    elif next_status == "succeeded":
                         self._promote_ready_nodes_db(db, thread_id, owner_id)
                         statuses = [item["status"] for item in db.execute("SELECT status FROM super_nodes WHERE thread_id=? AND owner_id=?", (thread_id, owner_id)).fetchall()]
                         if statuses and all(status in {"succeeded", "cancelled"} for status in statuses):

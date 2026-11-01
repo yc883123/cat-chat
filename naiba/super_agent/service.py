@@ -137,7 +137,11 @@ class SuperAgentService:
             if isinstance(outputs, list):
                 updates["output_refs"] = outputs
         self.store.update_node(node.node_id, owner_id=owner_id, expected_attempt=node.attempt, **updates)
-        if next_status == "succeeded":
+        if next_status == "failed":
+            thread = self.get_thread(owner_id, event.thread_id)
+            if thread.status not in THREAD_TERMINAL_STATUSES and thread.status not in {"paused", "cancelled"}:
+                self.store.update_thread(event.thread_id, owner_id=owner_id, status="failed")
+        elif next_status == "succeeded":
             self.store.promote_ready_nodes(event.thread_id, owner_id=owner_id)
             nodes = self.store.list_nodes(event.thread_id, owner_id=owner_id)
             if nodes and all(item.status in {"succeeded", "cancelled"} for item in nodes):

@@ -56,6 +56,7 @@ class SuperAgentP0Tests(unittest.TestCase):
         self.service.start_node("u", node.node_id)
         self.service.worker.fail("u", node.node_id, "可重试失败")
         self.assertEqual(self.service.get_node("u", node.node_id).status, "failed")
+        self.assertEqual(self.service.get_thread("u", thread.thread_id).status, "failed")
         retried = self.service.retry_node("u", node.node_id)
         self.assertEqual(retried.attempt, 1)
         self.service.pause_thread("u", thread.thread_id, request_id="pause-1")

@@ -598,6 +598,19 @@ class SuperAgentStore:
         finally:
             db.close()
 
+    def list_approvals(self, thread_id: str, *, owner_id: str) -> list[Approval]:
+        db = self._connect()
+        try:
+            rows = db.execute(
+                "SELECT a.* FROM super_approvals a JOIN super_threads t "
+                "ON t.thread_id=a.thread_id WHERE a.thread_id=? AND t.owner_id=? "
+                "ORDER BY a.requested_at, a.approval_id",
+                (thread_id, owner_id),
+            ).fetchall()
+            return [self._approval(row) for row in rows if self._approval(row)]
+        finally:
+            db.close()
+
     def create_approval_atomic(
         self, *, owner_id: str, thread_id: str, node_id: str, action: str,
         description: str, idempotency_key: str, risk_level: str = "medium",

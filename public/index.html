@@ -35,6 +35,7 @@
         <div class="sidebar-mode-switch" role="group" aria-label="视图">
           <button class="sidebar-mode-btn active" id="openChatMode" type="button" aria-pressed="true">对话</button>
           <button class="sidebar-mode-btn" id="openStudio" type="button" aria-pressed="false" title="工作台（模板检索与生成）">工作台</button>
+          <button class="sidebar-mode-btn" id="openSuperAgent" type="button" aria-pressed="false" title="查看长期任务状态">任务总管</button>
         </div>
         <!-- 侧栏收放是两种视图共享的操作，因此跟模式切换留在同一行 -->
         <button class="icon-button sidebar-collapse-btn" id="collapseSidebar" type="button" title="收起侧栏" aria-label="收起侧栏">
@@ -127,6 +128,22 @@
           <span>Agent</span>
           <select id="agentSelect" aria-label="当前 Agent"></select>
         </label>
+        <div class="kvmem-control" id="kvmemControl" hidden aria-live="polite">
+          <button class="kvmem-status-button" id="kvmemStatusButton" type="button" title="KVMem 服务状态">
+            <i id="kvmemStatusDot" aria-hidden="true"></i><span id="kvmemStatusLabel">KVMem</span>
+          </button>
+          <div class="kvmem-popover" id="kvmemPopover" hidden>
+            <p class="kvmem-popover-title">KVMem 本地服务</p>
+            <p class="kvmem-popover-summary" id="kvmemSummary"></p>
+            <p class="kvmem-popover-error" id="kvmemError" hidden></p>
+            <div class="kvmem-actions">
+              <button class="control-button tiny" id="kvmemRefresh" type="button">刷新</button>
+              <button class="control-button tiny" id="kvmemStart" type="button">启动</button>
+              <button class="control-button tiny" id="kvmemStop" type="button">停止</button>
+              <button class="control-button tiny" id="kvmemOpen" type="button">打开控制台</button>
+            </div>
+          </div>
+        </div>
         <!-- Agent 说明弹层：打开时会被挪到 body（fixed 定位），初始放哪不重要 -->
         <div class="agent-help-popover" id="agentHelpPopover" hidden>
           <strong>Agent 是什么？</strong>
@@ -1650,6 +1667,46 @@
         </div>
       </section>
 
+      <section class="super-agent-view" id="superAgentView" hidden aria-label="任务总管">
+        <header class="super-agent-topbar">
+          <button class="icon-button sidebar-expand-btn" id="superAgentExpandSidebar" type="button" title="展开侧栏" aria-label="展开侧栏">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6l6 6-6 6"></path><path d="M5 6l6 6-6 6"></path></svg>
+          </button>
+          <button class="icon-button mobile-only" id="superAgentOpenSidebar" type="button" title="打开导航" aria-label="打开导航">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"></path></svg>
+          </button>
+          <strong class="super-agent-brand">任务总管</strong>
+          <span class="super-agent-readonly">只读查看</span>
+          <div class="super-agent-toolbar">
+            <span class="super-agent-sync" id="superAgentSyncStatus" role="status"></span>
+            <button class="control-button tiny" id="superAgentRefresh" type="button">刷新</button>
+          </div>
+        </header>
+        <div class="super-agent-columns">
+          <aside class="super-agent-thread-panel" aria-label="Thread 列表">
+            <div class="super-agent-panel-head"><strong>Thread</strong><span id="superAgentThreadCount">0</span></div>
+            <div class="super-agent-thread-list" id="superAgentThreadList" role="list"></div>
+            <p class="super-agent-empty" id="superAgentThreadEmpty">还没有任务总管 Thread。</p>
+          </aside>
+          <section class="super-agent-detail-panel" aria-label="Thread 详情">
+            <div class="super-agent-empty" id="superAgentDetailEmpty">选择一个 Thread 查看详情。</div>
+            <div id="superAgentDetail" hidden>
+              <div class="super-agent-detail-head">
+                <div><h1 id="superAgentTitle"></h1><p id="superAgentGoal"></p></div>
+                <span class="super-agent-status" id="superAgentStatus"></span>
+              </div>
+              <p class="super-agent-summary" id="superAgentSummary"></p>
+              <section class="super-agent-section"><h2>节点阶段</h2><div class="super-agent-node-list" id="superAgentNodeList"></div></section>
+              <section class="super-agent-section"><h2>事件时间线</h2><div class="super-agent-event-list" id="superAgentEventList"></div></section>
+            </div>
+          </section>
+          <aside class="super-agent-side-panel" aria-label="审批与产物">
+            <section class="super-agent-section"><h2>待确认项</h2><div id="superAgentApprovalList"></div></section>
+            <section class="super-agent-section"><h2>产物引用</h2><div id="superAgentArtifactList"></div></section>
+          </aside>
+        </div>
+      </section>
+
       <section class="composer-wrap">
         <div class="active-task-bar" id="activeTaskBar" hidden></div>
         <div class="pending-files" id="pendingFiles" hidden></div>
@@ -2904,6 +2961,11 @@
           </select>
         </label>
         <p class="provider-format-guide" id="providerFormatGuide" hidden></p>
+        <div class="provider-field kvmem-provider-fields" id="kvmemProviderFields" hidden>
+          <label class="checkbox-field"><input id="providerKvmemEnabled" type="checkbox"><span class="checkbox-text"><b>由 KVMem 控制台管理</b><small class="hint">仅适用于本机 KVMem 服务；启动/停止按钮会出现在对话顶栏 Agent 右侧。</small></span></label>
+          <label>控制台地址<input id="providerKvmemManagerUrl" type="url" placeholder="http://127.0.0.1:18199"></label>
+          <small class="hint">只允许本机回环地址；普通 llama.cpp 不会显示启停控制。</small>
+        </div>
         <label class="provider-field">模型名称
           <span class="model-picker">
             <select id="providerModel" required aria-label="模型名称"></select>
@@ -3136,9 +3198,11 @@
 
   <dialog id="tasksDialog" class="panel-dialog tasks-dialog">
     <div class="dialog-toolbar">
-      <div><h2>异步任务</h2></div>
-      <div class="dialog-toolbar-actions">
-        <button class="danger-button task-clear-button" id="clearTerminalTasks" type="button">清理已结束</button>
+              <div><h2>异步任务</h2></div>
+              <div class="dialog-toolbar-actions">
+                <button class="control-button tiny" id="openTaskManager" type="button">打开任务总管</button>
+                <button class="danger-button task-clear-button" id="clearTerminalTasks" type="button">清理已结束</button>
+
         <button class="icon-button" data-close="tasksDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
       </div>
     </div>

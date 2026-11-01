@@ -236,6 +236,10 @@ class SuperAgentService:
         self.get_thread(owner_id, thread_id)
         return self.store.list_artifacts(thread_id, owner_id=owner_id)
 
+    def approvals(self, owner_id: str, thread_id: str) -> list[Approval]:
+        self.get_thread(owner_id, thread_id)
+        return self.store.list_approvals(thread_id, owner_id=owner_id)
+
 
 class FakeWorker:
     """Deterministic, model-free Worker used by the P0 contract tests."""

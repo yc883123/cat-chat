@@ -5937,3 +5937,78 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
   .writer-manage-form { height: 100%; padding: 10px 10px 12px; }
   .writer-manage-list { max-height: none; }
 }
+
+/* ============ KVMem 对话顶栏控制（仅 KVMem provider 显示） ============ */
+.kvmem-control { position: relative; display: inline-flex; flex: none; align-items: center; }
+.kvmem-control[hidden] { display: none; }
+.kvmem-status-button { display: inline-flex; align-items: center; gap: 5px; min-height: 30px; padding: 0 8px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); color: var(--muted); cursor: pointer; font: inherit; font-size: 11px; }
+.kvmem-status-button:hover { color: var(--text); border-color: var(--accent); }
+#kvmemStatusDot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+#kvmemStatusDot[data-status="ready"], #kvmemStatusDot[data-status="running"] { background: var(--success); }
+#kvmemStatusDot[data-status="starting"], #kvmemStatusDot[data-status="stopping"] { background: var(--warning); }
+#kvmemStatusDot[data-status="failed"], #kvmemStatusDot[data-status="error"], #kvmemStatusDot[data-status="port_mismatch"], #kvmemStatusDot[data-status="model_missing"] { background: var(--danger); }
+.kvmem-popover { position: absolute; z-index: 50; top: calc(100% + 8px); left: 0; width: min(330px, 86vw); padding: 12px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); box-shadow: var(--shadow-3); }
+.kvmem-popover[hidden] { display: none; }
+.kvmem-popover-title { margin: 0; font-weight: 700; font-size: 12px; }
+.kvmem-popover-summary, .kvmem-popover-error { margin: 7px 0; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.kvmem-popover-error { color: var(--danger); }
+.kvmem-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* ============ 任务总管（Super-agent P2 第一切片，只读） ============ */
+body[data-app-view="super-agent"] .chat-backdrop,
+body[data-app-view="super-agent"] .messages,
+body[data-app-view="super-agent"] .turn-rail,
+body[data-app-view="super-agent"] .composer-wrap,
+body[data-app-view="super-agent"] .topbar,
+body[data-app-view="super-agent"] .studio-view { display: none; }
+body[data-app-view="super-agent"] .chat-main { grid-template-rows: minmax(0, 1fr); }
+body[data-app-view="super-agent"] .super-agent-view { display: flex; }
+.super-agent-view { flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); color: var(--text); }
+.super-agent-view[hidden] { display: none; }
+.super-agent-topbar { display: flex; align-items: center; gap: var(--s-3); min-height: 56px; padding: 10px var(--s-4); border-bottom: 1px solid var(--line); flex: none; }
+.super-agent-brand { font-size: 14px; white-space: nowrap; }
+.super-agent-readonly { padding: 3px 8px; border-radius: var(--r-full); background: var(--accent-soft); color: var(--accent-solid); font-size: 11px; }
+.super-agent-toolbar { display: flex; align-items: center; gap: 10px; margin-left: auto; min-width: 0; }
+.super-agent-sync { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.super-agent-sync.is-error { color: var(--danger); }
+.super-agent-columns { display: grid; grid-template-columns: minmax(210px, 280px) minmax(0, 1fr) minmax(210px, 280px); gap: var(--s-3); padding: var(--s-3) var(--s-4) var(--s-4); min-height: 0; flex: 1; overflow: hidden; }
+.super-agent-thread-panel, .super-agent-detail-panel, .super-agent-side-panel { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); }
+.super-agent-panel-head, .super-agent-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.super-agent-panel-head span { color: var(--muted); font-size: 12px; }
+.super-agent-thread-list, .super-agent-event-list, .super-agent-node-list { display: flex; flex-direction: column; gap: 8px; padding: 10px; overflow: auto; min-height: 0; }
+.super-agent-thread { display: grid; gap: 4px; width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); color: var(--text); text-align: left; cursor: pointer; font: inherit; }
+.super-agent-thread:hover, .super-agent-thread.active { border-color: var(--accent); background: var(--accent-soft); }
+.super-agent-thread strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.super-agent-thread span, .super-agent-thread small { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.super-agent-detail-panel { overflow: auto; }
+.super-agent-detail-head { align-items: flex-start; }
+.super-agent-detail-head h1 { margin: 0; font-size: 18px; }
+.super-agent-detail-head p, .super-agent-summary { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.super-agent-status { flex: none; padding: 3px 8px; border-radius: var(--r-full); background: var(--surface-2); color: var(--muted); font-size: 11px; }
+.super-agent-status[data-status="active"], .super-agent-status[data-status="running"], .super-agent-status[data-status="succeeded"], .super-agent-status[data-status="completed"] { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
+.super-agent-status[data-status="failed"], .super-agent-status[data-status="cancelled"] { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+.super-agent-summary { margin: 12px 14px; padding: 10px; border-radius: var(--r-sm); background: var(--surface-2); }
+.super-agent-section { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; min-width: 0; }
+.super-agent-section h2 { margin: 0; font-size: 13px; }
+.super-agent-node, .super-agent-event, .super-agent-ref { padding: 9px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-2); min-width: 0; }
+.super-agent-node > div, .super-agent-event > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.super-agent-node p, .super-agent-event p, .super-agent-ref p { margin: 5px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
+.super-agent-event time { color: var(--muted); font-size: 10px; }
+.super-agent-ref { margin: 0 14px 8px; }
+.super-agent-ref code { display: block; margin-top: 6px; color: var(--accent-solid); font: 10px/1.5 var(--font-mono); overflow-wrap: anywhere; }
+.super-agent-empty, .super-agent-muted { margin: auto; padding: 16px; color: var(--muted); font-size: 12px; line-height: 1.6; text-align: center; }
+.super-agent-error { display: block; color: var(--danger); overflow-wrap: anywhere; }
+@media (max-width: 1180px) and (min-width: 761px) { .super-agent-columns { grid-template-columns: minmax(190px, 230px) minmax(0, 1fr) minmax(190px, 230px); padding: 12px; } }
+@media (max-width: 760px) {
+  body[data-app-view="super-agent"] .chat-main { min-width: 0; }
+  .super-agent-topbar { min-height: 50px; padding: 8px 10px; gap: 8px; }
+  .super-agent-readonly { display: none; }
+  .super-agent-columns { display: flex; flex-direction: column; gap: 8px; padding: 8px; overflow: auto; }
+  .super-agent-thread-panel, .super-agent-detail-panel, .super-agent-side-panel { flex: none; overflow: visible; }
+  .super-agent-thread-panel { max-height: 220px; }
+  .super-agent-thread-list { max-height: 160px; }
+  .super-agent-detail-panel { min-height: 280px; }
+  .super-agent-side-panel { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+  .super-agent-side-panel .super-agent-section { min-width: 0; padding: 10px; }
+  .super-agent-side-panel .super-agent-ref { margin-left: 0; margin-right: 0; }
+}

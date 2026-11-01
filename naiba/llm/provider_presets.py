@@ -271,6 +271,20 @@ PROVIDER_PRESETS: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        "id": "kvmem",
+        "kind": "local",
+        "name": "本机 KVMem",
+        "abbr": "KV",
+        "base_url": "http://127.0.0.1:18200/v1",
+        "request_format": "llama_cpp",
+        "model": "",
+        "key_required": False,
+        "key_url": "",
+        "service_manager": "kvmem",
+        "service_manager_url": "http://127.0.0.1:18199",
+        "hint": "本机 KVMem（免 Key）：① 启动 KVMem 控制台；② 控制台默认地址 http://127.0.0.1:18199，推理 API 默认 http://127.0.0.1:18200/v1；③ 保存后可在对话顶栏查看并控制 KVMem 服务。",
+    },
+    {
         "id": "unsloth",
         "kind": "local",
         "name": "本机 Unsloth",
@@ -291,7 +305,7 @@ PROVIDER_PRESETS: tuple[dict[str, Any], ...] = (
 _PRESET_BY_ID = {item["id"]: item for item in PROVIDER_PRESETS}
 
 # 预设只负责回填连接字段；api_key 等敏感/个性化字段永远以用户提交为准。
-_PRESET_FILL_KEYS = ("kind", "name", "base_url", "request_format", "model", "local_backend")
+_PRESET_FILL_KEYS = ("kind", "name", "base_url", "request_format", "model", "local_backend", "service_manager", "service_manager_url")
 
 
 def provider_preset(preset_id: str) -> dict[str, Any] | None:

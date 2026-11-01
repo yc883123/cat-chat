@@ -80,6 +80,110 @@ from naiba.vision.runtime import VisionRouter
 
 logger = logging.getLogger("naiba.app")
 
+# 当前应用只有共享访问口令，没有登录用户/session 身份；任务总管的 HTTP
+# 读取因此使用服务端固定 owner。客户端不能通过 query/body 选择 owner。
+SUPER_AGENT_HTTP_OWNER = "local"
+
+
+def _super_agent_text(value: Any, limit: int = 500) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else f"{text[:limit]}…"
+
+
+def _super_agent_thread_payload(thread: Any, *, detail: bool = False) -> dict[str, Any]:
+    payload = {
+        "thread_id": thread.thread_id,
+        "title": _super_agent_text(thread.title, 160),
+        "goal": _super_agent_text(thread.goal, 1000),
+        "status": thread.status,
+        "summary": _super_agent_text(thread.summary, 1000),
+        "current_node_id": thread.current_node_id,
+        "version": thread.version,
+        "last_event_at": thread.last_event_at,
+        "created_at": thread.created_at,
+        "updated_at": thread.updated_at,
+    }
+    if detail:
+        payload.update({
+            "linked_conversation_ids": list(thread.linked_conversation_ids or []),
+            "linked_run_ids": list(thread.linked_run_ids or []),
+            "linked_job_ids": list(thread.linked_job_ids or []),
+            "linked_domain_task_ids": list(thread.linked_domain_task_ids or []),
+            "execution_snapshot": {
+                key: value for key, value in (thread.execution_snapshot or {}).items()
+                if key in {"agent_id", "provider_id", "model_key", "permission_mode", "enabled_tool_ids", "skill_policy", "vision_capabilities", "cost_policy"}
+            },
+        })
+    return payload
+
+
+def _super_agent_node_payload(node: Any) -> dict[str, Any]:
+    return {
+        "node_id": node.node_id,
+        "thread_id": node.thread_id,
+        "kind": _super_agent_text(node.kind, 160),
+        "status": node.status,
+        "parent_id": node.parent_id,
+        "dependencies": list(node.dependencies or []),
+        "executor_type": _super_agent_text(node.executor_type, 80),
+        "attempt": node.attempt,
+        "approval_required": bool(node.approval_required),
+        "output_refs": list(node.output_refs or []),
+        "error": _super_agent_text(node.error, 500),
+        "created_at": node.created_at,
+        "updated_at": node.updated_at,
+    }
+
+
+def _super_agent_event_payload(event: Any) -> dict[str, Any]:
+    raw = event.payload if isinstance(event.payload, dict) else {}
+    summary_keys = {"message", "step", "status", "action", "approval_id", "error", "output_refs"}
+    summary = {}
+    for key in summary_keys:
+        if key in raw:
+            value = raw[key]
+            summary[key] = _super_agent_text(value, 500) if isinstance(value, (str, int, float, bool)) else value
+    return {
+        "event_id": event.event_id,
+        "thread_id": event.thread_id,
+        "node_id": event.node_id,
+        "source": _super_agent_text(event.source, 80),
+        "event_type": event.event_type,
+        "summary": summary,
+        "attempt": event.attempt,
+        "sequence": event.sequence,
+        "created_at": event.created_at,
+    }
+
+
+def _super_agent_artifact_payload(artifact: Any) -> dict[str, Any]:
+    return {
+        "artifact_id": artifact.artifact_id,
+        "thread_id": artifact.thread_id,
+        "node_id": artifact.node_id,
+        "kind": _super_agent_text(artifact.kind, 80),
+        "path_or_ref": _super_agent_text(artifact.path_or_ref, 1000),
+        "title": _super_agent_text(artifact.title, 160),
+        "summary": _super_agent_text(artifact.summary, 500),
+        "version": artifact.version,
+        "created_at": artifact.created_at,
+    }
+
+
+def _super_agent_approval_payload(approval: Any) -> dict[str, Any]:
+    return {
+        "approval_id": approval.approval_id,
+        "thread_id": approval.thread_id,
+        "node_id": approval.node_id,
+        "action": _super_agent_text(approval.action, 160),
+        "description": _super_agent_text(approval.description, 1000),
+        "risk_level": approval.risk_level,
+        "status": approval.status,
+        "requested_at": approval.requested_at,
+        "resolved_at": approval.resolved_at,
+        "resolved_by": _super_agent_text(approval.resolved_by, 160),
+    }
+
 # 缓存清理的**进程内**互斥：同一时刻只允许一个清理在扫 messages 表
 # （自动清理 / 手动按钮 / 两个 scope 之间都串行）。后台清理持锁跑完整轮次
 # （含补跑登记过的触发），手动清理拿不到锁就如实回「正在清理，请稍后再试」。
@@ -817,6 +921,55 @@ class NaibaChatApp:
             return {"ok": False, "error": str(exc), **self.migration_health()}
         return {"ok": True, "report": report, **self.migration_health()}
 
+    # ---- Super-agent 只读任务总管 API（P2 第一切片） ----
+
+    @staticmethod
+    def _super_agent_owner() -> str:
+        return SUPER_AGENT_HTTP_OWNER
+
+    def api_super_agent_threads(self) -> tuple[dict[str, Any], int]:
+        threads = self.super_agent.list_threads(self._super_agent_owner())
+        return {"threads": [_super_agent_thread_payload(thread) for thread in threads]}, HTTPStatus.OK
+
+    def api_super_agent_thread(self, thread_id: str) -> tuple[dict[str, Any], int]:
+        try:
+            thread = self.super_agent.get_thread(self._super_agent_owner(), thread_id)
+        except LookupError:
+            return {"error": "Thread 不存在或无权访问"}, HTTPStatus.NOT_FOUND
+        return {"thread": _super_agent_thread_payload(thread, detail=True)}, HTTPStatus.OK
+
+    def api_super_agent_nodes(self, thread_id: str) -> tuple[dict[str, Any], int]:
+        try:
+            nodes = self.super_agent.list_nodes(self._super_agent_owner(), thread_id)
+        except LookupError:
+            return {"error": "Thread 不存在或无权访问"}, HTTPStatus.NOT_FOUND
+        return {"nodes": [_super_agent_node_payload(node) for node in nodes]}, HTTPStatus.OK
+
+    def api_super_agent_events(self, thread_id: str, after: int = 0) -> tuple[dict[str, Any], int]:
+        try:
+            events = self.super_agent.events(self._super_agent_owner(), thread_id, after=after)
+        except LookupError:
+            return {"error": "Thread 不存在或无权访问"}, HTTPStatus.NOT_FOUND
+        return {
+            "events": [_super_agent_event_payload(event) for event in events],
+            "after": after,
+            "last_sequence": events[-1].sequence if events else after,
+        }, HTTPStatus.OK
+
+    def api_super_agent_artifacts(self, thread_id: str) -> tuple[dict[str, Any], int]:
+        try:
+            artifacts = self.super_agent.artifacts(self._super_agent_owner(), thread_id)
+        except LookupError:
+            return {"error": "Thread 不存在或无权访问"}, HTTPStatus.NOT_FOUND
+        return {"artifacts": [_super_agent_artifact_payload(item) for item in artifacts]}, HTTPStatus.OK
+
+    def api_super_agent_approvals(self, thread_id: str) -> tuple[dict[str, Any], int]:
+        try:
+            approvals = self.super_agent.approvals(self._super_agent_owner(), thread_id)
+        except LookupError:
+            return {"error": "Thread 不存在或无权访问"}, HTTPStatus.NOT_FOUND
+        return {"approvals": [_super_agent_approval_payload(item) for item in approvals]}, HTTPStatus.OK
+
     # ---- 3.4.3 内联业务下沉：HTTP 分支体迁入（返回 (payload, status) 供传输层直发） ----
 
     def api_create_conversation(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
@@ -1122,6 +1275,86 @@ class NaibaChatApp:
         未知预设抛 ValueError（HTTP 层转 400）。
         """
         return self.config.upsert_provider(apply_preset_values(body))
+
+    def _kvmem_provider(self, provider_id: str) -> tuple[dict[str, Any], str]:
+        provider_id = str(provider_id or "").strip()
+        if not provider_id:
+            raise ValueError("provider_id 不能为空")
+        profile = self.config.profile(f"local:{provider_id}")
+        if str(profile.get("service_manager") or "").lower() != "kvmem":
+            raise ValueError("该供应商不是 KVMem 管理配置")
+        manager_url = str(profile.get("service_manager_url") or "")
+        if not manager_url:
+            raise ValueError("KVMem 控制台地址未配置")
+        return profile, manager_url
+
+    def _kvmem_client(self, provider_id: str):
+        from naiba.kvmem import KVMemClient
+        profile, manager_url = self._kvmem_provider(provider_id)
+        return profile, KVMemClient(manager_url, str(profile.get("base_url") or ""))
+
+    def api_kvmem_status(self, provider_id: str) -> tuple[dict[str, Any], int]:
+        try:
+            profile, client = self._kvmem_client(provider_id)
+            status = client.readiness(str(profile.get("model") or ""))
+            status["provider_id"] = str(profile.get("id") or provider_id)
+            return status, HTTPStatus.OK
+        except Exception as exc:  # noqa: BLE001 - adapter returns only safe text
+            return {"ok": False, "status": "error", "error": str(exc)}, HTTPStatus.BAD_REQUEST
+
+    def _kvmem_active_usage(self, provider_id: str) -> list[str]:
+        model_key = f"local:{provider_id}"
+        active: list[str] = []
+        for task in self.storage.list_background_tasks(active_only=True, limit=200):
+            conversation_id = str(task.get("conversation_id") or "")
+            if not conversation_id:
+                continue
+            conversation = self.storage.get_conversation(conversation_id, include_messages=False) or {}
+            if str(conversation.get("model_key") or "") == model_key:
+                active.append(str(task.get("id") or conversation_id))
+        return active
+
+    def api_kvmem_start(self, provider_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        if body.get("confirm") is not True:
+            return {"error": "启动 KVMem 服务需要用户确认"}, HTTPStatus.CONFLICT
+        try:
+            profile, client = self._kvmem_client(provider_id)
+            before = client.status()
+            if before.get("status") in {"ready", "running"}:
+                return {**before, "accepted": False, "message": "KVMem 服务已经在运行"}, HTTPStatus.OK
+            result = client.start()
+            result["status"] = "starting"
+            result["summary"] = {
+                "backend": before.get("backend"), "model": before.get("model"),
+                "engine_summary": before.get("engine_summary"), "actual_port": before.get("actual_port"),
+            }
+            return result, HTTPStatus.ACCEPTED
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "status": "error", "error": str(exc)}, HTTPStatus.BAD_REQUEST
+
+    def api_kvmem_stop(self, provider_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        if body.get("confirm") is not True:
+            return {"error": "停止 KVMem 服务需要用户确认"}, HTTPStatus.CONFLICT
+        try:
+            active = self._kvmem_active_usage(provider_id)
+            if active:
+                return {"ok": False, "status": "blocked", "error": "当前仍有任务使用该 KVMem 配置，请先等待或取消任务", "active_task_ids": active[:20]}, HTTPStatus.CONFLICT
+            _profile, client = self._kvmem_client(provider_id)
+            current = client.status()
+            if current.get("status") == "stopped":
+                return {**current, "accepted": False, "message": "KVMem 服务已经停止"}, HTTPStatus.OK
+            result = client.stop()
+            result["status"] = "stopping"
+            return result, HTTPStatus.ACCEPTED
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "status": "error", "error": str(exc)}, HTTPStatus.BAD_REQUEST
+
+    def api_kvmem_open(self, provider_id: str) -> tuple[dict[str, Any], int]:
+        try:
+            _profile, client = self._kvmem_client(provider_id)
+            return client.open_console(), HTTPStatus.OK
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST
 
     def api_update_provider_pricing(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         """只改一张卡片的三档单价（用量统计页「费用单价」弹层）。

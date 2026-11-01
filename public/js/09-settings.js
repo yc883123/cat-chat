@@ -608,6 +608,8 @@ export function applyProviderPreset(presetId) {
   if (!preset) return null;
   const local = preset.kind === 'local';
   $('#providerKind').value = local ? '1' : '0';
+  state.providerKvmemEnabled = preset.id === 'kvmem';
+  if ($('#providerKvmemEnabled')) $('#providerKvmemEnabled').checked = state.providerKvmemEnabled;
   $('#providerName').value = preset.name || '';
   $('#providerBaseUrl').value = preset.base_url || '';
   $('#providerFormat').value = preset.request_format || 'openai_chat';
@@ -686,6 +688,9 @@ export function showProviderForm(provider = {}, { isNew = false } = {}) {
   $('#providerBaseUrl').value = provider.base_url || '';
   const inferredKind = provider.kind || (['ollama', 'lm_studio', 'llama_cpp', 'unsloth'].includes(provider.request_format) ? 'local' : 'online');
   $('#providerKind').value = inferredKind === 'local' ? '1' : '0';
+  state.providerKvmemEnabled = provider.service_manager === 'kvmem';
+  $('#providerKvmemEnabled').checked = state.providerKvmemEnabled;
+  $('#providerKvmemManagerUrl').value = provider.service_manager_url || 'http://127.0.0.1:18199';
   $('#providerContextWindow').value = provider.context_window || provider.context_size || '';
   $('#providerMaxOutputTokens').value = provider.max_output_tokens || '';
   $('#providerTemperature').value = provider.temperature ?? '';
@@ -715,6 +720,7 @@ export function showProviderForm(provider = {}, { isNew = false } = {}) {
   syncProviderKindOptions();
   updateProviderFormatGuide();
   updateProviderContextField();
+  updateProviderKvmemFields();
   updateProviderVisionHint();
   updateUnloadModelButton();
   const dialog = $('#providerDialog');
@@ -735,6 +741,16 @@ export function syncProviderKindOptions(previousFormat = '') {
   }
   const hint = $('#providerKindHint');
   if (hint) hint.textContent = local ? '本地 API 可使用 llama.cpp、Unsloth、Ollama 或 LM Studio 服务。' : '在线 API 使用远程模型服务。';
+}
+
+export function updateProviderKvmemFields() {
+  const local = $('#providerKind')?.value === '1';
+  const format = $('#providerFormat')?.value || '';
+  const fields = $('#kvmemProviderFields');
+  const active = local && format === 'llama_cpp';
+  if (fields) fields.hidden = !active;
+  const url = $('#providerKvmemManagerUrl');
+  if (url && active && !url.value) url.value = 'http://127.0.0.1:18199';
 }
 
 export function updateProviderFormatGuide() {
@@ -864,6 +880,8 @@ export function providerFormValue() {
     kind,
     local_backend: kind === 'local' ? $('#providerFormat').value : undefined,
     request_format: $('#providerFormat').value,
+    service_manager: kind === 'local' && $('#providerKvmemEnabled')?.checked ? 'kvmem' : undefined,
+    service_manager_url: kind === 'local' && $('#providerKvmemEnabled')?.checked ? $('#providerKvmemManagerUrl').value.trim() : undefined,
     context_window: numberOrUndefined('#providerContextWindow'),
     max_output_tokens: numberOrUndefined('#providerMaxOutputTokens'),
     temperature: numberOrUndefined('#providerTemperature'),

@@ -260,9 +260,36 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json({"error": str(exc)}, HTTPStatus.BAD_GATEWAY)
         elif path == "/api/agents":
             self._json({"agents": self.app.config.public_agents(), "default_agent_id": self.app.config.default_agent_id()})
+        # ---- Super-agent 任务总管只读接口 ----
+        elif path == "/api/super-agent/threads":
+            self._json(*self.app.api_super_agent_threads())
+        elif path.startswith("/api/super-agent/threads/") and path.endswith("/nodes"):
+            thread_id = path[len("/api/super-agent/threads/") : -len("/nodes")].strip("/")
+            self._json(*self.app.api_super_agent_nodes(thread_id))
+        elif path.startswith("/api/super-agent/threads/") and path.endswith("/events"):
+            thread_id = path[len("/api/super-agent/threads/") : -len("/events")].strip("/")
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                after = max(0, int(query.get("after", ["0"])[0]))
+            except ValueError:
+                self._json({"error": "after 必须是整数"}, HTTPStatus.BAD_REQUEST)
+                return
+            self._json(*self.app.api_super_agent_events(thread_id, after=after))
+        elif path.startswith("/api/super-agent/threads/") and path.endswith("/artifacts"):
+            thread_id = path[len("/api/super-agent/threads/") : -len("/artifacts")].strip("/")
+            self._json(*self.app.api_super_agent_artifacts(thread_id))
+        elif path.startswith("/api/super-agent/threads/") and path.endswith("/approvals"):
+            thread_id = path[len("/api/super-agent/threads/") : -len("/approvals")].strip("/")
+            self._json(*self.app.api_super_agent_approvals(thread_id))
+        elif path.startswith("/api/super-agent/threads/"):
+            thread_id = path[len("/api/super-agent/threads/") :].strip("/")
+            self._json(*self.app.api_super_agent_thread(thread_id))
         elif path == "/api/provider-presets":
             # 供应商预设表（「只填 API Key」的接入模板）：设置弹层与首启引导共用同一份。
             self._json(self.app.api_provider_presets())
+        elif path.startswith("/api/providers/") and path.endswith("/kvmem/status"):
+            provider_id = path[len("/api/providers/"):-len("/kvmem/status")].strip("/")
+            self._json(*self.app.api_kvmem_status(provider_id))
         elif path == "/api/tasks":
             query = urllib.parse.parse_qs(parsed.query)
             conversation_id = query.get("conversation_id", [""])[0]
@@ -1164,6 +1191,15 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json(self.app.api_upsert_model_profile(body))
             except Exception as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif path.startswith("/api/providers/") and path.endswith("/kvmem/start"):
+            provider_id = path[len("/api/providers/"):-len("/kvmem/start")].strip("/")
+            self._json(*self.app.api_kvmem_start(provider_id, body))
+        elif path.startswith("/api/providers/") and path.endswith("/kvmem/stop"):
+            provider_id = path[len("/api/providers/"):-len("/kvmem/stop")].strip("/")
+            self._json(*self.app.api_kvmem_stop(provider_id, body))
+        elif path.startswith("/api/providers/") and path.endswith("/kvmem/open"):
+            provider_id = path[len("/api/providers/"):-len("/kvmem/open")].strip("/")
+            self._json(*self.app.api_kvmem_open(provider_id))
         elif path == "/api/providers/pricing":
             # 定价弹层专用入口：只提交 {id, kind, pricing}，不碰连接配置。
             self._json(*self.app.api_update_provider_pricing(body))

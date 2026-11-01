@@ -362,7 +362,8 @@ class StudioEntryTests(unittest.TestCase):
         studio = (ROOT / "public/js/22-studio.js").read_text(encoding="utf-8")
         self.assertIn('export function openStudioView()', studio)
         self.assertIn("if (studio.open) return;", studio, "重复进入不得反向退出")
-        self.assertIn('$("#openChatMode")?.addEventListener', studio, "「对话」按钮必须接线")
+        bind = (ROOT / "public/js/15-bind-events.js").read_text(encoding="utf-8")
+        self.assertIn("$('#openChatMode')?.addEventListener", bind, "「对话」按钮必须由组合根统一接线")
 
 
 if __name__ == "__main__":

@@ -20,6 +20,8 @@ export const initialSkillMode = ['auto', 'pinned', 'exclusive'].includes(storedS
 export const state = {
   token: urlToken || localStorage.getItem('naibaChatToken') || localStorage.getItem('lanSkillToken') || '',
   bootstrap: null,
+  // 顶层应用视图：任务总管是独立只读入口，不混入旧 Chat/Job 任务状态。
+  appView: 'chat',
   appearance: {
     theme: 'system',
     skin: 'violet',
@@ -1077,6 +1079,32 @@ export const $ = (selector) => document.querySelector(selector);
 export const $$ = (selector) => [...document.querySelectorAll(selector)];
 
 export const emptyStateElement = $('#emptyState');
+
+// 顶层应用视图的唯一状态写入口。模块只负责各自业务生命周期，不能再各自
+// 改按钮、hidden 和 data-studio，避免 chat/studio/super-agent 三套状态漂移。
+export function setAppView(view) {
+  const next = ['chat', 'studio', 'super-agent'].includes(view) ? view : 'chat';
+  state.appView = next;
+  document.body.dataset.appView = next;
+  document.body.dataset.studio = next === 'studio' ? 'on' : 'off';
+  $('#studioView')?.toggleAttribute('hidden', next !== 'studio');
+  $('#superAgentView')?.toggleAttribute('hidden', next !== 'super-agent');
+  $('#messages')?.toggleAttribute('hidden', next !== 'chat');
+  $('#chatBackdrop')?.toggleAttribute('hidden', next !== 'chat');
+  $('#turnRail')?.toggleAttribute('hidden', next !== 'chat');
+  $('.composer-wrap')?.toggleAttribute('hidden', next !== 'chat');
+  $('.topbar')?.toggleAttribute('hidden', next !== 'chat');
+  $('#sidebarWorkspaceHeader')?.toggleAttribute('hidden', next !== 'chat');
+  $('#sidebarWorkspaceTree')?.toggleAttribute('hidden', next !== 'chat');
+  $('#sidebarStudioNav')?.toggleAttribute('hidden', next !== 'studio');
+  for (const [id, active] of [['openChatMode', next === 'chat'], ['openStudio', next === 'studio'], ['openSuperAgent', next === 'super-agent']]) {
+    const button = $(`#${id}`);
+    if (!button) continue;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  }
+  return next;
+}
 
 // 侧栏底部唯一的状态指示灯（#serverDot）：绿=服务已建立，红=连不上服务端。
 // 只在网络层失败（服务端没开/端口不通）时亮红；HTTP 4xx/5xx 说明服务在线，仍是绿。

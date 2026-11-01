@@ -6,7 +6,7 @@
 // 应用级视图：入口在侧栏「对话 / 工作台」模式切换，不再是顶栏会话按钮。
 // ============================================================
 
-import { $, api, applyModelSkinFor, copyText, localFileUrl, state, toast } from "./01-core.js";
+import { $, api, applyModelSkinFor, copyText, localFileUrl, setAppView, state, toast } from "./01-core.js";
 import { populateComposerModels } from "./07-models-agents.js";
 import { openConversation, renderSidebar } from "./08-conversations.js";
 import { applyFilePanelOpenClass, closeSidebar, filePanelState, openSidebar, setLeftSidebarCollapsed, sidebarDesktop } from "./14-file-panel.js";
@@ -357,6 +357,7 @@ function persistStudioView(view) {
 export function openStudioView() {
   if (studio.open) return;
   studio.open = true;
+  setAppView("studio");
   // 工作台是独立模块，不继承对话的右侧面板：开着「文件/辅助」进来会把中间栏
   // 挤窄，而它的重开按钮又只存在于对话顶栏（工作台态隐藏）。收起时保留标签，
   // 回到对话用顶栏按钮原样重开。
@@ -380,6 +381,7 @@ export function openStudioView() {
 export function closeStudioView() {
   if (!studio.open) return;
   studio.open = false;
+  setAppView("chat");
   syncModeUi();
   stopStudioPolling();
   // 打标页的轮询也必须停：页面隐藏后继续轮询只是白耗请求。
@@ -2303,20 +2305,10 @@ async function confirmStudioHandoff() {
 // ============================================================
 
 export function bindStudioEvents() {
-  // 侧栏模式切换：工作台只进不退，退出统一由「对话」负责。
-  // 手机端每次点模式按钮都关闭抽屉，避免挡住刚打开的目标内容（已在工作台时同样关闭）。
-  $("#openStudio")?.addEventListener("click", () => {
-    openStudioView();
-    if (!sidebarDesktop()) closeSidebar();
-  });
   // 工作台自己的手机导航入口（对话顶栏在工作台态整体退场，汉堡按钮由本模块提供）。
   $("#studioOpenSidebar")?.addEventListener("click", () => openSidebar());
   // 桌面端侧栏收起后，对话顶栏的 #expandSidebar 已随顶栏退场；用本模块顶栏的同款按钮恢复。
   $("#studioExpandSidebar")?.addEventListener("click", () => setLeftSidebarCollapsed(false));
-  $("#openChatMode")?.addEventListener("click", () => {
-    closeStudioView();
-    if (!sidebarDesktop()) closeSidebar();
-  });
   $("#studioCats")?.addEventListener("click", (event) => {
     const cat = event.target.closest("[data-studio-module]");
     if (!cat) return;

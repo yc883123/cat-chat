@@ -38,13 +38,13 @@ from naiba.llm.provider_presets import (  # noqa: E402
 REQUIRED_FIELDS = ("id", "kind", "name", "abbr", "base_url", "request_format", "model", "key_required", "key_url", "hint")
 # 名单顺序即界面顺序：大厂 → 中转 → 自定义 → 本地（在线在前）。
 EXPECTED_ONLINE_IDS = ("deepseek", "kimi", "zhipu", "qwen", "ark", "qianfan", "openai", "claude", "gemini", "te", "custom")
-EXPECTED_LOCAL_IDS = ("ollama", "lm_studio", "llama_cpp", "unsloth")
+EXPECTED_LOCAL_IDS = ("ollama", "lm_studio", "llama_cpp", "kvmem", "unsloth")
 
 
 class PresetTableTests(unittest.TestCase):
     def test_fifteen_presets_in_declared_order(self):
         ids = [item["id"] for item in PROVIDER_PRESETS]
-        self.assertEqual(len(ids), 15, f"预设条数应为 15：{ids}")
+        self.assertEqual(len(ids), 16, f"预设条数应为 16：{ids}")
         self.assertEqual(len(set(ids)), len(ids), "预设 id 必须唯一")
         self.assertEqual(ids, list(EXPECTED_ONLINE_IDS) + list(EXPECTED_LOCAL_IDS))
 

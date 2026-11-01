@@ -3455,6 +3455,19 @@ class ConfigStore:
                 "api_key": str(values.get("api_key") or "").strip(),
                 "request_format": request_format,
             }
+            service_manager = str(values.get("service_manager") or "").strip().lower()
+            service_manager_url = str(values.get("service_manager_url") or "").strip().rstrip("/")
+            if service_manager:
+                if kind != "local" or service_manager != "kvmem":
+                    raise ValueError("服务管理器只能用于本地 KVMem 配置")
+                from naiba.kvmem import validate_manager_url
+                service_manager_url = validate_manager_url(service_manager_url)
+                payload["service_manager"] = service_manager
+                payload["service_manager_url"] = service_manager_url
+            elif existing and str(existing.get("service_manager") or "") == "kvmem":
+                # 编辑旧卡时前端未带管理字段也不能静默抹掉 KVMem 绑定。
+                payload["service_manager"] = "kvmem"
+                payload["service_manager_url"] = str(existing.get("service_manager_url") or "")
             raw_effort = str(values.get("reasoning_effort") or "auto").strip().lower()
             if raw_effort not in {"auto", "off", "low", "medium", "high"}:
                 raise ValueError("思维强度必须是 auto / off / low / medium / high 之一")

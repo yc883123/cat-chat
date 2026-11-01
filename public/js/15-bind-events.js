@@ -2,14 +2,14 @@
 // 15-bind-events.js —— 拆分自 public/app.js 第 6658-7653 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, api, applyAppearance, applyModelSkinFor, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, escapeHtml, hideTextContextMenu, isCoarsePointer, onChatBackgroundMissingChange, triggerDownload, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setClipboardPasteDriver, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer, watchTopbarWidth } from "./01-core.js";
+import { $, $$, api, applyAppearance, applyModelSkinFor, applyChatBackground, CHAT_BACKGROUND_FORMATS, CHAT_BACKGROUND_MIN_CROP, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundFillCrop, clampChatBackgroundCrop, clampChatBackgroundOpacity, clearChatBackgroundSetting, contextMenuPreviousFocus, copyText, draggedFileCache, editableElement, ensureContextMenu, escapeHtml, hideTextContextMenu, isCoarsePointer, onChatBackgroundMissingChange, setAppView, triggerDownload, probeChatBackgroundImageAspect, refreshChatBackgroundGeometry, restoreTopbarCompact, runTextContextAction, saveAppearance, saveChatBackground, setClipboardPasteDriver, setTopbarCompact, showTextContextMenu, state, toast, topLayerContainer, watchTopbarWidth } from "./01-core.js";
 import { closeContextUsagePopover, closeImageLightbox, continueAfterContextWarning, ensureImageContextMenu, fileUrl, handleImageLightboxKey, hideFileActionMenu, hideImageContextMenu, initImageLightboxInteractions, isPywebview, openImageLightbox, positionContextUsagePopover, resetContextWarningResume, runImageContextAction, saveLocalFile, showFileActionMenu, showImageContextMenu, stepImageLightbox, toggleContextUsagePopover, updateSendButtonState } from "./03-media.js";
 import { branchMessage, cancelActiveEdit, cancelCompaction, cancelSessionStart, confirmActiveEdit, deleteMessageFlow, fillContextResetSeed, initTurnRail, isNearBottom, regenerateMessage, setStickToBottom, startEditMessage, startNewSession, undoLastDelete } from "./04-messages.js";
 import { authenticate, enableLanAccess, initialize } from "./05-bootstrap.js";
 import { switchPermissionMode } from "./06-tasks-plans.js";
-import { checkUpdate, closeAgentHelpPopover, closeComposerModelPicker, composerModelChoice, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, applyUpdate, cancelUpdate, discardUpdate, dismissUpdateReady, saveUpdateProxy, syncUpdateFloat, syncUpdateProxyControls, renderUpdateProxyState, positionAgentHelpPopover, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleAgentHelpPopover, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
+import { bindKvmemControls, checkUpdate, closeAgentHelpPopover, closeComposerModelPicker, composerModelChoice, composerPickerState, filterComposerModelPicker, handleComposerModelPickerClick, handleComposerModelPickerKey, installUpdate, applyUpdate, cancelUpdate, discardUpdate, dismissUpdateReady, saveUpdateProxy, syncUpdateFloat, syncUpdateProxyControls, renderUpdateProxyState, positionAgentHelpPopover, positionComposerModelPicker, renderUpdateStatus, saveAgentSelection, saveComposerModelSelection, saveModelSelection, syncComposerModelPicker, toggleAgentHelpPopover, toggleComposerModelPicker, unloadConfiguredProviderModel, unloadProviderModel } from "./07-models-agents.js";
 import { applySidebarViewPref, bindSidebarDragDrop, cancelTask, clearTerminalTasks, closeAgentPromptPresetPanel, closeBranchChainPanel, closeConversationMenu, closeSidebarViewMenu, conversationMenuTargetId, createWorkspace, deleteConversation, handleAgentPromptPresetPanelClick, importAgentCharacterCard, onComposerWorkspaceChange, onSidebarTreeClick, openAgentPromptPresetSaveDialog, openConversation, openRenameConversation, openSidebarViewMenu, positionAgentPromptPresetPanel, renderSidebar, renderSidebarWindow, runFullTextSearch, saveAgentPromptPreset, saveNewWorkspace, saveRenameConversation, setSidebarScrollRaf, sidebarRowCache, sidebarScrollRaf, toggleAgentPromptPresetPanel, toggleConversationArchive, setTaskLogOpen, setTaskLogStick, setWorkspaceSearchMode, syncSearchModeUi, SEARCH_DEBOUNCE_MS } from "./08-conversations.js";
-import { addProvider, addSearchProfile, appearanceFormValues, applyProviderModelCapabilities, applyProviderPreset, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, hideAgentForm, handleMcpListClick, closeMcpForm, openMcpForm, setMcpFormMode, submitMcpForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadUsageStats, loadWorkspaceTree, openAgentCard, openAgentToolEditorCurrent, openProviderCard, openProviderPresetKeyUrl, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderMcp, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, previewDoneSound, saveDoneSound, saveDoneSoundVolume, saveInterjectDirectSend, saveTrayDoneToast, syncRangeFill, saveProvider, saveRuntimeSettings, saveSkillMaxSize, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, setUsageChart, setUsageDim, setUsageGran, setUsageMetric, setUsageRange, showAgentForm, skillDisplayName, skillMatchesQuery, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAgentToolPeek, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, toggleToolOnlySelected, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderVisionHint, applyUsageFilter, openUsagePrefsDialog, resetUsageFilter, saveUsagePrefs, selectUsageFilterRange, usageUnbindDialogViewport, refreshUsagePricingBadge, openUsagePricingDialog, pricingGoBackToList, pricingTogglePool, pricingConfirmCustomCurrency, pricingCloseCustomCurrency, pricingOpenCustomCurrency, pricingApplyGroupCurrency, pricingDropCurrency, pricingAddFromPool, pricingMarkRowDirty, pricingCycleRowCurrency, pricingSaveRow, pricingRemoveRow, pricingOpenGroup, populateVisionModels } from "./09-settings.js";
+import { addProvider, addSearchProfile, appearanceFormValues, applyProviderModelCapabilities, applyProviderPreset, cancelProviderEdit, cleanImageCache, closeAgentToolEditor, compactDatabase, deleteAgent, deleteProvider, deleteSearchProfile, hideAgentForm, handleMcpListClick, closeMcpForm, openMcpForm, setMcpFormMode, submitMcpForm, handleAgentAvatarFile, handleAgentToolPresetCardsClick, handleAgentToolPresetCardsKeydown, loadMcpServers, loadProviderModels, loadStorageStats, loadUsageStats, loadWorkspaceTree, openAgentCard, openAgentToolEditorCurrent, openProviderCard, openProviderPresetKeyUrl, persistSearchProfiles, loadChatBackgroundPresets, pickAgentAvatar, pickWorkspace, populateChatBackgroundEditor, refreshImageCacheSize, renderAgentManager, renderAgentSkillPicker, renderImageCompressRow, renderMcp, renderProviders, renderProxyRows, renderSearchProfileFields, renderSkills, renderToolScopeList, saveAccessToken, saveAgentForm, saveAgentToolSet, previewDoneSound, saveDoneSound, saveDoneSoundVolume, saveInterjectDirectSend, saveTrayDoneToast, syncRangeFill, saveProvider, saveRuntimeSettings, saveSkillMaxSize, saveSearchSettings, saveVisionSettings, saveWorkspaceSettings, searchProfiles, setChatBackgroundEditorEnabled, setChatBackgroundEditorError, setChatBackgroundStatus, setUsageChart, setUsageDim, setUsageGran, setUsageMetric, setUsageRange, showAgentForm, skillDisplayName, skillMatchesQuery, switchAgentTab, syncAppearanceControls, syncProviderKindOptions, testProvider, testSearchConnection, testVisionConnection, toggleAgentToolPeek, toggleAllToolGroups, toggleCustomModel, toggleProviderKey, toggleToolOnlySelected, updateAgentSkillTabCount, updateChatBackgroundControls, updateChatBackgroundEditorControls, updateProviderContextField, updateProviderFormatGuide, updateProviderKvmemFields, updateProviderVisionHint, applyUsageFilter, openUsagePrefsDialog, resetUsageFilter, saveUsagePrefs, selectUsageFilterRange, usageUnbindDialogViewport, refreshUsagePricingBadge, openUsagePricingDialog, pricingGoBackToList, pricingTogglePool, pricingConfirmCustomCurrency, pricingCloseCustomCurrency, pricingOpenCustomCurrency, pricingApplyGroupCurrency, pricingDropCurrency, pricingAddFromPool, pricingMarkRowDirty, pricingCycleRowCurrency, pricingSaveRow, pricingRemoveRow, pricingOpenGroup, populateVisionModels } from "./09-settings.js";
 import { addFolderChip, isFolderChip, readAsDataUrl, renderPendingFiles, uploadFiles } from "./10-upload.js";
 import { cancelCurrentRun, closeQuickMessagePanel, closeReasoningMenu, handleQuickMessagePanelClick, handlePasteImage, clipboardPasteDriver, openStarterPromptDialog, positionQuickMessagePanel, positionReasoningMenu, quickPanelState, reloadPage, restoreStarterPresets, saveStarterPrompt, sendMessage, setReasoningEffort, startSkillEdit, startSkillInstall, toggleDeepReasoning, toggleQuickMessagePanel, togglePermissionModeMenu, positionPermissionModeMenu, closePermissionModeMenu, permissionMenuState } from "./12-chat-input.js";
 import { commitSkillSelection, hideSkillPopup, insertSkillRefAtCursor, moveSkillPopupSelection, popupState, positionSkillPopup, renderInputMirror, resizeTextarea, setSkillPopupSelection, skillList, toggleComposerExpanded, updateSkillPopup } from "./13-skill-refs.js";
@@ -21,7 +21,7 @@ import { dismissOnboarding, resetOnboarding, saveOnboardingProvider, selectOnboa
 // 按 import 区的**行号**断言 01-core / 04-messages 的位置，插在前面会把它们推后而报红。
 import { bindAuxChatEvents, restoreAuxChats, restoreDockGroup } from "./21-aux-chat.js";
 // 工作台（Studio）import 同样追加在末尾（_studio_plan_v2.md P4.1）。
-import { bindStudioEvents } from "./22-studio.js";
+import { bindStudioEvents, closeStudioView, openStudioView } from "./22-studio.js";
 // 工作台（Studio）import 同样追加在末尾（_studio_plan_v2.md P4.1）。
 // 打标器（工作台第二个功能页）import 同样追加在末尾：
 // 23 只从 22 取 onStudioPageChange，22 不反向 import 23，不存在循环依赖。
@@ -33,6 +33,7 @@ import { bindComfyuiEvents } from "./24-comfyui.js";
 import { bindNovelEvents } from "./25-novel.js";
 // 织书台（工作台第五个功能页，原创写作）：27 只从 01/22 取公共函数，无循环依赖。
 import { bindWriterEvents } from "./27-writer.js";
+import { bindSuperAgentEvents, closeSuperAgentView, openSuperAgentView } from "./28-super-agent.js";
 // 工作台（Studio）import 同样追加在末尾（_studio_plan_v2.md P4.1）。
 // ---- 聊天背景图（外观页） ----
 // 上传走同一个 /api/uploads（落盘 data/uploads/<日期>/，返回绝对路径），但**不进入
@@ -957,6 +958,16 @@ async function runFileAction(button) {
 }
 
 export function bindEvents() {
+  // 顶层应用入口唯一绑定点：Chat / Studio / 任务总管。
+  $('#openChatMode')?.addEventListener('click', () => {
+    if (state.appView === 'studio') closeStudioView();
+    else if (state.appView === 'super-agent') closeSuperAgentView();
+    else setAppView('chat');
+  });
+  $('#openStudio')?.addEventListener('click', () => {
+    if (state.appView !== 'studio') openStudioView();
+  });
+  $('#openSuperAgent')?.addEventListener('click', () => void openSuperAgentView());
   document.addEventListener('contextmenu', (event) => {
     hideTextContextMenu();
     const editable = editableElement(event.target);
@@ -1090,6 +1101,7 @@ export function bindEvents() {
   // 自动化脚本 / 程序化改值（page.selectOption）不经过浮层：change 后把触发按钮文案对齐一次。
   $('#composerModelSelect').addEventListener('change', () => syncComposerModelPicker());
   $('#agentSelect').addEventListener('change', saveAgentSelection);
+  bindKvmemControls();
   $('#openSkills').addEventListener('click', () => {
     // 打开即重渲染：清掉上一会话可能残留的「已引用」标签与计数（quotedSkillIds
     // 在 openConversation 里已重置，但列表内容是打开前渲染的）；「查看说明」展开态同样回收。
@@ -2141,6 +2153,7 @@ export function bindEvents() {
   $('#providerFormat').addEventListener('change', () => {
     syncProviderKindOptions();
     updateProviderFormatGuide();
+    updateProviderKvmemFields();
     updateProviderContextField();
   });
   $('#providerModel').addEventListener('change', () => {
@@ -2148,6 +2161,7 @@ export function bindEvents() {
     applyProviderModelCapabilities();
   });
   $('#providerSupportsImages').addEventListener('change', updateProviderVisionHint);
+  $('#providerKvmemEnabled')?.addEventListener('change', () => { state.providerKvmemEnabled = $('#providerKvmemEnabled').checked; updateProviderKvmemFields(); });
   $('#toggleProviderKey').addEventListener('click', toggleProviderKey);
   $('#providerApiKey').addEventListener('input', (event) => {
     if (event.target.value) $('#providerKeyStatus').textContent = '待保存';
@@ -3240,6 +3254,8 @@ restoreDockGroup();
 void restoreAuxChats();
 // 工作台（_studio_plan_v2.md P4）：事件接线（组合根唯一装配点）。
 bindStudioEvents();
+// 任务总管：独立只读视图，不接管旧任务面板或工作台模块。
+bindSuperAgentEvents();
 // 打标器（工作台第二个功能页）：事件接线（与 Studio 同一个组合根）。
 bindLabelerEvents();
 // 造梦机（工作台第三个功能页）：事件接线（与 Studio 同一个组合根）。

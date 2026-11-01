@@ -3,6 +3,77 @@
 // ============================================================
 
 import { $, api, applyModelSkinFor, state, toast } from "./01-core.js";
+
+const KVMEM_STATUS_LABELS = { stopped: '未运行', starting: '启动中', stopping: '停止中', ready: '就绪', running: '运行中', failed: '异常', port_mismatch: '端口不一致', model_missing: '缺少模型', error: '不可达', unknown: '未知' };
+let kvmemState = { providerId: '', payload: null, busy: false };
+
+function currentKvmemProvider() {
+  const key = String($('#modelSelect')?.value || '');
+  const provider = (state.bootstrap?.model_profiles || []).find((item) => item.model_key === key);
+  return provider && provider.service_manager === 'kvmem' ? provider : null;
+}
+
+function kvmemLabel(status) { return KVMEM_STATUS_LABELS[status] || 'KVMem'; }
+
+export function renderKvmemControl() {
+  const root = $('#kvmemControl');
+  const provider = currentKvmemProvider();
+  if (!root) return;
+  root.hidden = !provider;
+  if (!provider) { $('#kvmemPopover')?.setAttribute('hidden', ''); return; }
+  kvmemState.providerId = provider.id;
+  const status = kvmemState.payload?.status || 'unknown';
+  $('#kvmemStatusLabel').textContent = `KVMem · ${kvmemLabel(status)}`;
+  $('#kvmemStatusDot').dataset.status = status;
+  const payload = kvmemState.payload || {};
+  $('#kvmemSummary').textContent = payload.model || payload.backend
+    ? `后端：${payload.backend || '未知'} · 模型：${payload.model || '未知'} · 端口：${payload.actual_port || '—'}`
+    : '读取服务状态后显示启动摘要。';
+  const error = $('#kvmemError'); error.hidden = !payload.error; error.textContent = payload.error || '';
+  $('#kvmemStart').disabled = kvmemState.busy || ['ready', 'running', 'starting'].includes(status);
+  $('#kvmemStop').disabled = kvmemState.busy || ['stopped', 'stopping', 'unknown', 'error'].includes(status);
+}
+
+export async function refreshKvmemStatus({ quiet = false } = {}) {
+  const provider = currentKvmemProvider();
+  if (!provider) { renderKvmemControl(); return null; }
+  try {
+    const payload = await api(`/api/providers/${encodeURIComponent(provider.id)}/kvmem/status`);
+    kvmemState.payload = payload; kvmemState.providerId = provider.id; renderKvmemControl(); return payload;
+  } catch (error) {
+    kvmemState.payload = { status: 'error', error: error.message }; renderKvmemControl();
+    if (!quiet) toast(`KVMem 状态读取失败：${error.message}`);
+    return kvmemState.payload;
+  }
+}
+
+async function kvmemAction(action) {
+  const provider = currentKvmemProvider(); if (!provider || kvmemState.busy) return;
+  const current = await refreshKvmemStatus({ quiet: true });
+  if (action === 'start') {
+    const summary = `${current?.backend || '未知后端'} / ${current?.model || '未知模型'} / 端口 ${current?.actual_port || '—'}`;
+    if (!confirm(`将通过 KVMem 控制台启动托管服务：\\n${summary}\\n\\n继续吗？`)) return;
+  } else if (action === 'stop' && !confirm('将停止当前 KVMem 控制台托管的推理服务，确定继续吗？')) return;
+  kvmemState.busy = true; renderKvmemControl();
+  try {
+    await api(`/api/providers/${encodeURIComponent(provider.id)}/kvmem/${action}`, { method: 'POST', body: { confirm: true } });
+    await refreshKvmemStatus({ quiet: true });
+    toast(action === 'start' ? '已请求启动 KVMem 服务' : '已请求停止 KVMem 服务');
+  } catch (error) { toast(`KVMem 操作失败：${error.message}`); }
+  finally { kvmemState.busy = false; renderKvmemControl(); }
+}
+
+export function bindKvmemControls() {
+  $('#kvmemStatusButton')?.addEventListener('click', () => $('#kvmemPopover')?.toggleAttribute('hidden'));
+  $('#kvmemRefresh')?.addEventListener('click', () => void refreshKvmemStatus());
+  $('#kvmemStart')?.addEventListener('click', () => void kvmemAction('start'));
+  $('#kvmemStop')?.addEventListener('click', () => void kvmemAction('stop'));
+  $('#kvmemOpen')?.addEventListener('click', async () => {
+    const provider = currentKvmemProvider(); if (!provider) return;
+    try { await api(`/api/providers/${encodeURIComponent(provider.id)}/kvmem/open`, { method: 'POST', body: {} }); }
+    catch (error) { toast(`打开 KVMem 控制台失败：${error.message}`); }
+  });
+}
 import { renderSidebar } from "./08-conversations.js";
 import { renderSkills } from "./09-settings.js";
 import { appendPresetSkillsToComposer } from "./13-skill-refs.js";
@@ -755,6 +826,8 @@ export function populateModels() {
     select.selectedIndex = 0;
   }
   updateUnloadModelButton();
+  renderKvmemControl();
+  void refreshKvmemStatus({ quiet: true });
   void populateComposerModels();
 }
 
@@ -1207,6 +1280,8 @@ export async function saveModelSelection() {
     }
   }
   updateUnloadModelButton();
+  renderKvmemControl();
+  void refreshKvmemStatus({ quiet: true });
   // 切换 API 后清空会话模型，等待新 API 的检测目录填充下拉。
   await populateComposerModels('');
   toast('API 已切换');

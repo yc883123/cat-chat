@@ -2,7 +2,7 @@
 // 05-bootstrap.js —— 拆分自 public/app.js 第 1502-1605 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, api, initializeAppearance, setServerStatus, state, syncAppearanceFromBootstrap, syncSidebarPrefsFromBootstrap, toast } from "./01-core.js";
+import { $, $$, api, initializeAppearance, setAppView, setServerStatus, state, syncAppearanceFromBootstrap, syncSidebarPrefsFromBootstrap, toast } from "./01-core.js";
 import { loadTasks, startTaskSync } from "./06-tasks-plans.js";
 import { populateModels, renderAgents, renderUpdateStatus, startUpdatePoll as startFastUpdatePoll } from "./07-models-agents.js";
 import { loadConversationPromptPresets, loadConversations, restoreSidebarWidth, setSidebarScrollToActive, startConversationSync } from "./08-conversations.js";
@@ -54,6 +54,7 @@ export async function enableLanAccess() {
 
 export async function initialize() {
   // 尽早应用本地偏好，避免首屏闪烁；bootstrap 返回后再以服务端配置同步。
+  setAppView('chat');
   initializeAppearance();
   restoreSidebarWidth();
   setSidebarScrollToActive(true);

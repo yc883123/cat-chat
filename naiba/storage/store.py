@@ -28,7 +28,7 @@ _METADATA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
-CURRENT_SCHEMA_VERSION = 28
+CURRENT_SCHEMA_VERSION = 29
 
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
@@ -942,6 +942,71 @@ def _migrate_to_v28(db: sqlite3.Connection) -> None:
     db.commit()
 
 
+def _migrate_to_v29(db: sqlite3.Connection) -> None:
+    """Create the independent Super-agent P0 domain tables.
+
+    The task layer deliberately does not reuse ``background_tasks``: that table
+    records one execution, while a Thread is a durable user-owned goal spanning
+    multiple executions. All statements are idempotent so a partially upgraded
+    installation can safely rerun this migration.
+    """
+    statements = [
+        """CREATE TABLE IF NOT EXISTS super_threads (
+            thread_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, title TEXT NOT NULL,
+            goal TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,
+            workspace_dir TEXT NOT NULL DEFAULT '', router_agent_id TEXT NOT NULL DEFAULT '',
+            autonomy_level TEXT NOT NULL DEFAULT 'confirm', summary TEXT NOT NULL DEFAULT '',
+            current_node_id TEXT NOT NULL DEFAULT '', linked_conversation_ids TEXT NOT NULL DEFAULT '[]',
+            linked_run_ids TEXT NOT NULL DEFAULT '[]', linked_job_ids TEXT NOT NULL DEFAULT '[]',
+            linked_domain_task_ids TEXT NOT NULL DEFAULT '[]', execution_snapshot TEXT NOT NULL DEFAULT '{}',
+            schema_version INTEGER NOT NULL DEFAULT 1, version INTEGER NOT NULL DEFAULT 1,
+            last_event_at INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL, archived_at INTEGER
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_super_threads_owner_updated ON super_threads(owner_id, updated_at DESC)",
+        """CREATE TABLE IF NOT EXISTS super_nodes (
+            node_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, owner_id TEXT NOT NULL,
+            parent_id TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, status TEXT NOT NULL,
+            dependencies TEXT NOT NULL DEFAULT '[]', executor_type TEXT NOT NULL, executor_id TEXT NOT NULL DEFAULT '',
+            input_refs TEXT NOT NULL DEFAULT '[]', output_refs TEXT NOT NULL DEFAULT '[]', approval_required INTEGER NOT NULL DEFAULT 0,
+            retry_policy TEXT NOT NULL DEFAULT '{}', checkpoint TEXT NOT NULL DEFAULT '{}', attempt INTEGER NOT NULL DEFAULT 0,
+            idempotency_key TEXT NOT NULL, execution_snapshot TEXT NOT NULL DEFAULT '{}', cancel_requested INTEGER NOT NULL DEFAULT 0,
+            error TEXT NOT NULL DEFAULT '', schema_version INTEGER NOT NULL DEFAULT 1, version INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+            FOREIGN KEY(thread_id) REFERENCES super_threads(thread_id) ON DELETE CASCADE,
+            UNIQUE(thread_id, idempotency_key)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_super_nodes_thread_status ON super_nodes(thread_id, status, created_at)",
+        """CREATE TABLE IF NOT EXISTS super_events (
+            event_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, node_id TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}',
+            source_event_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0,
+            sequence INTEGER NOT NULL, created_at INTEGER NOT NULL, handled_at INTEGER,
+            FOREIGN KEY(thread_id) REFERENCES super_threads(thread_id) ON DELETE CASCADE,
+            UNIQUE(thread_id, idempotency_key), UNIQUE(thread_id, source, source_event_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_super_events_thread_sequence ON super_events(thread_id, sequence)",
+        """CREATE TABLE IF NOT EXISTS super_artifacts (
+            artifact_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, node_id TEXT NOT NULL DEFAULT '',
+            kind TEXT NOT NULL, path_or_ref TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '',
+            version INTEGER NOT NULL DEFAULT 1, idempotency_key TEXT NOT NULL, created_at INTEGER NOT NULL,
+            FOREIGN KEY(thread_id) REFERENCES super_threads(thread_id) ON DELETE CASCADE,
+            UNIQUE(thread_id, idempotency_key)
+        )""",
+        """CREATE TABLE IF NOT EXISTS super_approvals (
+            approval_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, node_id TEXT NOT NULL DEFAULT '',
+            action TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', risk_level TEXT NOT NULL DEFAULT 'medium',
+            status TEXT NOT NULL, idempotency_key TEXT NOT NULL, requested_at INTEGER NOT NULL,
+            resolved_at INTEGER, resolved_by TEXT NOT NULL DEFAULT '',
+            FOREIGN KEY(thread_id) REFERENCES super_threads(thread_id) ON DELETE CASCADE,
+            UNIQUE(thread_id, idempotency_key)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_super_approvals_thread_status ON super_approvals(thread_id, status, requested_at)",
+    ]
+    for statement in statements:
+        db.execute(statement)
+
+
 # 目标版本 -> 迁移函数。新增版本时在此追加并提升 CURRENT_SCHEMA_VERSION。
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
@@ -972,6 +1037,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     26: _migrate_to_v26,
     27: _migrate_to_v27,
     28: _migrate_to_v28,
+    29: _migrate_to_v29,
 }
 
 
@@ -1503,15 +1569,20 @@ class ChatStorage:
                     file=sys.stderr,
                 )
         with self._connect() as db:
-            while int(db.execute("PRAGMA user_version").fetchone()[0]) < CURRENT_SCHEMA_VERSION:
-                target = int(db.execute("PRAGMA user_version").fetchone()[0]) + 1
-                migration = MIGRATIONS.get(target)
-                if migration is None:
-                    # 没有对应迁移定义则向前跳版本，避免死循环。
+            try:
+                db.execute("BEGIN")
+                while int(db.execute("PRAGMA user_version").fetchone()[0]) < CURRENT_SCHEMA_VERSION:
+                    target = int(db.execute("PRAGMA user_version").fetchone()[0]) + 1
+                    migration = MIGRATIONS.get(target)
+                    if migration is not None:
+                        migration(db)
+                    # Version changes are committed together with that version's
+                    # schema. A failed migration rolls back both DDL and user_version.
                     db.execute(f"PRAGMA user_version = {int(target)}")
-                    continue
-                migration(db)
-                db.execute(f"PRAGMA user_version = {int(target)}")
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
 
     def get_user_version(self) -> int:
         with self._connect() as db:

@@ -136,6 +136,14 @@ class NaibaChatApp:
             self._paths.rebind_data_dir(configured_data_dir)
         self._paths.data_dir.mkdir(parents=True, exist_ok=True)
         self.storage = ChatStorage(self._paths.data_dir / "chat.db")
+        # Super-agent P0 只装配独立任务域和假 Worker；不接管现有 Chat/Job/Studio 流程。
+        from naiba.super_agent import SuperAgentService
+
+        self.super_agent = SuperAgentService(self.storage)
+        try:
+            self.super_agent.recover_all()
+        except Exception:  # noqa: BLE001 - 任务恢复失败不阻断旧应用启动
+            logger.exception("Super-agent 任务恢复失败")
         # ---- 缓存清理的运行时状态（uploads / generated 各一套）----
         # `_cache_clean_pending`：占锁期间新来的触发按 scope 登记待清理 + 必须无条件保留的
         #   路径（刚落盘的附件），当前轮跑完后复查并补跑——**不能丢弃最后一次触发**。
@@ -412,6 +420,10 @@ class NaibaChatApp:
         self.runs.shutdown()
         self.plans.shutdown()
         self.jobs.shutdown()
+        try:
+            self.super_agent.shutdown()
+        except Exception:  # noqa: BLE001 - 收尾不互相阻断
+            logger.exception("Super-agent 收尾失败")
         try:
             self.writer.shutdown()
         except Exception:  # noqa: BLE001 - 收尾不互相阻断

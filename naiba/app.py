@@ -97,7 +97,9 @@ def _super_agent_thread_payload(thread: Any, *, detail: bool = False) -> dict[st
         "goal": _super_agent_text(thread.goal, 1000),
         "status": thread.status,
         "summary": _super_agent_text(thread.summary, 1000),
+        "chain_version": int(getattr(thread, "chain_version", 0) or 0),
         "current_node_id": thread.current_node_id,
+        "current_stage_key": str(getattr(thread, "current_stage_key", "") or ""),
         "version": thread.version,
         "last_event_at": thread.last_event_at,
         "created_at": thread.created_at,
@@ -118,26 +120,73 @@ def _super_agent_thread_payload(thread: Any, *, detail: bool = False) -> dict[st
 
 
 def _super_agent_node_payload(node: Any) -> dict[str, Any]:
+    checkpoint = node.checkpoint if isinstance(node.checkpoint, dict) else {}
+    ref = checkpoint.get("domain_ref") if isinstance(checkpoint.get("domain_ref"), dict) else None
+    domain_ref = None
+    if ref:
+        domain_ref = {
+            "domain": _super_agent_text(ref.get("domain"), 40),
+            "book_id": _super_agent_text(ref.get("book_id"), 160),
+            "stage": _super_agent_text(ref.get("stage"), 80),
+            "domain_task_id": _super_agent_text(ref.get("domain_task_id"), 160),
+            "domain_revision": int(ref.get("domain_revision") or 0),
+        }
     return {
         "node_id": node.node_id,
         "thread_id": node.thread_id,
         "kind": _super_agent_text(node.kind, 160),
         "status": node.status,
+        "stage_key": _super_agent_text(getattr(node, "stage_key", ""), 160),
+        "sequence": int(getattr(node, "sequence", 0) or 0),
+        "promote_to": _super_agent_text(getattr(node, "promote_to", ""), 160),
+        "promotion_policy": dict(getattr(node, "promotion_policy", {}) or {}),
+        "chain_instance_id": _super_agent_text(getattr(node, "chain_instance_id", ""), 160),
         "parent_id": node.parent_id,
         "dependencies": list(node.dependencies or []),
         "executor_type": _super_agent_text(node.executor_type, 80),
         "attempt": node.attempt,
         "approval_required": bool(node.approval_required),
         "output_refs": list(node.output_refs or []),
+        "domain_ref": domain_ref,
         "error": _super_agent_text(node.error, 500),
         "created_at": node.created_at,
         "updated_at": node.updated_at,
     }
 
 
+def _super_agent_action_payload(result: Any) -> dict[str, Any]:
+    """Public action result: stable execution summary, never checkpoint/raw."""
+    checkpoint = result.checkpoint if isinstance(getattr(result, "checkpoint", None), dict) else {}
+    ref = checkpoint.get("domain_ref") if isinstance(checkpoint.get("domain_ref"), dict) else None
+    domain_ref = None
+    if ref:
+        domain_ref = {
+            "domain": _super_agent_text(ref.get("domain"), 40),
+            "book_id": _super_agent_text(ref.get("book_id"), 160),
+            "stage": _super_agent_text(ref.get("stage"), 80),
+            "domain_task_id": _super_agent_text(ref.get("domain_task_id"), 160),
+            "domain_revision": int(ref.get("domain_revision") or 0),
+        }
+    return {
+        "executor_type": _super_agent_text(getattr(result, "executor_type", ""), 80),
+        "executor_id": _super_agent_text(getattr(result, "executor_id", ""), 160),
+        "status": _super_agent_text(getattr(result, "status", ""), 80),
+        "attempt": int(getattr(result, "attempt", 0) or 0),
+        "node_status": _super_agent_text(getattr(result, "node_status", ""), 80),
+        "output_refs": list(getattr(result, "output_refs", None) or []),
+        "artifact_refs": list(getattr(result, "artifact_refs", None) or []),
+        "domain_ref": domain_ref,
+        "approval_id": _super_agent_text(checkpoint.get("approval_id"), 160),
+    }
+
+
 def _super_agent_event_payload(event: Any) -> dict[str, Any]:
+
     raw = event.payload if isinstance(event.payload, dict) else {}
-    summary_keys = {"message", "step", "status", "action", "approval_id", "error", "output_refs"}
+    summary_keys = {
+        "message", "step", "status", "action", "approval_id", "error", "output_refs",
+        "from_node_id", "from_stage", "to_node_id", "to_stage", "chain_instance_id",
+    }
     summary = {}
     for key in summary_keys:
         if key in raw:
@@ -512,6 +561,10 @@ class NaibaChatApp:
             logger.exception("织书台流水线启动恢复失败")
             writer_recovery = None
         _ = writer_recovery
+        from naiba.super_agent.domain import DomainCoordinator
+
+        self.super_agent_domain = DomainCoordinator(self)
+        self.super_agent.domain_router = self.super_agent_domain
         self.updater = UpdateManager(self._paths.app_dir, self._paths.data_dir)
         # 「更新代理」独立于全局 proxy：启动时注入一次，设置保存后再注入更新。
         self.updater.configure_proxy(self.config.data.get("update_proxy"))
@@ -931,12 +984,54 @@ class NaibaChatApp:
         threads = self.super_agent.list_threads(self._super_agent_owner())
         return {"threads": [_super_agent_thread_payload(thread) for thread in threads]}, HTTPStatus.OK
 
+    def api_super_agent_create_thread(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        try:
+            thread, node = self.super_agent_domain.create_thread(self._super_agent_owner(), body)
+            nodes = self.super_agent.list_nodes(self._super_agent_owner(), thread.thread_id)
+            thread_payload = _super_agent_thread_payload(thread, detail=True)
+            thread_payload["current_stage_key"] = str(getattr(node, "stage_key", "") or "")
+            return {
+                "thread": thread_payload,
+                "node": _super_agent_node_payload(node),
+                "nodes": [_super_agent_node_payload(item) for item in nodes],
+            }, HTTPStatus.CREATED
+        except LookupError as exc:
+            return {"error": str(exc)}, HTTPStatus.NOT_FOUND
+        except (ValueError, RuntimeError) as exc:
+            return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
+
+    def api_super_agent_action(self, thread_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        try:
+            result = self.super_agent_domain.action(self._super_agent_owner(), thread_id, body)
+            return {"result": _super_agent_action_payload(result)}, HTTPStatus.OK
+        except LookupError as exc:
+            return {"error": str(exc)}, HTTPStatus.NOT_FOUND
+        except (ValueError, RuntimeError) as exc:
+            return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
+
+    def api_super_agent_resolve_approval(self, thread_id: str, approval_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        try:
+            approval = self.super_agent_domain.resolve_approval(
+                self._super_agent_owner(), thread_id, approval_id, body,
+            )
+            return {"approval": _super_agent_approval_payload(approval)}, HTTPStatus.OK
+        except LookupError as exc:
+            return {"error": str(exc)}, HTTPStatus.NOT_FOUND
+        except (ValueError, RuntimeError) as exc:
+            return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
+
     def api_super_agent_thread(self, thread_id: str) -> tuple[dict[str, Any], int]:
         try:
             thread = self.super_agent.get_thread(self._super_agent_owner(), thread_id)
         except LookupError:
             return {"error": "Thread 不存在或无权访问"}, HTTPStatus.NOT_FOUND
-        return {"thread": _super_agent_thread_payload(thread, detail=True)}, HTTPStatus.OK
+        payload = _super_agent_thread_payload(thread, detail=True)
+        if thread.current_node_id:
+            current = self.super_agent.get_node(self._super_agent_owner(), thread.current_node_id)
+            payload["current_stage_key"] = str(getattr(current, "stage_key", "") or "")
+        else:
+            payload["current_stage_key"] = ""
+        return {"thread": payload}, HTTPStatus.OK
 
     def api_super_agent_nodes(self, thread_id: str) -> tuple[dict[str, Any], int]:
         try:

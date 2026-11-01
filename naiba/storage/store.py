@@ -28,7 +28,7 @@ _METADATA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
-CURRENT_SCHEMA_VERSION = 29
+CURRENT_SCHEMA_VERSION = 30
 
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
@@ -1007,6 +1007,32 @@ def _migrate_to_v29(db: sqlite3.Connection) -> None:
         db.execute(statement)
 
 
+def _migrate_to_v30(db: sqlite3.Connection) -> None:
+    """Add durable chain metadata to the Super-agent tables.
+
+    This is deliberately additive: old rows keep empty/zero values and retain
+    the single-node behavior. It is safe to run after a partially-created v29
+    database as well as on a fresh database.
+    """
+    for column, definition in (("chain_version", "INTEGER NOT NULL DEFAULT 0"),):
+        try:
+            db.execute(f"SELECT {column} FROM super_threads LIMIT 1")
+        except sqlite3.OperationalError:
+            db.execute(f"ALTER TABLE super_threads ADD COLUMN {column} {definition}")
+    for column, definition in (
+        ("stage_key", "TEXT NOT NULL DEFAULT ''"),
+        ("sequence", "INTEGER NOT NULL DEFAULT 0"),
+        ("promote_to", "TEXT NOT NULL DEFAULT ''"),
+        ("promotion_policy", "TEXT NOT NULL DEFAULT '{}'"),
+        ("chain_instance_id", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        try:
+            db.execute(f"SELECT {column} FROM super_nodes LIMIT 1")
+        except sqlite3.OperationalError:
+            db.execute(f"ALTER TABLE super_nodes ADD COLUMN {column} {definition}")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_super_nodes_chain ON super_nodes(thread_id, chain_instance_id, sequence)")
+
+
 # 目标版本 -> 迁移函数。新增版本时在此追加并提升 CURRENT_SCHEMA_VERSION。
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
@@ -1038,6 +1064,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     27: _migrate_to_v27,
     28: _migrate_to_v28,
     29: _migrate_to_v29,
+    30: _migrate_to_v30,
 }
 
 

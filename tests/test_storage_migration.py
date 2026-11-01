@@ -414,10 +414,14 @@ class ShowMediaToolMigrationTests(unittest.TestCase):
         return json.loads(raw or "[]")
 
     def test_version_and_id_constant(self) -> None:
-        self.assertEqual(CURRENT_SCHEMA_VERSION, 29)
+        self.assertEqual(CURRENT_SCHEMA_VERSION, 30)
         with closing(sqlite3.connect(self.root / "chat.db")) as db:
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            thread_columns = {row[1] for row in db.execute("PRAGMA table_info(super_threads)")}
+            node_columns = {row[1] for row in db.execute("PRAGMA table_info(super_nodes)")}
         self.assertTrue({"super_threads", "super_nodes", "super_events", "super_artifacts", "super_approvals"}.issubset(tables))
+        self.assertIn("chain_version", thread_columns)
+        self.assertTrue({"stage_key", "sequence", "promote_to", "promotion_policy", "chain_instance_id"}.issubset(node_columns))
         from naiba.config import built_in_agent_ids
         from naiba.storage.store import _BUILTIN_AGENT_IDS
 

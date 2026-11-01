@@ -1676,9 +1676,10 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"></path></svg>
           </button>
           <strong class="super-agent-brand">任务总管</strong>
-          <span class="super-agent-readonly">只读查看</span>
+          <span class="super-agent-capability">查看与控制</span>
           <div class="super-agent-toolbar">
             <span class="super-agent-sync" id="superAgentSyncStatus" role="status"></span>
+            <button class="control-button tiny" id="superAgentCreate" type="button">新建领域任务</button>
             <button class="control-button tiny" id="superAgentRefresh" type="button">刷新</button>
           </div>
         </header>
@@ -1696,7 +1697,7 @@
                 <span class="super-agent-status" id="superAgentStatus"></span>
               </div>
               <p class="super-agent-summary" id="superAgentSummary"></p>
-              <section class="super-agent-section"><h2>节点阶段</h2><div class="super-agent-node-list" id="superAgentNodeList"></div></section>
+              <section class="super-agent-section super-agent-stage-section"><div class="super-agent-section-title"><h2>阶段链</h2><span class="super-agent-chain-meta" id="superAgentChainMeta"></span></div><div class="super-agent-stage-chain" id="superAgentStageChain"></div><div class="super-agent-node-list" id="superAgentNodeList" hidden></div></section>
               <section class="super-agent-section"><h2>事件时间线</h2><div class="super-agent-event-list" id="superAgentEventList"></div></section>
             </div>
           </section>
@@ -1706,6 +1707,23 @@
           </aside>
         </div>
       </section>
+
+      <dialog id="superAgentCreateDialog" class="writer-dialog super-agent-create-dialog" aria-labelledby="superAgentCreateTitle">
+        <form method="dialog" class="writer-dialog-form super-agent-create-form" id="superAgentCreateForm" novalidate>
+          <div class="writer-manage-head">
+            <h3 id="superAgentCreateTitle">新建领域任务</h3>
+            <button class="control-button tiny" id="superAgentCreateClose" value="cancel" type="submit">关闭</button>
+          </div>
+          <label>领域<select id="superAgentCreateDomain"><option value="writer">Writer · 织书台</option><option value="novel">Novel · 拆书匠</option></select></label>
+          <label>作品 ID<input id="superAgentCreateBookId" required autocomplete="off"></label>
+          <label>阶段<input id="superAgentCreateStage" required value="chapter" autocomplete="off"></label>
+          <label>供应商<select id="superAgentCreateProvider" required aria-describedby="superAgentCreateModelHint"></select></label>
+          <label>模型<select id="superAgentCreateModel" required aria-describedby="superAgentCreateModelHint"></select></label>
+          <p class="writer-dialog-hint" id="superAgentCreateModelHint">模型来自全局供应商设置，打开时优先使用全局默认模型；任务总管不会保存 API Key。</p>
+          <p class="writer-dialog-error" id="superAgentCreateError" role="alert" aria-live="polite"></p>
+          <div class="writer-dialog-actions"><button class="control-button" value="cancel" type="submit">取消</button><button class="control-button primary" id="superAgentCreateSubmit" value="default" type="submit">创建</button></div>
+        </form>
+      </dialog>
 
       <section class="composer-wrap">
         <div class="active-task-bar" id="activeTaskBar" hidden></div>

@@ -40,6 +40,8 @@ EVENT_TYPES = (
     "approval_requested",
     "approval_received",
     "task_cancelled",
+    "run_interrupted",
+    "stage_promoted",
     "task_paused",
     "task_resumed",
     "app_restarted",
@@ -92,6 +94,7 @@ class Thread:
     router_agent_id: str = ""
     autonomy_level: str = "confirm"
     summary: str = ""
+    chain_version: int = 0
     current_node_id: str = ""
     linked_conversation_ids: list[str] = field(default_factory=list)
     linked_run_ids: list[str] = field(default_factory=list)
@@ -117,6 +120,11 @@ class TaskNode:
     owner_id: str
     kind: str
     status: str = "pending"
+    stage_key: str = ""
+    sequence: int = 0
+    promote_to: str = ""
+    promotion_policy: dict[str, Any] = field(default_factory=dict)
+    chain_instance_id: str = ""
     parent_id: str = ""
     dependencies: list[str] = field(default_factory=list)
     executor_type: str = "fake"

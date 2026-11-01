@@ -3136,6 +3136,11 @@ export function bindNovelEvents() {
   restoreStoryboardSystem();
   novel.initialized = true;
 
+  window.addEventListener("naiba-open-domain", (event) => {
+    if (event.detail?.domain !== "novel") return;
+    setStudioPage("novel");
+    if (event.detail.bookId) void openBook(String(event.detail.bookId));
+  });
   $("#novelImportBtn")?.addEventListener("click", () => $("#novelFileInput")?.click());
   $("#novelFileInput")?.addEventListener("change", (event) => {
     const file = event.target.files?.[0];

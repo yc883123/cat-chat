@@ -29,6 +29,7 @@ class SuperAgentService:
         self.store = SuperAgentStore(storage_or_db)
         self.worker = worker or FakeWorker(self)
         self._lock = threading.RLock()
+        self.domain_router: Any | None = None
 
     def create_thread(self, owner_id: str, title: str, goal: str = "", **kwargs: Any) -> Thread:
         return self.store.create_thread(owner_id=owner_id, title=title, goal=goal, **kwargs)
@@ -46,6 +47,15 @@ class SuperAgentService:
         self.get_thread(owner_id, thread_id)
         return self.store.create_node(owner_id=owner_id, thread_id=thread_id, kind=kind, idempotency_key=idempotency_key, **kwargs)
 
+    def create_thread_chain(self, owner_id: str, title: str, goal: str, *,
+                            chain_instance_id: str, chain_version: int,
+                            nodes: list[dict[str, Any]], **kwargs: Any) -> tuple[Thread, list[TaskNode]]:
+        return self.store.create_thread_chain(
+            owner_id=owner_id, title=title, goal=goal,
+            chain_instance_id=chain_instance_id, chain_version=chain_version,
+            nodes=nodes, **kwargs,
+        )
+
     def get_node(self, owner_id: str, node_id: str) -> TaskNode:
         node = self.store.get_node(node_id, owner_id=owner_id)
         if node is None:
@@ -55,6 +65,14 @@ class SuperAgentService:
     def list_nodes(self, owner_id: str, thread_id: str) -> list[TaskNode]:
         self.get_thread(owner_id, thread_id)
         return self.store.list_nodes(thread_id, owner_id=owner_id)
+
+    def list_chain(self, owner_id: str, thread_id: str, chain_instance_id: str = "") -> list[TaskNode]:
+        self.get_thread(owner_id, thread_id)
+        return self.store.list_chain(thread_id, owner_id=owner_id, chain_instance_id=chain_instance_id)
+
+    def promote_chain_node(self, owner_id: str, thread_id: str, node_id: str, *, expected_attempt: int | None = None, request_id: str = "") -> TaskNode | None:
+        self.get_thread(owner_id, thread_id)
+        return self.store.promote_chain_node(thread_id, node_id, owner_id=owner_id, expected_attempt=expected_attempt, request_id=request_id)
 
     def create_approval(self, owner_id: str, thread_id: str, node_id: str, *, action: str, description: str, idempotency_key: str, risk_level: str = "medium") -> Approval:
         node = self.get_node(owner_id, node_id)
@@ -121,6 +139,7 @@ class SuperAgentService:
             "run_completed": "succeeded",
             "job_failed": "failed",
             "task_cancelled": "cancelled",
+            "run_interrupted": "interrupted",
         }
         next_status = status_by_event.get(event.event_type)
         if next_status is None:
@@ -141,8 +160,18 @@ class SuperAgentService:
             thread = self.get_thread(owner_id, event.thread_id)
             if thread.status not in THREAD_TERMINAL_STATUSES and thread.status not in {"paused", "cancelled"}:
                 self.store.update_thread(event.thread_id, owner_id=owner_id, status="failed")
+        elif next_status == "interrupted":
+            thread = self.get_thread(owner_id, event.thread_id)
+            if thread.status == "active":
+                self.store.update_thread(event.thread_id, owner_id=owner_id, status="needs_recovery", summary="服务中断，任务需恢复")
         elif next_status == "succeeded":
-            self.store.promote_ready_nodes(event.thread_id, owner_id=owner_id)
+            if node.chain_instance_id:
+                self.store.promote_chain_node(
+                    event.thread_id, node.node_id, owner_id=owner_id,
+                    expected_attempt=node.attempt, request_id=event.idempotency_key,
+                )
+            else:
+                self.store.promote_ready_nodes(event.thread_id, owner_id=owner_id)
             nodes = self.store.list_nodes(event.thread_id, owner_id=owner_id)
             if nodes and all(item.status in {"succeeded", "cancelled"} for item in nodes):
                 thread = self.get_thread(owner_id, event.thread_id)
@@ -212,8 +241,8 @@ class SuperAgentService:
 
     def retry_node(self, owner_id: str, node_id: str) -> TaskNode:
         node = self.get_node(owner_id, node_id)
-        if node.status not in {"failed", "cancelled"}:
-            raise RuntimeError("只有 failed/cancelled Node 可以重试")
+        if node.status not in {"failed", "cancelled", "interrupted"}:
+            raise RuntimeError("只有 failed/cancelled/interrupted Node 可以重试")
         result = self.store.update_node(node_id, owner_id=owner_id, status="ready", attempt=node.attempt + 1, cancel_requested=False, error="", expected_attempt=node.attempt)
         self.store.update_thread(result.thread_id, owner_id=owner_id, status="active")
         return result

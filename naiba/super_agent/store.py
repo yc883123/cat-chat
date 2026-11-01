@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import time
 import uuid
@@ -45,6 +46,12 @@ def _load(value: Any, default: Any) -> Any:
 
 def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
+
+
+def _stable_id(prefix: str, value: str) -> str:
+    """Return a deterministic local identifier for an idempotent chain."""
+    digest = hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:32]
+    return f"{prefix}_{digest}"
 
 
 _SNAPSHOT_KEYS = {
@@ -104,6 +111,7 @@ class SuperAgentStore:
             title=str(row["title"]), goal=str(row["goal"]), status=str(row["status"]),
             workspace_dir=str(row["workspace_dir"]), router_agent_id=str(row["router_agent_id"]),
             autonomy_level=str(row["autonomy_level"]), summary=str(row["summary"]),
+            chain_version=int(row["chain_version"] or 0),
             current_node_id=str(row["current_node_id"]),
             linked_conversation_ids=_load(row["linked_conversation_ids"], []),
             linked_run_ids=_load(row["linked_run_ids"], []),
@@ -123,6 +131,9 @@ class SuperAgentStore:
         return TaskNode(
             node_id=str(row["node_id"]), thread_id=str(row["thread_id"]),
             owner_id=str(row["owner_id"]), kind=str(row["kind"]), status=str(row["status"]),
+            stage_key=str(row["stage_key"]), sequence=int(row["sequence"] or 0),
+            promote_to=str(row["promote_to"]), promotion_policy=_load(row["promotion_policy"], {}),
+            chain_instance_id=str(row["chain_instance_id"]),
             parent_id=str(row["parent_id"]), dependencies=_load(row["dependencies"], []),
             executor_type=str(row["executor_type"]), executor_id=str(row["executor_id"]),
             input_refs=_load(row["input_refs"], []), output_refs=_load(row["output_refs"], []),
@@ -193,14 +204,14 @@ class SuperAgentStore:
             db.execute("BEGIN IMMEDIATE")
             db.execute(
                 "INSERT INTO super_threads(thread_id,owner_id,title,goal,status,workspace_dir,"
-                "router_agent_id,autonomy_level,summary,current_node_id,linked_conversation_ids,"
+                "router_agent_id,autonomy_level,summary,chain_version,current_node_id,linked_conversation_ids,"
                 "linked_run_ids,linked_job_ids,linked_domain_task_ids,execution_snapshot,"
-                "schema_version,version,last_event_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "schema_version,version,last_event_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     thread_id, owner_id, title, str(goal or ""), status,
                     str(fields.get("workspace_dir") or ""), str(fields.get("router_agent_id") or ""),
                     str(fields.get("autonomy_level") or "confirm"), str(fields.get("summary") or ""),
-                    str(fields.get("current_node_id") or ""), _json(fields.get("linked_conversation_ids"), []),
+                    int(fields.get("chain_version") or 0), str(fields.get("current_node_id") or ""), _json(fields.get("linked_conversation_ids"), []),
                     _json(fields.get("linked_run_ids"), []), _json(fields.get("linked_job_ids"), []),
                     _json(fields.get("linked_domain_task_ids"), []), _json(snapshot, {}), 1, 1, 0, now, now,
                 ),
@@ -236,7 +247,7 @@ class SuperAgentStore:
     def update_thread(self, thread_id: str, *, owner_id: str, expected_version: int | None = None, **updates: Any) -> Thread:
         allowed = {
             "title", "goal", "status", "workspace_dir", "router_agent_id", "autonomy_level",
-            "summary", "current_node_id", "linked_conversation_ids", "linked_run_ids",
+            "summary", "chain_version", "current_node_id", "linked_conversation_ids", "linked_run_ids",
             "linked_job_ids", "linked_domain_task_ids", "execution_snapshot",
         }
         unknown = set(updates) - allowed
@@ -314,12 +325,14 @@ class SuperAgentStore:
             now = _now()
             node_id = str(fields.get("node_id") or _id("node"))
             db.execute(
-                "INSERT INTO super_nodes(node_id,thread_id,owner_id,parent_id,kind,status,dependencies,"
+                "INSERT INTO super_nodes(node_id,thread_id,owner_id,parent_id,kind,status,stage_key,sequence,promote_to,promotion_policy,chain_instance_id,dependencies,"
                 "executor_type,executor_id,input_refs,output_refs,approval_required,retry_policy,checkpoint,"
                 "attempt,idempotency_key,execution_snapshot,cancel_requested,error,schema_version,version,created_at,updated_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     node_id, thread_id, owner_id, str(fields.get("parent_id") or ""), kind, status,
+                    str(fields.get("stage_key") or ""), int(fields.get("sequence") or 0), str(fields.get("promote_to") or ""),
+                    _json(fields.get("promotion_policy"), {}), str(fields.get("chain_instance_id") or ""),
                     _json(deps, []), str(fields.get("executor_type") or "fake"), str(fields.get("executor_id") or ""),
                     _json(fields.get("input_refs"), []), _json(fields.get("output_refs"), []),
                     1 if fields.get("approval_required") else 0, _json(fields.get("retry_policy"), {}),
@@ -332,6 +345,195 @@ class SuperAgentStore:
         finally:
             db.close()
         return self.get_node(node_id, owner_id=owner_id)  # type: ignore[return-value]
+
+    def create_chain(self, *, owner_id: str, thread_id: str, chain_instance_id: str, nodes: list[dict[str, Any]]) -> list[TaskNode]:
+        """Create a chain in one transaction on an existing Thread.
+
+        ``create_node`` intentionally remains the legacy single-node API.  A
+        chain cannot use it because dependencies must point at rows inserted in
+        the same transaction and a failed graph must leave no partial nodes.
+        """
+        if not chain_instance_id or not nodes:
+            raise ValueError("chain_instance_id 和 nodes 不能为空")
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            thread = db.execute("SELECT * FROM super_threads WHERE thread_id=? AND owner_id=?", (thread_id, owner_id)).fetchone()
+            if thread is None:
+                raise LookupError("Thread 不存在或无权访问")
+            self._insert_chain_nodes_db(db, thread_id=thread_id, owner_id=owner_id,
+                                        chain_instance_id=chain_instance_id, nodes=nodes)
+            first = db.execute(
+                "SELECT node_id FROM super_nodes WHERE thread_id=? AND owner_id=? AND chain_instance_id=? ORDER BY sequence LIMIT 1",
+                (thread_id, owner_id, chain_instance_id),
+            ).fetchone()
+            if first is not None:
+                db.execute(
+                    "UPDATE super_threads SET current_node_id=?, status='active', version=version+1, updated_at=? WHERE thread_id=? AND owner_id=?",
+                    (str(first["node_id"]), _now(), thread_id, owner_id),
+                )
+            db.commit()
+        finally:
+            db.close()
+        return self.list_chain(thread_id, owner_id=owner_id, chain_instance_id=chain_instance_id)
+
+    def _validate_existing_chain_db(self, db: sqlite3.Connection, *, thread_id: str,
+                                    owner_id: str, chain_instance_id: str,
+                                    nodes: list[dict[str, Any]]) -> list[sqlite3.Row]:
+        """Verify a replayed graph without repairing a damaged one."""
+        specs = [dict(item) for item in nodes]
+        stage_keys = [str(item.get("stage_key") or "").strip() for item in specs]
+        by_stage = {key: _stable_id("node", f"{chain_instance_id}:{key}") for key in stage_keys}
+        rows = db.execute(
+            "SELECT * FROM super_nodes WHERE thread_id=? AND owner_id=? AND chain_instance_id=? ORDER BY sequence, created_at",
+            (thread_id, owner_id, chain_instance_id),
+        ).fetchall()
+        if len(rows) != len(specs):
+            raise RuntimeError("幂等 Thread 已存在但阶段链不完整")
+        for index, (row, item) in enumerate(zip(rows, specs)):
+            stage_key = stage_keys[index]
+            raw_deps = item.get("dependencies")
+            deps = list(raw_deps) if isinstance(raw_deps, list) else ([stage_keys[index - 1]] if index else [])
+            expected_deps = [by_stage.get(str(dep or ""), str(dep or "")) for dep in deps]
+            promote = str(item.get("promote_to") or "")
+            expected_promote = by_stage.get(promote, promote) if promote else (by_stage[stage_keys[index + 1]] if index + 1 < len(specs) else "")
+            expected_idem = str(item.get("idempotency_key") or f"{chain_instance_id}:{stage_key}")
+            if (
+                str(row["node_id"]) != by_stage[stage_key]
+                or str(row["stage_key"]) != stage_key
+                or int(row["sequence"] or 0) != index
+                or str(row["promote_to"] or "") != expected_promote
+                or _load(row["dependencies"], []) != expected_deps
+                or str(row["idempotency_key"]) != expected_idem
+            ):
+                raise RuntimeError("幂等 Thread 已存在但阶段链结构已损坏")
+        thread = db.execute("SELECT current_node_id,status FROM super_threads WHERE thread_id=? AND owner_id=?", (thread_id, owner_id)).fetchone()
+        node_ids = {str(row["node_id"]) for row in rows}
+        if thread is None or (str(thread["current_node_id"] or "") and str(thread["current_node_id"]) not in node_ids):
+            raise RuntimeError("幂等 Thread 已存在但当前阶段游标已损坏")
+        return rows
+
+    def create_thread_chain(self, *, owner_id: str, title: str, goal: str = "",
+                            chain_instance_id: str, chain_version: int,
+                            nodes: list[dict[str, Any]], **fields: Any) -> tuple[Thread, list[TaskNode]]:
+        """Atomically create (or replay) a Thread and its complete graph."""
+        owner_id = str(owner_id or "").strip()
+        title = str(title or "").strip()
+        if not owner_id or not title:
+            raise ValueError("Thread owner_id/title 不能为空")
+        if not chain_instance_id or not nodes:
+            raise ValueError("chain_instance_id 和 nodes 不能为空")
+        thread_id = str(fields.get("thread_id") or _stable_id("thread_chain", f"{owner_id}:{chain_instance_id}"))
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute("SELECT * FROM super_threads WHERE thread_id=? AND owner_id=?", (thread_id, owner_id)).fetchone()
+            if existing is not None:
+                existing_nodes = self._validate_existing_chain_db(
+                    db, thread_id=thread_id, owner_id=owner_id,
+                    chain_instance_id=chain_instance_id, nodes=nodes,
+                )
+                db.commit()
+                return self._thread(existing), [self._node(row) for row in existing_nodes if self._node(row)]  # type: ignore[return-value]
+            status = str(fields.get("status") or "active")
+            if status not in THREAD_STATUSES:
+                raise ValueError(f"非法 Thread 状态: {status}")
+            now = _now()
+            snapshot = _snapshot(fields.get("execution_snapshot"), fallback={})
+            db.execute(
+                "INSERT INTO super_threads(thread_id,owner_id,title,goal,status,workspace_dir,"
+                "router_agent_id,autonomy_level,summary,chain_version,current_node_id,linked_conversation_ids,"
+                "linked_run_ids,linked_job_ids,linked_domain_task_ids,execution_snapshot,"
+                "schema_version,version,last_event_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    thread_id, owner_id, title, str(goal or ""), status,
+                    str(fields.get("workspace_dir") or ""), str(fields.get("router_agent_id") or ""),
+                    str(fields.get("autonomy_level") or "confirm"), str(fields.get("summary") or ""),
+                    int(chain_version), "", _json(fields.get("linked_conversation_ids"), []),
+                    _json(fields.get("linked_run_ids"), []), _json(fields.get("linked_job_ids"), []),
+                    _json(fields.get("linked_domain_task_ids"), []), _json(snapshot, {}),
+                    1, 1, 0, now, now,
+                ),
+            )
+            self._insert_chain_nodes_db(db, thread_id=thread_id, owner_id=owner_id,
+                                        chain_instance_id=chain_instance_id, nodes=nodes)
+            first = db.execute(
+                "SELECT node_id FROM super_nodes WHERE thread_id=? AND owner_id=? AND chain_instance_id=? ORDER BY sequence LIMIT 1",
+                (thread_id, owner_id, chain_instance_id),
+            ).fetchone()
+            if first is None:
+                raise RuntimeError("阶段链没有首节点")
+            db.execute(
+                "UPDATE super_threads SET current_node_id=?, status='active', version=version+1, updated_at=? WHERE thread_id=? AND owner_id=?",
+                (str(first["node_id"]), now, thread_id, owner_id),
+            )
+            db.commit()
+            thread_row = db.execute("SELECT * FROM super_threads WHERE thread_id=? AND owner_id=?", (thread_id, owner_id)).fetchone()
+            node_rows = db.execute(
+                "SELECT * FROM super_nodes WHERE thread_id=? AND owner_id=? AND chain_instance_id=? ORDER BY sequence, created_at",
+                (thread_id, owner_id, chain_instance_id),
+            ).fetchall()
+            return self._thread(thread_row), [self._node(row) for row in node_rows if self._node(row)]  # type: ignore[return-value]
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def _insert_chain_nodes_db(self, db: sqlite3.Connection, *, thread_id: str,
+                               owner_id: str, chain_instance_id: str,
+                               nodes: list[dict[str, Any]]) -> None:
+        """Validate and insert a complete graph while ``db`` is locked."""
+        if not nodes:
+            raise ValueError("阶段链不能为空")
+        specs = [dict(item) for item in nodes]
+        stage_keys = [str(item.get("stage_key") or "").strip() for item in specs]
+        if any(not key for key in stage_keys) or len(set(stage_keys)) != len(stage_keys):
+            raise ValueError("阶段链 stage_key 必须唯一且非空")
+        by_stage = {key: _stable_id("node", f"{chain_instance_id}:{key}") for key in stage_keys}
+        sequences = [int(item.get("sequence") if item.get("sequence") is not None else index) for index, item in enumerate(specs)]
+        if sequences != list(range(len(specs))):
+            raise ValueError("阶段链 sequence 必须从 0 连续递增")
+        now = _now()
+        for index, item in enumerate(specs):
+            stage_key = stage_keys[index]
+            raw_deps = item.get("dependencies")
+            deps = list(raw_deps) if isinstance(raw_deps, list) else ([stage_keys[index - 1]] if index else [])
+            dep_ids: list[str] = []
+            for dep in deps:
+                dep_key = str(dep or "")
+                dep_ids.append(by_stage.get(dep_key, dep_key))
+            if any(dep_id not in by_stage.values() for dep_id in dep_ids):
+                raise ValueError("dependencies 必须引用本链 stage_key")
+            promote = str(item.get("promote_to") or "")
+            promote_id = by_stage.get(promote, promote) if promote else (by_stage[stage_keys[index + 1]] if index + 1 < len(specs) else "")
+            if promote_id and promote_id not in by_stage.values():
+                raise ValueError("promote_to 必须引用本链 stage_key")
+            expected_status = "ready" if index == 0 else "blocked"
+            status = str(item.get("status") or expected_status)
+            if status != expected_status:
+                raise ValueError("阶段链只能首节点 ready、后续节点 blocked")
+            idem = str(item.get("idempotency_key") or f"{chain_instance_id}:{stage_key}")
+            existing = db.execute("SELECT * FROM super_nodes WHERE thread_id=? AND idempotency_key=?", (thread_id, idem)).fetchone()
+            if existing is not None:
+                if str(existing["chain_instance_id"]) != chain_instance_id or str(existing["stage_key"]) != stage_key:
+                    raise RuntimeError("阶段链幂等键已被其他 Node 占用")
+                continue
+            db.execute(
+                "INSERT INTO super_nodes(node_id,thread_id,owner_id,parent_id,kind,status,stage_key,sequence,promote_to,promotion_policy,chain_instance_id,dependencies,"
+                "executor_type,executor_id,input_refs,output_refs,approval_required,retry_policy,checkpoint,attempt,idempotency_key,execution_snapshot,cancel_requested,error,schema_version,version,created_at,updated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    by_stage[stage_key], thread_id, owner_id, str(item.get("parent_id") or ""),
+                    str(item.get("kind") or stage_key), status, stage_key, sequences[index], promote_id,
+                    _json(item.get("promotion_policy") or {"on": "success", "once": True}, {}), chain_instance_id,
+                    _json(dep_ids, []), str(item.get("executor_type") or "fake"), str(item.get("executor_id") or ""),
+                    _json(item.get("input_refs"), []), _json(item.get("output_refs"), []),
+                    1 if item.get("approval_required") else 0, _json(item.get("retry_policy"), {}),
+                    _json(item.get("checkpoint"), {}), int(item.get("attempt") or 0), idem,
+                    _json(item.get("execution_snapshot"), {}), 0, str(item.get("error") or ""), 1, 1, now, now,
+                ),
+            )
 
     def get_node(self, node_id: str, *, owner_id: str | None = None) -> TaskNode | None:
         db = self._connect()
@@ -417,6 +619,141 @@ class SuperAgentStore:
         finally:
             db.close()
 
+    def list_chain(self, thread_id: str, *, owner_id: str, chain_instance_id: str = "") -> list[TaskNode]:
+        db = self._connect()
+        try:
+            sql = "SELECT * FROM super_nodes WHERE thread_id=? AND owner_id=?"
+            args: list[Any] = [thread_id, owner_id]
+            if chain_instance_id:
+                sql += " AND chain_instance_id=?"
+                args.append(chain_instance_id)
+            sql += " ORDER BY sequence, created_at"
+            return [self._node(row) for row in db.execute(sql, args).fetchall() if self._node(row)]
+        finally:
+            db.close()
+
+    def _promote_chain_node_db(self, db: sqlite3.Connection, thread_id: str, node_id: str,
+                               *, owner_id: str, expected_attempt: int | None = None,
+                               request_id: str = "") -> tuple[sqlite3.Row, bool]:
+        """Promote one successful current node and append its audit event.
+
+        The caller owns the transaction.  The source/target state change, the
+        Thread cursor, and ``stage_promoted`` are therefore one durable unit.
+        """
+        current = db.execute(
+            "SELECT * FROM super_nodes WHERE node_id=? AND thread_id=? AND owner_id=?",
+            (node_id, thread_id, owner_id),
+        ).fetchone()
+        if current is None:
+            raise LookupError("Chain Node 不存在或无权访问")
+        if not str(current["chain_instance_id"] or ""):
+            return current, False
+        if str(current["status"]) != "succeeded":
+            return current, False
+        if expected_attempt is not None and int(current["attempt"] or 0) != expected_attempt:
+            return current, False
+        thread = db.execute(
+            "SELECT current_node_id,status FROM super_threads WHERE thread_id=? AND owner_id=?",
+            (thread_id, owner_id),
+        ).fetchone()
+        if thread is None:
+            raise LookupError("Thread 不存在或无权访问")
+        # A stale completion from a previous stage/attempt is observable but
+        # cannot move the cursor after a newer stage has become current.
+        if str(thread["current_node_id"] or "") != node_id:
+            return current, False
+        if str(thread["status"] or "") in {"paused", "needs_recovery", "cancelled", "completed", "failed", "archived"}:
+            return current, False
+        target_id = str(current["promote_to"] or "")
+        target = None
+        if target_id:
+            target = db.execute(
+                "SELECT * FROM super_nodes WHERE node_id=? AND thread_id=? AND owner_id=? AND chain_instance_id=?",
+                (target_id, thread_id, owner_id, current["chain_instance_id"]),
+            ).fetchone()
+        if target is not None:
+            if str(target["status"]) not in {"blocked", "ready"}:
+                return target, False
+            now = _now()
+            db.execute(
+                "UPDATE super_nodes SET status='ready', version=version+1, updated_at=? WHERE node_id=? AND status='blocked'",
+                (now, target["node_id"]),
+            )
+            db.execute(
+                "UPDATE super_threads SET current_node_id=?, status='active', version=version+1, updated_at=? WHERE thread_id=? AND owner_id=?",
+                (target["node_id"], now, thread_id, owner_id),
+            )
+            event_key = f"stage-promote:{node_id}:{int(current['attempt'] or 0)}"
+            exists = db.execute(
+                "SELECT 1 FROM super_events WHERE thread_id=? AND idempotency_key=?",
+                (thread_id, event_key),
+            ).fetchone()
+            if exists is None:
+                sequence = int(db.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM super_events WHERE thread_id=?", (thread_id,)).fetchone()[0])
+                now_event = _now()
+                payload = {
+                    "from_node_id": str(current["node_id"]),
+                    "from_stage": str(current["stage_key"] or ""),
+                    "to_node_id": str(target["node_id"]),
+                    "to_stage": str(target["stage_key"] or ""),
+                    "chain_instance_id": str(current["chain_instance_id"] or ""),
+                    "request_id": str(request_id or ""),
+                }
+                db.execute(
+                    "INSERT INTO super_events(event_id,thread_id,node_id,source,event_type,payload,source_event_id,idempotency_key,attempt,sequence,created_at,handled_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (_id("event"), thread_id, str(current["node_id"]), "super-agent", "stage_promoted",
+                     _json(payload, {}), event_key, event_key, int(current["attempt"] or 0), sequence, now_event, now_event),
+                )
+                db.execute("UPDATE super_threads SET last_event_at=?, version=version+1, updated_at=? WHERE thread_id=?", (now_event, now_event, thread_id))
+            return db.execute("SELECT * FROM super_nodes WHERE node_id=?", (target["node_id"],)).fetchone(), True  # type: ignore[return-value]
+        now = _now()
+        db.execute(
+            "UPDATE super_threads SET current_node_id=?, status='completed', version=version+1, updated_at=? WHERE thread_id=? AND owner_id=?",
+            (node_id, now, thread_id, owner_id),
+        )
+        event_key = f"stage-promote:{node_id}:{int(current['attempt'] or 0)}"
+        exists = db.execute(
+            "SELECT 1 FROM super_events WHERE thread_id=? AND idempotency_key=?",
+            (thread_id, event_key),
+        ).fetchone()
+        if exists is None:
+            sequence = int(db.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM super_events WHERE thread_id=?", (thread_id,)).fetchone()[0])
+            now_event = _now()
+            payload = {
+                "from_node_id": str(current["node_id"]),
+                "from_stage": str(current["stage_key"] or ""),
+                "to_node_id": "",
+                "to_stage": "",
+                "chain_instance_id": str(current["chain_instance_id"] or ""),
+                "terminal": True,
+                "request_id": str(request_id or ""),
+            }
+            db.execute(
+                "INSERT INTO super_events(event_id,thread_id,node_id,source,event_type,payload,source_event_id,idempotency_key,attempt,sequence,created_at,handled_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (_id("event"), thread_id, str(current["node_id"]), "super-agent", "stage_promoted", _json(payload, {}), event_key, event_key, int(current["attempt"] or 0), sequence, now_event, now_event),
+            )
+            db.execute("UPDATE super_threads SET last_event_at=?, version=version+1, updated_at=? WHERE thread_id=?", (now_event, now_event, thread_id))
+        return current, True
+
+
+    def promote_chain_node(self, thread_id: str, node_id: str, *, owner_id: str,
+                           expected_attempt: int | None = None, request_id: str = "") -> TaskNode | None:
+        """Public atomic promotion entry point, safe across process restarts."""
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            result, _ = self._promote_chain_node_db(
+                db, thread_id, node_id, owner_id=owner_id,
+                expected_attempt=expected_attempt, request_id=request_id,
+            )
+            db.commit()
+            return self._node(result)
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
     def append_event_and_apply(self, *, owner_id: str, thread_id: str, event_type: str, source: str, node_id: str = "", payload: dict[str, Any] | None = None, source_event_id: str = "", idempotency_key: str = "", attempt: int = 0) -> tuple[TaskEvent, bool]:
         """Insert and apply a node event in one transaction.
 
@@ -458,7 +795,7 @@ class SuperAgentStore:
             )
             db.execute("UPDATE super_threads SET last_event_at=?, version=version+1, updated_at=? WHERE thread_id=?", (now, now, thread_id))
             applied = False
-            status_by_event = {"run_started": "running", "progress": "running", "job_completed": "succeeded", "run_completed": "succeeded", "job_failed": "failed", "task_cancelled": "cancelled"}
+            status_by_event = {"run_started": "running", "progress": "running", "job_completed": "succeeded", "run_completed": "succeeded", "job_failed": "failed", "task_cancelled": "cancelled", "run_interrupted": "interrupted"}
             next_status = status_by_event.get(event_type)
             if node_id and next_status:
                 row = db.execute("SELECT * FROM super_nodes WHERE node_id=? AND owner_id=? AND thread_id=?", (node_id, owner_id, thread_id)).fetchone()
@@ -475,11 +812,21 @@ class SuperAgentStore:
                         thread_status = str(thread_row["status"])
                         if thread_status not in THREAD_TERMINAL_STATUSES and thread_status not in {"paused", "cancelled"}:
                             db.execute("UPDATE super_threads SET status='failed', version=version+1, updated_at=? WHERE thread_id=? AND owner_id=?", (now, thread_id, owner_id))
+                    elif next_status == "interrupted":
+                        thread_status = str(thread_row["status"])
+                        if thread_status == "active":
+                            db.execute("UPDATE super_threads SET status='needs_recovery', summary='服务中断，任务需恢复', version=version+1, updated_at=? WHERE thread_id=? AND owner_id=?", (now, thread_id, owner_id))
                     elif next_status == "succeeded":
-                        self._promote_ready_nodes_db(db, thread_id, owner_id)
-                        statuses = [item["status"] for item in db.execute("SELECT status FROM super_nodes WHERE thread_id=? AND owner_id=?", (thread_id, owner_id)).fetchall()]
-                        if statuses and all(status in {"succeeded", "cancelled"} for status in statuses):
-                            db.execute("UPDATE super_threads SET status='completed', version=version+1, updated_at=? WHERE thread_id=? AND owner_id=?", (now, thread_id, owner_id))
+                        if str(row["chain_instance_id"] or ""):
+                            self._promote_chain_node_db(
+                                db, thread_id, node_id, owner_id=owner_id,
+                                expected_attempt=attempt, request_id=key,
+                            )
+                        else:
+                            self._promote_ready_nodes_db(db, thread_id, owner_id)
+                            statuses = [item["status"] for item in db.execute("SELECT status FROM super_nodes WHERE thread_id=? AND owner_id=?", (thread_id, owner_id)).fetchall()]
+                            if statuses and all(status in {"succeeded", "cancelled"} for status in statuses):
+                                db.execute("UPDATE super_threads SET status='completed', version=version+1, updated_at=? WHERE thread_id=? AND owner_id=?", (now, thread_id, owner_id))
             if applied or not node_id or event_type not in status_by_event:
                 db.execute("UPDATE super_events SET handled_at=? WHERE event_id=?", (_now(), event_id))
             db.commit()

@@ -862,6 +862,15 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/studio/generate":
             # 工作台生成：Studio 自有异步任务（不创建普通会话，不产生 chat Run）。
             self._json(*self.app.studio.api_generate(body))
+        elif path == "/api/super-agent/threads":
+            self._json(*self.app.api_super_agent_create_thread(body))
+        elif path.startswith("/api/super-agent/threads/") and path.endswith("/actions"):
+            thread_id = path[len("/api/super-agent/threads/"):-len("/actions")].strip("/")
+            self._json(*self.app.api_super_agent_action(thread_id, body))
+        elif path.startswith("/api/super-agent/threads/") and "/approvals/" in path:
+            middle = path[len("/api/super-agent/threads/"):]
+            thread_id, _, approval_id = middle.partition("/approvals/")
+            self._json(*self.app.api_super_agent_resolve_approval(thread_id, approval_id, body))
         elif path == "/api/studio/handoff":
             # 唯一跨进聊天域的路径：Agent 已显式确认后创建普通会话并提交首轮。
             self._json(*self.app.studio.api_handoff(body))

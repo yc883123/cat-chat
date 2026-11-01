@@ -12,7 +12,7 @@
 
 import { $, api, applyModelSkinFor, localFileUrl, state, toast } from "./01-core.js";
 import { isPywebview, saveLocalFile } from "./03-media.js";
-import { onStudioPageChange } from "./22-studio.js";
+import { onStudioPageChange, setStudioPage } from "./22-studio.js";
 
 const WRITER_TASKS_URL = "/api/studio/tasks?module=writer";
 const LAST_BOOK_KEY = "naibaWriterLastBookId";
@@ -3622,6 +3622,11 @@ function closeExportMenu() {
 // ============================================================
 
 export function bindWriterEvents() {
+  window.addEventListener("naiba-open-domain", (event) => {
+    if (event.detail?.domain !== "writer") return;
+    setStudioPage("writer");
+    if (event.detail.bookId) void openBook(String(event.detail.bookId));
+  });
   if (writer.initialized) return;
   restoreLimits();
   writer.initialized = true;

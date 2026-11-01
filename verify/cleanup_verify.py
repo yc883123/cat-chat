@@ -34,6 +34,8 @@ KEEP = {
     # CI 环境差异自检（短路径 TEMP）：§六 第 ③ 条承诺「推之前跑一次」的闸门，
     # 2026-09-17 归档批把文件删了却留着文档 ⇒ 闸门静默消失，2.8.2 首次推 master 因此红了流水线。
     "ci_short_path_check.py",
+    # 任务总管：真实源码隔离服务与阶段链/控制面门禁。
+    "_serve_super_agent_stage_chain.py", "super_agent_stage_chain_smoke.cjs", "super_agent_controls_smoke.cjs",
     # 浏览器冒烟
     "browser_smoke.cjs", "topbar_smoke.cjs", "pending_files_smoke.cjs",
     "send_button_smoke.cjs", "send_state_smoke.cjs", "file_ref_smoke.cjs",

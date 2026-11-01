@@ -12,7 +12,8 @@ const viewState = {
   loading: false, error: "", actionMessage: "", syncedAt: 0,
 };
 
-const createModelState = { catalogs: new Map(), loading: false, providerKey: "" };
+const createModelState = { requestId: 0, loading: false, submitting: false };
+const CREATE_MODEL_HINT = "模型来自全局供应商设置，默认使用全局默认模型，没有独立 API 设置；阶段链创建仅供内部预览。";
 
 const STATUS_LABELS = {
   draft: "草稿", active: "进行中", waiting_user: "等待确认", paused: "已暂停", cancelled: "已取消",
@@ -215,7 +216,6 @@ function renderCreateProviders(preferred = "") {
     key && [...select.options].some((option) => option.value === key));
   select.value = wanted || "";
   select.disabled = !select.options.length;
-  createModelState.providerKey = select.value;
   return select.value;
 }
 
@@ -227,7 +227,7 @@ function createPreferredModel(providerKey) {
 function renderCreateModels(providerKey, preferred = "") {
   const select = $("#superAgentCreateModel");
   if (!select) return;
-  const models = createModelState.catalogs.get(providerKey) || [];
+  const models = state.providerModelCatalogs[providerKey] || [];
   select.replaceChildren();
   const entries = models.map((entry) => {
     const id = typeof entry === "object" ? (entry.id ?? entry.model ?? entry.name) : entry;
@@ -250,27 +250,34 @@ function renderCreateModels(providerKey, preferred = "") {
   select.disabled = false;
 }
 
-async function loadCreateModels(providerKey, preferred = "") {
+async function loadCreateModels(providerKey, preferred = "", { force = false } = {}) {
   const select = $("#superAgentCreateModel");
-  if (!select || !providerKey) { renderCreateModels(providerKey, preferred); return; }
-  createModelState.providerKey = providerKey;
+  const requestId = ++createModelState.requestId;
+  const hint = $("#superAgentCreateModelHint");
+  if (hint) hint.textContent = CREATE_MODEL_HINT;
+  createModelState.loading = false;
   renderCreateModels(providerKey, preferred);
-  if (createModelState.catalogs.has(providerKey)) return;
+  if (!select || !providerKey) return;
+  if (!force && (state.providerModelCatalogs[providerKey] || []).length) return;
   createModelState.loading = true;
   select.disabled = true;
+  select.replaceChildren(new Option("正在读取模型目录…", ""));
   try {
     const result = await api("/api/providers/models", { method: "POST", body: { model_key: providerKey } });
-    createModelState.catalogs.set(providerKey, Array.isArray(result?.models) ? result.models : []);
-    if ($("#superAgentCreateProvider")?.value === providerKey) renderCreateModels(providerKey, preferred);
-  } catch (error) {
-    createModelState.catalogs.set(providerKey, []);
-    if ($("#superAgentCreateProvider")?.value === providerKey) {
-      renderCreateModels(providerKey);
-      const hint = $("#superAgentCreateModelHint");
-      if (hint) hint.textContent = `模型目录读取失败：${error.message}`;
+    if (result?.error) throw new Error(result.error);
+    if (requestId !== createModelState.requestId) return;
+    state.providerModelCatalogs[providerKey] = Array.isArray(result?.models) ? result.models : [];
+    renderCreateModels(providerKey, preferred);
+    if (!select.value && !state.providerModelCatalogs[providerKey].length && hint) {
+      hint.textContent = "该供应商暂无可用模型，请先在设置中检查配置，再点重新检测模型。";
     }
+  } catch (error) {
+    if (requestId !== createModelState.requestId) return;
+    delete state.providerModelCatalogs[providerKey];
+    renderCreateModels(providerKey);
+    if (hint) hint.textContent = `模型目录读取失败：${error.message}。请检查配置后重新检测模型。`;
   } finally {
-    createModelState.loading = false;
+    if (requestId === createModelState.requestId) createModelState.loading = false;
   }
 }
 
@@ -279,6 +286,7 @@ function openCreateDomainDialog() {
   if (!dialog || typeof dialog.showModal !== "function") return;
   const domain = $("#superAgentCreateDomain");
   if (domain) domain.value = "writer";
+  if ($("#superAgentCreateStage")) $("#superAgentCreateStage").value = "chapter";
   clearCreateError();
   const providerKey = renderCreateProviders();
   void loadCreateModels(providerKey, createPreferredModel(providerKey));
@@ -288,6 +296,7 @@ function openCreateDomainDialog() {
 
 async function createDomainThread(event) {
   event?.preventDefault();
+  if (createModelState.submitting) return;
   const domain = String($("#superAgentCreateDomain")?.value || "writer").trim().toLowerCase();
   const bookId = String($("#superAgentCreateBookId")?.value || "").trim();
   const stage = String($("#superAgentCreateStage")?.value || "").trim();
@@ -305,6 +314,14 @@ async function createDomainThread(event) {
         : "请填写作品 ID 和阶段。";
     return;
   }
+  const catalog = state.providerModelCatalogs[providerKey] || [];
+  if (createModelState.loading || !catalog.some((entry) => String(typeof entry === "object" ? (entry?.id ?? entry?.model ?? entry?.name ?? "") : entry).trim() === modelName)) {
+    if (errorBox) errorBox.textContent = "请先重新检测并选择一个可用模型。";
+    return;
+  }
+  createModelState.submitting = true;
+  const submit = $("#superAgentCreateSubmit");
+  if (submit) submit.disabled = true;
   const startRequest = domain === "writer"
     ? { kind: stage, chapter_no: 1, provider_id: providerId, model_name: modelName, model_key: providerKey }
     : { book_id: bookId, stage, chapter_ids: [], provider_id: providerId, model_name: modelName, model_key: providerKey };
@@ -316,6 +333,7 @@ async function createDomainThread(event) {
     $("#superAgentCreateDialog")?.close();
     await loadThreads();
   } catch (error) { if (errorBox) errorBox.textContent = error.message || "创建任务失败"; }
+  finally { createModelState.submitting = false; if (submit) submit.disabled = false; }
 }
 
 async function runNodeAction(action, nodeId) {
@@ -381,6 +399,9 @@ export function bindSuperAgentEvents() {
     void loadCreateModels(String(event.target.value || ""));
   });
   $("#superAgentCreateModel")?.addEventListener("change", clearCreateError);
+  $("#superAgentCreateModelRefresh")?.addEventListener("click", () => {
+    void loadCreateModels(String($("#superAgentCreateProvider")?.value || ""), "", { force: true });
+  });
   $("#superAgentCreateForm")?.addEventListener("input", clearCreateError);
   $("#openTaskManager")?.addEventListener("click", () => { $("#tasksDialog")?.close(); void openSuperAgentView(); });
   $("#superAgentRefresh")?.addEventListener("click", () => void openSuperAgentView());

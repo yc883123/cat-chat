@@ -1719,7 +1719,8 @@
           <label>阶段<input id="superAgentCreateStage" required value="chapter" autocomplete="off"></label>
           <label>供应商<select id="superAgentCreateProvider" required aria-describedby="superAgentCreateModelHint"></select></label>
           <label>模型<select id="superAgentCreateModel" required aria-describedby="superAgentCreateModelHint"></select></label>
-          <p class="writer-dialog-hint" id="superAgentCreateModelHint">模型来自全局供应商设置，打开时优先使用全局默认模型；任务总管不会保存 API Key。</p>
+          <button class="control-button tiny" id="superAgentCreateModelRefresh" type="button">重新检测模型</button>
+          <p class="writer-dialog-hint" id="superAgentCreateModelHint" role="status">模型来自全局供应商设置，默认使用全局默认模型，没有独立 API 设置；阶段链创建仅供内部预览。</p>
           <p class="writer-dialog-error" id="superAgentCreateError" role="alert" aria-live="polite"></p>
           <div class="writer-dialog-actions"><button class="control-button" value="cancel" type="submit">取消</button><button class="control-button primary" id="superAgentCreateSubmit" value="default" type="submit">创建</button></div>
         </form>

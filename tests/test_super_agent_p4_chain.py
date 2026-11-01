@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from naiba.app import _super_agent_event_payload, _super_agent_node_payload
 from naiba.super_agent.domain import build_novel_graph, build_writer_graph
@@ -62,6 +63,103 @@ class SuperAgentP4ChainTests(unittest.TestCase):
                 "start_request": {"kind": "chapter", "chapter_no": 1, "model_name": "probe", "api_key": "secret"},
             })
         self.assertEqual(self.app.super_agent.list_threads("local"), [])
+
+    def _profiles(self) -> None:
+        self.app.config.model_profiles = lambda: [
+            {"id": "alpha", "model_key": "online:alpha", "model": "alpha-default",
+             "base_url": "https://unused.invalid", "api_key": "global-secret"},
+            {"id": "beta", "model_key": "local:beta", "model": "beta-default"},
+        ]
+        # This is local config resolution, not model-directory validation. Even
+        # an unknown runtime model name is valid here; no directory is fetched.
+        self.app.config.profile = Mock(side_effect=AssertionError("unexpected profile fallback"))
+
+    def test_chain_cross_provider_override_and_common_fallback_are_resolved_per_node(self) -> None:
+        self._profiles()
+        body = self._chain_body(self._writer_book())
+        body.update(provider_id="alpha", model_key="online:alpha", model_name="common")
+        body["stage_requests"] = {
+            "setup": {"model_key": "local:beta", "model_name": "beta-runtime"},
+            "outline": {"model_name": "same-provider-other-model"},
+            "chapter_plan": {"provider_id": "beta", "model_name": "beta-by-provider"},
+        }
+        thread, _ = self.app.super_agent_domain.create_thread("local", body)
+        self.assertEqual(thread.execution_snapshot, {"provider_id": "alpha", "model_key": "online:alpha"})
+        nodes = self.app.super_agent.list_nodes("local", thread.thread_id)
+        for node, expected in zip(nodes, [
+            ("beta", "local:beta", "beta-runtime"),
+            ("alpha", "online:alpha", "same-provider-other-model"),
+            ("beta", "local:beta", "beta-by-provider"),
+            ("alpha", "online:alpha", "common"),
+        ]):
+            with self.subTest(stage=node.stage_key):
+                request = node.checkpoint["start_request"]
+                self.assertEqual(tuple(request[key] for key in ("provider_id", "model_key", "model_name")), expected)
+                self.assertEqual(node.execution_snapshot, dict(zip(("provider_id", "model_key"), expected[:2])))
+                self.assertNotIn("api_key", request)
+                self.assertNotIn("base_url", request)
+        self.app.config.profile.assert_not_called()
+
+    def test_chain_missing_model_names_stage_and_creates_nothing(self) -> None:
+        self._profiles()
+        for missing in ("setup", "outline", "chapter_plan", "chapter_content"):
+            with self.subTest(stage=missing):
+                body = self._chain_body(self._writer_book())
+                for key in ("provider_id", "model_key", "model_name"):
+                    body.pop(key)
+                body["stage_requests"] = {stage: {"model_name": "legacy"}
+                                          for stage in body["stage_requests"] if stage != missing}
+                with self.assertRaisesRegex(ValueError, rf"stage_requests\.{missing}.*model_name"):
+                    self.app.super_agent_domain.create_thread("local", body)
+        # A cross-provider override must not borrow the common model name.
+        body = self._chain_body(self._writer_book())
+        body.update(provider_id="alpha", model_key="online:alpha", model_name="common")
+        body["stage_requests"]["outline"] = {"model_key": "local:beta"}
+        with self.assertRaisesRegex(ValueError, r"stage_requests\.outline.*model_name"):
+            self.app.super_agent_domain.create_thread("local", body)
+        body["stage_requests"]["outline"] = {
+            "provider_id": "alpha", "model_key": "local:beta", "model_name": "bad-pair",
+        }
+        with self.assertRaisesRegex(ValueError, r"stage_requests\.outline.*不匹配"):
+            self.app.super_agent_domain.create_thread("local", body)
+        self.assertEqual(self.app.super_agent.list_threads("local"), [])
+
+    def test_bare_model_key_provider_is_checked_against_profile_not_itself(self) -> None:
+        for provider in ("arbitrary", "alpha"):
+            with self.subTest(provider=provider), self.assertRaisesRegex(ValueError, "全局供应商不匹配"):
+                self.app.super_agent_domain.create_thread("local", {
+                    "domain": "writer", "book_id": self._writer_book(), "stage": "chapter",
+                    "start_request": {"model_key": "probe", "provider_id": provider, "model_name": "probe"},
+                })
+        self.assertEqual(self.app.super_agent.list_threads("local"), [])
+
+    def test_novel_gates_have_no_model_even_without_any_common_selection(self) -> None:
+        self._profiles()
+        staged = self.app.novel.store.stage_import(filename="gates.txt", data="第1章 标题\n原文。".encode(), max_len=6000)
+        book = self.app.novel.store.create_book(import_id=staged["import_id"], picked=[1], title="Gates")
+        thread, _ = self.app.super_agent_domain.create_thread("local", {
+            "domain": "novel", "book_id": book["id"], "chain": "novel_v1",
+            "stage_requests": {stage: {"model_key": "local:beta", "model_name": "runtime"}
+                               for stage in ("elements", "outline", "screenplay")},
+        })
+        self.assertEqual(thread.execution_snapshot, {})
+        nodes = self.app.super_agent.list_nodes("local", thread.thread_id)
+        for gate in (nodes[0], nodes[-1]):
+            self.assertEqual(gate.execution_snapshot, {})
+            for key in ("provider_id", "model_key", "model_name"):
+                self.assertNotIn(key, gate.checkpoint["start_request"])
+        for node in nodes[1:-1]:
+            self.assertEqual(node.execution_snapshot, {"provider_id": "beta", "model_key": "local:beta"})
+
+    def test_create_does_not_probe_model_directory_or_network(self) -> None:
+        self._profiles()
+        body = self._chain_body(self._writer_book())
+        body.update(provider_id="alpha", model_key="online:alpha", model_name="not-in-any-catalog")
+        with patch("socket.create_connection", side_effect=AssertionError("network forbidden")), \
+                patch("naiba.llm.runtime.ModelRuntime.list_online_models", side_effect=AssertionError("directory forbidden")) as directory:
+            thread, _ = self.app.super_agent_domain.create_thread("local", body)
+        self.assertEqual(len(self.app.super_agent.list_nodes("local", thread.thread_id)), 4)
+        directory.assert_not_called()
 
     def test_chain_create_is_multi_node_ready_blocked_and_idempotent(self) -> None:
         book_id = self._writer_book()

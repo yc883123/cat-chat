@@ -10,8 +10,10 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 from naiba.app import (
+    NaibaChatApp,
     _super_agent_action_payload,
     _super_agent_approval_payload,
     _super_agent_artifact_payload,
@@ -31,17 +33,9 @@ class P3HTTPApp(P3App):
     def _super_agent_owner() -> str:
         return "local"
 
-    def api_super_agent_create_thread(self, body):
-        try:
-            thread, node = self.super_agent_domain.create_thread(self._super_agent_owner(), body)
-            return {
-                "thread": _super_agent_thread_payload(thread, detail=True),
-                "node": _super_agent_node_payload(node),
-            }, 201
-        except LookupError as exc:
-            return {"error": str(exc)}, 404
-        except (ValueError, RuntimeError) as exc:
-            return {"error": str(exc)}, 400
+    # Bind the production create facade: a copied implementation would miss
+    # regressions in its full ``nodes`` response and safe DTO projection.
+    api_super_agent_create_thread = NaibaChatApp.api_super_agent_create_thread
 
     def api_super_agent_action(self, thread_id, body):
         try:
@@ -194,6 +188,156 @@ class SuperAgentP3HTTPAcceptanceTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("model_name", body["error"])
         self.assertEqual(self.app.super_agent.list_threads("local"), [])
+
+    def _profiles(self):
+        self.app.config.model_profiles = lambda: [
+            {"id": "alpha", "model_key": "online:alpha", "model": "default-a",
+             "api_key": "server-only-secret", "base_url": "https://unused.invalid"},
+            {"id": "beta", "model_key": "local:beta", "model": "default-b"},
+            {"model_key": "probe", "model": "probe"},
+        ]
+
+    def _assert_safe_dto(self, payload):
+        if isinstance(payload, dict):
+            for key, value in payload.items():
+                self.assertNotIn(key, {"checkpoint", "raw", "start_request", "api_key", "base_url", "provider", "providers"})
+                self._assert_safe_dto(value)
+        elif isinstance(payload, list):
+            for value in payload:
+                self._assert_safe_dto(value)
+        self.assertNotIn("server-only-secret", json.dumps(payload, ensure_ascii=False))
+
+    def test_production_create_facade_single_resolves_one_safe_selection(self):
+        self._profiles()
+        book_id = self._writer_book()
+        for label, top, nested, expected in [
+            ("top", {"provider_id": "alpha", "model_key": "online:alpha", "model_name": "runtime-a"}, {},
+             {"provider_id": "alpha", "model_key": "online:alpha", "model_name": "runtime-a"}),
+            ("nested", {}, {"model_key": "local:beta", "model_name": "runtime-b"},
+             {"provider_id": "beta", "model_key": "local:beta", "model_name": "runtime-b"}),
+            ("compatible-completion", {"model_key": "online:alpha"}, {"provider_id": "alpha", "model_name": "runtime-a"},
+             {"provider_id": "alpha", "model_key": "online:alpha", "model_name": "runtime-a"}),
+            ("provider-only", {"provider_id": "beta", "model_name": "runtime-b"}, {},
+             {"provider_id": "beta", "model_key": "local:beta", "model_name": "runtime-b"}),
+            ("legacy", {}, {"model_name": "legacy-model"},
+             {"provider_id": "", "model_key": "", "model_name": "legacy-model"}),
+            ("duplicates", {"model_key": " online:alpha ", "model_name": "runtime-a"},
+             {"provider_id": "alpha", "model_key": "online:alpha", "model_name": "runtime-a"},
+             {"provider_id": "alpha", "model_key": "online:alpha", "model_name": "runtime-a"}),
+        ]:
+            with self.subTest(selection=label):
+                status, dto = self._request("POST", "/api/super-agent/threads", {
+                    "domain": "writer", "book_id": book_id, "stage": "chapter", **top,
+                    "start_request": {"kind": "chapter", "chapter_no": 1, **nested},
+                })
+                self.assertEqual(status, 201, dto)
+                self.assertEqual(len(dto["nodes"]), 1)
+                self.assertEqual(dto["nodes"][0], dto["node"])
+                self._assert_safe_dto(dto)
+                node = self.app.super_agent.get_node("local", dto["node"]["node_id"])
+                self.assertEqual({key: node.checkpoint["start_request"][key] for key in expected}, expected)
+                snapshot = {key: expected[key] for key in ("provider_id", "model_key") if expected[key]}
+                self.assertEqual(node.execution_snapshot, snapshot)
+                self.assertEqual(dto["thread"]["execution_snapshot"], snapshot)
+                status, events = self._request("GET", f'/api/super-agent/threads/{node.thread_id}/events')
+                self.assertEqual(status, 200)
+                self._assert_safe_dto(events)
+
+    def test_production_facade_config_fallback_keeps_only_safe_profile_identity(self):
+        # profile() returns credentials in production, whereas model_profiles()
+        # is sanitized. Exercise the fallback without letting it enter storage.
+        self.app.config.model_profiles = lambda: []
+        self.app.config.profile = lambda key: {
+            "id": "alpha", "kind": "online", "api_key": "server-only-secret",
+            "base_url": "https://unused.invalid", "model": "default-a",
+        }
+        body = {
+            "domain": "writer", "book_id": self._writer_book(), "stage": "chapter",
+            "model_key": "online:alpha", "provider_id": "alpha", "model_name": "runtime-not-catalogued",
+        }
+        with patch("socket.create_connection", side_effect=AssertionError("network forbidden")), \
+                patch("naiba.llm.runtime.ModelRuntime.list_online_models", side_effect=AssertionError("directory forbidden")) as directory:
+            dto, status = NaibaChatApp.api_super_agent_create_thread(self.app, body)
+        self.assertEqual(status, 201, dto)
+        directory.assert_not_called()
+        self._assert_safe_dto(dto)
+        node = self.app.super_agent.get_node("local", dto["node"]["node_id"])
+        self.assertEqual(node.checkpoint["start_request"]["model_name"], "runtime-not-catalogued")
+        self.assertNotIn("server-only-secret", json.dumps(node.checkpoint))
+        self.assertNotIn("base_url", node.checkpoint["start_request"])
+        self.assertEqual(node.execution_snapshot, {"provider_id": "alpha", "model_key": "online:alpha"})
+
+    def test_production_create_facade_rejects_ambiguous_or_invalid_selections(self):
+        self._profiles()
+        book_id = self._writer_book()
+        for top, nested, message in [
+            ({"model_key": "online:alpha"}, {"model_key": "local:beta", "model_name": "b"}, "矛盾"),
+            ({"provider_id": "alpha"}, {"provider_id": "beta", "model_name": "b"}, "矛盾"),
+            ({"model_name": "a"}, {"model_name": "b"}, "矛盾"),
+            ({"model_name": "a"}, {"model_name": ""}, "矛盾"),
+            ({"model_key": "online:alpha"}, {"provider_id": "beta", "model_name": "b"}, "不匹配"),
+            ({"provider_id": "missing", "model_name": "b"}, {}, "不存在"),
+            ({"model_key": "online:missing", "model_name": "b"}, {}, "不存在"),
+            ({"model_key": "probe", "provider_id": "arbitrary", "model_name": "b"}, {}, "不匹配"),
+            ({"model_key": "online:alpha", "model_name": ""}, {}, "model_name"),
+        ]:
+            with self.subTest(top=top, nested=nested):
+                status, dto = self._request("POST", "/api/super-agent/threads", {
+                    "domain": "writer", "book_id": book_id, "stage": "chapter", **top,
+                    "start_request": nested,
+                })
+                self.assertEqual(status, 400, dto)
+                self.assertIn(message, dto["error"])
+        self.assertEqual(self.app.super_agent.list_threads("local"), [])
+
+    def test_production_create_facade_rejects_inline_config_at_any_depth(self):
+        book_id = self._writer_book()
+        for extra in [
+            {"api_key": "client-secret"}, {"provider": {"id": "probe", "kind": "online"}},
+            {"providers": [{"id": "probe"}]}, {"base_url": "https://unused.invalid"},
+            {"apply_request": {"Provider-Config": {"id": "probe"}}},
+            {"start_request": {"model_name": "probe", "base-url": "https://unused.invalid"}},
+            {"stage_requests": {"outline": {"provider": {"id": "probe"}}}},
+            {"apply_requests": {"outline": {"items": [{"Authorization": "client-secret"}]}}},
+        ]:
+            with self.subTest(extra=extra):
+                status, dto = self._request("POST", "/api/super-agent/threads", {
+                    "domain": "writer", "book_id": book_id, "stage": "chapter",
+                    "start_request": {"model_name": "probe"}, **extra,
+                })
+                self.assertEqual(status, 400, dto)
+                self.assertIn("不接受 API Key", dto["error"])
+                self.assertNotIn("client-secret", json.dumps(dto))
+                self._assert_safe_dto(dto)
+        self.assertEqual(self.app.super_agent.list_threads("local"), [])
+
+    def test_production_create_facade_chain_override_fallback_and_gates(self):
+        self._profiles()
+        status, dto = self._request("POST", "/api/super-agent/threads", {
+            "domain": "novel", "book_id": self._novel_book(), "chain": "novel_v1",
+            "provider_id": "alpha", "model_key": "online:alpha", "model_name": "common",
+            "stage_requests": {"elements": {"model_key": "local:beta", "model_name": "override"}},
+        })
+        self.assertEqual(status, 201, dto)
+        self.assertEqual(len(dto["nodes"]), 5)
+        self.assertEqual(dto["thread"]["execution_snapshot"], {"provider_id": "alpha", "model_key": "online:alpha"})
+        self._assert_safe_dto(dto)
+        nodes = self.app.super_agent.list_nodes("local", dto["thread"]["thread_id"])
+        self.assertEqual(nodes[1].execution_snapshot, {"provider_id": "beta", "model_key": "local:beta"})
+        self.assertEqual(nodes[2].checkpoint["start_request"]["model_name"], "common")
+        self.assertEqual(nodes[3].checkpoint["start_request"]["stage"], "script")
+        for gate in (nodes[0], nodes[-1]):
+            self.assertEqual(gate.execution_snapshot, {})
+            for key in ("provider_id", "model_key", "model_name"):
+                self.assertNotIn(key, gate.checkpoint["start_request"])
+        before = len(self.app.super_agent.list_threads("local"))
+        status, dto = self._request("POST", "/api/super-agent/threads", {
+            "domain": "writer", "book_id": self._writer_book(), "chain": "writer_v1",
+            "stage_requests": {"setup": {"model_name": "legacy"}},
+        })
+        self.assertEqual(status, 400, dto)
+        self.assertIn("stage_requests.outline", dto["error"])
+        self.assertEqual(len(self.app.super_agent.list_threads("local")), before)
 
     def test_novel_approval_reject_has_no_writeback(self):
         book_id = self._novel_book()

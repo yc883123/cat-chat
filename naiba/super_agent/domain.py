@@ -72,7 +72,8 @@ class DomainCoordinator:
                 key_text = str(key).strip().lower()
                 normalized = key_text.replace("_", "").replace("-", "")
                 current = f"{path}.{key_text}" if path else key_text
-                if normalized in {"apikey", "accesstoken", "authorization", "token", "secret"}:
+                if normalized in {"apikey", "accesstoken", "authorization", "token", "secret",
+                                  "provider", "providers", "providerconfig", "baseurl"}:
                     found.append(current)
                 else:
                     found.extend(DomainCoordinator._secret_keys(item, current))
@@ -114,10 +115,63 @@ class DomainCoordinator:
         if matched is None:
             raise ValueError(f"{context} 的供应商或模型不存在，请先在设置中检查配置")
         canonical_key = str(matched.get("model_key") or model_key).strip()
-        canonical_provider = provider_id or (canonical_key.split(":", 1)[1] if ":" in canonical_key else str(matched.get("id") or "").strip())
-        if provider_id and canonical_provider and provider_id != canonical_provider:
+        # Derive identity from the matched global profile, NEVER from the
+        # untrusted provider_id being checked. Bare keys remain valid for old
+        # in-process profiles (e.g. probe), with the key as their identity.
+        canonical_provider = str(matched.get("id") or "").strip()
+        key_provider = canonical_key.split(":", 1)[1].strip() if ":" in canonical_key else ""
+        if canonical_provider and key_provider and canonical_provider != key_provider:
+            raise ValueError(f"{context} 的全局供应商配置不一致")
+        canonical_provider = canonical_provider or key_provider or canonical_key
+        if provider_id and provider_id != canonical_provider:
             raise ValueError(f"{context} 的 provider_id 与全局供应商不匹配")
         return {"model_key": canonical_key, "provider_id": canonical_provider, "model_name": model_name}
+
+    MODEL_FIELDS = ("provider_id", "model_key", "model_name")
+
+    @classmethod
+    def _common_request(cls, body: dict[str, Any]) -> dict[str, Any]:
+        """Nested payload supplies defaults; duplicate model fields must agree.
+
+        Missing fields can be completed by the top level, but an explicit empty
+        value is not treated as missing (nor silently replaced using ``or``).
+        """
+        raw = body.get("start_request", {})
+        if not isinstance(raw, dict):
+            raise ValueError("start_request 必须是对象")
+        request = dict(raw)
+        for key in cls.MODEL_FIELDS:
+            if key not in body:
+                continue
+            value = str(body[key] or "").strip()
+            if key in request and str(request[key] or "").strip() != value:
+                raise ValueError(f"start_request.{key} 与顶层 {key} 矛盾")
+            request[key] = value
+        return request
+
+    @classmethod
+    def _stage_request(cls, common: dict[str, Any], supplied: dict[str, Any]) -> dict[str, Any]:
+        """Stage > common; changing identity discards the old selection tuple.
+
+        A name-only override stays on the common provider. A different key or
+        provider must select its own name and resolve its own paired identity.
+        """
+        request = dict(common)
+        if any(key in supplied and str(supplied[key] or "").strip() != str(common.get(key) or "").strip()
+               for key in ("model_key", "provider_id")):
+            for key in cls.MODEL_FIELDS:
+                request.pop(key, None)
+        request.update(supplied)
+        return request
+
+    @staticmethod
+    def _execution_snapshot(body: dict[str, Any], selection: dict[str, str]) -> dict[str, str]:
+        # model_name belongs to the checkpoint, not the snapshot schema. Chain
+        # Thread snapshots describe ONLY the common choice, never an override.
+        snapshot = {key: str(body[key] or "")
+                    for key in ("agent_id", "workspace_dir", "permission_mode") if key in body}
+        snapshot.update({key: selection[key] for key in ("provider_id", "model_key") if selection.get(key)})
+        return snapshot
 
     def _validate(self, domain: str, stage: str, book_id: str) -> str:
         domain = str(domain or "").strip().lower()
@@ -155,11 +209,9 @@ class DomainCoordinator:
             raise ValueError("executor_type 与领域不匹配")
         title = str(body.get("title") or ("织书台任务" if domain == "writer" else "拆书匠任务")).strip()
         goal = str(body.get("goal") or f"完成 {domain}:{stage}").strip()
-        request = dict(body.get("start_request") or {})
+        request = self._common_request(body)
         selection = self._validate_model_selection(
-            request.get("model_key") or body.get("model_key"),
-            request.get("provider_id") or body.get("provider_id"),
-            request.get("model_name") or body.get("model_name"),
+            request.get("model_key"), request.get("provider_id"), request.get("model_name"),
             context="start_request",
         )
         request.update(selection)
@@ -176,10 +228,7 @@ class DomainCoordinator:
         thread = self.service.create_thread(
             owner_id, title, goal,
             autonomy_level="confirm",
-            execution_snapshot={
-                key: str(body.get(key) or "") for key in ("agent_id", "provider_id", "model_key", "workspace_dir", "permission_mode")
-                if body.get(key) is not None
-            },
+            execution_snapshot=self._execution_snapshot(body, selection),
         )
         ref = {"domain": domain, "book_id": book_id, "stage": stage, "domain_task_id": "", "domain_revision": 0}
         chain_version = int(body.get("chain_version") or 1)
@@ -226,14 +275,14 @@ class DomainCoordinator:
         graph = build_writer_graph() if domain == "writer" else build_novel_graph()
         stage_map = self.WRITER_CHAIN_STAGE_MAP if domain == "writer" else self.NOVEL_CHAIN_STAGE_MAP
         raw_requests = body.get("stage_requests") if isinstance(body.get("stage_requests"), dict) else {}
-        raw_common = body.get("start_request") if isinstance(body.get("start_request"), dict) else {}
-        common = dict(raw_common)
-        if body.get("model_name") is not None:
-            common.setdefault("model_name", str(body.get("model_name") or ""))
-        if body.get("model_key") is not None:
-            common.setdefault("model_key", str(body.get("model_key") or ""))
-        if body.get("provider_id") is not None:
-            common.setdefault("provider_id", str(body.get("provider_id") or ""))
+        common = self._common_request(body)
+        common_selection = {}
+        if str(common.get("model_name") or "").strip():
+            common_selection = self._validate_model_selection(
+                common.get("model_key"), common.get("provider_id"), common.get("model_name"),
+                context="start_request",
+            )
+            common.update(common_selection)
         # A chain may provide one model for all executable stages or a model
         # per stage.  Coordination gates (Novel import/review) do not call a
         # model and therefore must not force an otherwise unrelated model name.
@@ -254,8 +303,8 @@ class DomainCoordinator:
                 supplied = raw_requests.get(actual_stage)
             if supplied is not None and not isinstance(supplied, dict):
                 raise ValueError(f"stage_requests.{stage_key} 必须是对象")
-            request = dict(common)
-            request.update(dict(supplied or {}))
+            request = self._stage_request(common, dict(supplied or {}))
+            selection = {}
             if domain == "writer" or stage_key not in self.NOVEL_CHAIN_GATE_KEYS:
                 selection = self._validate_model_selection(
                     request.get("model_key"), request.get("provider_id"), request.get("model_name"),
@@ -307,10 +356,7 @@ class DomainCoordinator:
                 "checkpoint": {"domain_ref": ref, "start_request": request, "apply_request": apply_request,
                                "chain_stage": {"key": stage_key, "actual_stage": actual_stage,
                                                "coordination": bool(ref["coordination"]) }},
-                "execution_snapshot": {
-                    key: str(body.get(key) or "") for key in ("agent_id", "provider_id", "model_key", "workspace_dir", "permission_mode")
-                    if body.get(key) is not None
-                },
+                "execution_snapshot": self._execution_snapshot(body, selection),
             })
         title = str(body.get("title") or ("织书台阶段链" if domain == "writer" else "拆书匠阶段链")).strip()
         goal = str(body.get("goal") or f"完成 {domain} 阶段链").strip()
@@ -318,10 +364,7 @@ class DomainCoordinator:
             owner_id, title, goal, chain_instance_id=chain_instance_id,
             chain_version=chain_version, nodes=nodes,
             autonomy_level="confirm", linked_domain_task_ids=linked_ids,
-            execution_snapshot={
-                key: str(body.get(key) or "") for key in ("agent_id", "provider_id", "model_key", "workspace_dir", "permission_mode")
-                if body.get(key) is not None
-            },
+            execution_snapshot=self._execution_snapshot(body, common_selection),
         )
         if not created_nodes:
             raise RuntimeError("阶段链创建后没有 Node")

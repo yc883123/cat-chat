@@ -2,8 +2,8 @@
  "ok": true,
  "version": "2.0.0",
  "built": "2026-10-22",
- "count": 559,
- "chars": 608917,
+ "count": 580,
+ "chars": 766596,
  "snippet_n": 700,
  "modules": {
   "vs": 51,
@@ -11,12 +11,12 @@
   "vi": 11,
   "ec": 2,
   "global": 3,
-  "script": 53,
+  "script": 74,
   "game": 24,
   "style": 396
  },
  "types": {
-  "template": 146,
+  "template": 167,
   "rule": 4,
   "lexicon": 400,
   "example": 9
@@ -12801,6 +12801,699 @@
    "order": 396,
    "genre": "绘画",
    "snippet": "Style: A richly physical painting style built on thickly applied pigment that stands proud from the working surface, ridges and peaks of dried medium catching real directional light with sculptural dimensionality, confident, decisive strokes carrying visible weight and texture across the entire composition, dramatic tactile depth replacing smooth blending or flat coverage entirely, and a raw, sculptural painterly intensity that celebrates the physical presence of pigment itself. Influenced by: Vincent van Gogh, Lucian Freud, impasto oil-painting technique, expressive thick-pigment method"
+  },
+  {
+   "id": "script-manju-xuanhuan",
+   "title": "漫剧·玄幻修仙",
+   "module": "script",
+   "type": "template",
+   "summary": "玄幻修仙漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "幻想",
+    "玄幻修仙"
+   ],
+   "chars": 7405,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/xuanhuan-manju/SKILL.md",
+   "source_sha1": "ab48517a0b07bc7afefe201dd2192ef06b63fdc9",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 54,
+   "genre": "玄幻修仙",
+   "snippet": "# 玄幻修仙AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是玄幻修仙AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常34–48镜，每镜3–10秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 东方暗黑玄幻国漫，电影级2.5D动画 |\n| 受众 | 男频热血爽剧 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 文戏稳，战斗碎。对峙和蓄力用长镜压住，交手用3–5秒的短镜连切，大招前留一拍静。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，"
+  },
+  {
+   "id": "script-manju-xihuan",
+   "title": "漫剧·西幻魔法",
+   "module": "script",
+   "type": "template",
+   "summary": "西幻魔法漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "幻想",
+    "西幻魔法"
+   ],
+   "chars": 7460,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/xihuan-manju/SKILL.md",
+   "source_sha1": "42af461fd1141006fc9c4e4abfe56b6038b76282",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 55,
+   "genre": "西幻魔法",
+   "snippet": "# 西幻魔法AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是西幻魔法AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常30–42镜，每镜3–10秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 西幻厚涂国漫，电影级2.5D动画 |\n| 受众 | 奇幻爽文向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 舞会、学院的戏舒展，决斗前铺垫足，魔法出手用短镜，大场面留长镜看全貌。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒情或铺垫的集可"
+  },
+  {
+   "id": "script-manju-xingji",
+   "title": "漫剧·星际机甲",
+   "module": "script",
+   "type": "template",
+   "summary": "星际机甲漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "幻想",
+    "星际机甲"
+   ],
+   "chars": 7612,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/xingji-manju/SKILL.md",
+   "source_sha1": "f22ac623e071a7449f5d10d0d40703da4f016a18",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 56,
+   "genre": "星际机甲",
+   "snippet": "# 星际机甲AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是星际机甲AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常30–42镜，每镜3–10秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 硬派科幻CG国漫，电影级2.5D动画 |\n| 受众 | 男频科幻爽文向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 舱内慢，舱外快。驾驶舱和指挥室用长镜留给人物，机甲和舰队用短镜，但动作要有重量，不能切得太碎。上面的镜数和秒数只是参考：每集按戏的需要定，"
+  },
+  {
+   "id": "script-manju-xitong",
+   "title": "漫剧·系统无限流",
+   "module": "script",
+   "type": "template",
+   "summary": "系统无限流漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "幻想",
+    "系统无限流"
+   ],
+   "chars": 7581,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/xitong-manju/SKILL.md",
+   "source_sha1": "24d86eb8c76f96ca7c6bd5cf1cd7373620810cb8",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 57,
+   "genre": "系统无限流",
+   "snippet": "# 系统无限流AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是系统无限流AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常32–44镜，每镜3–9秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 随副本切换的电影级2.5D国漫 |\n| 受众 | 爽文闯关向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 跟着规则走。解谜时放慢，让观众看清线索，倒计时和通关时加快；现实世界的节奏比副本慢。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒"
+  },
+  {
+   "id": "script-manju-moshi",
+   "title": "漫剧·末日废土",
+   "module": "script",
+   "type": "template",
+   "summary": "末日废土漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "幻想",
+    "末日废土"
+   ],
+   "chars": 7662,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/moshi-manju/SKILL.md",
+   "source_sha1": "36c9f5b85b00e7f16e6c0a9c4bee9de44c272883",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 58,
+   "genre": "末日废土",
+   "snippet": "# 末日废土AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是末日废土AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常34–46镜，每镜3–9秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 废土写实国漫，电影级2.5D动画 |\n| 受众 | 男频或大女主爽文向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 紧张不松。逃亡和尸潮用短镜连切，囤货和清点物资可以放慢，给观众喘息和满足感。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒情"
+  },
+  {
+   "id": "script-manju-chuanyue",
+   "title": "漫剧·穿越重生",
+   "module": "script",
+   "type": "template",
+   "summary": "穿越重生漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "古代",
+    "穿越重生"
+   ],
+   "chars": 7519,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/chuanyue-manju/SKILL.md",
+   "source_sha1": "374c65841dd33a0a5114595c5943ac0a531d5262",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 59,
+   "genre": "穿越重生",
+   "snippet": "# 古代穿越重生AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是古代穿越重生AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常28–40镜，每镜4–10秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 古风国漫，电影级2.5D动画 |\n| 受众 | 大女主或爽文逆袭向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 开局快，尽快把人扔进困境。反差和吐槽靠短镜接反应，解决难题时放慢，让观众看清怎么做到的。上面的镜数和秒数只是参考：每集按戏的需要定，高"
+  },
+  {
+   "id": "script-manju-gongdou",
+   "title": "漫剧·宫斗",
+   "module": "script",
+   "type": "template",
+   "summary": "宫斗漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "古代",
+    "宫斗"
+   ],
+   "chars": 7532,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/gongdou-manju/SKILL.md",
+   "source_sha1": "a1844027d198bc3e360a9fdba969fc2e6df64715",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 60,
+   "genre": "宫斗",
+   "snippet": "# 宫斗AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是宫斗AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常24–34镜，每镜5–12秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 古风国漫，电影级2.5D动画 |\n| 受众 | 大女主向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 慢刀子。一句话后留足眼神和停顿，请安、行礼可以用长镜，翻脸的瞬间才切快。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒情或铺垫的集可以更慢，集与"
+  },
+  {
+   "id": "script-manju-zhaidou",
+   "title": "漫剧·宅斗",
+   "module": "script",
+   "type": "template",
+   "summary": "宅斗漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "古代",
+    "宅斗"
+   ],
+   "chars": 7454,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/zhaidou-manju/SKILL.md",
+   "source_sha1": "46adb45a4136e184943f7790d2a86d80529b762e",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 61,
+   "genre": "宅斗",
+   "snippet": "# 宅斗AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是宅斗AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常26–36镜，每镜4–11秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 古风国漫，电影级2.5D动画 |\n| 受众 | 大女主向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 文火慢炖。对话有来有回，亮证据时收紧，让对手一步步落进坑里。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒情或铺垫的集可以更慢，集与集不要套同一"
+  },
+  {
+   "id": "script-manju-quanmou",
+   "title": "漫剧·权谋朝堂",
+   "module": "script",
+   "type": "template",
+   "summary": "权谋朝堂漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "古代",
+    "权谋朝堂"
+   ],
+   "chars": 7445,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/quanmou-manju/SKILL.md",
+   "source_sha1": "4d86b9cba3c3aa7d73ca870447855ed6c2e29d89",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 62,
+   "genre": "权谋朝堂",
+   "snippet": "# 权谋朝堂AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是权谋朝堂AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常22–32镜，每镜5–12秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 古风国漫，电影级2.5D动画，沉稳厚重 |\n| 受众 | 权谋爽文向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 沉。朝堂对峙用长镜和潜台词，收网时才加快，军情可以用短镜拉出紧迫感。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒情或铺垫的"
+  },
+  {
+   "id": "script-manju-wuxia",
+   "title": "漫剧·武侠江湖",
+   "module": "script",
+   "type": "template",
+   "summary": "武侠江湖漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "古代",
+    "武侠江湖"
+   ],
+   "chars": 7389,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/wuxia-manju/SKILL.md",
+   "source_sha1": "5c827f47626c763ccb836aa84362e5cf8cb8b258",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 63,
+   "genre": "武侠江湖",
+   "snippet": "# 武侠江湖AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是武侠江湖AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常24–36镜，每镜3–12秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 水墨国漫，电影级2.5D动画 |\n| 受众 | 武侠爽文向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 静多动少。对峙可以很长，风声和眼神撑住，出手只有几个短镜，一招定胜负。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒情或铺垫的集可以更"
+  },
+  {
+   "id": "script-manju-zhongtian",
+   "title": "漫剧·种田经商",
+   "module": "script",
+   "type": "template",
+   "summary": "种田经商漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "古代",
+    "种田经商"
+   ],
+   "chars": 7437,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/zhongtian-manju/SKILL.md",
+   "source_sha1": "64273783f690182a62de5b72866d35ff69aa58b8",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 64,
+   "genre": "种田经商",
+   "snippet": "# 古代种田经商AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是古代种田经商AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常24–34镜，每镜4–12秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 暖色古风国漫，电影级2.5D动画 |\n| 受众 | 女频治愈爽文向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 治愈。做饭、手艺用连续的长镜拍过程，算账和吵架可以轻快有喜感。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒情或铺垫的"
+  },
+  {
+   "id": "script-manju-dushi",
+   "title": "漫剧·都市逆袭",
+   "module": "script",
+   "type": "template",
+   "summary": "都市逆袭漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "现代",
+    "都市逆袭"
+   ],
+   "chars": 7505,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/dushi-manju/SKILL.md",
+   "source_sha1": "fd946b7d9bd1b5f1ace64dfb4e1091b37cd586d3",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 65,
+   "genre": "都市逆袭",
+   "snippet": "# 都市逆袭AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是都市逆袭AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常38–54镜，每镜3–8秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 现代写实国漫，电影级2.5D动画 |\n| 受众 | 男频爽文向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 快。羞辱段累积，打脸那一刻用反应镜头快切，主角、对手、围观者来回切，爽点不拖。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒情或铺垫"
+  },
+  {
+   "id": "script-manju-tianchong",
+   "title": "漫剧·总裁甜宠",
+   "module": "script",
+   "type": "template",
+   "summary": "总裁甜宠漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "现代",
+    "总裁甜宠"
+   ],
+   "chars": 7505,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/tianchong-manju/SKILL.md",
+   "source_sha1": "9f3ef5f6b268aca67ef0c17f742be02c9069e82c",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 66,
+   "genre": "总裁甜宠",
+   "snippet": "# 总裁甜宠AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是总裁甜宠AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常28–42镜，每镜4–12秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 现代精致国漫，电影级2.5D动画 |\n| 受众 | 女频甜宠向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 留呼吸。靠近、对视、心动的瞬间用长镜放慢，日常斗嘴可以轻快一些。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒情或铺垫的集可以更慢"
+  },
+  {
+   "id": "script-manju-jiating",
+   "title": "漫剧·家庭伦理",
+   "module": "script",
+   "type": "template",
+   "summary": "家庭伦理漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "现代",
+    "家庭伦理"
+   ],
+   "chars": 7589,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/jiating-manju/SKILL.md",
+   "source_sha1": "463d5982f7c72cf25fa41eb20c3bbbb8320cc1d4",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 67,
+   "genre": "家庭伦理",
+   "snippet": "# 家庭伦理AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是家庭伦理AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常22–32镜，每镜5–14秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 中国现实主义家庭片，真人写实电影质感 |\n| 受众 | 女性家庭向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 像真实生活。饭桌和吵架用长镜，让争执连贯地说完，不靠快剪制造冲突，爆发时才切近。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒"
+  },
+  {
+   "id": "script-manju-chongsheng",
+   "title": "漫剧·重生复仇",
+   "module": "script",
+   "type": "template",
+   "summary": "重生复仇漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "现代",
+    "重生复仇"
+   ],
+   "chars": 7612,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/chongsheng-manju/SKILL.md",
+   "source_sha1": "5e391f57b5ab76e1e5f8803769604c5c6db0be4f",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 68,
+   "genre": "重生复仇",
+   "snippet": "# 现代重生复仇AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是现代重生复仇AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常32–44镜，每镜3–9秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 现代写实国漫，电影级2.5D动画 |\n| 受众 | 爽文复仇向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 今生快，前世慢。前世闪回用长镜压抑，今生反击干脆利落，一句台词接一个反应。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒情或"
+  },
+  {
+   "id": "script-manju-shangzhan",
+   "title": "漫剧·职场商战",
+   "module": "script",
+   "type": "template",
+   "summary": "职场商战漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "现代",
+    "职场商战"
+   ],
+   "chars": 7422,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/shangzhan-manju/SKILL.md",
+   "source_sha1": "99486b189c523613d6a00657d33a5ee394da8307",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 69,
+   "genre": "职场商战",
+   "snippet": "# 职场商战AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是职场商战AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常26–36镜，每镜4–10秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 现代写实国漫，电影级2.5D动画 |\n| 受众 | 都市职场爽文向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 看交锋。谈判和会议用对话节奏，亮底牌前慢下来，亮出来后切对手的反应。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒情或铺垫的集"
+  },
+  {
+   "id": "script-manju-niandai",
+   "title": "漫剧·年代文",
+   "module": "script",
+   "type": "template",
+   "summary": "年代文漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "现代",
+    "年代文"
+   ],
+   "chars": 7486,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/niandai-manju/SKILL.md",
+   "source_sha1": "8afc9a74ee00ac2b17db862ba5b25d1265d6f6ba",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 70,
+   "genre": "年代文",
+   "snippet": "# 年代文AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是年代文AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常22–32镜，每镜5–13秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 年代胶片感国漫，电影级2.5D动画 |\n| 受众 | 女频年代向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 不紧不慢。给物件和日常留时间，吵架时才快起来，温情的戏不要切碎。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒情或铺垫的集可以更慢，"
+  },
+  {
+   "id": "script-manju-yule",
+   "title": "漫剧·娱乐圈",
+   "module": "script",
+   "type": "template",
+   "summary": "娱乐圈漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "现代",
+    "娱乐圈"
+   ],
+   "chars": 7434,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/yule-manju/SKILL.md",
+   "source_sha1": "7e5eff4fb8617392d0cc5ff6ed29029290d72ad3",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 71,
+   "genre": "娱乐圈",
+   "snippet": "# 娱乐圈AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是娱乐圈AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常34–46镜，每镜3–8秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 现代精致国漫，电影级2.5D动画 |\n| 受众 | 女频或爽文向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 舆论快，舞台长。热搜、评论、后台用短镜连切，表演高光给足完整的长镜。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒情或铺垫的集可以更慢"
+  },
+  {
+   "id": "script-manju-xiaoyuan",
+   "title": "漫剧·大学校园青春",
+   "module": "script",
+   "type": "template",
+   "summary": "大学校园青春漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "现代",
+    "大学校园青春"
+   ],
+   "chars": 7393,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/xiaoyuan-manju/SKILL.md",
+   "source_sha1": "b2fdd53ba80e675ea7c88273b4cacdd5211bb10f",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 72,
+   "genre": "大学校园青春",
+   "snippet": "# 大学校园青春AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是大学校园青春AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常22–30镜，每镜5–13秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 清新国漫，电影级2.5D动画 |\n| 受众 | 青春恋爱向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 舒缓。多用环境和留白，风、光、走路都可以是一镜，沉默比台词更有用。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒情或铺垫的集可"
+  },
+  {
+   "id": "script-manju-xuanyi",
+   "title": "漫剧·悬疑刑侦",
+   "module": "script",
+   "type": "template",
+   "summary": "悬疑刑侦漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "类型片",
+    "悬疑刑侦"
+   ],
+   "chars": 7636,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/xuanyi-manju/SKILL.md",
+   "source_sha1": "fba197d4156ad07c63a314f8e140509433dc5429",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 73,
+   "genre": "悬疑刑侦",
+   "snippet": "# 悬疑刑侦AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是悬疑刑侦AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常24–36镜，每镜4–12秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 冷调写实国漫，电影级2.5D动画 |\n| 受众 | 悬疑推理向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 松紧交替。勘查和询问放慢，让线索看得清；反转时收紧，追逐才用短镜。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒情或铺垫的集可以更"
+  },
+  {
+   "id": "script-manju-minsu",
+   "title": "漫剧·民俗怪谈",
+   "module": "script",
+   "type": "template",
+   "summary": "民俗怪谈漫剧全流程：企划案、全季资产库、分集剧本、导演手册与发布包；按批次在对话中继续。",
+   "tags": [
+    "漫剧",
+    "全流程",
+    "类型片",
+    "民俗怪谈"
+   ],
+   "chars": 7601,
+   "model": [],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/zhanghao123vip/ai-manju-skills/blob/77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4/skills/minsu-manju/SKILL.md",
+   "source_sha1": "03a99c13034926b2f8cd5e9c84af42d47e31b198",
+   "cleaned": [
+    "frontmatter",
+    "paste_ready",
+    "file_tool_paragraph",
+    "directory_block",
+    "manual_file_clause",
+    "reference_tokens",
+    "upload_order",
+    "chat_usage"
+   ],
+   "origin": "builtin",
+   "order": 74,
+   "genre": "民俗怪谈",
+   "snippet": "# 民俗怪谈AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是民俗怪谈AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常22–30镜，每镜5–14秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 暗调民俗国漫，电影级2.5D动画 |\n| 受众 | 悬疑猎奇向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 慢压迫。长镜让观众自己发现不对劲，宁静之后突然一个短镜，不靠连续快切吓人。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒情或铺垫的"
   }
  ],
  "sources": {
@@ -12860,6 +13553,360 @@
     }
    },
    "empty_ids": []
+  },
+  "ai-manju-skills": {
+   "input": 21,
+   "output": 21,
+   "expected": 21,
+   "dupes": 0,
+   "rejected": 0,
+   "repository": "https://github.com/zhanghao123vip/ai-manju-skills",
+   "commit": "77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4",
+   "license": "MIT",
+   "groups": {
+    "幻想": 5,
+    "古代": 6,
+    "现代": 8,
+    "类型片": 2
+   },
+   "audit": [
+    {
+     "id": "script-manju-xuanhuan",
+     "file": "skills/xuanhuan-manju/SKILL.md",
+     "sha256": "3520deac5c951adfb80c750d6475e8f9e85c865f31b732ce2f1af3f5758e7a0a",
+     "bytes": 20010,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "ab48517a0b07bc7afefe201dd2192ef06b63fdc9"
+    },
+    {
+     "id": "script-manju-xihuan",
+     "file": "skills/xihuan-manju/SKILL.md",
+     "sha256": "4649b3d538b0e75d4aeb3b9d7169df09b4c2a153509c9e6ff8d408cfa085735d",
+     "bytes": 20154,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "42af461fd1141006fc9c4e4abfe56b6038b76282"
+    },
+    {
+     "id": "script-manju-xingji",
+     "file": "skills/xingji-manju/SKILL.md",
+     "sha256": "91f04f9920e3c21e937948f3d7af36ac5e8f5dfec843a2c03e8cc6f25ede5a19",
+     "bytes": 20521,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 4,
+      "upload_order": 3
+     },
+     "output_sha1": "f22ac623e071a7449f5d10d0d40703da4f016a18"
+    },
+    {
+     "id": "script-manju-xitong",
+     "file": "skills/xitong-manju/SKILL.md",
+     "sha256": "6477ba30dfab52a52e3984f30bb61936ab818a248ec53bbae525425d8b5894f5",
+     "bytes": 20494,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "24d86eb8c76f96ca7c6bd5cf1cd7373620810cb8"
+    },
+    {
+     "id": "script-manju-moshi",
+     "file": "skills/moshi-manju/SKILL.md",
+     "sha256": "16aaee3c1905742a6ae2bdac0a4659afa7bc200da19c399170a77afbe1f99375",
+     "bytes": 20732,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "36c9f5b85b00e7f16e6c0a9c4bee9de44c272883"
+    },
+    {
+     "id": "script-manju-chuanyue",
+     "file": "skills/chuanyue-manju/SKILL.md",
+     "sha256": "2d13a8c63318b1d4c78c9e10ce4fe3999473207eb4c37637a76d784cd5d83c58",
+     "bytes": 20400,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "374c65841dd33a0a5114595c5943ac0a531d5262"
+    },
+    {
+     "id": "script-manju-gongdou",
+     "file": "skills/gongdou-manju/SKILL.md",
+     "sha256": "2923dc316eaf812aad455bd3eb1c5aa7891d9a9924562f1ddbb2834157ee01eb",
+     "bytes": 20323,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "a1844027d198bc3e360a9fdba969fc2e6df64715"
+    },
+    {
+     "id": "script-manju-zhaidou",
+     "file": "skills/zhaidou-manju/SKILL.md",
+     "sha256": "de0c994f035464bc4ac993959a7db428506f64c18fb67dbd65a2fa41fb296e94",
+     "bytes": 20099,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "46adb45a4136e184943f7790d2a86d80529b762e"
+    },
+    {
+     "id": "script-manju-quanmou",
+     "file": "skills/quanmou-manju/SKILL.md",
+     "sha256": "ca11a1a7497386af1fc0363f1ee89dcc985ca6eb60c19a9df15e02309b3c37dc",
+     "bytes": 20090,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "4d86b9cba3c3aa7d73ca870447855ed6c2e29d89"
+    },
+    {
+     "id": "script-manju-wuxia",
+     "file": "skills/wuxia-manju/SKILL.md",
+     "sha256": "2c0f1a17e9acb9d1a2170633df8c4dd3b1245a9b8ee3432f11760d5df7e00483",
+     "bytes": 19934,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "5c827f47626c763ccb836aa84362e5cf8cb8b258"
+    },
+    {
+     "id": "script-manju-zhongtian",
+     "file": "skills/zhongtian-manju/SKILL.md",
+     "sha256": "28ac7be35e45065ef8edb5c02bbfd41cc9379987f3643b3a89b298d112e790b5",
+     "bytes": 20086,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "64273783f690182a62de5b72866d35ff69aa58b8"
+    },
+    {
+     "id": "script-manju-dushi",
+     "file": "skills/dushi-manju/SKILL.md",
+     "sha256": "278a9c0fcdf2f558e15f2667ce6a8d0ed6aa7514edc5a1fcde8eecf7dd349590",
+     "bytes": 20298,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "fd946b7d9bd1b5f1ace64dfb4e1091b37cd586d3"
+    },
+    {
+     "id": "script-manju-tianchong",
+     "file": "skills/tianchong-manju/SKILL.md",
+     "sha256": "fc0c082da4f7eb6b0dc6c94391e95bbc82d5f98b4f85da47793c77470e6c7aae",
+     "bytes": 20281,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "9f3ef5f6b268aca67ef0c17f742be02c9069e82c"
+    },
+    {
+     "id": "script-manju-jiating",
+     "file": "skills/jiating-manju/SKILL.md",
+     "sha256": "ab2858ea28da674d37a03c87c852f7bb2dc7831ac766a5d69b1789fce20b465f",
+     "bytes": 20598,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "463d5982f7c72cf25fa41eb20c3bbbb8320cc1d4"
+    },
+    {
+     "id": "script-manju-chongsheng",
+     "file": "skills/chongsheng-manju/SKILL.md",
+     "sha256": "00921ddde81efce17494b853d44f9dede9bc10fdecc7d127ea08e26867f1dc67",
+     "bytes": 20701,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "5e391f57b5ab76e1e5f8803769604c5c6db0be4f"
+    },
+    {
+     "id": "script-manju-shangzhan",
+     "file": "skills/shangzhan-manju/SKILL.md",
+     "sha256": "24e67707641071cc1df129c0798063771100e7a9d41c9041554bd7bb0f2a1aae",
+     "bytes": 20017,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "99486b189c523613d6a00657d33a5ee394da8307"
+    },
+    {
+     "id": "script-manju-niandai",
+     "file": "skills/niandai-manju/SKILL.md",
+     "sha256": "0a158cc0f33a2f07a59063b607c1346cadc7b294b20181aff3cfc2aae36bb697",
+     "bytes": 20205,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "8afc9a74ee00ac2b17db862ba5b25d1265d6f6ba"
+    },
+    {
+     "id": "script-manju-yule",
+     "file": "skills/yule-manju/SKILL.md",
+     "sha256": "509c878cd05b3ad7be440b92c8a3f19ed04c507161f03f065d83d07d0384f373",
+     "bytes": 20079,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "7e5eff4fb8617392d0cc5ff6ed29029290d72ad3"
+    },
+    {
+     "id": "script-manju-xiaoyuan",
+     "file": "skills/xiaoyuan-manju/SKILL.md",
+     "sha256": "a0fd16086d64b16ed4c43298c91dd46abfb5b6a77cb1642620604ecd4dd3cba2",
+     "bytes": 19927,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "b2fdd53ba80e675ea7c88273b4cacdd5211bb10f"
+    },
+    {
+     "id": "script-manju-xuanyi",
+     "file": "skills/xuanyi-manju/SKILL.md",
+     "sha256": "080282384fe82d49d97e86a8025269d3c72a9a3a416cbbd7f3d36ebc4d3cd031",
+     "bytes": 20623,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "fba197d4156ad07c63a314f8e140509433dc5429"
+    },
+    {
+     "id": "script-manju-minsu",
+     "file": "skills/minsu-manju/SKILL.md",
+     "sha256": "5c38535b512c6c273323d8fb7451f2045180f3825854717a6577af7ecc704c68",
+     "bytes": 20544,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "03a99c13034926b2f8cd5e9c84af42d47e31b198"
+    }
+   ]
   }
  }
 }

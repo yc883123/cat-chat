@@ -1,9 +1,9 @@
 {
  "generated_at": "2026-10-22",
  "counts": {
-  "expected_plan": 561,
-  "input": 561,
-  "output_index": 559,
+  "expected_plan": 582,
+  "input": 582,
+  "output_index": 580,
   "rejected": 2,
   "sensitive": 2,
   "empty": 0,
@@ -66,6 +66,360 @@
     }
    },
    "empty_ids": []
+  },
+  "ai-manju-skills": {
+   "input": 21,
+   "output": 21,
+   "expected": 21,
+   "dupes": 0,
+   "rejected": 0,
+   "repository": "https://github.com/zhanghao123vip/ai-manju-skills",
+   "commit": "77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4",
+   "license": "MIT",
+   "groups": {
+    "幻想": 5,
+    "古代": 6,
+    "现代": 8,
+    "类型片": 2
+   },
+   "audit": [
+    {
+     "id": "script-manju-xuanhuan",
+     "file": "skills/xuanhuan-manju/SKILL.md",
+     "sha256": "3520deac5c951adfb80c750d6475e8f9e85c865f31b732ce2f1af3f5758e7a0a",
+     "bytes": 20010,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "ab48517a0b07bc7afefe201dd2192ef06b63fdc9"
+    },
+    {
+     "id": "script-manju-xihuan",
+     "file": "skills/xihuan-manju/SKILL.md",
+     "sha256": "4649b3d538b0e75d4aeb3b9d7169df09b4c2a153509c9e6ff8d408cfa085735d",
+     "bytes": 20154,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "42af461fd1141006fc9c4e4abfe56b6038b76282"
+    },
+    {
+     "id": "script-manju-xingji",
+     "file": "skills/xingji-manju/SKILL.md",
+     "sha256": "91f04f9920e3c21e937948f3d7af36ac5e8f5dfec843a2c03e8cc6f25ede5a19",
+     "bytes": 20521,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 4,
+      "upload_order": 3
+     },
+     "output_sha1": "f22ac623e071a7449f5d10d0d40703da4f016a18"
+    },
+    {
+     "id": "script-manju-xitong",
+     "file": "skills/xitong-manju/SKILL.md",
+     "sha256": "6477ba30dfab52a52e3984f30bb61936ab818a248ec53bbae525425d8b5894f5",
+     "bytes": 20494,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "24d86eb8c76f96ca7c6bd5cf1cd7373620810cb8"
+    },
+    {
+     "id": "script-manju-moshi",
+     "file": "skills/moshi-manju/SKILL.md",
+     "sha256": "16aaee3c1905742a6ae2bdac0a4659afa7bc200da19c399170a77afbe1f99375",
+     "bytes": 20732,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "36c9f5b85b00e7f16e6c0a9c4bee9de44c272883"
+    },
+    {
+     "id": "script-manju-chuanyue",
+     "file": "skills/chuanyue-manju/SKILL.md",
+     "sha256": "2d13a8c63318b1d4c78c9e10ce4fe3999473207eb4c37637a76d784cd5d83c58",
+     "bytes": 20400,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "374c65841dd33a0a5114595c5943ac0a531d5262"
+    },
+    {
+     "id": "script-manju-gongdou",
+     "file": "skills/gongdou-manju/SKILL.md",
+     "sha256": "2923dc316eaf812aad455bd3eb1c5aa7891d9a9924562f1ddbb2834157ee01eb",
+     "bytes": 20323,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "a1844027d198bc3e360a9fdba969fc2e6df64715"
+    },
+    {
+     "id": "script-manju-zhaidou",
+     "file": "skills/zhaidou-manju/SKILL.md",
+     "sha256": "de0c994f035464bc4ac993959a7db428506f64c18fb67dbd65a2fa41fb296e94",
+     "bytes": 20099,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "46adb45a4136e184943f7790d2a86d80529b762e"
+    },
+    {
+     "id": "script-manju-quanmou",
+     "file": "skills/quanmou-manju/SKILL.md",
+     "sha256": "ca11a1a7497386af1fc0363f1ee89dcc985ca6eb60c19a9df15e02309b3c37dc",
+     "bytes": 20090,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "4d86b9cba3c3aa7d73ca870447855ed6c2e29d89"
+    },
+    {
+     "id": "script-manju-wuxia",
+     "file": "skills/wuxia-manju/SKILL.md",
+     "sha256": "2c0f1a17e9acb9d1a2170633df8c4dd3b1245a9b8ee3432f11760d5df7e00483",
+     "bytes": 19934,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "5c827f47626c763ccb836aa84362e5cf8cb8b258"
+    },
+    {
+     "id": "script-manju-zhongtian",
+     "file": "skills/zhongtian-manju/SKILL.md",
+     "sha256": "28ac7be35e45065ef8edb5c02bbfd41cc9379987f3643b3a89b298d112e790b5",
+     "bytes": 20086,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "64273783f690182a62de5b72866d35ff69aa58b8"
+    },
+    {
+     "id": "script-manju-dushi",
+     "file": "skills/dushi-manju/SKILL.md",
+     "sha256": "278a9c0fcdf2f558e15f2667ce6a8d0ed6aa7514edc5a1fcde8eecf7dd349590",
+     "bytes": 20298,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "fd946b7d9bd1b5f1ace64dfb4e1091b37cd586d3"
+    },
+    {
+     "id": "script-manju-tianchong",
+     "file": "skills/tianchong-manju/SKILL.md",
+     "sha256": "fc0c082da4f7eb6b0dc6c94391e95bbc82d5f98b4f85da47793c77470e6c7aae",
+     "bytes": 20281,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "9f3ef5f6b268aca67ef0c17f742be02c9069e82c"
+    },
+    {
+     "id": "script-manju-jiating",
+     "file": "skills/jiating-manju/SKILL.md",
+     "sha256": "ab2858ea28da674d37a03c87c852f7bb2dc7831ac766a5d69b1789fce20b465f",
+     "bytes": 20598,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "463d5982f7c72cf25fa41eb20c3bbbb8320cc1d4"
+    },
+    {
+     "id": "script-manju-chongsheng",
+     "file": "skills/chongsheng-manju/SKILL.md",
+     "sha256": "00921ddde81efce17494b853d44f9dede9bc10fdecc7d127ea08e26867f1dc67",
+     "bytes": 20701,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "5e391f57b5ab76e1e5f8803769604c5c6db0be4f"
+    },
+    {
+     "id": "script-manju-shangzhan",
+     "file": "skills/shangzhan-manju/SKILL.md",
+     "sha256": "24e67707641071cc1df129c0798063771100e7a9d41c9041554bd7bb0f2a1aae",
+     "bytes": 20017,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "99486b189c523613d6a00657d33a5ee394da8307"
+    },
+    {
+     "id": "script-manju-niandai",
+     "file": "skills/niandai-manju/SKILL.md",
+     "sha256": "0a158cc0f33a2f07a59063b607c1346cadc7b294b20181aff3cfc2aae36bb697",
+     "bytes": 20205,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "8afc9a74ee00ac2b17db862ba5b25d1265d6f6ba"
+    },
+    {
+     "id": "script-manju-yule",
+     "file": "skills/yule-manju/SKILL.md",
+     "sha256": "509c878cd05b3ad7be440b92c8a3f19ed04c507161f03f065d83d07d0384f373",
+     "bytes": 20079,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "7e5eff4fb8617392d0cc5ff6ed29029290d72ad3"
+    },
+    {
+     "id": "script-manju-xiaoyuan",
+     "file": "skills/xiaoyuan-manju/SKILL.md",
+     "sha256": "a0fd16086d64b16ed4c43298c91dd46abfb5b6a77cb1642620604ecd4dd3cba2",
+     "bytes": 19927,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "b2fdd53ba80e675ea7c88273b4cacdd5211bb10f"
+    },
+    {
+     "id": "script-manju-xuanyi",
+     "file": "skills/xuanyi-manju/SKILL.md",
+     "sha256": "080282384fe82d49d97e86a8025269d3c72a9a3a416cbbd7f3d36ebc4d3cd031",
+     "bytes": 20623,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "fba197d4156ad07c63a314f8e140509433dc5429"
+    },
+    {
+     "id": "script-manju-minsu",
+     "file": "skills/minsu-manju/SKILL.md",
+     "sha256": "5c38535b512c6c273323d8fb7451f2045180f3825854717a6577af7ecc704c68",
+     "bytes": 20544,
+     "rules": {
+      "frontmatter": 1,
+      "paste_ready": 1,
+      "file_tool_paragraph": 1,
+      "directory_block": 1,
+      "manual_file_clause": 1,
+      "reference_tokens": 3,
+      "upload_order": 3
+     },
+     "output_sha1": "03a99c13034926b2f8cd5e9c84af42d47e31b198"
+    }
+   ]
   }
  },
  "descriptive_mentions": [
@@ -87,16 +441,16 @@
  ],
  "products": {
   "catalog_index.json": {
-   "items": 559,
-   "bytes": 731975
+   "items": 580,
+   "bytes": 800689
   },
   "bodies_prompt.json": {
    "items": 86,
    "bytes": 801325
   },
   "bodies_script.json": {
-   "items": 53,
-   "bytes": 24411
+   "items": 74,
+   "bytes": 450720
   },
   "bodies_game.json": {
    "items": 24,
@@ -130,5 +484,355 @@
     "erotic"
    ]
   }
- ]
+ ],
+ "manju_conversion": {
+  "commit": "77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4",
+  "input": 21,
+  "output": 21,
+  "note": "逐份保留五阶段、默认表、题材节奏、企划13项、格式示例与内容尺度；只作聊天适配，不自动生成媒体。",
+  "content_review": "21份正文敏感硬标记均0命中；保留原文内容尺度。部分题材存在少年或年龄隐去措辞，不等同明确成年与平台合规保证，需使用者复核。",
+  "content_risks": [
+   "玄幻原文对受刑/战斗中的未成年人仅规定不写年龄数字、回忆只称少年，不能视为明确成年保证；武侠也保留少年时期回忆，实际创作仍需审查。",
+   "保留原文复仇、家暴后果、自杀案件、下毒暗示等虚构剧情及其限制；敏感词0命中不等于生成内容必然安全。",
+   "原文的合规建议及民俗怪谈人为解释规则不是平台审核通过保证；本预设仅生成文字制作材料，不自动出图或生成视频。"
+  ],
+  "audit": [
+   {
+    "id": "script-manju-xuanhuan",
+    "file": "skills/xuanhuan-manju/SKILL.md",
+    "sha256": "3520deac5c951adfb80c750d6475e8f9e85c865f31b732ce2f1af3f5758e7a0a",
+    "bytes": 20010,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "ab48517a0b07bc7afefe201dd2192ef06b63fdc9"
+   },
+   {
+    "id": "script-manju-xihuan",
+    "file": "skills/xihuan-manju/SKILL.md",
+    "sha256": "4649b3d538b0e75d4aeb3b9d7169df09b4c2a153509c9e6ff8d408cfa085735d",
+    "bytes": 20154,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "42af461fd1141006fc9c4e4abfe56b6038b76282"
+   },
+   {
+    "id": "script-manju-xingji",
+    "file": "skills/xingji-manju/SKILL.md",
+    "sha256": "91f04f9920e3c21e937948f3d7af36ac5e8f5dfec843a2c03e8cc6f25ede5a19",
+    "bytes": 20521,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 4,
+     "upload_order": 3
+    },
+    "output_sha1": "f22ac623e071a7449f5d10d0d40703da4f016a18"
+   },
+   {
+    "id": "script-manju-xitong",
+    "file": "skills/xitong-manju/SKILL.md",
+    "sha256": "6477ba30dfab52a52e3984f30bb61936ab818a248ec53bbae525425d8b5894f5",
+    "bytes": 20494,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "24d86eb8c76f96ca7c6bd5cf1cd7373620810cb8"
+   },
+   {
+    "id": "script-manju-moshi",
+    "file": "skills/moshi-manju/SKILL.md",
+    "sha256": "16aaee3c1905742a6ae2bdac0a4659afa7bc200da19c399170a77afbe1f99375",
+    "bytes": 20732,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "36c9f5b85b00e7f16e6c0a9c4bee9de44c272883"
+   },
+   {
+    "id": "script-manju-chuanyue",
+    "file": "skills/chuanyue-manju/SKILL.md",
+    "sha256": "2d13a8c63318b1d4c78c9e10ce4fe3999473207eb4c37637a76d784cd5d83c58",
+    "bytes": 20400,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "374c65841dd33a0a5114595c5943ac0a531d5262"
+   },
+   {
+    "id": "script-manju-gongdou",
+    "file": "skills/gongdou-manju/SKILL.md",
+    "sha256": "2923dc316eaf812aad455bd3eb1c5aa7891d9a9924562f1ddbb2834157ee01eb",
+    "bytes": 20323,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "a1844027d198bc3e360a9fdba969fc2e6df64715"
+   },
+   {
+    "id": "script-manju-zhaidou",
+    "file": "skills/zhaidou-manju/SKILL.md",
+    "sha256": "de0c994f035464bc4ac993959a7db428506f64c18fb67dbd65a2fa41fb296e94",
+    "bytes": 20099,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "46adb45a4136e184943f7790d2a86d80529b762e"
+   },
+   {
+    "id": "script-manju-quanmou",
+    "file": "skills/quanmou-manju/SKILL.md",
+    "sha256": "ca11a1a7497386af1fc0363f1ee89dcc985ca6eb60c19a9df15e02309b3c37dc",
+    "bytes": 20090,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "4d86b9cba3c3aa7d73ca870447855ed6c2e29d89"
+   },
+   {
+    "id": "script-manju-wuxia",
+    "file": "skills/wuxia-manju/SKILL.md",
+    "sha256": "2c0f1a17e9acb9d1a2170633df8c4dd3b1245a9b8ee3432f11760d5df7e00483",
+    "bytes": 19934,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "5c827f47626c763ccb836aa84362e5cf8cb8b258"
+   },
+   {
+    "id": "script-manju-zhongtian",
+    "file": "skills/zhongtian-manju/SKILL.md",
+    "sha256": "28ac7be35e45065ef8edb5c02bbfd41cc9379987f3643b3a89b298d112e790b5",
+    "bytes": 20086,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "64273783f690182a62de5b72866d35ff69aa58b8"
+   },
+   {
+    "id": "script-manju-dushi",
+    "file": "skills/dushi-manju/SKILL.md",
+    "sha256": "278a9c0fcdf2f558e15f2667ce6a8d0ed6aa7514edc5a1fcde8eecf7dd349590",
+    "bytes": 20298,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "fd946b7d9bd1b5f1ace64dfb4e1091b37cd586d3"
+   },
+   {
+    "id": "script-manju-tianchong",
+    "file": "skills/tianchong-manju/SKILL.md",
+    "sha256": "fc0c082da4f7eb6b0dc6c94391e95bbc82d5f98b4f85da47793c77470e6c7aae",
+    "bytes": 20281,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "9f3ef5f6b268aca67ef0c17f742be02c9069e82c"
+   },
+   {
+    "id": "script-manju-jiating",
+    "file": "skills/jiating-manju/SKILL.md",
+    "sha256": "ab2858ea28da674d37a03c87c852f7bb2dc7831ac766a5d69b1789fce20b465f",
+    "bytes": 20598,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "463d5982f7c72cf25fa41eb20c3bbbb8320cc1d4"
+   },
+   {
+    "id": "script-manju-chongsheng",
+    "file": "skills/chongsheng-manju/SKILL.md",
+    "sha256": "00921ddde81efce17494b853d44f9dede9bc10fdecc7d127ea08e26867f1dc67",
+    "bytes": 20701,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "5e391f57b5ab76e1e5f8803769604c5c6db0be4f"
+   },
+   {
+    "id": "script-manju-shangzhan",
+    "file": "skills/shangzhan-manju/SKILL.md",
+    "sha256": "24e67707641071cc1df129c0798063771100e7a9d41c9041554bd7bb0f2a1aae",
+    "bytes": 20017,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "99486b189c523613d6a00657d33a5ee394da8307"
+   },
+   {
+    "id": "script-manju-niandai",
+    "file": "skills/niandai-manju/SKILL.md",
+    "sha256": "0a158cc0f33a2f07a59063b607c1346cadc7b294b20181aff3cfc2aae36bb697",
+    "bytes": 20205,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "8afc9a74ee00ac2b17db862ba5b25d1265d6f6ba"
+   },
+   {
+    "id": "script-manju-yule",
+    "file": "skills/yule-manju/SKILL.md",
+    "sha256": "509c878cd05b3ad7be440b92c8a3f19ed04c507161f03f065d83d07d0384f373",
+    "bytes": 20079,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "7e5eff4fb8617392d0cc5ff6ed29029290d72ad3"
+   },
+   {
+    "id": "script-manju-xiaoyuan",
+    "file": "skills/xiaoyuan-manju/SKILL.md",
+    "sha256": "a0fd16086d64b16ed4c43298c91dd46abfb5b6a77cb1642620604ecd4dd3cba2",
+    "bytes": 19927,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "b2fdd53ba80e675ea7c88273b4cacdd5211bb10f"
+   },
+   {
+    "id": "script-manju-xuanyi",
+    "file": "skills/xuanyi-manju/SKILL.md",
+    "sha256": "080282384fe82d49d97e86a8025269d3c72a9a3a416cbbd7f3d36ebc4d3cd031",
+    "bytes": 20623,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "fba197d4156ad07c63a314f8e140509433dc5429"
+   },
+   {
+    "id": "script-manju-minsu",
+    "file": "skills/minsu-manju/SKILL.md",
+    "sha256": "5c38535b512c6c273323d8fb7451f2045180f3825854717a6577af7ecc704c68",
+    "bytes": 20544,
+    "rules": {
+     "frontmatter": 1,
+     "paste_ready": 1,
+     "file_tool_paragraph": 1,
+     "directory_block": 1,
+     "manual_file_clause": 1,
+     "reference_tokens": 3,
+     "upload_order": 3
+    },
+    "output_sha1": "03a99c13034926b2f8cd5e9c84af42d47e31b198"
+   }
+  ]
+ }
 }

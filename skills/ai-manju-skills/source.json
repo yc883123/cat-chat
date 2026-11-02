@@ -1,0 +1,176 @@
+{
+  "repository": "https://github.com/zhanghao123vip/ai-manju-skills",
+  "commit": "77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4",
+  "license": "MIT",
+  "copyright": "Copyright (c) 2026 zhanghao123vip",
+  "files": [
+    {
+      "path": "xuanhuan-manju/SKILL.md",
+      "title": "玄幻修仙",
+      "group": "幻想",
+      "sha256": "3520deac5c951adfb80c750d6475e8f9e85c865f31b732ce2f1af3f5758e7a0a",
+      "bytes": 20010,
+      "local_path": "references/xuanhuan-manju.md"
+    },
+    {
+      "path": "xihuan-manju/SKILL.md",
+      "title": "西幻魔法",
+      "group": "幻想",
+      "sha256": "4649b3d538b0e75d4aeb3b9d7169df09b4c2a153509c9e6ff8d408cfa085735d",
+      "bytes": 20154,
+      "local_path": "references/xihuan-manju.md"
+    },
+    {
+      "path": "xingji-manju/SKILL.md",
+      "title": "星际机甲",
+      "group": "幻想",
+      "sha256": "91f04f9920e3c21e937948f3d7af36ac5e8f5dfec843a2c03e8cc6f25ede5a19",
+      "bytes": 20521,
+      "local_path": "references/xingji-manju.md"
+    },
+    {
+      "path": "xitong-manju/SKILL.md",
+      "title": "系统无限流",
+      "group": "幻想",
+      "sha256": "6477ba30dfab52a52e3984f30bb61936ab818a248ec53bbae525425d8b5894f5",
+      "bytes": 20494,
+      "local_path": "references/xitong-manju.md"
+    },
+    {
+      "path": "moshi-manju/SKILL.md",
+      "title": "末日废土",
+      "group": "幻想",
+      "sha256": "16aaee3c1905742a6ae2bdac0a4659afa7bc200da19c399170a77afbe1f99375",
+      "bytes": 20732,
+      "local_path": "references/moshi-manju.md"
+    },
+    {
+      "path": "chuanyue-manju/SKILL.md",
+      "title": "穿越重生",
+      "group": "古代",
+      "sha256": "2d13a8c63318b1d4c78c9e10ce4fe3999473207eb4c37637a76d784cd5d83c58",
+      "bytes": 20400,
+      "local_path": "references/chuanyue-manju.md"
+    },
+    {
+      "path": "gongdou-manju/SKILL.md",
+      "title": "宫斗",
+      "group": "古代",
+      "sha256": "2923dc316eaf812aad455bd3eb1c5aa7891d9a9924562f1ddbb2834157ee01eb",
+      "bytes": 20323,
+      "local_path": "references/gongdou-manju.md"
+    },
+    {
+      "path": "zhaidou-manju/SKILL.md",
+      "title": "宅斗",
+      "group": "古代",
+      "sha256": "de0c994f035464bc4ac993959a7db428506f64c18fb67dbd65a2fa41fb296e94",
+      "bytes": 20099,
+      "local_path": "references/zhaidou-manju.md"
+    },
+    {
+      "path": "quanmou-manju/SKILL.md",
+      "title": "权谋朝堂",
+      "group": "古代",
+      "sha256": "ca11a1a7497386af1fc0363f1ee89dcc985ca6eb60c19a9df15e02309b3c37dc",
+      "bytes": 20090,
+      "local_path": "references/quanmou-manju.md"
+    },
+    {
+      "path": "wuxia-manju/SKILL.md",
+      "title": "武侠江湖",
+      "group": "古代",
+      "sha256": "2c0f1a17e9acb9d1a2170633df8c4dd3b1245a9b8ee3432f11760d5df7e00483",
+      "bytes": 19934,
+      "local_path": "references/wuxia-manju.md"
+    },
+    {
+      "path": "zhongtian-manju/SKILL.md",
+      "title": "种田经商",
+      "group": "古代",
+      "sha256": "28ac7be35e45065ef8edb5c02bbfd41cc9379987f3643b3a89b298d112e790b5",
+      "bytes": 20086,
+      "local_path": "references/zhongtian-manju.md"
+    },
+    {
+      "path": "dushi-manju/SKILL.md",
+      "title": "都市逆袭",
+      "group": "现代",
+      "sha256": "278a9c0fcdf2f558e15f2667ce6a8d0ed6aa7514edc5a1fcde8eecf7dd349590",
+      "bytes": 20298,
+      "local_path": "references/dushi-manju.md"
+    },
+    {
+      "path": "tianchong-manju/SKILL.md",
+      "title": "总裁甜宠",
+      "group": "现代",
+      "sha256": "fc0c082da4f7eb6b0dc6c94391e95bbc82d5f98b4f85da47793c77470e6c7aae",
+      "bytes": 20281,
+      "local_path": "references/tianchong-manju.md"
+    },
+    {
+      "path": "jiating-manju/SKILL.md",
+      "title": "家庭伦理",
+      "group": "现代",
+      "sha256": "ab2858ea28da674d37a03c87c852f7bb2dc7831ac766a5d69b1789fce20b465f",
+      "bytes": 20598,
+      "local_path": "references/jiating-manju.md"
+    },
+    {
+      "path": "chongsheng-manju/SKILL.md",
+      "title": "重生复仇",
+      "group": "现代",
+      "sha256": "00921ddde81efce17494b853d44f9dede9bc10fdecc7d127ea08e26867f1dc67",
+      "bytes": 20701,
+      "local_path": "references/chongsheng-manju.md"
+    },
+    {
+      "path": "shangzhan-manju/SKILL.md",
+      "title": "职场商战",
+      "group": "现代",
+      "sha256": "24e67707641071cc1df129c0798063771100e7a9d41c9041554bd7bb0f2a1aae",
+      "bytes": 20017,
+      "local_path": "references/shangzhan-manju.md"
+    },
+    {
+      "path": "niandai-manju/SKILL.md",
+      "title": "年代文",
+      "group": "现代",
+      "sha256": "0a158cc0f33a2f07a59063b607c1346cadc7b294b20181aff3cfc2aae36bb697",
+      "bytes": 20205,
+      "local_path": "references/niandai-manju.md"
+    },
+    {
+      "path": "yule-manju/SKILL.md",
+      "title": "娱乐圈",
+      "group": "现代",
+      "sha256": "509c878cd05b3ad7be440b92c8a3f19ed04c507161f03f065d83d07d0384f373",
+      "bytes": 20079,
+      "local_path": "references/yule-manju.md"
+    },
+    {
+      "path": "xiaoyuan-manju/SKILL.md",
+      "title": "大学校园青春",
+      "group": "现代",
+      "sha256": "a0fd16086d64b16ed4c43298c91dd46abfb5b6a77cb1642620604ecd4dd3cba2",
+      "bytes": 19927,
+      "local_path": "references/xiaoyuan-manju.md"
+    },
+    {
+      "path": "xuanyi-manju/SKILL.md",
+      "title": "悬疑刑侦",
+      "group": "类型片",
+      "sha256": "080282384fe82d49d97e86a8025269d3c72a9a3a416cbbd7f3d36ebc4d3cd031",
+      "bytes": 20623,
+      "local_path": "references/xuanyi-manju.md"
+    },
+    {
+      "path": "minsu-manju/SKILL.md",
+      "title": "民俗怪谈",
+      "group": "类型片",
+      "sha256": "5c38535b512c6c273323d8fb7451f2045180f3825854717a6577af7ecc704c68",
+      "bytes": 20544,
+      "local_path": "references/minsu-manju.md"
+    }
+  ]
+}

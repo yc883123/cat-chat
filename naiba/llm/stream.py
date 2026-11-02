@@ -28,6 +28,39 @@ from naiba.llm.protocols import ProtocolMixins
 StatusCallback = Callable[[dict[str, Any]], None]
 
 
+class _RawContentCapture:
+    """Opt-in, request-local CONTENT evidence; never a display/reasoning channel.
+
+    The sink receives reset/delta/done dictionaries with a string ``content``.
+    Only done is authoritative (including an empty string); failed attempts never
+    emit done. Sink failures abort, rather than retrying a paid model request.
+    """
+
+    def __init__(self, sink: StatusCallback) -> None:
+        if not callable(sink):
+            raise TypeError("raw_content_sink must be callable")
+        self.raw_callback = sink
+        self.parts: list[str] = []
+
+    def _notify_raw(self, event_type: str, content: str) -> None:
+        try:
+            self.raw_callback({"type": event_type, "content": content})
+        except Exception as exc:
+            raise RuntimeError("raw_content_sink callback failed") from exc
+
+    def reset(self) -> None:
+        self.parts.clear()
+        self._notify_raw("reset", "")
+
+    def feed(self, content: str) -> None:
+        if content:
+            self.parts.append(content)
+            self._notify_raw("delta", content)
+
+    def finish(self) -> None:
+        self._notify_raw("done", "".join(self.parts))
+
+
 def _iter_lines(text: str, start: int):
     """从 ``start`` 起逐行产出 ``(行起点, 行内容(去换行), 下一行起点, 行是否已完整)``。"""
     pos = start
@@ -566,11 +599,97 @@ class _ProtocolStreamGuard:
 
 class StreamMixins:
     @staticmethod
+    def _raw_text(value: Any) -> str:
+        """Join provider text blocks verbatim, without synthetic separators."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            texts = []
+            for part in value:
+                if not isinstance(part, dict):
+                    raise RuntimeError("Unsupported raw assistant content block")
+                kind = str(part.get("type") or "")
+                if kind in {"thinking", "redacted_thinking", "reasoning", "reasoning_text", "summary_text", "tool_use", "function_call"} or part.get("thought") is True:
+                    continue
+                if kind not in {"", "text", "output_text"}:
+                    raise RuntimeError("Unsupported raw assistant content block type")
+                text = part.get("text", part.get("content"))
+                if text is not None and not isinstance(text, str):
+                    raise RuntimeError("Unsupported raw assistant text value")
+                texts.append(text or "")
+            return "".join(texts)
+        raise RuntimeError("Unsupported raw assistant content value")
+
+    @staticmethod
+    def _raw_online_content(request_format: str, result: Any) -> str:
+        """CONTENT only, before display cleanup or native-tool action conversion."""
+        if isinstance(result, list):
+            return "".join(StreamMixins._raw_online_content(request_format, item) for item in result)
+        if not isinstance(result, dict):
+            raise RuntimeError("Unsupported raw assistant response")
+        if request_format == "openai_chat":
+            choices = result.get("choices") or []
+            choice = choices[0] if choices else {}
+            message = choice.get("message") or {}
+            if message.get("role", "assistant") != "assistant":
+                raise RuntimeError("Raw response is not an assistant message")
+            return StreamMixins._raw_text(message.get("content", choice.get("text")))
+        if request_format == "ollama":
+            return StreamMixins._raw_text((result.get("message") or {}).get("content"))
+        if request_format == "claude":
+            return StreamMixins._raw_text(result.get("content"))
+        if request_format == "gemini":
+            texts = []
+            for candidate in result.get("candidates") or []:
+                for part in (candidate.get("content") or {}).get("parts") or []:
+                    if part.get("thought") is not True and "text" in part:
+                        texts.append(StreamMixins._raw_text(part["text"]))
+            return "".join(texts)
+        if request_format in {"codex_responses", "lm_studio"}:
+            output = result.get("output") or result.get("choices") or []
+            texts = []
+            for item in output:
+                kind = str(item.get("type") or "")
+                if kind in {"reasoning", "function_call"}:
+                    continue
+                if kind not in {"", "message"}:
+                    raise RuntimeError("Unsupported raw assistant output item")
+                if item.get("role", "assistant") != "assistant":
+                    raise RuntimeError("Raw response is not an assistant message")
+                value = item.get("content", (item.get("message") or {}).get("content", item.get("text")))
+                texts.append(StreamMixins._raw_text(value))
+            # output_text is a convenience duplicate, not another content block.
+            return "".join(texts) if output else StreamMixins._raw_text(result.get("output_text"))
+        raise RuntimeError("Unsupported wire format for raw assistant content")
+
+    @staticmethod
+    def _raw_responses_aggregated(chunks: list[dict[str, Any]]) -> str:
+        completed = [chunk.get("response") for chunk in chunks if chunk.get("type") == "response.completed"]
+        if completed:
+            return StreamMixins._raw_online_content("codex_responses", completed[-1] or {})
+        if any(chunk.get("type") == "response.incomplete" for chunk in chunks):
+            return ""
+        items = []
+        seen = set()
+        for chunk in chunks:
+            if chunk.get("type") != "response.output_item.done":
+                continue
+            item = chunk.get("item") or {}
+            key = item.get("id") or json.dumps(item, sort_keys=True)
+            if key not in seen:
+                seen.add(key)
+                items.append(item)
+        return StreamMixins._raw_online_content("codex_responses", {"output": items})
+
+    @staticmethod
     def _read_ollama_stream(
         response: Any,
         status: StatusCallback | None,
         reasoning_break_chars: float = 0.0,
         progress: dict[str, Any] | None = None,
+        raw_content: _RawContentCapture | None = None,
     ) -> dict[str, Any]:
         chunks: list[dict[str, Any]] = []
         full_content_parts: list[str] = []
@@ -607,6 +726,8 @@ class StreamMixins:
                     "arguments": arguments,
                 }
             text, reasoning = StreamMixins._ollama_stream_delta(chunk)
+            if raw_content is not None:
+                raw_content.feed(StreamMixins._raw_text(message.get("content")))
             text, inline_reasoning = inline_parser.feed(text)
             reasoning = reasoning + inline_reasoning
             if reasoning:
@@ -657,6 +778,7 @@ class StreamMixins:
         status: StatusCallback | None,
         reasoning_break_chars: float = 0.0,
         progress: dict[str, Any] | None = None,
+        raw_content: _RawContentCapture | None = None,
     ) -> dict[str, Any]:
         """Collect SSE chunks while forwarding only ordinary prose to the chat client.
 
@@ -731,6 +853,27 @@ class StreamMixins:
                 if iid and iid not in reasoning_ids:
                     reasoning_ids.append(iid)
             text, reasoning, tool_calls = ProtocolMixins._stream_delta_full(request_format, chunk)
+            if raw_content is not None:
+                raw_text = ""
+                if request_format == "openai_chat":
+                    choices = chunk.get("choices") or []
+                    delta = (choices[0].get("delta") or {}) if choices else {}
+                    raw_text = StreamMixins._raw_text(delta.get("content"))
+                elif request_format == "codex_responses":
+                    if event_type == "response.output_text.delta":
+                        raw_text = StreamMixins._raw_text(chunk.get("delta"))
+                elif request_format == "claude":
+                    if event_type == "content_block_start":
+                        block = chunk.get("content_block") or {}
+                        if block.get("type") == "text":
+                            raw_text = StreamMixins._raw_text(block.get("text"))
+                    elif event_type == "content_block_delta":
+                        delta = chunk.get("delta") or {}
+                        if delta.get("type") == "text_delta":
+                            raw_text = StreamMixins._raw_text(delta.get("text"))
+                else:
+                    raise RuntimeError("Unsupported SSE wire format for raw assistant content")
+                raw_content.feed(raw_text)
             text, inline_reasoning = inline_parser.feed(text)
             reasoning = reasoning + inline_reasoning
             if reasoning:
@@ -796,6 +939,8 @@ class StreamMixins:
             if not aggregated_action and agg_text and not "".join(full_content_parts).strip():
                 full_content_parts.append(agg_text)
                 guard.feed(agg_text, status)
+        if raw_content is not None and request_format == "codex_responses" and not raw_content.parts:
+            raw_content.feed(StreamMixins._raw_responses_aggregated(chunks))
         guard.finish(status)
         reasoning_streamer.finish()
         # codex_responses 工具调用事件普查（NAIBA_DEBUG_STREAM=1 才有输出，默认零开销）：
@@ -838,6 +983,7 @@ class StreamMixins:
         status: StatusCallback | None,
         reasoning_break_chars: float = 0.0,
         progress: dict[str, Any] | None = None,
+        raw_content: _RawContentCapture | None = None,
     ) -> dict[str, Any]:
         """按 LM Studio 原生 chat SSE 事件解析（``message.delta`` / ``reasoning.delta`` / ``error`` / ``chat.end``）。
 
@@ -891,6 +1037,11 @@ class StreamMixins:
             else:
                 # 未知事件但可能带有正文/文本字段（兼容字段命名）。
                 text = ProtocolMixins._text_value(chunk.get("content") or chunk.get("text"))
+            if raw_content is not None:
+                if event_type in ("message.delta", "message.full"):
+                    raw_content.feed(StreamMixins._raw_text(chunk.get("content")))
+                elif text:
+                    raise RuntimeError("Unsupported LM Studio raw assistant content event")
             text, inline_reasoning = inline_parser.feed(text)
             if inline_reasoning:
                 reasoning_chars += len(inline_reasoning)

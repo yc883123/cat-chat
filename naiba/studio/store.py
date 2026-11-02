@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import threading
 import time
 import uuid
@@ -32,12 +34,23 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
+# Multiple service/store instances in one process share the receipt creation lock.
+_STORE_LOCKS: dict[str, Any] = {}
+_STORE_LOCKS_GUARD = threading.Lock()
+
+
+def _store_lock(directory: Path) -> Any:
+    key = os.path.normcase(os.path.abspath(directory))
+    with _STORE_LOCKS_GUARD:
+        return _STORE_LOCKS.setdefault(key, threading.RLock())
+
+
 class StudioStore:
     """线程安全（锁内追加重放）；文件布局见模块注释。"""
 
     def __init__(self, data_dir: Path):
         self._dir = Path(data_dir) / "studio" / "tasks"
-        self._lock = threading.RLock()
+        self._lock = _store_lock(self._dir)
         # 引用保护缓存：(单调时间, 路径键集合)。清理器对每个候选文件都会问一次
         # 「这个文件还被 Studio 任务引用吗」，不能每次都重读全部任务 JSON。
         self._ref_cache: tuple[float, set[str]] | None = None
@@ -59,10 +72,41 @@ class StudioStore:
 
     # ---- 任务记录 ----
 
-    def create_task(self, input_data: dict[str, Any]) -> dict[str, Any]:
+    def lookup_request(self, request_key: str, *, owner_id: str = "") -> dict[str, Any] | None:
+        if not request_key:
+            return None
+        with self._lock:
+            for path in self._dir.glob("st-*.json"):
+                task = self.get_task(path.stem)
+                if task and task.get("request_key") == request_key and task.get("owner_id", "") == owner_id:
+                    return task
+        return None
+
+    def create_task(self, input_data: dict[str, Any], *, request_key: str = "",
+                    owner_id: str = "", source_task_id: str = "",
+                    submission_policy: dict[str, Any] | None = None) -> dict[str, Any]:
+        # The receipt and native execution fact have one atomic persistence point.
+        frozen = json.loads(json.dumps(input_data, ensure_ascii=False, allow_nan=False))
+        policy = json.loads(json.dumps(submission_policy or {}, allow_nan=False))
+        digest = hashlib.sha256(json.dumps(
+            {"input": frozen, "source_task_id": source_task_id, "submission_policy": policy},
+            sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+        with self._lock:
+            existing = self.lookup_request(request_key, owner_id=owner_id)
+            if existing:
+                if existing.get("payload_hash") != digest:
+                    raise StudioStoreError("request_key 已绑定不同的生成输入")
+                return existing
+            return self._create_task(frozen, request_key=request_key, payload_hash=digest,
+                                     owner_id=owner_id, source_task_id=source_task_id,
+                                     submission_policy=policy)
+
+    def _create_task(self, input_data: dict[str, Any], **receipt: Any) -> dict[str, Any]:
         """登记 queued 任务（输入实在落盘，避免服务器重启后无法重试）。"""
         task_id = self.new_task_id()
         record = {
+            **receipt,
             "id": task_id,
             "status": "queued",
             "detail": "",
@@ -103,7 +147,7 @@ class StudioStore:
             if current is None:
                 return None
             for key in ("status", "detail", "result", "result_partial", "reasoning", "error",
-                        "usage", "performance", "finish_reason", "handoff", "started_at", "finished_at"):
+                        "usage", "performance", "finish_reason", "handoff", "started_at", "finished_at", "raw_result", "raw_result_source"):
                 if key in fields:
                     current[key] = fields[key]
             current["updated_at"] = now_ms()

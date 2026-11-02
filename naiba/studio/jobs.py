@@ -73,7 +73,12 @@ class StudioJobManager:
 
     # ---- 提交 / 取消 / 重试 ----
 
-    def submit(self, input_data: dict[str, Any]) -> dict[str, Any]:
+    def lookup_request(self, request_key: str, *, owner_id: str = "") -> dict[str, Any] | None:
+        return self.store.lookup_request(request_key, owner_id=owner_id)
+
+    def submit(self, input_data: dict[str, Any], *, request_key: str = "",
+               owner_id: str = "", source_task_id: str = "",
+               submission_policy: dict[str, Any] | None = None) -> dict[str, Any]:
         if not isinstance(input_data, dict):
             raise StudioTaskError("生成输入非法")
         content = str(input_data.get("content") or "")
@@ -81,7 +86,10 @@ class StudioJobManager:
             raise StudioTaskError("生成内容不能为空")
         if not str(input_data.get("model_name") or "").strip():
             raise StudioTaskError("请选择模型；可用模型来自设置页的模型检查结果")
-        task = self.store.create_task(input_data)
+        task = self.store.create_task(
+            input_data, request_key=request_key, owner_id=owner_id,
+            source_task_id=source_task_id, submission_policy=submission_policy,
+        )
         self.runner.submit(task["id"])
         return task
 
@@ -113,7 +121,8 @@ class StudioJobManager:
                 skipped.append({"id": task_id, "reason": "not_found"})
         return {"deleted": deleted, "skipped": skipped}
 
-    def retry(self, task_id: str) -> dict[str, Any]:
+    def retry(self, task_id: str, *, request_key: str = "", owner_id: str = "",
+              submission_policy: dict[str, Any] | None = None) -> dict[str, Any]:
         """失败/取消/中断任务的幂等重试：以原输入重建排队任务（原记录保留）。"""
         source = self.store.get_task(task_id)
         if not source:
@@ -121,7 +130,18 @@ class StudioJobManager:
         if source.get("status") not in {"failed", "cancelled", "interrupted"}:
             raise StudioTaskError("仅失败、取消或中断的任务会重试")
         input_data = dict(source.get("input") or {})
-        task = self.store.create_task(input_data)
+        source_task_id = task_id
+        owner_id = owner_id or str(source.get("owner_id") or "")
+        if source.get("owner_id") and owner_id != source.get("owner_id"):
+            raise StudioTaskError("任务不属于当前 owner")
+        frozen_policy = source.get("submission_policy") or {}
+        if submission_policy is not None and submission_policy != frozen_policy:
+            raise StudioTaskError("重试不能改变原任务的提交策略")
+        submission_policy = frozen_policy
+        task = self.store.create_task(
+            input_data, request_key=request_key, owner_id=owner_id,
+            source_task_id=source_task_id, submission_policy=submission_policy,
+        )
         self.runner.submit(task["id"])
         return task
 

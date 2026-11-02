@@ -12,6 +12,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import time
 import traceback
@@ -97,6 +99,7 @@ class StudioRunner:
         self.app = app
         self.store = store
         self._queue: list[str] = []
+        self._delivering: set[str] = set()
         self._condition = threading.Condition()
         self._worker: threading.Thread | None = None
         self._shutdown = False
@@ -106,9 +109,11 @@ class StudioRunner:
     # ---- 队列 ----
 
     def submit(self, task_id: str) -> None:
+        task = self.store.get_task(task_id)
         with self._condition:
-            if self._shutdown:
+            if self._shutdown or task_id in self._delivering or not task or task.get("status") != "queued":
                 return
+            self._delivering.add(task_id)
             self._queue.append(task_id)
             if self._worker is None or not self._worker.is_alive():
                 self._worker = threading.Thread(target=self._worker_loop, name="naiba-studio-run", daemon=True)
@@ -128,6 +133,7 @@ class StudioRunner:
             with self._condition:
                 if task_id in self._queue:
                     self._queue.remove(task_id)
+                    self._delivering.discard(task_id)
             self._finish_terminal(
                 task_id, "cancelled", {"type": "cancelled"},
                 result_partial="", detail=reason or "任务已取消",
@@ -165,6 +171,13 @@ class StudioRunner:
                     self._run_task(task_id)
                 except Exception:  # noqa: BLE001 - worker 不因单任务异常退出
                     traceback.print_exc()
+                finally:
+                    with self._condition:
+                        self._delivering.discard(task_id)
+                    # An explicit retry may race the previous worker's final cleanup.
+                    task = self.store.get_task(task_id)
+                    if not self._shutdown and task and task.get("status") == "queued":
+                        self.submit(task_id)
 
     # ---- 执行 ----
 
@@ -181,7 +194,31 @@ class StudioRunner:
         try:
             self.store.update_task(task_id, status="running", started_at=now_ms(), detail="")
             self.store.append_event(task_id, {"type": "status", "message": "生成任务开始执行"})
-            content = self._complete(task.get("input") or {}, buffer.forward, cancel_event, usage_sink)
+            input_data = dict(task.get("input") or {})
+            identity = (task.get("submission_policy") or {}).get("model_identity")
+            if isinstance(identity, dict):
+                input_data["model_snapshot"] = identity
+            raw_parts: list[str] = []
+            raw_done = False
+            recipe = (task.get("submission_policy") or {}).get("mode") == "recipe"
+            def raw_sink(event: dict[str, Any]) -> None:
+                nonlocal raw_done
+                if event.get("type") == "reset":
+                    raw_parts.clear()
+                    raw_done = False
+                elif event.get("type") == "delta":
+                    raw_parts.append(str(event.get("content") or ""))
+                elif event.get("type") == "done":
+                    raw_parts[:] = [str(event.get("content") or "")]
+                    raw_done = True
+            if recipe:
+                input_data["_raw_content_sink"] = raw_sink
+            content = self._complete(input_data, buffer.forward, cancel_event, usage_sink)
+            if recipe:
+                self.store.update_task(task_id, raw_result="".join(raw_parts),
+                                       raw_result_source="runtime_callback" if raw_done else "unavailable")
+                if not raw_done:
+                    raise ValueError("原始模型输出不可用，需人工核对；不能使用清理后结果")
             buffer.flush()
             result_partial = ""
             self._finish_terminal(task_id, "done", {"type": "done"}, result=content,
@@ -229,6 +266,31 @@ class StudioRunner:
         with self._registry_lock:
             return self._cancel_events.get(task_id) or threading.Event()
 
+    def _resolve_profile(self, input_data: dict[str, Any]) -> dict[str, Any]:
+        profile = resolve_profile_with_override(
+            self.app.config, str(input_data.get("model_key") or ""), str(input_data.get("model_name") or "")
+        )
+        snapshot = input_data.get("model_snapshot")
+        if isinstance(snapshot, dict):
+            # Credentials are never copied into snapshots; compare only frozen identity fields.
+            identity = {
+                "model_key": str(input_data.get("model_key") or ""),
+                "model_name": str(input_data.get("model_name") or ""),
+                "provider_id": str(profile.get("provider_id") or profile.get("provider") or ""),
+                "kind": str(profile.get("kind") or ""),
+                "base_url_hash": hashlib.sha256(json.dumps(
+                    str(profile.get("base_url") or ""), sort_keys=True, ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")).hexdigest(),
+            }
+            for key, value in snapshot.items():
+                if key == "key":
+                    continue
+                actual = identity[key] if key in identity else profile.get(key)
+                if actual != value:
+                    raise ValueError("模型配置已改变，请重新确认配方后提交")
+        return profile
+
     def _complete(
         self, input_data: dict[str, Any], status_provider: Any, cancel_event: threading.Event,
         usage_sink: dict[str, Any] | None = None,
@@ -236,9 +298,7 @@ class StudioRunner:
         chunked = input_data.get("chunked")
         if isinstance(chunked, dict) and isinstance(chunked.get("blocks"), list) and chunked.get("blocks"):
             return self._complete_chunked(input_data, chunked, status_provider, cancel_event, usage_sink)
-        profile = resolve_profile_with_override(
-            self.app.config, str(input_data.get("model_key") or ""), str(input_data.get("model_name") or "")
-        )
+        profile = self._resolve_profile(input_data)
         system_message = _system_message(input_data)
         images = [ref for ref in (input_data.get("images") or []) if isinstance(ref, dict)]
         if images:
@@ -277,6 +337,7 @@ class StudioRunner:
             "cancel_event": cancel_event,
             "lock_label": "工作台生成",
             **(self.app.config.runtime_guard_options() or {}),
+            **({"raw_content_sink": input_data["_raw_content_sink"]} if callable(input_data.get("_raw_content_sink")) else {}),
         }
         content = self.app.models.complete(profile, messages, options, status_provider)
         if usage_sink is not None:
@@ -295,9 +356,7 @@ class StudioRunner:
         - 第 2 块起带上一轮输出的结尾（continuity），要求紧接续写不重复。
         - 用量跨轮累加，费用汇总不因此少记。
         """
-        profile = resolve_profile_with_override(
-            self.app.config, str(input_data.get("model_key") or ""), str(input_data.get("model_name") or "")
-        )
+        profile = self._resolve_profile(input_data)
         system_message = _system_message(input_data)
         blocks = [str(block) for block in chunked.get("blocks") or [] if str(block)]
         prefix = str(chunked.get("prefix") or "")
@@ -312,6 +371,7 @@ class StudioRunner:
             "cancel_event": cancel_event,
             "lock_label": "工作台生成",
             **(self.app.config.runtime_guard_options() or {}),
+            **({"raw_content_sink": input_data["_raw_content_sink"]} if callable(input_data.get("_raw_content_sink")) else {}),
         }
         outputs: list[str] = []
         for index, block in enumerate(blocks, 1):

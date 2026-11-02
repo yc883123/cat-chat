@@ -18,12 +18,14 @@ from __future__ import annotations
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from naiba.comfyui import (
     COMFYUI_ACTIVE_STATUSES,
     MEDIA_INPUT_MAX_BYTES,
     MAX_SHOTS,
 )
+from naiba.comfyui import client
 from naiba.comfyui.store import ComfyUIStoreError, now_ms
 from naiba.core.media_types import media_kind_of
 from naiba.storage.media import is_uploads_path
@@ -53,7 +55,8 @@ class ComfyUIJobManager:
             task_id = str(task.get("id") or "")
             if not task_id:
                 continue
-            self.runner.cancel(task_id, reason="服务重启前任务中断")
+            if (task.get("submission_policy") or {}).get("mode") != "recipe":
+                self.runner.cancel(task_id, reason="服务重启前任务中断")
             checkpoint = task.get("checkpoint") or {}
             completed = len(checkpoint.get("completed") or [])
             shots = int((task.get("input") or {}).get("shots") or 0)
@@ -82,7 +85,11 @@ class ComfyUIJobManager:
 
     # ---- 提交 ----
 
-    def submit(self, body: dict[str, Any]) -> dict[str, Any]:
+    def lookup_request(self, request_key: str, *, owner_id: str = "") -> dict[str, Any] | None:
+        return self.store.lookup_request(request_key, owner_id=owner_id)
+
+    def submit(self, body: dict[str, Any], *, request_key: str = "", owner_id: str = "",
+               source_task_id: str = "", submission_policy: dict[str, Any] | None = None) -> dict[str, Any]:
         if not isinstance(body, dict):
             raise ComfyUITaskError("请求体必须是对象")
         workflow_id = str(body.get("workflow_id") or "").strip()
@@ -107,7 +114,22 @@ class ComfyUIJobManager:
             "media_inputs": media_inputs,
             "shots": shots,
         }
-        task = self.store.create_task(input_data)
+        policy = dict(submission_policy or {})
+        if policy.get("mode") == "recipe":
+            target = str(policy.get("target_url") or "").strip()
+            if not target:
+                raise ComfyUITaskError("配方必须指定冻结的 ComfyUI 地址")
+            parsed = urlsplit(target)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+                raise ComfyUITaskError("配方目标必须是无凭据的 HTTP(S) 地址")
+            policy["target_url"] = client.normalize_base_url(target)
+            expected = policy.get("workflow_fingerprint")
+            if expected and expected != self.store.payload_hash(input_data["prompt"]):
+                raise ComfyUITaskError("工作流已改变，请重新确认配方")
+        task = self.store.create_task(
+            input_data, request_key=request_key, owner_id=owner_id,
+            source_task_id=source_task_id, submission_policy=policy,
+        )
         self.runner.submit(str(task.get("id") or ""))
         return task
 
@@ -147,7 +169,16 @@ class ComfyUIJobManager:
                 if value is None or str(value).strip() == "":
                     continue
                 try:
-                    number = int(float(str(value).strip()))
+                    if isinstance(value, bool):
+                        raise ValueError("seed cannot be boolean")
+                    if isinstance(value, int):
+                        number = value
+                    elif isinstance(value, str):
+                        number = int(value.strip())
+                    elif isinstance(value, float) and value.is_integer() and abs(value) <= 2 ** 53:
+                        number = int(value)
+                    else:
+                        raise ValueError("seed must be an exact integer")
                 except (TypeError, ValueError):
                     raise ComfyUITaskError(f"参数 {slot.get('label')} 必须是数字") from None
                 if number < 0:
@@ -278,21 +309,100 @@ class ComfyUIJobManager:
     def cancel(self, task_id: str) -> bool:
         return self.runner.cancel(task_id, reason="用户取消")
 
-    def retry(self, task_id: str) -> dict[str, Any]:
+    def retry(self, task_id: str, *, request_key: str = "", owner_id: str = "",
+              submission_policy: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._retry(task_id, request_key=request_key, owner_id=owner_id,
+                           submission_policy=submission_policy, collect_only=False)
+
+    def retry_collect(self, task_id: str, *, request_key: str = "", owner_id: str = "",
+                      submission_policy: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self._retry(task_id, request_key=request_key, owner_id=owner_id,
+                           submission_policy=submission_policy, collect_only=True)
+
+    def _retry(self, task_id: str, *, request_key: str, owner_id: str,
+               submission_policy: dict[str, Any] | None, collect_only: bool) -> dict[str, Any]:
+        # Receipt insertion and checkpoint mutation must be indivisible, including retries.
+        with self.store._lock:
+            return self._retry_locked(task_id, request_key=request_key, owner_id=owner_id,
+                                      submission_policy=submission_policy, collect_only=collect_only)
+
+    def _retry_locked(self, task_id: str, *, request_key: str, owner_id: str,
+                      submission_policy: dict[str, Any] | None, collect_only: bool) -> dict[str, Any]:
         """重试 = 续跑：保留 checkpoint（已完成段不再提交），errors 清掉后重新排队。"""
         task = self.store.get_task(task_id)
         if task is None:
             raise LookupError("任务不存在")
+        policy = task.get("submission_policy") or {}
+        if submission_policy is not None and submission_policy != policy:
+            raise ComfyUITaskError("重试不能改变原任务的提交策略")
+        owner_id = owner_id or str(task.get("owner_id") or "")
+        if task.get("owner_id") and owner_id != task.get("owner_id"):
+            raise ComfyUITaskError("任务不属于当前 owner")
+        digest = self.store.payload_hash({"task_id": task_id, "operation": "collect" if collect_only else "retry",
+                                          "submission_policy": policy})
+        existing = self.lookup_request(request_key, owner_id=owner_id)
+        if existing:
+            receipts = [existing, *(existing.get("request_receipts") or [])]
+            if existing.get("id") != task_id or not any(
+                r.get("request_key") == request_key and r.get("owner_id", "") == owner_id
+                and r.get("payload_hash") == digest for r in receipts):
+                raise ComfyUITaskError("request_key 已绑定不同的操作")
+            self.runner.submit(task_id)
+            return existing
         if str(task.get("status") or "") in COMFYUI_ACTIVE_STATUSES:
             raise ComfyUITaskError("任务还在执行，请先取消或等待结束")
         checkpoint = dict(task.get("checkpoint") or {})
+        if policy.get("mode") == "recipe":
+            submissions = checkpoint.get("submissions") or {}
+            for row in submissions.values():
+                if row.get("state") in {"intent", "unknown"} and not row.get("prompt_id"):
+                    raise ComfyUITaskError("提交结果未知，需要人工对账；禁止自动重新生成")
+            if collect_only and not (any(row.get("output_items") or row.get("prompt_id")
+                                         for row in submissions.values()) or any(checkpoint.get("prompt_ids") or [])):
+                raise ComfyUITaskError("没有可收集的远端任务")
+            if not collect_only:
+                # Only definite remote rejection/failure authorizes a new paid attempt.
+                for key, row in list(submissions.items()):
+                    if row.get("state") == "remote_failed":
+                        history = list(checkpoint.get("submission_history") or [])
+                        history.append(row)
+                        checkpoint["submission_history"] = history
+                        submissions.pop(key)
+                        ids = list(checkpoint.get("prompt_ids") or [])
+                        if int(key) < len(ids):
+                            ids[int(key)] = ""
+                        checkpoint["prompt_ids"] = ids
+            checkpoint["submissions"] = submissions
+            checkpoint["collect_only"] = collect_only
+        elif collect_only:
+            raise ComfyUITaskError("仅配方任务支持只收集产物")
         checkpoint["errors"] = []
         shots = int((task.get("input") or {}).get("shots") or 1)
+        if collect_only:
+            kept = []
+            for completed in checkpoint.get("completed") or []:
+                files = completed.get("files") or []
+                base = self.store.task_output_dir(task_id)
+                if files and all((base / str(name)).is_file() and (base / str(name)).stat().st_size > 0 for name in files):
+                    kept.append(completed)
+                else:
+                    row = (checkpoint.get("submissions") or {}).get(str(completed.get("index")))
+                    if row is not None:
+                        row["state"] = "collection_failed"
+                        row.pop("files", None)
+            checkpoint["completed"] = kept
+        elif policy.get("mode") == "recipe":
+            checkpoint.pop("pending_generation", None)
+            if (checkpoint.get("cancellation") or {}).get("state") == "confirmed":
+                checkpoint.pop("cancellation", None)
         done = len(checkpoint.get("completed") or [])
         if done >= shots:
             raise ComfyUITaskError("所有段都已完成，没有需要重试的内容")
         self.store.update_task(
             task_id, status="queued", checkpoint=checkpoint, error="", detail="",
+            request_receipts=[*(task.get("request_receipts") or []), *([
+                {"request_key": request_key, "owner_id": owner_id, "payload_hash": digest}
+            ] if request_key else [])],
             # 重试是新的一轮运行：清掉上一轮的结束时刻（开始时刻由 runner 重写）。
             finished_at=None,
             progress={"done": done, "total": shots, "failed": 0},
@@ -324,6 +434,9 @@ class ComfyUIJobManager:
         for task_id in targets:
             task = self.store.get_task(task_id)
             if task is None:
+                continue
+            if ((task.get("checkpoint") or {}).get("cancellation") or {}).get("state") == "pending_remote":
+                failed.append({"id": task_id, "reason": "远端停止尚未确认，保留任务记录用于对账"})
                 continue
             if str(task.get("status") or "") in COMFYUI_ACTIVE_STATUSES:
                 if not cancel_active:

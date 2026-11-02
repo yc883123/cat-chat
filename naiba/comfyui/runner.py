@@ -32,6 +32,7 @@ class ComfyUIRunner:
         self.app = app
         self.store = store
         self._queue: list[str] = []
+        self._delivering: set[str] = set()
         self._condition = threading.Condition()
         self._worker: threading.Thread | None = None
         self._shutdown = False
@@ -41,9 +42,11 @@ class ComfyUIRunner:
     # ---- 队列 ----
 
     def submit(self, task_id: str) -> None:
+        task = self.store.get_task(task_id)
         with self._condition:
-            if self._shutdown:
+            if self._shutdown or task_id in self._delivering or not task or task.get("status") != "queued":
                 return
+            self._delivering.add(task_id)
             self._queue.append(str(task_id))
             if self._worker is None or not self._worker.is_alive():
                 self._worker = threading.Thread(
@@ -65,6 +68,15 @@ class ComfyUIRunner:
         task = self.store.get_task(task_id)
         if task is None:
             return False
+        if (task.get("submission_policy") or {}).get("mode") == "recipe":
+            checkpoint = task.get("checkpoint") or {}
+            done_ids = {str(row.get("prompt_id") or "") for row in checkpoint.get("completed") or []}
+            unresolved = any(str(pid) not in done_ids for pid in checkpoint.get("prompt_ids") or [] if pid)
+            unresolved = unresolved or any(row.get("state") in {"intent", "unknown"}
+                                           for row in (checkpoint.get("submissions") or {}).values())
+            if task.get("status") in {"completed", "failed", "cancelled", "interrupted"} and not unresolved:
+                return False
+            return self._cancel_recipe(task_id, task, reason)
         if str(task.get("status") or "") in {"completed", "failed", "cancelled", "interrupted"}:
             return False
         cancel_event = None
@@ -73,15 +85,24 @@ class ComfyUIRunner:
             if task_id in self._queue:
                 with self._condition:
                     self._queue.remove(task_id)
+                    self._delivering.discard(task_id)
         # 两步取消：先请求中断正在执行的段，再把未完成的 prompt 从 ComfyUI 队列移除。
         checkpoint = task.get("checkpoint") or {}
         prompt_ids = [str(pid) for pid in (checkpoint.get("prompt_ids") or []) if pid]
         done_ids = {str(item.get("prompt_id") or "") for item in (checkpoint.get("completed") or [])
                     if isinstance(item, dict)}
         pending = [pid for pid in prompt_ids if pid and pid not in done_ids]
-        base = self._base_url()
+        base = self._task_base(task)
+        if cancel_event is not None:
+            cancel_event.set()
         if pending:
-            client.interrupt(base)
+            if (task.get("submission_policy") or {}).get("mode") == "recipe":
+                running = client.running_queue_ids(base)
+                # An unreadable queue is not authority to interrupt somebody else's work.
+                if running and running.issubset(set(pending)):
+                    client.interrupt(base)
+            else:
+                client.interrupt(base)
             client.delete_queue_items(base, pending)
         if cancel_event is not None:
             cancel_event.set()
@@ -90,6 +111,49 @@ class ComfyUIRunner:
         counts = self._progress_counts(checkpoint, shots)
         detail = f"已取消，完成 {counts['done']}/{shots} 段" if counts["done"] else "任务已取消"
         self._finish_terminal(task_id, "cancelled", detail, counts)
+        return True
+
+    def _cancel_recipe(self, task_id: str, task: dict[str, Any], reason: str) -> bool:
+        # A successful HTTP response is a request acknowledgement, not proof that
+        # a global interrupt has actually stopped the remote execution.
+        base = self._task_base(task)
+        checkpoint = task.get("checkpoint") or {}
+        completed = {str(row.get("prompt_id") or "") for row in checkpoint.get("completed") or []}
+        pending = [str(pid) for pid in checkpoint.get("prompt_ids") or [] if pid and pid not in completed]
+        submissions = checkpoint.get("submissions") or {}
+        uncertain = any(row.get("state") in {"intent", "unknown"} and not row.get("prompt_id")
+                        for row in submissions.values())
+        cancellation = {"state": "pending_remote", "requested_at": now_ms(), "reason": reason,
+                        "interrupt_ack": False, "delete_ack": False}
+        if pending:
+            running = client.running_queue_ids(base)
+            cancellation["requires_interrupt"] = running is None or bool(set(pending).intersection(running))
+            if running and running.issubset(set(pending)):
+                cancellation["interrupt_ack"] = bool(client.interrupt(base))
+            cancellation["delete_ack"] = bool(client.delete_queue_items(base, pending))
+        with self._registry_lock:
+            event = self._cancel_events.get(task_id)
+        # No submitted work and no in-flight worker is a provably local cancel.
+        if not pending and not uncertain and event is None:
+            cancellation["state"] = "confirmed"
+        with self.store._lock:
+            current = self.store.get_task(task_id) or task
+            current_checkpoint = current.get("checkpoint") or {}
+            current_checkpoint["cancellation"] = cancellation
+            self.store.update_task(task_id, checkpoint=current_checkpoint,
+                                   detail="已请求取消；远端停止尚未确认" if cancellation["state"] == "pending_remote" else reason)
+        if cancellation["state"] == "confirmed":
+            with self._condition:
+                if task_id in self._queue:
+                    self._queue.remove(task_id)
+                    self._delivering.discard(task_id)
+            self._finish_terminal(task_id, "cancelled", reason,
+                                  self._progress_counts(current_checkpoint, int((task.get("input") or {}).get("shots") or 1)))
+        elif event is None:
+            # Recovery/queued cancellation still needs a worker to reconcile its
+            # existing IDs; that worker is forbidden to submit any new work.
+            self.store.update_task(task_id, status="queued", finished_at=None)
+            self.submit(task_id)
         return True
 
     def shutdown(self, timeout: float = 5.0) -> None:
@@ -104,7 +168,10 @@ class ComfyUIRunner:
             task = self.store.get_task(task_id) or {}
             counts = self._progress_counts(
                 task.get("checkpoint") or {}, int((task.get("input") or {}).get("shots") or 0))
-            self._finish_terminal(task_id, "cancelled", "服务关闭，任务已取消", counts)
+            if (task.get("submission_policy") or {}).get("mode") == "recipe":
+                self.store.update_task(task_id, status="interrupted", detail="服务关闭，本地轮询停止；远端状态未确认", finished_at=None)
+            else:
+                self._finish_terminal(task_id, "cancelled", "服务关闭，任务已取消", counts)
         worker = self._worker
         if worker is not None:
             worker.join(timeout)
@@ -123,14 +190,30 @@ class ComfyUIRunner:
                 except Exception:  # noqa: BLE001 - 单任务异常不拖垮 worker
                     traceback.print_exc()
                     self._fail_task(task_id, "造梦机任务执行失败（内部错误）")
+                finally:
+                    with self._condition:
+                        self._delivering.discard(task_id)
+                    # An explicit retry may race the previous worker's final cleanup.
+                    task = self.store.get_task(task_id)
+                    if not self._shutdown and task and task.get("status") == "queued":
+                        self.submit(task_id)
 
     # ---- 单任务 ----
 
     def _base_url(self) -> str:
         return client.normalize_base_url(self.app.config.data.get("comfyui_url"))
 
+    def _task_base(self, task: dict[str, Any]) -> str:
+        policy = task.get("submission_policy") or {}
+        if policy.get("mode") == "recipe":
+            return client.normalize_base_url(policy["target_url"])
+        return self._base_url()
+
     def _run_task(self, task_id: str) -> None:
         task = self.store.get_task(task_id)
+        if task and (task.get("submission_policy") or {}).get("mode") == "recipe":
+            self._run_recipe_task(task_id)
+            return
         if not task or task.get("status") != "queued":
             return
         input_data = task.get("input") or {}
@@ -143,7 +226,7 @@ class ComfyUIRunner:
         # 同一任务执行周期内同一资产只上传一次（计划 §5.2）：任务重试/续跑会
         # 重新进入 _run_task，从快照引用重新读取并按需重新上传。
         media_upload_cache: dict[str, str] = {}
-        base = self._base_url()
+        base = self._task_base(task)
         cancel_event = threading.Event()
         with self._registry_lock:
             self._cancel_events[task_id] = cancel_event
@@ -293,6 +376,246 @@ class ComfyUIRunner:
             cancel_event.set()
             with self._registry_lock:
                 self._cancel_events.pop(task_id, None)
+
+    def _run_recipe_task(self, task_id: str) -> None:
+        """Persist intent before /prompt; absent evidence never authorizes regeneration."""
+        task = self.store.get_task(task_id)
+        if not task or task.get("status") != "queued":
+            return
+        base = self._task_base(task)
+        input_data = task.get("input") or {}
+        shots = int(input_data.get("shots") or 1)
+        checkpoint = dict(task.get("checkpoint") or {})
+        submissions = dict(checkpoint.get("submissions") or {})
+        completed = list(checkpoint.get("completed") or [])
+        prompt_ids = list(checkpoint.get("prompt_ids") or [])
+        checkpoint.update(submissions=submissions, completed=completed, prompt_ids=prompt_ids, errors=[])
+        cancel_event = threading.Event()
+        with self._registry_lock:
+            self._cancel_events[task_id] = cancel_event
+
+        if (self.store.get_task(task_id) or {}).get("status") != "queued":
+            with self._registry_lock:
+                self._cancel_events.pop(task_id, None)
+            return
+
+        def persist() -> None:
+            cancellation = ((self.store.get_task(task_id) or {}).get("checkpoint") or {}).get("cancellation")
+            if cancellation and (checkpoint.get("cancellation") or {}).get("state") != "confirmed":
+                checkpoint["cancellation"] = cancellation
+            self.store.update_task(task_id, checkpoint=checkpoint,
+                                   progress=self._progress_counts(checkpoint, shots),
+                                   result={"completed": completed, "outputs": self._all_output_names(completed)})
+
+        try:
+            self.store.update_task(task_id, status="running", started_at=now_ms(), error="", detail="")
+            self.store.append_event(task_id, {"type": "task_started", "message": f"开始生成 {shots} 段"})
+            done_indexes = {int(row["index"]) for row in completed}
+            upload_cache: dict[str, str] = {}
+            for index in range(shots):
+                if cancel_event.is_set():
+                    break
+                if index in done_indexes:
+                    continue
+                key = str(index)
+                row = submissions.get(key)
+                if row is None and index < len(prompt_ids) and prompt_ids[index]:
+                    row = {"index": index, "prompt_id": prompt_ids[index], "state": "submitted"}
+                    submissions[key] = row
+                    persist()
+                cancellation = ((self.store.get_task(task_id) or {}).get("checkpoint") or {}).get("cancellation")
+                if cancellation:
+                    checkpoint["cancellation"] = cancellation
+                if row is None:
+                    if cancellation:
+                        checkpoint["cancellation"]["state"] = "confirmed"
+                        break
+                    if checkpoint.get("collect_only"):
+                        checkpoint["pending_generation"] = list(range(index, shots))
+                        persist()
+                        break
+                    workflow = apply_overrides(input_data.get("prompt") or {},
+                                               input_data.get("overrides") or [], randomize_seeds=True)
+                    media = input_data.get("media_inputs") or []
+                    self._remove_unselected_optional_media(workflow, media, base)
+                    media_error = self._apply_media(base, workflow, media, upload_cache)
+                    if media_error:
+                        raise ValueError(media_error)
+                    self._validate_recipe_graph(base, workflow)
+                    if cancel_event.is_set():
+                        break
+                    cancellation = ((self.store.get_task(task_id) or {}).get("checkpoint") or {}).get("cancellation")
+                    if cancellation:
+                        checkpoint["cancellation"] = {**cancellation, "state": "confirmed"}
+                        break
+                    row = {"index": index, "state": "intent", "workflow": workflow,
+                           "workflow_fingerprint": self.store.payload_hash(workflow), "created_at": now_ms()}
+                    submissions[key] = row
+                    persist()
+                    prompt_id, reason = client.submit(base, workflow)
+                    if not prompt_id:
+                        row["state"] = "remote_failed" if getattr(reason, "definite", False) else "unknown"
+                        row["error"] = str(reason)
+                        persist()
+                        raise ValueError("远端拒绝提交：" + str(reason) if row["state"] == "remote_failed"
+                                         else "提交结果未知，需要人工对账；禁止重新生成：" + str(reason))
+                    row.update(state="submitted", prompt_id=prompt_id)
+                    while len(prompt_ids) <= index:
+                        prompt_ids.append("")
+                    prompt_ids[index] = prompt_id
+                    persist()
+                    self.store.append_event(task_id, {"type": "shot_submitted", "index": index,
+                                                       "prompt_id": prompt_id})
+                prompt_id = str(row.get("prompt_id") or "")
+                if not prompt_id:
+                    raise ValueError("提交结果未知，需要人工对账；禁止重新生成")
+                if row.get("state") == "remote_failed":
+                    raise ValueError("远端已失败；请显式重试生成")
+                cancellation = ((self.store.get_task(task_id) or {}).get("checkpoint") or {}).get("cancellation")
+                if cancellation:
+                    self._cancel_recipe(task_id, self.store.get_task(task_id) or task, str(cancellation.get("reason") or "用户取消"))
+                self._collect_recipe_shot(base, task_id, index, row, cancel_event, persist)
+                if cancel_event.is_set() or row.get("state") == "remote_cancelled":
+                    break
+                completed.append({"index": index, "prompt_id": prompt_id, "files": row["files"]})
+                done_indexes.add(index)
+                persist()
+                self.store.append_event(task_id, {"type": "shot_done", "index": index, "files": row["files"]})
+            counts = self._progress_counts(checkpoint, shots)
+            local_cancellation = checkpoint.get("cancellation") or {}
+            cancellation = local_cancellation if local_cancellation.get("state") == "confirmed" else (
+                ((self.store.get_task(task_id) or {}).get("checkpoint") or {}).get("cancellation") or local_cancellation)
+            if cancellation:
+                if len(completed) >= shots:
+                    cancellation["state"] = "confirmed"
+                checkpoint["cancellation"] = cancellation
+            if cancellation and cancellation.get("state") != "confirmed" and len(completed) < shots:
+                self.store.update_task(task_id, status="interrupted", checkpoint=checkpoint,
+                                       detail="取消请求尚未确认，需对账原远端任务", finished_at=None)
+            elif cancellation and len(completed) < shots:
+                self._finish_terminal(task_id, "cancelled", "远端停止已确认", counts, checkpoint)
+            elif cancel_event.is_set():
+                self.store.update_task(task_id, status="interrupted", checkpoint=checkpoint,
+                                       detail="本地轮询已停止，远端状态未确认", finished_at=None)
+            elif checkpoint.get("pending_generation"):
+                self._finish_terminal(task_id, "interrupted", "已有产物已收集，剩余段尚未生成；需显式重试生成", counts, checkpoint)
+            else:
+                self._finish_terminal(task_id, "completed", "", counts, checkpoint,
+                                      result={"completed": completed, "outputs": self._all_output_names(completed)})
+                self.store.append_event(task_id, {"type": "task_done", "status": "completed"})
+        except Exception as exc:
+            checkpoint["errors"] = [{"error": str(exc)}]
+            persist()
+            cancellation = checkpoint.get("cancellation") or {}
+            if cancel_event.is_set() or cancellation.get("state") == "pending_remote":
+                self.store.update_task(task_id, status="interrupted", checkpoint=checkpoint,
+                                       detail="远端停止尚未确认：" + str(exc), error=str(exc), finished_at=None)
+            else:
+                self._fail_task(task_id, str(exc))
+        finally:
+            cancel_event.set()
+            with self._registry_lock:
+                self._cancel_events.pop(task_id, None)
+
+    def _collect_recipe_shot(self, base: str, task_id: str, index: int,
+                             row: dict[str, Any], cancel_event: threading.Event, persist: Any) -> None:
+        prompt_id = str(row["prompt_id"])
+        deadline = now_ms() + SHOT_TIMEOUT_SECONDS * 1000
+        while not row.get("output_items") and not cancel_event.is_set():
+            if row.get("state") == "remote_completed":
+                raise ValueError("远端已完成但没有输出，需要人工检查；不会重新生成")
+            if now_ms() > deadline:
+                raise ValueError("远端结果仍未确认，请稍后对账；禁止重新生成")
+            try:
+                entry = client.history_entry(base, prompt_id)
+            except Exception:
+                entry = None
+            if entry is not None:
+                status = client.entry_status(entry)
+                if status in {"error", "failed"}:
+                    row.update(state="remote_failed", error=client.entry_error(entry))
+                    with self.store._lock:
+                        current = self.store.get_task(task_id) or {}
+                        cp = current.get("checkpoint") or {}
+                        if cp.get("cancellation"):
+                            cp["cancellation"]["state"] = "confirmed"
+                            self.store.update_task(task_id, checkpoint=cp)
+                    persist()
+                    raise ValueError("远端执行失败：" + str(row.get("error") or status))
+                if status in {"success", "completed"} or entry.get("outputs"):
+                    row.update(state="remote_completed", output_items=client.output_items(entry))
+                    persist()  # Save descriptors before /view; history can disappear after this.
+                    continue
+            queue = client.queue_ids(base)
+            current = self.store.get_task(task_id) or {}
+            cancellation = (current.get("checkpoint") or {}).get("cancellation") or {}
+            if cancellation and queue is not None and prompt_id not in queue and entry is None:
+                acknowledged = cancellation.get("interrupt_ack") if cancellation.get("requires_interrupt") else cancellation.get("delete_ack")
+                if acknowledged:
+                    cancellation["state"] = "confirmed"
+                    with self.store._lock:
+                        fresh = self.store.get_task(task_id) or current
+                        cp = fresh.get("checkpoint") or {}
+                        cp["cancellation"] = cancellation
+                        self.store.update_task(task_id, checkpoint=cp)
+                    row["state"] = "remote_cancelled"
+                    persist()
+                    return
+            if queue is not None and prompt_id not in queue and entry is None:
+                row["state"] = "unknown"
+                persist()
+                raise ValueError("远端历史与队列未找到原 prompt，需要人工对账；禁止重新提交")
+            cancel_event.wait(POLL_INTERVAL_SECONDS)
+        if cancel_event.is_set():
+            return
+        try:
+            files = self._save_outputs(task_id, index, base, row["output_items"])
+        except Exception as exc:
+            row.update(state="collection_failed", error=str(exc))
+            persist()
+            raise ValueError(f"产物收集失败，可只重试收集：{exc}") from exc
+        row.update(state="collected", files=files)
+
+    @staticmethod
+    def _validate_recipe_graph(base: str, workflow: dict[str, Any]) -> None:
+        """Require live classes, required fields and valid enums before paid submission."""
+        schemas: dict[str, Any] = {}
+        for node_id, node in workflow.items():
+            class_type = str(node.get("class_type") or "")
+            if class_type not in schemas:
+                schemas[class_type] = client.object_info_node(base, class_type)
+            schema = schemas[class_type]
+            if not isinstance(schema, dict) or not isinstance(schema.get("input"), dict):
+                raise ValueError(f"节点 {node_id}（{class_type}）声明不可用，未提交")
+            inputs = node.get("inputs") or {}
+            required = schema["input"].get("required") or {}
+            optional = schema["input"].get("optional") or {}
+            for field, spec in required.items():
+                kind = str(spec[0]) if isinstance(spec, (list, tuple)) and spec else ""
+                if kind.startswith("COMFY_AUTOGROW"):
+                    from naiba.comfyui.schema import parse_autogrow_decl
+                    group = parse_autogrow_decl(spec)
+                    if group is None:
+                        raise ValueError(f"节点 {node_id} 动态输入 {field} 无法校验")
+                    for index in range(int(group.get("min") or 0)):
+                        names = group.get("names") or []
+                        name = names[index] if names else f"{group['prefix']}{index}"
+                        if f"{field}.{name}" not in inputs:
+                            raise ValueError(f"节点 {node_id} 缺少必填输入 {field}.{name}")
+                elif field not in inputs:
+                    raise ValueError(f"节点 {node_id} 缺少必填输入 {field}")
+            for field, value in inputs.items():
+                if isinstance(value, list) and len(value) == 2:
+                    if str(value[0]) not in workflow or not isinstance(value[1], int):
+                        raise ValueError(f"节点 {node_id} 连线 {field} 无效")
+                    continue
+                spec = required.get(field, optional.get(field))
+                if not isinstance(spec, (list, tuple)) or not spec:
+                    continue
+                config = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
+                choices = spec[0] if isinstance(spec[0], list) else config.get("options")
+                if isinstance(choices, list) and value not in choices:
+                    raise ValueError(f"节点 {node_id} 输入 {field} 不在可用选项中")
 
     @staticmethod
     def _remove_unselected_optional_media(
@@ -485,6 +808,36 @@ class ComfyUIRunner:
                     continue
             return False, [], f"第 {index + 1} 段已被 ComfyUI 丢弃（服务重启或队列被清空）"
 
+    @staticmethod
+    def _validate_output_bytes(name: str, data: bytes) -> None:
+        from io import BytesIO
+        from pathlib import Path
+        from PIL import Image
+
+        suffix = Path(name).suffix.lower()
+        if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff"}:
+            try:
+                with Image.open(BytesIO(data)) as image:
+                    image.verify()
+                with Image.open(BytesIO(data)) as image:
+                    image.load()
+            except Exception as exc:
+                raise ValueError("图片产物无法完整解码") from exc
+            return
+        signatures = {
+            ".mp4": lambda: len(data) >= 24 and data[4:8] == b"ftyp",
+            ".mov": lambda: len(data) >= 24 and data[4:8] in {b"ftyp", b"moov", b"mdat"},
+            ".webm": lambda: len(data) >= 32 and data.startswith(bytes.fromhex("1a45dfa3")),
+            ".mkv": lambda: len(data) >= 32 and data.startswith(bytes.fromhex("1a45dfa3")),
+            ".wav": lambda: len(data) >= 44 and data.startswith(b"RIFF") and data[8:12] == b"WAVE",
+            ".mp3": lambda: len(data) >= 32 and (data.startswith(b"ID3") or data[:2] in {bytes.fromhex("fffb"), bytes.fromhex("fff3"), bytes.fromhex("fff2")}),
+            ".ogg": lambda: len(data) >= 32 and data.startswith(b"OggS"),
+            ".flac": lambda: len(data) >= 42 and data.startswith(b"fLaC"),
+            ".m4a": lambda: len(data) >= 24 and data[4:8] == b"ftyp",
+        }
+        if suffix not in signatures or not signatures[suffix]():
+            raise ValueError("产物不是可识别的媒体内容")
+
     def _save_outputs(self, task_id: str, index: int, base: str,
                       items: list[dict[str, str]]) -> list[str]:
         """把一段的产物字节写入受管目录，返回相对文件名列表。"""
@@ -496,6 +849,8 @@ class ComfyUIRunner:
             if not data:
                 raise ValueError(f"产物 {item.get('filename')} 内容为空")
             original = item["filename"].replace("\\", "/").split("/")[-1] or "output.bin"
+            if ((self.store.get_task(task_id) or {}).get("submission_policy") or {}).get("mode") == "recipe":
+                self._validate_output_bytes(original, data)
             name = f"{index + 1:03d}_{position:02d}_{original}"
             path = target_dir / name
             tmp = target_dir / f".{name}.tmp"

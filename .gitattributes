@@ -1,2 +1,4 @@
 # Vendored upstream Skills and LICENSE are verified against exact byte hashes.
 skills/ai-manju-skills/** -text
+# Recipe templates and license carry byte-level provenance hashes.
+naiba/super_agent/recipe_assets/** -text

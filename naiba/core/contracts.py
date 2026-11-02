@@ -339,6 +339,9 @@ class AppContext(Protocol):
     runs: Any
     tasks: Any
     jobs: Any
+    studio: Any
+    comfyui: Any
+    recipes: Any
     plans: Any
     catalog: Any
     vision: Any
@@ -555,6 +558,38 @@ MESSAGE_ORDER_KEYS: tuple[str, ...] = ("created_at", "rowid")
 #      原子写，只看状态就关流会让客户端整轮收不到终态事件（见该函数注释）；
 #   ② `storage.terminal_event_sequence` 查该 run 有没有落过终态事件（宽限判据）。
 TERMINAL_RUN_EVENT_TYPES: tuple[str, ...] = ("done", "cancelled", "error")
+
+# ---- 任务总管有界配方契约 ----
+# 一批一个总管节点；素材/提示词/工作流/模型/目标的 revision 摘要分别授权，
+# 原生 st-/cf- 执行事实留在各自存储。request_key 同载荷复用、异载荷拒绝。
+RECIPE_SCHEMA_VERSION = 1
+RECIPE_EXECUTOR_TYPE = "recipe_batch"
+RECIPE_SNAPSHOT_KEYS = ("recipe_batch_id", "recipe_id", "batch_id")
+RECIPE_MAX_ITEMS = 50
+RECIPE_MAX_IMAGES_PER_ITEM = 6
+RECIPE_MAX_TOTAL_BYTES = 300 * 1024 * 1024
+RECIPE_MAX_PROMPT_CHARS = 32000
+RECIPE_BATCH_STATUSES = (
+    "draft", "reverse_running", "review", "generation_running", "completed",
+    "partial", "paused", "cancelled", "interrupted", "needs_review",
+)
+RECIPE_ACTIONS = (
+    "edit", "confirm_reverse", "confirm_generate", "retry_reverse",
+    "retry_generate", "retry_collect", "pause", "continue", "cancel",
+)
+NATIVE_SUBMISSION_KEYS = (
+    "request_key", "payload_hash", "owner_id", "source_task_id", "submission_policy",
+    "request_receipts", "model_snapshot",
+)
+RECIPE_NATIVE_CHECKPOINT_KEYS = (
+    "submissions", "state", "workflow", "workflow_fingerprint", "prompt_id",
+    "outputs", "collection_failed", "target_url", "cancellation",
+)
+RECIPE_NATIVE_CANCELLATION_KEYS = (
+    "state", "requested_at", "interrupt_ack", "delete_ack", "reason", "requires_interrupt",
+)
+RECIPE_NATIVE_RAW_RESULT_KEY = "raw_result"
+RECIPE_NATIVE_RAW_SOURCE_KEY = "raw_result_source"
 
 # ---- Studio（工作台）任务事件契约 ----
 # Studio 生成任务走 naiba/studio 自己的生命周期（runner 用 ModelRuntime.complete() 的

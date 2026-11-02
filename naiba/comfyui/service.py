@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -257,6 +258,10 @@ class ComfyUIService:
             self.store.save_workflow(entry)
         elif self._refresh_unconfirmed_media(entry):
             self.store.save_workflow(entry)
+        entry["workflow_fingerprint"] = hashlib.sha256(json.dumps(
+            entry.get("prompt") or {}, sort_keys=True, ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
         return {"workflow": entry}, 200
 
     def api_workflow_create(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
@@ -394,11 +399,13 @@ class ComfyUIService:
         task = self.store.get_task(task_id)
         if task is None:
             return {"error": "任务不存在"}, 404
-        if str(task.get("status") or "") in {"completed", "failed", "cancelled", "interrupted"}:
+        recipe = (task.get("submission_policy") or {}).get("mode") == "recipe"
+        if not recipe and str(task.get("status") or "") in {"completed", "failed", "cancelled", "interrupted"}:
             return {"error": "任务已结束，无需取消"}, 409
         if not self.jobs.cancel(task_id):
             return {"error": "任务无法取消（可能已结束）"}, 409
-        return {"ok": True}, 200
+        cancellation = (((self.store.get_task(task_id) or {}).get("checkpoint") or {}).get("cancellation") or {})
+        return {"ok": True, **({"cancellation": cancellation} if recipe else {})}, 200
 
     def api_retry(self, task_id: str) -> tuple[dict[str, Any], int]:
         try:

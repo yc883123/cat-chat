@@ -99,6 +99,7 @@ def _super_agent_thread_payload(thread: Any, *, detail: bool = False) -> dict[st
         "summary": _super_agent_text(thread.summary, 1000),
         "chain_version": int(getattr(thread, "chain_version", 0) or 0),
         "current_node_id": thread.current_node_id,
+        "recipe_batch_id": str((thread.execution_snapshot or {}).get("recipe_batch_id") or ""),
         "current_stage_key": str(getattr(thread, "current_stage_key", "") or ""),
         "linked_conversation_ids": list(thread.linked_conversation_ids or []),
         "linked_book_refs": [
@@ -569,8 +570,11 @@ class NaibaChatApp:
             logger.exception("织书台流水线启动恢复失败")
             writer_recovery = None
         _ = writer_recovery
+        from naiba.super_agent.recipes import RecipeCoordinator
         from naiba.super_agent.domain import DomainCoordinator
 
+        self.recipes = RecipeCoordinator(self, self.super_agent)
+        self.recipes.recover()
         self.super_agent_domain = DomainCoordinator(self)
         self.super_agent.domain_router = self.super_agent_domain
         self.super_agent_domain.runtime.start()
@@ -1010,9 +1014,38 @@ class NaibaChatApp:
         except (ValueError, RuntimeError) as exc:
             return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
 
+    def api_super_agent_recipes(self) -> tuple[dict[str, Any], int]:
+        return self.recipes.catalog(self._super_agent_owner()), HTTPStatus.OK
+
+    def api_super_agent_save_recipe(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        return self._recipe_api(lambda: self.recipes.save_recipe(self._super_agent_owner(), body), created=True)
+
+    def api_super_agent_create_recipe_batch(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        return self._recipe_api(lambda: self.recipes.create(self._super_agent_owner(), body), created=True)
+
+    def api_super_agent_recipe(self, thread_id: str) -> tuple[dict[str, Any], int]:
+        return self._recipe_api(lambda: self.recipes.detail(self._super_agent_owner(), thread_id))
+
+    def api_super_agent_recipe_action(self, thread_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        return self._recipe_api(lambda: self.recipes.action(self._super_agent_owner(), thread_id, body))
+
+    @staticmethod
+    def _recipe_api(operation: Any, *, created: bool = False) -> tuple[dict[str, Any], int]:
+        try:
+            return operation(), HTTPStatus.CREATED if created else HTTPStatus.OK
+        except LookupError as exc:
+            return {"error": str(exc)}, HTTPStatus.NOT_FOUND
+        except (ValueError, RuntimeError) as exc:
+            message = str(exc)
+            conflict = any(word in message.lower() for word in ("revision", "版本", "conflict", "冲突"))
+            return {"error": message}, HTTPStatus.CONFLICT if conflict else HTTPStatus.BAD_REQUEST
+
     def api_super_agent_action(self, thread_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         from naiba.super_agent.baseline import PreflightRejected
         try:
+            nodes = self.super_agent.list_nodes(self._super_agent_owner(), thread_id)
+            if any(node.executor_type == "recipe_batch" for node in nodes):
+                return self.api_super_agent_recipe_action(thread_id, body)
             result = self.super_agent_domain.action(self._super_agent_owner(), thread_id, body)
             return {"result": _super_agent_action_payload(result)}, HTTPStatus.OK
         except LookupError as exc:
@@ -2618,6 +2651,12 @@ class NaibaChatApp:
                 keys.update(comfyui.referenced_upload_paths())
             except (OSError, ValueError):
                 pass
+        recipes = getattr(self, "recipes", None)
+        if recipes is not None:
+            try:
+                keys.update(recipes.referenced_upload_paths())
+            except (OSError, ValueError):
+                pass
         background = str(((self.config.data.get("chat_background") or {}).get("image") or "")).strip()
         if background:
             key = normalized_path_key(background)
@@ -2771,6 +2810,13 @@ class NaibaChatApp:
                     return True
             except (OSError, ValueError):
                 return True  # 判定不了时宁可保留
+        recipes = getattr(self, "recipes", None)
+        if recipes is not None:
+            try:
+                if normalized_path_key(target) in recipes.referenced_upload_paths():
+                    return True
+            except (OSError, ValueError):
+                return True
         background = self.config.data.get("chat_background") or {}
         image = str(background.get("image") or "").strip()
         if not image:

@@ -1,0 +1,30 @@
+Write one ready-to-use MiniMax H3 Ref2VA prompt in one pass for the supplied ordered reference images and this single item only.
+Requirements: {{requirements}}
+Requested duration: {{duration_seconds}} seconds (within 4–15 seconds). Supplied image count: {{image_count}} (1–6).
+
+This is a bounded image-only reference recipe. Use exactly the supplied contiguous labels <Picture 1> through <Picture {{image_count}}> with no gaps, no renumbering, no unused supplied images, and no nonexistent assets. Label N maps to the Nth supplied image and to ref_images.ref_image_(N-1), not to its filename or subject number. Never invent <Audio N> or <Video N>; this recipe has no audio/video reference inputs. Native generated voices, effects and music remain allowed. <Subject N> labels identify reusable visible content, not media slot numbers; define every subject you use before referring to it elsewhere.
+
+Return one text result with exactly six nonempty fields, once each, in this exact order:
+subject_definitions: ...
+summary: ...
+retention_analysis: ...
+detailed_description: ...
+overall_soundscape: ...
+non_diegetic_music: ...
+
+No markdown headings, fences, JSON, explanations, plans, alternatives, automatic story segmentation, separate videos, extra fields, scheduler instructions, tool calls or batch execution. Write all six sections in English; preserve dialogue/lyrics verbatim in their original language inside <d>[Language] ...</d> and preserve visible scene text verbatim inside English double quotes. Do not invent dialogue or hidden image content. Keep dialogue and actions feasible in the requested single clip; do not truncate a user's words to force a fit.
+
+subject_definitions: Give separately tracked referenced content its own line. Use <Subject N> for people, objects, settings, clothes, style or actions drawn from images; cite their actual <Picture N> sources. Use standalone <Picture N> only when the image itself anchors a first frame, keyframe, last frame or storyboard. Do not equate Subject numbers with Picture numbers. Definitions must establish stable roles and visible features from the supplied image. Cover every supplied image.
+
+summary: One short paragraph beginning with a square-bracketed task prefix such as [reference generation], [keyframe completion], or [keyframe completion + reference generation] as actually applicable. No video editing, continuation or audio reference/reuse tasks in this image-only recipe. Mention only already-defined subjects and valid source pictures; describe their actual roles without adding new labels.
+
+retention_analysis: One line per independently defined label. State where it appears and use fully_preserved, partially_preserved, attribute_transfer or weak_reference consistently with its defined role. Referencing an image inside a subject definition alone does not require a separate picture definition. Do not use speaker (Sx) IDs in this section.
+
+detailed_description: Begin with one or two English sentences establishing the visible style, then [Shot 1] without a timestamp. Develop composition, visible subject features and positions, environment, lighting, action/state change, camera movement, current sounds and where references actually take effect. Prefer one shot unless cuts are requested. Number requested subsequent shots sequentially; use [Shot N] At MM:SS.mmm, ... with strictly increasing cut times inside the duration. Do not invent automatic story segmentation. Use detail proportionate to the single clip; prioritize a complete feasible spoken timeline rather than a mechanical word count. Write camera type/amplitude/speed as natural action, not appended keywords. Reuse subject labels at first appearance and relevant later appearances without identity drift.
+
+Assign stable speaker IDs (S1), (S2) in order of actual vocal events, writing <Subject N> (Sx) for a referenced speaker. A non-speaking subject has no speaker ID. Identify delivery and speaker outside <d>; place only [Language] and original dialogue/lyrics inside. For voiceover use 'says in an off-screen voiceover' and immediately state that corresponding on-screen lips remain completely closed. For dialogue crossing an explicitly requested cut use <scenetrans> and continuity wording; <cutoff> only for a user-requested interrupted line. Keep dialogue, singing, diegetic music and synchronized sound in detailed_description.
+
+overall_soundscape: 1–4 English sentences in one continuous paragraph for ambience, physical sounds and non-verbal human sounds, not repeated dialogue. N/A only when complete silence is requested.
+non_diegetic_music: 1–3 English sentences about audience-only instrumentation, tempo, rhythm and dynamics, or N/A when absent. No invented reference soundtrack.
+
+Do not output a seventh duration field. The caller binds requested duration separately. The official graph snaps to 17k+5 frames at 24fps, so rendered/container duration is not guaranteed exact. The repository shortdrama skill is a reference for tag-to-slot mapping only; do not inherit its parser, segmentation or fire-all scheduler.

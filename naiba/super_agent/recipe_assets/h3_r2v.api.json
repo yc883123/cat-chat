@@ -1,0 +1,334 @@
+{
+  "115": {
+    "class_type": "ResolutionSelector",
+    "inputs": {
+      "aspect_ratio": "16:9 (Widescreen)",
+      "megapixels": 0.4,
+      "multiple": 32
+    }
+  },
+  "119": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
+    }
+  },
+  "120": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    }
+  },
+  "121": {
+    "class_type": "VAEDecodeAudio",
+    "inputs": {
+      "samples": [
+        "125",
+        0
+      ],
+      "vae": [
+        "120",
+        0
+      ]
+    }
+  },
+  "122": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "125",
+        0
+      ],
+      "vae": [
+        "119",
+        0
+      ]
+    }
+  },
+  "123": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+      "sampler_name": "res_multistep"
+    }
+  },
+  "124": {
+    "class_type": "BasicScheduler",
+    "inputs": {
+      "denoise": 1,
+      "model": [
+        "127",
+        0
+      ],
+      "scheduler": "simple",
+      "steps": [
+        "142",
+        0
+      ]
+    }
+  },
+  "125": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "guider": [
+        "126",
+        0
+      ],
+      "latent_image": [
+        "136",
+        1
+      ],
+      "noise": [
+        "129",
+        0
+      ],
+      "sampler": [
+        "123",
+        0
+      ],
+      "sigmas": [
+        "124",
+        0
+      ]
+    }
+  },
+  "126": {
+    "class_type": "BasicGuider",
+    "inputs": {
+      "conditioning": [
+        "136",
+        0
+      ],
+      "model": [
+        "141",
+        0
+      ]
+    }
+  },
+  "127": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "128": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "device": "default",
+      "type": "minimax"
+    }
+  },
+  "129": {
+    "class_type": "RandomNoise",
+    "inputs": {
+      "noise_seed": 261662374822964
+    }
+  },
+  "130": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "audio": [
+        "121",
+        0
+      ],
+      "bit_depth": 8,
+      "fps": 24,
+      "images": [
+        "122",
+        0
+      ]
+    }
+  },
+  "131": {
+    "class_type": "ComfyMathExpression",
+    "inputs": {
+      "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "values.a": [
+        "132",
+        0
+      ]
+    }
+  },
+  "132": {
+    "class_type": "PrimitiveFloat",
+    "inputs": {
+      "value": 5
+    }
+  },
+  "136": {
+    "class_type": "MiniMaxH3ReferenceToVideo",
+    "inputs": {
+      "audio_vae": [
+        "120",
+        0
+      ],
+      "clip": [
+        "128",
+        0
+      ],
+      "height": [
+        "115",
+        1
+      ],
+      "length": [
+        "131",
+        1
+      ],
+      "prompt": [
+        "138",
+        0
+      ],
+      "ref_image_size": "match",
+      "ref_images.ref_image_0": [
+        "137",
+        0
+      ],
+      "ref_images.ref_image_1": [
+        "139",
+        0
+      ],
+      "ref_images.ref_image_2": [
+        "recipe_ref_image_3",
+        0
+      ],
+      "ref_images.ref_image_3": [
+        "recipe_ref_image_4",
+        0
+      ],
+      "ref_images.ref_image_4": [
+        "recipe_ref_image_5",
+        0
+      ],
+      "ref_images.ref_image_5": [
+        "recipe_ref_image_6",
+        0
+      ],
+      "vae": [
+        "119",
+        0
+      ],
+      "width": [
+        "115",
+        0
+      ]
+    }
+  },
+  "137": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "recipe_input_1.png"
+    }
+  },
+  "138": {
+    "class_type": "PrimitiveStringMultiline",
+    "inputs": {
+      "value": ""
+    }
+  },
+  "139": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "recipe_input_2.png"
+    }
+  },
+  "141": {
+    "class_type": "ComfySwitchNode",
+    "inputs": {
+      "on_false": [
+        "127",
+        0
+      ],
+      "on_true": [
+        "145",
+        0
+      ],
+      "switch": [
+        "146",
+        0
+      ]
+    }
+  },
+  "142": {
+    "class_type": "ComfySwitchNode",
+    "inputs": {
+      "on_false": [
+        "143",
+        0
+      ],
+      "on_true": [
+        "144",
+        0
+      ],
+      "switch": [
+        "146",
+        0
+      ]
+    }
+  },
+  "143": {
+    "class_type": "PrimitiveInt",
+    "inputs": {
+      "value": 20
+    }
+  },
+  "144": {
+    "class_type": "PrimitiveInt",
+    "inputs": {
+      "value": 4
+    }
+  },
+  "145": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "lora_name": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+      "model": [
+        "127",
+        0
+      ],
+      "strength_model": 1
+    }
+  },
+  "146": {
+    "class_type": "PrimitiveBoolean",
+    "inputs": {
+      "value": false
+    }
+  },
+  "92": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "codec": "auto",
+      "filename_prefix": "video/recipe_h3_r2v",
+      "format": "auto",
+      "video": [
+        "130",
+        0
+      ]
+    }
+  },
+  "recipe_ref_image_3": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "recipe_input_3.png"
+    }
+  },
+  "recipe_ref_image_4": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "recipe_input_4.png"
+    }
+  },
+  "recipe_ref_image_5": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "recipe_input_5.png"
+    }
+  },
+  "recipe_ref_image_6": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "recipe_input_6.png"
+    }
+  }
+}

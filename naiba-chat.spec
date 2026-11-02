@@ -65,6 +65,8 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(root / "public"), "public"),
+        *Tree(str(root / "naiba" / "super_agent" / "recipe_assets"),
+              prefix="naiba/super_agent/recipe_assets", excludes=["__pycache__"]),
         *Tree(
             str(root / "skills"),
             prefix="skills",

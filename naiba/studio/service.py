@@ -137,7 +137,7 @@ class StudioService:
 
     # ---- 生成任务 ----
 
-    def api_generate(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    def prepare_generation(self, body: dict[str, Any]) -> dict[str, Any]:
         body = body if isinstance(body, dict) else {}
         model_key = str(body.get("model_key") or "").strip()
         model_name = str(body.get("model_name") or "").strip()[:256]
@@ -148,12 +148,12 @@ class StudioService:
         custom_id = str(body.get("custom_id") or "").strip()
         vars_raw = body.get("vars") or {}
         if not isinstance(vars_raw, dict):
-            return {"error": "vars 必须是对象"}, 400
+            raise ValueError("vars 必须是对象")
         try:
             # 图片引用是服务端权威校验：客户端只能给受管 uploads 里的真实图片。
             images = validate_image_refs(self.app.paths.data_dir, body.get("images"))
         except StudioImageError as exc:
-            return {"error": str(exc)}, 400
+            raise ValueError(str(exc))
         title = ""
         source_body = ""
         origin_label = ""
@@ -165,24 +165,24 @@ class StudioService:
                 module = str(meta.get("module") or "global")
                 origin_label = "预设库"
             except LookupError:
-                return {"error": "工作台条目不存在"}, 404
+                raise LookupError("工作台条目不存在")
             except CatalogError as exc:
-                return {"error": str(exc)}, 404
+                raise LookupError(str(exc))
 
         elif custom_id:
             try:
                 meta = self.custom.get(custom_id)
             except LookupError:
-                return {"error": "自定义条目不存在"}, 404
+                raise LookupError("自定义条目不存在")
             except ValueError as exc:
-                return {"error": str(exc)}, 400
+                raise ValueError(str(exc))
             title = str(meta.get("title") or "")
             module = str(meta.get("module") or "global")
             source_body = str(meta.get("body") or "")
             origin_label = "自定义"
 
         elif not user_request:
-            return {"error": "请选择条目或填写输入"}, 400
+            raise ValueError("请选择条目或填写输入")
         else:
             # 自由输入：用户输入即全文（未选条目/自定义条目）。
             module = "global"
@@ -193,7 +193,7 @@ class StudioService:
         else:
             content, unresolved = user_request, []
         if not content.strip():
-            return {"error": "生成内容为空：请填写输入或变量"}, 400
+            raise ValueError("生成内容为空：请填写输入或变量")
         input_data = {
             "content": content,
             "model_key": model_key,
@@ -210,13 +210,21 @@ class StudioService:
             "unresolved_vars": unresolved,
             "images": images,
         }
+        if not model_name:
+            raise ValueError("请选择模型；可用模型来自设置页的模型检查结果")
+        if isinstance(body.get("model_snapshot"), dict):
+            input_data["model_snapshot"] = dict(body["model_snapshot"])
+        return input_data
+
+    def api_generate(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         try:
+            input_data = self.prepare_generation(body)
             task = self.jobs.submit(input_data)
-        except ValueError as exc:
-            return {"error": str(exc)}, 400
         except LookupError as exc:
             return {"error": str(exc)}, 404
-        return {"task": task, "unresolved_vars": unresolved}, 201
+        except ValueError as exc:
+            return {"error": str(exc)}, 400
+        return {"task": task, "unresolved_vars": input_data["unresolved_vars"]}, 201
 
     def api_vision(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         """图片反推：优先用当前参数里选中的模型，识别不了再用视觉配置兜底。

@@ -125,6 +125,28 @@ def object_info_node(base: str, class_type: str, timeout: int = 8) -> dict[str, 
     return node if isinstance(node, dict) else None
 
 
+class SubmissionFailure(str):
+    """String-compatible legacy reason, with evidence of a definite rejection."""
+
+    def __new__(cls, message: str, *, definite: bool = False):
+        value = super().__new__(cls, message)
+        value.definite = definite
+        return value
+
+
+def running_queue_ids(base: str) -> set[str] | None:
+    """Only running IDs can justify the otherwise global /interrupt endpoint."""
+    try:
+        with _DIRECT_OPENER.open(f"{normalize_base_url(base)}/queue", timeout=15) as resp:
+            data = json.loads(resp.read(200000).decode("utf-8", errors="replace"))
+        if not isinstance(data, dict) or not isinstance(data.get("queue_running"), list):
+            return None
+        return {str(row[1]) for row in data["queue_running"]
+                if isinstance(row, (list, tuple)) and len(row) > 1}
+    except Exception:
+        return None
+
+
 def submit(base: str, workflow: dict[str, Any]) -> tuple[str, str]:
     """提交单个工作流到 /prompt，返回 (prompt_id, 失败原因)；成功时原因空串。"""
     payload = {"prompt": workflow, "client_id": uuid.uuid4().hex}
@@ -146,7 +168,7 @@ def submit(base: str, workflow: dict[str, Any]) -> tuple[str, str]:
         except Exception:  # noqa: BLE001 - 读不到响应体时只报状态码
             detail = ""
         reason = _summarize_reject(exc.code, detail)
-        return "", reason
+        return "", SubmissionFailure(reason, definite=exc.code in {400, 422})
     except Exception as exc:  # noqa: BLE001 - 网络异常带上类型便于诊断
         return "", f"{type(exc).__name__}: {exc}"
 

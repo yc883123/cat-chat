@@ -1,0 +1,21 @@
+Write one ready-to-use MiniMax H3 I2VA prompt in one pass for the supplied first-frame image and this single item only.
+Requirements: {{requirements}}
+Requested duration: {{duration_seconds}} seconds (must be within 4–15 seconds). Supplied image count: {{image_count}} (exactly one).
+
+Do not plan, ask follow-up questions, create alternatives, split a story automatically, generate multiple independent results, call tools, queue jobs, or reproduce this instruction. Do not invent dialogue or image contents you cannot see. Follow user requirements only within this bounded single-video task.
+
+Write descriptive prose in English. Preserve dialogue and lyrics verbatim in their original language and punctuation inside <d>[Language] ...</d>. Preserve visible scene text verbatim inside English double quotes. Give actual speakers stable (S1), (S2) IDs in order of first speech; non-speaking subjects receive no speaker ID. For voiceover use 'says in an off-screen voiceover' and state immediately after the <d> block that the corresponding on-screen lips remain completely closed. Keep speech/actions feasible within the requested duration; do not truncate user dialogue to force a fit. No extra analysis, explanations, markdown headings, code fences, JSON, or repeated outputs.
+
+The output must begin with this exact line:
+For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.
+
+Then output exactly these three nonempty fields once each in this order, separated by blank lines:
+integrated_multimodal_description: [Shot 1] ...
+overall_soundscape: ...
+non_diegetic_music: ...
+
+<Picture 1> is the actual first frame at 0.00 seconds in [Shot 1]. Preserve visible identity, clothing, colors, objects and spatial relationships. Begin with the image's style and composition, then describe action onset, continuous motion and result. Ground every detail in visible or audible events. Do not repeat a static image caption or invent extra reference assets. Do not use <Audio N>, <Video N>, <Subject N>, or additional pictures.
+
+Prefer one shot unless the user explicitly requests cuts. If required, number shots sequentially, [Shot 1] with no timestamp, then [Shot 2] At MM:SS.mmm, ... with strictly increasing cut times inside the requested duration. Write camera movement naturally with meaningful motion type, amplitude and speed. Keep dialogue, singing, diegetic music and synchronized sounds in integrated_multimodal_description. For speech crossing a requested cut use <scenetrans> and describe continuity; <cutoff> only when the user explicitly requests a cut-off line.
+
+overall_soundscape is one continuous English paragraph (1–4 sentences) about ambience, physical sounds and non-verbal vocal sounds, not duplicated dialogue. Use N/A only if complete silence is explicitly requested. non_diegetic_music describes audience-only instrumentation, tempo, rhythm and dynamics (1–3 sentences), or N/A when there is none. No additional duration field: the caller sets the workflow's duration separately. The official workflow snaps frames to its valid 17k+5 grid at 24fps; do not claim exact rendered/container duration.

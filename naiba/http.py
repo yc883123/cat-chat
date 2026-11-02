@@ -261,8 +261,13 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/agents":
             self._json({"agents": self.app.config.public_agents(), "default_agent_id": self.app.config.default_agent_id()})
         # ---- Super-agent 任务总管只读接口 ----
+        elif path == "/api/super-agent/recipes":
+            self._json(*self.app.api_super_agent_recipes())
         elif path == "/api/super-agent/threads":
             self._json(*self.app.api_super_agent_threads())
+        elif path.startswith("/api/super-agent/threads/") and path.endswith("/recipe"):
+            thread_id = path[len("/api/super-agent/threads/") : -len("/recipe")].strip("/")
+            self._json(*self.app.api_super_agent_recipe(thread_id))
         elif path.startswith("/api/super-agent/threads/") and path.endswith("/nodes"):
             thread_id = path[len("/api/super-agent/threads/") : -len("/nodes")].strip("/")
             self._json(*self.app.api_super_agent_nodes(thread_id))
@@ -866,8 +871,15 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/studio/generate":
             # 工作台生成：Studio 自有异步任务（不创建普通会话，不产生 chat Run）。
             self._json(*self.app.studio.api_generate(body))
+        elif path == "/api/super-agent/recipes":
+            self._json(*self.app.api_super_agent_save_recipe(body))
+        elif path == "/api/super-agent/recipe-batches":
+            self._json(*self.app.api_super_agent_create_recipe_batch(body))
         elif path == "/api/super-agent/threads":
             self._json(*self.app.api_super_agent_create_thread(body))
+        elif path.startswith("/api/super-agent/threads/") and path.endswith("/recipe/actions"):
+            thread_id = path[len("/api/super-agent/threads/"):-len("/recipe/actions")].strip("/")
+            self._json(*self.app.api_super_agent_recipe_action(thread_id, body))
         elif path.startswith("/api/super-agent/threads/") and path.endswith("/actions"):
             thread_id = path[len("/api/super-agent/threads/"):-len("/actions")].strip("/")
             self._json(*self.app.api_super_agent_action(thread_id, body))

@@ -37,7 +37,15 @@ const comfyui = {
 // 入口 / 生命周期
 // ============================================================
 
+// Composition root owns the destination; this module only emits a frozen intent.
+let workflowIntentHandler = null;
+export function setWorkflowIntentHandler(handler) { workflowIntentHandler = handler; }
+
 export function bindComfyuiEvents() {
+  $("#comfyuiRecipeHandoff")?.addEventListener("click", () => {
+    if (!comfyui.detail || !workflowIntentHandler) return toast("请先选择工作流");
+    workflowIntentHandler(JSON.parse(JSON.stringify({ workflow: comfyui.detail, overrides: collectOverrides(), media_inputs: collectMediaInputs(), shots: Number($("#comfyuiShots")?.value || 1) })));
+  });
   if (comfyui.unsubscribePage) comfyui.unsubscribePage();
   comfyui.unsubscribePage = onStudioPageChange((page) => {
     if (page === "comfyui") {

@@ -641,6 +641,7 @@
                     <input id="comfyuiShots" type="number" min="1" max="200" value="1" aria-label="生成张数">
                   </label>
                   <button class="control-button" id="comfyuiSubmit" type="button" disabled>开始生成</button>
+                  <button class="control-button" id="comfyuiRecipeHandoff" type="button">交给任务总管 · 制作配方</button>
                 </div>
               </div>
             </section>
@@ -1681,6 +1682,7 @@
             <div class="super-agent-sidebar-brand"><span class="super-agent-brand-mark" aria-hidden="true">总</span><div><strong>任务总管</strong><small>Super-agent · V1</small></div></div>
             <nav class="super-agent-app-nav" id="superAgentAppNav" aria-label="应用视图"><button type="button" data-super-view="chat">对话</button><button type="button" data-super-view="studio">工作台</button><button type="button" data-super-view="super-agent" aria-current="page">任务总管</button></nav>
             <button class="control-button primary super-agent-new-task" id="superAgentCreate" type="button"><span aria-hidden="true">＋</span> 新建任务</button>
+            <button class="control-button super-agent-new-task" id="superAgentRecipeCreate" type="button">图片 → 提示词 → 视频配方</button>
             <div class="super-agent-panel-head"><strong>我的任务</strong><span id="superAgentThreadCount">0</span></div>
             <div class="super-agent-filters" id="superAgentFilters" role="group" aria-label="筛选任务">
               <button type="button" data-super-filter="all" aria-pressed="true">全部</button>
@@ -1707,6 +1709,7 @@
                 <section class="super-agent-metric"><h2>最近更新</h2><strong id="superAgentUpdatedAt">—</strong><small>以任务记录为准</small></section>
               </div>
               <section class="super-agent-section super-agent-decision-section" id="superAgentDecisionSection" hidden><div class="super-agent-section-title"><h2>最近系统决策</h2><span class="super-agent-chain-meta" id="superAgentDecisionAt"></span></div><p class="super-agent-summary" id="superAgentSummary"></p></section>
+              <section class="super-agent-section super-agent-recipe" id="superAgentRecipeBatch" hidden aria-label="配方批次审核"></section>
               <section class="super-agent-section super-agent-supervision" id="superAgentSupervision" hidden aria-live="polite"></section>
               <section class="super-agent-section super-agent-stage-section"><div class="super-agent-section-title"><h2>任务步骤</h2><span class="super-agent-chain-meta" id="superAgentChainMeta"></span></div><div class="super-agent-stage-chain" id="superAgentStageChain"><div class="super-agent-node-list" id="superAgentNodeList"></div></div></section>
               <section class="super-agent-section"><div class="super-agent-section-title"><h2>时间线</h2><span class="super-agent-chain-meta">最近活动在前</span></div><div class="super-agent-event-list" id="superAgentEventList"></div></section>
@@ -1722,6 +1725,38 @@
         </div>
       </section>
 
+      <dialog id="superAgentRecipeDialog" class="writer-dialog super-agent-recipe-dialog" aria-labelledby="superAgentRecipeTitle">
+        <form id="superAgentRecipeForm" class="writer-dialog-form" novalidate>
+          <div class="super-agent-section-title"><h2 id="superAgentRecipeTitle">图片视频配方</h2><button type="button" class="control-button tiny" data-recipe-close>关闭</button></div>
+          <p class="writer-dialog-hint">先保存素材清单，再分别确认反推与生成。创建不会调用模型。原图上传到受管目录；反推确认后会发送给所选供应商。不会按文件夹名称暗配图片。</p>
+          <label>配方<select id="recipeSelect"></select></label><p id="recipeDescription" class="writer-dialog-hint"></p>
+          <label>任务名称<input id="recipeTitle" maxlength="160" placeholder="本次视频批次"></label>
+          <div class="super-agent-create-grid"><label>反推供应商<select id="recipeProvider"></select></label><label>反推模型<select id="recipeModel"></select></label></div>
+          <button class="control-button tiny" id="recipeModelsRefresh" type="button">重新读取模型</button><p class="writer-dialog-hint" id="recipeModelHint" role="status">仅用于图片反推；视频模型由工作流决定，不会随此选择改变。</p>
+          <div class="super-agent-create-grid"><label>请求时长（4–15 秒）<input id="recipeDuration" type="number" min="4" max="15" step="1" value="15"></label><label>每项生成次数<input id="recipeShots" type="number" min="1" max="200" value="1"></label></div>
+          <p class="writer-dialog-hint">实际视频长度按工作流帧对齐，15 秒可能约为 15.08 秒。最终生效参数以生成确认页为准。</p>
+          <div id="recipeEffectiveControls"></div>
+          <div class="recipe-import-actions"><label>导入原图（多选）<input id="recipeImages" type="file" accept="image/*" multiple></label><label>导入目录（保留来源名）<input id="recipeFolder" type="file" accept="image/*" multiple webkitdirectory></label></div>
+          <div id="recipeGrouping" hidden><p class="writer-dialog-hint">R2V：每组 1–6 张图片。勾选素材，按当前列表顺序显式建立一组；组内 Picture 1…N 连续编号。不接受音频或视频。</p><button id="recipeAddGroup" class="control-button" type="button">用已勾选图片建立一组</button></div>
+          <div id="recipeUploadList" class="recipe-upload-list" aria-label="原图上传结果"></div><div id="recipeDraftItems" class="recipe-items"></div><div id="recipeSharedMedia"></div>
+          <p id="recipeCreateError" class="writer-dialog-error" role="alert"></p>
+          <div class="writer-dialog-actions"><button class="control-button" data-recipe-close type="button">保留草稿并关闭</button><button id="recipeCreateSubmit" class="control-button primary" type="submit">保存批次，进入审核</button></div>
+        </form>
+      </dialog>
+      <dialog id="superAgentRecipeCustomDialog" class="writer-dialog super-agent-recipe-dialog" aria-labelledby="recipeCustomTitle">
+        <form id="recipeCustomForm" class="writer-dialog-form" novalidate>
+          <div class="super-agent-section-title"><h2 id="recipeCustomTitle">将当前工作流保存为配方</h2><button type="button" class="control-button tiny" id="recipeCustomClose">关闭</button></div>
+          <p class="writer-dialog-hint">所有目标必须手动指定节点与字段，不按名称或唯一文本框自动绑定。不会修改原工作流与造梦机草稿。保存配方不授权执行。</p>
+          <p id="recipeCustomWorkflow"></p><label>配方名称<input id="recipeCustomName" maxlength="160"></label>
+          <label>每项提示词写入的精确槽位<select id="recipePromptSlot"><option value="">请明确选择节点 / 字段</option></select></label>
+          <fieldset><legend>图片槽位与用途（仅勾选需要的入口）</legend><div id="recipeCustomMedia"></div></fieldset>
+          <label>提词库模板<select id="recipeCustomTemplate"></select></label>
+          <div class="super-agent-create-grid"><label>结果规则<select id="recipeResultType"><option value="text">完整文本</option><option value="json">严格 JSON 字段</option></select></label><label>JSON 字段名（选择 JSON 时必填）<input id="recipeResultField" placeholder="prompt"></label></div>
+          <details><summary>固定参数快照</summary><pre id="recipeCustomOverrides" class="recipe-snapshot"></pre></details>
+          <p id="recipeCustomError" class="writer-dialog-error" role="alert"></p><button class="control-button primary" id="recipeCustomSave" type="submit">仅保存配方并去准备素材</button>
+        </form>
+      </dialog>
+      <dialog id="recipeReviewDialog" class="writer-dialog super-agent-recipe-dialog" aria-labelledby="recipeReviewTitle"><div class="writer-dialog-form"><h2 id="recipeReviewTitle">核对本次操作</h2><div id="recipeReviewBody"></div><p class="writer-dialog-error" id="recipeReviewError" role="alert"></p><div class="writer-dialog-actions"><button id="recipeReviewCancel" class="control-button" type="button">返回修改</button><button id="recipeReviewConfirm" class="control-button primary" type="button">确认本次操作</button></div></div></dialog>
       <dialog id="superAgentResultDialog" class="writer-dialog super-agent-result-dialog" aria-labelledby="superAgentResultTitle">
         <div class="writer-dialog-form"><div class="super-agent-section-title"><h2 id="superAgentResultTitle">本次执行结果</h2><button type="button" class="control-button tiny" id="superAgentResultClose">关闭</button></div><div id="superAgentResultBody" aria-live="polite"></div></div>
       </dialog>

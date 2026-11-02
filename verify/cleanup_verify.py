@@ -37,7 +37,7 @@ KEEP = {
     # 任务总管：真实源码隔离服务与阶段链/控制面门禁。
     "_serve_super_agent_stage_chain.py", "super_agent_stage_chain_smoke.cjs", "super_agent_controls_smoke.cjs",
     "_serve_super_agent_v1_ui.py", "super_agent_v1_ui_smoke.cjs", "super_agent_feedback_smoke.cjs",
-    "super_agent_runtime_smoke.cjs",
+    "super_agent_runtime_smoke.cjs", "_serve_recipe_ui.py",
     # 浏览器冒烟
     "browser_smoke.cjs", "topbar_smoke.cjs", "pending_files_smoke.cjs",
     "send_button_smoke.cjs", "send_state_smoke.cjs", "file_ref_smoke.cjs",

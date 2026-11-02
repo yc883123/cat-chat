@@ -24,6 +24,7 @@ from naiba.llm.stream import (
     StreamMixins,
     StreamTotalTimeout,
     _STREAM_SOURCE_LABELS,
+    _RawContentCapture,
     is_context_overflow,
 )
 from naiba.core.diagnostics import (
@@ -1198,6 +1199,13 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
         status: StatusCallback | None = None,
         diagnostics: dict[str, Any] | None = None,
     ) -> tuple[str, str, str, dict[str, int]]:
+        # Internal opt-in evidence channel; never added to a provider payload.
+        # A done event is authoritative even when content == "". Consumers must
+        # not substitute cleaned content or reasoning when it is empty.
+        raw_content = (
+            _RawContentCapture(options["raw_content_sink"])
+            if "raw_content_sink" in options else None
+        )
         base_url = str(profile.get("base_url") or "").rstrip("/")
         model = str(profile.get("model") or "").strip()
         api_key = str(profile.get("api_key") or "").strip()
@@ -1620,6 +1628,8 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
             stream_progress: dict[str, Any] = {}
             if diagnostics is not None:
                 diagnostics["attempts"] = attempt + 1
+            if raw_content is not None:
+                raw_content.reset()
             try:
                 with ModelRuntime._urlopen_cancelable(request, request_timeout, cancel_event) as response:
                     if stream_enabled and response_format == "ollama":
@@ -1628,7 +1638,7 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                                 ModelRuntime._iter_stream_lines(
                                     response, cancel_event, first_byte_timeout, stream_total_timeout
                                 ),
-                                status, reasoning_break_chars, stream_progress,
+                                status, reasoning_break_chars, stream_progress, raw_content,
                             )
                         except EmptyModelStreamError as exc:
                             # 思考预算熔断（§A）：本地模型也会思考失控（如 Qwen3 循环）。
@@ -1640,7 +1650,7 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                             streamed = {"content": "", "reasoning": "", "usage": {}, "finish_reason": ""}
                         content = ModelRuntime._clean_content(streamed["content"])
                         reasoning = streamed["reasoning"]
-                        if not content:
+                        if not content and not (raw_content is not None and raw_content.parts):
                             content = ModelRuntime._reasoning_action(reasoning)
                             if content:
                                 reasoning = ""
@@ -1655,6 +1665,8 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                                     headers=headers,
                                     method="POST",
                                 )
+                                if raw_content is not None:
+                                    raw_content.reset()
                                 with ModelRuntime._urlopen_cancelable(
                                     retry_request, request_timeout, cancel_event
                                 ) as retry_response:
@@ -1662,28 +1674,30 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                                         ModelRuntime._iter_stream_lines(
                                             retry_response, cancel_event, first_byte_timeout, stream_total_timeout
                                         ),
-                                        status, reasoning_break_chars, stream_progress,
+                                        status, reasoning_break_chars, stream_progress, raw_content,
                                     )
                                 content = ModelRuntime._clean_content(streamed["content"])
                                 reasoning = streamed["reasoning"]
-                                if not content:
+                                if not content and not (raw_content is not None and raw_content.parts):
                                     content = ModelRuntime._reasoning_action(reasoning)
                                     if content:
                                         reasoning = ""
-                            if not content:
+                            if not content and not (raw_content is not None and raw_content.parts):
                                 raise RuntimeError("Ollama 流式响应中没有文本内容")
                         _record_finish_reason(streamed.get("finish_reason"))
+                        if raw_content is not None:
+                            raw_content.finish()
                         return content, reasoning, "", streamed["usage"]
                     if stream_enabled and response_format == "lm_studio":
                         streamed = ModelRuntime._read_lm_studio_stream(
                             ModelRuntime._iter_stream_lines(
                                 response, cancel_event, first_byte_timeout, stream_total_timeout
                             ),
-                            status, reasoning_break_chars, stream_progress,
+                            status, reasoning_break_chars, stream_progress, raw_content,
                         )
                         content = ModelRuntime._clean_content(streamed["content"])
                         reasoning = streamed["reasoning"]
-                        if not content:
+                        if not content and not (raw_content is not None and raw_content.parts):
                             content = ModelRuntime._reasoning_action(reasoning)
                             if content:
                                 reasoning = ""
@@ -1696,6 +1710,8 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                             else:
                                 raise RuntimeError(empty_stream_phrase)
                         _record_finish_reason(streamed.get("finish_reason"))
+                        if raw_content is not None:
+                            raw_content.finish()
                         return content, reasoning, "", streamed["usage"]
                     if stream_enabled and response_format != "gemini":
                         streamed = ModelRuntime._read_sse_response(
@@ -1706,10 +1722,11 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                             status,
                             reasoning_break_chars,
                             stream_progress,
+                            raw_content,
                         )
                         content = ModelRuntime._clean_content(streamed["content"])
                         reasoning = streamed["reasoning"]
-                        if not content:
+                        if not content and not (raw_content is not None and raw_content.parts):
                             content = ModelRuntime._reasoning_action(reasoning)
                             if content:
                                 reasoning = ""
@@ -1737,6 +1754,8 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                                 "在线模型输出流被中途掐断（没有终止原因、没有用量、没有收尾事件）"
                             )
                         _record_finish_reason(streamed.get("finish_reason"))
+                        if raw_content is not None:
+                            raw_content.finish()
                         return content, reasoning, str(streamed.get("reasoning_id") or ""), streamed["usage"]
                     raw_response = ModelRuntime._read_response_cancelable(
                         response, cancel_event
@@ -2194,16 +2213,22 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                     )
 
         usage = ModelRuntime._online_usage(response_format, result)
+        if raw_content is not None:
+            raw_content.feed(ModelRuntime._raw_online_content(response_format, result))
         try:
             content, reasoning = ModelRuntime._online_response(response_format, result)
         except RuntimeError:
             reasoning = ModelRuntime._online_reasoning(response_format, result)
             if connection_test and reasoning:
                 _record_finish_reason("")
+                if raw_content is not None:
+                    raw_content.finish()
                 return "接口已返回有效响应", reasoning, "", usage
             raise
         reasoning_id = ModelRuntime._responses_reasoning_id(response_format, result)
         _record_finish_reason(ModelRuntime._online_finish_reason(response_format, result))
+        if raw_content is not None:
+            raw_content.finish()
         return content, reasoning, reasoning_id, usage
 
     @staticmethod

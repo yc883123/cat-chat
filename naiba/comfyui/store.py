@@ -11,6 +11,7 @@ resubmits）在 update_task 白名单里，runner 逐段原子推进。
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -43,6 +44,17 @@ class ComfyUIStoreError(ValueError):
     """工作流/任务数据非法。"""
 
 
+# Multiple service/store instances in one process share the receipt creation lock.
+_STORE_LOCKS: dict[str, Any] = {}
+_STORE_LOCKS_GUARD = threading.Lock()
+
+
+def _store_lock(directory: Path) -> Any:
+    key = os.path.normcase(os.path.abspath(directory))
+    with _STORE_LOCKS_GUARD:
+        return _STORE_LOCKS.setdefault(key, threading.RLock())
+
+
 class ComfyUIStore:
     """线程安全（锁内写 JSON / 追加事件）。"""
 
@@ -51,7 +63,7 @@ class ComfyUIStore:
         self._workflows_dir = root / "workflows"
         self._tasks_dir = root / "tasks"
         self._outputs_dir = root / "outputs"
-        self._lock = threading.RLock()
+        self._lock = _store_lock(self._tasks_dir)
 
     # ---- 路径 ----
 
@@ -153,11 +165,49 @@ class ComfyUIStore:
 
     # ---- 任务记录 ----
 
-    def create_task(self, input_data: dict[str, Any], *, source_task_id: str = "") -> dict[str, Any]:
+    @staticmethod
+    def payload_hash(value: Any) -> str:
+        return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+                                        separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+    def lookup_request(self, request_key: str, *, owner_id: str = "") -> dict[str, Any] | None:
+        if not request_key:
+            return None
+        with self._lock:
+            for path in self._tasks_dir.glob(f"{COMFYUI_TASK_PREFIX}-*.json"):
+                task = self.get_task(path.stem)
+                if not task:
+                    continue
+                receipts = [task, *(task.get("request_receipts") or [])]
+                if any(r.get("request_key") == request_key and r.get("owner_id", "") == owner_id
+                       for r in receipts if isinstance(r, dict)):
+                    return task
+        return None
+
+    def create_task(self, input_data: dict[str, Any], *, source_task_id: str = "",
+                    request_key: str = "", owner_id: str = "",
+                    submission_policy: dict[str, Any] | None = None) -> dict[str, Any]:
+        frozen = json.loads(json.dumps(input_data, ensure_ascii=False, allow_nan=False))
+        policy = json.loads(json.dumps(submission_policy or {}, allow_nan=False))
+        digest = self.payload_hash({"input": frozen, "source_task_id": source_task_id,
+                                    "submission_policy": policy})
+        with self._lock:
+            existing = self.lookup_request(request_key, owner_id=owner_id)
+            if existing:
+                if existing.get("request_key") != request_key or existing.get("payload_hash") != digest:
+                    raise ComfyUIStoreError("request_key 已绑定不同的生成输入")
+                return existing
+            return self._create_task(frozen, source_task_id=source_task_id,
+                                     request_key=request_key, owner_id=owner_id,
+                                     payload_hash=digest, submission_policy=policy)
+
+    def _create_task(self, input_data: dict[str, Any], *, source_task_id: str = "",
+                     **receipt: Any) -> dict[str, Any]:
         task_id = self.new_task_id()
         stamp = now_ms()
         shots = int((input_data or {}).get("shots") or 1)
         record = {
+            **receipt,
             "id": task_id,
             "status": "queued",
             "module": COMFYUI_MODULE,
@@ -221,7 +271,7 @@ class ComfyUIStore:
     def update_task(self, task_id: str, **fields: Any) -> dict[str, Any] | None:
         allowed = {
             "status", "detail", "progress", "result", "error", "usage",
-            "started_at", "finished_at", "checkpoint",
+            "started_at", "finished_at", "checkpoint", "request_receipts",
         }
         with self._lock:
             current = self.get_task(task_id)

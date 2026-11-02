@@ -1,0 +1,107 @@
+{
+  "copyright": "Copyright (c) 2023-present Comfy Org",
+  "license": "MIT",
+  "license_sha256": "5dccd61c80c847cd6b22fa98124010163ab8646e573557a16a5cae31122f2056",
+  "license_source": "comfyui_workflow_templates-0.11.100.dist-info/licenses/LICENSE",
+  "manifest_sha256": "445745b691b12c8481044aa67937e3dd1c88a10b38f7c745f89cf4187bd9e173",
+  "manifest_source": "comfyui_workflow_templates_core/manifest.json",
+  "metadata_sha256": "756489a0f26f604112225c98054b0b933861894f03ad7b44819e61cbac9fb667",
+  "package": "comfyui-workflow-templates-json",
+  "templates": {
+    "i2v": {
+      "duration": {
+        "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+        "fps": 24,
+        "note": "Official frame snapping may exceed requested duration; 4s=107frames/24,15s=362frames/24. No promise of exact container duration.",
+        "requested_seconds": [
+          4,
+          15
+        ]
+      },
+      "modifications": [
+        "Removed UI notes, layout, properties and upload/seed-control widgets.",
+        "Replaced demonstration prompts and media filenames with empty prompt and recipe_input_N.png placeholders.",
+        "Replaced SaveVideo filename_prefix with video/recipe_h3_i2v.",
+        "Flattened subgraph105 as 105_<inner_id>; resolved all parent promoted overrides and live root connections.",
+        "Official link218 connects114 directly to105.first_frame;119.image is unconnected and119->120 is output-disconnected. Omitted119/120; no invented scale edge.",
+        "Parent duration5, noise_seed757358688076805, turbo false and turbo_steps8 override inner defaults."
+      ],
+      "prompt_reference_hash_format": "UTF-8 bytes with CRLF normalized to LF",
+      "prompt_reference_sha256": {
+        "skills/h3-prompt-writing/references/base-en.txt": "2cfebc096a6e08370f288d468d90b60f7f9bcb938f94bf090816e910e48e75fc"
+      },
+      "prompt_template_sha256": "51c45b8485f7dc9e920689b5d7d6aff27cab9d8e73b6bd8e5fd2b2935fce095a",
+      "source": "comfyui_workflow_templates_json/templates/video_minimax_h3_i2v.json",
+      "source_manifest_entry": {
+        "assets": [
+          {
+            "filename": "video_minimax_h3_i2v.json",
+            "sha256": "34ee39544808fd3b0dc8de9df082940d4d41c3771beb80d3988c1ea5531cec0d"
+          },
+          {
+            "filename": "video_minimax_h3_i2v-1.webp",
+            "sha256": "10b93d68316c3322e63269dd86599ffe6562c30219bda4bdab0f2a2b5816db2a"
+          }
+        ],
+        "bundle": "media-assets-01",
+        "cdn": {
+          "path": "media-assets-01/video_minimax_h3_i2v/"
+        },
+        "id": "video_minimax_h3_i2v",
+        "version": "0.0.0"
+      },
+      "source_sha256": "34ee39544808fd3b0dc8de9df082940d4d41c3771beb80d3988c1ea5531cec0d",
+      "ui_workflow_id": "e3f2b845-8f2c-4b5a-9caf-eac1029d3e7e",
+      "workflow_fingerprint": "70f86994c484866e39030c3045d732e0e3869e0ab9797d4bf9caee63ac07fc29"
+    },
+    "r2v": {
+      "duration": {
+        "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+        "fps": 24,
+        "note": "Official frame snapping may exceed requested duration; 4s=107frames/24,15s=362frames/24. No promise of exact container duration.",
+        "requested_seconds": [
+          4,
+          15
+        ]
+      },
+      "modifications": [
+        "Removed UI notes, layout, properties and upload/seed-control widgets.",
+        "Replaced demonstration prompts and media filenames with empty prompt and recipe_input_N.png placeholders.",
+        "Replaced SaveVideo filename_prefix with video/recipe_h3_r2v.",
+        "Extended official image inputs0/1 to a six-image bounded contiguous prefix using four additional core LoadImage nodes; no audio/video inputs.",
+        "Execution must remove absent optional loaders AND corresponding136.ref_images.ref_image_N connections; never sparse labels.",
+        "Preserved scheduler124.model->127 and guider126.model->141 exactly (not normalized)."
+      ],
+      "prompt_reference_hash_format": "UTF-8 bytes with CRLF normalized to LF",
+      "prompt_reference_sha256": {
+        "skills/comfyui-shortdramav2/SKILL.md": "eed4fc6ef0c8a119b77d67fdc7bbb07e6f0aede2bb9f2f11533c22d76eda790b",
+        "skills/h3-prompt-writing/references/base-en.txt": "2cfebc096a6e08370f288d468d90b60f7f9bcb938f94bf090816e910e48e75fc",
+        "skills/h3-prompt-writing/references/ref-en.txt": "1e574f356716ad55612247ffb7bbccbcdb484ad96599d63c7dca1af186b1fab7"
+      },
+      "prompt_template_sha256": "4994f0da4c22c54bd01c9519fdd62b756420ac3d76a3f703fa1a9b93a73ac732",
+      "source": "comfyui_workflow_templates_json/templates/video_minimax_h3_r2v.json",
+      "source_manifest_entry": {
+        "assets": [
+          {
+            "filename": "video_minimax_h3_r2v.json",
+            "sha256": "afeea99e9fd5a1456df348e0573e289c1243f2f28546fc95c1c963f808d61ddb"
+          },
+          {
+            "filename": "video_minimax_h3_r2v-1.webp",
+            "sha256": "283e4c502b09370f9014b9ae3f668d2c8b84caab63cc80ecbc114784ea4b866d"
+          }
+        ],
+        "bundle": "media-assets-01",
+        "cdn": {
+          "path": "media-assets-01/video_minimax_h3_r2v/"
+        },
+        "id": "video_minimax_h3_r2v",
+        "version": "0.0.0"
+      },
+      "source_sha256": "afeea99e9fd5a1456df348e0573e289c1243f2f28546fc95c1c963f808d61ddb",
+      "ui_workflow_id": "e3f2b845-8f2c-4b5a-9caf-eac1029d3e7e",
+      "workflow_fingerprint": "27fbd151db9fdf404cec844b21e21ca7fa684976ffbb94c8f771f8c642fc151a"
+    }
+  },
+  "version": "0.1.126"
+}

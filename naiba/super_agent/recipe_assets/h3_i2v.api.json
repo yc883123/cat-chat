@@ -1,0 +1,270 @@
+{
+  "105_10": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "105_14",
+        0
+      ],
+      "vae": [
+        "105_11",
+        0
+      ]
+    }
+  },
+  "105_104": {
+    "class_type": "MiniMaxH3ImageToVideo",
+    "inputs": {
+      "clip": [
+        "105_13",
+        0
+      ],
+      "first_frame": [
+        "114",
+        0
+      ],
+      "height": [
+        "115",
+        1
+      ],
+      "length": [
+        "105_107",
+        1
+      ],
+      "prompt": "",
+      "vae": [
+        "105_11",
+        0
+      ],
+      "width": [
+        "115",
+        0
+      ]
+    }
+  },
+  "105_107": {
+    "class_type": "ComfyMathExpression",
+    "inputs": {
+      "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "values.a": [
+        "105_111",
+        0
+      ]
+    }
+  },
+  "105_11": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
+    }
+  },
+  "105_111": {
+    "class_type": "PrimitiveFloat",
+    "inputs": {
+      "value": 5
+    }
+  },
+  "105_121": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "lora_name": "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+      "model": [
+        "105_6",
+        0
+      ],
+      "strength_model": 1
+    }
+  },
+  "105_122": {
+    "class_type": "ComfySwitchNode",
+    "inputs": {
+      "on_false": [
+        "105_6",
+        0
+      ],
+      "on_true": [
+        "105_121",
+        0
+      ],
+      "switch": [
+        "105_126",
+        0
+      ]
+    }
+  },
+  "105_123": {
+    "class_type": "ComfySwitchNode",
+    "inputs": {
+      "on_false": [
+        "105_124",
+        0
+      ],
+      "on_true": [
+        "105_125",
+        0
+      ],
+      "switch": [
+        "105_126",
+        0
+      ]
+    }
+  },
+  "105_124": {
+    "class_type": "PrimitiveInt",
+    "inputs": {
+      "value": 20
+    }
+  },
+  "105_125": {
+    "class_type": "PrimitiveInt",
+    "inputs": {
+      "value": 8
+    }
+  },
+  "105_126": {
+    "class_type": "PrimitiveBoolean",
+    "inputs": {
+      "value": false
+    }
+  },
+  "105_13": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "device": "default",
+      "type": "minimax"
+    }
+  },
+  "105_14": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "guider": [
+        "105_16",
+        0
+      ],
+      "latent_image": [
+        "105_104",
+        1
+      ],
+      "noise": [
+        "105_15",
+        0
+      ],
+      "sampler": [
+        "105_17",
+        0
+      ],
+      "sigmas": [
+        "105_9",
+        0
+      ]
+    }
+  },
+  "105_15": {
+    "class_type": "RandomNoise",
+    "inputs": {
+      "noise_seed": 757358688076805
+    }
+  },
+  "105_16": {
+    "class_type": "BasicGuider",
+    "inputs": {
+      "conditioning": [
+        "105_104",
+        0
+      ],
+      "model": [
+        "105_122",
+        0
+      ]
+    }
+  },
+  "105_17": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+      "sampler_name": "res_multistep"
+    }
+  },
+  "105_23": {
+    "class_type": "VAEDecodeAudio",
+    "inputs": {
+      "samples": [
+        "105_14",
+        0
+      ],
+      "vae": [
+        "105_24",
+        0
+      ]
+    }
+  },
+  "105_24": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    }
+  },
+  "105_6": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "105_9": {
+    "class_type": "BasicScheduler",
+    "inputs": {
+      "denoise": 1,
+      "model": [
+        "105_122",
+        0
+      ],
+      "scheduler": "simple",
+      "steps": [
+        "105_123",
+        0
+      ]
+    }
+  },
+  "105_91": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "audio": [
+        "105_23",
+        0
+      ],
+      "bit_depth": 8,
+      "fps": 24,
+      "images": [
+        "105_10",
+        0
+      ]
+    }
+  },
+  "114": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "recipe_input_1.png"
+    }
+  },
+  "115": {
+    "class_type": "ResolutionSelector",
+    "inputs": {
+      "aspect_ratio": "1:1 (Square)",
+      "megapixels": 0.4,
+      "multiple": 32
+    }
+  },
+  "92": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "codec": "auto",
+      "filename_prefix": "video/recipe_h3_i2v",
+      "format": "auto",
+      "video": [
+        "105_91",
+        0
+      ]
+    }
+  }
+}

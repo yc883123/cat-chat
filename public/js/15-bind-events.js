@@ -27,13 +27,13 @@ import { bindStudioEvents, closeStudioView, openStudioView } from "./22-studio.j
 // 23 只从 22 取 onStudioPageChange，22 不反向 import 23，不存在循环依赖。
 import { bindLabelerEvents } from "./23-labeler.js";
 // 造梦机（工作台第三个功能页）：24 只从 01/03/22 取公共函数，无循环依赖。
-import { bindComfyuiEvents } from "./24-comfyui.js";
+import { bindComfyuiEvents, setWorkflowIntentHandler } from "./24-comfyui.js";
 // 拆书匠（工作台第四个功能页，小说改编；显示名从「创作场」改来，内部标识 novel 不变）：
 // 25 只从 01/22 取公共函数，无循环依赖。
 import { bindNovelEvents } from "./25-novel.js";
 // 织书台（工作台第五个功能页，原创写作）：27 只从 01/22 取公共函数，无循环依赖。
 import { bindWriterEvents } from "./27-writer.js";
-import { bindSuperAgentEvents, closeSuperAgentView, openSuperAgentView } from "./28-super-agent.js";
+import { bindSuperAgentEvents, closeSuperAgentView, openSuperAgentView, openRecipeWorkflowIntent } from "./28-super-agent.js";
 // 工作台（Studio）import 同样追加在末尾（_studio_plan_v2.md P4.1）。
 // ---- 聊天背景图（外观页） ----
 // 上传走同一个 /api/uploads（落盘 data/uploads/<日期>/，返回绝对路径），但**不进入
@@ -3255,6 +3255,7 @@ void restoreAuxChats();
 // 工作台（_studio_plan_v2.md P4）：事件接线（组合根唯一装配点）。
 bindStudioEvents();
 // 任务总管：独立只读视图，不接管旧任务面板或工作台模块。
+setWorkflowIntentHandler((intent) => { void openRecipeWorkflowIntent(intent); });
 bindSuperAgentEvents();
 // 打标器（工作台第二个功能页）：事件接线（与 Studio 同一个组合根）。
 bindLabelerEvents();

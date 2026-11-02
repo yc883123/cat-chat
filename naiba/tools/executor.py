@@ -281,6 +281,11 @@ class ToolExecutor:
         分发：别名归一 → MCP（mcp__ 前缀 / server.tool）→ def.execute，全部经单一通道。
         """
         try:
+            guard = (run_context or {}).get("execution_guard")
+            if callable(guard):
+                denial = str(guard() or "")
+                if denial:
+                    return False, f"授权配置已变化，未执行：{denial}"
             tool = self._resolve_tool_name(tool)
             if tool.startswith("mcp__"):
                 parts = tool.split("__", 2)
@@ -306,6 +311,14 @@ class ToolExecutor:
         兜底原则与 ``_evaluate_confirmation_reason`` 一致：复核**抛异常也拒绝**
         （fail-closed），不因为包装层出错而放行一个本该被拦的动作。
         """
+        guard = (pending.get("run_context") or {}).get("execution_guard")
+        if callable(guard):
+            try:
+                denial = str(guard() or "")
+            except Exception:
+                return "授权配置复核失败，已拒绝执行"
+            if denial:
+                return f"授权配置已变化，未执行：{denial}"
         check = pending.get("recheck")
         if not callable(check):
             return ""
@@ -404,6 +417,7 @@ class ToolExecutor:
         cancel_event: threading.Event | None = None,
     ) -> tuple[bool, str]:
         deadline = time.monotonic() + timeout
+        guard_checked_at = 0.0
         while time.monotonic() < deadline:
             if cancel_event and cancel_event.is_set():
                 with self._confirmation_lock:
@@ -412,6 +426,23 @@ class ToolExecutor:
                         self.pending_confirmation.pop(confirm_id, None)
                     self.confirmation_results.pop(confirm_id, None)
                 raise TaskCancelled("任务已取消")
+            if time.monotonic() - guard_checked_at >= 0.5:
+                guard_checked_at = time.monotonic()
+                with self._confirmation_lock:
+                    current_pending = self.pending_confirmation.get(confirm_id)
+                    guard = ((current_pending or {}).get("run_context") or {}).get("execution_guard")
+                if callable(guard):
+                    try:
+                        denial = str(guard() or "")
+                    except Exception:
+                        denial = "授权配置复核失败"
+                    if denial:
+                        with self._confirmation_lock:
+                            current_pending = self.pending_confirmation.get(confirm_id)
+                            if current_pending and not current_pending.get("processing"):
+                                self.pending_confirmation.pop(confirm_id, None)
+                                self.confirmation_results.pop(confirm_id, None)
+                                return False, f"授权配置已变化，未执行：{denial}"
             with self._confirmation_lock:
                 result = self.confirmation_results.pop(confirm_id, None)
                 pending = confirm_id in self.pending_confirmation

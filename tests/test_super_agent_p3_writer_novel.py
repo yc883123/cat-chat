@@ -173,10 +173,35 @@ class P3WriterNovelTests(unittest.TestCase):
 
     def test_unknown_domain_and_owner_boundary_are_rejected(self):
         with self.assertRaises(ValueError):
-            self.app.super_agent_domain.create_thread("local", {"domain": "chat", "book_id": "x", "stage": "run"})
+            self.app.super_agent_domain.create_thread("local", {"domain": "unknown-domain", "book_id": "x", "stage": "run"})
         thread = self.app.super_agent.create_thread("local", "x")
         with self.assertRaises(LookupError):
             self.app.super_agent_domain.action("other", thread.thread_id, {"action": "status", "node_id": "missing"})
+
+    def test_chat_domain_missing_conversation_is_bad_request_not_unknown_domain(self):
+        payload, status = NaibaChatApp.api_super_agent_create_thread(self.app, {"domain": "chat"})
+        self.assertEqual(status, 400)
+        self.assertIn("conversation_id", payload["error"])
+        self.assertEqual(self.app.super_agent.list_threads("local"), [])
+
+    def test_chat_domain_missing_message_is_bad_request(self):
+        conversation = self.app.storage.create_conversation(
+            model_key="probe", model_name="probe", workspace_dir=self.tmp.name,
+        )
+        payload, status = NaibaChatApp.api_super_agent_create_thread(self.app, {
+            "domain": "chat", "conversation_id": conversation["id"],
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("message", payload["error"])
+        self.assertEqual(self.app.super_agent.list_threads("local"), [])
+
+    def test_chat_domain_unknown_conversation_is_not_found(self):
+        payload, status = NaibaChatApp.api_super_agent_create_thread(self.app, {
+            "domain": "chat", "conversation_id": "does-not-exist", "start_request": {"message": "test"},
+        })
+        self.assertEqual(status, 404)
+        self.assertIn("对话不存在", payload["error"])
+        self.assertEqual(self.app.super_agent.list_threads("local"), [])
 
     def test_real_app_facade_exposes_p3_create_endpoint(self):
         root = Path(self.tmp.name) / "real-app"

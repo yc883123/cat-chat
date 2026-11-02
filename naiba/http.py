@@ -266,6 +266,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path.startswith("/api/super-agent/threads/") and path.endswith("/nodes"):
             thread_id = path[len("/api/super-agent/threads/") : -len("/nodes")].strip("/")
             self._json(*self.app.api_super_agent_nodes(thread_id))
+        elif path.startswith("/api/super-agent/threads/") and path.endswith("/results"):
+            thread_id = path[len("/api/super-agent/threads/") : -len("/results")].strip("/")
+            query = urllib.parse.parse_qs(parsed.query)
+            self._json(*self.app.api_super_agent_results(thread_id, str(query.get("node_id", [""])[0])))
         elif path.startswith("/api/super-agent/threads/") and path.endswith("/events"):
             thread_id = path[len("/api/super-agent/threads/") : -len("/events")].strip("/")
             query = urllib.parse.parse_qs(parsed.query)
@@ -2517,7 +2521,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                     # 实时事件此刻必在 pending（executor 先登记后发事件），不受影响。
                     if event.get("type") == "tool_confirm":
                         confirm_id = str(event.get("confirm_id") or "")
-                        if confirm_id and not self.app.runs.owns_confirmation(run_id, confirm_id):
+                        snapshot = getattr(self.app.runs, "confirmation_snapshot", None)
+                        if confirm_id and callable(snapshot):
+                            current = next((item for item in snapshot(run_id)
+                                            if item.get("confirm_id") == confirm_id), None)
+                            # 已批准的异步工具仍在 pending 中，但不能再次显示批准按钮。
+                            event = {**event, "confirm_resolved": current is None,
+                                     "confirm_processing": bool(current and current.get("status") == "processing")}
+                        elif confirm_id and not self.app.runs.owns_confirmation(run_id, confirm_id):
                             event = {**event, "confirm_resolved": True}
                     self.wfile.write((json.dumps(event, ensure_ascii=False) + "\n").encode("utf-8"))
                     self.wfile.flush()

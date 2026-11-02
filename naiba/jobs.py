@@ -20,7 +20,7 @@ ComfyUI 生成任务使用专用 Worker（见 ``_run_comfyui``）。
 """
 from __future__ import annotations
 
-from naiba.core.contracts import AppContext
+from naiba.core.contracts import AppContext, SUBAGENT_OUTCOME_KEY
 
 import hashlib
 import json
@@ -374,6 +374,23 @@ class JobRegistry:
     # ---- 统一接口 ----
     def start(self, spec: JobSpec, owner: str | None = None) -> str:
         owner = owner or spec.owner_session_id or spec.conversation_id
+        submission_guard = None
+        if spec.kind == "subagent":
+            from naiba.core.contracts import SUPER_AGENT_BINDING_KEY
+            if (spec.params or {}).get(SUPER_AGENT_BINDING_KEY):
+                from naiba.super_agent.baseline import PreflightRejected, validate_execution_baseline
+                frozen = (spec.params or {}).get("configuration_fingerprint")
+                denial = validate_execution_baseline(self.app, spec.conversation_id, frozen) if isinstance(frozen, dict) and frozen else "缺少子助手授权基准"
+                if denial:
+                    raise PreflightRejected(denial)
+                def submission_guard(db):
+                    row = db.execute("SELECT * FROM conversations WHERE id=?", (spec.conversation_id,)).fetchone()
+                    if row is None:
+                        raise PreflightRejected("关联会话已删除，未派发")
+                    conversation = self.app.storage._conversation_dict(row)
+                    denial = validate_execution_baseline(self.app, spec.conversation_id, frozen, conversation=conversation)
+                    if denial:
+                        raise PreflightRejected(denial)
         # 父任务取消闸门：父已被取消（或正在停止）时拒绝创建。取消级联只抓「取消
         # 那一刻」已存在的子任务；没有这道闸门，没及时响应取消信号的 worker 之后
         # 仍能派生新 Job（实测：subagent 被取消后仍创建 comfyui Job 并跑完 6/6）。
@@ -401,6 +418,7 @@ class JobRegistry:
             owner_session_id=owner,
             detached=bool(spec.detached),
             origin_run_id=str(spec.origin_run_id or ""),
+            **({"submission_guard": submission_guard} if submission_guard is not None else {}),
         )
         job_id = str(run["id"])
         self.app.storage.update_job(
@@ -733,10 +751,21 @@ class JobRegistry:
             self.agent_runner(job_id, spec, cancel, _subagent_event_sink(self, job_id))
             job = self.get(job_id)
             if job and job["status"] not in JOB_TERMINAL:
-                self._finish(job_id, "completed", result={"subagent_job_id": job_id})
+                result = dict(job.get("result") or {})
+                result.setdefault("subagent_job_id", job_id)
+                outcome = result.get(SUBAGENT_OUTCOME_KEY) or {}
+                non_success = isinstance(outcome, dict) and outcome.get("status") in {"not_executed", "failed"}
+                self._finish(job_id, "failed" if non_success else "completed", result=result,
+                             error=str(outcome.get("summary") or "子助手未完成") if non_success else "")
+        except TaskCancelled:
+            result = dict((self.get(job_id) or {}).get("result") or {})
+            self._finish(job_id, "cancelled", error="用户取消", result=result)
         except Exception as exc:
             logger.exception("子 Agent Job 执行失败：job=%s", job_id)
-            self._finish(job_id, "failed", error=str(exc))
+            result = dict((self.get(job_id) or {}).get("result") or {})
+            result[SUBAGENT_OUTCOME_KEY] = {"version": 1, "status": "failed", "reason_code": "runner_failed",
+                "summary": str(exc), "uncompleted_actions": [], "artifact_refs": []}
+            self._finish(job_id, "failed", error=str(exc), result=result)
         finally:
             # 兜底：子 Agent 被取消/失败而退出时，它派生的子 Job 不得继续跑。
             # 取消级联（cancel → _cancel_children）只抓「取消那一刻」已存在的子

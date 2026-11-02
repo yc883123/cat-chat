@@ -11,7 +11,8 @@
 """
 from __future__ import annotations
 
-from naiba.core.contracts import AppContext, RunContext
+from naiba.core.contracts import (AppContext, RunContext, SUPER_AGENT_BINDING_KEY,
+                                  SUPER_AGENT_DEPENDENCY_KEY, SUBAGENT_OUTCOME_KEY)
 
 import traceback
 from pathlib import Path
@@ -20,6 +21,7 @@ from typing import Any, Callable
 from naiba.jobs import JobRegistry, JobSpec
 from naiba.core.history import build_model_history, local_brain
 from naiba.core.tool_results import model_visible_run
+from naiba.core.messages import dependency_message_content
 
 MAX_SUBAGENT_DEPTH = 2
 MAX_CHILDREN_PER_PARENT = 4
@@ -103,21 +105,23 @@ def run_subagent_agent(
     params = spec.params or {}
     instruction = str(params.get("instruction") or "")
     if not instruction:
-        app.storage.update_job(job_id, result={"error": "缺少 instruction"})
-        return
+        raise ValueError("缺少 instruction")
     conversation = app.storage.get_conversation(conversation_id)
     if not conversation:
-        app.storage.update_job(job_id, result={"error": "对话已删除"})
-        return
+        raise ValueError("对话已删除")
     # fork=true（`subagent` 工具）：回放父会话历史，思考回放限长必须与主对话同参数，
     # 否则同一会话出现两种回放字节（前缀缓存断 + 行为不一致）。
     # fork=false（`subagent_spawn` 工具）：fresh child，不播种父历史（对齐 dsh 的 seed
     # 缺省语义），无历史可回放，子代理只带自身人设 + instruction。
-    model_key = str(conversation.get("model_key") or "")
+    frozen = params.get("execution_snapshot") if isinstance(params.get("execution_snapshot"), dict) else {}
+    model_key = str(frozen.get("model_key") or conversation.get("model_key") or "")
     if not model_key:
         provider_id = str(conversation.get("provider_id") or "")
         model_key = f"online:{provider_id}" if provider_id else ""
-    profile = app.config.profile(model_key)
+    profile = dict(app.config.profile(model_key))
+    if frozen.get("model_name"):
+        profile["model"] = str(frozen["model_name"])
+        profile["model_name"] = str(frozen["model_name"])
     # 工具集先定稿再构建历史：历史是本轮请求前缀的来源，先建历史再定稿工具集会让
     # PDF/视频处理指引按未过滤的默认全集展开，同一会话出现两种回放字节（前缀缓存断）。
     requested = [str(t) for t in (params.get("allowed_tools") or [])]
@@ -146,6 +150,10 @@ def run_subagent_agent(
         )
     else:
         history = []
+    dependency = params.get(SUPER_AGENT_DEPENDENCY_KEY)
+    if isinstance(dependency, dict) and dependency.get("text"):
+        # Separate data from the user's instruction and all user-origin grants.
+        history.append({"role": "assistant", "content": dependency_message_content("", dependency)})
     getter = app.config.generation_options
     try:
         options = dict(getter(model_key))
@@ -159,11 +167,54 @@ def run_subagent_agent(
     # 占住全进程唯一的本地锁时主对话只能显示「等待本地模型资源」，无从归因。
     options["lock_label"] = "子代理"
     agent = app.config.get_agent(str(conversation.get("agent_id") or "")) or {}
+    if not agent and params.get(SUPER_AGENT_BINDING_KEY):
+        agent = app.config.get_agent(app.config.default_agent_id()) or {}
     # 系统提示词只有一个来源：Agent（会话级系统提示词已移除）。
     combined_prompt = str(agent.get("system_prompt") or "").strip() or str(
         app.config.data.get("agent_system_prompt", "")
     )
     skill_policy = params.get("skill_policy") or {"mode": "auto", "skill_ids": []}
+
+    def live_binding_valid() -> bool:
+        getter = getattr(app.storage, "get_background_task", None)
+        if not callable(getter):
+            return False
+        job = getter(job_id) or {}
+        owner = str(spec.owner_session_id or conversation_id)
+        if (job.get("kind") != "subagent" or job.get("conversation_id") != conversation_id
+                or str(job.get("owner_session_id") or "") != owner
+                or job.get("status") not in {"queued", "running", "waiting"}
+                or job.get("cancel_requested") or (cancel is not None and cancel.is_set())):
+            return False
+        binding = params.get(SUPER_AGENT_BINDING_KEY)
+        if not binding:
+            return True
+        if not isinstance(binding, dict) or not str(binding.get("owner_id") or "").strip():
+            return False
+        try:
+            from naiba.super_agent.runtime import current_execution_claims
+            node = app.super_agent.get_node(str(binding["owner_id"]), str(binding["node_id"]))
+            thread = app.super_agent.get_thread(str(binding["owner_id"]), str(binding["thread_id"]))
+            return (node.thread_id == binding["thread_id"] and node.attempt == binding["attempt"]
+                    and node.executor_type == "subagent" and node.executor_id in {"", job_id}
+                    and not node.cancel_requested and node.status in {"ready", "running", "waiting_user"}
+                    and thread.status in {"draft", "active", "waiting_user", "paused"}
+                    and node.checkpoint.get("conversation_id") == conversation_id
+                    and any(c.get("correlation") == binding.get("correlation")
+                            for c in current_execution_claims(node).values()))
+        except (LookupError, KeyError, ValueError, TypeError):
+            return False
+
+    def execution_guard() -> str:
+        if params.get(SUPER_AGENT_BINDING_KEY) and not live_binding_valid():
+            return "执行归属、取消状态或执行轮次已变化"
+        fingerprint = params.get("configuration_fingerprint")
+        if fingerprint:
+            from naiba.super_agent.baseline import validate_execution_baseline
+            denial = validate_execution_baseline(app, conversation_id, fingerprint)
+            if denial:
+                return denial
+        return ""
 
     emit({"type": "job_status", "status": "running", "current_step": "推理中"})
     # 子 Agent 继承"该会话的工作区 + 审批档位"（不得扩大权限）：
@@ -171,13 +222,15 @@ def run_subagent_agent(
     # 且 run_context 缺 executor 时 unpack_skill_archive 等工具取不到工作区（必然失败）。
     try:
         session_workspace = app.config.resolve_workspace_dir(
-            str(conversation.get("workspace_dir") or "").strip() or None
+            str(frozen.get("workspace_dir") or conversation.get("workspace_dir") or "").strip() or None
         )
     except (OSError, ValueError):
+        if params.get(SUPER_AGENT_BINDING_KEY):
+            raise ValueError("子助手工作区不可用，未执行；请重新确认任务基准")
         session_workspace = app.config.resolve_workspace_dir()
     base_executor = app.executor
     sub_executor = (
-        base_executor.clone_for_permission(str(conversation.get("permission_mode") or "auto"))
+        base_executor.clone_for_permission(str(frozen.get("permission_mode") or conversation.get("permission_mode") or "confirm"))
         if callable(getattr(base_executor, "clone_for_permission", None))
         else base_executor
     )
@@ -226,8 +279,30 @@ def run_subagent_agent(
         # 子 Agent 跑在自己的后台 Job 里，没有前端确认卡：围栏来源动作在此直接按原文
         # 收尾（未执行），不执行、不挂起、不等待 30 分钟（计划 2026-10-01 §3.5）。
         "confirmation_ui": False,
+        "execution_guard": execution_guard,
     }
+    manager = getattr(app, "runs", None)
+    register = getattr(manager, "register_subagent_executor", None)
+    unregister = getattr(manager, "unregister_subagent_executor", None)
+    registered = bool(params.get(SUPER_AGENT_BINDING_KEY) and callable(register) and callable(unregister)
+                      and register(job_id, sub_executor, cancel, live_binding_valid))
+    run_context["confirmation_ui"] = registered
+    terminal_errors: list[str] = []
+
+    def observed_event(payload: dict[str, Any]) -> None:
+        if payload.get("type") == "run_failed":
+            terminal_errors.append(str(payload.get("error") or "子助手执行未完成"))
+        if "arguments" in payload:
+            # The executor keeps originals; persisted/display events get only the
+            # same redacted whitelist as the live confirmation projection.
+            from naiba.run.manager import ConversationRunManager
+            payload = {**payload, "arguments": ConversationRunManager._confirmation_parameters(payload.get("arguments"))}
+        emit(payload)
+
     try:
+        denial = execution_guard()
+        if denial:
+            raise ValueError(denial)
         content, runs, reasonings, usage = worker.run(
             instruction,
             history,
@@ -237,22 +312,33 @@ def run_subagent_agent(
             [],
             combined_prompt,
             allowed_tools,
-            emit,
+            observed_event,
             cancel,
             tool_registry=app.tool_registry,
             run_context=run_context,
         )
+        outcome = run_context.get(SUBAGENT_OUTCOME_KEY) or {
+            "version": 1, "status": "failed" if terminal_errors else "completed",
+            "reason_code": "agent_failed" if terminal_errors else "completed",
+            "summary": terminal_errors[-1] if terminal_errors else "子助手已完成本轮执行",
+            "uncompleted_actions": [], "artifact_refs": [],
+        }
         app.storage.update_job(
             job_id,
             # 供父模型看到的子 Agent 结果：tool_runs 走模型可见序列化（与主会话一致），
             # usage 是宿主诊断信息，不进入父模型上下文。
-            result={"response": content, "tool_runs": [model_visible_run(run) for run in runs]},
+            result={"response": content, "tool_runs": [model_visible_run(run) for run in runs],
+                    SUBAGENT_OUTCOME_KEY: outcome},
         )
     except TaskCancelled:
         raise
     except Exception as exc:
         traceback.print_exc()
         app.storage.update_job(job_id, result={"error": str(exc)})
+        raise
+    finally:
+        if registered:
+            unregister(job_id, sub_executor)
 
 
 def subagent_handler_factory(

@@ -8,7 +8,8 @@ _persist_failed_message（事件重建与取消幂等持久化）/recover_interr
 
 from __future__ import annotations
 
-from naiba.core.contracts import MetadataKeys, RunContext
+from naiba.core.contracts import MetadataKeys, RunContext, SUPER_AGENT_BASELINE_KEY
+from naiba.core.messages import dependency_message_content, supervised_message_content
 
 import json
 import logging
@@ -296,7 +297,13 @@ def _merge_usage_summary(
 
 
 class ConversationRunMixin:
-    def submit_chat(self, body: dict[str, Any]) -> dict[str, Any]:
+    def submit_chat(
+        self, body: dict[str, Any], *, execution_key: str = "",
+        supervised_context: dict[str, Any] | None = None,
+        dependency_context: dict[str, Any] | None = None,
+        task_model_override: bool = False,
+        configuration_fingerprint: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         conversation_id = str(body.get("conversation_id") or "")
         message = str(body.get("message") or "").strip()
         attachments = body.get("attachments") or []
@@ -331,6 +338,8 @@ class ConversationRunMixin:
             raise ValueError(f"附件文件已丢失（可能已被缓存清理）：{shown}。请重新上传后再发送。")
 
         with self._submit_lock:
+            if supervised_context is None and dependency_context is None:
+                self._supervised_human_input(conversation_id)
             conversation = self.app.storage.get_conversation(conversation_id, include_trace=False)
             if not conversation:
                 raise LookupError("对话不存在")
@@ -366,7 +375,7 @@ class ConversationRunMixin:
             model_name = raw_model_name.strip()[:256]
             if not model_name:
                 raise ValueError("请先在会话底部选择模型；可用模型来自设置页的模型检查结果")
-            if (
+            if not task_model_override and (
                 model_key != str(conversation.get("model_key") or "")
                 or model_name != str(conversation.get("model_name") or "")
             ):
@@ -380,24 +389,30 @@ class ConversationRunMixin:
                 resolver = getattr(self.app.vision, "resolve_brain_supports_images", None)
                 # 按会话固化图像能力：首次确定后写入会话，之后复用，不再随“本轮是否带图”
                 # 重复探测（避免结果漂移破坏视觉工具集与前缀缓存）。
-                frozen_capability = conversation.get("chat_supports_images")
+                frozen_capability = None if task_model_override else conversation.get("chat_supports_images")
                 if isinstance(frozen_capability, bool):
                     chat_supports_images = frozen_capability
                 elif int(frozen_capability if frozen_capability is not None else -1) >= 0:
                     chat_supports_images = bool(int(frozen_capability))
                 elif callable(resolver):
                     chat_supports_images = bool(resolver(chat_profile, probe_if_unknown=True))
-                    self.app.storage.set_conversation_chat_supports_images(conversation_id, chat_supports_images)
+                    if not task_model_override:
+                        self.app.storage.set_conversation_chat_supports_images(conversation_id, chat_supports_images)
                 else:
                     chat_supports_images = bool(self.app.vision.brain_supports_images(chat_profile))
-                    self.app.storage.set_conversation_chat_supports_images(conversation_id, chat_supports_images)
+                    if not task_model_override:
+                        self.app.storage.set_conversation_chat_supports_images(conversation_id, chat_supports_images)
             except Exception:
                 chat_supports_images = False
             # 会话启动时固化启用工具集（Agent 工具集/旧会话全选），之后不可改，
             # 作为本轮 allowed_tools 的硬限制，替代 base+system 并集。
             # 辅助对话（conv_kind='aux'）在工具决议里只读锁死（后端唯一判定，§3.2）。
             conv_kind = str(conversation.get("conv_kind") or "main")
-            enabled_tool_ids = self._bake_session_tool_ids(conversation, agent)
+            if task_model_override:
+                from naiba.run.session import resolve_session_tool_ids
+                enabled_tool_ids = resolve_session_tool_ids(self.app, conversation, agent)
+            else:
+                enabled_tool_ids = self._bake_session_tool_ids(conversation, agent)
             allowed_tools = self._resolve_allowed_tools(
                 mode, agent, web_search_enabled, model_key, enabled_tool_ids, conv_kind
             )
@@ -422,9 +437,10 @@ class ConversationRunMixin:
             stored_ids = [str(item) for item in (stored_policy.get("skill_ids") or []) if str(item).strip()]
             if not stored_policy and not (conversation.get("messages") or []):
                 frozen_ids = sorted({str(item) for item in referenced_ids})
-                self.app.storage.set_conversation_skill_policy(
-                    conversation_id, {"mode": "exclusive", "skill_ids": frozen_ids}
-                )
+                if not task_model_override:
+                    self.app.storage.set_conversation_skill_policy(
+                        conversation_id, {"mode": "exclusive", "skill_ids": frozen_ids}
+                    )
             else:
                 frozen_ids = stored_ids
             if catalog:
@@ -472,11 +488,37 @@ class ConversationRunMixin:
                 # first_turn（系统提示词 + 工具集），供前端会话顶部折叠卡展示。
                 "is_first_turn": not (conversation.get("messages") or []),
             }
+            if execution_key:
+                from naiba.core.contracts import SUPER_AGENT_EXECUTION_KEY
+                snapshot[SUPER_AGENT_EXECUTION_KEY] = execution_key
+            if supervised_context is not None:
+                snapshot[MetadataKeys.SUPERVISED_SOURCE] = dict(supervised_context)
+            if dependency_context is not None:
+                snapshot[MetadataKeys.DEPENDENCY_SOURCE] = dict(dependency_context)
+            if configuration_fingerprint is not None:
+                snapshot[SUPER_AGENT_BASELINE_KEY] = dict(configuration_fingerprint)
             try:
                 # @ 工作区引用：把用户消息里的 @相对路径 解析为绝对路径后再交给模型/落库
                 # （只替换工作区内真实存在的文件/目录，其余原样保留）。会话标题仍取用户原文。
                 workspace_root = _conv_workspace_root(conversation, self.app.config)
                 model_message = resolve_file_references(message, workspace_root)
+                def submission_guard(db: Any) -> None:
+                    from naiba.super_agent.baseline import PreflightRejected, validate_execution_baseline
+                    row = db.execute("SELECT * FROM conversations WHERE id=?", (conversation_id,)).fetchone()
+                    if row is None:
+                        raise PreflightRejected("关联会话不存在，未派发")
+                    persisted = self.app.storage._conversation_dict(row)
+                    denial = validate_execution_baseline(self.app, conversation_id, configuration_fingerprint,
+                        conversation=persisted)
+                    if denial:
+                        raise PreflightRejected(denial)
+                    if task_model_override and not persisted.get("enabled_tool_ids"):
+                        # Freeze the already validated default only when the
+                        # first Run is really committed. Otherwise its new user
+                        # row would look like a legacy unbaked conversation and
+                        # widen the next effective tool set to all tools.
+                        db.execute("UPDATE conversations SET enabled_tool_ids=? WHERE id=?",
+                            (json.dumps(enabled_tool_ids, ensure_ascii=False), conversation_id))
                 run = self.app.storage.create_chat_run(
                     conversation_id,
                     model_message,
@@ -488,6 +530,9 @@ class ConversationRunMixin:
                     display_message=str(body.get("display_message") or ""),
                     title_text=message,
                     folder_indexes=folder_indexes,
+                    supervised_context=supervised_context,
+                    dependency_context=dependency_context,
+                    submission_guard=submission_guard if configuration_fingerprint else None,
                 )
             except RuntimeError as exc:
                 active_error = self._active_error(exc)
@@ -608,7 +653,7 @@ class ConversationRunMixin:
         # 放在进入 try 之前：它只用冻结历史与用户原文，不需要模型 profile；
         # 后续任何异常路径都不会留下"半边授权"（两枚键只在这一处赋值）。
         show_media_allowed, show_media_candidates = show_media_run_state(
-            message=str(run.get("message") or ""),
+            message="" if snapshot.get(MetadataKeys.SUPERVISED_SOURCE) else str(run.get("message") or ""),
             mode=mode,
             conv_kind=conv_kind,
             messages=run.get("conversation_messages") or [],
@@ -620,7 +665,7 @@ class ConversationRunMixin:
         # 「精确逐帧」授权门：同样只在本处定稿（普通主对话 + 非 Plan + 用户原话明确要求）。
         # 工具执行层据此 fail closed：没有这枚键就不创建 Job、不写一帧。
         video_frames_allowed = video_frames_run_state(
-            message=str(run.get("message") or ""),
+            message="" if snapshot.get(MetadataKeys.SUPERVISED_SOURCE) else str(run.get("message") or ""),
             mode=mode,
             conv_kind=conv_kind,
         )
@@ -631,6 +676,8 @@ class ConversationRunMixin:
         search_sources: list[dict[str, str]] = []
         vision_trace: dict[str, Any] = {"requests": 0, "cache_hit": False}
         chat_diagnostics: dict[str, Any] = {}
+        chat_requests: list[dict[str, Any]] = []
+        performance: dict[str, Any] = {}
         # 用量台账的尽力关联消息 id（done/取消/失败三条路径各自的落库消息）。
         usage_message_id = ""
         # 当前轮模型的三档单价（profile 在 try 内解析，这里先占位）：
@@ -691,6 +738,8 @@ class ConversationRunMixin:
                 folder_indexes=snapshot.get("folder_indexes") or [],
                 pdf_tools=pdf_tools_enabled, video_tools=video_tools_enabled,
             )
+            effective = supervised_message_content(effective, snapshot.get(MetadataKeys.SUPERVISED_SOURCE))
+            effective = dependency_message_content(effective, snapshot.get(MetadataKeys.DEPENDENCY_SOURCE))
             model_key = str(snapshot.get("model_key") or "")
             if not model_key and snapshot.get("provider_id"):
                 model_key = f"online:{snapshot['provider_id']}"
@@ -930,6 +979,13 @@ class ConversationRunMixin:
                 if (mode == "plan" or conv_kind == "aux")
                 else CraftToolExecutor(run_executor)
             )
+            def execution_guard() -> str:
+                frozen = snapshot.get(SUPER_AGENT_BASELINE_KEY)
+                if frozen:
+                    from naiba.super_agent.baseline import validate_execution_baseline
+                    return validate_execution_baseline(self.app, conversation_id, frozen)
+                return ""
+
             run_context: RunContext = {
                 "run_id": run_id,
                 "conversation_id": conversation_id,
@@ -962,7 +1018,7 @@ class ConversationRunMixin:
                 "workspace_dir": str(snapshot.get("workspace_dir") or ""),
                 # 用户本轮是否明确要看图：枚举类工具的媒体声明 intent_gated 据此放行
                 # （判定用用户原文，不用路由增强文本——后者可能含历史助手措辞）。
-                "media_intent": _image_intent(message),
+                "media_intent": False if snapshot.get(MetadataKeys.SUPERVISED_SOURCE) else _image_intent(message),
                 # 指名出卡：意图门 + 唯一候选门（两枚键只由本处赋值，缺省即拒绝）。
                 "show_media_intent": bool(show_media_allowed),
                 "show_media_candidates": list(show_media_candidates),
@@ -977,6 +1033,7 @@ class ConversationRunMixin:
                 "turn_index": _turn_index_for_run(snapshot, run),
                 "event_sink": event,
                 "confirmation_ui": True,
+                "execution_guard": execution_guard,
                 "model_key": model_key,
                 "context_limit": max(
                     0, int(profile.get("context_window") or fallback_context_window(profile)),
@@ -1003,10 +1060,35 @@ class ConversationRunMixin:
                         ((getattr(self.app.models, "last_usage", {}) or {}).get("input_tokens") or 0)
                     ),
                 )
+            complete = self.app.models.complete
+            if snapshot.get(SUPER_AGENT_BASELINE_KEY):
+                original_complete = complete
+                def observed_complete(*args: Any, **kwargs: Any) -> str:
+                    denial = execution_guard()
+                    if denial:
+                        from naiba.super_agent.baseline import PreflightRejected
+                        raise PreflightRejected(denial)
+                    self.app.models.last_diagnostics = {}
+                    self.app.models.last_usage = {}
+                    status = "failed"
+                    try:
+                        result = original_complete(*args, **kwargs)
+                        status = "completed"
+                        return result
+                    finally:
+                        diagnostics = getattr(self.app.models, "last_diagnostics", {}) or {}
+                        attempts = diagnostics.get("attempts")
+                        attempts = attempts if type(attempts) is int and attempts > 0 else None
+                        chat_requests.append({"attempts": attempts, "retries": attempts - 1 if attempts is not None else None,
+                            "usage": dict(getattr(self.app.models, "last_usage", {}) or {}) or None, "status": status})
+                # SkillAgent reads ModelRuntime side channels through the bound
+                # owner. Preserve that existing contract for this local wrapper.
+                observed_complete.__self__ = self.app.models
+                complete = observed_complete
             worker = SkillAgent(
                 self.app.catalog,
                 executor,
-                self.app.models.complete,
+                complete,
                 getattr(self.app, "media_collector", None),
             )
             response, runs, reasonings, usage = worker.run(
@@ -1053,6 +1135,7 @@ class ConversationRunMixin:
             performance = {
                 "vision": dict(vision_trace),
                 "chat": dict(chat_diagnostics),
+                **({"chat_requests": chat_requests} if snapshot.get(SUPER_AGENT_BASELINE_KEY) else {}),
                 "total_ms": round((time.perf_counter() - run_started) * 1000, 1),
                 "warnings": performance_warnings,
                 "routing": {
@@ -1079,7 +1162,7 @@ class ConversationRunMixin:
                         compile_options.pop("tools", None)
                         # 本地锁占用者标签：计划整理走 status=None，占住本地锁时不可归因。
                         compile_options["lock_label"] = "计划整理"
-                        response = self.app.models.complete(
+                        response = complete(
                             profile,
                             self.app.plans.plan_compilation_messages(current_plan, response),
                             compile_options,
@@ -1272,6 +1355,12 @@ class ConversationRunMixin:
                     traceback.print_exc()
             self.emit(run_id, error_payload)
         finally:
+            if snapshot.get(SUPER_AGENT_BASELINE_KEY) and usage_message_id:
+                try:
+                    self.app.storage.merge_message_metadata(conversation_id, usage_message_id,
+                        {"performance": {**performance, "chat_requests": chat_requests}})
+                except Exception:
+                    logger.exception("任务模型请求用量收尾记录失败：run=%s", run_id)
             # 首轮上下文（first_turn）收尾统一落盘：完整系统提示词（含 Skill 注入块）、
             # 完整工具 JSON 定义、生成参数与完整请求消息（图片 base64 摘要化）。
             # 正常/取消/失败路径都落（trace 可能部分），失败不阻断收尾。

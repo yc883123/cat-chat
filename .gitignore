@@ -226,6 +226,10 @@ verify/*
 !verify/_serve_super_agent_stage_chain.py
 !verify/super_agent_stage_chain_smoke.cjs
 !verify/super_agent_controls_smoke.cjs
+!verify/_serve_super_agent_v1_ui.py
+!verify/super_agent_v1_ui_smoke.cjs
+!verify/super_agent_feedback_smoke.cjs
+!verify/super_agent_runtime_smoke.cjs
 !verify/auto_compaction_e2e.py
 !verify/auto_compaction_e2e.cjs
 !verify/_serve_tmp.py

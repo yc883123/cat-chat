@@ -100,6 +100,12 @@ def _super_agent_thread_payload(thread: Any, *, detail: bool = False) -> dict[st
         "chain_version": int(getattr(thread, "chain_version", 0) or 0),
         "current_node_id": thread.current_node_id,
         "current_stage_key": str(getattr(thread, "current_stage_key", "") or ""),
+        "linked_conversation_ids": list(thread.linked_conversation_ids or []),
+        "linked_book_refs": [
+            {"domain": parts[0], "book_id": parts[1]}
+            for ref in (thread.linked_domain_task_ids or [])
+            if len(parts := str(ref).split(":")) >= 2 and parts[0] in {"writer", "novel"}
+        ],
         "version": thread.version,
         "last_event_at": thread.last_event_at,
         "created_at": thread.created_at,
@@ -119,7 +125,7 @@ def _super_agent_thread_payload(thread: Any, *, detail: bool = False) -> dict[st
     return payload
 
 
-def _super_agent_node_payload(node: Any) -> dict[str, Any]:
+def _super_agent_node_payload(node: Any, capabilities: dict[str, bool] | None = None) -> dict[str, Any]:
     checkpoint = node.checkpoint if isinstance(node.checkpoint, dict) else {}
     ref = checkpoint.get("domain_ref") if isinstance(checkpoint.get("domain_ref"), dict) else None
     domain_ref = None
@@ -144,6 +150,8 @@ def _super_agent_node_payload(node: Any) -> dict[str, Any]:
         "parent_id": node.parent_id,
         "dependencies": list(node.dependencies or []),
         "executor_type": _super_agent_text(node.executor_type, 80),
+        "executor_id": _super_agent_text(node.executor_id, 160),
+        "capabilities": {key: bool((capabilities or {}).get(key)) for key in ("start", "cancel", "retry", "resume")},
         "attempt": node.attempt,
         "approval_required": bool(node.approval_required),
         "output_refs": list(node.output_refs or []),
@@ -565,6 +573,7 @@ class NaibaChatApp:
 
         self.super_agent_domain = DomainCoordinator(self)
         self.super_agent.domain_router = self.super_agent_domain
+        self.super_agent_domain.runtime.start()
         self.updater = UpdateManager(self._paths.app_dir, self._paths.data_dir)
         # 「更新代理」独立于全局 proxy：启动时注入一次，设置保存后再注入更新。
         self.updater.configure_proxy(self.config.data.get("update_proxy"))
@@ -574,6 +583,7 @@ class NaibaChatApp:
         self._start_mcp_background()
 
     def stop(self) -> None:
+        self.super_agent_domain.runtime.shutdown()
         self.runs.shutdown()
         self.plans.shutdown()
         self.jobs.shutdown()
@@ -992,8 +1002,8 @@ class NaibaChatApp:
             thread_payload["current_stage_key"] = str(getattr(node, "stage_key", "") or "")
             return {
                 "thread": thread_payload,
-                "node": _super_agent_node_payload(node),
-                "nodes": [_super_agent_node_payload(item) for item in nodes],
+                "node": _super_agent_node_payload(node, self.super_agent_domain.runtime.node_capabilities(node)),
+                "nodes": [_super_agent_node_payload(item, self.super_agent_domain.runtime.node_capabilities(item)) for item in nodes],
             }, HTTPStatus.CREATED
         except LookupError as exc:
             return {"error": str(exc)}, HTTPStatus.NOT_FOUND
@@ -1001,11 +1011,14 @@ class NaibaChatApp:
             return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
 
     def api_super_agent_action(self, thread_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        from naiba.super_agent.baseline import PreflightRejected
         try:
             result = self.super_agent_domain.action(self._super_agent_owner(), thread_id, body)
             return {"result": _super_agent_action_payload(result)}, HTTPStatus.OK
         except LookupError as exc:
             return {"error": str(exc)}, HTTPStatus.NOT_FOUND
+        except PreflightRejected as exc:
+            return {"error": str(exc), "submission": "not_submitted"}, HTTPStatus.BAD_REQUEST
         except (ValueError, RuntimeError) as exc:
             return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
 
@@ -1026,6 +1039,14 @@ class NaibaChatApp:
         except LookupError:
             return {"error": "Thread 不存在或无权访问"}, HTTPStatus.NOT_FOUND
         payload = _super_agent_thread_payload(thread, detail=True)
+        from naiba.core.contracts import SUPER_AGENT_CHAT_CONFIRMATIONS_KEY
+        payload[SUPER_AGENT_CHAT_CONFIRMATIONS_KEY] = self.super_agent_domain.chat_confirmations(
+            self._super_agent_owner(), thread_id,
+        )
+        from naiba.core.contracts import SUPER_AGENT_SUPERVISION_KEY
+        supervision = self.super_agent_domain.runtime.supervised.detail(self._super_agent_owner(), thread_id)
+        if supervision is not None:
+            payload[SUPER_AGENT_SUPERVISION_KEY] = supervision
         if thread.current_node_id:
             current = self.super_agent.get_node(self._super_agent_owner(), thread.current_node_id)
             payload["current_stage_key"] = str(getattr(current, "stage_key", "") or "")
@@ -1038,7 +1059,18 @@ class NaibaChatApp:
             nodes = self.super_agent.list_nodes(self._super_agent_owner(), thread_id)
         except LookupError:
             return {"error": "Thread 不存在或无权访问"}, HTTPStatus.NOT_FOUND
-        return {"nodes": [_super_agent_node_payload(node) for node in nodes]}, HTTPStatus.OK
+        return {"nodes": [_super_agent_node_payload(node, self.super_agent_domain.runtime.node_capabilities(node)) for node in nodes]}, HTTPStatus.OK
+
+    def api_super_agent_results(self, thread_id: str, node_id: str) -> tuple[dict[str, Any], int]:
+        if not node_id:
+            return {"error": "缺少 node_id"}, HTTPStatus.BAD_REQUEST
+        try:
+            results = self.super_agent_domain.results.list_results(self._super_agent_owner(), thread_id, node_id)
+            return {"results": results}, HTTPStatus.OK
+        except LookupError as exc:
+            return {"error": str(exc)}, HTTPStatus.NOT_FOUND
+        except (ValueError, RuntimeError) as exc:
+            return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
 
     def api_super_agent_events(self, thread_id: str, after: int = 0) -> tuple[dict[str, Any], int]:
         try:

@@ -19,6 +19,7 @@ from typing import Any
 
 from naiba.core.attachments import compose_user_content
 from naiba.core.contracts import MetadataKeys
+from naiba.core.messages import dependency_message_content, supervised_message_content
 from naiba.core.diagnostics import _cache_debug_enabled
 from naiba.core.tool_results import model_visible_run, truncate_json_text
 
@@ -611,6 +612,9 @@ def build_model_history(
         if item.get("role") not in {"user", "assistant"}:
             continue
         content = str(item.get("content") or "")
+        if item.get("role") == "user":
+            content = supervised_message_content(content, metadata.get(MetadataKeys.SUPERVISED_SOURCE))
+            content = dependency_message_content(content, metadata.get(MetadataKeys.DEPENDENCY_SOURCE))
         previous_uploads = (item.get("metadata") or {}).get(MetadataKeys.ATTACHMENTS) or []
         # 拖入文件夹的路径索引：与附件走同一条拼装路径（否则"只拖了文件夹"的那一轮
         # 重放时会丢掉清单，而 live 那一轮是带着清单发的 ⇒ 前缀缓存断在第一处差异上）。

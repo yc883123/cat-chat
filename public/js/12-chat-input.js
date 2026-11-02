@@ -1023,7 +1023,13 @@ function handleToolConfirmEvent(event, { row, answer, runId }) {
     : JSON.stringify(event.arguments || {}, null, 2);
   // 去重：重连/重渲染若把同一确认事件再投一次，不能插第二张卡（两张卡的按钮点哪个
   // 另一个都会变成「已失效」，纯属惊吓）。
-  if (confirmId && row.querySelector(`.tool-confirm[data-confirm-id="${CSS.escape(String(confirmId))}"]`)) {
+  const existing = confirmId && row.querySelector(`.tool-confirm[data-confirm-id="${CSS.escape(String(confirmId))}"]`);
+  if (existing) {
+    if (event.confirm_resolved || event.confirm_processing) {
+      existing.dataset.confirmState = event.confirm_resolved ? 'resolved' : 'processing';
+      existing.querySelector('.tool-confirm-title').textContent = event.confirm_resolved ? '确认已结束' : '已确认';
+      existing.querySelector('.tool-confirm-actions').innerHTML = `<div class="tool-confirm-status">${event.confirm_resolved ? '该确认已处理或已失效，无需再次操作' : '已允许，工具正在执行，请等待结果'}</div>`;
+    }
     return;
   }
   // 后端在回放时已标注「该确认不再待决」（confirm_resolved）：渲染成历史回执、不给按钮——
@@ -1035,17 +1041,19 @@ function handleToolConfirmEvent(event, { row, answer, runId }) {
         <button class="tool-confirm-btn tool-confirm-approve${allowRun ? ' tool-confirm-approve-run' : ''}" data-confirm-id="${escapeHtml(confirmId)}" data-run-id="${escapeHtml(event.run_id || runId)}" data-allow-run="${allowRun ? '1' : '0'}">${allowRun ? '允许本轮继续执行后续操作' : '允许执行'}</button>`;
   const actionsMarkup = event.confirm_resolved
     ? '<div class="tool-confirm-status">该确认已处理或已超时失效（历史回执，无需操作）</div>'
-    : (event.action_source === 'fenced'
+    : event.confirm_processing
+      ? '<div class="tool-confirm-status">已允许，工具正在执行，请等待结果</div>'
+      : (event.action_source === 'fenced'
       ? confirmButtons(true)
       : confirmButtons(false));
   const confirmHint = event.action_source === 'fenced'
     ? '<div class="tool-confirm-hint">这段动作来自代码块（围栏）文本，可能是说明里的示例。允许后本轮的后续同类动作不再重复询问。</div>'
     : '';
   const confirmMarkup = `
-    <div class="tool-confirm" data-confirm-id="${escapeHtml(confirmId)}">
+    <div class="tool-confirm" data-confirm-id="${escapeHtml(confirmId)}" data-confirm-state="${event.confirm_resolved ? 'resolved' : event.confirm_processing ? 'processing' : 'pending'}">
       <div class="tool-confirm-header">
         <span class="tool-confirm-icon">⚠️</span>
-        <span class="tool-confirm-title">${event.confirm_resolved ? '确认已结束' : '需要确认'}</span>
+        <span class="tool-confirm-title">${event.confirm_resolved ? '确认已结束' : event.confirm_processing ? '已确认' : '需要确认'}</span>
       </div>
       <div class="tool-confirm-body">
         <div class="tool-confirm-tool">工具：${escapeHtml(toolName)}</div>
@@ -1740,15 +1748,17 @@ export async function approveTool(confirmId, runId = state.chatRunId, allowRun =
   const confirmEl = document.querySelector(`.tool-confirm[data-confirm-id="${CSS.escape(String(confirmId))}"]`);
   try {
     if (confirmEl) {
-      confirmEl.querySelector('.tool-confirm-actions').innerHTML = '<div class="tool-confirm-status">正在执行...</div>';
+      confirmEl.querySelector('.tool-confirm-actions').innerHTML = '<div class="tool-confirm-status">正在提交确认…</div>';
     }
     const body = { run_id: runId, confirm_id: confirmId };
     // allow_run 只在确认卡明确给了选择时才发送：缺省由后端按「围栏来源 ⇒ 允许本轮继续」处理，
     // 老前端（不知道这个字段）行为不变。
     if (typeof allowRun === 'boolean') body.allow_run = allowRun;
     const response = await api('/api/tool/confirm', { method: 'POST', body });
-    if (confirmEl) {
-      confirmEl.querySelector('.tool-confirm-status').textContent = response.success ? '已执行' : `执行失败：${response.result}`;
+    if (confirmEl && confirmEl.dataset.confirmState !== 'resolved') {
+      confirmEl.dataset.confirmState = response.success ? 'processing' : 'resolved';
+      confirmEl.querySelector('.tool-confirm-title').textContent = response.success ? '已确认' : '确认未受理';
+      confirmEl.querySelector('.tool-confirm-status').textContent = response.success ? '已允许，工具正在执行，请等待结果' : `确认失败：${response.result}`;
     }
   } catch (error) {
     // 失败必须落回卡片（典型：确认已超时/被处理 → 409）——只 toast 会让卡片永远停在

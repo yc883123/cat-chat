@@ -117,6 +117,8 @@ _FENCED_MARKERS = (
 # 不是工具执行失败。三者共用一个判定入口 ⇒ 共用同一条收尾路径（计划 2026-10-01 §2.4）：
 # 不回灌模型、当轮以原文收尾。
 _FENCED_WAIT_FAILURES = (
+    ("授权配置已变化", _FENCED_EXPIRED_MARKER, "执行授权已变化，请重新确认任务。"),
+    ("授权配置复核失败", _FENCED_EXPIRED_MARKER, "执行授权无法复核，动作未执行。"),
     ("用户拒绝执行", _FENCED_REJECTED_MARKER, "用户拒绝了该代码块动作。"),
     ("确认ID无效或已过期", _FENCED_EXPIRED_MARKER, "该确认已失效（已被处理或超时）。"),
     ("确认请求已失效", _FENCED_EXPIRED_MARKER, "该确认已失效（已被处理或超时）。"),
@@ -1784,6 +1786,12 @@ class SkillAgent:
             return False, f"Agent 设置已禁用工具：{tool}"
         event({"type": "tool_started", "tool": tool})  # noqa: event-internal
 
+        guard = (run_context or {}).get("execution_guard")
+        if callable(guard):
+            denial = str(guard() or "")
+            if denial:
+                return False, f"{_FENCED_EXPIRED_MARKER}未执行：{denial}"
+
         def _dispatch() -> tuple[bool, str]:
             if tool_registry is not None:
                 return tool_registry.execute(tool, arguments, active, run_context)
@@ -1811,6 +1819,8 @@ class SkillAgent:
             )
         else:
             success, result = _dispatch()
+        if not success and str(result).startswith(("授权配置已变化", "授权配置复核失败")):
+            return False, f"{_FENCED_EXPIRED_MARKER}未执行：执行授权已变化，请重新确认任务。"
 
         confirmation_requested = False
         if not success and str(result).startswith("NEED_CONFIRM:"):
@@ -1819,6 +1829,11 @@ class SkillAgent:
             if len(parts) >= 4:
                 confirm_id = parts[1]
                 tool_desc = parts[2]
+                if not self._confirmation_ui(run_context):
+                    self._run_executor(run_context).reject_execute(confirm_id)
+                    return False, (
+                        f"{_FENCED_SKIPPED_MARKER}未执行：此工具动作需要用户确认，当前运行没有确认入口。"
+                    )
                 event({
                     "type": "tool_confirm",
                     "confirm_id": confirm_id,
@@ -1834,7 +1849,9 @@ class SkillAgent:
                 success, result = self._run_executor(run_context).wait_for_confirmation(
                     confirm_id, timeout=1800, cancel_event=cancel_event
                 )
-            if fenced and not success:
+            if not success:
+                if str(result).startswith(("授权配置已变化", "授权配置复核失败")):
+                    return False, f"{_FENCED_EXPIRED_MARKER}未执行：执行授权已变化，请重新确认任务。"
                 wait_failure = _fenced_wait_failure(result)
                 if wait_failure:
                     # 用户拒绝 / 确认失效 / 超时自动拒绝：都不作为工具失败回灌模型
@@ -1916,16 +1933,23 @@ class SkillAgent:
         body = str(raw or "").strip()
         if marker == _FENCED_REJECTED_MARKER:
             note = "该动作未执行：你在确认卡上选择了「拒绝」。"
-            status = "已拒绝执行该代码块动作；本轮结束，未执行任何命令。"
+            status = "已拒绝执行该动作；本轮结束，此次请求未执行。"
         elif marker == _FENCED_EXPIRED_MARKER:
-            note = "该动作未执行：确认已失效或超时（没有收到你的批准）。"
-            status = "代码块动作的确认已失效或超时，本轮结束，未执行任何命令。"
+            note = "该动作未执行：确认已失效、超时或执行授权已经变化。"
+            status = "动作确认或执行授权已失效，本轮结束，此次请求未执行。"
         else:
             note = "该动作未执行：当前运行（子 Agent / 后台任务）没有可用的确认入口。"
             status = "代码块动作在当前运行形态下无法确认，已按原文收尾（未执行）。"
         event({"type": "status", "message": status})
         answer = f"{body}\n\n（{note}）" if body else note
         if isinstance(run_context, dict):
+            run_context["execution_outcome"] = {
+                "version": 1, "status": "not_executed",
+                "reason_code": ("confirmation_rejected" if marker == _FENCED_REJECTED_MARKER else
+                                "confirmation_expired" if marker == _FENCED_EXPIRED_MARKER else "confirmation_unavailable"),
+                "summary": note, "uncompleted_actions": [str(run.get("tool") or "") for run in runs[-1:]],
+                "artifact_refs": [],
+            }
             messages.append(build_message(answer))
             run_context["trace_messages"] = [*compacted_trace_prefix, *messages[trace_start:]]
         return answer, runs, reasonings, self._summarize_usage(usages)

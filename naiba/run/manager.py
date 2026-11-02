@@ -7,11 +7,13 @@ ConversationRunManager：每会话一轮 Run 的调度器与注册表——提�
 
 from __future__ import annotations
 
-from naiba.core.contracts import AppContext
+from naiba.core.contracts import AppContext, RunConfirmationSnapshot
 
 import logging
+import re
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +73,71 @@ class ConversationRunManager(ConversationRunMixin):
         # 各调一次，第二次是同载荷重复落盘（同一份首轮上下文再序列化再写两处）。
         self._first_turn_done: set[str] = set()
         self._first_turn_lock = threading.Lock()
+        self._subagent_validators: dict[str, Any] = {}
+
+    def register_subagent_executor(self, job_id: str, executor: Any, cancel: Any, validate: Any) -> bool:
+        """Register a live Job executor only after its persisted owner is checked."""
+        if not callable(validate) or not validate():
+            return False
+        with self._lock:
+            if job_id in self._executors:
+                return False
+            self._executors[job_id] = executor
+            self._events[job_id] = cancel
+            self._subagent_validators[job_id] = validate
+        return True
+
+    def unregister_subagent_executor(self, job_id: str, executor: Any) -> None:
+        with self._lock:
+            if self._executors.get(job_id) is executor and job_id in self._subagent_validators:
+                self._executors.pop(job_id, None)
+                self._events.pop(job_id, None)
+                self._subagent_validators.pop(job_id, None)
+
+    def subagent_confirmation_snapshot(self, job_id: str) -> list[RunConfirmationSnapshot]:
+        with self._lock:
+            if job_id not in self._subagent_validators:
+                return []
+        return self.confirmation_snapshot(job_id)
+
+    @staticmethod
+    def _confirmation_parameters(arguments: Any) -> dict[str, str]:
+        """Only necessary path/command fields cross the confirmation boundary."""
+        if not isinstance(arguments, dict):
+            return {}
+        from naiba.core.redaction import redact_execution_text
+        result = {}
+        for key in ("path", "directory", "destination", "command"):
+            value = arguments.get(key)
+            if not isinstance(value, str):
+                continue
+            value = redact_execution_text(value)
+            result[key] = value[:800] + ("…（已截断）" if len(value) > 800 else "")
+        return result
+
+    @contextmanager
+    def supervised_submission_guard(self, conversation_id: str):
+        """Serialize human input and automatic dispatch through the same gate.
+
+        The existing submission RLock is intentionally reused: final response
+        persistence already uses it, and nested internal submit_chat is safe.
+        No supervision coordinator lock may be acquired by the human hook.
+        """
+        if not str(conversation_id or "").strip():
+            raise ValueError("conversation_id 不能为空")
+        with self._submit_lock:
+            yield
+
+    def _supervised_human_input(self, conversation_id: str) -> None:
+        """Persist takeover before recording any new human instruction."""
+        domain = getattr(self.app, "super_agent_domain", None)
+        runtime = getattr(domain, "runtime", None)
+        supervised = getattr(runtime, "supervised", None)
+        hook = getattr(supervised, "human_input", None)
+        if callable(hook):
+            # Fail closed if persistence fails: no new instruction can race a
+            # stale automatic decision after a swallowed database error.
+            hook(conversation_id)
 
     def _resolve_allowed_tools(
         self,
@@ -380,21 +447,63 @@ class ConversationRunManager(ConversationRunMixin):
         )
         return self.cancel(str(run["id"])) if run else None
 
-    def owns_confirmation(self, run_id: str, confirm_id: str) -> bool:
-        run = self.get(run_id)
-        if not run or str(run.get("status") or "") in {"completed", "failed", "cancelled", "cancelling"}:
-            return False
+    def confirmation_snapshot(self, run_id: str) -> list[RunConfirmationSnapshot]:
+        """Read only this live Run's isolated executor, under its confirmation lock.
+
+        Neither persisted events nor run.detail can establish ownership: parallel
+        tools may have multiple confirmations and a restarted run has no authority.
+        Arguments, workspace paths and free-form reasons never leave this boundary.
+        """
         with self._lock:
             executor = self._executors.get(run_id)
-        if executor is None:
-            return False
-        # A run may hold SEVERAL pending confirmations at once (e.g. a parallel
-        # batch of out-of-workspace file reads). `run.detail.confirm_id` only
-        # tracks the LAST one emitted, so it cannot be the source of truth here —
-        # using it made clicking Confirm on any but the last request fail and hang
-        # the conversation. Ownership is correctly decided by whether this
-        # confirm_id is actually pending on the run's own executor.
-        return confirm_id in getattr(executor, "pending_confirmation", {})
+            cancelled = self._events.get(run_id)
+            validator = self._subagent_validators.get(run_id)
+        lock = getattr(executor, "_confirmation_lock", None)
+        if executor is None or lock is None or (cancelled and cancelled.is_set()):
+            return []
+        # Do not hold the manager lock while waiting on a tool's policy recheck.
+        # Rechecks may call back into the manager; the reverse order can deadlock.
+        with lock:
+            with self._lock:
+                if self._executors.get(run_id) is not executor or (cancelled and cancelled.is_set()):
+                    return []
+            run = self.get(run_id)
+            if not run or run.get("status") not in {"queued", "running", "waiting"}:
+                return []
+            if validator is not None and not validator():
+                return []
+            conversation_id = str(run.get("conversation_id") or "")
+            if not conversation_id:
+                return []
+            result: list[RunConfirmationSnapshot] = []
+            for confirm_id, pending in executor.pending_confirmation.items():
+                if not isinstance(pending, dict):
+                    continue
+                context = pending.get("run_context") or {}
+                if not isinstance(context, dict):
+                    continue
+                if any(context.get(key) and str(context[key]) != value for key, value in (
+                    ("run_id", run_id), ("conversation_id", conversation_id),
+                )):
+                    continue
+                tool = str(pending.get("tool") or "")
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.:-]{0,159}", tool):
+                    continue
+                processing = bool(pending.get("processing"))
+                item = {
+                    "confirm_id": str(confirm_id), "run_id": run_id,
+                    "conversation_id": conversation_id, "tool": tool,
+                    "reason": "已确认，工具正在执行" if processing else "此工具操作需要你确认",
+                    "status": "processing" if processing else "pending",
+                }
+                if validator is not None:
+                    item.update({"executor_kind": "subagent", "parameters": self._confirmation_parameters(pending.get("arguments")),
+                                 "action_source": "fenced" if pending.get("fenced_scope") else "native"})
+                result.append(item)
+            return result
+
+    def owns_confirmation(self, run_id: str, confirm_id: str) -> bool:
+        return any(item["confirm_id"] == confirm_id for item in self.confirmation_snapshot(run_id))
 
     def executor_for_run(self, run_id: str, snapshot: dict[str, Any] | None = None) -> Any:
         """Return the isolated executor owned by one Run, creating it if needed."""
@@ -443,7 +552,7 @@ class ConversationRunManager(ConversationRunMixin):
             return None
         with self._lock:
             executor = self._executors.get(run_id)
-        if executor is None or confirm_id not in getattr(executor, "pending_confirmation", {}):
+        if executor is None:
             return None
         return executor.confirm_execute(confirm_id, allow_run)
 
@@ -454,7 +563,7 @@ class ConversationRunManager(ConversationRunMixin):
             return None
         with self._lock:
             executor = self._executors.get(run_id)
-        if executor is None or confirm_id not in getattr(executor, "pending_confirmation", {}):
+        if executor is None:
             return None
         starter = getattr(executor, "confirm_execute_async", None)
         return starter(confirm_id, allow_run) if callable(starter) else executor.confirm_execute(confirm_id, allow_run)
@@ -464,7 +573,7 @@ class ConversationRunManager(ConversationRunMixin):
             return None
         with self._lock:
             executor = self._executors.get(run_id)
-        if executor is None or confirm_id not in getattr(executor, "pending_confirmation", {}):
+        if executor is None:
             return None
         return executor.reject_execute(confirm_id)
 
@@ -483,9 +592,11 @@ class ConversationRunManager(ConversationRunMixin):
             raise ValueError("conversation_id、run_id 和 message 不能为空")
         if not isinstance(attachments, list):
             raise ValueError("attachments 必须是数组")
-        saved = self.app.storage.add_run_interjection(
-            conversation_id, run_id, message, attachments
-        )
+        with self.supervised_submission_guard(conversation_id):
+            self._supervised_human_input(conversation_id)
+            saved = self.app.storage.add_run_interjection(
+                conversation_id, run_id, message, attachments
+            )
         return {"message": saved, "run_id": run_id}
 
     def guide_interjection(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -494,7 +605,9 @@ class ConversationRunManager(ConversationRunMixin):
         message_id = str(body.get("message_id") or "").strip()
         if not conversation_id or not run_id or not message_id:
             raise ValueError("conversation_id、run_id 和 message_id 不能为空")
-        saved = self.app.storage.guide_run_interjection(conversation_id, run_id, message_id)
+        with self.supervised_submission_guard(conversation_id):
+            self._supervised_human_input(conversation_id)
+            saved = self.app.storage.guide_run_interjection(conversation_id, run_id, message_id)
         with self._lock:
             executor = self._executors.get(run_id)
         # 待确认的工具调用属于旧轨迹：先拒掉，agent 下一步才能看见新指令
@@ -517,7 +630,9 @@ class ConversationRunManager(ConversationRunMixin):
         message = str(body.get("message") or "").strip()
         if not conversation_id or not run_id or not message_id or not message:
             raise ValueError("conversation_id、run_id、message_id 和 message 不能为空")
-        saved = self.app.storage.edit_run_interjection(conversation_id, run_id, message_id, message)
+        with self.supervised_submission_guard(conversation_id):
+            self._supervised_human_input(conversation_id)
+            saved = self.app.storage.edit_run_interjection(conversation_id, run_id, message_id, message)
         return {"message": saved, "run_id": run_id}
 
     def delete_interjection(self, body: dict[str, Any]) -> dict[str, Any]:

@@ -1669,60 +1669,112 @@
 
       <section class="super-agent-view" id="superAgentView" hidden aria-label="任务总管">
         <header class="super-agent-topbar">
-          <button class="icon-button sidebar-expand-btn" id="superAgentExpandSidebar" type="button" title="展开侧栏" aria-label="展开侧栏">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 6l6 6-6 6"></path><path d="M5 6l6 6-6 6"></path></svg>
-          </button>
-          <button class="icon-button mobile-only" id="superAgentOpenSidebar" type="button" title="打开导航" aria-label="打开导航">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"></path></svg>
-          </button>
-          <strong class="super-agent-brand">任务总管</strong>
-          <span class="super-agent-capability">查看与控制</span>
+          <strong class="super-agent-brand"><i aria-hidden="true"></i>任务总管 · V1</strong>
+          <span class="super-agent-capability">任务进展与结果</span>
           <div class="super-agent-toolbar">
-            <span class="super-agent-sync" id="superAgentSyncStatus" role="status"></span>
-            <button class="control-button tiny" id="superAgentCreate" type="button">新建领域任务</button>
-            <button class="control-button tiny" id="superAgentRefresh" type="button">刷新</button>
+            <span class="super-agent-sync" id="superAgentSyncStatus" role="status" aria-live="polite"></span>
+            <button class="control-button tiny" id="superAgentRefresh" type="button">刷新状态</button>
           </div>
         </header>
         <div class="super-agent-columns">
-          <aside class="super-agent-thread-panel" aria-label="Thread 列表">
-            <div class="super-agent-panel-head"><strong>Thread</strong><span id="superAgentThreadCount">0</span></div>
-            <div class="super-agent-thread-list" id="superAgentThreadList" role="list"></div>
-            <p class="super-agent-empty" id="superAgentThreadEmpty">还没有任务总管 Thread。</p>
+          <aside class="super-agent-thread-panel" aria-label="任务列表">
+            <div class="super-agent-sidebar-brand"><span class="super-agent-brand-mark" aria-hidden="true">总</span><div><strong>任务总管</strong><small>Super-agent · V1</small></div></div>
+            <nav class="super-agent-app-nav" id="superAgentAppNav" aria-label="应用视图"><button type="button" data-super-view="chat">对话</button><button type="button" data-super-view="studio">工作台</button><button type="button" data-super-view="super-agent" aria-current="page">任务总管</button></nav>
+            <button class="control-button primary super-agent-new-task" id="superAgentCreate" type="button"><span aria-hidden="true">＋</span> 新建任务</button>
+            <div class="super-agent-panel-head"><strong>我的任务</strong><span id="superAgentThreadCount">0</span></div>
+            <div class="super-agent-filters" id="superAgentFilters" role="group" aria-label="筛选任务">
+              <button type="button" data-super-filter="all" aria-pressed="true">全部</button>
+              <button type="button" data-super-filter="waiting" aria-pressed="false">待确认</button>
+              <button type="button" data-super-filter="completed" aria-pressed="false">已完成</button>
+            </div>
+            <div class="super-agent-thread-list" id="superAgentThreadList"></div>
+            <p class="super-agent-empty" id="superAgentThreadEmpty">还没有任务，先新建一个吧。</p>
+            <p class="super-agent-list-note">切换页面不会中断后台任务</p>
           </aside>
-          <section class="super-agent-detail-panel" aria-label="Thread 详情">
-            <div class="super-agent-empty" id="superAgentDetailEmpty">选择一个 Thread 查看详情。</div>
+          <header class="super-agent-workspace-topbar"><span class="super-agent-crumb">任务总管 <span aria-hidden="true">/</span> <strong id="superAgentCrumbTitle">任务进展与结果</strong></span><span class="super-agent-workspace-label">持续任务</span></header>
+          <section class="super-agent-detail-panel" aria-label="任务详情">
+            <div class="super-agent-empty" id="superAgentDetailEmpty">选择一个任务，查看进展与下一步。</div>
             <div id="superAgentDetail" hidden>
               <div class="super-agent-detail-head">
-                <div><h1 id="superAgentTitle"></h1><p id="superAgentGoal"></p></div>
+                <div><div class="super-agent-eyebrow"><span aria-hidden="true">▤</span> 持续任务 · 任务总管</div><h1 id="superAgentTitle"></h1><p id="superAgentGoal"></p></div>
                 <span class="super-agent-status" id="superAgentStatus"></span>
               </div>
-              <p class="super-agent-summary" id="superAgentSummary"></p>
-              <section class="super-agent-section super-agent-stage-section"><div class="super-agent-section-title"><h2>阶段链</h2><span class="super-agent-chain-meta" id="superAgentChainMeta"></span></div><div class="super-agent-stage-chain" id="superAgentStageChain"></div><div class="super-agent-node-list" id="superAgentNodeList" hidden></div></section>
-              <section class="super-agent-section"><h2>事件时间线</h2><div class="super-agent-event-list" id="superAgentEventList"></div></section>
+              <div class="super-agent-thread-actions" id="superAgentThreadActions"><button type="button" class="control-button tiny" data-super-thread-action="pause" title="暂停后续步骤，正在执行的步骤仍可能完成">暂停任务</button><button type="button" class="control-button tiny" data-super-thread-action="continue">继续任务</button><button type="button" class="control-button tiny danger" data-super-thread-action="cancel">取消任务</button></div>
+              <p class="super-agent-control-note">暂停只停止后续步骤；正在执行的步骤仍可能完成。取消后请以实际停止状态为准。</p>
+              <div class="super-agent-overview" aria-label="任务概况">
+                <section class="super-agent-metric super-agent-progress"><h2>总体进度</h2><strong id="superAgentProgressText">暂无步骤</strong><progress id="superAgentProgress" max="1" value="0" aria-label="已完成步骤" hidden></progress><small id="superAgentProgressHint">仅统计已完成的真实步骤</small></section>
+                <section class="super-agent-metric"><h2>当前阶段</h2><strong id="superAgentCurrentStage">尚未开始</strong><small id="superAgentCurrentHint"></small></section>
+                <section class="super-agent-metric"><h2>最近更新</h2><strong id="superAgentUpdatedAt">—</strong><small>以任务记录为准</small></section>
+              </div>
+              <section class="super-agent-section super-agent-decision-section" id="superAgentDecisionSection" hidden><div class="super-agent-section-title"><h2>最近系统决策</h2><span class="super-agent-chain-meta" id="superAgentDecisionAt"></span></div><p class="super-agent-summary" id="superAgentSummary"></p></section>
+              <section class="super-agent-section super-agent-supervision" id="superAgentSupervision" hidden aria-live="polite"></section>
+              <section class="super-agent-section super-agent-stage-section"><div class="super-agent-section-title"><h2>任务步骤</h2><span class="super-agent-chain-meta" id="superAgentChainMeta"></span></div><div class="super-agent-stage-chain" id="superAgentStageChain"><div class="super-agent-node-list" id="superAgentNodeList"></div></div></section>
+              <section class="super-agent-section"><div class="super-agent-section-title"><h2>时间线</h2><span class="super-agent-chain-meta">最近活动在前</span></div><div class="super-agent-event-list" id="superAgentEventList"></div></section>
             </div>
           </section>
-          <aside class="super-agent-side-panel" aria-label="审批与产物">
-            <section class="super-agent-section"><h2>待确认项</h2><div id="superAgentApprovalList"></div></section>
-            <section class="super-agent-section"><h2>产物引用</h2><div id="superAgentArtifactList"></div></section>
+          <aside class="super-agent-side-panel" aria-label="待确认、下一步与产物">
+            <div class="super-agent-side-title"><h2>任务详情</h2><small>以实际任务记录为准</small></div>
+            <section class="super-agent-section super-agent-confirmations"><h2>等待你确认</h2><div id="superAgentChatConfirmationList"></div><div id="superAgentApprovalList"></div></section>
+            <section class="super-agent-section"><h2>下一步</h2><div id="superAgentNextStep"><p class="super-agent-muted">选择任务后查看下一步。</p></div></section>
+            <section class="super-agent-section"><h2>最近产物</h2><div id="superAgentArtifactList"></div></section>
+            <section class="super-agent-section"><h2>相关入口</h2><div class="super-agent-related-links" id="superAgentConversationLinks"></div></section>
           </aside>
         </div>
       </section>
 
+      <dialog id="superAgentResultDialog" class="writer-dialog super-agent-result-dialog" aria-labelledby="superAgentResultTitle">
+        <div class="writer-dialog-form"><div class="super-agent-section-title"><h2 id="superAgentResultTitle">本次执行结果</h2><button type="button" class="control-button tiny" id="superAgentResultClose">关闭</button></div><div id="superAgentResultBody" aria-live="polite"></div></div>
+      </dialog>
       <dialog id="superAgentCreateDialog" class="writer-dialog super-agent-create-dialog" aria-labelledby="superAgentCreateTitle">
         <form method="dialog" class="writer-dialog-form super-agent-create-form" id="superAgentCreateForm" novalidate>
           <div class="writer-manage-head">
-            <h3 id="superAgentCreateTitle">新建领域任务</h3>
+            <h3 id="superAgentCreateTitle">新建任务</h3>
             <button class="control-button tiny" id="superAgentCreateClose" value="cancel" type="submit">关闭</button>
           </div>
-          <label>领域<select id="superAgentCreateDomain"><option value="writer">Writer · 织书台</option><option value="novel">Novel · 拆书匠</option></select></label>
-          <label>作品 ID<input id="superAgentCreateBookId" required autocomplete="off"></label>
-          <label>阶段<input id="superAgentCreateStage" required value="chapter" autocomplete="off"></label>
-          <label>供应商<select id="superAgentCreateProvider" required aria-describedby="superAgentCreateModelHint"></select></label>
-          <label>模型<select id="superAgentCreateModel" required aria-describedby="superAgentCreateModelHint"></select></label>
-          <button class="control-button tiny" id="superAgentCreateModelRefresh" type="button">重新检测模型</button>
-          <p class="writer-dialog-hint" id="superAgentCreateModelHint" role="status">模型来自全局供应商设置，默认使用全局默认模型，没有独立 API 设置；阶段链创建仅供内部预览。</p>
+          <label class="super-agent-goal-field">你想完成什么？<textarea id="superAgentCreateGoal" rows="3" placeholder="说说你的目标，以及需要注意的要求"></textarea><small id="superAgentCreateGoalHint">写作任务可不填，直接使用作品中已保存的内容。</small></label>
+          <div class="super-agent-create-grid">
+            <label>任务类型<select id="superAgentCreateDomain"><option value="writer">织书台 · 原创写作</option><option value="novel">拆书匠 · 小说改编</option><option value="chat">聊天任务</option><option value="job">关联已有后台任务</option><option value="subagent">交给子助手</option></select></label>
+            <label>任务名称 <small>可选</small><input id="superAgentCreateName" maxlength="160" placeholder="留空会自动命名"></label>
+          </div>
+          <fieldset id="superAgentCreateDomainFields" class="super-agent-create-group"><legend>选择作品与范围</legend>
+            <label>作品<select id="superAgentCreateBookId" required></select></label>
+            <div class="super-agent-create-links"><button class="control-button tiny" id="superAgentCreateBooksRefresh" type="button">刷新作品</button><button class="control-button tiny" id="superAgentCreateWorkbench" type="button">到工作台新建 / 导入</button></div>
+            <p class="writer-dialog-hint" id="superAgentCreateBookHint" role="status" aria-live="polite"></p>
+            <label>做到哪一步<select id="superAgentCreateMode"><option value="chain">从设定到成稿</option><option value="single">只做一个步骤</option></select></label>
+            <label id="superAgentCreateStageWrap" hidden>阶段<select id="superAgentCreateStage"></select></label>
+            <ol class="super-agent-chain-preview" id="superAgentCreateChainPreview" aria-label="计划步骤"></ol>
+            <div id="superAgentCreateWriterFields"><label>部标题（每行一部，最多 20 部）<textarea id="superAgentCreateParts" rows="3" placeholder="第一部：起点&#10;第二部：转折"></textarea></label><p class="writer-dialog-hint">大纲阶段使用此部清单；原作品没有部清单时可直接修改默认标题。故事创意须先在织书台保存。</p></div>
+            <div id="superAgentCreateWriterRange" class="super-agent-create-grid">
+              <label id="superAgentCreatePartWrap">拆章所属部<select id="superAgentCreatePart"></select></label><label id="superAgentCreateFromWrap">拆章起始章号<input id="superAgentCreateFrom" type="number" min="1" value="1"></label><label id="superAgentCreateCountWrap">拆章数量<input id="superAgentCreateCount" type="number" min="1" max="999" value="10"></label><label id="superAgentCreateChapterWrap">生成哪一章正文<input id="superAgentCreateChapter" type="number" min="1" value="1"></label>
+            </div>
+            <div id="superAgentCreateNovelRange" hidden><label>起始章节<select id="superAgentCreateChapterStart"></select></label><label>结束章节<select id="superAgentCreateChapterEnd"></select></label></div>
+            <p class="writer-dialog-hint" id="superAgentCreateRangeHint"></p>
+          </fieldset>
+          <fieldset id="superAgentCreateConversationFields" class="super-agent-create-group" hidden><legend>关联会话</legend>
+            <label>会话<select id="superAgentCreateConversation"></select></label>
+            <label id="superAgentCreateJobWrap" hidden>已有后台任务<select id="superAgentCreateJob"></select></label>
+            <p class="writer-dialog-hint" id="superAgentCreateRuntimeHint" role="status"></p>
+          </fieldset>
+          <fieldset id="superAgentCreateChatMode" class="super-agent-create-group" hidden><legend>执行方式</legend>
+            <label>如何处理这项任务<select id="superAgentCreateExecutionMode"><option value="single">单次执行</option><option value="supervised">自动检查并继续</option></select></label>
+            <div id="superAgentCreateSupervisionFields" class="super-agent-supervision-fields" hidden>
+              <label>完成标准（每行一条）<textarea id="superAgentCreateCriteria" rows="4" maxlength="8000" placeholder="例如：导出按钮可用&#10;导出内容正确&#10;桌面与手机验证通过"></textarea><small>代码、文件、测试等标准需要实际依据。文案风格等可由模型评价的标准，请以“[主观]”开头，结果会标明为模型判断。</small></label>
+              <div class="super-agent-create-grid"><label>最多自动补做几次<select id="superAgentCreateContinuations"><option value="1">1 次</option><option value="2">2 次</option><option value="3" selected>3 次（共最多 4 轮执行）</option><option value="4">4 次</option><option value="5">5 次</option></select></label><label>运行窗口（分钟）<input id="superAgentCreateWindow" type="number" min="1" max="120" value="30"></label></div>
+              <p class="writer-dialog-hint">检查使用本任务所选模型，独立检查结果。自动补做会产生新的模型调用；每轮可能包含多次工具推理，轮数不等于模型请求次数。暂停和等待不会延长截止时间。</p>
+              <p class="writer-dialog-hint">沿用关联会话的权限，需要你确认时会等待；你的新消息会暂停自动续办。同一会话只能关联一个未结束的自动任务。</p>
+            </div>
+          </fieldset>
+          <details class="super-agent-create-options" id="superAgentCreateModelOptions"><summary>使用的模型 <small id="superAgentCreateModelSummary">跟随全局默认</small></summary><div class="super-agent-create-group">
+            <div class="super-agent-create-grid"><label>供应商<select id="superAgentCreateProvider" required aria-describedby="superAgentCreateModelHint"></select></label><label>模型<select id="superAgentCreateModel" required aria-describedby="superAgentCreateModelHint"></select></label></div>
+            <button class="control-button tiny" id="superAgentCreateModelRefresh" type="button">重新检测模型</button>
+            <p class="writer-dialog-hint" id="superAgentCreateModelHint" role="status">默认使用全局默认模型，也可以为这次任务选择其他模型。</p>
+          </div></details>
+          <div class="super-agent-create-start"><label class="super-agent-check"><input id="superAgentCreateAutostart" type="checkbox">创建后立即开始（可能产生模型费用）</label>
+          <label class="super-agent-check" id="superAgentCreateAutoAdvanceWrap"><input id="superAgentCreateAutoAdvance" type="checkbox">完成一步后自动继续；需要确认时会等你</label>
+          <p class="writer-dialog-hint">不勾选立即开始时，只保存任务，稍后可手动开始。关联已有后台任务不会重新执行。</p></div>
+          <details class="super-agent-create-options" id="superAgentCreateMixedOptions"><summary>串联多个步骤 <small>可选</small></summary><div class="super-agent-create-group"><p class="writer-dialog-hint">把当前任务加入清单，再切换类型添加下一步。写作任务请选择“只做一个步骤”。</p><button type="button" class="control-button tiny" id="superAgentCreateAddStep">添加当前步骤</button><p class="writer-dialog-hint" id="superAgentCreateDraftStatus" role="status"></p><ol id="superAgentCreateSteps" class="super-agent-mixed-steps" aria-label="待创建的步骤"></ol><label class="super-agent-check"><input type="checkbox" id="superAgentCreateMixedAutoAdvance">按顺序自动继续，需要确认时会等你</label><button type="button" class="control-button primary" id="superAgentCreateMixedSubmit" disabled>创建整套任务</button></div></details>
           <p class="writer-dialog-error" id="superAgentCreateError" role="alert" aria-live="polite"></p>
-          <div class="writer-dialog-actions"><button class="control-button" value="cancel" type="submit">取消</button><button class="control-button primary" id="superAgentCreateSubmit" value="default" type="submit">创建</button></div>
+          <div class="writer-dialog-actions"><button class="control-button" value="cancel" type="submit">取消</button><button class="control-button primary" id="superAgentCreateSubmit" value="default" type="submit">创建任务</button></div>
         </form>
       </dialog>
 

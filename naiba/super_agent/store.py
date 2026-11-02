@@ -30,6 +30,8 @@ def _now() -> int:
 
 
 def _json(value: Any, default: Any) -> str:
+    if isinstance(default, (list, dict)) and not isinstance(value, type(default)):
+        value = default
     try:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     except (TypeError, ValueError):
@@ -41,6 +43,8 @@ def _load(value: Any, default: Any) -> Any:
         result = json.loads(value or "")
     except (json.JSONDecodeError, TypeError):
         return default
+    if isinstance(default, (list, dict)) and not isinstance(result, type(default)):
+        return default.copy()
     return result
 
 
@@ -94,6 +98,84 @@ class SuperAgentStore:
     def __init__(self, storage_or_db: Any):
         self.db_path = Path(getattr(storage_or_db, "db_path", storage_or_db))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def claim_command(self, owner_id: str, thread_id: str, node_id: str, action: str,
+                      request_id: str) -> tuple[str, dict[str, Any], bool]:
+        """Persist intent BEFORE touching an executor. Unfinished intents fail closed.
+
+        Starts are unique per attempt, not per caller key. Retry/resume commands
+        are unique across attempts so replay cannot create another generation.
+        """
+        from naiba.core.contracts import SUPER_AGENT_CLAIMS_KEY
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM super_nodes WHERE owner_id=? AND thread_id=? AND node_id=?",
+                             (owner_id, thread_id, node_id)).fetchone()
+            if row is None:
+                raise LookupError("Node 不存在或无权访问")
+            checkpoint = _load(row["checkpoint"], {})
+            claims = dict(checkpoint.get(SUPER_AGENT_CLAIMS_KEY) or {})
+            # A rejected, provably unsubmitted start does not occupy an attempt
+            # forever. Keep its receipt: replaying the *same* request is still a
+            # rejection, while a new explicit request may try once more.
+            for prior_key, prior in claims.items():
+                if (isinstance(prior, dict) and prior.get("request_id") == request_id
+                        and str(prior_key).partition(":")[0] == action):
+                    return prior_key, dict(prior), False
+            key = f"start:{row['attempt']}" if action == "start" else f"{action}:{request_id}"
+            if action == "start":
+                same_attempt = [(k, v) for k, v in claims.items() if isinstance(v, dict)
+                                and str(k).startswith("start:") and v.get("attempt") == int(row["attempt"])]
+                for prior_key, prior in same_attempt:
+                    if not (prior.get("state") == "done" and isinstance(prior.get("result"), dict)
+                            and prior["result"].get("submission") == "not_submitted"):
+                        return prior_key, dict(prior), False
+                if key in claims:
+                    key += ":" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:24]
+            if key in claims:
+                return key, dict(claims[key]), False
+            claim = {"state": "pending", "attempt": int(row["attempt"]),
+                     "request_id": request_id,
+                     "correlation": f"{node_id}:{row['attempt']}:{key}"}
+            claims[key] = claim
+            checkpoint[SUPER_AGENT_CLAIMS_KEY] = claims
+            self._update_node_db(db, node_id, owner_id, {"checkpoint": checkpoint}, expected_attempt=int(row["attempt"]))
+            db.commit()
+            return key, claim, True
+        finally:
+            db.close()
+
+    def settle_command(self, owner_id: str, node_id: str, key: str, result: dict[str, Any],
+                       *, expected_attempt: int | None = None) -> None:
+        from naiba.core.contracts import SUPER_AGENT_CLAIMS_KEY
+        db = self._connect()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM super_nodes WHERE node_id=? AND owner_id=?", (node_id, owner_id)).fetchone()
+            if row is None:
+                raise LookupError("Node 不存在")
+            if expected_attempt is not None and int(row["attempt"]) != expected_attempt:
+                raise RuntimeError("Node attempt 已过期")
+            checkpoint = _load(row["checkpoint"], {})
+            claims = dict(checkpoint.get(SUPER_AGENT_CLAIMS_KEY) or {})
+            claim = dict(claims.get(key) or {})
+            claim.update(state="done", result=result)
+            claims[key] = claim
+            checkpoint[SUPER_AGENT_CLAIMS_KEY] = claims
+            self._update_node_db(db, node_id, owner_id, {"checkpoint": checkpoint}, expected_attempt=int(row["attempt"]))
+            db.commit()
+        finally:
+            db.close()
+
+    def reconciliation_threads(self, limit: int = 64, *, after: str = "") -> list[Thread]:
+        db = self._connect()
+        try:
+            rows = db.execute("SELECT * FROM super_threads WHERE status IN ('active','paused','stopping','waiting_user','needs_recovery','cancelled') AND thread_id>? ORDER BY thread_id LIMIT ?",
+                              (after, max(1, min(limit, 128)))).fetchall()
+            return [self._thread(row) for row in rows]
+        finally:
+            db.close()
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.db_path, timeout=30)
@@ -568,10 +650,10 @@ class SuperAgentStore:
                 raise RuntimeError(f"非法 Node 状态转换: {current_row['status']} -> {updates['status']}")
         assignments: list[str] = []
         args: list[Any] = []
-        json_fields = {"output_refs", "checkpoint"}
+        json_fields = {"output_refs": [], "checkpoint": {}}
         for key, value in updates.items():
             assignments.append(f"{key}=?")
-            args.append(_json(value, []) if key in json_fields else 1 if key == "cancel_requested" and value else 0 if key == "cancel_requested" else value)
+            args.append(_json(value, json_fields[key]) if key in json_fields else 1 if key == "cancel_requested" and value else 0 if key == "cancel_requested" else value)
         assignments += ["version=version+1", "updated_at=?"]
         args.extend([_now(), node_id, owner_id])
         where = "node_id=? AND owner_id=?"
@@ -800,7 +882,7 @@ class SuperAgentStore:
             if node_id and next_status:
                 row = db.execute("SELECT * FROM super_nodes WHERE node_id=? AND owner_id=? AND thread_id=?", (node_id, owner_id, thread_id)).fetchone()
                 thread_row = db.execute("SELECT status FROM super_threads WHERE thread_id=? AND owner_id=?", (thread_id, owner_id)).fetchone()
-                if row is not None and thread_row is not None and int(row["attempt"] or 0) == attempt and not bool(row["cancel_requested"]) and str(thread_row["status"]) not in {"cancelled", "paused"} and str(row["status"]) not in NODE_TERMINAL_STATUSES:
+                if row is not None and thread_row is not None and int(row["attempt"] or 0) == attempt and not bool(row["cancel_requested"]) and str(thread_row["status"]) not in {"cancelled", "paused", "stopping"} and str(row["status"]) not in NODE_TERMINAL_STATUSES:
                     updates: dict[str, Any] = {"status": next_status}
                     if next_status == "failed":
                         updates["error"] = str((payload or {}).get("error") or "任务失败")

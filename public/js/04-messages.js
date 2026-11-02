@@ -180,6 +180,10 @@ export function messageElement(message, temporary = false) {
     });
   }
   if (message.role === 'user') {
+    const supervised = metadata.supervised_source;
+    const supervisedLabel = supervised && typeof supervised === 'object' && supervised.thread_id
+      ? `<div class="supervised-message-source" data-supervised-thread="${escapeHtml(supervised.thread_id)}">任务总管 · 自动续办 · 第 ${Math.max(1, Number(supervised.round) || 1)} 轮</div>`
+      : '';
     // 「编辑」（破坏性：截断这条提问及其之后）在前，「分支」（非破坏性）居中，「删除」最后——
     // 编辑最常用，删除破坏性最强（因此排在末尾，且带分级确认框）。
     const actions = message.id
@@ -189,7 +193,7 @@ export function messageElement(message, temporary = false) {
         + '<button data-delete-message title="删除这条提问（可只删这一条，或连同 AI 回复整轮删除；10 秒内可撤销）">删除</button>'
         + '</div>'
       : '';
-    row.innerHTML = `<div class="message-body">${renderUserContent(metadata.display_content || message.content)}${uploadedFileMarkup(metadata.attachments)}${folderIndexMarkup(metadata.folder_indexes)}${actions}</div>`;
+    row.innerHTML = `<div class="message-body">${supervisedLabel}${renderUserContent(metadata.display_content || message.content)}${uploadedFileMarkup(metadata.attachments)}${folderIndexMarkup(metadata.folder_indexes)}${actions}</div>`;
   } else {
     const abortedBadge = metadata.aborted
       ? '<span class="aborted-badge">已中止</span>'

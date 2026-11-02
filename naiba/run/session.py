@@ -182,7 +182,7 @@ def all_tool_names(app: AppContext) -> list[str]:
     ]
 
 
-def bake_session_tool_ids(
+def resolve_session_tool_ids(
     app: AppContext, conversation: dict[str, Any], agent: dict[str, Any]
 ) -> list[str]:
     """固化某会话的启用工具集（会话启动时写死，之后不可改）。
@@ -211,7 +211,16 @@ def bake_session_tool_ids(
     # 落库的就必须是归一后的集合：前端显示与实际放行同源，不给"互斥的两个都开了"留洞。
     baked = normalize_tool_mutex(baked)
     baked = list(dict.fromkeys(str(item) for item in baked if item))
-    app.storage.set_enabled_tool_ids(str(conversation.get("id") or ""), baked)
+    return baked
+
+
+def bake_session_tool_ids(
+    app: AppContext, conversation: dict[str, Any], agent: dict[str, Any]
+) -> list[str]:
+    """Persist the shared effective tool decision for ordinary chat sessions."""
+    baked = resolve_session_tool_ids(app, conversation, agent)
+    if not conversation.get("enabled_tool_ids"):
+        app.storage.set_enabled_tool_ids(str(conversation.get("id") or ""), baked)
     return baked
 
 

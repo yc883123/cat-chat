@@ -3,6 +3,8 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from naiba.core.contracts import (SUPER_AGENT_EXECUTION_KEY, SUPERVISED_ACCEPT_COMPLETION_ACTION,
+                                  SuperAgentChatConfirmation)
 from naiba.super_agent.adapters import AdapterResult
 from naiba.super_agent.domain_adapters import NovelStageAdapter, WriterPipelineAdapter
 from naiba.super_agent.router import AdapterRegistry, FastPathRequest, FastPathRouter
@@ -57,11 +59,91 @@ class DomainCoordinator:
     def __init__(self, app: Any):
         self.app = app
         self.service = app.super_agent
+        from naiba.super_agent.results import ExecutionResults
+        self.results = ExecutionResults(app, self.service)
+        self.service.results = self.results
         self.registry = AdapterRegistry([
             WriterPipelineAdapter(self.service, app),
             NovelStageAdapter(self.service, app),
         ])
         self.router = FastPathRouter(self.service, self.registry)
+        from naiba.super_agent.runtime import ExecutionCoordinator
+        self.runtime = ExecutionCoordinator(self)
+
+    def chat_confirmations(self, owner_id: str, thread_id: str) -> list[SuperAgentChatConfirmation]:
+        """Project live confirmations only for a durably bound current attempt."""
+        from naiba.super_agent.runtime import current_execution_claims
+
+        thread = self.service.get_thread(owner_id, thread_id)
+        if thread.status in {"completed", "cancelled", "archived", "failed", "stopping"}:
+            return []
+        snapshotter = getattr(getattr(self.app, "runs", None), "confirmation_snapshot", None)
+        if not callable(snapshotter):
+            return []
+        result: list[SuperAgentChatConfirmation] = []
+        for node in self.service.list_nodes(owner_id, thread_id):
+            if node.executor_type == "subagent":
+                if (not node.executor_id or node.cancel_requested
+                        or node.status not in {"running", "waiting_user"}):
+                    continue
+                # Reuse the same durable owner/type/correlation fence as sync;
+                # the live manager revalidates it once more on actual approval.
+                try:
+                    record = self.registry.get("subagent")._record(node)
+                except (LookupError, ValueError, RuntimeError):
+                    continue
+                if record.get("status") not in {"queued", "running", "waiting"}:
+                    continue
+                sub_snapshotter = getattr(self.app.runs, "subagent_confirmation_snapshot", None)
+                items = sub_snapshotter(node.executor_id) if callable(sub_snapshotter) else []
+                current = self.service.get_node(owner_id, node.node_id)
+                if (current.attempt != node.attempt or current.executor_id != node.executor_id
+                        or current.cancel_requested or current.status not in {"running", "waiting_user"}):
+                    continue
+                for item in items:
+                    if (item.get("run_id") == node.executor_id
+                            and item.get("conversation_id") == node.checkpoint.get("conversation_id")
+                            and item.get("executor_kind") == "subagent"
+                            and item.get("status") in {"pending", "processing"}):
+                        result.append({key: item[key] for key in (
+                            "confirm_id", "run_id", "conversation_id", "tool", "reason", "status",
+                            "executor_kind", "parameters", "scope", "action_source",
+                        ) if key in item} | {"node_id": node.node_id})
+                continue
+            if (node.executor_type not in {"chat_run", "supervised_chat"} or not node.executor_id or node.cancel_requested
+                    or node.status not in {"running", "waiting_user"}):
+                continue
+            conversation_id = str(node.checkpoint.get("conversation_id") or "")
+            run = self.app.storage.get_background_task(node.executor_id) or {}
+            if (not conversation_id or str(run.get("conversation_id") or "") != conversation_id
+                    or run.get("kind") != "chat" or run.get("status") not in {"running", "waiting"}):
+                continue
+            frozen = self.app.storage.get_run_snapshot(node.executor_id) or {}
+            correlation = frozen.get(SUPER_AGENT_EXECUTION_KEY)
+            if node.executor_type == "supervised_chat":
+                rounds = self.runtime.supervised.store.rounds(thread_id)
+                if (not rounds or str(rounds[-1].get("correlation") or "") != str(correlation or "")
+                        or rounds[-1].get("run_id") != node.executor_id
+                        or (not correlation and not rounds[-1].get("adopted_human"))):
+                    continue
+            elif not correlation or not any(claim.get("correlation") == correlation for claim in current_execution_claims(node).values()):
+                continue
+            confirmations = snapshotter(node.executor_id)
+            current = self.service.get_node(owner_id, node.node_id)
+            if (current.attempt != node.attempt or current.executor_id != node.executor_id
+                    or current.cancel_requested or current.status not in {"running", "waiting_user"}):
+                continue
+            for item in confirmations:
+                if (item.get("run_id") == node.executor_id and item.get("conversation_id") == conversation_id
+                        and item.get("status") in {"pending", "processing"}):
+                    result.append({key: item[key] for key in (
+                        "confirm_id", "run_id", "conversation_id", "tool", "reason", "status",
+                    )} | {"node_id": node.node_id})
+        if self.service.get_thread(owner_id, thread_id).status in {
+            "completed", "cancelled", "archived", "failed", "stopping",
+        }:
+            return []
+        return result
 
     @staticmethod
     def _secret_keys(value: Any, path: str = "") -> list[str]:
@@ -200,6 +282,11 @@ class DomainCoordinator:
         if secret_fields:
             raise ValueError("任务总管不接受 API Key 或访问口令；请先在全局供应商设置中配置")
         domain = str(body.get("domain") or "").strip().lower()
+        self.runtime.policy(body)  # reject invalid booleans before any persistence
+        if domain == "mixed":
+            return self.runtime.create_mixed(owner_id, body)
+        if domain in {"chat", "job", "subagent"}:
+            return self.runtime.create(owner_id, body)
         if self._is_chain_request(body):
             return self._create_chain(owner_id, body, domain)
         stage = str(body.get("stage") or "").strip()
@@ -242,7 +329,8 @@ class DomainCoordinator:
             owner_id, thread.thread_id, f"{domain}:{stage}",
             idempotency_key=str(body.get("idempotency_key") or f"{domain}:{book_id}:{stage}"),
             executor_type=executor_type, stage_key=stage_key, sequence=sequence,
-            chain_instance_id=chain_instance_id, status="ready", checkpoint={"domain_ref": ref, "start_request": request, "apply_request": dict(body.get("apply_request") or {})},
+            chain_instance_id=chain_instance_id, status="ready", checkpoint={"domain_ref": ref, "start_request": request, "apply_request": dict(body.get("apply_request") or {}),
+                "_super_agent_v1": self.runtime.policy(body)},
         )
         self.service.store.update_thread(
             thread.thread_id, owner_id=owner_id,
@@ -354,6 +442,7 @@ class DomainCoordinator:
                 "idempotency_key": f"{chain_instance_id}:{stage_key}",
                 "status": "ready" if int(spec["sequence"]) == 0 else "blocked",
                 "checkpoint": {"domain_ref": ref, "start_request": request, "apply_request": apply_request,
+                               "_super_agent_v1": self.runtime.policy(body),
                                "chain_stage": {"key": stage_key, "actual_stage": actual_stage,
                                                "coordination": bool(ref["coordination"]) }},
                 "execution_snapshot": self._execution_snapshot(body, selection),
@@ -376,6 +465,8 @@ class DomainCoordinator:
         node_id = str(body.get("node_id") or "").strip()
         action = str(body.get("action") or "status").strip()
         request_id = str(body.get("request_id") or body.get("idempotency_key") or "").strip()
+        if not node_id and action in {"pause", "continue", "cancel", "resume", SUPERVISED_ACCEPT_COMPLETION_ACTION}:
+            return self.runtime.control(owner_id, thread_id, action, request_id)
         if not node_id:
             raise ValueError("缺少 node_id")
         if action in {"start", "cancel", "retry", "resume"} and not request_id:
@@ -383,16 +474,22 @@ class DomainCoordinator:
         node = self.service.get_node(owner_id, node_id)
         if node.thread_id != thread_id:
             raise LookupError("Node 不属于当前 Thread")
-        return self.router.route(FastPathRequest(
-            owner_id=owner_id, thread_id=thread_id, node_id=node_id,
-            executor_type=node.executor_type, action=action,
-            attempt=body.get("attempt"), request_id=request_id,
-            idempotency_key=str(body.get("idempotency_key") or request_id),
-            source_event_id=str(body.get("source_event_id") or ""),
-            payload=dict(body.get("payload") or {}),
-        ))
+        return self.runtime.command(owner_id, thread_id, node_id, action, request_id,
+            attempt=body.get("attempt"), payload=dict(body.get("payload") or {}))
 
     def resolve_approval(self, owner_id: str, thread_id: str, approval_id: str, body: dict[str, Any]) -> Any:
+        with self.runtime.lock:
+            thread = self.service.get_thread(owner_id, thread_id)
+            if thread.status in {"cancelled", "archived"}:
+                raise ValueError("取消或归档任务不能批准执行")
+            paused = thread.status == "paused"
+            result = self._resolve_approval(owner_id, thread_id, approval_id, body)
+            if paused and self.service.get_thread(owner_id, thread_id).status == "active":
+                self.service.store.update_thread(thread_id, owner_id=owner_id, status="paused")
+            self.runtime.wake_event.set()
+            return result
+
+    def _resolve_approval(self, owner_id: str, thread_id: str, approval_id: str, body: dict[str, Any]) -> Any:
         if not isinstance(body, dict):
             raise ValueError("请求体必须是对象")
         status = str(body.get("status") or "").strip()

@@ -414,7 +414,7 @@ class ShowMediaToolMigrationTests(unittest.TestCase):
         return json.loads(raw or "[]")
 
     def test_version_and_id_constant(self) -> None:
-        self.assertEqual(CURRENT_SCHEMA_VERSION, 30)
+        self.assertEqual(CURRENT_SCHEMA_VERSION, 31)
         with closing(sqlite3.connect(self.root / "chat.db")) as db:
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             thread_columns = {row[1] for row in db.execute("PRAGMA table_info(super_threads)")}

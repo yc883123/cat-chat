@@ -28,7 +28,7 @@ _METADATA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
-CURRENT_SCHEMA_VERSION = 30
+CURRENT_SCHEMA_VERSION = 31
 
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
@@ -1033,6 +1033,23 @@ def _migrate_to_v30(db: sqlite3.Connection) -> None:
     db.execute("CREATE INDEX IF NOT EXISTS idx_super_nodes_chain ON super_nodes(thread_id, chain_instance_id, sequence)")
 
 
+def _migrate_to_v31(db: sqlite3.Connection) -> None:
+    """Persist supervision separately; old threads remain ordinary tasks."""
+    db.execute("""CREATE TABLE IF NOT EXISTS super_supervisions (
+        thread_id TEXT PRIMARY KEY REFERENCES super_threads(thread_id) ON DELETE CASCADE,
+        node_id TEXT NOT NULL, conversation_id TEXT NOT NULL, owner_id TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1, state TEXT NOT NULL DEFAULT '{}',
+        version INTEGER NOT NULL DEFAULT 1
+    )""")
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_super_supervisions_conversation "
+               "ON super_supervisions(conversation_id) WHERE active=1")
+    db.execute("""CREATE TABLE IF NOT EXISTS super_supervision_rounds (
+        thread_id TEXT NOT NULL REFERENCES super_supervisions(thread_id) ON DELETE CASCADE,
+        round INTEGER NOT NULL, state TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY(thread_id,round)
+    )""")
+
+
 # 目标版本 -> 迁移函数。新增版本时在此追加并提升 CURRENT_SCHEMA_VERSION。
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
@@ -1065,6 +1082,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     28: _migrate_to_v28,
     29: _migrate_to_v29,
     30: _migrate_to_v30,
+    31: _migrate_to_v31,
 }
 
 
@@ -3641,6 +3659,9 @@ class ChatStorage:
         display_message: str = "",
         title_text: str = "",
         folder_indexes: list[dict[str, Any]] | None = None,
+        supervised_context: dict[str, Any] | None = None,
+        dependency_context: dict[str, Any] | None = None,
+        submission_guard: Callable[[sqlite3.Connection], None] | None = None,
     ) -> dict[str, Any]:
         """Atomically append the user message and create its owning run.
 
@@ -3662,6 +3683,14 @@ class ChatStorage:
             "run_id": run_id,
             "agent_id": str(agent.get("id") or ""),
         }
+        if supervised_context is not None:
+            metadata[MetadataKeys.SUPERVISED_SOURCE] = {
+                key: supervised_context[key] for key in (
+                    "thread_id", "node_id", "round", "review_id", "previous_run_id",
+                )
+            }
+        if dependency_context is not None:
+            metadata[MetadataKeys.DEPENDENCY_SOURCE] = dict(dependency_context)
         if folder_indexes:
             metadata[MetadataKeys.FOLDER_INDEXES] = folder_indexes
         if str(display_message or "").strip():
@@ -3669,6 +3698,32 @@ class ChatStorage:
             metadata["display_content"] = str(display_message)
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if submission_guard is not None:
+                submission_guard(db)
+            if supervised_context is not None:
+                # The dispatch intent, human takeover generation and limits
+                # must still match INSIDE the transaction creating both rows.
+                # A pre-submit check alone leaves a race with human input.
+                row = db.execute(
+                    "SELECT s.*,t.status AS thread_status,n.cancel_requested "
+                    "FROM super_supervisions s "
+                    "JOIN super_threads t ON t.thread_id=s.thread_id "
+                    "JOIN super_nodes n ON n.node_id=s.node_id AND n.thread_id=s.thread_id "
+                    "WHERE s.thread_id=? AND s.node_id=? AND s.conversation_id=?",
+                    (supervised_context["thread_id"], supervised_context["node_id"], conversation_id),
+                ).fetchone()
+                state = json.loads(row["state"]) if row is not None else {}
+                if (row is None or not row["active"] or row["thread_status"] != "active"
+                        or row["cancel_requested"] or not isinstance(state, dict)
+                        or int(row["version"]) != supervised_context["expected_version"]
+                        or state.get("phase") != "dispatching"
+                        or state.get("round") != supervised_context["round"]
+                        or state.get("human_epoch") != supervised_context["human_epoch"]
+                        or state.get("generation") != supervised_context["generation"]
+                        or state.get("goal_version") != supervised_context["goal_version"]
+                        or state.get("deadline_at", 0) <= now
+                        or supervised_context["round"] > state.get("max_continuations", 0) + 1):
+                    raise RuntimeError("自动续办条件已变化，请先对账；未创建消息或执行")
             # A parent chat Run is allowed to spawn child Jobs.  The previous
             # global conversation lock rejected those children with
             # ACTIVE_RUN, leaving the parent Agent stuck after it attempted a
@@ -3734,6 +3789,18 @@ class ChatStorage:
                 ),
             )
             db.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
+            if supervised_context is not None:
+                # Keep durable execution identity even if the caller crashes
+                # before receiving the new Run or binding its executor_id.
+                db.execute(
+                    "UPDATE super_supervisions SET state=json_set(state,'$.run_id',?) WHERE thread_id=?",
+                    (run_id, supervised_context["thread_id"]),
+                )
+                db.execute(
+                    "UPDATE super_supervision_rounds SET state="
+                    "json_set(state,'$.run_id',?,'$.input_message_id',?) WHERE thread_id=? AND round=?",
+                    (run_id, message_id, supervised_context["thread_id"], supervised_context["round"]),
+                )
             if message_count <= 2 and not conversation["title_customized"]:
                 # 纯附件轮次（无文字）没有可用的标题文本：回退到首个附件名，避免所有
                 # 图片/文件首轮都叫"新对话"而无法区分。@ 引用轮次取用户原文（非解析后的路径）。
@@ -3758,12 +3825,18 @@ class ChatStorage:
         owner_session_id: str = "",
         detached: bool = False,
         origin_run_id: str = "",
+        submission_guard: Callable[[sqlite3.Connection], None] | None = None,
     ) -> dict[str, Any]:
         now = int(time.time() * 1000)
         task_id = uuid.uuid4().hex
         owner = owner_session_id or conversation_id
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            # Host-owned validation shares the transaction that registers the
+            # execution; no stale authorization may slip between read/insert.
+            # Storage stays independent of domain/runtime implementations.
+            if submission_guard is not None:
+                submission_guard(db)
             # detached 的任务与主聊天并行：它既不占顶层互斥位，也不做互斥检查。
             # 判定必须用显式 detached 标记，不能只看 parent_job_id 为空（见
             # _migrate_to_v28 的注释：空父 ID 的默认语义是"顶层 Run"）。

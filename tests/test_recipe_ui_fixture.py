@@ -171,7 +171,7 @@ class RecipeUIFixtureTests(unittest.TestCase):
             self.assertEqual(self.fixture["output_type"], "image")
         self.assertTrue(self.fixture["simulated_media"]["simulated"])
         for image in self.fixture["images"]:
-            self.assertTrue(Path(image["path"]).resolve().is_relative_to(self.root / "data" / "uploads"))
+            self.assertTrue(Path(image["path"]).resolve().is_relative_to((self.root / "data" / "uploads").resolve()))
         time.sleep(0.7)  # allow at least one real coordinator tick
         stats = self.control()
         self.assertEqual(stats["counts"]["model"], 0)

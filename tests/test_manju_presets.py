@@ -10,6 +10,7 @@ from collections import Counter
 import hashlib
 import json
 from pathlib import Path
+import io
 import re
 import shutil
 import subprocess
@@ -281,6 +282,22 @@ class ManjuStudioTests(unittest.TestCase):
 
 
 class ManjuAppendCliTests(unittest.TestCase):
+    def test_cli_configures_utf8_for_legacy_windows_console(self):
+        from unittest import mock
+        stdout = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+        stderr = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+        self.addCleanup(stdout.close)
+        self.addCleanup(stderr.close)
+        with mock.patch.object(build.sys, "stdout", stdout), mock.patch.object(build.sys, "stderr", stderr), \
+                mock.patch.object(build.sys, "argv", ["studio_catalog_build.py", "--help"]):
+            with self.assertRaises(SystemExit) as exit_info:
+                build.main()
+            self.assertEqual(exit_info.exception.code, 0)
+            self.assertEqual(stdout.encoding, "utf-8")
+            self.assertEqual(stderr.encoding, "utf-8")
+            stdout.flush()
+            self.assertIn("工作台", stdout.buffer.getvalue().decode("utf-8"))
+
     def _baseline(self, out):
         shutil.copytree(PUBLIC, out)
         index = _json(out / "catalog_index.json")

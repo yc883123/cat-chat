@@ -54,6 +54,20 @@ _COPY_MIN_CLAUSE = 12
 _COPY_MIN_HITS = 3
 
 
+class ReleaseTestExecutionPolicyTests(unittest.TestCase):
+    def test_test_step_runs_once_with_explicit_deadline_and_utf8(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        step = workflow.split("      - name: Run tests", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("timeout-minutes: 25", step)
+        self.assertIn('PYTHONUTF8: "1"', step)
+        self.assertIn("PYTHONIOENCODING: utf-8", step)
+        self.assertEqual(step.count("-m unittest discover -s tests -v"), 1)
+        self.assertNotIn("$attempts", step)
+        self.assertNotIn("retrying once", step)
+        self.assertIn("exit $LASTEXITCODE", step)
+        self.assertIn("refusing to publish without unit tests", step)
+
+
 def release_display(version: str) -> str:
     """版本串决定显示后缀；正式版不加 Beta。"""
     return version.removesuffix("-beta") + (" Beta" if version.endswith("-beta") else "")

@@ -34,6 +34,9 @@ SUPERVISED_MAX_CONTINUATIONS = 5
 SUPERVISED_DEFAULT_WINDOW_MINUTES = 30
 SUPERVISED_REVIEW_TIMEOUT_SECONDS = 90
 SUPERVISED_ACCEPT_COMPLETION_ACTION = "accept_completion"
+# Review evidence reads the bounded event list and exact total atomically;
+# a concurrently appended terminal event is not evidence truncation.
+SUPERVISED_EVIDENCE_EVENT_LIMIT = 200
 # Results are read only through a declared node/attempt binding, never a URI
 # supplied in model text. Oversized dependencies stop dispatch, not silent loss.
 SUPER_AGENT_DEPENDENCY_MAX_ITEMS = 8

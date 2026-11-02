@@ -4028,6 +4028,21 @@ class ChatStorage:
                 "WHERE run_id = ? AND sequence > ? ORDER BY sequence LIMIT ?",
                 (run_id, max(0, int(after)), max(1, min(int(limit), 2000))),
             ).fetchall()
+        return self._decode_run_events(run_id, rows)
+
+    def list_run_events_snapshot(self, run_id: str, limit: int = 200) -> tuple[list[dict[str, Any]], int]:
+        """Read bounded events and their full count from one SQLite snapshot."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT sequence, payload, created_at, COUNT(*) OVER() AS total FROM run_events "
+                "WHERE run_id = ? ORDER BY sequence LIMIT ?",
+                (run_id, max(1, min(int(limit), 2000))),
+            ).fetchall()
+        total = int(rows[0]["total"]) if rows else 0
+        return self._decode_run_events(run_id, rows), total
+
+    @staticmethod
+    def _decode_run_events(run_id: str, rows: Iterable[sqlite3.Row]) -> list[dict[str, Any]]:
         events = []
         for row in rows:
             try:

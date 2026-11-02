@@ -345,6 +345,88 @@ class SupervisedRecoveryTests(unittest.TestCase):
         self.assertEqual(state["round"], 2)
         self.assertEqual(self.calls, ["execute", "review", "execute", "review"])
 
+    def test_late_done_between_evidence_reads_keeps_review_snapshot_coherent(self):
+        entered, release, committed = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        emit = self.app.runs.emit
+        list_events = self.app.storage.list_run_events
+        snapshot = self.app.storage.list_run_events_snapshot
+        complete = self.complete
+        review_payloads = []
+
+        def held_done(run_id, payload, *args, **kwargs):
+            if payload.get("type") == "done":
+                entered.set()
+                if not release.wait(4):
+                    raise AssertionError("evidence reader never released done")
+                result = emit(run_id, payload, *args, **kwargs)
+                committed.set()
+                return result
+            return emit(run_id, payload, *args, **kwargs)
+
+        def read_then_commit(reader, *args, **kwargs):
+            result = reader(*args, **kwargs)
+            if not entered.is_set():
+                return result
+            # Reproduce the old list -> late done commit -> COUNT ordering.
+            # The snapshot reader must retain the count from before this commit.
+            release.set()
+            self.assertTrue(committed.wait(3))
+            return result
+
+        def capture_review(profile, messages, options, status=None):
+            if messages[0].get("content", "").startswith("你是任务结果审查器"):
+                review_payloads.append(json.loads(messages[1]["content"]))
+            return complete(profile, messages, options, status)
+
+        self.app.models.complete = capture_review
+        self.create()
+        with patch.object(self.app.runs, "emit", side_effect=held_done), \
+             patch.object(self.app.storage, "list_run_events", side_effect=lambda *a, **kw: read_then_commit(list_events, *a, **kw)), \
+             patch.object(self.app.storage, "list_run_events_snapshot", side_effect=lambda *a, **kw: read_then_commit(snapshot, *a, **kw)):
+            self.start()
+            self.assertTrue(entered.wait(3))
+            rid = self.adapter.store.get(self.tid)["state"]["run_id"]
+            self.assertEqual(self.app.storage.get_background_task(rid)["status"], "completed")
+            self.assertEqual(self.app.storage.terminal_event_sequence(rid), 0)
+            state = self.wait_phase("completed", "waiting_user")
+            self.settled()
+        self.assertEqual(state["phase"], "completed")
+        self.assertEqual(self.calls, ["execute", "review"])
+        self.assertEqual(len(review_payloads), 1)
+        payload = review_payloads[0]
+        self.assertFalse(payload["incomplete"])
+        self.assertEqual(payload["omitted"]["events_total"], payload["omitted"]["events_provided"])
+        events, total = snapshot(rid)
+        self.assertEqual(total, payload["omitted"]["events_total"] + 1)
+        self.assertEqual(events[-1]["type"], "done")
+
+    def test_event_snapshot_keeps_full_count_and_existing_durable_envelopes(self):
+        storage = self.app.storage
+        run = storage.create_run(self.cid, "快照检查", {}, {}, kind="shell")
+        rid = run["id"]
+        self.assertEqual(storage.list_run_events_snapshot(rid), ([], 0))
+        self.assertEqual(storage.list_run_events_snapshot("missing-run"), ([], 0))
+        for i in range(201):
+            storage.append_run_event(rid, {"type": "status", "message": str(i),
+                "run_id": "forged", "sequence": -1, "created_at": -1})
+        with storage._connect() as db:
+            for sequence, payload in ((1, "{broken"), (2, "[]"), (3, "null")):
+                db.execute("UPDATE run_events SET payload=? WHERE run_id=? AND sequence=?", (payload, rid, sequence))
+        events, total = storage.list_run_events_snapshot(rid)
+        self.assertEqual(total, 201)
+        self.assertEqual(len(events), 200)
+        self.assertEqual(events, storage.list_run_events(rid, limit=200))
+        for event in events[:3]:
+            self.assertEqual(event["type"], "error")
+            self.assertEqual(event["message"], "运行事件损坏")
+        self.assertTrue(all(event["run_id"] == rid and event["created_at"] > 0 for event in events))
+        self.assertEqual([event["sequence"] for event in events], list(range(1, 201)))
+        limited, total = storage.list_run_events_snapshot(rid, limit=0)
+        self.assertEqual((len(limited), total), (1, 201))
+        all_events, total = storage.list_run_events_snapshot(rid, limit=9999)
+        self.assertEqual((len(all_events), total), (201, 201))
+
     def test_event_read_truncation_does_not_treat_missing_evidence_as_success(self):
         self.create()
         self.start()

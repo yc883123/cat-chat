@@ -11,7 +11,7 @@ from typing import Any
 
 from naiba.core.contracts import (SUPER_AGENT_EXECUTION_KEY, SUPERVISED_DEFAULT_CONTINUATIONS,
     SUPERVISED_DEFAULT_WINDOW_MINUTES, SUPERVISED_EXECUTOR, SUPERVISED_MAX_CONTINUATIONS,
-    SUPERVISED_REVIEW_TIMEOUT_SECONDS)
+    SUPERVISED_EVIDENCE_EVENT_LIMIT, SUPERVISED_REVIEW_TIMEOUT_SECONDS)
 from naiba.super_agent.adapters import AdapterCapabilities, AdapterError, BaseAdapter
 from naiba.core.exceptions import ActiveRunError
 from naiba.super_agent.baseline import PreflightRejected
@@ -263,9 +263,7 @@ class SupervisedChatAdapter(BaseAdapter):
         evidence: dict[str, Any] = {}
         # run_events are an independent server-produced trace. A claimed path
         # in assistant prose or a successful list/read tool is no test proof.
-        events = self.app.storage.list_run_events(run["id"], limit=200)
-        with self.app.storage._connect() as db:
-            total = int(db.execute("SELECT COUNT(*) FROM run_events WHERE run_id=?", (run["id"],)).fetchone()[0])
+        events, total = self.app.storage.list_run_events_snapshot(run["id"], limit=SUPERVISED_EVIDENCE_EVENT_LIMIT)
         incomplete = incomplete or total > len(events)
         for event in events:
             if event.get("type") != "tool_result":

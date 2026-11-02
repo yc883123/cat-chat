@@ -29,6 +29,7 @@ import argparse
 import hashlib
 import json
 import re
+import sys
 from collections import Counter, OrderedDict
 from pathlib import Path
 
@@ -677,6 +678,9 @@ def append_manju(out_dir: Path, source_dir: Path | None = None) -> dict:
 
 
 def main() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="工作台预设资产转换器")
     parser.add_argument("--sources-dir", help="完整构建必需；旧四套JSON的源目录")
     parser.add_argument("--append-manju", action="store_true", help="幂等增补已存在catalog，只写漫剧相关三份JSON")

@@ -21,12 +21,14 @@ class SkillPromptRulesTests(unittest.TestCase):
     def setUpClass(cls):
         cls.stream = (ROOT / "public" / "js" / "11-run-stream.js").read_text(encoding="utf-8")
         cls.chat = (ROOT / "public" / "js" / "12-chat-input.js").read_text(encoding="utf-8")
+        cls.rules = (ROOT / "public" / "js" / "skill-script-rules.js").read_text(encoding="utf-8")
 
     def test_rules_constant_covers_both_conventions(self):
-        self.assertIn("export const SKILL_SCRIPT_RULES", self.stream)
-        self.assertIn("scripts/ 子目录", self.stream)
-        self.assertIn('encoding="utf-8"', self.stream)
-        self.assertIn("GBK", self.stream, "必须说明裸 open() 在冻结版下按 GBK 读写")
+        self.assertIn("export const SKILL_SCRIPT_RULES", self.rules)
+        self.assertNotIn("import ", self.rules)
+        self.assertIn("scripts/ 子目录", self.rules)
+        self.assertIn('encoding="utf-8"', self.rules)
+        self.assertIn("GBK", self.rules, "必须说明裸 open() 在冻结版下按 GBK 读写")
 
     def test_both_prompts_reuse_the_shared_rules(self):
         self.assertIn("export const SKILL_INSTALL_PRESET", self.stream)
@@ -36,9 +38,12 @@ class SkillPromptRulesTests(unittest.TestCase):
         self.assertIn("+ SKILL_SCRIPT_RULES", self.chat)
         self.assertRegex(
             self.chat,
-            r'import \{[^}]*SKILL_SCRIPT_RULES[^}]*\} from "\./11-run-stream\.js"',
-            "12-chat-input 必须从 11-run-stream 引入共用规范",
+            r'import \{[^}]*SKILL_SCRIPT_RULES[^}]*\} from "\./skill-script-rules\.js"',
+            "12-chat-input 必须从无依赖文案模块引入规范，不能立即读取循环依赖中的 const",
         )
+
+        self.assertIn('export { SKILL_SCRIPT_RULES } from "./skill-script-rules.js"', self.stream)
+        self.assertIn('import { SKILL_SCRIPT_RULES } from "./skill-script-rules.js"', self.stream)
 
     def test_install_prompt_requires_scripts_subdir_cleanup(self):
         self.assertIn("scripts/", self.stream)

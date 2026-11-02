@@ -27,7 +27,7 @@ APPLY = "--apply" in sys.argv
 KEEP = {
     # 静态检查器 / 无浏览器校验
     "scan_undef_all.py", "scan_unused_pkg.py", "esm_cross_assign.py",
-    "esm_unused_imports.py", "esm_graph_check.py", "tdz_check.py",
+    "esm_unused_imports.py", "esm_graph_check.py", "tdz_check.py", "js_module_analysis.cjs",
     "dup_ids.py", "sitecustomize.py", "media_markup_check.mjs",
     "media_pipeline_audit.py",
     "skill_prompt_check.mjs", "verify_doc_encoding.py",

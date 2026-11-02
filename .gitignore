@@ -290,6 +290,7 @@ verify/*
 !verify/dup_ids.py
 !verify/esm_cross_assign.py
 !verify/esm_graph_check.py
+!verify/js_module_analysis.cjs
 !verify/esm_unused_imports.py
 !verify/file_actions_smoke.cjs
 !verify/fence_action_smoke.cjs

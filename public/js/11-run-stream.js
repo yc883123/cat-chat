@@ -14,6 +14,7 @@ import { collapseComposerIfExpanded, hideSkillPopup, parseSkillReferences, rende
 import { hideFilePopup } from "./16-file-refs.js";
 import { sendRunInterjection } from "./18-interjections.js";
 import { notifyRunDone } from "./20-sound.js";
+import { SKILL_SCRIPT_RULES } from "./skill-script-rules.js";
 
 // 发送前附件存在性校验的互斥标志（模块内私有，不对外共享）：
 // 校验要走一次本地 HTTP，await 期间连点发送不能被放过去。
@@ -732,19 +733,8 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
   }
 }
 
-// Skill 附带脚本的通用规范（安装 / 编辑两个入口共用同一份文案，避免两处漂移）。
-// 依据：run_skill_script 的 script 是"相对 Skill 根目录"的路径；冻结版 Python 默认编码
-// 跟随系统 locale（简体中文 Windows = GBK），裸 open() 会读写乱码（维护说明 §九.18⑤/⑥）。
-export const SKILL_SCRIPT_RULES =
-  '【Skill 附带脚本规范（务必遵守）】\n'
-  + '1. 脚本一律放在该 Skill 目录的 scripts/ 子目录下（如 <skill 根目录>/scripts/xxx.py），不要散落在根目录或其它子目录；'
-  + '后续调用时 script 参数写相对 Skill 根目录的路径（如 scripts/xxx.py）。\n'
-  + '2. 脚本读写文本/JSON 文件必须显式写 encoding="utf-8"（open(path, encoding="utf-8")、json.dump(..., ensure_ascii=False)）。'
-  + '原因：本应用冻结版下 Python 的默认编码跟随系统 locale（简体中文 Windows 上是 GBK），'
-  + '裸 open() 会把 UTF-8 文件读成乱码、把中文写成 GBK，导致中文路径/内容出错。\n'
-  + '3. 不要在脚本里自行改写 stdout/stderr 编码（宿主已把 run_skill_script 子进程的 stdio 强制为 UTF-8）；'
-  + '但脚本内部若再启动子进程、或写临时文件/日志，同样要显式指定 UTF-8。\n'
-  + '4. 优先只用标准库（冻结版解释器里可用的第三方包以应用自带为准）；脚本应把关键产物路径打印到 stdout，方便用户核对。';
+// 保留旧导出接口；文案本体在无依赖模块中，安装/编辑初始化不再受循环导入顺序影响。
+export { SKILL_SCRIPT_RULES } from "./skill-script-rules.js";
 
 export const SKILL_INSTALL_PRESET =
   '用户希望在本应用内通过你安装一个 Skill。本会话已为你启用 install_skill / unpack_skill_archive（以及读取/编辑/写入文件）工具。'

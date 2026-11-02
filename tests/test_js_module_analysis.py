@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -110,7 +111,7 @@ for (const markdown of []) console.log(markdown);
     def test_cli_exits_nonzero_for_real_risk(self):
         with tempfile.TemporaryDirectory(prefix="naiba_tdz_cli_") as directory:
             (Path(directory) / "main.js").write_text('const a=b; const b=1;', encoding="utf-8")
-            result = subprocess.run([str(ROOT / ".venv/Scripts/python.exe"), str(ROOT / "verify/tdz_check.py"), directory], capture_output=True, text=True, encoding="utf-8", timeout=30)
+            result = subprocess.run([sys.executable, str(ROOT / "verify/tdz_check.py"), directory], capture_output=True, text=True, encoding="utf-8", timeout=30)
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
 
 

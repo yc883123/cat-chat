@@ -62,6 +62,10 @@ class ReleaseTestExecutionPolicyTests(unittest.TestCase):
         self.assertIn('PYTHONUTF8: "1"', step)
         self.assertIn("PYTHONIOENCODING: utf-8", step)
         self.assertEqual(step.count("-m unittest discover -s tests -v"), 1)
+        fast_gate = "-m unittest tests.test_recipe_ui_fixture tests.test_manju_presets tests.test_supervised_chat_recovery -v"
+        self.assertIn(fast_gate, step)
+        self.assertLess(step.index(fast_gate), step.index("-m unittest discover -s tests -v"))
+        self.assertIn("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", step)
         self.assertNotIn("$attempts", step)
         self.assertNotIn("retrying once", step)
         self.assertIn("exit $LASTEXITCODE", step)

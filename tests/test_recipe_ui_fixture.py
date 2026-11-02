@@ -25,6 +25,32 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "verify" / "_serve_recipe_ui.py"
 
 
+class RecipeManifestPublicationTests(unittest.TestCase):
+    def test_manifest_is_not_visible_during_partial_write(self):
+        import ast
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("recipe_manifest_fixture", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        build_app = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "build_app")
+        self.assertTrue(any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                            and node.func.id == "atomic_write_json" for node in ast.walk(build_app)))
+        original_write = Path.write_text
+        with tempfile.TemporaryDirectory(prefix="recipe-manifest-") as directory:
+            target = Path(directory) / "fixture.json"
+            payload = {"app_url": "http://127.0.0.1:1", "ready": "完整"}
+            def delayed_write(path, data, *args, **kwargs):
+                original_write(path, "", encoding="utf-8")
+                self.assertFalse(target.exists(), "Ready manifest must not expose an empty file")
+                return original_write(path, data, *args, **kwargs)
+            with mock.patch.object(Path, "write_text", delayed_write):
+                module.atomic_write_json(target, payload)
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), payload)
+            self.assertEqual(list(target.parent.glob("*.tmp")), [])
+
+
 class RecipeUIFixtureTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="recipe-fixture-test-")

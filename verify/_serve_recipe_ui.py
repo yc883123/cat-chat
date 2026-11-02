@@ -34,6 +34,9 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+from naiba.core.fsutil import atomic_write_json
+
 MODEL_ID = "recipe-fixture-vision"
 MODEL_KEY = "online:recipe-fixture"
 
@@ -479,7 +482,7 @@ def build_app(root_dir: Path, port=0, *, blocked=None, media_mode="auto"):
                    "coverage": "Real NaibaChatApp/Studio ModelRuntime/ComfyUI runners; only loopback external HTTP services faked. "
                                "SaveVideo uses a synthetic local MP4 when available; PNG otherwise. Simulated media, not H3 inference. Seed drafts never dispatch. "
                                "Use create UI too; seed drafts cover browsers without supported file upload."}
-        (root_dir / "fixture.json").write_text(json.dumps(fixture, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_json(root_dir / "fixture.json", fixture)
         return app, server, services, fixture, state
     except BaseException:
         if server:

@@ -33,15 +33,15 @@ def brand_hit(text: str, template: str) -> str:
 notes = json.loads((ROOT / "release_notes.json").read_text(encoding="utf-8"))
 update = json.loads((ROOT / "naiba-chat-update.json").read_text(encoding="utf-8"))
 version = update["version"]        # 如 2.3.5-beta
-series = version.split("-")[0]     # 2.3.5
+display = version.removesuffix("-beta") + (" Beta" if version.endswith("-beta") else "")
 print(f"[§2/§3] release_notes {len(notes)} 条，与更新清单一致 = {notes == update['release_notes']}，"
       f"version = {version}")
 
 # ---- 2) README 版本串（版本号从更新清单派生；曾写死 2.1.0 而长期失效）----
 readme = (ROOT / "README.md").read_text(encoding="utf-8")
-title_brand = brand_hit(readme, "# {brand} " + series + " Beta")
-print(f"[§4] README 标题 `# <品牌> {series} Beta`：命中品牌 = {title_brand or '无'}")
-for token in (f"## {series} Beta 主要能力",
+title_brand = brand_hit(readme.split("\n", 1)[0].strip() + "\n", "# {brand} " + display + "\n")
+print(f"[§4] README 标题 `# <品牌> {display}`：命中品牌 = {title_brand or '无'}")
+for token in (f"## {display} 主要能力",
               f"cat-chat-{version}-windows-x64.zip",
               f"naiba-chat-{version}-windows-x64.zip",
               f'NAIBA_BUILD_VERSION = "{version}"'):
@@ -66,9 +66,10 @@ for field, expect in (("RELEASE_VERSION", version),
     actual = found.group(1) if found else "(未找到)"
     suffix = "" if actual == expect else f"  ← 与清单不符（应为 {expect}）"
     print(f"[§1] {field} = {actual}{suffix}")
-name_brand = brand_hit(workflow, "name: {brand} " + series + " Beta")
-print(f"[§1] 工作流 Release 标题 `name: <品牌> {series} Beta`：命中品牌 = {name_brand or '无'}")
-publish_step = f"Publish {series} Beta release"
+workflow_lines = "\n".join(line.strip() for line in workflow.splitlines()) + "\n"
+name_brand = brand_hit(workflow_lines, "name: {brand} " + display + "\n")
+print(f"[§1] 工作流 Release 标题 `name: <品牌> {display}`：命中品牌 = {name_brand or '无'}")
+publish_step = f"Publish {display} release"
 print(f"[§1] 工作流含 {publish_step!r}: {publish_step in workflow}")
 
 # ---- 3b) 更新协议常量 + 5 项资产双发（仓库改名后新增的硬校验）----

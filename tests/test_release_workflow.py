@@ -23,10 +23,15 @@ YAML 的块标量遇到缩进更小的行就**提前结束**，于是那行 `- �
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import re
+import runpy
+import subprocess
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
@@ -47,6 +52,11 @@ _COPY_MIN_CLAUSE = 12
 # 相同说法（如「被消息、快照、聊天背景引用的文件一律保留」在 2.9.0 与 2.9.1 都出现）。
 # 而「整段漏换」的签名是**成片**重合：实测 2.9.0 那次漏换命中了 5 句。取 3 作阈值。
 _COPY_MIN_HITS = 3
+
+
+def release_display(version: str) -> str:
+    """版本串决定显示后缀；正式版不加 Beta。"""
+    return version.removesuffix("-beta") + (" Beta" if version.endswith("-beta") else "")
 
 
 def _indent(line: str) -> int:
@@ -196,9 +206,9 @@ class ReleaseVersionConsistencyTests(unittest.TestCase):
         self.assertEqual(f"cat-chat-{self.version}-windows-x64", self.env["PACKAGE_NAME"])
         self.assertEqual(f"naiba-chat-{self.version}-windows-x64", self.env["LEGACY_PACKAGE_NAME"])
         # 发布步骤的 name / Release 标题必须同步（漏改会发出标题写着旧版本的 Release）。
-        display = self.version.replace("-beta", "") + " Beta"
-        self.assertIn(f"Publish {display} release", self.text)
-        self.assertIn(f"name: Cat Chat {display}", self.text)
+        display = release_display(self.version)
+        self.assertRegex(self.text, rf"(?m)^[ \t]*- name: Publish {re.escape(display)} release[ \t]*\r?$")
+        self.assertRegex(self.text, rf"(?m)^[ \t]*name: Cat Chat {re.escape(display)}[ \t]*\r?$")
         # 「过时的上一版版本串」不该还留在文件里。
         self.assertNotIn("2.8.6", self.text, "release.yml 里仍残留上一版版本号")
 
@@ -210,17 +220,18 @@ class ReleaseVersionConsistencyTests(unittest.TestCase):
         self.assertEqual("naiba-chat.exe", manifest["asset"])
 
     def test_readme_title_and_release_notes_head_agree(self) -> None:
-        display = self.version.replace("-beta", "") + " Beta"
+        display = release_display(self.version)
         first_line = README.read_text(encoding="utf-8").split("\n", 1)[0].strip()
         self.assertEqual(f"# Cat Chat {display}", first_line)
         head = json.loads(RELEASE_NOTES.read_text(encoding="utf-8"))[0]
         self.assertTrue(
-            head.startswith(f"Cat Chat {display}"), f"更新说明头条没跟上版本：{head[:60]!r}"
+            re.match(rf"^Cat Chat {re.escape(display)}(?!\s+Beta\b)(?=[:：\s]|$)", head) is not None,
+            f"更新说明头条没跟上版本：{head[:60]!r}",
         )
 
     def test_release_body_mentions_the_current_version(self) -> None:
         """`body` 是手写正文，最容易漏改；至少要带上本版标题。"""
-        display = self.version.replace("-beta", "") + " Beta"
+        display = release_display(self.version)
         self.assertIn(f"Cat Chat {display} Windows build", self.text)
 
     def test_release_body_has_no_unsubstituted_placeholder(self) -> None:
@@ -274,6 +285,143 @@ class ReleaseVersionConsistencyTests(unittest.TestCase):
             + "\n".join(f"  · {clause}" for clause in copied[:6])
             + "\n本版更新说明里没有这些句子，请把 body 整段换成本版内容。"
         )
+
+
+class ReleaseDisplayTests(unittest.TestCase):
+    """用内存中的正式版/Beta 材料验证显示判据，不改真实发布文件。"""
+
+    CASES = (("4.0.0", "4.0.0"), ("4.0.0-beta", "4.0.0 Beta"))
+
+    @staticmethod
+    def _workflow(version: str, display: str) -> str:
+        return (
+            "env:\n"
+            f"  RELEASE_VERSION: {version}\n"
+            f"  RELEASE_TAG: v{version}\n"
+            f"  PACKAGE_NAME: cat-chat-{version}-windows-x64\n"
+            f"  LEGACY_PACKAGE_NAME: naiba-chat-{version}-windows-x64\n"
+            "steps:\n"
+            f"  - name: Publish {display} release\n"
+            "    with:\n"
+            f"      name: Cat Chat {display}\n"
+            "      body: |\n"
+            f"        Cat Chat {display} Windows build\n"
+        )
+
+    def test_display_depends_on_beta_suffix(self) -> None:
+        for version, expected in self.CASES:
+            with self.subTest(version=version):
+                self.assertEqual(expected, release_display(version))
+
+    def test_workflow_guards_accept_matching_display_and_reject_wrong_channel(self) -> None:
+        for version, expected in self.CASES:
+            wrong = "4.0.0 Beta" if version == "4.0.0" else "4.0.0"
+            for display in (expected, wrong):
+                for name in (
+                    "test_tag_and_package_names_derive_from_version",
+                    "test_readme_title_and_release_notes_head_agree",
+                    "test_release_body_mentions_the_current_version",
+                ):
+                    with self.subTest(version=version, display=display, guard=name):
+                        text = self._workflow(version, display)
+                        guard = ReleaseVersionConsistencyTests(name)
+                        guard.version = version
+                        guard.text = text
+                        guard.env = {
+                            "RELEASE_TAG": f"v{version}",
+                            "PACKAGE_NAME": f"cat-chat-{version}-windows-x64",
+                            "LEGACY_PACKAGE_NAME": f"naiba-chat-{version}-windows-x64",
+                        }
+                        with mock.patch.object(Path, "read_text", side_effect=[
+                            f"# Cat Chat {display}\n",
+                            json.dumps([f"Cat Chat {display}：更新"]),
+                        ]):
+                            if display == expected:
+                                getattr(guard, name)()
+                            else:
+                                with self.assertRaises(AssertionError):
+                                    getattr(guard, name)()
+
+    def test_stable_guards_reject_beta_in_each_display_field(self) -> None:
+        version = "4.0.0"
+        text = self._workflow(version, version)
+        for old, new, name in (
+            ("Publish 4.0.0 release", "Publish 4.0.0 Beta release",
+             "test_tag_and_package_names_derive_from_version"),
+            ("name: Cat Chat 4.0.0\n", "name: Cat Chat 4.0.0 Beta\n",
+             "test_tag_and_package_names_derive_from_version"),
+            ("Cat Chat 4.0.0 Windows build", "Cat Chat 4.0.0 Beta Windows build",
+             "test_release_body_mentions_the_current_version"),
+        ):
+            with self.subTest(field=old):
+                guard = ReleaseVersionConsistencyTests(name)
+                guard.version = version
+                guard.text = text.replace(old, new)
+                guard.env = {
+                    "RELEASE_TAG": "v4.0.0",
+                    "PACKAGE_NAME": "cat-chat-4.0.0-windows-x64",
+                    "LEGACY_PACKAGE_NAME": "naiba-chat-4.0.0-windows-x64",
+                }
+                with self.assertRaises(AssertionError):
+                    getattr(guard, name)()
+        for title, head in (
+            ("4.0.0 Beta", "4.0.0"),
+            ("4.0.0", "4.0.0 Beta"),
+            ("4.0.0", "4.0.01"),
+        ):
+            with self.subTest(title=title, head=head):
+                guard = ReleaseVersionConsistencyTests()
+                guard.version = version
+                with mock.patch.object(Path, "read_text", side_effect=[
+                    f"# Cat Chat {title}\n", json.dumps([f"Cat Chat {head}：更新"]),
+                ]), self.assertRaises(AssertionError):
+                    guard.test_readme_title_and_release_notes_head_agree()
+
+    def test_release_check_uses_version_display(self) -> None:
+        class Stdout(io.StringIO):
+            def reconfigure(self, **_kwargs) -> None:
+                pass
+
+        for version, expected, material_display in (
+            ("4.0.0", "4.0.0", "4.0.0"),
+            ("4.0.0-beta", "4.0.0 Beta", "4.0.0 Beta"),
+            ("4.0.0", "4.0.0", "4.0.0 Beta"),
+            ("4.0.0-beta", "4.0.0 Beta", "4.0.0"),
+        ):
+            with self.subTest(version=version, display=material_display):
+                notes = [f"Cat Chat {material_display}：更新"]
+                files = {
+                    RELEASE_NOTES: json.dumps(notes),
+                    MANIFEST: json.dumps({"version": version, "release_notes": notes}),
+                    README: (
+                        f"# Cat Chat {material_display}\n## {material_display} 主要能力\n"
+                        f"cat-chat-{version}-windows-x64.zip\n"
+                        f"naiba-chat-{version}-windows-x64.zip\n"
+                        f'NAIBA_BUILD_VERSION = "{version}"\n'
+                    ),
+                    WORKFLOW: self._workflow(version, material_display),
+                }
+
+                def read_text(path, *args, **kwargs):
+                    return files[path]  # 不允许自检读取其他文件或用户数据
+
+                output = Stdout()
+                with mock.patch.object(Path, "read_text", read_text), \
+                        mock.patch.object(subprocess, "run", return_value=subprocess.CompletedProcess(
+                            ["git", "ls-files"], 0, stdout="", stderr="",
+                        )), contextlib.redirect_stdout(output):
+                    result = runpy.run_path(str(ROOT / "verify" / "_release_check.py"))
+                self.assertEqual(expected, result["display"])
+                printed = output.getvalue()
+                matches = material_display == expected
+                brand = "Cat Chat" if matches else "无"
+                for marker in (
+                    f"README 标题 `# <品牌> {expected}`：命中品牌 = {brand}",
+                    f"README 含 '## {expected} 主要能力': {matches}",
+                    f"工作流 Release 标题 `name: <品牌> {expected}`：命中品牌 = {brand}",
+                    f"工作流含 'Publish {expected} release': {matches}",
+                ):
+                    self.assertIn(marker, printed)
 
 
 if __name__ == "__main__":  # pragma: no cover

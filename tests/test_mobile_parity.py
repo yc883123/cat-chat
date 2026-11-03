@@ -132,6 +132,25 @@ class MobileParityTests(unittest.TestCase):
         self.assertNotIn("display: none !important", mobile, "又用 !important 把能力关掉了")
         self.assertNotIn("pointer-events: none", mobile, "又用 pointer-events 把能力关掉了")
 
+    def test_grid_views_allow_shrinking(self) -> None:
+        """`.chat-main` 网格的视图列项必须带 `min-width: 0`（拆书匠手机端横向溢出根因）。
+
+        网格列项默认 `min-width: auto`，取内容 min-content：缺这一条时，任何一页把
+        min-content 撑大（拆书匠页头长书名实测撑到 402px 定值），整条主区列就被顶住，
+        `html` 的 overflow-x:hidden 再把右侧裁掉——看起来像「页面没有正确缩放」。
+        同网格以后新增视图（如任务总管）也必须写上；详情见
+        docs/plans/2026-11-03-拆书匠手机端横向溢出修复计划.md。
+        """
+        offenders = [
+            selector for selector, body, in_media in self._iter_rules(self._css())
+            if selector in {".studio-view", ".super-agent-view"} and not in_media
+            and "min-width: 0" not in body
+        ]
+        self.assertEqual(
+            offenders, [],
+            "主区网格视图缺 min-width: 0，会被内容 min-content 撑破横向布局：" + "、".join(offenders),
+        )
+
     def test_settings_layout_columns_stay_breakpoint_scoped(self) -> None:
         """`.settings-layout` 的列定义只许「裸写且只有一个类名」，或住在媒体查询里。
 

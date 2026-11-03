@@ -432,7 +432,7 @@ class RecipeCoordinator:
     def _link(self, batch: dict[str, Any]) -> None:
         if not batch.get("thread_id"):
             thread, nodes = self.service.create_thread_chain(
-                batch["owner_id"], batch["title"], "有界配方批次",
+                batch["owner_id"], batch["title"], "按图片分组生成视频",
                 chain_instance_id=batch["id"], chain_version=1,
                 nodes=[{"kind": RECIPE_EXECUTOR_TYPE, "stage_key": RECIPE_EXECUTOR_TYPE,
                         "sequence": 0, "executor_type": RECIPE_EXECUTOR_TYPE, "executor_id": batch["id"],
@@ -675,7 +675,7 @@ class RecipeCoordinator:
                 item["reverse"]["status"] = "provided"
             if item["generate"]["status"] != "done":
                 if item["generate"]["attempts"] and (set(patch) - {"id", "included", "name"} or reverse_global or any(k in body for k in ("shots", "overrides"))):
-                    raise ValueError("已有生成执行记录的项目不能改稿后隐式重建；请新建批次")
+                    raise ValueError("这条视频已经提交过，不能改稿后重新生成；请新建批次保留原有结果")
                 if not item["generate"]["attempts"]:
                     item["generate"]["status"] = "pending"
         self._validate_manifest(batch)

@@ -62,9 +62,9 @@ def _load_catalog() -> list[dict[str, Any]]:
         recipes.append({
             "id": f"minimax_h3_{mode}",
             "name": "MiniMax H3 首帧生视频（官方）" if mode == "i2v" else "MiniMax H3 图片参考生视频（官方）",
-            "description": ("官方 I2V 单首帧工作流；一次生成一条英文三字段提示词，保留原语言台词。"
+            "description": ("每张图片生成一条视频。先用图片和剧本生成可编辑的提示词，确认后再制作视频；保留原语言台词。"
                             if mode == "i2v" else
-                            "官方 Ref2VA 工作流，限定连续 1–6 张图片；一次生成一条英文六字段提示词，不自动拆剧本。")
+                            "每组选择 1–6 张参考图，共同生成一条视频。提示词由模板生成，不自动拆分剧本。")
                            + "请求时长 4–15 秒，官方帧数取整可能使实际视频略长；需本机模型和节点，未做真实生成验收。",
             "mode": mode, "workflow": graph, "workflow_fingerprint": fingerprint,
             "provenance": provenance,

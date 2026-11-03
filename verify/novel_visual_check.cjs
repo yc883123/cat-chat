@@ -28,7 +28,7 @@ const MANUSCRIPTS = {
   ],
 };
 const BOOK = {
-  id: BOOK_ID, title: '长夜灯', revision: 5, chapter_count: 3,
+  id: BOOK_ID, title: '《恐怖副本：大BOSS是恋爱脑》作者：测试署名', revision: 5, chapter_count: 3,
   created_at: 1750000000000, updated_at: 1750000800000,
   schema_version: 2,
   source: { name: '长夜灯.txt', encoding: 'gb18030', bytes: 51234, split_level: 'heading',
@@ -70,8 +70,11 @@ const VIEWPORTS = [
   { name: 'desktop-1280x900', width: 1280, height: 900 },
   { name: 'landscape-844x390', width: 844, height: 390 },
   { name: 'landscape-812x375', width: 812, height: 375 },
+  { name: 'portrait-412x915', width: 412, height: 915 },
   { name: 'portrait-390x844', width: 390, height: 844 },
   { name: 'portrait-375x812', width: 375, height: 812 },
+  { name: 'portrait-360x800', width: 360, height: 800 },
+  { name: 'portrait-320x720', width: 320, height: 720 },
 ];
 
 async function setup(page) {
@@ -172,6 +175,43 @@ async function openNovel(page) {
   await page.waitForTimeout(400);
 }
 
+async function pageOverflow(page) {
+  // html 的 overflow-x:hidden 会把 documentElement.scrollWidth 压成 clientWidth，
+  // 旧判据因此恒真、什么都测不到；必须看元素几何（被裁掉的 rect.right 依然如实报告）。
+  return page.evaluate(() => {
+    const clientWidth = document.documentElement.clientWidth;
+    let worst = 0, culprit = '';
+    for (const el of document.querySelectorAll('body *')) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.right <= clientWidth + 1 || rect.right <= worst) continue;
+      let scrollable = false;
+      for (let node = el.parentElement; node && node !== document.body; node = node.parentElement) {
+        if (/(auto|scroll)/.test(getComputedStyle(node).overflowX)) { scrollable = true; break; }
+      }
+      if (scrollable) continue; // 横向可滚动容器内部被裁是设计行为，不算页面溢出
+      worst = rect.right;
+      culprit = `${el.tagName.toLowerCase()}.${String(el.className).split(' ')[0]}`;
+    }
+    return { overflow: Math.max(0, Math.round((worst - clientWidth) * 10) / 10), culprit };
+  });
+}
+
+async function pageStateCheck(page) {
+  // 页头状态文字必须真的能收缩出省略号，而不是把页头 min-content 顶破。
+  return page.evaluate(() => {
+    const el = document.getElementById('novelPageState');
+    if (!el) return { ok: false, note: 'novelPageState 缺失' };
+    const style = getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return {
+      ok: el.clientWidth > 40 && style.overflowX === 'hidden' && style.textOverflow === 'ellipsis'
+        && rect.right <= document.documentElement.clientWidth + 1,
+      scrollWidth: el.scrollWidth, clientWidth: el.clientWidth,
+      note: 'novelPageState 需可收缩并显示省略号',
+    };
+  });
+}
+
 (async () => {
   fs.mkdirSync(SHOT_DIR, { recursive: true });
   const browser = await chromium.launch({ channel: 'msedge', headless: true });
@@ -185,6 +225,8 @@ async function openNovel(page) {
       const page = await context.newPage();
       await setup(page);
       await openNovel(page);
+      const stateCheck = await pageStateCheck(page);
+      report.push({ viewport: vp.name, scheme, pane: 'page-state', overflow: stateCheck.ok ? 0 : 1, ...stateCheck });
       // 三个分档都截：章节 / 编辑 / 预览，手机上才能看到每档的实际排版。
       for (const pane of ['chapters', 'editor', 'preview']) {
         const paneBtn = page.locator(`#novelPanes [data-novel-pane="${pane}"]`);
@@ -192,9 +234,8 @@ async function openNovel(page) {
           await paneBtn.click();
           await page.waitForTimeout(200);
         }
-        const overflow = await page.evaluate(() =>
-          document.documentElement.scrollWidth - document.documentElement.clientWidth);
-        report.push({ viewport: vp.name, scheme, pane, overflow });
+        const { overflow, culprit } = await pageOverflow(page);
+        report.push({ viewport: vp.name, scheme, pane, overflow, culprit });
         await page.screenshot({
           path: path.join(SHOT_DIR, `${vp.name}-${scheme}-${pane}.png`),
           fullPage: false,
@@ -203,9 +244,8 @@ async function openNovel(page) {
       // 管理记录面板
       await page.locator('#novelManageBtn').click();
       await page.waitForTimeout(500);
-      const manageOverflow = await page.evaluate(() =>
-        document.documentElement.scrollWidth - document.documentElement.clientWidth);
-      report.push({ viewport: vp.name, scheme, pane: 'manage', overflow: manageOverflow });
+      const manage = await pageOverflow(page);
+      report.push({ viewport: vp.name, scheme, pane: 'manage', overflow: manage.overflow, culprit: manage.culprit });
       await page.screenshot({ path: path.join(SHOT_DIR, `${vp.name}-${scheme}-manage.png`) });
       await page.locator('#novelManageClose').click().catch(() => {});
       await context.close();

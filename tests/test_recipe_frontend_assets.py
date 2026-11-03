@@ -41,7 +41,7 @@ class RecipeFrontendAssets(unittest.TestCase):
         self.assertNotIn('return `<article class="recipe-item"><h3>${text(item.source_path)}</h3><p>反推', source)
         self.assertIn('const conflict = Object.entries(draft.items)', source)
         self.assertIn('仅统计纳入清单且产物完整的项目', source)
-        self.assertIn('核对素材并确认反推', source)
+        self.assertIn('核对素材，生成提示词', source)
         self.assertIn('已明确排除：', source)
         self.assertIn('recipeThread ? recipeState.batches.get(threadId) : null', source)
 
@@ -53,34 +53,37 @@ const source=fs.readFileSync('public/js/28-super-agent.js','utf8').replace(/^imp
 const nodes=new Map();
 const $=key=>{if(!nodes.has(key))nodes.set(key,{value:'',disabled:false,textContent:'',innerHTML:'',open:false,dataset:{},showModal(){this.open=true;},close(){this.open=false;},querySelectorAll(){return [];}});return nodes.get(key);};
 const requests=[];
-const context={$,assert,console,process,globalThis,setTimeout,clearTimeout,state:{providerModelCatalogs:{}},
+const context={$,assert,console,process,globalThis,setTimeout,clearTimeout,URL,state:{providerModelCatalogs:{}},
  escapeHtml:value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'),
  localFileUrl:path=>'/api/file?token=auth&path='+encodeURIComponent(path),window:{confirm:()=>true},
  api:async(path,options)=>{requests.push({path,body:JSON.parse(JSON.stringify(options.body))});return {batch:{...context.nextBatch}};}};
 vm.runInNewContext(source+`
 (async()=>{
-const batch={id:'batch',thread_id:'thread',revision:1,revision_hash:'hash-1',status:'review',capabilities:['edit','confirm_generate','retry_collect'],model:{model_key:'supplier',model_name:'vision'},target:{url:'local-target',fingerprint:'target-hash'},recipe:{name:'Recipe',workflow_id:'workflow',workflow_fingerprint:'workflow-hash',prompt_slot:{node_id:'7',field_name:'prompt'},media_slots:[{role:'picture_1',node_id:'8',field_name:'image'}],workflow:{'7':{inputs:{prompt:'fixed'}}}},template:{id:'template',body:'EXACT TEMPLATE',result_rule:{type:'text'}},duration_seconds:15,shots:2,overrides:[],items:[{id:'one',source_path:'one.png',included:true,requirements:'old',prompt:'old prompt',media:[{role:'picture_1',path:'managed/image.png',name:'image.png'}],reverse:{status:'done'},generate:{status:'failed'},effective_params:[{node_id:'7',field_name:'prompt',value:'new prompt'}],outputs:[]},{id:'two',source_path:'excluded.png',included:false,prompt:'excluded',generate:{status:'pending'}}]};
+const batch={id:'batch',thread_id:'thread',revision:1,revision_hash:'hash-1',status:'review',capabilities:['edit','confirm_generate','retry_collect'],model:{model_key:'supplier',model_name:'vision'},target:{url:'http://127.0.0.1:8188',fingerprint:'target-hash'},recipe:{name:'Recipe',workflow_id:'workflow',workflow_fingerprint:'workflow-hash',prompt_slot:{node_id:'7',field_name:'prompt'},media_slots:[{role:'picture_1',node_id:'8',field_name:'image'}],workflow:{'7':{inputs:{prompt:'fixed'}}}},template:{id:'template',body:'EXACT TEMPLATE',result_rule:{type:'text'}},duration_seconds:15,shots:2,overrides:[],items:[{id:'one',source_path:'one.png',included:true,requirements:'old',prompt:'old prompt',media:[{role:'picture_1',path:'managed/image.png',name:'image.png'}],reverse:{status:'done'},generate:{status:'failed'},effective_params:[{node_id:'7',field_name:'prompt',value:'new prompt'}],outputs:[]},{id:'two',source_path:'excluded.png',included:false,prompt:'excluded',generate:{status:'pending'}}]};
 batch.items[0].effective_workflow={id:'effective-one-ref',fingerprint:'effective-one-hash',prompt:{'7':{inputs:{prompt:'saved-source'}},'8':{inputs:{image:'one.png'}}}};
 batch.items[0].effective_media_inputs=[{node_id:'8',field_name:'image',path:'managed/image.png'}];
 batch.recipe.workflow.unused_reference_6={inputs:{image:'UNUSED_SIXTH_REFERENCE'}};
 batch.recipe.media_slots.push({role:'picture_6',node_id:'unused_reference_6',field_name:'image'});
 const markup=recipeReviewMarkup(batch,'confirm_generate');
-assert.match(markup,/模板来源指纹/);assert.match(markup,/effective-one-ref/);assert.match(markup,/effective-one-hash/);
-assert.ok(!markup.includes('UNUSED_SIXTH_REFERENCE'));assert.ok(!markup.includes('unused_reference_6'));
-assert.ok(!markup.includes('picture_6'));assert.ok(markup.includes('本项实际图片节点映射（1 张）'));
-assert.equal(markup.split('new prompt').length-1,0); // Prompt override is omitted from the separate effective parameter block.
+// 审核确认页是普通用户视角：素材/提示词/数量/费用；不得出现指纹、原始 JSON、绝对路径、模板正文与内部标识。
+assert.ok(!/指纹|snapshot|<pre|EXACT TEMPLATE|supplier|vision|workflow-hash|target-hash|node_id|field_name|effective-one/.test(markup), 'review markup leaked technical details');
+assert.ok(!markup.includes('managed/'));assert.ok(!markup.includes('UNUSED_SIXTH_REFERENCE'));assert.ok(!markup.includes('unused_reference_6'));
+assert.ok(!markup.includes('picture_6'));assert.ok(!markup.includes('new prompt'));
+assert.ok(markup.includes('old prompt'));assert.ok(markup.includes('excluded.png'));
+assert.ok(markup.includes('每组 <b>2 条</b>'));assert.ok(markup.includes('时长 <b>15 秒</b>'));assert.ok(markup.includes('本机 ComfyUI'));
+assert.ok(markup.includes('2 条视频生成'));assert.ok(markup.includes('可能产生费用'));
 assert.doesNotThrow(()=>assertRecipeReviewSnapshot(batch,'confirm_generate'));
 const missingEffective={...batch,items:[{...batch.items[0],effective_workflow:null}]};
-assert.throws(()=>assertRecipeReviewSnapshot(missingEffective,'confirm_generate'),/缺少服务器最终生效工作流快照/);
+assert.throws(()=>assertRecipeReviewSnapshot(missingEffective,'confirm_generate'),/生成设置还未同步/);
 assert.doesNotThrow(()=>assertRecipeReviewSnapshot(missingEffective,'confirm_reverse'));
-for(const value of ['EXACT TEMPLATE','supplier','vision','workflow-hash','target-hash','one.png','excluded.png','15','2'])assert.ok(markup.includes(value),value);
 assert.equal(recipeCan(batch,'confirm_generate'),true);
 assert.equal(recipeCan(batch,'pause'),false);
 assert.equal(recipeRequest('same',{revision:1}),recipeRequest('same',{revision:1}));
 assert.notEqual(recipeRequest('same',{revision:1}),recipeRequest('same',{revision:2}));
+// 产物在类型可用前只做占位缩略图 + 打开/保存，不渲染不可用的播放器（Q1）。
 const image=recipeOutputMarkup({path:'managed/out.png',name:'<unsafe>',type:'image'});
-assert.ok(image.includes('/api/file?token=auth'));assert.ok(image.includes('loading="lazy"'));assert.ok(!image.includes('_thumb'));assert.ok(!image.includes('<unsafe>'));
-assert.ok(recipeOutputMarkup({path:'managed/out.mp4',type:'video'}).includes('preload="none"'));
+assert.ok(image.includes('/api/file?token=auth'));assert.ok(image.includes('kind-image'));assert.ok(!image.includes('<img'));assert.ok(!image.includes('<video'));assert.ok(!image.includes('<audio'));assert.ok(!image.includes('<unsafe>'));
+assert.ok(!recipeOutputMarkup({path:'managed/out.mp4',type:'video'}).includes('<video'));
 assert.ok(recipeOutputMarkup({path:'managed/out.mp4',name:'C:'+String.fromCharCode(92)+'outputs'+String.fromCharCode(92)+'clip.mp4',type:'video'}).includes('打开 / 保存 clip.mp4'));
 assert.ok(!recipeOutputMarkup({path:'managed/unknown.bin',type:'file'}).includes('<img'));
 const draft=recipeDraft(batch);draft.dirty=true;draft.revision=1;draft.items={one:{prompt:'edited prompt',included:false}};draft.baseline={one:{prompt:'old prompt',included:true}};

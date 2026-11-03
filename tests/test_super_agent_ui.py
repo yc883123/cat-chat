@@ -246,7 +246,7 @@ vm.runInNewContext(source + `
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync('public/js/28-super-agent.js','utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
 const elements=new Map();
-const $=key=>{if(!elements.has(key))elements.set(key,{value:'',checked:false,textContent:'',hidden:false,innerHTML:'',dataset:{},querySelectorAll:()=>[],insertAdjacentHTML(where,html){this.innerHTML+=html;}});return elements.get(key);};
+const $=key=>{if(!elements.has(key))elements.set(key,{value:'',checked:false,textContent:'',hidden:false,innerHTML:'',dataset:{},classList:{add(){},remove(){},toggle(){}},querySelectorAll:()=>[],insertAdjacentHTML(where,html){this.innerHTML+=html;}});return elements.get(key);};
 vm.runInNewContext(source+`
   $('#superAgentCreateDomain').value='job';
   $('#superAgentCreateAutostart').checked=true;

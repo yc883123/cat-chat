@@ -20,6 +20,12 @@ import { onStudioPageChange, setStudioPage } from "./22-studio.js";
 // 与服务端一致的上限（前端只做提前提示，服务端仍逐项校验）。
 const MAX_FILE_BYTES = 60 * 1024 * 1024;
 
+// 书名常自带《》（多半来自用户文件名），再包一层会变成《《…》》。
+function bookTitleLabel(title) {
+  const raw = String(title ?? "").trim();
+  return raw.startsWith("《") && raw.endsWith("》") ? raw : `《${raw}》`;
+}
+
 const LEVEL_LABELS = {
   heading: "按章节标题识别",
   sep: "按符号分节（没有识别到章节标题）",
@@ -428,7 +434,7 @@ function renderBookSummary() {
     return;
   }
   if (book) {
-    if (titleEl) titleEl.textContent = `《${book.title}》`;
+    if (titleEl) titleEl.textContent = bookTitleLabel(book.title);
     if (metaEl) {
       const source = book.source || {};
       const parts = [source.encoding ? `编码 ${source.encoding}` : ""];
@@ -955,7 +961,7 @@ function renderStagePanel() {
   const meta = $("#novelStageMeta");
   if (meta) {
     meta.replaceChildren(
-      metaItem("作品", novel.book ? `《${novel.book.title}》` : "未打开"),
+      metaItem("作品", novel.book ? bookTitleLabel(novel.book.title) : "未打开"),
       ...(isStoryboard
         ? [metaItem("剧本场次", sceneCount ? `${sceneCount} 场` : "还没有场次")]
         : [metaItem("素材章节", picked.length ? `${picked.length} 章` : "未选择"),
@@ -1183,7 +1189,7 @@ function renderPlan() {
   if (pageState) {
     const book = novel.staged
       ? "待保存作品"
-      : (novel.bookId ? `《${novel.book?.title || "已打开作品"}》已保存` : "未打开作品");
+      : (novel.bookId ? `${bookTitleLabel(novel.book?.title || "已打开作品")}已保存` : "未打开作品");
     pageState.textContent = `${book} · ${stageLabel(novel.stage)}`;
     pageState.title = pageState.textContent;
   }
@@ -2668,7 +2674,7 @@ async function openBook(bookId) {
     };
     const recovery = novel.book?.origin_recovery || {};
     const legacy = Array.isArray(recovery.legacy) ? recovery.legacy : [];
-    setSaveState("已读取", `作品《${novel.book.title}》共 ${novel.chapters.length} 章。` +
+    setSaveState("已读取", `作品${bookTitleLabel(novel.book.title)}共 ${novel.chapters.length} 章。` +
       (novel.broken.length ? `有 ${novel.broken.length} 章读取失败（数据异常），需要重新导入或删除。` : "") +
       (legacy.length ? `其中 ${legacy.length} 章的原文在升级前没有单独保存，已标为「升级前保存的正文」。` : ""));
     renderAll();
@@ -2775,7 +2781,7 @@ async function saveBook() {
     novel.staged = null;
     novel.picked.clear();
     await openBook(payload.book.id);
-    toast(`已保存作品《${payload.book.title}》，共 ${payload.book.chapter_count} 章`);
+    toast(`已保存作品${bookTitleLabel(payload.book.title)}，共 ${payload.book.chapter_count} 章`);
   } catch (error) {
     fail("保存作品失败", error);
     setSaveState("保存失败", String(error?.message || error));
@@ -2984,7 +2990,7 @@ async function renderBookDialog() {
       open.className = "novel-book-open";
       open.dataset.novelOpen = book.id;
       const strong = document.createElement("strong");
-      strong.textContent = `《${book.title}》`;
+      strong.textContent = bookTitleLabel(book.title);
       const small = document.createElement("small");
       small.textContent = `${book.chapter_count} 章 · ${fmtChars(book.source?.total_len || 0)} 字`;
       open.append(strong, small);

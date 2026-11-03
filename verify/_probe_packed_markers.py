@@ -453,6 +453,7 @@ def main() -> int:
     print("五、launcher JsApi 反射（既有对照项）")
     print("=" * 72)
     frame = sys._getframe()
+    jsapi = None
     while frame is not None and jsapi is None:
         jsapi = frame.f_globals.get("JsApi")
         frame = frame.f_back

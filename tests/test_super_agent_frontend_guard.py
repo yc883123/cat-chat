@@ -107,5 +107,53 @@ class SuperAgentCopyGuard(unittest.TestCase):
         self.assertNotIn("隐式重建", recipes)
 
 
+class SuperAgentDialogGuard(unittest.TestCase):
+    """弹窗三段式骨架与容器约束（弹窗视觉优化计划 §六，纳入现有守门不新建一套）。
+
+    硬约束来自 GhostDialogTests：弹层 display 规则不得带 !important、
+    dialog:not([open]) 必须无条件隐藏——骨架的 display:flex 只写在 [open] 态。
+    """
+
+    def test_five_dialogs_use_sa_dialog_container(self):
+        html = _index()
+        for dialog_id in ("superAgentRecipeDialog", "superAgentRecipeCustomDialog", "recipeReviewDialog",
+                          "superAgentResultDialog", "superAgentCreateDialog"):
+            self.assertRegex(html, rf'id="{dialog_id}" class="[^"]*\bsa-dialog\b',
+                             f"{dialog_id} 缺少 .sa-dialog 容器类")
+
+    def test_skeleton_only_body_scrolls(self):
+        css = _css()
+        self.assertIn(".sa-dialog[open] { display: flex; flex-direction: column; }", css)
+        self.assertIn(".sa-dialog .dlg-body { flex: 1 1 auto; min-height: 0; overflow: auto;", css)
+
+    def test_backdrop_and_size_tiers(self):
+        css = _css()
+        self.assertIn(".sa-dialog::backdrop { background: rgba(14, 17, 30, .55); backdrop-filter: blur(3px); }", css)
+        self.assertIn("html[data-theme=\"dark\"] .sa-dialog::backdrop { background: rgba(4, 6, 14, .72); }", css)
+        for width in ("--dlg-w: 880px", "--dlg-w: 760px", "--dlg-w: 720px"):
+            self.assertIn(width, css, f"缺少尺寸阶梯 {width}")
+
+    def test_mobile_fullscreen_is_one_unified_rule(self):
+        css = _css()
+        self.assertIn(".sa-dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; border: 0; border-radius: 0; margin: 0; }", css)
+        self.assertIn(".sa-dialog .dlg-head { padding-top: max(17px, env(safe-area-inset-top)); }", css)
+        self.assertIn(".sa-dialog .dlg-foot { padding-bottom: max(14px, env(safe-area-inset-bottom)); }", css)
+
+    def test_error_alerts_inline_and_empty_hidden(self):
+        css = _css()
+        self.assertIn(".sa-dialog .writer-dialog-error:empty { display: none; }", css)
+
+    def test_form_submit_semantics_preserved(self):
+        html = _index()
+        # 关闭/取消/主按钮挪到骨架 foot 后必须仍用 form 属性提交，method="dialog" 语义不破坏。
+        self.assertIn('type="submit" form="superAgentCreateForm"', html)
+        self.assertGreaterEqual(html.count('form="superAgentCreateForm"'), 3)
+        self.assertIn('type="submit" form="superAgentRecipeForm"', html)
+        self.assertIn('type="submit" form="recipeCustomForm"', html)
+        self.assertIn('method="dialog"', html)
+        for close_id in ("superAgentCreateClose", "recipeCustomClose", "superAgentResultClose"):
+            self.assertIn(f'id="{close_id}"', html, f"JS 按绑定依赖的关闭按钮 id 丢失：{close_id}")
+
+
 if __name__ == "__main__":
     unittest.main()

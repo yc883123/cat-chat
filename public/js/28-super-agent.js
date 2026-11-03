@@ -868,6 +868,13 @@ async function runNodeAction(action, nodeId = "") {
   } finally { actionInFlight.delete(key); }
 }
 
+function resultRefCard(ref) {
+  const value = typeof ref === "object" ? String(ref.path_or_ref || ref.ref || ref.artifact_id || ref.title || "") : String(ref || "");
+  const kind = mediaKindFromName(value);
+  const openable = value && !value.includes("://");
+  return `<div class="super-agent-artifact"><span class="recipe-thumb kind-${kind}" aria-hidden="true">${({ image: "图", video: "影", audio: "音" })[kind] || "文"}</span><span class="artifact-copy"><b>${text(artifactBaseName(value), "产物")}</b></span>${openable ? `<a class="control-button tiny" href="${text(localFileUrl(value))}" target="_blank" rel="noopener">打开</a>` : ""}</div>`;
+}
+
 async function showNodeResult(nodeId) {
   const threadId = viewState.selectedId;
   if (!threadId || !nodeId) return;
@@ -879,7 +886,7 @@ async function showNodeResult(nodeId) {
   try {
     const payload = await api(`/api/super-agent/threads/${encodeURIComponent(threadId)}/results?node_id=${encodeURIComponent(nodeId)}`);
     if (requestId !== viewState.resultRequest) return;
-    host.innerHTML = (payload.results || []).map((result) => `<article class="super-agent-result"><h3>第 ${Number(result.attempt || 0) + 1} 次执行 · ${text(statusLabel(result.status))}</h3>${result.summary ? `<p>${text(result.summary)}</p>` : ""}<pre>${text(result.text, "本次执行尚无可展示正文。")}</pre>${result.compatibility ? `<p class="super-agent-muted">${text(RESULT_COMPATIBILITY_LABELS[result.compatibility], "执行记录需要进一步核对")}</p>` : ""}${result.output_refs?.length ? `<p>结果引用：${result.output_refs.map((ref) => refText(ref)).join("、")}</p>` : ""}</article>`).join("") || '<p>暂无可展示的执行结果。</p>';
+    host.innerHTML = (payload.results || []).map((result) => `<article class="super-agent-result"><h3>第 ${Number(result.attempt || 0) + 1} 次执行 · ${text(statusLabel(result.status))}</h3>${result.summary ? `<p>${text(result.summary)}</p>` : ""}<div class="sa-result-text">${text(result.text, "本次执行尚无可展示正文。")}</div>${result.compatibility ? `<p class="super-agent-muted">${text(RESULT_COMPATIBILITY_LABELS[result.compatibility], "执行记录需要进一步核对")}</p>` : ""}${result.output_refs?.length ? `<div class="recipe-review-items">${result.output_refs.map((ref) => resultRefCard(ref)).join("")}</div>` : ""}</article>`).join("") || '<p>暂无可展示的执行结果。</p>';
   } catch (error) { if (requestId === viewState.resultRequest) host.textContent = `结果读取失败：${error.message}`; }
 }
 
@@ -1145,6 +1152,10 @@ function setRecipeMode(mode) {
   if (hint) hint.textContent = promptMode
     ? "不调用提词模型、不要求剧本；提示词原样使用，不会自动润色或翻译。"
     : "图片＋剧本共同作为主要输入；额外要求可选，写在每组剧本下方。";
+  const materialHint = $("#recipeMaterialHint");
+  if (materialHint) materialHint.textContent = promptMode
+    ? "图片＋现成提示词，不要求剧本"
+    : selectedRecipe()?.mode === "r2v" ? "每组 1–6 张参考图" : "每组 1 张首帧图";
   const modelHint = $("#recipeModelHint");
   if (modelHint) modelHint.textContent = promptMode
     ? "本模式不会调用提词模型；仍需登记一个可用模型（默认全局设置）。"
@@ -1154,7 +1165,11 @@ function setRecipeMode(mode) {
 function renderRecipeCreation() {
   const recipe = selectedRecipe();
   setRecipeMode(recipeState.mode);
-  $("#recipeDescription").textContent = recipe ? (recipe.description || "自定义方案已保存。请核对素材用途与固定参数；创建不会开始执行。") : "暂无可用方案，可在造梦机选择工作流制作。";
+  const hasItemSlots = (recipe?.media_slots || []).some((slot) => slot.scope === "item");
+  const slotlessNote = recipe && !hasItemSlots
+    ? " 注意：本方案没有图片槽位，各组只能直接使用提示词；要把图片映射进组，请回造梦机重新保存方案并勾选图片入口。"
+    : "";
+  $("#recipeDescription").textContent = recipe ? ((recipe.description || "自定义方案已保存。请核对素材用途与固定参数；创建不会开始执行。") + slotlessNote) : "暂无可用方案，可在造梦机选择工作流制作。";
   $("#recipeGrouping").hidden = recipe?.mode !== "r2v";
   $("#recipeEffectiveControls").innerHTML = `<p class="writer-dialog-hint">数值参数（种子、尺寸、帧数等）：留空沿用方案值，只改需要的字段。这里不改变视频模型。</p><div class="super-agent-create-grid">${recipeNumericSlots(recipe).map((slot) => `<label>${text(slot.field_name)}<input type="number" step="any" data-recipe-override-node="${text(slot.node_id)}" data-recipe-override-field="${text(slot.field_name)}" placeholder="${text(slot.value)}"></label>`).join("")}</div>`;
   renderRecipeUploads(); renderRecipeDraftItems();
@@ -1438,6 +1453,36 @@ function recipeReviewMediaMarkup(item, shared) {
   if (first) return `<img src="${text(localFileUrl(first.path))}" loading="lazy" alt="${text(first.name || "素材图")}">`;
   return '<span class="recipe-thumb kind-image" aria-hidden="true">图</span>';
 }
+// 就绪检查前置：缺项在确认页直接可见，不再走到最后一步才被拒（A05）。
+function recipeReadinessList(batch, action, items) {
+  const reverse = action === "confirm_reverse" || action === "retry_reverse";
+  const rows = [];
+  const missingMedia = items.filter((item) => !(item.media || []).length && !(batch.shared_media || []).length);
+  rows.push(reverse
+    ? { ok: !missingMedia.length, label: missingMedia.length ? `${missingMedia.length} 组还没有图片素材` : `${items.length} 组图片素材已就绪` }
+    : { ok: true, label: `${items.reduce((sum, item) => sum + (item.media || []).length + (batch.shared_media || []).length, 0)} 张图片素材已就绪` });
+  if (reverse) {
+    const missingScript = items.filter((item) => !String(item.requirements || "").trim()).length;
+    rows.push(missingScript
+      ? { ok: false, label: `${missingScript} 组还没有剧本正文；生成提示词需要剧本` }
+      : { ok: true, label: `${items.length} 组剧本已填写` });
+  } else if (action !== "retry_collect") {
+    const missingPrompt = items.filter((item) => !String(item.prompt || "").trim()).length;
+    rows.push(missingPrompt
+      ? { ok: false, label: `${missingPrompt} 组提示词为空，确认会被拦下` }
+      : { ok: true, label: `${items.length} 条提示词已就绪` });
+  } else {
+    rows.push({ ok: true, label: "只重新下载已有结果，不会重新生成" });
+  }
+  if (action.includes("generate")) {
+    const missingSnapshot = items.filter((item) => { const effective = recipeEffectiveWorkflow(item); return !effective?.id || !effective.fingerprint || !effective.graph; }).length;
+    rows.push(missingSnapshot
+      ? { ok: false, label: `${missingSnapshot} 组生成设置未同步，请刷新后重新核对` }
+      : { ok: true, label: "生成设置已同步到本页" });
+  }
+  rows.push({ ok: true, label: "已成功的结果不会重复执行" });
+  return `<div class="sa-sec-head" style="margin-top:18px"><h3>就绪检查</h3><span>确认前自动核对</span></div><div class="recipe-check-list" style="margin-top:10px">${rows.map((row) => `<div class="recipe-check-item${row.ok ? "" : " warn"}"><i>${row.ok ? "✓" : "!"}</i><span>${text(row.label)}</span></div>`).join("")}</div>`;
+}
 // 审核确认页：普通用户视角——素材、提示词、数量与费用；不再展示 JSON、绝对路径、指纹与模板原文。
 function recipeReviewMarkup(batch, action, itemIds) {
   const reverse = action === "confirm_reverse" || action === "retry_reverse";
@@ -1451,7 +1496,7 @@ function recipeReviewMarkup(batch, action, itemIds) {
     : collect
       ? "只重新下载已经生成的结果，不会重新生成，也不会改写提示词。"
       : `本次将提交 ${count} 条视频生成（可能产生费用）；不会重新生成提示词，也不会改写你已填好的内容。`;
-  return `<div class="recipe-review-summary"><span class="recipe-review-kv">方案 <b>${text(batch.recipe?.name, "视频方案")}</b></span><span class="recipe-review-kv">本次涉及 <b>${items.length} 组</b></span>${reverse || collect ? "" : `<span class="recipe-review-kv">每组 <b>${shots} 条</b></span><span class="recipe-review-kv">时长 <b>${Number(batch.duration_seconds)} 秒</b></span>`}<span class="recipe-review-kv">运行位置 <b>${text(recipeTargetLabel(batch))}</b></span></div><p class="writer-dialog-hint">已成功的结果不会重复执行。${excluded.length ? `已明确排除：${excluded.map((item) => text(itemDisplayName(item) || item.source_path)).join("、")}。` : ""}</p><p><strong>${authorize}</strong></p>${reverse ? `<p class="writer-dialog-hint">提词模型：${text(batch.model?.model_name || batch.model?.model_key, "未选择")}</p>` : ""}${items.length ? `<div class="recipe-review-items">${items.map((item, index) => `<article class="recipe-review-card"><div class="recipe-review-media">${recipeReviewMediaMarkup(item, batch.shared_media)}</div><div class="recipe-review-body"><h3>${text(itemDisplayName(item) || `第 ${index + 1} 组`)}</h3>${reverse ? `<p class="writer-dialog-hint">剧本 / 内容要求：${text(item.requirements, "（未填写）")}</p>` : `<div class="recipe-review-prompt">${escapeHtml(item.prompt || "")}</div>`}<p class="writer-dialog-hint">素材 ${((item.media || []).length + (batch.shared_media || []).length)} 张${reverse || collect ? "" : ` · 生成 ${shots} 条`}</p></div></article>`).join("")}</div>` : '<p class="writer-dialog-hint">所选范围没有需要执行的项目。</p>'}`;
+  return `<div class="recipe-review-summary"><span class="recipe-review-kv">方案 <b>${text(batch.recipe?.name, "视频方案")}</b></span><span class="recipe-review-kv">本次涉及 <b>${items.length} 组</b></span>${reverse || collect ? "" : `<span class="recipe-review-kv">每组 <b>${shots} 条</b></span><span class="recipe-review-kv">时长 <b>${Number(batch.duration_seconds)} 秒</b></span>`}<span class="recipe-review-kv">运行位置 <b>${text(recipeTargetLabel(batch))}</b></span></div><p class="writer-dialog-hint">已成功的结果不会重复执行。${excluded.length ? `已明确排除：${excluded.map((item) => text(itemDisplayName(item) || item.source_path)).join("、")}。` : ""}</p><p><strong>${authorize}</strong></p>${reverse ? `<p class="writer-dialog-hint">提词模型：${text(batch.model?.model_name || batch.model?.model_key, "未选择")}</p>` : ""}${items.length ? `<div class="recipe-review-items">${items.map((item, index) => `<article class="recipe-review-card"><div class="recipe-review-media">${recipeReviewMediaMarkup(item, batch.shared_media)}</div><div class="recipe-review-body"><h3>${text(itemDisplayName(item) || `第 ${index + 1} 组`)}</h3>${reverse ? `<p class="writer-dialog-hint">剧本 / 内容要求：${text(item.requirements, "（未填写）")}</p>` : `<div class="recipe-review-prompt">${escapeHtml(item.prompt || "")}</div>`}<p class="writer-dialog-hint">素材 ${((item.media || []).length + (batch.shared_media || []).length)} 张${reverse || collect ? "" : ` · 生成 ${shots} 条`}</p></div></article>`).join("")}</div>` : '<p class="writer-dialog-hint">所选范围没有需要执行的项目。</p>'}${recipeReadinessList(batch, action, items)}`;
 }
 async function recipeAction(action, itemIds = null) {
   const threadId = viewState.selectedId; let batch = recipeState.batches.get(threadId);
@@ -1468,6 +1513,11 @@ async function recipeAction(action, itemIds = null) {
       const count = reverse || action === "retry_collect" ? reviewItems.length : reviewItems.length * Number(batch.shots);
       $("#recipeReviewTitle").textContent = reverse ? "确认生成提示词" : action === "retry_collect" ? "重新下载已有结果" : "确认生成视频";
       $("#recipeReviewConfirm").textContent = reverse ? `确认生成 ${count} 组提示词` : action === "retry_collect" ? "重新下载" : `确认生成 ${count} 条视频`;
+      $("#recipeReviewHint").textContent = reverse
+        ? "确认后向提词模型发送请求；只生成提示词，不制作视频。"
+        : action === "retry_collect"
+          ? "只重新下载已有结果，不会重新生成。"
+          : "确认后提交视频生成；缺项会在这一步之前拦下。";
       $("#recipeReviewError").textContent = ""; $("#recipeReviewBody").innerHTML = recipeReviewMarkup(batch, action, itemIds);
       try { assertRecipeReviewSnapshot(batch, action, itemIds); $("#recipeReviewConfirm").disabled = false; }
       catch (error) { $("#recipeReviewError").textContent = error.message; $("#recipeReviewConfirm").disabled = true; }
@@ -1525,7 +1575,10 @@ export async function openRecipeWorkflowIntent(intent) {
   const select = $("#recipePromptSlot"); select.replaceChildren(new Option("请明确选择节点 / 字段", ""));
   // List exact native parameter addresses. Server validates safe prompt destinations.
   for (const slot of workflow.params || []) if (!["image", "audio", "video", "number", "bool", "seed"].includes(slot.field_type) && slot.control !== "media") select.append(new Option(`${slot.node_id} / ${slot.field_name} · ${slot.label || slot.title || slot.field_type}`, JSON.stringify({ node_id: String(slot.node_id), field_name: slot.field_name })));
-  $("#recipeCustomMedia").innerHTML = (workflow.params || []).filter((slot) => slot.field_type === "image").map((slot, index) => `<div class="recipe-custom-slot" data-custom-slot-index="${index}" data-node-id="${text(slot.node_id)}" data-field-name="${text(slot.field_name)}"><label class="recipe-check"><input type="checkbox" data-custom-use>使用 ${text(slot.node_id)} / ${text(slot.field_name)}</label><div class="super-agent-create-grid"><label>业务角色（唯一）<input data-custom-role placeholder="character_1"></label><label>显示名<input data-custom-label placeholder="角色参考图"></label><label>范围<select data-custom-scope><option value="">明确选择</option><option value="item">逐项图片</option><option value="shared">整批共用</option></select></label><label class="recipe-check"><input type="checkbox" data-custom-required>必填</label></div></div>`).join("");
+  const imageSlots = (workflow.params || []).filter((slot) => slot.field_type === "image");
+  // 纯文生图工作流没有图片输入口：给一行说明，别留一个空槽位框装作坏了。
+  $("#recipeCustomMedia").innerHTML = imageSlots.length ? imageSlots.map((slot, index) => `<div class="recipe-custom-slot" data-custom-slot-index="${index}" data-node-id="${text(slot.node_id)}" data-field-name="${text(slot.field_name)}"><label class="recipe-check"><input type="checkbox" data-custom-use>启用此图片入口</label><div class="sa-slot-fields" hidden><div class="super-agent-create-grid"><label>业务角色（唯一）<input data-custom-role placeholder="character_1"></label><label>显示名<input data-custom-label placeholder="角色参考图"></label><label>范围<select data-custom-scope><option value="">明确选择</option><option value="item">逐项图片</option><option value="shared">整批共用</option></select></label><label class="recipe-check"><input type="checkbox" data-custom-required>必填</label></div><small class="writer-dialog-hint">底层位置：节点 ${text(slot.node_id)} · 字段 ${text(slot.field_name)}</small></div></div>`).join("")
+    : '<p class="writer-dialog-hint" style="margin:0">这个工作流没有图片输入口（例如纯文生图工作流）。把它的产物图片再交给视频工作流，才能走「用图片批量制作视频」。</p>';
   try {
     $("#recipeCustomOverrides").textContent = recipeJson({ numeric_boolean_overrides: recipeCustomFixedOverrides(intent), note: "未修改的字段沿用工作流原值；提示词和图片按你手动选择的槽位写入。已修改的不支持参数将阻止保存。" });
   } catch (error) {
@@ -1547,8 +1600,19 @@ async function saveCustomRecipe(event) {
     const workflow = recipeState.intent?.workflow;
     if (!workflow || !$("#recipePromptSlot").value) throw new Error("请手动选择接收提示词的节点 / 字段。");
     const promptSlot = JSON.parse($("#recipePromptSlot").value);
-    const mediaSlots = [...$("#recipeCustomMedia").querySelectorAll("[data-custom-slot-index]")].filter((row) => row.querySelector("[data-custom-use]").checked).map((row) => ({ node_id: row.dataset.nodeId, field_name: row.dataset.fieldName, role: row.querySelector("[data-custom-role]").value.trim(), label: row.querySelector("[data-custom-label]").value.trim(), scope: row.querySelector("[data-custom-scope]").value, required: row.querySelector("[data-custom-required]").checked }));
-    if (mediaSlots.some((slot) => !slot.role || !slot.label || !slot.scope) || new Set(mediaSlots.map((slot) => slot.role)).size !== mediaSlots.length) throw new Error("请为每个选中的图片槽明确填写唯一角色、显示名与范围。");
+    const checkedSlotRows = [...$("#recipeCustomMedia").querySelectorAll("[data-custom-slot-index]")].filter((row) => row.querySelector("[data-custom-use]").checked);
+    const mediaSlots = checkedSlotRows.map((row) => ({ node_id: row.dataset.nodeId, field_name: row.dataset.fieldName, role: row.querySelector("[data-custom-role]").value.trim(), label: row.querySelector("[data-custom-label]").value.trim(), scope: row.querySelector("[data-custom-scope]").value, required: row.querySelector("[data-custom-required]").checked }));
+    // 只有勾选启用的入口才会成为方案的图片槽位；报错要指名是哪个入口缺什么，不能一句话糊住。
+    const slotProblems = checkedSlotRows.map((row, index) => {
+      const missing = [
+        !row.querySelector("[data-custom-role]").value.trim() && "业务角色",
+        !row.querySelector("[data-custom-label]").value.trim() && "显示名",
+        !row.querySelector("[data-custom-scope]").value && "范围（逐项图片 / 整批共用）",
+      ].filter(Boolean);
+      return missing.length ? `第 ${index + 1} 个启用的图片入口（节点 ${row.dataset.nodeId}）缺：${missing.join("、")}` : "";
+    }).filter(Boolean);
+    if (slotProblems.length) throw new Error(`${slotProblems.join("；")}。未启用的入口不用填，也不会保存。`);
+    if (new Set(mediaSlots.map((slot) => slot.role)).size !== mediaSlots.length) throw new Error("启用的图片入口之间业务角色必须互不相同。");
     const templateId = $("#recipeCustomTemplate").value; if (!templateId) throw new Error("请选择提词库模板。");
     const jsonRule = $("#recipeResultType").value === "json", field = $("#recipeResultField").value.trim();
     if (jsonRule && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(field)) throw new Error("JSON 字段名须为有效的单字段标识符。");
@@ -1611,5 +1675,11 @@ function bindRecipeEvents() {
   $("#recipeReviewCancel")?.addEventListener("click", () => { $("#recipeReviewDialog").close(); recipeState.review = null; });
   $("#recipeReviewConfirm")?.addEventListener("click", () => void confirmRecipeReview());
   $("#recipeCustomClose")?.addEventListener("click", () => $("#superAgentRecipeCustomDialog").close());
+  // 未启用的图片入口收起其映射字段：不是每个入口都必须填，勾选才展开。
+  $("#recipeCustomMedia")?.addEventListener("change", (event) => {
+    const box = event.target.closest("[data-custom-use]"); if (!box) return;
+    const fields = box.closest("[data-custom-slot-index]")?.querySelector(".sa-slot-fields");
+    if (fields) fields.hidden = !box.checked;
+  });
   $("#recipeCustomForm")?.addEventListener("submit", (event) => void saveCustomRecipe(event));
 }

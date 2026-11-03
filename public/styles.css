@@ -681,6 +681,10 @@ html[data-model-skin="on"] .chat-backdrop .chat-bg-blur {
 .lightbox-close svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
 .control-button, .mcp-button, .text-button { min-height: 34px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); color: var(--text); padding: 0 11px; white-space: nowrap; }
 .control-button:hover, .mcp-button:hover { border-color: var(--line-strong); background: var(--surface-2); }
+/* 实心主按钮变体（D-04 主次分明）：此前 .control-button.primary 一直没有样式，主按钮和次按钮长得一样。 */
+.control-button.primary { border-color: var(--accent-solid); background: var(--accent-solid); color: #fff; }
+.control-button.primary:hover { border-color: var(--brand-700); background: var(--brand-700); color: #fff; }
+.control-button.primary:disabled { opacity: .55; }
 .mcp-button { display: flex; align-items: center; gap: 7px; }
 .mcp-button i { display: block; }
 .mcp-button.connecting i { background: var(--warning); }
@@ -5748,8 +5752,8 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .writer-dialog-form h3 { margin: 0; font-size: 14px; }
 .writer-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .writer-dialog-error { margin: 0; min-height: 14px; font-size: 11px; color: var(--danger, #c0392b); }
-.super-agent-create-dialog { width: min(820px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow: hidden; }
-.super-agent-create-form { min-width: 0; max-height: inherit; overflow-y: auto; }
+/* 新建任务弹窗容器交给 .sa-dialog 三段式骨架；这里只保留表单内部规则。 */
+.super-agent-create-form { min-width: 0; }
 .super-agent-create-form label { display: grid; gap: 6px; min-width: 0; }
 .super-agent-create-form input, .super-agent-create-form select { min-width: 0; }
 .super-agent-create-form .writer-manage-head { min-width: 0; }
@@ -5763,7 +5767,6 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .super-agent-create-options summary small { margin-left: 8px; overflow-wrap: anywhere; }
 .super-agent-create-options > .super-agent-create-group { border: 0; border-top: 1px solid var(--line); border-radius: 0; }
 .super-agent-create-start { padding: 4px 0; }
-.super-agent-create-form .writer-dialog-actions { position: sticky; bottom: -14px; z-index: 1; padding: 12px 0 14px; background: var(--surface); border-top: 1px solid var(--line); }
 .super-agent-create-group { display: grid; gap: 10px; min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: var(--r-md); }
 .super-agent-create-group legend { font-size: 12px; padding: 0 6px; color: var(--muted); }
 .super-agent-supervision-fields { display: grid; gap: 10px; min-width: 0; }
@@ -6154,10 +6157,7 @@ body[data-app-view="super-agent"] .super-agent-view { display: flex; }
   .super-agent-toolbar { flex: 1; flex-wrap: wrap; justify-content: flex-end; }
   .super-agent-sync { width: 100%; text-align: right; font-size: 11px; }
   .super-agent-app-nav button { padding: 6px 7px; }
-  .super-agent-create-dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; border: 0; border-radius: 0; margin: 0; }
-  .super-agent-create-form { max-height: 100%; padding: max(10px, env(safe-area-inset-top)) 10px max(12px, env(safe-area-inset-bottom)); }
-  .super-agent-create-grid { grid-template-columns: minmax(0, 1fr); }
-  .super-agent-create-form .writer-dialog-actions { bottom: -12px; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+  /* 弹窗移动端全屏的容器级规则统一放在 .sa-dialog 基础块之后（见文件后段 760 块），这里不留容器规则。 */
   .super-agent-columns { display: flex; flex-direction: column; gap: 8px; padding: 8px; overflow: auto; }
   .super-agent-thread-panel, .super-agent-detail-panel, .super-agent-side-panel { flex: none; overflow: visible; border: 1px solid var(--line); border-radius: var(--r-md); }
   .super-agent-thread-panel { max-height: 350px; overflow: hidden; }
@@ -6177,13 +6177,57 @@ body[data-app-view="super-agent"] .super-agent-view { display: flex; }
   .super-agent-side-panel .super-agent-ref { margin-left: 0; margin-right: 0; }
 }
 .super-agent-confirm-parameters, .super-agent-result pre { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font: inherit; max-width: 100%; padding: 10px; border-radius: 8px; background: var(--surface-inset); color: var(--text); }
-.super-agent-result-dialog { width: min(780px, calc(100vw - 24px)); max-height: 85vh; overflow: auto; }
+/* ── 弹窗统一容器（.sa-dialog，限任务总管 5 个弹窗）：三段式骨架，只有 body 滚 ── */
+.sa-dialog { width: min(var(--dlg-w, 720px), calc(100vw - 32px)); max-width: calc(100vw - 32px); max-height: min(88dvh, 900px); padding: 0; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); color: var(--text); box-shadow: var(--shadow-3); overflow: hidden; }
+.sa-dialog[open] { display: flex; flex-direction: column; }
+.sa-dialog::backdrop { background: rgba(14, 17, 30, .55); backdrop-filter: blur(3px); }
+html[data-theme="dark"] .sa-dialog::backdrop { background: rgba(4, 6, 14, .72); }
+/* 尺寸阶梯：大 880（两个新建表单）/ 中偏大 760（生成前确认）/ 中 720（保存方案、执行结果） */
+.super-agent-create-dialog, #superAgentRecipeDialog { --dlg-w: 880px; }
+#recipeReviewDialog { --dlg-w: 760px; }
+#superAgentRecipeCustomDialog, #superAgentResultDialog { --dlg-w: 720px; }
+.sa-dialog .dlg-head { flex: none; display: flex; align-items: flex-start; gap: 12px; padding: 17px 20px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.sa-dialog .dlg-ico { width: 34px; height: 34px; flex: none; display: grid; place-items: center; border-radius: 10px; background: var(--accent-soft); color: var(--accent-solid); font-size: 16px; font-style: normal; }
+.sa-dialog .dlg-head-copy { flex: 1; min-width: 0; }
+.sa-dialog .dlg-head-copy h2 { margin: 0; font-size: 16px; font-weight: 700; line-height: 1.35; overflow-wrap: anywhere; }
+.sa-dialog .dlg-head-copy p { margin: 3px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.sa-dialog .dlg-close { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border: 1px solid transparent; border-radius: var(--r-md); background: transparent; color: var(--muted); cursor: pointer; font: inherit; font-size: 15px; padding: 0; }
+.sa-dialog .dlg-close:hover { border-color: var(--line); background: var(--surface-2); color: var(--text); }
+.sa-dialog .dlg-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 18px 20px; }
+.sa-dialog .dlg-foot { flex: none; display: flex; align-items: center; gap: 12px; padding: 13px 20px; border-top: 1px solid var(--line); background: var(--surface); }
+.sa-dialog .dlg-foot .foot-hint { flex: 1; min-width: 0; color: var(--muted); font-size: 11.5px; line-height: 1.55; }
+.sa-dialog .dlg-foot .foot-btns { display: flex; align-items: center; gap: 9px; flex: none; }
+.sa-dialog .dlg-foot .foot-btns > .control-button { min-height: 36px; }
+/* 错误提示就近可见：body 顶部的 inline alert（空时不占位，不再藏在滚动区外） */
+.sa-dialog .writer-dialog-error { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 14px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line)); border-radius: var(--r-md); background: var(--danger-soft); color: var(--text); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.sa-dialog .writer-dialog-error:empty { display: none; }
+.sa-dialog .writer-dialog-error::before { content: "!"; flex: none; width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%; background: var(--danger); color: #fff; font-size: 11px; font-weight: 700; }
+/* 弹窗内表单：body 提供留白，form 本身不再带内边距与滚动 */
+.sa-dialog .writer-dialog-form { min-width: 0; max-width: 100%; display: grid; gap: 10px; padding: 0; overflow-wrap: anywhere; }
+.sa-dialog fieldset { min-width: 0; margin: 0; padding: 14px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface-inset); }
+.sa-dialog .writer-dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
+.sa-dialog textarea:focus, .sa-dialog input:focus, .sa-dialog select:focus { border-color: var(--accent); outline: 0; box-shadow: 0 0 0 3px var(--accent-soft); }
+/* 弹窗内小节标题（1 · 输入方式 这类分步行） */
+.sa-sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 8px 0 2px; }
+.sa-sec-head h3 { margin: 0; font-size: 12.5px; font-weight: 700; }
+.sa-sec-head span { color: var(--muted); font-size: 11.5px; }
+/* .writer-dialog-hint 从来没有过样式规则，弹窗里一直按 16px 正文渲染（D-07）；只在任务总管弹窗内收小。 */
+.sa-dialog .writer-dialog-hint { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.65; }
+/* 保存方案：按用途描述的三张卡，节点映射收进高级折叠区；未启用的图片入口收起映射字段 */
+.sa-slot-fields { display: grid; gap: 8px; margin-top: 6px; min-width: 0; }
+
+.sa-vis-card { display: flex; gap: 11px; padding: 12px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); min-width: 0; }
+.sa-vis-ico { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border-radius: 9px; background: var(--accent-soft); color: var(--accent-solid); font-size: 13px; font-style: normal; }
+.sa-vis-copy { flex: 1; min-width: 0; }
+.sa-vis-copy b { display: block; font-size: 12.5px; font-weight: 650; }
+.sa-vis-copy p { margin: 3px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.6; }
+/* 执行结果：正文变成可读内容块，不再是一坨等宽 pre */
+.sa-result-text { margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-inset); color: var(--text); font: 12.5px/1.7 var(--font-sans); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 46dvh; overflow: auto; }
+.super-agent-result-dialog { overflow: hidden; }
 .super-agent-result-dialog .writer-dialog-form { min-width: 0; }
 .super-agent-supervision > .super-agent-muted { margin: 0; padding: 2px 0; text-align: left; }
 
 /* Recipe materials, snapshots and review stay readable at desktop and 375px. */
-.super-agent-recipe-dialog { width: min(860px, calc(100vw - 24px)); max-width: calc(100vw - 24px); max-height: 90dvh; padding: 0; overflow: auto; }
-.super-agent-recipe-dialog .writer-dialog-form { min-width: 0; max-width: 100%; overflow-wrap: anywhere; padding: 20px; }
 .super-agent-recipe-dialog label, .super-agent-recipe label { display: block; min-width: 0; margin: 9px 0; }
 .super-agent-recipe-dialog textarea, .super-agent-recipe textarea, .super-agent-recipe-dialog select, .super-agent-recipe input:not([type=checkbox]) { width: 100%; min-width: 0; box-sizing: border-box; }
 .super-agent-recipe textarea, .super-agent-recipe-dialog textarea { resize: vertical; border: 1px solid var(--line); border-radius: 8px; padding: 9px; background: var(--surface-inset); color: var(--text); font: inherit; }
@@ -6274,10 +6318,15 @@ span.recipe-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA
 .super-agent-artifact b { display: block; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
 .super-agent-artifact small { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 @media (max-width: 760px) {
-  .super-agent-recipe-dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; border: 0; border-radius: 0; margin: 0; }
-  .super-agent-recipe-dialog .writer-dialog-form { padding: max(12px, env(safe-area-inset-top)) 12px max(16px, env(safe-area-inset-bottom)); }
-  .super-agent-recipe-dialog .writer-dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-  .super-agent-recipe-dialog .writer-dialog-actions > button { flex: 1 1 130px; white-space: normal; }
+  /* 弹窗移动端全屏：一处统一规则管全部 .sa-dialog；必须位于基础块之后才能覆盖同权重的容器规则。 */
+  .sa-dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; border: 0; border-radius: 0; margin: 0; }
+  .sa-dialog .dlg-head { padding-top: max(17px, env(safe-area-inset-top)); }
+  .sa-dialog .dlg-foot { padding-bottom: max(14px, env(safe-area-inset-bottom)); }
+  .sa-dialog .dlg-body { padding: 16px; }
+  .sa-dialog .dlg-foot .foot-hint { display: none; }
+  .sa-dialog .dlg-foot .foot-btns { width: 100%; }
+  .sa-dialog .dlg-foot .foot-btns > .control-button { flex: 1 1 130px; white-space: normal; }
+  .sa-dialog .super-agent-create-grid { grid-template-columns: minmax(0, 1fr); }
   .recipe-batch-actions > button { flex: 1 1 135px; white-space: normal; }
   .super-agent-mode-cards { grid-template-columns: 1fr; }
   .recipe-review-items { grid-template-columns: 1fr; }

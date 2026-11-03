@@ -24,6 +24,7 @@ import time
 import traceback
 from typing import Any
 
+from naiba.core.contracts import WRITER_CHAPTER_BASELINE_KEY, WRITER_PREVIOUS_CHAPTER_KEY
 from naiba.writer import prompts
 from naiba.writer.store import (
     PIPELINE_STATUSES,
@@ -169,112 +170,119 @@ class WriterPipelineManager:
             steps = KIND_STEPS[kind]
         if not str(model_name or "").strip():
             raise WriterPipelineError("请选择模型；可用模型来自设置页的模型检查结果")
-        manifest = self.store._load_manifest(book_id)
-        if base_revision is not None and base_revision != "":
-            from naiba.writer.store import WriterStore
-            WriterStore._check_revision(manifest, base_revision)
-        current = manifest.get("active_pipeline")
-        if isinstance(current, dict) and str(current.get("status") or "") == "running":
-            raise WriterPipelineError("这部作品已有正在进行的生成，请先取消或等它结束")
-        setup_version_id = str(setup_version_id or "").strip() or str(
-            manifest.get("current_setup_version_id") or "")
-        setup = None
-        if setup_version_id:
-            try:
-                setup = self.store.load_setup(book_id, manifest=manifest, version_id=setup_version_id)
-            except (LookupError, WriterStoreError):
-                setup = None
-        if steps[0] in ("segs", "draft", "outline", "outline_text", "split", "outline_review") and not setup:
-            raise WriterPipelineError("请先生成或保存设定，再生成大纲与正文")
-        # 设定链的起点是创意：已保存设定里没有创意时，模型只能编出「未提供创意/未指定」
-        # 这类占位结果，白烧 token 还落一版垃圾（真实反馈）。在排队前如实拒绝。
-        if kind in ("setup_all", "setup_step") \
-                and not str((setup or {}).get("idea") or "").strip():
-            raise WriterPipelineError(
-                "请先在「设定 → 故事创意」里写一句话（或从模板套用后再生成）；"
-                "还没有创意时，模型只能给出占位结果"
-            )
-        if steps[0] == "draft":
-            outline_version_id = str(outline_version_id or "").strip() or str(
-                manifest.get("current_outline_version_id") or "")
-            if not outline_version_id:
-                raise WriterPipelineError("请先生成大纲，再写正文")
-            if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
-                raise WriterPipelineError(f"作品里没有第 {chapter_no} 章；请先同步章节")
-            chapter = self.store._load_chapter_index(self.store._book_dir(book_id), chapter_no)
-            chapter_revision = chapter_revision if chapter_revision is not None and chapter_revision != "" \
-                else int(chapter.get("revision") or 0)
-        else:
-            outline_version_id = str(outline_version_id or "").strip()
-            chapter_revision = None
-        char_count = self._clamp(int(char_count or 4), prompts.CHARS_MIN, prompts.CHARS_MAX, 4)
-        side_count = self._clamp(int(side_count or 0), 0, prompts.SIDE_COUNT_MAX, 0)
-        chapter_count = self._clamp(int(chapter_count or 10), prompts.OUTLINE_MIN, prompts.OUTLINE_MAX, 10)
-        # 拆分参数：只在 outline_text / outline_all / split 有意义，其余 kind 归一成 0。
-        part_no = int(part_no or 0)
-        target_chars = int(target_chars or 0)
-        want_count = int(want_count or 0)
-        from_no = int(from_no or 0)
-        if kind == "outline_text":
-            if part_no < 1:
-                raise WriterPipelineError("请指定要生成第几部的大纲")
-            target_chars = self._clamp(target_chars or 8000, 1000, 60000, 8000)
-        if kind == "split":
-            if want_count < 1:
-                raise WriterPipelineError("请指定要拆多少章")
-            want_count = self._clamp(want_count, prompts.SPLIT_MIN, prompts.SPLIT_BATCH_MAX,
-                                     prompts.SPLIT_BATCH_MAX)
-            from_no = max(1, from_no or 1)
-            # 第三次反馈⑦：一次让模型拆几百章，它会把整本书在思考里推演一遍，
-            # 正文没出就撞「思考异常冗长」熔断。按 SPLIT_STEP_CHAPTERS 切成多步连拆：
-            # 每步落一批章、带上已拆前文衔接，失败也只停在本批。
-            steps = tuple(["split"] * max(1, -(-want_count // prompts.SPLIT_STEP_CHAPTERS)))
-        book_title = str(manifest.get("title") or "未命名作品")
-        snapshot = {
-            "kind": kind,
-            "steps": list(steps),
-            "step": step or "",
-            "chapter_no": int(chapter_no or 0),
-            "model_key": str(model_key or ""),
-            "model_name": str(model_name or "").strip(),
-            "char_count": char_count,
-            "side_count": side_count,
-            "chapter_count": chapter_count,
-            "part_no": part_no,
-            "part_title": str(part_title or "")[:80],
-            "target_chars": target_chars,
-            "want_count": want_count,
-            "from_no": from_no,
-            "part_plan": [dict(row) for row in (part_plan if isinstance(part_plan, list) else [])
-                          if isinstance(row, dict)][:prompts.PARTS_MAX],
-            "setup_version_id": setup_version_id,
-            "outline_version_id": outline_version_id,
-            "extra_note": str(extra_note or "")[:500],
-            "allow_drop": bool(allow_drop),
-            "book_title": book_title,
-        }
-        pipeline = {
-            "id": new_version_id("pl"),
-            "kind": kind,
-            "attempt": 1,
-            "status": "running",
-            "steps": list(steps),
-            "step_index": 0,
-            "current_task_id": "",
-            "completed_task_ids": [],
-            "step_outputs": {},
-            "request_snapshot": snapshot,
-            "source_version_ids": {
-                "setup": setup_version_id,
-                "outline": outline_version_id,
-            },
-            "base_revision": int(manifest.get("revision") or 0),
-            "chapter_revision": int(chapter_revision) if chapter_revision is not None else None,
-            "error": "",
-            "created_at": int(time.time() * 1000),
-            "updated_at": int(time.time() * 1000),
-        }
-        self.store._save_manifest(self.store._book_dir(book_id), {**manifest, "active_pipeline": pipeline})
+        with self.store._lock:
+            manifest = self.store._load_manifest(book_id)
+            if base_revision is not None and base_revision != "":
+                from naiba.writer.store import WriterStore
+                WriterStore._check_revision(manifest, base_revision)
+            current = manifest.get("active_pipeline")
+            if isinstance(current, dict) and str(current.get("status") or "") == "running":
+                raise WriterPipelineError("这部作品已有正在进行的生成，请先取消或等它结束")
+            setup_version_id = str(setup_version_id or "").strip() or str(
+                manifest.get("current_setup_version_id") or "")
+            setup = None
+            if setup_version_id:
+                try:
+                    setup = self.store.load_setup(book_id, manifest=manifest, version_id=setup_version_id)
+                except (LookupError, WriterStoreError):
+                    setup = None
+            if steps[0] in ("segs", "draft", "outline", "outline_text", "split", "outline_review") and not setup:
+                raise WriterPipelineError("请先生成或保存设定，再生成大纲与正文")
+            # 设定链的起点是创意：已保存设定里没有创意时，模型只能编出「未提供创意/未指定」
+            # 这类占位结果，白烧 token 还落一版垃圾（真实反馈）。在排队前如实拒绝。
+            if kind in ("setup_all", "setup_step") \
+                    and not str((setup or {}).get("idea") or "").strip():
+                raise WriterPipelineError(
+                    "请先在「设定 → 故事创意」里写一句话（或从模板套用后再生成）；"
+                    "还没有创意时，模型只能给出占位结果"
+                )
+            if steps[0] in ("segs", "draft"):
+                outline_version_id = str(outline_version_id or "").strip() or str(
+                    manifest.get("current_outline_version_id") or "")
+                if not outline_version_id:
+                    raise WriterPipelineError("请先生成大纲，再写正文")
+                if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
+                    raise WriterPipelineError(f"作品里没有第 {chapter_no} 章；请先同步章节")
+                chapter = self.store._load_chapter_index(self.store._book_dir(book_id), chapter_no)
+                self.store._check_revision(chapter, chapter_revision, what=f"第 {chapter_no} 章")
+                chapter_revision = int(chapter.get("revision") or 0)
+            else:
+                outline_version_id = str(outline_version_id or "").strip()
+                chapter_revision = None
+            char_count = self._clamp(int(char_count or 4), prompts.CHARS_MIN, prompts.CHARS_MAX, 4)
+            side_count = self._clamp(int(side_count or 0), 0, prompts.SIDE_COUNT_MAX, 0)
+            chapter_count = self._clamp(int(chapter_count or 10), prompts.OUTLINE_MIN, prompts.OUTLINE_MAX, 10)
+            # 拆分参数：只在 outline_text / outline_all / split 有意义，其余 kind 归一成 0。
+            part_no = int(part_no or 0)
+            target_chars = int(target_chars or 0)
+            want_count = int(want_count or 0)
+            from_no = int(from_no or 0)
+            if kind == "outline_text":
+                if part_no < 1:
+                    raise WriterPipelineError("请指定要生成第几部的大纲")
+                target_chars = self._clamp(target_chars or 8000, 1000, 60000, 8000)
+            if kind == "split":
+                if want_count < 1:
+                    raise WriterPipelineError("请指定要拆多少章")
+                want_count = self._clamp(want_count, prompts.SPLIT_MIN, prompts.SPLIT_BATCH_MAX,
+                                         prompts.SPLIT_BATCH_MAX)
+                from_no = max(1, from_no or 1)
+                # 第三次反馈⑦：一次让模型拆几百章，它会把整本书在思考里推演一遍，
+                # 正文没出就撞「思考异常冗长」熔断。按 SPLIT_STEP_CHAPTERS 切成多步连拆：
+                # 每步落一批章、带上已拆前文衔接，失败也只停在本批。
+                steps = tuple(["split"] * max(1, -(-want_count // prompts.SPLIT_STEP_CHAPTERS)))
+            book_title = str(manifest.get("title") or "未命名作品")
+            snapshot = {
+                "kind": kind,
+                "steps": list(steps),
+                "step": step or "",
+                "chapter_no": int(chapter_no or 0),
+                "model_key": str(model_key or ""),
+                "model_name": str(model_name or "").strip(),
+                "char_count": char_count,
+                "side_count": side_count,
+                "chapter_count": chapter_count,
+                "part_no": part_no,
+                "part_title": str(part_title or "")[:80],
+                "target_chars": target_chars,
+                "want_count": want_count,
+                "from_no": from_no,
+                "part_plan": [dict(row) for row in (part_plan if isinstance(part_plan, list) else [])
+                              if isinstance(row, dict)][:prompts.PARTS_MAX],
+                "setup_version_id": setup_version_id,
+                "outline_version_id": outline_version_id,
+                "extra_note": str(extra_note or "")[:500],
+                "allow_drop": bool(allow_drop),
+                "book_title": book_title,
+            }
+            if steps[0] in ("segs", "draft"):
+                baseline, previous = self.store.chapter_writing_inputs(book_id, chapter_no)
+                snapshot[WRITER_CHAPTER_BASELINE_KEY] = baseline
+                snapshot[WRITER_PREVIOUS_CHAPTER_KEY] = previous
+                if kind == "chapter_continue":
+                    self._continuation_baseline(snapshot)
+            pipeline = {
+                "id": new_version_id("pl"),
+                "kind": kind,
+                "attempt": 1,
+                "status": "running",
+                "steps": list(steps),
+                "step_index": 0,
+                "current_task_id": "",
+                "completed_task_ids": [],
+                "step_outputs": {},
+                "request_snapshot": snapshot,
+                "source_version_ids": {
+                    "setup": setup_version_id,
+                    "outline": outline_version_id,
+                },
+                "base_revision": int(manifest.get("revision") or 0),
+                "chapter_revision": int(chapter_revision) if chapter_revision is not None else None,
+                "error": "",
+                "created_at": int(time.time() * 1000),
+                "updated_at": int(time.time() * 1000),
+            }
+            self.store._save_manifest(self.store._book_dir(book_id), {**manifest, "active_pipeline": pipeline})
         self._submit_step(book_id, pipeline)
         # 返回落盘后的权威记录（_submit_step 已把 current_task_id 写回）。
         updated = self.store.get_active_pipeline(book_id)
@@ -341,41 +349,56 @@ class WriterPipelineManager:
 
     def retry_pipeline(self, book_id: str, *, rebase: bool = False) -> dict[str, Any]:
         """失败步重试：attempt+1 重提当前步；conflict 状态需 `rebase=True` 显式换基。"""
-        manifest = self.store._load_manifest(book_id)
-        pipeline = manifest.get("active_pipeline")
-        if not isinstance(pipeline, dict):
-            raise WriterPipelineError("这部作品没有可重试的生成")
-        status = str(pipeline.get("status") or "")
-        if status == "running":
-            raise WriterPipelineError("当前生成还在进行中")
-        if status == "conflict" and not rebase:
-            raise WriterPipelineError(
-                "作品或章节已被修改（版本冲突）；请重新读取作品后，勾选「基于当前版本重新生成」再试"
-            )
-        if status not in ("failed", "conflict", "interrupted", "cancelled"):
-            raise WriterPipelineError("只有失败、冲突、中断或取消的生成可以重试")
-        attempt = int(pipeline.get("attempt") or 0) + 1
+        with self.store._lock:
+            manifest = self.store._load_manifest(book_id)
+            pipeline = manifest.get("active_pipeline")
+            if not isinstance(pipeline, dict):
+                raise WriterPipelineError("这部作品没有可重试的生成")
+            status = str(pipeline.get("status") or "")
+            if status == "running":
+                raise WriterPipelineError("当前生成还在进行中")
+            if status == "conflict" and not rebase:
+                raise WriterPipelineError(
+                    "作品或章节已被修改（版本冲突）；请重新读取作品后，勾选「基于当前版本重新生成」再试"
+                )
+            if status not in ("failed", "conflict", "interrupted", "cancelled"):
+                raise WriterPipelineError("只有失败、冲突、中断或取消的生成可以重试")
+            attempt = int(pipeline.get("attempt") or 0) + 1
 
-        def _retry(record: dict[str, Any]) -> None:
-            record["attempt"] = attempt
-            record["status"] = "running"
-            record["error"] = ""
-            record["current_task_id"] = ""
-            record["base_revision"] = int(manifest.get("revision") or 0)
-            if record.get("chapter_revision") is not None:
-                snapshot = record.get("request_snapshot") or {}
-                chapter_no = int(snapshot.get("chapter_no") or 0)
-                if chapter_no and chapter_no in {int(n) for n in manifest.get("chapter_ids") or []}:
-                    try:
-                        chapter = self.store._load_chapter_index(
-                            self.store._book_dir(book_id), chapter_no)
-                        record["chapter_revision"] = int(chapter.get("revision") or 0)
-                    except (LookupError, WriterStoreError):
-                        record["chapter_revision"] = None
+            def _retry(record: dict[str, Any]) -> None:
+                record["attempt"] = attempt
+                record["status"] = "running"
+                record["error"] = ""
+                record["current_task_id"] = ""
+                if rebase:
+                    record["base_revision"] = int(manifest.get("revision") or 0)
+                    snapshot = dict(record.get("request_snapshot") or {})
+                    snapshot["book_title"] = str(manifest.get("title") or "未命名作品")
+                    for field in ("setup", "outline"):
+                        vid = str(manifest.get(f"current_{field}_version_id") or "")
+                        snapshot[f"{field}_version_id"] = vid
+                        record.setdefault("source_version_ids", {})[field] = vid
+                    chapter_no = int(snapshot.get("chapter_no") or 0)
+                    if any(step in ("segs", "draft") for step in record.get("steps") or []):
+                        baseline, previous = self.store.chapter_writing_inputs(book_id, chapter_no)
+                        snapshot[WRITER_CHAPTER_BASELINE_KEY] = baseline
+                        snapshot[WRITER_PREVIOUS_CHAPTER_KEY] = previous
+                        record["chapter_revision"] = baseline["revision"]
+                    if record.get("kind") == "chapter_continue":
+                        self._continuation_baseline(snapshot)
+                    record["request_snapshot"] = snapshot
+                    # 换基后的设定来源必须真正生效，不能再被旧链内累计副本覆盖。
+                    outputs = dict(record.get("step_outputs") or {})
+                    outputs.pop("setup", None)
+                    record["step_outputs"] = outputs
+                elif record.get("kind") == "chapter_continue":
+                    self._continuation_baseline(record.get("request_snapshot") or {})
 
-        updated = self.store.update_pipeline(book_id, str(pipeline["id"]), _retry)
-        if updated is None:
-            raise WriterPipelineError("流水线状态已变化，请刷新后重试")
+            updated = self.store.update_pipeline(
+                book_id, str(pipeline["id"]), _retry,
+                expected_attempt=int(pipeline.get("attempt") or 0))
+            if updated is None:
+                raise WriterPipelineError("流水线状态已变化，请刷新后重试")
         self._submit_step(book_id, updated)
         return updated
 
@@ -726,13 +749,38 @@ class WriterPipelineManager:
         record["step_outputs"] = outputs
         self.store.save_setup(book_id, content=merged, kind="generated", task_id=task_id)
 
+    @staticmethod
+    def _continuation_baseline(snapshot: dict[str, Any]) -> dict[str, Any]:
+        baseline = snapshot.get(WRITER_CHAPTER_BASELINE_KEY)
+        if (not isinstance(baseline, dict)
+                or baseline.get("chapter_no") != snapshot.get("chapter_no")
+                or not isinstance(baseline.get("content"), str)
+                or not baseline["content"].strip()
+                or not isinstance(baseline.get("revision"), int)
+                or not baseline.get("current_version_id")):
+            raise WriterPipelineError("续写缺少完整正文基线；请显式基于当前版本重新生成")
+        return baseline
+
     def _apply_draft_step(self, book_id: str, record: dict[str, Any],
                           output: str, task_id: str) -> None:
         snapshot = record.get("request_snapshot") if isinstance(record.get("request_snapshot"), dict) else {}
         chapter_no = int(snapshot.get("chapter_no") or 0)
         source = record.get("source_version_ids") if isinstance(record.get("source_version_ids"), dict) else {}
+        content = str(output)
+        if record.get("kind") == "chapter_continue":
+            baseline = self._continuation_baseline(snapshot)
+            if baseline["revision"] != record.get("chapter_revision"):
+                raise WriterConflictError("续写基线 revision 不一致，结果不写回")
+            # 保留基线与增量全部字节，只补足段落边界已有换行之外的部分。
+            base = baseline["content"]
+            tail_breaks = base[len(base.rstrip("\r\n")):]
+            head_breaks = content[:len(content) - len(content.lstrip("\r\n"))]
+            trailing = len(tail_breaks.replace("\r\n", "\n"))
+            leading = len(head_breaks.replace("\r\n", "\n"))
+            separator = "\n" * max(0, 2 - trailing - leading)
+            content = base + separator + content
         self.store.save_chapter_version(
-            book_id, chapter_no, content=str(output), kind="generated", task_id=task_id,
+            book_id, chapter_no, content=content, kind="generated", task_id=task_id,
             source_setup_version_id=str(source.get("setup") or ""),
             source_outline_version_id=str(source.get("outline") or ""),
             expected_revision=record.get("chapter_revision"),
@@ -871,7 +919,10 @@ class WriterPipelineManager:
             )
             task_title = f"《{book_title}》· {prompts.STEP_LABELS[step]}"
         else:
-            chapter = self.store._load_chapter_index(self.store._book_dir(book_id), chapter_no)
+            chapter = snapshot.get(WRITER_CHAPTER_BASELINE_KEY)
+            if not isinstance(chapter, dict):
+                chapter = self.store._load_chapter_index(self.store._book_dir(book_id), chapter_no)
+            previous = snapshot.get(WRITER_PREVIOUS_CHAPTER_KEY) or {}
             chapter_view = {
                 "no": chapter_no,
                 "title": str(chapter.get("title") or ""),
@@ -884,8 +935,8 @@ class WriterPipelineManager:
             mode = "continue" if kind == "chapter_continue" else "whole"
             draft_tail = ""
             if mode == "continue":
-                current = self.store.get_chapter(book_id, chapter_no)
-                draft_tail = str(current.get("content") or "")[-prompts.CONTINUE_TAIL_CHARS:]
+                baseline = self._continuation_baseline(snapshot)
+                draft_tail = baseline["content"][-prompts.CONTINUE_TAIL_CHARS:]
             if kind == "chapter_segs" and step == "draft":
                 # 分段正文：复用 Studio chunked 多轮契约（实施计划 §6.3）。
                 points = [str(p) for p in (dict(pipeline.get("step_outputs") or {}).get("segs") or [])]
@@ -893,7 +944,7 @@ class WriterPipelineManager:
                     raise WriterPipelineError("缺少段落要点，无法分段写作")
                 prefix_build = prompts.build_draft_context(
                     setup, chapter_view, mode="segment", seg_points=[],
-                    extra_note=extra_note,
+                    extra_note=extra_note, previous_chapter=previous,
                 )
                 # 前缀只含公共上下文（无要点段）；每块的要点单独拼。
                 prefix_lines = prefix_build["content"].split("\n\n")
@@ -918,7 +969,7 @@ class WriterPipelineManager:
             else:
                 built = prompts.build_draft_context(
                     setup, chapter_view, mode=mode, draft_tail=draft_tail,
-                    extra_note=extra_note,
+                    extra_note=extra_note, previous_chapter=previous,
                 )
                 content = built["content"]
                 label = prompts.STEP_LABELS["draft"]

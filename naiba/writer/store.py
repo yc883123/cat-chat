@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from naiba.core.fsutil import atomic_write_bytes, atomic_write_json
+from naiba.core.contracts import WriterChapterBaseline, WriterExportResult, WriterPreviousChapter
 
 # 作品清单版本：首版为 1。
 SCHEMA_VERSION = 1
@@ -1174,6 +1175,50 @@ class WriterStore:
             "versions": versions,
         }
 
+    def chapter_writing_inputs(self, book_id: str, chapter_no: int) -> tuple[WriterChapterBaseline, WriterPreviousChapter]:
+        """锁内读取当前章基线和紧邻前章的当前指针；不回退历史候选。"""
+        from naiba.writer.prompts import chapter_head_summary
+
+        with self._lock:
+            manifest = self._load_manifest(book_id)
+            current = self.get_chapter(book_id, chapter_no, manifest=manifest)
+            baseline: WriterChapterBaseline = {
+                "chapter_no": chapter_no, "title": current["title"],
+                "beat": current["beat"], "hook": current["hook"],
+                "content": current["content"],
+                "current_version_id": current["current_version_id"],
+                "revision": current["revision"],
+            }
+            if baseline["current_version_id"] and not any(
+                row.get("id") == baseline["current_version_id"] for row in current["versions"]
+            ):
+                raise WriterStoreError("当前正文版本不可读取，请重新选择版本")
+            previous: WriterPreviousChapter = {
+                "chapter_no": chapter_no - 1, "title": "", "current_version_id": "",
+                "revision": 0, "excerpt": "", "status": "first_chapter",
+            }
+            if chapter_no <= 1:
+                return baseline, previous
+            if chapter_no - 1 not in {int(n) for n in manifest.get("chapter_ids") or []}:
+                previous["status"] = "missing_chapter"
+                return baseline, previous
+            try:
+                prev = self.get_chapter(book_id, chapter_no - 1, manifest=manifest)
+                previous.update(title=prev["title"], current_version_id=prev["current_version_id"],
+                                revision=prev["revision"])
+                if not prev["current_version_id"]:
+                    previous["status"] = "no_current_version"
+                elif not any(row.get("id") == prev["current_version_id"] for row in prev["versions"]):
+                    previous["status"] = "unavailable"
+                elif not prev["content"].strip():
+                    previous["status"] = "empty_content"
+                else:
+                    previous["excerpt"] = chapter_head_summary(prev["content"])
+                    previous["status"] = "included"
+            except (LookupError, WriterStoreError, OSError):
+                previous["status"] = "unavailable"
+            return baseline, previous
+
     def save_chapter_version(self, book_id: str, chapter_no: int, *, content: Any,
                              kind: str = "manual", task_id: str = "",
                              source_setup_version_id: str = "",
@@ -1185,28 +1230,28 @@ class WriterStore:
 
         幂等：同一 `task_id` 已写过版本时直接返回既有版本（重复写回/崩溃恢复安全）。
         """
-        manifest = manifest or self._load_manifest(book_id)
-        if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
-            raise LookupError("章节不存在")
-        if not isinstance(content, str) or not content.strip():
-            raise WriterStoreError("章节正文不能为空")
-        if len(content) > CHAPTER_CONTENT_MAX_CHARS:
-            raise WriterStoreError(f"单章正文超过 {CHAPTER_CONTENT_MAX_CHARS} 字上限，已拒绝")
-        book_dir = self._book_dir(book_id)
-        index = self._load_chapter_index(book_dir, chapter_no)
-        if expected_revision is not None and expected_revision != "":
-            if isinstance(expected_revision, bool):
-                raise WriterStoreError("revision 必须是整数")
-            try:
-                expected = int(expected_revision)
-            except (TypeError, ValueError):
-                raise WriterStoreError("revision 必须是整数") from None
-            if expected != int(index.get("revision") or 0):
-                raise WriterConflictError(
-                    f"第 {chapter_no} 章已被修改过（你看到的是第 {expected} 版，"
-                    f"现在是第 {int(index.get('revision') or 0)} 版），请重新读取后再保存"
-                )
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
+                raise LookupError("章节不存在")
+            if not isinstance(content, str) or not content.strip():
+                raise WriterStoreError("章节正文不能为空")
+            if len(content) > CHAPTER_CONTENT_MAX_CHARS:
+                raise WriterStoreError(f"单章正文超过 {CHAPTER_CONTENT_MAX_CHARS} 字上限，已拒绝")
+            book_dir = self._book_dir(book_id)
+            index = self._load_chapter_index(book_dir, chapter_no)
+            if expected_revision is not None and expected_revision != "":
+                if isinstance(expected_revision, bool):
+                    raise WriterStoreError("revision 必须是整数")
+                try:
+                    expected = int(expected_revision)
+                except (TypeError, ValueError):
+                    raise WriterStoreError("revision 必须是整数") from None
+                if expected != int(index.get("revision") or 0):
+                    raise WriterConflictError(
+                        f"第 {chapter_no} 章已被修改过（你看到的是第 {expected} 版，"
+                        f"现在是第 {int(index.get('revision') or 0)} 版），请重新读取后再保存"
+                    )
             if task_id:
                 for row in index.get("version_ids") or []:
                     if isinstance(row, dict) and str(row.get("task_id") or "") == task_id:
@@ -1256,19 +1301,19 @@ class WriterStore:
     def select_chapter_version(self, book_id: str, chapter_no: int, *,
                                version_id: str, expected_revision: Any = None) -> dict[str, Any]:
         """恢复旧版本：切换当前指针，不移动文件。"""
-        manifest = self._load_manifest(book_id)
-        if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
-            raise LookupError("章节不存在")
-        book_dir = self._book_dir(book_id)
-        index = self._load_chapter_index(book_dir, chapter_no)
-        if expected_revision is not None and expected_revision != "":
-            self._check_revision({"revision": index.get("revision")}, expected_revision,
-                                 what=f"第 {chapter_no} 章")
-        vid = str(version_id or "").strip()
-        known = [str(row.get("id") or "") for row in (index.get("version_ids") or []) if isinstance(row, dict)]
-        if vid not in known:
-            raise WriterStoreError(f"第 {chapter_no} 章没有这份正文版本")
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
+                raise LookupError("章节不存在")
+            book_dir = self._book_dir(book_id)
+            index = self._load_chapter_index(book_dir, chapter_no)
+            if expected_revision is not None and expected_revision != "":
+                self._check_revision({"revision": index.get("revision")}, expected_revision,
+                                     what=f"第 {chapter_no} 章")
+            vid = str(version_id or "").strip()
+            known = [str(row.get("id") or "") for row in (index.get("version_ids") or []) if isinstance(row, dict)]
+            if vid not in known:
+                raise WriterStoreError(f"第 {chapter_no} 章没有这份正文版本")
             index["current_version_id"] = vid
             index["revision"] = int(index.get("revision") or 0) + 1
             index["updated_at"] = _now_ms()
@@ -1482,12 +1527,15 @@ class WriterStore:
                     book_dir, manifest, int(row["no"]),
                     title=str(row.get("title") or ""), beat="", hook="",
                 )
+                # 先发布锁内新建的章节索引；正文写入只信磁盘上的权威清单。
+                self._save_manifest(book_dir, manifest)
                 self.save_chapter_version(
                     book_id, int(row["no"]), content=str(row["content"]), kind="imported",
                     note="启元存档导入", manifest=manifest,
                     source_setup_version_id=setup_version_id,
                     source_outline_version_id=outline_version_id,
                 )
+                manifest = self._load_manifest(book_id)
             self._bump_manifest(book_dir, manifest)
         shutil.rmtree(self._import_dir(import_id), ignore_errors=True)
         return {"book": self._public_manifest(manifest), "imported": parsed["preview"]}
@@ -1565,7 +1613,7 @@ class WriterStore:
 
     # ---- 导出 ----
 
-    def export_book(self, book_id: str, *, fmt: str = "txt", with_extras: bool = False) -> dict[str, Any]:
+    def export_book(self, book_id: str, *, fmt: str = "txt", with_extras: bool = False) -> WriterExportResult:
         """按当前版本导出全书；`with_extras=True` 附设定与大纲。"""
         manifest = self._load_manifest(book_id)
         book_dir = self._book_dir(book_id)
@@ -1574,8 +1622,7 @@ class WriterStore:
         if fmt == "md":
             parts.append(f"# {title}\n")
         missing: list[int] = []
-        # 「有没有正文」与「文件是否为空」是两件事：md 带书名标题，空书也非 0 字节。
-        # 前端要按前者决定弹不弹保存框，所以单独回一个 has_body。
+        # 标题不算有效导出内容；纯正文与附录导出分别按实际选中的内容判断。
         has_body = False
         for chapter_no in (int(n) for n in manifest.get("chapter_ids") or []):
             try:
@@ -1599,10 +1646,12 @@ class WriterStore:
                 parts.append(f"## {chapter_title}\n\n{body}\n")
             else:
                 parts.append(f"{chapter_title}\n\n{body}\n\n")
-        if with_extras:
-            parts.append(self._extras_block(book_id, manifest, fmt))
+        extras = self._extras_block(book_id, manifest, fmt) if with_extras else ""
+        if extras:
+            parts.append(extras)
         text = "".join(parts)
         return {"text": text, "missing_chapters": missing, "has_body": has_body,
+                "has_content": has_body or bool(extras.strip()),
                 "filename": f"{clean_title(title)}.{fmt}"}
 
     def export_to_file(self, book_id: str, *, fmt: str = "txt",
@@ -1635,7 +1684,7 @@ class WriterStore:
             "suggested_name": filename,
             "bytes": target.stat().st_size,
             "missing_chapters": result.get("missing_chapters") or [],
-            "has_content": bool(result.get("has_body")),
+            "has_content": result["has_content"],
         }
 
     def _extras_block(self, book_id: str, manifest: dict[str, Any], fmt: str) -> str:
@@ -1669,6 +1718,18 @@ class WriterStore:
                 parts.append("\n# 附录：设定\n\n" + "\n\n".join(setup_lines) + "\n")
             else:
                 parts.append("\n==== 附录：设定 ====\n\n" + "\n\n".join(setup_lines) + "\n\n")
+        outline_parts = outline.get("parts") if isinstance(outline.get("parts"), list) else []
+        if outline_parts:
+            lines = []
+            for row in outline_parts:
+                if not isinstance(row, dict) or not str(row.get("text") or "").strip():
+                    continue
+                heading = str(row.get("title") or f"第{row.get('no')}部")
+                text = str(row["text"])
+                lines.append(f"## {heading}\n\n{text}" if fmt == "md" else f"【{heading}】\n{text}")
+            if lines:
+                heading = "\n# 附录：大纲\n\n" if fmt == "md" else "\n==== 附录：大纲 ====\n\n"
+                parts.append(heading + "\n\n".join(lines) + "\n")
         rows = outline.get("chapters") if isinstance(outline.get("chapters"), list) else []
         if rows:
             lines = []

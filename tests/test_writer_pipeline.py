@@ -306,6 +306,34 @@ class SetupChainTests(PipelineTestCase):
         self.assertEqual(self.current_pipeline()["step_index"], 1)
         self.assertEqual(len(self.store.get_book(self.book_id)["book"]["setup_versions"]), 2)
 
+    def test_retry_after_written_step_keeps_advanced_base_revision(self):
+        initial = self.start()
+        self.app.studio.jobs.finish(self.last_task()["id"], '{"channel":"male","cat":"玄幻"}')
+        self.tick()
+        advanced = self.current_pipeline()
+        self.assertGreater(advanced["base_revision"], initial["base_revision"])
+        self.app.studio.jobs.finish(self.last_task()["id"], "", status="failed", error="超时")
+        self.tick()
+        self.manager.retry_pipeline(self.book_id)
+        retried = self.current_pipeline()
+        self.assertEqual(retried["base_revision"], advanced["base_revision"])
+        self.assertEqual(retried["step_index"], advanced["step_index"])
+        self.app.studio.jobs.finish(self.last_task()["id"], '["书名"]')
+        self.tick()
+        self.assertEqual(self.current_pipeline()["status"], "running")
+        self.assertEqual(self.current_pipeline()["step_index"], 2)
+
+    def test_rebase_discards_old_accumulated_setup_overlay(self):
+        self.start()
+        self.app.studio.jobs.finish(self.last_task()["id"], '{"channel":"male","cat":"玄幻"}')
+        self.tick()
+        self.app.studio.jobs.finish(self.last_task()["id"], "", status="failed", error="超时")
+        self.tick()
+        self.store.save_setup(self.book_id, content={"idea": "换基后的创意"})
+        self.manager.retry_pipeline(self.book_id, rebase=True)
+        self.assertIn("换基后的创意", self.last_task()["input"]["content"])
+        self.assertNotIn("setup", self.current_pipeline()["step_outputs"])
+
     def test_retry_requires_rebase_for_conflict(self):
         self.start()
         task_id = self.current_pipeline()["current_task_id"]
@@ -446,6 +474,179 @@ class ChapterPipelineTests(PipelineTestCase):
         self.tick()
         self.tick()
         self.assertEqual(len(self.store.get_chapter(self.book_id, 1)["versions"]), versions_before)
+
+
+class ContinuationRegressionTests(PipelineTestCase):
+    def setUp(self):
+        super().setUp()
+        self.store.save_setup(self.book_id, content={"idea": "创意"})
+        self.store.save_outline(self.book_id, chapters=[
+            {"no": no, "title": f"章{no}", "beat": "梗概"} for no in range(1, 4)
+        ], sync=True)
+
+    def test_freezes_full_baseline_sends_tail_and_appends(self):
+        body = "不可丢失开头" + "甲" * (prompts.CONTINUE_TAIL_CHARS + 20) + "尾段"
+        first = self.store.save_chapter_version(self.book_id, 2, content=body)
+        self.store.save_chapter_version(self.book_id, 1, content="上章未决事件")
+        pipeline = self.start(kind="chapter_continue", chapter_no=2)
+        baseline = pipeline["request_snapshot"]["chapter_baseline"]
+        self.assertEqual(baseline["content"], body)
+        self.assertEqual(baseline["current_version_id"], first["version"]["id"])
+        task = self.last_task()
+        self.assertNotIn("不可丢失开头", json.dumps(task["input"], ensure_ascii=False))
+        self.assertIn("尾段", task["input"]["content"])
+        self.assertIn("上章未决事件", task["input"]["content"])
+        self.app.studio.jobs.finish(task["id"], "新增正文")
+        self.tick()
+        chapter = self.store.get_chapter(self.book_id, 2)
+        self.assertEqual(chapter["content"], body + "\n\n新增正文")
+        self.assertEqual(len(chapter["versions"]), 2)
+        self.tick()
+        self.assertEqual(len(self.store.get_chapter(self.book_id, 2)["versions"]), 2)
+        self.store.select_chapter_version(self.book_id, 2, version_id=first["version"]["id"])
+        self.assertEqual(self.store.get_chapter(self.book_id, 2)["content"], body)
+
+    def test_all_modes_and_chunk_prefix_include_previous_excerpt(self):
+        for kind in ("chapter", "chapter_rewrite", "chapter_continue", "chapter_segs"):
+            with self.subTest(kind=kind):
+                self.store.save_chapter_version(self.book_id, 1, content="前章当前原文")
+                self.store.save_chapter_version(self.book_id, 2, content="本章基线")
+                self.start(kind=kind, chapter_no=2)
+                task = self.last_task()
+                self.assertIn("上一章原文节选", task["input"]["content"])
+                self.assertIn("前章当前原文", task["input"]["content"])
+                if kind == "chapter_segs":
+                    self.app.studio.jobs.finish(task["id"], '["要点一","要点二"]')
+                    self.tick()
+                    self.assertIn("前章当前原文", self.last_task()["input"]["chunked"]["prefix"])
+                self.manager.cancel_pipeline(self.book_id)
+
+    def test_retry_preserves_baseline_revisions_rebase_refreshes_all(self):
+        self.store.save_chapter_version(self.book_id, 1, content="旧前章")
+        self.store.save_chapter_version(self.book_id, 2, content="旧基线")
+        original = self.start(kind="chapter_continue", chapter_no=2)
+        self.app.studio.jobs.finish(self.last_task()["id"], "", status="failed", error="超时")
+        self.tick()
+        self.store.save_chapter_version(self.book_id, 1, content="新前章")
+        self.store.save_chapter_version(self.book_id, 2, content="新基线")
+        self.store.save_setup(self.book_id, content={"idea": "新设定"})
+        retried = self.manager.retry_pipeline(self.book_id)
+        for key in ("request_snapshot", "base_revision", "chapter_revision"):
+            self.assertEqual(retried[key], original[key])
+        self.assertIn("旧基线", self.last_task()["input"]["content"])
+        self.assertNotIn("新基线", self.last_task()["input"]["content"])
+        self.app.studio.jobs.finish(self.last_task()["id"], "新增")
+        self.tick()
+        self.assertEqual(self.current_pipeline()["status"], "conflict")
+        rebased = self.manager.retry_pipeline(self.book_id, rebase=True)
+        snap = rebased["request_snapshot"]
+        self.assertEqual(snap["chapter_baseline"]["content"], "新基线")
+        self.assertEqual(snap["previous_chapter"]["excerpt"], "新前章")
+        self.assertEqual(snap["setup_version_id"], self.store._load_manifest(self.book_id)["current_setup_version_id"])
+        self.app.studio.jobs.finish(self.last_task()["id"], "新续写")
+        self.tick()
+        self.assertEqual(self.store.get_chapter(self.book_id, 2)["content"], "新基线\n\n新续写")
+
+    def test_legacy_missing_baseline_fails_closed_until_rebase(self):
+        self.store.save_chapter_version(self.book_id, 2, content="基线")
+        pl = self.start(kind="chapter_continue", chapter_no=2)
+        self.store.update_pipeline(self.book_id, pl["id"],
+                                   lambda record: record["request_snapshot"].pop("chapter_baseline"))
+        self.app.studio.jobs.finish(self.last_task()["id"], "旧任务增量")
+        self.tick()
+        self.assertEqual(self.current_pipeline()["status"], "failed")
+        self.assertEqual(self.store.get_chapter(self.book_id, 2)["content"], "基线")
+        with self.assertRaisesRegex(Exception, "基线"):
+            self.manager.retry_pipeline(self.book_id)
+        self.manager.retry_pipeline(self.book_id, rebase=True)
+        self.assertIn("基线", self.last_task()["input"]["content"])
+
+    def test_total_length_gate_and_truncation_preserve_old_version(self):
+        body = "原" * 199999
+        self.store.save_chapter_version(self.book_id, 2, content=body)
+        self.start(kind="chapter_continue", chapter_no=2)
+        self.app.studio.jobs.finish(self.last_task()["id"], "超限")
+        self.tick()
+        self.assertEqual(self.current_pipeline()["status"], "failed")
+        self.assertIn("上限", self.current_pipeline()["error"])
+        self.assertEqual(self.store.get_chapter(self.book_id, 2)["content"], body)
+        self.manager.retry_pipeline(self.book_id)
+        self.app.studio.jobs.finish(self.last_task()["id"], "半截", finish_reason="length")
+        self.tick()
+        self.assertEqual(self.current_pipeline()["status"], "failed")
+        self.assertEqual(len(self.store.get_chapter(self.book_id, 2)["versions"]), 1)
+
+    def test_empty_baseline_refused_before_submit(self):
+        with self.assertRaisesRegex(Exception, "基线"):
+            self.start(kind="chapter_continue", chapter_no=2)
+        self.assertEqual(len(self.app.studio.jobs.submitted), 0)
+
+    def test_continue_preserves_existing_paragraph_boundaries(self):
+        for suffix in ("\n\n", "\n", "\r\n\r\n"):
+            with self.subTest(suffix=repr(suffix)):
+                body = "原文保留空格  " + suffix
+                self.store.save_chapter_version(self.book_id, 2, content=body)
+                self.start(kind="chapter_continue", chapter_no=2)
+                self.app.studio.jobs.finish(self.last_task()["id"], "新增")
+                self.tick()
+                expected = body + ("\n" if suffix == "\n" else "") + "新增"
+                self.assertEqual(self.store.get_chapter(self.book_id, 2)["content"], expected)
+
+    def test_continuation_conflict_never_appends_to_changed_baseline(self):
+        self.store.save_chapter_version(self.book_id, 2, content="旧基线")
+        self.start(kind="chapter_continue", chapter_no=2)
+        self.store.save_chapter_version(self.book_id, 2, content="用户手改")
+        self.app.studio.jobs.finish(self.last_task()["id"], "旧增量")
+        self.tick()
+        self.assertEqual(self.current_pipeline()["status"], "conflict")
+        chapter = self.store.get_chapter(self.book_id, 2)
+        self.assertEqual(chapter["content"], "用户手改")
+        self.assertEqual(len(chapter["versions"]), 2)
+
+    def test_previous_empty_current_does_not_fall_back_to_history(self):
+        self.store.save_chapter_version(self.book_id, 1, content="历史候选不应带入")
+        index = self.store._load_chapter_index(self.store._book_dir(self.book_id), 1)
+        index["current_version_id"] = ""
+        self.store._write_chapter_index(self.store._book_dir(self.book_id), index)
+        self.start(kind="chapter", chapter_no=2)
+        self.assertNotIn("历史候选不应带入", self.last_task()["input"]["content"])
+        previous = self.current_pipeline()["request_snapshot"]["previous_chapter"]
+        self.assertEqual(previous["status"], "no_current_version")
+        self.assertEqual(previous["excerpt"], "")
+
+    def test_segment_retry_keeps_current_step_base_and_frozen_excerpt(self):
+        self.store.save_chapter_version(self.book_id, 1, content="冻结前章")
+        original = self.start(kind="chapter_segs", chapter_no=2)
+        self.app.studio.jobs.finish(self.last_task()["id"], '["要点一","要点二"]')
+        self.tick()
+        advanced = self.current_pipeline()
+        self.assertEqual(advanced["step_index"], 1)
+        self.app.studio.jobs.finish(self.last_task()["id"], "", status="failed", error="超时")
+        self.tick()
+        self.manager.retry_pipeline(self.book_id)
+        retried = self.current_pipeline()
+        self.assertEqual(retried["base_revision"], advanced["base_revision"])
+        self.assertEqual(retried["chapter_revision"], advanced["chapter_revision"])
+        self.assertEqual(retried["request_snapshot"], original["request_snapshot"])
+        self.assertIn("冻结前章", self.last_task()["input"]["chunked"]["prefix"])
+        self.app.studio.jobs.finish(self.last_task()["id"], "分段全文")
+        self.tick()
+        self.assertEqual(self.current_pipeline()["status"], "done")
+
+    def test_stale_chapter_revision_refused_before_submit(self):
+        with self.assertRaisesRegex(Exception, "修改"):
+            self.start(kind="chapter", chapter_no=2, chapter_revision=999)
+        self.assertEqual(len(self.app.studio.jobs.submitted), 0)
+
+    def test_snapshot_reads_are_locked_at_start_and_rebase(self):
+        original = self.store.chapter_writing_inputs
+        def checked(*args, **kwargs):
+            self.assertTrue(self.store._lock._is_owned())
+            return original(*args, **kwargs)
+        self.store.chapter_writing_inputs = checked
+        self.start(kind="chapter", chapter_no=2)
+        self.manager.cancel_pipeline(self.book_id)
+        self.manager.retry_pipeline(self.book_id, rebase=True)
 
 
 if __name__ == "__main__":

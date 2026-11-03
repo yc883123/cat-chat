@@ -76,6 +76,72 @@ class BookCrudTests(WriterStoreTestCase):
                 self.store._book_dir(bad)
 
 
+class WritingInputRegressionTests(WriterStoreTestCase):
+    def setUp(self):
+        super().setUp()
+        self.book_id = self._book()["id"]
+        self.store.save_outline(self.book_id, chapters=[
+            {"no": no, "title": f"章{no}", "beat": "梗概"} for no in range(1, 4)
+        ], sync=True)
+
+    def test_previous_current_only_and_no_history_fallback(self):
+        from naiba.writer.prompts import chapter_head_summary
+        body = "首" * 200 + "中" * 1000 + "尾" * 300
+        first = self.store.save_chapter_version(self.book_id, 1, content=body)
+        self.store.save_chapter_version(self.book_id, 1, content="历史候选")
+        self.store.select_chapter_version(self.book_id, 1, version_id=first["version"]["id"])
+        _, previous = self.store.chapter_writing_inputs(self.book_id, 2)
+        self.assertEqual(previous["excerpt"], chapter_head_summary(body))
+        self.assertEqual(previous["current_version_id"], first["version"]["id"])
+        path = self.store._chapter_dir(self.store._book_dir(self.book_id), 1)
+        index = self.store._read_json(path, what="索引")
+        for vid, status in (("", "no_current_version"), ("cv-aaaaaaaaaaaa", "unavailable")):
+            index["current_version_id"] = vid
+            self.store._write_json(path, index)
+            _, previous = self.store.chapter_writing_inputs(self.book_id, 2)
+            self.assertEqual(previous["status"], status)
+            self.assertEqual(previous["excerpt"], "")
+
+    def test_missing_empty_and_unreadable_previous_are_explicit(self):
+        self.assertEqual(self.store.chapter_writing_inputs(self.book_id, 1)[1]["status"], "first_chapter")
+        saved = self.store.save_chapter_version(self.book_id, 1, content="正文")
+        path = self.store._chapter_version_path(self.store._book_dir(self.book_id), 1, saved["version"]["id"])
+        record = self.store._read_json(path, what="正文")
+        record["content"] = ""
+        self.store._write_json(path, record)
+        self.assertEqual(self.store.chapter_writing_inputs(self.book_id, 2)[1]["status"], "empty_content")
+        path.unlink()
+        self.assertEqual(self.store.chapter_writing_inputs(self.book_id, 2)[1]["status"], "unavailable")
+        self.store.delete_chapter(self.book_id, 1)
+        self.assertEqual(self.store.chapter_writing_inputs(self.book_id, 2)[1]["status"], "missing_chapter")
+
+    def test_save_select_authoritative_read_and_check_are_locked(self):
+        saved = self.store.save_chapter_version(self.book_id, 1, content="原稿")
+        original = self.store._load_chapter_index
+        def checked(*args, **kwargs):
+            self.assertTrue(self.store._lock._is_owned())
+            return original(*args, **kwargs)
+        self.store._load_chapter_index = checked
+        rev = saved["chapter_revision"]
+        self.store.save_chapter_version(self.book_id, 1, content="新稿", expected_revision=rev)
+        with self.assertRaises(WriterConflictError):
+            self.store.select_chapter_version(self.book_id, 1, version_id=saved["version"]["id"], expected_revision=rev)
+        self.store.select_chapter_version(self.book_id, 1, version_id=saved["version"]["id"], expected_revision=rev + 1)
+
+    def test_stale_manifest_cannot_erase_latest_pipeline_or_revision(self):
+        stale = self.store._load_manifest(self.book_id)
+        current = self.store._load_manifest(self.book_id)
+        current["active_pipeline"] = {"id": "pl-aaaaaaaaaaaa", "attempt": 2, "status": "running"}
+        self.store._save_manifest(self.store._book_dir(self.book_id), current)
+        self.store.rename_book(self.book_id, title="最新标题")
+        rev = self.store._load_manifest(self.book_id)["revision"]
+        self.store.save_chapter_version(self.book_id, 1, content="正文", manifest=stale)
+        fresh = self.store._load_manifest(self.book_id)
+        self.assertEqual(fresh["title"], "最新标题")
+        self.assertEqual(fresh["active_pipeline"], current["active_pipeline"])
+        self.assertEqual(fresh["revision"], rev + 1)
+
+
 class SetupVersionTests(WriterStoreTestCase):
     def test_save_setup_creates_immutable_versions(self):
         book = self._book()
@@ -260,6 +326,55 @@ class OutlineAndChapterTests(WriterStoreTestCase):
         self.assertFalse(result["has_content"])
         self.assertEqual(result["bytes"], 0)
         self.assertEqual(result["missing_chapters"], [1, 2])
+
+    def test_export_parts_outline_without_body(self):
+        book = self._book("只有大纲")
+        self.store.save_outline(book["id"], parts=[
+            {"no": 1, "title": "旧港篇", "text": "第一部原文。\n第二段不截断。"},
+            {"no": 2, "title": "远航篇", "text": "第二部原文。"},
+        ])
+        for fmt in ("txt", "md"):
+            with self.subTest(fmt=fmt):
+                plain = self.store.export_book(book["id"], fmt=fmt)
+                self.assertFalse(plain["has_content"])
+                self.assertNotIn("第一部原文", plain["text"])
+                result = self.store.export_book(book["id"], fmt=fmt, with_extras=True)
+                self.assertFalse(result["has_body"])
+                self.assertTrue(result["has_content"])
+                self.assertIn("附录：大纲", result["text"])
+                self.assertIn("旧港篇", result["text"])
+                self.assertIn("第一部原文。\n第二段不截断。", result["text"])
+                self.assertLess(result["text"].index("第一部原文"), result["text"].index("第二部原文"))
+                saved = self.store.export_to_file(book["id"], fmt=fmt, with_extras=True)
+                self.assertTrue(saved["has_content"])
+                self.assertEqual(Path(saved["path"]).read_text(encoding="utf-8"), result["text"])
+
+    def test_export_extras_uses_current_outline_only(self):
+        book = self._book("当前大纲")
+        self.store.save_outline(book["id"], parts=[{"no": 1, "text": "旧大纲不应导出"}])
+        self.store.save_outline(book["id"], parts=[{"no": 1, "text": "当前大纲必须导出"}])
+        result = self.store.export_book(book["id"], fmt="md", with_extras=True)
+        self.assertIn("当前大纲必须导出", result["text"])
+        self.assertNotIn("旧大纲不应导出", result["text"])
+
+    def test_export_legacy_outline_and_setup_without_body(self):
+        book = self._book("附录书")
+        self.store.save_setup(book["id"], content={"idea": "设定原文"})
+        self.store.save_outline(book["id"], chapters=self._outline_rows(2), sync=True)
+        result = self.store.export_to_file(book["id"], fmt="md", with_extras=True)
+        self.assertTrue(result["has_content"])
+        text = Path(result["path"]).read_text(encoding="utf-8")
+        self.assertIn("附录：设定", text)
+        self.assertIn("附录：大纲", text)
+        self.assertIn("第2章", text)
+        self.assertEqual(result["missing_chapters"], [1, 2])
+
+    def test_export_setup_only_is_content_but_title_only_is_not(self):
+        book = self._book("设定书")
+        self.assertFalse(self.store.export_book(book["id"], fmt="md", with_extras=True)["has_content"])
+        self.store.save_setup(book["id"], content={"idea": "只有设定也能导出"})
+        self.assertTrue(self.store.export_book(book["id"], fmt="md", with_extras=True)["has_content"])
+        self.assertFalse(self.store.export_book(book["id"], fmt="md")["has_content"])
 
     def test_exports_dir_is_not_listed_as_book(self):
         """_exports 落在作品根下：不能被作品列表当成一本损坏的书。"""

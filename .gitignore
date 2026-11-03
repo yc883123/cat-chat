@@ -389,3 +389,5 @@ verify/*
 !verify/usage_rate_smoke.cjs
 !verify/usage_stats_smoke.cjs
 !verify/verify_doc_encoding.py
+!verify/_serve_writer_draft_ui.py
+!verify/writer_draft_offline_test.cjs

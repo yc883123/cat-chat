@@ -11,6 +11,9 @@
 """
 import json
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -279,6 +282,57 @@ class WriterRound3UiTests(unittest.TestCase):
         self.assertIn("async function ensurePartsSavedBeforeGenerate()", self.js)
         self.assertIn("if (!await ensurePartsSavedBeforeGenerate()) return;", self.js)
         self.assertIn("部目录已保存", self.js, "空目录也允许人工保存（只存部数与标题）")
+
+
+class WriterDraftSubmissionTests(unittest.TestCase):
+    """执行真实前端函数（Node VM），另用真实服务检查续写读取刚保存的尾段。"""
+
+    def test_offline_javascript_submission_order_and_guards(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required to execute the real writer JS")
+        result = subprocess.run(
+            [node, str(ROOT / "verify" / "writer_draft_offline_test.cjs")],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("27 cases passed", result.stdout)
+        self.assertIn("writer export offline: 8 cases passed", result.stdout)
+
+    def test_continue_preview_reads_newly_saved_tail(self):
+        from naiba.writer import prompts
+        from naiba.writer.service import WriterService
+        from naiba.writer.pipeline import WriterPipelineManager
+        from naiba.writer.store import WriterStore
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = object.__new__(WriterService)
+            service.store = WriterStore(Path(directory))
+            service.pipeline = WriterPipelineManager(None, service.store)
+            service._context_window = lambda _key: 131072
+            bid = service.store.create_book(title="正文顺序回归", setup={"idea": "收到来信"})["id"]
+            service.store.save_outline(bid, sync=True, chapters=[{"no": 1, "title": "来信", "beat": "辨认来客"}])
+            service.store.save_chapter_version(bid, 1, content="旧稿唯一标记")
+            chapter = service.store.get_chapter(bid, 1)
+            content = "手动新稿前缀不应进入尾段" + "雨" * (prompts.CONTINUE_TAIL_CHARS + 100) + "手动新稿尾段唯一标记"
+            saved, code = service.api_save_chapter(bid, 1, {"content": content, "revision": chapter["revision"]})
+            self.assertEqual(code, 201)
+            self.assertGreater(saved["chapter_revision"], chapter["revision"])
+            preview, code = service.api_preview({"book_id": bid, "kind": "chapter_continue", "chapter_no": 1})
+            self.assertEqual(code, 200)
+            self.assertEqual(preview["kind"], "chapter_continue")
+            self.assertIn(content[-prompts.CONTINUE_TAIL_CHARS:], preview["content"])
+            self.assertNotIn("旧稿唯一标记", preview["content"])
+            self.assertNotIn("手动新稿前缀不应进入尾段", preview["content"])
+
+    def test_fixture_is_offline_and_uses_real_markup_module(self):
+        fixture = (ROOT / "verify" / "_serve_writer_draft_ui.py").read_text(encoding="utf-8")
+        self.assertIn("ThreadingHTTPServer(('127.0.0.1'", fixture)
+        self.assertIn("TemporaryDirectory(", fixture)
+        self.assertIn("f.service.api_preview(body)", fixture)
+        self.assertIn("f.service.api_save_chapter(bid, no, body)", fixture)
+        self.assertNotIn("import playwright", fixture)
+        self.assertNotIn("start_pipeline(", fixture)
 
 
 if __name__ == "__main__":

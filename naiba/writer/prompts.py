@@ -568,7 +568,8 @@ def chapter_head_summary(content: str, *, head: int = SUMMARY_HEAD_CHARS,
 def build_draft_context(setup: dict[str, Any], chapter: dict[str, Any], *,
                         mode: str, seg_points: list[str] | None = None,
                         seg_index: int = 0, prev_tail: str = "",
-                        draft_tail: str = "", extra_note: str = "") -> dict[str, Any]:
+                        draft_tail: str = "", extra_note: str = "",
+                        previous_chapter: dict[str, Any] | None = None) -> dict[str, Any]:
     """组装正文用户消息与槽位清单（预检与正式提交、右栏来源展示共用）。
 
     `mode`：whole 整章 / segment 分段 / continue 续写。
@@ -608,10 +609,22 @@ def build_draft_context(setup: dict[str, Any], chapter: dict[str, Any], *,
         parts.append(chapter_line)
         slots.append({"key": "chapter_brief", "label": "本章梗概", "included": True,
                       "chars": len(chapter_line)})
-    if prev_tail.strip():
-        parts.append(f"【上一章结尾】\n{prev_tail.strip()}")
-        slots.append({"key": "prev_tail", "label": "上一章结尾", "included": True,
-                      "chars": len(prev_tail.strip())})
+    previous = previous_chapter or {}
+    excerpt = str(previous.get("excerpt") or prev_tail).strip()
+    if excerpt:
+        parts.append("【上一章原文节选（首尾截取，非总结）】\n" + excerpt
+                     + "\n请承接上一章结束时的人物位置、时间、情绪与未决事件，不要重演已发生情节。")
+        slots.append({"key": "prev_tail", "label": "上一章原文节选", "included": True,
+                      "chars": len(excerpt), **previous})
+    else:
+        reasons = {
+            "first_chapter": "首章没有上一章", "missing_chapter": "上一章不存在",
+            "no_current_version": "上一章尚未选择当前正文版本",
+            "empty_content": "上一章当前正文为空", "unavailable": "上一章当前正文不可读取",
+        }
+        slots.append({"key": "prev_tail", "label": "上一章原文节选", "included": False,
+                      **previous, "reason": reasons.get(str(previous.get("status") or ""),
+                                                       "未提供上一章当前正文")})
     if mode == "segment":
         points = [str(p).strip()[:SEG_POINT_CHARS] for p in (seg_points or []) if str(p).strip()]
         if points:

@@ -186,6 +186,10 @@ const writer = {
   chapterNo: 0,
   chapter: null,
   draftDirty: false,
+  draftEditToken: 0,
+  // 正文保存/预检/提交共用一个锁，不能由内层保存提前释放。
+  draftOperation: false,
+  draftPlanKind: "chapter",
   // 流水线与轮询。
   pipeline: null,
   pipelineTask: null,
@@ -1269,7 +1273,8 @@ function renderDraft() {
     if (btn) btn.disabled = !canWrite || writer.busy;
   }
   const continueBtn = $("#writerDraftContinue");
-  if (continueBtn) continueBtn.disabled = !(hasChapter && String(chapter?.content || "").trim()) || writer.busy;
+  if (continueBtn) continueBtn.disabled = !(hasChapter
+    && String(writer.draftDirty ? content?.value || "" : chapter?.content || "").trim()) || writer.busy;
   const save = $("#writerDraftSave");
   if (save) save.disabled = !hasChapter || !writer.draftDirty || writer.busy;
   const reload = $("#writerDraftReload");
@@ -1425,7 +1430,20 @@ const PLAN_MODEL_FIELDS = {
   draft: ["draftProviderKey", "draftModelName"],
 };
 
-async function refreshPlan() {
+async function refreshPlan({ kind: actualKind = "", model: actualModel = null, extraNote } = {}) {
+  // 提交预检期间，后台展示刷新不能盖掉实际操作的预算。
+  if (writer.draftOperation && !actualKind) return null;
+  const stage = writer.stage;
+  const bookId = writer.bookId;
+  const chapterNo = writer.chapterNo;
+  const bookToken = writer.bookToken;
+  const chapterToken = writer.chapterToken;
+  if (!actualKind && stage === "draft" && writer.draftDirty) {
+    writer.budgetToken += 1;
+    writer.budget = null;
+    renderPlan();
+    return null;
+  }
   if (!writer.bookId) {
     writer.budget = null;
     renderPlan();
@@ -1434,44 +1452,71 @@ async function refreshPlan() {
   const kinds = {
     setup: "genre",
     outline: "outline_text",
-    draft: "chapter",
+    draft: writer.draftPlanKind,
   };
-  const kind = kinds[writer.stage];
-  if (!kind || (writer.stage === "draft" && !writer.chapterNo)) {
+  const kind = actualKind || kinds[stage];
+  if (!kind || (stage === "draft" && !chapterNo)) {
     writer.budget = null;
     renderPlan();
     return;
   }
-  const model = readModel(...(PLAN_MODEL_FIELDS[writer.stage] || ["setupProviderKey", "setupModelName"]));
+  const model = actualModel || readModel(...(PLAN_MODEL_FIELDS[stage] || ["setupProviderKey", "setupModelName"]));
   const token = ++writer.budgetToken;
+  writer.budget = null;
   try {
     const payload = await api("/api/writer/generate/preview", {
       method: "POST",
       body: {
         kind,
-        book_id: writer.bookId,
-        chapter_no: writer.stage === "draft" ? writer.chapterNo : undefined,
+        book_id: bookId,
+        chapter_no: DRAFT_KINDS.has(kind) ? chapterNo : undefined,
         model_key: model.model_key,
         char_count: writer.charCount,
         side_count: writer.sideCount,
-        extra_note: String(
-          writer.stage === "setup" ? $("#writerSetupNote")?.value || ""
-            : writer.stage === "outline" ? $("#writerOutlineNote")?.value || ""
+        extra_note: extraNote ?? String(
+          stage === "setup" ? $("#writerSetupNote")?.value || ""
+            : stage === "outline" ? $("#writerOutlineNote")?.value || ""
               : $("#writerDraftNote")?.value || ""
         ),
       },
     });
-    if (token !== writer.budgetToken || writer.stage !== stageAtRequest) return;
+    if (token !== writer.budgetToken || writer.stage !== stage || writer.bookId !== bookId
+      || writer.bookToken !== bookToken || writer.chapterToken !== chapterToken
+      || writer.chapterNo !== chapterNo) return null;
+    if (actualKind && !payload.budget) throw new Error("未取得本次操作预算，请重试");
     writer.budget = payload.budget || null;
-  } catch (_error) {
-    if (token !== writer.budgetToken) return;
-    writer.budget = null;
+    renderPlan();
+    return payload;
+  } catch (error) {
+    if (token === writer.budgetToken) {
+      writer.budget = null;
+      renderPlan();
+    }
+    if (actualKind) throw error;
+    return null;
   }
-  renderPlan();
 }
 
-// 预检请求发出时的阶段快照：响应回来时若已切阶段则丢弃。
-let stageAtRequest = "setup";
+const DRAFT_KINDS = new Set(["chapter", "chapter_segs", "chapter_continue", "chapter_rewrite"]);
+
+function draftSnapshot() {
+  return {
+    bookId: writer.bookId, bookToken: writer.bookToken,
+    chapterNo: writer.chapterNo, chapterToken: writer.chapterToken,
+    editToken: writer.draftEditToken,
+    content: String($("#writerDraftContent")?.value || ""),
+  };
+}
+
+function sameDraftTarget(snapshot) {
+  return writer.bookId === snapshot.bookId && writer.bookToken === snapshot.bookToken
+    && writer.chapterNo === snapshot.chapterNo && writer.chapterToken === snapshot.chapterToken;
+}
+
+function sameDraftEdit(snapshot) {
+  return sameDraftTarget(snapshot) && writer.draftEditToken === snapshot.editToken
+    && String($("#writerDraftContent")?.value || "") === snapshot.content;
+}
 
 function renderPipeline() {
   const block = $("#writerPipelineBlock");
@@ -1649,8 +1694,7 @@ function beginPipelineWatch(pipeline) {
 // 生成提交
 // ============================================================
 
-function gateByBudget(model) {
-  const budget = writer.budget;
+function gateByBudget(model, budget = writer.budget) {
   if (!budget) return true;
   if (budget.context_known && budget.fits === false) {
     toast((budget.suggestions || []).join(" ") || "本次输入超过模型窗口，请减少设定或前文引用后再生成");
@@ -1708,31 +1752,50 @@ async function submitPipeline(kind, opts = {}) {
     targetChars = 0, wantCount = 0, fromNo = 0, extraNote = "", model: preset = null,
     partPlan = null,
   } = opts;
-  if (!writer.bookId) return;
+  if (!writer.bookId || writer.busy || writer.draftOperation) return;
+  const isDraft = DRAFT_KINDS.has(kind);
+  const snapshot = isDraft ? draftSnapshot() : null;
+  const bookId = writer.bookId;
+  const bookToken = writer.bookToken;
+  const stage = writer.stage;
+  if (isDraft && (!writer.chapter || Number(chapterNo) !== snapshot.chapterNo)) return;
   if (writer.pipeline?.status === "running") {
     toast("这部作品已有正在进行的生成，请先取消或等它结束");
     return;
   }
-  const modelFields = PLAN_MODEL_FIELDS[writer.stage] || ["setupProviderKey", "setupModelName"];
+  const modelFields = PLAN_MODEL_FIELDS[isDraft ? "draft" : stage] || ["setupProviderKey", "setupModelName"];
   const model = preset && preset.model_name ? preset : readModel(...modelFields);
   if (!model.model_name) {
     toast("先在设置里检查模型，再回来选择");
     return;
   }
-  if (!gateByBudget(model)) return;
+  if (!isDraft && !gateByBudget(model)) return;
+  const fallbackNote = stage === "setup" ? $("#writerSetupNote")?.value || ""
+    : stage === "outline" ? $("#writerOutlineNote")?.value || ""
+      : stage === "chapter" ? $("#writerChapterNote")?.value || ""
+        : $("#writerDraftNote")?.value || "";
+  const note = extraNote || fallbackNote;
+  writer.draftOperation = isDraft;
   setBusy(true);
   try {
+    if (isDraft && writer.draftDirty && !await saveChapterEdit({ beforeGenerate: true })) return;
+    if (isDraft && !sameDraftEdit(snapshot)) return;
     // 表单里有未保存的设定改动（例：刚套用模板）：先自动存一版再提交，
     // 否则流水线仍用旧的已保存设定。
     if (writer.setupDirty) {
       const saved = await saveSetupBeforeGenerate();
       if (!saved) return;
     }
-    const fallbackNote = writer.stage === "setup" ? $("#writerSetupNote")?.value || ""
-      : writer.stage === "outline" ? $("#writerOutlineNote")?.value || ""
-        : writer.stage === "chapter" ? $("#writerChapterNote")?.value || ""
-          : $("#writerDraftNote")?.value || "";
-    const payload = await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}/pipelines`, {
+    if (writer.bookId !== bookId || writer.bookToken !== bookToken || writer.stage !== stage) return;
+    if (isDraft) {
+      if (!sameDraftEdit(snapshot)) return;
+      writer.draftPlanKind = kind;
+      const preview = await refreshPlan({ kind, model, extraNote: note });
+      if (!preview || !sameDraftEdit(snapshot) || writer.stage !== stage) return;
+      if (!gateByBudget(model, preview.budget)) return;
+    }
+    if (writer.pipeline?.status === "running") return;
+    const payload = await api(`/api/writer/books/${encodeURIComponent(bookId)}/pipelines`, {
       method: "POST",
       body: {
         kind,
@@ -1747,18 +1810,20 @@ async function submitPipeline(kind, opts = {}) {
         want_count: wantCount || undefined,
         from_no: fromNo || undefined,
         part_plan: Array.isArray(partPlan) && partPlan.length ? partPlan : undefined,
-        extra_note: extraNote || fallbackNote,
+        extra_note: note,
         allow_drop: allowDrop || undefined,
         revision: writer.book?.revision,
         chapter_revision: chapterNo ? writer.chapter?.revision : undefined,
       },
     });
+    if (writer.bookId !== bookId || writer.bookToken !== bookToken) return;
     beginPipelineWatch(payload.pipeline);
     setSaveState("已提交", `${kindLabel(kind)}已提交；每完成一步都会自动存一版。`);
     toast("已提交生成");
   } catch (error) {
     fail("提交生成失败", error);
   } finally {
+    writer.draftOperation = false;
     setBusy(false);
     renderAll();
   }
@@ -1779,7 +1844,7 @@ async function cancelPipeline() {
 }
 
 async function retryPipeline() {
-  if (!writer.bookId || !writer.pipeline) return;
+  if (!writer.bookId || !writer.pipeline || writer.busy || writer.draftOperation) return;
   const status = String(writer.pipeline.status || "");
   if (!["failed", "cancelled", "interrupted", "conflict"].includes(status)) return;
   let rebase = false;
@@ -1939,10 +2004,11 @@ function renderLocation() {
 }
 
 async function openBook(bookId, { keepEdits = false, keepStage = false } = {}) {
+  if (writer.draftOperation) return false;
   const token = ++writer.bookToken;
   try {
     const payload = await api(`/api/writer/books/${encodeURIComponent(bookId)}`);
-    if (token !== writer.bookToken) return;
+    if (token !== writer.bookToken || writer.draftOperation) return;
     const sameBook = writer.bookId === bookId;
     writer.bookId = bookId;
     writer.book = payload.book;
@@ -2134,14 +2200,20 @@ async function renderBooksDialog() {
 // ============================================================
 
 async function openChapter(chapterNo, { silent = false } = {}) {
-  if (!writer.bookId) return;
+  if (!writer.bookId || writer.draftOperation) return false;
+  const bookId = writer.bookId;
+  const bookToken = writer.bookToken;
+  const editToken = writer.draftEditToken;
   const token = ++writer.chapterToken;
   try {
     const payload = await api(
-      `/api/writer/books/${encodeURIComponent(writer.bookId)}/chapters/${Number(chapterNo)}`,
+      `/api/writer/books/${encodeURIComponent(bookId)}/chapters/${Number(chapterNo)}`,
     );
-    if (token !== writer.chapterToken) return;
+    if (token !== writer.chapterToken || writer.bookId !== bookId
+      || writer.bookToken !== bookToken || writer.draftEditToken !== editToken
+      || writer.draftOperation) return false;
     writer.chapterNo = Number(chapterNo);
+    writer.draftPlanKind = "chapter";
     writer.chapter = payload;
     writer.draftDirty = false;
     renderChapters();
@@ -2152,45 +2224,74 @@ async function openChapter(chapterNo, { silent = false } = {}) {
   }
 }
 
-async function saveChapterEdit() {
-  if (!writer.bookId || !writer.chapter) return;
-  const content = String($("#writerDraftContent")?.value || "");
+/** true 只表示保存及必要刷新全部成功，且期间没有编辑/切换；任何失败都不可继续生成。 */
+async function saveChapterEdit({ beforeGenerate = false } = {}) {
+  if (!writer.bookId || !writer.chapter) return false;
+  if (!beforeGenerate && (writer.busy || writer.draftOperation)) return false;
+  const snapshot = draftSnapshot();
+  const { bookId, chapterNo, content } = snapshot;
   if (!content.trim()) {
     toast("正文是空的；要清空请删章节，不要保存空稿");
-    return;
+    return false;
   }
-  setBusy(true);
+  if (!beforeGenerate) {
+    writer.draftOperation = true;
+    setBusy(true);
+  }
   try {
-    const payload = await api(
-      `/api/writer/books/${encodeURIComponent(writer.bookId)}/chapters/${writer.chapter.no}`,
-      {
-        method: "PATCH",
-        body: { content, revision: writer.chapter.revision },
-      },
-    );
-    writer.chapter = { ...writer.chapter, ...payload.chapter_no !== undefined ? payload : {} };
+    const chapterUrl = `/api/writer/books/${encodeURIComponent(bookId)}/chapters/${chapterNo}`;
+    const payload = await api(chapterUrl, {
+      method: "PATCH", body: { content, revision: writer.chapter.revision },
+    });
+    if (!sameDraftTarget(snapshot)) return false;
+    // PATCH 的返回不是章节详情；只取明确的 chapter_revision，不能把整个 payload 混进 chapter。
+    if (payload.chapter_revision !== undefined) writer.chapter.revision = payload.chapter_revision;
+    const chapter = await api(chapterUrl);
+    if (!sameDraftTarget(snapshot)) return false;
+    const index = await api(`/api/writer/books/${encodeURIComponent(bookId)}`);
+    if (!sameDraftTarget(snapshot)) return false;
+    if (!index.book || Number(chapter.no) !== chapterNo || chapter.revision === undefined) {
+      throw new Error("保存后的章节或作品刷新不完整，请重新读取后重试");
+    }
+    if (chapter.content !== content || (payload.chapter_revision !== undefined
+      && chapter.revision !== payload.chapter_revision)) {
+      throw new Error("章节在保存后又被修改；你的编辑仍保留，请处理冲突后重试");
+    }
+    writer.chapter = chapter;
+    writer.book = index.book;
+    writer.chapters = index.chapters || [];
+    writer.pipeline = index.book.active_pipeline || writer.pipeline;
+    // textarea 仍以用户此刻输入为准；刷新期间新增的编辑不能被标为已保存。
+    if (!sameDraftEdit(snapshot)) {
+      writer.draftDirty = true;
+      setSaveState("有未保存修改", "保存期间正文有新编辑，请再保存后生成。");
+      return false;
+    }
     writer.draftDirty = false;
+    renderBookSummary();
+    renderChapters();
     toast(payload.duplicate ? "与当前版本相同，未重复存版本" : "已保存为新版本");
     setSaveState("已保存", "正文按新版本保存；旧版本保留，可随时切回。");
-    await openChapter(writer.chapter.no, { silent: true });
-    await reloadBookIndex();
+    return true;
   } catch (error) {
     if (error?.status === 409) {
-      if (window.confirm("这一章在别处被修改过（版本冲突）。\n要放弃你的修改、重新读取最新内容吗？")) {
-        writer.draftDirty = false;
-        await openChapter(writer.chapter.no, { silent: true });
-      }
-      return;
+      // 不自动重载、不清 dirty：用户必须明确放弃或处理冲突后再操作。
+      toast("这一章在别处被修改过（版本冲突）；你的修改仍保留。请处理冲突后重试，本次不会提交生成。");
+    } else {
+      fail("保存或刷新失败，本次未提交生成", error);
     }
-    fail("保存失败", error);
+    return false;
   } finally {
-    setBusy(false);
+    if (!beforeGenerate) {
+      writer.draftOperation = false;
+      setBusy(false);
+    }
     renderDraft();
   }
 }
 
 async function selectChapterVersion(versionId) {
-  if (!writer.bookId || !writer.chapter || !versionId) return;
+  if (!writer.bookId || !writer.chapter || !versionId || writer.draftOperation) return;
   try {
     await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}/versions/select`, {
       method: "POST",
@@ -2216,7 +2317,7 @@ async function selectChapterVersion(versionId) {
 }
 
 async function deleteChapter() {
-  if (!writer.bookId || !writer.chapter) return;
+  if (!writer.bookId || !writer.chapter || writer.draftOperation) return;
   if (!window.confirm(
     `要删除第 ${writer.chapter.no} 章（含全部正文版本）吗？这个操作不能撤销。`,
   )) return;
@@ -3113,12 +3214,13 @@ async function exportBook(fmt = "txt", withExtras = false) {
     );
     const missing = Array.isArray(payload?.missing_chapters) ? payload.missing_chapters : [];
     const bytes = Number(payload?.bytes || 0);
-    // 没有正文：不弹保存框。弹了也只是让人存一个空壳，正是「导出又坏了」的来源。
+    // 以所选范围的实际内容为准：附录可独立导出，书名标题不算内容。
     if (!bytes || payload?.has_content === false) {
-      setSaveState("没有正文可导出",
-        `《${writer.book?.title || "作品"}》还没有任何一章写成正文，这样导出只会得到一个空文件。`
-        + "改选「导出 Markdown（含设定与大纲）」可以先把设定和大纲带走。");
-      toast("还没有正文；可改选「导出 Markdown（含设定与大纲）」");
+      const message = withExtras
+        ? "当前没有可导出的正文、设定或大纲，请先保存内容后再导出。"
+        : "还没有正文；可改选「导出 Markdown（含设定与大纲）」带走已保存的设定和大纲。";
+      setSaveState(withExtras ? "没有内容可导出" : "没有正文可导出", message);
+      toast(message);
       return;
     }
     const filename = String(payload?.suggested_name || payload?.filename || "");
@@ -3557,9 +3659,9 @@ function closeDialog(selector) {
 }
 
 function setStage(stage) {
+  if (writer.draftOperation) return;
   const next = ["setup", "outline", "chapter", "draft"].includes(stage) ? stage : "setup";
   writer.stage = next;
-  stageAtRequest = next;
   document.querySelectorAll("#writerStages [data-writer-stage]").forEach((btn) => {
     const active = btn.dataset.writerStage === next;
     btn.classList.toggle("active", active);
@@ -4092,11 +4194,13 @@ export function bindWriterEvents() {
   $("#writerDraftPrev")?.addEventListener("click", () => stepChapter(-1));
   $("#writerDraftNext")?.addEventListener("click", () => stepChapter(1));
   $("#writerDraftContent")?.addEventListener("input", () => {
+    writer.draftEditToken += 1;
     writer.draftDirty = true;
     renderDraft();
   });
   $("#writerDraftSave")?.addEventListener("click", () => void saveChapterEdit());
   $("#writerDraftReload")?.addEventListener("click", () => {
+    if (writer.draftOperation) return;
     writer.draftDirty = false;
     if (writer.chapter) void openChapter(writer.chapter.no, { silent: true });
     else renderDraft();

@@ -194,6 +194,25 @@ class DraftContextTests(unittest.TestCase):
         self.assertIn("· 第一段要点", built["content"])
         self.assertIn("第 1 章第 2 段", built["content"])
 
+    def test_previous_excerpt_label_continuity_and_omitted_reason(self):
+        for mode in ("whole", "segment", "continue"):
+            built = prompts.build_draft_context(
+                self._setup(), {"no": 2, "title": "章二"}, mode=mode,
+                previous_chapter={"status": "included", "chapter_no": 1,
+                                  "current_version_id": "cv-aaaaaaaaaaaa", "revision": 3,
+                                  "title": "章一", "excerpt": "原文首尾"})
+            self.assertIn("首尾截取，非总结", built["content"])
+            self.assertIn("人物位置、时间、情绪与未决事件", built["content"])
+            slot = next(slot for slot in built["slots"] if slot["key"] == "prev_tail")
+            self.assertEqual(slot["current_version_id"], "cv-aaaaaaaaaaaa")
+        built = prompts.build_draft_context({}, {"no": 2}, mode="whole",
+                                           previous_chapter={"status": "unavailable", "excerpt": ""})
+        slot = next(slot for slot in built["slots"] if slot["key"] == "prev_tail")
+        self.assertFalse(slot["included"])
+        self.assertIn("不可读取", slot["reason"])
+        report = prompts.budget_report(content=built["content"], slots=built["slots"], context_window=100000)
+        self.assertIn(slot["reason"], [item["reason"] for item in report["omitted"]])
+
     def test_chapter_head_summary_is_excerpt_not_summary(self):
         text = "首" * 150 + "中" * 300 + "尾" * 250
         summary = prompts.chapter_head_summary(text)

@@ -179,6 +179,36 @@ class ServiceTestCase(unittest.TestCase):
         # 章节与设定来源如实列出。
         self.assertEqual(payload["chapter"]["no"], 1)
 
+    def test_previous_excerpt_preview_matches_submission_all_modes(self):
+        store = self.service.store
+        store.save_chapter_version(self.book_id, 1, content="前章首" + "中" * 1000 + "尾")
+        store.save_chapter_version(self.book_id, 2, content="当前稿" * 1000)
+        for kind in ("chapter", "chapter_rewrite", "chapter_continue", "chapter_segs"):
+            with self.subTest(kind=kind):
+                preview, code = self.service.api_preview({"book_id": self.book_id, "chapter_no": 2, "kind": kind})
+                self.assertEqual(code, 200)
+                slot = next(item for item in preview["slots"] if item["key"] == "prev_tail")
+                self.assertTrue(slot["included"])
+                self.assertEqual(slot["status"], "included")
+                self.assertIn("原文节选", slot["label"])
+                pl = self.service.pipeline.start_pipeline(self.book_id, kind=kind, chapter_no=2,
+                                                          model_key="online:probe", model_name="probe")
+                task = self.app.studio.jobs.tasks[pl["current_task_id"]]
+                if kind != "chapter_segs":
+                    self.assertEqual(preview["content"], task["input"]["content"])
+                else:
+                    self.assertIn(slot["excerpt"], task["input"]["content"])
+                self.service.pipeline.cancel_pipeline(self.book_id)
+
+    def test_preview_reports_omitted_previous_and_rejects_empty_continue(self):
+        preview, code = self.service.api_preview({"book_id": self.book_id, "chapter_no": 2, "kind": "chapter"})
+        self.assertEqual(code, 200)
+        slot = next(item for item in preview["slots"] if item["key"] == "prev_tail")
+        self.assertFalse(slot["included"])
+        self.assertEqual(slot["status"], "no_current_version")
+        _, code = self.service.api_preview({"book_id": self.book_id, "chapter_no": 2, "kind": "chapter_continue"})
+        self.assertEqual(code, 400)
+
     def test_preview_unknown_chapter(self):
         payload, status = self.service.api_preview({
             "book_id": self.book_id, "kind": "chapter", "chapter_no": 99})
@@ -347,6 +377,22 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(self.service.api_export_file(self.book_id, "not-a-dict")[1], 400)
         self.assertEqual(
             self.service.api_export_file("wb-20990101-0123456789ab", {"format": "txt"})[1], 404)
+
+    def test_export_parts_without_body_is_downloadable(self):
+        self.service.store.save_outline(self.book_id, parts=[
+            {"no": 1, "title": "开篇", "text": "完整分部大纲原文"},
+        ])
+        for fmt in ("txt", "md"):
+            with self.subTest(fmt=fmt):
+                plain, status = self.service.api_export_file(self.book_id, {"format": fmt})
+                self.assertEqual(status, 200)
+                self.assertFalse(plain["has_content"])
+                payload, status = self.service.api_export_file(
+                    self.book_id, {"format": fmt, "extras": "1"})
+                self.assertEqual(status, 200)
+                self.assertTrue(payload["has_content"])
+                self.assertTrue(payload["with_extras"])
+                self.assertIn("完整分部大纲原文", Path(payload["path"]).read_text(encoding="utf-8"))
 
     def test_export_file_flags_book_without_body(self):
         payload, status = self.service.api_export_file(self.book_id, {"format": "txt"})

@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from naiba.core.contracts import WRITER_CHAPTER_BASELINE_KEY
 from naiba.writer import prompts
 from naiba.writer.pipeline import WriterPipelineManager, WriterPipelineError
 from naiba.writer.store import (
@@ -278,18 +279,21 @@ class WriterService:
                 index = next((row for row in book["chapters"] if row["no"] == chapter_no), None)
                 if index is None:
                     return {"error": f"作品里没有第 {chapter_no} 章"}, 404
+                baseline, previous = self.store.chapter_writing_inputs(book_id, chapter_no)
                 chapter_view = {
-                    "no": chapter_no, "title": index["title"],
-                    "beat": index["beat"], "hook": index["hook"],
+                    "no": chapter_no, "title": baseline["title"],
+                    "beat": baseline["beat"], "hook": baseline["hook"],
                 }
-                mode = "continue" if kind in ("chapter_continue",) else "whole"
+                mode = "continue" if kind == "chapter_continue" else "whole"
                 draft_tail = ""
                 if mode == "continue":
-                    current = self.store.get_chapter(book_id, chapter_no)
-                    draft_tail = str(current.get("content") or "")[-prompts.CONTINUE_TAIL_CHARS:]
+                    self.pipeline._continuation_baseline({
+                        "chapter_no": chapter_no, WRITER_CHAPTER_BASELINE_KEY: baseline,
+                    })
+                    draft_tail = baseline["content"][-prompts.CONTINUE_TAIL_CHARS:]
                 built = prompts.build_draft_context(
                     setup, chapter_view, mode=mode, draft_tail=draft_tail,
-                    extra_note=str(body.get("extra_note") or ""),
+                    extra_note=str(body.get("extra_note") or ""), previous_chapter=previous,
                 )
                 budget = prompts.budget_report(
                     content=built["content"], slots=built["slots"],
@@ -327,7 +331,7 @@ class WriterService:
             }, 200
         except LookupError as exc:
             return {"error": str(exc)}, 404
-        except (WriterStoreError, prompts.PromptError) as exc:
+        except (WriterStoreError, WriterPipelineError, prompts.PromptError) as exc:
             return {"error": str(exc)}, 400
 
     def api_start_pipeline(self, book_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
@@ -539,7 +543,7 @@ class WriterService:
         """导出成真实文件（POST：有落盘副作用，不能用 GET）。
 
         前端拿到 path 后交给桌面端「另存为」，浏览器/手机则走 `/api/file?download=1`。
-        没有正文时不写「看起来成功」的空文件，直接把 has_content=False 交给前端提示。
+        has_content 按所选范围判断：正文或请求的非空附录；仅书名标题不算内容。
         """
         if not isinstance(body, dict):
             return {"error": "请求体必须是对象"}, 400

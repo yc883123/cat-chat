@@ -346,6 +346,27 @@ class RecipeUIFixtureTests(unittest.TestCase):
         self.assertEqual(status, 200, result)
         self.assertEqual(self.control()["counts"]["prompt"], 0)
 
+    def test_import_response_can_save_recipe_without_loading_detail(self):
+        before = self.control()
+        status, imported = self.api("POST", "/api/comfyui/workflows", {
+            "name": "导入后直接创建方案", "workflow": self.fixture["custom_workflow"],
+        })
+        self.assertEqual(status, 201, imported)
+        workflow = imported["workflow"]
+        status, saved = self.api("POST", "/api/super-agent/recipes", {
+            "name": "原生导入往返方案", "input_mode": "prompt",
+            "workflow_id": workflow["id"],
+            "workflow_fingerprint": workflow.get("workflow_fingerprint", ""),
+            "prompt_slot": self.fixture["custom_prompt_slot"],
+            "media_slots": self.fixture["custom_media_slots"], "overrides": [],
+        })
+        self.assertEqual(status, 201, saved)
+        self.assertEqual(saved["recipe"]["workflow_id"], workflow["id"])
+        self.assertEqual(saved["recipe"]["workflow_fingerprint"], workflow["workflow_fingerprint"])
+        after = self.control()
+        self.assertEqual(after["counts"], before["counts"])
+        self.assertEqual(after["blocked_connections"], [])
+
     def test_image_graph_still_returns_png_when_video_fixture_is_enabled(self):
         status, result = self.request("POST", self.fixture["comfyui_url"] + "/prompt", {
             "prompt": {"1": {"class_type": "SaveImage", "inputs": {"filename_prefix": "local-image"}}}})
@@ -371,6 +392,128 @@ class RecipeUIFixtureTests(unittest.TestCase):
         self.assertEqual(metadata["type"], "image")
         self.assertEqual(metadata["reason"], "explicit PNG mode")
         self.assertFalse((Path(self.temp.name) / "unused").exists())
+
+    def test_typed_reference_assets_optional_schema_and_mixed_clone_are_offline(self):
+        self.assertEqual(len(self.fixture["images"]), 9)
+        self.assertEqual(len(self.fixture["audios"]), 3)
+        self.assertEqual(len(self.fixture["videos"]), 3 if shutil.which("ffmpeg") else 0)
+        import wave
+        for ref in self.fixture["audios"]:
+            self.assertTrue(Path(ref["path"]).resolve().is_relative_to((self.root / "data" / "uploads").resolve()))
+            with wave.open(ref["path"], "rb") as audio:
+                self.assertEqual(audio.getframerate(), 16000)
+                self.assertEqual(audio.getnframes(), 16000)
+                self.assertEqual(audio.getsampwidth(), 2)
+        for ref in self.fixture["videos"]:
+            self.assert_decodable_output(Path(ref["path"]).read_bytes())
+        status, schema = self.request("GET", self.fixture["comfyui_url"] + "/object_info/MiniMaxH3ReferenceToVideo")
+        self.assertEqual(status, 200)
+        inputs = schema["MiniMaxH3ReferenceToVideo"]["input"]
+        self.assertIn("ref_images.ref_image_0", inputs["optional"])
+        self.assertIn("ref_images.ref_image_8", inputs["optional"])
+        self.assertFalse(any(key.startswith(("ref_images.", "ref_videos.", "ref_audios.")) for key in inputs["required"]))
+        mixed = self.fixture["mixed_draft"]
+        status, result = self.api("GET", f"/api/super-agent/threads/{mixed['thread_id']}/recipe/clone-draft")
+        self.assertEqual(status, 200, result)
+        draft = result["draft"]
+        media = draft["items"][0]["media"]
+        self.assertEqual({m["role"] for m in media}, {m["role"] for m in self.fixture["mixed_payload"]["items"][0]["media"]})
+        self.assertNotIn("request_id", draft)
+        self.assertEqual(self.control()["counts"]["model"], 0)
+        self.assertEqual(self.control()["counts"]["prompt"], 0)
+        self.assertEqual(self.control()["blocked_connections"], [])
+
+    def test_http_save_as_forks_configuration_and_keeps_params_display_only(self):
+        wid = self.fixture["custom_workflow_id"]
+        status, detail = self.api("GET", "/api/comfyui/workflows/" + wid)
+        self.assertEqual(status, 200)
+        body = {"name": "离线另存", "workflow_fingerprint": detail["workflow"]["workflow_fingerprint"],
+                "overrides": [{"node_id": "105_121", "field_name": "lora_name", "value": "fixture_alternative.safetensors"}]}
+        status, result = self.api("POST", f"/api/comfyui/workflows/{wid}/save-as", body)
+        self.assertEqual(status, 201, result)
+        saved = result["workflow"]
+        self.assertNotEqual(saved["id"], wid)
+        self.assertEqual(saved["prompt"]["105_121"]["inputs"]["lora_name"], "fixture_alternative.safetensors")
+        self.assertNotEqual(saved["workflow_fingerprint"], body["workflow_fingerprint"])
+        status, source = self.api("GET", "/api/comfyui/workflows/" + wid)
+        self.assertEqual(source["workflow"]["prompt"], self.fixture["custom_workflow"])
+        body["workflow_fingerprint"] = "0" * 64
+        self.assertEqual(self.api("POST", f"/api/comfyui/workflows/{wid}/save-as", body)[0], 409)
+        self.assertEqual(self.control()["counts"]["model"], 0)
+        self.assertEqual(self.control()["counts"]["prompt"], 0)
+        mixed = self.batch(self.fixture["mixed_draft"]["thread_id"])
+        status, refused = self.api("DELETE", "/api/comfyui/workflows/" + mixed["recipe"]["workflow_id"])
+        self.assertEqual(status, 409, refused)
+
+    def test_mixed_reverse_passes_only_real_images_and_textual_av_descriptions(self):
+        tid = self.fixture["mixed_draft"]["thread_id"]
+        before = self.control()
+        self.action(tid, "confirm_reverse")
+        batch = self.wait_batch(tid, {"review", "needs_review"})
+        self.assertEqual(batch["status"], "review", self.summary(batch))
+        stats = self.control()
+        self.assertEqual(stats["counts"]["model"], before["counts"]["model"] + 1)
+        self.assertEqual(stats["counts"]["prompt"], before["counts"]["prompt"])
+        request = stats["model_requests"][-1]
+        serialized = json.dumps(request["messages"], ensure_ascii=False)
+        self.assertIn("<Audio 1>", serialized)
+        if self.fixture["videos"]:
+            self.assertIn("<Video 1>", serialized)
+        images = [part for message in request["messages"] if isinstance(message.get("content"), list)
+                  for part in message["content"] if part.get("type") == "image_url"]
+        self.assertEqual(len(images), 1)
+        self.assertTrue(all(part["image_url"]["url"].startswith("data:image/") for part in images))
+        self.assertEqual(stats["blocked_connections"], [])
+
+    def test_reference_execution_zero_audio_video_mixed_and_full_capacity(self):
+        references = []
+        for media, rows, prefix in (("image", self.fixture["images"], "picture"),
+                                    ("video", self.fixture["videos"], "video"),
+                                    ("audio", self.fixture["audios"], "audio")):
+            references.extend({"role": f"{prefix}_{i}", "path": row["path"], "name": row["name"],
+                               "description": f"Locally generated {media} reference {i}."}
+                              for i, row in enumerate(rows, 1))
+        variants = [[], [r for r in references if r["role"] == "audio_1"],
+                    self.fixture["mixed_payload"]["items"][0]["media"], references]
+        if self.fixture["videos"]:
+            variants.insert(2, [r for r in references if r["role"] == "video_1"])
+        for refs in variants:
+            with self.subTest(roles=[r["role"] for r in refs]):
+                payload = copy.deepcopy(self.fixture["mixed_payload"])
+                payload.update({"request_id": "typed-capacity-" + str(time.time_ns()), "input_mode": "prompt"})
+                payload.pop("model_key", None)
+                payload.pop("model_name", None)
+                payload["items"] = [{"name": "typed case", "media": refs,
+                                     "prompt": "A golden graphic gently moves. No speech."}]
+                before = self.control()
+                status, created = self.api("POST", "/api/super-agent/recipe-batches", payload)
+                self.assertEqual(status, 201, created)
+                tid = created["thread_id"]
+                self.action(tid, "confirm_generate")
+                batch = self.wait_batch(tid, {"completed", "partial", "needs_review"})
+                self.assertEqual(batch["status"], "completed", self.summary(batch))
+                after = self.control()
+                self.assertEqual(after["counts"]["model"], before["counts"]["model"])
+                self.assertEqual(after["counts"]["prompt"], before["counts"]["prompt"] + 1)
+                submitted = after["submitted"][-1]["prompt"]
+                h3 = next(n for n in submitted.values() if n["class_type"] == "MiniMaxH3ReferenceToVideo")
+                selected = {kind: sum(r["role"].startswith(prefix) for r in refs)
+                            for kind, prefix in (("images", "picture_"), ("videos", "video_"), ("audios", "audio_"))}
+                for group, count in selected.items():
+                    self.assertEqual(sum(key.startswith(f"ref_{group}.") for key in h3["inputs"]), count)
+                for key, connection in h3["inputs"].items():
+                    if key.startswith("ref_videos."):
+                        components = submitted[connection[0]]
+                        self.assertEqual(components["class_type"], "GetVideoComponents")
+                        self.assertEqual(connection[1], 0)
+                        self.assertEqual(submitted[components["inputs"]["video"][0]]["class_type"], "LoadVideo")
+                self.assertFalse(any(key.startswith("ref_video_audios.") for key in h3["inputs"]))
+                # Identical synthetic MP4s share a content-addressed snapshot/upload,
+                # while still binding all three distinct Video reference slots.
+                import hashlib
+                unique_payloads = {hashlib.sha256(Path(ref["path"]).read_bytes()).hexdigest() for ref in refs}
+                self.assertEqual(after["counts"]["upload"] - before["counts"]["upload"], len(unique_payloads))
+                self.assertEqual(after["blocked_connections"], [])
 
     def test_existing_root_is_refused_without_touching_its_contents(self):
         sentinel = self.root / "do-not-touch.txt"

@@ -118,6 +118,21 @@ class ComfyUIStore:
             self._write_json(self.workflow_path(str(entry["id"])), entry)
         return entry
 
+    def save_workflow_as(self, source_id: str, fingerprint: str, entry: dict[str, Any]) -> bool:
+        """Commit a new immutable fork only while the original graph still matches.
+
+        Shares the workflow mutation lock with save/delete, closing the final
+        fingerprint-check/write race without holding a disk lock during schema HTTP.
+        """
+        with self._lock:
+            source = self.get_workflow(source_id)
+            if source is None or self.payload_hash(source.get("prompt") or {}) != fingerprint:
+                return False
+            if str(entry["id"]) == source_id or self.workflow_path(str(entry["id"])).exists():
+                raise ComfyUIStoreError("另存必须使用新的工作流 id")
+            self._write_json(self.workflow_path(str(entry["id"])), entry)
+            return True
+
     def get_workflow(self, workflow_id: str) -> dict[str, Any] | None:
         workflow_id = str(workflow_id or "").strip()
         if not workflow_id or "/" in workflow_id or "\\" in workflow_id:

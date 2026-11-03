@@ -128,6 +128,12 @@
           <span>Agent</span>
           <select id="agentSelect" aria-label="当前 Agent"></select>
         </label>
+        <!-- 轮次下拉：桌面刻度轨的等价形态，手机 / 桌面共用同一个元素。
+             2026-11-04 起移出 .topbar-actions、作为 .topbar 直接子元素（导航语义，
+             与汉堡/Agent 同排）：手机端 760 块把它放进第 1 行中段；桌面端仍靠
+             margin-right:auto 落在「Agent 之后、[文件] 之前」——视觉不变，且不再
+             随手机端操作区换行漂移（顶栏两层改版，见 styles.css 760 块注释）。 -->
+        <select class="turn-jump-select" id="turnJumpSelect" aria-label="跳转到对话轮次" title="跳转到对话轮次" hidden></select>
         <div class="kvmem-control" id="kvmemControl" hidden aria-live="polite">
           <button class="kvmem-status-button" id="kvmemStatusButton" type="button" title="KVMem 服务状态">
             <i id="kvmemStatusDot" aria-hidden="true"></i><span id="kvmemStatusLabel">KVMem</span>
@@ -175,10 +181,6 @@
           <small>两条路任选其一即可，一般不需要同时开。Agent 的每个工具在设置页都有说明，不确定就先只读模式试试。</small>
         </div>
         <div class="topbar-actions">
-          <!-- 轮次下拉：桌面刻度轨的等价形态，手机 / 桌面共用同一个元素。
-               手机端由 760 块顶到操作区行首；桌面端靠 margin-right:auto 落在
-               「Agent 之后、[文件] 之前」——即左段中段，不额外占宽。 -->
-          <select class="turn-jump-select" id="turnJumpSelect" aria-label="跳转到对话轮次" title="跳转到对话轮次" hidden></select>
           <button class="control-button file-reopen-button" id="openFileTabs" type="button" hidden title="重新打开面板（保留已打开的文件标签）">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h8.5L19 7.5V21H6z"></path><path d="M14.5 3v4.5H19"></path></svg>
             <span id="fileTabsCount">0</span>
@@ -636,12 +638,14 @@
                   <div class="comfyui-storyboard-list" id="comfyuiStoryboardList" aria-label="分镜提示词队列"></div>
                 </div>
                 <div class="comfyui-param-form" id="comfyuiParamForm" aria-label="工作流参数"></div>
+                <p class="comfyui-draft-hint" id="comfyuiDraftHint" hidden role="status"></p>
                 <div class="comfyui-submit-row">
                   <label class="comfyui-shots-field">张数
                     <input id="comfyuiShots" type="number" min="1" max="200" value="1" aria-label="生成张数">
                   </label>
                   <button class="control-button" id="comfyuiSubmit" type="button" disabled>开始生成</button>
-                  <button class="control-button" id="comfyuiRecipeHandoff" type="button">交给任务总管 · 制作方案</button>
+                  <button class="control-button" id="comfyuiSaveCurrentAs" type="button">用当前配置另存工作流</button>
+                  <button class="control-button" id="comfyuiRecipeHandoff" type="button">交给任务总管 · 批量准备</button>
                 </div>
               </div>
             </section>
@@ -694,24 +698,24 @@
               <p class="comfyui-import-error" id="comfyuiParamsError" role="alert"></p>
             </form>
           </dialog>
-          <dialog class="comfyui-import-dialog" id="comfyuiImportDialog" aria-label="导入工作流">
+          <dialog class="comfyui-import-dialog comfyui-params-dialog comfyui-saveas-dialog" id="comfyuiSaveAsDialog" aria-label="核对要另存进副本的参数">
             <form method="dialog" class="comfyui-import-form">
-              <h3>导入 ComfyUI 工作流</h3>
-              <p class="comfyui-import-reminder">请先在你自己的 ComfyUI 里完整跑出过结果，再用「导出（API）」把工作流存成 JSON 导入到这里。界面格式的文件（编辑器里保存的那种）这里用不了。</p>
-              <label class="comfyui-import-name">名字
-                <input id="comfyuiImportName" type="text" maxlength="120" placeholder="例如：Qwen 文生图（已跑通）">
+              <h3>核对要保存进副本的参数</h3>
+              <p class="comfyui-import-reminder">下面列出这份工作流扫描到的全部参数。没有改动的不会写进副本，原工作流保持不变；另存后会自动切到副本，接着就能交给任务总管。</p>
+              <label class="comfyui-import-name">副本名称
+                <input id="comfyuiSaveAsName" type="text" maxlength="120" autocomplete="off">
               </label>
-              <label class="comfyui-import-file">从文件导入
-                <input id="comfyuiImportFile" type="file" accept=".json,application/json">
-              </label>
-              <label class="comfyui-import-paste">或粘贴 JSON 内容
-                <textarea id="comfyuiImportText" rows="8" placeholder='{"3": {"class_type": "KSampler", "inputs": {…}}, …}'></textarea>
+              <p class="comfyui-saveas-summary" id="comfyuiSaveAsSummary" role="status"></p>
+              <div class="comfyui-saveas-list" id="comfyuiSaveAsList" aria-label="另存参数核对清单"></div>
+              <label class="comfyui-saveas-discard" id="comfyuiSaveAsDiscardRow" hidden>
+                <input type="checkbox" id="comfyuiSaveAsDiscard">
+                <span>我知道上面不能另存的改动不会写进副本，仍要保存其余改动</span>
               </label>
               <div class="comfyui-import-actions">
-                <button class="control-button" type="button" id="comfyuiImportConfirm">导入</button>
-                <button class="control-button" type="button" id="comfyuiImportCancel">取消</button>
+                <button class="control-button" type="button" id="comfyuiSaveAsConfirm">另存副本</button>
+                <button class="control-button" type="button" id="comfyuiSaveAsCancel">取消</button>
               </div>
-              <p class="comfyui-import-error" id="comfyuiImportError" role="alert"></p>
+              <p class="comfyui-import-error" id="comfyuiSaveAsError" role="alert"></p>
             </form>
           </dialog>
         </div>
@@ -1674,7 +1678,7 @@
             <div class="super-agent-sidebar-brand"><span class="super-agent-brand-mark" aria-hidden="true">总</span><div><strong>任务总管</strong><small>持续任务 · 进展与结果</small></div></div>
             <nav class="super-agent-app-nav" id="superAgentAppNav" aria-label="应用视图"><button type="button" data-super-view="chat">对话</button><button type="button" data-super-view="studio">工作台</button><button type="button" data-super-view="super-agent" aria-current="page">任务总管</button></nav>
             <button class="control-button primary super-agent-new-task" id="superAgentCreate" type="button"><span aria-hidden="true">＋</span> 新建任务</button>
-            <button class="control-button super-agent-new-task super-agent-new-secondary" id="superAgentRecipeCreate" type="button">用图片批量制作视频</button>
+            <button class="control-button super-agent-new-task super-agent-new-secondary" id="superAgentRecipeCreate" type="button">批量制作视频</button>
             <div class="super-agent-panel-head"><strong>我的任务</strong><span id="superAgentThreadCount">0</span></div>
             <div class="super-agent-filters" id="superAgentFilters" role="group" aria-label="筛选任务">
               <button type="button" data-super-filter="all" aria-pressed="true">全部</button>
@@ -1728,68 +1732,62 @@
       <dialog id="superAgentRecipeDialog" class="writer-dialog sa-dialog super-agent-recipe-dialog" aria-labelledby="superAgentRecipeTitle">
         <div class="dlg-head">
           <span class="dlg-ico" aria-hidden="true">▶</span>
-          <div class="dlg-head-copy"><h2 id="superAgentRecipeTitle">用图片批量制作视频</h2><p>选一个方案，再决定素材怎么变成提示词</p></div>
+          <div class="dlg-head-copy"><h2 id="superAgentRecipeTitle">新建批量任务</h2><p>直接选造梦机已保存的工作流，不要求先建方案</p></div>
           <button type="button" class="dlg-close" data-recipe-close aria-label="关闭">✕</button>
         </div>
         <div class="dlg-body">
           <p id="recipeCreateError" class="writer-dialog-error" role="alert"></p>
           <form id="superAgentRecipeForm" class="writer-dialog-form" novalidate>
-            <p class="writer-dialog-hint">创建只保存清单，不会调用模型；原图会先上传到受管目录，不会按文件夹名称暗配图片。</p>
-            <div class="sa-sec-head"><h3>1 · 选择输入方式</h3><span>两种方式互斥，草稿各自保留</span></div>
-            <div class="super-agent-mode-cards" id="recipeModeCards" role="radiogroup" aria-label="输入方式（两种互斥）">
-              <button type="button" class="super-agent-mode-card active" data-recipe-mode="script" role="radio" aria-checked="true"><span class="super-agent-mode-radio" aria-hidden="true"></span><span class="super-agent-mode-top">图片＋剧本生成提示词</span><p>每组图片配一段剧本正文，由模板生成可编辑的提示词，检查后再制作视频。</p></button>
-              <button type="button" class="super-agent-mode-card" data-recipe-mode="prompt" role="radio" aria-checked="false"><span class="super-agent-mode-radio" aria-hidden="true"></span><span class="super-agent-mode-top">直接使用提示词</span><p>已有写好的视频提示词，不调用提词模型、不要求剧本，原样使用不改写。</p></button>
-            </div>
-            <p class="writer-dialog-hint" id="recipeModeHint">图片＋剧本共同作为主要输入；额外要求可选，写在每组剧本下方。</p>
-            <div class="sa-sec-head"><h3>2 · 方案与名称</h3><span>最近使用优先；模型与参数默认沿用方案</span></div>
-            <label>使用哪个方案<select id="recipeSelect"></select></label><p id="recipeDescription" class="writer-dialog-hint"></p>
+            <p class="writer-dialog-hint">创建只保存批量草稿，不会调用模型、不会开始生成；进入批次后再逐组补内容、改参数、确认生成。</p>
+            <div class="sa-sec-head"><h3>1 · 工作流</h3><span>直接复用它的槽位、控件与保存值</span></div>
+            <label>造梦机已保存的工作流<select id="recipeWorkflowSelect"></select></label>
+            <p class="writer-dialog-hint" id="recipeWorkflowHint" role="status">选工作流后自动带入它的参数与保存值。</p>
             <label>任务名称<input id="recipeTitle" maxlength="160" placeholder="本次视频批次"></label>
-            <div class="sa-sec-head"><h3>3 · 素材与正文</h3><span id="recipeMaterialHint">每组 1 张首帧图</span></div>
-            <div class="recipe-import-actions"><label>添加图片（可多选）<input id="recipeImages" type="file" accept="image/*" multiple></label><label>导入目录（保留来源名）<input id="recipeFolder" type="file" accept="image/*" multiple webkitdirectory></label></div>
-            <div id="recipeGrouping" hidden><p class="writer-dialog-hint">参考图方案：每组选 1–6 张图片，共同生成一条视频。勾选素材后按当前列表顺序建立一组。</p><button id="recipeAddGroup" class="control-button" type="button">用已勾选图片建立一组</button></div>
-            <div id="recipeUploadList" class="recipe-upload-list" aria-label="图片上传结果"></div><div id="recipeDraftItems" class="recipe-items"></div><div id="recipeSharedMedia"></div>
-            <div class="sa-sec-head"><h3>4 · 数量与时长</h3><span>默认继承方案</span></div>
-            <div class="super-agent-create-grid"><label>每组生成几条<input id="recipeShots" type="number" min="1" max="200" value="1"></label><label>视频时长（4–15 秒）<input id="recipeDuration" type="number" min="4" max="15" step="1" value="15"></label></div>
-            <p class="writer-dialog-hint">实际视频长度按工作流帧对齐。最终生效参数以生成确认页为准。</p>
-            <details class="super-agent-create-options" id="recipeAdvanced"><summary>高级设置（提词模型、数值参数）</summary>
-              <div id="recipeModelFields"><div class="super-agent-create-grid"><label>提词供应商<select id="recipeProvider"></select></label><label>提词模型<select id="recipeModel"></select></label></div>
-              <button class="control-button tiny" id="recipeModelsRefresh" type="button">重新读取模型</button><p class="writer-dialog-hint" id="recipeModelHint" role="status">仅用于生成提示词；视频模型由方案工作流决定，不会随此选择改变。</p></div>
-              <div id="recipeEffectiveControls"></div>
-            </details>
+            <div class="sa-sec-head"><h3>2 · 首组内容</h3><span>其余组进入批次后逐组添加</span></div>
+            <div id="recipeCreatePromptSlotRow" hidden><label>提示词写入位（这个工作流有多个文本入口）<select id="recipeCreatePromptSlot"></select></label><p class="writer-dialog-hint">只确认一次；以后交接同一工作流会记住这个选择。</p></div>
+            <label>第一组提示词<textarea id="recipeCreatePrompt" rows="6" placeholder="选工作流后自动带入它保存的默认正文，可修改"></textarea></label>
+            <div class="sa-sec-head"><h3>3 · 数量与时长</h3><span>沿用工作流单位</span></div>
+            <div class="super-agent-create-grid"><label>每组生成几条<input id="recipeShots" type="number" min="1" max="200" value="1"></label><label id="recipeDurationField" hidden>视频时长（秒）<input id="recipeDuration" type="number" min="1" max="300" step="1" value="15"></label></div>
+            <p class="writer-dialog-hint">时长只在这个工作流暴露了时长入口时出现；实际视频长度按工作流帧对齐。最终生效参数以生成确认页为准。</p>
           </form>
         </div>
         <div class="dlg-foot">
           <span class="foot-hint">创建只保存清单，不会调用模型、不会开始生成。</span>
           <div class="foot-btns">
             <button class="control-button" data-recipe-close type="button">保留草稿并关闭</button>
-            <button id="recipeCreateSubmit" class="control-button primary" type="submit" form="superAgentRecipeForm">创建任务（暂不开始）</button>
+            <button id="recipeCreateSubmit" class="control-button primary" type="submit" form="superAgentRecipeForm">创建批量草稿</button>
           </div>
         </div>
       </dialog>
-      <dialog id="superAgentRecipeCustomDialog" class="writer-dialog sa-dialog super-agent-recipe-dialog" aria-labelledby="recipeCustomTitle">
+      <dialog id="superAgentHandoffDialog" class="writer-dialog sa-dialog super-agent-recipe-dialog" aria-labelledby="superAgentHandoffTitle">
         <div class="dlg-head">
-          <span class="dlg-ico" aria-hidden="true">▦</span>
-          <div class="dlg-head-copy"><h2 id="recipeCustomTitle">保存为我的方案</h2><p>把当前工作流存成可重复使用的方案，不改动原件</p></div>
-          <button type="button" class="dlg-close" id="recipeCustomClose" aria-label="关闭">✕</button>
+          <span class="dlg-ico" aria-hidden="true">⇥</span>
+          <div class="dlg-head-copy"><h2 id="superAgentHandoffTitle">交给任务总管 · 确认参数来源</h2><p>带入当前工作流与明确参数，直接生成批量草稿，不重新配置整套图</p></div>
+          <button type="button" class="dlg-close" data-handoff-close aria-label="关闭">✕</button>
         </div>
         <div class="dlg-body">
-          <p id="recipeCustomError" class="writer-dialog-error" role="alert"></p>
-          <form id="recipeCustomForm" class="writer-dialog-form" novalidate>
-            <p class="writer-dialog-hint">普通使用只需要按用途确认三件事；节点与字段映射收在底部「仅专业配置」。所有目标必须手动指定，不按名称或唯一文本框自动绑定。</p>
-            <label>方案名称<input id="recipeCustomName" maxlength="160"></label>
-            <div class="sa-vis-card"><span class="sa-vis-ico" aria-hidden="true">图</span><div class="sa-vis-copy"><b>素材用在哪</b><p>每组图片交给哪个入口、范围与是否必填；底层节点见高级配置。</p><fieldset><legend>图片槽位与用途（仅勾选需要的入口）</legend><div id="recipeCustomMedia"></div></fieldset></div></div>
-            <div class="sa-vis-card"><span class="sa-vis-ico" aria-hidden="true">文</span><div class="sa-vis-copy"><b>提示词写到哪</b><p>生成好的提示词交给工作流里的哪个文本入口。</p><label>每项提示词写入的精确槽位<select id="recipePromptSlot"><option value="">请明确选择节点 / 字段</option></select></label></div></div>
-            <div class="sa-vis-card"><span class="sa-vis-ico" aria-hidden="true">▶</span><div class="sa-vis-copy"><b>结果怎么读</b><p>提词结果按完整文本取用，还是按指定字段取用。</p><label>提词库模板<select id="recipeCustomTemplate"></select></label><div class="super-agent-create-grid"><label>结果规则<select id="recipeResultType"><option value="text">完整文本</option><option value="json">按字段取用（JSON）</option></select></label><label>JSON 字段名（按字段取用时必填）<input id="recipeResultField" placeholder="prompt"></label></div></div></div>
-            <details class="super-agent-create-options"><summary>高级：节点与字段映射（仅专业配置）</summary>
-              <p id="recipeCustomWorkflow" class="writer-dialog-hint"></p>
-              <pre id="recipeCustomOverrides" class="recipe-snapshot"></pre>
-            </details>
-          </form>
+          <p id="superAgentHandoffError" class="writer-dialog-error" role="alert"></p>
+          <p class="writer-dialog-hint" id="superAgentHandoffWorkflow"></p>
+          <div class="sa-sec-head"><h3>这次用哪一份参数</h3><span>来源必须说清楚</span></div>
+          <div class="super-agent-mode-cards" id="superAgentHandoffModeCards" role="radiogroup" aria-label="参数来源（二选一）">
+            <button type="button" class="super-agent-mode-card active" data-handoff-mode="saved" role="radio" aria-checked="true"><span class="super-agent-mode-radio" aria-hidden="true"></span><span class="super-agent-mode-top">使用工作流已保存的默认值</span><p>沿用造梦机里已保存的工作流与参数；最稳妥，不改动原件。</p></button>
+            <button type="button" class="super-agent-mode-card" data-handoff-mode="current" role="radio" aria-checked="false"><span class="super-agent-mode-radio" aria-hidden="true"></span><span class="super-agent-mode-top">使用当前未保存调整</span><p>只作为本次任务的覆盖值；不静默丢弃、不改写原工作流，也不伪称已保存。</p></button>
+          </div>
+          <p class="writer-dialog-hint" id="superAgentHandoffChanges" role="status"></p>
+          <div id="superAgentHandoffPromptRow" hidden><label>提示词写入位（这个工作流有多个文本入口）<select id="superAgentHandoffPromptSlot"></select></label><p class="writer-dialog-hint">只确认一次；以后交接同一工作流会记住这个选择。</p></div>
+          <div class="sa-sec-head"><h3>将带入批量草稿</h3><span>只读摘要</span></div>
+          <div id="superAgentHandoffSummary"></div>
         </div>
         <div class="dlg-foot">
-          <span class="foot-hint">不会修改原工作流与造梦机草稿；已有任务保留旧方案版本。</span>
-          <div class="foot-btns"><button class="control-button primary" id="recipeCustomSave" type="submit" form="recipeCustomForm">仅保存方案并去准备素材</button></div>
+          <span class="foot-hint">不新建方案、不改写原工作流；草稿创建后仍需逐组审核、预检，再确认生成。</span>
+          <div class="foot-btns">
+            <button class="control-button" data-handoff-close type="button">取消</button>
+            <button id="superAgentHandoffConfirm" class="control-button primary" type="button">创建批量草稿</button>
+          </div>
         </div>
+      </dialog>
+      <dialog id="studioRuleEditorDialog" class="writer-dialog sa-dialog" aria-label="编辑提词规则">
+        <div class="dlg-head"><div class="dlg-head-copy"><h2>提词规则（另存副本）</h2></div><button id="studioRuleEditorCancel" class="dlg-close" type="button" aria-label="返回方案">✕</button></div><div class="dlg-body"><p id="studioRuleEditorError" class="writer-dialog-error" role="alert"></p><label>规则名称<input id="studioRuleEditorName" maxlength="160"></label><label>完整规则正文<textarea id="studioRuleEditorBody" rows="18"></textarea></label></div><div class="dlg-foot"><button id="studioRuleEditorSave" class="control-button primary" type="button">保存规则并返回方案</button></div>
       </dialog>
       <dialog id="recipeReviewDialog" class="writer-dialog sa-dialog" aria-labelledby="recipeReviewTitle">
         <div class="dlg-head">
@@ -1798,6 +1796,7 @@
         </div>
         <div class="dlg-body">
           <p class="writer-dialog-error" id="recipeReviewError" role="alert"></p>
+          <div id="recipeReviewPrecheck" hidden></div>
           <div id="recipeReviewBody"></div>
         </div>
         <div class="dlg-foot">
@@ -2071,6 +2070,28 @@
       </div>
     </aside>
   </div>
+
+  <!-- 任务总管与造梦机共用，不能放在会隐藏的工作台分页内。 -->
+  <dialog class="comfyui-import-dialog" id="comfyuiImportDialog" aria-label="导入工作流">
+    <form method="dialog" class="comfyui-import-form">
+      <h3>导入 ComfyUI 工作流</h3>
+      <p class="comfyui-import-reminder">请先在你自己的 ComfyUI 里完整跑出过结果，再用「导出（API）」把工作流存成 JSON 导入到这里。界面格式的文件（编辑器里保存的那种）这里用不了。</p>
+      <label class="comfyui-import-name">名字
+        <input id="comfyuiImportName" type="text" maxlength="120" placeholder="例如：Qwen 文生图（已跑通）">
+      </label>
+      <label class="comfyui-import-file">从文件导入
+        <input id="comfyuiImportFile" type="file" accept=".json,application/json">
+      </label>
+      <label class="comfyui-import-paste">或粘贴 JSON 内容
+        <textarea id="comfyuiImportText" rows="8" placeholder='{"3": {"class_type": "KSampler", "inputs": {…}}, …}'></textarea>
+      </label>
+      <div class="comfyui-import-actions">
+        <button class="control-button" type="button" id="comfyuiImportConfirm">导入</button>
+        <button class="control-button" type="button" id="comfyuiImportCancel">取消</button>
+      </div>
+      <p class="comfyui-import-error" id="comfyuiImportError" role="alert"></p>
+    </form>
+  </dialog>
 
   <dialog id="authDialog" class="auth-dialog">
     <form id="authForm" method="dialog">

@@ -3719,6 +3719,18 @@ function closeExportMenu() {
   $("#writerExportBtn")?.setAttribute("aria-expanded", "false");
 }
 
+// 手机端导出菜单是 fixed 定位（页头操作条 overflow-x:auto 会把 absolute 下拉整体裁掉，
+// 2026-11-04 专查实测菜单完全不可见且点击穿透）：打开时按按钮实时落位，与拆书匠同款。
+function placeExportMenu() {
+  const menu = $("#writerExportMenu");
+  const btn = $("#writerExportBtn");
+  if (!menu || !btn) return;
+  const rect = btn.getBoundingClientRect();
+  menu.style.top = `${Math.round(rect.bottom + 4)}px`;
+  menu.style.right = `${Math.max(8, Math.round(window.innerWidth - rect.right))}px`;
+  menu.style.left = "auto";
+}
+
 // ============================================================
 // 事件接线
 // ============================================================
@@ -3798,7 +3810,10 @@ export function bindWriterEvents() {
     const menu = $("#writerExportMenu");
     if (!menu) return;
     const open = menu.hidden;
-    if (open) renderExportNote();
+    if (open) {
+      renderExportNote();
+      placeExportMenu();
+    }
     menu.hidden = !open;
     $("#writerExportBtn")?.setAttribute("aria-expanded", String(open));
   });
@@ -3816,6 +3831,13 @@ export function bindWriterEvents() {
     if (event.target.closest("#writerExportMenu, #writerExportBtn")) return;
     closeExportMenu();
   });
+  // fixed 菜单会随页面滚动漂离锚点：滚动（含菜单外容器）或改窗直接关掉。
+  const closeWriterExportOnMove = () => {
+    const menu = $("#writerExportMenu");
+    if (menu && !menu.hidden) closeExportMenu();
+  };
+  document.addEventListener("scroll", closeWriterExportOnMove, { capture: true, passive: true });
+  window.addEventListener("resize", closeWriterExportOnMove);
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     const menu = $("#writerExportMenu");

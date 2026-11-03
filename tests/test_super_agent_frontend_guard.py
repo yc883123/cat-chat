@@ -116,7 +116,7 @@ class SuperAgentDialogGuard(unittest.TestCase):
 
     def test_five_dialogs_use_sa_dialog_container(self):
         html = _index()
-        for dialog_id in ("superAgentRecipeDialog", "superAgentRecipeCustomDialog", "recipeReviewDialog",
+        for dialog_id in ("superAgentRecipeDialog", "superAgentHandoffDialog", "recipeReviewDialog",
                           "superAgentResultDialog", "superAgentCreateDialog"):
             self.assertRegex(html, rf'id="{dialog_id}" class="[^"]*\bsa-dialog\b',
                              f"{dialog_id} 缺少 .sa-dialog 容器类")
@@ -149,9 +149,8 @@ class SuperAgentDialogGuard(unittest.TestCase):
         self.assertIn('type="submit" form="superAgentCreateForm"', html)
         self.assertGreaterEqual(html.count('form="superAgentCreateForm"'), 3)
         self.assertIn('type="submit" form="superAgentRecipeForm"', html)
-        self.assertIn('type="submit" form="recipeCustomForm"', html)
         self.assertIn('method="dialog"', html)
-        for close_id in ("superAgentCreateClose", "recipeCustomClose", "superAgentResultClose"):
+        for close_id in ("superAgentCreateClose", "superAgentResultClose", "superAgentHandoffConfirm"):
             self.assertIn(f'id="{close_id}"', html, f"JS 按绑定依赖的关闭按钮 id 丢失：{close_id}")
 
 

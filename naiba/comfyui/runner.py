@@ -614,8 +614,13 @@ class ComfyUIRunner:
                     continue
                 config = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
                 choices = spec[0] if isinstance(spec[0], list) else config.get("options")
-                if isinstance(choices, list) and value not in choices:
-                    raise ValueError(f"节点 {node_id} 输入 {field} 不在可用选项中")
+                if isinstance(choices, list):
+                    # COMFY_DYNAMICCOMBO_V3 的 options 是「{key, inputs}」字典数组；
+                    # 只比对 key，不把整个字典当选项字符串误杀合法值（ComfyUI 0.43
+                    # 起部分节点改用动态枚举，例如 BlockSparseAttention.selection）。
+                    choices = [entry.get("key") if isinstance(entry, dict) else entry for entry in choices]
+                    if value not in choices:
+                        raise ValueError(f"节点 {node_id} 输入 {field} 不在可用选项中")
 
     @staticmethod
     def _remove_unselected_optional_media(
@@ -630,6 +635,7 @@ class ComfyUIRunner:
             if item.get("path")
         }
         schemas = NodeSchemaProvider(base)
+        removed_sources: set[str] = set()
         for node in workflow.values():
             if not isinstance(node, dict):
                 continue
@@ -648,11 +654,20 @@ class ComfyUIRunner:
                 if not isinstance(source_inputs, dict):
                     continue
                 source_class = str(source.get("class_type") or "")
+                loader_id = source_id
+                if source_class == "GetVideoComponents":
+                    video_connection = source_inputs.get("video")
+                    if not isinstance(video_connection, list) or len(video_connection) != 2:
+                        continue
+                    loader_id = str(video_connection[0])
+                    loader = workflow.get(loader_id) or {}
+                    source_class = str(loader.get("class_type") or "")
+                    source_inputs = loader.get("inputs") or {}
                 media_fields = [
                     key for key in source_inputs
                     if media_kind_of_field(source_class, str(key))
                 ]
-                if len(media_fields) == 1 and (source_id, media_fields[0]) not in selected:
+                if len(media_fields) == 1 and (loader_id, media_fields[0]) not in selected:
                     media_connections.append((str(field_name), source_id))
             if not media_connections:
                 continue
@@ -664,6 +679,23 @@ class ComfyUIRunner:
                 # Autogrow 必须校验前缀/编号范围/min，模棱两可的不移除。
                 if input_is_optional(declarations, field_name) is True:
                     inputs.pop(field_name, None)
+                    removed_sources.add(source_id)
+        # Only prune the exact optional loader edges removed above; never trim
+        # arbitrary disconnected nodes or a loader still used by another branch.
+        used = {str(value[0]) for node in workflow.values()
+                for value in (node.get("inputs") or {}).values()
+                if isinstance(value, list) and len(value) == 2}
+        for source_id in removed_sources - used:
+            removed = workflow.pop(source_id, None) or {}
+            if removed.get("class_type") == "GetVideoComponents":
+                connection = (removed.get("inputs") or {}).get("video")
+                if isinstance(connection, list) and len(connection) == 2:
+                    removed_sources.add(str(connection[0]))
+        used = {str(value[0]) for node in workflow.values()
+                for value in (node.get("inputs") or {}).values()
+                if isinstance(value, list) and len(value) == 2}
+        for source_id in removed_sources - used:
+            workflow.pop(source_id, None)
 
     def _apply_media(
         self,

@@ -6,9 +6,12 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -284,6 +287,7 @@ class ComfyUIService:
             "id": self.store.new_workflow_id(),
             "name": name,
             "prompt": prompt,
+            "workflow_fingerprint": ComfyUIStore.payload_hash(prompt),
             "params": self._scan_params_current(prompt),
             "params_version": PARAMS_SCHEMA_VERSION,
             "created_at": stamp,
@@ -291,6 +295,95 @@ class ComfyUIService:
         }
         self.store.save_workflow(entry)
         return {"ok": True, "workflow": entry}, 201
+
+    def api_workflow_save_as(self, workflow_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """另存当前安全配置；不执行、不接受图/目标/凭据，不复用生成时的 seed 转换。"""
+        if not isinstance(body, dict) or set(body) != {"name", "workflow_fingerprint", "overrides"}:
+            return {"error": "另存只接受 name、workflow_fingerprint、overrides"}, 400
+        name = body["name"]
+        if not isinstance(name, str) or not 1 <= len(name.strip()) <= 120 or any(ord(c) < 32 for c in name):
+            return {"error": "名称须为 1–120 字的普通文本"}, 400
+        fingerprint = body["workflow_fingerprint"]
+        if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            return {"error": "workflow_fingerprint 格式不正确，请重新读取工作流"}, 400
+        overrides = body["overrides"]
+        if not isinstance(overrides, list) or len(overrides) > 2000:
+            return {"error": "overrides 必须是有界参数数组"}, 400
+        entry = self.store.get_workflow(workflow_id)
+        if entry is None:
+            return {"error": "工作流不存在或已被删除"}, 404
+        source = entry.get("prompt")
+        if not isinstance(source, dict) or not source:
+            return {"error": "源工作流无有效节点图"}, 400
+        if ComfyUIStore.payload_hash(source) != fingerprint:
+            return {"error": "工作流版本已变化，请重新载入后另存"}, 409
+        prompt = copy.deepcopy(source)
+        slots = {(slot["node_id"], slot["field_name"]): slot for slot in scan_params(source)}
+        provider = NodeSchemaProvider(client.normalize_base_url(self.app.config.data.get("comfyui_url")))
+        seen = set()
+        for item in overrides:
+            if not isinstance(item, dict) or set(item) != {"node_id", "field_name", "value"}:
+                return {"error": "覆盖项只接受 node_id、field_name、value"}, 400
+            node_id, field = item["node_id"], item["field_name"]
+            if not isinstance(node_id, str) or not isinstance(field, str):
+                return {"error": "node_id 和 field_name 必须是字符串"}, 400
+            key = (node_id, field)
+            slot = slots.get(key)
+            if key in seen or slot is None or slot["field_type"] in {"image", "video", "audio"}:
+                return {"error": "覆盖参数重复、不存在或属于受管媒体入口"}, 400
+            seen.add(key)
+            try:
+                declarations = provider.node_inputs(slot["class_type"])
+            except Exception:  # noqa: BLE001 - authoritative schema must fail closed
+                declarations = None
+            decl = (declarations or {}).get(field)
+            if not isinstance(decl, dict) or decl.get("kind") == "unknown":
+                return {"error": f"无法取得 {node_id} · {field} 的实时权威声明，未保存"}, 503
+            value = item["value"]
+            kind = decl.get("kind")
+            valid = False
+            if kind == "combo":
+                valid = isinstance(value, str) and value in (decl.get("candidates") or [])
+            elif kind == "bool":
+                valid = type(value) is bool
+            elif kind == "number":
+                low, high = decl.get("min"), decl.get("max")
+                def finite(number: Any) -> bool:
+                    return type(number) in (int, float) and (type(number) is int or math.isfinite(number))
+                if not finite(low) or not finite(high) or low > high:
+                    return {"error": f"{node_id} · {field} 缺少可信数值范围，未保存"}, 503
+                valid = finite(value) and low <= value <= high
+                if decl.get("number_type") == "INT" or slot["field_type"] == "seed":
+                    valid = valid and type(value) is int
+                if slot["field_type"] == "seed":
+                    valid = valid and value >= 0
+            # STRING (even multiline), code, URLs and paths are never configuration overrides.
+            if not valid:
+                return {"error": f"{node_id} · {field} 不是允许保存的枚举成员或严格类型范围值"}, 400
+            prompt[node_id]["inputs"][field] = value
+        # Re-read before writing so a concurrent source edit/deletion cannot silently fork stale data.
+        current = self.store.get_workflow(workflow_id)
+        if current is None or ComfyUIStore.payload_hash(current.get("prompt") or {}) != fingerprint:
+            return {"error": "工作流版本已变化，请重新载入后另存"}, 409
+        stamp = int(time.time() * 1000)
+        params = scan_params(prompt)
+        try:
+            enrich_slots(params, provider)
+        except Exception:  # noqa: BLE001 - metadata only; changed values already checked above
+            pass
+        saved = {"id": self.store.new_workflow_id(), "name": name.strip(), "prompt": prompt,
+                 "params": params, "params_version": PARAMS_SCHEMA_VERSION,
+                 "created_at": stamp, "updated_at": stamp}
+        for key in ("visible_params", "param_order"):
+            if key in entry:
+                saved[key] = copy.deepcopy(entry[key])
+        saved["workflow_fingerprint"] = ComfyUIStore.payload_hash(prompt)
+        try:
+            if not self.store.save_workflow_as(workflow_id, fingerprint, saved):
+                return {"error": "工作流版本已变化，请重新载入后另存"}, 409
+        except (OSError, ComfyUIStoreError) as exc:
+            return {"error": f"另存工作流失败：{exc}"}, 500
+        return {"ok": True, "workflow": saved}, 201
 
     def api_workflow_params_set(self, workflow_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         """保存这份工作流在主表单显示哪些参数、按什么顺序显示（按工作流粒度持久化）。
@@ -347,6 +440,12 @@ class ComfyUIService:
         entry = self.store.get_workflow(workflow_id)
         if entry is None:
             return {"error": "工作流不存在或已被删除"}, 404
+        try:
+            recipes = getattr(self.app, "recipes", None)
+            if recipes is not None and recipes.workflow_referenced(workflow_id):
+                return {"error": "工作流仍被制作方案或批次引用，不能删除；请另存新版本"}, 409
+        except Exception:  # noqa: BLE001 - reference lookup failure must not permit deletion
+            return {"error": "无法确认制作方案引用，暂不删除工作流"}, 503
         try:
             ok, reason = self.jobs.delete_workflow(workflow_id)
         except (OSError, ComfyUIStoreError) as exc:

@@ -1026,8 +1026,14 @@ class NaibaChatApp:
     def api_super_agent_recipe(self, thread_id: str) -> tuple[dict[str, Any], int]:
         return self._recipe_api(lambda: self.recipes.detail(self._super_agent_owner(), thread_id))
 
+    def api_super_agent_recipe_clone_draft(self, thread_id: str) -> tuple[dict[str, Any], int]:
+        return self._recipe_api(lambda: self.recipes.clone_draft(self._super_agent_owner(), thread_id))
+
     def api_super_agent_recipe_action(self, thread_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         return self._recipe_api(lambda: self.recipes.action(self._super_agent_owner(), thread_id, body))
+
+    def api_super_agent_recipe_precheck(self, thread_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        return self._recipe_api(lambda: self.recipes.precheck(self._super_agent_owner(), thread_id, body))
 
     @staticmethod
     def _recipe_api(operation: Any, *, created: bool = False) -> tuple[dict[str, Any], int]:

@@ -991,6 +991,30 @@ async function syncStudioModel() {
 }
 
 
+// Shared rule editor: callers supply return callbacks; no cross-domain imports.
+let ruleEditorReturn = null;
+export function openStudioRuleEditor({ title = "我的提词规则", body = "", onSave = null, onCancel = null } = {}) {
+  ruleEditorReturn = { onSave, onCancel };
+  $("#studioRuleEditorName").value = title;
+  $("#studioRuleEditorBody").value = body;
+  $("#studioRuleEditorError").textContent = "";
+  $("#studioRuleEditorDialog").showModal();
+}
+async function saveStudioRuleEditor() {
+  const title = $("#studioRuleEditorName").value.trim();
+  const body = $("#studioRuleEditorBody").value;
+  if (!title || !body.trim()) { $("#studioRuleEditorError").textContent = "请填写规则名称和正文。"; return; }
+  $("#studioRuleEditorSave").disabled = true;
+  try {
+    const result = await api("/api/studio/custom/import", { method: "POST", body: { filename: `${title}.txt`, content: body } });
+    studio.customLoaded = false;
+    const callback = ruleEditorReturn?.onSave;
+    ruleEditorReturn = null; $("#studioRuleEditorDialog").close();
+    await callback?.(result.item);
+  } catch (error) { $("#studioRuleEditorError").textContent = `保存失败：${error.message}`; }
+  finally { $("#studioRuleEditorSave").disabled = false; }
+}
+
 async function saveCustomEdit() {
   if (!studio.customId) return;
   const editor = $("#studioBodyEditor");
@@ -2305,6 +2329,10 @@ async function confirmStudioHandoff() {
 // ============================================================
 
 export function bindStudioEvents() {
+  $("#studioRuleEditorSave")?.addEventListener("click", () => void saveStudioRuleEditor());
+  const cancelRule = () => { const callback = ruleEditorReturn?.onCancel; ruleEditorReturn = null; $("#studioRuleEditorDialog").close(); callback?.(); };
+  $("#studioRuleEditorCancel")?.addEventListener("click", cancelRule);
+  $("#studioRuleEditorDialog")?.addEventListener("cancel", (event) => { event.preventDefault(); cancelRule(); });
   // 工作台自己的手机导航入口（对话顶栏在工作台态整体退场，汉堡按钮由本模块提供）。
   $("#studioOpenSidebar")?.addEventListener("click", () => openSidebar());
   // 桌面端侧栏收起后，对话顶栏的 #expandSidebar 已随顶栏退场；用本模块顶栏的同款按钮恢复。

@@ -163,16 +163,16 @@ def parse_input_decl(spec: Any) -> dict[str, Any] | None:
     config = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
     options = config.get("options")
     if isinstance(options, (list, tuple)):
-        candidates = [str(item) for item in options
-                      if isinstance(item, str) and str(item).strip()]
-        if candidates:
-            return {"kind": "combo", "candidates": candidates, "multiline": False}
+        if options and all(isinstance(item, str) and item.strip() for item in options):
+            return {"kind": "combo", "candidates": list(options), "multiline": False}
+        return None
     upper = str(first).upper()
     if upper == "STRING":
         return {"kind": "text", "candidates": None,
                 "multiline": bool(config.get("multiline"))}
     if upper in ("INT", "FLOAT", "NUMBER"):
-        return {"kind": "number", "candidates": None, "multiline": False}
+        return {"kind": "number", "candidates": None, "multiline": False,
+                "number_type": upper, "min": config.get("min"), "max": config.get("max")}
     if upper in ("BOOLEAN", "BOOL"):
         return {"kind": "bool", "candidates": None, "multiline": False}
     return None

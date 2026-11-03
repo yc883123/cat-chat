@@ -19,7 +19,12 @@ from __future__ import annotations
 
 import argparse
 import copy
+from email import policy
+from email.parser import BytesParser
 import io
+import math
+import struct
+import wave
 import ipaddress
 import json
 import re
@@ -116,16 +121,27 @@ def simulated_media(root_dir, mode="auto"):
     return clip.read_bytes(), {"type": "video", "mime": "video/mp4", **metadata, "decode_verified": True}
 
 
-def deterministic_prompt(mode="i2v", image_count=1):
+def wav_bytes(index=0):
+    """One second of typed PCM audio, generated entirely in memory."""
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as audio:
+        audio.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        audio.writeframes(b"".join(struct.pack("<h", int(3000 * math.sin(2 * math.pi * (440 + index * 40) * n / 16000)))
+                                   for n in range(16000)))
+    return buffer.getvalue()
+
+
+def deterministic_prompt(mode="i2v", image_count=1, video_count=0, audio_count=0):
     """Canonical catalog-compatible 3/6-section output, no model/tool emulation."""
     if mode == "r2v":
-        definitions = "\n".join(
-            f"<Subject {i}> is the golden rectangular object and blue background from <Picture {i}>."
-            for i in range(1, image_count + 1))
-        retention = "\n".join(
-            f"<Subject {i}> in [Shot 1]: fully_preserved - Maintain the same visible shape and colors."
-            for i in range(1, image_count + 1))
-        subjects = ", ".join(f"<Subject {i}>" for i in range(1, image_count + 1))
+        references = ([f"<Picture {i}>" for i in range(1, image_count + 1)] +
+                      [f"<Video {i}>" for i in range(1, video_count + 1)] +
+                      [f"<Audio {i}>" for i in range(1, audio_count + 1)])
+        definitions = "\n".join(f"<Subject {i}> is the reference subject from {ref}."
+                                for i, ref in enumerate(references, 1)) or "N/A — no reference media provided."
+        retention = "\n".join(f"<Subject {i}> in [Shot 1]: fully_preserved - Maintain the reference identity and rhythm."
+                              for i in range(1, len(references) + 1)) or "N/A — no reference media provided."
+        subjects = ", ".join(f"<Subject {i}>" for i in range(1, len(references) + 1)) or "a golden rectangle on a blue background"
         return (f"subject_definitions: {definitions}\n\n"
                 f"summary: [reference generation] Present {subjects} in a calm continuous composition.\n\n"
                 f"retention_analysis: {retention}\n\n"
@@ -193,7 +209,9 @@ def node_schemas(graphs):
         for node in graph.values():
             cls = node["class_type"]
             row = schemas.setdefault(cls, {"input": {"required": {}, "optional": {}},
-                                           "output": ["IMAGE"], "name": cls, "category": "fixture"})
+                                           "output": ({"LoadVideo": ["VIDEO"], "LoadAudio": ["AUDIO"],
+                                                       "GetVideoComponents": ["IMAGE", "AUDIO", "FLOAT"]}.get(cls, ["IMAGE"])),
+                                           "name": cls, "category": "fixture"})
             for name, value in node.get("inputs", {}).items():
                 kind = "STRING"
                 if isinstance(value, bool):
@@ -203,11 +221,28 @@ def node_schemas(graphs):
                 elif isinstance(value, float):
                     kind = "FLOAT"
                 elif isinstance(value, list):
-                    kind = "IMAGE" if "image" in name or name == "first_frame" else "*"
-                decl = [kind, {"default": value}] if not isinstance(value, list) else [kind]
+                    kind = ("AUDIO" if "audio" in name else
+                            "IMAGE" if "image" in name or name == "first_frame" or name.startswith("ref_videos.") else
+                            "VIDEO" if cls == "GetVideoComponents" and name == "video" else "*")
+                config = {"default": value}
+                if kind in {"INT", "FLOAT"}:
+                    config.update({"min": 0, "max": 2**64 - 1 if name in {"seed", "noise_seed"} else 10000})
+                decl = [kind, config] if not isinstance(value, list) else [kind]
                 if cls == "LoadImage" and name == "image":
-                    decl = [[f"recipe_input_{i}.png" for i in range(1, 7)], {"image_upload": True}]
-                group = "optional" if name.startswith("ref_images.ref_image_") and name != "ref_images.ref_image_0" else "required"
+                    decl = [[f"recipe_input_{i}.png" for i in range(1, 10)], {"image_upload": True}]
+                if cls == "LoadVideo" and name == "file":
+                    decl = [[f"recipe_video_{i}.mp4" for i in range(1, 4)], {"video_upload": True}]
+                if cls == "LoadAudio" and name == "audio":
+                    decl = [[f"recipe_audio_{i}.wav" for i in range(1, 4)], {"audio_upload": True}]
+                if (cls, name) in {("VAELoader", "vae_name"), ("UNETLoader", "unet_name"),
+                                   ("CLIPLoader", "clip_name"), ("LoraLoaderModelOnly", "lora_name"),
+                                   ("KSampler", "sampler_name"), ("KSampler", "scheduler"),
+                                   ("KSamplerAdvanced", "sampler_name"), ("KSamplerAdvanced", "scheduler")}:
+                    decl = [[value, "fixture_alternative.safetensors" if "name" in name and name != "sampler_name" else "fixture_alternative"], {}]
+                group = "optional" if name.startswith(("ref_images.", "ref_videos.", "ref_audios.", "ref_video_audios.")) else "required"
+                existing = row["input"][group].get(name)
+                if existing and isinstance(existing[0], list) and isinstance(decl[0], list):
+                    decl[0] = list(dict.fromkeys(existing[0] + decl[0]))
                 row["input"][group][name] = decl
     return schemas
 
@@ -285,10 +320,32 @@ class LocalServicesHandler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         state = self.state
         if path == "/comfy/upload/image":
-            number = state.count("upload", {"bytes": len(raw), "content_type": self.headers.get("Content-Type")})
-            name = f"fixture_upload_{number}.png"
+            content_type = self.headers.get("Content-Type", "")
+            message = BytesParser(policy=policy.default).parsebytes(
+                b"Content-Type: " + content_type.encode("ascii", "replace") + b"\r\nMIME-Version: 1.0\r\n\r\n" + raw)
+            parts = list(message.iter_parts()) if message.is_multipart() else []
+            upload = next((part for part in parts if part.get_filename()), None)
+            original = upload.get_filename() if upload is not None else ""
+            extension = Path(original).suffix.lower()
+            media = {".png": "image", ".jpg": "image", ".mp4": "video", ".wav": "audio"}.get(extension)
+            if not media:
+                return self.reply({"error": "fixture upload requires PNG/JPEG, MP4 or WAV"}, 400)
+            data = upload.get_payload(decode=True)
+            if media == "audio":
+                with wave.open(io.BytesIO(data), "rb") as audio:
+                    audio.readframes(audio.getnframes())
+            if media == "image":
+                from PIL import Image
+                with Image.open(io.BytesIO(data)) as image:
+                    image.load()
+            if media == "video" and b"ftyp" not in data[:32]:
+                return self.reply({"error": "fixture expected MP4 bytes"}, 400)
+            number = state.count("upload", {"bytes": len(data), "content_type": upload.get_content_type(),
+                                             "name": original, "media": media})
+            name = f"fixture_upload_{number}{extension}"
+            loader, field = {"image": ("LoadImage", "image"), "video": ("LoadVideo", "file"), "audio": ("LoadAudio", "audio")}[media]
             with state.lock:
-                state.schemas["LoadImage"]["input"]["required"]["image"][0].append(name)
+                state.schemas[loader]["input"]["required"][field][0].append(name)
             return self.reply({"name": name, "subfolder": "", "type": "input"})
         try:
             body = json.loads(raw or b"{}")
@@ -334,8 +391,11 @@ class LocalServicesHandler(BaseHTTPRequestHandler):
                 return self.reply({"error": {"message": "fixture intentional reverse failure"}}, 400)
             serialized = json.dumps(body.get("messages") or [], ensure_ascii=False)
             mode = "r2v" if "subject_definitions:" in serialized else "i2v"
-            count = max(1, min(6, len(re.findall(r'"type"\s*:\s*"image_url"', serialized))))
-            text = deterministic_prompt(mode, count)
+            count = min(9, len(re.findall(r'"type"\s*:\s*"image_url"', serialized)))
+            # AV are described to the prompt model, never disguised as image_url payloads.
+            video_count = max([int(n) for n in re.findall(r"<Video (\d+)>", serialized)] or [0])
+            audio_count = max([int(n) for n in re.findall(r"<Audio (\d+)>", serialized)] or [0])
+            text = deterministic_prompt(mode, count, min(3, video_count), min(3, audio_count))
             if not body.get("stream"):
                 return self.reply({"id": f"fixture-{number}", "choices": [{"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
                                    "usage": {"prompt_tokens": 30, "completion_tokens": 60, "total_tokens": 90}})
@@ -437,7 +497,10 @@ def build_app(root_dir: Path, port=0, *, blocked=None, media_mode="auto"):
         imported, status = app.comfyui.api_workflow_create({"name": "LOCAL · 可编辑 H3 配方工作流", "workflow": custom_graph})
         if status != 201:
             raise RuntimeError(f"custom workflow seed failed: {imported}")
-        images = [store_uploaded_file(png_bytes(i), f"recipe_input_{i + 1}.png", paths.data_dir) for i in range(6)]
+        images = [store_uploaded_file(png_bytes(i), f"recipe_input_{i + 1}.png", paths.data_dir) for i in range(9)]
+        audios = [store_uploaded_file(wav_bytes(i), f"recipe_audio_{i + 1}.wav", paths.data_dir) for i in range(3)]
+        videos = ([store_uploaded_file(state.mp4, f"recipe_video_{i + 1}.mp4", paths.data_dir) for i in range(3)]
+                  if state.mp4 else [])
         recipes, status = app.api_super_agent_recipes()
         if status != 200:
             raise RuntimeError(f"recipe catalog failed: {recipes}")
@@ -466,6 +529,20 @@ def build_app(root_dir: Path, port=0, *, blocked=None, media_mode="auto"):
             create_payloads.append(payload)
         if len(drafts) != 2:
             raise RuntimeError("expected I2V and R2V builtin recipes")
+        mixed_payload = copy.deepcopy(next(p for p in create_payloads if p["recipe_id"] == "minimax_h3_r2v"))
+        mixed_payload.update({"title": "LOCAL 多媒体参考 · 可复制草稿", "request_id": "fixture-seed-mixed"})
+        mixed_refs = ([{"role": "picture_1", "path": images[0]["path"], "name": images[0]["name"]}] +
+                      ([{"role": "video_1", "path": videos[0]["path"], "name": videos[0]["name"],
+                         "description": "A locally generated blue and gold moving test pattern."}] if videos else []) +
+                      [{"role": "audio_1", "path": audios[0]["path"], "name": audios[0]["name"],
+                        "description": "A locally generated steady 440 Hz sine tone."}])
+        mixed_payload["items"] = [{"name": "离线多媒体一项", "source_path": "fixture-set/mixed", "media": mixed_refs,
+                                   "requirements": "Preserve the reference object and gentle rhythm. No speech."}]
+        mixed_created, status = app.api_super_agent_create_recipe_batch(mixed_payload)
+        if status != 201:
+            raise RuntimeError(f"mixed recipe seed failed: {mixed_created}")
+        mixed_draft = {"recipe_id": mixed_payload["recipe_id"], "thread_id": mixed_created["thread_id"],
+                       "batch_id": mixed_created["batch"]["id"], "title": mixed_payload["title"]}
         server = AppHTTPServer(("127.0.0.1", port), RequestHandler, app)
         server.daemon_threads = True
         state.server = server
@@ -473,7 +550,11 @@ def build_app(root_dir: Path, port=0, *, blocked=None, media_mode="auto"):
         fixture = {"root": str(root_dir), "app_url": app_url, "base": app_url,
                    "control_url": base + "/__fixture", "control_base": base, "control_token": state.token,
                    "model_url": base + "/v1", "model_key": MODEL_KEY, "model_name": MODEL_ID,
-                   "comfyui_url": base + "/comfy", "images": images, "drafts": drafts,
+                   "comfyui_url": base + "/comfy", "images": images, "audios": audios, "videos": videos,
+                   "reference_limits": {"image": 9, "video": 3, "audio": 3},
+                   "audio_metadata": {"mime": "audio/wav", "codec": "pcm_s16le", "sample_rate": 16000,
+                                      "duration_seconds": 1, "simulated": True},
+                   "drafts": drafts, "mixed_draft": mixed_draft, "mixed_payload": mixed_payload,
                    "draft_thread_id": drafts[0]["thread_id"], "create_payloads": create_payloads,
                    "custom_workflow_id": imported["workflow"]["id"], "custom_workflow": custom_graph,
                    "custom_prompt_slot": {"node_id": "105_104", "field_name": "prompt"},

@@ -21,7 +21,8 @@ _REF_FIELDS = ("subject_definitions", "summary", "retention_analysis", "detailed
 _I2V_INSTRUCTION = ("For the target video, at 0.00 seconds into the target video, "
                     "<Picture 1> (from [Shot 1]) is fully referenced.")
 _REF_LOADERS = ("137", "139", "recipe_ref_image_3", "recipe_ref_image_4",
-                "recipe_ref_image_5", "recipe_ref_image_6")
+                "recipe_ref_image_5", "recipe_ref_image_6", "recipe_ref_image_7",
+                "recipe_ref_image_8", "recipe_ref_image_9")
 _MAX_OUTPUT_CHARS = 50000
 
 
@@ -54,17 +55,23 @@ def _load_catalog() -> list[dict[str, Any]]:
         provenance["license_asset"] = "recipe_assets/LICENSE"
         provenance["verification_scope"] = "Offline source/manifest/graph verification; not server/model execution."
         slots = ([{"role": "first_frame", "label": "首帧 / <Picture 1>", "node_id": "114",
-                   "field_name": "image", "scope": "item", "required": True}]
+                   "field_name": "image", "media": "image", "scope": "item", "required": True}]
                  if mode == "i2v" else
                  [{"role": f"picture_{i + 1}", "label": f"参考图 {i + 1} / <Picture {i + 1}>",
-                   "node_id": node, "field_name": "image", "scope": "item", "required": i == 0}
-                  for i, node in enumerate(_REF_LOADERS)])
+                   "node_id": node, "field_name": "image", "media": "image", "scope": "item", "required": False}
+                  for i, node in enumerate(_REF_LOADERS)] +
+                 [{"role": f"{kind}_{i}", "label": f"<{label} {i}>",
+                   "node_id": f"recipe_ref_{kind}_{i}", "field_name": field,
+                   "media": kind, "scope": "item", "required": False}
+                  for kind, label, field in (("video", "Video", "file"), ("audio", "Audio", "audio"))
+                  for i in range(1, 4)])
         recipes.append({
             "id": f"minimax_h3_{mode}",
-            "name": "MiniMax H3 首帧生视频（官方）" if mode == "i2v" else "MiniMax H3 图片参考生视频（官方）",
+            "name": "MiniMax H3 首帧生视频（官方派生）" if mode == "i2v" else "MiniMax H3 多媒体参考生视频（官方派生）",
+            "version": 2, "input_mode": "script",
             "description": ("每张图片生成一条视频。先用图片和剧本生成可编辑的提示词，确认后再制作视频；保留原语言台词。"
                             if mode == "i2v" else
-                            "每组选择 1–6 张参考图，共同生成一条视频。提示词由模板生成，不自动拆分剧本。")
+                            "每组可选 0–9 张图片、0–3 段视频、0–3 段音频；音视频仅以用户描述交给提词模型，原件交给 H3。不自动拆分剧本。")
                            + "请求时长 4–15 秒，官方帧数取整可能使实际视频略长；需本机模型和节点，未做真实生成验收。",
             "mode": mode, "workflow": graph, "workflow_fingerprint": fingerprint,
             "provenance": provenance,
@@ -72,9 +79,9 @@ def _load_catalog() -> list[dict[str, Any]]:
                             "field_name": "prompt" if mode == "i2v" else "value"},
             "media_slots": slots,
             "duration_slot": {"node_id": "105_111" if mode == "i2v" else "132", "field_name": "value"},
-            "template": {"id": f"recipe_minimax_h3_{mode}_v1",
+            "template": {"id": f"recipe_minimax_h3_{mode}_v1" if mode == "i2v" else "recipe_minimax_h3_r2v_v2",
                          "body": (_ASSETS / f"h3_{mode}.prompt.txt").read_text(encoding="utf-8"),
-                         "result_rule": "h3_i2v_single_v1" if mode == "i2v" else "h3_ref2va_single_v1"},
+                         "result_rule": "h3_i2v_single_v1" if mode == "i2v" else "h3_ref2va_single_v2"},
         })
     return recipes
 
@@ -95,25 +102,43 @@ def get_recipe(recipe_id: str) -> dict[str, Any]:
 
 
 def _valid_image_count(recipe: dict[str, Any], image_count: Any) -> bool:
+    maximum = 9 if recipe.get("version", 1) >= 2 else 6
+    minimum = 0 if recipe.get("mode") == "r2v" and recipe.get("version", 1) >= 2 else 1
     return (isinstance(image_count, int) and not isinstance(image_count, bool)
-            and 1 <= image_count <= len(recipe["media_slots"]))
+            and minimum <= image_count <= (maximum if recipe.get("mode") == "r2v" else 1))
 
 
-def prepare_workflow(recipe_id: str, *, image_count: int) -> dict[str, Any]:
+def prepare_workflow(recipe_id: str, *, image_count: int, video_count: int = 0,
+                     audio_count: int = 0, recipe_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
     """Derive a deterministic per-count API graph, deleting unused reference tails.
 
     Count alone cannot verify an actual media list. The caller MUST reject sparse
     supplied roles (e.g. picture_1 + picture_3), never compact/relabel user assets.
     Freeze both the fixed recipe fingerprint and this variant's fingerprint.
     """
-    recipe = get_recipe(recipe_id)
+    recipe = deepcopy(recipe_snapshot) if recipe_snapshot is not None else get_recipe(recipe_id)
     if not _valid_image_count(recipe, image_count):
-        raise ValueError("Image count must be exactly 1 for I2V or 1–6 for R2V")
+        raise ValueError("Invalid image count for the frozen recipe version")
+    if any(isinstance(n, bool) or not isinstance(n, int) or not 0 <= n <= 3 for n in (video_count, audio_count)):
+        raise ValueError("Invalid video/audio count")
     graph = recipe["workflow"]
     if recipe["mode"] == "r2v":
-        for index in range(image_count, len(_REF_LOADERS)):
-            graph.pop(_REF_LOADERS[index])
-            graph["136"]["inputs"].pop(f"ref_images.ref_image_{index}")
+        counts = {"image": image_count, "video": video_count, "audio": audio_count}
+        seen = {k: 0 for k in counts}
+        for slot in recipe["media_slots"]:
+            kind = slot.get("media", "image")
+            seen[kind] += 1
+            if seen[kind] <= counts[kind]:
+                continue
+            node_id = slot["node_id"]
+            removed = {node_id, node_id + "_components"}
+            for removed_id in removed:
+                graph.pop(removed_id, None)
+            for node in graph.values():
+                inputs = node.get("inputs") or {}
+                for field, connection in list(inputs.items()):
+                    if isinstance(connection, list) and len(connection) == 2 and str(connection[0]) in removed:
+                        inputs.pop(field)
     return graph
 
 
@@ -157,7 +182,8 @@ def _timeline_errors(body: str, duration: float, errors: list[str]) -> None:
 
 
 def validate_output(recipe_id: str, raw: Any, *, image_count: int,
-                    duration_seconds: float) -> dict[str, Any]:
+                    duration_seconds: float, video_count: int = 0, audio_count: int = 0,
+                    recipe_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
     """Fail closed on ambiguous output; retain raw verbatim, never repair/truncate.
 
     This deterministic format/timeline/reference gate is not semantic verification
@@ -166,12 +192,12 @@ def validate_output(recipe_id: str, raw: Any, *, image_count: int,
     errors: list[str] = []
     result = {"valid": False, "raw": raw, "text": "", "errors": errors}
     try:
-        recipe = get_recipe(recipe_id)
+        recipe = deepcopy(recipe_snapshot) if recipe_snapshot is not None else get_recipe(recipe_id)
     except ValueError:
         errors.append("Unknown fixed recipe.")
         return result
     if not _valid_image_count(recipe, image_count):
-        errors.append("Invalid image count; require contiguous 1–6 pictures or exactly one first frame.")
+        errors.append("Invalid image count for the frozen recipe version (v2 R2V: 0–9; v1: 1–6; I2V: one).")
     duration_valid = (isinstance(duration_seconds, (int, float)) and not isinstance(duration_seconds, bool)
                       and 4 <= duration_seconds <= 15 and math.isfinite(duration_seconds))
     if not duration_valid:
@@ -217,6 +243,12 @@ def validate_output(recipe_id: str, raw: Any, *, image_count: int,
         errors.append("Descriptions must be English; original dialogue and quoted visible text are exempt.")
     labels = list(re.finditer(r"<\s*(Picture|Audio|Video|Subject)\b([^>]*)>", text, flags=re.I))
     picture_numbers = set()
+    media_numbers = {"Audio": set(), "Video": set()}
+    multimodal = recipe.get("version", 1) >= 2 and recipe["mode"] == "r2v"
+    counts = {"Audio": audio_count, "Video": video_count}
+    for kind, count in counts.items():
+        if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= (3 if multimodal else 0):
+            errors.append("Invalid " + kind + " reference count.")
     subjects = set()
     for label in labels:
         canonical = re.fullmatch(r"<(Picture|Audio|Video|Subject) ([1-9]\d*)>", label[0])
@@ -224,32 +256,53 @@ def validate_output(recipe_id: str, raw: Any, *, image_count: int,
             errors.append("Malformed or noncanonical reference label: " + label[0])
             continue
         kind, number = canonical[1], int(canonical[2])
-        if kind in ("Audio", "Video") or (kind == "Subject" and recipe["mode"] == "i2v"):
-            errors.append("Unsupported reference type for this image recipe: " + kind)
+        if kind in ("Audio", "Video"):
+            media_numbers[kind].add(number)
+            if not multimodal:
+                errors.append("Unsupported reference type for this recipe: " + kind)
+        elif kind == "Subject" and recipe["mode"] == "i2v":
+            errors.append("Unsupported reference type for this recipe: " + kind)
         elif kind == "Picture":
             picture_numbers.add(number)
         elif kind == "Subject":
             subjects.add(number)
     if _valid_image_count(recipe, image_count) and picture_numbers != set(range(1, image_count + 1)):
         errors.append("Picture labels must match all supplied images exactly as contiguous 1..image_count.")
+    for kind, numbers in media_numbers.items():
+        if isinstance(counts[kind], int) and not isinstance(counts[kind], bool) and numbers != set(range(1, counts[kind] + 1)):
+            errors.append(kind + " labels must match supplied references exactly.")
     if recipe["mode"] == "r2v":
         definitions = sections["subject_definitions"]
         defined_subjects = set(map(int, re.findall(r"(?m)^<Subject ([1-9]\d*)>", definitions)))
         if subjects != defined_subjects:
             errors.append("Every Subject label must be defined at the start of its own definition line.")
-        def_ids = re.findall(r"(?m)^<(Subject|Picture) ([1-9]\d*)>", definitions)
+        def_ids = re.findall(r"(?m)^<(Subject|Picture|Video|Audio) ([1-9]\d*)>" if multimodal else r"(?m)^<(Subject|Picture) ([1-9]\d*)>", definitions)
         if len(def_ids) != len(set(def_ids)):
             errors.append("Duplicate subject/picture definitions.")
         defined_pictures = set(map(int, re.findall(r"<Picture ([1-9]\d*)>", definitions)))
         if _valid_image_count(recipe, image_count) and defined_pictures != set(range(1, image_count + 1)):
             errors.append("Definitions must identify every supplied source picture.")
-        if not re.match(r"\[(?:reference generation|keyframe completion)(?: \+ (?:reference generation|keyframe completion))?\]", sections["summary"]):
-            errors.append("Summary must begin with an image-only task prefix.")
+        prefixes = r"reference generation|keyframe completion|video editing|video continuation|audio reference|audio reuse" if multimodal else r"reference generation|keyframe completion"
+        if not re.match(r"\[(?:" + prefixes + r")(?: \+ (?:" + prefixes + r"))*\]", sections["summary"]):
+            errors.append("Summary must begin with a supported task prefix.")
+        if multimodal:
+            if re.search(r"\[(?:[^\]]*\b)?(?:audio reuse|audio reference)\b", sections["summary"]) and audio_count + video_count == 0:
+                errors.append("Audio task prefix requires supplied audio or video references.")
+            if re.search(r"\[(?:[^\]]*\b)?(?:video editing|video continuation)\b", sections["summary"]) and video_count == 0:
+                errors.append("Video task prefix requires a supplied video reference.")
         retention = sections["retention_analysis"]
         if re.search(r"\(S\d+\)", retention):
             errors.append("Retention analysis must not assign speaker IDs.")
-        retained = re.findall(r"(?m)^<(Subject|Picture) ([1-9]\d*)>[^\n]*:\s*"
+        retention_labels = "Subject|Picture|Video|Audio" if multimodal else "Subject|Picture"
+        retained = re.findall(r"(?m)^<(" + retention_labels + r") ([1-9]\d*)>[^\n]*:\s*"
                               r"(?:fully_preserved|partially_preserved|attribute_transfer|weak_reference)\s*-\s*\S", retention)
+        if multimodal:
+            for kind, count in counts.items():
+                defined = set(map(int, re.findall(r"<" + kind + r" ([1-9]\d*)>", definitions)))
+                if defined != set(range(1, count + 1)):
+                    errors.append("Definitions must identify every supplied " + kind + ".")
+            if image_count == video_count == audio_count == 0 and (definitions != "N/A" or retention != "N/A"):
+                errors.append("Zero-reference definitions and retention must be N/A.")
         if set(retained) != set(def_ids) or len(retained) != len(set(retained)):
             errors.append("Retention analysis must cover each defined label once with a supported relationship marker.")
         if sections["detailed_description"].startswith("[Shot 1]"):

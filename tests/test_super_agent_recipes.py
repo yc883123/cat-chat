@@ -390,6 +390,166 @@ class RecipeCoordinatorTests(unittest.TestCase):
         self.core.tick()
         self.assertEqual(self.service.get_thread("owner", self.tid).status, "cancelled")
 
+    def test_direct_prompt_never_resolves_model_across_generate_retry_collect(self):
+        body = self.body()
+        body.update(input_mode="prompt")
+        body.pop("model_key")
+        body.pop("model_name")
+        body["items"][0]["prompt"] = "A clear final scene with <Picture 1>."
+        self.app.config.profile = lambda key: (_ for _ in ()).throw(AssertionError("unused model resolved"))
+        created = self.core.create("owner", body)
+        self.tid = created["thread_id"]
+        self.assertIsNone(created["batch"]["model"])
+        self.assertIsNone(created["batch"]["template"])
+        with self.assertRaises(ValueError):
+            self.action("confirm_reverse")
+        self.action("confirm_generate")
+        self.core.tick()
+        self.comfy.records["native-1"].update(status="failed", error="generation failed")
+        self.core.tick()
+        self.action("retry_generate")
+        self.core.tick()
+        self.comfy.records["native-1"].update(status="failed", checkpoint={"submissions": {"0": {"state": "collection_failed"}}})
+        self.core.tick()
+        self.action("retry_collect")
+        self.core.tick()
+        self.assertEqual(self.studio.calls, [])
+        self.assertEqual(len(self.comfy.records), 1)
+
+    def test_text_only_assisted_and_zero_reference_r2v(self):
+        self.patch.stop()
+        self.profile["supports_images_explicit"] = False
+        body = {"recipe_id": "minimax_h3_r2v", "input_mode": "script", "request_id": "text-only", "model_key": "text", "model_name": "text", "items": [{"source_path": "scene", "requirements": "A quiet room."}]}
+        created = self.core.create("owner", body)
+        self.tid = created["thread_id"]
+        self.action("confirm_reverse")
+        self.core.tick()
+        self.assertEqual(self.studio.calls[0][0]["images"], [])
+        self.assertNotIn("LoadImage", str(created["batch"]["items"][0]["effective_workflow"]["prompt"]))
+
+    def test_source_recipe_save_as_is_immutable_and_owner_scoped(self):
+        first = self.core.save_recipe("owner", {"source_recipe_id": "test_recipe", "name": "One"})["recipe"]
+        second = self.core.save_recipe("owner", {"source_recipe_id": first["id"], "name": "Two", "input_mode": "prompt"})["recipe"]
+        self.assertNotEqual(first["id"], second["id"])
+        self.assertEqual(second["source_recipe_id"], first["id"])
+        self.assertEqual(first["template"]["body"], RECIPE["template"]["body"])
+        self.assertIsNone(second["template"])
+        self.assertEqual(self.core._recipe("owner", first["id"]), first)
+        with self.assertRaises(LookupError):
+            self.core.save_recipe("other", {"source_recipe_id": first["id"]})
+        self.assertTrue(self.core.workflow_referenced(first["workflow_id"]))
+
+    def test_save_as_explicit_rule_selection_beats_inherited_template(self):
+        self.app.studio.catalog = SimpleNamespace(get_body=lambda key: "Selected new body " + key)
+        saved = self.core.save_recipe("owner", {"source_recipe_id": "test_recipe", "template_id": "new-rule"})["recipe"]
+        self.assertEqual(saved["template"]["id"], "new-rule")
+        self.assertEqual(saved["template"]["body"], "Selected new body new-rule")
+        with self.assertRaisesRegex(ValueError, "冲突"):
+            self.core.save_recipe("owner", {"source_recipe_id": "test_recipe", "template_id": "new-rule", "template": RECIPE["template"]})
+
+    def test_clone_projection_has_no_execution_authority_and_capabilities_are_truthful(self):
+        self.create()
+        self.reverse_done()
+        self.action("confirm_generate")
+        self.core.tick()
+        self.comfy.records["native-1"].update(status="failed")
+        self.core.tick()
+        item = self.batch()["items"][0]
+        self.assertFalse(item["edit_capabilities"]["prompt"])
+        self.assertTrue(item["edit_capabilities"]["included"])
+        draft = self.core.clone_draft("owner", self.tid)["draft"]
+        self.assertEqual(draft["source_thread_id"], self.tid)
+        self.assertEqual(draft["items"][0]["source_item_id"], item["id"])
+        for key in ("request_id", "confirmations", "revision", "target", "owner_id", "model", "recipe", "generate", "reverse", "outputs"):
+            self.assertNotIn(key, draft)
+            self.assertNotIn(key, draft["items"][0])
+        draft["request_id"] = "cloned"
+        cloned = self.core.create("owner", draft)["batch"]
+        self.assertEqual(cloned["items"][0]["generate"]["attempts"], [])
+        self.assertEqual(cloned["confirmations"], {})
+
+    def test_nine_images_reach_prompt_model_without_normal_studio_limit_change(self):
+        from naiba.studio.images import validate_image_refs, StudioImageError
+        from naiba.studio.service import StudioService
+        self.patch.stop()
+        self.app.studio.prepare_generation = lambda b, **kw: StudioService.prepare_generation(SimpleNamespace(app=self.app), b, **kw)
+        body = {"recipe_id": "minimax_h3_r2v", "request_id": "nine", "model_key": "vision", "model_name": "vision", "items": [{"source_path": "scene", "requirements": "A scene.", "media": [{"role": f"picture_{n}", "path": str(self.image)} for n in range(1, 10)]}]}
+        created = self.core.create("owner", body)
+        self.tid = created["thread_id"]
+        self.action("confirm_reverse")
+        self.core.tick()
+        self.assertEqual(len(self.studio.calls[0][0]["images"]), 9)
+        with self.assertRaises(StudioImageError):
+            validate_image_refs(self.data, [str(self.image)] * 9)
+
+    def test_audio_reference_verified_and_only_description_reaches_prompt_model(self):
+        import wave
+        self.patch.stop()
+        audio = self.image.with_name("voice.wav")
+        with wave.open(str(audio), "wb") as out:
+            out.setnchannels(1)
+            out.setsampwidth(2)
+            out.setframerate(16000)
+            out.writeframes(b"\x00\x00" * 16000)
+        self.profile["supports_images_explicit"] = False
+        body = {"recipe_id": "minimax_h3_r2v", "request_id": "audio", "model_key": "text", "model_name": "text", "items": [{"source_path": "scene", "requirements": "Use the voice.", "media": [{"role": "audio_1", "path": str(audio), "description": "A calm low voice."}]}]}
+        created = self.core.create("owner", body)
+        self.tid = created["thread_id"]
+        media = created["batch"]["items"][0]["media"][0]
+        self.assertEqual(media["reference"], "<Audio 1>")
+        self.assertEqual(media["media"], "audio")
+        self.assertGreater(media["duration_seconds"], 0)
+        self.assertEqual(len(media["sha256"]), 64)
+        self.action("confirm_reverse")
+        self.core.tick()
+        payload = self.studio.calls[0][0]
+        self.assertEqual(payload["images"], [])
+        self.assertIn("A calm low voice.", payload["content"])
+        self.assertIn("没有观看或听取原件", payload["content"])
+        self.assertNotIn(str(audio), payload["content"])
+        fake = self.image.with_name("fake.wav")
+        fake.write_bytes(b"not audio")
+        with self.assertRaises(ValueError):
+            self.core._media([{"role": "audio_1", "path": str(fake)}], "bad", {"audio_1"}, [{"role": "audio_1", "media": "audio"}])
+
+    def test_video_snapshot_has_typed_chain_and_rejects_fake_extension(self):
+        import av
+        self.patch.stop()
+        video = self.image.with_name("clip.mp4")
+        with av.open(str(video), "w") as out:
+            stream = out.add_stream("mpeg4", rate=24)
+            stream.width, stream.height, stream.pix_fmt = 16, 16, "yuv420p"
+            for _ in range(24):
+                frame = av.VideoFrame.from_image(Image.new("RGB", (16, 16), "blue"))
+                for packet in stream.encode(frame):
+                    out.mux(packet)
+            for packet in stream.encode():
+                out.mux(packet)
+        body = {"recipe_id": "minimax_h3_r2v", "input_mode": "prompt", "request_id": "video", "items": [{"source_path": "scene", "prompt": "Use <Video 1> as the movement reference.", "media": [{"role": "video_1", "path": str(video)}]}]}
+        created = self.core.create("owner", body)
+        self.tid = created["thread_id"]
+        item = created["batch"]["items"][0]
+        self.assertEqual(item["media"][0]["media"], "video")
+        self.assertEqual(item["media"][0]["reference"], "<Video 1>")
+        self.assertEqual(item["media"][0]["width"], 16)
+        self.assertEqual(item["effective_workflow"]["prompt"]["136"]["inputs"]["ref_videos.ref_video_0"], ["recipe_ref_video_1_components", 0])
+        self.action("confirm_generate")
+        self.core.tick()
+        self.assertEqual(self.comfy.calls[0][0]["media_inputs"][0]["media"], "video")
+        fake = video.with_name("fake.mp4")
+        fake.write_bytes(self.image.read_bytes())
+        with self.assertRaises(ValueError):
+            self.core._media([{"role": "video_1", "path": str(fake)}], "bad", {"video_1"}, [{"role": "video_1", "media": "video"}])
+
+    def test_nonexistent_reference_blocked_before_generation(self):
+        body = self.body()
+        body["input_mode"] = "prompt"
+        body["items"][0]["prompt"] = "Use <Video 1>."
+        self.tid = self.core.create("owner", body)["thread_id"]
+        with self.assertRaisesRegex(ValueError, "媒体"):
+            self.action("confirm_generate")
+        self.assertEqual(self.comfy.calls, [])
+
     def test_custom_recipe_defaults_saved_and_merged_without_mutating_workflow(self):
         self.workflow_store.save_workflow({"id": "custom-workflow", "name": "Custom", "prompt": copy.deepcopy(GRAPH), "params": []})
         saved = self.core.save_recipe("owner", {"name": "Custom", "workflow_id": "custom-workflow", "workflow_fingerprint": digest(GRAPH), "prompt_slot": {"node_id": "1", "field_name": "text"}, "media_slots": RECIPE["media_slots"], "template_id": "test_template", "overrides": [{"node_id": "2", "field_name": "steps", "value": 30}]})["recipe"]
@@ -520,15 +680,23 @@ class RecipeCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.batch()["items"][0]["reverse"]["status"], "needs_review")
         self.assertEqual(self.batch()["items"][0]["reverse"]["attempts"][0]["raw"], "unapproved explanation</think>good prompt")
 
-    def test_custom_safe_binding_rejects_code_title_and_untraced_encoder(self):
+    def test_custom_prompt_binding_uses_existing_text_field_not_downstream_whitelist(self):
         self.core._validate_binding(GRAPH, {"node_id": "1", "field_name": "text"})
-        evil = {"1": {"class_type": "ExecutePython", "inputs": {"text": ""}, "_meta": {"title": "positive prompt"}}}
-        with self.assertRaises(ValueError):
-            self.core._validate_binding(evil, {"node_id": "1", "field_name": "text"})
-        orphan = copy.deepcopy(GRAPH)
-        del orphan["2"]
-        with self.assertRaises(ValueError):
-            self.core._validate_binding(orphan, {"node_id": "1", "field_name": "text"})
+        graph = {"1": {"class_type": "PrimitiveStringMultiline", "inputs": {"value": "base"}},
+                 "2": {"class_type": "PromptRouter", "inputs": {"text": ["1", 0]}},
+                 "3": {"class_type": "CLIPTextEncode", "inputs": {"text": ["2", 0]}},
+                 "4": {"class_type": "KSampler", "inputs": {"positive": ["3", 0], "steps": 20}}}
+        self.workflow_store.save_workflow({"id": "routed-workflow", "name": "Routed", "prompt": graph, "params": []})
+        saved = self.core.save_recipe("owner", {"workflow_id": "routed-workflow", "workflow_fingerprint": digest(graph),
+                                                "prompt_slot": {"node_id": "1", "field_name": "value"},
+                                                "media_slots": [], "input_mode": "prompt"})["recipe"]
+        self.assertEqual(saved["prompt_slot"], {"node_id": "1", "field_name": "value"})
+        self.assertEqual(saved["workflow"], graph)
+        for slot in ({"node_id": "4", "field_name": "steps"},
+                     {"node_id": "1", "field_name": "missing"},
+                     {"node_id": "3", "field_name": "text"}):
+            with self.subTest(slot=slot), self.assertRaisesRegex(ValueError, "文本字段"):
+                self.core._validate_binding(graph, slot)
 
 
 if __name__ == "__main__":

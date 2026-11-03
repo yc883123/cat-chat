@@ -65,14 +65,15 @@ def _verify_image(path: Path, label: str) -> None:
         raise StudioImageError(f"{label}不是可读取的图片：{exc}") from exc
 
 
-def validate_image_refs(data_dir: Path, refs: Any) -> list[dict[str, str]]:
+def validate_image_refs(data_dir: Path, refs: Any, *, max_images: int = MAX_IMAGES,
+                        max_total_bytes: int = MAX_TOTAL_BYTES) -> list[dict[str, str]]:
     """校验并规范化图片引用列表；顺序原样保留（= 图号顺序）。"""
     if refs is None:
         return []
     if not isinstance(refs, list):
         raise StudioImageError("images 必须是数组")
-    if len(refs) > MAX_IMAGES:
-        raise StudioImageError(f"最多支持 {MAX_IMAGES} 张图片")
+    if len(refs) > max_images:
+        raise StudioImageError(f"最多支持 {max_images} 张图片")
     out: list[dict[str, str]] = []
     total_bytes = 0
     for index, ref in enumerate(refs, 1):
@@ -93,8 +94,8 @@ def validate_image_refs(data_dir: Path, refs: Any) -> list[dict[str, str]]:
             total_bytes += path.stat().st_size
         except OSError as exc:
             raise StudioImageError(f"{label}读取失败：{exc}") from exc
-        if total_bytes > MAX_TOTAL_BYTES:
-            limit_mb = MAX_TOTAL_BYTES // (1024 * 1024)
+        if total_bytes > max_total_bytes:
+            limit_mb = max_total_bytes // (1024 * 1024)
             raise StudioImageError(f"图片总大小超过 {limit_mb}MB 上限")
         thumb_path = ""
         if str(raw_thumb or "").strip():

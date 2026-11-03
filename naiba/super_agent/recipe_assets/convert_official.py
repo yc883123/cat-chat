@@ -53,6 +53,29 @@ def convert_nodes(nodes, links, *, prefix="", boundary=None):
     return result
 
 
+def add_r2v_references(graph):
+    """Apply the deterministic v2 media extension to the pinned official graph."""
+    image_ids = ["137", "139", *[f"recipe_ref_image_{i}" for i in range(3, 10)]]
+    for index, node_id in enumerate(image_ids):
+        graph[node_id] = {"class_type": "LoadImage", "inputs": {"image": f"recipe_input_{index + 1}.png"}}
+        graph["136"]["inputs"][f"ref_images.ref_image_{index}"] = [node_id, 0]
+    for kind, cls, field, suffix in (("video", "LoadVideo", "file", "mp4"), ("audio", "LoadAudio", "audio", "wav")):
+        for index in range(1, 4):
+            node_id = f"recipe_ref_{kind}_{index}"
+            graph[node_id] = {"class_type": cls, "inputs": {field: f"recipe_input_{index}.{suffix}"}}
+            source_id = node_id
+            if kind == "video":
+                source_id = node_id + "_components"
+                graph[source_id] = {"class_type": "GetVideoComponents", "inputs": {"video": [node_id, 0]}}
+            graph["136"]["inputs"][f"ref_{kind}s.ref_{kind}_{index - 1}"] = [source_id, 0]
+    return [
+        "Version 2: up to nine optional images, three optional core LoadVideo references and three optional LoadAudio references. Zero references are structurally supported; no live generation claim.",
+        "Execution must remove absent optional loaders AND corresponding H3 reference connections, including unused GetVideoComponents; never sparse labels.",
+        "Preserved scheduler124.model->127 and guider126.model->141 exactly (not normalized).",
+        "LoadVideo VIDEO output passes through GetVideoComponents.images IMAGE output before H3 ref_videos; video soundtrack is not implicitly bound.",
+    ]
+
+
 def convert(source: Path, target: Path):
     metadata_path = source / "comfyui_workflow_templates_json-0.1.126.dist-info/METADATA"
     metadata = metadata_path.read_text(encoding="utf-8")
@@ -116,13 +139,7 @@ def convert(source: Path, target: Path):
                 "Parent duration5, noise_seed757358688076805, turbo false and turbo_steps8 override inner defaults."])
         else:
             graph["138"]["inputs"]["value"] = ""
-            for index, node_id in enumerate(["137", "139", "recipe_ref_image_3", "recipe_ref_image_4", "recipe_ref_image_5", "recipe_ref_image_6"]):
-                graph[node_id] = {"class_type": "LoadImage", "inputs": {"image": f"recipe_input_{index + 1}.png"}}
-                graph["136"]["inputs"][f"ref_images.ref_image_{index}"] = [node_id, 0]
-            modifications.extend([
-                "Extended official image inputs0/1 to a six-image bounded contiguous prefix using four additional core LoadImage nodes; no audio/video inputs.",
-                "Execution must remove absent optional loaders AND corresponding136.ref_images.ref_image_N connections; never sparse labels.",
-                "Preserved scheduler124.model->127 and guider126.model->141 exactly (not normalized)."])
+            modifications.extend(add_r2v_references(graph))
         graph["92"]["inputs"]["filename_prefix"] = "video/recipe_h3_" + mode
         graph_bytes = (json.dumps(graph, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
         (target / ("h3_" + mode + ".api.json")).write_bytes(graph_bytes)
@@ -147,7 +164,7 @@ def convert(source: Path, target: Path):
         }
         record["prompt_reference_hash_format"] = "UTF-8 bytes with CRLF normalized to LF"
         record["prompt_template_sha256"] = digest((target / ("h3_" + mode + ".prompt.txt")).read_bytes())
-    (target / "provenance.json").write_text(json.dumps(provenance, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    (target / "provenance.json").write_text(json.dumps(provenance, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8", newline="\n")
 
 
 if __name__ == "__main__":

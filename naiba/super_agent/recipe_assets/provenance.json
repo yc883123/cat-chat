@@ -68,9 +68,10 @@
         "Removed UI notes, layout, properties and upload/seed-control widgets.",
         "Replaced demonstration prompts and media filenames with empty prompt and recipe_input_N.png placeholders.",
         "Replaced SaveVideo filename_prefix with video/recipe_h3_r2v.",
-        "Extended official image inputs0/1 to a six-image bounded contiguous prefix using four additional core LoadImage nodes; no audio/video inputs.",
-        "Execution must remove absent optional loaders AND corresponding136.ref_images.ref_image_N connections; never sparse labels.",
-        "Preserved scheduler124.model->127 and guider126.model->141 exactly (not normalized)."
+        "Version 2: up to nine optional images, three optional core LoadVideo references and three optional LoadAudio references. Zero references are structurally supported; no live generation claim.",
+        "Execution must remove absent optional loaders AND corresponding H3 reference connections, including unused GetVideoComponents; never sparse labels.",
+        "Preserved scheduler124.model->127 and guider126.model->141 exactly (not normalized).",
+        "LoadVideo VIDEO output passes through GetVideoComponents.images IMAGE output before H3 ref_videos; video soundtrack is not implicitly bound."
       ],
       "prompt_reference_hash_format": "UTF-8 bytes with CRLF normalized to LF",
       "prompt_reference_sha256": {
@@ -78,7 +79,7 @@
         "skills/h3-prompt-writing/references/base-en.txt": "2cfebc096a6e08370f288d468d90b60f7f9bcb938f94bf090816e910e48e75fc",
         "skills/h3-prompt-writing/references/ref-en.txt": "1e574f356716ad55612247ffb7bbccbcdb484ad96599d63c7dca1af186b1fab7"
       },
-      "prompt_template_sha256": "4994f0da4c22c54bd01c9519fdd62b756420ac3d76a3f703fa1a9b93a73ac732",
+      "prompt_template_sha256": "a12f11f22bc73ca0659e032772a620cb60159d1ee2438ce4b5e21d35388c30e7",
       "source": "comfyui_workflow_templates_json/templates/video_minimax_h3_r2v.json",
       "source_manifest_entry": {
         "assets": [
@@ -100,7 +101,7 @@
       },
       "source_sha256": "afeea99e9fd5a1456df348e0573e289c1243f2f28546fc95c1c963f808d61ddb",
       "ui_workflow_id": "e3f2b845-8f2c-4b5a-9caf-eac1029d3e7e",
-      "workflow_fingerprint": "27fbd151db9fdf404cec844b21e21ca7fa684976ffbb94c8f771f8c642fc151a"
+      "workflow_fingerprint": "6e553d6645029bf6b1a42c571cc4576cf3701d83ccaee31206ad844fe2c4140c"
     }
   },
   "version": "0.1.126"

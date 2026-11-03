@@ -11,9 +11,10 @@
    `showAgentForm()` 的 `focus()` 把文档滚到弹层位置，"偶发"露出来。修法：作者级
    `dialog:not([open]) { display: none; }`（(0,1,1) 高于 `.agent-dialog` 的 (0,1,0)，无需 `!important`）。
 
-2. **顶栏折叠**：手机顶栏在 ≤760px 下要占三行（API / Agent / 操作区 + 折叠条），会话区只剩半屏。
-   细条按钮 `#toggleTopbarCompact` 收起后**整条顶栏只剩它自己**（API / Agent 两个下拉、操作区、
-   侧栏按钮全部 `display: none`），并把「展开顶栏」文字亮出来。曾经的实现只隐藏 `.topbar-actions`
+2. **顶栏折叠**：手机顶栏 ≤760px 改版后是两层（第 1 行 ☰ + 轮次下拉 + Agent，第 2 行操作区），
+   收起入口是**悬浮把手**（半嵌顶栏下缘的小胶囊，不占行）；`#toggleTopbarCompact` 收起后
+   **整条顶栏只剩它自己**（API / Agent / 轮次下拉、操作区、侧栏按钮全部 `display: none`，
+   把手复位成整条）并把「展开顶栏」文字亮出来。曾经的实现只隐藏 `.topbar-actions`
    并把两个下拉收拢到第 1 行，用户看到的仍是「一行 API + 一行 Agent + 一条箭头」——收起等于没收
    （用户手机截图报障，§九.86）。
 
@@ -191,13 +192,24 @@ class TopbarCollapseStyleTests(unittest.TestCase):
         index = (ROOT / "public/index.html").read_text(encoding="utf-8")
         self.assertIn('<span class="topbar-toggle-label">展开顶栏</span>', index)
 
-    def test_toggle_is_full_width_row(self) -> None:
+    def test_toggle_is_floating_handle_when_expanded(self) -> None:
+        """展开态收起入口是悬浮把手（2026-11-04 顶栏两层改版）：不再占一整行，
+        半嵌在顶栏下缘中线（探出部分落在 .messages 顶部 22px 内边距里，不盖消息）；
+        收起态由 .compact 规则复位成整条（占满一行、随流布局）。"""
         mobile = self._mobile_block()
         rule = mobile[mobile.index(".topbar-collapse-toggle {"):]
         rule = rule[: rule.index("}")]
-        self.assertIn("grid-column: 1 / -1", rule, "要占满一行，不能挤进下拉那一格")
-        self.assertNotIn("grid-row", rule, "不要写死 grid-row：760/380 两块都要自然落到最后一行")
+        self.assertIn("position: absolute", rule, "悬浮：不参与 grid 排布、不占行")
+        self.assertIn("bottom: -14px", rule, "探出顶栏下缘")
+        self.assertIn("left: 50%", rule, "水平居中")
         self.assertIn("min-height", rule)
+        self.assertNotIn("grid-column", rule, "绝对定位后不得再写 grid 定位属性")
+        self.assertNotIn("grid-row", rule)
+        compact = mobile[mobile.index(".topbar.compact .topbar-collapse-toggle {"):]
+        compact = compact[: compact.index("}")]
+        self.assertIn("position: static", compact, "收起态必须复位成整条（随流、占满一行）")
+        self.assertIn("width: 100%", compact)
+        self.assertIn("transform: none", compact, "复位时必须清掉居中位移")
 
     def test_collapse_does_not_delete_capabilities(self) -> None:
         """与 tests/test_mobile_parity.py 同源：收起是形态变化，不是按视口删能力。"""

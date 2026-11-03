@@ -134,18 +134,20 @@ class TopbarStyleTests(unittest.TestCase):
         self.assertIn(".topbar-actions > * { flex: none; }", css, "按钮默认不被压缩（保形、贴右缘）")
         # 轮次下拉仍显式写死 flex-basis（auto 会触发 Chromium 收缩不回收），
         # 窄容器档位由 .topbar[data-tb] 覆盖成 96 / 64px。
+        # 2026-11-04 起它是 .topbar 直接子元素（顶栏两层改版：手机端上移第 1 行，
+        # 桌面端视觉不变），选择器从 .topbar-actions > 改成 .topbar >。
         self.assertIn(
-            ".topbar-actions > .turn-jump-select { flex: 0 100 260px; }",
+            ".topbar > .turn-jump-select { flex: 0 100 260px; }",
             css,
             "桌面轮次下拉显式收缩，且 flex-basis 写死（auto 会触发 Chromium 收缩不回收）",
         )
         self.assertIn(
-            '.topbar[data-tb="tight"] .topbar-actions > .turn-jump-select { flex: 0 0 96px;',
+            '.topbar[data-tb="tight"] > .turn-jump-select { flex: 0 0 96px;',
             css,
             "窄容器第一档必须把轮次下拉收窄，且 flex-shrink 写 0（否则又被压成一根箭头）",
         )
         self.assertIn(
-            '.topbar[data-tb="tightest"] .topbar-actions > .turn-jump-select { flex: 0 0 64px;',
+            '.topbar[data-tb="tightest"] > .turn-jump-select { flex: 0 0 64px;',
             css,
             "窄容器第二档轮次下拉收到 64px（仍要能认出「第 N 轮」）",
         )
@@ -256,24 +258,36 @@ class TopbarStyleTests(unittest.TestCase):
         self.assertIn('.composer-provider select', narrow)
 
     def test_agent_and_turn_picker_keep_compact_mobile_layout(self) -> None:
+        """手机端顶栏两层（2026-11-04 改版）：第 1 行 ☰ + 轮次下拉 + Agent，第 2 行操作区。"""
         css = self._css()
         mobile = css[css.index('@media (max-width: 760px) {'):]
         mobile = mobile[:mobile.index("\n}")]
-        self.assertIn(".agent-control { grid-column: 2; grid-row: 1; justify-self: end;", mobile)
+        self.assertIn(".agent-control { grid-column: 3; grid-row: 1; justify-self: end;", mobile)
         self.assertIn(".agent-control select { width: auto;", mobile)
         self.assertIn(".turn-jump-select { display: inline-block;", mobile)
+        self.assertIn("grid-column: 2; grid-row: 1;", mobile[mobile.index(".turn-jump-select {"):])
         self.assertIn("grid-column: 1 / -1;", mobile[mobile.index(".topbar-actions {"):])
         narrow = css[css.index('@media (max-width: 380px) {'):]
         narrow = narrow[:narrow.index("\n}")]
-        self.assertIn(".agent-control { grid-column: 2; grid-row: 1;", narrow)
-        self.assertIn(".topbar-actions { grid-row: 2; }", narrow)
+        self.assertIn(".agent-control { grid-column: 3; grid-row: 1;", narrow)
+        self.assertIn(".topbar-actions { grid-row: 2;", narrow)
 
-    def test_turn_jump_select_lives_in_topbar_actions(self) -> None:
-        """轮次下拉在顶栏操作区（手机 / 桌面共用一个元素，桌面落在左段中段），细节见 test_turn_jump.py。"""
+    def test_turn_jump_select_lives_in_topbar_as_direct_child(self) -> None:
+        """轮次下拉是 .topbar 直接子元素（2026-11-04 两层改版：手机端第 1 行中段、
+        桌面端左段中段视觉不变），不得回到 .topbar-actions 里随操作区换行漂移。
+        手机 / 桌面共用一个元素，细节见 test_turn_jump.py。"""
         index = self._index()
-        actions = index[index.index('class="topbar-actions"'):]
-        actions = actions[: actions.index("</header>")]
-        self.assertIn('id="turnJumpSelect"', actions, "轮次下拉不在顶栏操作区")
+        header = index[index.index('<header class="topbar">'): index.index("</header>")]
+        actions_start = header.index('class="topbar-actions"')
+        actions_end = header.index("</div>", actions_start)
+        self.assertNotIn('id="turnJumpSelect"', header[actions_start:actions_end],
+                         "轮次下拉不能放进 .topbar-actions（手机端会随操作区换行漂移）")
+        self.assertIn('id="turnJumpSelect"', header, "轮次下拉不在顶栏里")
+        # 必须紧跟 Agent 控件之后（导航语义同排），且在操作区之前。
+        agent_end = header.index("</label>", header.index('class="model-control agent-control"'))
+        turn_pos = header.index('id="turnJumpSelect"')
+        self.assertGreater(turn_pos, agent_end, "轮次下拉要排在 Agent 控件之后")
+        self.assertLess(turn_pos, actions_start, "轮次下拉要排在操作区之前")
 
 
 class StudioEntryTests(unittest.TestCase):

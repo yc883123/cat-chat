@@ -1480,6 +1480,14 @@ def main() -> None:
     if "--run-skill-script" in argv:
         idx = argv.index("--run-skill-script")
         raise SystemExit(_run_skill_script(argv[idx + 1 :]))
+    # 媒体解码隔离进程只消费 stdin；不得启动 GUI、HTTP 或争用实例锁。
+    if "--probe-recipe-media" in argv:
+        idx = argv.index("--probe-recipe-media")
+        if len(argv) != idx + 2 or idx != 0:
+            raise SystemExit(2)
+        _force_utf8_stdio()
+        from naiba.super_agent.recipes import probe_media_main
+        raise SystemExit(probe_media_main(argv[idx + 1]))
     # 隐藏入口：冻结版打包自检（发布流水线用，不初始化 GUI/HTTP/实例锁）。
     if "--self-check" in argv:
         raise SystemExit(_run_self_check())

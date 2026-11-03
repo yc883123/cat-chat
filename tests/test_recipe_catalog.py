@@ -52,7 +52,7 @@ class RecipeCatalogTests(unittest.TestCase):
         for recipe in items:
             self.assertEqual(set(recipe), {"id", "name", "description", "mode", "workflow",
                                           "workflow_fingerprint", "provenance", "prompt_slot",
-                                          "media_slots", "duration_slot", "template"})
+                                          "media_slots", "duration_slot", "template", "version", "input_mode"})
             graph = recipe["workflow"]
             self.assertEqual(workflow_fingerprint(graph), recipe["workflow_fingerprint"])
             for slot in [recipe["prompt_slot"], recipe["duration_slot"], *recipe["media_slots"]]:
@@ -147,21 +147,65 @@ class RecipeCatalogTests(unittest.TestCase):
 
     def test_count_variants_remove_both_loaders_and_connections(self):
         fingerprints = set()
-        for count in range(1, 7):
+        for count in range(0, 10):
             graph = prepare_workflow(R2V, image_count=count)
             keys = {key for key in graph["136"]["inputs"] if key.startswith("ref_images.")}
             self.assertEqual(keys, {f"ref_images.ref_image_{i}" for i in range(count)})
             self.assertEqual(sum(n["class_type"] == "LoadImage" for n in graph.values()), count)
             fingerprints.add(workflow_fingerprint(graph))
             self.assertEqual(graph, prepare_workflow(R2V, image_count=count))
-        self.assertEqual(len(fingerprints), 6)
-        self.assertEqual(workflow_fingerprint(prepare_workflow(R2V, image_count=6)), get_recipe(R2V)["workflow_fingerprint"])
+        self.assertEqual(len(fingerprints), 10)
+        self.assertEqual(workflow_fingerprint(prepare_workflow(R2V, image_count=9, video_count=3, audio_count=3)), get_recipe(R2V)["workflow_fingerprint"])
         self.assertEqual(prepare_workflow(I2V, image_count=1), get_recipe(I2V)["workflow"])
-        for count in [0, 7, -1, True, "2", 2.0, None]:
+        for count in [10, -1, True, "2", 2.0, None]:
             with self.subTest(count=count), self.assertRaises(ValueError):
                 prepare_workflow(R2V, image_count=count)
         with self.assertRaises(ValueError):
             prepare_workflow(I2V, image_count=2)
+
+    def test_offline_converter_reproduces_v2_extension_and_provenance(self):
+        from naiba.super_agent.recipe_assets.convert_official import add_r2v_references
+        expected = get_recipe(R2V)
+        graph = deepcopy(expected["workflow"])
+        # Strip every v2 media extension, retaining only official image 0/1.
+        for slot in expected["media_slots"][2:]:
+            node_id = slot["node_id"]
+            graph.pop(node_id, None)
+            graph.pop(node_id + "_components", None)
+        graph["136"]["inputs"] = {k: v for k, v in graph["136"]["inputs"].items()
+                                  if not k.startswith(("ref_images.", "ref_videos.", "ref_audios.", "ref_video_audios."))}
+        graph["136"]["inputs"].update({"ref_images.ref_image_0": ["137", 0], "ref_images.ref_image_1": ["139", 0]})
+        changes = add_r2v_references(graph)
+        self.assertEqual(graph, expected["workflow"])
+        self.assertEqual(workflow_fingerprint(graph), expected["workflow_fingerprint"])
+        self.assertEqual(changes, expected["provenance"]["modifications"][3:])
+        self.assertFalse(any(k.startswith("ref_video_audios.") for k in graph["136"]["inputs"]))
+        first = deepcopy(graph)
+        self.assertEqual(add_r2v_references(graph), changes)
+        self.assertEqual(graph, first)
+
+    def test_frozen_v1_graph_derives_without_current_catalog(self):
+        old = get_recipe(R2V)
+        old["workflow"] = prepare_workflow(R2V, image_count=6)
+        old["media_slots"] = old["media_slots"][:6]
+        old.pop("version")
+        old["template"]["result_rule"] = "h3_ref2va_single_v1"
+        self.assertEqual(workflow_fingerprint(old["workflow"]), "27fbd151db9fdf404cec844b21e21ca7fa684976ffbb94c8f771f8c642fc151a")
+        old["workflow"]["132"]["inputs"]["value"] = 7
+        projected = prepare_workflow(R2V, image_count=2, recipe_snapshot=old)
+        self.assertEqual(projected["132"]["inputs"]["value"], 7)
+        self.assertEqual(sum(n["class_type"] == "LoadImage" for n in projected.values()), 2)
+        with self.assertRaises(ValueError):
+            prepare_workflow(R2V, image_count=0, recipe_snapshot=old)
+
+    def test_video_component_types_and_optional_zero_projection(self):
+        graph = prepare_workflow(R2V, image_count=0, video_count=1, audio_count=1)
+        self.assertEqual(graph["136"]["inputs"]["ref_videos.ref_video_0"], ["recipe_ref_video_1_components", 0])
+        self.assertEqual(graph["recipe_ref_video_1_components"]["inputs"]["video"], ["recipe_ref_video_1", 0])
+        self.assertEqual(graph["136"]["inputs"]["ref_audios.ref_audio_0"], ["recipe_ref_audio_1", 0])
+        zero = prepare_workflow(R2V, image_count=0)
+        self.assertFalse(any(n["class_type"] in {"LoadImage", "LoadAudio", "LoadVideo", "GetVideoComponents"} for n in zero.values()))
+        self.assertFalse(any(k.startswith(("ref_images.", "ref_videos.", "ref_audios.")) for k in zero["136"]["inputs"]))
 
     def test_prompt_templates_are_self_contained_one_pass(self):
         for recipe in builtins():
@@ -174,14 +218,14 @@ class RecipeCatalogTests(unittest.TestCase):
             self.assertIn("17k+5", body)
             self.assertNotIn("D:/", body)
         self.assertEqual(get_recipe(I2V)["template"]["result_rule"], "h3_i2v_single_v1")
-        self.assertEqual(get_recipe(R2V)["template"]["result_rule"], "h3_ref2va_single_v1")
+        self.assertEqual(get_recipe(R2V)["template"]["result_rule"], "h3_ref2va_single_v2")
 
     def test_valid_outputs_keep_bytes_and_original_dialogue(self):
         text = " \n" + i2v() + "\n "
         result = self.validate(text)
         self.assertTrue(result["valid"], result)
         self.assertEqual(result["text"], text)
-        for count in range(1, 7):
+        for count in range(1, 10):
             result = self.validate(r2v(count), recipe=R2V, count=count)
             self.assertTrue(result["valid"], result)
 

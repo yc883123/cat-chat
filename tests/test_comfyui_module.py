@@ -1045,6 +1045,35 @@ class _StubComfyRunner:
         pass
 
 
+class RecipeGraphValidationTests(unittest.TestCase):
+    """COMFY_DYNAMICCOMBO_V3 动态枚举按 key 比对，不把选项字典当字符串误杀。"""
+
+    @staticmethod
+    def _dynamic_combo_schema():
+        def option(key, field):
+            return {"key": key, "inputs": {"required": {field: ["FLOAT", {"default": 1.3}]}}}
+        return {"input": {"required": {"selection": ["COMFY_DYNAMICCOMBO_V3", {"options": [option("sol-attn", "tau"), option("sla", "keep_percent")]}]}}}
+
+    def test_accepts_declared_dynamic_combo_key_and_rejects_unknown(self):
+        from naiba.comfyui.runner import ComfyUIRunner
+        good = {"332": {"class_type": "BlockSparseAttention", "inputs": {"selection": "sol-attn"}}}
+        with mock.patch("naiba.comfyui.runner.client.object_info_node", return_value=self._dynamic_combo_schema()):
+            ComfyUIRunner._validate_recipe_graph("http://127.0.0.1:8188", good)
+        bad = {"332": {"class_type": "BlockSparseAttention", "inputs": {"selection": "bogus"}}}
+        with mock.patch("naiba.comfyui.runner.client.object_info_node", return_value=self._dynamic_combo_schema()):
+            with self.assertRaises(ValueError) as caught:
+                ComfyUIRunner._validate_recipe_graph("http://127.0.0.1:8188", bad)
+        self.assertIn("不在可用选项中", str(caught.exception))
+
+    def test_plain_combo_lists_still_enforced(self):
+        from naiba.comfyui.runner import ComfyUIRunner
+        schema = {"input": {"required": {"sampler_name": [["euler", "dpmpp"]]}}}
+        bad = {"1": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "bogus"}}}
+        with mock.patch("naiba.comfyui.runner.client.object_info_node", return_value=schema):
+            with self.assertRaises(ValueError):
+                ComfyUIRunner._validate_recipe_graph("http://127.0.0.1:8188", bad)
+
+
 class JobsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1289,6 +1318,13 @@ class ServiceApiTests(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.app = _StubApp(self.dir)
         self.service = ComfyUIService(self.app)
+        # 本模块全部用例必须离线（模块头第 1 行）。服务门的候选/健康探测默认打真网络：
+        # 桩地址 127.0.0.1:9 在 Windows 上每次拒绝要等约 2 秒，api_models 一次 6 组
+        # loader 就是 14 秒；未打桩的用例会把这个本地等待带进 CI。
+        for name in ("reachable", "_enum_choices"):
+            patcher = mock.patch.object(comfyui_client, name, return_value=None if name == "reachable" else [])
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def tearDown(self):
         self.service.shutdown()
@@ -1300,8 +1336,11 @@ class ServiceApiTests(unittest.TestCase):
         })
         self.assertEqual(status, 201)
         workflow_id = payload["workflow"]["id"]
+        fingerprint = payload["workflow"].get("workflow_fingerprint")
+        self.assertEqual(fingerprint, ComfyUIStore.payload_hash(_sample_prompt()))
         detail, status2 = self.service.api_workflow(workflow_id)
         self.assertEqual(status2, 200)
+        self.assertEqual(detail["workflow"]["workflow_fingerprint"], fingerprint)
         self.assertEqual(detail["workflow"]["prompt"], _sample_prompt())
         self.assertTrue(any(s["field_type"] == "seed" for s in detail["workflow"]["params"]))
 
@@ -2043,6 +2082,59 @@ class ParamsPickerSearchTests(unittest.TestCase):
         self.assertIn('$("#comfyuiParamsSearch")?.addEventListener("input", filterParamsPicker)', self.js)
         self.assertIn("filterParamsPicker();", self.js,
                       "打开弹窗与重渲染清单后要按当前搜索词重过滤")
+
+
+class SaveAsReviewTests(unittest.TestCase):
+    """另存核对：全扫描参数的「可否另存」判定（2026-11-03 一致性修复计划 §3.1）。
+
+    只验纯函数：哪些改动能固化进副本、哪些必须被点名拦下。渲染与提交接线由
+    test_recipe_frontend_assets 的源码断言覆盖。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        root = Path(__file__).resolve().parents[1]
+        cls.js = (root / "public/js/24-comfyui.js").read_text(encoding="utf-8")
+
+    def _fn(self, signature):
+        return self.js.split(signature, 1)[1].split("\nfunction ", 1)[0]
+
+    @unittest.skipUnless(__import__("shutil").which("node"), "Node required for frontend logic")
+    def test_problem_classification_is_nameable_and_never_blocks_supported_values(self):
+        import subprocess
+        import shutil
+        body = self._fn("function saveAsProblem(slot, value) {")
+        same = self._fn("function saveAsSameValue(left, right) {")
+        script = (
+            'const MEDIA_FIELD_TYPES=new Set(["image","audio","video"]);\n'
+            'const SAVE_AS_PROMPT_ROLES=new Set(["positive_prompt","negative_prompt"]);\n'
+            "function saveAsProblem(slot, value) {" + body + "\n"
+            "function saveAsSameValue(left, right) {" + same + "\n"
+            r'''
+const assert=require('assert/strict');
+const problem=(slot,value)=>saveAsProblem(slot,value);
+assert.equal(problem({field_type:'number'},'30'),'');
+assert.equal(problem({field_type:'seed'},'0'),'');
+assert.equal(problem({field_type:'seed'},'7'),'');
+assert.match(problem({field_type:'seed'},'-1'),/种子/);
+assert.match(problem({field_type:'seed'},'3.5'),/种子/);
+assert.match(problem({field_type:'number'},'abc'),/有限数字/);
+assert.equal(problem({field_type:'bool'},false),'');
+assert.match(problem({field_type:'bool'},'false'),/开 \/ 关/);
+assert.match(problem({field_type:'text',role:'positive_prompt'},'new prose'),/提示词按任务输入处理/);
+assert.match(problem({field_type:'image'},'a.png'),/受管媒体入口/);
+assert.match(problem({field_type:'text',control:'media'},'a.png'),/受管媒体入口/);
+assert.equal(problem({field_type:'text',control:'combo',candidates:['euler','dpmpp']},'dpmpp'),'');
+assert.match(problem({field_type:'text',control:'combo',candidates:['euler']},'other'),/不在这个参数的候选/);
+assert.match(problem({field_type:'text'},'/etc/passwd'),/自由文本 \/ 路径 \/ 代码不写进副本/);
+// 未改动（没有草稿）永远不算改动，也就不会被提交或被拦。
+assert.equal(saveAsSameValue(undefined,20),true);
+assert.equal(saveAsSameValue('30',30),true);
+assert.equal(saveAsSameValue(30,20),false);
+'''
+        )
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,30 @@ from naiba.studio.store import StudioStore
 
 
 class NativeRecipeSubmissionTests(unittest.TestCase):
+    def test_optional_media_prunes_unused_loader_and_video_components_only(self):
+        graph = {"image": {"class_type": "LoadImage", "inputs": {"image": "placeholder.png"}},
+                 "video": {"class_type": "LoadVideo", "inputs": {"file": "placeholder.mp4"}},
+                 "components": {"class_type": "GetVideoComponents", "inputs": {"video": ["video", 0]}},
+                 "h3": {"class_type": "H3", "inputs": {"image": ["image", 0], "video": ["components", 0]}},
+                 "unrelated": {"class_type": "LoadImage", "inputs": {"image": "keep.png"}}}
+        schema = {"image": {"optional": True}, "video": {"optional": True}}
+        with mock.patch("naiba.comfyui.runner.NodeSchemaProvider") as provider:
+            provider.return_value.node_inputs.side_effect = lambda cls: schema if cls == "H3" else {"video": {"optional": False}}
+            ComfyUIRunner._remove_unselected_optional_media(graph, [], "http://unused.invalid")
+        self.assertNotIn("image", graph)
+        self.assertNotIn("video", graph)
+        self.assertNotIn("components", graph)
+        self.assertIn("unrelated", graph)
+        self.assertEqual(graph["h3"]["inputs"], {})
+        shared = {"loader": {"class_type": "LoadImage", "inputs": {"image": "keep.png"}},
+                  "h3": {"class_type": "H3", "inputs": {"optional": ["loader", 0], "required": ["loader", 0]}}}
+        with mock.patch("naiba.comfyui.runner.NodeSchemaProvider") as provider:
+            provider.return_value.node_inputs.return_value = {"required": {"optional": False}, "optional": {"optional": True}}
+            ComfyUIRunner._remove_unselected_optional_media(shared, [], "http://unused.invalid")
+        self.assertIn("loader", shared)
+        self.assertIn("required", shared["h3"]["inputs"])
+        self.assertNotIn("optional", shared["h3"]["inputs"])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

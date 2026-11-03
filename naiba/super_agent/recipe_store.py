@@ -124,6 +124,21 @@ class RecipeStore:
         with self.transaction() as db:
             return [json.loads(row[0]) for row in db.execute("SELECT data FROM recipe_definitions WHERE owner=?", (owner,))]
 
+    def workflow_referenced(self, workflow_id: str) -> bool:
+        """Check every owner's immutable definitions and execution snapshots."""
+        with self.transaction() as db:
+            for table in ("recipe_definitions", "recipe_batches"):
+                for row in db.execute(f"SELECT data FROM {table}"):
+                    value = json.loads(row[0])
+                    recipe = value.get("recipe", value)
+                    if recipe.get("workflow_id") == workflow_id:
+                        return True
+                    for item in value.get("items", []):
+                        for attempt in (item.get("generate") or {}).get("attempts", []):
+                            if (attempt.get("payload") or {}).get("workflow_id") == workflow_id:
+                                return True
+        return False
+
     def save_definition(self, owner: str, recipe: dict[str, Any]) -> None:
         with self.transaction() as db:
             row = db.execute("SELECT data FROM recipe_definitions WHERE owner=? AND id=?", (owner, recipe["id"])).fetchone()

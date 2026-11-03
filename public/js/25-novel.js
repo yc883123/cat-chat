@@ -20,10 +20,12 @@ import { onStudioPageChange, setStudioPage } from "./22-studio.js";
 // 与服务端一致的上限（前端只做提前提示，服务端仍逐项校验）。
 const MAX_FILE_BYTES = 60 * 1024 * 1024;
 
-// 书名常自带《》（多半来自用户文件名），再包一层会变成《《…》》。
+// 书名常自带《》（多半来自用户文件名，后面还可能跟「作者：…」等后缀），再包一层会变成
+// 《《…》…》（2026-11-04 实测「《恐怖副本…》作者：姜乐你」被包成双书名号）。
+// 只要原文以《开头就视为已带书名号，原样展示；仅裸书名才补包。
 function bookTitleLabel(title) {
   const raw = String(title ?? "").trim();
-  return raw.startsWith("《") && raw.endsWith("》") ? raw : `《${raw}》`;
+  return raw.startsWith("《") ? raw : `《${raw}》`;
 }
 
 const LEVEL_LABELS = {
@@ -215,6 +217,18 @@ function closeExportMenu() {
   const menu = $("#novelExportMenu");
   if (menu) menu.hidden = true;
   $("#novelExportBtn")?.setAttribute("aria-expanded", "false");
+}
+
+// 手机端导出菜单是 fixed 定位（页头操作条 overflow-x:auto 会把 absolute 下拉整体裁掉，
+// 2026-11-04 专查实测菜单完全不可见且点击穿透）：打开时按按钮实时落位。
+function placeExportMenu() {
+  const menu = $("#novelExportMenu");
+  const btn = $("#novelExportBtn");
+  if (!menu || !btn) return;
+  const rect = btn.getBoundingClientRect();
+  menu.style.top = `${Math.round(rect.bottom + 4)}px`;
+  menu.style.right = `${Math.max(8, Math.round(window.innerWidth - rect.right))}px`;
+  menu.style.left = "auto";
 }
 
 function setBusy(busy) {
@@ -3205,7 +3219,10 @@ export function bindNovelEvents() {
     const menu = $("#novelExportMenu");
     if (!menu) return;
     const open = menu.hidden;
-    if (open) renderExportNote();
+    if (open) {
+      renderExportNote();
+      placeExportMenu();
+    }
     menu.hidden = !open;
     $("#novelExportBtn")?.setAttribute("aria-expanded", String(open));
   });
@@ -3223,6 +3240,13 @@ export function bindNovelEvents() {
     if (event.target.closest("#novelExportMenu, #novelExportBtn")) return;
     closeExportMenu();
   });
+  // fixed 菜单会随页面滚动漂离锚点：滚动（含菜单外容器）或改窗直接关掉。
+  const closeNovelExportOnMove = () => {
+    const menu = $("#novelExportMenu");
+    if (menu && !menu.hidden) closeExportMenu();
+  };
+  document.addEventListener("scroll", closeNovelExportOnMove, { capture: true, passive: true });
+  window.addEventListener("resize", closeNovelExportOnMove);
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     const menu = $("#novelExportMenu");

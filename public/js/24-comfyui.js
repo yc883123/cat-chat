@@ -40,12 +40,260 @@ const comfyui = {
 // Composition root owns the destination; this module only emits a frozen intent.
 let workflowIntentHandler = null;
 export function setWorkflowIntentHandler(handler) { workflowIntentHandler = handler; }
+let importReturn = null;
+export function openComfyuiWorkflowImport({ onSave = null, onCancel = null } = {}) {
+  importReturn = { onSave, onCancel };
+  openImportDialog();
+}
+let workflowSaveBusy = false;
+
+// ---- 另存核对 ----
+// 另存只固化「枚举 / 严格布尔 / 有权威上下界的数值」；提示词、媒体、自由文本和
+// 路径由任务输入或受管上传处理。核对清单必须列出**全部已扫描参数**：隐藏槽位
+// 没有控件，不能算「已改变」，但要让人看见它们没有进入副本，而不是悄悄消失。
+const SAVE_AS_PROMPT_ROLES = new Set(["positive_prompt", "negative_prompt"]);
+
+function saveAsValueFor(slot) {
+  // 草稿只在用户真的动过控件时才有记录；没记录 = 沿用工作流原值。
+  const draft = savedDraft(slotKey(slot));
+  if (draft === undefined) return undefined;
+  const input = document.querySelector(`[data-comfyui-slot="${CSS.escape(slotKey(slot))}"]`);
+  const text = String(input ? (input.value ?? "") : draft).trim();
+  return slot.field_type === "bool" ? text === "true" : text;
+}
+
+function saveAsSameValue(left, right) {
+  if (left === undefined) return true;
+  if (left === right) return true;
+  return typeof left === typeof right ? false : String(left) === String(right);
+}
+
+// 返回值是「不能另存的原因」；空串表示可以写进副本。
+// 服务端仍会用实时 object_info 复核枚举成员与数值上下界，这里只挡明显不支持的改动。
+function saveAsProblem(slot, value) {
+  if (slot.control === "media" || MEDIA_FIELD_TYPES.has(slot.field_type)) {
+    return "受管媒体入口：文件不进副本，另存后仍按任务选择的素材执行";
+  }
+  if (SAVE_AS_PROMPT_ROLES.has(slot.role)) {
+    return "提示词按任务输入处理，不写进副本；另存后请在任务总管或主表单里填";
+  }
+  if (slot.field_type === "bool") return typeof value === "boolean" ? "" : "布尔参数只接受「开 / 关」";
+  if (slot.field_type === "number" || slot.field_type === "seed") {
+    const text = String(value).trim();
+    const number = Number(text);
+    if (!text || !Number.isFinite(number)) return "数值参数要填有限数字";
+    if (slot.field_type !== "seed") return "";
+    return Number.isInteger(number) && number >= 0
+      ? "" : "种子要填 0 或更大的整数；想每次随机就留空";
+  }
+  if (slot.control === "combo") {
+    const options = slot.candidates || [];
+    return options.length && !options.includes(value)
+      ? `「${value}」不在这个参数的候选里` : "";
+  }
+  return "自由文本 / 路径 / 代码不写进副本";
+}
+
+// 一行 = 一个已扫描槽位。changed 为假的隐藏槽位也要出现，但不会被提交。
+function saveAsRows() {
+  const visible = visibleKeySet();
+  return (comfyui.detail?.params || []).map((slot) => {
+    const key = slotKey(slot);
+    const original = comfyui.detail?.prompt?.[slot.node_id]?.inputs?.[slot.field_name];
+    const current = saveAsValueFor(slot);
+    const changed = !saveAsSameValue(current, original);
+    return {
+      slot, key, original, current, changed,
+      visible: visible.has(key),
+      problem: changed ? saveAsProblem(slot, current) : "",
+    };
+  });
+}
+
+function saveAsText(value) {
+  if (value === undefined) return "（没有）";
+  if (typeof value === "boolean") return value ? "开" : "关";
+  if (typeof value === "string" && !value) return "（空）";
+  return String(value);
+}
+
+function saveAsRowMarkup(row, { changed }) {
+  const { slot } = row;
+  const name = slot.label || `${slot.node_id} · ${slot.field_name}`;
+  const tags = [];
+  if (!row.visible) tags.push('<span class="comfyui-saveas-tag">未在主表单显示</span>');
+  if (changed && row.problem) tags.push('<span class="comfyui-saveas-tag is-blocked">不能另存</span>');
+  const action = !row.visible
+    ? `<button class="control-button tiny" type="button" data-comfyui-add-slot="${CSS.escape(row.key)}">加到主表单</button>`
+    : "";
+  const diff = changed
+    ? `<span class="comfyui-saveas-diff">${escapeText(saveAsText(row.original))} → <b>${escapeText(saveAsText(row.current))}</b></span>`
+    : `<span class="comfyui-saveas-diff is-same">${escapeText(saveAsText(row.original))}（未改）</span>`;
+  const reason = row.problem ? `<small class="comfyui-saveas-reason">${escapeText(row.problem)}</small>` : "";
+  return `<div class="comfyui-saveas-row${row.problem ? " is-blocked" : ""}"><span class="comfyui-saveas-name">${escapeText(name)}${tags.join("")}</span>${diff}${reason}${action}</div>`;
+}
+
+function renderSaveAsReview() {
+  const list = $("#comfyuiSaveAsList");
+  if (!list) return;
+  const rows = saveAsRows();
+  const changed = rows.filter((row) => row.changed);
+  const blocked = changed.filter((row) => row.problem);
+  const saveable = changed.filter((row) => !row.problem);
+  const untouched = rows.filter((row) => !row.changed);
+  const summary = $("#comfyuiSaveAsSummary");
+  if (summary) {
+    summary.textContent = changed.length
+      ? `共 ${rows.length} 个参数 · ${changed.length} 项已改动（${saveable.length} 项写进副本${blocked.length ? `，${blocked.length} 项不能另存` : ""}）· ${untouched.length} 项未改`
+      : `共 ${rows.length} 个参数，当前全部是工作流原值；直接另存会得到一份原样副本。`;
+  }
+  const parts = [];
+  if (changed.length) {
+    parts.push(`<div class="comfyui-saveas-group"><p class="comfyui-saveas-group-title">本次要写入副本的改动</p>${changed.map((row) => saveAsRowMarkup(row, { changed: true })).join("")}</div>`);
+  }
+  if (untouched.length) {
+    parts.push(`<details class="comfyui-saveas-group"><summary>未改动的 ${untouched.length} 个参数（不会写入副本）</summary>${untouched.map((row) => saveAsRowMarkup(row, { changed: false })).join("")}</details>`);
+  }
+  list.innerHTML = parts.join("") || '<p class="comfyui-empty">这份工作流没有扫描到可调参数。</p>';
+  const discardRow = $("#comfyuiSaveAsDiscardRow");
+  if (discardRow) {
+    discardRow.hidden = !blocked.length;
+    if (!blocked.length) { const box = $("#comfyuiSaveAsDiscard"); if (box) box.checked = false; }
+  }
+  const confirm = $("#comfyuiSaveAsConfirm");
+  if (confirm) confirm.disabled = Boolean(blocked.length) && !$("#comfyuiSaveAsDiscard")?.checked;
+}
+
+// 隐藏槽位没法编辑，也就无从改动；把它加进主表单后才能核对和另存。
+async function addSlotToMainForm(key) {
+  if (!comfyui.detail) return;
+  const visible = visibleKeySet();
+  visible.add(key);
+  const order = orderedSlots(comfyui.detail.params || [])
+    .map((slot) => ({ node_id: slot.node_id, field_name: slot.field_name }));
+  try {
+    const payload = await api(
+      `/api/comfyui/workflows/${encodeURIComponent(comfyui.detail.id)}/params`,
+      { method: "POST", body: { visible: [...visible].map(parseSlotKey), order } });
+    comfyui.detail = {
+      ...comfyui.detail,
+      visible_params: payload.visible_params || [...visible].map(parseSlotKey),
+      param_order: payload.param_order || order,
+    };
+    markVisibleSetKnowsMedia();
+    renderParamForm();
+    renderSaveAsReview();
+  } catch (error) {
+    const box = $("#comfyuiSaveAsError");
+    if (box) box.textContent = `加入主表单失败：${error.message}`;
+  }
+}
+
+function parseSlotKey(key) {
+  const [nodeId, ...rest] = String(key).split("|");
+  return { node_id: nodeId, field_name: rest.join("|") };
+}
+
+function escapeText(value) {
+  return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function openSaveAsDialog() {
+  if (!comfyui.detail || workflowSaveBusy) return;
+  const dialog = $("#comfyuiSaveAsDialog");
+  if (!dialog) return;
+  const nameInput = $("#comfyuiSaveAsName");
+  if (nameInput) nameInput.value = `${comfyui.detail.name || "工作流"} · 副本`;
+  const box = $("#comfyuiSaveAsDiscard");
+  if (box) box.checked = false;
+  const error = $("#comfyuiSaveAsError");
+  if (error) error.textContent = "";
+  renderSaveAsReview();
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+function closeSaveAsDialog() {
+  const dialog = $("#comfyuiSaveAsDialog");
+  if (!dialog) return;
+  if (typeof dialog.close === "function") dialog.close();
+  else dialog.removeAttribute("open");
+}
+
+async function confirmSaveAs() {
+  if (!comfyui.detail || workflowSaveBusy) return;
+  const errorBox = $("#comfyuiSaveAsError");
+  if (errorBox) errorBox.textContent = "";
+  const name = String($("#comfyuiSaveAsName")?.value || "").trim();
+  if (!name) { if (errorBox) errorBox.textContent = "请填写副本名称"; return; }
+  const rows = saveAsRows();
+  const changed = rows.filter((row) => row.changed);
+  const blocked = changed.filter((row) => row.problem);
+  if (blocked.length && !$("#comfyuiSaveAsDiscard")?.checked) {
+    if (errorBox) errorBox.textContent = "还有不能另存的改动：请先还原它们，或勾选确认放弃。";
+    return;
+  }
+  const source = comfyui.detail;
+  // 只提交核对清单里「已改动且可以另存」的项；被放弃的改动在这里显式排除。
+  const overrides = changed.filter((row) => !row.problem).map((row) => ({
+    node_id: row.slot.node_id,
+    field_name: row.slot.field_name,
+    value: row.slot.field_type === "bool" ? row.current === true
+      : ["number", "seed"].includes(row.slot.field_type) ? Number(row.current)
+      : String(row.current),
+  }));
+  workflowSaveBusy = true;
+  const confirm = $("#comfyuiSaveAsConfirm");
+  if (confirm) confirm.disabled = true;
+  try {
+    const result = await api(`/api/comfyui/workflows/${encodeURIComponent(source.id)}/save-as`, { method: "POST", body: { name, workflow_fingerprint: source.workflow_fingerprint || source.fingerprint, overrides } });
+    if (!result.workflow?.id) throw new Error("保存未返回工作流编号，请刷新列表后核对。");
+    await refreshWorkflows();
+    // Preserve media selections and every drafted value (including hidden slots that
+    // carry a draft from when they were visible) when selecting the saved copy.
+    const media = new Map(comfyui.mediaSelection);
+    await selectWorkflow(result.workflow.id);
+    if (comfyui.detail?.id !== result.workflow.id) throw new Error("工作流已保存但未切换成功，请在列表中选择新副本。");
+    comfyui.mediaSelection = media;
+    for (const row of rows) {
+      if (row.current !== undefined) rememberDraft(row.key, typeof row.current === "boolean" ? String(row.current) : row.current);
+    }
+    renderParamForm();
+    closeSaveAsDialog();
+    const skipped = blocked.length ? `；${blocked.length} 项不能另存的改动没有写入` : "";
+    toast(`已另存副本（写入 ${overrides.length} 项改动${skipped}），可继续交给任务总管；没有开始执行。`);
+  } catch (error) {
+    if (errorBox) errorBox.textContent = `另存失败：${error.message}`;
+  } finally {
+    workflowSaveBusy = false;
+    if (confirm) confirm.disabled = false;
+  }
+}
 
 export function bindComfyuiEvents() {
+  $("#comfyuiSaveCurrentAs")?.addEventListener("click", openSaveAsDialog);
+  $("#comfyuiSaveAsCancel")?.addEventListener("click", closeSaveAsDialog);
+  $("#comfyuiSaveAsConfirm")?.addEventListener("click", () => void confirmSaveAs());
+  $("#comfyuiSaveAsDiscard")?.addEventListener("change", () => {
+    const confirm = $("#comfyuiSaveAsConfirm");
+    if (confirm) confirm.disabled = !$("#comfyuiSaveAsDiscard")?.checked;
+    const error = $("#comfyuiSaveAsError");
+    if (error) error.textContent = "";
+  });
+  $("#comfyuiSaveAsName")?.addEventListener("input", () => {
+    const error = $("#comfyuiSaveAsError");
+    if (error) error.textContent = "";
+  });
+  $("#comfyuiSaveAsList")?.addEventListener("click", (event) => {
+    const key = event.target.closest?.("[data-comfyui-add-slot]")?.dataset.comfyuiAddSlot;
+    if (key) void addSlotToMainForm(key);
+  });
+  $("#comfyuiImportDialog")?.addEventListener("cancel", () => { const callback = importReturn?.onCancel; importReturn = null; callback?.(); });
   $("#comfyuiRecipeHandoff")?.addEventListener("click", () => {
     if (!comfyui.detail || !workflowIntentHandler) return toast("请先选择工作流");
     workflowIntentHandler(JSON.parse(JSON.stringify({ workflow: comfyui.detail, overrides: collectOverrides(), media_inputs: collectMediaInputs(), shots: Number($("#comfyuiShots")?.value || 1) })));
   });
+  for (const type of ["input", "change"]) $("#comfyuiParamForm")?.addEventListener(type, () => updateDraftHint());
   if (comfyui.unsubscribePage) comfyui.unsubscribePage();
   comfyui.unsubscribePage = onStudioPageChange((page) => {
     if (page === "comfyui") {
@@ -61,7 +309,7 @@ export function bindComfyuiEvents() {
   $("#comfyuiUrlSave")?.addEventListener("click", () => void saveUrl());
   $("#comfyuiRefreshWorkflows")?.addEventListener("click", () => void refreshWorkflows());
   $("#comfyuiImportBtn")?.addEventListener("click", openImportDialog);
-  $("#comfyuiImportCancel")?.addEventListener("click", closeImportDialog);
+  $("#comfyuiImportCancel")?.addEventListener("click", () => { const callback = importReturn?.onCancel; importReturn = null; closeImportDialog(); callback?.(); });
   $("#comfyuiImportConfirm")?.addEventListener("click", () => void confirmImport());
   $("#comfyuiImportFile")?.addEventListener("change", onImportFile);
   $("#comfyuiSubmit")?.addEventListener("click", () => void submitTask());
@@ -498,7 +746,7 @@ function renderParamForm() {
   if (!comfyui.detail) {
     const empty = document.createElement("p");
     empty.className = "comfyui-empty";
-    empty.textContent = "先在左侧选一份工作流，这里会列出它可以调的参数。";
+    empty.textContent = "先选择一份工作流，这里会列出它可调的参数。";
     form.append(empty);
     return;
   }
@@ -568,6 +816,37 @@ function renderParamForm() {
       }
     }
   }
+  updateDraftHint();
+}
+
+// 未保存调整的台面提示（交接须说明参数来源，计划 §4.1）：只数「主表单可见控件
+// 当前值 ≠ 工作流保存值」的项，不打断调参、不弹窗；交接弹窗里再做二选一。
+function updateDraftHint() {
+  const hint = $("#comfyuiDraftHint");
+  if (!hint) return;
+  const graph = comfyui.detail?.prompt || {};
+  let changed = 0;
+  for (const slot of comfyui.detail?.params || []) {
+    if ((slot.control || "") === "media") continue;
+    const input = document.querySelector(`[data-comfyui-slot="${CSS.escape(slotKey(slot))}"]`);
+    if (!input) continue;
+    const original = ((graph[slot.node_id] || {}).inputs || {})[slot.field_name];
+    const text = String(input.value ?? "").trim();
+    if (slot.field_type === "seed") {
+      if (text) changed += 1;
+    } else if (slot.field_type === "bool") {
+      if ((text === "true") !== Boolean(original)) changed += 1;
+    } else if (slot.field_type === "number") {
+      const value = Number(text);
+      if (text !== "" && Number.isFinite(value) && value !== Number(original)) changed += 1;
+    } else if (text !== String(original ?? "").trim()) {
+      changed += 1;
+    }
+  }
+  hint.hidden = changed === 0;
+  hint.textContent = changed
+    ? `当前有 ${changed} 项未保存调整；交给任务总管时会问你要用「工作流已保存的默认值」还是「当前未保存调整」，不会静默丢弃、不改写原工作流。`
+    : "";
 }
 
 // ---- 编辑参数 ----
@@ -1585,6 +1864,8 @@ async function confirmImport() {
       body: { name, workflow: raw },
     });
     closeImportDialog();
+    const callback = importReturn?.onSave; importReturn = null;
+    if (callback) { await callback(payload.workflow); return; }
     await refreshWorkflows();
     await selectWorkflow(String(payload.workflow?.id || ""));
     toast(`已导入「${payload.workflow?.name || name}」，共 ${payload.workflow?.params?.length || 0} 个可调参数`);

@@ -7,8 +7,10 @@
 左段中段，Agent 之后、[文件] 之前），两处共用同一个 `#turnJumpSelect` 元素。
 
 不变量：
-1. `#turnJumpSelect` 在 `.topbar-actions` 内、初始 `hidden`，手机 / 桌面共用一个元素：
-   手机端显示规则写在既有 760 块内（顶到操作区行首），桌面端由基态规则 + `margin-right:auto`
+1. `#turnJumpSelect` 是 `.topbar` 的**直接子元素**（2026-11-04 顶栏两层改版：从
+   `.topbar-actions` 移出——手机端进第 1 行中段、与汉堡/Agent 同排，桌面端视觉不变）、
+   初始 `hidden`，手机 / 桌面共用一个元素：
+   手机端显示规则写在既有 760 块内（grid 第 1 行中段），桌面端由基态规则 + `margin-right:auto`
    落在左段中段（视口 ≥1000px 时显示，761–999px 顶栏放不下则收起、只留刻度轨）；
    不得再挂 `.mobile-only`（那会让桌面端也藏起来）；
 2. 实现落在 `04-messages.js` **内部**，复用既有 `collectTurns()` / `turnRailTurns` /
@@ -49,9 +51,13 @@ class TurnJumpTests(unittest.TestCase):
             index,
             "桌面端也要显示轮次下拉，不能再挂 .mobile-only",
         )
-        actions = index[index.index('class="topbar-actions"'):]
-        actions = actions[: actions.index("</header>")]
-        self.assertIn('id="turnJumpSelect"', actions, "轮次下拉要放进顶栏操作区")
+        # 2026-11-04 两层改版：它是 .topbar 直接子元素（Agent 控件之后、操作区之前），
+        # 不再在 .topbar-actions 内（手机端会随操作区换行漂移）。
+        header = index[index.index('<header class="topbar">'): index.index("</header>")]
+        actions_start = header.index('class="topbar-actions"')
+        self.assertIn('id="turnJumpSelect"', header[:actions_start], "轮次下拉要放在操作区之前（.topbar 直接子元素）")
+        agent_end = header.index("</label>", header.index('class="model-control agent-control"'))
+        self.assertGreater(header.index('id="turnJumpSelect"'), agent_end, "轮次下拉要紧跟 Agent 控件之后")
         start = index.index('<select class="turn-jump-select"')
         markup = index[start: index.index(">", start) + 1]
         self.assertIn("hidden", markup, "初始 hidden（不足 2 轮时不显示）")
@@ -63,7 +69,7 @@ class TurnJumpTests(unittest.TestCase):
         self.assertIn("margin-right: auto", base, "桌面端靠 margin-right:auto 顶到操作区行首（左段中段）")
         # 桌面端收缩规则：flex-basis 必须写死 260px，不能 auto——Chromium 下 <select> 的 auto 基准
         # 会取「上次渲染宽度」，窗口一缩被压小后即使再放大也回不来（实测 1440→1100→1440 恒为 0）。
-        self.assertIn(".topbar-actions > .turn-jump-select { flex: 0 100 260px; }", css)
+        self.assertIn(".topbar > .turn-jump-select { flex: 0 100 260px; }", css)
         # 窄桌面（761–999px）：顶栏被 API + Agent + 4 个按钮占满，下拉会被压成废桩 → 收掉只留刻度轨。
         narrow = css[css.index("@media (min-width: 761px) and (max-width: 999px) {"):]
         narrow = narrow[: narrow.index("\n}")]

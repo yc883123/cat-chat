@@ -211,6 +211,42 @@
       "width": [
         "115",
         0
+      ],
+      "ref_images.ref_image_6": [
+        "recipe_ref_image_7",
+        0
+      ],
+      "ref_images.ref_image_7": [
+        "recipe_ref_image_8",
+        0
+      ],
+      "ref_images.ref_image_8": [
+        "recipe_ref_image_9",
+        0
+      ],
+      "ref_videos.ref_video_0": [
+        "recipe_ref_video_1_components",
+        0
+      ],
+      "ref_videos.ref_video_1": [
+        "recipe_ref_video_2_components",
+        0
+      ],
+      "ref_videos.ref_video_2": [
+        "recipe_ref_video_3_components",
+        0
+      ],
+      "ref_audios.ref_audio_0": [
+        "recipe_ref_audio_1",
+        0
+      ],
+      "ref_audios.ref_audio_1": [
+        "recipe_ref_audio_2",
+        0
+      ],
+      "ref_audios.ref_audio_2": [
+        "recipe_ref_audio_3",
+        0
       ]
     }
   },
@@ -329,6 +365,87 @@
     "class_type": "LoadImage",
     "inputs": {
       "image": "recipe_input_6.png"
+    }
+  },
+  "recipe_ref_image_7": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "recipe_input_7.png"
+    }
+  },
+  "recipe_ref_image_8": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "recipe_input_8.png"
+    }
+  },
+  "recipe_ref_image_9": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "recipe_input_9.png"
+    }
+  },
+  "recipe_ref_video_1": {
+    "class_type": "LoadVideo",
+    "inputs": {
+      "file": "recipe_input_1.mp4"
+    }
+  },
+  "recipe_ref_video_2": {
+    "class_type": "LoadVideo",
+    "inputs": {
+      "file": "recipe_input_2.mp4"
+    }
+  },
+  "recipe_ref_video_3": {
+    "class_type": "LoadVideo",
+    "inputs": {
+      "file": "recipe_input_3.mp4"
+    }
+  },
+  "recipe_ref_audio_1": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "recipe_input_1.wav"
+    }
+  },
+  "recipe_ref_audio_2": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "recipe_input_2.wav"
+    }
+  },
+  "recipe_ref_audio_3": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "recipe_input_3.wav"
+    }
+  },
+  "recipe_ref_video_1_components": {
+    "class_type": "GetVideoComponents",
+    "inputs": {
+      "video": [
+        "recipe_ref_video_1",
+        0
+      ]
+    }
+  },
+  "recipe_ref_video_2_components": {
+    "class_type": "GetVideoComponents",
+    "inputs": {
+      "video": [
+        "recipe_ref_video_2",
+        0
+      ]
+    }
+  },
+  "recipe_ref_video_3_components": {
+    "class_type": "GetVideoComponents",
+    "inputs": {
+      "video": [
+        "recipe_ref_video_3",
+        0
+      ]
     }
   }
 }

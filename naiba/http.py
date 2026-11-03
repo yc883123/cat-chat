@@ -265,6 +265,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(*self.app.api_super_agent_recipes())
         elif path == "/api/super-agent/threads":
             self._json(*self.app.api_super_agent_threads())
+        elif path.startswith("/api/super-agent/threads/") and path.endswith("/recipe/clone-draft"):
+            thread_id = path[len("/api/super-agent/threads/") : -len("/recipe/clone-draft")].strip("/")
+            self._json(*self.app.api_super_agent_recipe_clone_draft(thread_id))
         elif path.startswith("/api/super-agent/threads/") and path.endswith("/recipe"):
             thread_id = path[len("/api/super-agent/threads/") : -len("/recipe")].strip("/")
             self._json(*self.app.api_super_agent_recipe(thread_id))
@@ -877,6 +880,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(*self.app.api_super_agent_create_recipe_batch(body))
         elif path == "/api/super-agent/threads":
             self._json(*self.app.api_super_agent_create_thread(body))
+        elif path.startswith("/api/super-agent/threads/") and path.endswith("/recipe/precheck"):
+            thread_id = path[len("/api/super-agent/threads/"):-len("/recipe/precheck")].strip("/")
+            self._json(*self.app.api_super_agent_recipe_precheck(thread_id, body))
         elif path.startswith("/api/super-agent/threads/") and path.endswith("/recipe/actions"):
             thread_id = path[len("/api/super-agent/threads/"):-len("/recipe/actions")].strip("/")
             self._json(*self.app.api_super_agent_recipe_action(thread_id, body))
@@ -1014,6 +1020,8 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/comfyui/workflows":
             # 造梦机：导入工作流（API 格式校验 + 参数扫描 + 受管存储）。
             self._json(*self.app.comfyui.api_workflow_create(body))
+        elif path.startswith("/api/comfyui/workflows/") and path.endswith("/save-as"):
+            self._json(*self.app.comfyui.api_workflow_save_as(path.split("/")[-2], body))
         elif path.startswith("/api/comfyui/workflows/") and path.endswith("/params"):
             # 造梦机：保存这份工作流的主表单可见参数与显示顺序（按工作流粒度持久化）。
             self._json(*self.app.comfyui.api_workflow_params_set(path.split("/")[-2], body))

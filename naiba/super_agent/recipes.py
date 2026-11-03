@@ -17,9 +17,10 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from naiba.core.contracts import (
-    RECIPE_ACTIONS, RECIPE_EXECUTOR_TYPE, RECIPE_MAX_IMAGES_PER_ITEM,
-    RECIPE_MAX_ITEMS, RECIPE_MAX_PROMPT_CHARS, RECIPE_MAX_TOTAL_BYTES,
-    RECIPE_SCHEMA_VERSION,
+    RECIPE_ACTIONS, RECIPE_EXECUTOR_TYPE, RECIPE_HANDOFF_PROVENANCE,
+    RECIPE_MAX_IMAGES_PER_ITEM, RECIPE_MAX_ITEMS, RECIPE_MAX_PROMPT_CHARS,
+    RECIPE_MAX_TOTAL_BYTES, RECIPE_SCHEMA_VERSION, RECIPE_INPUT_MODES,
+    RECIPE_MEDIA_LIMITS, RECIPE_MEDIA_REFERENCE_NAMES, RECIPE_ITEM_EDIT_FIELDS,
 )
 from naiba.comfyui.params import media_kind_of_field, scan_params
 from naiba.super_agent.recipe_store import RecipeStore, canonical, digest
@@ -27,6 +28,56 @@ from naiba.super_agent.recipe_store import RecipeStore, canonical, digest
 _ACTIVE = {"queued", "running", "stopping", "submitting", "unknown"}
 _NATIVE_ACTIVE = {"queued", "running", "stopping"}
 _FAILED = {"failed", "cancelled", "interrupted", "needs_review", "partial", "collection_failed"}
+
+
+_MEDIA_PROBE_CODE = """import av, io, json, sys
+kind=sys.argv[1]
+data=sys.stdin.buffer.read()
+metadata={}
+with av.open(io.BytesIO(data), options={"protocol_whitelist": "pipe,data", "format_whitelist": "mov,matroska,webm,avi,wav,mp3,flac,ogg,aac", "probesize": "5000000", "analyzeduration": "5000000"}) as container:
+    import math
+    streams = list(container.streams.video if kind == "video" else container.streams.audio)
+    if not streams:
+        raise ValueError("素材没有所需媒体轨道")
+    stream = streams[0]
+    seconds = float(stream.duration * stream.time_base) if stream.duration is not None and stream.time_base else float(container.duration or 0) / av.time_base
+    if not math.isfinite(seconds) or not 0 < seconds <= 300:
+        raise ValueError("音视频时长必须为 0–300 秒的有限正数")
+    metadata["duration_seconds"] = seconds
+    if kind == "video":
+        width, height = stream.codec_context.width, stream.codec_context.height
+        if not width or not height or width * height > 16_777_216:
+            raise ValueError("视频像素预算超限")
+        fps = float(stream.average_rate or stream.base_rate or 0)
+        if not math.isfinite(fps) or not 0 < fps <= 120:
+            raise ValueError("视频帧率无效或超限")
+        metadata.update(width=width, height=height, fps=fps)
+    if next(container.decode(stream), None) is None:
+        raise ValueError("素材轨道无法解码")
+    metadata["has_audio"] = bool(container.streams.audio)
+    metadata["verification"] = "metadata_and_first_decoded_frame"
+print(json.dumps(metadata))
+"""
+
+def probe_media_main(kind: str) -> int:
+    """Trusted frozen-executable child mode; stdin bytes, stdout JSON only."""
+    import sys
+    if kind not in {"video", "audio"}:
+        return 2
+    try:
+        if sys.stdin is None or sys.stdout is None:
+            return 2
+        # Same constrained decoder as source builds; no user program is executed.
+        namespace = {"__name__": "__recipe_media_probe__"}
+        old_argv = sys.argv
+        try:
+            sys.argv = ["recipe-media-probe", kind]
+            exec(_MEDIA_PROBE_CODE, namespace)
+        finally:
+            sys.argv = old_argv
+        return 0
+    except Exception:
+        return 1
 
 
 def _now() -> int:
@@ -76,7 +127,25 @@ class RecipeCoordinator:
         recipes = [self._install_builtin(recipe) for recipe in self._builtins()]
         if owner:
             recipes += self.store.definitions(owner)
-        return {"recipes": recipes, "limits": {"items": RECIPE_MAX_ITEMS, "images_per_item": RECIPE_MAX_IMAGES_PER_ITEM, "total_bytes": RECIPE_MAX_TOTAL_BYTES}}
+        return {"recipes": recipes, "limits": {"items": RECIPE_MAX_ITEMS, "images_per_item": RECIPE_MAX_IMAGES_PER_ITEM, "videos_per_item": 3, "audios_per_item": 3, "total_bytes": RECIPE_MAX_TOTAL_BYTES}}
+
+    def workflow_referenced(self, workflow_id: str) -> bool:
+        try:
+            return self.store.workflow_referenced(workflow_id)
+        except Exception:
+            logging.getLogger(__name__).exception("Cannot verify recipe workflow references")
+            return True
+
+    @staticmethod
+    def _input_mode(body: dict[str, Any], default: str = "script") -> str:
+        mode = body.get("input_mode", default)
+        if mode not in RECIPE_INPUT_MODES:
+            raise ValueError("input_mode 必须为 prompt 或 script")
+        return mode
+
+    @staticmethod
+    def _media_counts(refs: list[dict[str, Any]]) -> dict[str, int]:
+        return {kind: sum(m.get("media", "image") == kind for m in refs) for kind in RECIPE_MEDIA_LIMITS}
 
     def _fingerprint(self, graph: dict[str, Any]) -> str:
         from naiba.super_agent.recipe_catalog import workflow_fingerprint
@@ -122,44 +191,43 @@ class RecipeCoordinator:
             raise ValueError("需要明确 prompt_slot")
         node_id, field = _slot(binding)
         node = graph.get(node_id) or {}
-        cls = str(node.get("class_type") or "").lower()
         inputs = node.get("inputs") or {}
-        h3_classes = {"minimaxh3imagetovideo", "minimaxh3referencetovideo"}
-        safe = cls in h3_classes and field == "prompt"
-        if cls in {"stringmultiline", "primitivestringmultiline"} and field == "value":
-            consumers = [(str(target.get("class_type") or "").lower(), name)
-                         for target in graph.values() for name, value in (target.get("inputs") or {}).items()
-                         if isinstance(value, list) and value and str(value[0]) == node_id]
-            safe = bool(consumers) and all(target_cls in h3_classes and name == "prompt" for target_cls, name in consumers)
-        if cls in {"cliptextencode", "cliptextencodesdxl", "cliptextencodeflux"} and field in {"text", "text_g", "text_l", "clip_l", "t5xxl"}:
-            # A recognised encoder must actually feed a positive sampler input;
-            # a title containing 'prompt' is not proof of a safe destination.
-            seen: set[str] = set()
-            def reaches(current: str) -> bool:
-                if current in seen:
-                    return False
-                seen.add(current)
-                for target_id, target in graph.items():
-                    for name, value in (target.get("inputs") or {}).items():
-                        if isinstance(value, list) and value and str(value[0]) == current:
-                            target_cls = str(target.get("class_type") or "").lower()
-                            if name == "positive" and ("ksampler" in target_cls or "samplercustom" in target_cls):
-                                return True
-                            if reaches(str(target_id)):
-                                return True
-                return False
-            safe = reaches(node_id)
-        if not safe or not isinstance(inputs.get(field), str):
-            raise ValueError("该字段不是已验证的安全提示词槽位")
+        # The workflow is selected from the ComfyUI library and fingerprint-pinned.
+        # Mapping a prompt only needs a real editable text field; its downstream
+        # routing belongs to the workflow, not to a second recipe-specific graph judge.
+        slot = next((param for param in scan_params(graph) if _slot(param) == (node_id, field)), None)
+        if (not slot or slot["field_type"] != "text"
+                or not isinstance(inputs.get(field), str)):
+            raise ValueError("提示词写入位置不是当前工作流的文本字段，请重新选择")
 
     def _template(self, body: dict[str, Any]) -> dict[str, Any]:
         raw = body.get("template") or {}
         if not isinstance(raw, dict):
             raise ValueError("template 必须是对象")
+        if body.get("template_id") and raw.get("id") and str(body["template_id"]) != str(raw["id"]):
+            raise ValueError("template_id 与 template.id 冲突")
+        if "body" in raw:
+            text = raw["body"]
+            if not isinstance(text, str) or not text.strip() or len(text) > 100000:
+                raise ValueError("提词规则正文为空或过长")
+            rule = raw.get("result_rule", body.get("result_rule", {"type": "text"}))
+            builtin_rule = next((r["template"]["result_rule"] for r in self._builtins() if r["template"]["id"] == raw.get("id")), None)
+            if isinstance(rule, str):
+                legacy_rule = raw.get("id") == "recipe_minimax_h3_r2v_v1" and rule == "h3_ref2va_single_v1"
+                if rule != builtin_rule and not legacy_rule:
+                    raise ValueError("未知的内置结果规则")
+            elif not isinstance(rule, dict) or rule.get("type") not in {"text", "json_field", "sections"}:
+                raise ValueError("不支持的单结果选择规则")
+            elif rule["type"] == "json_field" and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(rule.get("field") or "")):
+                raise ValueError("JSON 结果字段无效")
+            return {"id": str(raw.get("id") or "recipe-rule-" + digest(text)[:20]), "body": text, "result_rule": copy.deepcopy(rule)}
         template_id = str(body.get("template_id") or raw.get("id") or "")
         for recipe in self._builtins():
             if recipe["template"]["id"] == template_id:
                 return copy.deepcopy(recipe["template"])
+        if template_id == "recipe_minimax_h3_r2v_v1":
+            legacy = Path(__file__).resolve().with_name("recipe_assets") / "h3_r2v.v1.prompt.txt"
+            return {"id": template_id, "body": legacy.read_text(encoding="utf-8"), "result_rule": "h3_ref2va_single_v1"}
         if not template_id:
             raise ValueError("请选择提词库模板")
         custom_id = str(body.get("custom_id") or raw.get("custom_id") or "")
@@ -174,13 +242,23 @@ class RecipeCoordinator:
             raise ValueError("不支持的单结果选择规则")
         if rule["type"] == "json_field" and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(rule.get("field") or "")):
             raise ValueError("JSON 结果字段无效")
-        return {"id": template_id, "body": str(text), "result_rule": rule, "custom_id": custom_id}
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("提词规则正文为空")
+        return {"id": template_id, "body": text, "result_rule": rule, "custom_id": custom_id}
 
     def save_recipe(self, owner: str, body: dict[str, Any]) -> dict[str, Any]:
         if not owner or not isinstance(body, dict):
             raise ValueError("配方请求无效")
         if set(body) & {"api_key", "base_url", "target_url", "workflow", "workflow_snapshot", "submission_policy"}:
             raise ValueError("配方不接受凭据、任意目标或内联工作流")
+        source_id = str(body.get("source_recipe_id") or "")
+        source = self._recipe(owner, source_id) if source_id else None
+        if source is not None:
+            inherited = {k: copy.deepcopy(source[k]) for k in ("workflow_id", "workflow_fingerprint", "prompt_slot", "media_slots", "duration_slot", "template", "overrides", "input_mode") if k in source}
+            if ("template_id" in body or "custom_id" in body) and "template" not in body:
+                inherited.pop("template", None)
+            body = {**inherited, **body}
+        input_mode = self._input_mode(body)
         workflow_id = str(body.get("workflow_id") or "")
         entry = self.app.comfyui.store.get_workflow(workflow_id)
         if not entry:
@@ -205,17 +283,25 @@ class RecipeCoordinator:
             node = graph.get(node_id) or {}
             if not role or role in roles or (node_id, field) in addresses or raw.get("scope") not in {"item", "shared"}:
                 raise ValueError("媒体角色/槽位重复或范围未明确")
-            if media_kind_of_field(node.get("class_type"), field) != "image" or not isinstance((node.get("inputs") or {}).get(field), str):
-                raise ValueError("只支持已验证图片媒体槽位")
+            kind = media_kind_of_field(node.get("class_type"), field)
+            if kind not in RECIPE_MEDIA_LIMITS or raw.get("media", kind) != kind or not isinstance((node.get("inputs") or {}).get(field), str):
+                raise ValueError("只支持已验证的图片/视频/音频媒体槽位")
             roles.add(role)
             addresses.add((node_id, field))
             normalized.append({"role": role, "label": str(raw.get("label") or role), "node_id": node_id,
-                               "field_name": field, "scope": raw["scope"], "required": raw.get("required") is True})
+                               "field_name": field, "media": kind, "scope": raw["scope"], "required": raw.get("required") is True})
+        # Builtin derivation is valid only for its pinned graph and bindings.
+        # An unrelated workflow or changed mapping is a custom graph, not H3.
+        derived_mode = source.get("mode", "custom") if source else "custom"
+        if source and (source["workflow_fingerprint"] != self._fingerprint(graph) or source["prompt_slot"] != body["prompt_slot"] or source["media_slots"] != normalized):
+            derived_mode = "custom"
         recipe = {"name": str(body.get("name") or entry.get("name") or "自定义配方"),
-                  "description": str(body.get("description") or ""), "mode": "custom",
+                  "description": str(body.get("description") or ""), "mode": derived_mode,
+                  "version": 2, "input_mode": input_mode, "source_recipe_id": source_id,
+                  "source_recipe_version": source.get("version", 1) if source else None,
                   "workflow_id": workflow_id, "workflow": graph, "workflow_fingerprint": self._fingerprint(graph),
                   "prompt_slot": {"node_id": _slot(body["prompt_slot"])[0], "field_name": _slot(body["prompt_slot"])[1]},
-                  "media_slots": normalized, "template": self._template(body), "provenance": {"source": "user"}}
+                  "media_slots": normalized, "template": (self._template(body) if input_mode == "script" else None), "provenance": {"source": "user"}}
         if body.get("duration_slot"):
             address = _slot(body["duration_slot"])
             param = next((s for s in scan_params(graph) if _slot(s) == address), None)
@@ -228,13 +314,156 @@ class RecipeCoordinator:
             self.store.save_definition(owner, recipe)
         return {"recipe": recipe}
 
-    def _model(self, body: dict[str, Any]) -> dict[str, Any]:
+    # ---- 工作流直建（批量执行助手 2026-11-03 计划 §5.1/§5.2）----
+    # 造梦机交接 / 总管新建不再要求先注册「方案」：服务端按参数扫描元数据自动
+    # 派生映射并落为不可变定义；用途有歧义时明确报错，不猜。
+
+    @staticmethod
+    def _auto_prompt_slot(graph: dict[str, Any], params: list[dict[str, Any]]) -> dict[str, Any]:
+        """自动识别提示词写入位：正向连线锚点 → 唯一多行文本槽；歧义时报错。"""
+        positive = [slot for slot in params if slot.get("role") == "positive_prompt"]
+        if len(positive) == 1:
+            return {"node_id": str(positive[0]["node_id"]), "field_name": str(positive[0]["field_name"])}
+        multiline = [slot for slot in params if slot.get("field_type") == "text" and slot.get("control") == "multiline"]
+        if len(multiline) == 1:
+            return {"node_id": str(multiline[0]["node_id"]), "field_name": str(multiline[0]["field_name"])}
+        candidates = [f"{slot['node_id']}/{slot['field_name']}" for slot in multiline or positive]
+        raise ValueError(
+            "无法唯一识别提示词入口（候选：" + ("、".join(candidates) if candidates else "无多行文本槽") +
+            "）；请在交接时明确选择提示词写入位，不自动猜测")
+
+    def _auto_media_slots(self, graph: dict[str, Any], params: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """自动派生媒体槽位：显式映射的图片/音频/视频入口全部纳入，逐项作用域。"""
+        slots, roles = [], set()
+        for slot in params:
+            kind = slot.get("field_type")
+            if kind not in RECIPE_MEDIA_LIMITS:
+                continue
+            node_id, field = str(slot["node_id"]), str(slot["field_name"])
+            node = graph.get(node_id) or {}
+            if not isinstance((node.get("inputs") or {}).get(field), str):
+                continue
+            role = f"m{node_id}"
+            if role in roles:
+                role = f"m{node_id}_{field}"
+            if role in roles:
+                raise ValueError(f"工作流媒体槽位地址重复：{node_id}/{field}，请先在造梦机整理该工作流")
+            roles.add(role)
+            optional = slot.get("media_optional")
+            slots.append({"role": role, "label": str(slot.get("label") or f"{node_id} · {field}"),
+                          "node_id": node_id, "field_name": field, "media": kind,
+                          "scope": "item", "required": optional is False})
+        return slots
+
+    @staticmethod
+    def _auto_duration_slot(params: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """时长槽识别：唯一含「时长 / duration」标题的数值槽；识别不到则不映射。"""
+        markers = ("时长", "duration")
+        hits = [slot for slot in params if slot.get("field_type") == "number"
+                and any(marker in f"{slot.get('node_title', '')} {slot.get('label', '')}".lower() for marker in markers)]
+        if len(hits) != 1:
+            return None
+        return {"node_id": str(hits[0]["node_id"]), "field_name": str(hits[0]["field_name"])}
+
+    def _derive_recipe_from_workflow(self, entry: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
+        graph = copy.deepcopy(entry.get("prompt") or {})
+        fingerprint = self._fingerprint(graph)
+        params = scan_params(graph)
+        prompt_slot = None
+        if body.get("prompt_slot"):
+            # 前端在歧义时明确选择过写入位：仍按同一规则验证地址真实可写。
+            self._validate_binding(graph, body["prompt_slot"])
+            node_id, field = _slot(body["prompt_slot"])
+            prompt_slot = {"node_id": node_id, "field_name": field}
+        else:
+            prompt_slot = self._auto_prompt_slot(graph, params)
+        media_slots = self._auto_media_slots(graph, params)
+        duration_slot = self._auto_duration_slot(params)
+        if duration_slot:
+            address = (duration_slot["node_id"], duration_slot["field_name"])
+            if address in {(prompt_slot["node_id"], prompt_slot["field_name"])} | {(s["node_id"], s["field_name"]) for s in media_slots}:
+                duration_slot = None
+        recipe = {"name": str(entry.get("name") or "交接工作流"),
+                  "description": "由造梦机「交给任务总管」自动生成的批量方案；映射来自工作流参数扫描，可继续复用。",
+                  "mode": "custom", "version": 2, "input_mode": "prompt",
+                  "source_recipe_id": "", "source_recipe_version": None,
+                  "workflow_id": str(entry.get("id") or ""), "workflow": graph, "workflow_fingerprint": fingerprint,
+                  "prompt_slot": prompt_slot, "media_slots": media_slots, "template": None,
+                  "provenance": {"source": RECIPE_HANDOFF_PROVENANCE, "workflow_fingerprint": fingerprint,
+                                  "source_mode": "current" if body.get("source_mode") == "current" else "saved"}}
+        if duration_slot:
+            recipe["duration_slot"] = duration_slot
+        recipe["overrides"] = []
+        recipe["id"] = "recipe-custom-" + digest(recipe)[:24]
+        return recipe
+
+    def create_from_workflow(self, owner: str, body: dict[str, Any]) -> dict[str, Any]:
+        """交接 / 新建：工作流 + 当前值 → 自动映射派生定义 → 复用既有批次链路。"""
+        workflow_id = str(body.get("workflow_id") or "")
+        entry = self.app.comfyui.store.get_workflow(workflow_id)
+        if not entry:
+            raise LookupError("工作流不存在")
+        graph = copy.deepcopy(entry.get("prompt") or {})
+        fingerprint = body.get("workflow_fingerprint")
+        if not isinstance(fingerprint, str) or not fingerprint.strip():
+            raise ValueError("需要当前工作流指纹，请在造梦机刷新后重新交接")
+        if fingerprint != self._fingerprint(graph):
+            raise ValueError("stale workflow_fingerprint：工作流已变化，请在造梦机刷新后重新交接")
+        recipe = self._derive_recipe_from_workflow(entry, body)
+        duration_slot = recipe.get("duration_slot")
+        overrides_in = [value for value in (body.get("overrides") or []) if isinstance(value, dict)]
+        duration_seconds = body.get("duration_seconds", body.get("duration"))
+        if duration_slot:
+            address = (duration_slot["node_id"], duration_slot["field_name"])
+            kept = []
+            for value in overrides_in:
+                if _slot(value) == address:
+                    # 时长是配方管理槽位：把当前调整升格为批次时长，不落成固定参数覆盖。
+                    if duration_seconds is None:
+                        duration_seconds = value.get("value")
+                    continue
+                kept.append(value)
+            overrides_in = kept
+            if duration_seconds is None:
+                raw = (graph.get(duration_slot["node_id"]) or {}).get("inputs", {}).get(duration_slot["field_name"])
+                duration_seconds = raw if isinstance(raw, (int, float)) and not isinstance(raw, bool) else 15
+        if duration_seconds is None:
+            duration_seconds = 15
+        duration_seconds = _integer(duration_seconds, "时长", 1, 300)
+        normalized_overrides = self._overrides(recipe, overrides_in)
+        role_by_address = {(slot["node_id"], slot["field_name"]): slot["role"] for slot in recipe.get("media_slots", [])}
+        item_media = []
+        for ref in body.get("media_inputs") or []:
+            if not isinstance(ref, dict):
+                raise ValueError("素材引用格式无效")
+            role = role_by_address.get((str(ref.get("node_id") or ""), str(ref.get("field_name") or "")))
+            if not role:
+                raise ValueError(f"素材入口不属于该工作流的媒体槽位：{ref.get('node_id')}/{ref.get('field_name')}")
+            item_media.append({"role": role, "path": ref.get("path"), "name": ref.get("name")})
+        prompt = body.get("prompt")
+        if prompt is None:
+            prompt = (graph.get(recipe["prompt_slot"]["node_id"]) or {}).get("inputs", {}).get(recipe["prompt_slot"]["field_name"]) or ""
+        prompt = str(prompt)
+        if not prompt.strip() or len(prompt) > RECIPE_MAX_PROMPT_CHARS:
+            raise ValueError("该工作流没有可用提示词（或超过长度上限）：请在造梦机填写后交接")
+        with self._lock:
+            self.store.save_definition(owner, recipe)
+        payload = {"request_id": body.get("request_id"), "recipe_id": recipe["id"],
+                   "title": str(body.get("title") or recipe["name"]), "input_mode": "prompt",
+                   "shots": body.get("shots", 1), "overrides": normalized_overrides,
+                   "duration_seconds": duration_seconds,
+                   "items": [{"name": "组 01", "source_path": "handoff/group-01",
+                              "prompt": prompt, "media": item_media, "requirements": ""}]}
+        return self.create(owner, payload)
+
+
+    def _model(self, body: dict[str, Any], *, needs_images: bool = False) -> dict[str, Any]:
         key = str(body.get("model_key") or "").strip()
         if not key:
             raise ValueError("请选择明确的反推模型")
         profile = dict(self.app.config.profile(key))
         name = str(body.get("model_name") or profile.get("model") or "").strip()
-        if not name or profile.get("supports_images_explicit") is False:
+        if not name or (needs_images and profile.get("supports_images_explicit") is False):
             raise ValueError("请选择支持图片的反推模型")
         return {"model_key": key, "model_name": name,
                 "provider_id": str(profile.get("provider_id") or profile.get("provider") or ""),
@@ -249,16 +478,21 @@ class RecipeCoordinator:
             raise ValueError("生成目标不能含凭据、查询参数或片段")
         return {"url": urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")), "fingerprint": digest(url)}
 
-    def _media(self, raw: Any, batch_id: str, allowed: set[str]) -> list[dict[str, Any]]:
+    def _media(self, raw: Any, batch_id: str, allowed: set[str], slots: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         if raw is None:
             return []
         if isinstance(raw, dict):
             raw = [{"role": role, "path": path} for role, path in raw.items()]
-        if not isinstance(raw, list) or len(raw) > RECIPE_MAX_IMAGES_PER_ITEM:
-            raise ValueError("每项最多 6 张图片")
+        if not isinstance(raw, list) or len(raw) > sum(RECIPE_MEDIA_LIMITS.values()):
+            raise ValueError("每项最多 9 张图片、3 段视频、3 段音频")
         refs, roles = [], set()
         from PIL import Image
         from naiba.studio.images import ALLOWED_IMAGE_EXTS, MAX_IMAGE_BYTES
+        extensions = {"image": ALLOWED_IMAGE_EXTS,
+                      "video": {".mp4", ".mov", ".webm", ".mkv", ".avi"},
+                      "audio": {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".opus"}}
+        slot_map = {slot["role"]: slot for slot in (slots or [])}
+        counts = {kind: 0 for kind in RECIPE_MEDIA_LIMITS}
         uploads = (self.data_dir / "uploads").resolve()
         for ref in raw:
             if not isinstance(ref, dict):
@@ -267,27 +501,50 @@ class RecipeCoordinator:
             if not role or role in roles or role not in allowed:
                 raise ValueError("媒体角色重复、未知或未明确")
             roles.add(role)
+            kind = slot_map.get(role, {}).get("media", "image")
+            if ref.get("media", kind) != kind:
+                raise ValueError("媒体类型与已验证槽位不符")
+            counts[kind] += 1
+            if counts[kind] > RECIPE_MEDIA_LIMITS[kind]:
+                raise ValueError("媒体数量超过类型上限")
             text = str(ref.get("path") or "")
             path = Path(text)
             if not path.is_absolute():
                 safe = _relative(text)
                 path = self.data_dir / safe if safe.startswith("uploads/") else uploads / safe
             source = path.resolve()
-            if not source.is_relative_to(uploads) or not source.is_file() or source.suffix.lower() not in ALLOWED_IMAGE_EXTS:
-                raise ValueError("素材必须是受管 uploads 中的图片原件")
+            if not source.is_relative_to(uploads) or not source.is_file() or source.suffix.lower() not in extensions[kind]:
+                raise ValueError("素材必须是受管 uploads 中对应类型的原件")
             size = source.stat().st_size
-            if not 0 < size <= MAX_IMAGE_BYTES:
-                raise ValueError("图片原件超过 20MB 或为空")
+            if not 0 < size <= (MAX_IMAGE_BYTES if kind == "image" else 80 * 1024 * 1024):
+                raise ValueError("素材原件超限或为空（图片 20MB，音视频 80MB）")
             data = source.read_bytes()
             if len(data) != size:
                 raise ValueError("素材读取过程中发生变化")
+            metadata = {}
             try:
-                with Image.open(io.BytesIO(data)) as image:
-                    image.verify()
-                with Image.open(io.BytesIO(data)) as image:
-                    image.load()
-            except (OSError, ValueError, Image.DecompressionBombError) as exc:
-                raise ValueError("图片损坏或无法完整解码") from exc
+                if kind == "image":
+                    with Image.open(io.BytesIO(data)) as image:
+                        if image.width * image.height > 40_000_000:
+                            raise ValueError("图片像素超过 4000 万")
+                        image.verify()
+                    with Image.open(io.BytesIO(data)) as image:
+                        image.load()
+                else:
+                    import subprocess
+                    import sys
+                    code = _MEDIA_PROBE_CODE
+                    # Container probing and one-frame decoding occur in an isolated,
+                    # killable child; malformed files cannot hang the request worker.
+                    command = [sys.executable, "--probe-recipe-media", kind] if getattr(sys, "frozen", False) else [sys.executable, "-I", "-c", code, kind]
+                    completed = subprocess.run(command,
+                                               input=data, capture_output=True, timeout=12,
+                                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                    if completed.returncode:
+                        raise ValueError("音视频元信息或首帧解码验证失败")
+                    metadata = json.loads(completed.stdout)
+            except Exception as exc:
+                raise ValueError("素材损坏或无法解码：" + kind) from exc
             content_hash = hashlib.sha256(data).hexdigest()
             target = uploads / "recipes" / batch_id / (content_hash + source.suffix.lower())
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -296,8 +553,10 @@ class RecipeCoordinator:
             elif hashlib.sha256(target.read_bytes()).hexdigest() != content_hash:
                 raise ValueError("受管素材快照损坏")
             refs.append({"id": "media-" + digest({"role": role, "source": str(source), "hash": content_hash})[:24],
-                         "role": role, "path": str(target), "original_path": str(source),
-                         "name": str(ref.get("name") or source.name), "sha256": content_hash, "size": size})
+                         "role": role, "media": kind, "path": str(target), "original_path": str(source),
+                         "description": str(ref.get("description") or ""),
+                         "name": str(ref.get("name") or source.name), "sha256": content_hash, "size": size,
+                         **metadata})
         return refs
 
     def _overrides(self, recipe: dict[str, Any], raw: Any) -> list[dict[str, Any]]:
@@ -363,20 +622,16 @@ class RecipeCoordinator:
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", item_id) or item_id in ids:
                 raise ValueError("项目 ID 重复或无效")
             ids.add(item_id)
-            media = self._media(row.get("media"), batch_id, allowed)
+            media = self._media(row.get("media"), batch_id, allowed, slots)
             total_bytes += sum(m["size"] for m in media)
             if total_bytes > RECIPE_MAX_TOTAL_BYTES:
                 raise ValueError("批次素材总大小超过 300MB")
-            if len(media) + len(shared) > RECIPE_MAX_IMAGES_PER_ITEM:
-                raise ValueError("每项含公共素材最多 6 张图片")
             mapping = {m["role"]: m for m in media + shared}
             if len(mapping) != len(media) + len(shared):
                 raise ValueError("公共/逐项媒体角色冲突")
             for slot in slots:
                 if slot.get("required") and slot["role"] not in mapping:
                     raise ValueError(f"缺少素材角色 {slot['role']}")
-            if not media and not shared and not row.get("prompt"):
-                raise ValueError("项目需要图片或用户已写提示词")
             prompt = str(row.get("prompt") or "")
             if len(prompt) > RECIPE_MAX_PROMPT_CHARS:
                 raise ValueError("提示词超过长度上限")
@@ -384,6 +639,7 @@ class RecipeCoordinator:
             if not isinstance(included, bool):
                 raise ValueError("included 必须是布尔值")
             result.append({"id": item_id, "name": str(row.get("name") or source), "source_path": source,
+                           "source_item_id": str(row.get("source_item_id") or "")[:100],
                            "media": media, "requirements": str(row.get("requirements") or ""),
                            "included": included, "prompt": prompt,
                            "overrides": self._overrides(recipe, row.get("overrides")),
@@ -405,15 +661,21 @@ class RecipeCoordinator:
             if existing:
                 self._link(existing)
                 return {"batch": self._public(existing), "thread_id": existing["thread_id"]}
+            if str(body.get("source") or "") == "workflow":
+                # 工作流直建（造梦机交接 / 总管新建）：派生映射后回到统一批次链路。
+                return self.create_from_workflow(owner, body)
             recipe = self._recipe(owner, str(body.get("recipe_id") or ""))
             batch_id = "recipe-" + digest({"owner": owner, "request": key})[:32]
-            shared = self._media(body.get("shared_media"), batch_id, {s["role"] for s in recipe.get("media_slots", []) if s.get("scope") == "shared"})
+            input_mode = self._input_mode(body, recipe.get("input_mode", "script"))
+            shared = self._media(body.get("shared_media"), batch_id, {s["role"] for s in recipe.get("media_slots", []) if s.get("scope") == "shared"}, recipe.get("media_slots", []))
             if shared and not any(s.get("scope") == "shared" for s in recipe.get("media_slots", [])):
                 raise ValueError("该配方没有公共媒体槽位")
             batch = {"id": batch_id, "batch_id": batch_id, "owner_id": owner, "thread_id": "", "node_id": "",
                      "schema_version": RECIPE_SCHEMA_VERSION, "title": str(body.get("title") or recipe["name"]),
+                     "source_thread_id": str(body.get("source_thread_id") or "")[:100],
                      "recipe_id": recipe["id"], "recipe": recipe, "recipe_hash": digest(recipe),
-                     "template": copy.deepcopy(recipe["template"]), "model": self._model(body), "target": self._target(),
+                     "input_mode": input_mode, "template": copy.deepcopy(recipe.get("template")) if input_mode == "script" else None,
+                     "model": None, "target": self._target(),
                      "requirements": str(body.get("requirements") or ""), "shared_media": shared,
                      "overrides": self._merged_overrides(recipe, recipe.get("overrides"), body.get("overrides")),
                      "duration_seconds": _integer(body.get("duration_seconds", body.get("duration", 15)), "时长", 1, 300),
@@ -421,6 +683,12 @@ class RecipeCoordinator:
                      "items": self._items(recipe, batch_id, body.get("items"), shared),
                      "status": "draft", "revision": 1, "confirmations": {}, "error": "",
                      "created_at": _now(), "updated_at": _now()}
+            if input_mode == "script":
+                if not batch["template"] or not str(batch["template"].get("body") or "").strip():
+                    raise ValueError("代写模式需要非空提词规则")
+                batch["model"] = self._model(body, needs_images=any(self._media_counts(i["media"] + shared)["image"] for i in batch["items"]))
+            elif any(not i["prompt"].strip() for i in batch["items"] if i["included"]):
+                raise ValueError("直接模式需要每项完整提示词")
             self._validate_manifest(batch)
             self._refresh_hash(batch)
             # This insert precedes creating the independently stored thread. A
@@ -444,6 +712,7 @@ class RecipeCoordinator:
 
     def _refresh_hash(self, batch: dict[str, Any]) -> None:
         snapshot = {k: batch[k] for k in ("recipe_hash", "template", "model", "target", "requirements", "shared_media", "overrides", "duration_seconds", "shots")}
+        snapshot["input_mode"] = batch.get("input_mode", "script")
         snapshot["items"] = [{k: item[k] for k in ("id", "name", "source_path", "media", "requirements", "included", "prompt", "overrides")} for item in batch["items"]]
         batch["revision_hash"] = digest(snapshot)
         batch["confirmation_hash"] = batch["revision_hash"]
@@ -465,6 +734,9 @@ class RecipeCoordinator:
             item["effective_workflow"] = {"id": payload["workflow_id"], "fingerprint": self._fingerprint(graph), "prompt": graph}
             item["effective_media_inputs"] = payload["media_inputs"]
             item["seed_semantics"] = "未显式固定的种子按原生执行器随机策略解析；不承诺预览时已知随机值"
+            editable = batch["status"] in {"draft", "review", "partial", "needs_review"} and not any(a["state"] in _ACTIVE for i in batch["items"] for p in ("reverse", "generate") for a in i[p]["attempts"])
+            mutable_input = editable and not item["generate"]["attempts"]
+            item["edit_capabilities"] = {field: (editable if field in {"included", "name"} else mutable_input) for field in RECIPE_ITEM_EDIT_FIELDS}
             item["capabilities"] = []
             if batch["status"] in {"draft", "review", "partial", "needs_review"}:
                 if item["reverse"]["status"] in _FAILED:
@@ -486,8 +758,33 @@ class RecipeCoordinator:
         if status in {"paused", "interrupted"}:
             capabilities += ["continue"]
         result["cancel_pending"] = batch["status"] == "cancelled" and any(a["state"] in _ACTIVE for i in batch["items"] for p in ("reverse", "generate") for a in i[p]["attempts"])
+        if batch.get("input_mode") == "prompt":
+            capabilities = [c for c in capabilities if c not in {"confirm_reverse", "retry_reverse"}]
         result["capabilities"] = capabilities
+        result["clone_draft_available"] = True
+        result["duration_editable"] = bool(batch["recipe"].get("duration_slot"))
         return result
+
+    def clone_draft(self, owner: str, thread_id: str) -> dict[str, Any]:
+        """Read-only allowlisted projection: never clone authority or attempts."""
+        with self._lock:
+            batch = self.store.get(owner, thread_id)
+            draft = {k: copy.deepcopy(batch[k]) for k in ("recipe_id", "title", "requirements", "overrides", "duration_seconds", "shots")}
+            draft["input_mode"] = batch.get("input_mode", "script")
+            draft["source_thread_id"] = thread_id
+            recipe = batch.get("recipe") or {}
+            if (recipe.get("provenance") or {}).get("source") == RECIPE_HANDOFF_PROVENANCE:
+                # 工作流直建批次的复制：带出工作流与映射，供「选工作流」创建表单重建。
+                draft["workflow"] = {"id": recipe.get("workflow_id"), "workflow_fingerprint": recipe.get("workflow_fingerprint"),
+                                     "prompt_slot": recipe.get("prompt_slot"), "media_slots": recipe.get("media_slots")}
+            if draft["input_mode"] == "script":
+                draft.update({k: batch["model"][k] for k in ("model_key", "model_name")})
+            def media_projection(refs):
+                return [{k: m[k] for k in ("role", "path", "name", "media", "description") if k in m} for m in refs]
+            draft["shared_media"] = media_projection(batch["shared_media"])
+            draft["items"] = [{**{k: copy.deepcopy(item[k]) for k in ("name", "source_path", "requirements", "included", "prompt", "overrides")},
+                               "media": media_projection(item["media"]), "source_item_id": item["id"]} for item in batch["items"]]
+            return {"draft": draft}
 
     def detail(self, owner: str, thread_id: str) -> dict[str, Any]:
         with self._lock:
@@ -628,9 +925,11 @@ class RecipeCoordinator:
         if "requirements" in body:
             batch["requirements"] = str(body["requirements"])
         if "model_key" in body or "model_name" in body:
-            batch["model"] = self._model({**batch["model"], **body})
+            if batch.get("input_mode", "script") == "script":
+                batch["model"] = self._model({**(batch["model"] or {}), **body}, needs_images=any(self._media_counts(i["media"] + batch["shared_media"])["image"] for i in batch["items"]))
         if "template_id" in body or "template" in body:
-            batch["template"] = self._template(body)
+            if batch.get("input_mode", "script") == "script":
+                batch["template"] = self._template(body)
         if "duration" in body or "duration_seconds" in body:
             batch["duration_seconds"] = _integer(body.get("duration_seconds", body.get("duration")), "时长", 1, 300)
             reverse_global = True
@@ -639,7 +938,7 @@ class RecipeCoordinator:
         if "overrides" in body:
             batch["overrides"] = self._merged_overrides(batch["recipe"], batch["recipe"].get("overrides"), body["overrides"])
         if "shared_media" in body:
-            batch["shared_media"] = self._media(body["shared_media"], batch["id"], {s["role"] for s in batch["recipe"].get("media_slots", []) if s.get("scope") == "shared"})
+            batch["shared_media"] = self._media(body["shared_media"], batch["id"], {s["role"] for s in batch["recipe"].get("media_slots", []) if s.get("scope") == "shared"}, batch["recipe"].get("media_slots", []))
             reverse_global = True
         for item in batch["items"]:
             for phase in ("reverse", "generate"):
@@ -653,7 +952,7 @@ class RecipeCoordinator:
                 raise ValueError("成功生成项不可改写，请新建批次保留成功事实")
             changed_reverse = reverse_global or any(k in patch for k in ("media", "requirements"))
             if "media" in patch:
-                item["media"] = self._media(patch["media"], batch["id"], {s["role"] for s in batch["recipe"].get("media_slots", []) if s.get("scope") == "item"})
+                item["media"] = self._media(patch["media"], batch["id"], {s["role"] for s in batch["recipe"].get("media_slots", []) if s.get("scope") == "item"}, batch["recipe"].get("media_slots", []))
             for key in ("requirements", "name"):
                 if key in patch:
                     item[key] = str(patch[key])
@@ -664,9 +963,10 @@ class RecipeCoordinator:
             if "overrides" in patch:
                 item["overrides"] = self._overrides(batch["recipe"], patch["overrides"])
             if changed_reverse:
-                item["reverse"]["status"] = "pending"
                 item["previous_prompt"] = item["prompt"]
-                item["prompt"] = ""
+                if batch.get("input_mode", "script") == "script" or "media" in patch or "shared_media" in body:
+                    item["reverse"]["status"] = "pending"
+                    item["prompt"] = ""
             if "prompt" in patch:
                 prompt = str(patch["prompt"])
                 if not prompt.strip() or len(prompt) > RECIPE_MAX_PROMPT_CHARS:
@@ -691,12 +991,27 @@ class RecipeCoordinator:
             mode = batch["recipe"].get("mode")
             if mode == "i2v" and set(mapping) != {"first_frame"}:
                 raise ValueError("首帧配方必须恰好提供一张首帧图片")
-            if mode == "r2v" and set(mapping) != {f"picture_{n + 1}" for n in range(len(refs))}:
-                raise ValueError("参考图必须连续映射 picture_1 到 picture_N，不允许稀疏暗配")
+            counts = self._media_counts(refs)
+            if mode == "r2v":
+                expected = {f"{prefix}_{n + 1}" for kind, prefix in (("image", "picture"), ("video", "video"), ("audio", "audio")) for n in range(counts[kind])}
+                if set(mapping) != expected:
+                    raise ValueError("参考媒体各类型必须连续映射，不允许稀疏暗配")
+                if batch["recipe"].get("version", 1) < 2 and (counts["image"] < 1 or counts["image"] > 6 or counts["video"] or counts["audio"]):
+                    raise ValueError("v1 配方仅支持 1–6 张图片")
+            for kind, count in counts.items():
+                if count > RECIPE_MEDIA_LIMITS[kind]:
+                    raise ValueError("媒体类型数量超限")
+            # Number from frozen slot order, never from filenames or UI list order.
+            indices = {kind: 0 for kind in RECIPE_MEDIA_LIMITS}
+            for slot in batch["recipe"].get("media_slots", []):
+                if slot["role"] in mapping:
+                    kind = mapping[slot["role"]].get("media", "image")
+                    indices[kind] += 1
+                    mapping[slot["role"]]["reference"] = f"<{RECIPE_MEDIA_REFERENCE_NAMES[kind]} {indices[kind]}>"
             if mode in {"i2v", "r2v"} and not 4 <= batch["duration_seconds"] <= 15:
                 raise ValueError("H3 内置配方时长必须为 4-15 秒")
-            if len(refs) > RECIPE_MAX_IMAGES_PER_ITEM or len(mapping) != len(refs):
-                raise ValueError("图片数量超限或角色重复")
+            if len(mapping) != len(refs):
+                raise ValueError("媒体角色重复")
             for slot in batch["recipe"].get("media_slots", []):
                 if slot.get("required") and slot["role"] not in mapping:
                     raise ValueError("缺少必需媒体角色")
@@ -704,10 +1019,12 @@ class RecipeCoordinator:
         if total > RECIPE_MAX_TOTAL_BYTES:
             raise ValueError("批次素材超过 300MB")
 
-    def _assert_baseline(self, batch: dict[str, Any]) -> None:
+    def _assert_baseline(self, batch: dict[str, Any], *, check_model: bool = True) -> None:
         self._verify_workflow(batch["recipe"])
-        if self._model(batch["model"]) != batch["model"]:
-            raise ValueError("反推模型档案已变化，需要新建或编辑重新确认")
+        if check_model and batch.get("input_mode", "script") == "script":
+            needs_images = any(self._media_counts(i["media"] + batch["shared_media"])["image"] for i in batch["items"])
+            if self._model(batch["model"], needs_images=needs_images) != batch["model"]:
+                raise ValueError("反推模型档案已变化，需要新建或编辑重新确认")
         if self._target() != batch["target"]:
             raise ValueError("生成目标已变化，需要重新建立确认快照")
         for item in batch["items"]:
@@ -716,8 +1033,77 @@ class RecipeCoordinator:
                 if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != media["sha256"]:
                     raise ValueError("素材快照已丢失或损坏")
 
+    def _probe_target(self, batch: dict[str, Any]) -> None:
+        """生成前的冻结目标可达性检查（计划 §5.3）；只探测本批次冻结地址。"""
+        from naiba.comfyui import client as comfy_client
+        url = (batch.get("target") or {}).get("url") or ""
+        if comfy_client.reachable(url, timeout=3) is None:
+            raise ValueError(f"生成目标不可达：{url or '（未配置）'}；请启动 ComfyUI 或核对地址后重新检测")
+
+    def _prompt_reference_errors(self, batch: dict[str, Any], item: dict[str, Any]) -> list[str]:
+        """提示词媒体引用检查；返回问题列表（第一条即可作为拒绝理由）。"""
+        counts = self._media_counts(item["media"] + batch["shared_media"])
+        limits = {"Picture": counts["image"], "Video": counts["video"], "Audio": counts["audio"]}
+        errors = []
+        for match in re.finditer(r"<\s*(Picture|Video|Audio)\b[^>]*>", str(item.get("prompt") or ""), flags=re.I):
+            canonical_label = re.fullmatch(r"<(Picture|Video|Audio) ([1-9]\d*)>", match[0])
+            if canonical_label is None or int(canonical_label[2]) > limits.get(canonical_label[1], 0):
+                errors.append("提示词引用了不存在或编号无效的媒体：" + match[0])
+        return errors
+
+    def precheck(self, owner: str, thread_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """生成前预检（只读）：冻结目标可达 / 工作流快照 / 媒体有效 / 提示词引用。"""
+        if not isinstance(body, dict):
+            raise ValueError("预检请求无效")
+        with self._lock:
+            batch = self.store.get(owner, thread_id)
+            selected = self._scope(batch, body)
+            checks = []
+            target_url = (batch.get("target") or {}).get("url") or ""
+            try:
+                self._probe_target(batch)
+                checks.append({"key": "target", "ok": True, "label": "实际目标可达", "detail": ""})
+                target_ok = True
+            except ValueError as exc:
+                checks.append({"key": "target", "ok": False, "label": "实际目标可达", "detail": str(exc)})
+                target_ok = False
+            try:
+                self._verify_workflow(batch["recipe"])
+                checks.append({"key": "workflow", "ok": True, "label": "工作流与输入就绪", "detail": ""})
+            except (ValueError, LookupError) as exc:
+                checks.append({"key": "workflow", "ok": False, "label": "工作流与输入就绪", "detail": str(exc)})
+            missing = []
+            for item in selected:
+                label = item.get("name") or item["id"]
+                for media in item["media"] + batch["shared_media"]:
+                    path = Path(media["path"])
+                    if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != media.get("sha256"):
+                        missing.append(f"{label} · {media.get('name') or media['role']}")
+            checks.append({"key": "media", "ok": not missing, "label": "媒体文件有效",
+                           "detail": "；".join(missing[:5]) + ("等" if len(missing) > 5 else "") if missing else ""})
+            prompt_issues = []
+            for item in selected:
+                label = item.get("name") or item["id"]
+                if not str(item.get("prompt") or "").strip():
+                    prompt_issues.append(f"{label} 还没有提示词")
+                    continue
+                for issue in self._prompt_reference_errors(batch, item):
+                    if issue not in prompt_issues:
+                        prompt_issues.append(issue)
+            checks.append({"key": "prompt", "ok": not prompt_issues, "label": "提示词引用存在",
+                           "detail": "；".join(prompt_issues[:5])})
+            return {"checked_at": _now(), "target": {"url": target_url, "ok": target_ok},
+                    "checks": checks, "ok": all(check["ok"] for check in checks)}
+
     def _authorize(self, batch: dict[str, Any], body: dict[str, Any], action: str, key: str) -> None:
-        self._assert_baseline(batch)
+        reverse = action in {"confirm_reverse", "retry_reverse"}
+        if reverse and batch.get("input_mode", "script") == "prompt":
+            raise ValueError("直接提示词模式不执行代写阶段")
+        self._assert_baseline(batch, check_model=reverse)
+        if not reverse:
+            # 生成阶段的授权以「本批冻结目标可达」为前提（计划 §5.3）；离线在
+            # 确认时就被拦下，不进入已运行状态。
+            self._probe_target(batch)
         if any(a["state"] in _ACTIVE | {"authorized"} for i in batch["items"] for p in ("reverse", "generate") for a in i[p]["attempts"]):
             raise ValueError("仍有已确认阶段或原生执行未结束或结果未知")
         selected = self._scope(batch, body)
@@ -738,6 +1124,10 @@ class RecipeCoordinator:
                 raise ValueError("已有生成执行记录，不能改变反推输入后续跑旧生成；请新建批次")
             if not reverse and not item["prompt"].strip():
                 raise ValueError("纳入项目尚无可用提示词，请编辑或明确排除失败项")
+            if not reverse and action != "retry_collect":
+                errors = self._prompt_reference_errors(batch, item)
+                if errors:
+                    raise ValueError(errors[0])
             targets.append(item)
         if not targets:
             raise ValueError("所选范围没有需要执行的阶段")
@@ -769,17 +1159,22 @@ class RecipeCoordinator:
     def _reverse_payload(self, batch: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
         from naiba.studio.service import fill_vars
         requirements = "\n".join(t for t in (batch["requirements"], item["requirements"]) if t)
+        counts = self._media_counts(item["media"] + batch["shared_media"])
         variables = {"duration": str(batch["duration_seconds"]), "duration_seconds": str(batch["duration_seconds"]),
-                     "requirements": requirements, "image_count": str(len(item["media"] + batch["shared_media"]))}
+                     "requirements": requirements, "image_count": str(counts["image"]),
+                     "video_count": str(counts["video"]), "audio_count": str(counts["audio"])}
         content, unresolved = fill_vars(batch["template"]["body"], requirements, variables)
         # Templates without variables still receive the user's requirements and
         # duration; literal text is data, never interpreted as orchestration.
         content += f"\n\n用户补充要求：\n{requirements}\n目标时长：{batch['duration_seconds']} 秒。"
         mapping = {m["role"]: m for m in batch["shared_media"] + item["media"]}
         ordered = [mapping[s["role"]] for s in batch["recipe"].get("media_slots", []) if s["role"] in mapping]
-        refs = [{"path": m["path"], "name": m["name"], "thumb_path": ""} for m in ordered]
+        av_descriptions = [{"reference": m.get("reference"), "description": m.get("description", "")} for m in ordered if m.get("media", "image") != "image"]
+        if av_descriptions:
+            content += "\n\n音视频仅提供以下用户文字描述，提词模型没有观看或听取原件，不得声称已分析原件。原件只交给 H3：\n" + json.dumps(av_descriptions, ensure_ascii=False)
+        refs = [{"path": m["path"], "name": m["name"], "thumb_path": ""} for m in ordered if m.get("media", "image") == "image"]
         request = {"user_request": content, "model_key": batch["model"]["model_key"], "model_name": batch["model"]["model_name"], "images": refs}
-        prepared = self.app.studio.prepare_generation(request)
+        prepared = self.app.studio.prepare_generation(request, recipe=True) if len(refs) > 6 else self.app.studio.prepare_generation(request)
         if isinstance(prepared, tuple):
             prepared, status = prepared
             if status >= 400:
@@ -796,7 +1191,8 @@ class RecipeCoordinator:
         recipe = batch["recipe"]
         if recipe.get("mode") == "r2v":
             from naiba.super_agent.recipe_catalog import prepare_workflow
-            return prepare_workflow(recipe["id"], image_count=len(batch["shared_media"] + item["media"]))
+            return prepare_workflow(recipe["id"], recipe_snapshot=recipe,
+                                    **{kind + "_count": count for kind, count in self._media_counts(batch["shared_media"] + item["media"]).items()})
         return copy.deepcopy(recipe["workflow"])
 
     def _generation_payload(self, batch: dict[str, Any], item: dict[str, Any], *, install: bool = False) -> dict[str, Any]:
@@ -812,11 +1208,11 @@ class RecipeCoordinator:
         media = []
         for slot in recipe.get("media_slots", []):
             if slot["role"] in refs:
-                media.append({"node_id": slot["node_id"], "field_name": slot["field_name"], "path": refs[slot["role"]]["path"]})
+                media.append({"node_id": slot["node_id"], "field_name": slot["field_name"], "path": refs[slot["role"]]["path"], "media": refs[slot["role"]].get("media", "image")})
         workflow_id = recipe["workflow_id"]
         if recipe.get("mode") == "r2v":
             from naiba.super_agent.recipe_catalog import prepare_workflow
-            graph = prepare_workflow(recipe["id"], image_count=len(refs))
+            graph = self._effective_graph(batch, item)
             if isinstance(graph.get("workflow"), dict):
                 graph = graph["workflow"]
             fingerprint = self._fingerprint(graph)
@@ -877,13 +1273,18 @@ class RecipeCoordinator:
     def _validate_output(self, batch: dict[str, Any], item: dict[str, Any], raw: str) -> dict[str, Any]:
         if batch["recipe"].get("mode") != "custom" and batch["template"] == batch["recipe"]["template"]:
             from naiba.super_agent.recipe_catalog import validate_output
-            return validate_output(batch["recipe_id"], raw, image_count=len(item["media"] + batch["shared_media"]), duration_seconds=batch["duration_seconds"])
+            return validate_output(batch["recipe_id"], raw, recipe_snapshot=batch["recipe"],
+                                   **{kind + "_count": n for kind, n in self._media_counts(item["media"] + batch["shared_media"]).items()}, duration_seconds=batch["duration_seconds"])
         rule = batch["template"]["result_rule"]
         if isinstance(rule, str):
             from naiba.super_agent.recipe_catalog import validate_output
             for builtin in self._builtins():
-                if builtin["template"]["id"] == batch["template"]["id"]:
-                    return validate_output(builtin["id"], raw, image_count=len(item["media"] + batch["shared_media"]), duration_seconds=batch["duration_seconds"])
+                if builtin["template"]["id"] == batch["template"]["id"] or (rule == "h3_ref2va_single_v1" and builtin["mode"] == "r2v"):
+                    validation_recipe = copy.deepcopy(builtin)
+                    if rule.endswith("_v1") and validation_recipe["mode"] == "r2v":
+                        validation_recipe["version"] = 1
+                    return validate_output(builtin["id"], raw, recipe_snapshot=validation_recipe,
+                                           **{kind + "_count": n for kind, n in self._media_counts(item["media"] + batch["shared_media"]).items()}, duration_seconds=batch["duration_seconds"])
             return {"valid": False, "raw": raw, "text": "", "errors": ["未知的内置结果规则，需要人工编辑"]}
         errors, text = [], raw
         if rule["type"] == "json_field":
@@ -1087,7 +1488,10 @@ class RecipeCoordinator:
                         continue
                     intent = item[phase]["attempts"][-1]
                     try:
-                        self._assert_baseline(batch)
+                        self._assert_baseline(batch, check_model=phase == "reverse")
+                        if phase == "generate":
+                            # 排队后目标可能已变化：提交前再探一次冻结目标。
+                            self._probe_target(batch)
                     except (ValueError, LookupError, OSError) as exc:
                         batch["status"], batch["error"] = "needs_review", str(exc)
                         self.store.save(batch)

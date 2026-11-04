@@ -4,6 +4,7 @@
 
 import { $, agentAvatarEmoji, agentAvatarSrc, api, draggedFileCache, emptyStateElement, escapeHtml, notifyComposerChanged, state, toast } from "./01-core.js";
 import { markdown } from "./02-markdown.js";
+import { scanMarkdownBlocks } from "./02b-markdown-stream.js";
 import { activityMarkup, closeImageLightbox, fileChangesSummaryMarkup, fileUrl, folderIndexMarkup, mediaKind, mediaMarkup, mediaProductsMarkup, mediaTruncatedNotice, reasoningMarkup, remainingAttachments, skillMarkup, sourcesMarkup, toolMarkup, truncationNotice, updateContextComposerLock, updateContextUsage, updateSendButtonState, uploadedFileMarkup, usageMarkup } from "./03-media.js";
 import { openConversation, syncCurrentConversation } from "./08-conversations.js";
 import { attachmentChips, folderChips, folderChipsFromIndexes, folderIndexMetadata, renderPendingFiles } from "./10-upload.js";
@@ -946,11 +947,88 @@ export function forceScrollToBottom() {
   if (messages) withInstantScroll(messages, () => { messages.scrollTop = messages.scrollHeight; });
 }
 
-// 流式正文只做轻量的逐帧文本绘制，完整 Markdown 留到本轮结束后的会话重载再渲染。
-// 以前每个 delta 都把累计全文重新跑一遍 markdown 并整体替换 innerHTML：回复越长，
-// 总成本越接近 O(n²)，最终表现为主线程卡顿后成段吐出。流式阶段只更新一个文本节点，
-// 用 requestAnimationFrame 合并同一帧内的多个 delta；终态 renderMessages 仍会按原规则
-// 把同一份 raw 内容排版成 Markdown，因此不会改变最终消息的格式。
+// ---- 流式正文的块级增量渲染 ----
+// 流式渲染的两条老路都不能走：
+//  - 09b3de0d 之前：每个节流周期对累计全文重跑 markdown() 并整体替换 innerHTML，单次成本
+//    正比于全文长度，总量 O(n²)，长回复越输出越卡、停顿后成段吐出；
+//  - 09b3de0d（v3.9.16）：流式期间只画纯文本、Markdown 留到终态——不卡了，代价是裸
+//    Markdown 源码直接糊在屏幕上，结束瞬间再跳一次版。
+// 本方案把每帧成本降到正比于增量：按「空行 + 围栏闭合」切块（02b-markdown-stream.js），
+// **稳定块只渲染一次**（此后只做 DOM 追加，不重解析、不重排版），每个周期只重渲染最后
+// 一个未完结块（尾块，通常几十字）。终态 renderMessages 仍按原规则全量排版，块级 HTML
+// 与流式产物一致，结束后不再有明显跳版。
+const STREAM_TAIL_FULL_MARKDOWN_CHARS = 2000;
+const STREAM_TAIL_THROTTLE_MS = 200;
+// 尾块还在生长：代码高亮等块稳定（稳定块路径）再做，流式期间先素着——大 JSON/长代码
+// 每帧全量重跑高亮正则是旧方案里最大的一项重复成本。
+const STREAM_TAIL_OPTS = { highlight: false };
+
+// 每个流式元素一份渲染状态（WeakMap：元素随重渲染整体销毁，状态跟着失效）。
+//   tail         尾块容器（恒为 element 最后一个子元素）
+//   segStart     当前未完结块起始偏移（= 稳定区长度）
+//   pos/fenceOpen 块边界扫描游标（02b-markdown-stream.js）
+//   stableCache  raw.slice(0, segStart) 的缓存：前缀校验用，检测 raw 被外部换写
+//   tailRendered 尾块当前渲染的文本（去重，避免相同内容反复 innerHTML）
+//   lastTailAt   大尾块节流用的时间戳
+const streamingRenderStates = new WeakMap();
+
+// 校验失败（元素被外部整体改写、raw 被换写）时的兜底：清空重建，从头扫一遍。
+// rebuild 是同步的（清空 + 立即重渲染在同一帧里），不产生可见闪烁。
+function streamRenderState(element, raw) {
+  let st = streamingRenderStates.get(element);
+  const valid = st
+    && st.tail.parentNode === element
+    && element.lastElementChild === st.tail
+    && raw.length >= st.segStart
+    && raw.slice(0, st.segStart) === st.stableCache;
+  if (valid) return st;
+  st = {
+    tail: document.createElement('div'),
+    segStart: 0,
+    pos: 0,
+    fenceOpen: false,
+    stableCache: '',
+    tailRendered: null,
+    lastTailAt: 0,
+  };
+  st.tail.className = 'stream-tail';
+  streamingRenderStates.set(element, st);
+  // 本渲染器独占 element 的子节点（answer-content / stream-prose / reasoning-content
+  // 的正文都只由这里写）；外部直写 innerHTML 后状态在此自愈。
+  element.replaceChildren(st.tail);
+  return st;
+}
+
+// 稳定块只追加、不重写：解析出的节点插到尾块之前。
+function appendStreamHtml(element, st, html) {
+  if (!html) return;
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html;
+  while (tmp.firstChild) element.insertBefore(tmp.firstChild, st.tail);
+}
+
+function renderStreamingMarkdown(element, raw) {
+  const st = streamRenderState(element, raw);
+  const prevSegStart = st.segStart;
+  for (const [start, end] of scanMarkdownBlocks(raw, st)) {
+    appendStreamHtml(element, st, markdown(raw.slice(start, end)));
+  }
+  if (st.segStart !== prevSegStart) st.stableCache = raw.slice(0, st.segStart);
+
+  // 尾块：最后一个未完结块，每个周期重渲染；超长尾块（巨段/长列表/未闭合大代码块）
+  // 降频到 STREAM_TAIL_THROTTLE_MS，避免单段超长时每帧都全量重画（O(n²) 复发）。
+  const tailRaw = raw.slice(st.segStart);
+  if (st.tailRendered === tailRaw) return;
+  if (tailRaw.length > STREAM_TAIL_FULL_MARKDOWN_CHARS
+    && Date.now() - st.lastTailAt < STREAM_TAIL_THROTTLE_MS) return;
+  st.lastTailAt = Date.now();
+  st.tailRendered = tailRaw;
+  st.tail.innerHTML = markdown(tailRaw, true, STREAM_TAIL_OPTS);
+}
+
+// 流式正文渲染入口（调用方与签名保持 09b3de0d 以来的形态）：把 raw 记到 dataset 供
+// 终态渲染与 moveBottomProseInline 复用，用 requestAnimationFrame 合并同一帧内的多个
+// delta；帧内读取 dataset.raw，保证合并期间漏掉的 delta 一起画上。
 export function scheduleStreamingMarkdown(element, raw) {
   if (!element) return;
   element.dataset.raw = String(raw || '');
@@ -959,7 +1037,7 @@ export function scheduleStreamingMarkdown(element, raw) {
   window.requestAnimationFrame(() => {
     element.dataset.renderScheduled = '0';
     if (!element.isConnected) return;
-    element.textContent = element.dataset.raw || '';
+    renderStreamingMarkdown(element, element.dataset.raw || '');
     scrollToBottom();
   });
 }
@@ -988,6 +1066,10 @@ export function moveBottomProseInline(row, answer) {
   if (!bottomRaw.trim()) return;
   const seg = getStreamingProseSegment(row, answer);
   if (!seg) return;
+  // 两处 innerHTML 都是整体重写：块级增量的渲染状态（稳定块节点清单）随之作废，
+  // 下一个 delta 会走重建路径按全量 raw 重新分块。
+  streamingRenderStates.delete(answer);
+  streamingRenderStates.delete(seg);
   seg.dataset.raw = bottomRaw;
   seg.innerHTML = markdown(bottomRaw);
   answer.dataset.raw = '';

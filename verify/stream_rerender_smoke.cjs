@@ -132,6 +132,22 @@ async function apiJson(path, options = {}) {
     check('流式气泡已出现并收到第一段正文', Boolean(live), JSON.stringify(live));
     if (!live) throw new Error('活动流的气泡没出现，后续断言无从谈起');
 
+    // ---- 块级增量渲染：流式期间就该是 Markdown 排版，不是裸源码 ----
+    // run 还没结束（第 2 段带 **加粗**/`代码`，终态渲染要等最后一段），此刻 <strong>/<code>
+    // 已经出现 = 流式路径在真正跑 Markdown；裸 ** 不再出现在可见文本里 = 不再是纯文本绘制。
+    const mdLive = await waitFor(async () => page.evaluate(() => {
+      const row = document.querySelector('#messages [data-smoke-live="1"]');
+      const prose = row && (row.querySelector('.stream-prose') || row.querySelector('.answer-content'));
+      if (!prose) return null;
+      const strong = Boolean(prose.querySelector('strong'));
+      const code = Boolean(prose.querySelector('code'));
+      const bareStars = (prose.textContent || '').includes('**');
+      return strong && code && !bareStars ? { strong, code, bareStars } : null;
+    }), 8000, 80);
+    check('流式期间正文已按 Markdown 排版（出现 <strong>/<code>，且无裸 **）',
+      Boolean(mdLive), JSON.stringify(mdLive));
+    check('流式 Markdown 阶段无页面错误', pageErrors.length === 0, pageErrors.join(' | '));
+
     // ---- 核心：流到一半点任务面板那一行的「跳转」按钮 ----
     // （切会话入口已从「整卡可点」收窄为显式按钮：卡片空白不再有副作用，
     //   但按钮走的是同一个 openConversation(当前会话) → 重渲染路径，触发条件不变。）

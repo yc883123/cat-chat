@@ -216,7 +216,7 @@ export function renderMarkdownTable(rows) {
   return `<div class="table-wrap"><table><thead><tr>${th}</tr></thead><tbody>${tbody}</tbody></table></div>`;
 }
 
-export function markdown(text, allowRichText = true) {
+export function markdown(text, allowRichText = true, opts = null) {
   const codeBlocks = [];
   const addCodeBlock = (language, rawCode) => {
     const index = codeBlocks.length;
@@ -230,7 +230,12 @@ export function markdown(text, allowRichText = true) {
       }
     }
     const lang = escapeHtml(String(language || '').trim());
-    const highlighted = highlightCode(rawCode, String(language || '').trim());
+    // opts.highlight === false：流式尾块的代码块先不做语法高亮（04-messages.js）。尾块还在
+    // 生长，每个周期都重跑一遍高亮正则是流式渲染里最大的一项重复成本；块稳定后由稳定块
+    // 路径带高亮重渲染一次，颜色那时才补上。
+    const highlighted = opts && opts.highlight === false
+      ? escapeHtml(rawCode)
+      : highlightCode(rawCode, String(language || '').trim());
     codeBlocks.push(
       `<div class="code-block"><div class="code-block-bar">` +
       `<span class="code-lang">${lang}</span>` +

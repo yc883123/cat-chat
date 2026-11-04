@@ -45,12 +45,19 @@ COMPACT_DEFAULTS: dict[str, Any] = {
     "mode": MODE_AUTO,
     "threshold_percent": 70,
     "retain_turns": 3,
-    "summary_max_tokens": 2048,
+    # 8192 而不是 2048：交接材料是**长文档**（实测合格摘要 3862-6650 字），而思考档模型的
+    # 推理 token 与正文共用这份输出额度——2048 时思维独白先吃光预算，正文必被切断。
+    # 预算本身不计费（只按实际生成量算），给足不会变贵；截断反而要重写一遍。
+    "summary_max_tokens": 8192,
 }
 SETTING_KEYS = frozenset(COMPACT_DEFAULTS)
 # 旧版（本地确定性抽取）用过这个键：允许读取但不再生效，避免老配置报「不支持的字段」。
 LEGACY_SETTING_KEYS = frozenset({"digest_max_chars", "retain_messages"})
 
+# 总结请求输出预算的**有效下限**。设置页没有这一项入口（见 09-settings.js：保存时原样沿用），
+# 所以 2048 这类值来自旧默认，不是用户的选择；而它装不下一份合格交接材料。
+# 生效值 = max(本下限, 设置值)，保证存量配置也被抬到能装下的量级。
+MIN_SUMMARY_OUTPUT_TOKENS = 8192
 # 摘要正文的长度闸门：太短说明没按要求输出，太长说明它在抄原文（白花一次请求）。
 MIN_SUMMARY_CHARS = 120
 MAX_SUMMARY_CHARS = 20000
@@ -137,7 +144,10 @@ def should_compact(
         return False
     percent = max(30, min(95, int(settings["threshold_percent"])))
     by_percent = int(limit) * percent // 100
-    headroom = int(settings.get("summary_max_tokens") or 0) + max(0, int(reserve)) + SUMMARY_OUTPUT_SLACK
+    # 预留不能超过窗口的四分之一：小窗口（8000）配 8192 预算时，headroom 会超过窗口本身，
+    # ceiling 被压到 1 —— 任何会话一开局就被判「该整理」。大窗口下照常用满预算。
+    budget = min(effective_summary_budget(settings), max(1, int(limit) // 4))
+    headroom = budget + max(0, int(reserve)) + SUMMARY_OUTPUT_SLACK
     ceiling = max(1, int(limit) - headroom)
     return int(used) >= min(by_percent, ceiling)
 
@@ -295,6 +305,51 @@ def clean_summary(text: Any) -> str:
     return summary.strip()
 
 
+def effective_summary_budget(settings: dict[str, Any], profile: dict[str, Any] | None = None) -> int:
+    """总结请求实际使用的输出预算：不低于 ``MIN_SUMMARY_OUTPUT_TOKENS``，且不超模型上限。
+
+    设置里的 ``summary_max_tokens`` 在界面没有入口（保存时原样沿用），所以存量配置里
+    那些 2048 是**旧默认值**、不是用户的选择；直接信它会让每份交接材料都被腰斩。
+
+    上限一侧同样要钳：用户给模型填的小 ``max_output_tokens`` 会被当成本次请求的
+    ``max_tokens`` 下发，超了就是 HTTP 400——而 A0 的「去掉被拒的输出上限」自愈
+    **只对我们自己注入的值生效**，用户显式设的值不吞错（见 runtime 的注释）。所以在这里
+    就先按模型声明的上限收口，避免拿一个必然被拒的数值去撞一次 400。
+    """
+    configured = int(settings.get("summary_max_tokens") or 0)
+    budget = max(MIN_SUMMARY_OUTPUT_TOKENS, configured)
+    ceiling = 0
+    if isinstance(profile, dict):
+        try:
+            ceiling = int(profile.get("max_output_tokens") or 0)
+        except (TypeError, ValueError):
+            ceiling = 0
+    if ceiling > 0:
+        budget = min(budget, ceiling)
+    return budget
+
+
+# 摘要收尾判据：合格交接材料不会以一个悬空的项目符号收尾。
+_DANGLING_BULLET_RE = re.compile(r"(?:^|\n)\s*(?:[-*+]|\d+[.)])\s*$")
+
+
+def looks_truncated(summary: str) -> bool:
+    """摘要是否在句子中途被切断（模型输出额度用尽的典型形态）。
+
+    只判**明确**的两种形态，宁可漏判也不误杀——误杀会让整理整轮失败、白花一次请求：
+    - 末尾是悬空的 Markdown 项目符号（``-``/``1.`` 后面什么都没有）；
+    - 末尾是未闭合的代码围栏（围栏计数为奇）。
+    其余「末尾没有句号」这类猜测不在此判：路径、代码标识符结尾是交接材料的正常写法
+    （实测 ``/var/log/gateway.log`` 这类收尾完全合法）。
+    """
+    text = str(summary or "").rstrip()
+    if not text:
+        return False
+    if _DANGLING_BULLET_RE.search(text):
+        return True
+    return text.count("```") % 2 == 1
+
+
 def validate_summary(summary: str, *, max_chars: int = MAX_SUMMARY_CHARS) -> tuple[bool, str]:
     """可用性校验：不合格就不整理（fail-open，宁可这轮不整理也不写坏标记）。
 
@@ -302,7 +357,8 @@ def validate_summary(summary: str, *, max_chars: int = MAX_SUMMARY_CHARS) -> tup
     分区关键词命中数卡摘要，会反复误拒措辞不同但内容完整的输出（冻结版实测
     ``summary_missing_sections`` / ``summary_not_structured`` 连续失败）。判据：
     - 长度在 [MIN_SUMMARY_CHARS, max_chars] 内；
-    - 不是拒答或敷衍（交接材料不会以道歉、「我无法总结」开场）。
+    - 不是拒答或敷衍（交接材料不会以道歉、「我无法总结」开场）；
+    - 不是被切断的半截稿（``looks_truncated``）。
     「摘要确实比输入短」由 compact_conversation 的 freed_est 闸门单独把关。
     """
     if len(summary) < MIN_SUMMARY_CHARS:
@@ -314,6 +370,8 @@ def validate_summary(summary: str, *, max_chars: int = MAX_SUMMARY_CHARS) -> tup
         return False, "summary_refusal"
     if _REFUSAL_ROLE_RE.search(head):
         return False, "summary_refusal"
+    if looks_truncated(summary):
+        return False, "summary_truncated"
     return True, ""
 
 
@@ -337,6 +395,19 @@ def _last_output_tokens(app: Any) -> int:
         return int((usage or {}).get("output_tokens") or 0)
     except (TypeError, ValueError, AttributeError):
         return 0
+
+
+def _last_finish_reason(app: Any) -> str:
+    """最近一次模型请求的终止原因（"length" = 撞输出上限被切断）。
+
+    与 ``last_usage`` 同构的旁路读取：属性缺失或供应商没给都返回空串，绝不影响主流程。
+    读它是因为「正文被腰斩」在文本层面上不一定有可辨认的收尾形态（实测一份摘要以
+    ``anima-lllite-in`` 结尾），而终止原因是确定性的。
+    """
+    try:
+        return str(getattr(getattr(app, "models", None), "last_finish_reason", "") or "")
+    except (TypeError, ValueError, AttributeError):
+        return ""
 
 
 def _is_cancellation(exc: BaseException, cancel_event: Any) -> bool:
@@ -468,10 +539,11 @@ def compact_conversation(
     if not force and estimate_rows_tokens(region_rows) < MIN_REGION_TOKENS:
         return {"compacted": False, "reason": "region_too_small"}
     # 输出预算**独立**于正常回复：摘要请求不挂工具、不流式，max_tokens 只来自
-    # auto_compaction 设置（summary_max_tokens），不继承本轮对话的输出上限。
+    # auto_compaction 设置（summary_max_tokens，经 effective_summary_budget 抬到有效下限），
+    # 不继承本轮对话的输出上限。
     options: dict[str, Any] = {
         "stream": False,
-        "max_tokens": int(settings.get("summary_max_tokens") or 2048),
+        "max_tokens": effective_summary_budget(settings, profile),
     }
     if cancel_event is not None:
         options["cancel_event"] = cancel_event
@@ -516,6 +588,16 @@ def compact_conversation(
                 "reason": f"summary_failed:{type(exc).__name__}",
                 "attempts": attempts,
             }
+        # 撞输出上限：模型明确报 finish_reason=length 时，正文一定不完整——不管它
+        # 碰巧怎么收尾都不该定稿。这是比正文尾部形态更硬的证据，先判它。
+        if _last_finish_reason(app) == "length":
+            attempts.append({
+                "region_messages": len(current_rows),
+                "input_tokens": input_tokens,
+                "output_tokens": _last_output_tokens(app),
+                "reason": "summary_truncated",
+            })
+            return {"compacted": False, "reason": "summary_truncated", "attempts": attempts}
         summary = clean_summary(raw)
         ok, reason = validate_summary(summary, max_chars=MAX_SUMMARY_CHARS)
         if not ok:

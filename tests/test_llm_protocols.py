@@ -351,6 +351,46 @@ class LlmProtocolTests(unittest.TestCase):
         self.assertEqual(P._content_text([{"type": "text", "text": "A"}, {"type": "text", "text": "B"}]), "A\nB")
         self.assertEqual(P._text_value("x"), "x")
 
+    def test_codex_responses_content_excludes_reasoning(self):
+        """非流式正文提取必须只取 message：reasoning 不是正文。
+
+        真实事故（2026-11-04）：DeepSeek 思考档经 codex_responses 返回
+        ``[{type:reasoning}, {type:message}]``，旧实现把两个 item 的 content 一起拼进
+        正文，于是「用户要求我写一份交接材料。让我梳理一下。」这段思维独白出现在
+        自动整理的交接材料最前面，还先吃掉了输出额度。
+        """
+        result = {"output": [
+            {"type": "reasoning", "id": "rs_1",
+             "content": [{"type": "reasoning_text", "text": "用户要求我写一份交接材料。"}]},
+            {"type": "message", "id": "msg_1",
+             "content": [{"type": "output_text", "text": "# 交接材料\n\n真正的正文"}]},
+        ]}
+        self.assertEqual(
+            P._online_content("codex_responses", result), "# 交接材料\n\n真正的正文",
+            "思维独白不得混入正文",
+        )
+        self.assertEqual(
+            P._online_reasoning("codex_responses", result), "用户要求我写一份交接材料。",
+            "独白仍按思考内容单独提取，不丢失",
+        )
+
+    def test_codex_responses_content_skips_function_call(self):
+        """function_call 的 arguments 也不能当正文返回（那是工具协议载荷）。"""
+        result = {"output": [
+            {"type": "function_call", "call_id": "c1", "name": "pwsh",
+             "arguments": json.dumps({"command": "dir"})},
+            {"type": "message", "id": "m1",
+             "content": [{"type": "output_text", "text": "正文"}]},
+        ]}
+        self.assertEqual(P._online_content("codex_responses", result), "正文")
+
+    def test_codex_responses_content_keeps_output_text_shortcut(self):
+        """供应商直接给了聚合好的 output_text 时照旧优先用它。"""
+        result = {"output_text": "聚合正文", "output": [
+            {"type": "reasoning", "content": [{"type": "reasoning_text", "text": "思考"}]},
+        ]}
+        self.assertEqual(P._online_content("codex_responses", result), "聚合正文")
+
     def test_codex_responses_aggregated_dedup_and_filter(self):
         """聚合提取：completed 优先、同 id 去重、incomplete 排除、function_call 成 action。"""
         items = [

@@ -1147,6 +1147,15 @@ class ProtocolMixins:
                 return str(result["output_text"])
             texts = []
             for output in result.get("output") or []:
+                if not isinstance(output, dict):
+                    continue
+                # 只取 message 正文。reasoning / function_call 是**另外两类 item**，
+                # 不是正文的一部分：把它们拼进来会让思维独白与工具调用 JSON 混进
+                # 用户可见内容（实测 DeepSeek 思考档把「用户要求我写一份交接材料。
+                # 让我梳理一下。」整段独白拼在摘要前面，且独白先占满输出额度导致正文
+                # 被切断）。与 lm_studio 分支同一判据。
+                if str(output.get("type") or "") in {"reasoning", "function_call"}:
+                    continue
                 for item in output.get("content") or []:
                     text = item.get("text") if isinstance(item, dict) else ""
                     if text:

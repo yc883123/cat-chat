@@ -222,6 +222,85 @@ class PartialRunRebuildTests(unittest.TestCase):
         self.assertEqual(content, "")
 
 
+class PartialRunUsageTests(unittest.TestCase):
+    """取消/失败轮次必须带末次 usage。
+
+    不带的话前端 `updateContextUsage` 往前扫只能扫到上一轮已落库的值——上下文圆环
+    显示的是整理前/更早的口径，看起来像自动整理没生效（实测真实占用 44k-73k，
+    圆环停在 117,855 / 46%）。
+    """
+
+    def test_last_usage_wins_and_drops_runtime_elapsed(self):
+        from naiba.run.chat import ConversationRunMixin
+
+        first = {"type": "usage", "usage": {"input_tokens": 100, "output_tokens": 10,
+                                            "context_tokens": 110, "requests": 1}}
+        # 末次：累计口径由 SkillAgent 重发，elapsed_ms 是运行期注入的瞬时值，必须剥掉。
+        last = {"type": "usage", "usage": {"input_tokens": 73347, "output_tokens": 76,
+                                          "context_tokens": 73423, "requests": 48,
+                                          "elapsed_ms": 1234.5}}
+        usage = ConversationRunMixin._last_usage_from_events([first, ev("delta"), last])
+        self.assertEqual(usage["input_tokens"], 73347, "取最后一次请求的真实输入量")
+        self.assertEqual(usage["requests"], 48)
+        self.assertNotIn("elapsed_ms", usage, "运行期瞬时耗时不是本轮汇总，不能落库")
+
+    def test_no_usage_events_returns_empty(self):
+        from naiba.run.chat import ConversationRunMixin
+
+        self.assertEqual(
+            ConversationRunMixin._last_usage_from_events([ev("delta"), ev("cancelled")]), {},
+            "一次请求都没发出去时不得凭空造 usage",
+        )
+
+    def test_malformed_usage_payloads_are_ignored(self):
+        from naiba.run.chat import ConversationRunMixin
+
+        events = [
+            {"type": "usage", "usage": None},
+            {"type": "usage", "usage": "bad"},
+            {"type": "usage", "usage": {}},
+            {"type": "usage", "usage": {"input_tokens": 5, "output_tokens": 1}},
+        ]
+        self.assertEqual(
+            ConversationRunMixin._last_usage_from_events(events)["input_tokens"], 5,
+            "空/非法形态跳过，取最后一条可用值",
+        )
+
+
+class CompactionIndicatorClearedTests(unittest.TestCase):
+    """终态路径必须收走「正在整理」的琥珀色脉动。
+
+    实测：整理中点了停止，后端只发过 compaction `started`、永远不会再发
+    `compacted`/`failed`，于是脉动一直亮到下一个无关的 status 事件才被顺手清掉，
+    看起来像「还在整理 / 整理卡住了」。
+    """
+
+    def setUp(self):
+        root = Path(__file__).resolve().parents[1]
+        self.source = (root / "public" / "js" / "12-chat-input.js").read_text(encoding="utf-8")
+
+    def _handler_body(self, name):
+        marker = f"function {name}("
+        start = self.source.index(marker)
+        # 取到下一个顶层函数声明为止（这些 handler 都是模块级 function）。
+        rest = self.source[start + len(marker):]
+        end = rest.index("\nfunction ")
+        return rest[:end]
+
+    def test_terminal_handlers_clear_the_indicator(self):
+        for name in ("handleCancelledEvent", "handleRunFailedEvent",
+                     "handleDoneEvent", "handleErrorEvent"):
+            body = self._handler_body(name)
+            self.assertIn(
+                "clearCompactionIndicator(", body,
+                f"{name} 是终态路径，必须收走整理脉动",
+            )
+
+    def test_started_still_lights_the_indicator(self):
+        """负向：`started` 分支必须保留加脉冲的逻辑（不能为了清理把它一并删掉）。"""
+        self.assertIn("classList.add('compaction-running')", self.source)
+
+
 class FrontendProseFilterTests(unittest.TestCase):
     """前端渲染层必须与后端同口径。
 

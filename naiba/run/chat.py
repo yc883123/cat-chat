@@ -1735,6 +1735,11 @@ class ConversationRunMixin:
             "trace": trace or [],
             "attachments": attachments,
         }
+        # 中止轮次也带 usage：圆环要显示「最近一次真实请求」的占用。不带的话前端只能
+        # 往前扫到上一轮（甚至是整理前那一轮）的旧值，看起来像整理没生效。
+        last_usage = self._last_usage_from_events(events)
+        if last_usage:
+            metadata["usage"] = last_usage
         if attachments_truncated:
             metadata[MetadataKeys.ATTACHMENTS_TRUNCATED] = attachments_truncated
         if changed_files:
@@ -1871,6 +1876,30 @@ class ConversationRunMixin:
         content = "".join(content_parts).strip()
         return reasoning, tool_runs, content, _safe_activity(events, reasoning, tool_runs)
 
+    @staticmethod
+    def _last_usage_from_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+        """从事件流里取**最后一次**模型请求的 usage（没有则返回空 dict）。
+
+        取消/失败的轮次过去不带 usage，于是 ``updateContextUsage`` 往前扫只能扫到上一轮
+        已落库的值——上下文圆环显示的是**整理前/更早**的口径，看起来像整理没生效
+        （实测：真实占用 44k-73k，圆环停在 117,855 / 46%）。usage 事件在 run_events 里
+        是完整保留的（终态瘦身只动 done/cancelled 的消息副本），这里逐条扫最后一条。
+
+        ``requests`` 是累计值，取末次事件即可代表「本轮共调用几次」——与成功路径的
+        ``_merge_usage_summary`` 是同一口径（展示用末次 per-request 用量，不求和）。
+        """
+        last: dict[str, Any] = {}
+        for ev in events:
+            if str(ev.get("type") or "") != "usage":
+                continue
+            usage = ev.get("usage")
+            if isinstance(usage, dict) and usage:
+                last = dict(usage)
+        # 运行期注入的 elapsed_ms 是「到那一刻为止」的耗时，不是本轮汇总；成功路径的
+        # performance.total_ms 才是。这里去掉它，免得前端把它当成本轮总耗时展示。
+        last.pop("elapsed_ms", None)
+        return last
+
     def recover_interrupted_runs(self) -> int:
         """把「服务重启中断」的对话 Run 里已经吐出来的内容重建为一条 partial 消息。
 
@@ -1986,6 +2015,10 @@ class ConversationRunMixin:
             "error": error,
             "attachments": attachments,
         }
+        # 失败轮次同样带末次 usage（同取消路径：圆环显示最近一次真实请求的占用）。
+        last_usage = self._last_usage_from_events(events)
+        if last_usage:
+            metadata["usage"] = last_usage
         if attachments_truncated:
             metadata[MetadataKeys.ATTACHMENTS_TRUNCATED] = attachments_truncated
         if changed_files:

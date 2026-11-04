@@ -50,7 +50,9 @@ class CompactionSettingsTests(unittest.TestCase):
         # 70 而不是 80：整理要额外发一次总结请求、之后还要正常回复，触发点必须提前。
         self.assertEqual(settings["threshold_percent"], 70)
         self.assertEqual(settings["retain_turns"], 3)
-        self.assertEqual(settings["summary_max_tokens"], 2048)
+        # 8192 而不是 2048：交接材料实测 3862-6650 字，思考档的推理 token 与正文共用
+        # 这份额度，2048 必然腰斩正文。
+        self.assertEqual(settings["summary_max_tokens"], 8192)
 
     def test_partial_dict_fills_missing_keys(self):
         settings = compaction.resolve_settings({"mode": "off"})
@@ -93,14 +95,56 @@ class CompactionSettingsTests(unittest.TestCase):
     def test_reserve_lowers_the_trigger_point(self):
         """预留越大触发越早：给总结请求和正常回复留空间。
 
-        ceiling = limit - (summary_max_tokens + reserve + SUMMARY_OUTPUT_SLACK)；
-        reserve=0 时 2048+1024=3072，窗口 10000 只剩 6928 —— 用量 6000 不触发；
-        再预留 3000 后只剩 3928 —— 同样的 6000 必须触发。
+        预留 = min(有效总结预算, 窗口/4) + reserve + SUMMARY_OUTPUT_SLACK。
+        窗口 10000 时预算封顶在 2500（窗口的四分之一），故 headroom = 2500+1024=3524、
+        ceiling = 6476 —— 用量 6000 不触发；再预留 3000 后 ceiling 只剩 3476 —— 必须触发。
         """
         settings = compaction.resolve_settings({"threshold_percent": 95, "summary_max_tokens": 2048})
         limit = 10000
         self.assertFalse(compaction.should_compact(settings, used=6000, limit=limit, reserve=0))
         self.assertTrue(compaction.should_compact(settings, used=6000, limit=limit, reserve=3000))
+
+    def test_small_window_budget_is_capped_at_a_quarter(self):
+        """小窗口不该被总结预算直接判死：8192 预算配 8000 窗口时预留必须按窗口收缩。
+
+        没有这层收缩时 headroom = 8192+1024 > 8000，ceiling 被压到 1，任何会话一开局
+        就被判「该整理」。
+        """
+        settings = compaction.resolve_settings(None)
+        limit = 8000
+        self.assertFalse(
+            compaction.should_compact(settings, used=100, limit=limit),
+            "窗口 8000 时用量 100 不该触发整理",
+        )
+
+    def test_summary_budget_floor_lifts_legacy_config(self):
+        """存量配置里的 2048（旧默认、设置页无入口）必须被抬到能装下交接材料的量级。"""
+        legacy = compaction.resolve_settings({"summary_max_tokens": 2048})
+        self.assertEqual(compaction.effective_summary_budget(legacy), 8192)
+        explicit = compaction.resolve_settings({"summary_max_tokens": 16384})
+        self.assertEqual(
+            compaction.effective_summary_budget(explicit), 16384,
+            "用户显式设的更大值不被压低",
+        )
+
+    def test_summary_budget_respects_model_output_ceiling(self):
+        """模型自己声明的输出上限更小时要收口，否则必然被供应商 400。
+
+        用户填的小 ``max_output_tokens`` 会原样作为本次请求的 max_tokens 下发；A0 的
+        「去掉被拒输出上限」自愈只对我们注入的值生效，用户显式设的值不吞错。
+        """
+        settings = compaction.resolve_settings(None)
+        self.assertEqual(
+            compaction.effective_summary_budget(settings, {"max_output_tokens": 4096}), 4096,
+        )
+        self.assertEqual(
+            compaction.effective_summary_budget(settings, {"max_output_tokens": 0}), 8192,
+            "0 / 缺省视为没声明上限",
+        )
+        self.assertEqual(
+            compaction.effective_summary_budget(settings, {"max_output_tokens": 32768}), 8192,
+            "上限比预算大时不抬高预算",
+        )
 
 
 class CompactionRegionTests(unittest.TestCase):
@@ -358,12 +402,14 @@ class _FakeStorage:
 
 
 class _FakeModels:
-    def __init__(self, reply=None, raises=None, script=None):
+    def __init__(self, reply=None, raises=None, script=None, finish_reason=""):
         self.reply = reply
         self.raises = raises
         # script：逐次消耗的「回复或异常」序列；耗尽后回落到 reply/raises。
         self.script = list(script or [])
         self.calls = []
+        self.last_finish_reason = finish_reason
+        self.last_usage = {}
 
     def complete(self, profile, messages, options, status=None):
         self.calls.append({"profile": profile, "messages": messages, "options": options})
@@ -378,9 +424,11 @@ class _FakeModels:
 
 
 class _FakeApp:
-    def __init__(self, reply=None, raises=None, script=None):
+    def __init__(self, reply=None, raises=None, script=None, finish_reason=""):
         self.storage = _FakeStorage()
-        self.models = _FakeModels(reply=reply, raises=raises, script=script)
+        self.models = _FakeModels(
+            reply=reply, raises=raises, script=script, finish_reason=finish_reason,
+        )
         self.config = None
 
 
@@ -454,6 +502,36 @@ class CompactionCompactConversationTests(unittest.TestCase):
         self.assertFalse(result["compacted"])
         self.assertEqual(result["reason"], "region_too_small")
         self.assertEqual(self.app.models.calls, [], "区间太小时连请求都不该发")
+
+    def test_length_finish_reason_blocks_marker(self):
+        """撞输出上限的摘要一律不定稿——哪怕正文碰巧通过了长度与拒答校验。
+
+        真实事故（2026-11-04 会话 6400b3bf）：DeepSeek 思考档把 3483 字思维独白写进正文，
+        2048 输出额度被独白吃光，交接材料只写到「## 2. 用户原话」就断了；结尾形态恰好
+        躲过了所有文本判据，15 条真实历史被替换成半份材料。
+        """
+        self.app.models.last_finish_reason = "length"
+        # 正文本身完全合格（够长、不是拒答、不是悬空项目符号）。
+        self.app.models.reply = GOOD_SUMMARY
+        result = self._compact()
+        self.assertFalse(result["compacted"], "finish_reason=length 时不得写标记")
+        self.assertEqual(result["reason"], "summary_truncated")
+        self.assertEqual(self.app.storage.calls, [], "不得写任何标记")
+        self.assertEqual(len(self.app.models.calls), 1, "截断不重试：同一输入重发只会再花一次钱")
+
+    def test_normal_finish_reason_still_compacts(self):
+        """对照组：终止原因正常时同一份摘要照常定稿（新判据不得误杀）。"""
+        self.assertEqual(self.app.models.last_finish_reason, "")
+        result = self._compact()
+        self.assertTrue(result["compacted"], result)
+
+    def test_summary_request_uses_effective_budget(self):
+        """总结请求的输出预算必须抬到有效下限，旧配置的 2048 不能原样下发。"""
+        self.app.models.reply = GOOD_SUMMARY
+        self._compact(settings=compaction.resolve_settings({"retain_turns": 1,
+                                                            "summary_max_tokens": 2048}))
+        options = self.app.models.calls[0]["options"]
+        self.assertEqual(options["max_tokens"], compaction.MIN_SUMMARY_OUTPUT_TOKENS)
 
     def test_old_summary_is_fed_back_to_the_model(self):
         """再次整理：交给模型的是「旧摘要 + 新进入区间的历史」，不是只总结原始消息。"""

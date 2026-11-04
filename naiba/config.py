@@ -499,13 +499,14 @@ def default_config() -> dict[str, Any]:
         # 自动压缩上下文（docs/plans/2026-10-26-自动压缩上下文计划.md）：
         # mode=auto 自动整理 / remind 整理前提醒 / off 关闭；threshold_percent 触发阈值
         # （窗口百分比，默认 70——整理要额外发一次总结请求、之后还要正常回复，必须提前）；
-        # retain_turns 逐字保留的最近**完整轮次**数；summary_max_tokens 总结请求输出上限。
+        # retain_turns 逐字保留的最近**完整轮次**数；summary_max_tokens 总结请求输出上限
+        # （8192：交接材料是长文档，思考档的推理 token 与正文共用这份额度，2048 会腰斩正文）。
         # 总结用当前会话同一模型（不引入摘要模型）。兜底见 core.compaction.resolve_settings。
         "auto_compaction": {
             "mode": "auto",
             "threshold_percent": 70,
             "retain_turns": 3,
-            "summary_max_tokens": 2048,
+            "summary_max_tokens": 8192,
         },
         # 本地模型「首字节超时」（秒）：本地后端在 prefill 期间一个字节都不吐，
         # 「正在 prefill」和「永远做不完」在界面上无法区分。本地请求总超时是 1800 秒，

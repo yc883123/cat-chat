@@ -1081,6 +1081,10 @@ function handleChoiceEvent(event) {
 function handleCancelledEvent(event, { row, answer, setActivity, conversationId }) {
   clearElapsedStatus();
   clearVisionProgress();
+  // 取消发生在整理过程中时，后端只发过 `started`、永远不会再发 `compacted`/`failed`——
+  // 不在这里收，琥珀色脉动（消息活动栏 / 状态栏 / 圆环）会一直亮到下一个无关的 status
+  // 事件才被顺手清掉，看起来像「还在整理」或「整理卡住了」。
+  clearCompactionIndicator(row);
   setActivity('');
   if (event.aborted_message) {
     // 取消时后端已把累积内容持久化为"已中止"assistant 消息，直接用其渲染，保留已展示的思考与工具。
@@ -1108,9 +1112,11 @@ function handleCancelledEvent(event, { row, answer, setActivity, conversationId 
   freezeQueuedInterjections();
 }
 
-function handleRunFailedEvent(event, { answer, setActivity }) {
+function handleRunFailedEvent(event, { row, answer, setActivity }) {
   clearElapsedStatus();
   clearVisionProgress();
+  // 同取消路径：整理中的任意失败收尾都必须收走琥珀色脉动。
+  clearCompactionIndicator(row);
   setActivity('');
   // 工具协议解析失败：只展示可读错误，不显示原始 XML/JSON 或命令参数。
   // 但**不能**在已有正文时清空它：末次解析失败会把模型最后一轮原文保留在答复里
@@ -1209,6 +1215,9 @@ function prefillResetSeed(resetInfo) {
 function handleDoneEvent(event, { row, answer, collapseReasoning, conversationId }) {
   clearElapsedStatus();
   clearVisionProgress();
+  // 一轮正常结束：整理脉动必须收走（正常路径上 compacted 已经清过，这里兜住
+  // 「整理完成后本轮没有后续 status 事件」的收尾形态）。
+  clearCompactionIndicator(row);
   collapseReasoning();
   if (event.message) {
     // 存量形态（重放旧事件流/旧库）：done 曾携带完整消息对象，按老路径就地渲染一次。
@@ -1258,6 +1267,8 @@ function handleDoneEvent(event, { row, answer, collapseReasoning, conversationId
 function handleErrorEvent(event, { row, answer, collapseReasoning, conversationId }) {
   clearElapsedStatus();
   clearVisionProgress();
+  // 同 done：错误终态必须收走整理脉动。
+  clearCompactionIndicator(row);
   collapseReasoning();
   if (event.partial_message) {
     // 存量形态（重放旧事件流/旧库）：失败时后端把累积内容持久化成了 partial assistant 消息，

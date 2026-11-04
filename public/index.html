@@ -953,6 +953,8 @@
                         <span id="novelStageTaskState">排队中</span>
                       </button>
                       <span class="novel-stage-task-actions">
+                        <!-- 查看历史任务时才出现：把结果盒切回当前任务（不挪 activeTaskId）。 -->
+                        <button class="control-button tiny" id="novelStageBackToActive" type="button" hidden>返回当前任务</button>
                         <button class="control-button tiny" id="novelStageCancel" type="button" hidden>取消</button>
                         <button class="control-button tiny" id="novelStageRetry" type="button" hidden>重试</button>
                         <button class="control-button" id="novelStageApply" type="button" hidden>保存为新版本</button>

@@ -5195,6 +5195,13 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
   font-size: 10px; cursor: pointer; padding: 1px 2px; text-decoration: underline;
 }
 .novel-link-button:focus-visible { outline: 2px solid var(--violet-line); outline-offset: 1px; }
+/* 行 = 查看行 + 行内删除（终态任务才有删）：删除不再要进管理记录翻批量勾选（反馈①）。 */
+.novel-task-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px; align-items: stretch; }
+.novel-task-del {
+  min-width: 30px; padding: 0 8px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--muted); font-size: 11px; cursor: pointer;
+}
+.novel-task-del:hover { border-color: var(--danger, #b4443c); color: var(--danger, #b4443c); background: var(--surface-2); }
 .novel-task-row {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px 8px;
   min-width: 0; padding: 4px 7px; border: 1px solid var(--line); border-radius: var(--r-sm);

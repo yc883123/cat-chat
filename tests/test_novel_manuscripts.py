@@ -676,5 +676,77 @@ class CreativeFieldLayoutUITests(unittest.TestCase):
         self.assertIn("max-height: 42vh", result, "结果区要自己收高度并在内部滚动")
 
 
+class StageTaskFlowGuardTests(unittest.TestCase):
+    """阶段任务流三不变量（2026-11-04 用户反馈①②③，修复计划见 docs/plans/2026-11-04）。
+
+    - ① 历史行行内删除：终态任务行带 [data-novel-task-del]，主界面直接删，不必进管理记录；
+    - ② 本阶段有 queued/running 任务时生成按钮禁用；刷新/切书后任务自动挂回阶段槽；
+    - ③ 查看历史任务只换 viewTaskId 展示指针，绝不挪 activeTaskId（轮询/取消/写回不被顶掉）。
+    """
+
+    def _read(self, rel: str) -> str:
+        return (ROOT / rel).read_text(encoding="utf-8")
+
+    def test_history_rows_have_inline_delete_for_terminal_tasks(self):
+        js = self._read("public/js/25-novel.js")
+        render = js[js.index("function renderStageTaskHistory("):]
+        render = render[: render.index("\nfunction bodyHasText(")]
+        self.assertIn("novel-task-line", render, "行要包一层便于并排删按钮")
+        self.assertIn("novel-task-del", render, "历史行要有行内删除按钮")
+        self.assertIn('TERMINAL_TASK_STATUSES.has(String(task.status || ""))', render,
+                      "只有终态任务给删除；运行中的任务先取消再删")
+        self.assertIn("del.dataset.novelTaskDel = task.id;", render,
+                      "删除按钮要带任务 id（委托处理器按它定位）")
+        handler = js[js.index('const delBtn = event.target.closest("[data-novel-task-del]")'):]
+        handler = handler[: handler.index('const card = event.target.closest("[data-novel-task]")')]
+        self.assertIn("deleteStageTask", handler, "删除要走确认后的专用流程")
+        self.assertIn("/api/novel/tasks/delete", js, "复用管理记录同一删除接口")
+        css = self._read("public/styles.css")
+        self.assertIn(".novel-task-line {", css)
+        self.assertIn(".novel-task-del {", css)
+
+    def test_generate_disabled_while_stage_task_is_live(self):
+        js = self._read("public/js/25-novel.js")
+        panel = js[js.index("function renderStagePanel("):]
+        panel = panel[: panel.index("function applyStageCollapse(")]
+        self.assertIn('["queued", "running"].includes(String(row.status || ""))', panel,
+                      "生成按钮要识别本阶段排队/运行中的任务")
+        self.assertIn("generate.disabled = !ready || stageData.busy || Boolean(liveStageTask)",
+                      panel, "本阶段有任务在跑时禁止再点（反馈②）")
+        self.assertIn("本阶段已有任务在跑，等它完成或取消后再生成。", panel,
+                      "禁用要有解释（按钮 title）")
+
+    def test_refresh_reattaches_live_tasks_to_empty_slots(self):
+        js = self._read("public/js/25-novel.js")
+        self.assertIn("function reattachLiveTasks()", js,
+                      "刷新任务列表后要把 live 任务挂回空槽（反馈②根因）")
+        self.assertIn("reattachLiveTasks();", js[js.index("async function refreshStageTasks("):])
+        reattach = js[js.index("function reattachLiveTasks()"):]
+        reattach = reattach[: reattach.index("\n}")]
+        self.assertIn("if (data.activeTaskId) continue;", reattach, "已在跑的指针不动")
+        self.assertIn("row.novel?.book_id === novel.bookId", reattach, "只挂当前作品的任务")
+
+    def test_viewing_history_never_displaces_active_task(self):
+        js = self._read("public/js/25-novel.js")
+        click = js[js.index('const card = event.target.closest("[data-novel-task]")'):]
+        click = click[: click.index("async function deleteStageTask")]
+        self.assertIn('data.viewTaskId = task.id === data.activeTaskId ? "" : task.id;',
+                      click, "查看只换展示指针")
+        self.assertNotIn("data.activeTaskId = task.id;", click,
+                         "查看不得再改 activeTaskId（反馈③：会顶掉运行中任务）")
+        self.assertNotIn("scheduleTaskPolling();", click,
+                         "查看不需要重挂轮询；轮询始终认 activeTaskId")
+        panel = js[js.index("function renderStagePanel("):]
+        panel = panel[: panel.index("function applyStageCollapse(")]
+        self.assertIn("const viewingHistory = Boolean(viewTask && (!activeTask || viewTask.id !== activeTask.id));", panel)
+        self.assertIn("novelStageBackToActive", panel, "要有返回当前任务入口")
+        self.assertIn("apply.hidden = isStoryboard || viewingHistory", panel,
+                      "历史任务的结果不得触发写回")
+        index = self._read("public/index.html")
+        self.assertIn('id="novelStageBackToActive"', index, "返回当前任务按钮要有实体")
+        self.assertIn('"novelStageBackToActive"', self._read("public/js/25-novel.js"),
+                      "按钮要进面板克隆的 id 迁移清单")
+
+
 if __name__ == "__main__":
     unittest.main()

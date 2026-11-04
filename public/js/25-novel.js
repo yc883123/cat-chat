@@ -86,12 +86,14 @@ const novel = {
   taskPollTimer: null,
   taskPollBusy: false,
   // 每个阶段各自保存当前任务和流式结果。
+  // viewTaskId：结果盒当前「展示」谁。查看历史任务只改它，不动 activeTaskId——
+  // 否则查看动作会把运行中任务的进度盒顶掉（2026-11-04 用户反馈③）。
   stageStates: {
-    elements: { activeTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0, firstDeltaAt: 0, recentDeltas: [] },
-    outline: { activeTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0, firstDeltaAt: 0, recentDeltas: [] },
-    script: { activeTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0, firstDeltaAt: 0, recentDeltas: [] },
+    elements: { activeTaskId: "", viewTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0, firstDeltaAt: 0, recentDeltas: [] },
+    outline: { activeTaskId: "", viewTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0, firstDeltaAt: 0, recentDeltas: [] },
+    script: { activeTaskId: "", viewTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0, firstDeltaAt: 0, recentDeltas: [] },
     // 分镜生图（阶段四）：多存逐场解析结果与勾选集（解析一次，轮询不重算）。
-    storyboard: { activeTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0, firstDeltaAt: 0, recentDeltas: [], progressNote: "", rows: [], parsed: false, checked: new Set() },
+    storyboard: { activeTaskId: "", viewTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0, firstDeltaAt: 0, recentDeltas: [], progressNote: "", rows: [], parsed: false, checked: new Set() },
   },
   // 单章 AI 改编写在拆章阶段，但有自己的一条任务槽。
   adaptTask: { activeTaskId: "", taskCursor: 0, streamText: "", warnings: [], busy: false, submittedAt: 0, progressNote: "" },
@@ -261,7 +263,7 @@ function activeTaskSlot() {
 const STAGE_PANEL_CONTROL_IDS = [
   "novelStageMeta", "novelStageNote", "novelStageProvider", "novelStageModel",
   "novelStageGenerate", "novelStageWarning", "novelStageTask", "novelStageTaskState",
-  "novelStageCancel", "novelStageRetry", "novelStageApply", "novelStageTaskNote",
+  "novelStageBackToActive", "novelStageCancel", "novelStageRetry", "novelStageApply", "novelStageTaskNote",
   "novelStageResult", "novelStageSaved", "novelStageSavedAt", "novelStageSavedBody", "novelStageVersion",
   "novelTaskHistory", "novelPickManuscripts", "novelBodyChars", "novelBodyCharsValue",
   "novelMaxChapters", "novelMaxChaptersValue",
@@ -1006,15 +1008,23 @@ function renderStagePanel() {
     }
   });
   const generate = $("#novelStageGenerate");
+  // 本阶段已有排队/运行中的任务时禁止再点：tooltip 原口径「每次点击都会新建一条任务」
+  // 在长任务（剧本 1 分钟+）下会堆出好几条重复任务（2026-11-04 用户反馈②）。
+  const liveStageTask = novel.tasks.find((row) => row.module === "novel"
+    && row.novel?.book_id === novel.bookId && row.novel?.stage === stage
+    && ["queued", "running"].includes(String(row.status || ""))) || null;
   if (generate) {
-    generate.disabled = !ready || stageData.busy;
+    generate.disabled = !ready || stageData.busy || Boolean(liveStageTask);
     generate.textContent = stage === "script" ? "生成剧本"
       : (isStoryboard ? "生成分镜提示词" : `生成${stageLabel(stage)}`);
-    generate.title = "每次点击都会新建一条任务；可以在结果确认后再次生成，不会锁死本阶段。";
+    generate.title = liveStageTask
+      ? "本阶段已有任务在跑，等它完成或取消后再生成。"
+      : "每次点击都会新建一条任务；可以在结果确认后再次生成，不会锁死本阶段。";
   }
   const warning = $("#novelStageWarning");
   if (warning) {
     const lines = [];
+    if (liveStageTask) lines.push("本阶段已有生成任务在跑（见下方任务盒），等它完成或取消后再点生成。");
     if (novel.staged) lines.push("先把导入的章节保存为作品，再生成。");
     else if (!novel.bookId) lines.push("先打开或保存一个作品。");
     else if (isStoryboard && !sceneCount) lines.push("这个作品还没有剧本场次；先到「剧本」阶段生成并保存场次。");
@@ -1028,32 +1038,45 @@ function renderStagePanel() {
   }
 
   // 任务区：进行中显示进度与取消；完成显示结果与写回；失败显示原因与重试。
+  // 查看历史任务只换「展示对象」，轮询/取消/写回始终认 activeTaskId（反馈③）。
   const taskBox = $("#novelStageTask");
   const savedBox = $("#novelStageSaved");
-  const task = novel.tasks.find((row) => row.id === stageData.activeTaskId) || null;
+  const activeTask = novel.tasks.find((row) => row.id === stageData.activeTaskId) || null;
+  const viewTask = stageData.viewTaskId
+    ? (novel.tasks.find((row) => row.id === stageData.viewTaskId) || null)
+    : null;
+  const viewingHistory = Boolean(viewTask && (!activeTask || viewTask.id !== activeTask.id));
+  const task = viewTask || activeTask;
   if (taskBox) taskBox.hidden = !task;
   if (task) {
     const stateEl = $("#novelStageTaskState");
     const status = String(task.status || "");
     if (stateEl) {
-      stateEl.textContent = TASK_STATUS_LABELS[status] || "状态未知";
+      stateEl.textContent = (viewingHistory ? "历史 · " : "") + (TASK_STATUS_LABELS[status] || "状态未知");
     }
     const note = $("#novelStageTaskNote");
     if (note) {
       const bits = [];
-      const elapsed = stageData.submittedAt ? Math.max(0, Math.floor((Date.now() - stageData.submittedAt) / 1000)) : 0;
+      if (viewingHistory) {
+        bits.push(activeTask && !TERMINAL_TASK_STATUSES.has(String(activeTask.status || ""))
+          ? "正在查看历史任务；当前任务仍在后台运行，可点「返回当前任务」。"
+          : "正在查看历史任务。");
+      }
+      const elapsed = !viewingHistory && stageData.submittedAt ? Math.max(0, Math.floor((Date.now() - stageData.submittedAt) / 1000)) : 0;
       if (status === "queued") bits.push(`生成任务在后台排队${elapsed >= 5 ? `，已等待 ${elapsed} 秒` : ""}。作品页面不会被锁住。`);
       if (status === "running") {
-        if (!bodyHasText(stageData, task)) {
-          bits.push(elapsed >= 8
-            ? `模型仍在处理，已等待 ${elapsed} 秒，尚未返回正文；中转较慢时页面会继续等待，你可以取消任务。`
-            : "正在连接模型并等待首段回复，可以切到别的阶段继续操作。");
+        if (viewingHistory || !bodyHasText(stageData, task)) {
+          if (!viewingHistory) {
+            bits.push(elapsed >= 8
+              ? `模型仍在处理，已等待 ${elapsed} 秒，尚未返回正文；中转较慢时页面会继续等待，你可以取消任务。`
+              : "正在连接模型并等待首段回复，可以切到别的阶段继续操作。");
+          }
         } else {
           const samples = stageData.recentDeltas;
           const span = samples.length > 1 ? (samples[samples.length - 1].at - samples[0].at) / 1000 : 0;
           const chars = samples.reduce((sum, row) => sum + row.chars, 0);
           const speed = span > 0 ? Math.max(1, Math.round(chars / span)) : 0;
-          bits.push(`已生成 ${stageData.streamText.length || String(task.result_partial || "").length} 字${speed ? `，最近约 ${speed} 字/秒` : ""}。`);
+          bits.push(`已生成 ${stageData.streamText.length || String(task.result || task.result_partial || "").length} 字${speed ? `，最近约 ${speed} 字/秒` : ""}。`);
         }
       }
       if (status === "failed" && task.error) bits.push(String(task.error));
@@ -1061,21 +1084,29 @@ function renderStagePanel() {
       if (status === "interrupted") bits.push("服务重启让任务中断了，可以重试。");
       note.textContent = bits.join(" ");
     }
-    const body = String(stageData.streamText || task.result || task.result_partial || "");
+    const body = viewingHistory
+      ? String(task.result || task.result_partial || "")
+      : String(stageData.streamText || task.result || task.result_partial || "");
     const result = $("#novelStageResult");
     if (result) result.textContent = body;
+    const back = $("#novelStageBackToActive");
+    if (back) back.hidden = !viewingHistory;
     const cancel = $("#novelStageCancel");
-    if (cancel) cancel.hidden = TERMINAL_TASK_STATUSES.has(status);
+    if (cancel) cancel.hidden = viewingHistory || TERMINAL_TASK_STATUSES.has(status);
     const retry = $("#novelStageRetry");
-    if (retry) retry.hidden = !["failed", "cancelled", "interrupted"].includes(status);
+    if (retry) retry.hidden = viewingHistory || !["failed", "cancelled", "interrupted"].includes(status);
     const apply = $("#novelStageApply");
-    // 只有「已完成且结果非空」才能写回：写回是覆盖动作，不能拿空结果覆盖已有成果。
+    // 只有「展示的是当前任务、已完成且结果非空」才能写回：写回是覆盖动作，不能拿空结果
+    // 覆盖已有成果；历史任务的结果要保存请重新生成或在管理记录里对照。
     // 分镜提示词不写回作品（结果直接发给造梦机），所以这一阶段不出现写回按钮。
     if (apply) {
-      apply.hidden = isStoryboard || !(status === "done" && body.trim());
+      apply.hidden = isStoryboard || viewingHistory || !(status === "done" && body.trim());
       apply.textContent = stage === "script" ? "保存为新剧本版本" : `保存为新${stageLabel(stage)}版本`;
       apply.title = "保存会新增一个版本并保留旧版；后续阶段可选择使用哪个版本。";
     }
+  } else {
+    const back = $("#novelStageBackToActive");
+    if (back) back.hidden = true;
   }
   renderStageTaskHistory(stage, stageData.activeTaskId);
 
@@ -1157,6 +1188,8 @@ function renderStageTaskHistory(stage, activeTaskId) {
   all.title = "在「管理记录」里查看全部生成记录";
   head.append(label, all);
   const shown = rows.slice(0, novel.recentTaskLimit).map((task) => {
+    const line = document.createElement("div");
+    line.className = "novel-task-line";
     const button = document.createElement("button");
     button.type = "button";
     button.className = "novel-task-row";
@@ -1174,7 +1207,19 @@ function renderStageTaskHistory(stage, activeTaskId) {
     open.className = "novel-task-open";
     open.textContent = "查看";
     button.append(title, meta, open);
-    return button;
+    line.append(button);
+    // 终态任务给行内删除（2026-11-04 用户反馈①）：不用再进「管理记录」翻批量删除。
+    if (TERMINAL_TASK_STATUSES.has(String(task.status || ""))) {
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "novel-task-del";
+      del.textContent = "删";
+      del.dataset.novelTaskDel = task.id;
+      del.title = "删除这条任务记录；已保存的结果不受影响";
+      del.setAttribute("aria-label", `删除任务 ${task.title || stageLabel(stage)}`);
+      line.append(del);
+    }
+    return line;
   });
   list.replaceChildren(head, ...shown);
 }
@@ -1809,8 +1854,33 @@ async function refreshStageTasks() {
     fail("读取拆书匠任务失败", error);
     return;
   }
+  reattachLiveTasks();
   renderStagePanel();
   scheduleTaskPolling();
+}
+
+// 打开作品/刷新页面会把阶段槽指针清空（openBook 重置口径）；若就此不管，
+// 仍在排队/运行的任务会「隐身」：进度盒不出现、轮询停摆、生成按钮复活，
+// 用户以为没在跑而重复提交（2026-11-04 用户反馈②的根因之一）。
+// 这里把每个阶段最新的 queued/running 任务挂回空槽；已在跑的指针不动。
+function reattachLiveTasks() {
+  if (!novel.bookId) return;
+  for (const [stage, data] of Object.entries(novel.stageStates)) {
+    if (data.activeTaskId) continue;
+    const live = novel.tasks
+      .filter((row) => row.module === "novel" && row.novel?.book_id === novel.bookId
+        && row.novel?.stage === stage
+        && ["queued", "running"].includes(String(row.status || "")))
+      .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0))[0];
+    if (live) {
+      data.activeTaskId = live.id;
+      data.streamText = String(live.result_partial || "");
+      data.taskCursor = 0;
+      data.submittedAt = Number(live.created_at || 0) || Date.now();
+      data.busy = false;
+      novel.collapsed.delete(`${stage}:task`);
+    }
+  }
 }
 
 function scheduleTaskPolling() {
@@ -1973,6 +2043,7 @@ async function generateStage({ confirmLarge = false } = {}) {
       },
     });
     stageData.activeTaskId = payload.task?.id || "";
+    stageData.viewTaskId = "";
     stageData.streamText = "";
     stageData.taskCursor = 0;
     stageData.warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
@@ -2034,6 +2105,7 @@ async function retryStageTask() {
       method: "POST", body: {},
     });
     slot.activeTaskId = task?.id || "";
+    slot.viewTaskId = "";
     slot.streamText = "";
     slot.taskCursor = 0;
     slot.progressNote = "";
@@ -2080,6 +2152,7 @@ async function applyStageResult() {
     });
     novel.book = payload.book;
     stageData.activeTaskId = "";
+    stageData.viewTaskId = "";
     stageData.streamText = "";
     stageData.taskCursor = 0;
     novel.sceneEditing = 0;
@@ -2667,6 +2740,7 @@ async function openBook(bookId) {
     novel.aiTargetId = "";
     for (const data of Object.values(novel.stageStates)) {
       data.activeTaskId = "";
+      data.viewTaskId = "";
       data.streamText = "";
       data.taskCursor = 0;
       data.warnings = [];
@@ -3342,21 +3416,53 @@ export function bindNovelEvents() {
       toast("已恢复内置分镜写法");
       return;
     }
+    // 行内删除（仅终态任务有此按钮）：确认后删任务记录，已保存结果不受影响。
+    const delBtn = event.target.closest("[data-novel-task-del]");
+    if (delBtn) {
+      void deleteStageTask(delBtn.dataset.novelTaskDel);
+      return;
+    }
     const card = event.target.closest("[data-novel-task]");
     if (!card) return;
     const task = novel.tasks.find((row) => row.id === card.dataset.novelTask);
     if (!task || task.novel?.stage !== novel.stage) return;
     const data = stageState();
-    data.activeTaskId = task.id;
-    data.streamText = String(task.result || task.result_partial || "");
-    data.taskCursor = 0;
-    novel.taskToken += 1;
+    // 查看 = 只换「展示对象」（viewTaskId），绝不挪 activeTaskId：
+    // 运行中任务的进度盒、轮询、取消/写回都不能被查看动作顶掉（2026-11-04 反馈③）。
+    data.viewTaskId = task.id === data.activeTaskId ? "" : task.id;
     // 点「查看」就是想看这条任务的结果：之前收起过的状态不能挡住它，
     // 否则面板以收起态出现、只剩标题条，看起来像打不开（实测复现）。
     novel.collapsed.delete(`${novel.stage}:task`);
     renderStagePanel();
-    scheduleTaskPolling();
   });
+
+  async function deleteStageTask(taskId) {
+    const data = stageState();
+    if (!taskId || !novel.bookId) return;
+    const task = novel.tasks.find((row) => row.id === taskId);
+    if (!task) return;
+    if (!TERMINAL_TASK_STATUSES.has(String(task.status || ""))) {
+      toast("任务还在跑，先取消再删除");
+      return;
+    }
+    if (!window.confirm(`删除任务「${task.title || stageLabel(task.novel?.stage || "")}」的记录吗？\n已保存到作品的结果不受影响。`)) return;
+    try {
+      await api("/api/novel/tasks/delete", {
+        method: "POST",
+        body: { book_id: novel.bookId, task_ids: [taskId] },
+      });
+      if (data.viewTaskId === taskId) data.viewTaskId = "";
+      if (data.activeTaskId === taskId) {
+        data.activeTaskId = "";
+        data.streamText = "";
+        data.taskCursor = 0;
+      }
+      await refreshStageTasks();
+      toast("已删除任务记录");
+    } catch (error) {
+      fail("删除任务记录失败", error);
+    }
+  }
   $("#novelEditorBody")?.addEventListener("change", (event) => {
     const target = event.target;
     if (target.matches("[data-context-elements]")) novel.selectedVersions.elements = Number(target.value) || 0;
@@ -3467,6 +3573,12 @@ export function bindNovelEvents() {
 
   document.querySelectorAll("#novelEditorBody [data-stage-panel]").forEach((panel) => {
     panel.querySelector('[data-novel-control="novelStageGenerate"]')?.addEventListener("click", () => void generateStage());
+    panel.querySelector('[data-novel-control="novelStageBackToActive"]')?.addEventListener("click", () => {
+      const data = stageState();
+      data.viewTaskId = "";
+      novel.collapsed.delete(`${novel.stage}:task`);
+      renderStagePanel();
+    });
     panel.querySelector('[data-novel-control="novelStageCancel"]')?.addEventListener("click", () => void cancelStageTask());
     panel.querySelector('[data-novel-control="novelStageRetry"]')?.addEventListener("click", () => void retryStageTask());
     panel.querySelector('[data-novel-control="novelStageApply"]')?.addEventListener("click", () => void applyStageResult());

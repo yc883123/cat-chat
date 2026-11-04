@@ -169,6 +169,36 @@ class HandoffTests(unittest.TestCase):
         by_key = {check["key"]: check for check in report["checks"]}
         self.assertFalse(by_key["media"]["ok"])
 
+    def test_add_groups_and_media_patch_in_direct_mode(self):
+        # 多组批量：交接只建第 1 组，其余组在批次里逐个「添加一组」补齐。
+        created = self.handoff(prompt_slot={"node_id": "1", "field_name": "text"},
+                               duration_slot={"node_id": "5", "field_name": "value"},
+                               media_slots=[{"node_id": "3", "field_name": "image", "media": "image"}])
+        tid = created["thread_id"]
+        batch = self.core.detail("owner", tid)["batch"]
+        self.assertEqual(len(batch["items"]), 1)
+        revision, revision_hash = batch["revision"], batch["revision_hash"]
+        updated = self.core.action("owner", tid, {
+            "action": "edit", "request_id": "add-group-1", "revision": revision, "revision_hash": revision_hash,
+            "add_items": [{"source_path": "added/group-2", "prompt": "第二组正文", "media": []}]})["batch"]
+        self.assertEqual(len(updated["items"]), 2)
+        self.assertEqual(updated["items"][1]["prompt"], "第二组正文")
+        self.assertEqual(updated["status"], "review")
+        # 直接模式换素材不清正文：媒体引用对不对由用户决定。
+        item_id = updated["items"][0]["id"]
+        updated = self.core.action("owner", tid, {
+            "action": "edit", "request_id": "media-1", "revision": updated["revision"], "revision_hash": updated["revision_hash"],
+            "items": {item_id: {"media": [{"role": "m3_image", "path": str(self.image)}]}}})["batch"]
+        item = updated["items"][0]
+        self.assertEqual([m["role"] for m in item["media"]], ["m3_image"])
+        self.assertEqual(item["prompt"], "第二组正文" if item["id"] != updated["items"][0]["id"] else created["batch"]["items"][0]["prompt"])
+        self.assertEqual(item["reverse"]["status"], "provided")
+        # 编辑接口拒绝引用未知项目的补丁，添加组受 50 组上限约束。
+        with self.assertRaisesRegex(ValueError, "50"):
+            self.core.action("owner", tid, {
+                "action": "edit", "request_id": "add-group-2", "revision": updated["revision"], "revision_hash": updated["revision_hash"],
+                "add_items": [{"source_path": f"added/extra-{n}", "prompt": "x", "media": []} for n in range(60)]})
+
     def test_generate_authorize_probes_frozen_target(self):
         created = self.handoff(prompt_slot={"node_id": "1", "field_name": "text"})
         self.tid = created["thread_id"]

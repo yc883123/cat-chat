@@ -918,6 +918,22 @@ class RecipeCoordinator:
         by_id = {i["id"]: i for i in batch["items"]}
         if set(patches) - set(by_id):
             raise ValueError("编辑引用未知项目")
+        add_items = body.get("add_items")
+        if add_items is not None:
+            # 添加组：走同一套 _items 构建校验再并入（多组批量在此补齐，不用新建批次）。
+            if not isinstance(add_items, list) or not add_items:
+                raise ValueError("添加组必须是至少一组的数组")
+            built = self._items(batch["recipe"], batch["id"], add_items, [])
+            existing_ids = {i["id"] for i in batch["items"]}
+            existing_sources = {i["source_path"].casefold() for i in batch["items"]}
+            for item in built:
+                if item["id"] in existing_ids or item["source_path"].casefold() in existing_sources:
+                    raise ValueError("新组与现有组的 ID 或来源重复")
+                existing_ids.add(item["id"])
+                existing_sources.add(item["source_path"].casefold())
+            if len(batch["items"]) + len(built) > RECIPE_MAX_ITEMS:
+                raise ValueError(f"一个批次最多 {RECIPE_MAX_ITEMS} 组")
+            batch["items"].extend(built)
         reverse_global = any(k in body for k in ("requirements", "model_key", "model_name", "template_id", "template"))
         if "requirements" in body:
             batch["requirements"] = str(body["requirements"])
@@ -960,8 +976,10 @@ class RecipeCoordinator:
             if "overrides" in patch:
                 item["overrides"] = self._overrides(batch["recipe"], patch["overrides"])
             if changed_reverse:
-                item["previous_prompt"] = item["prompt"]
-                if batch.get("input_mode", "script") == "script" or "media" in patch or "shared_media" in body:
+                item["previous_prompt"] = item.get("previous_prompt") or item["prompt"]
+                # 只有代写（反推）模式需要重跑提示词；直接模式的正文是用户最终稿，
+                # 换素材不清正文（媒体引用对不对由用户决定）。
+                if batch.get("input_mode", "script") == "script":
                     item["reverse"]["status"] = "pending"
                     item["prompt"] = ""
             if "prompt" in patch:

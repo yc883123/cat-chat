@@ -1031,7 +1031,7 @@ export function bindSuperAgentEvents() {
 const recipeState = {
   batches: new Map(), drafts: new Map(), busy: false, review: null, requests: new Map(),
   restored: false, intent: null, handoff: null,
-  createWorkflow: null, createMapping: null, createInput: null, createDraft: null, precheckOk: false,
+  createWorkflow: null, createMapping: null, createInput: null, createDraft: null, precheckOk: false, addGroupMedia: {},
 };
 let recipeEditorBridge = {};
 export function setRecipeEditorBridge(bridge) { recipeEditorBridge = bridge || {}; }
@@ -1600,8 +1600,8 @@ function renderRecipeBatch(batch) {
       const groupConfirm = recipeCan(batch, "confirm_generate") && item.included !== false
         && generationStatus(item) === "pending" && !item.generate?.attempts?.length
         && Boolean(String(item.prompt || "").trim());
-      return `<article class="recipe-item" data-recipe-item-id="${text(item.id)}"><div class="recipe-item-head"><div><h3>第 ${index + 1} 组</h3><span class="recipe-item-status" data-status="${text(generationStatus(item))}">${text(statusLabel(generationStatus(item)))}</span><span class="recipe-item-sub">${text(label ? `${label} · ` : "")}${recipeMediaSummary(item.media)}</span></div><label class="recipe-check"><input type="checkbox" data-recipe-edit="included" ${item.included !== false ? "checked" : ""} ${itemFieldEditable(batch, savedItem, "included") ? "" : "disabled"}>纳入本次</label></div>${recipeMediaMarkup([...(item.media || []), ...(batch.shared_media || [])])}<label>${batch.input_mode === "prompt" ? "内容备注（本批次不执行提词阶段）" : "剧本 / 内容要求（修改后需重新生成提示词）"}<textarea rows="3" data-recipe-edit="requirements" ${itemFieldEditable(batch, savedItem, "requirements") ? "" : "disabled"}>${escapeHtml(item.requirements || "")}</textarea></label><label>最终提示词<textarea rows="5" data-recipe-edit="prompt" ${itemFieldEditable(batch, savedItem, "prompt") ? "" : "disabled"}>${escapeHtml(item.prompt || "")}</textarea></label>${item.reverse?.attempts?.at(-1)?.validation?.errors?.length ? `<p class="super-agent-error">提示词格式问题：${item.reverse.attempts.at(-1).validation.errors.map((error) => text(error)).join("；")}</p>` : ""}${groupConfirm ? `<div class="recipe-group-actions"><button type="button" class="control-button tiny primary" data-recipe-action="confirm_generate" data-recipe-retry-id="${text(item.id)}" ${recipeState.busy ? "disabled" : ""}>预检本组 · 确认生成</button><span class="writer-dialog-hint">确认生成 ≠ 确认反推；其他组仍可编辑。</span></div>` : ""}<div class="recipe-item-results" data-recipe-results-id="${text(item.id)}"></div></article>`;
-    }).join("");
+      return `<article class="recipe-item" data-recipe-item-id="${text(item.id)}"><div class="recipe-item-head"><div><h3>第 ${index + 1} 组</h3><span class="recipe-item-status" data-status="${text(generationStatus(item))}">${text(statusLabel(generationStatus(item)))}</span><span class="recipe-item-sub">${text(label ? `${label} · ` : "")}${recipeMediaSummary(item.media)}</span></div><label class="recipe-check"><input type="checkbox" data-recipe-edit="included" ${item.included !== false ? "checked" : ""} ${itemFieldEditable(batch, savedItem, "included") ? "" : "disabled"}>纳入本次</label></div>${recipeMediaMarkup([...(item.media || []), ...(batch.shared_media || [])])}${recipeCan(batch, "edit") && generationStatus(item) !== "done" ? recipeGroupMediaEditor(batch, item.media) : ""}<label>${batch.input_mode === "prompt" ? "内容备注（本批次不执行提词阶段）" : "剧本 / 内容要求（修改后需重新生成提示词）"}<textarea rows="3" data-recipe-edit="requirements" ${itemFieldEditable(batch, savedItem, "requirements") ? "" : "disabled"}>${escapeHtml(item.requirements || "")}</textarea></label><label>最终提示词<textarea rows="5" data-recipe-edit="prompt" ${itemFieldEditable(batch, savedItem, "prompt") ? "" : "disabled"}>${escapeHtml(item.prompt || "")}</textarea></label>${item.reverse?.attempts?.at(-1)?.validation?.errors?.length ? `<p class="super-agent-error">提示词格式问题：${item.reverse.attempts.at(-1).validation.errors.map((error) => text(error)).join("；")}</p>` : ""}${groupConfirm ? `<div class="recipe-group-actions"><button type="button" class="control-button tiny primary" data-recipe-action="confirm_generate" data-recipe-retry-id="${text(item.id)}" ${recipeState.busy ? "disabled" : ""}>预检本组 · 确认生成</button><span class="writer-dialog-hint">确认生成 ≠ 确认反推；其他组仍可编辑。</span></div>` : ""}<div class="recipe-item-results" data-recipe-results-id="${text(item.id)}"></div></article>`;
+    }).join("") + (recipeCan(batch, "edit") ? recipeAddGroupCard(batch, items.length) : "");
   }
   host.querySelector(".recipe-batch-results").innerHTML = "";
   for (const item of items) {
@@ -1700,6 +1700,50 @@ function recipeTargetLabel(batch) {
 function recipeReviewMediaMarkup(item, shared) {
   const media = [...(item.media || []), ...(shared || [])];
   return media.length ? recipeMediaMarkup(media) : '<span class="writer-dialog-hint">纯文本 / 无参考媒体</span>';
+}
+// ---- 组素材上传（映射了素材入口的方案，逐槽放文件）----
+const RECIPE_MEDIA_ACCEPT = { image: "image/*", video: "video/*", audio: "audio/*" };
+function recipeGroupMediaEditor(batch, media, { forAdd = false } = {}) {
+  const slots = (batch.recipe?.media_slots || []).filter((slot) => (slot.scope || "item") === "item");
+  if (!slots.length) return "";
+  const rows = slots.map((slot) => {
+    const current = (media || []).find((m) => m.role === slot.role);
+    const kindLabel = RECIPE_MEDIA_KIND_LABELS[slot.media || "image"] || "图片";
+    return `<div class="recipe-group-media-row"><span class="recipe-group-media-label">${text(slot.label || slot.role)}<i>${kindLabel}</i></span>${current ? `<span class="recipe-group-media-file">${text(current.name || "")}</span>` : '<span class="recipe-group-media-file muted">未放文件</span>'}${forAdd || !current ? "" : `<button type="button" class="control-button tiny" data-recipe-media-clear="${text(slot.role)}"${recipeState.busy ? " disabled" : ""}>清掉</button>`}<label class="control-button tiny">选${kindLabel}<input type="file" hidden accept="${RECIPE_MEDIA_ACCEPT[slot.media || "image"] || "image/*"}" data-recipe-media-upload="${text(slot.role)}"${recipeState.busy ? " disabled" : ""}></label></div>`;
+  }).join("");
+  return `<div class="recipe-group-media"><span class="recipe-group-media-title">素材（入口按方案映射；${batch.input_mode === "prompt" ? "换素材不动已填正文" : "换素材后该组会要求重新反推"}）</span>${rows}</div>`;
+}
+async function recipeUploadMediaFile(file) {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  return api("/api/comfyui/media", { method: "POST", body: form });
+}
+async function recipeSetItemMedia(batch, itemId, role, ref) {
+  const savedItem = (batch.items || []).find((row) => row.id === itemId) || {};
+  const media = (savedItem.media || []).filter((m) => m.role !== role);
+  if (ref) media.push({ role, path: String(ref.path || ""), name: String(ref.name || "") });
+  const updated = await sendRecipeAction(batch, "edit", { items: { [itemId]: { media } } });
+  if (viewState.selectedId === batch.thread_id) renderRecipeBatch(updated);
+}
+async function recipeSubmitAddGroup(batch) {
+  const card = document.querySelector('#superAgentRecipeBatch [data-recipe-add-card]');
+  const field = card?.querySelector("[data-recipe-add]");
+  const value = String(field?.value || "").trim();
+  const media = Object.entries(recipeState.addGroupMedia || {}).map(([role, ref]) => ({ role, path: String(ref.path || ""), name: String(ref.name || "") }));
+  const count = (batch.items || []).length;
+  const row = { source_path: `added/group-${count + 1}`, name: `组 ${String(count + 1).padStart(2, "0")}`, media };
+  if (batch.input_mode === "prompt") row.prompt = value; else row.requirements = value;
+  try {
+    const updated = await sendRecipeAction(batch, "edit", { add_items: [row] });
+    recipeState.addGroupMedia = [];
+    recipeState.batches.set(batch.thread_id, updated);
+    if (viewState.selectedId === batch.thread_id) renderRecipeBatch(updated);
+    toast(`已添加第 ${count + 1} 组`);
+  } catch (error) { $("#recipeBatchError").textContent = `添加失败：${error.message}`; }
+}
+function recipeAddGroupCard(batch, count) {
+  const isPrompt = batch.input_mode === "prompt";
+  return `<article class="recipe-item recipe-item-add" data-recipe-add-card><div class="recipe-item-head"><div><h3>＋ 添加一组</h3><span class="recipe-item-sub">新组和其他组一样逐个处理；不会触发任何生成</span></div></div>${recipeGroupMediaEditor(batch, Object.entries(recipeState.addGroupMedia || {}).map(([role, ref]) => ({ role, name: ref.name })), { forAdd: true })}<label>${isPrompt ? "本组正文（最终提示词，可留空进组后补）" : "本组要求（交给反推模板；可留空进组后补）"}<textarea rows="3" data-recipe-add placeholder="${isPrompt ? "直接填这一组的最终提示词" : "写这一组要发生什么"}"></textarea></label><div class="recipe-group-actions"><button type="button" class="control-button tiny primary" data-recipe-add-submit ${recipeState.busy ? "disabled" : ""}>添加第 ${count + 1} 组</button><span class="writer-dialog-hint">素材先选好再点添加；进组后还能逐项改。</span></div></article>`;
 }
 // 就绪检查前置：缺项在确认页直接可见，不再走到最后一步才被拒（A05）。
 function recipeReadinessList(batch, action, items) {
@@ -1821,46 +1865,11 @@ async function confirmRecipeReview() {
   finally { recipeState.busy = false; $("#recipeReviewConfirm").disabled = false; if (viewState.selectedId === review.batch.thread_id) renderRecipeBatch(recipeState.batches.get(viewState.selectedId)); }
 }
 
-function recipeCustomFixedOverrides(intent, managedAddresses = new Set()) {
-  const params = new Map((intent?.workflow?.params || []).map((slot) => [`${slot.node_id}|${slot.field_name}`, slot]));
-  const result = [];
-  for (const override of intent?.overrides || []) {
-    const address = `${override.node_id}|${override.field_name}`;
-    if (managedAddresses.has(address)) continue;
-    const slot = params.get(address);
-    if (!slot) throw new Error(`${override.node_id} / ${override.field_name}：不在这份工作流的参数里，请恢复工作流值或保存为新工作流。`);
-    if (["image", "video", "audio"].includes(slot.field_type)) throw new Error(`${override.node_id} / ${override.field_name}：这是媒体入口，请在素材入口里选文件，不用参数覆盖文本。`);
-    const original = (((intent?.workflow?.prompt || {})[override.node_id] || {}).inputs || {})[override.field_name];
-    // collectOverrides trims native text controls; compare against the actual
-    // saved graph, not a guessed role — 没变的值不带，变了的原样交给总管。
-    if (original !== undefined && (override.value === original || (typeof original === "string" && override.value === original.trim()))) continue;
-    if (slot.field_type === "bool") {
-      if (override.value === "") continue;
-      result.push({ node_id: String(override.node_id), field_name: override.field_name, value: override.value === true || override.value === "true" });
-      continue;
-    }
-    if (["number", "seed"].includes(slot.field_type)) {
-      const value = Number(override.value);
-      if (override.value === "" || !Number.isFinite(value)) continue;
-      result.push({ node_id: String(override.node_id), field_name: override.field_name, value });
-      continue;
-    }
-    // 文本 / 枚举参数：用户确定的参数按用户给的值带上，总管不再限制数值/布尔。
-    if (override.value === "" || override.value === undefined || override.value === null) continue;
-    result.push({ node_id: String(override.node_id), field_name: override.field_name, value: String(override.value) });
-  }
-  return result;
-}
-// ---- 造梦机交接：二选一参数来源 → 工作流直建批量草稿（计划 §4.1）----
-// 已保存值 = 工作流保存的默认值（不是「上次生成用的值」）；当前调整只作为本次
-// 任务覆盖。映射解释权在用户：参数映射区里指定文本位/素材入口/时长槽，并按
-// 工作流指纹记住，下次交接自动带入；总管不猜、不因"看起来不像"而拦。
-function recipeHandoffPromptText(workflow, slot, overrides) {
-  const saved = recipeSlotValue(workflow, slot);
-  if (!slot) return saved;
-  const current = (overrides || []).find((entry) => String(entry.node_id) === String(slot.node_id) && entry.field_name === slot.field_name);
-  return current ? String(current.value ?? saved) : saved;
-}
+// 值全部在总管批次里定：不再有「未保存调整带成参数覆盖」的通道；造梦机里的
+// 临时调整要么另存进工作流，要么在总管批次页逐项填。
+// ---- 造梦机交接：工作流快照 + 用户映射 → 批量草稿 ----
+// 值全部在总管批次里定：交接只带工作流快照与映射（文本位/素材入口/时长槽），
+// 不再有「已保存值 vs 未保存调整」二选一；映射按工作流指纹记住，下次自动带入。
 export async function openRecipeWorkflowIntent(intent) {
   const workflow = intent?.workflow;
   if (!workflow) return;
@@ -1869,52 +1878,25 @@ export async function openRecipeWorkflowIntent(intent) {
   const fingerprint = workflow.workflow_fingerprint || workflow.fingerprint || "";
   const mapping = recalledRecipeMapping(fingerprint) || recipeMappingFromWorkflow(workflow);
   adoptWorkflowMediaIntoMapping(mapping, workflow, intent.media_inputs || []);
-  recipeState.handoff = { intent, slots, mode: "saved", changed: null, changedError: "", mapping, fingerprint, inputMode: "prompt", templateId: RECIPE_TEMPLATE_PRESETS[0].id };
-  try {
-    // 只把「真的和保存值不同」的项算作未保存调整；与台面提示同一口径。
-    // 提示词正文单独走 prompt 字段、素材单独走 media_inputs，不进固定参数覆盖。
-    const graph = workflow.prompt || {};
-    const managed = new Set([...recipeMappingAddresses(mapping),
-      ...(intent.media_inputs || []).map((entry) => `${entry.node_id}|${entry.field_name}`)]);
-    recipeState.handoff.changed = recipeCustomFixedOverrides(intent, managed).filter((override) => {
-      const original = ((graph[override.node_id] || {}).inputs || {})[override.field_name];
-      return override.value !== original;
-    });
-  }
-  catch (error) { recipeState.handoff.changed = null; recipeState.handoff.changedError = error.message; }
+  recipeState.handoff = { intent, slots, mapping, fingerprint, inputMode: "prompt", templateId: RECIPE_TEMPLATE_PRESETS[0].id };
   $("#superAgentHandoffError").textContent = "";
   $("#superAgentHandoffWorkflow").textContent = `当前工作流：${workflow.name || workflow.id}`;
   renderRecipeMappingEditor("superAgentHandoff", workflow, mapping);
   renderRecipeInputMode("superAgentHandoff", recipeState.handoff);
   renderHandoffSummary();
-  $("#superAgentHandoffChanges").textContent = recipeHandoffChangesText(workflow, recipeState.handoff.changed);
   syncHandoffDialog();
   $("#superAgentHandoffDialog").showModal();
 }
-// 交接摘要随所选提示词写入位与参数来源刷新：多文本槽工作流显示的必须是
-// 选中槽位的正文；时长 / 分辨率要亮出本次实际带什么值，不能只说「沿用槽位」。
-function recipeHandoffEffectiveValue(handoff, slot) {
-  const saved = recipeSlotValue(handoff.intent.workflow, slot);
-  if (handoff.mode !== "current") return { value: saved, changed: false };
-  const override = (handoff.changed || []).find((entry) => String(entry.node_id) === String(slot.node_id) && entry.field_name === slot.field_name);
-  return override ? { value: String(override.value ?? ""), changed: true } : { value: saved, changed: false };
-}
-// 映射槽位（文本位/时长槽）的当前值：从造梦机原始 overrides 里取（这些槽已
-// 收编进映射、不再进「未保存调整」清单），没有就用工作流保存值。
-function recipeManagedSlotValue(handoff, slot) {
-  const workflow = handoff.intent.workflow;
-  const saved = recipeSlotValue(workflow, slot);
-  if (!slot || handoff.mode !== "current") return { value: saved, changed: false };
-  const override = (handoff.intent.overrides || []).find((entry) => String(entry.node_id) === String(slot.node_id) && entry.field_name === slot.field_name);
-  return override ? { value: String(override.value ?? ""), changed: true } : { value: saved, changed: false };
-}
+// 交接摘要随参数映射与正文来源刷新：多文本槽工作流显示的必须是映射槽位的正文；
+// 时长 / 分辨率亮出实际带入的保存值，不能只说「沿用槽位」。
 function recipeHandoffDurationText(handoff) {
+  const workflow = handoff.intent.workflow;
   const slot = handoff.mapping?.duration_slot;
   if (!slot) return "未映射时长槽；按工作流原配置出片，不额外改写时长";
-  const { value, changed } = recipeManagedSlotValue(handoff, slot);
+  const value = recipeSlotValue(workflow, slot);
   const seconds = Number(value);
   const shown = value !== "" && Number.isFinite(seconds) ? `${seconds} 秒` : "未填（将按 15 秒执行）";
-  return `${shown}${changed ? " · 本次未保存调整" : " · 沿用已保存值"}`;
+  return `${shown} · 沿用工作流保存值（进批次后可改）`;
 }
 function recipeHandoffResolutionText(handoff) {
   // 分辨率 / 画幅没有统一槽位：width/height 走 role，H3 这类工作流用
@@ -1926,25 +1908,12 @@ function recipeHandoffResolutionText(handoff) {
       || ["width", "height", "aspect_ratio", "megapixels"].includes(slot.field_name)
       || /解析度|分辨率/.test(String(slot.node_title || ""))));
   if (!slots.length) return "工作流未暴露分辨率 / 画幅参数；按工作流原配置出片";
-  const shown = slots.slice(0, 4);
-  const parts = shown.map((slot) => {
-    const { value } = recipeHandoffEffectiveValue(handoff, slot);
+  const parts = slots.slice(0, 4).map((slot) => {
+    const value = recipeSlotValue(workflow, slot);
     const name = slot.field_name === "height" ? "高" : slot.field_name === "width" ? "宽" : slot.field_name;
     return `${name} ${value !== "" ? value : "未填"}`;
   });
-  const changed = handoff.mode === "current" && slots.some((slot) => recipeHandoffEffectiveValue(handoff, slot).changed);
-  return `${parts.join(" · ")}${slots.length > shown.length ? `（等共 ${slots.length} 项）` : ""}${changed ? " · 含本次未保存调整" : " · 沿用已保存值"}`;
-}
-function recipeHandoffChangesText(workflow, changed) {
-  if (!changed?.length) return "当前没有未保存的数值 / 开关调整；两种来源结果一致。";
-  const params = new Map((workflow.params || []).map((slot) => [`${slot.node_id}|${slot.field_name}`, slot]));
-  const named = changed.slice(0, 4).map((override) => {
-    const slot = params.get(`${override.node_id}|${override.field_name}`);
-    const label = slot?.label || `${override.node_id} / ${override.field_name}`;
-    const original = ((((workflow.prompt || {})[override.node_id] || {}).inputs || {})[override.field_name]);
-    return `${text(label)}：${text(String(original ?? "（空）"))} → ${text(String(override.value))}`;
-  });
-  return `检测到 ${changed.length} 项未保存的数值 / 开关调整：${named.join("；")}${changed.length > named.length ? `（等共 ${changed.length} 项）` : ""}。`;
+  return `${parts.join(" · ")}${slots.length > 4 ? `（等共 ${slots.length} 项）` : ""} · 沿用工作流保存值`;
 }
 function renderHandoffSummary() {
   const handoff = recipeState.handoff; if (!handoff) return;
@@ -1967,17 +1936,8 @@ function renderHandoffSummary() {
 }
 function syncHandoffDialog() {
   const handoff = recipeState.handoff; if (!handoff) return;
-  const currentAvailable = handoff.changed !== null;
-  document.querySelectorAll("#superAgentHandoffModeCards [data-handoff-mode]").forEach((card) => {
-    const active = card.dataset.handoffMode === handoff.mode;
-    card.classList.toggle("active", active);
-    card.setAttribute("aria-checked", String(active));
-    if (card.dataset.handoffMode === "current") card.disabled = !currentAvailable;
-  });
   $("#superAgentHandoffConfirm").disabled = false;
-  $("#superAgentHandoffError").textContent = handoff.mode === "current" && !currentAvailable
-    ? `${handoff.changedError || "有改动无法作为本次覆盖"}。请改用「已保存的默认值」，或先在造梦机「另存工作流」把这些值存进副本。`
-    : "";
+  $("#superAgentHandoffError").textContent = "";
 }
 async function confirmWorkflowHandoff() {
   const handoff = recipeState.handoff;
@@ -1985,16 +1945,14 @@ async function confirmWorkflowHandoff() {
   const workflow = handoff.intent.workflow;
   const mapping = handoff.mapping || {};
   try {
-    const useCurrent = handoff.mode === "current";
-    if (useCurrent && handoff.changed === null) throw new Error(handoff.changedError || "当前调整无法作为本次覆盖；请改用已保存的默认值。");
-    const prompt = useCurrent ? recipeHandoffPromptText(workflow, mapping.prompt_slot, handoff.intent.overrides) : recipeSlotValue(workflow, mapping.prompt_slot);
-    if (handoff.inputMode === "prompt" && String(prompt).trim() && !mapping.prompt_slot) throw new Error("已填写正文但没有指定文本写入位；请在参数映射里选一个，或清空正文。");
+    // 正文取工作流快照里映射槽位的保存值；参数/素材/时长的最终值都在总管批次里定。
+    const prompt = recipeSlotValue(workflow, mapping.prompt_slot);
     if (handoff.inputMode === "script" && !handoff.templateId) throw new Error("反推需要选择模板：H3 两种预设或提词库模板。");
     // 这次确认的映射按工作流指纹记住：下次交接同一工作流自动带入，可改。
     rememberRecipeMapping(handoff.fingerprint, mapping);
     let durationSeconds;
     if (mapping.duration_slot) {
-      const value = Number(recipeManagedSlotValue(handoff, mapping.duration_slot).value);
+      const value = Number(recipeSlotValue(workflow, mapping.duration_slot));
       if (Number.isFinite(value) && value > 0) durationSeconds = Math.round(value);
     }
     const templateId = String(handoff.templateId || "");
@@ -2008,7 +1966,7 @@ async function confirmWorkflowHandoff() {
       ...(handoff.inputMode === "script" ? (RECIPE_TEMPLATE_PRESETS.some((row) => row.id === templateId)
         ? { input_mode: "script", template_id: templateId }
         : { input_mode: "script", custom_id: templateId }) : {}),
-      ...(useCurrent ? { overrides: handoff.changed } : {}), media_inputs: handoff.intent.media_inputs || [] };
+      media_inputs: handoff.intent.media_inputs || [] };
     body.request_id = recipeRequest(`handoff:${workflow.id}`, body);
     recipeState.busy = true; $("#superAgentHandoffConfirm").disabled = true;
     const response = await api("/api/super-agent/recipe-batches", { method: "POST", body });
@@ -2077,17 +2035,34 @@ function bindRecipeEvents() {
     recipeState.handoff.templateId = $("#superAgentHandoffTemplate").value;
     renderHandoffSummary();
   });
-  // 交接二选一：来源切换 + 确认 + 关闭。
-  $("#superAgentHandoffModeCards")?.addEventListener("click", (event) => {
-    const card = event.target.closest("[data-handoff-mode]");
-    if (!card || card.disabled || !recipeState.handoff) return;
-    recipeState.handoff.mode = card.dataset.handoffMode;
-    syncHandoffDialog();
-    renderHandoffSummary();
-  });
+  // 交接：确认 + 关闭（参数来源二选一已移除——值全部在总管批次里定）。
   $("#superAgentHandoffConfirm")?.addEventListener("click", () => void confirmWorkflowHandoff());
   $("#superAgentHandoffDialog")?.addEventListener("click", (event) => { if (event.target.closest("[data-handoff-close]")) { $("#superAgentHandoffDialog").close(); recipeState.handoff = null; } });
-  $("#superAgentRecipeBatch")?.addEventListener("input", (event) => {
+  $("#superAgentRecipeBatch")?.addEventListener("change", (event) => {
+    const upload = event.target.closest("[data-recipe-media-upload]");
+    if (upload) {
+      const file = upload.files?.[0];
+      upload.value = "";
+      if (!file || recipeState.busy) return;
+      const batch = recipeState.batches.get(viewState.selectedId); if (!batch) return;
+      const role = upload.dataset.recipeMediaUpload;
+      const addCard = upload.closest("[data-recipe-add-card]");
+      void (async () => {
+        try {
+          recipeState.busy = true;
+          const ref = await recipeUploadMediaFile(file);
+          if (addCard) {
+            recipeState.addGroupMedia[role] = { path: String(ref.path || ""), name: String(ref.name || file.name) };
+            renderRecipeBatch(batch);
+          } else {
+            const itemId = upload.closest("[data-recipe-item-id]")?.dataset.recipeItemId;
+            if (itemId) await recipeSetItemMedia(batch, itemId, role, ref);
+          }
+        } catch (error) { toast(`素材上传失败：${error.message}`); }
+        finally { recipeState.busy = false; }
+      })();
+      return;
+    }
     const field = event.target.dataset.recipeEdit; if (!field || event.target.disabled) return;
     const batch = recipeState.batches.get(viewState.selectedId), id = event.target.closest("[data-recipe-item-id]")?.dataset.recipeItemId; if (!batch || !id) return;
     const draft = recipeDraft(batch);
@@ -2097,6 +2072,17 @@ function bindRecipeEvents() {
   $("#superAgentRecipeBatch")?.addEventListener("click", (event) => {
     if (event.target.closest("[data-recipe-clone]")) { void cloneRecipeBatch(); return; }
     if (event.target.closest("[data-recipe-discard]")) { if (window.confirm("确认放弃当前未保存的本地编辑？")) { recipeState.drafts.delete(viewState.selectedId); $("#superAgentRecipeBatch .recipe-batch-editors").innerHTML = ""; renderRecipeBatch(recipeState.batches.get(viewState.selectedId)); } return; }
+    const clear = event.target.closest("[data-recipe-media-clear]");
+    if (clear && !recipeState.busy) {
+      const batch = recipeState.batches.get(viewState.selectedId), itemId = clear.closest("[data-recipe-item-id]")?.dataset.recipeItemId;
+      if (batch && itemId) void recipeSetItemMedia(batch, itemId, clear.dataset.recipeMediaClear, null);
+      return;
+    }
+    if (event.target.closest("[data-recipe-add-submit]")) {
+      const batch = recipeState.batches.get(viewState.selectedId);
+      if (batch && !recipeState.busy) void recipeSubmitAddGroup(batch);
+      return;
+    }
     const button = event.target.closest("[data-recipe-action]"); if (button) void recipeAction(button.dataset.recipeAction, button.dataset.recipeRetryId ? [button.dataset.recipeRetryId] : null);
   });
   $("#recipeReviewCancel")?.addEventListener("click", () => { $("#recipeReviewDialog").close(); recipeState.review = null; });

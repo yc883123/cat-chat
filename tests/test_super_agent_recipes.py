@@ -102,6 +102,11 @@ class RecipeCoordinatorTests(unittest.TestCase):
         self.fp = patch.object(RecipeCoordinator, "_fingerprint", side_effect=digest)
         self.fp.start()
         self.addCleanup(self.fp.stop)
+        # 生成授权会探测冻结目标可达性：测试不依赖本机 ComfyUI 是否真的开着，
+        # 统一打桩为可达（个别用例自己再按场景覆盖/直接桩 _probe_target）。
+        self.reachable = patch("naiba.comfyui.client.reachable", return_value={"version": "fake-local"})
+        self.reachable.start()
+        self.addCleanup(self.reachable.stop)
         self.validator = patch.object(RecipeCoordinator, "_validate_output", side_effect=lambda b, i, raw: {"valid": raw == "good prompt", "text": raw if raw == "good prompt" else "", "raw": raw, "errors": [] if raw == "good prompt" else ["bad output"]})
         self.validator.start()
         self.addCleanup(self.validator.stop)
@@ -542,14 +547,21 @@ class RecipeCoordinatorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.core._media([{"role": "video_1", "path": str(fake)}], "bad", {"video_1"}, [{"role": "video_1", "media": "video"}])
 
-    def test_nonexistent_reference_blocked_before_generation(self):
+    def test_reference_numbering_gate_is_builtin_only(self):
+        # <Picture/Video N> 编号核对是内置 H3 模板的契约；自定义映射批次不再拦
+        # （引用可由工作流保存的默认文件兜底，编号对不对由用户决定）。
         body = self.body()
         body["input_mode"] = "prompt"
         body["items"][0]["prompt"] = "Use <Video 1>."
         self.tid = self.core.create("owner", body)["thread_id"]
-        with self.assertRaisesRegex(ValueError, "媒体"):
-            self.action("confirm_generate")
-        self.assertEqual(self.comfy.calls, [])
+        self.action("confirm_generate")
+        self.core.tick()
+        self.assertEqual(len(self.comfy.calls), 1)
+        # 编号核对本身仍在：内置 i2v/r2v 模式用它拦引用越界。
+        errors = self.core._prompt_reference_errors(
+            {"recipe": {"media_slots": []}, "shared_media": []},
+            {"prompt": "Use <Video 1>.", "media": []})
+        self.assertTrue(any("媒体" in error for error in errors))
 
     def test_custom_recipe_defaults_saved_and_merged_without_mutating_workflow(self):
         self.workflow_store.save_workflow({"id": "custom-workflow", "name": "Custom", "prompt": copy.deepcopy(GRAPH), "params": []})

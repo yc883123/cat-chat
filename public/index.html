@@ -1777,12 +1777,7 @@
         <div class="dlg-body">
           <p id="superAgentHandoffError" class="writer-dialog-error" role="alert"></p>
           <p class="writer-dialog-hint" id="superAgentHandoffWorkflow"></p>
-          <div class="sa-sec-head"><h3>这次用哪一份参数</h3><span>来源必须说清楚</span></div>
-          <div class="super-agent-mode-cards" id="superAgentHandoffModeCards" role="radiogroup" aria-label="参数来源（二选一）">
-            <button type="button" class="super-agent-mode-card active" data-handoff-mode="saved" role="radio" aria-checked="true"><span class="super-agent-mode-radio" aria-hidden="true"></span><span class="super-agent-mode-top">使用工作流已保存的默认值</span><p>沿用造梦机里已保存的工作流与参数；最稳妥，不改动原件。</p></button>
-            <button type="button" class="super-agent-mode-card" data-handoff-mode="current" role="radio" aria-checked="false"><span class="super-agent-mode-radio" aria-hidden="true"></span><span class="super-agent-mode-top">使用当前未保存调整</span><p>只作为本次任务的覆盖值；不静默丢弃、不改写原工作流，也不伪称已保存。</p></button>
-          </div>
-          <p class="writer-dialog-hint" id="superAgentHandoffChanges" role="status"></p>
+          <p class="writer-dialog-hint">按工作流已保存的快照出片；各参数、素材、时长、条数的最终值都在总管批次里逐项确定，交接只确认「哪个参数对应什么」。</p>
           <div class="sa-sec-head"><h3>参数映射</h3><span>哪个参数对应什么由你指定；这次的选择会记住</span></div>
           <div id="superAgentHandoffMapping"></div>
           <div class="sa-sec-head"><h3>每组正文怎么来</h3><span>直接用现成文本，或先反推</span></div>

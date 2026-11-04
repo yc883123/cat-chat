@@ -255,6 +255,7 @@ assert.equal(JSON.stringify(batch),original);assert.equal(JSON.stringify(recipeP
     def test_recipe_state_actions_review_and_media_execute(self):
         script = r'''
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const mappingStorage=new Map();
 const source=fs.readFileSync('public/js/28-super-agent.js','utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
 const nodes=new Map();
 const $=key=>{if(!nodes.has(key))nodes.set(key,{value:'',disabled:false,textContent:'',innerHTML:'',open:false,dataset:{},showModal(){this.open=true;},close(){this.open=false;},querySelectorAll(){return [];}});return nodes.get(key);};
@@ -262,6 +263,7 @@ const requests=[];
 const context={$,assert,console,process,globalThis,setTimeout,clearTimeout,URL,state:{providerModelCatalogs:{}},
  escapeHtml:value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'),
  localFileUrl:path=>'/api/file?token=auth&path='+encodeURIComponent(path),window:{confirm:()=>true},document:{querySelectorAll:()=>[]},
+ localStorage:{setItem:(key,value)=>mappingStorage.set(key,String(value)),getItem:key=>mappingStorage.has(key)?mappingStorage.get(key):null},
  api:async(path,options)=>{requests.push({path,body:JSON.parse(JSON.stringify(options.body))});
   if(path.endsWith('/recipe/precheck'))return {checked_at:1,ok:true,target:{url:'http://127.0.0.1:8188',ok:true},checks:[]};
   if(path.endsWith('/recipe-batches'))return {thread_id:'t9',batch:{...context.nextBatch}};
@@ -310,34 +312,16 @@ await assert.rejects(()=>saveRecipeDraft({...batch,thread_id:'stale',revision:5}
 assert.equal(stale.items.one.prompt,'mine');
 const numeric=recipeNumericSlots({workflow:{'1':{inputs:{seed:7,width:768,prompt:'text',value:15,image:'x'}}},prompt_slot:{node_id:'1',field_name:'prompt'},duration_slot:{node_id:'1',field_name:'value'},media_slots:[{node_id:'1',field_name:'image'}]});
 assert.equal(numeric.length,2);assert.ok(numeric.some(slot=>slot.field_name==='seed'));
-const fixedIntent={workflow:{prompt:{'1':{inputs:{seed:7,enabled:false,path:'saved-path',sampler_name:'euler',model:'saved-model',prompt:'saved prompt'}}},params:[{node_id:'1',field_name:'seed',field_type:'seed'},{node_id:'1',field_name:'enabled',field_type:'bool'},{node_id:'1',field_name:'path',field_type:'text'},{node_id:'1',field_name:'sampler_name',field_type:'text'},{node_id:'1',field_name:'model',field_type:'text'},{node_id:'1',field_name:'prompt',field_type:'text'}]},overrides:[{node_id:'1',field_name:'seed',value:'42'},{node_id:'1',field_name:'enabled',value:'true'},{node_id:'1',field_name:'path',value:'saved-path'},{node_id:'1',field_name:'sampler_name',value:'euler'},{node_id:'1',field_name:'model',value:'saved-model'}]};
-const fixed=recipeCustomFixedOverrides(fixedIntent);
-assert.equal(fixed.length,2);assert.equal(fixed[0].value,42);assert.equal(fixed[1].value,true);
-// 文本/枚举参数：变了的原样带上（映射用户定），没变的跳过，不再按类型拦。
-const changedText=recipeCustomFixedOverrides({...fixedIntent,overrides:[{node_id:'1',field_name:'path',value:'changed-path'},{node_id:'1',field_name:'sampler_name',value:'dpmpp'},{node_id:'1',field_name:'model',value:'changed-model'}]});
-assert.deepEqual(changedText.map(row=>[row.field_name,row.value]),[['path','changed-path'],['sampler_name','dpmpp'],['model','changed-model']]);
-// 未知槽位仍要拦：值写不进任何地方。
-assert.throws(()=>recipeCustomFixedOverrides({...fixedIntent,overrides:[{node_id:'9',field_name:'nope',value:'x'}]}),/不在这份工作流的参数里/);
-// 媒体槽不接受文本覆盖，要走素材入口。
-const mediaIntent={...fixedIntent,overrides:[{node_id:'1',field_name:'image',value:'x.png'}],workflow:{...fixedIntent.workflow,params:[...fixedIntent.workflow.params,{node_id:'1',field_name:'image',field_type:'image'}]}};
-assert.throws(()=>recipeCustomFixedOverrides(mediaIntent),/素材入口/);
-const managedIntent={...fixedIntent,overrides:[...fixedIntent.overrides,{node_id:'1',field_name:'prompt',value:'new per-item prompt'}]};
-assert.equal(recipeCustomFixedOverrides(managedIntent,new Set(['1|prompt'])).length,2);
-assert.equal(recipeCustomFixedOverrides(managedIntent).length,3);
-// 交接二选一（Q3 口径）：「已保存的默认值」不带 overrides，正文取工作流保存值；
-// 「当前未保存调整」只带数值 / 开关覆盖，正文取当前值；张数沿用造梦机 shots。
+// 交接不再有「已保存值 vs 未保存调整」二选一：值全部在总管批次里定，
+// 交接只带工作流快照 + 用户映射（文本位/素材入口/时长槽）。
 const handoffIntent={workflow:{id:'cw-9',name:'金鱼',workflow_fingerprint:'fp-9',prompt:{'1':{inputs:{text:'默认正文'}},'5':{inputs:{value:15}},'6':{inputs:{width:832}},'7':{inputs:{height:1216}}},params:[{node_id:'1',field_name:'text',field_type:'text',control:'multiline'},{node_id:'5',field_name:'value',field_type:'number',node_title:'视频时长（秒）'},{node_id:'6',field_name:'width',field_type:'number',role:'resolution'},{node_id:'7',field_name:'height',field_type:'number',role:'resolution'}]},overrides:[{node_id:'1',field_name:'text',value:'当前正文'},{node_id:'5',field_name:'value',value:5}],media_inputs:[{node_id:'3',field_name:'image',path:'managed/a.png'}],shots:2};
 await openRecipeWorkflowIntent(handoffIntent);
 assert.equal($('#superAgentHandoffDialog').open,true);
-assert.equal(recipeState.handoff.mode,'saved');
-// 交接摘要必须亮出时长 / 分辨率的实际值与来源（2026-11-04 反馈）：
+// 交接摘要必须亮出时长 / 分辨率的实际保存值与来源（2026-11-04 反馈）：
 const summarySaved=$('#superAgentHandoffSummary').innerHTML;
-assert.ok(summarySaved.includes('<b>时长</b> · 15 秒 · 沿用已保存值'),summarySaved);
-assert.ok(summarySaved.includes('<b>分辨率 / 画幅</b> · 宽 832 · 高 1216 · 沿用已保存值'),summarySaved);
-assert.ok($('#superAgentHandoffChanges').textContent.includes('5 / value：15 → 5') === false,$('#superAgentHandoffChanges').textContent);
-// 时长槽已映射：时长变化升格为批次时长（摘要「时长」行亮出），不再进固定参数覆盖。
-recipeState.handoff.mode='current';renderHandoffSummary();
-assert.ok($('#superAgentHandoffSummary').innerHTML.includes('<b>时长</b> · 5 秒 · 本次未保存调整'),$('#superAgentHandoffSummary').innerHTML);
+assert.ok(summarySaved.includes('<b>时长</b> · 15 秒 · 沿用工作流保存值'),summarySaved);
+assert.ok(summarySaved.includes('<b>分辨率 / 画幅</b> · 宽 832 · 高 1216 · 沿用工作流保存值'),summarySaved);
+assert.ok(summarySaved.includes('已映射 1 个素材入口，本次带 1 张图'),summarySaved);
 // 没有时长槽 / 分辨率槽的工作流：如实说「按工作流原配置出片」，不冒充有值。
 await openRecipeWorkflowIntent({...handoffIntent,overrides:[],media_inputs:[],workflow:{...handoffIntent.workflow,params:handoffIntent.workflow.params.filter(slot=>slot.role!=='resolution'&&slot.node_id!=='5')}});
 const summaryBare=$('#superAgentHandoffSummary').innerHTML;
@@ -346,19 +330,24 @@ assert.ok(summaryBare.includes('<b>分辨率 / 画幅</b> · 工作流未暴露�
 // H3 这类解析度選擇器工作流：aspect_ratio 走字段名识别，max_resolution（预览覆盖）不算。
 await openRecipeWorkflowIntent({...handoffIntent,overrides:[],media_inputs:[],workflow:{...handoffIntent.workflow,params:[handoffIntent.workflow.params[0],{node_id:'8',field_name:'aspect_ratio',field_type:'text',node_title:'解析度選擇器'},{node_id:'9',field_name:'max_resolution',field_type:'number',node_title:'Model Preview Override'}],prompt:{...handoffIntent.workflow.prompt,'8':{inputs:{aspect_ratio:'9:16 (Portrait Widescreen)'}}}}});
 const summaryAspect=$('#superAgentHandoffSummary').innerHTML;
-assert.ok(summaryAspect.includes('<b>分辨率 / 画幅</b> · aspect_ratio 9:16 (Portrait Widescreen) · 沿用已保存值'),summaryAspect);
+assert.ok(summaryAspect.includes('<b>分辨率 / 画幅</b> · aspect_ratio 9:16 (Portrait Widescreen) · 沿用工作流保存值'),summaryAspect);
 assert.ok(!summaryAspect.includes('max_resolution'),summaryAspect);
+// 确认交接：正文取映射槽位保存值；不传 overrides（参数覆盖在总管批次里定）；
+// 反推模式带 input_mode + 模板；映射按指纹记住。
 await openRecipeWorkflowIntent(handoffIntent);
+recipeState.handoff.inputMode='script';recipeState.handoff.templateId='recipe_minimax_h3_i2v_v1';
 await confirmWorkflowHandoff();
 const handoffCreate=requests.filter(row=>row.path==='/api/super-agent/recipe-batches').at(-1);
 assert.equal(handoffCreate.body.source,'workflow');assert.equal(handoffCreate.body.prompt,'默认正文');assert.ok(!('overrides' in handoffCreate.body));assert.equal(handoffCreate.body.shots,2);
+assert.equal(handoffCreate.body.input_mode,'script');assert.equal(handoffCreate.body.template_id,'recipe_minimax_h3_i2v_v1');
 assert.equal(handoffCreate.body.media_inputs.length,1);assert.equal(handoffCreate.body.media_inputs[0].node_id,'3');assert.equal(handoffCreate.body.media_inputs[0].path,'managed/a.png');
-recipeState.handoff={intent:handoffIntent,mapping:{prompt_slot:{node_id:'1',field_name:'text'},media_slots:[],duration_slot:{node_id:'5',field_name:'value'}},fingerprint:'fp-9',inputMode:'prompt',templateId:'recipe_minimax_h3_r2v_v2',mode:'current',changed:[{node_id:'5',field_name:'value',value:5}],changedError:''};
-await confirmWorkflowHandoff();
-const handoffCreate2=requests.filter(row=>row.path==='/api/super-agent/recipe-batches').at(-1);
-assert.equal(handoffCreate2.body.prompt,'当前正文');assert.equal(handoffCreate2.body.overrides.length,1);assert.equal(handoffCreate2.body.overrides[0].value,5);assert.equal(handoffCreate2.body.overrides[0].field_name,'value');
+assert.equal(handoffCreate.body.prompt_slot.node_id,'1');
+assert.ok(typeof mappingStorage.get('saHandoffMapping:fp-9')==='string' && mappingStorage.get('saHandoffMapping:fp-9').length>0);
+// 映射记忆回读：同指纹再次交接自动带入（文本位/素材入口/时长槽）。
+const recalled=JSON.parse(mappingStorage.get('saHandoffMapping:fp-9'));
+assert.equal(recalled.prompt_slot.node_id,'1');assert.equal(recalled.duration_slot.node_id,'5');assert.equal(recalled.media_slots.length,1);
 })().catch(error=>{console.error(error);process.exitCode=1;});
-`,Object.assign(context,{requests,context}));
+`,Object.assign(context,{requests,context,mappingStorage}));
 '''
         result = subprocess.run(["node", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=20)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

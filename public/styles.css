@@ -6462,3 +6462,16 @@ span.recipe-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA
   .recipe-item { padding: 10px; }
   .super-agent-thread-panel { max-height: 410px; }
 }
+
+/* 任务总管参数映射（用户指定文本位/素材入口/时长槽） */
+.recipe-mapping { display: grid; gap: 10px; margin: 4px 0 2px; }
+.recipe-mapping > label { display: grid; gap: 5px; font-size: 12px; color: var(--muted); }
+.recipe-mapping select { width: 100%; }
+.recipe-mapping-media { display: grid; gap: 7px; padding: 10px 11px; border: 1px dashed var(--line); border-radius: 11px; background: var(--surface-inset); }
+.recipe-mapping-media-title { font-size: 12px; color: var(--muted); }
+.recipe-mapping-media-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.recipe-mapping-media-list li { display: flex; align-items: center; gap: 8px; }
+.recipe-mapping-media-list code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--text); }
+.recipe-mapping-media-list select { width: auto; flex: none; }
+.recipe-mapping-media-add { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.recipe-mapping-media-add select { flex: 1; min-width: 140px; width: auto; }

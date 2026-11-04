@@ -309,11 +309,12 @@ class RecipeCoordinatorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "目标"):
             self.action("confirm_reverse")
         self.app.config.data["comfyui_url"] = "http://127.0.0.1:8188"
+        # 工作流按方案快照条目执行（不可变）：库条目后来被改不再拦已确认批次。
         entry = self.workflow_store.get_workflow(self.batch()["recipe"]["workflow_id"])
         entry["prompt"]["1"]["inputs"]["text"] = "changed"
         self.workflow_store.save_workflow(entry)
-        with self.assertRaisesRegex(ValueError, "工作流"):
-            self.action("confirm_reverse")
+        self.action("confirm_reverse")
+        self.assertEqual(self.batch()["status"], "reverse_running")
 
     def test_original_mutation_does_not_change_managed_snapshot(self):
         item = self.create()["items"][0]
@@ -559,30 +560,28 @@ class RecipeCoordinatorTests(unittest.TestCase):
         self.assertEqual(created["overrides"], saved["overrides"])
         self.assertEqual(self.workflow_store.get_workflow("custom-workflow")["prompt"], GRAPH)
 
-    def test_custom_recipe_requires_current_authoritative_fingerprint(self):
+    def test_custom_recipe_fingerprint_is_recorded_but_never_blocks(self):
         self.workflow_store.save_workflow({"id": "custom-workflow", "name": "Custom", "prompt": copy.deepcopy(GRAPH), "params": []})
         body = {"workflow_id": "custom-workflow", "prompt_slot": {"node_id": "1", "field_name": "text"}, "media_slots": RECIPE["media_slots"], "template_id": "test_template"}
-        for fingerprint in (None, "", "incorrect"):
-            with self.subTest(fingerprint=fingerprint), self.assertRaises(ValueError):
-                self.core.save_recipe("owner", {**body, "workflow_fingerprint": fingerprint})
-        stale_hash = digest(GRAPH)
+        # 指纹缺失/错误都不再拦：方案按当前库图快照落盘，指纹只记录不比对。
+        for fingerprint in (None, "", "incorrect", digest(GRAPH)):
+            with self.subTest(fingerprint=fingerprint):
+                saved = self.core.save_recipe("owner", {**body, "workflow_fingerprint": fingerprint})["recipe"]
+                self.assertEqual(saved["workflow"], GRAPH)
         changed = copy.deepcopy(GRAPH)
         changed["2"]["inputs"]["steps"] = 31
         self.workflow_store.save_workflow({"id": "custom-workflow", "name": "Custom", "prompt": changed, "params": []})
-        with self.assertRaisesRegex(ValueError, "stale workflow_fingerprint"):
-            self.core.save_recipe("owner", {**body, "workflow_fingerprint": stale_hash})
-        self.assertEqual(self.core.store.definitions("owner"), [])
-        saved = self.core.save_recipe("owner", {**body, "workflow_fingerprint": digest(changed)})["recipe"]
-        self.assertEqual(saved["workflow"], changed)
+        stale = self.core.save_recipe("owner", {**body, "workflow_fingerprint": digest(GRAPH)})["recipe"]
+        self.assertEqual(stale["workflow"], changed)
 
-    def test_custom_changed_sampler_rejected_instead_of_silent_default(self):
+    def test_custom_text_override_is_taken_verbatim(self):
         graph = copy.deepcopy(GRAPH)
         graph["2"]["inputs"]["sampler_name"] = "euler"
         self.workflow_store.save_workflow({"id": "custom-workflow", "name": "Custom", "prompt": graph, "params": []})
         body = {"workflow_id": "custom-workflow", "workflow_fingerprint": digest(graph), "prompt_slot": {"node_id": "1", "field_name": "text"}, "media_slots": RECIPE["media_slots"], "template_id": "test_template", "overrides": [{"node_id": "2", "field_name": "sampler_name", "value": "dpmpp_2m"}]}
-        with self.assertRaisesRegex(ValueError, "sampler_name.*不能静默"):
-            self.core.save_recipe("owner", body)
-        self.assertEqual(self.core.store.definitions("owner"), [])
+        saved = self.core.save_recipe("owner", body)["recipe"]
+        # 文本/枚举参数按用户给的值原样保存，不再限制数值/布尔；工作流原件不动。
+        self.assertIn({"node_id": "2", "field_name": "sampler_name", "value": "dpmpp_2m"}, saved["overrides"])
         self.assertEqual(self.workflow_store.get_workflow("custom-workflow")["prompt"]["2"]["inputs"]["sampler_name"], "euler")
 
     def test_r2v_review_exposes_actual_pruned_graph_without_installing(self):
@@ -606,7 +605,8 @@ class RecipeCoordinatorTests(unittest.TestCase):
         payload = self.comfy.calls[0][0]
         self.assertEqual(payload["workflow_id"], item["effective_workflow"]["id"])
         self.assertEqual(self.workflow_store.get_workflow(payload["workflow_id"])["prompt"], graph)
-        self.assertEqual(self.comfy.calls[0][2]["workflow_fingerprint"], item["effective_workflow"]["fingerprint"])
+        # 方案按快照条目执行：policy 不再带指纹拦截。
+        self.assertNotIn("workflow_fingerprint", self.comfy.calls[0][2])
 
     def test_integer_override_rejects_fraction_and_unsafe_precision(self):
         for value in (20.9, 20.0, 2 ** 53 + 1, True):
@@ -680,8 +680,11 @@ class RecipeCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.batch()["items"][0]["reverse"]["status"], "needs_review")
         self.assertEqual(self.batch()["items"][0]["reverse"]["attempts"][0]["raw"], "unapproved explanation</think>good prompt")
 
-    def test_custom_prompt_binding_uses_existing_text_field_not_downstream_whitelist(self):
-        self.core._validate_binding(GRAPH, {"node_id": "1", "field_name": "text"})
+    def test_prompt_binding_is_structural_only(self):
+        # 映射只做地址结构防呆：地址必须在快照图里且是可写标量（连线不算）；
+        # 类型/语义不再校验——数值槽当文本位也照存，映射解释权在用户。
+        self.assertEqual(self.core._normalize_point_slot(GRAPH, {"node_id": "1", "field_name": "text"}),
+                         {"node_id": "1", "field_name": "text"})
         graph = {"1": {"class_type": "PrimitiveStringMultiline", "inputs": {"value": "base"}},
                  "2": {"class_type": "PromptRouter", "inputs": {"text": ["1", 0]}},
                  "3": {"class_type": "CLIPTextEncode", "inputs": {"text": ["2", 0]}},
@@ -692,11 +695,15 @@ class RecipeCoordinatorTests(unittest.TestCase):
                                                 "media_slots": [], "input_mode": "prompt"})["recipe"]
         self.assertEqual(saved["prompt_slot"], {"node_id": "1", "field_name": "value"})
         self.assertEqual(saved["workflow"], graph)
-        for slot in ({"node_id": "4", "field_name": "steps"},
+        # 方案快照注册为自己的不可变条目，可按 ID 取回。
+        self.assertIsNotNone(self.workflow_store.get_workflow(saved["workflow_id"]))
+        for slot in ({"node_id": "3", "field_name": "text"},
                      {"node_id": "1", "field_name": "missing"},
-                     {"node_id": "3", "field_name": "text"}):
-            with self.subTest(slot=slot), self.assertRaisesRegex(ValueError, "文本字段"):
-                self.core._validate_binding(graph, slot)
+                     {"node_id": "", "field_name": ""}):
+            with self.subTest(slot=slot), self.assertRaisesRegex(ValueError, "槽位"):
+                self.core._normalize_point_slot(graph, slot)
+        self.assertEqual(self.core._normalize_point_slot(graph, {"node_id": "4", "field_name": "steps"}),
+                         {"node_id": "4", "field_name": "steps"})
 
 
 if __name__ == "__main__":

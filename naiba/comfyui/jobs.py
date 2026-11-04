@@ -218,7 +218,10 @@ class ComfyUIJobManager:
     def _validate_media_inputs(self, entry: dict[str, Any], raw: Any) -> list[dict[str, Any]]:
         """媒体输入校验（计划 §5.2/§5.3）：受管引用 + 类型/体积/存在性。
 
-        - 只认扫描出的媒体槽（control=media，显式映射的加载节点）；
+        - 槽位来源不再限于扫描出的媒体槽：映射解释权在用户——payload 明确带
+          ``media`` 类型、且该地址在快照图里是标量输入（连线不算）的自定义槽
+          同样接受（任务总管的用户映射走这里）；造梦机直跑仍只在其媒体槽 UI
+          上选文件，行为不变。
         - 路径必须位于宿主 uploads 受管树内且文件存在——**拒绝任意本机路径**，
           否则等于把客户端路径直接写进执行环境；
         - 文件扩展名要与槽位媒体类型一致，单文件 ≤ MEDIA_INPUT_MAX_BYTES；
@@ -233,6 +236,12 @@ class ComfyUIJobManager:
             (str(slot.get("node_id") or ""), str(slot.get("field_name") or "")): slot
             for slot in params if isinstance(slot, dict)
         }
+        graph_inputs: dict[tuple[str, str], Any] = {}
+        for node_id, node in (entry.get("prompt") or {}).items():
+            inputs = (node or {}).get("inputs") if isinstance(node, dict) else None
+            if isinstance(inputs, dict):
+                for field_name, value in inputs.items():
+                    graph_inputs[(str(node_id), str(field_name))] = value
         data_dir = Path(self.app.paths.data_dir)
         out: list[dict[str, Any]] = []
         for index, item in enumerate(raw, 1):
@@ -243,14 +252,19 @@ class ComfyUIJobManager:
             slot = slot_map.get((node_id, field_name))
             # control 由 schema 增强写入（在线导入）；离线导入只有 field_type。
             is_media_slot = str(slot.get("control") or "") == "media" if slot else False
+            declared = str(item.get("media") or "")
             if slot is None or (
                 not is_media_slot
                 and str(slot.get("field_type") or "") not in ("image", "audio", "video")
             ):
-                raise ComfyUITaskError(
-                    f"媒体输入 {node_id} · {field_name} 不是这份工作流的可上传槽位"
-                )
-            kind = str(slot.get("media") or slot.get("field_type") or "")
+                current = graph_inputs.get((node_id, field_name))
+                if declared not in ("image", "audio", "video") or not isinstance(current, str):
+                    raise ComfyUITaskError(
+                        f"媒体输入 {node_id} · {field_name} 不是这份工作流的可上传槽位"
+                    )
+                kind = declared
+            else:
+                kind = str(slot.get("media") or slot.get("field_type") or "")
             path = str(item.get("path") or "").strip()
             label = str(slot.get("label") or f"{node_id} · {field_name}")
             if not path:

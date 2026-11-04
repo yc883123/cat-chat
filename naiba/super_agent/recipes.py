@@ -22,7 +22,7 @@ from naiba.core.contracts import (
     RECIPE_MAX_TOTAL_BYTES, RECIPE_SCHEMA_VERSION, RECIPE_INPUT_MODES,
     RECIPE_MEDIA_LIMITS, RECIPE_MEDIA_REFERENCE_NAMES, RECIPE_ITEM_EDIT_FIELDS,
 )
-from naiba.comfyui.params import media_kind_of_field, scan_params
+from naiba.comfyui.params import scan_params
 from naiba.super_agent.recipe_store import RecipeStore, canonical, digest
 
 _ACTIVE = {"queued", "running", "stopping", "submitting", "unknown"}
@@ -151,24 +151,35 @@ class RecipeCoordinator:
         from naiba.super_agent.recipe_catalog import workflow_fingerprint
         return workflow_fingerprint(graph)
 
-    def _install_builtin(self, recipe: dict[str, Any]) -> dict[str, Any]:
-        graph = recipe["workflow"]
+    def _install_snapshot(self, graph: dict[str, Any], name: str, *, key: Any = None) -> str:
+        """把冻结图注册为独立的不可变工作流条目并返回其 ID；提交永远按这份快照跑。
+
+        key 为 None 时按图指纹去重（同一张图只存一份，重复交接不膨胀条目）；
+        传 key（内置配方）时保留既有 ID 口径，并对已存在条目校验指纹未漂移。
+        """
         fingerprint = self._fingerprint(graph)
-        if recipe.get("workflow_fingerprint") != fingerprint:
-            raise ValueError("内置工作流指纹错误")
-        workflow_id = "cwf-recipe-" + digest({"id": recipe["id"], "graph": fingerprint})[:24]
+        workflow_id = "cwf-recipe-" + digest(key if key is not None else {"graph": fingerprint})[:24]
         store = self.app.comfyui.store
         # Never silently overwrite an edited library entry under a trusted ID.
         with store._lock:
             existing = store.get_workflow(workflow_id)
             if existing is not None:
-                if self._fingerprint(existing.get("prompt") or {}) != fingerprint:
+                if key is not None and self._fingerprint(existing.get("prompt") or {}) != fingerprint:
                     raise ValueError("内置工作流已变更，请恢复原版本")
             else:
-                store.save_workflow({"id": workflow_id, "name": recipe["name"], "prompt": graph,
-                                     "params": scan_params(graph), "created_at": _now(),
-                                     "updated_at": _now(), "recipe_immutable": True})
-        recipe["workflow_id"] = workflow_id
+                store.save_workflow({"id": workflow_id, "name": name, "prompt": graph,
+                                     "params": scan_params(graph), "recipe_immutable": True,
+                                     "workflow_fingerprint": fingerprint,
+                                     "created_at": _now(), "updated_at": _now()})
+        return workflow_id
+
+    def _install_builtin(self, recipe: dict[str, Any]) -> dict[str, Any]:
+        graph = recipe["workflow"]
+        fingerprint = self._fingerprint(graph)
+        if recipe.get("workflow_fingerprint") != fingerprint:
+            raise ValueError("内置工作流指纹错误")
+        recipe["workflow_id"] = self._install_snapshot(
+            graph, recipe["name"], key={"id": recipe["id"], "graph": fingerprint})
         return recipe
 
     def _recipe(self, owner: str, recipe_id: str) -> dict[str, Any]:
@@ -177,28 +188,57 @@ class RecipeCoordinator:
                 return self._install_builtin(recipe)
         for recipe in self.store.definitions(owner):
             if recipe["id"] == recipe_id:
-                self._verify_workflow(recipe)
                 return recipe
         raise LookupError("配方不存在或无权访问")
 
-    def _verify_workflow(self, recipe: dict[str, Any]) -> None:
-        entry = self.app.comfyui.store.get_workflow(recipe["workflow_id"])
-        if entry is None or self._fingerprint(entry.get("prompt") or {}) != recipe["workflow_fingerprint"]:
-            raise ValueError("工作流已变更或删除，配方快照不能继续执行")
+    # 映射解释权在用户：工作流参数对应什么由用户（造梦机搭图/交接确认）决定，
+    # 总管只做「地址真实存在且可写」的结构防呆，不再做类型/白名单/语义校验。
+    @staticmethod
+    def _address(graph: dict[str, Any], raw: Any) -> tuple[str, str]:
+        node_id, field = _slot(raw)
+        if not node_id or not field:
+            raise ValueError("槽位地址缺少 node_id/field_name")
+        inputs = (graph.get(node_id) or {}).get("inputs")
+        if not isinstance(inputs, dict) or field not in inputs or isinstance(inputs.get(field), list):
+            raise ValueError(f"槽位 {node_id}/{field} 不在这份工作流快照里（或不是可写参数）")
+        return node_id, field
 
-    def _validate_binding(self, graph: dict[str, Any], binding: Any) -> None:
-        if not isinstance(binding, dict):
-            raise ValueError("需要明确 prompt_slot")
-        node_id, field = _slot(binding)
-        node = graph.get(node_id) or {}
-        inputs = node.get("inputs") or {}
-        # The workflow is selected from the ComfyUI library and fingerprint-pinned.
-        # Mapping a prompt only needs a real editable text field; its downstream
-        # routing belongs to the workflow, not to a second recipe-specific graph judge.
-        slot = next((param for param in scan_params(graph) if _slot(param) == (node_id, field)), None)
-        if (not slot or slot["field_type"] != "text"
-                or not isinstance(inputs.get(field), str)):
-            raise ValueError("提示词写入位置不是当前工作流的文本字段，请重新选择")
+    @classmethod
+    def _normalize_point_slot(cls, graph: dict[str, Any], raw: Any) -> dict[str, Any] | None:
+        """文本/时长这类单值槽：地址存在即可，未传就是未映射（不猜、不参与填参）。"""
+        if not raw:
+            return None
+        node_id, field = cls._address(graph, raw)
+        return {"node_id": node_id, "field_name": field}
+
+    @classmethod
+    def _normalize_media_slots(cls, graph: dict[str, Any], raw: Any,
+                               occupied: set[tuple[str, str]] | None = None) -> list[dict[str, Any]]:
+        if raw is None:
+            return []
+        if not isinstance(raw, list):
+            raise ValueError("media_slots 必须是数组")
+        params = {_slot(s): s for s in scan_params(graph)}
+        slots, roles, addresses = [], set(), set(occupied or set())
+        for entry in raw:
+            if not isinstance(entry, dict):
+                raise ValueError("媒体映射格式无效")
+            node_id, field = cls._address(graph, entry)
+            if (node_id, field) in addresses:
+                raise ValueError("媒体槽位与文本/时长/其他素材入口重复")
+            role = str(entry.get("role") or f"m{node_id}_{field}")
+            if role in roles:
+                raise ValueError("媒体角色重复")
+            kind = str(entry.get("media") or (params.get((node_id, field)) or {}).get("field_type") or "image")
+            if kind not in RECIPE_MEDIA_LIMITS:
+                kind = "image"
+            roles.add(role)
+            addresses.add((node_id, field))
+            slots.append({"role": role, "label": str(entry.get("label") or f"{node_id} · {field}"),
+                          "node_id": node_id, "field_name": field, "media": kind,
+                          "scope": entry.get("scope") if entry.get("scope") in {"item", "shared"} else "item",
+                          "required": entry.get("required") is True})
+        return slots
 
     def _template(self, body: dict[str, Any]) -> dict[str, Any]:
         raw = body.get("template") or {}
@@ -264,155 +304,94 @@ class RecipeCoordinator:
         if not entry:
             raise LookupError("工作流不存在")
         graph = copy.deepcopy(entry.get("prompt") or {})
-        expected_fingerprint = body.get("workflow_fingerprint")
-        if not isinstance(expected_fingerprint, str) or not expected_fingerprint.strip():
-            raise ValueError("需要当前工作流指纹，请刷新工作流后重新保存配方")
-        if expected_fingerprint != self._fingerprint(graph):
-            raise ValueError("stale workflow_fingerprint：工作流已变化，请刷新并核对当前参数后保存")
-        self._validate_binding(graph, body.get("prompt_slot"))
-        slots = body.get("media_slots") or []
-        if not isinstance(slots, list):
-            raise ValueError("media_slots 必须是数组")
-        roles, addresses = set(), {_slot(body["prompt_slot"])}
-        normalized = []
-        for raw in slots:
-            if not isinstance(raw, dict):
-                raise ValueError("媒体映射格式无效")
-            node_id, field = _slot(raw)
-            role = str(raw.get("role") or "")
-            node = graph.get(node_id) or {}
-            if not role or role in roles or (node_id, field) in addresses or raw.get("scope") not in {"item", "shared"}:
-                raise ValueError("媒体角色/槽位重复或范围未明确")
-            kind = media_kind_of_field(node.get("class_type"), field)
-            if kind not in RECIPE_MEDIA_LIMITS or raw.get("media", kind) != kind or not isinstance((node.get("inputs") or {}).get(field), str):
-                raise ValueError("只支持已验证的图片/视频/音频媒体槽位")
-            roles.add(role)
-            addresses.add((node_id, field))
-            normalized.append({"role": role, "label": str(raw.get("label") or role), "node_id": node_id,
-                               "field_name": field, "media": kind, "scope": raw["scope"], "required": raw.get("required") is True})
+        # 映射解释权在用户：传什么存什么；指纹只记录不比对——执行按方案快照条目
+        # 跑，工作流库后续变化与已确认的方案无关。
+        prompt_slot = self._normalize_point_slot(graph, body.get("prompt_slot"))
+        occupied: set[tuple[str, str]] = set()
+        if prompt_slot:
+            occupied.add((prompt_slot["node_id"], prompt_slot["field_name"]))
+        duration_slot = self._normalize_point_slot(graph, body.get("duration_slot"))
+        if duration_slot:
+            if (duration_slot["node_id"], duration_slot["field_name"]) in occupied:
+                raise ValueError("同一槽位不能既是文本写入位又是时长槽")
+            occupied.add((duration_slot["node_id"], duration_slot["field_name"]))
+        media_slots = self._normalize_media_slots(graph, body.get("media_slots"), occupied=occupied)
         # Builtin derivation is valid only for its pinned graph and bindings.
         # An unrelated workflow or changed mapping is a custom graph, not H3.
         derived_mode = source.get("mode", "custom") if source else "custom"
-        if source and (source["workflow_fingerprint"] != self._fingerprint(graph) or source["prompt_slot"] != body["prompt_slot"] or source["media_slots"] != normalized):
+        if source and (source["workflow_fingerprint"] != self._fingerprint(graph)
+                       or source.get("prompt_slot") != prompt_slot
+                       or source.get("media_slots") != media_slots):
             derived_mode = "custom"
         recipe = {"name": str(body.get("name") or entry.get("name") or "自定义配方"),
                   "description": str(body.get("description") or ""), "mode": derived_mode,
                   "version": 2, "input_mode": input_mode, "source_recipe_id": source_id,
                   "source_recipe_version": source.get("version", 1) if source else None,
-                  "workflow_id": workflow_id, "workflow": graph, "workflow_fingerprint": self._fingerprint(graph),
-                  "prompt_slot": {"node_id": _slot(body["prompt_slot"])[0], "field_name": _slot(body["prompt_slot"])[1]},
-                  "media_slots": normalized, "template": (self._template(body) if input_mode == "script" else None), "provenance": {"source": "user"}}
-        if body.get("duration_slot"):
-            address = _slot(body["duration_slot"])
-            param = next((s for s in scan_params(graph) if _slot(s) == address), None)
-            if not param or param["field_type"] != "number" or address in addresses:
-                raise ValueError("时长槽位无效")
-            recipe["duration_slot"] = {"node_id": address[0], "field_name": address[1]}
+                  "workflow_id": "", "workflow": graph, "workflow_fingerprint": self._fingerprint(graph),
+                  "prompt_slot": prompt_slot,
+                  "media_slots": media_slots, "template": (self._template(body) if input_mode == "script" else None), "provenance": {"source": "user"}}
+        if duration_slot:
+            recipe["duration_slot"] = duration_slot
         recipe["overrides"] = self._overrides(recipe, body.get("overrides"))
+        # 提交按方案自己的快照条目跑：库工作流后来改了/删了都不影响已确认的方案。
+        recipe["workflow_id"] = self._install_snapshot(graph, recipe["name"])
         recipe["id"] = "recipe-custom-" + digest(recipe)[:24]
         with self._lock:
             self.store.save_definition(owner, recipe)
         return {"recipe": recipe}
 
     # ---- 工作流直建（批量执行助手 2026-11-03 计划 §5.1/§5.2）----
-    # 造梦机交接 / 总管新建不再要求先注册「方案」：服务端按参数扫描元数据自动
-    # 派生映射并落为不可变定义；用途有歧义时明确报错，不猜。
-
-    @staticmethod
-    def _auto_prompt_slot(graph: dict[str, Any], params: list[dict[str, Any]]) -> dict[str, Any]:
-        """自动识别提示词写入位：正向连线锚点 → 唯一多行文本槽；歧义时报错。"""
-        positive = [slot for slot in params if slot.get("role") == "positive_prompt"]
-        if len(positive) == 1:
-            return {"node_id": str(positive[0]["node_id"]), "field_name": str(positive[0]["field_name"])}
-        multiline = [slot for slot in params if slot.get("field_type") == "text" and slot.get("control") == "multiline"]
-        if len(multiline) == 1:
-            return {"node_id": str(multiline[0]["node_id"]), "field_name": str(multiline[0]["field_name"])}
-        candidates = [f"{slot['node_id']}/{slot['field_name']}" for slot in multiline or positive]
-        raise ValueError(
-            "无法唯一识别提示词入口（候选：" + ("、".join(candidates) if candidates else "无多行文本槽") +
-            "）；请在交接时明确选择提示词写入位，不自动猜测")
-
-    def _auto_media_slots(self, graph: dict[str, Any], params: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """自动派生媒体槽位：显式映射的图片/音频/视频入口全部纳入，逐项作用域。"""
-        slots, roles = [], set()
-        for slot in params:
-            kind = slot.get("field_type")
-            if kind not in RECIPE_MEDIA_LIMITS:
-                continue
-            node_id, field = str(slot["node_id"]), str(slot["field_name"])
-            node = graph.get(node_id) or {}
-            if not isinstance((node.get("inputs") or {}).get(field), str):
-                continue
-            role = f"m{node_id}"
-            if role in roles:
-                role = f"m{node_id}_{field}"
-            if role in roles:
-                raise ValueError(f"工作流媒体槽位地址重复：{node_id}/{field}，请先在造梦机整理该工作流")
-            roles.add(role)
-            optional = slot.get("media_optional")
-            slots.append({"role": role, "label": str(slot.get("label") or f"{node_id} · {field}"),
-                          "node_id": node_id, "field_name": field, "media": kind,
-                          "scope": "item", "required": optional is False})
-        return slots
-
-    @staticmethod
-    def _auto_duration_slot(params: list[dict[str, Any]]) -> dict[str, Any] | None:
-        """时长槽识别：唯一含「时长 / duration」标题的数值槽；识别不到则不映射。"""
-        markers = ("时长", "duration")
-        hits = [slot for slot in params if slot.get("field_type") == "number"
-                and any(marker in f"{slot.get('node_title', '')} {slot.get('label', '')}".lower() for marker in markers)]
-        if len(hits) != 1:
-            return None
-        return {"node_id": str(hits[0]["node_id"]), "field_name": str(hits[0]["field_name"])}
-
-    def _derive_recipe_from_workflow(self, entry: dict[str, Any], body: dict[str, Any]) -> dict[str, Any]:
-        graph = copy.deepcopy(entry.get("prompt") or {})
-        fingerprint = self._fingerprint(graph)
-        params = scan_params(graph)
-        prompt_slot = None
-        if body.get("prompt_slot"):
-            # 前端在歧义时明确选择过写入位：仍按同一规则验证地址真实可写。
-            self._validate_binding(graph, body["prompt_slot"])
-            node_id, field = _slot(body["prompt_slot"])
-            prompt_slot = {"node_id": node_id, "field_name": field}
-        else:
-            prompt_slot = self._auto_prompt_slot(graph, params)
-        media_slots = self._auto_media_slots(graph, params)
-        duration_slot = self._auto_duration_slot(params)
-        if duration_slot:
-            address = (duration_slot["node_id"], duration_slot["field_name"])
-            if address in {(prompt_slot["node_id"], prompt_slot["field_name"])} | {(s["node_id"], s["field_name"]) for s in media_slots}:
-                duration_slot = None
-        recipe = {"name": str(entry.get("name") or "交接工作流"),
-                  "description": "由造梦机「交给任务总管」自动生成的批量方案；映射来自工作流参数扫描，可继续复用。",
-                  "mode": "custom", "version": 2, "input_mode": "prompt",
-                  "source_recipe_id": "", "source_recipe_version": None,
-                  "workflow_id": str(entry.get("id") or ""), "workflow": graph, "workflow_fingerprint": fingerprint,
-                  "prompt_slot": prompt_slot, "media_slots": media_slots, "template": None,
-                  "provenance": {"source": RECIPE_HANDOFF_PROVENANCE, "workflow_fingerprint": fingerprint,
-                                  "source_mode": "current" if body.get("source_mode") == "current" else "saved"}}
-        if duration_slot:
-            recipe["duration_slot"] = duration_slot
-        recipe["overrides"] = []
-        recipe["id"] = "recipe-custom-" + digest(recipe)[:24]
-        return recipe
+    # 造梦机交接 / 总管新建不再要求先注册「方案」，也不再扫描猜测：映射完全来自
+    # 用户确认（body 传入 + media_inputs 收编），总管原样记住存为不可变定义。
 
     def create_from_workflow(self, owner: str, body: dict[str, Any]) -> dict[str, Any]:
-        """交接 / 新建：工作流 + 当前值 → 自动映射派生定义 → 复用既有批次链路。"""
+        """交接 / 新建：工作流 + 用户确定的映射 + 当前值 → 批量草稿（不检查不猜）。"""
         workflow_id = str(body.get("workflow_id") or "")
         entry = self.app.comfyui.store.get_workflow(workflow_id)
         if not entry:
             raise LookupError("工作流不存在")
         graph = copy.deepcopy(entry.get("prompt") or {})
-        fingerprint = body.get("workflow_fingerprint")
-        if not isinstance(fingerprint, str) or not fingerprint.strip():
-            raise ValueError("需要当前工作流指纹，请在造梦机刷新后重新交接")
-        if fingerprint != self._fingerprint(graph):
-            raise ValueError("stale workflow_fingerprint：工作流已变化，请在造梦机刷新后重新交接")
-        recipe = self._derive_recipe_from_workflow(entry, body)
-        duration_slot = recipe.get("duration_slot")
-        overrides_in = [value for value in (body.get("overrides") or []) if isinstance(value, dict)]
+        prompt_slot = self._normalize_point_slot(graph, body.get("prompt_slot"))
+        occupied: set[tuple[str, str]] = set()
+        if prompt_slot:
+            occupied.add((prompt_slot["node_id"], prompt_slot["field_name"]))
+        duration_slot = self._normalize_point_slot(graph, body.get("duration_slot"))
+        if duration_slot:
+            if (duration_slot["node_id"], duration_slot["field_name"]) in occupied:
+                raise ValueError("同一槽位不能既是文本写入位又是时长槽")
+            occupied.add((duration_slot["node_id"], duration_slot["field_name"]))
+        media_slots = self._normalize_media_slots(graph, body.get("media_slots"), occupied=occupied)
+        # 造梦机带过来的素材入口（用户在媒体槽上明确选了文件）= 已确认映射，自动
+        # 收编为逐项素材槽；其余槽位不映射，想要就在交接/创建界面自己指定。
+        params = {_slot(s): s for s in scan_params(graph)}
+        for ref in body.get("media_inputs") or []:
+            if not isinstance(ref, dict):
+                raise ValueError("素材引用格式无效")
+            node_id, field = str(ref.get("node_id") or ""), str(ref.get("field_name") or "")
+            if not node_id or (node_id, field) in occupied:
+                continue
+            kind = str((params.get((node_id, field)) or {}).get("field_type") or "")
+            if kind not in RECIPE_MEDIA_LIMITS:
+                kind = str(ref.get("media") or "image")
+            occupied.add((node_id, field))
+            media_slots.append({"role": f"m{node_id}_{field}", "label": f"{node_id} · {field}",
+                                "node_id": node_id, "field_name": field, "media": kind,
+                                "scope": "item", "required": False})
+        wants_script = any(body.get(key) for key in ("template", "template_id", "custom_id"))
+        input_mode = self._input_mode(body, "script" if wants_script else "prompt")
+        template = self._template(body) if input_mode == "script" else None
+        recipe = {"name": str(entry.get("name") or "交接工作流"),
+                  "description": "由造梦机「交给任务总管」生成的批量方案；映射来自用户确认，可继续复用。",
+                  "mode": "custom", "version": 2, "input_mode": input_mode,
+                  "source_recipe_id": "", "source_recipe_version": None,
+                  "workflow_id": "", "workflow": graph, "workflow_fingerprint": self._fingerprint(graph),
+                  "prompt_slot": prompt_slot, "media_slots": media_slots, "template": template,
+                  "provenance": {"source": RECIPE_HANDOFF_PROVENANCE,
+                                  "source_mode": "current" if body.get("source_mode") == "current" else "saved"}}
+        if duration_slot:
+            recipe["duration_slot"] = duration_slot
         duration_seconds = body.get("duration_seconds", body.get("duration"))
+        overrides_in = [value for value in (body.get("overrides") or []) if isinstance(value, dict)]
         if duration_slot:
             address = (duration_slot["node_id"], duration_slot["field_name"])
             kept = []
@@ -430,30 +409,38 @@ class RecipeCoordinator:
         if duration_seconds is None:
             duration_seconds = 15
         duration_seconds = _integer(duration_seconds, "时长", 1, 300)
-        normalized_overrides = self._overrides(recipe, overrides_in)
-        role_by_address = {(slot["node_id"], slot["field_name"]): slot["role"] for slot in recipe.get("media_slots", [])}
+        recipe["overrides"] = self._overrides(recipe, overrides_in)
+        # 提交按方案自己的快照条目跑：造梦机库工作流后来改了/删了都不影响已确认方案。
+        recipe["workflow_id"] = self._install_snapshot(graph, recipe["name"])
+        recipe["id"] = "recipe-custom-" + digest(recipe)[:24]
+        with self._lock:
+            self.store.save_definition(owner, recipe)
+        role_by_address = {(slot["node_id"], slot["field_name"]): slot["role"] for slot in media_slots}
         item_media = []
         for ref in body.get("media_inputs") or []:
             if not isinstance(ref, dict):
-                raise ValueError("素材引用格式无效")
+                continue
             role = role_by_address.get((str(ref.get("node_id") or ""), str(ref.get("field_name") or "")))
-            if not role:
-                raise ValueError(f"素材入口不属于该工作流的媒体槽位：{ref.get('node_id')}/{ref.get('field_name')}")
-            item_media.append({"role": role, "path": ref.get("path"), "name": ref.get("name")})
+            if role:
+                item_media.append({"role": role, "path": ref.get("path"), "name": ref.get("name")})
         prompt = body.get("prompt")
-        if prompt is None:
-            prompt = (graph.get(recipe["prompt_slot"]["node_id"]) or {}).get("inputs", {}).get(recipe["prompt_slot"]["field_name"]) or ""
-        prompt = str(prompt)
-        if not prompt.strip() or len(prompt) > RECIPE_MAX_PROMPT_CHARS:
-            raise ValueError("该工作流没有可用提示词（或超过长度上限）：请在造梦机填写后交接")
-        with self._lock:
-            self.store.save_definition(owner, recipe)
+        if prompt is None and prompt_slot:
+            prompt = (graph.get(prompt_slot["node_id"]) or {}).get("inputs", {}).get(prompt_slot["field_name"]) or ""
+        prompt = str(prompt or "")
+        # 文本/素材/参数的最终取值都在总管批次里填：直接模式允许先建批后补正文
+        # （确认生成时仍会拦空提示词）；反推模式正文留空即走反推。
+        if input_mode == "prompt" and prompt.strip() and not prompt_slot:
+            raise ValueError("已填写正文但没有映射文本写入位；请在参数映射里指定，或清空正文")
+        if len(prompt) > RECIPE_MAX_PROMPT_CHARS:
+            raise ValueError("提示词超过长度上限")
         payload = {"request_id": body.get("request_id"), "recipe_id": recipe["id"],
-                   "title": str(body.get("title") or recipe["name"]), "input_mode": "prompt",
-                   "shots": body.get("shots", 1), "overrides": normalized_overrides,
+                   "title": str(body.get("title") or recipe["name"]), "input_mode": input_mode,
+                   "requirements": str(body.get("requirements") or ""),
+                   "shots": body.get("shots", 1), "overrides": recipe["overrides"],
                    "duration_seconds": duration_seconds,
                    "items": [{"name": "组 01", "source_path": "handoff/group-01",
-                              "prompt": prompt, "media": item_media, "requirements": ""}]}
+                              "prompt": prompt, "media": item_media,
+                              "requirements": str(body.get("item_requirements") or "")}]}
         return self.create(owner, payload)
 
 
@@ -565,7 +552,9 @@ class RecipeCoordinator:
         if not isinstance(raw, list):
             raise ValueError("overrides 必须是数组")
         params = {_slot(s): s for s in scan_params(recipe["workflow"])}
-        prohibited = {_slot(recipe["prompt_slot"])} | {_slot(s) for s in recipe.get("media_slots", [])}
+        prohibited = {_slot(s) for s in recipe.get("media_slots", [])}
+        if recipe.get("prompt_slot"):
+            prohibited.add(_slot(recipe["prompt_slot"]))
         if recipe.get("duration_slot"):
             prohibited.add(_slot(recipe["duration_slot"]))
         result, seen = [], set()
@@ -576,23 +565,28 @@ class RecipeCoordinator:
             if address in seen or address in prohibited or address not in params:
                 raise ValueError("参数重复或与配方管理槽位冲突")
             param = params[address]
-            if param["field_type"] not in {"number", "seed", "bool"}:
-                raise ValueError(f"固定参数 {address[0]}/{address[1]} 是当前不支持的文本/枚举覆盖，不能静默使用工作流原值；请先在造梦机保存该参数到工作流并刷新，再重新制作配方。首期额外覆盖只支持数值/布尔槽，不接受路径或代码")
+            kind = param["field_type"]
             val = value.get("value")
-            if param["field_type"] == "bool":
+            if kind in RECIPE_MEDIA_LIMITS:
+                raise ValueError(f"固定参数 {address[0]}/{address[1]} 是媒体槽：请走素材入口，不接受文本覆盖")
+            if kind == "bool":
                 if not isinstance(val, bool):
                     raise ValueError("参数必须为布尔值")
-            elif isinstance(val, bool) or not isinstance(val, (int, float)):
-                raise ValueError("参数必须为数字")
+            elif kind in {"number", "seed"}:
+                if isinstance(val, bool) or not isinstance(val, (int, float)):
+                    raise ValueError("参数必须为数字")
+            else:
+                # 文本/枚举槽：用户确定的参数按用户给的值原样覆盖，不再限制数值/布尔。
+                val = "" if val is None else str(val)
             digest(val)  # reject NaN and infinity, never silently coerce
             original = recipe["workflow"][address[0]]["inputs"][address[1]]
-            integer_slot = param["field_type"] == "seed" or (isinstance(original, int) and not isinstance(original, bool))
+            integer_slot = kind == "seed" or (isinstance(original, int) and not isinstance(original, bool))
             if integer_slot:
                 if not isinstance(val, int) or isinstance(val, bool):
                     raise ValueError(f"整数参数 {address[0]}/{address[1]} 必须是精确 JSON 整数，不能截断或浮点转换")
                 if abs(val) > 2 ** 53 - 1:
                     raise ValueError(f"整数参数 {address[0]}/{address[1]} 超过可精确确认范围")
-                if param["field_type"] == "seed" and val < 0:
+                if kind == "seed" and val < 0:
                     raise ValueError("配方固定 seed 不能为负数；随机值请不提供覆盖")
             seen.add(address)
             result.append({"node_id": address[0], "field_name": address[1], "value": val})
@@ -686,9 +680,11 @@ class RecipeCoordinator:
             if input_mode == "script":
                 if not batch["template"] or not str(batch["template"].get("body") or "").strip():
                     raise ValueError("代写模式需要非空提词规则")
-                batch["model"] = self._model(body, needs_images=any(self._media_counts(i["media"] + shared)["image"] for i in batch["items"]))
-            elif any(not i["prompt"].strip() for i in batch["items"] if i["included"]):
-                raise ValueError("直接模式需要每项完整提示词")
+                # 反推模型可先不选：确认反推时才必须已有（_assert_baseline），届时补选。
+                if str(body.get("model_key") or "").strip():
+                    batch["model"] = self._model(body, needs_images=any(self._media_counts(i["media"] + shared)["image"] for i in batch["items"]))
+            # 直接模式允许先建批、后补正文：每组的最终文本都在总管批次里填，
+            # 确认生成时才要求非空（_authorize）。
             self._validate_manifest(batch)
             self._refresh_hash(batch)
             # This insert precedes creating the independently stored thread. A
@@ -774,11 +770,12 @@ class RecipeCoordinator:
             draft["source_thread_id"] = thread_id
             recipe = batch.get("recipe") or {}
             if (recipe.get("provenance") or {}).get("source") == RECIPE_HANDOFF_PROVENANCE:
-                # 工作流直建批次的复制：带出工作流与映射，供「选工作流」创建表单重建。
+                # 工作流直建批次的复制：带出工作流与用户映射，供「选工作流」创建表单重建。
                 draft["workflow"] = {"id": recipe.get("workflow_id"), "workflow_fingerprint": recipe.get("workflow_fingerprint"),
-                                     "prompt_slot": recipe.get("prompt_slot"), "media_slots": recipe.get("media_slots")}
-            if draft["input_mode"] == "script":
-                draft.update({k: batch["model"][k] for k in ("model_key", "model_name")})
+                                     "prompt_slot": recipe.get("prompt_slot"), "media_slots": recipe.get("media_slots"),
+                                     "duration_slot": recipe.get("duration_slot")}
+            if draft["input_mode"] == "script" and batch.get("model"):
+                draft.update({k: batch["model"][k] for k in ("model_key", "model_name") if k in batch["model"]})
             def media_projection(refs):
                 return [{k: m[k] for k in ("role", "path", "name", "media", "description") if k in m} for m in refs]
             draft["shared_media"] = media_projection(batch["shared_media"])
@@ -1020,8 +1017,10 @@ class RecipeCoordinator:
             raise ValueError("批次素材超过 300MB")
 
     def _assert_baseline(self, batch: dict[str, Any], *, check_model: bool = True) -> None:
-        self._verify_workflow(batch["recipe"])
+        # 工作流按方案快照条目执行（不可变、与库工作流变化无关），不再做指纹拦截。
         if check_model and batch.get("input_mode", "script") == "script":
+            if not batch.get("model"):
+                raise ValueError("请先在批次里选择反推模型，再确认反推")
             needs_images = any(self._media_counts(i["media"] + batch["shared_media"])["image"] for i in batch["items"])
             if self._model(batch["model"], needs_images=needs_images) != batch["model"]:
                 raise ValueError("反推模型档案已变化，需要新建或编辑重新确认")
@@ -1068,10 +1067,12 @@ class RecipeCoordinator:
                 checks.append({"key": "target", "ok": False, "label": "实际目标可达", "detail": str(exc)})
                 target_ok = False
             try:
-                self._verify_workflow(batch["recipe"])
-                checks.append({"key": "workflow", "ok": True, "label": "工作流与输入就绪", "detail": ""})
+                snapshot_id = str((batch.get("recipe") or {}).get("workflow_id") or "")
+                if self.app.comfyui.store.get_workflow(snapshot_id) is None:
+                    raise LookupError("工作流快照条目不存在")
+                checks.append({"key": "workflow", "ok": True, "label": "工作流快照就绪", "detail": ""})
             except (ValueError, LookupError) as exc:
-                checks.append({"key": "workflow", "ok": False, "label": "工作流与输入就绪", "detail": str(exc)})
+                checks.append({"key": "workflow", "ok": False, "label": "工作流快照就绪", "detail": str(exc)})
             missing = []
             for item in selected:
                 label = item.get("name") or item["id"]
@@ -1082,10 +1083,13 @@ class RecipeCoordinator:
             checks.append({"key": "media", "ok": not missing, "label": "媒体文件有效",
                            "detail": "；".join(missing[:5]) + ("等" if len(missing) > 5 else "") if missing else ""})
             prompt_issues = []
+            builtin_mode = (batch.get("recipe") or {}).get("mode") in {"i2v", "r2v"}
             for item in selected:
                 label = item.get("name") or item["id"]
                 if not str(item.get("prompt") or "").strip():
                     prompt_issues.append(f"{label} 还没有提示词")
+                    continue
+                if not builtin_mode:
                     continue
                 for issue in self._prompt_reference_errors(batch, item):
                     if issue not in prompt_issues:
@@ -1124,7 +1128,9 @@ class RecipeCoordinator:
                 raise ValueError("已有生成执行记录，不能改变反推输入后续跑旧生成；请新建批次")
             if not reverse and not item["prompt"].strip():
                 raise ValueError("纳入项目尚无可用提示词，请编辑或明确排除失败项")
-            if not reverse and action != "retry_collect":
+            # <Picture N> 引用编号是内置 H3 冻结模板的契约；自定义映射批次里
+            # 引用可以由工作流保存的默认文件兜底，编号对不对由用户自己负责。
+            if not reverse and action != "retry_collect" and batch["recipe"].get("mode") in {"i2v", "r2v"}:
                 errors = self._prompt_reference_errors(batch, item)
                 if errors:
                     raise ValueError(errors[0])
@@ -1146,7 +1152,6 @@ class RecipeCoordinator:
                       "payload": payload, "payload_hash": digest(payload), "task_id": "", "source_task_id": native_id or (old.get("task_id", "") if old else ""),
                       "revision_hash": batch["revision_hash"], "created_at": _now(),
                       "policy": {"mode": "recipe", "target_url": batch["target"]["url"],
-                                 "workflow_fingerprint": self._fingerprint((self.app.comfyui.store.get_workflow(payload["workflow_id"]) or {}).get("prompt") or {}) if not reverse else "",
                                  "model_identity": batch["model"]}, "error": ""}
             item[phase]["attempts"].append(intent)
             item[phase]["status"] = "authorized"
@@ -1199,8 +1204,10 @@ class RecipeCoordinator:
         recipe = batch["recipe"]
         overrides = {_slot(s): copy.deepcopy(s) for s in batch["overrides"]}
         overrides.update({_slot(s): copy.deepcopy(s) for s in item["overrides"]})
-        slot = recipe["prompt_slot"]
-        overrides[_slot(slot)] = {**slot, "value": item["prompt"]}
+        # 没映射的槽位不参与批量填参：未映射文本位/时长位就按工作流快照原值执行。
+        if recipe.get("prompt_slot"):
+            slot = recipe["prompt_slot"]
+            overrides[_slot(slot)] = {**slot, "value": item["prompt"]}
         if recipe.get("duration_slot"):
             slot = recipe["duration_slot"]
             overrides[_slot(slot)] = {**slot, "value": batch["duration_seconds"]}

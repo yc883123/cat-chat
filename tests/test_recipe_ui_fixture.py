@@ -361,7 +361,8 @@ class RecipeUIFixtureTests(unittest.TestCase):
             "media_slots": self.fixture["custom_media_slots"], "overrides": [],
         })
         self.assertEqual(status, 201, saved)
-        self.assertEqual(saved["recipe"]["workflow_id"], workflow["id"])
+        # 方案快照注册为自己的不可变条目：不再直接引用库工作流 ID。
+        self.assertTrue(saved["recipe"]["workflow_id"].startswith("cwf-recipe-"), saved["recipe"]["workflow_id"])
         self.assertEqual(saved["recipe"]["workflow_fingerprint"], workflow["workflow_fingerprint"])
         after = self.control()
         self.assertEqual(after["counts"], before["counts"])

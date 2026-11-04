@@ -158,38 +158,54 @@ const source=fs.readFileSync('public/js/28-super-agent.js','utf8');
 const names=new Set([...source.matchAll(/^import \{([^}]+)\}/gm)].flatMap(match=>match[1].split(',').map(name=>name.trim())));
 const values={$,api:async(path,options)=>{requests.push({path,body:options?.body});return path.endsWith('/recipe-batches')?{thread_id:'t1',batch:{id:'b1'}}:{}},state:{providerModelCatalogs:{}},escapeHtml:value=>String(value??'').replaceAll('<','&lt;').replaceAll('>','&gt;'),localFileUrl:path=>'/file?path='+encodeURIComponent(path)};
 const stub=new vm.SyntheticModule([...names],function(){for(const name of names)this.setExport(name,values[name]||(()=>{}))},{context});
-const mod=new vm.SourceTextModule(source+'\nexport {recipeState,rememberRecipeDraft,restoreRecipeDraft,recipeMediaMarkup,itemFieldEditable,submitRecipeCreate,recipeDurationSupported,recipePromptSlotCandidates,recipeDurationSlotCandidate};',{context});
+const mod=new vm.SourceTextModule(source+'\nexport {recipeState,rememberRecipeDraft,restoreRecipeDraft,recipeMediaMarkup,itemFieldEditable,submitRecipeCreate,recipeDurationSupported,recipePromptSlotCandidates,recipeDurationSlotCandidate,recipeMappingFromWorkflow};',{context});
 (async()=>{await mod.link(()=>stub);await mod.evaluate();const m=mod.namespace,s=m.recipeState;
-// 槽位识别规则与后端一致：正向锚点优先，其次唯一多行文本槽；时长取唯一标题命中。
-const slots=[{node_id:'1',field_name:'text',field_type:'text',control:'multiline',role:''},{node_id:'2',field_name:'note',field_type:'text',control:'multiline'},{node_id:'5',field_name:'value',field_type:'number',node_title:'视频时长（秒）'},{node_id:'6',field_name:'image',field_type:'image',control:'media'}];
-assert.equal(m.recipePromptSlotCandidates(slots).length,2);
+// 文本写入位候选 = 全部文本槽：正向锚点只排最前，不再只认多行框、不因歧义报错。
+const slots=[{node_id:'1',field_name:'text',field_type:'text',control:'multiline',role:''},{node_id:'2',field_name:'note',field_type:'text',control:'multiline'},{node_id:'5',field_name:'value',field_type:'number',node_title:'视频时长（秒）'},{node_id:'6',field_name:'image',field_type:'image',control:'media'},{node_id:'7',field_name:'sampler_name',field_type:'text',role:'sampler'}];
+assert.equal(m.recipePromptSlotCandidates(slots).length,3);
 const durationSlot=m.recipeDurationSlotCandidate(slots);
 assert.equal(durationSlot.node_id,'5');assert.equal(durationSlot.field_name,'value');
 const anchored=[{node_id:'9',field_name:'text',field_type:'text',role:'positive_prompt'},...slots];
-assert.equal(m.recipePromptSlotCandidates(anchored).length,1);
-// 提交形态：source=workflow，不带 model_key；时长只在暴露时长槽时携带。
+assert.equal(m.recipePromptSlotCandidates(anchored)[0].node_id,'9');
+// 映射初稿：唯一文本槽/唯一时长槽预选（可改可清）；素材入口由用户添加。
+const mapping=m.recipeMappingFromWorkflow({params:anchored});
+assert.equal(mapping.prompt_slot.node_id,'9');assert.equal(mapping.prompt_slot.field_name,'text');
+assert.equal(mapping.duration_slot.node_id,'5');
+// 提交形态：source=workflow，不带 model_key；用户映射（文本位/素材/时长）随批次带上。
 s.createWorkflow={id:'cw-1',name:'测试工作流',workflow_fingerprint:'fp-1',prompt:{'1':{inputs:{text:'默认正文'}},'5':{inputs:{value:15}}},params:slots};
-s.createPromptSlots=m.recipePromptSlotCandidates(slots).slice(0,1);
-$('#recipeTitle').value='批次甲';$('#recipeShots').value='3';$('#recipeDuration').value='5';$('#recipeDurationField').hidden=false;
+s.createMapping={prompt_slot:{node_id:'1',field_name:'text'},media_slots:[{node_id:'6',field_name:'image',media:'image'}],duration_slot:{node_id:'5',field_name:'value'}};
+s.createInput={inputMode:'prompt',templateId:'recipe_minimax_h3_r2v_v2'};
+$('#recipeTitle').value='批次甲';$('#recipeShots').value='3';$('#recipeDuration').value='5';
 $('#recipeCreatePrompt').value='  提交正文  ';
 $('#superAgentRecipeDialog').open=true;
 m.rememberRecipeDraft();const persisted=[...storage.values()][0];const parsed=JSON.parse(persisted);
 assert.equal(parsed.version,2);assert.equal(parsed.workflowId,'cw-1');assert.equal(parsed.title,'批次甲');assert.ok(!persisted.includes('secret'));
-$('#recipeDurationField').hidden=true;
+assert.deepEqual(parsed.mapping.prompt_slot,{node_id:'1',field_name:'text'});
 await m.submitRecipeCreate({preventDefault(){}});
 const create=requests.find(row=>row.path==='/api/super-agent/recipe-batches');assert.ok(create);
 assert.equal(create.body.source,'workflow');assert.equal(create.body.workflow_id,'cw-1');assert.equal(create.body.workflow_fingerprint,'fp-1');
 assert.equal(create.body.prompt,'提交正文');assert.equal(create.body.shots,3);assert.equal(create.body.title,'批次甲');
-assert.ok(!('model_key' in create.body));assert.ok(!('input_mode' in create.body));assert.ok(!('duration_seconds' in create.body));assert.ok(!('prompt_slot' in create.body));
-// 歧义工作流必须带 prompt_slot；时长槽暴露时带 duration_seconds。
-s.createWorkflow={...s.createWorkflow,workflow_fingerprint:'fp-2'};s.createPromptSlots=[{node_id:'1',field_name:'text'},{node_id:'2',field_name:'note'}];
-$('#recipeCreatePromptSlot').value=JSON.stringify({node_id:'1',field_name:'text'});
-$('#recipeDurationField').hidden=false;
+assert.ok(!('model_key' in create.body));
+assert.equal(create.body.prompt_slot.node_id,'1');assert.equal(create.body.prompt_slot.field_name,'text');
+assert.equal(create.body.duration_slot.node_id,'5');assert.equal(create.body.duration_slot.field_name,'value');
+assert.equal(create.body.duration_seconds,5);
+assert.equal(create.body.media_slots.length,1);assert.equal(create.body.media_slots[0].node_id,'6');
+// 已填正文但没有文本写入位 → 明确拒绝（值没地方去，属映射不自洽），不发请求。
+s.createMapping.prompt_slot=null;
+await m.submitRecipeCreate({preventDefault(){}});
+assert.equal(requests.filter(row=>row.path==='/api/super-agent/recipe-batches').length,1);
+assert.ok($('#recipeCreateError').textContent.includes('文本写入位'),$('#recipeCreateError').textContent);
+s.createMapping.prompt_slot={node_id:'1',field_name:'text'};
+// 反推模式：带 input_mode + H3 预设模板 ID。
+s.createInput.inputMode='script';
 await m.submitRecipeCreate({preventDefault(){}});
 const create2=requests.filter(row=>row.path==='/api/super-agent/recipe-batches').at(-1);
-assert.equal(create2.body.prompt_slot.node_id,'1');assert.equal(create2.body.prompt_slot.field_name,'text');assert.equal(create2.body.duration_seconds,5);
-// 草稿恢复：只回填 createDraft，不复活旧版 items/pool 结构。
+assert.equal(create2.body.input_mode,'script');assert.equal(create2.body.template_id,'recipe_minimax_h3_r2v_v2');
+// 草稿恢复：只回填 createDraft（含映射与正文来源），不复活旧版 items/pool 结构。
+$('#superAgentRecipeDialog').open=true;m.rememberRecipeDraft();
 s.createDraft=null;s.restored=false;m.restoreRecipeDraft();assert.equal(s.createDraft.title,'批次甲');assert.equal(s.createDraft.workflowId,'cw-1');
+assert.equal(s.createDraft.mapping.prompt_slot.node_id,'1');assert.equal(s.createDraft.mapping.prompt_slot.field_name,'text');
+assert.equal(s.createDraft.inputMode,'script');
 const media=m.recipeMediaMarkup([{path:'clip.mp4',name:'clip.mp4',media:'video',description:'motion'},{path:'sound.wav',name:'sound.wav',media:'audio'}]);assert.ok(media.includes('<video'));assert.ok(media.includes('<audio'));assert.ok(media.includes('&lt;Video 1&gt;'));assert.ok(media.includes('&lt;Audio 1&gt;'));
 assert.equal(m.itemFieldEditable({capabilities:['edit']},{generate:{status:'failed',attempts:[{}]},edit_capabilities:{prompt:false,included:true}},'prompt'),false);
 assert.equal(m.recipeDurationSupported({}),false);
@@ -297,11 +313,17 @@ assert.equal(numeric.length,2);assert.ok(numeric.some(slot=>slot.field_name==='s
 const fixedIntent={workflow:{prompt:{'1':{inputs:{seed:7,enabled:false,path:'saved-path',sampler_name:'euler',model:'saved-model',prompt:'saved prompt'}}},params:[{node_id:'1',field_name:'seed',field_type:'seed'},{node_id:'1',field_name:'enabled',field_type:'bool'},{node_id:'1',field_name:'path',field_type:'text'},{node_id:'1',field_name:'sampler_name',field_type:'text'},{node_id:'1',field_name:'model',field_type:'text'},{node_id:'1',field_name:'prompt',field_type:'text'}]},overrides:[{node_id:'1',field_name:'seed',value:'42'},{node_id:'1',field_name:'enabled',value:'true'},{node_id:'1',field_name:'path',value:'saved-path'},{node_id:'1',field_name:'sampler_name',value:'euler'},{node_id:'1',field_name:'model',value:'saved-model'}]};
 const fixed=recipeCustomFixedOverrides(fixedIntent);
 assert.equal(fixed.length,2);assert.equal(fixed[0].value,42);assert.equal(fixed[1].value,true);
-for(const [field,value] of [['path','changed-path'],['sampler_name','dpmpp'],['model','changed-model']])assert.throws(()=>recipeCustomFixedOverrides({...fixedIntent,overrides:[{node_id:'1',field_name:field,value}]}),/此参数尚不支持交给总管，请恢复工作流值或保存为新工作流/);
-assert.throws(()=>recipeCustomFixedOverrides({...fixedIntent,workflow:{params:fixedIntent.workflow.params},overrides:[{node_id:'1',field_name:'model',value:'saved-model'}]}),/此参数尚不支持/);
+// 文本/枚举参数：变了的原样带上（映射用户定），没变的跳过，不再按类型拦。
+const changedText=recipeCustomFixedOverrides({...fixedIntent,overrides:[{node_id:'1',field_name:'path',value:'changed-path'},{node_id:'1',field_name:'sampler_name',value:'dpmpp'},{node_id:'1',field_name:'model',value:'changed-model'}]});
+assert.deepEqual(changedText.map(row=>[row.field_name,row.value]),[['path','changed-path'],['sampler_name','dpmpp'],['model','changed-model']]);
+// 未知槽位仍要拦：值写不进任何地方。
+assert.throws(()=>recipeCustomFixedOverrides({...fixedIntent,overrides:[{node_id:'9',field_name:'nope',value:'x'}]}),/不在这份工作流的参数里/);
+// 媒体槽不接受文本覆盖，要走素材入口。
+const mediaIntent={...fixedIntent,overrides:[{node_id:'1',field_name:'image',value:'x.png'}],workflow:{...fixedIntent.workflow,params:[...fixedIntent.workflow.params,{node_id:'1',field_name:'image',field_type:'image'}]}};
+assert.throws(()=>recipeCustomFixedOverrides(mediaIntent),/素材入口/);
 const managedIntent={...fixedIntent,overrides:[...fixedIntent.overrides,{node_id:'1',field_name:'prompt',value:'new per-item prompt'}]};
-assert.throws(()=>recipeCustomFixedOverrides(managedIntent),/prompt.*此参数尚不支持/);
 assert.equal(recipeCustomFixedOverrides(managedIntent,new Set(['1|prompt'])).length,2);
+assert.equal(recipeCustomFixedOverrides(managedIntent).length,3);
 // 交接二选一（Q3 口径）：「已保存的默认值」不带 overrides，正文取工作流保存值；
 // 「当前未保存调整」只带数值 / 开关覆盖，正文取当前值；张数沿用造梦机 shots。
 const handoffIntent={workflow:{id:'cw-9',name:'金鱼',workflow_fingerprint:'fp-9',prompt:{'1':{inputs:{text:'默认正文'}},'5':{inputs:{value:15}},'6':{inputs:{width:832}},'7':{inputs:{height:1216}}},params:[{node_id:'1',field_name:'text',field_type:'text',control:'multiline'},{node_id:'5',field_name:'value',field_type:'number',node_title:'视频时长（秒）'},{node_id:'6',field_name:'width',field_type:'number',role:'resolution'},{node_id:'7',field_name:'height',field_type:'number',role:'resolution'}]},overrides:[{node_id:'1',field_name:'text',value:'当前正文'},{node_id:'5',field_name:'value',value:5}],media_inputs:[{node_id:'3',field_name:'image',path:'managed/a.png'}],shots:2};
@@ -312,13 +334,14 @@ assert.equal(recipeState.handoff.mode,'saved');
 const summarySaved=$('#superAgentHandoffSummary').innerHTML;
 assert.ok(summarySaved.includes('<b>时长</b> · 15 秒 · 沿用已保存值'),summarySaved);
 assert.ok(summarySaved.includes('<b>分辨率 / 画幅</b> · 宽 832 · 高 1216 · 沿用已保存值'),summarySaved);
-assert.ok($('#superAgentHandoffChanges').textContent.includes('5 / value：15 → 5'),$('#superAgentHandoffChanges').textContent);
+assert.ok($('#superAgentHandoffChanges').textContent.includes('5 / value：15 → 5') === false,$('#superAgentHandoffChanges').textContent);
+// 时长槽已映射：时长变化升格为批次时长（摘要「时长」行亮出），不再进固定参数覆盖。
 recipeState.handoff.mode='current';renderHandoffSummary();
 assert.ok($('#superAgentHandoffSummary').innerHTML.includes('<b>时长</b> · 5 秒 · 本次未保存调整'),$('#superAgentHandoffSummary').innerHTML);
 // 没有时长槽 / 分辨率槽的工作流：如实说「按工作流原配置出片」，不冒充有值。
 await openRecipeWorkflowIntent({...handoffIntent,overrides:[],media_inputs:[],workflow:{...handoffIntent.workflow,params:handoffIntent.workflow.params.filter(slot=>slot.role!=='resolution'&&slot.node_id!=='5')}});
 const summaryBare=$('#superAgentHandoffSummary').innerHTML;
-assert.ok(summaryBare.includes('<b>时长</b> · 未识别唯一时长槽位'),summaryBare);
+assert.ok(summaryBare.includes('<b>时长</b> · 未映射时长槽'),summaryBare);
 assert.ok(summaryBare.includes('<b>分辨率 / 画幅</b> · 工作流未暴露分辨率 / 画幅参数'),summaryBare);
 // H3 这类解析度選擇器工作流：aspect_ratio 走字段名识别，max_resolution（预览覆盖）不算。
 await openRecipeWorkflowIntent({...handoffIntent,overrides:[],media_inputs:[],workflow:{...handoffIntent.workflow,params:[handoffIntent.workflow.params[0],{node_id:'8',field_name:'aspect_ratio',field_type:'text',node_title:'解析度選擇器'},{node_id:'9',field_name:'max_resolution',field_type:'number',node_title:'Model Preview Override'}],prompt:{...handoffIntent.workflow.prompt,'8':{inputs:{aspect_ratio:'9:16 (Portrait Widescreen)'}}}}});
@@ -330,7 +353,7 @@ await confirmWorkflowHandoff();
 const handoffCreate=requests.filter(row=>row.path==='/api/super-agent/recipe-batches').at(-1);
 assert.equal(handoffCreate.body.source,'workflow');assert.equal(handoffCreate.body.prompt,'默认正文');assert.ok(!('overrides' in handoffCreate.body));assert.equal(handoffCreate.body.shots,2);
 assert.equal(handoffCreate.body.media_inputs.length,1);assert.equal(handoffCreate.body.media_inputs[0].node_id,'3');assert.equal(handoffCreate.body.media_inputs[0].path,'managed/a.png');
-recipeState.handoff={intent:handoffIntent,slots:[{node_id:'1',field_name:'text',field_type:'text',control:'multiline'}],mode:'current',changed:[{node_id:'5',field_name:'value',value:5}],changedError:''};
+recipeState.handoff={intent:handoffIntent,mapping:{prompt_slot:{node_id:'1',field_name:'text'},media_slots:[],duration_slot:{node_id:'5',field_name:'value'}},fingerprint:'fp-9',inputMode:'prompt',templateId:'recipe_minimax_h3_r2v_v2',mode:'current',changed:[{node_id:'5',field_name:'value',value:5}],changedError:''};
 await confirmWorkflowHandoff();
 const handoffCreate2=requests.filter(row=>row.path==='/api/super-agent/recipe-batches').at(-1);
 assert.equal(handoffCreate2.body.prompt,'当前正文');assert.equal(handoffCreate2.body.overrides.length,1);assert.equal(handoffCreate2.body.overrides[0].value,5);assert.equal(handoffCreate2.body.overrides[0].field_name,'value');

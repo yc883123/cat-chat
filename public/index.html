@@ -1746,11 +1746,18 @@
             <p class="writer-dialog-hint" id="recipeWorkflowHint" role="status">选工作流后自动带入它的参数与保存值。</p>
             <label>任务名称<input id="recipeTitle" maxlength="160" placeholder="本次视频批次"></label>
             <div class="sa-sec-head"><h3>2 · 首组内容</h3><span>其余组进入批次后逐组添加</span></div>
-            <div id="recipeCreatePromptSlotRow" hidden><label>提示词写入位（这个工作流有多个文本入口）<select id="recipeCreatePromptSlot"></select></label><p class="writer-dialog-hint">只确认一次；以后交接同一工作流会记住这个选择。</p></div>
+            <div class="sa-sec-head"><h3>2 · 参数映射与首组内容</h3><span>哪个参数对应什么，由你指定，总管记住</span></div>
+            <div id="recipeCreateMapping"></div>
+            <div class="sa-sec-head"><h3>每组正文怎么来</h3><span>直接用现成文本，或先反推</span></div>
+            <div class="super-agent-mode-cards" id="recipeCreateInputMode" role="radiogroup" aria-label="正文来源">
+              <button type="button" class="super-agent-mode-card active" data-input-mode="prompt" role="radio" aria-checked="true"><span class="super-agent-mode-radio" aria-hidden="true"></span><span class="super-agent-mode-top">直接用现成文本</span><p>填好的正文就是最终提示词，不反推；哪组想反推进批次后单独改。</p></button>
+              <button type="button" class="super-agent-mode-card" data-input-mode="script" role="radio" aria-checked="false"><span class="super-agent-mode-radio" aria-hidden="true"></span><span class="super-agent-mode-top">先反推生成提示词</span><p>只填每组的内容要求，确认后按模板反推；填了正文的组仍直接用原文。</p></button>
+            </div>
+            <div id="recipeCreateTemplateRow" hidden><label>反推模板<select id="recipeCreateTemplate"><option value="recipe_minimax_h3_r2v_v2">MiniMax H3 · 多媒体参考生视频</option><option value="recipe_minimax_h3_i2v_v1">MiniMax H3 · 首帧生视频</option><optgroup label="提词库自定义模板" data-custom></optgroup></select></label><p class="writer-dialog-hint">反推模型可进批次后再选；正文留空的组才走反推。</p></div>
             <label>第一组提示词<textarea id="recipeCreatePrompt" rows="6" placeholder="选工作流后自动带入它保存的默认正文，可修改"></textarea></label>
             <div class="sa-sec-head"><h3>3 · 数量与时长</h3><span>沿用工作流单位</span></div>
             <div class="super-agent-create-grid"><label>每组生成几条<input id="recipeShots" type="number" min="1" max="200" value="1"></label><label id="recipeDurationField" hidden>视频时长（秒）<input id="recipeDuration" type="number" min="1" max="300" step="1" value="15"></label></div>
-            <p class="writer-dialog-hint">时长只在这个工作流暴露了时长入口时出现；实际视频长度按工作流帧对齐。最终生效参数以生成确认页为准。</p>
+            <p class="writer-dialog-hint">时长只在参数映射里选了时长槽时出现；实际视频长度按工作流帧对齐。最终生效参数以生成确认页为准。</p>
           </form>
         </div>
         <div class="dlg-foot">
@@ -1776,7 +1783,14 @@
             <button type="button" class="super-agent-mode-card" data-handoff-mode="current" role="radio" aria-checked="false"><span class="super-agent-mode-radio" aria-hidden="true"></span><span class="super-agent-mode-top">使用当前未保存调整</span><p>只作为本次任务的覆盖值；不静默丢弃、不改写原工作流，也不伪称已保存。</p></button>
           </div>
           <p class="writer-dialog-hint" id="superAgentHandoffChanges" role="status"></p>
-          <div id="superAgentHandoffPromptRow" hidden><label>提示词写入位（这个工作流有多个文本入口）<select id="superAgentHandoffPromptSlot"></select></label><p class="writer-dialog-hint">只确认一次；以后交接同一工作流会记住这个选择。</p></div>
+          <div class="sa-sec-head"><h3>参数映射</h3><span>哪个参数对应什么由你指定；这次的选择会记住</span></div>
+          <div id="superAgentHandoffMapping"></div>
+          <div class="sa-sec-head"><h3>每组正文怎么来</h3><span>直接用现成文本，或先反推</span></div>
+          <div class="super-agent-mode-cards" id="superAgentHandoffInputMode" role="radiogroup" aria-label="正文来源">
+            <button type="button" class="super-agent-mode-card active" data-input-mode="prompt" role="radio" aria-checked="true"><span class="super-agent-mode-radio" aria-hidden="true"></span><span class="super-agent-mode-top">直接用现成文本</span><p>工作流里的正文就是最终提示词；哪组想反推进批次后单独改。</p></button>
+            <button type="button" class="super-agent-mode-card" data-input-mode="script" role="radio" aria-checked="false"><span class="super-agent-mode-radio" aria-hidden="true"></span><span class="super-agent-mode-top">先反推生成提示词</span><p>确认后按模板反推成提示词；填了正文的组仍直接用原文。</p></button>
+          </div>
+          <div id="superAgentHandoffTemplateRow" hidden><label>反推模板<select id="superAgentHandoffTemplate"><option value="recipe_minimax_h3_r2v_v2">MiniMax H3 · 多媒体参考生视频</option><option value="recipe_minimax_h3_i2v_v1">MiniMax H3 · 首帧生视频</option><optgroup label="提词库自定义模板" data-custom></optgroup></select></label><p class="writer-dialog-hint">反推模型可进批次后再选；正文留空的组才走反推。</p></div>
           <div class="sa-sec-head"><h3>将带入批量草稿</h3><span>只读摘要</span></div>
           <div id="superAgentHandoffSummary"></div>
         </div>

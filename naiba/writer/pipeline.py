@@ -38,6 +38,7 @@ PIPELINE_KINDS = (
     "setup_all", "setup_step", "outline", "outline_text", "outline_all", "split",
     "outline_review",
     "chapter", "chapter_segs", "chapter_continue", "chapter_rewrite",
+    "chapter_all",
 )
 # 各 kind 的步骤序列（segs → draft 两步；draft 复用 Studio chunked 顺序生成各段）。
 KIND_STEPS = {
@@ -56,6 +57,10 @@ KIND_STEPS = {
     "chapter_segs": ("segs", "draft"),
     "chapter_continue": ("draft",),
     "chapter_rewrite": ("draft",),
+    # 方案A（2026-11-04 拍板）：链的正文步骤写完拆章范围内全部章节——
+    # 步骤是 N 个 draft，每步写哪一章由快照里的 chapter_plan[step_index] 决定，
+    # 逐章落盘、可中途取消；实际章数在锁内按拆章结果定（此处只是占位校验用）。
+    "chapter_all": ("draft",),
 }
 SETUP_STEP_KINDS = tuple(prompts.SETUP_STEPS)
 TERMINAL_STATUSES = {"done", "failed", "cancelled", "interrupted", "conflict"}
@@ -196,6 +201,23 @@ class WriterPipelineManager:
                     "请先在「设定 → 故事创意」里写一句话（或从模板套用后再生成）；"
                     "还没有创意时，模型只能给出占位结果"
                 )
+            chapter_plan_rows: list[dict[str, int]] = []
+            if kind == "chapter_all":
+                # 方案A：批量正文的章数在锁内按拆章实际落下的章定——模型少拆
+                # 不硬造，范围内没有可写章节就如实拒绝，不空转烧调用。
+                want_count = self._clamp(want_count or 0, 1, prompts.SPLIT_BATCH_MAX, 0)
+                from_no = max(1, from_no or 1)
+                if want_count < 1:
+                    raise WriterPipelineError("请指定要写完的章数（from_no 起 want_count 章）")
+                existing = {int(n) for n in manifest.get("chapter_ids") or []}
+                chapter_plan_rows = [{"no": no} for no in sorted(existing)
+                                     if from_no <= no < from_no + want_count]
+                if not chapter_plan_rows:
+                    raise WriterPipelineError(
+                        f"拆章范围内（第 {from_no}–{from_no + want_count - 1} 章）"
+                        "还没有可写的章节；先拆章，再批量写正文")
+                chapter_no = chapter_plan_rows[0]["no"]
+                steps = tuple(["draft"] * len(chapter_plan_rows))
             if steps[0] in ("segs", "draft"):
                 outline_version_id = str(outline_version_id or "").strip() or str(
                     manifest.get("current_outline_version_id") or "")
@@ -249,6 +271,8 @@ class WriterPipelineManager:
                 "from_no": from_no,
                 "part_plan": [dict(row) for row in (part_plan if isinstance(part_plan, list) else [])
                               if isinstance(row, dict)][:prompts.PARTS_MAX],
+                # chapter_all 的逐章计划（[{no: 章号}…]）；其余 kind 恒为空表。
+                "chapter_plan": list(chapter_plan_rows),
                 "setup_version_id": setup_version_id,
                 "outline_version_id": outline_version_id,
                 "extra_note": str(extra_note or "")[:500],
@@ -796,6 +820,14 @@ class WriterPipelineManager:
         part_title = str(row.get("title") or "").strip() or str(snapshot.get("part_title") or "").strip()
         return part_no, part_title
 
+    @staticmethod
+    def _chapter_all_no(snapshot: dict[str, Any], step_index: int) -> int:
+        """chapter_all 当前步写哪一章：按步取 chapter_plan；越界兜底 from_no + 步号。"""
+        plan = snapshot.get("chapter_plan") if isinstance(snapshot.get("chapter_plan"), list) else []
+        row = plan[step_index] if 0 <= step_index < len(plan) and isinstance(plan[step_index], dict) else {}
+        no = int(row.get("no") or 0)
+        return no if no >= 1 else int(snapshot.get("from_no") or 1) + step_index
+
     def _submit_step(self, book_id: str, pipeline: dict[str, Any]) -> str:
         """为当前步提交一个 Studio 任务；任务 input.writer 固化归属（实施计划 §7.1）。"""
         snapshot = pipeline.get("request_snapshot") if isinstance(pipeline.get("request_snapshot"), dict) else {}
@@ -804,6 +836,10 @@ class WriterPipelineManager:
         step = steps[step_index] if 0 <= step_index < len(steps) else ""
         if not step:
             raise WriterPipelineError("流水线没有待执行的步骤")
+        # chapter_all（方案A）：本步的章号/基线/前章要在提交时同锁落盘，
+        # 供 _advance 的归属校验与写回冲突检查按同一章对齐。
+        pending_step_update: dict[str, Any] | None = None
+        pending_chapter_revision: int | None = None
         book_title = str(snapshot.get("book_title") or "未命名作品")
         extra_note = str(snapshot.get("extra_note") or "")
         chapter_no = int(snapshot.get("chapter_no") or 0)
@@ -923,6 +959,23 @@ class WriterPipelineManager:
             if not isinstance(chapter, dict):
                 chapter = self.store._load_chapter_index(self.store._book_dir(book_id), chapter_no)
             previous = snapshot.get(WRITER_PREVIOUS_CHAPTER_KEY) or {}
+            if str(pipeline.get("kind") or "") == "chapter_all":
+                # 逐章批量（方案A）：每步提交时现读这一章的基线与前章衔接——
+                # 前一章多半是上一步刚落盘的，不能用流水线创建时的旧快照。
+                chapter_no = self._chapter_all_no(snapshot, step_index)
+                try:
+                    fresh_baseline, fresh_previous = self.store.chapter_writing_inputs(book_id, chapter_no)
+                except LookupError as exc:
+                    raise WriterPipelineError(
+                        f"第 {chapter_no} 章不存在（可能已被删除或改号），批量正文在本步停止：{exc}") from exc
+                chapter = fresh_baseline
+                previous = fresh_previous
+                pending_step_update = {
+                    "chapter_no": chapter_no,
+                    WRITER_CHAPTER_BASELINE_KEY: fresh_baseline,
+                    WRITER_PREVIOUS_CHAPTER_KEY: fresh_previous,
+                }
+                pending_chapter_revision = int(fresh_baseline.get("revision") or 0)
             chapter_view = {
                 "no": chapter_no,
                 "title": str(chapter.get("title") or ""),
@@ -974,6 +1027,8 @@ class WriterPipelineManager:
                 content = built["content"]
                 label = prompts.STEP_LABELS["draft"]
                 suffix = {"chapter_continue": "续写", "chapter_rewrite": "重写"}.get(kind, "")
+                if kind == "chapter_all":
+                    suffix = f"（批量 {step_index + 1}/{len(steps)}）"
                 task_title = f"《{book_title}》· 第{chapter_no}章{suffix or ''}{label}".replace("  ", " ")
         input_data: dict[str, Any] = {
             "content": content,
@@ -998,9 +1053,21 @@ class WriterPipelineManager:
         if chunked is not None:
             input_data["chunked"] = chunked
         task = self.app.studio.jobs.submit(input_data)
+
+        def _persist(record: dict[str, Any]) -> None:
+            record["current_task_id"] = str(task["id"])
+            if pending_step_update is not None:
+                # 逐章批量：本步写哪章、它的基线与前章衔接，必须和任务归属
+                # 同锁落盘，否则 _advance 的归属校验会拿旧章号误判不一致。
+                record_snapshot = record.get("request_snapshot")
+                if isinstance(record_snapshot, dict):
+                    record_snapshot.update(pending_step_update)
+                    record["request_snapshot"] = record_snapshot
+                record["chapter_revision"] = pending_chapter_revision
+
         self.store.update_pipeline(
             book_id, str(pipeline.get("id") or ""),
-            lambda record: record.__setitem__("current_task_id", str(task["id"])),
+            _persist,
             expected_attempt=int(pipeline.get("attempt") or 0),
         )
         return str(task["id"])

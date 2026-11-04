@@ -550,7 +550,8 @@ function renderCreateMode() {
   $("#superAgentCreateWriterRange").hidden = domain !== "writer" || (!chain && !["split", "chapter"].includes(stage));
   $("#superAgentCreateWriterFields").hidden = domain !== "writer" || (!chain && !["outline_all", "split"].includes(stage));
   for (const id of ["Part", "From", "Count"]) $("#superAgentCreate" + id + "Wrap").hidden = !chain && stage !== "split";
-  $("#superAgentCreateChapterWrap").hidden = !chain && stage !== "chapter";
+  // 链的正文步骤按拆章范围写全部章节（方案A）：不选单章，只展示范围提示。
+  $("#superAgentCreateChapterWrap").hidden = chain || stage !== "chapter";
   $("#superAgentCreateNovelRange").hidden = domain !== "novel";
   $("#superAgentCreateAutoAdvanceWrap").hidden = !chain;
   $("#superAgentCreateGoal").required = ["chat", "subagent"].includes(domain);
@@ -581,7 +582,9 @@ function renderCreateRangeHint() {
     const chain = $("#superAgentCreateMode").value === "chain";
     const stage = $("#superAgentCreateStage").value;
     const range = chain || stage === "split" ? `拆章范围：第 ${from}–${from + count - 1} 章。` : "";
-    const target = chain || stage === "chapter" ? `正文仅生成第 ${chapter} 章。` : "";
+    const target = chain
+      ? `正文将写完拆章范围内全部 ${count} 章（每章一次模型调用，逐章落盘，可中途取消）。`
+      : stage === "chapter" ? `正文仅生成第 ${chapter} 章。` : "";
     hint.textContent = `按作品已保存的创意生成。${range}${target}已有内容会保留为历史版本。`;
   } else if (domain === "novel") {
     hint.textContent = "使用所选范围内已导入的原文；完成后需要你确认复核。请先在拆书匠导入原文。";
@@ -614,7 +617,6 @@ async function loadCreateBook() {
       $("#superAgentCreateChapter").value = String(chapterNumber(createState.chapters[0]) || 1);
       const nextChapter = (chapterNumber(createState.chapters.at(-1)) || 0) + 1;
       $("#superAgentCreateFrom").value = String(nextChapter);
-      if ($("#superAgentCreateMode").value === "chain") $("#superAgentCreateChapter").value = String(nextChapter);
     }
     renderCreateRangeHint();
   } catch (error) { if (token === createState.bookToken) { createError(error.message || "作品读取失败"); $("#superAgentCreateBookHint").textContent = "读取失败，请刷新作品后重试。"; } }
@@ -780,17 +782,18 @@ async function createDomainThread(event, { addStep = false } = {}) {
     const chapter = Number($("#superAgentCreateChapter").value);
     const partNo = Number($("#superAgentCreatePart").value);
     const splitNeeded = chain || stage === "split";
-    const chapterNeeded = chain || stage === "chapter";
+    const chapterNeeded = !chain && stage === "chapter";
     if ((chain || stage === "outline_all") && (!createState.parts.length || createState.parts.length > 20 || createState.parts.some((row) => !String(row.title || "").trim() || row.title.length > 80))) return createError("请填写 1–20 部标题，每部标题不超过 80 字。");
     if (splitNeeded && (!Number.isInteger(from) || from < 1 || !Number.isInteger(count) || count < 1 || count > 999 || !partNo)) return createError("请选择拆章所属部，起始章号为正整数，拆章数量须为 1–999。");
     if (chapterNeeded && (!Number.isInteger(chapter) || chapter < 1)) return createError("正文目标章须为正整数。");
     if (!chain && stage === "chapter" && !createState.chapters.some((row) => chapterNumber(row) === chapter) && !(addStep && draftProvidesChapter(bookId, chapter))) return createError("正文目标章不在作品中，请先到工作台拆章，或先添加同作品且覆盖目标章的拆章步骤。");
-    if (chain && (chapter < from || chapter >= from + count)) return createError("要生成正文的章节须位于本次拆章范围内。");
     const requests = {
       setup: { extra_note: goal },
       outline: { part_plan: createState.parts.map((row, index) => ({ no: Number(row.no || index + 1), title: row.title })), extra_note: goal },
       chapter_plan: { part_no: partNo, from_no: from, want_count: count, extra_note: goal },
-      chapter_content: { chapter_no: chapter, extra_note: goal },
+      // 链的正文步骤写完拆章范围内全部章节（方案A，2026-11-04 拍板）：
+      // 范围与拆章步同源，逐章落盘、每章一次模型调用、可中途取消。
+      chapter_content: chain ? { from_no: from, want_count: count, extra_note: goal } : { chapter_no: chapter, extra_note: goal },
     };
     if (chain) body.stage_requests = requests;
     else startRequest = { ...selection, kind: stage, ...(requests[({ setup_all: "setup", outline_all: "outline", split: "chapter_plan", chapter: "chapter_content" })[stage]] || {}) };
@@ -1722,13 +1725,57 @@ export async function openRecipeWorkflowIntent(intent) {
     if (remembered && slots.some((slot) => recipeSlotKey(slot) === remembered)) row.value = remembered;
   }
   renderHandoffSummary();
-  $("#superAgentHandoffChanges").textContent = recipeState.handoff.changed?.length
-    ? `检测到 ${recipeState.handoff.changed.length} 项数值 / 开关未保存调整；选「当前未保存调整」时将它们作为本次任务覆盖。`
-    : "当前没有未保存的数值 / 开关调整；两种来源结果一致。";
+  $("#superAgentHandoffChanges").textContent = recipeHandoffChangesText(workflow, recipeState.handoff.changed);
   syncHandoffDialog();
   $("#superAgentHandoffDialog").showModal();
 }
-// 交接摘要随所选提示词写入位刷新：多文本槽工作流显示的必须是选中槽位的正文。
+// 交接摘要随所选提示词写入位与参数来源刷新：多文本槽工作流显示的必须是
+// 选中槽位的正文；时长 / 分辨率要亮出本次实际带什么值，不能只说「沿用槽位」。
+function recipeHandoffEffectiveValue(handoff, slot) {
+  const saved = recipeSlotValue(handoff.intent.workflow, slot);
+  if (handoff.mode !== "current") return { value: saved, changed: false };
+  const override = (handoff.changed || []).find((entry) => String(entry.node_id) === String(slot.node_id) && entry.field_name === slot.field_name);
+  return override ? { value: String(override.value ?? ""), changed: true } : { value: saved, changed: false };
+}
+function recipeHandoffDurationText(handoff) {
+  const workflow = handoff.intent.workflow;
+  const slot = recipeDurationSlotCandidate(workflow.params || []);
+  if (!slot) return "未识别唯一时长槽位；按工作流原配置出片，不额外改写时长";
+  const { value, changed } = recipeHandoffEffectiveValue(handoff, slot);
+  const seconds = Number(value);
+  const shown = value !== "" && Number.isFinite(seconds) ? `${seconds} 秒` : "未填（将按 15 秒执行）";
+  return `${shown}${changed ? " · 本次未保存调整" : " · 沿用已保存值"}`;
+}
+function recipeHandoffResolutionText(handoff) {
+  // 分辨率 / 画幅没有统一槽位：width/height 走 role，H3 这类工作流用
+  // 「解析度選擇器」（aspect_ratio / megapixels）——按字段名与节点标题一起认，
+  // 只做展示不影响提交；都没有就如实说按工作流原配置出片。
+  const workflow = handoff.intent.workflow;
+  const slots = (workflow.params || []).filter((slot) => ["number", "text"].includes(slot.field_type)
+    && (slot.role === "resolution"
+      || ["width", "height", "aspect_ratio", "megapixels"].includes(slot.field_name)
+      || /解析度|分辨率/.test(String(slot.node_title || ""))));
+  if (!slots.length) return "工作流未暴露分辨率 / 画幅参数；按工作流原配置出片";
+  const shown = slots.slice(0, 4);
+  const parts = shown.map((slot) => {
+    const { value } = recipeHandoffEffectiveValue(handoff, slot);
+    const name = slot.field_name === "height" ? "高" : slot.field_name === "width" ? "宽" : slot.field_name;
+    return `${name} ${value !== "" ? value : "未填"}`;
+  });
+  const changed = handoff.mode === "current" && slots.some((slot) => recipeHandoffEffectiveValue(handoff, slot).changed);
+  return `${parts.join(" · ")}${slots.length > shown.length ? `（等共 ${slots.length} 项）` : ""}${changed ? " · 含本次未保存调整" : " · 沿用已保存值"}`;
+}
+function recipeHandoffChangesText(workflow, changed) {
+  if (!changed?.length) return "当前没有未保存的数值 / 开关调整；两种来源结果一致。";
+  const params = new Map((workflow.params || []).map((slot) => [`${slot.node_id}|${slot.field_name}`, slot]));
+  const named = changed.slice(0, 4).map((override) => {
+    const slot = params.get(`${override.node_id}|${override.field_name}`);
+    const label = slot?.label || `${override.node_id} / ${override.field_name}`;
+    const original = ((((workflow.prompt || {})[override.node_id] || {}).inputs || {})[override.field_name]);
+    return `${text(label)}：${text(String(original ?? "（空）"))} → ${text(String(override.value))}`;
+  });
+  return `检测到 ${changed.length} 项未保存的数值 / 开关调整：${named.join("；")}${changed.length > named.length ? `（等共 ${changed.length} 项）` : ""}。`;
+}
 function renderHandoffSummary() {
   const handoff = recipeState.handoff; if (!handoff) return;
   const workflow = handoff.intent.workflow;
@@ -1740,7 +1787,7 @@ function renderHandoffSummary() {
   const mediaCounts = { image: 0, video: 0, audio: 0 };
   for (const entry of media) mediaCounts[(workflow.params || []).find((param) => String(param.node_id) === String(entry.node_id) && param.field_name === entry.field_name)?.field_type || "image"] += 1;
   const mediaText = media.length ? Object.entries(mediaCounts).filter(([, count]) => count).map(([kind, count]) => `${count} ${({ image: "张图", video: "段视频", audio: "段音频" })[kind]}`).join("、") : "未选素材（可选入口不必填满）";
-  $("#superAgentHandoffSummary").innerHTML = `<div class="recipe-check-list"><div class="recipe-check-item"><i>✓</i><span><b>工作流</b> · ${text(workflow.name || workflow.id)}（复用已保存的槽位与值）</span></div><div class="recipe-check-item"><i>✓</i><span><b>提示词</b> · 已保存默认正文${selected ? `（槽位 ${text(selected.node_id)} / ${text(selected.field_name)}）` : ""} ${text(String(savedPrompt || "").length ? `（${String(savedPrompt).length} 字）` : "（空）")}</span></div><div class="recipe-check-item"><i>✓</i><span><b>素材</b> · ${text(mediaText)}</span></div><div class="recipe-check-item"><i>✓</i><span><b>生成条数</b> · 首组 ${text(String(Number(handoff.intent.shots) || 1))} 条（沿用造梦机「张数」）</span></div></div>`;
+  $("#superAgentHandoffSummary").innerHTML = `<div class="recipe-check-list"><div class="recipe-check-item"><i>✓</i><span><b>工作流</b> · ${text(workflow.name || workflow.id)}（复用已保存的槽位与值）</span></div><div class="recipe-check-item"><i>✓</i><span><b>提示词</b> · 已保存默认正文${selected ? `（槽位 ${text(selected.node_id)} / ${text(selected.field_name)}）` : ""} ${text(String(savedPrompt || "").length ? `（${String(savedPrompt).length} 字）` : "（空）")}</span></div><div class="recipe-check-item"><i>✓</i><span><b>素材</b> · ${text(mediaText)}</span></div><div class="recipe-check-item"><i>✓</i><span><b>时长</b> · ${text(recipeHandoffDurationText(handoff))}</span></div><div class="recipe-check-item"><i>✓</i><span><b>分辨率 / 画幅</b> · ${text(recipeHandoffResolutionText(handoff))}</span></div><div class="recipe-check-item"><i>✓</i><span><b>生成条数</b> · 首组 ${text(String(Number(handoff.intent.shots) || 1))} 条（沿用造梦机「张数」）</span></div></div>`;
 }
 function syncHandoffDialog() {
   const handoff = recipeState.handoff; if (!handoff) return;
@@ -1820,6 +1867,7 @@ function bindRecipeEvents() {
     if (!card || card.disabled || !recipeState.handoff) return;
     recipeState.handoff.mode = card.dataset.handoffMode;
     syncHandoffDialog();
+    renderHandoffSummary();
   });
   $("#superAgentHandoffPromptSlot")?.addEventListener("change", () => renderHandoffSummary());
   $("#superAgentHandoffConfirm")?.addEventListener("click", () => void confirmWorkflowHandoff());

@@ -405,8 +405,23 @@ class DomainCoordinator:
                 for key in ("provider_id", "model_key", "model_name"):
                     request.pop(key, None)
             if domain == "writer":
-                request.setdefault("kind", actual_stage)
-                request.setdefault("chapter_no", 1)
+                if actual_stage == "chapter" and ("from_no" in request or "want_count" in request):
+                    # 方案A（2026-11-04 拍板）：链的正文步骤写完拆章范围内全部
+                    # 章节——范围与拆章步同源（from_no/want_count），逐章落盘、
+                    # 可中途取消；单章与范围两种写法不允许混填。
+                    if "chapter_no" in request:
+                        raise ValueError("正文步骤不能同时指定单章 chapter_no 和拆章范围 from_no/want_count")
+                    try:
+                        chain_from = int(request.get("from_no") or 0)
+                        chain_want = int(request.get("want_count") or 0)
+                    except (TypeError, ValueError):
+                        chain_from = chain_want = 0
+                    if chain_from < 1 or chain_want < 1:
+                        raise ValueError("正文范围无效：from_no 与 want_count 都必须是正整数")
+                    request["kind"] = "chapter_all"
+                else:
+                    request.setdefault("kind", actual_stage)
+                    request.setdefault("chapter_no", 1)
             elif stage_key in self.NOVEL_CHAIN_GATE_KEYS:
                 # Gates retain the book identity but never carry a fake
                 # ``stage`` that could be mistaken for a Novel prompt stage.

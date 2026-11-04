@@ -313,6 +313,67 @@ class SuperAgentP4ChainTests(unittest.TestCase):
         self.assertEqual(self.app.super_agent.get_thread("local", thread.thread_id).current_node_id, first.node_id)
         self.assertEqual(self.app.super_agent.list_nodes("local", thread.thread_id)[1].status, "blocked")
 
+    def test_writer_chain_content_step_covers_split_range(self) -> None:
+        """方案A（2026-11-04）：链的正文步骤带拆章范围 → kind=chapter_all 批量正文。"""
+        book_id = self._writer_book()
+        body = self._chain_body(book_id)
+        body["stage_requests"]["chapter_plan"] = {"part_no": 1, "from_no": 1, "want_count": 10}
+        body["stage_requests"]["chapter_content"] = {"from_no": 1, "want_count": 10}
+        thread, _ = self.app.super_agent_domain.create_thread("local", body)
+        nodes = self.app.super_agent.list_nodes("local", thread.thread_id)
+        request = nodes[-1].checkpoint["start_request"]
+        self.assertEqual(request["kind"], "chapter_all")
+        self.assertEqual(request["from_no"], 1)
+        self.assertEqual(request["want_count"], 10)
+        self.assertNotIn("chapter_no", request)
+
+    def test_writer_chain_content_range_and_single_chapter_are_mutually_exclusive(self) -> None:
+        for bad, message in (
+            ({"from_no": 1, "want_count": 10, "chapter_no": 2}, "不能同时指定"),
+            ({"from_no": 0, "want_count": 10}, "正文范围无效"),
+            ({"from_no": 1, "want_count": "many"}, "正文范围无效"),
+        ):
+            with self.subTest(bad=bad):
+                body = self._chain_body(self._writer_book())
+                body["stage_requests"]["chapter_content"] = bad
+                with self.assertRaisesRegex(ValueError, message):
+                    self.app.super_agent_domain.create_thread("local", body)
+        self.assertEqual(self.app.super_agent.list_threads("local"), [])
+        # 不带范围的单章链保持旧行为：kind=chapter + chapter_no 默认 1。
+        body = self._chain_body(self._writer_book())
+        thread, _ = self.app.super_agent_domain.create_thread("local", body)
+        nodes = self.app.super_agent.list_nodes("local", thread.thread_id)
+        request = nodes[-1].checkpoint["start_request"]
+        self.assertEqual(request["kind"], "chapter")
+        self.assertEqual(request["chapter_no"], 1)
+
+    def test_writer_service_starts_chapter_all_from_handoff_request_shape(self) -> None:
+        """适配层把 start_request 原样交给 api_start_pipeline；这里按同一形态验证服务端行为。"""
+        book_id = self.app.writer.store.create_book(title="服务级批量正文")["id"]
+        self.app.writer.store.save_setup(book_id, content={"idea": "一句话创意"}, kind="manual")
+        self.app.writer.store.save_outline(book_id, chapters=[
+            {"no": 1, "title": "一", "beat": "梗概1", "hook": ""},
+            {"no": 2, "title": "二", "beat": "梗概2", "hook": ""},
+        ], kind="generated", sync=True)
+        payload, code = self.app.writer.api_start_pipeline(book_id, {
+            "kind": "chapter_all", "from_no": 1, "want_count": 2,
+            "model_key": "probe", "model_name": "probe",
+        })
+        self.assertEqual(code, 201)
+        pipeline = payload["pipeline"]
+        self.assertEqual(pipeline["steps"], ["draft", "draft"])
+        task = self.app.studio.jobs.tasks[pipeline["current_task_id"]]
+        self.assertEqual(task["input"]["writer"]["chapter_no"], 1)
+        # api_start_pipeline 把 WriterPipelineError 转成 400 文案；另起一本验证空范围拒绝。
+        other_id = self.app.writer.store.create_book(title="空范围拒绝")["id"]
+        self.app.writer.store.save_setup(other_id, content={"idea": "一句话创意"}, kind="manual")
+        payload2, code2 = self.app.writer.api_start_pipeline(other_id, {
+            "kind": "chapter_all", "from_no": 9, "want_count": 2,
+            "model_key": "probe", "model_name": "probe",
+        })
+        self.assertEqual(code2, 400)
+        self.assertIn("可写的章节", payload2["error"])
+
     def test_novel_approval_apply_promotes_next_stage(self) -> None:
         staged = self.app.novel.store.stage_import(filename="p4.txt", data="第1章 标题\n原文。".encode(), max_len=6000)
         book = self.app.novel.store.create_book(import_id=staged["import_id"], picked=[1], title="P4 Novel")

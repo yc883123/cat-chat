@@ -52,6 +52,7 @@ const KIND_LABELS = {
   chapter_segs: "分段正文",
   chapter_continue: "续写正文",
   chapter_rewrite: "重写本章",
+  chapter_all: "批量生成正文",
 };
 
 // 步骤中文名（与服务端 prompts.STEP_LABELS 对齐）。

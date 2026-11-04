@@ -304,10 +304,28 @@ assert.throws(()=>recipeCustomFixedOverrides(managedIntent),/prompt.*此参数�
 assert.equal(recipeCustomFixedOverrides(managedIntent,new Set(['1|prompt'])).length,2);
 // 交接二选一（Q3 口径）：「已保存的默认值」不带 overrides，正文取工作流保存值；
 // 「当前未保存调整」只带数值 / 开关覆盖，正文取当前值；张数沿用造梦机 shots。
-const handoffIntent={workflow:{id:'cw-9',name:'金鱼',workflow_fingerprint:'fp-9',prompt:{'1':{inputs:{text:'默认正文'}},'5':{inputs:{value:15}}},params:[{node_id:'1',field_name:'text',field_type:'text',control:'multiline'},{node_id:'5',field_name:'value',field_type:'number',node_title:'视频时长（秒）'}]},overrides:[{node_id:'1',field_name:'text',value:'当前正文'},{node_id:'5',field_name:'value',value:5}],media_inputs:[{node_id:'3',field_name:'image',path:'managed/a.png'}],shots:2};
+const handoffIntent={workflow:{id:'cw-9',name:'金鱼',workflow_fingerprint:'fp-9',prompt:{'1':{inputs:{text:'默认正文'}},'5':{inputs:{value:15}},'6':{inputs:{width:832}},'7':{inputs:{height:1216}}},params:[{node_id:'1',field_name:'text',field_type:'text',control:'multiline'},{node_id:'5',field_name:'value',field_type:'number',node_title:'视频时长（秒）'},{node_id:'6',field_name:'width',field_type:'number',role:'resolution'},{node_id:'7',field_name:'height',field_type:'number',role:'resolution'}]},overrides:[{node_id:'1',field_name:'text',value:'当前正文'},{node_id:'5',field_name:'value',value:5}],media_inputs:[{node_id:'3',field_name:'image',path:'managed/a.png'}],shots:2};
 await openRecipeWorkflowIntent(handoffIntent);
 assert.equal($('#superAgentHandoffDialog').open,true);
 assert.equal(recipeState.handoff.mode,'saved');
+// 交接摘要必须亮出时长 / 分辨率的实际值与来源（2026-11-04 反馈）：
+const summarySaved=$('#superAgentHandoffSummary').innerHTML;
+assert.ok(summarySaved.includes('<b>时长</b> · 15 秒 · 沿用已保存值'),summarySaved);
+assert.ok(summarySaved.includes('<b>分辨率 / 画幅</b> · 宽 832 · 高 1216 · 沿用已保存值'),summarySaved);
+assert.ok($('#superAgentHandoffChanges').textContent.includes('5 / value：15 → 5'),$('#superAgentHandoffChanges').textContent);
+recipeState.handoff.mode='current';renderHandoffSummary();
+assert.ok($('#superAgentHandoffSummary').innerHTML.includes('<b>时长</b> · 5 秒 · 本次未保存调整'),$('#superAgentHandoffSummary').innerHTML);
+// 没有时长槽 / 分辨率槽的工作流：如实说「按工作流原配置出片」，不冒充有值。
+await openRecipeWorkflowIntent({...handoffIntent,overrides:[],media_inputs:[],workflow:{...handoffIntent.workflow,params:handoffIntent.workflow.params.filter(slot=>slot.role!=='resolution'&&slot.node_id!=='5')}});
+const summaryBare=$('#superAgentHandoffSummary').innerHTML;
+assert.ok(summaryBare.includes('<b>时长</b> · 未识别唯一时长槽位'),summaryBare);
+assert.ok(summaryBare.includes('<b>分辨率 / 画幅</b> · 工作流未暴露分辨率 / 画幅参数'),summaryBare);
+// H3 这类解析度選擇器工作流：aspect_ratio 走字段名识别，max_resolution（预览覆盖）不算。
+await openRecipeWorkflowIntent({...handoffIntent,overrides:[],media_inputs:[],workflow:{...handoffIntent.workflow,params:[handoffIntent.workflow.params[0],{node_id:'8',field_name:'aspect_ratio',field_type:'text',node_title:'解析度選擇器'},{node_id:'9',field_name:'max_resolution',field_type:'number',node_title:'Model Preview Override'}],prompt:{...handoffIntent.workflow.prompt,'8':{inputs:{aspect_ratio:'9:16 (Portrait Widescreen)'}}}}});
+const summaryAspect=$('#superAgentHandoffSummary').innerHTML;
+assert.ok(summaryAspect.includes('<b>分辨率 / 画幅</b> · aspect_ratio 9:16 (Portrait Widescreen) · 沿用已保存值'),summaryAspect);
+assert.ok(!summaryAspect.includes('max_resolution'),summaryAspect);
+await openRecipeWorkflowIntent(handoffIntent);
 await confirmWorkflowHandoff();
 const handoffCreate=requests.filter(row=>row.path==='/api/super-agent/recipe-batches').at(-1);
 assert.equal(handoffCreate.body.source,'workflow');assert.equal(handoffCreate.body.prompt,'默认正文');assert.ok(!('overrides' in handoffCreate.body));assert.equal(handoffCreate.body.shots,2);

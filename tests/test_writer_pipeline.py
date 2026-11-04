@@ -476,6 +476,111 @@ class ChapterPipelineTests(PipelineTestCase):
         self.assertEqual(len(self.store.get_chapter(self.book_id, 1)["versions"]), versions_before)
 
 
+class ChapterAllPipelineTests(PipelineTestCase):
+    """方案A（2026-11-04 拍板）：链的正文步骤写完拆章范围内全部章节。
+
+    逐章落盘、每章一次模型调用、可中途取消；前章衔接每步现读，
+    不能用流水线创建时的旧快照。
+    """
+
+    def _prepare_outline(self, chapters=5):
+        self.store.save_setup(self.book_id, content={"idea": "一句话创意"}, kind="manual")
+        rows = [{"no": i, "title": f"第{i}章", "beat": f"梗概{i}", "hook": "钩"} for i in range(1, chapters + 1)]
+        self.store.save_outline(self.book_id, chapters=rows, kind="generated", sync=True)
+
+    def test_batch_writes_every_existing_chapter_in_range(self):
+        self._prepare_outline(5)
+        pipeline = self.start(kind="chapter_all", from_no=1, want_count=10)
+        record = self.current_pipeline()
+        # 范围 1–10 只写拆章实际落下的 1–5 章：模型少拆不硬造。
+        self.assertEqual(record["steps"], ["draft"] * 5)
+        self.assertEqual([row["no"] for row in record["request_snapshot"]["chapter_plan"]], [1, 2, 3, 4, 5])
+        for expected_no in range(1, 6):
+            record = self.current_pipeline()
+            self.assertEqual(record["status"], "running")
+            task_id = record["current_task_id"]
+            task = self.app.studio.jobs.tasks[task_id]
+            writer = task["input"]["writer"]
+            self.assertEqual(writer["chapter_no"], expected_no)
+            self.assertEqual(writer["step"], "draft")
+            self.assertIn(f"梗概{expected_no}", task["input"]["content"])
+            if expected_no > 1:
+                # 前章衔接用上一步刚落盘的正文，不是创建时的旧快照。
+                self.assertIn(f"第{expected_no - 1}章的正文", task["input"]["content"])
+            if expected_no == 3:
+                self.assertIn("批量 3/5", task["title"])
+            self.assertEqual(task["input"]["writer"]["chapter_no"], int(
+                record["request_snapshot"]["chapter_no"]))
+            self.app.studio.jobs.finish(task_id, f"第{expected_no}章的正文。")
+            self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "done")
+        for no in range(1, 6):
+            chapter = self.store.get_chapter(self.book_id, no)
+            self.assertEqual(chapter["content"], f"第{no}章的正文。")
+            self.assertEqual(chapter["versions"][0]["kind"], "generated")
+
+    def test_empty_range_refused_without_pipeline(self):
+        self._prepare_outline(3)
+        with self.assertRaises(Exception) as ctx:
+            self.start(kind="chapter_all", from_no=10, want_count=5)
+        self.assertIn("可写的章节", str(ctx.exception))
+        self.assertIsNone(self.store.get_active_pipeline(self.book_id))
+
+    def test_partial_range_writes_intersection_only(self):
+        self._prepare_outline(5)
+        pipeline = self.start(kind="chapter_all", from_no=4, want_count=3)
+        record = self.current_pipeline()
+        self.assertEqual([row["no"] for row in record["request_snapshot"]["chapter_plan"]], [4, 5])
+        for expected_no in (4, 5):
+            task_id = record["current_task_id"]
+            self.assertEqual(self.app.studio.jobs.tasks[task_id]["input"]["writer"]["chapter_no"], expected_no)
+            self.app.studio.jobs.finish(task_id, f"第{expected_no}章的正文。")
+            self.tick()
+            record = self.current_pipeline()
+        self.assertEqual(record["status"], "done")
+        self.assertEqual(self.store.get_chapter(self.book_id, 4)["content"], "第4章的正文。")
+        self.assertEqual(self.store.get_chapter(self.book_id, 5)["content"], "第5章的正文。")
+        self.assertEqual(self.store.get_chapter(self.book_id, 1)["content"], "")
+
+    def test_cancel_midway_keeps_written_chapters(self):
+        self._prepare_outline(3)
+        self.start(kind="chapter_all", from_no=1, want_count=3)
+        first_id = self.current_pipeline()["current_task_id"]
+        self.app.studio.jobs.finish(first_id, "第1章的正文。")
+        self.tick()
+        record = self.current_pipeline()
+        self.assertEqual(record["step_index"], 1)
+        self.assertEqual(self.app.studio.jobs.tasks[record["current_task_id"]]["input"]["writer"]["chapter_no"], 2)
+        self.manager.cancel_pipeline(self.book_id)
+        record = self.current_pipeline()
+        self.assertEqual(record["status"], "cancelled")
+        self.assertEqual(self.store.get_chapter(self.book_id, 1)["content"], "第1章的正文。")
+        self.assertEqual(self.store.get_chapter(self.book_id, 2)["content"], "")
+        submitted = len(self.app.studio.jobs.submitted)
+        self.tick()
+        self.assertEqual(len(self.app.studio.jobs.submitted), submitted)
+
+    def test_failed_step_retry_resubmits_same_chapter(self):
+        self._prepare_outline(3)
+        self.start(kind="chapter_all", from_no=1, want_count=3)
+        first_id = self.current_pipeline()["current_task_id"]
+        self.app.studio.jobs.finish(first_id, "第1章的正文。")
+        self.tick()
+        second_id = self.current_pipeline()["current_task_id"]
+        self.app.studio.jobs.finish(second_id, "", status="failed", error="线路抖动")
+        self.tick()
+        self.assertEqual(self.current_pipeline()["status"], "failed")
+        # retry_pipeline 的返回值是提交前快照；current_task_id 以存储里的权威记录为准。
+        self.manager.retry_pipeline(self.book_id)
+        task_id = self.current_pipeline()["current_task_id"]
+        self.assertEqual(self.app.studio.jobs.tasks[task_id]["input"]["writer"]["chapter_no"], 2)
+        self.app.studio.jobs.finish(task_id, "第2章重试正文。")
+        self.tick()
+        third_id = self.current_pipeline()["current_task_id"]
+        self.assertEqual(self.app.studio.jobs.tasks[third_id]["input"]["writer"]["chapter_no"], 3)
+
+
 class ContinuationRegressionTests(PipelineTestCase):
     def setUp(self):
         super().setUp()

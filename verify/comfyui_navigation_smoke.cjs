@@ -32,6 +32,7 @@ async function checkViewport(browser, vp) {
   const batchSubmissions = [];
   let batchDetailRequests = 0;
   let batchItemStatus = 'running';
+  let mediaUploads = 0;
   const runBatch = () => ({
     id: 'cfb-navigation-smoke', title: '浏览器提交回归',
     items: [{ index: 1, name: '回归条目', task_id: 'cf-navigation-item', status: batchItemStatus, done: batchItemStatus === 'completed' ? 1 : 0, total: 1, outputs: [] }],
@@ -58,9 +59,19 @@ async function checkViewport(browser, vp) {
   await page.route('**/api/providers/models', route => route.fulfill({
     status: 200, contentType: 'application/json', body: JSON.stringify({ models: [] }),
   }));
+  await page.route('**/api/file?*', route => route.fulfill({
+    status: 200, contentType: 'image/png',
+    body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l1sAAAAASUVORK5CYII=', 'base64'),
+  }));
   await page.route('**/api/comfyui/**', route => {
     const pathname = new URL(route.request().url()).pathname;
     if (pathname.includes('/files/')) return route.fulfill({ status: 200, contentType: 'video/mp4', body: '' });
+    if (pathname === '/api/comfyui/media') {
+      mediaUploads += 1;
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
+        path: `/managed/uploads/ui-${mediaUploads}.png`, name: `ui-${mediaUploads}.png`, thumb_path: `/managed/uploads/ui-${mediaUploads}_thumb.webp`,
+      }) });
+    }
     if (pathname === '/api/comfyui/batches' && route.request().method() === 'POST') {
       batchSubmissions.push(route.request().postDataJSON());
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ batch: runBatch() }) });
@@ -139,12 +150,55 @@ async function checkViewport(browser, vp) {
     }
     await checkNoScriptError();
     await page.screenshot({ path: path.join(__dirname, `comfyui_navigation_${vp.width}.png`) });
+    // 走真实拖入事件与素材映射控件，校验禁用前口之后的上传和提交都仍属于原节点。
+    await page.locator('[data-batch-select="port-node"]').first().selectOption('1|image');
+    await page.locator('[data-batch-port-check]').first().check();
+    await page.locator('[data-batch-port-check]').nth(1).check();
+    const uploadTile = async ordinal => {
+      const transfer = await page.evaluateHandle(() => {
+        const data = new DataTransfer();
+        data.items.add(new File([new Uint8Array([1, 2, 3])], 'fixture.png', { type: 'image/png' }));
+        return data;
+      });
+      const before = mediaUploads;
+      await page.locator(`[data-batch-tile][data-port="${ordinal}"]`).dispatchEvent('drop', { dataTransfer: transfer });
+      await page.waitForFunction(count => document.querySelectorAll('.cbm-mname').length >= count, ordinal + 1);
+      await page.waitForFunction(expected => document.querySelector('#comfyuiBatchBody').innerText.includes(`ui-${expected}.png`), before + 1);
+      await transfer.dispose();
+    };
+    await uploadTile(0);
+    await uploadTile(1);
+    await page.locator('[data-batch-port-check]').first().uncheck();
+    assert.deepEqual(await page.locator('.cbm-mname').allTextContents(), ['ui-2.png✕'], '禁用第一个口只能移除该口文件');
+    await uploadTile(0);
+    assert.deepEqual(await page.locator('.cbm-mname').allTextContents(), ['ui-3.png✕'], '前口禁用后仍可上传到当前第一个已选口');
+    await page.locator('[data-batch-action="port-up"]').nth(1).click();
+    assert.equal(await page.locator('[data-batch-select="port-node"]').first().inputValue(), '2|image');
+    assert.deepEqual(await page.locator('.cbm-mname').allTextContents(), ['ui-3.png✕'], '排序后文件必须跟随原素材口');
     await page.locator('[data-batch-item="prompt"]').first().fill('用于验证提交与返回轮询的提示词');
     await page.locator('[data-batch-action="submit"]').click();
     await page.locator('.cbm-card .cbm-badge.run').waitFor({ state: 'visible' });
     assert.equal(batchSubmissions.length, 1, '一次点击只提交一个批次');
     assert.equal(batchSubmissions[0].schemes[0].workflow_id, workflow.id);
     assert.equal(batchSubmissions[0].schemes[0].items[0].prompt, '用于验证提交与返回轮询的提示词');
+    assert.deepEqual(batchSubmissions[0].schemes[0].items[0].media_inputs, [{ node_id: '2', field_name: 'image', path: '/managed/uploads/ui-3.png', media: 'image' }]);
+    await page.evaluate(async () => (await import('/js/22-studio.js')).closeStudioView());
+    await page.waitForTimeout(100);
+    const closedCount = batchDetailRequests;
+    await page.waitForTimeout(2400);
+    assert.equal(batchDetailRequests, closedCount, '关闭工作台必须停止批次请求');
+    await page.evaluate(async () => (await import('/js/22-studio.js')).openStudioView());
+    await page.waitForFunction(() => Boolean(document.querySelector('.cbm-card .cbm-badge.run')));
+    await page.waitForTimeout(100);
+    assert.ok(batchDetailRequests > closedCount, '重开工作台必须恢复当前批次');
+    await page.evaluate(async () => (await import('/js/22-studio.js')).setStudioPage('library'));
+    await page.waitForTimeout(100);
+    const otherPageCount = batchDetailRequests;
+    await page.waitForTimeout(2400);
+    assert.equal(batchDetailRequests, otherPageCount, '切换其他工作台页必须停止批次请求');
+    await page.evaluate(async () => (await import('/js/22-studio.js')).setStudioPage('comfyui'));
+    await page.waitForTimeout(100);
+    assert.ok(batchDetailRequests > otherPageCount, '返回造梦机必须恢复批次轮询');
     await checkNoScriptError();
     await paneButton('run').click();
     const beforeReturnRequests = batchDetailRequests;

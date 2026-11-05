@@ -21,6 +21,14 @@ async function runViewport(browser, viewport) {
   const tasks = new Map();
   let uploadCount = 0;
   let visionDelay = 0;
+  let pendingVision = null;
+  const holdNextVision = () => {
+    let arrived, release;
+    const started = new Promise(resolve => { arrived = resolve; });
+    const done = new Promise(resolve => { release = resolve; });
+    pendingVision = { arrived, done };
+    return { started, release };
+  };
   const json = (route, body) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
   const check = async () => {
     assert.deepEqual(errors, [], '无脚本与接口错误');
@@ -31,7 +39,9 @@ async function runViewport(browser, viewport) {
   page.on('console', message => { if (message.type() === 'error' && !message.text().includes('Failed to load resource')) errors.push(message.text()); });
   page.on('response', response => { if (response.status() >= 400 && !response.url().endsWith('/favicon.ico')) errors.push(`${response.status()} ${response.url()}`); });
   await page.addInitScript(() => { localStorage.clear(); localStorage.setItem('naibaOnboardingDismissed', '1'); });
-  await page.route('**/api/providers/models', route => json(route, { models: [{ id: 'probe-default', name: '本地视觉替身' }] }));
+  await page.route('**/api/providers/models', route => json(route, { models: [
+    { id: 'probe-default', name: '本地视觉替身' }, { id: 'probe-alternate', name: '第二个视觉替身' },
+  ] }));
   await page.route('**/api/settings', route => route.request().method() === 'POST'
     ? json(route, { settings: route.request().postDataJSON() }) : route.continue());
   await page.route('**/api/upload*', route => json(route, upload()));
@@ -53,6 +63,12 @@ async function runViewport(browser, viewport) {
     }
     if (pathname === '/api/studio/vision') {
       const body = route.request().postDataJSON();
+      if (pendingVision) {
+        const waiting = pendingVision;
+        pendingVision = null;
+        waiting.arrived();
+        await waiting.done;
+      }
       if (visionDelay) await new Promise(resolve => setTimeout(resolve, visionDelay));
       return json(route, { analyzed: body.images.length, failed: 0, fallback_used: 0,
         text: '【图1】\n一只橘猫坐在窗边', images: [{ index: 1, text: '一只橘猫坐在窗边', error: '', backend: 'selected' }] });
@@ -102,7 +118,42 @@ async function runViewport(browser, viewport) {
     await page.locator('#studioVisionAnalyze').click();
     await page.waitForFunction(() => document.querySelector('#studioImageStatus').textContent.includes('已识别 1/1 张'));
     assert.match(await page.locator('#studioUserRequest').inputValue(), /一只橘猫/);
-    assert.match(await page.locator('#studioImageStatus').textContent(), /当前模型/);
+    assert.match(await page.locator('#studioImageStatus').textContent(), /发起模型 probe-default/);
+    await check();
+    const editedVision = holdNextVision();
+    await page.locator('#studioVisionAnalyze').click();
+    await editedVision.started;
+    await page.locator('#studioUserRequest').fill('识别期间继续编辑的内容');
+    editedVision.release();
+    await page.waitForFunction(() => !document.querySelector('#studioVisionAnalyze').disabled);
+    assert.ok((await page.locator('#studioUserRequest').inputValue()).startsWith('识别期间继续编辑的内容\n\n'));
+    assert.match(await page.locator('#studioUserRequest').inputValue(), /一只橘猫/);
+    await check();
+
+    const modelVision = holdNextVision();
+    const modelInput = await page.locator('#studioUserRequest').inputValue();
+    await page.locator('#studioVisionAnalyze').click();
+    await modelVision.started;
+    await page.locator('#studioModelSelect').selectOption('probe-alternate');
+    modelVision.release();
+    await page.waitForFunction(() => !document.querySelector('#studioVisionAnalyze').disabled);
+    assert.equal(await page.locator('#studioUserRequest').inputValue(), modelInput, '更换模型后的旧识别结果不追加');
+    assert.match(await page.locator('#toast').textContent(), /模型已更换/);
+    assert.doesNotMatch(await page.locator('#studioImageStatus').textContent(), /已识别/);
+    await page.locator('#studioModelSelect').selectOption('probe-default');
+    await check();
+
+    const templateVision = holdNextVision();
+    await page.locator('#studioVisionAnalyze').click();
+    await templateVision.started;
+    await pane('list');
+    await page.locator('#studioList [data-studio-pick="vi-111-i2t-enhance"]').click();
+    await page.locator('#studioUserRequest').fill('切换模板后的新输入');
+    templateVision.release();
+    await page.waitForFunction(() => !document.querySelector('#studioVisionAnalyze').disabled);
+    assert.equal(await page.locator('#studioUserRequest').inputValue(), '切换模板后的新输入');
+    assert.match(await page.locator('#toast').textContent(), /模板已切换/);
+    assert.doesNotMatch(await page.locator('#studioImageStatus').textContent(), /已识别/);
     await check();
     const inputBefore = await page.locator('#studioUserRequest').inputValue();
     visionDelay = 500;

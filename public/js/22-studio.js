@@ -1376,6 +1376,18 @@ function studioImageKey(images) {
   return JSON.stringify(images.map((image) => [image.path, image.name || ""]));
 }
 
+function studioVisionContext() {
+  return {
+    detailToken: studio.detailToken,
+    templateKey: JSON.stringify([studio.kind, studio.itemId, studio.customId]),
+    modelKey: $("#studioProviderSelect")?.value || "",
+    modelName: $("#studioModelSelect")?.value || "",
+    imageKey: studioImageKey(studio.images),
+    page: studio.page,
+    open: studio.open,
+  };
+}
+
 async function analyzeStudioImages() {
   if (studio.visionBusy) return;
   if (!studio.images.length) {
@@ -1383,7 +1395,8 @@ async function analyzeStudioImages() {
     return;
   }
   const images = studio.images.map((image) => ({ ...image }));
-  const imageKey = studioImageKey(images);
+  const requestContext = studioVisionContext();
+  const imageKey = requestContext.imageKey;
   studio.visionBusy = true;
   studio.visionSummary = null;
   renderImagePreview();
@@ -1397,23 +1410,39 @@ async function analyzeStudioImages() {
           name: image.name || "",
         })),
         // 优先用参数里当前选中的模型识别；识别不了由后端回落到设置里的视觉 API。
-        model_key: $("#studioProviderSelect")?.value || "",
-        model_name: $("#studioModelSelect")?.value || "",
+        model_key: requestContext.modelKey,
+        model_name: requestContext.modelName,
       },
     });
-    const text = String(result?.text || "").trim();
-    if (!text) throw new Error("视觉模型没有返回可用的描述");
-    if (imageKey !== studioImageKey(studio.images)) {
+    const current = studioVisionContext();
+    // 图片、模板及模型共同确定本次识别用途；旧响应不能写入新选择或抢回视图。
+    if (requestContext.open !== current.open || requestContext.page !== current.page) return;
+    if (imageKey !== current.imageKey) {
       toast("参考图片已更换，本次识别结果未写入；请重新识别当前图片");
       return;
     }
+    if (requestContext.detailToken !== current.detailToken || requestContext.templateKey !== current.templateKey) {
+      toast("模板已切换，本次识别结果未写入；请重新识别");
+      return;
+    }
+    if (requestContext.modelKey !== current.modelKey || requestContext.modelName !== current.modelName) {
+      toast("识别模型已更换，本次识别结果未写入；请重新识别");
+      return;
+    }
+    const text = String(result?.text || "").trim();
+    if (!text) throw new Error("视觉模型没有返回可用的描述");
     appendVisionResult(text);
+    const analyzed = Number(result?.analyzed || 0);
     const failed = Number(result?.failed || 0);
     const fallback = Number(result?.fallback_used || 0);
     const note = String(result?.selected_note || "").trim();
+    const requestedModel = requestContext.modelName || requestContext.modelKey;
+    const sources = [];
+    if (requestedModel) sources.push(`发起模型 ${requestedModel}${analyzed > fallback ? `：${analyzed - fallback} 张` : ""}`);
+    if (fallback) sources.push(`视觉 API：${fallback} 张`);
     studio.visionSummary = {
       imageKey,
-      text: `已识别 ${Number(result?.analyzed || 0)}/${images.length} 张${failed ? `，${failed} 张失败` : ""}（${fallback ? "含视觉 API 兜底" : "当前模型"}），描述已写入「我的输入」`,
+      text: `已识别 ${analyzed}/${images.length} 张${failed ? `，${failed} 张失败` : ""}（${sources.join("；")}），描述已写入「我的输入」`,
     };
     const parts = [];
     if (failed) parts.push(`${result.analyzed} 张识别成功，${failed} 张失败：${visionFailureDetails(result) || "原因未知"}`);

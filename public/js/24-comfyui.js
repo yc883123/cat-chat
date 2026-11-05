@@ -7,7 +7,7 @@
 
 import { $, api, localFileUrl, state, toast } from "./01-core.js";
 import { attachmentThumbUrl, isPywebview, mediaKind, saveLocalFile } from "./03-media.js";
-import { currentStudioPage, onStudioPageChange, setStudioPage } from "./22-studio.js";
+import { currentStudioPage, isStudioOpen, onStudioPageChange, setStudioPage } from "./22-studio.js";
 import { BATCH_H3_REFERENCE_TEMPLATE, buildBatchConvertRequest } from "./24a-comfyui-convert.js";
 const POLL_MS = 1200;
 const REFRESH_MS = 5000;
@@ -291,11 +291,13 @@ export function bindComfyuiEvents() {
   $("#comfyuiOpenBatch")?.addEventListener("click", () => setComfyuiPane("batch"));
   for (const type of ["input", "change"]) $("#comfyuiParamForm")?.addEventListener(type, () => updateDraftHint());
   if (comfyui.unsubscribePage) comfyui.unsubscribePage();
-  comfyui.unsubscribePage = onStudioPageChange((page) => {
-    if (page === "comfyui") {
+  comfyui.unsubscribePage = onStudioPageChange((page, detail = {}) => {
+    if (page === "comfyui" && !detail.closed && isStudioOpen()) {
       void enterPage();
     } else {
       stopPolling();
+      stopBackgroundRefresh();
+      stopBatchPolling();
     }
   });
 
@@ -374,6 +376,15 @@ async function enterPage() {
   renderParamForm();
   renderStoryboardQueue();
   scheduleBackgroundRefresh();
+  if (batchPaneVisible()) enterBatchPane();
+}
+
+function comfyuiPageVisible() {
+  return isStudioOpen() && currentStudioPage() === "comfyui";
+}
+
+function batchPaneVisible() {
+  return comfyuiPageVisible() && $("#studioPageComfyui")?.dataset.comfyuiPane === "batch";
 }
 
 function onPaneClick(event) {
@@ -431,7 +442,7 @@ function setComfyuiPane(pane) {
 function scheduleBackgroundRefresh() {
   stopBackgroundRefresh();
   comfyui.refreshTimer = setInterval(() => {
-    if (currentStudioPage() !== "comfyui") return;
+    if (!comfyuiPageVisible()) return;
     // 轻量保活：任务列表轮询走 pollActiveTask；这里只补工作流/连接的偶发变化。
     void refreshTasks(true);
   }, REFRESH_MS);
@@ -1992,7 +2003,7 @@ function isTaskActiveById(id) {
 
 function startPolling() {
   if (comfyui.pollTimer) return;
-  if (currentStudioPage() !== "comfyui") return;
+  if (!comfyuiPageVisible()) return;
   comfyui.pollTimer = setInterval(() => { void pollActiveTask(); }, POLL_MS);
 }
 
@@ -2004,7 +2015,7 @@ function stopPolling() {
 }
 
 async function pollActiveTask() {
-  if (currentStudioPage() !== "comfyui") {
+  if (!comfyuiPageVisible()) {
     stopPolling();
     return;
   }
@@ -2554,11 +2565,13 @@ const batch = {
   runId: "",                // 跑批视图正在看的批次 id
   runData: null,            // 该批次的详情（轮询刷新）
   runTimer: null,
+  runEpoch: 0,
+  runPoll: null,
   runElapsedTimer: null,
   runStartedAt: 0,
   histories: [],            // 历史批次（下拉）
   historiesLoaded: false,
-  converting: new Set(),    // 转换中的条目（schemeId:itemIndex）
+  converting: new Set(),    // 转换中的原条目对象；删行或重排不会把忙碌态移给其他条目
   missingItems: new Set(),  // 自检没过的条目（schemeId:itemIndex），标红拦提交
   blockedMessage: "",
   convert: { template: "", provider: "", model: "" },
@@ -2692,10 +2705,15 @@ function addBatchScheme(cloneFrom = null) {
 
 async function loadBatchWorkflowDetail(scheme, workflowId) {
   const id = workflowId ?? scheme.workflow_id;
+  const request = {};
+  scheme.detailRequest = request;
+  const current = () => batchSchemeOf(scheme.id) === scheme && scheme.detailRequest === request
+    && scheme.workflow_id === id;
   scheme.workflow_id = id;
   scheme.detail = null;
   scheme.mapping = null;
   scheme.fixed = {};
+  scheme.loading = false;
   if (!scheme.items.length) scheme.items = [newBatchItem(1)];
   batch.blockedMessage = "";
   renderBatch();
@@ -2704,6 +2722,7 @@ async function loadBatchWorkflowDetail(scheme, workflowId) {
   renderBatch();
   try {
     const payload = await api(`/api/comfyui/workflows/${encodeURIComponent(id)}`);
+    if (!current()) return;
     scheme.detail = payload.workflow || null;
     scheme.loading = false;
     const fingerprint = scheme.detail?.workflow_fingerprint || scheme.detail?.fingerprint || "";
@@ -2719,6 +2738,7 @@ async function loadBatchWorkflowDetail(scheme, workflowId) {
         String(slot.node_id) === String(port.node_id) && String(slot.field_name) === String(port.field_name)));
     renderBatch();
   } catch (error) {
+    if (!current()) return;
     scheme.loading = false;
     batch.blockedMessage = `工作流读取失败：${error.message}`;
     renderBatch();
@@ -2993,7 +3013,7 @@ function batchItemsMarkup(scheme, schemeIndex) {
 
 function batchItemRowMarkup(scheme, schemeIndex, item, itemIndex, ports) {
   const missing = batch.missingItems.has(`${scheme.id}:${itemIndex}`);
-  const converting = batch.converting.has(`${scheme.id}:${itemIndex}`);
+  const converting = batch.converting.has(item);
   // 分辨率控件需要当前条目的索引，必须与条目行处于同一作用域。
   const resolutionControl = () => {
     const slot = batchSlotByAddress(scheme.detail, scheme.mapping?.resolution_slot);
@@ -3095,6 +3115,13 @@ function onBatchClick(event) {
     scheme.items.splice(itemIndex, 1);
     batch.recheckMissing();
     renderBatch();
+  } else if ((action === "port-up" || action === "port-down") && scheme) {
+    const index = Number(target.dataset.port);
+    const next = index + (action === "port-up" ? -1 : 1);
+    const ports = scheme.mapping?.media_ports || [];
+    if (index >= 0 && index < ports.length && next >= 0 && next < ports.length) {
+      changeBatchMediaPorts(scheme, () => { [ports[index], ports[next]] = [ports[next], ports[index]]; });
+    }
   } else if (action === "clear-file" && scheme && itemIndex >= 0) {
     event.stopPropagation();
     const item = scheme.items[itemIndex];
@@ -3174,13 +3201,10 @@ function onBatchChange(event) {
     const [nodeId, ...rest] = value.split("|");
     const port = (scheme.mapping.media_ports || [])[portIndex];
     if (port && value) {
-      port.node_id = nodeId;
-      port.field_name = rest.join("|");
-      // 换节点后条目里已放的文件还在旧节点名下：清掉这些口的文件，明明白白。
-      const ordinal = batchPortOrdinal(scheme, portIndex);
-      for (const item of scheme.items) delete item.files[String(ordinal)];
-      batchRememberMappingQuietly(scheme);
-renderBatch();
+      changeBatchMediaPorts(scheme, () => {
+        port.node_id = nodeId;
+        port.field_name = rest.join("|");
+      });
     }
     return;
   }
@@ -3189,15 +3213,29 @@ renderBatch();
     const portIndex = Number(target.dataset.batchPortCheck);
     const port = (scheme.mapping.media_ports || [])[portIndex];
     if (port) {
-      port.checked = target.checked;
-      if (!target.checked) {
-        const ordinal = batchPortOrdinal(scheme, portIndex);
-        for (const item of scheme.items) delete item.files[String(ordinal)];
-      }
-      batchRememberMappingQuietly(scheme);
-      renderBatch();
+      changeBatchMediaPorts(scheme, () => { port.checked = target.checked; });
     }
   }
+}
+
+function changeBatchMediaPorts(scheme, change) {
+  const before = (scheme.mapping?.media_ports || []).filter((port) => port.checked);
+  const records = new Map(scheme.items.map((item) => [item, new Map(before.map((port, ordinal) =>
+    [port, { address: slotKeyOf(port), file: item.files?.[String(ordinal)] }]))]));
+  change();
+  const after = (scheme.mapping?.media_ports || []).filter((port) => port.checked);
+  for (const item of scheme.items) {
+    const files = {};
+    after.forEach((port, ordinal) => {
+      const previous = records.get(item)?.get(port);
+      // 排序只改编号；禁用或换节点只移除对应口，其余文件仍跟随原素材口。
+      if (previous?.file && previous.address === slotKeyOf(port)) files[String(ordinal)] = previous.file;
+    });
+    item.files = files;
+  }
+  batch.recheckMissing();
+  batchRememberMappingQuietly(scheme);
+  renderBatch();
 }
 
 function onBatchInput(event) {
@@ -3248,14 +3286,18 @@ function batchPickFile(tile) {
   const scheme = batchSchemeOf(tile.dataset.scheme || "");
   if (!scheme) return;
   const portIndex = Number(tile.dataset.port);
-  const slot = batchSlotByAddress(scheme.detail, (scheme.mapping?.media_ports || [])[portIndex]);
+  const port = (scheme.mapping?.media_ports || []).filter((entry) => entry.checked)[portIndex];
+  const item = scheme.items[Number(tile.dataset.item)];
+  const detail = scheme.detail;
+  const address = port ? slotKeyOf(port) : "";
+  const slot = batchSlotByAddress(detail, port);
   const kind = tile.dataset.kind || slot?.media || "image";
   const input = document.createElement("input");
   input.type = "file";
   input.accept = MEDIA_ACCEPT[kind] || "";
   input.addEventListener("change", () => {
     const file = input.files?.[0];
-    if (file) void batchUploadTiles([{ tile, file }]);
+    if (file) void batchUploadTiles([{ tile, file, scheme, item, port, detail, address }]);
   });
   input.click();
 }
@@ -3295,19 +3337,28 @@ function onBatchDrop(event) {
 async function batchUploadTiles(pairs) {
   if (comfyui.uploadingSlot) { toast("上一个文件还在上传，请稍候"); return; }
   comfyui.uploadingSlot = "batch";
+  // 全部目标在首个 await 前固定；旧 tile 的序号不能在后续上传时重新指向另一行/口。
+  const queued = pairs.map((pair) => {
+    const { tile } = pair;
+    const scheme = pair.scheme || batchSchemeOf(tile.dataset.scheme || "");
+    const item = pair.item || scheme?.items[Number(tile.dataset.item)];
+    const port = pair.port || (scheme?.mapping?.media_ports || []).filter((entry) => entry.checked)[Number(tile.dataset.port)];
+    return { ...pair, scheme, item, port, detail: pair.detail || scheme?.detail,
+      address: pair.address || (port ? slotKeyOf(port) : "") };
+  });
   let saved = 0;
   try {
-    for (const { tile, file } of pairs) {
-      const scheme = batchSchemeOf(tile.dataset.scheme || "");
-      const itemIndex = Number(tile.dataset.item);
-      const item = scheme?.items[itemIndex];
-      if (!scheme || !item) continue;
+    for (const { file, scheme, item, port, detail, address } of queued) {
+      const current = () => scheme && batchSchemeOf(scheme.id) === scheme && scheme.items.includes(item)
+        && scheme.detail === detail && port?.checked && slotKeyOf(port) === address
+        && (scheme.mapping?.media_ports || []).includes(port);
+      if (!current()) continue;
       const form = new FormData();
       form.append("file", file, file.name);
       try {
         const payload = await api("/api/comfyui/media", { method: "POST", body: form });
-        const ordinal = batchPortOrdinal(scheme, Number(tile.dataset.port));
-        if (ordinal >= 0) {
+        const ordinal = (scheme.mapping?.media_ports || []).filter((entry) => entry.checked).indexOf(port);
+        if (current() && ordinal >= 0) {
           item.files[String(ordinal)] = {
             path: String(payload.path || ""),
             name: String(payload.name || file.name),
@@ -3372,7 +3423,13 @@ async function batchLoadCustomTemplates() {
 }
 
 function batchItemReference(scheme, itemIndex) {
-  return `${scheme.id}:${itemIndex}`;
+  return scheme.items[itemIndex];
+}
+
+function batchConversionSnapshot(scheme, item) {
+  return JSON.stringify({ workflow: scheme.workflow_id, script: item.script, prompt: item.prompt,
+    files: item.files, duration: item.duration, resolution: item.resolution,
+    mapping: scheme.mapping, fixed: scheme.fixed, convert: batch.convert });
 }
 
 async function batchConvert(scheme, itemIndex, silent = false) {
@@ -3388,11 +3445,19 @@ async function batchConvert(scheme, itemIndex, silent = false) {
   batch.converting.add(key);
   renderBatch();
   try {
+    const detail = scheme.detail;
+    const snapshot = batchConversionSnapshot(scheme, item);
+    const current = () => batchSchemeOf(scheme.id) === scheme && scheme.detail === detail
+      && scheme.items.includes(item) && batchConversionSnapshot(scheme, item) === snapshot;
     const body = buildBatchConvertRequest(scheme.detail, scheme.mapping, item, batch.convert, scheme.fixed);
     const created = await api("/api/studio/generate", { method: "POST", body });
     const taskId = String(created?.task?.id || "");
     if (!taskId) throw new Error(created?.error || "转换任务创建失败");
-    const result = await batchWaitStudioTask(taskId);
+    const result = await batchWaitStudioTask(taskId, current);
+    if (!current()) {
+      toast("条目、素材或转换设置已改变，本次结果未写入；请重新转换");
+      return false;
+    }
     const prompt = String(result || "").trim();
     if (!prompt) throw new Error("转换模型没有返回提示词正文");
     item.prompt = prompt;
@@ -3414,23 +3479,28 @@ async function batchConvertAll() {
     (scheme.items || []).forEach((item, itemIndex) => {
       if (String(item.script || "").trim() && !String(item.prompt || "").trim()
           && !batch.converting.has(batchItemReference(scheme, itemIndex))) {
-        targets.push([scheme, itemIndex]);
+        targets.push([scheme, item]);
       }
     });
   });
   if (!targets.length) { toast("没有要转换的条目：先填剧本，或已全部转换过"); return; }
   if (!batch.convert.provider || !batch.convert.model) { toast("先在「剧本 → 提示词」一栏选好供应商和模型"); return; }
   batch.blockedMessage = "";
-  for (const [scheme, itemIndex] of targets) {
+  for (const [scheme, item] of targets) {
+    if (batchSchemeOf(scheme.id) !== scheme) return;
+    const itemIndex = scheme.items.indexOf(item);
+    if (itemIndex < 0) continue;
     const ok = await batchConvert(scheme, itemIndex, true);
     if (!ok) return;
   }
   toast("转换完成；提示词可以逐条手改");
 }
 
-async function batchWaitStudioTask(taskId) {
+async function batchWaitStudioTask(taskId, current = () => true) {
   for (let attempt = 0; attempt < 600; attempt += 1) {
+    if (!current()) return null;
     await new Promise((resolve) => setTimeout(resolve, 1500));
+    if (!current()) return null;
     const payload = await api(`/api/studio/tasks/${encodeURIComponent(taskId)}`);
     const task = payload?.task || payload;
     const status = String(task?.status || "");
@@ -3645,11 +3715,19 @@ function startBatchRunElapsed() {
 }
 
 function startBatchPolling() {
+  const runId = batch.runId;
+  if (!runId || batch.view !== "run" || !batchPaneVisible()) return;
+  if (batch.runPoll?.runId === runId) return;
   stopBatchPolling();
+  const poll = { runId, epoch: batch.runEpoch };
+  batch.runPoll = poll;
+  const current = () => batch.runPoll === poll && batch.runEpoch === poll.epoch
+    && batch.runId === runId && batch.view === "run" && batchPaneVisible();
   const tick = async () => {
-    if (!batch.runId || batch.view !== "run") return;
+    if (!current()) return;
     try {
-      const payload = await api(`/api/comfyui/batches/${encodeURIComponent(batch.runId)}`);
+      const payload = await api(`/api/comfyui/batches/${encodeURIComponent(runId)}`);
+      if (!current() || (payload.batch?.id && payload.batch.id !== runId)) return;
       batch.runData = payload.batch || batch.runData;
       renderBatch();
       const items = batch.runData?.items || [];
@@ -3658,13 +3736,18 @@ function startBatchPolling() {
         void loadBatchHistories();
       }
     } catch (_) { /* 单次轮询失败不终止跑批监视 */ }
+    finally {
+      // 串行安排下一次；旧响应既不能写入，也不能清除新一代轮询。
+      if (current()) batch.runTimer = setTimeout(() => void tick(), 2200);
+    }
   };
-  batch.runTimer = setInterval(() => void tick(), 2200);
   void tick();
 }
 
 function stopBatchPolling() {
-  if (batch.runTimer) { clearInterval(batch.runTimer); batch.runTimer = null; }
+  batch.runEpoch += 1;
+  batch.runPoll = null;
+  if (batch.runTimer) { clearTimeout(batch.runTimer); batch.runTimer = null; }
   if (batch.runElapsedTimer) { clearInterval(batch.runElapsedTimer); batch.runElapsedTimer = null; }
 }
 

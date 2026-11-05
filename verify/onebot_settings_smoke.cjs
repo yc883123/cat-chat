@@ -53,10 +53,22 @@ async function waitFor(check, label) {
     await page.goto(BASE, { waitUntil: 'networkidle' });
     await page.evaluate(() => { document.querySelector('#onboardingDialog')?.close(); });
     await page.click('#openSettings');
+    let firstStatusFails = true;
+    await page.route('**/api/onebot/status', (route) => {
+      if (!firstStatusFails) return route.continue();
+      firstStatusFails = false;
+      return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: '首次状态读取失败测试' }) });
+    });
     await page.click('[data-settings-tab="onebot"]');
     await page.locator('#onebotConfigFields').waitFor();
+    await waitFor(async () => (await page.locator('#onebotFeedback').innerText()).includes('首次状态读取失败测试'), '首次读取错误');
+    assert(await page.locator('#onebotSave').isDisabled());
+    await page.click('#onebotRefresh');
     await waitFor(() => page.locator('#onebotEnabled').isEnabled(), 'QQ 设置载入');
+    assert.equal(await page.inputValue('#onebotListenHost'), original.listen_host, '首次失败后成功刷新须回填配置');
+    assert.equal(await page.inputValue('#onebotListenPort'), String(original.listen_port));
     assert.equal(await page.locator('#onebotTokenStatus').innerText(), '未配置');
+    await page.unroute('**/api/onebot/status');
     const port = await freePort();
     await page.fill('#onebotListenHost', '127.0.0.1');
     await page.fill('#onebotListenPort', String(port));
@@ -89,6 +101,8 @@ async function waitFor(check, label) {
     await page.fill('#onebotAllowedUsers', `${QQ}\n20000456`);
     await page.click('#onebotSave');
     await waitFor(async () => (await request('/api/onebot/status')).config.allowed_user_ids.length === 2, '保留口令保存白名单');
+    await waitFor(async () => (await page.locator('#onebotFeedback').innerText()).includes('已保存')
+      && await page.locator('#onebotSave').isEnabled(), '白名单保存及监听重启完成');
     assert.equal((await request('/api/onebot/status')).config.has_access_token, true);
     ws = new WebSocket(`${address}?access_token=${encodeURIComponent(TOKEN)}`);
     await new Promise((resolve, reject) => { ws.addEventListener('open', resolve, { once: true }); ws.addEventListener('error', () => reject(new Error('保存后原口令失效')), { once: true }); });
@@ -120,6 +134,68 @@ async function waitFor(check, label) {
     await waitFor(async () => (await page.locator('#onebotFeedback').innerText()).includes('保存失败测试'), '显示保存失败');
     await page.unroute('**/api/settings');
 
+    // 会话列表慢请求期间，解绑身份必须与界面同步，不能沿用数组序号误删另一行。
+    const actualSnapshot = await request('/api/onebot/status');
+    const firstBinding = actualSnapshot.bindings.find((item) => item.qq_user_id === QQ);
+    const secondBinding = { ...firstBinding, qq_user_id: '20000456' };
+    let projectedBindings = [firstBinding, secondBinding];
+    await page.route('**/api/onebot/status', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ...actualSnapshot, bindings: projectedBindings }) }));
+    await page.click('#onebotRefresh');
+    await waitFor(async () => (await page.locator('#onebotBindings [data-onebot-unbind]').count()) === 2, '两条绑定投影');
+    let releaseConversations;
+    let conversationsWaiting = false;
+    await page.route('**/api/conversations', async route => {
+      conversationsWaiting = true;
+      await new Promise(resolve => { releaseConversations = resolve; });
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ conversations: [] }) });
+    });
+    const projectedUnbinds = [];
+    await page.route('**/api/onebot/unbind', route => {
+      projectedUnbinds.push(route.request().postDataJSON());
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ removed: true }) });
+    });
+    projectedBindings = [secondBinding];
+    await page.click('#onebotRefresh');
+    await waitFor(() => conversationsWaiting, '会话列表慢请求已开始');
+    assert.equal(await page.locator('#onebotBindings [data-onebot-unbind]').count(), 1, '慢请求期间立即同步绑定列表');
+    assert((await page.locator('#onebotBindings').innerText()).includes('20000456'));
+    await page.locator('#onebotBindings [data-onebot-unbind]').first().click();
+    await waitFor(() => projectedUnbinds.length === 1, '稳定身份解绑请求');
+    assert.equal(projectedUnbinds[0].qq_user_id, '20000456');
+    releaseConversations();
+    await page.unroute('**/api/conversations');
+    await page.unroute('**/api/onebot/unbind');
+    await page.unroute('**/api/onebot/status');
+    await page.click('#onebotRefresh');
+    await waitFor(async () => (await page.locator('#onebotBindings').innerText()).includes(QQ), '恢复真实绑定投影');
+
+    // 保存发出后关闭重开：旧响应不能回填新周期，也不能越过新周期的权限失败。
+    let releaseSave;
+    let saveWaiting = false;
+    await page.route('**/api/settings', async route => {
+      saveWaiting = true;
+      await new Promise(resolve => { releaseSave = resolve; });
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ settings: { onebot: { ...actualSnapshot.config, listen_port: 19999 } } }) });
+    });
+    await page.fill('#onebotAccessToken', 'closing-secret-test');
+    await page.click('#onebotSave');
+    await waitFor(() => saveWaiting, '旧保存请求等待响应');
+    await page.evaluate(() => document.querySelector('#settingsDialog').close());
+    assert.equal(await page.inputValue('#onebotAccessToken'), '', '关闭时清空口令草稿');
+    await page.route('**/api/onebot/status', route => route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ error: '重新打开后无管理权限测试' }) }));
+    await page.click('#openSettings');
+    await waitFor(async () => (await page.locator('#onebotFeedback').innerText()).includes('重新打开后无管理权限测试'), '新周期权限错误');
+    releaseSave();
+    await page.waitForTimeout(250);
+    assert(await page.locator('#onebotSave').isDisabled());
+    assert(await page.locator('#onebotBind').isDisabled());
+    assert.notEqual(await page.inputValue('#onebotListenPort'), '19999', '旧保存不得回填已失效表单');
+    assert((await page.locator('#onebotFeedback').innerText()).includes('重新打开后无管理权限测试'));
+    await page.unroute('**/api/settings');
+    await page.unroute('**/api/onebot/status');
+    await page.click('#onebotRefresh');
+    await waitFor(() => page.locator('#onebotSave').isEnabled(), '权限恢复后重新启用');
+
     for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile', width: 375, height: 812 }]) {
       await page.setViewportSize(viewport);
       await page.locator('[data-settings-tab="onebot"]').scrollIntoViewIfNeeded();
@@ -134,7 +210,7 @@ async function waitFor(check, label) {
     assert(await page.locator('#onebotBind').isDisabled());
     await page.unroute('**/api/onebot/status');
     assert.deepEqual(errors, []);
-    console.log('PASS QQ 设置：桌面/375px、真实保存与监听、假 NapCat 连接、口令保留和脱敏、复制地址、新建/已有会话绑定及解绑、失败提示、草稿保留');
+    console.log('PASS QQ 设置：桌面/375px、真实保存与监听、假 NapCat、口令脱敏、地址复制、会话绑定、首次失败恢复、稳定身份解绑、关闭重开隔离、草稿保留');
   } finally {
     if (ws) ws.close();
     await page.close();

@@ -11,6 +11,13 @@ let bindingBusy = false;
 let bound = false;
 let generation = 0;
 let authorized = false;
+let configLoaded = false;
+let conversationsLoaded = false;
+let statusFailed = false;
+
+function currentRequest(requestGeneration) {
+  return active && requestGeneration === generation;
+}
 
 function feedback(message = '', failed = false) {
   $('#onebotFeedback').textContent = message;
@@ -64,9 +71,13 @@ function populateConfig() {
 function renderBindings() {
   const list = $('#onebotBindings');
   const labels = new Map(conversations.map((item) => [String(item.id), item.title || '未命名会话']));
-  list.innerHTML = bindings.length ? bindings.map((item, index) => `
-    <div class="onebot-binding"><div><strong>QQ ${escapeHtml(item.qq_user_id)}</strong><span>${item.scope === 'group' ? `群 ${escapeHtml(item.qq_group_id)} · ` : '私聊 · '}机器人 ${escapeHtml(item.channel_account_id)}</span><span>→ ${escapeHtml(labels.get(String(item.conversation_id)) || item.conversation_id)}</span></div><button class="control-button" type="button" data-onebot-unbind="${index}" ${bindingBusy ? 'disabled' : ''}>解绑</button></div>
+  list.innerHTML = bindings.length ? bindings.map((item) => `
+    <div class="onebot-binding"><div><strong>QQ ${escapeHtml(item.qq_user_id)}</strong><span>${item.scope === 'group' ? `群 ${escapeHtml(item.qq_group_id)} · ` : '私聊 · '}机器人 ${escapeHtml(item.channel_account_id)}</span><span>→ ${escapeHtml(labels.get(String(item.conversation_id)) || item.conversation_id)}</span></div><button class="control-button" type="button" data-onebot-unbind="${escapeHtml(bindingIdentity(item))}" ${bindingBusy ? 'disabled' : ''}>解绑</button></div>
   `).join('') : '<p class="hint">还没有绑定。保存 QQ 白名单后，在下方添加。</p>';
+}
+
+function bindingIdentity(item) {
+  return JSON.stringify([item.channel_account_id, item.scope, item.qq_user_id, item.qq_group_id || '']);
 }
 
 function renderConversationOptions() {
@@ -104,22 +115,31 @@ async function refreshStatus({ populate = false, loadConversations = false } = {
   const requestGeneration = generation;
   try {
     const result = await api('/api/onebot/status');
-    if (requestGeneration !== generation || !active) return;
+    if (!currentRequest(requestGeneration)) return;
     currentConfig = result.config || {};
     bindings = result.bindings || [];
     renderStatus(result.status);
     updateAddress();
-    if (populate) populateConfig();
+    if (populate || !configLoaded) {
+      populateConfig();
+      configLoaded = true;
+    }
     setAccessible(true);
-    if (loadConversations) {
+    // 身份数组与按钮必须同步更新，不能等另一次网络请求回来后才重画。
+    renderBindings();
+    if (statusFailed && !saving && !bindingBusy) feedback();
+    statusFailed = false;
+    if (loadConversations || !conversationsLoaded) {
       const data = await api('/api/conversations');
-      if (requestGeneration !== generation || !active) return;
+      if (!currentRequest(requestGeneration)) return;
       conversations = data.conversations || [];
+      conversationsLoaded = true;
       renderConversationOptions();
     }
     renderBindings();
   } catch (error) {
-    if (requestGeneration !== generation || !active) return;
+    if (!currentRequest(requestGeneration)) return;
+    statusFailed = true;
     feedback(`读取 QQ 渠道失败：${error.message}`, true);
     if (error.status === 403) setAccessible(false);
   } finally {
@@ -136,7 +156,8 @@ function parseIds(value, label) {
 
 async function saveConfig(event) {
   event.preventDefault();
-  if (saving) return;
+  if (saving || !active || !authorized) return;
+  const requestGeneration = generation;
   try {
     const model = $('#onebotDefaultModel').value.split('\n');
     const config = {
@@ -156,6 +177,7 @@ async function saveConfig(event) {
     setAccessible();
     feedback('正在保存 QQ 渠道设置…');
     const result = await api('/api/settings', { method: 'POST', body: { onebot: config } });
+    if (!currentRequest(requestGeneration)) return;
     currentConfig = result.settings?.onebot || currentConfig;
     if (state.bootstrap?.settings) state.bootstrap.settings.onebot = currentConfig;
     populateConfig();
@@ -164,16 +186,18 @@ async function saveConfig(event) {
     feedback('QQ 渠道设置已保存');
     await refreshStatus();
   } catch (error) {
-    feedback(`保存失败：${error.message}`, true);
+    if (currentRequest(requestGeneration)) feedback(`保存失败：${error.message}`, true);
   } finally {
     saving = false;
-    setAccessible();
+    if (currentRequest(requestGeneration)) setAccessible();
+    else if (visible()) void refreshStatus();
   }
 }
 
 async function bindConversation(event) {
   event.preventDefault();
-  if (bindingBusy) return;
+  if (bindingBusy || !active || !authorized) return;
+  const requestGeneration = generation;
   bindingBusy = true;
   setAccessible();
   try {
@@ -184,20 +208,23 @@ async function bindConversation(event) {
       scope: isGroup ? 'group' : 'private', qq_group_id: isGroup ? $('#onebotGroupId').value.trim() : '',
       conversation_id: $('#onebotConversationId').value, title: $('#onebotNewTitle').value.trim(),
     } });
+    if (!currentRequest(requestGeneration)) return;
     feedback('QQ 会话绑定已保存');
     await refreshStatus({ loadConversations: true });
   } catch (error) {
-    feedback(`绑定失败：${error.message}`, true);
+    if (currentRequest(requestGeneration)) feedback(`绑定失败：${error.message}`, true);
   } finally {
     bindingBusy = false;
-    setAccessible();
-    renderBindings();
+    if (currentRequest(requestGeneration)) { setAccessible(); renderBindings(); }
+    else if (visible()) void refreshStatus();
   }
 }
 
-async function unbindConversation(index) {
-  const item = bindings[index];
-  if (!item || bindingBusy) return;
+async function unbindConversation(identity) {
+  if (bindingBusy || !active || !authorized) return;
+  const item = bindings.find((entry) => bindingIdentity(entry) === identity);
+  if (!item) { feedback('该绑定已发生变化，请刷新后再操作', true); return; }
+  const requestGeneration = generation;
   bindingBusy = true;
   renderBindings();
   setAccessible();
@@ -205,20 +232,25 @@ async function unbindConversation(index) {
     await api('/api/onebot/unbind', { method: 'POST', body: {
       account_id: item.channel_account_id, scope: item.scope, qq_user_id: item.qq_user_id, qq_group_id: item.qq_group_id,
     } });
+    if (!currentRequest(requestGeneration)) return;
     feedback('已解除绑定，会话和消息仍保留');
     await refreshStatus();
   } catch (error) {
-    feedback(`解绑失败：${error.message}`, true);
+    if (currentRequest(requestGeneration)) feedback(`解绑失败：${error.message}`, true);
   } finally {
     bindingBusy = false;
-    setAccessible();
-    renderBindings();
+    if (currentRequest(requestGeneration)) { setAccessible(); renderBindings(); }
+    else if (visible()) void refreshStatus();
   }
 }
 
 export async function openOnebotSettings() {
   active = true;
   generation += 1;
+  configLoaded = false;
+  conversationsLoaded = false;
+  statusFailed = false;
+  setAccessible(false);
   feedback();
   await refreshStatus({ populate: true, loadConversations: true });
 }
@@ -241,7 +273,7 @@ export function bindOnebotSettingsEvents() {
   $('#onebotBindScope').addEventListener('change', updateBindMode);
   $('#onebotBindings').addEventListener('click', (event) => {
     const button = event.target.closest('[data-onebot-unbind]');
-    if (button) void unbindConversation(Number(button.dataset.onebotUnbind));
+    if (button) void unbindConversation(button.dataset.onebotUnbind);
   });
   $('#onebotCopyAddress').addEventListener('click', async () => {
     try { await copyText($('#onebotAddress').value); feedback('已复制 NapCat 连接地址'); }

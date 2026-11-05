@@ -86,7 +86,7 @@ jobs:
         run: |
           # 发布前必须让打包产物真的跑一次：--self-check 会导入 PDF/视频/子代理等全部重依赖，
           # 缺 DLL/扩展会在这里复现。用超时等待，避免导入失败时 PyInstaller 的弹窗挂住 CI。
-          $proc = Start-Process -FilePath "dist\naiba-chat.exe" -ArgumentList "--self-check" -PassThru
+          $proc = Start-Process -FilePath "dist\naiba-chat.exe" -ArgumentList "--self-check" -WindowStyle Hidden -PassThru
           if (-not $proc.WaitForExit(180000)) {
             Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
             throw "打包产物自检超时（很可能在导入阶段弹出了错误窗口），禁止发布"
@@ -95,6 +95,39 @@ jobs:
             throw "打包产物自检失败（exit $($proc.ExitCode)）：exe 缺少运行文件，禁止发布"
           }
           Write-Host "打包产物自检通过（--self-check exit 0）"
+
+      - name: Install packaged UI test dependency
+        shell: pwsh
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          # 锁定与本机验收一致的 Playwright；浏览器使用 runner 已有 Edge，不安装或改写系统浏览器。
+          npm install --prefix "${{ runner.temp }}\cat-chat-ui-deps" --no-save --package-lock=false --ignore-scripts playwright@1.63.0
+          exit $LASTEXITCODE
+
+      - name: Smoke test packaged UI
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          NODE_PATH: ${{ runner.temp }}\cat-chat-ui-deps\node_modules
+          NAIBA_SMOKE_BROWSER_CHANNEL: msedge
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
+        run: |
+          python -u verify/release_ui_smoke.py --exe dist/naiba-chat.exe --node "$((Get-Command node).Source)" --artifacts verify/release-ui-artifacts
+          exit $LASTEXITCODE
+
+      - name: Upload packaged UI failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaged-ui-failure-${{ github.run_id }}
+          # 仅上传门禁日志与截图；隔离 config.json、chat.db、临时浏览器资料不属于此目录。
+          path: |
+            verify/release-ui-artifacts/*.log
+            verify/release-ui-artifacts/*.png
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Create update manifest
         shell: pwsh

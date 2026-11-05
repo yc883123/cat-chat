@@ -41,6 +41,7 @@ KEEP = {
     # 浏览器冒烟
     "browser_smoke.cjs", "topbar_smoke.cjs", "pending_files_smoke.cjs",
     "chat_composer_layout_smoke.cjs",
+    "release_ui_smoke.py", "comfyui_draft_smoke.cjs",
     "comfyui_navigation_smoke.cjs",
     "onebot_settings_smoke.cjs",
     "studio_prompt_feedback_smoke.cjs",

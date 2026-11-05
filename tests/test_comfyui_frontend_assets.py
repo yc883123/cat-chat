@@ -207,11 +207,12 @@ assert.equal(new Set(sigs).size,5, '五类内容区结构应互异：'+sigs.join
 const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
 (async()=>{
+const draftCodec=await import('./public/js/24b-comfyui-draft.js');
 const nodes=new Map(),requests=[],toasts=[];
 const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,open:false,dataset:{},textContent:'',innerHTML:'',options:[],children:[],classList:{add(){},remove(){},toggle(){}},setAttribute(){},removeAttribute(){},addEventListener(){},append(){},closest(){return null},querySelector(){return null},querySelectorAll(){return []}});
 const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
 const context=vm.createContext({console,setTimeout,clearTimeout,URL,document:{createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
-const values={$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[{model_key:'prov',name:'P',model:'m1'}]}},api:async(path,options)=>{requests.push({path,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});
+const values={...draftCodec,$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[{model_key:'prov',name:'P',model:'m1'}]}},api:async(path,options)=>{requests.push({path,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});
   if(path==='/api/comfyui/batches')return {batch:{id:'cfb-x1'}};
   return {};}};
 async function make(name,sourceText,exportsLine){

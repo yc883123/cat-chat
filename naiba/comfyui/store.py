@@ -200,12 +200,9 @@ class ComfyUIStore:
         return None
 
     def create_task(self, input_data: dict[str, Any], *, source_task_id: str = "",
-                    request_key: str = "", owner_id: str = "",
-                    submission_policy: dict[str, Any] | None = None) -> dict[str, Any]:
+                    request_key: str = "", owner_id: str = "") -> dict[str, Any]:
         frozen = json.loads(json.dumps(input_data, ensure_ascii=False, allow_nan=False))
-        policy = json.loads(json.dumps(submission_policy or {}, allow_nan=False))
-        digest = self.payload_hash({"input": frozen, "source_task_id": source_task_id,
-                                    "submission_policy": policy})
+        digest = self.payload_hash({"input": frozen, "source_task_id": source_task_id})
         with self._lock:
             existing = self.lookup_request(request_key, owner_id=owner_id)
             if existing:
@@ -214,7 +211,7 @@ class ComfyUIStore:
                 return existing
             return self._create_task(frozen, source_task_id=source_task_id,
                                      request_key=request_key, owner_id=owner_id,
-                                     payload_hash=digest, submission_policy=policy)
+                                     payload_hash=digest)
 
     def _create_task(self, input_data: dict[str, Any], *, source_task_id: str = "",
                      **receipt: Any) -> dict[str, Any]:

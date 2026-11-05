@@ -25,6 +25,7 @@ from naiba.comfyui import (
     PARAMS_SCHEMA_VERSION,
 )
 from naiba.comfyui import client
+from naiba.comfyui.batches import ComfyUIBatchError, ComfyUIBatchManager
 from naiba.comfyui.jobs import ComfyUIJobManager, ComfyUITaskError
 from naiba.comfyui.params import enrich_slots, scan_params
 from naiba.comfyui.runner import ComfyUIRunner
@@ -74,6 +75,7 @@ class ComfyUIService:
         self.store = ComfyUIStore(data_dir)
         self.runner = ComfyUIRunner(app, self.store)
         self.jobs = ComfyUIJobManager(app, self.store, self.runner)
+        self.batches = ComfyUIBatchManager(app, self.store, self.jobs)
 
     # ---- 生命周期 ----
 
@@ -441,12 +443,6 @@ class ComfyUIService:
         if entry is None:
             return {"error": "工作流不存在或已被删除"}, 404
         try:
-            recipes = getattr(self.app, "recipes", None)
-            if recipes is not None and recipes.workflow_referenced(workflow_id):
-                return {"error": "工作流仍被制作方案或批次引用，不能删除；请另存新版本"}, 409
-        except Exception:  # noqa: BLE001 - reference lookup failure must not permit deletion
-            return {"error": "无法确认制作方案引用，暂不删除工作流"}, 503
-        try:
             ok, reason = self.jobs.delete_workflow(workflow_id)
         except (OSError, ComfyUIStoreError) as exc:
             return {"error": f"删除工作流失败：{exc}"}, 500
@@ -498,13 +494,11 @@ class ComfyUIService:
         task = self.store.get_task(task_id)
         if task is None:
             return {"error": "任务不存在"}, 404
-        recipe = (task.get("submission_policy") or {}).get("mode") == "recipe"
-        if not recipe and str(task.get("status") or "") in {"completed", "failed", "cancelled", "interrupted"}:
+        if str(task.get("status") or "") in {"completed", "failed", "cancelled", "interrupted"}:
             return {"error": "任务已结束，无需取消"}, 409
         if not self.jobs.cancel(task_id):
             return {"error": "任务无法取消（可能已结束）"}, 409
-        cancellation = (((self.store.get_task(task_id) or {}).get("checkpoint") or {}).get("cancellation") or {})
-        return {"ok": True, **({"cancellation": cancellation} if recipe else {})}, 200
+        return {"ok": True}, 200
 
     def api_retry(self, task_id: str) -> tuple[dict[str, Any], int]:
         try:
@@ -528,6 +522,29 @@ class ComfyUIService:
         except (OSError, ComfyUIStoreError) as exc:
             return {"error": f"删除任务失败：{exc}"}, 500
         return {"ok": True, **result}, 200
+
+    # ---- 批量生成 ----
+
+    def api_batch_create(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        try:
+            batch = self.batches.create(body)
+        except ComfyUIBatchError as exc:
+            return {"error": str(exc)}, 400
+        except ComfyUITaskError as exc:
+            return {"error": str(exc)}, 400
+        except (OSError, ComfyUIStoreError) as exc:
+            return {"error": f"批量提交失败：{exc}"}, 500
+        return {"ok": True, "batch": self.batches.get(str(batch.get("id") or "")) or batch}, 201
+
+    def api_batches(self) -> tuple[dict[str, Any], int]:
+        rows = self.batches.list()
+        return {"batches": rows, "count": len(rows)}, 200
+
+    def api_batch(self, batch_id: str) -> tuple[dict[str, Any], int]:
+        batch = self.batches.get(batch_id)
+        if batch is None:
+            return {"error": "批次不存在或已被删除"}, 404
+        return {"batch": batch}, 200
 
     # ---- 产物文件 ----
 

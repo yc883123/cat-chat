@@ -14,6 +14,8 @@ COMFYUI_ORIGIN_LABEL = "造梦机"
 # 任务 id 前缀（工作台口径：studio st- / labeler tg- / comfyui cf-）。
 COMFYUI_TASK_PREFIX = "cf"
 COMFYUI_WORKFLOW_PREFIX = "cw"
+# 批量生成批次记录前缀（request_key = <批次id>-<条目序号>，同 cf 系口径）。
+COMFYUI_BATCH_PREFIX = "cfb"
 
 COMFYUI_TASK_STATUSES = ("queued", "running", "completed", "failed", "cancelled", "interrupted")
 COMFYUI_ACTIVE_STATUSES = ("queued", "running")
@@ -22,6 +24,8 @@ COMFYUI_RESUMABLE_STATUSES = ("interrupted", "failed")
 COMFYUI_EVENT_TYPES = (
     "status", "task_started", "shot_submitted", "shot_done", "shot_failed",
     "shot_lost", "task_done", "error", "log",
+    # 逐次卸载（母本 §5.5）：每个执行边界后的 /free 受理或失败，单独记录。
+    "unload_requested",
 )
 
 MAX_SHOTS = 200

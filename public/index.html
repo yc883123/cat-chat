@@ -606,6 +606,7 @@
             <button class="studio-pane-btn comfyui-pane-btn" type="button" aria-pressed="false" data-comfyui-pane="workflows">工作流</button>
             <button class="studio-pane-btn comfyui-pane-btn active" type="button" aria-pressed="true" data-comfyui-pane="run">提交</button>
             <button class="studio-pane-btn comfyui-pane-btn" type="button" aria-pressed="false" data-comfyui-pane="tasks">结果</button>
+            <button class="studio-pane-btn comfyui-pane-btn" type="button" aria-pressed="false" data-comfyui-pane="batch">批量生成</button>
           </div>
           <div class="comfyui-columns" id="comfyuiColumns">
             <!-- 左：工作流库 -->
@@ -645,7 +646,7 @@
                   </label>
                   <button class="control-button" id="comfyuiSubmit" type="button" disabled>开始生成</button>
                   <button class="control-button" id="comfyuiSaveCurrentAs" type="button">用当前配置另存工作流</button>
-                  <button class="control-button" id="comfyuiRecipeHandoff" type="button">交给任务总管 · 批量准备</button>
+                  <button class="control-button" id="comfyuiOpenBatch" type="button">批量生成</button>
                 </div>
               </div>
             </section>
@@ -667,6 +668,11 @@
                 <div class="comfyui-output-grid" id="comfyuiOutputGrid" aria-label="生成结果"></div>
               </div>
             </section>
+          </div>
+          <!-- 批量生成档：一批多方案多条目，每条目独立素材/提示词/时长/分辨率。
+               页面壳在这里定稿；填单与跑批视图全由 public/js/24-comfyui.js 渲染。 -->
+          <div class="comfyui-batch" id="comfyuiBatch" hidden>
+            <div class="comfyui-batch-body" id="comfyuiBatchBody"></div>
           </div>
           <dialog class="comfyui-url-dialog" id="comfyuiUrlDialog" aria-label="ComfyUI 地址">
             <form method="dialog" class="comfyui-import-form">
@@ -1680,13 +1686,20 @@
             <div class="super-agent-sidebar-brand"><span class="super-agent-brand-mark" aria-hidden="true">总</span><div><strong>任务总管</strong><small>持续任务 · 进展与结果</small></div></div>
             <nav class="super-agent-app-nav" id="superAgentAppNav" aria-label="应用视图"><button type="button" data-super-view="chat">对话</button><button type="button" data-super-view="studio">工作台</button><button type="button" data-super-view="super-agent" aria-current="page">任务总管</button></nav>
             <button class="control-button primary super-agent-new-task" id="superAgentCreate" type="button"><span aria-hidden="true">＋</span> 新建任务</button>
-            <button class="control-button super-agent-new-task super-agent-new-secondary" id="superAgentRecipeCreate" type="button">批量制作视频</button>
             <div class="super-agent-panel-head"><strong>我的任务</strong><span id="superAgentThreadCount">0</span></div>
             <div class="super-agent-filters" id="superAgentFilters" role="group" aria-label="筛选任务">
               <button type="button" data-super-filter="all" aria-pressed="true">全部</button>
               <button type="button" data-super-filter="waiting" aria-pressed="false">待确认</button>
               <button type="button" data-super-filter="completed" aria-pressed="false">已完成</button>
+              <button type="button" data-super-filter="archived" aria-pressed="false">已归档</button>
             </div>
+            <div class="super-agent-batch-bar" id="superAgentBatchBar" hidden>
+              <label class="super-agent-select-all"><input type="checkbox" id="superAgentSelectAll">全选</label>
+              <span id="superAgentBatchCount">已选 0 项</span>
+              <button type="button" class="control-button tiny" id="superAgentBatchDelete">删除所选</button>
+              <button type="button" class="control-button tiny" id="superAgentMultiExit">退出多选</button>
+            </div>
+            <button type="button" class="control-button tiny super-agent-multi-toggle" id="superAgentMultiToggle" hidden>多选</button>
             <div class="super-agent-thread-list" id="superAgentThreadList"></div>
             <p class="super-agent-empty" id="superAgentThreadEmpty">还没有任务，先新建一个吧。</p>
             <p class="super-agent-list-note">切换页面不会中断后台任务</p>
@@ -1716,9 +1729,9 @@
                 <p class="super-agent-focus-note" id="superAgentFocusNote" hidden></p>
               </section>
               <section class="super-agent-section super-agent-decision-section" id="superAgentDecisionSection" hidden><div class="super-agent-section-title"><h2>最近系统决策</h2><span class="super-agent-chain-meta" id="superAgentDecisionAt"></span></div><p class="super-agent-summary" id="superAgentSummary"></p></section>
-              <section class="super-agent-section super-agent-recipe" id="superAgentRecipeBatch" hidden aria-label="视频批次审核"></section>
+              <section class="super-agent-section content-zone" id="superAgentContentZone" hidden aria-label="任务内容区"></section>
               <section class="super-agent-section super-agent-supervision" id="superAgentSupervision" hidden aria-live="polite"></section>
-              <section class="super-agent-section super-agent-stage-section"><div class="super-agent-section-title"><h2>任务步骤</h2><span class="super-agent-chain-meta" id="superAgentChainMeta"></span></div><div class="super-agent-stage-chain" id="superAgentStageChain"><div class="super-agent-node-list" id="superAgentNodeList"></div></div></section>
+              <section class="super-agent-section super-agent-stage-section" id="superAgentStageSection" hidden><div class="super-agent-section-title"><h2>任务步骤</h2><span class="super-agent-chain-meta" id="superAgentChainMeta"></span></div><div class="super-agent-stage-chain" id="superAgentStageChain"><div class="super-agent-node-list" id="superAgentNodeList"></div></div></section>
               <section class="super-agent-section"><div class="super-agent-section-title"><h2>时间线</h2><span class="super-agent-chain-meta">最近活动在前</span></div><div class="super-agent-event-list" id="superAgentEventList"></div></section>
             </div>
           </section>
@@ -1731,89 +1744,8 @@
         </div>
       </section>
 
-      <dialog id="superAgentRecipeDialog" class="writer-dialog sa-dialog super-agent-recipe-dialog" aria-labelledby="superAgentRecipeTitle">
-        <div class="dlg-head">
-          <span class="dlg-ico" aria-hidden="true">▶</span>
-          <div class="dlg-head-copy"><h2 id="superAgentRecipeTitle">新建批量任务</h2><p>直接选造梦机已保存的工作流，不要求先建方案</p></div>
-          <button type="button" class="dlg-close" data-recipe-close aria-label="关闭">✕</button>
-        </div>
-        <div class="dlg-body">
-          <p id="recipeCreateError" class="writer-dialog-error" role="alert"></p>
-          <form id="superAgentRecipeForm" class="writer-dialog-form" novalidate>
-            <p class="writer-dialog-hint">创建只保存批量草稿，不会调用模型、不会开始生成；进入批次后再逐组补内容、改参数、确认生成。</p>
-            <div class="sa-sec-head"><h3>1 · 工作流</h3><span>直接复用它的槽位、控件与保存值</span></div>
-            <label>造梦机已保存的工作流<select id="recipeWorkflowSelect"></select></label>
-            <p class="writer-dialog-hint" id="recipeWorkflowHint" role="status">选工作流后自动带入它的参数与保存值。</p>
-            <label>任务名称<input id="recipeTitle" maxlength="160" placeholder="本次视频批次"></label>
-            <div class="sa-sec-head"><h3>2 · 首组内容</h3><span>其余组进入批次后逐组添加</span></div>
-            <div class="sa-sec-head"><h3>2 · 参数映射与首组内容</h3><span>哪个参数对应什么，由你指定，总管记住</span></div>
-            <div id="recipeCreateMapping"></div>
-            <div class="sa-sec-head"><h3>每组正文怎么来</h3><span>直接用现成文本，或先反推</span></div>
-            <div class="super-agent-mode-cards" id="recipeCreateInputMode" role="radiogroup" aria-label="正文来源">
-              <button type="button" class="super-agent-mode-card active" data-input-mode="prompt" role="radio" aria-checked="true"><span class="super-agent-mode-radio" aria-hidden="true"></span><span class="super-agent-mode-top">直接用现成文本</span><p>填好的正文就是最终提示词，不反推；哪组想反推进批次后单独改。</p></button>
-              <button type="button" class="super-agent-mode-card" data-input-mode="script" role="radio" aria-checked="false"><span class="super-agent-mode-radio" aria-hidden="true"></span><span class="super-agent-mode-top">先反推生成提示词</span><p>只填每组的内容要求，确认后按模板反推；填了正文的组仍直接用原文。</p></button>
-            </div>
-            <div id="recipeCreateTemplateRow" hidden><label>反推模板<select id="recipeCreateTemplate"><option value="recipe_minimax_h3_r2v_v2">MiniMax H3 · 多媒体参考生视频</option><option value="recipe_minimax_h3_i2v_v1">MiniMax H3 · 首帧生视频</option><optgroup label="提词库自定义模板" data-custom></optgroup></select></label><p class="writer-dialog-hint">反推模型可进批次后再选；正文留空的组才走反推。</p></div>
-            <label>第一组提示词<textarea id="recipeCreatePrompt" rows="6" placeholder="选工作流后自动带入它保存的默认正文，可修改"></textarea></label>
-            <div class="sa-sec-head"><h3>3 · 数量与时长</h3><span>沿用工作流单位</span></div>
-            <div class="super-agent-create-grid"><label>每组生成几条<input id="recipeShots" type="number" min="1" max="200" value="1"></label><label id="recipeDurationField" hidden>视频时长（秒）<input id="recipeDuration" type="number" min="1" max="300" step="1" value="15"></label></div>
-            <p class="writer-dialog-hint">时长只在参数映射里选了时长槽时出现；实际视频长度按工作流帧对齐。最终生效参数以生成确认页为准。</p>
-          </form>
-        </div>
-        <div class="dlg-foot">
-          <span class="foot-hint">创建只保存清单，不会调用模型、不会开始生成。</span>
-          <div class="foot-btns">
-            <button class="control-button" data-recipe-close type="button">保留草稿并关闭</button>
-            <button id="recipeCreateSubmit" class="control-button primary" type="submit" form="superAgentRecipeForm">创建批量草稿</button>
-          </div>
-        </div>
-      </dialog>
-      <dialog id="superAgentHandoffDialog" class="writer-dialog sa-dialog super-agent-recipe-dialog" aria-labelledby="superAgentHandoffTitle">
-        <div class="dlg-head">
-          <span class="dlg-ico" aria-hidden="true">⇥</span>
-          <div class="dlg-head-copy"><h2 id="superAgentHandoffTitle">交给任务总管 · 确认参数来源</h2><p>带入当前工作流与明确参数，直接生成批量草稿，不重新配置整套图</p></div>
-          <button type="button" class="dlg-close" data-handoff-close aria-label="关闭">✕</button>
-        </div>
-        <div class="dlg-body">
-          <p id="superAgentHandoffError" class="writer-dialog-error" role="alert"></p>
-          <p class="writer-dialog-hint" id="superAgentHandoffWorkflow"></p>
-          <p class="writer-dialog-hint">按工作流已保存的快照出片；各参数、素材、时长、条数的最终值都在总管批次里逐项确定，交接只确认「哪个参数对应什么」。</p>
-          <div class="sa-sec-head"><h3>参数映射</h3><span>哪个参数对应什么由你指定；这次的选择会记住</span></div>
-          <div id="superAgentHandoffMapping"></div>
-          <div class="sa-sec-head"><h3>每组正文怎么来</h3><span>直接用现成文本，或先反推</span></div>
-          <div class="super-agent-mode-cards" id="superAgentHandoffInputMode" role="radiogroup" aria-label="正文来源">
-            <button type="button" class="super-agent-mode-card active" data-input-mode="prompt" role="radio" aria-checked="true"><span class="super-agent-mode-radio" aria-hidden="true"></span><span class="super-agent-mode-top">直接用现成文本</span><p>工作流里的正文就是最终提示词；哪组想反推进批次后单独改。</p></button>
-            <button type="button" class="super-agent-mode-card" data-input-mode="script" role="radio" aria-checked="false"><span class="super-agent-mode-radio" aria-hidden="true"></span><span class="super-agent-mode-top">先反推生成提示词</span><p>确认后按模板反推成提示词；填了正文的组仍直接用原文。</p></button>
-          </div>
-          <div id="superAgentHandoffTemplateRow" hidden><label>反推模板<select id="superAgentHandoffTemplate"><option value="recipe_minimax_h3_r2v_v2">MiniMax H3 · 多媒体参考生视频</option><option value="recipe_minimax_h3_i2v_v1">MiniMax H3 · 首帧生视频</option><optgroup label="提词库自定义模板" data-custom></optgroup></select></label><p class="writer-dialog-hint">反推模型可进批次后再选；正文留空的组才走反推。</p></div>
-          <div class="sa-sec-head"><h3>将带入批量草稿</h3><span>只读摘要</span></div>
-          <div id="superAgentHandoffSummary"></div>
-        </div>
-        <div class="dlg-foot">
-          <span class="foot-hint">不新建方案、不改写原工作流；草稿创建后仍需逐组审核、预检，再确认生成。</span>
-          <div class="foot-btns">
-            <button class="control-button" data-handoff-close type="button">取消</button>
-            <button id="superAgentHandoffConfirm" class="control-button primary" type="button">创建批量草稿</button>
-          </div>
-        </div>
-      </dialog>
       <dialog id="studioRuleEditorDialog" class="writer-dialog sa-dialog" aria-label="编辑提词规则">
         <div class="dlg-head"><div class="dlg-head-copy"><h2>提词规则（另存副本）</h2></div><button id="studioRuleEditorCancel" class="dlg-close" type="button" aria-label="返回方案">✕</button></div><div class="dlg-body"><p id="studioRuleEditorError" class="writer-dialog-error" role="alert"></p><label>规则名称<input id="studioRuleEditorName" maxlength="160"></label><label>完整规则正文<textarea id="studioRuleEditorBody" rows="18"></textarea></label></div><div class="dlg-foot"><button id="studioRuleEditorSave" class="control-button primary" type="button">保存规则并返回方案</button></div>
-      </dialog>
-      <dialog id="recipeReviewDialog" class="writer-dialog sa-dialog" aria-labelledby="recipeReviewTitle">
-        <div class="dlg-head">
-          <span class="dlg-ico" aria-hidden="true">✓</span>
-          <div class="dlg-head-copy"><h2 id="recipeReviewTitle">生成前确认</h2><p>逐组核对素材、提示词与设置；确认后才会提交</p></div>
-        </div>
-        <div class="dlg-body">
-          <p class="writer-dialog-error" id="recipeReviewError" role="alert"></p>
-          <div id="recipeReviewPrecheck" hidden></div>
-          <div id="recipeReviewBody"></div>
-        </div>
-        <div class="dlg-foot">
-          <span class="foot-hint" id="recipeReviewHint">缺项会在这一步之前拦下。</span>
-          <div class="foot-btns"><button id="recipeReviewCancel" class="control-button" type="button">返回修改</button><button id="recipeReviewConfirm" class="control-button primary" type="button">确认</button></div>
-        </div>
       </dialog>
       <dialog id="superAgentResultDialog" class="writer-dialog sa-dialog super-agent-result-dialog" aria-labelledby="superAgentResultTitle">
         <div class="dlg-head">
@@ -1822,6 +1754,38 @@
           <button type="button" class="dlg-close" id="superAgentResultClose" aria-label="关闭">✕</button>
         </div>
         <div class="dlg-body"><div id="superAgentResultBody" aria-live="polite"></div></div>
+      </dialog>
+      <!-- 启动台 B（修复 B3）：「＋新建任务」先到这里按用途选类型；选卡只打开对应
+           表单弹窗，不创建任务、不产生费用。类型真源仍是新建表单里隐藏的 select。 -->
+      <dialog id="superAgentLaunchDialog" class="writer-dialog sa-dialog super-agent-launch-dialog" aria-labelledby="superAgentLaunchTitle">
+        <div class="dlg-head">
+          <span class="dlg-ico" aria-hidden="true">＋</span>
+          <div class="dlg-head-copy"><h2 id="superAgentLaunchTitle">新建任务 · 先选要做什么</h2><p>任务类型按用途分组，选完才进入对应表单</p></div>
+          <button type="button" class="dlg-close" data-launch-close aria-label="关闭">✕</button>
+        </div>
+        <div class="dlg-body">
+          <p class="writer-dialog-hint">先选这次要做什么。选类型只打开对应表单，<b>不会创建任务、不会调用模型、不会开始生成</b>。</p>
+          <div class="launcher-group">
+            <div class="lg-head"><h3>写作与改编</h3><span>按作品推进</span></div>
+            <div class="super-agent-mode-cards type-grid" id="superAgentLaunchCards" role="group" aria-label="任务类型">
+              <button type="button" class="type-card" data-launch-domain="writer"><span class="tc-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 4h9a3 3 0 0 1 3 3v13H8a3 3 0 0 0-3 3z"></path><path d="M5 4v18M8 9h6"></path></svg></span><span class="tc-copy"><b>织书台 · 原创写作</b><p>从设定、大纲到分章正文，按阶段链往下写</p><span class="tc-meta"><span class="tag warn">需要先有作品</span><span class="tag">4 阶段链</span></span></span></button>
+              <button type="button" class="type-card" data-launch-domain="novel"><span class="tc-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="6" cy="7" r="2.5"></circle><circle cx="6" cy="17" r="2.5"></circle><path d="M8 8.5 20 19M8 15.5 20 5"></path></svg></span><span class="tc-copy"><b>拆书匠 · 小说改编</b><p>导入原文，提取要素、改编大纲、生成剧本</p><span class="tc-meta"><span class="tag warn">需要先有作品</span><span class="tag">5 阶段链</span></span></span></button>
+            </div>
+          </div>
+          </div>
+          <div class="launcher-group">
+            <div class="lg-head"><h3>对话与自动化</h3><span>按轮次执行</span></div>
+            <div class="type-grid">
+              <button type="button" class="type-card" data-launch-domain="chat"><span class="tc-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"></path><path d="M8 9h8M8 12h5"></path></svg></span><span class="tc-copy"><b>聊天任务</b><p>以一段目标开始，单次执行或自动检查并继续</p><span class="tc-meta"><span class="tag ok">无需准备</span><span class="tag">按轮次</span></span></span></button>
+              <button type="button" class="type-card" data-launch-domain="job"><span class="tc-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 7h10v10H7z"></path><path d="m9 7 1-3h4l1 3M9 17l-1 3h8l-1-3"></path></svg></span><span class="tc-copy"><b>关联已有后台任务</b><p>把已在运行的后台任务接到总管里看状态</p><span class="tc-meta"><span class="tag warn">需要已有任务</span><span class="tag">只读状态</span></span></span></button>
+              <button type="button" class="type-card" data-launch-domain="subagent"><span class="tc-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="12" rx="3"></rect><path d="M12 3v4M9 13h.01M15 13h.01M9 16h6"></path></svg></span><span class="tc-copy"><b>交给子助手</b><p>由子助手分头处理，结果回传本任务</p><span class="tc-meta"><span class="tag warn">需要已配置子助手</span><span class="tag">按轮次</span></span></span></button>
+            </div>
+          </div>
+        </div>
+        <div class="dlg-foot">
+          <span class="foot-hint">选类型不会创建任务，也不会产生任何模型费用。</span>
+          <div class="foot-btns"><button class="control-button" data-launch-close type="button">取消</button></div>
+        </div>
       </dialog>
       <dialog id="superAgentCreateDialog" class="writer-dialog sa-dialog super-agent-create-dialog" aria-labelledby="superAgentCreateTitle">
         <div class="dlg-head">
@@ -1834,7 +1798,7 @@
           <form method="dialog" class="writer-dialog-form super-agent-create-form" id="superAgentCreateForm" novalidate>
           <label class="super-agent-goal-field">你想完成什么？<textarea id="superAgentCreateGoal" rows="3" placeholder="说说你的目标，以及需要注意的要求"></textarea><small id="superAgentCreateGoalHint">写作任务可不填，直接使用作品中已保存的内容。</small></label>
           <div class="super-agent-create-grid">
-            <label>任务类型<select id="superAgentCreateDomain"><option value="writer">织书台 · 原创写作</option><option value="novel">拆书匠 · 小说改编</option><option value="chat">聊天任务</option><option value="job">关联已有后台任务</option><option value="subagent">交给子助手</option></select></label>
+            <label hidden>任务类型<select id="superAgentCreateDomain"><option value="writer">织书台 · 原创写作</option><option value="novel">拆书匠 · 小说改编</option><option value="chat">聊天任务</option><option value="job">关联已有后台任务</option><option value="subagent">交给子助手</option></select></label>
             <label>任务名称 <small>可选</small><input id="superAgentCreateName" maxlength="160" placeholder="留空会自动命名"></label>
           </div>
           <fieldset id="superAgentCreateDomainFields" class="super-agent-create-group"><legend>选择作品与范围</legend>

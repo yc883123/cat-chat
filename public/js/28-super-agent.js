@@ -2,7 +2,7 @@
 // 28-super-agent.js —— 任务总管控制面
 // ============================================================
 
-import { $, api, copyText, escapeHtml, localFileUrl, setAppView, state } from "./01-core.js";
+import { $, api, copyText, escapeHtml, localFileUrl, setAppView, state, toast } from "./01-core.js";
 import { closeSidebar, sidebarDesktop } from "./14-file-panel.js";
 import { closeStudioView, openStudioView, setStudioPage } from "./22-studio.js";
 import { openConversation } from "./08-conversations.js";
@@ -10,7 +10,7 @@ import { openConversation } from "./08-conversations.js";
 const viewState = {
   open: false, selectedId: "", threads: [], detail: null, nodes: [], events: [], artifacts: [], approvals: [],
   eventCursor: 0, eventsThreadId: "", eventsInitialized: false,
-  loading: false, error: "", actionMessage: "", syncedAt: 0, filter: "all", resultRequest: 0,
+  loading: false, error: "", actionMessage: "", syncedAt: 0, filter: "all", multiSelect: false, deleteSelection: new Set(), resultRequest: 0,
 };
 
 const createModelState = { requestId: 0, loading: false, submitting: false };
@@ -27,7 +27,7 @@ function scheduleRefresh() {
   refreshTimer = setTimeout(async () => {
     refreshTimer = null;
     if (state.appView !== "super-agent") return;
-    try { if (!viewState.loading && !createModelState.submitting && !recipeState.busy && document.visibilityState !== "hidden") await loadThreads(); }
+    try { if (!viewState.loading && !createModelState.submitting && document.visibilityState !== "hidden") await loadThreads(); }
     catch (error) { viewState.error = error.message || "刷新任务失败"; renderSyncStatus(); }
     finally { if (state.appView === "super-agent") scheduleRefresh(); }
   }, 4000);
@@ -94,8 +94,45 @@ function mergeEvents(existing, incoming) {
   return [...merged.values()].sort((left, right) => Number(left.sequence || 0) - Number(right.sequence || 0));
 }
 
+// §5.1：删除＝软删除（归档）。运行中 / 停止中先取消再删；产物文件不动。
+async function deleteThread(threadId) {
+  const thread = viewState.threads.find((row) => row.thread_id === threadId);
+  if (thread && ["active", "stopping"].includes(thread.status)) { toast("任务正在运行或停止中；请先取消再删除"); return; }
+  if (!window.confirm("任务将从列表移除，已生成的文件仍保留在磁盘。确认删除？")) return;
+  try {
+    await api(`/api/super-agent/threads/${encodeURIComponent(threadId)}/archive`, { method: "POST", body: { request_id: newRequestId() } });
+    toast("已删除任务；已生成的文件仍保留在磁盘");
+    if (viewState.selectedId === threadId) { viewState.selectedId = ""; viewState.detail = null; }
+    await loadThreads();
+  } catch (error) { toast(`删除失败：${error.message}`); }
+}
+async function restoreThread(threadId) {
+  try {
+    await api(`/api/super-agent/threads/${encodeURIComponent(threadId)}/restore`, { method: "POST", body: { request_id: newRequestId() } });
+    toast("已恢复任务");
+    await loadThreads();
+  } catch (error) { toast(`恢复失败：${error.message}`); }
+}
+async function deleteSelectedThreads() {
+  const ids = [...viewState.deleteSelection].filter((id) => {
+    const thread = viewState.threads.find((row) => row.thread_id === id);
+    return thread && !["active", "stopping"].includes(thread.status);
+  });
+  if (!ids.length) { toast("没有可删除的选中项；运行中 / 停止中的任务要先取消"); return; }
+  if (!window.confirm(`将从列表移除选中的 ${ids.length} 个任务；已生成的文件仍保留在磁盘。确认删除？`)) return;
+  // 逐项独立提交（不做整批原子）：部分失败单独列出，成功项不回滚。
+  const failed = [];
+  for (const id of ids) {
+    try { await api(`/api/super-agent/threads/${encodeURIComponent(id)}/archive`, { method: "POST", body: { request_id: newRequestId() } }); }
+    catch (error) { failed.push(`${error.message}`); }
+  }
+  viewState.deleteSelection.clear(); viewState.multiSelect = false;
+  await loadThreads();
+  toast(failed.length ? `已删除 ${ids.length - failed.length} 个任务；${failed.length} 个失败：${failed.join("；")}` : `已删除 ${ids.length} 个任务`);
+}
 async function loadThreads() {
-  const result = await api("/api/super-agent/threads");
+  // 含归档一次拉回：删除 / 恢复都在列表层完成（§5.1），各筛选前端分流。
+  const result = await api("/api/super-agent/threads?include_archived=1");
   viewState.threads = Array.isArray(result.threads) ? result.threads : [];
   const threads = filteredThreads();
   if (!viewState.selectedId || !threads.some((item) => item.thread_id === viewState.selectedId)) {
@@ -127,20 +164,18 @@ async function loadDetail(threadId) {
     viewState.eventsThreadId = threadId; viewState.eventsInitialized = true;
     viewState.artifacts = Array.isArray(artifacts.artifacts) ? artifacts.artifacts : [];
     viewState.approvals = Array.isArray(approvals.approvals) ? approvals.approvals : [];
-    const recipeThread = Boolean(viewState.detail?.recipe_batch_id || viewState.nodes.some((node) => node.executor_type === "recipe_batch"));
-    if (recipeThread) {
-      const response = await api(`/api/super-agent/threads/${encoded}/recipe`);
-      if (viewState.selectedId !== threadId) return;
-      recipeState.batches.set(threadId, response.batch);
-    }
     viewState.error = ""; viewState.actionMessage = ""; viewState.syncedAt = Date.now(); renderDetail();
-    renderRecipeBatch(recipeThread ? recipeState.batches.get(threadId) : null);
   } catch (error) { viewState.error = error.message || "读取任务失败"; renderSyncStatus(); }
   finally { viewState.loading = false; renderSyncStatus(); }
 }
 
 function filteredThreads() {
-  return viewState.threads.filter((thread) => viewState.filter === "waiting" ? thread.status === "waiting_user" : viewState.filter === "completed" ? thread.status === "completed" : true);
+  return viewState.threads.filter((thread) => {
+    if (viewState.filter === "waiting") return thread.status === "waiting_user";
+    if (viewState.filter === "completed") return thread.status === "completed";
+    if (viewState.filter === "archived") return thread.status === "archived";
+    return thread.status !== "archived";
+  });
 }
 
 function renderThreadList() {
@@ -152,13 +187,29 @@ function renderThreadList() {
   $("#superAgentFilters")?.querySelectorAll("[data-super-filter]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.superFilter === viewState.filter)));
   $("#superAgentFilters")?.querySelectorAll("[data-super-filter]").forEach((button) => {
     const filter = button.dataset.superFilter;
-    const count = viewState.threads.filter((thread) => filter === "waiting" ? thread.status === "waiting_user" : filter === "completed" ? thread.status === "completed" : true).length;
-    button.textContent = `${({ all: "全部", waiting: "待确认", completed: "已完成" })[filter]} ${count}`;
+    const count = viewState.threads.filter((thread) => filter === "waiting" ? thread.status === "waiting_user" : filter === "completed" ? thread.status === "completed" : filter === "archived" ? thread.status === "archived" : thread.status !== "archived").length;
+    button.textContent = `${({ all: "全部", waiting: "待确认", completed: "已完成", archived: "已归档" })[filter]} ${count}`;
   });
-  list.innerHTML = threads.map((thread) => `
-    <button class="super-agent-thread ${thread.thread_id === viewState.selectedId ? "active" : ""}" type="button" data-super-thread="${text(thread.thread_id)}">
-      <strong><i class="super-agent-task-icon" aria-hidden="true">▤</i>${text(thread.title, "未命名任务")}</strong><span class="super-agent-task-state" data-status="${text(thread.status)}"><i aria-hidden="true"></i>${text(statusLabel(thread.status))}</span><small>${text(thread.goal, "暂无目标")}</small>
-    </button>`).join("");
+  // 删除入口在统一壳/列表层，六类任务一套实现（§5.1）。
+  $("#superAgentMultiToggle").hidden = viewState.multiSelect || !threads.length;
+  const bar = $("#superAgentBatchBar");
+  if (bar) {
+    bar.hidden = !viewState.multiSelect;
+    $("#superAgentBatchCount").textContent = `已选 ${viewState.deleteSelection.size} 项`;
+    const selectAll = $("#superAgentSelectAll");
+    if (selectAll) selectAll.checked = threads.length > 0 && threads.every((thread) => viewState.deleteSelection.has(thread.thread_id) || ["active", "stopping"].includes(thread.status));
+  }
+  list.innerHTML = threads.map((thread) => {
+    const busy = ["active", "stopping"].includes(thread.status);
+    return `<div class="super-agent-thread-row${viewState.multiSelect ? " selecting" : ""}">
+      ${viewState.multiSelect ? `<input type="checkbox" class="super-agent-thread-check" data-thread-check="${text(thread.thread_id)}" ${viewState.deleteSelection.has(thread.thread_id) ? "checked" : ""} ${busy ? "disabled" : ""} aria-label="选择任务">` : ""}
+      <button class="super-agent-thread ${thread.thread_id === viewState.selectedId ? "active" : ""}" type="button" data-super-thread="${text(thread.thread_id)}">
+        <strong><i class="super-agent-task-icon" aria-hidden="true">▤</i>${text(thread.title, "未命名任务")}</strong><span class="super-agent-task-state" data-status="${text(thread.status)}"><i aria-hidden="true"></i>${text(statusLabel(thread.status))}</span><small>${text(thread.goal, "暂无目标")}</small>
+      </button>
+      ${thread.status === "archived" ? `<button class="super-agent-thread-act" type="button" data-thread-restore="${text(thread.thread_id)}" ${viewState.multiSelect ? "hidden" : ""}>恢复</button>` : ""}
+      <button class="super-agent-thread-act is-danger" type="button" data-thread-delete="${text(thread.thread_id)}" ${viewState.multiSelect ? "hidden" : ""} aria-label="删除任务">✕</button>
+    </div>`;
+  }).join("");
 }
 
 function renderEmptyDetail() {
@@ -171,7 +222,7 @@ function renderEmptyDetail() {
   $("#superAgentNextStep").innerHTML = '<p class="super-agent-muted">选择任务后查看下一步。</p>';
   $("#superAgentConversationLinks").innerHTML = "";
   $("#superAgentSupervision").hidden = true;
-  if ($("#superAgentRecipeBatch")) $("#superAgentRecipeBatch").hidden = true;
+  const stageSection = $("#superAgentStageSection"); if (stageSection) stageSection.hidden = false;
   const focus = $("#superAgentFocus"); if (focus) focus.hidden = true;
 }
 
@@ -227,10 +278,133 @@ function renderSupervision(detail) {
     }).join("") || '<p class="super-agent-muted">开始后在这里保留每轮结果与检查依据。</p>'}</div>`;
 }
 
-function renderOverview(detail, nodes, currentNodeId) {
+// ---- 六类内容区（§四 4.1；2026-11-05 修复 B）：「一壳三芯」——统一壳（标题 /
+// 状态 / 操作 / 指标 / 时间线 / 右栏）六类一致，#superAgentContentZone 作为详情区
+// 中间的主内容容器，随任务类型替换成各自的完整结构，不再是旧详情页上叠一块
+// 文字条。路由只依据现有字段（supervision / executor_type），
+// 不新增猜类型逻辑；字段缺失或历史任务回退通用视图（无数据的块不渲染）。
+function threadZoneKind(detail, nodes) {
+  const kinds = new Set(nodes.map((node) => String(node.executor_type || "")));
+  if (detail.supervision || kinds.has("supervised_chat") || kinds.has("chat_run")) return "chat";
+  if (kinds.has("job")) return "job";
+  if (kinds.has("subagent")) return "subagent";
+  if (kinds.has("writer_pipeline")) return "writer";
+  if (kinds.has("novel_stage")) return "novel";
+  return "";
+}
+function zoneSecHead(title, sub) {
+  return `<div class="sec-head"><h2>${text(title)}</h2><span>${text(sub)}</span></div>`;
+}
+function zonePill(label, tone) {
+  return `<span class="pill ${tone}">${text(label)}</span>`;
+}
+function statusPill(status) {
+  const tone = ({ succeeded: "ok", running: "run", active: "run", pending: "idle", ready: "idle", waiting_user: "wait", needs_recovery: "wait", failed: "bad", blocked: "bad", cancelled: "idle", stopped: "idle" })[String(status || "")] || "idle";
+  return zonePill(statusLabel(status), tone);
+}
+// 阶段轨道（写作 / 改编共用；novel 的导入 / 复核标关卡——后端 coordination gates）。
+function zoneTrackMarkup(nodes, currentNodeId, gateStages = []) {
+  const cols = nodes.length >= 5 ? "track-5" : "track-4";
+  return `<div class="stage-track ${cols}">${nodes.map((node, index) => {
+    const status = String(node.status || "pending");
+    const done = status === "succeeded";
+    const current = String(node.node_id) === String(currentNodeId);
+    const gate = gateStages.includes(String(node.stage_key || ""));
+    return `<div class="track-node${done ? " done" : ""}${current ? " current" : ""}${gate ? " gate" : ""}"><span class="dot" aria-hidden="true">${done ? "✓" : index + 1}</span><i class="line" aria-hidden="true"></i><b>${text(nodeDisplayName(node))}</b><small>${gate ? "关卡 · " : ""}${text(statusLabel(status))}</small></div>`;
+  }).join("")}</div>`;
+}
+function zoneRowList(items, savedLabel = "已保存") {
+  if (!items.length) return "";
+  return `<div class="row-list">${items.map((item) => `<div class="row-item"><b>${text(item.title, "任务产物")}</b><em>${text(formatTime(item.created_at || item.updated_at))}</em>${zonePill(item.pill_label || savedLabel, item.pill_tone || "ok")}</div>`).join("")}</div>`;
+}
+// 章节网格只画真实写完的章：从产物标题解析「第 N 章」；没有章产物就不画网格。
+// 章数过大（长篇逐章落盘）时不铺占位格，只亮已写的章，避免一格一格假进度。
+function zoneChapterGrid(artifacts) {
+  const chapters = [...new Set(artifacts.map((item) => Number(/第\s*(\d+)\s*章/.exec(String(item?.title || item?.path_or_ref || ""))?.[1] || 0)))].filter((no) => no > 0).sort((a, b) => a - b);
+  if (!chapters.length) return "";
+  const total = chapters.at(-1);
+  if (total > 120) return `<div class="chapter-grid" aria-label="章节进度">${chapters.map((no) => `<span class="chapter done">${no}</span>`).join("")}</div>`;
+  return `<div class="chapter-grid" aria-label="章节进度">${Array.from({ length: total }, (_, index) => {
+    const no = index + 1;
+    return `<span class="chapter${chapters.includes(no) ? " done" : " pending"}">${no}</span>`;
+  }).join("")}</div>`;
+}
+function zoneWriterMarkup(detail, nodes, currentNodeId, artifacts) {
+  const chapterNos = [...new Set(artifacts.map((item) => Number(/第\s*(\d+)\s*章/.exec(String(item?.title || ""))?.[1] || 0)))].filter((no) => no > 0);
+  const chapterArtifacts = artifacts.filter((item) => /第\s*\d+\s*章/.test(String(item?.title || "")));
+  const grid = zoneChapterGrid(artifacts);
+  const rows = chapterArtifacts.length ? chapterArtifacts.slice(0, 4) : artifacts.slice(0, 4);
+  return `${zoneSecHead("创作阶段", `${nodes.length} 个真实步骤 · 线性推进`)}
+    ${zoneTrackMarkup(nodes, currentNodeId)}
+    ${grid ? `${zoneSecHead("章节进度", `已写 ${chapterNos.length} 章`)}${grid}` : ""}
+    ${zoneRowList(rows)}
+    <p class="hint">写到第几章、哪一章还没写，才是这类任务真正要看的进度；不是笼统的「第 N / M 步」。</p>`;
+}
+function zoneNovelMarkup(detail, nodes, currentNodeId, artifacts) {
+  const gates = ["import", "review"];
+  const gateNode = nodes.find((node) => gates.includes(String(node.stage_key || ""))
+    && ["waiting_user", "blocked", "ready", "running"].includes(String(node.status || "")));
+  return `${zoneSecHead("改编阶段", `${nodes.length} 步 · 其中 ${nodes.filter((node) => gates.includes(String(node.stage_key || ""))).length} 步是关卡`)}
+    ${zoneTrackMarkup(nodes, currentNodeId, gates)}
+    <p class="hint">虚线圈的「导入」「复核」是关卡：只做整理与确认，不调用生成模型；中间步骤才真正产出内容。</p>
+    ${zoneRowList(artifacts.slice(0, 4), "已生成")}
+    ${gateNode ? `<div class="gate-card"><div><b>${text(nodeDisplayName(gateNode))} · ${gateNode.status === "waiting_user" ? "需要你确认" : "未完成"}</b><p>${gateNode.status === "waiting_user" ? "这一步只做确认，不会改原文、也不会自动往下生成；确认操作在上方「现在需要你确认」里。" : "关卡还没走完，后续生成不会开始。"}</p></div></div>` : ""}`;
+}
+function zoneChatMarkup(detail, nodes) {
+  const supervision = detail.supervision;
+  const supervised = Boolean(supervision) || nodes.some((node) => node.executor_type === "supervised_chat");
+  return `<div class="goal-card"><small>这次要完成什么</small>${text(detail.goal || "未填写目标")}</div>
+    ${zoneSecHead("执行方式", "创建时选定，这里只读")}
+    <div class="mode-cards"><div class="mode-card${supervised ? " active" : ""}"><b>${supervised ? "自动检查并继续" : "单次执行"}</b><p>${supervised ? "每轮结束后按完成标准检查，按缺项补做" : "执行一次即结束，结果保留在任务里"}</p></div></div>
+    ${supervision ? `<div class="kv-row"><span class="kv">已执行 <b>${Number(supervision.round || 0)} / ${Number(supervision.max_rounds || 1)}</b> 轮</span><span class="kv">剩余补做 <b>${Number(supervision.remaining_continuations ?? 0)}</b> 次</span><span class="kv">已检查 <b>${Number(supervision.review_count || 0)}</b> 次</span></div><p class="hint">轮次时间线与完成标准在下方「自动检查与续办」卡里；轮数不等于模型请求次数，暂停和等待不会延长截止时间。</p>` : ""}`;
+}
+function zoneJobMarkup(detail, nodes) {
+  const jobIds = detail.linked_job_ids || [];
+  const sourceNode = nodes.find((node) => node.executor_type === "job") || nodes[0];
+  const sourceProgress = nodes.length && nodes.every((node) => node.status === "succeeded");
+  return `<div class="mirror-banner"><b>这是已有后台任务的只读视图。</b>任务总管只读取它的真实状态，不会重新启动、暂停或改写它；下面没有本地步骤链，因为本来就不由总管驱动。</div>
+    ${zoneSecHead("关联的后台任务", jobIds.length ? `关联 ${jobIds.length} 个后台任务` : "来源：已有后台任务")}
+    <div class="source-card"><span class="source-ico" aria-hidden="true">▤</span><div><b>${text(sourceNode ? nodeDisplayName(sourceNode) : "后台任务", "后台任务")}</b><p>${text(formatTime(detail.updated_at))} 同步 · 以原任务记录为准</p></div>${statusPill(detail.status)}</div>
+    <p class="hint">这类任务不需要「暂停 / 重试」：那会让用户误以为总管在控制它。要看细节请回原任务${sourceProgress ? "；本任务已全部完成" : ""}。</p>`;
+}
+function zoneSubagentMarkup(detail, nodes, approvals) {
+  const items = nodes.filter((node) => node.executor_type === "subagent");
+  const pending = approvals.filter((item) => item.status === "pending");
+  return `<div class="instruction"><small>交给子助手的要求</small>${text(detail.goal || "未填写指令")}</div>
+    ${zoneSecHead("子助手分工", `${items.length} 个 · 结果各自回传本任务`)}
+    <div class="delegate-grid">${items.map((node, index) => `<div class="delegate"><div class="delegate-top"><span class="delegate-ico" aria-hidden="true">助</span><b>子助手 ${index + 1}</b></div><p>${node.error ? text(node.error) : text(nodeDisplayName(node))}</p><div class="dfoot">${statusPill(node.status)}<span class="tag">${node.status === "succeeded" ? "已回传" : "等待回传"}</span></div></div>`).join("")}</div>
+    ${pending.length ? `<div class="approval"><b>等待你确认 · ${pending.length} 项操作</b><p>${text(pending[0].action, "待确认操作")} · ${text(pending[0].description, "请核对本次操作。")}</p><div class="param-mask">参数已按白名单脱敏，这里不展示原始路径与内容。</div><div class="acts">${pending.map((item) => `<button type="button" class="control-button tiny" data-super-approval="approved" data-super-approval-id="${text(item.approval_id)}">批准</button><button type="button" class="control-button tiny" data-super-approval="rejected" data-super-approval-id="${text(item.approval_id)}">拒绝</button>`).join("")}</div><p class="hint">全部待确认操作也列在上方「现在需要你确认」区。</p></div>` : ""}`;
+}
+function renderContentZone(kind, detail, nodes, currentNodeId) {
+  const host = $("#superAgentContentZone");
+  if (!host) return;
+  host.hidden = !kind;
+  if (!kind) { host.innerHTML = ""; return; }
+  const artifacts = viewState.artifacts || [];
+  const bodies = {
+    writer: () => zoneWriterMarkup(detail, nodes, currentNodeId, artifacts),
+    novel: () => zoneNovelMarkup(detail, nodes, currentNodeId, artifacts),
+    chat: () => zoneChatMarkup(detail, nodes),
+    job: () => zoneJobMarkup(detail, nodes),
+    subagent: () => zoneSubagentMarkup(detail, nodes, viewState.approvals || []),
+  };
+  host.innerHTML = `<span class="zone-tag"><i aria-hidden="true"></i>${text(({ writer: "内容区 A · 章节链", novel: "内容区 B · 原文到剧本", chat: "内容区 D · 执行轮次", job: "内容区 E · 只读镜像", subagent: "内容区 F · 分工与回传" })[kind] || "任务内容区")}</span>${bodies[kind] ? bodies[kind]() : ""}`;
+}
+
+function progressHintFor(kind, detail) {
+  // 指标口径随类型（§九 #4 / 修复 B）：一句话说明这个数字怎么来的，不再六类共用一句「仅统计已完成的真实步骤」。
+  if (kind === "writer") return "按写完的真实章节与步骤统计";
+  if (kind === "novel") return "按已完成步骤统计；场次见内容区";
+  if (kind === "chat") return detail.supervision ? "按执行轮次统计，不含模型请求次数" : "按真实执行轮次统计";
+  if (kind === "job") return "来自后台任务真实记录";
+  if (kind === "subagent") return "按子助手回传结果统计";
+  return "仅统计已完成的真实步骤";
+}
+
+function renderOverview(detail, nodes, currentNodeId, zoneKind = "") {
   const completed = nodes.filter((node) => node.status === "succeeded").length;
   const current = nodes.find((node) => node.node_id === currentNodeId) || nodes.find((node) => !["succeeded", "cancelled"].includes(node.status));
-  $("#superAgentProgressHint").textContent = "仅统计已完成的真实步骤";
+  $("#superAgentProgressHint").textContent = progressHintFor(zoneKind, detail);
   $("#superAgentProgressText").textContent = nodes.length ? `${completed} / ${nodes.length} 步已完成` : "暂无步骤";
   const progress = $("#superAgentProgress"); progress.hidden = !nodes.length; progress.max = nodes.length || 1; progress.value = completed;
   $("#superAgentCurrentStage").textContent = current ? nodeDisplayName(current) : detail.status === "completed" ? "全部完成" : "暂无进行中的步骤";
@@ -334,10 +508,13 @@ function renderDetail() {
   const status = $("#superAgentStatus"); status.textContent = statusLabel(detail.status); status.dataset.status = detail.status || "";
   const terminal = ["completed", "cancelled", "failed", "archived"].includes(detail.status);
   const stopping = detail.status === "stopping";
+  const jobMirror = (viewState.nodes || []).some((node) => node.executor_type === "job") && !(viewState.nodes || []).some((node) => ["writer_pipeline", "novel_stage", "supervised_chat", "chat_run", "subagent"].includes(String(node.executor_type || "")));
   const threadActions = $("#superAgentThreadActions");
   if (threadActions) {
     // 每个状态只保留当前有效的操作；结束/停止中不再渲染一排禁用按钮（A11/A13）。
-    threadActions.hidden = terminal || stopping;
+    // job 只读镜像：三个按钮保持置灰并说明「不是漏做」（§九 #5）。
+    threadActions.hidden = (terminal || stopping) && !jobMirror;
+    if (jobMirror) threadActions.querySelectorAll("[data-super-thread-action]").forEach((button) => { button.disabled = true; });
     threadActions.querySelectorAll("[data-super-thread-action]").forEach((button) => {
       const action = button.dataset.superThreadAction;
       button.disabled = action === "pause" ? !["active", "waiting_user"].includes(detail.status)
@@ -366,9 +543,16 @@ function renderDetail() {
   viewState.approvals.forEach((item) => {
     const key = String(item.node_id || ""); if (!approvalByNode.has(key)) approvalByNode.set(key, []); approvalByNode.get(key).push(item);
   });
-  renderOverview(detail, nodes, currentNodeId);
+  const zoneKind = threadZoneKind(detail, nodes);
+  renderOverview(detail, nodes, currentNodeId, zoneKind);
   renderFocus(detail, nodes, currentNodeId);
+  renderContentZone(zoneKind, detail, nodes, currentNodeId);
   renderSupervision(detail);
+  // 步骤区按类型收放（修复 B1）：链类与 chat 保留步骤卡——开始 / 同步 / 取消 /
+  // 查看结果都在卡上；job 只读镜像与 subagent 分工的步骤信息已并入内容区，
+  // 同一份步骤信息不再出现两遍。
+  const stageSection = $("#superAgentStageSection");
+  if (stageSection) stageSection.hidden = ["job", "subagent"].includes(zoneKind);
   $("#superAgentChainMeta").textContent = `${nodes.length} 个步骤`;
   $("#superAgentNodeList").innerHTML = nodes.length ? nodes.map((node, index) => {
     const nodeId = String(node.node_id || ""); const nodeStatus = String(node.status || "pending");
@@ -378,7 +562,7 @@ function renderDetail() {
       <div class="super-agent-stage-rail"><span class="super-agent-stage-index">${index + 1}</span>${index < nodes.length - 1 ? "<i aria-hidden=\"true\"></i>" : ""}</div>
       <div class="super-agent-stage-body"><div class="super-agent-stage-head"><div><strong>${text(nodeDisplayName(node))}</strong></div><span class="super-agent-status" data-status="${text(nodeStatus)}">${text(statusLabel(nodeStatus))}</span></div>
       <p class="super-agent-stage-meta">第 ${index + 1} 步${(node.dependencies || []).length ? ` · 等待 ${(node.dependencies || []).length} 个前置步骤完成` : ""}${Number(node.attempt) > 0 ? ` · 第 ${Number(node.attempt) + 1} 次执行` : ""}</p>
-      ${active ? '<span class="super-agent-current-badge">当前步骤</span>' : ""}
+      ${active ? '<span class="super-agent-current-badge">当前步骤</span>' : ""}${String(node.stage_key || "") && ["import", "review"].includes(String(node.stage_key)) ? '<span class="super-agent-gate-badge">关卡 · 不调用生成模型</span>' : ""}
       ${node.domain_ref ? `<p class="super-agent-stage-meta">${text(domainName(node.domain_ref.domain))} · ${stageLabel(node.domain_ref.stage, "作品任务")}</p><button type="button" class="control-button tiny" data-super-return-domain="${text(node.domain_ref.domain)}" data-super-book-id="${text(node.domain_ref.book_id)}">回到工作台</button>` : ""}
       ${approvals.length ? `<div class="super-agent-linked"><b>审批</b>${approvals.map((item) => `<span>${text(item.action, "待确认操作")} · ${text(statusLabel(item.status))}</span>`).join("")}</div>` : ""}
       ${artifacts.length ? `<div class="super-agent-linked"><b>产物</b>${artifacts.map((item) => `<span>${refText(item.title || item.path_or_ref, item.kind)}</span>`).join("")}</div>` : ""}
@@ -391,13 +575,14 @@ function renderDetail() {
   }).join("") : '<p class="super-agent-muted">暂无步骤。</p>';
   $("#superAgentEventList").innerHTML = viewState.events.length ? [...viewState.events].reverse().map((event) => `
     <article class="super-agent-event"><div><strong>${text(EVENT_LABELS[event.event_type], "任务活动")}</strong><time>${text(formatTime(event.created_at))}</time></div><p>${text(event.summary?.message || event.summary?.description || (event.summary?.status ? statusLabel(event.summary.status) : "状态已更新"))}</p></article>`).join("") : '<p class="super-agent-muted">暂无活动。</p>';
-  $("#superAgentApprovalList").innerHTML = viewState.approvals.length ? viewState.approvals.map((item) => `
+  // subagent 的待确认操作卡已并入内容区（修复 B1），这里不再重复渲染一排。
+  $("#superAgentApprovalList").innerHTML = zoneKind === "subagent" ? "" : viewState.approvals.length ? viewState.approvals.map((item) => `
     <article class="super-agent-ref"><strong>${text(item.action, "待确认操作")}</strong><span>${text(statusLabel(item.status))}</span><p>步骤：${text(nodeDisplayName(nodeById.get(String(item.node_id))))}</p><p>${text(item.description)}</p>${item.status === 'pending' ? `<div class="super-agent-node-actions"><button type="button" class="control-button tiny" data-super-approval="approved" data-super-approval-id="${text(item.approval_id)}">批准</button><button type="button" class="control-button tiny" data-super-approval="rejected" data-super-approval-id="${text(item.approval_id)}">拒绝</button></div>` : ""}</article>`).join("") : "";
   $("#superAgentArtifactList").innerHTML = viewState.artifacts.length ? viewState.artifacts.map((item) => {
     const kind = artifactKind(item);
     const ref = String(item.path_or_ref || "");
     const openable = ref && !ref.includes("://");
-    return `<article class="super-agent-artifact"><span class="recipe-thumb kind-${kind}" aria-hidden="true">${({ image: "图", video: "影", audio: "音" })[kind] || "文"}</span><span class="artifact-copy"><b>${text(item.title, "任务产物")}</b><small>${text(item.summary || artifactBaseName(ref))}</small></span>${openable ? `<a class="control-button tiny" href="${text(localFileUrl(ref))}" target="_blank" rel="noopener">打开</a>` : ""}</article>`;
+    return `<article class="super-agent-artifact"><span class="sa-thumb kind-${kind}" aria-hidden="true">${({ image: "图", video: "影", audio: "音" })[kind] || "文"}</span><span class="artifact-copy"><b>${text(item.title, "任务产物")}</b><small>${text(item.summary || artifactBaseName(ref))}</small></span>${openable ? `<a class="control-button tiny" href="${text(localFileUrl(ref))}" target="_blank" rel="noopener">打开</a>` : ""}</article>`;
   }).join("") : '<p class="super-agent-muted">暂无产物。</p>';
 }
 
@@ -666,6 +851,14 @@ async function loadCreateResources({ bookId = "", conversationId = "" } = {}) {
   finally { if (token === createState.resourceToken) { createState.loading = false; select.disabled = false; } }
 }
 
+// 启动台 B（修复 B3）：「＋新建任务」先开类型启动台，选完才进对应表单。
+function openLaunchDialog() {
+  const dialog = $("#superAgentLaunchDialog");
+  if (!dialog || typeof dialog.showModal !== "function") return;
+  clearCreateError();
+  if (!dialog.open) dialog.showModal();
+}
+
 async function openCreateDomainDialog(prefill = {}) {
   const dialog = $("#superAgentCreateDialog");
   if (!dialog || typeof dialog.showModal !== "function") return;
@@ -836,7 +1029,6 @@ async function createDomainThread(event, { addStep = false } = {}) {
 }
 
 async function runNodeAction(action, nodeId = "") {
-  if (!nodeId && recipeState.batches.has(viewState.selectedId)) return recipeAction(action);
   if (!viewState.selectedId || viewState.detail?.thread_id !== viewState.selectedId) return;
   const threadId = viewState.selectedId;
   const key = `${threadId}:${nodeId}:${action}`;
@@ -875,7 +1067,7 @@ function resultRefCard(ref) {
   const value = typeof ref === "object" ? String(ref.path_or_ref || ref.ref || ref.artifact_id || ref.title || "") : String(ref || "");
   const kind = mediaKindFromName(value);
   const openable = value && !value.includes("://");
-  return `<div class="super-agent-artifact"><span class="recipe-thumb kind-${kind}" aria-hidden="true">${({ image: "图", video: "影", audio: "音" })[kind] || "文"}</span><span class="artifact-copy"><b>${text(artifactBaseName(value), "产物")}</b></span>${openable ? `<a class="control-button tiny" href="${text(localFileUrl(value))}" target="_blank" rel="noopener">打开</a>` : ""}</div>`;
+  return `<div class="super-agent-artifact"><span class="sa-thumb kind-${kind}" aria-hidden="true">${({ image: "图", video: "影", audio: "音" })[kind] || "文"}</span><span class="artifact-copy"><b>${text(artifactBaseName(value), "产物")}</b></span>${openable ? `<a class="control-button tiny" href="${text(localFileUrl(value))}" target="_blank" rel="noopener">打开</a>` : ""}</div>`;
 }
 
 async function showNodeResult(nodeId) {
@@ -889,7 +1081,7 @@ async function showNodeResult(nodeId) {
   try {
     const payload = await api(`/api/super-agent/threads/${encodeURIComponent(threadId)}/results?node_id=${encodeURIComponent(nodeId)}`);
     if (requestId !== viewState.resultRequest) return;
-    host.innerHTML = (payload.results || []).map((result) => `<article class="super-agent-result"><h3>第 ${Number(result.attempt || 0) + 1} 次执行 · ${text(statusLabel(result.status))}</h3>${result.summary ? `<p>${text(result.summary)}</p>` : ""}<div class="sa-result-text">${text(result.text, "本次执行尚无可展示正文。")}</div>${result.compatibility ? `<p class="super-agent-muted">${text(RESULT_COMPATIBILITY_LABELS[result.compatibility], "执行记录需要进一步核对")}</p>` : ""}${result.output_refs?.length ? `<div class="recipe-review-items">${result.output_refs.map((ref) => resultRefCard(ref)).join("")}</div>` : ""}</article>`).join("") || '<p>暂无可展示的执行结果。</p>';
+    host.innerHTML = (payload.results || []).map((result) => `<article class="super-agent-result"><h3>第 ${Number(result.attempt || 0) + 1} 次执行 · ${text(statusLabel(result.status))}</h3>${result.summary ? `<p>${text(result.summary)}</p>` : ""}<div class="sa-result-text">${text(result.text, "本次执行尚无可展示正文。")}</div>${result.compatibility ? `<p class="super-agent-muted">${text(RESULT_COMPATIBILITY_LABELS[result.compatibility], "执行记录需要进一步核对")}</p>` : ""}${result.output_refs?.length ? `<div class="sa-result-refs">${result.output_refs.map((ref) => resultRefCard(ref)).join("")}</div>` : ""}</article>`).join("") || '<p>暂无可展示的执行结果。</p>';
   } catch (error) { if (requestId === viewState.resultRequest) host.textContent = `结果读取失败：${error.message}`; }
 }
 
@@ -941,7 +1133,6 @@ async function resolveApproval(status, approvalId) {
 }
 
 export function bindSuperAgentEvents() {
-  bindRecipeEvents();
   $("#superAgentResultClose")?.addEventListener("click", () => $("#superAgentResultDialog").close());
   $("#superAgentSupervision")?.addEventListener("click", (event) => { if (event.target.closest("[data-super-accept-completion]")) void runNodeAction("accept_completion"); });
   $("#superAgentChatConfirmationList")?.addEventListener("click", (event) => {
@@ -955,23 +1146,49 @@ export function bindSuperAgentEvents() {
   });
   $("#superAgentFilters")?.addEventListener("click", (event) => {
     const filter = event.target.closest("[data-super-filter]")?.dataset.superFilter;
-    if (!["all", "waiting", "completed"].includes(filter)) return;
+    if (!["all", "waiting", "completed", "archived"].includes(filter)) return;
     viewState.filter = filter;
     const threads = filteredThreads();
     if (!threads.some((thread) => thread.thread_id === viewState.selectedId)) viewState.selectedId = threads[0]?.thread_id || "";
     renderThreadList();
     if (viewState.selectedId) void loadDetail(viewState.selectedId); else renderEmptyDetail();
   });
-  $("#superAgentCreate")?.addEventListener("click", () => openCreateDomainDialog());
+  $("#superAgentCreate")?.addEventListener("click", () => openLaunchDialog());
+  $("#superAgentLaunchDialog")?.addEventListener("click", (event) => { if (event.target.closest("[data-launch-close]")) $("#superAgentLaunchDialog").close(); });
   $("#superAgentCreateForm")?.addEventListener("submit", (event) => {
     if (event.submitter?.value === "cancel") return;
     void createDomainThread(event);
   });
+  // 视图级点击委托统一收口（修复 B1）：节点操作 / 结果 / 回工作台 / 审批卡 /
+  // 关联会话跳转，可能渲染在步骤卡或六类内容区里（job 与 subagent 的步骤卡会
+  // 隐藏），全部委托到 #superAgentView 一处，不绑在会被隐藏的子容器上。
   $("#superAgentView")?.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-super-conversation]");
-    if (!button) return;
-    closeSuperAgentView();
-    void openConversation(button.dataset.superConversation).catch((error) => { viewState.error = error.message || "打开会话失败"; renderSyncStatus(); void openSuperAgentView(); });
+    const conversation = event.target.closest("[data-super-conversation]");
+    if (conversation) {
+      closeSuperAgentView();
+      void openConversation(conversation.dataset.superConversation).catch((error) => { viewState.error = error.message || "打开会话失败"; renderSyncStatus(); void openSuperAgentView(); });
+      return;
+    }
+    const result = event.target.closest("[data-super-result]");
+    if (result) void showNodeResult(result.dataset.superResult);
+    const action = event.target.closest("[data-super-action]");
+    if (action) void runNodeAction(action.dataset.superAction || "status", action.dataset.superNode || "");
+    const back = event.target.closest("[data-super-return-domain]");
+    if (back) void returnToDomain(back);
+    const approval = event.target.closest("[data-super-approval]");
+    if (approval) void resolveApproval(approval.dataset.superApproval || "", approval.dataset.superApprovalId || "");
+  });
+  // 启动台 B（修复 B3）：类型卡在独立 dialog 里，按用途分组；选卡只路由到对应
+  // 表单（5 类 → 新建表单弹窗），不创建任务、不产生费用。隐藏的类型 select
+  // 继续当真源，路由后由表单弹窗照常加载。
+  $("#superAgentLaunchCards")?.addEventListener("click", (event) => {
+    const card = event.target.closest("[data-launch-domain]");
+    if (!card) return;
+    const domain = card.dataset.launchDomain;
+    $("#superAgentLaunchDialog")?.close();
+    const select = $("#superAgentCreateDomain");
+    if (select) select.value = domain;
+    void openCreateDomainDialog({ domain });
   });
   $("#superAgentCreateDomain")?.addEventListener("change", () => void loadCreateResources());
   $("#superAgentCreateMode")?.addEventListener("change", renderCreateMode);
@@ -1011,1085 +1228,39 @@ export function bindSuperAgentEvents() {
   $("#openTaskManager")?.addEventListener("click", () => { $("#tasksDialog")?.close(); void openSuperAgentView(); });
   $("#superAgentRefresh")?.addEventListener("click", () => void openSuperAgentView());
   $("#superAgentThreadList")?.addEventListener("click", (event) => {
+    // 删除 / 恢复是独立按钮：stopPropagation 语义由分支提前 return 保证，
+    // 不会顺带切换选中任务（§5.1 前端坑：button 不能嵌套 button）。
+    const restore = event.target.closest("[data-thread-restore]");
+    if (restore) { void restoreThread(restore.dataset.threadRestore); return; }
+    const del = event.target.closest("[data-thread-delete]");
+    if (del) { void deleteThread(del.dataset.threadDelete); return; }
     const button = event.target.closest("[data-super-thread]"); if (!button) return;
     const threadId = button.dataset.superThread || "";
     if (threadId !== viewState.selectedId) { viewState.detail = null; viewState.nodes = []; renderEmptyDetail(); }
     viewState.selectedId = threadId; renderThreadList(); void loadDetail(threadId);
   });
-  $("#superAgentNodeList")?.addEventListener("click", (event) => {
-    const result = event.target.closest("[data-super-result]");
-    if (result) void showNodeResult(result.dataset.superResult);
-    const action = event.target.closest("[data-super-action]");
-    if (action) void runNodeAction(action.dataset.superAction || "status", action.dataset.superNode || "");
-    const back = event.target.closest("[data-super-return-domain]");
-    if (back) void returnToDomain(back);
+  $("#superAgentThreadList")?.addEventListener("change", (event) => {
+    const check = event.target.closest("[data-thread-check]");
+    if (!check) return;
+    if (check.checked) viewState.deleteSelection.add(check.dataset.threadCheck);
+    else viewState.deleteSelection.delete(check.dataset.threadCheck);
+    renderThreadList();
   });
-  $("#superAgentApprovalList")?.addEventListener("click", (event) => { const button = event.target.closest("[data-super-approval]"); if (!button) return; void resolveApproval(button.dataset.superApproval || "", button.dataset.superApprovalId || ""); });
+  $("#superAgentMultiToggle")?.addEventListener("click", () => { viewState.multiSelect = true; renderThreadList(); });
+  $("#superAgentMultiExit")?.addEventListener("click", () => { viewState.multiSelect = false; viewState.deleteSelection.clear(); renderThreadList(); });
+  $("#superAgentSelectAll")?.addEventListener("change", (event) => {
+    const threads = filteredThreads().filter((thread) => !["active", "stopping"].includes(thread.status));
+    if (event.target.checked) threads.forEach((thread) => viewState.deleteSelection.add(thread.thread_id));
+    else threads.forEach((thread) => viewState.deleteSelection.delete(thread.thread_id));
+    renderThreadList();
+  });
+  $("#superAgentBatchDelete")?.addEventListener("click", () => void deleteSelectedThreads());
 }
 
-// Bounded recipes use native domain tasks, never chat planning or guessed bindings.
-const recipeState = {
-  batches: new Map(), drafts: new Map(), busy: false, review: null, requests: new Map(),
-  restored: false, intent: null, handoff: null,
-  createWorkflow: null, createMapping: null, createInput: null, createDraft: null, precheckOk: false, addGroupMedia: {},
-};
-let recipeEditorBridge = {};
-export function setRecipeEditorBridge(bridge) { recipeEditorBridge = bridge || {}; }
-const RECIPE_DRAFT_KEY = "naibaChatRecipeProductionDraftV1";
-function recipeMediaKind(entry) { return entry?.media || entry?.kind || mediaKindFromName(entry?.name || entry?.path || entry?.source); }
-function rememberRecipeDraft() {
-  // 创建草稿：保存「选了哪个工作流 + 首组内容 + 用户映射与正文来源」；换工作流后旧值不套用。
-  const dialog = $("#superAgentRecipeDialog");
-  if (!dialog || !dialog.open) return;
-  const draft = { version: 2,
-    workflowId: recipeState.createWorkflow?.id || recipeState.createDraft?.workflowId || "",
-    workflowFingerprint: recipeState.createWorkflow?.workflow_fingerprint || recipeState.createDraft?.workflowFingerprint || "",
-    title: $("#recipeTitle")?.value || recipeState.createDraft?.title || "",
-    shots: $("#recipeShots")?.value || recipeState.createDraft?.shots || "",
-    prompt: $("#recipeCreatePrompt")?.value || recipeState.createDraft?.prompt || "" };
-  if (recipeState.createMapping) draft.mapping = recipeState.createMapping;
-  if (recipeState.createInput) { draft.inputMode = recipeState.createInput.inputMode; draft.templateId = recipeState.createInput.templateId; }
-  if (draft.workflowId) recipeState.createDraft = draft;
-  try { localStorage.setItem(RECIPE_DRAFT_KEY, JSON.stringify(draft)); } catch { /* quota/private mode: live draft remains */ }
-}
-function restoreRecipeDraft() {
-  if (recipeState.restored) return;
-  recipeState.restored = true;
-  try {
-    const draft = JSON.parse(localStorage.getItem(RECIPE_DRAFT_KEY) || "null");
-    if (draft?.version !== 2 || !draft.workflowId) return;
-    recipeState.createDraft = { workflowId: String(draft.workflowId), workflowFingerprint: String(draft.workflowFingerprint || ""),
-      title: String(draft.title || ""), shots: draft.shots || "", prompt: String(draft.prompt || ""),
-      ...(draft.mapping && typeof draft.mapping === "object" ? { mapping: draft.mapping } : {}),
-      ...(draft.inputMode ? { inputMode: String(draft.inputMode) } : {}),
-      ...(draft.templateId ? { templateId: String(draft.templateId) } : {}) };
-  } catch { /* malformed/old draft: start safely */ }
-}
-function recipeDurationSupported(recipe) { return Boolean(recipe?.duration_slot); }
-function itemFieldEditable(batch, item, field) {
-  if (item.edit_capabilities && Object.hasOwn(item.edit_capabilities, field)) return item.edit_capabilities[field] === true;
-  const generated = generationStatus(item);
-  const attempted = (item.generate?.attempts || []).length > 0;
-  if (!recipeCan(batch, "edit")) return false;
-  return field === "included" || (generated === "pending" && !attempted);
-}
-const RECIPE_PHASES = { draft: "待生成提示词", reverse_running: "正在生成提示词", review: "待确认生成视频", generation_running: "正在生成视频", completed: "全部完成", partial: "部分未完成", paused: "已暂停", cancelled: "已取消", interrupted: "执行已中断", needs_review: "需要人工核对" };
 function mediaKindFromName(name) {
   const ext = String(name || "").split(".").pop().toLowerCase();
   if (["mp4", "mov", "webm", "mkv", "avi"].includes(ext)) return "video";
   if (["png", "jpg", "jpeg", "webp", "gif", "bmp", "avif"].includes(ext)) return "image";
   if (["mp3", "wav", "flac", "m4a", "ogg", "aac", "opus"].includes(ext)) return "audio";
   return "doc";
-}
-function recipeMediaSummary(media) {
-  return ["image", "video", "audio"].map((kind) => { const count = (media || []).filter((entry) => recipeMediaKind(entry) === kind).length; return count ? `${count} ${({ image: "张图", video: "段视频", audio: "段音频" })[kind]}` : ""; }).filter(Boolean).join("、") || "无参考素材";
-}
-function recipeBaseName(ref) {
-  return String(ref || "").replaceAll("\\", "/").split("/").filter(Boolean).pop() || "产物";
-}
-function itemDisplayName(item, index = 0) {
-  const raw = String(item?.name || item?.source_path || "").replaceAll("\\", "/");
-  const base = raw.split("/").filter(Boolean).pop() || "";
-  return /^(group|item)-\d+$/i.test(base) ? "" : base;
-}
-function recipeCan(batch, action) { return Array.isArray(batch.capabilities) ? batch.capabilities.includes(action) : batch.capabilities?.[action] === true; }
-function reverseStatus(item) { return item.reverse_status || item.reverse?.status || "pending"; }
-function generationStatus(item) { return item.generation_status || item.generate?.status || "pending"; }
-function recipeDraft(batch) {
-  if (!recipeState.drafts.has(batch.thread_id)) recipeState.drafts.set(batch.thread_id, { revision: batch.revision, items: {}, dirty: false });
-  return recipeState.drafts.get(batch.thread_id);
-}
-function recipeError(message) { $("#recipeCreateError").textContent = message || ""; }
-// 素材缩略图：本地上传图片直接预览；不再显示受管绝对路径。
-function recipeMediaMarkup(media) {
-  const counts = { image: 0, video: 0, audio: 0 };
-  return `<div class="recipe-thumb-strip">${(media || []).map((entry) => {
-    const kind = recipeMediaKind(entry), number = ++counts[kind];
-    const reference = entry.reference || `<${({ image: "Picture", video: "Video", audio: "Audio" })[kind] || "Media"} ${number}>`;
-    const url = text(localFileUrl(entry.path));
-    const preview = !entry.path ? "" : kind === "image" ? `<img class="recipe-thumb" src="${url}" loading="lazy" alt="${text(entry.name)}">` : kind === "video" ? `<video class="recipe-media-preview" src="${url}" controls preload="metadata"></video>` : `<audio class="recipe-media-preview" src="${url}" controls preload="metadata"></audio>`;
-    return `<figure class="recipe-media-ref">${preview}<figcaption>${text(reference)} · ${text(entry.name || recipeBaseName(entry.path))}${entry.description ? `<small>${text(entry.description)}</small>` : ""}</figcaption></figure>`;
-  }).join("")}</div>`;
-}
-// 产物：后端补 output.type 之前用可辨占位 + 打开/保存链接；不渲染不可用的播放按钮。
-function recipeOutputMarkup(output) {
-  if (!output?.path) return `<p class="super-agent-error">产物缺少受管路径：${text(output?.name)}</p>`;
-  const url = text(localFileUrl(output.path));
-  const displayName = recipeBaseName(output.name || output.path);
-  const kind = String(output.type || "") || mediaKindFromName(output.name || output.path);
-  const mark = ({ image: "图", video: "影", audio: "音" })[kind] || "文";
-  const kindClass = kind === "image" ? "kind-image" : kind === "doc" ? "kind-doc" : "kind-video";
-  return `<div class="recipe-output"><span class="recipe-thumb ${kindClass}" aria-hidden="true">${mark}</span><a href="${url}" target="_blank" rel="noopener">打开 / 保存 ${text(displayName)}</a></div>`;
-}
-function recipeRequest(key, body) {
-  const fingerprint = JSON.stringify(body);
-  const old = recipeState.requests.get(key);
-  if (old?.fingerprint === fingerprint) return old.id;
-  const id = newRequestId(); recipeState.requests.set(key, { fingerprint, id }); return id;
-}
-// ---- 新建批量任务：直接选造梦机已保存工作流（2026-11-03 计划 §4.1 入口②）----
-// 映射解释权在用户：总管不猜不查。文本写入位候选 = 全部文本槽（正向锚点 /
-// 多行框排前面只是排序建议，不是规则）；选哪个由用户定，也可以不注入正文。
-function recipePromptSlotCandidates(slots) {
-  const all = (slots || []).filter((slot) => slot.field_type === "text");
-  const rank = (slot) => (slot.role === "positive_prompt" ? 0 : slot.control === "multiline" ? 1 : 2);
-  return [...all].sort((a, b) => rank(a) - rank(b));
-}
-function recipeDurationSlotCandidate(slots) {
-  const hits = (slots || []).filter((slot) => slot.field_type === "number"
-    && /时长|duration/i.test(`${slot.node_title || ""} ${slot.label || ""}`));
-  return hits.length === 1 ? { node_id: String(hits[0].node_id), field_name: String(hits[0].field_name) } : null;
-}
-function recipeSlotKey(slot) { return JSON.stringify({ node_id: String(slot.node_id), field_name: String(slot.field_name) }); }
-function recipeSlotValue(workflow, slot) {
-  if (!slot) return "";
-  return String((((workflow?.prompt || {})[slot.node_id] || {}).inputs || {})[slot.field_name] ?? "");
-}
-// ---- 用户映射（方案）：文本写入位 + 素材入口 + 时长槽，按工作流指纹记住 ----
-function recipeMappingMemoryKey(fingerprint) { return `saHandoffMapping:${fingerprint}`; }
-function rememberRecipeMapping(fingerprint, mapping) {
-  if (!fingerprint || !mapping) return;
-  try { localStorage.setItem(recipeMappingMemoryKey(fingerprint), JSON.stringify(mapping)); } catch { /* 隐私模式忽略 */ }
-}
-function recalledRecipeMapping(fingerprint) {
-  try {
-    const raw = localStorage.getItem(recipeMappingMemoryKey(fingerprint));
-    const parsed = raw ? JSON.parse(raw) : null;
-    if (parsed && typeof parsed === "object") {
-      return { prompt_slot: parsed.prompt_slot || null, media_slots: Array.isArray(parsed.media_slots) ? parsed.media_slots : [], duration_slot: parsed.duration_slot || null };
-    }
-  } catch { /* 坏记忆当没有 */ }
-  return null;
-}
-function recipeMappingFromWorkflow(workflow) {
-  // 没有记忆时的初稿：唯一文本槽 / 唯一时长槽预选只是省一次点击，用户可改可清。
-  const mapping = { prompt_slot: null, media_slots: [], duration_slot: null };
-  const slots = workflow?.params || [];
-  const positive = slots.filter((slot) => slot.role === "positive_prompt");
-  const multiline = slots.filter((slot) => slot.field_type === "text" && slot.control === "multiline");
-  const preselect = positive.length === 1 ? positive[0] : multiline.length === 1 ? multiline[0] : null;
-  if (preselect) mapping.prompt_slot = { node_id: String(preselect.node_id), field_name: String(preselect.field_name) };
-  const duration = recipeDurationSlotCandidate(slots);
-  if (duration) mapping.duration_slot = duration;
-  return mapping;
-}
-function recipeMappingAddresses(mapping) {
-  return [mapping?.prompt_slot, mapping?.duration_slot, ...(mapping?.media_slots || [])]
-    .filter(Boolean).map((slot) => `${slot.node_id}|${slot.field_name}`);
-}
-// 造梦机已选素材 = 用户已确认的映射：自动收编成素材入口，缺类型的按加载节点事实补。
-function adoptWorkflowMediaIntoMapping(mapping, workflow, mediaInputs) {
-  const known = new Set((mapping.media_slots || []).map((slot) => `${slot.node_id}|${slot.field_name}`));
-  mapping.media_slots = mapping.media_slots || [];
-  for (const entry of mediaInputs || []) {
-    const key = `${entry.node_id}|${entry.field_name}`;
-    if (known.has(key)) continue;
-    const param = (workflow?.params || []).find((p) => String(p.node_id) === String(entry.node_id) && p.field_name === entry.field_name);
-    const kind = ["image", "video", "audio"].includes(param?.field_type) ? param.field_type : "image";
-    mapping.media_slots.push({ node_id: String(entry.node_id), field_name: String(entry.field_name), media: kind, label: String(param?.label || `${entry.node_id} · ${entry.field_name}`) });
-    known.add(key);
-  }
-}
-const RECIPE_MEDIA_KIND_LABELS = { image: "图片", video: "视频", audio: "音频" };
-const RECIPE_TEMPLATE_PRESETS = [
-  { id: "recipe_minimax_h3_r2v_v2", label: "MiniMax H3 · 多媒体参考生视频" },
-  { id: "recipe_minimax_h3_i2v_v1", label: "MiniMax H3 · 首帧生视频" },
-];
-function recipeTemplateLabel(id) {
-  return RECIPE_TEMPLATE_PRESETS.find((row) => row.id === id)?.label
-    || (id ? "提词库自定义模板" : "未选择");
-}
-// 参数映射编辑区（交接/直建共用）：文本位、时长槽、素材入口全部用户指定。
-function recipeMappingEditorMarkup(prefix, workflow, mapping) {
-  const slots = workflow?.params || [];
-  const textSlots = recipePromptSlotCandidates(slots);
-  const numberSlots = slots.filter((slot) => slot.field_type === "number" || slot.field_type === "seed");
-  const mediaCandidates = slots.filter((slot) => ["text", "image", "video", "audio"].includes(slot.field_type));
-  const promptKey = mapping.prompt_slot ? recipeSlotKey(mapping.prompt_slot) : "";
-  const durationKey = mapping.duration_slot ? recipeSlotKey(mapping.duration_slot) : "";
-  const mappedKeys = new Set((mapping.media_slots || []).map((slot) => `${slot.node_id}|${slot.field_name}`));
-  const slotLabel = (slot) => slot.label || `${slot.node_id} · ${slot.field_name}`;
-  const addCandidates = mediaCandidates.filter((slot) => {
-    const key = `${slot.node_id}|${slot.field_name}`;
-    return !mappedKeys.has(key) && key !== promptKey && key !== durationKey;
-  });
-  const option = (slot, selectedKey) => `<option value="${escapeHtml(recipeSlotKey(slot))}"${recipeSlotKey(slot) === selectedKey ? " selected" : ""}>${escapeHtml(slotLabel(slot))}</option>`;
-  const mediaRows = (mapping.media_slots || []).map((slot, index) => `<li data-media-index="${index}"><code>${escapeHtml(slotLabel(slot))}</code><select data-map-role="mediaKind" aria-label="素材类型">${["image", "video", "audio"].map((kind) => `<option value="${kind}"${(slot.media || "image") === kind ? " selected" : ""}>${RECIPE_MEDIA_KIND_LABELS[kind]}</option>`).join("")}</select><button type="button" class="control-button tiny" data-map-role="mediaRemove">移除</button></li>`).join("");
-  return `<div class="recipe-mapping">
-    <label>文本写入位（每组正文写进哪个参数）<select data-map-role="prompt"><option value="">不注入正文（沿用工作流里的原值）</option>${textSlots.map((slot) => option(slot, promptKey)).join("")}</select></label>
-    <label>时长槽（批次时长写进哪个参数）<select data-map-role="duration"><option value="">不映射时长（按工作流原配置出片）</option>${numberSlots.map((slot) => option(slot, durationKey)).join("")}</select></label>
-    <div class="recipe-mapping-media">
-      <span class="recipe-mapping-media-title">素材入口（可选，不必填满；文件在批次里逐组放）</span>
-      ${mediaRows ? `<ul class="recipe-mapping-media-list">${mediaRows}</ul>` : '<p class="writer-dialog-hint">还没映射素材入口；不需要素材的工作流可以不加。</p>'}
-      <div class="recipe-mapping-media-add">
-        <select data-map-role="mediaAddField" aria-label="选择参数">${addCandidates.map((slot) => option(slot, "")).join("")}</select>
-        <select data-map-role="mediaAddKind" aria-label="素材类型">${["image", "video", "audio"].map((kind) => `<option value="${kind}">${RECIPE_MEDIA_KIND_LABELS[kind]}</option>`).join("")}</select>
-        <button type="button" class="control-button tiny" data-map-role="mediaAdd"${addCandidates.length ? "" : " disabled"}>添加素材入口</button>
-      </div>
-    </div>
-  </div>`;
-}
-function renderRecipeMappingEditor(prefix, workflow, mapping) {
-  const host = $(`#${prefix}Mapping`);
-  if (host) host.innerHTML = recipeMappingEditorMarkup(prefix, workflow, mapping || {});
-}
-function bindRecipeMappingEditor(prefix, getMapping, onChange) {
-  const host = $(`#${prefix}Mapping`);
-  if (!host || host.dataset.bound) return;
-  host.dataset.bound = "1";
-  const workflow = () => recipeState.handoff?.intent?.workflow || recipeState.createWorkflow;
-  host.addEventListener("change", (event) => {
-    const mapping = getMapping(); if (!mapping) return;
-    const role = event.target.closest("[data-map-role]")?.dataset.mapRole;
-    if (role === "prompt" || role === "duration") {
-      const key = event.target.value || "";
-      mapping[role === "prompt" ? "prompt_slot" : "duration_slot"] = key ? JSON.parse(key) : null;
-      onChange();
-    } else if (role === "mediaKind") {
-      const index = Number(event.target.closest("li")?.dataset.mediaIndex);
-      if (Number.isInteger(index) && mapping.media_slots[index]) { mapping.media_slots[index].media = event.target.value; onChange(); }
-    }
-  });
-  host.addEventListener("click", (event) => {
-    const mapping = getMapping(); if (!mapping) return;
-    const remove = event.target.closest("[data-map-role='mediaRemove']");
-    if (remove) {
-      const index = Number(remove.closest("li")?.dataset.mediaIndex);
-      if (Number.isInteger(index)) { mapping.media_slots.splice(index, 1); onChange(); }
-      return;
-    }
-    if (event.target.closest("[data-map-role='mediaAdd']")) {
-      const fieldKey = host.querySelector("[data-map-role='mediaAddField']")?.value || "";
-      const kind = host.querySelector("[data-map-role='mediaAddKind']")?.value || "image";
-      if (!fieldKey) return;
-      const slot = JSON.parse(fieldKey);
-      const param = (workflow()?.params || []).find((p) => String(p.node_id) === String(slot.node_id) && p.field_name === slot.field_name);
-      mapping.media_slots.push({ node_id: String(slot.node_id), field_name: String(slot.field_name), media: kind, label: String(param?.label || `${slot.node_id} · ${slot.field_name}`) });
-      onChange();
-    }
-  });
-}
-// 正文来源（直接 / 反推）+ 反推模板（H3 两种预设 + 提词库自定义），交接/直建共用。
-function recipeInputModeMarkup() {
-  return `<div class="sa-sec-head"><h3>每组正文怎么来</h3><span>直接用现成文本，或先反推</span></div>
-    <div class="super-agent-mode-cards" role="radiogroup" aria-label="正文来源">
-      <button type="button" class="super-agent-mode-card active" data-input-mode="prompt" role="radio" aria-checked="true"><span class="super-agent-mode-radio" aria-hidden="true"></span><span class="super-agent-mode-top">直接用现成文本</span><p>填好的正文就是最终提示词，不反推；哪组想反推进批次后单独改。</p></button>
-      <button type="button" class="super-agent-mode-card" data-input-mode="script" role="radio" aria-checked="false"><span class="super-agent-mode-radio" aria-hidden="true"></span><span class="super-agent-mode-top">先反推生成提示词</span><p>只填每组的内容要求，确认后按模板反推；填了正文的组仍直接用原文。</p></button>
-    </div>`;
-}
-function renderRecipeInputMode(prefix, input) {
-  const host = $(`#${prefix}InputMode`); if (!host) return;
-  host.querySelectorAll("[data-input-mode]").forEach((card) => {
-    const active = card.dataset.inputMode === input.inputMode;
-    card.classList.toggle("active", active);
-    card.setAttribute("aria-checked", String(active));
-  });
-  const row = $(`#${prefix}TemplateRow`);
-  if (row) row.hidden = input.inputMode !== "script";
-  if (input.inputMode === "script") void fillRecipeCustomTemplates(`#${prefix}Template`);
-}
-async function fillRecipeCustomTemplates(selector) {
-  const select = $(selector); if (!select) return;
-  if (!recipeState.customTemplates) {
-    recipeState.customTemplates = [];
-    try {
-      const { items } = await api("/api/studio/custom");
-      recipeState.customTemplates = (items || []).filter((item) => item?.id).map((item) => ({ id: String(item.id), title: String(item.title || item.id) }));
-    } catch { /* 读取失败仍可用 H3 预设 */ }
-  }
-  try {
-    const group = select.querySelector("optgroup[data-custom]");
-    if (group && !group.children.length) group.replaceChildren(...recipeState.customTemplates.map((row) => new Option(row.title, row.id)));
-  } catch { /* 桩环境无 Option/DOM，忽略 */ }
-}
-async function openRecipeDialog() {
-  restoreRecipeDraft();
-  recipeError("");
-  const dialog = $("#superAgentRecipeDialog"); if (!dialog.open) dialog.showModal();
-  try {
-    const result = await api("/api/comfyui/workflows");
-    const workflows = result.workflows || [];
-    const select = $("#recipeWorkflowSelect");
-    select.replaceChildren(new Option("请选择造梦机已保存的工作流", ""), ...workflows.map((row) => new Option(row.name || row.id, row.id)));
-    const wanted = recipeState.createDraft?.workflowId;
-    if (wanted && workflows.some((row) => row.id === wanted)) select.value = wanted;
-    await loadCreateWorkflowDetail();
-  } catch (error) { recipeError(`工作流读取失败：${error.message}`); }
-}
-async function loadCreateWorkflowDetail() {
-  const id = $("#recipeWorkflowSelect").value;
-  const hint = $("#recipeWorkflowHint");
-  recipeState.createWorkflow = null;
-  recipeState.createMapping = { prompt_slot: null, media_slots: [], duration_slot: null };
-  $("#recipeDurationField").hidden = true;
-  if (!id) { hint.textContent = "选工作流后自动带入它的参数与保存值；不要求先建方案。"; return; }
-  hint.textContent = "正在读取工作流参数…";
-  try {
-    const result = await api(`/api/comfyui/workflows/${encodeURIComponent(id)}`);
-    const workflow = result.workflow;
-    recipeState.createWorkflow = workflow;
-    const fingerprint = workflow.workflow_fingerprint || workflow.id || "";
-    const draft = recipeState.createDraft;
-    // 用户映射：优先恢复本次草稿，其次记住的方案，最后给一份可改的初稿。
-    const mapping = draft?.workflowId === id && draft.mapping ? draft.mapping : (recalledRecipeMapping(fingerprint) || recipeMappingFromWorkflow(workflow));
-    adoptWorkflowMediaIntoMapping(mapping, workflow, []);
-    recipeState.createMapping = mapping;
-    recipeState.createInput = { inputMode: draft?.workflowId === id && draft.inputMode === "script" ? "script" : "prompt",
-      templateId: draft?.templateId || RECIPE_TEMPLATE_PRESETS[0].id };
-    renderRecipeMappingEditor("recipeCreate", workflow, mapping);
-    renderRecipeInputMode("recipeCreate", recipeState.createInput);
-    const promptField = $("#recipeCreatePrompt");
-    if (document.activeElement !== promptField) promptField.value = draft?.workflowId === id && draft.prompt ? draft.prompt : recipeSlotValue(workflow, mapping.prompt_slot);
-    const duration = mapping.duration_slot;
-    $("#recipeDurationField").hidden = !duration;
-    if (duration) {
-      const value = Number(recipeSlotValue(workflow, duration));
-      if (Number.isFinite(value) && value > 0) $("#recipeDuration").value = String(Math.round(value));
-    }
-    if (draft?.workflowId === id && draft.title) $("#recipeTitle").value = draft.title;
-    if (draft?.workflowId === id && draft.shots) $("#recipeShots").value = String(draft.shots);
-    hint.textContent = `已带入「${workflow.name || id}」的保存值；文本写入位、素材入口、时长槽在参数映射里指定，这次的选择会记住，下次自动带入。`;
-    rememberRecipeDraft();
-  } catch (error) { hint.textContent = `工作流参数读取失败：${error.message}`; }
-}
-// ---- 高级参数：一份模型同时供展示和提交 ----
-// 原图值来自冻结的 recipe.workflow，方案值来自 recipe.overrides，本批次值来自控件。
-// 只收数值 / 布尔 / seed；提示词、素材和时长由方案自己管理，不在这里重复。
-function recipeBoundAddresses(recipe) {
-  return new Set([recipe?.prompt_slot, recipe?.duration_slot, ...(recipe?.media_slots || [])]
-    .filter(Boolean).map((slot) => `${slot.node_id}|${slot.field_name}`));
-}
-// 草稿按「方案 ID + 版本 + 工作流指纹」隔离：换方案、重新读取或另存副本后，
-// 旧地址不会套到新方案的同名字段上。
-function recipeParamIdentity(recipe) {
-  const fingerprint = String(recipe?.workflow_fingerprint || "");
-  return `${recipe?.id || ""}@${recipe?.version || 1}${fingerprint ? `#${fingerprint.slice(0, 12)}` : ""}`;
-}
-function recipeOverrideKey(recipe, nodeId, field) {
-  return `override:${recipeParamIdentity(recipe)}::${nodeId}|${field}`;
-}
-function recipeParameterKind(field, value) {
-  if (typeof value === "boolean") return "bool";
-  if (typeof value === "number" && Number.isFinite(value)) return field === "seed" || field === "noise_seed" ? "seed" : "number";
-  return "";
-}
-function recipeParameterRows(recipe) {
-  if (!recipe || typeof recipe.workflow !== "object" || !recipe.workflow) return [];
-  const bound = recipeBoundAddresses(recipe);
-  const recipeValues = new Map((recipe.overrides || []).map((entry) => [`${entry.node_id}|${entry.field_name}`, entry.value]));
-  const rows = [];
-  for (const [nodeId, node] of Object.entries(recipe.workflow)) {
-    if (!node || typeof node.inputs !== "object" || !node.inputs) continue;
-    const title = String(node._meta?.title || node.class_type || "");
-    for (const [field, value] of Object.entries(node.inputs)) {
-      if (Array.isArray(value)) continue;
-      const address = `${nodeId}|${field}`;
-      if (bound.has(address)) continue;
-      const kind = recipeParameterKind(field, value);
-      if (!kind) continue;
-      rows.push({
-        address, node_id: String(nodeId), field_name: field, field_type: kind,
-        original: value, recipe_value: recipeValues.has(address) ? recipeValues.get(address) : undefined,
-        // 原图是整数就要求精确整数；seed 一律按整数处理。
-        integer: kind === "seed" || (typeof value === "number" && Number.isInteger(value)),
-        node_title: title,
-        label: `${field}（节点 ${nodeId}${title ? ` · ${title}` : ""}）`,
-      });
-    }
-  }
-  return rows;
-}
-// 旧的调用点只关心「有哪些数值槽」；统一走同一份模型，避免两套逻辑漂移。
-function recipeNumericSlots(recipe) {
-  return recipeParameterRows(recipe).map((row) => ({
-    node_id: row.node_id, field_name: row.field_name,
-    value: row.recipe_value ?? row.original,
-  }));
-}
-function recipeParamValueText(value) {
-  if (value === undefined) return "同原图";
-  if (typeof value === "boolean") return value ? "开" : "关";
-  return String(value);
-}
-// 提交用的覆盖：方案默认 + 本批次填写值，经过同一份参数行校验。
-function collectRecipeOverrides(recipe) {
-  const result = new Map((recipe?.overrides || []).map((entry) => [`${entry.node_id}|${entry.field_name}`, { node_id: String(entry.node_id), field_name: entry.field_name, value: entry.value }]));
-  const rows = new Map(recipeParameterRows(recipe).map((row) => [row.address, row]));
-  const host = $("#recipeEffectiveControls");
-  for (const input of host ? host.querySelectorAll("[data-recipe-override-node]") : []) {
-    const address = `${input.dataset.recipeOverrideNode}|${input.dataset.recipeOverrideField}`;
-    const row = rows.get(address);
-    if (!row) throw new Error(`节点 ${input.dataset.recipeOverrideNode} · ${input.dataset.recipeOverrideField} 不在当前方案的可覆盖参数里，请重新打开方案核对。`);
-    if (input.value === "") continue;
-    result.set(address, { node_id: row.node_id, field_name: row.field_name, value: recipeOverrideValue(row, input.value) });
-  }
-  return [...result.values()];
-}
-function recipeOverrideValue(row, raw) {
-  const where = `节点 ${row.node_id} · ${row.field_name}`;
-  if (row.field_type === "bool") {
-    if (raw !== "true" && raw !== "false") throw new Error(`${where}：请选择开或关`);
-    return raw === "true";
-  }
-  const value = Number(raw);
-  if (!Number.isFinite(value)) throw new Error(`${where}：请填有限数字`);
-  if (row.integer && !Number.isInteger(value)) throw new Error(`${where}：这个参数是整数，不能填小数`);
-  if (Math.abs(value) > 2 ** 53 - 1) throw new Error(`${where}：超出可精确确认的整数范围`);
-  if (row.field_type === "seed" && value < 0) throw new Error(`${where}：固定种子不能是负数；想随机就留空`);
-  return value;
-}
-// 批次页展示的是「原始工作流图 + 待应用覆盖」：服务端返回的 overrides 才是已受理的
-// 覆盖，未打补丁的 effective_workflow.prompt 不能当成最终执行图。
-function recipeAppliedOverridesMarkup(batch) {
-  const applied = Array.isArray(batch?.overrides) ? batch.overrides : [];
-  if (!applied.length) return '<p class="super-agent-muted">高级参数：全部沿工作流原图值，没有额外覆盖。</p>';
-  const rows = applied.map((entry) => `${text(entry.field_name)}（节点 ${text(entry.node_id)}）= ${text(recipeParamValueText(entry.value))}`);
-  return `<p class="super-agent-muted">高级参数（原始工作流图 + 待应用覆盖）：${rows.join(" · ")}</p><p class="super-agent-muted">提示词、素材和时长在执行阶段写入，预览图不等于最终执行图。</p>`;
-}
-// 创建批量草稿：工作流直建，映射按用户在「参数映射」里指定的为准，不要求先注册方案。
-async function submitRecipeCreate(event) {
-  event.preventDefault(); if (recipeState.busy) return;
-  try {
-    const workflow = recipeState.createWorkflow;
-    if (!workflow?.id) throw new Error("请选择造梦机已保存的工作流。");
-    const shots = Number($("#recipeShots").value);
-    if (!Number.isInteger(shots) || shots < 1 || shots > 200) throw new Error("每组生成几条须为 1–200 整数。");
-    const mapping = recipeState.createMapping || {};
-    const input = recipeState.createInput || {};
-    const inputMode = input.inputMode === "script" ? "script" : "prompt";
-    const templateId = String(input.templateId || "");
-    if (inputMode === "script" && !templateId) throw new Error("反推需要选择模板：H3 两种预设或提词库模板。");
-    const prompt = String($("#recipeCreatePrompt").value || "").trim();
-    if (prompt.length > 32000) throw new Error("提示词超过长度上限。");
-    if (inputMode === "prompt" && prompt.trim() && !mapping.prompt_slot) throw new Error("已填写正文但没有指定文本写入位；请在参数映射里选一个，或清空正文。");
-    const durationSlot = mapping.duration_slot || null;
-    const durationSeconds = durationSlot ? Number($("#recipeDuration")?.value) : NaN;
-    const body = { source: "workflow", workflow_id: workflow.id, workflow_fingerprint: workflow.workflow_fingerprint || workflow.fingerprint || "",
-      title: $("#recipeTitle").value.trim() || workflow.name || "批量任务", shots, prompt,
-      prompt_slot: mapping.prompt_slot || null,
-      media_slots: (mapping.media_slots || []).map((slot) => ({ node_id: String(slot.node_id), field_name: String(slot.field_name), media: slot.media || "image", scope: "item", required: false })),
-      ...(durationSlot ? { duration_slot: durationSlot } : {}),
-      ...(durationSlot && Number.isFinite(durationSeconds) && durationSeconds > 0 ? { duration_seconds: Math.round(durationSeconds) } : {}),
-      ...(inputMode === "script" ? (RECIPE_TEMPLATE_PRESETS.some((row) => row.id === templateId)
-        ? { input_mode: "script", template_id: templateId }
-        : { input_mode: "script", custom_id: templateId }) : {}) };
-    body.request_id = recipeRequest("create", body);
-    recipeState.busy = true; $("#recipeCreateSubmit").disabled = true;
-    const response = await api("/api/super-agent/recipe-batches", { method: "POST", body });
-    if (!response.thread_id || !response.batch) throw new Error("服务端未返回批次，请保持清单并重试确认创建结果。");
-    recipeState.requests.delete("create");
-    recipeState.createDraft = null; rememberRecipeDraft();
-    recipeState.batches.set(response.thread_id, response.batch);
-    viewState.selectedId = response.thread_id; viewState.filter = "all";
-    $("#superAgentRecipeDialog").close(); await openSuperAgentView();
-  } catch (error) { recipeError(error.message || "创建批次失败"); }
-  finally { recipeState.busy = false; $("#recipeCreateSubmit").disabled = false; }
-}
-
-function recipePrimaryAction(batch) {
-  const status = batch.status;
-  const included = (batch.items || []).filter((item) => item.included !== false);
-  // 与后端 _authorize 口径一致：失败阶段必须逐组补跑，不能整体确认；空提示词不进入生成确认。
-  const failedStates = ["failed", "cancelled", "interrupted", "needs_review", "partial", "collection_failed", "collect_failed", "download_failed"];
-  const pendingReverse = included.filter((item) => reverseStatus(item) === "pending").length;
-  const pendingGenerate = included.filter((item) => generationStatus(item) === "pending").length;
-  const failedReverse = included.some((item) => failedStates.includes(reverseStatus(item)));
-  const failedGenerate = included.some((item) => failedStates.includes(generationStatus(item)));
-  const missingPrompts = included.filter((item) => !["done", "provided"].includes(reverseStatus(item)) && !String(item.prompt || "").trim()).length;
-  if (["draft", "review", "partial", "needs_review"].includes(status)) {
-    if (pendingReverse && !failedReverse && recipeCan(batch, "confirm_reverse")) return { action: "confirm_reverse", label: "预览并生成提示词" };
-    if (pendingGenerate && !failedGenerate && !missingPrompts && recipeCan(batch, "confirm_generate")) {
-      return { action: "confirm_generate", label: `确认生成 ${pendingGenerate * Number(batch.shots)} 条视频` };
-    }
-  }
-  if (["paused", "interrupted"].includes(status) && recipeCan(batch, "continue")) return { action: "continue", label: "继续" };
-  return null;
-}
-function recipePhaseLabel(batch) {
-  if (batch.status === "draft") {
-    const included = (batch.items || []).filter((item) => item.included !== false);
-    if (!included.length) return "待纳入项目";
-    if (batch.input_mode === "prompt") return included.every((item) => String(item.prompt || "").trim()) ? "待确认生成视频" : "待补齐提示词";
-  }
-  return RECIPE_PHASES[batch.status] || batch.status;
-}
-function recipeNextCopy(batch) {
-  const included = (batch.items || []).filter((item) => item.included !== false);
-  const completed = included.filter((item) => generationStatus(item) === "done").length;
-  const prompts = included.filter((item) => ["done", "provided"].includes(reverseStatus(item)) || String(item.prompt || "").trim()).length;
-  const outputs = included.reduce((sum, item) => sum + (item.outputs?.length || 0), 0);
-  switch (batch.status) {
-    case "draft": {
-      if (!included.length) return { title: "待纳入项目", hint: "请先纳入至少一组内容，再核对并确认下一步。" };
-      if (batch.input_mode === "prompt") {
-        if (included.some((item) => !String(item.prompt || "").trim())) return { title: "待补齐提示词", hint: "请填写每个纳入项目的完整视频提示词；本批次不执行提词阶段。" };
-        const primary = recipePrimaryAction(batch);
-        return { title: primary?.action === "confirm_generate" ? primary.label : "提示词已就绪，待核对", hint: "已使用你提供的完整提示词；核对后确认生成视频，可能产生费用。本批次不执行提词阶段。" };
-      }
-      return { title: "核对素材，生成提示词", hint: `已纳入 ${included.length} 组；确认后向提词模型发送请求，生成可编辑的提示词。` };
-    }
-    case "reverse_running": return { title: "正在生成提示词", hint: "完成后需要你核对，再确认生成视频。" };
-    case "review": return prompts < included.length
-      ? { title: "还有提示词未就绪", hint: `${prompts} / ${included.length} 组提示词就绪；请补齐后再确认生成。` }
-      : { title: `确认生成 ${included.length * Number(batch.shots)} 条视频`, hint: "提示词已就绪；确认后提交生成，可能产生费用。" };
-    case "needs_review": return { title: "有项目需要核对", hint: "请查看各组说明，处理后继续。" };
-    case "partial": return { title: "部分未完成", hint: `已完成 ${completed} 组；未完成项目可逐组重试或重新下载。` };
-    case "generation_running": return { title: "正在生成视频", hint: "每条完成后会自动收集结果，不需要你操作。" };
-    case "paused": return { title: "已暂停", hint: "继续后从当前进度接着执行。" };
-    case "interrupted": return { title: "执行已中断", hint: "核对执行记录后选择继续，或新建批次。" };
-    case "completed": return { title: "全部完成", hint: `${outputs} 个结果已收齐，可在对应组下打开或保存。` };
-    case "cancelled": return { title: "批次已取消", hint: "已生成的结果仍保留。" };
-    default: return { title: "等待当前任务完成", hint: "完成后这里会更新。" };
-  }
-}
-function recipeFocusCopy(batch) {
-  const status = batch.status;
-  const included = (batch.items || []).filter((item) => item.included !== false);
-  const pendingGenerate = included.filter((item) => generationStatus(item) === "pending").length;
-  const completed = included.filter((item) => generationStatus(item) === "done").length;
-  if (["draft", "review", "needs_review", "partial"].includes(status)) {
-    const primary = recipePrimaryAction(batch);
-    if (primary?.action === "confirm_reverse") return { tone: "", label: "现在需要你确认", title: "核对素材，生成提示词", text: `共 ${included.length} 组素材 / 文本；确认后将向提词模型发送请求（可能产生费用），生成可编辑的提示词。确认前不会调用模型。` };
-    if (primary?.action === "confirm_generate") return { tone: "", label: "现在需要你确认", title: `确认生成 ${pendingGenerate * Number(batch.shots)} 条视频`, text: "提示词就绪后才会进入这一步；确认后提交生成，可能产生费用，不会重新生成提示词。" };
-    if (primary?.action === "continue") return { tone: "", label: "已暂停", title: "已暂停后续任务", text: "继续后从当前进度接着执行；在途任务仍可能完成。" };
-    return { tone: "is-failed", label: "需要你处理", title: "部分项目未完成", text: "请在下方清单里按组重试或补齐提示词；已成功的结果不会重复执行。" };
-  }
-  if (status === "reverse_running") return { tone: "is-running", label: "正在执行", title: "正在生成提示词", text: "不需要你操作；完成后这里会提示下一步。" };
-  if (status === "generation_running") return { tone: "is-running", label: "正在执行", title: "正在生成视频", text: `已完成 ${completed} / ${included.length} 组；可随时暂停后续任务。` };
-  if (status === "paused") return { tone: "", label: "已暂停", title: "已暂停后续任务", text: "继续后从当前进度接着执行；在途任务仍可能完成。" };
-  if (status === "interrupted") return { tone: "", label: "执行已中断", title: "执行已中断", text: "核对记录后选择继续，或新建批次。" };
-  if (status === "completed") return { tone: "is-done", label: "任务已完成", title: `全部 ${included.length} 组已完成`, text: "结果在下方逐组保留，可打开或保存；需要继续处理可复制为新任务。" };
-  if (status === "cancelled") return { tone: "is-done", label: "已取消", title: "批次已取消", text: "已生成的结果仍保留在对应组下。" };
-  return { tone: "is-running", label: "进行中", title: "等待任务更新", text: "完成后这里会提示下一步。" };
-}
-function renderRecipeBatch(batch) {
-  const host = $("#superAgentRecipeBatch"); if (!host) return;
-  host.hidden = !batch; if (!batch) return;
-  if (host.dataset.batchId !== batch.id) {
-    host.dataset.batchId = batch.id;
-    host.innerHTML = '<div class="recipe-batch-status" aria-live="polite"></div><p id="recipeBatchError" class="super-agent-error" role="alert"></p><div class="recipe-batch-actions"></div><p class="recipe-dirty-notice" role="status"></p><div class="recipe-batch-editors"></div><div class="recipe-batch-results"></div>';
-  }
-  const draft = recipeDraft(batch); const items = batch.items || [];
-  const includedItems = items.filter((item) => item.included !== false);
-  const readyItems = includedItems.filter((item) => ["done", "provided"].includes(reverseStatus(item)) || String(item.prompt || "").trim());
-  const completedItems = includedItems.filter((item) => generationStatus(item) === "done");
-  const editorWasEmpty = !host.querySelector(".recipe-batch-editors").children.length;
-  const phase = recipePhaseLabel(batch);
-  host.querySelector(".recipe-batch-status").innerHTML = `<h2>${text(batch.recipe?.name, "视频方案")}</h2><span class="super-agent-status" data-status="${text(batch.status)}">${text(phase)}</span><p>${includedItems.length ? `已纳入 ${includedItems.length} 组 · 提示词就绪 ${readyItems.length} 组 · 计划生成 ${Number(batch.counts?.generation_requests ?? includedItems.length * batch.shots)} 条视频` : "还没有纳入的图片组"}</p><p>${recipeDurationSupported(batch.recipe) ? `请求时长 ${Number(batch.duration_seconds)} 秒 · 实际长度按帧对齐，以最终结果为准。` : "时长沿用工作流配置；本方案没有时长映射，不额外改写时长。"}</p>${recipeAppliedOverridesMarkup(batch)}${batch.error ? `<p class="super-agent-error">${text(batch.error)}</p>` : ""}`;
-  // 每个状态只给一个当前主操作（在主操作卡中），这里只保留次级操作。
-  const primary = recipePrimaryAction(batch);
-  const secondary = [];
-  if (recipeCan(batch, "edit")) secondary.push(["edit", "保存修改（不执行）"]);
-  if (recipeCan(batch, "pause")) secondary.push(["pause", "暂停后续任务"]);
-  if (recipeCan(batch, "continue") && !primary) secondary.push(["continue", "继续"]);
-  if (recipeCan(batch, "cancel")) secondary.push(["cancel", "取消批次"]);
-  host.querySelector(".recipe-batch-actions").innerHTML = '<button type="button" class="control-button tiny" data-recipe-clone>复制为新任务（不执行）</button>' + secondary.map(([action, label]) => `<button type="button" class="control-button tiny" data-recipe-action="${action}" ${recipeState.busy ? "disabled" : ""}>${label}</button>`).join("");
-  if (draft.dirty) host.querySelector(".recipe-batch-actions").insertAdjacentHTML("beforeend", '<button type="button" class="control-button tiny" data-recipe-discard>放弃本地草稿，读取最新版本</button>');
-  host.querySelector(".recipe-dirty-notice").textContent = draft.dirty
-    ? "有未保存修改；确认前会先保存，不会覆盖你的编辑。"
-    : ["draft", "review", "needs_review", "partial"].includes(batch.status) ? "修改后需重新确认；保存不会执行模型。" : "";
-  const editors = host.querySelector(".recipe-batch-editors");
-  // Keep live DOM and cursor while dirty/focused, even when 4-second polling updates statuses.
-  if (editorWasEmpty || (!draft.dirty && !editors.contains(document.activeElement))) {
-    if (!draft.dirty) { draft.revision = batch.revision; draft.baseline = Object.fromEntries(items.map((item) => [item.id, { requirements: item.requirements || "", prompt: item.prompt || "", included: item.included !== false }])); }
-    editors.innerHTML = items.map((savedItem, index) => {
-      const item = { ...savedItem, ...(draft.items[savedItem.id] || {}) };
-      const locked = !recipeCan(batch, "edit") || generationStatus(item) === "done";
-      const label = itemDisplayName(item, index);
-      // 逐组审核、逐组确认（计划 §4.3）：哪组准备好就先确认哪组，不等其他组。
-      const groupConfirm = recipeCan(batch, "confirm_generate") && item.included !== false
-        && generationStatus(item) === "pending" && !item.generate?.attempts?.length
-        && Boolean(String(item.prompt || "").trim());
-      return `<article class="recipe-item" data-recipe-item-id="${text(item.id)}"><div class="recipe-item-head"><div><h3>第 ${index + 1} 组</h3><span class="recipe-item-status" data-status="${text(generationStatus(item))}">${text(statusLabel(generationStatus(item)))}</span><span class="recipe-item-sub">${text(label ? `${label} · ` : "")}${recipeMediaSummary(item.media)}</span></div><label class="recipe-check"><input type="checkbox" data-recipe-edit="included" ${item.included !== false ? "checked" : ""} ${itemFieldEditable(batch, savedItem, "included") ? "" : "disabled"}>纳入本次</label></div>${recipeMediaMarkup([...(item.media || []), ...(batch.shared_media || [])])}${recipeCan(batch, "edit") && generationStatus(item) !== "done" ? recipeGroupMediaEditor(batch, item.media) : ""}<label>${batch.input_mode === "prompt" ? "内容备注（本批次不执行提词阶段）" : "剧本 / 内容要求（修改后需重新生成提示词）"}<textarea rows="3" data-recipe-edit="requirements" ${itemFieldEditable(batch, savedItem, "requirements") ? "" : "disabled"}>${escapeHtml(item.requirements || "")}</textarea></label><label>最终提示词<textarea rows="5" data-recipe-edit="prompt" ${itemFieldEditable(batch, savedItem, "prompt") ? "" : "disabled"}>${escapeHtml(item.prompt || "")}</textarea></label>${item.reverse?.attempts?.at(-1)?.validation?.errors?.length ? `<p class="super-agent-error">提示词格式问题：${item.reverse.attempts.at(-1).validation.errors.map((error) => text(error)).join("；")}</p>` : ""}${groupConfirm ? `<div class="recipe-group-actions"><button type="button" class="control-button tiny primary" data-recipe-action="confirm_generate" data-recipe-retry-id="${text(item.id)}" ${recipeState.busy ? "disabled" : ""}>预检本组 · 确认生成</button><span class="writer-dialog-hint">确认生成 ≠ 确认反推；其他组仍可编辑。</span></div>` : ""}<div class="recipe-item-results" data-recipe-results-id="${text(item.id)}"></div></article>`;
-    }).join("") + (recipeCan(batch, "edit") ? recipeAddGroupCard(batch, items.length) : "");
-  }
-  host.querySelector(".recipe-batch-results").innerHTML = "";
-  for (const item of items) {
-    const reverse = reverseStatus(item), generated = generationStatus(item);
-    const excluded = item.included === false;
-    const retryReverse = !excluded && ["failed", "invalid", "needs_review", "interrupted", "cancelled", "partial"].includes(reverse);
-    const retryCollect = !excluded && (["collection_failed", "collect_failed", "download_failed"].includes(generated) || item.capabilities?.retry_collect === true || item.capabilities?.includes?.("retry_collect") === true);
-    const retryGenerate = !excluded && ["failed", "interrupted", "needs_review", "partial", "cancelled"].includes(generated) && !retryCollect;
-    const failure = item.error || item.reverse?.error || item.generate?.error || item.reverse?.attempts?.at(-1)?.error || item.generate?.attempts?.at(-1)?.error;
-    const resultHost = [...editors.querySelectorAll("[data-recipe-results-id]")].find((element) => element.dataset.recipeResultsId === item.id);
-    if (resultHost) resultHost.innerHTML = `<p>提示词：${text(statusLabel(reverse))} · 视频：${text(statusLabel(generated))}${excluded ? " · 已排除" : ""}</p>${failure ? `<p class="super-agent-error">${text(failure)}</p>` : ""}<div class="recipe-retry-actions">${[[retryReverse && recipeCan(batch, "retry_reverse"), "retry_reverse", "重试本组提示词"], [retryGenerate && recipeCan(batch, "retry_generate"), "retry_generate", "重试本组视频（保留提示词）"], [retryCollect && recipeCan(batch, "retry_collect"), "retry_collect", "重新下载已有结果（不会重新生成）"]].filter(([show]) => show).map(([, action, label]) => `<button class="control-button tiny" type="button" data-recipe-action="${action}" data-recipe-retry-id="${text(item.id)}">${label}</button>`).join("")}</div><div class="recipe-outputs">${(item.outputs || []).map(recipeOutputMarkup).join("")}</div>`;
-  }
-  $("#superAgentProgressText").textContent = includedItems.length ? `${completedItems.length} / ${includedItems.length} 组完成` : "暂无内容";
-  $("#superAgentProgress").hidden = !includedItems.length;
-  $("#superAgentProgress").max = includedItems.length || 1; $("#superAgentProgress").value = completedItems.length;
-  $("#superAgentProgressHint").textContent = "仅统计纳入清单且产物完整的项目";
-  $("#superAgentCurrentStage").textContent = phase;
-  $("#superAgentCurrentHint").textContent = includedItems.length ? `提示词就绪 ${readyItems.length} 组 · 计划生成 ${Number(batch.counts?.generation_requests ?? 0)} 条` : "";
-  const nextCopy = recipeNextCopy(batch);
-  $("#superAgentNextStep").innerHTML = `<div class="super-agent-ref"><strong>${text(nextCopy.title)}</strong><p>${text(nextCopy.hint)}</p></div>`;
-  $("#superAgentChatConfirmationList").innerHTML = "";
-  $("#superAgentApprovalList").innerHTML = "";
-  $("#superAgentArtifactList").innerHTML = items.some((item) => item.outputs?.length)
-    ? `<p class="super-agent-muted">已收集 ${items.reduce((sum, item) => sum + (item.outputs?.length || 0), 0)} 个结果，在对应组下打开或保存。</p>`
-    : '<p class="super-agent-muted">尚未收集到结果；生成成功后会显示在对应组下。</p>';
-  $("#superAgentConversationLinks").innerHTML = '<p class="super-agent-muted">暂无相关入口。</p>';
-  $("#superAgentChainMeta").textContent = "按方案固定流程执行";
-  $("#superAgentNodeList").innerHTML = `<p class="super-agent-muted">${text(phase)} · 执行记录与结果在上方逐组清单中保留。</p>`;
-  const focusCopy = recipeFocusCopy(batch);
-  const focus = $("#superAgentFocus");
-  if (focus) {
-    focus.hidden = false;
-    focus.classList.remove("is-running", "is-done", "is-failed");
-    if (focusCopy.tone) focus.classList.add(focusCopy.tone);
-    $("#superAgentFocusLabel").textContent = focusCopy.label;
-    $("#superAgentFocusTitle").textContent = focusCopy.title;
-    $("#superAgentFocusText").textContent = focusCopy.text;
-    $("#superAgentFocusActions").innerHTML = primary
-      ? `<button type="button" class="control-button primary" data-recipe-action="${primary.action}" ${recipeState.busy ? "disabled" : ""}>${text(primary.label)}</button>`
-      : "";
-    const note = $("#superAgentFocusNote");
-    note.hidden = true;
-    note.textContent = "";
-  }
-  const threadActions = $("#superAgentThreadActions");
-  const actionsVisible = recipeCan(batch, "pause") || recipeCan(batch, "continue") || recipeCan(batch, "cancel");
-  if (threadActions) {
-    threadActions.hidden = !actionsVisible;
-    threadActions.querySelectorAll("[data-super-thread-action]").forEach((button) => { button.disabled = !recipeCan(batch, button.dataset.superThreadAction); });
-  }
-  const controlNote = $("#superAgentControlNote");
-  if (controlNote) controlNote.hidden = !actionsVisible;
-  $("#superAgentNodeList")?.querySelectorAll("[data-super-action]").forEach((button) => { button.hidden = true; });
-}
-async function sendRecipeAction(batch, action, extra = {}) {
-  const body = { action, revision: batch.revision, ...(batch.revision_hash ? { revision_hash: batch.revision_hash } : {}), ...extra };
-  const key = `${batch.thread_id}:${action}`; body.request_id = recipeRequest(key, body);
-  const result = await api(`/api/super-agent/threads/${encodeURIComponent(batch.thread_id)}/recipe/actions`, { method: "POST", body });
-  if (!result.batch) throw new Error("服务端未返回更新批次，请同步状态后重试。");
-  recipeState.requests.delete(key); recipeState.batches.set(batch.thread_id, result.batch); return result.batch;
-}
-async function saveRecipeDraft(batch) {
-  const draft = recipeDraft(batch); if (!draft.dirty) return batch;
-  if (draft.revision !== batch.revision) {
-    const conflict = Object.entries(draft.items).some(([id, patch]) => {
-      const current = batch.items.find((item) => item.id === id);
-      return !current || Object.keys(patch).some((field) => current[field] !== draft.baseline?.[id]?.[field]);
-    });
-    if (conflict) throw new Error("同一字段的服务器版本已变化，已保留草稿。请复制需要的修改，放弃草稿后重新核对。");
-  }
-  const saved = await sendRecipeAction(batch, "edit", { items: draft.items });
-  recipeState.drafts.set(batch.thread_id, { revision: saved.revision, items: {}, dirty: false });
-  return saved;
-}
-function recipeReviewItems(batch, action, itemIds) {
-  const reverse = action === "confirm_reverse" || action === "retry_reverse";
-  return (batch.items || []).filter((item) => item.included !== false && (!itemIds || itemIds.includes(item.id)) && (reverse ? !["done", "provided"].includes(reverseStatus(item)) : generationStatus(item) !== "done"));
-}
-function recipeEffectiveWorkflow(item) {
-  const workflow = item.effective_workflow;
-  return workflow && { id: workflow.id, fingerprint: workflow.fingerprint, graph: workflow.prompt || workflow.graph };
-}
-function assertRecipeReviewSnapshot(batch, action, itemIds) {
-  if (action.includes("reverse") || action === "retry_collect") return;
-  for (const item of recipeReviewItems(batch, action, itemIds)) {
-    const effective = recipeEffectiveWorkflow(item);
-    if (!effective?.id || !effective.fingerprint || !effective.graph || typeof effective.graph !== "object" || Array.isArray(effective.graph)) throw new Error(`第 ${itemDisplayName(item) || "当前"} 组的生成设置还未同步到本页，请刷新后重新核对，暂不能确认生成。`);
-  }
-}
-function recipeTargetLabel(batch) {
-  const raw = String(batch?.target?.url || batch?.target || "");
-  let host = raw;
-  try { host = new URL(raw).hostname; } catch { /* 非 URL 时原样显示主机名 */ }
-  return ["127.0.0.1", "localhost", "::1", "[::1]"].includes(host) ? "本机 ComfyUI" : host || "生成服务";
-}
-function recipeReviewMediaMarkup(item, shared) {
-  const media = [...(item.media || []), ...(shared || [])];
-  return media.length ? recipeMediaMarkup(media) : '<span class="writer-dialog-hint">纯文本 / 无参考媒体</span>';
-}
-// ---- 组素材上传（映射了素材入口的方案，逐槽放文件）----
-const RECIPE_MEDIA_ACCEPT = { image: "image/*", video: "video/*", audio: "audio/*" };
-function recipeGroupMediaEditor(batch, media, { forAdd = false } = {}) {
-  const slots = (batch.recipe?.media_slots || []).filter((slot) => (slot.scope || "item") === "item");
-  if (!slots.length) return "";
-  const rows = slots.map((slot) => {
-    const current = (media || []).find((m) => m.role === slot.role);
-    const kindLabel = RECIPE_MEDIA_KIND_LABELS[slot.media || "image"] || "图片";
-    return `<div class="recipe-group-media-row"><span class="recipe-group-media-label">${text(slot.label || slot.role)}<i>${kindLabel}</i></span>${current ? `<span class="recipe-group-media-file">${text(current.name || "")}</span>` : '<span class="recipe-group-media-file muted">未放文件</span>'}${forAdd || !current ? "" : `<button type="button" class="control-button tiny" data-recipe-media-clear="${text(slot.role)}"${recipeState.busy ? " disabled" : ""}>清掉</button>`}<label class="control-button tiny">选${kindLabel}<input type="file" hidden accept="${RECIPE_MEDIA_ACCEPT[slot.media || "image"] || "image/*"}" data-recipe-media-upload="${text(slot.role)}"${recipeState.busy ? " disabled" : ""}></label></div>`;
-  }).join("");
-  return `<div class="recipe-group-media"><span class="recipe-group-media-title">素材（入口按方案映射；${batch.input_mode === "prompt" ? "换素材不动已填正文" : "换素材后该组会要求重新反推"}）</span>${rows}</div>`;
-}
-async function recipeUploadMediaFile(file) {
-  const form = new FormData();
-  form.append("file", file, file.name);
-  return api("/api/comfyui/media", { method: "POST", body: form });
-}
-async function recipeSetItemMedia(batch, itemId, role, ref) {
-  const savedItem = (batch.items || []).find((row) => row.id === itemId) || {};
-  const media = (savedItem.media || []).filter((m) => m.role !== role);
-  if (ref) media.push({ role, path: String(ref.path || ""), name: String(ref.name || "") });
-  const updated = await sendRecipeAction(batch, "edit", { items: { [itemId]: { media } } });
-  if (viewState.selectedId === batch.thread_id) renderRecipeBatch(updated);
-}
-async function recipeSubmitAddGroup(batch) {
-  const card = document.querySelector('#superAgentRecipeBatch [data-recipe-add-card]');
-  const field = card?.querySelector("[data-recipe-add]");
-  const value = String(field?.value || "").trim();
-  const media = Object.entries(recipeState.addGroupMedia || {}).map(([role, ref]) => ({ role, path: String(ref.path || ""), name: String(ref.name || "") }));
-  const count = (batch.items || []).length;
-  const row = { source_path: `added/group-${count + 1}`, name: `组 ${String(count + 1).padStart(2, "0")}`, media };
-  if (batch.input_mode === "prompt") row.prompt = value; else row.requirements = value;
-  try {
-    const updated = await sendRecipeAction(batch, "edit", { add_items: [row] });
-    recipeState.addGroupMedia = [];
-    recipeState.batches.set(batch.thread_id, updated);
-    if (viewState.selectedId === batch.thread_id) renderRecipeBatch(updated);
-    toast(`已添加第 ${count + 1} 组`);
-  } catch (error) { $("#recipeBatchError").textContent = `添加失败：${error.message}`; }
-}
-function recipeAddGroupCard(batch, count) {
-  const isPrompt = batch.input_mode === "prompt";
-  return `<article class="recipe-item recipe-item-add" data-recipe-add-card><div class="recipe-item-head"><div><h3>＋ 添加一组</h3><span class="recipe-item-sub">新组和其他组一样逐个处理；不会触发任何生成</span></div></div>${recipeGroupMediaEditor(batch, Object.entries(recipeState.addGroupMedia || {}).map(([role, ref]) => ({ role, name: ref.name })), { forAdd: true })}<label>${isPrompt ? "本组正文（最终提示词，可留空进组后补）" : "本组要求（交给反推模板；可留空进组后补）"}<textarea rows="3" data-recipe-add placeholder="${isPrompt ? "直接填这一组的最终提示词" : "写这一组要发生什么"}"></textarea></label><div class="recipe-group-actions"><button type="button" class="control-button tiny primary" data-recipe-add-submit ${recipeState.busy ? "disabled" : ""}>添加第 ${count + 1} 组</button><span class="writer-dialog-hint">素材先选好再点添加；进组后还能逐项改。</span></div></article>`;
-}
-// 就绪检查前置：缺项在确认页直接可见，不再走到最后一步才被拒（A05）。
-function recipeReadinessList(batch, action, items) {
-  const reverse = action === "confirm_reverse" || action === "retry_reverse";
-  const rows = [];
-  const missingMedia = items.filter((item) => (batch.recipe?.media_slots || []).some((slot) => slot.required && ![...(item.media || []), ...(batch.shared_media || [])].some((entry) => entry.role === slot.role)));
-  rows.push({ ok: !missingMedia.length, label: missingMedia.length ? `${missingMedia.length} 组缺少方案要求的素材` : "素材按当前方案要求已核对；可选参考不必填满" });
-  if (items.some((item) => [...(item.media || []), ...(batch.shared_media || [])].some((entry) => ["video", "audio"].includes(recipeMediaKind(entry))))) rows.push({ ok: true, label: "提词模型仅使用音视频文字描述，不观看 / 收听；参考视频仅用画面，音轨请另加音频" });
-  if (reverse) {
-    const missingScript = items.filter((item) => !String(item.requirements || "").trim()).length;
-    rows.push(missingScript
-      ? { ok: false, label: `${missingScript} 组还没有剧本正文；生成提示词需要剧本` }
-      : { ok: true, label: `${items.length} 组剧本已填写` });
-  } else if (action !== "retry_collect") {
-    const missingPrompt = items.filter((item) => !String(item.prompt || "").trim()).length;
-    rows.push(missingPrompt
-      ? { ok: false, label: `${missingPrompt} 组提示词为空，确认会被拦下` }
-      : { ok: true, label: `${items.length} 条提示词已就绪` });
-  } else {
-    rows.push({ ok: true, label: "只重新下载已有结果，不会重新生成" });
-  }
-  if (action.includes("generate")) {
-    const missingSnapshot = items.filter((item) => { const effective = recipeEffectiveWorkflow(item); return !effective?.id || !effective.fingerprint || !effective.graph; }).length;
-    rows.push(missingSnapshot
-      ? { ok: false, label: `${missingSnapshot} 组生成设置未同步，请刷新后重新核对` }
-      : { ok: true, label: "生成设置已同步到本页" });
-  }
-  rows.push({ ok: true, label: "已成功的结果不会重复执行" });
-  return `<div class="sa-sec-head" style="margin-top:18px"><h3>就绪检查</h3><span>确认前自动核对</span></div><div class="recipe-check-list" style="margin-top:10px">${rows.map((row) => `<div class="recipe-check-item${row.ok ? "" : " warn"}"><i>${row.ok ? "✓" : "!"}</i><span>${text(row.label)}</span></div>`).join("")}</div>`;
-}
-// 审核确认页：普通用户视角——素材、提示词、数量与费用；不再展示 JSON、绝对路径、指纹与模板原文。
-function recipeReviewMarkup(batch, action, itemIds) {
-  const reverse = action === "confirm_reverse" || action === "retry_reverse";
-  const collect = action === "retry_collect";
-  const items = recipeReviewItems(batch, action, itemIds);
-  const shots = Number(batch.shots);
-  const count = reverse || collect ? items.length : items.length * shots;
-  const excluded = (batch.items || []).filter((item) => item.included === false);
-  const authorize = reverse
-    ? `本次将向提词模型发送 ${count} 项请求（可能产生费用）；只生成提示词，不制作视频。`
-    : collect
-      ? "只重新下载已经生成的结果，不会重新生成，也不会改写提示词。"
-      : `本次将提交 ${count} 条视频生成（可能产生费用）；不会重新生成提示词，也不会改写你已填好的内容。`;
-  return `<div class="recipe-review-summary"><span class="recipe-review-kv">方案 <b>${text(batch.recipe?.name, "视频方案")}</b></span><span class="recipe-review-kv">本次涉及 <b>${items.length} 组</b></span>${reverse || collect ? "" : `<span class="recipe-review-kv">每组 <b>${shots} 条</b></span><span class="recipe-review-kv">时长 <b>${recipeDurationSupported(batch.recipe) ? `${Number(batch.duration_seconds)} 秒` : "沿用工作流"}</b></span>`}<span class="recipe-review-kv">运行位置 <b>${text(recipeTargetLabel(batch))}</b></span></div><p class="writer-dialog-hint">已成功的结果不会重复执行。${excluded.length ? `已明确排除：${excluded.map((item) => text(itemDisplayName(item) || item.source_path)).join("、")}。` : ""}</p><p><strong>${authorize}</strong></p>${reverse ? `<p class="writer-dialog-hint">提词模型：${text(batch.model?.model_name || batch.model?.model_key, "未选择")}</p>` : ""}${items.length ? `<div class="recipe-review-items">${items.map((item, index) => `<article class="recipe-review-card"><div class="recipe-review-media">${recipeReviewMediaMarkup(item, batch.shared_media)}</div><div class="recipe-review-body"><h3>${text(itemDisplayName(item) || `第 ${index + 1} 组`)}</h3>${reverse ? `<p class="writer-dialog-hint">剧本 / 内容要求：${text(item.requirements, "（未填写）")}</p>` : `<div class="recipe-review-prompt">${escapeHtml(item.prompt || "")}</div>`}<p class="writer-dialog-hint">素材 ${recipeMediaSummary([...(item.media || []), ...(batch.shared_media || [])])}${reverse || collect ? "" : ` · 生成 ${shots} 条`}</p></div></article>`).join("")}</div>` : '<p class="writer-dialog-hint">所选范围没有需要执行的项目。</p>'}${recipeReadinessList(batch, action, items)}`;
-}
-async function recipeAction(action, itemIds = null) {
-  const threadId = viewState.selectedId; let batch = recipeState.batches.get(threadId);
-  if (!batch || recipeState.busy || !recipeCan(batch, action)) return;
-  recipeState.busy = true;
-  try {
-    if (action === "cancel" && !window.confirm("取消只停止还没开始的任务；正在执行的可能仍会完成。确认取消本批次？")) return;
-    if (!["pause", "continue", "cancel"].includes(action)) batch = await saveRecipeDraft(batch);
-    renderRecipeBatch(batch);
-    if (["confirm_reverse", "confirm_generate", "retry_reverse", "retry_generate", "retry_collect"].includes(action)) {
-      recipeState.review = { batch, action, itemIds, snapshotOk: true };
-      const reviewItems = recipeReviewItems(batch, action, itemIds);
-      const reverse = action.includes("reverse");
-      const count = reverse || action === "retry_collect" ? reviewItems.length : reviewItems.length * Number(batch.shots);
-      $("#recipeReviewTitle").textContent = reverse ? "确认生成提示词" : action === "retry_collect" ? "重新下载已有结果" : "生成前预检 · 确认生成";
-      $("#recipeReviewConfirm").textContent = reverse ? `确认生成 ${count} 组提示词` : action === "retry_collect" ? "重新下载" : `确认生成 ${count} 条视频`;
-      $("#recipeReviewHint").textContent = reverse
-        ? "确认后向提词模型发送请求；只生成提示词，不制作视频。"
-        : action === "retry_collect"
-          ? "只重新下载已有结果，不会重新生成。"
-          : "预检通过后才提交视频生成；缺项会在这一步之前拦下。";
-      $("#recipeReviewError").textContent = ""; $("#recipeReviewBody").innerHTML = recipeReviewMarkup(batch, action, itemIds);
-      try { assertRecipeReviewSnapshot(batch, action, itemIds); }
-      catch (error) { $("#recipeReviewError").textContent = error.message; recipeState.review.snapshotOk = false; }
-      // 生成前预检（计划 §5.3）：冻结目标四项检查通过才允许确认；反推不探测 ComfyUI。
-      recipeState.precheckOk = !["confirm_generate", "retry_generate", "retry_collect"].includes(action);
-      $("#recipeReviewConfirm").disabled = !recipeState.precheckOk || recipeState.review.snapshotOk === false;
-      const precheckHost = $("#recipeReviewPrecheck");
-      if (precheckHost) { precheckHost.hidden = recipeState.precheckOk; if (recipeState.precheckOk) precheckHost.innerHTML = ""; }
-      $("#recipeReviewDialog").showModal();
-      if (!recipeState.precheckOk) await runReviewPrecheck(batch, action, reviewItems);
-      return;
-    }
-    if (action !== "edit") batch = await sendRecipeAction(batch, action);
-    $("#recipeBatchError").textContent = "";
-    renderRecipeBatch(batch);
-  } catch (error) { const box = $("#recipeBatchError"); if (box) box.textContent = `操作未完成：${error.message}`; }
-  finally { recipeState.busy = false; if (viewState.selectedId === threadId) renderRecipeBatch(recipeState.batches.get(threadId)); }
-}
-// 生成前预检（计划 §5.3）：只读探测本批冻结目标与就绪项；结果不伪造全绿。
-function recipePrecheckMarkup(report) {
-  const rows = (report.checks || []).map((check) => `<div class="recipe-check-item${check.ok ? "" : " warn"}"><i>${check.ok ? "✓" : "!"}</i><span><b>${text(check.label)}</b>${check.detail ? ` · ${text(check.detail)}` : ""}</span></div>`).join("");
-  let host = report.target?.url || "生成目标";
-  try { host = new URL(report.target?.url || "").host || host; } catch { /* 原样显示 */ }
-  const time = report.checked_at ? new Date(report.checked_at).toLocaleTimeString() : "";
-  return `<div class="recipe-precheck"><p class="recipe-precheck-target">本组冻结目标：<b>${text(host)}</b> · ${text(time)} 检测 · 一次「在线」不代表长期可用</p><div class="recipe-check-list">${rows}</div><p class="writer-dialog-hint">预检不保证显存充足、模型已安装或付费余额足够；执行器仍保留上传、图校验与提交前的最后校验。检查后掉线会如实区分「确定未提交」与「提交结果未知」。</p>${report.ok ? "" : '<button type="button" class="control-button tiny" data-recipe-precheck-retry>重新检测</button>'}</div>`;
-}
-async function runReviewPrecheck(batch, action, items) {
-  const host = $("#recipeReviewPrecheck");
-  if (!host) { recipeState.precheckOk = true; return; }
-  host.hidden = false;
-  host.innerHTML = '<p class="writer-dialog-hint">正在预检本组冻结目标（实际目标可达 / 工作流与输入 / 媒体 / 提示词引用）…</p>';
-  try {
-    const report = await api(`/api/super-agent/threads/${encodeURIComponent(batch.thread_id)}/recipe/precheck`, { method: "POST", body: {} });
-    host.innerHTML = recipePrecheckMarkup(report);
-    recipeState.precheckOk = Boolean(report.ok);
-  } catch (error) {
-    host.innerHTML = `<p class="super-agent-error">预检不可用：${text(error.message)}。预检通过前不能确认生成。</p><button type="button" class="control-button tiny" data-recipe-precheck-retry>重新检测</button>`;
-    recipeState.precheckOk = false;
-  }
-  $("#recipeReviewConfirm").disabled = !recipeState.precheckOk || recipeState.review?.snapshotOk === false;
-}
-async function confirmRecipeReview() {
-  const review = recipeState.review; if (!review || recipeState.busy) return;
-  recipeState.busy = true; $("#recipeReviewConfirm").disabled = true;
-  try {
-    if (recipeDraft(review.batch).dirty) throw new Error("审核打开后仍有修改，请返回保存并重新审核。");
-    if (!["confirm_reverse", "retry_reverse"].includes(review.action) && !recipeState.precheckOk) throw new Error("生成前预检未通过；请处理检查项或重新检测后再确认。");
-    assertRecipeReviewSnapshot(review.batch, review.action, review.itemIds);
-    const batch = await sendRecipeAction(review.batch, review.action, review.itemIds ? { item_ids: review.itemIds } : {});
-    $("#recipeReviewDialog").close(); recipeState.review = null;
-    const errorBox = $("#recipeBatchError"); if (errorBox) errorBox.textContent = "";
-    if (viewState.selectedId === batch.thread_id) renderRecipeBatch(batch);
-  } catch (error) { $("#recipeReviewError").textContent = `确认未受理：${error.message}。请同步批次后重新核对，不会自动授权新版本。`; }
-  finally { recipeState.busy = false; $("#recipeReviewConfirm").disabled = false; if (viewState.selectedId === review.batch.thread_id) renderRecipeBatch(recipeState.batches.get(viewState.selectedId)); }
-}
-
-// 值全部在总管批次里定：不再有「未保存调整带成参数覆盖」的通道；造梦机里的
-// 临时调整要么另存进工作流，要么在总管批次页逐项填。
-// ---- 造梦机交接：工作流快照 + 用户映射 → 批量草稿 ----
-// 值全部在总管批次里定：交接只带工作流快照与映射（文本位/素材入口/时长槽），
-// 不再有「已保存值 vs 未保存调整」二选一；映射按工作流指纹记住，下次自动带入。
-export async function openRecipeWorkflowIntent(intent) {
-  const workflow = intent?.workflow;
-  if (!workflow) return;
-  recipeError("");
-  const slots = recipePromptSlotCandidates(workflow.params || []);
-  const fingerprint = workflow.workflow_fingerprint || workflow.fingerprint || "";
-  const mapping = recalledRecipeMapping(fingerprint) || recipeMappingFromWorkflow(workflow);
-  adoptWorkflowMediaIntoMapping(mapping, workflow, intent.media_inputs || []);
-  recipeState.handoff = { intent, slots, mapping, fingerprint, inputMode: "prompt", templateId: RECIPE_TEMPLATE_PRESETS[0].id };
-  $("#superAgentHandoffError").textContent = "";
-  $("#superAgentHandoffWorkflow").textContent = `当前工作流：${workflow.name || workflow.id}`;
-  renderRecipeMappingEditor("superAgentHandoff", workflow, mapping);
-  renderRecipeInputMode("superAgentHandoff", recipeState.handoff);
-  renderHandoffSummary();
-  syncHandoffDialog();
-  $("#superAgentHandoffDialog").showModal();
-}
-// 交接摘要随参数映射与正文来源刷新：多文本槽工作流显示的必须是映射槽位的正文；
-// 时长 / 分辨率亮出实际带入的保存值，不能只说「沿用槽位」。
-function recipeHandoffDurationText(handoff) {
-  const workflow = handoff.intent.workflow;
-  const slot = handoff.mapping?.duration_slot;
-  if (!slot) return "未映射时长槽；按工作流原配置出片，不额外改写时长";
-  const value = recipeSlotValue(workflow, slot);
-  const seconds = Number(value);
-  const shown = value !== "" && Number.isFinite(seconds) ? `${seconds} 秒` : "未填（将按 15 秒执行）";
-  return `${shown} · 沿用工作流保存值（进批次后可改）`;
-}
-function recipeHandoffResolutionText(handoff) {
-  // 分辨率 / 画幅没有统一槽位：width/height 走 role，H3 这类工作流用
-  // 「解析度選擇器」（aspect_ratio / megapixels）——按字段名与节点标题一起认，
-  // 只做展示不影响提交；都没有就如实说按工作流原配置出片。
-  const workflow = handoff.intent.workflow;
-  const slots = (workflow.params || []).filter((slot) => ["number", "text"].includes(slot.field_type)
-    && (slot.role === "resolution"
-      || ["width", "height", "aspect_ratio", "megapixels"].includes(slot.field_name)
-      || /解析度|分辨率/.test(String(slot.node_title || ""))));
-  if (!slots.length) return "工作流未暴露分辨率 / 画幅参数；按工作流原配置出片";
-  const parts = slots.slice(0, 4).map((slot) => {
-    const value = recipeSlotValue(workflow, slot);
-    const name = slot.field_name === "height" ? "高" : slot.field_name === "width" ? "宽" : slot.field_name;
-    return `${name} ${value !== "" ? value : "未填"}`;
-  });
-  return `${parts.join(" · ")}${slots.length > 4 ? `（等共 ${slots.length} 项）` : ""} · 沿用工作流保存值`;
-}
-function renderHandoffSummary() {
-  const handoff = recipeState.handoff; if (!handoff) return;
-  const workflow = handoff.intent.workflow;
-  const mapping = handoff.mapping || {};
-  const selected = mapping.prompt_slot;
-  const savedPrompt = recipeSlotValue(workflow, selected);
-  const media = handoff.intent.media_inputs || [];
-  const mediaCounts = { image: 0, video: 0, audio: 0 };
-  for (const entry of media) mediaCounts[(workflow.params || []).find((param) => String(param.node_id) === String(entry.node_id) && param.field_name === entry.field_name)?.field_type || "image"] += 1;
-  const mediaFiles = media.length ? Object.entries(mediaCounts).filter(([, count]) => count).map(([kind, count]) => `${count} ${({ image: "张图", video: "段视频", audio: "段音频" })[kind]}`).join("、") : "";
-  const mediaText = (mapping.media_slots || []).length
-    ? `已映射 ${(mapping.media_slots || []).length} 个素材入口${mediaFiles ? `，本次带 ${mediaFiles}` : "，文件进批次后逐组放"}`
-    : "未映射素材入口（不需要素材可留空）";
-  const promptText = selected
-    ? `${mapping.prompt_slot.node_id} / ${mapping.prompt_slot.field_name}${String(savedPrompt || "").length ? `（${String(savedPrompt).length} 字）` : "（空，进批次后补）"}`
-    : "未映射（正文沿用工作流里的原值）";
-  const sourceText = handoff.inputMode === "script" ? `反推 · ${recipeTemplateLabel(handoff.templateId)}` : "直接用现成正文（不反推）";
-  $("#superAgentHandoffSummary").innerHTML = `<div class="recipe-check-list"><div class="recipe-check-item"><i>✓</i><span><b>工作流</b> · ${text(workflow.name || workflow.id)}（按这份快照出片）</span></div><div class="recipe-check-item"><i>✓</i><span><b>正文来源</b> · ${text(sourceText)}</span></div><div class="recipe-check-item"><i>✓</i><span><b>提示词</b> · ${text(promptText)}</span></div><div class="recipe-check-item"><i>✓</i><span><b>素材</b> · ${text(mediaText)}</span></div><div class="recipe-check-item"><i>✓</i><span><b>时长</b> · ${text(recipeHandoffDurationText(handoff))}</span></div><div class="recipe-check-item"><i>✓</i><span><b>分辨率 / 画幅</b> · ${text(recipeHandoffResolutionText(handoff))}</span></div><div class="recipe-check-item"><i>✓</i><span><b>生成条数</b> · 首组 ${text(String(Number(handoff.intent.shots) || 1))} 条（沿用造梦机「张数」）</span></div></div>`;
-}
-function syncHandoffDialog() {
-  const handoff = recipeState.handoff; if (!handoff) return;
-  $("#superAgentHandoffConfirm").disabled = false;
-  $("#superAgentHandoffError").textContent = "";
-}
-async function confirmWorkflowHandoff() {
-  const handoff = recipeState.handoff;
-  if (!handoff || recipeState.busy) return;
-  const workflow = handoff.intent.workflow;
-  const mapping = handoff.mapping || {};
-  try {
-    // 正文取工作流快照里映射槽位的保存值；参数/素材/时长的最终值都在总管批次里定。
-    const prompt = recipeSlotValue(workflow, mapping.prompt_slot);
-    if (handoff.inputMode === "script" && !handoff.templateId) throw new Error("反推需要选择模板：H3 两种预设或提词库模板。");
-    // 这次确认的映射按工作流指纹记住：下次交接同一工作流自动带入，可改。
-    rememberRecipeMapping(handoff.fingerprint, mapping);
-    let durationSeconds;
-    if (mapping.duration_slot) {
-      const value = Number(recipeSlotValue(workflow, mapping.duration_slot));
-      if (Number.isFinite(value) && value > 0) durationSeconds = Math.round(value);
-    }
-    const templateId = String(handoff.templateId || "");
-    const body = { source: "workflow", workflow_id: workflow.id, workflow_fingerprint: handoff.fingerprint,
-      title: `${workflow.name || "工作流"} · 批量`, shots: Number(handoff.intent.shots) || 1,
-      prompt: String(prompt),
-      prompt_slot: mapping.prompt_slot || null,
-      media_slots: (mapping.media_slots || []).map((slot) => ({ node_id: String(slot.node_id), field_name: String(slot.field_name), media: slot.media || "image", scope: "item", required: false })),
-      ...(mapping.duration_slot ? { duration_slot: mapping.duration_slot } : {}),
-      ...(durationSeconds ? { duration_seconds: durationSeconds } : {}),
-      ...(handoff.inputMode === "script" ? (RECIPE_TEMPLATE_PRESETS.some((row) => row.id === templateId)
-        ? { input_mode: "script", template_id: templateId }
-        : { input_mode: "script", custom_id: templateId }) : {}),
-      media_inputs: handoff.intent.media_inputs || [] };
-    body.request_id = recipeRequest(`handoff:${workflow.id}`, body);
-    recipeState.busy = true; $("#superAgentHandoffConfirm").disabled = true;
-    const response = await api("/api/super-agent/recipe-batches", { method: "POST", body });
-    if (!response.thread_id || !response.batch) throw new Error("服务端未返回批次，请保持工作流打开并重试。");
-    recipeState.requests.delete(`handoff:${workflow.id}`);
-    recipeState.handoff = null;
-    recipeState.batches.set(response.thread_id, response.batch);
-    $("#superAgentHandoffDialog").close();
-    viewState.selectedId = response.thread_id; viewState.filter = "all";
-    await openSuperAgentView();
-  } catch (error) { $("#superAgentHandoffError").textContent = error.message || "交接失败"; }
-  finally { recipeState.busy = false; if (recipeState.handoff) $("#superAgentHandoffConfirm").disabled = false; }
-}
-async function cloneRecipeBatch() {
-  try {
-    const result = await api(`/api/super-agent/threads/${encodeURIComponent(viewState.selectedId)}/recipe/clone-draft`);
-    const draft = result.draft; if (!draft) throw new Error("未返回可复制草稿");
-    if (!draft.workflow?.id) throw new Error("这个批次来自旧方案流程，不能按工作流直建复制；请新建批量任务重新选择工作流。原批次与结果保留不变。");
-    const first = (draft.items || [])[0] || {};
-    recipeState.createDraft = { workflowId: draft.workflow.id, workflowFingerprint: draft.workflow.workflow_fingerprint || "",
-      title: `${draft.title || "视频批次"} · 副本`, shots: draft.shots || 1, prompt: String(first.prompt || "") };
-    await openRecipeDialog();
-    if ((draft.items || []).length > 1) recipeError(`原批次有 ${draft.items.length} 组；当前带入第 1 组，其余组创建后在批次里逐组添加。`);
-  } catch (error) { $("#recipeBatchError").textContent = `复制失败：${error.message}`; }
-}
-function bindRecipeEvents() {
-  $("#superAgentRecipeCreate")?.addEventListener("click", () => void openRecipeDialog());
-  $("#superAgentFocus")?.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-recipe-action]");
-    if (button) void recipeAction(button.dataset.recipeAction, button.dataset.recipeRetryId ? [button.dataset.recipeRetryId] : null);
-  });
-  $("#recipeWorkflowSelect")?.addEventListener("change", () => void loadCreateWorkflowDetail());
-  // 参数映射（直建）：改动即刷新并进草稿；交接侧同样绑定。
-  bindRecipeMappingEditor("recipeCreate", () => recipeState.createMapping, () => { renderRecipeMappingEditor("recipeCreate", recipeState.createWorkflow, recipeState.createMapping); rememberRecipeDraft(); });
-  $("#recipeCreateInputMode")?.addEventListener("click", (event) => {
-    const card = event.target.closest("[data-input-mode]");
-    if (!card || !recipeState.createInput) return;
-    recipeState.createInput.inputMode = card.dataset.inputMode;
-    renderRecipeInputMode("recipeCreate", recipeState.createInput);
-    rememberRecipeDraft();
-  });
-  $("#recipeCreateTemplate")?.addEventListener("change", () => {
-    if (!recipeState.createInput) return;
-    recipeState.createInput.templateId = $("#recipeCreateTemplate").value;
-    rememberRecipeDraft();
-  });
-  for (const type of ["input", "change"]) $("#superAgentRecipeForm")?.addEventListener(type, () => rememberRecipeDraft());
-  window.addEventListener("beforeunload", rememberRecipeDraft);
-  $("#superAgentRecipeForm")?.addEventListener("submit", (event) => void submitRecipeCreate(event));
-  $("#superAgentRecipeDialog")?.addEventListener("click", (event) => { if (event.target.closest("[data-recipe-close]")) $("#superAgentRecipeDialog").close(); });
-  // 参数映射（交接）+ 正文来源切换：改动即刷新摘要。
-  bindRecipeMappingEditor("superAgentHandoff", () => recipeState.handoff?.mapping, () => {
-    if (!recipeState.handoff) return;
-    renderRecipeMappingEditor("superAgentHandoff", recipeState.handoff.intent.workflow, recipeState.handoff.mapping);
-    renderHandoffSummary();
-  });
-  $("#superAgentHandoffInputMode")?.addEventListener("click", (event) => {
-    const card = event.target.closest("[data-input-mode]");
-    if (!card || !recipeState.handoff) return;
-    recipeState.handoff.inputMode = card.dataset.inputMode;
-    renderRecipeInputMode("superAgentHandoff", recipeState.handoff);
-    renderHandoffSummary();
-  });
-  $("#superAgentHandoffTemplate")?.addEventListener("change", () => {
-    if (!recipeState.handoff) return;
-    recipeState.handoff.templateId = $("#superAgentHandoffTemplate").value;
-    renderHandoffSummary();
-  });
-  // 交接：确认 + 关闭（参数来源二选一已移除——值全部在总管批次里定）。
-  $("#superAgentHandoffConfirm")?.addEventListener("click", () => void confirmWorkflowHandoff());
-  $("#superAgentHandoffDialog")?.addEventListener("click", (event) => { if (event.target.closest("[data-handoff-close]")) { $("#superAgentHandoffDialog").close(); recipeState.handoff = null; } });
-  $("#superAgentRecipeBatch")?.addEventListener("change", (event) => {
-    const upload = event.target.closest("[data-recipe-media-upload]");
-    if (upload) {
-      const file = upload.files?.[0];
-      upload.value = "";
-      if (!file || recipeState.busy) return;
-      const batch = recipeState.batches.get(viewState.selectedId); if (!batch) return;
-      const role = upload.dataset.recipeMediaUpload;
-      const addCard = upload.closest("[data-recipe-add-card]");
-      void (async () => {
-        try {
-          recipeState.busy = true;
-          const ref = await recipeUploadMediaFile(file);
-          if (addCard) {
-            recipeState.addGroupMedia[role] = { path: String(ref.path || ""), name: String(ref.name || file.name) };
-            renderRecipeBatch(batch);
-          } else {
-            const itemId = upload.closest("[data-recipe-item-id]")?.dataset.recipeItemId;
-            if (itemId) await recipeSetItemMedia(batch, itemId, role, ref);
-          }
-        } catch (error) { toast(`素材上传失败：${error.message}`); }
-        finally { recipeState.busy = false; }
-      })();
-      return;
-    }
-    const field = event.target.dataset.recipeEdit; if (!field || event.target.disabled) return;
-    const batch = recipeState.batches.get(viewState.selectedId), id = event.target.closest("[data-recipe-item-id]")?.dataset.recipeItemId; if (!batch || !id) return;
-    const draft = recipeDraft(batch);
-    draft.items[id] = { ...(draft.items[id] || {}), [field]: field === "included" ? event.target.checked : event.target.value }; draft.dirty = true;
-    $("#superAgentRecipeBatch .recipe-dirty-notice").textContent = "有未保存修改；轮询不会覆盖编辑，确认前会先保存。";
-  });
-  $("#superAgentRecipeBatch")?.addEventListener("click", (event) => {
-    if (event.target.closest("[data-recipe-clone]")) { void cloneRecipeBatch(); return; }
-    if (event.target.closest("[data-recipe-discard]")) { if (window.confirm("确认放弃当前未保存的本地编辑？")) { recipeState.drafts.delete(viewState.selectedId); $("#superAgentRecipeBatch .recipe-batch-editors").innerHTML = ""; renderRecipeBatch(recipeState.batches.get(viewState.selectedId)); } return; }
-    const clear = event.target.closest("[data-recipe-media-clear]");
-    if (clear && !recipeState.busy) {
-      const batch = recipeState.batches.get(viewState.selectedId), itemId = clear.closest("[data-recipe-item-id]")?.dataset.recipeItemId;
-      if (batch && itemId) void recipeSetItemMedia(batch, itemId, clear.dataset.recipeMediaClear, null);
-      return;
-    }
-    if (event.target.closest("[data-recipe-add-submit]")) {
-      const batch = recipeState.batches.get(viewState.selectedId);
-      if (batch && !recipeState.busy) void recipeSubmitAddGroup(batch);
-      return;
-    }
-    const button = event.target.closest("[data-recipe-action]"); if (button) void recipeAction(button.dataset.recipeAction, button.dataset.recipeRetryId ? [button.dataset.recipeRetryId] : null);
-  });
-  $("#recipeReviewCancel")?.addEventListener("click", () => { $("#recipeReviewDialog").close(); recipeState.review = null; });
-  $("#recipeReviewConfirm")?.addEventListener("click", () => void confirmRecipeReview());
-  $("#recipeReviewPrecheck")?.addEventListener("click", (event) => {
-    if (!event.target.closest("[data-recipe-precheck-retry]")) return;
-    const review = recipeState.review; if (!review) return;
-    void runReviewPrecheck(review.batch, review.action, recipeReviewItems(review.batch, review.action, review.itemIds));
-  });
 }

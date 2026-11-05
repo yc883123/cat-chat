@@ -37,9 +37,7 @@ const comfyui = {
 // 入口 / 生命周期
 // ============================================================
 
-// Composition root owns the destination; this module only emits a frozen intent.
-let workflowIntentHandler = null;
-export function setWorkflowIntentHandler(handler) { workflowIntentHandler = handler; }
+// Composition root owns the destination; batch generations stay in this module.
 let importReturn = null;
 export function openComfyuiWorkflowImport({ onSave = null, onCancel = null } = {}) {
   importReturn = { onSave, onCancel };
@@ -289,10 +287,7 @@ export function bindComfyuiEvents() {
     if (key) void addSlotToMainForm(key);
   });
   $("#comfyuiImportDialog")?.addEventListener("cancel", () => { const callback = importReturn?.onCancel; importReturn = null; callback?.(); });
-  $("#comfyuiRecipeHandoff")?.addEventListener("click", () => {
-    if (!comfyui.detail || !workflowIntentHandler) return toast("请先选择工作流");
-    workflowIntentHandler(JSON.parse(JSON.stringify({ workflow: comfyui.detail, overrides: collectOverrides(), media_inputs: collectMediaInputs(), shots: Number($("#comfyuiShots")?.value || 1) })));
-  });
+  $("#comfyuiOpenBatch")?.addEventListener("click", () => setComfyuiPane("batch"));
   for (const type of ["input", "change"]) $("#comfyuiParamForm")?.addEventListener(type, () => updateDraftHint());
   if (comfyui.unsubscribePage) comfyui.unsubscribePage();
   comfyui.unsubscribePage = onStudioPageChange((page) => {
@@ -348,6 +343,14 @@ export function bindComfyuiEvents() {
   $("#comfyuiTaskList")?.addEventListener("click", onTaskListClick);
   $("#comfyuiOutputGrid")?.addEventListener("click", onOutputGridClick);
   $("#comfyuiPanes")?.addEventListener("click", onPaneClick);
+  // 批量生成档：填单与跑批都渲染进 #comfyuiBatchBody，全部走容器级委托。
+  const batchBody = $("#comfyuiBatchBody");
+  batchBody?.addEventListener("click", onBatchClick);
+  batchBody?.addEventListener("change", onBatchChange);
+  batchBody?.addEventListener("input", onBatchInput);
+  batchBody?.addEventListener("dragover", onBatchDragOver);
+  batchBody?.addEventListener("dragleave", onBatchDragLeave);
+  batchBody?.addEventListener("drop", onBatchDrop);
   // 分镜队列：拆书匠跨页交接 + 逐条填入正向提示词。
   document.addEventListener("naiba:storyboard-handoff", onStoryboardHandoff);
   $("#comfyuiStoryboardClear")?.addEventListener("click", () => {
@@ -376,6 +379,8 @@ function onPaneClick(event) {
   const btn = event.target.closest("[data-comfyui-pane]");
   if (!btn) return;
   setComfyuiPane(btn.dataset.comfyuiPane);
+  if (btn.dataset.comfyuiPane === "batch") enterBatchPane();
+  else stopBatchPolling();
 }
 
 // 三栏放不下时改回三档（工作流 / 提交 / 结果），中栏才拿得到整页宽度。
@@ -819,8 +824,8 @@ function renderParamForm() {
   updateDraftHint();
 }
 
-// 未保存调整的台面提示（交接须说明参数来源，计划 §4.1）：只数「主表单可见控件
-// 当前值 ≠ 工作流保存值」的项，不打断调参、不弹窗；交接弹窗里再做二选一。
+// 未保存调整的台面提示：只数「主表单可见控件当前值 ≠ 工作流保存值」的项，
+// 不打断调参、不弹窗；交接按工作流已保存快照出片，调整要么另存要么进总管批次填。
 function updateDraftHint() {
   const hint = $("#comfyuiDraftHint");
   if (!hint) return;
@@ -845,7 +850,7 @@ function updateDraftHint() {
   }
   hint.hidden = changed === 0;
   hint.textContent = changed
-    ? `当前有 ${changed} 项未保存调整；交给任务总管时会问你要用「工作流已保存的默认值」还是「当前未保存调整」，不会静默丢弃、不改写原工作流。`
+    ? `当前有 ${changed} 项未保存调整；交给任务总管按工作流已保存的快照出片，这些调整不会自动带入——要带上就先另存进工作流，或在总管批次里逐项填。`
     : "";
 }
 
@@ -2526,4 +2531,1150 @@ function fillStoryboardPrompt(index) {
   item.filled = true;
   renderStoryboardQueue();
   toast(`已填入第 ${item.no} 场的提示词，确认参数后点「开始生成」`);
+}
+// ============================================================
+// 批量生成（2026-11-05 拍板方案 A）：一批 = 方案列表 × 条目表，
+// 每条目 = 一次现有提交（同款校验/上传/轮询/续跑）。
+// 零猜测：写入位与素材口由用户在映射区指认（按工作流指纹记住），
+// 服务端只套地址与校验，不扫描、不派生、不猜时长。
+// ============================================================
+
+const batch = {
+  view: "draft",            // draft = 填单；run = 跑批进度
+  draft: null,              // { title, unload_after, schemes: [scheme] }
+  runId: "",                // 跑批视图正在看的批次 id
+  runData: null,            // 该批次的详情（轮询刷新）
+  runTimer: null,
+  runElapsedTimer: null,
+  runStartedAt: 0,
+  histories: [],            // 历史批次（下拉）
+  historiesLoaded: false,
+  converting: new Set(),    // 转换中的条目（schemeId:itemIndex）
+  missingItems: new Set(),  // 自检没过的条目（schemeId:itemIndex），标红拦提交
+  blockedMessage: "",
+  convert: { template: "", provider: "", model: "" },
+};
+
+// ---- 映射记忆（按工作流指纹；结构 = 三个写入位 + 素材口顺序）----
+
+function batchMappingMemoryKey(fingerprint) {
+  return `cfBatchMapping:${fingerprint}`;
+}
+
+function rememberBatchMapping(fingerprint, mapping) {
+  if (!fingerprint || !mapping) return;
+  try {
+    localStorage.setItem(batchMappingMemoryKey(fingerprint), JSON.stringify({
+      prompt_slot: mapping.prompt_slot || null,
+      duration_slot: mapping.duration_slot || null,
+      resolution_slot: mapping.resolution_slot || null,
+      media_ports: Array.isArray(mapping.media_ports) ? mapping.media_ports : [],
+    }));
+  } catch (_) { /* 隐私模式忽略 */ }
+}
+
+function recallBatchMapping(fingerprint) {
+  try {
+    const raw = localStorage.getItem(batchMappingMemoryKey(fingerprint));
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (parsed && typeof parsed === "object") {
+      return {
+        prompt_slot: parsed.prompt_slot || null,
+        duration_slot: parsed.duration_slot || null,
+        resolution_slot: parsed.resolution_slot || null,
+        media_ports: Array.isArray(parsed.media_ports) ? parsed.media_ports : [],
+      };
+    }
+  } catch (_) { /* 坏记忆当没有 */ }
+  return null;
+}
+
+// ---- 方案 / 条目的构造与工具 ----
+
+function batchMediaCandidates(detail) {
+  return (detail?.params || [])
+    .map((slot) => ({ ...slot, media: mediaKindOfSlot(slot) }))
+    .filter((slot) => MEDIA_GROUP_ORDER.includes(slot.media));
+}
+
+function batchSlotByAddress(detail, slot) {
+  if (!slot) return null;
+  return (detail?.params || []).find((s) =>
+    String(s.node_id) === String(slot.node_id) && String(s.field_name) === String(slot.field_name)) || null;
+}
+
+function batchSlotAddressText(detail, slot) {
+  const row = batchSlotByAddress(detail, slot);
+  if (!row) return `${slot.node_id} · ${slot.field_name}`;
+  return `${row.node_title || row.class_type || slot.node_id} · ${slot.field_name}`;
+}
+
+function batchSlotSavedValue(detail, slot) {
+  if (!slot) return "";
+  return String((((detail?.prompt || {})[slot.node_id] || {}).inputs || {})[slot.field_name] ?? "");
+}
+
+function batchMappingFromWorkflow(detail) {
+  // 预选建议（2026-11-05 拍板）：唯一语义正文槽 / 唯一标签命中的时长、分辨率槽；
+  // 只是映射区里预先选中的值，用户随时改、随时清。素材口默认勾上必填槽。
+  const mapping = { prompt_slot: null, duration_slot: null, resolution_slot: null, media_ports: [] };
+  const slots = detail?.params || [];
+  const positive = slots.filter((slot) => slot.role === "positive_prompt");
+  const multiline = slots.filter((slot) => slot.field_type === "text" && slot.control === "multiline");
+  const preselect = positive.length === 1 ? positive[0] : multiline.length === 1 ? multiline[0] : null;
+  if (preselect) mapping.prompt_slot = { node_id: String(preselect.node_id), field_name: String(preselect.field_name) };
+  const durationHits = slots.filter((slot) => slot.field_type === "number"
+    && /时长|duration/i.test(`${slot.node_title || ""} ${slot.label || ""}`));
+  if (durationHits.length === 1) {
+    mapping.duration_slot = { node_id: String(durationHits[0].node_id), field_name: String(durationHits[0].field_name) };
+  }
+  const resolutionHits = slots.filter((slot) => (slot.field_type === "number"
+      || (slot.field_type === "text" && (slot.candidates || []).length))
+    && /分辨率|画幅|width|height|resolution|size/i.test(`${slot.node_title || ""} ${slot.label || ""}`));
+  if (resolutionHits.length === 1) {
+    mapping.resolution_slot = { node_id: String(resolutionHits[0].node_id), field_name: String(resolutionHits[0].field_name) };
+  }
+  mapping.media_ports = batchMediaCandidates(detail).map((slot) => ({
+    node_id: String(slot.node_id),
+    field_name: String(slot.field_name),
+    checked: slot.media_optional === false,
+  }));
+  return mapping;
+}
+
+function newBatchItem(index, patch = {}) {
+  return {
+    name: `条目 ${index}`,
+    script: "",
+    prompt: "",
+    duration: "",
+    resolution: "",
+    shots: 1,
+    files: {},
+    ...patch,
+  };
+}
+
+function ensureBatchDraft() {
+  if (batch.draft) return batch.draft;
+  batch.draft = { title: "", unload_after: false, schemes: [] };
+  addBatchScheme();
+  return batch.draft;
+}
+
+function addBatchScheme(cloneFrom = null) {
+  const scheme = {
+    id: `bs${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`,
+    workflow_id: cloneFrom?.workflow_id || "",
+    detail: cloneFrom?.detail || null,
+    loading: false,
+    mapping: cloneFrom ? JSON.parse(JSON.stringify(cloneFrom.mapping)) : null,
+    fixed: cloneFrom ? JSON.parse(JSON.stringify(cloneFrom.fixed)) : {},
+    items: cloneFrom ? cloneFrom.items.map((item) => ({
+      ...JSON.parse(JSON.stringify(item)),
+      name: `${item.name} 副本`,
+    })) : [],
+  };
+  batch.draft.schemes.push(scheme);
+  if (!cloneFrom && scheme.workflow_id) void loadBatchWorkflowDetail(scheme);
+  return scheme;
+}
+
+async function loadBatchWorkflowDetail(scheme, workflowId) {
+  const id = workflowId ?? scheme.workflow_id;
+  scheme.workflow_id = id;
+  scheme.detail = null;
+  scheme.mapping = null;
+  scheme.fixed = {};
+  if (!scheme.items.length) scheme.items = [newBatchItem(1)];
+  batch.blockedMessage = "";
+  renderBatch();
+  if (!id) return;
+  scheme.loading = true;
+  renderBatch();
+  try {
+    const payload = await api(`/api/comfyui/workflows/${encodeURIComponent(id)}`);
+    scheme.detail = payload.workflow || null;
+    scheme.loading = false;
+    const fingerprint = scheme.detail?.workflow_fingerprint || scheme.detail?.fingerprint || "";
+    const recalled = recallBatchMapping(fingerprint);
+    scheme.mapping = recalled || batchMappingFromWorkflow(scheme.detail);
+    // 记忆里的槽位可能已不在工作流里（版本变了）：逐项验证，失效的按未映射处理。
+    for (const key of ["prompt_slot", "duration_slot", "resolution_slot"]) {
+      const slot = scheme.mapping[key];
+      if (slot && !batchSlotByAddress(scheme.detail, slot)) scheme.mapping[key] = null;
+    }
+    scheme.mapping.media_ports = (scheme.mapping.media_ports || []).filter((port) =>
+      batchMediaCandidates(scheme.detail).some((slot) =>
+        String(slot.node_id) === String(port.node_id) && String(slot.field_name) === String(port.field_name)));
+    renderBatch();
+  } catch (error) {
+    scheme.loading = false;
+    batch.blockedMessage = `工作流读取失败：${error.message}`;
+    renderBatch();
+  }
+}
+
+// ---- 填单视图渲染 ----
+
+function renderBatch() {
+  const host = $("#comfyuiBatchBody");
+  if (!host) return;
+  const root = $("#comfyuiBatch");
+  if (root) root.hidden = false;
+  host.innerHTML = batch.view === "run" ? batchRunMarkup() : batchDraftMarkup();
+  if (batch.view === "run") {
+    startBatchRunElapsed();
+    return;
+  }
+  // 转换条是条件渲染的：重绘后补模板与模型下拉（选中值存在 batch.convert 里）。
+  if (batch.convert.provider) void batchLoadConvertModels();
+  void batchLoadCustomTemplates();
+}
+
+function batchDraftMarkup() {
+  const draft = ensureBatchDraft();
+  const parts = [];
+  parts.push(`<div class="cbm-batch-head">
+    <span class="cbm-field">批次名 <input type="text" data-batch-field="title" maxlength="120" value="${escapeText(draft.title)}" placeholder="例：短剧第1集"></span>
+    <label class="cbm-switch"><input type="checkbox" data-batch-field="unload_after" ${draft.unload_after ? "checked" : ""}><span class="cbm-track"></span>每条出完就释放模型</label>
+    <button type="button" class="cbm-btn" data-batch-action="import-storyboard">${comfyui.storyboardQueue.length ? `从分镜队列导入（${comfyui.storyboardQueue.length} 条）` : "从分镜队列导入"}</button>
+    <span class="cbm-field cbm-history">查看以前的批次
+      <select data-batch-select="history"><option value="">选择批次…</option>${batch.histories.map((row) =>
+        `<option value="${escapeText(row.id)}">${escapeText(row.title || row.id)} · ${row.done_count ?? 0}/${row.item_count ?? 0} 完成</option>`).join("")}</select>
+    </span>
+  </div>`);
+  if (batch.blockedMessage) parts.push(`<p class="cbm-alert">${escapeText(batch.blockedMessage)}</p>`);
+  const hasScript = draft.schemes.some((scheme) => (scheme.items || []).some((item) => String(item.script || "").trim()));
+  if (hasScript) parts.push(batchConvertBarMarkup());
+  draft.schemes.forEach((scheme, index) => parts.push(batchSchemeMarkup(scheme, index)));
+  parts.push(`<button type="button" class="cbm-add-scheme" data-batch-action="add-scheme">＋ 添加方案（换一个工作流，或同一工作流换模型配方）</button>`);
+  const totals = batchTotals(draft);
+  parts.push(`<div class="cbm-submit-bar">
+    <button type="button" class="cbm-btn primary" data-batch-action="submit" ${batch.missingItems.size ? "disabled" : ""}>开始批量生成</button>
+    <span class="cbm-note">${totals.note}</span>
+  </div>`);
+  if (batch.missingItems.size) {
+    parts.push(`<p class="cbm-alert">有 ${batch.missingItems.size} 条条目没填完（表里标红）：补齐或删掉再提交，其他条目不受影响。</p>`);
+  }
+  return parts.join("");
+}
+
+function batchTotals(draft) {
+  let count = 0;
+  for (const scheme of draft.schemes) {
+    for (const item of scheme.items || []) {
+      count += Math.max(1, Math.floor(Number(item.shots) || 1));
+    }
+  }
+  const ready = draft.schemes.filter((scheme) => scheme.workflow_id && scheme.detail).length;
+  return {
+    count,
+    note: count
+      ? `共 ${count} 条（${draft.schemes.length} 个方案，其中 ${ready} 个已选好工作流），逐条排队执行，一条失败不影响其他条。`
+      : "还没有条目：选好工作流后添加条目，或从分镜队列导入。",
+  };
+}
+
+function batchConvertBarMarkup() {
+  const profiles = state.bootstrap?.model_profiles || state.bootstrap?.providers || [];
+  return `<div class="cbm-convert-bar">
+    <span class="cbm-convert-title">剧本 → 提示词</span>
+    <select data-batch-field="convertTemplate" aria-label="转换模板">
+      <option value="">内置：按 MiniMax H3 格式改写</option>
+      <optgroup label="提词库自定义模板" data-batch-custom-templates></optgroup>
+    </select>
+    <select data-batch-field="convertProvider" aria-label="转换用的模型供应商">
+      <option value="">请选择供应商…</option>
+      ${profiles.map((profile) => `<option value="${escapeText(String(profile?.model_key || ""))}"${String(profile?.model_key || "") === batch.convert.provider ? " selected" : ""}>${escapeText(String(profile?.name || profile?.model_key || ""))}</option>`).join("")}
+    </select>
+    <select data-batch-field="convertModel" aria-label="转换用的模型"><option>${batch.convert.provider ? "加载模型中…" : "请先选择供应商"}</option></select>
+    <button type="button" class="cbm-btn" data-batch-action="convert-all">全部转换</button>
+    <span class="cbm-convert-note">填了剧本、提示词空着的条目会逐条转换，写完可手改；转换走模型，可能产生费用。</span>
+  </div>`;
+}
+
+// ---- 方案卡渲染 ----
+
+function batchSchemeMarkup(scheme, schemeIndex) {
+  const classes = ["cbm-scheme"];
+  if (scheme.collapsed) classes.push("collapsed");
+  const head = `<div class="cbm-scheme-head">
+    <span class="cbm-chip">方案 ${schemeIndex + 1}</span>
+    <select data-batch-select="workflow" data-scheme="${scheme.id}" aria-label="这个方案用哪份工作流">
+      <option value="">选择工作流…</option>
+      ${comfyui.workflows.map((row) => `<option value="${escapeText(row.id)}"${row.id === scheme.workflow_id ? " selected" : ""}>${escapeText(row.name || row.id)}</option>`).join("")}
+    </select>
+    ${scheme.loading ? '<span class="cbm-chip plain">正在读取参数…</span>' : ""}
+    <span class="cbm-scheme-actions">
+      <button type="button" class="cbm-btn tiny" data-batch-action="toggle-scheme" data-scheme="${scheme.id}">${scheme.collapsed ? "展开" : "收起"}</button>
+      <button type="button" class="cbm-btn tiny" data-batch-action="copy-scheme" data-scheme="${scheme.id}">复制方案</button>
+      <button type="button" class="cbm-btn tiny" data-batch-action="remove-scheme" data-scheme="${scheme.id}">删除</button>
+    </span>
+  </div>`;
+  if (scheme.collapsed) {
+    const summary = scheme.items.map((item) => escapeText(item.name)).join(" · ");
+    return `<div class="${classes.join(" ")}">${head}<div class="cbm-collapsed-row">${scheme.items.length} 条条目：${summary || "还没有条目"}</div></div>`;
+  }
+  if (!scheme.workflow_id || !scheme.detail || !scheme.mapping) {
+    return `<div class="${classes.join(" ")}">${head}<div class="cbm-scheme-body">
+      <p class="cbm-hint">选工作流后在这里指认：正文 / 时长 / 分辨率写进哪个参数、哪些装载槽做素材口。</p>
+    </div></div>`;
+  }
+  const body = `<div class="cbm-scheme-body">
+    ${batchMappingAreaMarkup(scheme)}
+    ${batchFixedMarkup(scheme)}
+    ${batchItemsMarkup(scheme, schemeIndex)}
+    <p class="cbm-hint">剧本填了、提示词空着的，点「转换」让模型写提示词，写完可手改。素材格留空＝这条不用这个口（必填的口留空会在提交时拦下）。没勾选的素材口不出现在条目里，生成时按工作流保存值执行。</p>
+  </div>`;
+  return `<div class="${classes.join(" ")}">${head}${body}</div>`;
+}
+
+// ---- 映射区：三个写入位下拉 + 装载槽（勾选 / 排序 / 每口可换节点）----
+
+function batchMappingAreaMarkup(scheme) {
+  const detail = scheme.detail;
+  const mapping = scheme.mapping;
+  const slots = detail?.params || [];
+  const slotKeyOf = (slot) => (slot ? `${slot.node_id}|${slot.field_name}` : "");
+  const savedValue = (slot) => {
+    const value = batchSlotSavedValue(detail, slot);
+    return value !== "" ? `当前保存值：${value}` : "当前保存值：空";
+  };
+  const pointSelect = (point, label, emptyLabel, candidates) => {
+    const slot = mapping[`${point}_slot`];
+    const key = slotKeyOf(slot);
+    return `<div class="cbm-map-slot"><label>${label}</label>
+      <select data-batch-select="mapping" data-scheme="${scheme.id}" data-point="${point}">
+        <option value="">${emptyLabel}</option>
+        ${candidates.map((row) => `<option value="${escapeText(slotKeyOf(row))}"${slotKeyOf(row) === key ? " selected" : ""}>${escapeText(batchSlotAddressText(detail, row))}</option>`).join("")}
+      </select></div>`;
+  };
+  const textCandidates = slots.filter((slot) => slot.field_type === "text");
+  const semantic = textCandidates.filter((slot) => slot.role === "positive_prompt" || slot.control === "multiline");
+  const promptPool = semantic.length ? semantic : textCandidates;
+  const rank = (slot) => (slot.role === "positive_prompt" ? 0 : slot.control === "multiline" ? 1 : 2);
+  promptPool.sort((a, b) => rank(a) - rank(b));
+  const numberSlots = slots.filter((slot) => slot.field_type === "number");
+  const resolutionSlots = [...numberSlots, ...textCandidates.filter((slot) => (slot.candidates || []).length)];
+  const durationSlot = batchSlotByAddress(detail, mapping.duration_slot);
+  const resolutionSlot = batchSlotByAddress(detail, mapping.resolution_slot);
+  const portRows = batchPortsMarkup(scheme);
+  return `<div class="cbm-mapping">
+    ${pointSelect("prompt", "剧本/提示词写进", "不注入正文（按工作流原配置出片）", promptPool)}
+    ${pointSelect("duration", "时长写进", "不逐条改时长", numberSlots)}
+    ${pointSelect("resolution", "分辨率写进", "不逐条改分辨率", resolutionSlots)}
+    <p class="cbm-map-hint">先把「东西往哪放」指认好：没指认的参数按工作流保存值执行，不会出现在条目里。${durationSlot ? `时长 · ${savedValue(durationSlot)} · 写入 ${escapeText(batchSlotAddressText(detail, durationSlot))}` : "时长未映射：不会替你猜哪个参数控制时长"}；${resolutionSlot ? `分辨率 · ${savedValue(resolutionSlot)}` : "分辨率未映射"}。映射按这份工作流记住，下次打开还是这样。</p>
+  </div>
+  <p class="cbm-media-title">素材口：勾选启用，对应哪个节点用下拉换（列的是这份工作流里全部的图/音/视频口），↑↓ 定编号。</p>
+  ${portRows}`;
+}
+
+function batchPortsMarkup(scheme) {
+  const detail = scheme.detail;
+  const candidates = batchMediaCandidates(detail);
+  const ports = scheme.mapping.media_ports || [];
+  const kindNames = { image: "图", video: "视频", audio: "音" };
+  const kindFull = { image: "图片", video: "视频", audio: "音频" };
+  const counts = { image: 0, video: 0, audio: 0 };
+  const numbers = ports.map((port) => {
+    if (!port.checked) return "—";
+    const slot = batchSlotByAddress(detail, port);
+    counts[slot?.media || "image"] = (counts[slot?.media || "image"] || 0) + 1;
+    return `${kindNames[slot?.media || "image"]} ${counts[slot?.media || "image"]}`;
+  });
+  const checkedCount = ports.filter((port) => port.checked).length;
+  const rows = ports.map((port, index) => {
+    const slot = batchSlotByAddress(detail, port);
+    const sameKind = candidates.filter((row) => row.media === (slot?.media || "image"));
+    return `<div class="cbm-media-slot${port.checked ? "" : " unchecked"}">
+      <input type="checkbox" data-batch-port-check="${index}" data-scheme="${scheme.id}" ${port.checked ? "checked" : ""} aria-label="启用这个素材口">
+      <span class="cbm-no">${numbers[index]}</span>
+      <select class="cbm-nodesel" data-batch-select="port-node" data-scheme="${scheme.id}" data-port="${index}" aria-label="这个素材口对应哪个节点">
+        ${sameKind.map((row) => `<option value="${escapeText(slotKeyOf(row))}"${slot && slotKeyOf(row) === slotKeyOf(slot) ? " selected" : ""}>${escapeText(batchSlotAddressText(detail, row))}</option>`).join("")}
+      </select>
+      <span class="cbm-kw">${port.checked ? `${kindFull[slot?.media || "image"] || "媒体"} · ${slot?.media_optional === false ? "必填" : "可选，留空就跳过"}` : "未勾选 · 不出现在条目里"}</span>
+      <button type="button" class="cbm-move" data-batch-action="port-up" data-scheme="${scheme.id}" data-port="${index}" aria-label="上移" ${index === 0 ? "disabled" : ""}>↑</button>
+      <button type="button" class="cbm-move" data-batch-action="port-down" data-scheme="${scheme.id}" data-port="${index}" aria-label="下移" ${index === ports.length - 1 ? "disabled" : ""}>↓</button>
+    </div>`;
+  }).join("");
+  return `<div class="cbm-media-slots">
+      ${rows || '<p class="cbm-hint">这份工作流没有装载槽（LoadImage / LoadVideo / LoadAudio 等）。</p>'}
+    </div>
+    <p class="cbm-map-hint">已启用 ${checkedCount}/${ports.length} 个口；编号按这里的顺序算成 图1 / 图2 / 音1…，条目表按口出列。</p>`;
+}
+
+function slotKeyOf(slot) {
+  return `${slot.node_id}|${slot.field_name}`;
+}
+
+// ---- 固定参数折叠区 ----
+
+function batchFixedMarkup(scheme) {
+  const detail = scheme.detail;
+  const mapping = scheme.mapping;
+  const skipKeys = new Set();
+  for (const key of ["prompt_slot", "duration_slot", "resolution_slot"]) {
+    const slot = batchSlotByAddress(detail, mapping?.[key]);
+    if (slot) skipKeys.add(slotKeyOf(slot));
+  }
+  const editable = (detail?.params || []).filter((slot) =>
+    slot.control !== "media" && !MEDIA_FIELD_TYPES.has(slot.field_type) && !skipKeys.has(slotKeyOf(slot)));
+  if (!editable.length) return "";
+  const rows = editable.map((slot) => {
+    const key = slotKeyOf(slot);
+    const value = scheme.fixed[key] ?? batchSlotSavedValue(detail, slot);
+    let control = "";
+    if (slot.field_type === "bool") {
+      control = `<select data-batch-fixed="${escapeText(key)}" data-scheme="${scheme.id}">
+        <option value="true"${String(value) === "true" ? " selected" : ""}>开</option>
+        <option value="false"${String(value) !== "true" ? " selected" : ""}>关</option>
+      </select>`;
+    } else if ((slot.candidates || []).length) {
+      control = `<select data-batch-fixed="${escapeText(key)}" data-scheme="${scheme.id}">
+        ${(slot.candidates || []).map((candidate) => `<option value="${escapeText(String(candidate))}"${String(value) === String(candidate) ? " selected" : ""}>${escapeText(String(candidate))}</option>`).join("")}
+      </select>`;
+    } else {
+      control = `<input type="${slot.field_type === "number" || slot.field_type === "seed" ? "number" : "text"}" step="any"
+        data-batch-fixed="${escapeText(key)}" data-scheme="${scheme.id}" value="${escapeText(value)}">`;
+    }
+    const label = slot.label || `${slot.node_id} · ${slot.field_name}`;
+    return `<div><label>${escapeText(label)}${slot.field_type === "seed" ? "（留空 = 每次随机）" : ""}</label>${control}</div>`;
+  }).join("");
+  const applied = Object.keys(scheme.fixed).length
+    ? Object.keys(scheme.fixed).map((key) => {
+        const slot = (detail?.params || []).find((row) => slotKeyOf(row) === key);
+        const label = slot?.label || key;
+        const value = scheme.fixed[key];
+        return `<span class="cbm-kv">${escapeText(label)} ${escapeText(typeof value === "boolean" ? (value ? "开" : "关") : String(value))}</span>`;
+      }).join("")
+    : '<span>其余按工作流保存值</span>';
+  return `<div class="cbm-fixed-bar">
+      固定参数（本方案每条相同）：${applied}
+      <button type="button" class="cbm-btn tiny" data-batch-action="toggle-fixed" data-scheme="${scheme.id}">展开固定参数</button>
+    </div>
+    <div class="cbm-fixed-detail${scheme.fixedOpen ? " open" : ""}">
+      ${rows}
+      <p class="cbm-map-hint">同一工作流想换模型配方，不用改这份方案——「复制方案」再来一份，这里改成另一套即可。</p>
+    </div>`;
+}
+
+// ---- 条目表 ----
+
+function batchItemsMarkup(scheme, schemeIndex) {
+  const ports = (scheme.mapping?.media_ports || []).filter((port) => port.checked);
+  const portHeaders = ports.map((port, portIndex) => {
+    const slot = batchSlotByAddress(scheme.detail, port);
+    const kind = slot?.media || "image";
+    const counts = ports.slice(0, portIndex + 1).filter((row) =>
+      (batchSlotByAddress(scheme.detail, row)?.media || "image") === kind).length;
+    const kindNames = { image: "图", video: "视频", audio: "音" };
+    return `<th>${kindNames[kind]} ${counts}（${escapeText(batchSlotAddressText(scheme.detail, slot))}）</th>`;
+  }).join("");
+  const rows = scheme.items.map((item, itemIndex) =>
+    batchItemRowMarkup(scheme, schemeIndex, item, itemIndex, ports)).join("");
+  const resolutionControl = (item) => {
+    const slot = batchSlotByAddress(scheme.detail, scheme.mapping?.resolution_slot);
+    if (slot && (slot.candidates || []).length) {
+      return `<select data-batch-item="resolution" data-scheme="${scheme.id}" data-item="${itemIndex}">
+        <option value="">按工作流</option>
+        ${slot.candidates.map((candidate) => `<option value="${escapeText(String(candidate))}"${String(item.resolution) === String(candidate) ? " selected" : ""}>${escapeText(String(candidate))}</option>`).join("")}
+      </select>`;
+    }
+    return `<input type="${slot?.field_type === "number" ? "number" : "text"}" step="any" placeholder="按工作流"
+      data-batch-item="resolution" data-scheme="${scheme.id}" data-item="${itemIndex}" value="${escapeText(item.resolution)}">`;
+  };
+  return `<div class="cbm-items-wrap"><table class="cbm-items">
+    <thead><tr><th>名称</th>${portHeaders}<th>剧本</th><th>提示词</th><th>时长</th><th>分辨率</th><th>条数</th><th>操作</th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="${8 + ports.length}" class="cbm-hint">还没有条目。</td></tr>`}</tbody>
+    <tfoot><tr><td colspan="${8 + ports.length}"><button type="button" class="cbm-add-item" data-batch-action="add-item" data-scheme="${scheme.id}">＋ 添加一条</button></td></tr></tfoot>
+  </table></div>`;
+}
+
+function batchItemRowMarkup(scheme, schemeIndex, item, itemIndex, ports) {
+  const missing = batch.missingItems.has(`${scheme.id}:${itemIndex}`);
+  const converting = batch.converting.has(`${scheme.id}:${itemIndex}`);
+  const tiles = ports.map((port, portIndex) => {
+    const slot = batchSlotByAddress(scheme.detail, port);
+    const kind = slot?.media || "image";
+    const record = item.files[String(portIndex)];
+    if (record) {
+      const thumb = kind === "image"
+        ? `<img src="${escapeText(attachmentThumbUrl(record))}" alt="" loading="lazy">`
+        : `<span class="cbm-tile-ico">${kind === "video" ? "▶" : "♪"}</span>`;
+      return `<td><span class="cbm-mtile" data-batch-tile data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" data-kind="${kind}" title="点选 / 拖拽可换">
+        <span class="cbm-thumb ${kind}">${thumb}</span>
+        <span class="cbm-mname">${escapeText(record.name || "")}<button type="button" class="cbm-tile-clear" data-batch-action="clear-file" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" aria-label="清除这个文件">✕</button></span>
+      </span></td>`;
+    }
+    const required = slot?.media_optional === false;
+    return `<td><span class="cbm-empty-slot${required && missing ? " is-missing" : ""}" data-batch-tile data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" data-kind="${kind}">${required ? "必填 · 点选/拖入" : "留空 · 这条跳过"}</span></td>`;
+  }).join("");
+  const promptCell = `<td>
+    <textarea class="cbm-script" rows="3" placeholder="最终交给工作流的提示词" data-batch-item="prompt" data-scheme="${scheme.id}" data-item="${itemIndex}">${escapeText(item.prompt)}</textarea>
+    ${item.script && converting ? '<button type="button" class="cbm-convert" disabled>转换中…</button>' : ""}
+  </td>`;
+  const durationControl = `<input type="number" min="1" step="any" style="width:76px" placeholder="按工作流"
+    data-batch-item="duration" data-scheme="${scheme.id}" data-item="${itemIndex}" value="${escapeText(item.duration)}">`;
+  return `<tr${missing ? ' class="is-missing"' : ""}>
+    <td><input type="text" class="cbm-name" maxlength="120" data-batch-item="name" data-scheme="${scheme.id}" data-item="${itemIndex}" value="${escapeText(item.name)}"></td>
+    ${tiles}
+    <td><textarea class="cbm-script" rows="3" placeholder="这场的内容要求（可转换成提示词）" data-batch-item="script" data-scheme="${scheme.id}" data-item="${itemIndex}">${escapeText(item.script)}</textarea></td>
+    ${promptCell}
+    <td>${durationControl}</td>
+    <td>${resolutionControl(item)}</td>
+    <td><input type="number" min="1" max="200" style="width:56px" data-batch-item="shots" data-scheme="${scheme.id}" data-item="${itemIndex}" value="${escapeText(String(item.shots))}"></td>
+    <td class="cbm-row-act">
+      <button type="button" class="cbm-btn tiny" data-batch-action="convert-item" data-scheme="${scheme.id}" data-item="${itemIndex}" ${item.script && !item.prompt && !converting ? "" : "disabled"}>转换</button>
+      <button type="button" class="cbm-btn tiny" data-batch-action="copy-item" data-scheme="${scheme.id}" data-item="${itemIndex}">复制</button>
+      <button type="button" class="cbm-btn tiny" data-batch-action="remove-item" data-scheme="${scheme.id}" data-item="${itemIndex}">删</button>
+    </td>
+  </tr>`;
+}
+
+// ---- 批量交互（容器级委托）----
+
+function batchSchemeOf(id) {
+  return (batch.draft?.schemes || []).find((scheme) => scheme.id === id) || null;
+}
+
+function onBatchClick(event) {
+  const target = event.target.closest("[data-batch-action]");
+  const tile = event.target.closest("[data-batch-tile]");
+  if (!target && tile) {
+    // 素材格点选：唤起系统选择器（tile 内动态建 file input）。
+    event.preventDefault();
+    batchPickFile(tile);
+    return;
+  }
+  if (!target) {
+    if (event.target.closest("[data-batch-tile-clear]")) return;
+    return;
+  }
+  const action = target.dataset.batchAction;
+  const scheme = batchSchemeOf(target.dataset.scheme || "");
+  const itemIndex = target.dataset.item !== undefined ? Number(target.dataset.item) : -1;
+  event.preventDefault();
+  if (action === "add-scheme") {
+    addBatchScheme();
+    renderBatch();
+  } else if (action === "copy-scheme" && scheme) {
+    addBatchScheme(scheme);
+    renderBatch();
+  } else if (action === "remove-scheme" && scheme) {
+    if ((batch.draft?.schemes.length || 0) <= 1) { toast("至少保留一个方案"); return; }
+    batch.draft.schemes = batch.draft.schemes.filter((row) => row.id !== scheme.id);
+    renderBatch();
+  } else if (action === "toggle-scheme" && scheme) {
+    scheme.collapsed = !scheme.collapsed;
+    renderBatch();
+  } else if (action === "toggle-fixed" && scheme) {
+    scheme.fixedOpen = !scheme.fixedOpen;
+    renderBatch();
+  } else if (action === "add-item" && scheme) {
+    scheme.items.push(newBatchItem(scheme.items.length + 1));
+    renderBatch();
+  } else if (action === "copy-item" && scheme && itemIndex >= 0) {
+    const copy = JSON.parse(JSON.stringify(scheme.items[itemIndex]));
+    copy.name = `${copy.name} 副本`;
+    scheme.items.splice(itemIndex + 1, 0, copy);
+    renderBatch();
+  } else if (action === "remove-item" && scheme && itemIndex >= 0) {
+    scheme.items.splice(itemIndex, 1);
+    batch.recheckMissing();
+    renderBatch();
+  } else if (action === "clear-file" && scheme && itemIndex >= 0) {
+    event.stopPropagation();
+    const item = scheme.items[itemIndex];
+    delete item.files[String(target.dataset.port)];
+    renderBatch();
+  } else if (action === "import-storyboard") {
+    importBatchStoryboard();
+  } else if (action === "convert-item" && scheme && itemIndex >= 0) {
+    void batchConvert(scheme, itemIndex);
+  } else if (action === "convert-all") {
+    void batchConvertAll();
+  } else if (action === "submit") {
+    void submitBatch();
+  } else if (action === "back-to-draft") {
+    batch.view = "draft";
+    stopBatchPolling();
+    renderBatch();
+  } else if (action === "switch-draft") {
+    // 跑批视图「回填单改下一批」：草稿保留，直接回去改。
+    batch.view = "draft";
+    stopBatchPolling();
+    renderBatch();
+  } else if (action === "open-task-outputs" && target.dataset.taskId) {
+    void openBatchTaskOutputs(String(target.dataset.taskId));
+  } else if (action === "retry-item" && target.dataset.taskId) {
+    void retryBatchItem(String(target.dataset.taskId));
+  }
+}
+
+function onBatchChange(event) {
+  const target = event.target;
+  const scheme = batchSchemeOf(target.dataset.scheme || "");
+  if (target.matches('[data-batch-field="title"]')) {
+    ensureBatchDraft().title = String(target.value || "");
+    return;
+  }
+  if (target.matches('[data-batch-field="unload_after"]')) {
+    ensureBatchDraft().unload_after = target.checked;
+    return;
+  }
+  if (target.matches('[data-batch-field="convertTemplate"]')) {
+    batch.convert.template = String(target.value || "");
+    return;
+  }
+  if (target.matches('[data-batch-field="convertProvider"]')) {
+    batch.convert.provider = String(target.value || "");
+    void batchLoadConvertModels();
+    return;
+  }
+  if (target.matches('[data-batch-field="convertModel"]')) {
+    batch.convert.model = String(target.value || "");
+    return;
+  }
+  if (target.matches('[data-batch-select="history"]')) {
+    const id = String(target.value || "");
+    if (id) { batch.runId = id; batch.runData = null; batch.view = "run"; startBatchPolling(); }
+    return;
+  }
+  if (!scheme) return;
+  if (target.matches('[data-batch-select="workflow"]')) {
+    void loadBatchWorkflowDetail(scheme, String(target.value || ""));
+    return;
+  }
+  if (target.matches('[data-batch-select="mapping"]')) {
+    const point = String(target.dataset.point || "");
+    const value = String(target.value || "");
+    const [nodeId, ...rest] = value.split("|");
+    scheme.mapping[`${point}_slot`] = value ? { node_id: nodeId, field_name: rest.join("|") } : null;
+    batchRememberMappingQuietly(scheme);
+    renderBatch();
+    return;
+  }
+  if (target.matches('[data-batch-select="port-node"]')) {
+    const portIndex = Number(target.dataset.port);
+    const value = String(target.value || "");
+    const [nodeId, ...rest] = value.split("|");
+    const port = (scheme.mapping.media_ports || [])[portIndex];
+    if (port && value) {
+      port.node_id = nodeId;
+      port.field_name = rest.join("|");
+      // 换节点后条目里已放的文件还在旧节点名下：清掉这些口的文件，明明白白。
+      const ordinal = batchPortOrdinal(scheme, portIndex);
+      for (const item of scheme.items) delete item.files[String(ordinal)];
+      batchRememberMappingQuietly(scheme);
+renderBatch();
+    }
+    return;
+  }
+  const checkbox = target.matches("[data-batch-port-check]");
+  if (checkbox) {
+    const portIndex = Number(target.dataset.batchPortCheck);
+    const port = (scheme.mapping.media_ports || [])[portIndex];
+    if (port) {
+      port.checked = target.checked;
+      if (!target.checked) {
+        const ordinal = batchPortOrdinal(scheme, portIndex);
+        for (const item of scheme.items) delete item.files[String(ordinal)];
+      }
+      batchRememberMappingQuietly(scheme);
+      renderBatch();
+    }
+  }
+}
+
+function onBatchInput(event) {
+  const target = event.target;
+  const scheme = batchSchemeOf(target.dataset.scheme || "");
+  const itemField = target.dataset.batchItem;
+  if (!scheme || !itemField) return;
+  const itemIndex = Number(target.dataset.item);
+  const item = scheme.items[itemIndex];
+  if (!item) return;
+  if (itemField === "shots") item.shots = Math.max(1, Math.floor(Number(target.value) || 1));
+  else item[itemField] = String(target.value ?? "");
+}
+
+// 素材口在条目文件字典里的键 = 它在已勾选口里的序号（0 起）。
+function batchPortOrdinal(scheme, portIndex) {
+  const ports = scheme.mapping?.media_ports || [];
+  let ordinal = 0;
+  for (let index = 0; index < ports.length && index < portIndex; index += 1) {
+    if (ports[index].checked) ordinal += 1;
+  }
+  return ports[portIndex]?.checked ? ordinal : -1;
+}
+
+function batchRememberMappingQuietly(scheme) {
+  const fingerprint = scheme.detail?.workflow_fingerprint || scheme.detail?.fingerprint || "";
+  rememberBatchMapping(fingerprint, scheme.mapping);
+}
+
+// ---- 批量素材上传（复用单次生成的受管上传链路）----
+
+function batchPickFile(tile) {
+  const scheme = batchSchemeOf(tile.dataset.scheme || "");
+  if (!scheme) return;
+  const portIndex = Number(tile.dataset.port);
+  const slot = batchSlotByAddress(scheme.detail, (scheme.mapping?.media_ports || [])[portIndex]);
+  const kind = tile.dataset.kind || slot?.media || "image";
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = MEDIA_ACCEPT[kind] || "";
+  input.addEventListener("change", () => {
+    const file = input.files?.[0];
+    if (file) void batchUploadTiles([{ tile, file }]);
+  });
+  input.click();
+}
+
+function onBatchDragOver(event) {
+  const tile = event.target.closest?.("[data-batch-tile]");
+  if (!tile || !dragHasFiles(event)) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+  tile.classList.add("dragover");
+}
+
+function onBatchDragLeave(event) {
+  const tile = event.target.closest?.("[data-batch-tile]");
+  if (!tile || (event.relatedTarget && tile.contains(event.relatedTarget))) return;
+  tile.classList.remove("dragover");
+}
+
+function onBatchDrop(event) {
+  const tile = event.target.closest?.("[data-batch-tile]");
+  if (!tile || !dragHasFiles(event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  tile.classList.remove("dragover");
+  const scheme = batchSchemeOf(tile.dataset.scheme || "");
+  if (!scheme) return;
+  const files = Array.from(event.dataTransfer?.files || []);
+  if (!files.length) return;
+  if (dropHasDirectory(event)) { toast("媒体输入只收单个文件，不支持拖文件夹"); return; }
+  const kind = tile.dataset.kind || "image";
+  const bad = files.find((file) => !fileMatchesMediaKind(file, kind));
+  if (bad) { toastMediaKindMismatch(bad, kind); return; }
+  if (files.length > 1) toast(`一次拖了 ${files.length} 个文件，只有第一个进入这个素材格`);
+  void batchUploadTiles([{ tile, file: files[0] }]);
+}
+
+async function batchUploadTiles(pairs) {
+  if (comfyui.uploadingSlot) { toast("上一个文件还在上传，请稍候"); return; }
+  comfyui.uploadingSlot = "batch";
+  let saved = 0;
+  try {
+    for (const { tile, file } of pairs) {
+      const scheme = batchSchemeOf(tile.dataset.scheme || "");
+      const itemIndex = Number(tile.dataset.item);
+      const item = scheme?.items[itemIndex];
+      if (!scheme || !item) continue;
+      const form = new FormData();
+      form.append("file", file, file.name);
+      try {
+        const payload = await api("/api/comfyui/media", { method: "POST", body: form });
+        const ordinal = batchPortOrdinal(scheme, Number(tile.dataset.port));
+        if (ordinal >= 0) {
+          item.files[String(ordinal)] = {
+            path: String(payload.path || ""),
+            name: String(payload.name || file.name),
+            thumb_path: String(payload.thumb_path || ""),
+          };
+          saved += 1;
+        }
+      } catch (error) {
+        toast(`上传失败：${error.message}`);
+      }
+    }
+  } finally {
+    comfyui.uploadingSlot = "";
+    batch.recheckMissing();
+    renderBatch();
+  }
+  if (saved) toast(`已上传 ${saved} 个文件`);
+}
+
+// ---- 剧本转换（POST /api/studio/generate + 轮询既有任务）----
+
+const BATCH_CONVERT_INTRO = "你是视频提示词工程师。把下面的剧本改写成一支视频的生成提示词：写成一段连贯的英文或中文描述，覆盖画面主体、动作节奏、镜头运动、氛围与声音要点；不要输出解释、标题或分点列表，只输出提示词正文。\n\n剧本：\n";
+
+async function batchLoadConvertModels() {
+  const select = document.querySelector('[data-batch-field="convertModel"]');
+  if (!select) return;
+  const providerKey = batch.convert.provider;
+  if (!providerKey) {
+    select.replaceChildren(new Option("请先选择供应商", ""));
+    select.disabled = true;
+    return;
+  }
+  if (!(state.providerModelCatalogs[providerKey] || []).length) {
+    try {
+      const result = await api("/api/providers/models", { method: "POST", body: { model_key: providerKey } });
+      if (result?.error) throw new Error(result.error);
+      state.providerModelCatalogs[providerKey] = Array.isArray(result?.models) ? result.models : [];
+    } catch (_) {
+      state.providerModelCatalogs[providerKey] = [];
+    }
+  }
+  const models = state.providerModelCatalogs[providerKey] || [];
+  select.replaceChildren(new Option("请选择模型…", ""), ...models.map((entry) => {
+    const id = typeof entry === "object" ? (entry.id ?? entry.model ?? entry.name) : entry;
+    return new Option(entry?.name || id, id);
+  }));
+  select.disabled = !models.length;
+}
+
+async function batchLoadCustomTemplates() {
+  const group = document.querySelector('[data-batch-custom-templates]');
+  if (!group || group.children.length) return;
+  try {
+    const { items } = await api("/api/studio/custom");
+    group.replaceChildren(...(items || []).filter((item) => item?.id)
+      .map((item) => new Option(String(item.title || item.id), String(item.id))));
+  } catch (_) { /* 读取失败仍可用内置转换 */ }
+}
+
+function batchItemReference(scheme, itemIndex) {
+  return `${scheme.id}:${itemIndex}`;
+}
+
+async function batchConvert(scheme, itemIndex, silent = false) {
+  const item = scheme.items[itemIndex];
+  const script = String(item?.script || "").trim();
+  if (!item || !script || String(item.prompt || "").trim()) return true;
+  const key = batchItemReference(scheme, itemIndex);
+  if (batch.converting.has(key)) return true;
+  if (!batch.convert.provider || !batch.convert.model) {
+    if (!silent) toast("转换前先在「剧本 → 提示词」一栏选好供应商和模型");
+    return false;
+  }
+  batch.converting.add(key);
+  renderBatch();
+  try {
+    const customId = batch.convert.template;
+    // studio 生成契约：custom_id 有值 → user_request 填进提词库模板；没有 →
+    // user_request 本身就是全文（内置引导 + 剧本）。
+    const body = {
+      model_key: batch.convert.provider,
+      model_name: batch.convert.model,
+      user_request: customId ? script : `${BATCH_CONVERT_INTRO}${script}`,
+    };
+    if (customId) body.custom_id = customId;
+    const created = await api("/api/studio/generate", { method: "POST", body });
+    const taskId = String(created?.task?.id || "");
+    if (!taskId) throw new Error(created?.error || "转换任务创建失败");
+    const result = await batchWaitStudioTask(taskId);
+    item.prompt = String(result || "").trim();
+    return true;
+  } catch (error) {
+    batch.blockedMessage = "";
+    toast(`这条转换失败：${error.message}`);
+    return false;
+  } finally {
+    batch.converting.delete(key);
+    renderBatch();
+  }
+}
+
+async function batchConvertAll() {
+  const draft = ensureBatchDraft();
+  const targets = [];
+  draft.schemes.forEach((scheme) => {
+    (scheme.items || []).forEach((item, itemIndex) => {
+      if (String(item.script || "").trim() && !String(item.prompt || "").trim()
+          && !batch.converting.has(batchItemReference(scheme, itemIndex))) {
+        targets.push([scheme, itemIndex]);
+      }
+    });
+  });
+  if (!targets.length) { toast("没有要转换的条目：先填剧本，或已全部转换过"); return; }
+  if (!batch.convert.provider || !batch.convert.model) { toast("先在「剧本 → 提示词」一栏选好供应商和模型"); return; }
+  batch.blockedMessage = "";
+  for (const [scheme, itemIndex] of targets) {
+    const ok = await batchConvert(scheme, itemIndex, true);
+    if (!ok) break;
+  }
+  toast("转换完成；提示词可以逐条手改");
+}
+
+async function batchWaitStudioTask(taskId) {
+  for (let attempt = 0; attempt < 600; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const payload = await api(`/api/studio/tasks/${encodeURIComponent(taskId)}`);
+    const task = payload?.task || payload;
+    const status = String(task?.status || "");
+    if (status === "done") return String(task?.result ?? "");
+    if (["failed", "cancelled"].includes(status)) {
+      throw new Error(String(task?.error || "转换任务没有完成"));
+    }
+  }
+  throw new Error("转换超时，可稍后重试");
+}
+
+// ---- 自检与提交 ----
+
+batch.recheckMissing = function recheckMissing() {
+  batch.missingItems.clear();
+  const draft = batch.draft;
+  if (!draft) return;
+  draft.schemes.forEach((scheme) => {
+    if (!scheme.detail || !scheme.mapping) return;
+    const ports = (scheme.mapping.media_ports || []).filter((port) => port.checked);
+    (scheme.items || []).forEach((item, itemIndex) => {
+      for (let portIndex = 0; portIndex < ports.length; portIndex += 1) {
+        const slot = batchSlotByAddress(scheme.detail, ports[portIndex]);
+        if (slot?.media_optional !== false) continue;
+        const ordinal = batchPortOrdinal(scheme, portIndex);
+        if (!item.files[String(ordinal)]?.path) {
+          batch.missingItems.add(`${scheme.id}:${itemIndex}`);
+          return;
+        }
+      }
+    });
+  });
+};
+
+async function submitBatch() {
+  batch.recheckMissing();
+  const draft = ensureBatchDraft();
+  if (batch.missingItems.size) {
+    batch.blockedMessage = "";
+    renderBatch();
+    toast("有标红的条目还没填完必填素材，补齐或删掉再提交");
+    return;
+  }
+  const schemes = [];
+  for (const scheme of draft.schemes) {
+    if (!scheme.workflow_id || !scheme.detail || !scheme.mapping) continue;
+    const detail = scheme.detail;
+    const savedOf = (slot) => batchSlotSavedValue(detail, slot);
+    const fixedOverrides = [];
+    for (const [key, raw] of Object.entries(scheme.fixed || {})) {
+      const [nodeId, ...rest] = key.split("|");
+      const slot = batchSlotByAddress(detail, { node_id: nodeId, field_name: rest.join("|") });
+      if (!slot) continue;
+      if (slot.field_type === "bool") {
+        const value = String(raw) === "true";
+        if (typeof savedOf(slot) === "boolean" && savedOf(slot) === value) continue;
+        fixedOverrides.push({ node_id: nodeId, field_name: slot.field_name, value });
+      } else if (slot.field_type === "number" || slot.field_type === "seed") {
+        const value = Number(raw);
+        if (!Number.isFinite(value) || value === savedOf(slot)) continue;
+        fixedOverrides.push({ node_id: nodeId, field_name: slot.field_name, value: slot.field_type === "seed" || Number.isInteger(value) ? Math.round(value) : value });
+      } else {
+        const value = String(raw);
+        if (value === savedOf(slot)) continue;
+        fixedOverrides.push({ node_id: nodeId, field_name: slot.field_name, value });
+      }
+    }
+    const ports = (scheme.mapping.media_ports || []).filter((port) => port.checked);
+    const items = scheme.items.map((item) => {
+      const mediaInputs = [];
+      ports.forEach((port, portIndex) => {
+        const record = item.files[String(portIndex)];
+        if (!record?.path) return;
+        mediaInputs.push({ node_id: String(port.node_id), field_name: String(port.field_name), path: record.path, media: batchSlotByAddress(detail, port)?.media || "image" });
+      });
+      const duration = String(item.duration ?? "").trim();
+      const resolution = String(item.resolution ?? "").trim();
+      return {
+        name: String(item.name || "").trim() || `条目 ${scheme.items.indexOf(item) + 1}`,
+        prompt: String(item.prompt || "").trim(),
+        duration_seconds: duration ? Number(duration) : null,
+        resolution,
+        shots: Math.max(1, Math.floor(Number(item.shots) || 1)),
+        media_inputs: mediaInputs,
+      };
+    });
+    schemes.push({
+      workflow_id: scheme.workflow_id,
+      overrides: fixedOverrides,
+      mapping: {
+        prompt_slot: scheme.mapping.prompt_slot,
+        duration_slot: scheme.mapping.duration_slot,
+        resolution_slot: scheme.mapping.resolution_slot,
+      },
+      items,
+    });
+  }
+  if (!schemes.length) { toast("还没有可选的方案：每个方案要先选好工作流"); return; }
+  try {
+    const payload = await api("/api/comfyui/batches", {
+      method: "POST",
+      body: { title: draft.title, unload_after: draft.unload_after, schemes },
+    });
+    batch.runId = String(payload.batch?.id || "");
+    batch.runData = payload.batch || null;
+    batch.runStartedAt = Date.now();
+    batch.missingItems.clear();
+    batch.view = "run";
+    renderBatch();
+    startBatchPolling();
+    toast("批次已提交，正在逐条执行");
+  } catch (error) {
+    toast(`提交失败：${error.message}`);
+  }
+}
+
+// ---- 分镜队列导入 ----
+
+function importBatchStoryboard() {
+  const items = (comfyui.storyboardQueue || []).filter((item) => item.prompt);
+  if (!items.length) { toast("分镜队列是空的：从拆书匠发一份「分镜生图」过来"); return; }
+  const scheme = ensureBatchDraft().schemes[0];
+  if (!scheme.detail || !scheme.mapping) { toast("先给方案 1 选好工作流再导入分镜"); return; }
+  const start = scheme.items.length;
+  items.forEach((row, index) => {
+    scheme.items.push(newBatchItem(start + index + 1, {
+      name: row.head ? String(row.head).slice(0, 120) : `第 ${row.no} 镜`,
+      script: "",
+      prompt: String(row.prompt || ""),
+    }));
+  });
+  renderBatch();
+  toast(`已把 ${items.length} 条分镜提示词导进方案 ${1} 的条目表`);
+}
+
+// ---- 跑批视图 ----
+
+const BATCH_STATUS_BADGES = {
+  queued: ["排队中", "queue"],
+  running: ["生成中", "run"],
+  completed: ["已完成", "done"],
+  failed: ["失败", "fail"],
+  cancelled: ["已取消", "fail"],
+  interrupted: ["已中断", "fail"],
+  missing: ["任务缺失", "fail"],
+};
+
+function batchRunMarkup() {
+  const data = batch.runData;
+  if (!data) return '<div class="cbm-run-head"><span class="cbm-run-title">正在读取批次…</span></div>';
+  const items = data.items || [];
+  const done = items.filter((item) => item.status === "completed").length;
+  const total = Math.max(items.length, 1);
+  const active = items.some((item) => ["queued", "running"].includes(String(item.status)));
+  const percent = Math.round((done / total) * 100);
+  const cards = items.map((item) => batchRunCardMarkup(item)).join("");
+  return `<div class="cbm-run-head">
+      <span class="cbm-run-title">${escapeText(data.title || "未命名批次")}</span>
+      <span class="cbm-badge ${active ? "run" : "done"}">${active ? `正在生成 ${done}/${items.length}` : done === items.length ? `${items.length} 条全部完成` : `${done}/${items.length} 完成`}</span>
+      <div class="cbm-progress" role="progressbar" aria-label="批次进度" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100"><div style="width:${percent}%"></div></div>
+      <span class="cbm-run-meta" id="comfyuiBatchElapsed"></span>
+      <button type="button" class="cbm-btn tiny" data-batch-action="switch-draft">回填单改下一批</button>
+    </div>
+    <div class="cbm-cards">${cards}</div>
+    <p class="cbm-run-note">失败的条目点「重试」＝从没完成的段继续，不会重复提交已完成的段；其他条目照常跑。</p>`;
+}
+
+function batchRunCardMarkup(item) {
+  const [label, cls] = BATCH_STATUS_BADGES[String(item.status || "")] || [String(item.status || "—"), "queue"];
+  const outputs = item.outputs || [];
+  const first = outputs[0] || "";
+  const taskRef = String(item.task_id || "");
+  const kind = mediaKind(first, first) === "video" ? "video" : "image";
+  let thumb;
+  if (item.status === "completed" && first) {
+    const url = outputFileUrl(taskRef, first, "");
+    thumb = kind === "image"
+      ? `<img src="${escapeText(url)}" alt="" loading="lazy" data-large-url="${escapeText(url)}">`
+      : '<span class="cbm-card-play">▶</span>';
+  } else if (String(item.status) === "running") {
+    thumb = `<span class="cbm-card-skel-text">第 ${(Number(item.done) || 0) + 1}/${item.total || 1} 段生成中</span>`;
+  } else {
+    thumb = `<span class="cbm-card-skel-text">${item.status === "queued" ? "等前面的条目出完" : "—"}</span>`;
+  }
+  const foot = [];
+  if (item.status === "completed") {
+    foot.push(`<span>${outputs.length > 1 ? `${outputs.length} 个产物` : "已完成"}</span>`);
+    foot.push(`<button type="button" class="cbm-btn tiny" data-batch-action="open-task-outputs" data-task-id="${escapeText(taskRef)}">产物</button>`);
+  } else if (item.error) {
+    foot.push(`<span class="cbm-err">${escapeText(String(item.error))}</span>`);
+    foot.push('<button type="button" class="cbm-btn tiny" data-batch-action="retry-item" data-task-id="' + escapeText(taskRef) + '">重试</button>');
+  } else if (item.status === "running" || item.status === "queued") {
+    foot.push(`<span>${item.done || 0}/${item.total || 1} 段</span>`);
+  }
+  return `<div class="cbm-card">
+    <div class="cbm-card-head"><strong>${escapeText(item.name || `条目 ${item.index}`)}</strong><span class="cbm-badge ${cls}">${label}</span></div>
+    <div class="cbm-card-thumb${item.status === "completed" && first && kind === "image" ? "" : " skel"}">${thumb}</div>
+    <div class="cbm-card-foot">${foot.join("")}</div>
+  </div>`;
+}
+
+function startBatchRunElapsed() {
+  if (batch.runElapsedTimer) return;
+  const update = () => {
+    const host = $("#comfyuiBatchElapsed");
+    if (!host) return;
+    const seconds = Math.max(0, Math.round((Date.now() - batch.runStartedAt) / 1000));
+    host.textContent = `已用 ${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+  };
+  update();
+  batch.runElapsedTimer = setInterval(update, 1000);
+}
+
+function startBatchPolling() {
+  stopBatchPolling();
+  const tick = async () => {
+    if (!batch.runId || batch.view !== "run") return;
+    try {
+      const payload = await api(`/api/comfyui/batches/${encodeURIComponent(batch.runId)}`);
+      batch.runData = payload.batch || batch.runData;
+      renderBatch();
+      const items = batch.runData?.items || [];
+      if (!items.some((item) => ["queued", "running"].includes(String(item.status)))) {
+        stopBatchPolling();
+        void loadBatchHistories();
+      }
+    } catch (_) { /* 单次轮询失败不终止跑批监视 */ }
+  };
+  batch.runTimer = setInterval(() => void tick(), 2200);
+  void tick();
+}
+
+function stopBatchPolling() {
+  if (batch.runTimer) { clearInterval(batch.runTimer); batch.runTimer = null; }
+  if (batch.runElapsedTimer) { clearInterval(batch.runElapsedTimer); batch.runElapsedTimer = null; }
+}
+
+async function loadBatchHistories() {
+  try {
+    const payload = await api("/api/comfyui/batches");
+    batch.histories = (payload.batches || []).slice(0, 50);
+    batch.historiesLoaded = true;
+    if (batch.view === "draft") renderBatch();
+  } catch (_) { /* 历史读不到不挡填单 */ }
+}
+
+async function openBatchTaskOutputs(taskId) {
+  setComfyuiPane("tasks");
+  comfyui.activeTaskId = taskId;
+  comfyui.eventSeq = 0;
+  comfyui.tasks = [];
+  await refreshTasks();
+  startPolling();
+}
+
+async function retryBatchItem(taskId) {
+  try {
+    await api(`/api/comfyui/tasks/${encodeURIComponent(taskId)}/retry`, { method: "POST", body: {} });
+    toast("已重新排队：从没完成的段继续");
+    batch.runData = null;
+    if (batch.view === "run" && batch.runId) startBatchPolling();
+  } catch (error) {
+    toast(`重试失败：${error.message}`);
+  }
+}
+
+function enterBatchPane() {
+  ensureBatchDraft();
+  void loadBatchHistories();
+  void batchLoadCustomTemplates();
+  batch.recheckMissing();
+  renderBatch();
 }

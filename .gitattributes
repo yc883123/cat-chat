@@ -2,3 +2,5 @@
 skills/ai-manju-skills/** -text
 # Recipe templates and license carry byte-level provenance hashes.
 naiba/super_agent/recipe_assets/** -text
+# 预设由转换器按 LF 生成，Windows checkout 必须保持字节可复现。
+public/studio/*.json text eol=lf

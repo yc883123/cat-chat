@@ -278,6 +278,8 @@ verify/*
 !verify/branch_first_turn_smoke.py
 !verify/browser_smoke.cjs
 !verify/chat_composer_layout_smoke.cjs
+!verify/release_ui_smoke.py
+!verify/comfyui_draft_smoke.cjs
 !verify/comfyui_navigation_smoke.cjs
 !verify/skills_ui_smoke.cjs
 !verify/chat_font_smoke.cjs

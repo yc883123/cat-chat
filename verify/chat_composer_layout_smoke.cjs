@@ -3,7 +3,10 @@
 const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const fs = require('node:fs');
 const BASE = process.env.NAIBA_SMOKE_BASE || 'http://127.0.0.1:8765';
+const OUTPUT = path.resolve(process.env.NAIBA_SMOKE_OUTPUT || __dirname);
+fs.mkdirSync(OUTPUT, { recursive: true });
 const VIEWPORTS = [{ width: 1580, height: 1033 }, { width: 1280, height: 800 }, { width: 375, height: 812 }];
 const LONG_TEXT = '用于验证聊天布局的隔离内容，不执行任何命令。\n'.repeat(50);
 const messages = [
@@ -68,6 +71,9 @@ async function rawHtmlCheck(browser, viewport) {
   try {
     await page.goto(BASE, { waitUntil: 'load' });
     await assertComposer(page, { label: '禁用JS后的原生HTML解析' });
+  } catch (error) {
+    await page.screenshot({ path: path.join(OUTPUT, `chat_composer_raw_failed_${viewport.width}.png`) }).catch(() => {});
+    throw error;
   } finally { await context.close(); }
 }
 
@@ -97,6 +103,9 @@ async function runViewport(browser, viewport) {
     await page.evaluate(async ({ messages }) => {
       const core = await import('/js/01-core.js');
       const chat = await import('/js/04-messages.js');
+      // 服务端会恢复上次视图，先同步真实控制器，不能只改外层DOM留下工作台打开标记。
+      (await import('/js/22-studio.js')).closeStudioView();
+      (await import('/js/28-super-agent.js')).closeSuperAgentView();
       core.setAppView('chat');
       core.state.conversationId = '';
       core.state.chatBusy = false;
@@ -147,6 +156,7 @@ async function runViewport(browser, viewport) {
     await page.evaluate(async () => { await (await import('/js/28-super-agent.js')).openSuperAgentView(); });
     assert.equal(await page.locator('#superAgentView').isVisible(), true);
     await page.locator('#superAgentCreate').click();
+    await page.locator('#superAgentLaunchDialog').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#superAgentLaunchDialog').isVisible(), true);
     assert.equal(await page.locator('#superAgentLaunchDialog [data-launch-domain]').count(), 5);
     await page.locator('#superAgentLaunchDialog [data-launch-close]').first().click();
@@ -154,16 +164,16 @@ async function runViewport(browser, viewport) {
     await assertComposer(page, { label: '任务总管返回聊天' });
     await checkErrors();
     await page.evaluate(() => window.__layout.chat.forceScrollToBottom());
-    await page.screenshot({ path: path.join(__dirname, `chat_composer_layout_${viewport.width}.png`) });
+    await page.screenshot({ path: path.join(OUTPUT, `chat_composer_layout_${viewport.width}.png`) });
     console.log(`通过 ${viewport.width}×${viewport.height}：HTML归属、长工具折叠展开、背景、编辑还原、三视图与启动台`);
   } catch (error) {
-    await page.screenshot({ path: path.join(__dirname, `chat_composer_layout_failed_${viewport.width}.png`) });
+    await page.screenshot({ path: path.join(OUTPUT, `chat_composer_layout_failed_${viewport.width}.png`) }).catch(() => {});
     throw error;
   } finally { await page.close(); }
 }
 
 (async () => {
-  const browser = await chromium.launch({ channel: 'msedge', headless: true });
+  const browser = await chromium.launch({ channel: process.env.NAIBA_SMOKE_BROWSER_CHANNEL || 'msedge', headless: true });
   try { for (const viewport of VIEWPORTS) await runViewport(browser, viewport); }
   finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

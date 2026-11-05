@@ -9,6 +9,7 @@ import { $, api, localFileUrl, state, toast } from "./01-core.js";
 import { attachmentThumbUrl, isPywebview, mediaKind, saveLocalFile } from "./03-media.js";
 import { currentStudioPage, isStudioOpen, onStudioPageChange, setStudioPage } from "./22-studio.js";
 import { BATCH_H3_REFERENCE_TEMPLATE, buildBatchConvertRequest } from "./24a-comfyui-convert.js";
+import { BATCH_DRAFT_KEY, batchDraftMappingValid, decodeBatchDraft, encodeBatchDraft } from "./24b-comfyui-draft.js";
 const POLL_MS = 1200;
 const REFRESH_MS = 5000;
 
@@ -354,6 +355,7 @@ export function bindComfyuiEvents() {
   batchBody?.addEventListener("dragover", onBatchDragOver);
   batchBody?.addEventListener("dragleave", onBatchDragLeave);
   batchBody?.addEventListener("drop", onBatchDrop);
+  window.addEventListener("pagehide", flushBatchDraft);
   // 分镜队列：拆书匠跨页交接 + 逐条填入正向提示词。
   document.addEventListener("naiba:storyboard-handoff", onStoryboardHandoff);
   $("#comfyuiStoryboardClear")?.addEventListener("click", () => {
@@ -2575,7 +2577,120 @@ const batch = {
   missingItems: new Set(),  // 自检没过的条目（schemeId:itemIndex），标红拦提交
   blockedMessage: "",
   convert: { template: "", provider: "", model: "" },
+  draftLoaded: false,
+  draftSaveTimer: null,
+  draftSavedText: "",
+  draftStatus: "",
+  draftError: "",
 };
+
+function setBatchDraftStatus(message, error = false) {
+  batch.draftStatus = message;
+  const node = document.querySelector("[data-batch-draft-status]");
+  if (node) { node.textContent = message; node.classList.toggle("cbm-alert", error); }
+  if (error && batch.draftError !== message) toast(message);
+  batch.draftError = error ? message : "";
+}
+
+function flushBatchDraft() {
+  if (batch.draftSaveTimer) clearTimeout(batch.draftSaveTimer);
+  batch.draftSaveTimer = null;
+  if (!batch.draftLoaded || !batch.draft) return;
+  try {
+    const raw = encodeBatchDraft(batch.draft, batch.convert);
+    if (raw === batch.draftSavedText) return;
+    localStorage.setItem(BATCH_DRAFT_KEY, raw);
+    batch.draftSavedText = raw;
+    setBatchDraftStatus("草稿已保存到本机");
+  } catch (error) {
+    const reason = error?.name === "QuotaExceededError" || error?.name === "SecurityError"
+      ? "本机存储不可用或空间不足" : String(error?.message || "本机存储不可用");
+    setBatchDraftStatus(`草稿未保存：${reason}`, true);
+  }
+}
+
+function scheduleBatchDraftSave() {
+  if (!batch.draftLoaded || !batch.draft) return;
+  if (batch.draftSaveTimer) clearTimeout(batch.draftSaveTimer);
+  batch.draftSaveTimer = setTimeout(flushBatchDraft, 450);
+}
+
+function loadBatchDraft() {
+  if (batch.draftLoaded) return;
+  batch.draftLoaded = true;
+  try {
+    const raw = localStorage.getItem(BATCH_DRAFT_KEY);
+    if (!raw) return;
+    const saved = decodeBatchDraft(raw);
+    batch.convert = saved.convert;
+    batch.draft = { ...saved.draft, schemes: saved.draft.schemes.map((scheme) => ({
+      ...scheme, id: newBatchSchemeId(), detail: null, mapping: null, fixed: {}, loading: false,
+      restoreDraft: scheme, restoreNeedsReview: scheme.needs_review,
+    })) };
+    batch.draftSavedText = encodeBatchDraft(batch.draft, batch.convert);
+    setBatchDraftStatus("草稿已恢复，正在核对工作流和素材");
+    for (const scheme of batch.draft.schemes) {
+      if (scheme.workflow_id) void loadBatchWorkflowDetail(scheme, scheme.workflow_id, scheme.restoreDraft);
+      else scheme.restoreDraft = null;
+    }
+  } catch (error) {
+    setBatchDraftStatus(`草稿未恢复：${error?.name === "SecurityError" ? "本机存储不可用" : "保存内容损坏或版本不兼容"}`, true);
+  }
+}
+
+function clearBatchDraft() {
+  if (!window.confirm("清空这份批量草稿？已提交的批次和产物不会删除。")) return;
+  if (batch.draftSaveTimer) clearTimeout(batch.draftSaveTimer);
+  batch.draftSaveTimer = null;
+  try { localStorage.removeItem(BATCH_DRAFT_KEY); }
+  catch (_) { setBatchDraftStatus("草稿未清空：本机存储不可用，请稍后重试", true); return; }
+  // 换整棵对象让详情、上传和转换的旧请求同时失效，旧回包不能复活已清空草稿。
+  batch.draft = { title: "", unload_after: false, schemes: [] };
+  batch.convert = { template: "", provider: "", model: "" };
+  batch.converting.clear();
+  batch.missingItems.clear();
+  batch.blockedMessage = "";
+  addBatchScheme();
+  batch.draftSavedText = encodeBatchDraft(batch.draft, batch.convert);
+  setBatchDraftStatus("草稿已清空");
+  renderBatch();
+}
+
+async function checkBatchRestoredFiles(scheme) {
+  const detail = scheme.detail;
+  const stored = scheme.items.flatMap((item) => Object.entries(item.files || {}).map(([key, file]) => ({ item, key, file })));
+  const dataDir = String(state.bootstrap?.data_location?.data_dir || "").replaceAll("\\", "/").replace(/\/+$/, "");
+  const normalize = (value) => /^[a-z]:\//i.test(dataDir) ? value.toLowerCase() : value;
+  const uploadRoot = normalize(`${dataDir}/uploads/`);
+  const records = [];
+  let removed = 0;
+  for (const row of stored) {
+    if (dataDir && normalize(row.file.path.replaceAll("\\", "/")).startsWith(uploadRoot)) records.push(row);
+    else { delete row.item.files[row.key]; removed += 1; }
+  }
+  if (removed) scheme.restoreNotice = `有 ${removed} 个草稿素材不在当前上传目录，请重新选择；剧本和提示词已保留。`;
+  if (!records.length) { scheme.filesUnverified = false; batch.recheckMissing(); renderBatch(); return; }
+  const current = () => batchSchemeOf(scheme.id) === scheme && scheme.detail === detail;
+  scheme.filesUnverified = true;
+  scheme.checkingFiles = true;
+  renderBatch();
+  try {
+    const payload = await api("/api/uploads/check", { method: "POST", body: { paths: [...new Set(records.map(({ file }) => file.path))] } });
+    if (!current()) return;
+    if (!Array.isArray(payload?.missing)) throw new Error("素材检查未返回有效结果");
+    const missing = new Set(payload.missing);
+    for (const { item, key, file } of records) {
+      if (missing.has(file.path) && item.files[key] === file) { delete item.files[key]; removed += 1; }
+    }
+    scheme.filesUnverified = false;
+    if (removed) scheme.restoreNotice = `有 ${removed} 个草稿素材已失效或不在当前上传目录，请重新选择；剧本和提示词已保留。`;
+  } catch (_) {
+    if (!current()) return;
+    scheme.restoreNotice = "暂时无法核验草稿素材，请重试核验后再转换或生成。";
+  } finally {
+    if (current()) { scheme.checkingFiles = false; batch.recheckMissing(); renderBatch(); }
+  }
+}
 
 // ---- 映射记忆（按工作流指纹；结构 = 三个写入位 + 素材口顺序）----
 
@@ -2679,15 +2794,23 @@ function newBatchItem(index, patch = {}) {
 }
 
 function ensureBatchDraft() {
+  loadBatchDraft();
   if (batch.draft) return batch.draft;
   batch.draft = { title: "", unload_after: false, schemes: [] };
   addBatchScheme();
+  batch.draftSavedText = encodeBatchDraft(batch.draft, batch.convert);
   return batch.draft;
+}
+
+let batchSchemeSequence = 0;
+function newBatchSchemeId() {
+  batchSchemeSequence += 1;
+  return `bs${Date.now().toString(36)}-${batchSchemeSequence.toString(36)}`;
 }
 
 function addBatchScheme(cloneFrom = null) {
   const scheme = {
-    id: `bs${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`,
+    id: newBatchSchemeId(),
     workflow_id: cloneFrom?.workflow_id || "",
     detail: cloneFrom?.detail || null,
     loading: false,
@@ -2697,14 +2820,27 @@ function addBatchScheme(cloneFrom = null) {
       ...JSON.parse(JSON.stringify(item)),
       name: `${item.name} 副本`,
     })) : [],
+    restoreDraft: cloneFrom?.restoreDraft ? JSON.parse(JSON.stringify(cloneFrom.restoreDraft)) : null,
+    restoreNeedsReview: cloneFrom?.restoreNeedsReview === true,
+    restoreNotice: cloneFrom?.restoreNotice || "",
+    filesUnverified: cloneFrom?.filesUnverified === true,
   };
+  if (scheme.restoreDraft && scheme.restoreNeedsReview) scheme.restoreDraft.needs_review = true;
   batch.draft.schemes.push(scheme);
-  if (!cloneFrom && scheme.workflow_id) void loadBatchWorkflowDetail(scheme);
+  // 副本保留原草稿的核对限制；加载中的详情和素材检查由副本自己的请求接管。
+  if (scheme.workflow_id && !scheme.detail) void loadBatchWorkflowDetail(scheme, scheme.workflow_id, scheme.restoreDraft);
+  else if (scheme.filesUnverified || cloneFrom?.checkingFiles) void checkBatchRestoredFiles(scheme);
   return scheme;
 }
 
-async function loadBatchWorkflowDetail(scheme, workflowId) {
+async function loadBatchWorkflowDetail(scheme, workflowId, restored = null) {
   const id = workflowId ?? scheme.workflow_id;
+  if (!restored && id !== scheme.workflow_id) scheme.items.forEach((item) => { item.files = {}; });
+  scheme.restoreDraft = restored;
+  scheme.restoreNeedsReview = false;
+  scheme.restoreNotice = "";
+  scheme.filesUnverified = false;
+  scheme.checkingFiles = false;
   const request = {};
   scheme.detailRequest = request;
   const current = () => batchSchemeOf(scheme.id) === scheme && scheme.detailRequest === request
@@ -2723,11 +2859,25 @@ async function loadBatchWorkflowDetail(scheme, workflowId) {
   try {
     const payload = await api(`/api/comfyui/workflows/${encodeURIComponent(id)}`);
     if (!current()) return;
-    scheme.detail = payload.workflow || null;
+    if (!payload.workflow || typeof payload.workflow !== "object" || !Array.isArray(payload.workflow.params)) {
+      throw new Error("工作流详情不可用，请重新读取");
+    }
+    scheme.detail = payload.workflow;
     scheme.loading = false;
     const fingerprint = scheme.detail?.workflow_fingerprint || scheme.detail?.fingerprint || "";
     const recalled = recallBatchMapping(fingerprint);
-    scheme.mapping = recalled || batchMappingFromWorkflow(scheme.detail);
+    const compatible = restored && batchDraftMappingValid(restored, scheme.detail, (slot) => slot ? mediaKindOfSlot(slot) : "");
+    scheme.mapping = compatible && restored.mapping ? restored.mapping : recalled || batchMappingFromWorkflow(scheme.detail);
+    if (compatible) {
+      scheme.fixed = restored.fixed;
+      scheme.restoreNeedsReview = restored.needs_review;
+      scheme.restoreNotice = restored.needs_review ? "工作流配置仍待核对，请确认映射和固定参数后继续。" : "草稿已恢复。";
+    } else if (restored) {
+      scheme.restoreNeedsReview = true;
+      scheme.restoreNotice = "工作流已变化，已保留剧本和提示词；请重新核对映射、固定参数和素材后继续。";
+      scheme.items.forEach((item) => { item.files = {}; });
+    }
+    scheme.restoreDraft = null;
     // 记忆里的槽位可能已不在工作流里（版本变了）：逐项验证，失效的按未映射处理。
     for (const key of ["prompt_slot", "duration_slot", "resolution_slot"]) {
       const slot = scheme.mapping[key];
@@ -2737,6 +2887,7 @@ async function loadBatchWorkflowDetail(scheme, workflowId) {
       batchMediaCandidates(scheme.detail).some((slot) =>
         String(slot.node_id) === String(port.node_id) && String(slot.field_name) === String(port.field_name)));
     renderBatch();
+    if (compatible) void checkBatchRestoredFiles(scheme);
   } catch (error) {
     if (!current()) return;
     scheme.loading = false;
@@ -2748,6 +2899,7 @@ async function loadBatchWorkflowDetail(scheme, workflowId) {
 // ---- 填单视图渲染 ----
 
 function renderBatch() {
+  scheduleBatchDraftSave();
   const host = $("#comfyuiBatchBody");
   if (!host) return;
   const root = $("#comfyuiBatch");
@@ -2769,11 +2921,13 @@ function batchDraftMarkup() {
     <span class="cbm-field">批次名 <input type="text" data-batch-field="title" maxlength="120" value="${escapeText(draft.title)}" placeholder="例：短剧第1集"></span>
     <label class="cbm-switch"><input type="checkbox" data-batch-field="unload_after" ${draft.unload_after ? "checked" : ""}><span class="cbm-track"></span>每条出完就释放模型</label>
     <button type="button" class="cbm-btn" data-batch-action="import-storyboard">${comfyui.storyboardQueue.length ? `从分镜队列导入（${comfyui.storyboardQueue.length} 条）` : "从分镜队列导入"}</button>
+    <button type="button" class="cbm-btn" data-batch-action="clear-draft">清空草稿</button>
     <span class="cbm-field cbm-history">查看以前的批次
       <select data-batch-select="history"><option value="">选择批次…</option>${batch.histories.map((row) =>
         `<option value="${escapeText(row.id)}">${escapeText(row.title || row.id)} · ${row.done_count ?? 0}/${row.item_count ?? 0} 完成</option>`).join("")}</select>
     </span>
   </div>`);
+  parts.push(`<p class="cbm-note${batch.draftError ? " cbm-alert" : ""}" data-batch-draft-status role="status">${escapeText(batch.draftStatus || "草稿会自动保存到本机")}</p>`);
   if (batch.blockedMessage) parts.push(`<p class="cbm-alert">${escapeText(batch.blockedMessage)}</p>`);
   const hasScript = draft.schemes.some((scheme) => (scheme.items || []).some((item) => String(item.script || "").trim()));
   if (hasScript) parts.push(batchConvertBarMarkup());
@@ -2843,12 +2997,17 @@ function batchSchemeMarkup(scheme, schemeIndex) {
       <button type="button" class="cbm-btn tiny" data-batch-action="remove-scheme" data-scheme="${scheme.id}">删除</button>
     </span>
   </div>`;
+  const restored = scheme.restoreNotice || scheme.restoreDraft || scheme.checkingFiles || scheme.filesUnverified;
+  const recovery = restored ? `<p class="cbm-alert">${escapeText(scheme.restoreNotice || (scheme.checkingFiles ? "正在核验草稿素材…" : "正在核对草稿工作流…"))}
+    ${scheme.restoreDraft && !scheme.loading ? `<button type="button" class="cbm-btn tiny" data-batch-action="retry-restored-workflow" data-scheme="${scheme.id}">重试读取工作流</button>` : ""}
+    ${scheme.filesUnverified ? `<button type="button" class="cbm-btn tiny" data-batch-action="retry-draft-files" data-scheme="${scheme.id}" ${scheme.checkingFiles ? "disabled" : ""}>重新核验素材</button>` : ""}
+    ${scheme.restoreNeedsReview ? `<button type="button" class="cbm-btn tiny" data-batch-action="confirm-restored-workflow" data-scheme="${scheme.id}">已核对，继续使用</button>` : ""}</p>` : "";
   if (scheme.collapsed) {
     const summary = scheme.items.map((item) => escapeText(item.name)).join(" · ");
-    return `<div class="${classes.join(" ")}">${head}<div class="cbm-collapsed-row">${scheme.items.length} 条条目：${summary || "还没有条目"}</div></div>`;
+    return `<div class="${classes.join(" ")}">${head}${recovery}<div class="cbm-collapsed-row">${scheme.items.length} 条条目：${summary || "还没有条目"}</div></div>`;
   }
   if (!scheme.workflow_id || !scheme.detail || !scheme.mapping) {
-    return `<div class="${classes.join(" ")}">${head}<div class="cbm-scheme-body">
+    return `<div class="${classes.join(" ")}">${head}${recovery}<div class="cbm-scheme-body">
       <p class="cbm-hint">选工作流后在这里指认：正文 / 时长 / 分辨率写进哪个参数、哪些装载槽做素材口。</p>
     </div></div>`;
   }
@@ -2858,7 +3017,7 @@ function batchSchemeMarkup(scheme, schemeIndex) {
     ${batchItemsMarkup(scheme, schemeIndex)}
     <p class="cbm-hint">剧本填了、提示词空着的，点「转换」让模型写提示词，写完可手改。素材格留空＝这条不用这个口（必填的口留空会在提交时拦下）。没勾选的素材口不出现在条目里，生成时按工作流保存值执行。</p>
   </div>`;
-  return `<div class="${classes.join(" ")}">${head}${body}</div>`;
+  return `<div class="${classes.join(" ")}">${head}${recovery}${body}</div>`;
 }
 
 // ---- 映射区：三个写入位下拉 + 装载槽（勾选 / 排序 / 每口可换节点）----
@@ -3087,7 +3246,17 @@ function onBatchClick(event) {
   const scheme = batchSchemeOf(target.dataset.scheme || "");
   const itemIndex = target.dataset.item !== undefined ? Number(target.dataset.item) : -1;
   event.preventDefault();
-  if (action === "add-scheme") {
+  if (action === "clear-draft") {
+    clearBatchDraft();
+  } else if (action === "retry-restored-workflow" && scheme?.restoreDraft) {
+    void loadBatchWorkflowDetail(scheme, scheme.workflow_id, scheme.restoreDraft);
+  } else if (action === "retry-draft-files" && scheme) {
+    void checkBatchRestoredFiles(scheme);
+  } else if (action === "confirm-restored-workflow" && scheme?.detail) {
+    scheme.restoreNeedsReview = false;
+    scheme.restoreNotice = "草稿已恢复，工作流配置已核对。";
+    renderBatch();
+  } else if (action === "add-scheme") {
     addBatchScheme();
     renderBatch();
   } else if (action === "copy-scheme" && scheme) {
@@ -3152,6 +3321,7 @@ function onBatchClick(event) {
 }
 
 function onBatchChange(event) {
+  scheduleBatchDraftSave();
   const target = event.target;
   const scheme = batchSchemeOf(target.dataset.scheme || "");
   if (target.matches('[data-batch-field="title"]')) {
@@ -3182,6 +3352,10 @@ function onBatchChange(event) {
     return;
   }
   if (!scheme) return;
+  if (target.matches("[data-batch-fixed]")) {
+    scheme.fixed[String(target.dataset.batchFixed)] = String(target.value ?? "");
+    return;
+  }
   if (target.matches('[data-batch-select="workflow"]')) {
     void loadBatchWorkflowDetail(scheme, String(target.value || ""));
     return;
@@ -3239,8 +3413,17 @@ function changeBatchMediaPorts(scheme, change) {
 }
 
 function onBatchInput(event) {
+  scheduleBatchDraftSave();
   const target = event.target;
+  if (target.matches('[data-batch-field="title"]')) {
+    ensureBatchDraft().title = String(target.value || "");
+    return;
+  }
   const scheme = batchSchemeOf(target.dataset.scheme || "");
+  if (scheme && target.matches("[data-batch-fixed]")) {
+    scheme.fixed[String(target.dataset.batchFixed)] = String(target.value ?? "");
+    return;
+  }
   const itemField = target.dataset.batchItem;
   if (!scheme || !itemField) return;
   const itemIndex = Number(target.dataset.item);
@@ -3433,6 +3616,10 @@ function batchConversionSnapshot(scheme, item) {
 }
 
 async function batchConvert(scheme, itemIndex, silent = false) {
+  if (scheme.restoreDraft || scheme.restoreNeedsReview || scheme.filesUnverified || scheme.checkingFiles) {
+    if (!silent) toast("先完成草稿工作流和素材核对，再转换");
+    return false;
+  }
   const item = scheme.items[itemIndex];
   const script = String(item?.script || "").trim();
   if (!item || !script || String(item.prompt || "").trim()) return true;
@@ -3538,6 +3725,10 @@ batch.recheckMissing = function recheckMissing() {
 async function submitBatch() {
   batch.recheckMissing();
   const draft = ensureBatchDraft();
+  if (draft.schemes.some((scheme) => scheme.restoreDraft || scheme.restoreNeedsReview || scheme.filesUnverified || scheme.checkingFiles)) {
+    toast("先完成草稿工作流和素材核对，再开始批量生成");
+    return;
+  }
   if (batch.missingItems.size) {
     batch.blockedMessage = "";
     renderBatch();

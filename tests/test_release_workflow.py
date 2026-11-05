@@ -55,6 +55,31 @@ _COPY_MIN_HITS = 3
 
 
 class ReleaseTestExecutionPolicyTests(unittest.TestCase):
+    def test_packaged_ui_gate_precedes_manifest_and_cannot_ignore_failure(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        packaged = workflow.index("      - name: Smoke test packaged executable")
+        ui = workflow.index("      - name: Smoke test packaged UI")
+        manifest = workflow.index("      - name: Create update manifest")
+        publish = workflow.index("      - name: Publish ")
+        self.assertLess(packaged, ui)
+        self.assertLess(ui, manifest)
+        self.assertLess(manifest, publish)
+        step = workflow[ui:manifest].split("      - name:", 2)[1]
+        self.assertIn("--exe dist/naiba-chat.exe", step)
+        self.assertIn("verify/release_ui_smoke.py", step)
+        self.assertIn("exit $LASTEXITCODE", step)
+        self.assertNotIn("continue-on-error", step)
+        self.assertNotIn("if: always()", step)
+        self.assertIn("playwright@1.63.0", workflow)
+
+    def test_ui_failure_artifact_excludes_runtime_configuration_and_database(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        upload = workflow.split("      - name: Upload packaged UI failure evidence", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("if: failure()", upload)
+        self.assertIn("actions/upload-artifact@v4", upload)
+        paths = [line.strip() for line in block_scalar_text(upload, "path").splitlines()]
+        self.assertEqual(paths, ["verify/release-ui-artifacts/*.log", "verify/release-ui-artifacts/*.png"])
+
     def test_test_step_runs_once_with_explicit_deadline_and_utf8(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         step = workflow.split("      - name: Run tests", 1)[1].split("      - name:", 1)[0]

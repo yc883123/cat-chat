@@ -147,7 +147,7 @@ class StudioStore:
             if current is None:
                 return None
             for key in ("status", "detail", "result", "result_partial", "reasoning", "error",
-                        "usage", "performance", "finish_reason", "handoff", "started_at", "finished_at", "raw_result", "raw_result_source"):
+                        "usage", "performance", "finish_reason", "handoff", "started_at", "finished_at"):
                 if key in fields:
                     current[key] = fields[key]
             current["updated_at"] = now_ms()

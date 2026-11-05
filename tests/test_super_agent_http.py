@@ -34,8 +34,8 @@ class _App:
     def _owner(self) -> str:
         return "local"
 
-    def api_super_agent_threads(self):
-        return {"threads": [_super_agent_thread_payload(item) for item in self.super_agent.list_threads(self._owner())]}, 200
+    def api_super_agent_threads(self, include_archived: bool = False):
+        return {"threads": [_super_agent_thread_payload(item) for item in self.super_agent.list_threads(self._owner(), include_archived=include_archived)]}, 200
 
     def api_super_agent_thread(self, thread_id):
         try:
@@ -207,6 +207,70 @@ class SuperAgentHTTPTests(unittest.TestCase):
         self.assertFalse(handler._authorized(urlparse("/api/super-agent/threads")))
         handler.headers = {"Authorization": "Bearer secret-token"}
         self.assertTrue(handler._authorized(urlparse("/api/super-agent/threads")))
+
+
+
+class ThreadArchiveTests(unittest.TestCase):
+    """§5.1 删除＝软删除（归档）：运行中先取消、恢复走状态机、产物不动。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.service = SuperAgentService(ChatStorage(Path(self.tmp.name) / "chat.db"))
+
+    def test_archive_and_restore_roundtrip_keeps_previous_status(self):
+        completed = self.service.create_thread("local", "写小说", "completed 目标")
+        self.service.store.update_thread(completed.thread_id, owner_id="local", status="active")
+        self.service.store.update_thread(completed.thread_id, owner_id="local", status="completed")
+        archived = self.service.archive_thread("local", completed.thread_id, request_id="del-1")
+        self.assertEqual(archived.status, "archived")
+        self.assertIsNotNone(archived.archived_at)
+        # 默认列表不含归档；include_archived 可查（已归档视图）。
+        self.assertTrue(all(t.status != "archived" for t in self.service.list_threads("local")))
+        self.assertTrue(any(t.thread_id == completed.thread_id for t in self.service.list_threads("local", include_archived=True)))
+        restored = self.service.restore_thread("local", completed.thread_id, request_id="restore-1")
+        self.assertEqual(restored.status, "completed")
+        self.assertEqual(restored.archived_at, None)
+
+    def test_archive_running_and_stopping_are_refused(self):
+        for status in ("active", "stopping"):
+            thread = self.service.create_thread("local", "运行中", "")
+            self.service.store.update_thread(thread.thread_id, owner_id="local", status="active")
+            if status == "stopping":
+                self.service.store.update_thread(thread.thread_id, owner_id="local", status="stopping")
+            with self.assertRaisesRegex(RuntimeError, "先取消"):
+                self.service.archive_thread("local", thread.thread_id, request_id=f"del-{status}")
+
+    def test_archive_is_idempotent_and_request_id_guarded(self):
+        thread = self.service.create_thread("local", "草稿", "")
+        self.service.store.update_thread(thread.thread_id, owner_id="local", status="draft")
+        first = self.service.archive_thread("local", thread.thread_id, request_id="del-again")
+        second = self.service.archive_thread("local", thread.thread_id, request_id="del-again")
+        self.assertEqual(first.status, second.status)
+        with self.assertRaises(ValueError):
+            self.service.archive_thread("local", thread.thread_id, request_id="")
+
+    def test_restore_requires_explicit_transition_not_raw_write(self):
+        # 恢复必须走状态机（archived -> 之前状态）；直接写非法目标会被 update_thread 拒绝。
+        thread = self.service.create_thread("local", "待确认", "")
+        self.service.store.update_thread(thread.thread_id, owner_id="local", status="active")
+        self.service.store.update_thread(thread.thread_id, owner_id="local", status="waiting_user")
+        self.service.archive_thread("local", thread.thread_id, request_id="del-2")
+        with self.assertRaisesRegex(RuntimeError, "非法 Thread 状态转换"):
+            self.service.store.update_thread(thread.thread_id, owner_id="local", status="stopping")
+        restored = self.service.restore_thread("local", thread.thread_id, request_id="restore-2")
+        self.assertEqual(restored.status, "waiting_user")
+
+    def test_artifacts_and_events_survive_archive(self):
+        thread = self.service.create_thread("local", "带产物", "")
+        node = self.service.create_node("local", thread.thread_id, "job", idempotency_key="node-1")
+        self.service.store.update_thread(thread.thread_id, owner_id="local", status="active")
+        self.service.store.update_thread(thread.thread_id, owner_id="local", status="completed")
+        artifact = self.service.create_artifact("local", thread.thread_id, node.node_id, kind="video",
+                                                path_or_ref="data/generated/out.mp4", idempotency_key="art-1", title="out.mp4")
+        self.service.archive_thread("local", thread.thread_id, request_id="del-3")
+        self.assertEqual([a.artifact_id for a in self.service.artifacts("local", thread.thread_id)], [artifact.artifact_id])
+        self.assertTrue(any(e.event_type == "task_archived" for e in self.service.events("local", thread.thread_id)))
 
 
 if __name__ == "__main__":

@@ -707,12 +707,6 @@ class ExecutionCoordinator:
 
     def tick(self, limit: int = 32) -> None:
         with self.lock:
-            recipes = getattr(self.domain.app, "recipes", None)
-            if recipes is not None:
-                try:
-                    recipes.tick()
-                except Exception:
-                    logger.exception("配方清单对账失败；未自动重新提交")
             threads = self.service.store.reconciliation_threads(limit, after=self.cursor)
             self.cursor = threads[-1].thread_id if threads else ""
             for thread in threads:
@@ -723,8 +717,6 @@ class ExecutionCoordinator:
 
     def _tick_thread(self, thread: Any) -> None:
         owner, tid = thread.owner_id, thread.thread_id
-        if any(node.executor_type == "recipe_batch" for node in self.service.list_nodes(owner, tid)):
-            return  # RecipeCoordinator reconciles native facts and both confirmation gates.
         if thread.status == "paused":
             for node in self.service.list_nodes(owner, tid):
                 if node.executor_type == "supervised_chat":

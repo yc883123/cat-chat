@@ -80,7 +80,6 @@ class SuperAgentStyleGuard(unittest.TestCase):
         # 该守门禁止的是弹层自身的 display 规则，不是隐藏内部 [hidden] 子元素）。
         css = _css()
         self.assertIn(".super-agent-view [hidden]", css)
-        self.assertIn("#superAgentRecipeDialog [hidden]", css)
         self.assertIn("#superAgentCreateDialog [hidden]", css)
 
 
@@ -97,14 +96,8 @@ class SuperAgentCopyGuard(unittest.TestCase):
                        "仅补收此项产物", "确认本次操作", "不能改稿后隐式重建"):
             self.assertNotIn(phrase, frontend, f"已替换的旧文案回潮：{phrase}")
 
-    def test_recipe_selector_and_catalog_use_plain_copy(self):
+    def test_recipe_selector_copy_does_not_regrow(self):
         self.assertNotIn("请选择配方", _js())
-        catalog = (ROOT / "naiba/super_agent/recipe_catalog.py").read_text(encoding="utf-8")
-        for phrase in ("三字段", "六字段", "单首帧工作流"):
-            self.assertNotIn(phrase, catalog, f"官方方案描述仍是技术化文案：{phrase}")
-        recipes = (ROOT / "naiba/super_agent/recipes.py").read_text(encoding="utf-8")
-        self.assertNotIn("有界配方批次", recipes)
-        self.assertNotIn("隐式重建", recipes)
 
 
 class SuperAgentDialogGuard(unittest.TestCase):
@@ -116,8 +109,7 @@ class SuperAgentDialogGuard(unittest.TestCase):
 
     def test_five_dialogs_use_sa_dialog_container(self):
         html = _index()
-        for dialog_id in ("superAgentRecipeDialog", "superAgentHandoffDialog", "recipeReviewDialog",
-                          "superAgentResultDialog", "superAgentCreateDialog"):
+        for dialog_id in ("superAgentResultDialog", "superAgentCreateDialog"):
             self.assertRegex(html, rf'id="{dialog_id}" class="[^"]*\bsa-dialog\b',
                              f"{dialog_id} 缺少 .sa-dialog 容器类")
 
@@ -130,7 +122,7 @@ class SuperAgentDialogGuard(unittest.TestCase):
         css = _css()
         self.assertIn(".sa-dialog::backdrop { background: rgba(14, 17, 30, .55); backdrop-filter: blur(3px); }", css)
         self.assertIn("html[data-theme=\"dark\"] .sa-dialog::backdrop { background: rgba(4, 6, 14, .72); }", css)
-        for width in ("--dlg-w: 880px", "--dlg-w: 760px", "--dlg-w: 720px"):
+        for width in ("--dlg-w: 880px", "--dlg-w: 720px"):
             self.assertIn(width, css, f"缺少尺寸阶梯 {width}")
 
     def test_mobile_fullscreen_is_one_unified_rule(self):
@@ -148,9 +140,8 @@ class SuperAgentDialogGuard(unittest.TestCase):
         # 关闭/取消/主按钮挪到骨架 foot 后必须仍用 form 属性提交，method="dialog" 语义不破坏。
         self.assertIn('type="submit" form="superAgentCreateForm"', html)
         self.assertGreaterEqual(html.count('form="superAgentCreateForm"'), 3)
-        self.assertIn('type="submit" form="superAgentRecipeForm"', html)
         self.assertIn('method="dialog"', html)
-        for close_id in ("superAgentCreateClose", "superAgentResultClose", "superAgentHandoffConfirm"):
+        for close_id in ("superAgentCreateClose", "superAgentResultClose"):
             self.assertIn(f'id="{close_id}"', html, f"JS 按绑定依赖的关闭按钮 id 丢失：{close_id}")
 
 

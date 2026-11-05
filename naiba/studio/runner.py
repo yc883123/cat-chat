@@ -198,27 +198,7 @@ class StudioRunner:
             identity = (task.get("submission_policy") or {}).get("model_identity")
             if isinstance(identity, dict):
                 input_data["model_snapshot"] = identity
-            raw_parts: list[str] = []
-            raw_done = False
-            recipe = (task.get("submission_policy") or {}).get("mode") == "recipe"
-            def raw_sink(event: dict[str, Any]) -> None:
-                nonlocal raw_done
-                if event.get("type") == "reset":
-                    raw_parts.clear()
-                    raw_done = False
-                elif event.get("type") == "delta":
-                    raw_parts.append(str(event.get("content") or ""))
-                elif event.get("type") == "done":
-                    raw_parts[:] = [str(event.get("content") or "")]
-                    raw_done = True
-            if recipe:
-                input_data["_raw_content_sink"] = raw_sink
             content = self._complete(input_data, buffer.forward, cancel_event, usage_sink)
-            if recipe:
-                self.store.update_task(task_id, raw_result="".join(raw_parts),
-                                       raw_result_source="runtime_callback" if raw_done else "unavailable")
-                if not raw_done:
-                    raise ValueError("原始模型输出不可用，需人工核对；不能使用清理后结果")
             buffer.flush()
             result_partial = ""
             self._finish_terminal(task_id, "done", {"type": "done"}, result=content,

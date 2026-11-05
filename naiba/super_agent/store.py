@@ -8,7 +8,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from naiba.core.contracts import RECIPE_SNAPSHOT_KEYS
 from naiba.super_agent.models import (
     APPROVAL_STATUSES,
     EVENT_TYPES,
@@ -62,7 +61,6 @@ def _stable_id(prefix: str, value: str) -> str:
 _SNAPSHOT_KEYS = {
     "agent_id", "provider_id", "model_key", "workspace_dir", "permission_mode",
     "enabled_tool_ids", "skill_policy", "vision_capabilities", "cost_policy",
-    *RECIPE_SNAPSHOT_KEYS,
 }
 
 
@@ -176,36 +174,6 @@ class SuperAgentStore:
             rows = db.execute("SELECT * FROM super_threads WHERE status IN ('active','paused','stopping','waiting_user','needs_recovery','cancelled') AND thread_id>? ORDER BY thread_id LIMIT ?",
                               (after, max(1, min(limit, 128)))).fetchall()
             return [self._thread(row) for row in rows]
-        finally:
-            db.close()
-
-    def reopen_recipe_collection(self, *, owner_id: str, thread_id: str, node_id: str, batch_id: str) -> None:
-        """Reopen only a completed recipe's missing-artifact collection projection.
-
-        The recipe service validates the actual missing file and explicit collect
-        confirmation first. Generic executor terminal transitions stay immutable.
-        """
-        db = self._connect()
-        try:
-            db.execute("BEGIN IMMEDIATE")
-            thread = db.execute("SELECT * FROM super_threads WHERE thread_id=? AND owner_id=?", (thread_id, owner_id)).fetchone()
-            node = db.execute("SELECT * FROM super_nodes WHERE node_id=? AND thread_id=? AND owner_id=?", (node_id, thread_id, owner_id)).fetchone()
-            if thread is None or node is None:
-                raise LookupError("配方任务不存在或无权访问")
-            if node["executor_type"] != "recipe_batch" or node["executor_id"] != batch_id:
-                raise ValueError("仅配方原生收集关联可恢复")
-            if thread["status"] != "completed" or node["status"] != "succeeded":
-                raise ValueError("仅已完成配方可重新收集缺失产物")
-            count = db.execute("SELECT COUNT(*) FROM super_nodes WHERE thread_id=?", (thread_id,)).fetchone()[0]
-            if count != 1:
-                raise ValueError("配方收集恢复不允许跨节点修改")
-            now = _now()
-            db.execute("UPDATE super_nodes SET status='waiting_user',version=version+1,updated_at=? WHERE node_id=?", (now, node_id))
-            db.execute("UPDATE super_threads SET status='waiting_user',summary='产物缺失，等待重新收集',version=version+1,updated_at=? WHERE thread_id=?", (now, thread_id))
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
         finally:
             db.close()
 
@@ -392,6 +360,9 @@ class SuperAgentStore:
         if updates.get("status") == "archived":
             assignments.append("archived_at=?")
             args.append(now)
+        elif "status" in updates:
+            # 恢复（离开归档态）要清掉归档时间，列表口径以 status 为准（§5.1）。
+            assignments.append("archived_at=NULL")
         assignments += ["version=version+1", "updated_at=?"]
         args += [now, thread_id, owner_id]
         where = "thread_id=? AND owner_id=?"

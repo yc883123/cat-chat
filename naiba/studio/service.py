@@ -137,7 +137,7 @@ class StudioService:
 
     # ---- 生成任务 ----
 
-    def prepare_generation(self, body: dict[str, Any], *, recipe: bool = False) -> dict[str, Any]:
+    def prepare_generation(self, body: dict[str, Any]) -> dict[str, Any]:
         body = body if isinstance(body, dict) else {}
         model_key = str(body.get("model_key") or "").strip()
         model_name = str(body.get("model_name") or "").strip()[:256]
@@ -151,8 +151,7 @@ class StudioService:
             raise ValueError("vars 必须是对象")
         try:
             # 图片引用是服务端权威校验：客户端只能给受管 uploads 里的真实图片。
-            images = validate_image_refs(self.app.paths.data_dir, body.get("images"),
-                                         **({"max_images": 9, "max_total_bytes": 180 * 1024 * 1024} if recipe else {}))
+            images = validate_image_refs(self.app.paths.data_dir, body.get("images"))
         except StudioImageError as exc:
             raise ValueError(str(exc))
         title = ""

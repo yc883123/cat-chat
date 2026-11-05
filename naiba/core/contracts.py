@@ -380,7 +380,6 @@ class AppContext(Protocol):
     jobs: Any
     studio: Any
     comfyui: Any
-    recipes: Any
     plans: Any
     catalog: Any
     vision: Any
@@ -391,6 +390,9 @@ class AppContext(Protocol):
     updater: Any
     capabilities: Any
     mcp: Any
+    # QQ 渠道（NapCatQQ / OneBot v11）：服务只暴露 status/bindings/adapter，
+    # 不把 OneBot 解析或 QQ 身份判定塞进 run 域（见 naiba/channels/service.py）。
+    onebot: Any
     listener_host: str
     update_restart_callback: Any
     data_migration: dict[str, Any]
@@ -597,48 +599,6 @@ MESSAGE_ORDER_KEYS: tuple[str, ...] = ("created_at", "rowid")
 #      原子写，只看状态就关流会让客户端整轮收不到终态事件（见该函数注释）；
 #   ② `storage.terminal_event_sequence` 查该 run 有没有落过终态事件（宽限判据）。
 TERMINAL_RUN_EVENT_TYPES: tuple[str, ...] = ("done", "cancelled", "error")
-
-# ---- 任务总管有界配方契约 ----
-# 一批一个总管节点；素材/提示词/工作流/模型/目标的 revision 摘要分别授权，
-# 原生 st-/cf- 执行事实留在各自存储。request_key 同载荷复用、异载荷拒绝。
-RECIPE_SCHEMA_VERSION = 2
-RECIPE_INPUT_MODES = ("prompt", "script")
-# 批量执行助手（2026-11-03 计划 §5.1/§5.2）：创建批次的两条来源——旧协议按
-# 方案 ID（recipe）；交接/新建走工作流直建（workflow），服务端自动派生映射并
-# 以 provenance 标记来源，不要求用户先注册「方案」。
-RECIPE_CREATE_SOURCES = ("recipe", "workflow")
-RECIPE_HANDOFF_PROVENANCE = "workflow_handoff"
-RECIPE_MEDIA_LIMITS = {"image": 9, "video": 3, "audio": 3}
-RECIPE_MEDIA_REFERENCE_NAMES = {"image": "Picture", "video": "Video", "audio": "Audio"}
-RECIPE_ITEM_EDIT_FIELDS = ("prompt", "requirements", "media", "overrides", "included", "name")
-RECIPE_DEFINITION_VERSION = 2
-RECIPE_EXECUTOR_TYPE = "recipe_batch"
-RECIPE_SNAPSHOT_KEYS = ("recipe_batch_id", "recipe_id", "batch_id")
-RECIPE_MAX_ITEMS = 50
-RECIPE_MAX_IMAGES_PER_ITEM = 9
-RECIPE_MAX_TOTAL_BYTES = 300 * 1024 * 1024
-RECIPE_MAX_PROMPT_CHARS = 32000
-RECIPE_BATCH_STATUSES = (
-    "draft", "reverse_running", "review", "generation_running", "completed",
-    "partial", "paused", "cancelled", "interrupted", "needs_review",
-)
-RECIPE_ACTIONS = (
-    "edit", "confirm_reverse", "confirm_generate", "retry_reverse",
-    "retry_generate", "retry_collect", "pause", "continue", "cancel",
-)
-NATIVE_SUBMISSION_KEYS = (
-    "request_key", "payload_hash", "owner_id", "source_task_id", "submission_policy",
-    "request_receipts", "model_snapshot",
-)
-RECIPE_NATIVE_CHECKPOINT_KEYS = (
-    "submissions", "state", "workflow", "workflow_fingerprint", "prompt_id",
-    "outputs", "collection_failed", "target_url", "cancellation",
-)
-RECIPE_NATIVE_CANCELLATION_KEYS = (
-    "state", "requested_at", "interrupt_ack", "delete_ack", "reason", "requires_interrupt",
-)
-RECIPE_NATIVE_RAW_RESULT_KEY = "raw_result"
-RECIPE_NATIVE_RAW_SOURCE_KEY = "raw_result_source"
 
 # ---- Studio（工作台）任务事件契约 ----
 # Studio 生成任务走 naiba/studio 自己的生命周期（runner 用 ModelRuntime.complete() 的

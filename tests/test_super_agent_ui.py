@@ -35,7 +35,8 @@ class SuperAgentUITests(unittest.TestCase):
 
     def test_frontend_control_api_contract(self) -> None:
         source = self._read("public/js/28-super-agent.js")
-        self.assertIn('api("/api/super-agent/threads")', source)
+        # 列表含归档一次拉回（§5.1 删除/恢复在列表层完成）。
+        self.assertIn('api("/api/super-agent/threads?include_archived=1")', source)
         self.assertIn("/nodes`", source)
         self.assertIn("/events", source)
         self.assertIn("/artifacts`", source)
@@ -115,7 +116,10 @@ class SuperAgentUITests(unittest.TestCase):
         html = self._read("public/index.html")
         css = self._read("public/styles.css")
         self.assertNotIn('$("#superAgentStageChain").innerHTML', source)
-        self.assertEqual(source.count('$("#superAgentNodeList")?.addEventListener("click"'), 1)
+        # 修复 B1：节点操作 / 审批卡委托统一收口到 #superAgentView 一处
+        # （job / subagent 的步骤卡会隐藏，不能绑在子容器上）。
+        self.assertEqual(source.count('$("#superAgentView")?.addEventListener("click"'), 1)
+        self.assertEqual(source.count('$("#superAgentNodeList")?.addEventListener("click"'), 0)
         self.assertNotIn("setLeftSidebarCollapsed", source)
         self.assertNotIn("superAgentCreateInstruction", html + source)
         self.assertIn('id="superAgentAppNav"', html)

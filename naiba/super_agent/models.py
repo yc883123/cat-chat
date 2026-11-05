@@ -45,6 +45,9 @@ EVENT_TYPES = (
     "stage_promoted",
     "task_paused",
     "task_resumed",
+    # 删除＝软删除（归档）与恢复（§5.1）；事件保留归档前状态供恢复回读。
+    "task_archived",
+    "task_restored",
     "app_restarted",
     "progress",
 )
@@ -73,7 +76,9 @@ THREAD_TRANSITIONS = {
     "needs_recovery": {"active", "archived"},
     "completed": {"archived"},
     "cancelled": {"active", "archived"},
-    "archived": set(),
+    # 「恢复」（§5.1）：归档可回到归档前的状态；归档源状态由服务层限定
+    # （active/stopping 必须先取消），所以这里不含 active/stopping。
+    "archived": {"draft", "waiting_user", "paused", "failed", "needs_recovery", "completed", "cancelled"},
 }
 
 

@@ -8,6 +8,7 @@ from naiba.super_agent.models import (
     NODE_TERMINAL_STATUSES,
     NODE_STATUSES,
     THREAD_TERMINAL_STATUSES,
+    THREAD_TRANSITIONS,
     THREAD_STATUSES,
     Approval,
     Artifact,
@@ -217,6 +218,45 @@ class SuperAgentService:
             self._apply_event(owner_id, event)
             self.store.mark_event_handled(event.event_id, owner_id=owner_id)
         self.emit_event(owner_id, thread_id, "task_resumed", payload={"request_id": request_id}, idempotency_key=f"resume:{request_id}")
+        return self.get_thread(owner_id, thread_id)
+
+    # 删除＝软删除（统一实施计划 §5.1 定稿）：不动产物文件、批次、事件、审批
+    # 与关联会话，保留执行事实；运行中 / 停止中必须先取消再删。
+    _ARCHIVABLE_STATUSES = frozenset({"draft", "waiting_user", "paused", "failed", "needs_recovery", "completed", "cancelled"})
+
+    def archive_thread(self, owner_id: str, thread_id: str, *, request_id: str, expected_version: int | None = None) -> Thread:
+        if not request_id:
+            raise ValueError("删除操作必须提供 request_id")
+        thread = self.get_thread(owner_id, thread_id)
+        if thread.status == "archived":
+            return thread
+        if thread.status in {"active", "stopping"}:
+            raise RuntimeError("任务正在运行或停止中；请先取消再删除")
+        if thread.status not in self._ARCHIVABLE_STATUSES:
+            raise RuntimeError(f"当前状态 {thread.status} 不能删除")
+        result = self.store.update_thread(thread_id, owner_id=owner_id, status="archived", expected_version=expected_version)
+        self.emit_event(owner_id, thread_id, "task_archived",
+                        payload={"request_id": request_id, "previous_status": thread.status},
+                        idempotency_key=f"archive:{request_id}")
+        return result
+
+    def restore_thread(self, owner_id: str, thread_id: str, *, request_id: str) -> Thread:
+        """恢复：按最近一次归档事件回到归档前状态；不得绕过状态机直接改库。"""
+        if not request_id:
+            raise ValueError("恢复操作必须提供 request_id")
+        thread = self.get_thread(owner_id, thread_id)
+        if thread.status != "archived":
+            return thread
+        previous = "cancelled"
+        for event in self.events(owner_id, thread_id):
+            if event.event_type == "task_archived" and isinstance(event.payload, dict):
+                candidate = str(event.payload.get("previous_status") or "")
+                if candidate in THREAD_TRANSITIONS.get("archived", set()):
+                    previous = candidate
+        result = self.store.update_thread(thread_id, owner_id=owner_id, status=previous)
+        self.emit_event(owner_id, thread_id, "task_restored",
+                        payload={"request_id": request_id, "status": previous},
+                        idempotency_key=f"restore:{request_id}")
         return self.get_thread(owner_id, thread_id)
 
     def cancel_thread(self, owner_id: str, thread_id: str, *, request_id: str) -> Thread:

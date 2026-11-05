@@ -604,9 +604,9 @@
         <div class="studio-page-view" id="studioPageComfyui" data-studio-page-view="comfyui" data-comfyui-pane="run" hidden>
           <div class="comfyui-panes" id="comfyuiPanes" role="group" aria-label="造梦机分档">
             <button class="studio-pane-btn comfyui-pane-btn" type="button" aria-pressed="false" data-comfyui-pane="workflows">工作流</button>
-            <button class="studio-pane-btn comfyui-pane-btn active" type="button" aria-pressed="true" data-comfyui-pane="run">提交</button>
-            <button class="studio-pane-btn comfyui-pane-btn" type="button" aria-pressed="false" data-comfyui-pane="tasks">结果</button>
+            <button class="studio-pane-btn comfyui-pane-btn active" type="button" aria-pressed="true" data-comfyui-pane="run">单次生成</button>
             <button class="studio-pane-btn comfyui-pane-btn" type="button" aria-pressed="false" data-comfyui-pane="batch">批量生成</button>
+            <button class="studio-pane-btn comfyui-pane-btn" type="button" aria-pressed="false" data-comfyui-pane="tasks">结果</button>
           </div>
           <div class="comfyui-columns" id="comfyuiColumns">
             <!-- 左：工作流库 -->
@@ -2440,6 +2440,7 @@
           <button data-settings-tab="search" data-settings-search="联网 搜索 网络"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M3.5 12h17M12 3.5c2.5 2.6 2.5 14.4 0 17M12 3.5c-2.5 2.6-2.5 14.4 0 17"></path></svg>联网搜索</button>
           <button data-settings-tab="mcp" data-settings-search="MCP 服务 连接器 工具 外部"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 14.5 14.5 9.5"></path><path d="M11 6.5 12.8 4.7a4.5 4.5 0 0 1 6.5 6.5L17.5 13"></path><path d="M13 17.5 11.2 19.3a4.5 4.5 0 0 1-6.5-6.5L6.5 11"></path></svg>MCP 连接器</button>
           <button data-settings-tab="connections" data-settings-search="手机 局域网 口令 访问"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2.5" width="10" height="19" rx="2.5"></rect><path d="M11 18.5h2"></path></svg>局域网访问</button>
+          <button data-settings-tab="onebot" data-settings-search="QQ NapCat OneBot 白名单 绑定 反向 WebSocket"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4.5h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-8l-6 4v-4a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z"></path><path d="M8 9h8M8 13h5"></path></svg>QQ 渠道</button>
         </div>
         <div class="settings-nav-group"><span class="settings-nav-heading">数据与隐私</span>
           <button data-settings-tab="usage" data-settings-search="用量 token 费用 统计 价格 单价"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"></path></svg>用量统计</button>
@@ -2748,6 +2749,53 @@
           </div>
           <div class="form-actions"><button class="primary-button" id="saveToken" type="button">保存口令</button></div>
           <p class="hint">保存后所有设备需用新口令重新登录。</p></div>
+        </section>
+        <section data-settings-panel="onebot" class="settings-panel onebot-settings" hidden>
+          <div class="settings-panel-head has-action"><div class="settings-panel-head-text"><h3>QQ 渠道</h3><p>连接 NapCatQQ，将允许的 QQ 账号接到指定会话。仅在运行 Cat Chat 的这台电脑上管理。</p></div><button class="control-button" id="onebotRefresh" type="button">刷新状态</button></div>
+          <p class="hint onebot-feedback" id="onebotFeedback" role="status" aria-live="polite"></p>
+          <div class="settings-card">
+            <div class="settings-card-head"><h4>连接状态</h4></div>
+            <dl class="onebot-status"><div><dt>监听</dt><dd id="onebotListening">未读取</dd></div><div><dt>NapCat</dt><dd id="onebotConnected">未读取</dd></div><div><dt>机器人 QQ</dt><dd id="onebotAccount">—</dd></div></dl>
+            <p class="hint onebot-error" id="onebotLastError" hidden></p>
+            <label>NapCat 反向 WebSocket 地址（同机）<span class="onebot-address-row"><input id="onebotAddress" readonly aria-label="NapCat 连接地址"><button class="control-button" id="onebotCopyAddress" type="button" disabled>复制地址</button></span></label>
+            <p class="hint">在 NapCat 新增反向 WebSocket 客户端，填写此地址和下方相同的 OneBot 口令。NapCat 在另一台电脑时，将地址中的主机名换成 Cat Chat 电脑地址，并确认监听地址可被访问。</p>
+          </div>
+          <form class="settings-card" id="onebotConfigForm">
+            <div class="settings-card-head"><h4>连接配置与白名单</h4><p>修改后点保存，监听服务会按新配置重启。</p></div>
+            <fieldset id="onebotConfigFields" disabled>
+              <label class="toggle-row"><span><b>启用 QQ 渠道</b></span><input id="onebotEnabled" type="checkbox"></label>
+              <div class="field-grid">
+                <label>监听地址<input id="onebotListenHost" required placeholder="127.0.0.1" autocomplete="off"></label>
+                <label>监听端口<input id="onebotListenPort" type="number" required min="1" max="65535" step="1"></label>
+                <label class="field-wide">WebSocket 路径<input id="onebotPath" required pattern="/.*" placeholder="/onebot/v11/ws" autocomplete="off"></label>
+                <label class="field-wide">OneBot 专用口令<span class="secret-field"><input id="onebotAccessToken" type="password" autocomplete="new-password" minlength="4" placeholder="留空则保留当前口令"><span class="secret-actions"><span id="onebotTokenStatus">未配置</span></span></span></label>
+                <label class="field-wide">允许的 QQ 号<textarea id="onebotAllowedUsers" rows="2" placeholder="多个 QQ 号用逗号、空格或换行分隔"></textarea><small class="hint">先保存白名单，再添加会话绑定。只有名单中的账号能发起对话。</small></label>
+                <label class="toggle-row"><span><b>允许群聊</b><small class="hint">群聊同时核对 QQ 白名单与群白名单。</small></span><input id="onebotAllowGroups" type="checkbox"></label>
+                <label class="field-wide" id="onebotGroupsField" hidden>允许的群号<textarea id="onebotAllowedGroups" rows="2" placeholder="多个群号用逗号、空格或换行分隔"></textarea></label>
+                <label>新会话默认模型<select id="onebotDefaultModel"></select></label>
+                <label>新会话默认 Agent<select id="onebotDefaultAgent"></select></label>
+              </div>
+              <div class="form-actions"><button class="primary-button" id="onebotSave" type="submit">保存 QQ 渠道设置</button></div>
+            </fieldset>
+          </form>
+          <div class="settings-card">
+            <div class="settings-card-head"><h4>QQ 与会话绑定</h4><p>绑定决定每个 QQ 账号使用的会话；解绑不会删除会话或历史消息。</p></div>
+            <div class="onebot-binding-list" id="onebotBindings"><p class="hint">读取状态后显示绑定。</p></div>
+            <form id="onebotBindForm">
+              <fieldset id="onebotBindFields" disabled>
+                <div class="field-grid">
+                  <label>机器人 QQ 号<input id="onebotBotId" inputmode="numeric" pattern="[0-9]+" required placeholder="NapCat 登录的 QQ 号"></label>
+                  <label>用户 QQ 号<input id="onebotUserId" inputmode="numeric" pattern="[0-9]+" required placeholder="已保存到白名单的 QQ 号"></label>
+                  <label>消息范围<select id="onebotBindScope"><option value="private">私聊</option><option value="group">群聊</option></select></label>
+                  <label id="onebotBindGroupField" hidden>群号<input id="onebotGroupId" inputmode="numeric" pattern="[0-9]+"></label>
+                  <label>会话方式<select id="onebotBindMode"><option value="existing">绑定已有会话</option><option value="new">新建专用会话</option></select></label>
+                  <label class="field-wide" id="onebotConversationField">会话<select id="onebotConversationId" required></select></label>
+                  <label class="field-wide" id="onebotTitleField" hidden>新会话标题（可选）<input id="onebotNewTitle" maxlength="80" placeholder="留空则使用 QQ 号"></label>
+                </div>
+                <div class="form-actions"><button class="primary-button" id="onebotBind" type="submit">添加绑定</button></div>
+              </fieldset>
+            </form>
+          </div>
         </section>
         <section data-settings-panel="vision" hidden>
           <div class="settings-panel-head"><h3>视觉（给纯文本大脑装眼睛）</h3><p>未配置视觉供应商时，自动使用内置 OVH 免费匿名视觉链兜底（限流严格，仅作默认）。生产建议配置自己的视觉 API（Qwen-VL / Gemini / GPT-4o 等）。</p></div>

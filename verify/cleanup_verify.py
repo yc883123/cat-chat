@@ -40,6 +40,9 @@ KEEP = {
     "super_agent_runtime_smoke.cjs",
     # 浏览器冒烟
     "browser_smoke.cjs", "topbar_smoke.cjs", "pending_files_smoke.cjs",
+    "comfyui_navigation_smoke.cjs",
+    "onebot_settings_smoke.cjs",
+    "studio_prompt_feedback_smoke.cjs",
     "send_button_smoke.cjs", "send_state_smoke.cjs", "file_ref_smoke.cjs",
     "lightbox_smoke.cjs", "usage_rate_smoke.cjs", "media_inline_smoke.cjs",
     "usage_stats_smoke.cjs",

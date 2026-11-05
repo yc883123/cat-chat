@@ -261,7 +261,8 @@ class StudioService:
         for index, ref in enumerate(images, 1):
             prompt = (
                 f"这是第 {index} 张图（图{index}）。请只描述这一张图片：主体、构图、风格、"
-                "光线、画面中的文字（如有），以及可用于复现这张图的提示词要点。"
+                "光线和画面中的文字（如有）。只提取实际可见的画面事实，不扩写创作提示词，"
+                "不增加未出现的人物、物体、特效或光影；无法辨认的细节请如实说明。"
             )
             if question:
                 prompt += f"\n补充要求：{question}"
@@ -277,15 +278,18 @@ class StudioService:
                     ).strip()
                     if text:
                         backend = "selected"
+                    else:
+                        direct_error = "当前模型返回了空描述"
                 except Exception as exc:  # noqa: BLE001 - 失败后仍可用视觉配置兜底
                     direct_error = str(exc) or "当前模型识别失败"
             if not text:
                 # 当前参数模型没有识别成功（或明确不支持）→ 视觉配置兜底。
                 try:
                     text = str(self.app.vision.describe_files([ref["path"]], prompt) or "").strip()
-                    if text:
-                        backend = "vision"
-                        fallback_used += 1
+                    if not text:
+                        raise RuntimeError("视觉模型返回了空描述")
+                    backend = "vision"
+                    fallback_used += 1
                 except Exception as exc:  # noqa: BLE001 - 单图失败不拖累其他图
                     if direct_error:
                         message = f"{direct_error}；视觉兜底也失败：{exc}"

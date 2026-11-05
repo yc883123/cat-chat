@@ -178,6 +178,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         默认 ``BaseHTTPRequestHandler.handle_one_request`` 在异常时只关闭连接、不写回包，
         浏览器会看到 ``net::ERR_EMPTY_RESPONSE``，难以定位。这里在异常时回一个 500 JSON。
         """
+        self.headers_sent = False
         try:
             self.raw_requestline = self.rfile.readline(65537)
             if len(self.raw_requestline) > 65536:
@@ -198,6 +199,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             method = getattr(self, mname)
             method()
             self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # 切换页签、停止视频预加载或拖动进度条都会主动断开旧请求。
+            # 此时连接已失效，不能再写 500，也不应刷屏拖慢并发媒体请求。
+            self.close_connection = True
+            return
         except TimeoutError:
             self.log_error("Request timed out")
             self.close_connection = True
@@ -210,8 +216,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.log_error("Request handler error: %s", exc)
             self.close_connection = True
             try:
-                # headers_sent 在首次 send_response 前不存在，用 getattr 兜底，否则会再抛
-                # AttributeError 被吞掉、导致依然不回包（net::ERR_EMPTY_RESPONSE）。
+                # 已经发出响应头时，不能在原响应正文后追加第二份 HTTP 响应。
                 if not getattr(self.wfile, "closed", True) and not getattr(self, "headers_sent", False):
                     body = json.dumps({"error": f"服务器内部错误：{exc}"}, ensure_ascii=False).encode("utf-8")
                     self.send_response(HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -222,6 +227,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                     self.wfile.flush()
             except Exception:  # noqa: BLE001
                 pass
+
+    def end_headers(self) -> None:
+        super().end_headers()
+        self.headers_sent = True
 
     def log_message(self, format_string: str, *args: Any) -> None:
         print(f"[{self.log_date_time_string()}] {self.client_address[0]} {format_string % args}")
@@ -2090,8 +2099,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                         break
                     self.wfile.write(chunk)
                     remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self.close_connection = True
         except OSError as exc:
             # 响应头已发出，只能记录（客户端会看到截断的响应）。
+            self.close_connection = True
             logger.warning("读取文件失败：path=%s error=%s", path, exc)
 
     def _parse_character_card(self, body: dict[str, Any]) -> None:

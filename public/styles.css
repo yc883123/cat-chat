@@ -1779,6 +1779,29 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .settings-card { padding: 16px 18px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--shadow-1); margin-bottom: 14px; }
 .settings-card h4 { margin: 0 0 6px; font-size: 14px; }
 .settings-card > :last-child { margin-bottom: 0; }
+/* QQ 渠道设置：状态与绑定使用同一列流，窄屏不依赖横向表格。 */
+.onebot-settings fieldset { min-width: 0; padding: 0; margin: 0; border: 0; }
+.onebot-settings .onebot-status { display: flex; flex-wrap: wrap; gap: 14px 30px; margin: 0 0 16px; }
+.onebot-settings .onebot-status div { min-width: 80px; }
+.onebot-settings .onebot-status dt { color: var(--muted); font-size: 12px; }
+.onebot-settings .onebot-status dd { margin: 4px 0 0; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.onebot-settings .onebot-feedback { min-height: 20px; overflow-wrap: anywhere; }
+.onebot-settings .onebot-error { color: var(--danger, #bd354c); overflow-wrap: anywhere; }
+.onebot-settings .onebot-address-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.onebot-settings .onebot-address-row input { margin-top: 0; min-width: 0; flex: 1; }
+.onebot-settings .onebot-address-row button { flex: none; }
+.onebot-settings .onebot-binding-list { margin-bottom: 18px; }
+.onebot-settings .onebot-binding { display: flex; align-items: center; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.onebot-settings .onebot-binding > div { display: grid; flex: 1; min-width: 0; gap: 4px; overflow-wrap: anywhere; }
+.onebot-settings .onebot-binding span { font-size: 12px; color: var(--muted); }
+.onebot-settings .onebot-binding button { flex: none; }
+.onebot-settings .toggle-row input[type="checkbox"] { display: inline-block; width: 18px; height: 18px; margin: 0; flex: none; }
+@media (max-width: 560px) {
+  .onebot-settings .settings-panel-head.has-action { flex-wrap: wrap; }
+  .onebot-settings .onebot-address-row { flex-wrap: wrap; }
+  .onebot-settings .onebot-address-row input { flex-basis: 100%; }
+  .onebot-settings .form-actions { flex-wrap: wrap; }
+}
 /* 卡内标题块：标题 + 描述（描述替代旧的裸 hint 段落，避免负 margin 对齐 hack） */
 .settings-card-head { margin-bottom: 12px; }
 .settings-card-head h4 { margin: 0; font-size: 13.5px; font-weight: 600; }
@@ -4276,10 +4299,11 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 
 /* ============================================================
    造梦机（data-studio-page-view="comfyui"）
-   与打标器同一套节奏：桌面左（工作流库）右（状态/参数/任务）两栏，
-   手机分三档（工作流 / 提交 / 任务）。只新增最小集 .comfyui-*。
+   桌面保留工作流 / 参数 / 结果三栏；导航条在所有尺寸常显，批量生成独占整页。
+   窄屏按工作流 / 单次生成 / 批量生成 / 结果分档。只新增最小集 .comfyui-*。
    ============================================================ */
-.comfyui-panes { display: none; gap: 4px; padding: 6px var(--s-4); border-bottom: 1px solid var(--line); }
+.comfyui-panes { display: flex; flex: none; gap: 4px; padding: 6px var(--s-4); border-bottom: 1px solid var(--line); }
+.comfyui-pane-btn { white-space: nowrap; }
 .comfyui-columns {
   display: grid;
   grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(260px, 340px);
@@ -6649,4 +6673,8 @@ span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); 
 @media (max-width: 560px) {
   .cbm-cards { grid-template-columns: 1fr; }
   .cbm-history { margin-left: 0; }
+  .cbm-media-slot { display: grid; grid-template-columns: 14px 30px minmax(0, 1fr) 20px 20px; gap: 6px; }
+  .cbm-media-slot .cbm-no { min-width: 0; }
+  .cbm-media-slot .cbm-nodesel { width: 100%; min-width: 0; max-width: none; }
+  .cbm-media-slot .cbm-kw { grid-column: 3 / -1; grid-row: 2; margin-left: 0; }
 }

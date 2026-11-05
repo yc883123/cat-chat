@@ -34,6 +34,7 @@ import { bindNovelEvents } from "./25-novel.js";
 // 织书台（工作台第五个功能页，原创写作）：27 只从 01/22 取公共函数，无循环依赖。
 import { bindWriterEvents } from "./27-writer.js";
 import { bindSuperAgentEvents, closeSuperAgentView, openSuperAgentView } from "./28-super-agent.js";
+import { bindOnebotSettingsEvents, openOnebotSettings, closeOnebotSettings } from "./30-onebot-settings.js";
 // 工作台（Studio）import 同样追加在末尾（_studio_plan_v2.md P4.1）。
 // ---- 聊天背景图（外观页） ----
 // 上传走同一个 /api/uploads（落盘 data/uploads/<日期>/，返回绝对路径），但**不进入
@@ -958,6 +959,7 @@ async function runFileAction(button) {
 }
 
 export function bindEvents() {
+  bindOnebotSettingsEvents();
   // 顶层应用入口唯一绑定点：Chat / Studio / 任务总管。
   $('#openChatMode')?.addEventListener('click', () => {
     if (state.appView === 'studio') closeStudioView();
@@ -3162,6 +3164,8 @@ export async function backupData() {
 }
 
 export function switchSettingsTab(name) {
+  if (name === 'onebot') void openOnebotSettings();
+  else closeOnebotSettings();
   $$('.settings-nav button').forEach((button) => button.classList.toggle('active', button.dataset.settingsTab === name));
   $$('[data-settings-panel]').forEach((panel) => { panel.hidden = panel.dataset.settingsPanel !== name; });
   // 标题栏副标题跟随当前分类；切换后内容区回到顶部，避免带着上一页的滚动位置。

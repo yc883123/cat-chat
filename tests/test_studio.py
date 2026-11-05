@@ -9,7 +9,10 @@
    启动恢复、重试、handoff 交接消息组装（不创建普通会话除非显式确认后交接）。
 """
 
+import base64
+import io
 import json
+import shutil
 import sys
 import tempfile
 import threading
@@ -115,6 +118,39 @@ class CommittedCatalogContractTests(unittest.TestCase):
         for item in index["items"]:
             self.assertEqual(item["origin"], "builtin", item["id"])
             self.assertTrue(str(item["source"]).strip(), item["id"])
+
+    def test_corrected_prompts_survive_idempotent_refresh(self):
+        from verify.studio_catalog_build import prompt_updates, refresh_prompts
+
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder)
+            for source in self.public.glob("*.json"):
+                shutil.copy2(source, target / source.name)
+            before = {path.name: path.read_bytes() for path in target.glob("*.json")}
+            refresh_prompts(target)
+            refresh_prompts(target)
+            self.assertEqual(before, {path.name: path.read_bytes() for path in target.glob("*.json")})
+            catalog = StudioCatalog(target)
+            for update in prompt_updates():
+                self.assertEqual(catalog.get_body(update["id"]), update["body"])
+
+    def test_h3_modes_are_separate_from_reference_editing(self):
+        catalog = StudioCatalog(self.public)
+        base = catalog.get_body("h3-007-h3-i2va")
+        reference = catalog.get_body("h3-014-h3-ref2va")
+        for mode in ("T2VA", "I2VA", "FL2VA", "L2VA"):
+            self.assertIn(mode, base)
+        for field in ("integrated_multimodal_description:", "overall_soundscape:", "non_diegetic_music:"):
+            self.assertIn(field, base)
+        self.assertLess(reference.index("subject_definitions:"), reference.index("summary:"))
+        self.assertLess(reference.index("summary:"), reference.index("retention_analysis:"))
+        self.assertLess(reference.index("retention_analysis:"), reference.index("detailed_description:"))
+        self.assertLess(reference.index("detailed_description:"), reference.index("overall_soundscape:"))
+        self.assertLess(reference.index("overall_soundscape:"), reference.index("non_diegetic_music:"))
+        for item_id in ("vi-004-cmd-reverse", "vi-111-i2t-enhance"):
+            body = catalog.get_body(item_id)
+            self.assertIn("实际收到的参考图片", body)
+            self.assertNotIn("Masterpiece", body)
 
 
 class StudioCatalogTests(unittest.TestCase):
@@ -805,6 +841,20 @@ class StudioServiceApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("受管上传目录", payload["error"])
 
+    def test_image_reverse_template_needs_no_extra_text_and_keeps_pixels(self):
+        self.service.catalog = StudioCatalog(ROOT / "public" / "studio")
+        payload, status = self.service.api_generate({
+            "item_id": "vi-004-cmd-reverse", "user_request": "",
+            "images": [str(self.img_a)], "model_key": "online:p1", "model_name": "stub-model",
+        })
+        self.assertEqual(status, 201)
+        self.assertEqual(self._wait_done(payload["task"]["id"])["status"], "done")
+        parts = self.models.messages[-1][0]["content"]
+        self.assertEqual([part["type"] for part in parts], ["text", "image", "text"])
+        self.assertTrue(parts[1]["data"])
+        self.assertIn("实际收到的参考图片", parts[2]["text"])
+        self.assertNotIn("Masterpiece", parts[2]["text"])
+
     def test_vision_returns_numbered_sections_in_order(self):
         payload, status = self.service.api_vision({
             "images": [str(self.img_a), str(self.img_b)],
@@ -819,6 +869,48 @@ class StudioServiceApiTests(unittest.TestCase):
         self.assertEqual(len(self.vision.calls), 2)
         self.assertIn("第 1 张图", self.vision.calls[0][1])
         self.assertIn("第 2 张图", self.vision.calls[1][1])
+
+    def test_vision_sends_actual_image_bytes_through_real_router(self):
+        from PIL import Image
+
+        router = VisionRouter(self.app)
+        router._runtime = self.models
+        self.app.vision = router
+        payload, status = self.service.api_vision({
+            "images": [str(self.img_a), str(self.img_b)],
+            "model_key": "online:p1", "model_name": "stub-model",
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["analyzed"], 2)
+        self.assertEqual(len(self.models.messages), 2)
+        for index, messages in enumerate(self.models.messages):
+            content = messages[0]["content"]
+            self.assertEqual([part["type"] for part in content], ["text", "image"])
+            self.assertIn(f"第 {index + 1} 张图", content[0]["text"])
+            self.assertIn("实际可见", content[0]["text"])
+            pixels = Image.open(io.BytesIO(base64.b64decode(content[1]["data"]))).convert("RGB")
+            expected = Image.open((self.img_a, self.img_b)[index]).convert("RGB")
+            self.assertEqual(pixels.size, expected.size)
+            # 编码层可转 JPEG；用颜色误差检查实际像素而非只验证“有个图片字段”。
+            self.assertLess(max(abs(a - b) for a, b in zip(pixels.getpixel((0, 0)), expected.getpixel((0, 0)))), 5)
+
+    def test_vision_empty_result_is_failure(self):
+        self.vision.behavior = lambda path, question: "  "
+        payload, status = self.service.api_vision({"images": [str(self.img_a)]})
+        self.assertEqual(status, 502)
+        self.assertEqual(payload["analyzed"], 0)
+        self.assertEqual(payload["failed"], 1)
+        self.assertEqual(payload["text"], "")
+        self.assertIn("空描述", payload["images"][0]["error"])
+
+    def test_vision_empty_selected_result_records_fallback_reason(self):
+        self.vision.selected_behavior = lambda path, question: ""
+        payload, status = self.service.api_vision({
+            "images": [str(self.img_a)], "model_key": "online:p1", "model_name": "stub-model",
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["fallback_used"], 1)
+        self.assertIn("空描述", payload["images"][0]["fallback_reason"])
 
     def test_vision_uses_selected_model_before_vision_settings(self):
         payload, status = self.service.api_vision({

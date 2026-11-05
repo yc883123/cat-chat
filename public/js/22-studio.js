@@ -104,6 +104,7 @@ const studio = {
   imageQueue: [],
   imageUploading: false,
   visionBusy: false,
+  visionSummary: null,
   // 迟到响应保护：列表 / 详情 / 任务各自一个令牌，响应回来时核对是否仍是当前请求。
   listToken: 0,
   detailToken: 0,
@@ -1180,6 +1181,9 @@ function renderImagePreview() {
     if (studio.visionBusy) status.textContent = "正在逐图识别，请稍候；识别结果会写进「我的输入」，可继续编辑。";
     else if (studio.images.length) {
       status.textContent = `${studio.images.length} 张参考图片：生成时按图1…图${studio.images.length} 的顺序一起发送`;
+      if (studio.visionSummary?.imageKey === studioImageKey(studio.images)) {
+        status.textContent += `；${studio.visionSummary.text}`;
+      }
     } else status.textContent = "";
   }
 }
@@ -1368,19 +1372,26 @@ function visionFailureDetails(result) {
   return rows.filter((row) => row?.error).map((row) => `图${row.index}：${row.error}`).join("；");
 }
 
+function studioImageKey(images) {
+  return JSON.stringify(images.map((image) => [image.path, image.name || ""]));
+}
+
 async function analyzeStudioImages() {
   if (studio.visionBusy) return;
   if (!studio.images.length) {
     toast("先上传图片再识别");
     return;
   }
+  const images = studio.images.map((image) => ({ ...image }));
+  const imageKey = studioImageKey(images);
   studio.visionBusy = true;
+  studio.visionSummary = null;
   renderImagePreview();
   try {
     const result = await api("/api/studio/vision", {
       method: "POST",
       body: {
-        images: studio.images.map((image) => ({
+        images: images.map((image) => ({
           path: image.path,
           thumb_path: image.thumb_path || "",
           name: image.name || "",
@@ -1392,10 +1403,18 @@ async function analyzeStudioImages() {
     });
     const text = String(result?.text || "").trim();
     if (!text) throw new Error("视觉模型没有返回可用的描述");
+    if (imageKey !== studioImageKey(studio.images)) {
+      toast("参考图片已更换，本次识别结果未写入；请重新识别当前图片");
+      return;
+    }
     appendVisionResult(text);
     const failed = Number(result?.failed || 0);
     const fallback = Number(result?.fallback_used || 0);
     const note = String(result?.selected_note || "").trim();
+    studio.visionSummary = {
+      imageKey,
+      text: `已识别 ${Number(result?.analyzed || 0)}/${images.length} 张${failed ? `，${failed} 张失败` : ""}（${fallback ? "含视觉 API 兜底" : "当前模型"}），描述已写入「我的输入」`,
+    };
     const parts = [];
     if (failed) parts.push(`${result.analyzed} 张识别成功，${failed} 张失败：${visionFailureDetails(result) || "原因未知"}`);
     else parts.push("图片识别完成，逐图描述已写进「我的输入」，可继续编辑");
@@ -1449,7 +1468,7 @@ async function submitGenerate() {
   }
   if (studio.kind === "builtin" && studio.itemId) payload.item_id = studio.itemId;
   if (studio.kind === "custom" && studio.customId) payload.custom_id = studio.customId;
-  if (!userRequest) { toast("先写你的需求再生成"); focusStudioInput(); return; }
+  if (!userRequest && !(studio.meta && studio.images.length)) { toast("先写你的需求再生成"); focusStudioInput(); return; }
   if (studio.kind === "builtin") {
     const declared = (studio.meta?.vars || []).map((v) => v.key);
     const unfilled = declared.filter((k) => !String(vars[k] ?? "").trim());

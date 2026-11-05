@@ -240,6 +240,7 @@ verify/*
 # live 检查真连模型生成（含 4 万字长正文条目）发版前跑一遍。
 !verify/studio_catalog_build.py
 !verify/studio_ui_smoke.cjs
+!verify/studio_prompt_feedback_smoke.cjs
 !verify/studio_live_ui_check.cjs
 # 创作场（小说改编阶段一，2026-10-25 入库）：导入 → 拆章 → 勾选 → 保存 → 单章编辑 → 导出
 # 的前端冒烟。只连 127.0.0.1 隔离实例，/api/novel/* 全部路由注入，不碰真实书与模型。
@@ -276,6 +277,7 @@ verify/*
 !verify/branch_first_turn_smoke.cjs
 !verify/branch_first_turn_smoke.py
 !verify/browser_smoke.cjs
+!verify/comfyui_navigation_smoke.cjs
 !verify/skills_ui_smoke.cjs
 !verify/chat_font_smoke.cjs
 !verify/chat_font_smoke.py
@@ -392,4 +394,5 @@ verify/*
 !verify/_serve_writer_draft_ui.py
 !verify/writer_draft_offline_test.cjs
 !verify/onebot_fake_napcat_smoke.py
+!verify/onebot_settings_smoke.cjs
 .zcode-site/

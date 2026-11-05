@@ -47,6 +47,86 @@ MANJU_SOURCE = "ai-manju-skills"
 MANJU_REPOSITORY = "https://github.com/zhanghao123vip/ai-manju-skills"
 MANJU_COMMIT = "77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4"
 
+# 手工修正的提示词在转换器中维护，完整重建和增量刷新共用，避免旧来源把修复覆盖。
+H3_REFERENCE_COMMIT = "199b7d0e1fd95e7b3eafa8c15eca692534142427"
+H3_REFERENCE_ROOT = f"https://github.com/MiniMax-AI/MiniMax-H3/blob/{H3_REFERENCE_COMMIT}/skills/h3-prompt-writing/references"
+H3_BASE_PROMPT = """你是 MiniMax H3 基础视频提示词编写助手。根据用户的文字意图、实际提供的关键帧和目标时长，生成可直接使用的英文提示词。本模板依据 MiniMax 官方 base-en 指南整理，适用于 T2VA、I2VA、FL2VA、L2VA。
+
+先核对用户指定的模式、素材用途和时长；未指定模式时，只有文字用 T2VA，一张首帧用 I2VA，明确首尾两帧用 FL2VA，明确仅尾帧用 L2VA。不要把角色或风格参考图擅自当成首帧；参考生成、视频编辑、视频续写或音频复用应改用 H3 参考与编辑模板。需要关键帧却未收到图片时，先说明缺少哪张图，不声称已经看图。时长采用用户要求；未说明时先询问，镜头切点必须在总时长以内。
+
+输出格式：只输出所选模式需要的对齐首行与下列三个字段，字段之间空一行；不输出规则说明、Markdown 围栏或中文翻译。三个字段顺序固定为：
+integrated_multimodal_description: ...
+overall_soundscape: ...
+non_diegetic_music: ...
+
+模式与关键帧：
+- T2VA：从文字建立整个视听过程，直接以 integrated_multimodal_description 开始，不添加图片对齐首行。
+- I2VA：<Picture 1> 是 0.00 秒的真实首帧，属于 [Shot 1]。首行严格使用：
+For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.
+  正文先建立该图可见主体、衣着、构图、环境和光线，再描述从首帧连续发生的运动。
+- FL2VA：Picture 1 为首帧，Picture 2 为尾帧。首行使用以下格式，把 N 换成实际最后镜头序号，把 S.SS 换成两位小数总时长：
+How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot N) aligns with the S.SS-second mark of the target video.
+  通常用一个连续镜头写清主体、物体、相机和构图如何从首帧逐步到达尾帧；用户要求分镜时才分镜。
+- L2VA：<Picture 1> 是最终镜头的尾帧，不是默认首帧。首行使用以下格式，并替换 N 和 S.SS：
+How the reference pictures align with the target video — <Picture 1> (from [Shot N]) aligns with the S.SS-second mark of the target video.
+  从与尾帧及用户意图相容的较早状态开始，描述动作和相机如何逐步收敛到尾帧。
+
+共同写法：
+1. integrated_multimodal_description 按播放顺序写可观察的画面、动作、相机和同步声音。[Shot 1] 不带时间戳；后续镜头用 [Shot N] At MM:SS.mmm, ...，切点严格递增。第一镜建立风格和初始构图，关键帧任务以图片可见事实为准，不凭空编造图片外的信息。
+2. 运镜写成句子，必要时说明幅度和速度。Zoom 是变焦，Push/Pull 是前后移动，Pan 是水平转动，Truck 是水平平移，Tilt 是上下转动，Pedestal 是相机整体升降；不要混用这些运动。
+3. 发声角色使用跨镜头稳定的 (S1)、(S2)。对白和歌词放在 <d>[Language] 原文</d>，保留原语言和原句；画内文字使用英文双引号保留原文。画外音注明 says in an off-screen voiceover，并在其后说明画内人物嘴唇保持闭合；跨切点对白用 <scenetrans> 标记连续，片尾截断用 <cutoff>。
+4. overall_soundscape 用一个英文段落概述环境声、动作声和非语言人声，不重复对白、演唱或画内音乐；只有用户要求全片完全静音时填 N/A。
+5. non_diegetic_music 描述观众听见而角色听不见的配乐，写乐器、节奏、速度和动态变化；没有配乐填 N/A。角色听见的电台、乐器演奏和音乐放入画面时间线。
+"""
+H3_REFERENCE_PROMPT = """你是 MiniMax H3 参考生成与编辑提示词编写助手。依据用户实际提供的图片、视频、音频及创作目标，整理英文 Ref2VA 提示词。本模板依据 MiniMax 官方 ref-en 指南整理，覆盖参考生成、关键帧补全、视频编辑、视频续写、音频复用与音频参考。
+
+先核对各素材的真实用途、目标时长、保留项与修改项。缺少视频、音频或图片时应说明缺项；文件名、路径或用户一句“参考这个视频”不能替代素材内容。当前界面若只提供图片，只基于收到的图片工作，不声称看过视频或听过音频。
+
+只输出以下六个英文段落，顺序与字段名固定，不加 Markdown 围栏：
+subject_definitions: ...
+summary: ...
+retention_analysis: ...
+detailed_description: ...
+overall_soundscape: ...
+non_diegetic_music: ...
+
+subject_definitions：逐项定义后文确实会用到的素材内容与引用标签。<Subject N> 表示从素材中提取的角色、物体、场景、服装、风格或动作；<Picture N> 只用于具体帧、关键帧、首尾帧或分镜构图锚点；<Video N> 用于待编辑/续写的原片或整段视频的时间结构；<Audio N> 用于实际复用或参考的音频信号。只定义角色外观的图片应放在对应 Subject 的来源说明里，不额外创建独立 Picture 条目。同一素材的画面与声音分别编号，不因视频带声就自动建立 Audio。标签在所有字段保持同义，发声人物另外使用稳定的 (S1)、(S2)，不要把人物编号和说话者编号混同。
+
+summary：以方括号任务类型开头，用一个短英文段落说明目标和引用关系。按实际用途选择并用 + 合并 keyframe completion、reference generation、video editing、video continuation、audio reuse、audio reference。修改静态图或首尾帧补全不属于 video editing；直接复用同一音频信号才是 audio reuse，只参考音色、节奏或音乐风格属于 audio reference。
+
+retention_analysis：逐项写引用出现在哪些镜头、哪些特征保留或改变。视觉内容的关系标记使用 fully_preserved、partially_preserved、attribute_transfer、weak_reference；音频使用 fully_copy、partially_copy、reference、weak_reference。关系以 subject_definitions 定义的用途为准；新增背景或动作不自动代表角色参考失真。
+
+detailed_description：先用一两句英文建立整体风格，再从 [Shot 1] 开始按播放顺序写分镜。第一镜不加时间戳，后续镜头用 [Shot N] At MM:SS.mmm, ...，切点递增且不超过总时长。逐镜交代构图、可见主体特征和位置、环境光线、动作变化、相机运动、当前声音，以及引用素材何时生效。重要 Subject 首次出现时写清可见特征，后续沿用标签；关键帧说明从哪张图开始、对应哪张图或结束在哪张图。编辑/续写任务自然引用 Video 的原始状态或结构，Audio 在实际生效的镜头或阶段说明复制还是参考。一般生成任务采用约 350–500 个英文词；编辑任务按源片复杂程度调整，对白优先满足实际可播放时长。
+
+对白和歌词使用 <d>[Language] 原文</d>，保持原语言；听不清写 [unclear]，不能猜词。画面里的文字用英文双引号保留原文。发声角色使用跨镜头稳定的 (S1)、(S2)，对应引用人物时写 <Subject N> (Sx)。画外音注明 says in an off-screen voiceover 并说明画内嘴唇保持闭合；跨切点连续语音用 <scenetrans>，片尾截断用 <cutoff>。直接复用的配乐中含人声不等于新增一个发声角色。
+
+overall_soundscape：用一个英文段落写环境声、动作声、非语言人声及实际音频引用关系，不重复对白或配乐段；只有全片完全静音填 N/A。
+non_diegetic_music：说明画外配乐的乐器、速度、节奏和动态，并标明相关 Audio 是复制还是参考；没有画外配乐填 N/A。画内可听的音乐放在 detailed_description。
+"""
+IMAGE_REVERSE_PROMPT = """请根据实际收到的参考图片反推可复现其可见画面的图像提示词。
+先观察图片，再组织文字。保留真实可见的主体、外观、服饰、动作、空间位置、前景背景、构图、色彩、材质、光线和画面风格。不要把本模板复述成结果，不因用户只写了一个概念就凭空增加人物、物件、镜头、特效、材质或光影；看不清的细节不要猜测。
+用户补充文字只用于指定关注点和输出语言，不能当成图片中已经存在的事实。没有实际图片时明确要求上传图片，不声称已经完成反推。
+输出一段可直接使用的连贯图像提示词，默认中文；用户明确要求英文时输出英文。只描述图片支持的内容，不追加解释、模板规则、无依据的画质口号或对水印的描述。
+"""
+
+
+def prompt_updates() -> list[dict]:
+    """应用自己的改写规则；官方链接仅记录格式依据，不复制整份第三方指南。"""
+    return [
+        {"id": "h3-007-h3-i2va", "title": "MiniMax H3 基础视频 · 文生与首尾帧", "module": "h3",
+         "body": H3_BASE_PROMPT, "summary": "T2VA / I2VA / FL2VA / L2VA 四种基础模式，按实际首尾帧输出三字段。",
+         "tags": ["MiniMax", "H3", "T2VA", "I2VA", "FL2VA", "L2VA"], "source": f"{H3_REFERENCE_ROOT}/base-en.txt"},
+        {"id": "h3-014-h3-ref2va", "title": "MiniMax H3 参考生成与视频编辑", "module": "h3",
+         "body": H3_REFERENCE_PROMPT, "summary": "Ref2VA 六字段：参考生成、关键帧补全、视频编辑/续写和音频引用；只分析实际收到的素材。",
+         "tags": ["MiniMax", "H3", "Ref2VA", "参考生成", "视频编辑"], "source": f"{H3_REFERENCE_ROOT}/ref-en.txt"},
+        {"id": "vi-004-cmd-reverse", "title": "图片反推 · 可见画面提示词", "module": "vi",
+         "body": IMAGE_REVERSE_PROMPT, "summary": "依据实际图片提取主体、构图、色彩和光影，不把文字概念扩写伪装成看图。",
+         "tags": ["反推", "图片", "提示词"], "source": "Cat Chat 图片反推规则"},
+        {"id": "vi-111-i2t-enhance", "title": "图生图反推 · 画面细节提取", "module": "vi",
+         "body": IMAGE_REVERSE_PROMPT, "summary": "提取实际参考图片可见细节，默认输出中文提示词，不补造画面内容。",
+         "tags": ["反推", "图片", "图生图"], "source": "Cat Chat 图片反推规则"},
+    ]
+
 # NSFW / 不适宜内容硬标记（入库前逐条扫描正文，命中即拒收并进报告；大小写不敏感）。
 SENSITIVE_MARKERS = (
     "露点", "全裸", "做爱", "性爱", "淫水", "淫虐", "群交", "肛交", "口交", "乳交", "迷奸", "强奸",
@@ -616,6 +696,68 @@ def write_json(path: Path, payload: object) -> int:
     return path.stat().st_size
 
 
+def apply_prompt_updates(items: list[dict], bodies: dict[str, str]) -> int:
+    """原位更新目标条目，保留旧 ID、顺序和所有无关条目；返回新增条数。"""
+    existing = {item["id"]: item for item in items}
+    added = 0
+    for update in prompt_updates():
+        previous = existing.get(update["id"])
+        replacement = new_item(
+            item_id=update["id"], title=update["title"], module=update["module"],
+            item_type="rule" if update["module"] == "h3" else "template",
+            summary=update["summary"], tags=update["tags"], body=update["body"],
+            model=["H3"] if update["module"] == "h3" else [], source=update["source"],
+        )
+        replacement["has_vars"] = bool(replacement["vars"])
+        replacement["order"] = previous["order"] if previous else max(
+            (int(item.get("order", 0)) for item in items if item["module"] == update["module"]), default=0
+        ) + 1
+        if previous is not None:
+            previous.update(replacement)
+        else:
+            items.append(replacement)
+            added += 1
+        bodies[update["id"]] = update["body"]
+    return added
+
+
+def refresh_prompts(out_dir: Path) -> dict:
+    """不依赖旧外部素材目录，幂等刷新仓库内置提示词及其索引/报告。"""
+    index = read_json(out_dir / "catalog_index.json")
+    prompt_bodies = read_json(out_dir / "bodies_prompt.json")
+    report = read_json(out_dir / "conversion_report.json")
+    items = index["items"]
+    added = apply_prompt_updates(items, prompt_bodies)
+    bodies = dict(prompt_bodies)
+    for tag in ("script", "game", "style"):
+        bodies.update(read_json(out_dir / f"bodies_{tag}.json"))
+    problems = cross_check(items, bodies)
+    if problems:
+        raise SystemExit(f"提示词修正后契约不符：{problems}")
+    calculated = build_index(items)
+    for key in ("ok", "count", "chars", "modules", "types", "items"):
+        index[key] = calculated[key]
+    counts = report.setdefault("counts", {})
+    for key in ("input", "expected_plan"):
+        counts[key] = int(counts.get(key, len(items) - added)) + added
+    counts["output_index"] = len(items)
+    report["prompt_updates"] = {
+        "ids": [update["id"] for update in prompt_updates()],
+        "reference_commit": H3_REFERENCE_COMMIT,
+        "note": "保留已有 ID；基础模式和参考编辑独立；图片反推只提取实际可见事实。",
+    }
+    products = report.setdefault("products", {})
+    for name, payload, count in (
+        ("catalog_index.json", index, len(items)), ("bodies_prompt.json", prompt_bodies, len(prompt_bodies))
+    ):
+        products[name] = {**products.get(name, {}), "items": count,
+                          "bytes": len(json.dumps(payload, ensure_ascii=False, indent=1).encode("utf-8"))}
+    write_json(out_dir / "catalog_index.json", index)
+    write_json(out_dir / "bodies_prompt.json", prompt_bodies)
+    write_json(out_dir / "conversion_report.json", report)
+    return index
+
+
 def append_manju(out_dir: Path, source_dir: Path | None = None) -> dict:
     """幂等更新已提交目录；仅写索引、script正文与JSON报告，所有校验先于写入。"""
     manju_items, manju_bodies, rejects, stats, descriptive = manju_family(source_dir)
@@ -684,6 +826,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="工作台预设资产转换器")
     parser.add_argument("--sources-dir", help="完整构建必需；旧四套JSON的源目录")
     parser.add_argument("--append-manju", action="store_true", help="幂等增补已存在catalog，只写漫剧相关三份JSON")
+    parser.add_argument("--refresh-prompts", action="store_true", help="幂等刷新 H3 与图片反推提示词，不需旧来源目录")
     parser.add_argument("--manju-dir", help="漫剧包根目录，默认仓库 skills/ai-manju-skills")
     parser.add_argument("--out-dir", default="public/studio")
     parser.add_argument("--report-md", help="可选：完整构建额外写Markdown报告；增补模式不写文档")
@@ -693,6 +836,10 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     if not out_dir.is_absolute():
         out_dir = here / out_dir
+    if args.refresh_prompts:
+        index = refresh_prompts(out_dir)
+        print(f"提示词修正完成；catalog {index['count']} 条 -> {out_dir}")
+        return
     manju_dir = Path(args.manju_dir) if args.manju_dir else None
     if manju_dir is not None and not manju_dir.is_absolute():
         manju_dir = here / manju_dir
@@ -716,6 +863,7 @@ def main() -> None:
         item["order"] += max((it["order"] for it in script_items), default=0)
     items = prompt_items + script_items + manju_items + game_items + style_items
     bodies = {**prompt_bodies, **script_bodies, **manju_bodies, **game_bodies, **style_bodies}
+    added_prompts = apply_prompt_updates(items, bodies)
     rejects = prompt_rejects + script_rejects + manju_rejects + game_rejects + style_rejects
 
     problems = cross_check(items, bodies)
@@ -745,7 +893,7 @@ def main() -> None:
         f"{pack}_index.json" and read_json(source_dir / f"{pack}_index.json").get("count") or (len(read_json(source_dir / f"{pack}_index.json").get("items") or []))
         for pack in ("qiyuan_prompt_library", "chat_extra")
     )
-    input_total += script_stats["input"] + manju_stats["input"] + game_stats["input"] + style_stats["input"]
+    input_total += script_stats["input"] + manju_stats["input"] + game_stats["input"] + style_stats["input"] + added_prompts
     sensitive_rejects = [r for r in rejects if r.get("sensitive")]
     empty_rejects = [r for r in rejects if "空正文" in (r.get("reason") or [])]
     dupe_rejects = [r for r in rejects if "重复ID" in (r.get("reason") or [])]
@@ -753,7 +901,7 @@ def main() -> None:
     report = OrderedDict([
         ("generated_at", BUILD_STAMP),
         ("counts", {
-            "expected_plan": EXPECTED_TOTAL,
+            "expected_plan": EXPECTED_TOTAL + added_prompts,
             "input": input_total,
             "output_index": len(items),
             "rejected": len(rejects),
@@ -790,6 +938,7 @@ def main() -> None:
             report[key] = {**previous_report.get(key, {}), **report[key]}
         report = {**previous_report, **report}
     write_json(report_path, report)
+    index = refresh_prompts(out_dir)
     if not args.report_md:
         print(f"index {index['count']} 条 -> {out_dir / 'catalog_index.json'}；JSON报告 -> {report_path}")
         return

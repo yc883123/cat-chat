@@ -1,9 +1,9 @@
 {
  "generated_at": "2026-10-22",
  "counts": {
-  "expected_plan": 582,
-  "input": 582,
-  "output_index": 580,
+  "expected_plan": 583,
+  "input": 583,
+  "output_index": 581,
   "rejected": 2,
   "sensitive": 2,
   "empty": 0,
@@ -441,12 +441,12 @@
  ],
  "products": {
   "catalog_index.json": {
-   "items": 580,
-   "bytes": 800689
+   "items": 581,
+   "bytes": 802173
   },
   "bodies_prompt.json": {
-   "items": 86,
-   "bytes": 801325
+   "items": 87,
+   "bytes": 788156
   },
   "bodies_script.json": {
    "items": 74,
@@ -834,5 +834,15 @@
     "output_sha1": "03a99c13034926b2f8cd5e9c84af42d47e31b198"
    }
   ]
+ },
+ "prompt_updates": {
+  "ids": [
+   "h3-007-h3-i2va",
+   "h3-014-h3-ref2va",
+   "vi-004-cmd-reverse",
+   "vi-111-i2t-enhance"
+  ],
+  "reference_commit": "199b7d0e1fd95e7b3eafa8c15eca692534142427",
+  "note": "保留已有 ID；基础模式和参考编辑独立；图片反推只提取实际可见事实。"
  }
 }

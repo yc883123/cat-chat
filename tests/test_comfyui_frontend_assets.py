@@ -227,8 +227,8 @@ async function make(name,sourceText,exportsLine){
   await mod.evaluate();
   return mod.namespace;
 }
-const m=await make('comfy',source,'\nexport {batch,ensureBatchDraft,submitBatch,batchPortOrdinal};');
-const {batch,ensureBatchDraft,submitBatch,batchPortOrdinal}=m;
+const m=await make('comfy',source,'\nexport {batch,ensureBatchDraft,submitBatch,batchPortOrdinal,batchSlotAddressText,batchPortsMarkup,batchItemsMarkup};');
+const {batch,ensureBatchDraft,submitBatch,batchPortOrdinal,batchSlotAddressText,batchPortsMarkup,batchItemsMarkup}=m;
 ensureBatchDraft();
 const s=batch.draft.schemes[0];
 s.detail={id:'cw-1',name:'测试流',workflow_fingerprint:'fp-x',
@@ -236,16 +236,35 @@ s.detail={id:'cw-1',name:'测试流',workflow_fingerprint:'fp-x',
   params:[{node_id:'5',field_name:'text',field_type:'text',control:'multiline',role:'positive_prompt',label:'正文'},
           {node_id:'6',field_name:'length',field_type:'number',default:5,label:'时长'},
           {node_id:'7',field_name:'res',field_type:'text',candidates:['848x480','480x848'],label:'分辨率'},
-          {node_id:'8',field_name:'image',field_type:'image',control:'media',media:'image',label:'参考图',media_optional:true},
+          {node_id:'8',field_name:'image',field_type:'image',control:'media',media:'image',node_title:'载入图片',label:'8 · 载入图片 · image → ref_images.ref_image_0',media_optional:true},
+          {node_id:'10',field_name:'image',field_type:'image',control:'media',media:'image',node_title:'载入图片',label:'10 · 载入图片 · image → ref_images.ref_image_1、mask（节点 21）',media_optional:true},
           {node_id:'9',field_name:'lora',field_type:'text',role:'lora',label:'LoRA'}]};
 s.workflow_id='cw-1';
 s.mapping={prompt_slot:{node_id:'5',field_name:'text'},duration_slot:{node_id:'6',field_name:'length'},
   resolution_slot:{node_id:'7',field_name:'res'},
   media_ports:[{node_id:'8',field_name:'image',checked:true}]};
+// 同名加载节点必须保留与单次生成相同的完整下游标签；地址值不随显示文案改变。
+assert.equal(batchSlotAddressText(s.detail,{node_id:'8',field_name:'image'}),s.detail.params.find(row=>row.node_id==='8').label);
+const portsMarkup=batchPortsMarkup(s);
+assert.ok(portsMarkup.includes('value="8|image" selected'));
+assert.ok(portsMarkup.includes('8 · 载入图片 · image → ref_images.ref_image_0'));
+assert.ok(portsMarkup.includes('10 · 载入图片 · image → ref_images.ref_image_1、mask（节点 21）'));
+assert.equal(batchSlotAddressText(s.detail,{node_id:'missing',field_name:'image'}),'missing · image');
 s.fixed={'9|lora':'other.safetensors'};
 s.items=[{name:'条目 1',script:'',prompt:'场景A',duration:'8',resolution:'848x480',shots:1,
           files:{'0':{path:'/managed/a.png',name:'a.png',thumb_path:''}}},
          {name:'条目 2',script:'',prompt:'场景B',duration:'',resolution:'',shots:2,files:{}}];
+// 执行真实条目渲染，覆盖分辨率枚举和独立索引；仅提交形状测试无法发现作用域错误。
+let itemMarkup=batchItemsMarkup(s,0);
+assert.ok(itemMarkup.includes('data-batch-item="resolution"'));
+assert.ok(itemMarkup.includes('data-item="0"'));
+assert.ok(itemMarkup.includes('data-item="1"'));
+assert.ok(itemMarkup.includes('value="848x480" selected'));
+const resolutionMapping=s.mapping.resolution_slot;
+s.mapping.resolution_slot=null;
+itemMarkup=batchItemsMarkup(s,0);
+assert.ok(itemMarkup.includes('type="text" step="any" placeholder="按工作流"'));
+s.mapping.resolution_slot=resolutionMapping;
 batch.draft.title='验收批次';batch.draft.unload_after=true;
 await submitBatch();
 const post=requests.find(row=>row.path==='/api/comfyui/batches');

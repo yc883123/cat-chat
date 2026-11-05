@@ -140,7 +140,8 @@ def scan_structure(text: str) -> list[str]:
 
 def workflow_facts() -> tuple[str, dict]:
     """返回 (原始文本, 解析后的判据来源)。不依赖 pyyaml，用正则取需要的字段。"""
-    text = WORKFLOW.read_text(encoding="utf-8", newline="")
+    # 保留 CRLF 原始字节，同时兼容尚不支持 read_text(newline=...) 的解释器。
+    text = WORKFLOW.read_bytes().decode("utf-8")
     env = {}
     for key in ("RELEASE_VERSION", "RELEASE_TAG", "PACKAGE_NAME", "LEGACY_PACKAGE_NAME"):
         # `\r?` 必须留：CI（Windows runner，autocrlf=true）checkout 出来是 CRLF，
@@ -186,13 +187,13 @@ class WorkflowStructureTests(unittest.TestCase):
     """工作流文件本身必须是合法 YAML——不合法则 GitHub 直接不运行（本次事故）。"""
 
     def test_release_yml_has_no_structural_problem(self) -> None:
-        problems = scan_structure(WORKFLOW.read_text(encoding="utf-8", newline=""))
+        problems = scan_structure(WORKFLOW.read_bytes().decode("utf-8"))
         self.assertEqual([], problems, "release.yml 结构有问题：\n" + "\n".join(problems))
 
     def test_other_workflow_files_have_no_structural_problem(self) -> None:
         """同一条纪律适用于 `.github/workflows/` 下所有文件，不只 release.yml。"""
         for path in sorted(WORKFLOW.parent.glob("*.y*ml")):
-            problems = scan_structure(path.read_text(encoding="utf-8", newline=""))
+            problems = scan_structure(path.read_bytes().decode("utf-8"))
             self.assertEqual([], problems, f"{path.name} 结构有问题：\n" + "\n".join(problems))
 
     def test_workflow_parses_with_pyyaml_when_available(self) -> None:
@@ -204,7 +205,7 @@ class WorkflowStructureTests(unittest.TestCase):
         for path in sorted(WORKFLOW.parent.glob("*.y*ml")):
             with self.subTest(path=path.name):
                 try:
-                    yaml.safe_load(path.read_text(encoding="utf-8", newline=""))
+                    yaml.safe_load(path.read_bytes().decode("utf-8"))
                 except yaml.YAMLError as error:
                     self.fail(f"{path.name} 不是合法 YAML（GitHub 不会运行它）：{error}")
 

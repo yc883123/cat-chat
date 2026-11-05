@@ -8,6 +8,7 @@
 import { $, api, localFileUrl, state, toast } from "./01-core.js";
 import { attachmentThumbUrl, isPywebview, mediaKind, saveLocalFile } from "./03-media.js";
 import { currentStudioPage, onStudioPageChange, setStudioPage } from "./22-studio.js";
+import { BATCH_H3_REFERENCE_TEMPLATE, buildBatchConvertRequest } from "./24a-comfyui-convert.js";
 const POLL_MS = 1200;
 const REFRESH_MS = 5000;
 
@@ -379,11 +380,9 @@ function onPaneClick(event) {
   const btn = event.target.closest("[data-comfyui-pane]");
   if (!btn) return;
   setComfyuiPane(btn.dataset.comfyuiPane);
-  if (btn.dataset.comfyuiPane === "batch") enterBatchPane();
-  else stopBatchPolling();
 }
 
-// 三栏放不下时改回三档（工作流 / 提交 / 结果），中栏才拿得到整页宽度。
+// 三栏放不下时，工作流 / 单次生成 / 结果按页签单栏显示，中栏才拿得到整页宽度。
 // 判档口径是**这一页自己的宽度**而不是视口：侧栏拖宽、文件面板打开都会让页面变窄
 // 而视口不变（与顶栏 watchTopbarWidth 同一教训）。阈值来自实测：页面 1000px 以下
 // 中栏就只剩 250px 上下——状态栏虽然换行兜住不再溢出，参数表单也已经没法用。
@@ -424,6 +423,9 @@ function setComfyuiPane(pane) {
     node.classList.toggle("active", active);
     node.setAttribute("aria-pressed", String(active));
   });
+  // 页签和主表单的「批量生成」按钮共用入口，首次进入也要初始化填单。
+  if (pane === "batch") enterBatchPane();
+  else stopBatchPolling();
 }
 
 function scheduleBackgroundRefresh() {
@@ -2372,7 +2374,12 @@ async function renderLatestOutputs() {
   const wantedOrder = wanted.map((entry) => entry.key);
   const currentOrder = Array.from(grid.children).map((node) => node.dataset.outputKey || "");
   if (currentOrder.join("|") !== wantedOrder.join("|")) {
-    for (const key of wantedOrder) grid.append(existing.get(key));
+    let next = grid.firstElementChild;
+    for (const key of wantedOrder) {
+      const node = existing.get(key);
+      if (node !== next) grid.insertBefore(node, next);
+      next = node.nextElementSibling;
+    }
   }
 }
 
@@ -2412,14 +2419,16 @@ function renderOutputCard(taskId, name, path) {
     video.src = url;
     video.controls = true;
     video.playsInline = true;
-    video.preload = "metadata";
+    // 批量结果可同时有 24 段视频，隐藏的结果栏也会创建媒体节点。
+    // 由用户点击后再请求，避免打开批量页便并发读取所有视频及反复取消 Range。
+    video.preload = "none";
     card.append(video);
   } else if (kind === "audio") {
     // 音频产物此前退化为下载链接；现在与聊天媒体卡一致，就地播放。
     const audio = document.createElement("audio");
     audio.src = url;
     audio.controls = true;
-    audio.preload = "metadata";
+    audio.preload = "none";
     card.append(audio);
   } else {
     const link = document.createElement("a");
@@ -2606,7 +2615,8 @@ function batchSlotByAddress(detail, slot) {
 function batchSlotAddressText(detail, slot) {
   const row = batchSlotByAddress(detail, slot);
   if (!row) return `${slot.node_id} · ${slot.field_name}`;
-  return `${row.node_title || row.class_type || slot.node_id} · ${slot.field_name}`;
+  // 与单次生成共用扫描标签，保留节点号、下游端口及同名目标的区分信息。
+  return row.label || `${row.node_id} · ${row.node_title || row.class_type || "节点"} · ${row.field_name}`;
 }
 
 function batchSlotSavedValue(detail, slot) {
@@ -2781,7 +2791,8 @@ function batchConvertBarMarkup() {
   return `<div class="cbm-convert-bar">
     <span class="cbm-convert-title">剧本 → 提示词</span>
     <select data-batch-field="convertTemplate" aria-label="转换模板">
-      <option value="">内置：按 MiniMax H3 格式改写</option>
+      <option value=""${batch.convert.template ? "" : " selected"}>MiniMax H3：文生 / 首帧 / 首尾帧 / 尾帧</option>
+      <option value="${BATCH_H3_REFERENCE_TEMPLATE}"${batch.convert.template === BATCH_H3_REFERENCE_TEMPLATE ? " selected" : ""}>MiniMax H3：参考生成 / 编辑</option>
       <optgroup label="提词库自定义模板" data-batch-custom-templates></optgroup>
     </select>
     <select data-batch-field="convertProvider" aria-label="转换用的模型供应商">
@@ -2973,17 +2984,6 @@ function batchItemsMarkup(scheme, schemeIndex) {
   }).join("");
   const rows = scheme.items.map((item, itemIndex) =>
     batchItemRowMarkup(scheme, schemeIndex, item, itemIndex, ports)).join("");
-  const resolutionControl = (item) => {
-    const slot = batchSlotByAddress(scheme.detail, scheme.mapping?.resolution_slot);
-    if (slot && (slot.candidates || []).length) {
-      return `<select data-batch-item="resolution" data-scheme="${scheme.id}" data-item="${itemIndex}">
-        <option value="">按工作流</option>
-        ${slot.candidates.map((candidate) => `<option value="${escapeText(String(candidate))}"${String(item.resolution) === String(candidate) ? " selected" : ""}>${escapeText(String(candidate))}</option>`).join("")}
-      </select>`;
-    }
-    return `<input type="${slot?.field_type === "number" ? "number" : "text"}" step="any" placeholder="按工作流"
-      data-batch-item="resolution" data-scheme="${scheme.id}" data-item="${itemIndex}" value="${escapeText(item.resolution)}">`;
-  };
   return `<div class="cbm-items-wrap"><table class="cbm-items">
     <thead><tr><th>名称</th>${portHeaders}<th>剧本</th><th>提示词</th><th>时长</th><th>分辨率</th><th>条数</th><th>操作</th></tr></thead>
     <tbody>${rows || `<tr><td colspan="${8 + ports.length}" class="cbm-hint">还没有条目。</td></tr>`}</tbody>
@@ -2994,6 +2994,18 @@ function batchItemsMarkup(scheme, schemeIndex) {
 function batchItemRowMarkup(scheme, schemeIndex, item, itemIndex, ports) {
   const missing = batch.missingItems.has(`${scheme.id}:${itemIndex}`);
   const converting = batch.converting.has(`${scheme.id}:${itemIndex}`);
+  // 分辨率控件需要当前条目的索引，必须与条目行处于同一作用域。
+  const resolutionControl = () => {
+    const slot = batchSlotByAddress(scheme.detail, scheme.mapping?.resolution_slot);
+    if (slot && (slot.candidates || []).length) {
+      return `<select data-batch-item="resolution" data-scheme="${scheme.id}" data-item="${itemIndex}">
+        <option value="">按工作流</option>
+        ${slot.candidates.map((candidate) => `<option value="${escapeText(String(candidate))}"${String(item.resolution) === String(candidate) ? " selected" : ""}>${escapeText(String(candidate))}</option>`).join("")}
+      </select>`;
+    }
+    return `<input type="${slot?.field_type === "number" ? "number" : "text"}" step="any" placeholder="按工作流"
+      data-batch-item="resolution" data-scheme="${scheme.id}" data-item="${itemIndex}" value="${escapeText(item.resolution)}">`;
+  };
   const tiles = ports.map((port, portIndex) => {
     const slot = batchSlotByAddress(scheme.detail, port);
     const kind = slot?.media || "image";
@@ -3022,7 +3034,7 @@ function batchItemRowMarkup(scheme, schemeIndex, item, itemIndex, ports) {
     <td><textarea class="cbm-script" rows="3" placeholder="这场的内容要求（可转换成提示词）" data-batch-item="script" data-scheme="${scheme.id}" data-item="${itemIndex}">${escapeText(item.script)}</textarea></td>
     ${promptCell}
     <td>${durationControl}</td>
-    <td>${resolutionControl(item)}</td>
+    <td>${resolutionControl()}</td>
     <td><input type="number" min="1" max="200" style="width:56px" data-batch-item="shots" data-scheme="${scheme.id}" data-item="${itemIndex}" value="${escapeText(String(item.shots))}"></td>
     <td class="cbm-row-act">
       <button type="button" class="cbm-btn tiny" data-batch-action="convert-item" data-scheme="${scheme.id}" data-item="${itemIndex}" ${item.script && !item.prompt && !converting ? "" : "disabled"}>转换</button>
@@ -3129,6 +3141,7 @@ function onBatchChange(event) {
   }
   if (target.matches('[data-batch-field="convertProvider"]')) {
     batch.convert.provider = String(target.value || "");
+    batch.convert.model = "";
     void batchLoadConvertModels();
     return;
   }
@@ -3197,6 +3210,21 @@ function onBatchInput(event) {
   if (!item) return;
   if (itemField === "shots") item.shots = Math.max(1, Math.floor(Number(target.value) || 1));
   else item[itemField] = String(target.value ?? "");
+  if (itemField === "script" || itemField === "prompt") {
+    const convertButton = target.closest("tr")?.querySelector('[data-batch-action="convert-item"]');
+    if (convertButton) convertButton.disabled = !String(item.script || "").trim()
+      || Boolean(String(item.prompt || "").trim()) || batch.converting.has(batchItemReference(scheme, itemIndex));
+    const host = $("#comfyuiBatchBody");
+    const bar = host?.querySelector(".cbm-convert-bar");
+    const hasScript = batch.draft.schemes.some((row) => row.items.some((entry) => String(entry.script || "").trim()));
+    if (!hasScript) bar?.remove();
+    else if (!bar) {
+      // 输入时只补转换条，保留正在编辑的 textarea 与光标。
+      host?.querySelector(".cbm-batch-head")?.insertAdjacentHTML("afterend", batchConvertBarMarkup());
+      if (batch.convert.provider) void batchLoadConvertModels();
+      void batchLoadCustomTemplates();
+    }
+  }
 }
 
 // 素材口在条目文件字典里的键 = 它在已勾选口里的序号（0 起）。
@@ -3301,8 +3329,6 @@ async function batchUploadTiles(pairs) {
 
 // ---- 剧本转换（POST /api/studio/generate + 轮询既有任务）----
 
-const BATCH_CONVERT_INTRO = "你是视频提示词工程师。把下面的剧本改写成一支视频的生成提示词：写成一段连贯的英文或中文描述，覆盖画面主体、动作节奏、镜头运动、氛围与声音要点；不要输出解释、标题或分点列表，只输出提示词正文。\n\n剧本：\n";
-
 async function batchLoadConvertModels() {
   const select = document.querySelector('[data-batch-field="convertModel"]');
   if (!select) return;
@@ -3312,6 +3338,8 @@ async function batchLoadConvertModels() {
     select.disabled = true;
     return;
   }
+  select.replaceChildren(new Option("加载模型中…", ""));
+  select.disabled = true;
   if (!(state.providerModelCatalogs[providerKey] || []).length) {
     try {
       const result = await api("/api/providers/models", { method: "POST", body: { model_key: providerKey } });
@@ -3321,12 +3349,16 @@ async function batchLoadConvertModels() {
       state.providerModelCatalogs[providerKey] = [];
     }
   }
+  if (batch.convert.provider !== providerKey || !select.isConnected) return;
   const models = state.providerModelCatalogs[providerKey] || [];
+  const validIds = models.map((entry) => String(typeof entry === "object" ? (entry.id ?? entry.model ?? entry.name) : entry));
+  if (!validIds.includes(batch.convert.model)) batch.convert.model = "";
   select.replaceChildren(new Option("请选择模型…", ""), ...models.map((entry) => {
     const id = typeof entry === "object" ? (entry.id ?? entry.model ?? entry.name) : entry;
     return new Option(entry?.name || id, id);
   }));
   select.disabled = !models.length;
+  select.value = batch.convert.model;
 }
 
 async function batchLoadCustomTemplates() {
@@ -3335,7 +3367,7 @@ async function batchLoadCustomTemplates() {
   try {
     const { items } = await api("/api/studio/custom");
     group.replaceChildren(...(items || []).filter((item) => item?.id)
-      .map((item) => new Option(String(item.title || item.id), String(item.id))));
+      .map((item) => new Option(String(item.title || item.id), String(item.id), false, String(item.id) === batch.convert.template)));
   } catch (_) { /* 读取失败仍可用内置转换 */ }
 }
 
@@ -3356,20 +3388,14 @@ async function batchConvert(scheme, itemIndex, silent = false) {
   batch.converting.add(key);
   renderBatch();
   try {
-    const customId = batch.convert.template;
-    // studio 生成契约：custom_id 有值 → user_request 填进提词库模板；没有 →
-    // user_request 本身就是全文（内置引导 + 剧本）。
-    const body = {
-      model_key: batch.convert.provider,
-      model_name: batch.convert.model,
-      user_request: customId ? script : `${BATCH_CONVERT_INTRO}${script}`,
-    };
-    if (customId) body.custom_id = customId;
+    const body = buildBatchConvertRequest(scheme.detail, scheme.mapping, item, batch.convert, scheme.fixed);
     const created = await api("/api/studio/generate", { method: "POST", body });
     const taskId = String(created?.task?.id || "");
     if (!taskId) throw new Error(created?.error || "转换任务创建失败");
     const result = await batchWaitStudioTask(taskId);
-    item.prompt = String(result || "").trim();
+    const prompt = String(result || "").trim();
+    if (!prompt) throw new Error("转换模型没有返回提示词正文");
+    item.prompt = prompt;
     return true;
   } catch (error) {
     batch.blockedMessage = "";
@@ -3397,7 +3423,7 @@ async function batchConvertAll() {
   batch.blockedMessage = "";
   for (const [scheme, itemIndex] of targets) {
     const ok = await batchConvert(scheme, itemIndex, true);
-    if (!ok) break;
+    if (!ok) return;
   }
   toast("转换完成；提示词可以逐条手改");
 }
@@ -3677,4 +3703,6 @@ function enterBatchPane() {
   void batchLoadCustomTemplates();
   batch.recheckMissing();
   renderBatch();
+  // 离开批量页会暂停监视；返回时立即校准，避免运行卡停在离开前的状态。
+  if (batch.view === "run" && batch.runId) startBatchPolling();
 }

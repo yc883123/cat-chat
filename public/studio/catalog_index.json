@@ -2,12 +2,12 @@
  "ok": true,
  "version": "2.0.0",
  "built": "2026-10-22",
- "count": 580,
- "chars": 766596,
+ "count": 581,
+ "chars": 760560,
  "snippet_n": 700,
  "modules": {
   "vs": 51,
-  "h3": 19,
+  "h3": 20,
   "vi": 11,
   "ec": 2,
   "global": 3,
@@ -16,8 +16,8 @@
   "style": 396
  },
  "types": {
-  "template": 167,
-  "rule": 4,
+  "template": 166,
+  "rule": 6,
   "lexicon": 400,
   "example": 9
  },
@@ -95,26 +95,26 @@
   },
   {
    "id": "vi-004-cmd-reverse",
-   "title": "41. 图片反推命令提示（反推段）",
+   "title": "图片反推 · 可见画面提示词",
    "module": "vi",
    "type": "template",
-   "summary": "图片反推指令：黄金公式七段式 + 英文输出约束，带完整美学词库。",
+   "summary": "依据实际图片提取主体、构图、色彩和光影，不把文字概念扩写伪装成看图。",
    "tags": [
     "反推",
-    "英文输出",
-    "美学词库"
+    "图片",
+    "提示词"
    ],
-   "chars": 1529,
+   "chars": 284,
    "model": [],
    "vars": [],
    "has_vars": false,
-   "source": "0图片反推命令提示.txt",
-   "source_sha1": "d7d215370e81f7e7187b2ef7df783bd794a85850",
+   "source": "Cat Chat 图片反推规则",
+   "source_sha1": "c19223eee12b28ddf8850c06ee0b5d950f78e422",
    "cleaned": [],
    "origin": "builtin",
    "order": 4,
-   "genre": "tool",
-   "snippet": "图片反推：\n你是一位精通光影、构图、色彩心理学以及数字渲染技术的顶级艺术指导。你深知 Midjourney, Stable Diffusion XL, Flux 等顶级 AI 绘画模型的底层逻辑。你的目标是将用户简单的概念转化为**视觉冲击力极强、细节惊艳绝伦、具有电影级质感的绘画提示词。\n1.  **Analyze (分析):** 提取用户输入的核心主体、情感基调和场景。\n2.  **Enhance (增强):** 自动补充缺失的美学元素（光影、材质、相机参数、艺术风格）。\n3.  **Structure (结构化):** 按照“主体描述 + 环境氛围 + 艺术风格 + 技术参数”的黄金公式重组。\n4.  **Output (输出):** 提供英文提示词 (Prompt)。\n## The Golden Formula (黄金公式)\n[Subject & Action] + [Environment & Context] + [Lighting & Atmosphere] + [Camera & Composition] + [Style & Medium] + [Color Palette] + [Quality Boosters]\n## Knowledge Base (美学词库 - 自动调用)\n### 1. Lighting (光影 - 决定质感)\n* **Keywords:** Cinematic lighting (电影布光), Volumetric lighting (体积光/丁达尔效应), Rembrandt lighting (伦勃朗光), Bioluminesc"
+   "genre": "",
+   "snippet": "请根据实际收到的参考图片反推可复现其可见画面的图像提示词。\n先观察图片，再组织文字。保留真实可见的主体、外观、服饰、动作、空间位置、前景背景、构图、色彩、材质、光线和画面风格。不要把本模板复述成结果，不因用户只写了一个概念就凭空增加人物、物件、镜头、特效、材质或光影；看不清的细节不要猜测。\n用户补充文字只用于指定关注点和输出语言，不能当成图片中已经存在的事实。没有实际图片时明确要求上传图片，不声称已经完成反推。\n输出一段可直接使用的连贯图像提示词，默认中文；用户明确要求英文时输出英文。只描述图片支持的内容，不追加解释、模板规则、无依据的画质口号或对水印的描述。\n"
   },
   {
    "id": "vs-001-cmd-t2i-aesthetic",
@@ -1396,28 +1396,31 @@
   },
   {
    "id": "h3-007-h3-i2va",
-   "title": "46. MiniMax H3 视频反推规则",
+   "title": "MiniMax H3 基础视频 · 文生与首尾帧",
    "module": "h3",
-   "type": "template",
-   "summary": "H3 官方 I2VA 成品提示词规则，Truck/Pan 严格区分，三字段输出。",
+   "type": "rule",
+   "summary": "T2VA / I2VA / FL2VA / L2VA 四种基础模式，按实际首尾帧输出三字段。",
    "tags": [
+    "MiniMax",
     "H3",
+    "T2VA",
     "I2VA",
-    "官方"
+    "FL2VA",
+    "L2VA"
    ],
-   "chars": 7394,
+   "chars": 1938,
    "model": [
     "H3"
    ],
    "vars": [],
    "has_vars": false,
-   "source": "MiniMaxH3视频反推规则.txt",
-   "source_sha1": "7cd1ece65284050e43263cf2b61417153275f322",
+   "source": "https://github.com/MiniMax-AI/MiniMax-H3/blob/199b7d0e1fd95e7b3eafa8c15eca692534142427/skills/h3-prompt-writing/references/base-en.txt",
+   "source_sha1": "f1ed6c566091880f0ad32726af28a1cd90335562",
    "cleaned": [],
    "origin": "builtin",
    "order": 56,
-   "genre": "tool",
-   "snippet": "你是 MiniMax H3 单图生视频（I2VA）巨构场景提示词反推助手。\n【任务】\n根据用户上传的一张巨构场景图片 <Picture 1>、一句简短创作意图 user_prompt 和目标时长 duration_seconds，输出一份可直接提交 MiniMax H3 的英文 I2VA 成品提示词。\n这套规则服务于“可被读懂的宏大”，不是快节奏展示：让观众在一个稳定、连续的视点中逐步看清局部尺度、空间层级、结构延伸和环境运动。适用于科幻巨构、远古遗迹、奇幻巨树、超大型舰船、未来城市、工业设施、神话建筑、自然奇观等任何风格。\n【输入】\n- <Picture 1>：唯一上传图片，也是视频 0.00 秒的首帧。\n- user_prompt：用户的简短意图，例如“云海里的环形太空港，镜头慢慢拉远”“巨型神树下有微小旅行者”“雨中的赛博城市，向上仰拍”。\n- duration_seconds：目标视频时长，单位秒。使用 H3 支持的 4–15 秒整数；按用户实际填写的时长设计节奏。调用方应在交给模型前校验这个范围与整数格式。\nuser_prompt 可以补充主体、环境变化、想强调的尺度关系、镜头方向、声音或配乐。它可以补充创意意图，但不能推翻图片中已经可见的主体、构图、材质、时间、光线和空间关系。\n【能力边界】\n1. 固定使用 I2VA：<Picture 1> 是 [Shot 1] 的真实首帧，不改用 T2VA、FL2VA、L2VA 或 Ref2VA。\n2. 只把图片可见信息当作确定事实。不得虚构明确的人名、地点、品牌、功能、历史、内部空间、不可见结构细节或具体数量。\n3. 可以补充与"
+   "genre": "",
+   "snippet": "你是 MiniMax H3 基础视频提示词编写助手。根据用户的文字意图、实际提供的关键帧和目标时长，生成可直接使用的英文提示词。本模板依据 MiniMax 官方 base-en 指南整理，适用于 T2VA、I2VA、FL2VA、L2VA。\n\n先核对用户指定的模式、素材用途和时长；未指定模式时，只有文字用 T2VA，一张首帧用 I2VA，明确首尾两帧用 FL2VA，明确仅尾帧用 L2VA。不要把角色或风格参考图擅自当成首帧；参考生成、视频编辑、视频续写或音频复用应改用 H3 参考与编辑模板。需要关键帧却未收到图片时，先说明缺少哪张图，不声称已经看图。时长采用用户要求；未说明时先询问，镜头切点必须在总时长以内。\n\n输出格式：只输出所选模式需要的对齐首行与下列三个字段，字段之间空一行；不输出规则说明、Markdown 围栏或中文翻译。三个字段顺序固定为：\nintegrated_multimodal_description: ...\noverall_soundscape: ...\nnon_diegetic_music: ...\n\n模式与关键帧：\n- T2VA：从文字建立整个视听过程，直接以 integrated_multimodal_description 开始，不添加图片对齐首行。\n- I2VA：<Picture 1> 是 0.00 秒的真实首帧，属于 [Shot 1]。首行严格使用：\nFor the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully re"
   },
   {
    "id": "h3-008-grid25",
@@ -1942,30 +1945,26 @@
   },
   {
    "id": "vi-111-i2t-enhance",
-   "title": "图生图反推 · 顶级艺术指导增强",
+   "title": "图生图反推 · 画面细节提取",
    "module": "vi",
    "type": "template",
-   "summary": "提取核心主体与情绪基调后自动补齐光影、材质、相机参数与艺术风格。",
+   "summary": "提取实际参考图片可见细节，默认输出中文提示词，不补造画面内容。",
    "tags": [
     "反推",
-    "增强",
-    "结构化"
+    "图片",
+    "图生图"
    ],
-   "chars": 1545,
-   "model": [
-    "MJ",
-    "SDXL",
-    "Flux"
-   ],
+   "chars": 284,
+   "model": [],
    "vars": [],
    "has_vars": false,
-   "source": "(提示词整合)表格视图.xlsx",
-   "source_sha1": "71e72898fef9809321ab76c249c1aa4634a01a31",
+   "source": "Cat Chat 图片反推规则",
+   "source_sha1": "c19223eee12b28ddf8850c06ee0b5d950f78e422",
    "cleaned": [],
    "origin": "builtin",
    "order": 76,
-   "genre": "tool",
-   "snippet": "你是一位精通光影、构图、色彩心理学以及数字渲染技术的顶级艺术指导。你深知 Midjourney, Stable Diffusion XL, Flux 等顶级 AI 绘画模型的底层逻辑。你的目标是将用户简单的概念转化为**视觉冲击力极强、细节惊艳绝伦、具有电影级质感的绘画提示词。\n1.  **Analyze (分析):** 提取用户输入的核心主体、情感基调和场景。\n2.  **Enhance (增强):** 自动补充缺失的美学元素（光影、材质、相机参数、艺术风格）。\n3.  **Structure (结构化):** 按照“主体描述 + 环境氛围 + 艺术风格 + 技术参数”的黄金公式重组。\n4.  **Output (输出):** 提供英文提示词 (Prompt)。\n## The Golden Formula (黄金公式)\n[Subject &amp; Action] + [Environment &amp; Context] + [Lighting &amp; Atmosphere] + [Camera &amp; Composition] + [Style &amp; Medium] + [Color Palette] + [Quality Boosters]\n## Knowledge Base (美学词库 - 自动调用)\n### 1. Lighting (光影 - 决定质感)\n* **Keywords:** Cinematic lighting (电影布光), Volumetric lighting (体积光/丁达尔效应), Rembrandt lighting (伦勃朗光"
+   "genre": "",
+   "snippet": "请根据实际收到的参考图片反推可复现其可见画面的图像提示词。\n先观察图片，再组织文字。保留真实可见的主体、外观、服饰、动作、空间位置、前景背景、构图、色彩、材质、光线和画面风格。不要把本模板复述成结果，不因用户只写了一个概念就凭空增加人物、物件、镜头、特效、材质或光影；看不清的细节不要猜测。\n用户补充文字只用于指定关注点和输出语言，不能当成图片中已经存在的事实。没有实际图片时明确要求上传图片，不声称已经完成反推。\n输出一段可直接使用的连贯图像提示词，默认中文；用户明确要求英文时输出英文。只描述图片支持的内容，不追加解释、模板规则、无依据的画质口号或对水印的描述。\n"
   },
   {
    "id": "h3-111-story6",
@@ -13494,6 +13493,33 @@
    "order": 74,
    "genre": "民俗怪谈",
    "snippet": "# 民俗怪谈AI漫剧全流程模板\n\n## 使用说明（聊天版）\n\n根据我的输入直接生成首批内容，无需先等待就绪确认；未指定的项目采用下文默认值。已有材料时，我可以指定从某个阶段、某集或某批开始，请以我在对话中提供的材料为依据，不依赖工具、文件读取或写入。每批开头标明阶段、集数和批次，结束提示本批已完成、下一批内容及继续指令。我说“继续”时，先结合本段对话衔接当前进度；若交接对话缺少必要材料，只追问缺少的交接内容，不臆造已完成的结果。仅生成制作文档与提示词，不声称已经自动出图或生成视频；图片上传和视频制作由我另行完成。\n\n你是民俗怪谈AI漫剧的总导演兼编剧。用户通常只给一句话，你负责把它做成可以直接出图、出视频的制作文档。\n\n## 一、工作方式\n\n**一句话就开工。** 不要先问一串问题。用户没说的内容按下面的默认值定，并在立项卡里列出来，用户可以随时改。\n\n| 项目 | 默认值 |\n|---|---|\n| 集数与时长 | 第一季30集，每集约4分钟，按内容在3–5分钟之间浮动 |\n| 单集镜头 | 不设固定镜数，由本集内容决定，本题材通常22–30镜，每镜5–14秒 |\n| 画幅 | 9:16竖屏，1080×1920，24fps |\n| 风格 | 暗调民俗国漫，电影级2.5D动画 |\n| 受众 | 悬疑猎奇向 |\n\n用户指定了别的（集数、时长、受众、风格等），一律以用户为准。改了单集时长时，对白字数按比例调整。\n\n**本题材的节奏。** 慢压迫。长镜让观众自己发现不对劲，宁静之后突然一个短镜，不靠连续快切吓人。上面的镜数和秒数只是参考：每集按戏的需要定，高潮集可以更快，抒情或铺垫的"
+  },
+  {
+   "id": "h3-014-h3-ref2va",
+   "title": "MiniMax H3 参考生成与视频编辑",
+   "module": "h3",
+   "type": "rule",
+   "summary": "Ref2VA 六字段：参考生成、关键帧补全、视频编辑/续写和音频引用；只分析实际收到的素材。",
+   "tags": [
+    "MiniMax",
+    "H3",
+    "Ref2VA",
+    "参考生成",
+    "视频编辑"
+   ],
+   "chars": 1926,
+   "model": [
+    "H3"
+   ],
+   "vars": [],
+   "has_vars": false,
+   "source": "https://github.com/MiniMax-AI/MiniMax-H3/blob/199b7d0e1fd95e7b3eafa8c15eca692534142427/skills/h3-prompt-writing/references/ref-en.txt",
+   "source_sha1": "e8260c2b830dec458b1e4e12c6a4fbf569d9e1cf",
+   "cleaned": [],
+   "origin": "builtin",
+   "order": 86,
+   "genre": "",
+   "snippet": "你是 MiniMax H3 参考生成与编辑提示词编写助手。依据用户实际提供的图片、视频、音频及创作目标，整理英文 Ref2VA 提示词。本模板依据 MiniMax 官方 ref-en 指南整理，覆盖参考生成、关键帧补全、视频编辑、视频续写、音频复用与音频参考。\n\n先核对各素材的真实用途、目标时长、保留项与修改项。缺少视频、音频或图片时应说明缺项；文件名、路径或用户一句“参考这个视频”不能替代素材内容。当前界面若只提供图片，只基于收到的图片工作，不声称看过视频或听过音频。\n\n只输出以下六个英文段落，顺序与字段名固定，不加 Markdown 围栏：\nsubject_definitions: ...\nsummary: ...\nretention_analysis: ...\ndetailed_description: ...\noverall_soundscape: ...\nnon_diegetic_music: ...\n\nsubject_definitions：逐项定义后文确实会用到的素材内容与引用标签。<Subject N> 表示从素材中提取的角色、物体、场景、服装、风格或动作；<Picture N> 只用于具体帧、关键帧、首尾帧或分镜构图锚点；<Video N> 用于待编辑/续写的原片或整段视频的时间结构；<Audio N> 用于实际复用或参考的音频信号。只定义角色外观的图片应放在对应 Subject 的来源说明里，不额外创建独立 Picture 条目。同一素材的画面与声音分别编号，不因视频带声就自动建立 Audio。标签在所有字段保持同义，发声人物另外使用稳定的 (S1)、(S2"
   }
  ],
  "sources": {

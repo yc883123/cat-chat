@@ -1,0 +1,961 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>工作台五模块 · 视觉优化预览</title>
+<!--
+  设计预览：不连接后端、不读真实数据、不写入任何文件。
+  沿用 public/styles.css 现有令牌名（brand / neutral / 语义层），评审通过后可逐块迁移。
+  观察依据：public/index.html 的 5 个 studio-page-view（library / labeler / comfyui / novel / writer）。
+-->
+<style>
+:root{
+  color-scheme:light;
+  --brand-100:#EDECFF; --brand-200:#DCD3FF; --brand-500:#7C5CFF; --brand-600:#6D5AE6; --brand-700:#5A47C4;
+  --neutral-0:#fff; --neutral-50:#F8F9FC; --neutral-100:#F1F2F7; --neutral-200:#E6E8F0; --neutral-300:#D2D6E3;
+  --neutral-400:#A9AFC2; --neutral-500:#7A8099; --neutral-600:#5A6079; --neutral-700:#3D4257; --neutral-800:#2A2E40; --neutral-900:#1E2138;
+  --bg:#F6F7FB; --surface:var(--neutral-0); --surface-2:var(--neutral-100); --surface-inset:#F5F6FA;
+  --line:var(--neutral-200); --line-strong:var(--neutral-300);
+  --text:var(--neutral-800); --text-2:var(--neutral-700); --muted:var(--neutral-500);
+  --accent:var(--brand-500); --accent-solid:var(--brand-600); --accent-soft:var(--brand-100);
+  --sidebar:#1E2138; --sidebar-line:rgba(255,255,255,.10); --sidebar-text:#F1F2F7; --sidebar-muted:#989FC0;
+  --sidebar-hover:rgba(255,255,255,.07); --sidebar-active:rgba(124,92,255,.22);
+  --success:#12A594; --success-soft:#DCF4F0; --warning:#D9820B; --warning-soft:#FCF0E0;
+  --danger:#DC4A46; --danger-soft:#FCE8E7; --info:#3B82C4; --info-soft:#E6F1FB;
+  --r-sm:6px; --r-md:9px; --r-lg:13px; --r-xl:18px; --r-full:999px;
+  --s-1:4px; --s-2:8px; --s-3:12px; --s-4:16px; --s-5:20px; --s-6:24px;
+  --shadow-1:0 1px 2px rgba(30,33,56,.05),0 1px 3px rgba(30,33,56,.04);
+  --shadow-2:0 6px 20px rgba(30,33,56,.09),0 2px 6px rgba(30,33,56,.045);
+  --shadow-3:0 18px 44px rgba(30,33,56,.16);
+  --nav-w:272px; --res-w:340px;
+  --font-sans:"Inter","HarmonyOS Sans SC","PingFang SC","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:"Cascadia Code","JetBrains Mono",Consolas,monospace;
+}
+html[data-theme="dark"]{
+  color-scheme:dark;
+  --neutral-0:#171A24; --neutral-50:#111522; --neutral-100:#1D2130; --neutral-200:#2B3143; --neutral-300:#3D455C;
+  --neutral-400:#66708A; --neutral-500:#8D96AD; --neutral-600:#AEB6C8; --neutral-700:#C8CEDA; --neutral-800:#E3E7EF; --neutral-900:#0D1019;
+  --bg:#111522; --surface:#171A24; --surface-2:#1D2130; --surface-inset:#121620;
+  --line:#2B3143; --line-strong:#3D455C; --text:#E3E7EF; --text-2:#C8CEDA; --muted:#8D96AD;
+  --accent-soft:#2A2350; --sidebar:#0D1019; --sidebar-text:#E3E7EF; --sidebar-muted:#9CA6BD;
+  --success-soft:#163C3B; --warning-soft:#46351A; --danger-soft:#452322; --info-soft:#183044;
+  --shadow-1:0 1px 2px rgba(0,0,0,.25); --shadow-2:0 6px 20px rgba(0,0,0,.3); --shadow-3:0 18px 44px rgba(0,0,0,.45);
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--text);font:13.5px/1.6 var(--font-sans);overflow:hidden;-webkit-font-smoothing:antialiased}
+button,input,textarea,select{font:inherit;color:inherit}
+button{cursor:pointer}
+button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+h1,h2,h3,h4,p{margin:0}
+[hidden]{display:none!important}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-thumb{background:var(--neutral-300);border-radius:9px;border:2px solid transparent;background-clip:padding-box}
+
+/* ── 预览工具条（不属于产品界面） ── */
+.preview-bar{height:54px;display:flex;align-items:center;gap:10px;padding:0 16px;background:var(--surface);border-bottom:1px solid var(--line);flex:none;flex-wrap:nowrap;overflow-x:auto}
+.preview-kicker{display:flex;align-items:center;gap:9px;font-weight:700;font-size:13px;white-space:nowrap}
+.preview-kicker i{width:8px;height:8px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px var(--accent-soft)}
+.seg{display:flex;gap:2px;padding:3px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-2)}
+.seg button{border:0;border-radius:6px;padding:5px 10px;background:transparent;color:var(--muted);font-size:12px;white-space:nowrap;display:inline-flex;align-items:center;gap:5px}
+.seg button svg{width:14px;height:14px}
+.seg button:hover{color:var(--text)}
+.seg button.active{background:var(--surface);color:var(--accent-solid);font-weight:650;box-shadow:var(--shadow-1)}
+.preview-spacer{flex:1}
+.preview-note{color:var(--muted);font-size:11.5px;white-space:nowrap}
+
+/* ── 舞台 / 视口 ── */
+.stage{height:calc(100dvh - 54px);display:flex;align-items:center;justify-content:center;padding:18px;min-height:0}
+.shell{display:flex;height:100%;width:100%;max-width:1520px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-xl);overflow:hidden;box-shadow:var(--shadow-3)}
+.stage[data-vp="mobile"] .shell{width:392px;max-width:392px;height:min(100%,860px);border-radius:34px;border-width:1px;box-shadow:0 24px 60px rgba(30,33,56,.28)}
+.stage[data-vp="mobile"]{align-items:center}
+/* 规范页不参与手机收窄，始终按桌面宽度看 */
+.stage[data-module="spec"] .shell{width:100%;max-width:1240px;height:100%;border-radius:var(--r-xl)}
+
+/* ── 工作台侧栏 ── */
+.rail{width:230px;flex:none;display:flex;flex-direction:column;background:var(--sidebar);color:var(--sidebar-text);min-height:0}
+.rail-head{display:flex;align-items:center;gap:10px;padding:16px 14px 12px}
+.brand-mark{width:30px;height:30px;display:grid;place-items:center;border-radius:9px;background:var(--brand-600);color:#fff;font-size:14px;font-weight:700;box-shadow:0 4px 14px rgba(109,90,230,.35)}
+.brand-copy strong{display:block;font-size:13.5px;font-weight:650;line-height:1.3}
+.brand-copy small{display:block;color:var(--sidebar-muted);font-size:11px}
+.mode-switch{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;margin:0 12px 14px;padding:3px;background:rgba(255,255,255,.06);border-radius:var(--r-md)}
+.mode-btn{border:0;border-radius:6px;padding:6px 2px;background:transparent;color:var(--sidebar-muted);font-size:11.5px}
+.mode-btn.active{background:var(--sidebar-active);color:#fff;font-weight:650}
+.rail-label{padding:0 16px 6px;color:var(--sidebar-muted);font-size:11px;letter-spacing:.4px}
+.rail-nav{padding:0 10px;display:flex;flex-direction:column;gap:2px;overflow:auto}
+.rail-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border:0;border-radius:8px;background:transparent;color:var(--sidebar-muted);font-size:13px;text-align:left}
+.rail-item:hover{background:var(--sidebar-hover);color:#fff}
+.rail-item.active{background:var(--sidebar-active);color:#fff;font-weight:600}
+.rail-item .cnt{margin-left:auto;font-size:11px;color:var(--sidebar-muted)}
+.rail-item.active .cnt{color:rgba(255,255,255,.7)}
+.rail-foot{margin-top:auto;padding:12px;border-top:1px solid var(--sidebar-line);display:flex;align-items:center;gap:8px;color:var(--sidebar-muted);font-size:11.5px}
+.rail-foot .dot{width:7px;height:7px;border-radius:50%;background:var(--success)}
+
+/* ── 主区 ── */
+.content{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--bg);min-height:0}
+.module{flex:1;min-height:0;display:flex;flex-direction:column}
+.module[hidden]{display:none}
+.phone-status{display:none}
+
+/* ① 统一模块头 */
+.mod-head{display:flex;align-items:center;gap:12px;padding:12px 18px;background:var(--surface);border-bottom:1px solid var(--line);flex:none}
+.mod-icon{width:32px;height:32px;flex:none;display:grid;place-items:center;border-radius:9px;background:var(--accent-soft);color:var(--accent-solid)}
+.mod-icon svg{width:18px;height:18px}
+.mod-titles{min-width:0}
+.mod-titles h2{font-size:15px;font-weight:680;line-height:1.25;display:flex;align-items:center;gap:8px}
+.mod-titles small{display:block;color:var(--muted);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mod-head-spacer{flex:1}
+.mod-actions{display:flex;align-items:center;gap:6px;flex:none}
+
+/* ② 阶段条（拆书匠 / 织书台） */
+.stagebar{display:flex;align-items:center;gap:10px;padding:9px 18px;background:var(--surface);border-bottom:1px solid var(--line);flex:none}
+.stages{display:flex;gap:4px;flex-wrap:wrap}
+.stage-chip{border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:var(--r-full);padding:4px 12px;font-size:12px;display:inline-flex;align-items:center;gap:6px}
+.stage-chip .idx{width:15px;height:15px;border-radius:50%;background:var(--surface-2);color:var(--muted);font-size:10px;display:grid;place-items:center}
+.stage-chip.done{color:var(--text-2);border-color:var(--line-strong)}
+.stage-chip.done .idx{background:var(--success-soft);color:var(--success)}
+.stage-chip.active{background:var(--accent-soft);border-color:var(--brand-200);color:var(--accent-solid);font-weight:650}
+.stage-chip.active .idx{background:var(--accent-solid);color:#fff}
+.stagebar small{color:var(--muted);font-size:11.5px}
+
+/* ③ 三栏 */
+.cols{flex:1;min-height:0;display:grid;grid-template-columns:var(--nav-w) minmax(0,1fr) var(--res-w);gap:0}
+.col{min-width:0;min-height:0;display:flex;flex-direction:column;border-right:1px solid var(--line);background:var(--bg)}
+.col:last-child{border-right:0}
+.col-nav,.col-res{background:var(--surface)}
+.col-head{display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid var(--line);flex:none}
+.col-head strong{font-size:13px;font-weight:650}
+.col-head small{color:var(--muted);font-size:11.5px}
+.col-head .sp{flex:1}
+.col-body{flex:1;min-height:0;overflow:auto;padding:12px}
+.col-main .col-body{padding:14px 16px}
+.col-main{background:var(--bg)}
+
+/* 通用块 / 卡片 */
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:12px 14px;margin-bottom:12px}
+.card.tight{padding:10px 12px}
+.grp{margin-bottom:14px}
+.grp-head{display:flex;align-items:baseline;gap:8px;margin-bottom:8px}
+.grp-head strong{font-size:13px;font-weight:650}
+.grp-head small{color:var(--muted);font-size:11.5px}
+.field{display:block;margin-bottom:10px}
+.field > span,.field-label{display:block;font-size:12px;color:var(--text-2);margin-bottom:5px;font-weight:550}
+.field small{color:var(--muted);font-weight:400}
+input[type=text],input[type=search],input[type=number],input[type=range],select,textarea{
+  width:100%;min-width:0;border:1px solid var(--line-strong);border-radius:var(--r-md);background:var(--surface);
+  padding:7px 10px;font-size:12.5px;outline:none}
+input[type=range]{padding:0;border:0;background:none}
+textarea{resize:vertical;line-height:1.65}
+input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.btn{border:1px solid var(--line-strong);background:var(--surface);color:var(--text-2);border-radius:var(--r-md);padding:6px 12px;font-size:12.5px;display:inline-flex;align-items:center;gap:6px}
+.btn:hover{border-color:var(--accent);color:var(--accent-solid)}
+.btn svg{width:15px;height:15px}
+.btn.primary{background:var(--accent-solid);border-color:var(--accent-solid);color:#fff;font-weight:600}
+.btn.primary:hover{background:var(--brand-700);color:#fff}
+.btn.ghost{border-color:transparent;background:transparent;color:var(--muted)}
+.btn.tiny{padding:4px 9px;font-size:11.5px}
+.btn.danger{color:var(--danger);border-color:var(--line-strong)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+
+/* ④ 统一任务条 */
+.taskbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:9px 12px;border-radius:var(--r-md);background:var(--surface-2);border:1px solid var(--line);margin-bottom:10px}
+.taskbar .dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--muted)}
+.taskbar b{font-size:12.5px;font-weight:650}
+.taskbar .txt{color:var(--muted);font-size:11.5px}
+.taskbar .track{flex:1;height:5px;border-radius:5px;background:var(--neutral-200);overflow:hidden;min-width:40px}
+.taskbar .track i{display:block;height:100%;background:var(--accent);border-radius:5px}
+.taskbar.running .dot{background:var(--accent);animation:pulse 1.4s infinite}
+.taskbar.ok .dot{background:var(--success)}
+.taskbar.ok{background:var(--success-soft);border-color:transparent}
+.taskbar.warn .dot{background:var(--warning)}
+.taskbar.warn{background:var(--warning-soft);border-color:transparent}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* 列表项 */
+.item{display:flex;gap:10px;padding:9px 10px;border-radius:var(--r-md);border:1px solid transparent;cursor:pointer}
+.item:hover{background:var(--surface-2)}
+.item.active{background:var(--accent-soft);border-color:var(--brand-200)}
+.item .thumb{width:38px;height:38px;border-radius:8px;flex:none;background:linear-gradient(135deg,var(--neutral-200),var(--neutral-300));display:grid;place-items:center;color:var(--neutral-500);font-size:11px}
+.item .t{min-width:0;flex:1}
+.item .t b{display:block;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item .t small{display:block;color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item .meta{font-size:11px;color:var(--muted);flex:none}
+.chip{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:var(--r-full);background:var(--surface-2);color:var(--muted);font-size:11px;border:1px solid var(--line)}
+.chip.accent{background:var(--accent-soft);color:var(--accent-solid);border-color:transparent}
+.chip.ok{background:var(--success-soft);color:var(--success);border-color:transparent}
+.chip.warn{background:var(--warning-soft);color:var(--warning);border-color:transparent}
+.pill{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:var(--r-full);font-size:11.5px;background:var(--surface-2);color:var(--muted)}
+.pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+.pill.ok{background:var(--success-soft);color:var(--success)}
+.pill.run{background:var(--accent-soft);color:var(--accent-solid)}
+.pill.warn{background:var(--warning-soft);color:var(--warning)}
+.sep{height:1px;background:var(--line);margin:10px 0}
+.note{color:var(--muted);font-size:11.5px;line-height:1.7}
+pre.mono{font:12px/1.75 var(--font-mono);background:var(--surface-inset);border:1px solid var(--line);border-radius:var(--r-md);padding:10px 12px;white-space:pre-wrap;max-height:190px;overflow:auto;color:var(--text-2)}
+
+/* 空态 */
+.empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:28px 18px;text-align:center;color:var(--muted);border:1.5px dashed var(--line-strong);border-radius:var(--r-lg);background:var(--surface-inset)}
+.empty .ico{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;background:var(--surface-2);color:var(--neutral-400)}
+.empty strong{color:var(--text);font-size:13px}
+.empty p{font-size:11.5px;max-width:280px}
+
+/* 吸底操作区 */
+.actionbar{position:sticky;bottom:0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:10px 0;margin-top:4px;background:linear-gradient(to top,var(--bg) 62%,transparent)}
+.actionbar .sp{flex:1}
+
+/* 图片网格 */
+.grid-img{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.grid-img .ph{aspect-ratio:1;border-radius:10px;background:linear-gradient(135deg,var(--neutral-200),var(--neutral-300));display:grid;place-items:center;color:var(--neutral-500);font-size:11px;position:relative;overflow:hidden}
+.grid-img .ph.done::after{content:"✓";position:absolute;right:5px;bottom:3px;font-size:11px;color:#fff;background:rgba(18,165,148,.9);width:15px;height:15px;border-radius:50%;display:grid;place-items:center}
+.strip{display:flex;gap:6px;overflow:auto;padding-bottom:4px}
+.strip .ph{width:46px;height:46px;flex:none;border-radius:8px;background:linear-gradient(135deg,var(--neutral-200),var(--neutral-300));display:grid;place-items:center;font-size:10px;color:var(--neutral-500)}
+
+/* 桌面窄屏降级：先收窄两栏，别让工作区被压到只剩一掌宽 */
+@media (max-width:1180px){ :root{--nav-w:236px;--res-w:300px} }
+@media (max-width:1040px){ :root{--nav-w:212px;--res-w:276px} .mod-titles small{display:none} }
+
+/* 手机档位条 */
+.panebar{display:none}
+
+/* ── 手机视口 ── */
+.stage[data-vp="mobile"] .rail{display:none}
+.stage[data-vp="mobile"] .phone-status{display:flex;align-items:center;justify-content:space-between;padding:9px 18px 6px;color:var(--neutral-500);font-size:11px;background:var(--surface);flex:none}
+.stage[data-vp="mobile"] .mod-head{padding:8px 14px 10px;gap:9px}
+.stage[data-vp="mobile"] .mod-icon{width:28px;height:28px}
+.stage[data-vp="mobile"] .mod-titles h2{font-size:14px}
+.stage[data-vp="mobile"] .mod-actions .btn{padding:5px 9px;font-size:11.5px}
+/* 手机端头部收敛：状态 pill 让位，次要操作收进「⋯」，只留主操作 */
+.stage[data-vp="mobile"] .mod-head .pill{display:none}
+.stage[data-vp="mobile"] .mod-actions .sec{display:none}
+.stage[data-vp="mobile"] .btn-more{display:inline-flex}
+.btn-more{display:none;padding:5px 8px}
+.stage[data-vp="mobile"] .cols{display:block;overflow:auto}
+.stage[data-vp="mobile"] .col{display:none;border-right:0}
+.stage[data-vp="mobile"] .cols[data-pane="nav"] .col-nav,
+.stage[data-vp="mobile"] .cols[data-pane="main"] .col-main,
+.stage[data-vp="mobile"] .cols[data-pane="res"] .col-res{display:flex;flex:1;min-height:0}
+.stage[data-vp="mobile"] .col-body{padding:12px}
+.stage[data-vp="mobile"] .col-main .col-body{padding:12px}
+.stage[data-vp="mobile"] .grid2{grid-template-columns:minmax(0,1fr)}
+.stage[data-vp="mobile"] .grid-img{grid-template-columns:repeat(2,minmax(0,1fr))}
+.stage[data-vp="mobile"] .panebar{
+  display:grid;grid-template-columns:repeat(3,1fr);gap:2px;flex:none;padding:6px 8px 8px;
+  background:var(--surface);border-top:1px solid var(--line)}
+.panebar button{border:0;background:transparent;color:var(--muted);border-radius:10px;padding:7px 4px;font-size:12px;display:flex;flex-direction:column;align-items:center;gap:3px}
+.panebar button svg{width:18px;height:18px}
+.panebar button.active{background:var(--accent-soft);color:var(--accent-solid);font-weight:650}
+.stage[data-vp="mobile"] .stagebar{gap:6px;padding:8px 12px;overflow-x:auto}
+.stage[data-vp="mobile"] .stagebar small{display:none}
+.stage[data-vp="mobile"] .actionbar{padding-bottom:2px}
+
+/* ── 规范页 ── */
+.spec{flex:1;min-height:0;overflow:auto;padding:24px 26px;background:var(--bg)}
+.spec h3{font-size:15px;margin:0 0 4px}
+.spec .lead{color:var(--muted);font-size:12.5px;margin-bottom:18px}
+.spec-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;margin-bottom:22px}
+.spec-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);padding:14px}
+.spec-card h4{font-size:12.5px;margin:0 0 2px}
+.spec-card .why{color:var(--muted);font-size:11.5px;margin-bottom:10px}
+.demo{background:var(--surface-inset);border:1px solid var(--line);border-radius:var(--r-md);padding:12px}
+table.cmp{width:100%;border-collapse:collapse;font-size:12px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden}
+table.cmp th,table.cmp td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+table.cmp th{background:var(--surface-2);font-weight:650;font-size:11.5px;white-space:nowrap}
+table.cmp tr:last-child td{border-bottom:0}
+table.cmp td.before{color:var(--muted)}
+table.cmp td b{font-weight:650}
+.tag-no{color:var(--danger);font-weight:650}
+.tag-yes{color:var(--success);font-weight:650}
+</style>
+</head>
+<body>
+
+<div class="preview-bar">
+  <span class="preview-kicker"><i></i>工作台 · 五模块视觉优化</span>
+  <div class="seg" id="moduleTabs">
+    <button data-module="library" class="active">提词库</button>
+    <button data-module="labeler">打标器</button>
+    <button data-module="comfyui">造梦机</button>
+    <button data-module="novel">拆书匠</button>
+    <button data-module="writer">织书台</button>
+    <button data-module="spec">统一规范</button>
+  </div>
+  <div class="seg" id="vpTabs">
+    <button data-vp="desktop" class="active">
+      <svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2"></rect><path d="M8 21h8"></path></svg>桌面 1440</button>
+    <button data-vp="mobile">
+      <svg viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="3"></rect><path d="M11 18.5h2"></path></svg>手机 390</button>
+  </div>
+  <span class="preview-spacer"></span>
+  <span class="preview-note" id="vpNote">手机上点底部档位条切换「列表 / 工作 / 结果」</span>
+  <div class="seg" id="themeTabs">
+    <button data-theme="light" class="active">浅色</button>
+    <button data-theme="dark">深色</button>
+  </div>
+</div>
+
+<div class="stage" id="stage" data-vp="desktop" data-module="library">
+<div class="shell">
+  <aside class="rail">
+    <div class="rail-head">
+      <span class="brand-mark">C</span>
+      <span class="brand-copy"><strong>Cat Chat</strong><small>3.9.13-beta</small></span>
+    </div>
+    <div class="mode-switch">
+      <button class="mode-btn">对话</button>
+      <button class="mode-btn active">工作台</button>
+      <button class="mode-btn">任务总管</button>
+    </div>
+    <p class="rail-label">工作台模块</p>
+    <nav class="rail-nav" id="railNav">
+      <button class="rail-item active" data-module="library"><span>提词库</span><span class="cnt">1.8k</span></button>
+      <button class="rail-item" data-module="labeler"><span>打标器</span><span class="cnt">3</span></button>
+      <button class="rail-item" data-module="comfyui"><span>造梦机</span><span class="cnt">7</span></button>
+      <button class="rail-item" data-module="novel"><span>拆书匠</span><span class="cnt">《雾港旧船》</span></button>
+      <button class="rail-item" data-module="writer"><span>织书台</span><span class="cnt">《雾港》</span></button>
+    </nav>
+    <div class="rail-foot"><span class="dot"></span><span>本机服务已启动 · 192.168.5.12:8787</span></div>
+  </aside>
+
+  <div class="content">
+  <div class="phone-status"><span>9:41</span><span style="display:flex;gap:4px;align-items:center"><svg style="width:14px;height:14px" viewBox="0 0 24 24"><path d="M2 17h3v3H2zM7 13h3v7H7zM12 9h3v11h-3zM17 5h3v15h-3z"></path></svg><svg style="width:14px;height:14px" viewBox="0 0 24 24"><rect x="2" y="7" width="17" height="10" rx="2"></rect><path d="M21 10v4"></path></svg></span></div>
+
+<!-- ══════════════ ① 提词库 ══════════════ -->
+<section class="module" data-module="library">
+  <header class="mod-head">
+    <span class="mod-icon"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"></rect><rect x="13" y="4" width="7" height="7" rx="1.5"></rect><rect x="4" y="13" width="7" height="7" rx="1.5"></rect><rect x="13" y="13" width="7" height="7" rx="1.5"></rect></svg></span>
+    <div class="mod-titles"><h2>提词库<small>1,842 条模板 · 最近更新 11-02 · 常用分类：短剧分镜</small></h2></div>
+    <span class="pill run"><span class="dot"></span>1 个任务进行中</span>
+    <div class="mod-head-spacer"></div>
+    <div class="mod-actions">
+      <button class="btn tiny sec">导入</button>
+      <button class="btn tiny sec">管理分类</button>
+      <button class="btn tiny primary">+ 新建</button>
+      <button class="btn tiny btn-more" aria-label="更多操作">⋯</button>
+    </div>
+  </header>
+  <div class="cols" data-pane="main">
+    <aside class="col col-nav">
+      <div class="col-head"><strong>分类</strong><span class="sp"></span><small>1,842</small></div>
+      <div class="col-body">
+        <div class="row" style="margin-bottom:8px">
+          <span class="chip accent">全部</span><span class="chip">短剧分镜 412</span><span class="chip">电商主图 268</span>
+          <span class="chip">人物设定 190</span><span class="chip">画风 331</span><span class="chip">文案 641</span>
+        </div>
+        <input type="search" placeholder="搜索模板名 / 原名 / 标签" style="margin-bottom:10px">
+        <div class="item active"><span class="thumb">镜</span><span class="t"><b>短剧分镜 · 电影感开场</b><small>h3_cinematic_open · 已用 128 次</small></span><span class="meta">★</span></div>
+        <div class="item"><span class="thumb">商</span><span class="t"><b>电商主图 · 冷暖对比</b><small>ec_main_cool_warm · 已用 61 次</small></span></div>
+        <div class="item"><span class="thumb">人</span><span class="t"><b>人物设定 · 三视角卡</b><small>char_3view · 已用 44 次</small></span></div>
+        <div class="item"><span class="thumb">画</span><span class="t"><b>画风 · 旧工业城潮湿感</b><small>style_wet_industrial · 已用 22 次</small></span></div>
+        <div class="item"><span class="thumb">文</span><span class="t"><b>文案 · 悬疑开场白</b><small>copy_suspense_open · 已用 9 次</small></span></div>
+      </div>
+    </aside>
+
+    <section class="col col-main">
+      <div class="col-head"><strong>短剧分镜 · 电影感开场</strong><span class="sp"></span><small>改完点「生成」</small></div>
+      <div class="col-body">
+        <div class="card">
+          <p class="note" style="margin-bottom:8px">把一场戏拆成一条可直出的出图提示词：地点景物、人物外观与动作、景别构图、光线氛围，不写台词字幕。</p>
+          <div class="row"><span class="chip accent">分镜</span><span class="chip">电影感</span><span class="chip">16:9</span><span class="chip">单场</span></div>
+        </div>
+        <div class="grp">
+          <div class="grp-head"><strong>模板变量</strong><small>填完直接进正文</small></div>
+          <div class="grid2">
+            <label class="field"><span>角色</span><input type="text" value="陈砚，38 岁，修船工，旧工装"></label>
+            <label class="field"><span>场景</span><input type="text" value="雾港，废弃船坞，黄昏"></label>
+          </div>
+          <div class="grid2">
+            <label class="field"><span>镜头语言</span><input type="text" value="35mm · 低机位 · 浅景深"></label>
+            <label class="field"><span>氛围</span><input type="text" value="潮湿、冷调、胶片颗粒"></label>
+          </div>
+        </div>
+        <div class="grp">
+          <div class="grp-head"><strong>我的输入</strong><small>不填就按上面变量直出</small></div>
+          <textarea rows="3" placeholder="把你的要求写在这里，例如：主角先不出正脸，用背影和手上的动作铺垫"></textarea>
+        </div>
+        <div class="grp">
+          <div class="grp-head"><strong>参考图片</strong><small>可选，最多 6 张</small></div>
+          <div class="row"><button class="btn tiny">上传图片</button><button class="btn tiny">识别图片</button><span class="note">已选 2 张</span></div>
+          <div class="strip" style="margin-top:8px"><span class="ph">01</span><span class="ph">02</span></div>
+        </div>
+        <div class="grp">
+          <div class="grp-head"><strong>生成设置</strong><small>与拆书匠 / 织书台同口径</small></div>
+          <div class="grid2">
+            <label class="field"><span>供应商</span><select><option>TE中转</option></select></label>
+            <label class="field"><span>模型</span><select><option>DeepSeek-V3</option></select></label>
+          </div>
+        </div>
+        <div class="actionbar">
+          <button class="btn primary">生成</button>
+          <button class="btn">发送到分镜生图</button>
+          <span class="sp"></span>
+          <button class="btn tiny ghost">保存修改</button>
+        </div>
+      </div>
+    </section>
+
+    <aside class="col col-res">
+      <div class="col-head"><strong>结果</strong><span class="sp"></span><button class="btn tiny">历史</button></div>
+      <div class="col-body">
+        <div class="taskbar running"><span class="dot"></span><b>生成中</b><span class="txt">12s</span><span class="track"><i style="width:38%"></i></span><button class="btn tiny">取消</button></div>
+        <div class="card" style="position:relative">
+          <div class="row" style="justify-content:space-between;margin-bottom:6px"><strong style="font-size:12.5px">生成结果</strong><button class="btn tiny">复制</button></div>
+          <pre class="mono">【镜头 1】外景 · 雾港船坞 · 黄昏
+低机位 35mm，前景是锈成暗红色的缆桩，
+中景陈砚背对镜头蹲在船舷边，手在摸一道
+新划痕；背景是散在雾里的龙门吊剪影，
+暖橙路灯在湿地面拉出长反光。</pre>
+        </div>
+        <div class="taskbar ok"><span class="dot"></span><b>已完成</b><span class="txt">刚刚 · 1,240 字</span><span class="sp" style="flex:1"></span><button class="btn tiny">重试</button></div>
+        <div class="taskbar warn"><span class="dot"></span><b>1 条失败</b><span class="txt">上游 429</span><span class="sp" style="flex:1"></span><button class="btn tiny">重试</button></div>
+      </div>
+    </aside>
+  </div>
+  <nav class="panebar">
+    <button data-pane="nav"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="4" rx="1"></rect><rect x="3" y="10" width="18" height="4" rx="1"></rect><rect x="3" y="16" width="18" height="4" rx="1"></rect></svg>模板</button>
+    <button data-pane="main" class="active"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"></path></svg>参数</button>
+    <button data-pane="res"><svg viewBox="0 0 24 24"><path d="M5 4h14v16l-7-4-7 4z"></path></svg>结果</button>
+  </nav>
+</section>
+
+<!-- ══════════════ ② 打标器 ══════════════ -->
+<section class="module" data-module="labeler" hidden>
+  <header class="mod-head">
+    <span class="mod-icon"><svg viewBox="0 0 24 24"><path d="M4 12.5V5a1 1 0 0 1 1-1h7.5a1 1 0 0 1 .7.3l7 7a1 1 0 0 1 0 1.4l-7.5 7.5a1 1 0 0 1-1.4 0l-7-7a1 1 0 0 1-.3-.7Z"></path><circle cx="8.5" cy="8.5" r="1.3"></circle></svg></span>
+    <div class="mod-titles"><h2>打标器<small>3 个批次 · 当前「ohwx_style」12 / 40 张</small></h2></div>
+    <span class="pill run"><span class="dot"></span>正在打标</span>
+    <div class="mod-head-spacer"></div>
+    <div class="mod-actions">
+      <button class="btn tiny sec">清理已完成</button>
+      <button class="btn tiny sec">刷新</button>
+      <button class="btn tiny primary">+ 批次</button>
+      <button class="btn tiny btn-more" aria-label="更多操作">⋯</button>
+    </div>
+  </header>
+  <div class="cols" data-pane="main">
+    <aside class="col col-nav">
+      <div class="col-head"><strong>批次</strong><span class="sp"></span><small>最近 3</small></div>
+      <div class="col-body">
+        <div class="item active"><span class="thumb">40</span><span class="t"><b>ohwx_style</b><small>12 / 40 · 刚刚</small></span><span class="chip warn">进行中</span></div>
+        <div class="item"><span class="thumb">36</span><span class="t"><b>harbor_night</b><small>36 / 36 · 11-01 22:14</small></span><span class="chip ok">完成</span></div>
+        <div class="item"><span class="thumb">12</span><span class="t"><b>test_batch</b><small>7 / 12 · 10-31</small></span><span class="chip">中断</span></div>
+        <div class="sep"></div>
+        <div class="taskbar"><span class="dot" style="background:var(--accent)"></span><b>12 / 40</b><span class="track"><i style="width:30%"></i></span></div>
+        <p class="note">预计还剩 4 分 20 秒 · 失败 0 张 · 断点已保存，关掉也能「继续未完成」。</p>
+      </div>
+    </aside>
+
+    <section class="col col-main">
+      <div class="col-head"><strong>打标设置</strong><span class="sp"></span><small>描述里不写什么，模型就学什么</small></div>
+      <div class="col-body">
+        <div class="empty" style="margin-bottom:12px">
+          <span class="ico"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"></path><path d="M12 11v5M9.5 13.5 12 11l2.5 2.5"></path></svg></span>
+          <strong>把文件夹拖到这里</strong>
+          <p>只读取其中的图片，按文件夹结构分组；也可点这里选择文件夹。</p>
+          <button class="btn tiny primary">选择文件夹</button>
+        </div>
+        <div class="grp">
+          <div class="grp-head"><strong>已选 40 张</strong><small>来自 D:\素材\ohwx_style</small></div>
+          <div class="strip"><span class="ph">01</span><span class="ph">02</span><span class="ph">03</span><span class="ph">04</span><span class="ph">05</span><span class="ph">06</span><span class="ph">07</span><span class="ph">…</span></div>
+        </div>
+        <div class="grp">
+          <div class="grp-head"><strong>生成模式</strong><small>选什么就忽略什么</small></div>
+          <div class="grid2">
+            <label class="field"><span>模式</span><select><option>忽略面部（训练面部 LoRA）</option></select></label>
+            <label class="field"><span>输出形式</span><select><option>标签 + 自然语言</option></select></label>
+          </div>
+          <div class="grid2">
+            <label class="field"><span>输出语言</span><select><option>英文标签 + 中文描述</option></select></label>
+            <label class="field"><span>触发词</span><input type="text" value="my_ohwx_style"></label>
+          </div>
+        </div>
+        <div class="grp">
+          <div class="grp-head"><strong>生成设置</strong><small>与其余四个模块同口径</small></div>
+          <div class="grid2">
+            <label class="field"><span>供应商</span><select><option>TE中转</option></select></label>
+            <label class="field"><span>模型</span><select><option>GLM-4V</option></select></label>
+          </div>
+        </div>
+        <div class="actionbar">
+          <button class="btn primary">继续未完成</button>
+          <button class="btn">取消</button>
+          <span class="sp"></span>
+          <button class="btn tiny ghost">高级设置</button>
+        </div>
+      </div>
+    </section>
+
+    <aside class="col col-res">
+      <div class="col-head"><strong>结果</strong><span class="sp"></span><small>已标注 12 张</small></div>
+      <div class="col-body">
+        <div class="row" style="margin-bottom:10px">
+          <button class="btn tiny" style="background:var(--accent-soft);color:var(--accent-solid);border-color:transparent">按图</button>
+          <button class="btn tiny">按标签</button>
+          <button class="btn tiny">句子库</button>
+        </div>
+        <input type="search" placeholder="筛选标签或文件名" style="margin-bottom:10px">
+        <div class="card tight">
+          <div class="row" style="justify-content:space-between"><strong style="font-size:12.5px">IMG_0231.jpg</strong><span class="chip ok">已保存</span></div>
+          <p class="note" style="margin-top:6px">my_ohwx_style, 1girl, standing, harbor at dusk, wet ground reflection, rusty crane, film grain, teal and orange grade</p>
+        </div>
+        <div class="card tight">
+          <div class="row" style="justify-content:space-between"><strong style="font-size:12.5px">IMG_0232.jpg</strong><span class="chip">排队中</span></div>
+          <p class="note" style="margin-top:6px">等待生成…</p>
+        </div>
+        <div class="card tight">
+          <div class="row" style="justify-content:space-between"><strong style="font-size:12.5px">IMG_0233.jpg</strong><span class="chip ok">已保存</span></div>
+          <p class="note" style="margin-top:6px">my_ohwx_style, dock worker, back view, low angle, fog, warm street lamp, shallow depth of field</p>
+        </div>
+      </div>
+    </aside>
+  </div>
+  <nav class="panebar">
+    <button data-pane="nav"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"></path></svg>批次</button>
+    <button data-pane="main" class="active"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M19 12a7 7 0 1 1-2.6-5.4"></path></svg>设置</button>
+    <button data-pane="res"><svg viewBox="0 0 24 24"><path d="M5 4h14v16l-7-4-7 4z"></path></svg>结果</button>
+  </nav>
+</section>
+
+<!-- ══════════════ ③ 造梦机 ══════════════ -->
+<section class="module" data-module="comfyui" hidden>
+  <header class="mod-head">
+    <span class="mod-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"></circle><path d="M12 2.8v3.4M12 17.8v3.4M2.8 12h3.4M17.8 12h3.4M5.5 5.5l2.4 2.4M16.1 16.1l2.4 2.4M18.5 5.5l-2.4 2.4M7.9 16.1l-2.4 2.4"></path></svg></span>
+    <div class="mod-titles"><h2>造梦机<small>7 个工作流 · ComfyUI 127.0.0.1:8188</small></h2></div>
+    <span class="pill ok"><span class="dot"></span>已连接</span>
+    <div class="mod-head-spacer"></div>
+    <div class="mod-actions">
+      <button class="btn tiny sec">改地址</button>
+      <button class="btn tiny sec">测试连接</button>
+      <button class="btn tiny primary">导入</button>
+      <button class="btn tiny btn-more" aria-label="更多操作">⋯</button>
+    </div>
+  </header>
+  <div class="cols" data-pane="main">
+    <aside class="col col-nav">
+      <div class="col-head"><strong>工作流</strong><span class="sp"></span><small>7</small></div>
+      <div class="col-body">
+        <p class="note" style="margin-bottom:10px">先在 ComfyUI 里跑通，再用「导出（API）」存成 JSON 导入。</p>
+        <div class="item active"><span class="thumb">Q</span><span class="t"><b>Qwen 文生图（已跑通）</b><small>11 个参数 · 改过 2 次</small></span></div>
+        <div class="item"><span class="thumb">F</span><span class="t"><b>Flux 写实人像</b><small>8 个参数</small></span></div>
+        <div class="item"><span class="thumb">V</span><span class="t"><b>SVD 图生视频</b><small>6 个参数</small></span></div>
+        <div class="item"><span class="thumb">U</span><span class="t"><b>放大 · 4x 细节</b><small>3 个参数</small></span></div>
+      </div>
+    </aside>
+
+    <section class="col col-main">
+      <div class="col-head"><strong>Qwen 文生图（已跑通）</strong><span class="sp"></span><small>只显示勾选过的 6 个参数</small></div>
+      <div class="col-body">
+        <div class="card" style="margin-bottom:12px">
+          <div class="row" style="justify-content:space-between;margin-bottom:6px">
+            <strong style="font-size:12.5px">分镜队列 · 3 条</strong><button class="btn tiny">清空</button>
+          </div>
+          <p class="note">拆书匠「分镜生图」发来的提示词，点「填入」写进正向提示词。</p>
+          <div class="row" style="margin-top:8px"><span class="chip accent">第 1 场 ✓</span><span class="chip">第 2 场</span><span class="chip">第 3 场</span></div>
+        </div>
+        <div class="grp">
+          <div class="grp-head"><strong>生成参数</strong><small>未勾选的按工作流原值执行</small></div>
+          <label class="field"><span>正向提示词</span><textarea rows="4">low angle 35mm, dock worker back view, rusty bollard foreground, fog harbor, warm street lamp reflection, teal orange grade, film grain</textarea></label>
+          <label class="field"><span>反向提示词</span><input type="text" value="text, watermark, lowres, bad hands"></label>
+          <div class="grid2">
+            <label class="field"><span>宽度</span><input type="number" value="1216"></label>
+            <label class="field"><span>高度</span><input type="number" value="832"></label>
+          </div>
+          <div class="grid2">
+            <label class="field"><span>步数</span><input type="number" value="28"></label>
+            <label class="field"><span>CFG</span><input type="number" value="4.5"></label>
+          </div>
+        </div>
+        <div class="actionbar">
+          <label class="field" style="margin:0;width:90px"><span>张数</span><input type="number" value="4"></label>
+          <button class="btn primary">开始生成</button>
+          <button class="btn">交给任务总管</button>
+          <span class="sp"></span>
+          <button class="btn tiny ghost">编辑参数</button>
+        </div>
+      </div>
+    </section>
+
+    <aside class="col col-res">
+      <div class="col-head"><strong>任务与产物</strong><span class="sp"></span><small>2 运行 · 9 完成</small></div>
+      <div class="col-body">
+        <div class="taskbar running"><span class="dot"></span><b>生成中</b><span class="txt">2 / 4 张</span><span class="track"><i style="width:50%"></i></span></div>
+        <div class="taskbar running"><span class="dot"></span><b>排队中</b><span class="txt">第 2 场</span><span class="track"><i style="width:6%"></i></span></div>
+        <div class="taskbar ok"><span class="dot"></span><b>已完成</b><span class="txt">4 张 · 1 分 12 秒</span></div>
+        <div class="sep"></div>
+        <div class="grp-head"><strong>生成结果</strong><small>点图可放大</small></div>
+        <div class="grid-img">
+          <span class="ph done">01</span><span class="ph done">02</span><span class="ph done">03</span>
+          <span class="ph done">04</span><span class="ph">05</span><span class="ph">06</span>
+        </div>
+      </div>
+    </aside>
+  </div>
+  <nav class="panebar">
+    <button data-pane="nav"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"></path></svg>工作流</button>
+    <button data-pane="main" class="active"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v8M8 12h8"></path></svg>提交</button>
+    <button data-pane="res"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="7" height="7" rx="1"></rect><rect x="14" y="4" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect></svg>结果</button>
+  </nav>
+</section>
+
+<!-- ══════════════ ④ 拆书匠 ══════════════ -->
+<section class="module" data-module="novel" hidden>
+  <header class="mod-head">
+    <span class="mod-icon"><svg viewBox="0 0 24 24"><path d="M5 4.5h9a3 3 0 0 1 3 3V19H8a3 3 0 0 0-3 3Z"></path><path d="M5 4.5v17.2M8.5 8.5h6M8.5 12h6"></path></svg></span>
+    <div class="mod-titles"><h2>拆书匠 · 《雾港旧船》<small>已导入 42 章 · 128,400 字 · 状态：分镜已完成</small></h2></div>
+    <span class="pill ok"><span class="dot"></span>已保存到 D:\naibachatdata\novel\雾港旧船</span>
+    <div class="mod-head-spacer"></div>
+    <div class="mod-actions">
+      <button class="btn tiny sec">管理记录</button>
+      <button class="btn tiny sec">导入 TXT</button>
+      <button class="btn tiny sec">作品</button>
+      <button class="btn tiny primary">导出</button>
+      <button class="btn tiny btn-more" aria-label="更多操作">⋯</button>
+    </div>
+  </header>
+  <div class="stagebar">
+    <div class="stages">
+      <button class="stage-chip done"><span class="idx">✓</span>拆章</button>
+      <button class="stage-chip done"><span class="idx">✓</span>要素</button>
+      <button class="stage-chip done"><span class="idx">✓</span>大纲</button>
+      <button class="stage-chip done"><span class="idx">✓</span>剧本</button>
+      <button class="stage-chip active"><span class="idx">5</span>分镜</button>
+    </div>
+    <small>五个阶段：拆章 → 要素 → 大纲 → 剧本 → 分镜</small>
+  </div>
+  <div class="cols" data-pane="main">
+    <aside class="col col-nav">
+      <div class="col-head"><strong>作品与章节</strong><span class="sp"></span><small>已选 6 章</small></div>
+      <div class="col-body">
+        <div class="card tight" style="margin-bottom:10px">
+          <div class="row" style="gap:10px">
+            <span class="thumb" style="width:40px;height:52px;border-radius:6px;background:linear-gradient(160deg,#6D5AE6,#3D4257);color:#fff;font-size:15px">雾</span>
+            <span class="t" style="min-width:0"><b style="display:block;font-size:13px">雾港旧船</b><small style="color:var(--muted);font-size:11px">42 章 · 改编自 TXT</small></span>
+          </div>
+          <div class="row" style="margin-top:10px;gap:14px">
+            <span><b style="font-size:14px">42</b> <small style="color:var(--muted)">章节</small></span>
+            <span><b style="font-size:14px">12.8w</b> <small style="color:var(--muted)">字数</small></span>
+            <span><b style="font-size:14px">5 / 5</b> <small style="color:var(--muted)">阶段</small></span>
+          </div>
+        </div>
+        <input type="search" placeholder="筛选章节" style="margin-bottom:10px">
+        <div class="item active"><span class="thumb">1</span><span class="t"><b>第 1 章 · 旧船</b><small>3,180 字 · 已改编</small></span></div>
+        <div class="item"><span class="thumb">2</span><span class="t"><b>第 2 章 · 合影</b><small>2,940 字 · 已改编</small></span></div>
+        <div class="item"><span class="thumb">3</span><span class="t"><b>第 3 章 · 第六个人</b><small>3,510 字 · 原文</small></span></div>
+        <div class="item"><span class="thumb">4</span><span class="t"><b>第 4 章 · 潮汐表</b><small>2,760 字 · 原文</small></span></div>
+      </div>
+    </aside>
+
+    <section class="col col-main">
+      <div class="col-head"><strong>分镜</strong><span class="sp"></span><small>逐场出图提示词，可批量送造梦机</small></div>
+      <div class="col-body">
+        <div class="grp">
+          <div class="grp-head"><strong>生成参数</strong><small>素材范围与正文长度</small></div>
+          <div class="grid2">
+            <label class="field"><span>每章正文上限 <b>3,000</b> 字</span><input type="range" min="3000" max="15000" step="500" value="3000"></label>
+            <label class="field"><span>一次最多选择 <b>6</b> 章</span><input type="range" min="1" max="20" step="1" value="6"></label>
+          </div>
+        </div>
+        <div class="grp">
+          <div class="grp-head"><strong>生成设置</strong><small>写法可编辑，改了立即保存</small></div>
+          <label class="field"><span>出图提示词写法（系统提示词）<small>留空 = 内置分镜写法</small></span>
+            <textarea rows="3">每场转成一条出图提示词：写清地点景物、人物外观与动作、景别构图、光线氛围，不写台词字幕。</textarea></label>
+          <div class="grid2">
+            <label class="field"><span>供应商</span><select><option>TE中转</option></select></label>
+            <label class="field"><span>模型</span><select><option>DeepSeek-V3</option></select></label>
+          </div>
+        </div>
+        <div class="grp">
+          <div class="grp-head"><strong>分镜结果</strong><small>3 场 · 勾选后批量带走</small></div>
+          <div class="taskbar ok"><span class="dot"></span><b>已完成</b><span class="txt">3 场 · 26 秒</span><span class="sp" style="flex:1"></span><button class="btn tiny">保存为新版本</button></div>
+          <div class="card tight" style="margin-bottom:8px">
+            <div class="row" style="justify-content:space-between"><strong style="font-size:12.5px">第 1 场 · 外景 船坞 黄昏</strong><span class="chip accent">已选</span></div>
+            <p class="note" style="margin-top:5px">低机位 35mm，锈红缆桩前景，陈砚背身蹲在船舷边摸划痕，雾中龙门吊剪影，暖橙路灯光在湿地面拉长反光。</p>
+          </div>
+          <div class="card tight" style="margin-bottom:8px">
+            <div class="row" style="justify-content:space-between"><strong style="font-size:12.5px">第 2 场 · 内景 船舱 夜</strong><span class="chip accent">已选</span></div>
+            <p class="note" style="margin-top:5px">手持微晃，头灯切开尘埃，陈砚掀开防水布一角，露出 1998 年的船员合影，画面偏冷青。</p>
+          </div>
+        </div>
+        <div class="actionbar">
+          <button class="btn primary">发送到造梦机</button>
+          <button class="btn">全选</button>
+          <span class="sp"></span>
+          <button class="btn tiny ghost">恢复默认写法</button>
+        </div>
+      </div>
+    </section>
+
+    <aside class="col col-res">
+      <div class="col-head"><strong>本次生成说明</strong><span class="sp"></span><small>分镜</small></div>
+      <div class="col-body">
+        <div class="card tight" style="margin-bottom:10px">
+          <div class="row" style="justify-content:space-between"><strong style="font-size:12.5px">这次会做什么</strong><span class="chip ok">就绪</span></div>
+          <p class="note" style="margin-top:6px">取已选 6 章的改编稿，按上面的写法逐场转成出图提示词；每章正文最多 3,000 字，超出部分截断。</p>
+        </div>
+        <div class="card tight" style="margin-bottom:10px">
+          <div class="row" style="justify-content:space-between"><strong style="font-size:12.5px">保存状态</strong><span class="chip ok">已保存</span></div>
+          <p class="note" style="margin-top:6px">分镜 v3 · 11-03 11:42 · 前一版 v2 仍在历史里</p>
+        </div>
+        <div class="card tight">
+          <div class="row" style="justify-content:space-between"><strong style="font-size:12.5px">作品保存在哪里</strong><small style="color:var(--muted)">本机路径</small></div>
+          <p class="note" style="margin-top:6px;font-family:var(--font-mono)">D:\naibachatdata\novel\雾港旧船</p>
+          <div class="row" style="margin-top:8px"><button class="btn tiny">复制路径</button><button class="btn tiny">打开保存位置</button></div>
+        </div>
+      </div>
+    </aside>
+  </div>
+  <nav class="panebar">
+    <button data-pane="nav"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"></path></svg>章节</button>
+    <button data-pane="main" class="active"><svg viewBox="0 0 24 24"><path d="M4 20h16"></path><path d="M15.5 4.6a2.1 2.1 0 0 1 3 3L9.8 16.8 5.5 18l1.2-4.3Z"></path></svg>编辑</button>
+    <button data-pane="res"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 16v-4M12 8h.01"></path></svg>预览</button>
+  </nav>
+</section>
+
+<!-- ══════════════ ⑤ 织书台 ══════════════ -->
+<section class="module" data-module="writer" hidden>
+  <header class="mod-head">
+    <span class="mod-icon"><svg viewBox="0 0 24 24"><path d="M4 20h16"></path><path d="M15.5 4.6a2.1 2.1 0 0 1 3 3L9.8 16.8 5.5 18l1.2-4.3Z"></path></svg></span>
+    <div class="mod-titles"><h2>织书台 · 《雾港》<small>4 阶段 · 12 章已成稿 7 · 46,200 字</small></h2></div>
+    <span class="pill run"><span class="dot"></span>第 8 章生成中</span>
+    <div class="mod-head-spacer"></div>
+    <div class="mod-actions">
+      <button class="btn tiny sec">管理记录</button>
+      <button class="btn tiny sec">作品</button>
+      <button class="btn tiny sec">导出</button>
+      <button class="btn tiny primary">+ 新建</button>
+      <button class="btn tiny btn-more" aria-label="更多操作">⋯</button>
+    </div>
+  </header>
+  <div class="stagebar">
+    <div class="stages">
+      <button class="stage-chip done"><span class="idx">✓</span>设定</button>
+      <button class="stage-chip done"><span class="idx">✓</span>大纲</button>
+      <button class="stage-chip done"><span class="idx">✓</span>章节</button>
+      <button class="stage-chip active"><span class="idx">4</span>正文</button>
+    </div>
+    <small>四个阶段：设定 → 大纲 → 章节 → 正文</small>
+  </div>
+  <div class="cols" data-pane="main">
+    <aside class="col col-nav">
+      <div class="col-head"><strong>目录</strong><span class="sp"></span><small>7 / 12</small></div>
+      <div class="col-body">
+        <div class="card tight" style="margin-bottom:10px">
+          <div class="row" style="justify-content:space-between;margin-bottom:6px"><strong style="font-size:12.5px">进度</strong><small style="color:var(--muted)">58%</small></div>
+          <div class="taskbar" style="margin:0;padding:0;background:none;border:0"><span class="track" style="flex:1"><i style="width:58%"></i></span></div>
+          <div class="row" style="margin-top:8px;gap:14px">
+            <span><b style="font-size:14px">12</b> <small style="color:var(--muted)">章节</small></span>
+            <span><b style="font-size:14px">7</b> <small style="color:var(--muted)">已成稿</small></span>
+            <span><b style="font-size:14px">4.6w</b> <small style="color:var(--muted)">总字数</small></span>
+          </div>
+        </div>
+        <div class="item"><span class="thumb">1</span><span class="t"><b>第 1 章 · 旧船</b><small>3,900 字</small></span><span class="chip ok">已稿</span></div>
+        <div class="item"><span class="thumb">2</span><span class="t"><b>第 2 章 · 合影</b><small>4,100 字</small></span><span class="chip ok">已稿</span></div>
+        <div class="item active"><span class="thumb">8</span><span class="t"><b>第 8 章 · 潮汐表</b><small>生成中</small></span><span class="chip warn">进行</span></div>
+        <div class="item"><span class="thumb">9</span><span class="t"><b>第 9 章 · 未命名</b><small>待写</small></span></div>
+      </div>
+    </aside>
+
+    <section class="col col-main">
+      <div class="col-head"><strong>第 8 章 · 潮汐表</strong><span class="sp"></span><small>成稿后可切成新版本</small></div>
+      <div class="col-body">
+        <div class="taskbar running"><span class="dot"></span><b>生成中</b><span class="txt">1,240 / 4,000 字 · 18s</span><span class="track"><i style="width:31%"></i></span><button class="btn tiny">取消</button></div>
+        <div class="grp">
+          <div class="grp-head"><strong>本章正文</strong><small>直接改，保存即新版本</small></div>
+          <textarea rows="9">陈砚把潮汐表摊在船舱的矮桌上，纸边卷得像被水泡过又晒干。
+
+他数着 1998 年那几行，手指停在七月十九。那天港口封航，气象站记了六级风，可合影里的人都站在甲板上，笑得没有一丝风的样子。
+
+「你爸那趟，本来不该出海。」老周在门口站着，没进来。</textarea>
+        </div>
+        <div class="grp">
+          <div class="grp-head"><strong>续写设置</strong><small>与前四个模块同口径</small></div>
+          <div class="grid2">
+            <label class="field"><span>单章字数</span><select><option>4000 字</option></select></label>
+            <label class="field"><span>章节结尾</span><select><option>留悬念</option></select></label>
+          </div>
+          <div class="grid2">
+            <label class="field"><span>供应商</span><select><option>TE中转</option></select></label>
+            <label class="field"><span>模型</span><select><option>DeepSeek-V3</option></select></label>
+          </div>
+        </div>
+        <div class="actionbar">
+          <button class="btn primary">继续生成</button>
+          <button class="btn">保存为新版本</button>
+          <span class="sp"></span>
+          <button class="btn tiny ghost">查看历史版本</button>
+        </div>
+      </div>
+    </section>
+
+    <aside class="col col-res">
+      <div class="col-head"><strong>说明与状态</strong><span class="sp"></span><small>正文</small></div>
+      <div class="col-body">
+        <div class="card tight" style="margin-bottom:10px">
+          <div class="row" style="justify-content:space-between"><strong style="font-size:12.5px">这次会写什么</strong><span class="chip ok">就绪</span></div>
+          <p class="note" style="margin-top:6px">接着第 7 章结尾，写陈砚对照潮汐表发现日期对不上；保留老周的迟疑，不解释真相。</p>
+        </div>
+        <div class="card tight" style="margin-bottom:10px">
+          <div class="row" style="justify-content:space-between"><strong style="font-size:12.5px">带上的上下文</strong><small style="color:var(--muted)">自动压缩</small></div>
+          <div class="row" style="margin-top:8px"><span class="chip accent">设定 v4</span><span class="chip accent">大纲 v2</span><span class="chip">前章摘要</span><span class="chip">角色 6 人</span></div>
+        </div>
+        <div class="card tight">
+          <div class="row" style="justify-content:space-between"><strong style="font-size:12.5px">保存状态</strong><span class="chip ok">自动保存</span></div>
+          <p class="note" style="margin-top:6px">每完成一段存一版；失败时保留前面已写的部分。</p>
+        </div>
+      </div>
+    </aside>
+  </div>
+  <nav class="panebar">
+    <button data-pane="nav"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"></path></svg>作品</button>
+    <button data-pane="main" class="active"><svg viewBox="0 0 24 24"><path d="M4 20h16"></path><path d="M15.5 4.6a2.1 2.1 0 0 1 3 3L9.8 16.8 5.5 18l1.2-4.3Z"></path></svg>编辑</button>
+    <button data-pane="res"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 16v-4M12 8h.01"></path></svg>说明</button>
+  </nav>
+</section>
+
+<!-- ══════════════ ⑥ 统一规范 ══════════════ -->
+<section class="module spec" data-module="spec" hidden>
+  <h3>五模块统一规范（本次优化的落点）</h3>
+  <p class="lead">以下 6 条是这次改动的核心：五个模块共用同一套壳与组件，只在内容区保留各自差异。迁移时按「先壳后内容」的顺序做，每个模块都能单独上线。</p>
+
+  <div class="spec-grid">
+    <div class="spec-card">
+      <h4>① 模块头</h4>
+      <p class="why">现在只有拆书匠 / 织书台有页面头，另外三个模块进来后没有标题，只能靠侧栏高亮反推位置。</p>
+      <div class="demo">
+        <div class="mod-head" style="padding:0;border:0;background:none">
+          <span class="mod-icon"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"></rect><rect x="13" y="4" width="7" height="7" rx="1.5"></rect><rect x="4" y="13" width="7" height="7" rx="1.5"></rect><rect x="13" y="13" width="7" height="7" rx="1.5"></rect></svg></span>
+          <div class="mod-titles"><h2>提词库<small>1,842 条模板 · 最近更新 11-02</small></h2></div>
+          <span class="pill run"><span class="dot"></span>1 个任务进行中</span>
+          <div class="mod-head-spacer"></div>
+          <div class="mod-actions"><button class="btn tiny">导入</button><button class="btn tiny primary">+ 新建</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="spec-card">
+      <h4>② 三栏栅格</h4>
+      <p class="why">各模块三栏宽度是各自写死的，切模块时内容宽度会跳。统一成 272 / 1fr / 340，≤1180px 时右栏收窄到 300。</p>
+      <div class="demo">
+        <div style="display:grid;grid-template-columns:80px minmax(0,1fr) 96px;gap:6px;height:96px">
+          <div style="background:var(--surface);border:1px solid var(--line);border-radius:8px;display:grid;place-items:center;font-size:11px;color:var(--muted)">导航</div>
+          <div style="background:var(--accent-soft);border:1px solid var(--brand-200);border-radius:8px;display:grid;place-items:center;font-size:11px;color:var(--accent-solid)">工作区</div>
+          <div style="background:var(--surface);border:1px solid var(--line);border-radius:8px;display:grid;place-items:center;font-size:11px;color:var(--muted)">结果</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="spec-card">
+      <h4>③ 任务条</h4>
+      <p class="why">进行中 / 完成 / 失败现在有五种写法（hint 文本、进度条、任务卡、折叠块、toast）。统一成一条组件，五个模块共用。</p>
+      <div class="demo">
+        <div class="taskbar running" style="margin-bottom:6px"><span class="dot"></span><b>生成中</b><span class="txt">12s</span><span class="track"><i style="width:38%"></i></span><button class="btn tiny">取消</button></div>
+        <div class="taskbar ok" style="margin-bottom:6px"><span class="dot"></span><b>已完成</b><span class="txt">1,240 字</span></div>
+        <div class="taskbar warn"><span class="dot"></span><b>失败</b><span class="txt">上游 429</span><span class="sp" style="flex:1"></span><button class="btn tiny">重试</button></div>
+      </div>
+    </div>
+
+    <div class="spec-card">
+      <h4>④ 分组头 + 吸底操作区</h4>
+      <p class="why">长表单里主按钮会滚出视野。分组统一「标题 + 一句说明」，主操作区吸底常驻。</p>
+      <div class="demo">
+        <div class="grp-head"><strong>生成设置</strong><small>与其余模块同口径</small></div>
+        <div class="grid2"><input type="text" value="供应商"><input type="text" value="模型"></div>
+        <div style="position:relative"><div class="actionbar" style="position:static;margin-top:8px"><button class="btn tiny primary">生成</button><button class="btn tiny">取消</button></div></div>
+      </div>
+    </div>
+
+    <div class="spec-card">
+      <h4>⑤ 空态</h4>
+      <p class="why">现在的空态有的是一句话、有的没有。统一「图标 + 一句结论 + 下一步动作」。</p>
+      <div class="demo">
+        <div class="empty" style="padding:16px">
+          <span class="ico"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg></span>
+          <strong>还没有批次</strong>
+          <p>拖入一个文件夹即可开始。</p>
+          <button class="btn tiny primary">选择文件夹</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="spec-card">
+      <h4>⑥ 手机档位条（改到底部）</h4>
+      <p class="why">现在手机档位按钮在顶部，和模块头挤在一起、占掉一整行高度。改成底部三档：列表 / 工作 / 结果。</p>
+      <div class="demo" style="padding:0">
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:2px;padding:4px;background:var(--surface);border:1px solid var(--line);border-radius:12px">
+          <button class="btn tiny" style="justify-content:center;border:0">列表</button>
+          <button class="btn tiny primary" style="justify-content:center">工作</button>
+          <button class="btn tiny" style="justify-content:center;border:0">结果</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h3 style="margin-bottom:8px">逐模块改动对照</h3>
+  <table class="cmp">
+    <thead><tr><th style="width:88px">模块</th><th style="width:34%">现在</th><th>优化后</th><th style="width:74px">改动量</th></tr></thead>
+    <tbody>
+      <tr><td><b>提词库</b></td><td class="before">无模块头；顶栏搜索框常驻但对其他模块无效；结果区与历史产出两个入口并存</td><td>补模块头（含模板数 + 任务态）；搜索移入左栏；结果栏统一「任务条 + 结果卡 + 历史」</td><td><span class="tag-yes">小</span></td></tr>
+      <tr><td><b>打标器</b></td><td class="before">批次进度在左栏底部自成一派；拖放区与参数混在一栏；结果三档 tab 在右栏</td><td>进度改用统一任务条；拖放区收成空态卡；结果三档保持但样式与其余模块一致</td><td><span class="tag-yes">中</span></td></tr>
+      <tr><td><b>造梦机</b></td><td class="before">连接状态是一条独立状态栏；任务列表与产物网格上下堆叠，长任务挤掉产物</td><td>连接状态收进模块头的状态 pill；任务与产物分区固定高度、各自滚动</td><td><span class="tag-yes">中</span></td></tr>
+      <tr><td><b>拆书匠</b></td><td class="before">已有模块头与阶段条（五阶段）；右栏说明是四张卡；手机三档在顶部</td><td>保留结构，套用统一壳：阶段条样式统一、右栏卡片统一、手机档位下沉</td><td><span class="tag-yes">小</span></td></tr>
+      <tr><td><b>织书台</b></td><td class="before">同拆书匠；四阶段；左栏随阶段换内容（设定版本 / 设定汇总 / 大纲汇总 / 目录）</td><td>保留阶段切换逻辑，套用统一壳；左栏四种形态共用同一套列表样式</td><td><span class="tag-yes">小</span></td></tr>
+    </tbody>
+  </table>
+  <p class="note" style="margin-top:12px">说明：本预览只做视觉与结构，不改任何交互逻辑与后端接口；模块 id、事件绑定、dom id 全部保留，迁移时可逐个模块替换。</p>
+</section>
+
+  </div>
+</div>
+</div>
+
+<script>
+(function(){
+  var stage=document.getElementById('stage');
+  var modules=[].slice.call(document.querySelectorAll('.module'));
+  var railItems=[].slice.call(document.querySelectorAll('.rail-item'));
+  var vpNote=document.getElementById('vpNote');
+
+  function showModule(name){
+    stage.dataset.module=name;
+    modules.forEach(function(m){ m.hidden = (m.dataset.module!==name); });
+    railItems.forEach(function(b){ b.classList.toggle('active', b.dataset.module===name); });
+    [].slice.call(document.querySelectorAll('#moduleTabs button')).forEach(function(b){
+      b.classList.toggle('active', b.dataset.module===name); });
+    document.querySelector('.rail').hidden = (name==='spec');
+    vpNote.textContent = name==='spec'
+      ? '规范页：共用组件与逐模块改动对照'
+      : '手机上点底部档位条切换「列表 / 工作 / 结果」';
+  }
+  function setVp(vp){
+    stage.dataset.vp=vp;
+    [].slice.call(document.querySelectorAll('#vpTabs button')).forEach(function(b){
+      b.classList.toggle('active', b.dataset.vp===vp); });
+  }
+  [].slice.call(document.querySelectorAll('#moduleTabs button')).forEach(function(b){
+    b.addEventListener('click', function(){ showModule(b.dataset.module); }); });
+  railItems.forEach(function(b){ b.addEventListener('click', function(){ showModule(b.dataset.module); }); });
+  [].slice.call(document.querySelectorAll('#vpTabs button')).forEach(function(b){
+    b.addEventListener('click', function(){ setVp(b.dataset.vp); }); });
+  [].slice.call(document.querySelectorAll('#themeTabs button')).forEach(function(b){
+    b.addEventListener('click', function(){
+      document.documentElement.dataset.theme=b.dataset.theme;
+      [].slice.call(document.querySelectorAll('#themeTabs button')).forEach(function(x){
+        x.classList.toggle('active', x===b); });
+    }); });
+  // 手机档位条
+  [].slice.call(document.querySelectorAll('.panebar')).forEach(function(bar){
+    var cols=bar.parentNode.querySelector('.cols');
+    [].slice.call(bar.querySelectorAll('button')).forEach(function(b){
+      b.addEventListener('click', function(){
+        cols.dataset.pane=b.dataset.pane;
+        [].slice.call(bar.querySelectorAll('button')).forEach(function(x){
+          x.classList.toggle('active', x===b); });
+      }); });
+  });
+})();
+</script>
+</body>
+</html>

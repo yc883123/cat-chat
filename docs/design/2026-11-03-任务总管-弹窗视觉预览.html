@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>任务总管 · 弹窗视觉预览</title>
+<!--
+  设计层提案，不连接真实任务、不调用模型、不写入数据。
+  重要：真实前端代码正在变动，本预览【不绑定当前工作树的某一刻实现】。
+  字段与分组仅为代表性示意，落地时以真实 dialog 结构为准；
+  预览只用于评审「弹窗容器」的视觉：遮罩 / 固定标题栏 / 唯一滚动区 /
+  底部 sticky 操作条 / 移动端全屏 / 深浅主题可读性。
+  沿用 public/styles.css 现有 :root 令牌名，不另起色板。
+-->
+<style>
+:root{
+  color-scheme:light;
+  --brand-100:#EDECFF; --brand-200:#DCD3FF; --brand-500:#7C5CFF; --brand-600:#6D5AE6; --brand-700:#5A47C4;
+  --neutral-0:#fff; --neutral-50:#F8F9FC; --neutral-100:#F1F2F7; --neutral-200:#E6E8F0; --neutral-300:#D2D6E3;
+  --neutral-400:#A9AFC2; --neutral-500:#7A8099; --neutral-600:#5A6079; --neutral-700:#3D4257; --neutral-800:#2A2E40; --neutral-900:#1E2138;
+  --bg:#F6F7FB; --surface:var(--neutral-0); --surface-2:var(--neutral-100); --surface-inset:#F5F6FA;
+  --line:var(--neutral-200); --line-strong:var(--neutral-300);
+  --text:var(--neutral-800); --muted:var(--neutral-500);
+  --accent:var(--brand-500); --accent-solid:var(--brand-600); --accent-soft:var(--brand-100);
+  --sidebar:#1E2138; --sidebar-text:#F1F2F7; --sidebar-muted:#989FC0;
+  --success:#12A594; --success-soft:#DCF4F0; --warning:#D9820B; --warning-soft:#FCF0E0;
+  --danger:#DC4A46; --danger-soft:#FCE8E7; --info:#3B82C4; --info-soft:#E6F1FB;
+  --r-sm:6px; --r-md:9px; --r-lg:13px; --r-xl:18px; --r-full:999px;
+  --shadow-1:0 1px 2px rgba(30,33,56,.05),0 1px 3px rgba(30,33,56,.04);
+  --shadow-2:0 6px 20px rgba(30,33,56,.09),0 2px 6px rgba(30,33,56,.045);
+  --shadow-3:0 18px 48px rgba(30,33,56,.20),0 4px 12px rgba(30,33,56,.08);
+  --font-sans:"Inter","HarmonyOS Sans SC","PingFang SC","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+}
+html[data-theme="dark"]{
+  color-scheme:dark;
+  --neutral-0:#171A24; --neutral-50:#111522; --neutral-100:#1D2130; --neutral-200:#2B3143; --neutral-300:#3D455C;
+  --neutral-400:#66708A; --neutral-500:#8D96AD; --neutral-600:#AEB6C8; --neutral-700:#C8CEDA; --neutral-800:#E3E7EF; --neutral-900:#0D1019;
+  --bg:#111522; --surface:#171A24; --surface-2:#1D2130; --surface-inset:#121620;
+  --line:#2B3143; --line-strong:#3D455C; --text:#E3E7EF; --muted:#8D96AD;
+  --accent-soft:#2A2350; --sidebar:#0D1019; --sidebar-text:#E3E7EF; --sidebar-muted:#9CA6BD;
+  --success-soft:#163C3B; --warning-soft:#46351A; --danger-soft:#452322; --info-soft:#183044;
+  --shadow-1:0 1px 2px rgba(0,0,0,.25); --shadow-2:0 6px 20px rgba(0,0,0,.3); --shadow-3:0 18px 48px rgba(0,0,0,.5);
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--text);font:13.5px/1.6 var(--font-sans);overflow:hidden;-webkit-font-smoothing:antialiased}
+button,input,textarea,select{font:inherit;color:inherit}
+button{cursor:pointer}
+button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+h1,h2,h3,h4,p{margin:0}
+[hidden]{display:none!important}
+
+/* ── 预览工具条（仅预览用） ── */
+.preview-bar{height:54px;display:flex;align-items:center;gap:10px;padding:0 16px;background:var(--surface);border-bottom:1px solid var(--line);flex:none;position:relative;z-index:30}
+.preview-kicker{display:flex;align-items:center;gap:9px;font-weight:700;font-size:13px;white-space:nowrap}
+.preview-kicker i{width:8px;height:8px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px var(--accent-soft)}
+.preview-note{color:var(--muted);font-size:11.5px;white-space:nowrap}
+.scene-tabs{display:flex;gap:2px;padding:3px;margin-left:6px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-2);overflow-x:auto;scrollbar-width:none}
+.scene-tabs::-webkit-scrollbar{display:none}
+.scene-tab{border:0;border-radius:6px;padding:5px 10px;background:transparent;color:var(--muted);font-size:12px;white-space:nowrap}
+.scene-tab:hover{color:var(--text)}
+.scene-tab.active{background:var(--surface);color:var(--accent-solid);font-weight:650;box-shadow:var(--shadow-1)}
+.preview-spacer{flex:1}
+.demo-control{height:31px;display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line-strong);border-radius:var(--r-md);background:var(--surface);color:var(--muted);padding:0 10px;font-size:12px;white-space:nowrap;flex:none}
+.demo-control:hover{border-color:var(--accent);color:var(--text)}
+.demo-control.active{color:var(--accent-solid);border-color:var(--accent);background:var(--accent-soft)}
+.demo-control svg{width:15px;height:15px}
+
+/* ── 变暗的工作台背景：让弹窗有「从页面弹出来」的语境 ── */
+.stage{position:fixed;inset:54px 0 0;background:var(--bg);overflow:hidden}
+.ghost{display:grid;grid-template-columns:222px minmax(0,1fr) 296px;height:100%;gap:14px;padding:16px;opacity:.62}
+.ghost-col{border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);padding:16px;display:grid;gap:11px;align-content:start}
+.ghost-col.dark{background:var(--sidebar);border-color:transparent}
+.ghost-line{height:9px;border-radius:5px;background:var(--surface-2)}
+.ghost-col.dark .ghost-line{background:rgba(255,255,255,.10)}
+.ghost-line.w40{width:40%}.ghost-line.w60{width:60%}.ghost-line.w80{width:80%}
+.ghost-card{height:56px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-inset)}
+.ghost-col.dark .ghost-card{background:rgba(255,255,255,.055);border-color:rgba(255,255,255,.08)}
+.ghost-title{height:14px;width:55%;border-radius:5px;background:var(--surface-2);margin-bottom:4px}
+.ghost-col.dark .ghost-title{background:rgba(255,255,255,.16)}
+.stage-hint{position:absolute;left:50%;bottom:18px;transform:translateX(-50%);color:var(--muted);font-size:11.5px;white-space:nowrap}
+
+/* ── 弹窗容器：三段式骨架（本次改版核心） ── */
+.sa-dialog{width:min(var(--dlg-w,720px),calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:min(88dvh,900px);padding:0;border:1px solid var(--line);border-radius:16px;background:var(--surface);color:var(--text);box-shadow:var(--shadow-3);overflow:hidden}
+.sa-dialog[open]{display:flex;flex-direction:column}
+.sa-dialog::backdrop{background:rgba(14,17,30,.55);backdrop-filter:blur(3px)}
+html[data-theme="dark"] .sa-dialog::backdrop{background:rgba(4,6,14,.72)}
+.dlg-head{flex:none;display:flex;align-items:flex-start;gap:12px;padding:17px 20px;border-bottom:1px solid var(--line);background:var(--surface)}
+.dlg-ico{width:34px;height:34px;flex:none;display:grid;place-items:center;border-radius:10px;background:var(--accent-soft);color:var(--accent-solid)}
+.dlg-ico svg{width:18px;height:18px}
+.dlg-head-copy{flex:1;min-width:0}
+.dlg-head-copy h2{font-size:16px;font-weight:700;line-height:1.35;letter-spacing:-.01em}
+.dlg-head-copy p{margin-top:3px;color:var(--muted);font-size:12px;line-height:1.55}
+.dlg-close{width:30px;height:30px;flex:none;display:grid;place-items:center;border:1px solid transparent;border-radius:var(--r-md);background:transparent;color:var(--muted)}
+.dlg-close:hover{border-color:var(--line);background:var(--surface-2);color:var(--text)}
+.dlg-close svg{width:16px;height:16px}
+.dlg-body{flex:1 1 auto;min-height:0;overflow:auto;padding:20px;display:grid;gap:0;align-content:start}
+.dlg-foot{flex:none;display:flex;align-items:center;gap:12px;padding:14px 20px;border-top:1px solid var(--line);background:var(--surface)}
+.foot-hint{flex:1;min-width:0;color:var(--muted);font-size:11.5px;line-height:1.55}
+.foot-btns{display:flex;align-items:center;gap:9px;flex:none}
+
+/* ── 通用组件（作用域限定在弹窗内，短类名只在预览里用） ── */
+.sa-dialog .btn,.gallery .btn{min-height:36px;display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:0 14px;border:1px solid var(--line-strong);border-radius:var(--r-md);background:var(--surface);color:var(--text);font-size:12.5px;font-weight:600;white-space:nowrap}
+.sa-dialog .btn:hover,.gallery .btn:hover{border-color:var(--accent);color:var(--accent-solid)}
+.sa-dialog .btn-primary,.gallery .btn-primary{border-color:var(--accent-solid);background:var(--accent-solid);color:#fff}
+.sa-dialog .btn-primary:hover,.gallery .btn-primary:hover{background:var(--brand-700);color:#fff;border-color:var(--brand-700)}
+.sa-dialog .btn-quiet,.gallery .btn-quiet{border-color:transparent;background:transparent;color:var(--muted)}
+.sec{margin-bottom:20px}
+.sec:last-child{margin-bottom:2px}
+.sec-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+.sec-head h3{font-size:12.5px;font-weight:700}
+.sec-head span{color:var(--muted);font-size:11.5px}
+.hint{color:var(--muted);font-size:11.5px;line-height:1.65}
+.field{display:block;margin-top:13px}
+.field > span{display:block;margin-bottom:7px;font-size:12px;font-weight:600}
+.field > small{display:block;margin-top:6px;color:var(--muted);font-size:11.5px;line-height:1.6}
+.input,.textarea,.select{width:100%;box-sizing:border-box;padding:10px 11px;border:1px solid var(--line-strong);border-radius:var(--r-md);background:var(--surface-inset);color:var(--text);font-size:12.5px;line-height:1.6}
+.input:focus,.textarea:focus,.select:focus{border-color:var(--accent);outline:0;box-shadow:0 0 0 3px var(--accent-soft)}
+.input::placeholder,.textarea::placeholder{color:var(--muted)}
+.textarea{min-height:88px;resize:vertical}
+.field-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.field-row .field{margin-top:0}
+.mode-cards{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+.mode-card{position:relative;padding:14px 15px;border:1px solid var(--line);border-radius:13px;background:var(--surface-inset);color:var(--text);text-align:left}
+.mode-card:hover{border-color:var(--accent)}
+.mode-card.active{border-color:var(--accent);background:var(--accent-soft);box-shadow:0 0 0 2px var(--accent-soft)}
+.mode-card .mc-top{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:650}
+.mode-card .mc-top svg{width:16px;height:16px;color:var(--accent-solid)}
+.mode-card p{margin-top:7px;color:var(--muted);font-size:11.5px;line-height:1.65}
+.mode-card .radio{position:absolute;right:13px;top:15px;width:16px;height:16px;border:1.5px solid var(--line-strong);border-radius:50%}
+.mode-card.active .radio{border-color:var(--accent-solid);background:var(--accent-solid);box-shadow:inset 0 0 0 3.5px var(--surface)}
+.dropzone{display:grid;place-items:center;gap:8px;padding:20px;border:1.5px dashed var(--line-strong);border-radius:var(--r-lg);background:var(--surface-inset);color:var(--muted);font-size:12px;text-align:center}
+.dropzone svg{width:21px;height:21px;color:var(--accent-solid)}
+.dropzone b{color:var(--text);font-weight:600}
+.advanced{margin-top:14px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);overflow:hidden}
+.advanced summary{padding:11px 14px;cursor:pointer;font-size:12.5px;font-weight:600;color:var(--muted);list-style:none;display:flex;align-items:center;gap:8px}
+.advanced summary::-webkit-details-marker{display:none}
+.advanced summary svg{width:14px;height:14px;transition:transform .18s}
+.advanced[open] summary svg{transform:rotate(90deg)}
+.advanced[open] summary{border-bottom:1px solid var(--line);color:var(--text)}
+.advanced-body{padding:2px 14px 14px}
+.alert{display:flex;align-items:flex-start;gap:9px;padding:10px 12px;margin-bottom:16px;border:1px solid color-mix(in srgb,var(--warning) 40%,var(--line));border-radius:var(--r-md);background:var(--warning-soft);color:var(--text);font-size:12px;line-height:1.6}
+.alert svg{width:16px;height:16px;color:var(--warning);margin-top:1px}
+.alert.ok{border-color:color-mix(in srgb,var(--success) 40%,var(--line));background:var(--success-soft)}
+.alert.ok svg{color:var(--success)}
+.group{padding:14px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface-inset);display:grid;gap:11px}
+.group-legend{font-size:11.5px;font-weight:700;color:var(--muted);letter-spacing:.02em}
+.vis-card{display:flex;gap:11px;padding:12px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface)}
+.vis-ico{width:30px;height:30px;flex:none;display:grid;place-items:center;border-radius:9px;background:var(--accent-soft);color:var(--accent-solid)}
+.vis-ico svg{width:16px;height:16px}
+.vis-copy{flex:1;min-width:0}
+.vis-copy b{display:block;font-size:12.5px;font-weight:650}
+.vis-copy p{margin-top:3px;color:var(--muted);font-size:11.5px;line-height:1.6}
+.vis-copy .select{margin-top:9px}
+.check-list{display:grid;gap:9px}
+.check{display:flex;align-items:center;gap:9px;font-size:12px}
+.check i{width:18px;height:18px;display:grid;place-items:center;border-radius:50%;background:var(--success-soft);color:var(--success);font-size:11px;font-weight:700;font-style:normal;flex:none}
+.check span{color:var(--muted)}.check b{color:var(--text);font-weight:600}
+.batch-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.batch{border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);overflow:hidden}
+.batch-media{position:relative;aspect-ratio:16/10;display:grid;place-items:center;color:rgba(255,255,255,.75);font-size:10.5px;text-align:center;line-height:1.5}
+.batch-media.b1{background:linear-gradient(135deg,#2C3350,#4A4270)}
+.batch-media.b2{background:linear-gradient(135deg,#3D3152,#6B4A72)}
+.batch-media.b3{background:linear-gradient(135deg,#26405A,#3C6B78)}
+.batch-media .ph{display:grid;place-items:center;gap:5px}
+.batch-media .ph svg{width:20px;height:20px;opacity:.8}
+.batch-tag{position:absolute;left:8px;top:8px;padding:3px 8px;border-radius:var(--r-full);background:rgba(0,0,0,.42);color:#fff;font-size:10px}
+.batch-body{padding:10px 11px}
+.batch-body b{display:flex;justify-content:space-between;gap:6px;font-size:12px;font-weight:650}
+.batch-body b span{color:var(--muted);font-size:11px;font-weight:400}
+.batch-prompt{margin-top:8px;padding:8px 9px;border-radius:var(--r-sm);border:1px solid var(--line);background:var(--surface-inset);font-size:11.5px;line-height:1.6;max-height:56px;overflow:hidden}
+.kv-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.kv{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--line);border-radius:var(--r-full);background:var(--surface);font-size:11.5px;color:var(--muted)}
+.kv b{color:var(--text);font-weight:650}
+.outputs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.output{border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);overflow:hidden}
+.output-media{aspect-ratio:16/10;display:grid;place-items:center;background:linear-gradient(135deg,#373A5C,#5D5A8C);color:rgba(255,255,255,.8)}
+.output-media svg{width:24px;height:24px}
+.output-body{padding:9px 10px;display:flex;align-items:center;gap:8px}
+.output-body b{flex:1;min-width:0;font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mini-btn{width:26px;height:26px;display:grid;place-items:center;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface);color:var(--muted);flex:none}
+.mini-btn:hover{color:var(--accent-solid);border-color:var(--accent)}
+.mini-btn svg{width:13px;height:13px}
+.link-row{display:flex;align-items:center;gap:9px;width:100%;padding:9px 0;border:0;border-bottom:1px solid var(--line);background:transparent;color:var(--text);font-size:12px;text-align:left}
+.link-row:last-child{border-bottom:0}
+.link-row:hover{color:var(--accent-solid)}
+.link-row svg{width:15px;height:15px;color:var(--muted)}
+.link-row em{margin-left:auto;font-style:normal;color:var(--muted);font-size:11px}
+.chain{display:grid;gap:7px;padding-left:20px;margin:0}
+.chain li{font-size:11.5px;color:var(--muted);line-height:1.55}
+.chain li b{color:var(--text);font-weight:600}
+.pill{display:inline-flex;align-items:center;gap:6px;min-height:24px;padding:0 10px;border-radius:var(--r-full);font-size:11.5px;font-weight:600;white-space:nowrap}
+.pill.ok{background:var(--success-soft);color:var(--success)}
+.pill.wait{background:var(--warning-soft);color:var(--warning)}
+
+/* ── 并排对照 ── */
+.gallery{position:fixed;inset:54px 0 0;overflow:auto;padding:22px;display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:18px;align-content:start;background:var(--bg)}
+.gallery-card{border:1px solid var(--line);border-radius:16px;background:var(--surface);box-shadow:var(--shadow-2);overflow:hidden;display:flex;flex-direction:column;max-height:520px;cursor:pointer}
+.gallery-card:hover{border-color:var(--accent);box-shadow:var(--shadow-3)}
+.gallery-card .dlg-body{max-height:340px;pointer-events:none}
+.gallery-card .dlg-foot{padding:12px 16px}
+.gallery-cap{padding:8px 2px 0;color:var(--muted);font-size:11.5px}
+.gallery-card .foot-hint{display:none}
+
+/* ── 手机视图 ── */
+body[data-mobile="true"] .stage{inset:54px 0 0}
+body[data-mobile="true"] .ghost{grid-template-columns:1fr;padding:10px;gap:10px}
+body[data-mobile="true"] .ghost-col:nth-child(2),body[data-mobile="true"] .ghost-col:nth-child(3){display:none}
+body[data-mobile="true"] .sa-dialog{width:100vw;max-width:100vw;height:100dvh;max-height:100dvh;border:0;border-radius:0;margin:0}
+body[data-mobile="true"] .dlg-head{padding-top:max(17px,env(safe-area-inset-top))}
+body[data-mobile="true"] .dlg-foot{padding-bottom:max(14px,env(safe-area-inset-bottom))}
+body[data-mobile="true"] .dlg-body{padding:16px}
+body[data-mobile="true"] .mode-cards,body[data-mobile="true"] .field-row{grid-template-columns:1fr}
+body[data-mobile="true"] .batch-grid,body[data-mobile="true"] .outputs{grid-template-columns:1fr 1fr}
+body[data-mobile="true"] .foot-hint{display:none}
+body[data-mobile="true"] .foot-btns{width:100%}
+body[data-mobile="true"] .foot-btns .btn{flex:1}
+body[data-mobile="true"] .gallery{grid-template-columns:1fr}
+body[data-mobile="true"] .preview-note{display:none}
+@media(max-width:1000px){.preview-note{display:none}.scene-tab{padding:5px 8px}}
+
+.toast{position:fixed;left:50%;bottom:22px;z-index:80;transform:translate(-50%,8px);padding:9px 16px;border-radius:var(--r-full);background:var(--neutral-800);color:#fff;font-size:12px;box-shadow:var(--shadow-3);opacity:0;pointer-events:none;transition:opacity .18s,transform .18s}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+</style>
+</head>
+<body data-mobile="false">
+<header class="preview-bar">
+  <div class="preview-kicker"><i></i><span>任务总管 · 弹窗视觉预览</span></div>
+  <span class="preview-note">设计层提案 · 不连任务，不绑定当前正在变动的真实代码</span>
+  <div class="scene-tabs" role="group" aria-label="弹窗场景">
+    <button class="scene-tab active" data-scene="recipe" type="button">新建配方</button>
+    <button class="scene-tab" data-scene="custom" type="button">保存方案</button>
+    <button class="scene-tab" data-scene="review" type="button">生成前确认</button>
+    <button class="scene-tab" data-scene="result" type="button">执行结果</button>
+    <button class="scene-tab" data-scene="create" type="button">新建任务</button>
+    <button class="scene-tab" data-scene="gallery" type="button">并排对照</button>
+  </div>
+  <span class="preview-spacer"></span>
+  <button class="demo-control" id="themeBtn" type="button"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg><span>深色</span></button>
+  <button class="demo-control" id="mobileBtn" type="button"><svg viewBox="0 0 24 24"><rect x="6.5" y="3" width="11" height="18" rx="2"></rect><path d="M10 18h4"></path></svg><span>手机视图</span></button>
+</header>
+
+<div class="stage">
+  <div class="ghost">
+    <div class="ghost-col dark"><div class="ghost-title"></div><div class="ghost-line w80"></div><div class="ghost-line w60"></div><div class="ghost-card"></div><div class="ghost-card"></div><div class="ghost-card"></div></div>
+    <div class="ghost-col"><div class="ghost-title"></div><div class="ghost-line w40"></div><div class="ghost-card" style="height:88px"></div><div class="ghost-card"></div><div class="ghost-card"></div><div class="ghost-card"></div></div>
+    <div class="ghost-col"><div class="ghost-title"></div><div class="ghost-card"></div><div class="ghost-card"></div><div class="ghost-card"></div></div>
+  </div>
+  <div class="stage-hint">点上方切换弹窗；点遮罩或右上角可关闭 · 所有按钮仅演示</div>
+</div>
+
+<dialog class="sa-dialog" id="dlg" aria-labelledby="dlgTitle"></dialog>
+<div class="gallery" id="gallery" hidden></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+const $=s=>document.querySelector(s);
+const $$=s=>[...document.querySelectorAll(s)];
+const el=id=>document.getElementById(id);
+const I={
+  close:'<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"></path></svg>',
+  film:'<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="m10 9 5 3-5 3z"></path></svg>',
+  book:'<svg viewBox="0 0 24 24"><path d="M5 4h9a3 3 0 0 1 3 3v13H8a3 3 0 0 0-3 3z"></path><path d="M5 4v18M8 9h6"></path></svg>',
+  check:'<svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg>',
+  result:'<svg viewBox="0 0 24 24"><path d="M4 5h16v14H4z"></path><path d="M8 9h8M8 13h5"></path></svg>',
+  plus:'<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg>',
+  warn:'<svg viewBox="0 0 24 24"><path d="M12 3 2.8 19h18.4z"></path><path d="M12 9v4M12 16h.01"></path></svg>',
+  img:'<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"></rect><circle cx="8.5" cy="9.5" r="1.5"></circle><path d="m4 17 5-5 4 4 3-3 4 4"></path></svg>',
+  upload:'<svg viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5"></path><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"></path></svg>',
+  chev:'<svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"></path></svg>',
+  play:'<svg viewBox="0 0 24 24"><path d="m8 5 11 7-11 7z"></path></svg>',
+  down:'<svg viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5"></path><path d="M4 19h16"></path></svg>',
+  link:'<svg viewBox="0 0 24 24"><path d="M7 7h10v10H7z"></path><path d="m9 7 1-3h4l1 3M9 17l-1 3h8l-1-3"></path></svg>',
+  doc:'<svg viewBox="0 0 24 24"><path d="M6 3h8.5L19 7.5V21H6z"></path><path d="M14.5 3v4.5H19M9 12h6M9 16h4"></path></svg>'
+};
+
+function toast(msg){const t=el('toast');t.textContent=msg;t.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>t.classList.remove('show'),1900)}
+
+/* ── 五个弹窗的内容：字段仅为代表性示意，不逐字对应当前工作树 ── */
+const scenes={
+  recipe:{w:880,icon:I.film,title:'用图片批量制作视频',sub:'选一个方案，再决定素材怎么变成提示词',
+    body:`<div class="sec"><div class="sec-head"><h3>1 · 选择输入方式</h3><span>两种方式互斥，草稿各自保留</span></div>
+      <div class="mode-cards">
+        <button class="mode-card active" data-mode="script" type="button"><span class="radio"></span><div class="mc-top">${I.img}图片＋剧本生成提示词</div><p>每组图片配一段剧本正文，由模板生成可编辑的提示词，检查后再制作视频。</p></button>
+        <button class="mode-card" data-mode="prompt" type="button"><span class="radio"></span><div class="mc-top">${I.doc}直接使用提示词</div><p>已有写好的提示词，不调用提词模型、不要求剧本，原样使用不改写。</p></button>
+      </div></div>
+      <div class="sec"><div class="sec-head"><h3>2 · 方案与名称</h3><span>最近使用优先</span></div>
+        <div class="field-row"><label class="field"><span>使用哪个方案</span><select class="select"><option>官方 I2V · 单首帧（最近使用）</option><option>官方 R2V · 连续 1–6 图</option><option>我的方案 · 短剧镜头 v2</option></select></label>
+        <label class="field"><span>任务名称（可选）</span><input class="input" placeholder="本次视频批次"></label></div>
+        <p class="hint" style="margin-top:8px">模型与生成参数默认沿用方案，不用重新挑。</p></div>
+      <div class="sec"><div class="sec-head"><h3>3 · 素材与正文</h3><span>每组 1 张首帧图</span></div>
+        <div class="dropzone">${I.upload}<div><b>添加图片</b><br>可一次选多张；每组对应一张图</div></div>
+        <label class="field"><span>剧本正文 · 包含动作与对白</span><textarea class="textarea" placeholder="例：雨夜的巷口，林砚撑伞快步走来，忽然停住，回头望向身后空荡的街……"></textarea><small>剧本是主要输入，不是补充说明；额外要求可以写在剧本末尾。</small></label></div>
+      <div class="sec"><div class="sec-head"><h3>4 · 数量与时长</h3><span>默认继承方案</span></div>
+        <div class="field-row"><label class="field"><span>每组生成几条</span><input class="input" type="number" min="1" max="20" value="1"></label>
+        <label class="field"><span>视频时长（秒）</span><input class="input" type="number" min="4" max="15" value="5"></label></div></div>
+      <details class="advanced"><summary>${I.chev}高级设置（提词模型、数值参数）</summary><div class="advanced-body">
+        <label class="field"><span>提词模型</span><select class="select"><option>继承方案设置</option><option>单独指定模型…</option></select></label>
+        <label class="field"><span>输出尺寸</span><select class="select"><option>继承方案（1080 × 1920）</option><option>自定义…</option></select></label></div></details>`,
+    hint:'创建只保存清单，不会调用模型、不会开始生成。',
+    foot:[['保留草稿并关闭','btn btn-quiet'],['创建任务（暂不开始）','btn btn-primary']]},
+
+  custom:{w:720,icon:I.book,title:'保存为我的方案',sub:'把当前工作流存成可重复使用的方案，不改动原件',
+    body:`<div class="alert">${I.warn}<div>普通使用不需要理解节点参数。下面三项按用途描述；只有专业配置才需要展开底部的节点映射。</div></div>
+      <label class="field" style="margin-top:0"><span>方案名称</span><input class="input" placeholder="例：短剧镜头 v3"></label>
+      <div class="sec" style="margin-top:20px"><div class="sec-head"><h3>按用途确认三件事</h3><span>保存方案不授权执行</span></div>
+        <div class="group">
+          <div class="vis-card"><span class="vis-ico">${I.img}</span><div class="vis-copy"><b>素材用在哪</b><p>每组图片交给哪个入口，以及图片顺序是否影响结果。</p><select class="select"><option>首帧图 · 每组 1 张</option><option>参考图 · 每组 1–6 张</option></select></div></div>
+          <div class="vis-card"><span class="vis-ico">${I.doc}</span><div class="vis-copy"><b>提示词写到哪</b><p>生成好的提示词交给工作流里的哪个文本入口。</p><select class="select"><option>已随官方方案预设</option><option>手动指定文本入口…</option></select></div></div>
+          <div class="vis-card"><span class="vis-ico">${I.result}</span><div class="vis-copy"><b>结果怎么读</b><p>提词结果按完整文本还是按字段取用。</p><select class="select"><option>完整文本</option><option>按指定字段取用</option></select></div></div>
+        </div></div>
+      <details class="advanced"><summary>${I.chev}高级：节点与字段映射（仅专业配置）</summary><div class="advanced-body">
+        <div class="field-row"><label class="field"><span>节点</span><select class="select"><option>请选择节点…</option></select></label><label class="field"><span>字段名</span><input class="input" placeholder="选填"></label></div>
+        <p class="hint" style="margin-top:10px">普通审核不会展示这一层；底层标识只留内部诊断，不进入日常界面。</p></div></details>`,
+    hint:'不会修改原工作流与造梦机草稿；已有任务保留旧方案版本。',
+    foot:[['取消','btn btn-quiet'],['仅保存方案','btn btn-primary']]},
+
+  review:{w:760,icon:I.check,title:'生成前确认',sub:'逐组核对素材、提示词与设置；确认后才会提交生成',
+    body:`<div class="kv-row"><span class="kv">方案 <b>官方 I2V · 单首帧</b></span><span class="kv">共 <b>6 组</b></span><span class="kv">每组 <b>1 条视频</b></span><span class="kv">时长 <b>5 秒</b></span></div>
+      <div class="sec-head"><h3>按组核对（显示前 3 组，共 6 组）</h3><span>缩略图为占位示意</span></div>
+      <div class="batch-grid">
+        <article class="batch"><div class="batch-media b1"><span class="batch-tag">第 1 组</span><span class="ph">${I.img}素材缩略图占位</span></div><div class="batch-body"><b>第 1 条视频 <span>1 条 · 5 秒</span></b><div class="batch-prompt">雨夜巷口，林砚撑伞快步走来，忽然停住回头，镜头缓慢推近，冷色调。</div></div></article>
+        <article class="batch"><div class="batch-media b2"><span class="batch-tag">第 2 组</span><span class="ph">${I.img}素材缩略图占位</span></div><div class="batch-body"><b>第 2 条视频 <span>1 条 · 5 秒</span></b><div class="batch-prompt">天台边缘，两人对峙，风吹动衣摆，远景保持静止，轻微手持晃动。</div></div></article>
+        <article class="batch"><div class="batch-media b3"><span class="batch-tag">第 3 组</span><span class="ph">${I.img}素材缩略图占位</span></div><div class="batch-body"><b>第 3 条视频 <span>1 条 · 5 秒</span></b><div class="batch-prompt">旧书房内，台灯亮起，纸张被翻动，暖光，浅景深，镜头平稳下移。</div></div></article>
+      </div>
+      <div class="sec" style="margin-top:20px"><div class="sec-head"><h3>就绪检查</h3><span>只读</span></div>
+        <div class="check-list"><div class="check"><i>✓</i><span><b>6 张图片</b> 已就绪</span></div><div class="check"><i>✓</i><span><b>6 条提示词</b> 已就绪</span></div><div class="check"><i>✓</i><span>方案依赖 <b>可在本机运行</b></span></div><div class="check"><i>✓</i><span>没有阻断项</span></div></div></div>
+      <div class="alert ok">${I.check}<div>本次只提交 6 次视频生成，不会重新生成提示词，也不会改写素材与设置。</div></div>`,
+    hint:'确认后向本机提交 6 次生成；缺项会在这一步之前拦下。',
+    foot:[['返回修改','btn'],['确认生成 6 条视频','btn btn-primary']]},
+
+  result:{w:720,icon:I.result,title:'本次执行结果',sub:'6 条视频已生成完毕，产物保留在这里',
+    body:`<div class="alert ok">${I.check}<div><b>全部完成。</b> 6 组素材各自生成 1 条视频，均已收齐；历史失败记录保留，不再显示当前错误。</div></div>
+      <div class="sec"><div class="sec-head"><h3>产物</h3><span>缩略图为占位示意</span></div>
+        <div class="outputs">
+          <div class="output"><div class="output-media">${I.play}</div><div class="output-body"><b>第 1 条视频</b><button class="mini-btn" data-act="播放" type="button" title="播放">${I.play}</button><button class="mini-btn" data-act="下载" type="button" title="下载">${I.down}</button></div></div>
+          <div class="output"><div class="output-media">${I.play}</div><div class="output-body"><b>第 2 条视频</b><button class="mini-btn" data-act="播放" type="button" title="播放">${I.play}</button><button class="mini-btn" data-act="下载" type="button" title="下载">${I.down}</button></div></div>
+          <div class="output"><div class="output-media">${I.play}</div><div class="output-body"><b>第 3 条视频</b><button class="mini-btn" data-act="播放" type="button" title="播放">${I.play}</button><button class="mini-btn" data-act="下载" type="button" title="下载">${I.down}</button></div></div>
+        </div><p class="hint" style="margin-top:9px">共 6 条，此处展示前 3 条；播放与下载需要真实产物类型支持。</p></div>
+      <div class="sec"><div class="sec-head"><h3>相关入口</h3><span>可直接定位</span></div>
+        <button class="link-row" data-act="打开本轮对话" type="button">${I.link}本轮对应对话<em>打开 ›</em></button>
+        <button class="link-row" data-act="打开任务详情" type="button">${I.link}任务详情与阶段<em>跳转 ›</em></button>
+        <button class="link-row" data-act="复制为新任务" type="button">${I.link}复制为新任务并修改<em>新建 ›</em></button></div>`,
+    hint:'已完成的任务只展示结果，不再提供会改动历史产物的操作。',
+    foot:[['关闭','btn btn-primary']]},
+
+  create:{w:880,icon:I.plus,title:'新建任务',sub:'只填这次要用的信息，创建后默认不立即开始',
+    body:`<label class="field" style="margin-top:0"><span>你想完成什么？</span><textarea class="textarea" placeholder="说说你的目标，以及需要注意的要求"></textarea><small>写作任务可不填，直接使用作品中已保存的内容。</small></label>
+      <div class="field-row" style="margin-top:14px"><label class="field"><span>任务类型</span><select class="select"><option>织书台 · 原创写作</option><option>拆书匠 · 小说改编</option><option>聊天任务</option><option>关联已有后台任务</option><option>交给子助手</option></select></label>
+      <label class="field"><span>任务名称（可选）</span><input class="input" placeholder="留空会自动命名"></label></div>
+      <div class="sec" style="margin-top:20px"><div class="sec-head"><h3>选择作品与范围</h3><span>按所选类型显示</span></div>
+        <div class="group"><span class="group-legend">作品与阶段</span>
+          <div class="field-row"><label class="field"><span>作品</span><select class="select"><option>《某某小说》</option></select></label><label class="field"><span>做到哪一步</span><select class="select"><option>从设定到成稿</option><option>只做一个步骤</option></select></label></div>
+          <div class="field-row"><label class="field"><span>起始章号</span><input class="input" type="number" value="1"></label><label class="field"><span>拆章数量</span><input class="input" type="number" value="20"></label></div>
+          <div><span class="group-legend">计划步骤</span><ol class="chain"><li><b>1</b> 整理设定与人物关系</li><li><b>2</b> 生成章节大纲</li><li><b>3</b> 按每批 20 章拆章</li><li><b>4</b> 一致性检查并归档</li></ol></div></div></div>
+      <div class="sec"><div class="sec-head"><h3>执行方式</h3><span>默认单次执行</span></div>
+        <div class="group"><span class="group-legend">如何处理这项任务</span>
+          <select class="select"><option>单次执行</option><option>自动检查并继续</option></select>
+          <p class="hint">自动检查会产生新的模型调用；需要人工确认时仍会在这里停下等你决定。</p></div></div>`,
+    hint:'创建后可在任务详情里核对，再决定下一步。',
+    foot:[['取消','btn btn-quiet'],['创建任务','btn btn-primary']]}
+};
+
+function head(s){return `<div class="dlg-head"><span class="dlg-ico">${s.icon}</span><div class="dlg-head-copy"><h2 id="dlgTitle">${s.title}</h2><p>${s.sub}</p></div><button class="dlg-close" data-close type="button" aria-label="关闭">${I.close}</button></div>`}
+function foot(s){return `<div class="dlg-foot"><span class="foot-hint">${s.hint}</span><div class="foot-btns">${s.foot.map(([label,cls])=>`<button class="${cls}" data-foot="${label}" type="button">${label}</button>`).join('')}</div></div>`}
+function sceneHtml(s){return head(s)+`<div class="dlg-body">${s.body}</div>`+foot(s)}
+
+let current='recipe';
+function openScene(id){
+  current=id;
+  $$('.scene-tab').forEach(b=>b.classList.toggle('active',b.dataset.scene===id));
+  if(id==='gallery'){if(el('dlg').open)el('dlg').close();renderGallery();el('gallery').hidden=false;return}
+  el('gallery').hidden=true;
+  const dlg=el('dlg');dlg.style.setProperty('--dlg-w',scenes[id].w+'px');
+  dlg.innerHTML=sceneHtml(scenes[id]);
+  bindDialog();
+  if(!dlg.open)dlg.showModal();
+  dlg.querySelector('.dlg-body').scrollTop=0;
+}
+function renderGallery(){
+  el('gallery').innerHTML=Object.entries(scenes).map(([id,s])=>`<div><div class="gallery-card" data-goto="${id}">${sceneHtml(s)}</div><div class="gallery-cap">${s.title} · ${s.w}px</div></div>`).join('');
+  $$('.gallery-card').forEach(c=>c.addEventListener('click',()=>openScene(c.dataset.goto)));
+}
+function bindDialog(){
+  const dlg=el('dlg');
+  dlg.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click',()=>dlg.close()));
+  dlg.querySelectorAll('[data-foot]').forEach(b=>b.addEventListener('click',()=>toast('预览：'+b.dataset.foot)));
+  dlg.querySelectorAll('.mode-card').forEach(c=>c.addEventListener('click',()=>{dlg.querySelectorAll('.mode-card').forEach(x=>x.classList.remove('active'));c.classList.add('active');toast('预览：已切换输入方式，草稿分别保留')}));
+  dlg.querySelectorAll('[data-act]').forEach(b=>b.addEventListener('click',()=>toast('预览：'+b.dataset.act)));
+  dlg.querySelectorAll('.dropzone').forEach(d=>d.addEventListener('click',()=>toast('预览：打开文件选择')));
+  dlg.querySelectorAll('.link-row').forEach(b=>b.addEventListener('click',()=>toast('预览：'+b.dataset.act)));
+}
+el('dlg').addEventListener('click',e=>{if(e.target===el('dlg'))el('dlg').close()});
+el('dlg').addEventListener('close',()=>{if(el('gallery').hidden)toast('弹窗已关闭；点上方场景可重新打开')});
+
+$$('.scene-tab').forEach(b=>b.addEventListener('click',()=>openScene(b.dataset.scene)));
+el('themeBtn').addEventListener('click',()=>{const dark=document.documentElement.dataset.theme!=='dark';document.documentElement.dataset.theme=dark?'dark':'light';el('themeBtn').querySelector('span').textContent=dark?'浅色':'深色';toast(dark?'已切换为深色：输入框、内容框与遮罩仍可读':'已切换为浅色')});
+el('mobileBtn').addEventListener('click',()=>{const m=document.body.dataset.mobile!=='true';document.body.dataset.mobile=String(m);el('mobileBtn').classList.toggle('active',m);el('mobileBtn').querySelector('span').textContent=m?'桌面视图':'手机视图';toast(m?'已切换为手机全屏弹窗（标题栏/底栏固定）':'已切换为桌面居中弹窗')});
+
+openScene('recipe');
+</script>
+</body>
+</html>

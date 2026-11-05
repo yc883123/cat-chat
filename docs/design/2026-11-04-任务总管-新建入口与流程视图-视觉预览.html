@@ -1,0 +1,811 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>任务总管 · 新建入口与流程视图设计预览</title>
+<!--
+  设计层提案：不连接真实任务、不调用模型、不写入数据、不修改任何产品代码。
+  依据（2026-11-04 读取真实前端）：
+    public/index.html:1682-1683  侧栏两个新建按钮
+    public/index.html:1734-1799  新建批量任务 / 交接两个 dialog
+    public/index.html:1826-1884  新建任务 dialog（5 类 domain）
+    public/js/28-super-agent.js:35-39, 965, 1996  CHAINS / domainName / 两个按钮绑定
+    public/styles.css:6110-6136  三栏网格 262/1fr/322、深色侧栏、新建按钮层级
+  预览里的字段、任务名、组数均为代表性示意，不逐字复刻当前工作树。
+  沿用 public/styles.css 现有 :root 令牌名，不另起色板。
+-->
+<style>
+:root{
+  color-scheme:light;
+  --brand-100:#EDECFF; --brand-200:#DCD3FF; --brand-500:#7C5CFF; --brand-600:#6D5AE6; --brand-700:#5A47C4;
+  --neutral-0:#fff; --neutral-50:#F8F9FC; --neutral-100:#F1F2F7; --neutral-200:#E6E8F0; --neutral-300:#D2D6E3;
+  --neutral-400:#A9AFC2; --neutral-500:#7A8099; --neutral-600:#5A6079; --neutral-700:#3D4257; --neutral-800:#2A2E40; --neutral-900:#1E2138;
+  --bg:#F6F7FB; --surface:var(--neutral-0); --surface-2:var(--neutral-100); --surface-inset:#F5F6FA;
+  --line:var(--neutral-200); --line-strong:var(--neutral-300);
+  --text:var(--neutral-800); --muted:var(--neutral-500);
+  --accent:var(--brand-500); --accent-solid:var(--brand-600); --accent-soft:var(--brand-100);
+  --sidebar:#1E2138; --sidebar-line:#31354E; --sidebar-hover:#2A2E49; --sidebar-text:#F1F2F7; --sidebar-muted:#989FC0;
+  --success:#12A594; --success-soft:#DCF4F0; --warning:#D9820B; --warning-soft:#FCF0E0;
+  --danger:#DC4A46; --danger-soft:#FCE8E7; --info:#3B82C4; --info-soft:#E6F1FB;
+  --r-sm:6px; --r-md:9px; --r-lg:13px; --r-xl:18px; --r-full:999px;
+  --shadow-1:0 1px 2px rgba(30,33,56,.05),0 1px 3px rgba(30,33,56,.04);
+  --shadow-2:0 6px 20px rgba(30,33,56,.09),0 2px 6px rgba(30,33,56,.045);
+  --shadow-3:0 18px 48px rgba(30,33,56,.20),0 4px 12px rgba(30,33,56,.08);
+  --font-sans:"Inter","HarmonyOS Sans SC","PingFang SC","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+}
+html[data-theme="dark"]{
+  color-scheme:dark;
+  --neutral-0:#171A24; --neutral-50:#111522; --neutral-100:#1D2130; --neutral-200:#2B3143; --neutral-300:#3D455C;
+  --neutral-400:#66708A; --neutral-500:#8D96AD; --neutral-600:#AEB6C8; --neutral-700:#C8CEDA; --neutral-800:#E3E7EF; --neutral-900:#0D1019;
+  --bg:#111522; --surface:#171A24; --surface-2:#1D2130; --surface-inset:#121620;
+  --line:#2B3143; --line-strong:#3D455C; --text:#E3E7EF; --muted:#8D96AD;
+  --accent-soft:#2A2350; --sidebar:#0D1019; --sidebar-line:#282D40; --sidebar-hover:#1D2130; --sidebar-text:#E3E7EF; --sidebar-muted:#9CA6BD;
+  --success-soft:#163C3B; --warning-soft:#46351A; --danger-soft:#452322; --info-soft:#183044;
+  --shadow-1:0 1px 2px rgba(0,0,0,.25); --shadow-2:0 6px 20px rgba(0,0,0,.3); --shadow-3:0 18px 48px rgba(0,0,0,.5);
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--text);font:13.5px/1.6 var(--font-sans);overflow:hidden;-webkit-font-smoothing:antialiased}
+button,input,textarea,select{font:inherit;color:inherit}
+button{cursor:pointer}
+button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
+h1,h2,h3,h4,p{margin:0}
+[hidden]{display:none!important}
+
+/* ── 预览工具条 ── */
+.preview-bar{height:54px;display:flex;align-items:center;gap:10px;padding:0 16px;background:var(--surface);border-bottom:1px solid var(--line);flex:none;position:relative;z-index:30}
+.preview-kicker{display:flex;align-items:center;gap:9px;font-weight:700;font-size:13px;white-space:nowrap}
+.preview-kicker i{width:8px;height:8px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px var(--accent-soft)}
+.preview-note{color:var(--muted);font-size:11.5px;white-space:nowrap}
+.scene-tabs{display:flex;gap:2px;padding:3px;margin-left:6px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-2);overflow-x:auto;scrollbar-width:none}
+.scene-tabs::-webkit-scrollbar{display:none}
+.scene-tab{border:0;border-radius:6px;padding:5px 10px;background:transparent;color:var(--muted);font-size:12px;white-space:nowrap}
+.scene-tab:hover{color:var(--text)}
+.scene-tab.active{background:var(--surface);color:var(--accent-solid);font-weight:650;box-shadow:var(--shadow-1)}
+.preview-spacer{flex:1}
+.demo-control{height:31px;display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line-strong);border-radius:var(--r-md);background:var(--surface);color:var(--muted);padding:0 10px;font-size:12px;white-space:nowrap;flex:none}
+.demo-control:hover{border-color:var(--accent);color:var(--text)}
+.demo-control.active{color:var(--accent-solid);border-color:var(--accent);background:var(--accent-soft)}
+.demo-control svg{width:15px;height:15px}
+
+/* ── 舞台：仿真三栏任务总管 ── */
+.stage{position:fixed;inset:54px 0 0;background:var(--bg);overflow:hidden}
+.sim{display:grid;grid-template-columns:262px minmax(0,1fr) 322px;grid-template-rows:58px minmax(0,1fr);height:100%;min-height:0}
+.sim-sidebar{grid-column:1;grid-row:1/3;display:flex;flex-direction:column;min-height:0;background:var(--sidebar);color:var(--sidebar-text);border-right:1px solid var(--sidebar-line)}
+.brand{display:flex;align-items:center;gap:11px;padding:18px 16px 14px}
+.brand-mark{width:32px;height:32px;display:grid;place-items:center;border:1px solid #a28dff;border-radius:10px;background:linear-gradient(145deg,#a78bfa,#7254e5);color:#fff;font-size:17px;font-weight:700;box-shadow:0 3px 14px #7c5cff55}
+.brand-copy{display:grid;gap:2px}.brand-copy strong{font-size:15px}.brand-copy small{color:var(--sidebar-muted);font-size:11px}
+.app-nav{display:flex;gap:3px;margin:0 12px;padding:3px;border-radius:var(--r-md);background:var(--sidebar-hover)}
+.app-nav button{flex:1;border:0;border-radius:var(--r-sm);padding:6px 4px;background:transparent;color:var(--sidebar-muted);font-size:12px}
+.app-nav button[aria-current="page"]{background:#7c5cff44;color:#fff;font-weight:600}
+.panel-head{display:flex;justify-content:space-between;padding:8px 18px;color:var(--sidebar-muted);font-size:11px}
+.filters{display:flex;gap:5px;padding:0 12px 6px}.filters button{border:0;border-radius:var(--r-sm);padding:5px 7px;background:transparent;color:var(--sidebar-muted);font-size:11px}
+.filters button[aria-pressed="true"]{background:var(--sidebar-hover);color:var(--sidebar-text)}
+.thread-list{display:flex;flex-direction:column;gap:6px;padding:4px 10px;overflow:auto;min-height:0;flex:1}
+.thread{display:grid;gap:3px;padding:10px;border:1px solid transparent;border-radius:var(--r-md);color:var(--sidebar-text);text-align:left}
+.thread:hover{background:var(--sidebar-hover)}
+.thread.active{border-color:#a28dff66;background:#7c5cff33}
+.thread strong{display:flex;align-items:center;gap:7px;font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.thread small{color:var(--sidebar-muted);font-size:11px;padding-left:26px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.t-ico{width:19px;height:19px;display:grid;place-items:center;border-radius:5px;background:#ffffff0a;color:var(--sidebar-muted);font-size:12px;font-style:normal}
+.list-note{margin:auto 0 0;padding:14px 18px;border-top:1px solid var(--sidebar-line);color:var(--sidebar-muted);font-size:11px}
+.sim-topbar{grid-column:2/4;grid-row:1;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 20px;background:var(--surface);border-bottom:1px solid var(--line);font-size:12px;color:var(--muted)}
+.sim-topbar strong{color:var(--text);font-weight:600}
+.sim-main{grid-column:2;grid-row:2;min-width:0;min-height:0;overflow:auto;padding:18px;background:color-mix(in srgb,var(--accent-soft) 22%,var(--surface))}
+.sim-aside{grid-column:3;grid-row:2;min-width:0;min-height:0;overflow:auto;display:grid;gap:12px;align-content:start;padding:14px;background:var(--surface-inset);border-left:1px solid var(--line)}
+.aside-card{padding:13px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);box-shadow:var(--shadow-1)}
+.aside-card h3{font-size:11.5px;color:var(--muted);font-weight:600;margin-bottom:8px}
+.aside-ref{font-size:12px}.aside-ref p{margin-top:5px;color:var(--muted);font-size:11.5px;line-height:1.6}
+.aside-link{display:flex;width:100%;padding:7px 0;border:0;border-bottom:1px solid var(--line);background:transparent;color:var(--text);font-size:12px;text-align:left;justify-content:space-between}
+.aside-link:last-child{border-bottom:0}.aside-link:hover{color:var(--accent-solid)}.aside-link em{font-style:normal;color:var(--muted);font-size:11px}
+
+/* ── 侧栏新建区：4 种形态 ── */
+.entry{padding:0 12px 10px}
+.btn-new{display:flex;align-items:center;gap:8px;width:100%;min-height:40px;padding:8px 12px;border:1px solid rgba(155,130,255,.5);border-radius:var(--r-md);background:rgba(124,92,255,.18);color:var(--sidebar-text);font-size:13px;font-weight:600;text-align:left}
+.btn-new:hover{background:rgba(124,92,255,.3)}
+.btn-new svg{width:16px;height:16px}
+.btn-new.primary-solid{background:var(--accent-solid);border-color:var(--accent-solid);color:#fff}
+.btn-new.primary-solid:hover{background:var(--brand-700)}
+.btn-sub{display:block;width:100%;min-height:34px;margin-top:4px;padding:6px 12px;border:1px solid transparent;border-radius:var(--r-md);background:transparent;color:var(--sidebar-muted);font-size:12px;text-align:left}
+.btn-sub:hover{background:var(--sidebar-hover);color:var(--sidebar-text)}
+.entry-label{margin:12px 12px 6px;color:var(--sidebar-muted);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase}
+.entry-select{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;padding:0 12px 10px}
+.entry-select select{min-width:0;height:38px;padding:0 8px;border:1px solid var(--sidebar-line);border-radius:var(--r-md);background:var(--sidebar-hover);color:var(--sidebar-text);font-size:12px}
+.entry-select button{height:38px;padding:0 12px;border:1px solid rgba(155,130,255,.5);border-radius:var(--r-md);background:rgba(124,92,255,.18);color:var(--sidebar-text);font-size:12px;font-weight:600;white-space:nowrap}
+.entry-caption{padding:0 12px 8px;color:var(--sidebar-muted);font-size:10.5px;line-height:1.5}
+.shortcut{margin:0 12px 10px;padding:10px;border:1px solid var(--sidebar-line);border-radius:var(--r-lg);background:rgba(255,255,255,.035)}
+.shortcut small{display:block;color:var(--sidebar-muted);font-size:10.5px;margin-bottom:6px}
+.shortcut button{display:flex;align-items:center;gap:8px;width:100%;padding:7px 8px;border:1px solid transparent;border-radius:var(--r-md);background:transparent;color:var(--sidebar-text);font-size:12px;text-align:left}
+.shortcut button:hover{border-color:#a28dff55;background:var(--sidebar-hover)}
+.shortcut button em{margin-left:auto;font-style:normal;color:var(--sidebar-muted);font-size:10px}
+
+/* ── 现状批注 ── */
+.callout{display:flex;align-items:flex-start;gap:8px;margin:0 0 12px;padding:10px 12px;border:1px solid color-mix(in srgb,var(--danger) 40%,var(--line));border-radius:var(--r-md);background:var(--danger-soft);font-size:12px;line-height:1.6}
+.callout svg{width:16px;height:16px;color:var(--danger);margin-top:2px}
+.callout.neutral{border-color:color-mix(in srgb,var(--info) 40%,var(--line));background:var(--info-soft)}
+.callout.neutral svg{color:var(--info)}
+.callout.good{border-color:color-mix(in srgb,var(--success) 40%,var(--line));background:var(--success-soft)}
+.callout.good svg{color:var(--success)}
+.tag{display:inline-block;padding:1px 7px;border-radius:var(--r-full);background:var(--surface-2);color:var(--muted);font-size:10.5px;font-weight:600}
+.tag.warn{background:var(--warning-soft);color:var(--warning)}
+.tag.ok{background:var(--success-soft);color:var(--success)}
+
+/* ── 中间栏：统一外壳 ── */
+.detail-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}
+.eyebrow{color:var(--muted);font-size:11px;letter-spacing:.04em}
+.detail-head h1{font-size:19px;font-weight:700;letter-spacing:-.01em;margin:4px 0 3px}
+.detail-head p{color:var(--muted);font-size:12px;line-height:1.55}
+.pill{display:inline-flex;align-items:center;min-height:24px;padding:0 10px;border-radius:var(--r-full);font-size:11.5px;font-weight:600;white-space:nowrap}
+.pill.run{background:var(--accent-soft);color:var(--accent-solid)}
+.pill.ok{background:var(--success-soft);color:var(--success)}
+.pill.wait{background:var(--warning-soft);color:var(--warning)}
+.pill.bad{background:var(--danger-soft);color:var(--danger)}
+.pill.idle{background:var(--surface-2);color:var(--muted)}
+.detail-actions{display:flex;gap:7px;margin-bottom:12px;flex-wrap:wrap}
+.mini-btn{min-height:30px;padding:0 11px;border:1px solid var(--line-strong);border-radius:var(--r-md);background:var(--surface);color:var(--text);font-size:11.5px}
+.mini-btn:hover{border-color:var(--accent);color:var(--accent-solid)}
+.mini-btn.primary{border-color:var(--accent-solid);background:var(--accent-solid);color:#fff}
+.control-note{color:var(--muted);font-size:11px;margin:0 0 14px;line-height:1.55}
+.metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:14px}
+.metric{padding:12px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);box-shadow:var(--shadow-1)}
+.metric h3{font-size:11px;color:var(--muted);font-weight:600}
+.metric strong{display:block;margin-top:5px;font-size:16px;font-weight:700}
+.metric small{display:block;margin-top:3px;color:var(--muted);font-size:10.5px;line-height:1.5}
+.metric progress{width:100%;height:5px;margin-top:8px;accent-color:var(--accent-solid)}
+.sec{margin-bottom:16px;padding:14px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);box-shadow:var(--shadow-1)}
+.sec-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:11px}
+.sec-head h2{font-size:13px;font-weight:700}
+.sec-head span{color:var(--muted);font-size:11px}
+.hint{color:var(--muted);font-size:11.5px;line-height:1.65}
+.flow-tabs{display:flex;gap:5px;padding:4px;margin-bottom:14px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-2);width:fit-content;max-width:100%;overflow-x:auto}
+.flow-tab{border:0;border-radius:6px;padding:6px 12px;background:transparent;color:var(--muted);font-size:12px;white-space:nowrap}
+.flow-tab.active{background:var(--surface);color:var(--accent-solid);font-weight:650;box-shadow:var(--shadow-1)}
+.shell-note{display:flex;align-items:center;gap:7px;margin-bottom:12px;padding:7px 10px;border:1px dashed var(--line-strong);border-radius:var(--r-md);color:var(--muted);font-size:11px;background:var(--surface-inset)}
+.shell-note svg{width:14px;height:14px;color:var(--accent-solid)}
+
+/* 流程 A：线性链 */
+.stage-track{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;margin-bottom:14px}
+.track-node{position:relative;padding:0 8px 0 0;min-width:0}
+.track-node .dot{position:relative;z-index:2;width:26px;height:26px;display:grid;place-items:center;border:1.5px solid var(--line-strong);border-radius:50%;background:var(--surface);color:var(--muted);font-size:11px;font-weight:700}
+.track-node .line{position:absolute;left:26px;top:13px;right:0;height:1.5px;background:var(--line-strong)}
+.track-node:last-child .line{display:none}
+.track-node.done .dot{border-color:var(--success);background:var(--success-soft);color:var(--success)}
+.track-node.done .line{background:var(--success)}
+.track-node.current .dot{border-color:var(--accent-solid);background:var(--accent-solid);color:#fff;box-shadow:0 0 0 4px var(--accent-soft)}
+.track-node b{display:block;margin-top:8px;font-size:12px;font-weight:650}
+.track-node small{display:block;color:var(--muted);font-size:10.5px;line-height:1.5}
+.chapter-grid{display:grid;grid-template-columns:repeat(10,minmax(0,1fr));gap:5px}
+.chapter{aspect-ratio:1;display:grid;place-items:center;border:1px solid var(--line);border-radius:5px;background:var(--surface-inset);font-size:10px;color:var(--muted)}
+.chapter.done{background:var(--success-soft);border-color:color-mix(in srgb,var(--success) 35%,var(--line));color:var(--success);font-weight:700}
+.chapter.current{background:var(--accent-soft);border-color:var(--accent-solid);color:var(--accent-solid);font-weight:700}
+.chapter.pending{opacity:.55}
+.row-list{display:grid;gap:7px;margin-top:10px}
+.row-item{display:flex;align-items:center;gap:9px;padding:9px 10px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-inset);font-size:11.5px}
+.row-item b{flex:1;min-width:0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row-item em{font-style:normal;color:var(--muted);font-size:10.5px}
+
+/* 流程 B：批次看板 */
+.batch-summary{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.kv{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--line);border-radius:var(--r-full);background:var(--surface);font-size:11.5px;color:var(--muted)}
+.kv b{color:var(--text);font-weight:700}
+.batch-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}
+.batch{border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface);overflow:hidden}
+.batch-media{position:relative;aspect-ratio:16/10;display:grid;place-items:center;color:rgba(255,255,255,.8);font-size:10px;text-align:center;background:linear-gradient(135deg,#2C3350,#4A4270)}
+.batch-media.b2{background:linear-gradient(135deg,#3D3152,#6B4A72)}
+.batch-media.b3{background:linear-gradient(135deg,#26405A,#3C6B78)}
+.batch-media.b4{background:linear-gradient(135deg,#3A3F4B,#5B6070)}
+.batch-media .ph{display:grid;place-items:center;gap:4px}
+.batch-media .ph svg{width:18px;height:18px;opacity:.85}
+.batch-tag{position:absolute;left:7px;top:7px;padding:2px 7px;border-radius:var(--r-full);background:rgba(0,0,0,.45);color:#fff;font-size:10px}
+.batch-body{padding:9px 10px}
+.batch-body b{display:flex;justify-content:space-between;gap:6px;font-size:11.5px;font-weight:650}
+.batch-body p{margin-top:4px;color:var(--muted);font-size:10.5px;line-height:1.5;max-height:32px;overflow:hidden}
+.check-list{display:grid;gap:7px;margin-top:12px}
+.check{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--muted)}
+.check i{width:18px;height:18px;display:grid;place-items:center;border-radius:50%;background:var(--success-soft);color:var(--success);font-size:11px;font-weight:700;font-style:normal;flex:none}
+.check.warn i{background:var(--warning-soft);color:var(--warning)}
+.check b{color:var(--text);font-weight:600}
+
+/* 流程 C：轮次时间线 */
+.round{display:grid;grid-template-columns:74px minmax(0,1fr);gap:12px;padding-bottom:14px;border-left:1.5px solid var(--line-strong);margin-left:34px;position:relative}
+.round:last-child{border-left-color:transparent;padding-bottom:0}
+.round .badge{position:absolute;left:-14px;top:0;width:27px;height:27px;display:grid;place-items:center;border-radius:50%;background:var(--surface);border:1.5px solid var(--line-strong);color:var(--muted);font-size:10px;font-weight:700}
+.round.done .badge{border-color:var(--success);background:var(--success-soft);color:var(--success)}
+.round.active .badge{border-color:var(--accent-solid);background:var(--accent-soft);color:var(--accent-solid)}
+.round-label{padding-top:4px;color:var(--muted);font-size:11px;font-weight:600}
+.round-body{padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface-inset)}
+.round-body b{font-size:12px;font-weight:650}
+.round-body p{margin-top:4px;color:var(--muted);font-size:11px;line-height:1.6}
+.criteria{display:grid;gap:7px;margin-top:12px}
+.crit{display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-inset);font-size:11.5px}
+.crit i{font-style:normal;color:var(--success);font-weight:700;flex:none}
+.crit.wait i{color:var(--warning)}
+.crit small{color:var(--muted);font-size:10.5px}
+
+/* ── 弹窗：沿用 .sa-dialog 三段式 ── */
+.sa-dialog{width:min(var(--dlg-w,760px),calc(100vw - 32px));max-width:calc(100vw - 32px);max-height:min(88dvh,900px);padding:0;border:1px solid var(--line);border-radius:16px;background:var(--surface);color:var(--text);box-shadow:var(--shadow-3);overflow:hidden}
+.sa-dialog[open]{display:flex;flex-direction:column}
+.sa-dialog::backdrop{background:rgba(14,17,30,.55);backdrop-filter:blur(3px)}
+html[data-theme="dark"] .sa-dialog::backdrop{background:rgba(4,6,14,.72)}
+.dlg-head{flex:none;display:flex;align-items:flex-start;gap:12px;padding:17px 20px;border-bottom:1px solid var(--line);background:var(--surface)}
+.dlg-ico{width:34px;height:34px;flex:none;display:grid;place-items:center;border-radius:10px;background:var(--accent-soft);color:var(--accent-solid)}
+.dlg-ico svg{width:18px;height:18px}
+.dlg-head-copy{flex:1;min-width:0}
+.dlg-head-copy h2{font-size:16px;font-weight:700;line-height:1.35}
+.dlg-head-copy p{margin-top:3px;color:var(--muted);font-size:12px;line-height:1.55}
+.dlg-close{width:30px;height:30px;flex:none;display:grid;place-items:center;border:1px solid transparent;border-radius:var(--r-md);background:transparent;color:var(--muted)}
+.dlg-close:hover{border-color:var(--line);background:var(--surface-2);color:var(--text)}
+.dlg-close svg{width:16px;height:16px}
+.dlg-body{flex:1 1 auto;min-height:0;overflow:auto;padding:18px 20px}
+.dlg-foot{flex:none;display:flex;align-items:center;gap:12px;padding:13px 20px;border-top:1px solid var(--line);background:var(--surface)}
+.foot-hint{flex:1;min-width:0;color:var(--muted);font-size:11.5px;line-height:1.55}
+.foot-btns{display:flex;align-items:center;gap:9px;flex:none}
+.btn{min-height:36px;display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:0 14px;border:1px solid var(--line-strong);border-radius:var(--r-md);background:var(--surface);color:var(--text);font-size:12.5px;font-weight:600;white-space:nowrap}
+.btn:hover{border-color:var(--accent);color:var(--accent-solid)}
+.btn-primary{border-color:var(--accent-solid);background:var(--accent-solid);color:#fff}
+.btn-primary:hover{background:var(--brand-700);color:#fff;border-color:var(--brand-700)}
+.btn-quiet{border-color:transparent;background:transparent;color:var(--muted)}
+
+/* 启动台 */
+.launcher-group{margin-bottom:18px}
+.launcher-group:last-child{margin-bottom:2px}
+.lg-head{display:flex;align-items:center;gap:8px;margin-bottom:9px}
+.lg-head h3{font-size:12px;font-weight:700}
+.lg-head span{color:var(--muted);font-size:11px}
+.type-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.type-card{position:relative;display:flex;align-items:flex-start;gap:11px;min-height:86px;padding:13px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface-inset);text-align:left;color:var(--text)}
+.type-card:hover{border-color:var(--accent);background:var(--accent-soft);box-shadow:var(--shadow-1)}
+.type-card .tc-ico{width:34px;height:34px;flex:none;display:grid;place-items:center;border-radius:10px;background:var(--accent-soft);color:var(--accent-solid)}
+.type-card .tc-ico svg{width:18px;height:18px}
+.tc-copy{flex:1;min-width:0}
+.tc-copy b{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:650}
+.tc-copy p{margin-top:4px;color:var(--muted);font-size:11.5px;line-height:1.6}
+.tc-meta{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.tc-meta .tag{font-size:10px}
+.recent{position:absolute;right:11px;top:11px;font-size:10px;color:var(--accent-solid);font-weight:600}
+.type-card.disabled{opacity:.55}
+.type-card.disabled:hover{border-color:var(--line);background:var(--surface-inset);box-shadow:none}
+
+/* 表单示意 */
+.field{display:block;margin-bottom:12px}
+.field > span{display:block;margin-bottom:6px;font-size:12px;font-weight:600}
+.field > small{display:block;margin-top:5px;color:var(--muted);font-size:11px;line-height:1.6}
+.input,.textarea,.select{width:100%;box-sizing:border-box;padding:9px 10px;border:1px solid var(--line-strong);border-radius:var(--r-md);background:var(--surface-inset);color:var(--text);font-size:12.5px;line-height:1.6}
+.input:focus,.textarea:focus,.select:focus{border-color:var(--accent);outline:0;box-shadow:0 0 0 3px var(--accent-soft)}
+.field-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.field-row .field{margin-bottom:12px}
+.mode-cards{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
+.mode-card{padding:12px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface-inset);text-align:left;color:var(--text)}
+.mode-card.active{border-color:var(--accent);background:var(--accent-soft)}
+.mode-card b{font-size:12.5px;font-weight:650}
+.mode-card p{margin-top:5px;color:var(--muted);font-size:11.5px;line-height:1.6}
+.chain-preview{display:flex;flex-wrap:wrap;gap:6px 16px;margin:0;padding-left:18px;color:var(--accent-solid);font-size:11.5px}
+
+/* ── 全宽说明 / 对照 ── */
+.wide{position:fixed;inset:54px 0 0;overflow:auto;padding:22px;background:var(--bg)}
+.wide-inner{max-width:1180px;margin:0 auto;display:grid;gap:18px}
+.wide h1{font-size:18px;font-weight:700}
+.wide h2{font-size:14px;font-weight:700;margin-bottom:10px}
+.wide p{font-size:12.5px;line-height:1.75;color:var(--muted)}
+.panel{padding:18px;border:1px solid var(--line);border-radius:16px;background:var(--surface);box-shadow:var(--shadow-1)}
+.compare{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.compare-card{padding:14px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface-inset)}
+.compare-card.rec{border-color:var(--accent);background:var(--accent-soft)}
+.compare-card h3{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700}
+.compare-card .sub{color:var(--muted);font-size:11.5px;margin:5px 0 10px;line-height:1.6}
+.compare-card ul{margin:0;padding-left:17px;font-size:11.5px;line-height:1.9;color:var(--muted)}
+.compare-card ul b{color:var(--text)}
+table{width:100%;border-collapse:collapse;font-size:11.5px}
+th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;line-height:1.6}
+th{color:var(--muted);font-weight:600;font-size:11px;background:var(--surface-inset)}
+td b{font-weight:650}
+.panel ul{margin:0;padding-left:18px;font-size:12px;line-height:1.9;color:var(--muted)}
+.panel ul b{color:var(--text)}
+.q{display:grid;gap:9px}
+.q-row{display:grid;grid-template-columns:38px minmax(0,1fr);gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-inset);font-size:12px;line-height:1.65}
+.q-row b{color:var(--accent-solid)}
+.selfcheck{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.sc{display:flex;align-items:center;gap:9px;padding:9px 11px;border:1px solid var(--line);border-radius:var(--r-md);background:var(--surface-inset);font-size:11.5px}
+.sc i{width:18px;height:18px;display:grid;place-items:center;border-radius:50%;background:var(--success-soft);color:var(--success);font-size:11px;font-style:normal;font-weight:700;flex:none}
+.sc.bad i{background:var(--danger-soft);color:var(--danger)}
+.sc span{color:var(--muted)}
+.sc b{color:var(--text);font-weight:650}
+
+/* ── 尺寸标注 ── */
+body.show-measure [data-m]{position:relative;outline:1px dashed var(--accent)}
+body.show-measure [data-m]::after{content:attr(data-m-size);position:absolute;right:0;top:0;z-index:12;padding:1px 5px;border-radius:4px;background:var(--accent-solid);color:#fff;font-size:9.5px;line-height:1.5;white-space:nowrap;pointer-events:none}
+
+/* ── 手机视图 ── */
+body[data-mobile="true"] .sim{grid-template-columns:minmax(0,1fr);grid-template-rows:58px minmax(0,1fr)}
+body[data-mobile="true"] .sim-sidebar{display:none}
+body[data-mobile="true"] .sim-aside{display:none}
+body[data-mobile="true"] .sim-topbar{grid-column:1;grid-row:1;padding:0 14px}
+body[data-mobile="true"] .sim-main{grid-column:1;grid-row:2;padding:14px}
+body[data-mobile="true"] .metrics{grid-template-columns:1fr 1fr}
+body[data-mobile="true"] .batch-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+body[data-mobile="true"] .stage-track{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 0}
+body[data-mobile="true"] .chapter-grid{grid-template-columns:repeat(8,minmax(0,1fr))}
+body[data-mobile="true"] .sa-dialog{width:100vw;max-width:100vw;height:100dvh;max-height:100dvh;border:0;border-radius:0;margin:0}
+body[data-mobile="true"] .dlg-head{padding-top:max(17px,env(safe-area-inset-top))}
+body[data-mobile="true"] .dlg-foot{padding-bottom:max(14px,env(safe-area-inset-bottom))}
+body[data-mobile="true"] .dlg-body{padding:16px}
+body[data-mobile="true"] .type-grid,body[data-mobile="true"] .field-row,body[data-mobile="true"] .mode-cards{grid-template-columns:1fr}
+body[data-mobile="true"] .foot-hint{display:none}
+body[data-mobile="true"] .foot-btns{width:100%}
+body[data-mobile="true"] .foot-btns .btn{flex:1}
+body[data-mobile="true"] .preview-note{display:none}
+body[data-mobile="true"] .compare,body[data-mobile="true"] .selfcheck{grid-template-columns:1fr}
+body[data-mobile="true"] .measure-samples{grid-template-columns:1fr!important}
+body[data-mobile="true"] .wide{padding:14px}
+@media(max-width:1100px){.preview-note{display:none}.scene-tab{padding:5px 8px}}
+@media(max-width:640px){
+  .preview-bar{gap:6px;padding:0 8px;overflow-x:auto;scrollbar-width:none}
+  .preview-bar::-webkit-scrollbar{display:none}
+  .preview-kicker{flex:none}.preview-kicker span{display:none}
+  .scene-tabs{margin-left:0}
+  .preview-spacer{display:none}
+  .demo-control{padding:0 7px;flex:none}.demo-control span{display:none}
+  .wide table{min-width:0}
+  .panel{overflow-x:auto}
+}
+@media(max-width:900px){.compare{grid-template-columns:1fr}.selfcheck{grid-template-columns:1fr}}
+
+.toast{position:fixed;left:50%;bottom:22px;z-index:90;transform:translate(-50%,8px);padding:9px 16px;border-radius:var(--r-full);background:var(--neutral-800);color:#fff;font-size:12px;box-shadow:var(--shadow-3);opacity:0;pointer-events:none;transition:opacity .18s,transform .18s}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+</style>
+</head>
+<body data-mobile="false">
+<header class="preview-bar">
+  <div class="preview-kicker"><i></i><span>任务总管 · 新建入口 / 流程视图</span></div>
+  <span class="preview-note">设计层提案 · 不连任务、不调用模型、不改产品代码</span>
+  <div class="scene-tabs" role="group" aria-label="预览场景">
+    <button class="scene-tab active" data-scene="current" type="button">现状</button>
+    <button class="scene-tab" data-scene="select" type="button">A · 下拉+新建</button>
+    <button class="scene-tab" data-scene="launcher" type="button">B · 类型启动台</button>
+    <button class="scene-tab" data-scene="shortcut" type="button">C · 主入口+快捷</button>
+    <button class="scene-tab" data-scene="flows" type="button">流程视图</button>
+    <button class="scene-tab" data-scene="compare" type="button">方案对照</button>
+    <button class="scene-tab" data-scene="notes" type="button">说明与自检</button>
+  </div>
+  <span class="preview-spacer"></span>
+  <button class="demo-control" id="measureBtn" type="button" title="在关键元素上标注真实 DOM 尺寸"><svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"></path><path d="M8 8l8 8M8 16l3-3M13 8l3 3"></path></svg><span>尺寸</span></button>
+  <button class="demo-control" id="themeBtn" type="button"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg><span>深色</span></button>
+  <button class="demo-control" id="mobileBtn" type="button"><svg viewBox="0 0 24 24"><rect x="6.5" y="3" width="11" height="18" rx="2"></rect><path d="M10 18h4"></path></svg><span>手机视图</span></button>
+</header>
+
+<div class="stage" id="stage"></div>
+<dialog class="sa-dialog" id="dlg" aria-labelledby="dlgTitle"></dialog>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)], el=id=>document.getElementById(id);
+const I={
+  close:'<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"></path></svg>',
+  plus:'<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg>',
+  book:'<svg viewBox="0 0 24 24"><path d="M5 4h9a3 3 0 0 1 3 3v13H8a3 3 0 0 0-3 3z"></path><path d="M5 4v18M8 9h6"></path></svg>',
+  scissors:'<svg viewBox="0 0 24 24"><circle cx="6" cy="7" r="2.5"></circle><circle cx="6" cy="17" r="2.5"></circle><path d="M8 8.5 20 19M8 15.5 20 5"></path></svg>',
+  film:'<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="m10 9 5 3-5 3z"></path></svg>',
+  chat:'<svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z"></path><path d="M8 9h8M8 12h5"></path></svg>',
+  link:'<svg viewBox="0 0 24 24"><path d="M7 7h10v10H7z"></path><path d="m9 7 1-3h4l1 3M9 17l-1 3h8l-1-3"></path></svg>',
+  bot:'<svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="12" rx="3"></rect><path d="M12 3v4M9 13h.01M15 13h.01M9 16h6"></path></svg>',
+  warn:'<svg viewBox="0 0 24 24"><path d="M12 3 2.8 19h18.4z"></path><path d="M12 9v4M12 16h.01"></path></svg>',
+  info:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5M12 8h.01"></path></svg>',
+  check:'<svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg>',
+  img:'<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"></rect><circle cx="8.5" cy="9.5" r="1.5"></circle><path d="m4 17 5-5 4 4 3-3 4 4"></path></svg>',
+  layers:'<svg viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5z"></path><path d="m3 13 9 5 9-5M3 17l9 5 9-5"></path></svg>',
+  grid:'<svg viewBox="0 0 24 24"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"></path></svg>',
+  loop:'<svg viewBox="0 0 24 24"><path d="M4 8h11a4 4 0 0 1 0 8H8"></path><path d="m11 5-3 3 3 3M8 19l3-3-3-3"></path></svg>',
+  chev:'<svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"></path></svg>'
+};
+function toast(msg){const t=el('toast');t.textContent=msg;t.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>t.classList.remove('show'),2100)}
+
+/* ── 侧栏新建区：四种形态 ── */
+function entryCurrent(){
+  return `<div class="entry" data-m="current-main">
+    <button class="btn-new" data-open="form" data-type="writer" type="button" data-m="btn-new"><span>＋</span> 新建任务</button>
+    <button class="btn-sub" data-open="form" data-type="recipe" type="button" data-m="btn-secondary">批量制作视频</button>
+  </div>`;
+}
+function entrySelect(){
+  return `<div class="entry-select" data-m="entry-select">
+    <select id="entryType" aria-label="任务类型" data-m="select">
+      <option value="writer">织书台 · 原创写作</option><option value="novel">拆书匠 · 小说改编</option>
+      <option value="recipe" selected>批量制作视频</option><option value="chat">聊天任务</option>
+      <option value="job">关联已有后台任务</option><option value="subagent">交给子助手</option>
+    </select>
+    <button data-open="form-from-select" type="button" data-m="btn-new">新建</button>
+  </div><p class="entry-caption">先选类型，再点「新建」打开对应表单。</p>`;
+}
+function entryLauncher(){
+  return `<div class="entry" data-m="entry-launcher">
+    <button class="btn-new primary-solid" data-open="launcher" type="button" data-m="btn-new">${I.plus} 新建任务</button>
+  </div><p class="entry-caption" style="padding-bottom:10px">一个入口；类型在下一步挑，不预先猜。</p>`;
+}
+function entryShortcut(){
+  return `<div class="entry"><button class="btn-new primary-solid" data-open="launcher" type="button" data-m="btn-new">${I.plus} 新建任务</button></div>
+  <p class="entry-label">快捷开始 · 新建任务的一种</p>
+  <div class="shortcut" data-m="shortcut">
+    <small>最近使用</small>
+    <button data-open="form" data-type="recipe" type="button">${I.film} 批量制作视频 <em>1 步直达 ›</em></button>
+  </div>`;
+}
+
+/* ── 三栏骨架 ── */
+function aside(){
+  return `<aside class="sim-aside">
+    <div class="aside-card"><h3>下一步</h3><div class="aside-ref"><b>等第 13 章正文写完</b><p>这一步由当前任务自动继续；需要你确认时会停下来。</p></div></div>
+    <div class="aside-card"><h3>最近产物</h3><button class="aside-link">第 12 章 · 正文 <em>打开 ›</em></button><button class="aside-link">第一部分 · 大纲 <em>打开 ›</em></button><button class="aside-link">设定集 v3 <em>打开 ›</em></button></div>
+    <div class="aside-card"><h3>相关入口</h3><button class="aside-link">回到工作台 <em>跳转 ›</em></button><button class="aside-link">本轮对话 <em>打开 ›</em></button><button class="aside-link">复制为新任务 <em>新建 ›</em></button></div>
+  </aside>`;
+}
+function shell(entry,main){
+  return `<div class="sim">
+    <div class="sim-sidebar">
+      <div class="brand"><span class="brand-mark">总</span><div class="brand-copy"><strong>任务总管</strong><small>持续任务 · 进展与结果</small></div></div>
+      <nav class="app-nav" aria-label="应用视图"><button type="button">对话</button><button type="button">工作台</button><button type="button" aria-current="page">任务总管</button></nav>
+      ${entry}
+      <div class="panel-head"><strong>我的任务</strong><span>6</span></div>
+      <div class="filters"><button aria-pressed="true">全部</button><button aria-pressed="false">待确认</button><button aria-pressed="false">已完成</button></div>
+      <div class="thread-list">
+        <button class="thread active" type="button"><strong><i class="t-ico">文</i>《某某小说》改编任务</strong><small>进行中 · 2 分钟前</small></button>
+        <button class="thread" type="button"><strong><i class="t-ico">影</i>金鱼 H3 · 第 2 批</strong><small>待确认 · 1 小时前</small></button>
+        <button class="thread" type="button"><strong><i class="t-ico">聊</i>导出功能自检</strong><small>已完成 · 昨天</small></button>
+        <button class="thread" type="button"><strong><i class="t-ico">文</i>短篇设定整理</strong><small>已完成 · 3 天前</small></button>
+      </div>
+      <p class="list-note">切换页面不会中断后台任务</p>
+    </div>
+    <header class="sim-topbar"><span>任务总管 <span aria-hidden="true">/</span> <strong id="crumb">任务进展与结果</strong></span><span>4 秒前同步 · 刷新状态</span></header>
+    <section class="sim-main" id="simMain" data-m="sim-main">${main}</section>
+    ${aside()}
+  </div>`;
+}
+function emptyMain(kicker){
+  return `<div class="callout ${kicker.tone||'neutral'}">${kicker.tone==='bad'?I.warn:I.info}<div>${kicker.text}</div></div>
+  ${kicker.extra||''}
+  <div class="sec"><div class="sec-head"><h2>当前任务 · 统一外壳（示意）</h2><span>所有类型共用</span></div>
+    <div class="detail-head"><div><div class="eyebrow">持续任务 · 任务总管</div><h1>《某某小说》改编任务</h1><p>从设定到成稿 · 4 个阶段</p></div><span class="pill run">进行中</span></div>
+    <div class="detail-actions"><button class="mini-btn">暂停任务</button><button class="mini-btn">继续任务</button><button class="mini-btn">取消任务</button></div>
+    <p class="control-note">暂停只停止后续步骤；正在执行的步骤仍可能完成。</p>
+    <div class="metrics"><div class="metric"><h3>总体进度</h3><strong>2 / 4 步</strong><progress max="4" value="2"></progress><small>仅统计已完成的真实步骤</small></div>
+      <div class="metric"><h3>当前阶段</h3><strong>拆章</strong><small>第 1 部 · 12 / 20 章</small></div>
+      <div class="metric"><h3>最近更新</h3><strong>2 分钟前</strong><small>以任务记录为准</small></div></div>
+    <p class="hint">这里只示意「不管哪种任务都不变的外壳」：标题 / 状态 / 操作 / 三个指标 / 时间线 / 右栏。中间的内容区按任务类型换，见「流程视图」场景。</p>
+  </div>`;
+}
+
+/* ── 流程视图：一壳三芯 ── */
+function flowShell(tab){
+  return `<div class="shell-note">${I.layers} 统一外壳：标题 / 状态 / 操作 / 指标 / 时间线 / 右栏 —— 三类任务完全一致，只有下方内容区换。</div>
+  <div class="detail-head"><div><div class="eyebrow">持续任务 · 任务总管</div><h1 id="flowTitle"></h1><p id="flowSub"></p></div><span class="pill run" id="flowPill">进行中</span></div>
+  <div class="detail-actions"><button class="mini-btn">暂停任务</button><button class="mini-btn">继续任务</button><button class="mini-btn">取消任务</button></div>
+  <p class="control-note">暂停只停止后续步骤；正在执行的步骤仍可能完成。</p>
+  <div class="metrics">
+    <div class="metric"><h3 id="m1h">总体进度</h3><strong id="m1v"></strong><small id="m1s"></small></div>
+    <div class="metric"><h3 id="m2h">当前阶段</h3><strong id="m2v"></strong><small id="m2s"></small></div>
+    <div class="metric"><h3>最近更新</h3><strong>2 分钟前</strong><small>以任务记录为准</small></div>
+  </div>
+  <div class="flow-tabs" role="group" aria-label="切换任务类型">
+    <button class="flow-tab ${tab==='chain'?'active':''}" data-flow="chain" type="button">写作 / 改编链</button>
+    <button class="flow-tab ${tab==='batch'?'active':''}" data-flow="batch" type="button">批量视频</button>
+    <button class="flow-tab ${tab==='loop'?'active':''}" data-flow="loop" type="button">监督轮次</button>
+  </div>
+  <div id="flowBody" data-m="flow-body"></div>`;
+}
+function flowChain(){
+  return `<section class="sec" data-m="flow-chain"><div class="sec-head"><h2>阶段轨道</h2><span>线性 · 4 个真实步骤</span></div>
+    <div class="stage-track">
+      <div class="track-node done"><span class="dot">✓</span><i class="line"></i><b>设定</b><small>已完成</small></div>
+      <div class="track-node done"><span class="dot">✓</span><i class="line"></i><b>大纲</b><small>已完成</small></div>
+      <div class="track-node current"><span class="dot">3</span><i class="line"></i><b>拆章</b><small>进行中</small></div>
+      <div class="track-node"><span class="dot">4</span><i class="line"></i><b>正文</b><small>等待前序</small></div>
+    </div>
+    <div class="sec-head" style="margin-top:16px"><h2>第 1 部 · 章节进度</h2><span>20 章 · 已写 12</span></div>
+    <div class="chapter-grid">${Array.from({length:20},(_,i)=>`<span class="chapter ${i<12?'done':i===12?'current':'pending'}">${i+1}</span>`).join('')}</div>
+    <div class="row-list"><div class="row-item"><b>第 12 章 · 雨夜</b><em>3 分钟前</em><span class="pill ok">已保存</span></div><div class="row-item"><b>第 11 章 · 旧书房</b><em>26 分钟前</em><span class="pill ok">已保存</span></div></div>
+    <p class="hint" style="margin-top:10px">写作任务真正要看的是「写到第几章」，不是笼统的 2 / 4 步。指标卡保留，但内容区换成阶段轨道 + 章节网格。</p>
+  </section>`;
+}
+function flowBatch(){
+  const cards=[
+    ['b1','第 1 组','已就绪','ok','雨夜巷口，林砚撑伞快步走来…'],
+    ['b2','第 2 组','已就绪','ok','天台边缘，两人对峙，风吹动衣摆…'],
+    ['b3','第 3 组','待确认','wait','旧书房内，台灯亮起，纸张被翻动…'],
+    ['b4','第 4 组','缺素材','bad','尚未放参考图，确认前会被拦下'],
+    ['b1','第 5 组','已就绪','ok','长廊尽头，脚步声由远及近…'],
+    ['b2','第 6 组','待反推','idle','正文留空，等待生成提示词'],
+    ['b3','第 7 组','已就绪','ok','清晨街道，镜头缓慢横移…'],
+    ['b4','第 8 组','已完成','ok','结果已收齐，可打开 / 保存']
+  ];
+  return `<section class="sec" data-m="flow-batch"><div class="sec-head"><h2>批次看板</h2><span>按组 · 不是按步骤</span></div>
+    <div class="batch-summary"><span class="kv">共 <b>8 组</b></span><span class="kv">已就绪 <b>5</b></span><span class="kv">待确认 <b>1</b></span><span class="kv">缺素材 <b>1</b></span><span class="kv">已完成 <b>1</b></span></div>
+    <div class="batch-grid">${cards.map(([bg,tag,st,cls,prompt])=>`<article class="batch"><div class="batch-media ${bg}"><span class="batch-tag">${tag}</span><span class="ph">${I.img}素材缩略图占位</span></div><div class="batch-body"><b>${tag} <span class="pill ${cls}">${st}</span></b><p>${prompt}</p></div></article>`).join('')}</div>
+    <div class="check-list"><div class="check"><i>✓</i><span><b>7 组</b>提示词已就绪</span></div><div class="check warn"><i>!</i><span><b>1 组</b>缺少方案要求的素材，确认前会拦下</span></div><div class="check"><i>✓</i><span>已成功的结果不会重复执行</span></div></div>
+    <p class="hint" style="margin-top:10px">批量视频的核心单位是「组」，不是线性步骤。竖向步骤链在这里没有意义，换成组卡网格 + 就绪检查。</p>
+  </section>`;
+}
+function flowLoop(){
+  return `<section class="sec" data-m="flow-loop"><div class="sec-head"><h2>执行轮次</h2><span>执行 → 检查 → 补做，直到达标</span></div>
+    <div class="round done"><span class="badge">1</span><div class="round-label">第 1 轮</div><div class="round-body"><b>执行并自检</b><p>生成导出按钮与页面骨架；检查发现 2 项标准未达成，已记录原因。</p></div></div>
+    <div class="round active"><span class="badge">2</span><div class="round-label">第 2 轮 · 当前</div><div class="round-body"><b>按未达成项补做</b><p>只处理失败项，不重跑已完成部分。本轮结束后再次核对标准。</p></div></div>
+    <div class="round"><span class="badge">3</span><div class="round-label">第 3 轮 · 未开始</div><div class="round-body"><b>等待前一轮结论</b><p>需要人工确认时会停下来等你，不会自动扩大范围。</p></div></div>
+    <div class="sec-head" style="margin-top:18px"><h2>完成标准</h2><span>最多补做 3 次</span></div>
+    <div class="criteria"><div class="crit"><i>✓</i><span>导出按钮可用 <small>· 第 1 轮已核验</small></span></div><div class="crit wait"><i>!</i><span>导出内容正确 <small>· 待第 2 轮核验</small></span></div><div class="crit wait"><i>!</i><span>[主观] 桌面与手机观感一致 <small>· 模型判断，不作为硬阻断</small></span></div></div>
+    <p class="hint" style="margin-top:10px">聊天 / 子助手 / 自动检查任务是循环，不是链。用轮次时间线 + 完成标准清单，才看得出「还要补几轮、卡在哪条标准」。</p>
+  </section>`;
+}
+const FLOWMETA={
+  chain:{title:'《某某小说》改编任务',sub:'织书台 · 从设定到成稿',m1h:'总体进度',m1v:'12 / 20 章',m1s:'按真实章节统计，不是步骤数',m2h:'当前阶段',m2v:'拆章',m2s:'第 1 部 · 阶段 3 / 4',body:flowChain},
+  batch:{title:'金鱼 H3 · 第 2 批',sub:'批量视频 · 8 组 · 每组 1 条',m1h:'本次涉及',m1v:'8 组',m1s:'已就绪 5 · 缺素材 1',m2h:'当前阶段',m2v:'逐组审核',m2s:'确认后才提交生成',body:flowBatch},
+  loop:{title:'导出功能自检',sub:'自动检查并继续 · 最多 3 次补做',m1h:'执行轮次',m1v:'第 2 / 4 轮',m1s:'含第 1 轮执行与最多 3 次补做',m2h:'当前阶段',m2v:'按缺项补做',m2s:'2 条标准未达成',body:flowLoop}
+};
+
+/* ── 弹窗 ── */
+const TYPES={
+  writer:{icon:I.book,name:'织书台 · 原创写作',desc:'从设定、大纲到分章正文，按阶段链往下写',need:'需要先有作品',flow:'4 阶段链',group:'写作与改编'},
+  novel:{icon:I.scissors,name:'拆书匠 · 小说改编',desc:'导入原文，提取要素、改编大纲、生成剧本',need:'需要先有作品',flow:'5 阶段链',group:'写作与改编'},
+  recipe:{icon:I.film,name:'批量制作视频',desc:'逐组放素材、写提示词、审核后批量生成',need:'需要已保存的工作流',flow:'按组准备',group:'批量制作'},
+  chat:{icon:I.chat,name:'聊天任务',desc:'以一段目标开始，单次执行或自动检查并继续',need:'无需准备',flow:'按轮次',group:'对话与自动化'},
+  job:{icon:I.link,name:'关联已有后台任务',desc:'把已在运行的后台任务接到总管里看状态',need:'需要已有任务',flow:'只读状态',group:'对话与自动化'},
+  subagent:{icon:I.bot,name:'交给子助手',desc:'由子助手分头处理，结果回传本任务',need:'需要已配置子助手',flow:'按轮次',group:'对话与自动化'}
+};
+function launcherBody(){
+  const groups=['写作与改编','批量制作','对话与自动化'];
+  return `<p class="hint" style="margin-bottom:16px">先选这次要做什么。选类型只打开对应表单，<b>不会创建任务、不会调用模型、不会开始生成</b>。</p>`+
+    groups.map((g,gi)=>{
+      const items=Object.entries(TYPES).filter(([,t])=>t.group===g);
+      return `<div class="launcher-group"><div class="lg-head"><h3>${g}</h3><span>${gi===0?'按作品推进':gi===1?'按组准备':'按轮次执行'}</span></div>
+        <div class="type-grid">${items.map(([k,t])=>`<button class="type-card" data-type="${k}" type="button" data-m="type-card">
+          ${k==='recipe'?'<span class="recent">最近使用</span>':''}
+          <span class="tc-ico">${t.icon}</span><span class="tc-copy"><b>${t.name}</b><p>${t.desc}</p>
+          <span class="tc-meta"><span class="tag ${t.need==='无需准备'?'ok':'warn'}">${t.need}</span><span class="tag">${t.flow}</span></span></span>
+        </button>`).join('')}</div></div>`;
+    }).join('');
+}
+function formBody(key){
+  const t=TYPES[key];
+  const common=`<div class="callout neutral">${I.info}<div><b>${t.name}</b> · ${t.desc}<br>创建只保存清单；默认不立即开始、不调用模型。${t.need!=='无需准备'?` 前置条件：<b>${t.need}</b>。`:''}</div></div>
+    <label class="field"><span>任务名称 <small style="font-weight:400;color:var(--muted)">可选</small></span><input class="input" placeholder="留空会自动命名"></label>`;
+  let extra='';
+  if(key==='writer'||key==='novel'){
+    extra=`<div class="field-row"><label class="field"><span>作品</span><select class="select"><option>《某某小说》</option></select></label><label class="field"><span>做到哪一步</span><select class="select"><option>从设定到成稿</option><option>只做一个步骤</option></select></label></div>
+      <div class="field"><span>计划步骤</span><ol class="chain-preview">${(key==='writer'?['设定','大纲','拆章','正文']:['导入','要素','大纲','剧本','复核']).map(s=>`<li>${s}</li>`).join('')}</ol></div>
+      <label class="field"><span>拆章范围</span><input class="input" value="第 1 部 · 第 1–20 章" readonly></label>`;
+  }else if(key==='recipe'){
+    extra=`<label class="field"><span>造梦机已保存的工作流</span><select class="select"><option>YZ金鱼 · MiniMax H3 终极篇</option></select></label>
+      <div class="mode-cards"><button class="mode-card active" type="button"><b>直接用现成文本</b><p>填好的正文就是最终提示词</p></button><button class="mode-card" type="button"><b>先反推生成提示词</b><p>确认后才向提词模型发请求</p></button></div>
+      <div class="field-row"><label class="field"><span>每组生成几条</span><input class="input" type="number" value="1"></label><label class="field"><span>时长（秒）</span><input class="input" type="number" value="15"></label></div>
+      <p class="hint">素材进批次后逐组放；这里只定工作流、正文来源和数量。</p>`;
+  }else if(key==='chat'){
+    extra=`<label class="field"><span>你想完成什么？</span><textarea class="textarea" rows="3" placeholder="说说目标与需要注意的要求"></textarea></label>
+      <label class="field"><span>执行方式</span><select class="select"><option>单次执行</option><option>自动检查并继续</option></select></label>`;
+  }else if(key==='job'){
+    extra=`<label class="field"><span>已有后台任务</span><select class="select"><option>导出任务 · 运行中</option></select></label><p class="hint">关联后只读取真实状态，不会重新启动或改写它。</p>`;
+  }else{
+    extra=`<label class="field"><span>交给哪个子助手</span><select class="select"><option>资料整理助手</option></select></label><p class="hint">子助手结果回传本任务；需要你确认时会停下来。</p>`;
+  }
+  return common+extra;
+}
+function dialogHtml(o){
+  return `<div class="dlg-head" data-m="dlg-head"><span class="dlg-ico">${o.icon}</span><div class="dlg-head-copy"><h2 id="dlgTitle">${o.title}</h2><p>${o.sub}</p></div><button class="dlg-close" data-close type="button" aria-label="关闭">${I.close}</button></div>
+    <div class="dlg-body" data-m="dlg-body">${o.body}</div>
+    <div class="dlg-foot" data-m="dlg-foot"><span class="foot-hint">${o.hint}</span><div class="foot-btns">${o.foot.map(([l,c])=>`<button class="btn ${c}" data-foot="${l}" type="button" data-m="dlg-btn">${l}</button>`).join('')}</div></div>`;
+}
+function openDialog(o){
+  const d=el('dlg');d.style.setProperty('--dlg-w',(o.w||760)+'px');d.innerHTML=dialogHtml(o);
+  d.querySelectorAll('[data-close]').forEach(b=>b.addEventListener('click',()=>d.close()));
+  d.querySelectorAll('[data-foot]').forEach(b=>b.addEventListener('click',()=>toast('预览：'+b.dataset.foot)));
+  d.querySelectorAll('.mode-card').forEach(c=>c.addEventListener('click',()=>{d.querySelectorAll('.mode-card').forEach(x=>x.classList.remove('active'));c.classList.add('active')}));
+  d.querySelectorAll('.type-card').forEach(c=>c.addEventListener('click',()=>openForm(c.dataset.type)));
+  if(!d.open)d.showModal();
+  d.querySelector('.dlg-body').scrollTop=0;
+  applyMeasure();
+}
+function openLauncher(){
+  openDialog({w:820,icon:I.plus,title:'新建任务 · 先选要做什么',sub:'六种任务类型按用途分组，选完才进入对应表单',
+    body:launcherBody(),hint:'选类型不会创建任务，也不会产生任何模型费用。',foot:[['取消','btn-quiet']]});
+}
+function openForm(key){
+  const t=TYPES[key]||TYPES.writer;
+  openDialog({w:key==='recipe'?880:760,icon:t.icon,title:t.name,sub:t.desc,
+    body:formBody(key),hint:'创建只保存清单；不会调用模型、不会开始生成。',
+    foot:[['返回选类型','btn-quiet'],['创建任务','btn-primary']]});
+  el('dlg').querySelectorAll('[data-foot]').forEach(b=>{if(b.dataset.foot==='返回选类型')b.addEventListener('click',()=>setTimeout(openLauncher,120))});
+}
+
+/* ── 场景 ── */
+let current='current', flowTab='chain';
+function render(){
+  const st=el('stage');
+  if(el('dlg').open)el('dlg').close();
+  if(current==='compare'||current==='notes'){st.innerHTML=wideHtml(current);bindWide();applyMeasure();return}
+  let entry,main;
+  if(current==='current'){
+    entry=entryCurrent();
+    main=emptyMain({tone:'bad',text:'<b>问题：两个按钮不是并列关系。</b>「新建任务」是动作，「批量制作视频」其实是第 6 种任务类型，却被摆成兄弟；而新建任务弹窗的类型下拉里<b>没有</b>批量视频，两套表单互不相通。',
+      extra:`<div class="sec"><div class="sec-head"><h2>由此带来的四个后果</h2><span>信息架构，不是配色问题</span></div>
+        <div class="row-list">
+          <div class="row-item"><b>① 层级错位</b><em>动作 vs 类型并列，用户会以为「新建任务」里不包含批量视频</em></div>
+          <div class="row-item"><b>② 主次反了</b><em>最重的流程（逐组审核 / 预检 / 生成）反而用最弱的次级按钮</em></div>
+          <div class="row-item"><b>③ 两个弹窗割裂</b><em>字段结构完全不同，从侧栏看不出点哪个会去哪</em></div>
+          <div class="row-item"><b>④ 不可扩展</b><em>再加类型只能再加按钮，任务列表上方会越堆越乱</em></div>
+        </div></div>`});
+  }else if(current==='select'){
+    entry=entrySelect();
+    main=emptyMain({tone:'neutral',text:'<b>方案 A · 下拉框 + 新建</b>（你提的方案）：侧栏只剩一个「新建」动作，类型收进下拉。改动最小、一个入口、无歧义。',
+      extra:`<div class="sec"><div class="sec-head"><h2>但要接受这几件事</h2><span>点左侧体验</span></div><div class="row-list">
+        <div class="row-item"><b>类型差异被藏起来</b><em>「需要已保存工作流」「需要作品」这类前置条件，选完才发现</em></div>
+        <div class="row-item"><b>每次多一步</b><em>批量视频是高频入口，老用户要多点一次下拉</em></div>
+        <div class="row-item"><b>6 项挤在 262px 侧栏</b><em>下拉文字会被截断，类型再多更难读</em></div>
+        <div class="row-item"><b>启动台能做的事它做不了</b><em>无法按用途分组、无法标「最近使用」、无法说明流程形态</em></div>
+      </div></div>`});
+  }else if(current==='launcher'){
+    entry=entryLauncher();
+    main=emptyMain({tone:'good',text:'<b>方案 B · 类型启动台（推荐）</b>：侧栏只保留一个「新建任务」。点开后按用途分组挑类型，卡片上直接写清「需要准备什么」和「流程长什么样」。',
+      extra:`<div class="sec"><div class="sec-head"><h2>为什么推荐它</h2><span>点左侧「＋ 新建任务」看弹窗</span></div><div class="row-list">
+        <div class="row-item"><b>层级对了</b><em>一个动作 → 一层类型 → 一个表单，三层不混</em></div>
+        <div class="row-item"><b>差异看得见</b><em>前置条件、流程形态、最近使用都在选之前</em></div>
+        <div class="row-item"><b>能长</b><em>以后加类型只是加一张卡，不用再动侧栏</em></div>
+        <div class="row-item"><b>代价可控</b><em>多一次点击；换来不用猜、不用记，且复用现有两个 dialog</em></div>
+      </div></div>`});
+  }else if(current==='shortcut'){
+    entry=entryShortcut();
+    main=emptyMain({tone:'neutral',text:'<b>方案 C · 主入口 + 快捷方式</b>：保留 B 的启动台，同时给高频类型一个「1 步直达」。关键是把它放进独立的「快捷开始」分组，并写明「新建任务的一种」，不再与主动作并排。',
+      extra:`<div class="sec"><div class="sec-head"><h2>取舍</h2><span>折中方案</span></div><div class="row-list">
+        <div class="row-item"><b>好处</b><em>老用户 1 步进批量视频；新用户仍看到完整类型列表</em></div>
+        <div class="row-item"><b>风险</b><em>两个可点区域，视觉分区一弱就又被读成并列</em></div>
+        <div class="row-item"><b>建议</b><em>只有确实存在高频类型时才加；且只能有 1 个，不能变成第二排按钮</em></div>
+      </div></div>`});
+  }else{
+    entry=entryLauncher();
+    main=flowShell(flowTab);
+  }
+  st.innerHTML=shell(entry,main);
+  el('crumb').textContent=current==='flows'?'任务进展与结果':'任务进展与结果';
+  if(current==='flows')fillFlow(flowTab);
+  bindStage();applyMeasure();
+}
+function fillFlow(tab){
+  const m=FLOWMETA[tab];
+  el('flowTitle').textContent=m.title;el('flowSub').textContent=m.sub;
+  el('m1h').textContent=m.m1h;el('m1v').textContent=m.m1v;el('m1s').textContent=m.m1s;
+  el('m2h').textContent=m.m2h;el('m2v').textContent=m.m2v;el('m2s').textContent=m.m2s;
+  el('flowPill').textContent=tab==='batch'?'待确认':tab==='loop'?'第 2 轮':'进行中';
+  el('flowBody').innerHTML=m.body();
+  $$('.flow-tab').forEach(b=>b.addEventListener('click',()=>{flowTab=b.dataset.flow;render()}));
+}
+
+/* ── 对照 / 说明 ── */
+function wideHtml(kind){
+  if(kind==='compare')return `<div class="wide"><div class="wide-inner">
+    <div class="panel"><h1>三个方案怎么选</h1><p>共同前提：不再把「动作」和「类型」并排。差别只在「类型放在哪一层」。</p></div>
+    <div class="compare">
+      <div class="compare-card"><h3>A · 下拉 + 新建</h3><p class="sub">你提的方案。类型收进 262px 侧栏的下拉，选完点新建。</p><ul>
+        <li><b>点击成本</b>：2 次（选类型 + 新建）</li><li><b>类型可见性</b>：藏起来的</li><li><b>前置条件</b>：选完才知道</li><li><b>扩展性</b>：好，但下拉会越来越长</li><li><b>实现量</b>：最小，改侧栏 + 路由</li><li><b>适合</b>：类型少、人人熟、追求零改动</li></ul></div>
+      <div class="compare-card rec"><h3>B · 类型启动台 <span class="tag ok">推荐</span></h3><p class="sub">一个主按钮 → 按用途分组的类型卡片 → 对应表单。</p><ul>
+        <li><b>点击成本</b>：2 次（新建 + 选类型）</li><li><b>类型可见性</b>：全部平铺、按用途分组</li><li><b>前置条件</b>：选之前就写在卡片上</li><li><b>扩展性</b>：最好，加卡片即可</li><li><b>实现量</b>：中，新增 1 个 dialog + 路由</li><li><b>适合</b>：类型差异大、有前置依赖、还会继续加类型</li></ul></div>
+      <div class="compare-card"><h3>C · 主入口 + 快捷</h3><p class="sub">B 的完整列表 + 一个高频类型的 1 步直达。</p><ul>
+        <li><b>点击成本</b>：高频 1 次 / 其他 2 次</li><li><b>类型可见性</b>：主列表完整</li><li><b>前置条件</b>：快捷项上可直接标</li><li><b>扩展性</b>：好，但快捷位只能有 1 个</li><li><b>实现量</b>：中，B + 一块侧栏分区</li><li><b>适合</b>：确认批量视频是绝对高频之后</li></ul></div>
+    </div>
+    <div class="panel"><h2>还有一个不建议的方向</h2><p><b>「一句话目标 → 系统猜类型」的对话式新建</b>：看起来最省事，但本项目的既定契约是「映射解释权在用户、不猜不查」，而且猜错会把用户带进错误的任务类型（写作 / 批量视频的数据契约完全不同）。在类型只有 6 种、且每种都有明确前置条件时，让用户自己选反而更快、更可控。</p></div>
+    <div class="panel"><h2>建议的落地切法</h2>
+      <table><thead><tr><th style="width:70px">步骤</th><th>做什么</th><th>复用 / 不动的东西</th></tr></thead><tbody>
+        <tr><td><b>1</b></td><td>侧栏只留一个「＋ 新建任务」；删掉独立的「批量制作视频」按钮</td><td>保留 <code>#superAgentCreate</code> 的绑定语义，改它指向启动台</td></tr>
+        <tr><td><b>2</b></td><td>新增启动台 dialog（三段式 <code>.sa-dialog</code>），6 张类型卡按 3 组</td><td>沿用现有尺寸阶梯 / 深浅主题 / 手机全屏规则</td></tr>
+        <tr><td><b>3</b></td><td>卡片点击路由到现有两个 dialog：5 类 → <code>superAgentCreateDialog</code>，批量视频 → <code>superAgentRecipeDialog</code></td><td><b>不改表单字段、不改数据契约、不改后端</b></td></tr>
+        <tr><td><b>4</b></td><td>表单里「任务类型」下拉保留，作为启动台选完后的二次确认（可改选）</td><td>避免两条路径状态不一致；改选不重开弹窗</td></tr>
+        <tr><td><b>5</b></td><td>若日后确认批量视频高频，再加 C 的「快捷开始」</td><td>只加 1 个，且必须写「新建任务的一种」</td></tr>
+      </tbody></table></div>
+  </div></div>`;
+  return `<div class="wide"><div class="wide-inner">
+    <div class="panel"><h1>第二个问题：不同预设任务用不同流程视觉，会不会更好？</h1>
+      <p><b>会，但只差异化「内容区」，不要整页换皮。</b> 建议做成「<b>一壳三芯</b>」：统一外壳 + 三种流程内容组件，用 <code>data-flow</code> 路由，而不是 6 套皮肤。</p></div>
+    <div class="panel"><h2>为什么现在这套通用详情确实不够用</h2>
+      <table><thead><tr><th style="width:150px">任务类型</th><th>真实的进度模型</th><th>通用模板哪里不对</th><th>建议的内容区</th></tr></thead><tbody>
+        <tr><td><b>织书台 / 拆书匠</b><br><span class="hint">writer · novel</span></td><td>线性阶段链（writer 4 步 / novel 5 步）+ 按部、按章的产物</td><td>「2 / 4 步」看不出写到第几章；章节产物被压成一条时间线</td><td>阶段轨道 + 章节网格 + 按章产物</td></tr>
+        <tr><td><b>批量制作视频</b><br><span class="hint">mode=recipe</span></td><td>网格批次：N 组 × 每条，逐组准备 / 审核 / 生成 / 收结果</td><td>竖向步骤链完全不适用；核心「哪组缺素材」看不见</td><td>批次看板 + 组卡网格 + 就绪检查</td></tr>
+        <tr><td><b>聊天 / 子助手 / 自动检查</b><br><span class="hint">chat · subagent · supervision</span></td><td>循环轮次：执行 → 检查 → 补做，直到完成标准</td><td>「当前阶段」是伪概念；补做次数和标准达成情况没有位置</td><td>轮次时间线 + 完成标准清单</td></tr>
+        <tr><td><b>关联已有后台任务</b><br><span class="hint">job</span></td><td>外部任务的只读镜像</td><td>伪装成本地步骤，会让用户以为总管在驱动它</td><td>状态卡 + 跳转，明确「只读取状态」</td></tr>
+      </tbody></table></div>
+    <div class="panel"><h2>哪一层统一、哪一层差异化</h2>
+      <table><thead><tr><th style="width:130px">层</th><th>做法</th><th>理由</th></tr></thead><tbody>
+        <tr><td><b>统一（壳）</b></td><td>三栏骨架、任务列表、标题 / 状态 pill、暂停 / 继续 / 取消、时间线、右栏「下一步 / 最近产物 / 相关入口」、深浅主题与手机规则、状态色语义</td><td>同一列表里点开两个任务不该像两个软件；这些也是已有前端守门与文档约定的契约层</td></tr>
+        <tr><td><b>差异化（芯）</b></td><td>中间内容区 3 种：链 / 批次 / 轮次；指标卡的<b>口径</b>随类型变（12/20 章、8 组、第 2/4 轮），但卡片本身不变</td><td>差异要落在「结构」上，用户真正需要的信息才看得见</td></tr>
+        <tr><td><b>不做什么</b></td><td>不给每类换主题色 / 图标皮；不靠类型名猜视图；不改操作语义；不改数据契约；不整页重做</td><td>换色最容易做也最没用，还会破坏「绿=完成、红=失败」的状态语义</td></tr>
+        <tr><td><b>依据字段</b></td><td><code>domain</code>（writer/novel/chat/job/subagent）、<code>mode=recipe</code>、<code>supervision</code> —— 都是现有真实字段</td><td>不新增「猜类型」逻辑；<b>字段缺失或旧任务一律回退通用视图</b>，不白屏、不改历史任务结论</td></tr>
+      </tbody></table></div>
+    <div class="panel"><h2>要拍板的几件事</h2><div class="q">
+      <div class="q-row"><b>Q1</b><span>新建入口定 <b>A / B / C</b> 哪个？我推荐 <b>B</b>；若确认批量视频是绝对高频，再叠加 C 的一个快捷位。</span></div>
+      <div class="q-row"><b>Q2</b><span>启动台里 6 张卡是否都要常显？「关联已有后台任务」使用率低，可折叠进「更多」，但默认先全显便于评审。</span></div>
+      <div class="q-row"><b>Q3</b><span>流程视图本轮只做<b>批量视频</b>一种，还是三种一起？建议先做批次看板（收益最大），链与轮次留第二批。</span></div>
+      <div class="q-row"><b>Q4</b><span>指标卡口径随类型变（章数 / 组数 / 轮次）会不会与「仅统计已完成的真实步骤」这条既有文案冲突？需要一起改口径说明。</span></div>
+      <div class="q-row"><b>Q5</b><span>上一轮「上传素材入口」我先停住了。等这个入口层级定案，再把它接到批量视频的组卡里，避免两套设计互相打架。</span></div>
+    </div></div>
+    <div class="panel"><h2>尺寸样本（同一套组件 CSS，现场测量）</h2><p>下方自检量的是这些真实渲染出来的组件，不是预设数值；切换深浅主题或手机视图后数值会跟着变。</p>
+      <div class="measure-samples" style="display:grid;grid-template-columns:minmax(0,240px) minmax(0,1fr);gap:12px;margin-top:12px">
+        <div style="padding:12px;border-radius:12px;background:var(--sidebar)">
+          <button class="btn-new primary-solid" data-m="btn-new" type="button">${I.plus} 新建任务</button>
+        </div>
+        <div style="padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--surface)">
+          <button class="type-card" data-m="type-card" type="button" style="width:100%"><span class="tc-ico">${I.film}</span><span class="tc-copy"><b>批量制作视频</b><p>逐组放素材、写提示词、审核后批量生成</p><span class="tc-meta"><span class="tag warn">需要已保存的工作流</span><span class="tag">按组准备</span></span></span></button>
+          <div class="foot-btns" style="margin-top:10px"><button class="btn btn-primary" data-m="dlg-btn" type="button">创建任务</button></div>
+        </div>
+      </div></div>
+    <div class="panel"><h2>真实 DOM 自检（实时计算，不是肉眼判断）</h2><p>下面数值由 <code>getBoundingClientRect()</code> / <code>scrollWidth</code> 现场读取，切换主题、手机视图或尺寸开关后会重算。</p><div class="selfcheck" id="selfcheck"></div></div>
+    <div class="panel"><h2>本预览的边界</h2><ul>
+      <li>只读了真实前端结构，<b>没有修改 <code>public/*</code> 任何产品代码</b>，也没有跑真实实例或提交任务。</li>
+      <li>任务名、组数、章节数、卡片文案是代表性示意；真实字段以 <code>28-super-agent.js</code> 与后端契约为准。</li>
+      <li>缩略图全部是 CSS 占位，没有使用 <code>data/generated</code> 里的真实产物图。</li>
+      <li>流程视图的三种内容是设计提案，不代表后端已有对应聚合接口；落地前需核字段。</li>
+    </ul></div>
+  </div></div>`;
+}
+
+/* ── 交互绑定 ── */
+function bindStage(){
+  $$('[data-open]').forEach(b=>b.addEventListener('click',()=>{
+    const k=b.dataset.open;
+    if(k==='launcher')openLauncher();
+    else if(k==='form')openForm(b.dataset.type);
+    else if(k==='form-from-select')openForm(el('entryType').value);
+  }));
+  $$('.thread').forEach(b=>b.addEventListener('click',()=>toast('预览：切换任务（不加载数据）')));
+}
+function bindWide(){
+  $$('.compare-card').forEach(c=>c.addEventListener('click',()=>toast('预览：可在上方场景切换查看该方案')));
+  if(current==='notes')runSelfCheck();
+}
+$$('.scene-tab').forEach(b=>b.addEventListener('click',()=>{
+  current=b.dataset.scene;$$('.scene-tab').forEach(x=>x.classList.toggle('active',x===b));render();
+}));
+el('themeBtn').addEventListener('click',()=>{
+  const dark=document.documentElement.dataset.theme!=='dark';
+  document.documentElement.dataset.theme=dark?'dark':'light';
+  el('themeBtn').querySelector('span').textContent=dark?'浅色':'深色';
+  toast(dark?'已切换深色：侧栏仍为深色系，弹窗输入面保持可读':'已切换浅色');applyMeasure();
+});
+el('mobileBtn').addEventListener('click',()=>{
+  const m=document.body.dataset.mobile!=='true';document.body.dataset.mobile=String(m);
+  el('mobileBtn').classList.toggle('active',m);el('mobileBtn').querySelector('span').textContent=m?'桌面视图':'手机视图';
+  toast(m?'已切换手机单列（侧栏收起、弹窗全屏）':'已切换桌面三栏');applyMeasure();
+});
+el('measureBtn').addEventListener('click',()=>{
+  const on=!document.body.classList.contains('show-measure');
+  document.body.classList.toggle('show-measure',on);el('measureBtn').classList.toggle('active',on);
+  el('measureBtn').querySelector('span').textContent=on?'尺寸 ✓':'尺寸';
+  toast(on?'已标注关键元素的真实 DOM 尺寸':'已关闭尺寸标注');applyMeasure();
+});
+el('dlg').addEventListener('click',e=>{if(e.target===el('dlg'))el('dlg').close()});
+
+/* ── 尺寸标注 + 自检 ── */
+function applyMeasure(){
+  $$('[data-m]').forEach(n=>{const r=n.getBoundingClientRect();if(r.width>0)n.dataset.mSize=`${Math.round(r.width)}×${Math.round(r.height)}`});
+  if(current==='notes')runSelfCheck();
+}
+function runSelfCheck(){
+  const host=el('selfcheck');if(!host)return;
+  const rows=[];
+  const rect=s=>{const n=document.querySelector(s);return n?n.getBoundingClientRect():null};
+  const add=(ok,label,value)=>rows.push(`<div class="sc ${ok?'':'bad'}"><i>${ok?'✓':'!'}</i><span>${label} <b>${value}</b></span></div>`);
+  const btn=rect('[data-m="btn-new"]'), card=rect('[data-m="type-card"]'), dlgBtn=rect('[data-m="dlg-btn"]');
+  add(!btn||btn.height>=36,'新建主按钮最小高度 ≥ 36px',btn?`${Math.round(btn.width)}×${Math.round(btn.height)}px`:'需打开启动台场景');
+  add(!card||card.height>=80,'类型卡点击区 ≥ 80px 高',card?`${Math.round(card.width)}×${Math.round(card.height)}px`:'需打开含启动台的场景');
+  add(!dlgBtn||dlgBtn.height>=36,'弹窗底栏按钮 ≥ 36px',dlgBtn?`${Math.round(dlgBtn.width)}×${Math.round(dlgBtn.height)}px`:'需打开弹窗');
+  const main=document.querySelector('.sim-main'), stage=el('stage');
+  add(!main||main.scrollWidth<=main.clientWidth+1,'三栏内容区无横向溢出',main?`${main.scrollWidth} / ${main.clientWidth}px`:'—');
+  add(!stage||stage.scrollWidth<=stage.clientWidth+1,'舞台无横向溢出',stage?`${stage.scrollWidth} / ${stage.clientWidth}px`:'—');
+  const mobile=document.body.dataset.mobile==='true';
+  add(document.documentElement.scrollWidth<=window.innerWidth+1,'当前视口无横向滚动',`${document.documentElement.scrollWidth} / ${window.innerWidth}px`);
+  const fs=n=>n?parseFloat(getComputedStyle(n).fontSize):0;
+  const hint=document.querySelector('.hint');
+  add(!hint||fs(hint)>=11,'最小字号 ≥ 11px',hint?`${fs(hint)}px`:'—');
+  const wide=document.querySelector('.wide');
+  add(!mobile||!wide||wide.scrollWidth<=wide.clientWidth+1,'手机视图内容区不溢出',mobile&&wide?`${wide.scrollWidth} / ${wide.clientWidth}px`:'当前为桌面');
+  host.innerHTML=rows.join('');
+}
+window.addEventListener('resize',()=>applyMeasure());
+render();
+</script>
+</body>
+</html>

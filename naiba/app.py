@@ -26,7 +26,7 @@ import naiba.net as net_io
 from naiba.capability import CapabilityRuntime
 from naiba.config import (
     ConfigStore, VALID_MODEL_KINDS, _infer_kind_for_request_format,
-    built_in_agent_ids, validate_skills_dir,
+    built_in_agent_ids, onebot_public, validate_skills_dir,
 )
 from naiba.core.cards import parse_sillytavern_card
 from naiba.core.migration import (
@@ -99,7 +99,6 @@ def _super_agent_thread_payload(thread: Any, *, detail: bool = False) -> dict[st
         "summary": _super_agent_text(thread.summary, 1000),
         "chain_version": int(getattr(thread, "chain_version", 0) or 0),
         "current_node_id": thread.current_node_id,
-        "recipe_batch_id": str((thread.execution_snapshot or {}).get("recipe_batch_id") or ""),
         "current_stage_key": str(getattr(thread, "current_stage_key", "") or ""),
         "linked_conversation_ids": list(thread.linked_conversation_ids or []),
         "linked_book_refs": [
@@ -570,11 +569,8 @@ class NaibaChatApp:
             logger.exception("织书台流水线启动恢复失败")
             writer_recovery = None
         _ = writer_recovery
-        from naiba.super_agent.recipes import RecipeCoordinator
         from naiba.super_agent.domain import DomainCoordinator
 
-        self.recipes = RecipeCoordinator(self, self.super_agent)
-        self.recipes.recover()
         self.super_agent_domain = DomainCoordinator(self)
         self.super_agent.domain_router = self.super_agent_domain
         self.super_agent_domain.runtime.start()
@@ -585,8 +581,21 @@ class NaibaChatApp:
         # 后台自动连接所有已启用 MCP 服务；对启动时未连上的做周期重试，
         # 保证 MCP 工具在会话固化工具集之前就绪（否则新会话烘焙不到它们）。
         self._start_mcp_background()
+        # QQ 渠道（NapCatQQ / OneBot v11 反向 WebSocket）：默认关闭，只有配置
+        # enabled=true 且校验通过才真正监听。渠道故障只在状态里报告，不阻断网页启动。
+        from naiba.channels import OneBotChannelService
+
+        self.onebot = OneBotChannelService(self)
+        try:
+            self.onebot.start()
+        except Exception:  # noqa: BLE001 - 渠道启动失败不阻断应用
+            logger.exception("QQ 渠道启动失败")
 
     def stop(self) -> None:
+        try:
+            self.onebot.stop()
+        except Exception:  # noqa: BLE001 - 收尾不互相阻断
+            logger.exception("QQ 渠道收尾失败")
         self.super_agent_domain.runtime.shutdown()
         self.runs.shutdown()
         self.plans.shutdown()
@@ -994,9 +1003,30 @@ class NaibaChatApp:
     def _super_agent_owner() -> str:
         return SUPER_AGENT_HTTP_OWNER
 
-    def api_super_agent_threads(self) -> tuple[dict[str, Any], int]:
-        threads = self.super_agent.list_threads(self._super_agent_owner())
+    def api_super_agent_threads(self, include_archived: bool = False) -> tuple[dict[str, Any], int]:
+        threads = self.super_agent.list_threads(self._super_agent_owner(), include_archived=include_archived)
         return {"threads": [_super_agent_thread_payload(thread) for thread in threads]}, HTTPStatus.OK
+
+    def api_super_agent_archive_thread(self, thread_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        try:
+            thread = self.super_agent.archive_thread(
+                self._super_agent_owner(), thread_id, request_id=str((body or {}).get("request_id") or ""),
+                expected_version=(body or {}).get("expected_version"))
+            return {"thread": _super_agent_thread_payload(thread)}, HTTPStatus.OK
+        except LookupError as exc:
+            return {"error": str(exc)}, HTTPStatus.NOT_FOUND
+        except (ValueError, RuntimeError) as exc:
+            return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
+
+    def api_super_agent_restore_thread(self, thread_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        try:
+            thread = self.super_agent.restore_thread(
+                self._super_agent_owner(), thread_id, request_id=str((body or {}).get("request_id") or ""))
+            return {"thread": _super_agent_thread_payload(thread)}, HTTPStatus.OK
+        except LookupError as exc:
+            return {"error": str(exc)}, HTTPStatus.NOT_FOUND
+        except (ValueError, RuntimeError) as exc:
+            return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
 
     def api_super_agent_create_thread(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         try:
@@ -1014,44 +1044,9 @@ class NaibaChatApp:
         except (ValueError, RuntimeError) as exc:
             return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
 
-    def api_super_agent_recipes(self) -> tuple[dict[str, Any], int]:
-        return self.recipes.catalog(self._super_agent_owner()), HTTPStatus.OK
-
-    def api_super_agent_save_recipe(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
-        return self._recipe_api(lambda: self.recipes.save_recipe(self._super_agent_owner(), body), created=True)
-
-    def api_super_agent_create_recipe_batch(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
-        return self._recipe_api(lambda: self.recipes.create(self._super_agent_owner(), body), created=True)
-
-    def api_super_agent_recipe(self, thread_id: str) -> tuple[dict[str, Any], int]:
-        return self._recipe_api(lambda: self.recipes.detail(self._super_agent_owner(), thread_id))
-
-    def api_super_agent_recipe_clone_draft(self, thread_id: str) -> tuple[dict[str, Any], int]:
-        return self._recipe_api(lambda: self.recipes.clone_draft(self._super_agent_owner(), thread_id))
-
-    def api_super_agent_recipe_action(self, thread_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
-        return self._recipe_api(lambda: self.recipes.action(self._super_agent_owner(), thread_id, body))
-
-    def api_super_agent_recipe_precheck(self, thread_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
-        return self._recipe_api(lambda: self.recipes.precheck(self._super_agent_owner(), thread_id, body))
-
-    @staticmethod
-    def _recipe_api(operation: Any, *, created: bool = False) -> tuple[dict[str, Any], int]:
-        try:
-            return operation(), HTTPStatus.CREATED if created else HTTPStatus.OK
-        except LookupError as exc:
-            return {"error": str(exc)}, HTTPStatus.NOT_FOUND
-        except (ValueError, RuntimeError) as exc:
-            message = str(exc)
-            conflict = any(word in message.lower() for word in ("revision", "版本", "conflict", "冲突"))
-            return {"error": message}, HTTPStatus.CONFLICT if conflict else HTTPStatus.BAD_REQUEST
-
     def api_super_agent_action(self, thread_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         from naiba.super_agent.baseline import PreflightRejected
         try:
-            nodes = self.super_agent.list_nodes(self._super_agent_owner(), thread_id)
-            if any(node.executor_type == "recipe_batch" for node in nodes):
-                return self.api_super_agent_recipe_action(thread_id, body)
             result = self.super_agent_domain.action(self._super_agent_owner(), thread_id, body)
             return {"result": _super_agent_action_payload(result)}, HTTPStatus.OK
         except LookupError as exc:
@@ -1414,6 +1409,63 @@ class NaibaChatApp:
         """供应商预设表（设置弹层与首启引导共用，名单唯一来源在 llm/provider_presets.py）。"""
         return {"presets": provider_presets_payload()}
 
+    # ---- QQ 渠道（NapCatQQ / OneBot v11）----
+
+    def api_onebot_status(self) -> dict[str, Any]:
+        """QQ 渠道可观察状态 + 本机绑定清单（不含口令与消息内容）。"""
+        return {
+            "status": self.onebot.status(),
+            "bindings": self.onebot.bindings(),
+            "config": onebot_public(self.config.data.get("onebot")),
+        }
+
+    def api_onebot_bind(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """把 QQ 号绑到会话；只接受本机调用（路由层已限制），不接受任意远端身份。
+
+        ``mode=new`` 时先按 ``onebot.default_*`` 建一个专用会话再绑定；缺模型就 400，
+        由前端提示用户去选默认模型（计划 §3.4）。
+        """
+        mode = str(body.get("mode") or "existing").strip().lower()
+        try:
+            if mode == "new":
+                conversation = self.onebot.bind_new_conversation(
+                    qq_user_id=str(body.get("qq_user_id") or ""),
+                    qq_group_id=str(body.get("qq_group_id") or ""),
+                    scope=str(body.get("scope") or "private"),
+                    account_id=str(body.get("account_id") or ""),
+                    title=str(body.get("title") or ""),
+                )
+                conversation_id = str(conversation.get("id") or "")
+                binding = self.onebot.bindings()
+                binding = next(
+                    (
+                        item for item in binding
+                        if str(item.get("conversation_id") or "") == conversation_id
+                    ),
+                    {},
+                )
+            else:
+                binding = self.onebot.bind_conversation(
+                    qq_user_id=str(body.get("qq_user_id") or ""),
+                    conversation_id=str(body.get("conversation_id") or ""),
+                    qq_group_id=str(body.get("qq_group_id") or ""),
+                    scope=str(body.get("scope") or "private"),
+                    account_id=str(body.get("account_id") or ""),
+                )
+                conversation_id = str(binding.get("conversation_id") or "")
+        except ValueError as exc:
+            return {"error": str(exc)}, HTTPStatus.BAD_REQUEST
+        return {"binding": binding, "conversation_id": conversation_id}, HTTPStatus.OK
+
+    def api_onebot_unbind(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        removed = self.onebot.unbind(
+            qq_user_id=str(body.get("qq_user_id") or ""),
+            qq_group_id=str(body.get("qq_group_id") or ""),
+            scope=str(body.get("scope") or "private"),
+            account_id=str(body.get("account_id") or ""),
+        )
+        return {"removed": removed}, HTTPStatus.OK
+
     def api_open_provider_key_url(self, preset_id: str) -> tuple[dict[str, Any], int]:
         """用系统默认浏览器打开预设的 Key 申请入口（弹层与向导的「打开注册页」按钮）。
 
@@ -1610,6 +1662,15 @@ class NaibaChatApp:
         # 工作区变更：仅影响新任务；已运行后台任务继续使用其启动时的快照路径。
         if "workspace_dir" in body:
             self.executor.workspace = self.config.resolve_workspace_dir()
+        # QQ 渠道配置变更即时生效：开关/端口/口令/白名单都按新配置重建监听，
+        # 否则用户「保存了但没反应」，只能靠重启才发现。
+        if "onebot" in body:
+            try:
+                self.onebot.restart()
+            except Exception:  # noqa: BLE001 - 渠道重启失败只记状态，不改设置保存结果
+                logger.exception("QQ 渠道重启失败")
+            settings["onebot"] = onebot_public(self.config.data.get("onebot"))
+            settings["onebot_status"] = self.onebot.status()
         return (
             {
                 "settings": settings,
@@ -2652,15 +2713,8 @@ class NaibaChatApp:
         comfyui = getattr(self, "comfyui", None)
         if comfyui is not None:
             try:
-                # 造梦机本期不消费 uploads（P5 图片输入接入后由它返回引用集合）；
-                # 保护入口先并进来，方向只会是「多留」。
+                # 造梦机任务仍引用的输入媒体（排队/执行/可重试都保护）。
                 keys.update(comfyui.referenced_upload_paths())
-            except (OSError, ValueError):
-                pass
-        recipes = getattr(self, "recipes", None)
-        if recipes is not None:
-            try:
-                keys.update(recipes.referenced_upload_paths())
             except (OSError, ValueError):
                 pass
         background = str(((self.config.data.get("chat_background") or {}).get("image") or "")).strip()
@@ -2816,13 +2870,6 @@ class NaibaChatApp:
                     return True
             except (OSError, ValueError):
                 return True  # 判定不了时宁可保留
-        recipes = getattr(self, "recipes", None)
-        if recipes is not None:
-            try:
-                if normalized_path_key(target) in recipes.referenced_upload_paths():
-                    return True
-            except (OSError, ValueError):
-                return True
         background = self.config.data.get("chat_background") or {}
         image = str(background.get("image") or "").strip()
         if not image:

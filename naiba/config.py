@@ -300,6 +300,87 @@ def clamp_skill_max_size_mb(value: Any) -> int:
     return max(10, min(SKILL_MAX_SIZE_MB_MAX, parsed))
 
 
+ONEBOT_DEFAULT: dict[str, Any] = {
+    "enabled": False,
+    "listen_host": "127.0.0.1",
+    "listen_port": 8766,
+    "path": "/onebot/v11/ws",
+    "access_token": "",
+    "allowed_user_ids": [],
+    "allowed_group_ids": [],
+    "allow_groups": False,
+    "default_model_key": "",
+    "default_model_name": "",
+    "default_agent_id": "",
+}
+
+
+def _string_list(value: Any, *, limit: int = 200) -> list[str]:
+    """只收干净的非空字符串列表：手改配置里的对象/数字一律丢掉，不让它变成身份白名单。"""
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value[:limit]:
+        text = str(item).strip() if isinstance(item, (str, int)) else ""
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def normalize_onebot(value: Any) -> dict[str, Any]:
+    """归一化 QQ 渠道配置，供配置加载与运行时更新**共用**。
+
+    与其它嵌套配置同款约定：手改的非法值静默收敛成默认，绝不让整份 config.json
+    加载失败，也绝不让「端口写成字符串」「path 不带 /」这类脏值进入监听逻辑。
+    ``access_token`` 原样保留（它是密钥，只做去首尾空白）；对外快照由
+    :func:`onebot_public` 脱敏。
+    """
+    merged = dict(ONEBOT_DEFAULT)
+    if isinstance(value, dict):
+        merged.update(value)
+    host = str(merged.get("listen_host") or "").strip()
+    if not host:
+        host = ONEBOT_DEFAULT["listen_host"]
+    try:
+        port = int(merged.get("listen_port") or 0)
+    except (TypeError, ValueError):
+        port = ONEBOT_DEFAULT["listen_port"]
+    if not 1 <= port <= 65535:
+        port = ONEBOT_DEFAULT["listen_port"]
+    path = str(merged.get("path") or "").strip() or ONEBOT_DEFAULT["path"]
+    if not path.startswith("/"):
+        path = f"/{path}"
+    enabled = merged.get("enabled")
+    allow_groups = merged.get("allow_groups")
+    return {
+        "enabled": enabled if isinstance(enabled, bool) else False,
+        "listen_host": host,
+        "listen_port": port,
+        "path": path,
+        "access_token": str(merged.get("access_token") or "").strip(),
+        "allowed_user_ids": _string_list(merged.get("allowed_user_ids")),
+        "allowed_group_ids": _string_list(merged.get("allowed_group_ids")),
+        # 群聊默认关闭：只有在显式打开 **且** 配了群白名单时才生效（见 service.py）。
+        "allow_groups": allow_groups if isinstance(allow_groups, bool) else False,
+        "default_model_key": str(merged.get("default_model_key") or "").strip(),
+        "default_model_name": str(merged.get("default_model_name") or "").strip()[:256],
+        "default_agent_id": str(merged.get("default_agent_id") or "").strip()[:128],
+    }
+
+
+def onebot_public(value: Any) -> dict[str, Any]:
+    """对外（HTTP / 前端）可见的 QQ 渠道配置：``access_token`` 只回是否已配置。
+
+    NapCat 口令一旦随设置快照外发，任何能打开 /api/settings 的局域网客户端都能
+    冒充 NapCat 连线并伪造 QQ 用户身份，所以这个键**永不**出网（计划 §3.3）。
+    """
+    normalized = normalize_onebot(value)
+    normalized.pop("access_token", None)
+    normalized["has_access_token"] = bool(str((value or {}).get("access_token") or "").strip()) \
+        if isinstance(value, dict) else False
+    return normalized
+
+
 def normalize_appearance(appearance: Any) -> dict[str, Any]:
     """归一化外观设置，供配置加载与运行时更新**共用**（与 chat_background 同款约定）。
 
@@ -604,6 +685,24 @@ def default_config() -> dict[str, Any]:
         # 但仍需要给更新单独挂一个代理。mode=inherit 表示完全跟随全局 proxy（默认，
         # 行为与引入该设置前逐字一致）。
         "update_proxy": {"mode": "inherit", "url": ""},
+        # QQ 渠道（NapCatQQ / OneBot v11 反向 WebSocket，
+        # docs/plans/2026-11-05-Cat-Chat-NapCatQQ接入计划.md）。默认关闭。
+        # `access_token` 是 **OneBot 专用口令**：与全局 `access_token` 分开保存、分开校验，
+        # 前者泄露不该等于 Cat Chat 网页也失守。
+        # 监听地址默认 loopback：OneBot 端口一旦对局域网开放，能连上的人都可以冒充 NapCat 投递消息。
+        "onebot": {
+            "enabled": False,
+            "listen_host": "127.0.0.1",
+            "listen_port": 8766,
+            "path": "/onebot/v11/ws",
+            "access_token": "",
+            "allowed_user_ids": [],
+            "allowed_group_ids": [],
+            "allow_groups": False,
+            "default_model_key": "",
+            "default_model_name": "",
+            "default_agent_id": "",
+        },
     }
 
 
@@ -1541,7 +1640,7 @@ class ConfigStore:
                 pass
         # 嵌套默认值合并：用户配置若只写了部分子字段，补齐缺失键。
         for key in ("vision", "search", "appearance", "chat_background", "update_proxy",
-                    "studio", "auto_compaction"):
+                    "studio", "auto_compaction", "onebot"):
             merged = dict(default_config().get(key, {}))
             if isinstance(defaults.get(key), dict):
                 merged.update(defaults[key])
@@ -1557,6 +1656,10 @@ class ConfigStore:
                 # 旧配置没有 studio 键也在这里补齐为空偏好；非法枚举/重复收藏静默收敛，
                 # 绝不让「上次选中的模板已不存在」这类状态阻止工作台打开。
                 merged = normalize_studio_prefs(merged)
+            elif key == "onebot":
+                # 旧配置没有 onebot 键（或者手改坏了）都收敛回可用形态：
+                # 端口/路径/白名单/开关的类型错误不能让整份配置加载失败。
+                merged = normalize_onebot(merged)
             defaults[key] = merged
         # Build 74 changes the historical 120-second Run-wide vision budget
         # into a 180-second timeout for each individual visual request. Only
@@ -2058,9 +2161,55 @@ class ConfigStore:
             }
             result["resolved_workspace_dir"] = str(self.resolve_workspace_dir())
             result["resolved_data_dir"] = str(self.resolve_data_dir())
+            # QQ 渠道口令与全局 access_token 同款：只回「是否已配置」，密钥永不出网。
+            result["onebot"] = onebot_public(self.data.get("onebot"))
             # Skill 大小上限的当前生效值：导入对话框文案与前端预检都用这份服务端算好的值。
             result["skill_size_limits"] = self.skill_size_limits()
             return result
+
+    def onebot_config(self) -> dict[str, Any]:
+        """运行时读取 QQ 渠道配置（含口令；只供服务端装配与校验，不外发）。"""
+        with self.lock:
+            return normalize_onebot(self.data.get("onebot"))
+
+    def update_onebot(self, values: Any) -> dict[str, Any]:
+        """更新 QQ 渠道配置；``access_token`` 传空串表示「保持原值」。
+
+        为什么不是"传空就清空"：前端拿不到原值，保存其它开关时必然回传空串，
+        若按清空处理，用户每改一次开关就等于把口令擦掉、NapCat 立刻连不上。
+        显式清除用 ``clear_access_token: true``。
+        """
+        if not isinstance(values, dict):
+            raise ValueError("onebot 必须是对象")
+        with self.lock:
+            current = normalize_onebot(self.data.get("onebot"))
+            merged = dict(current)
+            for key in (
+                "enabled", "listen_host", "listen_port", "path", "allowed_user_ids",
+                "allowed_group_ids", "allow_groups", "default_model_key",
+                "default_model_name", "default_agent_id",
+            ):
+                if key in values:
+                    merged[key] = values[key]
+            if values.get("clear_access_token"):
+                merged["access_token"] = ""
+            elif "access_token" in values:
+                token = str(values.get("access_token") or "").strip()
+                if token:
+                    if len(token) < 4:
+                        raise ValueError("OneBot 口令至少 4 位")
+                    merged["access_token"] = token
+            normalized = normalize_onebot(merged)
+            if normalized["enabled"] and not normalized["access_token"]:
+                # 没有口令的反向 WebSocket 等于把「谁都能投递 QQ 消息」开在端口上。
+                raise ValueError("启用 QQ 渠道前必须设置 OneBot 口令")
+            if normalized["enabled"] and not normalized["allowed_user_ids"]:
+                raise ValueError("启用 QQ 渠道前必须至少配置一个允许的 QQ 号")
+            if normalized["allow_groups"] and not normalized["allowed_group_ids"]:
+                raise ValueError("开启群聊前必须至少配置一个允许的群号")
+            self.data["onebot"] = normalized
+            self.save()
+            return onebot_public(normalized)
 
     def get_skills_dirs(self) -> list[str]:
         with self.lock:
@@ -2569,6 +2718,7 @@ class ConfigStore:
             "sidebar",
             "usage_dash",
             "studio",
+            "onebot",
         }
         with self.lock:
             for key in allowed:
@@ -2887,6 +3037,10 @@ class ConfigStore:
                                 normalized_titles.append({"kind": kind, "id": item_id, "title": title})
                             current["titles"] = normalized_titles
                         self.data[key] = current
+                    elif key == "onebot":
+                        # QQ 渠道：启用前必须有口令与至少一个允许的 QQ 号（校验在 update_onebot）。
+                        # 这里只负责把异常转成 400，不重复实现规则。
+                        self.update_onebot(values[key])
                     elif key in ("vision", "search", "imaging"):
                         incoming = values[key]
                         if not isinstance(incoming, dict):

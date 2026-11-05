@@ -1465,6 +1465,12 @@ def _run_self_check() -> int:
         "naiba.tools.providers.core",
         "naiba.tools.providers.documents",
         "naiba.tools.providers.video",
+        # QQ 渠道（NapCatQQ / OneBot 反向 WebSocket）：service.start() 惰性 import，
+        # 打包漏掉时网页一切正常、只有「QQ 渠道启动失败」——自检必须当场上报。
+        "websockets",
+        "websockets.sync.server",
+        "websockets.http11",
+        "naiba.channels.service",
     )
     for name in modules:
         importlib.import_module(name)

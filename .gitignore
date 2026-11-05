@@ -391,3 +391,5 @@ verify/*
 !verify/verify_doc_encoding.py
 !verify/_serve_writer_draft_ui.py
 !verify/writer_draft_offline_test.cjs
+!verify/onebot_fake_napcat_smoke.py
+.zcode-site/

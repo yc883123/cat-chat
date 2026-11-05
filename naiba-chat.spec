@@ -100,6 +100,14 @@ a = Analysis(
         # 随附的 FFmpeg DLL 由官方 hook（pyinstaller-hooks-contrib 的 hook-av.py）
         # 把 site-packages/av.libs 按原布局收进产物，这里不要重复收集（会出重复项）。
         "av",
+        # QQ 渠道（NapCatQQ / OneBot 反向 WebSocket）：naiba/channels/service.py 在
+        # start() 里惰性 import，模块图看不到 —— 打包漏掉时表现是「QQ 渠道启动失败：
+        # 缺少 websockets 依赖」，网页却一切正常，只有用户机器上才暴露。
+        "websockets",
+        "websockets.sync.server",
+        "websockets.sync.client",
+        "websockets.http11",
+        "websockets.datastructures",
     ],
     hookspath=[],
     hooksconfig={},

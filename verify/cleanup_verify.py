@@ -37,7 +37,7 @@ KEEP = {
     # 任务总管：真实源码隔离服务与阶段链/控制面门禁。
     "_serve_super_agent_stage_chain.py", "super_agent_stage_chain_smoke.cjs", "super_agent_controls_smoke.cjs",
     "_serve_super_agent_v1_ui.py", "super_agent_v1_ui_smoke.cjs", "super_agent_feedback_smoke.cjs",
-    "super_agent_runtime_smoke.cjs", "_serve_recipe_ui.py",
+    "super_agent_runtime_smoke.cjs",
     # 浏览器冒烟
     "browser_smoke.cjs", "topbar_smoke.cjs", "pending_files_smoke.cjs",
     "send_button_smoke.cjs", "send_state_smoke.cjs", "file_ref_smoke.cjs",
@@ -177,6 +177,9 @@ KEEP = {
     # `_tut_run.sh` 一键跑一篇，`_tutorial_serve.py` 是隔离实例与播种器（被前者调用），
     # `_tutorial_shots.cjs` 是各篇的拍摄脚本。删掉任何一个这条流水线就断。
     "_tut_run.sh", "_tutorial_serve.py", "_tutorial_shots.cjs",
+    # QQ 渠道（NapCatQQ / OneBot v11）真实传输冒烟：自带隔离实例 + 假 NapCat 客户端
+    # （反向 WS 连入、发事件、回动作响应），不访问真实 QQ 或模型供应商。
+    "onebot_fake_napcat_smoke.py",
     # 本脚本自身
     "cleanup_verify.py",
 }

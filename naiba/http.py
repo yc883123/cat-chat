@@ -260,17 +260,18 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json({"error": str(exc)}, HTTPStatus.BAD_GATEWAY)
         elif path == "/api/agents":
             self._json({"agents": self.app.config.public_agents(), "default_agent_id": self.app.config.default_agent_id()})
+        elif path == "/api/onebot/status":
+            # 绑定清单里有 QQ 号，属于个人信息：只给本机看，不随局域网口令外发。
+            if not self._is_local_request():
+                self._json({"error": "QQ 渠道状态只能在本机查看"}, HTTPStatus.FORBIDDEN)
+                return
+            self._json(self.app.api_onebot_status())
         # ---- Super-agent 任务总管只读接口 ----
-        elif path == "/api/super-agent/recipes":
-            self._json(*self.app.api_super_agent_recipes())
         elif path == "/api/super-agent/threads":
-            self._json(*self.app.api_super_agent_threads())
-        elif path.startswith("/api/super-agent/threads/") and path.endswith("/recipe/clone-draft"):
-            thread_id = path[len("/api/super-agent/threads/") : -len("/recipe/clone-draft")].strip("/")
-            self._json(*self.app.api_super_agent_recipe_clone_draft(thread_id))
-        elif path.startswith("/api/super-agent/threads/") and path.endswith("/recipe"):
-            thread_id = path[len("/api/super-agent/threads/") : -len("/recipe")].strip("/")
-            self._json(*self.app.api_super_agent_recipe(thread_id))
+            from urllib.parse import parse_qs, urlsplit
+            query = parse_qs(urlsplit(self.path).query)
+            include_archived = query.get("include_archived", ["0"])[0] in {"1", "true", "yes"}
+            self._json(*self.app.api_super_agent_threads(include_archived=include_archived))
         elif path.startswith("/api/super-agent/threads/") and path.endswith("/nodes"):
             thread_id = path[len("/api/super-agent/threads/") : -len("/nodes")].strip("/")
             self._json(*self.app.api_super_agent_nodes(thread_id))
@@ -741,6 +742,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(*self.app.comfyui.api_models())
         elif path == "/api/comfyui/workflows":
             self._json(*self.app.comfyui.api_workflows())
+        elif path == "/api/comfyui/batches":
+            # 造梦机批量生成：批次列表（历史下拉）。
+            self._json(*self.app.comfyui.api_batches())
+        elif path.startswith("/api/comfyui/batches/"):
+            # 造梦机批量生成：批次详情（逐条目 join 任务状态与产物计数）。
+            self._json(*self.app.comfyui.api_batch(path.rsplit("/", 1)[-1]))
         elif path.startswith("/api/comfyui/workflows/"):
             self._json(*self.app.comfyui.api_workflow(path.rsplit("/", 1)[-1]))
         elif path == "/api/comfyui/tasks":
@@ -874,18 +881,17 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/studio/generate":
             # 工作台生成：Studio 自有异步任务（不创建普通会话，不产生 chat Run）。
             self._json(*self.app.studio.api_generate(body))
-        elif path == "/api/super-agent/recipes":
-            self._json(*self.app.api_super_agent_save_recipe(body))
-        elif path == "/api/super-agent/recipe-batches":
-            self._json(*self.app.api_super_agent_create_recipe_batch(body))
+        elif path == "/api/comfyui/batches":
+            # 造梦机批量生成：一次提交一个批次（方案 + 条目，逐条目一个任务）。
+            self._json(*self.app.comfyui.api_batch_create(body))
         elif path == "/api/super-agent/threads":
             self._json(*self.app.api_super_agent_create_thread(body))
-        elif path.startswith("/api/super-agent/threads/") and path.endswith("/recipe/precheck"):
-            thread_id = path[len("/api/super-agent/threads/"):-len("/recipe/precheck")].strip("/")
-            self._json(*self.app.api_super_agent_recipe_precheck(thread_id, body))
-        elif path.startswith("/api/super-agent/threads/") and path.endswith("/recipe/actions"):
-            thread_id = path[len("/api/super-agent/threads/"):-len("/recipe/actions")].strip("/")
-            self._json(*self.app.api_super_agent_recipe_action(thread_id, body))
+        elif path.startswith("/api/super-agent/threads/") and path.endswith("/archive"):
+            thread_id = path[len("/api/super-agent/threads/"):-len("/archive")].strip("/")
+            self._json(*self.app.api_super_agent_archive_thread(thread_id, body))
+        elif path.startswith("/api/super-agent/threads/") and path.endswith("/restore"):
+            thread_id = path[len("/api/super-agent/threads/"):-len("/restore")].strip("/")
+            self._json(*self.app.api_super_agent_restore_thread(thread_id, body))
         elif path.startswith("/api/super-agent/threads/") and path.endswith("/actions"):
             thread_id = path[len("/api/super-agent/threads/"):-len("/actions")].strip("/")
             self._json(*self.app.api_super_agent_action(thread_id, body))
@@ -1266,6 +1272,16 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json(*self.app.api_update_runtime_settings(body))
             except (OSError, ValueError) as exc:
                 self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+        elif path in {"/api/onebot/bind", "/api/onebot/unbind"}:
+            # QQ 身份绑定是**本机操作**：绑定等于把「谁能通过 QQ 用这条会话」这件事定下来，
+            # 不能由局域网里任意带口令的客户端改写（计划 §3.4 不接受任意消息自行完成绑定）。
+            if not self._is_local_request():
+                self._json({"error": "QQ 绑定只能在运行 Cat Chat 的这台电脑上操作"}, HTTPStatus.FORBIDDEN)
+                return
+            if path == "/api/onebot/bind":
+                self._json(*self.app.api_onebot_bind(body))
+            else:
+                self._json(*self.app.api_onebot_unbind(body))
         elif path == "/api/settings/import-legacy":
             # 从用户指定的旧数据目录导入 config.json 与 data/（保留目标已存在数据）。
             try:

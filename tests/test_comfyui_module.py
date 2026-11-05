@@ -1045,35 +1045,6 @@ class _StubComfyRunner:
         pass
 
 
-class RecipeGraphValidationTests(unittest.TestCase):
-    """COMFY_DYNAMICCOMBO_V3 动态枚举按 key 比对，不把选项字典当字符串误杀。"""
-
-    @staticmethod
-    def _dynamic_combo_schema():
-        def option(key, field):
-            return {"key": key, "inputs": {"required": {field: ["FLOAT", {"default": 1.3}]}}}
-        return {"input": {"required": {"selection": ["COMFY_DYNAMICCOMBO_V3", {"options": [option("sol-attn", "tau"), option("sla", "keep_percent")]}]}}}
-
-    def test_accepts_declared_dynamic_combo_key_and_rejects_unknown(self):
-        from naiba.comfyui.runner import ComfyUIRunner
-        good = {"332": {"class_type": "BlockSparseAttention", "inputs": {"selection": "sol-attn"}}}
-        with mock.patch("naiba.comfyui.runner.client.object_info_node", return_value=self._dynamic_combo_schema()):
-            ComfyUIRunner._validate_recipe_graph("http://127.0.0.1:8188", good)
-        bad = {"332": {"class_type": "BlockSparseAttention", "inputs": {"selection": "bogus"}}}
-        with mock.patch("naiba.comfyui.runner.client.object_info_node", return_value=self._dynamic_combo_schema()):
-            with self.assertRaises(ValueError) as caught:
-                ComfyUIRunner._validate_recipe_graph("http://127.0.0.1:8188", bad)
-        self.assertIn("不在可用选项中", str(caught.exception))
-
-    def test_plain_combo_lists_still_enforced(self):
-        from naiba.comfyui.runner import ComfyUIRunner
-        schema = {"input": {"required": {"sampler_name": [["euler", "dpmpp"]]}}}
-        bad = {"1": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "bogus"}}}
-        with mock.patch("naiba.comfyui.runner.client.object_info_node", return_value=schema):
-            with self.assertRaises(ValueError):
-                ComfyUIRunner._validate_recipe_graph("http://127.0.0.1:8188", bad)
-
-
 class JobsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -2088,7 +2059,7 @@ class SaveAsReviewTests(unittest.TestCase):
     """另存核对：全扫描参数的「可否另存」判定（2026-11-03 一致性修复计划 §3.1）。
 
     只验纯函数：哪些改动能固化进副本、哪些必须被点名拦下。渲染与提交接线由
-    test_recipe_frontend_assets 的源码断言覆盖。
+    test_comfyui_frontend_assets 的源码断言覆盖。
     """
 
     @classmethod

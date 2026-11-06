@@ -756,7 +756,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(*self.app.comfyui.api_batches())
         elif path.startswith("/api/comfyui/batches/"):
             # 造梦机批量生成：批次详情（逐条目 join 任务状态与产物计数）。
-            self._json(*self.app.comfyui.api_batch(path.rsplit("/", 1)[-1]))
+            # with_schemes=1 才带可编辑快照（「编辑这一批」用）；轮询不带。
+            query = urllib.parse.parse_qs(parsed.query)
+            with_schemes = str(query.get("with_schemes", [""])[0]).lower() in {"1", "true", "yes"}
+            self._json(*self.app.comfyui.api_batch(
+                path.rsplit("/", 1)[-1], with_schemes=with_schemes))
         elif path.startswith("/api/comfyui/workflows/"):
             self._json(*self.app.comfyui.api_workflow(path.rsplit("/", 1)[-1]))
         elif path == "/api/comfyui/tasks":
@@ -1761,6 +1765,19 @@ class RequestHandler(BaseHTTPRequestHandler):
             if body is None:
                 return
             self._json(*self.app.studio.api_tasks_delete(body))
+        elif path.startswith("/api/comfyui/batches/") and path.endswith("/outputs"):
+            # 造梦机：删掉这一批的任务记录与产物文件，批次记录保留（可回填再跑）。
+            body = self._read_json()
+            if body is None:
+                return
+            self._json(*self.app.comfyui.api_batch_clear_outputs(path.split("/")[-2]))
+        elif path.startswith("/api/comfyui/batches/"):
+            # 造梦机：删除整个批次；默认连任务记录与产物一起删。
+            body = self._read_json()
+            if body is None:
+                return
+            self._json(*self.app.comfyui.api_batch_delete(
+                path.rsplit("/", 1)[-1], body))
         elif path == "/api/comfyui/tasks":
             # 造梦机：批量删除历史任务（执行中跳过）；产物目录随任务一起删。
             body = self._read_json()

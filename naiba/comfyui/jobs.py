@@ -381,12 +381,18 @@ class ComfyUIJobManager:
         """
         ids = body.get("task_ids") if isinstance(body, dict) else None
         cancel_active = bool(isinstance(body, dict) and body.get("cancel_active"))
+        # 结果页「单次」档的清除只清单次任务：批量条目有自己那一批的删除入口，
+        # 不能因为单次页看不见它们就顺手把整批产物删了。
+        exclude_batch = bool(isinstance(body, dict) and body.get("exclude_batch"))
         if isinstance(ids, list) and ids:
             targets = [str(item).strip() for item in ids[:200] if str(item).strip()]
         else:
             # 未指定 id = 清全部：执行中的在循环里跳过并回报。
-            targets = [str(task.get("id") or "")
-                       for task in self.store.list_tasks(limit=5000)]
+            targets = []
+            for task in self.store.list_tasks(limit=5000):
+                if exclude_batch and str((task.get("input") or {}).get("batch_id") or ""):
+                    continue
+                targets.append(str(task.get("id") or ""))
         deleted = 0
         skipped: list[str] = []
         failed: list[dict[str, str]] = []

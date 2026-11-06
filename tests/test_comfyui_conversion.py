@@ -12,7 +12,7 @@ class ComfyuiConversionTests(unittest.TestCase):
     def test_templates_images_and_material_boundaries(self):
         script = r"""
 import assert from 'node:assert/strict';
-import { buildBatchConvertRequest as build, BATCH_H3_REFERENCE_TEMPLATE as REF } from './public/js/24a-comfyui-convert.js';
+import { buildBatchConvertRequest as build, BATCH_H3_BASE_TEMPLATE as BASE, BATCH_H3_REFERENCE_TEMPLATE as REF } from './public/js/24a-comfyui-convert.js';
 const detail = {
   params: [
     { node_id: '1', field_name: 'image', media: 'image', label: '普通参考' },
@@ -49,6 +49,24 @@ assert.match(body.user_request, /实际发送 2 张图片/);
 assert.match(body.user_request, /图1：节点 2，字段 image，标签 尾帧 last_image，下游 20.end_frame/);
 assert.match(body.user_request, /图2：节点 1，字段 image，标签 普通参考/);
 assert.match(body.user_request, /用途未知时不得猜成首帧/);
+assert.match(body.user_request, /直接输出最终提示词，不提问、不要求确认/);
+
+// 自动口径：只有普通参考图时改走 Ref2VA 六字段，不再让模型停下来问。
+const refDetail = {
+  params: [{ node_id: '8', field_name: 'image', media: 'image',
+             label: '8 · 载入图片 · image → ref_images.ref_image_0' }],
+  prompt: {},
+};
+const refMapping = { media_ports: [{ node_id: '8', field_name: 'image', checked: true }] };
+const refItem = { script: '人物坐下', duration: '', files: { '0': { path: 'uploads/ref.png' } } };
+body = build(refDetail, refMapping, refItem, convert);
+assert.equal(body.item_id, 'h3-014-h3-ref2va');
+assert.match(body.user_request, /普通参考图/);
+assert.match(body.user_request, /不要当首帧/);
+assert.match(body.user_request, /Ref2VA/);
+// 显式强制基础模板时不自动改道。
+body = build(refDetail, refMapping, refItem, { ...convert, template: BASE });
+assert.equal(body.item_id, 'h3-007-h3-i2va');
 
 body = build(detail, mapping, { ...item, duration: '' }, { ...convert, template: REF });
 assert.equal(body.item_id, 'h3-014-h3-ref2va');
@@ -59,6 +77,11 @@ body = build(detail, mapping, item, { ...convert, template: 'cu-custom' });
 assert.equal(body.item_id, undefined);
 assert.equal(body.custom_id, 'cu-custom');
 assert.equal(body.images.length, 2);
+
+// 提词库内置模板：下拉值带 catalog: 前缀，请求里还原成 item_id。
+body = build(detail, mapping, item, { ...convert, template: 'catalog:vi-004-cmd-reverse' });
+assert.equal(body.item_id, 'vi-004-cmd-reverse');
+assert.equal(body.custom_id, undefined);
 
 const videoMapping = { media_ports: [{ node_id: '3', field_name: 'video', checked: true }] };
 assert.throws(() => build(detail, videoMapping, item, { ...convert, template: REF }), /尚未发送视频或音频/);

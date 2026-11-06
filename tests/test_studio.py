@@ -150,6 +150,16 @@ class CommittedCatalogContractTests(unittest.TestCase):
             self.assertIn(mode, base)
         for field in ("integrated_multimodal_description:", "overall_soundscape:", "non_diegetic_music:"):
             self.assertIn(field, base)
+        # 批量转换不再向用户提问：普通参考图直接改走 Ref2VA 六字段。
+        self.assertIn("不要向用户提问", base)
+        self.assertIn("不询问", base)
+        self.assertIn("第一句必须是提示词正文", base)
+        self.assertIn("不得以提问", base)
+        self.assertIn("subject_definitions:", base)
+        self.assertIn("不要向用户提问", reference)
+        self.assertIn("不要索要", reference)
+        self.assertIn("第一句必须是 subject_definitions:", reference)
+        self.assertIn("不得以提问", reference)
         self.assertLess(reference.index("subject_definitions:"), reference.index("summary:"))
         self.assertLess(reference.index("summary:"), reference.index("retention_analysis:"))
         self.assertLess(reference.index("retention_analysis:"), reference.index("detailed_description:"))
@@ -1260,6 +1270,17 @@ class StudioCopyResultUiTests(unittest.TestCase):
         self.assertIn("-webkit-line-clamp: 2", self.css, "长标题允许两行，不能只剩「41. 图片反推命令…」")
         self.assertNotIn("button.append(summaryEl)", self.js, "正文摘要不进列表卡片")
         self.assertNotIn(".studio-row-summary", self.css, "对应的摘要样式也应移除")
+
+
+class StudioCategoryContrastTests(unittest.TestCase):
+    """模型皮肤下 .studio-view 透明：分类栏要自带 --surface 底色，否则亮壁纸上看不清。"""
+
+    def test_category_column_has_surface_backdrop(self) -> None:
+        css = (ROOT / "public/styles.css").read_text(encoding="utf-8")
+        block = css[css.index(".studio-cats {"):]
+        block = block[: block.index("}")]
+        self.assertIn("background: var(--surface)", block)
+        self.assertIn("border: 1px solid var(--line)", block)
 
 
 import unittest.mock  # noqa: E402

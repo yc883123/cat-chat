@@ -628,16 +628,6 @@
                 <button class="control-button tiny" id="comfyuiTestConn" type="button">测试连接</button>
               </div>
               <div class="comfyui-run" id="comfyuiRunSection">
-                <!-- 拆书匠「分镜生图」发来的提示词队列：逐条填进正向提示词，
-                     不做剪贴板中转。只存内存，刷新页面即清空。 -->
-                <div class="comfyui-storyboard" id="comfyuiStoryboard" hidden>
-                  <div class="comfyui-storyboard-head">
-                    <strong>分镜队列</strong>
-                    <small>从拆书匠发来的出图提示词；点「填入」写进正向提示词，填过的会打勾。</small>
-                    <button class="control-button tiny" id="comfyuiStoryboardClear" type="button">清空</button>
-                  </div>
-                  <div class="comfyui-storyboard-list" id="comfyuiStoryboardList" aria-label="分镜提示词队列"></div>
-                </div>
                 <div class="comfyui-param-form" id="comfyuiParamForm" aria-label="工作流参数"></div>
                 <p class="comfyui-draft-hint" id="comfyuiDraftHint" hidden role="status"></p>
                 <div class="comfyui-submit-row">
@@ -674,7 +664,7 @@
               <div class="comfyui-batch-history" id="comfyuiBatchListSection">
                 <div class="comfyui-batch-history-head">
                   <strong>批次</strong>
-                  <small>批量生成的每一批都留在这里，进行中的实时刷新；点一批看逐条产物、失败重试</small>
+                  <small>批量生成的每一批都留在这里，进行中的实时刷新；点一批看逐条产物、重试或删除，点「编辑」回到填单区改内容</small>
                 </div>
                 <div class="comfyui-batch-list" id="comfyuiBatchList" aria-label="批次列表"></div>
               </div>
@@ -806,6 +796,7 @@
               <div class="novel-filter">
                 <input type="search" id="novelChapterFilter" placeholder="筛选章节" aria-label="筛选章节">
               </div>
+              <p class="novel-note novel-chapter-note" id="novelChapterNote" hidden></p>
               <div class="novel-chapter-list" id="novelChapterList" aria-label="章节列表">
                 <p class="novel-empty" id="novelChapterEmpty">还没有章节。点上面的「导入 TXT」选一本小说。</p>
               </div>

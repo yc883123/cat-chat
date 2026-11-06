@@ -45,11 +45,13 @@ class ComfyUIBatchesTests(unittest.TestCase):
              "candidates": ["848x480", "480x848"], "label": "分辨率"},
             {"node_id": "8", "field_name": "image", "field_type": "image",
              "control": "media", "media": "image", "label": "参考图"},
+            {"node_id": "9", "field_name": "lora", "field_type": "text", "label": "LoRA"},
         ]
         self.prompt = {"5": {"class_type": "Fake", "inputs": {"text": "hello", "seed": -1}},
                        "6": {"class_type": "Fake", "inputs": {"length": 5}},
                        "7": {"class_type": "Fake", "inputs": {"res": "848x480"}},
-                       "8": {"class_type": "LoadImage", "inputs": {"image": "default.png"}}}
+                       "8": {"class_type": "LoadImage", "inputs": {"image": "default.png"}},
+                       "9": {"class_type": "Fake", "inputs": {"lora": "base.safetensors"}}}
         self.store.save_workflow({"id": "cw-batch", "name": "批量测试流", "prompt": self.prompt,
                                   "params": self.params})
         # Any accidental network access makes these focused tests fail immediately.
@@ -142,6 +144,34 @@ class ComfyUIBatchesTests(unittest.TestCase):
         self.assertEqual(list(self.batches._dir.glob("cfb-*.json")), [])
         self.enqueue.assert_not_called()
 
+    def test_record_write_failure_rolls_back_created_tasks(self):
+        # 任务都建好了但批次记录落盘失败：不能留下「有任务、没批次」的半批。
+        with mock.patch("naiba.comfyui.batches._write_json", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                self.batches.create(self.body())
+        self.assertEqual(self.store.list_tasks(limit=100), [])
+        self.assertEqual(list(self.batches._dir.glob("cfb-*")), [])
+        self.enqueue.assert_not_called()
+
+    def test_snapshot_write_failure_also_removes_main_record(self):
+        # 主记录写成功、快照写失败：两条都要清掉，不能留下没有快照的半批。
+        from naiba.comfyui import batches as batches_module
+        real_write = batches_module._write_json
+        calls = {"count": 0}
+
+        def flaky(path, payload):
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise OSError("disk full")
+            real_write(path, payload)
+
+        with mock.patch("naiba.comfyui.batches._write_json", side_effect=flaky):
+            with self.assertRaises(OSError):
+                self.batches.create(self.body())
+        self.assertEqual(self.store.list_tasks(limit=100), [])
+        self.assertEqual(list(self.batches._dir.glob("cfb-*")), [])
+        self.enqueue.assert_not_called()
+
     def test_invalid_media_input_rejected_by_dry_run(self):
         body = self.body(schemes=[dict(self.scheme, items=[self._item(
             "条目一", media_inputs=[{"node_id": "8", "field_name": "image",
@@ -205,6 +235,77 @@ class ComfyUIBatchesTests(unittest.TestCase):
         second = self.batches.create(self.body())
         ids = [row["id"] for row in self.batches.list()]
         self.assertEqual(ids, [second["id"], first["id"]])
+
+    def test_editable_snapshot_is_stored_and_only_returned_on_request(self):
+        # 「编辑这一批」不靠任务状态反推：提交时把映射 / 固定参数 / 条目字段
+        # 原样存进批次记录；跑批轮询和列表都不带，避免每 2 秒重复传正文。
+        mapping = {**self.mapping, "media_ports": [
+            {"node_id": "8", "field_name": "image", "checked": True}]}
+        batch = self.batches.create(self.body(schemes=[dict(
+            self.scheme, mapping=mapping, overrides=[
+                {"node_id": "9", "field_name": "lora", "value": "other.safetensors"}],
+            items=[dict(self.scheme["items"][0], script="剧本A")])]))
+        full = self.batches.get(batch["id"], with_schemes=True)
+        snapshot = full["schemes"][0]
+        self.assertEqual(snapshot["workflow_id"], "cw-batch")
+        self.assertEqual(snapshot["workflow_name"], "批量测试流")
+        self.assertEqual(snapshot["overrides"],
+                         [{"node_id": "9", "field_name": "lora", "value": "other.safetensors"}])
+        self.assertEqual(snapshot["mapping"]["prompt_slot"], {"node_id": "5", "field_name": "text"})
+        self.assertEqual(snapshot["mapping"]["media_ports"],
+                         [{"node_id": "8", "field_name": "image", "checked": True}])
+        item = snapshot["items"][0]
+        self.assertEqual(item["name"], "条目一")
+        self.assertEqual(item["script"], "剧本A")
+        self.assertEqual(item["prompt"], "场景A")
+        self.assertEqual(item["duration_seconds"], 8)
+        self.assertEqual(item["resolution"], "848x480")
+        self.assertEqual(item["shots"], 1)
+        # 默认详情与列表都不带快照，主记录不塞正文；快照在独立文件里。
+        self.assertNotIn("schemes", self.batches.get(batch["id"]))
+        self.assertNotIn("schemes", self.batches.list()[0])
+        self.assertEqual([row["id"] for row in self.batches.list()], [batch["id"]])
+        self.assertTrue(self.batches.schemes_path(batch["id"]).exists())
+        self.assertNotIn('"schemes"',
+                         self.batches.batch_path(batch["id"]).read_text(encoding="utf-8"))
+
+    def test_legacy_batch_exposes_task_input_for_restore(self):
+        # 升级前落盘的批次没有 schemes 文件；详情带 with_schemes=1 时用任务输入兜底，
+        # 让「编辑这一批」至少能把能对上的字段捞回来。
+        batch = self.batches.create(self.body())
+        self.batches.schemes_path(batch["id"]).unlink(missing_ok=True)
+        detail = self.batches.get(batch["id"], with_schemes=True)
+        self.assertEqual(detail["schemes"], [])
+        restore = detail["items"][0]["restore"]
+        self.assertEqual(restore["workflow_id"], "cw-batch")
+        self.assertEqual(restore["shots"], 1)
+        values = {(row["node_id"], row["field_name"]): row["value"]
+                  for row in restore["overrides"]}
+        self.assertEqual(values[("5", "text")], "场景A")
+        self.assertNotIn("restore", self.batches.get(batch["id"])["items"][0])
+
+    def test_clear_outputs_deletes_tasks_but_keeps_batch(self):
+        batch = self.batches.create(self.body())
+        task_ids = [item["task_id"] for item in batch["items"]]
+        for task_id in task_ids:
+            self.store.update_task(task_id, status="completed")
+        result = self.batches.clear_outputs(batch["id"])
+        self.assertEqual(result["deleted"], len(task_ids))
+        self.assertIsNone(self.store.get_task(task_ids[0]))
+        detail = self.batches.get(batch["id"])
+        self.assertIsNotNone(detail)
+        self.assertEqual(detail["items"][0]["status"], "missing")
+
+    def test_delete_batch_removes_record_and_tasks(self):
+        batch = self.batches.create(self.body())
+        task_id = batch["items"][0]["task_id"]
+        self.store.update_task(task_id, status="completed")
+        result = self.batches.delete(batch["id"])
+        self.assertEqual(result["deleted"], 1)
+        self.assertIsNone(self.store.get_task(task_id))
+        self.assertIsNone(self.batches.get(batch["id"]))
+        self.assertFalse(self.batches.batch_path(batch["id"]).exists())
+        self.assertFalse(self.batches.schemes_path(batch["id"]).exists())
 
 
 if __name__ == "__main__":

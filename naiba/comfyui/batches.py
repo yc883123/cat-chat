@@ -77,6 +77,18 @@ def _slot_of(raw: Any) -> dict[str, str] | None:
     return {"node_id": node_id, "field_name": field_name}
 
 
+def _override_value(overrides: list[dict[str, Any]], slot: dict[str, str] | None,
+                    default: Any) -> Any:
+    """从已校验的 overrides 里取一个槽位的值；没写这个槽位就返回默认值。"""
+    if not slot:
+        return default
+    for row in overrides:
+        if (str(row.get("node_id") or "") == slot["node_id"]
+                and str(row.get("field_name") or "") == slot["field_name"]):
+            return row.get("value")
+    return default
+
+
 class ComfyUIBatchManager:
     """线程安全（锁内写 JSON）；提交编排复用 jobs 的既有校验与幂等。"""
 
@@ -91,6 +103,11 @@ class ComfyUIBatchManager:
 
     def batch_path(self, batch_id: str) -> Path:
         return self._dir / f"{batch_id}.json"
+
+    def schemes_path(self, batch_id: str) -> Path:
+        # 可编辑快照单独落盘：批次列表每 5 秒读一遍主记录，不能把整批正文
+        # 跟着一起解析；只有「编辑这一批」才会读这个文件。
+        return self._dir / f"{batch_id}.schemes.json"
 
     @staticmethod
     def new_batch_id() -> str:
@@ -126,15 +143,17 @@ class ComfyUIBatchManager:
 
         entries: dict[str, dict[str, Any]] = {}
         payloads: list[dict[str, Any]] = []
+        snapshots: list[dict[str, Any]] = []
         # request_key 前缀就是批次 id（cfb-<batch_id>-<条目序号>），重放同一条
         # 目永远落到同一个 request_key 上；批次 id 先行生成不影响任何状态。
         batch_id = self.new_batch_id()
         for scheme_index, scheme in enumerate(schemes, 1):
-            expanded = self._expand_scheme(
+            expanded, snapshot = self._expand_scheme(
                 scheme_index, scheme, entries, offset=len(payloads),
                 batch_id=batch_id, title=title,
             )
             payloads.extend(expanded)
+            snapshots.append(snapshot)
         if not payloads:
             raise ComfyUIBatchError("批次里没有任何条目")
 
@@ -179,18 +198,36 @@ class ComfyUIBatchManager:
             "unload_after": unload_after,
             "items": items,
         }
-        with self._lock:
-            _write_json(self.batch_path(batch_id), record)
+        try:
+            with self._lock:
+                # 先写主记录再写快照：万一只落了主记录，批次仍可见、可删；
+                # 快照缺失时详情会退回任务输入兜底。
+                _write_json(self.batch_path(batch_id), record)
+                if snapshots:
+                    _write_json(self.schemes_path(batch_id),
+                                {"id": batch_id, "schemes": snapshots})
+        except Exception:
+            # 记录没落盘就不能留下「有任务、没批次」的半批：任务仍是 hold 状态，直接清掉。
+            self._rollback(batch_id)
+            for path in (self.batch_path(batch_id), self.schemes_path(batch_id)):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
         # 全部建好才统一入队：入队本身不失败（线程投递），不再回滚。
         for item in items:
             self.jobs.runner.submit(str(item["task_id"]))
         return record
 
     def _expand_scheme(self, scheme_index: int, scheme: Any, entries: dict[str, Any],
-                       *, offset: int, batch_id: str, title: str) -> list[dict[str, Any]]:
+                       *, offset: int, batch_id: str, title: str,
+                       ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """把一个方案展开成逐条目的提交载荷；只套地址与校验，不做任何派生。
 
         ``offset`` 是前面方案已展开的条目数：条目编号与总数限制都按整批累计。
+        同时返回一份可编辑快照（映射 / 固定参数 / 条目字段），供「编辑这一批」
+        原样回填；快照只服务回填，不参与执行。
         """
         if not isinstance(scheme, dict):
             raise ComfyUIBatchError(f"第 {scheme_index} 个方案格式必须是对象")
@@ -216,6 +253,7 @@ class ComfyUIBatchManager:
             raise ComfyUIBatchError(f"整批条目总数不能超过 {MAX_SHOTS} 条")
 
         out: list[dict[str, Any]] = []
+        snapshot_items: list[dict[str, Any]] = []
         for item_index, item in enumerate(items, 1):
             if not isinstance(item, dict):
                 raise ComfyUIBatchError(f"方案 {scheme_index} 的第 {item_index} 条条目格式必须是对象")
@@ -270,7 +308,64 @@ class ComfyUIBatchManager:
                 "request_key": f"{batch_id}-{index}",
                 "label": f"{title} · {name}",
             })
-        return out
+            snapshot_items.append({
+                "name": name,
+                # 剧本只服务回填（下次还能接着「转换」），不参与执行。
+                "script": str(item.get("script") or "").strip()[:20000],
+                "prompt": _override_value(overrides, prompt_slot, ""),
+                "duration_seconds": _override_value(overrides, duration_slot, None),
+                "resolution": _override_value(overrides, resolution_slot, ""),
+                "shots": shots,
+                "media_inputs": _frozen(media_inputs or []),
+            })
+        snapshot = {
+            "workflow_id": workflow_id,
+            "workflow_name": workflow_name,
+            "overrides": _frozen(scheme_overrides),
+            "mapping": {
+                "prompt_slot": self._valid_slot(entry, prompt_slot),
+                "duration_slot": self._valid_slot(entry, duration_slot),
+                "resolution_slot": self._valid_slot(entry, resolution_slot),
+                "media_ports": self._media_ports(entry, mapping.get("media_ports")),
+            },
+            "items": snapshot_items,
+        }
+        return out, snapshot
+
+    @staticmethod
+    def _valid_slot(entry: dict[str, Any], slot: dict[str, str] | None) -> dict[str, str] | None:
+        """快照里的映射只保留这份工作流真有的槽位；失效地址不复活。"""
+        if not slot:
+            return None
+        for row in entry.get("params") or []:
+            if (str(row.get("node_id") or "") == slot["node_id"]
+                    and str(row.get("field_name") or "") == slot["field_name"]):
+                return dict(slot)
+        return None
+
+    @staticmethod
+    def _media_ports(entry: dict[str, Any], raw: Any) -> list[dict[str, Any]]:
+        """素材口快照：只收这份工作流里的媒体槽，保留勾选与顺序。"""
+        if not isinstance(raw, list):
+            return []
+        allowed = {
+            (str(row.get("node_id") or ""), str(row.get("field_name") or ""))
+            for row in entry.get("params") or []
+            if str(row.get("control") or "") == "media"
+            or str(row.get("field_type") or "") in ("image", "video", "audio")
+        }
+        ports: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for port in raw[:64]:
+            slot = _slot_of(port)
+            if slot is None:
+                continue
+            key = (slot["node_id"], slot["field_name"])
+            if key not in allowed or key in seen:
+                continue
+            seen.add(key)
+            ports.append({**slot, "checked": bool(port.get("checked"))})
+        return ports
 
     def _rollback(self, batch_id: str) -> None:
         """事务回滚：删掉本批次已建的全部任务记录（hold 创建的任务未入队）。"""
@@ -292,8 +387,11 @@ class ComfyUIBatchManager:
         rows: list[dict[str, Any]] = []
         if not self._dir.exists():
             return rows
-        paths = sorted(self._dir.glob(f"{COMFYUI_BATCH_PREFIX}-*.json"),
-                       key=lambda p: p.stat().st_mtime, reverse=True)
+        paths = sorted(
+            (path for path in self._dir.glob(f"{COMFYUI_BATCH_PREFIX}-*.json")
+             if not path.name.endswith(".schemes.json")),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
         for path in paths:
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
@@ -307,7 +405,7 @@ class ComfyUIBatchManager:
                 break
         return rows
 
-    def get(self, batch_id: str) -> dict[str, Any] | None:
+    def _read_record(self, batch_id: str) -> dict[str, Any] | None:
         batch_id = str(batch_id or "").strip()
         if not batch_id or "/" in batch_id or "\\" in batch_id or not batch_id.startswith(
                 f"{COMFYUI_BATCH_PREFIX}-"):
@@ -316,36 +414,124 @@ class ComfyUIBatchManager:
             payload = json.loads(self.batch_path(batch_id).read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return None
-        record = self._sanitize(payload)
-        return self._with_task_state(record) if record else None
+        return self._sanitize(payload)
 
-    def _with_task_state(self, record: dict[str, Any], *, slim: bool = False) -> dict[str, Any]:
-        """逐条目 join 任务状态：跑批视图与历史下拉共用一份形状。"""
+    def _read_schemes(self, batch_id: str, record: dict[str, Any]) -> list[dict[str, Any]]:
+        # 过渡兼容：早期实现把快照写在主记录里；新记录一律走独立的 schemes 文件。
+        inline = record.get("schemes")
+        if isinstance(inline, list) and inline:
+            return inline
+        try:
+            payload = json.loads(self.schemes_path(batch_id).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return []
+        schemes = payload.get("schemes") if isinstance(payload, dict) else None
+        return schemes if isinstance(schemes, list) else []
+
+    def get(self, batch_id: str, *, with_schemes: bool = False) -> dict[str, Any] | None:
+        record = self._read_record(batch_id)
+        if record is None:
+            return None
+        if not with_schemes:
+            # 快照只在「编辑这一批」时取；跑批轮询不反复传正文。
+            return self._with_task_state(record)
+        schemes = self._read_schemes(batch_id, record)
+        detail = self._with_task_state(record, with_restore=not schemes)
+        detail["schemes"] = schemes
+        return detail
+
+    def _task_ids(self, record: dict[str, Any]) -> list[str]:
+        return [str(item.get("task_id") or "") for item in record.get("items") or []
+                if isinstance(item, dict) and str(item.get("task_id") or "")]
+
+    def clear_outputs(self, batch_id: str) -> dict[str, Any] | None:
+        """删掉这一批的任务记录与产物文件，批次记录保留（还能回填再跑）。"""
+        record = self._read_record(batch_id)
+        if record is None:
+            return None
+        ids = self._task_ids(record)
+        if not ids:
+            return {"deleted": 0, "skipped": [], "failed": []}
+        result = self.jobs.delete_tasks({"task_ids": ids, "cancel_active": True})
+        failed = result.get("failed") or []
+        if failed:
+            first = failed[0]
+            raise ComfyUIBatchError(
+                f"有任务没能删掉，批次先保留：{first.get('reason') or first.get('id') or ''}"
+            )
+        return result
+
+    def delete(self, batch_id: str, *, delete_outputs: bool = True) -> dict[str, Any] | None:
+        """删掉整个批次；默认连任务记录与产物文件一起删。"""
+        record = self._read_record(batch_id)
+        if record is None:
+            return None
+        result = {"deleted": 0, "skipped": [], "failed": []}
+        ids = self._task_ids(record)
+        if delete_outputs and ids:
+            result = self.jobs.delete_tasks({"task_ids": ids, "cancel_active": True})
+            failed = result.get("failed") or []
+            if failed:
+                first = failed[0]
+                raise ComfyUIBatchError(
+                    f"有任务没能删掉，批次先保留：{first.get('reason') or first.get('id') or ''}"
+                )
+        with self._lock:
+            self.batch_path(batch_id).unlink(missing_ok=True)
+            try:
+                self.schemes_path(batch_id).unlink(missing_ok=True)
+            except OSError:
+                # 主记录已删：快照文件清不掉也不影响列表（list 会跳过它）。
+                pass
+        return result
+
+    def _with_task_state(self, record: dict[str, Any], *, slim: bool = False,
+                         with_restore: bool = False) -> dict[str, Any]:
+        """逐条目 join 任务状态：跑批视图与历史下拉共用一份形状。
+
+        ``with_restore`` 只给「编辑这一批」用：老批次没有快照时，把任务输入
+        （overrides / media_inputs / shots）作为 ``restore`` 兜底。
+        """
         items = []
         for item in record.get("items") or []:
             row = dict(item) if isinstance(item, dict) else {}
             task = self.store.get_task(str(row.get("task_id") or ""))
             if task is None:
+                # 用户删过产物（或任务记录损坏）：卡片显示「产物已删除」，
+                # 不再给一个必然 404 的「重试」按钮。
                 row.update({"status": "missing", "done": 0, "total": 0, "failed": 0,
-                            "outputs": [], "error": "任务记录不存在"})
+                            "outputs": [], "error": "任务记录和产物已删除"})
             else:
                 checkpoint = task.get("checkpoint") if isinstance(task.get("checkpoint"), dict) else {}
                 result = task.get("result") if isinstance(task.get("result"), dict) else {}
                 outputs = [str(name) for name in (result.get("outputs") or []) if str(name or "")]
+                input_data = task.get("input") if isinstance(task.get("input"), dict) else {}
                 row.update({
                     "status": task.get("status"),
                     "done": len(checkpoint.get("completed") or []),
-                    "total": int((task.get("input") or {}).get("shots") or 0),
+                    "total": int(input_data.get("shots") or 0),
                     "failed": len(checkpoint.get("errors") or []),
                     "outputs": outputs,
                     "error": task.get("error") or "",
                 })
+                if with_restore and not slim:
+                    row["restore"] = {
+                        "workflow_id": str(input_data.get("workflow_id")
+                                           or row.get("workflow_id") or ""),
+                        "workflow_name": str(input_data.get("workflow_name")
+                                             or row.get("workflow_name") or ""),
+                        "overrides": input_data.get("overrides") or [],
+                        "media_inputs": input_data.get("media_inputs") or [],
+                        "shots": int(input_data.get("shots") or 1),
+                    }
             if slim:
                 row.pop("outputs", None)
+                row.pop("restore", None)
             items.append(row)
-        slim_record = {**record, "items": items}
+        detail = {**record, "items": items}
+        detail.pop("schemes", None)
         if slim:
             done = sum(1 for row in items if row.get("status") == "completed")
-            slim_record["done_count"] = done
-            slim_record["item_count"] = len(items)
-        return slim_record
+            detail["done_count"] = done
+            detail["item_count"] = len(items)
+        return detail

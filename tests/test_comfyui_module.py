@@ -1231,6 +1231,20 @@ class JobsTests(unittest.TestCase):
         self.assertFalse(out_dir.exists())
         self.assertIsNotNone(self.store.get_task(running["id"]))
 
+    def test_delete_tasks_exclude_batch_on_clear_all(self):
+        # 「单次」档的清除只清单次任务：批量条目归批次页自己删，不能顺手连产物一起删。
+        single = self.store.create_task({"workflow_id": "cw-x", "shots": 1,
+                                          "prompt": {}, "overrides": [], "batch_id": ""})
+        batch_task = self.store.create_task({"workflow_id": "cw-x", "shots": 1,
+                                             "prompt": {}, "overrides": [],
+                                             "batch_id": "cfb-x1"})
+        self.store.update_task(single["id"], status="completed")
+        self.store.update_task(batch_task["id"], status="completed")
+        result = self.jobs.delete_tasks({"exclude_batch": True})
+        self.assertEqual(result["deleted"], 1)
+        self.assertIsNone(self.store.get_task(single["id"]))
+        self.assertIsNotNone(self.store.get_task(batch_task["id"]))
+
     def test_delete_tasks_cancels_active_then_deletes(self):
         # 计划 §2：删除排队/运行中的任务 = 先取消、等终态、再删记录与产物。
         task = self.store.create_task({"workflow_id": "cw-x", "shots": 1, "prompt": {}, "overrides": []})

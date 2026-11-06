@@ -3930,7 +3930,12 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 }
 /* 模板库栏：纵向分类 + 模板列表，同一栏内两列（不新增第四栏） */
 .studio-library { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 8px; min-height: 0; }
-.studio-cats { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0; padding-right: 2px; }
+/* 分类栏自带底色：模型皮肤下 .studio-view 是透明的，透明底配 muted 字在亮壁纸上几乎看不见。
+   底色与模板列表、详情栏同用 --surface，换肤和深浅主题都跟着走。 */
+.studio-cats {
+  display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0;
+  padding: 6px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg);
+}
 .studio-cat {
   display: flex;
   align-items: baseline;
@@ -4377,32 +4382,6 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .comfyui-statusbar .status-mark.ok { background: var(--ok, #2e9e5b); }
 .comfyui-statusbar .status-mark.error { background: var(--danger, #c0392b); }
 .comfyui-run { flex: 1; min-height: 0; padding: 12px; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
-/* 分镜队列（创作场跨页交接）：参数表单上方的提示词条列。 */
-.comfyui-storyboard {
-  display: grid; gap: 6px; flex: none; max-height: 34%;
-  padding: 8px 9px; border: 1px solid var(--violet-line); border-radius: var(--r-md);
-  background: var(--accent-soft);
-}
-.comfyui-storyboard[hidden] { display: none; }
-.comfyui-storyboard-head { display: flex; align-items: center; gap: 8px; }
-.comfyui-storyboard-head strong { font-size: 12px; }
-.comfyui-storyboard-head small { flex: 1; min-width: 0; font-size: 10px; color: var(--muted); }
-.comfyui-storyboard-list { display: grid; gap: 4px; overflow-y: auto; }
-.comfyui-storyboard-item {
-  display: flex; align-items: flex-start; gap: 7px;
-  border: 1px solid var(--line); border-radius: var(--r-sm);
-  padding: 5px 7px; background: var(--surface);
-}
-.comfyui-storyboard-item.filled { border-color: var(--ok, #2e9e5b); }
-.comfyui-storyboard-item .control-button { flex: none; }
-.comfyui-storyboard-copy { display: grid; gap: 2px; min-width: 0; }
-.comfyui-storyboard-copy strong {
-  font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.comfyui-storyboard-copy small {
-  font-size: 10px; color: var(--muted); line-height: 1.5;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
-}
 .comfyui-param-form { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 2px; }
 .comfyui-param-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .comfyui-param-heading { margin: 0; font-size: 12.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -4720,6 +4699,10 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .comfyui-batch-progress { display: block; height: 6px; margin: 7px 0 3px; border-radius: var(--r-full); background: var(--surface-inset); overflow: hidden; }
 .comfyui-batch-progress > span { display: block; height: 100%; border-radius: var(--r-full); background: var(--accent-solid); }
 .comfyui-batch-row.is-failed .comfyui-batch-progress > span { background: var(--danger); }
+.comfyui-batch-row-wrap { display: flex; align-items: stretch; gap: 6px; }
+.comfyui-batch-row-wrap .comfyui-batch-row { flex: 1 1 auto; min-width: 0; }
+.comfyui-batch-row-edit { flex: none; padding: 0 10px; font: inherit; font-size: 11.5px; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); cursor: pointer; }
+.comfyui-batch-row-edit:hover, .comfyui-batch-row-edit:focus-visible { border-color: var(--violet-line); background: var(--surface-2); }
 .comfyui-batch-meta { display: block; font-size: 10.5px; color: var(--muted); }
 .comfyui-import-dialog, .comfyui-url-dialog { border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); color: var(--text); max-width: 520px; width: min(92vw, 520px); padding: 0; }
 .comfyui-import-dialog::backdrop, .comfyui-url-dialog::backdrop { background: rgba(10, 10, 24, .55); }
@@ -4875,6 +4858,10 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .novel-chapter-row:hover { background: var(--surface-2); }
 .novel-chapter-row.active { border-color: var(--violet-line); background: var(--accent-soft); }
 .novel-chapter-row.picked { background: var(--surface-2); }
+/* 分镜阶段章节只读：没有勾选框，也不吃悬停，别让人以为能选。 */
+.novel-chapter-row.readonly { cursor: default; opacity: .78; }
+.novel-chapter-row.readonly:hover { background: transparent; }
+.novel-chapter-note { margin: 0 0 4px; font-size: 11px; line-height: 1.5; color: var(--muted); }
 /* 章节行是 <label>，会被全局 `label input { width:100%; height:40px }` 命中：
    复选框必须显式复位成原生尺寸，否则整行只剩一个大方块、标题被挤成 0 宽。 */
 .novel-chapter-row input[type="checkbox"] {
@@ -6534,6 +6521,8 @@ span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); 
 .cbm-btn:hover { background: var(--surface-2); }
 .cbm-btn.primary { border-color: var(--accent-solid); background: var(--accent-solid); color: #fff; }
 .cbm-btn.tiny { padding: 2px 8px; font-size: 12px; border-radius: var(--r-sm); }
+.cbm-btn.danger { border-color: var(--danger); color: var(--danger); }
+.cbm-btn.danger:hover { background: var(--danger-soft); }
 .cbm-btn:disabled { opacity: .55; cursor: not-allowed; }
 .cbm-alert { margin: 0; color: var(--danger); background: var(--danger-soft); border-radius: var(--r-md); padding: 8px 12px; }
 .cbm-hint { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.6; }
@@ -6580,6 +6569,8 @@ span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); 
 .cbm-items-wrap { overflow-x: auto; border-top: 1px solid var(--line); }
 .cbm-items { border-collapse: collapse; width: 100%; min-width: 960px; font-size: 13px; }
 .cbm-items th { font-weight: 500; color: var(--muted); text-align: left; padding: 8px 10px; background: var(--surface-inset); border-bottom: 1px solid var(--line); white-space: nowrap; }
+.cbm-th-clear { margin-left: 6px; padding: 0 6px; font: inherit; font-size: 11px; line-height: 17px; color: var(--muted); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-sm); cursor: pointer; }
+.cbm-th-clear:hover, .cbm-th-clear:focus-visible { color: var(--danger); border-color: var(--danger); }
 .cbm-items td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
 .cbm-items tr.is-missing td { background: var(--danger-soft); }
 .cbm-items .cbm-name { width: 110px; font: inherit; font-size: 12.5px; color: var(--text); background: transparent; border: 1px solid transparent; border-radius: var(--r-sm); padding: 3px 5px; }
@@ -6623,7 +6614,8 @@ span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); 
 .cbm-progress { flex: 1; min-width: 200px; height: 8px; background: var(--surface-2); border-radius: var(--r-full); overflow: hidden; }
 .cbm-progress > div { height: 100%; background: var(--accent-solid); border-radius: var(--r-full); transition: width var(--t-base); }
 .cbm-run-meta { font-size: 13px; color: var(--muted); }
-.cbm-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.cbm-run-actions { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.cbm-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: start; }
 .cbm-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; display: flex; flex-direction: column; }
 .cbm-card-head { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--line); }
 .cbm-card-head strong { font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -6635,7 +6627,16 @@ span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); 
 .cbm-card-thumb { height: 96px; display: flex; align-items: center; justify-content: center; color: var(--muted); position: relative; background: var(--surface-2); }
 .cbm-card-thumb img { width: 100%; height: 100%; object-fit: cover; cursor: zoom-in; }
 .cbm-card-thumb.skel { background: repeating-linear-gradient(45deg, var(--surface-2), var(--surface-2) 10px, var(--surface-inset) 10px, var(--surface-inset) 20px); font-size: 12px; }
-.cbm-card-play { width: 34px; height: 34px; border-radius: 50%; background: rgba(255, 255, 255, .28); display: flex; align-items: center; justify-content: center; color: #fff; }
+/* 完成态预览：媒体不拉满卡片宽度，按自身比例居中；竖图/竖视频不会再被裁成横条。 */
+.cbm-card-preview { position: relative; display: flex; justify-content: center; align-items: center; padding: 8px; background: var(--surface-2); min-height: 96px; }
+.cbm-card-preview .comfyui-output { position: relative; border: 0; border-radius: 0; background: transparent; display: flex; flex-direction: column; align-items: center; max-width: 100%; }
+.cbm-card-preview .comfyui-output img,
+.cbm-card-preview .comfyui-output video { width: auto; max-width: 100%; max-height: 220px; object-fit: contain; }
+.cbm-card-preview .comfyui-output video { background: #000; min-height: 96px; }
+.cbm-card-preview .comfyui-output audio { width: 100%; }
+.cbm-card-preview .comfyui-output figcaption { display: none; }
+.cbm-preview-play { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 46px; height: 46px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 50%; background: rgba(10, 10, 24, .62); color: #fff; font-size: 18px; line-height: 1; cursor: pointer; z-index: 1; }
+.cbm-preview-play:hover, .cbm-preview-play:focus-visible { background: rgba(10, 10, 24, .82); }
 .cbm-card-foot { padding: 8px 12px; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 38px; }
 .cbm-card-foot .cbm-err { color: var(--danger); flex: 1; min-width: 0; }
 .cbm-card-foot .cbm-btn { margin-left: auto; }
@@ -6644,6 +6645,7 @@ span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); 
 .cbm-card-expand { border-top: 1px dashed var(--line); background: var(--surface-2); padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 8px; }
 .cbm-card-expand .comfyui-output { width: 128px; }
 .cbm-card-expand .comfyui-output img, .cbm-card-expand .comfyui-output video { max-height: 96px; }
+.cbm-card-expand .comfyui-output video { object-fit: contain; background: #000; }
 .cbm-expand-empty { font-size: 11.5px; color: var(--muted); }
 
 @media (max-width: 900px) {

@@ -3,7 +3,7 @@
  "version": "2.0.0",
  "built": "2026-10-22",
  "count": 581,
- "chars": 760560,
+ "chars": 761244,
  "snippet_n": 700,
  "modules": {
   "vs": 51,
@@ -1399,7 +1399,7 @@
    "title": "MiniMax H3 基础视频 · 文生与首尾帧",
    "module": "h3",
    "type": "rule",
-   "summary": "T2VA / I2VA / FL2VA / L2VA 四种基础模式，按实际首尾帧输出三字段。",
+   "summary": "T2VA / I2VA / FL2VA / L2VA 四种基础模式；普通参考图自动改走 Ref2VA 六字段，不提问。",
    "tags": [
     "MiniMax",
     "H3",
@@ -1408,19 +1408,19 @@
     "FL2VA",
     "L2VA"
    ],
-   "chars": 1938,
+   "chars": 2417,
    "model": [
     "H3"
    ],
    "vars": [],
    "has_vars": false,
    "source": "https://github.com/MiniMax-AI/MiniMax-H3/blob/199b7d0e1fd95e7b3eafa8c15eca692534142427/skills/h3-prompt-writing/references/base-en.txt",
-   "source_sha1": "f1ed6c566091880f0ad32726af28a1cd90335562",
+   "source_sha1": "e8098f4e7bc5428783c9068b90cf23d9fff43787",
    "cleaned": [],
    "origin": "builtin",
    "order": 56,
    "genre": "",
-   "snippet": "你是 MiniMax H3 基础视频提示词编写助手。根据用户的文字意图、实际提供的关键帧和目标时长，生成可直接使用的英文提示词。本模板依据 MiniMax 官方 base-en 指南整理，适用于 T2VA、I2VA、FL2VA、L2VA。\n\n先核对用户指定的模式、素材用途和时长；未指定模式时，只有文字用 T2VA，一张首帧用 I2VA，明确首尾两帧用 FL2VA，明确仅尾帧用 L2VA。不要把角色或风格参考图擅自当成首帧；参考生成、视频编辑、视频续写或音频复用应改用 H3 参考与编辑模板。需要关键帧却未收到图片时，先说明缺少哪张图，不声称已经看图。时长采用用户要求；未说明时先询问，镜头切点必须在总时长以内。\n\n输出格式：只输出所选模式需要的对齐首行与下列三个字段，字段之间空一行；不输出规则说明、Markdown 围栏或中文翻译。三个字段顺序固定为：\nintegrated_multimodal_description: ...\noverall_soundscape: ...\nnon_diegetic_music: ...\n\n模式与关键帧：\n- T2VA：从文字建立整个视听过程，直接以 integrated_multimodal_description 开始，不添加图片对齐首行。\n- I2VA：<Picture 1> 是 0.00 秒的真实首帧，属于 [Shot 1]。首行严格使用：\nFor the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully re"
+   "snippet": "你是 MiniMax H3 基础视频提示词编写助手。根据用户的文字意图、实际提供的关键帧和目标时长，生成可直接使用的英文提示词。本模板依据 MiniMax 官方 base-en 指南整理，适用于 T2VA、I2VA、FL2VA、L2VA。\n\n这是批量转换调用：不要向用户提问、不要要求确认、不要只输出说明，直接按已给素材和剧本写最终提示词。\n\n先看工作流提供的素材槽位证据再选模式：没有图片、只有文字用 T2VA；槽位明确是首帧用 I2VA；明确首尾两帧用 FL2VA；明确仅尾帧用 L2VA。普通参考图不是首帧，也不得当成首帧。槽位证据表明图片是普通参考图（ref_images / reference / subject / 参考）时，直接改用 Ref2VA 参考写法，用 <Subject 1> 引用图片，不要提问。关键帧和普通参考混在一起时，以关键帧模式为准，普通参考图在正文里用 <Subject N> 补充。没有收到图片时按 T2VA 写，不索要图片，也不声称已经看图。\n\n输出格式：只输出最终提示词，不输出规则说明、Markdown 围栏或中文翻译。基础模式输出所选模式需要的对齐首行和下列三个字段，字段之间空一行，顺序固定为：\nintegrated_multimodal_description: ...\noverall_soundscape: ...\nnon_diegetic_music: ...\n\n普通参考图改用的 Ref2VA 写法输出下列六段，顺序固定为：\nsubject_definitions: ...\nsummary: ...\nretention_analysis: "
   },
   {
    "id": "h3-008-grid25",
@@ -13499,7 +13499,7 @@
    "title": "MiniMax H3 参考生成与视频编辑",
    "module": "h3",
    "type": "rule",
-   "summary": "Ref2VA 六字段：参考生成、关键帧补全、视频编辑/续写和音频引用；只分析实际收到的素材。",
+   "summary": "Ref2VA 六字段：参考生成、关键帧补全、视频编辑/续写和音频引用；只分析实际收到的素材，不索要未发送的视频音频。",
    "tags": [
     "MiniMax",
     "H3",
@@ -13507,19 +13507,19 @@
     "参考生成",
     "视频编辑"
    ],
-   "chars": 1926,
+   "chars": 2131,
    "model": [
     "H3"
    ],
    "vars": [],
    "has_vars": false,
    "source": "https://github.com/MiniMax-AI/MiniMax-H3/blob/199b7d0e1fd95e7b3eafa8c15eca692534142427/skills/h3-prompt-writing/references/ref-en.txt",
-   "source_sha1": "e8260c2b830dec458b1e4e12c6a4fbf569d9e1cf",
+   "source_sha1": "2d3e9eaf43e6a9e447e1e81f0746685cae77b6a3",
    "cleaned": [],
    "origin": "builtin",
    "order": 86,
    "genre": "",
-   "snippet": "你是 MiniMax H3 参考生成与编辑提示词编写助手。依据用户实际提供的图片、视频、音频及创作目标，整理英文 Ref2VA 提示词。本模板依据 MiniMax 官方 ref-en 指南整理，覆盖参考生成、关键帧补全、视频编辑、视频续写、音频复用与音频参考。\n\n先核对各素材的真实用途、目标时长、保留项与修改项。缺少视频、音频或图片时应说明缺项；文件名、路径或用户一句“参考这个视频”不能替代素材内容。当前界面若只提供图片，只基于收到的图片工作，不声称看过视频或听过音频。\n\n只输出以下六个英文段落，顺序与字段名固定，不加 Markdown 围栏：\nsubject_definitions: ...\nsummary: ...\nretention_analysis: ...\ndetailed_description: ...\noverall_soundscape: ...\nnon_diegetic_music: ...\n\nsubject_definitions：逐项定义后文确实会用到的素材内容与引用标签。<Subject N> 表示从素材中提取的角色、物体、场景、服装、风格或动作；<Picture N> 只用于具体帧、关键帧、首尾帧或分镜构图锚点；<Video N> 用于待编辑/续写的原片或整段视频的时间结构；<Audio N> 用于实际复用或参考的音频信号。只定义角色外观的图片应放在对应 Subject 的来源说明里，不额外创建独立 Picture 条目。同一素材的画面与声音分别编号，不因视频带声就自动建立 Audio。标签在所有字段保持同义，发声人物另外使用稳定的 (S1)、(S2"
+   "snippet": "你是 MiniMax H3 参考生成与编辑提示词编写助手。依据用户实际提供的图片、视频、音频及创作目标，整理英文 Ref2VA 提示词。本模板依据 MiniMax 官方 ref-en 指南整理，覆盖参考生成、关键帧补全、视频编辑、视频续写、音频复用与音频参考。\n\n这是批量转换调用：不要向用户提问、不要要求确认、不要只输出说明，直接按已收到的素材和剧本写最终提示词。\n\n先按工作流槽位证据确认各素材的用途、目标时长、保留项与修改项；用途不明时按普通参考处理，不猜成首帧或尾帧。当前界面只发图片时，就只基于图片和剧本工作：缺少视频或音频不算缺项，不要索要，也不声称看过或听过未发送的素材。文件名、路径或用户一句“参考这个视频”不能替代素材内容。目标时长未说明时按剧本需要给出 4–15 秒内的合理时长，不询问。\n\n只输出以下六个英文段落，顺序与字段名固定，不加 Markdown 围栏：\nsubject_definitions: ...\nsummary: ...\nretention_analysis: ...\ndetailed_description: ...\noverall_soundscape: ...\nnon_diegetic_music: ...\n\nsubject_definitions：逐项定义后文确实会用到的素材内容与引用标签。<Subject N> 表示从素材中提取的角色、物体、场景、服装、风格或动作；<Picture N> 只用于具体帧、关键帧、首尾帧或分镜构图锚点；<Video N> 用于待编辑/续写的原片或整段视频的时间结构；<Audio N> 用于实际复用或参考的音频信"
   }
  ],
  "sources": {

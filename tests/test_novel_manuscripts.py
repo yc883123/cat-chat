@@ -742,10 +742,45 @@ class StageTaskFlowGuardTests(unittest.TestCase):
         self.assertIn("novelStageBackToActive", panel, "要有返回当前任务入口")
         self.assertIn("apply.hidden = isStoryboard || viewingHistory", panel,
                       "历史任务的结果不得触发写回")
+
+    def test_storyboard_block_follows_the_displayed_task(self):
+        """分镜结果盒与分镜块必须看同一条任务：历史任务的提示词也要能勾选发送。"""
+        js = self._read("public/js/25-novel.js")
+        self.assertIn("function storyboardDisplayTask(", js)
+        helper = js[js.index("function storyboardDisplayTask("):]
+        helper = helper[: helper.index("\n}")]
+        self.assertIn("stageData.viewTaskId", helper, "先认历史任务")
+        self.assertIn("stageData.activeTaskId", helper, "再看当前任务")
+        panel = js[js.index("function renderStagePanel("):]
+        panel = panel[: panel.index("function applyStageCollapse(")]
+        self.assertIn("renderStoryboard(stageData, storyboardDisplayTask(stageData));", panel,
+                      "分镜块跟着结果盒的展示任务走")
+        send = js[js.index("function sendStoryboardToComfyui("):]
+        send = send[: send.index("function toggleStoryboardAll(")]
+        self.assertIn("storyboardDisplayTask(stageData)", send, "历史任务也能发送到造梦机")
+        sync = js[js.index("function syncStoryboardRows("):]
+        sync = sync[: sync.index("function storyboardRow(")]
+        self.assertIn("task.result || task.result_partial", sync,
+                      "终态任务优先读自己的结果，别混进别的任务的流")
         index = self._read("public/index.html")
         self.assertIn('id="novelStageBackToActive"', index, "返回当前任务按钮要有实体")
         self.assertIn('"novelStageBackToActive"', self._read("public/js/25-novel.js"),
                       "按钮要进面板克隆的 id 迁移清单")
+
+    def test_storyboard_stage_chapter_list_is_readonly(self):
+        """分镜阶段场次来自剧本，章节列表不能再给勾选框和可点高亮。"""
+        js = self._read("public/js/25-novel.js")
+        self.assertIn("function storyboardChapterRow(", js)
+        self.assertIn('if (novel.stage === "storyboard") return storyboardChapterRow(row);', js,
+                      "分镜阶段章节行走只读分支")
+        self.assertIn('if (novel.stage === "storyboard") return;', js,
+                      "旧勾选事件在分镜阶段直接忽略")
+        self.assertIn("分镜生图不读章节勾选", js, "本次素材要说明不按章节")
+        index = self._read("public/index.html")
+        self.assertIn('id="novelChapterNote"', index, "章节列表上方要有分镜说明")
+        css = self._read("public/styles.css")
+        self.assertIn(".novel-chapter-row.readonly", css)
+        self.assertIn(".novel-chapter-note", css)
 
 
 if __name__ == "__main__":

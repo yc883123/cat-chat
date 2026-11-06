@@ -442,11 +442,11 @@
  "products": {
   "catalog_index.json": {
    "items": 581,
-   "bytes": 802173
+   "bytes": 802360
   },
   "bodies_prompt.json": {
    "items": 87,
-   "bytes": 788156
+   "bytes": 789642
   },
   "bodies_script.json": {
    "items": 74,

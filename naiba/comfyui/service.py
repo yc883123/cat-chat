@@ -540,11 +540,37 @@ class ComfyUIService:
         rows = self.batches.list()
         return {"batches": rows, "count": len(rows)}, 200
 
-    def api_batch(self, batch_id: str) -> tuple[dict[str, Any], int]:
-        batch = self.batches.get(batch_id)
+    def api_batch(self, batch_id: str, *, with_schemes: bool = False) -> tuple[dict[str, Any], int]:
+        batch = self.batches.get(batch_id, with_schemes=with_schemes)
         if batch is None:
             return {"error": "批次不存在或已被删除"}, 404
         return {"batch": batch}, 200
+
+    def api_batch_delete(self, batch_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        body = body if isinstance(body, dict) else {}
+        delete_outputs = body.get("delete_outputs")
+        try:
+            result = self.batches.delete(
+                batch_id, delete_outputs=True if delete_outputs is None else bool(delete_outputs)
+            )
+        except ComfyUIBatchError as exc:
+            return {"error": str(exc)}, 409
+        except (OSError, ComfyUIStoreError) as exc:
+            return {"error": f"删除批次失败：{exc}"}, 500
+        if result is None:
+            return {"error": "批次不存在或已被删除"}, 404
+        return {"ok": True, **result}, 200
+
+    def api_batch_clear_outputs(self, batch_id: str) -> tuple[dict[str, Any], int]:
+        try:
+            result = self.batches.clear_outputs(batch_id)
+        except ComfyUIBatchError as exc:
+            return {"error": str(exc)}, 409
+        except (OSError, ComfyUIStoreError) as exc:
+            return {"error": f"删除产物失败：{exc}"}, 500
+        if result is None:
+            return {"error": "批次不存在或已被删除"}, 404
+        return {"ok": True, **result}, 200
 
     # ---- 产物文件 ----
 

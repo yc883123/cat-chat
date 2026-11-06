@@ -251,12 +251,13 @@ assert.ok(portsMarkup.includes('8 · 载入图片 · image → ref_images.ref_im
 assert.ok(portsMarkup.includes('10 · 载入图片 · image → ref_images.ref_image_1、mask（节点 21）'));
 assert.equal(batchSlotAddressText(s.detail,{node_id:'missing',field_name:'image'}),'missing · image');
 s.fixed={'9|lora':'other.safetensors'};
-s.items=[{name:'条目 1',script:'',prompt:'场景A',duration:'8',resolution:'848x480',shots:1,
+s.items=[{name:'条目 1',script:'剧本A',prompt:'场景A',duration:'8',resolution:'848x480',shots:1,
           files:{'0':{path:'/managed/a.png',name:'a.png',thumb_path:''}}},
          {name:'条目 2',script:'',prompt:'场景B',duration:'',resolution:'',shots:2,files:{}}];
 // 执行真实条目渲染，覆盖分辨率枚举和独立索引；仅提交形状测试无法发现作用域错误。
 let itemMarkup=batchItemsMarkup(s,0);
 assert.ok(itemMarkup.includes('data-batch-item="resolution"'));
+assert.ok(itemMarkup.includes('data-batch-action="clear-prompts"'));
 assert.ok(itemMarkup.includes('data-item="0"'));
 assert.ok(itemMarkup.includes('data-item="1"'));
 assert.ok(itemMarkup.includes('value="848x480" selected'));
@@ -272,9 +273,10 @@ assert.ok(post,'必须 POST /api/comfyui/batches');
 assert.equal(post.body.title,'验收批次');assert.equal(post.body.unload_after,true);
 const scheme=post.body.schemes[0];
 assert.equal(scheme.workflow_id,'cw-1');
-assert.deepEqual(scheme.mapping,{prompt_slot:{node_id:'5',field_name:'text'},duration_slot:{node_id:'6',field_name:'length'},resolution_slot:{node_id:'7',field_name:'res'}});
+assert.deepEqual(scheme.mapping,{prompt_slot:{node_id:'5',field_name:'text'},duration_slot:{node_id:'6',field_name:'length'},resolution_slot:{node_id:'7',field_name:'res'},media_ports:[{node_id:'8',field_name:'image',checked:true}]});
 assert.deepEqual(scheme.overrides,[{node_id:'9',field_name:'lora',value:'other.safetensors'}]);
 const [one,two]=scheme.items;
+assert.equal(one.script,'剧本A');
 assert.equal(one.prompt,'场景A');assert.equal(one.duration_seconds,8);assert.equal(one.resolution,'848x480');assert.equal(one.shots,1);
 assert.deepEqual(one.media_inputs,[{node_id:'8',field_name:'image',path:'/managed/a.png',media:'image'}]);
 assert.equal(two.duration_seconds,null);assert.equal(two.resolution,'');assert.equal(two.media_inputs.length,0);
@@ -306,6 +308,8 @@ assert.equal(b.items[0].files['0'].path,'/managed/a.png');
         self.assertIn("comfyui.tasks.filter((row) => !isBatchTaskRow(row))", js)
         self.assertIn("if (isBatchTaskRow(row)) continue;", js)
         for rule in (".comfyui-results-seg", ".comfyui-batch-row", ".comfyui-batch-progress",
+                     ".comfyui-batch-row-wrap", ".comfyui-batch-row-edit", ".cbm-btn.danger",
+                     ".cbm-th-clear", ".cbm-card-preview", ".cbm-preview-play",
                      ".cbm-card-expand", ".cbm-expand-empty"):
             self.assertIn(rule, css)
         self.assertIn('[data-results-segment="single"] .comfyui-batch-history', css)
@@ -316,6 +320,44 @@ assert.equal(b.items[0].files['0'].path,'/managed/a.png');
         self.assertIn('data-batch-action="toggle-item-outputs"', js)
         self.assertIn("function mountBatchItemOutputs()", js)
         self.assertNotIn('data-batch-action="open-task-outputs"', js)
+        # 批量完成态与单次结果共用同一张产物卡：视频能播、竖屏按比例显示。
+        self.assertIn("function mountBatchItemPreviews()", js)
+        self.assertIn("data-batch-preview-task", js)
+        self.assertIn('batchBody?.addEventListener("click", onOutputGridClick)', js)
+        self.assertIn("function batchRunSignature(", js)
+        # 历史批次：能删产物、删批次，也能回填填单区再跑。
+        for action in ("edit-batch", "clear-batch-outputs", "delete-batch", "delete-item"):
+            self.assertIn(f'data-batch-action="{action}"', js)
+        self.assertIn('data-batch-action="open-history"', js)
+        # 单次档的「清除」不碰批量任务：批量产物按批次删。
+        self.assertIn("exclude_batch: true", js)
+        # 转换模板的默认档是自动：普通参考图走参考六字段，首尾帧走基础三字段。
+        self.assertIn("自动（按工作流素材槽位选基础/参考）", js)
+        self.assertIn("BATCH_H3_BASE_TEMPLATE", js)
+        convert_js = (ROOT / "public/js/24a-comfyui-convert.js").read_text(encoding="utf-8")
+        self.assertIn("export const BATCH_H3_BASE_TEMPLATE", convert_js)
+        self.assertIn("function evidenceSaysReference(", convert_js)
+        # 提词库内置模板也要出现在转换模板下拉：按模块分组，值带 catalog: 前缀。
+        self.assertIn("/api/studio/catalog/items?type=template", js)
+        self.assertIn("BATCH_TEMPLATE_MODULES", js)
+        self.assertIn("`catalog:${item.id}`", js)
+        self.assertIn('template.startsWith("catalog:")', convert_js)
+        # 拆书匠分镜交接落到批量档：「从分镜队列导入」直接可见；单次档不再接分镜队列。
+        handoff = js[js.index("function onStoryboardHandoff("):js.index("const batch = {")]
+        self.assertIn('setComfyuiPane("batch");', handoff)
+        self.assertNotIn("comfyuiStoryboard", js)
+        self.assertNotIn("renderStoryboardQueue", js)
+        self.assertNotIn("fillStoryboardPrompt", js)
+        # 空行不提交：导入清默认空行，提交前再过滤，自检也不为空行标红。
+        self.assertIn("function batchItemIsBlank(", js)
+        self.assertIn("scheme.items = scheme.items.filter((item) => !batchItemIsBlank(item));", js)
+        self.assertIn("const readyItems = (scheme.items || []).filter((item) => !batchItemIsBlank(item));", js)
+        self.assertIn("if (batchItemIsBlank(item)) return;", js)
+        self.assertIn("data-batch-edit", js)
+        self.assertIn("function batchSchemeFromRestore(", js)
+        self.assertIn("function batchSchemeFromLegacy(", js)
+        self.assertIn('with_schemes=1', js)
+        self.assertNotIn('data-batch-action="switch-draft"', js)
 
     @unittest.skipUnless(shutil.which("node"), "Node required for frontend logic")
     def test_results_segments_and_batch_history_render(self):
@@ -343,8 +385,15 @@ async function make(name,sourceText,exportsLine){
   await mod.evaluate();
   return mod.namespace;
 }
-const m=await make('comfy',source,'\nexport {batch,batchHistoryBadge,renderBatchHistoryList,batchRunCardMarkup,isBatchTaskRow};');
-const {batch,batchHistoryBadge,renderBatchHistoryList,batchRunCardMarkup,isBatchTaskRow}=m;
+const m=await make('comfy',source,'\nexport {batch,batchHistoryBadge,renderBatchHistoryList,batchRunCardMarkup,batchRunMarkup,batchRunSignature,batchSchemeFromRestore,batchSchemeFromLegacy,isBatchTaskRow,batchItemIsBlank};');
+const {batch,batchHistoryBadge,renderBatchHistoryList,batchRunCardMarkup,batchRunMarkup,batchRunSignature,batchSchemeFromRestore,batchSchemeFromLegacy,isBatchTaskRow,batchItemIsBlank}=m;
+// 空行口径：默认名 + 什么都没填才算空；改过名、填过字、挂过素材、调过条数都不算。
+assert.equal(batchItemIsBlank({name:'条目 1',script:'',prompt:'',duration:'',resolution:'',shots:1,files:{}}),true);
+assert.equal(batchItemIsBlank({name:'条目 2',prompt:'提示词',shots:1,files:{}}),false);
+assert.equal(batchItemIsBlank({name:'条目 3',files:{'0':{path:'uploads/a.png'}}}),false);
+assert.equal(batchItemIsBlank({name:'我的镜头',shots:1,files:{}}),false);
+assert.equal(batchItemIsBlank({name:'条目 4',shots:2}),false);
+assert.equal(batchItemIsBlank({name:'条目 5',duration:'6'}),false);
 assert.equal(isBatchTaskRow({batch_id:'cfb-a1'}),true);
 assert.equal(isBatchTaskRow({batch_id:''}),false);
 assert.equal(isBatchTaskRow({}),false);
@@ -353,6 +402,8 @@ assert.equal(isBatchTaskRow(null),false);
 assert.equal(JSON.stringify(batchHistoryBadge({items:[{status:'running'},{status:'completed'}],done_count:1,item_count:2})),JSON.stringify(['run','正在生成 1/2']));
 assert.equal(JSON.stringify(batchHistoryBadge({items:[{status:'completed'},{status:'completed'}],done_count:2,item_count:2})),JSON.stringify(['done','2 条全部完成']));
 assert.equal(JSON.stringify(batchHistoryBadge({items:[{status:'failed'},{status:'completed'},{status:'cancelled'}],done_count:1,item_count:3})),JSON.stringify(['fail','1/3 完成 · 2 失败']));
+// 任务记录被删不算失败，单独报「产物已删」。
+assert.equal(JSON.stringify(batchHistoryBadge({items:[{status:'missing'},{status:'missing'}],done_count:0,item_count:2})),JSON.stringify(['queue','0/2 完成 · 2 条产物已删']));
 batch.histories=[
   {id:'cfb-a0',title:'短剧第2集',done_count:3,item_count:6,created_at:0,items:[{status:'running'},{status:'completed'},{status:'completed'}]},
   {id:'cfb-a1',title:'短剧第1集',done_count:6,item_count:6,created_at:new Date('2026-11-06T13:05:00').getTime(),items:[{status:'completed'}]},
@@ -360,6 +411,7 @@ batch.histories=[
 renderBatchHistoryList();
 const html=$('#comfyuiBatchList').innerHTML;
 assert.ok(html.includes('data-batch-open="cfb-a1"')&&html.includes('短剧第1集'));
+assert.ok(html.includes('data-batch-edit="cfb-a1"')&&html.includes('回到填单区修改这一批'));
 assert.ok(html.includes('cbm-badge done')&&html.includes('6 条全部完成'));
 assert.ok(html.includes('is-failed')&&html.includes('cbm-badge fail'));
 assert.ok(html.includes('正在生成'));
@@ -373,8 +425,70 @@ batch.expandedItems.add('ct-10');
 const done=batchRunCardMarkup({index:2,name:'条目 2',status:'completed',done:2,total:2,task_id:'ct-10',outputs:['a.png','b.png']});
 assert.ok(done.includes('data-batch-action="toggle-item-outputs"')&&done.includes('aria-expanded="true"'));
 assert.ok(done.includes('data-batch-expand-for="ct-10"'));
+assert.ok(done.includes('data-batch-action="delete-item"'));
+// 完成态预览挂单次结果同款产物卡，不再自己画缩略图（视频/竖屏都交给产物卡）。
+assert.ok(done.includes('data-batch-preview-task="ct-10"')&&done.includes('data-batch-preview-name="a.png"'));
+assert.ok(!done.includes('cbm-card-thumb'));
+// 轮询只在条目状态变化时重绘，别打断正在播放的视频。
+assert.equal(batchRunSignature({items:[{task_id:'ct-1',status:'completed',outputs:['a.png']}]}),
+             batchRunSignature({items:[{task_id:'ct-1',status:'completed',outputs:['a.png']}]}));
+assert.notEqual(batchRunSignature({items:[{task_id:'ct-1',status:'running'}]}),
+                batchRunSignature({items:[{task_id:'ct-1',status:'completed'}]}));
 const failed=batchRunCardMarkup({index:3,name:'条目 3',status:'failed',error:'超时',task_id:'ct-11',outputs:[]});
 assert.ok(failed.includes('data-batch-action="retry-item"')&&!failed.includes('cancel-item'));
+assert.ok(failed.includes('data-batch-action="delete-item"'));
+// 任务记录已删：不再给必然 404 的重试，徽标改中性文案。
+const missing=batchRunCardMarkup({index:4,name:'条目 4',status:'missing',error:'任务记录和产物已删除',task_id:'ct-12',outputs:[]});
+assert.ok(missing.includes('产物已删除')&&!missing.includes('retry-item')&&!missing.includes('delete-item'));
+// 跑批头：编辑、清产物、删批次三个入口都在。
+batch.runData={title:'短剧第1集',items:[
+  {index:1,name:'条目 1',status:'completed',task_id:'ct-1',outputs:['a.png']},
+  {index:2,name:'条目 2',status:'missing',task_id:'ct-2',outputs:[]},
+]};
+const runHead=batchRunMarkup();
+assert.ok(runHead.includes('data-batch-action="edit-batch"'));
+assert.ok(runHead.includes('data-batch-action="clear-batch-outputs"'));
+assert.ok(runHead.includes('data-batch-action="delete-batch"'));
+assert.ok(runHead.includes('1/2 完成 · 1 条产物已删'));
+// 新批次快照回填：映射、固定参数、条目、素材文件都按原样放回。
+const detail={id:'cw-1',name:'测试流',workflow_fingerprint:'fp-x',
+  prompt:{'5':{inputs:{text:'默认正文'}},'6':{inputs:{length:5}},'7':{inputs:{res:'848x480'}},'8':{inputs:{image:'old.png'}},'9':{inputs:{lora:'base.safetensors'}}},
+  params:[{node_id:'5',field_name:'text',field_type:'text',control:'multiline',role:'positive_prompt',label:'正文'},
+          {node_id:'6',field_name:'length',field_type:'number',default:5,label:'时长'},
+          {node_id:'7',field_name:'res',field_type:'text',candidates:['848x480','480x848'],label:'分辨率'},
+          {node_id:'8',field_name:'image',field_type:'image',control:'media',media:'image',label:'参考图'},
+          {node_id:'9',field_name:'lora',field_type:'text',role:'lora',label:'LoRA'}]};
+const restored=batchSchemeFromRestore({
+  workflow_id:'cw-1',workflow_name:'测试流',
+  overrides:[{node_id:'9',field_name:'lora',value:'other.safetensors'}],
+  mapping:{prompt_slot:{node_id:'5',field_name:'text'},duration_slot:{node_id:'6',field_name:'length'},
+           resolution_slot:{node_id:'7',field_name:'res'},
+           media_ports:[{node_id:'8',field_name:'image',checked:true}]},
+  items:[{name:'条目 1',script:'剧本A',prompt:'场景A',duration_seconds:8,resolution:'848x480',shots:2,
+          media_inputs:[{node_id:'8',field_name:'image',path:'/managed/a.png',media:'image',name:'a.png'}]}],
+},detail);
+assert.equal(restored.mapping.prompt_slot.node_id,'5');
+assert.equal(restored.items[0].script,'剧本A');
+assert.equal(restored.items[0].prompt,'场景A');
+assert.equal(restored.items[0].duration,'8');
+assert.equal(restored.items[0].resolution,'848x480');
+assert.equal(restored.items[0].shots,2);
+assert.equal(restored.items[0].files['0'].path,'/managed/a.png');
+assert.equal(restored.items[0].files['0'].name,'a.png');
+assert.equal(restored.fixed['9|lora'],'other.safetensors');
+assert.equal(restored.mapping.media_ports.filter(port=>port.checked).length,1);
+// 旧批次：从任务输入捞回能对上的字段，映射走工作流预选。
+const legacy=batchSchemeFromLegacy({workflowId:'cw-1',rows:[{row:{name:'条目 1'},restore:{
+  overrides:[{node_id:'5',field_name:'text',value:'旧正文'},{node_id:'6',field_name:'length',value:8},
+             {node_id:'9',field_name:'lora',value:'base.safetensors'}],
+  media_inputs:[{node_id:'8',field_name:'image',path:'/managed/old.png',media:'image',name:'old.png'}],
+  shots:2,
+}}]},detail);
+assert.equal(legacy.items[0].prompt,'旧正文');
+assert.equal(legacy.items[0].duration,'8');
+assert.equal(legacy.items[0].files['0'].path,'/managed/old.png');
+assert.equal(legacy.fixed['9|lora'],'base.safetensors');
+assert.ok(legacy.restoreWarning.includes('旧版'));
 })().catch(error=>{console.error(error);process.exitCode=1});
 '''
         result = subprocess.run(["node", "--experimental-vm-modules", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=30)

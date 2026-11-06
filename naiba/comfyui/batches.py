@@ -13,6 +13,11 @@
 写进哪个槽位，由前端把用户在映射区指认的槽位地址随请求带来
 （``mapping.prompt_slot`` / ``duration_slot`` / ``resolution_slot``）；
 没有映射却填了值的条目整单拒绝——填了不生效比报错更伤用户。
+
+「＋增加指认」（2026-11-06 拍板）：第二段提示词 / 第二时长 / 第二分辨率 /
+备用槽是可选的扩展写入位（``mapping.extra_points``），条目里的补充值以
+``item.extras = {"节点|字段": 值}`` 随条目带来；值只会写进前端指认出的槽位，
+喂给没被指认的参数同样整单拒绝。
 """
 
 from __future__ import annotations
@@ -27,13 +32,15 @@ from typing import Any
 
 from naiba.comfyui import COMFYUI_BATCH_PREFIX, MAX_SHOTS
 from naiba.comfyui import client
-from naiba.comfyui.jobs import ComfyUITaskError
+from naiba.comfyui.jobs import ComfyUITaskError, _running_step
 from naiba.comfyui.store import _store_lock, now_ms
 
 # 批次历史上限（跑批视图 + 历史下拉够用；更早的批次靠任务记录本身留存）。
 MAX_BATCHES = 50
 # 方案数与总条目数上限（总条目对齐单任务 shots ≤ 200 的口径）。
 MAX_SCHEMES = 50
+# 「＋增加指认」扩展写入位上限（第二段/第二时长/第二分辨率 + 备用槽）。
+MAX_EXTRA_POINTS = 8
 
 
 class ComfyUIBatchError(ValueError):
@@ -87,6 +94,109 @@ def _override_value(overrides: list[dict[str, Any]], slot: dict[str, str] | None
                 and str(row.get("field_name") or "") == slot["field_name"]):
             return row.get("value")
     return default
+
+
+def _extra_points(entry: dict[str, Any], raw: Any) -> list[dict[str, Any]]:
+    """「＋增加指认」扩展写入位：第二段提示词 / 第二时长 / 第二分辨率 / 备用槽。
+
+    返回形如 ``[{"id", "kind", "spec", "slot"}]``；形状不对、槽位对不上工作流、
+    类型不匹配或同一槽位重复指认都整单拒绝——指认错位比悄悄丢弃更伤用户。
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ComfyUIBatchError("「＋增加指认」的内容格式必须是列表")
+    if len(raw) > MAX_EXTRA_POINTS:
+        raise ComfyUIBatchError(f"指认行最多 {MAX_EXTRA_POINTS} 个")
+    kinds = {"prompt", "duration", "resolution", "spare"}
+    params = {(str(row.get("node_id") or ""), str(row.get("field_name") or "")): row
+              for row in entry.get("params") or []}
+    points: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    seen_kinds: set[str] = set()
+    for row in raw:
+        if not isinstance(row, dict):
+            raise ComfyUIBatchError("每一行指认都必须是对象")
+        kind = str(row.get("kind") or "").strip()
+        slot = _slot_of(row.get("slot"))
+        if kind not in kinds:
+            raise ComfyUIBatchError(f"未知的指认类型：{kind or '（空）'}")
+        if slot is None:
+            raise ComfyUIBatchError("指认行还没有选定写进哪个参数")
+        key = (slot["node_id"], slot["field_name"])
+        param = params.get(key)
+        if param is None:
+            raise ComfyUIBatchError(
+                f"指认行指向的参数（节点 {slot['node_id']} · {slot['field_name']}）"
+                f"不在这份工作流里，请重新指认")
+        field_type = str(param.get("field_type") or "")
+        control = str(param.get("control") or "")
+        if control == "media" or field_type in ("image", "video", "audio"):
+            raise ComfyUIBatchError("素材口是媒体槽：请在「素材口」区勾选启用，不能指认成写入位")
+        if key in seen:
+            raise ComfyUIBatchError(
+                f"同一个参数（{slot['node_id']} · {slot['field_name']}）被指认了两行，"
+                f"两行会互相覆盖；请删掉重复的那行")
+        spec = "string"
+        if kind == "prompt":
+            if kind in seen_kinds:
+                raise ComfyUIBatchError("第二段提示词的指认行只能有一行")
+            if field_type != "text":
+                raise ComfyUIBatchError("第二段提示词只能指认文本参数")
+            spec = "text"
+        elif kind == "duration":
+            if kind in seen_kinds:
+                raise ComfyUIBatchError("第二时长的指认行只能有一行")
+            if field_type not in ("number", "seed"):
+                raise ComfyUIBatchError("第二时长只能指认数字参数")
+            spec = "number"
+        elif kind == "resolution":
+            if kind in seen_kinds:
+                raise ComfyUIBatchError("第二分辨率的指认行只能有一行")
+            if field_type != "number" and not (field_type == "text" and (param.get("candidates") or [])):
+                raise ComfyUIBatchError("第二分辨率只能指认数字参数或带候选值的文本参数")
+            spec = "text"
+        else:  # spare：任何可改参数都行，值按该槽位的类型来。
+            if field_type == "bool":
+                spec = "bool"
+            elif field_type in ("number", "seed"):
+                spec = "number"
+        seen.add(key)
+        seen_kinds.add(kind)
+        points.append({
+            "id": str(row.get("id") or "").strip()[:64],
+            "kind": kind,
+            "spec": spec,
+            "slot": dict(slot),
+        })
+    return points
+
+
+def _extra_value(point: dict[str, Any], raw: Any, *, where: str) -> Any:
+    """按指认类型换算补充值；空值返回 None（不写入）。只做直译，不再猜测。"""
+    label = f"{point['slot']['node_id']} · {point['slot']['field_name']}"
+    spec = point["spec"]
+    if isinstance(raw, str):
+        raw = raw.strip()
+    if raw is None or raw == "" or (isinstance(raw, str) and not raw):
+        return None
+    if spec == "number":
+        try:
+            number = float(raw)
+        except (TypeError, ValueError):
+            raise ComfyUIBatchError(f"{where}「{label}」要填数字，现在填的是「{raw}」") from None
+        return int(number) if number.is_integer() else number
+    if spec == "bool":
+        text = str(raw).strip().lower()
+        if text in ("true", "1", "on", "开"):
+            return True
+        if text in ("false", "0", "off", "关"):
+            return False
+        raise ComfyUIBatchError(f"{where}「{label}」只能填开/关，现在填的是「{raw}」")
+    text = str(raw)
+    if spec == "text" and len(text) > 20000:
+        raise ComfyUIBatchError(f"{where}「{label}」的正文太长（超过 20000 字）")
+    return text
 
 
 class ComfyUIBatchManager:
@@ -245,6 +355,15 @@ class ComfyUIBatchManager:
         prompt_slot = _slot_of(mapping.get("prompt_slot"))
         duration_slot = _slot_of(mapping.get("duration_slot"))
         resolution_slot = _slot_of(mapping.get("resolution_slot"))
+        extra_points = _extra_points(entry, mapping.get("extra_points"))
+        primary_keys = {f"{slot['node_id']}|{slot['field_name']}"
+                        for slot in (prompt_slot, duration_slot, resolution_slot) if slot}
+        for point in extra_points:
+            key = f"{point['slot']['node_id']}|{point['slot']['field_name']}"
+            if key in primary_keys:
+                raise ComfyUIBatchError(
+                    f"指认行「{point['kind']}」和主映射选中了同一个参数（{key}），"
+                    f"会互相覆盖；两个写入位别指向同一段")
         scheme_overrides = scheme.get("overrides") if isinstance(scheme.get("overrides"), list) else []
         items = scheme.get("items")
         if not isinstance(items, list) or not items:
@@ -284,6 +403,24 @@ class ComfyUIBatchManager:
                 )
             if resolution and resolution_slot:
                 overrides.append({**resolution_slot, "value": resolution})
+            # 「＋增加指认」的补充值：只写进前端指认出的槽位，喂给没被指认的
+            # 参数整单拒绝（与主映射同一口径）。
+            extras_raw = item.get("extras")
+            extras_map = extras_raw if isinstance(extras_raw, dict) else {}
+            known_keys = {f"{point['slot']['node_id']}|{point['slot']['field_name']}"
+                          for point in extra_points}
+            for key in extras_map:
+                if key not in known_keys:
+                    raise ComfyUIBatchError(
+                        f"条目「{name}」给未指认的参数（{key}）填了补充值；"
+                        f"请在映射区点「＋增加指认」把这一参数指认出来，或清掉这个值"
+                    )
+            for point in extra_points:
+                key = f"{point['slot']['node_id']}|{point['slot']['field_name']}"
+                value = _extra_value(point, extras_map.get(key), where=f"条目「{name}」")
+                if value is None:
+                    continue
+                overrides.append({**point["slot"], "value": value})
             media_inputs = item.get("media_inputs")
             if media_inputs is not None and not isinstance(media_inputs, list):
                 raise ComfyUIBatchError(f"条目「{name}」的素材列表格式不对")
@@ -315,6 +452,13 @@ class ComfyUIBatchManager:
                 "prompt": _override_value(overrides, prompt_slot, ""),
                 "duration_seconds": _override_value(overrides, duration_slot, None),
                 "resolution": _override_value(overrides, resolution_slot, ""),
+                # 指认位的补充值原样记下来，「编辑这一批」回填同一个表的对应列。
+                "extras": {
+                    f"{point['slot']['node_id']}|{point['slot']['field_name']}":
+                        _override_value(overrides, point["slot"], None)
+                    for point in extra_points
+                    if _override_value(overrides, point["slot"], None) is not None
+                },
                 "shots": shots,
                 "media_inputs": _frozen(media_inputs or []),
             })
@@ -326,6 +470,10 @@ class ComfyUIBatchManager:
                 "prompt_slot": self._valid_slot(entry, prompt_slot),
                 "duration_slot": self._valid_slot(entry, duration_slot),
                 "resolution_slot": self._valid_slot(entry, resolution_slot),
+                "extra_points": [
+                    {key: point[key] for key in ("id", "kind", "spec", "slot")}
+                    for point in extra_points
+                ],
                 "media_ports": self._media_ports(entry, mapping.get("media_ports")),
             },
             "items": snapshot_items,
@@ -513,6 +661,8 @@ class ComfyUIBatchManager:
                     "failed": len(checkpoint.get("errors") or []),
                     "outputs": outputs,
                     "error": task.get("error") or "",
+                    # 当前正在生成的条目带采样步级进度（其余条目 None，不渲染）。
+                    "step": _running_step(task, checkpoint),
                 })
                 if with_restore and not slim:
                     row["restore"] = {

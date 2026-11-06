@@ -71,6 +71,27 @@ export function buildBatchConvertRequest(detail, mapping, item, convert, fixed =
     ?? detail?.prompt?.[durationSlot.node_id]?.inputs?.[durationSlot.field_name] ?? durationSlot.default : undefined;
   const duration = Number(String(item.duration ?? "").trim() || savedDuration);
   if (Number.isFinite(duration) && duration > 0) body.user_request += `\n目标时长：${duration} 秒。`;
+  // 指认了第二段提示词：要求模型按 ---- 分行输出两段，前端拆开分别写入两个写入位。
+  const prompt2Point = (mapping?.extra_points || []).find((row) => row?.kind === "prompt" && row?.slot);
+  if (prompt2Point) {
+    const labelOf = (slot) => (slot ? `${slot.node_id} · ${slot.label || slot.field_name}` : "");
+    const anchorOf = (slot) => {
+      if (!slot) return "";
+      const key = `${slot.node_id}|${slot.field_name}`;
+      const saved = fixed?.[key]
+        ?? detail?.prompt?.[slot.node_id]?.inputs?.[slot.field_name] ?? slot.default;
+      return String(saved ?? "").trim().slice(0, 320);
+    };
+    const firstSlot = slotOf(mapping?.prompt_slot);
+    const secondSlot = slotOf(prompt2Point.slot);
+    body.user_request += `\n\n输出协议：这份工作流要把提示词分两处注入，最终输出必须拆成两段，两段之间用只含四个减号的一行（----）分隔；`
+      + `第一段给「${labelOf(firstSlot)}」，第二段给「${labelOf(secondSlot)}」；两段都必须是可直接使用的成品提示词正文。`
+      + `除两段正文和分隔行外不得输出标题、注释或任何说明文字。`;
+    const firstAnchor = anchorOf(firstSlot);
+    const secondAnchor = anchorOf(secondSlot);
+    if (firstAnchor) body.user_request += `\n第一段写入位的当前内容（口径参考，不是要保留的原文）：${firstAnchor}`;
+    if (secondAnchor) body.user_request += `\n第二段写入位的当前内容（口径参考，不是要保留的原文）：${secondAnchor}`;
+  }
   // 批量转换只要成品提示词：把这条放在请求末尾，模型最后看到的是输出纪律。
   body.user_request += "\n直接输出最终提示词，不提问、不要求确认、不说明规则；信息不全按现有剧本和素材补齐。";
   return body;

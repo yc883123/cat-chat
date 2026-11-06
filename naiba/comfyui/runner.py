@@ -18,6 +18,7 @@ from typing import Any
 
 from naiba.comfyui import MAX_FILES_PER_SHOT, MAX_RESUBMIT, MAX_SHOTS, SHOT_TIMEOUT_SECONDS
 from naiba.comfyui import client
+from naiba.comfyui import stepmeter
 from naiba.comfyui.params import apply_overrides, media_kind_of_field
 from naiba.comfyui.schema import NodeSchemaProvider, input_is_optional
 from naiba.comfyui.store import now_ms
@@ -514,6 +515,11 @@ class ComfyUIRunner:
             queue = client.queue_ids(base)
             if queue is None or prompt_id in queue:
                 # 仍在排队/执行中；队列查询失败时保守处理，不判定丢失。
+                # 顺带提取一次采样步级进度（失败静默降级，绝不影响主链路）。
+                try:
+                    stepmeter.observe(base, prompt_id)
+                except Exception:  # noqa: BLE001 - 提取失败只是没有条
+                    pass
                 cancel_event.wait(POLL_INTERVAL_SECONDS)
                 continue
             # 历史无 + 队列无：ComfyUI 重启或清队列导致丢失。有界重提交一次。

@@ -232,16 +232,18 @@ const {batch,ensureBatchDraft,submitBatch,batchPortOrdinal,batchSlotAddressText,
 ensureBatchDraft();
 const s=batch.draft.schemes[0];
 s.detail={id:'cw-1',name:'测试流',workflow_fingerprint:'fp-x',
-  prompt:{'5':{inputs:{text:'默认正文'}},'6':{inputs:{length:5}},'7':{inputs:{res:'848x480'}},'8':{inputs:{image:'old.png'}},'9':{inputs:{lora:'base.safetensors'}}},
+  prompt:{'5':{inputs:{text:'默认正文'}},'6':{inputs:{length:5}},'7':{inputs:{res:'848x480'}},'8':{inputs:{image:'old.png'}},'9':{inputs:{lora:'base.safetensors'}},'31':{inputs:{tail:''}}},
   params:[{node_id:'5',field_name:'text',field_type:'text',control:'multiline',role:'positive_prompt',label:'正文'},
           {node_id:'6',field_name:'length',field_type:'number',default:5,label:'时长'},
           {node_id:'7',field_name:'res',field_type:'text',candidates:['848x480','480x848'],label:'分辨率'},
           {node_id:'8',field_name:'image',field_type:'image',control:'media',media:'image',node_title:'载入图片',label:'8 · 载入图片 · image → ref_images.ref_image_0',media_optional:true},
           {node_id:'10',field_name:'image',field_type:'image',control:'media',media:'image',node_title:'载入图片',label:'10 · 载入图片 · image → ref_images.ref_image_1、mask（节点 21）',media_optional:true},
-          {node_id:'9',field_name:'lora',field_type:'text',role:'lora',label:'LoRA'}]};
+          {node_id:'9',field_name:'lora',field_type:'text',role:'lora',label:'LoRA'},
+          {node_id:'31',field_name:'tail',field_type:'text',control:'multiline',label:'第二段'}]};
 s.workflow_id='cw-1';
 s.mapping={prompt_slot:{node_id:'5',field_name:'text'},duration_slot:{node_id:'6',field_name:'length'},
   resolution_slot:{node_id:'7',field_name:'res'},
+  extra_points:[{id:'bx1',kind:'prompt',slot:{node_id:'31',field_name:'tail'}}],
   media_ports:[{node_id:'8',field_name:'image',checked:true}]};
 // 同名加载节点必须保留与单次生成相同的完整下游标签；地址值不随显示文案改变。
 assert.equal(batchSlotAddressText(s.detail,{node_id:'8',field_name:'image'}),s.detail.params.find(row=>row.node_id==='8').label);
@@ -252,12 +254,16 @@ assert.ok(portsMarkup.includes('10 · 载入图片 · image → ref_images.ref_i
 assert.equal(batchSlotAddressText(s.detail,{node_id:'missing',field_name:'image'}),'missing · image');
 s.fixed={'9|lora':'other.safetensors'};
 s.items=[{name:'条目 1',script:'剧本A',prompt:'场景A',duration:'8',resolution:'848x480',shots:1,
-          files:{'0':{path:'/managed/a.png',name:'a.png',thumb_path:''}}},
-         {name:'条目 2',script:'',prompt:'场景B',duration:'',resolution:'',shots:2,files:{}}];
+          files:{'0':{path:'/managed/a.png',name:'a.png',thumb_path:''}},
+          extras:{'31|tail':'第二段A'}},
+         {name:'条目 2',script:'',prompt:'场景B',duration:'',resolution:'',shots:2,files:{},extras:{}}];
 // 执行真实条目渲染，覆盖分辨率枚举和独立索引；仅提交形状测试无法发现作用域错误。
 let itemMarkup=batchItemsMarkup(s,0);
 assert.ok(itemMarkup.includes('data-batch-item="resolution"'));
 assert.ok(itemMarkup.includes('data-batch-action="clear-prompts"'));
+assert.ok(itemMarkup.includes('data-batch-item="extras"'));
+assert.ok(itemMarkup.includes('data-extra-key="31|tail"'));
+assert.ok(itemMarkup.includes('第二段'));
 assert.ok(itemMarkup.includes('data-item="0"'));
 assert.ok(itemMarkup.includes('data-item="1"'));
 assert.ok(itemMarkup.includes('value="848x480" selected'));
@@ -273,13 +279,16 @@ assert.ok(post,'必须 POST /api/comfyui/batches');
 assert.equal(post.body.title,'验收批次');assert.equal(post.body.unload_after,true);
 const scheme=post.body.schemes[0];
 assert.equal(scheme.workflow_id,'cw-1');
-assert.deepEqual(scheme.mapping,{prompt_slot:{node_id:'5',field_name:'text'},duration_slot:{node_id:'6',field_name:'length'},resolution_slot:{node_id:'7',field_name:'res'},media_ports:[{node_id:'8',field_name:'image',checked:true}]});
+assert.deepEqual(scheme.mapping,{prompt_slot:{node_id:'5',field_name:'text'},duration_slot:{node_id:'6',field_name:'length'},resolution_slot:{node_id:'7',field_name:'res'},extra_points:[{id:'bx1',kind:'prompt',slot:{node_id:'31',field_name:'tail'}}],media_ports:[{node_id:'8',field_name:'image',checked:true}]});
 assert.deepEqual(scheme.overrides,[{node_id:'9',field_name:'lora',value:'other.safetensors'}]);
 const [one,two]=scheme.items;
 assert.equal(one.script,'剧本A');
 assert.equal(one.prompt,'场景A');assert.equal(one.duration_seconds,8);assert.equal(one.resolution,'848x480');assert.equal(one.shots,1);
+// 指认补充值产出在 VM 域里，原型不等，用 JSON 比对形状。
+assert.equal(JSON.stringify(one.extras),JSON.stringify({'31|tail':'第二段A'}));
 assert.deepEqual(one.media_inputs,[{node_id:'8',field_name:'image',path:'/managed/a.png',media:'image'}]);
 assert.equal(two.duration_seconds,null);assert.equal(two.resolution,'');assert.equal(two.media_inputs.length,0);
+assert.equal(JSON.stringify(two.extras),'{}');
 assert.equal(two.shots,2);
 // 换节点/取消勾选后条目文件键按已勾选口序重排：ordinal 语义测试。
 const b=batch.draft.schemes[0];
@@ -342,6 +351,25 @@ assert.equal(b.items[0].files['0'].path,'/managed/a.png');
         self.assertIn("BATCH_TEMPLATE_MODULES", js)
         self.assertIn("`catalog:${item.id}`", js)
         self.assertIn('template.startsWith("catalog:")', convert_js)
+        # ＋增加指认：点加号才出现指认行；四类写入位按入列逐条控制，备用槽认任何可改参数。
+        for marker in ("function extraPointsOf(", "function extraSlotPool(", "function promptSlotPool(",
+                       'data-batch-action="add-extra"', 'data-batch-action="remove-extra"',
+                       "data-batch-extra-kind", "data-batch-extra-slot", 'data-batch-item="extras"',
+                       "function batchExtraCellMarkup(", "function itemExtraValue("):
+            self.assertIn(marker, js)
+        self.assertIn("function splitBatchPromptSegments(", js)
+        for rule in (".cbm-extras", ".cbm-extra-row", ".cbm-extra-kind", ".cbm-extra-slot",
+                     "td[data-batch-extra]", ".cbm-extra-prompt"):
+            self.assertIn(rule, css)
+        # 转换带图小字提醒：每条显示这次转换真正发给视觉模型的图片数。
+        self.assertIn("function batchItemConversionImageCount(", js)
+        self.assertIn('class="cbm-convert-hint', js)
+        # 第二列转换：带第二段写入位时双段输出协议随请求发出，模型按 ---- 分段。
+        self.assertIn("输出协议：这份工作流要把提示词分两处注入", convert_js)
+        self.assertIn("prompt2Point", convert_js)
+        # 结果页产物卡的视频封面：进入视野才读首帧，三条挂载点全接同一个升级观察器。
+        self.assertIn("batchPreviewVideoPreload(existing.get(key))", js)
+        self.assertIn("batchPreviewVideoPreload(host);", js)
         # 拆书匠分镜交接落到批量档：「从分镜队列导入」直接可见；单次档不再接分镜队列。
         handoff = js[js.index("function onStoryboardHandoff("):js.index("const batch = {")]
         self.assertIn('setComfyuiPane("batch");', handoff)
@@ -394,6 +422,9 @@ assert.equal(batchItemIsBlank({name:'条目 3',files:{'0':{path:'uploads/a.png'}
 assert.equal(batchItemIsBlank({name:'我的镜头',shots:1,files:{}}),false);
 assert.equal(batchItemIsBlank({name:'条目 4',shots:2}),false);
 assert.equal(batchItemIsBlank({name:'条目 5',duration:'6'}),false);
+// 指认列里填过任何补充值也不算空行；空串不算填过。
+assert.equal(batchItemIsBlank({name:'条目 6',shots:1,files:{},extras:{'31|tail':'补充'}}),false);
+assert.equal(batchItemIsBlank({name:'条目 7',shots:1,files:{},extras:{'31|tail':''}}),true);
 assert.equal(isBatchTaskRow({batch_id:'cfb-a1'}),true);
 assert.equal(isBatchTaskRow({batch_id:''}),false);
 assert.equal(isBatchTaskRow({}),false);
@@ -463,11 +494,20 @@ const restored=batchSchemeFromRestore({
   overrides:[{node_id:'9',field_name:'lora',value:'other.safetensors'}],
   mapping:{prompt_slot:{node_id:'5',field_name:'text'},duration_slot:{node_id:'6',field_name:'length'},
            resolution_slot:{node_id:'7',field_name:'res'},
+           extra_points:[{id:'bx2',kind:'spare',slot:{node_id:'9',field_name:'lora'}},
+                         {id:'bx3',kind:'prompt',slot:{node_id:'99',field_name:'gone'}}],
            media_ports:[{node_id:'8',field_name:'image',checked:true}]},
   items:[{name:'条目 1',script:'剧本A',prompt:'场景A',duration_seconds:8,resolution:'848x480',shots:2,
+          extras:{'9|lora':'帽型 v2','99|ghost':'不该回来的值'},
           media_inputs:[{node_id:'8',field_name:'image',path:'/managed/a.png',media:'image',name:'a.png'}]}],
 },detail);
 assert.equal(restored.mapping.prompt_slot.node_id,'5');
+// 指认行原样回填：槽位还在的保留，槽位没了的整行丢掉并条相应清值。
+assert.equal(restored.mapping.extra_points.length,1);
+assert.equal(restored.mapping.extra_points[0].kind,'spare');
+assert.equal(restored.mapping.extra_points[0].id,'bx2');
+assert.equal(JSON.stringify(restored.items[0].extras),JSON.stringify({'9|lora':'帽型 v2'}));
+assert.ok(restored.restoreWarning);
 assert.equal(restored.items[0].script,'剧本A');
 assert.equal(restored.items[0].prompt,'场景A');
 assert.equal(restored.items[0].duration,'8');

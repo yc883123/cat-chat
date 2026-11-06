@@ -46,12 +46,18 @@ class ComfyUIBatchesTests(unittest.TestCase):
             {"node_id": "8", "field_name": "image", "field_type": "image",
              "control": "media", "media": "image", "label": "参考图"},
             {"node_id": "9", "field_name": "lora", "field_type": "text", "label": "LoRA"},
+            {"node_id": "10", "field_name": "steps", "field_type": "number",
+             "default": 24, "label": "步数"},
+            {"node_id": "11", "field_name": "flag", "field_type": "bool",
+             "default": True, "label": "开关"},
         ]
         self.prompt = {"5": {"class_type": "Fake", "inputs": {"text": "hello", "seed": -1}},
                        "6": {"class_type": "Fake", "inputs": {"length": 5}},
                        "7": {"class_type": "Fake", "inputs": {"res": "848x480"}},
                        "8": {"class_type": "LoadImage", "inputs": {"image": "default.png"}},
-                       "9": {"class_type": "Fake", "inputs": {"lora": "base.safetensors"}}}
+                       "9": {"class_type": "Fake", "inputs": {"lora": "base.safetensors"}},
+                       "10": {"class_type": "Fake", "inputs": {"steps": 24}},
+                       "11": {"class_type": "Fake", "inputs": {"flag": True}}}
         self.store.save_workflow({"id": "cw-batch", "name": "批量测试流", "prompt": self.prompt,
                                   "params": self.params})
         # Any accidental network access makes these focused tests fail immediately.
@@ -117,6 +123,89 @@ class ComfyUIBatchesTests(unittest.TestCase):
             self.batches.create(body)
         self.assertEqual(self.store.list_tasks(limit=100), [])
         self.enqueue.assert_not_called()
+
+    # ---- ＋增加指认（extra_points / item.extras）----
+
+    def test_extra_designations_apply_per_item(self):
+        scheme = dict(self.scheme, mapping=dict(self.mapping, extra_points=[
+            {"id": "bx1", "kind": "prompt", "slot": {"node_id": "9", "field_name": "lora"}},
+            {"id": "bx2", "kind": "duration", "slot": {"node_id": "10", "field_name": "steps"}},
+            {"id": "bx3", "kind": "spare", "slot": {"node_id": "11", "field_name": "flag"}},
+        ]), items=[
+            self._item("条目一", prompt="场景A", duration_seconds=8,
+                       extras={"9|lora": "cute.safetensors", "10|steps": "30", "11|flag": "true"}),
+            self._item("条目二", prompt="场景B"),
+        ])
+        batch = self.batches.create(self.body(schemes=[scheme]))
+        first = self.store.get_task(batch["items"][0]["task_id"])
+        first_values = {(o["node_id"], o["field_name"]): o["value"] for o in first["input"]["overrides"]}
+        self.assertEqual(first_values[("9", "lora")], "cute.safetensors")
+        self.assertEqual(first_values[("10", "steps")], 30)
+        self.assertEqual(first_values[("11", "flag")], True)
+        second = self.store.get_task(batch["items"][1]["task_id"])
+        second_values = {(o["node_id"], o["field_name"]) for o in second["input"]["overrides"]}
+        self.assertNotIn(("9", "lora"), second_values)
+        self.assertNotIn(("10", "steps"), second_values)
+        self.assertNotIn(("11", "flag"), second_values)
+        # 快照把指认行与逐条补充值都记下来，「编辑这一批」原样回填。
+        detail = self.batches.get(batch["id"], with_schemes=True)
+        self.assertEqual(detail["schemes"][0]["mapping"]["extra_points"][0]["kind"], "prompt")
+        self.assertEqual(detail["schemes"][0]["mapping"]["extra_points"][2]["spec"], "bool")
+        self.assertEqual(detail["schemes"][0]["items"][0]["extras"],
+                         {"9|lora": "cute.safetensors", "10|steps": 30, "11|flag": True})
+        self.assertEqual(detail["schemes"][0]["items"][1]["extras"], {})
+
+    def test_extras_for_undesignated_slot_rejects_whole_batch(self):
+        scheme = dict(self.scheme, items=[self._item("条目一", extras={"13|nope": "值"})])
+        with self.assertRaises(ComfyUIBatchError):
+            self.batches.create(self.body(schemes=[scheme]))
+        self.assertEqual(self.store.list_tasks(limit=100), [])
+        self.enqueue.assert_not_called()
+
+    def test_extra_number_must_be_numeric(self):
+        scheme = dict(self.scheme, mapping=dict(self.mapping, extra_points=[
+            {"id": "bx1", "kind": "duration", "slot": {"node_id": "10", "field_name": "steps"}},
+        ]), items=[self._item("条目一", extras={"10|steps": "不三不四"})])
+        with self.assertRaises(ComfyUIBatchError) as caught:
+            self.batches.create(self.body(schemes=[scheme]))
+        self.assertIn("要填数字", str(caught.exception))
+
+    def test_duplicate_extra_designation_rejects(self):
+        mapping = dict(self.mapping, extra_points=[
+            {"id": "bx1", "kind": "spare", "slot": {"node_id": "9", "field_name": "lora"}},
+            {"id": "bx2", "kind": "spare", "slot": {"node_id": "9", "field_name": "lora"}},
+        ])
+        scheme = dict(self.scheme, mapping=mapping)
+        with self.assertRaises(ComfyUIBatchError) as caught:
+            self.batches.create(self.body(schemes=[scheme]))
+        self.assertIn("互相覆盖", str(caught.exception))
+
+    def test_extra_kind_must_match_slot_type(self):
+        mapping = dict(self.mapping, extra_points=[
+            {"id": "bx1", "kind": "prompt", "slot": {"node_id": "10", "field_name": "steps"}},
+        ])
+        scheme = dict(self.scheme, mapping=mapping)
+        with self.assertRaises(ComfyUIBatchError) as caught:
+            self.batches.create(self.body(schemes=[scheme]))
+        self.assertIn("只能指认文本参数", str(caught.exception))
+
+    def test_extra_slot_matching_primary_mapping_rejects(self):
+        mapping = dict(self.mapping, extra_points=[
+            {"id": "bx1", "kind": "duration", "slot": {"node_id": "6", "field_name": "length"}},
+        ])
+        scheme = dict(self.scheme, mapping=mapping)
+        with self.assertRaises(ComfyUIBatchError) as caught:
+            self.batches.create(self.body(schemes=[scheme]))
+        self.assertIn("互相覆盖", str(caught.exception))
+
+    def test_extra_on_media_slot_rejects(self):
+        mapping = dict(self.mapping, extra_points=[
+            {"id": "bx1", "kind": "spare", "slot": {"node_id": "8", "field_name": "image"}},
+        ])
+        scheme = dict(self.scheme, mapping=mapping)
+        with self.assertRaises(ComfyUIBatchError) as caught:
+            self.batches.create(self.body(schemes=[scheme]))
+        self.assertIn("素材口", str(caught.exception))
 
     def test_unreachable_comfyui_rejects_before_any_creation(self):
         self.reachable.return_value = None

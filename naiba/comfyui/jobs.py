@@ -24,6 +24,7 @@ from naiba.comfyui import (
     MEDIA_INPUT_MAX_BYTES,
     MAX_SHOTS,
 )
+from naiba.comfyui import stepmeter
 from naiba.comfyui.store import ComfyUIStoreError, now_ms
 from naiba.core.media_types import media_kind_of
 from naiba.storage.media import is_uploads_path
@@ -31,6 +32,16 @@ from naiba.storage.media import is_uploads_path
 
 class ComfyUITaskError(ValueError):
     """任务操作非法（参数/状态）。"""
+
+
+def _running_step(task: dict[str, Any], checkpoint: dict[str, Any]) -> dict[str, Any] | None:
+    """采样步级进度：只在 running 且数据新鲜时带出；其余为 None（不渲染）。"""
+    if str(task.get("status") or "") != "running":
+        return None
+    try:
+        return stepmeter.snapshot_for(checkpoint.get("prompt_ids") or [])
+    except Exception:  # noqa: BLE001 - 步级提取失败只是没有条
+        return None
 
 
 def _format_default(value: Any) -> str:
@@ -481,6 +492,7 @@ class ComfyUIJobManager:
             "shots": input_data.get("shots") or 1,
             "done_segments": len(checkpoint.get("completed") or []),
             "failed_segments": len(checkpoint.get("errors") or []),
+            "step": _running_step(task, checkpoint),
         }
 
     def _output_files(self, task_id: Any, result: dict[str, Any]) -> list[dict[str, str]]:

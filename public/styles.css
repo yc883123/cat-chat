@@ -3715,6 +3715,37 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .studio-topbar-tools { display: flex; align-items: center; gap: 8px; margin-left: auto; min-width: 0; }
 /* 按页隐藏顶栏工具：作者样式里的 display:flex 会盖掉 [hidden] 的 UA 规则，必须显式声明。 */
 .studio-topbar-tools[hidden] { display: none; }
+
+/* 提取 ComfyUI 进度条：顶栏右侧全局单条（runner 单 worker，同一时刻至多一个在采样）。
+   顶栏直接子元素、自带贴右 margin，不搭搜索/导入的车（那是模块库页专属，其他页隐藏）；
+   与 tools 同屏时（模块库页生成中）用兄弟选择器收回 auto，避免把工具顶向中间。 */
+.comfyui-step-meter {
+  display: flex; align-items: center; gap: 8px;
+  margin-left: auto; flex: none;
+  border: 1px solid var(--line); border-radius: var(--r-full);
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  backdrop-filter: blur(6px);
+  padding: 4px 10px; min-height: 24px;
+}
+.comfyui-step-meter[hidden] { display: none; }
+.studio-topbar-tools:not([hidden]) ~ .comfyui-step-meter { margin-left: 0; }
+.comfyui-step-meter-track {
+  display: block; width: 160px; height: 6px; border-radius: var(--r-full);
+  background: var(--surface-inset); overflow: hidden;
+}
+.comfyui-step-meter-fill {
+  display: block; width: 0%; height: 100%; border-radius: inherit;
+  background: repeating-linear-gradient(45deg, var(--accent) 0 6px, var(--accent-solid) 6px 12px);
+  background-size: 16.97px 16.97px;
+  transition: width var(--t-base);
+  animation: comfyui-step-crawl 0.9s linear infinite;
+}
+@keyframes comfyui-step-crawl { to { background-position: 16.97px 0; } }
+@media (prefers-reduced-motion: reduce) { .comfyui-step-meter-fill { animation: none; } }
+.comfyui-step-meter-label {
+  font-size: 10.5px; line-height: 1; color: var(--muted);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
 .studio-search input {
   width: 190px; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--r-md);
   background: var(--surface); color: var(--text); font-size: 13px;
@@ -3736,7 +3767,28 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
   min-height: 0;
   flex: 1;
 }
-.labeler-panes { display: none; gap: 4px; padding: 6px var(--s-4); border-bottom: 1px solid var(--line); }
+/* 页签条常显（造梦机四档同款）：桌面只放 预设打标/自定义打标 两页签；
+   批次/设置/结果 三档按钮是手机栏（≤760px 才出现），桌面三栏常显不重复出现。 */
+.labeler-panes { display: flex; gap: 4px; padding: 6px var(--s-4); border-bottom: 1px solid var(--line); }
+.labeler-pane-btn { display: none; }
+.labeler-page-divider { display: none; }
+.labeler-page-btn { flex: 1; max-width: 300px; white-space: nowrap; }
+
+/* 预设打标 / 自定义打标 两页签：dataset 驱动互斥显隐（造梦机四档同款交互），
+   批次/结果两栏与触发词、模型、高级设置为两页共用，不拆成两套 DOM。 */
+#studioPageLabeler[data-labeler-page="preset"] [data-labeler-page-body="custom"] { display: none; }
+#studioPageLabeler[data-labeler-page="preset"] [data-labeler-page-body="custom"] { display: none; }
+#studioPageLabeler[data-labeler-page="custom"] [data-labeler-page-body="preset"] { display: none; }
+#studioPageLabeler[data-labeler-page="custom"] [data-labeler-page-body="custom"] {
+  display: flex; flex-direction: column; gap: 10px;
+}
+/* 自定义页不需要预设档语义的「补充要求（可点名要忽略的元素）」：规则全在系统提示词里。 */
+#studioPageLabeler[data-labeler-page="custom"] .labeler-advanced .labeler-prompt-field { display: none; }
+.labeler-system-prompt-field textarea { min-height: 170px; resize: vertical; line-height: 1.6; }
+.labeler-field-row.labeler-skill-row { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+.labeler-skill-actions { display: flex; gap: 6px; }
+.labeler-skill-note { margin: 0; min-height: 16px; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.labeler-skill-note.error { color: var(--danger, #c0392b); }
 
 .labeler-queue, .labeler-config, .labeler-results {
   display: flex; flex-direction: column; gap: 10px;
@@ -3897,7 +3949,8 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .labeler-degraded { margin: 0 0 6px; font-size: 11px; color: var(--warn, #c98a00); }
 
 @media (max-width: 760px) {
-  .labeler-panes { display: flex; }
+  .labeler-pane-btn { display: block; }
+  .labeler-page-divider { display: block; flex: none; width: 1px; align-self: stretch; margin: 2px 4px; background: var(--line); }
   .labeler-columns { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); padding: 10px; gap: 10px; overflow: hidden; }
   .labeler-queue, .labeler-config, .labeler-results { display: none; }
   #studioPageLabeler[data-labeler-pane="queue"] .labeler-queue,
@@ -4271,6 +4324,8 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
   .studio-brand { font-size: 13px; }
   .studio-pages { order: 1; flex: 1; }
   .studio-topbar-tools { order: 3; flex: 1 1 100%; margin-left: 0; }
+  /* 进度条在手机顶栏独占一行贴右；tools 同理整行，互不挤压。 */
+  .comfyui-step-meter { order: 4; margin-left: auto; }
   .studio-search { flex: 1; }
   .studio-search input { width: 100%; }
   .studio-panes { display: flex; }
@@ -5886,6 +5941,12 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .super-agent-control-note { margin: 4px 14px 12px; color: var(--muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .super-agent-chain-preview { display: flex; flex-wrap: wrap; gap: 6px 20px; margin: 0; padding-left: 20px; font-size: 12px; color: var(--accent-solid); }
 @media (max-width: 480px) { .super-agent-create-grid { grid-template-columns: minmax(0, 1fr); } }
+/* 窄屏进度条只留条 + 百分比：比值/速率属诊断信息，让位给顶栏。 */
+@media (max-width: 480px) {
+  .comfyui-step-meter { padding: 4px 8px; gap: 6px; }
+  .comfyui-step-meter-track { width: 96px; }
+  .comfyui-step-meter-detail { display: none; }
+}
 .writer-book-create { display: flex; gap: 6px; }
 .writer-book-create input { flex: 1; min-width: 0; }
 .writer-book-create .control-button { flex: none; }
@@ -6544,6 +6605,19 @@ span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); 
 .cbm-map-slot select { width: 100%; font: inherit; font-size: 12.5px; color: var(--text); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-md); padding: 5px 8px; }
 .cbm-map-hint { grid-column: 1 / -1; margin: 0; font-size: 12px; color: var(--muted); padding: 2px 0 6px; line-height: 1.6; }
 .cbm-media-title { margin: 0; font-size: 12px; color: var(--muted); padding: 6px 14px 0; line-height: 1.6; }
+
+/* ＋增加指认：第二段提示词 / 第二时长 / 第二分辨率 / 备用槽的扩展写入位行 */
+.cbm-extras { padding: 4px 14px 6px; display: flex; flex-direction: column; gap: 6px; }
+.cbm-extras .cbm-hint { margin: 0; font-size: 12px; color: var(--muted); }
+.cbm-extras > .cbm-btn { align-self: flex-start; }
+.cbm-extra-row { display: flex; align-items: center; gap: 8px; }
+.cbm-extra-kind { flex: none; width: 150px; font: inherit; font-size: 12.5px; padding: 4px 6px; color: var(--text); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-sm); }
+.cbm-extra-slot { flex: 1 1 240px; min-width: 0; font: inherit; font-size: 12.5px; padding: 4px 6px; color: var(--text); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-sm); }
+.cbm-items td[data-batch-extra] { min-width: 110px; }
+.cbm-items .cbm-extra-prompt { width: 100%; min-width: 130px; resize: vertical; line-height: 1.45; color: var(--text); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-sm); font: inherit; font-size: 12.5px; padding: 4px 6px; }
+/* 转换带图小字提醒：每条显示这次转换真正发给模型的图片数 */
+.cbm-convert-hint { display: block; font-size: 11px; color: var(--muted); white-space: nowrap; line-height: 1.3; }
+.cbm-convert-hint.over { color: var(--danger); font-weight: 600; }
 .cbm-media-slots { padding: 8px 14px 4px; display: flex; flex-direction: column; gap: 5px; }
 .cbm-media-slot { display: flex; align-items: center; gap: 8px; background: var(--surface-inset); border: 1px solid var(--line); border-radius: var(--r-md); padding: 6px 10px; font-size: 13px; }
 .cbm-media-slot.unchecked { opacity: .55; border-style: dashed; }

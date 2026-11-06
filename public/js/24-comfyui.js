@@ -2058,9 +2058,66 @@ function taskFingerprint(row) {
   ]);
 }
 
+// ============================================================
+// 提取 ComfyUI 进度条（顶栏全局单条，定点更新）
+// ============================================================
+
+// runner 单 worker 串行，同一时刻至多一个 prompt 在采样；单次任务与批量当前
+// 条目各回一份 step，取 updated_at 最新的那份。形状非法一律视为无数据（不渲染）。
+function normalizeStep(step) {
+  if (!step || typeof step !== "object") return null;
+  const value = Number(step.value);
+  const max = Number(step.max);
+  if (!Number.isFinite(value) || !Number.isFinite(max) || max <= 0 || value > max) return null;
+  return {
+    value,
+    max,
+    rate: typeof step.rate === "string" ? step.rate.trim() : "",
+    updatedAt: Number(step.updated_at) || 0,
+  };
+}
+
+function activeComfyStep() {
+  let best = null;
+  for (const row of comfyui.tasks || []) {
+    if (String(row.status || "") !== "running") continue;
+    const step = normalizeStep(row.step);
+    if (step && (!best || step.updatedAt >= best.updatedAt)) best = step;
+  }
+  for (const item of batch.runData?.items || []) {
+    if (String(item.status || "") !== "running") continue;
+    const step = normalizeStep(item.step);
+    if (step && (!best || step.updatedAt >= best.updatedAt)) best = step;
+  }
+  return best;
+}
+
+// 唯一写手：只定点写宽度和标签文本；终态/降级整块隐藏，不留 100% 定格。
+// 不进 taskFingerprint / batchRunSignature：步进刷新太频繁，进了会整卡重建闪屏。
+function updateStepMeter() {
+  const meter = document.getElementById("comfyuiStepMeter");
+  if (!meter) return;
+  const step = activeComfyStep();
+  if (!step) {
+    meter.hidden = true;
+    return;
+  }
+  const pct = Math.max(0, Math.min(100, Math.round((step.value / step.max) * 100)));
+  meter.hidden = false;
+  const fill = meter.querySelector(".comfyui-step-meter-fill");
+  if (fill) fill.style.width = `${pct}%`;
+  const pctNode = meter.querySelector(".comfyui-step-meter-pct");
+  if (pctNode) pctNode.textContent = `${pct}%`;
+  const detail = meter.querySelector(".comfyui-step-meter-detail");
+  if (detail) {
+    detail.textContent = ` (${step.value}/${step.max})${step.rate ? ` ${step.rate}` : ""}`;
+  }
+}
+
 function renderTasks() {
   const list = $("#comfyuiTaskList");
   if (!list) return;
+  updateStepMeter();
   // 批量条目去了结果页「批量」档的批次列表，这里只留单次任务。
   const rows = comfyui.tasks.filter((row) => !isBatchTaskRow(row)).slice(0, 12);
   if (!rows.length) {
@@ -2384,6 +2441,8 @@ async function renderLatestOutputs() {
       card.dataset.outputKey = key;
       existing.set(key, card);
     }
+    // 视频卡进入视野才读元数据，首帧当封面；逐卡观察，新卡在后续轮询里补挂。
+    batchPreviewVideoPreload(existing.get(key));
   }
   for (const [key, node] of existing) {
     if (!seen.has(key)) node.remove();
@@ -2558,6 +2617,7 @@ function rememberBatchMapping(fingerprint, mapping) {
       prompt_slot: mapping.prompt_slot || null,
       duration_slot: mapping.duration_slot || null,
       resolution_slot: mapping.resolution_slot || null,
+      extra_points: Array.isArray(mapping.extra_points) ? mapping.extra_points : [],
       media_ports: Array.isArray(mapping.media_ports) ? mapping.media_ports : [],
     }));
   } catch (_) { /* 隐私模式忽略 */ }
@@ -2572,6 +2632,8 @@ function recallBatchMapping(fingerprint) {
         prompt_slot: parsed.prompt_slot || null,
         duration_slot: parsed.duration_slot || null,
         resolution_slot: parsed.resolution_slot || null,
+        extra_points: (Array.isArray(parsed.extra_points) ? parsed.extra_points : []).filter(
+          (point) => point?.kind && point?.slot),
         media_ports: Array.isArray(parsed.media_ports) ? parsed.media_ports : [],
       };
     }
@@ -2608,7 +2670,10 @@ function batchSlotSavedValue(detail, slot) {
 function batchMappingFromWorkflow(detail) {
   // 预选建议（2026-11-05 拍板）：唯一语义正文槽 / 唯一标签命中的时长、分辨率槽；
   // 只是映射区里预先选中的值，用户随时改、随时清。素材口默认勾上必填槽。
-  const mapping = { prompt_slot: null, duration_slot: null, resolution_slot: null, media_ports: [] };
+  const mapping = {
+    prompt_slot: null, duration_slot: null, resolution_slot: null,
+    extra_points: [], media_ports: [],
+  };
   const slots = detail?.params || [];
   const positive = slots.filter((slot) => slot.role === "positive_prompt");
   const multiline = slots.filter((slot) => slot.field_type === "text" && slot.control === "multiline");
@@ -2642,8 +2707,68 @@ function newBatchItem(index, patch = {}) {
     resolution: "",
     shots: 1,
     files: {},
+    extras: {},
     ...patch,
   };
+}
+
+// 「＋增加指认」扩展写入位：第二段提示词 / 第二时长 / 第二分辨率 / 备用槽。
+// 只有点了加号才出现指认行；值都存 item.extras["节点|字段"]，随条目提交。
+const EXTRA_KIND_LABELS = {
+  prompt: "第二段提示词",
+  duration: "第二时长",
+  resolution: "第二分辨率",
+  spare: "备用槽",
+};
+
+function extraPointsOf(scheme) {
+  // 展示口径：点过加号的行都算，哪怕还没选参数。
+  return (scheme?.mapping?.extra_points || []).filter((point) => point?.kind);
+}
+
+/** 生效口径：只有已选定参数的指认行才上条目列、进提交与转换。 */
+function activeExtraPoints(scheme) {
+  return extraPointsOf(scheme).filter((point) => point?.slot);
+}
+
+function extraKeyOf(point) {
+  return `${point.slot.node_id}|${point.slot.field_name}`;
+}
+
+function newExtraId() {
+  return `bx${Date.now().toString(36)}${Math.floor(Math.random() * 1e4)}`;
+}
+
+/** 每类指认可以选的参数池：备用槽给所有可改参数，其余和主写入位同一口径。 */
+function extraSlotPool(detail, kind) {
+  const slots = detail?.params || [];
+  if (kind === "prompt") {
+    return promptSlotPool(slots);
+  }
+  if (kind === "duration") {
+    return slots.filter((slot) => slot.field_type === "number");
+  }
+  if (kind === "resolution") {
+    return [...slots.filter((slot) => slot.field_type === "number"),
+      ...slots.filter((slot) => slot.field_type === "text" && (slot.candidates || []).length)];
+  }
+  // 备用槽：任何非媒体参数都行（表达式节点、开关、LoRA 清单一类都在内）。
+  return slots.filter((slot) => slot.control !== "media" && !MEDIA_FIELD_TYPES.has(slot.field_type));
+}
+
+function promptSlotPool(slots) {
+  const textCandidates = slots.filter((slot) => slot.field_type === "text");
+  const semantic = textCandidates.filter((slot) => slot.role === "positive_prompt" || slot.control === "multiline");
+  const pool = semantic.length ? semantic : textCandidates;
+  const rank = (slot) => (slot.role === "positive_prompt" ? 0 : slot.control === "multiline" ? 1 : 2);
+  pool.sort((a, b) => rank(a) - rank(b));
+  return pool;
+}
+
+/** 该条目的某个指认值；参数还没被指认时是空串。 */
+function itemExtraValue(item, key) {
+  if (!key) return "";
+  return String((item?.extras || {})[key] ?? "");
 }
 
 /** 完全没动过的条目：默认名、没剧本/提示词/时长/分辨率、没挂素材、条数还是 1。 */
@@ -2656,6 +2781,7 @@ function batchItemIsBlank(item) {
   if (String(item.duration ?? "").trim()) return false;
   if (String(item.resolution ?? "").trim()) return false;
   if (Math.max(1, Math.floor(Number(item.shots) || 1)) !== 1) return false;
+  if (Object.values(item.extras || {}).some((value) => String(value ?? "").trim())) return false;
   return !Object.values(item.files || {}).some((ref) => ref?.path);
 }
 
@@ -2721,6 +2847,14 @@ async function loadBatchWorkflowDetail(scheme, workflowId) {
       const slot = scheme.mapping[key];
       if (slot && !batchSlotByAddress(scheme.detail, slot)) scheme.mapping[key] = null;
     }
+    // 记忆里的指认行同样逐项验证：槽位没了的整行丢掉，姐妹指认的类型照旧。
+    scheme.mapping.extra_points = (scheme.mapping.extra_points || []).filter((point) =>
+      EXTRA_KIND_LABELS[point?.kind]
+      && batchSlotByAddress(scheme.detail, point.slot)
+      // 专用指认的类型跟着参数走：工作流版本变了类型对不上就按未指认处理。
+      && (point.kind === "spare"
+        || extraSlotPool(scheme.detail, point.kind).some((slot) =>
+          slotKeyOf(slot) === slotKeyOf(point.slot))));
     scheme.mapping.media_ports = (scheme.mapping.media_ports || []).filter((port) =>
       batchMediaCandidates(scheme.detail).some((slot) =>
         String(slot.node_id) === String(port.node_id) && String(slot.field_name) === String(port.field_name)));
@@ -2752,6 +2886,7 @@ function renderBatch() {
   // 转换条是条件渲染的：重绘后补模板与模型下拉（选中值存在 batch.convert 里）。
   if (batch.convert.provider) void batchLoadConvertModels();
   void batchLoadCustomTemplates();
+  updateStepMeter();
 }
 
 function batchDraftMarkup() {
@@ -2868,36 +3003,54 @@ function batchMappingAreaMarkup(scheme) {
   const detail = scheme.detail;
   const mapping = scheme.mapping;
   const slots = detail?.params || [];
-  const slotKeyOf = (slot) => (slot ? `${slot.node_id}|${slot.field_name}` : "");
+  const slotKeyOfLocal = (slot) => (slot ? `${slot.node_id}|${slot.field_name}` : "");
   const savedValue = (slot) => {
     const value = batchSlotSavedValue(detail, slot);
     return value !== "" ? `当前保存值：${value}` : "当前保存值：空";
   };
   const pointSelect = (point, label, emptyLabel, candidates) => {
     const slot = mapping[`${point}_slot`];
-    const key = slotKeyOf(slot);
+    const key = slotKeyOfLocal(slot);
     return `<div class="cbm-map-slot"><label>${label}</label>
       <select data-batch-select="mapping" data-scheme="${scheme.id}" data-point="${point}">
         <option value="">${emptyLabel}</option>
-        ${candidates.map((row) => `<option value="${escapeText(slotKeyOf(row))}"${slotKeyOf(row) === key ? " selected" : ""}>${escapeText(batchSlotAddressText(detail, row))}</option>`).join("")}
+        ${candidates.map((row) => `<option value="${escapeText(slotKeyOfLocal(row))}"${slotKeyOfLocal(row) === key ? " selected" : ""}>${escapeText(batchSlotAddressText(detail, row))}</option>`).join("")}
       </select></div>`;
   };
-  const textCandidates = slots.filter((slot) => slot.field_type === "text");
-  const semantic = textCandidates.filter((slot) => slot.role === "positive_prompt" || slot.control === "multiline");
-  const promptPool = semantic.length ? semantic : textCandidates;
-  const rank = (slot) => (slot.role === "positive_prompt" ? 0 : slot.control === "multiline" ? 1 : 2);
-  promptPool.sort((a, b) => rank(a) - rank(b));
+  const promptPool = promptSlotPool(slots);
   const numberSlots = slots.filter((slot) => slot.field_type === "number");
-  const resolutionSlots = [...numberSlots, ...textCandidates.filter((slot) => (slot.candidates || []).length)];
+  const resolutionSlots = [...numberSlots, ...slots.filter((slot) => slot.field_type === "text" && (slot.candidates || []).length)];
   const durationSlot = batchSlotByAddress(detail, mapping.duration_slot);
   const resolutionSlot = batchSlotByAddress(detail, mapping.resolution_slot);
   const portRows = batchPortsMarkup(scheme);
+  const extras = extraPointsOf(scheme);
+  const extraRows = extras.map((point) => {
+    const pairs = extraSlotPool(detail, point.kind);
+    // 当前槽位不在池里（工作流改过）也要保留显示，别让下拉静默改值。
+    const chosen = batchSlotByAddress(detail, point.slot);
+    const pool = chosen && !pairs.some((slot) => slotKeyOfLocal(slot) === slotKeyOfLocal(chosen))
+      ? [chosen, ...pairs] : pairs;
+    const usedKinds = extras.filter((row) => row !== point).map((row) => row.kind);
+    const kindOptions = Object.entries(EXTRA_KIND_LABELS).map(([kind, label]) =>
+      `<option value="${kind}"${point.kind === kind ? " selected" : ""}${usedKinds.includes(kind) && kind !== "spare" ? " disabled" : ""}>${escapeText(label)}</option>`).join("");
+    return `<div class="cbm-extra-row">
+      <select class="cbm-extra-kind" data-batch-extra-kind data-scheme="${scheme.id}" data-extra="${escapeText(String(point.id || ""))}" aria-label="这行指认的类型">${kindOptions}</select>
+      <select class="cbm-extra-slot" data-batch-extra-slot data-scheme="${scheme.id}" data-extra="${escapeText(String(point.id || ""))}" aria-label="这行指认写进哪个参数">
+        <option value="">选一个参数…</option>
+        ${pool.map((row) => `<option value="${escapeText(slotKeyOfLocal(row))}"${slotKeyOfLocal(row) === slotKeyOfLocal(point.slot) ? " selected" : ""}>${escapeText(batchSlotAddressText(detail, row))}</option>`).join("")}
+      </select>
+      <button type="button" class="cbm-btn tiny" data-batch-action="remove-extra" data-scheme="${scheme.id}" data-extra="${escapeText(String(point.id || ""))}">删除指认</button>
+    </div>`;
+  }).join("");
   return `<div class="cbm-mapping">
     ${pointSelect("prompt", "剧本/提示词写进", "不注入正文（按工作流原配置出片）", promptPool)}
     ${pointSelect("duration", "时长写进", "不逐条改时长", numberSlots)}
     ${pointSelect("resolution", "分辨率写进", "不逐条改分辨率", resolutionSlots)}
-    <p class="cbm-map-hint">先把「东西往哪放」指认好：没指认的参数按工作流保存值执行，不会出现在条目里。${durationSlot ? `时长 · ${savedValue(durationSlot)} · 写入 ${escapeText(batchSlotAddressText(detail, durationSlot))}` : "时长未映射：不会替你猜哪个参数控制时长"}；${resolutionSlot ? `分辨率 · ${savedValue(resolutionSlot)}` : "分辨率未映射"}。映射按这份工作流记住，下次打开还是这样。</p>
+    <p class="cbm-map-hint">先把「东西往哪放」指认好：没指认的参数按工作流保存值执行，不会出现在条目里。${durationSlot ? `时长 · ${savedValue(durationSlot)} · 写入 ${escapeText(batchSlotAddressText(detail, durationSlot))}` : "时长未映射：不会替你猜哪个参数控制时长"}；${resolutionSlot ? `分辨率 · ${savedValue(resolutionSlot)}` : "分辨率未映射"}。映射按这份工作流记住，下次打开还是这样。要逐条控制两个以上参数（比如第二段提示词），点下面的「＋增加指认」。</p>
   </div>
+  ${extras.length || detail ? `<div class="cbm-extras">${extraRows || '<p class="cbm-hint">还没有增加指认：点了加号才会出现一行。</p>'}
+    <button type="button" class="cbm-btn tiny" data-batch-action="add-extra" data-scheme="${scheme.id}" ${detail ? "" : "disabled"}>＋ 增加指认</button>
+  </div>` : ""}
   <p class="cbm-media-title">素材口：勾选启用，对应哪个节点用下拉换（列的是这份工作流里全部的图/音/视频口），↑↓ 定编号。</p>
   ${portRows}`;
 }
@@ -2949,6 +3102,10 @@ function batchFixedMarkup(scheme) {
   for (const key of ["prompt_slot", "duration_slot", "resolution_slot"]) {
     const slot = batchSlotByAddress(detail, mapping?.[key]);
     if (slot) skipKeys.add(slotKeyOf(slot));
+  }
+  // 指认行选中的槽位走条目列，不再重复出现在固定参数里。
+  for (const point of activeExtraPoints(scheme)) {
+    skipKeys.add(slotKeyOf(point.slot));
   }
   const editable = (detail?.params || []).filter((slot) =>
     slot.control !== "media" && !MEDIA_FIELD_TYPES.has(slot.field_type) && !skipKeys.has(slotKeyOf(slot)));
@@ -3009,18 +3166,91 @@ function batchItemsMarkup(scheme, schemeIndex) {
     const kindNames = { image: "图", video: "视频", audio: "音" };
     return `<th>${kindNames[kind]} ${counts}（${escapeText(batchSlotAddressText(scheme.detail, slot))}）</th>`;
   }).join("");
+  // 指认列跟在同类主列后面：第二段提示词接提示词，第二时长接时长，其余排条数前。
+  const extras = activeExtraPoints(scheme);
+  const kindExtras = (kind) => extras.filter((point) => point.kind === kind);
+  const extrasMarkup = (kind) => kindExtras(kind).map((point) =>
+    `<th title="${escapeText(batchSlotAddressText(scheme.detail, point.slot))}">${escapeText(EXTRA_KIND_LABELS[point.kind] || "备用槽")}</th>`).join("");
   const rows = scheme.items.map((item, itemIndex) =>
-    batchItemRowMarkup(scheme, schemeIndex, item, itemIndex, ports)).join("");
+    batchItemRowMarkup(scheme, item, itemIndex, ports)).join("");
+  const columnCount = 7 + kindExtras("prompt").length + kindExtras("duration").length
+    + extras.filter((point) => point.kind === "resolution" && point.slot).length
+    + extras.filter((point) => point.kind === "spare" && point.slot).length + ports.length;
   return `<div class="cbm-items-wrap"><table class="cbm-items">
-    <thead><tr><th>名称</th>${portHeaders}<th>剧本</th><th>提示词<button type="button" class="cbm-th-clear" data-batch-action="clear-prompts" data-scheme="${scheme.id}" title="清空这个方案所有条目的提示词，剧本栏不动">清空</button></th><th>时长</th><th>分辨率</th><th>条数</th><th>操作</th></tr></thead>
-    <tbody>${rows || `<tr><td colspan="${8 + ports.length}" class="cbm-hint">还没有条目。</td></tr>`}</tbody>
-    <tfoot><tr><td colspan="${8 + ports.length}"><button type="button" class="cbm-add-item" data-batch-action="add-item" data-scheme="${scheme.id}">＋ 添加一条</button></td></tr></tfoot>
+    <thead><tr><th>名称</th>${portHeaders}<th>剧本</th><th>提示词<button type="button" class="cbm-th-clear" data-batch-action="clear-prompts" data-scheme="${scheme.id}" title="清空这个方案所有条目的提示词（含指认出的第二段），剧本栏不动">清空</button></th>${extrasMarkup("prompt")}<th>时长</th>${extrasMarkup("duration")}<th>分辨率</th>${extrasMarkup("resolution")}${extrasMarkup("spare")}<th>条数</th><th>操作</th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="${columnCount}" class="cbm-hint">还没有条目。</td></tr>`}</tbody>
+    <tfoot><tr><td colspan="${columnCount}"><button type="button" class="cbm-add-item" data-batch-action="add-item" data-scheme="${scheme.id}">＋ 添加一条</button></td></tr></tfoot>
   </table></div>`;
 }
 
-function batchItemRowMarkup(scheme, schemeIndex, item, itemIndex, ports) {
+// 指认列的一个单元格：按指认类型出控件（第二段提示词是叙述文本，备用槽跟参数类型走）。
+function batchExtraCellMarkup(scheme, item, itemIndex, point) {
+  const detail = scheme.detail;
+  const slot = batchSlotByAddress(detail, point.slot);
+  const key = extraKeyOf(point);
+  const value = itemExtraValue(item, key);
+  const bind = `<td data-batch-extra="${escapeText(String(point.id || ""))}">`;
+  if (point.kind === "prompt") {
+    return `${bind}<textarea class="cbm-extra-prompt" rows="2" placeholder="第二段交给工作流的提示词" data-batch-item="extras" data-extra-key="${escapeText(key)}" data-scheme="${scheme.id}" data-item="${itemIndex}">${escapeText(value)}</textarea></td>`;
+  }
+  if (point.kind === "duration") {
+    return `${bind}<input type="number" min="0" step="any" style="width:76px" placeholder="按工作流" data-batch-item="extras" data-extra-key="${escapeText(key)}" data-scheme="${scheme.id}" data-item="${itemIndex}" value="${escapeText(value)}"></td>`;
+  }
+  if (point.kind === "resolution" && (slot?.candidates || []).length) {
+    const choices = (slot.candidates || []).map((candidate) => String(candidate));
+    const extra = value && !choices.includes(value)
+      ? `<option value="${escapeText(value)}" selected>${escapeText(value)}（原值）</option>` : "";
+    return `${bind}<select data-batch-item="extras" data-extra-key="${escapeText(key)}" data-scheme="${scheme.id}" data-item="${itemIndex}"><option value="">按工作流</option>${extra}${choices.map((choice) => `<option value="${escapeText(choice)}"${choice === value ? " selected" : ""}>${escapeText(choice)}</option>`).join("")}</select></td>`;
+  }
+  if (slot?.field_type === "bool") {
+    return `${bind}<select data-batch-item="extras" data-extra-key="${escapeText(key)}" data-scheme="${scheme.id}" data-item="${itemIndex}"><option value="">按工作流</option><option value="true"${String(value) === "true" ? " selected" : ""}>开</option><option value="false"${String(value) === "false" ? " selected" : ""}>关</option></select></td>`;
+  }
+  if ((slot?.candidates || []).length) {
+    const choices = (slot.candidates || []).map((candidate) => String(candidate));
+    const extra = value && !choices.includes(value)
+      ? `<option value="${escapeText(value)}" selected>${escapeText(value)}（原值）</option>` : "";
+    return `${bind}<select data-batch-item="extras" data-extra-key="${escapeText(key)}" data-scheme="${scheme.id}" data-item="${itemIndex}">${extra}${choices.map((choice) => `<option value="${escapeText(choice)}"${choice === value ? " selected" : ""}>${escapeText(choice)}</option>`).join("")}</select></td>`;
+  }
+  const numberish = slot?.field_type === "number" || slot?.field_type === "seed";
+  const multiline = slot?.control === "multiline";
+  const control = multiline
+    ? `<textarea class="cbm-extra-prompt" rows="2" data-batch-item="extras" data-extra-key="${escapeText(key)}" data-scheme="${scheme.id}" data-item="${itemIndex}">${escapeText(value)}</textarea>`
+    : `<input type="${numberish ? "number" : "text"}" step="any"${numberish ? ' style="width:96px"' : ""} placeholder="按工作流" data-batch-item="extras" data-extra-key="${escapeText(key)}" data-scheme="${scheme.id}" data-item="${itemIndex}" value="${escapeText(value)}">`;
+  return `${bind}${control}</td>`;
+}
+
+/** 该条目转换真正会带几张图：已勾选的图片口里挂了原图的那几只；>6 张后端直接拒绝。 */
+function batchItemConversionImageCount(scheme, item) {
+  const ports = (scheme.mapping?.media_ports || []).filter((port) => port.checked);
+  let count = 0;
+  ports.forEach((port, portIndex) => {
+    const slot = batchSlotByAddress(scheme.detail, port);
+    if ((slot?.media || "image") !== "image") return;
+    if (item?.files?.[String(portIndex)]?.path) count += 1;
+  });
+  return count;
+}
+
+function batchConversionImageHint(scheme, item) {
+  const count = batchItemConversionImageCount(scheme, item);
+  if (count > 6) return { text: `${count} 图 · 超上限`, over: true };
+  if (count > 0) return { text: `带 ${count} 图`, over: false };
+  return { text: "无图", over: false };
+}
+
+function batchItemRowMarkup(scheme, item, itemIndex, ports) {
   const missing = batch.missingItems.has(`${scheme.id}:${itemIndex}`);
   const converting = batch.converting.has(item);
+  // 转换条件：有剧本可转，且（还出不来正文，或还没指认出/没填到第二段）。
+  const promptExtra = activeExtraPoints(scheme).find((point) => point.kind === "prompt");
+  const promptFilled = Boolean(String(item.prompt || "").trim());
+  const prompt2Filled = Boolean(promptExtra && itemExtraValue(item, extraKeyOf(promptExtra)).trim());
+  const convertReady = Boolean(String(item.script || "").trim())
+    && (!promptFilled || (Boolean(promptExtra) && !prompt2Filled))
+    && !converting;
+  const imageHint = batchConversionImageHint(scheme, item);
+  const title = batchItemConversionImageCount(scheme, item) > 6
+    ? "超过 6 张图的转换会被拒绝：减少本条启用的图片素材口" : "转换实际发给视觉模型的图片数（视频/音频不发送）";
   // 分辨率控件需要当前条目的索引，必须与条目行处于同一作用域。
   const resolutionControl = () => {
     const slot = batchSlotByAddress(scheme.detail, scheme.mapping?.resolution_slot);
@@ -3067,11 +3297,15 @@ function batchItemRowMarkup(scheme, schemeIndex, item, itemIndex, ports) {
     ${tiles}
     <td><textarea class="cbm-script" rows="3" placeholder="这场的内容要求（可转换成提示词）" data-batch-item="script" data-scheme="${scheme.id}" data-item="${itemIndex}">${escapeText(item.script)}</textarea></td>
     ${promptCell}
+    ${activeExtraPoints(scheme).filter((point) => point.kind === "prompt").map((point) => batchExtraCellMarkup(scheme, item, itemIndex, point)).join("")}
     <td>${durationControl}</td>
+    ${activeExtraPoints(scheme).filter((point) => point.kind === "duration").map((point) => batchExtraCellMarkup(scheme, item, itemIndex, point)).join("")}
     <td>${resolutionControl()}</td>
+    ${activeExtraPoints(scheme).filter((point) => (point.kind === "resolution" || point.kind === "spare")).map((point) => batchExtraCellMarkup(scheme, item, itemIndex, point)).join("")}
     <td><input type="number" min="1" max="200" style="width:56px" data-batch-item="shots" data-scheme="${scheme.id}" data-item="${itemIndex}" value="${escapeText(String(item.shots))}"></td>
     <td class="cbm-row-act">
-      <button type="button" class="cbm-btn tiny" data-batch-action="convert-item" data-scheme="${scheme.id}" data-item="${itemIndex}" ${item.script && !item.prompt && !converting ? "" : "disabled"}>转换</button>
+      <span class="cbm-convert-hint${imageHint.over ? " over" : ""}" title="${title}">${escapeText(imageHint.text)}</span>
+      <button type="button" class="cbm-btn tiny" data-batch-action="convert-item" data-scheme="${scheme.id}" data-item="${itemIndex}" ${convertReady ? "" : "disabled"}>转换</button>
       <button type="button" class="cbm-btn tiny" data-batch-action="copy-item" data-scheme="${scheme.id}" data-item="${itemIndex}">复制</button>
       <button type="button" class="cbm-btn tiny" data-batch-action="remove-item" data-scheme="${scheme.id}" data-item="${itemIndex}">删</button>
     </td>
@@ -3084,14 +3318,20 @@ function batchSchemeOf(id) {
   return (batch.draft?.schemes || []).find((scheme) => scheme.id === id) || null;
 }
 
-// 提示词列头的一键清除：只清「最终提示词」，剧本栏保留，方便重新转换。
+// 提示词列头的一键清除：只清「最终提示词」和指认出的第二段，剧本栏保留。
 function clearBatchPrompts(scheme) {
-  const filled = (scheme?.items || []).filter((item) => String(item.prompt || "").trim());
-  if (!filled.length) { toast("提示词已经是空的"); return; }
-  if (!window.confirm(`清空这个方案的全部 ${filled.length} 条提示词？剧本栏不动。`)) return;
-  for (const item of scheme.items || []) item.prompt = "";
+  const promptExtras = activeExtraPoints(scheme).filter((point) => point.kind === "prompt");
+  const touched = (scheme?.items || []).filter((item) =>
+    String(item.prompt || "").trim()
+    || promptExtras.some((point) => itemExtraValue(item, extraKeyOf(point)).trim()));
+  if (!touched.length) { toast("提示词已经是空的"); return; }
+  if (!window.confirm(`清空这个方案的全部 ${touched.length} 条提示词？剧本栏不动。`)) return;
+  for (const item of scheme.items || []) {
+    item.prompt = "";
+    for (const point of promptExtras) delete item.extras?.[extraKeyOf(point)];
+  }
   renderBatch();
-  toast(`已清空 ${filled.length} 条提示词`);
+  toast(`已清空 ${touched.length} 条提示词`);
 }
 
 function onBatchClick(event) {
@@ -3132,6 +3372,23 @@ function onBatchClick(event) {
     renderBatch();
   } else if (action === "clear-prompts" && scheme) {
     clearBatchPrompts(scheme);
+  } else if (action === "add-extra" && scheme) {
+    // ＋增加指认：点了才出现一行；类型先给备用槽，用户再选参数。
+    if (!scheme.detail) { toast("先选好工作流再增加指认"); return; }
+    scheme.mapping.extra_points = (scheme.mapping.extra_points || []).concat(
+      [{ id: newExtraId(), kind: "spare", slot: null }]);
+    renderBatch();
+  } else if (action === "remove-extra" && scheme) {
+    const pointId = String(target.dataset.extra || "");
+    const points = scheme.mapping.extra_points || [];
+    const leaving = points.find((point) => String(point.id) === pointId);
+    scheme.mapping.extra_points = points.filter((point) => String(point.id) !== pointId);
+    if (leaving?.slot) {
+      const key = extraKeyOf(leaving);
+      for (const item of scheme.items) delete item.extras?.[key];
+    }
+    batchRememberMappingQuietly(scheme);
+    renderBatch();
   } else if (action === "copy-item" && scheme && itemIndex >= 0) {
     const copy = JSON.parse(JSON.stringify(scheme.items[itemIndex]));
     copy.name = `${copy.name} 副本`;
@@ -3234,6 +3491,39 @@ function onBatchChange(event) {
     renderBatch();
     return;
   }
+  if (target.matches("[data-batch-extra-kind]")) {
+    const row = (scheme.mapping.extra_points || []).find(
+      (item) => String(item?.id) === String(target.dataset.extra || ""));
+    if (row) {
+      const oldKey = row.slot ? extraKeyOf(row) : "";
+      row.kind = String(target.value || "spare");
+      // 池子换了：旧槽位不在新池里就按未指认处理，条目里的旧补充值也不留。
+      if (row.slot && !extraSlotPool(scheme.detail, row.kind).some(
+          (slot) => slotKeyOf(slot) === slotKeyOf(row.slot))) {
+        row.slot = null;
+        for (const item of scheme.items) delete item.extras?.[oldKey];
+      }
+      batchRememberMappingQuietly(scheme);
+      renderBatch();
+    }
+    return;
+  }
+  if (target.matches("[data-batch-extra-slot]")) {
+    const row = (scheme.mapping.extra_points || []).find(
+      (item) => String(item?.id) === String(target.dataset.extra || ""));
+    if (row) {
+      const oldKey = row.slot ? extraKeyOf(row) : "";
+      const value = String(target.value || "");
+      const [nodeId, ...rest] = value.split("|");
+      row.slot = value ? { node_id: nodeId, field_name: rest.join("|") } : null;
+      if (oldKey && (!row.slot || extraKeyOf(row) !== oldKey)) {
+        for (const item of scheme.items) delete item.extras?.[oldKey];
+      }
+      batchRememberMappingQuietly(scheme);
+      renderBatch();
+    }
+    return;
+  }
   if (target.matches('[data-batch-select="port-node"]')) {
     const portIndex = Number(target.dataset.port);
     const value = String(target.value || "");
@@ -3286,11 +3576,20 @@ function onBatchInput(event) {
   const item = scheme.items[itemIndex];
   if (!item) return;
   if (itemField === "shots") item.shots = Math.max(1, Math.floor(Number(target.value) || 1));
-  else item[itemField] = String(target.value ?? "");
-  if (itemField === "script" || itemField === "prompt") {
+  else if (itemField === "extras") {
+    const key = String(target.dataset.extraKey || "");
+    if (!key) return;
+    item.extras = item.extras || {};
+    item.extras[key] = String(target.value ?? "");
+  } else item[itemField] = String(target.value ?? "");
+  if (itemField === "script" || itemField === "prompt" || itemField === "extras") {
+    const promptExtra = activeExtraPoints(scheme).find((point) => point.kind === "prompt");
+    const promptFilled = Boolean(String(item.prompt || "").trim());
+    const prompt2Filled = Boolean(promptExtra && itemExtraValue(item, extraKeyOf(promptExtra)).trim());
     const convertButton = target.closest("tr")?.querySelector('[data-batch-action="convert-item"]');
     if (convertButton) convertButton.disabled = !String(item.script || "").trim()
-      || Boolean(String(item.prompt || "").trim()) || batch.converting.has(batchItemReference(scheme, itemIndex));
+      || (promptFilled && !(promptExtra && !prompt2Filled))
+      || batch.converting.has(batchItemReference(scheme, itemIndex));
     const host = $("#comfyuiBatchBody");
     const bar = host?.querySelector(".cbm-convert-bar");
     const hasScript = batch.draft.schemes.some((row) => row.items.some((entry) => String(entry.script || "").trim()));
@@ -3520,14 +3819,28 @@ function batchItemReference(scheme, itemIndex) {
 
 function batchConversionSnapshot(scheme, item) {
   return JSON.stringify({ workflow: scheme.workflow_id, script: item.script, prompt: item.prompt,
-    files: item.files, duration: item.duration, resolution: item.resolution,
+    extras: item.extras || {}, files: item.files, duration: item.duration, resolution: item.resolution,
     mapping: scheme.mapping, fixed: scheme.fixed, convert: batch.convert });
+}
+
+// 转换输出按 ---- 分行拆成两段（第二段写入位的输出协议）；没拆开就当作整段。
+function splitBatchPromptSegments(text) {
+  const lines = String(text || "").replace(/\r\n/g, "\n").trim().split("\n");
+  const index = lines.findIndex((line) => /^\s*-{4,}\s*$/.test(line));
+  if (index < 1 || index >= lines.length - 1) return null;
+  const first = lines.slice(0, index).join("\n").trim();
+  const second = lines.slice(index + 1).join("\n").trim();
+  return first && second ? [first, second] : null;
 }
 
 async function batchConvert(scheme, itemIndex, silent = false) {
   const item = scheme.items[itemIndex];
   const script = String(item?.script || "").trim();
-  if (!item || !script || String(item.prompt || "").trim()) return true;
+  const promptExtra = activeExtraPoints(scheme).find((point) => point.kind === "prompt");
+  const prompt2Key = promptExtra ? extraKeyOf(promptExtra) : "";
+  if (!item || !script
+      || (String(item.prompt || "").trim()
+          && (!promptExtra || itemExtraValue(item, prompt2Key).trim()))) return true;
   const key = batchItemReference(scheme, itemIndex);
   if (batch.converting.has(key)) return true;
   if (!batch.convert.provider || !batch.convert.model) {
@@ -3552,7 +3865,16 @@ async function batchConvert(scheme, itemIndex, silent = false) {
     }
     const prompt = String(result || "").trim();
     if (!prompt) throw new Error("转换模型没有返回提示词正文");
-    item.prompt = prompt;
+    const parts = prompt2Key ? splitBatchPromptSegments(prompt) : null;
+    if (parts) {
+      item.prompt = parts[0];
+      item.extras = item.extras || {};
+      item.extras[prompt2Key] = parts[1];
+    } else {
+      // 模型没按协议分段：整段进主列，第二列留空让用户手填。
+      item.prompt = prompt;
+      if (prompt2Key && !silent) toast("转换没有按 ---- 给出第二段，可以直接手填第二列");
+    }
     return true;
   } catch (error) {
     batch.blockedMessage = "";
@@ -3568,8 +3890,12 @@ async function batchConvertAll() {
   const draft = ensureBatchDraft();
   const targets = [];
   draft.schemes.forEach((scheme) => {
+    const promptExtra = activeExtraPoints(scheme).find((point) => point.kind === "prompt");
+    const prompt2Key = promptExtra ? extraKeyOf(promptExtra) : "";
     (scheme.items || []).forEach((item, itemIndex) => {
-      if (String(item.script || "").trim() && !String(item.prompt || "").trim()
+      const done = Boolean(String(item.prompt || "").trim()
+        && (!promptExtra || itemExtraValue(item, prompt2Key).trim()));
+      if (String(item.script || "").trim() && !done
           && !batch.converting.has(batchItemReference(scheme, itemIndex))) {
         targets.push([scheme, item]);
       }
@@ -3678,12 +4004,19 @@ async function submitBatch() {
       });
       const duration = String(item.duration ?? "").trim();
       const resolution = String(item.resolution ?? "").trim();
+      // 只提交已指认槽位的补充值：指认行还没选参数就不提交那一行。
+      const extras = {};
+      for (const point of activeExtraPoints(scheme)) {
+        const value = itemExtraValue(item, extraKeyOf(point));
+        if (value) extras[extraKeyOf(point)] = value;
+      }
       return {
         name: String(item.name || "").trim() || `条目 ${scheme.items.indexOf(item) + 1}`,
         script: String(item.script || "").trim(),
         prompt: String(item.prompt || "").trim(),
         duration_seconds: duration ? Number(duration) : null,
         resolution,
+        extras,
         shots: Math.max(1, Math.floor(Number(item.shots) || 1)),
         media_inputs: mediaInputs,
       };
@@ -3695,6 +4028,11 @@ async function submitBatch() {
         prompt_slot: scheme.mapping.prompt_slot,
         duration_slot: scheme.mapping.duration_slot,
         resolution_slot: scheme.mapping.resolution_slot,
+        extra_points: activeExtraPoints(scheme).map((point) => ({
+          id: String(point.id || ""),
+          kind: String(point.kind || ""),
+          slot: { node_id: String(point.slot.node_id), field_name: String(point.slot.field_name) },
+        })),
         // 素材口顺序与勾选一并提交：批次快照原样存下来，「编辑这一批」才能
         // 把每个文件放回原来的口，而不是靠猜。
         media_ports: (scheme.mapping.media_ports || []).map((port) => ({
@@ -3946,6 +4284,8 @@ function mountBatchItemOutputs() {
       return;
     }
     files.forEach((file) => host.append(renderOutputCard(taskId, file.name, file.path)));
+    // 展开区与单次结果同一口径：可见才读首帧当封面，不并发拉整批视频。
+    batchPreviewVideoPreload(host);
   });
 }
 
@@ -4023,6 +4363,8 @@ function startBatchPolling() {
       const changed = signature !== batch.runSignature;
       batch.runData = next;
       batch.runSignature = signature;
+      // 步级进度不进签名：每轮 tick 都定点刷新顶栏条，签名不变也要刷。
+      updateStepMeter();
       if (changed) renderBatch();
       const items = batch.runData?.items || [];
       if (!items.some((item) => ["queued", "running"].includes(String(item.status)))) {
@@ -4114,6 +4456,11 @@ function batchBasename(path) {
 }
 
 function batchItemFromSnapshot(item, index) {
+  const extras = {};
+  for (const [key, value] of Object.entries(item?.extras || {})) {
+    const text = String(value ?? "").trim();
+    if (text) extras[String(key)] = text;
+  }
   return newBatchItem(index + 1, {
     name: String(item?.name || `条目 ${index + 1}`),
     script: String(item?.script || ""),
@@ -4122,6 +4469,7 @@ function batchItemFromSnapshot(item, index) {
       ? "" : String(item.duration_seconds),
     resolution: String(item?.resolution || ""),
     shots: Math.max(1, Math.floor(Number(item?.shots) || 1)),
+    extras,
     files: {},
   });
 }
@@ -4145,12 +4493,26 @@ function batchItemFiles(mediaInputs, checkedPorts) {
 }
 
 function batchMappingFromSnapshot(snapshotMapping, detail, mediaInputs) {
-  const mapping = { prompt_slot: null, duration_slot: null, resolution_slot: null, media_ports: [] };
+  const mapping = {
+    prompt_slot: null, duration_slot: null, resolution_slot: null,
+    extra_points: [], media_ports: [],
+  };
   for (const key of ["prompt_slot", "duration_slot", "resolution_slot"]) {
     const slot = snapshotMapping?.[key];
     if (slot && batchSlotByAddress(detail, slot)) {
       mapping[key] = { node_id: String(slot.node_id), field_name: String(slot.field_name) };
     }
+  }
+  // 指认行原样回填：槽位还在就保留；类型/槽位对不上就丢（跟主映射同一口径）。
+  const seenIds = new Set();
+  for (const point of snapshotMapping?.extra_points || []) {
+    if (!point?.kind || !point?.slot) continue;
+    const slot = batchSlotByAddress(detail, point.slot);
+    if (!slot) continue;
+    let id = String(point.id || "");
+    while (!id || seenIds.has(id)) id = newExtraId();
+    seenIds.add(id);
+    mapping.extra_points.push({ id, kind: String(point.kind), slot: { node_id: slot.node_id, field_name: slot.field_name } });
   }
   const candidates = batchMediaCandidates(detail);
   const validKeys = new Set(candidates.map((slot) => slotKeyOf(slot)));
@@ -4215,9 +4577,21 @@ function batchSchemeFromRestore(snapshot, detail) {
   });
   const lostMapping = ["prompt_slot", "duration_slot", "resolution_slot"]
     .some((key) => snapshot?.mapping?.[key] && !scheme.mapping[key]);
+  // 指认行对不上就先丢（batchMappingFromSnapshot 已丢），条目里的补充值也清掉，
+  // 免得提交时撞「给未指认参数填了值」的整单拒绝。
+  const knownExtraKeys = new Set(activeExtraPoints(scheme).map((point) => extraKeyOf(point)));
+  let lostExtras = false;
+  for (const item of scheme.items) {
+    const kept = {};
+    for (const [key, value] of Object.entries(item.extras || {})) {
+      if (knownExtraKeys.has(key)) kept[key] = value;
+      else lostExtras = true;
+    }
+    item.extras = kept;
+  }
   const lostMedia = allMedia.some((input) =>
     !checkedPorts.some((port) => slotKeyOf(port) === slotKeyOf(input)));
-  if (lostMapping || lostMedia) {
+  if (lostMapping || lostMedia || lostExtras) {
     scheme.restoreWarning = "这份工作流改过：部分映射或素材口已经对不上，标出来的条目提交前要重新指认。";
   }
   if (!scheme.items.length) scheme.items = [newBatchItem(1)];
@@ -4375,6 +4749,7 @@ function batchDraftHasContent(draft) {
     || String(item?.script || "").trim()
     || String(item?.duration || "").trim()
     || String(item?.resolution || "").trim()
+    || Object.values(item?.extras || {}).some((value) => String(value ?? "").trim())
     || Object.keys(item?.files || {}).length)));
 }
 

@@ -129,7 +129,15 @@ class CommittedCatalogContractTests(unittest.TestCase):
             before = {path.name: path.read_bytes() for path in target.glob("*.json")}
             refresh_prompts(target)
             refresh_prompts(target)
-            self.assertEqual(before, {path.name: path.read_bytes() for path in target.glob("*.json")})
+            after = {path.name: path.read_bytes() for path in target.glob("*.json")}
+            # 幂等护栏防的是内容漂移；git autocrlf 检出 CRLF 与转换器写出的
+            # 行尾差异是环境噪音（2026-11-06 实测 bodies_prompt 混排行尾把
+            # assertDictEqual 拖进 difflib 平方级对比，假失败磨 25 分钟），
+            # 归一化行尾后再比。若真有内容漂移，这里照样会炸。
+            self.assertEqual(
+                {name: body.replace(b"\r\n", b"\n") for name, body in before.items()},
+                {name: body.replace(b"\r\n", b"\n") for name, body in after.items()},
+            )
             catalog = StudioCatalog(target)
             for update in prompt_updates():
                 self.assertEqual(catalog.get_body(update["id"]), update["body"])

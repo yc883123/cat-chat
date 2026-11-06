@@ -77,7 +77,9 @@ def wait_terminal(store, task_id, timeout=15.0):
 
 class StudioE2ETests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors：真应用起后台线程，CI 上偶发清理期文件仍被占用
+        # （WinError 32，run #283 实测）——断言已跑完，清理失败不该判红整轮。
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self.tmp.name)
         self.addCleanup(self.tmp.cleanup)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeHandler)

@@ -86,11 +86,14 @@ class ComfyUIJobManager:
         return self.store.lookup_request(request_key, owner_id=owner_id)
 
     def submit(self, body: dict[str, Any], *, request_key: str = "", owner_id: str = "",
-               source_task_id: str = "", label: str = "", hold: bool = False) -> dict[str, Any]:
+               source_task_id: str = "", label: str = "", batch_id: str = "",
+               hold: bool = False) -> dict[str, Any]:
         """提交一个造梦机任务。
 
         - ``label``：任务卡显示名（批量提交传「批次名 · 条目名」；单任务不传，
           卡片回落显示工作流名）；
+        - ``batch_id``：来源批次 id（批量提交传；单任务留空）。随 input 冻结，
+          重试续跑沿用原任务记录，字段不丢——前端结果页按它把批量条目和单次任务分档；
         - ``hold``：只创建不入队（批量编排的事务窗口——先全部建好再统一入队，
           回滚时任务还没进 worker，直接删记录即可）；单任务提交不要传。
         """
@@ -120,6 +123,7 @@ class ComfyUIJobManager:
             # 逐次卸载偏好随载荷冻结（母本 §5.5）；任务不随后续批次设置漂移。
             "unload_after": bool(body.get("unload_after")),
             "label": str(label or ""),
+            "batch_id": str(batch_id or ""),
         }
         task = self.store.create_task(
             input_data, request_key=request_key, owner_id=owner_id,
@@ -455,6 +459,7 @@ class ComfyUIJobManager:
             "module": task.get("module"),
             "origin_label": task.get("origin_label"),
             "label": input_data.get("label") or "",
+            "batch_id": input_data.get("batch_id") or "",
             "detail": task.get("detail") or "",
             "created_at": task.get("created_at"),
             "updated_at": task.get("updated_at"),

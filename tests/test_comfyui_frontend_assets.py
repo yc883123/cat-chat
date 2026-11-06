@@ -288,6 +288,98 @@ assert.equal(b.items[0].files['0'].path,'/managed/a.png');
         result = subprocess.run(["node", "--experimental-vm-modules", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_results_page_two_segments_split_single_and_batch(self):
+        # 结果页两档（单次 / 批量）：批量条目不再混进单次任务与产物网格，
+        # 历史批次入口统一到「批量」档——填单里的旧历史下拉必须删干净。
+        js = (ROOT / "public/js/24-comfyui.js").read_text(encoding="utf-8")
+        html = (ROOT / "public/index.html").read_text(encoding="utf-8")
+        css = (ROOT / "public/styles.css").read_text(encoding="utf-8")
+        self.assertNotIn('data-batch-select="history"', js)
+        self.assertNotIn("openBatchTaskOutputs", js)
+        self.assertNotIn("cbm-history", css)
+        self.assertIn('id="comfyuiResultsSeg"', html)
+        self.assertIn('id="comfyuiBatchList"', html)
+        self.assertIn("data-results-segment", html)
+        self.assertIn("function setComfyuiResultsSegment(", js)
+        self.assertIn("function isBatchTaskRow(", js)
+        self.assertIn("function renderBatchHistoryList()", js)
+        self.assertIn("comfyui.tasks.filter((row) => !isBatchTaskRow(row))", js)
+        self.assertIn("if (isBatchTaskRow(row)) continue;", js)
+        for rule in (".comfyui-results-seg", ".comfyui-batch-row", ".comfyui-batch-progress",
+                     ".cbm-card-expand", ".cbm-expand-empty"):
+            self.assertIn(rule, css)
+        self.assertIn('[data-results-segment="single"] .comfyui-batch-history', css)
+        self.assertIn('[data-results-segment="batch"] .comfyui-tasks', css)
+        self.assertIn('[data-results-segment="batch"] .comfyui-outputs', css)
+        # 跑批视图：排队/生成中的条目卡有取消，完成条目产物就地展开。
+        self.assertIn('data-batch-action="cancel-item"', js)
+        self.assertIn('data-batch-action="toggle-item-outputs"', js)
+        self.assertIn("function mountBatchItemOutputs()", js)
+        self.assertNotIn('data-batch-action="open-task-outputs"', js)
+
+    @unittest.skipUnless(shutil.which("node"), "Node required for frontend logic")
+    def test_results_segments_and_batch_history_render(self):
+        # 批量档渲染契约：徽标口径、失败进度条、行点击目标、空态；跑批视图
+        # 三种条目卡各自只带自己的动作（取消 / 产物就地展开 / 重试）。
+        script = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
+(async()=>{
+const nodes=new Map();
+const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,dataset:{},textContent:'',innerHTML:'',children:[],classList:{add(){},remove(){},toggle(){}},setAttribute(){},append(){},closest(){return null},querySelector(){return null},querySelectorAll(){return []}});
+const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
+const context=vm.createContext({console,setTimeout,clearTimeout,URL,document:{createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
+const values={$,toast:()=>{},state:{},localFileUrl:path=>path,api:async()=>({})};
+async function make(name,sourceText,exportsLine){
+  const byMod=new Map();
+  for(const match of sourceText.matchAll(/^import \{([^}]+)\} from "([^"]+)"/gm)){
+    byMod.set(match[2], match[1].split(',').map(n=>n.trim()).filter(Boolean));
+  }
+  const mod=new vm.SourceTextModule(sourceText+exportsLine,{context});
+  await mod.link(async (spec)=>{
+    const names=byMod.get(spec)||[];
+    return new vm.SyntheticModule(names,function(){for(const n of names)this.setExport(n,values[n]??(()=>{}));},{context});
+  });
+  await mod.evaluate();
+  return mod.namespace;
+}
+const m=await make('comfy',source,'\nexport {batch,batchHistoryBadge,renderBatchHistoryList,batchRunCardMarkup,isBatchTaskRow};');
+const {batch,batchHistoryBadge,renderBatchHistoryList,batchRunCardMarkup,isBatchTaskRow}=m;
+assert.equal(isBatchTaskRow({batch_id:'cfb-a1'}),true);
+assert.equal(isBatchTaskRow({batch_id:''}),false);
+assert.equal(isBatchTaskRow({}),false);
+assert.equal(isBatchTaskRow(null),false);
+// 徽标数组跨 VM 域比较原型不等，用 JSON 字符串比对形状。
+assert.equal(JSON.stringify(batchHistoryBadge({items:[{status:'running'},{status:'completed'}],done_count:1,item_count:2})),JSON.stringify(['run','正在生成 1/2']));
+assert.equal(JSON.stringify(batchHistoryBadge({items:[{status:'completed'},{status:'completed'}],done_count:2,item_count:2})),JSON.stringify(['done','2 条全部完成']));
+assert.equal(JSON.stringify(batchHistoryBadge({items:[{status:'failed'},{status:'completed'},{status:'cancelled'}],done_count:1,item_count:3})),JSON.stringify(['fail','1/3 完成 · 2 失败']));
+batch.histories=[
+  {id:'cfb-a0',title:'短剧第2集',done_count:3,item_count:6,created_at:0,items:[{status:'running'},{status:'completed'},{status:'completed'}]},
+  {id:'cfb-a1',title:'短剧第1集',done_count:6,item_count:6,created_at:new Date('2026-11-06T13:05:00').getTime(),items:[{status:'completed'}]},
+  {id:'cfb-a2',title:'短剧第3集',done_count:2,item_count:6,created_at:0,items:[{status:'failed'},{status:'failed'},{status:'completed'}]}];
+renderBatchHistoryList();
+const html=$('#comfyuiBatchList').innerHTML;
+assert.ok(html.includes('data-batch-open="cfb-a1"')&&html.includes('短剧第1集'));
+assert.ok(html.includes('cbm-badge done')&&html.includes('6 条全部完成'));
+assert.ok(html.includes('is-failed')&&html.includes('cbm-badge fail'));
+assert.ok(html.includes('正在生成'));
+batch.histories=[];
+renderBatchHistoryList();
+assert.ok($('#comfyuiBatchList').innerHTML.includes('还没有批次'));
+const running=batchRunCardMarkup({index:1,name:'条目 1',status:'running',done:1,total:3,task_id:'ct-9',outputs:[]});
+assert.ok(running.includes('data-batch-action="cancel-item"')&&running.includes('data-task-id="ct-9"'));
+assert.ok(!running.includes('open-task-outputs'));
+batch.expandedItems.add('ct-10');
+const done=batchRunCardMarkup({index:2,name:'条目 2',status:'completed',done:2,total:2,task_id:'ct-10',outputs:['a.png','b.png']});
+assert.ok(done.includes('data-batch-action="toggle-item-outputs"')&&done.includes('aria-expanded="true"'));
+assert.ok(done.includes('data-batch-expand-for="ct-10"'));
+const failed=batchRunCardMarkup({index:3,name:'条目 3',status:'failed',error:'超时',task_id:'ct-11',outputs:[]});
+assert.ok(failed.includes('data-batch-action="retry-item"')&&!failed.includes('cancel-item'));
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+        result = subprocess.run(["node", "--experimental-vm-modules", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

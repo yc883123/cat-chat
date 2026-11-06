@@ -1996,20 +1996,32 @@ class ComfyuiStatusbarLayoutTests(unittest.TestCase):
         # 按钮保持自身宽度、参与换行而不是被压扁或顶出边界。
         self.assertIn(".comfyui-statusbar .control-button { flex: none; }", self.css)
 
-    def test_narrow_mode_uses_page_width(self):
-        self.assertIn("NARROW_PAGE_WIDTH", self.js)
-        watch = self.js.split("function watchComfyuiWidth() {", 1)[1].split("\nfunction ", 1)[0]
-        self.assertIn("ResizeObserver", watch)
-        self.assertIn("getBoundingClientRect().width", watch)
-        self.assertIn('root.dataset.comfyuiNarrow = "1"', watch)
-        # 判档必须挂在页面宽度上，不许再回到 matchMedia(视口)。
+    def test_panes_are_exclusive_tabs_at_all_widths(self):
+        """四档互斥整页（2026-11-06 结果页改造）：点哪档只见哪档。
+
+        旧的「桌面三栏常显 + 窄档按页面宽度切分段」机制随三栏一起退役：
+        data-comfyui-pane 是唯一的显隐真源，不再有 ResizeObserver 判宽。
+        """
+        self.assertNotIn("NARROW_PAGE_WIDTH", self.js)
+        self.assertNotIn("narrowPanes", self.js)
+        self.assertNotIn("watchComfyuiWidth", self.js)
+        self.assertNotIn("data-comfyui-narrow", self.css)
         self.assertNotIn('matchMedia("(max-width: 760px)")', self.js)
-        self.assertIn('data-comfyui-narrow="1"', self.css)
-        # 窄档下三档条可见、三栏只显示一栏。
-        self.assertIn('#studioPageComfyui[data-comfyui-narrow="1"] .comfyui-panes { display: flex; }', self.css)
-        self.assertIn('[data-comfyui-narrow="1"][data-comfyui-pane="run"] .comfyui-run-col', self.css)
-        # 页面初始就带档位，首帧不会先按三栏渲染再跳。
+        # 互斥显隐：默认全隐，按档放行；初始档位写在页面壳上，首帧不闪三栏。
+        self.assertIn(
+            "#studioPageComfyui[data-comfyui-pane=\"workflows\"] .comfyui-library { display: flex; }",
+            self.css)
+        self.assertIn(
+            "#studioPageComfyui[data-comfyui-pane=\"run\"] .comfyui-run-col { display: flex; }",
+            self.css)
+        self.assertIn(
+            "#studioPageComfyui[data-comfyui-pane=\"tasks\"] .comfyui-results-col { display: flex; }",
+            self.css)
         self.assertIn('data-comfyui-pane="run"', self.html)
+        # 整页宽度下档位内容居中收拢，不摊满全宽（与批量页同一口径）。
+        cols = self.css.split(".comfyui-library, .comfyui-run-col, .comfyui-results-col {", 1)[1].split("}", 1)[0]
+        self.assertIn("max-width: 1180px", cols)
+        self.assertIn("margin: 0 auto", cols)
 
 
 class TaskCardLayoutTests(unittest.TestCase):

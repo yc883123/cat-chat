@@ -169,6 +169,17 @@ class ComfyUIBatchesTests(unittest.TestCase):
             task = self.store.get_task(item["task_id"])
             self.assertTrue(task["input"]["unload_after"])
 
+    def test_batch_id_is_frozen_into_tasks_and_joined_back(self):
+        # 结果页按来源分档：批量条目带 batch_id，单任务没有——字段随 input 冻结，
+        # 精简行原样带回，前端不过问 request_key 形状。
+        batch = self.batches.create(self.body())
+        task = self.store.get_task(batch["items"][0]["task_id"])
+        self.assertEqual(task["input"]["batch_id"], batch["id"])
+        self.assertEqual(self.jobs.task(task["id"])["batch_id"], batch["id"])
+        single = self.jobs.submit({"workflow_id": "cw-batch", "overrides": [],
+                                   "media_inputs": [], "shots": 1})
+        self.assertEqual(self.jobs.task(single["id"])["batch_id"], "")
+
     def test_detail_joins_task_state_and_counts(self):
         batch = self.batches.create(self.body())
         task_id = batch["items"][0]["task_id"]

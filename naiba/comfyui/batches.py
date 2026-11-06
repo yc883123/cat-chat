@@ -153,6 +153,7 @@ class ComfyUIBatchManager:
                     },
                     request_key=payload["request_key"],
                     label=payload["label"],
+                    batch_id=batch_id,
                     hold=True,
                 )
                 task_id = str(task.get("id") or "")

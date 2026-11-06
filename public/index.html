@@ -601,7 +601,7 @@
         <!-- 分页：造梦机 —— 导入自己在 ComfyUI 里跑通的 API 格式工作流，填几个参数反复出图/出片。
              三栏：左（工作流库 + 导入）、中（连接状态 / 参数表单 / 提交）、右（任务与产物结果）。
              页面结构在这里定稿；交互与渲染由 public/js/24-comfyui.js 接管。 -->
-        <div class="studio-page-view" id="studioPageComfyui" data-studio-page-view="comfyui" data-comfyui-pane="run" hidden>
+        <div class="studio-page-view" id="studioPageComfyui" data-studio-page-view="comfyui" data-comfyui-pane="run" data-results-segment="single" hidden>
           <div class="comfyui-panes" id="comfyuiPanes" role="group" aria-label="造梦机分档">
             <button class="studio-pane-btn comfyui-pane-btn" type="button" aria-pressed="false" data-comfyui-pane="workflows">工作流</button>
             <button class="studio-pane-btn comfyui-pane-btn active" type="button" aria-pressed="true" data-comfyui-pane="run">单次生成</button>
@@ -650,8 +650,12 @@
                 </div>
               </div>
             </section>
-            <!-- 右：任务与产物（结果栏，随任务进度实时更新） -->
+            <!-- 右：结果页（两档：单次任务+产物 / 批次列表；见 24-comfyui.js 的 resultsSegment） -->
             <section class="comfyui-results-col" aria-label="生成结果">
+              <div class="comfyui-results-seg" id="comfyuiResultsSeg" role="group" aria-label="结果来源">
+                <button class="comfyui-results-seg-btn active" type="button" data-comfyui-results-seg="single" aria-pressed="true">单次</button>
+                <button class="comfyui-results-seg-btn" type="button" data-comfyui-results-seg="batch" aria-pressed="false">批量</button>
+              </div>
               <div class="comfyui-tasks" id="comfyuiTasksSection">
                 <div class="comfyui-tasks-head">
                   <strong>任务</strong>
@@ -666,6 +670,13 @@
               <div class="comfyui-outputs" id="comfyuiOutputsSection" aria-label="产物">
                 <div class="comfyui-outputs-head"><strong>生成结果</strong></div>
                 <div class="comfyui-output-grid" id="comfyuiOutputGrid" aria-label="生成结果"></div>
+              </div>
+              <div class="comfyui-batch-history" id="comfyuiBatchListSection">
+                <div class="comfyui-batch-history-head">
+                  <strong>批次</strong>
+                  <small>批量生成的每一批都留在这里，进行中的实时刷新；点一批看逐条产物、失败重试</small>
+                </div>
+                <div class="comfyui-batch-list" id="comfyuiBatchList" aria-label="批次列表"></div>
               </div>
             </section>
           </div>
@@ -707,7 +718,7 @@
           <dialog class="comfyui-import-dialog comfyui-params-dialog comfyui-saveas-dialog" id="comfyuiSaveAsDialog" aria-label="核对要另存进副本的参数">
             <form method="dialog" class="comfyui-import-form">
               <h3>核对要保存进副本的参数</h3>
-              <p class="comfyui-import-reminder">下面列出这份工作流扫描到的全部参数。没有改动的不会写进副本，原工作流保持不变；另存后会自动切到副本，接着就能交给任务总管。</p>
+              <p class="comfyui-import-reminder">下面列出这份工作流扫描到的全部参数。没有改动的不会写进副本，原工作流保持不变；另存后会自动切到副本，接着就能用副本出片。</p>
               <label class="comfyui-import-name">副本名称
                 <input id="comfyuiSaveAsName" type="text" maxlength="120" autocomplete="off">
               </label>

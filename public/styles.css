@@ -4299,14 +4299,17 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 
 /* ============================================================
    造梦机（data-studio-page-view="comfyui"）
-   桌面保留工作流 / 参数 / 结果三栏；导航条在所有尺寸常显，批量生成独占整页。
-   窄屏按工作流 / 单次生成 / 批量生成 / 结果分档。只新增最小集 .comfyui-*。
+   工作流 / 单次生成 / 批量生成 / 结果四档在所有宽度互斥整页：
+   点哪档只见哪档，结果不再挤在单次旁边的窄栏里（2026-11-06 结果页改造）。
+   档位内容居中收拢，整页宽度下参数表单不摊满全宽（与批量页同一口径）。
+   只新增最小集 .comfyui-*。
    ============================================================ */
 .comfyui-panes { display: flex; flex: none; gap: 4px; padding: 6px var(--s-4); border-bottom: 1px solid var(--line); }
-.comfyui-pane-btn { white-space: nowrap; }
+.comfyui-pane-btn { flex: 1; max-width: 300px; white-space: nowrap; }
 .comfyui-columns {
   display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(260px, 340px);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: var(--s-3);
   padding: var(--s-3) var(--s-4) var(--s-4);
   min-height: 0;
@@ -4317,10 +4320,16 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
   border-radius: var(--r-lg);
   background: var(--surface);
   min-height: 0;
-  display: flex;
+  width: 100%;
+  max-width: 1180px;
+  margin: 0 auto;
+  display: none;
   flex-direction: column;
   overflow: hidden;
 }
+#studioPageComfyui[data-comfyui-pane="workflows"] .comfyui-library { display: flex; }
+#studioPageComfyui[data-comfyui-pane="run"] .comfyui-run-col { display: flex; }
+#studioPageComfyui[data-comfyui-pane="tasks"] .comfyui-results-col { display: flex; }
 .comfyui-library-head, .comfyui-tasks-head {
   display: flex; align-items: center; gap: 6px;
   padding: 10px 12px; border-bottom: 1px solid var(--line);
@@ -4691,6 +4700,27 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .comfyui-output-save:hover { background: var(--accent-soft); color: var(--accent); }
 .comfyui-output-save:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .comfyui-output-save svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+/* 结果页两档：单次（任务+产物）/ 批量（批次列表）。切换由页面根上的
+   data-results-segment 驱动（24-comfyui.js），与 data-comfyui-pane 同一套口径。 */
+.comfyui-results-seg { flex: none; display: flex; gap: 6px; padding: 10px 12px 0; }
+.comfyui-results-seg-btn { flex: 1; min-height: 30px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); color: var(--muted); font-size: 12.5px; cursor: pointer; }
+.comfyui-results-seg-btn.active { background: var(--accent-soft); border-color: var(--violet-line); color: var(--violet-deep); font-weight: 600; }
+#studioPageComfyui[data-results-segment="single"] .comfyui-batch-history { display: none; }
+#studioPageComfyui[data-results-segment="batch"] .comfyui-tasks,
+#studioPageComfyui[data-results-segment="batch"] .comfyui-outputs { display: none; }
+.comfyui-batch-history { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.comfyui-batch-history-head { flex: none; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding: 10px 12px 4px; }
+.comfyui-batch-history-head strong { font-size: 13px; }
+.comfyui-batch-history-head small { font-size: 11px; color: var(--muted); }
+.comfyui-batch-list { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 12px 12px; display: flex; flex-direction: column; gap: 8px; align-content: start; }
+.comfyui-batch-row { display: block; width: 100%; text-align: left; font: inherit; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); padding: 9px 11px; cursor: pointer; }
+.comfyui-batch-row:hover, .comfyui-batch-row:focus-visible { border-color: var(--violet-line); }
+.comfyui-batch-row-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.comfyui-batch-row-top strong { flex: 1 1 auto; min-width: 0; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.comfyui-batch-progress { display: block; height: 6px; margin: 7px 0 3px; border-radius: var(--r-full); background: var(--surface-inset); overflow: hidden; }
+.comfyui-batch-progress > span { display: block; height: 100%; border-radius: var(--r-full); background: var(--accent-solid); }
+.comfyui-batch-row.is-failed .comfyui-batch-progress > span { background: var(--danger); }
+.comfyui-batch-meta { display: block; font-size: 10.5px; color: var(--muted); }
 .comfyui-import-dialog, .comfyui-url-dialog { border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); color: var(--text); max-width: 520px; width: min(92vw, 520px); padding: 0; }
 .comfyui-import-dialog::backdrop, .comfyui-url-dialog::backdrop { background: rgba(10, 10, 24, .55); }
 .comfyui-import-form { display: flex; flex-direction: column; gap: 10px; padding: 16px; }
@@ -4706,33 +4736,8 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .comfyui-import-form textarea { font-family: var(--mono, monospace); resize: vertical; }
 .comfyui-import-actions { display: flex; gap: 8px; justify-content: flex-end; }
 
-/* 三栏留给中栏的宽度必须够放参数表单：左右两栏只做目录与结果，
-   中栏被挤到几十像素时（旧口径 1024 视口实测只有 46px）连「改地址 / 测试连接」都放不下。
-   判档口径是**这一页自己的宽度**而不是视口：侧栏拖宽、文件面板打开都会让页面变窄而视口不变
-   （与顶栏 watchTopbarWidth 同一教训）。data-comfyui-narrow 由 24-comfyui.js 的
-   watchComfyuiWidth 写入；窄档改回三档分段（与手机同一套 pane），中栏始终占满可用宽度。 */
-#studioPageComfyui[data-comfyui-narrow="1"] .comfyui-panes { display: flex; }
-#studioPageComfyui[data-comfyui-narrow="1"] .comfyui-columns {
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr);
-  padding: 10px; gap: 10px; overflow: hidden;
-}
-#studioPageComfyui[data-comfyui-narrow="1"] .comfyui-library,
-#studioPageComfyui[data-comfyui-narrow="1"] .comfyui-run-col,
-#studioPageComfyui[data-comfyui-narrow="1"] .comfyui-results-col { display: none; }
-#studioPageComfyui[data-comfyui-narrow="1"][data-comfyui-pane="workflows"] .comfyui-library,
-#studioPageComfyui[data-comfyui-narrow="1"][data-comfyui-pane="run"] .comfyui-run-col,
-#studioPageComfyui[data-comfyui-narrow="1"][data-comfyui-pane="tasks"] .comfyui-results-col { display: flex; }
-#studioPageComfyui[data-comfyui-narrow="1"][data-comfyui-pane="tasks"] .comfyui-tasks { max-height: 40%; }
-
 @media (max-width: 760px) {
-  .comfyui-panes { display: flex; }
-  .comfyui-columns { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); padding: 10px; gap: 10px; overflow: hidden; }
-  .comfyui-library, .comfyui-run-col, .comfyui-results-col { display: none; }
-  #studioPageComfyui[data-comfyui-pane="workflows"] .comfyui-library,
-  #studioPageComfyui[data-comfyui-pane="run"] .comfyui-run-col,
-  #studioPageComfyui[data-comfyui-pane="tasks"] .comfyui-results-col { display: flex; }
-  #studioPageComfyui[data-comfyui-pane="tasks"] .comfyui-tasks { max-height: 40%; }
+  .comfyui-columns { padding: 10px; gap: 10px; }
 }
 
 /* ============================================================
@@ -6155,9 +6160,6 @@ body[data-app-view="super-agent"] .super-agent-view { display: flex; }
 .super-agent-side-panel .super-agent-section h2 { color: var(--muted); font-size: 11.5px; font-weight: 600; }
 .super-agent-new-task { margin: 14px 12px 10px; min-height: 40px; padding: 8px 12px; flex: none; justify-content: flex-start; text-align: left; border: 1px solid rgba(155, 130, 255, .5); border-radius: var(--r-md); background: rgba(124, 92, 255, .18); color: var(--sidebar-text); font-size: 13px; font-weight: 600; }
 .super-agent-new-task:hover { background: rgba(124, 92, 255, .3); }
-/* 次级入口：与主按钮拉开层级，避免两个「新建」并排争夺注意力。 */
-.super-agent-new-task.super-agent-new-secondary { min-height: 34px; margin: 0 12px 10px; border-color: transparent; background: transparent; color: var(--sidebar-muted); font-size: 12px; font-weight: 400; }
-.super-agent-new-task.super-agent-new-secondary:hover { background: var(--sidebar-hover); color: var(--sidebar-text); }
 .super-agent-filters { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 12px 4px; }
 .super-agent-filters button { border: 0; border-radius: var(--r-sm); padding: 5px 7px; background: transparent; color: var(--sidebar-muted); font: inherit; font-size: 11px; cursor: pointer; }
 .super-agent-filters button[aria-pressed="true"] { color: var(--sidebar-text); background: var(--sidebar-hover); }
@@ -6268,7 +6270,6 @@ body[data-app-view="super-agent"] .super-agent-view { display: flex; }
   .super-agent-thread-panel { max-height: 350px; overflow: hidden; }
   .super-agent-sidebar-brand { padding: 13px 14px 10px; }
   .super-agent-workspace-topbar { flex: none; min-height: 42px; padding: 0 12px; border: 1px solid var(--line); border-radius: var(--r-md); }
-  .super-agent-workspace-label { display: none; }
   .super-agent-thread-list { max-height: 160px; }
   .super-agent-list-note { display: none; }
   .super-agent-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
@@ -6311,27 +6312,13 @@ html[data-theme="dark"] .sa-dialog::backdrop { background: rgba(4, 6, 14, .72); 
 .sa-dialog fieldset { min-width: 0; margin: 0; padding: 14px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface-inset); }
 .sa-dialog .writer-dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
 .sa-dialog textarea:focus, .sa-dialog input:focus, .sa-dialog select:focus { border-color: var(--accent); outline: 0; box-shadow: 0 0 0 3px var(--accent-soft); }
-/* 弹窗内小节标题（1 · 输入方式 这类分步行） */
-.sa-sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 8px 0 2px; }
-.sa-sec-head h3 { margin: 0; font-size: 12.5px; font-weight: 700; }
-.sa-sec-head span { color: var(--muted); font-size: 11.5px; }
 /* .writer-dialog-hint 从来没有过样式规则，弹窗里一直按 16px 正文渲染（D-07）；只在任务总管弹窗内收小。 */
 .sa-dialog .writer-dialog-hint { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.65; }
-/* 保存方案：按用途描述的三张卡，节点映射收进高级折叠区；未启用的图片入口收起映射字段 */
-.sa-slot-fields { display: grid; gap: 8px; margin-top: 6px; min-width: 0; }
-
-.sa-vis-card { display: flex; gap: 11px; padding: 12px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); min-width: 0; }
-.sa-vis-ico { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border-radius: 9px; background: var(--accent-soft); color: var(--accent-solid); font-size: 13px; font-style: normal; }
-.sa-vis-copy { flex: 1; min-width: 0; }
-.sa-vis-copy b { display: block; font-size: 12.5px; font-weight: 650; }
-.sa-vis-copy p { margin: 3px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.6; }
 /* 执行结果：正文变成可读内容块，不再是一坨等宽 pre */
 .sa-result-text { margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-inset); color: var(--text); font: 12.5px/1.7 var(--font-sans); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 46dvh; overflow: auto; }
 .super-agent-result-dialog { overflow: hidden; }
 .super-agent-result-dialog .writer-dialog-form { min-width: 0; }
 .super-agent-supervision > .super-agent-muted { margin: 0; padding: 2px 0; text-align: left; }
-
-/* Recipe materials, snapshots and review stay readable at desktop and 375px. */
 
 /* ── V2 视觉组件：全部带 super-agent 前缀，不进全局 ── */
 .super-agent-view [hidden], #superAgentCreateDialog [hidden], #studioRuleEditorDialog [hidden] { display: none !important; }
@@ -6350,26 +6337,16 @@ html[data-theme="dark"] .sa-dialog::backdrop { background: rgba(4, 6, 14, .72); 
 .super-agent-focus .super-agent-node-actions { margin-top: 15px; }
 .super-agent-focus .super-agent-ref { margin: 12px 0 0; background: var(--surface); }
 .super-agent-focus-note { margin-top: 11px; color: var(--muted); font-size: 11.5px; line-height: 1.6; }
-/* 新建配方：两种互斥输入方式 */
+/* 新建任务类型卡：桌面两列，移动端单列 */
 .super-agent-mode-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; margin: 12px 0 4px; }
-.super-agent-mode-card { position: relative; padding: 14px 15px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface-inset); text-align: left; color: var(--text); font: inherit; cursor: pointer; }
-.super-agent-mode-card:hover { border-color: var(--accent); }
-.super-agent-mode-card.active { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 2px var(--accent-soft); }
-.super-agent-mode-top { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 650; }
-.super-agent-mode-card p { margin: 7px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.65; }
-.super-agent-mode-radio { position: absolute; right: 13px; top: 15px; width: 16px; height: 16px; border: 1.5px solid var(--line-strong); border-radius: 50%; }
-.super-agent-mode-card.active .super-agent-mode-radio { border-color: var(--accent-solid); background: var(--accent-solid); box-shadow: inset 0 0 0 3.5px var(--surface); }
 /* 缩略图：真实素材直接预览；产物在类型可用前用可辨占位 */
 span.sa-thumb { display: grid; place-items: center; color: #fff; font-size: 11px; font-weight: 700; text-align: center; }
 span.sa-thumb.kind-video { background: linear-gradient(135deg, #5FC5B0, #3B8FB8); border: 0; }
 span.sa-thumb.kind-image { background: linear-gradient(135deg, #F0A26B, #D96C86); border: 0; }
 span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); border: 0; }
-/* 审核确认页：只读摘要 / 就绪检查 / 分组卡片 */
-/* 高级参数：每行同时给出原图值、方案值和本批次填写框，避免占位符冒充最终值。 */
 
-/* ---- 批量执行助手（2026-11-03 计划）：交接提示 / 逐组确认 / 生成前预检 ---- */
+/* ---- 造梦机未保存调整提示（单次按当前值执行、批量按已保存快照执行） ---- */
 .comfyui-draft-hint { margin: 6px 0 0; padding: 7px 11px; border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--line)); border-radius: 9px; background: var(--warning-soft); color: var(--text); font-size: 11.5px; line-height: 1.55; }
-.super-agent-mode-card:disabled { opacity: .55; cursor: not-allowed; }
 .super-agent-artifact { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); min-width: 0; }
 .super-agent-artifact:last-child { border-bottom: 0; }
 .super-agent-artifact .artifact-copy { min-width: 0; flex: 1; }
@@ -6547,8 +6524,6 @@ span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); 
 .cbm-batch-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); }
 .cbm-field { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
 .cbm-batch-head input[type="text"], .cbm-batch-head select { font: inherit; font-size: 13px; color: var(--text); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-md); padding: 5px 8px; }
-.cbm-history { margin-left: auto; }
-.cbm-history select { max-width: 230px; }
 .cbm-switch { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); cursor: pointer; }
 .cbm-switch .cbm-track { width: 30px; height: 17px; border-radius: var(--r-full); background: var(--line-strong); position: relative; transition: background var(--t-fast); }
 .cbm-switch .cbm-track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: var(--neutral-0); transition: left var(--t-fast); }
@@ -6665,6 +6640,11 @@ span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); 
 .cbm-card-foot .cbm-err { color: var(--danger); flex: 1; min-width: 0; }
 .cbm-card-foot .cbm-btn { margin-left: auto; }
 .cbm-run-note { margin: 0; font-size: 12.5px; color: var(--muted); }
+/* 条目产物就地展开：点「产物」才拉清单（懒加载，与结果栏视频 preload=none 同一考虑）。 */
+.cbm-card-expand { border-top: 1px dashed var(--line); background: var(--surface-2); padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+.cbm-card-expand .comfyui-output { width: 128px; }
+.cbm-card-expand .comfyui-output img, .cbm-card-expand .comfyui-output video { max-height: 96px; }
+.cbm-expand-empty { font-size: 11.5px; color: var(--muted); }
 
 @media (max-width: 900px) {
   .cbm-mapping { grid-template-columns: 1fr; }
@@ -6672,7 +6652,6 @@ span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); 
 }
 @media (max-width: 560px) {
   .cbm-cards { grid-template-columns: 1fr; }
-  .cbm-history { margin-left: 0; }
   .cbm-media-slot { display: grid; grid-template-columns: 14px 30px minmax(0, 1fr) 20px 20px; gap: 6px; }
   .cbm-media-slot .cbm-no { min-width: 0; }
   .cbm-media-slot .cbm-nodesel { width: 100%; min-width: 0; max-width: none; }

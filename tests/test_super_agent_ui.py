@@ -77,9 +77,11 @@ class SuperAgentUITests(unittest.TestCase):
     def test_app_view_contract_and_no_workbench_page_changes(self) -> None:
         core = self._read("public/js/01-core.js")
         self.assertIn("appView: 'chat'", core)
-        module = self._read("public/js/28-super-agent.js")
-        self.assertIn('setAppView(next)', module)
+        self.assertIn('setAppView(next)', self._read("public/js/28-super-agent.js"))
         self.assertIn('setAppView(view)', core)
+        self.assertIn(".composer-wrap:not(.edit-placeholder)", core,
+                      "视图切换必须控制真实 composer，不能误选排在前面的隐藏编辑占位")
+        self.assertIn("composer-wrap edit-placeholder", self._read("public/js/04-messages.js"))
         for name in ("23-labeler.js", "24-comfyui.js", "25-novel.js", "27-writer.js"):
             source = self._read(f"public/js/{name}")
             self.assertNotIn("superAgentView", source)

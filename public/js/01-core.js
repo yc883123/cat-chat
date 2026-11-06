@@ -1092,7 +1092,7 @@ export function setAppView(view) {
   $('#messages')?.toggleAttribute('hidden', next !== 'chat');
   $('#chatBackdrop')?.toggleAttribute('hidden', next !== 'chat');
   $('#turnRail')?.toggleAttribute('hidden', next !== 'chat');
-  $('.composer-wrap')?.toggleAttribute('hidden', next !== 'chat');
+  $('.composer-wrap:not(.edit-placeholder)')?.toggleAttribute('hidden', next !== 'chat');
   $('.topbar')?.toggleAttribute('hidden', next !== 'chat');
   $('#sidebarWorkspaceHeader')?.toggleAttribute('hidden', next !== 'chat');
   $('#sidebarWorkspaceTree')?.toggleAttribute('hidden', next !== 'chat');

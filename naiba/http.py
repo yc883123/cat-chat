@@ -1438,6 +1438,14 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "hidden_skills": self._hidden_skill_entries(),
                 "recycled_skills": self.app._recycled_skill_entries(),
             })
+        elif path == "/api/skills/content":
+            skill_id = str(body.get("id") or "").strip()
+            try:
+                self._json(self.app.catalog.skill_content(skill_id))
+            except ValueError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+            except OSError as exc:
+                self._json({"error": f"Skill 文件读取失败：{exc}"}, HTTPStatus.BAD_REQUEST)
         elif path == "/api/skills/delete":
             self._delete_skill(body)
         elif path == "/api/skills/recycle/clear":

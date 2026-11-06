@@ -1790,11 +1790,12 @@ function taskStatusLabel(status) {
 
 function taskOrigin(task) {
   const module = String(task.module || "").trim();
-  // 功能页改名后由 module 决定显示名：novel→拆书匠、writer→织书台。
-  // 历史任务 input 里的 origin_label 可能还是旧名「创作场」，展示层统一按 module 映射，
-  // 记录本身不重写。
+  // 功能页改名后由 module 决定显示名：novel→拆书匠、writer→织书台、labeler→贴签匠。
+  // 历史任务 input 里的 origin_label 可能还是旧名（「创作场」「打标器」），
+  // 展示层统一按 module 映射，记录本身不重写。
   if (module === "novel") return "拆书匠";
   if (module === "writer") return "织书台";
+  if (module === "labeler") return "贴签匠";
   const label = String(task.origin_label || "").trim();
   if (label) return label;
   // 「全部」是分类导航的汇总项，不是任务的真实来源；module 缺失时不能回退到它。

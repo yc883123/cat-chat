@@ -45,8 +45,15 @@ def _mode_rule(output_mode: str, language: str) -> str:
                 "短语是名词短语，不要完整句子、不要句号、不要编号。"
                 'tags 字段固定输出空数组 []，短语全部写进 description。'
             )
+        if str(language) == "zh":
+            return (
+                "输出形式：词组短语。把画面内容写成 6-15 个用中文逗号分隔的短语，"
+                "短语是名词短语，不要完整句子、不要句号、不要编号。"
+                'tags 字段固定输出空数组 []，短语全部写进 description。'
+            )
+        # 语言「以提示词为准」（auto）：措辞中性，语言跟随上方提示词。
         return (
-            "输出形式：词组短语。把画面内容写成 6-15 个用中文逗号分隔的短语，"
+            "输出形式：词组短语。把画面内容写成 6-15 个用逗号分隔的短语（语言与上方提示词保持一致），"
             "短语是名词短语，不要完整句子、不要句号、不要编号。"
             'tags 字段固定输出空数组 []，短语全部写进 description。'
         )
@@ -66,7 +73,20 @@ def build_prompt(config: dict[str, Any], preset: dict[str, Any]) -> str:
 
     口径与 LoRA 训练一致：**描述里不包含的内容，才是模型要学习的内容**；
     所以预设段落写成「必须忽略」，而不是「重点描述」。
+    自定义打标档（config 带 system_prompt 键）：手输提示词就是全部规则，
+    预设的忽略词/输出规则一概不叠加；输出形式/语言只有在用户明确选了
+    具体值（非 auto）时才在提示词后补对应约束。
     """
+    system_prompt = str(config.get("system_prompt") or "").strip()
+    if system_prompt:
+        parts = [system_prompt]
+        language = str(config.get("language") or "auto")
+        output_mode = str(config.get("output_mode") or "auto")
+        if language != "auto":
+            parts.append(_language_rule(language))
+        if output_mode != "auto":
+            parts.append(_mode_rule(output_mode, language))
+        return "\n".join(parts)
     output_mode = str(config.get("output_mode") or "keywords")
     language = str(config.get("language") or "mixed")
     max_tags = int(config.get("max_tags") or 24)

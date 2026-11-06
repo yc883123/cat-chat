@@ -35,18 +35,21 @@ ALLOWED_CONFIG_KEYS = frozenset({
     "engine", "output_mode", "language", "preset", "model_key", "model_name",
     "confidence_threshold", "max_tags", "custom_prompt", "subject_filter",
     "concurrency", "retry_limit", "timeout_seconds", "prompt_version",
-    "trigger_word",
+    "trigger_word", "system_prompt",
 })
 # 只进指纹的「影响结果」字段：换并发/重试次数/超时不该改变结果身份。
 # trigger_word 进指纹，但「关闭」时按缺省处理（config_fingerprint 里归一化），
 # 这样默认关闭的配置与旧任务指纹一致，已有标注照常复用、不重复计费。
+# system_prompt（自定义打标档）同理：缺省/空串按缺省处理，预设档指纹不变。
 FINGERPRINT_KEYS = (
     "engine", "output_mode", "language", "preset", "model_key", "model_name",
     "confidence_threshold", "max_tags", "custom_prompt", "subject_filter", "prompt_version",
-    "trigger_word",
+    "trigger_word", "system_prompt",
 )
 VALID_STRENGTHS = ("low", "medium", "high")
 MAX_CUSTOM_PROMPT = 2000
+# 自定义打标档的系统提示词上限：要容得下一整段手输规则或灌进来的 Skill 正文。
+MAX_SYSTEM_PROMPT = 12000
 MAX_TRIGGER_WORD = 200
 
 
@@ -110,13 +113,24 @@ def normalize_config(app: Any, raw: Any, *, allow_legacy_language: bool = False)
     engine = str(raw.get("engine") or DEFAULT_ENGINE).strip() or DEFAULT_ENGINE
     if engine not in ENGINE_IDS:
         raise LabelerTaskError(f"未知的打标引擎：{engine}")
+    # system_prompt：键存在 = 自定义打标档，整段手输提示词即全部规则，
+    # 预设的忽略词/输出规则不叠加（build_prompt 按键走分支）。
+    system_prompt = ""
+    if raw.get("system_prompt") is not None:
+        system_prompt = str(raw.get("system_prompt")).strip()[:MAX_SYSTEM_PROMPT]
+        if not system_prompt:
+            raise LabelerTaskError("自定义打标必须填写系统提示词")
     output_mode = str(raw.get("output_mode") or "keywords").strip()
-    if output_mode not in VALID_OUTPUT_MODES:
+    if output_mode == "auto" and not system_prompt:
+        raise LabelerTaskError("output_mode=auto（以提示词为准）只在自定义打标下可用")
+    if output_mode not in VALID_OUTPUT_MODES and output_mode != "auto":
         raise LabelerTaskError("output_mode 必须是 keywords / phrases / description / both")
     language = str(raw.get("language") or "mixed").strip().lower()
-    if language not in VALID_LANGUAGES:
+    if language == "auto" and not system_prompt:
+        raise LabelerTaskError("language=auto（以提示词为准）只在自定义打标下可用")
+    if language not in VALID_LANGUAGES and language != "auto":
         raise LabelerTaskError("language 必须是 mixed / zh / en")
-    if language == "mixed" and output_mode != "both" and not allow_legacy_language:
+    if language == "mixed" and output_mode not in ("both", "auto") and not allow_legacy_language:
         raise LabelerTaskError(
             "输出语言与输出形式不匹配：「英文标签 + 中文描述」只在「标签 + 自然语言」下可选"
         )
@@ -176,6 +190,10 @@ def normalize_config(app: Any, raw: Any, *, allow_legacy_language: bool = False)
         "timeout_seconds": timeout_seconds,
         "prompt_version": prompt_version,
     }
+    # 预设档不落 system_prompt 键：快照往返（继续/恢复）时「键在 = 自定义档」
+    # 的判断才稳定；空串落键会把旧任务误判成「自定义档空提示词」。
+    if system_prompt:
+        config["system_prompt"] = system_prompt
     config["config_fingerprint"] = config_fingerprint(config)
     return config
 
@@ -191,6 +209,10 @@ def config_fingerprint(config: dict[str, Any]) -> str:
     if not (isinstance(trigger, dict) and trigger.get("enabled")
             and str(trigger.get("value") or "").strip()):
         payload.pop("trigger_word", None)
+    # system_prompt 缺省（预设档）不进指纹：预设任务的指纹与旧版本逐字节一致，
+    # 已有标注照常复用；自定义任务因 system_prompt 进指纹天然区分。
+    if not str(payload.get("system_prompt") or ""):
+        payload.pop("system_prompt", None)
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "cfg-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
 
@@ -450,8 +472,10 @@ class LabelerJobManager:
             "source_task_id": task.get("source_task_id") or "",
             "image_count": len(refs),
             "label": LabelerJobManager._label_for(task, refs),
-            # 批次历史按现行档位显示（旧任务存的 concept_lora 也要显示成「动作」）。
-            "preset": canonical_preset_id(config.get("preset")),
+            # 批次历史按现行档位显示（旧任务存的 concept_lora 也要显示成「动作」）；
+            # 自定义打标任务没有生成模式，前端把 custom 显示成「自定义」。
+            "preset": "custom" if str(config.get("system_prompt") or "").strip()
+                      else canonical_preset_id(config.get("preset")),
             "model_name": config.get("model_name") or "",
             "output_mode": config.get("output_mode") or "",
         }

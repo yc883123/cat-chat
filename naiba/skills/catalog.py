@@ -27,6 +27,17 @@ SKILL_POLICY_MODES = {"auto", "pinned", "exclusive"}
 
 
 
+def _strip_frontmatter(text: str) -> str:
+    """去掉文件头部 ``--- … ---`` YAML 块（没有就原样返回，正文不重建）。"""
+    stripped = str(text or "")
+    if not stripped.startswith("---"):
+        return stripped
+    match = re.match(r"^---\r?\n.*?\r?\n---\r?\n?", stripped, re.S)
+    if not match:
+        return stripped
+    return stripped[match.end():].lstrip("\r\n")
+
+
 def _frontmatter_value(text: str, key: str) -> str:
     match = re.search(rf"(?m)^{re.escape(key)}:\s*(.*)$", text)
     if not match:
@@ -286,6 +297,31 @@ class SkillCatalog:
             logger.exception("合并 Skill 覆盖层失败（按未合并返回）")
             return entries
         return merged if isinstance(merged, list) else entries
+
+    def skill_content(self, skill_id: str) -> dict[str, Any]:
+        """Return one Skill's full text for explicit loads (e.g. the labeler's
+        custom page fills its system-prompt box from here).
+
+        ``content`` is the whole SKILL.md (frontmatter included, byte-faithful);
+        ``body`` strips a leading YAML frontmatter block and keeps the markdown
+        body — two flavors because the caller may want either as a prompt.
+        The scan manifest only carries metadata on purpose (chat re-scans every
+        turn); bodies are fetched individually and share the content cache.
+        """
+        wanted = str(skill_id or "").strip()
+        if not wanted:
+            raise ValueError("缺少 Skill id")
+        row = next((item for item in self.scan() if str(item.get("id") or "") == wanted), None)
+        if not row:
+            raise ValueError("Skill 不存在或已被删除")
+        text = self.read_skill_content(row["path"])
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "char_count": len(text),
+            "content": text,
+            "body": _strip_frontmatter(text),
+        }
 
     def read_skill_content(self, path: str | Path) -> str:
         """Read one Skill body with metadata-aware in-memory caching."""

@@ -1,0 +1,298 @@
+"""护栏：贴签匠「预设打标 / 自定义打标」两页签与自定义档（system_prompt）。
+
+自定义档口径（2026-11-07 用户拍板，取代 2026-11-01 交接的 custom_lora 方案）：
+- 配置键 system_prompt：**键存在 = 自定义档**，整段手输提示词即全部规则，
+  预设的忽略词/输出规则不叠加；预设档快照不落该键（空串省键，往返无损）。
+- 输出形式/语言支持 auto（「以提示词为准」）：不追加规则；auto 只在自定义档可用。
+- 指纹：system_prompt 只在非空时进指纹，预设任务指纹与旧版本逐字节一致。
+- Skill 载入：与聊天同一份列表（/api/skills/scan），正文经 /api/skills/content 灌进提示词框。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from naiba.labeler.engines.provider import build_prompt
+from naiba.labeler.jobs import LabelerTaskError, config_fingerprint, normalize_config
+from naiba.labeler.presets import get_preset
+
+
+class _StubConfig:
+    def __init__(self, kind: str = "online"):
+        self.kind = kind
+
+    def profile(self, key):
+        return {"kind": self.kind, "name": "stub", "model": "stub-model",
+                "base_url": "http://127.0.0.1:9"}
+
+    def runtime_guard_options(self):
+        return {}
+
+
+class _StubPaths:
+    def __init__(self, data_dir: Path):
+        self.data_dir = Path(data_dir)
+
+
+class _StubApp:
+    def __init__(self, data_dir: Path):
+        self.paths = _StubPaths(data_dir)
+        self.config = _StubConfig()
+
+
+def _base_config(**overrides):
+    config = {
+        "engine": "provider",
+        "output_mode": "keywords",
+        "language": "en",
+        "preset": "general",
+        "model_key": "online:stub",
+        "model_name": "stub-model",
+        "confidence_threshold": 0.35,
+        "max_tags": 24,
+        "custom_prompt": "",
+        "subject_filter": {"enabled": False, "keywords": [], "strength": "medium"},
+        "concurrency": 1,
+        "retry_limit": 1,
+        "timeout_seconds": 90,
+        "prompt_version": 2,
+    }
+    config.update(overrides)
+    return config
+
+
+def _legacy_fingerprint(config: dict) -> str:
+    """旧版（4.1.2-beta）指纹算法：FINGERPRINT_KEYS 无 system_prompt。
+
+    预设档指纹必须与旧版本逐字节一致（已有标注照常复用、不重复计费），
+    这里按旧键集独立重算一遍作为对照基准。
+    """
+    keys = ("engine", "output_mode", "language", "preset", "model_key", "model_name",
+            "confidence_threshold", "max_tags", "custom_prompt", "subject_filter",
+            "prompt_version", "trigger_word")
+    payload = {key: config.get(key) for key in keys}
+    trigger = payload.get("trigger_word")
+    if not (isinstance(trigger, dict) and trigger.get("enabled")
+            and str(trigger.get("value") or "").strip()):
+        payload.pop("trigger_word", None)
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "cfg-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
+
+
+class CustomPageConfigTests(unittest.TestCase):
+    def setUp(self):
+        self.app = _StubApp(Path(tempfile.gettempdir()))
+
+    def test_custom_config_accepts_system_prompt_and_auto(self):
+        config = normalize_config(self.app, _base_config(
+            output_mode="auto", language="auto", system_prompt="输出 5-10 个英文标签。"))
+        self.assertEqual(config["system_prompt"], "输出 5-10 个英文标签。")
+        self.assertEqual(config["output_mode"], "auto")
+        self.assertEqual(config["language"], "auto")
+
+    def test_custom_config_concrete_output_mode_still_valid(self):
+        config = normalize_config(self.app, _base_config(
+            output_mode="description", language="zh",
+            system_prompt="你是一个插画师助手。"))
+        self.assertEqual(config["output_mode"], "description")
+        self.assertEqual(config["language"], "zh")
+
+    def test_auto_requires_system_prompt(self):
+        with self.assertRaises(LabelerTaskError):
+            normalize_config(self.app, _base_config(output_mode="auto"))
+        with self.assertRaises(LabelerTaskError):
+            normalize_config(self.app, _base_config(language="auto"))
+
+    def test_empty_system_prompt_rejected(self):
+        with self.assertRaises(LabelerTaskError):
+            normalize_config(self.app, _base_config(output_mode="auto", system_prompt="   "))
+        with self.assertRaises(LabelerTaskError):
+            normalize_config(self.app, _base_config(system_prompt=""))
+
+    def test_preset_config_has_no_system_prompt_key(self):
+        config = normalize_config(self.app, _base_config())
+        self.assertNotIn("system_prompt", config)
+
+    def test_preset_fingerprint_matches_legacy_algorithm(self):
+        # 预设档指纹与旧版本逐字节一致：旧标注照常复用。
+        config = normalize_config(self.app, _base_config())
+        self.assertEqual(config["config_fingerprint"], _legacy_fingerprint(config))
+        triggered = normalize_config(self.app, _base_config(
+            trigger_word={"enabled": True, "value": "ohwx"}))
+        self.assertEqual(triggered["config_fingerprint"], _legacy_fingerprint(triggered))
+
+    def test_custom_fingerprint_distinguished_by_system_prompt(self):
+        base = normalize_config(self.app, _base_config())
+        custom = normalize_config(self.app, _base_config(
+            output_mode="auto", language="auto", system_prompt="只描述动物。"))
+        self.assertNotEqual(base["config_fingerprint"], custom["config_fingerprint"])
+        self.assertEqual(custom["config_fingerprint"],
+                         config_fingerprint(normalize_config(self.app, _base_config(
+                             output_mode="auto", language="auto", system_prompt="只描述动物。"))))
+
+    def test_preset_snapshot_roundtrip_omits_key(self):
+        # 继续任务走 allow_legacy_language 重归一化：预设快照无键、往返不误判。
+        first = normalize_config(self.app, _base_config())
+        snapshot = {key: value for key, value in first.items() if key != "config_fingerprint"}
+        second = normalize_config(self.app, snapshot, allow_legacy_language=True)
+        self.assertNotIn("system_prompt", second)
+        self.assertEqual(first["config_fingerprint"], second["config_fingerprint"])
+
+    def test_custom_snapshot_roundtrip_keeps_prompt(self):
+        first = normalize_config(self.app, _base_config(
+            output_mode="auto", language="auto", system_prompt="输出 JSON。"))
+        snapshot = {key: value for key, value in first.items() if key != "config_fingerprint"}
+        second = normalize_config(self.app, snapshot, allow_legacy_language=True)
+        self.assertEqual(second["system_prompt"], "输出 JSON。")
+        self.assertEqual(first["config_fingerprint"], second["config_fingerprint"])
+
+
+class CustomPromptBuildTests(unittest.TestCase):
+    def setUp(self):
+        self.preset = get_preset("character_lora")
+
+    def test_custom_prompt_is_verbatim_with_auto(self):
+        # 自定义档 + auto：手输正文原样返回，不叠 JSON 契约/预设忽略段/输出规则。
+        prompt = build_prompt({
+            "output_mode": "auto", "language": "auto",
+            "system_prompt": "列出画面里的一切，但不要提天气。",
+        }, self.preset)
+        self.assertEqual(prompt, "列出画面里的一切，但不要提天气。")
+
+    def test_custom_prompt_appends_explicit_rules_only(self):
+        prompt = build_prompt({
+            "output_mode": "description", "language": "en",
+            "system_prompt": "描述这张图。",
+        }, self.preset)
+        self.assertTrue(prompt.startswith("描述这张图。"))
+        self.assertIn("输出语言", prompt)
+        self.assertIn("输出形式", prompt)
+        # 预设的忽略段与 JSON 契约不叠加。
+        self.assertNotIn("必须从标签和描述里省略", prompt)
+        self.assertNotIn("你是图片标注助手", prompt)
+
+    def test_custom_phrases_with_auto_language_is_neutral(self):
+        prompt = build_prompt({
+            "output_mode": "phrases", "language": "auto",
+            "system_prompt": "短语化描述。",
+        }, self.preset)
+        self.assertIn("语言与上方提示词保持一致", prompt)
+
+    def test_preset_path_unchanged(self):
+        # 预设档维持既有形态：JSON 契约 + 生成模式忽略段，system_prompt 不参与。
+        config = {
+            "output_mode": "keywords", "language": "en", "max_tags": 24,
+            "confidence_threshold": 0.35, "custom_prompt": "",
+        }
+        prompt = build_prompt(config, self.preset)
+        self.assertIn("你是图片标注助手", prompt)
+        self.assertIn("必须从标签和描述里省略", prompt)
+
+
+class CustomPageUiContractTests(unittest.TestCase):
+    """两页签与自定义页的源码契约（页面结构 / 接线 / 显隐规则 / 后端路由）。"""
+
+    def setUp(self):
+        self.root = Path(__file__).resolve().parents[1]
+        self.html = (self.root / "public/index.html").read_text(encoding="utf-8")
+        self.js = (self.root / "public/js/23-labeler.js").read_text(encoding="utf-8")
+
+    def test_page_tabs_and_bodies_in_html(self):
+        # 根节点挂 dataset 状态；页签前置两枚 + 分隔线；两套 body 互斥。
+        self.assertIn('id="studioPageLabeler" data-studio-page-view="labeler" data-labeler-page="preset"', self.html)
+        self.assertIn('data-labeler-page-tab="preset">预设打标', self.html)
+        self.assertIn('data-labeler-page-tab="custom">自定义打标', self.html)
+        self.assertIn('class="labeler-page-divider"', self.html)
+        self.assertIn('data-labeler-page-body="preset"', self.html)
+        self.assertIn('data-labeler-page-body="custom" hidden', self.html)
+        # 预设页字段在 preset body 内；自定义页字段在 custom body 内。
+        self.assertLess(self.html.index('data-labeler-page-body="preset"'),
+                        self.html.index('id="labelerPreset"'))
+        self.assertLess(self.html.index('id="labelerPreset"'),
+                        self.html.index('data-labeler-page-body="custom"'))
+        self.assertIn('id="labelerCustomSystemPrompt"', self.html)
+        self.assertIn('id="labelerCustomOutputMode"', self.html)
+        self.assertIn('id="labelerCustomLanguage"', self.html)
+
+    def test_custom_page_defaults_to_prompt_decides(self):
+        # 输出形式/语言默认「以提示词为准」（auto）。
+        self.assertIn('<option value="auto" selected>以提示词为准</option>', self.html)
+        self.assertGreaterEqual(self.html.count('<option value="auto" selected>以提示词为准</option>'), 2)
+
+    def test_skill_load_controls_in_html(self):
+        # 两种载入口味：完整 SKILL.md 全文 / 去头部元数据的纯正文（用户 2026-11-07 拍板）。
+        self.assertIn('id="labelerSkillSelect"', self.html)
+        self.assertIn('id="labelerSkillLoadFull"', self.html)
+        self.assertIn(">载入完整 Skill</button>", self.html)
+        self.assertIn('id="labelerSkillLoadBody"', self.html)
+        self.assertIn(">载入正文</button>", self.html)
+        self.assertIn('id="labelerSkillClear"', self.html)
+        self.assertIn('id="labelerSkillNote"', self.html)
+
+    def test_rename_labeler_to_tieqianjiang_display_only(self):
+        # 用户可见名改「贴签匠」；DOM id / 类名 / data-* 不动。
+        self.assertIn("<span>贴签匠</span>", self.html)
+        self.assertNotIn("<span>打标器</span>", self.html)
+        self.assertIn('aria-label="贴签匠分档"', self.html)
+        self.assertIn('id="labelerPanes"', self.html)
+        self.assertIn('data-studio-page="labeler"', self.html)
+        # 展示层按 module 映射新名，记录常量不重写。
+        studio_js = (self.root / "public/js/22-studio.js").read_text(encoding="utf-8")
+        self.assertIn('if (module === "labeler") return "贴签匠";', studio_js)
+
+    def test_labeler_js_page_switch_and_custom_collect(self):
+        self.assertIn("function currentLabelerPage()", self.js)
+        self.assertIn("function setLabelerPage(page)", self.js)
+        self.assertIn('page2.dataset.labelerPage = next', self.js)
+        # 自定义档收集：system_prompt 直传 + auto 默认 + 预设固定 general。
+        self.assertIn('currentLabelerPage() === "custom"', self.js)
+        self.assertIn('config.system_prompt = String($("#labelerCustomSystemPrompt")?.value || "").trim()', self.js)
+        self.assertIn('config.output_mode = $("#labelerCustomOutputMode")?.value || "auto"', self.js)
+        self.assertIn('config.preset = "general"', self.js)
+        # 空提示词在提交前拦截。
+        self.assertIn("自定义打标要先填写系统提示词", self.js)
+
+    def test_skill_load_uses_chat_skill_surface(self):
+        # 与聊天同一份接口且同方法：scan/content 都走 POST 空体/带 id（GET 会 404）。
+        self.assertIn('api("/api/skills/scan", { method: "POST", body: {} })', self.js)
+        self.assertIn('api("/api/skills/content", { method: "POST", body: { id } })', self.js)
+        self.assertIn("function ensureSkills()", self.js)
+        self.assertIn("function loadSkillContent(mode)", self.js)
+        self.assertIn('mode === "body" ? String(payload.body || "") : String(payload.content || "")', self.js)
+        self.assertIn("function clearSystemPrompt()", self.js)
+
+    def test_skill_content_api_returns_both_flavors(self):
+        # /api/skills/content 同时回完整全文与去头正文，口味由前端按钮决定。
+        catalog_py = (self.root / "naiba/skills/catalog.py").read_text(encoding="utf-8")
+        self.assertIn('"content": text', catalog_py)
+        self.assertIn('"body": _strip_frontmatter(text)', catalog_py)
+        self.assertIn("def _strip_frontmatter(text: str)", catalog_py)
+
+    def test_panes_click_delegates_page_tabs_first(self):
+        # 同一个 #labelerPanes 委托里页签优先于三档页签（互不串扰）。
+        pane_index = self.js.index('$("#labelerPanes")?.addEventListener("click"')
+        self.assertLess(pane_index, self.js.index('data-labeler-page-tab]', pane_index))
+        self.assertLess(pane_index, self.js.index('data-labeler-pane]', pane_index))
+
+    def test_styles_toggle_by_dataset(self):
+        css = (self.root / "public/styles.css").read_text(encoding="utf-8")
+        self.assertIn('#studioPageLabeler[data-labeler-page="preset"] [data-labeler-page-body="custom"] { display: none; }', css)
+        self.assertIn('#studioPageLabeler[data-labeler-page="custom"] [data-labeler-page-body="preset"] { display: none; }', css)
+        self.assertIn('#studioPageLabeler[data-labeler-page="custom"] [data-labeler-page-body="custom"]', css)
+        # 自定义页隐藏预设语义的「补充要求」。
+        self.assertIn('#studioPageLabeler[data-labeler-page="custom"] .labeler-advanced .labeler-prompt-field { display: none; }', css)
+
+    def test_backend_skill_content_route(self):
+        http_py = (self.root / "naiba/http.py").read_text(encoding="utf-8")
+        catalog_py = (self.root / "naiba/skills/catalog.py").read_text(encoding="utf-8")
+        self.assertIn('"/api/skills/content"', http_py)
+        self.assertIn("def skill_content(self, skill_id: str)", catalog_py)
+        self.assertIn("read_skill_content(row[\"path\"])", catalog_py)
+
+
+if __name__ == "__main__":
+    unittest.main()

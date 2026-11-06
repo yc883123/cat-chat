@@ -68,6 +68,8 @@ const labeler = {
   detailToken: 0,
   searchTimer: null,
   pane: "config",
+  // 预设打标 / 自定义打标 两页签（写进 #studioPageLabeler 的 data-labeler-page）。
+  page: "preset",
 };
 
 // ============================================================
@@ -297,8 +299,10 @@ async function activateLabeler({ refresh = true } = {}) {
     if (!labeler.initialized) {
       labeler.initialized = true;
       setLabelerPane(labeler.pane);
+      setLabelerPage(labeler.page);
       await ensurePresets();
       await ensureModels();
+      void ensureSkills();
     }
     if (refresh) {
       await refreshBatches();
@@ -323,6 +327,84 @@ function setLabelerPane(pane) {
     btn.classList.toggle("active", active);
     btn.setAttribute("aria-pressed", String(active));
   });
+}
+
+// ============================================================
+// 预设打标 / 自定义打标 两页签
+// ============================================================
+
+function currentLabelerPage() {
+  return $("#studioPageLabeler")?.dataset.labelerPage === "custom" ? "custom" : "preset";
+}
+
+function setLabelerPage(page) {
+  const next = page === "custom" ? "custom" : "preset";
+  labeler.page = next;
+  const page2 = $("#studioPageLabeler");
+  if (page2) page2.dataset.labelerPage = next;
+  $$("#labelerPanes .labeler-page-btn").forEach((btn) => {
+    const active = btn.dataset.labelerPageTab === next;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-pressed", String(active));
+  });
+}
+
+// 自定义页的 Skill 下拉：与聊天同一份列表（/api/skills/scan），只做展示与载入入口。
+async function ensureSkills() {
+  const select = $("#labelerSkillSelect");
+  if (!select || select.options.length) return;
+  try {
+    // 与聊天同一份接口：POST 空体（GET 会 404，见 15-bind-events.js 同款调用）。
+    const payload = await api("/api/skills/scan", { method: "POST", body: {} });
+    const skills = (payload.skills || []).filter((row) => row && row.id);
+    select.replaceChildren(...skills.map((skill) => {
+      const option = document.createElement("option");
+      option.value = String(skill.id || "");
+      option.textContent = `${String(skill.name || skill.id)}（${Number(skill.char_count || 0)} 字）`;
+      return option;
+    }));
+  } catch (error) {
+    select.replaceChildren();
+    setSkillNote(`Skill 列表读取失败：${error.message}`, true);
+  }
+}
+
+function setSkillNote(text, isError = false) {
+  const node = $("#labelerSkillNote");
+  if (!node) return;
+  node.textContent = String(text || "");
+  node.classList.toggle("error", Boolean(isError));
+}
+
+// mode="full" = 完整 SKILL.md 全文（含头部元数据）；mode="body" = 去掉头部元数据的纯正文。
+async function loadSkillContent(mode) {
+  const select = $("#labelerSkillSelect");
+  const id = String(select?.value || "").trim();
+  if (!id) {
+    setSkillNote("先在下拉里选一个 Skill", true);
+    return;
+  }
+  const button = mode === "body" ? $("#labelerSkillLoadBody") : $("#labelerSkillLoadFull");
+  if (button) button.disabled = true;
+  setSkillNote("正在读取 Skill…");
+  try {
+    const payload = await api("/api/skills/content", { method: "POST", body: { id } });
+    const text = mode === "body" ? String(payload.body || "") : String(payload.content || "");
+    const textarea = $("#labelerCustomSystemPrompt");
+    if (textarea) textarea.value = text;
+    const flavor = mode === "body" ? "正文（已去头部元数据）" : "完整 Skill 全文（含头部元数据）";
+    setSkillNote(`已把 Skill「${String(payload.name || id)}」${flavor}灌进提示词框（${text.length} 字），可以直接手改或清空。`);
+  } catch (error) {
+    setSkillNote(`Skill 读取失败：${error.message}`, true);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function clearSystemPrompt() {
+  const textarea = $("#labelerCustomSystemPrompt");
+  if (textarea) textarea.value = "";
+  setSkillNote("已清空系统提示词。");
 }
 
 // ============================================================
@@ -569,14 +651,13 @@ function syncLanguageOptions() {
 }
 
 function collectConfig() {
-  const preset = $("#labelerPreset")?.value || labeler.presetId || "";
   const providerSelect = $("#labelerProviderSelect");
   const modelSelect = $("#labelerModelSelect");
-  return {
+  const config = {
     engine: "provider",
     output_mode: $("#labelerOutputMode")?.value || "keywords",
     language: $("#labelerLanguage")?.value || "mixed",
-    preset,
+    preset: $("#labelerPreset")?.value || labeler.presetId || "",
     model_key: String(providerSelect?.value || ""),
     model_name: String(modelSelect?.value || ""),
     confidence_threshold: Number($("#labelerConfidence")?.value || 0.35),
@@ -591,6 +672,17 @@ function collectConfig() {
     timeout_seconds: Number($("#labelerTimeout")?.value || 90),
     prompt_version: 2,
   };
+  if (currentLabelerPage() === "custom") {
+    // 自定义档：系统提示词就是全部规则（key 在 = 自定义档）；输出形式/语言默认
+    // 「以提示词为准」（auto）= 不追加规则；预设固定 general 只做噪声清理，
+    // 忽略词/输出规则不叠加，补充要求不参与。
+    config.output_mode = $("#labelerCustomOutputMode")?.value || "auto";
+    config.language = $("#labelerCustomLanguage")?.value || "auto";
+    config.preset = "general";
+    config.custom_prompt = "";
+    config.system_prompt = String($("#labelerCustomSystemPrompt")?.value || "").trim();
+  }
+  return config;
 }
 
 async function startTask() {
@@ -602,6 +694,10 @@ async function startTask() {
   const config = collectConfig();
   if (!config.model_key || !config.model_name) {
     setHint("请选择模型配置与模型", true);
+    return;
+  }
+  if (currentLabelerPage() === "custom" && !String(config.system_prompt || "").trim()) {
+    setHint("自定义打标要先填写系统提示词（或从 Skill 载入正文）", true);
     return;
   }
   if (config.trigger_word.enabled && !config.trigger_word.value) {
@@ -834,9 +930,10 @@ function renderBatches() {
     const bits = [`${Number(progress.done || 0)}/${Number(progress.total || 0)} 完成`];
     if (Number(progress.failed || 0)) bits.push(`失败 ${progress.failed}`);
     if (Number(progress.uncertain || 0)) bits.push(`不确定 ${progress.uncertain}`);
-    // 批次历史显示用户能看懂的生成模式名，不暴露 face_lora 这类内部 ID。
+    // 批次历史显示用户能看懂的生成模式名，不暴露 face_lora 这类内部 ID；
+    // 自定义打标的任务没有预设，显示成「自定义」。
     const preset = labeler.presets.find((row2) => row2.id === task.preset);
-    bits.push(preset?.label || String(task.preset || ""));
+    bits.push(preset?.label || (String(task.preset || "") === "custom" ? "自定义" : String(task.preset || "")));
     meta.textContent = bits.filter(Boolean).join(" · ");
     button.append(top, meta);
     row.append(button);
@@ -1386,10 +1483,18 @@ export function bindLabelerEvents() {
     void openBatch(button.dataset.labelerTask);
   });
   $("#labelerPanes")?.addEventListener("click", (event) => {
+    const pageBtn = event.target.closest("[data-labeler-page-tab]");
+    if (pageBtn) {
+      setLabelerPage(pageBtn.dataset.labelerPageTab);
+      return;
+    }
     const btn = event.target.closest("[data-labeler-pane]");
     if (!btn) return;
     setLabelerPane(btn.dataset.labelerPane);
   });
+  $("#labelerSkillLoadFull")?.addEventListener("click", () => { void loadSkillContent("full"); });
+  $("#labelerSkillLoadBody")?.addEventListener("click", () => { void loadSkillContent("body"); });
+  $("#labelerSkillClear")?.addEventListener("click", clearSystemPrompt);
   $("#studioPageLabeler .labeler-result-tabs")?.addEventListener("click", (event) => {
     const btn = event.target.closest("[data-labeler-result]");
     if (!btn) return;

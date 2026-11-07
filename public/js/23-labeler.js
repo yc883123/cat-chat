@@ -1337,7 +1337,7 @@ function renderImageResults(body) {
       err.textContent = `失败原因：${item.error}`;
       card.append(err);
     }
-    cards.push(card);
+    return card;
   });
   body.replaceChildren(...cards);
   const hasMoreItems = labeler.items.length < Number(labeler.task?.items_total || labeler.items.length);

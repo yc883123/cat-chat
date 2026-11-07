@@ -15,6 +15,7 @@ const VIEWPORTS = [
 async function runViewport(browser, vp) {
   const errors = [];
   const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height } });
+  await page.addInitScript(() => localStorage.setItem('naibaOnboardingDismissed', '1'));
   page.on('pageerror', (err) => errors.push(`pageerror: ${err.message}`));
   // 浏览器会自己去请求 /favicon.ico，而源码实例没有这条路由（HTTP 层 404）。
   // 那是浏览器的资源噪音、不是应用错误：按 URL 排除，其余 4xx/5xx 仍照旧判红。
@@ -38,6 +39,8 @@ async function runViewport(browser, vp) {
     // 合法的视图恢复状态误报成前端缺失。
     const chatMode = page.locator('#openChatMode');
     if (await chatMode.count() && !(await chatMode.getAttribute('aria-pressed'))?.toLowerCase().includes('true')) {
+      const openSidebar = page.locator('#openSidebar');
+      if (await openSidebar.isVisible()) await openSidebar.click();
       await chatMode.click();
       await page.waitForTimeout(700);
     }

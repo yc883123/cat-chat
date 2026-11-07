@@ -55,31 +55,66 @@ function fileExtension(value) {
   return /^\.[a-z0-9]+$/.test(ext) ? ext : '';
 }
 
-// ---- 大图灯箱：会话内左右切换 ----
-// 图片列表 = 当前会话消息里所有可放大的图片（#messages img[data-large-url]），
-// 按 DOM 顺序（= 历史出现顺序）去重；输入区待发送附件与右侧文件面板的图片不参与切换。
+// ---- 大图灯箱：当前会话 / 造梦机产物组内左右切换 ----
+// 只收当前来源容器的媒体，输入附件和隐藏页不混入；同一产物的缩略与展开卡按身份去重。
 let lightboxItems = [];
 let lightboxIndex = -1;
+
+function mediaPreviewContainer(sourceEl, includeInputs = false) {
+  return sourceEl?.closest?.('#messages, #comfyuiBatchBody, #comfyuiOutputGrid, .comfyui-output-grid')
+    || (includeInputs ? sourceEl?.closest?.('.comfyui-media-tiles') : null);
+}
+
+function previewNodeShown(node) {
+  return !node.closest?.('[hidden]')
+    && (typeof node.getClientRects !== 'function' || node.getClientRects().length > 0);
+}
+
+function mediaPreviewKey(node, url) {
+  return String(node?.closest?.('[data-comfyui-preview-key]')?.dataset?.comfyuiPreviewKey || url);
+}
+
+function previewDescriptor(node) {
+  const data = node.dataset || {};
+  if (!data.comfyuiPreviewUrl && data.batchPreviewTask && data.batchPreviewName) {
+    const name = String(data.batchPreviewName), taskId = String(data.batchPreviewTask);
+    const direct = `/api/comfyui/tasks/${encodeURIComponent(taskId)}/files/${encodeURIComponent(name)}`;
+    return { url: state.token ? `${direct}?token=${encodeURIComponent(state.token)}` : direct,
+      key: JSON.stringify([taskId, name]), kind: mediaKind(name), name };
+  }
+  const url = String(data.comfyuiPreviewUrl || node.getAttribute?.('data-large-url') || '');
+  return { url, key: String(data.comfyuiPreviewKey || mediaPreviewKey(node, url)),
+    kind: String(data.comfyuiPreviewKind || (node.matches?.('img[data-large-url]') ? 'image' : '')),
+    name: String(data.comfyuiPreviewName || node.getAttribute?.('alt') || '') };
+}
 
 function collectImages(container) {
   if (!container) return [];
   const seen = new Set();
   const items = [];
-  container.querySelectorAll('img[data-large-url]').forEach((img) => {
-    const url = String(img.getAttribute('data-large-url') || '');
-    if (!url || seen.has(url)) return;
-    seen.add(url);
-    items.push({ url, name: String(img.getAttribute('alt') || '') });
+  // 批量卡片进入视野前还没有 img：占位已带任务和文件名，可成组翻页而不预载屏外图片。
+  container.querySelectorAll('img[data-large-url], [data-batch-preview-task][data-batch-preview-name]').forEach((node) => {
+    const item = previewDescriptor(node);
+    if (!item.url || item.kind !== 'image' || seen.has(item.key) || !previewNodeShown(node)) return;
+    seen.add(item.key);
+    items.push(item);
   });
   return items;
 }
 
-function collectConversationImages() {
-  return collectImages($('#messages'));
-}
-
-function collectComfyuiOutputImages() {
-  return collectImages($('#comfyuiOutputGrid'));
+// 视频 / 音频浮层也使用同一产物分组与去重口径；图片只在真实产物区或对话中成组。
+export function collectMediaPreviewItems(sourceEl, kind = 'image') {
+  const container = mediaPreviewContainer(sourceEl, kind !== 'image');
+  if (!container) return [];
+  if (kind === 'image') return collectImages(container);
+  const seen = new Set(), items = [];
+  container.querySelectorAll('[data-comfyui-preview-url], [data-batch-preview-task][data-batch-preview-name]').forEach((node) => {
+    const item = previewDescriptor(node);
+    if (!item.url || item.kind !== kind || seen.has(item.key) || !previewNodeShown(node)) return;
+    seen.add(item.key);
+    items.push(item);
+  });
+  return items;
 }
 
 function renderLightboxFrame() {
@@ -109,16 +144,16 @@ export function openImageLightbox(largeUrl, sourceEl = null) {
   if (!img || !box || !url) return;
   // 宿主托管的图片链接：/api/file（uploads/generated 等）与 /api/comfyui/tasks/（造梦机产物）。
   if (!/^(\/api\/file|\/api\/comfyui\/tasks\/|https?:\/\/)/i.test(url)) return;
-  const inConversation = Boolean(sourceEl?.closest?.('#messages'));
-  const inComfyuiOutputs = Boolean(sourceEl?.closest?.('#comfyuiOutputGrid'));
-  lightboxItems = inConversation
-    ? collectConversationImages()
-    : (inComfyuiOutputs ? collectComfyuiOutputImages() : []);
-  lightboxIndex = lightboxItems.findIndex((item) => item.url === url);
+  lightboxItems = collectMediaPreviewItems(sourceEl, 'image');
+  const selectedKey = mediaPreviewKey(sourceEl, url);
+  lightboxIndex = lightboxItems.findIndex((item) => item.key === selectedKey || item.url === url);
   if (lightboxIndex < 0) {
     // 不在会话列表内（输入区附件、文件面板）或列表为空：按单张展示，不显示左右按钮。
     lightboxItems = [{ url, name: String(sourceEl?.getAttribute?.('alt') || '') }];
     lightboxIndex = 0;
+  } else {
+    // 同一产物可能同时有直链和受管文件地址；保留本次点击的地址，下载仍能利用本地路径。
+    lightboxItems[lightboxIndex] = { ...lightboxItems[lightboxIndex], url };
   }
   // 大图也不在磁盘上（例如被缓存清理后）：不能静默关闭——用户点了缩略图却什么都没发生，
   // 只会以为"预览坏了"。明确告知文件已不存在（缩略图那侧另有降级为文件图标的兜底）。
@@ -350,9 +385,11 @@ export function initImageLightboxInteractions() {
     }
     const touch = event.touches[0];
     lightboxTouch = {
-      mode: 'pan',
+      mode: lightboxScale <= 1.001 ? 'swipe' : 'pan',
       x: touch.clientX,
       y: touch.clientY,
+      lastX: touch.clientX,
+      lastY: touch.clientY,
       tx: lightboxTx,
       ty: lightboxTy,
       moved: false,
@@ -360,6 +397,15 @@ export function initImageLightboxInteractions() {
   }, { passive: true });
   box.addEventListener('touchmove', (event) => {
     if (!lightboxTouch) return;
+    if (lightboxTouch.mode === 'swipe' && event.touches.length === 1) {
+      const touch = event.touches[0];
+      lightboxTouch.lastX = touch.clientX;
+      lightboxTouch.lastY = touch.clientY;
+      const dx = touch.clientX - lightboxTouch.x, dy = touch.clientY - lightboxTouch.y;
+      if (Math.hypot(dx, dy) > 8) lightboxTouch.moved = true;
+      if (lightboxItems.length > 1 && Math.abs(dx) > Math.abs(dy)) event.preventDefault();
+      return;
+    }
     if (lightboxTouch.mode === 'pinch' && event.touches.length >= 2) {
       event.preventDefault();
       const next = lightboxTouch.scale * (touchDistance(event.touches) / (lightboxTouch.distance || 1));
@@ -381,6 +427,18 @@ export function initImageLightboxInteractions() {
   }, { passive: false });
   box.addEventListener('touchend', (event) => {
     if (!lightboxTouch) return;
+    const swipe = lightboxTouch.mode === 'swipe' && event.touches.length === 0;
+    const finalTouch = event.changedTouches?.[0];
+    const dx = (finalTouch?.clientX ?? lightboxTouch.lastX ?? lightboxTouch.x) - lightboxTouch.x;
+    const dy = (finalTouch?.clientY ?? lightboxTouch.lastY ?? lightboxTouch.y) - lightboxTouch.y;
+    if (swipe && lightboxItems.length > 1 && Math.abs(dx) >= 45 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+      lightboxTouch = null;
+      lightboxLastTapAt = 0;
+      lightboxSuppressClick = true;
+      stepImageLightbox(dx < 0 ? 1 : -1);
+      window.setTimeout(() => { lightboxSuppressClick = false; }, 400);
+      return;
+    }
     const moved = Boolean(lightboxTouch.moved);
     const wasPinch = lightboxTouch.mode === 'pinch';
     const lastX = lightboxTouch.x;

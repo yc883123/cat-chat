@@ -279,6 +279,7 @@ verify/*
 !verify/browser_smoke.cjs
 !verify/chat_composer_layout_smoke.cjs
 !verify/comfyui_navigation_smoke.cjs
+!verify/comfyui_preview_delete_smoke.cjs
 !verify/skills_ui_smoke.cjs
 !verify/chat_font_smoke.cjs
 !verify/chat_font_smoke.py

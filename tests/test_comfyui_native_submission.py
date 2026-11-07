@@ -66,7 +66,7 @@ class NativeSubmissionTests(unittest.TestCase):
         mock.patch.object(client, "reachable", return_value={}).start()
         self.submit = mock.patch.object(client, "submit", return_value=("pid-1", "")).start()
         self.history = mock.patch.object(client, "history_entry", return_value=self.entry).start()
-        self.queue = mock.patch.object(client, "queue_ids", return_value=set()).start()
+        self.queue = mock.patch.object(client, "queue_snapshot", return_value=(set(), set())).start()
         self.info = mock.patch.object(client, "object_info_node", return_value=self.schema).start()
         from PIL import Image
         stream = BytesIO()

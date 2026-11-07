@@ -97,6 +97,9 @@ async function runViewport(browser, viewport) {
     await page.evaluate(async ({ messages }) => {
       const core = await import('/js/01-core.js');
       const chat = await import('/js/04-messages.js');
+      // 恢复上次视图后，先同步控制器状态，不能只改 DOM 留下工作台打开标记。
+      (await import('/js/22-studio.js')).closeStudioView();
+      (await import('/js/28-super-agent.js')).closeSuperAgentView();
       core.setAppView('chat');
       core.state.conversationId = '';
       core.state.chatBusy = false;

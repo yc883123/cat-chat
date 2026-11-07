@@ -6,7 +6,7 @@
 // ============================================================
 
 import { $, api, localFileUrl, state, toast } from "./01-core.js";
-import { attachmentThumbUrl, isPywebview, mediaKind, saveLocalFile } from "./03-media.js";
+import { attachmentThumbUrl, collectMediaPreviewItems, isPywebview, mediaKind, saveLocalFile } from "./03-media.js";
 import { currentStudioPage, isStudioOpen, onStudioPageChange, setStudioPage } from "./22-studio.js";
 import { BATCH_H3_BASE_TEMPLATE, BATCH_H3_REFERENCE_TEMPLATE, buildBatchConvertRequest } from "./24a-comfyui-convert.js";
 const POLL_MS = 1200;
@@ -196,6 +196,10 @@ function parseSlotKey(key) {
 
 function escapeText(value) {
   return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function escapeAttribute(value) {
+  return escapeText(value).replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
 
 function openSaveAsDialog() {
@@ -1460,6 +1464,10 @@ function renderMediaTile(slot, key, kind) {
     }
     if (picked) {
       const record = { path: picked.path, thumb_path: picked.thumb_path || "", name: picked.name || "" };
+      tile.dataset.comfyuiPreviewUrl = localFileUrl(record.path);
+      tile.dataset.comfyuiPreviewKind = kind;
+      tile.dataset.comfyuiPreviewName = record.name;
+      tile.dataset.comfyuiPreviewKey = JSON.stringify(["input", key]);
       if (kind === "image") {
         const img = document.createElement("img");
         img.src = attachmentThumbUrl(record);
@@ -1489,7 +1497,7 @@ function renderMediaTile(slot, key, kind) {
         thumb.append(duration);
         tile.addEventListener("click", (event) => {
           if (event.target.closest(".t-actions")) return;
-          openMediaPreviewOverlay(localFileUrl(record.path), "video");
+          openMediaPreviewOverlay(localFileUrl(record.path), "video", tile);
         });
       } else {
         const icon = document.createElement("span");
@@ -1498,7 +1506,7 @@ function renderMediaTile(slot, key, kind) {
         thumb.append(icon);
         tile.addEventListener("click", (event) => {
           if (event.target.closest(".t-actions")) return;
-          openMediaPreviewOverlay(localFileUrl(record.path), "audio");
+          openMediaPreviewOverlay(localFileUrl(record.path), "audio", tile);
         });
       }
     } else {
@@ -1556,36 +1564,111 @@ function formatMediaDuration(seconds) {
   return `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
 }
 
-// 视频/音频放大播放浮层：动态建节点（本模块不改 index.html），点遮罩或 Esc 关闭。
-function openMediaPreviewOverlay(url, kind) {
-  document.querySelector(".comfyui-media-preview-overlay")?.remove();
+// 视频/音频放大播放浮层：同组前后切换；关闭或换项必须停下并释放旧播放器。
+let closeMediaPreviewOverlay = null;
+function openMediaPreviewOverlay(url, kind, sourceEl = null) {
+  closeMediaPreviewOverlay?.();
   const overlay = document.createElement("div");
   overlay.className = "comfyui-media-preview-overlay";
-  const media = document.createElement(kind === "video" ? "video" : "audio");
-  media.src = url;
-  media.controls = true;
-  media.autoplay = true;
-  if (kind === "video") media.playsInline = true;
+  overlay.tabIndex = -1;
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", kind === "video" ? "视频预览" : "音频预览");
+  const items = collectMediaPreviewItems(sourceEl, kind);
+  const selectedKey = String(sourceEl?.closest?.('[data-comfyui-preview-key]')?.dataset?.comfyuiPreviewKey || url);
+  let index = items.findIndex((item) => item.key === selectedKey || item.url === url);
+  if (index < 0) { items.splice(0, items.length, { url, kind, name: "" }); index = 0; }
+  else items[index] = { ...items[index], url };
+  let media = null;
+  const stopMedia = () => {
+    if (!media) return;
+    media.pause();
+    media.removeAttribute("src");
+    media.load();
+    media.remove();
+    media = null;
+  };
+  const counter = document.createElement("div");
+  counter.className = "comfyui-media-preview-counter";
+  counter.dataset.mediaPreviewCounter = "";
+  counter.setAttribute("aria-live", "polite");
+  const previous = document.createElement("button");
+  const next = document.createElement("button");
+  for (const [button, delta, label, icon] of [[previous, -1, "上一项（←）", "‹"], [next, 1, "下一项（→）", "›"]]) {
+    button.type = "button";
+    button.className = `comfyui-media-preview-nav ${delta < 0 ? "previous" : "next"}`;
+    button.dataset.mediaPreviewStep = String(delta);
+    button.setAttribute("aria-label", label);
+    button.title = label;
+    button.textContent = icon;
+    button.hidden = items.length < 2;
+    button.addEventListener("click", () => step(delta));
+  }
+  const render = () => {
+    stopMedia();
+    const item = items[index];
+    media = document.createElement(kind === "video" ? "video" : "audio");
+    media.src = item.url;
+    media.controls = true;
+    media.autoplay = true;
+    if (kind === "video") media.playsInline = true;
+    counter.textContent = `${index + 1} / ${items.length}${item.name ? ` · ${item.name}` : ""}`;
+    overlay.prepend(media);
+  };
+  const step = (delta) => {
+    if (items.length < 2) return;
+    index = (index + delta + items.length) % items.length;
+    render();
+  };
   const close = document.createElement("button");
   close.type = "button";
   close.className = "comfyui-media-preview-close";
+  close.dataset.mediaPreviewClose = "";
   close.textContent = "✕";
   close.title = "关闭";
   close.setAttribute("aria-label", "关闭预览");
+  let suppressClick = false;
   const shutdown = () => {
+    stopMedia();
     overlay.remove();
-    document.removeEventListener("keydown", onKey);
+    document.removeEventListener("keydown", onKey, true);
+    if (closeMediaPreviewOverlay === shutdown) closeMediaPreviewOverlay = null;
+    if (sourceEl?.isConnected) sourceEl.focus?.();
   };
   const onKey = (event) => {
+    if (!["Escape", "ArrowLeft", "ArrowRight"].includes(event.key)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
     if (event.key === "Escape") shutdown();
+    else step(event.key === "ArrowLeft" ? -1 : 1);
   };
   close.addEventListener("click", shutdown);
   overlay.addEventListener("click", (event) => {
-    if (event.target === overlay) shutdown();
+    if (event.target === overlay && !suppressClick) shutdown();
   });
-  document.addEventListener("keydown", onKey);
-  overlay.append(media, close);
+  let swipe = null;
+  overlay.addEventListener("touchstart", (event) => {
+    if (event.touches.length !== 1 || event.target.closest?.("button")) { swipe = null; return; }
+    swipe = { x: event.touches[0].clientX, y: event.touches[0].clientY };
+  }, { passive: true });
+  overlay.addEventListener("touchend", (event) => {
+    if (!swipe || event.touches.length) { swipe = null; return; }
+    const touch = event.changedTouches?.[0];
+    const dx = touch ? touch.clientX - swipe.x : 0;
+    const dy = touch ? touch.clientY - swipe.y : 0;
+    swipe = null;
+    if (Math.abs(dx) >= 45 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+      suppressClick = true;
+      step(dx < 0 ? 1 : -1);
+      window.setTimeout(() => { suppressClick = false; }, 400);
+    }
+  }, { passive: true });
+  document.addEventListener("keydown", onKey, true);
+  closeMediaPreviewOverlay = shutdown;
+  overlay.append(previous, next, counter, close);
+  render();
   document.body.append(overlay);
+  overlay.focus();
 }
 
 // ---- 拖拽（桌面增强；触屏不派发 HTML5 drag 事件，点选才是主路径）----
@@ -2481,6 +2564,10 @@ function renderOutputCard(taskId, name, path) {
   const card = document.createElement("figure");
   card.className = "comfyui-output";
   const kind = mediaKind(String(path || url), name);
+  card.dataset.comfyuiPreviewUrl = url;
+  card.dataset.comfyuiPreviewKind = kind;
+  card.dataset.comfyuiPreviewName = name;
+  card.dataset.comfyuiPreviewKey = JSON.stringify([String(taskId), String(name)]);
   if (kind === "image") {
     const img = document.createElement("img");
     // 造梦机产物没有侧车缩略图（attachmentThumbUrl 会推导 <stem>_thumb.webp 而
@@ -2530,6 +2617,20 @@ function renderOutputCard(taskId, name, path) {
   save.innerHTML = OUTPUT_SAVE_ICON;
   caption.append(label, save);
   card.append(caption);
+  if (kind === "video" || kind === "audio") {
+    const preview = document.createElement("button");
+    preview.type = "button";
+    preview.className = "comfyui-output-preview";
+    preview.dataset.mediaPreviewOpen = "";
+    preview.textContent = "放大预览";
+    preview.setAttribute("aria-label", `放大预览 ${name}`);
+    preview.addEventListener("click", (event) => {
+      event.stopPropagation();
+      card.querySelector(kind)?.pause();
+      openMediaPreviewOverlay(url, kind, card);
+    });
+    card.append(preview);
+  }
   return card;
 }
 
@@ -2593,6 +2694,11 @@ const batch = {
   expandedItems: new Set(), // 跑批视图里展开了产物区的条目任务 id；重绘后按它还原
   itemOutputs: new Map(),   // 已拉取的条目产物清单 {任务id: [{name, path}]}；完成态不再变化
   deletingItems: new Set(), // 正在删除产物的条目任务 id
+  deletingBatches: new Set(), // 同一批的破坏性操作互斥，切换批次后仍保留请求归属
+  selectionBatchId: "",
+  selectionMode: false,
+  selectedItems: new Set(),
+  editEpoch: 0,             // 编辑历史批次只允许最新请求写回，迟到响应不得覆盖人工输入
   converting: new Set(),    // 转换中的原条目对象；删行或重排不会把忙碌态移给其他条目
   missingItems: new Set(),  // 自检没过的条目（schemeId:itemIndex），标红拦提交
   blockedMessage: "",
@@ -3351,7 +3457,21 @@ function onBatchClick(event) {
   const scheme = batchSchemeOf(target.dataset.scheme || "");
   const itemIndex = target.dataset.item !== undefined ? Number(target.dataset.item) : -1;
   event.preventDefault();
-  if (action === "add-scheme") {
+  if (action === "select-items") {
+    syncBatchSelection(batch.runData);
+    batch.selectionMode = true;
+    renderBatch();
+  } else if (action === "select-all-items") {
+    syncBatchSelection(batch.runData);
+    batch.selectedItems = new Set(batchDeletableItems().map((item) => String(item.task_id)));
+    renderBatch();
+  } else if (action === "cancel-selection") {
+    batch.selectionMode = false;
+    batch.selectedItems.clear();
+    renderBatch();
+  } else if (action === "delete-selected-items") {
+    void deleteSelectedBatchItems();
+  } else if (action === "add-scheme") {
     addBatchScheme();
     renderBatch();
   } else if (action === "copy-scheme" && scheme) {
@@ -3454,6 +3574,16 @@ function onBatchClick(event) {
 
 function onBatchChange(event) {
   const target = event.target;
+  if (target.matches("[data-batch-task-check]")) {
+    syncBatchSelection(batch.runData);
+    const id = String(target.dataset.batchTaskCheck || "");
+    if (!batch.deletingBatches.has(batch.runId) && batchDeletableItems().some((item) => String(item.task_id) === id)) {
+      if (target.checked) batch.selectedItems.add(id);
+      else batch.selectedItems.delete(id);
+      renderBatch();
+    }
+    return;
+  }
   const scheme = batchSchemeOf(target.dataset.scheme || "");
   if (target.matches('[data-batch-field="title"]')) {
     ensureBatchDraft().title = String(target.value || "");
@@ -4115,9 +4245,25 @@ const BATCH_STATUS_BADGES = {
   missing: ["产物已删除", "queue"],
 };
 
+function batchDeletableItems(data = batch.runData) {
+  return (data?.items || []).filter((item) => item?.task_id && String(item.status) !== "missing");
+}
+
+function syncBatchSelection(data) {
+  const id = String(data?.id || batch.runId || "");
+  if (batch.selectionBatchId !== id) {
+    batch.selectionBatchId = id;
+    batch.selectionMode = false;
+    batch.selectedItems.clear();
+  }
+  const allowed = new Set(batchDeletableItems(data).map((item) => String(item.task_id)));
+  for (const selected of batch.selectedItems) if (!allowed.has(selected)) batch.selectedItems.delete(selected);
+}
+
 function batchRunMarkup() {
   const data = batch.runData;
   if (!data) return '<div class="cbm-run-head"><span class="cbm-run-title">正在读取批次…</span></div>';
+  syncBatchSelection(data);
   const items = data.items || [];
   const done = items.filter((item) => item.status === "completed").length;
   const missing = items.filter((item) => item.status === "missing").length;
@@ -4135,20 +4281,31 @@ function batchRunMarkup() {
         ? `${done}/${items.length} 完成 · ${missing} 条产物已删`
         : `${done}/${items.length} 完成`;
   const badgeClass = active ? "run" : done === items.length ? "done" : failed ? "fail" : "queue";
-  const canClear = items.some((item) => item.task_id && item.status !== "missing");
+  const canClear = batchDeletableItems(data).length > 0;
+  const busy = batch.deletingBatches.has(String(batch.runId || data.id || ""));
+  const disabled = busy ? "disabled" : "";
   const actions = [
-    '<button type="button" class="cbm-btn tiny primary" data-batch-action="edit-batch">编辑这一批</button>',
+    `<button type="button" class="cbm-btn cbm-manage-btn primary" data-batch-action="edit-batch" ${disabled}>编辑这一批</button>`,
     canClear
-      ? '<button type="button" class="cbm-btn tiny" data-batch-action="clear-batch-outputs">删除产物</button>'
+      ? `<button type="button" class="cbm-btn cbm-manage-btn danger" data-batch-action="clear-batch-outputs" ${disabled}>删除本批全部产物</button>`
       : "",
-    '<button type="button" class="cbm-btn tiny danger" data-batch-action="delete-batch">删除批次</button>',
+    `<button type="button" class="cbm-btn cbm-manage-btn danger" data-batch-action="delete-batch" ${disabled}>删除整个批次</button>`,
   ].join("");
+  const selection = batch.selectionMode
+    ? `<strong data-batch-selected-count>已选 ${batch.selectedItems.size} 条</strong>
+       <button type="button" class="cbm-btn cbm-manage-btn" data-batch-action="select-all-items" ${disabled}>全选可删除条目</button>
+       <button type="button" class="cbm-btn cbm-manage-btn" data-batch-action="cancel-selection" ${disabled}>取消选择</button>
+       <button type="button" class="cbm-btn cbm-manage-btn danger" data-batch-action="delete-selected-items" ${disabled || !batch.selectedItems.size ? "disabled" : ""}>${busy ? "删除中…" : `删除所选（${batch.selectedItems.size}）`}</button>`
+    : `<button type="button" class="cbm-btn cbm-manage-btn" data-batch-action="select-items" ${disabled || !canClear ? "disabled" : ""}>选择条目</button><span>勾选后可一次删除多个条目的产物</span>`;
   return `<div class="cbm-run-head">
       <span class="cbm-run-title">${escapeText(data.title || "未命名批次")}</span>
       <span class="cbm-badge ${badgeClass}">${escapeText(badgeLabel)}</span>
       <div class="cbm-progress" role="progressbar" aria-label="批次进度" aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100"><div style="width:${percent}%"></div></div>
       <span class="cbm-run-meta" id="comfyuiBatchElapsed"></span>
       <span class="cbm-run-actions">${actions}</span>
+    </div>
+    <div class="cbm-selection-toolbar" data-batch-selection-toolbar aria-label="批次条目管理">${selection}
+      <p>删除产物会同时移除对应任务记录，保留批次内容，可编辑后重新生成；正在运行的条目会先取消。删除整个批次还会移除批次记录。</p>
     </div>
     <div class="cbm-cards">${cards}</div>
     <p class="cbm-run-note">失败的条目点「重试」＝从没完成的段继续；产物删掉了也能点「编辑这一批」把工作流、条目和映射回填，改完重新提交会生成新批次。</p>`;
@@ -4166,7 +4323,7 @@ function batchRunCardMarkup(item) {
   let preview = "";
   if (status === "completed") {
     preview = first
-      ? `<div class="cbm-card-preview" data-batch-preview-task="${escapeText(taskRef)}" data-batch-preview-name="${escapeText(first)}"></div>`
+      ? `<div class="cbm-card-preview" data-batch-preview-task="${escapeAttribute(taskRef)}" data-batch-preview-name="${escapeAttribute(first)}" data-comfyui-preview-key="${escapeAttribute(JSON.stringify([taskRef, String(first)]))}" data-comfyui-preview-url="${escapeAttribute(outputFileUrl(taskRef, first))}" data-comfyui-preview-kind="${escapeAttribute(mediaKind(first, first))}" data-comfyui-preview-name="${escapeAttribute(first)}"></div>`
       : '<div class="cbm-card-thumb skel"><span class="cbm-card-skel-text">已完成，没有产物</span></div>';
   } else {
     let thumb;
@@ -4180,8 +4337,10 @@ function batchRunCardMarkup(item) {
     preview = `<div class="cbm-card-thumb skel">${thumb}</div>`;
   }
   const deleting = taskRef && batch.deletingItems.has(taskRef);
-  const deleteButton = taskRef
-    ? `<button type="button" class="cbm-btn tiny" data-batch-action="delete-item" data-task-id="${escapeText(taskRef)}" ${deleting ? "disabled" : ""}>${deleting ? "删除中…" : "删除"}</button>`
+  const busy = deleting || batch.deletingBatches.has(String(batch.runId || ""));
+  const deletable = taskRef && status !== "missing";
+  const deleteButton = deletable
+    ? `<button type="button" class="cbm-btn cbm-delete-product danger" data-batch-action="delete-item" data-task-id="${escapeText(taskRef)}" ${busy ? "disabled" : ""}>${deleting ? "删除中…" : "删除产物"}</button>`
     : "";
   const foot = [];
   if (status === "completed") {
@@ -4190,7 +4349,6 @@ function batchRunCardMarkup(item) {
       // 产物就地展开：不再跳单次结果页（那里已经看不到批量条目）。
       foot.push(`<button type="button" class="cbm-btn tiny" data-batch-action="toggle-item-outputs" data-task-id="${escapeText(taskRef)}" aria-expanded="${expanded}">${expanded ? "收起" : "产物"}</button>`);
     }
-    foot.push(deleteButton);
   } else if (status === "missing") {
     // 记录已经不在：重试必然 404，入口统一到「编辑这一批」重新提交。
     foot.push('<span>产物已删除</span>');
@@ -4198,13 +4356,11 @@ function batchRunCardMarkup(item) {
     foot.push(`<span class="cbm-err">${escapeText(String(item.error))}</span>`);
     if (taskRef) {
       foot.push('<button type="button" class="cbm-btn tiny" data-batch-action="retry-item" data-task-id="' + escapeText(taskRef) + '">重试</button>');
-      foot.push(deleteButton);
     }
   } else if (["failed", "cancelled", "interrupted"].includes(status)) {
     foot.push(`<span>${item.failed || 0} 段失败</span>`);
     if (taskRef) {
       foot.push('<button type="button" class="cbm-btn tiny" data-batch-action="retry-item" data-task-id="' + escapeText(taskRef) + '">重试</button>');
-      foot.push(deleteButton);
     }
   } else if (status === "running" || status === "queued") {
     // 批量条目不再出现在单次结果页的任务列表，取消入口就留在条目卡上。
@@ -4214,10 +4370,13 @@ function batchRunCardMarkup(item) {
   const expand = expanded
     ? `<div class="cbm-card-expand" data-batch-expand-for="${escapeText(taskRef)}"></div>`
     : "";
-  return `<div class="cbm-card">
-    <div class="cbm-card-head"><strong>${escapeText(item.name || `条目 ${item.index}`)}</strong><span class="cbm-badge ${cls}">${label}</span></div>
+  const selection = batch.selectionMode && deletable
+    ? `<label class="cbm-card-select"><input type="checkbox" data-batch-task-check="${escapeText(taskRef)}" ${batch.selectedItems.has(taskRef) ? "checked" : ""} ${busy ? "disabled" : ""}><span>选择此条目</span></label>` : "";
+  return `<div class="cbm-card${batch.selectedItems.has(taskRef) ? " is-selected" : ""}" data-batch-task-id="${escapeText(taskRef)}">
+    <div class="cbm-card-head">${selection}<strong>${escapeText(item.name || `条目 ${item.index}`)}</strong><span class="cbm-badge ${cls}">${label}</span></div>
     ${preview}
-    <div class="cbm-card-foot">${foot.join("")}</div>${expand}
+    <div class="cbm-card-foot">${foot.join("")}</div>
+    ${deleteButton ? `<div class="cbm-card-actions">${deleteButton}</div>` : ""}${expand}
   </div>`;
 }
 
@@ -4753,7 +4912,21 @@ function batchDraftHasContent(draft) {
     || Object.keys(item?.files || {}).length)));
 }
 
+function batchEditSnapshot() {
+  const draft = batch.draft;
+  return JSON.stringify({
+    title: draft?.title, unload_after: draft?.unload_after, convert: batch.convert,
+    schemes: (draft?.schemes || []).map((scheme) => ({
+      id: scheme.id, workflow_id: scheme.workflow_id, mapping: scheme.mapping,
+      fixed: scheme.fixed, items: scheme.items,
+    })),
+    // 文本框尚未 blur 时模型可能尚未回写（例如批次标题），也必须保护人工输入。
+    fields: Array.from(document.querySelectorAll("#comfyuiBatchBody [data-batch-field], #comfyuiBatchBody [data-batch-item], #comfyuiBatchBody [data-batch-fixed]")).map((node) => [node.dataset, node.value, node.checked]),
+  });
+}
+
 async function editCurrentBatch(batchIdOverride = "") {
+  const epoch = ++batch.editEpoch;
   const batchId = String(batchIdOverride || batch.runId || batch.runData?.id || "");
   if (!batchId) return;
   if (batch.draftSourceId === batchId && batch.draft) {
@@ -4764,15 +4937,26 @@ async function editCurrentBatch(batchIdOverride = "") {
     renderBatch();
     return;
   }
+  const originalDraft = batch.draft;
+  const originalSnapshot = batchEditSnapshot();
+  const originalRunId = batch.runId;
+  const originalView = batch.view;
+  const current = () => epoch === batch.editEpoch && batch.draft === originalDraft
+    && batch.runId === originalRunId && batch.view === originalView
+    && batchEditSnapshot() === originalSnapshot;
+  const stale = () => {
+    if (epoch === batch.editEpoch) toast("填单或当前批次已改变，本次历史内容未覆盖；需要时请重新点编辑");
+  };
   let detail = null;
   try {
     const payload = await api(
       `/api/comfyui/batches/${encodeURIComponent(batchId)}?with_schemes=1`);
     detail = payload.batch || null;
   } catch (error) {
-    toast(`读取批次失败：${error.message}`);
+    if (epoch === batch.editEpoch) toast(`读取批次失败：${error.message}`);
     return;
   }
+  if (!current()) { stale(); return; }
   if (!detail) { toast("批次不存在或已被删除"); return; }
   const active = (detail.items || []).some((item) =>
     ["queued", "running"].includes(String(item?.status)));
@@ -4784,6 +4968,7 @@ async function editCurrentBatch(batchIdOverride = "") {
     return;
   }
   const draft = await batchDraftFromDetail(detail);
+  if (!current()) { stale(); return; }
   batch.draft = draft;
   batch.draftSourceId = batchId;
   batch.runId = batchId;
@@ -4808,92 +4993,130 @@ async function openBatchForEdit(id) {
   await editCurrentBatch(batchId);
 }
 
-async function deleteBatchItem(taskId, button) {
+async function deleteBatchItem(taskId) {
   const id = String(taskId || "");
-  if (!id || batch.deletingItems.has(id)) return;
-  if (!window.confirm("删除这一条的产物文件？任务记录会一起删除；要重新出，点「编辑这一批」重新提交。")) {
-    return;
+  if (id) await deleteBatchTaskIds([id]);
+}
+
+async function deleteSelectedBatchItems() {
+  syncBatchSelection(batch.runData);
+  await deleteBatchTaskIds(Array.from(batch.selectedItems));
+}
+
+function batchDeleteResult(payload, requested) {
+  if (!Number.isInteger(payload?.deleted) || payload.deleted < 0 || payload.deleted > requested
+      || !Array.isArray(payload.failed) || !Array.isArray(payload.skipped)
+      || payload.deleted + payload.failed.length + payload.skipped.length > requested) {
+    throw new Error("删除响应不完整，请刷新批次确认结果后再试");
   }
-  batch.deletingItems.add(id);
-  if (button) {
-    button.disabled = true;
-    button.textContent = "删除中…";
-  }
+  return { deleted: payload.deleted, failed: payload.failed, skipped: payload.skipped };
+}
+
+async function deleteBatchTaskIds(requestedIds) {
+  const batchId = String(batch.runId || "");
+  if (!batchId || batch.deletingBatches.has(batchId)) return;
+  const rows = batchDeletableItems();
+  const allowed = new Set(rows.map((item) => String(item.task_id)));
+  const ids = [...new Set(requestedIds.map(String))].filter((id) => allowed.has(id));
+  if (!ids.length) { toast("先选择要删除的条目"); return; }
+  const active = rows.filter((item) => ids.includes(String(item.task_id)) && ["running", "queued"].includes(String(item.status))).length;
+  if (!window.confirm(`删除所选 ${ids.length} 个条目的全部产物和任务记录？${active ? `其中 ${active} 条正在运行或排队，会先取消。` : ""}\n批次内容保留，可点「编辑这一批」重新生成；产物删除后无法恢复。`)) return;
+  const current = () => batch.runId === batchId && batch.view === "run";
+  batch.deletingBatches.add(batchId);
+  ids.forEach((id) => batch.deletingItems.add(id));
+  renderBatch();
+  let deleted = 0;
+  const failed = [], skipped = [], doneIds = new Set();
   try {
-    const payload = await api("/api/comfyui/tasks", {
-      method: "DELETE",
-      body: { task_ids: [id], cancel_active: true },
-    });
-    const failed = Array.isArray(payload.failed) ? payload.failed : [];
-    if (failed.length) {
-      toast(`没有删成：${failed[0]?.reason || "任务没能停下来"}`);
-      return;
+    // 删除接口每次最多 200 个 id，按块提交并保留逐块结果，不能把后半批悄悄漏掉。
+    for (let offset = 0; offset < ids.length; offset += 200) {
+      const chunk = ids.slice(offset, offset + 200);
+      const result = batchDeleteResult(await api("/api/comfyui/tasks", {
+        method: "DELETE", body: { task_ids: chunk, cancel_active: true },
+      }), chunk.length);
+      deleted += result.deleted;
+      failed.push(...result.failed);
+      skipped.push(...result.skipped);
+      const kept = new Set([...result.failed.map((row) => String(row?.id || "")), ...result.skipped.map(String)]);
+      const removed = chunk.filter((id) => !kept.has(id));
+      if (removed.length === result.deleted) removed.forEach((id) => doneIds.add(id));
     }
-    batch.expandedItems.delete(id);
-    batch.itemOutputs.delete(id);
-    toast("已删除这一条的产物");
-    batch.runData = null;
-    batch.runSignature = "";
-    stopBatchPolling();
-    if (batch.view === "run" && batch.runId) startBatchPolling();
-    void loadBatchHistories();
+    if (failed.length || skipped.length) {
+      toast(`已删除 ${deleted} 条，${failed.length + skipped.length} 条未删除：${failed[0]?.reason || "任务仍在运行，请稍后重试"}`);
+    } else if (deleted === ids.length) toast(`已删除所选 ${deleted} 个条目的产物，批次内容已保留`);
+    else toast(`本次删除 ${deleted} 条，其余记录可能已被移除，已重新读取批次状态`);
   } catch (error) {
-    toast(`删除失败：${error.message}`);
+    toast(`${deleted ? `已有 ${deleted} 条删除成功；` : ""}删除未全部完成：${error.message}`);
   } finally {
-    batch.deletingItems.delete(id);
-    if (batch.view === "run") renderBatch();
+    ids.forEach((id) => batch.deletingItems.delete(id));
+    batch.deletingBatches.delete(batchId);
+    if (current()) {
+      for (const id of doneIds) {
+        batch.selectedItems.delete(id);
+        batch.expandedItems.delete(id);
+        batch.itemOutputs.delete(id);
+      }
+      batch.runData = null;
+      batch.runSignature = "";
+      stopBatchPolling();
+      startBatchPolling();
+      renderBatch();
+    }
+    void loadBatchHistories();
   }
 }
 
 async function clearBatchOutputs() {
-  const batchId = String(batch.runId || "");
-  if (!batchId) return;
-  const items = batch.runData?.items || [];
-  if (!items.some((item) => item.task_id && item.status !== "missing")) {
+  const ids = batchDeletableItems().map((item) => String(item.task_id));
+  if (!ids.length) {
     toast("这一批没有可删除的产物");
     return;
   }
-  if (!window.confirm("删除这一批的全部产物文件？正在跑的条目会先取消，任务记录一起删除；批次内容保留，可以点「编辑这一批」再跑。")) {
-    return;
-  }
-  try {
-    const payload = await api(
-      `/api/comfyui/batches/${encodeURIComponent(batchId)}/outputs`,
-      { method: "DELETE", body: {} });
-    toast(`已删除 ${payload.deleted || 0} 条产物`);
-    batch.expandedItems.clear();
-    batch.itemOutputs.clear();
-    batch.runData = null;
-    batch.runSignature = "";
-    stopBatchPolling();
-    if (batch.view === "run") startBatchPolling();
-    void loadBatchHistories();
-  } catch (error) {
-    toast(`删除产物失败：${error.message}`);
-  }
+  await deleteBatchTaskIds(ids);
 }
 
 async function deleteCurrentBatch() {
   const batchId = String(batch.runId || "");
-  if (!batchId) return;
-  if (!window.confirm("删除这个批次记录和它的全部产物？正在跑的条目会先取消，删除后历史里不再出现。")) return;
+  if (!batchId || batch.deletingBatches.has(batchId)) return;
+  const count = (batch.runData?.items || []).length;
+  if (!window.confirm(`删除整个批次「${batch.runData?.title || "未命名批次"}」及其 ${count} 个条目的全部产物和任务记录？\n正在运行的条目会先取消；批次记录也会移除，无法从历史重新编辑。删除后无法恢复。`)) return;
+  batch.deletingBatches.add(batchId);
+  renderBatch();
   try {
-    await api(`/api/comfyui/batches/${encodeURIComponent(batchId)}`, {
+    const payload = await api(`/api/comfyui/batches/${encodeURIComponent(batchId)}`, {
       method: "DELETE",
       body: { delete_outputs: true },
     });
-    stopBatchPolling();
-    batch.runId = "";
-    batch.runData = null;
-    batch.runSignature = "";
-    if (batch.draftSourceId === batchId) batch.draftSourceId = "";
-    batch.view = "draft";
-    setComfyuiResultsSegment("batch");
-    setComfyuiPane("tasks");
+    const result = batchDeleteResult(payload, count);
+    if (payload.ok !== true || result.failed.length || result.skipped.length) {
+      throw new Error(result.failed[0]?.reason || "批次未完整删除，请刷新后确认");
+    }
+    if (batch.runId === batchId) {
+      stopBatchPolling();
+      batch.runId = "";
+      batch.runData = null;
+      batch.runSignature = "";
+      batch.selectedItems.clear();
+      batch.selectionMode = false;
+      if (batch.draftSourceId === batchId) batch.draftSourceId = "";
+      batch.view = "draft";
+      setComfyuiResultsSegment("batch");
+      setComfyuiPane("tasks");
+    }
     void loadBatchHistories();
-    toast("已删除这个批次");
+    toast(`已删除整个批次及 ${result.deleted} 条任务记录`);
   } catch (error) {
     toast(`删除批次失败：${error.message}`);
+  } finally {
+    batch.deletingBatches.delete(batchId);
+    if (batch.runId === batchId && batch.view === "run") {
+      // 后端整批删除可能先删掉部分任务再报错；重新读取，不能留下已删除的旧缩略图。
+      batch.runData = null;
+      batch.runSignature = "";
+      stopBatchPolling();
+      startBatchPolling();
+      renderBatch();
+    }
   }
 }
 

@@ -117,9 +117,11 @@ def normalize_config(app: Any, raw: Any, *, allow_legacy_language: bool = False)
     # 预设的忽略词/输出规则不叠加（build_prompt 按键走分支）。
     system_prompt = ""
     if raw.get("system_prompt") is not None:
-        system_prompt = str(raw.get("system_prompt")).strip()[:MAX_SYSTEM_PROMPT]
+        system_prompt = str(raw.get("system_prompt")).strip()
         if not system_prompt:
             raise LabelerTaskError("自定义打标必须填写系统提示词")
+        if len(system_prompt) > MAX_SYSTEM_PROMPT:
+            raise LabelerTaskError(f"系统提示词不能超过 {MAX_SYSTEM_PROMPT} 字，请精简后再提交")
     output_mode = str(raw.get("output_mode") or "keywords").strip()
     if output_mode == "auto" and not system_prompt:
         raise LabelerTaskError("output_mode=auto（以提示词为准）只在自定义打标下可用")

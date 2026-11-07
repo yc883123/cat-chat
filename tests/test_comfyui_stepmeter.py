@@ -3,7 +3,7 @@
 口径（2026-11-07 用户拍板）：
 - 数据源 = ComfyUI 官方内部端点 /internal/logs/raw 的 tqdm 采样进度行；
   HTTP 侧（/history /queue）执行期没有步级字段，纯轮询推算不可行。
-- 归属靠 runner 单 worker 串行 + checkpoint.prompt_ids 绑定，不猜测；
+- 归属由队列运行 ID、首次运行日志游标与 checkpoint.prompt_ids 共同约束；
 - 新鲜期外 / 形状非法 / 端点缺失一律不带 step 字段，前端整块不渲染；
 - 功能名只叫「提取 ComfyUI 进度条」，不提任何来源。
 """
@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import io
 import runpy
 import tempfile
 import threading
@@ -24,6 +25,7 @@ from naiba.comfyui import client as comfyui_client
 
 from naiba.comfyui import jobs as comfyui_jobs
 from naiba.comfyui import stepmeter
+from naiba.comfyui.runner import ComfyUIRunner
 
 
 def _tqdm_line(value: int, max_steps: int, rate: str = "6.94it/s") -> str:
@@ -69,6 +71,20 @@ class StepMeterParseTests(unittest.TestCase):
 
 
 class StepMeterNetworkTests(unittest.TestCase):
+    def test_queue_snapshot_reuses_one_response_and_preserves_queue_ids_compatibility(self):
+        payload = {"queue_running": [[1, "running", {}, {}, []]],
+                   "queue_pending": [[2, "pending", {}, {}, []]]}
+        with mock.patch.object(comfyui_client._DIRECT_OPENER, "open", side_effect=lambda *args, **kw:
+                               io.BytesIO(json.dumps(payload).encode())) as opened:
+            all_ids, running_ids = comfyui_client.queue_snapshot("http://127.0.0.1:9")
+            self.assertEqual(all_ids, {"running", "pending"})
+            self.assertEqual(running_ids, {"running"})
+            self.assertEqual(opened.call_count, 1)
+            self.assertEqual(comfyui_client.queue_ids("http://127.0.0.1:9"), all_ids)
+        with mock.patch.object(comfyui_client._DIRECT_OPENER, "open", side_effect=OSError("offline")):
+            self.assertIsNone(comfyui_client.queue_snapshot("http://127.0.0.1:9"))
+            self.assertIsNone(comfyui_client.queue_ids("http://127.0.0.1:9"))
+
     def test_log_request_ignores_environment_and_system_proxies(self):
         payload = {"entries": [{"t": int(time.time() * 1000), "m": _tqdm_line(2, 8)}]}
         paths = []
@@ -76,7 +92,8 @@ class StepMeterNetworkTests(unittest.TestCase):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 paths.append(self.path)
-                body = json.dumps(payload if self.path == "/internal/logs/raw" else {
+                logs = {"entries": []} if paths.count("/internal/logs/raw") == 1 else payload
+                body = json.dumps(logs if self.path == "/internal/logs/raw" else {
                     "system": {"comfyui_version": "test"}, "devices": [],
                 }).encode("utf-8")
                 self.send_response(200)
@@ -99,11 +116,12 @@ class StepMeterNetworkTests(unittest.TestCase):
                     mock.patch("urllib.request.proxy_bypass", return_value=False):
                 isolated = runpy.run_path(str(Path(stepmeter.__file__)))
                 self.assertEqual(comfyui_client.reachable(base)["version"], "test")
-                isolated["observe"](base + "/", "pid-proxy")
+                isolated["observe"](base + "/", "pid-proxy", is_running=True)
+                isolated["observe"](base + "/", "pid-proxy", is_running=True)
                 snap = isolated["snapshot_for"](["pid-proxy"])
             self.assertIsNotNone(snap, "生成接口可达时，进度请求也必须绕过代理")
             self.assertEqual((snap["value"], snap["max"]), (2, 8))
-            self.assertEqual(paths, ["/system_stats", "/internal/logs/raw"])
+            self.assertEqual(paths, ["/system_stats", "/internal/logs/raw", "/internal/logs/raw"])
         finally:
             server.shutdown()
             server.server_close()
@@ -119,8 +137,11 @@ class StepMeterStateTests(unittest.TestCase):
 
     def _with_fetch(self, payload, fn):
         original = stepmeter._fetch_raw
-        stepmeter._fetch_raw = lambda base: payload
+        # 首次看到运行只记录游标，后续新到日志才可以展示。
+        responses = iter([{"entries": []}, payload])
+        stepmeter._fetch_raw = lambda base: next(responses, payload)
         try:
+            fn()
             return fn()
         finally:
             stepmeter._fetch_raw = original
@@ -128,7 +149,7 @@ class StepMeterStateTests(unittest.TestCase):
     def test_observe_binds_and_snapshots_for_known_prompt(self):
         now_ms = int(time.time() * 1000)
         payload = {"entries": [{"t": now_ms, "m": _tqdm_line(2, 8)}]}
-        self._with_fetch(payload, lambda: stepmeter.observe("http://127.0.0.1:9", "pid-1"))
+        self._with_fetch(payload, lambda: stepmeter.observe("http://127.0.0.1:9", "pid-1", is_running=True))
         snap = stepmeter.snapshot_for(["pid-1"])
         self.assertIsNotNone(snap)
         self.assertEqual((snap["value"], snap["max"], snap["rate"]), (2, 8, "6.94it/s"))
@@ -136,13 +157,13 @@ class StepMeterStateTests(unittest.TestCase):
     def test_unknown_prompt_gets_nothing(self):
         now_ms = int(time.time() * 1000)
         payload = {"entries": [{"t": now_ms, "m": _tqdm_line(2, 8)}]}
-        self._with_fetch(payload, lambda: stepmeter.observe("http://127.0.0.1:9", "pid-1"))
+        self._with_fetch(payload, lambda: stepmeter.observe("http://127.0.0.1:9", "pid-1", is_running=True))
         self.assertIsNone(stepmeter.snapshot_for(["pid-other"]))
         self.assertIsNone(stepmeter.snapshot_for([]))
 
     def test_stale_data_not_served(self):
         payload = {"entries": [{"t": int(time.time() * 1000), "m": _tqdm_line(2, 8)}]}
-        self._with_fetch(payload, lambda: stepmeter.observe("http://127.0.0.1:9", "pid-1"))
+        self._with_fetch(payload, lambda: stepmeter.observe("http://127.0.0.1:9", "pid-1", is_running=True))
         # 把时间戳拨到新鲜期外。
         with stepmeter._LOCK:
             stepmeter._STATE["updated_at"] = int(time.time() * 1000) - stepmeter.FRESH_WINDOW_MS - 1
@@ -153,7 +174,7 @@ class StepMeterStateTests(unittest.TestCase):
         original = stepmeter._fetch_raw
         stepmeter._fetch_raw = lambda base: None
         try:
-            stepmeter.observe("http://127.0.0.1:9", "pid-1")
+            stepmeter.observe("http://127.0.0.1:9", "pid-1", is_running=True)
         finally:
             stepmeter._fetch_raw = original
         self.assertIsNone(stepmeter.snapshot_for(["pid-1"]))
@@ -161,8 +182,8 @@ class StepMeterStateTests(unittest.TestCase):
     def test_rebind_clears_old_prompt(self):
         now_ms = int(time.time() * 1000)
         payload = {"entries": [{"t": now_ms, "m": _tqdm_line(2, 8)}]}
-        self._with_fetch(payload, lambda: stepmeter.observe("http://127.0.0.1:9", "pid-1"))
-        self._with_fetch(payload, lambda: stepmeter.observe("http://127.0.0.1:9", "pid-2"))
+        self._with_fetch(payload, lambda: stepmeter.observe("http://127.0.0.1:9", "pid-1", is_running=True))
+        self._with_fetch(payload, lambda: stepmeter.observe("http://127.0.0.1:9", "pid-2", is_running=True))
         self.assertIsNone(stepmeter.snapshot_for(["pid-1"]))
         self.assertIsNotNone(stepmeter.snapshot_for(["pid-2"]))
 
@@ -170,7 +191,7 @@ class StepMeterStateTests(unittest.TestCase):
         # ComfyUI logger 的 t 是 datetime.now().isoformat() 字符串：新鲜期按真实时刻算。
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
         payload = {"entries": [{"t": stamp, "m": _tqdm_line(3, 8)}]}
-        self._with_fetch(payload, lambda: stepmeter.observe("http://127.0.0.1:9", "pid-1"))
+        self._with_fetch(payload, lambda: stepmeter.observe("http://127.0.0.1:9", "pid-1", is_running=True))
         snap = stepmeter.snapshot_for(["pid-1"])
         self.assertIsNotNone(snap)
         self.assertEqual((snap["value"], snap["max"]), (3, 8))
@@ -179,8 +200,62 @@ class StepMeterStateTests(unittest.TestCase):
         # 时间戳解析不动的行不能进状态：旧行会被误判成永远新鲜，
         # 新任务开局会把上一次生成留在缓冲里的进度当现势数据显示。
         payload = {"entries": [{"t": "not-a-time", "m": _tqdm_line(8, 8)}]}
-        self._with_fetch(payload, lambda: stepmeter.observe("http://127.0.0.1:9", "pid-1"))
+        self._with_fetch(payload, lambda: stepmeter.observe("http://127.0.0.1:9", "pid-1", is_running=True))
         self.assertIsNone(stepmeter.snapshot_for(["pid-1"]))
+
+    def test_new_prompt_never_inherits_recent_old_log_and_pending_skips_network(self):
+        stamp = int(time.time() * 1000) - 1000
+        old = {"entries": [{"t": stamp, "m": _tqdm_line(8, 8)}]}
+        with mock.patch.object(stepmeter, "_fetch_raw", return_value=old) as fetch:
+            stepmeter.observe("http://127.0.0.1:9", "queued", is_running=False)
+            self.assertEqual(fetch.call_count, 0)
+            self.assertIsNone(stepmeter.snapshot_for(["queued"]))
+            stepmeter.observe("http://127.0.0.1:9", "new", is_running=True)
+            stepmeter.observe("http://127.0.0.1:9", "new", is_running=True)
+            self.assertIsNone(stepmeter.snapshot_for(["new"]))
+            fetch.return_value = {"entries": [*old["entries"], {"t": stamp + 500, "m": _tqdm_line(1, 8)}]}
+            stepmeter.observe("http://127.0.0.1:9", "new", is_running=True)
+            self.assertEqual(stepmeter.snapshot_for(["new"])["value"], 1)
+            stepmeter.observe("http://127.0.0.1:9", "pending-after-new", is_running=False)
+            self.assertIsNone(stepmeter.snapshot_for(["new"]))
+
+    def test_late_old_observation_cannot_overwrite_new_prompt(self):
+        entered, release = threading.Event(), threading.Event()
+        stamp = int(time.time() * 1000)
+        def fetch(base):
+            if base.endswith("old"):
+                entered.set()
+                self.assertTrue(release.wait(2))
+                return {"entries": [{"t": stamp + 1, "m": _tqdm_line(8, 8)}]}
+            return {"entries": []}
+        with mock.patch.object(stepmeter, "_fetch_raw", side_effect=fetch):
+            worker = threading.Thread(target=lambda: stepmeter.observe("http://old", "old", is_running=True))
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                stepmeter.observe("http://new", "new", is_running=True)
+            finally:
+                release.set()
+                worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(stepmeter._STATE.get("prompt_id"), "new")
+        self.assertIsNone(stepmeter.snapshot_for(["old"]))
+
+
+class RunnerStepBindingTests(unittest.TestCase):
+    def test_wait_loop_only_marks_actual_running_prompt_as_running(self):
+        for queue in [({"pid"}, set()), ({"pid"}, {"pid"}), None]:
+            with self.subTest(queue=queue):
+                cancel = threading.Event()
+                with mock.patch.object(comfyui_client, "history_entry", return_value=None), \
+                        mock.patch.object(comfyui_client, "queue_snapshot", return_value=queue), \
+                        mock.patch.object(stepmeter, "observe") as observe, \
+                        mock.patch.object(cancel, "wait", side_effect=lambda timeout: cancel.set()):
+                    result = ComfyUIRunner._wait_shot(mock.Mock(), "http://local", "task", 0, "pid",
+                                                     cancel, {}, {}, {}, [], [], {})
+                self.assertEqual(result, (False, [], "用户取消"))
+                observe.assert_called_once_with("http://local", "pid",
+                                                is_running=queue is not None and "pid" in queue[1])
 
 
 class StepExposureTests(unittest.TestCase):
@@ -203,9 +278,11 @@ class StepExposureTests(unittest.TestCase):
         now_ms = int(time.time() * 1000)
         payload = {"entries": [{"t": now_ms, "m": _tqdm_line(3, 8)}]}
         original = stepmeter._fetch_raw
-        stepmeter._fetch_raw = lambda base: payload
+        responses = iter([{"entries": []}, payload])
+        stepmeter._fetch_raw = lambda base: next(responses, payload)
         try:
-            stepmeter.observe("http://127.0.0.1:9", "pid-9")
+            stepmeter.observe("http://127.0.0.1:9", "pid-9", is_running=True)
+            stepmeter.observe("http://127.0.0.1:9", "pid-9", is_running=True)
         finally:
             stepmeter._fetch_raw = original
         step = comfyui_jobs._running_step(self._running_task(["pid-9"]), self._running_task(["pid-9"])["checkpoint"])

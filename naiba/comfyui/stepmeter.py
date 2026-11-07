@@ -6,8 +6,8 @@ tqdm 的采样进度行（``25%|███| 2/8 [00:05<00:14, 6.94it/s]``）就�
 runner 在既有的 1.5s 轮询里顺带 GET 一次，解析最后一条进度行更新内存态。
 
 归属与降级口径：
-- runner 是单 worker 串行，同一时刻至多一个在途 prompt；提交时把 prompt_id
-  绑进状态，``snapshot_for`` 只对绑定的 prompt 生效，不猜测归属。
+- runner 从同一次队列响应确认 prompt 正在运行，排队时不展示全局日志。
+  首次确认运行只记录日志边界；后续日志才能归入该 prompt。
 - 步级数据带新鲜期（超出视为段间/已结束），过期不回快照。
 - 端点缺失（404）、格式变化、tqdm 被关闭都表现为「解析不到」→ 状态保持旧值/
   过期 → 轮询回包自然不带 step 字段，前端不渲染进度条，一切回到现状。
@@ -98,21 +98,37 @@ def parse_progress(text: str) -> dict[str, Any] | None:
     return {"value": value, "max": max_steps, "rate": rate}
 
 
-def observe(base: str, prompt_id: str) -> None:
+def observe(base: str, prompt_id: str, *, is_running: bool = False) -> None:
     """轮询循环里调用：拉一次日志缓冲，解析最后一条进度行更新内存态。
 
     任何失败都保持旧状态（由新鲜期兜底），绝不抛出影响打图主链路。
     """
+    normalized_base = normalize_base_url(base)
+    bound_prompt = str(prompt_id or "")
     with _LOCK:
-        if str(_STATE.get("prompt_id") or "") != str(prompt_id or ""):
+        if not is_running or not bound_prompt:
             _STATE.clear()
-            _STATE["prompt_id"] = str(prompt_id or "")
+            return
+        if _STATE.get("prompt_id") != bound_prompt or _STATE.get("base") != normalized_base:
+            _STATE.clear()
+            _STATE.update(prompt_id=bound_prompt, base=normalized_base, generation=object())
+        generation = _STATE["generation"]
     payload = _fetch_raw(base)
     if not isinstance(payload, dict):
         return
     entries = payload.get("entries")
     if not isinstance(entries, list):
         return
+    with _LOCK:
+        if _STATE.get("generation") is not generation:
+            return
+        if "log_floor" not in _STATE:
+            # 日志没有 prompt_id，首次看到运行时不能把已有末行直接贴给新任务。
+            # 使用日志自身时间作为游标，避免把刚结束的上一任务进度重新标成新任务。
+            _STATE["log_floor"] = max((_entry_stamp_ms(row.get("t")) for row in entries
+                                      if isinstance(row, dict)), default=0)
+            return
+        log_floor = _STATE["log_floor"]
     for entry in reversed(entries):
         message = entry.get("m") if isinstance(entry, dict) else None
         if not isinstance(message, str):
@@ -123,11 +139,13 @@ def observe(base: str, prompt_id: str) -> None:
         # 时间戳解析不动（updated_at=0）时不用该行：旧行会被误判成「永远新鲜」，
         # 新任务开局会把上一次生成留在缓冲里的进度当现势数据显示。
         updated_at = _entry_stamp_ms(entry.get("t") if isinstance(entry, dict) else None)
-        if updated_at <= 0:
+        if updated_at <= 0 or updated_at <= log_floor:
             continue
         with _LOCK:
+            if _STATE.get("generation") is not generation:
+                return
             _STATE.update({
-                "prompt_id": str(prompt_id or ""),
+                "prompt_id": bound_prompt,
                 "value": parsed["value"],
                 "max": parsed["max"],
                 "rate": parsed["rate"],

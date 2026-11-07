@@ -19,6 +19,7 @@ const MAX_BATCH_BYTES = 1024 * 1024 * 1024;
 const UPLOAD_CONCURRENCY = 3;
 const POLL_MS = 1200;
 const SEARCH_DEBOUNCE_MS = 300;
+const MAX_SYSTEM_PROMPT = 12000;
 
 const STATUS_LABELS = {
   queued: "排队中",
@@ -71,6 +72,7 @@ const labeler = {
   // 预设打标 / 自定义打标 两页签（写进 #studioPageLabeler 的 data-labeler-page）。
   page: "preset",
 };
+let skillLoadRequest = 0;
 
 // ============================================================
 // 小工具
@@ -339,6 +341,7 @@ function currentLabelerPage() {
 
 function setLabelerPage(page) {
   const next = page === "custom" ? "custom" : "preset";
+  if (next !== labeler.page) invalidateSkillLoad();
   labeler.page = next;
   const page2 = $("#studioPageLabeler");
   if (page2) page2.dataset.labelerPage = next;
@@ -376,6 +379,18 @@ function setSkillNote(text, isError = false) {
   node.classList.toggle("error", Boolean(isError));
 }
 
+function setSkillLoadBusy(busy) {
+  for (const id of ["#labelerSkillLoadFull", "#labelerSkillLoadBody"]) {
+    const button = $(id);
+    if (button) button.disabled = busy;
+  }
+}
+
+function invalidateSkillLoad() {
+  skillLoadRequest += 1;
+  setSkillLoadBusy(false);
+}
+
 // mode="full" = 完整 SKILL.md 全文（含头部元数据）；mode="body" = 去掉头部元数据的纯正文。
 async function loadSkillContent(mode) {
   const select = $("#labelerSkillSelect");
@@ -384,24 +399,34 @@ async function loadSkillContent(mode) {
     setSkillNote("先在下拉里选一个 Skill", true);
     return;
   }
-  const button = mode === "body" ? $("#labelerSkillLoadBody") : $("#labelerSkillLoadFull");
-  if (button) button.disabled = true;
+  const textarea = $("#labelerCustomSystemPrompt");
+  const initialText = String(textarea?.value || "");
+  const page = currentLabelerPage();
+  const request = ++skillLoadRequest;
+  const current = () => request === skillLoadRequest && String(select?.value || "").trim() === id
+    && currentLabelerPage() === page && String(textarea?.value || "") === initialText;
+  setSkillLoadBusy(true);
   setSkillNote("正在读取 Skill…");
   try {
     const payload = await api("/api/skills/content", { method: "POST", body: { id } });
+    if (!current()) return;
     const text = mode === "body" ? String(payload.body || "") : String(payload.content || "");
-    const textarea = $("#labelerCustomSystemPrompt");
+    if (text.length > MAX_SYSTEM_PROMPT) {
+      setSkillNote(`这份 Skill 有 ${text.length} 字，超过提示词上限 ${MAX_SYSTEM_PROMPT} 字；原提示词已保留，请精简后再使用。`, true);
+      return;
+    }
     if (textarea) textarea.value = text;
     const flavor = mode === "body" ? "正文（已去头部元数据）" : "完整 Skill 全文（含头部元数据）";
     setSkillNote(`已把 Skill「${String(payload.name || id)}」${flavor}灌进提示词框（${text.length} 字），可以直接手改或清空。`);
   } catch (error) {
-    setSkillNote(`Skill 读取失败：${error.message}`, true);
+    if (current()) setSkillNote(`Skill 读取失败：${error.message}`, true);
   } finally {
-    if (button) button.disabled = false;
+    if (request === skillLoadRequest) setSkillLoadBusy(false);
   }
 }
 
 function clearSystemPrompt() {
+  invalidateSkillLoad();
   const textarea = $("#labelerCustomSystemPrompt");
   if (textarea) textarea.value = "";
   setSkillNote("已清空系统提示词。");
@@ -698,6 +723,10 @@ async function startTask() {
   }
   if (currentLabelerPage() === "custom" && !String(config.system_prompt || "").trim()) {
     setHint("自定义打标要先填写系统提示词（或从 Skill 载入正文）", true);
+    return;
+  }
+  if (String(config.system_prompt || "").length > MAX_SYSTEM_PROMPT) {
+    setHint(`系统提示词不能超过 ${MAX_SYSTEM_PROMPT} 字，请精简后再提交`, true);
     return;
   }
   if (config.trigger_word.enabled && !config.trigger_word.value) {
@@ -1495,6 +1524,14 @@ export function bindLabelerEvents() {
   $("#labelerSkillLoadFull")?.addEventListener("click", () => { void loadSkillContent("full"); });
   $("#labelerSkillLoadBody")?.addEventListener("click", () => { void loadSkillContent("body"); });
   $("#labelerSkillClear")?.addEventListener("click", clearSystemPrompt);
+  $("#labelerSkillSelect")?.addEventListener("change", () => {
+    invalidateSkillLoad();
+    setSkillNote("");
+  });
+  $("#labelerCustomSystemPrompt")?.addEventListener("input", () => {
+    invalidateSkillLoad();
+    setSkillNote("提示词已手动修改。");
+  });
   $("#studioPageLabeler .labeler-result-tabs")?.addEventListener("click", (event) => {
     const btn = event.target.closest("[data-labeler-result]");
     if (!btn) return;
@@ -1521,6 +1558,7 @@ export function bindLabelerEvents() {
   // 功能页切换：切走暂停轮询，切回来按服务端校准。
   onStudioPageChange((next, detail) => {
     if (detail?.closed || next !== "labeler") {
+      invalidateSkillLoad();
       stopPolling();
       return;
     }

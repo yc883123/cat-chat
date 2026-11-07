@@ -118,6 +118,22 @@ class StepMeterStateTests(unittest.TestCase):
         self.assertIsNone(stepmeter.snapshot_for(["pid-1"]))
         self.assertIsNotNone(stepmeter.snapshot_for(["pid-2"]))
 
+    def test_iso_timestamp_accepted(self):
+        # ComfyUI logger 的 t 是 datetime.now().isoformat() 字符串：新鲜期按真实时刻算。
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+        payload = {"entries": [{"t": stamp, "m": _tqdm_line(3, 8)}]}
+        self._with_fetch(payload, lambda: stepmeter.observe("http://127.0.0.1:9", "pid-1"))
+        snap = stepmeter.snapshot_for(["pid-1"])
+        self.assertIsNotNone(snap)
+        self.assertEqual((snap["value"], snap["max"]), (3, 8))
+
+    def test_unparseable_timestamp_row_skipped(self):
+        # 时间戳解析不动的行不能进状态：旧行会被误判成永远新鲜，
+        # 新任务开局会把上一次生成留在缓冲里的进度当现势数据显示。
+        payload = {"entries": [{"t": "not-a-time", "m": _tqdm_line(8, 8)}]}
+        self._with_fetch(payload, lambda: stepmeter.observe("http://127.0.0.1:9", "pid-1"))
+        self.assertIsNone(stepmeter.snapshot_for(["pid-1"]))
+
 
 class StepExposureTests(unittest.TestCase):
     """jobs._running_step 出口：running + 归属命中才带 step，其余 None。"""

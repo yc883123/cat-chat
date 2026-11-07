@@ -20,6 +20,7 @@ import json
 import re
 import threading
 import time
+from datetime import datetime
 from typing import Any
 from urllib.error import HTTPError
 from urllib.request import build_opener
@@ -52,6 +53,24 @@ def _fetch_raw(base: str) -> dict[str, Any] | None:
         return None
     except Exception:  # noqa: BLE001 - 网络抖动视为本轮没有数据
         return None
+
+
+def _entry_stamp_ms(stamp: Any) -> int:
+    """日志条目时间戳 → epoch 毫秒；解析不动返回 0（视为无时间，不参与新鲜期）。
+
+    ComfyUI logger 的 ``t`` 是 ``datetime.now().isoformat()`` 字符串；也兼容
+    秒/毫秒数字（不同版本实现有差异）。
+    """
+    if isinstance(stamp, (int, float)) and stamp > 0:
+        # 秒级时间戳（< 1e11）转毫秒；毫秒级原样。
+        return int(stamp) if stamp > 1e11 else int(stamp * 1000)
+    text = str(stamp or "").strip()
+    if not text:
+        return 0
+    try:
+        return int(datetime.fromisoformat(text).timestamp() * 1000)
+    except (TypeError, ValueError):
+        return 0
 
 
 def parse_progress(text: str) -> dict[str, Any] | None:
@@ -101,11 +120,11 @@ def observe(base: str, prompt_id: str) -> None:
         parsed = parse_progress(message)
         if parsed is None:
             continue
-        stamp = entry.get("t") if isinstance(entry, dict) else None
-        try:
-            updated_at = int(stamp)
-        except (TypeError, ValueError):
-            updated_at = int(time.time() * 1000)
+        # 时间戳解析不动（updated_at=0）时不用该行：旧行会被误判成「永远新鲜」，
+        # 新任务开局会把上一次生成留在缓冲里的进度当现势数据显示。
+        updated_at = _entry_stamp_ms(entry.get("t") if isinstance(entry, dict) else None)
+        if updated_at <= 0:
+            continue
         with _LOCK:
             _STATE.update({
                 "prompt_id": str(prompt_id or ""),

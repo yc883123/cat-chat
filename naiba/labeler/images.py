@@ -4,7 +4,7 @@
 - 只接受落在 ``data_dir/uploads`` 受管缓存树内的文件（``resolve()`` 会展开 junction /
   symlink，再判包含关系，绕出 uploads 的路径一律拒绝）；
 - 扩展名白名单 + Pillow 真正解码一次（改后缀骗不过去）；
-- 单张 20 MiB、每批最多 500 张、每批合计 1 GiB；超限**拒绝启动批次**，不静默截断。
+- 单张缓存 20 MiB、每批最多 9999 张、缓存总量 20 GiB；超限**拒绝启动批次**，不静默截断。
 
 输出统一为 ``{path, path_key, name, relative_path, size, mtime_ns, content_version}``；
 ``relative_path`` 只来自前端枚举出来的相对名称，服务端绝不拿它拼落盘路径。
@@ -22,9 +22,10 @@ from naiba.labeler.originals import normalize_digest
 from naiba.storage.media import is_uploads_path
 
 ALLOWED_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif"})
-MAX_BATCH_IMAGES = 500
+MAX_BATCH_IMAGES = 9999
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
-MAX_BATCH_BYTES = 1024 * 1024 * 1024
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+MAX_BATCH_BYTES = 20 * 1024 * 1024 * 1024
 NAME_MAX = 200
 RELATIVE_PATH_MAX = 400
 
@@ -64,7 +65,7 @@ def _verify_image(path: Path, label: str) -> None:
         raise LabelerImageError(f"{label}是空文件")
     if size > MAX_IMAGE_BYTES:
         limit_mb = MAX_IMAGE_BYTES // (1024 * 1024)
-        raise LabelerImageError(f"{label}超过 {limit_mb}MB 上限")
+        raise LabelerImageError(f"{label}缓存图超过 {limit_mb}MB 上限")
     try:
         from PIL import Image
 
@@ -76,20 +77,16 @@ def _verify_image(path: Path, label: str) -> None:
         raise LabelerImageError(f"{label}不是可读取的图片：{exc}") from exc
 
 
-def verify_image_bytes(name: str, data: bytes) -> None:
-    """上传入口的字节级校验：与 ``_verify_image`` 同口径，只是数据已在内存里。
-
-    打标专用上传在落盘前先拦（格式 / 空文件 / 20 MiB / Pillow 真解码一次），
-    让用户在上传阶段就看到和提交阶段一致的错误，而不是等提交批次才失败。
-    """
+def verify_image_bytes(name: str, data: bytes, *, max_bytes: int | None = None) -> None:
+    """验证上传源图；贴签上传可以先保留大于缓存上限的原图字节。"""
     suffix = Path(str(name or "")).suffix.lower()
     if suffix not in ALLOWED_IMAGE_EXTS:
         raise LabelerImageError("格式不支持（只接受 PNG、JPG、WEBP、GIF）")
     if not data:
         raise LabelerImageError("是空文件")
-    if len(data) > MAX_IMAGE_BYTES:
-        limit_mb = MAX_IMAGE_BYTES // (1024 * 1024)
-        raise LabelerImageError(f"超过 {limit_mb}MB 上限")
+    if max_bytes is not None and len(data) > int(max_bytes):
+        limit_mb = int(max_bytes) // (1024 * 1024)
+        raise LabelerImageError(f"原图超过上传上限（{limit_mb}MB）")
     try:
         from PIL import Image
 
@@ -146,7 +143,10 @@ def validate_image_refs(data_dir: Path, refs: Any) -> list[dict[str, Any]]:
             stat = path.stat()
         except OSError as exc:
             raise LabelerImageError(f"{label}读取失败：{exc}") from exc
-        total_bytes += int(stat.st_size)
+        cache_size = int(ref.get("cache_size") or stat.st_size)
+        if cache_size <= 0 or cache_size > MAX_IMAGE_BYTES or cache_size != int(stat.st_size):
+            raise LabelerImageError(f"{label}缓存大小信息无效或超过 20 MiB，请重新上传")
+        total_bytes += cache_size
         if total_bytes > MAX_BATCH_BYTES:
             limit_gb = MAX_BATCH_BYTES / (1024 * 1024 * 1024)
             raise LabelerImageError(

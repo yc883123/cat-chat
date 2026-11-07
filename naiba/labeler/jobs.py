@@ -173,12 +173,11 @@ def normalize_config(app: Any, raw: Any, *, allow_legacy_language: bool = False)
         if not skill_id:
             raise LabelerTaskError("对话引擎（Skill 打标）要先选择 Skill")
         skill_revision = _skill_revision(app, skill_id)
-    # system_prompt：键存在 = 自定义打标档，整段手输提示词即全部规则，
-    # 预设的忽略词/输出规则不叠加（build_prompt 按键走分支）。
+    # chat 引擎可同时携带手写 Agent system prompt 与完整 Skill。
     system_prompt = ""
-    if raw.get("system_prompt") is not None and engine != "chat":
+    if raw.get("system_prompt") is not None:
         system_prompt = str(raw.get("system_prompt")).strip()
-        if not system_prompt:
+        if not system_prompt and engine != "chat":
             raise LabelerTaskError("自定义打标必须填写系统提示词")
     output_mode = str(raw.get("output_mode") or "keywords").strip()
     if output_mode == "auto" and not system_prompt and engine != "chat":
@@ -251,11 +250,9 @@ def normalize_config(app: Any, raw: Any, *, allow_legacy_language: bool = False)
         "timeout_seconds": timeout_seconds,
         "prompt_version": prompt_version,
     }
-    # 预设档不落 system_prompt 键：快照往返（继续/恢复）时「键在 = 自定义档」
-    # 的判断才稳定；空串落键会把旧任务误判成「自定义档空提示词」。
+    # 预设档空提示词省键；chat 可同时保存手写 system prompt 与 Skill 快照。
     if system_prompt:
         config["system_prompt"] = system_prompt
-    # chat 档才落 skill 键：provider 档指纹保持与旧版本逐字节一致（复用不失效）。
     if engine == "chat":
         config["skill_id"] = skill_id
         config["skill_revision"] = skill_revision
@@ -364,10 +361,21 @@ class LabelerJobManager:
         counts = self.db.counts(task_id)
         task["progress"] = self._progress(counts)
         task["counts"] = counts
-        task["items"] = self._public_items(task_id)
+        task["items"] = self._public_items(task_id, limit=500) if str(task.get("status") or "") in LABELER_ACTIVE_STATUSES else []
+        task["items_total"] = counts.get("total", 0)
         task["can_continue"] = self._can_continue(task, counts)
+        task["can_retry_failed"] = bool(int(counts.get("failed") or 0)) and str(task.get("status") or "") not in LABELER_ACTIVE_STATUSES
         task["uncertain_count"] = int(counts.get("uncertain") or 0)
         return task
+
+    def task_items(self, task_id: str, *, offset: int = 0, limit: int = 500) -> dict[str, Any] | None:
+        task = self.store.get_task(task_id)
+        if task is None:
+            return None
+        rows = self.db.list_items(task_id, limit=max(1, min(int(limit), 1000)), offset=max(0, int(offset)))
+        return {"items": self._public_items_from_rows(rows),
+                "offset": max(0, int(offset)), "count": len(rows),
+                "total": self.db.counts(task_id).get("total", 0)}
 
     def events(self, task_id: str, after: int = 0) -> list[dict[str, Any]]:
         return self.store.read_events(task_id, after=after)
@@ -447,7 +455,9 @@ class LabelerJobManager:
         refs = [ref for ref in (source_input.get("image_refs") or []) if isinstance(ref, dict)]
         if not refs:
             raise LabelerTaskError("源任务没有可继续的图片")
-        items = self.db.list_items(task_id, limit=5000)
+        if len(refs) > 10000:
+            raise LabelerTaskError("源任务图片清单超过处理上限，未继续任何图片")
+        items = self.db.list_items(task_id, limit=10000)
         by_identity = {
             (str(item.get("path_key") or ""), str(item.get("content_version") or "")): item
             for item in items
@@ -463,10 +473,11 @@ class LabelerJobManager:
             if state == "succeeded":
                 skipped_succeeded += 1
                 continue
-            if state == "uncertain" and not confirm_uncertain:
+            if mode == "failed_only":
+                if state != "failed":
+                    continue
+            elif state == "uncertain" and not confirm_uncertain:
                 skipped_uncertain += 1
-                continue
-            if mode == "failed_only" and state not in {"failed", "uncertain"}:
                 continue
             if state == "running":
                 # 理论上恢复后不会残留；保守当作不确定，需要确认。
@@ -482,6 +493,10 @@ class LabelerJobManager:
             raise LabelerTaskError(reason)
         # 重新校验受管引用：原图可能已被缓存清理（引用保护失效的极端情况）。
         config = dict(source_input.get("config") or {})
+        if str(config.get("engine") or "") == "chat" and str(config.get("skill_revision") or ""):
+            current_revision = _skill_revision(self.app, str(config.get("skill_id") or ""))
+            if current_revision != str(config.get("skill_revision") or ""):
+                raise LabelerTaskError("源任务使用的 Skill 已变化；为避免换规则重试，请按当前 Skill 新建批次")
         # 重试沿用原快照；模型配置若已失效，提交时解析会明确报错。
         # 历史快照可能带「mixed + 非标签加自然语言」的旧默认组合：继续时原样放行。
         config.pop("config_fingerprint", None)
@@ -572,8 +587,11 @@ class LabelerJobManager:
             return f"{first} 等 {count} 张"
         return f"{count} 张图片"
 
-    def _public_items(self, task_id: str) -> list[dict[str, Any]]:
-        rows = self.db.list_items(task_id, limit=2000)
+    def _public_items(self, task_id: str, *, limit: int = 10000) -> list[dict[str, Any]]:
+        return self._public_items_from_rows(self.db.list_items(task_id, limit=limit))
+
+    @staticmethod
+    def _public_items_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for row in rows:
             out.append({

@@ -203,21 +203,21 @@ class LabelerDB:
         return len(rows)
 
     def list_items(self, task_id: str, states: tuple[str, ...] | None = None,
-                   limit: int = 2000) -> list[dict[str, Any]]:
+                   limit: int = 10000, offset: int = 0) -> list[dict[str, Any]]:
         sql = "SELECT * FROM task_items WHERE task_id=?"
         params: list[Any] = [task_id]
         if states:
             placeholders = ",".join("?" for _ in states)
             sql += f" AND state IN ({placeholders})"
             params.extend(states)
-        sql += " ORDER BY ordinal ASC LIMIT ?"
-        params.append(int(limit))
+        sql += " ORDER BY ordinal ASC LIMIT ? OFFSET ?"
+        params.extend((max(1, int(limit)), max(0, int(offset))))
         with self._connect() as db:
             rows = db.execute(sql, params).fetchall()
         return [self._item_row(row) for row in rows]
 
     def pending_items(self, task_id: str) -> list[dict[str, Any]]:
-        return self.list_items(task_id, states=("queued",))
+        return self.list_items(task_id, states=("queued",), limit=10000)
 
     @_retry_transient
     def mark_running(self, task_id: str, item_id: str) -> None:
@@ -423,7 +423,7 @@ class LabelerDB:
         return self._annotation_row(row) if row else None
 
     def annotations(self, *, path_key: str = "", task_id: str = "", query: str = "",
-                    limit: int = 500) -> list[dict[str, Any]]:
+                    limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
         # task_id 走 task_items JOIN：标注行归属「第一个产出它的任务」（复用不改归属），
         # 但每个任务仍要能看到自己用到的那份结果，导出也只按该任务的实际项。
         if task_id:
@@ -444,10 +444,10 @@ class LabelerDB:
                     f" OR lower({prefix}tags_json) LIKE ? OR lower({prefix}description) LIKE ?)")
             params.extend([like, like, like, like])
         if task_id:
-            sql += " ORDER BY i.ordinal ASC LIMIT ?"
+            sql += " ORDER BY i.ordinal ASC LIMIT ? OFFSET ?"
         else:
-            sql += f" ORDER BY {prefix}updated_at DESC, {prefix}id DESC LIMIT ?"
-        params.append(max(1, min(int(limit), 2000)))
+            sql += f" ORDER BY {prefix}updated_at DESC, {prefix}id DESC LIMIT ? OFFSET ?"
+        params.extend((max(1, min(int(limit), 10000)), max(0, int(offset))))
         with self._connect() as db:
             rows = db.execute(sql, params).fetchall()
         return [self._annotation_row(row) for row in rows]

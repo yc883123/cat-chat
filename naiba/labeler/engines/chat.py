@@ -50,6 +50,7 @@ class ChatSkillEngine:
         self._event_sink = event_sink
         # 多轮工具循环的真实用量：SkillAgent.run 返回汇总，runner 优先读这里。
         self.last_usage: dict[str, Any] = {}
+        self.last_run_context: dict[str, Any] = {}
 
     def _build_worker(self, task_label: str) -> tuple[Any, Any]:
         """对话同款的 SkillAgent 装配（subagent.py:241-246 先例），全部无会话落库。"""
@@ -136,6 +137,7 @@ class ChatSkillEngine:
             "confirmation_ui": False,
         }
         try:
+            self.last_run_context = run_context
             text, _runs, _reasonings, usage = worker.run(
                 "",
                 history,
@@ -143,7 +145,7 @@ class ChatSkillEngine:
                 dict(options),
                 {"mode": "exclusive", "skill_ids": [skill_id]},
                 [],
-                "",  # 无 Agent 人设：Skill 即全部规则
+                str(self.config.get("system_prompt") or ""),  # Agent system prompt 与 Skill 一同注入
                 list(CHAT_ALLOWED_TOOLS),
                 self._bridge_event(image_name),
                 cancel_event,

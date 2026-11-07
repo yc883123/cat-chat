@@ -72,6 +72,7 @@ def store_uploaded_file(
     data_dir: Path,
     imaging: dict[str, Any] | None = None,
     dedupe: bool = True,
+    max_bytes: int | None = None,
 ) -> dict[str, str | int]:
     """存储一次上传：图片处理 → 内容级去重 → 分日目录原子落盘。
 
@@ -89,7 +90,12 @@ def store_uploaded_file(
     imaging = dict(imaging or {})
     name = Path(str(filename or "upload.bin")).name
     safe_name = _UPLOAD_SAFE_NAME_RE.sub("_", name) or "upload.bin"
-    main_bytes, thumb_name, thumb_bytes = _process_uploaded_image(data, name, imaging)
+    if max_bytes is None:
+        main_bytes, thumb_name, thumb_bytes = _process_uploaded_image(data, name, imaging)
+    else:
+        main_bytes, thumb_name, thumb_bytes = process_labeler_image(data, name, imaging, int(max_bytes))
+    if max_bytes is not None and len(main_bytes) > int(max_bytes):
+        raise ValueError("贴签缓存图超过大小上限")
     digest = hashlib.sha256(main_bytes).hexdigest()
     # 内容级去重（uploads 内）：同大小候选再比内容哈希（避免全目录哈希开销）。
     existing = _find_duplicate(uploads_root, len(main_bytes), digest) if dedupe else None
@@ -457,6 +463,49 @@ def _encode_webp_thumb(img: Any, thumb_px: int) -> bytes:
         return buf.getvalue()
     except Exception:  # noqa: BLE001 - thumbnail is best-effort
         return b""
+
+
+def process_labeler_image(data: bytes, filename: str, imaging: dict[str, Any],
+                          max_bytes: int) -> tuple[bytes, str | None, bytes]:
+    """按运行设置处理后，继续压缩贴签缓存副本直至字节上限。"""
+    from PIL import Image, ImageOps
+
+    main_bytes, thumb_name, thumb_bytes = _process_uploaded_image(data, filename, imaging)
+    if len(main_bytes) <= max_bytes:
+        return main_bytes, thumb_name, thumb_bytes
+
+    suffix = Path(filename).suffix.lower()
+    try:
+        with Image.open(io.BytesIO(data)) as source:
+            source.seek(0)
+            fmt = str(source.format or "").upper()
+            image = ImageOps.exif_transpose(source.copy())
+            image.load()
+    except Exception as exc:  # noqa: BLE001 - unsupported decode must fail visibly
+        raise ValueError(f"图片无法解码，不能自动压缩：{exc}") from exc
+
+    if fmt not in {"JPEG", "PNG", "WEBP", "GIF"}:
+        fmt = "PNG"
+    width, height = image.size
+    for factor in (0.8, 0.65, 0.5, 0.4, 0.3, 0.2, 0.12, 0.08):
+        scaled = image.resize((max(1, int(width * factor)), max(1, int(height * factor))), Image.LANCZOS)
+        output = scaled
+        if fmt == "GIF" and output.mode not in ("P", "L"):
+            output = output.convert("P", palette=Image.ADAPTIVE)
+        elif fmt == "JPEG" and output.mode not in ("RGB", "L"):
+            output = output.convert("RGB")
+        buffer = io.BytesIO()
+        save_options = {"optimize": True}
+        if fmt == "WEBP":
+            save_options.update(quality=82, method=6)
+        elif fmt == "JPEG":
+            save_options.update(quality=85, progressive=True)
+        output.save(buffer, format=fmt, **save_options)
+        candidate = buffer.getvalue()
+        if len(candidate) <= max_bytes:
+            thumb_bytes = _encode_webp_thumb(scaled, max(1, int(imaging.get("thumbnail_max_pixels", 500000) or 500000)))
+            return candidate, Path(filename).stem + "_thumb.webp", thumb_bytes
+    raise ValueError(f"自动压缩后仍超过 {max_bytes // (1024 * 1024)}MB，无法生成贴签缓存")
 
 
 def _process_uploaded_image(

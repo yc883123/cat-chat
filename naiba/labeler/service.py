@@ -16,6 +16,7 @@ from naiba.labeler.images import (
     MAX_BATCH_BYTES,
     MAX_BATCH_IMAGES,
     MAX_IMAGE_BYTES,
+    MAX_UPLOAD_BYTES,
     LabelerImageError,
     verify_image_bytes,
 )
@@ -27,7 +28,7 @@ from naiba.labeler.sentences import sentence_stats
 from naiba.labeler.store import LabelerStore
 from naiba.storage.media import store_uploaded_file
 
-EXPORT_MAX_RECORDS = 5000
+EXPORT_MAX_RECORDS = 9999
 
 
 class LabelerService:
@@ -100,7 +101,7 @@ class LabelerService:
         finally:
             spool.unlink(missing_ok=True)
         try:
-            verify_image_bytes(name, data)
+            verify_image_bytes(name, data, max_bytes=MAX_UPLOAD_BYTES)
         except LabelerImageError as exc:
             return {"error": str(exc)}, 400
         data_dir = Path(self.app.paths.data_dir)
@@ -113,13 +114,16 @@ class LabelerService:
         if config is not None:
             imaging = dict((getattr(config, "data", {}) or {}).get("imaging") or {})
         try:
-            result = store_uploaded_file(data, name, data_dir, imaging, dedupe=False)
-        except OSError as exc:
-            return {"error": f"上传保存失败：{exc}"}, 500
+            result = store_uploaded_file(
+                data, name, data_dir, imaging, dedupe=False, max_bytes=MAX_IMAGE_BYTES,
+            )
+        except (OSError, ValueError) as exc:
+            return {"error": f"贴签缓存生成失败：{exc}"}, 400
         return {
             "name": result.get("name") or "",
             "path": result.get("path") or "",
             "size": result.get("size") or 0,
+            "original_size": archived["size"],
             "thumb_path": result.get("thumb_path") or "",
             "deduped": False,
             "original_sha256": archived["sha256"],
@@ -166,6 +170,7 @@ class LabelerService:
             "limits": {
                 "max_batch_images": MAX_BATCH_IMAGES,
                 "max_image_bytes": MAX_IMAGE_BYTES,
+                "max_upload_bytes": MAX_UPLOAD_BYTES,
                 "max_batch_bytes": MAX_BATCH_BYTES,
                 "default_concurrency": DEFAULT_CONCURRENCY,
                 "validated_concurrency": list(VALIDATED_CONCURRENCY),
@@ -190,6 +195,17 @@ class LabelerService:
         if task is None:
             return {"error": "任务不存在"}, 404
         return {"task": task}, 200
+
+    def api_task_items(self, task_id: str, offset: Any = 0, limit: Any = 500) -> tuple[dict[str, Any], int]:
+        try:
+            parsed_offset = max(0, int(str(offset or "0")))
+            parsed_limit = max(1, min(1000, int(str(limit or "500"))))
+        except (TypeError, ValueError):
+            return {"error": "offset / limit 必须是整数"}, 400
+        result = self.jobs.task_items(task_id, offset=parsed_offset, limit=parsed_limit)
+        if result is None:
+            return {"error": "任务不存在"}, 404
+        return result, 200
 
     def api_task_events(self, task_id: str, after: Any = 0) -> tuple[dict[str, Any], int]:
         task = self.store.get_task(task_id)
@@ -269,21 +285,27 @@ class LabelerService:
     # ---- 标注库 ----
 
     def api_annotations(self, *, path_key: str = "", q: str = "", task_id: str = "",
-                        limit: Any = 500) -> tuple[dict[str, Any], int]:
+                        limit: Any = 500, offset: Any = 0) -> tuple[dict[str, Any], int]:
         try:
-            parsed_limit = max(1, min(2000, int(str(limit or "500"))))
+            parsed_limit = max(1, min(1000, int(str(limit or "500"))))
+            parsed_offset = max(0, int(str(offset or "0")))
         except (TypeError, ValueError):
             return {"error": "limit 必须是整数"}, 400
+        if task_id and self.store.get_task(task_id) is None:
+            return {"error": "任务不存在"}, 404
         try:
             rows = self.db.annotations(
                 path_key=str(path_key or "").strip(),
                 task_id=str(task_id or "").strip(),
                 query=str(q or "").strip()[:200],
                 limit=parsed_limit,
+                offset=parsed_offset,
             )
         except LabelerDBError as exc:
             return {"error": str(exc)}, 503
-        return {"annotations": rows, "count": len(rows)}, 200
+        total = int(self.db.counts(task_id).get("done", 0)) if task_id else len(rows)
+        return {"annotations": rows, "count": len(rows), "offset": parsed_offset,
+                "total": total}, 200
 
     def api_tags(self, limit: Any = 200) -> tuple[dict[str, Any], int]:
         try:
@@ -337,11 +359,13 @@ class LabelerService:
         try:
             if isinstance(raw_ids, list) and raw_ids:
                 ids: list[int] = []
-                for value in raw_ids[:EXPORT_MAX_RECORDS]:
+                for value in raw_ids:
                     try:
                         ids.append(int(value))
                     except (TypeError, ValueError):
                         return {"error": "annotation_ids 必须是整数数组"}, 400
+                if len(ids) > EXPORT_MAX_RECORDS:
+                    return {"error": f"一次最多导出 {EXPORT_MAX_RECORDS} 条标注"}, 400
                 records = self.db.annotations_by_ids(ids)
                 label = "选中标注"
             elif task_id:

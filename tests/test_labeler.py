@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from naiba.core.paths import normalized_path_key  # noqa: E402
 from naiba.labeler import LABELER_ITEM_STATES  # noqa: E402
 from naiba.labeler.db import LabelerDB, LabelerDBError  # noqa: E402
-from naiba.labeler.engines.chat import build_chat_prompt  # noqa: E402
+from naiba.labeler.engines.chat import CHAT_ALLOWED_TOOLS, build_chat_prompt  # noqa: E402
 from naiba.labeler.engines.provider import build_prompt, parse_response  # noqa: E402
 from naiba.labeler.export import (  # noqa: E402
     LabelerExportError,
@@ -41,6 +41,7 @@ from naiba.labeler.export import (  # noqa: E402
 )
 from naiba.labeler.images import (  # noqa: E402
     MAX_BATCH_IMAGES,
+    MAX_IMAGE_BYTES,
     LabelerImageError,
     stable_item_id,
     validate_image_refs,
@@ -200,6 +201,13 @@ class LabelerImageTests(unittest.TestCase):
         # 只保留相对名称段，绝不带 .. 或盘符。
         self.assertNotIn("..", refs[0]["relative_path"])
         self.assertNotIn(":", refs[0]["relative_path"])
+
+    def test_batch_cap_is_9999_and_duplicate_refs_still_dedupe(self):
+        refs = [{"path": str(self.upload), "name": str(index)} for index in range(MAX_BATCH_IMAGES)]
+        accepted = validate_image_refs(self.data_dir, refs)
+        self.assertEqual(len(accepted), 1)
+        with self.assertRaises(LabelerImageError):
+            validate_image_refs(self.data_dir, refs + [{"path": str(self.upload)}])
 
     def test_dedupes_same_file_in_one_batch(self):
         refs = validate_image_refs(self.data_dir, [
@@ -488,6 +496,23 @@ class LabelerDBTests(unittest.TestCase):
             "tags": tags or ["cat"], "confidences": [0.9], "description": "",
         }
 
+    def test_pending_items_returns_all_9999_queued_rows(self):
+        items = [self._item(item_id=f"it-{i}", key=f"k{i}", version=f"{i}:1")
+                 for i in range(9999)]
+        self.db.add_items("tg-large", items, "cfg")
+        pending = self.db.pending_items("tg-large")
+        self.assertEqual(len(pending), 9999)
+        self.assertEqual(pending[-1]["item_id"], "it-9998")
+
+    def test_list_items_paginates_without_gaps(self):
+        items = [self._item(item_id=f"it-{i}", key=f"k{i}", version=f"{i}:1") for i in range(5)]
+        self.db.add_items("tg-page", items, "cfg")
+        first = self.db.list_items("tg-page", limit=2, offset=0)
+        second = self.db.list_items("tg-page", limit=2, offset=2)
+        last = self.db.list_items("tg-page", limit=2, offset=4)
+        self.assertEqual([row["item_id"] for row in first + second + last],
+                         [f"it-{i}" for i in range(5)])
+
     def test_complete_item_is_one_transaction_and_counts(self):
         self.db.add_items("tg-1", [self._item()], "cfg-a")
         self.assertEqual(self.db.counts("tg-1")["queued"], 1)
@@ -730,9 +755,13 @@ class LabelerRunnerTests(unittest.TestCase):
         app = self._make_app(_StubModels(behavior))
         _, task = self._submit(app, config=_base_config(retry_limit=0), images=self.images[:2])
         self._wait(task["id"])
+        # 把第二项改为 uncertain：failed_only 不能把它一并带入新任务。
+        with self.db._connect() as db:
+            db.execute("UPDATE task_items SET state='uncertain' WHERE task_id=? AND ordinal=1", (task["id"],))
         jobs = self._jobs(app)
         new_task = jobs.continue_task(task["id"], mode="failed_only")
-        self.assertEqual(self.db.counts(new_task["id"])["total"], 2)
+        self.assertEqual(self.db.counts(new_task["id"])["total"], 1)
+        self.assertEqual(self.db.list_items(new_task["id"])[0]["name"], self.images[0].name)
 
     def test_usage_accumulator_ignores_non_numeric(self):
         merged = aggregate_usage({"total_tokens": 3}, {"total_tokens": 2, "model": "x"})
@@ -1156,6 +1185,34 @@ class LabelerOriginalsTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_large_source_is_archived_exactly_and_cache_is_compressed(self):
+        from naiba.labeler.originals import original_path
+        from PIL import Image
+        import struct
+        import zlib
+
+        source = io.BytesIO()
+        Image.new("RGB", (3000, 3000), (20, 120, 200)).save(source, format="PNG")
+        png = source.getvalue()
+        # A valid ancillary text chunk makes source bytes exceed the cache limit;
+        # Pillow decodes pixels normally and drops metadata on re-encode.
+        payload = b"x" * (21 * 1024 * 1024)
+        chunk = struct.pack(">I", len(payload)) + b"tEXt" + payload
+        chunk += struct.pack(">I", zlib.crc32(b"tEXt" + payload) & 0xFFFFFFFF)
+        source_bytes = png[:-12] + chunk + png[-12:]
+        spool = self.dir / "source.part"
+        spool.write_bytes(source_bytes)
+        service = LabelerService.__new__(LabelerService)
+        service.app = _StubApp(self.dir)
+        response, status = service.api_upload(str(spool), "large.png")
+        self.assertEqual(status, 200, response)
+        self.assertLessEqual(response["size"], MAX_IMAGE_BYTES)
+        self.assertEqual(response["original_size"], len(source_bytes))
+        self.assertEqual(hashlib.sha256(source_bytes).hexdigest(), response["original_sha256"])
+        original = original_path(self.dir, response["original_sha256"])
+        self.assertEqual(original.read_bytes(), source_bytes)
+        self.assertLessEqual(Path(response["path"]).stat().st_size, MAX_IMAGE_BYTES)
 
     def test_archive_is_content_addressed_and_idempotent(self):
         data = _png_bytes()
@@ -1779,6 +1836,27 @@ class LabelerTaskDeleteTests(unittest.TestCase):
         release.set()
         self._wait(task["id"])
 
+    def test_task_detail_and_annotation_pages_cover_full_task(self):
+        task = self._submit(self.images)
+        self._wait(task["id"])
+        service = LabelerService.__new__(LabelerService)
+        service.app = _StubApp(self.data_dir)
+        service.store = self.store
+        service.db = self.db
+        service.jobs = self.jobs
+        detail = self.jobs.task(task["id"])
+        self.assertEqual(detail["items"], [])
+        self.assertEqual(detail["items_total"], len(self.images))
+        self.assertEqual(detail["can_retry_failed"], False)
+        first, status = service.api_task_items(task["id"], offset=0, limit=1)
+        second, status2 = service.api_task_items(task["id"], offset=1, limit=1)
+        self.assertEqual((status, status2), (200, 200))
+        self.assertEqual(first["count"] + second["count"], len(self.images))
+        a, _ = service.api_annotations(task_id=task["id"], offset=0, limit=1)
+        b, _ = service.api_annotations(task_id=task["id"], offset=1, limit=1)
+        self.assertEqual(a["total"], len(self.images))
+        self.assertEqual(len(a["annotations"]) + len(b["annotations"]), len(self.images))
+
     def test_delete_without_ids_clears_all_finished_only(self):
         done = self._submit(self.images[:1])
         self._wait(done["id"])
@@ -2021,14 +2099,15 @@ class LabelerChatEngineTests(unittest.TestCase):
         raw.update(overrides)
         return raw
 
-    def _submit_chat(self, behavior=None, images=None):
+    def _submit_chat(self, behavior=None, images=None, *, system_prompt=""):
         if behavior:
             self.app.models = _StubModels(behavior)
         refs = [
             {"path": str(path), "name": path.name, "relative_path": f"d/{path.name}"}
             for path in (images if images is not None else self.images[:1])
         ]
-        return self.jobs.submit({"image_refs": refs, "config": self._chat_raw()})
+        return self.jobs.submit({"image_refs": refs,
+                                 "config": self._chat_raw(system_prompt=system_prompt)})
 
     def _wait(self, task_id, timeout=10.0):
         deadline = time.time() + timeout
@@ -2041,11 +2120,11 @@ class LabelerChatEngineTests(unittest.TestCase):
         return state
 
     def test_chat_config_valid_and_revision_in_fingerprint(self):
-        config = normalize_config(self.app, self._chat_raw())
+        config = normalize_config(self.app, self._chat_raw(system_prompt="手写规则"))
         self.assertEqual(config["engine"], "chat")
         self.assertEqual(config["skill_id"], self.skill_id)
+        self.assertEqual(config["system_prompt"], "手写规则")
         self.assertTrue(config["skill_revision"])
-        self.assertNotIn("system_prompt", config)
         old_fp = config["config_fingerprint"]
         # Skill 内容变更 → revision 变 → 指纹变：旧标注不再复用（会重新打标计费）。
         skill_md = self.skills_dir / "demo-label-skill" / "SKILL.md"
@@ -2098,6 +2177,26 @@ class LabelerChatEngineTests(unittest.TestCase):
             "prompt_version")}
         self.assertEqual(config_fingerprint({**config, "skill_id": "", "skill_revision": ""}),
                          config_fingerprint(raw_payload))
+
+    def test_chat_system_prompt_and_skill_both_reach_system_channel(self):
+        task = self._submit_chat(system_prompt="额外规则：只看主体")
+        self._wait(task["id"])
+        messages = self.app.models.calls[0]["messages"]
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("额外规则：只看主体", messages[0]["content"])
+        self.assertIn('<skill name="demo-label-skill"', messages[0]["content"])
+        user_image = next(message for message in messages if message["role"] == "user")
+        self.assertTrue(any(isinstance(part, dict) and part.get("type") in {"image_url", "image"}
+                            for part in user_image["content"]))
+        self.assertEqual(CHAT_ALLOWED_TOOLS, ("read_file", "list_directory", "search_files"))
+
+    def test_skill_change_blocks_retry_with_old_snapshot(self):
+        task = self._submit_chat(lambda profile, messages, options, status: (_ for _ in ()).throw(
+            RuntimeError("401 unauthorized")))
+        self._wait(task["id"])
+        (self.skills_dir / "demo-label-skill" / "SKILL.md").write_text("# changed", encoding="utf-8")
+        with self.assertRaisesRegex(LabelerTaskError, "Skill 已变化"):
+            self.jobs.continue_task(task["id"], mode="failed_only")
 
     def test_chat_engine_prose_output_becomes_description(self):
         def behavior(profile, messages, options, status):

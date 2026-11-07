@@ -720,6 +720,13 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/labeler/tasks":
             query = urllib.parse.parse_qs(parsed.query)
             self._json(*self.app.labeler.api_tasks(str(query.get("active_only", [""])[0])))
+        elif path.startswith("/api/labeler/tasks/") and path.endswith("/items"):
+            task_id = path.split("/")[-2]
+            query = urllib.parse.parse_qs(parsed.query)
+            self._json(*self.app.labeler.api_task_items(
+                task_id, str(query.get("offset", ["0"])[0]),
+                str(query.get("limit", ["500"])[0]),
+            ))
         elif path.startswith("/api/labeler/tasks/") and path.endswith("/events"):
             task_id = path.split("/")[-2]
             query = urllib.parse.parse_qs(parsed.query)
@@ -736,6 +743,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 q=str(query.get("q", [""])[0]),
                 task_id=str(query.get("task_id", [""])[0]),
                 limit=str(query.get("limit", ["500"])[0]),
+                offset=str(query.get("offset", ["0"])[0]),
             ))
         elif path == "/api/labeler/sentences/stats":
             query = urllib.parse.parse_qs(parsed.query)
@@ -850,10 +858,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 "可在 设置 → Skills 管理 调大「Skill 大小上限」后重试"
             )
         elif path == "/api/labeler/tasks":
-            # 打标批次含最多 500 条受管图片引用（每条带路径/相对路径/大小），
-            # 远大于 2 MiB 通用上限；图片本体走 /api/uploads，不在这里传输。
-            skill_max_size = 16 * 1024 * 1024
-            skill_oversize_error = "打标批次内容过大（最多 500 张图片引用），请拆分批次后重试"
+            skill_max_size = 32 * 1024 * 1024
+            skill_oversize_error = "贴签批次引用超过 32 MiB 请求上限，请检查路径长度或拆分批次"
         elif path == "/api/comfyui/workflows":
             # 造梦机工作流导入：整个 API 工作流 JSON 在这里传输，上限对齐
             # 聊天域 _load_comfyui_workflow 的 20 MB 文件上限；任务提交走默认上限。
@@ -2352,7 +2358,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0") or 0)
         except ValueError:
             length = 0
-        if length > _UPLOAD_BODY_LIMIT:
+        file_limit = 100 * 1024 * 1024 if labeler else UPLOAD_MAX_BYTES
+        body_limit = _UPLOAD_BODY_LIMIT + 20 * 1024 * 1024 if labeler else _UPLOAD_BODY_LIMIT
+        if length > body_limit:
             self._json({"error": "请求内容过大"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
             return
         if not length:
@@ -2424,7 +2432,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         def on_part_data(data: bytes, start: int, end: int) -> None:
             if state["filename"] and not state["too_large"]:
                 written = end - start
-                if state["written"] + written > UPLOAD_MAX_BYTES:
+                if state["written"] + written > file_limit:
                     state["too_large"] = True
                     return
                 try:
@@ -2474,9 +2482,9 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         spool_path = state["spool"].name
         state["spool"].close()
-        if state["too_large"] or state["written"] > UPLOAD_MAX_BYTES:
+        if state["too_large"] or state["written"] > file_limit:
             Path(spool_path).unlink(missing_ok=True)
-            self._json({"error": "单个文件不能超过 80 MB"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            self._json({"error": f"单个文件不能超过 {file_limit // (1024 * 1024)} MB"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
             return
         if not state["complete"] or not state["filename"] or state["written"] == 0:
             # 客户端中断（abort）或空表单：清理 spool，不返回错误（连接可能已断）。

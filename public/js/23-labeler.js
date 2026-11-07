@@ -12,9 +12,10 @@ import { currentStudioPage, onStudioPageChange } from "./22-studio.js";
 
 // ---- 与服务端一致的批量上限（前端只做提前提示，服务端仍逐项校验） ----
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
-const MAX_BATCH_IMAGES = 500;
+const MAX_BATCH_IMAGES = 9999;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
-const MAX_BATCH_BYTES = 1024 * 1024 * 1024;
+const MAX_SOURCE_IMAGE_BYTES = 100 * 1024 * 1024;
+const MAX_BATCH_BYTES = 20 * 1024 * 1024 * 1024;
 // 上传并发：与聊天附件一致（3），既能跑满带宽又不会打爆连接。
 const UPLOAD_CONCURRENCY = 3;
 const POLL_MS = 1200;
@@ -54,6 +55,7 @@ const labeler = {
   taskId: "",
   task: null,
   items: [],
+  imageResultLimit: 500,
   annotations: [],
   // 按标签视图命中集：与按图共用 annotations 会互相覆盖，单独存一份。
   tagMatches: [],
@@ -135,7 +137,7 @@ function updateSelectedUi() {
   if (counts.failed) parts.push(`失败 ${counts.failed}`);
   summary.textContent = parts.join(" · ");
   strip.replaceChildren(...labeler.selected.slice(0, 60).map((row) => {
-    const item = document.createElement("div");
+      const item = document.createElement("div");
     item.className = "labeler-thumb";
     const img = document.createElement("img");
     img.alt = row.name;
@@ -145,7 +147,7 @@ function updateSelectedUi() {
     img.src = row.objectUrl;
     const label = document.createElement("span");
     const state = row.status === "uploaded" ? "" : `（${
-      row.status === "failed" ? "失败" : row.status === "uploading" ? `${row.progress || 0}%` : "待上传"
+      row.status === "failed" ? "上传失败" : row.status === "uploading" ? (row.processing ? "自动压缩中" : `${row.progress || 0}%`) : "待上传"
     }）`;
     label.textContent = row.name + state;
     label.title = row.relative_path || row.name;
@@ -492,7 +494,6 @@ async function acceptFiles(picked) {
   }
   const images = [];
   let skipped = 0;
-  let totalBytes = 0;
   for (const row of picked) {
     if (!IMAGE_EXTS.has(extOf(row.file.name))) {
       skipped += 1;
@@ -509,15 +510,10 @@ async function acceptFiles(picked) {
     return;
   }
   for (const row of images) {
-    if (row.file.size > MAX_IMAGE_BYTES) {
-      setPickStatus(`「${row.file.name}」超过 ${formatBytes(MAX_IMAGE_BYTES)} 上限：请先压缩后再试`);
+    if (row.file.size > MAX_SOURCE_IMAGE_BYTES) {
+      setPickStatus(`「${row.file.name}」超过上传传输上限 ${formatBytes(MAX_SOURCE_IMAGE_BYTES)}，无法接收`);
       return;
     }
-    totalBytes += row.file.size;
-  }
-  if (totalBytes > MAX_BATCH_BYTES) {
-    setPickStatus(`本批合计 ${formatBytes(totalBytes)}，超过 ${formatBytes(MAX_BATCH_BYTES)} 上限：请拆成多批`);
-    return;
   }
   // 替换旧选择：一次拖入 = 一个批次；重复拖入不会把两批混在一起。
   abortUploads();
@@ -527,6 +523,7 @@ async function acceptFiles(picked) {
     name: row.file.name,
     relative_path: normalizeRelativePath(row.fullPath, row.file.name),
     size: row.file.size,
+    cacheSize: 0,
     status: "pending",
     progress: 0,
     path: "",
@@ -562,10 +559,11 @@ function uploadOne(row, token) {
     const xhr = new XMLHttpRequest();
     row.xhr = xhr;
     row.status = "uploading";
+    row.processing = row.file.size > MAX_IMAGE_BYTES;
     row.progress = 0;
     row.error = "";
-    // 打标专用上传：服务端会另存一份未经缩放的原图（训练包导出用），
-    // 且不做内容去重——同内容但不同文件夹的两张图必须保持两条样本。
+    if (row.processing) setPickStatus(`正在自动压缩「${row.name}」的缓存副本…原图会保留用于导出`);
+    // 打标专用上传：原图留存用于训练包导出，缓存副本按运行设置压缩。
     xhr.open("POST", "/api/labeler/uploads");
     if (state.token) xhr.setRequestHeader("Authorization", `Bearer ${state.token}`);
     xhr.upload.onprogress = (event) => {
@@ -584,6 +582,7 @@ function uploadOne(row, token) {
         row.path = String(payload.path);
         row.thumb_path = String(payload.thumb_path || "");
         row.original_sha256 = String(payload.original_sha256 || "");
+        row.cacheSize = Number(payload.size || 0);
         row.progress = 100;
         // 服务端落盘名以返回为准（含安全字符清洗）。
         if (payload.name) row.name = String(payload.name);
@@ -717,6 +716,11 @@ async function startTask() {
     setHint("请先拖入文件夹并等待图片上传完成", true);
     return;
   }
+  const totalBytes = uploaded.reduce((sum, row) => sum + Number(row.cacheSize || 0), 0);
+  if (totalBytes > MAX_BATCH_BYTES) {
+    setHint(`处理后缓存合计 ${formatBytes(totalBytes)}，超过 ${formatBytes(MAX_BATCH_BYTES)} 上限，请拆分批次`, true);
+    return;
+  }
   const config = collectConfig();
   if (!config.model_key || !config.model_name) {
     setHint("请选择模型配置与模型", true);
@@ -748,6 +752,7 @@ async function startTask() {
           thumb_path: row.thumb_path || "",
           name: row.name,
           relative_path: row.relative_path,
+          cache_size: row.cacheSize,
           original_sha256: row.original_sha256 || "",
         })),
         config,
@@ -797,9 +802,11 @@ async function pollTask() {
     if (labeler.taskId !== taskId) return;
     labeler.task = task;
     labeler.items = task.items || [];
+    labeler.imageResultLimit = 500;
     renderTask(task);
     if (!["queued", "running"].includes(String(task.status || ""))) {
       stopPolling();
+      await loadTaskItems(taskId);
       await loadTaskResults(taskId);
       await refreshBatches();
     }
@@ -824,10 +831,12 @@ async function reconcileTask() {
     if (token !== labeler.detailToken || labeler.taskId !== taskId) return;
     labeler.task = task;
     labeler.items = task.items || [];
+    labeler.imageResultLimit = 500;
     renderTask(task);
     if (["queued", "running"].includes(String(task.status || ""))) startPolling();
     else {
       stopPolling();
+      await loadTaskItems(taskId);
       await loadTaskResults(taskId);
     }
   } catch (error) {
@@ -858,10 +867,18 @@ async function cancelTask() {
 }
 
 async function continueTask() {
+  return retryTask("unfinished");
+}
+
+async function retryFailedTask() {
+  return retryTask("failed_only");
+}
+
+async function retryTask(mode) {
   const taskId = labeler.taskId;
   if (!taskId) return;
   const task = labeler.task || {};
-  const uncertain = Number(task.uncertain_count || 0);
+  const uncertain = mode === "unfinished" ? Number(task.uncertain_count || 0) : 0;
   let confirmUncertain = false;
   if (uncertain > 0) {
     confirmUncertain = window.confirm(
@@ -876,13 +893,14 @@ async function continueTask() {
   try {
     const payload = await api(`/api/labeler/tasks/${encodeURIComponent(taskId)}/retry`, {
       method: "POST",
-      body: { mode: "unfinished", confirm_uncertain: confirmUncertain },
+      body: { mode, confirm_uncertain: confirmUncertain },
     });
     const next = payload.task || {};
     labeler.taskId = String(next.id || "");
     labeler.task = next;
     labeler.items = next.items || [];
     labeler.annotations = [];
+    labeler.annotationTotal = 0;
     labeler.tagMatches = [];
     labeler.tags = [];
     labeler.sentences = [];
@@ -893,7 +911,7 @@ async function continueTask() {
     const notes = [];
     if (skipped) notes.push(`${skipped} 张已完成，未重复调用`);
     if (skippedUncertain) notes.push(`${skippedUncertain} 张结果不确定，本次跳过`);
-    setHint(notes.join("；") || "已创建继续任务");
+    setHint(notes.join("；") || (mode === "failed_only" ? "已创建失败图片重试任务" : "已创建继续任务"));
     await refreshBatches();
     startPolling();
   } catch (error) {
@@ -1054,6 +1072,7 @@ function clearSelectedBatch() {
   labeler.task = null;
   labeler.items = [];
   labeler.annotations = [];
+  labeler.annotationTotal = 0;
   labeler.tagMatches = [];
   labeler.tags = [];
   labeler.sentences = [];
@@ -1107,8 +1126,8 @@ function renderTask(task) {
   }
   const cancelBtn = $("#labelerCancel");
   if (cancelBtn) cancelBtn.hidden = !["queued", "running"].includes(status);
-  const continueBtn = $("#labelerContinue");
-  if (continueBtn) continueBtn.hidden = !task.can_continue;
+  const failedBtn = $("#labelerRetryModelFailed");
+  if (failedBtn) failedBtn.hidden = !task.can_retry_failed;
   renderResultBody();
 }
 
@@ -1145,19 +1164,53 @@ async function ensureTagView() {
   renderResultBody();
 }
 
+async function loadTaskItems(taskId, { reset = false } = {}) {
+  if (reset) labeler.items = [];
+  const pageSize = 500;
+  const offset = labeler.items.length;
+  try {
+    const payload = await api(`/api/labeler/tasks/${encodeURIComponent(taskId)}/items?offset=${offset}&limit=${pageSize}`);
+    if (labeler.taskId !== taskId) return;
+    labeler.items.push(...(payload.items || []));
+    labeler.task = { ...(labeler.task || {}), items_total: Number(payload.total || 0) };
+    renderResultBody();
+  } catch (error) {
+    setHint(`图片列表读取失败：${error.message}`, true);
+  }
+}
+
+async function loadNextTaskItems() {
+  return loadTaskItems(labeler.taskId);
+}
+
 async function loadTaskResults(taskId) {
   try {
-    const { annotations } = await api(
-      `/api/labeler/annotations?task_id=${encodeURIComponent(taskId)}&limit=2000`
-    );
-    labeler.annotations = annotations || [];
+    const payload = await api(`/api/labeler/annotations?task_id=${encodeURIComponent(taskId)}&limit=500&offset=0`);
+    if (labeler.taskId !== taskId) return;
+    labeler.annotations = payload.annotations || [];
+    labeler.annotationTotal = Number(payload.total || 0);
   } catch (error) {
     setHint(`标注结果读取失败：${error.message}`, true);
     labeler.annotations = [];
+    labeler.annotationTotal = 0;
   }
   if (labeler.resultTab === "tags") await loadTags();
   if (labeler.resultTab === "sentences") await loadSentences();
   renderResultBody();
+}
+
+async function loadNextAnnotations() {
+  const taskId = labeler.taskId;
+  if (!taskId || labeler.annotations.length >= Number(labeler.annotationTotal || 0)) return;
+  const offset = labeler.annotations.length;
+  try {
+    const payload = await api(`/api/labeler/annotations?task_id=${encodeURIComponent(taskId)}&limit=500&offset=${offset}`);
+    if (labeler.taskId !== taskId) return;
+    labeler.annotations.push(...(payload.annotations || []));
+    renderResultBody();
+  } catch (error) {
+    setHint(`更多标注读取失败：${error.message}`, true);
+  }
 }
 
 async function loadTags() {
@@ -1247,7 +1300,8 @@ function renderImageResults(body) {
     ));
     return;
   }
-  body.replaceChildren(...rows.map(({ item, annotation }) => {
+  const visible = rows.slice(0, labeler.imageResultLimit);
+  const cards = visible.map(({ item, annotation }) => {
     const card = document.createElement("article");
     card.className = "labeler-anno";
     const head = document.createElement("div");
@@ -1283,8 +1337,24 @@ function renderImageResults(body) {
       err.textContent = `失败原因：${item.error}`;
       card.append(err);
     }
-    return card;
-  }));
+    cards.push(card);
+  });
+  body.replaceChildren(...cards);
+  const hasMoreItems = labeler.items.length < Number(labeler.task?.items_total || labeler.items.length);
+  const hasMoreAnnotations = labeler.annotations.length < Number(labeler.annotationTotal || labeler.annotations.length);
+  if (hasMoreItems || hasMoreAnnotations) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "control-button tiny";
+    more.textContent = hasMoreItems
+      ? `加载更多图片（${labeler.items.length}/${labeler.task?.items_total || 0}）`
+      : `加载更多标注（${labeler.annotations.length}/${labeler.annotationTotal || 0}）`;
+    more.addEventListener("click", () => {
+      if (hasMoreItems) void loadNextTaskItems();
+      else void loadNextAnnotations();
+    });
+    body.append(more);
+  }
 }
 
 function tagList(tags, confidences) {
@@ -1532,6 +1602,7 @@ export function bindLabelerEvents() {
   $("#labelerStart")?.addEventListener("click", () => { void startTask(); });
   $("#labelerCancel")?.addEventListener("click", () => { void cancelTask(); });
   $("#labelerContinue")?.addEventListener("click", () => { void continueTask(); });
+  $("#labelerRetryModelFailed")?.addEventListener("click", () => { void retryFailedTask(); });
   $("#labelerRefreshRecent")?.addEventListener("click", () => { void refreshBatches(); });
   $("#labelerClearFinished")?.addEventListener("click", () => { void clearFinishedBatches(); });
   $("#labelerBatchList")?.addEventListener("click", (event) => {

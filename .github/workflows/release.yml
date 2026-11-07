@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 4.1.5-beta
-  RELEASE_TAG: v4.1.5-beta
+  RELEASE_VERSION: 4.1.6-beta
+  RELEASE_TAG: v4.1.6-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-4.1.5-beta-windows-x64
+  PACKAGE_NAME: cat-chat-4.1.6-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-4.1.5-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-4.1.6-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -47,6 +47,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+          cache: pip
+          cache-dependency-path: .github/workflows/release.yml
 
       - name: Install build dependencies
         run: |
@@ -66,11 +68,7 @@ jobs:
           if (-not (Test-Path "tests")) {
             throw "tests directory not found; refusing to publish without unit tests."
           }
-          # 先复核上一轮 CI 超时的真实前端执行用例，再跑领域与全量门禁。
-          python -u -X faulthandler -m unittest tests.test_comfyui_frontend_assets.ComfyUIFrontendAssets.test_batch_submission_shape_mapping_resolution_and_convert tests.test_comfyui_frontend_assets.ComfyUIFrontendAssets.test_render_content_zone_five_kinds_execute_distinct tests.test_comfyui_module.SaveAsReviewTests.test_problem_classification_is_nameable_and_never_blocks_supported_values -v
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -u -X faulthandler -m unittest tests.test_comfyui_batches tests.test_manju_presets tests.test_supervised_chat_recovery -v
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # 全量发现会覆盖前置专项用例，CI 只运行一次，避免重复消耗数分钟。
           python -u -X faulthandler -m unittest discover -s tests -v
           exit $LASTEXITCODE
 
@@ -135,11 +133,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 4.1.5 Beta release
+      - name: Publish 4.1.6 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 4.1.5 Beta
+          name: Cat Chat 4.1.6 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -149,13 +147,10 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 4.1.5 Beta：贴签匠 Skill 对话引擎、造梦机媒体管理与工作台修复
-            贴签匠 Skill 对话引擎：选中 Skill 后直接运行对话同款 SkillAgent 工具循环，模型可按需读取 Skill 参考文件；仅开放只读文件检索工具，无需把 Skill 正文复制到提示词框。手写规则仍可独立使用，超长内容不截断。
-            Skill 指纹与结果复用：对完整 Skill 文本计算版本指纹，包含 bundle 展示长度以外的尾部内容；Skill 变化后不再沿用旧标注，provider 预设任务的既有指纹保持兼容。
-            标注库管理：新增清空标注库操作，活跃批次期间拒绝清空；删除标注不删原始图片和批次记录。
-            造梦机媒体预览：产物灯箱支持图片、视频和音频在同组连续切换；翻页保留原生另存为路径，屏外产物按需获取。
-            造梦机批次删除与编辑保护：支持逐条删除及多选删除产物，区分删除产物和删除批次；部分删除失败保留失败选择，批次切换和异步回填不会覆盖当前编辑。
-            ComfyUI 进度归属：新任务从新的日志边界读取进度，不再短暂显示上一轮的旧进度；没有可用日志时继续隐藏进度条。
-            工作台与 Agent 修复：贴签匠结果库说明和正文复制、Agent 工具集编辑、KVMem 状态与启动流程、织书台输入和事件处理修正，并更新相关回归覆盖。
-            验证与边界：整合远端 4.1.4-beta 的造梦机预览、删除和异步输入修复，以及本地贴签匠、Agent、KVMem、Studio 和 Writer 改动。实际测试与桌面/375px 手机冒烟结果以本次 CI 和发布核验为准；没有使用付费模型或真实 ComfyUI 生成任务验收。既有数据位置、更新协议和双名称发布资产保持兼容。
-            Cat Chat 4.1.5 Beta Windows build。更新协议、既有数据位置和双名称发布资产保持兼容。
+            Cat Chat 4.1.6 Beta：贴签匠批量处理、提示词组合与重试改进
+            大图自动压缩：超过 20 MiB 的图片保留原始字节用于训练包，贴签匠按运行设置处理缓存副本，并在需要时继续压缩至单图上限。
+            大批次处理：单批最多 9999 张，处理后缓存合计上限 20 GiB；任务结果和标注列表支持分页加载，不静默遗漏尾部条目。
+            贴签提示词：手写系统规则以 Agent system prompt 身份传入；选择 Skill 时与完整 Skill 同时生效，图片和单图处理指令仍作为 user 内容。
+            失败项重试：新增仅重试明确失败图片的入口；不确定结果不混入失败重试，Skill 内容变化时拒绝沿用旧规则重试。
+            兼容性：保留原图、训练包导出和既有更新协议；更新资产继续提供双名称 EXE 与 ZIP。
+            Cat Chat 4.1.6 Beta Windows build。更新协议、既有数据位置和双名称发布资产保持兼容。

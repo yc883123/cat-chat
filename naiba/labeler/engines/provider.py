@@ -205,8 +205,9 @@ class ProviderLabelerEngine:
 
     def __init__(self, app: Any, config: dict[str, Any] | None = None,
                  event_sink: Any = None):
-        # config/event_sink 只有 chat 引擎用；provider 引擎收下但不消费（同构造调用面）。
+        # system_prompt 是 Agent 级规则；图像与每图动作仍保留在 user 消息。
         self.app = app
+        self.config = config or {}
 
     def run(
         self,
@@ -220,6 +221,9 @@ class ProviderLabelerEngine:
         messages, error = build_messages(image_path, prompt)
         if error:
             raise ValueError(error)
+        system_prompt = str(self.config.get("system_prompt") or "").strip()
+        if system_prompt:
+            messages.insert(0, {"role": "system", "content": system_prompt})
         text = str(self.app.models.complete(profile, messages, options, status) or "")
         parsed = parse_response(text)
         parsed["raw"] = text

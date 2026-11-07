@@ -462,7 +462,7 @@
                   <path d="M12 11v5M9.5 13.5 12 11l2.5 2.5"></path>
                 </svg>
                 <p class="labeler-dropzone-title">把文件夹拖到这里</p>
-                <p class="labeler-dropzone-hint">只读取其中的图片，按文件夹结构分组；也可点这里选择文件夹。</p>
+                <p class="labeler-dropzone-hint">只读取其中的图片，按文件夹结构分组；大图会自动压缩处理用副本，原图保留用于训练包。</p>
                 <input type="file" id="labelerFolderInput" webkitdirectory directory multiple hidden>
               </div>
               <p class="labeler-pick-status" id="labelerPickStatus" role="status"></p>
@@ -619,6 +619,7 @@
                 <button class="primary-button" id="labelerStart" type="button">开始打标</button>
                 <button class="control-button" id="labelerCancel" type="button" hidden>取消</button>
                 <button class="control-button" id="labelerContinue" type="button" hidden>继续未完成</button>
+                <button class="control-button" id="labelerRetryModelFailed" type="button" hidden>仅重试打标失败</button>
               </div>
               <p class="labeler-task-hint" id="labelerTaskHint" role="status"></p>
             </section>

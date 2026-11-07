@@ -1,4 +1,4 @@
-# Cat Chat 4.1.6 Beta
+# Cat Chat 4.1.7 Beta
 
 <p align="center">
   <img src="docs/cat-chat-logo.png" alt="Cat Chat" width="520">
@@ -10,12 +10,9 @@ Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把模�
 
 > 历史版本说明见 [CHANGELOG.md](CHANGELOG.md)。
 
-## 4.1.6 Beta 主要能力
-- 贴签匠大图处理：超过 20 MiB 的原图保留原始字节用于训练包；按运行设置处理缓存副本，并自动压缩到单图限制内。
-- 批次容量与结果分页：每批最多 9999 张、缓存合计最多 20 GiB；任务图片和标注结果分批加载。
-- 提示词组合：手写 Agent 系统规则与完整 Skill 同时生效，图像及单图处理指令留在用户消息中。
-- 失败项重试：只重试明确失败的图片；不确定结果单独处理，Skill 变化时阻止按旧规则重试。
-- 贴签匠上传区显示自动压缩状态，上传失败与模型打标失败使用不同状态文案。
+## 4.1.7 Beta 主要能力
+- 修复：贴签匠结果页渲染崩溃——提交打标后前端报「Cannot access 'cards' before initialization」，逐图结果无法显示；批次打标与标注数据不受影响，升级后刷新页面即可查看进度与结果。
+
 
 ## 开始使用
 
@@ -26,7 +23,7 @@ Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把模�
 3. 运行 `cat-chat.exe`。
 4. 在设置中添加在线 API 或本地模型服务。
 
-> 归档里也提供旧名 `naiba-chat-4.1.6-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
+> 归档里也提供旧名 `naiba-chat-4.1.7-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
 
 首次运行会创建本地数据目录。升级时请直接替换程序文件，不要删除原有 `data` 目录和配置文件。
 
@@ -133,7 +130,7 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 - `naiba-chat-update.json` —— 更新清单，其中 `repository` 字段永久写 `yc883123/naiba-chat`
 - `cat-chat.exe` —— 与 `naiba-chat.exe` 是同一文件，SHA-256 完全相同
 - `cat-chat-4.1.6-beta-windows-x64.zip`
-- `naiba-chat-4.1.6-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
+- `naiba-chat-4.1.7-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
 
 更新器会验证清单中的仓库、提交、文件名和 SHA-256。下载文件还必须是有效的 Windows 可执行文件；任何一项不一致都会终止安装。**自动更新始终读取 `naiba-chat.exe` 与清单里的旧仓库名**（GitHub 对旧仓库地址做长期重定向），这是已发布客户端逐字校验的协议，仓库改名后也不改值。
 
@@ -153,7 +150,7 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 ```powershell
 Get-ChildItem public\js\*.js | ForEach-Object { node --check $_.FullName }
 python -m unittest discover -s tests -q
-$env:NAIBA_BUILD_VERSION = "4.1.6-beta"
+$env:NAIBA_BUILD_VERSION = "4.1.7-beta"
 python -m PyInstaller --noconfirm --clean naiba-chat.spec
 ```
 

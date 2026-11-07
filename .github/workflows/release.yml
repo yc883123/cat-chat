@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 4.1.6-beta
-  RELEASE_TAG: v4.1.6-beta
+  RELEASE_VERSION: 4.1.7-beta
+  RELEASE_TAG: v4.1.7-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-4.1.6-beta-windows-x64
+  PACKAGE_NAME: cat-chat-4.1.7-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-4.1.6-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-4.1.7-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -133,11 +133,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 4.1.6 Beta release
+      - name: Publish 4.1.7 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 4.1.6 Beta
+          name: Cat Chat 4.1.7 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -147,10 +147,7 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 4.1.6 Beta：贴签匠批量处理、提示词组合与重试改进
-            大图自动压缩：超过 20 MiB 的图片保留原始字节用于训练包，贴签匠按运行设置处理缓存副本，并在需要时继续压缩至单图上限。
-            大批次处理：单批最多 9999 张，处理后缓存合计上限 20 GiB；任务结果和标注列表支持分页加载，不静默遗漏尾部条目。
-            贴签提示词：手写系统规则以 Agent system prompt 身份传入；选择 Skill 时与完整 Skill 同时生效，图片和单图处理指令仍作为 user 内容。
-            失败项重试：新增仅重试明确失败图片的入口；不确定结果不混入失败重试，Skill 内容变化时拒绝沿用旧规则重试。
-            兼容性：保留原图、训练包导出和既有更新协议；更新资产继续提供双名称 EXE 与 ZIP。
-            Cat Chat 4.1.6 Beta Windows build。更新协议、既有数据位置和双名称发布资产保持兼容。
+            Cat Chat 4.1.7 Beta：修复贴签匠结果页渲染崩溃
+            修复：提交打标后前端报「Cannot access 'cards' before initialization」，逐图结果区显示不出来；批次打标与已产出的标注数据不受影响，升级后刷新页面即可查看进度与结果。
+            验证：贴签匠逐图结果渲染真机验证、全量测试与发布检查通过。
+            Cat Chat 4.1.7 Beta Windows build。更新协议、既有数据位置和双名称发布资产保持兼容。

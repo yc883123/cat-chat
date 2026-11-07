@@ -70,6 +70,9 @@ const labeler = {
   pane: "config",
   // 预设打标 / 自定义打标 两页签（写进 #studioPageLabeler 的 data-labeler-page）。
   page: "preset",
+  // 自定义档选中的 Skill（选中即走对话链路打标，engine=chat + skill_id 提交，
+  // 正文不进提示词框）：{id, name} | null
+  skillPick: null,
 };
 
 // ============================================================
@@ -300,6 +303,8 @@ async function activateLabeler({ refresh = true } = {}) {
       labeler.initialized = true;
       setLabelerPane(labeler.pane);
       setLabelerPage(labeler.page);
+      // 先渲染一次结果区：三档说明行不依赖批次存在，进页就能看到「按图」是什么。
+      renderResultBody();
       await ensurePresets();
       await ensureModels();
       void ensureSkills();
@@ -349,7 +354,14 @@ function setLabelerPage(page) {
   });
 }
 
-// 自定义页的 Skill 下拉：与聊天同一份列表（/api/skills/scan），只做展示与载入入口。
+// 自定义页的 Skill 下拉：与聊天同一份列表（/api/skills/scan），只做展示与选用入口。
+function skillPlaceholderOption() {
+  const option = document.createElement("option");
+  option.value = "";
+  option.textContent = "不用 Skill（手输规则）";
+  return option;
+}
+
 async function ensureSkills() {
   const select = $("#labelerSkillSelect");
   if (!select || select.options.length) return;
@@ -357,14 +369,17 @@ async function ensureSkills() {
     // 与聊天同一份接口：POST 空体（GET 会 404，见 15-bind-events.js 同款调用）。
     const payload = await api("/api/skills/scan", { method: "POST", body: {} });
     const skills = (payload.skills || []).filter((row) => row && row.id);
-    select.replaceChildren(...skills.map((skill) => {
-      const option = document.createElement("option");
-      option.value = String(skill.id || "");
-      option.textContent = `${String(skill.name || skill.id)}（${Number(skill.char_count || 0)} 字）`;
-      return option;
-    }));
+    select.replaceChildren(
+      skillPlaceholderOption(),
+      ...skills.map((skill) => {
+        const option = document.createElement("option");
+        option.value = String(skill.id || "");
+        option.textContent = String(skill.name || skill.id);
+        return option;
+      }),
+    );
   } catch (error) {
-    select.replaceChildren();
+    select.replaceChildren(skillPlaceholderOption());
     setSkillNote(`Skill 列表读取失败：${error.message}`, true);
   }
 }
@@ -376,35 +391,41 @@ function setSkillNote(text, isError = false) {
   node.classList.toggle("error", Boolean(isError));
 }
 
-// mode="full" = 完整 SKILL.md 全文（含头部元数据）；mode="body" = 去掉头部元数据的纯正文。
-async function loadSkillContent(mode) {
+// 自定义档的规则来源切换：选了 Skill 走对话链路（engine=chat，输出规则由 Skill 决定），
+// 没选就走普通单轮打标（手输提示词即规则）。输出形式/语言两行只在手输模式下有意义。
+function syncCustomEngineUi() {
+  const picked = Boolean(labeler.skillPick?.id);
+  const outputRow = $("#labelerCustomOutputRow");
+  if (outputRow) outputRow.hidden = picked;
+}
+
+// 选中即生效：只记录选择，不取正文不显示（对话链路里模型自己按需读 Skill 文件）。
+function applySelectedSkill() {
   const select = $("#labelerSkillSelect");
   const id = String(select?.value || "").trim();
   if (!id) {
-    setSkillNote("先在下拉里选一个 Skill", true);
+    labeler.skillPick = null;
+    setSkillNote("未使用 Skill：用提示词框里的手输内容当打标规则（普通单轮打标）。");
+    syncCustomEngineUi();
     return;
   }
-  const button = mode === "body" ? $("#labelerSkillLoadBody") : $("#labelerSkillLoadFull");
-  if (button) button.disabled = true;
-  setSkillNote("正在读取 Skill…");
-  try {
-    const payload = await api("/api/skills/content", { method: "POST", body: { id } });
-    const text = mode === "body" ? String(payload.body || "") : String(payload.content || "");
-    const textarea = $("#labelerCustomSystemPrompt");
-    if (textarea) textarea.value = text;
-    const flavor = mode === "body" ? "正文（已去头部元数据）" : "完整 Skill 全文（含头部元数据）";
-    setSkillNote(`已把 Skill「${String(payload.name || id)}」${flavor}灌进提示词框（${text.length} 字），可以直接手改或清空。`);
-  } catch (error) {
-    setSkillNote(`Skill 读取失败：${error.message}`, true);
-  } finally {
-    if (button) button.disabled = false;
-  }
+  const name = String(select.selectedOptions?.[0]?.textContent || id);
+  labeler.skillPick = { id, name };
+  setSkillNote(
+    `已选 Skill「${name}」：提交后走对话同款链路打标（模型按 Skill 规则工作、可自行读取其参考文件，`
+    + `不做任何截断），每张图可能多轮工具调用，耗时与费用高于普通打标；输出形式与语言由 Skill 决定。`,
+  );
+  syncCustomEngineUi();
 }
 
 function clearSystemPrompt() {
   const textarea = $("#labelerCustomSystemPrompt");
   if (textarea) textarea.value = "";
-  setSkillNote("已清空系统提示词。");
+  const select = $("#labelerSkillSelect");
+  if (select) select.value = "";
+  labeler.skillPick = null;
+  setSkillNote("已清空手输提示词，并停用已选 Skill（回到普通手输打标）。");
+  syncCustomEngineUi();
 }
 
 // ============================================================
@@ -673,14 +694,19 @@ function collectConfig() {
     prompt_version: 2,
   };
   if (currentLabelerPage() === "custom") {
-    // 自定义档：系统提示词就是全部规则（key 在 = 自定义档）；输出形式/语言默认
-    // 「以提示词为准」（auto）= 不追加规则；预设固定 general 只做噪声清理，
-    // 忽略词/输出规则不叠加，补充要求不参与。
+    // 自定义档：规则来源二选一——选了 Skill 走对话链路（engine=chat + skill_id，
+    // 输出形式/语言/手输提示词都不参与）；没选 Skill 就是手输提示词（键在 = 自定义档），
+    // 输出形式/语言默认「以提示词为准」（auto）= 不追加规则；预设固定 general 只做噪声清理。
     config.output_mode = $("#labelerCustomOutputMode")?.value || "auto";
     config.language = $("#labelerCustomLanguage")?.value || "auto";
     config.preset = "general";
     config.custom_prompt = "";
-    config.system_prompt = String($("#labelerCustomSystemPrompt")?.value || "").trim();
+    if (labeler.skillPick?.id) {
+      config.engine = "chat";
+      config.skill_id = labeler.skillPick.id;
+    } else {
+      config.system_prompt = String($("#labelerCustomSystemPrompt")?.value || "").trim();
+    }
   }
   return config;
 }
@@ -696,8 +722,9 @@ async function startTask() {
     setHint("请选择模型配置与模型", true);
     return;
   }
-  if (currentLabelerPage() === "custom" && !String(config.system_prompt || "").trim()) {
-    setHint("自定义打标要先填写系统提示词（或从 Skill 载入正文）", true);
+  if (currentLabelerPage() === "custom" && !labeler.skillPick?.id
+      && !String(config.system_prompt || "").trim()) {
+    setHint("自定义打标要先选一个 Skill，或在系统提示词框手输规则", true);
     return;
   }
   if (config.trigger_word.enabled && !config.trigger_word.value) {
@@ -994,6 +1021,32 @@ async function clearFinishedBatches() {
   await refreshBatches();
 }
 
+// 清空整个标注库（用户显式操作）：标注全删、复用缓存失效（同图重打会重新计费）；
+// 批次记录不动；原图留存由启动恢复的 prune 链路按保护窗口自然回收。
+async function wipeAnnotations() {
+  if (!window.confirm(
+    "清空整个标注库？\n所有图的标签与描述都会删除，按标签 / 句子库会清空；\n同样的图再打标会重新调用模型、重新计费；\n原图留存失去保护，之后会按缓存策略自动回收。",
+  )) return;
+  const button = $("#labelerWipeAnnotations");
+  if (button) button.disabled = true;
+  try {
+    const payload = await api("/api/labeler/annotations", { method: "DELETE", body: {} });
+    toast(`已清空标注库（${Number(payload.deleted || 0)} 条标注）`);
+  } catch (error) {
+    toast(`清空失败：${error.message}`);
+    return;
+  } finally {
+    if (button) button.disabled = false;
+  }
+  labeler.annotations = [];
+  labeler.tagMatches = [];
+  labeler.tags = [];
+  labeler.sentences = [];
+  // 选中批次还在：逐图行的 annotation_id 已被服务端置空，按服务端详情校准一遍。
+  if (labeler.taskId) await reconcileTask();
+  else renderResultBody();
+}
+
 // 正在查看的批次被删掉时：停轮询、清选择与结果缓存，界面回到未选批次的空态。
 function clearSelectedBatch() {
   stopPolling();
@@ -1146,9 +1199,18 @@ function matchesSearch(row) {
   return haystack.includes(needle);
 }
 
+// 三档结果视图的一句话说明：随当前标签显示在结果区头部（用户口径，不讲内部实现）。
+const RESULT_TAB_HINTS = {
+  images: "当前批次的逐图结果，跟着批次走——批次记录删除后这里会清空；成果仍在标注库，可在「按标签」「句子库」查看或随时导出。",
+  tags: "标注库里全部标签的出现次数，跨批次；点标签可筛出带它的图。",
+  sentences: "描述类输出拆句去重的统计，跨批次；×N 越高说明这句话被重复得越多。",
+};
+
 function renderResultBody(sentencePayload = null) {
   const body = $("#labelerResultBody");
   if (!body) return;
+  const hint = $("#labelerResultsHint");
+  if (hint) hint.textContent = RESULT_TAB_HINTS[labeler.resultTab] || "";
   if (labeler.resultTab === "tags") {
     renderTagCloud(body);
     return;
@@ -1162,7 +1224,7 @@ function renderResultBody(sentencePayload = null) {
 
 function renderImageResults(body) {
   if (!labeler.taskId) {
-    body.replaceChildren(emptyPanel("还没有结果", "拖入文件夹、完成上传并点「开始打标」后，结果会按图片显示在这里。"));
+    body.replaceChildren(emptyPanel("还没有结果", "当前没有选中批次：按图跟的是批次，批次记录删除后这里会清空；标注库里的成果仍可在「按标签」「句子库」查看或随时导出。"));
     return;
   }
   const annotationById = new Map(labeler.annotations.map((row) => [Number(row.id), row]));
@@ -1492,8 +1554,7 @@ export function bindLabelerEvents() {
     if (!btn) return;
     setLabelerPane(btn.dataset.labelerPane);
   });
-  $("#labelerSkillLoadFull")?.addEventListener("click", () => { void loadSkillContent("full"); });
-  $("#labelerSkillLoadBody")?.addEventListener("click", () => { void loadSkillContent("body"); });
+  $("#labelerSkillSelect")?.addEventListener("change", () => { void applySelectedSkill(); });
   $("#labelerSkillClear")?.addEventListener("click", clearSystemPrompt);
   $("#studioPageLabeler .labeler-result-tabs")?.addEventListener("click", (event) => {
     const btn = event.target.closest("[data-labeler-result]");
@@ -1517,6 +1578,7 @@ export function bindLabelerEvents() {
   });
   $("#labelerExport")?.addEventListener("click", () => { void exportResults(); });
   $("#labelerOpenExports")?.addEventListener("click", () => { void openExportFolder(); });
+  $("#labelerWipeAnnotations")?.addEventListener("click", () => { void wipeAnnotations(); });
 
   // 功能页切换：切走暂停轮询，切回来按服务端校准。
   onStudioPageChange((next, detail) => {

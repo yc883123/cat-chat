@@ -27,10 +27,16 @@ async function apiJson(path, options = {}) {
   // 挑一套跨分类的工具（有 MCP 就排除，隔离实例没连 MCP）：24 个，模拟"自定义好的 Agent"。
   // **排除后台创建器**：它们带依赖闭包（run_in_background → job_output/job_status/job_wait/job_kill），
   // 打开编辑器时前端会给 scope 补上闭包，探针就会被"多出来那一件"误判成不一致。
-  // 这与 product 行为无关，只是让这套播种集合自洽（数量变了也不影响断言）。
+  // **排除 opt-in 工具**（当前只有 extract_video_frames_exact，naiba/config.py OPT_IN_TOOLS）：
+  // 「单独授权」与 tool_scope 是两条独立通道，前端打开表单时会把它从 tool_scope 里摘出去
+  // （09-settings.js renderAgentToolPicker 的 optInNames 过滤），且它不渲染进 .permission-grid
+  // （有专门的「单独授权」区块）——混进播种集合会让「清单 == tool_scope」永远差 1。
+  // 口径与 tool_groups_smoke 的播种池一致。这与 product 行为无关，只是让这套播种集合自洽
+  // （数量变了也不影响断言）。
   const CREATOR_TOOLS = new Set(['run_in_background', 'subagent', 'subagent_spawn', 'comfyui_batch']);
+  const OPT_IN_TOOLS = new Set((catalog.tools || []).filter((tool) => tool.opt_in).map((tool) => tool.name));
   const picked = allTools
-    .filter((name) => !name.startsWith('mcp__') && !CREATOR_TOOLS.has(name))
+    .filter((name) => !name.startsWith('mcp__') && !CREATOR_TOOLS.has(name) && !OPT_IN_TOOLS.has(name))
     .slice(0, 24);
   const groupOf = new Map();
   for (const group of catalog.groups || []) {
@@ -50,6 +56,8 @@ async function apiJson(path, options = {}) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   const pageErrors = [];
   page.on('pageerror', (err) => pageErrors.push(`pageerror: ${err.message}`));
+  // 下拉载入「我的工具集」模板会先弹防误触 confirm（自定义未保存组合），accept 让载入生效。
+  page.on('dialog', (dialog) => dialog.accept());
 
   try {
     await page.addInitScript(() => {
@@ -71,9 +79,29 @@ async function apiJson(path, options = {}) {
     await page.click('[data-agent-tab="tools"]');
     await page.waitForTimeout(400);
 
+    // 只读清单默认收起：#agentToolPeekList hidden、#toggleAgentToolPeek 文案「展开清单」、
+    // aria-expanded="false"。要看清单内容必须先点一次按钮，之后变「收起清单」/aria-expanded="true"。
+    const collapsedView = await page.evaluate(() => {
+      const peek = document.querySelector('#agentToolPeekList');
+      const toggle = document.querySelector('#toggleAgentToolPeek');
+      return {
+        peekExists: Boolean(peek),
+        peekHidden: Boolean(peek) && peek.hidden,
+        toggleText: toggle?.textContent.trim() || '',
+        expanded: toggle?.getAttribute('aria-expanded') || '',
+      };
+    });
+    check('只读清单默认收起（按钮提示「展开清单」、aria-expanded=false）',
+      collapsedView.peekExists && collapsedView.peekHidden
+      && collapsedView.toggleText.includes('展开清单') && collapsedView.expanded === 'false',
+      JSON.stringify(collapsedView));
+    await page.click('#toggleAgentToolPeek');
+    await page.waitForTimeout(300);
+
     const cardView = await page.evaluate(() => {
       const peek = document.querySelector('#agentToolPeekList');
       const box = peek.getBoundingClientRect();
+      const toggle = document.querySelector('#toggleAgentToolPeek');
       return {
         summary: document.querySelector('#agentToolPresetState')?.textContent.trim() || '',
         peekExists: Boolean(peek),
@@ -83,12 +111,15 @@ async function apiJson(path, options = {}) {
           name: row.querySelector('b')?.textContent.trim() || '',
           tools: (row.querySelector('span')?.textContent || '').split('、').filter(Boolean),
         })),
-        toggleText: document.querySelector('#toggleAgentToolPeek')?.textContent.trim() || '',
+        toggleText: toggle?.textContent.trim() || '',
+        expanded: toggle?.getAttribute('aria-expanded') || '',
         snippet: (peek.textContent || '').slice(0, 120),
       };
     });
-    check('卡片态存在「当前已选工具」清单且默认展开',
-      cardView.peekExists && cardView.peekVisible && cardView.peekH > 0, JSON.stringify(cardView));
+    check('点一次后清单展开（按钮变「收起清单」、aria-expanded=true）',
+      cardView.peekExists && cardView.peekVisible && cardView.peekH > 0
+      && cardView.toggleText.includes('收起清单') && cardView.expanded === 'true',
+      JSON.stringify(cardView));
     check('摘要仍显示这一套的名字与总数',
       cardView.summary.includes(SET_NAME) && cardView.summary.includes(`${picked.length} 个工具`),
       JSON.stringify(cardView.summary));
@@ -106,9 +137,18 @@ async function apiJson(path, options = {}) {
         wanted: [...wantedGroups] }));
     await page.screenshot({ path: 'verify/tool_peek_smoke_1_cards.png' });
 
-    // 缺陷前提：编辑态默认分组视图是折叠的，看不到具体工具名 → 这正是原来"不知道配了什么"的原因。
-    await page.click(`[data-tool-template-card]`);
-    await page.waitForTimeout(500);
+    // 缺陷前提：分组勾选视图默认折叠，看不到具体工具名 → 这正是原来"不知道配了什么"的原因。
+    // 载入一套「我的工具集」模板：新 DOM 是下拉框，取第一个 template option 的 value 做 selectOption。
+    const templateValue = await page.evaluate(() => {
+      const opt = document.querySelector('#agentToolPresetCards option[data-tool-template-card]');
+      return opt ? opt.value : '';
+    });
+    if (templateValue) {
+      await page.selectOption('#agentToolPresetCards', templateValue);
+      await page.waitForTimeout(500);
+    } else {
+      check('前提：「我的工具集」下拉里至少有一套模板', false, '没有 template option');
+    }
     const grouped = await page.evaluate(() => {
       const scope = document.querySelector('#agentToolScope');
       const groups = [...scope.querySelectorAll('.agent-tool-group')];

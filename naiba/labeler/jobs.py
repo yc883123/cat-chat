@@ -35,26 +35,45 @@ ALLOWED_CONFIG_KEYS = frozenset({
     "engine", "output_mode", "language", "preset", "model_key", "model_name",
     "confidence_threshold", "max_tags", "custom_prompt", "subject_filter",
     "concurrency", "retry_limit", "timeout_seconds", "prompt_version",
-    "trigger_word", "system_prompt",
+    "trigger_word", "system_prompt", "skill_id",
 })
 # 只进指纹的「影响结果」字段：换并发/重试次数/超时不该改变结果身份。
 # trigger_word 进指纹，但「关闭」时按缺省处理（config_fingerprint 里归一化），
 # 这样默认关闭的配置与旧任务指纹一致，已有标注照常复用、不重复计费。
 # system_prompt（自定义打标档）同理：缺省/空串按缺省处理，预设档指纹不变。
+# skill_id/skill_revision（chat 引擎档）同理：skill_revision 由服务端对 Skill 目录
+# 内容算摘要（防客户端谎报），Skill 内容变更后指纹变、旧标注不再复用。
 FINGERPRINT_KEYS = (
     "engine", "output_mode", "language", "preset", "model_key", "model_name",
     "confidence_threshold", "max_tags", "custom_prompt", "subject_filter", "prompt_version",
-    "trigger_word", "system_prompt",
+    "trigger_word", "system_prompt", "skill_id", "skill_revision",
 )
 VALID_STRENGTHS = ("low", "medium", "high")
 MAX_CUSTOM_PROMPT = 2000
-# 自定义打标档的系统提示词上限：要容得下一整段手输规则或灌进来的 Skill 正文。
-MAX_SYSTEM_PROMPT = 12000
 MAX_TRIGGER_WORD = 200
 
 
 class LabelerTaskError(ValueError):
     """任务操作非法（参数/状态）。"""
+
+
+def _skill_revision(app: Any, skill_id: str) -> str:
+    """Skill 目录内容摘要：进指纹用，Skill 文件变了旧标注就不复用（重新打标）。
+
+    复用 catalog.skill_bundle 的收集口径（文本资产全量 + 脚本名单），客户端无法
+    伪造；Skill 不存在时在这里就地报 400 语义的错。
+    """
+    try:
+        payload = app.catalog.skill_bundle(skill_id)
+    except ValueError as exc:
+        raise LabelerTaskError(str(exc)) from exc
+    except (OSError, AttributeError) as exc:
+        raise LabelerTaskError(f"Skill 读取失败：{exc}") from exc
+    digest = hashlib.sha256()
+    digest.update(str(payload.get("bundle") or "").encode("utf-8"))
+    for name in payload.get("script_names") or []:
+        digest.update(f"script:{name}".encode("utf-8"))
+    return digest.hexdigest()[:16]
 
 
 def _normalize_subject_filter(raw: Any) -> dict[str, Any]:
@@ -113,24 +132,33 @@ def normalize_config(app: Any, raw: Any, *, allow_legacy_language: bool = False)
     engine = str(raw.get("engine") or DEFAULT_ENGINE).strip() or DEFAULT_ENGINE
     if engine not in ENGINE_IDS:
         raise LabelerTaskError(f"未知的打标引擎：{engine}")
+    # chat 引擎：Skill 即规则。skill_revision 由服务端对 Skill 目录内容算摘要，
+    # 客户端只报 skill_id；手输提示词/输出形式/输出语言在对话档不生效（Skill 决定）。
+    skill_id = str(raw.get("skill_id") or "").strip()[:160]
+    skill_revision = ""
+    if engine == "chat":
+        if not skill_id:
+            raise LabelerTaskError("对话引擎（Skill 打标）要先选择 Skill")
+        skill_revision = _skill_revision(app, skill_id)
     # system_prompt：键存在 = 自定义打标档，整段手输提示词即全部规则，
     # 预设的忽略词/输出规则不叠加（build_prompt 按键走分支）。
     system_prompt = ""
-    if raw.get("system_prompt") is not None:
-        system_prompt = str(raw.get("system_prompt")).strip()[:MAX_SYSTEM_PROMPT]
+    if raw.get("system_prompt") is not None and engine != "chat":
+        system_prompt = str(raw.get("system_prompt")).strip()
         if not system_prompt:
             raise LabelerTaskError("自定义打标必须填写系统提示词")
     output_mode = str(raw.get("output_mode") or "keywords").strip()
-    if output_mode == "auto" and not system_prompt:
+    if output_mode == "auto" and not system_prompt and engine != "chat":
         raise LabelerTaskError("output_mode=auto（以提示词为准）只在自定义打标下可用")
     if output_mode not in VALID_OUTPUT_MODES and output_mode != "auto":
         raise LabelerTaskError("output_mode 必须是 keywords / phrases / description / both")
     language = str(raw.get("language") or "mixed").strip().lower()
-    if language == "auto" and not system_prompt:
+    if language == "auto" and not system_prompt and engine != "chat":
         raise LabelerTaskError("language=auto（以提示词为准）只在自定义打标下可用")
     if language not in VALID_LANGUAGES and language != "auto":
         raise LabelerTaskError("language 必须是 mixed / zh / en")
-    if language == "mixed" and output_mode not in ("both", "auto") and not allow_legacy_language:
+    if language == "mixed" and output_mode not in ("both", "auto") and not allow_legacy_language \
+            and engine != "chat":
         raise LabelerTaskError(
             "输出语言与输出形式不匹配：「英文标签 + 中文描述」只在「标签 + 自然语言」下可选"
         )
@@ -194,6 +222,10 @@ def normalize_config(app: Any, raw: Any, *, allow_legacy_language: bool = False)
     # 的判断才稳定；空串落键会把旧任务误判成「自定义档空提示词」。
     if system_prompt:
         config["system_prompt"] = system_prompt
+    # chat 档才落 skill 键：provider 档指纹保持与旧版本逐字节一致（复用不失效）。
+    if engine == "chat":
+        config["skill_id"] = skill_id
+        config["skill_revision"] = skill_revision
     config["config_fingerprint"] = config_fingerprint(config)
     return config
 
@@ -213,6 +245,10 @@ def config_fingerprint(config: dict[str, Any]) -> str:
     # 已有标注照常复用；自定义任务因 system_prompt 进指纹天然区分。
     if not str(payload.get("system_prompt") or ""):
         payload.pop("system_prompt", None)
+    # skill 键缺省（provider 档）同理不进指纹：加字段不能让老任务的复用失效。
+    if not str(payload.get("skill_id") or ""):
+        payload.pop("skill_id", None)
+        payload.pop("skill_revision", None)
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "cfg-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
 

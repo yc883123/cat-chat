@@ -364,6 +364,18 @@ class LabelerDB:
             return int(cursor.rowcount or 0)
 
     @_retry_transient
+    def clear_annotations(self) -> int:
+        """清空整个标注库（用户显式操作）：删全部标注行，并清掉逐图行的悬挂引用。
+
+        复用缓存随之失效：同样的图再打标会重新调用模型（重新计费）；
+        原图留存失去标注侧引用，由启动恢复的 prune 链路按保护窗口自然回收。
+        """
+        with self._connect() as db:
+            cursor = db.execute("DELETE FROM annotations")
+            db.execute("UPDATE task_items SET annotation_id=NULL WHERE annotation_id IS NOT NULL")
+            return int(cursor.rowcount or 0)
+
+    @_retry_transient
     def mark_running_as_uncertain(self, task_id: str = "") -> int:
         """启动恢复：``running`` 说明请求已发出但结果没落库（可能已计费）。"""
         with self._connect() as db:

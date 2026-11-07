@@ -277,6 +277,17 @@ class WriterRound3UiTests(unittest.TestCase):
         self.assertIn('$("#writerSplitCount")?.addEventListener("input", syncSplitTotalChars)', self.js)
         self.assertIn("SPLIT_STEP_CHAPTERS = 20", self.js, "与服务端分批常量对齐（提示文案用）")
 
+    def test_split_dialog_is_actually_shown(self):
+        """「接续/覆盖」弹窗必须真的弹出来：startSplit 只挂监听不 showModal 时，
+        <dialog> 没有 open 属性不可见，下面的 Promise 等按钮/close 永远挂着，
+        表现就是「开始拆分」点了毫无反应（2026-11-07 用户报障根因，自 9522d44 起天生如此）。"""
+        block = self.js[self.js.index("async function startSplit("):]
+        block = block[: block.index("\n}", 1) + 2]
+        self.assertIn("if (!dialog.open) dialog.showModal();", block,
+                      "弹窗分支里必须显式 showModal，漏了就是点了没反应")
+        self.assertLess(block.index("dialog.showModal()"), block.index("await new Promise"),
+                        "先 showModal 再开始等接续/覆盖选择，顺序反了同样永远等不到")
+
     def test_generate_skips_empty_catalog_presave(self):
         """一次性生成全部大纲不再被「大纲还是空的」挡住：纯目录不先存（第三次反馈①）。"""
         self.assertIn("async function ensurePartsSavedBeforeGenerate()", self.js)

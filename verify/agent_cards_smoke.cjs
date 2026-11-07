@@ -368,8 +368,12 @@ async function waitForCardCount(page, expected, timeout = 15000) {
       dialog.open === true && dialog.name === '' && dialog.title.includes('新增') && dialog.hasIdField === false,
       JSON.stringify(dialog));
     check('新建时提示 ID 由后台分配', dialog.subtitle.includes('自动分配'), JSON.stringify(dialog.subtitle));
-    // 表单默认停在「基本」页（名称与系统提示词同页），直接填即可。
+    // 名称在「基本」页（默认显示）；系统提示词已搬到 data-agent-panel="prompt" 面板（默认 hidden），
+    // fill 之前必须先切到「提示词」tab，否则 textarea 不可见、fill 会等超时。
+    // 保存按钮在弹层 footer（不在任何 tab panel 内），切页后仍可点。
     await page.fill('#agentName', `${PREFIX}卡片`);
+    await page.click('[data-agent-tab="prompt"]');
+    await page.waitForTimeout(200);
     await page.fill('#agentSystemPromptEdit', '这是冒烟测试用的 Agent 提示词，用来验证卡片摘要渲染。');
     await page.click('#saveAgentForm');
     const closed = await waitForClosed(page);

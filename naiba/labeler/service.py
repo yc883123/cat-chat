@@ -307,6 +307,23 @@ class LabelerService:
             return {"error": str(exc)}, 503
         return sentence_stats(rows, query=str(q or ""), limit=parsed), 200
 
+    def api_annotations_clear(self) -> tuple[dict[str, Any], int]:
+        """清空整个标注库（用户显式操作，前端强确认后才会调到这里）。
+
+        有活跃批次时拒绝：runner 正在写标注，清空会有竞态。原图留存不在
+        这里删：清空后引用集变空，由启动恢复的 prune 链路按保护窗口自然回收。
+        """
+        active = self.store.active_task_ids()
+        if active:
+            return {"error": "还有批次在排队或打标中，先取消或等批次结束后再清空标注库"}, 400
+        try:
+            deleted = self.db.clear_annotations()
+        except LabelerDBError as exc:
+            return {"error": f"标注库繁忙，请稍后重试：{exc}"}, 503
+        except OSError as exc:
+            return {"error": f"清空标注库失败：{exc}"}, 500
+        return {"ok": True, "deleted": deleted}, 200
+
     # ---- 导出 ----
 
     def api_export(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:

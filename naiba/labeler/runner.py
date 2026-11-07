@@ -181,10 +181,27 @@ class LabelerRunner:
                 return
             # 云端与本地 provider 都走同一条 complete()；本地后端的串行由 runtime 的
             # 全局执行锁保证（并发档位仍固定 1）。
-            preset = get_preset(str(config.get("preset") or ""))
-            prompt = build_prompt(config, preset)
+            # chat 引擎（Skill 打标）：Skill 即规则，不走 build_prompt 的指令拼装；
+            # SkillAgent 事件桥接进任务事件流，逐图进度仍由 writer 口径负责。
+            is_chat_engine = str(config.get("engine") or "") == "chat"
+
+            def event_bridge(payload: dict[str, Any]) -> None:
+                try:
+                    self.store.append_event(task_id, payload)
+                except Exception:  # noqa: BLE001 - 事件桥故障绝不影响打标主流程
+                    pass
+
             engine_cls = get_engine(str(config.get("engine") or "provider"))
-            engine = engine_cls(self.app)
+            engine = engine_cls(self.app, config, event_sink=event_bridge)
+            # finalize（置信度过滤/标签清洗/触发词）对 chat 产出同样生效；
+            # chat 档 preset 固定 general，只有 prompt 分支需要区分。
+            preset = get_preset(str(config.get("preset") or ""))
+            if is_chat_engine:
+                from naiba.labeler.engines.chat import build_chat_prompt
+
+                prompt = build_chat_prompt(config)
+            else:
+                prompt = build_prompt(config, preset)
             fingerprint = str(config.get("config_fingerprint") or "")
             retry_limit = max(0, min(5, int(config.get("retry_limit") or 0)))
             timeout_seconds = max(5, min(600, int(config.get("timeout_seconds") or 90)))
@@ -272,6 +289,10 @@ class LabelerRunner:
             "request_timeout_seconds": timeout_seconds,
             **(self.app.config.runtime_guard_options() or {}),
         }
+        if str(config.get("engine") or "") == "chat":
+            # chat 引擎的事件桥需要图片上下文（事件带图片名，逐图可读）。
+            options["item_id"] = str(item_id or "")
+            options["item_name"] = str(item.get("name") or "")
         attempt = 0
         while True:
             if cancel_event.is_set():
@@ -287,8 +308,12 @@ class LabelerRunner:
                     options=options,
                     status=None,
                 )
-                # 诊断读数必须在**本线程**内立刻取（P0-a）。
-                usage = dict(getattr(self.app.models, "last_usage", {}) or {})
+                # 诊断读数必须在**本线程**内立刻取（P0-a）。chat 引擎的多轮循环
+                # 用量在 SkillAgent.run 返回值里汇总（engine.last_usage），比
+                # last_usage（只反映最后一次调用）更真实；provider 引擎维持原口径。
+                engine_usage = getattr(engine, "last_usage", None)
+                usage = dict(engine_usage) if isinstance(engine_usage, dict) and engine_usage \
+                    else dict(getattr(self.app.models, "last_usage", {}) or {})
                 finish_reason = str(getattr(self.app.models, "last_finish_reason", "") or "")
                 tags, confidences = self._finalize_tags(parsed, config, preset)
                 description = self._finalize_description(parsed, config, preset)

@@ -203,7 +203,9 @@ class ProviderLabelerEngine:
 
     id = ENGINE_ID
 
-    def __init__(self, app: Any):
+    def __init__(self, app: Any, config: dict[str, Any] | None = None,
+                 event_sink: Any = None):
+        # config/event_sink 只有 chat 引擎用；provider 引擎收下但不消费（同构造调用面）。
         self.app = app
 
     def run(

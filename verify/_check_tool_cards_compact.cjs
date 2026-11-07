@@ -13,9 +13,20 @@ function check(label, ok, detail = '') {
 (async () => {
   const browser = await chromium.launch({ channel: 'msedge', headless: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  // 8790 隔离配置里 providers 只有占位 base_url ⇒ 全新 profile 首启必弹 #onboardingDialog，
+  // showModal 的 top layer 拦掉后续点击（"dialog intercepts pointer events"）。
+  // 与 agent_prompt_smoke / tool_groups_smoke 同款：initScript 先置 dismissed 标记。
+  await page.addInitScript(() => {
+    try { localStorage.setItem('naibaOnboardingDismissed', '1'); } catch (error) { void error; }
+  });
   const errors = [];
   page.on('pageerror', (err) => errors.push(err.message));
-  page.on('console', (msg) => { if (msg.type() === 'error') errors.push(msg.text()); });
+  // 「Failed to load resource」不带 URL、没法与已知噪音区分：8790 的占位供应商让设置页的
+  // 模型目录探测必然 POST /api/providers/models 400 —— 同款豁免；真实资源问题由逐条带
+  // URL 的 404 监听兜住（本脚本未启用，资源缺失多表现为选择器超时）。
+  page.on('console', (msg) => {
+    if (msg.type() === 'error' && !msg.text().includes('Failed to load resource')) errors.push(msg.text());
+  });
 
   try {
     await page.goto(`${BASE}/`, { waitUntil: 'load', timeout: 20000 });

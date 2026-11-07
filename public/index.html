@@ -146,7 +146,6 @@
               <button class="control-button tiny" id="kvmemRefresh" type="button">刷新</button>
               <button class="control-button tiny" id="kvmemStart" type="button">启动</button>
               <button class="control-button tiny" id="kvmemStop" type="button">停止</button>
-              <button class="control-button tiny" id="kvmemOpen" type="button">打开控制台</button>
             </div>
           </div>
         </div>
@@ -346,7 +345,15 @@
                 </label>
               </div>
               <details class="studio-body-preview" id="studioBodyPreviewWrap" open>
-                <summary>正文预览<em id="studioBodyEditableHint" hidden>（可编辑，保存后生效）</em></summary>
+                <!-- summary 行内右侧的复制按钮：与生成结果区同款 .studio-copy-button，
+                     复制的是当前正文（可编辑态以编辑框现值为准）；点击不折叠预览块（JS 里拦）。 -->
+                <summary>正文预览<em id="studioBodyEditableHint" hidden>（可编辑，保存后生效）</em>
+                  <button class="studio-copy-button" id="studioBodyCopy" type="button" hidden
+                          aria-label="复制正文" title="复制正文">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15V5a2 2 0 0 1 2-2h10"></path></svg>
+                    <span>复制</span>
+                  </button>
+                </summary>
                 <pre class="studio-body-text" id="studioBodyPreview"></pre>
                 <textarea class="studio-body-text" id="studioBodyEditor" rows="8" hidden></textarea>
               </details>
@@ -516,25 +523,25 @@
               </div>
               </div>
 
-              <!-- 自定义打标页：系统提示词以手输为准，预设的忽略词/输出规则不叠加。
-                   Skill 只是把正文灌进提示词框的快捷方式，灌进后可手改可清空。 -->
+              <!-- 自定义打标页：规则来源二选一——选了 Skill 就走对话模块同款链路
+                   （SkillAgent 工具循环，模型可按需 read_file 读参考文件，产出再经打标器
+                   既有解析管线）；没选 Skill 就用手输提示词走普通单轮打标。 -->
               <div class="labeler-page-body" data-labeler-page-body="custom" hidden>
-                <label class="labeler-prompt-field labeler-system-prompt-field">系统提示词（这段话就是打标规则，预设规则不叠加）
-                  <textarea id="labelerCustomSystemPrompt" rows="10" maxlength="12000"
+                <label class="labeler-prompt-field labeler-system-prompt-field">系统提示词（没选 Skill 时，这段话就是打标规则）
+                  <textarea id="labelerCustomSystemPrompt" rows="10"
                             placeholder="把打标规则写成一段完整的提示词：要描述什么、忽略什么、输出什么格式、用什么语言……"></textarea>
                 </label>
                 <div class="labeler-field-row labeler-skill-row">
-                  <label>Skill 载入（与聊天同一份 Skill 列表，选中后二选一灌进上方提示词框）
+                  <label>Skill（选中即用对话链路打标：模型按 Skill 规则工作、可自行读取参考文件，不做任何截断）
                     <select id="labelerSkillSelect" aria-label="Skill 来源"></select>
                   </label>
                   <span class="labeler-skill-actions">
-                    <button class="control-button tiny" id="labelerSkillLoadFull" type="button">载入完整 Skill</button>
-                    <button class="control-button tiny" id="labelerSkillLoadBody" type="button">载入正文</button>
-                    <button class="control-button tiny" id="labelerSkillClear" type="button">清空提示词</button>
+                    <button class="control-button tiny" id="labelerSkillClear" type="button"
+                            title="清空手输提示词，并停用已选的 Skill（回到手输规则）">清空提示词</button>
                   </span>
                 </div>
                 <p class="labeler-skill-note" id="labelerSkillNote" role="status"></p>
-                <div class="labeler-field-row">
+                <div class="labeler-field-row" id="labelerCustomOutputRow">
                   <label>输出形式
                     <!-- 默认「以提示词为准」= 不追加任何输出规则，格式由系统提示词决定。 -->
                     <select id="labelerCustomOutputMode" aria-label="自定义输出形式">
@@ -623,6 +630,13 @@
                   <button class="labeler-result-tab active" type="button" aria-pressed="true" data-labeler-result="images">按图</button>
                   <button class="labeler-result-tab" type="button" aria-pressed="false" data-labeler-result="tags">按标签</button>
                   <button class="labeler-result-tab" type="button" aria-pressed="false" data-labeler-result="sentences">句子库</button>
+                </div>
+                <div class="labeler-hint-row">
+                  <p class="labeler-results-hint" id="labelerResultsHint"></p>
+                  <!-- 清空标注库是危险的全库操作，与导出等常规动作分开：挂在说明行右端，
+                       避免混在导出行里被误触；id/文案/title 不许改（JS 按 id 绑定）。 -->
+                  <button class="control-button tiny danger-button labeler-wipe-btn" id="labelerWipeAnnotations" type="button"
+                          title="清空整个标注库：所有图的标签与描述都会删除，同样的图再打标要重新计费">清空标注库</button>
                 </div>
                 <div class="labeler-export">
                   <label class="labeler-search-field">
@@ -2633,7 +2647,7 @@
           <div class="provider-cards" id="providerCards"></div>
         </section>
         <section data-settings-panel="agent" hidden>
-          <div class="settings-panel-head"><h3>Agent 管理</h3><p>每个 Agent 拥有独立的预设、规则与固定 Skill，对话可随时切换。</p></div>
+          <div class="settings-panel-head"><h3>Agent 管理</h3><p>每个 Agent 都是一份可修改的配置：<b>点开卡片即可编辑系统提示词、工具集与固定 Skill</b>，内置 Agent 同样能改。工具集在会话开始时固化，改动请新开对话生效。</p></div>
           <div class="agent-cards" id="agentCards"></div>
         </section>
         <section data-settings-panel="runtime" class="settings-panel" hidden>
@@ -3329,6 +3343,7 @@
         <div class="agent-tabs-row">
           <nav class="agent-tabs" role="tablist" aria-label="Agent 设置分区">
             <button type="button" class="active" data-agent-tab="basic" role="tab" aria-selected="true">基本</button>
+            <button type="button" data-agent-tab="prompt" role="tab" aria-selected="false">提示词</button>
             <button type="button" data-agent-tab="skills" role="tab" aria-selected="false">固定 Skill <span class="agent-tab-count" id="agentSkillTabCount">0</span></button>
             <button type="button" data-agent-tab="tools" role="tab" aria-selected="false">工具集 <span class="agent-tab-count" id="agentToolTabCount">0/0</span></button>
           </nav>
@@ -3352,6 +3367,14 @@
               <span id="agentAvatarEmojiPreview" class="agent-avatar-emoji-preview" aria-hidden="true" hidden></span>
             </div>
           </div>
+          <div class="agent-duplicate-row">
+            <button type="button" class="control-button" id="duplicateAgent">复制为新 Agent</button>
+            <span class="agent-duplicate-hint">带着当前名称、系统提示词、工具集与固定 Skill 新建一份，保存后自动分配 ID。</span>
+          </div>
+        </section>
+
+        <section class="agent-tab-panel" data-agent-panel="prompt" role="tabpanel" hidden>
+          <p class="agent-tab-hint">会话创建时随 Agent 一起固化；工具是否可用由「工具集」分区决定，写在这里不生效。</p>
           <div class="agent-prompt-block">
             <div class="agent-prompt-head">
               <span class="agent-prompt-title">系统提示词（预设与规则）</span>
@@ -3378,37 +3401,40 @@
         <section class="agent-tab-panel" data-agent-panel="tools" role="tabpanel" hidden>
           <p class="agent-tab-hint">该 Agent 启用的工具（会话启动时固化，不可中途更改）</p>
 
-          <!-- 两态同框叠放：卡片态（内置预设只读 + 我的工具集 + 末尾「添加自定义工具集」卡）
-               与编辑态（命名栏 + 工具列表）共用 .tool-stage，弹层高度固定不跳，只做上下过渡。 -->
+          <!-- 模板下拉与分组勾选清单同屏。下拉是「选一套模板来套用」的动作入口：选完立即复位到占位，
+               不表示「当前绑定了哪套」（Agent 落库只有 tool_scope，本来就没有绑定关系）。
+               下方 checkbox 常驻，直接勾 / 取消就是编辑，不用再点进第三层。 -->
           <div class="tool-stage" id="agentToolStage">
             <div class="tool-preset-view" id="agentToolPresetView">
-              <div class="tool-preset-cards" id="agentToolPresetCards"></div>
-              <!-- 摘要 + 「当前已选工具」只读清单：已配好的 Agent 再次打开时，
-                   卡片上只有「N 个工具」看不出配了什么，这里按分类把工具名直接摊开
-                   （默认展开、可收起，只读不改配置）。
-                   右侧两枚按钮：「编辑当前工具集」带着当前勾选进编辑器（不覆盖任何勾选，
-                   自定义组合匹配不上卡片时它是唯一的编辑入口）、「收起清单」只折叠上面这份清单。 -->
+              <div class="tool-preset-picker">
+                <select id="agentToolPresetCards" class="tool-preset-select"
+                        title="选一套模板套用（只复制内容，不会把 Agent 绑到模板上）">
+                  <option value="">套用工具集模板…</option>
+                </select>
+                <button type="button" class="control-button tiny" data-tool-preset-add
+                        title="以当前勾选为底稿，另存一套自定义工具集">添加自定义工具集</button>
+                <button type="button" class="control-button tiny" id="deleteAgentToolTemplate"
+                        data-tool-template-del title="删除刚载入的「我的工具集」" hidden>删除工具集</button>
+                <span class="tool-preset-picker-hint">选完立即套用，下拉回到占位；当前配置看下面这行摘要。</span>
+              </div>
               <div class="tool-preset-summary">
                 <div class="tool-preset-summary-head">
                   <p class="tool-preset-summary-text" id="agentToolPresetState">当前：未限制</p>
                   <div class="tool-preset-summary-actions">
-                    <button type="button" class="control-button tiny" id="editAgentToolScope"
-                            title="带着当前已勾选的工具进入编辑，不会覆盖现有勾选">编辑当前工具集</button>
                     <button type="button" class="control-button tiny" id="toggleAgentToolPeek"
-                            aria-expanded="true" aria-controls="agentToolPeekList"
-                            title="展开/收起当前已选工具的清单">收起清单</button>
+                            aria-expanded="false" aria-controls="agentToolPeekList"
+                            title="展开/收起按分类摊开的只读清单">展开清单</button>
                   </div>
                 </div>
-                <div class="tool-peek" id="agentToolPeekList"></div>
+                <div class="tool-peek" id="agentToolPeekList" hidden></div>
               </div>
             </div>
 
-            <div class="tool-editor" id="agentToolEditor" hidden>
+            <div class="tool-editor" id="agentToolEditor">
               <div class="tool-editor-bar">
                 <input id="agentToolSetName" class="tool-set-name" type="text" maxlength="24" placeholder="工具集名称（留空自动命名）">
                 <code id="agentToolCount" class="tool-count">已选 0 / 0 个工具</code>
                 <button type="button" class="control-button tiny" id="toggleAllToolGroups">展开全部</button>
-                <button type="button" class="control-button tiny" id="agentToolEditorBack">返回</button>
                 <button type="button" class="primary-button tiny" id="agentToolEditorSave">保存工具集</button>
               </div>
               <p class="hint tool-unknown-hint" id="agentToolUnknownHint" hidden></p>

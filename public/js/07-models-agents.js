@@ -68,11 +68,6 @@ export function bindKvmemControls() {
   $('#kvmemRefresh')?.addEventListener('click', () => void refreshKvmemStatus());
   $('#kvmemStart')?.addEventListener('click', () => void kvmemAction('start'));
   $('#kvmemStop')?.addEventListener('click', () => void kvmemAction('stop'));
-  $('#kvmemOpen')?.addEventListener('click', async () => {
-    const provider = currentKvmemProvider(); if (!provider) return;
-    try { await api(`/api/providers/${encodeURIComponent(provider.id)}/kvmem/open`, { method: 'POST', body: {} }); }
-    catch (error) { toast(`打开 KVMem 控制台失败：${error.message}`); }
-  });
 }
 import { renderSidebar } from "./08-conversations.js";
 import { renderSkills } from "./09-settings.js";

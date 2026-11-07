@@ -1567,13 +1567,6 @@ class NaibaChatApp:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "status": "error", "error": str(exc)}, HTTPStatus.BAD_REQUEST
 
-    def api_kvmem_open(self, provider_id: str) -> tuple[dict[str, Any], int]:
-        try:
-            _profile, client = self._kvmem_client(provider_id)
-            return client.open_console(), HTTPStatus.OK
-        except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST
-
     def api_update_provider_pricing(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         """只改一张卡片的三档单价（用量统计页「费用单价」弹层）。
 

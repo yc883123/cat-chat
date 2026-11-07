@@ -1979,6 +1979,12 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .agent-card-prompt { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .agent-card-foot { display: flex; align-items: center; gap: 6px; margin-top: auto; }
 .agent-card-tag { padding: 2px 7px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 11px; }
+/* 恒定可见的「可编辑」线索：卡片静止时也能看出点开能改，不依赖 hover / cursor。 */
+.agent-card-edit-cue { margin-left: auto; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 10.5px; font-weight: 600; white-space: nowrap; }
+.agent-card:hover .agent-card-edit-cue, .agent-card:focus-visible .agent-card-edit-cue { background: var(--accent-solid); color: #fff; }
+/* 「复制为新 Agent」：与名称/头像/提示词同在基本分区，放在分隔线下方。 */
+.agent-duplicate-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.agent-duplicate-hint { color: var(--muted); font-size: 11.5px; }
 .agent-card-delete { position: absolute; top: 8px; right: 8px; width: 24px; height: 24px; display: grid; place-items: center; border: 0; border-radius: var(--r-xs); background: transparent; color: var(--muted); padding: 0; cursor: pointer; }
 .agent-card-delete:hover { background: var(--danger-soft); color: var(--danger); }
 .agent-card-delete svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
@@ -2615,48 +2621,21 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 /* ---- Agent 工具集：卡片态（预设 + 我的工具集）↔ 编辑态 ---- */
 .control-button.tiny { min-height: 24px; padding: 2px 9px; font-size: 11px; border-radius: 4px; }
 
-/* 两态同框叠放：同一格子里互相替换，弹层高度不变（只做上下过渡），所以没有布局跳动。 */
-.tool-stage { display: grid; flex: 1; min-height: 0; }
-.tool-stage > .tool-preset-view, .tool-stage > .tool-editor { grid-area: 1 / 1; min-height: 0; }
+/* 模板下拉区与分组勾选清单同屏：纵向排列，不再两态叠放 / 互斥切换。 */
+.tool-stage { display: flex; flex-direction: column; gap: 12px; flex: 1; min-height: 0; }
+.tool-stage > .tool-preset-view, .tool-stage > .tool-editor { min-height: 0; }
 
-/* 卡片态：整块贴顶（空白留在下方，正好是列表滑入的位置），点击后整体向上滑出。 */
-.tool-preset-view {
-  display: grid; gap: 10px; align-content: start;
-  transition: opacity .08s ease, transform .08s ease;
-}
+.tool-preset-view { display: grid; gap: 10px; align-content: start; }
 .tool-preset-view[hidden] { display: none; }
-.tool-preset-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-content: start; }
-.tool-preset-card {
-  position: relative; display: grid; align-content: start; gap: 4px; min-height: 92px;
-  padding: 12px 12px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius);
-  background: var(--surface); color: var(--text); text-align: left; cursor: pointer;
-  transition: border-color .10s ease, box-shadow .10s ease, transform .05s ease, background .05s ease;
+/* 下拉是「选一套模板来套用」的动作入口：收起时永远显示占位，不表示当前绑定了哪套。 */
+.tool-preset-picker { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tool-preset-select {
+  width: 250px; max-width: 100%; min-height: 28px; padding: 4px 9px;
+  border: 1px solid var(--line-strong); border-radius: 4px;
+  background: var(--surface); color: var(--text); font-size: 12px;
 }
-.tool-preset-card:hover { border-color: var(--accent); }
-.tool-preset-card.is-active { border-color: var(--accent); background: var(--accent-soft); }
-/* 点击反馈：卡片先按一下（并标为已选），再随整块向上滑出——「添加」卡同样有这一下。 */
-.tool-preset-card.is-picked {
-  transform: scale(.97); border-color: var(--accent); background: var(--accent-soft);
-  box-shadow: 0 0 0 2px var(--accent-soft);
-}
-.tool-preset-card-add.is-picked { color: var(--accent); }
-.tool-preset-card b { font-size: 13px; padding-right: 18px; }
-.tool-preset-card small {
-  color: var(--muted); font-size: 11.5px; line-height: 1.35;
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
-}
-.tool-preset-card em { font-style: normal; font-size: 11px; color: var(--muted); }
-.tool-preset-card-add { place-content: center; justify-items: center; gap: 6px; border-style: dashed; background: transparent; color: var(--muted); }
-.tool-preset-card-add:hover { border-color: var(--accent); color: var(--accent); }
-.tool-preset-card-add svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
-.tool-preset-card-del {
-  position: absolute; top: 6px; right: 6px; width: 20px; height: 20px; padding: 0;
-  border: 0; border-radius: 50%; background: transparent; color: var(--muted);
-  display: grid; place-items: center; cursor: pointer; opacity: 0; transition: opacity .15s ease;
-}
-.tool-preset-card:hover .tool-preset-card-del { opacity: 1; }
-.tool-preset-card-del:hover { color: var(--red); background: var(--surface-2); }
-.tool-preset-card-del svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; }
+.tool-preset-select:focus { border-color: var(--accent); outline: none; }
+.tool-preset-picker-hint { color: var(--muted); font-size: 11px; line-height: 1.5; }
 /* 摘要行：左边「当前：… · N 个工具」，右边「编辑当前工具集」+「收起/展开清单」；
    下面跟一份「当前已选工具」只读清单（已配好的 Agent 再次打开时一眼看清用了什么）。
    窄屏放不下时按钮整组折到下一行（文字可收缩，按钮不挤变形）。 */
@@ -2683,7 +2662,6 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 
 .tool-editor {
   display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0;
-  transition: opacity .08s ease, transform .08s ease;
 }
 .tool-editor[hidden] { display: none; }
 .tool-editor-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -2918,7 +2896,7 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 @media (max-width: 520px) {
   .composer-model-trigger { max-width: min(180px, calc(100vw - 92px)); }
   .tool-set-name { flex-basis: 100%; max-width: none; }
-  .tool-preset-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tool-preset-select { width: 100%; }
   .agent-tool-group-head { grid-template-columns: auto auto max-content minmax(0, 1fr) auto; gap: 6px; }
 }
 
@@ -3907,6 +3885,28 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .labeler-task-hint.error { color: var(--danger, #c0392b); }
 
 .labeler-results-head { display: grid; gap: 8px; }
+.labeler-results-hint { margin: 0; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+/* 选了 Skill（对话链路）时 JS 用 hidden 收起输出形式/语言行：
+   .labeler-field-row 的 display:grid 会压过 UA 的 [hidden]，必须显式关掉（同 704 行坑）。 */
+#labelerCustomOutputRow[hidden] { display: none; }
+/* 说明行：左说明文字（flex:1，长了换行），右「清空标注库」。
+   危险的全库操作不混进导出行的常规动作里，单独挂在这行右端。 */
+.labeler-hint-row { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
+.labeler-hint-row .labeler-results-hint { flex: 1; min-width: 0; }
+.labeler-hint-row .labeler-wipe-btn { flex: none; margin-left: auto; }
+/* 危险幽灵按钮：保持 tiny 同高同圆角，底色透明、红色描边 + 红字，
+   悬停才填上 --danger-soft 底；盖掉 .danger-button 默认的「淡红底淡红边」（没有按钮感）。 */
+.labeler-hint-row .control-button.danger-button {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  color: var(--danger);
+}
+.labeler-hint-row .control-button.danger-button:hover {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  color: var(--danger);
+  filter: none;
+}
 .labeler-result-tabs { display: flex; gap: 4px; }
 .labeler-result-tab {
   border: 1px solid transparent; background: transparent; color: var(--muted);
@@ -3915,7 +3915,9 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .labeler-result-tab:hover { background: var(--surface-2); color: var(--text); }
 .labeler-result-tab.active { background: var(--accent-soft); border-color: var(--violet-line); color: var(--violet-deep); font-weight: 600; }
 .labeler-export { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.labeler-export .labeler-search-field { flex: 1; min-width: 0; }
+/* 窄栏（三栏下结果区只有 300px 出头）不许把筛选框挤成一条缝：给可用下限，
+   放不下就让后续项换行（比 0 宽搜索框 + 孤行按钮体面）。 */
+.labeler-export .labeler-search-field { flex: 1 1 140px; min-width: 140px; }
 .labeler-export .labeler-export-name { flex: none; }
 .labeler-export .labeler-export-name input {
   width: 150px; min-height: 30px; border: 1px solid var(--line); border-radius: var(--r-md);
@@ -3956,6 +3958,11 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
   #studioPageLabeler[data-labeler-pane="queue"] .labeler-queue,
   #studioPageLabeler[data-labeler-pane="config"] .labeler-config,
   #studioPageLabeler[data-labeler-pane="results"] .labeler-results { display: flex; }
+  /* 窄屏：说明行文字变窄多行，按钮 flex:none 不被压扁；空间不够时整枚换行、仍右对齐。
+     导出行沿用既有 flex-wrap + flex:none（3916-3922 行），少了一个按钮只会更宽松。 */
+  .labeler-hint-row { gap: 8px; }
+  .labeler-hint-row .labeler-wipe-btn { flex: 0 0 auto; }
+  .labeler-hint-row .labeler-results-hint { flex: 1 1 170px; }
 }
 
 /* 手机三档切换条：桌面隐藏（三栏常显） */
@@ -4151,6 +4158,13 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .studio-body-preview summary { cursor: pointer; padding: 8px 12px; font-size: 12.5px; color: var(--muted); }
 .studio-body-preview[open] summary { border-bottom: 1px solid var(--line); }
 .studio-body-text { margin: 0; padding: 10px 12px; max-height: 180px; overflow: auto; white-space: pre-wrap; font-size: 12px; line-height: 1.6; color: var(--text); font-family: inherit; }
+/* 正文预览 summary 行内的复制按钮：复用结果区 .studio-copy-button 的样式与
+   is-copied 反馈，只把位置从结果区左上角改到 summary 右缘（不占标题行的排版流）；
+   悬停显现与结果区同款（默认 .38 透明度，聚焦/已复制时全局规则会置 1）。 */
+.studio-body-preview summary { position: relative; }
+.studio-body-preview summary .studio-copy-button { position: absolute; top: 50%; right: 10px; transform: translateY(-50%); }
+.studio-body-preview summary:hover .studio-copy-button,
+.studio-body-preview summary .studio-copy-button.is-copied { opacity: 1; }
 .studio-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .studio-task-hint { font-size: 12px; color: var(--muted); }
 /* 结果动作行也带状态点：运行中脉冲、完成绿点、失败红点，不只靠文字。 */
@@ -5543,6 +5557,12 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
   min-height: 40px; padding: 0 18px; font-size: 12.5px;
   border-color: var(--accent-solid); background: var(--accent-solid);
   color: #fff; font-weight: 600; white-space: nowrap;
+}
+/* .control-button:hover（特异性 0,2,0）会把实心紫底改成浅色 --surface-2 且不改字色，
+   白字配浅底 = 悬停瞬间文字隐形（拆分设置「开始拆分」按钮报障的根因）：
+   用 0,3,0 夺回背景/描边/字色，提亮仍走下面的 filter。 */
+.control-button.writer-primary:hover {
+  border-color: var(--accent-solid); background: var(--accent-solid); color: #fff;
 }
 .writer-primary:hover { filter: brightness(1.04); }
 .writer-primary:disabled { opacity: .55; filter: none; cursor: not-allowed; }

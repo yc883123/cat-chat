@@ -852,6 +852,7 @@ function renderStudioDetail() {
     }
     bodyEl.textContent = studio.body;
     bodyEl.hidden = false;
+    updateBodyCopyButton();
     const editor = $("#studioBodyEditor");
     const editorHint = $("#studioBodyEditableHint");
     const saveBtn = $("#studioCustomSave");
@@ -904,7 +905,7 @@ function renderStudioDetail() {
     });
     bodyEl.hidden = true;
     bodyEl.textContent = "";
-    ["#studioCustomSave", "#studioCustomDelete", "#studioCustomExport", "#studioBodyEditableHint"].forEach((sel) => { const el = $(sel); if (el) el.hidden = true; });
+    ["#studioCustomSave", "#studioCustomDelete", "#studioCustomExport", "#studioBodyEditableHint", "#studioBodyCopy"].forEach((sel) => { const el = $(sel); if (el) el.hidden = true; });
     const editorFree = $("#studioBodyEditor");
     if (editorFree) editorFree.hidden = true;
     const locateFree = $("#studioLocateEntry");
@@ -1691,6 +1692,44 @@ async function copyStudioResult() {
   }, 1400);
 }
 
+// 正文预览的取文口径：自定义模板处于可编辑态时以编辑框现值为准（用户眼前这份），
+// 只读态复制预览文本——与「发送到分镜生图」的规则一致，两种态复制的都是当前正文。
+function studioBodyText() {
+  const editor = $("#studioBodyEditor");
+  if (editor && !editor.hidden) return String(editor.value || "");
+  return String($("#studioBodyPreview")?.textContent || "");
+}
+
+// summary 行内的复制按钮只在真有正文时出现（与结果区按钮同规则：没正文就不显示）。
+function updateBodyCopyButton() {
+  const btn = $("#studioBodyCopy");
+  if (!btn) return;
+  btn.hidden = !studioBodyText().trim();
+}
+
+async function copyStudioBody() {
+  const text = studioBodyText().trim();
+  const btn = $("#studioBodyCopy");
+  if (!text) {
+    toast("还没有可复制的正文");
+    return;
+  }
+  try {
+    await copyText(text);
+  } catch (error) {
+    toast(`复制失败：${error.message}`);
+    return;
+  }
+  if (!btn) return;
+  const label = btn.querySelector("span");
+  if (label) label.textContent = "已复制";
+  btn.classList.add("is-copied");
+  window.setTimeout(() => {
+    if (label) label.textContent = "复制";
+    btn.classList.remove("is-copied");
+  }, 1400);
+}
+
 function updateReasoningChip() {
   const hint = $("#studioTaskHint");
   if (!hint) return;
@@ -2386,6 +2425,14 @@ export function bindStudioEvents() {
   $("#studioOpenSidebar")?.addEventListener("click", () => openSidebar());
   // 桌面端侧栏收起后，对话顶栏的 #expandSidebar 已随顶栏退场；用本模块顶栏的同款按钮恢复。
   $("#studioExpandSidebar")?.addEventListener("click", () => setLeftSidebarCollapsed(false));
+  // 正文预览 summary 行内的复制按钮：折叠是 <summary> 上 click 的**默认动作**，
+  // 必须 preventDefault 拦下（stopPropagation 只负责不冒泡到 #studioView 的委托）——
+  // 点复制不能顺手把预览块收起来。
+  $("#studioBodyCopy")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void copyStudioBody();
+  });
   $("#studioCats")?.addEventListener("click", (event) => {
     const cat = event.target.closest("[data-studio-module]");
     if (!cat) return;

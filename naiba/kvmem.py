@@ -9,7 +9,6 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
-import webbrowser
 from typing import Any
 
 from naiba import net as net_io
@@ -85,7 +84,14 @@ class KVMemClient:
         try:
             with net_io.open(request, timeout=self.timeout) as response:
                 payload = json.loads(response.read().decode("utf-8", errors="replace") or "{}")
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, ValueError):
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = json.loads(exc.read(4096).decode("utf-8", errors="replace"))
+            except (ValueError, OSError):
+                detail = {}
+            message = str(detail.get("error") or "").strip() if isinstance(detail, dict) else ""
+            raise KVMemError(_text(message, 400) or "KVMem 控制台返回了错误") from None
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
             raise KVMemError("KVMem 控制台不可达或返回了无效响应") from None
         if not isinstance(payload, dict):
             raise KVMemError("KVMem 控制台响应格式不正确")
@@ -125,7 +131,7 @@ class KVMemClient:
     def _status_payload(self, info: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
         state = str(_nested(status, "status", "state", "phase") or "unknown").strip().lower()
         mapping = {
-            "idle": "stopped", "stopped": "stopped", "down": "stopped",
+            "idle": "stopped", "stopped": "stopped", "down": "stopped", "exited": "stopped",
             "starting": "starting", "loading": "starting", "ready": "ready",
             "running": "running", "healthy": "ready", "failed": "failed", "error": "failed",
         }
@@ -159,8 +165,16 @@ class KVMemClient:
         token = self._token(info)
         if not token:
             raise KVMemError("KVMem 控制台未提供临时控制令牌")
-        result = self._request("/api/launcher/start", method="POST", token=token, body={})
-        return {"ok": True, "accepted": True, "message": _text(_nested(result, "message", "status"), 240) or "已请求 KVMem 启动"}
+        # 控制台要求完整 {'schema_version': 1, 'parameters': {...}} 结构，原样回传它自己的 draft。
+        draft = info.get("draft") if isinstance(info.get("draft"), dict) else None
+        params = draft.get("parameters") if draft else None
+        if not isinstance(params, dict):
+            raise KVMemError("KVMem 控制台没有可用的启动配置")
+        if not str(params.get("Model") or "").strip():
+            raise KVMemError("KVMem 尚未选择模型，请先在控制台选择模型后再启动")
+        result = self._request("/api/launcher/start", method="POST", token=token, body=draft)
+        return {"ok": True, "accepted": True,
+                "message": _text(_nested(result, "message", "status"), 240) or "已请求 KVMem 启动"}
 
     def stop(self) -> dict[str, Any]:
         info = self.info()
@@ -169,11 +183,6 @@ class KVMemClient:
             raise KVMemError("KVMem 控制台未提供临时控制令牌")
         result = self._request("/api/launcher/stop", method="POST", token=token, body={})
         return {"ok": True, "accepted": True, "message": _text(_nested(result, "message", "status"), 240) or "已请求 KVMem 停止"}
-
-    def open_console(self) -> dict[str, Any]:
-        if not webbrowser.open(self.manager_url):
-            raise KVMemError("无法打开 KVMem 控制台")
-        return {"ok": True}
 
     def readiness(self, target_model: str) -> dict[str, Any]:
         status = self.status()

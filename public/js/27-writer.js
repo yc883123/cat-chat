@@ -2724,6 +2724,9 @@ async function startSplit() {
   const continueBtn = $("#writerSplitContinueChoice");
   const overwriteBtn = $("#writerSplitOverwriteChoice");
   const cancelBtn = $("#writerSplitCancelChoice");
+  // 弹窗必须真的弹出来：此前只挂监听不 showModal，<dialog> 没有 open 属性不可见，
+  // 下面的 Promise 等按钮/close 事件永远挂着——「开始拆分」点了毫无反应（自 9522d44 起天生如此）。
+  if (!dialog.open) dialog.showModal();
   // signal：弹窗一结束就把本轮监听全部摘掉；once 残留下轮会串选择。
   const signal = new AbortController().signal;
   const done = await new Promise((resolve) => {

@@ -15,14 +15,17 @@ class _Controller(BaseHTTPRequestHandler):
     calls = []
     token = "temporary-secret"
     state = "stopped"
+    draft = {"backend": "ninfer", "model": "model.gguf", "port": 18200, "engine_params": {"ctx": 8192},
+             "schema_version": 1, "parameters": {"Model": "model.gguf", "Backend": "ninfer"}}
+    fail_start_reason = ""
 
     def log_message(self, *_args):
         return
 
     def do_GET(self):
-        self.__class__.calls.append(("GET", self.path, dict(self.headers)))
+        self.__class__.calls.append(("GET", self.path, dict(self.headers), b""))
         if self.path == "/api/launcher/info":
-            payload = {"service": "KVMem", "protocol_version": "1", "token": self.token, "draft": {"backend": "ninfer", "model": "model.gguf", "port": 18200, "engine_params": {"ctx": 8192}}}
+            payload = {"service": "KVMem", "protocol_version": "1", "token": self.token, "draft": self.draft}
         elif self.path == "/api/launcher/status":
             payload = {"status": self.state, "port": 18200}
         else:
@@ -30,9 +33,14 @@ class _Controller(BaseHTTPRequestHandler):
         self._send(payload)
 
     def do_POST(self):
-        self.__class__.calls.append(("POST", self.path, dict(self.headers)))
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        self.__class__.calls.append(("POST", self.path, dict(self.headers), body))
         if self.headers.get("X-KVMem-Token") != self.token:
             self._send({"error": "unauthorized"}, 401)
+            return
+        if self.path.endswith("/start") and self.__class__.fail_start_reason:
+            self._send({"error": self.__class__.fail_start_reason}, 400)
             return
         self.__class__.state = "ready" if self.path.endswith("/start") else "stopped"
         self._send({"status": self.__class__.state})
@@ -74,7 +82,7 @@ class KVMemTests(unittest.TestCase):
         self.assertNotIn("temporary-secret", json.dumps(status))
         client.start()
         client.stop()
-        post_headers = [headers for method, path, headers in _Controller.calls if method == "POST"]
+        post_headers = [headers for method, path, headers, _body in _Controller.calls if method == "POST"]
         self.assertTrue(post_headers)
         self.assertTrue(all(next((value for key, value in headers.items() if key.lower() == "x-kvmem-token"), "") == "temporary-secret" for headers in post_headers))
 
@@ -89,6 +97,39 @@ class KVMemTests(unittest.TestCase):
         source = inspect.getsource(KVMemClient)
         self.assertNotIn("taskkill", source.lower())
         self.assertNotIn("psutil", source.lower())
+
+    def test_start_posts_console_draft_unchanged(self):
+        client = KVMemClient(self.url, "http://127.0.0.1:18200/v1")
+        result = client.start()
+        self.assertTrue(result["accepted"])
+        bodies = [body for method, path, _headers, body in _Controller.calls
+                  if method == "POST" and path.endswith("/start")]
+        self.assertTrue(bodies)
+        self.assertEqual(json.loads(bodies[-1].decode("utf-8")), _Controller.draft)
+
+    def test_start_without_selected_model_raises_readable_error(self):
+        original = _Controller.draft
+        _Controller.draft = {**original, "parameters": {"Model": "", "Backend": "ninfer"}}
+        try:
+            client = KVMemClient(self.url, "http://127.0.0.1:18200/v1")
+            with self.assertRaises(KVMemError) as caught:
+                client.start()
+            self.assertIn("尚未选择模型", str(caught.exception))
+        finally:
+            _Controller.draft = original
+
+    def test_start_surfaces_console_error_text(self):
+        original = _Controller.fail_start_reason
+        _Controller.fail_start_reason = "健康检查未通过：模型文件缺失"
+        try:
+            client = KVMemClient(self.url, "http://127.0.0.1:18200/v1")
+            with self.assertRaises(KVMemError) as caught:
+                client.start()
+            message = str(caught.exception)
+            self.assertIn("模型文件缺失", message)
+            self.assertNotIn("不可达", message)
+        finally:
+            _Controller.fail_start_reason = original
 
 
 if __name__ == "__main__":

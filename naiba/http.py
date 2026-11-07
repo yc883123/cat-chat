@@ -1249,9 +1249,6 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path.startswith("/api/providers/") and path.endswith("/kvmem/stop"):
             provider_id = path[len("/api/providers/"):-len("/kvmem/stop")].strip("/")
             self._json(*self.app.api_kvmem_stop(provider_id, body))
-        elif path.startswith("/api/providers/") and path.endswith("/kvmem/open"):
-            provider_id = path[len("/api/providers/"):-len("/kvmem/open")].strip("/")
-            self._json(*self.app.api_kvmem_open(provider_id))
         elif path == "/api/providers/pricing":
             # 定价弹层专用入口：只提交 {id, kind, pricing}，不碰连接配置。
             self._json(*self.app.api_update_provider_pricing(body))
@@ -1440,8 +1437,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             })
         elif path == "/api/skills/content":
             skill_id = str(body.get("id") or "").strip()
+            # mode="bundle"：完整目录文本包（SKILL.md 正文 + 文本资产，脚本只报名单），
+            # 给贴签匠「载入完整目录」用；缺省仍是 SKILL.md 单文件的 content/body 两口味。
+            fetch = self.app.catalog.skill_bundle if str(body.get("mode") or "") == "bundle" \
+                else self.app.catalog.skill_content
             try:
-                self._json(self.app.catalog.skill_content(skill_id))
+                self._json(fetch(skill_id))
             except ValueError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
             except OSError as exc:
@@ -1799,6 +1800,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             if body is None:
                 return
             self._json(*self.app.labeler.api_tasks_delete(body))
+        elif path == "/api/labeler/annotations":
+            # 打标器：清空整个标注库（用户显式操作，活跃批次时服务端拒绝）。
+            body = self._read_json()
+            if body is None:
+                return
+            self._json(*self.app.labeler.api_annotations_clear())
         elif path.startswith("/api/comfyui/workflows/"):
             self._json(*self.app.comfyui.api_workflow_delete(path.rsplit("/", 1)[-1]))
         # ---- 创作场（小说改编） ----

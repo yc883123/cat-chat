@@ -1272,6 +1272,54 @@ class StudioCopyResultUiTests(unittest.TestCase):
         self.assertNotIn(".studio-row-summary", self.css, "对应的摘要样式也应移除")
 
 
+class StudioBodyCopyUiTests(unittest.TestCase):
+    """正文预览 summary 行内的复制按钮（静态契约，沿用仓库的源码断言风格）。
+
+    三条不变量：
+    1. 按钮在「正文预览」的 summary 行内，且不进入正文节点（复制到的永远是正文本身）；
+    2. 点击必须拦下 <summary> 的默认折叠并阻止冒泡——点复制不能把预览块收起来；
+    3. 复制走共享 copyText，正文为空时按钮隐藏（与生成结果区按钮同规则）。
+    """
+
+    def setUp(self) -> None:
+        self.html = (ROOT / "public/index.html").read_text(encoding="utf-8")
+        self.js = (ROOT / "public/js/22-studio.js").read_text(encoding="utf-8")
+        self.css = (ROOT / "public/styles.css").read_text(encoding="utf-8")
+
+    def test_button_lives_in_summary_row(self) -> None:
+        wrap = self.html[self.html.index('id="studioBodyPreviewWrap"'):]
+        summary = wrap[: wrap.index("</summary>")]
+        self.assertIn('id="studioBodyCopy"', summary, "按钮要在 summary 行内（标题右侧）")
+        self.assertNotIn('id="studioBodyPreview"', summary, "按钮不能嵌进正文节点")
+        self.assertNotIn('id="studioBodyEditor"', summary)
+
+    def test_click_does_not_collapse_the_details(self) -> None:
+        start = self.js.index('$("#studioBodyCopy")?.addEventListener("click"')
+        block = self.js[start: start + 300]
+        self.assertIn("event.preventDefault()", block,
+                      "<summary> 的折叠是 click 的默认动作，必须 preventDefault 拦下")
+        self.assertIn("event.stopPropagation()", block, "不得冒泡到 #studioView 的委托")
+        self.assertIn("void copyStudioBody()", block)
+
+    def test_copy_uses_shared_clipboard_helper(self) -> None:
+        self.assertIn("function copyStudioBody()", self.js)
+        self.assertIn("await copyText(text)", self.js, "与结果区共用 copyText，不另写剪贴板逻辑")
+
+    def test_button_hidden_when_body_empty(self) -> None:
+        self.assertIn("btn.hidden = !studioBodyText().trim();", self.js,
+                      "与结果区按钮同规则：没正文就不显示")
+        self.assertIn("updateBodyCopyButton();", self.js, "渲染详情时要同步按钮可见性")
+
+    def test_copy_source_follows_edit_state(self) -> None:
+        """可编辑态复制编辑框现值，只读态复制预览文本——都复制用户眼前这份正文。"""
+        self.assertIn('if (editor && !editor.hidden) return String(editor.value || "");', self.js)
+        self.assertIn('return String($("#studioBodyPreview")?.textContent || "");', self.js)
+
+    def test_summary_row_positions_the_button(self) -> None:
+        self.assertIn(".studio-body-preview summary .studio-copy-button", self.css,
+                      "summary 行内按钮要脱离排版流，贴右缘，不挤标题")
+
+
 class StudioCategoryContrastTests(unittest.TestCase):
     """模型皮肤下 .studio-view 透明：分类栏要自带 --surface 底色，否则亮壁纸上看不清。"""
 

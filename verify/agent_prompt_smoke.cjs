@@ -34,16 +34,35 @@ async function presetTitles() {
 
   const browser = await chromium.launch({ channel: 'msedge', headless: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  // 8790 的隔离配置（verify/_tmp_agent_e2e/config.json）里 providers 只有占位 base_url、没配 Key，
+  // hasUsableProvider() 为 false ⇒ 每个全新浏览器 profile 首启都会弹 #onboardingDialog
+  //（19-onboarding.js maybeShowOnboarding：localStorage 的 dismissed 标记或「有可用供应商」
+  // 二选一才放行）。原生 <dialog>.showModal 的 top layer 会拦掉后续所有点击（Playwright 报
+  // "dialog intercepts pointer events"）。与 tool_groups_smoke 同款做法：initScript 先置
+  // dismissed 标记，页面加载后再把节点摘掉（没有可用供应商时引导可能自己再开，实测踩过）。
+  await page.addInitScript(() => {
+    try { localStorage.setItem('naibaOnboardingDismissed', '1'); } catch (error) { void error; }
+  });
   const pageErrors = [];
   const notFound = [];
   page.on('pageerror', (err) => pageErrors.push(`pageerror: ${err.message}`));
-  page.on('console', (msg) => { if (msg.type() === 'error') pageErrors.push(`console.error: ${msg.text()}`); });
+  // 「Failed to load resource」这条 console 文案不带 URL，没法与已知噪音区分：8790 的占位
+  // 供应商（probe-te / probe-moda，base_url=example.invalid）让设置页的模型目录探测必然
+  // POST /api/providers/models 400 —— 与 _check_tool_cards_compact / tool_groups_smoke 同款豁免；
+  // 真正的资源问题仍由下面的 notFound（逐条带 URL 的 404）兜住。
+  page.on('console', (msg) => {
+    if (msg.type() === 'error' && !msg.text().includes('Failed to load resource')) {
+      pageErrors.push(`console.error: ${msg.text()}`);
+    }
+  });
   page.on('response', (res) => { if (res.status() === 404) notFound.push(res.url()); });
   page.on('dialog', (dialog) => dialog.accept());
 
   try {
     await page.goto(`${BASE}/`, { waitUntil: 'load', timeout: 20000 });
     await page.waitForSelector('#sidebarWorkspaceTree .conversation-item', { timeout: 20000 });
+    // 引导节点防御性摘除：只要它还挂在 top layer，下面 #openSettings 的点击就会被它拦截。
+    await page.evaluate(() => document.querySelector('#onboardingDialog')?.remove());
 
     // 设置页导航已无「快捷提示词」入口
     await page.click('#openSettings');
@@ -55,6 +74,11 @@ async function presetTitles() {
     await page.waitForSelector('#agentCards .agent-card', { timeout: 10000 });
     await page.click('#agentCards [data-agent-card] .agent-card-name');
     await page.waitForSelector('#agentDialog[open]', { timeout: 10000 });
+    await page.waitForTimeout(200);
+    // 系统提示词相关字段（#agentSystemPromptEdit / 快捷提示词按钮 / 角色卡导入 / .agent-prompt-block）
+    // 全部搬到 data-agent-panel="prompt" 面板，默认 hidden。本脚本整份都在操作这些字段，
+    // 打开弹层后先切一次「提示词」tab，后续断言/交互保持不动。
+    await page.click('[data-agent-tab="prompt"]');
     await page.waitForTimeout(200);
 
     const wiring = await page.evaluate(() => {
@@ -84,6 +108,12 @@ async function presetTitles() {
       wiring.importTitle.includes('追加') && wiring.importTitle.includes('不覆盖'), wiring.importTitle);
 
     // 0) 空提示词点「存为快捷提示词」→ 底部提示必须显示在模态弹层之上（top layer 遮挡回归）
+    // 前提要自己摆出来：本节测的是「空提示词」分支（08-conversations.js
+    // openAgentPromptPresetSaveDialog：空 → toast「系统提示词为空」，非空 → 直接打开另存弹窗）。
+    // 共享实例的第一张卡片（📘教程助手 Agent）带着非空出厂提示词，不先清空就会走另一条分支、
+    // 把 #promptPresetDialog 留在 top layer 拦掉后续所有交互。清空只改表单内存值，不点
+    // 「保存 Agent」就不落库，浏览器一关即弃。
+    await page.fill('#agentSystemPromptEdit', '');
     await page.click('#saveAgentPromptPreset');
     await page.waitForTimeout(400);
     const toastState = await page.evaluate(() => {

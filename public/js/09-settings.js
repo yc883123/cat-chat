@@ -3267,6 +3267,9 @@ const AGENT_PROMPT_PREVIEW_LIMIT = 140;
 
 // 弹层里新选的头像文件（保存时才上传；新建 Agent 此时还没有 id，必须延后到保存后）。
 let agentAvatarFile = null;
+// 「复制为新 Agent」要带走的头像字形：内置 Agent 的 emoji 头像存在 agent.avatar 里，
+// 但新建 id 不在 built_in_agent_ids() 中，后端取不到出厂兜底值会落成空串，必须显式带上。
+let pendingDuplicateAvatar = '';
 
 // 上传头像的 URL（内置 Agent 的 emoji 头像走 agentAvatarEmoji，不在这里）。
 export function agentAvatarUrl(agent) {
@@ -3292,15 +3295,18 @@ function agentCardMarkup(agent) {
   const badges = [
     agent.built_in ? '<span class="agent-card-tag">内置</span>' : '',
   ].join('');
+  // 卡片上把「这份配置有什么」摆成看得见的数字：原来只有一段灰色提示词摘要，
+  // 用户会当成静态说明，意识不到提示词 / 工具集 / 固定 Skill 都是能改的。
+  const promptChars = prompt.length;
   const toolSetName = toolScopeLabel(agent.tool_scope);
   return `
     <div class="agent-card" data-agent-card="${id}" role="button" tabindex="0" aria-label="编辑 ${name}">
       ${agent.built_in ? '' : `<button class="agent-card-delete" type="button" data-agent-delete="${id}" title="删除 ${name}" aria-label="删除 ${name}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>`}
       <span class="agent-card-name" title="${name}">${avatarHtml}${name}</span>
-      <span class="agent-card-meta">${skills ? `${skills} 个固定 Skill` : '无固定 Skill'}</span>
+      <span class="agent-card-meta">${skills ? `${skills} 个固定 Skill` : '无固定 Skill'} · 提示词 ${promptChars} 字</span>
       <span class="agent-card-tools" title="该 Agent 的工具集：${escapeHtml(toolSetName)}">工具集：${escapeHtml(toolSetName)}</span>
       <p class="agent-card-prompt">${preview ? escapeHtml(preview) : '未设置系统提示词'}</p>
-      <span class="agent-card-foot">${badges}</span>
+      <span class="agent-card-foot">${badges}<span class="agent-card-edit-cue" aria-hidden="true">✎ 编辑</span></span>
     </div>`;
 }
 
@@ -3322,6 +3328,23 @@ export function openAgentCard(agentId) {
   const agent = (state.bootstrap?.agents || []).find((item) => item.id === agentId);
   if (!agent) return;
   showAgentForm(agent);
+}
+
+// 「复制为新 Agent」：带当前名称、系统提示词、工具集与固定 Skill 新建一份。
+// 关键：必须走 showAgentForm(agent)（agentFormIsNew=false）——若按「新建」填充，
+// renderAgentToolPicker() 会把工具范围换成后端的标准模式默认集，副本就和原 Agent 不一样了。
+// 这里只在提交前把 #agentFormId 留空，让 /api/agents 分配一个新的持久化 id。
+export function duplicateAgent() {
+  const id = $('#agentFormId')?.value.trim() || '';
+  const agent = (state.bootstrap?.agents || []).find((item) => item.id === id);
+  if (!agent) { toast('先打开一个已有的 Agent，再复制'); return; }
+  showAgentForm(agent);
+  pendingDuplicateAvatar = String(agent.avatar || '').trim();
+  $('#agentFormId').value = '';
+  $('#agentName').value = `${agent.name || 'Agent'} 副本`;
+  $('#agentDialogTitle').textContent = '复制为新 Agent';
+  $('#agentDialogSubtitle').textContent = '保存后自动分配 ID（不会改动原 Agent）';
+  toast('已带入原 Agent 的配置；改个名字后点「保存 Agent」');
 }
 
 // Agent 弹层分区切换（基本 / 系统提示词 / 固定 Skill / 工具集）。
@@ -3355,6 +3378,8 @@ export function renderAgentSkillPicker() {
 }
 
 export function showAgentForm(agent = null) {
+  // 每次打开表单都清掉「复制待带走的头像」：取消复制后不能把上一个 Agent 的头像带给下一个新建。
+  pendingDuplicateAvatar = '';
   $('#agentFormId').value = agent?.id || '';
   $('#agentName').value = agent?.name || '';
   $('#agentSystemPromptEdit').value = agent?.system_prompt || '';
@@ -3510,9 +3535,6 @@ function notifyToolMutexDrop(before, after) {
 
 // —— 工具集：卡片态（内置预设 + 我的工具集）↔ 编辑态 ——
 // 两态同框叠放、弹层高度固定：点任意卡片（含「添加」卡）都先按一下再向上滑出，工具列表从下方滑入。
-const TOOL_SWAP_MS = 130;  // = CSS 里 .tool-preset-view.is-leaving 的 50ms 延迟 + 80ms 过渡
-const TOOL_SET_ADD_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>';
-const TOOL_SET_DEL_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>';
 
 // 一套工具（Agent 的 tool_scope 或工具集的 tools）参与匹配前的归一：滤掉「当前未注册」的幽灵名
 // （退役工具、掉线的 MCP 工具）。matchToolScope / toolScopeLabel / 删除工具集前的引用判定
@@ -3583,42 +3605,30 @@ function toolSetSummary() {
 }
 
 // 卡片态渲染：4 张内置预设（只读）+ 我的工具集（可删）+ 末尾「添加」卡 + 一行摘要。
+// 模板下拉：内置预设 / 我的工具集分两组。下拉是「选一套模板来套用」的**动作入口**，
+// 不表示当前绑定了哪套 —— Agent 落库只有 tool_scope，没有 preset_id，本来就没有绑定关系
+// （连「谁在用这套模板」都是反向比内容猜的，见 toolTemplateUsedByAgents）。
+// 所以没有 is-active / is-picked，收起时永远停在占位 option。
 export function renderAgentToolPresetCards() {
-  const box = $('#agentToolPresetCards');
-  if (!box) return;
-  const matched = matchToolPreset();
-  const presetCards = (state.toolCatalog?.presets || []).map((preset) => {
-    const active = matched?.kind === 'preset' && matched.id === preset.id;
-    return `<div class="tool-preset-card${active ? ' is-active' : ''}" role="button" tabindex="0"
-      data-tool-preset-card="${escapeHtml(preset.id)}" title="套用「${escapeHtml(preset.name)}」">
-      <b>${escapeHtml(preset.name)}</b>
-      <small>${escapeHtml(preset.desc || '')}</small>
-      <em>${(preset.tools || []).length} 个工具</em>
-    </div>`;
-  });
-  const templateCards = loadToolTemplates().map((template) => {
-    const active = matched?.kind === 'template' && matched.id === template.id;
+  const select = $('#agentToolPresetCards');
+  if (!select) return;
+  const presetOptions = (state.toolCatalog?.presets || []).map((preset) => {
+    const count = (preset.tools || []).length;
+    return `<option value="preset:${escapeHtml(preset.id)}" data-tool-preset-card="${escapeHtml(preset.id)}"
+      title="${escapeHtml(preset.desc || preset.name || '')}">${escapeHtml(preset.name)} · ${count} 个工具</option>`;
+  }).join('');
+  const templateOptions = loadToolTemplates().map((template) => {
     const usable = usableTemplateTools(template);
-    const count = usable.length;
-    const name = escapeHtml(template.name);
-    // 第二行给工具名预览：只写「我的工具集」等于零信息，用户看不出这套里装了什么。
-    const preview = usable.slice(0, 3).join('、') + (usable.length > 3 ? ' …' : '');
-    return `<div class="tool-preset-card${active ? ' is-active' : ''}" role="button" tabindex="0"
-      data-tool-template-card="${escapeHtml(template.id)}"
-      title="套用「${name}」（${count} 个工具）${usable.length ? `：${escapeHtml(usable.join('、'))}` : ''}">
-      <button type="button" class="tool-preset-card-del" data-tool-template-del="${escapeHtml(template.id)}"
-              title="删除工具集「${name}」" aria-label="删除工具集「${name}」">${TOOL_SET_DEL_SVG}</button>
-      <b>${name}</b>
-      <small>${escapeHtml(preview || '（工具已全部失效）')}</small>
-      <em>我的工具集 · ${count} 个工具</em>
-    </div>`;
-  });
-  box.innerHTML = [...presetCards, ...templateCards].join('') + `
-    <div class="tool-preset-card tool-preset-card-add" role="button" tabindex="0"
-         data-tool-preset-add title="以当前勾选的 ${state.agentFormToolScope.length} 个工具为底稿，另存一套自定义工具集">
-      ${TOOL_SET_ADD_SVG}
-      <span>添加自定义工具集</span>
-    </div>`;
+    return `<option value="template:${escapeHtml(template.id)}" data-tool-template-card="${escapeHtml(template.id)}"
+      title="${escapeHtml(usable.join('、') || '工具已全部失效')}">${escapeHtml(template.name)} · ${usable.length} 个工具</option>`;
+  }).join('');
+  select.innerHTML = '<option value="">套用工具集模板…</option>' +
+    (presetOptions ? `<optgroup label="内置预设">${presetOptions}</optgroup>` : '') +
+    (templateOptions ? `<optgroup label="我的工具集">${templateOptions}</optgroup>` : '');
+  select.value = '';
+  // 「我的工具集」的删除入口：只在刚载入某套模板（editingId 非空）时出现，避免误删。
+  const del = $('#deleteAgentToolTemplate');
+  if (del) del.hidden = !String(state.agentToolEditingId || '');
   const summary = $('#agentToolPresetState');
   if (summary) summary.textContent = toolSetSummary();
   renderAgentToolPeek();
@@ -3663,14 +3673,15 @@ export function renderAgentToolPeek() {
     : '');
 }
 
-// 打开表单时清单回到展开态（「收起」是临时动作，不跨表单残留）。
+// 同屏后这份只读清单默认收起：下面就是可编辑的分组勾选清单，同一份信息不摆两遍。
+// 想核对「按分类摊开」时点「展开清单」临时展开，动作不跨表单残留。
 export function resetAgentToolPeek() {
   const box = $('#agentToolPeekList');
-  if (box) box.hidden = false;
+  if (box) box.hidden = true;
   const btn = $('#toggleAgentToolPeek');
   if (btn) {
-    btn.textContent = '收起清单';
-    btn.setAttribute('aria-expanded', 'true');
+    btn.textContent = '展开清单';
+    btn.setAttribute('aria-expanded', 'false');
   }
 }
 
@@ -3686,15 +3697,8 @@ export function toggleAgentToolPeek() {
   }
 }
 
-// 勾选变化时刷新：卡片态重绘卡片（高亮/计数）；编辑态只更新摘要（面板隐藏，别白重绘）。
+// 勾选变化时刷新：两态同屏后摘要、计数与模板下拉都要更新（下拉复位占位，不保留选中态）。
 export function updateToolPresetUI() {
-  const editor = $('#agentToolEditor');
-  if (editor && !editor.hidden) {
-    const summary = $('#agentToolPresetState');
-    if (summary) summary.textContent = toolSetSummary();
-    updateToolCounter();
-    return;
-  }
   renderAgentToolPresetCards();
 }
 
@@ -3743,41 +3747,21 @@ export function toggleToolOnlySelected() {
   renderToolScopeList();
 }
 
-// 卡片态 ↔ 编辑态切换：卡片向上滑出、编辑区从下方滑入（返回时反向）。
-// 两态叠在同一个 .tool-stage 格子里，弹层高度不参与变化，所以没有布局跳动。
-function swapToolView(editing) {
+// 两态同屏：模板下拉/摘要区与分组勾选清单始终同时可见，不再互斥切换、不再有滑入滑出。
+// 保留函数名与全部调用点（打开表单 / 关闭编辑器 / 套用模板），只是不再隐藏任何一方。
+function swapToolView(_editing) {
   const view = $('#agentToolPresetView');
   const editor = $('#agentToolEditor');
   if (!view || !editor) return;
-  if (editing === !editor.hidden) return; // 已在目标态
-  const reduce = Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches);
-  const outgoing = editing ? view : editor;
-  const incoming = editing ? editor : view;
-  const finish = () => {
-    outgoing.hidden = true;
-    outgoing.classList.remove('is-leaving', 'is-entering');
-    incoming.hidden = false;
-    incoming.classList.remove('is-leaving', 'is-entering');
-  };
-  if (reduce) {
-    finish();
-    return;
-  }
-  outgoing.classList.add('is-leaving');
-  window.setTimeout(() => {
-    finish();
-    incoming.classList.add('is-entering');
-    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
-      incoming.classList.remove('is-entering');
-    }));
-  }, TOOL_SWAP_MS);
+  view.hidden = false;
+  editor.hidden = false;
 }
 
 // 进入编辑态：
 //   内置预设卡 → 载入该预设的工具（走依赖闭包）、命名栏预填预设名、保存时另存为「我的工具集」；
 //   我的工具集卡 → 载入该套工具、命名栏预填它的名字、保存时原地更新；
 //   「添加」卡 → 以**当前勾选**为底稿（未限制时 = 当前目录全量）、命名栏留空（留空自动命名）。
-//   若只想带着当前勾选进编辑器而不另存，走 openAgentToolEditorCurrent()（不碰勾选）。
+//   同屏后「只改当前这套勾选」不需要任何入口：勾选框常驻，直接勾即可，不会覆盖。
 export function openAgentToolEditor({ presetId = '', templateId = '' } = {}) {
   const presets = state.toolCatalog?.presets || [];
   const preset = presetId ? presets.find((item) => item.id === presetId) : null;
@@ -3802,9 +3786,6 @@ export function openAgentToolEditor({ presetId = '', templateId = '' } = {}) {
   // 命名栏只预填「被点的那张卡」的名字；「添加」卡没有名字，留空（保存时自动命名）。
   if (nameInput) nameInput.value = preset ? preset.name : (template ? template.name : '');
   enterToolEditorView();
-  // 上面 renderToolScopeList → syncAgentToolCheckboxes → updateToolPresetUI 会重绘卡片
-  // （编辑态还没显示），所以「按下」状态要在重绘之后再按 key 找回卡片打上。
-  markPickedToolCard({ presetId, templateId });
   nameInput?.focus();
   nameInput?.select();
 }
@@ -3818,29 +3799,6 @@ function enterToolEditorView({ onlySelected = false } = {}) {
   if (filter) filter.value = '';
   renderToolScopeList();
   swapToolView(true);
-}
-
-// 给刚点的那张卡打上「按下 / 已选」状态（按 key 重新查，兼容重绘后的新节点）。
-function markPickedToolCard({ presetId = '', templateId = '' }) {
-  const selector = presetId
-    ? `[data-tool-preset-card="${presetId}"]`
-    : (templateId ? `[data-tool-template-card="${templateId}"]` : '[data-tool-preset-add]');
-  const card = document.querySelector(selector);
-  if (!card) return;
-  card.classList.add('is-picked');
-  card.setAttribute('aria-pressed', 'true');
-}
-
-// 「编辑当前工具集」：带着当前勾选直接进编辑态，一个工具都不动。
-// 与点卡片的本质区别——不调用 setAgentToolScope（点任何卡片都会用那张卡的工具覆盖当前勾选）。
-// 常驻入口：自定义组合匹配不上任何卡片时，它是唯一能改这套勾选的地方；匹配到卡 / 未限制时
-// 点它也无害（不改勾选，比点卡片更安全）。命名栏留空 = 保存时另存一套新的「我的工具集」。
-export function openAgentToolEditorCurrent() {
-  state.agentToolEditingId = '';
-  const nameInput = $('#agentToolSetName');
-  if (nameInput) nameInput.value = '';
-  enterToolEditorView();
-  nameInput?.focus();
 }
 
 // 当前勾选是不是「还没存成卡片的自定义组合」——点任何卡片都会把它整份换掉的那种。
@@ -3895,39 +3853,36 @@ export async function saveAgentToolSet() {
   toast(editingId ? `已更新工具集「${name}」` : `已保存工具集「${name}」`);
 }
 
-// 卡片区事件委托：× 删除优先；其余任意卡片（预设 / 我的工具集 / 添加）都进入编辑态，
-// 命名栏预填该卡片的名字（「添加」卡留空），工具列表供查看与编辑；被点的卡会先「按下」。
+// 模板区按钮委托：「添加自定义工具集」以当前勾选为底稿另存；「删除工具集」删刚载入的那套。
+// 选模板套用已改由 <select> 的 change 处理（见 handleAgentToolPresetSelectChange）。
 export function handleAgentToolPresetCardsClick(event) {
   const del = event.target.closest('[data-tool-template-del]');
   if (del) {
     event.stopPropagation();
-    void deleteToolTemplate(del.dataset.toolTemplateDel);
+    const id = String(state.agentToolEditingId || '');
+    if (id) void deleteToolTemplate(id);
     return;
   }
   const add = event.target.closest('[data-tool-preset-add]');
   if (add) {
+    // 「添加」以当前勾选为底稿，不覆盖任何东西，所以不经过 confirmToolScopeOverwrite。
     openAgentToolEditor({});
-    return;
   }
-  // 防误触：预设卡 / 「我的工具集」卡都会用那张卡的工具覆盖当前勾选，
-  // 只在这份勾选是「还没存成卡片的自定义组合」时才问一次（取消 = 分毫不动）。
-  if (!confirmToolScopeOverwrite()) return;
-  const template = event.target.closest('[data-tool-template-card]');
-  if (template) {
-    openAgentToolEditor({ templateId: template.dataset.toolTemplateCard });
-    return;
-  }
-  const preset = event.target.closest('[data-tool-preset-card]');
-  if (preset) openAgentToolEditor({ presetId: preset.dataset.toolPresetCard });
 }
 
-// 卡片是 div[role=button]：Enter/Space 等同点击。
-export function handleAgentToolPresetCardsKeydown(event) {
-  if (event.key !== 'Enter' && event.key !== ' ') return;
-  const card = event.target.closest('.tool-preset-card');
-  if (!card) return;
-  event.preventDefault();
-  card.click();
+// 下拉选模板：选完立即复位到占位，不保留选中态（下拉是动作入口，不是状态选择器）。
+// 防误触：预设 / 我的工具集都会整份覆盖当前勾选，仅在「未保存的自定义组合」时先确认。
+export function handleAgentToolPresetSelectChange(event) {
+  const value = String(event.target.value || '');
+  event.target.value = '';
+  if (!value) return;
+  if (!confirmToolScopeOverwrite()) return;
+  const sep = value.indexOf(':');
+  if (sep < 0) return;
+  const kind = value.slice(0, sep);
+  const id = value.slice(sep + 1);
+  if (kind === 'template') { openAgentToolEditor({ templateId: id }); return; }
+  if (kind === 'preset') openAgentToolEditor({ presetId: id });
 }
 
 // —— 我的工具集：把任意自定义组合存成命名工具集，之后在别的 Agent 表单里点一下卡片即可套用。
@@ -4567,6 +4522,9 @@ export async function saveAgentForm() {
     // 单独授权：独立通道，永远按实际勾选保存（"未限制"语义不覆盖它——
     // 不限制指的是普通工具，不是"连整段视频逐帧落盘也一并放开"）。
     tool_opt_ins: [...new Set(state.agentFormToolOptIns || [])],
+    // 只有「复制内置 Agent 后新建」这条路径带 avatar：后端对新建取不到出厂 emoji 兜底值。
+    ...(!$('#agentFormId').value.trim() && pendingDuplicateAvatar
+      ? { avatar: pendingDuplicateAvatar } : {}),
   };
   try {
     const saved = await api('/api/agents', { method: 'POST', body: payload });
@@ -4583,6 +4541,7 @@ export async function saveAgentForm() {
       agentAvatarFile = null;
     }
     await refreshAgentsFromServer();
+    pendingDuplicateAvatar = '';
     hideAgentForm();
     renderAgents();
     renderAgentManager();

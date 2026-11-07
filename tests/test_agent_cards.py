@@ -50,13 +50,11 @@ FORM_FIELD_IDS = (
     "agentToolPresetState",
     "agentToolEditor",
     "agentToolSetName",
-    "agentToolEditorBack",
     "agentToolEditorSave",
     "agentToolCount",
     "toggleAllToolGroups",
     "agentToolUnknownHint",
     "agentToolScope",
-    "editAgentToolScope",
     "agentError",
     "cancelAgent",
     "saveAgentForm",
@@ -466,33 +464,37 @@ class AgentTabsTests(unittest.TestCase):
     def _bind(self):
         return (ROOT / "public/js/15-bind-events.js").read_text(encoding="utf-8")
 
-    def test_three_tabs_and_panels(self):
+    def test_four_tabs_and_panels(self):
+        """提示词重新独立成分区：原来并进「基本」后，导航里连「提示词」三个字都没有。"""
         index = self._index()
         tabs = index[index.index('class="agent-tabs"'):]
         tabs = tabs[: tabs.index("</nav>")]
-        for name in ("basic", "skills", "tools"):
+        for name in ("basic", "prompt", "skills", "tools"):
             with self.subTest(tab=name):
                 self.assertIn(f'data-agent-tab="{name}"', tabs)
                 self.assertIn(f'data-agent-panel="{name}"', index)
-        self.assertEqual(index.count("data-agent-panel="), 3, "只有 3 个分区面板")
-        self.assertNotIn('data-agent-panel="prompt"', index, "系统提示词已并入「基本」，不再单独分区")
-        # 默认只有第一个分区可见，其余带 hidden。
+        self.assertEqual(index.count("data-agent-panel="), 4, "基本 / 提示词 / 固定 Skill / 工具集")
         self.assertIn('<section class="agent-tab-panel" data-agent-panel="basic" role="tabpanel">', index)
-        for name in ("skills", "tools"):
+        for name in ("prompt", "skills", "tools"):
             with self.subTest(hidden=name):
                 self.assertIn(f'data-agent-panel="{name}" role="tabpanel" hidden', index)
-        # 标签带计数：固定 Skill 个数 / 工具已选/总数
         self.assertIn('id="agentSkillTabCount"', index)
         self.assertIn('id="agentToolTabCount"', index)
 
-    def test_basic_tab_holds_name_avatar_and_prompt(self):
+    def test_prompt_tab_holds_prompt_fields(self):
         index = self._index()
         basic = index[index.index('data-agent-panel="basic"'):]
-        basic = basic[: basic.index('data-agent-panel="skills"')]
-        for field in ("agentName", "pickAgentAvatar", "agentSystemPromptEdit",
-                      "agentPromptPresetButton", "saveAgentPromptPreset", "importAgentCharacterCard"):
+        basic = basic[: basic.index('data-agent-panel="prompt"')]
+        for field in ("agentName", "pickAgentAvatar", "agentAvatarPreview", "duplicateAgent"):
             with self.subTest(field=field):
-                self.assertIn(f'id="{field}"', basic, "基本分区应包含名称/头像/系统提示词")
+                self.assertIn(f'id="{field}"', basic, "基本分区只放名称/头像/复制")
+        prompt = index[index.index('data-agent-panel="prompt"'):]
+        prompt = prompt[: prompt.index('data-agent-panel="skills"')]
+        for field in ("agentSystemPromptEdit", "agentPromptPresetButton",
+                      "saveAgentPromptPreset", "importAgentCharacterCard",
+                      "agentCharacterCardFileInput"):
+            with self.subTest(field=field):
+                self.assertIn(f'id="{field}"', prompt, "系统提示词独立成「提示词」分区")
 
     def test_actions_pinned_to_tabs_row(self):
         """取消/保存移到分区行右侧：不随面板高度上下跳，底部腾给内容。"""
@@ -536,33 +538,40 @@ class AgentToolSetCardsTests(unittest.TestCase):
     def _css(self):
         return (ROOT / "public/styles.css").read_text(encoding="utf-8")
 
-    def test_card_view_and_editor_are_separate(self):
+    def test_picker_and_editor_share_screen(self):
+        """模板下拉与分组勾选清单同屏：不用再点「编辑当前工具集」进第三层。"""
         index = self._index()
-        self.assertIn('id="agentToolStage"', index, "两态同框叠放在 .tool-stage 里")
+        self.assertIn('id="agentToolStage"', index)
         self.assertIn('id="agentToolPresetView"', index)
-        self.assertIn('id="agentToolPresetCards"', index)
-        self.assertIn('id="agentToolEditor" hidden', index, "编辑态默认隐藏")
+        self.assertIn('<select id="agentToolPresetCards"', index, "6 张预设卡已改成一个下拉框")
+        self.assertIn('id="agentToolEditor"', index)
+        self.assertNotIn('id="agentToolEditor" hidden', index, "分组勾选清单常驻可见")
         stage = index[index.index('id="agentToolStage"'):]
         stage = stage[: stage.index("</section>")]
         self.assertLess(stage.index('id="agentToolPresetView"'), stage.index('id="agentToolEditor"'))
-        # 旧的下拉框与模板芯片行已退役。
         for snippet in ("agentToolPresetSelect", "agentToolTemplateName", "agentToolTemplateSave",
                         "agentToolTemplateRow", "agentToolTemplates"):
             with self.subTest(snippet=snippet):
                 self.assertNotIn(snippet, index, "旧的预设下拉/模板芯片行残留")
+        self.assertIn('data-tool-preset-add', index, "「添加自定义工具集」是下拉旁的独立按钮")
+        self.assertNotIn('id="editAgentToolScope"', index, "同屏后不再需要「进入编辑态」按钮")
+        self.assertNotIn('id="agentToolEditorBack"', index, "同屏后不再需要「返回」按钮")
 
-    def test_cards_markup_and_readonly_presets(self):
+    def test_dropdown_markup_and_readonly_presets(self):
+        """下拉是动作入口，不表示「当前绑定了哪套模板」（Agent 落库只有 tool_scope）。"""
         js = self._settings()
         self.assertIn("export function renderAgentToolPresetCards()", js)
+        self.assertIn('<optgroup label="内置预设">', js)
+        self.assertIn('<optgroup label="我的工具集">', js)
         self.assertIn('data-tool-preset-card=', js)
         self.assertIn('data-tool-template-card=', js)
-        self.assertIn("data-tool-preset-add", js, "末尾要有「添加自定义工具集」卡")
-        self.assertIn("data-tool-template-del=", js, "我的工具集卡片要有 × 删除")
-        # 预设卡不给删除入口（只读）。
+        self.assertIn("[data-tool-template-del]", js, "「我的工具集」仍保留删除入口")
         body = js[js.index("export function renderAgentToolPresetCards()"):]
-        body = body[: body.index("// 勾选变化时刷新")]
-        preset_block = body[body.index("const presetCards"): body.index("const templateCards")]
-        self.assertNotIn("tool-preset-card-del", preset_block, "内置预设卡不得给删除按钮")
+        body = body[: body.index("// 当前已选工具按分类摊平")]
+        self.assertNotIn("is-active", body, "下拉不保留选中态：Agent 与模板没有绑定关系")
+        self.assertNotIn("is-picked", body, "卡片按下态已随卡片一起退役")
+        self.assertNotIn("tool-preset-card-del", body, "内置预设不给删除入口")
+        self.assertIn("select.value = ''", body, "选完立即复位到占位")
 
     def test_editor_flow_and_closure(self):
         js = self._settings()
@@ -570,8 +579,8 @@ class AgentToolSetCardsTests(unittest.TestCase):
         self.assertIn("export function closeAgentToolEditor()", js)
         self.assertIn("export async function saveAgentToolSet()", js)
         self.assertIn("export function handleAgentToolPresetCardsClick(", js)
-        self.assertIn("export function handleAgentToolPresetCardsKeydown(", js)
-        # 点卡片必须载入该卡的工具并走依赖闭包（否则卡片显示个数 ≠ 实际放行个数）。
+        self.assertIn("export function handleAgentToolPresetSelectChange(", js)
+        # 选模板必须载入该卡的工具并走依赖闭包（否则显示个数 ≠ 实际放行个数）。
         editor = js[js.index("export function openAgentToolEditor("):]
         editor = editor[: editor.index("\n}")]
         self.assertEqual(editor.count("normalizeToolScope("), 3,
@@ -585,18 +594,17 @@ class AgentToolSetCardsTests(unittest.TestCase):
         self.assertNotIn("DEFAULT_TOOL_SET_PRESET_ID", js, "固定标准模式底稿的常量已退役")
         self.assertIn("setAgentToolScope(normalizeToolScope([...state.agentFormToolScope]))", editor,
                       "「添加」卡底稿 = 当前勾选的快照（浅拷贝，不共享数组引用）")
-        click = js[js.index("export function handleAgentToolPresetCardsClick("):]
-        click = click[: click.index("\n}")]
-        self.assertEqual(click.count("openAgentToolEditor("), 3)
-        self.assertIn("function markPickedToolCard(", js, "被点的卡要有「按下」状态")
-        mark = js[js.index("function markPickedToolCard("):]
-        mark = mark[: mark.index("\n}")]
-        self.assertIn("is-picked", mark)
-        self.assertIn("aria-pressed", mark)
+        change = js[js.index("export function handleAgentToolPresetSelectChange("):]
+        change = change[: change.index("\n}")]
+        self.assertIn("event.target.value = ''", change, "选完立即复位到占位，不保留选中态")
+        self.assertIn("confirmToolScopeOverwrite()", change, "整份覆盖前先防误触")
+        self.assertNotIn("markPickedToolCard", js, "卡片按下态已随卡片一起退役")
+        self.assertNotIn("handleAgentToolPresetCardsKeydown", js, "原生 select 自带键盘操作")
         bind = self._bind()
-        self.assertIn("$('#agentToolPresetCards')?.addEventListener('click', handleAgentToolPresetCardsClick)", bind)
-        self.assertIn("$('#agentToolEditorBack')?.addEventListener('click', closeAgentToolEditor)", bind)
+        self.assertIn("$('#agentToolPresetCards')?.addEventListener('change', handleAgentToolPresetSelectChange)", bind)
+        self.assertIn("$('#agentToolPresetView')?.addEventListener('click', handleAgentToolPresetCardsClick)", bind)
         self.assertIn("$('#agentToolEditorSave')?.addEventListener('click', saveAgentToolSet)", bind)
+        self.assertNotIn("$('#agentToolEditorBack')", bind)
 
     def test_saved_sets_live_in_backend_not_localstorage(self):
         """「我的工具集」存后端 config.json（localStorage 在冻结版每次退出都会被清空）。"""
@@ -635,7 +643,8 @@ class AgentToolSetCardsTests(unittest.TestCase):
         tools_panel = index[index.index('data-agent-panel="tools"'):]
         self.assertLess(tools_panel.index('id="agentToolPresetCards"'), tools_panel.index('id="agentToolPeekList"'),
                         "清单要排在卡片下方（摘要行里）")
-        self.assertIn('aria-expanded="true"', tools_panel, "清单默认展开：再打开就该看到内容")
+        self.assertIn('aria-expanded="false"', tools_panel,
+                      "同屏后只读清单默认收起：下面已有可编辑的分组清单，同一份信息不摆两遍")
         js = self._settings()
         for snippet in ("export function toolScopeBreakdown(",
                         "export function renderAgentToolPeek(",
@@ -703,52 +712,39 @@ class AgentToolSetCardsTests(unittest.TestCase):
         core = (ROOT / "public/js/01-core.js").read_text(encoding="utf-8")
         self.assertIn("agentToolOnlySelected: false,", core)
 
-    def test_swap_animation_keeps_height_fixed(self):
+    def test_no_two_state_swap(self):
+        """两态同屏：下拉区与分组勾选清单纵向排列，不再互斥隐藏、不再有滑入滑出。"""
         js = self._settings()
-        swap = js[js.index("function swapToolView(editing)"):]
+        swap = js[js.index("function swapToolView(_editing)"):]
         swap = swap[: swap.index("\n}")]
-        self.assertIn("prefers-reduced-motion: reduce", swap)
-        self.assertNotIn("--agent-dialog-h", swap, "高度固定，切换时不再改弹层高度")
-        self.assertNotIn("--agent-dialog-h", js, "09-settings 里不该再残留高度变量")
+        self.assertIn("view.hidden = false;", swap)
+        self.assertIn("editor.hidden = false;", swap, "两态同屏，不再互斥隐藏")
+        self.assertNotIn("is-leaving", swap)
         css = self._css()
-        for rule in (".tool-stage", ".tool-preset-view.is-leaving", ".tool-editor.is-entering",
-                     ".tool-preset-card.is-picked", ".tool-preset-card-add.is-picked",
-                     ".tool-preset-card-add", ".tool-preset-card-del"):
+        for rule in (".tool-stage", ".tool-preset-picker", ".tool-preset-select", ".tool-peek {"):
             with self.subTest(rule=rule):
                 self.assertIn(rule, css)
-        # 卡片态贴顶（空白留在下方，正好是列表滑入的位置）。
-        view_rule = css[css.index(".tool-preset-view {"):]
-        view_rule = view_rule[: view_rule.index("}")]
-        self.assertIn("align-content: start", view_rule)
-        self.assertIn("transition: opacity .08s", view_rule, "切换过渡已再缩短 1/3")
+        self.assertIn("flex-direction: column", css, "同屏纵向排列，不再叠放在同一格子")
+        self.assertNotIn(".tool-preset-card.is-picked", css, "卡片按下态样式已退役")
+        self.assertNotIn(".tool-preset-cards", css, "预设卡网格样式已退役")
 
-    def test_edit_current_scope_entry_keeps_selection(self):
-        """卡片态「编辑当前工具集」：带着当前勾选进编辑器，一个工具都不动。
+    def test_no_edit_current_scope_entry(self):
+        """同屏后勾选清单常驻，「编辑当前工具集」这个进入第三层的按钮整体退役。
 
-        起因：已保存 Agent 的 tool_scope 匹配不上任何卡片时（摘要显示「当前：自定义（未保存）· N 个工具」），
-        点任何卡片都会用那张卡的工具覆盖它 —— 等于没有任何入口能改当前这套勾选。按钮常驻：
-        匹配到卡 / 未限制时点它也无害（不改勾选，比点卡片更安全）。
+        它原本要解决的痛点（自定义组合匹配不上任何卡片时没有入口能改）现在由
+        「什么都不点、直接勾」天然解决：勾选框一直在屏幕上，不覆盖、不需要进入动作。
         """
         index = self._index()
-        self.assertIn('id="editAgentToolScope"', index, "摘要行要有常驻的「编辑当前工具集」入口")
-        self.assertNotIn('id="editAgentToolScope" hidden', index, "常驻入口：不做显隐分支")
-        head = index[index.index('class="tool-preset-summary-head"'):]
-        head = head[: head.index('id="agentToolPeekList"')]
-        self.assertLess(head.index('id="editAgentToolScope"'), head.index('id="toggleAgentToolPeek"'),
-                        "编辑入口排在「收起清单」左边，两枚按钮同一组")
+        self.assertNotIn('id="editAgentToolScope"', index)
+        self.assertNotIn('id="agentToolEditorBack"', index)
+        self.assertNotIn('id="agentToolEditor" hidden', index, "勾选清单默认可见")
         js = self._settings()
-        self.assertIn("export function openAgentToolEditorCurrent()", js)
-        fn = js[js.index("export function openAgentToolEditorCurrent()"):]
-        fn = fn[: fn.index("\n}")]
-        # 核心语义：进编辑器只改视图，不得碰勾选（调 setAgentToolScope 就会覆盖）。
-        self.assertNotIn("setAgentToolScope", fn, "「编辑当前工具集」绝不能覆盖当前勾选")
-        self.assertIn("state.agentToolEditingId = ''", fn, "不是原地更新某张已有工具集卡")
-        self.assertIn("nameInput.value = ''", fn, "命名栏留空 → 保存时另存一套新工具集")
-        self.assertIn("enterToolEditorView()", fn)
+        self.assertNotIn("openAgentToolEditorCurrent", js)
         bind = self._bind()
-        self.assertIn("$('#editAgentToolScope')?.addEventListener('click', openAgentToolEditorCurrent)", bind)
-        css = self._css()
-        self.assertIn(".tool-preset-summary-actions", css, "两枚按钮要成组（窄屏整组折行，不挤变形）")
+        self.assertNotIn("$('#editAgentToolScope')", bind)
+        self.assertNotIn("openAgentToolEditorCurrent", bind)
+        self.assertIn("export function confirmToolScopeOverwrite()", js,
+                      "防误触确认仍保留：下拉太容易顺手一选")
 
     def test_card_click_confirms_before_overwriting_unsaved_scope(self):
         """防误触：当前是「还没存成卡片的自定义组合」时，点预设卡 / 我的工具集卡先 confirm 一次。
@@ -767,13 +763,14 @@ class AgentToolSetCardsTests(unittest.TestCase):
         confirm_fn = confirm_fn[: confirm_fn.index("\n}")]
         self.assertIn("return confirm(", confirm_fn)
         self.assertIn("还没有保存成工具集卡片", confirm_fn, "文案要说清为什么拦、拦住的是什么")
-        click = js[js.index("export function handleAgentToolPresetCardsClick("):]
-        click = click[: click.index("\n}")]
-        self.assertLess(click.index("data-tool-preset-add"), click.index("confirmToolScopeOverwrite()"),
-                        "「添加」卡分支必须排在确认之前（它不覆盖勾选）")
-        self.assertIn("if (!confirmToolScopeOverwrite()) return;", click, "取消 = 留在卡片态、勾选不动")
-        add_branch = click[click.index("data-tool-preset-add"): click.index("confirmToolScopeOverwrite()")]
-        self.assertNotIn("confirm(", add_branch, "「添加」卡不该弹确认")
+        change = js[js.index("export function handleAgentToolPresetSelectChange("):]
+        change = change[: change.index("\n}")]
+        self.assertIn("if (!confirmToolScopeOverwrite()) return;", change, "取消 = 勾选分毫不动")
+        self.assertIn("event.target.value = ''", change, "取消时下拉也要复位占位")
+        add_fn = js[js.index("export function handleAgentToolPresetCardsClick("):]
+        add_fn = add_fn[: add_fn.index("\n}")]
+        self.assertIn("data-tool-preset-add", add_fn)
+        self.assertNotIn("confirm(", add_fn, "「添加」以当前勾选为底稿、不覆盖，不该弹确认")
 
     def test_delete_template_lists_referencing_agents(self):
         """删除「我的工具集」前先列出哪些 Agent 正在用它（不再是一句盲删「确定吗」）。

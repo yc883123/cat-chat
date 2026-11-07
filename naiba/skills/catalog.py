@@ -323,6 +323,122 @@ class SkillCatalog:
             "body": _strip_frontmatter(text),
         }
 
+    def skill_bundle(
+        self, skill_id: str,
+        *, max_total_chars: int = 200_000, max_file_chars: int = 60_000,
+    ) -> dict[str, Any]:
+        """Return one Skill directory as a text bundle (labeler's「载入完整目录」).
+
+        The labeler is a single-shot tool-less completion: its model cannot
+        read files on demand, so the only faithful equivalent of chat's
+        full-Skill access is packing the directory's text into one prompt.
+        SKILL.md goes in as body (frontmatter is chat-routing metadata);
+        text assets under the skill root (references/、assets/ 等) follow with
+        ``=== 相对路径 ===`` separators; scripts are listed by name only — the
+        labeling model cannot execute them and their source would only dilute
+        the prompt. Path safety mirrors the scan: dot-directories and
+        symlinks are skipped, every file stays inside the skill root.
+        """
+        wanted = str(skill_id or "").strip()
+        if not wanted:
+            raise ValueError("缺少 Skill id")
+        row = next((item for item in self.scan() if str(item.get("id") or "") == wanted), None)
+        if not row:
+            raise ValueError("Skill 不存在或已被删除")
+        root = Path(row["root"]).expanduser().resolve()
+        files: list[dict[str, Any]] = []
+        script_names: list[str] = []
+        skipped: list[dict[str, str]] = []
+        candidates: list[Path] = []
+        if (root / "SKILL.md").is_file():
+            candidates.append(root / "SKILL.md")
+        try:
+            walk_root = root
+            for current, dir_names, file_names in os.walk(walk_root):
+                here = Path(current)
+                # 不下钻：点目录、agents/（UI 元数据）、scripts/（只报名单）。
+                dir_names[:] = sorted(
+                    d for d in dir_names
+                    if not d.startswith(".") and d not in {"agents", "scripts"}
+                    and not (here / d).is_symlink()
+                )
+                if here == root and "SKILL.md" in file_names:
+                    file_names = [f for f in file_names if f != "SKILL.md"]
+                for name in sorted(file_names):
+                    candidates.append(here / name)
+        except OSError:
+            pass
+        # scripts/ 在上面被剪枝（正文绝不入包），这里单独收一份相对路径名单。
+        scripts_dir = root / "scripts"
+        if scripts_dir.is_dir():
+            for script_path in sorted(scripts_dir.rglob("*")):
+                try:
+                    if not script_path.is_file() or script_path.is_symlink():
+                        continue
+                    script_names.append(script_path.resolve().relative_to(root).as_posix())
+                except (OSError, ValueError):
+                    continue
+        parts: list[str] = []
+        total_chars = 0
+        for path in candidates:
+            try:
+                resolved = path.resolve()
+                rel = resolved.relative_to(root)
+            except (OSError, ValueError):
+                continue
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            rel_posix = rel.as_posix()
+            if rel.parts[0] == "scripts":
+                script_names.append(rel_posix)
+                continue
+            suffix = path.suffix.lower()
+            if suffix not in {".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".csv"}:
+                skipped.append({"path": rel_posix, "reason": "unsupported"})
+                continue
+            try:
+                if path.is_symlink():
+                    skipped.append({"path": rel_posix, "reason": "symlink"})
+                    continue
+                with path.open("rb") as handle:
+                    head = handle.read(8192)
+                if b"\x00" in head:
+                    skipped.append({"path": rel_posix, "reason": "binary"})
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                skipped.append({"path": rel_posix, "reason": "unreadable"})
+                continue
+            if rel_posix == "SKILL.md":
+                text = _strip_frontmatter(text).strip()
+            if not text:
+                skipped.append({"path": rel_posix, "reason": "empty"})
+                continue
+            truncated = False
+            if len(text) > max_file_chars:
+                text = text[:max_file_chars] + f"\n\n（该文件超 {max_file_chars} 字，已截断）"
+                truncated = True
+            total_chars += len(text)
+            parts.append(f"=== {rel_posix} ===\n{text}")
+            files.append({"path": rel_posix, "chars": len(text), "truncated": truncated})
+        bundle = "\n\n".join(parts)
+        bundle_truncated = False
+        if len(bundle) > max_total_chars:
+            bundle = bundle[:max_total_chars] + f"\n\n（总内容超 {max_total_chars} 字，已截断）"
+            bundle_truncated = True
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "root": str(root),
+            "files": files,
+            "script_names": script_names,
+            "skipped": skipped,
+            "bundle": bundle,
+            "bundle_chars": len(bundle),
+            "total_chars": total_chars,
+            "truncated": bundle_truncated,
+        }
+
     def read_skill_content(self, path: str | Path) -> str:
         """Read one Skill body with metadata-aware in-memory caching."""
         skill_path = Path(path).expanduser().resolve()

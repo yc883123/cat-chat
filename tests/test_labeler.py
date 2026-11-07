@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from naiba.core.paths import normalized_path_key  # noqa: E402
 from naiba.labeler import LABELER_ITEM_STATES  # noqa: E402
 from naiba.labeler.db import LabelerDB, LabelerDBError  # noqa: E402
+from naiba.labeler.engines.chat import build_chat_prompt  # noqa: E402
 from naiba.labeler.engines.provider import build_prompt, parse_response  # noqa: E402
 from naiba.labeler.export import (  # noqa: E402
     LabelerExportError,
@@ -56,6 +57,8 @@ from naiba.labeler.runner import LabelerRunner, aggregate_usage, classify_error 
 from naiba.labeler.sentences import sentence_stats, split_sentences  # noqa: E402
 from naiba.labeler.service import LabelerService  # noqa: E402
 from naiba.labeler.store import LabelerStore  # noqa: E402
+from naiba.skills.agent import _CONTEXT_FULL_NOTICE  # noqa: E402
+from naiba.skills.catalog import SkillCatalog  # noqa: E402
 
 
 def _write_png(path: Path, color=(20, 120, 200), size=(16, 16)) -> Path:
@@ -1842,6 +1845,289 @@ class LabelerTaskDeleteTests(unittest.TestCase):
         delete_section = http.split("def do_DELETE", 1)[1].split("def do_PATCH", 1)[0]             if "def do_PATCH" in http.split("def do_DELETE", 1)[1]             else http.split("def do_DELETE", 1)[1]
         self.assertIn('path == "/api/labeler/tasks"', delete_section)
 
+class LabelerAnnotationsClearTests(unittest.TestCase):
+    """清空标注库（用户显式操作）。
+
+    口径：有活跃批次拒绝（runner 正在写标注）；清空删全部 annotations 并把
+    task_items.annotation_id 置空；复用缓存随之失效（同图重打重新计费）；
+    标签统计 / 句子库 / 导出全部归零；批次记录与原图留存文件不动。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name)
+        self.uploads = self.data_dir / "uploads"
+        self.images = [
+            _write_png(self.uploads / "d" / f"wipe{i}.png", color=(200, 30 * i, 90))
+            for i in range(2)
+        ]
+        self.store = LabelerStore(self.data_dir)
+        self.db = LabelerDB(self.data_dir)
+        app = _StubApp(self.data_dir)
+        runner = LabelerRunner(app, self.store, self.db)
+        self.addCleanup(runner.shutdown)
+        self.jobs = LabelerJobManager(app, self.store, self.db, runner)
+        self.service = LabelerService.__new__(LabelerService)
+        self.service.app = app
+        self.service.store = self.store
+        self.service.db = self.db
+        self.service.jobs = self.jobs
+
+    def _submit(self, images=None):
+        refs = [
+            {"path": str(path), "name": path.name, "relative_path": f"d/{path.name}"}
+            for path in (images if images is not None else self.images)
+        ]
+        return self.jobs.submit({"image_refs": refs, "config": _base_config()})
+
+    def _wait(self, task_id, timeout=10.0):
+        deadline = time.time() + timeout
+        state = None
+        while time.time() < deadline:
+            state = self.store.get_task(task_id)
+            if state and state.get("status") in {"done", "failed", "cancelled", "interrupted"}:
+                return state
+            time.sleep(0.02)
+        return state
+
+    def test_clear_wipes_annotations_and_dangling_refs(self):
+        task = self._submit()
+        self._wait(task["id"])
+        rows = self.db.annotations(task_id=task["id"], limit=100)
+        self.assertTrue(rows)
+        self.assertTrue(self.db.tag_counts(limit=10))
+        first = rows[0]
+        self.assertIsNotNone(self.db.find_reusable(
+            first["path_key"], first["content_version"], first["config_fingerprint"]))
+
+        payload, status = self.service.api_annotations_clear()
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["deleted"], len(rows))
+        # 标注与统计归零：查询、复用、标签、句子全部为空。
+        self.assertEqual(self.db.annotations(limit=100), [])
+        self.assertEqual(self.db.tag_counts(limit=10), [])
+        self.assertIsNone(self.db.find_reusable(
+            first["path_key"], first["content_version"], first["config_fingerprint"]))
+        stats, _ = self.service.api_sentence_stats()
+        self.assertEqual(stats.get("items"), [])
+        # 逐图行保留（批次记录还在），但悬挂引用已清空。
+        items = self.db.list_items(task["id"], limit=100)
+        self.assertTrue(items)
+        self.assertTrue(all(item.get("annotation_id") in (None, "") for item in items))
+        # 任务记录本身不动。
+        self.assertIsNotNone(self.store.get_task(task["id"]))
+
+    def test_clear_rejected_while_batch_active(self):
+        release = threading.Event()
+
+        def behavior(profile, messages, options, status):
+            release.wait(timeout=10)
+            return '{"tags":[{"tag":"cat","confidence":0.9}],"description":""}'
+
+        app = _StubApp(self.data_dir, models=_StubModels(behavior=behavior))
+        runner = LabelerRunner(app, self.store, self.db)
+        self.addCleanup(runner.shutdown)
+        jobs = LabelerJobManager(app, self.store, self.db, runner)
+        service = LabelerService.__new__(LabelerService)
+        service.app = app
+        service.store = self.store
+        service.db = self.db
+        service.jobs = jobs
+        refs = [{"path": str(path), "name": path.name} for path in self.images]
+        active = jobs.submit({"image_refs": refs, "config": _base_config()})
+        try:
+            payload, status = service.api_annotations_clear()
+            self.assertEqual(status, 400)
+            self.assertIn("批次", payload["error"])
+            # 拒绝时不动库：已有标注照常可查。
+            self.assertIsNotNone(self.store.get_task(active["id"]))
+        finally:
+            release.set()
+            self._wait(active["id"])
+
+    def test_clear_ui_wired(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "public/index.html").read_text(encoding="utf-8")
+        js = (root / "public/js/23-labeler.js").read_text(encoding="utf-8")
+        http = (root / "naiba/http.py").read_text(encoding="utf-8")
+        self.assertIn('id="labelerWipeAnnotations"', html)
+        self.assertIn("清空标注库", html)
+        self.assertIn('id="labelerResultsHint"', html)
+        self.assertIn("wipeAnnotations", js)
+        self.assertIn('"/api/labeler/annotations"', js)
+        self.assertIn("RESULT_TAB_HINTS", js)
+        delete_section = http.split("def do_DELETE", 1)[1]
+        self.assertIn('path == "/api/labeler/annotations"', delete_section)
+
+
+class _ChatFakeExecutor:
+    """SkillAgent 只在模型主动调工具时才碰执行器；stub 模型不调工具，够用。"""
+
+    def __init__(self):
+        self.debug_label = ""
+
+    def clone_for_permission(self, mode):
+        return self
+
+
+class _ChatStubConfig(_StubConfig):
+    """补上对话引擎要用的 workspace 解析（默认应用工作区）。"""
+
+    def resolve_workspace_dir(self, *_args, **_kwargs):
+        return str(Path(tempfile.gettempdir()) / "naiba-chat-test-workspace")
+
+
+class LabelerChatEngineTests(unittest.TestCase):
+    """engine=chat：Skill 走对话同款 SkillAgent 工具循环（离线，stub 模型不联网）。
+
+    口径：Skill 即规则（引擎不拼提示词、不截断）；产出文本走既有 parse_response
+    （含非 JSON 兜底，解析口径=「得到一个文本，经由打标器处理」）；skill_revision
+    进指纹（Skill 内容变更后旧标注不复用）；取消传播；上下文超限逐图失败。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name)
+        self.uploads = self.data_dir / "uploads"
+        self.images = [
+            _write_png(self.uploads / "d" / f"chat{i}.png", color=(90, 30 * i, 120))
+            for i in range(2)
+        ]
+        self.skills_dir = self.data_dir / "skills"
+        skill_dir = self.skills_dir / "demo-label-skill"
+        (skill_dir / "references").mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: demo-label-skill\ndescription: 打标技能\n---\n\n# 规则\n观察图片并输出。",
+            encoding="utf-8",
+        )
+        (skill_dir / "references" / "style.txt").write_text("风格参考：简洁。", encoding="utf-8")
+        self.store = LabelerStore(self.data_dir)
+        self.db = LabelerDB(self.data_dir)
+        app = _StubApp(self.data_dir, config=_ChatStubConfig())
+        app.catalog = SkillCatalog([self.skills_dir])
+        app.executor = _ChatFakeExecutor()
+        self.app = app
+        runner = LabelerRunner(app, self.store, self.db)
+        self.addCleanup(runner.shutdown)
+        self.jobs = LabelerJobManager(app, self.store, self.db, runner)
+        self.skill_id = app.catalog.scan()[0]["id"]
+
+    def _chat_raw(self, **overrides):
+        raw = _base_config(engine="chat", output_mode="auto", language="auto",
+                           skill_id=self.skill_id)
+        raw.update(overrides)
+        return raw
+
+    def _submit_chat(self, behavior=None, images=None):
+        if behavior:
+            self.app.models = _StubModels(behavior)
+        refs = [
+            {"path": str(path), "name": path.name, "relative_path": f"d/{path.name}"}
+            for path in (images if images is not None else self.images[:1])
+        ]
+        return self.jobs.submit({"image_refs": refs, "config": self._chat_raw()})
+
+    def _wait(self, task_id, timeout=10.0):
+        deadline = time.time() + timeout
+        state = None
+        while time.time() < deadline:
+            state = self.store.get_task(task_id)
+            if state and state.get("status") in {"done", "failed", "cancelled", "interrupted"}:
+                return state
+            time.sleep(0.02)
+        return state
+
+    def test_chat_config_valid_and_revision_in_fingerprint(self):
+        config = normalize_config(self.app, self._chat_raw())
+        self.assertEqual(config["engine"], "chat")
+        self.assertEqual(config["skill_id"], self.skill_id)
+        self.assertTrue(config["skill_revision"])
+        self.assertNotIn("system_prompt", config)
+        old_fp = config["config_fingerprint"]
+        # Skill 内容变更 → revision 变 → 指纹变：旧标注不再复用（会重新打标计费）。
+        skill_md = self.skills_dir / "demo-label-skill" / "SKILL.md"
+        skill_md.write_text(
+            "---\nname: demo-label-skill\ndescription: 打标技能\n---\n\n# 规则改了。",
+            encoding="utf-8",
+        )
+        config2 = normalize_config(self.app, self._chat_raw())
+        self.assertNotEqual(config2["skill_revision"], config["skill_revision"])
+        self.assertNotEqual(config2["config_fingerprint"], old_fp)
+
+    def test_chat_config_requires_existing_skill(self):
+        with self.assertRaises(LabelerTaskError):
+            normalize_config(self.app, _base_config(engine="chat", output_mode="auto", language="auto"))
+        with self.assertRaises(LabelerTaskError):
+            normalize_config(self.app, self._chat_raw(skill_id="nonexistent"))
+
+    def test_provider_fingerprint_unchanged_by_skill_keys(self):
+        # 加 skill 字段不能让 provider 档的复用失效：指纹载荷里不出现空 skill 键。
+        config = normalize_config(self.app, _base_config())
+        self.assertNotIn("skill_id", config)
+        raw_payload = {key: config.get(key) for key in (
+            "engine", "output_mode", "language", "preset", "model_key", "model_name",
+            "confidence_threshold", "max_tags", "custom_prompt", "subject_filter",
+            "prompt_version")}
+        self.assertEqual(config_fingerprint({**config, "skill_id": "", "skill_revision": ""}),
+                         config_fingerprint(raw_payload))
+
+    def test_chat_engine_prose_output_becomes_description(self):
+        def behavior(profile, messages, options, status):
+            return "一位少女站在星空下，长发随风飘动，衣袂轻扬。画面整体是冷色调。"
+
+        task = self._submit_chat(behavior)
+        self._wait(task["id"])
+        rows = self.db.annotations(task_id=task["id"], limit=10)
+        self.assertEqual(len(rows), 1)
+        self.assertIn("少女", rows[0]["description"])
+        self.assertEqual(rows[0]["tags"], [])
+
+    def test_chat_engine_json_output_keeps_tags(self):
+        def behavior(profile, messages, options, status):
+            return '{"tags":[{"tag":"cat","confidence":0.9}],"description":"一只猫"}'
+
+        task = self._submit_chat(behavior)
+        self._wait(task["id"])
+        rows = self.db.annotations(task_id=task["id"], limit=10)
+        self.assertEqual(len(rows), 1)
+        self.assertIn("cat", rows[0]["tags"])
+        self.assertEqual(rows[0]["description"], "一只猫")
+
+    def test_chat_context_notice_fails_image(self):
+        # 上下文塞不下时 SkillAgent 把 notice 当正常返回值交回；引擎必须识别成失败，
+        # 绝不能把提示文案存成标注。
+        task = self._submit_chat(lambda profile, messages, options, status: _CONTEXT_FULL_NOTICE)
+        self._wait(task["id"])
+        item = self.db.list_items(task["id"])[0]
+        self.assertEqual(item["state"], "failed")
+        self.assertEqual(self.db.annotations(task_id=task["id"], limit=10), [])
+
+    def test_chat_cancel_propagates(self):
+        started = threading.Event()
+
+        def behavior(profile, messages, options, status):
+            started.set()
+            for _ in range(300):
+                if options["cancel_event"].is_set():
+                    raise RuntimeError("任务已取消")
+                time.sleep(0.01)
+            return "文本产出"
+
+        task = self._submit_chat(behavior)
+        self.assertTrue(started.wait(5))
+        self.assertTrue(self.jobs.cancel(task["id"]))
+        state = self._wait(task["id"], timeout=15)
+        self.assertEqual(state["status"], "cancelled")
+        counts = self.db.counts(task["id"])
+        self.assertEqual(counts["cancelled"], 1)
+
+    def test_build_chat_prompt_carries_extra_without_format_rules(self):
+        prompt = build_chat_prompt({"custom_prompt": "忽略背景文字"})
+        self.assertIn("忽略背景文字", prompt)
+        self.assertNotIn("JSON", prompt)  # 不往 Skill 规则里掺输出格式要求
 
 
 if __name__ == "__main__":

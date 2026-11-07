@@ -224,12 +224,12 @@ class CustomPageUiContractTests(unittest.TestCase):
         self.assertGreaterEqual(self.html.count('<option value="auto" selected>以提示词为准</option>'), 2)
 
     def test_skill_load_controls_in_html(self):
-        # 两种载入口味：完整 SKILL.md 全文 / 去头部元数据的纯正文（用户 2026-11-07 拍板）。
+        # 选中即应用（用户 2026-11-07 拍板）：Skill 完整目录不灌提示词框，
+        # 载入按钮全删，提示词框是纯手输区；只留「清空提示词」做重置。
         self.assertIn('id="labelerSkillSelect"', self.html)
-        self.assertIn('id="labelerSkillLoadFull"', self.html)
-        self.assertIn(">载入完整 Skill</button>", self.html)
-        self.assertIn('id="labelerSkillLoadBody"', self.html)
-        self.assertIn(">载入正文</button>", self.html)
+        self.assertNotIn("labelerSkillLoadFull", self.html)
+        self.assertNotIn("labelerSkillLoadBody", self.html)
+        self.assertNotIn("载入正文", self.html)
         self.assertIn('id="labelerSkillClear"', self.html)
         self.assertIn('id="labelerSkillNote"', self.html)
 
@@ -248,21 +248,30 @@ class CustomPageUiContractTests(unittest.TestCase):
         self.assertIn("function currentLabelerPage()", self.js)
         self.assertIn("function setLabelerPage(page)", self.js)
         self.assertIn('page2.dataset.labelerPage = next', self.js)
-        # 自定义档收集：system_prompt 直传 + auto 默认 + 预设固定 general。
+        # 自定义档收集：规则来源二选一——选了 Skill 走对话链路（engine=chat + skill_id），
+        # 没选就手输提示词；auto 默认 + 预设固定 general。
         self.assertIn('currentLabelerPage() === "custom"', self.js)
+        self.assertIn('config.engine = "chat"', self.js)
+        self.assertIn('config.skill_id = labeler.skillPick.id', self.js)
         self.assertIn('config.system_prompt = String($("#labelerCustomSystemPrompt")?.value || "").trim()', self.js)
         self.assertIn('config.output_mode = $("#labelerCustomOutputMode")?.value || "auto"', self.js)
         self.assertIn('config.preset = "general"', self.js)
-        # 空提示词在提交前拦截。
-        self.assertIn("自定义打标要先填写系统提示词", self.js)
+        # 空规则在提交前拦截（没选 Skill 也没手输）。
+        self.assertIn("自定义打标要先选一个 Skill", self.js)
 
     def test_skill_load_uses_chat_skill_surface(self):
-        # 与聊天同一份接口且同方法：scan/content 都走 POST 空体/带 id（GET 会 404）。
+        # 与聊天同一份接口且同方法：scan 走 POST；选中 Skill = 走对话链路（engine=chat）。
+        # 2026-11-07 拍板：正文不再灌提示词框，bundle 内联方案废弃（端点保留不接前端），
+        # 超限/截断类 UI 一律不存在（对话模块口径：不截断）。
         self.assertIn('api("/api/skills/scan", { method: "POST", body: {} })', self.js)
-        self.assertIn('api("/api/skills/content", { method: "POST", body: { id } })', self.js)
-        self.assertIn("function ensureSkills()", self.js)
-        self.assertIn("function loadSkillContent(mode)", self.js)
-        self.assertIn('mode === "body" ? String(payload.body || "") : String(payload.content || "")', self.js)
+        self.assertIn("function applySelectedSkill()", self.js)
+        self.assertIn("function skillPlaceholderOption()", self.js)
+        self.assertIn("labeler.skillPick", self.js)
+        self.assertIn("function syncCustomEngineUi()", self.js)
+        self.assertIn('config.engine = "chat"', self.js)
+        self.assertNotIn("systemPromptOverlimitNote", self.js)
+        self.assertNotIn("LABELER_MAX_SYSTEM_PROMPT", self.js)
+        self.assertNotIn("mode: \"bundle\"", self.js)
         self.assertIn("function clearSystemPrompt()", self.js)
 
     def test_skill_content_api_returns_both_flavors(self):
@@ -292,6 +301,10 @@ class CustomPageUiContractTests(unittest.TestCase):
         self.assertIn('"/api/skills/content"', http_py)
         self.assertIn("def skill_content(self, skill_id: str)", catalog_py)
         self.assertIn("read_skill_content(row[\"path\"])", catalog_py)
+        # mode="bundle" 分发到完整目录文本包；脚本只报名单不收正文。
+        self.assertIn("skill_bundle", http_py)
+        self.assertIn("def skill_bundle(", catalog_py)
+        self.assertIn('"script_names"', catalog_py)
 
 
 if __name__ == "__main__":

@@ -4462,12 +4462,17 @@ async function loadBatchItemOutputs(taskId) {
 }
 
 async function cancelBatchItem(taskId) {
+  const batchId = String(batch.runId || "");
   try {
     await api(`/api/comfyui/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST", body: {} });
     toast("已取消这一条，后面的条目照常跑");
-    batch.runData = null;
-    batch.runSignature = "";
-    if (batch.view === "run" && batch.runId) startBatchPolling();
+    if (batch.runId === batchId && batch.view === "run") {
+      batch.runData = null;
+      batch.runSignature = "";
+      stopBatchPolling();
+      renderBatch();
+      startBatchPolling();
+    }
     void loadBatchHistories();
   } catch (error) {
     toast(`取消失败：${error.message}`);
@@ -5077,12 +5082,37 @@ async function clearBatchOutputs() {
 
 async function deleteCurrentBatch() {
   const batchId = String(batch.runId || "");
-  if (!batchId || batch.deletingBatches.has(batchId)) return;
-  const count = (batch.runData?.items || []).length;
-  if (!window.confirm(`删除整个批次「${batch.runData?.title || "未命名批次"}」及其 ${count} 个条目的全部产物和任务记录？\n正在运行的条目会先取消；批次记录也会移除，无法从历史重新编辑。删除后无法恢复。`)) return;
+  if (!batchId || batch.view !== "run" || batch.deletingBatches.has(batchId)) return;
+  const originalDraft = batch.draft;
+  const originalSnapshot = batchEditSnapshot();
+  const editEpoch = batch.editEpoch;
+  const current = () => batch.runId === batchId && batch.view === "run"
+    && batch.draft === originalDraft && batch.editEpoch === editEpoch
+    && batchEditSnapshot() === originalSnapshot;
   batch.deletingBatches.add(batchId);
   renderBatch();
+  let deleteStarted = false;
   try {
+    let detail = batch.runData;
+    if (!detail || String(detail.id || "") !== batchId || !Array.isArray(detail.items)) {
+      toast("正在读取批次详情，确认删除范围后继续");
+      const response = await api(`/api/comfyui/batches/${encodeURIComponent(batchId)}`);
+      if (!current()) { toast("批次或填单已改变，本次删除未执行"); return; }
+      detail = response.batch;
+      if (!detail || String(detail.id || "") !== batchId || !Array.isArray(detail.items)) {
+        throw new Error("批次详情不可用，请刷新后重试");
+      }
+      batch.runData = detail;
+      batch.runSignature = batchRunSignature(detail);
+      renderBatch();
+    }
+    if (!current()) { toast("批次或填单已改变，本次删除未执行"); return; }
+    const count = detail.items.length;
+    if (!window.confirm(`删除整个批次「${detail.title || "未命名批次"}」及其 ${count} 个条目的全部产物和任务记录？\n正在运行的条目会先取消；批次记录也会移除，无法从历史重新编辑。删除后无法恢复。`)) return;
+    if (!current()) { toast("批次或填单已改变，本次删除未执行"); return; }
+    // 确认后让旧轮询失效，不能在整批删除后重新挂回刚删掉的内容。
+    stopBatchPolling();
+    deleteStarted = true;
     const payload = await api(`/api/comfyui/batches/${encodeURIComponent(batchId)}`, {
       method: "DELETE",
       body: { delete_outputs: true },
@@ -5091,7 +5121,7 @@ async function deleteCurrentBatch() {
     if (payload.ok !== true || result.failed.length || result.skipped.length) {
       throw new Error(result.failed[0]?.reason || "批次未完整删除，请刷新后确认");
     }
-    if (batch.runId === batchId) {
+    if (batch.runId === batchId && batch.view === "run") {
       stopBatchPolling();
       batch.runId = "";
       batch.runData = null;
@@ -5111,22 +5141,29 @@ async function deleteCurrentBatch() {
     batch.deletingBatches.delete(batchId);
     if (batch.runId === batchId && batch.view === "run") {
       // 后端整批删除可能先删掉部分任务再报错；重新读取，不能留下已删除的旧缩略图。
-      batch.runData = null;
-      batch.runSignature = "";
-      stopBatchPolling();
-      startBatchPolling();
+      if (deleteStarted) {
+        batch.runData = null;
+        batch.runSignature = "";
+        stopBatchPolling();
+        startBatchPolling();
+      }
       renderBatch();
     }
   }
 }
 
 async function retryBatchItem(taskId) {
+  const batchId = String(batch.runId || "");
   try {
     await api(`/api/comfyui/tasks/${encodeURIComponent(taskId)}/retry`, { method: "POST", body: {} });
     toast("已重新排队：从没完成的段继续");
-    batch.runData = null;
-    batch.runSignature = "";
-    if (batch.view === "run" && batch.runId) startBatchPolling();
+    if (batch.runId === batchId && batch.view === "run") {
+      batch.runData = null;
+      batch.runSignature = "";
+      stopBatchPolling();
+      renderBatch();
+      startBatchPolling();
+    }
     void loadBatchHistories();
   } catch (error) {
     toast(`重试失败：${error.message}`);

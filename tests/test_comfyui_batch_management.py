@@ -17,7 +17,8 @@ context.mediaKind=(path,name)=>/\.mp4$/.test(name||path)?'video':'image';
 vm.runInContext(`
   startBatchPolling=()=>{};stopBatchPolling=()=>{};setComfyuiPane=()=>{};setComfyuiResultsSegment=()=>{};
   globalThis.management={batchRunMarkup,batchRunCardMarkup,syncBatchSelection,
-    deleteBatchTaskIds,deleteBatchItem,deleteSelectedBatchItems,deleteCurrentBatch,editCurrentBatch};
+    deleteBatchTaskIds,deleteBatchItem,deleteSelectedBatchItems,deleteCurrentBatch,editCurrentBatch,
+    retryBatchItem,cancelBatchItem};
 `,context);
 const m=context.management;
 function runFixture(count=2){
@@ -118,6 +119,68 @@ runFixture();const whole=defer();context.api=()=>whole.promise;const pending=m.d
 p.batch.runId='batch-b';p.batch.runData=other;
 whole.resolve({ok:true,deleted:2,failed:[],skipped:[]});await pending;
 assert.equal(p.batch.runId,'batch-b');assert.equal(p.batch.runData,other);assert.equal(p.batch.view,'run');
+""")
+
+    def test_retry_and_cancel_refresh_immediately_and_delete_reads_accurate_details(self):
+        self.run_case(r"""
+for(const action of ['retryBatchItem','cancelBatchItem']){
+  runFixture();const detail=p.batch.runData,calls=[];let renders=0;
+  vm.runInContext('renderBatch=()=>globalThis.renderCount++;',context);context.renderCount=0;
+  context.api=async(path,options)=>{
+    calls.push({path,method:options?.method||'GET'});
+    if(options?.method==='DELETE')return {ok:true,deleted:2,failed:[],skipped:[]};
+    if(path==='/api/comfyui/batches/batch-a')return {batch:detail};
+    return {task:{id:'task-1'}};
+  };
+  await m[action]('task-1');assert.equal(p.batch.runData,null);assert.ok(context.renderCount>0,'刷新期间旧删除按钮必须立即撤下');
+  await m.deleteCurrentBatch();
+  assert.equal(calls.filter(row=>row.path==='/api/comfyui/batches/batch-a'&&row.method==='GET').length,1);
+  assert.equal(calls.filter(row=>row.method==='DELETE').length,1);
+  assert.match(confirms.at(-1),/测试批次/);assert.match(confirms.at(-1),/2 个条目/);
+  assert.match(messages.at(-1),/已删除整个批次及 2 条任务记录/);
+  assert.equal(p.batch.runId,'');assert.equal(p.batch.view,'draft');
+}
+""")
+
+    def test_delete_detail_loading_is_single_and_cannot_follow_navigation_or_manual_edits(self):
+        self.run_case(r"""
+for(const change of ['batch','draft']){
+  runFixture();const detail=p.batch.runData,later=defer();let deletes=0,reads=0;
+  p.batch.runData=null;p.batch.draft={title:'人工草稿',schemes:[]};
+  context.api=(path,options)=>{if(options?.method==='DELETE'){deletes++;return Promise.resolve({ok:true,deleted:2,failed:[],skipped:[]});}reads++;return later.promise;};
+  const pending=m.deleteCurrentBatch();await m.deleteCurrentBatch();assert.equal(reads,1);
+  if(change==='batch'){p.batch.runId='batch-b';p.batch.runData={id:'batch-b',items:[]};}
+  else p.batch.draft.title='读取期间的人工新稿';
+  later.resolve({batch:detail});await pending;
+  assert.equal(deletes,0);assert.equal(p.batch.deletingBatches.size,0);
+  assert.match(messages.at(-1),/本次删除未执行/);
+  if(change==='draft')assert.equal(p.batch.draft.title,'读取期间的人工新稿');
+  else assert.equal(p.batch.runId,'batch-b');
+}
+""")
+
+    def test_delete_refresh_failure_and_mismatched_details_can_retry_without_false_confirmation(self):
+        self.run_case(r"""
+runFixture();const detail=p.batch.runData;const initial=confirms.length;let deletes=0;
+p.batch.runData=null;context.api=async()=>{throw new Error('读取暂时失败');};
+await m.deleteCurrentBatch();assert.equal(confirms.length,initial);assert.equal(p.batch.deletingBatches.size,0);
+assert.match(messages.at(-1),/读取暂时失败/);
+p.batch.runData={...detail,id:'batch-b'};context.api=async()=>({batch:{...detail,id:'batch-b'}});
+await m.deleteCurrentBatch();assert.equal(confirms.length,initial);assert.match(messages.at(-1),/批次详情不可用/);
+context.api=async(path,options)=>{if(options?.method==='DELETE'){deletes++;return {ok:true,deleted:2,failed:[],skipped:[]};}return {batch:detail};};
+await m.deleteCurrentBatch();assert.equal(deletes,1);assert.match(confirms.at(-1),/2 个条目/);
+assert.equal(p.batch.runId,'');assert.equal(p.batch.view,'draft');
+""")
+
+    def test_old_retry_and_cancel_callbacks_cannot_clear_a_new_batch(self):
+        self.run_case(r"""
+for(const action of ['retryBatchItem','cancelBatchItem']){
+  runFixture();const later=defer();context.api=()=>later.promise;
+  const pending=m[action]('task-1');const other={id:'batch-b',items:[]};
+  p.batch.runId='batch-b';p.batch.runData=other;
+  later.resolve({task:{id:'task-1'}});await pending;
+  assert.equal(p.batch.runId,'batch-b');assert.equal(p.batch.runData,other);
+}
 """)
 
     def test_latest_edit_wins_and_late_edit_never_overwrites_manual_input(self):

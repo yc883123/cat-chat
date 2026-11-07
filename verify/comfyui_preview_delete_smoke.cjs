@@ -14,7 +14,8 @@ const image = '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800"
 async function runViewport(browser, viewport) {
   const page = await browser.newPage({ viewport, hasTouch: viewport.width < 500 });
   const errors = [], deleteRequests = [], confirmations = [];
-  let mode = 'image', batchExists = true, failOne = false;
+  let mode = 'image', batchExists = true, failOne = false, retryMode = false;
+  let holdNextBatch = false, releaseBatch = null;
   let delayedSkill = null, skillRequested = false, longSkill = false;
   const deleted = new Set();
   const names = () => [1, 2, 3].map(index => `${mode}-${index}.${mode === 'video' ? 'mp4' : 'png'}`);
@@ -22,7 +23,8 @@ async function runViewport(browser, viewport) {
     id: 'ui-preview-batch', title: '预览与删除回归批次', item_count: 3, done_count: 3 - deleted.size,
     created_at: '2026-11-01T00:00:00Z',
     items: names().map((name, index) => ({ index: index + 1, name: `条目 ${index + 1}`,
-      task_id: `ui-task-${index + 1}`, status: deleted.has(`ui-task-${index + 1}`) ? 'missing' : 'completed',
+      task_id: `ui-task-${index + 1}`, status: deleted.has(`ui-task-${index + 1}`) ? 'missing'
+        : retryMode && index === 0 ? 'failed' : 'completed',
       done: 1, total: 1, outputs: deleted.has(`ui-task-${index + 1}`) ? [] : [name] })),
   });
   const json = (route, data) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) });
@@ -59,7 +61,16 @@ async function runViewport(browser, viewport) {
     }
     if (url.pathname === '/api/comfyui/batches/ui-preview-batch' && request.method() === 'DELETE') {
       batchExists = false;
-      return json(route, { deleted: true });
+      return json(route, { ok: true, deleted: 3, failed: [], skipped: [] });
+    }
+    if (url.pathname === '/api/comfyui/tasks/ui-task-1/retry') {
+      holdNextBatch = true;
+      return json(route, { task: { id: 'ui-task-1', status: 'queued' } });
+    }
+    if (url.pathname === '/api/comfyui/batches/ui-preview-batch' && holdNextBatch) {
+      holdNextBatch = false;
+      const pending = batch();
+      return new Promise(resolve => { releaseBatch = () => resolve(json(route, { batch: pending })); });
     }
     const taskMatch = url.pathname.match(/^\/api\/comfyui\/tasks\/(ui-task-[123])$/);
     if (taskMatch) {
@@ -119,6 +130,27 @@ async function runViewport(browser, viewport) {
       });
       assert.equal((await page.locator('#imageLightboxCounter').innerText()).trim(), '3 / 3', '手机单指水平滑动切到下一张');
     }
+    // 模拟桌面桥，验证翻页后的下载仍传入对应文件的本地路径。
+    await page.evaluate(() => {
+      window.__originalPywebview = window.pywebview;
+      window.__nativeSaves = [];
+      window.pywebview = { api: { naibaSaveFileAs: (file, name) => {
+        window.__nativeSaves.push({ file, name }); return { ok: true };
+      } } };
+    });
+    await page.keyboard.press('Escape');
+    await firstImage.click();
+    await page.locator('#imageLightboxDownload').click();
+    await page.waitForFunction(() => window.__nativeSaves.length === 1);
+    await page.locator('#imageLightboxNext').click();
+    await page.locator('#imageLightboxDownload').click();
+    await page.waitForFunction(() => window.__nativeSaves.length === 2);
+    await page.locator('#imageLightboxNext').click();
+    await page.locator('#imageLightboxDownload').click();
+    await page.waitForFunction(() => window.__nativeSaves.length === 3);
+    assert.deepEqual(await page.evaluate(() => window.__nativeSaves.map(row => row.file)),
+      [1, 2, 3].map(index => `/managed/generated/image-${index}.png`));
+    await page.evaluate(() => { window.pywebview = window.__originalPywebview; });
     await page.keyboard.press('Escape');
     await page.locator('#imageLightbox').waitFor({ state: 'hidden' });
 
@@ -202,10 +234,29 @@ async function runViewport(browser, viewport) {
     await page.locator('#labelerSkillLoadFull').click();
     await page.locator('#labelerSkillNote').filter({ hasText: /超过.*12000|12000.*上限/ }).waitFor({ state: 'visible' });
     assert.equal(await prompt.inputValue(), '人工写的新提示词', '超长Skill必须明确拒绝，保留原提示词');
+
+    // 重试后的详情尚在刷新时，旧删除入口不能把条目数误当0；恢复后确认准确数量。
+    mode = 'image'; retryMode = true; deleted.clear(); failOne = false;
+    await openBatch();
+    await page.locator('[data-batch-action="retry-item"]').first().click();
+    const batchDeadline = Date.now() + 5000;
+    while (!releaseBatch && Date.now() < batchDeadline) await page.waitForTimeout(30);
+    assert.ok(releaseBatch, '必须真实挂起重试后的详情刷新');
+    assert.equal(await page.locator('[data-batch-action="delete-batch"]').isVisible(), false, '详情加载时不保留可误点的旧删除入口');
+    const resumeBatch = releaseBatch;
+    releaseBatch = null;
+    resumeBatch();
+    await page.locator('[data-batch-action="delete-batch"]').waitFor({ state: 'visible' });
+    await page.locator('[data-batch-action="delete-batch"]').click();
+    await page.waitForFunction(() => document.querySelectorAll('[data-batch-open]').length === 0);
+    assert.match(confirmations.at(-1), /3 个条目/);
+    assert.doesNotMatch(confirmations.at(-1), /0 个条目/);
+    assert.equal(batchExists, false);
     await verifyErrors();
-    console.log(`通过 ${viewport.width}×${viewport.height}：灯箱按钮/方向键/滑动、屏外产物、删除点击区/多选/部分失败、Skill迟到与超长保护${video ? '、视频切换暂停' : ''}`);
+    console.log(`通过 ${viewport.width}×${viewport.height}：灯箱切换/滑动/翻页另存为、屏外产物、批量删除/部分失败/刷新期间保护、Skill输入保护${video ? '、视频暂停' : ''}`);
   } catch (error) {
     if (delayedSkill) delayedSkill();
+    if (releaseBatch) releaseBatch();
     await page.screenshot({ path: path.join(OUTPUT, `comfyui_preview_delete_failed_${viewport.width}.png`) });
     throw error;
   } finally { await page.close(); }

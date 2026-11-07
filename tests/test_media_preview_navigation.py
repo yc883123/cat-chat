@@ -50,13 +50,13 @@ const nodes={};for(const id of ['imageLightbox','imageLightboxImg','imageLightbo
   const n=new Element(id==='imageLightboxImg'?'img':'div');n.id=id;nodes[id]=n;body.append(n);}
 nodes.imageLightbox.hidden=true;
 const state={token:'test-token',bootstrap:{media_exts:{exts:{image:['.png','.jpg'],video:['.mp4'],audio:['.wav']}}}};
-const messages=[],timers=[];const window={innerWidth:600,innerHeight:500,setTimeout:fn=>{timers.push(fn);return timers.length;}};
-const context=vm.createContext({console,document,window,state,URL,Set,Map,
+const messages=[],timers=[];const window={innerWidth:600,innerHeight:500,setTimeout:fn=>{timers.push(fn);return timers.length;},clearTimeout(){}};
+const context=vm.createContext({console,document,window,state,URL,Set,Map,AbortController,location:{origin:'http://127.0.0.1'},
   $:s=>document.querySelector(s),toast:text=>messages.push(text),localFileUrl:path=>'/api/file?path='+encodeURIComponent(path),
   setTimeout:window.setTimeout,clearTimeout(){},setInterval(){},clearInterval(){}});
 const clean=source=>source.replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
 vm.runInContext(clean(fs.readFileSync('public/js/03-media.js','utf8'))+`
-globalThis.mediaApi={collectMediaPreviewItems,openImageLightbox,closeImageLightbox,stepImageLightbox,handleImageLightboxKey,initImageLightboxInteractions,mediaKind};`,context);
+globalThis.mediaApi={collectMediaPreviewItems,openImageLightbox,closeImageLightbox,stepImageLightbox,handleImageLightboxKey,initImageLightboxInteractions,mediaKind,saveLocalFile,downloadLightboxImage};`,context);
 const api=context.mediaApi;
 Object.assign(context,api,{attachmentThumbUrl:()=>'',saveLocalFile:()=>true});
 vm.runInContext(clean(fs.readFileSync('public/js/24-comfyui.js','utf8'))+`
@@ -73,6 +73,14 @@ function output(parent,task,name,{placeholder=false,url=''}={}){
   const media=new Element(host.dataset.comfyuiPreviewKind==='image'?'img':host.dataset.comfyuiPreviewKind);
   if(media.tagName==='IMG'){media.dataset.largeUrl=host.dataset.comfyuiPreviewUrl;media.alt=name;}
   media.src=host.dataset.comfyuiPreviewUrl;host.append(media);return {host,media};
+}
+function downloadHarness(){
+  const native=[],fallback=[],calls=[];
+  context.saveLocalFile=api.saveLocalFile;
+  context.triggerDownload=url=>{fallback.push(url);return true;};
+  window.pywebview={api:{naibaSaveFileAs:(path,name)=>{native.push({path,name});return {ok:true};}}};
+  context.api=async path=>{calls.push(path);throw new Error('Unexpected detail request');};
+  return {native,fallback,calls};
 }
 """
 
@@ -112,6 +120,69 @@ const file=output(scope('pendingFiles'),'pending','pending.png');
 output(scope('messages'),'chat','chat.png');
 api.openImageLightbox(file.media.dataset.largeUrl,file.media);
 assert.equal(nodes.imageLightboxPrev.hidden,true);assert.equal(api.stepImageLightbox(1),false);
+""")
+
+    def test_download_after_navigation_keeps_native_path_of_mounted_image(self):
+        self.run_case(r"""
+(async()=>{
+const h=downloadHarness(),group=scope('comfyuiBatchBody');
+output(group,'a','a.png',{placeholder:true});const a=output(group,'a','a.png',{url:'/api/file?path=%2Fmanaged%2Fa.png'});
+output(group,'b','b.png',{placeholder:true});output(group,'b','b.png',{url:'/api/file?path=%2Fmanaged%2Fb.png'});
+api.openImageLightbox(a.media.dataset.largeUrl,a.media);api.stepImageLightbox(1);
+assert.equal(nodes.imageLightboxImg.src,'/api/file?path=%2Fmanaged%2Fb.png');
+await api.downloadLightboxImage();
+assert.equal(JSON.stringify(h.native),JSON.stringify([{path:'/managed/b.png',name:'b.png'}]));
+assert.deepEqual(h.calls,[]);assert.deepEqual(h.fallback,[]);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+""")
+
+    def test_offscreen_download_looks_up_exact_file_without_loading_other_tasks(self):
+        self.run_case(r"""
+(async()=>{
+const h=downloadHarness(),group=scope('comfyuiBatchBody');
+const a=output(group,'a','a.png',{placeholder:true});output(group,'b','b.png',{placeholder:true});
+context.api=async path=>{h.calls.push(path);return {task:{id:'b',output_files:[
+  {name:'other.png',path:'/managed/other.png'},{name:'b.png',path:'/managed/b.png'}]}};};
+api.openImageLightbox('/api/comfyui/tasks/a/files/a.png?token=test-token',a);api.stepImageLightbox(1);
+assert.equal(h.calls.length,0,'收集与切图不能提前查询所有任务');
+await api.downloadLightboxImage();
+assert.deepEqual(h.calls,['/api/comfyui/tasks/b']);
+assert.equal(JSON.stringify(h.native),JSON.stringify([{path:'/managed/b.png',name:'b.png'}]));
+assert.deepEqual(h.fallback,[]);assert.equal(nodes.imageLightboxDownload.disabled,false);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+""")
+
+    def test_desktop_lookup_failure_is_reported_without_broken_browser_fallback(self):
+        self.run_case(r"""
+(async()=>{
+const h=downloadHarness(),group=scope('comfyuiBatchBody'),a=output(group,'a','a.png',{placeholder:true});
+api.openImageLightbox('/api/comfyui/tasks/a/files/a.png?token=test-token',a);
+for(const result of [()=>Promise.reject(new Error('读取失败')),
+  ()=>Promise.resolve({task:{id:'wrong',output_files:[{name:'a.png',path:'/wrong.png'}]}}),
+  ()=>Promise.resolve({task:{id:'a',output_files:[]}})]){
+  context.api=result;await api.downloadLightboxImage();assert.match(messages.at(-1),/下载失败/);
+}
+assert.deepEqual(h.native,[]);assert.deepEqual(h.fallback,[]);assert.equal(nodes.imageLightboxDownload.disabled,false);
+delete window.pywebview;await api.downloadLightboxImage();
+assert.deepEqual(h.fallback,['/api/comfyui/tasks/a/files/a.png?token=test-token'],'普通浏览器仍保留原下载入口');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+""")
+
+    def test_pending_download_stays_bound_to_clicked_item_after_close_and_reopen(self):
+        self.run_case(r"""
+(async()=>{
+const h=downloadHarness(),group=scope('comfyuiBatchBody');
+const a=output(group,'a','a.png',{placeholder:true}),b=output(group,'b','b.png',{placeholder:true});
+let resolve;context.api=path=>{h.calls.push(path);return new Promise(r=>{resolve=r;});};
+api.openImageLightbox('/api/comfyui/tasks/a/files/a.png?token=test-token',a);
+const pending=api.downloadLightboxImage();assert.equal(nodes.imageLightboxDownload.disabled,true);
+api.closeImageLightbox();api.openImageLightbox('/api/comfyui/tasks/b/files/b.png?token=test-token',b);
+await api.downloadLightboxImage();assert.equal(h.calls.length,1,'查询期间不得重复触发下载');
+resolve({task:{id:'a',output_files:[{name:'a.png',path:'/managed/a.png'}]}});await pending;
+assert.equal(JSON.stringify(h.native),JSON.stringify([{path:'/managed/a.png',name:'a.png'}]));
+assert.equal(nodes.imageLightboxImg.src,'/api/comfyui/tasks/b/files/b.png?token=test-token');
+assert.equal(nodes.imageLightboxCounter.textContent,'2 / 2');assert.deepEqual(h.fallback,[]);
+})().catch(error=>{console.error(error);process.exitCode=1;});
 """)
 
     def test_mobile_swipe_changes_image_but_zoomed_pan_does_not(self):

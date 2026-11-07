@@ -59,6 +59,7 @@ function fileExtension(value) {
 // 只收当前来源容器的媒体，输入附件和隐藏页不混入；同一产物的缩略与展开卡按身份去重。
 let lightboxItems = [];
 let lightboxIndex = -1;
+let lightboxDownloadBusy = false;
 
 function mediaPreviewContainer(sourceEl, includeInputs = false) {
   return sourceEl?.closest?.('#messages, #comfyuiBatchBody, #comfyuiOutputGrid, .comfyui-output-grid')
@@ -90,13 +91,19 @@ function previewDescriptor(node) {
 
 function collectImages(container) {
   if (!container) return [];
-  const seen = new Set();
+  const positions = new Map();
   const items = [];
   // 批量卡片进入视野前还没有 img：占位已带任务和文件名，可成组翻页而不预载屏外图片。
   container.querySelectorAll('img[data-large-url], [data-batch-preview-task][data-batch-preview-name]').forEach((node) => {
     const item = previewDescriptor(node);
-    if (!item.url || item.kind !== 'image' || seen.has(item.key) || !previewNodeShown(node)) return;
-    seen.add(item.key);
+    if (!item.url || item.kind !== 'image' || !previewNodeShown(node)) return;
+    if (positions.has(item.key)) {
+      const index = positions.get(item.key);
+      // 占位在真实卡片前面；保留后者的本地路径，让翻页后的原生另存为仍可用。
+      if (!localPathFromUrl(items[index].url) && localPathFromUrl(item.url)) items[index] = item;
+      return;
+    }
+    positions.set(item.key, items.length);
     items.push(item);
   });
   return items;
@@ -107,11 +114,16 @@ export function collectMediaPreviewItems(sourceEl, kind = 'image') {
   const container = mediaPreviewContainer(sourceEl, kind !== 'image');
   if (!container) return [];
   if (kind === 'image') return collectImages(container);
-  const seen = new Set(), items = [];
+  const positions = new Map(), items = [];
   container.querySelectorAll('[data-comfyui-preview-url], [data-batch-preview-task][data-batch-preview-name]').forEach((node) => {
     const item = previewDescriptor(node);
-    if (!item.url || item.kind !== kind || seen.has(item.key) || !previewNodeShown(node)) return;
-    seen.add(item.key);
+    if (!item.url || item.kind !== kind || !previewNodeShown(node)) return;
+    if (positions.has(item.key)) {
+      const index = positions.get(item.key);
+      if (!localPathFromUrl(items[index].url) && localPathFromUrl(item.url)) items[index] = item;
+      return;
+    }
+    positions.set(item.key, items.length);
     items.push(item);
   });
   return items;
@@ -295,6 +307,45 @@ function touchDistance(touches) {
   return Math.hypot(dx, dy);
 }
 
+async function downloadLightboxImage() {
+  if (lightboxDownloadBusy) return;
+  // 下载意图绑定点击时的条目；详情返回后不改写当前灯箱索引或新条目的地址。
+  const item = lightboxItems[lightboxIndex];
+  const url = String(item?.url || $('#imageLightboxImg')?.getAttribute('src') || '');
+  const name = String(item?.name || '');
+  if (!url) return;
+  const button = $('#imageLightboxDownload');
+  lightboxDownloadBusy = true;
+  if (button) button.disabled = true;
+  let timeout = null;
+  try {
+    let downloadUrl = url;
+    const bridge = window.pywebview?.api;
+    if (!localPathFromUrl(url) && typeof bridge?.naibaSaveFileAs === 'function') {
+      const parsed = new URL(url, location.origin);
+      const match = parsed.origin === location.origin && parsed.pathname.match(/^\/api\/comfyui\/tasks\/([^/]+)\/files\/(.+)$/);
+      if (match) {
+        const taskId = decodeURIComponent(match[1]), filename = decodeURIComponent(match[2]);
+        const controller = new AbortController();
+        timeout = window.setTimeout(() => controller.abort(), 20000);
+        const payload = await api(`/api/comfyui/tasks/${encodeURIComponent(taskId)}`, { signal: controller.signal });
+        const task = payload?.task;
+        if (String(task?.id || '') !== taskId || !Array.isArray(task?.output_files)) throw new Error('未找到对应任务的原文件');
+        const files = task.output_files.filter(file => String(file?.name || '') === filename && typeof file?.path === 'string' && file.path.trim());
+        if (files.length !== 1) throw new Error('原文件已不存在或无法确认，请刷新产物列表');
+        downloadUrl = localFileUrl(files[0].path);
+      }
+    }
+    if (!saveLocalFile(downloadUrl, name)) toast('这张图没有可下载的地址');
+  } catch (error) {
+    toast(`下载失败：${error?.name === 'AbortError' ? '读取原文件超时，请重试' : error.message}`);
+  } finally {
+    if (timeout !== null) window.clearTimeout(timeout);
+    lightboxDownloadBusy = false;
+    if (button) button.disabled = false;
+  }
+}
+
 export function initImageLightboxInteractions() {
   const box = $('#imageLightbox');
   const img = $('#imageLightboxImg');
@@ -306,10 +357,7 @@ export function initImageLightboxInteractions() {
   $('#imageLightboxDownload')?.addEventListener('click', (event) => {
     event.preventDefault();
     event.stopPropagation();
-    const item = lightboxItems[lightboxIndex];
-    const url = String(item?.url || img.getAttribute('src') || '');
-    if (!url) return;
-    if (!saveLocalFile(url, String(item?.name || ''))) toast('这张图没有可下载的地址');
+    void downloadLightboxImage();
   });
 
   // 滚轮缩放（以光标为锚点）

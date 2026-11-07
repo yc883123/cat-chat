@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 4.1.3-beta
-  RELEASE_TAG: v4.1.3-beta
+  RELEASE_VERSION: 4.1.5-beta
+  RELEASE_TAG: v4.1.5-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-4.1.3-beta-windows-x64
+  PACKAGE_NAME: cat-chat-4.1.5-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-4.1.3-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-4.1.5-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -135,11 +135,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 4.1.3 Beta release
+      - name: Publish 4.1.5 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 4.1.3 Beta
+          name: Cat Chat 4.1.5 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -149,17 +149,13 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 4.1.3 Beta：批量指认与双段转换，贴签匠分预设/自定义两页
-            批次编辑与删除：批量档已排队的批次可以整单编辑回填（剧本、参数、指认都按快照恢复），没排队的条目可以逐条删除；已结束批次可一键清理记录。
-            拆书匠分镜交接：历史分镜可以一键发送进造梦机批量档，按批次快照逐条落位；提词库模板全部进入转换下拉，交接后不用再手动挑模板。
-            批量「＋增加指认」：给批次加四类写入位——第二段提示词、第二时长、第二分辨率与备用槽（比如把 KSampler 的 steps 指到备用槽），未指认的槽位必须整单有值才放行，类型不匹配直接拒绝。
-            双段转换：转换时按只含 ---- 的行把剧本拆成两段，第二段进指认位；工作流只有一个写入位时给明确提示，不再把两段挤在一起。
-            带图小字提醒：每条转换旁标注「无图 / 带 N 图 / N 图·超上限」，所选图片口里挂了多少原图一目了然，转换协议同步带上图片。
-            视频产物封面：结果网格、批量条目与预览的视频卡进入视野才加载元数据并用首帧当封面，不再黑块占位。
-            提取 ComfyUI 进度条：工作台顶栏右侧新增全局步级进度条（百分比、当前步/总步、速率），单次生成与批量生成共用一条；任务结束整条消失，ComfyUI 不提供进度数据时自动隐藏、完全回到原样。
-            打标器更名「贴签匠」：只改显示名，数据位置、导出格式和历史记录全部兼容。
-            贴签匠分两页：预设打标 / 自定义打标页签互斥；自定义页整段手输系统提示词（不叠加预设的忽略词与输出规则），输出形式与语言默认「以提示词为准」，可显式指定。
-            Skill 双口味载入：自定义页可从与聊天同一份 Skill 列表「载入完整 Skill」（含头部元数据）或「载入正文」（去掉头部元数据），灌进提示词框后可手改可清空。
-            验证与测试：本轮全量测试全部通过（含指认校验、自定义档指纹兼容、进度条解析与归属的新用例）；桌面与 375px 手机完成浏览器冒烟，进度条经真实生成链路实机断言（贴右缘 0px、顶栏高度不变）。
-            验收边界：真实 ComfyUI 全链路批量未跑真机探针；进度条依赖 ComfyUI 的日志接口，老版本或关闭日志时自动降级；既有数据位置、更新协议和双名称发布资产保持兼容。
-            Cat Chat 4.1.3 Beta Windows build。更新协议、既有数据位置和双名称发布资产保持兼容。
+            Cat Chat 4.1.5 Beta：贴签匠 Skill 对话引擎、造梦机媒体管理与工作台修复
+            贴签匠 Skill 对话引擎：选中 Skill 后直接运行对话同款 SkillAgent 工具循环，模型可按需读取 Skill 参考文件；仅开放只读文件检索工具，无需把 Skill 正文复制到提示词框。手写规则仍可独立使用，超长内容不截断。
+            Skill 指纹与结果复用：对完整 Skill 文本计算版本指纹，包含 bundle 展示长度以外的尾部内容；Skill 变化后不再沿用旧标注，provider 预设任务的既有指纹保持兼容。
+            标注库管理：新增清空标注库操作，活跃批次期间拒绝清空；删除标注不删原始图片和批次记录。
+            造梦机媒体预览：产物灯箱支持图片、视频和音频在同组连续切换；翻页保留原生另存为路径，屏外产物按需获取。
+            造梦机批次删除与编辑保护：支持逐条删除及多选删除产物，区分删除产物和删除批次；部分删除失败保留失败选择，批次切换和异步回填不会覆盖当前编辑。
+            ComfyUI 进度归属：新任务从新的日志边界读取进度，不再短暂显示上一轮的旧进度；没有可用日志时继续隐藏进度条。
+            工作台与 Agent 修复：贴签匠结果库说明和正文复制、Agent 工具集编辑、KVMem 状态与启动流程、织书台输入和事件处理修正，并更新相关回归覆盖。
+            验证与边界：整合远端 4.1.4-beta 的造梦机预览、删除和异步输入修复，以及本地贴签匠、Agent、KVMem、Studio 和 Writer 改动。实际测试与桌面/375px 手机冒烟结果以本次 CI 和发布核验为准；没有使用付费模型或真实 ComfyUI 生成任务验收。既有数据位置、更新协议和双名称发布资产保持兼容。
+            Cat Chat 4.1.5 Beta Windows build。更新协议、既有数据位置和双名称发布资产保持兼容。

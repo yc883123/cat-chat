@@ -42,6 +42,7 @@ KEEP = {
     "browser_smoke.cjs", "topbar_smoke.cjs", "pending_files_smoke.cjs",
     "chat_composer_layout_smoke.cjs",
     "comfyui_navigation_smoke.cjs",
+    "comfyui_preview_delete_smoke.cjs",
     "onebot_settings_smoke.cjs",
     "studio_prompt_feedback_smoke.cjs",
     "send_button_smoke.cjs", "send_state_smoke.cjs", "file_ref_smoke.cjs",

@@ -173,8 +173,8 @@ def submit(base: str, workflow: dict[str, Any]) -> tuple[str, str]:
         return "", f"{type(exc).__name__}: {exc}"
 
 
-def queue_ids(base: str) -> set[str] | None:
-    """当前队列中 pending/running 的 prompt_id 集合；查询失败返回 None（不判丢失）。"""
+def queue_snapshot(base: str) -> tuple[set[str], set[str]] | None:
+    """同一次队列响应返回（全部 ID，运行 ID）；查询失败返回 None。"""
     try:
         with _DIRECT_OPENER.open(f"{normalize_base_url(base)}/queue", timeout=15) as resp:
             data = json.loads(resp.read(200000).decode("utf-8", errors="replace"))
@@ -183,12 +183,24 @@ def queue_ids(base: str) -> set[str] | None:
     if not isinstance(data, dict):
         return None
     ids: set[str] = set()
+    running: set[str] = set()
     for key in ("queue_running", "queue_pending"):
-        for item in data.get(key) or []:
+        rows = data.get(key) or []
+        if not isinstance(rows, list):
+            return None
+        for item in rows:
             # 队列项形如 [number, prompt_id, workflow, extra, outputs]。
             if isinstance(item, (list, tuple)) and len(item) > 1:
                 ids.add(str(item[1]))
-    return ids
+                if key == "queue_running":
+                    running.add(str(item[1]))
+    return ids, running
+
+
+def queue_ids(base: str) -> set[str] | None:
+    """当前队列中 pending/running 的 prompt_id 集合；查询失败返回 None（不判丢失）。"""
+    snapshot = queue_snapshot(base)
+    return snapshot[0] if snapshot is not None else None
 
 
 def history_entry(base: str, prompt_id: str) -> dict[str, Any] | None:

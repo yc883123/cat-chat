@@ -15,11 +15,15 @@ const VIEWPORTS = [
 async function runViewport(browser, vp) {
   const errors = [];
   const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height } });
+  await page.addInitScript(() => localStorage.setItem('naibaOnboardingDismissed', '1'));
   page.on('pageerror', (err) => errors.push(`pageerror: ${err.message}`));
-  // 浏览器会自己去请求 /favicon.ico，而源码实例没有这条路由（HTTP 层 404）。
-  // 那是浏览器的资源噪音、不是应用错误：按 URL 排除，其余 4xx/5xx 仍照旧判红。
+  // 隔离实例的占位供应商会请求模型目录，精确忽略这条预期的 400；其他请求仍判红。
   page.on('response', (response) => {
-    if (response.status() >= 400 && !response.url().endsWith('/favicon.ico')) {
+    const url = new URL(response.url());
+    const placeholderModelsMiss = response.status() === 400
+      && response.request().method() === 'POST'
+      && url.pathname === '/api/providers/models';
+    if (response.status() >= 400 && !url.pathname.endsWith('/favicon.ico') && !placeholderModelsMiss) {
       errors.push(`HTTP ${response.status()} ${response.url()}`);
     }
   });
@@ -38,6 +42,8 @@ async function runViewport(browser, vp) {
     // 合法的视图恢复状态误报成前端缺失。
     const chatMode = page.locator('#openChatMode');
     if (await chatMode.count() && !(await chatMode.getAttribute('aria-pressed'))?.toLowerCase().includes('true')) {
+      const openSidebar = page.locator('#openSidebar');
+      if (await openSidebar.isVisible()) await openSidebar.click();
       await chatMode.click();
       await page.waitForTimeout(700);
     }

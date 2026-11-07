@@ -234,7 +234,9 @@ class LocalSaveRoutingTests(unittest.TestCase):
         self.assertIn("triggerDownload", body, "浏览器/手机分支必须仍走 <a download>")
         self.assertIn("localPathFromUrl", body, "取路径要走同源门，别直接信 URL")
         # 两条调用链都必须用它；写死 triggerDownload 就等于桌面又点了没反应。
-        self.assertIn("saveLocalFile(url", self.media, "灯箱下载必须走 saveLocalFile")
+        download = self._body(self.media, "async function downloadLightboxImage(")
+        self.assertRegex(download, r"\bsaveLocalFile\s*\(", "灯箱下载必须走 saveLocalFile")
+        self.assertNotRegex(download, r"\btriggerDownload\s*\(", "灯箱不能绕过桌面/手机保存分流")
         self.assertIn("saveLocalFile(convFileRawUrl(", self.bind, "文件面板「下载」必须走 saveLocalFile")
         self.assertNotIn(
             "triggerDownload(convFileRawUrl(", self._code_only(self.bind),

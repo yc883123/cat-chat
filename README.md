@@ -1,40 +1,35 @@
-# Cat Chat 4.1.3 Beta
+# Cat Chat 4.1.5 Beta
 
 <p align="center">
   <img src="docs/cat-chat-logo.png" alt="Cat Chat" width="520">
 </p>
 
-Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。4.1.3 Beta 给造梦机批量加上指认写入位与双段转换、顶栏提取 ComfyUI 步级进度条，打标器更名贴签匠并分预设/自定义两页；继续提供既有的批次编辑删除、任务总管、QQ 渠道与块级流式回复。
+Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。4.1.5 Beta 完善造梦机灯箱连续预览与批次删除，保护批次编辑和贴签匠 Skill 载入期间的人工输入，并隔离上一轮进度日志；继续提供既有的批量指认、双段转换、任务总管、QQ 渠道与块级流式回复。
 
 > Cat Chat 原名 Naiba Chat。显示名自 2.7.6 Beta 起为 Cat Chat；GitHub 仓库自 2.8.0 Beta 起更名为 `cat-chat`（旧地址自动跳转）。更新资产仍使用 `naiba-chat.exe` 与原有清单协议，既有数据位置不变，无需重新配置或搬迁数据。
 
 > 历史版本说明见 [CHANGELOG.md](CHANGELOG.md)。
 
-## 4.1.3 Beta 主要能力
-
-- 批次编辑与删除：批量档已排队的批次可以整单编辑回填（剧本、参数、指认都按快照恢复），没排队的条目可以逐条删除；已结束批次可一键清理记录。
-- 拆书匠分镜交接：历史分镜可以一键发送进造梦机批量档，按批次快照逐条落位；提词库模板全部进入转换下拉，交接后不用再手动挑模板。
-- 批量「＋增加指认」：给批次加四类写入位——第二段提示词、第二时长、第二分辨率与备用槽（比如把 KSampler 的 steps 指到备用槽），未指认的槽位必须整单有值才放行，类型不匹配直接拒绝。
-- 双段转换：转换时按只含 ---- 的行把剧本拆成两段，第二段进指认位；工作流只有一个写入位时给明确提示，不再把两段挤在一起。
-- 带图小字提醒：每条转换旁标注「无图 / 带 N 图 / N 图·超上限」，所选图片口里挂了多少原图一目了然，转换协议同步带上图片。
-- 视频产物封面：结果网格、批量条目与预览的视频卡进入视野才加载元数据并用首帧当封面，不再黑块占位。
-- 提取 ComfyUI 进度条：工作台顶栏右侧新增全局步级进度条（百分比、当前步/总步、速率），单次生成与批量生成共用一条；任务结束整条消失，ComfyUI 不提供进度数据时自动隐藏、完全回到原样。
-- 打标器更名「贴签匠」：只改显示名，数据位置、导出格式和历史记录全部兼容。
-- 贴签匠分两页：预设打标 / 自定义打标页签互斥；自定义页整段手输系统提示词（不叠加预设的忽略词与输出规则），输出形式与语言默认「以提示词为准」，可显式指定。
-- Skill 双口味载入：自定义页可从与聊天同一份 Skill 列表「载入完整 Skill」（含头部元数据）或「载入正文」（去掉头部元数据），灌进提示词框后可手改可清空。
-- 验证与测试：本轮全量测试全部通过（含指认校验、自定义档指纹兼容、进度条解析与归属的新用例）；桌面与 375px 手机完成浏览器冒烟，进度条经真实生成链路实机断言（贴右缘 0px、顶栏高度不变）。
-- 验收边界：真实 ComfyUI 全链路批量未跑真机探针；进度条依赖 ComfyUI 的日志接口，老版本或关闭日志时自动降级；既有数据位置、更新协议和双名称发布资产保持兼容。
+## 4.1.5 Beta 主要能力
+- 贴签匠 Skill 对话引擎：选中 Skill 后直接运行对话同款 SkillAgent 工具循环，模型可按需读取 Skill 参考文件；仅开放只读文件检索工具。手写规则仍可单独使用，完整 Skill 内容不截断。
+- Skill 指纹与结果复用：对完整 Skill 文本计算指纹，包含展示长度以外的尾部内容；Skill 改变后不复用旧标注，provider 预设指纹兼容保持。
+- 标注库管理：新增清空操作，活跃批次期间拒绝清空，原始图片与批次记录保留。
+- 造梦机产物灯箱支持图片、视频、音频连续切换；屏外产物按需获取，翻页后保留原生另存为路径。
+- 造梦机批次支持逐条和多选删除产物，明确区分产物删除与整批删除；失败条目保留选择，异步回填保护当前编辑。
+- ComfyUI 新任务按新的日志边界显示进度，避免上一轮进度串到新任务。
+- 工作台修复涵盖贴签匠结果说明和正文复制、Agent 工具集编辑、KVMem 状态与启动、织书台输入和事件处理。
+- 验证范围：包含远端 4.1.4-beta 修复和本地工作区改动；全量测试、浏览器冒烟及发布检查结果以本次实际执行和 CI 为准。未以付费模型或真实 ComfyUI 生成任务验收。
 
 ## 开始使用
 
 ### 使用 Windows 版本
 
-1. 下载 `cat-chat-4.1.3-beta-windows-x64.zip`。
+1. 下载 `cat-chat-4.1.5-beta-windows-x64.zip`。
 2. 解压到一个可写目录。
 3. 运行 `cat-chat.exe`。
 4. 在设置中添加在线 API 或本地模型服务。
 
-> 归档里也提供旧名 `naiba-chat-4.1.3-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
+> 归档里也提供旧名 `naiba-chat-4.1.5-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
 
 首次运行会创建本地数据目录。升级时请直接替换程序文件，不要删除原有 `data` 目录和配置文件。
 
@@ -43,7 +38,7 @@ Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把模�
 需要 Windows、Python 3.11 或更高版本。
 
 ```powershell
-git clone https://github.com/yc883123/cat-chat.git
+git clone https://github.com/yc883123/naiba-chat.git
 Set-Location cat-chat
 python -m pip install pywebview pystray pillow "mcp==2.1.1" pymupdf "av==18.1.0" python-multipart
 python server.py
@@ -140,14 +135,14 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 - `naiba-chat.exe` —— **自动更新链路唯一使用的资产，永久保留此文件名**
 - `naiba-chat-update.json` —— 更新清单，其中 `repository` 字段永久写 `yc883123/naiba-chat`
 - `cat-chat.exe` —— 与 `naiba-chat.exe` 是同一文件，SHA-256 完全相同
-- `cat-chat-4.1.3-beta-windows-x64.zip`
-- `naiba-chat-4.1.3-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
+- `cat-chat-4.1.5-beta-windows-x64.zip`
+- `naiba-chat-4.1.5-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
 
 更新器会验证清单中的仓库、提交、文件名和 SHA-256。下载文件还必须是有效的 Windows 可执行文件；任何一项不一致都会终止安装。**自动更新始终读取 `naiba-chat.exe` 与清单里的旧仓库名**（GitHub 对旧仓库地址做长期重定向），这是已发布客户端逐字校验的协议，仓库改名后也不改值。
 
 ## Beta 说明
 
-这是 4.1.3 Beta，适合实际使用和反馈，但仍有以下边界：
+这是 4.1.5 Beta，适合实际使用和反馈，但仍有以下边界：
 
 - 不内置 ComfyUI、模型权重或第三方生成服务，需用户自行安装和配置。
 - 不同模型的工具调用质量差异较大，小型模型可能无法稳定完成长链任务。
@@ -161,7 +156,7 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 ```powershell
 Get-ChildItem public\js\*.js | ForEach-Object { node --check $_.FullName }
 python -m unittest discover -s tests -q
-$env:NAIBA_BUILD_VERSION = "4.1.3-beta"
+$env:NAIBA_BUILD_VERSION = "4.1.5-beta"
 python -m PyInstaller --noconfirm --clean naiba-chat.spec
 ```
 

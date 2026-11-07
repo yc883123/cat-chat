@@ -2057,6 +2057,31 @@ class LabelerChatEngineTests(unittest.TestCase):
         self.assertNotEqual(config2["skill_revision"], config["skill_revision"])
         self.assertNotEqual(config2["config_fingerprint"], old_fp)
 
+    def test_chat_revision_hashes_content_beyond_bundle_limit(self):
+        skill_dir = self.skills_dir / "demo-label-skill"
+        skill_md = skill_dir / "SKILL.md"
+        initial = "---\nname: demo-label-skill\ndescription: 打标技能\n---\n\n" + "前缀" * 30001 + "A"
+        skill_md.write_text(initial, encoding="utf-8")
+        first = normalize_config(self.app, self._chat_raw())
+
+        skill_md.write_text(initial[:-1] + "B", encoding="utf-8")
+        second = normalize_config(self.app, self._chat_raw())
+
+        self.assertNotEqual(first["skill_revision"], second["skill_revision"])
+        self.assertNotEqual(first["config_fingerprint"], second["config_fingerprint"])
+
+    def test_chat_revision_does_not_read_outside_skill_root(self):
+        outside = self.skills_dir / "outside.txt"
+        outside.write_text("outside-one", encoding="utf-8")
+        bundle = {"files": [{"path": "../outside.txt"}], "script_names": []}
+        with mock.patch.object(self.app.catalog, "skill_bundle", return_value=bundle):
+            first = normalize_config(self.app, self._chat_raw())
+            outside.write_text("outside-two", encoding="utf-8")
+            second = normalize_config(self.app, self._chat_raw())
+
+        self.assertEqual(first["skill_revision"], second["skill_revision"])
+        self.assertEqual(first["config_fingerprint"], second["config_fingerprint"])
+
     def test_chat_config_requires_existing_skill(self):
         with self.assertRaises(LabelerTaskError):
             normalize_config(self.app, _base_config(engine="chat", output_mode="auto", language="auto"))

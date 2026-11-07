@@ -512,12 +512,14 @@ class ComfyUIRunner:
                     except Exception as exc:  # noqa: BLE001 - 产物落盘失败按段失败处理
                         return False, [], f"第 {index + 1} 段产物保存失败：{exc}"
                     return True, files, ""
-            queue = client.queue_ids(base)
+            queue_state = client.queue_snapshot(base)
+            queue = queue_state[0] if queue_state is not None else None
             if queue is None or prompt_id in queue:
                 # 仍在排队/执行中；队列查询失败时保守处理，不判定丢失。
                 # 顺带提取一次采样步级进度（失败静默降级，绝不影响主链路）。
                 try:
-                    stepmeter.observe(base, prompt_id)
+                    stepmeter.observe(base, prompt_id,
+                                      is_running=queue_state is not None and prompt_id in queue_state[1])
                 except Exception:  # noqa: BLE001 - 提取失败只是没有条
                     pass
                 cancel_event.wait(POLL_INTERVAL_SECONDS)

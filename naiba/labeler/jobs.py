@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 from naiba.llm.profiles import resolve_profile_with_override
@@ -58,19 +59,51 @@ class LabelerTaskError(ValueError):
 
 
 def _skill_revision(app: Any, skill_id: str) -> str:
-    """Skill 目录内容摘要：进指纹用，Skill 文件变了旧标注就不复用（重新打标）。
+    """Hash complete labeler-relevant Skill content for reuse identity.
 
-    复用 catalog.skill_bundle 的收集口径（文本资产全量 + 脚本名单），客户端无法
-    伪造；Skill 不存在时在这里就地报 400 语义的错。
+    Paths come only from the selected catalog entry. Files are constrained to its
+    root and follow skill_bundle's visible-file policy, but are hashed in full.
     """
     try:
         payload = app.catalog.skill_bundle(skill_id)
-    except ValueError as exc:
-        raise LabelerTaskError(str(exc)) from exc
-    except (OSError, AttributeError) as exc:
+        row = next(
+            item for item in app.catalog.scan()
+            if str(item.get("id") or "") == str(skill_id or "").strip()
+        )
+        root = Path(row["root"]).expanduser().resolve()
+    except (ValueError, OSError, AttributeError, StopIteration, KeyError) as exc:
         raise LabelerTaskError(f"Skill 读取失败：{exc}") from exc
+
     digest = hashlib.sha256()
-    digest.update(str(payload.get("bundle") or "").encode("utf-8"))
+    for entry in payload.get("files") or []:
+        relative = str(entry.get("path") or "")
+        if not relative:
+            continue
+        path = root / relative
+        try:
+            cursor = root
+            has_symlink = False
+            for part in Path(relative).parts:
+                cursor /= part
+                if cursor.is_symlink():
+                    has_symlink = True
+                    break
+            if has_symlink:
+                continue
+            resolved = path.resolve(strict=True)
+            rel = resolved.relative_to(root)
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            with resolved.open("rb") as handle:
+                content = handle.read()
+        except (OSError, ValueError):
+            continue
+        if b"\x00" in content[:8192]:
+            continue
+        digest.update(rel.as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(content)
+        digest.update(b"\0")
     for name in payload.get("script_names") or []:
         digest.update(f"script:{name}".encode("utf-8"))
     return digest.hexdigest()[:16]

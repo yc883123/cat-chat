@@ -113,6 +113,12 @@ class CustomPageConfigTests(unittest.TestCase):
         with self.assertRaises(LabelerTaskError):
             normalize_config(self.app, _base_config(system_prompt=""))
 
+    def test_oversized_system_prompt_is_preserved_without_silent_truncation(self):
+        prompt = "规" * 24001 + "尾部规则"
+        accepted = normalize_config(self.app, _base_config(
+            output_mode="auto", language="auto", system_prompt=prompt))
+        self.assertEqual(accepted["system_prompt"], prompt)
+
     def test_preset_config_has_no_system_prompt_key(self):
         config = normalize_config(self.app, _base_config())
         self.assertNotIn("system_prompt", config)

@@ -672,7 +672,7 @@ class _FakeComfy:
     def patch(self):
         return mock.patch.multiple(
             comfyui_client,
-            reachable=mock.DEFAULT, submit=mock.DEFAULT, queue_ids=mock.DEFAULT,
+            reachable=mock.DEFAULT, submit=mock.DEFAULT, queue_snapshot=mock.DEFAULT,
             history_entry=mock.DEFAULT, entry_status=mock.DEFAULT, entry_error=mock.DEFAULT,
             output_items=mock.DEFAULT, download_output=mock.DEFAULT,
             interrupt=mock.DEFAULT, delete_queue_items=mock.DEFAULT,
@@ -689,7 +689,7 @@ class _FakeComfy:
                 return f"pid-{len(self.submitted)}", ""
             return f"pid-{len(self.submitted)}", ""
         patcher["submit"].side_effect = _submit
-        patcher["queue_ids"].side_effect = lambda base: set()  # 永不在队列
+        patcher["queue_snapshot"].side_effect = lambda base: (set(), set())  # 永不在队列
         patcher["history_entry"].side_effect = self._history
         patcher["entry_status"].side_effect = self._status
         patcher["entry_error"].side_effect = lambda entry: "采样失败：value out of range"
@@ -955,7 +955,7 @@ class RunnerTests(unittest.TestCase):
 
         with mock.patch.object(comfyui_client, "reachable", return_value={"version": "t"}), \
              mock.patch.object(comfyui_client, "submit", side_effect=_submit), \
-             mock.patch.object(comfyui_client, "queue_ids", return_value={"pid-1"}), \
+             mock.patch.object(comfyui_client, "queue_snapshot", return_value=({"pid-1"}, {"pid-1"})), \
              mock.patch.object(comfyui_client, "history_entry", return_value=None), \
              mock.patch.object(comfyui_client, "interrupt", return_value=True) as mock_int, \
              mock.patch.object(comfyui_client, "delete_queue_items",

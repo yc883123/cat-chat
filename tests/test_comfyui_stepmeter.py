@@ -11,10 +11,16 @@
 from __future__ import annotations
 
 import json
+import runpy
 import tempfile
+import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
+
+from naiba.comfyui import client as comfyui_client
 
 from naiba.comfyui import jobs as comfyui_jobs
 from naiba.comfyui import stepmeter
@@ -60,6 +66,48 @@ class StepMeterParseTests(unittest.TestCase):
     def test_invalid_shapes_rejected(self):
         self.assertIsNone(stepmeter.parse_progress("| 8/0 [00:01<00:01, 1it/s]"))
         self.assertIsNone(stepmeter.parse_progress("| 9/8 [00:01<00:01, 1it/s]"))
+
+
+class StepMeterNetworkTests(unittest.TestCase):
+    def test_log_request_ignores_environment_and_system_proxies(self):
+        payload = {"entries": [{"t": int(time.time() * 1000), "m": _tqdm_line(2, 8)}]}
+        paths = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                paths.append(self.path)
+                body = json.dumps(payload if self.path == "/internal/logs/raw" else {
+                    "system": {"comfyui_version": "test"}, "devices": [],
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_port}"
+            # 模拟启动时系统/环境代理存在，且没有给 ComfyUI 地址配置绕过。
+            proxies = {"http": "http://127.0.0.1:1", "https": "http://127.0.0.1:1"}
+            with mock.patch("urllib.request.getproxies", return_value=proxies), \
+                    mock.patch("urllib.request.proxy_bypass", return_value=False):
+                isolated = runpy.run_path(str(Path(stepmeter.__file__)))
+                self.assertEqual(comfyui_client.reachable(base)["version"], "test")
+                isolated["observe"](base + "/", "pid-proxy")
+                snap = isolated["snapshot_for"](["pid-proxy"])
+            self.assertIsNotNone(snap, "生成接口可达时，进度请求也必须绕过代理")
+            self.assertEqual((snap["value"], snap["max"]), (2, 8))
+            self.assertEqual(paths, ["/system_stats", "/internal/logs/raw"])
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=2)
 
 
 class StepMeterStateTests(unittest.TestCase):

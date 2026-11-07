@@ -23,12 +23,12 @@ import time
 from datetime import datetime
 from typing import Any
 from urllib.error import HTTPError
-from urllib.request import build_opener
+from urllib.request import ProxyHandler, build_opener
 
 from naiba.comfyui.client import normalize_base_url
 
-# 不带 cookie/代理的全局 opener（与 client._DIRECT_OPENER 同口径：直连本机/局域网）。
-_DIRECT_OPENER = build_opener()
+# 空代理表强制直连，与 client._DIRECT_OPENER 一致，不读取系统/环境代理。
+_DIRECT_OPENER = build_opener(ProxyHandler({}))
 
 # tqdm 进度行：竖条分隔的 N/M 后紧跟方括号计时块（区别于日志里普通 "1/3" 计数）。
 _PROGRESS_RE = re.compile(r"\|\s*(\d+)\s*/\s*(\d+)\s*\[([^\]]*)\]")

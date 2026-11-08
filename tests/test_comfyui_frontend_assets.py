@@ -299,6 +299,87 @@ assert.equal(b.items[0].files['0'].path,'/managed/a.png');
         result = subprocess.run(["node", "--experimental-vm-modules", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_single_submission_unload_after_switch_contract(self):
+        # 单次「释放模型」开关契约：请求显式携带 unload_after；任务受理成功后
+        # 开关自动复位；提交失败保留勾选；批量草稿的开关不影响单次请求。
+        # 批量自身读 draft.unload_after 的契约由
+        # test_batch_submission_shape_mapping_resolution_and_convert 钉住。
+        script = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
+(async()=>{
+const nodes=new Map(),requests=[],toasts=[];
+const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,open:false,dataset:{},textContent:'',innerHTML:'',options:[],children:[],classList:{add(){},remove(){},toggle(){},contains(){return false}},setAttribute(){},removeAttribute(){},addEventListener(){},append(){},closest(){return null},querySelector(){return null},querySelectorAll(){return []},style:{}});
+const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
+let failSubmit=false;
+const context=vm.createContext({console,setTimeout,clearTimeout,setInterval,clearInterval,URL,document:{createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
+const values={$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},api:async(path,options)=>{
+  const method=String(options?.method||'GET').toUpperCase();
+  requests.push({path,method,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});
+  if(path==='/api/comfyui/tasks'&&method==='POST'){
+    if(failSubmit)throw new Error('远端拒绝');
+    return {task:{id:'cft-1'}};
+  }
+  return {tasks:[]};
+}};
+async function make(name,sourceText,exportsLine){
+  const byMod=new Map();
+  for(const match of sourceText.matchAll(/^import \{([^}]+)\} from "([^"]+)"/gm)){
+    byMod.set(match[2], match[1].split(',').map(n=>n.trim()).filter(Boolean));
+  }
+  const mod=new vm.SourceTextModule(sourceText+exportsLine,{context});
+  await mod.link(async (spec)=>{
+    const names=byMod.get(spec)||[];
+    return new vm.SyntheticModule(names,function(){for(const n of names)this.setExport(n,values[n]??(()=>{}));},{context});
+  });
+  await mod.evaluate();
+  return mod.namespace;
+}
+const m=await make('comfy',source,'\nexport {comfyui,submitTask,batch,ensureBatchDraft};');
+const {comfyui,submitTask,batch,ensureBatchDraft}=m;
+comfyui.detail={id:'cw-1',name:'测试流',params:[]};
+const shots=$('#comfyuiShots');shots.value='2';
+const toggle=$('#comfyuiUnloadAfter');
+const postTask=()=>requests.find(row=>row.path==='/api/comfyui/tasks'&&row.method==='POST');
+
+// 1) 未勾选：请求显式带 false；受理成功后保持未勾选。
+await submitTask();
+let post=postTask();
+assert.ok(post,'必须 POST /api/comfyui/tasks');
+assert.equal(post.body.unload_after,false);
+assert.equal(post.body.shots,2);
+assert.equal(post.body.workflow_id,'cw-1');
+assert.equal(toggle.checked,false);
+assert.equal(comfyui.activeTaskId,'cft-1');
+
+// 2) 勾选提交：请求带 true；任务受理成功后开关自动复位。
+toggle.checked=true;requests.length=0;
+await submitTask();
+post=postTask();
+assert.equal(post.body.unload_after,true);
+assert.equal(toggle.checked,false,'任务受理成功后开关自动复位');
+
+// 3) 提交失败：请求仍带勾选值，失败不清除勾选（用户重试不丢选择）。
+toggle.checked=true;requests.length=0;failSubmit=true;
+await submitTask();
+post=postTask();
+assert.equal(post.body.unload_after,true);
+assert.equal(toggle.checked,true,'提交失败不得清除勾选');
+assert.ok(toasts.some(row=>row.includes('提交失败')));
+failSubmit=false;
+
+// 4) 批量隔离：批量草稿开着释放，单次请求仍取开关自身状态。
+ensureBatchDraft();batch.draft.unload_after=true;
+toggle.checked=false;requests.length=0;
+await submitTask();
+post=postTask();
+assert.equal(post.body.unload_after,false,'单次请求不读批量草稿的释放开关');
+assert.equal(toggle.checked,false,'成功后复位，不受批量草稿影响');
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+        result = subprocess.run(["node", "--experimental-vm-modules", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_results_page_two_segments_split_single_and_batch(self):
         # 结果页两档（单次 / 批量）：批量条目不再混进单次任务与产物网格，
         # 历史批次入口统一到「批量」档——填单里的旧历史下拉必须删干净。

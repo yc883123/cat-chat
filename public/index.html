@@ -701,6 +701,10 @@
                     <input id="comfyuiShots" type="number" min="1" max="200" value="1" aria-label="生成张数">
                   </label>
                   <button class="control-button" id="comfyuiSubmit" type="button" disabled>开始生成</button>
+                  <label class="cbm-switch" title="本次任务结束后请求 ComfyUI 卸载模型，释放显存与内存">
+                    <input id="comfyuiUnloadAfter" type="checkbox">
+                    <span class="cbm-track"></span>释放模型
+                  </label>
                   <button class="control-button" id="comfyuiSaveCurrentAs" type="button">用当前配置另存工作流</button>
                   <button class="control-button" id="comfyuiOpenBatch" type="button">批量生成</button>
                 </div>

@@ -2036,8 +2036,14 @@ async function submitTask() {
         overrides: collectOverrides(),
         media_inputs: collectMediaInputs(),
         shots,
+        // 「释放模型」是单次专属开关：任务收尾请求 ComfyUI 卸载；批量走
+        // batch.draft.unload_after，两条路径互不读写对方状态。
+        unload_after: Boolean($("#comfyuiUnloadAfter")?.checked),
       },
     });
+    // 仅在任务受理成功后复位开关；失败保留勾选，用户重试不丢选择。
+    const unloadToggle = $("#comfyuiUnloadAfter");
+    if (unloadToggle) unloadToggle.checked = false;
     comfyui.activeTaskId = String(payload.task?.id || "");
     comfyui.eventSeq = 0;
     comfyui.tasks = [];

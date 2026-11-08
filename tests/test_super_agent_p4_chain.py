@@ -361,7 +361,8 @@ class SuperAgentP4ChainTests(unittest.TestCase):
         })
         self.assertEqual(code, 201)
         pipeline = payload["pipeline"]
-        self.assertEqual(pipeline["steps"], ["draft", "draft"])
+        # draft/state 交错（跨章连贯性修复）：每章正文落盘后立刻提取章末状态。
+        self.assertEqual(pipeline["steps"], ["draft", "state", "draft", "state"])
         task = self.app.studio.jobs.tasks[pipeline["current_task_id"]]
         self.assertEqual(task["input"]["writer"]["chapter_no"], 1)
         # api_start_pipeline 把 WriterPipelineError 转成 400 文案；另起一本验证空范围拒绝。

@@ -295,6 +295,40 @@ class WriterRound3UiTests(unittest.TestCase):
         self.assertIn("部目录已保存", self.js, "空目录也允许人工保存（只存部数与标题）")
 
 
+class WriterContinuityUiTests(unittest.TestCase):
+    """跨章连贯性（修复计划 §三）：只读检查的前端呈现 + 状态重建入口的接线。"""
+
+    def setUp(self):
+        self.index = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
+        self.js = (ROOT / "public" / "js" / "27-writer.js").read_text(encoding="utf-8")
+        start = self.index.index('id="studioPageWriter"')
+        self.page = self.index[start: self.index.index('</section>', self.index.index('id="writerImportFile"'))]
+
+    def test_continuity_panel_and_button_wired(self):
+        self.assertIn('id="writerContinuityRun"', self.page, "连贯性检查按钮")
+        self.assertIn('id="writerContinuityReport"', self.page, "报告容器")
+        self.assertIn('$("#writerContinuityRun")?.addEventListener("click", () => void runContinuityCheck())', self.js)
+        self.assertIn("function renderContinuity()", self.js)
+        self.assertIn("async function runContinuityCheck()", self.js)
+        # 只读口径要写进界面文案：检查不改正文。
+        self.assertIn("不会改动正文", self.page)
+        # 过期展示：报告 stale 时提示重跑。
+        self.assertIn("请重新运行", self.js)
+
+    def test_state_rebuild_entry_wired(self):
+        self.assertIn('id="writerDraftRebuildState"', self.page, "章末状态重建按钮")
+        self.assertIn('submitPipeline("state_rebuild"', self.js)
+        self.assertIn("state_rebuild: \"重建章末状态\"", self.js, "KIND_LABELS 有中文标签")
+        self.assertIn("state: \"章末状态\"", self.js, "STEP_LABELS 有中文标签")
+
+    def test_continuity_api_paths(self):
+        """前端调用的两个只读接口路径与服务端路由一致。"""
+        self.assertIn("/continuity/run", self.js)
+        block = self.js[self.js.index("async function loadContinuityReport()"):]
+        block = block[:block.index("\n}", 1) + 2]
+        self.assertIn("/continuity`", block, "读取报告走 GET /continuity")
+
+
 class WriterDraftSubmissionTests(unittest.TestCase):
     """执行真实前端函数（Node VM），另用真实服务检查续写读取刚保存的尾段。"""
 

@@ -27,7 +27,9 @@ from naiba.writer.store import WriterStoreError
 SETUP_STEPS: tuple[str, ...] = ("genre", "title", "blurb", "world", "chars")
 # 3.9.13 起「大纲」不再等于章节表：大纲是一整篇文字（可分部），章节由独立的 split 步拆出来。
 TEXT_STEPS: tuple[str, ...] = ("outline_text", "split", "outline_review")
-ALL_STEPS: tuple[str, ...] = (*SETUP_STEPS, *TEXT_STEPS, "segs", "draft")
+# state：章末状态提取（跨章连贯性修复计划 §三.B）——正文写完落盘后跑的派生步，
+# 失败不丢正文，也不阻断链上后续章节。
+ALL_STEPS: tuple[str, ...] = (*SETUP_STEPS, *TEXT_STEPS, "segs", "draft", "state")
 
 STEP_LABELS = {
     "genre": "题材推断",
@@ -41,6 +43,7 @@ STEP_LABELS = {
     "split": "拆章",
     "segs": "段落要点",
     "draft": "正文",
+    "state": "章末状态",
 }
 
 CHARS_MIN, CHARS_MAX = 1, 10
@@ -136,12 +139,40 @@ def style_label(style: str) -> str:
 WORLDVIEW_SLOT_CHARS = 800
 CHARS_SLOT_CHARS = 500
 CHARS_SLOT_COUNT = 6
+# 正文上下文的人物槽：不再「最多 6 人 + 总长 500」一刀切（跨章连贯性修复计划 §二.3）。
+# 改为按预算挑选相关人物：主角必带、本章梗概/前文点名的配角必带，其余配角按预算补足；
+# 预算不够时压缩次要描述，不静默丢掉相关角色。总输入仍有 budget_report 把关。
+DRAFT_CHARS_SLOT_CHARS = 2400
+# 人物条目的字段预算：身份/背景/关系是高优字段，预算紧张时先丢性格/说话/目标，
+# 不从条目中段乱砍；字段超长时保留开头（关键事实通常在句首）。
+_CHAR_FIELDS_FULL = (
+    # (字段, 备选旧字段, 标签, 上限)
+    ("identity", "", "身份", 100),
+    ("origin", "", "出身", 60),
+    ("intro", "background", "背景", 160),
+    ("relations", "", "关系", 160),
+    ("personality", "traits", "性格", 80),
+    ("voice", "speech", "说话", 60),
+    ("goal", "", "目标", 80),
+)
+_CHAR_FIELDS_MIN = (
+    ("identity", "", "身份", 60),
+    ("intro", "background", "背景", 80),
+    ("relations", "", "关系", 100),
+)
 PREV_TAIL_CHARS = 400
 SUMMARY_HEAD_CHARS = 100
 SUMMARY_TAIL_CHARS = 200
 CONTINUE_TAIL_CHARS = 200
 SEG_POINT_CHARS = 200
 IDEA_SLOT_CHARS = 1200
+# 前情状态槽（章末状态渲染）预算：窗口内每章一段，超预算丢最旧的章。
+CHAPTER_STATES_SLOT_CHARS = 2400
+CHAPTER_STATE_TEXT_CHARS = 800
+# 状态提取的正文输入预算：超出按「头 + 尾」截取（章末状态对结尾更敏感）。
+STATE_CONTENT_MAX_CHARS = 16000
+STATE_CONTENT_HEAD_CHARS = 12000
+STATE_CONTENT_TAIL_CHARS = 4000
 
 # 估算系数：中文按 1 字 ≈ 0.6 token 粗估（只用于预算提示，不冒充精确计量）。
 TOKENS_PER_CHAR = 0.6
@@ -166,35 +197,111 @@ def _genre_line(setup: dict[str, Any]) -> str:
     return line
 
 
+def _character_line(row: dict[str, Any], *,
+                    fields: tuple[tuple[str, str, str, int], ...] = _CHAR_FIELDS_FULL) -> str:
+    """单个人物条目：字段顺序固定（身份→出身→背景→关系→性格→说话→目标），
+    单字段独立限长、超长保留开头；预算紧张时换更小的字段集，而不是中段乱砍。"""
+    name = str(row.get("name") or "").strip()
+    role_raw = str(row.get("role") or "").strip()
+    role_text = {"lead": "主角", "side": "配角"}.get(role_raw, role_raw)
+    line = name + (f"（{role_text}）" if role_text else "")
+    bits: list[str] = []
+    for key, alt, label, cap in fields:
+        value = str(row.get(key) or "").strip()
+        if not value and alt:
+            value = str(row.get(alt) or "").strip()
+        if not value:
+            continue
+        if len(value) > cap:
+            value = value[:cap] + "…"
+        bits.append(f"{label}：{value}" if label else value)
+    if bits:
+        line += "：" + "；".join(bits)
+    return line
+
+
+def _character_aliases(row: dict[str, Any]) -> list[str]:
+    """可用于正文点名匹配的名字集合：本名 + 别名（别名按分隔符拆开）。"""
+    names = [str(row.get("name") or "").strip()]
+    alias_raw = str(row.get("alias") or "").strip()
+    if alias_raw:
+        names.extend(bit.strip() for bit in re.split(r"[、,，/;；|]+", alias_raw) if bit.strip())
+    return [name for name in names if name]
+
+
+def select_context_characters(rows: list[Any], *,
+                              relevance_text: str = "") -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """聚焦人物选择（跨章连贯性修复计划 §三.A）：主角优先，配角结合
+    「章节梗概 / 上一章出场人物 / 显式提及」挑选。
+
+    返回 (must_include, others)：must_include 是全部主角 + 被点名的配角
+    （预算再紧也不能丢）；others 是其余配角（按预算补足，可被排除）。
+    """
+    valid = [row for row in rows if isinstance(row, dict) and str(row.get("name") or "").strip()]
+    needle = str(relevance_text or "")
+    leads = [row for row in valid if str(row.get("role") or "") == "lead"]
+    sides = [row for row in valid if str(row.get("role") or "") != "lead"]
+    mentioned = [row for row in sides
+                 if any(name in needle for name in _character_aliases(row))]
+    others = [row for row in sides if row not in mentioned]
+    return leads + mentioned, others
+
+
+def _fit_characters_text(must_include: list[dict[str, Any]], others: list[dict[str, Any]],
+                         *, limit: int) -> tuple[str, list[str]]:
+    """按总预算渲染人物条目：必带人物压缩描述也要带上；其余配角放不下就排除并如实报告。"""
+    lines: list[str] = []
+    excluded: list[str] = []
+    used = 0
+
+    def _append(text: str) -> bool:
+        nonlocal used
+        cost = len(text) + (1 if lines else 0)
+        if used + cost > limit:
+            return False
+        lines.append(text)
+        used += cost
+        return True
+
+    for row in must_include:
+        text = _character_line(row)
+        if not _append(text):
+            # 相关人物不许丢：换最小字段集，仍超预算也强制带上（宁可略超不缺人）。
+            text = _character_line(row, fields=_CHAR_FIELDS_MIN)
+            cost = len(text) + (1 if lines else 0)
+            lines.append(text)
+            used += cost
+    for row in others:
+        text = _character_line(row)
+        if _append(text):
+            continue
+        if _append(_character_line(row, fields=_CHAR_FIELDS_MIN)):
+            continue
+        excluded.append(str(row.get("name") or "").strip())
+    return "\n".join(lines), excluded
+
+
 def _characters_text(setup: dict[str, Any], *, limit: int = CHARS_SLOT_CHARS,
-                     count: int = CHARS_SLOT_COUNT) -> str:
+                     count: int | None = CHARS_SLOT_COUNT) -> str:
+    """设定链（chars/outline/大纲）用的角色摘要：主角先带，配角按数组顺序补足。
+
+    同样走预算装填（放不下的整条排除，不中段乱砍），字段用最小集保持紧凑。
+    """
     rows = [row for row in (setup.get("characters") or []) if isinstance(row, dict)
             and str(row.get("name") or "").strip()]
-    # 主角先带（占比有限），配角按数组顺序补足。
     rows.sort(key=lambda row: 0 if str(row.get("role") or "") == "lead" else 1)
-    lines = []
-    for row in rows[:count]:
-        role = str(row.get("role") or "").strip()
-        role_text = {"lead": "主角", "side": "配角"}.get(role, role)
-        identity = str(row.get("identity") or "").strip()
-        goal = str(row.get("goal") or "").strip()
-        age = str(row.get("age") or "").strip()
-        origin = str(row.get("origin") or "").strip()
-        personality = str(row.get("personality") or row.get("traits") or "").strip()
-        relations = str(row.get("relations") or "").strip()
-        voice = str(row.get("voice") or row.get("speech") or "").strip()
-        line = f"{row['name']}" + (f"（{role_text}）" if role_text else "")
-        detail = "；".join(bit for bit in (
-            identity, f"{age} 岁" if age else "", origin, personality,
-            f"关系：{relations}" if relations else "", f"说话：{voice}" if voice else "", goal,
-        ) if bit)
-        if detail:
-            line += f"：{detail}"
-        lines.append(line)
-    text = "\n".join(lines) if lines else "（角色未定）"
-    if len(text) > limit:
-        text = text[:limit] + "…"
-    return text
+    if count is not None:
+        rows = rows[:count]
+    lines: list[str] = []
+    used = 0
+    for row in rows:
+        text = _character_line(row, fields=_CHAR_FIELDS_MIN)
+        cost = len(text) + (1 if lines else 0)
+        if used + cost > limit and lines:
+            continue
+        lines.append(text)
+        used += cost
+    return "\n".join(lines) if lines else "（角色未定）"
 
 
 def _worldview_text(setup: dict[str, Any], *, limit: int = WORLDVIEW_SLOT_CHARS) -> str:
@@ -272,9 +379,11 @@ STEP_SYSTEM = {
         "你是网文角色设计师。基于创作提示词与世界观，输出 JSON 数组：\n"
         '[{"name":"姓名","role":"主角/配角/反派","identity":"身份一句话",'
         '"goal":"核心诉求一句话","traits":"性格标签","speech":"说话习惯",'
-        '"arc":"人物弧光一句话","background":"背景与秘密"}]\n'
+        '"arc":"人物弧光一句话","background":"背景与秘密",'
+        '"relations":"与其他角色的关系（写清与谁、什么关系，如：张三：同门师兄，互相提防）"}]\n'
         "按用户消息要求的主角与配角数量给足，一个都不能少；配角也要有独立的动机与"
-        "生活，不做工具人。角色之间要有利益冲突或情感张力，反派动机必须合理。所有值纯中文。"
+        "生活，不做工具人。角色之间要有利益冲突或情感张力，反派动机必须合理；"
+        "relations 必须写出角色两两之间的具体关系，不许留空。所有值纯中文。"
     ),
     "outline": (
         "你是网文大纲策划师。基于创作提示词与世界观，输出 JSON 对象：\n"
@@ -313,6 +422,17 @@ STEP_SYSTEM = {
         "直接输出正文，不要解释写作思路；对白像真人说话，带潜台词；前三章新设定名词不超过3个。\n"
         "【节奏】开局即钩子，段内完成一次小兑付；结尾停在情节推进处，留给下一段续接。\n"
         "题材与尺度尊重创作提示词的约定，不做自我审查。"
+    ),
+    "state": (
+        "你是网文连续性记录员。通读给定章节正文，输出本章结束时的事实状态 JSON：\n"
+        '{"characters":[{"name":"姓名","presence":"出场/被提及/缺席","location":"本章结束时在哪里",'
+        '"condition":"身体/身份状态"}],'
+        '"relations":[{"between":["甲","乙"],"change":"本章里关系如何变化（没有变化的关系不写）"}],'
+        '"knowledge":[{"name":"姓名","known":["本章新得知的事"],"unknown":["本章结束时仍不知道的事"]}],'
+        '"events":["本章关键事件与结果"],"open_threads":["本章留下、尚未解决的线索"],'
+        '"next_hooks":["下一章需要接续的事项"]}\n'
+        "只记录正文明确写出的事实；没有写明的不要推断；数组可以为空，但结构与键名必须齐全。\n"
+        "只输出 JSON，不要解释。"
     ),
 }
 
@@ -565,14 +685,123 @@ def chapter_head_summary(content: str, *, head: int = SUMMARY_HEAD_CHARS,
     return text[:head] + "\n……\n" + text[-tail:]
 
 
+# ---- 章末状态（跨章连贯性修复计划 §三.B） ----
+
+def state_content_excerpt(content: str) -> str:
+    """状态提取的正文输入：超长按「头 + 尾」截取并明确标注省略。"""
+    text = str(content or "").strip()
+    if len(text) <= STATE_CONTENT_MAX_CHARS:
+        return text
+    return (text[:STATE_CONTENT_HEAD_CHARS]
+            + "\n……（中间部分省略）……\n"
+            + text[-STATE_CONTENT_TAIL_CHARS:])
+
+
+def build_state_user(*, chapter_no: int, content: str, names: list[str] | None = None,
+                     part_note: str = "") -> str:
+    """章末状态提取的用户消息：本章全文（超长截取）+ 角色名单（帮助统一人名）。"""
+    body = state_content_excerpt(content)
+    parts = [f"【章节】第 {int(chapter_no or 0)} 章"
+             + (f"（{part_note}）" if part_note else ""), f"【正文】\n{body}"]
+    clean_names = [str(n or "").strip() for n in (names or []) if str(n or "").strip()]
+    if clean_names:
+        parts.append("【本作角色名单】（人名以这份名单为准；正文里新出现的人物如实记录）\n"
+                     + "、".join(clean_names[:60]))
+    parts.append("请输出本章结束时的状态 JSON。")
+    return "\n\n".join(parts)
+
+
+def parse_chapter_state(text: str) -> dict[str, Any]:
+    """章末状态提取结果：严格 JSON 对象；至少要有一条事实，全空按失败处理。
+
+    结构收敛与限长在落盘前由 `store.normalize_chapter_state` 统一做，
+    这里只负责「拿不拿得到一份像样的 JSON」。
+    """
+    payload = extract_json_payload(text)
+    if not isinstance(payload, dict):
+        raise PromptError("章末状态必须是 JSON 对象")
+    has_content = False
+    for key in ("characters", "relations", "knowledge", "events", "open_threads", "next_hooks"):
+        value = payload.get(key)
+        if isinstance(value, list) and value:
+            has_content = True
+            break
+    if not has_content:
+        raise PromptError("章末状态没有任何事实（全为空）；按提取失败处理，可重试补建")
+    return payload
+
+
+def chapter_states_text(rows: list[dict[str, Any]], *,
+                        per_chapter_limit: int = CHAPTER_STATE_TEXT_CHARS) -> str:
+    """前序章末状态 → 提示词段落：每章一段、逐章限长，整体预算由调用方裁剪。"""
+    lines: list[str] = []
+    for row in rows:
+        no = row.get("no")
+        state = row.get("state") if isinstance(row.get("state"), dict) else {}
+        bits: list[str] = []
+        for character in state.get("characters") or []:
+            if not isinstance(character, dict):
+                continue
+            bit = f"{character.get('name')}（{character.get('presence') or '出场'}"
+            location = str(character.get("location") or "").strip()
+            condition = str(character.get("condition") or "").strip()
+            if location:
+                bit += f"，在{location}"
+            if condition:
+                bit += f"，{condition}"
+            bits.append(bit + "）")
+        for relation in state.get("relations") or []:
+            if isinstance(relation, dict):
+                between = "、".join(str(b) for b in (relation.get("between") or []))
+                bits.append(f"关系：{between}——{relation.get('change')}")
+        for item in state.get("knowledge") or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "")
+            for known in item.get("known") or []:
+                bits.append(f"{name}已知：{known}")
+            for unknown in item.get("unknown") or []:
+                bits.append(f"{name}不知道：{unknown}")
+        for event in state.get("events") or []:
+            bits.append(f"事件：{event}")
+        for thread in state.get("open_threads") or []:
+            bits.append(f"未决：{thread}")
+        for hook in state.get("next_hooks") or []:
+            bits.append(f"下章：{hook}")
+        text = f"第{no}章末：" + "；".join(bit for bit in bits if bit)
+        if len(text) > per_chapter_limit:
+            text = text[:per_chapter_limit] + "…"
+        lines.append(text)
+    return "\n".join(lines)
+
+
+def fit_chapter_states(rows: list[dict[str, Any]], *,
+                       limit: int = CHAPTER_STATES_SLOT_CHARS) -> list[dict[str, Any]]:
+    """按总预算裁剪前序状态：超预算丢最旧的章（最近的续写最要紧）。"""
+    kept: list[dict[str, Any]] = []
+    used = 0
+    for row in reversed(rows):
+        text = chapter_states_text([row])
+        cost = len(text) + (1 if kept else 0)
+        if used + cost > limit and kept:
+            break
+        kept.append(row)
+        used += cost
+    kept.reverse()
+    return kept
+
+
 def build_draft_context(setup: dict[str, Any], chapter: dict[str, Any], *,
                         mode: str, seg_points: list[str] | None = None,
                         seg_index: int = 0, prev_tail: str = "",
                         draft_tail: str = "", extra_note: str = "",
-                        previous_chapter: dict[str, Any] | None = None) -> dict[str, Any]:
+                        previous_chapter: dict[str, Any] | None = None,
+                        chapter_states: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """组装正文用户消息与槽位清单（预检与正式提交、右栏来源展示共用）。
 
     `mode`：whole 整章 / segment 分段 / continue 续写。
+    `chapter_states`：前序章末状态（`store.chapter_context_states` 的输出，
+    只含有效记录）；原文摘录仍保留作措辞衔接，长程事实由状态承担。
     返回 `{content, slots}`；slots 描述每个槽是否被带入及省略原因。
     """
     slots: list[dict[str, Any]] = []
@@ -580,7 +809,27 @@ def build_draft_context(setup: dict[str, Any], chapter: dict[str, Any], *,
     hook = str(chapter.get("hook") or "").strip()
     outline_text = beat or str(chapter.get("outline_beat") or "").strip()
     worldview = _worldview_text(setup)
-    chars = _characters_text(setup)
+    previous = previous_chapter or {}
+    excerpt = str(previous.get("excerpt") or prev_tail).strip()
+    if mode == "segment":
+        seg_point_texts = [str(p).strip()[:SEG_POINT_CHARS]
+                           for p in (seg_points or []) if str(p).strip()]
+    else:
+        seg_point_texts = []
+    # 聚焦人物的点名依据：本章梗概、章末钩子、上一章原文节选、段落要点与补充要求。
+    relevance_text = "\n".join(
+        bit for bit in (outline_text, hook, excerpt, str(extra_note or ""), *seg_point_texts) if bit
+    )
+    has_chars = [r for r in (setup.get("characters") or []) if isinstance(r, dict)]
+    chars_text = ""
+    chars_excluded: list[str] = []
+    if has_chars:
+        must_include, others = select_context_characters(
+            list(setup.get("characters") or []), relevance_text=relevance_text)
+        chars_text, chars_excluded = _fit_characters_text(
+            must_include, others, limit=DRAFT_CHARS_SLOT_CHARS)
+        if not chars_text:
+            chars_text = "（角色未定）"
 
     parts: list[str] = [f"【创作提示词】\n{idea_text(setup)}"]
     slots.append({"key": "idea", "label": "创作提示词", "included": True,
@@ -592,11 +841,14 @@ def build_draft_context(setup: dict[str, Any], chapter: dict[str, Any], *,
     else:
         slots.append({"key": "worldview", "label": "世界观摘要", "included": False,
                       "reason": "设定里还没有世界观"})
-    has_chars = [r for r in (setup.get("characters") or []) if isinstance(r, dict)]
     if has_chars:
-        parts.append(f"【出场角色】\n{chars}")
-        slots.append({"key": "characters", "label": "出场角色", "included": True,
-                      "chars": len(chars)})
+        parts.append(f"【出场角色】\n{chars_text}")
+        slot: dict[str, Any] = {"key": "characters", "label": "出场角色", "included": True,
+                                "chars": len(chars_text)}
+        if chars_excluded:
+            slot["excluded_names"] = chars_excluded
+            slot["excluded_reason"] = "人物预算不足或未在本章点名，未进上下文"
+        slots.append(slot)
     else:
         slots.append({"key": "characters", "label": "出场角色", "included": False,
                       "reason": "设定里还没有角色"})
@@ -610,7 +862,19 @@ def build_draft_context(setup: dict[str, Any], chapter: dict[str, Any], *,
         slots.append({"key": "chapter_brief", "label": "本章梗概", "included": True,
                       "chars": len(chapter_line)})
     previous = previous_chapter or {}
-    excerpt = str(previous.get("excerpt") or prev_tail).strip()
+    state_rows = fit_chapter_states(list(chapter_states or []))
+    if state_rows:
+        states_text = chapter_states_text(state_rows)
+        parts.append("【前情状态（截至上一章结束的已确认事实）】\n" + states_text
+                     + "\n【续写要求】后续章节必须延续以上事实：人物位置、身体与身份状态、"
+                       "关系变化不得无故回退；标注「不知道」的事项不得写成角色已知道；"
+                       "未决线索不得无故消失。与角色卡冲突时以已确认设定与正文事实为准。")
+        slots.append({"key": "chapter_states", "label": "前情状态", "included": True,
+                      "chars": len(states_text),
+                      "chapters": [int(row.get("no") or 0) for row in state_rows]})
+    else:
+        slots.append({"key": "chapter_states", "label": "前情状态", "included": False,
+                      "reason": "还没有有效的章末状态记录（首章或尚未提取）"})
     if excerpt:
         parts.append("【上一章原文节选（首尾截取，非总结）】\n" + excerpt
                      + "\n请承接上一章结束时的人物位置、时间、情绪与未决事件，不要重演已发生情节。")
@@ -626,7 +890,7 @@ def build_draft_context(setup: dict[str, Any], chapter: dict[str, Any], *,
                       **previous, "reason": reasons.get(str(previous.get("status") or ""),
                                                        "未提供上一章当前正文")})
     if mode == "segment":
-        points = [str(p).strip()[:SEG_POINT_CHARS] for p in (seg_points or []) if str(p).strip()]
+        points = seg_point_texts
         if points:
             lines = []
             for index, point in enumerate(points):
@@ -810,6 +1074,9 @@ def parse_characters(text: str, *, wanted: int) -> list[dict[str, str]]:
             "speech": str(item.get("speech") or "").strip()[:200],
             "arc": str(item.get("arc") or "").strip()[:200],
             "background": str(item.get("background") or "").strip()[:1000],
+            # 关系字段：生成要求输出，解析必须保留（跨章连贯性修复计划 §三.A）；
+            # 长度限制与 store 归一化（CHAR_LONG_MAX）一致。
+            "relations": str(item.get("relations") or "").strip()[:1000],
         })
     if len(rows) < wanted:
         raise PromptError(

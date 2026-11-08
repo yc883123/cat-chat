@@ -179,6 +179,25 @@ class ServiceTestCase(unittest.TestCase):
         # 章节与设定来源如实列出。
         self.assertEqual(payload["chapter"]["no"], 1)
 
+    def test_preview_and_submission_share_character_relations(self):
+        """验收 §五：关系/背景字段在保存 → 重载 → 正文预览与正式提交之间一致。"""
+        self.service.store.save_setup(self.book_id, content={
+            "idea": "创意",
+            "characters": [{"name": "张三", "role": "lead", "identity": "船匠",
+                            "background": "船坞出身", "relations": "与李四：死对头"}],
+        }, kind="manual")
+        preview, status = self.service.api_preview({
+            "book_id": self.book_id, "kind": "chapter", "chapter_no": 1})
+        self.assertEqual(status, 200)
+        for bit in ("身份：船匠", "背景：船坞出身", "关系：与李四：死对头"):
+            self.assertIn(bit, preview["content"])
+        pl, _ = self.service.api_start_pipeline(
+            self.book_id, {"kind": "chapter", "chapter_no": 1, "model_name": "probe"})
+        task = self.app.studio.jobs.tasks[pl["pipeline"]["current_task_id"]]
+        for bit in ("身份：船匠", "背景：船坞出身", "关系：与李四：死对头"):
+            self.assertIn(bit, task["input"]["content"])
+        self.service.pipeline.cancel_pipeline(self.book_id)
+
     def test_previous_excerpt_preview_matches_submission_all_modes(self):
         store = self.service.store
         store.save_chapter_version(self.book_id, 1, content="前章首" + "中" * 1000 + "尾")
@@ -332,6 +351,50 @@ class ServiceTestCase(unittest.TestCase):
         self.assertEqual(payload["version"]["kind"], "manual")
         versions = self.service.store.get_chapter(self.book_id, 1)["versions"]
         self.assertTrue(all(row["kind"] == "manual" for row in versions))
+
+    def test_state_rebuild_via_service_and_preview_states_slot(self):
+        """状态重建入口走既有 pipelines 接口；预览与正式提交共享前情状态槽。"""
+        store = self.service.store
+        store.save_setup(self.book_id, content={"idea": "创意", "characters": [
+            {"name": "张三", "role": "lead"}]}, kind="manual")
+        store.save_chapter_version(self.book_id, 1, content="第一章正文。")
+        store.save_chapter_state(self.book_id, 1, state={
+            "events": ["城门失守"], "open_threads": ["密信未送达"]}, task_id="st-1")
+        # 预览第 2 章：前情状态槽带着第 1 章的事实。
+        preview, status = self.service.api_preview({
+            "book_id": self.book_id, "kind": "chapter", "chapter_no": 2})
+        self.assertEqual(status, 200)
+        self.assertIn("前情状态", preview["content"])
+        self.assertIn("事件：城门失守", preview["content"])
+        self.assertIn("未决：密信未送达", preview["content"])
+        slot = next(s for s in preview["slots"] if s["key"] == "chapter_states")
+        self.assertTrue(slot["included"])
+        self.assertEqual(slot["chapters"], [1])
+        # state_rebuild 经同一 API 入口启动，逐章提取当前正文。
+        payload, status = self.service.api_start_pipeline(
+            self.book_id, {"kind": "state_rebuild", "from_no": 1, "want_count": 1,
+                           "model_name": "probe"})
+        self.assertEqual(status, 201)
+        pipeline = payload["pipeline"]
+        self.assertEqual(pipeline["steps"], ["state"])
+        task = self.app.studio.jobs.tasks[pipeline["current_task_id"]]
+        self.assertEqual(task["input"]["writer"]["step"], "state")
+        self.assertIn("第一章正文。", task["input"]["content"])
+        self.assertIn("张三", task["input"]["content"])
+        self.app.studio.jobs.finish(pipeline["current_task_id"], json.dumps({
+            "events": ["重建事件"]}, ensure_ascii=False))
+        self.service.pipeline.tick()
+        self.assertEqual(self.service.store.get_active_pipeline(self.book_id)["status"], "done")
+        state = store.load_chapter_state(self.book_id, 1)
+        self.assertEqual(state["effective_status"], "ready")
+        self.assertEqual(state["state"]["events"], ["重建事件"])
+
+    def test_preview_states_slot_omitted_without_states(self):
+        payload, status = self.service.api_preview({
+            "book_id": self.book_id, "kind": "chapter", "chapter_no": 2})
+        self.assertEqual(status, 200)
+        slot = next(s for s in payload["slots"] if s["key"] == "chapter_states")
+        self.assertFalse(slot["included"])
 
     # ---- 导入与导出 ----
 

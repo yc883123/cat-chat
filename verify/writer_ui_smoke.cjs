@@ -253,6 +253,12 @@ async function runViewport(browser, vp) {
       : { ...shape, bytes: 2048, missing_chapters: [2], has_content: true }));
   });
   await page.route('**/api/writer/books/wb-*/pipeline', (route) => route.fulfill(json({ pipeline: currentPipeline() })));
+  // 跨章连贯性检查（只读）：GET 返回空对象 = 还没有报告；不 mock 会打真实隔离实例吃 404 噪声。
+  await page.route('**/api/writer/books/wb-*/continuity/run', (route) => route.fulfill(json({
+    report: { schema: 1, book_id: BOOK_ID, generated_at: 1750000000000, checked_chapters: [1, 2],
+              chapter_versions: {}, findings: [], notes: [], stale: false },
+  })));
+  await page.route('**/api/writer/books/wb-*/continuity', (route) => route.fulfill(json({})));
   await page.route('**/api/writer/books/wb-*/pipelines', (route) => {
     recorded.pipelines.push(JSON.parse(route.request().postData() || '{}'));
     pipelineState = 'running';
@@ -619,8 +625,9 @@ async function runViewport(browser, vp) {
     await page.waitForTimeout(250);
     await page.click('[data-writer-export="md-extras"]');
     await page.waitForTimeout(500);
-    check('空正文不假装导出成功，明确提示「没有正文」',
-      (await page.textContent('#writerSaveState')).includes('没有正文'),
+    check('空正文不假装导出成功，明确提示没有可导出内容',
+      // 2be9710 起含附录导出的空态文案是「没有内容可导出」（附录可独立导出后口径变严）。
+      (await page.textContent('#writerSaveState')).includes('没有内容可导出'),
       await page.textContent('#writerSaveState'));
     const lastExport = recorded.exportPosts.at(-1) || {};
     check('「含设定与大纲」导出带 format=md 与 extras=1',

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from naiba.core.contracts import WRITER_CHAPTER_BASELINE_KEY
+from naiba.writer import coherence
 from naiba.writer import prompts
 from naiba.writer.pipeline import WriterPipelineManager, WriterPipelineError
 from naiba.writer.store import (
@@ -294,6 +295,7 @@ class WriterService:
                 built = prompts.build_draft_context(
                     setup, chapter_view, mode=mode, draft_tail=draft_tail,
                     extra_note=str(body.get("extra_note") or ""), previous_chapter=previous,
+                    chapter_states=self.store.chapter_context_states(book_id, chapter_no),
                 )
                 budget = prompts.budget_report(
                     content=built["content"], slots=built["slots"],
@@ -402,6 +404,36 @@ class WriterService:
             return {"error": str(exc)}, 400
         except WriterPipelineError as exc:
             return {"error": str(exc)}, 409
+
+    # ---- 只读连贯性检查（跨章连贯性修复计划 §三.C） ----
+
+    def api_run_continuity_check(self, book_id: str) -> tuple[dict[str, Any], int]:
+        """运行全书只读检查并保存报告；只写报告文件，不碰章节正文与版本。"""
+        try:
+            report = coherence.run_continuity_check(self.store, book_id)
+            self.store.save_continuity_report(book_id, report)
+            report["stale"] = False
+            return {"report": report}, 200
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+        except WriterStoreError as exc:
+            return {"error": str(exc)}, 400
+
+    def api_get_continuity_report(self, book_id: str) -> tuple[dict[str, Any], int]:
+        """读最近一次检查报告；正文版本变化后旧报告标记 stale，可重新运行。"""
+        try:
+            report = self.store.load_continuity_report(book_id)
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+        except WriterStoreError as exc:
+            return {"error": str(exc)}, 400
+        if report is None:
+            return {"error": "这本书还没有连贯性检查报告；先运行一次检查"}, 404
+        try:
+            report["stale"] = coherence.report_is_stale(self.store, book_id, report)
+        except (LookupError, WriterStoreError):
+            report["stale"] = True
+        return {"report": report}, 200
 
     # ---- 导入 ----
 

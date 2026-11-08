@@ -23,6 +23,9 @@ import threading  # noqa: F401  (供 run_context 键类型引用；协议成员�
 # never the newest historical candidate. Rebase replaces both atomically.
 WRITER_CHAPTER_BASELINE_KEY = "chapter_baseline"
 WRITER_PREVIOUS_CHAPTER_KEY = "previous_chapter"
+# Per-chapter end-of-chapter state rows (list of {no, source_version_id, state})
+# frozen into single-chapter snapshots at start; chapter_all re-reads per step.
+WRITER_CHAPTER_STATES_KEY = "chapter_states"
 
 
 class WriterExportResult(TypedDict):

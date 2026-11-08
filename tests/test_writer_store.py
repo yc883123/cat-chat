@@ -172,6 +172,35 @@ class SetupVersionTests(WriterStoreTestCase):
         # 角色分区：写了「主角」→ lead；纯字符串角色没写角色 → 默认补主角。
         self.assertEqual([row["role"] for row in characters], ["lead", "lead"])
 
+    def test_character_relations_background_roundtrip(self):
+        """验收 §五：relations/background/intro/origin 读写往返不丢；旧角色数据仍可读。"""
+        book = self._book()
+        payload = self.store.save_setup(book["id"], content={
+            "idea": "创意",
+            "characters": [{
+                "name": "张三", "role": "lead", "identity": "船匠",
+                "origin": "泉州港", "background": "船坞出身，藏着旧案",
+                "relations": "与李四：结拜兄弟，各怀心事",
+            }],
+        }, kind="manual")
+        row = payload["setup"]["characters"][0]
+        self.assertEqual(row["relations"], "与李四：结拜兄弟，各怀心事")
+        self.assertEqual(row["intro"], "船坞出身，藏着旧案")
+        self.assertEqual(row["background"], "船坞出身，藏着旧案")
+        self.assertEqual(row["origin"], "泉州港")
+        # 重新加载再保存（老页面只回传旧键也行）：字段不丢。
+        loaded = self.store.load_setup(book["id"])
+        again = self.store.save_setup(book["id"], content=loaded, kind="manual")
+        row2 = again["setup"]["characters"][0]
+        for key in ("relations", "intro", "background", "origin", "identity"):
+            self.assertEqual(row2[key], row[key])
+        # AI 解析结果（parse_characters 输出）走同一归一化也保留关系。
+        from naiba.writer import prompts
+        parsed = prompts.parse_characters(
+            '[{"name":"李四","role":"配角","relations":"与张三：结拜兄弟"}]', wanted=1)
+        third = self.store.save_setup(book["id"], content={"idea": "创意", "characters": parsed})
+        self.assertEqual(third["setup"]["characters"][0]["relations"], "与张三：结拜兄弟")
+
     def test_revision_conflict_rejected(self):
         book = self._book()
         with self.assertRaises(WriterConflictError):
@@ -385,6 +414,103 @@ class OutlineAndChapterTests(WriterStoreTestCase):
         listing = self.store.list_books()
         self.assertEqual(listing["corrupt"], [])
         self.assertEqual([row["id"] for row in listing["books"]], [book["id"]])
+
+
+class ChapterStateTests(WriterStoreTestCase):
+    """章末状态存储（跨章连贯性修复计划 §三.B）：归一化、有效性、窗口与路径安全。"""
+
+    def setUp(self):
+        super().setUp()
+        self.book_id = self._book()["id"]
+        self.store.save_outline(self.book_id, chapters=[
+            {"no": no, "title": f"章{no}", "beat": "梗概"} for no in range(1, 7)
+        ], sync=True)
+
+    def _state(self, **overrides):
+        payload = {
+            "characters": [{"name": "张三", "presence": "出场", "location": "北境",
+                            "condition": "受伤"}],
+            "relations": [{"between": ["张三", "李四"], "change": "结盟"}],
+            "knowledge": [{"name": "李四", "known": ["城门失守"], "unknown": ["密令内容"]}],
+            "events": ["城门失守"],
+            "open_threads": ["密信未送达"],
+            "next_hooks": ["张三须处理伤势"],
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_save_load_roundtrip_and_normalization(self):
+        saved = self.store.save_chapter_version(self.book_id, 1, content="正文")
+        self.store.save_chapter_state(
+            self.book_id, 1, state=self._state(unknown_key={"junk": 1}),
+            task_id="st-1")
+        record = self.store.load_chapter_state(self.book_id, 1)
+        self.assertEqual(record["effective_status"], "ready")
+        self.assertEqual(record["source_version_id"], saved["version"]["id"])
+        self.assertEqual(record["state"]["events"], ["城门失守"])
+        self.assertNotIn("unknown_key", record["state"])
+        # 未知键丢弃、空名条目跳过、字段超长截断。
+        self.store.save_chapter_version(self.book_id, 2, content="正文二")
+        self.store.save_chapter_state(self.book_id, 2, state=self._state(
+            characters=[{"name": "", "presence": "出场"},
+                        {"name": "长" * 100, "location": "长" * 200}]))
+        record = self.store.load_chapter_state(self.book_id, 2)
+        self.assertEqual([row["name"] for row in record["state"]["characters"]],
+                         ["长" * 60])
+        self.assertEqual(len(record["state"]["characters"][0]["location"]), 100)
+
+    def test_empty_state_refused_and_failed_state_not_valid(self):
+        self.store.save_chapter_version(self.book_id, 1, content="正文")
+        with self.assertRaises(WriterStoreError):
+            self.store.save_chapter_state(self.book_id, 1, state={"events": []})
+        self.assertIsNone(self.store.load_chapter_state(self.book_id, 1))
+        # failed 记录：state 强制为空，读取侧不当作有效状态。
+        self.store.save_chapter_state(self.book_id, 1, state=None, status="failed",
+                                      error="模型超时", task_id="st-9")
+        record = self.store.load_chapter_state(self.book_id, 1)
+        self.assertEqual(record["effective_status"], "failed")
+        self.assertIsNone(record["state"])
+        self.assertEqual(self.store.chapter_context_states(self.book_id, 2), [])
+
+    def test_state_requires_current_content(self):
+        # 没有正文的章不能落 ready 状态。
+        with self.assertRaises(WriterStoreError):
+            self.store.save_chapter_state(self.book_id, 1, state=self._state())
+        self.store.save_chapter_version(self.book_id, 1, content="正文")
+        self.store.save_chapter_state(self.book_id, 1, state=self._state())
+        # 删除章节连带状态文件。
+        self.store.delete_chapter(self.book_id, 1)
+        self.assertIsNone(self.store.load_chapter_state(self.book_id, 1))
+
+    def test_context_states_window_and_order(self):
+        for no in range(1, 7):
+            self.store.save_chapter_version(self.book_id, no, content=f"正文{no}")
+            self.store.save_chapter_state(self.book_id, no, state=self._state(events=[f"事件{no}"]))
+        rows = self.store.chapter_context_states(self.book_id, 7)
+        self.assertEqual([row["no"] for row in rows], [3, 4, 5, 6])  # 窗口 4
+        self.assertEqual(rows[-1]["state"]["events"], ["事件6"])
+        # 失效的章被跳过，不给后续章节当背景：重写第 5 章使 5、6 都失效。
+        self.store.save_chapter_version(self.book_id, 5, content="第五章重写")
+        rows = self.store.chapter_context_states(self.book_id, 7)
+        self.assertEqual([row["no"] for row in rows], [1, 2, 3, 4])
+        # 首章没有前序状态。
+        self.assertEqual(self.store.chapter_context_states(self.book_id, 1), [])
+
+    def test_state_file_path_safety(self):
+        book_dir = self.store._book_dir(self.book_id)
+        for bad in (0, -1, 10000, True, "1"):
+            with self.assertRaises(WriterStoreError):
+                self.store._chapter_state_path(book_dir, bad)
+        path = self.store._chapter_state_path(book_dir, 3)
+        self.assertTrue(str(path).replace("\\", "/").endswith("chapter-states/0003.json"))
+
+    def test_state_writes_do_not_bump_book_revision(self):
+        self.store.save_chapter_version(self.book_id, 1, content="正文")
+        revision = self.store._load_manifest(self.book_id)["revision"]
+        self.store.save_chapter_state(self.book_id, 1, state=self._state())
+        self.store.save_chapter_state(self.book_id, 1, state=None, status="failed",
+                                      error="x")
+        self.assertEqual(self.store._load_manifest(self.book_id)["revision"], revision)
 
 
 class PipelineRecordTests(WriterStoreTestCase):

@@ -24,7 +24,11 @@ import time
 import traceback
 from typing import Any
 
-from naiba.core.contracts import WRITER_CHAPTER_BASELINE_KEY, WRITER_PREVIOUS_CHAPTER_KEY
+from naiba.core.contracts import (
+    WRITER_CHAPTER_BASELINE_KEY,
+    WRITER_CHAPTER_STATES_KEY,
+    WRITER_PREVIOUS_CHAPTER_KEY,
+)
 from naiba.writer import prompts
 from naiba.writer.store import (
     PIPELINE_STATUSES,
@@ -33,14 +37,17 @@ from naiba.writer.store import (
     new_version_id,
 )
 
-# 流水线 kind：整套设定 / 单步设定 / 大纲 / 整章 / 分段 / 续写 / 重写。
+# 流水线 kind：整套设定 / 单步设定 / 大纲 / 整章 / 分段 / 续写 / 重写 / 状态重建。
 PIPELINE_KINDS = (
     "setup_all", "setup_step", "outline", "outline_text", "outline_all", "split",
     "outline_review",
     "chapter", "chapter_segs", "chapter_continue", "chapter_rewrite",
     "chapter_all",
+    "state_rebuild",
 )
 # 各 kind 的步骤序列（segs → draft 两步；draft 复用 Studio chunked 顺序生成各段）。
+# draft 之后统一跟 state（章末状态提取）：提取失败不丢正文、不阻断后续章节，
+# 只把该章状态落成 failed 记录（跨章连贯性修复计划 §三.B）。
 KIND_STEPS = {
     "setup_all": tuple(prompts.SETUP_STEPS),
     "outline": ("outline",),
@@ -53,14 +60,18 @@ KIND_STEPS = {
     "split": ("split",),
     # 第三次反馈④：多部统一复核梳理——步骤是 N 个 outline_review，每步修订一部。
     "outline_review": ("outline_review",),
-    "chapter": ("draft",),
-    "chapter_segs": ("segs", "draft"),
-    "chapter_continue": ("draft",),
-    "chapter_rewrite": ("draft",),
+    "chapter": ("draft", "state"),
+    "chapter_segs": ("segs", "draft", "state"),
+    "chapter_continue": ("draft", "state"),
+    "chapter_rewrite": ("draft", "state"),
     # 方案A（2026-11-04 拍板）：链的正文步骤写完拆章范围内全部章节——
-    # 步骤是 N 个 draft，每步写哪一章由快照里的 chapter_plan[step_index] 决定，
-    # 逐章落盘、可中途取消；实际章数在锁内按拆章结果定（此处只是占位校验用）。
+    # 步骤是 (draft, state) × N 交错：第 N+1 章的 draft 必须能读到第 N 章刚落盘的
+    # 章末状态，所以 state 紧跟每章 draft，而不是全部 draft 完再补状态。
+    # 实际章数在锁内按拆章结果定（此处只是占位校验用）。
     "chapter_all": ("draft",),
+    # 用户触发/后台补建：对指定章号范围按当前正文重新提取章末状态
+    # （兼容老作品没有状态记录、或重写后状态失效的场景）。实际步数在锁内定。
+    "state_rebuild": ("state",),
 }
 SETUP_STEP_KINDS = tuple(prompts.SETUP_STEPS)
 TERMINAL_STATUSES = {"done", "failed", "cancelled", "interrupted", "conflict"}
@@ -217,7 +228,31 @@ class WriterPipelineManager:
                         f"拆章范围内（第 {from_no}–{from_no + want_count - 1} 章）"
                         "还没有可写的章节；先拆章，再批量写正文")
                 chapter_no = chapter_plan_rows[0]["no"]
-                steps = tuple(["draft"] * len(chapter_plan_rows))
+                # draft/state 交错：第 N+1 章开写前必须能读到第 N 章刚落盘的章末状态。
+                steps = tuple(step for _ in chapter_plan_rows for step in ("draft", "state"))
+            if kind == "state_rebuild":
+                # 章末状态重建（用户触发入口）：对指定范围按**当前正文**重新提取。
+                # 只有已写正文（当前指针有内容）的章才有状态可言，其余章跳过。
+                want_count = self._clamp(want_count or 0, 1, prompts.SPLIT_BATCH_MAX, 0)
+                from_no = max(1, from_no or 1)
+                if want_count < 1:
+                    raise WriterPipelineError("请指定要重建章末状态的章数（from_no 起 want_count 章）")
+                existing = {int(n) for n in manifest.get("chapter_ids") or []}
+                for no in sorted(existing):
+                    if not from_no <= no < from_no + want_count:
+                        continue
+                    try:
+                        chapter_view = self.store.get_chapter(book_id, no, manifest=manifest)
+                    except (LookupError, WriterStoreError):
+                        continue
+                    if not str(chapter_view.get("content") or "").strip():
+                        continue
+                    chapter_plan_rows.append({"no": no})
+                if not chapter_plan_rows:
+                    raise WriterPipelineError(
+                        f"重建范围内（第 {from_no}–{from_no + want_count - 1} 章）"
+                        "没有已写正文的章节；先写正文，再重建章末状态")
+                steps = tuple(["state"] * len(chapter_plan_rows))
             if steps[0] in ("segs", "draft"):
                 outline_version_id = str(outline_version_id or "").strip() or str(
                     manifest.get("current_outline_version_id") or "")
@@ -283,6 +318,10 @@ class WriterPipelineManager:
                 baseline, previous = self.store.chapter_writing_inputs(book_id, chapter_no)
                 snapshot[WRITER_CHAPTER_BASELINE_KEY] = baseline
                 snapshot[WRITER_PREVIOUS_CHAPTER_KEY] = previous
+                # 前序章末状态随快照冻结（单章口径与章节基线一致）；chapter_all
+                # 不冻结——每步现读，保证读到上一章刚落盘的状态。
+                snapshot[WRITER_CHAPTER_STATES_KEY] = self.store.chapter_context_states(
+                    book_id, chapter_no)
                 if kind == "chapter_continue":
                     self._continuation_baseline(snapshot)
             pipeline = {
@@ -407,6 +446,8 @@ class WriterPipelineManager:
                         baseline, previous = self.store.chapter_writing_inputs(book_id, chapter_no)
                         snapshot[WRITER_CHAPTER_BASELINE_KEY] = baseline
                         snapshot[WRITER_PREVIOUS_CHAPTER_KEY] = previous
+                        snapshot[WRITER_CHAPTER_STATES_KEY] = self.store.chapter_context_states(
+                            book_id, chapter_no)
                         record["chapter_revision"] = baseline["revision"]
                     if record.get("kind") == "chapter_continue":
                         self._continuation_baseline(snapshot)
@@ -490,6 +531,17 @@ class WriterPipelineManager:
             self._fail(book_id, pipeline, "当前任务与流水线不一致（可能来自旧的尝试），已停止推进")
             return
         if status != "done":
+            if step == "state":
+                # 章末状态提取是尽力而为的派生步：任务级失败只落 failed 状态记录，
+                # 正文已在上一步保存，链继续走（跨章连贯性修复计划 §三.B）。
+                # 唯独「用户取消」必须停链——取消后不得再提交下一步。
+                if status == "cancelled":
+                    self._fail(book_id, pipeline, "用户取消", override_status="cancelled")
+                    return
+                state_error = str(task.get("error") or "") or f"状态提取任务状态为 {status}"
+                self._finish_step(book_id, pipeline, task_id, output=None,
+                                  state_error=state_error)
+                return
             # 条件 1：非 done 一律停链；cancelled/failed/interrupted 各有真实状态。
             self._fail(
                 book_id, pipeline,
@@ -504,6 +556,18 @@ class WriterPipelineManager:
         # 条件 3：输出非空 + 结构化解析 + 截断判定（解析失败 → 停链，保留任务原始结果）。
         result = str(task.get("result") or "")
         finish_reason = str(task.get("finish_reason") or "")
+        if step == "state":
+            try:
+                output = self._parse_step_output(
+                    step, result, pipeline=pipeline, finish_reason=finish_reason,
+                )
+            except prompts.PromptError as exc:
+                # 解析失败同样只落 failed 状态记录，不丢正文、不阻断链。
+                self._finish_step(book_id, pipeline, task_id, output=None,
+                                  state_error=str(exc))
+                return
+            self._finish_step(book_id, pipeline, task_id, output=output)
+            return
         output = self._parse_step_output(
             step, result, pipeline=pipeline, finish_reason=finish_reason,
         )
@@ -609,12 +673,14 @@ class WriterPipelineManager:
             return prompts.parse_segs(result)
         if step == "draft":
             return prompts.parse_draft(result, finish_reason=finish_reason)
+        if step == "state":
+            return prompts.parse_chapter_state(result)
         raise WriterPipelineError(f"未知步骤：{step}")
 
     # ---- 写回与前进（条件 4/5，单次加锁内原子完成） ----
 
     def _finish_step(self, book_id: str, pipeline: dict[str, Any], task_id: str,
-                     *, output: Any) -> None:
+                     *, output: Any, state_error: str = "") -> None:
         """锁内完成：条件校验 → 写回本步成果 → 记录完成 → 前进/收尾。
 
         条件 4（流水线仍活动 + revision 一致）与条件 5（原子写回）必须在同一次
@@ -663,6 +729,8 @@ class WriterPipelineManager:
                     record["step_outputs"] = outputs
                 elif step == "draft":
                     self._apply_draft_step(book_id, record, output, task_id)
+            if step == "state":
+                self._apply_state_step(book_id, record, output, state_error, task_id)
             # ---- 记录完成并前进 ----
             record["completed_task_ids"] = completed
             record["current_task_id"] = ""
@@ -810,6 +878,45 @@ class WriterPipelineManager:
             expected_revision=record.get("chapter_revision"),
         )
 
+    def _apply_state_step(self, book_id: str, record: dict[str, Any], output: Any,
+                          state_error: str, task_id: str) -> None:
+        """章末状态写回（锁内调用）：成功落 ready，失败落 failed，两者都不改正文。
+
+        来源版本固化为本步提交时读取的版本——写入与读取之间章节若被改动，
+        状态在读侧自动判为 stale，绝不会张冠李戴到新版本上。
+        幂等回放（output 与 state_error 都为空）不重复写。
+        """
+        if output is None and not state_error:
+            return
+        snapshot = record.get("request_snapshot") if isinstance(record.get("request_snapshot"), dict) else {}
+        chapter_no = int(snapshot.get("chapter_no") or 0)
+        errors = [str(e) for e in (record.get("state_errors") or [])]
+        try:
+            if output is not None:
+                self.store.save_chapter_state(
+                    book_id, chapter_no, state=output, status="ready", task_id=task_id,
+                    source_version_id=str(record.get("state_source_version_id") or ""),
+                )
+                return
+            self.store.save_chapter_state(
+                book_id, chapter_no, state=None, status="failed",
+                error=str(state_error or "")[:300], task_id=task_id,
+                source_version_id=str(record.get("state_source_version_id") or ""),
+            )
+            errors.append(f"第{chapter_no}章状态提取失败：{state_error}")
+        except (LookupError, WriterStoreError) as exc:
+            # 存储层失败同样不阻断链（正文早已保存）；状态按失败记录，可重建。
+            errors.append(f"第{chapter_no}章状态写入失败：{exc}")
+            try:
+                self.store.save_chapter_state(
+                    book_id, chapter_no, state=None, status="failed",
+                    error=f"状态写入失败：{exc}", task_id=task_id,
+                    source_version_id=str(record.get("state_source_version_id") or ""),
+                )
+            except (LookupError, WriterStoreError):
+                pass
+        record["state_errors"] = errors[-10:]
+
     # ---- 任务提交 ----
 
     def _resolve_part(self, snapshot: dict[str, Any], step_index: int) -> tuple[int, str]:
@@ -821,12 +928,16 @@ class WriterPipelineManager:
         return part_no, part_title
 
     @staticmethod
-    def _chapter_all_no(snapshot: dict[str, Any], step_index: int) -> int:
-        """chapter_all 当前步写哪一章：按步取 chapter_plan；越界兜底 from_no + 步号。"""
+    def _chapter_for_step(snapshot: dict[str, Any], step_index: int, kind: str) -> int:
+        """当前步对应哪一章：chapter_all 的步骤是 (draft, state) × N 交错
+        （两步同章，按下标折半）；state_rebuild 每步一章。越界兜底按 from_no 顺延。"""
         plan = snapshot.get("chapter_plan") if isinstance(snapshot.get("chapter_plan"), list) else []
-        row = plan[step_index] if 0 <= step_index < len(plan) and isinstance(plan[step_index], dict) else {}
+        offset = step_index if kind == "state_rebuild" else step_index // 2
+        row = plan[offset] if 0 <= offset < len(plan) and isinstance(plan[offset], dict) else {}
         no = int(row.get("no") or 0)
-        return no if no >= 1 else int(snapshot.get("from_no") or 1) + step_index
+        if no >= 1:
+            return no
+        return int(snapshot.get("from_no") or 1) + offset
 
     def _submit_step(self, book_id: str, pipeline: dict[str, Any]) -> str:
         """为当前步提交一个 Studio 任务；任务 input.writer 固化归属（实施计划 §7.1）。"""
@@ -840,6 +951,9 @@ class WriterPipelineManager:
         # 供 _advance 的归属校验与写回冲突检查按同一章对齐。
         pending_step_update: dict[str, Any] | None = None
         pending_chapter_revision: int | None = None
+        # state 步提交时读到的来源版本：写回时固化进状态记录，
+        # 章节中途被改也不会把状态错挂到新版本上。
+        pending_state_version: str | None = None
         book_title = str(snapshot.get("book_title") or "未命名作品")
         extra_note = str(snapshot.get("extra_note") or "")
         chapter_no = int(snapshot.get("chapter_no") or 0)
@@ -954,15 +1068,38 @@ class WriterPipelineManager:
                 extra_note=extra_note if step == "genre" else "",
             )
             task_title = f"《{book_title}》· {prompts.STEP_LABELS[step]}"
+        elif step == "state":
+            kind_now = str(pipeline.get("kind") or "")
+            if kind_now in ("chapter_all", "state_rebuild"):
+                chapter_no = self._chapter_for_step(snapshot, step_index, kind_now)
+                pending_step_update = {"chapter_no": chapter_no}
+            chapter_record = self.store.get_chapter(book_id, chapter_no)
+            state_content = str(chapter_record.get("content") or "")
+            if not state_content.strip():
+                raise WriterPipelineError(f"第 {chapter_no} 章没有当前正文，无法提取章末状态")
+            # 版本号与正文取自同一次读取：状态记录固化的就是被提取的那份正文。
+            pending_state_version = str(chapter_record.get("current_version_id") or "")
+            try:
+                state_setup = self.store.load_setup(
+                    book_id, version_id=str(snapshot.get("setup_version_id") or ""))
+            except (LookupError, WriterStoreError):
+                state_setup = {}
+            names = [str(row.get("name") or "").strip()
+                     for row in (state_setup.get("characters") or [])
+                     if isinstance(row, dict) and str(row.get("name") or "").strip()]
+            content = prompts.build_state_user(
+                chapter_no=chapter_no, content=state_content, names=names)
+            task_title = f"《{book_title}》· 第{chapter_no}章章末状态"
         else:
             chapter = snapshot.get(WRITER_CHAPTER_BASELINE_KEY)
             if not isinstance(chapter, dict):
                 chapter = self.store._load_chapter_index(self.store._book_dir(book_id), chapter_no)
             previous = snapshot.get(WRITER_PREVIOUS_CHAPTER_KEY) or {}
+            chapter_states = snapshot.get(WRITER_CHAPTER_STATES_KEY) or []
             if str(pipeline.get("kind") or "") == "chapter_all":
-                # 逐章批量（方案A）：每步提交时现读这一章的基线与前章衔接——
-                # 前一章多半是上一步刚落盘的，不能用流水线创建时的旧快照。
-                chapter_no = self._chapter_all_no(snapshot, step_index)
+                # 逐章批量（方案A）：每步提交时现读这一章的基线、前章衔接与
+                # 前序章末状态——前一章多半是上一步刚落盘的，不能用旧快照。
+                chapter_no = self._chapter_for_step(snapshot, step_index, "chapter_all")
                 try:
                     fresh_baseline, fresh_previous = self.store.chapter_writing_inputs(book_id, chapter_no)
                 except LookupError as exc:
@@ -970,10 +1107,12 @@ class WriterPipelineManager:
                         f"第 {chapter_no} 章不存在（可能已被删除或改号），批量正文在本步停止：{exc}") from exc
                 chapter = fresh_baseline
                 previous = fresh_previous
+                chapter_states = self.store.chapter_context_states(book_id, chapter_no)
                 pending_step_update = {
                     "chapter_no": chapter_no,
                     WRITER_CHAPTER_BASELINE_KEY: fresh_baseline,
                     WRITER_PREVIOUS_CHAPTER_KEY: fresh_previous,
+                    WRITER_CHAPTER_STATES_KEY: chapter_states,
                 }
                 pending_chapter_revision = int(fresh_baseline.get("revision") or 0)
             chapter_view = {
@@ -998,6 +1137,7 @@ class WriterPipelineManager:
                 prefix_build = prompts.build_draft_context(
                     setup, chapter_view, mode="segment", seg_points=[],
                     extra_note=extra_note, previous_chapter=previous,
+                    chapter_states=chapter_states,
                 )
                 # 前缀只含公共上下文（无要点段）；每块的要点单独拼。
                 prefix_lines = prefix_build["content"].split("\n\n")
@@ -1023,6 +1163,7 @@ class WriterPipelineManager:
                 built = prompts.build_draft_context(
                     setup, chapter_view, mode=mode, draft_tail=draft_tail,
                     extra_note=extra_note, previous_chapter=previous,
+                    chapter_states=chapter_states,
                 )
                 content = built["content"]
                 label = prompts.STEP_LABELS["draft"]
@@ -1064,6 +1205,8 @@ class WriterPipelineManager:
                     record_snapshot.update(pending_step_update)
                     record["request_snapshot"] = record_snapshot
                 record["chapter_revision"] = pending_chapter_revision
+            if pending_state_version is not None:
+                record["state_source_version_id"] = pending_state_version
 
         self.store.update_pipeline(
             book_id, str(pipeline.get("id") or ""),

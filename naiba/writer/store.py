@@ -27,6 +27,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -74,6 +75,98 @@ CHAR_LONG_MAX = 1_000
 
 # 流水线状态：running 推进中；done/failed/cancelled/interrupted/conflict 为终态。
 PIPELINE_STATUSES = ("running", "done", "failed", "cancelled", "interrupted", "conflict")
+
+# ---- 章末状态（跨章连贯性修复计划 §三.B） ----
+# 状态按「来源正文版本」关联：状态记录里固化 source_version_id + 内容指纹，
+# 读侧用它对章节当前指针判活——重写/换版本后旧状态自动失效（effective=stale），
+# 重建即对当前版本重新提取。状态文件是派生数据：写入不推进作品 revision，
+# 提取失败落 failed 记录（state=None），绝不让空状态伪装成有效状态。
+CHAPTER_STATE_SCHEMA = 1
+CHAPTER_STATE_KEYS = ("characters", "relations", "knowledge", "events", "open_threads", "next_hooks")
+CHAPTER_STATE_CHAR_MAX = 30
+CHAPTER_STATE_ITEM_MAX = 200
+CHAPTER_STATE_LIST_MAX = {"characters": 30, "relations": 20, "knowledge": 20,
+                          "events": 12, "open_threads": 12, "next_hooks": 8}
+CHAPTER_STATE_SUBITEM_MAX = 6
+# 新章生成读取的前序状态窗口：最近 N 章的有效章末状态（再远的不进上下文）。
+CHAPTER_STATE_WINDOW = 4
+
+
+def normalize_chapter_state(raw: Any) -> dict[str, Any]:
+    """把提取结果收敛成可落盘的章末状态：未知键丢弃、超长截断、空状态拒绝。
+
+    只收结构化事实；「待确认」的推断由提取层决定是否写入，这里不做内容判断。
+    """
+    if not isinstance(raw, dict):
+        raise WriterStoreError("章末状态必须是 JSON 对象")
+    normalized: dict[str, Any] = {}
+    total = 0
+    characters: list[dict[str, Any]] = []
+    for item in (raw.get("characters") if isinstance(raw.get("characters"), list) else [])[:CHAPTER_STATE_CHAR_MAX]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()[:60]
+        if not name:
+            continue
+        characters.append({
+            "name": name,
+            "presence": str(item.get("presence") or "出场").strip()[:20],
+            "location": str(item.get("location") or "").strip()[:100],
+            "condition": str(item.get("condition") or "").strip()[:100],
+        })
+    if characters:
+        normalized["characters"] = characters
+        total += len(characters)
+    relations: list[dict[str, Any]] = []
+    for item in (raw.get("relations") if isinstance(raw.get("relations"), list) else [])[:CHAPTER_STATE_LIST_MAX["relations"]]:
+        if not isinstance(item, dict):
+            continue
+        between_raw = item.get("between") if isinstance(item.get("between"), list) else []
+        between = [str(b or "").strip()[:60] for b in between_raw if str(b or "").strip()]
+        change = str(item.get("change") or "").strip()[:CHAPTER_STATE_ITEM_MAX]
+        if not between or not change:
+            continue
+        relations.append({"between": between[:3], "change": change})
+    if relations:
+        normalized["relations"] = relations
+        total += len(relations)
+    knowledge: list[dict[str, Any]] = []
+    for item in (raw.get("knowledge") if isinstance(raw.get("knowledge"), list) else [])[:CHAPTER_STATE_LIST_MAX["knowledge"]]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()[:60]
+        if not name:
+            continue
+
+        def _str_list(key: str) -> list[str]:
+            values = item.get(key) if isinstance(item.get(key), list) else []
+            rows = [str(v or "").strip()[:100] for v in values if str(v or "").strip()]
+            return rows[:CHAPTER_STATE_SUBITEM_MAX]
+
+        known = _str_list("known")
+        unknown = _str_list("unknown")
+        if not known and not unknown:
+            continue
+        knowledge.append({"name": name, "known": known, "unknown": unknown})
+    if knowledge:
+        normalized["knowledge"] = knowledge
+        total += len(knowledge)
+    for key in ("events", "open_threads", "next_hooks"):
+        values = raw.get(key) if isinstance(raw.get(key), list) else []
+        rows = [str(v or "").strip()[:CHAPTER_STATE_ITEM_MAX]
+                for v in values[:CHAPTER_STATE_LIST_MAX[key]] if str(v or "").strip()]
+        if rows:
+            normalized[key] = rows
+            total += len(rows)
+    if not total:
+        raise WriterStoreError("章末状态为空；提取结果里没有任何可用事实")
+    return {key: normalized[key] for key in CHAPTER_STATE_KEYS if key in normalized}
+
+
+def _content_fingerprint(content: str) -> str:
+    """正文内容指纹（诊断用）：版本不可变，主判定以 source_version_id 为准。"""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+
 
 
 class WriterStoreError(ValueError):
@@ -437,6 +530,18 @@ class WriterStore:
         path = (folder / f"{vid}.json").resolve()
         if not path.is_relative_to(folder):
             raise WriterStoreError("正文版本路径越界")
+        return path
+
+    def _chapter_state_path(self, book_dir: Path, chapter_no: int) -> Path:
+        """章末状态文件：`chapter-states/0001.json`，与章节索引同构的一章一文件。"""
+        if isinstance(chapter_no, bool) or not isinstance(chapter_no, int):
+            raise WriterStoreError("章节号必须是整数")
+        if chapter_no < 1 or chapter_no > 9999:
+            raise WriterStoreError("章节号必须在 1–9999 之间")
+        root = (book_dir / "chapter-states").resolve()
+        path = (root / f"{chapter_no:04d}.json").resolve()
+        if not path.is_relative_to(root):
+            raise WriterStoreError("章末状态路径越界")
         return path
 
     def _new_book_id(self) -> str:
@@ -883,6 +988,7 @@ class WriterStore:
             with self._lock:
                 shutil.rmtree(self._chapter_version_dir(book_dir, no), ignore_errors=True)
                 self._chapter_dir(book_dir, no).unlink(missing_ok=True)
+                self._chapter_state_path(book_dir, no).unlink(missing_ok=True)
         ordered: list[int] = []
         now = _now_ms()
         for no in wanted_nos:
@@ -1024,6 +1130,7 @@ class WriterStore:
                     self._chapter_dir(book_dir, no).unlink(missing_ok=True)
                 except OSError as exc:
                     raise WriterStoreError(f"清空章节目录失败：{exc}") from exc
+                self._chapter_state_path(book_dir, no).unlink(missing_ok=True)
             manifest["chapter_ids"] = []
             self._bump_manifest(book_dir, manifest)
         return {"ok": True, "removed": removed}
@@ -1103,8 +1210,12 @@ class WriterStore:
                     raise WriterStoreError(f"删除正文版本文件失败：{exc}") from exc
             remaining = [row for row in versions if str(row.get("id") or "") not in removed]
             index["version_ids"] = remaining
-            if str(index.get("current_version_id") or "") in removed:
+            old_current = str(index.get("current_version_id") or "")
+            if old_current in removed:
                 index["current_version_id"] = str(remaining[-1]["id"]) if remaining else ""
+                self._invalidate_states_from_locked(
+                    book_dir, manifest, chapter_no,
+                    keep_source_id=str(index.get("current_version_id") or ""))
             index["revision"] = int(index.get("revision") or 0) + 1
             index["updated_at"] = _now_ms()
             self._write_chapter_index(book_dir, index)
@@ -1294,6 +1405,8 @@ class WriterStore:
             index["revision"] = int(index.get("revision") or 0) + 1
             index["updated_at"] = _now_ms()
             self._write_chapter_index(book_dir, index)
+            # 正文变化：本章及之后各章的旧章末状态立即失效（可重建，不改正文）。
+            self._invalidate_states_from_locked(book_dir, manifest, chapter_no)
             self._bump_manifest(book_dir, manifest)
         return {"chapter_no": chapter_no, "version": record, "duplicate": False,
                 "chapter_revision": int(index["revision"])}
@@ -1318,6 +1431,10 @@ class WriterStore:
             index["revision"] = int(index.get("revision") or 0) + 1
             index["updated_at"] = _now_ms()
             self._write_chapter_index(book_dir, index)
+            # 换版本同样让本章及之后的状态失效；来源恰为新当前版本的记录
+            # （切回被提取的那一版）保持有效。
+            self._invalidate_states_from_locked(book_dir, manifest, chapter_no,
+                                                keep_source_id=vid)
             self._bump_manifest(book_dir, manifest)
         return {"chapter_no": chapter_no, "current_version_id": vid,
                 "chapter_revision": int(index["revision"])}
@@ -1367,9 +1484,206 @@ class WriterStore:
                 self._chapter_dir(book_dir, chapter_no).unlink(missing_ok=True)
             except OSError as exc:
                 raise WriterStoreError(f"删除章节失败：{exc}") from exc
+            self._chapter_state_path(book_dir, chapter_no).unlink(missing_ok=True)
             manifest["chapter_ids"] = [n for n in ids if n != chapter_no]
             self._bump_manifest(book_dir, manifest)
         return {"ok": True, "chapter_count": len(manifest["chapter_ids"])}
+
+    # ---- 章末状态（跨章连贯性修复计划 §三.B） ----
+
+    def save_chapter_state(self, book_id: str, chapter_no: int, *, state: Any,
+                           status: str = "ready", error: str = "",
+                           task_id: str = "", source_version_id: str = "") -> dict[str, Any]:
+        """写一章的章末状态记录；来源版本默认取当前指针，可显式指定。
+
+        状态是派生数据：不推进作品 revision、不改正文。`status="failed"` 时
+        `state` 必须为空——失败的提取绝不落成可被后续章节误读的有效状态。
+        `source_version_id` 由流水线在提交提取任务时固化：写入与读取之间
+        章节若被改动，这条状态在读侧自动判为 stale，不会错挂到新版本上。
+        """
+        if status not in ("ready", "failed"):
+            raise WriterStoreError("章末状态只能是 ready 或 failed")
+        with self._lock:
+            manifest = self._load_manifest(book_id)
+            if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
+                raise LookupError("章节不存在")
+            book_dir = self._book_dir(book_id)
+            stamped_id = str(source_version_id or "").strip()
+            if stamped_id:
+                if not VERSION_ID_PATTERN.match(stamped_id) or not stamped_id.startswith("cv-"):
+                    raise WriterStoreError("章末状态的来源版本 ID 非法")
+            else:
+                index = self._load_chapter_index(book_dir, chapter_no)
+                stamped_id = str(index.get("current_version_id") or "")
+            content = ""
+            if stamped_id:
+                record = self._read_json(
+                    self._chapter_version_path(book_dir, chapter_no, stamped_id),
+                    what="正文版本",
+                )
+                content = str(record.get("content") or "")
+            normalized: dict[str, Any] | None = None
+            if status == "ready":
+                if not content.strip():
+                    raise WriterStoreError("这一章还没有可提取的当前正文，不能生成章末状态")
+                normalized = normalize_chapter_state(state)
+            now = _now_ms()
+            record = {
+                "schema": CHAPTER_STATE_SCHEMA,
+                "no": chapter_no,
+                "status": status,
+                "source_version_id": stamped_id,
+                "content_fingerprint": _content_fingerprint(content) if content else "",
+                "state": normalized,
+                "error": str(error or "")[:300],
+                "task_id": str(task_id or ""),
+                "created_at": now,
+                "updated_at": now,
+            }
+            self._write_json(self._chapter_state_path(book_dir, chapter_no), record)
+            return record
+
+    def load_chapter_state(self, book_id: str, chapter_no: int, *,
+                           manifest: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        """读一章的章末状态记录；带 `effective_status`（ready/failed/stale/missing）。"""
+        manifest = manifest or self._load_manifest(book_id)
+        book_dir = self._book_dir(book_id)
+        try:
+            record = self._read_json(self._chapter_state_path(book_dir, chapter_no),
+                                     what="章末状态")
+        except (LookupError, WriterStoreError):
+            return None
+        record["effective_status"] = self._state_effective_status(
+            book_dir, chapter_no, record, manifest)
+        return record
+
+    def _state_effective_status(self, book_dir: Path, chapter_no: int,
+                                record: dict[str, Any], manifest: dict[str, Any]) -> str:
+        """有效性判定：来源版本 = 当前指针才算 ready；换版/重写后自动变 stale。"""
+        status = str(record.get("status") or "")
+        if status == "failed":
+            return "failed"
+        current_id = ""
+        try:
+            index = self._load_chapter_index(book_dir, chapter_no)
+            current_id = str(index.get("current_version_id") or "")
+        except (LookupError, WriterStoreError):
+            return "stale"
+        if not current_id or str(record.get("source_version_id") or "") != current_id:
+            return "stale"
+        return "ready" if status == "ready" else "stale"
+
+    def chapter_context_states(self, book_id: str, chapter_no: int, *,
+                               window: int = CHAPTER_STATE_WINDOW,
+                               manifest: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """收集第 chapter_no 章之前最近的有效章末状态（旧→新，最多 window 章）。
+
+        只取 effective=ready 的记录；stale/failed/缺失一律跳过——后续章节
+        永远不会读到已经失效或失败的状态（验收 §五「不产生可误读的空白状态」）。
+        """
+        manifest = manifest or self._load_manifest(book_id)
+        book_dir = self._book_dir(book_id)
+        chapter_nos = sorted(int(n) for n in manifest.get("chapter_ids") or [] if int(n) < chapter_no)
+        rows: list[dict[str, Any]] = []
+        for no in reversed(chapter_nos):
+            if len(rows) >= max(1, int(window or 1)):
+                break
+            record = self.load_chapter_state(book_id, no, manifest=manifest)
+            if not record or record.get("effective_status") != "ready":
+                continue
+            rows.append({
+                "no": no,
+                "source_version_id": str(record.get("source_version_id") or ""),
+                "state": dict(record.get("state") or {}),
+            })
+        rows.reverse()
+        return rows
+
+    def chapter_state_overview(self, book_id: str) -> dict[str, Any]:
+        """全书章末状态概览（只读，供连贯性检查用）：章号 → 记录 + 有效性。"""
+        manifest = self._load_manifest(book_id)
+        book_dir = self._book_dir(book_id)
+        rows: list[dict[str, Any]] = []
+        for chapter_no in sorted(int(n) for n in manifest.get("chapter_ids") or []):
+            record = self.load_chapter_state(book_id, chapter_no, manifest=manifest)
+            current_version_id = ""
+            try:
+                index = self._load_chapter_index(book_dir, chapter_no)
+                current_version_id = str(index.get("current_version_id") or "")
+            except (LookupError, WriterStoreError):
+                pass
+            rows.append({
+                "no": chapter_no,
+                "current_version_id": current_version_id,
+                "record": record,
+            })
+        return {"states": rows}
+
+    def delete_chapter_state(self, book_id: str, chapter_no: int) -> bool:
+        """删一章的章末状态记录（重建前清理用）；没有记录返回 False。"""
+        book_dir = self._book_dir(book_id)
+        path = self._chapter_state_path(book_dir, chapter_no)
+        with self._lock:
+            existed = path.exists()
+            path.unlink(missing_ok=True)
+        return existed
+
+    def _invalidate_states_from_locked(self, book_dir: Path, manifest: dict[str, Any],
+                                       from_no: int, *, keep_source_id: str = "") -> list[int]:
+        """第 from_no 章的正文发生变化（新版本 / 换指针）后，把第 from_no 章及
+        之后各章的旧章末状态标记失效（跨章连贯性修复计划 §三.B：重写第 N 章，
+        N 及之后依赖旧正文的状态不得再被读取）。
+
+        例外的「切回原版本」：切换指针时，来源版本恰等于新当前版本的记录
+        （通常是切回被提取的那一版）保持有效；下游章节不受此豁免——它们的
+        内容建立在上游旧正文之上。只改记录里的 status 字段，不动正文，
+        也不清空已提取的事实（可对照、可审计）。返回被标记的章号。
+        """
+        marked: list[int] = []
+        for no in sorted(int(n) for n in manifest.get("chapter_ids") or []):
+            if no < from_no:
+                continue
+            path = self._chapter_state_path(book_dir, no)
+            if not path.exists():
+                continue
+            try:
+                record = self._read_json(path, what="章末状态")
+            except (LookupError, WriterStoreError):
+                continue
+            if str(record.get("status") or "") != "ready":
+                continue
+            if keep_source_id and no == from_no \
+                    and str(record.get("source_version_id") or "") == keep_source_id:
+                continue
+            record["status"] = "stale"
+            record["updated_at"] = _now_ms()
+            self._write_json(path, record)
+            marked.append(no)
+        return marked
+
+    # ---- 连贯性检查报告（只读检查的落盘物；不改正文与版本） ----
+
+    def save_continuity_report(self, book_id: str, report: dict[str, Any]) -> None:
+        """保存最近一次连贯性检查报告（覆盖旧报告；检查可随时重跑）。"""
+        if not isinstance(report, dict):
+            raise WriterStoreError("连贯性报告必须是对象")
+        self._load_manifest(book_id)
+        book_dir = self._book_dir(book_id)
+        with self._lock:
+            self._write_json(book_dir / "continuity-report.json", report)
+
+    def load_continuity_report(self, book_id: str) -> dict[str, Any] | None:
+        """读最近一次连贯性检查报告；没有返回 None，坏文件按没有处理。"""
+        self._load_manifest(book_id)
+        book_dir = self._book_dir(book_id)
+        path = book_dir / "continuity-report.json"
+        if not path.exists():
+            return None
+        try:
+            report = self._read_json(path, what="连贯性报告")
+        except (LookupError, WriterStoreError):
+            return None
+        return report
 
     # ---- 流水线状态（book.json 内的活动记录） ----
 

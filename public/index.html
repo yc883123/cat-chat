@@ -1574,6 +1574,7 @@
                       <button class="control-button" type="button" id="writerDraftSegs" title="先拆 2–4 个段落要点，再按段顺序生成">分段写</button>
                       <button class="control-button" type="button" id="writerDraftContinue">续写</button>
                       <button class="control-button" type="button" id="writerDraftRewrite">重写本章</button>
+                      <button class="control-button tiny" type="button" id="writerDraftRebuildState" title="按当前正文重新提取本章的章末状态（不改正文；重写或旧作品补状态用）">重建状态</button>
                       <button class="control-button tiny" type="button" id="writerDraftPrev">上一章</button>
                       <button class="control-button tiny" type="button" id="writerDraftNext">下一章</button>
                     </div>
@@ -1594,6 +1595,13 @@
                     <label class="writer-field">版本
                       <select id="writerDraftVersion" aria-label="正文版本"></select>
                     </label>
+                  </div>
+                  <div class="writer-stage-group" id="writerContinuityGroup">
+                    <div class="writer-group-head"><strong>跨章连贯性检查</strong><small id="writerContinuityMeta">只读检查章末状态里的前后矛盾；不会改动正文</small></div>
+                    <div class="writer-action-bar">
+                      <button class="control-button" type="button" id="writerContinuityRun">运行检查</button>
+                    </div>
+                    <div id="writerContinuityReport" class="writer-hint" hidden></div>
                   </div>
                 </div>
               </div>

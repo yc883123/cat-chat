@@ -654,6 +654,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             ))
         elif path.startswith("/api/writer/books/") and path.endswith("/pipeline"):
             self._json(*self.app.writer.api_get_pipeline(path[len("/api/writer/books/"):-len("/pipeline")]))
+        elif path.startswith("/api/writer/books/") and path.endswith("/continuity"):
+            self._json(*self.app.writer.api_get_continuity_report(
+                path[len("/api/writer/books/"):-len("/continuity")]))
         elif path.startswith("/api/writer/books/") and "/chapters/" in path:
             head, _sep, tail = path[len("/api/writer/books/"):].partition("/chapters/")
             self._json(*self.app.writer.api_get_chapter(head, tail))
@@ -991,6 +994,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path.startswith("/api/writer/books/") and path.endswith("/pipeline/retry"):
             self._json(*self.app.writer.api_retry_pipeline(
                 path[len("/api/writer/books/"):-len("/pipeline/retry")], body))
+        elif path.startswith("/api/writer/books/") and path.endswith("/continuity/run"):
+            # 只读连贯性检查：只写报告文件，不碰章节正文与版本。
+            self._json(*self.app.writer.api_run_continuity_check(
+                path[len("/api/writer/books/"):-len("/continuity/run")]))
         elif path.startswith("/api/writer/books/") and path.endswith("/sync"):
             self._json(*self.app.writer.api_sync_chapters(
                 path[len("/api/writer/books/"):-len("/sync")], body))

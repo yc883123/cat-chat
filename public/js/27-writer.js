@@ -53,6 +53,7 @@ const KIND_LABELS = {
   chapter_continue: "续写正文",
   chapter_rewrite: "重写本章",
   chapter_all: "批量生成正文",
+  state_rebuild: "重建章末状态",
 };
 
 // 步骤中文名（与服务端 prompts.STEP_LABELS 对齐）。
@@ -68,6 +69,7 @@ const STEP_LABELS = {
   split: "拆章",
   segs: "段落要点",
   draft: "正文",
+  state: "章末状态",
 };
 
 // 拆章自动分批：与服务端 prompts.SPLIT_STEP_CHAPTERS 对齐（提示文案用）。
@@ -191,6 +193,8 @@ const writer = {
   // 正文保存/预检/提交共用一个锁，不能由内层保存提前释放。
   draftOperation: false,
   draftPlanKind: "chapter",
+  // 跨章连贯性检查：最近一次只读检查报告（null = 还没有报告）。
+  continuityReport: null,
   // 流水线与轮询。
   pipeline: null,
   pipelineTask: null,
@@ -270,6 +274,7 @@ function setBusy(busy) {
   for (const id of ["writerSetupGenerate", "writerSetupSave", "writerOutlineGenerate", "writerOutlineSave",
     "writerOutlineGenerateAll", "writerPartsApply", "writerImportSettingsBtn",
     "writerSyncBtn", "writerDraftGenerate", "writerDraftSegs", "writerDraftContinue", "writerDraftRewrite",
+    "writerDraftRebuildState", "writerContinuityRun",
     "writerDraftSave", "writerImportCommit", "writerExportBtn", "writerManageBtn",
     "writerImportBtn", "writerBooksBtn", "writerNewBookBtn"]) {
     const btn = $(`#${id}`);
@@ -1291,6 +1296,90 @@ function renderDraft() {
       String(row.id || ""),
     )));
     if (versions.length) select.value = String(chapter.current_version_id || versions.at(-1).id || "");
+  }
+}
+
+// ---- 跨章连贯性检查（只读；跨章连贯性修复计划 §三.C） ----
+// 只报告、不改正文：发现逐条带章节号与证据引文，矛盾/存疑分开标；
+// 正文或版本变化后旧报告由服务端标记过期，重新运行即得新报告。
+function renderContinuity() {
+  const panel = $("#writerContinuityReport");
+  const meta = $("#writerContinuityMeta");
+  if (!panel || !meta) return;
+  const report = writer.continuityReport;
+  if (!report) {
+    panel.hidden = true;
+    panel.replaceChildren();
+    meta.textContent = "只读检查章末状态里的前后矛盾；不会改动正文";
+    return;
+  }
+  const findings = Array.isArray(report.findings) ? report.findings : [];
+  const checked = Array.isArray(report.checked_chapters) ? report.checked_chapters.length : 0;
+  meta.textContent = report.stale
+    ? `上次报告已过期（正文或版本变过）；已比对 ${checked} 章，请重新运行`
+    : `已比对 ${checked} 章，发现 ${findings.length} 条`;
+  const rows = [];
+  if (report.stale) {
+    const staleNote = document.createElement("p");
+    staleNote.textContent = "上次检查之后正文有变化，以下结果基于旧版本；请重新运行检查。";
+    rows.push(staleNote);
+  }
+  if (!findings.length) {
+    const ok = document.createElement("p");
+    ok.textContent = "没有发现明显的前后矛盾（只覆盖有有效章末状态的章；见说明）。";
+    rows.push(ok);
+  }
+  for (const finding of findings) {
+    const item = document.createElement("p");
+    const chapters = (finding.chapters || []).join("、");
+    const severity = finding.severity === "confirmed" ? "矛盾" : "存疑";
+    item.textContent = `【${finding.type_label || finding.type} · ${severity}】第 ${chapters} 章：${finding.summary}`;
+    rows.push(item);
+    for (const evidence of finding.evidence || []) {
+      const quote = document.createElement("p");
+      quote.textContent = `　· 第 ${evidence.chapter_no} 章：${evidence.entry || ""}`
+        + (evidence.quote ? `（原文：${evidence.quote}）` : "");
+      rows.push(quote);
+    }
+  }
+  for (const note of report.notes || []) {
+    const noteEl = document.createElement("p");
+    noteEl.textContent = `说明：${note}`;
+    rows.push(noteEl);
+  }
+  panel.replaceChildren(...rows);
+  panel.hidden = false;
+}
+
+async function loadContinuityReport() {
+  if (!writer.bookId) return;
+  try {
+    const payload = await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}/continuity`);
+    if (writer.bookId !== payload.report?.book_id) return;
+    writer.continuityReport = payload.report || null;
+  } catch (_error) {
+    writer.continuityReport = null; // 还没有报告是正常状态
+  }
+  renderContinuity();
+}
+
+async function runContinuityCheck() {
+  if (!writer.bookId || writer.busy) return;
+  const btn = $("#writerContinuityRun");
+  if (btn) btn.disabled = true;
+  setBusy(true);
+  try {
+    const payload = await api(`/api/writer/books/${encodeURIComponent(writer.bookId)}/continuity/run`, {
+      method: "POST", body: {},
+    });
+    writer.continuityReport = payload.report || null;
+    renderContinuity();
+    toast("连贯性检查完成；结果只报告，不改正文");
+  } catch (error) {
+    fail("连贯性检查失败", error);
+  } finally {
+    setBusy(false);
+    if (btn) btn.disabled = writer.busy;
   }
 }
 
@@ -3676,6 +3765,7 @@ function setStage(stage) {
   renderChapters();
   renderTocLimits();
   renderPageState();
+  if (next === "draft") void loadContinuityReport();
   void refreshPlan();
 }
 
@@ -4217,6 +4307,10 @@ export function bindWriterEvents() {
   $("#writerDraftSegs")?.addEventListener("click", () => void submitPipeline("chapter_segs", { chapterNo: writer.chapterNo }));
   $("#writerDraftContinue")?.addEventListener("click", () => void submitPipeline("chapter_continue", { chapterNo: writer.chapterNo }));
   $("#writerDraftRewrite")?.addEventListener("click", () => void submitPipeline("chapter_rewrite", { chapterNo: writer.chapterNo }));
+  // 章末状态重建（跨章连贯性修复）：只提取状态，不改正文；旧作品补状态/重写后补建都用它。
+  $("#writerDraftRebuildState")?.addEventListener("click", () => void submitPipeline("state_rebuild", { fromNo: writer.chapterNo, wantCount: 1 }));
+  // 跨章连贯性检查：只读报告，不改正文。
+  $("#writerContinuityRun")?.addEventListener("click", () => void runContinuityCheck());
   $("#writerDraftPrev")?.addEventListener("click", () => stepChapter(-1));
   $("#writerDraftNext")?.addEventListener("click", () => stepChapter(1));
   $("#writerDraftContent")?.addEventListener("input", () => {

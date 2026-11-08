@@ -81,6 +81,17 @@ class P3WriterNovelTests(unittest.TestCase):
         task_id = result.executor_id
         self.assertEqual(self.app.studio.jobs.tasks[task_id]["input"]["writer"]["book_id"], book_id)
         self.app.studio.jobs.tasks[task_id].update(status="done", result="章节正文")
+        # draft 落盘后流水线进入章末状态步（跨章连贯性修复）：节点仍在运行，
+        # 直到状态任务也完成才 succeeded；正文此刻已经写好。
+        synced = self.app.super_agent_domain.action("local", thread.thread_id, {
+            "action": "sync", "node_id": node.node_id, "attempt": 0,
+        })
+        self.assertEqual(synced.node_status, "running")
+        self.assertEqual(self.app.writer.store.get_chapter(book_id, 1)["content"], "章节正文")
+        state_task_id = self.app.writer.store.get_active_pipeline(book_id)["current_task_id"]
+        self.assertEqual(self.app.studio.jobs.tasks[state_task_id]["input"]["writer"]["step"], "state")
+        self.app.studio.jobs.tasks[state_task_id].update(
+            status="done", result=json.dumps({"events": ["第一章事件"]}, ensure_ascii=False))
         synced = self.app.super_agent_domain.action("local", thread.thread_id, {
             "action": "sync", "node_id": node.node_id, "attempt": 0,
         })

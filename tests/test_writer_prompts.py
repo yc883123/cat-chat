@@ -79,6 +79,18 @@ class ParseStepTests(unittest.TestCase):
         with self.assertRaises(PromptError):
             prompts.parse_characters('[{"role":"无名"},{"name":"丁"}]', wanted=2)
 
+    def test_characters_keep_relations_and_cap(self):
+        """角色生成的 relations 必须被解析保留（跨章连贯性修复计划 §三.A）。"""
+        rows = prompts.parse_characters(
+            '[{"name":"甲","role":"主角","relations":"与乙：同门师兄，互相提防"},'
+            '{"name":"乙","relations":"' + "长" * 1200 + '"}]',
+            wanted=2)
+        self.assertEqual(rows[0]["relations"], "与乙：同门师兄，互相提防")
+        self.assertEqual(rows[1]["relations"], "长" * 1000)  # 上限与 store 归一化一致
+        # 旧输出没有 relations 也不炸。
+        rows = prompts.parse_characters('[{"name":"丙"}]', wanted=1)
+        self.assertEqual(rows[0]["relations"], "")
+
     def test_outline_requires_chapters_and_count(self):
         payload = '{"chapters":[' + ",".join(
             f'{{"no":{i},"title":"第{i}章","beat":"梗概{i}","hook":"钩{i}"}}'
@@ -221,6 +233,75 @@ class DraftContextTests(unittest.TestCase):
         self.assertIn("……", summary)
         short = prompts.chapter_head_summary("短文")
         self.assertEqual(short, "短文")
+
+
+class DraftCharacterSelectionTests(unittest.TestCase):
+    """正文人物摘要：背景/关系进提示词、点名配角不丢、无关配角可按预算排除。"""
+
+    def _setup(self, *, sides=8, background_len=0, relations="与张三是旧识"):
+        chars = [{"name": "张三", "role": "lead", "identity": "船匠",
+                  "background": "船坞出身", "relations": "与李四结盟"}]
+        for i in range(1, sides + 1):
+            chars.append({
+                "name": f"配角{i}", "role": "side", "identity": f"行当{i}",
+                "background": "背" * (background_len or 30),
+                "relations": relations,
+            })
+        return {"idea": "创意", "characters": chars}
+
+    def test_background_and_relations_enter_draft_context(self):
+        setup = self._setup(sides=1)
+        setup["characters"][0]["intro"] = "船坞出身，藏着一段旧案"
+        built = prompts.build_draft_context(
+            setup, {"no": 2, "title": "第二章", "beat": "梗概"}, mode="whole")
+        self.assertIn("身份：船匠", built["content"])
+        self.assertIn("背景：船坞出身，藏着一段旧案", built["content"])
+        self.assertIn("关系：与李四结盟", built["content"])
+        slot = next(s for s in built["slots"] if s["key"] == "characters")
+        self.assertTrue(slot["included"])
+
+    def test_mentioned_side_survives_six_plus_roster(self):
+        """超过 6 人时，本章梗概点名的配角必须进上下文（验收 §五）。"""
+        setup = self._setup(sides=8)
+        setup["characters"][3]["name"] = "王五"
+        built = prompts.build_draft_context(
+            setup, {"no": 3, "title": "第三章", "beat": "王五在码头拦下张三"}, mode="whole")
+        self.assertIn("王五", built["content"])
+        slot = next(s for s in built["slots"] if s["key"] == "characters")
+        self.assertNotIn("王五", slot.get("excluded_names") or [])
+
+    def test_irrelevant_sides_excluded_by_budget_and_reported(self):
+        """预算不足时无关配角被排除且如实报告；点名配角仍要带上。"""
+        setup = self._setup(sides=30, background_len=200)
+        setup["characters"][5]["name"] = "赵六"
+        built = prompts.build_draft_context(
+            setup, {"no": 3, "title": "第三章", "beat": "赵六现身"}, mode="whole")
+        slot = next(s for s in built["slots"] if s["key"] == "characters")
+        self.assertIn("赵六", built["content"])
+        self.assertTrue(slot.get("excluded_names"), "无关配角应被预算排除并报告")
+        self.assertNotIn("赵六", slot["excluded_names"])
+        self.assertLessEqual(len(built["content"]), 6000)
+
+    def test_long_fields_keep_head_not_random_chop(self):
+        """单字段超长保留开头加省略号；身份/背景/关系不被整段挤掉（验收 §五）。"""
+        setup = {"idea": "创意", "characters": [{
+            "name": "张三", "role": "lead", "identity": "身" * 300,
+            "background": "背" * 500, "relations": "关" * 500,
+        }]}
+        built = prompts.build_draft_context(
+            setup, {"no": 1, "title": "第一章", "beat": "梗概"}, mode="whole")
+        self.assertIn("身份：" + "身" * 100 + "…", built["content"])
+        self.assertIn("背景：" + "背" * 160 + "…", built["content"])
+        self.assertIn("关系：" + "关" * 160 + "…", built["content"])
+
+    def test_alias_and_extra_note_mention_counts(self):
+        setup = self._setup(sides=2)
+        setup["characters"][1]["name"] = "老周"
+        setup["characters"][1]["alias"] = "周师傅、铁算盘"
+        built = prompts.build_draft_context(
+            setup, {"no": 2, "title": "第二章", "beat": "铁算盘来算账"},
+            mode="whole", extra_note="多写周师傅的算盘声")
+        self.assertIn("老周", built["content"])
 
 
 class BudgetTests(unittest.TestCase):

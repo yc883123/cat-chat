@@ -169,7 +169,9 @@ class SidebarPrefsApiTests(unittest.TestCase):
     """HTTP 层口径：archived 只收布尔；reorder 校验数组；sidebar 偏好枚举校验。"""
 
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory(prefix="naiba_sidebar_api_")
+        # ignore_cleanup_errors：真应用起后台线程，CI 上偶发清理期文件仍被占用
+        # （WinError 32，run 42500965059 实测）——断言已跑完，清理失败不该判红整轮。
+        self._tmp = tempfile.TemporaryDirectory(prefix="naiba_sidebar_api_", ignore_cleanup_errors=True)
         self.addCleanup(self._tmp.cleanup)
         root = Path(self._tmp.name)
         from naiba.app import NaibaChatApp

@@ -237,6 +237,8 @@ class ComfyUIStore:
             "updated_at": stamp,
             "started_at": None,
             "finished_at": None,
+            # 重试过的任务卡片显示最近一轮开始时刻而非创建时刻，靠它区分。
+            "retry_count": 0,
         }
         with self._lock:
             self._write_json(self.task_record_path(task_id), record)
@@ -278,12 +280,14 @@ class ComfyUIStore:
         payload["checkpoint"] = checkpoint if isinstance(checkpoint, dict) else {
             "prompt_ids": [], "completed": [], "errors": [], "resubmits": {},
         }
+        payload.setdefault("retry_count", 0)
         return payload
 
     def update_task(self, task_id: str, **fields: Any) -> dict[str, Any] | None:
         allowed = {
             "status", "detail", "progress", "result", "error", "usage",
             "started_at", "finished_at", "checkpoint", "request_receipts",
+            "retry_count",
         }
         with self._lock:
             current = self.get_task(task_id)

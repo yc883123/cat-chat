@@ -1007,6 +1007,48 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(len(fake.submitted), 1)
         self.assertEqual(done["result"]["outputs"], ["001_00_old.png", "002_00_ComfyUI_00001_.png"])
 
+    def test_retry_after_cancel_resubmits_cancelled_segment(self):
+        # 用户取消后 ComfyUI 把中断以 error 落史；重试必须重提该段出片，
+        # 而不是拿旧中断顶账把任务原地判死（2026-11-08 取消后重试失效）。
+        fake = _FakeComfy()
+        real_history = fake._history
+        def _history(base, prompt_id):
+            if prompt_id == "pid-stale":
+                return {"prompt_id": prompt_id,
+                        "status": {"status_str": "error", "messages": []}, "outputs": {}}
+            return real_history(base, prompt_id)
+        fake._history = _history
+        task = self._make_task(shots=1)
+        self.store.update_task(task["id"], status="cancelled", checkpoint={
+            "prompt_ids": ["pid-stale"], "completed": [], "errors": [], "resubmits": {},
+        })
+        jobs = ComfyUIJobManager(self.app, self.store, self.runner)
+        with fake.patch() as patcher:
+            fake.wire(patcher)
+            jobs.retry(task["id"])
+            done = self._run_to_terminal(task["id"])
+        self.assertEqual(done["status"], "completed")
+        self.assertEqual(len(fake.submitted), 1, "被取消段必须重新提交")
+        self.assertEqual(done["checkpoint"]["prompt_ids"], ["pid-1"])
+
+    def test_retry_failed_resubmits_errored_segment(self):
+        # 旧缺陷回归钉：收养曾把上一轮 error 历史顶成失败、跳过重提，重试
+        # 原地判死。现在 error 历史一律不收养，失败段必须真实重跑（真实错误
+        # 重跑时当场再报）。本例远端恒 error，任务最终仍失败但确实重提过。
+        fake = _FakeComfy(history_status="error")
+        task = self._make_task(shots=1)
+        self.store.update_task(task["id"], status="failed", checkpoint={
+            "prompt_ids": ["pid-old"], "completed": [], "errors": [], "resubmits": {},
+        })
+        jobs = ComfyUIJobManager(self.app, self.store, self.runner)
+        with fake.patch() as patcher:
+            fake.wire(patcher)
+            jobs.retry(task["id"])
+            done = self._run_to_terminal(task["id"])
+        self.assertEqual(done["status"], "failed")
+        self.assertEqual(len(fake.submitted), 1, "error 历史不收养，失败段必须重跑")
+        self.assertIn("第 1 段执行失败", done["error"])
+
     def test_recover_interrupted_marks_active_tasks(self):
         task = self._make_task(shots=3)
         self.store.update_task(task["id"], status="running")
@@ -1214,6 +1256,43 @@ class JobsTests(unittest.TestCase):
         retried = self.jobs.retry(task["id"])
         self.assertEqual(retried["status"], "queued")
         self.assertIsNone(retried["finished_at"])
+
+    def test_retry_cancelled_voids_uncompleted_prompt_ids(self):
+        # 取消即作废旧提交：被取消任务的未完成段不再认旧 prompt_id（用户
+        # 中断在 ComfyUI 以 error 落史，收养会拿旧中断顶账）；已完成段保留。
+        task = self.jobs.submit({"workflow_id": self.entry["id"], "shots": 3})
+        task_id = task["id"]
+        self.store.update_task(task_id, status="cancelled", checkpoint={
+            "prompt_ids": ["p1", "p2", ""],
+            "completed": [{"index": 0, "prompt_id": "p1", "files": ["a.png"]}],
+            "errors": [], "resubmits": {},
+        })
+        retried = self.jobs.retry(task_id)
+        self.assertEqual(retried["checkpoint"]["prompt_ids"], ["p1", "", ""])
+
+    def test_retry_failed_and_interrupted_keep_prompt_ids(self):
+        # failed/interrupted 保留凭证：服务重启判 interrupted 后某段可能
+        # 已在远端成功，靠收养恢复产物、不重复出片（P4 契约不许破）。
+        for status in ("failed", "interrupted"):
+            with self.subTest(status=status):
+                task = self.jobs.submit({"workflow_id": self.entry["id"], "shots": 2})
+                task_id = task["id"]
+                self.store.update_task(task_id, status=status, checkpoint={
+                    "prompt_ids": ["p1", "p2"],
+                    "completed": [{"index": 0, "prompt_id": "p1", "files": []}],
+                    "errors": [], "resubmits": {},
+                })
+                retried = self.jobs.retry(task_id)
+                self.assertEqual(retried["checkpoint"]["prompt_ids"], ["p1", "p2"])
+
+    def test_retry_increments_retry_count(self):
+        # 卡片时间用：重试过的任务显示最近一轮开始而非创建时刻，靠计数区分。
+        task = self.jobs.submit({"workflow_id": self.entry["id"]})
+        self.store.update_task(task["id"], status="failed")
+        self.assertEqual(self.jobs.retry(task["id"])["retry_count"], 1)
+        self.assertEqual(self.jobs.task(task["id"])["retry_count"], 1)
+        self.store.update_task(task["id"], status="failed")
+        self.assertEqual(self.jobs.retry(task["id"])["retry_count"], 2)
 
     def test_delete_tasks_skips_active_and_removes_outputs(self):
         # 直接落任务记录（不经过 runner：真 runner 会把任务推到终态，干扰断言）。

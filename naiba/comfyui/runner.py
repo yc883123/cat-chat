@@ -197,7 +197,7 @@ class ComfyUIRunner:
                 if not prompt_id or index in done_indexes:
                     continue
                 adopted = self._adopt_submitted(
-                    base, task_id, index, prompt_id, completed, errors,
+                    base, task_id, index, prompt_id, completed,
                 )
                 if adopted:
                     done_indexes.add(index)
@@ -442,9 +442,13 @@ class ComfyUIRunner:
         index: int,
         prompt_id: str,
         completed: list[dict[str, Any]],
-        errors: list[dict[str, Any]],
     ) -> bool:
-        """已提交未确认的段：查历史收养结果；不可收养（还没跑/已丢）返回 False。"""
+        """已提交未确认的段：查历史只收养成功产物；查不到/失败/中断一律 False。
+
+        历史 error 不收养（ComfyUI 把用户中断也以 error 落史）：收养成失败会
+        把上一轮的中断顶成真实失败、把段标成已处理跳过重提，任务原地判死。
+        失败段交回正常提交逻辑重跑，真实错误重跑时会当场再报，信息不丢。
+        """
         try:
             entry = client.history_entry(base, prompt_id)
         except Exception:  # noqa: BLE001 - 查不到按未完成处理，交给后续提交逻辑
@@ -453,10 +457,7 @@ class ComfyUIRunner:
             return False
         status = client.entry_status(entry)
         if status in {"error", "failed"}:
-            detail = client.entry_error(entry) or f"ComfyUI 状态 {status}"
-            errors.append({"index": index, "prompt_id": prompt_id,
-                           "error": f"第 {index + 1} 段执行失败：{detail}"})
-            return True
+            return False
         items = client.output_items(entry) if (status in {"success", "completed"}
                                                or entry.get("outputs")) else []
         if not items:

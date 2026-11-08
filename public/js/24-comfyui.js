@@ -2336,8 +2336,14 @@ function taskMetaText(row) {
   const total = Number(progress.total || row.shots || 0);
   const failed = Number(progress.failed || 0);
   const pieces = [];
+  // 重试过的任务显示最近一轮开始时刻（retry_count 由重试入口累加）：
+  // 创建时间是首次提交的，重试后仍是旧值。排队中不显示：runner 还没
+  // 重写 started_at，那还是上一轮的开始时刻。
+  const retried = Number(row.retry_count || 0) > 0;
+  const started = formatTime(row.started_at);
   const created = formatTime(row.created_at);
-  if (created) pieces.push(`创建 ${created}`);
+  if (retried && started && row.status !== "queued") pieces.push(`开始 ${started}`);
+  else if (created) pieces.push(`创建 ${created}`);
   pieces.push(`${done}/${total} 段`);
   if (failed) pieces.push(`失败 ${failed} 段`);
   const outputs = (row.result?.outputs || []).length;

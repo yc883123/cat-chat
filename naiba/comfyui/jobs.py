@@ -362,8 +362,22 @@ class ComfyUIJobManager:
             return existing
         if str(task.get("status") or "") in COMFYUI_ACTIVE_STATUSES:
             raise ComfyUITaskError("任务还在执行，请先取消或等待结束")
+        previous_status = str(task.get("status") or "")
         checkpoint = dict(task.get("checkpoint") or {})
         checkpoint["errors"] = []
+        # 取消即作废旧提交：被取消任务的未完成段不再认旧 prompt_id——ComfyUI
+        # 把用户中断也以 error 落史，收养逻辑会拿旧中断顶账（runner 不收养
+        # error 是另一道防线）。failed/interrupted 保留凭证：服务重启判
+        # interrupted 后某段可能已在远端成功，靠收养恢复产物、不重复出片。
+        if previous_status == "cancelled":
+            done_indexes = {
+                int(item.get("index")) for item in checkpoint.get("completed") or []
+                if isinstance(item, dict) and str(item.get("index", "")).lstrip("-").isdigit()
+            }
+            checkpoint["prompt_ids"] = [
+                pid if index in done_indexes else ""
+                for index, pid in enumerate(checkpoint.get("prompt_ids") or [])
+            ]
         shots = int((task.get("input") or {}).get("shots") or 1)
         done = len(checkpoint.get("completed") or [])
         if done >= shots:
@@ -374,8 +388,10 @@ class ComfyUIJobManager:
                 {"request_key": request_key, "owner_id": owner_id, "payload_hash": digest}
             ] if request_key else [])],
             # 重试是新的一轮运行：清掉上一轮的结束时刻（开始时刻由 runner 重写）。
+            # retry_count 给卡片时间用：重试过的任务显示最近一轮开始而非创建时刻。
             finished_at=None,
             progress={"done": done, "total": shots, "failed": 0},
+            retry_count=int(task.get("retry_count") or 0) + 1,
         )
         self.store.append_event(task_id, {
             "type": "log", "message": f"重试：从第 {done + 1} 段继续（已完成的段不会重复提交）",
@@ -482,6 +498,7 @@ class ComfyUIJobManager:
             "updated_at": task.get("updated_at"),
             "started_at": task.get("started_at"),
             "finished_at": task.get("finished_at"),
+            "retry_count": int(task.get("retry_count") or 0),
             "progress": task.get("progress") or {},
             "result": result,
             "output_files": self._output_files(task.get("id"), result),

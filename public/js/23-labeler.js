@@ -55,7 +55,9 @@ const labeler = {
   taskId: "",
   task: null,
   items: [],
-  imageResultLimit: 500,
+  // 懒加载：首屏只渲染 100 张，「加载更多」每次追加 100；轮询数据没变化时跳过重建。
+  imageResultLimit: 100,
+  lastImageSignature: "",
   annotations: [],
   // 按标签视图命中集：与按图共用 annotations 会互相覆盖，单独存一份。
   tagMatches: [],
@@ -802,7 +804,7 @@ async function pollTask() {
     if (labeler.taskId !== taskId) return;
     labeler.task = task;
     labeler.items = task.items || [];
-    labeler.imageResultLimit = 500;
+    // 轮询不重置浏览位置：用户已点「加载更多」的进度保持，由签名 diff 决定要不要重绘。
     renderTask(task);
     if (!["queued", "running"].includes(String(task.status || ""))) {
       stopPolling();
@@ -831,7 +833,7 @@ async function reconcileTask() {
     if (token !== labeler.detailToken || labeler.taskId !== taskId) return;
     labeler.task = task;
     labeler.items = task.items || [];
-    labeler.imageResultLimit = 500;
+    labeler.imageResultLimit = 100;
     renderTask(task);
     if (["queued", "running"].includes(String(task.status || ""))) startPolling();
     else {
@@ -1301,6 +1303,19 @@ function renderImageResults(body) {
     return;
   }
   const visible = rows.slice(0, labeler.imageResultLimit);
+  // 懒加载签名 diff：任务、搜索、渲染上限、每条图片的状态与标注摘录都没变时，
+  // 跳过整段 DOM 重建——打标进行中每 1.2s 的轮询大多数轮次在这里直接返回。
+  const signature = JSON.stringify([
+    labeler.taskId, labeler.search, labeler.imageResultLimit,
+    labeler.items.length, labeler.annotations.length, labeler.annotationTotal,
+    Number(labeler.task?.items_total || 0),
+    visible.map(({ item, annotation }) => [
+      item.item_id, item.state, item.annotation_id || 0, item.error || "",
+      (annotation?.tags || []).length, annotation?.description || "",
+    ]),
+  ]);
+  if (labeler.lastImageSignature === signature) return;
+  labeler.lastImageSignature = signature;
   const cards = visible.map(({ item, annotation }) => {
     const card = document.createElement("article");
     card.className = "labeler-anno";
@@ -1340,18 +1355,27 @@ function renderImageResults(body) {
     return card;
   });
   body.replaceChildren(...cards);
+  const hasMoreRendered = rows.length > visible.length;
   const hasMoreItems = labeler.items.length < Number(labeler.task?.items_total || labeler.items.length);
   const hasMoreAnnotations = labeler.annotations.length < Number(labeler.annotationTotal || labeler.annotations.length);
-  if (hasMoreItems || hasMoreAnnotations) {
+  if (hasMoreRendered || hasMoreItems || hasMoreAnnotations) {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "control-button tiny";
-    more.textContent = hasMoreItems
-      ? `加载更多图片（${labeler.items.length}/${labeler.task?.items_total || 0}）`
-      : `加载更多标注（${labeler.annotations.length}/${labeler.annotationTotal || 0}）`;
+    if (hasMoreRendered || hasMoreItems) {
+      const shownTotal = hasMoreRendered ? rows.length : Number(labeler.task?.items_total || 0);
+      more.textContent = `显示更多图片（${visible.length}/${shownTotal}）`;
+    } else {
+      more.textContent = `加载更多标注（${labeler.annotations.length}/${labeler.annotationTotal || 0}）`;
+    }
     more.addEventListener("click", () => {
-      if (hasMoreItems) void loadNextTaskItems();
-      else void loadNextAnnotations();
+      if (hasMoreRendered || hasMoreItems) {
+        labeler.imageResultLimit += 100;
+        if (hasMoreItems) void loadNextTaskItems();
+        else renderResultBody();
+      } else {
+        void loadNextAnnotations();
+      }
     });
     body.append(more);
   }

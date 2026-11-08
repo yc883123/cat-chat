@@ -21,6 +21,23 @@ class ComfyUIFrontendAssets(unittest.TestCase):
         self.assertNotIn("superAgentView", comfy)
         self.assertNotIn("/api/super-agent", comfy)
 
+    def test_media_overlay_foreground_does_not_follow_page_text(self):
+        css = (ROOT / "public/styles.css").read_text(encoding="utf-8")
+        for selector in (".comfyui-media-tile .t-actions button",
+                         ".comfyui-media-tile .t-duration",
+                         ".comfyui-media-tile .t-status",
+                         ".comfyui-media-preview-close"):
+            with self.subTest(selector=selector):
+                rule = re.search(re.escape(selector) + r"\s*\{([^}]+)\}", css)
+                self.assertIsNotNone(rule)
+                self.assertRegex(rule.group(1), r"\bcolor:\s*#fff\s*;")
+        self.assertIn(".comfyui-media-tile .t-status.ok { color: var(--success); }", css)
+        self.assertIn(".comfyui-media-tile .t-status.keep { color: var(--warning); }", css)
+        source = (ROOT / "public/js/24-comfyui.js").read_text(encoding="utf-8")
+        icon = re.search(r"const MEDIA_PLAY_ICON = '([^']+)';", source)
+        self.assertIsNotNone(icon)
+        self.assertIn('fill="currentColor"', icon.group(1))
+
     def test_markup_ids_unique_and_mobile_media_controls_scoped(self):
         html = (ROOT / "public/index.html").read_text(encoding="utf-8")
         ids = re.findall(r'\bid="([^"]+)"', html)

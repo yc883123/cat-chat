@@ -4567,7 +4567,7 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .comfyui-media-tile .t-duration {
   position: absolute; right: 4px; bottom: 4px; z-index: 1;
   font-size: 9px; line-height: 14px; padding: 0 5px; border-radius: 4px;
-  background: rgba(17, 21, 34, .82); color: var(--text);
+  background: rgba(17, 21, 34, .82); color: #fff;
 }
 .comfyui-media-tile .t-name {
   font-size: 10.5px; color: var(--text); padding: 4px 6px 2px;
@@ -4583,7 +4583,7 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .comfyui-media-tile .t-status {
   position: absolute; top: 4px; left: 4px; z-index: 2;
   max-width: calc(100% - 8px); font-size: 9px; line-height: 14px; padding: 0 6px;
-  border-radius: var(--r-full); background: rgba(17, 21, 34, .82); color: var(--text);
+  border-radius: var(--r-full); background: rgba(17, 21, 34, .82); color: #fff;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; backdrop-filter: blur(2px);
 }
 .comfyui-media-tile .t-status.ok { color: var(--success); }
@@ -4592,7 +4592,7 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .comfyui-media-tile:hover .t-actions, .comfyui-media-tile:focus-within .t-actions { display: flex; }
 .comfyui-media-tile .t-actions button {
   width: 20px; height: 20px; border: 0; border-radius: 5px; padding: 0;
-  background: rgba(17, 21, 34, .85); color: var(--text); font-size: 10px; line-height: 1; cursor: pointer;
+  background: rgba(17, 21, 34, .85); color: #fff; font-size: 10px; line-height: 1; cursor: pointer;
 }
 .comfyui-media-tile .t-actions button:hover { background: var(--accent); color: #fff; }
 /* 空块：虚线格（音频是扁平小条）；点它即唤起系统选择器。 */
@@ -4636,7 +4636,7 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .comfyui-media-preview-close {
   position: absolute; top: 18px; right: 22px; width: 32px; height: 32px;
   border: 1px solid var(--line-strong); border-radius: 50%;
-  background: rgba(17, 21, 34, .8); color: var(--text); font-size: 14px; cursor: pointer;
+  background: rgba(17, 21, 34, .8); color: #fff; font-size: 14px; cursor: pointer;
 }
 .comfyui-media-preview-close:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
 .comfyui-media-preview-close { width: 44px; height: 44px; }

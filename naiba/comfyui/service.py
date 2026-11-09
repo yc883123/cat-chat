@@ -480,6 +480,28 @@ class ComfyUIService:
             "status": task.get("status"),
         }, 200
 
+    def api_task_rerun_snapshot(self, task_id: str) -> tuple[dict[str, Any], int]:
+        """完成态单次任务的只读再次生成快照（不返回执行状态/产物目标）。"""
+        try:
+            snapshot = self.jobs.rerun_snapshot(task_id)
+        except LookupError:
+            return {"error": "任务不存在"}, 404
+        except ComfyUITaskError as exc:
+            return {"error": str(exc)}, 400
+        return {"snapshot": snapshot}, 200
+
+    def api_task_rerun(self, task_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """用原任务冻结快照 + 当前表单值创建一条全新的单次任务。"""
+        try:
+            task = self.jobs.submit_rerun(task_id, body)
+        except LookupError:
+            return {"error": "任务不存在"}, 404
+        except ComfyUITaskError as exc:
+            return {"error": str(exc)}, 400
+        except (OSError, ComfyUIStoreError) as exc:
+            return {"error": f"再次生成创建失败：{exc}"}, 500
+        return {"task": self.jobs.task(str(task.get("id") or "")) or task}, 201
+
     def api_submit(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         try:
             task = self.jobs.submit(body)
@@ -597,6 +619,24 @@ class ComfyUIService:
         try:
             target = self.store.outputs_dir.resolve()
             target.mkdir(parents=True, exist_ok=True)
+            _open_folder(target)
+        except OSError as exc:
+            return {"error": f"无法打开产物文件夹：{exc}"}, 500
+        return {"ok": True, "path": str(target)}, 200
+
+    def api_reveal_task_outputs(self, task_id: str) -> tuple[dict[str, Any], int]:
+        """打开某个条目（任务）自己的产物目录；不接受任意路径。
+
+        批量条目的「打开文件夹」只定位这一条的产物，不用产物根目录替代。
+        任务记录不存在或目录还没有生成时如实回报，不创建一个空目录冒充。
+        """
+        task = self.store.get_task(str(task_id or ""))
+        if task is None:
+            return {"error": "任务记录不存在或已被删除"}, 404
+        target = self.store.task_output_dir(str(task.get("id") or "")).resolve()
+        if not target.is_dir():
+            return {"error": "这个条目还没有产物文件夹"}, 404
+        try:
             _open_folder(target)
         except OSError as exc:
             return {"error": f"无法打开产物文件夹：{exc}"}, 500

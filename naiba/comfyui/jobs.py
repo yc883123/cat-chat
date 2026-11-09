@@ -6,6 +6,8 @@
 - overrides 只接受扫描出的槽位，值按槽位类型保真转换（转不动=400）；
 - media_inputs 只接受扫描出的媒体槽 + 宿主 uploads 受管文件引用（拒绝任意
   本机路径），类型/体积/存在性在此校验（计划 §5.2/§5.3）；
+- media_skip 只接受扫描出的媒体槽地址：用户手动 ⊘ 强制跳过，执行端在提交副本
+  移除对应下游连接，不以 optional 声明为门槛（2026-11-09 口径）；
 - shots ≤ 200（对齐聊天域批量口径）；
 - 任务 JSON 保存工作流快照（prompt 副本 + 名称），删除工作流不破坏历史任务。
 
@@ -32,6 +34,12 @@ from naiba.storage.media import is_uploads_path
 
 class ComfyUITaskError(ValueError):
     """任务操作非法（参数/状态）。"""
+
+
+# 再次生成只接受这些当前表单字段；工作流基底永远从原任务冻结快照读取。
+RERUN_EDITABLE_FIELDS = frozenset({
+    "overrides", "media_inputs", "media_skip", "shots", "unload_after",
+})
 
 
 def _running_step(task: dict[str, Any], checkpoint: dict[str, Any]) -> dict[str, Any] | None:
@@ -98,7 +106,7 @@ class ComfyUIJobManager:
 
     def submit(self, body: dict[str, Any], *, request_key: str = "", owner_id: str = "",
                source_task_id: str = "", label: str = "", batch_id: str = "",
-               hold: bool = False) -> dict[str, Any]:
+               hold: bool = False, entry_override: dict[str, Any] | None = None) -> dict[str, Any]:
         """提交一个造梦机任务。
 
         - ``label``：任务卡显示名（批量提交传「批次名 · 条目名」；单任务不传，
@@ -107,21 +115,30 @@ class ComfyUIJobManager:
           重试续跑沿用原任务记录，字段不丢——前端结果页按它把批量条目和单次任务分档；
         - ``hold``：只创建不入队（批量编排的事务窗口——先全部建好再统一入队，
           回滚时任务还没进 worker，直接删记录即可）；单任务提交不要传。
+        - ``entry_override``：用任务冻结快照作为工作流基底（再次生成用）；不再查
+          工作流库，工作流已删除也能创建新任务。仍按快照 params 做全部校验。
         """
         if not isinstance(body, dict):
             raise ComfyUITaskError("请求体必须是对象")
-        workflow_id = str(body.get("workflow_id") or "").strip()
-        if not workflow_id:
-            raise ComfyUITaskError("请先选择要执行的工作流")
-        entry = self.store.get_workflow(workflow_id)
-        if entry is None:
-            raise ComfyUITaskError("工作流不存在或已被删除")
+        if entry_override is not None:
+            entry = entry_override if isinstance(entry_override, dict) else {}
+            workflow_id = str(entry.get("id") or "").strip()
+            if not workflow_id:
+                raise ComfyUITaskError("任务快照缺少工作流标识")
+        else:
+            workflow_id = str(body.get("workflow_id") or "").strip()
+            if not workflow_id:
+                raise ComfyUITaskError("请先选择要执行的工作流")
+            entry = self.store.get_workflow(workflow_id)
+            if entry is None:
+                raise ComfyUITaskError("工作流不存在或已被删除")
         try:
             shots = max(1, min(int(body.get("shots", 1) or 1), MAX_SHOTS))
         except (TypeError, ValueError):
             raise ComfyUITaskError("shots 必须是正整数") from None
         overrides = self._validate_overrides(entry, body.get("overrides"))
         media_inputs = self._validate_media_inputs(entry, body.get("media_inputs"))
+        media_skip = self._validate_media_skips(entry, body.get("media_skip"))
         input_data = {
             "workflow_id": workflow_id,
             "workflow_name": str(entry.get("name") or ""),
@@ -130,6 +147,8 @@ class ComfyUIJobManager:
             "params": entry.get("params") or [],
             "overrides": overrides,
             "media_inputs": media_inputs,
+            # 手动 ⊘ 跳过的媒体槽地址：独立于 media_inputs，重试/续跑沿用快照。
+            "media_skip": media_skip,
             "shots": shots,
             # 逐次卸载偏好随载荷冻结（母本 §5.5）；任务不随后续批次设置漂移。
             "unload_after": bool(body.get("unload_after")),
@@ -143,6 +162,125 @@ class ComfyUIJobManager:
         if not hold:
             self.runner.submit(str(task.get("id") or ""))
         return task
+
+    # ---- 再次生成（完成态单次任务 → 新任务）----
+
+    def _rerun_source(self, task_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        """读取完成态单次任务的冻结生成快照；结构不完整一律拒绝。"""
+        task = self.store.get_task(str(task_id or ""))
+        if task is None:
+            raise LookupError("任务不存在")
+        if str(task.get("status") or "") != "completed":
+            raise ComfyUITaskError("只有已完成的单次任务可以再次生成")
+        input_data = task.get("input") if isinstance(task.get("input"), dict) else {}
+        if str(input_data.get("batch_id") or "").strip():
+            raise ComfyUITaskError("批量条目请使用批次里的重试或编辑，不支持再次生成")
+        workflow_id = str(input_data.get("workflow_id") or "").strip()
+        if not workflow_id:
+            raise ComfyUITaskError("任务快照缺少工作流标识，无法再次生成")
+        prompt = input_data.get("prompt")
+        if not isinstance(prompt, dict) or not prompt:
+            raise ComfyUITaskError("任务快照缺少工作流内容，无法再次生成")
+        params = input_data.get("params")
+        if not isinstance(params, list):
+            raise ComfyUITaskError("任务快照缺少参数清单，无法再次生成")
+        overrides = input_data.get("overrides")
+        if not isinstance(overrides, list):
+            raise ComfyUITaskError("任务快照缺少参数覆盖清单，无法再次生成")
+        media_inputs = input_data.get("media_inputs")
+        if not isinstance(media_inputs, list):
+            raise ComfyUITaskError("任务快照缺少媒体输入清单，无法再次生成")
+        media_skip = input_data.get("media_skip") or []
+        if not isinstance(media_skip, list):
+            raise ComfyUITaskError("任务快照的媒体跳过清单格式不对，无法再次生成")
+        for label, rows in (("参数覆盖", overrides), ("媒体输入", media_inputs),
+                            ("媒体跳过", media_skip)):
+            for item in rows:
+                if not isinstance(item, dict) or not str(item.get("node_id") or "").strip() \
+                        or not str(item.get("field_name") or "").strip():
+                    raise ComfyUITaskError(f"任务快照的{label}不完整，无法再次生成")
+        for item in media_inputs:
+            if not str(item.get("path") or "").strip():
+                raise ComfyUITaskError("任务快照的媒体输入缺少文件路径，无法再次生成")
+        try:
+            shots = int(input_data.get("shots") or 1)
+        except (TypeError, ValueError):
+            raise ComfyUITaskError("任务快照的生成段数不合法，无法再次生成") from None
+        if not 1 <= shots <= MAX_SHOTS:
+            raise ComfyUITaskError("任务快照的生成段数超出允许范围，无法再次生成")
+        return task, {
+            "workflow_id": workflow_id,
+            "workflow_name": str(input_data.get("workflow_name") or ""),
+            "prompt": prompt,
+            "params": params,
+            "overrides": overrides,
+            "media_inputs": media_inputs,
+            "media_skip": media_skip,
+            "shots": shots,
+            "unload_after": bool(input_data.get("unload_after")),
+        }
+
+    def _media_input_snapshot(self, item: dict[str, Any]) -> dict[str, Any]:
+        """回填用媒体行：保留受管路径，并标出文件当前是否仍可用。"""
+        path = str(item.get("path") or "")
+        target = Path(path).expanduser()
+        available = False
+        if path and is_uploads_path(Path(self.app.paths.data_dir), target):
+            try:
+                available = target.resolve().is_file()
+            except OSError:
+                available = False
+        return {
+            "node_id": str(item.get("node_id") or ""),
+            "field_name": str(item.get("field_name") or ""),
+            "path": path,
+            "media": str(item.get("media") or ""),
+            "name": str(item.get("name") or ""),
+            "size": item.get("size"),
+            "available": available,
+        }
+
+    def rerun_snapshot(self, task_id: str) -> dict[str, Any]:
+        """再次生成只读快照：不含 checkpoint、prompt_ids、事件或旧产物目标。"""
+        task, base = self._rerun_source(task_id)
+        return {
+            "source_task_id": str(task.get("id") or ""),
+            "workflow_id": base["workflow_id"],
+            "workflow_name": base["workflow_name"],
+            "prompt": base["prompt"],
+            "params": base["params"],
+            "overrides": base["overrides"],
+            "media_inputs": [self._media_input_snapshot(item) for item in base["media_inputs"]],
+            "media_skip": base["media_skip"],
+            "shots": base["shots"],
+            "unload_after": base["unload_after"],
+            "created_at": task.get("created_at"),
+            "finished_at": task.get("finished_at"),
+        }
+
+    def submit_rerun(self, task_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """从完成态任务冻结快照创建新任务；不复制旧 checkpoint/产物。"""
+        task, base = self._rerun_source(task_id)
+        if not isinstance(body, dict):
+            raise ComfyUITaskError("请求体必须是对象")
+        extra = set(body) - RERUN_EDITABLE_FIELDS
+        if extra:
+            raise ComfyUITaskError(
+                "再次生成只接受当前表单参数（参数、媒体、段数、释放模型），"
+                "不接受工作流基底或来源标识"
+            )
+        entry = {
+            "id": base["workflow_id"],
+            "name": base["workflow_name"],
+            "prompt": base["prompt"],
+            "params": base["params"],
+        }
+        return self.submit(
+            body,
+            entry_override=entry,
+            source_task_id=str(task.get("id") or ""),
+            owner_id=str(task.get("owner_id") or ""),
+        )
 
     def _validate_overrides(self, entry: dict[str, Any], raw: Any) -> list[dict[str, Any]]:
         """overrides 只认扫描出的槽位；值按槽位类型保真转换，转不动直接拒绝。"""
@@ -307,6 +445,44 @@ class ComfyUIJobManager:
                 "name": target.name,
                 "size": size,
             })
+        return out
+
+    def _validate_media_skips(self, entry: dict[str, Any], raw: Any) -> list[dict[str, Any]]:
+        """手动强制跳过：只认扫描出的媒体槽地址，不接受任意节点/字段。
+
+        与 media_inputs 不同，这里要求槽位本身是媒体槽（control=media 或
+        field_type 为 image/audio/video）。执行端只在该地址确实存在下游连接时
+        移除连接；不以 ComfyUI optional 声明为门槛（用户手动 ⊘ 的明确意图）。
+        """
+        if raw is None:
+            return []
+        if not isinstance(raw, list):
+            raise ComfyUITaskError("media_skip 必须是数组")
+        slot_map: dict[tuple[str, str], dict[str, Any]] = {
+            (str(slot.get("node_id") or ""), str(slot.get("field_name") or "")): slot
+            for slot in (entry.get("params") or []) if isinstance(slot, dict)
+        }
+        out: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for index, item in enumerate(raw, 1):
+            if not isinstance(item, dict):
+                raise ComfyUITaskError(f"第 {index} 条媒体跳过格式非法")
+            node_id = str(item.get("node_id") or "")
+            field_name = str(item.get("field_name") or "")
+            slot = slot_map.get((node_id, field_name))
+            is_media_slot = bool(slot) and (
+                str(slot.get("control") or "") == "media"
+                or str(slot.get("field_type") or "") in ("image", "audio", "video")
+            )
+            if not is_media_slot:
+                raise ComfyUITaskError(
+                    f"媒体跳过 {node_id} · {field_name} 不是这份工作流的媒体槽"
+                )
+            key = (node_id, field_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"node_id": node_id, "field_name": field_name})
         return out
 
     # ---- 查询 ----

@@ -777,6 +777,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/comfyui/tasks":
             query = urllib.parse.parse_qs(parsed.query)
             self._json(*self.app.comfyui.api_tasks(str(query.get("active_only", [""])[0])))
+        elif path.startswith("/api/comfyui/tasks/") and path.endswith("/rerun-snapshot"):
+            # 完成态单次任务的只读再次生成快照（不返回 checkpoint/事件/产物目标）。
+            self._json(*self.app.comfyui.api_task_rerun_snapshot(path.split("/")[-2]))
         elif path.startswith("/api/comfyui/tasks/") and path.endswith("/events"):
             # 固定后缀排在通用任务详情之前，events 不会被当成任务 id。
             task_id = path.split("/")[-2]
@@ -1067,6 +1070,18 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(*self.app.comfyui.api_cancel(path.split("/")[-2]))
         elif path.startswith("/api/comfyui/tasks/") and path.endswith("/retry"):
             self._json(*self.app.comfyui.api_retry(path.split("/")[-2]))
+        elif path.startswith("/api/comfyui/tasks/") and path.endswith("/rerun"):
+            # 用原任务冻结快照 + 当前表单值创建一条全新的单次任务。
+            self._json(*self.app.comfyui.api_task_rerun(path.split("/")[-2], body))
+        elif path.startswith("/api/comfyui/tasks/") and path.endswith("/outputs/open"):
+            # 条目产物目录：只定位这一条任务自己的文件夹；手机端打不开 PC 的 Explorer。
+            if not self._is_local_request():
+                self._json(
+                    {"error": "产物文件夹在运行 Cat Chat 的电脑上，手机端打不开"},
+                    HTTPStatus.FORBIDDEN,
+                )
+            else:
+                self._json(*self.app.comfyui.api_reveal_task_outputs(path.split("/")[-2]))
         elif path == "/api/comfyui/free":
             # 造梦机：请求 ComfyUI 卸载模型释放显存/内存（不打断执行中的任务）。
             self._json(*self.app.comfyui.api_free_models())

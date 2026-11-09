@@ -277,6 +277,7 @@ class ComfyUIBatchManager:
                         "workflow_id": payload["workflow_id"],
                         "overrides": payload["overrides"],
                         "media_inputs": payload["media_inputs"],
+                        "media_skip": payload["media_skip"],
                         "shots": payload["shots"],
                         "unload_after": unload_after,
                     },
@@ -424,6 +425,9 @@ class ComfyUIBatchManager:
             media_inputs = item.get("media_inputs")
             if media_inputs is not None and not isinstance(media_inputs, list):
                 raise ComfyUIBatchError(f"条目「{name}」的素材列表格式不对")
+            media_skip = item.get("media_skip")
+            if media_skip is not None and not isinstance(media_skip, list):
+                raise ComfyUIBatchError(f"条目「{name}」的跳过素材列表格式不对")
             try:
                 shots = max(1, min(int(item.get("shots", 1) or 1), MAX_SHOTS))
             except (TypeError, ValueError):
@@ -432,6 +436,7 @@ class ComfyUIBatchManager:
             try:
                 overrides = self.jobs._validate_overrides(entry, overrides)
                 media_inputs = self.jobs._validate_media_inputs(entry, media_inputs)
+                media_skip = self.jobs._validate_media_skips(entry, media_skip)
             except ComfyUITaskError as exc:
                 raise ComfyUIBatchError(str(exc)) from None
             out.append({
@@ -441,6 +446,7 @@ class ComfyUIBatchManager:
                 "workflow_name": workflow_name,
                 "overrides": overrides,
                 "media_inputs": media_inputs,
+                "media_skip": media_skip,
                 "shots": shots,
                 "request_key": f"{batch_id}-{index}",
                 "label": f"{title} · {name}",
@@ -461,6 +467,8 @@ class ComfyUIBatchManager:
                 },
                 "shots": shots,
                 "media_inputs": _frozen(media_inputs or []),
+                # 手动 ⊘ 的槽位地址一并存快照：编辑回填时恢复跳过的口。
+                "media_skip": _frozen(media_skip or []),
             })
         snapshot = {
             "workflow_id": workflow_id,
@@ -648,7 +656,8 @@ class ComfyUIBatchManager:
                 # 用户删过产物（或任务记录损坏）：卡片显示「产物已删除」，
                 # 不再给一个必然 404 的「重试」按钮。
                 row.update({"status": "missing", "done": 0, "total": 0, "failed": 0,
-                            "outputs": [], "error": "任务记录和产物已删除"})
+                            "outputs": [], "error": "任务记录和产物已删除",
+                            "started_at": None, "finished_at": None})
             else:
                 checkpoint = task.get("checkpoint") if isinstance(task.get("checkpoint"), dict) else {}
                 result = task.get("result") if isinstance(task.get("result"), dict) else {}
@@ -661,6 +670,9 @@ class ComfyUIBatchManager:
                     "failed": len(checkpoint.get("errors") or []),
                     "outputs": outputs,
                     "error": task.get("error") or "",
+                    # 批次耗时只认服务端持久时间：打开详情不重置、完成态固定。
+                    "started_at": task.get("started_at"),
+                    "finished_at": task.get("finished_at"),
                     # 当前正在生成的条目带采样步级进度（其余条目 None，不渲染）。
                     "step": _running_step(task, checkpoint),
                 })
@@ -672,6 +684,7 @@ class ComfyUIBatchManager:
                                              or row.get("workflow_name") or ""),
                         "overrides": input_data.get("overrides") or [],
                         "media_inputs": input_data.get("media_inputs") or [],
+                        "media_skip": input_data.get("media_skip") or [],
                         "shots": int(input_data.get("shots") or 1),
                     }
             if slim:
@@ -680,8 +693,42 @@ class ComfyUIBatchManager:
             items.append(row)
         detail = {**record, "items": items}
         detail.pop("schemes", None)
+        detail.update(self._batch_timing(items))
         if slim:
             done = sum(1 for row in items if row.get("status") == "completed")
             detail["done_count"] = done
             detail["item_count"] = len(items)
         return detail
+
+    @staticmethod
+    def _batch_timing(items: list[dict[str, Any]]) -> dict[str, Any]:
+        """批次耗时只汇总服务端持久时间，不按打开详情的时刻重新起算。
+
+        ``started_at`` = 最早一条任务的实际开始时刻（没有就 None，前端显示
+        「等待开始」/「耗时未知」）；``finished_at`` 只在全部条目都到终态
+        且至少有一条记录结束时刻时才给——完成批次不会继续累计。
+        """
+        def stamps(key: str) -> list[float]:
+            values = []
+            for row in items:
+                value = row.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    values.append(float(value))
+            return values
+
+        statuses = {str(row.get("status") or "") for row in items}
+        active = any(status in {"queued", "running"} for status in statuses)
+        terminal = bool(items) and all(
+            status in {"completed", "failed", "cancelled", "interrupted", "missing"}
+            for status in statuses
+        )
+        starts = stamps("started_at")
+        finishes = stamps("finished_at")
+        started_at = int(min(starts)) if starts else None
+        finished_at = int(max(finishes)) if terminal and finishes else None
+        return {
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "active": active,
+            "elapsed_known": started_at is not None,
+        }

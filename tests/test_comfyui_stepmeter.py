@@ -252,7 +252,7 @@ class RunnerStepBindingTests(unittest.TestCase):
                         mock.patch.object(stepmeter, "observe") as observe, \
                         mock.patch.object(cancel, "wait", side_effect=lambda timeout: cancel.set()):
                     result = ComfyUIRunner._wait_shot(mock.Mock(), "http://local", "task", 0, "pid",
-                                                     cancel, {}, {}, {}, [], [], {})
+                                                     cancel, {}, {}, {}, [], [], {}, [])
                 self.assertEqual(result, (False, [], "用户取消"))
                 observe.assert_called_once_with("http://local", "pid",
                                                 is_running=queue is not None and "pid" in queue[1])

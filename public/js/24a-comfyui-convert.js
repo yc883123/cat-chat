@@ -31,6 +31,8 @@ export function buildBatchConvertRequest(detail, mapping, item, convert, fixed =
   const evidenceRows = [];
   const unsent = [];
   ports.forEach((port, index) => {
+    // 手动 ⊘ 的素材口不发给转换模型：用户已明确这次不要这个输入。
+    if (item.skips?.[`${port.node_id}|${port.field_name}`]) return;
     const file = item.files?.[String(index)];
     if (!file?.path) return;
     const slot = slotOf(port);

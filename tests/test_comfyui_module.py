@@ -892,6 +892,26 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(record["workflow"]["30"]["inputs"]["image"], "ref.png")
         self.assertEqual(prompt["30"]["inputs"]["image"], "base.png", "库快照不被污染")
 
+    def test_manual_media_skip_prunes_submission_copy_only(self):
+        # 手动 ⊘：执行端在提交副本移除下游连接，并清掉失去引用的加载器；
+        # 工作流母本与任务快照不因此改变（重试仍能按原图/新文件走）。
+        fake = _FakeComfy()
+        prompt = {"10": {"class_type": "LoadImage", "inputs": {"image": "fixed.png"}},
+                  "20": {"class_type": "Consumer", "inputs": {"image": ["10", 0]}}}
+        task = self._make_task(
+            shots=1, prompt=prompt,
+            media_skip=[{"node_id": "10", "field_name": "image"}],
+        )
+        with fake.patch() as patcher:
+            fake.wire(patcher)
+            self.runner.submit(task["id"])
+            done = self._run_to_terminal(task["id"])
+        self.assertEqual(done["status"], "completed")
+        self.assertEqual(fake.submitted[0]["workflow"],
+                         {"20": {"class_type": "Consumer", "inputs": {}}})
+        self.assertEqual(prompt["10"]["inputs"]["image"], "fixed.png",
+                         "工作流母本不被跳过改写")
+
     def test_media_upload_failure_stops_segment_with_reason(self):
         fake = _FakeComfy()
         prompt = dict(_sample_prompt())
@@ -1218,6 +1238,200 @@ class JobsTests(unittest.TestCase):
             self.jobs.submit({
                 "workflow_id": entry["id"], "shots": 1,
                 "overrides": [{"node_id": "30", "field_name": "image", "value": "x.png"}],
+            })
+
+    def test_media_skip_accepts_scanned_media_slots_only(self):
+        entry = self._media_entry()
+        task = self.jobs.submit({
+            "workflow_id": entry["id"], "shots": 1,
+            "media_skip": [
+                {"node_id": "30", "field_name": "image"},
+                {"node_id": "31", "field_name": "audio"},
+                {"node_id": "30", "field_name": "image"},  # 重复地址去重
+            ],
+        })
+        self.assertEqual(task["input"]["media_skip"], [
+            {"node_id": "30", "field_name": "image"},
+            {"node_id": "31", "field_name": "audio"},
+        ])
+        self.assertEqual(task["input"]["media_inputs"], [])
+        # 手动跳过与已选文件可以同时被记录：执行端以跳过为最高优先级；
+        # 地址必须是扫描出的媒体槽，任意节点/字段一律拒绝。
+        image = self._make_upload("skip.png")
+        with self.assertRaises(ComfyUITaskError):
+            self.jobs.submit({
+                "workflow_id": entry["id"], "shots": 1,
+                "media_skip": [{"node_id": "6", "field_name": "text"}],
+            })
+        with self.assertRaises(ComfyUITaskError):
+            self.jobs.submit({
+                "workflow_id": entry["id"], "shots": 1,
+                "media_skip": [{"node_id": "30", "field_name": "nope"}],
+            })
+        with self.assertRaises(ComfyUITaskError):
+            self.jobs.submit({
+                "workflow_id": entry["id"], "shots": 1, "media_skip": "30|image",
+            })
+        both = self.jobs.submit({
+            "workflow_id": entry["id"], "shots": 1,
+            "media_inputs": [{"node_id": "30", "field_name": "image", "path": str(image)}],
+            "media_skip": [{"node_id": "30", "field_name": "image"}],
+        })
+        self.assertEqual(len(both["input"]["media_inputs"]), 1)
+        self.assertEqual(len(both["input"]["media_skip"]), 1)
+
+    def test_retry_keeps_media_skip_snapshot(self):
+        entry = self._media_entry()
+        task = self.jobs.submit({
+            "workflow_id": entry["id"], "shots": 2,
+            "media_skip": [{"node_id": "30", "field_name": "image"}],
+        })
+        self.store.update_task(task["id"], status="failed", checkpoint={
+            "prompt_ids": ["p1", ""], "completed": [], "errors": [{"index": 0, "error": "x"}],
+            "resubmits": {},
+        })
+        retried = self.jobs.retry(task["id"])
+        self.assertEqual(retried["input"]["media_skip"],
+                         [{"node_id": "30", "field_name": "image"}])
+
+    # ---- 再次生成：完成态单次任务 → 新任务 ----
+
+    def _completed_task(self, entry, **body):
+        task = self.jobs.submit({
+            "workflow_id": entry["id"], "shots": 3, **body,
+        })
+        self.store.update_task(
+            task["id"], status="completed", finished_at=123456,
+            result={"completed": [], "outputs": ["old.png"]},
+        )
+        return task
+
+    def test_rerun_snapshot_and_create_new_task_from_frozen_snapshot(self):
+        entry = self._media_entry()
+        image = self._make_upload("rerun.png")
+        task = self._completed_task(
+            entry, shots=3, unload_after=True,
+            overrides=[{"node_id": "6", "field_name": "text", "value": "一只狗"}],
+            media_inputs=[{"node_id": "30", "field_name": "image", "path": str(image)}],
+            media_skip=[{"node_id": "31", "field_name": "audio"}],
+        )
+        original_input = json.loads(json.dumps(task["input"]))
+        original_after = self.store.get_task(task["id"])
+        snapshot = self.jobs.rerun_snapshot(task["id"])
+        self.assertEqual(snapshot["source_task_id"], task["id"])
+        self.assertEqual(snapshot["workflow_id"], entry["id"])
+        self.assertEqual(snapshot["workflow_name"], entry["name"])
+        self.assertEqual(snapshot["prompt"], entry["prompt"])
+        self.assertEqual(snapshot["params"], entry["params"])
+        self.assertEqual(snapshot["shots"], 3)
+        self.assertTrue(snapshot["unload_after"])
+        self.assertEqual(snapshot["media_inputs"][0]["available"], True)
+        self.assertEqual(snapshot["media_skip"],
+                         [{"node_id": "31", "field_name": "audio"}])
+        # 快照不含执行状态、事件或旧产物目标。
+        for key in ("checkpoint", "result", "prompt_ids", "events", "outputs"):
+            self.assertNotIn(key, snapshot)
+        # 工作流从库里删除后，仍可用任务冻结快照创建新任务。
+        self.assertTrue(self.store.delete_workflow(entry["id"]))
+        new_task = self.jobs.submit_rerun(task["id"], {
+            "overrides": [{"node_id": "6", "field_name": "text", "value": "两只狗"}],
+            "media_inputs": [{"node_id": "30", "field_name": "image", "path": str(image)}],
+            "media_skip": [{"node_id": "31", "field_name": "audio"}],
+            "shots": 2,
+            "unload_after": False,
+        })
+        new_record = self.store.get_task(new_task["id"])
+        new_input = new_record["input"]
+        self.assertEqual(new_input["workflow_id"], entry["id"])
+        self.assertEqual(new_input["workflow_name"], entry["name"])
+        self.assertEqual(new_input["prompt"], entry["prompt"])
+        self.assertEqual(new_input["params"], entry["params"])
+        values = {(row["node_id"], row["field_name"]): row["value"]
+                  for row in new_input["overrides"]}
+        self.assertEqual(values[("6", "text")], "两只狗")
+        self.assertEqual(new_input["shots"], 2)
+        self.assertFalse(new_input["unload_after"])
+        self.assertEqual(new_input["batch_id"], "")
+        self.assertEqual(new_record["source_task_id"], task["id"])
+        self.assertEqual(new_record["checkpoint"]["completed"], [])
+        self.assertEqual(new_record["result"]["outputs"], [])
+        # 原任务记录、状态、checkpoint、结果、时间全部不变。
+        self.assertEqual(self.store.get_task(task["id"])["input"], original_input)
+        self.assertEqual(self.store.get_task(task["id"])["status"], "completed")
+        self.assertEqual(self.store.get_task(task["id"])["finished_at"], 123456)
+        self.assertEqual(self.store.get_task(task["id"])["result"]["outputs"], ["old.png"])
+        self.assertEqual(original_after["checkpoint"], self.store.get_task(task["id"])["checkpoint"])
+
+    def test_rerun_rejects_non_completed_batch_and_unknown_tasks(self):
+        entry = self._media_entry()
+        queued = self.jobs.submit({"workflow_id": entry["id"], "shots": 1})
+        with self.assertRaises(ComfyUITaskError):
+            self.jobs.rerun_snapshot(queued["id"])
+        self.store.update_task(queued["id"], status="failed")
+        with self.assertRaises(ComfyUITaskError):
+            self.jobs.submit_rerun(queued["id"], {})
+        with self.assertRaises(LookupError):
+            self.jobs.rerun_snapshot("ct-missing")
+        # 批量条目即使已完成也不能走再次生成（批次有自己的重试/编辑语义）。
+        batch_task = self.store.create_task({
+            "workflow_id": entry["id"], "workflow_name": entry["name"],
+            "prompt": entry["prompt"], "params": entry["params"],
+            "overrides": [], "media_inputs": [], "media_skip": [],
+            "shots": 1, "unload_after": False, "batch_id": "cfb-x1",
+        })
+        self.store.update_task(batch_task["id"], status="completed")
+        with self.assertRaises(ComfyUITaskError):
+            self.jobs.rerun_snapshot(batch_task["id"])
+        with self.assertRaises(ComfyUITaskError):
+            self.jobs.submit_rerun(batch_task["id"], {})
+
+    def test_rerun_rejects_corrupt_snapshot_and_non_form_fields(self):
+        entry = self._media_entry()
+        # prompt / params 结构不完整：返回可读错误，不猜默认值。
+        corrupt = self.store.create_task({
+            "workflow_id": entry["id"], "workflow_name": entry["name"],
+            "prompt": "not-a-graph", "params": [], "overrides": [],
+            "media_inputs": [], "media_skip": [], "shots": 1, "unload_after": False,
+        })
+        self.store.update_task(corrupt["id"], status="completed")
+        with self.assertRaises(ComfyUITaskError) as caught:
+            self.jobs.rerun_snapshot(corrupt["id"])
+        self.assertIn("工作流内容", str(caught.exception))
+        # body 只接受当前表单值：工作流基底/来源 id 一律拒绝。
+        task = self._completed_task(entry)
+        with self.assertRaises(ComfyUITaskError):
+            self.jobs.submit_rerun(task["id"], {"workflow_id": entry["id"]})
+        with self.assertRaises(ComfyUITaskError):
+            self.jobs.submit_rerun(task["id"], {"prompt": entry["prompt"]})
+        # 非法覆盖 / 越权媒体路径重新走现有校验。
+        image = self._make_upload("ok.png")
+        outside = self.dir / "outside.png"
+        outside.write_bytes(b"PNG")
+        with self.assertRaises(ComfyUITaskError):
+            self.jobs.submit_rerun(task["id"], {
+                "overrides": [{"node_id": "99", "field_name": "nope", "value": 1}],
+            })
+        with self.assertRaises(ComfyUITaskError):
+            self.jobs.submit_rerun(task["id"], {
+                "media_inputs": [{"node_id": "30", "field_name": "image",
+                                  "path": str(outside)}],
+            })
+
+    def test_rerun_snapshot_marks_missing_media_and_rejects_its_resubmission(self):
+        entry = self._media_entry()
+        image = self._make_upload("gone.png")
+        task = self._completed_task(
+            entry, media_inputs=[{"node_id": "30", "field_name": "image",
+                                  "path": str(image)}],
+        )
+        image.unlink()
+        snapshot = self.jobs.rerun_snapshot(task["id"])
+        self.assertFalse(snapshot["media_inputs"][0]["available"])
+        # 前端应要求重选/跳过；若仍提交失效路径，服务端按受管引用校验拒绝。
+        with self.assertRaises(ComfyUITaskError):
+            self.jobs.submit_rerun(task["id"], {
+                "media_inputs": [{"node_id": "30", "field_name": "image",
+                                  "path": str(image)}],
             })
 
     def test_retry_keeps_completed_and_clears_errors(self):
@@ -1678,6 +1892,62 @@ class ServiceApiTests(unittest.TestCase):
         self.assertEqual(status, 500)
         self.assertIn("无法打开产物文件夹", payload["error"])
 
+    def test_rerun_api_snapshot_and_create_status_codes(self):
+        entry = self.service.store.save_workflow({
+            "id": self.service.store.new_workflow_id(), "name": "再次生成流",
+            "prompt": _sample_prompt(), "params": scan_params(_sample_prompt()),
+        })
+        task = self.service.store.create_task({
+            "workflow_id": entry["id"], "workflow_name": entry["name"],
+            "prompt": entry["prompt"], "params": entry["params"],
+            "overrides": [], "media_inputs": [], "media_skip": [],
+            "shots": 2, "unload_after": True,
+        })
+        self.service.store.update_task(task["id"], status="completed")
+        payload, status = self.service.api_task_rerun_snapshot(task["id"])
+        self.assertEqual(status, 200)
+        self.assertIn("snapshot", payload)
+        for key in ("checkpoint", "result", "events", "outputs"):
+            self.assertNotIn(key, payload["snapshot"])
+        created, status = self.service.api_task_rerun(task["id"], {
+            "overrides": [{"node_id": "3", "field_name": "steps", "value": 9}],
+            "shots": 1,
+        })
+        self.assertEqual(status, 201)
+        self.assertEqual(created["task"]["source_task_id"], task["id"])
+        self.assertEqual(created["task"]["shots"], 1)
+        # 活动任务 / 未知任务：快照与创建都拒绝。
+        active = self.service.store.create_task({
+            "workflow_id": entry["id"], "prompt": entry["prompt"],
+            "params": entry["params"], "overrides": [], "media_inputs": [],
+            "media_skip": [], "shots": 1, "unload_after": False,
+        })
+        self.assertEqual(self.service.api_task_rerun_snapshot(active["id"])[1], 400)
+        self.assertEqual(self.service.api_task_rerun(active["id"], {})[1], 400)
+        self.assertEqual(self.service.api_task_rerun_snapshot("ct-missing")[1], 404)
+        self.assertEqual(self.service.api_task_rerun("ct-missing", {})[1], 404)
+
+    def test_reveal_task_outputs_targets_specific_task_dir(self):
+        # 批量条目的「打开文件夹」只定位这一条任务自己的目录，不用产物根目录替代。
+        import naiba.comfyui.service as service_module
+
+        task = self.service.store.create_task({"shots": 1})
+        out_dir = self.service.store.task_output_dir(task["id"])
+        out_dir.mkdir(parents=True)
+        (out_dir / "001_00_a.png").write_bytes(b"x")
+        with mock.patch.object(service_module, "_open_folder") as opener:
+            payload, status = self.service.api_reveal_task_outputs(task["id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["path"], str(out_dir.resolve()))
+        opener.assert_called_once_with(out_dir.resolve())
+        self.assertEqual(self.service.api_reveal_task_outputs("ct-missing")[1], 404)
+        # 任务存在但还没有产物目录：如实 404，不创建一个空目录冒充。
+        empty = self.service.store.create_task({"shots": 1})
+        payload, status = self.service.api_reveal_task_outputs(empty["id"])
+        self.assertEqual(status, 404)
+        self.assertIn("还没有产物文件夹", payload["error"])
+        self.assertFalse(self.service.store.task_output_dir(empty["id"]).exists())
+
     def test_referenced_upload_paths_protects_active_and_retryable(self):
         # 计划 §5.3：排队/运行中 + 可重试（interrupted/failed）任务引用的输入媒体
         # 受缓存清理保护；completed/cancelled 不保护（沿用通用清理策略）。
@@ -1833,22 +2103,26 @@ class MediaGroupCardTests(unittest.TestCase):
         self.assertIn('createElement("audio")', picker)
 
     def test_media_tile_status_and_port_text(self):
-        # 四态文案一字不改；判定仍是 slot.media_optional === true。
+        # 三档优先级：手动 ⊘ > 已选新文件 > 沿用原文件 > 空值 optional 自动跳过。
         self.assertIn("slot.media_optional === true", self.js)
         self.assertIn("`已选：${picked.name}`", self.js)
-        for text in ("未选即跳过", "请选择文件", "未选沿用原文件"):
+        for text in ("未选即跳过", "请选择文件", "未选沿用原文件", "已跳过"):
             self.assertIn(text, self.js)
-        status = self._fn("function mediaSlotStatus(slot, picked) {")
+        status = self._fn("function mediaSlotStatus(slot, picked, skipped = false, problem = false) {")
         self.assertIn('badge: "已选"', status)
         self.assertIn('badge: "未选即跳过"', status)
         self.assertIn('badge: "请选择文件"', status)
         self.assertIn('badge: "沿用原文件"', status)
+        self.assertIn('badge: "已跳过"', status)
+        self.assertIn('badge: "文件失效"', status)
         # 块底端口小字带来源节点与目标端口；完整映射保留在块 title。
         self.assertIn("target_field", self.js)
         self.assertIn("mediaPortText(slot)", self.js)
         self.assertIn("tile.title = `${slot.label", self.js)
-        # 沿用原文件的槽按实块渲染（不是虚线空块）。
-        self.assertIn("const keepOriginal = !picked && status.cls === \"keep\";", self.js)
+        # 原文件非空按实块渲染（不是虚线空块）；手动跳过的块仍可取消恢复。
+        self.assertIn("const keepOriginal = !skipped && !picked && !problem && status.cls === \"keep\";", self.js)
+        self.assertIn("function mediaSkipButton(key, skipped) {", self.js)
+        self.assertIn('button.textContent = "⊘"', self.js)
 
     def test_media_drag_drop_wiring(self):
         # 块与卡片都挂 dragover/dragleave/drop，dragover 与 drop 都 preventDefault
@@ -2046,8 +2320,8 @@ class ParamValueDraftTests(unittest.TestCase):
         self.assertNotIn("param_order", reset)
         self.assertNotIn("/params", reset)
         render = self._fn("function renderParamForm() {")
-        # 「编辑」按钮文案收短成「编辑」，「默认」并排放在同一组里。
-        self.assertIn('edit.textContent = "编辑"', render)
+        # 按钮文案按用户口径改为「设置高级参数」，「默认」并排放在同一组里。
+        self.assertIn('edit.textContent = "设置高级参数"', render)
         self.assertIn('reset.textContent = "默认"', render)
         self.assertIn('dataset.comfyuiResetParams = "1"', render)
         self.assertIn('dataset.comfyuiEditParams = "1"', render)

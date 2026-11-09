@@ -216,6 +216,25 @@ assert.equal(new Set(sigs).size,5, '五类内容区结构应互异：'+sigs.join
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+    def test_batch_detail_stays_in_results_and_uses_persisted_elapsed(self):
+        # 从结果页批次列表打开详情：留在结果区（tasks 档），不切回批量生成填单。
+        js = (ROOT / "public/js/24-comfyui.js").read_text(encoding="utf-8")
+        html = (ROOT / "public/index.html").read_text(encoding="utf-8")
+        start = js.index("function openBatchHistory(id) {")
+        block = js[start:js.index("\n}", start)]
+        self.assertIn("batch.resultsDetailId = String(id);", block)
+        self.assertIn('setComfyuiPane("tasks");', block)
+        self.assertNotIn('setComfyuiPane("batch");', block)
+        self.assertIn('id="comfyuiBatchDetail"', html)
+        self.assertIn('data-batch-detail="0"', html)
+        # 耗时只认服务端持久时间：不再从打开详情的时刻起算，也不对完成批次继续累计。
+        self.assertNotIn("batch.runStartedAt", js)
+        self.assertIn("function batchElapsedText(data, now = Date.now())", js)
+        self.assertIn("if (finished) return `耗时", js)
+        self.assertIn('if (!active) return "耗时未知"', js)
+        self.assertIn("started_at: Number(data?.started_at) || 0", js)
+        self.assertIn("finished_at: Number(data?.finished_at) || 0", js)
+
     @unittest.skipUnless(shutil.which("node"), "Node required for frontend logic")
     def test_batch_submission_shape_mapping_resolution_and_convert(self):
         # 批量生成（方案 A）：提交 body 形状——媒体走 media_inputs 且已按映射
@@ -316,6 +335,306 @@ assert.equal(b.items[0].files['0'].path,'/managed/a.png');
         result = subprocess.run(["node", "--experimental-vm-modules", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_rerun_endpoints_are_routed_and_scoped(self):
+        http = (ROOT / "naiba/http.py").read_text(encoding="utf-8")
+        service = (ROOT / "naiba/comfyui/service.py").read_text(encoding="utf-8")
+        jobs = (ROOT / "naiba/comfyui/jobs.py").read_text(encoding="utf-8")
+        self.assertIn('path.endswith("/rerun-snapshot")', http)
+        self.assertIn("api_task_rerun_snapshot", http)
+        self.assertIn('path.endswith("/rerun")', http)
+        self.assertIn("api_task_rerun", http)
+        self.assertIn("def rerun_snapshot(", jobs)
+        self.assertIn("def submit_rerun(", jobs)
+        self.assertIn("只有已完成的单次任务可以再次生成", jobs)
+        self.assertIn("批量条目请使用批次里的重试或编辑", jobs)
+        self.assertIn("entry_override", jobs)
+        self.assertNotIn("checkpoint", service.split("def api_task_rerun_snapshot")[1].split("def ")[0])
+        js = (ROOT / "public/js/24-comfyui.js").read_text(encoding="utf-8")
+        self.assertIn("dataset.comfyuiRerun", js)
+        self.assertIn('rerun.textContent = "再次生成"', js)
+        self.assertIn("/rerun-snapshot", js)
+        self.assertIn("/rerun", js)
+        self.assertIn("data-comfyui-rerun-cancel", js)
+        self.assertIn("comfyui-rerun-banner", js)
+        self.assertIn("rerunMediaProblems", js)
+        self.assertIn("再次生成使用原任务快照，不新增或修改工作流库条目", js)
+        self.assertIn("再次生成使用原任务快照，不修改工作流库的显示参数", js)
+
+    @unittest.skipUnless(shutil.which("node"), "Node required for frontend logic")
+    def test_rerun_completed_task_prefill_submit_and_clear(self):
+        # 完成态单次任务：只多一个「再次生成」；快照回填参数/媒体/段数/释放开关；
+        # 失效媒体必须先重选或 ⊘；提交走 rerun 接口、成功后清草稿，失败保留。
+        script = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
+(async()=>{
+const nodes=new Map(),requests=[],toasts=[],slotValues={};
+const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,open:false,dataset:{},textContent:'',innerHTML:'',options:[],children:[],className:'',classList:{add(){},remove(){},toggle(){},contains(){return false}},setAttribute(name,value){this[name]=String(value);},getAttribute(name){return this[name];},removeAttribute(){},addEventListener(){},append(...items){this.children.push(...items);},closest(){return null},querySelector(){return null},querySelectorAll(){return []},style:{},remove(){}});
+const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
+const documentStub={
+  createElement:()=>makeNode(),
+  querySelector:(selector)=>{
+    const match=String(selector).match(/data-comfyui-slot="([^"]+)"/);
+    if(!match)return null;
+    const key=match[1];
+    if(key==='8|image'||key==='9|audio')return null;
+    const node=makeNode();node.value=slotValues[key]??'';return node;
+  },
+  querySelectorAll:()=>[],
+  addEventListener(){},
+  activeElement:null,
+  body:{append(){}},
+};
+let failRerun=false;
+const snapshot={source_task_id:'done',workflow_id:'cw-1',workflow_name:'原任务',
+  prompt:{'5':{inputs:{text:'原值'}},'6':{inputs:{steps:6}},'8':{inputs:{image:'fixed.png'}},'9':{inputs:{audio:''}}},
+  params:[{node_id:'5',field_name:'text',field_type:'text',role:'positive_prompt',control:'multiline',label:'正文'},
+          {node_id:'6',field_name:'steps',field_type:'number',default:6,label:'步数'},
+          {node_id:'8',field_name:'image',field_type:'image',control:'media',media:'image',default:'fixed.png',media_optional:true,label:'参考图'},
+          {node_id:'9',field_name:'audio',field_type:'audio',control:'media',media:'audio',default:'',media_optional:false,label:'音频'}],
+  overrides:[{node_id:'5',field_name:'text',value:'覆盖正文'},{node_id:'6',field_name:'steps',value:9}],
+  media_inputs:[{node_id:'8',field_name:'image',path:'/managed/a.png',name:'a.png',media:'image',available:false}],
+  media_skip:[{node_id:'9',field_name:'audio'}],
+  shots:3,unload_after:true,created_at:1000,finished_at:2000};
+const context=vm.createContext({console,setTimeout,clearTimeout,setInterval,clearInterval,URL,Date,document:documentStub,window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
+const values={$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[],media_exts:{exts:{}}}},localFileUrl:path=>path,attachmentThumbUrl:record=>record.thumb_path||record.path,mediaKind:()=> 'image',saveLocalFile:()=>false,api:async(path,options)=>{
+  const method=String(options?.method||'GET').toUpperCase();
+  requests.push({path,method,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});
+  if(path==='/api/comfyui/tasks/done/rerun-snapshot')return {snapshot};
+  if(path==='/api/comfyui/tasks/done/rerun'&&method==='POST'){
+    if(failRerun)throw new Error('远端拒绝');
+    return {task:{id:'ct-new'}};
+  }
+  if(path==='/api/comfyui/tasks')return {tasks:[]};
+  return {};
+}};
+async function make(name,sourceText,exportsLine){
+  const byMod=new Map();
+  for(const match of sourceText.matchAll(/^import \{([^}]+)\} from "([^"]+)"/gm)){
+    byMod.set(match[2], match[1].split(',').map(n=>n.trim()).filter(Boolean));
+  }
+  const mod=new vm.SourceTextModule(sourceText+exportsLine,{context});
+  await mod.link(async (spec)=>{
+    const names=byMod.get(spec)||[];
+    return new vm.SyntheticModule(names,function(){for(const n of names)this.setExport(n,values[n]??(()=>{}));},{context});
+  });
+  await mod.evaluate();
+  return mod.namespace;
+}
+const m=await make('comfy',source,'\nexport {comfyui,submitTask,renderTaskCard,openRerunSnapshot,buildRerunDetail,rerunMediaProblems,resetRerunState,cancelRerunDraft,mediaSlotStatus};');
+const {comfyui,submitTask,renderTaskCard,openRerunSnapshot,rerunMediaProblems,resetRerunState,cancelRerunDraft,mediaSlotStatus}=m;
+const actionsOf=(card)=>card.children.find(child=>String(child.className).includes('comfyui-task-actions'));
+
+// 1) 完成态单次任务只有一个「再次生成」；失败仍只有「重试续跑」；批量不出现。
+const finished=renderTaskCard({id:'done',status:'completed',workflow_name:'原任务'});
+const doneActions=actionsOf(finished);
+assert.ok(doneActions.children.some(button=>button.dataset.comfyuiRerun==='done'&&button.textContent==='再次生成'));
+assert.ok(!doneActions.children.some(button=>button.textContent==='编辑'||button.textContent==='复制'));
+const batchDone=renderTaskCard({id:'b1',status:'completed',batch_id:'cfb-1'});
+assert.ok(!actionsOf(batchDone).children.some(button=>button.dataset.comfyuiRerun));
+const failed=renderTaskCard({id:'f1',status:'failed'});
+assert.ok(actionsOf(failed).children.some(button=>button.dataset.comfyuiRetry==='f1'&&button.textContent==='重试续跑'));
+assert.ok(!actionsOf(failed).children.some(button=>button.dataset.comfyuiRerun));
+
+// 2) 快照回填：覆盖值变成当前值、媒体失效/跳过、段数与释放开关。
+await openRerunSnapshot('done');
+assert.ok(comfyui.rerun);
+assert.equal(comfyui.rerun.sourceTaskId,'done');
+assert.equal(comfyui.detail.params.find(slot=>slot.node_id==='5').default,'覆盖正文');
+assert.equal(comfyui.detail.params.find(slot=>slot.node_id==='6').default,9);
+assert.ok(comfyui.detail.visible_params.some(row=>row.node_id==='6'));
+assert.equal(comfyui.mediaSelection.get('8|image').available,false);
+assert.ok(comfyui.mediaSkipped.has('9|audio'));
+assert.equal($('#comfyuiShots').value,'3');
+assert.equal($('#comfyuiUnloadAfter').checked,true);
+const form=$('#comfyuiParamForm');
+const banner=form.children.find(child=>String(child.className).includes('comfyui-rerun-banner'));
+assert.ok(banner&&banner.children[0].textContent.includes('来源任务'));
+assert.ok(form.children.some(child=>String(child.className).includes('comfyui-rerun-alert')));
+assert.equal(mediaSlotStatus(comfyui.detail.params[2],comfyui.mediaSelection.get('8|image'),false,true).badge,'文件失效');
+assert.equal($('#comfyuiSaveCurrentAs').hidden,true);
+const editButton=form.children.find(child=>String(child.className).includes('comfyui-param-heading-row'))?.children
+  .find(child=>String(child.className).includes('comfyui-param-heading-actions'))?.children
+  .find(child=>child.textContent==='设置高级参数');
+assert.equal(editButton?.style.display,'none');
+
+// 3) 失效媒体未处理：前端拦住提交，不发 rerun 请求。
+slotValues['5|text']='用户改正文';slotValues['6|steps']='12';
+requests.length=0;toasts.length=0;
+await submitTask();
+assert.equal(requests.filter(row=>row.method==='POST'&&row.path==='/api/comfyui/tasks/done/rerun').length,0);
+assert.ok(toasts.some(message=>message.includes('媒体文件已不存在')));
+assert.ok(comfyui.rerun,'失效媒体被拦下时草稿必须保留');
+
+// 4) 重选失效媒体后提交：走 rerun 接口、不带工作流基底；成功后清草稿。
+comfyui.rerun.unavailable.delete('8|image');
+comfyui.mediaSelection.set('8|image',{path:'/managed/new.png',name:'new.png',thumb_path:'/managed/new.png',available:true});
+requests.length=0;
+await submitTask();
+const post=requests.find(row=>row.method==='POST'&&row.path==='/api/comfyui/tasks/done/rerun');
+assert.ok(post,'必须 POST /api/comfyui/tasks/done/rerun');
+assert.ok(!('workflow_id' in post.body));
+assert.equal(post.body.shots,3);
+assert.equal(post.body.unload_after,true);
+assert.equal(JSON.stringify(post.body.media_skip),JSON.stringify([{node_id:'9',field_name:'audio'}]));
+assert.equal(post.body.media_inputs[0].path,'/managed/new.png');
+const values5=post.body.overrides.find(row=>row.node_id==='5');
+assert.equal(values5.value,'用户改正文');
+assert.equal(comfyui.rerun,null);
+assert.equal(comfyui.detail,null);
+assert.equal(comfyui.mediaSelection.size,0);
+assert.equal($('#comfyuiShots').value,'1');
+assert.equal($('#comfyuiUnloadAfter').checked,false);
+assert.equal($('#comfyuiSaveCurrentAs').hidden,false);
+assert.equal(comfyui.activeTaskId,'ct-new');
+
+// 5) 提交失败：保留草稿、用户值和释放开关。
+failRerun=true;
+await openRerunSnapshot('done');
+comfyui.mediaSkipped.add('8|image');
+toasts.length=0;
+await submitTask();
+assert.ok(toasts.some(message=>message.includes('提交失败')));
+assert.ok(comfyui.rerun,'提交失败不得清草稿');
+assert.ok(comfyui.detail);
+assert.equal($('#comfyuiShots').value,'3');
+assert.equal($('#comfyuiUnloadAfter').checked,true);
+failRerun=false;
+
+// 6) 取消再次生成：清草稿并回到结果页单次档。
+cancelRerunDraft();
+assert.equal(comfyui.rerun,null);
+assert.equal(comfyui.detail,null);
+assert.equal($('#studioPageComfyui').dataset.comfyuiPane,'tasks');
+assert.equal($('#studioPageComfyui').dataset.resultsSegment,'single');
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+        result = subprocess.run(["node", "--experimental-vm-modules", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node required for frontend logic")
+    def test_single_and_batch_media_skip_and_elapsed_contract(self):
+        # 单次与批量同一套三态：原文件非空沿用、空值 optional 自动跳过、⊘ 手动
+        # 强制跳过（最高优先级，不受必填声明限制）；耗时只用持久时间。
+        script = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
+(async()=>{
+const nodes=new Map(),requests=[],toasts=[];
+const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,open:false,dataset:{},textContent:'',innerHTML:'',options:[],children:[],className:'',classList:{add(){},remove(){},toggle(){},contains(){return false}},setAttribute(name,value){this[name]=String(value);},removeAttribute(){},addEventListener(){},append(...items){this.children.push(...items);},closest(){return null},querySelector(){return null},querySelectorAll(){return []},style:{}});
+const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
+const context=vm.createContext({console,setTimeout,clearTimeout,setInterval,clearInterval,URL,Date,document:{createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
+const values={$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},localFileUrl:path=>path,attachmentThumbUrl:record=>record.path,mediaKind:()=> 'image',saveLocalFile:()=>false,api:async(path,options)=>{
+  const method=String(options?.method||'GET').toUpperCase();
+  requests.push({path,method,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});
+  if(path==='/api/comfyui/tasks'&&method==='POST')return {task:{id:'ct-single'}};
+  if(path==='/api/comfyui/batches'&&method==='POST')return {batch:{id:'cfb-x2'}};
+  if(path==='/api/comfyui/tasks')return {tasks:[]};
+  return {};
+}};
+async function make(name,sourceText,exportsLine){
+  const byMod=new Map();
+  for(const match of sourceText.matchAll(/^import \{([^}]+)\} from "([^"]+)"/gm)){
+    byMod.set(match[2], match[1].split(',').map(n=>n.trim()).filter(Boolean));
+  }
+  const mod=new vm.SourceTextModule(sourceText+exportsLine,{context});
+  await mod.link(async (spec)=>{
+    const names=byMod.get(spec)||[];
+    return new vm.SyntheticModule(names,function(){for(const n of names)this.setExport(n,values[n]??(()=>{}));},{context});
+  });
+  await mod.evaluate();
+  return mod.namespace;
+}
+const m=await make('comfy',source,'\nexport {comfyui,submitTask,mediaSlotStatus,collectMediaInputs,collectMediaSkips,mediaSkipButton,renderMediaTile,batch,ensureBatchDraft,submitBatch,batchItemsMarkup,batchSchemeFromRestore,batchElapsedText};');
+const {comfyui,submitTask,mediaSlotStatus,collectMediaInputs,collectMediaSkips,mediaSkipButton,renderMediaTile,batch,ensureBatchDraft,submitBatch,batchItemsMarkup,batchSchemeFromRestore,batchElapsedText}=m;
+
+// ---- 单次媒体槽 ----
+comfyui.detail={id:'cw-1',name:'单次流',prompt:{},params:[
+  {node_id:'8',field_name:'image',field_type:'image',control:'media',media:'image',default:'fixed.png',media_optional:true,label:'8 · 固定图'},
+  {node_id:'9',field_name:'image',field_type:'image',control:'media',media:'image',default:'',media_optional:true,label:'9 · 可选图'},
+  {node_id:'10',field_name:'audio',field_type:'audio',control:'media',media:'audio',default:'',media_optional:false,label:'10 · 必填音'},
+]};
+assert.equal(mediaSlotStatus(comfyui.detail.params[0],null).badge,'沿用原文件');
+assert.equal(mediaSlotStatus(comfyui.detail.params[1],null).badge,'未选即跳过');
+assert.equal(mediaSlotStatus(comfyui.detail.params[2],null).badge,'请选择文件');
+assert.equal(mediaSlotStatus(comfyui.detail.params[0],null,true).badge,'已跳过');
+// ⊘ 与已选文件同时存在：跳过优先，两个槽都不进 media_inputs。
+comfyui.mediaSelection.set('8|image',{path:'/managed/a.png',name:'a.png'});
+comfyui.mediaSkipped.add('8|image');
+comfyui.mediaSkipped.add('10|audio');
+assert.equal(JSON.stringify(collectMediaInputs()),'[]');
+assert.equal(JSON.stringify(collectMediaSkips()),JSON.stringify([
+  {node_id:'8',field_name:'image'},{node_id:'10',field_name:'audio'}]));
+await submitTask();
+const single=requests.find(row=>row.path==='/api/comfyui/tasks'&&row.method==='POST');
+assert.ok(single,'必须 POST /api/comfyui/tasks');
+assert.equal(JSON.stringify(single.body.media_inputs),'[]');
+assert.equal(JSON.stringify(single.body.media_skip),JSON.stringify([
+  {node_id:'8',field_name:'image'},{node_id:'10',field_name:'audio'}]));
+// 跳过块有可访问名称，再次点击即取消（状态恢复）。
+const skipButton=mediaSkipButton('8|image',true);
+assert.equal(skipButton.textContent,'⊘');
+assert.equal(skipButton['aria-label'],'取消跳过，恢复此前状态');
+const tile=renderMediaTile(comfyui.detail.params[0],'8|image','image');
+assert.equal(tile.dataset.comfyuiMediaSkipped,'1');
+assert.ok(String(tile.className).includes('skipped'));
+assert.ok(tile.children.some(child=>child.textContent==='⊘'));
+
+// ---- 批量条目：沿用 / 自动跳过 / 手动 ⊘ ----
+ensureBatchDraft();
+const s=batch.draft.schemes[0];
+s.workflow_id='cw-2';
+s.detail={id:'cw-2',name:'批量流',workflow_fingerprint:'fp-2',prompt:{},params:[
+  {node_id:'8',field_name:'image',field_type:'image',control:'media',media:'image',default:'fixed.png',media_optional:true,label:'8 · 固定图'},
+  {node_id:'9',field_name:'image',field_type:'image',control:'media',media:'image',default:'',media_optional:true,label:'9 · 可选图'},
+  {node_id:'10',field_name:'image',field_type:'image',control:'media',media:'image',default:'',media_optional:false,label:'10 · 必填图'},
+]};
+s.mapping={prompt_slot:null,duration_slot:null,resolution_slot:null,extra_points:[],
+  media_ports:[{node_id:'8',field_name:'image',checked:true},
+               {node_id:'9',field_name:'image',checked:true},
+               {node_id:'10',field_name:'image',checked:true}]};
+s.items=[
+  {name:'条目 A',script:'',prompt:'场景A',duration:'',resolution:'',shots:1,extras:{},files:{},skips:{'10|image':true}},
+  {name:'条目 B',script:'',prompt:'场景B',duration:'',resolution:'',shots:1,extras:{},files:{'2':{path:'/managed/b.png',name:'b.png'}},skips:{}},
+];
+const markup=batchItemsMarkup(s,0);
+assert.ok(markup.includes('沿用原文件'));
+assert.ok(markup.includes('留空 · 自动跳过'));
+assert.ok(markup.includes('已跳过这个输入'));
+assert.ok(markup.includes('cbm-tile-skip active'));
+assert.ok(markup.includes('data-batch-action="toggle-skip"'));
+// 必填口没有文件，但手动 ⊘ 了：前端不能把它标成缺项。
+batch.recheckMissing();
+assert.equal(batch.missingItems.size,0,'手动跳过应绕过必填检查');
+batch.draft.title='跳过验收';batch.draft.unload_after=false;
+await submitBatch();
+const post=requests.find(row=>row.path==='/api/comfyui/batches');
+assert.ok(post,'必须 POST /api/comfyui/batches');
+const [a,b]=post.body.schemes[0].items;
+assert.equal(JSON.stringify(a.media_inputs),'[]');
+assert.equal(JSON.stringify(a.media_skip),JSON.stringify([{node_id:'10',field_name:'image'}]));
+assert.equal(JSON.stringify(b.media_skip),'[]');
+assert.equal(b.media_inputs.length,1);
+// 快照回填：media_skip 按地址放回条目。
+const restored=batchSchemeFromRestore({workflow_id:'cw-2',workflow_name:'批量流',overrides:[],
+  mapping:s.mapping,
+  items:[{name:'条目 A',prompt:'场景A',shots:1,extras:{},
+          media_inputs:[],media_skip:[{node_id:'10',field_name:'image'}]}]},s.detail);
+assert.equal(restored.items[0].skips['10|image'],true);
+
+// ---- 耗时：完成态固定，缺时间显示未知 ----
+assert.equal(batchElapsedText({active:true,started_at:1000},61000),'已用 01:00');
+assert.equal(batchElapsedText({active:false,started_at:1000,finished_at:31000},99999999),'耗时 00:30');
+assert.equal(batchElapsedText({active:false,started_at:1000,finished_at:31000},1),'耗时 00:30');
+assert.equal(batchElapsedText({active:false},0),'耗时未知');
+assert.equal(batchElapsedText({active:true},0),'等待开始');
+assert.equal(batchElapsedText({active:false,started_at:1000},99999999),'耗时未知');
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+        result = subprocess.run(["node", "--experimental-vm-modules", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node required for frontend logic")
     def test_single_submission_unload_after_switch_contract(self):
         # 单次「释放模型」开关契约：请求显式携带 unload_after；任务受理成功后
         # 开关自动复位；提交失败保留勾选；批量草稿的开关不影响单次请求。
@@ -417,20 +736,30 @@ assert.equal(toggle.checked,false,'成功后复位，不受批量草稿影响');
         for rule in (".comfyui-results-seg", ".comfyui-batch-row", ".comfyui-batch-progress",
                      ".comfyui-batch-row-wrap", ".comfyui-batch-row-edit", ".cbm-btn.danger",
                      ".cbm-th-clear", ".cbm-card-preview", ".cbm-preview-play",
-                     ".cbm-card-expand", ".cbm-expand-empty"):
+                     ".cbm-back-to-list", ".comfyui-batch-detail", ".cbm-tile-skip"):
             self.assertIn(rule, css)
         self.assertIn('[data-results-segment="single"] .comfyui-batch-history', css)
         self.assertIn('[data-results-segment="batch"] .comfyui-tasks', css)
         self.assertIn('[data-results-segment="batch"] .comfyui-outputs', css)
-        # 跑批视图：排队/生成中的条目卡有取消，完成条目产物就地展开。
+        self.assertIn('[data-batch-detail="1"] .comfyui-batch-history', css)
+        # 跑批视图：排队/生成中的条目卡有取消；完成条目的「打开文件夹」定位本条产物目录。
         self.assertIn('data-batch-action="cancel-item"', js)
-        self.assertIn('data-batch-action="toggle-item-outputs"', js)
-        self.assertIn("function mountBatchItemOutputs()", js)
+        self.assertIn('data-batch-action="reveal-item-folder"', js)
+        self.assertIn("function revealBatchItemFolder(", js)
+        self.assertIn('data-batch-action="back-to-batch-list"', js)
+        self.assertIn("function renderResultsBatchDetail(", js)
+        self.assertIn("function syncResultsBatchDetail(", js)
+        self.assertIn("function batchRunVisible(", js)
+        self.assertIn("data-batch-elapsed", js)
+        self.assertIn("耗时未知", js)
+        self.assertNotIn('data-batch-action="toggle-item-outputs"', js)
+        self.assertNotIn("function mountBatchItemOutputs()", js)
         self.assertNotIn('data-batch-action="open-task-outputs"', js)
         # 批量完成态与单次结果共用同一张产物卡：视频能播、竖屏按比例显示。
         self.assertIn("function mountBatchItemPreviews()", js)
         self.assertIn("data-batch-preview-task", js)
-        self.assertIn('batchBody?.addEventListener("click", onOutputGridClick)', js)
+        self.assertIn('batchHost.addEventListener("click", onOutputGridClick)', js)
+        self.assertIn('for (const selector of ["#comfyuiBatchBody", "#comfyuiBatchDetail"])', js)
         self.assertIn("function batchRunSignature(", js)
         # 历史批次：能删产物、删批次，也能回填填单区再跑。
         for action in ("edit-batch", "clear-batch-outputs", "delete-batch", "delete-item"):
@@ -480,6 +809,15 @@ assert.equal(toggle.checked,false,'成功后复位，不受批量草稿影响');
         self.assertIn("const readyItems = (scheme.items || []).filter((item) => !batchItemIsBlank(item));", js)
         self.assertIn("if (batchItemIsBlank(item)) return;", js)
         self.assertIn("data-batch-edit", js)
+        # 媒体槽三态：沿用原文件 / 已选新文件 / 手动 ⊘ 强制跳过（单次与批量同口径）。
+        self.assertIn("mediaSkipped: new Set()", js)
+        self.assertIn("function mediaSkipButton(", js)
+        self.assertIn("function collectMediaSkips(", js)
+        self.assertIn("media_skip: collectMediaSkips()", js)
+        self.assertIn('data-batch-action="toggle-skip"', js)
+        self.assertIn("function itemSkipsPort(", js)
+        self.assertIn("media_skip: mediaSkip", js)
+        self.assertIn("mediaSlotOriginalNonEmpty(", js)
         self.assertIn("function batchSchemeFromRestore(", js)
         self.assertIn("function batchSchemeFromLegacy(", js)
         self.assertIn('with_schemes=1', js)
@@ -550,11 +888,10 @@ assert.ok($('#comfyuiBatchList').innerHTML.includes('还没有批次'));
 const running=batchRunCardMarkup({index:1,name:'条目 1',status:'running',done:1,total:3,task_id:'ct-9',outputs:[]});
 assert.ok(running.includes('data-batch-action="cancel-item"')&&running.includes('data-task-id="ct-9"'));
 assert.ok(!running.includes('open-task-outputs'));
-batch.expandedItems.add('ct-10');
 const done=batchRunCardMarkup({index:2,name:'条目 2',status:'completed',done:2,total:2,task_id:'ct-10',outputs:['a.png','b.png']});
-assert.ok(done.includes('data-batch-action="toggle-item-outputs"')&&done.includes('aria-expanded="true"'));
-assert.ok(done.includes('data-batch-expand-for="ct-10"'));
+assert.ok(done.includes('data-batch-action="reveal-item-folder"'));
 assert.ok(done.includes('data-batch-action="delete-item"'));
+assert.ok(!done.includes('data-batch-expand-for'));
 // 完成态预览挂单次结果同款产物卡，不再自己画缩略图（视频/竖屏都交给产物卡）。
 assert.ok(done.includes('data-batch-preview-task="ct-10"')&&done.includes('data-batch-preview-name="a.png"'));
 assert.ok(!done.includes('cbm-card-thumb'));

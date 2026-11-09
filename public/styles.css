@@ -4453,6 +4453,10 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .comfyui-run { flex: 1; min-height: 0; padding: 12px; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
 .comfyui-param-form { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 2px; }
 .comfyui-param-heading-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+/* 再次生成：来源任务横幅与失效媒体提示（只在完成态快照回填时出现）。 */
+.comfyui-rerun-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 10px; border: 1px solid var(--violet-line); border-radius: var(--r-md); background: var(--accent-soft); font-size: 12px; }
+.comfyui-rerun-banner p { margin: 0; flex: 1 1 220px; min-width: 0; }
+.comfyui-rerun-alert { margin: 6px 0 0; padding: 7px 10px; border: 1px solid var(--danger); border-radius: var(--r-md); background: var(--danger-soft); color: var(--danger); font-size: 12px; line-height: 1.5; }
 .comfyui-param-heading { margin: 0; font-size: 12.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 「默认 / 编辑」两个按钮一组：标题可以省略，按钮始终留在卡片内、不换行。 */
 .comfyui-param-heading-actions { display: flex; align-items: center; gap: 6px; flex: none; }
@@ -4588,7 +4592,19 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 }
 .comfyui-media-tile .t-status.ok { color: var(--success); }
 .comfyui-media-tile .t-status.keep { color: var(--warning); }
-.comfyui-media-tile .t-actions { position: absolute; top: 3px; right: 3px; z-index: 2; display: none; gap: 4px; }
+.comfyui-media-tile .t-status.skip { color: var(--warning); }
+.comfyui-media-tile .t-status.fail { color: var(--danger); }
+.comfyui-media-tile.problem { border-color: var(--danger); background: var(--danger-soft); }
+/* 手动 ⊘：始终可见的独立操作（不放在 hover 才出现的 t-actions 里）。 */
+.comfyui-media-tile .t-skip {
+  position: absolute; top: 3px; right: 3px; z-index: 2;
+  width: 20px; height: 20px; border: 1px solid rgba(255, 255, 255, .18); border-radius: 5px; padding: 0;
+  background: rgba(17, 21, 34, .85); color: #fff; font-size: 11px; line-height: 1; cursor: pointer;
+}
+.comfyui-media-tile .t-skip:hover, .comfyui-media-tile .t-skip:focus-visible { background: var(--accent); border-color: var(--accent); }
+.comfyui-media-tile .t-skip.active { background: var(--warning, #c98a00); border-color: var(--warning, #c98a00); }
+.comfyui-media-tile.skipped { opacity: .72; border-style: dashed; }
+.comfyui-media-tile .t-actions { position: absolute; top: 27px; right: 3px; z-index: 2; display: none; gap: 4px; }
 .comfyui-media-tile:hover .t-actions, .comfyui-media-tile:focus-within .t-actions { display: flex; }
 .comfyui-media-tile .t-actions button {
   width: 20px; height: 20px; border: 0; border-radius: 5px; padding: 0;
@@ -4782,6 +4798,10 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 #studioPageComfyui[data-results-segment="single"] .comfyui-batch-history { display: none; }
 #studioPageComfyui[data-results-segment="batch"] .comfyui-tasks,
 #studioPageComfyui[data-results-segment="batch"] .comfyui-outputs { display: none; }
+/* 结果页批次列表 / 详情互斥：从列表点开一批后仍留在结果区，返回按钮回列表。 */
+.comfyui-batch-detail { display: none; flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px 12px; }
+#studioPageComfyui[data-results-segment="batch"][data-batch-detail="1"] .comfyui-batch-history { display: none; }
+#studioPageComfyui[data-results-segment="batch"][data-batch-detail="1"] .comfyui-batch-detail { display: block; }
 .comfyui-batch-history { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .comfyui-batch-history-head { flex: none; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding: 10px 12px 4px; }
 .comfyui-batch-history-head strong { font-size: 13px; }
@@ -6711,9 +6731,27 @@ span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); 
 .cbm-mname { display: flex; flex-direction: column; line-height: 1.25; font-size: 12px; min-width: 0; }
 .cbm-tile-clear { border: none; background: transparent; color: var(--muted); font-size: 11px; padding: 0; text-align: left; cursor: pointer; width: fit-content; }
 .cbm-tile-clear:hover { color: var(--danger); }
-.cbm-empty-slot { display: flex; align-items: center; justify-content: center; min-width: 128px; border: 1px dashed var(--line-strong); border-radius: var(--r-md); color: var(--muted); font-size: 12px; padding: 8px 10px; cursor: pointer; }
+/* 条目素材口三态：沿用原文件 / 已选文件 / 手动 ⊘ 强制跳过。 */
+.cbm-tile-actions { display: inline-flex; align-items: center; gap: 6px; margin-top: 2px; }
+.cbm-tile-skip {
+  border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--surface);
+  color: var(--muted); font-size: 12px; line-height: 1; padding: 2px 6px; cursor: pointer;
+}
+.cbm-tile-skip:hover, .cbm-tile-skip:focus-visible { color: var(--warning); border-color: var(--warning); }
+.cbm-tile-skip.active { background: var(--warning-soft, var(--surface-2)); color: var(--warning); border-color: var(--warning); }
+/* 跳过态是一个紧凑警告条，不再画媒体缩略图：只留一个 ⊘ 开关和说明。 */
+.cbm-skip-tile { padding: 5px 8px; border: 1px dashed var(--warning); border-radius: var(--r-md); background: var(--warning-soft); cursor: default; }
+.cbm-skip-text { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
+.cbm-skip-title { font-size: 12px; font-weight: 600; color: var(--warning); }
+.cbm-skip-sub { font-size: 11px; color: var(--muted); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cbm-mtile.is-skipped { opacity: .8; }
+.cbm-empty-slot { display: flex; align-items: center; justify-content: center; gap: 6px; min-width: 128px; border: 1px dashed var(--line-strong); border-radius: var(--r-md); color: var(--muted); font-size: 12px; padding: 8px 10px; cursor: pointer; }
 .cbm-empty-slot.is-missing { border-color: var(--danger); color: var(--danger); }
-#comfyuiBatchBody [data-batch-tile].dragover { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* 工作流原文件非空：占位格改成实底 + 正常文字，提示「沿用原文件」。 */
+.cbm-empty-slot.is-kept { border-style: solid; border-color: var(--line); color: var(--text); background: var(--surface-2); }
+.cbm-slot-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#comfyuiBatchBody [data-batch-tile].dragover,
+#comfyuiBatchDetail [data-batch-tile].dragover { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* 剧本转换条 */
 .cbm-convert-bar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); flex-wrap: wrap; }
@@ -6773,12 +6811,7 @@ span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); 
 .cbm-card-actions { display: flex; padding: 0 12px 12px; }
 .cbm-card-actions .cbm-delete-product { width: 100%; }
 .cbm-run-note { margin: 0; font-size: 12.5px; color: var(--muted); }
-/* 条目产物就地展开：点「产物」才拉清单（懒加载，与结果栏视频 preload=none 同一考虑）。 */
-.cbm-card-expand { border-top: 1px dashed var(--line); background: var(--surface-2); padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 8px; }
-.cbm-card-expand .comfyui-output { width: 128px; }
-.cbm-card-expand .comfyui-output img, .cbm-card-expand .comfyui-output video { max-height: 96px; }
-.cbm-card-expand .comfyui-output video { object-fit: contain; background: #000; }
-.cbm-expand-empty { font-size: 11.5px; color: var(--muted); }
+.cbm-back-to-list { flex: none; }
 
 @media (max-width: 900px) {
   .cbm-mapping { grid-template-columns: 1fr; }

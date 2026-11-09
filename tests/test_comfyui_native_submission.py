@@ -21,25 +21,77 @@ from naiba.studio.store import StudioStore
 
 
 class NativeSubmissionTests(unittest.TestCase):
-    def test_optional_media_prunes_unused_loader_and_video_components_only(self):
-        graph = {"image": {"class_type": "LoadImage", "inputs": {"image": "placeholder.png"}},
-                 "video": {"class_type": "LoadVideo", "inputs": {"file": "placeholder.mp4"}},
+    def test_media_prune_keeps_original_and_manual_skip_forces_removal(self):
+        def provider_for(schema):
+            return type("Provider", (), {
+                "node_inputs": lambda self, class_type: schema.get(class_type),
+            })()
+
+        # 1) optional 且工作流原值为空：自动跳过，并清理无引用的加载器 /
+        #    GetVideoComponents 中间节点。
+        graph = {"image": {"class_type": "LoadImage", "inputs": {"image": "None"}},
+                 "video": {"class_type": "LoadVideo", "inputs": {"file": ""}},
                  "components": {"class_type": "GetVideoComponents", "inputs": {"video": ["video", 0]}},
                  "h3": {"class_type": "H3", "inputs": {"image": ["image", 0], "video": ["components", 0]}},
                  "unrelated": {"class_type": "LoadImage", "inputs": {"image": "keep.png"}}}
-        schema = {"image": {"optional": True}, "video": {"optional": True}}
+        schema = {"H3": {"image": {"optional": True}, "video": {"optional": True}}}
         with mock.patch("naiba.comfyui.runner.NodeSchemaProvider") as provider:
-            provider.return_value.node_inputs.side_effect = lambda cls: schema if cls == "H3" else {"video": {"optional": False}}
+            provider.return_value = provider_for(schema)
             ComfyUIRunner._remove_unselected_optional_media(graph, [], "http://unused.invalid")
         self.assertNotIn("image", graph)
         self.assertNotIn("video", graph)
         self.assertNotIn("components", graph)
         self.assertIn("unrelated", graph)
         self.assertEqual(graph["h3"]["inputs"], {})
-        shared = {"loader": {"class_type": "LoadImage", "inputs": {"image": "keep.png"}},
+
+        # 2) optional 但原值非空：固定素材优先，不能因为槽位可选就删掉。
+        graph = {"image": {"class_type": "LoadImage", "inputs": {"image": "placeholder.png"}},
+                 "video": {"class_type": "LoadVideo", "inputs": {"file": "placeholder.mp4"}},
+                 "components": {"class_type": "GetVideoComponents", "inputs": {"video": ["video", 0]}},
+                 "h3": {"class_type": "H3", "inputs": {"image": ["image", 0], "video": ["components", 0]}}}
+        with mock.patch("naiba.comfyui.runner.NodeSchemaProvider") as provider:
+            provider.return_value = provider_for(schema)
+            ComfyUIRunner._remove_unselected_optional_media(graph, [], "http://unused.invalid")
+        self.assertIn("image", graph)
+        self.assertIn("video", graph)
+        self.assertIn("components", graph)
+        self.assertEqual(graph["h3"]["inputs"], {"image": ["image", 0], "video": ["components", 0]})
+
+        # 3) 已选新文件：即使原值为空也保留连接，等执行前回填。
+        graph = {"image": {"class_type": "LoadImage", "inputs": {"image": ""}},
+                 "h3": {"class_type": "H3", "inputs": {"image": ["image", 0]}}}
+        with mock.patch("naiba.comfyui.runner.NodeSchemaProvider") as provider:
+            provider.return_value = provider_for(schema)
+            ComfyUIRunner._remove_unselected_optional_media(
+                graph, [{"node_id": "image", "field_name": "image", "path": "uploads/a.png"}],
+                "http://unused.invalid")
+        self.assertIn("image", graph)
+        self.assertEqual(graph["h3"]["inputs"]["image"], ["image", 0])
+
+        # 4) 手动 ⊘ 是唯一不受 optional 限制的路径：必填/未知声明也强制移除，
+        #    即使原值非空；移除后无引用的加载器与中间节点一并清理。
+        graph = {"image": {"class_type": "LoadImage", "inputs": {"image": "placeholder.png"}},
+                 "video": {"class_type": "LoadVideo", "inputs": {"file": "placeholder.mp4"}},
+                 "components": {"class_type": "GetVideoComponents", "inputs": {"video": ["video", 0]}},
+                 "h3": {"class_type": "H3", "inputs": {"image": ["image", 0], "video": ["components", 0]}}}
+        required = {"H3": {"image": {"optional": False}, "video": {"optional": False}}}
+        with mock.patch("naiba.comfyui.runner.NodeSchemaProvider") as provider:
+            provider.return_value = provider_for(required)
+            ComfyUIRunner._remove_unselected_optional_media(
+                graph, [], "http://unused.invalid",
+                [{"node_id": "image", "field_name": "image"},
+                 {"node_id": "video", "field_name": "file"}])
+        self.assertNotIn("image", graph)
+        self.assertNotIn("video", graph)
+        self.assertNotIn("components", graph)
+        self.assertEqual(graph["h3"]["inputs"], {})
+
+        # 5) 自动跳过只摘掉 optional 边；加载节点仍被必填边引用时保留。
+        shared = {"loader": {"class_type": "LoadImage", "inputs": {"image": ""}},
                   "h3": {"class_type": "H3", "inputs": {"optional": ["loader", 0], "required": ["loader", 0]}}}
         with mock.patch("naiba.comfyui.runner.NodeSchemaProvider") as provider:
-            provider.return_value.node_inputs.return_value = {"required": {"optional": False}, "optional": {"optional": True}}
+            provider.return_value = provider_for(
+                {"H3": {"optional": {"optional": True}, "required": {"optional": False}}})
             ComfyUIRunner._remove_unselected_optional_media(shared, [], "http://unused.invalid")
         self.assertIn("loader", shared)
         self.assertIn("required", shared["h3"]["inputs"])

@@ -282,6 +282,70 @@ class ComfyUIBatchesTests(unittest.TestCase):
         self.assertEqual(task["input"]["media_inputs"][0]["node_id"], "8")
         self.assertEqual(task["input"]["media_inputs"][0]["name"], "ref.png")
 
+    def test_media_skip_passes_through_and_snapshot_restores(self):
+        # 条目手动 ⊘ 的媒体地址随任务冻结；快照与老批次兜底都要能回填跳过状态。
+        scheme = dict(self.scheme, items=[self._item(
+            "条目一", media_skip=[{"node_id": "8", "field_name": "image"}])])
+        batch = self.batches.create(self.body(schemes=[scheme]))
+        task = self.store.get_task(batch["items"][0]["task_id"])
+        self.assertEqual(task["input"]["media_skip"],
+                         [{"node_id": "8", "field_name": "image"}])
+        self.assertEqual(task["input"]["media_inputs"], [])
+        detail = self.batches.get(batch["id"], with_schemes=True)
+        self.assertEqual(detail["schemes"][0]["items"][0]["media_skip"],
+                         [{"node_id": "8", "field_name": "image"}])
+        # 老批次没有 schemes 快照：详情兜底把 media_skip 一起交给前端回填。
+        self.batches.schemes_path(batch["id"]).unlink(missing_ok=True)
+        legacy = self.batches.get(batch["id"], with_schemes=True)
+        self.assertEqual(legacy["items"][0]["restore"]["media_skip"],
+                         [{"node_id": "8", "field_name": "image"}])
+
+    def test_invalid_media_skip_rejects_whole_batch(self):
+        scheme = dict(self.scheme, items=[self._item(
+            "条目一", media_skip=[{"node_id": "5", "field_name": "text"}])])
+        with self.assertRaises(ComfyUIBatchError):
+            self.batches.create(self.body(schemes=[scheme]))
+        self.assertEqual(self.store.list_tasks(limit=100), [])
+        self.enqueue.assert_not_called()
+
+    def test_batch_timing_uses_persisted_task_times_and_freezes(self):
+        # 批次耗时只汇总任务 started_at/finished_at：排队时没有起点，完成后固定。
+        batch = self.batches.create(self.body(schemes=[dict(self.scheme, items=[
+            self._item("条目一"), self._item("条目二")])]))
+        first, second = (item["task_id"] for item in batch["items"])
+        detail = self.batches.get(batch["id"])
+        self.assertIsNone(detail["started_at"])
+        self.assertIsNone(detail["finished_at"])
+        self.assertFalse(detail["elapsed_known"])
+        self.assertTrue(detail["active"])
+        self.store.update_task(first, status="running", started_at=1000)
+        detail = self.batches.get(batch["id"])
+        self.assertEqual(detail["started_at"], 1000)
+        self.assertIsNone(detail["finished_at"])
+        self.assertTrue(detail["active"])
+        self.store.update_task(first, status="completed", finished_at=3000)
+        self.store.update_task(second, status="running", started_at=2000)
+        detail = self.batches.get(batch["id"])
+        self.assertEqual(detail["started_at"], 1000)
+        self.assertIsNone(detail["finished_at"], "还有条目在跑时不能提前冻结")
+        self.store.update_task(second, status="completed", finished_at=5000)
+        detail = self.batches.get(batch["id"])
+        self.assertEqual(detail["started_at"], 1000)
+        self.assertEqual(detail["finished_at"], 5000)
+        self.assertFalse(detail["active"])
+        self.assertTrue(detail["elapsed_known"])
+        # 老记录缺时间：缺的那条不参与汇总，不伪造。
+        self.store.update_task(first, started_at=None, finished_at=None)
+        detail = self.batches.get(batch["id"])
+        self.assertEqual(detail["started_at"], 2000)
+        self.assertEqual(detail["finished_at"], 5000)
+        self.assertFalse(detail["active"])
+        self.store.update_task(second, started_at=None, finished_at=None)
+        detail = self.batches.get(batch["id"])
+        self.assertIsNone(detail["started_at"])
+        self.assertIsNone(detail["finished_at"])
+        self.assertFalse(detail["elapsed_known"])
+
     def test_unload_after_is_frozen_into_every_task(self):
         batch = self.batches.create(self.body(unload_after=True))
         for item in batch["items"]:

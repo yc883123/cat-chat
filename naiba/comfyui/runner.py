@@ -157,6 +157,9 @@ class ComfyUIRunner:
                      if isinstance(item, dict)]
         media_inputs = [item for item in (input_data.get("media_inputs") or [])
                         if isinstance(item, dict)]
+        # 用户手动 ⊘ 的媒体槽：独立于 media_inputs，不受 optional 声明限制。
+        media_skip = [item for item in (input_data.get("media_skip") or [])
+                      if isinstance(item, dict)]
         # 同一任务执行周期内同一资产只上传一次（计划 §5.2）：任务重试/续跑会
         # 重新进入 _run_task，从快照引用重新读取并按需重新上传。
         media_upload_cache: dict[str, str] = {}
@@ -213,7 +216,7 @@ class ComfyUIRunner:
                 if index in done_indexes:
                     continue
                 workflow = apply_overrides(prompt, overrides, randomize_seeds=True)
-                self._remove_unselected_optional_media(workflow, media_inputs, base)
+                self._remove_unselected_optional_media(workflow, media_inputs, base, media_skip)
                 media_error = self._apply_media(
                     base, workflow, media_inputs, media_upload_cache,
                 )
@@ -258,6 +261,7 @@ class ComfyUIRunner:
                 ok, files, fail_reason = self._wait_shot(
                     base, task_id, index, prompt_id, cancel_event, resubmits,
                     checkpoint, prompt, overrides, media_inputs, media_upload_cache,
+                    media_skip,
                 )
                 if cancel_event.is_set():
                     break
@@ -327,26 +331,60 @@ class ComfyUIRunner:
             pass
 
     @staticmethod
+    def _media_value_is_empty(value: Any) -> bool:
+        """工作流里媒体加载器的原值是否为空。
+
+        只有空值/None 才允许走 optional 自动跳过；非空（如固定音频、默认底图）
+        必须沿用原文件，不能因为槽位声明 optional 就删掉。
+        """
+        if value is None:
+            return True
+        if isinstance(value, str):
+            text = value.strip()
+            return not text or text == "None"
+        return False
+
+    @staticmethod
     def _remove_unselected_optional_media(
         workflow: dict[str, Any],
         media_inputs: list[dict[str, Any]],
         base: str,
+        media_skip: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Omit unselected media connections only where ComfyUI declares them optional."""
+        """按明确优先级处理提交副本里的媒体连接（2026-11-09 口径）。
+
+        - 已选新文件：保留连接，后续由 ``_apply_media`` 回填；
+        - 用户手动 ``⊘``：无论 optional 与否都移除下游连接，ComfyUI 拒绝就报
+          它的正常错误（手动跳过是唯一不受 optional 限制的路径）；
+        - 没选新文件但工作流原值非空：沿用原文件，即使 optional 也不删；
+        - 没选新文件、原值为空且 schema 确认 optional：自动跳过。
+
+        只改本次提交的深拷贝；清理加载节点时仍要确认没有其它连接引用它。
+        """
         selected = {
             (str(item.get("node_id") or ""), str(item.get("field_name") or ""))
             for item in media_inputs
             if item.get("path")
+        }
+        skipped = {
+            (str(item.get("node_id") or ""), str(item.get("field_name") or ""))
+            for item in (media_skip or [])
+            if isinstance(item, dict)
         }
         schemas = NodeSchemaProvider(base)
         removed_sources: set[str] = set()
         for node in workflow.values():
             if not isinstance(node, dict):
                 continue
+            # GetVideoComponents 是视频加载器与下游之间的桥：它的 video 输入
+            # 不是「下游消费边」，跳过整节点；下游对它的引用才是要移除的连接。
+            # 它本身会在失去所有引用时按下面的清理规则移除。
+            if str(node.get("class_type") or "") == "GetVideoComponents":
+                continue
             inputs = node.get("inputs")
             if not isinstance(inputs, dict):
                 continue
-            media_connections: list[tuple[str, str]] = []
+            media_connections: list[tuple[str, str, tuple[str, str], Any]] = []
             for field_name, connection in inputs.items():
                 if not (isinstance(connection, list) and len(connection) == 2):
                     continue
@@ -371,20 +409,37 @@ class ComfyUIRunner:
                     key for key in source_inputs
                     if media_kind_of_field(source_class, str(key))
                 ]
-                if len(media_fields) == 1 and (loader_id, media_fields[0]) not in selected:
-                    media_connections.append((str(field_name), source_id))
+                if len(media_fields) == 1:
+                    media_connections.append((
+                        str(field_name), source_id,
+                        (loader_id, media_fields[0]),
+                        source_inputs.get(media_fields[0]),
+                    ))
             if not media_connections:
                 continue
-            declarations = schemas.node_inputs(str(node.get("class_type") or ""))
-            if not declarations:
-                continue
-            for field_name, source_id in media_connections:
-                # 与参数提示共用同一套可选性规则：普通 optional 直接放行，
-                # Autogrow 必须校验前缀/编号范围/min，模棱两可的不移除。
-                if input_is_optional(declarations, field_name) is True:
+            # schema 只在需要判断「空值能否自动跳过」时才查：手动 ⊘ 与沿用
+            # 原文件都不依赖 ComfyUI 声明，离线也应照常提交。
+            declarations: dict[str, Any] | None = None
+            for field_name, source_id, address, original in media_connections:
+                if address in skipped:
+                    # 手动 ⊘：独立强制路径，不以 optional 为门槛。
                     inputs.pop(field_name, None)
                     removed_sources.add(source_id)
-        # Only prune the exact optional loader edges removed above; never trim
+                    continue
+                if address in selected:
+                    # 用户选了新文件：保留连接，执行前由 _apply_media 回填。
+                    continue
+                if not ComfyUIRunner._media_value_is_empty(original):
+                    # 沿用工作流原文件：固定素材不能被 optional 自动跳过。
+                    continue
+                # 与参数提示共用同一套可选性规则：普通 optional 直接放行，
+                # Autogrow 必须校验前缀/编号范围/min，模棱两可的不移除。
+                if declarations is None:
+                    declarations = schemas.node_inputs(str(node.get("class_type") or "")) or {}
+                if declarations and input_is_optional(declarations, field_name) is True:
+                    inputs.pop(field_name, None)
+                    removed_sources.add(source_id)
+        # Only prune the exact loader edges removed above; never trim
         # arbitrary disconnected nodes or a loader still used by another branch.
         used = {str(value[0]) for node in workflow.values()
                 for value in (node.get("inputs") or {}).values()
@@ -487,6 +542,7 @@ class ComfyUIRunner:
         overrides: list[dict[str, Any]],
         media_inputs: list[dict[str, Any]],
         media_upload_cache: dict[str, str],
+        media_skip: list[dict[str, Any]],
     ) -> tuple[bool, list[str], str]:
         """轮询一段直到成功 / 失败 / 丢失重提交 / 超时。返回 (ok, 本地文件名, 失败原因)。"""
         deadline = now_ms() + SHOT_TIMEOUT_SECONDS * 1000
@@ -529,7 +585,7 @@ class ComfyUIRunner:
             used = int(resubmits.get(str(index), 0) or 0)
             if used < MAX_RESUBMIT:
                 workflow = apply_overrides(prompt, overrides, randomize_seeds=True)
-                self._remove_unselected_optional_media(workflow, media_inputs, base)
+                self._remove_unselected_optional_media(workflow, media_inputs, base, media_skip)
                 media_error = self._apply_media(
                     base, workflow, media_inputs, media_upload_cache,
                 )

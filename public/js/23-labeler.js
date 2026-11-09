@@ -590,8 +590,9 @@ function uploadOne(row, token) {
         row.original_sha256 = String(payload.original_sha256 || "");
         row.cacheSize = Number(payload.size || 0);
         row.progress = 100;
-        // 服务端落盘名以返回为准（含安全字符清洗）。
-        if (payload.name) row.name = String(payload.name);
+        // 显示名/提交名保持原文件名：只认 path（缓存落盘位置），结果区标题
+        // 才能和导出文件相对路径一致。不去重时代缓存可能改名落盘，那个名字
+        // 会把「naiba_chat_时间戳_…」顶进结果区，不能再回填。
       } else {
         row.status = "failed";
         row.error = String(payload.error || `HTTP ${xhr.status}`);
@@ -1363,7 +1364,11 @@ function renderImageResults(body) {
     head.className = "labeler-anno-head";
     const name = document.createElement("span");
     name.className = "labeler-anno-name";
-    name.textContent = item.name || item.relative_path || item.item_id;
+    // 标题与导出同一口径（relative_path || name），逐行对得上导出文件：
+    // 旧批次的 name 曾被服务端缓存名（naiba_chat_…）顶替过，不能当标题用。
+    const displayName = item.relative_path || item.name || item.item_id;
+    name.textContent = displayName;
+    name.title = displayName;
     const state = document.createElement("span");
     state.className = "labeler-anno-state";
     const label = ITEM_STATE_LABELS[item.state] || item.state;
@@ -1371,12 +1376,6 @@ function renderImageResults(body) {
     if (["failed", "uncertain"].includes(item.state)) state.classList.add("failed");
     head.append(name, state);
     card.append(head);
-    if (item.relative_path && item.relative_path !== item.name) {
-      const path = document.createElement("span");
-      path.className = "labeler-anno-path";
-      path.textContent = item.relative_path;
-      card.append(path);
-    }
     if (annotation?.tags?.length) {
       card.append(tagList(annotation.tags, annotation.confidences));
     }

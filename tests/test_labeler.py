@@ -222,6 +222,38 @@ class LabelerImageTests(unittest.TestCase):
         self.assertTrue(a.startswith("it-"))
 
 
+class BatchLabelNamingTests(unittest.TestCase):
+    """批次标题命名口径（2026-11-09 用户反馈）：与导出同源，旧缓存名不能当标题。"""
+
+    def test_folder_batch_uses_common_first_segment(self):
+        refs = [
+            {"path": "x", "name": "naiba_chat_1_abc_a.png",
+             "relative_path": "新建文件夹/#aimodel a.jpg"},
+            {"path": "x", "name": "naiba_chat_1_abc_b.png",
+             "relative_path": "新建文件夹/sub/#aimodel b.jpg"},
+        ]
+        self.assertEqual(LabelerJobManager._label_for({}, refs), "新建文件夹 · 2 张")
+
+    def test_scattered_batch_prefers_relative_path_basename(self):
+        # 旧批次 name 是服务端缓存名（naiba_chat_…）：标题必须取 relative_path
+        # 最后一段，才能和导出文件逐行对上。
+        refs = [
+            {"path": "x", "name": "naiba_chat_1794233002_35a0cc_a.jpg",
+             "relative_path": "新建文件夹/#aimodel #a.jpg"},
+            {"name": "b.png", "relative_path": "sub/b.png"},
+        ]
+        label = LabelerJobManager._label_for({}, refs)
+        self.assertEqual(label, "#aimodel #a.jpg 等 2 张")
+
+    def test_scattered_batch_falls_back_to_name(self):
+        refs = [{"path": "x", "name": "原文件名.jpg", "relative_path": "原文件名.jpg"}]
+        self.assertEqual(LabelerJobManager._label_for({}, refs), "原文件名.jpg 等 1 张")
+
+    def test_no_usable_names(self):
+        self.assertEqual(LabelerJobManager._label_for({}, []), "0 张图片")
+        self.assertEqual(LabelerJobManager._label_for({}, [{"path": "x"}]), "1 张图片")
+
+
 class LabelerConfigTests(unittest.TestCase):
     def setUp(self):
         self.app = _StubApp(Path(tempfile.gettempdir()))

@@ -301,6 +301,22 @@ class CustomPageUiContractTests(unittest.TestCase):
         # 自定义页隐藏预设语义的「补充要求」。
         self.assertIn('#studioPageLabeler[data-labeler-page="custom"] .labeler-advanced .labeler-prompt-field { display: none; }', css)
 
+    def test_result_card_title_matches_export_naming(self):
+        # 逐图结果卡标题与导出同口径（relative_path || name），能逐行对照导出
+        # 文件；旧批次的 name 曾被服务端缓存名（naiba_chat_…）顶替过，不能当
+        # 标题（2026-11-09 用户反馈）。标题与路径同一信息只留一层。
+        self.assertIn('const displayName = item.relative_path || item.name || item.item_id;', self.js)
+        self.assertIn("name.textContent = displayName;", self.js)
+        self.assertIn("name.title = displayName;", self.js)
+        self.assertNotIn("labeler-anno-path", self.js)
+        css = (self.root / "public/styles.css").read_text(encoding="utf-8")
+        self.assertNotIn(".labeler-anno-path", css)
+
+    def test_upload_response_does_not_overwrite_display_name(self):
+        # 上传响应不再把服务端缓存落盘名写回显示名：提交与展示都以原文件名
+        # 走（否则结果区/提交批次里满是 naiba_chat_时间戳_…）。
+        self.assertNotIn("row.name = String(payload.name)", self.js)
+
     def test_backend_skill_content_route(self):
         http_py = (self.root / "naiba/http.py").read_text(encoding="utf-8")
         catalog_py = (self.root / "naiba/skills/catalog.py").read_text(encoding="utf-8")

@@ -566,7 +566,11 @@ class LabelerJobManager:
 
     @staticmethod
     def _label_for(task: dict[str, Any], refs: list[Any]) -> str:
-        """批次标题：优先用共同的顶层文件夹名，其次第一张图的文件名 + 张数。"""
+        """批次标题：优先用共同的顶层文件夹名，其次第一张图的文件名 + 张数。
+
+        回退名与导出同一口径（relative_path 的最后一段优先于 name）：旧批次
+        的 name 可能是服务端缓存名（naiba_chat_…），不能拿来当标题。
+        """
         roots: set[str] = set()
         for ref in refs:
             if not isinstance(ref, dict):
@@ -580,8 +584,14 @@ class LabelerJobManager:
             return f"{next(iter(roots))} · {count} 张"
         first = ""
         for ref in refs:
-            if isinstance(ref, dict) and ref.get("name"):
-                first = str(ref.get("name"))
+            if not isinstance(ref, dict):
+                continue
+            relative = str(ref.get("relative_path") or "").replace("\\", "/")
+            candidate = relative.rsplit("/", 1)[-1].strip() if relative else ""
+            if not candidate:
+                candidate = str(ref.get("name") or "").strip()
+            if candidate:
+                first = candidate
                 break
         if first:
             return f"{first} 等 {count} 张"

@@ -59,6 +59,10 @@ const labeler = {
   imageResultLimit: 100,
   lastImageSignature: "",
   annotations: [],
+  // 打标中逐图文本增量：记录当前任务最近一次看到的「已完成标注数」，轮询发现变多
+  // 就补拉一次标注内容（2026-11-09 远端反馈：打标中按图只出状态不出文本）。
+  resultsSyncTaskId: "",
+  resultsSyncDoneCount: 0,
   // 按标签视图命中集：与按图共用 annotations 会互相覆盖，单独存一份。
   tagMatches: [],
   tags: [],
@@ -805,8 +809,10 @@ async function pollTask() {
     labeler.task = task;
     labeler.items = task.items || [];
     // 轮询不重置浏览位置：用户已点「加载更多」的进度保持，由签名 diff 决定要不要重绘。
+    const active = ["queued", "running"].includes(String(task.status || ""));
+    if (active) syncAnnotationsIfDue(taskId, labeler.items);
     renderTask(task);
-    if (!["queued", "running"].includes(String(task.status || ""))) {
+    if (!active) {
       stopPolling();
       await loadTaskItems(taskId);
       await loadTaskResults(taskId);
@@ -823,32 +829,66 @@ async function pollTask() {
   }
 }
 
-// 重进打标页 / 页面刷新后按服务端校准当前批次。
+// 已完成图计数：拿到标注行的逐图条数（打标中文本增量口径，见 syncAnnotationsIfDue）。
+function annotatedCount(items) {
+  let count = 0;
+  for (const item of items) if (Number(item.annotation_id || 0)) count += 1;
+  return count;
+}
+
+// 打标中的「按图」逐图卡要随一张完成长出一张文本：已完成标注数比上次记录变多时，
+// 补拉一次标注内容（limit=500 一次查询，代价可忽略），重绘消抖交给签名 diff。
+// 任务切换后按 taskId 失效重计；终态由 pollTask/reconcileTask 的全量加载收尾，不走这里。
+function syncAnnotationsIfDue(taskId, items) {
+  taskId = String(taskId || "");
+  if (!taskId || String(labeler.taskId || "") !== taskId) return;
+  const done = annotatedCount(items);
+  const due = labeler.resultsSyncTaskId !== taskId
+    || done > Number(labeler.resultsSyncDoneCount || 0);
+  labeler.resultsSyncTaskId = taskId;
+  labeler.resultsSyncDoneCount = done;
+  if (!due || !done) return;
+  void loadTaskResults(taskId);
+}
+
+// 切回页面 / 窗口重新可见时立即按服务端校准一次：手机后台、窗口被遮挡期间浏览器会
+// 挂起甚至暂停 1.2s 轮询，回来那一刻不赌下一轮轮询的运气；发现已终态顺手刷新批次列表。
+async function wakeLabeler() {
+  if (currentStudioPage() !== "labeler" || !labeler.taskId) return;
+  const finished = await reconcileTask();
+  if (finished) void refreshBatches();
+}
+
+// 重进打标页 / 页面刷新后按服务端校准当前批次；返回 true = 已终态（wakeLabeler 用）。
 async function reconcileTask() {
   const taskId = labeler.taskId;
-  if (!taskId) return;
+  if (!taskId) return false;
   const token = ++labeler.detailToken;
   try {
     const { task } = await api(`/api/labeler/tasks/${encodeURIComponent(taskId)}`);
-    if (token !== labeler.detailToken || labeler.taskId !== taskId) return;
+    if (token !== labeler.detailToken || labeler.taskId !== taskId) return false;
     labeler.task = task;
     labeler.items = task.items || [];
     labeler.imageResultLimit = 100;
     renderTask(task);
-    if (["queued", "running"].includes(String(task.status || ""))) startPolling();
-    else {
-      stopPolling();
-      await loadTaskItems(taskId);
-      await loadTaskResults(taskId);
+    if (["queued", "running"].includes(String(task.status || ""))) {
+      startPolling();
+      syncAnnotationsIfDue(taskId, labeler.items);
+      return false;
     }
+    stopPolling();
+    await loadTaskItems(taskId);
+    await loadTaskResults(taskId);
+    return true;
   } catch (error) {
-    if (token !== labeler.detailToken) return;
+    if (token !== labeler.detailToken) return false;
     stopPolling();
     if (error.status === 404) {
       labeler.taskId = "";
-      return;
+      return false;
     }
     setHint(`任务状态读取失败：${error.message}`, true);
+    return false;
   }
 }
 
@@ -1683,6 +1723,11 @@ export function bindLabelerEvents() {
     }
     void activateLabeler({ refresh: true });
   });
+
+  // 手机后台 / 窗口完全遮挡时浏览器会把 1.2s 轮询挂起甚至暂停：切回可见的当刻
+  // 按服务端校准（wakeLabeler），不赌下一轮轮询（2026-11-09 远端反馈口径）。
+  document.addEventListener("visibilitychange", wakeLabeler);
+  window.addEventListener("focus", wakeLabeler);
 }
 
 async function loadAnnotationsForTag(tag) {

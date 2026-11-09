@@ -18,7 +18,8 @@ const elements={'#labelerCustomSystemPrompt':prompt,'#labelerSkillSelect':select
   '#labelerSkillNote':note,'#studioPageLabeler':page,'#labelerCustomOutputRow':output};
 let pageListener,calls=0;
 const context=vm.createContext({console,$:key=>elements[key]||null,$$:()=>[],api:async()=>{calls++;throw new Error('unexpected request');},
-  state:{},onStudioPageChange:fn=>{pageListener=fn;},setTimeout,clearTimeout,setInterval,clearInterval});
+  state:{},onStudioPageChange:fn=>{pageListener=fn;},setTimeout,clearTimeout,setInterval,clearInterval,
+  document:{addEventListener(){}},window:{addEventListener(){}}});
 const source=fs.readFileSync('public/js/23-labeler.js','utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
 vm.runInContext(source+'\nglobalThis.p={applySelectedSkill,clearSystemPrompt,setLabelerPage,bindLabelerEvents,labeler};',context);
 const p=context.p;p.setLabelerPage('custom');p.bindLabelerEvents();

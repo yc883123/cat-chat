@@ -6697,12 +6697,15 @@ span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); 
 /* 固定参数 */
 .cbm-fixed-bar { display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-top: 1px dashed var(--line); font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
 .cbm-fixed-bar .cbm-kv { background: var(--surface-2); border-radius: var(--r-sm); padding: 2px 8px; color: var(--text); }
+.cbm-fixed-bar .cbm-fixed-summary { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .cbm-fixed-bar .cbm-btn { margin-left: auto; }
-.cbm-fixed-detail { display: none; padding: 8px 14px 12px; gap: 14px; flex-wrap: wrap; border-top: 1px dashed var(--line); }
-.cbm-fixed-detail.open { display: flex; }
-.cbm-fixed-detail label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
-.cbm-fixed-detail input, .cbm-fixed-detail select { font: inherit; font-size: 12.5px; color: var(--text); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-md); padding: 4px 8px; }
-.cbm-fixed-detail .cbm-map-hint { flex-basis: 100%; }
+/* 展开后按可用宽度自适应铺列：桌面多列、窄屏一列；控件占满整格，说明独占整行 */
+.cbm-fixed-detail { display: none; padding: 10px 14px 12px; border-top: 1px dashed var(--line); }
+.cbm-fixed-detail.open { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px 16px; align-items: start; }
+.cbm-fixed-detail .cbm-fixed-field { min-width: 0; }
+.cbm-fixed-detail label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; overflow-wrap: anywhere; }
+.cbm-fixed-detail input, .cbm-fixed-detail select { box-sizing: border-box; width: 100%; font: inherit; font-size: 12.5px; color: var(--text); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-md); padding: 4px 8px; }
+.cbm-fixed-detail .cbm-map-hint { grid-column: 1 / -1; margin: 2px 0 0; }
 
 /* 条目表 */
 .cbm-items-wrap { overflow-x: auto; border-top: 1px solid var(--line); }

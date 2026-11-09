@@ -263,8 +263,8 @@ async function make(name,sourceText,exportsLine){
   await mod.evaluate();
   return mod.namespace;
 }
-const m=await make('comfy',source,'\nexport {batch,ensureBatchDraft,submitBatch,batchPortOrdinal,batchSlotAddressText,batchPortsMarkup,batchItemsMarkup};');
-const {batch,ensureBatchDraft,submitBatch,batchPortOrdinal,batchSlotAddressText,batchPortsMarkup,batchItemsMarkup}=m;
+const m=await make('comfy',source,'\nexport {batch,ensureBatchDraft,submitBatch,batchPortOrdinal,batchSlotAddressText,batchPortsMarkup,batchItemsMarkup,batchFixedMarkup,batchSetFixedValue};');
+const {batch,ensureBatchDraft,submitBatch,batchPortOrdinal,batchSlotAddressText,batchPortsMarkup,batchItemsMarkup,batchFixedMarkup,batchSetFixedValue}=m;
 ensureBatchDraft();
 const s=batch.draft.schemes[0];
 s.detail={id:'cw-1',name:'测试流',workflow_fingerprint:'fp-x',
@@ -275,6 +275,8 @@ s.detail={id:'cw-1',name:'测试流',workflow_fingerprint:'fp-x',
           {node_id:'8',field_name:'image',field_type:'image',control:'media',media:'image',node_title:'载入图片',label:'8 · 载入图片 · image → ref_images.ref_image_0',media_optional:true},
           {node_id:'10',field_name:'image',field_type:'image',control:'media',media:'image',node_title:'载入图片',label:'10 · 载入图片 · image → ref_images.ref_image_1、mask（节点 21）',media_optional:true},
           {node_id:'9',field_name:'lora',field_type:'text',role:'lora',label:'LoRA'},
+          {node_id:'11',field_name:'cache',field_type:'bool',default:true,label:'缓存'},
+          {node_id:'12',field_name:'steps',field_type:'number',default:8,label:'步数'},
           {node_id:'31',field_name:'tail',field_type:'text',control:'multiline',label:'第二段'}]};
 s.workflow_id='cw-1';
 s.mapping={prompt_slot:{node_id:'5',field_name:'text'},duration_slot:{node_id:'6',field_name:'length'},
@@ -289,6 +291,22 @@ assert.ok(portsMarkup.includes('8 · 载入图片 · image → ref_images.ref_im
 assert.ok(portsMarkup.includes('10 · 载入图片 · image → ref_images.ref_image_1、mask（节点 21）'));
 assert.equal(batchSlotAddressText(s.detail,{node_id:'missing',field_name:'image'}),'missing · image');
 s.fixed={'9|lora':'other.safetensors'};
+// 固定参数展开区：自适应字段块，编辑必须回写 scheme.fixed（旧版没有 input/change 绑定）。
+const fixedMarkup=batchFixedMarkup(s);
+assert.ok(fixedMarkup.includes('cbm-fixed-field'));
+assert.ok(fixedMarkup.includes('data-batch-fixed="9|lora"'));
+assert.ok(fixedMarkup.includes('data-batch-fixed="11|cache"'));
+assert.ok(fixedMarkup.includes('data-fixed-summary'));
+assert.ok(fixedMarkup.includes('other.safetensors'));
+batchSetFixedValue(s,{dataset:{batchFixed:'9|lora'},value:'third.safetensors'});
+assert.equal(s.fixed['9|lora'],'third.safetensors');
+batchSetFixedValue(s,{dataset:{batchFixed:'11|cache'},value:'false'});
+assert.equal(s.fixed['11|cache'],false);
+batchSetFixedValue(s,{dataset:{batchFixed:'11|cache'},value:'true'});
+assert.equal(s.fixed['11|cache'],true);
+delete s.fixed['11|cache'];
+batchSetFixedValue(s,{dataset:{batchFixed:'12|steps'},value:''});
+assert.ok(!('12|steps' in s.fixed),'数字参数清空应还原工作流值，不写 0');
 s.items=[{name:'条目 1',script:'剧本A',prompt:'场景A',duration:'8',resolution:'848x480',shots:1,
           files:{'0':{path:'/managed/a.png',name:'a.png',thumb_path:''}},
           extras:{'31|tail':'第二段A'}},
@@ -316,7 +334,7 @@ assert.equal(post.body.title,'验收批次');assert.equal(post.body.unload_after
 const scheme=post.body.schemes[0];
 assert.equal(scheme.workflow_id,'cw-1');
 assert.deepEqual(scheme.mapping,{prompt_slot:{node_id:'5',field_name:'text'},duration_slot:{node_id:'6',field_name:'length'},resolution_slot:{node_id:'7',field_name:'res'},extra_points:[{id:'bx1',kind:'prompt',slot:{node_id:'31',field_name:'tail'}}],media_ports:[{node_id:'8',field_name:'image',checked:true}]});
-assert.deepEqual(scheme.overrides,[{node_id:'9',field_name:'lora',value:'other.safetensors'}]);
+assert.deepEqual(scheme.overrides,[{node_id:'9',field_name:'lora',value:'third.safetensors'}]);
 const [one,two]=scheme.items;
 assert.equal(one.script,'剧本A');
 assert.equal(one.prompt,'场景A');assert.equal(one.duration_seconds,8);assert.equal(one.resolution,'848x480');assert.equal(one.shots,1);

@@ -3724,24 +3724,51 @@ function batchFixedMarkup(scheme) {
         data-batch-fixed="${escapeText(key)}" data-scheme="${scheme.id}" value="${escapeText(value)}">`;
     }
     const label = slot.label || `${slot.node_id} · ${slot.field_name}`;
-    return `<div><label>${escapeText(label)}${slot.field_type === "seed" ? "（留空 = 每次随机）" : ""}</label>${control}</div>`;
+    return `<div class="cbm-fixed-field"><label>${escapeText(label)}${slot.field_type === "seed" ? "（留空 = 每次随机）" : ""}</label>${control}</div>`;
   }).join("");
-  const applied = Object.keys(scheme.fixed).length
-    ? Object.keys(scheme.fixed).map((key) => {
-        const slot = (detail?.params || []).find((row) => slotKeyOf(row) === key);
-        const label = slot?.label || key;
-        const value = scheme.fixed[key];
-        return `<span class="cbm-kv">${escapeText(label)} ${escapeText(typeof value === "boolean" ? (value ? "开" : "关") : String(value))}</span>`;
-      }).join("")
-    : '<span>其余按工作流保存值</span>';
-  return `<div class="cbm-fixed-bar">
-      固定参数（本方案每条相同）：${applied}
+  return `<div class="cbm-fixed-bar" data-fixed-bar="${escapeText(scheme.id)}">
+      固定参数（本方案每条相同）：<span class="cbm-fixed-summary" data-fixed-summary>${batchFixedAppliedMarkup(scheme)}</span>
       <button type="button" class="cbm-btn tiny" data-batch-action="toggle-fixed" data-scheme="${scheme.id}">展开固定参数</button>
     </div>
     <div class="cbm-fixed-detail${scheme.fixedOpen ? " open" : ""}">
       ${rows}
       <p class="cbm-map-hint">同一工作流想换模型配方，不用改这份方案——「复制方案」再来一份，这里改成另一套即可。</p>
     </div>`;
+}
+
+/** 固定参数栏的已改值摘要；编辑时原地刷新，不重绘整块表单。 */
+function batchFixedAppliedMarkup(scheme) {
+  const keys = Object.keys(scheme.fixed || {});
+  if (!keys.length) return '<span>其余按工作流保存值</span>';
+  return keys.map((key) => {
+    const slot = (scheme.detail?.params || []).find((row) => slotKeyOf(row) === key);
+    const label = slot?.label || key;
+    const value = scheme.fixed[key];
+    return `<span class="cbm-kv">${escapeText(label)} ${escapeText(typeof value === "boolean" ? (value ? "开" : "关") : String(value))}</span>`;
+  }).join("");
+}
+
+/** 固定参数控件 → scheme.fixed。数字/种子清空视为还原工作流值；布尔存真布尔。 */
+function batchSetFixedValue(scheme, input) {
+  const key = String(input?.dataset?.batchFixed || "");
+  if (!scheme || !key) return;
+  const slot = (scheme.detail?.params || []).find((row) => slotKeyOf(row) === key);
+  const raw = String(input.value ?? "");
+  if ((slot?.field_type === "number" || slot?.field_type === "seed") && !raw.trim()) {
+    delete scheme.fixed[key];
+  } else if (slot?.field_type === "bool") {
+    scheme.fixed[key] = raw === "true";
+  } else {
+    scheme.fixed[key] = raw;
+  }
+  batchRefreshFixedBar(scheme);
+}
+
+function batchRefreshFixedBar(scheme) {
+  const bars = document.querySelectorAll("#comfyuiBatchBody .cbm-fixed-bar[data-fixed-bar]");
+  const host = Array.from(bars).find((node) => String(node.dataset.fixedBar) === String(scheme.id));
+  const summary = host?.querySelector("[data-fixed-summary]");
+  if (summary) summary.innerHTML = batchFixedAppliedMarkup(scheme);
 }
 
 // ---- 条目表 ----
@@ -4121,6 +4148,10 @@ function onBatchChange(event) {
     return;
   }
   if (!scheme) return;
+  if (target.matches("[data-batch-fixed]")) {
+    batchSetFixedValue(scheme, target);
+    return;
+  }
   if (target.matches('[data-batch-select="workflow"]')) {
     void loadBatchWorkflowDetail(scheme, String(target.value || ""));
     return;
@@ -4219,6 +4250,10 @@ function changeBatchMediaPorts(scheme, change) {
 function onBatchInput(event) {
   const target = event.target;
   const scheme = batchSchemeOf(target.dataset.scheme || "");
+  if (target.matches("[data-batch-fixed]")) {
+    if (scheme) batchSetFixedValue(scheme, target);
+    return;
+  }
   const itemField = target.dataset.batchItem;
   if (!scheme || !itemField) return;
   const itemIndex = Number(target.dataset.item);

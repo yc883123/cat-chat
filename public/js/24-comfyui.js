@@ -790,7 +790,7 @@ function renderParamForm() {
   edit.type = "button";
   edit.className = "control-button tiny";
   edit.dataset.comfyuiEditParams = "1";
-  edit.textContent = "编辑";
+  edit.textContent = "设置高级参数";
   edit.title = "选择要在主表单显示的参数，并调整它们的先后顺序";
   actions.append(reset, edit);
   head.append(heading, actions);

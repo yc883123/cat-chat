@@ -4184,7 +4184,10 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
    is-copied 反馈，只把位置从结果区左上角改到 summary 右缘（不占标题行的排版流）；
    悬停显现与结果区同款（默认 .38 透明度，聚焦/已复制时全局规则会置 1）。 */
 .studio-body-preview summary { position: relative; }
-.studio-body-preview summary .studio-copy-button { position: absolute; top: 50%; right: 10px; transform: translateY(-50%); }
+/* left 必须显式归回 auto：基础规则留了 left:8px，叠上这里的 right:10px 后
+   绝对定位盒会被两个对边拉满整行——按钮变成贴着整条 summary 的隐形拦截层，
+   手机上一 tap 正文预览就命中复制（preventDefault 还拦掉折叠展开），展开永远点不动。 */
+.studio-body-preview summary .studio-copy-button { position: absolute; top: 50%; right: 10px; left: auto; transform: translateY(-50%); }
 .studio-body-preview summary:hover .studio-copy-button,
 .studio-body-preview summary .studio-copy-button.is-copied { opacity: 1; }
 .studio-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

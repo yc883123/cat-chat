@@ -263,12 +263,12 @@ async function make(name,sourceText,exportsLine){
   await mod.evaluate();
   return mod.namespace;
 }
-const m=await make('comfy',source,'\nexport {batch,ensureBatchDraft,submitBatch,batchPortOrdinal,batchSlotAddressText,batchPortsMarkup,batchItemsMarkup,batchFixedMarkup,batchSetFixedValue};');
-const {batch,ensureBatchDraft,submitBatch,batchPortOrdinal,batchSlotAddressText,batchPortsMarkup,batchItemsMarkup,batchFixedMarkup,batchSetFixedValue}=m;
+const m=await make('comfy',source,'\nexport {batch,ensureBatchDraft,submitBatch,batchPortOrdinal,batchSlotAddressText,batchPortsMarkup,batchItemsMarkup,batchFixedMarkup,batchSetFixedValue,batchJsonParamMarkup,batchItemRowMarkup,jsonParamInfo,jsonParamSummary,jsonParamButtonText,jsonParamHelper,jsonEditableValue,jsonNewEntry,jsonTargetAssign};');
+const {batch,ensureBatchDraft,submitBatch,batchPortOrdinal,batchSlotAddressText,batchPortsMarkup,batchItemsMarkup,batchFixedMarkup,batchSetFixedValue,batchJsonParamMarkup,batchItemRowMarkup,jsonParamInfo,jsonParamSummary,jsonParamButtonText,jsonParamHelper,jsonEditableValue,jsonNewEntry,jsonTargetAssign}=m;
 ensureBatchDraft();
 const s=batch.draft.schemes[0];
 s.detail={id:'cw-1',name:'测试流',workflow_fingerprint:'fp-x',
-  prompt:{'5':{inputs:{text:'默认正文'}},'6':{inputs:{length:5}},'7':{inputs:{res:'848x480'}},'8':{inputs:{image:'old.png'}},'9':{inputs:{lora:'base.safetensors'}},'31':{inputs:{tail:''}}},
+  prompt:{'5':{inputs:{text:'默认正文'}},'6':{inputs:{length:5}},'7':{inputs:{res:'848x480'}},'8':{inputs:{image:'old.png'}},'9':{inputs:{lora:'base.safetensors'}},'20':{inputs:{lora_data:'[{"name":"a","strength_model":1,"strength_clip":1,"enabled":true},{"name":"b","strength_model":0.5,"strength_clip":1,"enabled":false}]'}},'31':{inputs:{tail:''}}},
   params:[{node_id:'5',field_name:'text',field_type:'text',control:'multiline',role:'positive_prompt',label:'正文'},
           {node_id:'6',field_name:'length',field_type:'number',default:5,label:'时长'},
           {node_id:'7',field_name:'res',field_type:'text',candidates:['848x480','480x848'],label:'分辨率'},
@@ -277,6 +277,7 @@ s.detail={id:'cw-1',name:'测试流',workflow_fingerprint:'fp-x',
           {node_id:'9',field_name:'lora',field_type:'text',role:'lora',label:'LoRA'},
           {node_id:'11',field_name:'cache',field_type:'bool',default:true,label:'缓存'},
           {node_id:'12',field_name:'steps',field_type:'number',default:8,label:'步数'},
+          {node_id:'20',field_name:'lora_data',field_type:'text',label:'20 · Visual LoRA Loader · lora_data'},
           {node_id:'31',field_name:'tail',field_type:'text',control:'multiline',label:'第二段'}]};
 s.workflow_id='cw-1';
 s.mapping={prompt_slot:{node_id:'5',field_name:'text'},duration_slot:{node_id:'6',field_name:'length'},
@@ -291,6 +292,61 @@ assert.ok(portsMarkup.includes('8 · 载入图片 · image → ref_images.ref_im
 assert.ok(portsMarkup.includes('10 · 载入图片 · image → ref_images.ref_image_1、mask（节点 21）'));
 assert.equal(batchSlotAddressText(s.detail,{node_id:'missing',field_name:'image'}),'missing · image');
 s.fixed={'9|lora':'other.safetensors'};
+// JSON 数组参数：摘要只显示启用数；固定参数区给编辑入口，不再摊开原始字符串。
+const loraJson='[{"name":"a","strength_model":1,"strength_clip":1,"enabled":true},{"name":"b","strength_model":0.5,"strength_clip":1,"enabled":false}]';
+assert.equal(jsonParamInfo(loraJson).kind,'array');
+assert.equal(jsonParamInfo('普通文本'),null);
+assert.equal(jsonParamInfo('[1,2]'),null);
+assert.equal(jsonParamSummary(loraJson),'1 项启用');
+assert.equal(jsonParamButtonText(loraJson),'编辑列表');
+assert.equal(jsonParamHelper(loraJson),'本次生成使用编辑后的列表');
+assert.equal(jsonParamButtonText('[{"text":"女孩","weight":1.2,"enabled":true}]'),'编辑预设');
+assert.equal(jsonParamSummary('[{"name":"a"},{"name":"b"}]'),'2 项');
+assert.equal(jsonParamSummary('{"a":1,"b":{"c":2}}'),'2 个字段');
+assert.equal(jsonEditableValue('[1]').ok,false);
+assert.match(jsonEditableValue('{bad').message,/格式有误/);
+const addedEntry=jsonNewEntry([{name:'a',strength_model:1,strength_clip:1,enabled:true,meta:{tag:'x'}}]);
+assert.equal(addedEntry.name,'');assert.equal(addedEntry.strength_model,1);assert.equal(addedEntry.enabled,true);
+assert.equal(JSON.stringify(addedEntry.meta),JSON.stringify({tag:'x'}),'未知嵌套字段必须保留');
+const jsonFixedMarkup=batchFixedMarkup(s);
+assert.ok(jsonFixedMarkup.includes('1 项启用'));
+assert.ok(jsonFixedMarkup.includes('data-batch-json-edit'));
+assert.ok(jsonFixedMarkup.includes('data-json-source="fixed"'));
+assert.ok(jsonFixedMarkup.includes('编辑列表'));
+assert.ok(!jsonFixedMarkup.includes('"strength_clip":1'),'固定参数区不应再渲染整串 JSON');
+const jsonCell=batchJsonParamMarkup(s,0,'extras',loraJson,'20|lora_data','p1');
+assert.ok(jsonCell.includes('1 项启用'));
+assert.ok(jsonCell.includes('data-json-source="extras"'));
+assert.ok(jsonCell.includes('data-json-key="20|lora_data"'));
+assert.ok(jsonCell.includes('编辑列表'));
+// 三来源写回隔离：逐条只碰当前条目，fixed 只碰 scheme.fixed。
+const itemA={name:'A',extras:{}},itemB={name:'B'};
+jsonTargetAssign({kind:'item',scheme:{detail:s.detail,fixed:{}},item:itemA,itemIndex:0,source:'extras',key:'20|lora_data'},loraJson);
+assert.equal(itemA.extras['20|lora_data'],loraJson);
+assert.equal(itemB.extras,undefined);
+const fixedTarget={fixed:{}};
+jsonTargetAssign({kind:'fixed',scheme:fixedTarget,key:'20|lora_data'},loraJson);
+assert.equal(fixedTarget.fixed['20|lora_data'],loraJson);
+assert.equal(itemA.name,'A');
+// 逐条三种主映射也走同一个写回入口，只动当前条目的对应字段。
+const mappedItem={name:'M',prompt:'',duration:'',resolution:''};
+jsonTargetAssign({kind:'item',item:mappedItem,source:'prompt'},loraJson);
+assert.equal(mappedItem.prompt,loraJson);
+jsonTargetAssign({kind:'item',item:mappedItem,source:'duration'},loraJson);
+assert.equal(mappedItem.duration,loraJson);
+jsonTargetAssign({kind:'item',item:mappedItem,source:'resolution'},loraJson);
+assert.equal(mappedItem.resolution,loraJson);
+// 主映射指向 JSON text 时，条目表格直接显示摘要入口，不静默跳过。
+const jsonMapping={prompt_slot:{node_id:'20',field_name:'lora_data'},duration_slot:{node_id:'20',field_name:'lora_data'},resolution_slot:{node_id:'20',field_name:'lora_data'},extra_points:[],media_ports:[]};
+const savedMapping=s.mapping;
+s.mapping=jsonMapping;
+const jsonRow=batchItemRowMarkup(s,{name:'J',script:'',prompt:loraJson,duration:loraJson,resolution:loraJson,shots:1,files:{},extras:{}},0,[]);
+assert.ok(jsonRow.includes('data-json-source="prompt"'));
+assert.ok(jsonRow.includes('data-json-source="duration"'));
+assert.ok(jsonRow.includes('data-json-source="resolution"'));
+assert.ok(jsonRow.includes('1 项启用'));
+s.mapping=savedMapping;
+
 // 固定参数展开区：自适应字段块，编辑必须回写 scheme.fixed（旧版没有 input/change 绑定）。
 const fixedMarkup=batchFixedMarkup(s);
 assert.ok(fixedMarkup.includes('cbm-fixed-field'));

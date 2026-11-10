@@ -289,6 +289,17 @@ export function bindComfyuiEvents() {
   $("#comfyuiSaveCurrentAs")?.addEventListener("click", openSaveAsDialog);
   $("#comfyuiSaveAsCancel")?.addEventListener("click", closeSaveAsDialog);
   $("#comfyuiSaveAsConfirm")?.addEventListener("click", () => void confirmSaveAs());
+  // JSON 参数共享弹窗：同一套 DOM 服务单次、批量固定和批量逐条。
+  $("#comfyuiJsonAdd")?.addEventListener("click", jsonEditorAddEntry);
+  $("#comfyuiJsonCancel")?.addEventListener("click", closeJsonParamEditor);
+  $("#comfyuiJsonApply")?.addEventListener("click", jsonEditorApply);
+  $("#comfyuiJsonFormat")?.addEventListener("click", jsonEditorFormat);
+  $("#comfyuiJsonRaw")?.addEventListener("input", jsonEditorValidateRaw);
+  $("#comfyuiJsonRaw")?.addEventListener("change", jsonEditorRawChanged);
+  $("#comfyuiJsonEntries")?.addEventListener("input", jsonEditorEntryChanged);
+  $("#comfyuiJsonEntries")?.addEventListener("change", jsonEditorEntryChanged);
+  $("#comfyuiJsonEntries")?.addEventListener("click", jsonEditorEntryClick);
+  $("#comfyuiJsonDialog")?.addEventListener("cancel", () => { comfyJsonEditor.target = null; });
   $("#comfyuiSaveAsDiscard")?.addEventListener("change", () => {
     const confirm = $("#comfyuiSaveAsConfirm");
     if (confirm) confirm.disabled = !$("#comfyuiSaveAsDiscard")?.checked;
@@ -364,6 +375,14 @@ export function bindComfyuiEvents() {
     if (event.target.closest("[data-comfyui-rerun-cancel]")) cancelRerunDraft();
     else if (event.target.closest("[data-comfyui-edit-params]")) openParamsDialog();
     else if (event.target.closest("[data-comfyui-reset-params]")) resetParamValues();
+    else {
+      const jsonButton = event.target.closest("[data-comfyui-json-edit]");
+      if (jsonButton) {
+        const key = String(jsonButton.dataset.comfyuiJsonKey || "");
+        const slot = (comfyui.detail?.params || []).find((row) => slotKey(row) === key);
+        if (slot) openJsonParamEditor({ kind: "single", key, slot });
+      }
+    }
   });
   // 用户边填边记草稿：重绘（切页回来、传完媒体、保存显示集）时按草稿复原。
   for (const type of ["input", "change"]) {
@@ -1312,11 +1331,405 @@ function resetParamValues() {
     : "已还原成工作流里原本的参数值");
 }
 
+// ---- JSON 参数：识别 / 摘要 / 列表编辑（单次、批量固定、批量逐条共用） ----
+// 只认对象数组、空数组和顶层对象；普通文本、数字、数组里的原始值都保持原控件。
+function jsonParamInfo(value) {
+  const text = String(value ?? "").trim();
+  if (!text || (text[0] !== "[" && text[0] !== "{")) return null;
+  let parsed;
+  try { parsed = JSON.parse(text); } catch (_) { return null; }
+  if (Array.isArray(parsed)) {
+    if (parsed.length && !parsed.every((row) => row && typeof row === "object" && !Array.isArray(row))) return null;
+    return { kind: "array", rows: parsed };
+  }
+  if (parsed && typeof parsed === "object") return { kind: "object", value: parsed };
+  return null;
+}
+
+function jsonParamSummary(value) {
+  const info = jsonParamInfo(value);
+  if (!info) return "";
+  if (info.kind === "object") return `${Object.keys(info.value).length} 个字段`;
+  const hasEnabled = info.rows.some((row) => Object.prototype.hasOwnProperty.call(row, "enabled"));
+  return hasEnabled
+    ? `${info.rows.filter((row) => row.enabled !== false).length} 项启用`
+    : `${info.rows.length} 项`;
+}
+
+function jsonParamFlavor(value) {
+  const info = jsonParamInfo(value);
+  if (!info) return "";
+  if (info.kind === "object") return "object";
+  return info.rows.some((row) => "text" in row || "weight" in row) ? "preset" : "list";
+}
+
+function jsonParamButtonText(value) {
+  const flavor = jsonParamFlavor(value);
+  if (flavor === "preset") return "编辑预设";
+  if (flavor === "object") return "编辑 JSON";
+  return "编辑列表";
+}
+
+function jsonParamHelper(value) {
+  const flavor = jsonParamFlavor(value);
+  if (flavor === "preset") return "可启用/停用预设并调整文本与权重";
+  if (flavor === "object") return "按 JSON 编辑这个参数";
+  return "本次生成使用编辑后的列表";
+}
+
+// 可编辑结构校验：空数组、对象数组、顶层对象；其他（原始值数组、标量）不接管。
+function jsonEditableValue(text) {
+  let parsed;
+  try { parsed = JSON.parse(String(text ?? "")); } catch (_) {
+    return { ok: false, message: "JSON 格式有误，请检查逗号、引号和括号" };
+  }
+  if (Array.isArray(parsed)) {
+    if (parsed.length && !parsed.every((row) => row && typeof row === "object" && !Array.isArray(row))) {
+      return { ok: false, message: "只支持对象数组；数组里的原始值请先改成对象" };
+    }
+    return { ok: true, value: parsed };
+  }
+  if (parsed && typeof parsed === "object") return { ok: true, value: parsed };
+  return { ok: false, message: "根结构必须是对象数组或 JSON 对象" };
+}
+
+function jsonEntryKeys(rows) {
+  const preferred = ["name", "text", "weight", "strength_model", "strength_clip"];
+  const keys = [];
+  for (const row of rows) {
+    for (const key of Object.keys(row)) {
+      if (key !== "enabled" && !keys.includes(key)) keys.push(key);
+    }
+  }
+  keys.sort((a, b) => {
+    const ai = preferred.indexOf(a);
+    const bi = preferred.indexOf(b);
+    return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+  });
+  return keys;
+}
+
+function jsonEntryFieldType(rows, key) {
+  const values = rows.map((row) => row[key]).filter((value) => value !== undefined && value !== null);
+  if (values.length && values.every((value) => typeof value === "boolean")) return "bool";
+  if (values.length && values.every((value) => typeof value === "number")) return "number";
+  return "text";
+}
+
+function jsonFieldLabel(key) {
+  const labels = {
+    name: "模型文件", text: "提示词文本", weight: "权重",
+    strength_model: "模型强度", strength_clip: "CLIP 强度",
+  };
+  return labels[key] || key;
+}
+
+// 新条目按已有条目的形状建默认值：已知字段清空，扩展字段和嵌套结构原样保留。
+function jsonNewEntry(rows) {
+  const template = rows[0] && typeof rows[0] === "object" ? JSON.parse(JSON.stringify(rows[0])) : {};
+  const entry = {};
+  for (const [key, value] of Object.entries(template)) {
+    if (key === "enabled") entry[key] = true;
+    else if (typeof value === "number") entry[key] = key === "weight" || key.includes("strength") ? 1 : 0;
+    else if (typeof value === "string") entry[key] = "";
+    else if (typeof value === "boolean") entry[key] = false;
+    else entry[key] = value;
+  }
+  return entry;
+}
+
+// 列表编辑框：隐藏 input 继续承载字符串，提交/草稿链路完全不变。
+function renderJsonParam(slot, key) {
+  const holder = document.createElement("div");
+  holder.className = "comfyui-json-param";
+  const hidden = document.createElement("input");
+  hidden.type = "hidden";
+  hidden.dataset.comfyuiSlot = key;
+  hidden.value = initialFieldValue(slot, key);
+  const summary = document.createElement("span");
+  summary.className = "comfyui-json-summary";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "control-button tiny comfyui-json-edit";
+  button.dataset.comfyuiJsonEdit = "1";
+  button.dataset.comfyuiJsonKey = key;
+  const helper = document.createElement("span");
+  helper.className = "comfyui-json-helper";
+  holder.append(hidden, summary, button, helper);
+  refreshJsonParamHolder(holder);
+  return holder;
+}
+
+function refreshJsonParamHolder(holder) {
+  const hidden = holder?.querySelector('input[type="hidden"][data-comfyui-slot]');
+  if (!hidden) return;
+  const value = hidden.value;
+  const summary = holder.querySelector(".comfyui-json-summary");
+  const button = holder.querySelector(".comfyui-json-edit");
+  const helper = holder.querySelector(".comfyui-json-helper");
+  if (summary) summary.textContent = jsonParamSummary(value);
+  if (button) button.textContent = jsonParamButtonText(value);
+  if (helper) helper.textContent = jsonParamHelper(value);
+  holder.dataset.jsonValue = value;
+}
+
+// 共享弹窗状态：每次打开都从明确来源重新读，不把临时编辑写进别处。
+const comfyJsonEditor = { target: null, kind: "array", rows: [], objectValue: null };
+
+function jsonSlotFromKey(detail, key) {
+  const [nodeId, ...rest] = String(key || "").split("|");
+  if (!nodeId || !rest.length) return null;
+  return batchSlotByAddress(detail, { node_id: nodeId, field_name: rest.join("|") });
+}
+
+function jsonTargetValue(target) {
+  if (!target) return "";
+  if (target.kind === "single") {
+    const input = document.querySelector(`[data-comfyui-slot="${CSS.escape(target.key)}"]`);
+    return String(input?.value ?? "");
+  }
+  if (target.kind === "fixed") {
+    const fixed = target.scheme?.fixed || {};
+    return String(fixed[target.key] ?? batchSlotSavedValue(target.scheme?.detail, target.slot) ?? "");
+  }
+  if (target.kind === "item") {
+    const { item, scheme, source, key, slot } = target;
+    if (source === "extras") {
+      const value = item?.extras?.[key];
+      return String(value ?? "") || batchSlotSavedValue(scheme?.detail, slot);
+    }
+    return String(item?.[source] ?? "") || batchSlotSavedValue(scheme?.detail, slot);
+  }
+  return "";
+}
+
+function jsonTargetLabel(target) {
+  if (!target) return "";
+  if (target.slot?.label) return target.slot.label;
+  if (target.key) return target.key;
+  return target.source || "";
+}
+
+function jsonTargetAssign(target, text) {
+  if (!target) return;
+  if (target.kind === "single") {
+    rememberDraft(target.key, text);
+    return;
+  }
+  if (target.kind === "fixed") {
+    target.scheme.fixed[target.key] = text;
+    return;
+  }
+  if (target.kind === "item") {
+    if (target.source === "extras") {
+      target.item.extras = target.item.extras || {};
+      target.item.extras[target.key] = text;
+    } else {
+      target.item[target.source] = text;
+    }
+  }
+}
+
+function jsonTargetWrite(target, text) {
+  if (!target) return;
+  jsonTargetAssign(target, text);
+  if (target.kind === "single") {
+    const input = document.querySelector(`[data-comfyui-slot="${CSS.escape(target.key)}"]`);
+    if (input) {
+      input.value = text;
+      const holder = input.closest(".comfyui-json-param");
+      if (holder) refreshJsonParamHolder(holder);
+    }
+    updateDraftHint();
+    return;
+  }
+  renderBatch();
+}
+
+function openJsonParamEditor(target) {
+  const dialog = $("#comfyuiJsonDialog");
+  if (!dialog) return;
+  const value = jsonTargetValue(target);
+  const info = jsonParamInfo(value);
+  if (!info) {
+    toast("这个参数现在不是合法 JSON，先用普通输入框改回来");
+    return;
+  }
+  comfyJsonEditor.target = target;
+  comfyJsonEditor.kind = info.kind;
+  comfyJsonEditor.rows = info.kind === "array" ? info.rows.map((row) => JSON.parse(JSON.stringify(row))) : [];
+  comfyJsonEditor.objectValue = info.kind === "object" ? JSON.parse(JSON.stringify(info.value)) : null;
+  const label = jsonTargetLabel(target);
+  const preset = jsonParamFlavor(value) === "preset";
+  $("#comfyuiJsonTitle").textContent = info.kind === "object" ? "编辑 JSON 参数" : (preset ? "编辑提示词预设" : "编辑 JSON 列表");
+  $("#comfyuiJsonSubtitle").textContent = `${label} · 改列表或右侧原始 JSON，应用后写回这个参数`;
+  $("#comfyuiJsonListTitle").textContent = info.kind === "object" ? "字段列表" : (preset ? "预设列表" : "列表");
+  const add = $("#comfyuiJsonAdd");
+  if (add) {
+    add.hidden = info.kind !== "array";
+    add.textContent = "＋ 添加项目";
+  }
+  const error = $("#comfyuiJsonError");
+  if (error) error.textContent = "";
+  renderJsonEditorEntries();
+  $("#comfyuiJsonRaw").value = JSON.stringify(info.kind === "array" ? comfyJsonEditor.rows : comfyJsonEditor.objectValue, null, 2);
+  jsonEditorValidateRaw();
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+function closeJsonParamEditor() {
+  const dialog = $("#comfyuiJsonDialog");
+  if (!dialog) return;
+  comfyJsonEditor.target = null;
+  if (typeof dialog.close === "function") dialog.close();
+  else dialog.removeAttribute("open");
+}
+
+function jsonEditorHasEnabled(rows) {
+  return rows.some((row) => Object.prototype.hasOwnProperty.call(row, "enabled"));
+}
+
+function jsonEditorEntryMarkup(row, index, rows) {
+  const fields = jsonEntryKeys(rows).map((key) => {
+    const value = row[key];
+    if (value && typeof value === "object") {
+      return `<div class="comfyui-json-nested"><span>${escapeText(jsonFieldLabel(key))}</span><small>嵌套对象或数组，请在原始 JSON 里修改（不会被丢弃）</small></div>`;
+    }
+    const type = jsonEntryFieldType(rows, key);
+    if (type === "bool") {
+      return `<label class="comfyui-json-field"><span>${escapeText(jsonFieldLabel(key))}</span><input type="checkbox" data-json-field="${escapeText(key)}" ${value ? "checked" : ""}></label>`;
+    }
+    if (type === "number") {
+      return `<label class="comfyui-json-field"><span>${escapeText(jsonFieldLabel(key))}</span><input type="number" step="any" data-json-field="${escapeText(key)}" value="${escapeText(value ?? "")}"></label>`;
+    }
+    return `<label class="comfyui-json-field"><span>${escapeText(jsonFieldLabel(key))}</span><input type="text" data-json-field="${escapeText(key)}" value="${escapeText(value ?? "")}"></label>`;
+  }).join("");
+  const enabled = Object.prototype.hasOwnProperty.call(row, "enabled")
+    ? `<label class="comfyui-json-enabled"><input type="checkbox" data-json-enabled ${row.enabled !== false ? "checked" : ""}>启用</label>`
+    : "";
+  return `<article class="comfyui-json-entry" data-json-index="${index}">
+    <div class="comfyui-json-entry-head"><strong>项目 ${index + 1}</strong>${enabled}<button type="button" class="comfyui-json-remove" data-json-remove="${index}" aria-label="删除这一项">×</button></div>
+    <div class="comfyui-json-fields">${fields}</div>
+  </article>`;
+}
+
+function renderJsonEditorEntries() {
+  const host = $("#comfyuiJsonEntries");
+  if (!host) return;
+  if (comfyJsonEditor.kind === "object") {
+    host.innerHTML = '<p class="comfyui-json-empty">这是 JSON 对象：在右侧原始 JSON 里增删字段，应用后按原结构写回。</p>';
+    return;
+  }
+  const rows = comfyJsonEditor.rows;
+  host.innerHTML = rows.length
+    ? rows.map((row, index) => jsonEditorEntryMarkup(row, index, rows)).join("")
+    : '<p class="comfyui-json-empty">列表为空，点「添加项目」开始；也可以在右侧直接写 JSON。</p>';
+}
+
+function jsonEditorSyncRaw() {
+  const raw = $("#comfyuiJsonRaw");
+  if (!raw) return;
+  const value = comfyJsonEditor.kind === "object" ? comfyJsonEditor.objectValue : comfyJsonEditor.rows;
+  raw.value = JSON.stringify(value, null, 2);
+  jsonEditorValidateRaw();
+}
+
+function jsonEditorValidateRaw() {
+  const raw = $("#comfyuiJsonRaw");
+  const box = $("#comfyuiJsonValidation");
+  const apply = $("#comfyuiJsonApply");
+  if (!raw || !box) return null;
+  const checked = jsonEditableValue(raw.value);
+  if (checked.ok) {
+    box.className = "comfyui-json-validation";
+    box.textContent = Array.isArray(checked.value) ? "JSON 格式正确，对象数组结构可识别" : "JSON 格式正确，对象结构可识别";
+    if (apply) apply.disabled = false;
+    return checked;
+  }
+  box.className = "comfyui-json-validation invalid";
+  box.textContent = checked.message;
+  if (apply) apply.disabled = true;
+  return null;
+}
+
+function jsonEditorRawChanged() {
+  const checked = jsonEditorValidateRaw();
+  if (!checked) return;
+  if (Array.isArray(checked.value)) {
+    comfyJsonEditor.kind = "array";
+    comfyJsonEditor.rows = checked.value;
+    comfyJsonEditor.objectValue = null;
+    renderJsonEditorEntries();
+  } else {
+    comfyJsonEditor.kind = "object";
+    comfyJsonEditor.rows = [];
+    comfyJsonEditor.objectValue = checked.value;
+    renderJsonEditorEntries();
+  }
+}
+
+function jsonEditorEntryChanged(event) {
+  const card = event.target.closest?.("[data-json-index]");
+  if (!card) return;
+  const index = Number(card.dataset.jsonIndex);
+  const row = comfyJsonEditor.rows[index];
+  if (!row) return;
+  if (event.target.matches("[data-json-enabled]")) {
+    row.enabled = event.target.checked;
+  } else {
+    const key = event.target.dataset.jsonField;
+    if (!key) return;
+    row[key] = event.target.type === "checkbox"
+      ? event.target.checked
+      : event.target.type === "number"
+        ? (String(event.target.value).trim() === "" ? 0 : Number(event.target.value))
+        : String(event.target.value);
+  }
+  jsonEditorSyncRaw();
+}
+
+function jsonEditorEntryClick(event) {
+  const remove = event.target.closest?.("[data-json-remove]");
+  if (!remove) return;
+  const index = Number(remove.dataset.jsonRemove);
+  if (!Number.isInteger(index)) return;
+  comfyJsonEditor.rows.splice(index, 1);
+  renderJsonEditorEntries();
+  jsonEditorSyncRaw();
+}
+
+function jsonEditorAddEntry() {
+  if (comfyJsonEditor.kind !== "array") return;
+  comfyJsonEditor.rows.push(jsonNewEntry(comfyJsonEditor.rows));
+  renderJsonEditorEntries();
+  jsonEditorSyncRaw();
+}
+
+function jsonEditorFormat() {
+  const checked = jsonEditableValue($("#comfyuiJsonRaw")?.value || "");
+  if (!checked.ok) { jsonEditorValidateRaw(); return; }
+  $("#comfyuiJsonRaw").value = JSON.stringify(checked.value, null, 2);
+  jsonEditorValidateRaw();
+}
+
+function jsonEditorApply() {
+  const checked = jsonEditorValidateRaw();
+  if (!checked) return;
+  const target = comfyJsonEditor.target;
+  if (!target) return;
+  jsonTargetWrite(target, JSON.stringify(checked.value));
+  closeJsonParamEditor();
+}
+
 function renderSlot(slot) {
   const type = slot.field_type;
   // 媒体槽内部有自己的「选择文件」label：<label> 不能嵌 <label>，外层用 div。
   const isMedia = slot.control === "media" || MEDIA_FIELD_TYPES.has(type);
-  const wrap = document.createElement(isMedia ? "div" : "label");
+  const key = `${slot.node_id}|${slot.field_name}`;
+  // JSON 行里有按钮：不能再包在 <label> 里（交互内容不能嵌 label）。
+  const jsonRow = !isMedia && type === "text" && Boolean(jsonParamInfo(savedDraft(key) ?? slot.default ?? ""));
+  const wrap = document.createElement(isMedia || jsonRow ? "div" : "label");
   wrap.className = "comfyui-param" + (isMedia ? " comfyui-param-media" : "");
   const title = document.createElement("span");
   title.className = "comfyui-param-label";
@@ -1329,7 +1742,6 @@ function renderSlot(slot) {
   title.textContent = roleLabel ? `${roleLabel} · ${fullLabel}` : fullLabel;
   title.title = fullLabel;
   wrap.append(title);
-  const key = `${slot.node_id}|${slot.field_name}`;
   wrap.dataset.paramKey = key;
   if (isMedia) {
     wrap.append(renderMediaPicker(slot, key));
@@ -1360,6 +1772,11 @@ function renderSlot(slot) {
     area.value = initialFieldValue(slot, key);
     area.spellcheck = false;
     wrap.append(area);
+    return wrap;
+  }
+  if (jsonRow) {
+    // JSON 数组/对象不摊成一长串文本：摘要 + 编辑入口，值仍由隐藏 input 承载。
+    wrap.append(renderJsonParam(slot, key));
     return wrap;
   }
   if (slot.control === "multiline") {
@@ -3704,7 +4121,13 @@ function batchFixedMarkup(scheme) {
     const key = slotKeyOf(slot);
     const value = scheme.fixed[key] ?? batchSlotSavedValue(detail, slot);
     let control = "";
-    if (slot.field_type === "bool") {
+    if (slot.field_type === "text" && jsonParamInfo(value)) {
+      control = `<div class="cbm-json-param">
+        <span class="cbm-json-summary">${escapeText(jsonParamSummary(value))}</span>
+        <button type="button" class="cbm-btn tiny" data-batch-json-edit data-json-source="fixed" data-scheme="${scheme.id}" data-fixed-key="${escapeText(key)}" data-json-key="${escapeText(key)}">${escapeText(jsonParamButtonText(value))}</button>
+        <span class="cbm-json-helper">${escapeText(jsonParamHelper(value))}</span>
+      </div>`;
+    } else if (slot.field_type === "bool") {
       control = `<select data-batch-fixed="${escapeText(key)}" data-scheme="${scheme.id}">
         <option value="true"${String(value) === "true" ? " selected" : ""}>开</option>
         <option value="false"${String(value) !== "true" ? " selected" : ""}>关</option>
@@ -3744,7 +4167,9 @@ function batchFixedAppliedMarkup(scheme) {
     const slot = (scheme.detail?.params || []).find((row) => slotKeyOf(row) === key);
     const label = slot?.label || key;
     const value = scheme.fixed[key];
-    return `<span class="cbm-kv">${escapeText(label)} ${escapeText(typeof value === "boolean" ? (value ? "开" : "关") : String(value))}</span>`;
+    const jsonSummary = jsonParamSummary(value);
+    const shown = jsonSummary || (typeof value === "boolean" ? (value ? "开" : "关") : String(value));
+    return `<span class="cbm-kv">${escapeText(label)} ${escapeText(shown)}</span>`;
   }).join("");
 }
 
@@ -3800,13 +4225,50 @@ function batchItemsMarkup(scheme, schemeIndex) {
   </table></div>`;
 }
 
+// 批量单元格里的 JSON 摘要：紧凑按钮打开同一个弹窗，不把整串 JSON 摊进表格。
+function batchJsonParamMarkup(scheme, itemIndex, source, value, key = "", pointId = "") {
+  return `<div class="cbm-json-param cbm-json-param-cell">
+    <span class="cbm-json-summary">${escapeText(jsonParamSummary(value))}</span>
+    <button type="button" class="cbm-btn tiny" data-batch-json-edit data-json-source="${source}" data-scheme="${scheme.id}" data-item="${itemIndex}" data-json-key="${escapeText(key)}" data-extra="${escapeText(String(pointId || ""))}">${escapeText(jsonParamButtonText(value))}</button>
+    <span class="cbm-json-helper">${escapeText(jsonParamHelper(value))}</span>
+  </div>`;
+}
+
+function openBatchJsonEditor(button) {
+  const scheme = batchSchemeOf(button?.dataset?.scheme || "");
+  if (!scheme) return;
+  const source = String(button.dataset.jsonSource || "");
+  if (source === "fixed") {
+    const key = String(button.dataset.fixedKey || "");
+    const slot = (scheme.detail?.params || []).find((row) => slotKeyOf(row) === key);
+    if (slot) openJsonParamEditor({ kind: "fixed", scheme, key, slot });
+    return;
+  }
+  const itemIndex = Number(button.dataset.item);
+  const item = scheme.items[itemIndex];
+  if (!item) return;
+  if (source === "extras") {
+    const key = String(button.dataset.jsonKey || "");
+    const slot = jsonSlotFromKey(scheme.detail, key);
+    openJsonParamEditor({ kind: "item", scheme, item, itemIndex, source: "extras", key, slot });
+    return;
+  }
+  const mapping = scheme.mapping || {};
+  const slot = batchSlotByAddress(scheme.detail, mapping[`${source}_slot`]);
+  if (slot) openJsonParamEditor({ kind: "item", scheme, item, itemIndex, source, slot });
+}
+
 // 指认列的一个单元格：按指认类型出控件（第二段提示词是叙述文本，备用槽跟参数类型走）。
 function batchExtraCellMarkup(scheme, item, itemIndex, point) {
   const detail = scheme.detail;
   const slot = batchSlotByAddress(detail, point.slot);
   const key = extraKeyOf(point);
   const value = itemExtraValue(item, key);
+  const effective = value || batchSlotSavedValue(detail, slot);
   const bind = `<td data-batch-extra="${escapeText(String(point.id || ""))}">`;
+  if (slot?.field_type === "text" && jsonParamInfo(effective)) {
+    return `${bind}${batchJsonParamMarkup(scheme, itemIndex, "extras", effective, key, point.id)}</td>`;
+  }
   if (point.kind === "prompt") {
     return `${bind}<textarea class="cbm-extra-prompt" rows="2" placeholder="第二段交给工作流的提示词" data-batch-item="extras" data-extra-key="${escapeText(key)}" data-scheme="${scheme.id}" data-item="${itemIndex}">${escapeText(value)}</textarea></td>`;
   }
@@ -3872,6 +4334,10 @@ function batchItemRowMarkup(scheme, item, itemIndex, ports) {
   // 分辨率控件需要当前条目的索引，必须与条目行处于同一作用域。
   const resolutionControl = () => {
     const slot = batchSlotByAddress(scheme.detail, scheme.mapping?.resolution_slot);
+    const current = String(item.resolution || "").trim() || batchSlotSavedValue(scheme.detail, slot);
+    if (slot?.field_type === "text" && jsonParamInfo(current)) {
+      return batchJsonParamMarkup(scheme, itemIndex, "resolution", current);
+    }
     if (slot && (slot.candidates || []).length) {
       const choices = slot.candidates.map((candidate) => String(candidate));
       // 回填的旧值可能已不在工作流的候选里：保留它并标出来，不让下拉静默改值。
@@ -3926,11 +4392,19 @@ function batchItemRowMarkup(scheme, item, itemIndex, ports) {
       : autoSkip ? "留空 · 自动跳过" : required ? "必填 · 点选/拖入" : "点选/拖入";
     return `<td><span class="cbm-empty-slot${required && missing ? " is-missing" : ""}${keptOriginal ? " is-kept" : ""}" data-batch-tile data-batch-skipped="" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" data-kind="${kind}" title="点选 / 拖入换素材；⊘ 跳过这个输入"><span class="cbm-slot-label">${labelText}</span>${skipButton}</span></td>`;
   }).join("");
-  const promptCell = `<td>
+  const promptSlot = batchSlotByAddress(scheme.detail, scheme.mapping?.prompt_slot);
+  const promptValue = String(item.prompt || "").trim() || batchSlotSavedValue(scheme.detail, promptSlot);
+  const promptCell = promptSlot?.field_type === "text" && jsonParamInfo(promptValue)
+    ? `<td>${batchJsonParamMarkup(scheme, itemIndex, "prompt", promptValue)}</td>`
+    : `<td>
     <textarea class="cbm-script" rows="3" placeholder="最终交给工作流的提示词" data-batch-item="prompt" data-scheme="${scheme.id}" data-item="${itemIndex}">${escapeText(item.prompt)}</textarea>
     ${item.script && converting ? '<button type="button" class="cbm-convert" disabled>转换中…</button>' : ""}
   </td>`;
-  const durationControl = `<input type="number" min="1" step="any" style="width:76px" placeholder="按工作流"
+  const durationSlot = batchSlotByAddress(scheme.detail, scheme.mapping?.duration_slot);
+  const durationValue = String(item.duration || "").trim() || batchSlotSavedValue(scheme.detail, durationSlot);
+  const durationControl = durationSlot?.field_type === "text" && jsonParamInfo(durationValue)
+    ? batchJsonParamMarkup(scheme, itemIndex, "duration", durationValue)
+    : `<input type="number" min="1" step="any" style="width:76px" placeholder="按工作流"
     data-batch-item="duration" data-scheme="${scheme.id}" data-item="${itemIndex}" value="${escapeText(item.duration)}">`;
   return `<tr${missing ? ' class="is-missing"' : ""}>
     <td><input type="text" class="cbm-name" maxlength="120" data-batch-item="name" data-scheme="${scheme.id}" data-item="${itemIndex}" value="${escapeText(item.name)}"></td>
@@ -3975,6 +4449,8 @@ function clearBatchPrompts(scheme) {
 }
 
 function onBatchClick(event) {
+  const jsonButton = event.target.closest("[data-batch-json-edit]");
+  if (jsonButton) { openBatchJsonEditor(jsonButton); return; }
   const target = event.target.closest("[data-batch-action]");
   const tile = event.target.closest("[data-batch-tile]");
   if (!target && tile) {
@@ -4715,7 +5191,8 @@ async function submitBatch() {
         name: String(item.name || "").trim() || `条目 ${scheme.items.indexOf(item) + 1}`,
         script: String(item.script || "").trim(),
         prompt: String(item.prompt || "").trim(),
-        duration_seconds: duration ? Number(duration) : null,
+        // 时长映射到 JSON 文本参数时原样提交字符串；普通数字仍走数值契约。
+        duration_seconds: duration ? (jsonParamInfo(duration) ? duration : Number(duration)) : null,
         resolution,
         extras,
         shots: Math.max(1, Math.floor(Number(item.shots) || 1)),

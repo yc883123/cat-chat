@@ -797,6 +797,34 @@
               <p class="comfyui-import-error" id="comfyuiSaveAsError" role="alert"></p>
             </form>
           </dialog>
+          <dialog class="comfyui-import-dialog comfyui-json-dialog" id="comfyuiJsonDialog" aria-label="编辑 JSON 参数">
+            <form method="dialog" class="comfyui-import-form">
+              <h3 id="comfyuiJsonTitle">编辑 JSON 参数</h3>
+              <p class="comfyui-import-reminder" id="comfyuiJsonSubtitle">改列表或右侧原始 JSON，应用后写回这个参数。</p>
+              <div class="comfyui-json-editor">
+                <section class="comfyui-json-list-pane">
+                  <div class="comfyui-json-toolbar">
+                    <strong id="comfyuiJsonListTitle">列表</strong>
+                    <button class="control-button tiny" type="button" id="comfyuiJsonAdd">＋ 添加项目</button>
+                  </div>
+                  <div class="comfyui-json-entries" id="comfyuiJsonEntries"></div>
+                </section>
+                <section class="comfyui-json-raw-pane">
+                  <div class="comfyui-json-toolbar">
+                    <strong>原始 JSON</strong>
+                    <button class="control-button tiny" type="button" id="comfyuiJsonFormat">格式化</button>
+                  </div>
+                  <textarea id="comfyuiJsonRaw" spellcheck="false" aria-label="原始 JSON"></textarea>
+                  <p class="comfyui-json-validation" id="comfyuiJsonValidation" role="status"></p>
+                </section>
+              </div>
+              <div class="comfyui-import-actions">
+                <button class="control-button" type="button" id="comfyuiJsonApply">应用修改</button>
+                <button class="control-button" type="button" id="comfyuiJsonCancel">取消</button>
+              </div>
+              <p class="comfyui-import-error" id="comfyuiJsonError" role="alert"></p>
+            </form>
+          </dialog>
         </div>
 
         <!-- 拆书匠（小说改编，内部标识 module="novel" 不变）：页面结构在这里定稿；交互与渲染由

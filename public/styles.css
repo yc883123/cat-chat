@@ -4833,6 +4833,45 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .comfyui-import-form textarea { font-family: var(--mono, monospace); resize: vertical; }
 .comfyui-import-actions { display: flex; gap: 8px; justify-content: flex-end; }
 
+/* JSON 数组参数：摘要行 + 编辑入口（单次 / 批量固定 / 批量逐条共用） */
+.comfyui-json-param, .cbm-json-param { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--surface-inset); min-width: 0; }
+.comfyui-json-param { margin-top: 2px; }
+.cbm-json-param { margin: 2px 0; }
+.comfyui-json-summary, .cbm-json-summary { font-size: 12px; font-weight: 600; color: var(--text); white-space: nowrap; }
+.comfyui-json-helper, .cbm-json-helper { flex: 1 1 120px; min-width: 0; font-size: 11px; color: var(--muted); line-height: 1.4; }
+.cbm-json-param-cell { flex-direction: column; align-items: flex-start; gap: 4px; padding: 6px 8px; min-width: 140px; }
+.cbm-json-param-cell .cbm-json-helper { flex-basis: auto; }
+
+/* JSON 参数共享弹窗：桌面双栏，手机单列滚动 */
+.comfyui-json-dialog { max-width: 920px; width: min(94vw, 920px); max-height: min(88vh, 760px); overflow: hidden; }
+.comfyui-json-dialog .comfyui-import-form { min-height: 0; }
+.comfyui-json-editor { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; min-height: 0; }
+.comfyui-json-list-pane, .comfyui-json-raw-pane { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; }
+.comfyui-json-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+.comfyui-json-entries { display: flex; flex-direction: column; gap: 8px; min-height: 120px; max-height: min(46vh, 420px); overflow: auto; padding-right: 2px; }
+.comfyui-json-entry { flex: none; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); overflow: hidden; }
+.comfyui-json-entry-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--surface-2); border-bottom: 1px solid var(--line); }
+.comfyui-json-entry-head strong { flex: 1 1 auto; min-width: 0; font-size: 11.5px; }
+.comfyui-json-enabled { flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.comfyui-json-remove { border: 0; background: transparent; color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; padding: 2px 4px; }
+.comfyui-json-remove:hover { color: var(--danger); }
+.comfyui-json-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; padding: 8px; }
+.comfyui-json-field { display: grid; gap: 3px; min-width: 0; font-size: 10.5px; color: var(--muted); }
+.comfyui-json-field input { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); color: var(--text); padding: 4px 6px; font-size: 11.5px; }
+.comfyui-json-field input[type="checkbox"] { width: auto; }
+.comfyui-json-nested { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 2px; padding: 5px 6px; border: 1px dashed var(--line-strong); border-radius: var(--r-sm); font-size: 10.5px; color: var(--muted); }
+.comfyui-json-nested span { color: var(--text); font-weight: 600; }
+.comfyui-json-empty { margin: 0; padding: 16px 10px; text-align: center; font-size: 11.5px; color: var(--muted); border: 1px dashed var(--line-strong); border-radius: var(--r-md); }
+#comfyuiJsonRaw { width: 100%; min-height: 200px; max-height: min(46vh, 420px); resize: vertical; font-family: var(--mono, monospace); font-size: 11px; line-height: 1.5; }
+.comfyui-json-validation { margin: 0; font-size: 10.5px; color: var(--success, #168879); }
+.comfyui-json-validation.invalid { color: var(--danger, #c0392b); }
+
+@media (max-width: 760px) {
+  .comfyui-json-dialog { width: calc(100vw - 16px); max-height: 92dvh; overflow: auto; }
+  .comfyui-json-editor { grid-template-columns: 1fr; }
+  .comfyui-json-entries, #comfyuiJsonRaw { max-height: 32dvh; }
+}
+
 @media (max-width: 760px) {
   .comfyui-columns { padding: 10px; gap: 10px; }
 }

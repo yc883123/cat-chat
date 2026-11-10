@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 4.2.3-beta
-  RELEASE_TAG: v4.2.3-beta
+  RELEASE_VERSION: 4.2.4-beta
+  RELEASE_TAG: v4.2.4-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-4.2.3-beta-windows-x64
+  PACKAGE_NAME: cat-chat-4.2.4-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-4.2.3-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-4.2.4-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -133,11 +133,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 4.2.3 Beta release
+      - name: Publish 4.2.4 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 4.2.3 Beta
+          name: Cat Chat 4.2.4 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -147,9 +147,13 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 4.2.3 Beta：修复更新说明串版
-            更新说明面板按版本收口：发布清单里的 release_notes 是整份历史（当前 314 条），选中哪一版就只取那一版的正文，不再把全部历史版本堆进右栏。
-            说明按正文真换行拆开：首行作标题、其余逐条列出；滚动条长度恢复，渲染不再被几百段正文拖慢。
-            兼容已有发布：旧清单、磁盘缓存、合成 latest 条目与源码模式共用同一套收口逻辑，历史版本标签页也能正常显示。
-            验证与边界：更新相关 58 项、发版守门 41 项与本轮全量测试通过；未连真实发布页逐版点选复测。
-            Cat Chat 4.2.3 Beta Windows build。更新协议、既有数据位置和双名称发布资产保持兼容。
+            Cat Chat 4.2.4 Beta：造梦机 JSON 参数更好用
+            弹窗条目瘦身：两字段条目从 143px 压到 82px、四字段从 213px 压到 129px，列表可视高度 420→520px，一屏从 3 条变成 6 条，条目多时不用滚半天。
+            LoRA 列表（lora_data）的「模型文件」改成可直接选：点进输入框就列出 models/loras 里的全部 LoRA，可搜索、可手输，长文件名折行显示，不再只靠手打。
+            修掉「有下拉箭头却点不开」：原生 datalist 会按输入框里现有的整条路径过滤，和候选清单经常一个都对不上；现在换成应用内候选下拉，挂在弹窗内部，不会被模态层挡住。
+            sha256 是节点内部的文件摘要，左侧不再显示这个输入框（原值仍保留在右侧原始 JSON 里），换模型文件时自动清空。
+            模型强度、CLIP 强度等数字字段支持鼠标滚轮：一格 ±0.1，按住 Shift 走 ±0.01，值固定两位小数，也不会带着列表一起滚。
+            贴签匠打完标后「按图」结果不再消失：批次转到已完成时，逐图卡片、标签描述和 TXT 状态都保留在结果区。
+            贴签匠手机端：在批次/结果档上点预设、自定义页签会同步切回设置档，五枚按钮按内容定宽不再越出格子。
+            验证与边界：全量 4381 项测试、静态检查（scan_undef / esm_graph / tdz）通过，并用真实 LoRA 工作流在隔离实例里走了端到端冒烟；候选清单依赖 ComfyUI 在线，离线时该字段退回普通输入框。
+            Cat Chat 4.2.4 Beta Windows build。更新协议、既有数据位置和双名称发布资产保持兼容。

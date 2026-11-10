@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 4.2.1-beta
-  RELEASE_TAG: v4.2.1-beta
+  RELEASE_VERSION: 4.2.2-beta
+  RELEASE_TAG: v4.2.2-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-4.2.1-beta-windows-x64
+  PACKAGE_NAME: cat-chat-4.2.2-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-4.2.1-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-4.2.2-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -133,11 +133,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 4.2.1 Beta release
+      - name: Publish 4.2.2 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 4.2.1 Beta
+          name: Cat Chat 4.2.2 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -147,10 +147,11 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 4.2.1 Beta：造梦机 JSON 数组参数可视化编辑
-            造梦机单次生成：LoRA 配置、提示词预设等 JSON 数组参数不再显示成一长串文本，改为「N 项启用」摘要和「编辑列表/编辑预设」入口；弹窗内可逐项改字段、启用/停用、删除、添加，右侧原始 JSON 可核对和修复，应用后写回本次任务草稿。
-            造梦机批量固定参数：展开固定参数里同样显示摘要和编辑入口，修改写回当前方案的固定值，方案内每条共用，摘要栏与展开状态保留。
-            造梦机批量逐条参数：映射到 JSON text 参数的提示词、时长、分辨率或备用槽单元格都显示摘要入口，只写回当前条目对应位置，不串到别的条目；空值仍按工作流原值执行。
-            编辑规则：可视控件不认识的字段、嵌套对象和数组原样保留，可在原始 JSON 里修改；JSON 非法或根结构不匹配时禁用应用，取消不写回。JSON 仍作为 text 字符串提交，不改后端协议。
-            验证与边界：全量测试、静态检查与 Playwright 桌面/375 冒烟通过；真实 ComfyUI 出片与真实模型未在本机复测。
-            Cat Chat 4.2.1 Beta Windows build。更新协议、既有数据位置和双名称发布资产保持兼容。
+            Cat Chat 4.2.2 Beta：贴签匠写入本地 TXT
+            贴签匠预设打标与自定义打标各增加一个「写入本地 TXT」开关，两页签各记各的选择；默认关闭，关闭时模型看不到任何 TXT 工具，保持原打标与导出路径。
+            开启后模型通过结构化工具调用（write_caption_txt）按图写文本：write 创建或整份覆盖，append 按调用顺序追加；item 只能指向当前这张图，缺少必填字段、类型不符或指向别的图片时直接返回工具错误，不执行写入。
+            预设 provider 与自定义 Skill 两条链路共用同一工具与同一套路径规则：每张图一个与图片同名的 .txt，保留相对目录；同名文件在任务内自动补序号，不会串写。
+            模型没有调用工具时按最终标注结果自动回填一份 TXT，保证每张成功图片都有文件；开关不参与配置指纹，同图同配置仍复用已有标注、不重复计费，续跑任务重新写 TXT。
+            结果区逐图显示 TXT 状态与字数，可查看、下载；结果区新增「TXT 文件夹」入口；删除批次记录时一并清理该批次的 TXT 输出目录。
+            验证与边界：贴签匠专项 188 项、全量 4328 项、静态检查与 Playwright 桌面/375 冒烟通过；真实模型的结构化工具调用未在本机复测。
+            Cat Chat 4.2.2 Beta Windows build。更新协议、既有数据位置和双名称发布资产保持兼容。

@@ -247,7 +247,8 @@ class SupervisedRecoveryTests(unittest.TestCase):
         self.assertIsNone(self.app.storage.active_run(self.cid))
         self.app.storage.update_conversation_settings(self.cid, permission_mode="confirm")
         self.adapter.control("local", self.tid, "continue", request_id="retry-zero-submission")
-        self.wait_phase("completed")
+        # 这条要等「执行 + 复核」两轮跑完：CI 单核 runner 上 8s 会偶发不够。
+        self.wait_phase("completed", timeout=30)
         self.settled()
         self.assertEqual(self.calls, ["execute", "review"])
 

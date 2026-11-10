@@ -82,8 +82,10 @@ class SupervisedAppTests(unittest.TestCase):
     def start(self):
         return self.app.super_agent_domain.action("local", self.tid, {"node_id": self.nid, "action": "start", "request_id": "start"})
 
-    def wait_phase(self, *phases):
-        deadline = time.monotonic() + 8
+    def wait_phase(self, *phases, timeout: float = 8):
+        # 默认 8s 对单轮足够；要连跑「执行 + 复核」两轮的用例在慢 runner 上会不够，
+        # 由调用方显式传 timeout（2026-11-10 CI 上 4.2.4 构建即挂在 8s 超时）。
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self.adapter.sync("local", self.tid, self.nid)
             state = self.adapter.detail("local", self.tid)

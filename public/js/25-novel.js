@@ -133,6 +133,8 @@ const novel = {
     selected: new Set(),
     loading: false,
     token: 0,
+    deleting: false,
+    deleteFailures: new Map(),
   },
 };
 
@@ -611,7 +613,11 @@ function manuscriptCard(row) {
     bits.push(source ? `来源：${manuscriptLabel(source)}` : "来源稿件已删除");
   }
   if (row.broken) bits.push("文件损坏，需要重新导入或删除");
-  meta.textContent = bits.filter(Boolean).join(" · ");
+  meta.replaceChildren(...bits.filter(Boolean).map((text) => {
+    const line = document.createElement("span");
+    line.textContent = text;
+    return line;
+  }));
 
   head.append(toggle, meta);
   card.append(head);
@@ -839,6 +845,16 @@ function selectedStageVersion(stage) {
   const versions = stage === "elements" ? novel.book?.elements_versions : novel.book?.outline_versions;
   const selectedNumber = novel.selectedVersions[stage];
   return versions?.find((row) => Number(row.version) === selectedNumber) || versions?.at(-1) || null;
+}
+
+function reconcileSelectedVersions() {
+  for (const stage of ["elements", "outline", "script"]) {
+    const selected = Number(novel.selectedVersions[stage] || 0);
+    const rows = novel.book?.[`${stage}_versions`] || [];
+    if (selected && !rows.some((row) => Number(row.version) === selected)) {
+      novel.selectedVersions[stage] = 0;
+    }
+  }
 }
 
 function stageSavedText(stage) {
@@ -2436,7 +2452,7 @@ function renderManage() {
   if (!list) return;
   const scope = $("#novelManageScope");
   if (scope) {
-    scope.textContent = novel.bookId ? `《${novel.book?.title || "作品"}》` : "先打开作品";
+    scope.textContent = novel.bookId ? bookTitleLabel(novel.book?.title || "作品") : "先打开作品";
   }
   const note = $("#novelManageNote");
   if (note) {
@@ -2472,7 +2488,7 @@ function renderManage() {
       box.type = "checkbox";
       box.dataset.novelManageRow = key;
       box.checked = selectable && novel.manage.selected.has(key);
-      box.disabled = !selectable;
+      box.disabled = !selectable || novel.manage.deleting;
       box.setAttribute("aria-label", `选择 ${manageRowLabel(row)}`);
       // 勾选框只管批量删除；点这一行本身就地查看内容。
       const copy = document.createElement("button");
@@ -2485,6 +2501,13 @@ function renderManage() {
       const small = document.createElement("small");
       small.textContent = manageRowMeta(row);
       copy.append(strong, small);
+      const deletionError = novel.manage.deleteFailures.get(key);
+      if (deletionError) {
+        const failure = document.createElement("small");
+        failure.className = "novel-delete-failure";
+        failure.textContent = `删除失败：${deletionError}`;
+        copy.append(failure);
+      }
       // 生成记录带结果开头一行做预览；作品内容版本行 small 里已经有来源，不重复。
       if (row.type === "task") {
         const preview = taskPreviewText(row);
@@ -2515,7 +2538,7 @@ function renderManage() {
       : `当前筛选范围内 ${total} 条可删除。`;
   }
   const del = $("#novelManageDelete");
-  if (del) del.disabled = count === 0 || !novel.bookId;
+  if (del) del.disabled = count === 0 || !novel.bookId || novel.manage.deleting;
 }
 
 // ---- 管理记录：点一行就地看内容 ----
@@ -2565,7 +2588,8 @@ async function openManageRecord(row) {
   body.textContent = String(text || "").trim() || "这条记录没有可显示的内容。";
 }
 
-async function loadManageRecords() {  if (!novel.bookId) {
+async function loadManageRecords(rethrow = false) {
+  if (!novel.bookId) {
     novel.manage.records = null;
     renderManage();
     return;
@@ -2582,6 +2606,7 @@ async function loadManageRecords() {  if (!novel.bookId) {
     novel.manage.records = null;
     const errorEl = $("#novelManageError");
     if (errorEl) errorEl.textContent = String(error?.message || error);
+    if (rethrow) throw error;
   } finally {
     if (token === novel.manage.token) {
       novel.manage.loading = false;
@@ -2593,6 +2618,7 @@ async function loadManageRecords() {  if (!novel.bookId) {
 function openManage(tab = "") {
   if (tab) novel.manage.tab = tab;
   novel.manage.selected.clear();
+  novel.manage.deleteFailures.clear();
   const dialog = $("#novelManageDialog");
   if (!dialog) return;
   novel.manage.open = true;
@@ -2618,7 +2644,8 @@ function closeManage() {
 
 async function deleteManageSelection() {
   const keys = [...novel.manage.selected];
-  if (!keys.length || !novel.bookId) return;
+  if (!keys.length || !novel.bookId || novel.manage.deleting) return;
+  const bookId = novel.bookId;
   const items = [];
   const taskIds = [];
   for (const key of keys) {
@@ -2645,23 +2672,77 @@ async function deleteManageSelection() {
   if (!window.confirm(confirmText)) return;
   const errorEl = $("#novelManageError");
   if (errorEl) errorEl.textContent = "";
+  novel.manage.deleting = true;
+  novel.manage.deleteFailures = new Map();
+  renderManage();
+  const succeeded = new Set();
+  const failed = new Map();
+  const warnings = [];
+  const recordKey = (item) => item.type === "manuscript"
+    ? `manuscript:${item.chapter_no}:${item.id}` : `${item.type}:${item.id}`;
+  const acceptResult = (payload, requested, keyOf) => {
+    const successes = Array.isArray(payload?.succeeded) ? payload.succeeded
+      : (Array.isArray(payload?.removed) ? payload.removed
+        : (Array.isArray(payload?.deleted) ? payload.deleted : []));
+    const wanted = new Set(requested);
+    for (const item of successes) {
+      const key = keyOf(item);
+      if (wanted.has(key)) {
+        succeeded.add(key);
+        if (item?.warning) warnings.push(String(item.warning));
+      }
+    }
+    const failures = Array.isArray(payload?.failed) ? payload.failed : [];
+    for (const item of failures) {
+      const key = keyOf(item);
+      if (wanted.has(key)) failed.set(key, String(item.error || item.reason || "删除失败"));
+    }
+    for (const key of requested) {
+      if (!succeeded.has(key) && !failed.has(key)) failed.set(key, "未收到删除成功明细，请刷新核对后重试");
+    }
+  };
   try {
     if (items.length) {
-      const payload = await api("/api/novel/records/delete", {
-        method: "POST",
-        body: { book_id: novel.bookId, items, revision: novel.book?.revision },
-      });
-      novel.book = payload.book;
+      const requested = items.map(recordKey);
+      try {
+        const payload = await api("/api/novel/records/delete", {
+          method: "POST",
+          body: { book_id: bookId, items, revision: novel.book?.revision },
+        });
+        acceptResult(payload, requested, recordKey);
+        if (novel.bookId === bookId && payload.book) {
+          novel.book = payload.book;
+          reconcileSelectedVersions();
+        }
+      } catch (error) {
+        for (const key of requested) failed.set(key, String(error?.message || error));
+      }
     }
     if (taskIds.length) {
-      await api("/api/novel/tasks/delete", {
-        method: "POST",
-        body: { book_id: novel.bookId, task_ids: taskIds },
-      });
+      const requested = taskIds.map((id) => `task:${id}`);
+      try {
+        const payload = await api("/api/novel/tasks/delete", {
+          method: "POST", body: { book_id: bookId, task_ids: taskIds },
+        });
+        // 旧接口只返回完整删除数量；只有数量与本次范围完全一致才可确认成功。
+        if (!Array.isArray(payload?.succeeded) && !Array.isArray(payload?.removed)
+            && Number(payload?.removed) === taskIds.length && payload?.ok !== false
+            && !(payload?.failed || []).length) {
+          requested.forEach((key) => succeeded.add(key));
+        } else {
+          acceptResult(payload, requested, (item) => `task:${typeof item === "string" ? item : item.id}`);
+        }
+      } catch (error) {
+        for (const key of requested) failed.set(key, String(error?.message || error));
+      }
     }
-    novel.manage.selected.clear();
-    await loadManageRecords();
+    if (novel.bookId !== bookId) return;
+    for (const key of succeeded) novel.manage.selected.delete(key);
+    novel.manage.deleteFailures = failed;
+    await loadManageRecords(true);
+    if (novel.bookId !== bookId) return;
     await refreshStageTasks();
+    if (novel.bookId !== bookId) return;
     // 记录删了，当前章与选择器都要跟着更新，不能留着指向已删稿件的选择。
     for (const [chapterNo, manuscriptId] of [...novel.manuscriptChoice.entries()]) {
       if (manuscriptId && !(novel.manage.records?.manuscripts || []).some((row) => row.id === manuscriptId)) {
@@ -2674,10 +2755,23 @@ async function deleteManageSelection() {
     novel.manuscriptBodies.clear();
     if (novel.chapterNo) await openChapter(novel.chapterNo);
     else renderAll();
-    toast("已删除选中的记录");
+    if (novel.bookId !== bookId) return;
+    if (failed.size) {
+      const summary = `删除${succeeded.size ? "部分成功" : "失败"} ${succeeded.size} / ${keys.length}，${failed.size} 条失败；失败项保留勾选，可核对原因后重试。`;
+      if (errorEl) errorEl.textContent = [summary, ...warnings].join("\n");
+      toast(summary);
+    } else {
+      if (errorEl && warnings.length) errorEl.textContent = `记录已删除，清理提醒：\n${warnings.join("\n")}`;
+      toast(`已删除 ${succeeded.size} 条选中记录`);
+    }
   } catch (error) {
-    if (errorEl) errorEl.textContent = String(error?.message || error);
-    fail("删除记录失败", error);
+    if (novel.bookId !== bookId) return;
+    const message = `已确认删除 ${succeeded.size} / ${keys.length}，刷新记录失败：${String(error?.message || error)}。请刷新核对。`;
+    if (errorEl) errorEl.textContent = message;
+    toast(message);
+  } finally {
+    novel.manage.deleting = false;
+    if (novel.bookId === bookId) renderManage();
   }
 }
 
@@ -2707,6 +2801,7 @@ function setStage(stage) {
 }
 
 function renderAll() {
+  reconcileSelectedVersions();
   renderBookSummary();
   renderChapters();
   renderImportBlock();
@@ -3072,6 +3167,11 @@ async function exportBook(fmt = "txt", withExtras = false) {
       `已交给浏览器下载「${filename}」（${fmt.toUpperCase()}${withExtras ? "，含要素与大纲" : "，全书"}）。`
       + "可以在浏览器的下载列表里查看；若系统弹出保存位置，按你选的位置保存。");
   } catch (error) {
+    const issues = Array.isArray(error?.payload?.issues) ? error.payload.issues : [];
+    const detail = issues.length
+      ? issues.map((item) => `第 ${item.chapter_no} 章：${item.reason || "正文不可读"}`).join("\n")
+      : String(error?.message || error);
+    setSaveState("导出已停止", detail);
     fail("导出失败", error);
   }
 }

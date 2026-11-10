@@ -5907,7 +5907,7 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
   background: var(--surface-inset); color: var(--text); font-size: 12.5px; font-family: inherit;
 }
 .writer-field textarea { resize: vertical; min-height: 64px; line-height: 1.6; }
-.writer-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.writer-grid-2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
 .writer-limits { display: grid; gap: 12px; }
 .writer-limit > span { display: flex; align-items: baseline; justify-content: space-between; font-size: 11.5px; color: var(--muted); }
 .writer-limit > span b { color: var(--text); font-variant-numeric: tabular-nums; }
@@ -6264,6 +6264,81 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
   }
   .writer-manage-form { height: 100%; padding: 10px 10px 12px; }
   .writer-manage-list { max-height: none; }
+}
+
+/* 拆书匠 / 织书台：收缩约束贯穿网格和列表，长标题只在文本列内省略。
+   不依赖页面 overflow-x:hidden 掩盖越界；路径、来源与错误保留完整可读换行。 */
+.novel-page-head, .writer-page-head, .novel-stagebar, .writer-stagebar,
+.novel-columns, .writer-columns, .novel-panel, .writer-panel,
+.novel-editor-body, .novel-editor-fields, .novel-preview-body, .writer-scroll,
+.novel-stage-panel, .novel-stage-group, .writer-stage-panel, .writer-stage-group,
+.writer-side, .writer-grid-2, .novel-field, .writer-field,
+.novel-chapter-list, .novel-chapter-row, .writer-chapter-list, .writer-chapter-row,
+.novel-manuscripts, .novel-manuscript-card, .novel-manuscript-head,
+.novel-manage-form, .writer-manage-form, .novel-manage-list, .writer-manage-list,
+.novel-manage-row, .writer-manage-row, .writer-version-list, .writer-version-row,
+.novel-block, .writer-block, .writer-summary, .writer-outline-view {
+  min-width: 0; max-width: 100%;
+}
+.novel-page-title-row, .writer-page-title-row { flex: 1 1 auto; }
+.novel-page-state, .writer-page-state { flex: 1 1 auto; width: 0; }
+.novel-page-actions, .writer-page-actions { min-width: 0; max-width: 100%; }
+.novel-chapter-copy, .writer-chapter-copy,
+.novel-book-open, .writer-book-open, .novel-manage-open, .writer-manage-open {
+  grid-template-columns: minmax(0, 1fr);
+}
+.novel-stage-group, .novel-block, .novel-manuscript-card, .novel-field, .novel-limit,
+.writer-field, .writer-block, .writer-version-row {
+  grid-template-columns: minmax(0, 1fr);
+}
+.novel-stage-meta { min-width: 0; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.novel-manuscript-toggle { min-width: 0; max-width: 100%; flex: 1 1 auto; }
+.novel-manuscript-caret { flex: none; }
+.novel-manuscript-toggle strong, .writer-version-row strong,
+.novel-book-open strong, .writer-book-open strong {
+  display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.novel-manuscript-meta { min-width: 0; max-width: 100%; display: grid; gap: 1px; }
+.novel-manuscript-meta > span { display: block; min-width: 0; overflow-wrap: anywhere; }
+.novel-manage-row small, .writer-manage-row small, .writer-version-row small,
+.novel-note, .writer-note, .novel-path, .writer-path,
+.novel-dialog-error, .writer-dialog-error, .novel-stage-warnings,
+.writer-hint, .writer-note-card p, .novel-book-open small, .writer-book-open small {
+  min-width: 0; max-width: 100%; overflow-wrap: anywhere;
+}
+.novel-manage-row .novel-delete-failure { color: var(--danger); }
+#novelManageError, #novelSaveNote { white-space: pre-wrap; }
+.novel-manage-head, .writer-manage-head { min-width: 0; }
+.writer-manage-head h3 { min-width: 0; flex: 0 1 auto; }
+.writer-manage-head h3 small {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.novel-group-head, .writer-group-head, .writer-stage-head { min-width: 0; }
+.writer-group-head strong, .writer-stage-head strong { min-width: 0; overflow-wrap: anywhere; }
+#writerDraftTitle { display: block; flex: 1 1 0; width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.writer-group-head small, .writer-stage-head small {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.writer-novel-import-dialog { width: min(720px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); }
+.writer-novel-import-dialog .writer-dialog-form {
+  min-width: 0; max-height: calc(100dvh - 28px); overflow-y: auto;
+}
+.writer-novel-import-dialog :is(input, select, textarea) { min-width: 0; max-width: 100%; }
+.writer-novel-import-dialog :is(p, small, strong) { overflow-wrap: anywhere; }
+.writer-novel-import-dialog .writer-dialog-actions { flex-wrap: wrap; }
+#writerNovelImportBody { display: grid; gap: 10px; min-width: 0; }
+#writerNovelImportError { white-space: pre-wrap; }
+.writer-novel-source-list { display: grid; gap: 8px; min-width: 0; max-height: 38dvh; overflow-y: auto; }
+.writer-novel-source-list .writer-field { overflow-wrap: anywhere; }
+.writer-novel-import-dialog .writer-novel-source-choice { display: flex; align-items: flex-start; gap: 8px; }
+.writer-novel-source-choice :is(input[type="radio"], input[type="checkbox"]) {
+  flex: none; width: 16px; height: 16px; min-height: 0; margin: 2px 0 0; padding: 0;
+}
+.writer-novel-source-choice span { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .novel-page-actions, .writer-page-actions { flex-wrap: wrap; overflow: visible; }
+  .novel-page-actions .control-button, .writer-page-actions .control-button { min-height: 36px; }
+  .novel-dialog-actions, .writer-dialog-actions { flex-wrap: wrap; }
 }
 
 /* ============ KVMem 对话顶栏控制（仅 KVMem provider 显示） ============ */

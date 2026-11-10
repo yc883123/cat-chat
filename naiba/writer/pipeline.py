@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import copy
 import threading
 import time
 import traceback
@@ -28,6 +29,7 @@ from naiba.core.contracts import (
     WRITER_CHAPTER_BASELINE_KEY,
     WRITER_CHAPTER_STATES_KEY,
     WRITER_PREVIOUS_CHAPTER_KEY,
+    WRITER_SETUP_SNAPSHOT_KEY,
 )
 from naiba.writer import prompts
 from naiba.writer.store import (
@@ -197,7 +199,7 @@ class WriterPipelineManager:
             setup_version_id = str(setup_version_id or "").strip() or str(
                 manifest.get("current_setup_version_id") or "")
             setup = None
-            if setup_version_id:
+            if setup_version_id or isinstance(manifest.get("continuation"), dict):
                 try:
                     setup = self.store.load_setup(book_id, manifest=manifest, version_id=setup_version_id)
                 except (LookupError, WriterStoreError):
@@ -223,6 +225,9 @@ class WriterPipelineManager:
                 existing = {int(n) for n in manifest.get("chapter_ids") or []}
                 chapter_plan_rows = [{"no": no} for no in sorted(existing)
                                      if from_no <= no < from_no + want_count]
+                for row in chapter_plan_rows:
+                    self.store._assert_chapter_editable(self.store._load_chapter_index(
+                        self.store._book_dir(book_id), row["no"]))
                 if not chapter_plan_rows:
                     raise WriterPipelineError(
                         f"拆章范围内（第 {from_no}–{from_no + want_count - 1} 章）"
@@ -261,6 +266,7 @@ class WriterPipelineManager:
                 if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
                     raise WriterPipelineError(f"作品里没有第 {chapter_no} 章；请先同步章节")
                 chapter = self.store._load_chapter_index(self.store._book_dir(book_id), chapter_no)
+                self.store._assert_chapter_editable(chapter)
                 self.store._check_revision(chapter, chapter_revision, what=f"第 {chapter_no} 章")
                 chapter_revision = int(chapter.get("revision") or 0)
             else:
@@ -314,6 +320,9 @@ class WriterPipelineManager:
                 "allow_drop": bool(allow_drop),
                 "book_title": book_title,
             }
+            if isinstance(manifest.get("continuation"), dict) and isinstance(setup, dict):
+                # 旧设定或空设定的摘要可能来自清单补值，版本号不能冻结这部分内容。
+                snapshot[WRITER_SETUP_SNAPSHOT_KEY] = copy.deepcopy(setup)
             if steps[0] in ("segs", "draft"):
                 baseline, previous = self.store.chapter_writing_inputs(book_id, chapter_no)
                 snapshot[WRITER_CHAPTER_BASELINE_KEY] = baseline
@@ -426,6 +435,9 @@ class WriterPipelineManager:
                 )
             if status not in ("failed", "conflict", "interrupted", "cancelled"):
                 raise WriterPipelineError("只有失败、冲突、中断或取消的生成可以重试")
+            if not rebase and isinstance(manifest.get("continuation"), dict):
+                # 先校验旧任务来源，避免缺少可恢复快照时先改成 running 再报错。
+                self._pipeline_setup(book_id, pipeline.get("request_snapshot") or {})
             attempt = int(pipeline.get("attempt") or 0) + 1
 
             def _retry(record: dict[str, Any]) -> None:
@@ -441,6 +453,9 @@ class WriterPipelineManager:
                         vid = str(manifest.get(f"current_{field}_version_id") or "")
                         snapshot[f"{field}_version_id"] = vid
                         record.setdefault("source_version_ids", {})[field] = vid
+                    if isinstance(manifest.get("continuation"), dict):
+                        snapshot[WRITER_SETUP_SNAPSHOT_KEY] = copy.deepcopy(self.store.load_setup(
+                            book_id, manifest=manifest, version_id=snapshot["setup_version_id"]))
                     chapter_no = int(snapshot.get("chapter_no") or 0)
                     if any(step in ("segs", "draft") for step in record.get("steps") or []):
                         baseline, previous = self.store.chapter_writing_inputs(book_id, chapter_no)
@@ -601,12 +616,28 @@ class WriterPipelineManager:
 
     # ---- 步骤输出解析（条件 3） ----
 
+    def _pipeline_setup(self, book_id: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+        """续写使用起点实际设定；旧任务只有可独立恢复的版本才允许原样重试。"""
+        frozen = snapshot.get(WRITER_SETUP_SNAPSHOT_KEY)
+        if isinstance(frozen, dict):
+            return copy.deepcopy(frozen)
+        version_id = str(snapshot.get("setup_version_id") or "")
+        manifest = self.store._load_manifest(book_id)
+        if isinstance(manifest.get("continuation"), dict):
+            # 兼容自带摘要的旧版本；缺字段时无法知道任务起点曾补入哪一版摘要。
+            if version_id:
+                record = self.store._read_json(
+                    self.store._setup_path(self.store._book_dir(book_id), version_id), what="设定版本")
+                if isinstance(record.get("continuation_summary"), dict):
+                    return record
+            raise WriterPipelineError("这条旧续写任务未保存完整设定快照，请选择「基于当前版本重新生成」后重试")
+        return self.store.load_setup(book_id, manifest=manifest, version_id=version_id)
+
     def _accumulated_setup(self, book_id: str, pipeline: dict[str, Any]) -> dict[str, Any]:
         """链内已积累的设定内容：起点 = 快照里的设定版本，之后逐步合并 step_outputs。"""
         snapshot = pipeline.get("request_snapshot") if isinstance(pipeline.get("request_snapshot"), dict) else {}
-        setup_version_id = str(snapshot.get("setup_version_id") or "")
         try:
-            setup = self.store.load_setup(book_id, version_id=setup_version_id)
+            setup = self._pipeline_setup(book_id, snapshot)
         except (LookupError, WriterStoreError):
             setup = {}
         outputs = pipeline.get("step_outputs") if isinstance(pipeline.get("step_outputs"), dict) else {}
@@ -622,6 +653,8 @@ class WriterPipelineManager:
                 "worldview": setup.get("worldview"), "characters": setup.get("characters"),
                 "style": setup.get("style"), "constraints": setup.get("constraints"),
             }
+        if "continuation_summary" in setup:
+            merged["continuation_summary"] = copy.deepcopy(setup["continuation_summary"])
         return merged
 
     def _parse_step_output(self, step: str, result: str, *, pipeline: dict[str, Any],
@@ -1016,8 +1049,7 @@ class WriterPipelineManager:
             )
             task_title = f"《{book_title}》· 多部复核梳理（第 {part_no} 部）"
         elif step == "split":
-            setup = self.store.load_setup(
-                book_id, version_id=str(snapshot.get("setup_version_id") or ""))
+            setup = self._pipeline_setup(book_id, snapshot)
             outline = self.store.load_outline(book_id)
             part_no = int(snapshot.get("part_no") or 1)
             part = next((row for row in (outline.get("parts") or [])
@@ -1080,8 +1112,7 @@ class WriterPipelineManager:
             # 版本号与正文取自同一次读取：状态记录固化的就是被提取的那份正文。
             pending_state_version = str(chapter_record.get("current_version_id") or "")
             try:
-                state_setup = self.store.load_setup(
-                    book_id, version_id=str(snapshot.get("setup_version_id") or ""))
+                state_setup = self._pipeline_setup(book_id, snapshot)
             except (LookupError, WriterStoreError):
                 state_setup = {}
             names = [str(row.get("name") or "").strip()
@@ -1121,8 +1152,7 @@ class WriterPipelineManager:
                 "beat": str(chapter.get("beat") or ""),
                 "hook": str(chapter.get("hook") or ""),
             }
-            setup = self.store.load_setup(
-                book_id, version_id=str(snapshot.get("setup_version_id") or ""))
+            setup = self._pipeline_setup(book_id, snapshot)
             kind = str(pipeline.get("kind") or "")
             mode = "continue" if kind == "chapter_continue" else "whole"
             draft_tail = ""

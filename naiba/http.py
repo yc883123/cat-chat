@@ -977,6 +977,10 @@ class RequestHandler(BaseHTTPRequestHandler):
         # ---- 织书台（原创写作） ----
         elif path == "/api/writer/books":
             self._json(*self.app.writer.api_create_book(body))
+        elif path == "/api/writer/novel-import/preview":
+            self._json(*self.app.writer.api_preview_novel_import(body))
+        elif path == "/api/writer/novel-import":
+            self._json(*self.app.writer.api_import_novel(body))
         elif path == "/api/writer/reveal":
             # 打开作品保存目录（路径由服务端决定，不收客户端参数）。
             if not self._is_local_request():

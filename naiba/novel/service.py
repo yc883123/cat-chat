@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -82,6 +83,15 @@ class NovelServiceError(ValueError):
 
 class NovelConflictError(NovelServiceError):
     """乐观并发冲突：revision 对不上，调用方应重新读取后再改（对应 409）。"""
+
+
+class NovelIntegrityError(NovelServiceError):
+    """章节预检失败；保留每章原因，导出和续写导入共用。"""
+
+    def __init__(self, issues: list[dict[str, Any]]):
+        self.issues = [dict(issue) for issue in issues]
+        details = "；".join(f"第 {row['chapter_no']} 章：{row['reason']}" for row in self.issues)
+        super().__init__(f"作品章节预检失败，已停止操作：{details}")
 
 
 def _now_ms() -> int:
@@ -143,7 +153,7 @@ class NovelStore:
     def __init__(self, data_dir: Path):
         self._root = Path(data_dir) / "studio" / "novel"
         self._imports = self._root / "_imports"
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     # ---- 路径与安全 ----
 
@@ -277,7 +287,40 @@ class NovelStore:
             raise NovelServiceError("作品清单与目录不一致")
         if not isinstance(manifest.get("chapter_ids"), list):
             raise NovelServiceError("作品清单缺少章节列表")
+        self._sync_current_versions(manifest)
         return manifest
+
+    @staticmethod
+    def _sync_current_versions(manifest: dict[str, Any]) -> None:
+        """版本数组是成果唯一裁决点；缓存字段随剩余最新版本同步。"""
+        for kind in ("elements", "outline", "script"):
+            key = f"{kind}_versions"
+            if key not in manifest:
+                continue  # 没有版本数组的老清单仍保留其单份成果。
+            rows = [row for row in (manifest.get(key) or []) if isinstance(row, dict)]
+            latest = max(rows, key=lambda row: int(row.get("version") or 0), default={})
+            version = int(latest.get("version") or 0)
+            if kind == "elements":
+                raw = str(latest.get("raw") or "")
+                buckets = _split_elements(raw)
+                manifest["elements"] = {
+                    **buckets, "raw": raw, "version": version,
+                    "version_id": str(latest.get("id") or ""),
+                    "updated_at": int(latest.get("updated_at") or 0),
+                    "task_id": str(latest.get("task_id") or ""),
+                }
+            else:
+                manifest[kind] = (copy.deepcopy(latest.get("script") or []) if kind == "script"
+                                  else str(latest.get("text") or ""))
+                manifest[f"{kind}_version"] = version
+                manifest[f"{kind}_version_id"] = str(latest.get("id") or "")
+                manifest[f"{kind}_updated_at"] = int(latest.get("updated_at") or 0)
+                manifest[f"{kind}_task_id"] = str(latest.get("task_id") or "")
+                if kind == "script":
+                    manifest["script_parsed"] = bool(latest) and any(
+                        str(row.get("scene") or "").strip() for row in manifest["script"]
+                        if isinstance(row, dict)
+                    )
 
     # ---- 老作品升级（schema 1 → 2）----
 
@@ -896,6 +939,11 @@ class NovelStore:
 
     def delete_manuscript(self, book_id: str, chapter_no: int, manuscript_id: str) -> dict[str, Any]:
         """删一份稿件。删掉该章最后一份稿件 = 移除这一章（至少保留一章）。"""
+        with self._lock:
+            return self._delete_manuscript_locked(book_id, chapter_no, manuscript_id)
+
+    def _delete_manuscript_locked(self, book_id: str, chapter_no: int,
+                                  manuscript_id: str) -> dict[str, Any]:
         manifest = self._load_manifest(book_id)
         ids = [int(n) for n in manifest.get("chapter_ids") or []]
         if chapter_no not in ids:
@@ -914,18 +962,24 @@ class NovelStore:
                 manifest["chapter_ids"] = [n for n in ids if n != chapter_no]
                 self._bump_manifest(book_dir, manifest)
             return {"ok": True, "removed_chapter": True, "chapter_ids": manifest["chapter_ids"]}
+        previous_index = copy.deepcopy(index)
         index["manuscript_ids"] = remaining
+        index["revision"] = int(index.get("revision") or 0) + 1
         if str(index.get("base_manuscript_id") or "") == target:
             # 原文被删：基础稿件顺延到剩下的第一份，不再谎称还有原文。
             index["base_manuscript_id"] = remaining[0]
         with self._lock:
             self._write_json(self._chapter_path(book_dir, chapter_no), index)
             try:
+                self._bump_manifest(book_dir, manifest)
+            except Exception:
+                self._write_json(self._chapter_path(book_dir, chapter_no), previous_index)
+                raise
+            try:
                 self._manuscript_path(book_dir, chapter_no, target).unlink(missing_ok=True)
             except OSError as exc:
                 # 清单已更新但文件没删掉：如实报错，重试可清理（不留下指向已删稿件之外的坏记录）。
                 raise NovelServiceError(f"稿件文件删除失败：{exc}（清单已更新，可重试清理）") from exc
-            self._bump_manifest(book_dir, manifest)
         return {"ok": True, "removed_chapter": False, "manuscript_ids": remaining}
 
     def delete_chapter(self, book_id: str, chapter_no: int) -> dict[str, Any]:
@@ -1027,7 +1081,7 @@ class NovelStore:
                 "task_id": str(previous.get("task_id") or ""),
             }]
         versions = self._ensure_version_ids(versions, "el")
-        version = len(versions) + 1
+        version = max((int(row.get("version") or 0) for row in versions if isinstance(row, dict)), default=0) + 1
         entry = {"id": _new_version_id("el"), "version": version, "raw": text,
                  "updated_at": _now_ms(), "task_id": str(task_id or "")}
         entry["chapter_ids"] = list(chapter_ids or [])
@@ -1067,7 +1121,7 @@ class NovelStore:
                 "task_id": str(manifest.get("outline_task_id") or ""),
             }]
         versions = self._ensure_version_ids(versions, "ol")
-        version = len(versions) + 1
+        version = max((int(row.get("version") or 0) for row in versions if isinstance(row, dict)), default=0) + 1
         entry = {"id": _new_version_id("ol"), "version": version, "text": body,
                  "updated_at": _now_ms(), "task_id": str(task_id or ""),
                  "chapter_ids": list(chapter_ids or []),
@@ -1124,7 +1178,7 @@ class NovelStore:
                          "updated_at": previous_updated_at, "task_id": previous_task_id,
                          "chapter_ids": []}]
         versions = self._ensure_version_ids(versions, "sc")
-        version = len(versions) + 1
+        version = max((int(row.get("version") or 0) for row in versions if isinstance(row, dict)), default=0) + 1
         entry = {"id": _new_version_id("sc"), "version": version, "script": manifest["script"],
                  "updated_at": _now_ms(), "task_id": str(task_id or ""),
                  "chapter_ids": source_chapters,
@@ -1362,85 +1416,158 @@ class NovelStore:
 
     def delete_records(self, book_id: str, items: list[dict[str, Any]],
                        expected_revision: Any = None) -> dict[str, Any]:
-        """批量删除管理记录（稿件 / 要素版本 / 大纲版本 / 剧本版本）。
+        """静态校验整批拒绝；运行期逐项反馈，删除与版本裁决共用写锁。"""
+        with self._lock:
+            return self._delete_records_locked(book_id, items, expected_revision)
 
-        统一校验：作品归属、记录存在、允许的删除范围。无效项**不执行任何删除**，
-        整批拒绝——避免「删了一半」这种半成品状态（计划 §6.3）。
-        批量删除**不能移除章节**：删掉某章最后一份稿件会把整章连根移除，
-        「全选 + 删除」一下就能把整本书删空（2026-10-28 157 章变 1 章的事故路径）。
-        所以这种项整批拒绝，移除章节只能走章节上的显式删除。
-        """
+    def _delete_records_locked(self, book_id: str, items: list[dict[str, Any]],
+                               expected_revision: Any) -> dict[str, Any]:
         if not isinstance(items, list) or not items:
             raise NovelServiceError("请选择要删除的记录")
         manifest = self._check_apply_revision(book_id, expected_revision)
         book_dir = self._book_dir(book_id)
-        plans: list[tuple[str, dict[str, Any]]] = []
-        removing_chapters: list[int] = []
+        plans: list[dict[str, Any]] = []
+        by_chapter: dict[int, set[str]] = {}
+        seen: set[tuple[str, int, str]] = set()
+        registered = {int(number) for number in manifest.get("chapter_ids") or []}
         for raw in items:
             if not isinstance(raw, dict):
                 raise NovelServiceError("删除项必须是对象")
             kind = str(raw.get("type") or "").strip()
+            record_id = str(raw.get("id") or "").strip()
+            chapter_no = 0
             if kind == "manuscript":
                 chapter_no = raw.get("chapter_no")
                 if isinstance(chapter_no, bool) or not isinstance(chapter_no, int):
                     raise NovelServiceError("删除稿件必须说明章节号")
-                manuscript_id = str(raw.get("id") or "").strip()
+                if chapter_no not in registered:
+                    raise NovelServiceError(f"第 {chapter_no} 章不在当前作品中")
                 index = self._load_chapter_index(book_dir, chapter_no)
-                resolved = self._resolve_manuscript_id(index, manuscript_id)
-                if len(index.get("manuscript_ids") or []) <= 1:
-                    removing_chapters.append(chapter_no)
-                plans.append(("manuscript", {"chapter_no": chapter_no, "id": resolved}))
+                if not record_id:
+                    raise NovelServiceError("删除稿件必须指定稿件 ID")
+                self._resolve_manuscript_id(index, record_id)
+                by_chapter.setdefault(chapter_no, set()).add(record_id)
             elif kind in ("elements", "outline", "script"):
-                plans.append((kind, {"id": str(raw.get("id") or "").strip()}))
+                versions = manifest.get(f"{kind}_versions") or []
+                if not record_id or not any(isinstance(row, dict) and row.get("id") == record_id
+                                            for row in versions):
+                    raise NovelServiceError("要删除的版本不存在或不属于当前作品")
             else:
                 raise NovelServiceError(f"不支持的删除类型：{kind or '（空）'}")
+            identity = (kind, chapter_no, record_id)
+            if identity not in seen:
+                seen.add(identity)
+                plans.append({"type": kind, "id": record_id,
+                              **({"chapter_no": chapter_no} if kind == "manuscript" else {})})
+        removing_chapters = [number for number, removing in by_chapter.items()
+                             if len(removing) >= len(self._load_chapter_index(book_dir, number)["manuscript_ids"])]
         if removing_chapters:
             raise NovelServiceError(
                 "这些稿件是所在章节的最后一份，删除会把章节一起移除："
                 + "、".join(f"第 {n} 章" for n in sorted(set(removing_chapters)))
                 + "。批量删除不能移除章节；要移除章节请在章节上单独删除。"
             )
-        # 全部校验通过后才开始改盘。
-        removed: list[dict[str, Any]] = []
-        if any(kind == "manuscript" for kind, _ in plans):
-            for kind, payload in plans:
-                if kind != "manuscript":
-                    continue
-                self.delete_manuscript(book_id, payload["chapter_no"], payload["id"])
-                removed.append({"type": "manuscript", **payload})
-        version_targets: dict[str, list[str]] = {"elements": [], "outline": [], "script": []}
-        for kind, payload in plans:
-            if kind in version_targets:
-                version_targets[kind].append(payload["id"])
-        manifest = self._load_manifest(book_id)
-        changed = False
-        if version_targets["elements"]:
-            versions = [row for row in (manifest.get("elements_versions") or [])
-                        if str(row.get("id") or "") not in set(version_targets["elements"])]
-            if len(versions) != len(manifest.get("elements_versions") or []):
-                manifest["elements_versions"] = versions
-                changed = True
-        if version_targets["outline"]:
-            versions = [row for row in (manifest.get("outline_versions") or [])
-                        if str(row.get("id") or "") not in set(version_targets["outline"])]
-            if len(versions) != len(manifest.get("outline_versions") or []):
-                manifest["outline_versions"] = versions
-                changed = True
-        if version_targets["script"]:
-            versions = [row for row in (manifest.get("script_versions") or [])
-                        if str(row.get("id") or "") not in set(version_targets["script"])]
-            if len(versions) != len(manifest.get("script_versions") or []):
-                manifest["script_versions"] = versions
-                changed = True
-        if changed:
-            with self._lock:
-                self._bump_manifest(book_dir, manifest)
-        for kind in version_targets:
-            for version_id in version_targets[kind]:
-                removed.append({"type": kind, "id": version_id})
-        return {"ok": True, "removed": removed, "book": self._public_manifest(self._load_manifest(book_id))}
+        succeeded: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        for payload in plans:
+            try:
+                if payload["type"] == "manuscript":
+                    self.delete_manuscript(book_id, payload["chapter_no"], payload["id"])
+                else:
+                    manifest = self._load_manifest(book_id)
+                    key = f"{payload['type']}_versions"
+                    manifest[key] = [row for row in manifest.get(key) or []
+                                     if str(row.get("id") or "") != payload["id"]]
+                    self._sync_current_versions(manifest)
+                    self._bump_manifest(book_dir, manifest)
+                succeeded.append(dict(payload))
+            except Exception as exc:  # noqa: BLE001 - 已完成项不能因后项失败而被隐瞒。
+                # 索引已提交而清理旧文件失败时，记录已经不在作品中，不能误报仍可删除。
+                try:
+                    if payload["type"] == "manuscript":
+                        remaining = self._load_chapter_index(book_dir, payload["chapter_no"])["manuscript_ids"]
+                        committed = payload["id"] not in remaining
+                    else:
+                        latest = self._load_manifest(book_id)
+                        committed = not any(row.get("id") == payload["id"]
+                                            for row in latest.get(f"{payload['type']}_versions") or [])
+                except Exception:  # noqa: BLE001 - 无法复核时如实列为失败，不猜测成功。
+                    committed = False
+                if committed:
+                    succeeded.append({**payload, "warning": str(exc)})
+                else:
+                    failed.append({**payload, "error": str(exc)})
+        result: dict[str, Any] = {
+            "ok": not failed, "partial": bool(succeeded and failed),
+            "removed": succeeded, "succeeded": succeeded, "failed": failed,
+        }
+        try:
+            result["book"] = self._public_manifest(self._load_manifest(book_id))
+        except (LookupError, NovelServiceError, OSError) as exc:
+            result.update({"book": None, "refresh_error": str(exc)})
+        return result
 
     # ---- 导出 ----
+
+    def preflight_chapters(self, book_id: str, chapter_ids: list[int] | None = None,
+                           manuscripts_by_chapter: dict[int, str] | None = None,
+                           *, require_explicit: bool = False) -> dict[str, Any]:
+        """只读校验并一次取齐章节快照；任何坏章都不返回不完整正文。"""
+        with self._lock:
+            manifest = self._load_manifest(book_id, upgrade=False)
+            registered = [int(value) for value in manifest.get("chapter_ids") or []]
+            if chapter_ids is None:
+                picked = registered
+            else:
+                if not isinstance(chapter_ids, list) or not chapter_ids:
+                    raise NovelServiceError("请选择章节")
+                if any(isinstance(value, bool) or not isinstance(value, int) for value in chapter_ids):
+                    raise NovelServiceError("章节号必须是整数")
+                unknown = [value for value in chapter_ids if value not in registered]
+                if unknown:
+                    raise NovelIntegrityError([
+                        {"chapter_no": number, "manuscript_id": "", "reason": "章节不在作品清单中"}
+                        for number in dict.fromkeys(unknown)
+                    ])
+                wanted_numbers = set(chapter_ids)
+                picked = [number for number in registered if number in wanted_numbers]
+            wanted = manuscripts_by_chapter if isinstance(manuscripts_by_chapter, dict) else {}
+            book_dir = self._book_dir(book_id)
+            issues: list[dict[str, Any]] = []
+            chapters: list[dict[str, Any]] = []
+            for number in picked:
+                manuscript_id = str(wanted.get(number) or wanted.get(str(number)) or "").strip()
+                try:
+                    if int(manifest.get("schema_version") or 0) != SCHEMA_VERSION:
+                        raise NovelServiceError("作品仍是旧格式，请先打开作品完成升级")
+                    index = self._load_chapter_index(book_dir, number)
+                    if require_explicit and not manuscript_id:
+                        raise NovelServiceError("必须明确选择本章的稿件，不能自动改用其它稿件")
+                    if not manuscript_id:
+                        manuscript_id = str(index.get("base_manuscript_id") or "")
+                        if manuscript_id not in (index.get("manuscript_ids") or []):
+                            raise NovelServiceError("基础稿件索引缺失或不一致")
+                    manuscript_id = self._resolve_manuscript_id(index, manuscript_id)
+                    record = self._load_manuscript(book_dir, number, manuscript_id)
+                    if not str(record.get("content") or "").strip():
+                        raise NovelServiceError("稿件正文为空")
+                except (LookupError, NovelServiceError, ValueError, TypeError) as exc:
+                    issues.append({"chapter_no": number, "manuscript_id": manuscript_id, "reason": str(exc)})
+                    continue
+                chapters.append({
+                    "i": number, "title": str(index.get("title") or f"第 {number} 章"),
+                    "content": str(record["content"]), "content_len": len(record["content"]),
+                    "manuscript_id": manuscript_id, "manuscript_kind": str(record.get("kind") or ""),
+                    "manuscript_label": str(record.get("label") or ""),
+                    "manuscript_no": int(record.get("no") or 0),
+                    "source_manuscript_id": str(record.get("source_manuscript_id") or ""),
+                    "created_at": int(record.get("created_at") or 0),
+                })
+            if issues:
+                raise NovelIntegrityError(issues)
+            if not chapters:
+                raise NovelServiceError("作品没有可导出的章节")
+            return {"manifest": copy.deepcopy(manifest), "chapter_ids": list(picked), "chapters": chapters}
 
     def export_book(self, book_id: str, *, fmt: str = "txt", with_extras: bool = False,
                     manuscript_ids: dict[int, str] | None = None) -> str:
@@ -1450,22 +1577,15 @@ class NovelStore:
         稿件（原文）。`with_extras=True` 时在正文后附要素与大纲。
         标题只写一次：`book.json` 的清单是权威顺序，不重复也不漏章。
         """
-        manifest = self._load_manifest(book_id)
-        book_dir = self._book_dir(book_id)
-        wanted = manuscript_ids if isinstance(manuscript_ids, dict) else {}
+        snapshot = self.preflight_chapters(book_id, manuscripts_by_chapter=manuscript_ids)
+        manifest = snapshot["manifest"]
         title = str(manifest.get("title") or "未命名作品")
         parts: list[str] = []
         if fmt == "md":
             parts.append(f"# {title}\n")
-        for chapter_no in (int(n) for n in manifest.get("chapter_ids") or []):
-            try:
-                index = self._load_chapter_index(book_dir, chapter_no)
-                manuscript_id = self._resolve_manuscript_id(index, wanted.get(chapter_no) or wanted.get(str(chapter_no)))
-                record = self._load_manuscript(book_dir, chapter_no, manuscript_id)
-            except (LookupError, NovelServiceError):
-                continue
-            chapter_title = str(index.get("title") or f"第 {chapter_no} 章")
-            body = str(record.get("content") or "")
+        for chapter in snapshot["chapters"]:
+            chapter_title = chapter["title"]
+            body = chapter["content"]
             if fmt == "md":
                 parts.append(f"## {chapter_title}\n\n{body}\n")
             else:
@@ -2116,7 +2236,7 @@ class NovelService:
     def _selected_version(body: dict[str, Any], key: str, versions: list[Any], current: Any) -> int:
         raw = body.get(key)
         if raw is None or raw == "":
-            return int(versions[-1].get("version", 0) if versions else current or 0)
+            return int(current or 0)
         if isinstance(raw, bool):
             raise NovelServiceError(f"{key} 必须是正整数")
         try:
@@ -2251,11 +2371,38 @@ class NovelService:
                 return {"error": "这些任务不属于当前作品，不能删除"}, 409
             if str(task.get("status") or "") in {"queued", "running"}:
                 return {"error": "有任务还在执行，请先取消再删除"}, 409
-            ids.append(task_id)
-        try:
-            return self.app.studio.jobs.delete(ids), 200
-        except Exception as exc:  # noqa: BLE001 - 删除失败如实回报
-            return {"error": f"删除生成记录失败：{exc}"}, 500
+            if task_id not in ids:
+                ids.append(task_id)
+        if not ids:
+            return {"error": "请选择要删除的生成记录"}, 400
+        succeeded: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        for task_id in ids:
+            row = {"type": "task", "id": task_id}
+            try:
+                result = self.app.studio.jobs.delete([task_id])
+                if task_id in (result.get("deleted") or []):
+                    succeeded.append(row)
+                else:
+                    skipped = next((item for item in result.get("skipped") or []
+                                    if item.get("id") == task_id), {})
+                    reason = str(skipped.get("reason") or "删除结果未确认")
+                    failed.append({**row, "error": reason})
+            except Exception as exc:  # noqa: BLE001 - 后续失败仍须保留已经删完的项。
+                try:
+                    committed = self.app.studio.jobs.task(task_id) is None
+                except Exception:  # noqa: BLE001 - 存储不可读时不能推断成功。
+                    committed = False
+                if committed:
+                    succeeded.append({**row, "warning": str(exc)})
+                else:
+                    failed.append({**row, "error": str(exc)})
+        return {
+            "ok": not failed, "partial": bool(succeeded and failed),
+            "deleted": [row["id"] for row in succeeded],
+            "succeeded": succeeded, "failed": failed,
+            "skipped": [{"id": row["id"], "reason": row["error"]} for row in failed],
+        }, 200
 
     def _task(self, task_id: str) -> dict[str, Any] | None:
         try:
@@ -2333,6 +2480,8 @@ class NovelService:
             }, 200
         except LookupError as exc:
             return {"error": str(exc)}, 404
+        except NovelIntegrityError as exc:
+            return {"error": str(exc), "issues": exc.issues}, 400
         except NovelServiceError as exc:
             return {"error": str(exc)}, 400
 

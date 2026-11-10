@@ -13,6 +13,7 @@
 import { $, api, applyModelSkinFor, localFileUrl, state, toast } from "./01-core.js";
 import { isPywebview, saveLocalFile } from "./03-media.js";
 import { onStudioPageChange, setStudioPage } from "./22-studio.js";
+import { bindWriterNovelContinuation } from "./27a-writer-continuation.js";
 
 const WRITER_TASKS_URL = "/api/studio/tasks?module=writer";
 const LAST_BOOK_KEY = "naibaWriterLastBookId";
@@ -276,10 +277,11 @@ function setBusy(busy) {
     "writerSyncBtn", "writerDraftGenerate", "writerDraftSegs", "writerDraftContinue", "writerDraftRewrite",
     "writerDraftRebuildState", "writerContinuityRun",
     "writerDraftSave", "writerImportCommit", "writerExportBtn", "writerManageBtn",
-    "writerImportBtn", "writerBooksBtn", "writerNewBookBtn"]) {
+    "writerImportBtn", "writerNovelContinueBtn", "writerBooksBtn", "writerNewBookBtn"]) {
     const btn = $(`#${id}`);
     if (btn) btn.disabled = busy;
   }
+  renderDraft();
 }
 
 function kindLabel(kind) {
@@ -492,7 +494,8 @@ function chapterRow(row) {
   const strong = document.createElement("strong");
   strong.textContent = `第${row.no}章 ${row.title || ""}`;
   const small = document.createElement("small");
-  small.textContent = Number(row.len) > 0 ? `${fmtChars(row.len)} 字 · 已成稿` : "待写 · 梗概已有";
+  small.textContent = row.read_only ? `${fmtChars(row.len)} 字 · 导入正文 · 只读`
+    : Number(row.len) > 0 ? `${fmtChars(row.len)} 字 · 已成稿` : "待写 · 梗概已有";
   copy.append(strong, small);
   item.append(dot, copy);
   return item;
@@ -716,12 +719,14 @@ function renderBriefList() {
     title.type = "text";
     title.dataset.writerBriefTitle = String(row.no);
     title.value = String(row.title || "");
+    title.readOnly = Boolean(row.read_only);
     title.setAttribute("aria-label", `第${row.no}章标题`);
     head.append(no, title);
     const beat = document.createElement("textarea");
     beat.rows = 2;
     beat.dataset.writerBriefBeat = String(row.no);
     beat.value = String(row.beat || "");
+    beat.readOnly = Boolean(row.read_only);
     beat.placeholder = "这一章发生什么（80—150 字）";
     beat.setAttribute("aria-label", `第${row.no}章简述`);
     item.append(head, beat);
@@ -1259,6 +1264,7 @@ function renderOutlineVersions() {
 function renderDraft() {
   const chapter = writer.chapter;
   const hasChapter = Boolean(chapter);
+  const imported = Boolean(chapter?.read_only);
   const titleEl = $("#writerDraftTitle");
   if (titleEl) titleEl.textContent = hasChapter ? `第${chapter.no}章 ${chapter.title || ""}` : "还没有选择章节";
   const beatEl = $("#writerDraftBeat");
@@ -1267,22 +1273,37 @@ function renderDraft() {
   }
   const content = $("#writerDraftContent");
   if (content && !writer.draftDirty) content.value = hasChapter ? String(chapter.content || "") : "";
+  if (content) content.readOnly = imported;
+  const contentLabel = $("#writerDraftContentLabel");
+  if (contentLabel) contentLabel.textContent = imported
+    ? "导入正文（只读，原文版本和来源已保留）"
+    : "正文（可直接改；保存会生成新版本，不覆盖旧稿）";
+  const sourceNote = $("#writerImportedSourceNote");
+  if (sourceNote) {
+    sourceNote.hidden = !imported && !writer.book?.continuation;
+    const source = chapter?.source;
+    sourceNote.textContent = imported
+      ? `导入正文只读 · 拆书匠${source?.source_kind === "original" ? "原文" : "改编稿"} · 来源第 ${source?.source_chapter_no || chapter.no} 章。请在目录中选择新章节进行写作。`
+      : writer.book?.continuation ? "新章使用导入时确认的人物、关系、剧情现状和后续大纲；生成失败可在当前作品重试。" : "";
+  }
   const meta = $("#writerDraftMeta");
   if (meta) {
     if (!hasChapter) meta.textContent = "点左侧目录选一章";
     else if (String(chapter.content || "").trim()) meta.textContent = `${fmtChars(String(chapter.content).length)} 字 · ${chapter.versions?.length || 0} 个版本`;
     else meta.textContent = "还没有正文";
   }
-  const canWrite = hasChapter && Boolean(writer.book?.current_outline_version_id);
+  const canWrite = hasChapter && !imported && Boolean(writer.book?.current_outline_version_id);
   for (const id of ["writerDraftGenerate", "writerDraftSegs", "writerDraftRewrite"]) {
     const btn = $(`#${id}`);
     if (btn) btn.disabled = !canWrite || writer.busy;
   }
   const continueBtn = $("#writerDraftContinue");
-  if (continueBtn) continueBtn.disabled = !(hasChapter
+  if (continueBtn) continueBtn.disabled = imported || !(hasChapter
     && String(writer.draftDirty ? content?.value || "" : chapter?.content || "").trim()) || writer.busy;
   const save = $("#writerDraftSave");
-  if (save) save.disabled = !hasChapter || !writer.draftDirty || writer.busy;
+  if (save) save.disabled = imported || !hasChapter || !writer.draftDirty || writer.busy;
+  const rebuild = $("#writerDraftRebuildState");
+  if (rebuild) rebuild.disabled = imported || !hasChapter || writer.busy;
   const reload = $("#writerDraftReload");
   if (reload) reload.disabled = !hasChapter || !writer.draftDirty;
   // 版本清单
@@ -1296,6 +1317,7 @@ function renderDraft() {
       String(row.id || ""),
     )));
     if (versions.length) select.value = String(chapter.current_version_id || versions.at(-1).id || "");
+    select.disabled = imported || writer.busy;
   }
 }
 
@@ -1844,6 +1866,10 @@ async function submitPipeline(kind, opts = {}) {
   } = opts;
   if (!writer.bookId || writer.busy || writer.draftOperation) return;
   const isDraft = DRAFT_KINDS.has(kind);
+  if (isDraft && writer.chapter?.read_only) {
+    toast("导入的旧章节为只读，请选择新章节进行写作");
+    return;
+  }
   const snapshot = isDraft ? draftSnapshot() : null;
   const bookId = writer.bookId;
   const bookToken = writer.bookToken;
@@ -2317,6 +2343,10 @@ async function openChapter(chapterNo, { silent = false } = {}) {
 /** true 只表示保存及必要刷新全部成功，且期间没有编辑/切换；任何失败都不可继续生成。 */
 async function saveChapterEdit({ beforeGenerate = false } = {}) {
   if (!writer.bookId || !writer.chapter) return false;
+  if (writer.chapter.read_only) {
+    toast("导入的旧章节为只读，不能保存修改");
+    return false;
+  }
   if (!beforeGenerate && (writer.busy || writer.draftOperation)) return false;
   const snapshot = draftSnapshot();
   const { bookId, chapterNo, content } = snapshot;
@@ -2899,6 +2929,10 @@ async function submitSplitBatch({ fromNo, partNo, model }) {
 
 /** 改章节标题/简述（失焦保存）。 */
 async function updateChapterMeta(chapterNo, patch) {
+  if (writer.chapters.some(row => Number(row.no) === Number(chapterNo) && row.read_only)) {
+    toast("导入的旧章节为只读");
+    return;
+  }
   if (!writer.bookId || !chapterNo) return;
   try {
     const payload = await api(
@@ -3839,6 +3873,29 @@ export function bindWriterEvents() {
   restoreLimits();
   writer.initialized = true;
   setPane(writer.pane);
+  bindWriterNovelContinuation({
+    beforeOpen: () => {
+      if (writer.busy || writer.draftOperation) {
+        toast("请等当前保存或提交完成");
+        return false;
+      }
+      writeWriterDraft(writer.bookId);
+      return true;
+    },
+    onImported: async (payload) => {
+      const bookId = String(payload.book?.id || "");
+      if (!bookId) throw new Error("续写作品已创建，但返回信息不完整，请在作品列表中检查");
+      writeWriterDraft(writer.bookId);
+      await openBook(bookId);
+      if (writer.bookId !== bookId) throw new Error("续写作品已创建，打开失败；可重试打开，不会重复导入");
+      writer.chapter = null;
+      writer.chapterNo = 0;
+      await openChapter(Number(payload.new_chapter_no));
+      if (writer.chapterNo !== Number(payload.new_chapter_no)) throw new Error("续写作品已创建，新章读取失败；请重试打开");
+      setStage("draft");
+      setPane("editor");
+    },
+  });
 
   // ---- 页面头 ----
   $("#writerNewBookBtn")?.addEventListener("click", () => {

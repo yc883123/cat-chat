@@ -834,6 +834,16 @@ def build_draft_context(setup: dict[str, Any], chapter: dict[str, Any], *,
     parts: list[str] = [f"【创作提示词】\n{idea_text(setup)}"]
     slots.append({"key": "idea", "label": "创作提示词", "included": True,
                   "chars": len(parts[0])})
+    summary = setup.get("continuation_summary")
+    if isinstance(summary, dict):
+        labels = (("characters_state", "人物现状"), ("relations_state", "关系现状"),
+                  ("plot_state", "剧情现状"), ("next_outline", "后续大纲"))
+        summary_text = "\n".join(f"{label}：{summary.get(key, '')}" for key, label in labels)
+        parts.append("【人工确认的续写现状与后续大纲】\n" + summary_text
+                     + "\n以上为导入时人工确认的接续基线。已生成的新章事实优先于更早的状态，"
+                       "不得把人物、关系或剧情无故重置回原作早期，也不得把未确认推测写成既定事实。")
+        slots.append({"key": "continuation_summary", "label": "人工确认的续写现状", "included": True,
+                      "chars": len(summary_text)})
     if str(setup.get("worldview") or "").strip():
         parts.append(f"【世界观摘要】\n{worldview}")
         slots.append({"key": "worldview", "label": "世界观摘要", "included": True,

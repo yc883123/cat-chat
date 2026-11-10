@@ -414,6 +414,10 @@ def normalize_setup(payload: Any, *, base: dict[str, Any] | None = None) -> dict
                                  AVOID_MAX, what="雷区"),
         },
     }
+    continuation_summary = raw.get("continuation_summary", base.get("continuation_summary"))
+    if continuation_summary is not None or "continuation_summary" in raw:
+        from naiba.writer.novel_import import normalize_summary
+        merged["continuation_summary"] = normalize_summary(continuation_summary)
     return merged
 
 
@@ -667,6 +671,8 @@ class WriterStore:
             "created_at": int(manifest.get("created_at") or 0),
             "updated_at": int(manifest.get("updated_at") or 0),
         }
+        if isinstance(manifest.get("continuation"), dict):
+            payload["continuation"] = json.loads(json.dumps(manifest["continuation"]))
         return payload
 
     # ---- 作品 CRUD ----
@@ -765,6 +771,8 @@ class WriterStore:
                 "current_kind": current_kind,
                 "len": current_len,
                 "version_count": len([r for r in index.get("version_ids") or [] if isinstance(r, dict)]),
+                "read_only": bool(index.get("read_only")),
+                "source": dict(index.get("source") or {}),
             })
         setup = self.load_setup(book_id, manifest=manifest)
         outline = self.load_outline(book_id, manifest=manifest)
@@ -808,8 +816,19 @@ class WriterStore:
 
     # ---- 设定版本 ----
 
+    @staticmethod
+    def _with_continuation_summary(manifest: dict[str, Any],
+                                   content: dict[str, Any]) -> dict[str, Any]:
+        """补回续写底稿；已有版本的摘要保持原样，供生成和重试冻结引用。"""
+        continuation = manifest.get("continuation")
+        if isinstance(continuation, dict) and "continuation_summary" not in content:
+            from naiba.writer.novel_import import normalize_summary
+            return {**content, "continuation_summary": normalize_summary(continuation.get("summary"))}
+        return content
+
     def _write_setup_locked(self, book_dir: Path, manifest: dict[str, Any],
                             content: dict[str, Any], *, kind: str, task_id: str) -> str:
+        content = self._with_continuation_summary(manifest, content)
         versions = manifest.get("setup_versions") if isinstance(manifest.get("setup_versions"), list) else []
         version_no = (max((int(row.get("version") or 0) for row in versions if isinstance(row, dict)),
                           default=0) + 1)
@@ -833,8 +852,13 @@ class WriterStore:
         self._check_revision(manifest, expected_revision)
         book_dir = self._book_dir(book_id)
         merged_base = base_setup if isinstance(base_setup, dict) else None
+        if isinstance(manifest.get("continuation"), dict):
+            merged_base = {**(merged_base or {}),
+                           "continuation_summary": manifest["continuation"].get("summary")}
         normalized = normalize_setup(content, base=merged_base)
         with self._lock:
+            if isinstance(manifest.get("continuation"), dict):
+                manifest["continuation"]["summary"] = normalized["continuation_summary"]
             vid = self._write_setup_locked(book_dir, manifest, normalized, kind=kind, task_id=task_id)
             self._bump_manifest(book_dir, manifest)
         return {"book": self._public_manifest(manifest), "setup": normalized,
@@ -846,10 +870,11 @@ class WriterStore:
         book_dir = self._book_dir(book_id)
         vid = str(version_id or "").strip() or str(manifest.get("current_setup_version_id") or "")
         if not vid:
-            return {"id": "", "version": 0, "kind": "", "updated_at": 0, "task_id": "",
-                    **normalize_setup({})}
+            return self._with_continuation_summary(
+                manifest, {"id": "", "version": 0, "kind": "", "updated_at": 0, "task_id": "",
+                           **normalize_setup({})})
         record = self._read_json(self._setup_path(book_dir, vid), what="设定版本")
-        return record
+        return self._with_continuation_summary(manifest, record)
 
     # ---- 大纲版本 ----
 
@@ -912,6 +937,9 @@ class WriterStore:
         if parts_rows is not None and sync:
             raise WriterStoreError("分部大纲不同步章节；请用拆章接口产出章节目录")
         with self._lock:
+            if sync:
+                for no in manifest.get("chapter_ids") or []:
+                    self._assert_chapter_editable(self._load_chapter_index(book_dir, int(no)))
             vid = self._write_outline_locked(
                 book_dir, manifest,
                 chapter_rows if parts_rows is None else None,
@@ -977,6 +1005,8 @@ class WriterStore:
         existing = {int(n) for n in manifest.get("chapter_ids") or []}
         wanted_nos = [int(row["no"]) for row in rows]
         by_no = {int(row["no"]): row for row in rows}
+        if any(self._load_chapter_index(book_dir, no).get("read_only") for no in existing):
+            raise WriterStoreError("此作品含只读导入正文，不能覆盖同步章节；请使用追加章节")
         # 删除保护：只有梗概、没有正文的章可以直接按大纲重建。
         for no in sorted(existing - set(wanted_nos)):
             versions = self._chapter_version_dir(book_dir, no)
@@ -1123,6 +1153,8 @@ class WriterStore:
         removed = 0
         with self._lock:
             nos = [int(n) for n in manifest.get("chapter_ids") or []]
+            for no in nos:
+                self._assert_chapter_editable(self._load_chapter_index(book_dir, no))
             removed = len(nos)
             for no in nos:
                 shutil.rmtree(self._chapter_version_dir(book_dir, no), ignore_errors=True)
@@ -1194,6 +1226,7 @@ class WriterStore:
         book_dir = self._book_dir(book_id)
         with self._lock:
             index = self._load_chapter_index(book_dir, chapter_no)
+            self._assert_chapter_editable(index)
             if expected_revision is not None and expected_revision != "":
                 self._check_revision({"revision": index.get("revision")}, expected_revision,
                                      what=f"第 {chapter_no} 章")
@@ -1234,6 +1267,7 @@ class WriterStore:
             raise LookupError("章节不存在")
         with self._lock:
             index = self._load_chapter_index(book_dir, chapter_no)
+            self._assert_chapter_editable(index)
             if title is not None:
                 text = str(title).strip()
                 if not text:
@@ -1252,6 +1286,11 @@ class WriterStore:
                             "hook": str(index.get("hook") or "")}}
 
     # ---- 章节 ----
+
+    @staticmethod
+    def _assert_chapter_editable(index: dict[str, Any]) -> None:
+        if index.get("read_only"):
+            raise WriterStoreError(f"第 {index.get('no')} 章是只读导入正文，请在末章后新建章节续写")
 
     def get_chapter(self, book_id: str, chapter_no: int, *,
                     manifest: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1284,6 +1323,8 @@ class WriterStore:
             "current_version_id": str(index.get("current_version_id") or ""),
             "content": content,
             "versions": versions,
+            "read_only": bool(index.get("read_only")),
+            "source": dict(index.get("source") or {}),
         }
 
     def chapter_writing_inputs(self, book_id: str, chapter_no: int) -> tuple[WriterChapterBaseline, WriterPreviousChapter]:
@@ -1351,6 +1392,7 @@ class WriterStore:
                 raise WriterStoreError(f"单章正文超过 {CHAPTER_CONTENT_MAX_CHARS} 字上限，已拒绝")
             book_dir = self._book_dir(book_id)
             index = self._load_chapter_index(book_dir, chapter_no)
+            self._assert_chapter_editable(index)
             if expected_revision is not None and expected_revision != "":
                 if isinstance(expected_revision, bool):
                     raise WriterStoreError("revision 必须是整数")
@@ -1420,6 +1462,7 @@ class WriterStore:
                 raise LookupError("章节不存在")
             book_dir = self._book_dir(book_id)
             index = self._load_chapter_index(book_dir, chapter_no)
+            self._assert_chapter_editable(index)
             if expected_revision is not None and expected_revision != "":
                 self._check_revision({"revision": index.get("revision")}, expected_revision,
                                      what=f"第 {chapter_no} 章")
@@ -1479,6 +1522,7 @@ class WriterStore:
             raise WriterStoreError("作品至少要保留一章；要整本删除请删作品")
         book_dir = self._book_dir(book_id)
         with self._lock:
+            self._assert_chapter_editable(self._load_chapter_index(book_dir, chapter_no))
             shutil.rmtree(self._chapter_version_dir(book_dir, chapter_no), ignore_errors=True)
             try:
                 self._chapter_dir(book_dir, chapter_no).unlink(missing_ok=True)

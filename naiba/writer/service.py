@@ -437,6 +437,51 @@ class WriterService:
 
     # ---- 导入 ----
 
+    def api_preview_novel_import(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """只读预检拆书匠来源；未选稿时仅返回候选索引。"""
+        from naiba.novel.service import NovelServiceError
+        from naiba.writer.novel_import import preview_source
+
+        if not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
+        try:
+            novel = self.app.novel.store
+            preview = preview_source(novel, body)
+            preview.pop("_chapters", None)
+            return preview, 200
+        except LookupError as exc:
+            return {"error": str(exc), "ready": False}, 404
+        except (NovelServiceError, WriterStoreError) as exc:
+            return {"error": str(exc), "ready": False, "issues": getattr(exc, "issues", [])}, 400
+
+    def api_import_novel(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """确认选稿和四项现状后新建作品；同一请求重试不会重复导入。"""
+        from naiba.novel.service import NovelServiceError
+        from naiba.writer.novel_import import create_continuation, find_existing, preview_source, request_identity
+
+        if not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
+        try:
+            key, request_hash, summary = request_identity(body)
+            existing = find_existing(self.store, key, request_hash)
+            if existing is not None:
+                return existing, 200
+            preview = preview_source(self.app.novel.store, body)
+            if not preview.get("ready"):
+                return {"error": "所选章节尚未全部通过稿件预检", "issues": preview.get("issues", [])}, 400
+            if preview["fingerprint"] != body.get("fingerprint"):
+                raise WriterConflictError("源章节或稿件已变化，请重新预检后再确认导入")
+            result = create_continuation(self.store, preview, summary,
+                                         title=str(body.get("title") or ""),
+                                         request_key=key, request_hash=request_hash)
+            return result, 200 if result["duplicate"] else 201
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+        except WriterConflictError as exc:
+            return {"error": str(exc)}, 409
+        except (NovelServiceError, WriterStoreError) as exc:
+            return {"error": str(exc), "issues": getattr(exc, "issues", [])}, 400
+
     def api_import(self, *, filename: str, data: bytes) -> tuple[dict[str, Any], int]:
         try:
             return self.store.stage_import(filename=filename, data=data), 200

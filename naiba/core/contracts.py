@@ -26,6 +26,26 @@ WRITER_PREVIOUS_CHAPTER_KEY = "previous_chapter"
 # Per-chapter end-of-chapter state rows (list of {no, source_version_id, state})
 # frozen into single-chapter snapshots at start; chapter_all re-reads per step.
 WRITER_CHAPTER_STATES_KEY = "chapter_states"
+# Imported continuations freeze their effective setup, including any summary
+# restored from the manifest, so retry cannot drift after setup edits/deletion.
+WRITER_SETUP_SNAPSHOT_KEY = "setup_snapshot"
+
+
+class WriterNovelChapterSource(TypedDict):
+    """Immutable provenance for a read-only chapter copied from NovelStore."""
+    source_book_id: str
+    source_manuscript_id: str
+    source_chapter_no: int
+    imported_at: int
+    source_kind: Literal["original", "manuscript"]
+
+
+class WriterContinuationSummary(TypedDict):
+    """User-confirmed context; importing never infers a book's plot or lore."""
+    characters_state: str
+    relations_state: str
+    plot_state: str
+    next_outline: str
 
 
 class WriterExportResult(TypedDict):

@@ -481,6 +481,86 @@ class ExecutableUpdateTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.manager.notes_for_tag("v0.0.1")
 
+    def test_notes_for_tag_keeps_only_the_selected_version(self):
+        """清单里的 release_notes 是整份历史：只交出选中版本那一条，并按行拆开。
+
+        2026-11-10 事故：4.2.2 的说明面板把 314 个历史版本全画了出来，
+        标题被拼成一大段、每个旧版本各占一条长项目符号。
+        """
+        self.manager.releases = [
+            {
+                "tag": "v2.1.5-beta",
+                "version": "2.1.5-beta",
+                "published_at": "",
+                "release_url": "",
+                "release_notes": [],
+                "installable": True,
+                "synthetic": False,
+                "current": False,
+            }
+        ]
+        self.manager._request_json = self.stub.route(
+            tag=lambda url: manifest_payload(
+                version="2.1.5-beta",
+                release_notes=[
+                    "Cat Chat 2.1.5 Beta：本版标题\n本版条目一\n本版条目二",
+                    "Cat Chat 2.1.4 Beta：上一版标题\n上一版条目",
+                    "Cat Chat 2.1.3 Beta：更早的标题\n更早的条目",
+                ],
+            )
+        )
+
+        payload = self.manager.notes_for_tag("v2.1.5-beta")
+
+        self.assertEqual(
+            payload["release_notes"],
+            ["Cat Chat 2.1.5 Beta：本版标题", "本版条目一", "本版条目二"],
+            "只显示选中版本，不能把上一版和更早的历史一起画出来",
+        )
+        self.assertEqual(self.manager.releases[0]["release_notes"], payload["release_notes"])
+
+    def test_manifest_validation_keeps_only_manifest_version_notes(self):
+        manifest = UpdateManager._validate_manifest(
+            manifest_payload(
+                version="2.1.7-beta",
+                release_notes=[
+                    "Cat Chat 2.1.7 Beta：标题\n条目一",
+                    "Cat Chat 2.1.6 Beta：旧标题\n旧条目",
+                ],
+            )
+        )
+
+        self.assertEqual(
+            manifest["release_notes"],
+            ["Cat Chat 2.1.7 Beta：标题", "条目一"],
+            "合成 latest 条目也不能带整份历史",
+        )
+
+    def test_cached_notes_are_trimmed_per_version(self):
+        cache = self.write_cache_payload(
+            {
+                "saved_at": 0,
+                "source": "api",
+                "items": [
+                    self.cache_entry(
+                        "v2.1.6-beta",
+                        notes=[
+                            "Cat Chat 2.1.6 Beta：本版标题\n本版条目",
+                            "Cat Chat 2.1.5 Beta：旧版标题\n旧版条目",
+                        ],
+                    )
+                ],
+            }
+        )
+
+        releases, _meta = self.manager._read_releases_cache(cache)
+
+        self.assertEqual(
+            releases[0]["release_notes"],
+            ["Cat Chat 2.1.6 Beta：本版标题", "本版条目"],
+            "旧缓存里存的是整份历史，读出来也要按版本收口",
+        )
+
     # ---------- check() 回退与合成条目 ----------
 
     def test_check_falls_back_to_latest_when_list_403(self):

@@ -45,6 +45,48 @@ _RELEASE_TAG_HREF_RE = re.compile(
 LATEST_TAG = "latest"
 MANUAL_RELEASE_VERSION = (2, 0, 0)
 MANUAL_RELEASE_URL = f"https://github.com/{REPOSITORY}/releases"
+# 更新说明面板最多画多少行：整版正文超长时截断，别把右栏撑成一条长滚动条。
+NOTES_MAX_LINES = 60
+
+
+def _version_number(version: Any) -> str:
+    """从 ``4.2.2-beta`` / ``v4.2.2`` 里取可比对的数字段。"""
+    match = re.search(r"\d+\.\d+(?:\.\d+)?", str(version or ""))
+    return match.group(0) if match else ""
+
+
+def _notes_for_version(notes: Any, version: Any) -> list[str]:
+    """把「一条 = 一整版说明」的发布清单收成该版本那一条，并按行拆开。
+
+    发布清单里的 ``release_notes`` 是整份历史：每个历史版本占一条整段正文。
+    直接交给前端会把所有版本画进同一个面板（2026-11-10 的长滚动条事故）。
+    GitHub API 来源已经是逐行拆好的，原样返回。
+    """
+    if isinstance(notes, str):
+        entries = [notes]
+    elif isinstance(notes, list):
+        entries = [str(note) for note in notes if str(note).strip()]
+    else:
+        return []
+    if not entries:
+        return []
+    if not any("\n" in entry.strip() for entry in entries):
+        return [entry.strip() for entry in entries if entry.strip()][:NOTES_MAX_LINES]
+    number = _version_number(version)
+    body = ""
+    if number:
+        for entry in entries:
+            first_line = entry.strip().splitlines()[0]
+            if re.search(rf"(?<![\d.]){re.escape(number)}(?![\d.])", first_line):
+                body = entry
+                break
+    if not body:
+        # 对不上版本号就只取最新那条，绝不把整份历史交出去。
+        body = entries[0]
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    return lines[:NOTES_MAX_LINES]
+
+
 DEFAULT_RELEASE_NOTES = [
     "修复 Windows 10053/10054/10061 瞬时连接错误，并在失败时显示供应商主机和排查提示。",
     "修复推理模型只返回 reasoning 时测试连接被误判失败的问题。",
@@ -271,7 +313,7 @@ class UpdateManager:
             if isinstance(value, dict):
                 value = value.get("release_notes", [])
             if isinstance(value, list):
-                notes = [str(note).strip() for note in value if str(note).strip()][:50]
+                notes = _notes_for_version(value, "")
                 if notes:
                     return notes
         except (OSError, json.JSONDecodeError):
@@ -450,7 +492,7 @@ class UpdateManager:
             release_notes = [release_notes]
         if not isinstance(release_notes, list):
             release_notes = []
-        release_notes = [str(note).strip() for note in release_notes if str(note).strip()][:50]
+        release_notes = _notes_for_version(release_notes, manifest.get("version"))
         return {
             "repository": repository,
             "commit": commit,
@@ -503,7 +545,7 @@ class UpdateManager:
             if isinstance(raw_notes, str):
                 release_notes = [line.strip() for line in raw_notes.splitlines() if line.strip()]
             elif isinstance(raw_notes, list):
-                release_notes = [str(note).strip() for note in raw_notes if str(note).strip()]
+                release_notes = _notes_for_version(raw_notes, version)
             else:
                 release_notes = []
             releases.append(
@@ -833,20 +875,12 @@ class UpdateManager:
             release = next((item for item in self.releases if item.get("tag") == target), None)
         if release is None:
             raise RuntimeError("目标版本不存在")
-        notes = [
-            str(note).strip()
-            for note in (release.get("release_notes") or [])
-            if str(note).strip()
-        ]
+        notes = _notes_for_version(release.get("release_notes"), release.get("version") or target)
         if not notes:
             if target == LATEST_TAG:
                 raise RuntimeError("该版本没有更新说明")
             manifest = self._fetch_manifest_for_tag(target)
-            notes = [
-                str(note).strip()
-                for note in (manifest.get("release_notes") or [])
-                if str(note).strip()
-            ]
+            notes = _notes_for_version(manifest.get("release_notes"), manifest.get("version") or target)
             with self.lock:
                 release["release_notes"] = notes
         return {

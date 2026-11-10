@@ -3971,6 +3971,10 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 @media (max-width: 760px) {
   .labeler-pane-btn { display: block; }
   .labeler-page-divider { display: block; flex: none; width: 1px; align-self: stretch; margin: 2px 4px; background: var(--line); }
+  /* 五枚按钮同排：页签「自定义打标」是五字标签，等分宽会把它挤出格子（文字越界）。
+     按内容定下限、多余空间再均分；极窄屏放不下就整枚换行。 */
+  .labeler-panes { flex-wrap: wrap; }
+  .labeler-panes .studio-pane-btn { flex: 1 1 auto; min-width: max-content; }
   .labeler-columns { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); padding: 10px; gap: 10px; overflow: hidden; }
   .labeler-queue, .labeler-config, .labeler-results { display: none; }
   #studioPageLabeler[data-labeler-pane="queue"] .labeler-queue,

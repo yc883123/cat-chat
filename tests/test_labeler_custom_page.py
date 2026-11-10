@@ -311,6 +311,20 @@ class CustomPageUiContractTests(unittest.TestCase):
         self.assertLess(pane_index, self.js.index('data-labeler-page-tab]', pane_index))
         self.assertLess(pane_index, self.js.index('data-labeler-pane]', pane_index))
 
+    def test_page_tab_click_opens_config_pane(self):
+        # 手机三档下两页签的内容只在「设置」档里：点页签必须同切设置档，
+        # 否则在批次/结果档上点页签只有高亮变化、页面不切换（2026-11-10 反馈）。
+        pane_index = self.js.index('$("#labelerPanes")?.addEventListener("click"')
+        page_branch = self.js.index('data-labeler-page-tab]', pane_index)
+        pane_branch = self.js.index('data-labeler-pane]', page_branch)
+        self.assertIn('setLabelerPane("config")', self.js[page_branch:pane_branch])
+
+    def test_mobile_page_tabs_fit_their_buttons(self):
+        # 手机五枚按钮同排：「自定义打标」比等分格子宽，必须按内容给下限，
+        # 否则文字越出按钮（2026-11-10 远端截图反馈）。
+        css = (self.root / "public/styles.css").read_text(encoding="utf-8")
+        self.assertIn('.labeler-panes .studio-pane-btn { flex: 1 1 auto; min-width: max-content; }', css)
+
     def test_styles_toggle_by_dataset(self):
         css = (self.root / "public/styles.css").read_text(encoding="utf-8")
         self.assertIn('#studioPageLabeler[data-labeler-page="preset"] [data-labeler-page-body="custom"] { display: none; }', css)

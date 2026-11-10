@@ -1827,6 +1827,9 @@ export function bindLabelerEvents() {
     const pageBtn = event.target.closest("[data-labeler-page-tab]");
     if (pageBtn) {
       setLabelerPage(pageBtn.dataset.labelerPageTab);
+      // 两页签的内容只住在「设置」档（手机三档）里：点页签同时切到设置档，
+      // 否则在批次/结果档上点页签只有高亮变化、页面不切换（2026-11-10 反馈）。
+      setLabelerPane("config");
       return;
     }
     const btn = event.target.closest("[data-labeler-pane]");

@@ -1996,7 +1996,9 @@ class ServiceApiTests(unittest.TestCase):
         self.assertIn("overflow-y: auto", menu_rule)
         hidden_rule = css.split(".comfyui-combo-list[hidden] {", 1)[1].split("}", 1)[0]
         self.assertIn("display: none", hidden_rule)
-        self.assertIn("document.body.append(list)", js)
+        # 候选下拉默认挂 body（浮层 fixed）；模态弹窗里改挂 dialog 内部，否则会被
+        # top layer 盖住（2026-11-10：JSON 参数弹窗里实测 elementFromPoint 打不到）。
+        self.assertIn("(container || document.body).append(list)", js)
         self.assertIn("getBoundingClientRect()", js)
         self.assertIn('slot.control === "multiline"', js)
         self.assertIn("renderMediaPicker", js)

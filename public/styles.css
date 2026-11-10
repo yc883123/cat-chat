@@ -4871,17 +4871,38 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .comfyui-json-editor { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; min-height: 0; }
 .comfyui-json-list-pane, .comfyui-json-raw-pane { display: flex; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; }
 .comfyui-json-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
-.comfyui-json-entries { display: flex; flex-direction: column; gap: 8px; min-height: 120px; max-height: min(46vh, 420px); overflow: auto; padding-right: 2px; }
+.comfyui-json-entries { display: flex; flex-direction: column; gap: 6px; min-height: 120px; max-height: min(58vh, 520px); overflow: auto; padding-right: 2px; }
 .comfyui-json-entry { flex: none; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); overflow: hidden; }
-.comfyui-json-entry-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--surface-2); border-bottom: 1px solid var(--line); }
+.comfyui-json-entry-head { display: flex; align-items: center; gap: 8px; padding: 3px 8px; background: var(--surface-2); border-bottom: 1px solid var(--line); }
 .comfyui-json-entry-head strong { flex: 1 1 auto; min-width: 0; font-size: 11.5px; }
 .comfyui-json-enabled { flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); white-space: nowrap; }
 .comfyui-json-remove { border: 0; background: transparent; color: var(--muted); font-size: 15px; line-height: 1; cursor: pointer; padding: 2px 4px; }
 .comfyui-json-remove:hover { color: var(--danger); }
-.comfyui-json-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; padding: 8px; }
-.comfyui-json-field { display: grid; gap: 3px; min-width: 0; font-size: 10.5px; color: var(--muted); }
+.comfyui-json-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 6px; padding: 6px 8px; }
+.comfyui-json-field { display: grid; gap: 2px; min-width: 0; font-size: 10.5px; color: var(--muted); }
 .comfyui-json-field input { width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); color: var(--text); padding: 4px 6px; font-size: 11.5px; }
 .comfyui-json-field input[type="checkbox"] { width: auto; }
+/* 条目瘦身（2026-11-10 反馈）：全局 `label input` 的 40px 高 + 6px 上边距把每条撑到
+   143px、一屏只看得到 3 条；这里在弹窗作用域内按紧凑档覆盖，不动全局表单规则。 */
+.comfyui-json-dialog .comfyui-json-field input[data-json-field] { height: 26px; margin-top: 0; padding: 2px 6px; }
+.comfyui-json-dialog .comfyui-json-field input[type="checkbox"] { height: 14px; width: 14px; margin: 0; padding: 0; }
+.comfyui-json-dialog .comfyui-json-enabled input[type="checkbox"] { height: 14px; width: 14px; margin: 0; padding: 0; }
+/* 弹窗内的候选下拉：挂进 dialog 自己（原生模态在 top layer，body 上的下拉会被盖住），
+   按容器定位，别用 body 那套 fixed 坐标。 */
+.comfyui-json-dialog .comfyui-combo-list-inset { position: absolute; z-index: 20; }
+/* 「模型文件」是可选的：留一个小箭头提示能点开，候选仍是自绘下拉（原生 datalist
+   会按现值过滤，之前表现为有箭头点了没反应）。 */
+.comfyui-json-dialog .comfyui-json-lora-name {
+  padding-right: 20px;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238a8f98' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  background-size: 9px 6px;
+}
+/* 候选名常常是「同一长前缀 + 末尾不同」：允许折行把完整文件名显示出来，别都截成一样。 */
+.comfyui-json-dialog .comfyui-combo-list-inset .comfyui-combo-option {
+  white-space: normal; overflow-wrap: anywhere; word-break: break-word; line-height: 15px;
+}
 .comfyui-json-nested { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 2px; padding: 5px 6px; border: 1px dashed var(--line-strong); border-radius: var(--r-sm); font-size: 10.5px; color: var(--muted); }
 .comfyui-json-nested span { color: var(--text); font-weight: 600; }
 .comfyui-json-empty { margin: 0; padding: 16px 10px; text-align: center; font-size: 11.5px; color: var(--muted); border: 1px dashed var(--line-strong); border-radius: var(--r-md); }
@@ -4892,7 +4913,8 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 @media (max-width: 760px) {
   .comfyui-json-dialog { width: calc(100vw - 16px); max-height: 92dvh; overflow: auto; }
   .comfyui-json-editor { grid-template-columns: 1fr; }
-  .comfyui-json-entries, #comfyuiJsonRaw { max-height: 32dvh; }
+  .comfyui-json-entries { max-height: 40dvh; }
+  #comfyuiJsonRaw { max-height: 32dvh; }
 }
 
 @media (max-width: 760px) {

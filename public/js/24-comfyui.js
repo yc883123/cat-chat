@@ -299,6 +299,8 @@ export function bindComfyuiEvents() {
   $("#comfyuiJsonEntries")?.addEventListener("input", jsonEditorEntryChanged);
   $("#comfyuiJsonEntries")?.addEventListener("change", jsonEditorEntryChanged);
   $("#comfyuiJsonEntries")?.addEventListener("click", jsonEditorEntryClick);
+  // 滚轮调数值需要 cancelable 的监听（passive:false 才能 preventDefault）。
+  $("#comfyuiJsonEntries")?.addEventListener("wheel", jsonEditorEntryWheel, { passive: false });
   $("#comfyuiJsonDialog")?.addEventListener("cancel", () => { comfyJsonEditor.target = null; });
   $("#comfyuiSaveAsDiscard")?.addEventListener("change", () => {
     const confirm = $("#comfyuiSaveAsConfirm");
@@ -1218,24 +1220,41 @@ function slotCandidates(slot) {
 }
 
 // 给输入框挂可搜索候选下拉；候选不可用时静默，自由输入不受影响。
-function attachCandidateCombo(input, wrap, candidatesFn) {
+// options.container：把下拉挂进这个容器（模态弹窗里必须用，顶层元素盖不住它），
+//   坐标随之改按容器定位；options.notify：选中后补发 input 事件，让外面的同步链
+//   （JSON 参数弹窗的 rows/原始 JSON）跟着更新。
+function attachCandidateCombo(input, wrap, candidatesFn, options = {}) {
+  const container = options.container || null;
   const list = document.createElement("div");
-  list.className = "comfyui-combo-list";
+  list.className = "comfyui-combo-list" + (container ? " comfyui-combo-list-inset" : "");
   list.hidden = true;
   const positionList = () => {
     if (list.hidden || !list.isConnected) return;
     const rect = input.getBoundingClientRect();
-    const maxHeight = Math.min(190, window.innerHeight * 0.4);
-    const below = window.innerHeight - rect.bottom - 8;
-    const above = rect.top - 8;
+    const base = container ? container.getBoundingClientRect() : { left: 0, top: 0, width: 0, height: 0 };
+    // 弹窗里模型名多为「同一前缀 + 末尾不同」，只跟输入框同宽会把候选截成一模一样；
+    // 这里放宽到 340px 起、最长 480px，并夹在容器内不越界。
+    const width = container
+      ? Math.max(200, Math.min(480, Math.max(rect.width, 340), base.width - 16))
+      : rect.width;
+    const maxHeight = container
+      ? Math.min(340, window.innerHeight * 0.5)
+      : Math.min(190, window.innerHeight * 0.4);
+    // 挂容器里时可用高度还要受容器底边限制（弹窗 overflow:hidden 会裁掉越界部分）。
+    const below = container
+      ? Math.min(window.innerHeight, base.top + base.height) - rect.bottom - 8
+      : window.innerHeight - rect.bottom - 8;
+    const above = rect.top - Math.max(8, base.top) - 2;
     const openAbove = below < Math.min(maxHeight, 120) && above > below;
     const available = Math.max(80, Math.min(maxHeight, openAbove ? above : below));
-    list.style.left = `${rect.left}px`;
-    list.style.width = `${rect.width}px`;
+    let left = rect.left - base.left;
+    if (container) left = Math.max(8, Math.min(left, base.width - width - 8));
+    list.style.left = `${left}px`;
+    list.style.width = `${width}px`;
     list.style.maxHeight = `${available}px`;
     list.style.top = openAbove
-      ? `${Math.max(8, rect.top - available - 2)}px`
-      : `${rect.bottom + 2}px`;
+      ? `${rect.top - available - 2 - base.top}px`
+      : `${rect.bottom + 2 - base.top}px`;
   };
   const trackPosition = () => {
     window.addEventListener("scroll", positionList, true);
@@ -1248,7 +1267,7 @@ function attachCandidateCombo(input, wrap, candidatesFn) {
   const showList = () => {
     list.hidden = false;
     if (!list.isConnected) {
-      document.body.append(list);
+      (container || document.body).append(list);
       trackPosition();
     }
     positionList();
@@ -1264,7 +1283,7 @@ function attachCandidateCombo(input, wrap, candidatesFn) {
     const matched = showAll || !text
       ? all
       : all.filter((name) => name.toLowerCase().includes(text));
-    const matches = matched.slice(0, 30);
+    const matches = matched.slice(0, container ? 80 : 30);
     list.textContent = "";
     list.style.height = "auto";
     list.style.maxHeight = "";
@@ -1284,6 +1303,8 @@ function attachCandidateCombo(input, wrap, candidatesFn) {
       option.addEventListener("mousedown", (event) => {
         event.preventDefault();
         input.value = name;
+        // 选中算「值已确定」：发 change（不是 input），JSON 弹窗据此清掉旧 sha256。
+        if (options.notify) input.dispatchEvent(new Event("change", { bubbles: true }));
         hideList();
       });
       list.append(option);
@@ -1572,10 +1593,18 @@ function openJsonParamEditor(target) {
   const error = $("#comfyuiJsonError");
   if (error) error.textContent = "";
   renderJsonEditorEntries();
+  void prepareJsonEditorLoraCandidates();
   $("#comfyuiJsonRaw").value = JSON.stringify(info.kind === "array" ? comfyJsonEditor.rows : comfyJsonEditor.objectValue, null, 2);
   jsonEditorValidateRaw();
   if (typeof dialog.showModal === "function") dialog.showModal();
   else dialog.setAttribute("open", "");
+}
+
+// 打开弹窗就把 LoRA 候选备好：页面首次加载时 ComfyUI 可能还没连上，缓存会是一份
+// 空清单且之后不再自动重试，这里发现空清单就强刷一次（拿不到也不报错，手输照常）。
+async function prepareJsonEditorLoraCandidates() {
+  if (modelCandidatesFor("lora").length) return;
+  await loadModelCandidates(true);
 }
 
 function closeJsonParamEditor() {
@@ -1590,8 +1619,21 @@ function jsonEditorHasEnabled(rows) {
   return rows.some((row) => Object.prototype.hasOwnProperty.call(row, "enabled"));
 }
 
+// LoRA 列表（Visual LoRA Loader 的 lora_data）：每条都有 name，并带强度或哈希字段。
+// 这种列表的「模型文件」就是 models/loras 里的文件名，走弹窗内的候选下拉；
+// 清单里没有的名字仍可手输，ComfyUI 不在线时就是一个普通输入框。
+function jsonEditorRowsAreLora(rows) {
+  return rows.length > 0 && rows.every((row) => row && typeof row === "object"
+    && typeof row.name === "string"
+    && ("strength_model" in row || "strength_clip" in row || "sha256" in row));
+}
+
 function jsonEditorEntryMarkup(row, index, rows) {
-  const fields = jsonEntryKeys(rows).map((key) => {
+  const loraList = jsonEditorRowsAreLora(rows);
+  // sha256 是节点内部用的文件摘要，手改只会改坏：左侧不给输入框（原值仍留在
+  // 原始 JSON 里，换模型文件时由 change 处理清空），要改就去右侧改。
+  const keys = jsonEntryKeys(rows).filter((key) => !(loraList && key === "sha256"));
+  const fields = keys.map((key) => {
     const value = row[key];
     if (value && typeof value === "object") {
       return `<div class="comfyui-json-nested"><span>${escapeText(jsonFieldLabel(key))}</span><small>嵌套对象或数组，请在原始 JSON 里修改（不会被丢弃）</small></div>`;
@@ -1602,6 +1644,9 @@ function jsonEditorEntryMarkup(row, index, rows) {
     }
     if (type === "number") {
       return `<label class="comfyui-json-field"><span>${escapeText(jsonFieldLabel(key))}</span><input type="number" step="any" data-json-field="${escapeText(key)}" value="${escapeText(value ?? "")}"></label>`;
+    }
+    if (loraList && key === "name") {
+      return `<label class="comfyui-json-field"><span>${escapeText(jsonFieldLabel(key))}</span><input type="text" class="comfyui-json-lora-name" data-json-field="${escapeText(key)}" value="${escapeText(value ?? "")}"></label>`;
     }
     return `<label class="comfyui-json-field"><span>${escapeText(jsonFieldLabel(key))}</span><input type="text" data-json-field="${escapeText(key)}" value="${escapeText(value ?? "")}"></label>`;
   }).join("");
@@ -1625,6 +1670,16 @@ function renderJsonEditorEntries() {
   host.innerHTML = rows.length
     ? rows.map((row, index) => jsonEditorEntryMarkup(row, index, rows)).join("")
     : '<p class="comfyui-json-empty">列表为空，点「添加项目」开始；也可以在右侧直接写 JSON。</p>';
+  // LoRA 列表的「模型文件」挂候选下拉：列表必须挂进弹窗内部——原生 showModal 的
+  // dialog 在 top layer，append 到 body 的下拉会被盖住（实测 elementFromPoint 打不到）；
+  // 聚焦即列全部候选，不受输入框里现存长路径的过滤影响（原生 datalist 会按现值筛）。
+  if (jsonEditorRowsAreLora(rows)) {
+    const dialog = $("#comfyuiJsonDialog");
+    host.querySelectorAll('input[data-json-field="name"]').forEach((input) => {
+      attachCandidateCombo(input, null, () => modelCandidatesFor("lora"),
+        { container: dialog, notify: true });
+    });
+  }
 }
 
 function jsonEditorSyncRaw() {
@@ -1685,8 +1740,30 @@ function jsonEditorEntryChanged(event) {
       : event.target.type === "number"
         ? (String(event.target.value).trim() === "" ? 0 : Number(event.target.value))
         : String(event.target.value);
+    // 换了模型文件就把旧哈希清掉：候选清单只有文件名，旧 sha256 和新文件对不上。
+    // 只在 change（失焦或从候选里选中）时清，输入过程中不动，免得边打字边抹。
+    if (key === "name" && event.type === "change"
+        && Object.prototype.hasOwnProperty.call(row, "sha256")) {
+      row.sha256 = "";
+      const hash = card.querySelector('[data-json-field="sha256"]');
+      if (hash) hash.value = "";
+    }
   }
   jsonEditorSyncRaw();
+}
+
+// 数字字段滚轮微调：悬停滚一格 ±0.1，按住 Shift 走 0.01。值按两位小数收口
+// （否则 1.05 向下滚会写成 0.9500000000000001）；preventDefault 挡住外层列表跟着滚。
+function jsonEditorEntryWheel(event) {
+  const input = event.target?.closest?.('input[type="number"][data-json-field]');
+  if (!input || !event.deltaY) return;
+  event.preventDefault();
+  const step = event.shiftKey ? 0.01 : 0.1;
+  const current = Number(input.value);
+  const base = Number.isFinite(current) ? current : 0;
+  const next = Math.round((base + (event.deltaY < 0 ? step : -step)) * 100) / 100;
+  input.value = String(next);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 function jsonEditorEntryClick(event) {

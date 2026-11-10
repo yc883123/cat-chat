@@ -816,9 +816,12 @@ async function pollTask() {
     const { task } = await api(`/api/labeler/tasks/${encodeURIComponent(taskId)}`);
     if (labeler.taskId !== taskId) return;
     labeler.task = task;
-    labeler.items = task.items || [];
     // 轮询不重置浏览位置：用户已点「加载更多」的进度保持，由签名 diff 决定要不要重绘。
     const active = ["queued", "running"].includes(String(task.status || ""));
+    // 终态详情不带逐图数据（items 走分页接口）：空数组别覆盖已渲染的列表，
+    // 否则结果区先闪一屏空态、再由下面的 loadTaskItems 补回来。
+    const detailItems = task.items || [];
+    if (active || detailItems.length) labeler.items = detailItems;
     if (active) syncAnnotationsIfDue(taskId, labeler.items);
     renderTask(task);
     if (!active) {
@@ -1356,6 +1359,10 @@ function renderImageResults(body) {
       labeler.search ? "没有匹配的图片" : "还没有逐图结果",
       labeler.search ? "换个关键词试试。" : "批次开始后，每处理完一张就会出现在这里。"
     ));
+    // 空态也要清掉签名：批次转终态时详情接口不带逐图数据（先清空、再靠
+    // loadTaskItems 补拉回来），补回来的签名与上一轮「有内容」的一模一样，
+    // 不清就会命中下面的 diff 直接返回，把「还没有逐图结果」永久留在屏幕上。
+    labeler.lastImageSignature = "";
     return;
   }
   const visible = rows.slice(0, labeler.imageResultLimit);

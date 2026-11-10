@@ -521,6 +521,16 @@
                   </select>
                 </label>
               </div>
+              <div class="labeler-trigger-field labeler-txt-field">
+                <span>写入本地 TXT</span>
+                <div class="labeler-trigger-line">
+                  <label class="labeler-trigger-switch" title="开启后，模型会把每张图的打标文本写进与图片同名的 .txt；文件在本批次输出目录，可在结果区查看或导出">
+                    <input id="labelerWriteTxtPreset" type="checkbox">
+                    <span>开启</span>
+                  </label>
+                  <span class="labeler-txt-note">一图一个文件，分段内容按顺序追加</span>
+                </div>
+              </div>
               </div>
 
               <!-- 自定义打标页：规则来源二选一——选了 Skill 就走对话模块同款链路
@@ -559,6 +569,16 @@
                       <option value="en">英文</option>
                     </select>
                   </label>
+                </div>
+                <div class="labeler-trigger-field labeler-txt-field">
+                  <span>写入本地 TXT</span>
+                  <div class="labeler-trigger-line">
+                    <label class="labeler-trigger-switch" title="开启后，模型会把每张图的打标文本写进与图片同名的 .txt；手输提示词与 Skill 两种方式都可使用">
+                      <input id="labelerWriteTxtCustom" type="checkbox">
+                      <span>开启</span>
+                    </label>
+                    <span class="labeler-txt-note">一图一个文件，分段内容按顺序追加</span>
+                  </div>
                 </div>
               </div>
 
@@ -657,11 +677,23 @@
                   <button class="control-button" id="labelerExport" type="button">导出</button>
                   <button class="control-button" id="labelerOpenExports" type="button"
                           title="在资源管理器中打开应用里的导出文件夹">打开文件夹</button>
+                  <button class="control-button" id="labelerOpenTxt" type="button" hidden
+                          title="在资源管理器中打开当前批次的 TXT 输出文件夹">TXT 文件夹</button>
                 </div>
               </header>
               <div class="labeler-result-body" id="labelerResultBody" aria-live="polite"></div>
             </section>
           </div>
+          <dialog class="labeler-txt-dialog" id="labelerTxtDialog" aria-label="TXT 内容">
+            <div class="labeler-txt-dialog-head">
+              <strong id="labelerTxtDialogTitle">TXT</strong>
+              <span class="labeler-txt-dialog-actions">
+                <button class="control-button tiny" id="labelerTxtDialogDownload" type="button">下载</button>
+                <button class="control-button tiny" id="labelerTxtDialogClose" type="button">关闭</button>
+              </span>
+            </div>
+            <pre class="labeler-txt-dialog-body" id="labelerTxtDialogBody"></pre>
+          </dialog>
         </div>
 
         <!-- 分页：造梦机 —— 导入自己在 ComfyUI 里跑通的 API 格式工作流，填几个参数反复出图/出片。

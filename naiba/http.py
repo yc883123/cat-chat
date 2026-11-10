@@ -730,6 +730,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 task_id, str(query.get("offset", ["0"])[0]),
                 str(query.get("limit", ["500"])[0]),
             ))
+        elif path.startswith("/api/labeler/tasks/") and path.endswith("/txt"):
+            task_id = path.split("/")[-2]
+            self._json(*self.app.labeler.api_task_txt_files(task_id))
+        elif path.startswith("/api/labeler/tasks/") and "/txt/" in path:
+            # /api/labeler/tasks/<id>/txt/<item_id>：单张图片已写入的 TXT 文本。
+            parts = path.split("/")
+            self._json(*self.app.labeler.api_task_txt_content(parts[-3], parts[-1]))
         elif path.startswith("/api/labeler/tasks/") and path.endswith("/events"):
             task_id = path.split("/")[-2]
             query = urllib.parse.parse_qs(parsed.query)
@@ -1036,6 +1043,15 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(*self.app.labeler.api_cancel(path.split("/")[-2]))
         elif path.startswith("/api/labeler/tasks/") and path.endswith("/retry"):
             self._json(*self.app.labeler.api_retry(path.split("/")[-2], body))
+        elif path.startswith("/api/labeler/tasks/") and path.endswith("/txt/open"):
+            # 打开任务 TXT 输出目录：与导出文件夹同一边界（只在运行应用的电脑上打开）。
+            if not self._is_local_request():
+                self._json(
+                    {"error": "TXT 文件夹在运行 Cat Chat 的电脑上，手机端打不开"},
+                    HTTPStatus.FORBIDDEN,
+                )
+            else:
+                self._json(*self.app.labeler.api_task_txt_open(path.split("/")[-3]))
         elif path == "/api/labeler/export":
             # 只收记录 ID / 查询条件 / 格式；落点由服务端决定（data/labeler/exports）。
             self._json(*self.app.labeler.api_export(body))

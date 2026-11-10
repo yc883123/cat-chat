@@ -116,6 +116,9 @@ class LabelerDB:
                     usage_json TEXT NOT NULL DEFAULT '{}',
                     annotation_id INTEGER,
                     config_fingerprint TEXT NOT NULL DEFAULT '',
+                    txt_path TEXT NOT NULL DEFAULT '',
+                    txt_state TEXT NOT NULL DEFAULT '',
+                    txt_chars INTEGER NOT NULL DEFAULT 0,
                     started_at INTEGER,
                     finished_at INTEGER,
                     PRIMARY KEY (task_id, item_id)
@@ -164,6 +167,18 @@ class LabelerDB:
                     db.execute(
                         f"ALTER TABLE {table} ADD COLUMN original_sha256 TEXT NOT NULL DEFAULT ''"
                     )
+            # 2026-11-10：每张图的 TXT 输出状态（工具写入/自动回填/失败）与相对路径。
+            columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(task_items)").fetchall()
+            }
+            for name, ddl in (
+                ("txt_path", "TEXT NOT NULL DEFAULT ''"),
+                ("txt_state", "TEXT NOT NULL DEFAULT ''"),
+                ("txt_chars", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE task_items ADD COLUMN {name} {ddl}")
 
     # ---- 逐图状态 ----
 
@@ -218,6 +233,15 @@ class LabelerDB:
 
     def pending_items(self, task_id: str) -> list[dict[str, Any]]:
         return self.list_items(task_id, states=("queued",), limit=10000)
+
+    def get_item(self, task_id: str, item_id: str) -> dict[str, Any] | None:
+        """按任务 + 项 ID 取一行（TXT 内容/状态接口用，不扫全表）。"""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM task_items WHERE task_id=? AND item_id=?",
+                (str(task_id or ""), str(item_id or "")),
+            ).fetchone()
+        return self._item_row(row) if row else None
 
     @_retry_transient
     def mark_running(self, task_id: str, item_id: str) -> None:
@@ -340,6 +364,22 @@ class LabelerDB:
             db.execute(
                 "UPDATE task_items SET state='cancelled', finished_at=? WHERE task_id=? AND item_id=?",
                 (now_ms(), task_id, item_id),
+            )
+
+    @_retry_transient
+    def mark_txt(self, task_id: str, item_id: str, *, path: str, state: str,
+                 chars: int = 0) -> None:
+        """记录单张图片的 TXT 输出状态（相对路径 / written|auto|failed / 字符数）。
+
+        只更新 ``txt_*`` 三列，不影响逐图运行状态与标注事务；轮询任务详情时
+        结果区据此显示「TXT 已写入」和查看入口。
+        """
+        with self._connect() as db:
+            db.execute(
+                "UPDATE task_items SET txt_path=?, txt_state=?, txt_chars=? "
+                "WHERE task_id=? AND item_id=?",
+                (str(path or ""), str(state or ""), max(0, int(chars or 0)),
+                 task_id, item_id),
             )
 
     @_retry_transient
@@ -540,6 +580,9 @@ class LabelerDB:
             "usage": _loads(row["usage_json"], {}),
             "annotation_id": int(row["annotation_id"]) if row["annotation_id"] is not None else None,
             "config_fingerprint": str(row["config_fingerprint"] or ""),
+            "txt_path": str(row["txt_path"] or ""),
+            "txt_state": str(row["txt_state"] or ""),
+            "txt_chars": int(row["txt_chars"] or 0),
             "started_at": row["started_at"],
             "finished_at": row["finished_at"],
         }

@@ -9,19 +9,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 HARNESS = r"""
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
-function element(value='') {return {value,disabled:false,textContent:'',dataset:{},handlers:{},classList:{toggle(){}},
+function element(value='') {return {value,checked:false,disabled:false,textContent:'',dataset:{},handlers:{},classList:{toggle(){}},
   addEventListener(type,fn){this.handlers[type]=fn;}};}
 const prompt=element('original'),select=element('skill-a'),note=element(),page=element(),output=element();
+const writePreset=element(),writeCustom=element();
 select.selectedOptions=[{textContent:'Skill A'}];
 page.dataset.labelerPage='custom';
 const elements={'#labelerCustomSystemPrompt':prompt,'#labelerSkillSelect':select,
-  '#labelerSkillNote':note,'#studioPageLabeler':page,'#labelerCustomOutputRow':output};
+  '#labelerSkillNote':note,'#studioPageLabeler':page,'#labelerCustomOutputRow':output,
+  '#labelerWriteTxtPreset':writePreset,'#labelerWriteTxtCustom':writeCustom};
 let pageListener,calls=0;
 const context=vm.createContext({console,$:key=>elements[key]||null,$$:()=>[],api:async()=>{calls++;throw new Error('unexpected request');},
   state:{},onStudioPageChange:fn=>{pageListener=fn;},setTimeout,clearTimeout,setInterval,clearInterval,
   document:{addEventListener(){}},window:{addEventListener(){}}});
 const source=fs.readFileSync('public/js/23-labeler.js','utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
-vm.runInContext(source+'\nglobalThis.p={applySelectedSkill,clearSystemPrompt,setLabelerPage,bindLabelerEvents,labeler};',context);
+vm.runInContext(source+'\nglobalThis.p={applySelectedSkill,clearSystemPrompt,setLabelerPage,bindLabelerEvents,collectConfig,labeler};',context);
 const p=context.p;p.setLabelerPage('custom');p.bindLabelerEvents();
 """
 
@@ -63,6 +65,24 @@ assert.equal(p.labeler.skillPick,null);assert.equal(output.hidden,false);assert.
 prompt.value='x'.repeat(24001)+'tail rule';select.handlers.change();
 select.value='';select.handlers.change();
 assert.equal(prompt.value,'x'.repeat(24001)+'tail rule');assert.equal(calls,0);
+""")
+
+    def test_write_txt_switches_are_independent_per_page(self):
+        # 两个页签各记各的开关：提交 config 只取当前页签的值，互不覆盖。
+        self.run_case(r"""
+p.setLabelerPage('preset');
+writePreset.checked=true;writePreset.handlers.change();
+assert.equal(p.collectConfig().write_txt,true);
+p.setLabelerPage('custom');
+assert.equal(p.collectConfig().write_txt,false);
+writeCustom.checked=true;writeCustom.handlers.change();
+assert.equal(p.collectConfig().write_txt,true);
+assert.equal(p.labeler.writeTxtPreset,true);
+assert.equal(p.labeler.writeTxtCustom,true);
+writeCustom.checked=false;writeCustom.handlers.change();
+assert.equal(p.collectConfig().write_txt,false);
+assert.equal(p.labeler.writeTxtPreset,true);
+assert.equal(calls,0);
 """)
 
 

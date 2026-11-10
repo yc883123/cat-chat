@@ -47,15 +47,23 @@ def _open_folder(target: Path) -> None:
         subprocess.Popen(["xdg-open", str(target)])
 
 
+def open_managed_dir(directory: Path) -> str:
+    """打开一个受管目录并返回实际路径（目录不存在时先建出来）。
+
+    路径必须由调用方从服务端固定位置拼出，不接受客户端传入。
+    """
+    target = Path(directory).resolve()
+    target.mkdir(parents=True, exist_ok=True)
+    _open_folder(target)
+    return str(target)
+
+
 def open_export_dir(exports_dir: Path) -> str:
     """打开受管导出目录并返回实际路径；目录不存在时先建出来。
 
     路径完全由服务端决定（``data_dir/labeler/exports``），不接受客户端传入。
     """
-    target = Path(exports_dir).resolve()
-    target.mkdir(parents=True, exist_ok=True)
-    _open_folder(target)
-    return str(target)
+    return open_managed_dir(exports_dir)
 
 
 class LabelerExportError(ValueError):
@@ -141,6 +149,11 @@ def _caption_text(row: dict[str, Any]) -> str:
             segments.append(description)
     # 一行一条 caption：换行会破坏「图片同名 txt」的一图一文件约定。
     return re.sub(r"\s*\r?\n\s*", " ", ", ".join(segments)).strip()
+
+
+def caption_text(row: dict[str, Any]) -> str:
+    """公开口径：一条标注记录 → 逐图 .txt 的正文（导出与「写入本地 TXT」共用）。"""
+    return _caption_text(row)
 
 
 def _caption_member(row: dict[str, Any]) -> str:

@@ -3949,6 +3949,25 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .labeler-sentence span { flex: 1; min-width: 0; line-height: 1.5; }
 .labeler-degraded { margin: 0 0 6px; font-size: 11px; color: var(--warn, #c98a00); }
 
+/* 写入本地 TXT（2026-11-10）：开关说明 + 结果卡上的文件状态与查看/下载入口。 */
+.labeler-txt-note { flex: 1; min-width: 0; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.labeler-anno-txt { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 11px; color: var(--muted); }
+.labeler-anno-txt .control-button { padding: 1px 8px; }
+.labeler-anno-txt.failed { color: var(--danger, #c0392b); }
+.labeler-txt-dialog {
+  width: min(720px, calc(100vw - 32px)); max-height: min(80vh, 640px);
+  border: 1px solid var(--line); border-radius: var(--r-md); padding: 14px;
+  background: var(--surface); color: var(--text);
+}
+.labeler-txt-dialog::backdrop { background: rgba(0, 0, 0, .35); }
+.labeler-txt-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.labeler-txt-dialog-actions { display: flex; gap: 6px; }
+.labeler-txt-dialog-body {
+  margin: 0; max-height: 60vh; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  font-size: 12.5px; line-height: 1.6; background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: var(--r-sm); padding: 10px;
+}
+
 @media (max-width: 760px) {
   .labeler-pane-btn { display: block; }
   .labeler-page-divider { display: block; flex: none; width: 1px; align-self: stretch; margin: 2px 4px; background: var(--line); }

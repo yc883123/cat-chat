@@ -36,7 +36,7 @@ ALLOWED_CONFIG_KEYS = frozenset({
     "engine", "output_mode", "language", "preset", "model_key", "model_name",
     "confidence_threshold", "max_tags", "custom_prompt", "subject_filter",
     "concurrency", "retry_limit", "timeout_seconds", "prompt_version",
-    "trigger_word", "system_prompt", "skill_id",
+    "trigger_word", "system_prompt", "skill_id", "write_txt",
 })
 # 只进指纹的「影响结果」字段：换并发/重试次数/超时不该改变结果身份。
 # trigger_word 进指纹，但「关闭」时按缺省处理（config_fingerprint 里归一化），
@@ -245,6 +245,8 @@ def normalize_config(app: Any, raw: Any, *, allow_legacy_language: bool = False)
         "custom_prompt": custom_prompt,
         "subject_filter": _normalize_subject_filter(raw.get("subject_filter")),
         "trigger_word": _normalize_trigger_word(raw.get("trigger_word")),
+        # 写入本地 TXT：只影响工具是否提供给模型与任务输出目录，不影响标注身份。
+        "write_txt": bool(raw.get("write_txt")),
         "concurrency": concurrency,
         "retry_limit": retry_limit,
         "timeout_seconds": timeout_seconds,
@@ -336,6 +338,13 @@ class LabelerJobManager:
         if not refs:
             raise LabelerTaskError("没有可打标的图片")
         task = self.store.create_task(input_data, source_task_id=source_task_id)
+        if bool(config.get("write_txt")):
+            # 任务输出目录在提交时就建好：模型第一次工具调用无需再赌目录存在。
+            try:
+                self.store.outputs_dir(task["id"]).mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                self.store.delete_task(task["id"])
+                raise LabelerTaskError(f"无法创建 TXT 输出目录：{exc}") from exc
         fingerprint = str(config.get("config_fingerprint") or "")
         items = []
         for ref in refs:
@@ -438,6 +447,9 @@ class LabelerJobManager:
                 continue
             if self.store.delete_task(task_id):
                 self.db.delete_items(task_id)
+                # TXT 输出目录跟着任务记录一起清：它是本批次的过程产物，
+                # 标注库/导出包不受影响。
+                self.store.remove_outputs(task_id)
                 deleted += 1
         return {"deleted": deleted, "skipped": skipped}
 
@@ -614,5 +626,8 @@ class LabelerJobManager:
                 "attempt_count": row.get("attempt_count") or 0,
                 "annotation_id": row.get("annotation_id"),
                 "usage": row.get("usage") or {},
+                "txt_path": row.get("txt_path") or "",
+                "txt_state": row.get("txt_state") or "",
+                "txt_chars": int(row.get("txt_chars") or 0),
             })
         return out

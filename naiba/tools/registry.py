@@ -192,6 +192,20 @@ class ToolRegistry:
         self._executor: Any = None
         self._mcp_registry: Any = None
 
+    def clone(self) -> "ToolRegistry":
+        """复制一份独立注册表（def / 别名 / 引擎 / MCP 绑定都沿用）。
+
+        用途：一次性任务需要临时注册**只对本任务可见**的工具（如贴签匠的 TXT 写入），
+        绝不能污染进程级 ``app.tool_registry``（并发会话会看到别人的工具）。
+        复制的是同一批不可变 ``ToolSpec`` 引用，注册/替换只发生在新实例的字典上。
+        """
+        clone = ToolRegistry()
+        clone._specs = dict(self._specs)
+        clone._alias_map = dict(self._alias_map)
+        clone._executor = self._executor
+        clone._mcp_registry = self._mcp_registry
+        return clone
+
     def bind_mcp(self, mcp_registry: Any) -> None:
         """注入 MCPRegistry，用于 mcp__<server>__<tool> 工具分发。"""
         self._mcp_registry = mcp_registry

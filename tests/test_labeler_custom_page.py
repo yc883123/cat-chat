@@ -198,6 +198,24 @@ class CustomPromptBuildTests(unittest.TestCase):
         self.assertIn("你是图片标注助手", prompt)
         self.assertIn("必须从标签和描述里省略", prompt)
 
+    def test_write_txt_rule_added_for_both_prompt_paths(self):
+        # 预设档与自定义手输档都要告诉模型用同一件写入工具。
+        preset_prompt = build_prompt({
+            "output_mode": "keywords", "language": "en", "max_tags": 24,
+            "confidence_threshold": 0.35, "custom_prompt": "", "write_txt": True,
+        }, self.preset)
+        self.assertIn("write_caption_txt", preset_prompt)
+        custom_prompt = build_prompt({
+            "output_mode": "auto", "language": "auto",
+            "system_prompt": "只描述动物。", "write_txt": True,
+        }, self.preset)
+        self.assertTrue(custom_prompt.startswith("只描述动物。"))
+        self.assertIn("write_caption_txt", custom_prompt)
+        # 关闭时不出现任何工具规则（原提示词逐字节不变）。
+        self.assertNotIn("write_caption_txt", build_prompt({
+            "output_mode": "auto", "language": "auto", "system_prompt": "只描述动物。",
+        }, self.preset))
+
 
 class CustomPageUiContractTests(unittest.TestCase):
     """两页签与自定义页的源码契约（页面结构 / 接线 / 显隐规则 / 后端路由）。"""
@@ -316,6 +334,33 @@ class CustomPageUiContractTests(unittest.TestCase):
         # 上传响应不再把服务端缓存落盘名写回显示名：提交与展示都以原文件名
         # 走（否则结果区/提交批次里满是 naiba_chat_时间戳_…）。
         self.assertNotIn("row.name = String(payload.name)", self.js)
+
+    def test_write_txt_switches_and_result_entries(self):
+        # 2026-11-10 计划：两个页签各一个「写入本地 TXT」开关；结果区可查看/
+        # 下载已写入的 TXT，并可打开本批次输出目录。
+        self.assertIn('id="labelerWriteTxtPreset"', self.html)
+        self.assertIn('id="labelerWriteTxtCustom"', self.html)
+        self.assertIn('id="labelerOpenTxt"', self.html)
+        self.assertIn('id="labelerTxtDialog"', self.html)
+        self.assertIn('id="labelerTxtDialogBody"', self.html)
+        self.assertIn('write_txt: Boolean($("#labelerWriteTxtPreset")?.checked)', self.js)
+        self.assertIn('config.write_txt = Boolean($("#labelerWriteTxtCustom")?.checked)', self.js)
+        self.assertIn("function viewTxt(", self.js)
+        self.assertIn("function downloadTxt(", self.js)
+        self.assertIn("function openTxtFolder(", self.js)
+        self.assertIn("/txt/open", self.js)
+        self.assertIn("data-labeler-txt-view", self.js)
+        self.assertIn("data-labeler-txt-download", self.js)
+
+    def test_write_txt_backend_routes(self):
+        http_py = (self.root / "naiba/http.py").read_text(encoding="utf-8")
+        service_py = (self.root / "naiba/labeler/service.py").read_text(encoding="utf-8")
+        self.assertIn('path.endswith("/txt")', http_py)
+        self.assertIn('"/txt/" in path', http_py)
+        self.assertIn('path.endswith("/txt/open")', http_py)
+        self.assertIn("def api_task_txt_files(", service_py)
+        self.assertIn("def api_task_txt_content(", service_py)
+        self.assertIn("def api_task_txt_open(", service_py)
 
     def test_backend_skill_content_route(self):
         http_py = (self.root / "naiba/http.py").read_text(encoding="utf-8")

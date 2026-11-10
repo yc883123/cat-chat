@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from naiba.labeler.db import LabelerDB, LabelerDBError
-from naiba.labeler.export import LabelerExportError, open_export_dir, write_export
+from naiba.labeler.export import LabelerExportError, open_export_dir, open_managed_dir, write_export
 from naiba.labeler.images import (
     MAX_BATCH_BYTES,
     MAX_BATCH_IMAGES,
@@ -25,7 +25,7 @@ from naiba.labeler.originals import archive_original, prune_unreferenced
 from naiba.labeler.presets import preset_list
 from naiba.labeler.runner import DEFAULT_CONCURRENCY, VALIDATED_CONCURRENCY, LabelerRunner
 from naiba.labeler.sentences import sentence_stats
-from naiba.labeler.store import LabelerStore
+from naiba.labeler.store import LabelerStore, LabelerStoreError
 from naiba.storage.media import store_uploaded_file
 
 EXPORT_MAX_RECORDS = 9999
@@ -224,6 +224,94 @@ class LabelerService:
             "last_seq": max(last_seq, parsed_after),
             "status": task.get("status"),
         }, 200
+
+    # ---- 任务 TXT 输出（2026-11-10 计划） ----
+
+    def api_task_txt_files(self, task_id: str) -> tuple[dict[str, Any], int]:
+        """任务内每张图的 TXT 写入状态与可访问路径（结果区列表/下载入口）。"""
+        task = self.store.get_task(task_id)
+        if task is None:
+            return {"error": "任务不存在"}, 404
+        try:
+            root = self.store.outputs_dir(task_id)
+        except LabelerStoreError:  # 非法 ID 与「任务不存在」同口径
+            return {"error": "任务不存在"}, 404
+        files: list[dict[str, Any]] = []
+        for row in self.db.list_items(task_id, limit=10000):
+            relative = str(row.get("txt_path") or "")
+            if not relative:
+                continue
+            path = (root / relative).resolve()
+            try:
+                path.relative_to(root.resolve())
+            except ValueError:
+                continue
+            size = 0
+            try:
+                if path.is_file():
+                    size = int(path.stat().st_size)
+            except OSError:
+                size = 0
+            files.append({
+                "item_id": str(row.get("item_id") or ""),
+                "name": str(row.get("name") or ""),
+                "relative_path": str(row.get("relative_path") or ""),
+                "txt_path": relative,
+                "state": str(row.get("txt_state") or ""),
+                "chars": int(row.get("txt_chars") or 0),
+                "size": size,
+                "path": str(path) if size else "",
+            })
+        return {"files": files, "count": len(files), "dir": str(root)}, 200
+
+    def api_task_txt_content(self, task_id: str, item_id: str) -> tuple[dict[str, Any], int]:
+        """读取单张图片已写入的 TXT 文本（结果区「查看」）。"""
+        if self.store.get_task(task_id) is None:
+            return {"error": "任务不存在"}, 404
+        item = self.db.get_item(task_id, item_id)
+        if item is None:
+            return {"error": "图片不在该任务里"}, 404
+        relative = str(item.get("txt_path") or "")
+        if not relative:
+            return {"error": "这张图还没有写入 TXT"}, 404
+        try:
+            root = self.store.outputs_dir(task_id)
+        except LabelerStoreError:  # 非法 ID 与「任务不存在」同口径
+            return {"error": "任务不存在"}, 404
+        path = (root / relative).resolve()
+        try:
+            path.relative_to(root.resolve())
+        except ValueError:
+            return {"error": "TXT 路径越出任务输出目录"}, 403
+        if not path.is_file():
+            return {"error": "TXT 文件不存在（可能已被清理）"}, 404
+        limit = 512 * 1024
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            return {"error": f"TXT 读取失败：{exc}"}, 500
+        truncated = len(raw) > limit
+        text = raw[:limit].decode("utf-8", errors="replace")
+        return {
+            "item_id": item_id,
+            "relative_path": str(item.get("relative_path") or item.get("name") or ""),
+            "txt_path": relative,
+            "content": text,
+            "truncated": truncated,
+            "path": str(path),
+        }, 200
+
+    def api_task_txt_open(self, task_id: str) -> tuple[dict[str, Any], int]:
+        """在运行本应用的电脑上打开任务 TXT 输出目录（路径固定，不收客户端参数）。"""
+        if self.store.get_task(task_id) is None:
+            return {"error": "任务不存在"}, 404
+        try:
+            path = open_managed_dir(self.store.outputs_dir(task_id))
+        except LabelerStoreError:
+            return {"error": "任务不存在"}, 404
+        except OSError as exc:
+            return {"error": f"无法打开 TXT 文件夹：{exc}"}, 500
+        return {"ok": True, "path": path}, 200
 
     def api_submit(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         try:

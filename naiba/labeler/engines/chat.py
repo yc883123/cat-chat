@@ -21,6 +21,7 @@ from typing import Any
 from naiba.core.exceptions import TaskCancelled
 from naiba.core.history import encode_image_for_model
 from naiba.labeler.engines.provider import parse_response
+from naiba.labeler.txt_output import TXT_TOOL_NAME, tool_schema
 
 ENGINE_ID = "chat"
 
@@ -35,6 +36,13 @@ def build_chat_prompt(config: dict[str, Any]) -> str:
     extra = str(config.get("custom_prompt") or "").strip()
     if extra:
         parts.append("用户补充要求（优先满足，可点名要忽略的元素）：" + extra)
+    if config.get("write_txt"):
+        parts.append(
+            "写入本地 TXT：本次任务已开启 TXT 输出。请把最终打标文本通过 "
+            f"{TXT_TOOL_NAME} 工具写入与图片同名的 .txt：一次写完用 mode=write，"
+            "分段时先 write 再 append（按顺序拼接）。item 填当前图片的文件名或相对路径。"
+            "写入后仍按技能规则输出打标结果。"
+        )
     return "\n".join(parts)
 
 
@@ -72,6 +80,29 @@ class ChatSkillEngine:
             None,  # media_collector=None：跳过媒体采集（测试/轻量调用口径，见 agent.py）
         )
         return worker, sub_executor
+
+    def _build_txt_registry(self, writer: Any) -> Any:
+        """派生一份任务级注册表，只多出 ``write_caption_txt``（不污染全局工具表）。"""
+        from naiba.tools.registry import ToolRegistry, ToolSpec
+
+        base = getattr(self.app, "tool_registry", None)
+        registry = base.clone() if callable(getattr(base, "clone", None)) else ToolRegistry()
+        schema = tool_schema()
+        registry.register(ToolSpec(
+            name=TXT_TOOL_NAME,
+            description=schema["description"],
+            parameters=schema["parameters"],
+            side_effect=True,
+            retryable=False,
+            timeout=30,
+            permission="auto",
+            # system=True：直接调 def.execute，不经过确认状态机——批量打标无人值守。
+            system=True,
+            execute=lambda arguments, _skills, _ctx: writer.execute(arguments),
+            # 明确声明不采集媒体：工具回执只是 JSON，别把里面的文件名当产物。
+            metadata={"media": {"policy": "never", "extract": "none"}},
+        ))
+        return registry
 
     def _bridge_event(self, image_name: str) -> Any:
         """SkillAgent 事件 → 贴签匠事件流：只转发批量进度有意义的关键事件。"""
@@ -121,12 +152,19 @@ class ChatSkillEngine:
         cancel_event = options.get("cancel_event")
         image_name = str(options.get("item_name") or "图片")
         worker, sub_executor = self._build_worker(str(options.get("lock_label") or "打标器"))
+        allowed_tools = list(CHAT_ALLOWED_TOOLS)
+        tool_registry = getattr(self.app, "tool_registry", None)
+        writer = options.get("txt_tool")
+        if writer is not None:
+            # 本任务专属工具（TXT 写入）只出现在这次运行的注册表与授权集里。
+            tool_registry = self._build_txt_registry(writer)
+            allowed_tools.append(TXT_TOOL_NAME)
         run_context = {
             "run_id": f"labeler-{str(options.get('item_id') or 'item')}",
             "conversation_id": "",
             "owner_session_id": "",
             "depth": 1,
-            "allowed_tools": list(CHAT_ALLOWED_TOOLS),
+            "allowed_tools": allowed_tools,
             "skill_policy": {"mode": "exclusive", "skill_ids": [skill_id]},
             "model_has_vision": True,
             "tool_defs": None,
@@ -146,11 +184,11 @@ class ChatSkillEngine:
                 {"mode": "exclusive", "skill_ids": [skill_id]},
                 [],
                 str(self.config.get("system_prompt") or ""),  # Agent system prompt 与 Skill 一同注入
-                list(CHAT_ALLOWED_TOOLS),
+                allowed_tools,
                 self._bridge_event(image_name),
                 cancel_event,
                 max_steps=CHAT_MAX_STEPS,
-                tool_registry=getattr(self.app, "tool_registry", None),
+                tool_registry=tool_registry,
                 run_context=run_context,
             )
         except TaskCancelled:

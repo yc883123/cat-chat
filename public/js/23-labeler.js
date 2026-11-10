@@ -81,6 +81,10 @@ const labeler = {
   // 自定义档选中的 Skill（选中即走对话链路打标，engine=chat + skill_id 提交，
   // 正文不进提示词框）：{id, name} | null
   skillPick: null,
+  // 写入本地 TXT：两个页签各记各的开关（互不影响，提交时只取当前页签的值）。
+  writeTxtPreset: false,
+  writeTxtCustom: false,
+  txtFiles: new Map(),
 };
 
 // ============================================================
@@ -698,6 +702,8 @@ function collectConfig() {
     retry_limit: Number($("#labelerRetryLimit")?.value || 2),
     timeout_seconds: Number($("#labelerTimeout")?.value || 90),
     prompt_version: 2,
+    // 写入本地 TXT：两个页签各用各的开关；关闭时不提供工具，保持原打标路径。
+    write_txt: Boolean($("#labelerWriteTxtPreset")?.checked),
   };
   if (currentLabelerPage() === "custom") {
     // 自定义档：规则来源二选一——选了 Skill 走对话链路（engine=chat + skill_id，
@@ -707,6 +713,7 @@ function collectConfig() {
     config.language = $("#labelerCustomLanguage")?.value || "auto";
     config.preset = "general";
     config.custom_prompt = "";
+    config.write_txt = Boolean($("#labelerWriteTxtCustom")?.checked);
     if (labeler.skillPick?.id) {
       config.engine = "chat";
       config.skill_id = labeler.skillPick.id;
@@ -773,6 +780,7 @@ async function startTask() {
     labeler.tagMatches = [];
     labeler.tags = [];
     labeler.sentences = [];
+    labeler.txtFiles = new Map();
     setResultTab("images");
     renderTask(task);
     await refreshBatches();
@@ -947,6 +955,7 @@ async function retryTask(mode) {
     labeler.tagMatches = [];
     labeler.tags = [];
     labeler.sentences = [];
+    labeler.txtFiles = new Map();
     setResultTab("images");
     renderTask(next);
     const skipped = Number(payload.skipped_succeeded || 0);
@@ -1119,8 +1128,11 @@ function clearSelectedBatch() {
   labeler.tagMatches = [];
   labeler.tags = [];
   labeler.sentences = [];
+  labeler.txtFiles = new Map();
   const box = $("#labelerQueueStatus");
   if (box) box.hidden = true;
+  const txtBtn = $("#labelerOpenTxt");
+  if (txtBtn) txtBtn.hidden = true;
   renderResultBody();
 }
 
@@ -1171,6 +1183,9 @@ function renderTask(task) {
   if (cancelBtn) cancelBtn.hidden = !["queued", "running"].includes(status);
   const failedBtn = $("#labelerRetryModelFailed");
   if (failedBtn) failedBtn.hidden = !task.can_retry_failed;
+  // TXT 文件夹入口只在本批次开启过「写入本地 TXT」时出现。
+  const txtBtn = $("#labelerOpenTxt");
+  if (txtBtn) txtBtn.hidden = !Boolean(task.input?.config?.write_txt);
   renderResultBody();
 }
 
@@ -1353,6 +1368,7 @@ function renderImageResults(body) {
     visible.map(({ item, annotation }) => [
       item.item_id, item.state, item.annotation_id || 0, item.error || "",
       (annotation?.tags || []).length, annotation?.description || "",
+      item.txt_state || "", item.txt_path || "", Number(item.txt_chars || 0),
     ]),
   ]);
   if (labeler.lastImageSignature === signature) return;
@@ -1385,6 +1401,7 @@ function renderImageResults(body) {
       desc.textContent = annotation.description;
       card.append(desc);
     }
+    if (item.txt_state) card.append(txtStatusRow(item));
     if (item.error) {
       const err = document.createElement("p");
       err.className = "labeler-anno-desc";
@@ -1436,6 +1453,119 @@ function tagList(tags, confidences) {
     wrap.append(span);
   });
   return wrap;
+}
+
+// ---- 写入本地 TXT：结果卡状态 + 查看/下载 + 打开任务输出目录 ----
+
+function txtStateLabel(item) {
+  if (item.txt_state === "written") return "TXT 已写入（模型分段）";
+  if (item.txt_state === "auto") return "TXT 已按标注生成";
+  if (item.txt_state === "failed") return "TXT 写入失败";
+  return "TXT";
+}
+
+function txtStatusRow(item) {
+  const row = document.createElement("div");
+  row.className = "labeler-anno-txt" + (item.txt_state === "failed" ? " failed" : "");
+  const label = document.createElement("span");
+  const name = String(item.txt_path || "");
+  const chars = Number(item.txt_chars || 0);
+  // 卡片标题已经是相对路径：这里只报状态与字数，不重复一层路径（路径放 title）。
+  label.textContent = txtStateLabel(item) + (chars ? ` · ${chars} 字` : "");
+  label.title = name;
+  row.append(label);
+  if (item.txt_state !== "failed") {
+    const view = document.createElement("button");
+    view.type = "button";
+    view.className = "control-button tiny";
+    view.textContent = "查看";
+    view.dataset.labelerTxtView = String(item.item_id || "");
+    const download = document.createElement("button");
+    download.type = "button";
+    download.className = "control-button tiny";
+    download.textContent = "下载";
+    download.dataset.labelerTxtDownload = String(item.item_id || "");
+    row.append(view, download);
+  }
+  return row;
+}
+
+async function fetchTxtFiles(taskId = labeler.taskId) {
+  const id = String(taskId || "");
+  if (!id) return [];
+  try {
+    const payload = await api(`/api/labeler/tasks/${encodeURIComponent(id)}/txt`);
+    if (labeler.taskId !== id) return [];
+    labeler.txtFiles = new Map((payload.files || []).map((row) => [String(row.item_id || ""), row]));
+    return payload.files || [];
+  } catch (error) {
+    setHint(`TXT 文件列表读取失败：${error.message}`, true);
+    return [];
+  }
+}
+
+async function viewTxt(itemId) {
+  const taskId = labeler.taskId;
+  const id = String(itemId || "");
+  if (!taskId || !id) return;
+  try {
+    const payload = await api(
+      `/api/labeler/tasks/${encodeURIComponent(taskId)}/txt/${encodeURIComponent(id)}`);
+    if (labeler.taskId !== taskId) return;
+    const dialog = $("#labelerTxtDialog");
+    const title = $("#labelerTxtDialogTitle");
+    const body = $("#labelerTxtDialogBody");
+    if (title) title.textContent = payload.relative_path || payload.txt_path || "TXT";
+    if (body) {
+      body.textContent = String(payload.content || "")
+        + (payload.truncated ? "\n\n…（内容过长，已截断显示；下载可看完整文件）" : "");
+    }
+    if (dialog) {
+      dialog.dataset.itemId = id;
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "");
+    }
+  } catch (error) {
+    setHint(`TXT 读取失败：${error.message}`, true);
+  }
+}
+
+async function downloadTxt(itemId) {
+  const id = String(itemId || "");
+  if (!id) return;
+  let entry = labeler.txtFiles.get(id);
+  if (!entry?.path) {
+    const rows = await fetchTxtFiles();
+    entry = rows.find((row) => String(row.item_id || "") === id) || labeler.txtFiles.get(id);
+  }
+  if (!entry?.path) {
+    setHint("TXT 文件尚未生成或已被清理", true);
+    return;
+  }
+  triggerDownload(fileUrl(entry.path));
+}
+
+async function openTxtFolder() {
+  const taskId = labeler.taskId;
+  if (!taskId) return;
+  const button = $("#labelerOpenTxt");
+  if (button) button.disabled = true;
+  try {
+    const payload = await api(
+      `/api/labeler/tasks/${encodeURIComponent(taskId)}/txt/open`, { method: "POST", body: {} });
+    setHint(payload?.path ? `已打开 TXT 文件夹：${payload.path}` : "已打开 TXT 文件夹");
+  } catch (error) {
+    setHint(`无法打开 TXT 文件夹：${error.message}`, true);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+function closeTxtDialog() {
+  const dialog = $("#labelerTxtDialog");
+  if (!dialog) return;
+  if (typeof dialog.close === "function") dialog.close();
+  else dialog.removeAttribute("open");
 }
 
 function renderTagCloud(body) {
@@ -1662,6 +1792,21 @@ export function bindLabelerEvents() {
   triggerEnabled?.addEventListener("change", () => {
     if (triggerWord) triggerWord.disabled = !triggerEnabled.checked;
   });
+  // 写入本地 TXT：两个页签各记各的开关，互不覆盖。
+  const writeTxtPreset = $("#labelerWriteTxtPreset");
+  const writeTxtCustom = $("#labelerWriteTxtCustom");
+  if (writeTxtPreset) {
+    writeTxtPreset.checked = Boolean(labeler.writeTxtPreset);
+    writeTxtPreset.addEventListener("change", () => {
+      labeler.writeTxtPreset = Boolean(writeTxtPreset.checked);
+    });
+  }
+  if (writeTxtCustom) {
+    writeTxtCustom.checked = Boolean(labeler.writeTxtCustom);
+    writeTxtCustom.addEventListener("change", () => {
+      labeler.writeTxtCustom = Boolean(writeTxtCustom.checked);
+    });
+  }
   $("#labelerStart")?.addEventListener("click", () => { void startTask(); });
   $("#labelerCancel")?.addEventListener("click", () => { void cancelTask(); });
   $("#labelerContinue")?.addEventListener("click", () => { void continueTask(); });
@@ -1696,6 +1841,16 @@ export function bindLabelerEvents() {
     setResultTab(btn.dataset.labelerResult);
   });
   $("#labelerResultBody")?.addEventListener("click", (event) => {
+    const view = event.target.closest("[data-labeler-txt-view]");
+    if (view) {
+      void viewTxt(view.dataset.labelerTxtView);
+      return;
+    }
+    const download = event.target.closest("[data-labeler-txt-download]");
+    if (download) {
+      void downloadTxt(download.dataset.labelerTxtDownload);
+      return;
+    }
     const btn = event.target.closest("[data-labeler-tag]");
     if (!btn) return;
     labeler.activeTag = labeler.activeTag === btn.dataset.labelerTag ? "" : btn.dataset.labelerTag;
@@ -1712,6 +1867,16 @@ export function bindLabelerEvents() {
   });
   $("#labelerExport")?.addEventListener("click", () => { void exportResults(); });
   $("#labelerOpenExports")?.addEventListener("click", () => { void openExportFolder(); });
+  $("#labelerOpenTxt")?.addEventListener("click", () => { void openTxtFolder(); });
+  $("#labelerTxtDialogClose")?.addEventListener("click", closeTxtDialog);
+  $("#labelerTxtDialogDownload")?.addEventListener("click", () => {
+    const itemId = $("#labelerTxtDialog")?.dataset.itemId || "";
+    void downloadTxt(itemId);
+  });
+  $("#labelerTxtDialog")?.addEventListener("close", () => {
+    const dialog = $("#labelerTxtDialog");
+    if (dialog) delete dialog.dataset.itemId;
+  });
   $("#labelerWipeAnnotations")?.addEventListener("click", () => { void wipeAnnotations(); });
 
   // 功能页切换：切走暂停轮询，切回来按服务端校准。

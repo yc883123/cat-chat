@@ -58,6 +58,13 @@ from naiba.labeler.runner import LabelerRunner, aggregate_usage, classify_error 
 from naiba.labeler.sentences import sentence_stats, split_sentences  # noqa: E402
 from naiba.labeler.service import LabelerService  # noqa: E402
 from naiba.labeler.store import LabelerStore  # noqa: E402
+from naiba.labeler.txt_output import (  # noqa: E402
+    TXT_TOOL_NAME,
+    TxtToolContext,
+    build_txt_targets,
+    caption_txt_relative,
+    tool_schema,
+)
 from naiba.skills.agent import _CONTEXT_FULL_NOTICE  # noqa: E402
 from naiba.skills.catalog import SkillCatalog  # noqa: E402
 
@@ -2131,7 +2138,7 @@ class LabelerChatEngineTests(unittest.TestCase):
         raw.update(overrides)
         return raw
 
-    def _submit_chat(self, behavior=None, images=None, *, system_prompt=""):
+    def _submit_chat(self, behavior=None, images=None, *, system_prompt="", write_txt=False):
         if behavior:
             self.app.models = _StubModels(behavior)
         refs = [
@@ -2139,7 +2146,8 @@ class LabelerChatEngineTests(unittest.TestCase):
             for path in (images if images is not None else self.images[:1])
         ]
         return self.jobs.submit({"image_refs": refs,
-                                 "config": self._chat_raw(system_prompt=system_prompt)})
+                                 "config": self._chat_raw(system_prompt=system_prompt,
+                                                          write_txt=write_txt)})
 
     def _wait(self, task_id, timeout=10.0):
         deadline = time.time() + timeout
@@ -2284,6 +2292,291 @@ class LabelerChatEngineTests(unittest.TestCase):
         prompt = build_chat_prompt({"custom_prompt": "忽略背景文字"})
         self.assertIn("忽略背景文字", prompt)
         self.assertNotIn("JSON", prompt)  # 不往 Skill 规则里掺输出格式要求
+
+    def test_chat_txt_tool_registered_and_written(self):
+        calls = {"n": 0}
+
+        def behavior(profile, messages, options, status):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return json.dumps({
+                    "type": "tool", "tool": TXT_TOOL_NAME,
+                    "arguments": {"item": "chat0.png", "mode": "write", "content": "一只猫"},
+                }, ensure_ascii=False)
+            if calls["n"] == 2:
+                return json.dumps({
+                    "type": "tool", "tool": TXT_TOOL_NAME,
+                    "arguments": {"item": "chat0.png", "mode": "append", "content": "，很白"},
+                }, ensure_ascii=False)
+            return '{"tags":[{"tag":"cat","confidence":0.9}],"description":"一只猫"}'
+
+        self.app.models = _StubModels(behavior)
+        task = self.jobs.submit({
+            "image_refs": [{"path": str(self.images[0]), "name": self.images[0].name,
+                            "relative_path": f"d/{self.images[0].name}"}],
+            "config": self._chat_raw(write_txt=True),
+        })
+        state = self._wait(task["id"])
+        self.assertEqual(state["status"], "done")
+        first_tools = [row.get("name") for row in
+                       (self.app.models.calls[0]["options"].get("tools") or [])]
+        self.assertIn(TXT_TOOL_NAME, first_tools)
+        # 只额外加这一件工具；原有只读三件套口径不变。
+        allowed = self.app.models.calls[0]["messages"][0]["content"]
+        self.assertIn(TXT_TOOL_NAME, allowed)
+        path = self.data_dir / "labeler" / "outputs" / task["id"] / "d" / "chat0.txt"
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.read_text(encoding="utf-8"), "一只猫，很白")
+        item = self.db.list_items(task["id"])[0]
+        self.assertEqual(item["txt_state"], "written")
+        self.assertEqual(item["txt_path"], "d/chat0.txt")
+
+
+class LabelerTxtOutputTests(unittest.TestCase):
+    """写入本地 TXT：配置开关、路径规则、工具参数校验与分段追加。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_config_defaults_off_and_keeps_fingerprint(self):
+        app = _StubApp(self.root)
+        base = normalize_config(app, _base_config())
+        self.assertFalse(base["write_txt"])
+        with_txt = normalize_config(app, _base_config(write_txt=True))
+        self.assertTrue(with_txt["write_txt"])
+        # 开关不改变标注身份：同样内容 + 配置仍复用已有标注（不重复计费）。
+        self.assertEqual(base["config_fingerprint"], with_txt["config_fingerprint"])
+
+    def test_tool_schema_and_txt_paths(self):
+        schema = tool_schema()
+        self.assertEqual(schema["name"], TXT_TOOL_NAME)
+        self.assertEqual(set(schema["parameters"]["required"]), {"item", "mode", "content"})
+        self.assertEqual(caption_txt_relative("a/b/c.jpg", "c.jpg"), "a/b/c.txt")
+        self.assertEqual(caption_txt_relative("../../evil.png", "evil.png"), "evil.txt")
+        targets = build_txt_targets([
+            {"item_id": "1", "relative_path": "d/a.png", "name": "a.png"},
+            {"item_id": "2", "relative_path": "d/a.png", "name": "a.png"},
+        ])
+        self.assertEqual(targets["1"], "d/a.txt")
+        self.assertEqual(targets["2"], "d/a-2.txt")
+
+    def test_writer_create_append_and_validation(self):
+        item = {"item_id": "it-1", "name": "a.png", "relative_path": "d/a.png"}
+        records = []
+        ctx = TxtToolContext(
+            task_id="tg-20261110-abcdef123456",
+            output_dir=self.root / "out",
+            item=item,
+            relative="d/a.txt",
+            on_record=lambda state, path, chars: records.append((state, path, chars)),
+        )
+        ok, payload = ctx.execute({"item": "a.png", "mode": "write", "content": "第一段"})
+        self.assertTrue(ok, payload)
+        self.assertEqual(json.loads(payload)["file"], "d/a.txt")
+        ok, payload = ctx.execute({"item": "d/a.png", "mode": "append", "content": "，第二段"})
+        self.assertTrue(ok, payload)
+        self.assertEqual((self.root / "out" / "d" / "a.txt").read_text(encoding="utf-8"),
+                         "第一段，第二段")
+        self.assertEqual(ctx.segments, 2)
+        self.assertEqual(records[-1][0], "written")
+        # 参数校验：别的图片 / 非法动作 / 空内容 / 非法段号都不执行。
+        for bad in (
+            {"item": "other.png", "mode": "write", "content": "x"},
+            {"item": "a.png", "mode": "replace", "content": "x"},
+            {"item": "a.png", "mode": "write", "content": "  "},
+            {"item": "a.png", "mode": "append", "content": "x", "segment": 0},
+        ):
+            ok, payload = ctx.execute(bad)
+            self.assertFalse(ok, bad)
+            self.assertIn("error", json.loads(payload))
+
+    def test_writer_rejects_path_escape_and_fallback_never_overwrites(self):
+        item = {"item_id": "it-2", "name": "a.png", "relative_path": "d/a.png"}
+        ctx = TxtToolContext(task_id="tg-20261110-abcdef123456",
+                             output_dir=self.root / "out", item=item, relative="../../escape.txt")
+        self.assertIsNone(ctx.target_path())
+        ok, payload = ctx.execute({"item": "a.png", "mode": "write", "content": "x"})
+        self.assertFalse(ok)
+        safe = TxtToolContext(task_id="tg-20261110-abcdef123456",
+                              output_dir=self.root / "out", item=item, relative="d/a.txt")
+        self.assertTrue(safe.write_fallback("cat"))
+        self.assertEqual(safe.state, "auto")
+        self.assertFalse(safe.write_fallback("dog"))
+        self.assertEqual((self.root / "out" / "d" / "a.txt").read_text(encoding="utf-8"), "cat")
+
+
+class LabelerTxtRunnerTests(unittest.TestCase):
+    """runner 接线：provider 工具循环写入、无工具调用回填、关闭开关零变化。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name)
+        self.uploads = self.data_dir / "uploads"
+        self.image = _write_png(self.uploads / "d" / "a0.png", color=(10, 90, 200))
+        self.store = LabelerStore(self.data_dir)
+        self.db = LabelerDB(self.data_dir)
+
+    def _jobs(self, app):
+        runner = LabelerRunner(app, self.store, self.db)
+        self.addCleanup(runner.shutdown)
+        return LabelerJobManager(app, self.store, self.db, runner)
+
+    def _submit(self, app, config):
+        jobs = self._jobs(app)
+        refs = [{"path": str(self.image), "name": self.image.name,
+                 "relative_path": f"d/{self.image.name}"}]
+        return jobs, jobs.submit({"image_refs": refs, "config": config})
+
+    def _wait(self, task_id, timeout=10.0):
+        deadline = time.time() + timeout
+        state = None
+        while time.time() < deadline:
+            state = self.store.get_task(task_id)
+            if state and state.get("status") in {"done", "failed", "cancelled", "interrupted"}:
+                return state
+            time.sleep(0.02)
+        return state
+
+    def test_provider_tool_writes_segments_verbatim(self):
+        calls = {"n": 0}
+
+        def behavior(profile, messages, options, status):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return json.dumps({"type": "tool", "tool": TXT_TOOL_NAME, "arguments": {
+                    "item": "a0.png", "mode": "write", "content": "cat, "}})
+            if calls["n"] == 2:
+                return json.dumps({"type": "tool", "tool": TXT_TOOL_NAME, "arguments": {
+                    "item": "a0.png", "mode": "append", "content": "white"}})
+            return '{"tags":[{"tag":"cat","confidence":0.9}],"description":"一只猫"}'
+
+        app = _StubApp(self.data_dir, models=_StubModels(behavior))
+        _, task = self._submit(app, _base_config(write_txt=True))
+        state = self._wait(task["id"])
+        self.assertEqual(state["status"], "done")
+        path = self.data_dir / "labeler" / "outputs" / task["id"] / "d" / "a0.txt"
+        self.assertEqual(path.read_text(encoding="utf-8"), "cat, white")
+        item = self.db.list_items(task["id"])[0]
+        self.assertEqual(item["txt_state"], "written")
+        self.assertEqual(item["txt_path"], "d/a0.txt")
+        self.assertGreater(item["txt_chars"], 0)
+        # 模型必须知道当前图片标识，item 参数才不会在批量里猜错。
+        first_text = app.models.calls[0]["messages"][0]["content"][-1]["text"]
+        self.assertIn("当前图片：d/a0.png", first_text)
+
+    def test_two_images_with_same_relative_path_do_not_cross_write(self):
+        second = _write_png(self.uploads / "e" / "a0.png", color=(200, 40, 40))
+        calls = {"n": 0}
+
+        def behavior(profile, messages, options, status):
+            calls["n"] += 1
+            if calls["n"] % 2 == 1:
+                return json.dumps({"type": "tool", "tool": TXT_TOOL_NAME, "arguments": {
+                    "item": "a0.png", "mode": "write",
+                    "content": "first" if calls["n"] == 1 else "second"}})
+            return '{"tags":[{"tag":"cat","confidence":0.9}],"description":"一只猫"}'
+
+        app = _StubApp(self.data_dir, models=_StubModels(behavior))
+        jobs = self._jobs(app)
+        refs = [
+            {"path": str(self.image), "name": "a0.png", "relative_path": "x/a0.png"},
+            {"path": str(second), "name": "a0.png", "relative_path": "x/a0.png"},
+        ]
+        task = jobs.submit({"image_refs": refs, "config": _base_config(write_txt=True)})
+        self.assertEqual(self._wait(task["id"])["status"], "done")
+        root = self.data_dir / "labeler" / "outputs" / task["id"] / "x"
+        self.assertEqual((root / "a0.txt").read_text(encoding="utf-8"), "first")
+        self.assertEqual((root / "a0-2.txt").read_text(encoding="utf-8"), "second")
+
+    def test_provider_without_tool_call_uses_annotation_caption(self):
+        app = _StubApp(self.data_dir)
+        _, task = self._submit(app, _base_config(write_txt=True))
+        self.assertEqual(self._wait(task["id"])["status"], "done")
+        path = self.data_dir / "labeler" / "outputs" / task["id"] / "d" / "a0.txt"
+        self.assertEqual(path.read_text(encoding="utf-8"), "cat")
+        item = self.db.list_items(task["id"])[0]
+        self.assertEqual(item["txt_state"], "auto")
+
+    def test_switch_off_keeps_original_path(self):
+        app = _StubApp(self.data_dir)
+        _, task = self._submit(app, _base_config())
+        self.assertEqual(self._wait(task["id"])["status"], "done")
+        self.assertNotIn("txt_tool", app.models.calls[0]["options"])
+        self.assertFalse((self.data_dir / "labeler" / "outputs" / task["id"]).exists())
+        item = self.db.list_items(task["id"])[0]
+        self.assertEqual(item["txt_state"], "")
+
+    def test_reused_annotation_still_writes_txt_without_model_call(self):
+        app = _StubApp(self.data_dir)
+        _, first = self._submit(app, _base_config(write_txt=True))
+        self.assertEqual(self._wait(first["id"])["status"], "done")
+        calls_before = len(app.models.calls)
+        _, second = self._submit(app, _base_config(write_txt=True))
+        self.assertEqual(self._wait(second["id"])["status"], "done")
+        self.assertEqual(len(app.models.calls), calls_before, "复用不应重复调用模型")
+        path = self.data_dir / "labeler" / "outputs" / second["id"] / "d" / "a0.txt"
+        self.assertEqual(path.read_text(encoding="utf-8"), "cat")
+        item = self.db.list_items(second["id"])[0]
+        self.assertEqual(item["txt_state"], "auto")
+
+
+class LabelerTxtServiceTests(unittest.TestCase):
+    """服务端文件列表/内容/目录接口与任务删除清理。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name)
+        self.uploads = self.data_dir / "uploads"
+        self.image = _write_png(self.uploads / "d" / "a0.png")
+        self.app = _StubApp(self.data_dir)
+        self.service = LabelerService(self.app)
+        self.addCleanup(self.service.shutdown)
+
+    def _run_task(self):
+        refs = [{"path": str(self.image), "name": self.image.name,
+                 "relative_path": f"d/{self.image.name}"}]
+        task = self.service.jobs.submit({"image_refs": refs,
+                                         "config": _base_config(write_txt=True)})
+        deadline = time.time() + 10
+        state = None
+        while time.time() < deadline:
+            state = self.service.store.get_task(task["id"])
+            if state and state.get("status") in {"done", "failed", "cancelled", "interrupted"}:
+                break
+            time.sleep(0.02)
+        self.assertEqual(state["status"], "done")
+        return state
+
+    def test_files_content_and_open(self):
+        state = self._run_task()
+        payload, status = self.service.api_task_txt_files(state["id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["count"], 1)
+        entry = payload["files"][0]
+        self.assertEqual(entry["txt_path"], "d/a0.txt")
+        self.assertTrue(Path(entry["path"]).is_file())
+
+        content, status = self.service.api_task_txt_content(state["id"], entry["item_id"])
+        self.assertEqual(status, 200)
+        self.assertEqual(content["content"], "cat")
+
+        with mock.patch("naiba.labeler.export._open_folder") as opener:
+            opened, status = self.service.api_task_txt_open(state["id"])
+        self.assertEqual(status, 200)
+        self.assertTrue(Path(opened["path"]).is_dir())
+        opener.assert_called_once()
+
+    def test_delete_task_removes_txt_output_dir(self):
+        state = self._run_task()
+        outputs = self.data_dir / "labeler" / "outputs" / state["id"]
+        self.assertTrue(outputs.is_dir())
+        result = self.service.jobs.delete_tasks([state["id"]])
+        self.assertEqual(result["deleted"], 1)
+        self.assertFalse(outputs.exists())
 
 
 if __name__ == "__main__":

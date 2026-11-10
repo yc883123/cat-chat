@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import threading
 import time
 import uuid
@@ -31,6 +33,8 @@ from naiba.labeler import (
 PROTECTED_STATUSES: tuple[str, ...] = tuple(
     dict.fromkeys((*LABELER_ACTIVE_STATUSES, *LABELER_RESUMABLE_STATUSES))
 )
+# 任务 ID → 输出目录名：只允许生成器产出的形状，防止任何路径逃逸。
+_SAFE_TASK_ID_RE = re.compile(r"^tg-[0-9]{8}-[0-9a-f]{12}$")
 
 
 class LabelerStoreError(ValueError):
@@ -46,6 +50,7 @@ class LabelerStore:
 
     def __init__(self, data_dir: Path):
         self._dir = Path(data_dir) / "labeler" / "tasks"
+        self._outputs_root = Path(data_dir) / "labeler" / "outputs"
         self._lock = threading.RLock()
 
     # ---- 路径 ----
@@ -55,6 +60,31 @@ class LabelerStore:
 
     def _events_path(self, task_id: str) -> Path:
         return self._dir / f"{task_id}.events.jsonl"
+
+    def outputs_dir(self, task_id: str) -> Path:
+        """任务 TXT 输出目录（固定 ``data/labeler/outputs/<task_id>/``）。
+
+        路径只由服务端拼：``task_id`` 先做白名单校验（``tg-`` 前缀 + 安全字符），
+        绝不接受客户端传入的目录。
+        """
+        clean = str(task_id or "").strip()
+        if not clean.startswith("tg-") or not _SAFE_TASK_ID_RE.fullmatch(clean):
+            raise LabelerStoreError(f"任务 ID 非法：{clean}")
+        return self._outputs_root / clean
+
+    def remove_outputs(self, task_id: str) -> bool:
+        """删除任务的 TXT 输出目录（任务记录删除时一并清理，尽力而为）。"""
+        try:
+            target = self.outputs_dir(task_id)
+        except LabelerStoreError:
+            return False
+        if not target.exists():
+            return False
+        try:
+            shutil.rmtree(target)
+            return True
+        except OSError:
+            return False
 
     def new_task_id(self) -> str:
         return f"tg-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:12]}"

@@ -22,8 +22,10 @@ from naiba.core.exceptions import TaskCancelled
 from naiba.llm.profiles import resolve_profile_with_override
 from naiba.labeler.engines import get_engine
 from naiba.labeler.engines.provider import build_prompt
+from naiba.labeler.export import caption_text
 from naiba.labeler.presets import filter_tags, get_preset, normalize_tag
 from naiba.labeler.store import now_ms
+from naiba.labeler.txt_output import TXT_TOOL_NAME, TxtToolContext, build_txt_targets
 
 # 已验证可用的并发档位。P0-a 只通过了离线契约；在线小样本未执行前不开放 >1。
 VALIDATED_CONCURRENCY = (1,)
@@ -209,6 +211,14 @@ class LabelerRunner:
             # 本地后端共用 runtime 的全局执行锁：批量任务不能把聊天挤在门外。
             # 在线 provider 每次调用独立，无需让路。
             is_local = str(profile.get("kind") or "").lower() == "local"
+            # 写入本地 TXT：输出目录在提交时已建好；这里把「每张图 → 同名 txt」
+            # 的目标一次性算好，同名相对路径在任务内也不会串写。
+            write_txt = bool(config.get("write_txt"))
+            txt_output: tuple[Any, dict[str, str]] | None = None
+            if write_txt:
+                output_dir = self.store.outputs_dir(task_id)
+                output_dir.mkdir(parents=True, exist_ok=True)
+                txt_output = (output_dir, build_txt_targets(self.db.list_items(task_id, limit=10000)))
 
             for item in self.db.pending_items(task_id):
                 if cancel_event.is_set():
@@ -229,6 +239,7 @@ class LabelerRunner:
                     retry_limit=retry_limit,
                     timeout_seconds=timeout_seconds,
                     cancel_event=cancel_event,
+                    txt_output=txt_output,
                 )
                 if item_usage:
                     total_usage = aggregate_usage(total_usage, item_usage)
@@ -264,20 +275,26 @@ class LabelerRunner:
         retry_limit: int,
         timeout_seconds: int,
         cancel_event: threading.Event,
+        txt_output: tuple[Any, dict[str, str]] | None = None,
     ) -> dict[str, Any]:
         item_id = item["item_id"]
+        writer = self._build_txt_writer(task_id, item, txt_output)
         # 同图同内容同配置已有成功结果：直接复用，不重复调用（也不产生费用）。
         reusable = self.db.find_reusable(item["path_key"], item["content_version"], fingerprint)
         if reusable is not None:
+            annotation = self._annotation_from_reusable(reusable, item, config)
+            if writer is not None:
+                # 复用的结果也要有同名 TXT：内容就是这条已保存的标注。
+                writer.write_fallback(caption_text(annotation))
             self.db.complete_item(
                 task_id, item_id,
-                annotation=self._annotation_from_reusable(reusable, item, config),
+                annotation=annotation,
                 usage=reusable.get("usage") or {},
                 config_fingerprint=fingerprint,
             )
             self.store.append_event(task_id, {
                 "type": "image_done", "item_id": item_id, "name": item.get("name") or "",
-                "reused": True,
+                "reused": True, "txt_state": writer.state if writer else "",
             })
             return {}
 
@@ -293,11 +310,25 @@ class LabelerRunner:
             # chat 引擎的事件桥需要图片上下文（事件带图片名，逐图可读）。
             options["item_id"] = str(item_id or "")
             options["item_name"] = str(item.get("name") or "")
+        if writer is not None:
+            # 两类引擎共用同一个写入器：provider 的单轮工具循环与 chat 的
+            # SkillAgent 工具循环都从 options["txt_tool"] 取它。
+            options["txt_tool"] = writer
+            # 模型需要知道这张图的标识，才能把 item 参数填对（否则只能在批量里猜）。
+            label = str(item.get("relative_path") or item.get("name") or "")
+            if label:
+                prompt = (
+                    f"{prompt}\n\n当前图片：{label}"
+                    f"（调用 {TXT_TOOL_NAME} 时 item 填这个）"
+                )
         attempt = 0
         while True:
             if cancel_event.is_set():
                 self.db.cancel_item(task_id, item_id)
                 return {}
+            if writer is not None:
+                # 重试会从零重来：清掉上一次尝试写了一半的 TXT，避免分段重复。
+                writer.reset()
             self.db.mark_running(task_id, item_id)
             started = time.monotonic()
             try:
@@ -342,6 +373,10 @@ class LabelerRunner:
                     "confidences": confidences,
                     "description": description,
                 }
+                if writer is not None:
+                    # 模型一次工具都没调用（或不支持工具）时回填一份，保证每张成功图片
+                    # 都有同名 TXT；工具写过的内容优先，不被标注文本覆盖。
+                    writer.write_fallback(caption_text(annotation))
                 self.db.complete_item(
                     task_id, item_id,
                     annotation=annotation,
@@ -353,6 +388,7 @@ class LabelerRunner:
                 self.store.append_event(task_id, {
                     "type": "image_done", "item_id": item_id, "name": item.get("name") or "",
                     "tags": len(tags), "finish_reason": finish_reason,
+                    "txt_state": writer.state if writer is not None else "",
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                 })
                 return usage
@@ -381,6 +417,29 @@ class LabelerRunner:
                     "error": str(exc)[:500], "category": category,
                 })
                 return {}
+
+    def _build_txt_writer(self, task_id: str, item: dict[str, Any],
+                          txt_output: tuple[Any, dict[str, str]] | None) -> TxtToolContext | None:
+        """按任务开关构造当前图片的 TXT 写入器；关闭时返回 None（零行为变化）。"""
+        if txt_output is None:
+            return None
+        output_dir, targets = txt_output
+        item_id = str(item.get("item_id") or "")
+
+        def record(state: str, path: str, chars: int) -> None:
+            self.db.mark_txt(task_id, item_id, path=path, state=state, chars=chars)
+
+        def event(message: str) -> None:
+            self.store.append_event(task_id, {"type": "status", "message": message})
+
+        return TxtToolContext(
+            task_id=task_id,
+            output_dir=output_dir,
+            item=item,
+            relative=targets.get(item_id, ""),
+            on_record=record,
+            on_event=event,
+        )
 
     @staticmethod
     def _trigger_word(config: dict[str, Any]) -> str:

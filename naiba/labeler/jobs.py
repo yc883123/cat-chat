@@ -25,9 +25,11 @@ from typing import Any
 from naiba.llm.profiles import resolve_profile_with_override
 from naiba.labeler import LABELER_ACTIVE_STATUSES, LABELER_RESUMABLE_STATUSES
 from naiba.labeler.engines import DEFAULT_ENGINE, ENGINE_IDS
+from naiba.labeler.gate import MAX_WORKERS
 from naiba.labeler.images import stable_item_id, validate_image_refs
 from naiba.labeler.presets import DEFAULT_PRESET, PRESET_IDS, canonical_preset_id
 from naiba.labeler.runner import DEFAULT_CONCURRENCY, VALIDATED_CONCURRENCY
+from naiba.labeler.supervisor import SUPERVISION_PROMPT_VERSION
 
 VALID_OUTPUT_MODES = ("keywords", "phrases", "description", "both")
 # 输出语言：mixed = 标签英文 + 描述中文（历史默认）；zh / en = 标签与描述统一语言。
@@ -37,6 +39,9 @@ ALLOWED_CONFIG_KEYS = frozenset({
     "confidence_threshold", "max_tags", "custom_prompt", "subject_filter",
     "concurrency", "retry_limit", "timeout_seconds", "prompt_version",
     "trigger_word", "system_prompt", "skill_id", "write_txt",
+    # 自定义打标并发监督档：开关 + 有序打标员槽位 + 监督员。
+    # supervisor_version 只随快照回读（继续任务），提交时服务端会覆盖成当前版本。
+    "concurrency_enabled", "workers", "supervisor", "supervisor_version",
 })
 # 只进指纹的「影响结果」字段：换并发/重试次数/超时不该改变结果身份。
 # trigger_word 进指纹，但「关闭」时按缺省处理（config_fingerprint 里归一化），
@@ -48,6 +53,9 @@ FINGERPRINT_KEYS = (
     "engine", "output_mode", "language", "preset", "model_key", "model_name",
     "confidence_threshold", "max_tags", "custom_prompt", "subject_filter", "prompt_version",
     "trigger_word", "system_prompt", "skill_id", "skill_revision",
+    # 并发监督档的结果身份：打标员集合、监督模型与版本化监督策略都会改变正式
+    # 输出，必须进指纹；关闭并发时三者一律弹出，旧指纹逐字节不变。
+    "workers", "supervisor", "supervisor_version",
 )
 VALID_STRENGTHS = ("low", "medium", "high")
 MAX_CUSTOM_PROMPT = 2000
@@ -150,6 +158,52 @@ def _normalize_trigger_word(raw: Any) -> dict[str, Any]:
     return {"enabled": enabled, "value": value}
 
 
+def _model_ref(app: Any, raw: Any, *, label: str) -> dict[str, str]:
+    """校验一个「供应商 + 模型」引用：字段白名单、profile 有效、必须在线。
+
+    客户端只能给非秘密标识；API Key / base_url / profile 内容一律不收。
+    本地 profile 明确拒绝（并发档不能挤占全局本地执行锁）。
+    """
+    if not isinstance(raw, dict):
+        raise LabelerTaskError(f"{label}必须是包含 model_key 与 model_name 的对象")
+    unknown = set(raw) - {"model_key", "model_name"}
+    if unknown:
+        names = ", ".join(sorted(map(str, unknown)))
+        raise LabelerTaskError(f"{label}包含不支持的字段：{names}")
+    model_key = str(raw.get("model_key") or "").strip()[:256]
+    model_name = str(raw.get("model_name") or "").strip()[:256]
+    if not model_key or not model_name:
+        raise LabelerTaskError(f"{label}要先选择模型配置与模型")
+    try:
+        base = app.config.profile(model_key)
+    except (ValueError, KeyError) as exc:
+        raise LabelerTaskError(f"{label}的模型配置不可用：{exc}") from exc
+    if str(base.get("kind") or "").strip().lower() == "local":
+        raise LabelerTaskError(
+            f"{label}选的是本地模型：并发打标只支持在线 API 供应商，"
+            "请换在线模型或关闭并发打标"
+        )
+    try:
+        resolve_profile_with_override(app.config, model_key, model_name)
+    except (ValueError, KeyError) as exc:
+        raise LabelerTaskError(f"{label}的模型配置不可用：{exc}") from exc
+    return {"model_key": model_key, "model_name": model_name}
+
+
+def _normalize_worker_slots(app: Any, raw: Any) -> list[dict[str, str]]:
+    """有序打标员槽位：1–9 个，允许重复选同一供应商/模型。"""
+    if not isinstance(raw, list):
+        raise LabelerTaskError("workers 必须是数组")
+    if not raw:
+        raise LabelerTaskError("开启并发打标后至少要配置 1 个打标员槽位")
+    if len(raw) > MAX_WORKERS:
+        raise LabelerTaskError(f"打标员槽位最多 {MAX_WORKERS} 个")
+    return [
+        _model_ref(app, row, label=f"第 {index + 1} 个打标员槽位")
+        for index, row in enumerate(raw)
+    ]
+
+
 def normalize_config(app: Any, raw: Any, *, allow_legacy_language: bool = False) -> dict[str, Any]:
     """白名单校验并归一化 config；顺带校验模型 profile（不落任何密钥）。
 
@@ -198,16 +252,36 @@ def normalize_config(app: Any, raw: Any, *, allow_legacy_language: bool = False)
     preset = canonical_preset_id(raw.get("preset")) or DEFAULT_PRESET
     if preset not in PRESET_IDS:
         raise LabelerTaskError(f"未知的打标侧重：{preset}")
-    model_key = str(raw.get("model_key") or "").strip()
+    model_key = str(raw.get("model_key") or "").strip()[:256]
     model_name = str(raw.get("model_name") or "").strip()[:256]
-    if not model_key or not model_name:
-        raise LabelerTaskError("请先选择模型配置与模型")
-    try:
-        # 只校验配置能解析（供应商存在、模型名非空）；云端与本地后端都允许，
-        # 本地后端由 runtime 自己的全局执行锁串行化。
-        resolve_profile_with_override(app.config, model_key, model_name)
-    except (ValueError, KeyError) as exc:
-        raise LabelerTaskError(f"模型配置不可用：{exc}") from exc
+    # 并发监督档只对自定义打标开放（预设档与旧任务不传这些键，行为不变）。
+    is_custom = engine == "chat" or bool(system_prompt)
+    concurrency_enabled = bool(raw.get("concurrency_enabled"))
+    if not concurrency_enabled and (raw.get("workers") is not None
+                                    or raw.get("supervisor") is not None):
+        raise LabelerTaskError("未开启并发打标时不要提交打标员或监督员配置")
+    workers: list[dict[str, str]] = []
+    supervisor: dict[str, str] = {}
+    if concurrency_enabled:
+        if not is_custom:
+            raise LabelerTaskError("并发打标只在自定义打标下可用")
+        workers = _normalize_worker_slots(app, raw.get("workers"))
+        if raw.get("supervisor") is None:
+            raise LabelerTaskError("开启并发打标后要选择监督员模型")
+        supervisor = _model_ref(app, raw.get("supervisor"), label="监督员")
+        # 顶层 model_key/model_name 是历史展示字段：并发档固定取第一个槽位，
+        # 不让客户端构造「顶层模型」与「槽位模型」不一致的快照。
+        model_key = workers[0]["model_key"]
+        model_name = workers[0]["model_name"]
+    else:
+        if not model_key or not model_name:
+            raise LabelerTaskError("请先选择模型配置与模型")
+        try:
+            # 只校验配置能解析（供应商存在、模型名非空）；云端与本地后端都允许，
+            # 本地后端由 runtime 自己的全局执行锁串行化。
+            resolve_profile_with_override(app.config, model_key, model_name)
+        except (ValueError, KeyError) as exc:
+            raise LabelerTaskError(f"模型配置不可用：{exc}") from exc
     try:
         confidence = float(raw.get("confidence_threshold", 0.35))
     except (TypeError, ValueError):
@@ -228,9 +302,13 @@ def normalize_config(app: Any, raw: Any, *, allow_legacy_language: bool = False)
         raise LabelerTaskError("retry_limit 必须在 0 到 5 之间")
     if not 15 <= timeout_seconds <= 600:
         raise LabelerTaskError("timeout_seconds 必须在 15 到 600 之间")
-    if concurrency not in VALIDATED_CONCURRENCY:
+    if concurrency_enabled:
+        # 槽位数就是打标最大同时处理图片数（1–9），由服务端按 workers 长度定，
+        # 不采信客户端另填的 concurrency。
+        concurrency = len(workers)
+    elif concurrency not in VALIDATED_CONCURRENCY:
         raise LabelerTaskError(
-            "当前只开放同时处理 1 张图片（多张并发尚未通过供应商验证）"
+            "当前只开放同时处理 1 张图片；要多张并发请在自定义打标里开启「并发打标」"
         )
     custom_prompt = str(raw.get("custom_prompt") or "").strip()[:MAX_CUSTOM_PROMPT]
     config = {
@@ -252,6 +330,12 @@ def normalize_config(app: Any, raw: Any, *, allow_legacy_language: bool = False)
         "timeout_seconds": timeout_seconds,
         "prompt_version": prompt_version,
     }
+    if concurrency_enabled:
+        config["concurrency_enabled"] = True
+        config["workers"] = workers
+        config["supervisor"] = supervisor
+        # 监督策略版本由服务端定：客户端既不能伪造也不能在继续任务时悄悄换策略。
+        config["supervisor_version"] = SUPERVISION_PROMPT_VERSION
     # 预设档空提示词省键；chat 可同时保存手写 system prompt 与 Skill 快照。
     if system_prompt:
         config["system_prompt"] = system_prompt
@@ -281,6 +365,11 @@ def config_fingerprint(config: dict[str, Any]) -> str:
     if not str(payload.get("skill_id") or ""):
         payload.pop("skill_id", None)
         payload.pop("skill_revision", None)
+    # 并发监督档的键缺省（关闭并发/预设/旧任务）不进指纹：旧任务指纹逐字节不变。
+    if not (config.get("concurrency_enabled") and payload.get("workers")):
+        payload.pop("workers", None)
+        payload.pop("supervisor", None)
+        payload.pop("supervisor_version", None)
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "cfg-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
 
@@ -509,6 +598,12 @@ class LabelerJobManager:
             current_revision = _skill_revision(self.app, str(config.get("skill_id") or ""))
             if current_revision != str(config.get("skill_revision") or ""):
                 raise LabelerTaskError("源任务使用的 Skill 已变化；为避免换规则重试，请按当前 Skill 新建批次")
+        if config.get("concurrency_enabled"):
+            stored_version = str(config.get("supervisor_version") or "")
+            if stored_version != SUPERVISION_PROMPT_VERSION:
+                raise LabelerTaskError(
+                    "源任务的监督策略版本已过期；为避免换标准重审，请按当前设置新建批次"
+                )
         # 重试沿用原快照；模型配置若已失效，提交时解析会明确报错。
         # 历史快照可能带「mixed + 非标签加自然语言」的旧默认组合：继续时原样放行。
         config.pop("config_fingerprint", None)
@@ -531,6 +626,7 @@ class LabelerJobManager:
             "failed": int(counts.get("failed") or 0),
             "uncertain": int(counts.get("uncertain") or 0),
             "cancelled": int(counts.get("cancelled") or 0),
+            "human_check": int(counts.get("human_check") or 0),
         }
 
     @staticmethod
@@ -542,6 +638,7 @@ class LabelerJobManager:
             or int(counts.get("uncertain") or 0)
             or int(counts.get("queued") or 0)
             or int(counts.get("running") or 0)
+            or int(counts.get("human_check") or 0)
             or str(task.get("status") or "") in LABELER_RESUMABLE_STATUSES
         )
 
@@ -551,6 +648,8 @@ class LabelerJobManager:
         input_data = task.get("input") if isinstance(task.get("input"), dict) else {}
         config = input_data.get("config") if isinstance(input_data.get("config"), dict) else {}
         refs = input_data.get("image_refs") or []
+        concurrency_enabled = bool(config.get("concurrency_enabled"))
+        supervisor = config.get("supervisor") if isinstance(config.get("supervisor"), dict) else {}
         return {
             "id": task.get("id"),
             "status": task.get("status"),
@@ -574,6 +673,10 @@ class LabelerJobManager:
                       else canonical_preset_id(config.get("preset")),
             "model_name": config.get("model_name") or "",
             "output_mode": config.get("output_mode") or "",
+            "concurrency_enabled": concurrency_enabled,
+            "worker_count": len(config.get("workers") or []) if concurrency_enabled else 0,
+            "supervisor_model_name": str(supervisor.get("model_name") or "")
+                                      if concurrency_enabled else "",
         }
 
     @staticmethod
@@ -616,6 +719,8 @@ class LabelerJobManager:
     def _public_items_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for row in rows:
+            candidate = row.get("candidate") if isinstance(row.get("candidate"), dict) else {}
+            has_candidate = bool(candidate.get("tags") or candidate.get("description"))
             out.append({
                 "item_id": row["item_id"],
                 "name": row.get("name") or "",
@@ -629,5 +734,15 @@ class LabelerJobManager:
                 "txt_path": row.get("txt_path") or "",
                 "txt_state": row.get("txt_state") or "",
                 "txt_chars": int(row.get("txt_chars") or 0),
+                # 并发监督档：结果归属与审核结论（串行档为空值）。
+                "worker_slot": int(row.get("worker_slot") or 0),
+                "worker_model_key": row.get("worker_model_key") or "",
+                "worker_model_name": row.get("worker_model_name") or "",
+                "phase": row.get("phase") or "",
+                "supervisor_decision": row.get("supervisor_decision") or "",
+                "supervisor_attempts": int(row.get("supervisor_attempts") or 0),
+                "supervisor_reason": row.get("supervisor_reason") or "",
+                "supervisor_usage": row.get("supervisor_usage") or {},
+                "candidate": candidate if has_candidate else None,
             })
         return out

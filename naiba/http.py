@@ -716,6 +716,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/labeler/presets":
             # 打标器：侧重预设 + 上限（前端只做提前提示，服务端仍逐项校验）。
             self._json(*self.app.labeler.api_presets())
+        elif path == "/api/labeler/settings":
+            # 贴签匠自己的设置：供应商档案并发上限（非秘密，不含 Key）。
+            self._json(*self.app.labeler.api_settings())
         elif path == "/api/labeler/tasks/recent":
             # 必须排在通用 /api/labeler/tasks/<id> 之前，否则 recent 会被当成任务 id。
             query = urllib.parse.parse_qs(parsed.query)
@@ -1043,6 +1046,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/labeler/tasks":
             # 打标批次：受管 image_refs + 白名单 config（服务端会重新校验图片与模型）。
             self._json(*self.app.labeler.api_submit(body))
+        elif path == "/api/labeler/settings":
+            # 供应商档案并发上限：整数 1–9，未知档案拒绝。
+            self._json(*self.app.labeler.api_update_settings(body))
         elif path.startswith("/api/labeler/tasks/") and path.endswith("/cancel"):
             self._json(*self.app.labeler.api_cancel(path.split("/")[-2]))
         elif path.startswith("/api/labeler/tasks/") and path.endswith("/retry"):

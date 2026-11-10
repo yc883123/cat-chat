@@ -26,6 +26,7 @@ _BUSY_TIMEOUT_MS = 5000
 _WRITE_RETRY_ATTEMPTS = 4
 _WRITE_RETRY_DELAY = 0.08
 _TRANSIENT_MARKERS = ("database is locked", "database is busy", "database table is locked")
+_MAX_REASON_CHARS = 500
 
 
 class LabelerDBError(RuntimeError):
@@ -116,6 +117,15 @@ class LabelerDB:
                     usage_json TEXT NOT NULL DEFAULT '{}',
                     annotation_id INTEGER,
                     config_fingerprint TEXT NOT NULL DEFAULT '',
+                    worker_slot INTEGER NOT NULL DEFAULT 0,
+                    worker_model_key TEXT NOT NULL DEFAULT '',
+                    worker_model_name TEXT NOT NULL DEFAULT '',
+                    phase TEXT NOT NULL DEFAULT '',
+                    supervisor_decision TEXT NOT NULL DEFAULT '',
+                    supervisor_attempts INTEGER NOT NULL DEFAULT 0,
+                    supervisor_reason TEXT NOT NULL DEFAULT '',
+                    supervisor_usage_json TEXT NOT NULL DEFAULT '{}',
+                    candidate_json TEXT NOT NULL DEFAULT '{}',
                     txt_path TEXT NOT NULL DEFAULT '',
                     txt_state TEXT NOT NULL DEFAULT '',
                     txt_chars INTEGER NOT NULL DEFAULT 0,
@@ -176,6 +186,21 @@ class LabelerDB:
                 ("txt_path", "TEXT NOT NULL DEFAULT ''"),
                 ("txt_state", "TEXT NOT NULL DEFAULT ''"),
                 ("txt_chars", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE task_items ADD COLUMN {name} {ddl}")
+            # 2026-11-10 并发监督档：打标员槽位、监督结论与候选证据。旧库补列，
+            # 历史行留缺省值（= 串行打标、无监督），行为与旧版本一致。
+            for name, ddl in (
+                ("worker_slot", "INTEGER NOT NULL DEFAULT 0"),
+                ("worker_model_key", "TEXT NOT NULL DEFAULT ''"),
+                ("worker_model_name", "TEXT NOT NULL DEFAULT ''"),
+                ("phase", "TEXT NOT NULL DEFAULT ''"),
+                ("supervisor_decision", "TEXT NOT NULL DEFAULT ''"),
+                ("supervisor_attempts", "INTEGER NOT NULL DEFAULT 0"),
+                ("supervisor_reason", "TEXT NOT NULL DEFAULT ''"),
+                ("supervisor_usage_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("candidate_json", "TEXT NOT NULL DEFAULT '{}'"),
             ):
                 if name not in columns:
                     db.execute(f"ALTER TABLE task_items ADD COLUMN {name} {ddl}")
@@ -244,18 +269,55 @@ class LabelerDB:
         return self._item_row(row) if row else None
 
     @_retry_transient
-    def mark_running(self, task_id: str, item_id: str) -> None:
-        """模型请求**之前**提交：崩溃后这一行就是 ``uncertain`` 的证据。"""
+    def mark_running(self, task_id: str, item_id: str, *, phase: str = "labeling",
+                     worker_slot: int = 0, worker_model_key: str = "",
+                     worker_model_name: str = "") -> None:
+        """模型请求**之前**提交：崩溃后这一行就是 ``uncertain`` 的证据。
+
+        并发档同时冻结这一轮由哪个槽位/模型处理（结果归属必须能逐图追到模型）。
+        """
         with self._connect() as db:
             db.execute(
                 """
                 UPDATE task_items
-                   SET state='running', attempt_count=attempt_count+1, started_at=?,
+                   SET state='running', phase=?, worker_slot=?, worker_model_key=?,
+                       worker_model_name=?, attempt_count=attempt_count+1, started_at=?,
                        error='', error_category=''
                  WHERE task_id=? AND item_id=?
-                   AND state IN ('queued','running','failed','cancelled','uncertain')
+                   AND state IN ('queued','running','supervising','revising','failed',
+                                 'cancelled','uncertain')
                 """,
-                (now_ms(), task_id, item_id),
+                (str(phase or "labeling"), max(0, int(worker_slot or 0)),
+                 str(worker_model_key or ""), str(worker_model_name or ""),
+                 now_ms(), task_id, item_id),
+            )
+
+    @_retry_transient
+    def set_phase(self, task_id: str, item_id: str, phase: str, *,
+                  state: str = "", supervisor_decision: str = "",
+                  supervisor_reason: str = "", supervisor_attempts: int | None = None,
+                  supervisor_usage: dict[str, Any] | None = None) -> None:
+        """推进单图的阶段（labeling/supervising/revising/human_check/approved）。
+
+        只改阶段与监督字段，不动标注关联与用量；调用方负责最终终态提交。
+        """
+        sets = ["phase=?", "supervisor_decision=?", "supervisor_reason=?"]
+        params: list[Any] = [str(phase or ""), str(supervisor_decision or ""),
+                             str(supervisor_reason or "")[:_MAX_REASON_CHARS]]
+        if state:
+            sets.append("state=?")
+            params.append(str(state))
+        if supervisor_attempts is not None:
+            sets.append("supervisor_attempts=?")
+            params.append(max(0, int(supervisor_attempts)))
+        if supervisor_usage is not None:
+            sets.append("supervisor_usage_json=?")
+            params.append(_dumps(supervisor_usage or {}))
+        params.extend((task_id, item_id))
+        with self._connect() as db:
+            db.execute(
+                f"UPDATE task_items SET {', '.join(sets)} WHERE task_id=? AND item_id=?",
+                params,
             )
 
     @_retry_transient
@@ -267,13 +329,26 @@ class LabelerDB:
         annotation: dict[str, Any],
         usage: dict[str, Any],
         config_fingerprint: str,
+        meta: dict[str, Any] | None = None,
     ) -> tuple[int, bool]:
         """一次事务提交「标注行 + 逐图成功状态 + 用量」。
 
         返回 ``(annotation_id, 是否命中既有结果)``。命中时复用既有行（保留 created_at），
         但把最新一次的值与 updated_at 更新掉——同一配置重跑以最近一次结果为准。
+
+        ``meta`` 只在并发监督档使用：记录打标员槽位/模型、监督结论与监督用量。
+        缺省（串行档）时这些列保持空值，历史查询口径不变。
         """
+        meta = meta or {}
         stamp = now_ms()
+        slot = max(0, int(meta.get("worker_slot") or 0))
+        worker_key = str(meta.get("worker_model_key") or "")
+        worker_name = str(meta.get("worker_model_name") or "")
+        decision = str(meta.get("supervisor_decision") or "")
+        attempts = max(0, int(meta.get("supervisor_attempts") or 0))
+        reason = str(meta.get("supervisor_reason") or "")[:_MAX_REASON_CHARS]
+        supervisor_usage = _dumps(meta.get("supervisor_usage") or {})
+        phase = str(meta.get("phase") or "approved")
         with self._connect() as db:
             existing = db.execute(
                 "SELECT id FROM annotations WHERE path_key=? AND content_version=? AND config_fingerprint=?",
@@ -337,25 +412,89 @@ class LabelerDB:
                 """
                 UPDATE task_items
                    SET state='succeeded', annotation_id=?, usage_json=?, error='',
-                       error_category='', finished_at=?
+                       error_category='', finished_at=?, phase=?,
+                       worker_slot=?, worker_model_key=?, worker_model_name=?,
+                       supervisor_decision=?, supervisor_attempts=?,
+                       supervisor_reason=?, supervisor_usage_json=?, candidate_json='{}'
                  WHERE task_id=? AND item_id=?
                 """,
-                (annotation_id, _dumps(usage or {}), stamp, task_id, item_id),
+                (annotation_id, _dumps(usage or {}), stamp, phase, slot, worker_key,
+                 worker_name, decision, attempts, reason, supervisor_usage,
+                 task_id, item_id),
             )
         return annotation_id, reused
 
     @_retry_transient
-    def fail_item(self, task_id: str, item_id: str, *, error: str, category: str,
-                  usage: dict[str, Any] | None = None) -> None:
+    def human_check_item(
+        self,
+        task_id: str,
+        item_id: str,
+        *,
+        candidate: dict[str, Any],
+        reason: str,
+        usage: dict[str, Any],
+        meta: dict[str, Any] | None = None,
+    ) -> None:
+        """监督未通过/无法裁定：保留候选证据，但不写标注库、不可复用。
+
+        ``annotation_id`` 保持为空是硬边界：导出、标注库查询与结果复用都只认
+        这条关联，人工检查项因此不会被误当成「已审核成功」。
+        """
+        meta = meta or {}
         with self._connect() as db:
             db.execute(
                 """
                 UPDATE task_items
-                   SET state='failed', error=?, error_category=?, usage_json=?, finished_at=?
+                   SET state='human_check', annotation_id=NULL, phase='human_check',
+                       worker_slot=?, worker_model_key=?, worker_model_name=?,
+                       supervisor_decision='human_check', supervisor_attempts=?,
+                       supervisor_reason=?, supervisor_usage_json=?,
+                       candidate_json=?, usage_json=?, error='', error_category='',
+                       finished_at=?
                  WHERE task_id=? AND item_id=?
                 """,
-                (str(error or "")[:2000], str(category or "")[:40], _dumps(usage or {}),
-                 now_ms(), task_id, item_id),
+                (
+                    max(0, int(meta.get("worker_slot") or 0)),
+                    str(meta.get("worker_model_key") or ""),
+                    str(meta.get("worker_model_name") or ""),
+                    max(0, int(meta.get("supervisor_attempts") or 0)),
+                    str(reason or "")[:_MAX_REASON_CHARS],
+                    _dumps(meta.get("supervisor_usage") or {}),
+                    _dumps(candidate or {}),
+                    _dumps(usage or {}),
+                    now_ms(), task_id, item_id,
+                ),
+            )
+
+    @_retry_transient
+    def fail_item(self, task_id: str, item_id: str, *, error: str, category: str,
+                  usage: dict[str, Any] | None = None,
+                  meta: dict[str, Any] | None = None,
+                  candidate: dict[str, Any] | None = None) -> None:
+        meta = meta or {}
+        with self._connect() as db:
+            db.execute(
+                """
+                UPDATE task_items
+                   SET state='failed', error=?, error_category=?, usage_json=?,
+                       phase='failed', worker_slot=?, worker_model_key=?,
+                       worker_model_name=?, supervisor_decision=?,
+                       supervisor_attempts=?, supervisor_reason=?,
+                       supervisor_usage_json=?, candidate_json=?, finished_at=?
+                 WHERE task_id=? AND item_id=?
+                """,
+                (
+                    str(error or "")[:2000], str(category or "")[:40], _dumps(usage or {}),
+                    max(0, int(meta.get("worker_slot") or 0)),
+                    str(meta.get("worker_model_key") or ""),
+                    str(meta.get("worker_model_name") or ""),
+                    str(meta.get("supervisor_decision") or ""),
+                    max(0, int(meta.get("supervisor_attempts") or 0)),
+                    str(meta.get("supervisor_reason") or "")[:_MAX_REASON_CHARS],
+                    _dumps(meta.get("supervisor_usage") or {}),
+                    _dumps(candidate or {}),
+                    now_ms(), task_id, item_id,
+                ),
             )
 
     @_retry_transient
@@ -417,17 +556,22 @@ class LabelerDB:
 
     @_retry_transient
     def mark_running_as_uncertain(self, task_id: str = "") -> int:
-        """启动恢复：``running`` 说明请求已发出但结果没落库（可能已计费）。"""
+        """启动恢复：``running`` 说明请求已发出但结果没落库（可能已计费）。
+
+        并发监督档的 ``supervising``/``revising`` 同样是「请求已发出、结果未落库」，
+        一并收敛为不确定，绝不让进程中断留下永远停在监督中的行。
+        """
+        states = "('running','supervising','revising')"
         with self._connect() as db:
             if task_id:
                 cursor = db.execute(
-                    "UPDATE task_items SET state='uncertain', finished_at=? "
-                    "WHERE task_id=? AND state='running'",
+                    f"UPDATE task_items SET state='uncertain', finished_at=? "
+                    f"WHERE task_id=? AND state IN {states}",
                     (now_ms(), task_id),
                 )
             else:
                 cursor = db.execute(
-                    "UPDATE task_items SET state='uncertain', finished_at=? WHERE state='running'",
+                    f"UPDATE task_items SET state='uncertain', finished_at=? WHERE state IN {states}",
                     (now_ms(),),
                 )
             return int(cursor.rowcount or 0)
@@ -448,6 +592,9 @@ class LabelerDB:
             "cancelled": by_state.get("cancelled", 0),
             "queued": by_state.get("queued", 0),
             "running": by_state.get("running", 0),
+            "supervising": by_state.get("supervising", 0),
+            "revising": by_state.get("revising", 0),
+            "human_check": by_state.get("human_check", 0),
         }
 
     # ---- 复用与查询 ----
@@ -580,6 +727,15 @@ class LabelerDB:
             "usage": _loads(row["usage_json"], {}),
             "annotation_id": int(row["annotation_id"]) if row["annotation_id"] is not None else None,
             "config_fingerprint": str(row["config_fingerprint"] or ""),
+            "worker_slot": int(row["worker_slot"] or 0),
+            "worker_model_key": str(row["worker_model_key"] or ""),
+            "worker_model_name": str(row["worker_model_name"] or ""),
+            "phase": str(row["phase"] or ""),
+            "supervisor_decision": str(row["supervisor_decision"] or ""),
+            "supervisor_attempts": int(row["supervisor_attempts"] or 0),
+            "supervisor_reason": str(row["supervisor_reason"] or ""),
+            "supervisor_usage": _loads(row["supervisor_usage_json"], {}),
+            "candidate": _loads(row["candidate_json"], {}),
             "txt_path": str(row["txt_path"] or ""),
             "txt_state": str(row["txt_state"] or ""),
             "txt_chars": int(row["txt_chars"] or 0),

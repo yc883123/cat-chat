@@ -16,6 +16,7 @@ import re
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from naiba.core.exceptions import TaskCancelled
@@ -23,15 +24,32 @@ from naiba.llm.profiles import resolve_profile_with_override
 from naiba.labeler.engines import get_engine
 from naiba.labeler.engines.provider import build_prompt
 from naiba.labeler.export import caption_text
+from naiba.labeler.gate import (
+    DEFAULT_PROVIDER_CONCURRENCY,
+    SUPERVISOR_MAX_CONCURRENCY,
+    ProviderGate,
+)
 from naiba.labeler.presets import filter_tags, get_preset, normalize_tag
 from naiba.labeler.store import now_ms
+from naiba.labeler.supervisor import (
+    SupervisionFormatError,
+    build_supervision_messages,
+    build_supervision_prompt,
+    parse_verdict,
+    revise_note,
+)
 from naiba.labeler.txt_output import TXT_TOOL_NAME, TxtToolContext, build_txt_targets
 
 # 已验证可用的并发档位。P0-a 只通过了离线契约；在线小样本未执行前不开放 >1。
+# 多并发走「自定义打标 → 并发打标」开关（按打标员槽位定并发），不受这里限制。
 VALIDATED_CONCURRENCY = (1,)
 DEFAULT_CONCURRENCY = 1
 PROGRESS_WRITE_INTERVAL = 0.3
 MAX_RETRY_BACKOFF = 8.0
+# 首版固定的返工上限：初次 + 最多 2 次重做 = 每张最多 3 次打标尝试。
+MAX_REVISIONS = 2
+# 监督调用的有限退避重试次数（429/5xx 等瞬时错误；认证/参数错误不重试）。
+SUPERVISOR_RETRY_LIMIT = 1
 
 
 def classify_error(exc: BaseException) -> str:
@@ -81,6 +99,8 @@ class LabelerRunner:
         self._shutdown = False
         self._cancel_events: dict[str, threading.Event] = {}
         self._registry_lock = threading.Lock()
+        # 当前任务的监督队列（任务级，结束即 shutdown；测试可观察并发度）。
+        self._supervisor_pool: ThreadPoolExecutor | None = None
 
     # ---- 队列 ----
 
@@ -163,8 +183,7 @@ class LabelerRunner:
         task = self.store.get_task(task_id)
         if not task or task.get("status") != "queued":
             return
-        input_data = task.get("input") or {}
-        config = dict(input_data.get("config") or {})
+        config = dict((task.get("input") or {}).get("config") or {})
         cancel_event = threading.Event()
         with self._registry_lock:
             self._cancel_events[task_id] = cancel_event
@@ -172,6 +191,23 @@ class LabelerRunner:
         try:
             self.store.update_task(task_id, status="running", started_at=now_ms(), detail="")
             self.store.append_event(task_id, {"type": "status", "message": "开始打标"})
+            if config.get("concurrency_enabled"):
+                self._run_task_concurrent(task_id, task, config, cancel_event, writer)
+            else:
+                self._run_task_serial(task_id, task, config, cancel_event, writer)
+        except Exception as exc:  # noqa: BLE001 - 兜底终态
+            traceback.print_exc()
+            self._fail_task(task_id, str(exc) or "打标任务执行失败")
+        finally:
+            cancel_event.set()
+            with self._registry_lock:
+                self._cancel_events.pop(task_id, None)
+
+    def _run_task_serial(self, task_id: str, task: dict[str, Any],
+                         config: dict[str, Any], cancel_event: threading.Event,
+                         writer: "_ProgressWriter") -> None:
+        """关闭并发时沿用原串行路径：一张一张跑，行为与旧版本逐字节一致。"""
+        try:
             try:
                 profile = resolve_profile_with_override(
                     self.app.config,
@@ -256,10 +292,432 @@ class LabelerRunner:
         except Exception as exc:  # noqa: BLE001 - 兜底终态
             traceback.print_exc()
             self._fail_task(task_id, str(exc) or "打标任务执行失败")
+
+    def _run_task_concurrent(self, task_id: str, task: dict[str, Any],
+                             config: dict[str, Any], cancel_event: threading.Event,
+                             writer: "_ProgressWriter") -> None:
+        """自定义打标并发监督档：有界打标员池 + 独立有界监督队列。
+
+        - 每个槽位固定一个引擎实例（引擎持有逐次调用的用量读数，必须线程内独占）；
+        - 图片由共享游标领取，领取与计数在同一把锁内，不会超领或重复派发；
+        - 每张图「打标 → 监督」顺序不变，但不同图片可同时在打标或监督；
+        - 同一供应商档案（model_key）的在途请求数由 ``ProviderGate`` 统一限制，
+          打标与监督共享额度。
+        """
+        workers = [dict(row) for row in (config.get("workers") or []) if isinstance(row, dict)]
+        supervisor_ref = dict(config.get("supervisor") or {})
+        if not workers or not supervisor_ref:
+            self._fail_task(task_id, "并发配置不完整：缺少打标员槽位或监督员")
+            return
+        try:
+            worker_profiles = [
+                resolve_profile_with_override(
+                    self.app.config, str(row.get("model_key") or ""),
+                    str(row.get("model_name") or ""),
+                )
+                for row in workers
+            ]
+            supervisor_profile = resolve_profile_with_override(
+                self.app.config, str(supervisor_ref.get("model_key") or ""),
+                str(supervisor_ref.get("model_name") or ""),
+            )
+        except (ValueError, KeyError) as exc:
+            self._fail_task(task_id, f"模型配置不可用：{exc}")
+            return
+
+        def event_bridge(payload: dict[str, Any]) -> None:
+            try:
+                self.store.append_event(task_id, payload)
+            except Exception:  # noqa: BLE001 - 事件桥故障绝不影响打标主流程
+                pass
+
+        engine_cls = get_engine(str(config.get("engine") or "provider"))
+        preset = get_preset(str(config.get("preset") or ""))
+        if str(config.get("engine") or "") == "chat":
+            from naiba.labeler.engines.chat import build_chat_prompt
+
+            base_prompt = build_chat_prompt(config)
+        else:
+            base_prompt = build_prompt(config, preset)
+        fingerprint = str(config.get("config_fingerprint") or "")
+        retry_limit = max(0, min(5, int(config.get("retry_limit") or 0)))
+        timeout_seconds = max(5, min(600, int(config.get("timeout_seconds") or 90)))
+        txt_output: tuple[Any, dict[str, str]] | None = None
+        if bool(config.get("write_txt")):
+            output_dir = self.store.outputs_dir(task_id)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            txt_output = (output_dir, build_txt_targets(self.db.list_items(task_id, limit=10000)))
+
+        settings = self.store.read_settings()
+        gate = ProviderGate(
+            settings.get("provider_limits") or {}, DEFAULT_PROVIDER_CONCURRENCY,
+        )
+        items = self.db.pending_items(task_id)
+        cursor = {"index": 0}
+        cursor_lock = threading.Lock()
+        usage_lock = threading.Lock()
+        total_usage: dict[str, Any] = dict(task.get("usage") or {})
+
+        def take_item() -> dict[str, Any] | None:
+            with cursor_lock:
+                if cancel_event.is_set() or cursor["index"] >= len(items):
+                    return None
+                row = items[cursor["index"]]
+                cursor["index"] += 1
+                return row
+
+        def lane(slot: int) -> None:
+            engine = engine_cls(self.app, config, event_sink=event_bridge)
+            while True:
+                item = take_item()
+                if item is None:
+                    return
+                try:
+                    item_usage = self._run_concurrent_item(
+                        task_id=task_id, item=item, config=config, preset=preset,
+                        prompt=base_prompt, engine=engine, profile=worker_profiles[slot],
+                        supervisor_profile=supervisor_profile,
+                        fingerprint=fingerprint, retry_limit=retry_limit,
+                        timeout_seconds=timeout_seconds, cancel_event=cancel_event,
+                        txt_output=txt_output, gate=gate, worker_slot=slot,
+                        worker_ref=workers[slot], supervisor_ref=supervisor_ref,
+                    )
+                except Exception as exc:  # noqa: BLE001 - 单图异常不拖垮整条泳道
+                    traceback.print_exc()
+                    item_usage = {}
+                    try:
+                        self.db.fail_item(
+                            task_id, item["item_id"], error=str(exc),
+                            category=classify_error(exc),
+                            meta={
+                                "worker_slot": slot,
+                                "worker_model_key": str(workers[slot].get("model_key") or ""),
+                                "worker_model_name": str(workers[slot].get("model_name") or ""),
+                                "phase": "failed",
+                            },
+                        )
+                    except Exception:  # noqa: BLE001 - 收尾失败也不能停泳道
+                        traceback.print_exc()
+                if item_usage:
+                    with usage_lock:
+                        merged = aggregate_usage(total_usage, item_usage)
+                        total_usage.clear()
+                        total_usage.update(merged)
+                    writer.set_usage(total_usage)
+                writer.tick()
+
+        pool = ThreadPoolExecutor(
+            max_workers=min(SUPERVISOR_MAX_CONCURRENCY, max(1, len(workers))),
+            thread_name_prefix="naiba-labeler-supervisor",
+        )
+        self._supervisor_pool = pool  # 测试可观察；任务结束即 shutdown
+        threads = [
+            threading.Thread(target=lane, args=(index,),
+                             name=f"naiba-labeler-lane-{index}", daemon=True)
+            for index in range(len(workers))
+        ]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            pool.shutdown(wait=True)
         finally:
-            cancel_event.set()
-            with self._registry_lock:
-                self._cancel_events.pop(task_id, None)
+            self._supervisor_pool = None
+            try:
+                pool.shutdown(wait=False)
+            except Exception:  # noqa: BLE001 - 已 shutdown 时忽略
+                pass
+        if cancel_event.is_set():
+            self.db.cancel_pending(task_id)
+        counts = self.db.counts(task_id)
+        annotation_ids = self.db.annotation_ids_for_task(task_id)
+        self._finish_from_counts(task_id, counts, annotation_ids, total_usage)
+
+    def _run_concurrent_item(self, *, task_id: str, item: dict[str, Any],
+                             config: dict[str, Any], preset: dict[str, Any],
+                             prompt: str, engine: Any, profile: dict[str, Any],
+                             supervisor_profile: dict[str, Any], fingerprint: str,
+                             retry_limit: int, timeout_seconds: int,
+                             cancel_event: threading.Event,
+                             txt_output: tuple[Any, dict[str, str]] | None,
+                             gate: ProviderGate, worker_slot: int,
+                             worker_ref: dict[str, str],
+                             supervisor_ref: dict[str, str]) -> dict[str, Any]:
+        """单图的并发处理：打标 → 监督 → 通过/退回重做 → 人工检查。"""
+        item_id = item["item_id"]
+        writer = self._build_txt_writer(task_id, item, txt_output)
+        worker_meta = {
+            "worker_slot": worker_slot,
+            "worker_model_key": str(worker_ref.get("model_key") or ""),
+            "worker_model_name": str(worker_ref.get("model_name") or ""),
+        }
+        # 同图同配置（含打标员集合/监督模型/监督策略版本）已有通过结果：直接复用。
+        reusable = self.db.find_reusable(item["path_key"], item["content_version"], fingerprint)
+        if reusable is not None:
+            annotation = self._annotation_from_reusable(reusable, item, config)
+            if writer is not None:
+                writer.write_fallback(caption_text(annotation))
+            self.db.complete_item(
+                task_id, item_id, annotation=annotation,
+                usage=reusable.get("usage") or {}, config_fingerprint=fingerprint,
+                meta={**worker_meta, "supervisor_decision": "reused", "phase": "approved"},
+            )
+            self.store.append_event(task_id, {
+                "type": "image_done", "item_id": item_id, "name": item.get("name") or "",
+                "reused": True, "txt_state": writer.state if writer else "",
+            })
+            return {}
+
+        options, label_prompt = self._build_item_options(
+            config, item, prompt, timeout_seconds, cancel_event, writer)
+        total_usage: dict[str, Any] = {}
+        label_usage: dict[str, Any] = {}
+        supervisor_usage: dict[str, Any] = {}
+        revisions = 0
+        attempt = 0
+        current_prompt = label_prompt
+        while True:
+            if cancel_event.is_set():
+                self.db.cancel_item(task_id, item_id)
+                return total_usage
+            try:
+                with gate.slot(str(worker_ref.get("model_key") or ""), cancel_event):
+                    annotation, usage, finish_reason = self._label_once(
+                        task_id=task_id, item=item, config=config, preset=preset,
+                        prompt=current_prompt, engine=engine, profile=profile,
+                        options=options, cancel_event=cancel_event, writer=writer,
+                        model_ref=worker_ref, worker_slot=worker_slot,
+                    )
+            except Exception as exc:  # noqa: BLE001 - 分类后决定重试或记失败
+                category = classify_error(exc)
+                if category == "cancelled":
+                    self.db.cancel_item(task_id, item_id)
+                    cancel_event.set()
+                    return total_usage
+                attempt += 1
+                if category == "transient" and attempt <= retry_limit:
+                    delay = min(MAX_RETRY_BACKOFF, 0.5 * (2 ** (attempt - 1)))
+                    if cancel_event.wait(delay):
+                        self.db.cancel_item(task_id, item_id)
+                        return total_usage
+                    continue
+                failure_usage = {} if category in {"auth", "bad_request", "image"} else (
+                    dict(getattr(self.app.models, "last_usage", {}) or {})
+                )
+                merged = aggregate_usage(total_usage, failure_usage)
+                self.db.fail_item(
+                    task_id, item_id, error=str(exc), category=category, usage=merged,
+                    meta={**worker_meta, "phase": "failed"},
+                )
+                self.store.append_event(task_id, {
+                    "type": "image_failed", "item_id": item_id,
+                    "name": item.get("name") or "", "error": str(exc)[:500],
+                    "category": category,
+                })
+                if writer is not None:
+                    writer.reset()
+                return merged
+            attempt = 0
+            label_usage = aggregate_usage(label_usage, usage)
+            total_usage = aggregate_usage(total_usage, usage)
+
+            # ---- 监督：先落阶段，再送审；等待期间取消也按实际结果收敛 ----
+            self.db.set_phase(
+                task_id, item_id, "supervising", state="supervising",
+                supervisor_attempts=revisions, supervisor_usage=supervisor_usage,
+            )
+            self.store.append_event(task_id, {
+                "type": "image_supervising", "item_id": item_id,
+                "name": item.get("name") or "",
+            })
+            try:
+                verdict, verdict_usage = self._supervise_with_retry(
+                    task_id=task_id, item=item, config=config,
+                    annotation=annotation, supervisor_profile=supervisor_profile,
+                    supervisor_ref=supervisor_ref, worker_slot=worker_slot,
+                    worker_model=str(worker_ref.get("model_name") or ""),
+                    cancel_event=cancel_event, gate=gate,
+                    timeout_seconds=timeout_seconds,
+                )
+            except SupervisionFormatError as exc:
+                if writer is not None:
+                    writer.reset()
+                self.db.human_check_item(
+                    task_id, item_id, candidate=annotation,
+                    reason=f"监督结果无法解析：{exc}", usage=total_usage,
+                    meta={**worker_meta, "supervisor_attempts": revisions,
+                          "supervisor_usage": supervisor_usage},
+                )
+                self.store.append_event(task_id, {
+                    "type": "image_human_check", "item_id": item_id,
+                    "name": item.get("name") or "", "reason": str(exc)[:500],
+                })
+                return total_usage
+            except Exception as exc:  # noqa: BLE001 - 监督调用失败
+                category = classify_error(exc)
+                if category == "cancelled":
+                    self.db.cancel_item(task_id, item_id)
+                    cancel_event.set()
+                    return total_usage
+                failure_usage = {} if category in {"auth", "bad_request", "image"} else (
+                    dict(getattr(exc, "supervisor_usage", {}) or {})
+                )
+                merged = aggregate_usage(total_usage, failure_usage)
+                if writer is not None:
+                    writer.reset()
+                self.db.fail_item(
+                    task_id, item_id, error=f"监督失败：{exc}",
+                    category=f"supervisor_{category}", usage=merged,
+                    meta={**worker_meta, "supervisor_attempts": revisions,
+                          "supervisor_usage": supervisor_usage},
+                )
+                self.store.append_event(task_id, {
+                    "type": "image_failed", "item_id": item_id,
+                    "name": item.get("name") or "",
+                    "error": f"监督失败：{str(exc)[:400]}",
+                    "category": f"supervisor_{category}",
+                })
+                return merged
+            supervisor_usage = aggregate_usage(supervisor_usage, verdict_usage)
+            total_usage = aggregate_usage(total_usage, verdict_usage)
+            decision = str(verdict.get("decision") or "")
+            reason = str(verdict.get("reason") or "")
+            self.db.set_phase(
+                task_id, item_id, "supervising", supervisor_decision=decision,
+                supervisor_reason=reason, supervisor_attempts=revisions,
+                supervisor_usage=supervisor_usage,
+            )
+            if decision == "approve":
+                self.db.complete_item(
+                    task_id, item_id, annotation=annotation, usage=total_usage,
+                    config_fingerprint=fingerprint,
+                    meta={
+                        **worker_meta, "phase": "approved",
+                        "supervisor_decision": "approve",
+                        "supervisor_attempts": revisions,
+                        "supervisor_reason": reason,
+                        "supervisor_usage": supervisor_usage,
+                    },
+                )
+                if total_usage:
+                    self.store.append_event(task_id, {"type": "usage", "usage": total_usage})
+                self.store.append_event(task_id, {
+                    "type": "image_done", "item_id": item_id,
+                    "name": item.get("name") or "",
+                    "tags": len(annotation.get("tags") or []),
+                    "finish_reason": finish_reason,
+                    "txt_state": writer.state if writer is not None else "",
+                })
+                return total_usage
+            # ---- 退回：超过上限转人工检查；否则原打标员重做 ----
+            if revisions >= MAX_REVISIONS:
+                if writer is not None:
+                    writer.reset()
+                note = "监督连续退回，已达重做上限（3 次打标尝试）"
+                if reason:
+                    note += f"：{reason}"
+                self.db.human_check_item(
+                    task_id, item_id, candidate=annotation, reason=note,
+                    usage=total_usage,
+                    meta={**worker_meta, "supervisor_attempts": revisions,
+                          "supervisor_usage": supervisor_usage},
+                )
+                self.store.append_event(task_id, {
+                    "type": "image_human_check", "item_id": item_id,
+                    "name": item.get("name") or "", "reason": note[:500],
+                })
+                return total_usage
+            revisions += 1
+            note = revise_note(verdict)
+            self.db.set_phase(
+                task_id, item_id, "revising", state="revising",
+                supervisor_decision="revise", supervisor_reason=reason,
+                supervisor_attempts=revisions, supervisor_usage=supervisor_usage,
+            )
+            self.store.append_event(task_id, {
+                "type": "image_revised", "item_id": item_id,
+                "name": item.get("name") or "", "attempt": revisions,
+                "reason": reason[:500],
+            })
+            current_prompt = label_prompt
+            if note:
+                current_prompt = (
+                    label_prompt
+                    + "\n\n上一轮监督退回意见（请按此重做，仍按原规则输出）：" + note
+                )
+
+    def _supervise_with_retry(self, *, task_id: str, item: dict[str, Any],
+                              config: dict[str, Any], annotation: dict[str, Any],
+                              supervisor_profile: dict[str, Any],
+                              supervisor_ref: dict[str, str], worker_slot: int,
+                              worker_model: str, cancel_event: threading.Event,
+                              gate: ProviderGate,
+                              timeout_seconds: int) -> tuple[dict[str, Any], dict[str, Any]]:
+        """把监督调用投递到独立有界队列并等待结果；瞬时错误有限退避重试。"""
+        pool = getattr(self, "_supervisor_pool", None)
+        last_exc: BaseException | None = None
+        for attempt in range(SUPERVISOR_RETRY_LIMIT + 1):
+            if cancel_event.is_set():
+                raise TaskCancelled("任务已取消")
+            request = lambda: self._supervisor_request(  # noqa: E731 - 单次投递
+                task_id=task_id, item=item, config=config, annotation=annotation,
+                supervisor_profile=supervisor_profile, supervisor_ref=supervisor_ref,
+                worker_slot=worker_slot, worker_model=worker_model,
+                cancel_event=cancel_event, gate=gate,
+                timeout_seconds=timeout_seconds,
+            )
+            future = pool.submit(request) if pool is not None else None
+            try:
+                text, usage = future.result() if future is not None else request()
+            except BaseException as exc:  # noqa: BLE001 - 分类后决定重试或抛出
+                last_exc = exc
+                if classify_error(exc) == "transient" and attempt < SUPERVISOR_RETRY_LIMIT:
+                    delay = min(MAX_RETRY_BACKOFF, 0.5 * (2 ** attempt))
+                    if cancel_event.wait(delay):
+                        raise TaskCancelled("任务已取消") from exc
+                    continue
+                raise
+            return parse_verdict(text), usage
+        raise last_exc or RuntimeError("监督调用失败")
+
+    def _supervisor_request(self, *, task_id: str, item: dict[str, Any],
+                            config: dict[str, Any], annotation: dict[str, Any],
+                            supervisor_profile: dict[str, Any],
+                            supervisor_ref: dict[str, str], worker_slot: int,
+                            worker_model: str, cancel_event: threading.Event,
+                            gate: ProviderGate,
+                            timeout_seconds: int) -> tuple[str, dict[str, Any]]:
+        """在线程内发起一次监督请求并**当场**读用量（runtime 读数是线程局部的）。"""
+        prompt = build_supervision_prompt(
+            config, annotation, slot_index=worker_slot, worker_model=worker_model,
+        )
+        messages, error = build_supervision_messages(item["path"], prompt)
+        if error:
+            raise ValueError(error)
+        options = {
+            "stream": True,
+            "cancel_event": cancel_event,
+            "lock_label": "打标器监督",
+            "stream_total_timeout_seconds": timeout_seconds,
+            "request_timeout_seconds": timeout_seconds,
+            **(self.app.config.runtime_guard_options() or {}),
+        }
+        with gate.slot(str(supervisor_ref.get("model_key") or ""), cancel_event):
+            try:
+                text = str(self.app.models.complete(
+                    supervisor_profile, messages, options, None,
+                ) or "")
+            except BaseException as exc:  # noqa: BLE001 - 把本线程用量随异常带回
+                # runtime 的 last_usage 是线程局部的：异常必须在本线程把读数取走，
+                # 不能让泳道线程事后跨线程读（那会拿到别人的/默认的读数）。
+                try:
+                    exc.supervisor_usage = dict(getattr(self.app.models, "last_usage", {}) or {})
+                except Exception:  # noqa: BLE001 - 附加失败不影响原始异常
+                    pass
+                raise
+        usage = dict(getattr(self.app.models, "last_usage", {}) or {})
+        return text, usage
 
     def _run_item(
         self,
@@ -298,85 +756,20 @@ class LabelerRunner:
             })
             return {}
 
-        options = {
-            "stream": True,
-            "cancel_event": cancel_event,
-            "lock_label": "打标器",
-            "stream_total_timeout_seconds": timeout_seconds,
-            "request_timeout_seconds": timeout_seconds,
-            **(self.app.config.runtime_guard_options() or {}),
-        }
-        if str(config.get("engine") or "") == "chat":
-            # chat 引擎的事件桥需要图片上下文（事件带图片名，逐图可读）。
-            options["item_id"] = str(item_id or "")
-            options["item_name"] = str(item.get("name") or "")
-        if writer is not None:
-            # 两类引擎共用同一个写入器：provider 的单轮工具循环与 chat 的
-            # SkillAgent 工具循环都从 options["txt_tool"] 取它。
-            options["txt_tool"] = writer
-            # 模型需要知道这张图的标识，才能把 item 参数填对（否则只能在批量里猜）。
-            label = str(item.get("relative_path") or item.get("name") or "")
-            if label:
-                prompt = (
-                    f"{prompt}\n\n当前图片：{label}"
-                    f"（调用 {TXT_TOOL_NAME} 时 item 填这个）"
-                )
+        options, prompt = self._build_item_options(
+            config, item, prompt, timeout_seconds, cancel_event, writer)
         attempt = 0
         while True:
             if cancel_event.is_set():
                 self.db.cancel_item(task_id, item_id)
                 return {}
-            if writer is not None:
-                # 重试会从零重来：清掉上一次尝试写了一半的 TXT，避免分段重复。
-                writer.reset()
-            self.db.mark_running(task_id, item_id)
             started = time.monotonic()
             try:
-                parsed = engine.run(
-                    profile=profile,
-                    image_path=item["path"],
-                    prompt=prompt,
-                    options=options,
-                    status=None,
+                annotation, usage, finish_reason = self._label_once(
+                    task_id=task_id, item=item, config=config, preset=preset,
+                    prompt=prompt, engine=engine, profile=profile, options=options,
+                    cancel_event=cancel_event, writer=writer,
                 )
-                # 诊断读数必须在**本线程**内立刻取（P0-a）。chat 引擎的多轮循环
-                # 用量在 SkillAgent.run 返回值里汇总（engine.last_usage），比
-                # last_usage（只反映最后一次调用）更真实；provider 引擎维持原口径。
-                engine_usage = getattr(engine, "last_usage", None)
-                usage = dict(engine_usage) if isinstance(engine_usage, dict) and engine_usage \
-                    else dict(getattr(self.app.models, "last_usage", {}) or {})
-                finish_reason = str(getattr(self.app.models, "last_finish_reason", "") or "")
-                tags, confidences = self._finalize_tags(parsed, config, preset)
-                description = self._finalize_description(parsed, config, preset)
-                # 触发词前缀在置信度/预设过滤与格式化之后统一应用：不参与过滤，
-                # 标签列表放首位（置信度补 -1 保持与标签按位对齐），描述放最前。
-                trigger = self._trigger_word(config)
-                if trigger:
-                    if tags:
-                        tags, confidences = self._apply_trigger_to_tags(trigger, tags, confidences)
-                    if description:
-                        description = self._apply_trigger_to_description(trigger, description, config)
-                annotation = {
-                    "path_key": item["path_key"],
-                    "content_version": item["content_version"],
-                    "path": item["path"],
-                    "relative_path": item.get("relative_path") or "",
-                    "name": item.get("name") or "",
-                    "original_sha256": str(item.get("original_sha256") or ""),
-                    "engine": str(config.get("engine") or "provider"),
-                    "output_mode": str(config.get("output_mode") or "keywords"),
-                    "preset": str(config.get("preset") or ""),
-                    "prompt_version": int(config.get("prompt_version") or 1),
-                    "model_key": str(config.get("model_key") or ""),
-                    "model_name": str(config.get("model_name") or ""),
-                    "tags": tags,
-                    "confidences": confidences,
-                    "description": description,
-                }
-                if writer is not None:
-                    # 模型一次工具都没调用（或不支持工具）时回填一份，保证每张成功图片
-                    # 都有同名 TXT；工具写过的内容优先，不被标注文本覆盖。
-                    writer.write_fallback(caption_text(annotation))
                 self.db.complete_item(
                     task_id, item_id,
                     annotation=annotation,
@@ -387,7 +780,7 @@ class LabelerRunner:
                     self.store.append_event(task_id, {"type": "usage", "usage": usage})
                 self.store.append_event(task_id, {
                     "type": "image_done", "item_id": item_id, "name": item.get("name") or "",
-                    "tags": len(tags), "finish_reason": finish_reason,
+                    "tags": len(annotation.get("tags") or []), "finish_reason": finish_reason,
                     "txt_state": writer.state if writer is not None else "",
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                 })
@@ -417,6 +810,106 @@ class LabelerRunner:
                     "error": str(exc)[:500], "category": category,
                 })
                 return {}
+
+    def _build_item_options(self, config: dict[str, Any], item: dict[str, Any],
+                            prompt: str, timeout_seconds: int,
+                            cancel_event: threading.Event, writer: Any) -> tuple[dict[str, Any], str]:
+        """单图调用选项与（按需追加图片标识的）提示词，串行/并发两条路径共用。"""
+        item_id = str(item.get("item_id") or "")
+        options = {
+            "stream": True,
+            "cancel_event": cancel_event,
+            "lock_label": "打标器",
+            "stream_total_timeout_seconds": timeout_seconds,
+            "request_timeout_seconds": timeout_seconds,
+            **(self.app.config.runtime_guard_options() or {}),
+        }
+        if str(config.get("engine") or "") == "chat":
+            # chat 引擎的事件桥需要图片上下文（事件带图片名，逐图可读）。
+            options["item_id"] = item_id
+            options["item_name"] = str(item.get("name") or "")
+        if writer is not None:
+            # 两类引擎共用同一个写入器：provider 的单轮工具循环与 chat 的
+            # SkillAgent 工具循环都从 options["txt_tool"] 取它。
+            options["txt_tool"] = writer
+            # 模型需要知道这张图的标识，才能把 item 参数填对（否则只能在批量里猜）。
+            label = str(item.get("relative_path") or item.get("name") or "")
+            if label:
+                prompt = (
+                    f"{prompt}\n\n当前图片：{label}"
+                    f"（调用 {TXT_TOOL_NAME} 时 item 填这个）"
+                )
+        return options, prompt
+
+    def _label_once(self, *, task_id: str, item: dict[str, Any], config: dict[str, Any],
+                    preset: dict[str, Any], prompt: str, engine: Any,
+                    profile: dict[str, Any], options: dict[str, Any],
+                    cancel_event: threading.Event, writer: Any,
+                    model_ref: dict[str, str] | None = None,
+                    worker_slot: int = 0) -> tuple[dict[str, Any], dict[str, Any], str]:
+        """一次打标尝试：mark_running → 调模型 → 解析/过滤/触发词 → 返回标注草稿。
+
+        不写标注库：串行路径由 ``_run_item`` 直接提交，并发路径先送监督再决定。
+        """
+        item_id = item["item_id"]
+        if writer is not None:
+            # 重试会从零重来：清掉上一次尝试写了一半的 TXT，避免分段重复。
+            writer.reset()
+        ref = model_ref or {
+            "model_key": str(config.get("model_key") or ""),
+            "model_name": str(config.get("model_name") or ""),
+        }
+        self.db.mark_running(
+            task_id, item_id, phase="labeling", worker_slot=worker_slot,
+            worker_model_key=str(ref.get("model_key") or ""),
+            worker_model_name=str(ref.get("model_name") or ""),
+        )
+        parsed = engine.run(
+            profile=profile,
+            image_path=item["path"],
+            prompt=prompt,
+            options=options,
+            status=None,
+        )
+        # 诊断读数必须在**本线程**内立刻取（P0-a）。chat 引擎的多轮循环
+        # 用量在 SkillAgent.run 返回值里汇总（engine.last_usage），比
+        # last_usage（只反映最后一次调用）更真实；provider 引擎维持原口径。
+        engine_usage = getattr(engine, "last_usage", None)
+        usage = dict(engine_usage) if isinstance(engine_usage, dict) and engine_usage \
+            else dict(getattr(self.app.models, "last_usage", {}) or {})
+        finish_reason = str(getattr(self.app.models, "last_finish_reason", "") or "")
+        tags, confidences = self._finalize_tags(parsed, config, preset)
+        description = self._finalize_description(parsed, config, preset)
+        # 触发词前缀在置信度/预设过滤与格式化之后统一应用：不参与过滤，
+        # 标签列表放首位（置信度补 -1 保持与标签按位对齐），描述放最前。
+        trigger = self._trigger_word(config)
+        if trigger:
+            if tags:
+                tags, confidences = self._apply_trigger_to_tags(trigger, tags, confidences)
+            if description:
+                description = self._apply_trigger_to_description(trigger, description, config)
+        annotation = {
+            "path_key": item["path_key"],
+            "content_version": item["content_version"],
+            "path": item["path"],
+            "relative_path": item.get("relative_path") or "",
+            "name": item.get("name") or "",
+            "original_sha256": str(item.get("original_sha256") or ""),
+            "engine": str(config.get("engine") or "provider"),
+            "output_mode": str(config.get("output_mode") or "keywords"),
+            "preset": str(config.get("preset") or ""),
+            "prompt_version": int(config.get("prompt_version") or 1),
+            "model_key": str(ref.get("model_key") or ""),
+            "model_name": str(ref.get("model_name") or ""),
+            "tags": tags,
+            "confidences": confidences,
+            "description": description,
+        }
+        if writer is not None:
+            # 模型一次工具都没调用（或不支持工具）时回填一份，保证每张成功图片
+            # 都有同名 TXT；工具写过的内容优先，不被标注文本覆盖。
+            writer.write_fallback(caption_text(annotation))
+        return annotation, usage, finish_reason
 
     def _build_txt_writer(self, task_id: str, item: dict[str, Any],
                           txt_output: tuple[Any, dict[str, str]] | None) -> TxtToolContext | None:
@@ -590,6 +1083,7 @@ class LabelerRunner:
             "failed": int(counts.get("failed") or 0),
             "uncertain": int(counts.get("uncertain") or 0),
             "cancelled": int(counts.get("cancelled") or 0),
+            "human_check": int(counts.get("human_check") or 0),
         }
 
     def _finish_from_counts(self, task_id: str, counts: dict[str, int],
@@ -598,25 +1092,33 @@ class LabelerRunner:
         done = int(counts.get("done") or 0)
         failed = int(counts.get("failed") or 0) + int(counts.get("uncertain") or 0)
         cancelled = int(counts.get("cancelled") or 0)
+        human_check = int(counts.get("human_check") or 0)
         progress = self._progress_from_counts(counts)
         result = {"annotation_ids": annotation_ids}
-        if cancelled and done == 0 and failed == 0:
+        if cancelled and done == 0 and failed == 0 and human_check == 0:
             self._finish_task_terminal(
                 task_id, "cancelled", {"type": "cancelled"}, detail="任务已取消",
                 progress=progress, result=result, usage=usage,
             )
             return
-        if total and done == 0 and failed + cancelled == total:
+        if total and done == 0 and failed + cancelled + human_check == total:
+            # 全部没有通过：监督退回/人工检查不是「失败」，但也不能报完成。
+            message = "全部图片未通过监督审核" if human_check and not failed else "全部图片打标失败"
             self._finish_task_terminal(
-                task_id, "failed", {"type": "error", "message": "全部图片打标失败"},
-                error="全部图片打标失败", progress=progress, result=result, usage=usage,
+                task_id, "failed", {"type": "error", "message": message},
+                error=message, progress=progress, result=result, usage=usage,
             )
             return
         detail = ""
         if cancelled:
             detail = f"已取消，完成 {done} 张"
-        elif failed:
-            detail = f"完成 {done} 张，失败或结果不确定 {failed} 张"
+        elif failed or human_check:
+            bits = [f"完成 {done} 张"]
+            if failed:
+                bits.append(f"失败或结果不确定 {failed} 张")
+            if human_check:
+                bits.append(f"需人工检查 {human_check} 张")
+            detail = "，".join(bits)
         self._finish_task_terminal(
             task_id, "done", {"type": "done"}, detail=detail,
             progress=progress, result=result, usage=usage,
@@ -673,17 +1175,22 @@ class _ProgressWriter:
         self._task_id = task_id
         self._usage: dict[str, Any] = {}
         self._last = 0.0
+        # 并发档多条泳道共享同一个 writer：用量与节流时间戳都必须按键/按锁更新。
+        self._lock = threading.Lock()
 
     def set_usage(self, usage: dict[str, Any]) -> None:
-        self._usage = dict(usage or {})
+        with self._lock:
+            self._usage = dict(usage or {})
 
     def tick(self) -> None:
-        now = time.monotonic()
-        if now - self._last < PROGRESS_WRITE_INTERVAL:
-            return
-        self._last = now
+        with self._lock:
+            now = time.monotonic()
+            if now - self._last < PROGRESS_WRITE_INTERVAL:
+                return
+            self._last = now
+            usage = dict(self._usage)
         counts = self._db.counts(self._task_id)
         fields: dict[str, Any] = {"progress": LabelerRunner._progress_from_counts(counts)}
-        if self._usage:
-            fields["usage"] = dict(self._usage)
+        if usage:
+            fields["usage"] = usage
         self._store.update_task(self._task_id, **fields)

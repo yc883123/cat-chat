@@ -34,11 +34,16 @@ const TERMINAL_BATCH_STATUSES = new Set(["done", "failed", "cancelled", "interru
 const ITEM_STATE_LABELS = {
   queued: "待处理",
   running: "处理中",
+  supervising: "监督中",
+  revising: "退回重做",
   succeeded: "已完成",
   failed: "失败",
   cancelled: "已取消",
   uncertain: "结果不确定",
+  human_check: "需人工检查",
 };
+const MAX_WORKERS = 9;
+const DEFAULT_PROVIDER_LIMIT = 3;
 
 const labeler = {
   initialized: false,
@@ -85,6 +90,16 @@ const labeler = {
   writeTxtPreset: false,
   writeTxtCustom: false,
   txtFiles: new Map(),
+  // 并发打标（仅自定义页）：开关、监督员、1–9 个打标员槽位。
+  // workers = [{providerKey, modelName}]，槽位顺序即服务端冻结顺序。
+  concurrencyEnabled: false,
+  workers: [],
+  supervisor: { providerKey: "", modelName: "" },
+  // 供应商档案并发上限：{model_key: 1..9}；未设置的走默认值。
+  providerLimits: {},
+  providerLimitDefault: DEFAULT_PROVIDER_LIMIT,
+  providerLimitMax: 9,
+  slotsToken: 0,
 };
 
 // ============================================================
@@ -183,12 +198,27 @@ function updateCostNote() {
   if (!node) return;
   const counts = selectedCounts();
   const uploaded = counts.uploaded;
-  const local = selectedProviderKind() === "local";
-  const localNote = local
-    ? "本地模型与聊天共用同一份执行资源：打标按一张一张来，聊天仍可用，只是会等当前这张处理完。"
-    : "打标在后台线程执行，不占用聊天页面；聊天与其它功能可以同时使用。";
+  const concurrent = currentLabelerPage() === "custom"
+    && Boolean($("#labelerConcurrencyEnabled")?.checked);
+  const refs = concurrent ? collectWorkerRefs() : [];
+  const local = !concurrent && selectedProviderKind() === "local";
+  const localNote = concurrent
+    ? "并发档只支持在线 API 供应商；请求按各供应商额度排队，不会挤占本地模型。"
+    : local
+      ? "本地模型与聊天共用同一份执行资源：打标按一张一张来，聊天仍可用，只是会等当前这张处理完。"
+      : "打标在后台线程执行，不占用聊天页面；聊天与其它功能可以同时使用。";
   if (!uploaded) {
     node.textContent = `拖入文件夹后，先上传图片；开始前会显示张数与最多请求数。${localNote}`;
+    return;
+  }
+  if (concurrent) {
+    const maxLabel = uploaded * 3;
+    const maxReview = uploaded * 3;
+    node.textContent = `本批 ${uploaded} 张、${refs.length || "若干"} 个打标员槽位：`
+      + `最多 ${uploaded} 次打标请求（每张最多返工 2 次，合计最多 ${maxLabel} 次），`
+      + `最多 ${maxReview} 次监督请求。费用由各供应商按实际用量计，单价无法事先预估；`
+      + "Skill 可能多轮工具调用，请求数不等于模型调用轮数。"
+      + localNote;
     return;
   }
   node.textContent = `本批 ${uploaded} 张：将发起最多 ${uploaded} 次请求（失败重试可能增加）。`
@@ -256,6 +286,42 @@ async function ensureModels() {
   await loadModelOptions();
 }
 
+async function modelOptionsFor(providerKey) {
+  const key = String(providerKey || "");
+  if (!key) return [];
+  if (labeler.providerModelsCache.has(key)) return labeler.providerModelsCache.get(key);
+  let models = [];
+  try {
+    const payload = await api("/api/providers/models", { method: "POST", body: { model_key: key } });
+    models = payload.models || [];
+  } catch (error) {
+    setHint(`模型目录读取失败：${error.message}`, true);
+  }
+  labeler.providerModelsCache.set(key, models);
+  return models;
+}
+
+function fillSelect(select, rows, preferred, placeholder = "") {
+  if (!select) return "";
+  const options = rows.map((row) => {
+    const option = document.createElement("option");
+    option.value = String(row.value ?? row);
+    option.textContent = String(row.label ?? row.value ?? row);
+    return option;
+  });
+  if (!options.length && placeholder) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = placeholder;
+    options.push(option);
+  }
+  select.replaceChildren(...options);
+  const values = options.map((option) => option.value);
+  const pick = values.includes(String(preferred || "")) ? String(preferred) : (values[0] || "");
+  select.value = pick;
+  return pick;
+}
+
 async function loadModelOptions() {
   const modelSelect = $("#labelerModelSelect");
   if (!modelSelect) return;
@@ -272,18 +338,7 @@ async function loadModelOptions() {
     modelSelect.value = labeler.modelName;
     return;
   }
-  let models = labeler.providerModelsCache.get(providerKey);
-  if (!models) {
-    try {
-      const payload = await api("/api/providers/models", { method: "POST", body: { model_key: providerKey } });
-      models = payload.models || [];
-      labeler.providerModelsCache.set(providerKey, models);
-    } catch (error) {
-      models = [];
-      labeler.providerModelsCache.set(providerKey, models);
-      setHint(`模型目录读取失败：${error.message}`, true);
-    }
-  }
+  const models = await modelOptionsFor(providerKey);
   modelSelect.replaceChildren();
   if (!models.length) {
     const option = document.createElement("option");
@@ -319,6 +374,8 @@ async function activateLabeler({ refresh = true } = {}) {
       renderResultBody();
       await ensurePresets();
       await ensureModels();
+      await ensureLabelerSettings();
+      syncCustomEngineUi();
       void ensureSkills();
     }
     if (refresh) {
@@ -364,6 +421,7 @@ function setLabelerPage(page) {
     btn.classList.toggle("active", active);
     btn.setAttribute("aria-pressed", String(active));
   });
+  syncConcurrencyUi();
 }
 
 // 自定义页的 Skill 下拉：与聊天同一份列表（/api/skills/scan），只做展示与选用入口。
@@ -409,6 +467,7 @@ function syncCustomEngineUi() {
   const picked = Boolean(labeler.skillPick?.id);
   const outputRow = $("#labelerCustomOutputRow");
   if (outputRow) outputRow.hidden = picked;
+  syncConcurrencyUi();
 }
 
 // 选中即生效：只记录选择，不取正文不显示（对话链路里模型自己按需读 Skill 文件）。
@@ -438,6 +497,266 @@ function clearSystemPrompt() {
   labeler.skillPick = null;
   setSkillNote("已清空手输提示词，并停用已选 Skill（回到普通手输打标）。");
   syncCustomEngineUi();
+}
+
+// ============================================================
+// 并发打标（自定义页）：监督员 + 1–9 个打标员槽位 + 供应商并发上限
+// ============================================================
+
+function providerProfiles() {
+  return state.bootstrap?.model_profiles || state.bootstrap?.providers || [];
+}
+
+function providerLabel(key) {
+  const row = providerProfiles().find((profile) => profile.model_key === key);
+  return String(row?.name || key || "");
+}
+
+function providerIsLocal(key) {
+  const row = providerProfiles().find((profile) => profile.model_key === key);
+  return String(row?.kind || "") === "local";
+}
+
+function ensureConcurrencyState() {
+  if (!labeler.workers.length) {
+    labeler.workers = [{ providerKey: labeler.providerKey || "", modelName: labeler.modelName || "" }];
+  }
+  if (!labeler.supervisor.providerKey) {
+    labeler.supervisor = {
+      providerKey: labeler.workers[0]?.providerKey || labeler.providerKey || "",
+      modelName: labeler.workers[0]?.modelName || labeler.modelName || "",
+    };
+  }
+}
+
+function collectWorkerRefs() {
+  return labeler.workers
+    .map((worker) => ({
+      model_key: String(worker.providerKey || ""),
+      model_name: String(worker.modelName || ""),
+    }))
+    .filter((worker) => worker.model_key && worker.model_name);
+}
+
+function collectSupervisorRef() {
+  return {
+    model_key: String(labeler.supervisor.providerKey || ""),
+    model_name: String(labeler.supervisor.modelName || ""),
+  };
+}
+
+function updateConcurrencySummary() {
+  const node = $("#labelerConcurrencyNote");
+  if (!node) return;
+  node.classList.remove("error");
+  const refs = collectWorkerRefs();
+  const supervisor = collectSupervisorRef();
+  const incomplete = labeler.workers.length - refs.length;
+  const locals = [...new Set([
+    ...labeler.workers.map((worker) => worker.providerKey),
+    labeler.supervisor.providerKey,
+  ].filter(Boolean))].filter(providerIsLocal);
+  if (locals.length) {
+    node.textContent = `并发打标只支持在线 API 供应商：${locals.map(providerLabel).join("、")} 是本地模型，请换在线模型或关闭并发。`;
+    node.classList.add("error");
+    return;
+  }
+  if (!refs.length) {
+    node.textContent = "至少添加 1 个打标员槽位，并选好供应商与模型。";
+    return;
+  }
+  const bits = [`${refs.length} 个打标员槽位`];
+  if (incomplete > 0) bits.push(`还有 ${incomplete} 个槽位没选完`);
+  if (supervisor.model_key && supervisor.model_name) {
+    bits.push(`监督员 ${providerLabel(supervisor.model_key)} · ${supervisor.model_name}`);
+  } else {
+    bits.push("还没选监督员");
+  }
+  node.textContent = bits.join(" · ");
+}
+
+async function renderWorkerSlots() {
+  const wrap = $("#labelerWorkerSlots");
+  if (!wrap) return;
+  const token = ++labeler.slotsToken;
+  const profiles = providerProfiles().map((profile) => ({
+    value: profile.model_key,
+    label: profile.name || profile.model_key,
+  }));
+  const rows = labeler.workers.map((worker, index) => {
+    const row = document.createElement("div");
+    row.className = "labeler-worker-slot";
+    row.dataset.workerSlot = String(index);
+    const label = document.createElement("span");
+    label.className = "labeler-worker-slot-index";
+    label.textContent = `#${index + 1}`;
+    const providerLabelNode = document.createElement("label");
+    providerLabelNode.append("供应商");
+    const providerSelect = document.createElement("select");
+    providerSelect.dataset.workerProvider = String(index);
+    providerSelect.setAttribute("aria-label", `打标员 ${index + 1} 供应商`);
+    fillSelect(providerSelect, profiles, worker.providerKey, "请先在设置中添加模型");
+    providerLabelNode.append(providerSelect);
+    const modelLabelNode = document.createElement("label");
+    modelLabelNode.append("模型");
+    const modelSelect = document.createElement("select");
+    modelSelect.dataset.workerModel = String(index);
+    modelSelect.setAttribute("aria-label", `打标员 ${index + 1} 模型`);
+    const loading = document.createElement("option");
+    loading.value = "";
+    loading.textContent = "读取模型中…";
+    modelSelect.append(loading);
+    modelLabelNode.append(modelSelect);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "control-button tiny";
+    remove.dataset.workerRemove = String(index);
+    remove.textContent = "删除";
+    remove.disabled = labeler.workers.length <= 1;
+    row.append(label, providerLabelNode, modelLabelNode, remove);
+    return row;
+  });
+  wrap.replaceChildren(...rows);
+  for (const [index, worker] of labeler.workers.entries()) {
+    const key = String(worker.providerKey || "");
+    const row = wrap.querySelector(`[data-worker-slot="${index}"]`);
+    const modelSelect = row?.querySelector("[data-worker-model]");
+    if (!modelSelect) continue;
+    const models = await modelOptionsFor(key);
+    if (token !== labeler.slotsToken) return;
+    if (String(worker.providerKey || "") !== key) continue;
+    const pick = fillSelect(
+      modelSelect,
+      models.map((model) => ({ value: model.id || model.name, label: model.name || model.id })),
+      worker.modelName,
+      "请先在设置中检查模型",
+    );
+    if (!worker.modelName) worker.modelName = pick;
+  }
+  if (token !== labeler.slotsToken) return;
+  updateConcurrencySummary();
+  renderProviderLimitRows();
+}
+
+async function renderSupervisorSelects() {
+  const providerSelect = $("#labelerSupervisorProvider");
+  const modelSelect = $("#labelerSupervisorModel");
+  if (!providerSelect || !modelSelect) return;
+  const profiles = providerProfiles().map((profile) => ({
+    value: profile.model_key,
+    label: profile.name || profile.model_key,
+  }));
+  labeler.supervisor.providerKey = fillSelect(
+    providerSelect, profiles, labeler.supervisor.providerKey, "请先在设置中添加模型");
+  const status = document.createElement("option");
+  status.value = "";
+  status.textContent = "读取模型中…";
+  modelSelect.replaceChildren(status);
+  const models = await modelOptionsFor(labeler.supervisor.providerKey);
+  labeler.supervisor.modelName = fillSelect(
+    modelSelect,
+    models.map((model) => ({ value: model.id || model.name, label: model.name || model.id })),
+    labeler.supervisor.modelName,
+    "请先在设置中检查模型",
+  );
+  updateConcurrencySummary();
+  renderProviderLimitRows();
+}
+
+function syncConcurrencyUi() {
+  const custom = currentLabelerPage() === "custom";
+  const enabled = custom && Boolean($("#labelerConcurrencyEnabled")?.checked);
+  labeler.concurrencyEnabled = enabled;
+  const block = $("#labelerConcurrencyBlock");
+  if (block) block.hidden = !custom;
+  const body = $("#labelerConcurrencyBody");
+  if (body) body.hidden = !enabled;
+  // 并发模式不使用原单模型控件（避免误以为它还参与打标），「同时处理」由槽位决定。
+  const mainRow = $("#labelerMainModelRow");
+  if (mainRow) mainRow.hidden = enabled;
+  const concurrencyRow = $("#labelerConcurrencyRow");
+  if (concurrencyRow) concurrencyRow.hidden = enabled;
+  updateCostNote();
+  if (enabled) {
+    ensureConcurrencyState();
+    void renderSupervisorSelects();
+    void renderWorkerSlots();
+  }
+}
+
+async function ensureLabelerSettings() {
+  try {
+    const payload = await api("/api/labeler/settings");
+    labeler.providerLimits = payload.provider_limits || {};
+    labeler.providerLimitDefault = Number(payload.default_provider_limit || DEFAULT_PROVIDER_LIMIT);
+    labeler.providerLimitMax = Number(payload.max_provider_limit || 9);
+  } catch (error) {
+    setHint(`并发设置读取失败：${error.message}`, true);
+  }
+  renderProviderLimitRows();
+}
+
+function usedProviderKeys() {
+  const keys = new Set();
+  for (const worker of labeler.workers) {
+    if (worker.providerKey) keys.add(String(worker.providerKey));
+  }
+  if (labeler.supervisor.providerKey) keys.add(String(labeler.supervisor.providerKey));
+  return [...keys];
+}
+
+function renderProviderLimitRows() {
+  const wrap = $("#labelerProviderLimitRows");
+  if (!wrap) return;
+  const keys = usedProviderKeys();
+  if (!keys.length) {
+    const note = document.createElement("p");
+    note.className = "labeler-skill-note";
+    note.textContent = "选好打标员槽位后，这里会列出需要限流的供应商档案。";
+    wrap.replaceChildren(note);
+    return;
+  }
+  wrap.replaceChildren(...keys.map((key) => {
+    const row = document.createElement("div");
+    row.className = "labeler-limit-row";
+    const name = document.createElement("span");
+    name.textContent = providerLabel(key);
+    name.title = key;
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "1";
+    input.max = String(labeler.providerLimitMax || 9);
+    input.step = "1";
+    input.value = String(labeler.providerLimits[key] || labeler.providerLimitDefault);
+    input.dataset.limitKey = key;
+    input.setAttribute("aria-label", `${providerLabel(key)} 并发上限`);
+    row.append(name, input);
+    return row;
+  }));
+}
+
+async function saveProviderLimit(key, rawValue) {
+  const name = String(key || "");
+  if (!name) return;
+  const number = Math.round(Number(rawValue));
+  const max = Number(labeler.providerLimitMax || 9);
+  if (!Number.isFinite(number) || number < 1 || number > max) {
+    setHint(`「${providerLabel(name)}」的并发上限必须在 1 到 ${max} 之间`, true);
+    renderProviderLimitRows();
+    return;
+  }
+  const next = { ...labeler.providerLimits, [name]: number };
+  try {
+    const payload = await api("/api/labeler/settings", {
+      method: "POST",
+      body: { provider_limits: next },
+    });
+    labeler.providerLimits = payload.provider_limits || next;
+    setHint(`已保存「${providerLabel(name)}」并发上限：${number}`);
+  } catch (error) {
+    setHint(`并发上限保存失败：${error.message}`, true);
+  }
+  renderProviderLimitRows();
 }
 
 // ============================================================
@@ -720,6 +1039,19 @@ function collectConfig() {
     } else {
       config.system_prompt = String($("#labelerCustomSystemPrompt")?.value || "").trim();
     }
+    if ($("#labelerConcurrencyEnabled")?.checked) {
+      const workers = collectWorkerRefs();
+      const supervisor = collectSupervisorRef();
+      config.concurrency_enabled = true;
+      config.workers = workers;
+      config.supervisor = supervisor;
+      // 槽位数即服务端打标并发；顶层模型固定取第一个槽位（服务端同样会校验）。
+      config.concurrency = workers.length || 1;
+      if (workers.length) {
+        config.model_key = workers[0].model_key;
+        config.model_name = workers[0].model_name;
+      }
+    }
   }
   return config;
 }
@@ -736,6 +1068,29 @@ async function startTask() {
     return;
   }
   const config = collectConfig();
+  if (config.concurrency_enabled) {
+    const supervisor = config.supervisor || {};
+    if (!config.workers?.length) {
+      setHint("并发打标至少要有一个选好供应商和模型的打标员槽位", true);
+      return;
+    }
+    if (config.workers.length !== labeler.workers.length) {
+      setHint("还有打标员槽位没选完供应商或模型，请补齐后再开始", true);
+      return;
+    }
+    if (!supervisor.model_key || !supervisor.model_name) {
+      setHint("并发打标要先选择监督员模型配置与模型", true);
+      return;
+    }
+    const localKeys = [...new Set([
+      ...config.workers.map((worker) => worker.model_key),
+      supervisor.model_key,
+    ])].filter(providerIsLocal);
+    if (localKeys.length) {
+      setHint(`并发打标只支持在线 API 供应商：${localKeys.map(providerLabel).join("、")} 是本地模型，请换在线模型或关闭并发`, true);
+      return;
+    }
+  }
   if (!config.model_key || !config.model_name) {
     setHint("请选择模型配置与模型", true);
     return;
@@ -1030,10 +1385,15 @@ function renderBatches() {
     const bits = [`${Number(progress.done || 0)}/${Number(progress.total || 0)} 完成`];
     if (Number(progress.failed || 0)) bits.push(`失败 ${progress.failed}`);
     if (Number(progress.uncertain || 0)) bits.push(`不确定 ${progress.uncertain}`);
+    if (Number(progress.human_check || 0)) bits.push(`待人工 ${progress.human_check}`);
     // 批次历史显示用户能看懂的生成模式名，不暴露 face_lora 这类内部 ID；
     // 自定义打标的任务没有预设，显示成「自定义」。
     const preset = labeler.presets.find((row2) => row2.id === task.preset);
     bits.push(preset?.label || (String(task.preset || "") === "custom" ? "自定义" : String(task.preset || "")));
+    if (task.concurrency_enabled) {
+      bits.push(`${Number(task.worker_count || 0)} 个打标员`);
+      if (task.supervisor_model_name) bits.push(`监督 ${task.supervisor_model_name}`);
+    }
     meta.textContent = bits.filter(Boolean).join(" · ");
     button.append(top, meta);
     row.append(button);
@@ -1160,7 +1520,8 @@ function renderTask(task) {
   const failed = Number(progress.failed || 0);
   const uncertain = Number(progress.uncertain || 0);
   const cancelled = Number(progress.cancelled || 0);
-  const finished = done + failed + uncertain + cancelled;
+  const humanCheck = Number(progress.human_check || 0);
+  const finished = done + failed + uncertain + cancelled + humanCheck;
   const box = $("#labelerQueueStatus");
   if (box) box.hidden = false;
   const label = $("#labelerProgressLabel");
@@ -1174,6 +1535,7 @@ function renderTask(task) {
     const bits = [];
     if (task.detail) bits.push(String(task.detail));
     if (cancelled) bits.push(`已取消 ${cancelled} 张`);
+    if (humanCheck) bits.push(`需人工检查 ${humanCheck} 张（未计入完成）`);
     if (task.usage && Object.keys(task.usage).length) {
       const tokens = Number(task.usage.total_tokens || 0);
       bits.push(tokens ? `累计 ${tokens} tokens（供应商读数）` : "已记录供应商用量");
@@ -1376,6 +1738,9 @@ function renderImageResults(body) {
       item.item_id, item.state, item.annotation_id || 0, item.error || "",
       (annotation?.tags || []).length, annotation?.description || "",
       item.txt_state || "", item.txt_path || "", Number(item.txt_chars || 0),
+      item.worker_slot || 0, item.worker_model_name || "",
+      item.supervisor_decision || "", Number(item.supervisor_attempts || 0),
+      item.supervisor_reason || "",
     ]),
   ]);
   if (labeler.lastImageSignature === signature) return;
@@ -1394,11 +1759,17 @@ function renderImageResults(body) {
     name.title = displayName;
     const state = document.createElement("span");
     state.className = "labeler-anno-state";
-    const label = ITEM_STATE_LABELS[item.state] || item.state;
+    const concurrentTask = Boolean(labeler.task?.concurrency_enabled);
+    let label = ITEM_STATE_LABELS[item.state] || item.state;
+    if (item.state === "running" && item.phase === "labeling") label = "打标中";
+    else if (item.state === "queued" && concurrentTask) label = "待分配";
+    else if (item.state === "succeeded" && concurrentTask) label = "通过";
     state.textContent = label;
-    if (["failed", "uncertain"].includes(item.state)) state.classList.add("failed");
+    if (["failed", "uncertain", "human_check"].includes(item.state)) state.classList.add("failed");
     head.append(name, state);
     card.append(head);
+    const meta = reviewMetaLine(item);
+    if (meta) card.append(meta);
     if (annotation?.tags?.length) {
       card.append(tagList(annotation.tags, annotation.confidences));
     }
@@ -1407,6 +1778,19 @@ function renderImageResults(body) {
       desc.className = "labeler-anno-desc";
       desc.textContent = annotation.description;
       card.append(desc);
+    }
+    if (item.state === "human_check" && item.candidate) {
+      // 未通过监督的候选只能作为证据展示：明确标注「未通过审核」，
+      // 不混进标签/描述的正常样式，避免被当成已完成结果。
+      const candidate = document.createElement("p");
+      candidate.className = "labeler-anno-candidate";
+      const parts = ["候选（未通过审核，仅供参考）"];
+      const tags = (item.candidate.tags || []).join("，");
+      if (tags) parts.push(`标签：${tags}`);
+      const text = String(item.candidate.description || "");
+      if (text) parts.push(`描述：${text}`);
+      candidate.textContent = parts.join("｜");
+      card.append(candidate);
     }
     if (item.txt_state) card.append(txtStatusRow(item));
     if (item.error) {
@@ -1442,6 +1826,47 @@ function renderImageResults(body) {
     });
     body.append(more);
   }
+}
+
+function reviewMetaLine(item) {
+  const bits = [];
+  if (item.worker_model_name) {
+    const slot = Number(item.worker_slot || 0) + 1;
+    bits.push(`打标员 #${slot} · ${item.worker_model_name}`);
+  }
+  if (item.supervisor_decision === "reused") {
+    bits.push("复用已通过结果");
+  } else if (item.supervisor_decision === "approve") {
+    bits.push(`监督通过${Number(item.supervisor_attempts || 0) ? `（退回 ${item.supervisor_attempts} 次后）` : ""}`);
+  } else if (item.supervisor_decision === "revise") {
+    bits.push(`监督退回重做 ${Number(item.supervisor_attempts || 0)} 次`);
+  } else if (item.state === "human_check") {
+    bits.push("需人工检查");
+  } else if (item.state === "supervising") {
+    bits.push("监督中");
+  } else if (item.state === "revising") {
+    bits.push("退回重做中");
+  }
+  const reason = String(item.supervisor_reason || "").trim();
+  if (reason && ["revise", "human_check"].includes(String(item.supervisor_decision || ""))) {
+    bits.push(reason);
+  }
+  if (!bits.length) return null;
+  const node = document.createElement("p");
+  node.className = "labeler-anno-meta";
+  const badge = document.createElement("span");
+  const decision = String(item.supervisor_decision || (item.state === "human_check" ? "human_check" : ""));
+  badge.className = "labeler-anno-review " + (
+    decision === "approve" || decision === "reused" ? "approve"
+      : decision === "revise" || item.state === "revising" ? "revise"
+        : decision === "human_check" ? "human_check" : "");
+  badge.textContent = item.state === "human_check"
+    ? "需人工检查"
+    : item.supervisor_decision === "reused" ? "复用"
+      : item.supervisor_decision === "approve" ? "监督通过"
+        : item.supervisor_decision === "revise" ? "已退回" : "并发";
+  node.append(badge, document.createTextNode(bits.join(" · ")));
+  return node;
 }
 
 function tagList(tags, confidences) {
@@ -1814,6 +2239,64 @@ export function bindLabelerEvents() {
       labeler.writeTxtCustom = Boolean(writeTxtCustom.checked);
     });
   }
+  // ---- 并发打标接线：开关 / 槽位增删 / 供应商切换 / 并发上限保存 ----
+  $("#labelerConcurrencyEnabled")?.addEventListener("change", () => {
+    syncConcurrencyUi();
+  });
+  $("#labelerWorkerAdd")?.addEventListener("click", () => {
+    if (labeler.workers.length >= MAX_WORKERS) {
+      setHint(`打标员槽位最多 ${MAX_WORKERS} 个`, true);
+      return;
+    }
+    const seed = labeler.workers[labeler.workers.length - 1] || {};
+    labeler.workers.push({ providerKey: seed.providerKey || "", modelName: "" });
+    void renderWorkerSlots();
+  });
+  $("#labelerWorkerSlots")?.addEventListener("change", (event) => {
+    const providerSelect = event.target.closest("[data-worker-provider]");
+    if (providerSelect) {
+      const index = Number(providerSelect.dataset.workerProvider);
+      const worker = labeler.workers[index];
+      if (!worker) return;
+      worker.providerKey = providerSelect.value;
+      worker.modelName = "";
+      void renderWorkerSlots();
+      return;
+    }
+    const modelSelect = event.target.closest("[data-worker-model]");
+    if (modelSelect) {
+      const index = Number(modelSelect.dataset.workerModel);
+      const worker = labeler.workers[index];
+      if (!worker) return;
+      worker.modelName = modelSelect.value;
+      updateConcurrencySummary();
+      updateCostNote();
+    }
+  });
+  $("#labelerWorkerSlots")?.addEventListener("click", (event) => {
+    const remove = event.target.closest("[data-worker-remove]");
+    if (!remove) return;
+    if (labeler.workers.length <= 1) {
+      setHint("至少保留 1 个打标员槽位", true);
+      return;
+    }
+    labeler.workers.splice(Number(remove.dataset.workerRemove), 1);
+    void renderWorkerSlots();
+  });
+  $("#labelerSupervisorProvider")?.addEventListener("change", () => {
+    labeler.supervisor.providerKey = String($("#labelerSupervisorProvider")?.value || "");
+    labeler.supervisor.modelName = "";
+    void renderSupervisorSelects();
+  });
+  $("#labelerSupervisorModel")?.addEventListener("change", () => {
+    labeler.supervisor.modelName = String($("#labelerSupervisorModel")?.value || "");
+    updateConcurrencySummary();
+  });
+  $("#labelerProviderLimitRows")?.addEventListener("change", (event) => {
+    const input = event.target.closest("[data-limit-key]");
+    if (!input) return;
+    void saveProviderLimit(input.dataset.limitKey, input.value);
+  });
   $("#labelerStart")?.addEventListener("click", () => { void startTask(); });
   $("#labelerCancel")?.addEventListener("click", () => { void cancelTask(); });
   $("#labelerContinue")?.addEventListener("click", () => { void continueTask(); });

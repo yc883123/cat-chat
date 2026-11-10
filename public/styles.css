@@ -3859,6 +3859,37 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .labeler-trigger-switch input:disabled ~ span { color: var(--muted); }
 .labeler-trigger-field .labeler-trigger-line input[type="text"] { flex: 1; min-width: 0; }
 .labeler-trigger-switch input:disabled ~ span { color: var(--muted); }
+/* 并发打标：开关 + 监督员 + 打标员槽位 + 供应商上限。display:grid 会压过
+   UA 的 [hidden]，隐藏态必须显式关掉（同 9.169 的 label 坑）。 */
+.labeler-concurrency { display: grid; gap: 6px; border-top: 1px solid var(--line); padding-top: 8px; }
+.labeler-concurrency[hidden] { display: none; }
+/* .labeler-field-row 的 display:grid 会压过 UA 的 [hidden]（同 9.169 的 label 坑）。 */
+#labelerMainModelRow[hidden], #labelerConcurrencyRow[hidden] { display: none; }
+.labeler-concurrency-body { display: grid; gap: 8px; }
+.labeler-concurrency-body[hidden] { display: none; }
+.labeler-concurrency-note { font-size: 11.5px; color: var(--muted); }
+.labeler-slots-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); }
+.labeler-worker-slots { display: grid; gap: 6px; }
+.labeler-worker-slot { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr) auto; gap: 6px; align-items: end; }
+.labeler-worker-slot > label { display: grid; gap: 3px; font-size: 11.5px; color: var(--muted); }
+.labeler-worker-slot select { width: 100%; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); color: var(--text); font-size: 12px; padding: 5px 7px; }
+.labeler-worker-slot-index { font-size: 11.5px; color: var(--muted); white-space: nowrap; padding-bottom: 7px; }
+.labeler-limit-rows { display: grid; gap: 6px; }
+.labeler-limit-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+.labeler-limit-row span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.labeler-limit-row input { width: 72px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); color: var(--text); font-size: 12.5px; padding: 5px 7px; }
+.labeler-limits-note { margin: 0 0 6px; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+/* 结果卡：打标员/监督结论是补充信息，只占一行小字；人工检查用警示色。 */
+.labeler-anno-meta { margin: 0; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.labeler-anno-review { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: var(--r-full); font-size: 11px; border: 1px solid var(--line); color: var(--muted); }
+.labeler-anno-review.approve { border-color: var(--accent); color: var(--accent); }
+.labeler-anno-review.revise { border-color: var(--warning, #b8860b); color: var(--warning, #b8860b); }
+.labeler-anno-review.human_check { border-color: var(--danger, #c0392b); color: var(--danger, #c0392b); }
+.labeler-anno-candidate { margin: 0; padding: 6px 8px; border-left: 3px solid var(--danger, #c0392b); background: var(--surface-2); border-radius: var(--r-md); font-size: 12px; color: var(--muted); line-height: 1.5; }
+@media (max-width: 600px) {
+  .labeler-worker-slot { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .labeler-worker-slot > label:nth-child(3) { grid-column: 2; }
+}
 .labeler-field-row select, .labeler-field-row input, .labeler-prompt-field textarea,
 .labeler-results-head input, .labeler-results-head select {
   width: 100%; border: 1px solid var(--line); border-radius: var(--r-md);

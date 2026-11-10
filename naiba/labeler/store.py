@@ -50,6 +50,7 @@ class LabelerStore:
 
     def __init__(self, data_dir: Path):
         self._dir = Path(data_dir) / "labeler" / "tasks"
+        self._settings_path = Path(data_dir) / "labeler" / "settings.json"
         self._outputs_root = Path(data_dir) / "labeler" / "outputs"
         self._lock = threading.RLock()
 
@@ -90,7 +91,7 @@ class LabelerStore:
         return f"tg-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:12]}"
 
     def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
-        self._dir.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_name(f".{uuid.uuid4().hex}.tmp")
         try:
             tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -111,6 +112,47 @@ class LabelerStore:
             except OSError:
                 pass
 
+    # ---- 设置（供应商并发上限） ----
+
+    def read_settings(self) -> dict[str, Any]:
+        """读贴签匠自己的设置（目前只有供应商并发上限）。
+
+        文件缺失/损坏都按空设置处理：并发上限是保守配额，不是数据事实，
+        读不到时走默认值比让整个功能不可用更安全。
+        """
+        try:
+            payload = json.loads(self._settings_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return {"provider_limits": {}}
+        if not isinstance(payload, dict):
+            return {"provider_limits": {}}
+        limits = payload.get("provider_limits")
+        clean: dict[str, int] = {}
+        if isinstance(limits, dict):
+            for key, value in limits.items():
+                try:
+                    number = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if str(key).strip() and number > 0:
+                    clean[str(key).strip()] = number
+        return {"provider_limits": clean}
+
+    def write_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """整份写回设置（调用方已做字段校验），返回规范化后的内容。"""
+        limits: dict[str, int] = {}
+        raw = (payload or {}).get("provider_limits")
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                key = str(key or "").strip()
+                if not key:
+                    continue
+                limits[key] = int(value)
+        clean = {"provider_limits": limits}
+        with self._lock:
+            self._write_json(self._settings_path, clean)
+        return clean
+
     # ---- 任务记录 ----
 
     def create_task(self, input_data: dict[str, Any], *, source_task_id: str = "") -> dict[str, Any]:
@@ -124,7 +166,8 @@ class LabelerStore:
             "origin_label": LABELER_ORIGIN_LABEL,
             "detail": "",
             "input": input_data,
-            "progress": {"done": 0, "total": total, "failed": 0, "uncertain": 0, "cancelled": 0},
+            "progress": {"done": 0, "total": total, "failed": 0, "uncertain": 0,
+                         "cancelled": 0, "human_check": 0},
             "result": {"annotation_ids": []},
             "error": "",
             "usage": {},
@@ -210,7 +253,8 @@ class LabelerStore:
             payload["status"] = "interrupted"
         payload.setdefault("module", LABELER_MODULE)
         payload.setdefault("origin_label", LABELER_ORIGIN_LABEL)
-        payload.setdefault("progress", {"done": 0, "total": 0, "failed": 0, "uncertain": 0, "cancelled": 0})
+        payload.setdefault("progress", {"done": 0, "total": 0, "failed": 0, "uncertain": 0,
+                                        "cancelled": 0, "human_check": 0})
         payload.setdefault("result", {"annotation_ids": []})
         return payload
 

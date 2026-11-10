@@ -580,6 +580,42 @@
                     <span class="labeler-txt-note">一图一个文件，分段内容按顺序追加</span>
                   </div>
                 </div>
+
+                <!-- 并发打标：每张图只由一个打标员标注，再由监督员审核；
+                     不通过退回原打标员重做（最多 2 次），仍不通过转人工检查。 -->
+                <div class="labeler-concurrency" id="labelerConcurrencyBlock">
+                  <div class="labeler-trigger-field">
+                    <span>并发打标</span>
+                    <div class="labeler-trigger-line" title="开启后可选最多 9 个打标员槽位并指定 1 个监督员；每张图只由一个打标员标注，监督通过才算完成">
+                      <label class="labeler-trigger-switch">
+                        <input id="labelerConcurrencyEnabled" type="checkbox">
+                        <span>多打标员 + 监督员</span>
+                      </label>
+                      <span class="labeler-concurrency-note">每张图只分配一个打标员；监督退回最多重做 2 次</span>
+                    </div>
+                  </div>
+                  <div class="labeler-concurrency-body" id="labelerConcurrencyBody" hidden>
+                    <div class="labeler-field-row labeler-supervisor-row">
+                      <label>监督员模型配置
+                        <select id="labelerSupervisorProvider" aria-label="监督员模型配置"></select>
+                      </label>
+                      <label>监督员模型
+                        <select id="labelerSupervisorModel" aria-label="监督员模型"></select>
+                      </label>
+                    </div>
+                    <div class="labeler-slots-head">
+                      <span>打标员槽位（1–9 个，可重复选同一供应商和模型）</span>
+                      <button class="control-button tiny" id="labelerWorkerAdd" type="button">增加槽位</button>
+                    </div>
+                    <div class="labeler-worker-slots" id="labelerWorkerSlots" aria-label="打标员槽位"></div>
+                    <p class="labeler-skill-note" id="labelerConcurrencyNote" role="status"></p>
+                    <details class="labeler-advanced" id="labelerProviderLimits">
+                      <summary>供应商并发上限</summary>
+                      <p class="labeler-limits-note">同一个供应商档案共用一份 API key 额度，这里按档案限制同时在途的请求数。额度未知时默认用 3，可手动调整；打标与监督请求共享同一额度。</p>
+                      <div class="labeler-limit-rows" id="labelerProviderLimitRows"></div>
+                    </details>
+                  </div>
+                </div>
               </div>
 
               <div class="labeler-trigger-field">
@@ -594,7 +630,7 @@
                 </div>
               </div>
 
-              <div class="labeler-field-row">
+              <div class="labeler-field-row" id="labelerMainModelRow">
                 <label>模型配置
                   <select id="labelerProviderSelect" aria-label="模型配置"></select>
                 </label>
@@ -621,7 +657,7 @@
                     <input id="labelerRetryLimit" type="number" min="0" max="5" step="1" value="2">
                   </label>
                 </div>
-                <div class="labeler-field-row">
+                <div class="labeler-field-row" id="labelerConcurrencyRow">
                   <label>同时处理
                     <select id="labelerConcurrency" aria-label="同时处理">
                       <option value="1">1 张（稳妥）</option>

@@ -12,6 +12,14 @@ from typing import Any
 
 from naiba.labeler.db import LabelerDB, LabelerDBError
 from naiba.labeler.export import LabelerExportError, open_export_dir, open_managed_dir, write_export
+from naiba.labeler.gate import (
+    DEFAULT_PROVIDER_CONCURRENCY,
+    MAX_PROVIDER_CONCURRENCY,
+    MAX_WORKERS,
+    MIN_PROVIDER_CONCURRENCY,
+    SUPERVISOR_MAX_CONCURRENCY,
+    validate_provider_limits,
+)
 from naiba.labeler.images import (
     MAX_BATCH_BYTES,
     MAX_BATCH_IMAGES,
@@ -174,8 +182,45 @@ class LabelerService:
                 "max_batch_bytes": MAX_BATCH_BYTES,
                 "default_concurrency": DEFAULT_CONCURRENCY,
                 "validated_concurrency": list(VALIDATED_CONCURRENCY),
+                # 自定义并发监督档：槽位上限、供应商档案默认并发与监督队列上限。
+                "max_workers": MAX_WORKERS,
+                "default_provider_limit": DEFAULT_PROVIDER_CONCURRENCY,
+                "min_provider_limit": MIN_PROVIDER_CONCURRENCY,
+                "max_provider_limit": MAX_PROVIDER_CONCURRENCY,
+                "supervisor_max_concurrency": SUPERVISOR_MAX_CONCURRENCY,
             },
         }, 200
+
+    # ---- 设置（供应商并发上限） ----
+
+    def api_settings(self) -> tuple[dict[str, Any], int]:
+        settings = self.store.read_settings()
+        return {
+            "provider_limits": settings.get("provider_limits") or {},
+            "default_provider_limit": DEFAULT_PROVIDER_CONCURRENCY,
+            "min_provider_limit": MIN_PROVIDER_CONCURRENCY,
+            "max_provider_limit": MAX_PROVIDER_CONCURRENCY,
+            "max_workers": MAX_WORKERS,
+            "supervisor_max_concurrency": SUPERVISOR_MAX_CONCURRENCY,
+        }, 200
+
+    def api_update_settings(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """保存供应商档案的并发上限（1–9）；未知档案直接拒绝，不静默丢弃。"""
+        body = body if isinstance(body, dict) else {}
+        try:
+            limits = validate_provider_limits(body.get("provider_limits"))
+        except ValueError as exc:
+            return {"error": str(exc)}, 400
+        for key in limits:
+            try:
+                self.app.config.profile(key)
+            except (ValueError, KeyError):
+                return {"error": f"模型配置不存在：{key}"}, 400
+        try:
+            saved = self.store.write_settings({"provider_limits": limits})
+        except OSError as exc:
+            return {"error": f"并发上限保存失败：{exc}"}, 500
+        return {"ok": True, **saved}, 200
 
     # ---- 任务 ----
 

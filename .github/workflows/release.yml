@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 4.2.2-beta
-  RELEASE_TAG: v4.2.2-beta
+  RELEASE_VERSION: 4.2.3-beta
+  RELEASE_TAG: v4.2.3-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-4.2.2-beta-windows-x64
+  PACKAGE_NAME: cat-chat-4.2.3-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-4.2.2-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-4.2.3-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -133,11 +133,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 4.2.2 Beta release
+      - name: Publish 4.2.3 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 4.2.2 Beta
+          name: Cat Chat 4.2.3 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -147,11 +147,9 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 4.2.2 Beta：贴签匠写入本地 TXT
-            贴签匠预设打标与自定义打标各增加一个「写入本地 TXT」开关，两页签各记各的选择；默认关闭，关闭时模型看不到任何 TXT 工具，保持原打标与导出路径。
-            开启后模型通过结构化工具调用（write_caption_txt）按图写文本：write 创建或整份覆盖，append 按调用顺序追加；item 只能指向当前这张图，缺少必填字段、类型不符或指向别的图片时直接返回工具错误，不执行写入。
-            预设 provider 与自定义 Skill 两条链路共用同一工具与同一套路径规则：每张图一个与图片同名的 .txt，保留相对目录；同名文件在任务内自动补序号，不会串写。
-            模型没有调用工具时按最终标注结果自动回填一份 TXT，保证每张成功图片都有文件；开关不参与配置指纹，同图同配置仍复用已有标注、不重复计费，续跑任务重新写 TXT。
-            结果区逐图显示 TXT 状态与字数，可查看、下载；结果区新增「TXT 文件夹」入口；删除批次记录时一并清理该批次的 TXT 输出目录。
-            验证与边界：贴签匠专项 188 项、全量 4328 项、静态检查与 Playwright 桌面/375 冒烟通过；真实模型的结构化工具调用未在本机复测。
-            Cat Chat 4.2.2 Beta Windows build。更新协议、既有数据位置和双名称发布资产保持兼容。
+            Cat Chat 4.2.3 Beta：修复更新说明串版
+            更新说明面板按版本收口：发布清单里的 release_notes 是整份历史（当前 314 条），选中哪一版就只取那一版的正文，不再把全部历史版本堆进右栏。
+            说明按正文真换行拆开：首行作标题、其余逐条列出；滚动条长度恢复，渲染不再被几百段正文拖慢。
+            兼容已有发布：旧清单、磁盘缓存、合成 latest 条目与源码模式共用同一套收口逻辑，历史版本标签页也能正常显示。
+            验证与边界：更新相关 58 项、发版守门 41 项与本轮全量测试通过；未连真实发布页逐版点选复测。
+            Cat Chat 4.2.3 Beta Windows build。更新协议、既有数据位置和双名称发布资产保持兼容。

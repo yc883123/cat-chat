@@ -812,7 +812,7 @@ class StreamMixins:
                 continue
             if data == "[DONE]":
                 saw_done = True
-                continue
+                break
             try:
                 chunk = json.loads(data)
             except json.JSONDecodeError:
@@ -902,18 +902,20 @@ class StreamMixins:
                         slot["name"] += call["name"]
                     if call.get("arguments") is not None:
                         slot["arguments"] += call["arguments"]
-                continue
-            if not text:
+            elif not text:
                 has_content = bool(full_content_parts) or guard.detected or bool(native_tool_calls)
                 _mark_progress(progress, reasoning_chars, has_content)
                 # 只有「正文仍为空」的思考增量才可能触发熔断；原生工具调用已到位时不算空转。
                 _break_on_runaway_reasoning(
                     reasoning_chars, reasoning_break_chars, has_content, status,
                 )
-                continue
-            full_content_parts.append(text)
-            _mark_progress(progress, reasoning_chars, True)
-            guard.feed(text, status)
+            else:
+                full_content_parts.append(text)
+                _mark_progress(progress, reasoning_chars, True)
+                guard.feed(text, status)
+            if saw_done:
+                # 先消费同包携带的最后一段文本/思考/工具，再结束；不等 HTTP 物理 EOF。
+                break
         final_text, final_reasoning = inline_parser.feed("", final=True)
         if final_reasoning:
             reasoning_streamer.feed(final_reasoning)

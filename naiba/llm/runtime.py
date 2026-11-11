@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import socket
 import threading
 import time
 from html.parser import HTMLParser
@@ -47,6 +48,8 @@ API_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 ONLINE_MODEL_TIMEOUT_SECONDS = 180
+# 在线流按实际文本/思考/工具增量计空闲时间；网关保活和 usage 不能延长等待。
+ONLINE_STREAM_IDLE_TIMEOUT_SECONDS = 180
 LOCAL_MODEL_TIMEOUT_SECONDS = 1800
 # A0：思考时的**默认输出上限**。`max_tokens` 本就是「思考 + 正文」的总量闸门，事故缺口
 # 不在「填得太大」，而在「不填 = 不发字段 = 上游默认值近乎无限」——只有 Claude 有 4096
@@ -125,6 +128,17 @@ class LocalModelFirstByteTimeout(RuntimeError):
     报错，期间界面只有一个「等待本地模型资源」——客户机实测整条会话看起来永久
     卡死（重启后端、重启电脑都无效：病根在每轮构造的请求体里，不在进程里）。
     """
+
+
+class OnlineModelStreamIdleTimeout(RuntimeError):
+    """在线流持续没有实际输出；不自动重放，避免拼接重复的部分结果。"""
+
+
+def _online_stream_idle_timeout_error(seconds: float) -> OnlineModelStreamIdleTimeout:
+    return OnlineModelStreamIdleTimeout(
+        f"在线模型已连续 {max(1, int(round(seconds)))} 秒没有返回新的内容，已停止等待。"
+        "上游响应可能中断，请重试或更换模型。"
+    )
 
 
 class StreamCutError(RuntimeError):
@@ -319,6 +333,48 @@ def _has_stream_payload(line: Any) -> bool:
         return bool(raw) and not raw.startswith(b":")
     text = str(line).strip()
     return bool(text) and not text.startswith(":")
+
+
+def _has_online_stream_output(line: Any, request_format: str) -> bool:
+    """复用协议解析器判断实际增量，空包/角色/事件头/usage 均不算模型进展。"""
+    text = (bytes(line).decode("utf-8", errors="replace")
+            if isinstance(line, (bytes, bytearray)) else str(line)).strip()
+    if not text.startswith("data:"):
+        return False
+    try:
+        chunk = json.loads(text[5:].strip())
+        if not isinstance(chunk, dict):
+            return False
+        content, reasoning, calls = ProtocolMixins._stream_delta_full(request_format, chunk)
+        return bool(content or reasoning or any(
+            call.get("name") or call.get("arguments") for call in calls
+        ))
+    except (ValueError, TypeError, AttributeError, IndexError):
+        # 保留真正解析器的原有错误行为，探测层不抢先改变错误归因。
+        return False
+
+
+def _abort_stream_response(response: Any) -> None:
+    """先唤醒 socket 读取，再关闭文件；直接 close 会等 BufferedReader 的读取锁。"""
+    raw = getattr(getattr(response, "fp", None), "raw", None)
+    connection = getattr(raw, "_sock", None)
+    if connection is not None:
+        try:
+            connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        # Windows 的 timeout-mode recv 可能仍等在 select；makefile 的引用又会推迟
+        # socket.close() 的真实关闭。detach 后关闭句柄，才能唤醒该阻塞读取。
+        try:
+            handle = connection.detach()
+            if handle >= 0:
+                socket.close(handle)
+        except OSError:
+            pass
+    try:
+        response.close()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 class _ErrorHTMLParser(HTMLParser):
@@ -928,12 +984,15 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
         cancel_event: threading.Event | None = None,
         first_byte_timeout: float = 0.0,
         total_timeout: float = 0.0,
+        *,
+        idle_timeout: float = 0.0,
+        request_format: str = "openai_chat",
     ) -> Any:
-        """逐行产出流式响应，在取消 / 首字节超时 / 总时长超时时尽快中断读取。
+        """逐行产出响应，在取消 / 本地载荷空闲 / 在线输出空闲 / 总时长超时时中断。
 
         读取线程阻塞在 ``response.readline()``（socket 读）里，循环体根本没有机会
         看到取消请求——本地模型 prefill 期间一个字节都不吐，此前「停止」对它完全
-        无效，只能等满 30 分钟超时。这里让一个轻量看门狗线程做三件事：
+        无效，只能等满 30 分钟超时。这里让一个轻量看门狗线程做四件事：
 
         1. **取消**置位时关闭连接，把阻塞的读打断，再把随之而来的 I/O 异常翻译成
            统一的「任务已取消」，避免被误判成网络故障而进入重试/报错分支；
@@ -951,71 +1010,79 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
            的空闲超时**，推理 delta 持续到达就不断重置它——一段 43 万字符的思考循环可以
            无限流下去（DeepSeek/Moonshot 的思考 token 还按输出计费），界面上「合法长思考」
            与「死循环」无法区分，只能靠用户手动停止。
+
+        4. ``idle_timeout > 0`` 时只按实际正文、思考或工具增量刷新在线空闲计时，
+           保活注释、角色空包与 usage 不能续命；超时直接失败，不自动重放部分输出。
         """
+        # 在线空闲闸门只认协议解析器识别到的实际输出，与本地载荷行计时分开。
         timeout_seconds = max(0.0, float(first_byte_timeout or 0.0))
         total_seconds = max(0.0, float(total_timeout or 0.0))
-        if cancel_event is None and timeout_seconds <= 0 and total_seconds <= 0:
+        idle_seconds = max(0.0, float(idle_timeout or 0.0))
+        if cancel_event is None and timeout_seconds <= 0 and total_seconds <= 0 and idle_seconds <= 0:
             yield from response
             return
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("任务已取消")
         stop = threading.Event()
-        state = {"started": False, "timed_out": False, "total_timed_out": False}
-        progress = {"last": time.perf_counter()}
+        state = {"timed_out": False, "total_timed_out": False, "idle_timed_out": False}
         started_at = time.perf_counter()
+        progress = {"last": started_at, "last_output": started_at}
+
+        def check_abort() -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise RuntimeError("任务已取消")
+            now = time.perf_counter()
+            if state["total_timed_out"] or (total_seconds > 0 and now - started_at >= total_seconds):
+                raise _stream_total_timeout_error(total_seconds)
+            if state["idle_timed_out"] or (idle_seconds > 0 and now - progress["last_output"] >= idle_seconds):
+                raise _online_stream_idle_timeout_error(idle_seconds)
+            if state["timed_out"]:
+                raise local_first_byte_timeout_error(timeout_seconds)
 
         def abort_watchdog() -> None:
             # 只做一件事：取消或长时间没有有效载荷时关闭连接，让阻塞中的 readline 立刻抛错返回。
             while not stop.wait(0.1):
                 if cancel_event is not None and cancel_event.is_set():
-                    try:
-                        response.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+                    _abort_stream_response(response)
                     return
                 if timeout_seconds > 0 and time.perf_counter() - progress["last"] >= timeout_seconds:
                     state["timed_out"] = True
-                    try:
-                        response.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+                    _abort_stream_response(response)
+                    return
+                if idle_seconds > 0 and time.perf_counter() - progress["last_output"] >= idle_seconds:
+                    state["idle_timed_out"] = True
+                    _abort_stream_response(response)
                     return
                 if total_seconds > 0 and time.perf_counter() - started_at >= total_seconds:
                     state["total_timed_out"] = True
-                    try:
-                        response.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+                    _abort_stream_response(response)
                     return
 
-        threading.Thread(
+        watchdog = threading.Thread(
             target=abort_watchdog, name="naiba-stream-abort", daemon=True
-        ).start()
+        )
+        watchdog.start()
         try:
             for line in response:
+                check_abort()
                 if _has_stream_payload(line):
-                    state["started"] = True
                     progress["last"] = time.perf_counter()
-                if cancel_event is not None and cancel_event.is_set():
-                    raise RuntimeError("任务已取消")
+                if idle_seconds > 0 and _has_online_stream_output(line, request_format):
+                    progress["last_output"] = time.perf_counter()
                 yield line
             # 超时有时表现为「连接被关掉 → 迭代干净结束」，这里补一次判定，
             # 避免退化成下游那句含糊的「流式响应中没有文本内容」。
-            if state["total_timed_out"]:
-                raise _stream_total_timeout_error(total_seconds)
-            if state["timed_out"]:
-                raise local_first_byte_timeout_error(timeout_seconds)
+            check_abort()
         except Exception as exc:  # noqa: BLE001
             # 连接被看门狗关掉时会抛 ValueError/OSError，按关掉它的原因归因。
-            if cancel_event is not None and cancel_event.is_set():
-                raise RuntimeError("任务已取消") from exc
-            if state["total_timed_out"]:
-                raise _stream_total_timeout_error(total_seconds) from exc
-            if state["timed_out"]:
-                raise local_first_byte_timeout_error(timeout_seconds) from exc
+            try:
+                check_abort()
+            except RuntimeError as abort:
+                raise abort from exc
             raise
         finally:
             stop.set()
+            watchdog.join(timeout=1.0)
 
     @staticmethod
     def list_online_models(profile: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1519,8 +1586,7 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
             request_timeout = max(1, min(int(timeout_override), LOCAL_MODEL_TIMEOUT_SECONDS))
         # 本地流式请求另加「首字节超时」：prefill 做不完时本地后端一个字节都不吐，
         # 只靠 1800 秒总超时等于让用户干等半小时（客户机实测整条会话看似永久卡死）。
-        # 在线请求不加首字节超时：云端排队/长时间思考是合法的，真正的兜底是下面的
-        # **墙钟总时长**（ONLINE_STREAM_TOTAL_TIMEOUT_SECONDS）。
+        # 在线使用独立的实际输出空闲闸门；持续输出的合法长思考不触发该闸门。
         # 注意 180 秒**不是**总超时：它是 urllib 每次读操作的空闲超时，delta 持续到达
         # 就会不停重置它——只靠它拦不住推理死循环（旧注释与此相反，已修正）。
         first_byte_timeout = 0.0
@@ -1531,6 +1597,7 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                 first_byte_timeout = max(0.0, float(override))
         if diagnostics is not None:
             diagnostics["first_byte_timeout_s"] = round(first_byte_timeout, 3)
+        stream_idle_timeout = 0.0 if is_local else float(ONLINE_STREAM_IDLE_TIMEOUT_SECONDS)
         # 「思考异常冗长」熔断阈值（字符；0 = 关闭）。纯解析层不读 options，由这里透传。
         reasoning_break_chars = float(REASONING_STREAM_BREAK_CHARS)
         break_override = options.get("reasoning_stream_break_chars")
@@ -1716,7 +1783,8 @@ class ModelRuntime(StreamMixins, ProtocolMixins):
                     if stream_enabled and response_format != "gemini":
                         streamed = ModelRuntime._read_sse_response(
                             ModelRuntime._iter_stream_lines(
-                                response, cancel_event, first_byte_timeout, stream_total_timeout
+                                response, cancel_event, first_byte_timeout, stream_total_timeout,
+                                idle_timeout=stream_idle_timeout, request_format=response_format,
                             ),
                             response_format,
                             status,

@@ -5,7 +5,7 @@
 // 任务动作在结果档可用；手机三档按定义切换；追问框初始无选中且「创建会话并继续」禁用、
 // 取消只关闭不创建会话；无 pageerror / console.error。
 // 另含：桌面侧栏收起后的恢复入口、任务/自定义条目迟到响应、离开期间任务终结后重进恢复、
-// 搜索过滤、自由输入生成、取消接口契约。
+// 搜索过滤、自由输入生成、取消接口契约，以及静默提示/终态快照失败重试。
 // 交接闭环（30 节，修复 3.6.1-beta「点确认什么都没发生」的回归守门）：
 // 确认真调 POST（恰一次/忙碌期重复触发不重复/完成前关弹窗不再加请求）、
 // 4xx 与缺 conversation_id 都留在工作台、会话详情读取失败不重发交接、
@@ -1513,13 +1513,149 @@ async function runViewport(browser, vp) {
   return { name: vp.name, failures };
 }
 
+async function runStreamRecoveryViewport(browser, vp) {
+  const assert = require('node:assert/strict');
+  const page = await browser.newPage({ viewport: { width: vp.width, height: vp.height } });
+  const errors = [];
+  const taskId = 'st-stream-recovery';
+  const task = { ...FAKE_TASK, id: taskId, title: '流静默恢复验收', status: 'running', result: '', result_partial: '' };
+  const other = { ...FAKE_TASK, id: 'st-stream-other', title: '另一个任务', result: '另一个任务的正文' };
+  const rows = [{ seq: 1, type: 'reasoning_delta', content: '正在分析请求' }];
+  let status = 'running', snapshotFailures = 0, expectedErrors = 0, snapshotAttempts = 0, eventRequests = 0;
+  let pendingSnapshot = null;
+  const json = (route, body, code = 200) => route.fulfill({ status: code, contentType: 'application/json', body: JSON.stringify(body) });
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('console', message => {
+    if (message.type() !== 'error') return;
+    const url = message.location()?.url || '';
+    if (expectedErrors > 0 && url.endsWith(`/api/studio/tasks/${taskId}`) && /status of 500/.test(message.text())) {
+      expectedErrors -= 1;
+      return;
+    }
+    errors.push(message.text());
+  });
+  const checkErrors = async () => {
+    assert.deepEqual(errors, [], '无非预期脚本/接口错误');
+    assert.equal(await page.locator('body').evaluate(el => /JS ERROR|PROMISE REJECT/.test(el.innerText)), false);
+  };
+  await page.addInitScript(() => { localStorage.clear(); localStorage.setItem('naibaOnboardingDismissed', '1'); });
+  await page.route('**/api/providers/models', route => json(route, { models: ['probe-default'] }));
+  await page.route('**/api/settings', route => route.request().method() === 'POST'
+    ? json(route, { settings: route.request().postDataJSON() }) : route.continue());
+  await page.route('**/api/studio/**', async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.includes('/catalog')) return route.continue();
+    if (url.pathname === '/api/studio/custom') return json(route, { items: [], corrupt: [] });
+    if (url.pathname === '/api/studio/tasks') return json(route, { tasks: [task, other] });
+    if (url.pathname === `/api/studio/tasks/${taskId}/events`) {
+      eventRequests += 1;
+      const after = Number(url.searchParams.get('after') || 0);
+      return json(route, { events: rows.filter(row => row.seq > after), status, last_seq: rows.at(-1)?.seq || 0 });
+    }
+    if (url.pathname === `/api/studio/tasks/${taskId}`) {
+      if (status !== 'running') {
+        snapshotAttempts += 1;
+        if (snapshotFailures > 0) {
+          snapshotFailures -= 1;
+          expectedErrors += 1;
+          return json(route, { error: '冒烟注入：终态快照暂时不可用' }, 500);
+        }
+        if (pendingSnapshot) {
+          const pending = pendingSnapshot;
+          pendingSnapshot = null;
+          const frozen = { ...task };
+          pending.arrived();
+          await pending.wait;
+          return json(route, { task: frozen });
+        }
+      }
+      return json(route, { task });
+    }
+    if (url.pathname === `/api/studio/tasks/${other.id}`) return json(route, { task: other });
+    return route.continue();
+  });
+  const openTask = async id => {
+    if (vp.width <= 760) await page.locator('#studioPanes [data-studio-pane="result"]').click();
+    if (await page.locator('#studioHistoryList').isVisible()) await page.locator('#studioBackToResult').click();
+    await page.locator('#studioOpenHistory').click();
+    await page.locator(`#studioHistoryList [data-studio-task="${id}"]`).click();
+  };
+  try {
+    await page.goto(BASE, { waitUntil: 'networkidle' });
+    await page.evaluate(async () => {
+      const mod = await import('/js/22-studio.js'); mod.openStudioView(); mod.setStudioPage('library', { persist: false });
+    });
+    await openTask(taskId);
+    await page.waitForFunction(() => /思考中/.test(document.querySelector('#studioTaskHint').textContent));
+    await checkErrors();
+
+    rows.push({ seq: 2, type: 'status', message: '等待模型继续输出…（已 15 秒无新内容）' });
+    await page.waitForFunction(() => /15 秒无新内容/.test(document.querySelector('#studioTaskHint').textContent));
+    assert.equal(await page.locator('#studioResultStream').textContent(), '');
+    await checkErrors();
+    rows.push({ seq: 3, type: 'delta', content: '已经收到的正文' });
+    await page.waitForFunction(() => /正在生成/.test(document.querySelector('#studioTaskHint').textContent));
+    assert.equal(await page.locator('#studioResultStream').textContent(), '已经收到的正文');
+    rows.push({ seq: 4, type: 'status', message: '等待模型继续输出…（已 30 秒无新内容）' });
+    await page.waitForFunction(() => /30 秒无新内容/.test(document.querySelector('#studioTaskHint').textContent));
+    assert.equal(await page.locator('#studioResultStream').textContent(), '已经收到的正文');
+    await checkErrors();
+
+    task.status = status = 'failed';
+    task.result_partial = '已经收到的正文';
+    task.error = '在线模型连续 180 秒未返回有效内容，请重试';
+    snapshotFailures = 1;
+    rows.push({ seq: 5, type: 'error', message: task.error });
+    await page.waitForFunction(() => /已结束.*重试读取结果/.test(document.querySelector('#studioTaskHint').textContent));
+    assert.equal(await page.locator('#studioResultStream').textContent(), '已经收到的正文');
+    await page.waitForFunction(() => /生成失败.*180 秒/.test(document.querySelector('#studioTaskHint').textContent));
+    assert.ok(snapshotAttempts >= 2, '终态快照失败后自动再次请求');
+    assert.equal(await page.locator('#studioRetryTask').isVisible(), true);
+    assert.equal(await page.locator('#studioCancelTask').isVisible(), false);
+    assert.equal(await page.locator('#studioResultStream').textContent(), '已经收到的正文');
+    await checkErrors();
+    const stoppedAt = eventRequests;
+    await page.waitForTimeout(1400);
+    assert.equal(eventRequests, stoppedAt, '快照渲染成功后才停止轮询');
+
+    // 终态快照在途时切到另一任务：旧快照不得覆盖当前正文或提示。
+    task.status = status = 'running';
+    task.result_partial = '';
+    task.error = '';
+    rows.splice(0, rows.length, { seq: 1, type: 'reasoning_delta', content: '第二次思考' });
+    await openTask(taskId);
+    await page.waitForFunction(() => /思考中/.test(document.querySelector('#studioTaskHint').textContent));
+    let arrived, release;
+    const waiting = new Promise(resolve => { arrived = resolve; });
+    pendingSnapshot = { arrived, wait: new Promise(resolve => { release = resolve; }) };
+    task.status = status = 'done';
+    task.result = '旧任务的终态正文';
+    rows.push({ seq: 2, type: 'done' });
+    await Promise.race([waiting, new Promise((_, reject) => setTimeout(() => reject(new Error('终态快照请求未发出')), 5000))]);
+    await openTask(other.id);
+    await page.waitForFunction(() => document.querySelector('#studioResultStream').textContent === '另一个任务的正文');
+    release();
+    await page.waitForTimeout(400);
+    assert.equal(await page.locator('#studioResultStream').textContent(), '另一个任务的正文');
+    assert.equal(await page.locator('#studioTaskHint').textContent(), '生成完成');
+    await checkErrors();
+    console.log(`[${vp.name}-stream-recovery] 等待提示、正文恢复、终态快照重试、迟到快照隔离通过`);
+    return { name: `${vp.name}-stream-recovery`, failures: [] };
+  } catch (error) {
+    return { name: `${vp.name}-stream-recovery`, failures: [error.stack || error.message, ...errors] };
+  } finally {
+    await page.close();
+  }
+}
+
 (async () => {
   const browser = await chromium.launch({ channel: 'msedge', headless: true });
   const results = [];
   try {
-    for (const vp of VIEWPORTS) {
-      results.push(await runViewport(browser, vp));
+    if (process.env.NAIBA_STUDIO_STREAM_ONLY !== '1') {
+      for (const vp of VIEWPORTS) results.push(await runViewport(browser, vp));
     }
+    for (const vp of [VIEWPORTS[0], VIEWPORTS[2]]) results.push(await runStreamRecoveryViewport(browser, vp));
   } finally {
     await browser.close();
   }

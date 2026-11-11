@@ -11,7 +11,7 @@ from typing import Any
 
 from naiba.core.exceptions import TaskCancelled
 from naiba.studio.runner import StudioRunner
-from naiba.studio.store import StudioStore
+from naiba.studio.store import StudioStore, now_ms
 
 
 class StudioTaskError(ValueError):
@@ -34,16 +34,21 @@ class StudioJobManager:
             if not task_id:
                 continue
             self.runner.cancel(task_id, reason="服务重启前任务中断")  # 排队清理/停止在跑 worker
-            partial = self.store.partial_from_events(task_id)
+            partial = self.store.partial_from_events(task_id) or str(task.get("result_partial") or "")
+            # 崩溃的精确时刻不可知；记录本次收敛为终态的时间，不能留下无完成时间的终态。
+            finished_at = now_ms()
             updated = self.store.update_task(
                 task_id,
                 status="interrupted",
                 result_partial=partial,
                 detail="服务重启前任务中断，结果保留为已产出部分",
-                finished_at=None,
+                finished_at=finished_at,
             )
             if updated is None and self.store.get_task(task_id) is not None:
-                self.store.update_task(task_id, status="interrupted", result_partial=partial)
+                self.store.update_task(
+                    task_id, status="interrupted", result_partial=partial,
+                    finished_at=finished_at,
+                )
             if self.store.has_terminal_event(task_id) is False:
                 self.store.append_event(task_id, {"type": "error", "message": "服务重启前任务中断"})
             recovered += 1

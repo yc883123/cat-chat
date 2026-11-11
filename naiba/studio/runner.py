@@ -25,6 +25,7 @@ from naiba.studio.store import now_ms
 
 FLUSH_CHARS = 4096
 FLUSH_SECONDS = 0.1
+HEARTBEAT_SECONDS = 15.0
 
 
 class _DeltaBuffer:
@@ -69,6 +70,62 @@ class _DeltaBuffer:
             return
         self.flush()
         self._emit(payload)
+
+
+class _TaskProgress:
+    """无输出时发等待提示；与模型回调串行，终态收尾前停止并封住迟到回调。"""
+
+    def __init__(self, buffer: _DeltaBuffer, cancel_event: threading.Event):
+        self._buffer = buffer
+        self._cancel = cancel_event
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._closed = False
+        self._last_output = time.monotonic()
+        self._last_update = self._last_output
+        self._has_output = False
+        self._thread = threading.Thread(target=self._heartbeat, name="naiba-studio-progress", daemon=True)
+
+    def __enter__(self) -> "_TaskProgress":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        with self._lock:
+            self._closed = True
+            self._stop.set()
+        self._thread.join()
+
+    def forward(self, payload: dict[str, Any]) -> None:
+        with self._lock:
+            if self._closed or self._cancel.is_set():
+                return
+            kind = str(payload.get("type") or "")
+            if kind in {"reasoning_start", "reasoning_end"}:
+                # 聊天模型的边界信号不在 Studio 事件契约中，思考增量已经足够展示。
+                return
+            if kind in {"delta", "reasoning_delta"} and payload.get("content"):
+                self._last_output = time.monotonic()
+                self._last_update = self._last_output
+                self._has_output = True
+            elif kind == "status":
+                self._last_update = time.monotonic()
+            self._buffer.forward(payload)
+
+    def _heartbeat(self) -> None:
+        while not self._stop.wait(HEARTBEAT_SECONDS):
+            with self._lock:
+                if self._closed or self._cancel.is_set():
+                    return
+                now = time.monotonic()
+                if now - self._last_update < HEARTBEAT_SECONDS:
+                    continue
+                elapsed = int(now - self._last_output)
+                waiting = "等待模型继续输出" if self._has_output else "等待模型响应"
+                self._buffer.forward({
+                    "type": "status", "message": f"{waiting}…（已 {elapsed} 秒无新内容）",
+                })
+                self._last_update = now
 
 
 def _system_message(input_data: dict[str, Any]) -> list[dict[str, str]]:
@@ -147,7 +204,9 @@ class StudioRunner:
             remaining = list(self._queue)
             self._queue.clear()
             self._condition.notify_all()
-        for event in list(self._cancel_events.values()):
+        with self._registry_lock:
+            active_events = list(self._cancel_events.values())
+        for event in active_events:
             event.set()
         for task_id in remaining:
             self._finish_terminal(
@@ -188,17 +247,24 @@ class StudioRunner:
         cancel_event = threading.Event()
         with self._registry_lock:
             self._cancel_events[task_id] = cancel_event
+            if self._shutdown:
+                cancel_event.set()
         buffer = _DeltaBuffer(self._make_emitter(task_id))
         # 分块任务的用量跨轮累加；单轮任务与旧行为一致（用 last_usage）。
         usage_sink: dict[str, Any] = {}
         try:
+            if cancel_event.is_set():
+                raise TaskCancelled("任务已取消")
             self.store.update_task(task_id, status="running", started_at=now_ms(), detail="")
             self.store.append_event(task_id, {"type": "status", "message": "生成任务开始执行"})
             input_data = dict(task.get("input") or {})
             identity = (task.get("submission_policy") or {}).get("model_identity")
             if isinstance(identity, dict):
                 input_data["model_snapshot"] = identity
-            content = self._complete(input_data, buffer.forward, cancel_event, usage_sink)
+            with _TaskProgress(buffer, cancel_event) as progress:
+                content = self._complete(input_data, progress.forward, cancel_event, usage_sink)
+            if cancel_event.is_set():
+                raise TaskCancelled("任务已取消")
             buffer.flush()
             result_partial = ""
             self._finish_terminal(task_id, "done", {"type": "done"}, result=content,
@@ -232,19 +298,13 @@ class StudioRunner:
         store = self.store
 
         def emit(payload: dict[str, Any]) -> None:
-            if self._cancelled_for(task_id).is_set() and str(payload.get("type") or "") in {"delta", "reasoning_delta"}:
-                # 取消后剩余的尾流事件直接丢弃（partial 已在收尾重建）。
-                return
+            # progress 在收尾前封住迟到回调；已接收的缓冲即使取消也须落盘以保留 partial。
             try:
                 store.append_event(task_id, payload)
             except Exception:  # noqa: BLE001 - 事件落盘失败不中断生成
                 traceback.print_exc()
 
         return emit
-
-    def _cancelled_for(self, task_id: str) -> threading.Event:
-        with self._registry_lock:
-            return self._cancel_events.get(task_id) or threading.Event()
 
     def _resolve_profile(self, input_data: dict[str, Any]) -> dict[str, Any]:
         profile = resolve_profile_with_override(

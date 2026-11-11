@@ -88,6 +88,7 @@ const studio = {
   eventCursor: 0,
   pollBusy: false,
   pollTimer: null,
+  pollGeneration: 0,
   agentPicked: "",
   handoffInFlight: false, // 交接请求进行中：挡掉忙碌期的重复触发（不是服务端幂等保证）
   streamText: "",
@@ -416,8 +417,8 @@ async function reconcileActiveTask() {
     }
   } catch (error) {
     if (token !== studio.taskToken || studio.activeTaskId !== taskId || !studio.open) return;
-    stopStudioPolling();
     if (error.status === 404) {
+      stopStudioPolling();
       // 任务记录已不存在：清掉活动任务，界面回到空结果态，不继续轮询。
       studio.activeTaskId = "";
       studio.lastResult = null;
@@ -425,7 +426,9 @@ async function reconcileActiveTask() {
       updateResultStream("");
       return;
     }
-    toast(`任务状态读取失败：${error.message}`);
+    const hint = $("#studioTaskHint");
+    if (hint) hint.textContent = "任务状态暂时读取失败，正在重试…";
+    startStudioPolling();
   }
 }
 
@@ -1562,6 +1565,9 @@ async function retryStudioTask(taskId) {
 }
 
 function stopStudioPolling() {
+  // 作废在途请求，包括关闭后重进同一个任务的旧响应。
+  studio.pollGeneration += 1;
+  studio.pollBusy = false;
   if (studio.pollTimer) {
     clearInterval(studio.pollTimer);
     studio.pollTimer = null;
@@ -1576,30 +1582,45 @@ function startStudioPolling() {
 
 async function pollStudioEvents() {
   const taskId = studio.activeTaskId;
-  if (!taskId || studio.pollBusy) return;
+  if (!taskId || !studio.open || studio.pollBusy) return;
+  const generation = studio.pollGeneration;
+  const taskToken = studio.taskToken;
+  const isCurrent = () => studio.open && studio.activeTaskId === taskId
+    && studio.pollGeneration === generation && studio.taskToken === taskToken;
+  let terminal = false;
   studio.pollBusy = true;
   try {
-    const { status } = await syncTaskEvents(taskId, studio.eventCursor);
-    if (studio.activeTaskId !== taskId) return; // 已切到别的任务，迟到的 A 结果不写进 B
-    const done = status === "done" || status === "cancelled" || status === "failed" || status === "interrupted";
-    if (done) {
-      stopStudioPolling();
+    const { status } = await syncTaskEvents(taskId, studio.eventCursor, isCurrent);
+    if (!isCurrent()) return;
+    terminal = ["done", "cancelled", "failed", "interrupted"].includes(status);
+    if (terminal) {
       const snapshot = await api(`/api/studio/tasks/${taskId}`);
-      if (studio.activeTaskId !== taskId) return;
+      if (!isCurrent()) return;
+      // 终态事件已读不代表快照一定可用；失败/滞后的快照下一轮继续取。
+      if (!["done", "cancelled", "failed", "interrupted"].includes(snapshot.task?.status)) {
+        const hint = $("#studioTaskHint");
+        if (hint) hint.textContent = "任务已结束，正在读取最终结果…";
+        return;
+      }
       renderResultPanel(snapshot.task);
+      stopStudioPolling();
       // 终态刷新同样同步历史列表（用户此刻可能正停在历史产出上）。
       await refreshTasks({ syncHistory: true });
     }
   } catch (error) {
-    toast(`生成状态读取失败：${error.message}`);
+    if (!isCurrent()) return;
+    const hint = $("#studioTaskHint");
+    if (hint) hint.textContent = terminal
+      ? "任务已结束，正在重试读取结果…"
+      : "任务状态暂时读取失败，正在重试…";
   } finally {
-    studio.pollBusy = false;
+    if (studio.pollGeneration === generation) studio.pollBusy = false;
   }
 }
 
-async function syncTaskEvents(taskId, after) {
+async function syncTaskEvents(taskId, after, isCurrent) {
   const payload = await api(`/api/studio/tasks/${taskId}/events?after=${after}`);
-  if (studio.activeTaskId !== taskId) return { status: "" }; // 旧任务的响应，丢弃
+  if (!isCurrent()) return { status: "" }; // 旧任务/旧轮询的响应，丢弃
   const nextCursor = payload.last_seq ?? after;
   for (const event of payload.events) {
     consumeStudioEvent(event);
@@ -1611,12 +1632,17 @@ async function syncTaskEvents(taskId, after) {
 function consumeStudioEvent(event) {
   const kind = String(event.type || "");
   if (kind === "delta") {
-    studio.streamText += String(event.content || "");
+    const content = String(event.content || "");
+    if (!content) return;
+    studio.streamText += content;
     updateResultStream(studio.streamText);
+    updateReasoningChip();
     return;
   }
   if (kind === "reasoning_delta") {
-    studio.reasoningText += String(event.content || "");
+    const content = String(event.content || "");
+    if (!content) return;
+    studio.reasoningText += content;
     updateReasoningChip();
     return;
   }
@@ -1728,7 +1754,8 @@ async function copyStudioBody() {
 function updateReasoningChip() {
   const hint = $("#studioTaskHint");
   if (!hint) return;
-  hint.textContent = studio.reasoningText ? `思考中…（${studio.reasoningText.length} 字）` : hint.textContent;
+  if (studio.streamText) hint.textContent = `正在生成…（${studio.streamText.length} 字）`;
+  else if (studio.reasoningText) hint.textContent = `思考中…（${studio.reasoningText.length} 字）`;
 }
 
 function renderResultPanel(task) {

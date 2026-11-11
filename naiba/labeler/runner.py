@@ -20,6 +20,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from naiba.core.exceptions import TaskCancelled
+from naiba.core.contracts import (LABELER_APPROVED_TXT_KEY, LABELER_UNKNOWN_WORKER_SLOT,
+                                  LABELER_SUPERVISION_RULES_KEY)
 from naiba.llm.profiles import resolve_profile_with_override
 from naiba.labeler.engines import get_engine
 from naiba.labeler.engines.provider import build_prompt
@@ -37,6 +39,7 @@ from naiba.labeler.supervisor import (
     build_supervision_prompt,
     parse_verdict,
     revise_note,
+    freeze_supervision_rules,
 )
 from naiba.labeler.txt_output import TXT_TOOL_NAME, TxtToolContext, build_txt_targets
 
@@ -124,9 +127,9 @@ class LabelerRunner:
         task_id = str(task_id or "").strip()
         with self._registry_lock:
             cancel_event = self._cancel_events.get(task_id)
-        if cancel_event is not None:
-            cancel_event.set()
-            return True
+            if cancel_event is not None:
+                cancel_event.set()
+                return True
         task = self.store.get_task(task_id)
         if not task:
             return False
@@ -446,7 +449,7 @@ class LabelerRunner:
                              supervisor_ref: dict[str, str]) -> dict[str, Any]:
         """单图的并发处理：打标 → 监督 → 通过/退回重做 → 人工检查。"""
         item_id = item["item_id"]
-        writer = self._build_txt_writer(task_id, item, txt_output)
+        writer = self._build_txt_writer(task_id, item, txt_output, staged=True)
         worker_meta = {
             "worker_slot": worker_slot,
             "worker_model_key": str(worker_ref.get("model_key") or ""),
@@ -454,15 +457,22 @@ class LabelerRunner:
         }
         # 同图同配置（含打标员集合/监督模型/监督策略版本）已有通过结果：直接复用。
         reusable = self.db.find_reusable(item["path_key"], item["content_version"], fingerprint)
-        if reusable is not None:
+        if reusable is not None and (writer is None or isinstance(reusable.get(LABELER_APPROVED_TXT_KEY), str)):
             annotation = self._annotation_from_reusable(reusable, item, config)
+            original_key = str(annotation.get("model_key") or "")
+            original_name = str(annotation.get("model_name") or "")
+            matching_slots = [index for index, ref in enumerate(config.get("workers") or [])
+                              if ref.get("model_key") == original_key and ref.get("model_name") == original_name]
+            worker_meta = {
+                "worker_slot": matching_slots[0] if len(matching_slots) == 1 else LABELER_UNKNOWN_WORKER_SLOT,
+                "worker_model_key": original_key, "worker_model_name": original_name,
+            }
             if writer is not None:
-                writer.write_fallback(caption_text(annotation))
-            self.db.complete_item(
-                task_id, item_id, annotation=annotation,
-                usage=reusable.get("usage") or {}, config_fingerprint=fingerprint,
-                meta={**worker_meta, "supervisor_decision": "reused", "phase": "approved"},
-            )
+                writer.write_fallback(reusable[LABELER_APPROVED_TXT_KEY])
+            if not self._commit_approved(task_id, item_id, annotation, reusable.get("usage") or {},
+                                         fingerprint, {**worker_meta, "supervisor_decision": "reused", "phase": "approved"},
+                                         writer, cancel_event):
+                return {}
             self.store.append_event(task_id, {
                 "type": "image_done", "item_id": item_id, "name": item.get("name") or "",
                 "reused": True, "txt_state": writer.state if writer else "",
@@ -479,10 +489,16 @@ class LabelerRunner:
         current_prompt = label_prompt
         while True:
             if cancel_event.is_set():
-                self.db.cancel_item(task_id, item_id)
+                if writer is not None:
+                    writer.reset()
+                self.db.cancel_item(task_id, item_id, usage=total_usage, supervisor_usage=supervisor_usage)
                 return total_usage
+            attempt_started = False
             try:
+                # 闸门等待也会取消；尚未调用本图模型时不能借到上一张图的读数。
+                self._reset_usage(self.app.models)
                 with gate.slot(str(worker_ref.get("model_key") or ""), cancel_event):
+                    attempt_started = True
                     annotation, usage, finish_reason = self._label_once(
                         task_id=task_id, item=item, config=config, preset=preset,
                         prompt=current_prompt, engine=engine, profile=profile,
@@ -491,21 +507,27 @@ class LabelerRunner:
                     )
             except Exception as exc:  # noqa: BLE001 - 分类后决定重试或记失败
                 category = classify_error(exc)
+                captured = getattr(exc, "labeler_attempt_usage", None)
+                failure_usage = dict(captured) if isinstance(captured, dict) else (
+                    {} if not attempt_started or category in {"auth", "bad_request", "image"} else
+                    dict(getattr(self.app.models, "last_usage", {}) or {}))
+                total_usage = aggregate_usage(total_usage, failure_usage)
                 if category == "cancelled":
-                    self.db.cancel_item(task_id, item_id)
+                    if writer is not None:
+                        writer.reset()
+                    self.db.cancel_item(task_id, item_id, usage=total_usage, supervisor_usage=supervisor_usage)
                     cancel_event.set()
                     return total_usage
                 attempt += 1
                 if category == "transient" and attempt <= retry_limit:
                     delay = min(MAX_RETRY_BACKOFF, 0.5 * (2 ** (attempt - 1)))
                     if cancel_event.wait(delay):
-                        self.db.cancel_item(task_id, item_id)
+                        if writer is not None:
+                            writer.reset()
+                        self.db.cancel_item(task_id, item_id, usage=total_usage, supervisor_usage=supervisor_usage)
                         return total_usage
                     continue
-                failure_usage = {} if category in {"auth", "bad_request", "image"} else (
-                    dict(getattr(self.app.models, "last_usage", {}) or {})
-                )
-                merged = aggregate_usage(total_usage, failure_usage)
+                merged = total_usage
                 self.db.fail_item(
                     task_id, item_id, error=str(exc), category=category, usage=merged,
                     meta={**worker_meta, "phase": "failed"},
@@ -532,23 +554,32 @@ class LabelerRunner:
                 "name": item.get("name") or "",
             })
             try:
+                candidate = dict(annotation)
+                if writer is not None:
+                    candidate["txt_content"] = writer.candidate_text()
+                    if not writer.wrote or writer.state == "failed":
+                        raise SupervisionFormatError("最终 TXT 未完整生成，不能批准")
                 verdict, verdict_usage = self._supervise_with_retry(
                     task_id=task_id, item=item, config=config,
-                    annotation=annotation, supervisor_profile=supervisor_profile,
+                    annotation=candidate, supervisor_profile=supervisor_profile,
                     supervisor_ref=supervisor_ref, worker_slot=worker_slot,
                     worker_model=str(worker_ref.get("model_name") or ""),
                     cancel_event=cancel_event, gate=gate,
                     timeout_seconds=timeout_seconds,
                 )
             except SupervisionFormatError as exc:
+                failed_usage = dict(getattr(exc, "supervisor_usage", {}) or {})
+                total_usage = aggregate_usage(total_usage, failed_usage)
+                supervisor_usage = aggregate_usage(supervisor_usage, failed_usage)
                 if writer is not None:
                     writer.reset()
-                self.db.human_check_item(
-                    task_id, item_id, candidate=annotation,
+                if not self._settle_unapproved(
+                    task_id, item_id, candidate=candidate, cancel_event=cancel_event,
                     reason=f"监督结果无法解析：{exc}", usage=total_usage,
                     meta={**worker_meta, "supervisor_attempts": revisions,
                           "supervisor_usage": supervisor_usage},
-                )
+                ):
+                    return total_usage
                 self.store.append_event(task_id, {
                     "type": "image_human_check", "item_id": item_id,
                     "name": item.get("name") or "", "reason": str(exc)[:500],
@@ -556,22 +587,26 @@ class LabelerRunner:
                 return total_usage
             except Exception as exc:  # noqa: BLE001 - 监督调用失败
                 category = classify_error(exc)
+                failure_usage = dict(getattr(exc, "supervisor_usage", {}) or {})
+                total_usage = aggregate_usage(total_usage, failure_usage)
+                supervisor_usage = aggregate_usage(supervisor_usage, failure_usage)
                 if category == "cancelled":
-                    self.db.cancel_item(task_id, item_id)
+                    if writer is not None:
+                        writer.reset()
+                    self.db.cancel_item(task_id, item_id, usage=total_usage, supervisor_usage=supervisor_usage)
                     cancel_event.set()
                     return total_usage
-                failure_usage = {} if category in {"auth", "bad_request", "image"} else (
-                    dict(getattr(exc, "supervisor_usage", {}) or {})
-                )
-                merged = aggregate_usage(total_usage, failure_usage)
+                merged = total_usage
                 if writer is not None:
                     writer.reset()
-                self.db.fail_item(
-                    task_id, item_id, error=f"监督失败：{exc}",
+                if not self._settle_unapproved(
+                    task_id, item_id, reason=f"监督失败：{exc}", cancel_event=cancel_event,
                     category=f"supervisor_{category}", usage=merged,
                     meta={**worker_meta, "supervisor_attempts": revisions,
                           "supervisor_usage": supervisor_usage},
-                )
+                    candidate=candidate,
+                ):
+                    return merged
                 self.store.append_event(task_id, {
                     "type": "image_failed", "item_id": item_id,
                     "name": item.get("name") or "",
@@ -589,17 +624,28 @@ class LabelerRunner:
                 supervisor_usage=supervisor_usage,
             )
             if decision == "approve":
-                self.db.complete_item(
-                    task_id, item_id, annotation=annotation, usage=total_usage,
-                    config_fingerprint=fingerprint,
-                    meta={
+                if writer is not None:
+                    annotation[LABELER_APPROVED_TXT_KEY] = writer.candidate_text()
+                approved_meta = {
                         **worker_meta, "phase": "approved",
                         "supervisor_decision": "approve",
                         "supervisor_attempts": revisions,
                         "supervisor_reason": reason,
                         "supervisor_usage": supervisor_usage,
-                    },
-                )
+                    }
+                try:
+                    committed = self._commit_approved(task_id, item_id, annotation, total_usage,
+                                                      fingerprint, approved_meta, writer, cancel_event)
+                except Exception as exc:
+                    if not self._settle_unapproved(task_id, item_id, reason=f"批准产物发布失败：{exc}",
+                                      category="publish_failed", usage=total_usage,
+                                      meta=approved_meta, candidate=candidate, cancel_event=cancel_event):
+                        return total_usage
+                    self.store.append_event(task_id, {"type": "image_failed", "item_id": item_id,
+                                                       "error": "批准产物发布失败", "category": "publish_failed"})
+                    return total_usage
+                if not committed:
+                    return total_usage
                 if total_usage:
                     self.store.append_event(task_id, {"type": "usage", "usage": total_usage})
                 self.store.append_event(task_id, {
@@ -617,12 +663,13 @@ class LabelerRunner:
                 note = "监督连续退回，已达重做上限（3 次打标尝试）"
                 if reason:
                     note += f"：{reason}"
-                self.db.human_check_item(
-                    task_id, item_id, candidate=annotation, reason=note,
+                if not self._settle_unapproved(
+                    task_id, item_id, candidate=candidate, reason=note, cancel_event=cancel_event,
                     usage=total_usage,
                     meta={**worker_meta, "supervisor_attempts": revisions,
                           "supervisor_usage": supervisor_usage},
-                )
+                ):
+                    return total_usage
                 self.store.append_event(task_id, {
                     "type": "image_human_check", "item_id": item_id,
                     "name": item.get("name") or "", "reason": note[:500],
@@ -647,6 +694,45 @@ class LabelerRunner:
                     + "\n\n上一轮监督退回意见（请按此重做，仍按原规则输出）：" + note
                 )
 
+    def _settle_unapproved(self, task_id: str, item_id: str, *, candidate: dict[str, Any],
+                           reason: str, usage: dict[str, Any], meta: dict[str, Any],
+                           cancel_event: threading.Event, category: str = "") -> bool:
+        # 所有迟到裁定都服从已受理取消，不只保护 approve 分支。
+        with self._registry_lock:
+            if cancel_event.is_set():
+                self.db.cancel_item(task_id, item_id, usage=usage,
+                                    supervisor_usage=meta.get("supervisor_usage"))
+                return False
+            if category:
+                self.db.fail_item(task_id, item_id, error=reason, category=category,
+                                  usage=usage, meta=meta, candidate=candidate)
+            else:
+                self.db.human_check_item(task_id, item_id, candidate=candidate,
+                                         reason=reason, usage=usage, meta=meta)
+        return True
+
+    def _commit_approved(self, task_id: str, item_id: str, annotation: dict[str, Any],
+                         usage: dict[str, Any], fingerprint: str, meta: dict[str, Any],
+                         writer: Any, cancel_event: threading.Event) -> bool:
+        # 与 cancel 共用窄锁：取消已受理后，迟到批准不能发布 TXT 或成功标注。
+        with self._registry_lock:
+            if cancel_event.is_set():
+                if writer is not None:
+                    writer.reset()
+                self.db.cancel_item(task_id, item_id, usage=usage,
+                                    supervisor_usage=meta.get("supervisor_usage"))
+                return False
+            try:
+                if writer is not None:
+                    writer.publish()
+                self.db.complete_item(task_id, item_id, annotation=annotation, usage=usage,
+                                      config_fingerprint=fingerprint, meta=meta)
+            except Exception:
+                if writer is not None:
+                    writer.reset()
+                raise
+        return True
+
     def _supervise_with_retry(self, *, task_id: str, item: dict[str, Any],
                               config: dict[str, Any], annotation: dict[str, Any],
                               supervisor_profile: dict[str, Any],
@@ -657,9 +743,12 @@ class LabelerRunner:
         """把监督调用投递到独立有界队列并等待结果；瞬时错误有限退避重试。"""
         pool = getattr(self, "_supervisor_pool", None)
         last_exc: BaseException | None = None
+        total_usage: dict[str, Any] = {}
         for attempt in range(SUPERVISOR_RETRY_LIMIT + 1):
             if cancel_event.is_set():
-                raise TaskCancelled("任务已取消")
+                cancelled = TaskCancelled("任务已取消")
+                cancelled.supervisor_usage = dict(total_usage)
+                raise cancelled
             request = lambda: self._supervisor_request(  # noqa: E731 - 单次投递
                 task_id=task_id, item=item, config=config, annotation=annotation,
                 supervisor_profile=supervisor_profile, supervisor_ref=supervisor_ref,
@@ -670,15 +759,32 @@ class LabelerRunner:
             future = pool.submit(request) if pool is not None else None
             try:
                 text, usage = future.result() if future is not None else request()
+                total_usage = aggregate_usage(total_usage, usage)
+                if cancel_event.is_set():
+                    raise TaskCancelled("任务已取消")
+                try:
+                    verdict = parse_verdict(text)
+                except SupervisionFormatError as exc:
+                    exc.supervisor_usage = total_usage
+                    raise
             except BaseException as exc:  # noqa: BLE001 - 分类后决定重试或抛出
                 last_exc = exc
+                if not isinstance(exc, SupervisionFormatError):
+                    total_usage = aggregate_usage(total_usage, getattr(exc, "supervisor_usage", {}) or {})
+                exc.supervisor_usage = dict(total_usage)
+                if cancel_event.is_set():
+                    cancelled = TaskCancelled("任务已取消")
+                    cancelled.supervisor_usage = dict(total_usage)
+                    raise cancelled from exc
                 if classify_error(exc) == "transient" and attempt < SUPERVISOR_RETRY_LIMIT:
                     delay = min(MAX_RETRY_BACKOFF, 0.5 * (2 ** attempt))
                     if cancel_event.wait(delay):
-                        raise TaskCancelled("任务已取消") from exc
+                        cancelled = TaskCancelled("任务已取消")
+                        cancelled.supervisor_usage = dict(total_usage)
+                        raise cancelled from exc
                     continue
                 raise
-            return parse_verdict(text), usage
+            return verdict, total_usage
         raise last_exc or RuntimeError("监督调用失败")
 
     def _supervisor_request(self, *, task_id: str, item: dict[str, Any],
@@ -704,6 +810,7 @@ class LabelerRunner:
             **(self.app.config.runtime_guard_options() or {}),
         }
         with gate.slot(str(supervisor_ref.get("model_key") or ""), cancel_event):
+            self._reset_usage(self.app.models)
             try:
                 text = str(self.app.models.complete(
                     supervisor_profile, messages, options, None,
@@ -852,6 +959,9 @@ class LabelerRunner:
         不写标注库：串行路径由 ``_run_item`` 直接提交，并发路径先送监督再决定。
         """
         item_id = item["item_id"]
+        self._reset_usage(self.app.models)
+        self._reset_usage(engine)
+        self._validate_live_skill_rules(config)
         if writer is not None:
             # 重试会从零重来：清掉上一次尝试写了一半的 TXT，避免分段重复。
             writer.reset()
@@ -877,6 +987,12 @@ class LabelerRunner:
         engine_usage = getattr(engine, "last_usage", None)
         usage = dict(engine_usage) if isinstance(engine_usage, dict) and engine_usage \
             else dict(getattr(self.app.models, "last_usage", {}) or {})
+        try:
+            self._validate_live_skill_rules(config)
+        except Exception as exc:
+            # 规则漂移拒收产物，也不能丢掉 Skill 多轮执行已经产生的用量。
+            exc.labeler_attempt_usage = usage
+            raise
         finish_reason = str(getattr(self.app.models, "last_finish_reason", "") or "")
         tags, confidences = self._finalize_tags(parsed, config, preset)
         description = self._finalize_description(parsed, config, preset)
@@ -912,7 +1028,8 @@ class LabelerRunner:
         return annotation, usage, finish_reason
 
     def _build_txt_writer(self, task_id: str, item: dict[str, Any],
-                          txt_output: tuple[Any, dict[str, str]] | None) -> TxtToolContext | None:
+                          txt_output: tuple[Any, dict[str, str]] | None, *,
+                          staged: bool = False) -> TxtToolContext | None:
         """按任务开关构造当前图片的 TXT 写入器；关闭时返回 None（零行为变化）。"""
         if txt_output is None:
             return None
@@ -932,7 +1049,23 @@ class LabelerRunner:
             relative=targets.get(item_id, ""),
             on_record=record,
             on_event=event,
+            staged=staged,
         )
+
+    @staticmethod
+    def _reset_usage(target: Any) -> None:
+        # runtime 在线程复用时不会在异常出口清 last_usage，不能继承上一张图读数。
+        try:
+            target.last_usage = {}
+        except (AttributeError, TypeError):
+            pass
+
+    def _validate_live_skill_rules(self, config: dict[str, Any]) -> None:
+        # SkillAgent 按需读取目录；排队或执行期间发生可观察变更必须阻断，
+        # 不让新规则产物交给旧规则监督。串行链路保持原有行为。
+        if config.get("concurrency_enabled") and str(config.get("engine") or "") == "chat":
+            if freeze_supervision_rules(self.app, config) != config.get(LABELER_SUPERVISION_RULES_KEY):
+                raise ValueError("Skill 规则已改变，未继续执行或采纳结果，请按当前规则新建任务")
 
     @staticmethod
     def _trigger_word(config: dict[str, Any]) -> str:
@@ -1051,6 +1184,7 @@ class LabelerRunner:
             "tags": reusable.get("tags") or [],
             "confidences": reusable.get("confidences") or [],
             "description": reusable.get("description") or "",
+            LABELER_APPROVED_TXT_KEY: reusable.get(LABELER_APPROVED_TXT_KEY),
         }
 
     # ---- 终态 ----

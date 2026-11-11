@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+from naiba.core.contracts import LABELER_APPROVED_TXT_KEY, LABELER_UNKNOWN_WORKER_SLOT
+
 import functools
 import json
 import sqlite3
@@ -156,6 +158,7 @@ class LabelerDB:
                     tags_json TEXT NOT NULL DEFAULT '[]',
                     confidences_json TEXT NOT NULL DEFAULT '[]',
                     description TEXT NOT NULL DEFAULT '',
+                    approved_txt TEXT,
                     usage_json TEXT NOT NULL DEFAULT '{}',
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
@@ -177,6 +180,10 @@ class LabelerDB:
                     db.execute(
                         f"ALTER TABLE {table} ADD COLUMN original_sha256 TEXT NOT NULL DEFAULT ''"
                     )
+            annotation_columns = {str(row["name"]) for row in db.execute("PRAGMA table_info(annotations)")}
+            if "approved_txt" not in annotation_columns:
+                # NULL 表示没有经监督审核的 TXT；不能用标签回填冒充历史批准文本。
+                db.execute("ALTER TABLE annotations ADD COLUMN approved_txt TEXT")
             # 2026-11-10：每张图的 TXT 输出状态（工具写入/自动回填/失败）与相对路径。
             columns = {
                 str(row["name"])
@@ -341,7 +348,7 @@ class LabelerDB:
         """
         meta = meta or {}
         stamp = now_ms()
-        slot = max(0, int(meta.get("worker_slot") or 0))
+        slot = max(LABELER_UNKNOWN_WORKER_SLOT, int(meta.get("worker_slot") or 0))
         worker_key = str(meta.get("worker_model_key") or "")
         worker_name = str(meta.get("worker_model_name") or "")
         decision = str(meta.get("supervisor_decision") or "")
@@ -363,7 +370,7 @@ class LabelerDB:
                 db.execute(
                     """
                     UPDATE annotations SET
-                        tags_json=?, confidences_json=?, description=?, usage_json=?,
+                        tags_json=?, confidences_json=?, description=?, usage_json=?, approved_txt=?,
                         model_key=?, model_name=?, relative_path=?, name=?,
                         original_sha256=CASE WHEN original_sha256='' THEN ? ELSE original_sha256 END,
                         updated_at=?
@@ -374,6 +381,7 @@ class LabelerDB:
                         _dumps(annotation.get("confidences") or []),
                         str(annotation.get("description") or ""),
                         _dumps(usage or {}),
+                        annotation.get(LABELER_APPROVED_TXT_KEY),
                         str(annotation.get("model_key") or ""),
                         str(annotation.get("model_name") or ""),
                         str(annotation.get("relative_path") or ""),
@@ -390,8 +398,8 @@ class LabelerDB:
                         relative_path, name, original_sha256, engine, output_mode,
                         preset, prompt_version, model_key, model_name,
                         config_fingerprint, tags_json, confidences_json, description,
-                        usage_json, created_at, updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        usage_json, created_at, updated_at, approved_txt
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         item_id, task_id, annotation["path_key"], annotation["content_version"],
@@ -404,7 +412,7 @@ class LabelerDB:
                         config_fingerprint, _dumps(annotation.get("tags") or []),
                         _dumps(annotation.get("confidences") or []),
                         str(annotation.get("description") or ""), _dumps(usage or {}),
-                        stamp, stamp,
+                        stamp, stamp, annotation.get(LABELER_APPROVED_TXT_KEY),
                     ),
                 )
                 annotation_id = int(cursor.lastrowid or 0)
@@ -498,11 +506,16 @@ class LabelerDB:
             )
 
     @_retry_transient
-    def cancel_item(self, task_id: str, item_id: str) -> None:
+    def cancel_item(self, task_id: str, item_id: str, *,
+                    usage: dict[str, Any] | None = None,
+                    supervisor_usage: dict[str, Any] | None = None) -> None:
         with self._connect() as db:
             db.execute(
-                "UPDATE task_items SET state='cancelled', finished_at=? WHERE task_id=? AND item_id=?",
-                (now_ms(), task_id, item_id),
+                "UPDATE task_items SET state='cancelled', finished_at=?, "
+                "usage_json=COALESCE(?,usage_json), supervisor_usage_json=COALESCE(?,supervisor_usage_json) "
+                "WHERE task_id=? AND item_id=?",
+                (now_ms(), _dumps(usage) if usage is not None else None,
+                 _dumps(supervisor_usage) if supervisor_usage is not None else None, task_id, item_id),
             )
 
     @_retry_transient
@@ -765,6 +778,7 @@ class LabelerDB:
             "tags": _loads(row["tags_json"], []),
             "confidences": _loads(row["confidences_json"], []),
             "description": str(row["description"] or ""),
+            LABELER_APPROVED_TXT_KEY: row["approved_txt"],
             "usage": _loads(row["usage_json"], {}),
             "created_at": int(row["created_at"] or 0),
             "updated_at": int(row["updated_at"] or 0),

@@ -161,6 +161,7 @@ class TxtToolContext:
         relative: str = "",
         on_record: Callable[[str, str, int], None] | None = None,
         on_event: Callable[[str], None] | None = None,
+        staged: bool = False,
     ):
         self.task_id = str(task_id or "")
         self.output_dir = Path(output_dir)
@@ -171,6 +172,10 @@ class TxtToolContext:
         )
         self._on_record = on_record
         self._on_event = on_event
+        # 并发监督档仅在内存中暂存；批准前既无公开文件，也不写可下载的逐图状态。
+        self.staged = bool(staged)
+        self._content = ""
+        self._published = False
         self.wrote = False
         self.segments = 0
         self.total_chars = 0
@@ -194,7 +199,7 @@ class TxtToolContext:
 
     def _record(self, state: str, chars: int) -> None:
         self.state = str(state or "")
-        if callable(self._on_record):
+        if (not self.staged or self._published) and callable(self._on_record):
             try:
                 self._on_record(state, self.relative if state else "", int(chars))
             except Exception:  # noqa: BLE001 - 状态记录失败不影响已落盘的 TXT
@@ -212,7 +217,7 @@ class TxtToolContext:
     def reset(self) -> None:
         """重试前清掉上一次尝试留下的半成品（避免重复追加）。"""
         path = self.target_path()
-        if path is not None:
+        if path is not None and (not self.staged or self._published):
             try:
                 path.unlink(missing_ok=True)
             except OSError:
@@ -221,6 +226,28 @@ class TxtToolContext:
         self.segments = 0
         self.total_chars = 0
         self._record("", 0)
+        self._content = ""
+        self._published = False
+
+    def candidate_text(self) -> str:
+        """返回最终交付的完整原文，供监督逐字审核；不截断。"""
+        return self._content if self.staged else self._read_text()
+
+    def publish(self) -> None:
+        """监督批准后原子发布同一份已审文本；落盘失败必须向调用方显式报错。"""
+        if not self.staged:
+            return
+        if not self.wrote or self.state == TXT_STATE_FAILED:
+            raise ValueError("TXT 未完整生成，不能发布")
+        path = self.target_path()
+        if path is None:
+            raise ValueError("TXT 目标路径越出输出目录")
+        with _path_lock:
+            self._ensure_parent(path)
+            self._write_text(path, self._content)
+        self._published = True
+        self._record(self.state, self.total_chars)
+        self._event(f"{self._label()}：监督通过，已发布 TXT")
 
     def write_fallback(self, text: str) -> bool:
         """模型没调用工具时，用最终标注文本回填一份（状态 ``auto``）。"""
@@ -232,15 +259,18 @@ class TxtToolContext:
             self._record(TXT_STATE_FAILED, 0)
             return False
         try:
-            self._ensure_parent(path)
-            self._write_text(path, content)
+            if self.staged:
+                self._content = content
+            else:
+                self._ensure_parent(path)
+                self._write_text(path, content)
         except OSError:
             self._record(TXT_STATE_FAILED, 0)
             return False
         self.total_chars = len(content)
         self.wrote = True
         self._record(TXT_STATE_AUTO, self.total_chars)
-        self._event(f"{self._label()}：已按标注结果写入 TXT")
+        self._event(f"{self._label()}：已按标注结果{'暂存待审' if self.staged else '写入'} TXT")
         return True
 
     # ---- 工具执行 ----
@@ -278,11 +308,15 @@ class TxtToolContext:
             return _error("目标路径越出本批次输出目录，已拒绝写入")
         try:
             with _path_lock:
-                self._ensure_parent(path)
-                if mode == "write":
+                if self.staged:
+                    self._content = content if mode == "write" else self._content + content
+                    self.total_chars = len(self._content)
+                elif mode == "write":
+                    self._ensure_parent(path)
                     self._write_text(path, content)
                     self.total_chars = len(content)
                 else:
+                    self._ensure_parent(path)
                     with path.open("a", encoding="utf-8", newline="\n") as handle:
                         handle.write(content)
                     self.total_chars += len(content)
@@ -294,7 +328,7 @@ class TxtToolContext:
         self.segments += 1
         self._record(TXT_STATE_WRITTEN, self.total_chars)
         self._event(
-            f"{self._label()}：已写入 TXT（{'覆盖' if mode == 'write' else '追加'}"
+            f"{self._label()}：已{'暂存待审' if self.staged else '写入'} TXT（{'覆盖' if mode == 'write' else '追加'}"
             f"，第 {self.segments} 段，共 {self.total_chars} 字）"
         )
         return True, json.dumps(
@@ -316,6 +350,8 @@ class TxtToolContext:
         return str(self.item.get("relative_path") or self.item.get("name") or "图片")
 
     def _read_text(self) -> str:
+        if self.staged:
+            return self._content
         path = self.target_path()
         if path is None or not path.is_file():
             return ""

@@ -239,6 +239,7 @@ class ProviderLabelerEngine:
         options: dict[str, Any],
         status: Any = None,
     ) -> dict[str, Any]:
+        self.last_usage = {}
         messages, error = build_messages(image_path, prompt)
         if error:
             raise ValueError(error)
@@ -249,7 +250,7 @@ class ProviderLabelerEngine:
         if writer is not None:
             text = self._complete_with_txt_tool(profile, messages, options, status, writer)
         else:
-            text = str(self.app.models.complete(profile, messages, options, status) or "")
+            text = self._call_model(profile, messages, options, status)
         parsed = parse_response(text)
         parsed["raw"] = text
         return parsed
@@ -271,11 +272,10 @@ class ProviderLabelerEngine:
         working = list(messages)
         step_options = dict(options)
         step_options["tools"] = [tool_schema()]
-        usages: list[dict[str, Any]] = []
         retries = 0
         for step in range(MAX_TXT_TOOL_STEPS):
             try:
-                text = str(self.app.models.complete(profile, working, step_options, status) or "")
+                text = self._call_model(profile, working, step_options, status)
             except TaskCancelled:
                 raise
             except Exception as exc:  # noqa: BLE001 - 首轮不支持工具时退回普通打标
@@ -286,9 +286,8 @@ class ProviderLabelerEngine:
                     raise
                 if step == 0:
                     self._emit(f"模型调用工具失败，已按普通打标继续：{str(exc)[:200]}")
-                    return str(self.app.models.complete(profile, working, options, status) or "")
+                    return self._call_model(profile, working, options, status)
                 raise
-            self._collect_usage(usages)
             action = SkillAgent._parse_action(text)
             if action.get("type") == "parse_error":
                 retries += 1
@@ -333,19 +332,28 @@ class ProviderLabelerEngine:
                 ),
             })
         # 步数用尽仍在调工具：去掉 tools 再要一次最终标注，避免整张图白跑。
-        return str(self.app.models.complete(profile, working, options, status) or "")
+        return self._call_model(profile, working, options, status)
 
-    def _collect_usage(self, usages: list[dict[str, Any]]) -> None:
-        usage = getattr(self.app.models, "last_usage", None)
-        if isinstance(usage, dict) and usage:
-            usages.append(dict(usage))
-        self.last_finish_reason = str(getattr(self.app.models, "last_finish_reason", "") or "")
-        merged: dict[str, Any] = {}
-        for row in usages:
-            for key, value in row.items():
+    def _call_model(self, profile: dict[str, Any], messages: list[dict[str, Any]],
+                     options: dict[str, Any], status: Any) -> str:
+        """每轮结束即归属用量；失败也携带本次图片尝试的所有已知工具轮。"""
+        try:
+            self.app.models.last_usage = {}
+        except (AttributeError, TypeError):
+            pass
+        failure: BaseException | None = None
+        try:
+            return str(self.app.models.complete(profile, messages, options, status) or "")
+        except BaseException as exc:
+            failure = exc
+            raise
+        finally:
+            for key, value in (getattr(self.app.models, "last_usage", {}) or {}).items():
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    merged[key] = merged.get(key, 0) + value
-        self.last_usage = merged
+                    self.last_usage[key] = self.last_usage.get(key, 0) + value
+            self.last_finish_reason = str(getattr(self.app.models, "last_finish_reason", "") or "")
+            if failure is not None:
+                failure.labeler_attempt_usage = dict(self.last_usage)
 
     def _emit(self, message: str) -> None:
         sink = self._event_sink

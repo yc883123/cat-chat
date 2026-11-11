@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from naiba.core.contracts import LABELER_SUPERVISION_RULES_KEY
 from naiba.llm.profiles import resolve_profile_with_override
 from naiba.labeler import LABELER_ACTIVE_STATUSES, LABELER_RESUMABLE_STATUSES
 from naiba.labeler.engines import DEFAULT_ENGINE, ENGINE_IDS
@@ -29,7 +30,7 @@ from naiba.labeler.gate import MAX_WORKERS
 from naiba.labeler.images import stable_item_id, validate_image_refs
 from naiba.labeler.presets import DEFAULT_PRESET, PRESET_IDS, canonical_preset_id
 from naiba.labeler.runner import DEFAULT_CONCURRENCY, VALIDATED_CONCURRENCY
-from naiba.labeler.supervisor import SUPERVISION_PROMPT_VERSION
+from naiba.labeler.supervisor import SUPERVISION_PROMPT_VERSION, freeze_supervision_rules
 
 VALID_OUTPUT_MODES = ("keywords", "phrases", "description", "both")
 # 输出语言：mixed = 标签英文 + 描述中文（历史默认）；zh / en = 标签与描述统一语言。
@@ -54,8 +55,8 @@ FINGERPRINT_KEYS = (
     "confidence_threshold", "max_tags", "custom_prompt", "subject_filter", "prompt_version",
     "trigger_word", "system_prompt", "skill_id", "skill_revision",
     # 并发监督档的结果身份：打标员集合、监督模型与版本化监督策略都会改变正式
-    # 输出，必须进指纹；关闭并发时三者一律弹出，旧指纹逐字节不变。
-    "workers", "supervisor", "supervisor_version",
+    # 输出，必须进指纹；关闭并发时这些字段一律弹出，旧指纹逐字节不变。
+    "workers", "supervisor", "supervisor_version", LABELER_SUPERVISION_RULES_KEY, "write_txt",
 )
 VALID_STRENGTHS = ("low", "medium", "high")
 MAX_CUSTOM_PROMPT = 2000
@@ -323,7 +324,7 @@ def normalize_config(app: Any, raw: Any, *, allow_legacy_language: bool = False)
         "custom_prompt": custom_prompt,
         "subject_filter": _normalize_subject_filter(raw.get("subject_filter")),
         "trigger_word": _normalize_trigger_word(raw.get("trigger_word")),
-        # 写入本地 TXT：只影响工具是否提供给模型与任务输出目录，不影响标注身份。
+        # 串行 TXT 开关保持原复用口径；并发档还要审核最终 TXT，须进入结果身份。
         "write_txt": bool(raw.get("write_txt")),
         "concurrency": concurrency,
         "retry_limit": retry_limit,
@@ -342,6 +343,14 @@ def normalize_config(app: Any, raw: Any, *, allow_legacy_language: bool = False)
     if engine == "chat":
         config["skill_id"] = skill_id
         config["skill_revision"] = skill_revision
+    if concurrency_enabled:
+        try:
+            config[LABELER_SUPERVISION_RULES_KEY] = freeze_supervision_rules(app, config)
+        except ValueError as exc:
+            raise LabelerTaskError(str(exc)) from exc
+        # 规则正文与 Skill 摘要必须来自同一版本，读取期间改动不能伪装成旧快照。
+        if engine == "chat" and _skill_revision(app, skill_id) != skill_revision:
+            raise LabelerTaskError("Skill 在读取期间已变化，请确认规则后重新提交")
     config["config_fingerprint"] = config_fingerprint(config)
     return config
 
@@ -370,6 +379,8 @@ def config_fingerprint(config: dict[str, Any]) -> str:
         payload.pop("workers", None)
         payload.pop("supervisor", None)
         payload.pop("supervisor_version", None)
+        payload.pop(LABELER_SUPERVISION_RULES_KEY, None)
+        payload.pop("write_txt", None)
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "cfg-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
 
@@ -594,20 +605,29 @@ class LabelerJobManager:
             raise LabelerTaskError(reason)
         # 重新校验受管引用：原图可能已被缓存清理（引用保护失效的极端情况）。
         config = dict(source_input.get("config") or {})
-        if str(config.get("engine") or "") == "chat" and str(config.get("skill_revision") or ""):
+        skill_revision = str(config.get("skill_revision") or "")
+        supervision_rules = str(config.get(LABELER_SUPERVISION_RULES_KEY) or "")
+        if str(config.get("engine") or "") == "chat" and skill_revision:
             current_revision = _skill_revision(self.app, str(config.get("skill_id") or ""))
-            if current_revision != str(config.get("skill_revision") or ""):
+            if current_revision != skill_revision:
                 raise LabelerTaskError("源任务使用的 Skill 已变化；为避免换规则重试，请按当前 Skill 新建批次")
         if config.get("concurrency_enabled"):
             stored_version = str(config.get("supervisor_version") or "")
-            if stored_version != SUPERVISION_PROMPT_VERSION:
+            if stored_version != SUPERVISION_PROMPT_VERSION or not supervision_rules:
                 raise LabelerTaskError(
                     "源任务的监督策略版本已过期；为避免换标准重审，请按当前设置新建批次"
                 )
         # 重试沿用原快照；模型配置若已失效，提交时解析会明确报错。
         # 历史快照可能带「mixed + 非标签加自然语言」的旧默认组合：继续时原样放行。
         config.pop("config_fingerprint", None)
+        # 内部摘要不是客户端参数；先核对源快照，再交规范化重新计算。
+        config.pop("skill_revision", None)
+        config.pop(LABELER_SUPERVISION_RULES_KEY, None)
         config = normalize_config(self.app, config, allow_legacy_language=True)
+        if skill_revision and str(config.get("skill_revision") or "") != skill_revision:
+            raise LabelerTaskError("源任务使用的 Skill 已变化；为避免换规则重试，请按当前 Skill 新建批次")
+        if config.get("concurrency_enabled") and config[LABELER_SUPERVISION_RULES_KEY] != supervision_rules:
+            raise LabelerTaskError("源任务的监督规则已变化；为避免换标准重试，请按当前设置新建批次")
         refs = validate_image_refs(self.app.paths.data_dir, wanted)
         task = self._create_task(
             {"image_refs": refs, "config": config}, source_task_id=task_id,

@@ -79,6 +79,9 @@ const labeler = {
   pollTimer: null,
   pollBusy: false,
   detailToken: 0,
+  itemsToken: 0,
+  resultsToken: 0,
+  retryBusy: false,
   searchTimer: null,
   pane: "config",
   // 预设打标 / 自定义打标 两页签（写进 #studioPageLabeler 的 data-labeler-page）。
@@ -100,6 +103,10 @@ const labeler = {
   providerLimitDefault: DEFAULT_PROVIDER_LIMIT,
   providerLimitMax: 9,
   slotsToken: 0,
+  supervisorToken: 0,
+  providerSettingsToken: 0,
+  providerLimitSaves: new Map(),
+  providerLimitPending: new Map(),
 };
 
 // ============================================================
@@ -286,7 +293,7 @@ async function ensureModels() {
   await loadModelOptions();
 }
 
-async function modelOptionsFor(providerKey) {
+async function modelOptionsFor(providerKey, { isCurrent = () => true } = {}) {
   const key = String(providerKey || "");
   if (!key) return [];
   if (labeler.providerModelsCache.has(key)) return labeler.providerModelsCache.get(key);
@@ -294,10 +301,10 @@ async function modelOptionsFor(providerKey) {
   try {
     const payload = await api("/api/providers/models", { method: "POST", body: { model_key: key } });
     models = payload.models || [];
+    if (isCurrent()) labeler.providerModelsCache.set(key, models);
   } catch (error) {
-    setHint(`模型目录读取失败：${error.message}`, true);
+    if (isCurrent()) setHint(`模型目录读取失败：${error.message}`, true);
   }
-  labeler.providerModelsCache.set(key, models);
   return models;
 }
 
@@ -642,6 +649,7 @@ async function renderSupervisorSelects() {
   const providerSelect = $("#labelerSupervisorProvider");
   const modelSelect = $("#labelerSupervisorModel");
   if (!providerSelect || !modelSelect) return;
+  const token = ++labeler.supervisorToken;
   const profiles = providerProfiles().map((profile) => ({
     value: profile.model_key,
     label: profile.name || profile.model_key,
@@ -652,7 +660,10 @@ async function renderSupervisorSelects() {
   status.value = "";
   status.textContent = "读取模型中…";
   modelSelect.replaceChildren(status);
-  const models = await modelOptionsFor(labeler.supervisor.providerKey);
+  const key = labeler.supervisor.providerKey;
+  const isCurrent = () => token === labeler.supervisorToken && key === labeler.supervisor.providerKey;
+  const models = await modelOptionsFor(key, { isCurrent });
+  if (!isCurrent()) return;
   labeler.supervisor.modelName = fillSelect(
     modelSelect,
     models.map((model) => ({ value: model.id || model.name, label: model.name || model.id })),
@@ -681,16 +692,21 @@ function syncConcurrencyUi() {
     ensureConcurrencyState();
     void renderSupervisorSelects();
     void renderWorkerSlots();
+  } else {
+    labeler.supervisorToken += 1;
   }
 }
 
 async function ensureLabelerSettings() {
+  const token = ++labeler.providerSettingsToken;
   try {
     const payload = await api("/api/labeler/settings");
+    if (token !== labeler.providerSettingsToken) return;
     labeler.providerLimits = payload.provider_limits || {};
     labeler.providerLimitDefault = Number(payload.default_provider_limit || DEFAULT_PROVIDER_LIMIT);
     labeler.providerLimitMax = Number(payload.max_provider_limit || 9);
   } catch (error) {
+    if (token !== labeler.providerSettingsToken) return;
     setHint(`并发设置读取失败：${error.message}`, true);
   }
   renderProviderLimitRows();
@@ -727,7 +743,8 @@ function renderProviderLimitRows() {
     input.min = "1";
     input.max = String(labeler.providerLimitMax || 9);
     input.step = "1";
-    input.value = String(labeler.providerLimits[key] || labeler.providerLimitDefault);
+    input.value = String(labeler.providerLimitPending.get(key)?.value
+      ?? labeler.providerLimits[key] ?? labeler.providerLimitDefault);
     input.dataset.limitKey = key;
     input.setAttribute("aria-label", `${providerLabel(key)} 并发上限`);
     row.append(name, input);
@@ -738,25 +755,43 @@ function renderProviderLimitRows() {
 async function saveProviderLimit(key, rawValue) {
   const name = String(key || "");
   if (!name) return;
-  const number = Math.round(Number(rawValue));
+  const number = Number(rawValue);
   const max = Number(labeler.providerLimitMax || 9);
-  if (!Number.isFinite(number) || number < 1 || number > max) {
+  if (!Number.isInteger(number) || number < 1 || number > max) {
     setHint(`「${providerLabel(name)}」的并发上限必须在 1 到 ${max} 之间`, true);
     renderProviderLimitRows();
     return;
   }
-  const next = { ...labeler.providerLimits, [name]: number };
-  try {
-    const payload = await api("/api/labeler/settings", {
-      method: "POST",
-      body: { provider_limits: next },
-    });
-    labeler.providerLimits = payload.provider_limits || next;
-    setHint(`已保存「${providerLabel(name)}」并发上限：${number}`);
-  } catch (error) {
-    setHint(`并发上限保存失败：${error.message}`, true);
-  }
-  renderProviderLimitRows();
+  labeler.providerSettingsToken += 1;
+  const pending = { value: number };
+  labeler.providerLimitPending.set(name, pending);
+  // 同档案顺序保存，不同档案用服务端原子补丁并行；完整回包只采纳本次改的键。
+  const previous = labeler.providerLimitSaves.get(name) || Promise.resolve();
+  const saving = previous.then(async () => {
+    try {
+      const payload = await api("/api/labeler/settings", {
+        method: "POST", body: { provider_limits_patch: { [name]: number } },
+      });
+      labeler.providerLimits = { ...labeler.providerLimits,
+        [name]: payload.provider_limits?.[name] ?? number };
+      if (labeler.providerLimitPending.get(name) === pending) {
+        setHint(`已保存「${providerLabel(name)}」并发上限：${number}`);
+      }
+    } catch (error) {
+      if (labeler.providerLimitPending.get(name) === pending) {
+        setHint(`并发上限保存失败：${error.message}`, true);
+      }
+    } finally {
+      labeler.providerSettingsToken += 1;
+      if (labeler.providerLimitPending.get(name) === pending) {
+        labeler.providerLimitPending.delete(name);
+        renderProviderLimitRows();
+      }
+    }
+  });
+  labeler.providerLimitSaves.set(name, saving);
+  await saving;
+  if (labeler.providerLimitSaves.get(name) === saving) labeler.providerLimitSaves.delete(name);
 }
 
 // ============================================================
@@ -1166,26 +1201,38 @@ function stopPolling() {
 async function pollTask() {
   const taskId = labeler.taskId;
   if (!taskId || labeler.pollBusy) return;
+  const token = labeler.detailToken;
   labeler.pollBusy = true;
   try {
     const { task } = await api(`/api/labeler/tasks/${encodeURIComponent(taskId)}`);
-    if (labeler.taskId !== taskId) return;
+    if (labeler.taskId !== taskId || token !== labeler.detailToken) return;
     labeler.task = task;
     // 轮询不重置浏览位置：用户已点「加载更多」的进度保持，由签名 diff 决定要不要重绘。
     const active = ["queued", "running"].includes(String(task.status || ""));
     // 终态详情不带逐图数据（items 走分页接口）：空数组别覆盖已渲染的列表，
     // 否则结果区先闪一屏空态、再由下面的 loadTaskItems 补回来。
     const detailItems = task.items || [];
-    if (active || detailItems.length) labeler.items = detailItems;
+    if (active || detailItems.length) labeler.items = mergeTaskItemRows(labeler.items, detailItems);
     if (active) syncAnnotationsIfDue(taskId, labeler.items);
     renderTask(task);
     if (!active) {
       stopPolling();
-      await loadTaskItems(taskId);
-      await loadTaskResults(taskId);
+      const loaded = await loadTaskItems(taskId, { refresh: true });
+      if (labeler.taskId !== taskId || token !== labeler.detailToken) return;
+      if (!loaded) {
+        startPolling();
+        return;
+      }
+      const resultsLoaded = await loadTaskResults(taskId);
+      if (labeler.taskId !== taskId || token !== labeler.detailToken) return;
+      if (!resultsLoaded) {
+        startPolling();
+        return;
+      }
       await refreshBatches();
     }
   } catch (error) {
+    if (labeler.taskId !== taskId || token !== labeler.detailToken) return;
     if (error.status === 404) {
       stopPolling();
       labeler.taskId = "";
@@ -1235,17 +1282,27 @@ async function reconcileTask() {
     const { task } = await api(`/api/labeler/tasks/${encodeURIComponent(taskId)}`);
     if (token !== labeler.detailToken || labeler.taskId !== taskId) return false;
     labeler.task = task;
-    labeler.items = task.items || [];
-    labeler.imageResultLimit = 100;
+    const active = ["queued", "running"].includes(String(task.status || ""));
+    if (active) labeler.items = mergeTaskItemRows(labeler.items, task.items || []);
     renderTask(task);
-    if (["queued", "running"].includes(String(task.status || ""))) {
+    if (active) {
       startPolling();
       syncAnnotationsIfDue(taskId, labeler.items);
       return false;
     }
     stopPolling();
-    await loadTaskItems(taskId);
-    await loadTaskResults(taskId);
+    const loaded = await loadTaskItems(taskId, { refresh: true });
+    if (token !== labeler.detailToken || labeler.taskId !== taskId) return false;
+    if (!loaded) {
+      startPolling();
+      return false;
+    }
+    const resultsLoaded = await loadTaskResults(taskId);
+    if (token !== labeler.detailToken || labeler.taskId !== taskId) return false;
+    if (!resultsLoaded) {
+      startPolling();
+      return false;
+    }
     return true;
   } catch (error) {
     if (token !== labeler.detailToken) return false;
@@ -1285,7 +1342,8 @@ async function retryFailedTask() {
 
 async function retryTask(mode) {
   const taskId = labeler.taskId;
-  if (!taskId) return;
+  if (!taskId || labeler.retryBusy) return;
+  const token = labeler.detailToken;
   const task = labeler.task || {};
   const uncertain = mode === "unfinished" ? Number(task.uncertain_count || 0) : 0;
   let confirmUncertain = false;
@@ -1299,15 +1357,19 @@ async function retryTask(mode) {
       confirmUncertain = false;
     }
   }
+  labeler.retryBusy = true;
+  renderTask(task);
   try {
     const payload = await api(`/api/labeler/tasks/${encodeURIComponent(taskId)}/retry`, {
       method: "POST",
       body: { mode, confirm_uncertain: confirmUncertain },
     });
+    if (labeler.taskId !== taskId || token !== labeler.detailToken) return;
     const next = payload.task || {};
     labeler.taskId = String(next.id || "");
     labeler.task = next;
     labeler.items = next.items || [];
+    labeler.imageResultLimit = 100;
     labeler.annotations = [];
     labeler.annotationTotal = 0;
     labeler.tagMatches = [];
@@ -1325,7 +1387,12 @@ async function retryTask(mode) {
     await refreshBatches();
     startPolling();
   } catch (error) {
-    setHint(`继续失败：${error.message}`, true);
+    if (labeler.taskId === taskId && token === labeler.detailToken) {
+      setHint(`继续失败：${error.message}`, true);
+    }
+  } finally {
+    labeler.retryBusy = false;
+    if (labeler.task) renderTask(labeler.task);
   }
 }
 
@@ -1483,6 +1550,8 @@ async function wipeAnnotations() {
 // 正在查看的批次被删掉时：停轮询、清选择与结果缓存，界面回到未选批次的空态。
 function clearSelectedBatch() {
   stopPolling();
+  labeler.detailToken += 1;
+  labeler.itemsToken += 1;
   labeler.taskId = "";
   labeler.task = null;
   labeler.items = [];
@@ -1492,6 +1561,7 @@ function clearSelectedBatch() {
   labeler.tags = [];
   labeler.sentences = [];
   labeler.txtFiles = new Map();
+  renderRetryButtons(null);
   const box = $("#labelerQueueStatus");
   if (box) box.hidden = true;
   const txtBtn = $("#labelerOpenTxt");
@@ -1503,6 +1573,10 @@ async function openBatch(taskId) {
   if (!taskId || taskId === labeler.taskId) return;
   stopPolling();
   labeler.taskId = taskId;
+  labeler.task = null;
+  labeler.items = [];
+  labeler.imageResultLimit = 100;
+  renderRetryButtons(null);
   labeler.annotations = [];
   labeler.tagMatches = [];
   labeler.tags = [];
@@ -1546,12 +1620,24 @@ function renderTask(task) {
   }
   const cancelBtn = $("#labelerCancel");
   if (cancelBtn) cancelBtn.hidden = !["queued", "running"].includes(status);
-  const failedBtn = $("#labelerRetryModelFailed");
-  if (failedBtn) failedBtn.hidden = !task.can_retry_failed;
+  renderRetryButtons(task);
   // TXT 文件夹入口只在本批次开启过「写入本地 TXT」时出现。
   const txtBtn = $("#labelerOpenTxt");
   if (txtBtn) txtBtn.hidden = !Boolean(task.input?.config?.write_txt);
   renderResultBody();
+}
+
+function renderRetryButtons(task) {
+  const failedBtn = $("#labelerRetryModelFailed");
+  if (failedBtn) {
+    failedBtn.hidden = !task?.can_retry_failed;
+    failedBtn.disabled = labeler.retryBusy;
+  }
+  const continueBtn = $("#labelerContinue");
+  if (continueBtn) {
+    continueBtn.hidden = !task?.can_continue;
+    continueBtn.disabled = labeler.retryBusy;
+  }
 }
 
 // ============================================================
@@ -1587,18 +1673,42 @@ async function ensureTagView() {
   renderResultBody();
 }
 
-async function loadTaskItems(taskId, { reset = false } = {}) {
-  if (reset) labeler.items = [];
+function mergeTaskItemRows(current, incoming) {
+  const merged = new Map(current.map((item) => [item.item_id, item]));
+  for (const item of incoming) merged.set(item.item_id, item);
+  return [...merged.values()];
+}
+
+async function loadTaskItems(taskId, { reset = false, refresh = false } = {}) {
+  if (!taskId || taskId !== labeler.taskId) return false;
+  const token = ++labeler.itemsToken;
+  const detailToken = labeler.detailToken;
+  const isCurrent = () => taskId === labeler.taskId && token === labeler.itemsToken
+    && detailToken === labeler.detailToken;
   const pageSize = 500;
-  const offset = labeler.items.length;
+  const replace = reset || refresh;
+  const target = replace ? Math.max(pageSize, labeler.items.length) : 0;
+  let offset = replace ? 0 : labeler.items.length;
+  let total = 0;
+  const rows = new Map();
   try {
-    const payload = await api(`/api/labeler/tasks/${encodeURIComponent(taskId)}/items?offset=${offset}&limit=${pageSize}`);
-    if (labeler.taskId !== taskId) return;
-    labeler.items.push(...(payload.items || []));
-    labeler.task = { ...(labeler.task || {}), items_total: Number(payload.total || 0) };
+    // 终态必须重取已加载范围：保留旧卡直到所有页成功，再按 item_id 原子替换。
+    do {
+      const payload = await api(`/api/labeler/tasks/${encodeURIComponent(taskId)}/items?offset=${offset}&limit=${pageSize}`);
+      if (!isCurrent()) return false;
+      const page = payload.items || [];
+      total = Number(payload.total || 0);
+      for (const item of page) rows.set(item.item_id, item);
+      offset += page.length;
+      if (!page.length) break;
+    } while (replace && offset < target && offset < total);
+    labeler.items = replace ? [...rows.values()] : mergeTaskItemRows(labeler.items, rows.values());
+    labeler.task = { ...(labeler.task || {}), items_total: total };
     renderResultBody();
+    return true;
   } catch (error) {
-    setHint(`图片列表读取失败：${error.message}`, true);
+    if (isCurrent()) setHint(`图片列表读取失败：${error.message}`, true);
+    return false;
   }
 }
 
@@ -1607,32 +1717,43 @@ async function loadNextTaskItems() {
 }
 
 async function loadTaskResults(taskId) {
+  const token = ++labeler.resultsToken;
+  const detailToken = labeler.detailToken;
+  const isCurrent = () => labeler.taskId === taskId && token === labeler.resultsToken
+    && detailToken === labeler.detailToken;
   try {
     const payload = await api(`/api/labeler/annotations?task_id=${encodeURIComponent(taskId)}&limit=500&offset=0`);
-    if (labeler.taskId !== taskId) return;
+    if (!isCurrent()) return false;
     labeler.annotations = payload.annotations || [];
     labeler.annotationTotal = Number(payload.total || 0);
   } catch (error) {
+    if (!isCurrent()) return false;
     setHint(`标注结果读取失败：${error.message}`, true);
-    labeler.annotations = [];
-    labeler.annotationTotal = 0;
+    return false;
   }
   if (labeler.resultTab === "tags") await loadTags();
   if (labeler.resultTab === "sentences") await loadSentences();
   renderResultBody();
+  return true;
 }
 
 async function loadNextAnnotations() {
   const taskId = labeler.taskId;
   if (!taskId || labeler.annotations.length >= Number(labeler.annotationTotal || 0)) return;
+  const token = labeler.resultsToken;
+  const detailToken = labeler.detailToken;
+  const isCurrent = () => labeler.taskId === taskId && token === labeler.resultsToken
+    && detailToken === labeler.detailToken;
   const offset = labeler.annotations.length;
   try {
     const payload = await api(`/api/labeler/annotations?task_id=${encodeURIComponent(taskId)}&limit=500&offset=${offset}`);
-    if (labeler.taskId !== taskId) return;
-    labeler.annotations.push(...(payload.annotations || []));
+    if (!isCurrent()) return;
+    const merged = new Map(labeler.annotations.map((row) => [Number(row.id), row]));
+    for (const row of payload.annotations || []) merged.set(Number(row.id), row);
+    labeler.annotations = [...merged.values()];
     renderResultBody();
   } catch (error) {
-    setHint(`更多标注读取失败：${error.message}`, true);
+    if (isCurrent()) setHint(`更多标注读取失败：${error.message}`, true);
   }
 }
 
@@ -1745,6 +1866,8 @@ function renderImageResults(body) {
   ]);
   if (labeler.lastImageSignature === signature) return;
   labeler.lastImageSignature = signature;
+  const scrollTop = body.scrollTop;
+  const scrollLeft = body.scrollLeft;
   const cards = visible.map(({ item, annotation }) => {
     const card = document.createElement("article");
     card.className = "labeler-anno";
@@ -1826,13 +1949,16 @@ function renderImageResults(body) {
     });
     body.append(more);
   }
+  body.scrollTop = scrollTop;
+  body.scrollLeft = scrollLeft;
 }
 
 function reviewMetaLine(item) {
   const bits = [];
   if (item.worker_model_name) {
-    const slot = Number(item.worker_slot || 0) + 1;
-    bits.push(`打标员 #${slot} · ${item.worker_model_name}`);
+    const slot = Number(item.worker_slot ?? -1);
+    const author = slot < 0 ? "打标员（原槽位未知）" : `打标员 #${slot + 1}`;
+    bits.push(`${author} · ${item.worker_model_name}`);
   }
   if (item.supervisor_decision === "reused") {
     bits.push("复用已通过结果");

@@ -30,6 +30,39 @@ WRITER_CHAPTER_STATES_KEY = "chapter_states"
 # restored from the manifest, so retry cannot drift after setup edits/deletion.
 WRITER_SETUP_SNAPSHOT_KEY = "setup_snapshot"
 
+# Labeler settings patch is an atomic per-provider update; it is mutually
+# exclusive with the legacy full-replacement provider_limits request.
+LABELER_PROVIDER_LIMITS_PATCH_KEY = "provider_limits_patch"
+# Internal-only task snapshot, never accepted as client-supplied rules.
+LABELER_SUPERVISION_RULES_KEY = "supervision_rules"
+# Exact TXT approved by the supervisor; None means no audited TXT exists.
+LABELER_APPROVED_TXT_KEY = "approved_txt"
+# Cached annotations retain the original model, but an unknown original slot
+# must not be confused with the worker that merely claimed the cache hit.
+LABELER_UNKNOWN_WORKER_SLOT = -1
+
+
+class LabelerSettingsUpdate(TypedDict, total=False):
+    provider_limits: dict[str, int]
+    provider_limits_patch: dict[str, int]
+
+
+class LabelerSupervisionCandidate(TypedDict, total=False):
+    tags: list[str]
+    description: str
+    # Full staged delivery, not a shortened caption reconstructed from tags.
+    txt_content: str
+
+
+class LabelerApprovedArtifact(TypedDict, total=False):
+    approved_txt: str | None
+
+
+class LabelerAttemptUsageCarrier(Protocol):
+    # Provider failures carry every known call in this image attempt, including
+    # successful tool rounds before the failed call; the runner sums once.
+    labeler_attempt_usage: dict[str, Any]
+
 
 class WriterNovelChapterSource(TypedDict):
     """Immutable provenance for a read-only chapter copied from NovelStore."""

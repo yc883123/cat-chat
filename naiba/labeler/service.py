@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from naiba.core.contracts import LABELER_PROVIDER_LIMITS_PATCH_KEY
 from naiba.labeler.db import LabelerDB, LabelerDBError
 from naiba.labeler.export import LabelerExportError, open_export_dir, open_managed_dir, write_export
 from naiba.labeler.gate import (
@@ -205,10 +206,22 @@ class LabelerService:
         }, 200
 
     def api_update_settings(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
-        """保存供应商档案的并发上限（1–9）；未知档案直接拒绝，不静默丢弃。"""
-        body = body if isinstance(body, dict) else {}
+        """原子合并档案额度；保留旧客户端整份替换入口，两种写法不可混用。"""
+        if not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
+        allowed = {"provider_limits", LABELER_PROVIDER_LIMITS_PATCH_KEY}
+        if set(body) - allowed or len(set(body) & allowed) != 1:
+            return {"error": "请只提交 provider_limits 或 provider_limits_patch"}, 400
+        is_patch = LABELER_PROVIDER_LIMITS_PATCH_KEY in body
+        raw = body[LABELER_PROVIDER_LIMITS_PATCH_KEY if is_patch else "provider_limits"]
+        if not isinstance(raw, dict) or (is_patch and not raw):
+            return {"error": "并发上限必须是对象，增量保存不能为空"}, 400
+        if any(not isinstance(key, str) or not key.strip() for key in raw):
+            return {"error": "模型配置标识不能为空"}, 400
+        if len({key.strip() for key in raw}) != len(raw):
+            return {"error": "模型配置标识不能重复"}, 400
         try:
-            limits = validate_provider_limits(body.get("provider_limits"))
+            limits = validate_provider_limits(raw)
         except ValueError as exc:
             return {"error": str(exc)}, 400
         for key in limits:
@@ -217,7 +230,8 @@ class LabelerService:
             except (ValueError, KeyError):
                 return {"error": f"模型配置不存在：{key}"}, 400
         try:
-            saved = self.store.write_settings({"provider_limits": limits})
+            saved = (self.store.patch_provider_limits(limits) if is_patch
+                     else self.store.write_settings({"provider_limits": limits}))
         except OSError as exc:
             return {"error": f"并发上限保存失败：{exc}"}, 500
         return {"ok": True, **saved}, 200

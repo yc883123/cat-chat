@@ -153,6 +153,14 @@ class LabelerStore:
             self._write_json(self._settings_path, clean)
         return clean
 
+    def patch_provider_limits(self, limits: dict[str, int]) -> dict[str, Any]:
+        """按档案合并已校验的额度；读、改、写共用锁，避免并发保存覆盖其他档案。"""
+        with self._lock:
+            current = self.read_settings()
+            merged = dict(current.get("provider_limits") or {})
+            merged.update(limits)
+            return self.write_settings({"provider_limits": merged})
+
     # ---- 任务记录 ----
 
     def create_task(self, input_data: dict[str, Any], *, source_task_id: str = "") -> dict[str, Any]:

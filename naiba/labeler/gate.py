@@ -38,7 +38,7 @@ def validate_provider_limits(raw: Any) -> dict[str, int]:
         name = str(key or "").strip()
         if not name:
             continue
-        if isinstance(value, bool):
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
             raise ValueError(f"供应商「{name}」的并发上限必须是整数")
         try:
             number = int(value)

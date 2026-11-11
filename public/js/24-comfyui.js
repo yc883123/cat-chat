@@ -4158,19 +4158,24 @@ function batchMappingAreaMarkup(scheme) {
   ${portRows}`;
 }
 
+// 配置区、桌面表头和手机字段标签共用同类编号；文件与事件仍使用整体口索引。
+function batchMediaPortNumbers(detail, ports) {
+  const counts = { image: 0, video: 0, audio: 0 };
+  return ports.map((port) => {
+    if (!port.checked) return 0;
+    const kind = batchSlotByAddress(detail, port)?.media || "image";
+    counts[kind] = (counts[kind] || 0) + 1;
+    return counts[kind];
+  });
+}
+
 function batchPortsMarkup(scheme) {
   const detail = scheme.detail;
   const candidates = batchMediaCandidates(detail);
   const ports = scheme.mapping.media_ports || [];
   const kindNames = { image: "图", video: "视频", audio: "音" };
   const kindFull = { image: "图片", video: "视频", audio: "音频" };
-  const counts = { image: 0, video: 0, audio: 0 };
-  const numbers = ports.map((port) => {
-    if (!port.checked) return "—";
-    const slot = batchSlotByAddress(detail, port);
-    counts[slot?.media || "image"] = (counts[slot?.media || "image"] || 0) + 1;
-    return `${kindNames[slot?.media || "image"]} ${counts[slot?.media || "image"]}`;
-  });
+  const numbers = batchMediaPortNumbers(detail, ports);
   const checkedCount = ports.filter((port) => port.checked).length;
   const rows = ports.map((port, index) => {
     const slot = batchSlotByAddress(detail, port);
@@ -4186,7 +4191,7 @@ function batchPortsMarkup(scheme) {
           : "需选择文件";
     return `<div class="cbm-media-slot${port.checked ? "" : " unchecked"}">
       <input type="checkbox" data-batch-port-check="${index}" data-scheme="${scheme.id}" ${port.checked ? "checked" : ""} aria-label="启用这个素材口">
-      <span class="cbm-no">${numbers[index]}</span>
+      <span class="cbm-no">${port.checked ? `${kindNames[slot?.media || "image"]} ${numbers[index]}` : "—"}</span>
       <select class="cbm-nodesel" data-batch-select="port-node" data-scheme="${scheme.id}" data-port="${index}" aria-label="这个素材口对应哪个节点">
         ${sameKind.map((row) => `<option value="${escapeText(slotKeyOf(row))}"${slot && slotKeyOf(row) === slotKeyOf(slot) ? " selected" : ""}>${escapeText(batchSlotAddressText(detail, row))}</option>`).join("")}
       </select>
@@ -4305,13 +4310,12 @@ function batchRefreshFixedBar(scheme) {
 
 function batchItemsMarkup(scheme, schemeIndex) {
   const ports = (scheme.mapping?.media_ports || []).filter((port) => port.checked);
+  const portNumbers = batchMediaPortNumbers(scheme.detail, ports);
   const portHeaders = ports.map((port, portIndex) => {
     const slot = batchSlotByAddress(scheme.detail, port);
     const kind = slot?.media || "image";
-    const counts = ports.slice(0, portIndex + 1).filter((row) =>
-      (batchSlotByAddress(scheme.detail, row)?.media || "image") === kind).length;
     const kindNames = { image: "图", video: "视频", audio: "音" };
-    return `<th>${kindNames[kind]} ${counts}（${escapeText(batchSlotAddressText(scheme.detail, slot))}）</th>`;
+    return `<th>${kindNames[kind]} ${portNumbers[portIndex]}（${escapeText(batchSlotAddressText(scheme.detail, slot))}）</th>`;
   }).join("");
   // 指认列跟在同类主列后面：第二段提示词接提示词，第二时长接时长，其余排条数前。
   const extras = activeExtraPoints(scheme);
@@ -4319,7 +4323,7 @@ function batchItemsMarkup(scheme, schemeIndex) {
   const extrasMarkup = (kind) => kindExtras(kind).map((point) =>
     `<th title="${escapeText(batchSlotAddressText(scheme.detail, point.slot))}">${escapeText(EXTRA_KIND_LABELS[point.kind] || "备用槽")}</th>`).join("");
   const rows = scheme.items.map((item, itemIndex) =>
-    batchItemRowMarkup(scheme, item, itemIndex, ports)).join("");
+    batchItemRowMarkup(scheme, item, itemIndex, ports, portNumbers)).join("");
   const columnCount = 7 + kindExtras("prompt").length + kindExtras("duration").length
     + extras.filter((point) => point.kind === "resolution" && point.slot).length
     + extras.filter((point) => point.kind === "spare" && point.slot).length + ports.length;
@@ -4423,7 +4427,7 @@ function batchConversionImageHint(scheme, item) {
   return { text: "无图", over: false };
 }
 
-function batchItemRowMarkup(scheme, item, itemIndex, ports) {
+function batchItemRowMarkup(scheme, item, itemIndex, ports, portNumbers = batchMediaPortNumbers(scheme.detail, ports)) {
   const missing = batch.missingItems.has(`${scheme.id}:${itemIndex}`);
   const converting = batch.converting.has(item);
   // 转换条件：有剧本可转，且（还出不来正文，或还没指认出/没填到第二段）。
@@ -4462,7 +4466,7 @@ function batchItemRowMarkup(scheme, item, itemIndex, ports) {
   const tiles = ports.map((port, portIndex) => {
     const slot = batchSlotByAddress(scheme.detail, port);
     const kind = slot?.media || "image";
-    const cellLabel = escapeAttribute(`${{ image: "图片", video: "视频", audio: "音频" }[kind] || "素材"} ${portIndex + 1} · ${slot?.node_id || ""}`);
+    const cellLabel = escapeAttribute(`${{ image: "图片", video: "视频", audio: "音频" }[kind] || "素材"} ${portNumbers[portIndex]} · ${slot?.node_id || ""}`);
     const record = item.files[String(portIndex)];
     const skipped = itemSkipsPort(item, port);
     const skipLabel = skipped ? "取消跳过，恢复此前状态" : "跳过这个输入";

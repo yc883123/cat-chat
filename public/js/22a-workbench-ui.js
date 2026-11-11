@@ -66,6 +66,23 @@ export function positionWorkbenchMenu(trigger, panel) {
 
 const menuBindings = new WeakMap();
 const detailsRoots = new WeakSet();
+const dialogReturnBindings = new WeakSet();
+
+export function bindWorkbenchDialogReturn(dialog, trigger) {
+  if (!dialog || !trigger || dialogReturnBindings.has(dialog)) return;
+  dialogReturnBindings.add(dialog);
+  dialog.addEventListener("close", () => {
+    // 原生 dialog 记住的 opener 可能是已经收起的菜单项；仅补救丢失的焦点，
+    // 不抢走用户另选的控件，也不把焦点移出接力打开的另一个弹窗。
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== document.documentElement
+        && !dialog.contains(active) && active.isConnected) return;
+    if (document.querySelector("dialog[open]")) return;
+    if (!trigger.isConnected || trigger.disabled || trigger.closest("[hidden], [inert]")
+        || !trigger.getClientRects().length || trigger.checkVisibility?.({ checkVisibilityCSS: true }) === false) return;
+    trigger.focus({ preventScroll: true });
+  });
+}
 
 export function bindWorkbenchDetails(root) {
   if (!root || detailsRoots.has(root)) return;

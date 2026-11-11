@@ -8,9 +8,9 @@ const { chromium } = require('playwright');
 const BASE = process.env.NAIBA_SMOKE_BASE || 'http://127.0.0.1:8843';
 const OUT = path.join(__dirname, 'workbench-media-results');
 const params = [
-  ...['image', 'audio', 'video'].map((kind, index) => ({
-    node_id: String(index + 1), field_name: kind, field_type: kind, control: 'media', media: kind,
-    node_title: `载入${kind}`, label: `${index + 1} · 载入${kind} · ${kind} → references.${kind}_0（节点 200）\n输出 1 → secondary_${kind}（节点 201）；完整映射末尾`,
+  ...[['1','image'],['2','audio'],['3','video'],['14','image']].map(([node_id,kind]) => ({
+    node_id, field_name: kind, field_type: kind, control: 'media', media: kind,
+    node_title: `载入${kind}`, label: `${node_id} · 载入${kind} · ${kind} → references.${kind}_0（节点 200）\n输出 1 → secondary_${kind}（节点 201）；完整映射末尾`,
     default: 'None', media_optional: false,
   })),
   {node_id:'4', field_name:'text', field_type:'text', control:'multiline', role:'positive_prompt', node_title:'主提示词', label:'4 · 主提示词 · text → prompt（节点 200）', default:'原有正向提示词'},
@@ -153,9 +153,20 @@ async function checkViewport(browser,width) {
     }
     const row=page.locator('.cbm-items tbody > tr').first();
     const labels=await row.locator('td').evaluateAll(nodes=>nodes.map(node=>node.dataset.label));
-    assert.equal(labels.length,14,'7个基础字段、3个媒体口、4个额外指认全部保留');
+    assert.equal(labels.length,15,'7个基础字段、4个媒体口、4个额外指认全部保留');
     assert.ok(labels.includes('名称')&&labels.includes('剧本')&&labels.includes('提示词')&&labels.includes('操作'));
-    assert.ok(labels.some(label=>label.startsWith('图片'))&&labels.some(label=>label.startsWith('音频'))&&labels.some(label=>label.startsWith('视频')));
+    const mediaLabels=['图片 1 · 1','音频 1 · 2','视频 1 · 3','图片 2 · 14'];
+    const mediaNumbers=['图 1','音 1','视频 1','图 2'];
+    assert.deepEqual(labels.slice(1,5),mediaLabels,'手机混排素材口按种类分别编号');
+    assert.deepEqual(await page.locator('.cbm-media-slot .cbm-no').allTextContents(),mediaNumbers,'配置区与手机编号一致');
+    const headers=await page.locator('.cbm-items thead th').allTextContents();
+    assert.deepEqual(headers.slice(1,5).map(text=>text.split('（')[0]),mediaNumbers,'桌面表头与手机编号一致');
+    assert.deepEqual(await row.locator('[data-batch-tile]').evaluateAll(nodes=>nodes.map(node=>node.dataset.port)),
+      ['0','1','2','3'],'媒体操作仍使用启用口的整体索引');
+    if(width<=760){
+      const displayedLabels=await row.locator('td').evaluateAll(nodes=>nodes.slice(1,5).map(node=>getComputedStyle(node,'::before').content));
+      assert.deepEqual(displayedLabels,mediaLabels.map(label=>`"${label}"`),'手机实际显示正确媒体编号');
+    }
     for(const cell of await row.locator('td').all()){
       assert.equal(await cell.isVisible(),true,`字段 ${await cell.getAttribute('data-label')} 可见`);
       if(width<=760){
@@ -203,7 +214,7 @@ async function checkViewport(browser,width) {
     assert.deepEqual(writes,[],'不发送后端写入或生成请求');
     assert.deepEqual(unexpected,[],'无未定义造梦机接口');
     results.push({width,params:params.length,batchFields:labels,single,batch,errors,writes,mockedPreferences});
-    console.log(`通过 ${width}px：13参数全映射、3处菜单、另存取消、14批量字段、清空只影响提示词、往返草稿保持、零后端写入`);
+    console.log(`通过 ${width}px：${params.length}参数全映射、3处菜单、另存取消、${labels.length}批量字段、混排媒体编号一致、清空只影响提示词、往返草稿保持、零后端写入`);
   }catch(error){
     await page.screenshot({path:path.join(OUT,`failed-${width}.png`)});
     console.error({width,errors,writes,unexpected});

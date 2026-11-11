@@ -125,6 +125,59 @@ assert.ok(html.includes('完整剧本'));assert.ok(html.includes('cbm-mobile-too
 assert.equal(scheme.items[0].prompt,'<img onerror=x>','纯呈现不得修改原始字段');
 """)
 
+    def test_media_numbers_match_mapping_headers_and_mobile_without_changing_file_indices(self):
+        self.run_case(r"""
+load('24-comfyui.js','globalThis.p={batchPortsMarkup,batchItemsMarkup};');
+ctx.attachmentThumbUrl=record=>record.path;
+const params=['image','audio','video','image','audio','video','image'].map((media,index)=>({
+  node_id:String(index+1),field_name:media,field_type:media,media,default:'None',media_optional:false,
+}));
+const shortNames={image:'图',audio:'音',video:'视频'},fullNames={image:'图片',audio:'音频',video:'视频'};
+const cases=[
+  {name:'混排',order:[0,1,2,3],numbers:[1,1,1,2]},
+  {name:'重排',order:[3,2,0,1],numbers:[1,1,2,1]},
+  {name:'首口禁用',order:[0,1,2,3],disabled:[0],numbers:[0,1,1,1]},
+  {name:'混排过滤',order:[0,1,2,3,4,5],disabled:[0,2],numbers:[0,1,0,1,2,1]},
+  {name:'同类多口',order:[6,3,0],numbers:[1,2,3]},
+  {name:'全部禁用',order:[0,1,2,3],disabled:[0,1,2,3],numbers:[0,0,0,0]},
+];
+for(const test of cases){
+  const ports=test.order.map((index,position)=>({node_id:params[index].node_id,field_name:params[index].field_name,
+    checked:!(test.disabled||[]).includes(position)}));
+  const active=ports.filter(port=>port.checked);
+  const files=Object.fromEntries(active.map((port,index)=>[String(index),{
+    name:`槽位-${port.node_id}-文件`,path:`/managed/${port.node_id}.png`,
+  }]));
+  const base={name:test.name,script:'',prompt:'',duration:'',resolution:'',shots:1};
+  const scheme={id:'s1',detail:{params},mapping:{media_ports:ports,extra_points:[]},fixed:{},items:[
+    {...base,files:{}},
+    {...base,files},
+    {...base,files,skips:Object.fromEntries(active.map(port=>[`${port.node_id}|${port.field_name}`,true]))},
+  ]};
+  const before=JSON.stringify(scheme);
+  const expectedNumbers=test.numbers.map((number,index)=>number?`${shortNames[params[test.order[index]].media]} ${number}`:'—');
+  const mapping=ctx.p.batchPortsMarkup(scheme),html=ctx.p.batchItemsMarkup(scheme,0);
+  assert.deepEqual([...mapping.matchAll(/<span class="cbm-no">([^<]+)<\/span>/g)].map(match=>match[1]),expectedNumbers,test.name+' 配置编号');
+  assert.deepEqual([...html.matchAll(/<th>((?:图|音|视频) \d+)（/g)].map(match=>match[1]),
+    expectedNumbers.filter(number=>number!=='—'),test.name+' 表头编号');
+  const expectedLabels=test.numbers.flatMap((number,index)=>number?[
+    `${fullNames[params[test.order[index]].media]} ${number} · ${params[test.order[index]].node_id}`]:[]);
+  const rows=[...html.matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map(match=>match[1]).filter(row=>row.includes('data-batch-item="name"'));
+  assert.equal(rows.length,3);
+  rows.forEach((row,rowIndex)=>{
+    const cells=[...row.matchAll(/<td data-label="([^"]+)">([\s\S]*?)<\/td>/g)].filter(match=>match[2].includes('data-batch-tile'));
+    assert.deepEqual(cells.map(cell=>cell[1]),expectedLabels,test.name+' 手机编号');
+    cells.forEach((cell,portIndex)=>{
+      assert.ok([...cell[2].matchAll(/data-port="(\d+)"/g)].every(match=>Number(match[1])===portIndex),
+        test.name+' 事件必须保留启用口的整体索引');
+      if(rowIndex>0)assert.ok(cell[2].includes(`槽位-${active[portIndex].node_id}-文件`),test.name+' 文件仍绑定原槽位');
+      if(rowIndex===2)assert.ok(cell[2].includes('data-batch-skipped="1"'),'手动跳过不改变显示编号');
+    });
+  });
+  assert.equal(JSON.stringify(scheme),before,test.name+' 纯呈现不得修改素材、顺序或映射');
+}
+""")
+
     def test_labeler_view_switch_preserves_draft_and_result_rows(self):
         self.run_case(r"""
 load('23-labeler.js','globalThis.p={labeler,setLabelerPane};');

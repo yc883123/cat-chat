@@ -14,7 +14,7 @@ import { $, api, applyModelSkinFor, localFileUrl, state, toast } from "./01-core
 import { isPywebview, saveLocalFile } from "./03-media.js";
 import { onStudioPageChange, setStudioPage } from "./22-studio.js";
 import { bindWriterNovelContinuation } from "./27a-writer-continuation.js";
-import { bindWorkbenchMenu, watchWorkbenchSize, workbenchWidth } from "./22a-workbench-ui.js";
+import { bindWorkbenchDialogReturn, bindWorkbenchMenu, watchWorkbenchSize, workbenchWidth } from "./22a-workbench-ui.js";
 
 const WRITER_TASKS_URL = "/api/studio/tasks?module=writer";
 const LAST_BOOK_KEY = "naibaWriterLastBookId";
@@ -4062,6 +4062,10 @@ export function bindWriterEvents() {
   watchWorkbenchSize($("#studioPageWriter"), applyPaneAccessibility);
   bindWorkbenchMenu($("#writerBookMenuBtn"), $("#writerBookMenu"));
   bindWorkbenchMenu($("#writerMoreBtn"), $("#writerMoreMenu"));
+  for (const id of ["writerBooksDialog", "writerImportDialog", "writerNovelImportDialog"]) {
+    bindWorkbenchDialogReturn($(`#${id}`), $("#writerBookMenuBtn"));
+  }
+  bindWorkbenchDialogReturn($("#writerManageDialog"), $("#writerMoreBtn"));
   $("#writerAsideBtn")?.addEventListener("click", () => setPane(writer.pane === "notes" ? "editor" : "notes"));
   $("#writerAsideClose")?.addEventListener("click", () => {
     setPane("editor");

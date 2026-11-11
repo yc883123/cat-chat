@@ -11,7 +11,7 @@ const viewState = {
   open: false, selectedId: "", threads: [], detail: null, nodes: [], events: [], artifacts: [], approvals: [],
   eventCursor: 0, eventsThreadId: "", eventsInitialized: false,
   loading: false, error: "", actionMessage: "", syncedAt: 0, filter: "all", multiSelect: false, deleteSelection: new Set(), resultRequest: 0,
-  listRequest: 0, detailRequest: 0,
+  listRequest: 0, detailRequest: 0, syncedThreadId: "",
 };
 
 const createModelState = { requestId: 0, loading: false, submitting: false };
@@ -24,6 +24,7 @@ const actionInFlight = new Set();
 const confirmationNotices = new Map();
 let refreshTimer = null;
 const TERMINAL_STATUSES = new Set(["completed", "cancelled", "failed", "archived"]);
+const TERMINAL_DETAIL_REFRESH_MS = 30000;
 const renderedHtml = new WeakMap();
 let detailRenderSignature = "";
 // 轮询只替换真正变化的分区，避免销毁键盘焦点、文字选区及已展开内容。
@@ -53,7 +54,7 @@ function renderThreadRows(element, html) {
   renderedHtml.set(element, html);
 }
 function refreshDelay() {
-  return viewState.error || viewState.threads.some((thread) => !TERMINAL_STATUSES.has(thread.status) && thread.status !== "paused") ? 4000 : 30000;
+  return viewState.error || viewState.threads.some((thread) => !TERMINAL_STATUSES.has(thread.status) && thread.status !== "paused") ? 4000 : TERMINAL_DETAIL_REFRESH_MS;
 }
 function scheduleRefresh() {
   if (refreshTimer) clearTimeout(refreshTimer);
@@ -179,8 +180,9 @@ async function loadThreads({ background = false } = {}) {
   const selected = threads.find((thread) => thread.thread_id === viewState.selectedId);
   const changed = JSON.stringify(previous) !== JSON.stringify(selected);
   if (viewState.selectedId) {
-    // 终态详情在列表快照未变化时不再请求五个详情接口；列表仍低频探测新增任务。
-    if (!background || !viewState.detail || viewState.error || changed || viewState.detail.status !== selected?.status || !TERMINAL_STATUSES.has(selected?.status)) await loadDetail(viewState.selectedId, { background });
+    // 产物可能晚于终态写入且不改变列表快照，因此详情独立低频复核，不跟随活任务每轮重读。
+    const detailExpired = viewState.syncedThreadId !== viewState.selectedId || Date.now() - viewState.syncedAt >= TERMINAL_DETAIL_REFRESH_MS;
+    if (!background || !viewState.detail || viewState.error || changed || detailExpired || viewState.detail.status !== selected?.status || !TERMINAL_STATUSES.has(selected?.status)) await loadDetail(viewState.selectedId, { background });
   } else renderEmptyDetail();
 }
 
@@ -206,7 +208,7 @@ async function loadDetail(threadId, { background = false } = {}) {
     viewState.eventsThreadId = threadId; viewState.eventsInitialized = true;
     viewState.artifacts = Array.isArray(artifacts.artifacts) ? artifacts.artifacts : [];
     viewState.approvals = Array.isArray(approvals.approvals) ? approvals.approvals : [];
-    viewState.error = ""; viewState.actionMessage = ""; viewState.syncedAt = Date.now(); renderDetail();
+    viewState.error = ""; viewState.actionMessage = ""; viewState.syncedAt = Date.now(); viewState.syncedThreadId = threadId; renderDetail();
   } catch (error) {
     if (requestId === viewState.detailRequest && viewState.selectedId === threadId && state.appView === "super-agent") { viewState.error = error.message || "读取任务失败"; renderSyncStatus(); }
   } finally { if (requestId === viewState.detailRequest) { viewState.loading = false; renderSyncStatus(); } }
@@ -525,10 +527,10 @@ function renderFocus(detail, nodes, currentNodeId) {
   if (pendingCount) {
     eyebrow = "现在需要你确认"; heading = `有 ${pendingCount} 项操作等待你确认`; tone = "wait";
     message = "确认后任务才会继续推进；每一项都写明了会执行什么。";
-  } else if (jobMirror && !TERMINAL_STATUSES.has(status)) {
+  } else if (jobMirror) {
     eyebrow = "后台任务进展"; heading = statusLabel(status);
     message = "这里同步原任务的实际进展；暂停、重试与详细记录请回到原任务处理。";
-    tone = status === "active" ? "run" : status === "needs_recovery" ? "wait" : "idle";
+    tone = status === "completed" ? "ok" : status === "failed" ? "bad" : status === "active" ? "run" : status === "needs_recovery" ? "wait" : "idle";
   } else if (status === "completed") {
     eyebrow = "任务已完成"; heading = detail.supervision ? "目标完成" : "全部步骤已完成"; tone = "ok";
     message = "结果保留在最近产物里；需要继续处理时，可以复制内容新建任务，不会改动已有结果。";

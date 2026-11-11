@@ -16,7 +16,7 @@
 
 import { $, api, applyModelSkinFor, state, toast } from "./01-core.js";
 import { onStudioPageChange, setStudioPage } from "./22-studio.js";
-import { bindWorkbenchMenu, watchWorkbenchSize, workbenchWidth } from "./22a-workbench-ui.js";
+import { bindWorkbenchDialogReturn, bindWorkbenchMenu, watchWorkbenchSize, workbenchWidth } from "./22a-workbench-ui.js";
 
 // 与服务端一致的上限（前端只做提前提示，服务端仍逐项校验）。
 const MAX_FILE_BYTES = 60 * 1024 * 1024;
@@ -3487,6 +3487,8 @@ export function bindNovelEvents() {
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.setAttribute("open", "");
   });
+  bindWorkbenchDialogReturn($("#novelBooksDialog"), $("#novelBookMenuBtn"));
+  bindWorkbenchDialogReturn($("#novelManageDialog"), $("#novelMoreBtn"));
   $("#novelBooksClose")?.addEventListener("click", () => {
     const dialog = $("#novelBooksDialog");
     if (!dialog) return;

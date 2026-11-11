@@ -69,6 +69,14 @@ fs.mkdirSync(output,{recursive:true});
         await page.locator('#'+prefix+'BooksBtn').click();
         await page.waitForSelector('#'+prefix+'BooksDialog[open]');
         await page.locator('#'+prefix+'BooksClose').click();
+        await page.waitForFunction(prefix=>document.activeElement.id===prefix+'BookMenuBtn',prefix);
+        // 键盘进入作品列表并用 Escape 关闭，也必须返回可见的书名入口。
+        await page.keyboard.press('Enter');
+        await page.waitForSelector('#'+prefix+'BookMenu');
+        await page.keyboard.press('Enter');
+        await page.waitForSelector('#'+prefix+'BooksDialog[open]');
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(prefix=>document.activeElement.id===prefix+'BookMenuBtn',prefix);
         await page.locator('#'+prefix+'MoreBtn').click();
         const anchorRect=await page.locator('#'+prefix+'MoreBtn').boundingBox();
         await page.locator('#'+prefix+'ExportBtn').click();
@@ -97,6 +105,7 @@ fs.mkdirSync(output,{recursive:true});
           await page.locator('#writerNovelContinueBtn').click();
           await page.waitForSelector('#writerNovelImportDialog[open]');
           await page.locator('#writerNovelImportClose').click();
+          await page.waitForFunction(()=>document.activeElement.id==='writerBookMenuBtn');
         }
         await page.screenshot({path:path.join(output,`${prefix}-${width}.png`)});
         assert.deepEqual(errors,[]);

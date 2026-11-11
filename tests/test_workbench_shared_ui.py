@@ -89,6 +89,27 @@ panelHandlers.keydown({key:'Escape',preventDefault(){prevented++;},stopPropagati
 assert.equal(panel.hidden,true);assert.equal(stopped,1);assert.equal(prevented,1);assert.equal(restored,1);
 """)
 
+    def test_dialog_returns_lost_focus_without_stealing_other_focus(self):
+        self.run_js("""
+let closed, bindings=0, focused=0, otherDialog=null, hidden=false, visible=true;
+const body={},dialog={contains:el=>el?.insideDialog,addEventListener:(name,handler)=>{assert.equal(name,'close');bindings++;closed=handler;}};
+const trigger={isConnected:true,disabled:false,closest:()=>hidden?{}:null,
+  getClientRects:()=>visible?[{}]:[],checkVisibility:()=>visible,
+  focus:options=>{assert.equal(options.preventScroll,true);focused++;document.activeElement=trigger;}};
+globalThis.document={body,documentElement:{},activeElement:body,querySelector:()=>otherDialog};
+ui.bindWorkbenchDialogReturn(dialog,trigger);ui.bindWorkbenchDialogReturn(dialog,trigger);
+assert.equal(bindings,1,'重复接线不得叠加回焦');closed();assert.equal(focused,1);
+document.activeElement={isConnected:true};closed();assert.equal(focused,1,'不抢用户另选的控件');
+document.activeElement=body;otherDialog={open:true};closed();assert.equal(focused,1,'不抢接力弹窗焦点');
+otherDialog=null;hidden=true;closed();assert.equal(focused,1,'隐藏或inert页面不得回焦');
+hidden=false;visible=false;closed();assert.equal(focused,1,'不可见按钮不得回焦');
+visible=true;trigger.disabled=true;closed();assert.equal(focused,1);
+trigger.disabled=false;trigger.isConnected=false;closed();assert.equal(focused,1);
+trigger.isConnected=true;document.activeElement={insideDialog:true,isConnected:true};closed();assert.equal(focused,2);
+document.activeElement={isConnected:false};closed();assert.equal(focused,3);
+ui.bindWorkbenchDialogReturn(null,trigger);ui.bindWorkbenchDialogReturn(dialog,null);
+""")
+
 
 class WorkbenchScopeTests(unittest.TestCase):
     def test_hidden_fix_is_local_and_preserves_labeler_pages(self):

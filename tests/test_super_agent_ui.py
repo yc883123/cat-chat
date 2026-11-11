@@ -23,7 +23,9 @@ class SuperAgentUITests(unittest.TestCase):
         sidebar = html[html.index('<aside class="sidebar"'):html.index("</aside>")]
         self.assertIn('id="openSuperAgent"', sidebar)
         view = html[html.index('<section class="super-agent-view"'):html.index('<section class="composer-wrap">')]
-        for marker in ("superAgentThreadList", "superAgentDetail", "superAgentNodeList", "superAgentEventList", "superAgentApprovalList", "superAgentArtifactList"):
+        self.assertIn('id="superAgentThreadList"', sidebar)
+        self.assertNotIn('id="superAgentThreadList"', view)
+        for marker in ("superAgentDetail", "superAgentNodeList", "superAgentEventList", "superAgentApprovalList", "superAgentArtifactList"):
             self.assertIn(f'id="{marker}"', view)
 
     def test_legacy_tasks_dialog_is_preserved_with_explicit_handoff(self) -> None:
@@ -122,13 +124,13 @@ class SuperAgentUITests(unittest.TestCase):
         # （job / subagent 的步骤卡会隐藏，不能绑在子容器上）。
         self.assertEqual(source.count('$("#superAgentView")?.addEventListener("click"'), 1)
         self.assertEqual(source.count('$("#superAgentNodeList")?.addEventListener("click"'), 0)
-        self.assertNotIn("setLeftSidebarCollapsed", source)
+        self.assertIn("setLeftSidebarCollapsed(false)", source)
         self.assertNotIn("superAgentCreateInstruction", html + source)
         self.assertIn('id="superAgentAppNav"', html)
-        self.assertIn('data-super-view="chat"', html)
-        self.assertIn('data-super-view="studio"', html)
-        self.assertIn('body[data-app-view="super-agent"] .app-shell.file-panel-open { grid-template-columns: minmax(0, 1fr); }', css)
-        self.assertIn('body[data-app-view="super-agent"] .sidebar,', css)
+        self.assertIn('id="sidebarSuperAgentNav"', html)
+        self.assertIn('id="superAgentOpenSidebar"', html)
+        self.assertIn('body[data-app-view="super-agent"] .app-shell.file-panel-open { grid-template-columns: var(--sidebar-col) minmax(0, 1fr); }', css)
+        self.assertNotIn('body[data-app-view="super-agent"] .sidebar,', css)
         self.assertIn('id="superAgentCreateModelOptions"', html)
         self.assertIn('id="superAgentCreateMixedOptions"', html)
         self.assertIn('message: goal', source)

@@ -9,6 +9,7 @@
 import { $, $$, api, applyModelSkinFor, state, toast, triggerDownload } from "./01-core.js";
 import { fileUrl, isPywebview } from "./03-media.js";
 import { currentStudioPage, onStudioPageChange } from "./22-studio.js";
+import { bindWorkbenchDetails, watchWorkbenchSize, workbenchWidth } from "./22a-workbench-ui.js";
 
 // ---- 与服务端一致的批量上限（前端只做提前提示，服务端仍逐项校验） ----
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
@@ -1175,7 +1176,8 @@ async function startTask() {
     renderTask(task);
     await refreshBatches();
     startPolling();
-    if (window.matchMedia("(max-width: 760px)").matches) setLabelerPane("results");
+    const width = workbenchWidth($("#studioPageLabeler"));
+    if (width > 0 && width < 1120) setLabelerPane("results");
     setHint("");
   } catch (error) {
     setHint(`提交失败：${error.message}`, true);
@@ -1444,6 +1446,7 @@ function renderBatches() {
     title.textContent = String(task.label || task.id || "批次");
     const state = document.createElement("span");
     state.className = "labeler-batch-state";
+    state.dataset.state = String(task.status || "unknown");
     state.textContent = STATUS_LABELS[task.status] || String(task.status || "");
     top.append(title, state);
     const meta = document.createElement("div");
@@ -1882,6 +1885,7 @@ function renderImageResults(body) {
     name.title = displayName;
     const state = document.createElement("span");
     state.className = "labeler-anno-state";
+    state.dataset.state = String(item.state || "unknown");
     const concurrentTask = Boolean(labeler.task?.concurrency_enabled);
     let label = ITEM_STATE_LABELS[item.state] || item.state;
     if (item.state === "running" && item.phase === "labeling") label = "打标中";
@@ -2268,6 +2272,8 @@ async function openExportFolder() {
 // ============================================================
 
 export function bindLabelerEvents() {
+  watchWorkbenchSize($("#studioPageLabeler"), () => {}, { wide: 1120, narrow: 720 });
+  bindWorkbenchDetails($("#studioPageLabeler"));
   const dropzone = $("#labelerDropzone");
   const folderInput = $("#labelerFolderInput");
   if (dropzone) {

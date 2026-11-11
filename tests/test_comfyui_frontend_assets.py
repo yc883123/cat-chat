@@ -202,7 +202,8 @@ assert.ok(!job.includes('track-node'), 'job 是只读镜像，不出现本地步
 const approvals=[{approval_id:'ap1',status:'pending',action:'写入文件',description:'保存润色稿'}];
 const sub=marksFor('subagent',{goal:'整理三章'},subNodes,[],approvals);
 assert.ok(sub.includes('instruction')&&sub.includes('delegate-grid')&&sub.includes('approval')&&sub.includes('param-mask'));
-assert.ok(sub.includes('data-super-approval-id="ap1"'));
+assert.ok(!sub.includes('data-super-approval-id="ap1"'), '审批按钮只保留在首屏主操作卡');
+assert.ok(sub.includes('上方主操作卡'));
 // 回退：未知类型不渲染内容区。
 marksFor('',{goal:'g'},[node({executor_type:'legacy'})],[]);
 assert.equal($('#superAgentContentZone').hidden,true);

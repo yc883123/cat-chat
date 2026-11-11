@@ -3,7 +3,7 @@
 // ============================================================
 
 import { $, api, copyText, escapeHtml, localFileUrl, setAppView, state, toast } from "./01-core.js";
-import { closeSidebar, sidebarDesktop } from "./14-file-panel.js";
+import { closeSidebar, openSidebar, setLeftSidebarCollapsed, sidebarDesktop } from "./14-file-panel.js";
 import { closeStudioView, openStudioView, setStudioPage } from "./22-studio.js";
 import { openConversation } from "./08-conversations.js";
 
@@ -11,6 +11,7 @@ const viewState = {
   open: false, selectedId: "", threads: [], detail: null, nodes: [], events: [], artifacts: [], approvals: [],
   eventCursor: 0, eventsThreadId: "", eventsInitialized: false,
   loading: false, error: "", actionMessage: "", syncedAt: 0, filter: "all", multiSelect: false, deleteSelection: new Set(), resultRequest: 0,
+  listRequest: 0, detailRequest: 0,
 };
 
 const createModelState = { requestId: 0, loading: false, submitting: false };
@@ -22,15 +23,47 @@ const actionRequests = new Map();
 const actionInFlight = new Set();
 const confirmationNotices = new Map();
 let refreshTimer = null;
+const TERMINAL_STATUSES = new Set(["completed", "cancelled", "failed", "archived"]);
+const renderedHtml = new WeakMap();
+let detailRenderSignature = "";
+// 轮询只替换真正变化的分区，避免销毁键盘焦点、文字选区及已展开内容。
+function renderHtml(element, html) {
+  if (!element || renderedHtml.get(element) === html) return;
+  element.innerHTML = html;
+  renderedHtml.set(element, html);
+}
+function renderText(element, value) {
+  if (element && element.textContent !== String(value)) element.textContent = String(value);
+}
+function renderThreadRows(element, html) {
+  if (!element || renderedHtml.get(element) === html) return;
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const previous = new Map(Array.from(element.children || []).map((row) => [row.dataset.threadRow, row]));
+  Array.from(template.content.children).forEach((incoming, index) => {
+    const key = incoming.dataset.threadRow;
+    const existing = previous.get(key);
+    // 其他任务的状态变化不重建本行，键盘仍停在原来的任务按钮上。
+    const row = existing && existing.outerHTML === incoming.outerHTML ? existing : incoming;
+    if (existing && row !== existing) existing.replaceWith(row);
+    if (element.children[index] !== row) element.insertBefore(row, element.children[index] || null);
+    previous.delete(key);
+  });
+  previous.forEach((row) => row.remove());
+  renderedHtml.set(element, html);
+}
+function refreshDelay() {
+  return viewState.error || viewState.threads.some((thread) => !TERMINAL_STATUSES.has(thread.status) && thread.status !== "paused") ? 4000 : 30000;
+}
 function scheduleRefresh() {
   if (refreshTimer) clearTimeout(refreshTimer);
   refreshTimer = setTimeout(async () => {
     refreshTimer = null;
     if (state.appView !== "super-agent") return;
-    try { if (!viewState.loading && !createModelState.submitting && document.visibilityState !== "hidden") await loadThreads(); }
+    try { if (!viewState.loading && !createModelState.submitting && document.visibilityState !== "hidden") await loadThreads({ background: true }); }
     catch (error) { viewState.error = error.message || "刷新任务失败"; renderSyncStatus(); }
     finally { if (state.appView === "super-agent") scheduleRefresh(); }
-  }, 4000);
+  }, refreshDelay());
 }
 const CHAINS = { writer: ["setup", "outline", "chapter_plan", "chapter_content"], novel: ["import", "elements", "outline", "screenplay", "review"] };
 const SINGLE_STAGES = { writer: { setup_all: "全部设定", outline_all: "全部大纲", split: "拆章", chapter: "单章正文" }, novel: { elements: "提取要素", outline: "改编大纲", script: "生成剧本" } };
@@ -41,7 +74,7 @@ function chapterNumber(row) { return Number(row?.i ?? row?.no ?? row?.chapter_no
 
 const STATUS_LABELS = {
   draft: "草稿", active: "进行中", waiting_user: "等待确认", paused: "已暂停", cancelled: "已取消",
-  completed: "已完成", failed: "失败", needs_recovery: "待恢复", archived: "已归档", pending: "待处理",
+  completed: "已完成", failed: "失败", needs_recovery: "需要处理", archived: "已归档", pending: "待处理",
   ready: "就绪", running: "运行中", stopping: "停止中", succeeded: "已完成", blocked: "已阻塞", interrupted: "已中断",
   not_executed: "未执行", unavailable: "不可用", unknown: "状态未知",
 };
@@ -130,9 +163,12 @@ async function deleteSelectedThreads() {
   await loadThreads();
   toast(failed.length ? `已删除 ${ids.length - failed.length} 个任务；${failed.length} 个失败：${failed.join("；")}` : `已删除 ${ids.length} 个任务`);
 }
-async function loadThreads() {
+async function loadThreads({ background = false } = {}) {
+  const requestId = ++viewState.listRequest;
   // 含归档一次拉回：删除 / 恢复都在列表层完成（§5.1），各筛选前端分流。
   const result = await api("/api/super-agent/threads?include_archived=1");
+  if (requestId !== viewState.listRequest || state.appView !== "super-agent") return;
+  const previous = viewState.threads.find((thread) => thread.thread_id === viewState.selectedId);
   viewState.threads = Array.isArray(result.threads) ? result.threads : [];
   const threads = filteredThreads();
   if (!viewState.selectedId || !threads.some((item) => item.thread_id === viewState.selectedId)) {
@@ -140,12 +176,18 @@ async function loadThreads() {
     viewState.detail = null; viewState.nodes = []; renderEmptyDetail();
   }
   renderThreadList();
-  if (viewState.selectedId) await loadDetail(viewState.selectedId); else renderEmptyDetail();
+  const selected = threads.find((thread) => thread.thread_id === viewState.selectedId);
+  const changed = JSON.stringify(previous) !== JSON.stringify(selected);
+  if (viewState.selectedId) {
+    // 终态详情在列表快照未变化时不再请求五个详情接口；列表仍低频探测新增任务。
+    if (!background || !viewState.detail || viewState.error || changed || viewState.detail.status !== selected?.status || !TERMINAL_STATUSES.has(selected?.status)) await loadDetail(viewState.selectedId, { background });
+  } else renderEmptyDetail();
 }
 
-async function loadDetail(threadId) {
+async function loadDetail(threadId, { background = false } = {}) {
   if (!threadId) return;
-  viewState.loading = true; renderSyncStatus();
+  const requestId = ++viewState.detailRequest;
+  viewState.loading = true; if (!background) renderSyncStatus();
   try {
     const encoded = encodeURIComponent(threadId);
     const firstLoad = viewState.eventsThreadId !== threadId || !viewState.eventsInitialized;
@@ -155,7 +197,7 @@ async function loadDetail(threadId) {
       api(`/api/super-agent/threads/${encoded}`), api(`/api/super-agent/threads/${encoded}/nodes`), eventRequest,
       api(`/api/super-agent/threads/${encoded}/artifacts`), api(`/api/super-agent/threads/${encoded}/approvals`),
     ]);
-    if (viewState.selectedId !== threadId) return;
+    if (viewState.selectedId !== threadId || requestId !== viewState.detailRequest || state.appView !== "super-agent") return;
     viewState.detail = thread.thread || null;
     viewState.nodes = Array.isArray(nodes.nodes) ? nodes.nodes : [];
     const incomingEvents = Array.isArray(events.events) ? events.events : [];
@@ -165,8 +207,9 @@ async function loadDetail(threadId) {
     viewState.artifacts = Array.isArray(artifacts.artifacts) ? artifacts.artifacts : [];
     viewState.approvals = Array.isArray(approvals.approvals) ? approvals.approvals : [];
     viewState.error = ""; viewState.actionMessage = ""; viewState.syncedAt = Date.now(); renderDetail();
-  } catch (error) { viewState.error = error.message || "读取任务失败"; renderSyncStatus(); }
-  finally { viewState.loading = false; renderSyncStatus(); }
+  } catch (error) {
+    if (requestId === viewState.detailRequest && viewState.selectedId === threadId && state.appView === "super-agent") { viewState.error = error.message || "读取任务失败"; renderSyncStatus(); }
+  } finally { if (requestId === viewState.detailRequest) { viewState.loading = false; renderSyncStatus(); } }
 }
 
 function filteredThreads() {
@@ -181,46 +224,53 @@ function filteredThreads() {
 function renderThreadList() {
   const list = $("#superAgentThreadList"); if (!list) return;
   const threads = filteredThreads();
-  $("#superAgentThreadCount").textContent = String(threads.length);
+  renderText($("#superAgentThreadCount"), threads.length);
   $("#superAgentThreadEmpty").hidden = threads.length > 0;
-  $("#superAgentThreadEmpty").textContent = viewState.threads.length ? "没有符合筛选条件的任务。" : "还没有任务，先新建一个吧。";
+  renderText($("#superAgentThreadEmpty"), viewState.threads.length ? "没有符合筛选条件的任务。" : "还没有任务，先新建一个吧。");
   $("#superAgentFilters")?.querySelectorAll("[data-super-filter]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.superFilter === viewState.filter)));
   $("#superAgentFilters")?.querySelectorAll("[data-super-filter]").forEach((button) => {
     const filter = button.dataset.superFilter;
     const count = viewState.threads.filter((thread) => filter === "waiting" ? thread.status === "waiting_user" : filter === "completed" ? thread.status === "completed" : filter === "archived" ? thread.status === "archived" : thread.status !== "archived").length;
-    button.textContent = `${({ all: "全部", waiting: "待确认", completed: "已完成", archived: "已归档" })[filter]} ${count}`;
+    renderText(button, `${({ all: "全部", waiting: "待确认", completed: "已完成", archived: "已归档" })[filter]} ${count}`);
   });
   // 删除入口在统一壳/列表层，六类任务一套实现（§5.1）。
   $("#superAgentMultiToggle").hidden = viewState.multiSelect || !threads.length;
   const bar = $("#superAgentBatchBar");
   if (bar) {
     bar.hidden = !viewState.multiSelect;
-    $("#superAgentBatchCount").textContent = `已选 ${viewState.deleteSelection.size} 项`;
+    renderText($("#superAgentBatchCount"), `已选 ${viewState.deleteSelection.size} 项`);
     const selectAll = $("#superAgentSelectAll");
     if (selectAll) selectAll.checked = threads.length > 0 && threads.every((thread) => viewState.deleteSelection.has(thread.thread_id) || ["active", "stopping"].includes(thread.status));
   }
-  list.innerHTML = threads.map((thread) => {
+  renderThreadRows(list, threads.map((thread) => {
     const busy = ["active", "stopping"].includes(thread.status);
-    return `<div class="super-agent-thread-row${viewState.multiSelect ? " selecting" : ""}">
+    return `<div class="super-agent-thread-row${viewState.multiSelect ? " selecting" : ""}" data-thread-row="${text(thread.thread_id)}">
       ${viewState.multiSelect ? `<input type="checkbox" class="super-agent-thread-check" data-thread-check="${text(thread.thread_id)}" ${viewState.deleteSelection.has(thread.thread_id) ? "checked" : ""} ${busy ? "disabled" : ""} aria-label="选择任务">` : ""}
       <button class="super-agent-thread ${thread.thread_id === viewState.selectedId ? "active" : ""}" type="button" data-super-thread="${text(thread.thread_id)}">
-        <strong><i class="super-agent-task-icon" aria-hidden="true">▤</i>${text(thread.title, "未命名任务")}</strong><span class="super-agent-task-state" data-status="${text(thread.status)}"><i aria-hidden="true"></i>${text(statusLabel(thread.status))}</span><small>${text(thread.goal, "暂无目标")}</small>
+        <strong title="${text(thread.title, "未命名任务")}"><i class="super-agent-task-icon" aria-hidden="true">▤</i>${text(thread.title, "未命名任务")}</strong><span class="super-agent-task-state" data-status="${text(thread.status)}"><i aria-hidden="true"></i>${text(statusLabel(thread.status))}</span>
       </button>
       ${thread.status === "archived" ? `<button class="super-agent-thread-act" type="button" data-thread-restore="${text(thread.thread_id)}" ${viewState.multiSelect ? "hidden" : ""}>恢复</button>` : ""}
       <button class="super-agent-thread-act is-danger" type="button" data-thread-delete="${text(thread.thread_id)}" ${viewState.multiSelect ? "hidden" : ""} aria-label="删除任务">✕</button>
     </div>`;
-  }).join("");
+  }).join(""));
 }
 
 function renderEmptyDetail() {
+  detailRenderSignature = "";
+  renderText($("#superAgentTitle"), "任务进展与结果");
+  renderText($("#superAgentCrumbTitle"), "任务进展与结果");
+  const status = $("#superAgentStatus");
+  if (status) { renderText(status, ""); status.dataset.status = ""; status.hidden = true; }
   $("#superAgentDetailEmpty").hidden = false; $("#superAgentDetail").hidden = true;
   $("#superAgentDetail").dataset.threadId = "";
-  $("#superAgentApprovalList").innerHTML = "";
-  $("#superAgentArtifactList").innerHTML = '<p class="super-agent-muted">暂无产物。</p>';
-  if ($("#superAgentNodeList")) $("#superAgentNodeList").innerHTML = '<p class="super-agent-muted">暂无步骤。</p>';
-  $("#superAgentChatConfirmationList").innerHTML = "";
-  $("#superAgentNextStep").innerHTML = '<p class="super-agent-muted">选择任务后查看下一步。</p>';
-  $("#superAgentConversationLinks").innerHTML = "";
+  renderHtml($("#superAgentApprovalList"), "");
+  renderHtml($("#superAgentArtifactList"), '<p class="super-agent-muted">暂无产物。</p>');
+  renderHtml($("#superAgentNodeList"), '<p class="super-agent-muted">暂无步骤。</p>');
+  renderHtml($("#superAgentChatConfirmationList"), "");
+  renderHtml($("#superAgentNextStep"), '<p class="super-agent-muted">选择任务后查看下一步。</p>');
+  renderHtml($("#superAgentConversationLinks"), "");
+  if ($("#superAgentRelatedSection")) $("#superAgentRelatedSection").hidden = true;
+  if ($("#superAgentOverview")) $("#superAgentOverview").hidden = true;
   $("#superAgentSupervision").hidden = true;
   const stageSection = $("#superAgentStageSection"); if (stageSection) stageSection.hidden = false;
   const focus = $("#superAgentFocus"); if (focus) focus.hidden = true;
@@ -243,7 +293,7 @@ function renderSupervision(detail) {
   const host = $("#superAgentSupervision");
   const supervision = detail.supervision;
   host.hidden = !supervision;
-  if (!supervision) { host.innerHTML = ""; return; }
+  if (!supervision) { renderHtml(host, ""); return; }
   const criteria = supervision.criteria || supervision.completion_criteria || [];
   const rounds = Array.isArray(supervision.rounds) ? supervision.rounds : [];
   const usage = supervision.token_usage;
@@ -254,7 +304,7 @@ function renderSupervision(detail) {
     const criterion = item.criterion ?? item.text ?? item.criterion_id ?? item.index;
     return Number.isInteger(criterion) ? criteria[criterion] || `标准 ${criterion + 1}` : criterion;
   };
-  host.innerHTML = `<div class="super-agent-section-title"><h2>自动检查与续办</h2><strong data-supervision-phase="${text(supervision.phase)}">${text(supervisionPhase(supervision))}</strong></div>
+  renderHtml(host, `<div class="super-agent-section-title"><h2>自动检查与续办</h2><strong data-supervision-phase="${text(supervision.phase)}">${text(supervisionPhase(supervision))}</strong></div>
     <p class="super-agent-muted">已执行 ${Number(supervision.round || 0)} / ${Number(supervision.max_rounds || 1)} 轮 · 剩余补做 ${Number(supervision.remaining_continuations ?? 0)} 次 · 已检查 ${Number(supervision.review_count || 0)} 次</p>
     <p class="super-agent-muted">截止时间：${text(formatTime(supervision.deadline_at))} · Token 用量：${text(usageText)}</p>
     ${supervision.review_attempt_count != null ? `<p class="super-agent-muted">审查调用 ${Number(supervision.review_attempt_count)} 次 · 内部重试 ${supervision.review_retry_count == null ? "未知" : Number(supervision.review_retry_count)} 次${usage && typeof usage === "object" ? ` · 执行 tokens：${usage.execution_tokens ?? "未知"} · 审查 tokens：${usage.review_tokens ?? "未知"}` : ""}</p>` : ""}
@@ -275,7 +325,7 @@ function renderSupervision(detail) {
         ${review.next_instruction ? `<div class="super-agent-next-instruction"><strong>自动补做指令</strong><p>${text(review.next_instruction)}</p></div>` : ""}
         ${review.user_question ? `<p class="super-agent-user-question">需要你处理：${text(review.user_question)}</p>` : ""}
         ${round.run_id ? '<small>本轮执行记录已保留，可回到关联会话查看完整对话。</small>' : ""}</div></details>`;
-    }).join("") || '<p class="super-agent-muted">开始后在这里保留每轮结果与检查依据。</p>'}</div>`;
+    }).join("") || '<p class="super-agent-muted">开始后在这里保留每轮结果与检查依据。</p>'}</div>`);
 }
 
 // ---- 六类内容区（§四 4.1；2026-11-05 修复 B）：「一壳三芯」——统一壳（标题 /
@@ -338,7 +388,7 @@ function zoneWriterMarkup(detail, nodes, currentNodeId, artifacts) {
     ${zoneTrackMarkup(nodes, currentNodeId)}
     ${grid ? `${zoneSecHead("章节进度", `已写 ${chapterNos.length} 章`)}${grid}` : ""}
     ${zoneRowList(rows)}
-    <p class="hint">写到第几章、哪一章还没写，才是这类任务真正要看的进度；不是笼统的「第 N / M 步」。</p>`;
+    <p class="hint">章节进度只统计已经生成并保存的正文。</p>`;
 }
 function zoneNovelMarkup(detail, nodes, currentNodeId, artifacts) {
   const gates = ["import", "review"];
@@ -365,7 +415,7 @@ function zoneJobMarkup(detail, nodes) {
   return `<div class="mirror-banner"><b>这是已有后台任务的只读视图。</b>任务总管只读取它的真实状态，不会重新启动、暂停或改写它；下面没有本地步骤链，因为本来就不由总管驱动。</div>
     ${zoneSecHead("关联的后台任务", jobIds.length ? `关联 ${jobIds.length} 个后台任务` : "来源：已有后台任务")}
     <div class="source-card"><span class="source-ico" aria-hidden="true">▤</span><div><b>${text(sourceNode ? nodeDisplayName(sourceNode) : "后台任务", "后台任务")}</b><p>${text(formatTime(detail.updated_at))} 同步 · 以原任务记录为准</p></div>${statusPill(detail.status)}</div>
-    <p class="hint">这类任务不需要「暂停 / 重试」：那会让用户误以为总管在控制它。要看细节请回原任务${sourceProgress ? "；本任务已全部完成" : ""}。</p>`;
+    <p class="hint">暂停、重试与详细记录请回到原任务处理${sourceProgress ? "；本任务已全部完成" : ""}。</p>`;
 }
 function zoneSubagentMarkup(detail, nodes, approvals) {
   const items = nodes.filter((node) => node.executor_type === "subagent");
@@ -373,13 +423,13 @@ function zoneSubagentMarkup(detail, nodes, approvals) {
   return `<div class="instruction"><small>交给子助手的要求</small>${text(detail.goal || "未填写指令")}</div>
     ${zoneSecHead("子助手分工", `${items.length} 个 · 结果各自回传本任务`)}
     <div class="delegate-grid">${items.map((node, index) => `<div class="delegate"><div class="delegate-top"><span class="delegate-ico" aria-hidden="true">助</span><b>子助手 ${index + 1}</b></div><p>${node.error ? text(node.error) : text(nodeDisplayName(node))}</p><div class="dfoot">${statusPill(node.status)}<span class="tag">${node.status === "succeeded" ? "已回传" : "等待回传"}</span></div></div>`).join("")}</div>
-    ${pending.length ? `<div class="approval"><b>等待你确认 · ${pending.length} 项操作</b><p>${text(pending[0].action, "待确认操作")} · ${text(pending[0].description, "请核对本次操作。")}</p><div class="param-mask">参数已按白名单脱敏，这里不展示原始路径与内容。</div><div class="acts">${pending.map((item) => `<button type="button" class="control-button tiny" data-super-approval="approved" data-super-approval-id="${text(item.approval_id)}">批准</button><button type="button" class="control-button tiny" data-super-approval="rejected" data-super-approval-id="${text(item.approval_id)}">拒绝</button>`).join("")}</div><p class="hint">全部待确认操作也列在上方「现在需要你确认」区。</p></div>` : ""}`;
+    ${pending.length ? `<div class="approval"><p class="hint">有 ${pending.length} 项操作需要确认，请在上方主操作卡核对后处理。</p><div class="param-mask">参数已按白名单脱敏，这里不展示原始路径与内容。</div></div>` : ""}`;
 }
 function renderContentZone(kind, detail, nodes, currentNodeId) {
   const host = $("#superAgentContentZone");
   if (!host) return;
   host.hidden = !kind;
-  if (!kind) { host.innerHTML = ""; return; }
+  if (!kind) { renderHtml(host, ""); return; }
   const artifacts = viewState.artifacts || [];
   const bodies = {
     writer: () => zoneWriterMarkup(detail, nodes, currentNodeId, artifacts),
@@ -388,7 +438,7 @@ function renderContentZone(kind, detail, nodes, currentNodeId) {
     job: () => zoneJobMarkup(detail, nodes),
     subagent: () => zoneSubagentMarkup(detail, nodes, viewState.approvals || []),
   };
-  host.innerHTML = `<span class="zone-tag"><i aria-hidden="true"></i>${text(({ writer: "内容区 A · 章节链", novel: "内容区 B · 原文到剧本", chat: "内容区 D · 执行轮次", job: "内容区 E · 只读镜像", subagent: "内容区 F · 分工与回传" })[kind] || "任务内容区")}</span>${bodies[kind] ? bodies[kind]() : ""}`;
+  renderHtml(host, `<span class="zone-tag"><i aria-hidden="true"></i>${text(({ writer: "章节创作", novel: "原文到剧本", chat: "执行方式", job: "后台任务进展", subagent: "分工与回传" })[kind] || "任务内容")}</span>${bodies[kind] ? bodies[kind]() : ""}`);
 }
 
 function progressHintFor(kind, detail) {
@@ -404,34 +454,34 @@ function progressHintFor(kind, detail) {
 function renderOverview(detail, nodes, currentNodeId, zoneKind = "") {
   const completed = nodes.filter((node) => node.status === "succeeded").length;
   const current = nodes.find((node) => node.node_id === currentNodeId) || nodes.find((node) => !["succeeded", "cancelled"].includes(node.status));
-  $("#superAgentProgressHint").textContent = progressHintFor(zoneKind, detail);
-  $("#superAgentProgressText").textContent = nodes.length ? `${completed} / ${nodes.length} 步已完成` : "暂无步骤";
+  renderText($("#superAgentProgressHint"), progressHintFor(zoneKind, detail));
+  renderText($("#superAgentProgressText"), nodes.length ? `${completed} / ${nodes.length} 步已完成` : "暂无步骤");
   const progress = $("#superAgentProgress"); progress.hidden = !nodes.length; progress.max = nodes.length || 1; progress.value = completed;
-  $("#superAgentCurrentStage").textContent = current ? nodeDisplayName(current) : detail.status === "completed" ? "全部完成" : "暂无进行中的步骤";
-  $("#superAgentCurrentHint").textContent = current ? statusLabel(current.status) : "";
+  renderText($("#superAgentCurrentStage"), current ? nodeDisplayName(current) : detail.status === "completed" ? "全部完成" : "暂无进行中的步骤");
+  renderText($("#superAgentCurrentHint"), current ? statusLabel(current.status) : "");
   if (detail.supervision) {
-    $("#superAgentCurrentStage").textContent = supervisionPhase(detail.supervision);
-    $("#superAgentCurrentHint").textContent = "每轮结束后按完成标准检查";
+    renderText($("#superAgentCurrentStage"), supervisionPhase(detail.supervision));
+    renderText($("#superAgentCurrentHint"), "每轮结束后按完成标准检查");
     $("#superAgentProgress").hidden = true;
-    $("#superAgentProgressText").textContent = `已执行 ${Number(detail.supervision.round || 0)} 轮 · 已检查 ${Number(detail.supervision.review_count || 0)} 次`;
+    renderText($("#superAgentProgressText"), `已执行 ${Number(detail.supervision.round || 0)} 轮 · 已检查 ${Number(detail.supervision.review_count || 0)} 次`);
   }
-  $("#superAgentUpdatedAt").textContent = formatTime(detail.updated_at || viewState.events.at(-1)?.created_at);
+  renderText($("#superAgentUpdatedAt"), formatTime(detail.updated_at || viewState.events.at(-1)?.created_at));
   const next = nodes.find((node) => ["ready", "pending", "blocked"].includes(node.status) && node.node_id !== currentNodeId);
   const confirmations = Array.isArray(detail.chat_confirmations) ? detail.chat_confirmations : [];
   const pending = confirmations.some((item) => item.status === "pending") || viewState.approvals.some((item) => item.status === "pending");
   const settled = ["completed", "cancelled", "failed", "archived"].includes(detail.status);
   const settledTitle = detail.status === "completed" ? detail.supervision ? "目标完成" : "全部步骤已完成" : detail.status === "cancelled" ? "任务已取消" : detail.status === "failed" ? "需要你处理" : "任务已结束";
-  const nextHint = settled ? detail.status === "failed" ? "本次执行未完成，请查看结果与原因，再决定是否重新执行。" : "本任务已结束，结果和执行记录已保留。" : pending ? "先处理右侧待确认事项，再查看任务是否继续。" : detail.status === "paused" ? "任务已暂停，继续后再处理后续步骤。" : next ? "按任务设置推进，也可在步骤中手动开始。" : current ? "当前步骤结束后会更新结果。" : "没有待执行步骤。";
-  $("#superAgentNextStep").innerHTML = `<div class="super-agent-ref"><strong>${settled ? settledTitle : next ? text(nodeDisplayName(next)) : current ? "等待当前步骤结束" : "暂无下一步"}</strong><p>${text(nextHint)}</p></div>`;
+  const nextHint = settled ? detail.status === "failed" ? "本次执行未完成，请查看结果与原因，再决定是否重新执行。" : "本任务已结束，结果和执行记录已保留。" : pending ? "先处理上方待确认事项，再查看任务是否继续。" : detail.status === "paused" ? "任务已暂停，继续后再处理后续步骤。" : detail.status === "needs_recovery" ? "任务需要处理，请查看主操作卡中的恢复说明。" : current?.capabilities?.start ? "当前步骤尚未开始，请点击主操作卡中的开始按钮。" : next ? "按任务设置推进，也可在步骤中手动开始。" : current ? "当前步骤结束后会更新结果。" : "没有待执行步骤。";
+  renderHtml($("#superAgentNextStep"), `<div class="super-agent-ref"><strong>${settled ? settledTitle : next ? text(nodeDisplayName(next)) : current?.status === "running" ? "等待当前步骤结束" : current ? text(nodeDisplayName(current)) : "暂无下一步"}</strong><p>${text(nextHint)}</p></div>`);
   const notice = confirmationNotices.get(viewState.selectedId);
-  $("#superAgentChatConfirmationList").innerHTML = confirmations.map((item) => {
+  const confirmationHtml = confirmations.map((item) => {
     const subagent = item.executor_kind === "subagent";
     const status = notice?.confirmId === item.confirm_id && notice?.runId === item.run_id ? "expired" : item.status;
     const pending = status === "pending";
     return `<article class="super-agent-ref super-agent-chat-confirmation" data-confirm-id="${text(item.confirm_id)}" data-confirm-status="${text(status)}"><strong>${status === "processing" ? "已确认，工具正在执行" : pending ? "等待你确认" : "确认已失效，请同步任务"}</strong><p>${text(item.tool)} · ${text(item.reason, "请核对本次操作。")}</p>
       ${subagent ? `<p>${text(item.scope, "仅限当前执行")} · 来源：${text(item.action_source)}</p>${item.parameters ? `<pre class="super-agent-confirm-parameters">${text(JSON.stringify(item.parameters, null, 2))}</pre>` : ""}${pending ? `<div class="super-agent-node-actions"><button type="button" class="control-button tiny" data-super-tool-decision="confirm" data-confirm-id="${text(item.confirm_id)}" data-run-id="${text(item.run_id)}">允许执行</button><button type="button" class="control-button tiny" data-super-tool-decision="reject" data-confirm-id="${text(item.confirm_id)}" data-run-id="${text(item.run_id)}">拒绝</button></div>` : ""}` : `<button type="button" class="control-button tiny" data-super-conversation="${text(item.conversation_id)}">${item.status === "processing" ? "回到聊天查看" : "回到聊天确认"}</button>`}</article>`;
   }).join("");
-  if (notice && !notice.dismissed) $("#superAgentChatConfirmationList").insertAdjacentHTML("beforeend", `<article class="super-agent-ref" data-confirm-status="expired"><p>${text(notice.message)}</p><button type="button" class="control-button tiny" data-super-dismiss-confirmation>知道了</button></article>`);
+  renderHtml($("#superAgentChatConfirmationList"), confirmationHtml + (notice && !notice.dismissed ? `<article class="super-agent-ref" data-confirm-status="expired"><p>${text(notice.message)}</p><button type="button" class="control-button tiny" data-super-dismiss-confirmation>知道了</button></article>` : ""));
 }
 
 function artifactKind(item) {
@@ -446,66 +496,103 @@ function artifactBaseName(ref) {
   if (raw.includes("://")) return raw;
   return raw.split("/").filter(Boolean).pop() || "";
 }
+function approvalLabel(value) {
+  return ({ novel_apply: "应用改编结果", novel_import: "确认导入原文", novel_review: "复核改编内容", writer_apply: "应用写作结果" })[value] || value || "待确认操作";
+}
+function artifactTitle(item) {
+  const raw = String(item?.title || "");
+  const match = /^(writer|novel)\s+([a-z_]+)\s+结果$/.exec(raw);
+  return match ? `${domainName(match[1])} · ${STAGE_LABELS[match[2]] || "创作"}结果` : raw || "任务产物";
+}
+function artifactSummary(item) {
+  const raw = String(item?.summary || "");
+  const match = /^阶段状态：([^；]+)；仅保留引用，不复制正文$/.exec(raw);
+  return match ? `${statusLabel(match[1])} · 内容保存在原作品中` : raw || artifactBaseName(item?.path_or_ref);
+}
 // 单一主操作卡：按当前状态给出唯一的「现在需要你做的事」，不再多处重复按钮与文案。
 function renderFocus(detail, nodes, currentNodeId) {
   const focus = $("#superAgentFocus"); if (!focus) return;
   const label = $("#superAgentFocusLabel"), title = $("#superAgentFocusTitle"), body = $("#superAgentFocusText"), note = $("#superAgentFocusNote");
   focus.hidden = false;
-  focus.classList.remove("is-running", "is-done", "is-failed");
-  const focusActions = $("#superAgentFocusActions"); if (focusActions) focusActions.innerHTML = "";
-  note.hidden = true; note.textContent = "";
   const status = detail.status;
   const pendingCount = (Array.isArray(detail.chat_confirmations) ? detail.chat_confirmations : []).filter((item) => item.status === "pending").length
     + viewState.approvals.filter((item) => item.status === "pending").length;
-  const current = nodes.find((node) => node.node_id === currentNodeId);
+  const current = nodes.find((node) => node.node_id === currentNodeId)
+    || nodes.find((node) => !["succeeded", "cancelled"].includes(node.status));
+  const jobMirror = nodes.length > 0 && nodes.every((node) => node.executor_type === "job");
+  let heading = "等待开始", message = "尚无正在执行的步骤。", eyebrow = "任务准备中", tone = "idle", actions = "", fine = "";
+  const nodeAction = (action, caption) => `<button type="button" class="control-button primary" data-super-action="${action}" data-super-node="${text(current?.node_id)}">${caption}</button>`;
   if (pendingCount) {
-    label.textContent = "现在需要你确认";
-    title.textContent = `有 ${pendingCount} 项操作等待你确认`;
-    body.textContent = "确认后任务才会继续推进；每一项都写明了会执行什么。";
-  } else if (["completed", "archived"].includes(status)) {
-    focus.classList.add("is-done");
-    label.textContent = "任务已完成";
-    title.textContent = detail.supervision ? "目标完成" : "全部步骤已完成";
-    body.textContent = "结果保留在最近产物里；需要继续处理时，可以复制内容新建任务，不会改动已有结果。";
+    eyebrow = "现在需要你确认"; heading = `有 ${pendingCount} 项操作等待你确认`; tone = "wait";
+    message = "确认后任务才会继续推进；每一项都写明了会执行什么。";
+  } else if (jobMirror && !TERMINAL_STATUSES.has(status)) {
+    eyebrow = "后台任务进展"; heading = statusLabel(status);
+    message = "这里同步原任务的实际进展；暂停、重试与详细记录请回到原任务处理。";
+    tone = status === "active" ? "run" : status === "needs_recovery" ? "wait" : "idle";
+  } else if (status === "completed") {
+    eyebrow = "任务已完成"; heading = detail.supervision ? "目标完成" : "全部步骤已完成"; tone = "ok";
+    message = "结果保留在最近产物里；需要继续处理时，可以复制内容新建任务，不会改动已有结果。";
+  } else if (status === "archived") {
+    eyebrow = heading = "任务已归档"; message = "原有结果与执行记录仍保留，恢复后可重新查看和处理。";
   } else if (status === "failed") {
-    focus.classList.add("is-failed");
-    label.textContent = "需要你处理";
-    title.textContent = "本次执行未完成";
-    body.textContent = "请查看失败原因与结果，再决定是否重试或重新创建。";
+    eyebrow = "需要你处理"; heading = "本次执行未完成"; tone = "bad";
+    message = current?.error || "请查看失败原因与结果，再决定是否重试或重新创建。";
+    if (current?.capabilities?.retry) { actions = nodeAction("retry", "重试（重新执行）"); fine = "重试会重新调用模型和工具，可能重复已发生的外部操作。"; }
   } else if (status === "paused") {
-    label.textContent = "已暂停";
-    title.textContent = "任务已暂停";
-    body.textContent = "继续后才会执行后续步骤；正在执行的内容仍可能完成。";
+    eyebrow = "已暂停"; heading = "任务已暂停";
+    message = "继续后才会执行后续步骤；正在执行的内容仍可能完成。";
+    actions = '<button type="button" class="control-button primary" data-super-action="continue">继续任务</button>';
   } else if (status === "cancelled") {
-    focus.classList.add("is-done");
-    label.textContent = "任务已取消";
-    title.textContent = "任务已取消";
-    body.textContent = "已产出的结果会保留；需要同类任务可重新创建。";
+    eyebrow = heading = "任务已取消"; message = "已产出的结果会保留；需要同类任务可重新创建。";
   } else if (status === "stopping") {
-    label.textContent = "正在停止";
-    title.textContent = "正在停止后续步骤";
-    body.textContent = "停止完成前请稍候；在途执行仍可能完成。";
+    eyebrow = "正在停止"; heading = "正在停止后续步骤"; tone = "wait";
+    message = "停止完成前请稍候；在途执行仍可能完成。";
+  } else if (status === "needs_recovery") {
+    eyebrow = "需要你处理"; heading = "任务尚未恢复"; tone = "wait";
+    message = current?.error || "任务没有继续执行。请核对原执行结果，再选择恢复或重试。";
+    if (current?.capabilities?.resume) actions = nodeAction("resume", "从检查点继续");
+    else if (current?.capabilities?.retry) actions = nodeAction("retry", "重试（重新执行）");
+    else actions = '<button type="button" class="control-button primary" data-super-action="continue">检查并继续</button>';
+    fine = "继续前会重新核对权限与执行状态；未知结果不会自动重新提交。";
+  } else if (current?.capabilities?.start) {
+    eyebrow = "现在可以开始"; heading = `${nodeDisplayName(current)} · 尚未开始`;
+    message = "准备就绪，点击开始后才会执行这一步。";
+    actions = nodeAction("start", "开始"); fine = "开始后可能调用模型和工具，具体用量以执行记录为准。";
+  } else if (["running", "stopping"].includes(current?.status)) {
+    eyebrow = "正在执行"; heading = nodeDisplayName(current); tone = "run";
+    message = "这一步不需要你操作，完成后这里会更新。";
+  } else if (["failed", "interrupted", "blocked", "waiting_user"].includes(current?.status)) {
+    eyebrow = "需要你处理"; heading = `${nodeDisplayName(current)} · ${statusLabel(current.status)}`; tone = current.status === "failed" ? "bad" : "wait";
+    message = current.error || "这一步尚未完成，请查看步骤说明与前置条件。";
+    if (current.capabilities?.resume) actions = nodeAction("resume", "从检查点继续");
+    else if (current.capabilities?.retry) actions = nodeAction("retry", "重试（重新执行）");
   } else {
-    focus.classList.add("is-running");
-    label.textContent = "正在执行";
-    title.textContent = current ? nodeDisplayName(current) : "任务进行中";
-    body.textContent = current ? "这一步不需要你操作，完成后这里会更新。" : "按任务设置推进；需要你确认时会在这里提示。";
+    heading = current ? `${nodeDisplayName(current)} · ${statusLabel(current.status)}` : "等待任务更新";
+    message = "当前没有正在执行的步骤；前置条件满足后会更新可用操作。";
   }
+  focus.dataset.tone = tone;
+  focus.classList.toggle("is-running", tone === "run"); focus.classList.toggle("is-done", tone === "ok"); focus.classList.toggle("is-failed", tone === "bad");
+  renderText(label, eyebrow); renderText(title, heading); renderText(body, message); renderText(note, fine);
+  note.hidden = !fine;
+  renderHtml($("#superAgentFocusActions"), actions);
 }
 
 function renderDetail() {
   const detail = viewState.detail; if (!detail) return renderEmptyDetail();
+  const signature = JSON.stringify([detail, viewState.nodes, viewState.events, viewState.artifacts, viewState.approvals, viewState.selectedId, confirmationNotices.get(viewState.selectedId), state.conversations?.map((row) => [row.id, row.title])]);
+  if (signature === detailRenderSignature && detail.supervision?.phase !== "reviewing") return;
+  detailRenderSignature = signature;
   $("#superAgentDetailEmpty").hidden = true; $("#superAgentDetail").hidden = false;
   $("#superAgentDetail").dataset.threadId = detail.thread_id || viewState.selectedId;
-  $("#superAgentTitle").textContent = detail.title || "未命名任务";
-  $("#superAgentCrumbTitle").textContent = detail.title || "未命名任务";
-  $("#superAgentGoal").textContent = detail.goal || "暂无目标";
+  renderText($("#superAgentTitle"), detail.title || "未命名任务");
+  renderText($("#superAgentCrumbTitle"), detail.title || "未命名任务");
+  renderText($("#superAgentGoal"), detail.goal || "暂无目标");
   const latestReview = detail.supervision?.rounds?.filter((round) => round.review?.summary).at(-1)?.review;
   const decision = latestReview?.summary || detail.summary || "";
-  $("#superAgentSummary").textContent = decision;
+  renderText($("#superAgentSummary"), decision);
   $("#superAgentDecisionSection").hidden = !decision;
-  $("#superAgentDecisionAt").textContent = formatTime(detail.updated_at);
-  const status = $("#superAgentStatus"); status.textContent = statusLabel(detail.status); status.dataset.status = detail.status || "";
+  renderText($("#superAgentDecisionAt"), formatTime(detail.updated_at));
+  const status = $("#superAgentStatus"); renderText(status, statusLabel(detail.status)); status.dataset.status = detail.status || ""; status.hidden = false;
   const terminal = ["completed", "cancelled", "failed", "archived"].includes(detail.status);
   const stopping = detail.status === "stopping";
   const jobMirror = (viewState.nodes || []).some((node) => node.executor_type === "job") && !(viewState.nodes || []).some((node) => ["writer_pipeline", "novel_stage", "supervised_chat", "chat_run", "subagent"].includes(String(node.executor_type || "")));
@@ -517,21 +604,21 @@ function renderDetail() {
     if (jobMirror) threadActions.querySelectorAll("[data-super-thread-action]").forEach((button) => { button.disabled = true; });
     threadActions.querySelectorAll("[data-super-thread-action]").forEach((button) => {
       const action = button.dataset.superThreadAction;
-      button.disabled = action === "pause" ? !["active", "waiting_user"].includes(detail.status)
+      button.disabled = jobMirror || (action === "pause" ? !["active", "waiting_user"].includes(detail.status)
         : action === "continue" ? !(detail.status === "paused" || detail.status === "needs_recovery" || detail.supervision?.phase === "paused")
-        : stopping;
-      if (detail.supervision && action === "pause") button.textContent = "暂停自动续办";
-      if (detail.supervision && action === "continue") button.textContent = "继续自动续办";
-      if (!detail.supervision && action === "pause") button.textContent = "暂停任务";
-      if (!detail.supervision && action === "continue") button.textContent = "继续任务";
+        : stopping);
+      if (action === "pause") renderText(button, detail.supervision ? "暂停自动续办" : "暂停任务");
+      if (action === "continue") renderText(button, detail.supervision ? "继续自动续办" : "继续任务");
     });
   }
   const controlNote = $("#superAgentControlNote");
   if (controlNote) controlNote.hidden = terminal || stopping;
-  $("#superAgentConversationLinks").innerHTML = (detail.linked_conversation_ids || []).map((id) => {
+  if ($("#superAgentRelatedSection")) $("#superAgentRelatedSection").hidden = !(detail.linked_conversation_ids || []).length;
+  if ($("#superAgentOverview")) $("#superAgentOverview").hidden = false;
+  renderHtml($("#superAgentConversationLinks"), (detail.linked_conversation_ids || []).map((id) => {
     const title = state.conversations?.find((row) => row.id === id)?.title;
     return `<button type="button" class="control-button tiny" data-super-conversation="${text(id)}">${title ? `回到关联会话 · ${text(title)}` : "查看关联会话"}</button>`;
-  }).join("");
+  }).join(""));
   const nodes = sortedNodes(viewState.nodes);
   const nodeById = new Map(nodes.map((node) => [String(node.node_id), node]));
   const currentNodeId = String(detail.current_node_id || nodes.find((node) => ["running", "waiting_user"].includes(String(node.status || "")))?.node_id || "");
@@ -553,8 +640,8 @@ function renderDetail() {
   // 同一份步骤信息不再出现两遍。
   const stageSection = $("#superAgentStageSection");
   if (stageSection) stageSection.hidden = ["job", "subagent"].includes(zoneKind);
-  $("#superAgentChainMeta").textContent = `${nodes.length} 个步骤`;
-  $("#superAgentNodeList").innerHTML = nodes.length ? nodes.map((node, index) => {
+  renderText($("#superAgentChainMeta"), `${nodes.length} 个步骤`);
+  renderHtml($("#superAgentNodeList"), nodes.length ? nodes.map((node, index) => {
     const nodeId = String(node.node_id || ""); const nodeStatus = String(node.status || "pending");
     const active = nodeId === currentNodeId;
     const approvals = approvalByNode.get(nodeId) || []; const artifacts = artifactByNode.get(nodeId) || [];
@@ -572,18 +659,18 @@ function renderDetail() {
       ${node.capabilities?.resume ? `<button type="button" class="control-button tiny" data-super-action="resume" data-super-node="${text(nodeId)}">从检查点继续</button>` : ""}
       ${node.executor_id && ["chat_run", "subagent", "job", "supervised_chat"].includes(node.executor_type) ? `<button type="button" class="control-button tiny" data-super-result="${text(nodeId)}">查看本次结果</button>` : ""}</div>
       </div></article>`;
-  }).join("") : '<p class="super-agent-muted">暂无步骤。</p>';
-  $("#superAgentEventList").innerHTML = viewState.events.length ? [...viewState.events].reverse().map((event) => `
-    <article class="super-agent-event"><div><strong>${text(EVENT_LABELS[event.event_type], "任务活动")}</strong><time>${text(formatTime(event.created_at))}</time></div><p>${text(event.summary?.message || event.summary?.description || (event.summary?.status ? statusLabel(event.summary.status) : "状态已更新"))}</p></article>`).join("") : '<p class="super-agent-muted">暂无活动。</p>';
-  // subagent 的待确认操作卡已并入内容区（修复 B1），这里不再重复渲染一排。
-  $("#superAgentApprovalList").innerHTML = zoneKind === "subagent" ? "" : viewState.approvals.length ? viewState.approvals.map((item) => `
-    <article class="super-agent-ref"><strong>${text(item.action, "待确认操作")}</strong><span>${text(statusLabel(item.status))}</span><p>步骤：${text(nodeDisplayName(nodeById.get(String(item.node_id))))}</p><p>${text(item.description)}</p>${item.status === 'pending' ? `<div class="super-agent-node-actions"><button type="button" class="control-button tiny" data-super-approval="approved" data-super-approval-id="${text(item.approval_id)}">批准</button><button type="button" class="control-button tiny" data-super-approval="rejected" data-super-approval-id="${text(item.approval_id)}">拒绝</button></div>` : ""}</article>`).join("") : "";
-  $("#superAgentArtifactList").innerHTML = viewState.artifacts.length ? viewState.artifacts.map((item) => {
+  }).join("") : '<p class="super-agent-muted">暂无步骤。</p>');
+  renderHtml($("#superAgentEventList"), viewState.events.length ? [...viewState.events].reverse().map((event) => `
+    <article class="super-agent-event"><div><strong>${text(EVENT_LABELS[event.event_type], "任务活动")}</strong><time>${text(formatTime(event.created_at))}</time></div><p>${text(event.summary?.message || event.summary?.description || (event.summary?.status ? statusLabel(event.summary.status) : "状态已更新"))}</p></article>`).join("") : '<p class="super-agent-muted">暂无活动。</p>');
+  // 所有类型的审批统一留在首屏主操作卡，避免用户到内容区寻找批准按钮。
+  renderHtml($("#superAgentApprovalList"), viewState.approvals.length ? viewState.approvals.filter((item) => item.status === "pending").map((item) => `
+    <article class="super-agent-ref"><strong>${text(approvalLabel(item.action))}</strong><span>${text(statusLabel(item.status))}</span><p>步骤：${text(nodeDisplayName(nodeById.get(String(item.node_id))))}</p><p>${text(item.description)}</p><div class="super-agent-node-actions"><button type="button" class="control-button primary" data-super-approval="approved" data-super-approval-id="${text(item.approval_id)}">批准</button><button type="button" class="control-button" data-super-approval="rejected" data-super-approval-id="${text(item.approval_id)}">拒绝</button></div></article>`).join("") : "");
+  renderHtml($("#superAgentArtifactList"), viewState.artifacts.length ? viewState.artifacts.map((item) => {
     const kind = artifactKind(item);
     const ref = String(item.path_or_ref || "");
     const openable = ref && !ref.includes("://");
-    return `<article class="super-agent-artifact"><span class="sa-thumb kind-${kind}" aria-hidden="true">${({ image: "图", video: "影", audio: "音" })[kind] || "文"}</span><span class="artifact-copy"><b>${text(item.title, "任务产物")}</b><small>${text(item.summary || artifactBaseName(ref))}</small></span>${openable ? `<a class="control-button tiny" href="${text(localFileUrl(ref))}" target="_blank" rel="noopener">打开</a>` : ""}</article>`;
-  }).join("") : '<p class="super-agent-muted">暂无产物。</p>';
+    return `<article class="super-agent-artifact"><span class="sa-thumb kind-${kind}" aria-hidden="true">${({ image: "图", video: "影", audio: "音" })[kind] || "文"}</span><span class="artifact-copy"><b>${text(artifactTitle(item))}</b><small>${text(artifactSummary(item))}</small></span>${openable ? `<a class="control-button tiny" href="${text(localFileUrl(ref))}" target="_blank" rel="noopener">打开</a>` : ""}</article>`;
+  }).join("") : '<p class="super-agent-muted">暂无产物。</p>');
 }
 
 function renderSyncStatus() {
@@ -599,6 +686,19 @@ function renderSyncStatus() {
 function setView(next) {
   setAppView(next);
 }
+function showTaskNavigation() {
+  if (sidebarDesktop()) setLeftSidebarCollapsed(false);
+  else openSidebar();
+}
+function setTaskInfoOpen(open) {
+  $("#superAgentView").dataset.infoOpen = String(Boolean(open));
+  $("#superAgentToggleInfo")?.setAttribute("aria-expanded", String(Boolean(open)));
+}
+async function wakeSuperAgent() {
+  if (state.appView !== "super-agent" || document.visibilityState === "hidden" || viewState.loading) return;
+  try { await loadThreads(); } catch (error) { viewState.error = error.message || "刷新任务失败"; renderSyncStatus(); }
+  scheduleRefresh();
+}
 
 export async function openSuperAgentView() {
   if (state.appView === "studio") {
@@ -607,10 +707,10 @@ export async function openSuperAgentView() {
   }
   setView("super-agent");
   try { await loadThreads(); } catch (error) { viewState.error = error.message || "读取任务失败"; renderSyncStatus(); }
-  if (!sidebarDesktop()) closeSidebar();
+  if (!sidebarDesktop()) { if (viewState.selectedId) closeSidebar(); else openSidebar(); }
   scheduleRefresh();
 }
-export function closeSuperAgentView() { if (refreshTimer) clearTimeout(refreshTimer); refreshTimer = null; if (state.appView === "super-agent") setView("chat"); }
+export function closeSuperAgentView() { if (refreshTimer) clearTimeout(refreshTimer); refreshTimer = null; viewState.listRequest += 1; viewState.detailRequest += 1; viewState.loading = false; if (state.appView === "super-agent") setView("chat"); }
 
 function clearCreateError() {
   const errorBox = $("#superAgentCreateError");
@@ -1099,6 +1199,8 @@ async function resolveToolConfirmation(button) {
   try {
     const response = await api(`/api/tool/${button.dataset.superToolDecision}`, { method: "POST", body: { run_id: runId, confirm_id: confirmId } });
     status.textContent = button.dataset.superToolDecision === "reject" ? "已拒绝，本次操作不会执行" : response.success ? "已确认，工具正在执行" : `确认未受理：${response.result || "请同步任务"}`;
+    renderedHtml.delete($("#superAgentChatConfirmationList"));
+    detailRenderSignature = "";
     if (viewState.selectedId === threadId) await loadDetail(threadId);
   } catch (error) {
     status.textContent = `确认已失效或未受理：${error.message}。请同步任务查看当前状态。`;
@@ -1133,6 +1235,11 @@ async function resolveApproval(status, approvalId) {
 }
 
 export function bindSuperAgentEvents() {
+  $("#superAgentOpenSidebar")?.addEventListener("click", showTaskNavigation);
+  $("#superAgentToggleInfo")?.addEventListener("click", () => setTaskInfoOpen($("#superAgentView").dataset.infoOpen !== "true"));
+  $("#superAgentCloseInfo")?.addEventListener("click", () => { setTaskInfoOpen(false); $("#superAgentToggleInfo")?.focus(); });
+  window.addEventListener("focus", () => void wakeSuperAgent());
+  document.addEventListener("visibilitychange", () => void wakeSuperAgent());
   $("#superAgentResultClose")?.addEventListener("click", () => $("#superAgentResultDialog").close());
   $("#superAgentSupervision")?.addEventListener("click", (event) => { if (event.target.closest("[data-super-accept-completion]")) void runNodeAction("accept_completion"); });
   $("#superAgentChatConfirmationList")?.addEventListener("click", (event) => {
@@ -1238,6 +1345,8 @@ export function bindSuperAgentEvents() {
     const threadId = button.dataset.superThread || "";
     if (threadId !== viewState.selectedId) { viewState.detail = null; viewState.nodes = []; renderEmptyDetail(); }
     viewState.selectedId = threadId; renderThreadList(); void loadDetail(threadId);
+    setTaskInfoOpen(false);
+    if (!sidebarDesktop()) closeSidebar();
   });
   $("#superAgentThreadList")?.addEventListener("change", (event) => {
     const check = event.target.closest("[data-thread-check]");

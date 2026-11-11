@@ -8,6 +8,7 @@
 import { $, api, localFileUrl, state, toast } from "./01-core.js";
 import { attachmentThumbUrl, collectMediaPreviewItems, isPywebview, mediaKind, saveLocalFile } from "./03-media.js";
 import { currentStudioPage, isStudioOpen, onStudioPageChange, setStudioPage } from "./22-studio.js";
+import { bindWorkbenchDetails, watchWorkbenchSize } from "./22a-workbench-ui.js";
 import { BATCH_H3_BASE_TEMPLATE, BATCH_H3_REFERENCE_TEMPLATE, buildBatchConvertRequest } from "./24a-comfyui-convert.js";
 const POLL_MS = 1200;
 const REFRESH_MS = 5000;
@@ -286,6 +287,8 @@ async function confirmSaveAs() {
 }
 
 export function bindComfyuiEvents() {
+  watchWorkbenchSize($("#studioPageComfyui"), () => {});
+  bindWorkbenchDetails($("#studioPageComfyui"));
   $("#comfyuiSaveCurrentAs")?.addEventListener("click", openSaveAsDialog);
   $("#comfyuiSaveAsCancel")?.addEventListener("click", closeSaveAsDialog);
   $("#comfyuiSaveAsConfirm")?.addEventListener("click", () => void confirmSaveAs());
@@ -944,7 +947,37 @@ function renderParamForm() {
       }
     }
   }
+  if (slots.length) form.append(renderParamConnections(slots));
   updateDraftHint();
+}
+
+// 参数表单只露出用途；完整节点号、字段和下游端口在同一处保留，按需展开。
+// 不拆解扫描器生成的 label，避免多输出、多下游映射被前端截断。
+function renderParamConnections(slots) {
+  const details = document.createElement("details");
+  details.className = "comfyui-param-connections";
+  const summary = document.createElement("summary");
+  summary.textContent = "每个参数接到工作流的哪里";
+  const list = document.createElement("dl");
+  for (const slot of slots) {
+    const title = document.createElement("dt");
+    title.textContent = slotDisplayLabel(slot);
+    const mapping = document.createElement("dd");
+    mapping.textContent = slot.label || `${slot.node_id} · ${slot.field_name}`;
+    list.append(title, mapping);
+  }
+  details.append(summary, list);
+  return details;
+}
+
+function slotDisplayLabel(slot) {
+  const roleLabel = slot.role === "resolution"
+    ? (slot.field_name === "height" ? "分辨率（高）" : "分辨率（宽）")
+    : ROLE_LABELS[slot.role];
+  if (!roleLabel) return slot.node_title
+    ? `${slot.node_title} · ${slot.field_name}` : String(slot.field_name || "参数");
+  const sameRole = (comfyui.detail?.params || []).filter((row) => row.role === slot.role);
+  return sameRole.length > 1 && slot.role !== "resolution" ? `${roleLabel}（节点 ${slot.node_id}）` : roleLabel;
 }
 
 // 未保存调整的台面提示：只数「主表单可见控件当前值 ≠ 工作流保存值」的项，
@@ -1810,13 +1843,8 @@ function renderSlot(slot) {
   wrap.className = "comfyui-param" + (isMedia ? " comfyui-param-media" : "");
   const title = document.createElement("span");
   title.className = "comfyui-param-label";
-  // 宽/高两个槽位同属「分辨率」角色：主标签要分得清，否则表单里两行都叫「分辨率」。
-  const roleLabel = slot.role === "resolution"
-    ? (slot.field_name === "height" ? "分辨率（高）" : "分辨率（宽）")
-    : ROLE_LABELS[slot.role];
   const fullLabel = slot.label || `${slot.node_id} · ${slot.field_name}`;
-  // 有用途角色的槽位也要显示完整来源与端口映射；角色名只做前缀，不覆盖映射。
-  title.textContent = roleLabel ? `${roleLabel} · ${fullLabel}` : fullLabel;
+  title.textContent = slotDisplayLabel(slot);
   title.title = fullLabel;
   wrap.append(title);
   wrap.dataset.paramKey = key;
@@ -4295,7 +4323,7 @@ function batchItemsMarkup(scheme, schemeIndex) {
   const columnCount = 7 + kindExtras("prompt").length + kindExtras("duration").length
     + extras.filter((point) => point.kind === "resolution" && point.slot).length
     + extras.filter((point) => point.kind === "spare" && point.slot).length + ports.length;
-  return `<div class="cbm-items-wrap"><table class="cbm-items">
+  return `<div class="cbm-items-wrap"><div class="cbm-mobile-tools"><button type="button" class="cbm-btn" data-batch-action="clear-prompts" data-scheme="${scheme.id}">清空本方案提示词</button></div><table class="cbm-items">
     <thead><tr><th>名称</th>${portHeaders}<th>剧本</th><th>提示词<button type="button" class="cbm-th-clear" data-batch-action="clear-prompts" data-scheme="${scheme.id}" title="清空这个方案所有条目的提示词（含指认出的第二段），剧本栏不动">清空</button></th>${extrasMarkup("prompt")}<th>时长</th>${extrasMarkup("duration")}<th>分辨率</th>${extrasMarkup("resolution")}${extrasMarkup("spare")}<th>条数</th><th>操作</th></tr></thead>
     <tbody>${rows || `<tr><td colspan="${columnCount}" class="cbm-hint">还没有条目。</td></tr>`}</tbody>
     <tfoot><tr><td colspan="${columnCount}"><button type="button" class="cbm-add-item" data-batch-action="add-item" data-scheme="${scheme.id}">＋ 添加一条</button></td></tr></tfoot>
@@ -4342,7 +4370,7 @@ function batchExtraCellMarkup(scheme, item, itemIndex, point) {
   const key = extraKeyOf(point);
   const value = itemExtraValue(item, key);
   const effective = value || batchSlotSavedValue(detail, slot);
-  const bind = `<td data-batch-extra="${escapeText(String(point.id || ""))}">`;
+  const bind = `<td data-label="${escapeAttribute(EXTRA_KIND_LABELS[point.kind] || "备用槽")}" data-batch-extra="${escapeText(String(point.id || ""))}">`;
   if (slot?.field_type === "text" && jsonParamInfo(effective)) {
     return `${bind}${batchJsonParamMarkup(scheme, itemIndex, "extras", effective, key, point.id)}</td>`;
   }
@@ -4434,6 +4462,7 @@ function batchItemRowMarkup(scheme, item, itemIndex, ports) {
   const tiles = ports.map((port, portIndex) => {
     const slot = batchSlotByAddress(scheme.detail, port);
     const kind = slot?.media || "image";
+    const cellLabel = escapeAttribute(`${{ image: "图片", video: "视频", audio: "音频" }[kind] || "素材"} ${portIndex + 1} · ${slot?.node_id || ""}`);
     const record = item.files[String(portIndex)];
     const skipped = itemSkipsPort(item, port);
     const skipLabel = skipped ? "取消跳过，恢复此前状态" : "跳过这个输入";
@@ -4445,7 +4474,7 @@ function batchItemRowMarkup(scheme, item, itemIndex, ports) {
         ? `原选择：${record.name}`
         : mediaSlotOriginalNonEmpty(slot)
           ? `恢复后沿用：${slot.default}` : "本次不提交这个素材口";
-      return `<td><span class="cbm-mtile is-skipped cbm-skip-tile" data-batch-tile data-batch-skipped="1" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" data-kind="${kind}" title="已跳过这个输入；点 ⊘ 恢复">
+      return `<td data-label="${cellLabel}"><span class="cbm-mtile is-skipped cbm-skip-tile" data-batch-tile data-batch-skipped="1" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" data-kind="${kind}" title="已跳过这个输入；点 ⊘ 恢复">
         ${skipButton}
         <span class="cbm-skip-text"><span class="cbm-skip-title">已跳过这个输入</span><span class="cbm-skip-sub" title="${escapeText(subText)}">${escapeText(subText)}</span></span>
         ${record ? `<button type="button" class="cbm-tile-clear" data-batch-action="clear-file" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" aria-label="清除这个文件">✕</button>` : ""}
@@ -4455,7 +4484,7 @@ function batchItemRowMarkup(scheme, item, itemIndex, ports) {
       const thumb = kind === "image"
         ? `<img src="${escapeText(attachmentThumbUrl(record))}" alt="" loading="lazy">`
         : `<span class="cbm-tile-ico">${kind === "video" ? "▶" : "♪"}</span>`;
-      return `<td><span class="cbm-mtile" data-batch-tile data-batch-skipped="" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" data-kind="${kind}" title="点选 / 拖拽可换；⊘ 跳过这个输入">
+      return `<td data-label="${cellLabel}"><span class="cbm-mtile" data-batch-tile data-batch-skipped="" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" data-kind="${kind}" title="点选 / 拖拽可换；⊘ 跳过这个输入">
         <span class="cbm-thumb ${kind}">${thumb}</span>
         <span class="cbm-mname">${escapeText(record.name || "")}<span class="cbm-tile-actions"><button type="button" class="cbm-tile-clear" data-batch-action="clear-file" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" aria-label="清除这个文件">✕</button>${skipButton}</span></span>
       </span></td>`;
@@ -4467,13 +4496,13 @@ function batchItemRowMarkup(scheme, item, itemIndex, ports) {
     const required = !keptOriginal && slot?.media_optional === false;
     const labelText = keptOriginal ? "沿用原文件"
       : autoSkip ? "留空 · 自动跳过" : required ? "必填 · 点选/拖入" : "点选/拖入";
-    return `<td><span class="cbm-empty-slot${required && missing ? " is-missing" : ""}${keptOriginal ? " is-kept" : ""}" data-batch-tile data-batch-skipped="" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" data-kind="${kind}" title="点选 / 拖入换素材；⊘ 跳过这个输入"><span class="cbm-slot-label">${labelText}</span>${skipButton}</span></td>`;
+    return `<td data-label="${cellLabel}"><span class="cbm-empty-slot${required && missing ? " is-missing" : ""}${keptOriginal ? " is-kept" : ""}" data-batch-tile data-batch-skipped="" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" data-kind="${kind}" title="点选 / 拖入换素材；⊘ 跳过这个输入"><span class="cbm-slot-label">${labelText}</span>${skipButton}</span></td>`;
   }).join("");
   const promptSlot = batchSlotByAddress(scheme.detail, scheme.mapping?.prompt_slot);
   const promptValue = String(item.prompt || "").trim() || batchSlotSavedValue(scheme.detail, promptSlot);
   const promptCell = promptSlot?.field_type === "text" && jsonParamInfo(promptValue)
-    ? `<td>${batchJsonParamMarkup(scheme, itemIndex, "prompt", promptValue)}</td>`
-    : `<td>
+    ? `<td data-label="提示词">${batchJsonParamMarkup(scheme, itemIndex, "prompt", promptValue)}</td>`
+    : `<td data-label="提示词">
     <textarea class="cbm-script" rows="3" placeholder="最终交给工作流的提示词" data-batch-item="prompt" data-scheme="${scheme.id}" data-item="${itemIndex}">${escapeText(item.prompt)}</textarea>
     ${item.script && converting ? '<button type="button" class="cbm-convert" disabled>转换中…</button>' : ""}
   </td>`;
@@ -4484,21 +4513,21 @@ function batchItemRowMarkup(scheme, item, itemIndex, ports) {
     : `<input type="number" min="1" step="any" style="width:76px" placeholder="按工作流"
     data-batch-item="duration" data-scheme="${scheme.id}" data-item="${itemIndex}" value="${escapeText(item.duration)}">`;
   return `<tr${missing ? ' class="is-missing"' : ""}>
-    <td><input type="text" class="cbm-name" maxlength="120" data-batch-item="name" data-scheme="${scheme.id}" data-item="${itemIndex}" value="${escapeText(item.name)}"></td>
+    <td data-label="名称"><input type="text" class="cbm-name" maxlength="120" data-batch-item="name" data-scheme="${scheme.id}" data-item="${itemIndex}" value="${escapeText(item.name)}"></td>
     ${tiles}
-    <td><textarea class="cbm-script" rows="3" placeholder="这场的内容要求（可转换成提示词）" data-batch-item="script" data-scheme="${scheme.id}" data-item="${itemIndex}">${escapeText(item.script)}</textarea></td>
+    <td data-label="剧本"><textarea class="cbm-script" rows="3" placeholder="这场的内容要求（可转换成提示词）" data-batch-item="script" data-scheme="${scheme.id}" data-item="${itemIndex}">${escapeText(item.script)}</textarea></td>
     ${promptCell}
     ${activeExtraPoints(scheme).filter((point) => point.kind === "prompt").map((point) => batchExtraCellMarkup(scheme, item, itemIndex, point)).join("")}
-    <td>${durationControl}</td>
+    <td data-label="时长">${durationControl}</td>
     ${activeExtraPoints(scheme).filter((point) => point.kind === "duration").map((point) => batchExtraCellMarkup(scheme, item, itemIndex, point)).join("")}
-    <td>${resolutionControl()}</td>
+    <td data-label="分辨率">${resolutionControl()}</td>
     ${activeExtraPoints(scheme).filter((point) => (point.kind === "resolution" || point.kind === "spare")).map((point) => batchExtraCellMarkup(scheme, item, itemIndex, point)).join("")}
-    <td><input type="number" min="1" max="200" style="width:56px" data-batch-item="shots" data-scheme="${scheme.id}" data-item="${itemIndex}" value="${escapeText(String(item.shots))}"></td>
-    <td class="cbm-row-act">
+    <td data-label="条数"><input type="number" min="1" max="200" style="width:56px" data-batch-item="shots" data-scheme="${scheme.id}" data-item="${itemIndex}" value="${escapeText(String(item.shots))}"></td>
+    <td class="cbm-row-act" data-label="操作">
       <span class="cbm-convert-hint${imageHint.over ? " over" : ""}" title="${title}">${escapeText(imageHint.text)}</span>
       <button type="button" class="cbm-btn tiny" data-batch-action="convert-item" data-scheme="${scheme.id}" data-item="${itemIndex}" ${convertReady ? "" : "disabled"}>转换</button>
       <button type="button" class="cbm-btn tiny" data-batch-action="copy-item" data-scheme="${scheme.id}" data-item="${itemIndex}">复制</button>
-      <button type="button" class="cbm-btn tiny" data-batch-action="remove-item" data-scheme="${scheme.id}" data-item="${itemIndex}">删</button>
+      <button type="button" class="cbm-btn tiny danger" data-batch-action="remove-item" data-scheme="${scheme.id}" data-item="${itemIndex}">删除条目</button>
     </td>
   </tr>`;
 }

@@ -16,6 +16,7 @@
 
 import { $, api, applyModelSkinFor, state, toast } from "./01-core.js";
 import { onStudioPageChange, setStudioPage } from "./22-studio.js";
+import { bindWorkbenchMenu, watchWorkbenchSize, workbenchWidth } from "./22a-workbench-ui.js";
 
 // 与服务端一致的上限（前端只做提前提示，服务端仍逐项校验）。
 const MAX_FILE_BYTES = 60 * 1024 * 1024;
@@ -219,20 +220,11 @@ function setSaveState(text, note = "") {
 
 function closeExportMenu() {
   const menu = $("#novelExportMenu");
-  if (menu) menu.hidden = true;
+  if (menu) {
+    if (typeof menu.hidePopover === "function") menu.hidePopover();
+    menu.hidden = true;
+  }
   $("#novelExportBtn")?.setAttribute("aria-expanded", "false");
-}
-
-// 手机端导出菜单是 fixed 定位（页头操作条 overflow-x:auto 会把 absolute 下拉整体裁掉，
-// 2026-11-04 专查实测菜单完全不可见且点击穿透）：打开时按按钮实时落位。
-function placeExportMenu() {
-  const menu = $("#novelExportMenu");
-  const btn = $("#novelExportBtn");
-  if (!menu || !btn) return;
-  const rect = btn.getBoundingClientRect();
-  menu.style.top = `${Math.round(rect.bottom + 4)}px`;
-  menu.style.right = `${Math.max(8, Math.round(window.innerWidth - rect.right))}px`;
-  menu.style.left = "auto";
 }
 
 function setBusy(busy) {
@@ -317,6 +309,20 @@ function prepareStagePanels() {
     host.append(clone);
   }
   first.dataset.stagePanelsReady = "true";
+  for (const panel of host.querySelectorAll("[data-stage-panel]")) {
+    const actions = panel.querySelector(".novel-stage-actions");
+    if (!actions) continue;
+    const body = document.createElement("div");
+    body.className = "wb-book-stage-body";
+    for (const child of [...panel.children]) if (child !== actions) body.append(child);
+    const hint = document.createElement("span");
+    hint.className = "wb-book-action-hint";
+    hint.textContent = "按当前素材与模型生成，结果确认后保存";
+    actions.prepend(hint);
+    actions.classList.add("wb-book-action-dock");
+    panel.prepend(body);
+    panel.append(actions);
+  }
 }
 
 // ============================================================
@@ -356,7 +362,7 @@ function renderChapters() {
     empty.hidden = rows.length > 0;
     empty.textContent = novel.chapters.length
       ? "没有匹配的章节。换个关键词试试。"
-      : "还没有章节。点上面的「导入 TXT」选一本小说。";
+      : "还没有章节。打开页头作品菜单，选择「导入 TXT 新建作品」。";
   }
   const note = $("#novelChapterNote");
   if (note) {
@@ -1292,7 +1298,7 @@ function renderPlan() {
   if (pageState) {
     const book = novel.staged
       ? "待保存作品"
-      : (novel.bookId ? `${bookTitleLabel(novel.book?.title || "已打开作品")}已保存` : "未打开作品");
+      : (novel.bookId ? `${bookTitleLabel(novel.book?.title || "已打开作品")}已保存` : "选择作品");
     pageState.textContent = `${book} · ${stageLabel(novel.stage)}`;
     pageState.title = pageState.textContent;
   }
@@ -3241,11 +3247,16 @@ async function renderBookDialog() {
   }
 }
 
-// 手机竖屏断点：与 styles.css 的 `@media (max-width: 760px)` 一致。
-const PORTRAIT_QUERY = "(max-width: 760px)";
+// 按页面实际可用宽度分档：侧栏展开或拖宽时也要同步可达性。
+function paneLayoutSize() {
+  const root = $("#studioPageNovel");
+  const width = workbenchWidth(root);
+  return width > 0 ? (width <= 760 ? "narrow" : width < 1000 ? "medium" : "wide")
+    : root?.dataset.wbSize || "wide";
+}
 
 function isPaneLayout() {
-  return typeof window.matchMedia === "function" && window.matchMedia(PORTRAIT_QUERY).matches;
+  return paneLayoutSize() === "narrow";
 }
 
 function setPane(pane) {
@@ -3267,14 +3278,20 @@ function setPane(pane) {
  * 只在竖屏分档布局下生效——桌面/横屏三栏全部可见，给其中一栏设 inert 会让它彻底点不动。
  */
 function applyPaneAccessibility() {
-  const paneLayout = isPaneLayout();
+  const size = paneLayoutSize();
   const map = { chapters: ".novel-chapters", editor: ".novel-editor", preview: ".novel-preview" };
   for (const [key, selector] of Object.entries(map)) {
     const el = document.querySelector(`#studioPageNovel ${selector}`);
     if (!el) continue;
-    const hidden = paneLayout && key !== novel.pane;
+    const hidden = size === "narrow" ? key !== novel.pane
+      : size === "medium" && key === "preview" && novel.pane !== "preview";
     el.setAttribute("aria-hidden", String(hidden));
     el.inert = hidden;
+  }
+  const aside = $("#novelAsideBtn");
+  if (aside) {
+    aside.setAttribute("aria-expanded", String(novel.pane === "preview"));
+    aside.textContent = novel.pane === "preview" ? "收起说明" : "查看说明";
   }
 }
 
@@ -3432,17 +3449,8 @@ export function bindNovelEvents() {
   });
 
   // 导出：点按钮开菜单，菜单项决定格式与是否附要素/大纲。
-  $("#novelExportBtn")?.addEventListener("click", () => {
-    const menu = $("#novelExportMenu");
-    if (!menu) return;
-    const open = menu.hidden;
-    if (open) {
-      renderExportNote();
-      placeExportMenu();
-    }
-    menu.hidden = !open;
-    $("#novelExportBtn")?.setAttribute("aria-expanded", String(open));
-  });
+  $("#novelExportBtn")?.addEventListener("click", renderExportNote);
+  bindWorkbenchMenu($("#novelExportBtn"), $("#novelExportMenu"), { anchor: $("#novelMoreBtn") });
   $("#novelExportMenu")?.addEventListener("click", (event) => {
     const btn = event.target.closest("[data-novel-export]");
     if (!btn) return;
@@ -3811,13 +3819,14 @@ export function bindNovelEvents() {
     toast(label ? `已导入模板「${label}」作为分镜写法，可再手动修改` : "已导入模板作为分镜写法，可再手动修改");
   });
 
-  // 横竖屏切换会改变三栏/分档布局，inert 必须跟着重算，否则转屏后整栏点不动。
-  if (typeof window.matchMedia === "function") {
-    const query = window.matchMedia(PORTRAIT_QUERY);
-    const onChange = () => applyPaneAccessibility();
-    if (typeof query.addEventListener === "function") query.addEventListener("change", onChange);
-    else if (typeof query.addListener === "function") query.addListener(onChange);
-  }
+  watchWorkbenchSize($("#studioPageNovel"), applyPaneAccessibility);
+  bindWorkbenchMenu($("#novelBookMenuBtn"), $("#novelBookMenu"));
+  bindWorkbenchMenu($("#novelMoreBtn"), $("#novelMoreMenu"));
+  $("#novelAsideBtn")?.addEventListener("click", () => setPane(novel.pane === "preview" ? "editor" : "preview"));
+  $("#novelAsideClose")?.addEventListener("click", () => {
+    setPane("editor");
+    $("#novelAsideBtn")?.focus();
+  });
 
   // 功能页切换：进入本页时按服务端校准一次（页面刷新后也能恢复上次作品）。
   onStudioPageChange((next, detail) => {

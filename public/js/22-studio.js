@@ -10,6 +10,7 @@ import { $, api, applyModelSkinFor, copyText, localFileUrl, setAppView, state, t
 import { populateComposerModels } from "./07-models-agents.js";
 import { openConversation, renderSidebar } from "./08-conversations.js";
 import { applyFilePanelOpenClass, closeSidebar, filePanelState, openSidebar, setLeftSidebarCollapsed, sidebarDesktop } from "./14-file-panel.js";
+import { statusLabel as workbenchStatusLabel, syncWorkbenchHeader, watchWorkbenchSize } from "./22a-workbench-ui.js";
 
 // ---- 模块清单（目录条目 module -> 显示名；顺序即分类顺序） ----
 const MODULE_TABS = [
@@ -29,14 +30,7 @@ const MODULE_TABS = [
 const TYPE_LABELS = { template: "模板", rule: "规则", lexicon: "词条", example: "示例" };
 
 // 任务状态：界面只说中文，不直接露英文状态码。
-const TASK_STATUS_LABELS = {
-  queued: "排队中",
-  running: "生成中",
-  done: "已完成",
-  failed: "失败",
-  cancelled: "已取消",
-  interrupted: "已中断",
-};
+const TASK_STATUS_LABELS = { running: "生成中" };
 
 // 结果栏的两种模式：任务结果 / 历史产出列表。两者互斥显示。
 const RESULT_MODES = ["result", "history"];
@@ -320,6 +314,7 @@ function applyStudioPageUi() {
   document.querySelectorAll("#studioView .studio-topbar-tools").forEach((tools) => {
     tools.hidden = page !== "library";
   });
+  syncWorkbenchHeader(page);
 }
 
 /**
@@ -1824,7 +1819,7 @@ function taskTitle(task) {
 }
 
 function taskStatusLabel(status) {
-  return TASK_STATUS_LABELS[String(status || "")] || "状态未知";
+  return TASK_STATUS_LABELS[String(status || "")] || workbenchStatusLabel(status);
 }
 
 function taskOrigin(task) {
@@ -2417,6 +2412,7 @@ async function confirmStudioHandoff() {
 // ============================================================
 
 export function bindStudioEvents() {
+  watchWorkbenchSize($("#studioPageLibrary"));
   $("#studioRuleEditorSave")?.addEventListener("click", () => void saveStudioRuleEditor());
   const cancelRule = () => { const callback = ruleEditorReturn?.onCancel; ruleEditorReturn = null; $("#studioRuleEditorDialog").close(); callback?.(); };
   $("#studioRuleEditorCancel")?.addEventListener("click", cancelRule);

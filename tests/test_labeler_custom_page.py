@@ -226,11 +226,12 @@ class CustomPageUiContractTests(unittest.TestCase):
         self.js = (self.root / "public/js/23-labeler.js").read_text(encoding="utf-8")
 
     def test_page_tabs_and_bodies_in_html(self):
-        # 根节点挂 dataset 状态；页签前置两枚 + 分隔线；两套 body 互斥。
+        # 根节点挂 dataset 状态；方式与窄屏分档分别分组；两套 body 互斥。
         self.assertIn('id="studioPageLabeler" data-studio-page-view="labeler" data-labeler-page="preset"', self.html)
         self.assertIn('data-labeler-page-tab="preset">预设打标', self.html)
         self.assertIn('data-labeler-page-tab="custom">自定义打标', self.html)
-        self.assertIn('class="labeler-page-divider"', self.html)
+        self.assertIn('class="wb-media-tabs" role="group" aria-label="打标方式"', self.html)
+        self.assertIn('class="wb-media-tabs labeler-view-tabs"', self.html)
         self.assertIn('data-labeler-page-body="preset"', self.html)
         self.assertIn('data-labeler-page-body="custom" hidden', self.html)
         # 预设页字段在 preset body 内；自定义页字段在 custom body 内。

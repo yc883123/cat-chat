@@ -14,6 +14,7 @@ import { $, api, applyModelSkinFor, localFileUrl, state, toast } from "./01-core
 import { isPywebview, saveLocalFile } from "./03-media.js";
 import { onStudioPageChange, setStudioPage } from "./22-studio.js";
 import { bindWriterNovelContinuation } from "./27a-writer-continuation.js";
+import { bindWorkbenchMenu, watchWorkbenchSize, workbenchWidth } from "./22a-workbench-ui.js";
 
 const WRITER_TASKS_URL = "/api/studio/tasks?module=writer";
 const LAST_BOOK_KEY = "naibaWriterLastBookId";
@@ -427,7 +428,8 @@ function renderPageState() {
   const el = $("#writerPageState");
   if (!el) return;
   if (!writer.bookId) {
-    el.textContent = "未打开作品";
+    el.textContent = "选择作品";
+    el.title = el.textContent;
     return;
   }
   const title = `《${writer.book?.title || "未命名作品"}》`;
@@ -438,6 +440,7 @@ function renderPageState() {
     : `${title} · ${stageName}`;
   // 表单/大纲里有还没写进作品的改动：页头必须能看出来，否则用户会以为已经存了。
   if (writer.setupDirty || writer.partsDirty) el.textContent += " · 有未保存修改";
+  el.title = el.textContent;
 }
 
 function renderBookSummary() {
@@ -509,7 +512,7 @@ function renderChapters() {
     list.replaceChildren();
     if (empty) {
       empty.hidden = false;
-      empty.textContent = "还没有打开作品。点右上「作品」新建或打开。";
+      empty.textContent = "还没有打开作品。打开页头作品菜单，新建或切换作品。";
     }
     return;
   }
@@ -3803,11 +3806,16 @@ function setStage(stage) {
   void refreshPlan();
 }
 
-// 手机竖屏断点：与 styles.css 的 `@media (max-width: 760px)` 一致。
-const PORTRAIT_QUERY = "(max-width: 760px)";
+// 分档使用页面实宽，不把被应用侧栏占去的宽度算进编辑区。
+function paneLayoutSize() {
+  const root = $("#studioPageWriter");
+  const width = workbenchWidth(root);
+  return width > 0 ? (width <= 760 ? "narrow" : width < 1000 ? "medium" : "wide")
+    : root?.dataset.wbSize || "wide";
+}
 
 function isPaneLayout() {
-  return typeof window.matchMedia === "function" && window.matchMedia(PORTRAIT_QUERY).matches;
+  return paneLayoutSize() === "narrow";
 }
 
 function setPane(pane) {
@@ -3828,40 +3836,83 @@ function setPane(pane) {
 function applyPaneAccessibility() {
   const columns = $("#writerColumns");
   if (!columns) return;
-  const paned = isPaneLayout();
+  const size = paneLayoutSize();
   for (const panel of columns.querySelectorAll(".writer-panel")) {
-    if (!paned) {
-      panel.removeAttribute("inert");
-      continue;
-    }
     const key = panel.classList.contains("writer-book") ? "book"
       : panel.classList.contains("writer-editor") ? "editor" : "notes";
-    if (key === writer.pane) panel.removeAttribute("inert");
+    const hidden = size === "narrow" ? key !== writer.pane
+      : size === "medium" && key === "notes" && writer.pane !== "notes";
+    panel.setAttribute("aria-hidden", String(hidden));
+    if (!hidden) panel.removeAttribute("inert");
     else panel.setAttribute("inert", "");
+  }
+  const aside = $("#writerAsideBtn");
+  if (aside) {
+    aside.setAttribute("aria-expanded", String(writer.pane === "notes"));
+    aside.textContent = writer.pane === "notes" ? "收起说明" : "查看说明";
   }
 }
 
 function closeExportMenu() {
   const menu = $("#writerExportMenu");
-  if (menu) menu.hidden = true;
+  if (menu) {
+    if (typeof menu.hidePopover === "function") menu.hidePopover();
+    menu.hidden = true;
+  }
   $("#writerExportBtn")?.setAttribute("aria-expanded", "false");
-}
-
-// 手机端导出菜单是 fixed 定位（页头操作条 overflow-x:auto 会把 absolute 下拉整体裁掉，
-// 2026-11-04 专查实测菜单完全不可见且点击穿透）：打开时按按钮实时落位，与拆书匠同款。
-function placeExportMenu() {
-  const menu = $("#writerExportMenu");
-  const btn = $("#writerExportBtn");
-  if (!menu || !btn) return;
-  const rect = btn.getBoundingClientRect();
-  menu.style.top = `${Math.round(rect.bottom + 4)}px`;
-  menu.style.right = `${Math.max(8, Math.round(window.innerWidth - rect.right))}px`;
-  menu.style.left = "auto";
 }
 
 // ============================================================
 // 事件接线
 // ============================================================
+
+function prepareEditorLayout() {
+  const stages = {
+    setup: ["writerSetupGenerate", "会依次生成五项设定，共调用 5 次模型"],
+    outline: ["writerOutlineGenerate", "生成当前分部调用一次模型，旧版本保留"],
+    chapter: ["writerSplitStart", "按拆分设置分批调用模型，先确认再开始"],
+    draft: ["writerDraftGenerate", "整章生成调用一次模型，保存为本章新版本"],
+  };
+  for (const [stage, [buttonId, copy]] of Object.entries(stages)) {
+    const panel = document.querySelector(`#studioPageWriter [data-writer-stage-panel="${stage}"]`);
+    const actions = $(`#${buttonId}`)?.closest(".writer-action-bar");
+    if (!panel || !actions || panel.dataset.wbDocked) continue;
+    // 搬动主体前取得保存按钮；脱离 document 后再用 ID 查询会找不到。
+    const saveId = { setup: "writerSetupSave", outline: "writerOutlineSave", draft: "writerDraftSave" }[stage];
+    const save = saveId ? $(`#${saveId}`) : null;
+    panel.dataset.wbDocked = "true";
+    const body = document.createElement("div");
+    body.className = "wb-book-stage-body";
+    for (const child of [...panel.children]) body.append(child);
+    const hint = document.createElement("span");
+    hint.className = "wb-book-action-hint";
+    hint.textContent = copy;
+    actions.prepend(hint);
+    actions.classList.add("wb-book-action-dock");
+    // 低频操作收进菜单，移动原节点以保留输入、禁用态与原有事件。
+    if (save) actions.append(save);
+    if (stage === "outline" || stage === "draft") {
+      const menu = document.createElement("div");
+      menu.className = "wb-book-menu";
+      menu.id = `writerStageMenu-${stage}`;
+      menu.hidden = true;
+      menu.setAttribute("role", "menu");
+      for (const button of [...actions.querySelectorAll("button")]) {
+        if (button.id === buttonId || button === save) continue;
+        button.setAttribute("role", "menuitem");
+        menu.append(button);
+      }
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "control-button";
+      more.textContent = "更多操作";
+      more.setAttribute("aria-haspopup", "menu");
+      actions.append(more, menu);
+      bindWorkbenchMenu(more, menu);
+    }
+    panel.append(body, actions);
+  }
+}
 
 export function bindWriterEvents() {
   window.addEventListener("naiba-open-domain", (event) => {
@@ -3870,6 +3921,7 @@ export function bindWriterEvents() {
     if (event.detail.bookId) void openBook(String(event.detail.bookId));
   });
   if (writer.initialized) return;
+  prepareEditorLayout();
   restoreLimits();
   writer.initialized = true;
   setPane(writer.pane);
@@ -3957,17 +4009,8 @@ export function bindWriterEvents() {
     writer.importPreview = null;
     closeDialog("#writerImportDialog");
   });
-  $("#writerExportBtn")?.addEventListener("click", () => {
-    const menu = $("#writerExportMenu");
-    if (!menu) return;
-    const open = menu.hidden;
-    if (open) {
-      renderExportNote();
-      placeExportMenu();
-    }
-    menu.hidden = !open;
-    $("#writerExportBtn")?.setAttribute("aria-expanded", String(open));
-  });
+  $("#writerExportBtn")?.addEventListener("click", renderExportNote);
+  bindWorkbenchMenu($("#writerExportBtn"), $("#writerExportMenu"), { anchor: $("#writerMoreBtn") });
   $("#writerExportMenu")?.addEventListener("click", (event) => {
     const btn = event.target.closest("[data-writer-export]");
     if (!btn) return;
@@ -4016,12 +4059,14 @@ export function bindWriterEvents() {
     const btn = event.target.closest("[data-writer-pane]");
     if (btn) setPane(btn.dataset.writerPane);
   });
-  if (typeof window.matchMedia === "function") {
-    const query = window.matchMedia(PORTRAIT_QUERY);
-    const onChange = () => applyPaneAccessibility();
-    if (typeof query.addEventListener === "function") query.addEventListener("change", onChange);
-    else if (typeof query.addListener === "function") query.addListener(onChange);
-  }
+  watchWorkbenchSize($("#studioPageWriter"), applyPaneAccessibility);
+  bindWorkbenchMenu($("#writerBookMenuBtn"), $("#writerBookMenu"));
+  bindWorkbenchMenu($("#writerMoreBtn"), $("#writerMoreMenu"));
+  $("#writerAsideBtn")?.addEventListener("click", () => setPane(writer.pane === "notes" ? "editor" : "notes"));
+  $("#writerAsideClose")?.addEventListener("click", () => {
+    setPane("editor");
+    $("#writerAsideBtn")?.focus();
+  });
 
   // ---- 目录 ----
   $("#writerChapterList")?.addEventListener("click", (event) => {

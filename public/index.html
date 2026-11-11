@@ -97,6 +97,27 @@
           </button>
         </nav>
       </div>
+      <div class="super-agent-thread-panel" id="sidebarSuperAgentNav" aria-label="任务列表">
+        <nav class="super-agent-app-nav" id="superAgentAppNav" aria-label="应用视图" hidden></nav>
+        <button class="control-button primary super-agent-new-task" id="superAgentCreate" type="button"><span aria-hidden="true">＋</span> 新建任务</button>
+        <div class="super-agent-panel-head"><strong>我的任务</strong><span id="superAgentThreadCount">0</span></div>
+        <div class="super-agent-filters" id="superAgentFilters" role="group" aria-label="筛选任务">
+          <button type="button" data-super-filter="all" aria-pressed="true">全部</button>
+          <button type="button" data-super-filter="waiting" aria-pressed="false">待确认</button>
+          <button type="button" data-super-filter="completed" aria-pressed="false">已完成</button>
+          <button type="button" data-super-filter="archived" aria-pressed="false">已归档</button>
+        </div>
+        <div class="super-agent-batch-bar" id="superAgentBatchBar" hidden>
+          <label class="super-agent-select-all"><input type="checkbox" id="superAgentSelectAll">全选</label>
+          <span id="superAgentBatchCount">已选 0 项</span>
+          <button type="button" class="control-button tiny" id="superAgentBatchDelete">删除所选</button>
+          <button type="button" class="control-button tiny" id="superAgentMultiExit">退出多选</button>
+        </div>
+        <button type="button" class="control-button tiny super-agent-multi-toggle" id="superAgentMultiToggle" hidden>多选</button>
+        <div class="super-agent-thread-list" id="superAgentThreadList"></div>
+        <p class="super-agent-empty" id="superAgentThreadEmpty">还没有任务，先新建一个吧。</p>
+        <p class="super-agent-list-note">切换页面不会中断后台任务</p>
+      </div>
       <div class="sidebar-footer">
         <button class="address-button" id="copyAddress" title="复制手机访问地址">
           <i class="status-mark" id="serverDot" title="服务状态" aria-label="服务状态"></i>
@@ -269,7 +290,7 @@
           <button class="icon-button mobile-only" id="studioOpenSidebar" type="button" title="打开导航" aria-label="打开导航">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"></path></svg>
           </button>
-          <strong class="studio-brand">工作台</strong>
+          <strong class="studio-brand">提词库</strong>
           <div class="studio-topbar-tools">
             <label class="studio-search">
               <input id="studioSearch" type="search" placeholder="搜索模板" aria-label="搜索模板">
@@ -422,23 +443,30 @@
              左（批次与队列）、中（拖放与参数）、右（按图 / 按标签 / 句子库）三栏。
              页面结构在这里定稿；交互与渲染由 public/js/23-labeler.js 接管。 -->
         <div class="studio-page-view" id="studioPageLabeler" data-studio-page-view="labeler" data-labeler-page="preset" hidden>
-          <div class="labeler-panes" id="labelerPanes" role="group" aria-label="贴签匠分档">
+          <header class="labeler-panes wb-page-head" id="labelerPanes" data-wb-page-header aria-label="贴签匠导航">
+            <h1>贴签匠</h1>
+            <div class="wb-media-tabs" role="group" aria-label="打标方式">
             <button class="studio-pane-btn labeler-page-btn active" type="button" aria-pressed="true" data-labeler-page-tab="preset">预设打标</button>
             <button class="studio-pane-btn labeler-page-btn" type="button" aria-pressed="false" data-labeler-page-tab="custom">自定义打标</button>
-            <span class="labeler-page-divider" aria-hidden="true"></span>
+            </div>
+            <div class="wb-media-tabs labeler-view-tabs" role="group" aria-label="贴签匠分档">
             <button class="studio-pane-btn labeler-pane-btn" type="button" aria-pressed="false" data-labeler-pane="queue">批次</button>
             <button class="studio-pane-btn labeler-pane-btn active" type="button" aria-pressed="true" data-labeler-pane="config">设置</button>
             <button class="studio-pane-btn labeler-pane-btn" type="button" aria-pressed="false" data-labeler-pane="results">结果</button>
-          </div>
+            </div>
+          </header>
           <div class="labeler-columns" id="labelerColumns">
             <!-- 左：批次 / 队列 / 断点状态 -->
             <aside class="labeler-queue" aria-label="批次与队列">
               <div class="labeler-queue-head">
                 <strong>批次</strong>
-                <span class="labeler-queue-head-actions">
+                <details class="wb-media-menu labeler-queue-head-actions">
+                  <summary aria-label="批次操作" title="批次操作">⋯</summary>
+                  <div class="wb-media-menu-panel">
                   <button class="control-button tiny" id="labelerClearFinished" type="button" title="删除全部已结束的批次记录（已生成的标注不受影响）">清理已完成</button>
                   <button class="control-button tiny" id="labelerRefreshRecent" type="button" title="重新读取最近批次">刷新</button>
-                </span>
+                  </div>
+                </details>
               </div>
               <div class="labeler-batch-list" id="labelerBatchList" aria-label="最近批次">
                 <p class="labeler-empty" id="labelerBatchEmpty">还没有批次。拖入一个文件夹即可开始。</p>
@@ -455,6 +483,7 @@
 
             <!-- 中：文件夹拖放 + 打标侧重 + 模型与参数 -->
             <section class="labeler-config" aria-label="打标设置">
+              <div class="labeler-config-body">
               <div class="labeler-dropzone" id="labelerDropzone" tabindex="0" role="button"
                    aria-label="拖入文件夹或点击选择文件夹">
                 <svg class="labeler-dropzone-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -670,6 +699,8 @@
                 </label>
               </details>
 
+              </div>
+              <footer class="labeler-config-foot">
               <p class="labeler-cost-note" id="labelerCostNote"></p>
               <div class="labeler-actions">
                 <button class="primary-button" id="labelerStart" type="button">开始打标</button>
@@ -678,6 +709,7 @@
                 <button class="control-button" id="labelerRetryModelFailed" type="button" hidden>仅重试打标失败</button>
               </div>
               <p class="labeler-task-hint" id="labelerTaskHint" role="status"></p>
+              </footer>
             </section>
 
             <!-- 右：结果三档（按图 / 按标签 / 句子库） -->
@@ -736,12 +768,26 @@
              三栏：左（工作流库 + 导入）、中（连接状态 / 参数表单 / 提交）、右（任务与产物结果）。
              页面结构在这里定稿；交互与渲染由 public/js/24-comfyui.js 接管。 -->
         <div class="studio-page-view" id="studioPageComfyui" data-studio-page-view="comfyui" data-comfyui-pane="run" data-results-segment="single" data-batch-detail="0" hidden>
-          <div class="comfyui-panes" id="comfyuiPanes" role="group" aria-label="造梦机分档">
+          <header class="comfyui-panes wb-page-head" data-wb-page-header>
+            <h1>造梦机</h1>
+          <div class="wb-media-tabs" id="comfyuiPanes" role="group" aria-label="造梦机分档">
             <button class="studio-pane-btn comfyui-pane-btn" type="button" aria-pressed="false" data-comfyui-pane="workflows">工作流</button>
             <button class="studio-pane-btn comfyui-pane-btn active" type="button" aria-pressed="true" data-comfyui-pane="run">单次生成</button>
             <button class="studio-pane-btn comfyui-pane-btn" type="button" aria-pressed="false" data-comfyui-pane="batch">批量生成</button>
             <button class="studio-pane-btn comfyui-pane-btn" type="button" aria-pressed="false" data-comfyui-pane="tasks">结果</button>
           </div>
+            <div class="comfyui-statusbar" id="comfyuiStatusbar">
+              <i class="status-mark" id="comfyuiStatusDot" title="ComfyUI 连接状态"></i>
+              <span class="comfyui-status-text" id="comfyuiStatusText">ComfyUI 未连接</span>
+              <details class="wb-media-menu">
+                <summary aria-label="ComfyUI 连接设置" title="连接设置">⋯</summary>
+                <div class="wb-media-menu-panel">
+                  <button class="control-button tiny" id="comfyuiEditUrl" type="button">改地址</button>
+                  <button class="control-button tiny" id="comfyuiTestConn" type="button">测试连接</button>
+                </div>
+              </details>
+            </div>
+          </header>
           <div class="comfyui-columns" id="comfyuiColumns">
             <!-- 左：工作流库 -->
             <aside class="comfyui-library" aria-label="工作流库">
@@ -755,12 +801,6 @@
             </aside>
             <!-- 中：连接状态 / 参数表单 / 提交 -->
             <section class="comfyui-run-col" aria-label="生成参数">
-              <div class="comfyui-statusbar" id="comfyuiStatusbar">
-                <i class="status-mark" id="comfyuiStatusDot" title="ComfyUI 连接状态"></i>
-                <span class="comfyui-status-text" id="comfyuiStatusText">ComfyUI 未连接</span>
-                <button class="control-button tiny" id="comfyuiEditUrl" type="button">改地址</button>
-                <button class="control-button tiny" id="comfyuiTestConn" type="button">测试连接</button>
-              </div>
               <div class="comfyui-run" id="comfyuiRunSection">
                 <div class="comfyui-param-form" id="comfyuiParamForm" aria-label="工作流参数"></div>
                 <p class="comfyui-draft-hint" id="comfyuiDraftHint" hidden role="status"></p>
@@ -768,13 +808,18 @@
                   <label class="comfyui-shots-field">张数
                     <input id="comfyuiShots" type="number" min="1" max="200" value="1" aria-label="生成张数">
                   </label>
-                  <button class="control-button" id="comfyuiSubmit" type="button" disabled>开始生成</button>
+                  <button class="primary-button" id="comfyuiSubmit" type="button" disabled>开始生成</button>
                   <label class="cbm-switch" title="本次任务结束后请求 ComfyUI 卸载模型，释放显存与内存">
                     <input id="comfyuiUnloadAfter" type="checkbox">
                     <span class="cbm-track"></span>释放模型
                   </label>
-                  <button class="control-button" id="comfyuiSaveCurrentAs" type="button">用当前配置另存工作流</button>
-                  <button class="control-button" id="comfyuiOpenBatch" type="button">批量生成</button>
+                  <details class="wb-media-menu">
+                    <summary aria-label="更多生成操作" title="更多生成操作">⋯</summary>
+                    <div class="wb-media-menu-panel is-up">
+                      <button class="control-button" id="comfyuiSaveCurrentAs" type="button">用当前配置另存工作流</button>
+                      <button class="control-button" id="comfyuiOpenBatch" type="button">批量生成</button>
+                    </div>
+                  </details>
                 </div>
               </div>
             </section>
@@ -787,11 +832,14 @@
               <div class="comfyui-tasks" id="comfyuiTasksSection">
                 <div class="comfyui-tasks-head">
                   <strong>任务</strong>
-                  <span class="comfyui-tasks-actions">
+                  <details class="wb-media-menu comfyui-tasks-actions">
+                    <summary aria-label="结果管理" title="结果管理">⋯</summary>
+                    <div class="wb-media-menu-panel">
                     <button class="control-button tiny" id="comfyuiFreeModels" type="button" title="让 ComfyUI 卸载已加载的模型，释放显存与内存；正在执行的任务不受影响，会在任务结束后卸载">释放模型</button>
                     <button class="control-button tiny" id="comfyuiOpenOutputs" type="button" title="在运行 Cat Chat 的电脑上打开产物文件夹">产物</button>
                     <button class="control-button tiny" id="comfyuiClearTasks" type="button" title="删除已结束的任务和它们的产物">清除</button>
-                  </span>
+                    </div>
+                  </details>
                 </div>
                 <div class="comfyui-task-list" id="comfyuiTaskList" aria-label="任务列表"></div>
               </div>
@@ -903,27 +951,34 @@
                工具栏搬到这儿，原有 id 全部保留，事件绑定不变；导出菜单跟着按钮进
                .novel-page-actions，以这个容器为定位基准，不再依赖左栏。
                不再放「工作台 / 拆书匠」面包屑：上方工作台标识与下方标题已经说明了位置。 -->
-          <header class="novel-page-head">
+          <header class="novel-page-head" data-wb-page-header>
             <div class="novel-page-title-row">
               <h2>拆书匠</h2>
-              <span class="novel-page-state" id="novelPageState">未打开作品 · 拆章</span>
+              <button class="wb-book-switch" id="novelBookMenuBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="novelBookMenu" title="切换作品或导入 TXT">
+                <span class="novel-page-state" id="novelPageState">选择作品</span><span aria-hidden="true">⌄</span>
+              </button>
+            </div>
+            <div class="wb-book-menu" id="novelBookMenu" role="menu" popover hidden>
+              <button class="control-button" id="novelBooksBtn" type="button" role="menuitem" title="打开已保存的作品列表">切换作品…</button>
+              <button class="control-button" id="novelImportBtn" type="button" role="menuitem" title="导入一本 TXT 小说并自动拆章">导入 TXT 新建作品</button>
             </div>
             <div class="novel-page-actions">
+              <button class="control-button wb-book-aside" id="novelAsideBtn" type="button" aria-controls="novelColumns" aria-expanded="false">查看说明</button>
+              <button class="control-button wb-book-more" id="novelMoreBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="novelMoreMenu" aria-label="更多作品操作">⋯</button>
+              <div class="wb-book-menu" id="novelMoreMenu" role="menu" popover hidden>
               <button class="control-button novel-manage-entry" id="novelManageBtn" type="button"
-                      title="集中管理原文、改编稿、要素、大纲、剧本与生成记录">管理记录</button>
-              <button class="control-button" id="novelImportBtn" type="button" title="导入一本 TXT 小说并自动拆章">导入 TXT</button>
-              <button class="control-button" id="novelBooksBtn" type="button" title="打开已保存的作品列表">作品</button>
+                      role="menuitem" title="集中管理原文、改编稿、要素、大纲、剧本与生成记录">管理记录</button>
               <button class="control-button" id="novelExportBtn" type="button"
-                      title="导出全书：TXT / Markdown，可附要素与大纲" aria-haspopup="menu"
+                      role="menuitem" title="导出全书：TXT / Markdown，可附要素与大纲" aria-haspopup="menu"
                       aria-expanded="false" disabled>导出</button>
-              <div class="novel-export-menu" id="novelExportMenu" role="menu" hidden>
+              </div>
+              <div class="novel-export-menu" id="novelExportMenu" role="menu" popover hidden>
                 <button type="button" role="menuitem" data-novel-export="txt">导出 TXT（全书）</button>
                 <button type="button" role="menuitem" data-novel-export="md">导出 Markdown（全书）</button>
                 <button type="button" role="menuitem" data-novel-export="md-extras">导出 Markdown（含要素与大纲）</button>
                 <p class="novel-note" id="novelExportNote">导出由浏览器发起下载，通常保存到浏览器默认下载目录。</p>
               </div>
             </div>
-          </header>
           <div class="novel-stagebar">
             <div class="novel-stages" id="novelStages" role="group" aria-label="创作阶段">
               <button class="novel-stage active" type="button" aria-pressed="true" data-novel-stage="split">拆章</button>
@@ -933,6 +988,7 @@
               <button class="novel-stage" type="button" aria-pressed="false" data-novel-stage="storyboard">分镜</button>
             </div>
           </div>
+          </header>
           <div class="novel-panes" id="novelPanes" role="group" aria-label="拆书匠分档">
             <button class="studio-pane-btn novel-pane-btn" type="button" aria-pressed="false" data-novel-pane="chapters">章节</button>
             <button class="studio-pane-btn novel-pane-btn active" type="button" aria-pressed="true" data-novel-pane="editor">编辑</button>
@@ -966,7 +1022,7 @@
               </div>
               <p class="novel-note novel-chapter-note" id="novelChapterNote" hidden></p>
               <div class="novel-chapter-list" id="novelChapterList" aria-label="章节列表">
-                <p class="novel-empty" id="novelChapterEmpty">还没有章节。点上面的「导入 TXT」选一本小说。</p>
+                <p class="novel-empty" id="novelChapterEmpty">还没有章节。打开页头作品菜单，选择「导入 TXT 新建作品」。</p>
               </div>
             </aside>
 
@@ -1182,6 +1238,7 @@
               <div class="novel-panel-head">
                 <strong>本次生成说明</strong>
                 <small id="novelPreviewStage">拆章</small>
+                <button class="control-button wb-book-aside-close" id="novelAsideClose" type="button" aria-label="收起说明">关闭</button>
               </div>
               <div class="novel-preview-body">
                 <section class="novel-block" id="novelImportBlock" hidden>
@@ -1268,32 +1325,39 @@
              三栏：左=作品与目录、中=阶段工作区、右=说明与状态。
              不放面包屑：上方工作台标识与下方标题已经说明了位置（与拆书匠同一拍板）。 -->
         <div class="studio-page-view" id="studioPageWriter" data-studio-page-view="writer" hidden>
-          <header class="writer-page-head">
+          <header class="writer-page-head" data-wb-page-header>
             <div class="writer-page-title-row">
               <h2>织书台</h2>
-              <span class="writer-page-state" id="writerPageState">未打开作品</span>
+              <button class="wb-book-switch" id="writerBookMenuBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="writerBookMenu" title="切换、新建或导入作品">
+                <span class="writer-page-state" id="writerPageState">选择作品</span><span aria-hidden="true">⌄</span>
+              </button>
+            </div>
+            <div class="wb-book-menu" id="writerBookMenu" role="menu" popover hidden>
+              <button class="control-button" id="writerBooksBtn" type="button" role="menuitem" title="打开已保存的作品列表">切换作品…</button>
+              <button class="control-button" id="writerNewBookBtn" type="button" role="menuitem"
+                      title="从一句话创意开始一本新书">新建作品</button>
+              <button class="control-button" id="writerImportBtn" type="button"
+                      role="menuitem" title="导入启元的「作品存档.json」，先预览再入库">导入存档</button>
+              <button class="control-button" id="writerNovelContinueBtn" type="button"
+                      role="menuitem" title="明确选拆书匠稿件，在末章后创建新章">从已有小说续写</button>
             </div>
             <div class="writer-page-actions">
+              <button class="control-button wb-book-aside" id="writerAsideBtn" type="button" aria-controls="writerColumns" aria-expanded="false">查看说明</button>
+              <button class="control-button wb-book-more" id="writerMoreBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="writerMoreMenu" aria-label="更多作品操作">⋯</button>
+              <div class="wb-book-menu" id="writerMoreMenu" role="menu" popover hidden>
               <button class="control-button writer-manage-entry" id="writerManageBtn" type="button"
-                      title="集中管理设定、大纲、章节正文与生成记录">管理记录</button>
-              <button class="control-button" id="writerImportBtn" type="button"
-                      title="导入启元的「作品存档.json」，先预览再入库">导入存档</button>
-              <button class="control-button" id="writerNovelContinueBtn" type="button"
-                      title="明确选拆书匠稿件，在末章后创建新章">从已有小说续写</button>
-              <button class="control-button" id="writerBooksBtn" type="button" title="打开已保存的作品列表">作品</button>
+                      role="menuitem" title="集中管理设定、大纲、章节正文与生成记录">管理记录</button>
               <button class="control-button" id="writerExportBtn" type="button"
-                      title="导出全书：TXT / Markdown，可附设定与大纲" aria-haspopup="menu"
+                      role="menuitem" title="导出全书：TXT / Markdown，可附设定与大纲" aria-haspopup="menu"
                       aria-expanded="false" disabled>导出</button>
-              <div class="writer-export-menu" id="writerExportMenu" role="menu" hidden>
+              </div>
+              <div class="writer-export-menu" id="writerExportMenu" role="menu" popover hidden>
                 <button type="button" role="menuitem" data-writer-export="txt">导出 TXT（全书）</button>
                 <button type="button" role="menuitem" data-writer-export="md">导出 Markdown（全书）</button>
                 <button type="button" role="menuitem" data-writer-export="md-extras">导出 Markdown（含设定与大纲）</button>
                 <p class="writer-hint" id="writerExportNote">导出会先在保存目录的 _exports 里生成文件，桌面端随后弹出「另存为」；手机/浏览器直接下载。</p>
               </div>
-              <button class="control-button primary" id="writerNewBookBtn" type="button"
-                      title="从一句话创意开始一本新书">新建作品</button>
             </div>
-          </header>
           <div class="writer-stagebar">
             <div class="writer-stages" id="writerStages" role="group" aria-label="原创写作阶段">
               <button class="writer-stage active" type="button" aria-pressed="true" data-writer-stage="setup">设定</button>
@@ -1301,8 +1365,8 @@
               <button class="writer-stage" type="button" aria-pressed="false" data-writer-stage="chapter">章节</button>
               <button class="writer-stage" type="button" aria-pressed="false" data-writer-stage="draft">正文</button>
             </div>
-            <span class="writer-stagebar-note">四个阶段：设定 → 大纲 → 章节 → 正文</span>
           </div>
+          </header>
           <div class="writer-panes" id="writerPanes" role="group" aria-label="织书台分档">
             <button class="studio-pane-btn writer-pane-btn" type="button" aria-pressed="false" data-writer-pane="book">作品</button>
             <button class="studio-pane-btn writer-pane-btn active" type="button" aria-pressed="true" data-writer-pane="editor">编辑</button>
@@ -1376,7 +1440,7 @@
                 <div class="writer-toc-limits" id="writerTocLimits"></div>
                 <div class="writer-scroll">
                   <div class="writer-chapter-list" id="writerChapterList" aria-label="章节列表"></div>
-                  <p class="writer-empty" id="writerChapterEmpty">还没有打开作品。点右上「作品」新建或打开。</p>
+                  <p class="writer-empty" id="writerChapterEmpty">还没有打开作品。打开页头作品菜单，新建或切换作品。</p>
                 </div>
               </div><!-- /side draft -->
             </aside>
@@ -1390,7 +1454,7 @@
               <div class="writer-scroll writer-editor-body" id="writerEditorBody">
                 <div class="writer-placeholder" id="writerEditorPlaceholder">
                   <strong>还没有打开作品</strong>
-                  <p>点右上「作品」新建一本（从一句话创意开始），或打开已保存的书。设定、大纲和正文的每一版都会自动保留，随时可以切回。</p>
+                  <p>打开页头作品菜单，新建一本（从一句话创意开始），或切换到已保存的书。设定、大纲和正文的每一版都会自动保留，随时可以切回。</p>
                 </div>
 
                 <!-- ===== 阶段一：设定 ===== -->
@@ -1714,6 +1778,7 @@
               <div class="writer-panel-head">
                 <strong>这次会做什么</strong>
                 <small id="writerPlanState">—</small>
+                <button class="control-button wb-book-aside-close" id="writerAsideClose" type="button" aria-label="收起说明">关闭</button>
               </div>
               <div class="writer-scroll">
                 <section class="writer-block" id="writerPlanBlock">
@@ -1878,42 +1943,16 @@
 
       <section class="super-agent-view" id="superAgentView" hidden aria-label="任务总管">
         <div class="super-agent-columns">
-          <aside class="super-agent-thread-panel" aria-label="任务列表">
-            <div class="super-agent-sidebar-brand"><span class="super-agent-brand-mark" aria-hidden="true">总</span><div><strong>任务总管</strong><small>持续任务 · 进展与结果</small></div></div>
-            <nav class="super-agent-app-nav" id="superAgentAppNav" aria-label="应用视图"><button type="button" data-super-view="chat">对话</button><button type="button" data-super-view="studio">工作台</button><button type="button" data-super-view="super-agent" aria-current="page">任务总管</button></nav>
-            <button class="control-button primary super-agent-new-task" id="superAgentCreate" type="button"><span aria-hidden="true">＋</span> 新建任务</button>
-            <div class="super-agent-panel-head"><strong>我的任务</strong><span id="superAgentThreadCount">0</span></div>
-            <div class="super-agent-filters" id="superAgentFilters" role="group" aria-label="筛选任务">
-              <button type="button" data-super-filter="all" aria-pressed="true">全部</button>
-              <button type="button" data-super-filter="waiting" aria-pressed="false">待确认</button>
-              <button type="button" data-super-filter="completed" aria-pressed="false">已完成</button>
-              <button type="button" data-super-filter="archived" aria-pressed="false">已归档</button>
-            </div>
-            <div class="super-agent-batch-bar" id="superAgentBatchBar" hidden>
-              <label class="super-agent-select-all"><input type="checkbox" id="superAgentSelectAll">全选</label>
-              <span id="superAgentBatchCount">已选 0 项</span>
-              <button type="button" class="control-button tiny" id="superAgentBatchDelete">删除所选</button>
-              <button type="button" class="control-button tiny" id="superAgentMultiExit">退出多选</button>
-            </div>
-            <button type="button" class="control-button tiny super-agent-multi-toggle" id="superAgentMultiToggle" hidden>多选</button>
-            <div class="super-agent-thread-list" id="superAgentThreadList"></div>
-            <p class="super-agent-empty" id="superAgentThreadEmpty">还没有任务，先新建一个吧。</p>
-            <p class="super-agent-list-note">切换页面不会中断后台任务</p>
-          </aside>
-          <header class="super-agent-workspace-topbar"><span class="super-agent-crumb">任务总管 <span aria-hidden="true">/</span> <strong id="superAgentCrumbTitle">任务进展与结果</strong></span><div class="super-agent-toolbar"><span class="super-agent-sync" id="superAgentSyncStatus" role="status" aria-live="polite"></span><button class="control-button tiny" id="superAgentRefresh" type="button">刷新状态</button></div></header>
+          <header class="super-agent-workspace-topbar">
+            <button class="control-button" id="superAgentOpenSidebar" type="button" aria-label="打开任务列表与导航">☰ <span>任务列表</span></button>
+            <h1 id="superAgentTitle">任务进展与结果</h1><strong class="super-agent-crumb" id="superAgentCrumbTitle" hidden>任务进展与结果</strong><span class="super-agent-status" id="superAgentStatus"></span>
+            <div class="super-agent-toolbar"><span class="super-agent-sync" id="superAgentSyncStatus" role="status" aria-live="polite"></span><button class="control-button" id="superAgentToggleInfo" type="button" aria-expanded="false" aria-controls="superAgentInfo">任务信息</button><button class="control-button" id="superAgentRefresh" type="button">刷新</button></div>
+          </header>
           <section class="super-agent-detail-panel" aria-label="任务详情">
             <div class="super-agent-empty" id="superAgentDetailEmpty">选择一个任务，查看进展与下一步。</div>
             <div id="superAgentDetail" hidden>
               <div class="super-agent-detail-head">
-                <div><div class="super-agent-eyebrow"><span aria-hidden="true">▤</span> 持续任务 · 任务总管</div><h1 id="superAgentTitle"></h1><p id="superAgentGoal"></p></div>
-                <span class="super-agent-status" id="superAgentStatus"></span>
-              </div>
-              <div class="super-agent-thread-actions" id="superAgentThreadActions"><button type="button" class="control-button tiny" data-super-thread-action="pause" title="暂停后续步骤，正在执行的步骤仍可能完成">暂停任务</button><button type="button" class="control-button tiny" data-super-thread-action="continue">继续任务</button><button type="button" class="control-button tiny danger" data-super-thread-action="cancel">取消任务</button></div>
-              <p class="super-agent-control-note" id="superAgentControlNote">暂停只停止后续步骤；正在执行的步骤仍可能完成。取消后请以实际停止状态为准。</p>
-              <div class="super-agent-overview" aria-label="任务概况">
-                <section class="super-agent-metric super-agent-progress"><h2>总体进度</h2><strong id="superAgentProgressText">暂无步骤</strong><progress id="superAgentProgress" max="1" value="0" aria-label="已完成步骤" hidden></progress><small id="superAgentProgressHint">仅统计已完成的真实步骤</small></section>
-                <section class="super-agent-metric"><h2>当前阶段</h2><strong id="superAgentCurrentStage">尚未开始</strong><small id="superAgentCurrentHint"></small></section>
-                <section class="super-agent-metric"><h2>最近更新</h2><strong id="superAgentUpdatedAt">—</strong><small>以任务记录为准</small></section>
+                <div><p id="superAgentGoal"></p></div>
               </div>
               <section class="super-agent-focus" id="superAgentFocus" hidden aria-label="现在需要你做的事">
                 <div class="super-agent-focus-top"><span id="superAgentFocusLabel"></span></div>
@@ -1924,18 +1963,24 @@
                 <div id="superAgentApprovalList"></div>
                 <p class="super-agent-focus-note" id="superAgentFocusNote" hidden></p>
               </section>
+              <details class="super-agent-controls"><summary>更多任务操作</summary><div class="super-agent-thread-actions" id="superAgentThreadActions"><button type="button" class="control-button" data-super-thread-action="pause" title="暂停后续步骤，正在执行的步骤仍可能完成">暂停任务</button><button type="button" class="control-button" data-super-thread-action="continue">继续任务</button><button type="button" class="control-button danger" data-super-thread-action="cancel">取消任务</button></div><p class="super-agent-control-note" id="superAgentControlNote">暂停只停止后续步骤；正在执行的步骤仍可能完成。取消后请以实际停止状态为准。</p></details>
               <section class="super-agent-section super-agent-decision-section" id="superAgentDecisionSection" hidden><div class="super-agent-section-title"><h2>最近系统决策</h2><span class="super-agent-chain-meta" id="superAgentDecisionAt"></span></div><p class="super-agent-summary" id="superAgentSummary"></p></section>
               <section class="super-agent-section content-zone" id="superAgentContentZone" hidden aria-label="任务内容区"></section>
               <section class="super-agent-section super-agent-supervision" id="superAgentSupervision" hidden aria-live="polite"></section>
               <section class="super-agent-section super-agent-stage-section" id="superAgentStageSection" hidden><div class="super-agent-section-title"><h2>任务步骤</h2><span class="super-agent-chain-meta" id="superAgentChainMeta"></span></div><div class="super-agent-stage-chain" id="superAgentStageChain"><div class="super-agent-node-list" id="superAgentNodeList"></div></div></section>
-              <section class="super-agent-section"><div class="super-agent-section-title"><h2>时间线</h2><span class="super-agent-chain-meta">最近活动在前</span></div><div class="super-agent-event-list" id="superAgentEventList"></div></section>
+              <details class="super-agent-activity"><summary>活动记录 <span class="super-agent-chain-meta">最近活动在前</span></summary><div class="super-agent-event-list" id="superAgentEventList"></div></details>
             </div>
           </section>
-          <aside class="super-agent-side-panel" aria-label="下一步、产物与入口">
-            <div class="super-agent-side-title"><h2>任务详情</h2><small>以实际任务记录为准</small></div>
+          <aside class="super-agent-side-panel" id="superAgentInfo" aria-label="下一步、产物与入口">
+            <button class="control-button" id="superAgentCloseInfo" type="button">返回任务</button>
+            <div class="super-agent-overview" id="superAgentOverview" aria-label="任务概况" hidden>
+              <section class="super-agent-metric super-agent-progress"><h2>总体进度</h2><strong id="superAgentProgressText">暂无步骤</strong><progress id="superAgentProgress" max="1" value="0" aria-label="已完成步骤" hidden></progress><small id="superAgentProgressHint">仅统计已完成的真实步骤</small></section>
+              <section class="super-agent-metric"><h2>当前阶段</h2><strong id="superAgentCurrentStage">尚未开始</strong><small id="superAgentCurrentHint"></small></section>
+              <section class="super-agent-metric"><h2>最近更新</h2><strong id="superAgentUpdatedAt">—</strong><small>以任务记录为准</small></section>
+            </div>
             <section class="super-agent-section"><h2>下一步</h2><div id="superAgentNextStep"><p class="super-agent-muted">选择任务后查看下一步。</p></div></section>
             <section class="super-agent-section"><h2>最近产物</h2><div id="superAgentArtifactList"></div></section>
-            <section class="super-agent-section"><h2>相关入口</h2><div class="super-agent-related-links" id="superAgentConversationLinks"></div></section>
+            <section class="super-agent-section" id="superAgentRelatedSection" hidden><h2>相关入口</h2><div class="super-agent-related-links" id="superAgentConversationLinks"></div></section>
           </aside>
         </div>
       </section>

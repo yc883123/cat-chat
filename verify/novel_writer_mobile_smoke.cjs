@@ -127,6 +127,7 @@ async function fixture(page) {
         await page.locator('[data-novel-stage="split"]').click();
         await page.locator('[data-novel-pane="editor"]').click();
         if (width===393 && theme==='light') await page.screenshot({path:path.join(OUTPUT,'novel-mobile-393.png')});
+        await page.locator('#novelMoreBtn').click();
         await page.locator('#novelManageBtn').click();
         await page.locator('#novelManageTabs [data-novel-manage-tab="manuscript"]').click();
         await page.waitForSelector('#novelManageList .novel-manage-row');
@@ -151,6 +152,7 @@ async function fixture(page) {
         await page.locator('[data-writer-pane="editor"]').click();
         await geometry(page,'#studioPageWriter',`writer 正文 ${width}/${theme}`);scans++;
         if (width===393 && theme==='light') await page.screenshot({path:path.join(OUTPUT,'writer-mobile-393.png')});
+        await page.locator('#writerMoreBtn').click();
         await page.locator('#writerManageBtn').click();
         for (const tab of ['setup','outline','chapter','task']) {
           await page.locator(`#writerManageTabs [data-writer-manage-tab="${tab}"]`).click();
@@ -162,6 +164,7 @@ async function fixture(page) {
           await geometry(page,'#writerManageDialog',`writer 管理记录 ${width}/${theme}/${tab}`);scans++;
         }
         await page.locator('#writerManageClose').click();
+        await page.locator('#writerBookMenuBtn').click();
         await page.locator('#writerNovelContinueBtn').click();
         await page.waitForSelector('#writerNovelSourceBook option[value="'+NID+'"]',{state:'attached'});
         await geometry(page,'#writerNovelImportDialog',`续写向导 ${width}/${theme}/1`);scans++;

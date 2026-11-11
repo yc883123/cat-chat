@@ -22,6 +22,8 @@ let pageListener,calls=0;
 const context=vm.createContext({console,$:key=>elements[key]||null,$$:()=>[],api:async()=>{calls++;throw new Error('unexpected request');},
   state:{},onStudioPageChange:fn=>{pageListener=fn;},setTimeout,clearTimeout,setInterval,clearInterval,
   document:{addEventListener(){}},window:{addEventListener(){}}});
+const shared=fs.readFileSync('public/js/22a-workbench-ui.js','utf8').replace(/^export /gm,'');
+vm.runInContext(shared,context);
 const source=fs.readFileSync('public/js/23-labeler.js','utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
 vm.runInContext(source+'\nglobalThis.p={applySelectedSkill,clearSystemPrompt,setLabelerPage,bindLabelerEvents,collectConfig,labeler};',context);
 const p=context.p;p.setLabelerPage('custom');p.bindLabelerEvents();

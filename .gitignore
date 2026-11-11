@@ -408,4 +408,6 @@ verify/*
 !verify/_serve_novel_integrity.py
 !verify/onebot_fake_napcat_smoke.py
 !verify/onebot_settings_smoke.cjs
+!verify/_serve_concurrency_guards.py
+!verify/concurrency_guards_smoke.cjs
 .zcode-site/

@@ -631,15 +631,32 @@ class NaibaChatApp:
         return payload
 
     def register_mcp_server(self, values: dict[str, Any]) -> dict[str, Any]:
-        config = self.config.upsert_mcp_server(values)
-        return {"saved": True, "server": self.mcp.upsert(config)}
+        server_id = str(values.get("id") or "").strip()
+        with self.mcp.server_operation(server_id):
+            previous_connection = self.mcp.connection(server_id)
+            with self.config.lock:
+                previous_config = next((dict(item) for item in self.config.data.get("mcp_servers", [])
+                                        if item.get("id") == server_id), None)
+            config = self.config.upsert_mcp_server(values)
+            try:
+                state = self.mcp.upsert(config)
+            except Exception:
+                # A failed stop leaves the old connection authoritative. Restore
+                # only this ID; unrelated server saves may have finished meanwhile.
+                if previous_connection is not None and self.mcp.connection(server_id) is previous_connection:
+                    if previous_config is None:
+                        self.config.delete_mcp_server(server_id)
+                    else:
+                        self.config.upsert_mcp_server(previous_config)
+                raise
+            return {"saved": True, "server": state}
 
     def remove_mcp_server(self, server_id: str) -> dict[str, Any]:
         """Persistently delete a registered MCP server and its live connection."""
-        if self.config.delete_mcp_server(server_id):
+        # 停止尚未完成时保留配置和管理入口，不能把活连接变成无法再操作的孤儿。
+        with self.mcp.server_operation(server_id):
             self.mcp.remove(server_id)
-        else:
-            self.mcp.remove(server_id)  # 配置里可能已缺，仍尝试清理运行态
+            self.config.delete_mcp_server(server_id)
         return {"removed": True, "server_id": server_id}
 
     def pick_workspace_directory(self, initial: str = "") -> dict[str, Any]:
@@ -795,13 +812,7 @@ class NaibaChatApp:
 
     def reconnect_mcp_server(self, server_id: str) -> dict[str, Any]:
         """强制重连指定 MCP 服务：先停止再启动，返回最新状态。"""
-        connection = self.mcp.connection(server_id)
-        if not connection:
-            raise ValueError(f"未注册的 MCP 服务：{server_id}")
-        connection.stop()
-        # 不传 timeout：用该服务自己的「连接建立」超时（用户可在 MCP 连接器里调）。
-        connection.start()
-        return connection.state()
+        return self.mcp.reconnect(server_id)
 
     def import_legacy_data(self, source: Path) -> dict[str, Any]:
         """从用户指定的旧数据目录导入 config.json、data/ 与 Skills（保留目标已存在数据）。"""

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 import tempfile
 import threading
@@ -68,6 +67,7 @@ class _ModelState:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.requests: list[dict] = []
+        self.answer_release = threading.Event()
 
     def add(self, payload: dict, stream: bool) -> None:
         with self.lock:
@@ -138,6 +138,8 @@ class _StubModelHandler(BaseHTTPRequestHandler):
         try:
             chunk({"id": "compaction-answer", "object": "chat.completion.chunk",
                    "choices": [{"index": 0, "delta": {"role": "assistant"}}]})
+            if not MODEL_STATE.answer_release.wait(timeout=30):
+                raise RuntimeError("浏览器未释放正式回复；整理后圆环验收失败")
             chunk({"id": "compaction-answer", "object": "chat.completion.chunk",
                    "choices": [{"index": 0, "delta": {"content": FINAL_ANSWER}}]})
             chunk({"id": "compaction-answer", "object": "chat.completion.chunk",
@@ -163,7 +165,7 @@ def isolated_root() -> Path:
     return Path(tempfile.mkdtemp(prefix="compaction_e2e_", dir=ROOT / "verify"))
 
 
-def seed(root: Path) -> str:
+def seed(root: Path, title: str = TITLE) -> str:
     from naiba.config import ConfigStore
     from naiba.paths import PathContext
     from naiba.storage.store import ChatStorage
@@ -191,7 +193,7 @@ def seed(root: Path) -> str:
     config.save()
     storage = ChatStorage(root / "data" / "chat.db")
     conversation = storage.create_conversation(
-        TITLE, model_key=f"online:{PROVIDER_ID}", model_name=MODEL_NAME,
+        title, model_key=f"online:{PROVIDER_ID}", model_name=MODEL_NAME,
         # 让隔离夹具使用窄工具集：master 的默认长会话工具 schema
         # 会吞掉 8k 桩模型窗口，整理成功后反而把正式请求挡成窗口已满；
         # 本冒烟验证的是「隐藏总结 → 重建历史 → 正式请求继续」，不是全工具
@@ -210,7 +212,7 @@ def seed(root: Path) -> str:
                 "context_limit_source": "local_config", "requests": 1,
             }}
         storage.add_message(conversation_id, "assistant", f"历史回答 {index + 1}：{filler}", metadata)
-    storage.update_conversation_settings(conversation_id, title=TITLE)
+    storage.update_conversation_settings(conversation_id, title=title)
     return conversation_id
 
 
@@ -229,7 +231,7 @@ def wait_health(deadline: float = 30.0) -> bool:
 def run() -> int:
     from naiba.app import NaibaChatApp
     from naiba.config import ConfigStore
-    from naiba.http import AppHTTPServer
+    from naiba.http import AppHTTPServer, RequestHandler
     from naiba.paths import PathContext
 
     root = isolated_root()
@@ -237,26 +239,39 @@ def run() -> int:
     app = None
     server = None
     try:
-        conversation_id = seed(root)
+        conversation_ids = {str(width): seed(root, f"{TITLE} {width}") for width in (1280, 375)}
         paths = PathContext.local(root, root / "config.json")
         paths.public_dir = ROOT / "public"
         app = NaibaChatApp(paths=paths)
-        server = AppHTTPServer(("127.0.0.1", APP_PORT), __import__("naiba.http", fromlist=["RequestHandler"]).RequestHandler, app)
+        class Handler(RequestHandler):
+            def do_POST(self):
+                if self.path in {"/_fixture/hold-answer", "/_fixture/release-answer"}:
+                    self._read_json()
+                    if self.path.endswith("hold-answer"):
+                        MODEL_STATE.answer_release.clear()
+                    else:
+                        MODEL_STATE.answer_release.set()
+                    self._json({"ok": True})
+                    return
+                return super().do_POST()
+
+        server = AppHTTPServer(("127.0.0.1", APP_PORT), Handler, app)
         server.daemon_threads = True
         threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True).start()
         if not wait_health():
             print("FAIL  隔离服务未就绪")
             return 1
         env = dict(os.environ)
-        env.update({"NAIBA_SMOKE_BASE": BASE, "NAIBA_COMPACTION_CONVERSATION": conversation_id,
-                    "NAIBA_COMPACTION_TITLE": TITLE, "NODE_PATH": str(Path.home() / "node_modules")})
+        env.update({"NAIBA_SMOKE_BASE": BASE, "NAIBA_COMPACTION_CONVERSATIONS": json.dumps(conversation_ids),
+                    "NAIBA_SMOKE_OUTPUT": str(root), "NAIBA_COMPACTION_TITLE": TITLE,
+                    "NODE_PATH": str(Path.home() / "node_modules")})
         import subprocess
         proc = subprocess.run(["node", str(ROOT / "verify" / "auto_compaction_e2e.cjs")],
                               cwd=str(ROOT), env=env, check=False)
         if proc.returncode:
             print("MODEL_REQUESTS", json.dumps(MODEL_STATE.snapshot(), ensure_ascii=False)[:4000])
             try:
-                print("CONVERSATION", json.dumps(app.storage.get_conversation(conversation_id), ensure_ascii=False)[:12000])
+                print("CONVERSATIONS", json.dumps([app.storage.get_conversation(cid) for cid in conversation_ids.values()], ensure_ascii=False)[:12000])
             except Exception as exc:  # noqa: BLE001
                 print("CONVERSATION_READ_FAIL", repr(exc))
             return proc.returncode
@@ -269,16 +284,17 @@ def run() -> int:
             and "只回复 OK" not in json.dumps(item["payload"].get("messages") or "", ensure_ascii=False)
         ]
         answer_requests = [item for item in requests if item["stream"]]
-        if len(summary_requests) != 1 or len(answer_requests) != 1:
+        if len(summary_requests) != 2 or len(answer_requests) != 2:
             print(f"FAIL  模型请求数不符：summary={len(summary_requests)} answer={len(answer_requests)}")
             return 1
         if PROMPT not in json.dumps(answer_requests[0]["payload"], ensure_ascii=False):
             print("FAIL  正式请求未包含本轮用户输入")
             return 1
-        print("PASS  桩模型收到 1 次隐藏总结 + 1 次正式回复")
+        print("PASS  两个独立会话各收到 1 次隐藏总结 + 1 次正式回复")
         print("ALL PASS")
         return 0
     finally:
+        MODEL_STATE.answer_release.set()
         if server is not None:
             server.shutdown()
             server.server_close()
@@ -286,7 +302,7 @@ def run() -> int:
             app.stop()
         model.shutdown()
         model.server_close()
-        shutil.rmtree(root, ignore_errors=True)
+        print(f"Compaction artifacts: {root}")
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from naiba.super_agent.baseline import PreflightRejected, execution_fingerprint,
 from naiba.jobs import JobSpec
 from naiba.super_agent.adapters import AdapterCapabilities, AdapterError, AdapterResult, BaseAdapter
 from naiba.super_agent.models import NODE_TERMINAL_STATUSES
+from naiba.super_agent.store import has_unsettled_execution
 
 logger = logging.getLogger(__name__)
 
@@ -502,6 +503,12 @@ class ExecutionCoordinator:
             if attempt is not None and attempt != node.attempt:
                 raise AdapterError("Node attempt 已过期")
             adapter = self.domain.registry.get(node.executor_type)
+            thread = self.service.get_thread(owner, thread_id)
+            if thread.status == "archived":
+                if action not in {"status", "sync"}:
+                    raise AdapterError("已归档任务不能控制执行，请先恢复任务")
+                self._tick_archived_thread(thread)
+                return adapter._result(self.service.get_node(owner, node_id))
             if node.executor_type == "supervised_chat":
                 if action in {"status", "sync"}:
                     return adapter.sync(owner, thread_id, node_id)
@@ -717,6 +724,9 @@ class ExecutionCoordinator:
 
     def _tick_thread(self, thread: Any) -> None:
         owner, tid = thread.owner_id, thread.thread_id
+        if thread.status == "archived":
+            self._tick_archived_thread(thread)
+            return
         if thread.status == "paused":
             for node in self.service.list_nodes(owner, tid):
                 if node.executor_type == "supervised_chat":
@@ -772,6 +782,76 @@ class ExecutionCoordinator:
         current_thread = self.service.get_thread(owner, tid)
         if current_thread.status == "stopping" and all(n.status in NODE_TERMINAL_STATUSES for n in self.service.list_nodes(owner, tid)):
             self.service.store.update_thread(tid, owner_id=owner, status="cancelled", summary="所有节点已确认停止")
+
+    def _tick_archived_thread(self, thread: Any) -> None:
+        """Collect executions hidden by older versions without resuming a chain."""
+        owner, tid = thread.owner_id, thread.thread_id
+        for node in self.service.list_nodes(owner, tid):
+            if not has_unsettled_execution(node) or node.executor_type not in self.domain.registry:
+                continue
+            adapter = self.domain.registry.get(node.executor_type)
+            try:
+                if isinstance(adapter, RuntimeAdapter):
+                    if adapter.reconcile_binding(node):
+                        adapter.sync(owner, tid, node.node_id, attempt=node.attempt)
+                    continue
+                requires_review = node.executor_type in {"novel_stage", "supervised_chat"}
+                if node.executor_type == "writer_pipeline":
+                    ref = adapter._ref(node)
+                    # The ordinary Writer accessor ticks its pipeline. Archived
+                    # reconciliation must only read the existing execution.
+                    record = self.app.writer.store.get_active_pipeline(ref["book_id"]) or {}
+                    pipeline_id = str(node.checkpoint.get("pipeline_id") or node.executor_id or "")
+                    if not pipeline_id or str(record.get("id") or "") != pipeline_id:
+                        raise AdapterError("已归档节点的原流水线不存在或已被替换")
+                    output = f"writer://{ref['book_id']}/{ref['stage']}/{node.executor_id}"
+                elif node.executor_type == "novel_stage":
+                    ref, record = adapter._task(owner, node)
+                    output = f"novel://{ref['book_id']}/{ref['stage']}/{node.executor_id}"
+                elif node.executor_type == "supervised_chat":
+                    supervision = self.supervised.store.get(tid, owner)
+                    if not supervision or supervision["node_id"] != node.node_id:
+                        raise AdapterError("已归档节点的监督记录不存在")
+                    run_id = str(supervision["state"].get("run_id") or "")
+                    record = self.app.storage.get_background_task(run_id) or {}
+                    if not record or record.get("conversation_id") != supervision["conversation_id"]:
+                        raise AdapterError("已归档监督任务的原执行尚未确认")
+                    terminal = {"completed", "failed", "cancelled", "interrupted"}
+                    if any(job.get("status") not in terminal for job in self.supervised._background_jobs(supervision, record)):
+                        continue
+                    output = f"run://{run_id}"
+                else:
+                    continue
+                status = str(record.get("status") or "")
+                if status not in {"done", "completed", "failed", "cancelled", "interrupted", "conflict"}:
+                    continue
+                if node.status == "interrupted":
+                    node = self.service.store.update_node(node.node_id, owner_id=owner, status="ready", expected_attempt=node.attempt)
+                if node.status == "ready":
+                    node = self.service.store.update_node(node.node_id, owner_id=owner, status="running", expected_attempt=node.attempt)
+                if node.cancel_requested:
+                    self.service.store.update_node(node.node_id, owner_id=owner, status="cancelled",
+                        expected_attempt=node.attempt)
+                elif status in {"done", "completed"} and requires_review:
+                    error = "归档前的执行已结束；恢复任务后确认结果，未推进后续步骤"
+                    if node.status != "waiting_user" or node.error != error or node.output_refs != [output]:
+                        self.service.store.update_node(node.node_id, owner_id=owner, status="waiting_user",
+                            output_refs=[output], error=error, expected_attempt=node.attempt)
+                else:
+                    event = ("task_cancelled" if node.cancel_requested or status == "cancelled"
+                             else "run_interrupted" if status == "interrupted"
+                             else "job_failed" if status in {"failed", "conflict"} else "run_completed")
+                    self.service.emit_event(owner, tid, event, node_id=node.node_id, source=node.executor_type,
+                        attempt=node.attempt, idempotency_key=f"archived-result:{node.node_id}:{node.attempt}:{status}",
+                        payload={"output_refs": [output], "error": str(record.get("error") or "执行失败")})
+                self.service.create_artifact(owner, tid, node.node_id, kind=node.executor_type,
+                    path_or_ref=output, title="归档前的执行结果", summary=f"执行状态：{status}；未推进后续步骤",
+                    idempotency_key=f"archived-artifact:{node.node_id}:{node.attempt}")
+            except (AdapterError, LookupError, ValueError, RuntimeError) as exc:
+                error = f"已归档执行需核对：{str(exc)[:250]}"
+                current = self.service.get_node(owner, node.node_id)
+                if current.error != error:
+                    self.service.store.update_node(node.node_id, owner_id=owner, error=error, expected_attempt=node.attempt)
 
     def start(self) -> None:
         if self.thread is not None:

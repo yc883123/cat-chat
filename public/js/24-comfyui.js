@@ -17,6 +17,8 @@ const comfyui = {
   workflows: [],
   selectedId: "",
   detail: null,
+  detailRequest: 0,
+  detailLoading: false,
   tasks: [],
   activeTaskId: "",
   eventSeq: 0,
@@ -339,7 +341,7 @@ export function bindComfyuiEvents() {
       void enterPage();
     } else {
       // 离开造梦机页：再次生成草稿不跨页面保留。
-      if (comfyui.rerun) dropRerunDraft();
+      if (comfyui.rerun || comfyui.rerunLoading) dropRerunDraft();
       stopPolling();
       stopBackgroundRefresh();
       stopBatchPolling();
@@ -467,7 +469,7 @@ function setComfyuiPane(pane) {
   const root = $("#studioPageComfyui");
   if (!root) return;
   // 离开生成表单就丢弃再次生成草稿；旧任务快照不跨档位复用到别的表单。
-  if (pane !== "run" && comfyui.rerun) dropRerunDraft();
+  if (pane !== "run" && (comfyui.rerun || comfyui.rerunLoading)) dropRerunDraft();
   root.dataset.comfyuiPane = pane;
   document.querySelectorAll("#comfyuiPanes [data-comfyui-pane]").forEach((node) => {
     const active = node.dataset.comfyuiPane === pane;
@@ -613,7 +615,10 @@ async function refreshWorkflows() {
   try {
     const payload = await api("/api/comfyui/workflows");
     comfyui.workflows = payload.workflows || [];
-    if (comfyui.selectedId && !comfyui.workflows.some((row) => row.id === comfyui.selectedId)) {
+    if (!comfyui.rerun && !comfyui.rerunLoading && comfyui.selectedId
+        && !comfyui.workflows.some((row) => row.id === comfyui.selectedId)) {
+      ++comfyui.detailRequest;
+      comfyui.detailLoading = false;
       comfyui.selectedId = "";
       comfyui.detail = null;
       renderParamForm();
@@ -669,6 +674,8 @@ async function onWorkflowListClick(event) {
     try {
       await api(`/api/comfyui/workflows/${encodeURIComponent(id)}`, { method: "DELETE" });
       if (comfyui.selectedId === id) {
+        ++comfyui.detailRequest;
+        comfyui.detailLoading = false;
         comfyui.selectedId = "";
         comfyui.detail = null;
         renderParamForm();
@@ -689,20 +696,35 @@ async function onWorkflowListClick(event) {
 }
 
 async function selectWorkflow(id) {
+  id = String(id || "");
+  const request = ++comfyui.detailRequest;
   // 手动选工作流即离开再次生成草稿：旧任务快照不能串到这份表单里。
   if (comfyui.rerun) resetRerunState();
+  comfyui.rerunLoading = "";
   comfyui.selectedId = id;
+  comfyui.detail = null;
+  comfyui.detailLoading = Boolean(id);
   comfyui.mediaSelection.clear();
   comfyui.mediaSkipped.clear();
   renderWorkflowList();
+  renderParamForm();
+  if (!id) return;
+  const current = () => request === comfyui.detailRequest && comfyui.selectedId === id;
   try {
     const payload = await api(`/api/comfyui/workflows/${encodeURIComponent(id)}`);
-    comfyui.detail = payload.workflow || null;
+    if (!current()) return;
+    if (String(payload.workflow?.id || "") !== id) throw new Error("返回的工作流与当前选择不一致");
+    comfyui.detail = payload.workflow;
   } catch (error) {
+    if (!current()) return;
     comfyui.detail = null;
     toast(`读取工作流详情失败：${error.message}`);
+  } finally {
+    if (current()) {
+      comfyui.detailLoading = false;
+      renderParamForm();
+    }
   }
-  renderParamForm();
 }
 
 // 槽位渲染顺序：正向提示词 → 负向提示词 → 模型 → 媒体输入 → 其余（保持导入扫描顺序）。
@@ -841,11 +863,13 @@ function renderParamForm() {
   if (!form) return;
   form.textContent = "";
   const submit = $("#comfyuiSubmit");
-  if (submit) submit.disabled = !comfyui.detail;
+  if (submit) submit.disabled = comfyui.submitting || comfyui.detailLoading
+    || !comfyui.detail || comfyui.detail.id !== comfyui.selectedId;
   if (!comfyui.detail) {
     const empty = document.createElement("p");
     empty.className = "comfyui-empty";
-    empty.textContent = "先选择一份工作流，这里会列出它可调的参数。";
+    empty.textContent = comfyui.detailLoading ? "正在读取工作流参数…"
+      : "先选择一份工作流，这里会列出它可调的参数。";
     form.append(empty);
     return;
   }
@@ -2780,7 +2804,10 @@ function resetRerunState() {
 
 // 离开生成表单 / 切换工作流：丢弃再次生成草稿，别把旧任务串到别的表单。
 function dropRerunDraft() {
-  if (!comfyui.rerun) return;
+  if (!comfyui.rerun && !comfyui.rerunLoading) return;
+  ++comfyui.detailRequest;
+  comfyui.rerunLoading = "";
+  comfyui.detailLoading = false;
   resetRerunState();
   comfyui.detail = null;
   comfyui.selectedId = "";
@@ -2881,16 +2908,25 @@ function buildRerunDetail(snapshot) {
 
 async function openRerunSnapshot(taskId) {
   const id = String(taskId || "");
-  if (!id || comfyui.rerunLoading) return;
+  if (!id || comfyui.rerunLoading === id) return;
+  const request = ++comfyui.detailRequest;
+  resetRerunState();
   comfyui.rerunLoading = id;
+  comfyui.detailLoading = true;
+  comfyui.detail = null;
+  comfyui.selectedId = "";
+  renderWorkflowList();
+  renderParamForm();
+  const current = () => request === comfyui.detailRequest && comfyui.rerunLoading === id;
   try {
     const payload = await api(`/api/comfyui/tasks/${encodeURIComponent(id)}/rerun-snapshot`);
+    if (!current()) return;
     const snapshot = payload?.snapshot;
     if (!snapshot || String(snapshot.source_task_id || "") !== id) {
       throw new Error("服务端没有返回这条任务的再次生成快照");
     }
     const built = buildRerunDetail(snapshot);
-    // 全部构建成功后才替换表单状态：失败时原任务和当前表单都不受影响。
+    // 只让本次快照接管表单；旧工作流回包不能覆盖它。
     clearDraftsForWorkflow(String(snapshot.workflow_id));
     comfyui.detail = built.detail;
     comfyui.selectedId = String(snapshot.workflow_id);
@@ -2904,6 +2940,7 @@ async function openRerunSnapshot(taskId) {
       finishedAt: Number(snapshot.finished_at) || 0,
       unavailable: built.unavailable,
     };
+    comfyui.detailLoading = false;
     setRerunSaveAsHidden(true);
     const shots = $("#comfyuiShots");
     if (shots) shots.value = String(Math.max(1, Math.min(200, Math.floor(Number(snapshot.shots) || 1))));
@@ -2914,14 +2951,21 @@ async function openRerunSnapshot(taskId) {
     setComfyuiPane("run");
     toast(`已载入「${comfyui.rerun.workflowName || built.detail.name}」的完成快照，可直接提交或修改`);
   } catch (error) {
+    if (!current()) return;
     toast(`再次生成不可用：${error.message}`);
   } finally {
-    comfyui.rerunLoading = "";
+    if (current()) {
+      comfyui.rerunLoading = "";
+      comfyui.detailLoading = false;
+      renderParamForm();
+    }
   }
 }
 
 async function submitTask() {
-  if (comfyui.submitting || !comfyui.detail) return;
+  if (comfyui.submitting || comfyui.detailLoading || !comfyui.detail
+      || comfyui.detail.id !== comfyui.selectedId) return;
+  const request = comfyui.detailRequest;
   const rerunId = String(comfyui.rerun?.sourceTaskId || "");
   if (rerunId) {
     const problems = rerunMediaProblems();
@@ -2956,6 +3000,10 @@ async function submitTask() {
       ? `/api/comfyui/tasks/${encodeURIComponent(rerunId)}/rerun`
       : "/api/comfyui/tasks";
     const payload = await api(endpoint, { method: "POST", body });
+    if (request !== comfyui.detailRequest) {
+      await refreshTasks();
+      return;
+    }
     // 仅在任务受理成功后复位开关；失败保留勾选，用户重试不丢选择。
     const unloadToggle = $("#comfyuiUnloadAfter");
     if (unloadToggle) unloadToggle.checked = false;
@@ -2980,7 +3028,8 @@ async function submitTask() {
     toast(`提交失败：${error.message}`);
   } finally {
     comfyui.submitting = false;
-    if (button) button.disabled = !comfyui.detail;
+    if (button) button.disabled = comfyui.detailLoading || !comfyui.detail
+      || comfyui.detail.id !== comfyui.selectedId;
   }
 }
 

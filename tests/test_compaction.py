@@ -14,6 +14,7 @@
    标记/分割线之前的旧口径不参与）。
 """
 
+import copy
 import json
 import sys
 import tempfile
@@ -408,6 +409,7 @@ class _FakeModels:
         # script：逐次消耗的「回复或异常」序列；耗尽后回落到 reply/raises。
         self.script = list(script or [])
         self.calls = []
+        self.finish_reason = finish_reason
         self.last_finish_reason = finish_reason
         self.last_usage = {}
 
@@ -417,9 +419,11 @@ class _FakeModels:
             step = self.script.pop(0)
             if isinstance(step, Exception):
                 raise step
+            self.last_finish_reason = self.finish_reason
             return step
         if self.raises:
             raise self.raises
+        self.last_finish_reason = self.finish_reason
         return self.reply
 
 
@@ -489,6 +493,48 @@ class CompactionCompactConversationTests(unittest.TestCase):
         self.assertTrue(result["reason"].startswith("summary_failed"), result)
         self.assertEqual(self.app.storage.calls, [], "失败不得留下任何标记")
 
+    def test_failed_summary_does_not_reuse_previous_reply_usage(self):
+        self.app.models.last_usage = {"input_tokens": 99000, "output_tokens": 7319}
+        self.app.models.last_finish_reason = "length"
+        self.app.models.raises = RuntimeError("HTTP 502 upstream timed out")
+        result = self._compact()
+        self.assertEqual(result["attempts"][0]["output_tokens"], 0)
+        self.assertEqual(self.app.models.last_finish_reason, "")
+        self.assertEqual(result["error"], "HTTP 502 upstream timed out")
+
+    def test_failed_summary_keeps_usage_reported_by_current_attempt(self):
+        def fail_with_usage(*args, **kwargs):
+            self.assertEqual(self.app.models.last_usage, {})
+            self.app.models.last_usage = {"output_tokens": 17}
+            raise RuntimeError("HTTP 502 after response headers")
+
+        self.app.models.last_usage = {"output_tokens": 7319}
+        self.app.models.complete = mock.Mock(side_effect=fail_with_usage)
+        result = self._compact()
+        self.assertEqual(result["attempts"][0]["output_tokens"], 17)
+
+    def test_failure_detail_redacts_credentials_and_preserves_cause(self):
+        profile = {**self.profile, "api_key": "profile-credential-value",
+                   "provider": {"token": "nested-credential-value"}}
+        self.app.models.raises = RuntimeError(
+            "HTTP 401 quota exhausted; profile-credential-value; nested-credential-value; "
+            "Bearer header-credential-value; https://user:url-credential-value@example.test/v1; "
+            "api_key=query-credential-value"
+        )
+        result = self._compact(profile=profile)
+        for detail in (result["error"], result["attempts"][0]["error"]):
+            self.assertIn("HTTP 401 quota exhausted", detail)
+            self.assertIn("example.test/v1", detail)
+            self.assertNotIn("credential-value", detail)
+            self.assertLessEqual(len(detail), 1200)
+        self.assertEqual(self.app.storage.calls, [])
+
+    def test_failure_detail_has_bounded_size(self):
+        self.app.models.raises = RuntimeError("HTTP 502 " + "upstream detail " * 1000)
+        result = self._compact()
+        self.assertEqual(len(result["error"]), 1200)
+        self.assertEqual(result["error"], result["attempts"][0]["error"])
+
     def test_invalid_summary_writes_nothing(self):
         self.app.models.reply = "好的，我已经总结完了。"
         result = self._compact()
@@ -510,7 +556,7 @@ class CompactionCompactConversationTests(unittest.TestCase):
         2048 输出额度被独白吃光，交接材料只写到「## 2. 用户原话」就断了；结尾形态恰好
         躲过了所有文本判据，15 条真实历史被替换成半份材料。
         """
-        self.app.models.last_finish_reason = "length"
+        self.app.models.finish_reason = "length"
         # 正文本身完全合格（够长、不是拒答、不是悬空项目符号）。
         self.app.models.reply = GOOD_SUMMARY
         result = self._compact()
@@ -524,6 +570,70 @@ class CompactionCompactConversationTests(unittest.TestCase):
         self.assertEqual(self.app.models.last_finish_reason, "")
         result = self._compact()
         self.assertTrue(result["compacted"], result)
+
+    def test_stale_length_finish_reason_does_not_reject_new_summary(self):
+        self.app.models.last_finish_reason = "length"
+        # Some providers omit finish_reason entirely on the new response.
+        self.app.models.complete = mock.Mock(return_value=GOOD_SUMMARY)
+        result = self._compact()
+        self.assertTrue(result["compacted"], result)
+        self.assertEqual(self.app.models.last_finish_reason, "")
+
+    def test_repeat_compaction_rejects_growth_of_effective_history(self):
+        rows = self._rows()
+        rows[9]["metadata"] = _marker("仍有效的旧交接。" * 20)
+        before = copy.deepcopy(rows)
+        self.app.models.reply = GOOD_SUMMARY + "\n补充内容。" * 300
+        result = self._compact(rows=rows, force=True)
+        self.assertFalse(result["compacted"], result)
+        self.assertEqual(result["reason"], "freed_too_small")
+        self.assertEqual(self.app.storage.calls, [])
+        self.assertEqual(rows, before, "拟写标记的收益评估不得修改原始消息")
+
+    def test_summary_wrapper_overhead_counts_against_savings(self):
+        summary = "保留任务目标与已核实的事实。" * 12
+        body_tokens = compaction.estimate_text_tokens(summary)
+        replay_tokens = compaction.estimate_messages_tokens([compaction_replay_message(summary)])
+        self.assertGreater(replay_tokens, body_tokens + 2)
+        rows = [
+            _row("user", "长" * (body_tokens + 1), row_id="u0"),
+            _row("assistant", "答", row_id="a0"),
+            _row("user", "保留的新问题", row_id="u1"),
+        ]
+        self.app.models.reply = summary
+        result = self._compact(rows=rows, force=True)
+        self.assertFalse(result["compacted"], result)
+        self.assertEqual(result["reason"], "freed_too_small")
+        self.assertEqual(self.app.storage.calls, [])
+
+    def test_reported_savings_equal_actual_replayed_history_difference(self):
+        rows = self._rows()
+        rows[3]["metadata"] = _marker("上一份交接材料。" * 50)
+        original = copy.deepcopy(rows)
+        before = compaction.estimate_messages_tokens(build_model_history(rows))
+        result = self._compact(rows=rows)
+        self.assertTrue(result["compacted"], result)
+        self.assertEqual(rows, original, "核心只写存储标记，不原地改输入快照")
+        _, marker_id, patch = self.app.storage.calls[0]
+        for row in rows:
+            if row["id"] == marker_id:
+                row["metadata"].update(patch)
+        after = compaction.estimate_messages_tokens(build_model_history(rows))
+        self.assertEqual(result["context_tokens_before"], before)
+        self.assertEqual(result["context_tokens_after"], after)
+        self.assertEqual(result["freed_est"], before - after)
+        self.assertEqual(patch[MetadataKeys.COMPACTION]["freed_est"], before - after)
+
+    def test_multimodal_estimate_does_not_count_encoded_image_bytes(self):
+        image_prefix = "data:image/png;base64,"
+        for image_kind in ("image", "image_url", "input_image"):
+            with self.subTest(image_kind=image_kind):
+                message = {"role": "user", "content": [
+                    {"type": "text", "text": "abcd"},
+                    {"type": image_kind, "image_url": {"url": image_prefix + "A" * 100000}},
+                ]}
+                self.assertEqual(compaction.estimate_messages_tokens([message]),
+                                 compaction.IMAGE_ESTIMATE_TOKENS + 1)
 
     def test_summary_request_uses_effective_budget(self):
         """总结请求的输出预算必须抬到有效下限，旧配置的 2048 不能原样下发。"""
@@ -642,6 +752,45 @@ class CompactionRecoveryTests(unittest.TestCase):
         self.assertEqual(app.storage.calls, [], "失败不得留下任何标记")
         inputs = [item["input_tokens"] for item in result["attempts"]]
         self.assertEqual(inputs, sorted(inputs, reverse=True), "每次尝试的输入必须递减")
+
+    def test_overflow_replaces_or_follows_existing_marker(self):
+        app = _FakeApp(script=[self.OVERFLOW, GOOD_SUMMARY])
+        rows = self._rows()
+        rows[7]["metadata"] = _marker("旧交接里的详细背景。" * 180)
+        result = self._compact(app, rows=rows)
+        self.assertTrue(result["compacted"], result)
+        self.assertEqual(len(app.models.calls), 2)
+        _, marker_id, patch = app.storage.calls[0]
+        marker_index = next(index for index, row in enumerate(rows) if row["id"] == marker_id)
+        self.assertGreaterEqual(marker_index, 7, "不能在旧标记之前写入会被旧标记覆盖的新摘要")
+        rows[marker_index]["metadata"].update(patch)
+        replay = build_model_history(rows)
+        self.assertIn(GOOD_SUMMARY.strip(), replay[0]["content"])
+        self.assertNotIn("旧交接里的详细背景", replay[0]["content"])
+        self.assertLess(result["attempts"][1]["input_tokens"], result["attempts"][0]["input_tokens"])
+
+    def test_overflow_at_latest_marker_has_no_safe_shrink(self):
+        app = _FakeApp(script=[self.OVERFLOW, GOOD_SUMMARY])
+        rows = self._rows()
+        rows[9]["metadata"] = _marker("旧交接里的详细背景。" * 180)
+        before = copy.deepcopy(rows)
+        result = self._compact(app, rows=rows)
+        self.assertFalse(result["compacted"])
+        self.assertEqual(len(app.models.calls), 1)
+        self.assertEqual(app.storage.calls, [])
+        self.assertEqual(rows, before)
+
+    def test_overflow_does_not_move_marker_before_session_boundary(self):
+        app = _FakeApp(script=[self.OVERFLOW, GOOD_SUMMARY])
+        rows = self._rows()
+        rows[5]["metadata"] = {MetadataKeys.SESSION_START: {"at": 1}}
+        result = self._compact(app, rows=rows)
+        self.assertTrue(result["compacted"], result)
+        _, marker_id, patch = app.storage.calls[0]
+        marker_index = next(index for index, row in enumerate(rows) if row["id"] == marker_id)
+        self.assertGreater(marker_index, 5)
+        rows[marker_index]["metadata"].update(patch)
+        self.assertIn(GOOD_SUMMARY.strip(), build_model_history(rows)[0]["content"])
 
     def test_overflow_without_splittable_region_does_not_retry(self):
         app = _FakeApp(raises=self.OVERFLOW)
@@ -1043,7 +1192,7 @@ class CompactionHookTests(unittest.TestCase):
         self.assertEqual(override["used"], 6000)
         self.assertEqual(override["limit"], 8000)
         self.assertEqual(override["budget"], 7000)
-        self.assertTrue(run["_compaction_attempted"])
+        self.assertFalse(run.get("_compaction_attempted"), "只有核心入口实际发起摘要请求时才标记尝试")
 
     def test_compaction_failure_event_includes_internal_reason(self):
         self.mixin.app.config.data = {"auto_compaction": {"mode": "auto", "threshold_percent": 30}}

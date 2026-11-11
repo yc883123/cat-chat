@@ -1271,20 +1271,22 @@ export function renderContextUsage() {
     ? Number(usage.context_limit || 0)
     : 0;
   const limit = profileLimit || trustedStoredLimit;
-  const percent = limit > 0 ? Math.min(100, Math.max(0, context / limit * 100)) : 0;
+  const pending = Boolean(usage.context_pending);
+  const percent = !pending && limit > 0 ? Math.min(100, Math.max(0, context / limit * 100)) : 0;
   state.contextPercent = percent;
   ring.style.setProperty('--context-percent', percent.toFixed(1));
   ring.classList.toggle('warning', percent >= CONTEXT_TONE_WARNING && percent < CONTEXT_TONE_DANGER);
   ring.classList.toggle('danger', percent >= CONTEXT_TONE_DANGER);
-  const contextText = limit
+  const contextText = pending ? '整理后的占用正在更新' : limit
     ? `${context.toLocaleString()} / ${limit.toLocaleString()}（${percent.toFixed(1)}%）`
     : context ? `${context.toLocaleString()} / 上限未知` : '上下文上限未知';
-  button.title = `上下文用量：${contextText}`;
-  summary.textContent = `上下文 ${contextText}`;
+  const estimateLabel = usage.context_estimated ? '（估算）' : '';
+  button.title = `上下文用量${estimateLabel}：${contextText}`;
+  summary.textContent = `上下文${estimateLabel} ${contextText}`;
   turn.textContent = `最近一轮：输入 ${input.toLocaleString()} · 输出 ${output.toLocaleString()} · 总计 ${total.toLocaleString()} tokens`;
   renderContextPercentLabel({
-    text: limit ? `上下文 ${percent.toFixed(1)}%` : '上下文 --',
-    title: `上下文用量：${contextText}`,
+    text: !pending && limit ? `上下文 ${percent.toFixed(1)}%${estimateLabel}` : '上下文 --',
+    title: `上下文用量${estimateLabel}：${contextText}`,
     percent: limit ? percent : 0,
   });
   const atCeiling = limit > 0 && percent >= 100;

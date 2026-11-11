@@ -225,8 +225,8 @@ class MCPServerConnection:
 
         ``timeout`` 缺省 None = 用该服务自己的启动超时。
         """
-        self._reset_thread()
         try:
+            self._reset_thread()
             self.start(timeout=timeout)
         except MCPError:
             return False
@@ -321,19 +321,9 @@ class MCPServerConnection:
         self.error = f"MCP 服务 {self.server_id} 重连失败，工具已注销"
 
     def _reset_thread(self) -> None:
-        self._stopping = True
-        if self._loop and self._loop.is_running() and self._stop_signal:
-            self._loop.call_soon_threadsafe(self._stop_signal.set)
-        if self._thread:
-            self._thread.join(timeout=5)
-        self._thread = None
-        self._session = None
-        self._stack = None
-        self._loop = None
-        self._stop_signal = None
-        self._ready = threading.Event()
-        self._stopping = False
-        self._stopped = True
+        self.stop()
+        if self._stopping:
+            raise MCPError("MCP 服务停止尚未确认，连接仍保留；请稍后重试")
 
     def stop(self) -> None:
         self._stopping = True
@@ -389,7 +379,9 @@ class MCPRegistry:
         # start() is used by application bootstrap and keeps connections alive until stop().
         self._persistent = False
         self._lock = threading.RLock()
-        self._lifecycle_lock = threading.Lock()
+        # Slow process startup/shutdown is serialized only for the same ID.
+        # Keep these locks after removal: an operation may already be waiting.
+        self._server_locks: dict[str, threading.RLock] = {}
         self.on_tools_discovered: Callable[[str, list[dict[str, Any]]], None] | None = None
         self.on_tools_deregistered: Callable[[str], None] | None = None
         for config in configs:
@@ -415,7 +407,26 @@ class MCPRegistry:
         return connection
 
     def _wire(self, connection: MCPServerConnection) -> None:
-        connection.on_tools_discovered = self.on_tools_discovered
+        def discovered(server_id: str, tools: list[dict[str, Any]]) -> None:
+            with self._lock:
+                if (self.connections.get(server_id) is connection
+                        and not connection._stopping and self.on_tools_discovered):
+                    self.on_tools_discovered(server_id, tools)
+        connection.on_tools_discovered = discovered
+
+    def _server_lock(self, server_id: str) -> threading.RLock:
+        with self._lock:
+            return self._server_locks.setdefault(server_id, threading.RLock())
+
+    def server_operation(self, server_id: str) -> threading.RLock:
+        """Keep persisted settings and their live connection in the same order."""
+        return self._server_lock(str(server_id or "").strip())
+
+    @staticmethod
+    def _stop_connection(connection: MCPServerConnection) -> None:
+        connection.stop()
+        if connection.state().get("status") == "stopping":
+            raise MCPError("MCP 服务停止尚未确认，连接仍保留；请稍后重试")
 
     def upsert(self, config: dict[str, Any]) -> dict[str, Any]:
         """Add or replace one server without interrupting unrelated MCP sessions."""
@@ -432,64 +443,86 @@ class MCPRegistry:
             "hidden_tools": [str(item) for item in (config.get("hidden_tools") or [])],
             "enabled": bool(config.get("enabled", True)),
         }
-        with self._lifecycle_lock:
+        with self._server_lock(server_id):
             with self._lock:
-                previous = self.connections.pop(server_id, None)
-        if previous:
-            previous.stop()
-        if not normalized["enabled"]:
-            if self.on_tools_deregistered:
-                self.on_tools_deregistered(server_id)
-            return {"id": server_id, "status": "disabled", "connected": False, "tools": [], "error": ""}
-        connection = self._connection(normalized)
-        self._wire(connection)
-        with self._lifecycle_lock:
+                previous = self.connections.get(server_id)
+            if previous:
+                self._stop_connection(previous)
+            with self._lock:
+                self.connections.pop(server_id, None)
+                if self.on_tools_deregistered:
+                    self.on_tools_deregistered(server_id)
+            if not normalized["enabled"]:
+                return {"id": server_id, "status": "disabled", "connected": False, "tools": [], "error": ""}
+            connection = self._connection(normalized)
+            self._wire(connection)
             with self._lock:
                 self.connections[server_id] = connection
                 should_start = self._persistent
-        if should_start:
-            connection.start()
-        return connection.state()
+            if should_start:
+                connection.start()
+            return connection.state()
 
     def remove(self, server_id: str) -> bool:
         """Remove one server entirely: stop its connection, deregister tools, drop it."""
         server_id = str(server_id or "").strip()
-        with self._lifecycle_lock:
+        with self._server_lock(server_id):
             with self._lock:
-                connection = self.connections.pop(server_id, None)
-        if connection is None:
-            return False
-        try:
-            connection.stop()
-        except Exception:
-            pass
-        if self.on_tools_deregistered:
-            try:
-                self.on_tools_deregistered(server_id)
-            except Exception:
-                pass
-        return True
+                connection = self.connections.get(server_id)
+            if connection is None:
+                return False
+            self._stop_connection(connection)
+            with self._lock:
+                self.connections.pop(server_id, None)
+                if self.on_tools_deregistered:
+                    self.on_tools_deregistered(server_id)
+            return True
+
+    def reconnect(self, server_id: str) -> dict[str, Any]:
+        server_id = str(server_id or "").strip()
+        with self._server_lock(server_id):
+            connection = self.connection(server_id)
+            if connection is None:
+                raise ValueError(f"未注册的 MCP 服务：{server_id}")
+            self._stop_connection(connection)
+            connection.start()
+            return connection.state()
+
+    def _start_current(self, connection: MCPServerConnection, *, retry: bool = False) -> None:
+        with self._server_lock(connection.server_id):
+            with self._lock:
+                if not self._persistent or self.connections.get(connection.server_id) is not connection:
+                    return
+            if retry and (connection.state().get("status") not in {"error", "idle", "stopped"}
+                          or connection._thread):
+                return
+            self._wire(connection)
+            connection.start()
 
     def start(self) -> None:
-        with self._lifecycle_lock:
-            with self._lock:
-                self._persistent = True
-                connections = list(self.connections.values())
+        with self._lock:
+            self._persistent = True
+            connections = list(self.connections.values())
         for connection in connections:
             try:
-                connection.start()
+                self._start_current(connection)
             except MCPStartupError:
                 # 启动失败已记录在 connection.error（state()/lightweight_status() 可观测），
                 # 单个服务失败不中断其余连接。
                 continue
 
     def stop(self) -> None:
-        with self._lifecycle_lock:
-            with self._lock:
-                self._persistent = False
-                connections = list(self.connections.values())
-        for connection in connections:
-            connection.stop()
+        with self._lock:
+            self._persistent = False
+            server_ids = list(self.connections)
+        for server_id in server_ids:
+            with self._server_lock(server_id):
+                with self._lock:
+                    if self._persistent:  # A newer start superseded this stop.
+                        continue
+                    connection = self.connections.get(server_id)
+                if connection is not None:
+                    connection.stop()  # Retain the handle even if shutdown takes longer.
 
     def retry_unconnected_until_stopped(self, interval: float = 30.0) -> None:
         """Watchdog: keep re-starting MCP connections that failed to establish at
@@ -498,19 +531,13 @@ class MCPRegistry:
         Runs as a daemon and stops when ``stop()`` flips ``_persistent``."""
         def _loop() -> None:
             while self._persistent:
-                with self._lifecycle_lock:
-                    with self._lock:
-                        connections = list(self.connections.values())
+                with self._lock:
+                    connections = list(self.connections.values())
                 for connection in connections:
-                    st = connection.state()
-                    if st.get("status") in {"error", "idle", "stopped"} and not connection._thread:
-                        try:
-                            # 不传 timeout：沿用每个服务自己的启动超时配置。
-                            connection.start()
-                        except MCPError:
-                            pass
-                        except Exception:
-                            pass
+                    try:
+                        self._start_current(connection, retry=True)
+                    except Exception:
+                        pass
                 time.sleep(interval)
         threading.Thread(target=_loop, name="naiba-mcp-retry", daemon=True).start()
 
@@ -523,13 +550,18 @@ class MCPRegistry:
         # Normalize ids emitted by older Skill prompts. The legacy app and
         # ComfyUI ids were removed from configuration; both now resolve to
         # the first-party comfy-mcp registration when it exists.
-        if server_id in {"naiba-chat", "comfyui", "comfyui-mcp"} and "comfy-mcp" in self.connections:
-            server_id = "comfy-mcp"
+        server_id = str(server_id or "").strip()
         with self._lock:
-            connection = self.connections.get(server_id)
-        if not connection:
-            return False, f"未注册 MCP 服务：{server_id}"
-        return connection.call(tool_name, arguments)
+            if server_id in {"naiba-chat", "comfyui", "comfyui-mcp"} and "comfy-mcp" in self.connections:
+                server_id = "comfy-mcp"
+        # A tool call may start/reconnect its connection. Keep it ordered with
+        # removal/replacement so a stale reference cannot revive an old server.
+        with self._server_lock(server_id):
+            with self._lock:
+                connection = self.connections.get(server_id)
+            if not connection:
+                return False, f"未注册 MCP 服务：{server_id}"
+            return connection.call(tool_name, arguments)
 
     def states(self) -> list[dict[str, Any]]:
         with self._lock:

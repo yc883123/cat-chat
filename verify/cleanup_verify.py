@@ -44,6 +44,7 @@ KEEP = {
     "comfyui_navigation_smoke.cjs",
     "comfyui_preview_delete_smoke.cjs",
     "onebot_settings_smoke.cjs",
+    "_serve_concurrency_guards.py", "concurrency_guards_smoke.cjs",
     "studio_prompt_feedback_smoke.cjs",
     "send_button_smoke.cjs", "send_state_smoke.cjs", "file_ref_smoke.cjs",
     "lightbox_smoke.cjs", "usage_rate_smoke.cjs", "media_inline_smoke.cjs",

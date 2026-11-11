@@ -624,6 +624,7 @@ const m=await make('comfy',source,'\nexport {comfyui,submitTask,mediaSlotStatus,
 const {comfyui,submitTask,mediaSlotStatus,collectMediaInputs,collectMediaSkips,mediaSkipButton,renderMediaTile,batch,ensureBatchDraft,submitBatch,batchItemsMarkup,batchSchemeFromRestore,batchElapsedText}=m;
 
 // ---- 单次媒体槽 ----
+comfyui.selectedId='cw-1';
 comfyui.detail={id:'cw-1',name:'单次流',prompt:{},params:[
   {node_id:'8',field_name:'image',field_type:'image',control:'media',media:'image',default:'fixed.png',media_optional:true,label:'8 · 固定图'},
   {node_id:'9',field_name:'image',field_type:'image',control:'media',media:'image',default:'',media_optional:true,label:'9 · 可选图'},
@@ -748,6 +749,7 @@ async function make(name,sourceText,exportsLine){
 }
 const m=await make('comfy',source,'\nexport {comfyui,submitTask,batch,ensureBatchDraft};');
 const {comfyui,submitTask,batch,ensureBatchDraft}=m;
+comfyui.selectedId='cw-1';
 comfyui.detail={id:'cw-1',name:'测试流',params:[]};
 const shots=$('#comfyuiShots');shots.value='2';
 const toggle=$('#comfyuiUnloadAfter');

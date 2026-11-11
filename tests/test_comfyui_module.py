@@ -1471,9 +1471,8 @@ class JobsTests(unittest.TestCase):
         self.assertEqual(retried["status"], "queued")
         self.assertIsNone(retried["finished_at"])
 
-    def test_retry_cancelled_voids_uncompleted_prompt_ids(self):
-        # 取消即作废旧提交：被取消任务的未完成段不再认旧 prompt_id（用户
-        # 中断在 ComfyUI 以 error 落史，收养会拿旧中断顶账）；已完成段保留。
+    def test_retry_cancelled_keeps_uncompleted_prompt_ids_for_reconciliation(self):
+        # 本地取消不证明远端停止；旧凭证必须保留，执行器核对后才决定重提。
         task = self.jobs.submit({"workflow_id": self.entry["id"], "shots": 3})
         task_id = task["id"]
         self.store.update_task(task_id, status="cancelled", checkpoint={
@@ -1482,7 +1481,7 @@ class JobsTests(unittest.TestCase):
             "errors": [], "resubmits": {},
         })
         retried = self.jobs.retry(task_id)
-        self.assertEqual(retried["checkpoint"]["prompt_ids"], ["p1", "", ""])
+        self.assertEqual(retried["checkpoint"]["prompt_ids"], ["p1", "p2", ""])
 
     def test_retry_failed_and_interrupted_keep_prompt_ids(self):
         # failed/interrupted 保留凭证：服务重启判 interrupted 后某段可能

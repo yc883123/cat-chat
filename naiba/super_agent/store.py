@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from naiba.core.contracts import SUPER_AGENT_CLAIMS_KEY
 from naiba.super_agent.models import (
     APPROVAL_STATUSES,
     EVENT_TYPES,
@@ -56,6 +57,32 @@ def _stable_id(prefix: str, value: str) -> str:
     """Return a deterministic local identifier for an idempotent chain."""
     digest = hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:32]
     return f"{prefix}_{digest}"
+
+
+def has_unsettled_execution(node: TaskNode) -> bool:
+    """Archiving must account for launch receipts as well as displayed status."""
+    claims = node.checkpoint.get(SUPER_AGENT_CLAIMS_KEY) or {}
+    if isinstance(claims, dict):
+        for key, claim in claims.items():
+            action = str(key).partition(":")[0]
+            if action not in {"start", "retry", "resume"} or not isinstance(claim, dict):
+                continue
+            result = claim.get("result") or {}
+            if isinstance(result, dict) and result.get("submission") == "not_submitted":
+                continue
+            attempt = claim.get("attempt")
+            if type(attempt) is not int or not claim.get("correlation"):
+                continue
+            target = attempt + (action in {"retry", "resume"})
+            # Retry reserves the next attempt before replacing the old terminal
+            # node. That small window must also prevent archive.
+            if claim.get("state") != "done" and target in {node.attempt, node.attempt + 1}:
+                if target == node.attempt or action in {"retry", "resume"}:
+                    return True
+            if target == node.attempt and node.status not in NODE_TERMINAL_STATUSES:
+                return True
+    return (node.status not in NODE_TERMINAL_STATUSES
+            and (node.status in {"running", "stopping"} or bool(node.executor_id)))
 
 
 _SNAPSHOT_KEYS = {
@@ -114,6 +141,10 @@ class SuperAgentStore:
                              (owner_id, thread_id, node_id)).fetchone()
             if row is None:
                 raise LookupError("Node 不存在或无权访问")
+            thread = db.execute("SELECT status FROM super_threads WHERE thread_id=? AND owner_id=?",
+                                (thread_id, owner_id)).fetchone()
+            if action in {"start", "retry", "resume"} and thread["status"] == "archived":
+                raise RuntimeError("已归档任务不能派发新执行")
             checkpoint = _load(row["checkpoint"], {})
             claims = dict(checkpoint.get(SUPER_AGENT_CLAIMS_KEY) or {})
             # A rejected, provably unsubmitted start does not occupy an attempt
@@ -171,8 +202,13 @@ class SuperAgentStore:
     def reconciliation_threads(self, limit: int = 64, *, after: str = "") -> list[Thread]:
         db = self._connect()
         try:
-            rows = db.execute("SELECT * FROM super_threads WHERE status IN ('active','paused','stopping','waiting_user','needs_recovery','cancelled') AND thread_id>? ORDER BY thread_id LIMIT ?",
-                              (after, max(1, min(limit, 128)))).fetchall()
+            rows = db.execute("SELECT * FROM super_threads t WHERE (status IN ('active','paused','stopping','waiting_user','needs_recovery','cancelled') "
+                              "OR (status='archived' AND EXISTS (SELECT 1 FROM super_nodes n WHERE n.thread_id=t.thread_id "
+                              "AND n.owner_id=t.owner_id AND n.status NOT IN ('succeeded','failed','cancelled') "
+                              "AND (n.status IN ('running','stopping','interrupted','waiting_user') OR n.executor_id!='' "
+                              "OR (json_valid(n.checkpoint) AND json_type(n.checkpoint,?)='object'))))) "
+                              "AND thread_id>? ORDER BY thread_id LIMIT ?",
+                              (f"$.{SUPER_AGENT_CLAIMS_KEY}", after, max(1, min(limit, 128)))).fetchall()
             return [self._thread(row) for row in rows]
         finally:
             db.close()
@@ -372,6 +408,20 @@ class SuperAgentStore:
         db = self._connect()
         try:
             db.execute("BEGIN IMMEDIATE")
+            current_row = db.execute("SELECT status FROM super_threads WHERE thread_id=? AND owner_id=?",
+                                     (thread_id, owner_id)).fetchone()
+            if current_row is None:
+                raise LookupError("Thread 不存在或无权访问")
+            if "status" in updates and updates["status"] != current_row["status"]:
+                if updates["status"] not in THREAD_TRANSITIONS.get(current_row["status"], set()):
+                    raise RuntimeError(f"非法 Thread 状态转换: {current_row['status']} -> {updates['status']}")
+            if updates.get("status") == "archived" and current_row["status"] != "archived":
+                if current_row["status"] in {"active", "stopping"}:
+                    raise RuntimeError("任务正在运行或停止中；请先取消再删除")
+                nodes = db.execute("SELECT * FROM super_nodes WHERE thread_id=? AND owner_id=?",
+                                   (thread_id, owner_id)).fetchall()
+                if any(has_unsettled_execution(self._node(row)) for row in nodes):
+                    raise RuntimeError("任务仍有运行、停止或尚未确认结果的执行；请先继续核对或取消，确认停止后再删除")
             cursor = db.execute(f"UPDATE super_threads SET {', '.join(assignments)} WHERE {where}", args)
             if cursor.rowcount != 1:
                 db.rollback()
@@ -645,9 +695,16 @@ class SuperAgentStore:
             raise ValueError(f"不可更新的 Node 字段: {sorted(set(updates) - allowed)}")
         if "status" in updates and updates["status"] not in NODE_STATUSES:
             raise ValueError(f"非法 Node 状态: {updates['status']}")
-        current_row = db.execute("SELECT status FROM super_nodes WHERE node_id=? AND owner_id=?", (node_id, owner_id)).fetchone()
+        current_row = db.execute("SELECT * FROM super_nodes WHERE node_id=? AND owner_id=?", (node_id, owner_id)).fetchone()
         if current_row is None:
             raise LookupError("Node 不存在或无权访问")
+        if updates.get("status") == "running" or ("attempt" in updates and updates["attempt"] != current_row["attempt"]):
+            thread = db.execute("SELECT status FROM super_threads WHERE thread_id=? AND owner_id=?",
+                                (current_row["thread_id"], owner_id)).fetchone()
+            if thread["status"] == "archived" and (
+                    updates.get("attempt", current_row["attempt"]) != current_row["attempt"]
+                    or not has_unsettled_execution(self._node(current_row))):
+                raise RuntimeError("已归档任务不能派发新执行")
         if "status" in updates and updates["status"] != current_row["status"]:
             if updates["status"] not in NODE_TRANSITIONS.get(str(current_row["status"]), set()):
                 raise RuntimeError(f"非法 Node 状态转换: {current_row['status']} -> {updates['status']}")
@@ -901,7 +958,7 @@ class SuperAgentStore:
                         thread_status = str(thread_row["status"])
                         if thread_status == "active":
                             db.execute("UPDATE super_threads SET status='needs_recovery', summary='服务中断，任务需恢复', version=version+1, updated_at=? WHERE thread_id=? AND owner_id=?", (now, thread_id, owner_id))
-                    elif next_status == "succeeded":
+                    elif next_status == "succeeded" and str(thread_row["status"]) != "archived":
                         if str(row["chain_instance_id"] or ""):
                             self._promote_chain_node_db(
                                 db, thread_id, node_id, owner_id=owner_id,

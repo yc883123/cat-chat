@@ -6,7 +6,7 @@
 
 1. ``resume_interrupted()`` 幂等：恢复后必须给**源 Job** 打持久标记，否则每次重启都会
    把同一批中断任务再恢复一遍（1→2→4→8，实测放大成每对话 13 份）；
-2. checkpoint 完全相同的中断 Job 视为同一批的重复副本，只恢复最新的一条；
+2. 相同 checkpoint 的独立 Job 各自恢复；只按持久源 Job / 接续 Job 关联防重；
 3. ComfyUI 重启/清空队列后，既不在 ``/history`` 也不在 ``/queue`` 的 prompt 不再被当成
    「还在跑」空转到 ``wait_timeout``（默认 2 小时）：按预算重提交，用尽预算则记为丢失并收尾；
 4. 后台子 Job（``parent_job_id`` 非空）不占用对话的活跃 Run 互斥位，否则一个卡死的
@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -27,6 +28,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from naiba.jobs import JobRegistry, JobSpec  # noqa: E402
+from naiba.core.contracts import (  # noqa: E402
+    JOB_RESUMED_FROM_KEY, JOB_RESUMED_INTO_KEY,
+    JOB_SUBMISSION_GUARD_KEY, JOB_SUBMISSION_PENDING_KEY,
+)
 from naiba.storage.store import ChatStorage  # noqa: E402
 
 
@@ -87,9 +92,10 @@ class _RegistryCase(unittest.TestCase):
         params: dict | None = None,
         resumable: bool = True,
         parent_job_id: str = "parent-run",
+        conversation_id: str | None = None,
     ) -> str:
         run = self.storage.create_run(
-            self.conversation_id,
+            conversation_id or self.conversation_id,
             "ComfyUI 批量生成",
             {"id": "", "name": "Job", "system_prompt": "", "skill_ids": []},
             {
@@ -98,7 +104,7 @@ class _RegistryCase(unittest.TestCase):
             },
             kind=kind,
             parent_job_id=parent_job_id,
-            owner_session_id=self.conversation_id,
+            owner_session_id=conversation_id or self.conversation_id,
         )
         job_id = str(run["id"])
         self.storage.update_job(job_id, status=status, checkpoint=checkpoint or {})
@@ -106,7 +112,7 @@ class _RegistryCase(unittest.TestCase):
 
 
 class ResumeInterruptedDedupeTests(_RegistryCase):
-    def test_duplicate_interrupted_jobs_are_resumed_once(self) -> None:
+    def test_equal_checkpoints_do_not_merge_independent_jobs(self) -> None:
         checkpoint = {"submitted": ["p1", "p2"], "completed": [{"index": 0, "prompt_id": "p1", "files": []}], "errors": []}
         # 先造旧的重复副本，再造较新的那条（list_background_tasks 按 created_at DESC）。
         duplicate = self._make_job(checkpoint=checkpoint)
@@ -117,17 +123,17 @@ class ResumeInterruptedDedupeTests(_RegistryCase):
 
         resumed = self.registry.resume_interrupted()
 
-        self.assertEqual(len(resumed), 2, "应按 checkpoint 指纹各恢复一条，而不是每条中断记录都恢复")
+        self.assertEqual(len(resumed), 3, "checkpoint 相同也可能是用户独立提交的任务，不得吞掉")
         newest_row = self.storage.get_background_task(newest)
         duplicate_row = self.storage.get_background_task(duplicate)
         other_row = self.storage.get_background_task(other_batch)
         self.assertTrue(newest_row["result"].get("resumed_into"), "被恢复的源 Job 必须记录接续者")
         self.assertTrue(other_row["result"].get("resumed_into"), "不同批次的 Job 也各恢复一条")
-        self.assertFalse(duplicate_row["result"].get("resumed_into"))
-        self.assertTrue(duplicate_row["result"].get("resume_skipped"), "重复副本必须打持久标记，否则下一轮又会被复活")
+        self.assertTrue(duplicate_row["result"].get("resumed_into"))
+        self.assertFalse(duplicate_row["result"].get("resume_skipped"))
 
         active = [job for job in self.storage.list_background_tasks("", active_only=False) if job["kind"] == "comfyui"]
-        self.assertEqual(len(active), 5, "3 条中断记录 + 2 条新恢复的 Job")
+        self.assertEqual(len(active), 6, "3 条独立中断记录 + 3 条新恢复的 Job")
 
     def test_resume_interrupted_is_idempotent_across_restarts(self) -> None:
         checkpoint = {"submitted": ["p1"], "completed": [], "errors": []}
@@ -139,7 +145,7 @@ class ResumeInterruptedDedupeTests(_RegistryCase):
         second = self.registry.resume_interrupted()
         third = self.registry.resume_interrupted()
 
-        self.assertEqual(len(first), 1)
+        self.assertEqual(len(first), 2)
         self.assertEqual(second, [], "同一批中断任务不得在下一轮启动里被反复复活")
         self.assertEqual(third, [])
 
@@ -148,6 +154,137 @@ class ResumeInterruptedDedupeTests(_RegistryCase):
         self.assertEqual(self.registry.resume_interrupted(), [])
         row = self.storage.get_background_task(job_id)
         self.assertFalse(row["result"].get("resumed_into"), "未声明 resumable 的 Job 不得被自动恢复")
+
+
+class _SimulatedProcessExit(BaseException):
+    pass
+
+
+class AtomicJobResumeTests(_RegistryCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.executed: list[str] = []
+        self.registry._workers["check"] = self._complete
+
+    def _complete(self, job_id, spec, cancel) -> None:
+        source = self.storage.get_background_task(spec.params[JOB_RESUMED_FROM_KEY])
+        self.assertEqual(source["result"][JOB_RESUMED_INTO_KEY], job_id)
+        self.executed.append(job_id)
+        self.storage.update_job(job_id, status="completed", finished=True)
+
+    def _source(self, **kwargs) -> str:
+        return self._make_job(kind="check", checkpoint={"handle": "shared-handle"}, **kwargs)
+
+    def _restart(self) -> None:
+        self.registry.shutdown(timeout=2)
+        self.storage = ChatStorage(self.data_dir / "chat.db")
+        self.registry = JobRegistry(_AppStub(self.storage, self.config, self.bus))
+        self.registry._workers["check"] = self._complete
+
+    def test_same_checkpoint_in_two_conversations_recovers_both(self) -> None:
+        a = self._source()
+        other = str(self.storage.create_conversation("另一条独立会话")["id"])
+        b = self._source(conversation_id=other)
+        ids = self.registry.resume_interrupted()
+        self.registry.shutdown(timeout=2)
+        self.assertEqual(len(ids), 2)
+        self.assertEqual(len(self.executed), 2)
+        self.assertEqual({self.storage.get_background_task(i)["conversation_id"] for i in ids}, {self.conversation_id, other})
+        for source in (a, b):
+            self.assertIn(self.storage.get_background_task(source)["result"][JOB_RESUMED_INTO_KEY], ids)
+
+    def test_concurrent_resume_returns_one_child_and_starts_one_worker(self) -> None:
+        source = self._source()
+        second = JobRegistry(_AppStub(self.storage, self.config, self.bus))
+        second._workers["check"] = self._complete
+        gate = threading.Barrier(2)
+        returned, failures = [], []
+        def resume(registry):
+            try:
+                gate.wait(timeout=2)
+                returned.append(registry.resume(source, owner=self.conversation_id))
+            except BaseException as exc:
+                failures.append(exc)
+        threads = [threading.Thread(target=resume, args=(r,)) for r in (self.registry, second)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(3)
+            self.assertFalse(thread.is_alive())
+        self.registry.shutdown(timeout=2)
+        second.shutdown(timeout=2)
+        self.assertEqual(failures, [])
+        self.assertEqual(len(set(returned)), 1)
+        self.assertEqual(self.executed, [returned[0]])
+        self.assertEqual(len(self.storage.list_background_tasks(limit=200)), 2)
+
+    def test_source_mark_failure_rolls_back_child_then_can_retry(self) -> None:
+        source = self._source()
+        with self.storage._connect() as db:
+            db.execute("CREATE TRIGGER reject_resume_mark BEFORE UPDATE OF result ON background_tasks "
+                       "WHEN json_extract(NEW.result, '$.resumed_into') IS NOT NULL "
+                       "BEGIN SELECT RAISE(ABORT, 'resume mark failure'); END")
+        with self.assertRaisesRegex(Exception, "resume mark failure"):
+            self.registry.resume(source, owner=self.conversation_id)
+        self.assertEqual(len(self.storage.list_background_tasks(limit=200)), 1)
+        self.assertEqual(self.executed, [])
+        with self.storage._connect() as db:
+            db.execute("DROP TRIGGER reject_resume_mark")
+        child = self.registry.resume(source, owner=self.conversation_id)
+        self.registry.shutdown(timeout=2)
+        self.assertEqual(self.executed, [child])
+
+    def test_crash_after_registration_before_thread_start_recovers_child_once(self) -> None:
+        source = self._source()
+        with patch.object(self.registry, "_emit", side_effect=_SimulatedProcessExit):
+            with self.assertRaises(_SimulatedProcessExit):
+                self.registry.resume(source, owner=self.conversation_id)
+        child = self.storage.get_background_task(source)["result"][JOB_RESUMED_INTO_KEY]
+        self.assertEqual(self.storage.get_background_task(child)["checkpoint"], {"handle": "shared-handle"})
+        self.assertEqual(self.executed, [])
+        self._restart()
+        resumed = self.registry.resume_interrupted()
+        self.registry.shutdown(timeout=2)
+        self.assertEqual(len(resumed), 1)
+        self.assertEqual(self.executed, resumed)
+        self.assertEqual(self.storage.get_run_snapshot(resumed[0])["params"][JOB_RESUMED_FROM_KEY], child)
+        self.assertEqual(self.storage.get_background_task(source)["result"][JOB_RESUMED_INTO_KEY], child)
+        self._restart()
+        self.assertEqual(self.registry.resume_interrupted(), [])
+        self.assertEqual(len(self.executed), 1)
+
+    def test_legacy_child_without_source_mark_is_reconciled_without_execution(self) -> None:
+        source = self._source()
+        child = self._source(params={JOB_RESUMED_FROM_KEY: source})
+        self.storage.update_job(child, status="completed", finished=True)
+        self.assertEqual(self.registry.resume(source, owner=self.conversation_id), child)
+        self.assertEqual(self.executed, [])
+        self.assertEqual(self.storage.get_background_task(source)["result"][JOB_RESUMED_INTO_KEY], child)
+
+    def test_ambiguous_legacy_siblings_are_not_replayed(self) -> None:
+        source = self._source()
+        self._source(params={JOB_RESUMED_FROM_KEY: source})
+        self._source(params={JOB_RESUMED_FROM_KEY: source})
+        with self.assertLogs("naiba.jobs", level="ERROR"):
+            self.assertEqual(self.registry.resume_interrupted(), [])
+        self.assertEqual(self.executed, [])
+        self.assertEqual(len(self.storage.list_background_tasks(limit=200)), 3)
+
+    def test_missing_recorded_child_is_not_recreated(self) -> None:
+        source = self._source()
+        self.storage.update_job(source, result={JOB_RESUMED_INTO_KEY: "missing-child"})
+        with self.assertRaisesRegex(ValueError, "缺失"):
+            self.registry.resume(source, owner=self.conversation_id)
+        self.assertEqual(self.executed, [])
+        self.assertEqual(len(self.storage.list_background_tasks(limit=200)), 1)
+
+    def test_same_checkpoint_with_different_kind_is_not_merged(self) -> None:
+        self._source()
+        self.registry._workers["http_poll"] = self._complete
+        self._make_job(kind="http_poll", checkpoint={"handle": "shared-handle"})
+        self.assertEqual(len(self.registry.resume_interrupted()), 2)
+        self.registry.shutdown(timeout=2)
+        self.assertEqual(len(self.executed), 2)
 
 
 class ResumeLabelTests(_RegistryCase):
@@ -259,6 +396,160 @@ class _ComfyStubHandler(BaseHTTPRequestHandler):
         self.rfile.read(length)
         state.submits.append(prompt_id)
         self._send({"prompt_id": prompt_id})
+
+
+class CheckSubmissionRecoveryTests(_RegistryCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.requests = {"submit": 0, "poll": 0}
+        counts = self.requests
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+            def _respond(self, payload):
+                body = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                counts["submit"] += 1
+                self._respond({"id": "accepted-once"})
+            def do_GET(self):
+                counts["poll"] += 1
+                self._respond({"status": "completed"})
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.http_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.http_thread.start()
+        base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.params = {"submit": {"url": base + "/submit", "json": {}},
+                       "poll": {"url": base + "/poll"},
+                       "check": {"interval_seconds": 0, "timeout_seconds": 2, "max_attempts": 2}}
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.http_thread.join(2)
+        super().tearDown()
+
+    def _restart(self):
+        self.registry.shutdown(timeout=2)
+        self.storage = ChatStorage(self.data_dir / "chat.db")
+        self.registry = JobRegistry(_AppStub(self.storage, self.config, self.bus))
+
+    def _run(self, source):
+        self.registry._run_check(source, JobSpec(kind="check", conversation_id=self.conversation_id,
+                                                params=self.params, resumable=True), threading.Event())
+
+    def test_restart_with_saved_handle_only_polls_original_request(self) -> None:
+        source = self._make_job(kind="check", status="running", params=self.params)
+        with patch.object(self.registry, "_poll_status", side_effect=_SimulatedProcessExit):
+            with self.assertRaises(_SimulatedProcessExit):
+                self._run(source)
+        self.assertEqual(self.requests["submit"], 1)
+        self.assertEqual(self.storage.get_background_task(source)["checkpoint"]["handle"], {"id": "accepted-once"})
+        self._restart()
+        children = self.registry.resume_interrupted()
+        self.assertEqual(len(children), 1)
+        self.registry._threads[children[0]].join(2)
+        self.assertFalse(self.registry._threads[children[0]].is_alive())
+        self.assertEqual(self.storage.get_background_task(children[0])["status"], "completed")
+        self.assertEqual(self.requests, {"submit": 1, "poll": 1})
+        self._restart()
+        self.assertEqual(self.registry.resume_interrupted(), [])
+        self.assertEqual(self.requests["submit"], 1)
+
+    def test_remote_acceptance_without_saved_handle_never_resubmits(self) -> None:
+        source = self._make_job(kind="check", status="running", params=self.params)
+        with patch.object(self.registry, "_save_job_submission", side_effect=_SimulatedProcessExit):
+            with self.assertRaises(_SimulatedProcessExit):
+                self._run(source)
+        self.assertEqual(self.requests["submit"], 1)
+        self.assertIn(JOB_SUBMISSION_PENDING_KEY, self.storage.get_background_task(source)["checkpoint"])
+        self._restart()
+        self.assertEqual(self.registry.resume_interrupted(), [])
+        with self.assertRaisesRegex(ValueError, "结果未知"):
+            self.registry.resume(source, owner=self.conversation_id)
+        self.assertEqual(self.requests["submit"], 1)
+
+    def test_legacy_checkpoint_without_handle_does_not_assume_unsubmitted(self) -> None:
+        source = self._make_job(kind="check", checkpoint={"attempt": 1}, params=self.params)
+        child = self.registry.resume(source, owner=self.conversation_id)
+        self.registry._threads[child].join(2)
+        self.assertFalse(self.registry._threads[child].is_alive())
+        self.assertEqual(self.requests["submit"], 0)
+        self.assertEqual(self.storage.get_background_task(child)["status"], "failed")
+        self.assertIn("结果未知", self.storage.get_background_task(child)["error"])
+
+
+class ComfySubmissionRecoveryTests(_RegistryCase):
+    def _restart(self):
+        self.registry.shutdown(timeout=2)
+        self.storage = ChatStorage(self.data_dir / "chat.db")
+        self.registry = JobRegistry(_AppStub(self.storage, self.config, self.bus))
+
+    def test_legacy_saved_prompt_is_polled_without_resubmission(self) -> None:
+        source = self._make_job(status="running")
+        spec = JobSpec(kind="comfyui", conversation_id=self.conversation_id,
+                       params={"workflow": {"1": {}}, JOB_RESUMED_FROM_KEY: "legacy-source"},
+                       checkpoint={"prompt_ids": ["known-prompt"], "completed_shots": []})
+        with patch.object(self.registry, "_comfyui_reachable", return_value=True), \
+             patch.object(self.registry, "_comfyui_submit") as submit, \
+             patch.object(self.registry, "_comfyui_wait_history", return_value=(True, ["file.png"], "")) as poll:
+            self.registry._run_comfyui(source, spec, threading.Event())
+        submit.assert_not_called()
+        self.assertEqual(poll.call_args.args[1], "known-prompt")
+        self.assertEqual(self.storage.get_background_task(source)["status"], "completed")
+
+    def test_batch_acceptance_before_checkpoint_is_not_replayed_after_restart(self) -> None:
+        source = self._make_job(status="running")
+        workflows = [{"1": {}}]
+        spec = JobSpec(kind="comfyui", conversation_id=self.conversation_id, params={"workflows": workflows})
+        with patch.object(self.registry, "_comfyui_submit", return_value=("accepted-prompt", "")) as submit, \
+             patch.object(self.registry, "_save_job_submission", side_effect=_SimulatedProcessExit):
+            with self.assertRaises(_SimulatedProcessExit):
+                self.registry._run_comfyui_batch(source, spec, threading.Event(), "http://unused", workflows)
+        submit.assert_called_once()
+        self.assertEqual(self.storage.get_background_task(source)["checkpoint"]["submitted"], [])
+        self._restart()
+        self.assertEqual(self.registry.resume_interrupted(), [])
+        self.assertIn("结果未知", self.storage.get_background_task(source)["error"])
+
+    def test_batch_resubmit_acceptance_before_checkpoint_is_not_replayed(self) -> None:
+        source = self._make_job(status="running")
+        workflows = [{"1": {}}]
+        checkpoint = {"submitted": ["lost-prompt"], "completed": [], "errors": [], JOB_SUBMISSION_GUARD_KEY: 1}
+        spec = JobSpec(kind="comfyui", conversation_id=self.conversation_id,
+                       params={"workflows": workflows}, checkpoint=checkpoint)
+        with patch.object(self.registry, "_comfyui_queue_ids", return_value=set()), \
+             patch.object(self.registry, "_comfyui_history_once", return_value=(False, [], "")), \
+             patch.object(self.registry, "_comfyui_submit", return_value=("accepted-replacement", "")) as submit, \
+             patch.object(self.registry, "_save_job_submission", side_effect=_SimulatedProcessExit):
+            with self.assertRaises(_SimulatedProcessExit):
+                self.registry._run_comfyui_batch(source, spec, threading.Event(), "http://unused", workflows)
+        submit.assert_called_once()
+        self._restart()
+        self.assertEqual(self.registry.resume_interrupted(), [])
+        self.assertEqual(self.storage.get_background_task(source)["checkpoint"]["submitted"], ["lost-prompt"])
+
+    def test_failed_history_query_does_not_authorize_resubmission(self) -> None:
+        source = self._make_job(status="running")
+        workflows = [{"1": {}}]
+        checkpoint = {"submitted": ["known-prompt"], JOB_SUBMISSION_GUARD_KEY: 1}
+        spec = JobSpec(kind="comfyui", conversation_id=self.conversation_id,
+                       params={"workflows": workflows}, checkpoint=checkpoint)
+        cancel = threading.Event()
+        def history(*args):
+            cancel.set()
+            return False, [], "UNKNOWN:history request failed"
+        with patch.object(self.registry, "_comfyui_queue_ids", return_value=set()), \
+             patch.object(self.registry, "_comfyui_history_once", side_effect=history), \
+             patch.object(self.registry, "_comfyui_submit") as submit, \
+             patch("naiba.jobs.time.sleep"):
+            self.registry._run_comfyui_batch(source, spec, cancel, "http://unused", workflows)
+        submit.assert_not_called()
 
 
 class ComfyBatchLostPromptTests(_RegistryCase):
@@ -400,6 +691,7 @@ class ComfyBatchSubmitRejectTests(_RegistryCase):
         self.assertEqual(row["status"], "failed")
         self.assertIn("Seed (rgthree)", row["error"], "任务错误必须带节点类型，模型才能自诊")
         self.assertIn("bigger than max", row["error"])
+        self.assertNotIn(JOB_SUBMISSION_PENDING_KEY, row["checkpoint"], "明确的校验拒绝仍允许人工重试")
         errors = (row["result"] or {}).get("errors") or []
         self.assertTrue(errors, "逐段错误必须落进 result.errors")
         self.assertEqual(errors[0].get("index"), 0)

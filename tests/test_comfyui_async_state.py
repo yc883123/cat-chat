@@ -25,8 +25,9 @@ const context=vm.createContext({console,FormData,File,buildBatchConvertRequest,B
   currentStudioPage:()=>page,isStudioOpen:()=>open,api:async()=>({})});
 const source=fs.readFileSync('public/js/24-comfyui.js','utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
 vm.runInContext(source+`
-  renderBatch=()=>{};loadBatchHistories=async()=>{};
+  renderBatch=()=>{};loadBatchHistories=async()=>{};renderWorkflowList=()=>{};renderParamForm=()=>{};
   globalThis.p={batch,startBatchPolling,stopBatchPolling,batchConvert,batchConvertAll,
+    comfyui,selectWorkflow,submitTask,openRerunSnapshot,dropRerunDraft,
     changeBatchMediaPorts,onBatchChange,onBatchClick,submitBatch,batchUploadTiles,loadBatchWorkflowDetail,
     setWait(fn){batchWaitStudioTask=fn;}};
 `,context);
@@ -51,6 +52,71 @@ class ComfyuiAsyncStateTests(unittest.TestCase):
             cwd=ROOT, text=True, encoding="utf-8", capture_output=True, timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_single_workflow_ignores_stale_success_failure_and_same_id_reselection(self):
+        self.run_case(r"""
+for(const oldFails of [false,true]){
+  for(const sameId of [false,true]){
+    const old=defer(),next=defer();let requests=0,posts=0;
+    context.api=(path,options)=>{if(options?.method==='POST'){posts++;return Promise.resolve({});}
+      return ++requests===1?old.promise:next.promise;};
+    const first=p.selectWorkflow('old');
+    assert.equal(p.comfyui.detail,null);assert.equal(p.comfyui.detailLoading,true);
+    await p.submitTask();assert.equal(posts,0,'加载期间不能提交旧表单');
+    const id=sameId?'old':'next',second=p.selectWorkflow(id);
+    next.resolve({workflow:{id,name:'new details',params:[]}});await second;
+    if(oldFails)old.reject(new Error('late failure'));
+    else old.resolve({workflow:{id:'old',name:'stale details',params:[]}});
+    await first;
+    assert.equal(p.comfyui.selectedId,id);assert.equal(p.comfyui.detail.name,'new details');
+    assert.equal(p.comfyui.detailLoading,false);
+  }
+}
+""")
+
+    def test_single_workflow_failure_or_wrong_identity_cannot_submit_previous_form(self):
+        self.run_case(r"""
+for(const response of [new Error('network'),{workflow:{id:'wrong',params:[]}}]){
+  p.comfyui.detail={id:'previous',params:[]};p.comfyui.selectedId='previous';let posts=0;
+  context.api=async(path,options)=>{if(options?.method==='POST'){posts++;return {};}
+    if(response instanceof Error)throw response;return response;};
+  await p.selectWorkflow('next');await p.submitTask();
+  assert.equal(p.comfyui.detail,null);assert.equal(p.comfyui.detailLoading,false);assert.equal(posts,0);
+}
+""")
+
+    def test_rerun_and_workflow_loads_share_request_ownership(self):
+        self.run_case(r"""
+const snapshot={source_task_id:'done',workflow_id:'frozen',workflow_name:'frozen',prompt:{},
+  params:[],overrides:[],media_inputs:[],media_skip:[]};
+let workflow=defer(),rerun=defer();
+context.api=path=>path.includes('rerun-snapshot')?rerun.promise:workflow.promise;
+let first=p.selectWorkflow('old'),second=p.openRerunSnapshot('done');
+rerun.resolve({snapshot});await second;
+workflow.resolve({workflow:{id:'old',params:[]}});await first;
+assert.equal(p.comfyui.detail.id,'frozen');assert.equal(p.comfyui.rerun.sourceTaskId,'done');
+workflow=defer();rerun=defer();
+first=p.openRerunSnapshot('done');second=p.selectWorkflow('next');
+workflow.resolve({workflow:{id:'next',params:[]}});await second;
+rerun.resolve({snapshot});await first;
+assert.equal(p.comfyui.detail.id,'next');assert.equal(p.comfyui.rerun,null);
+assert.equal(p.comfyui.rerunLoading,'');assert.equal(p.comfyui.detailLoading,false);
+rerun=defer();first=p.openRerunSnapshot('done');p.dropRerunDraft();
+rerun.resolve({snapshot});await first;
+assert.equal(p.comfyui.detail,null);assert.equal(p.comfyui.rerun,null);
+""")
+
+    def test_late_submit_success_preserves_new_workflow_form(self):
+        self.run_case(r"""
+const submitted=defer();
+context.api=async(path,options)=>options?.method==='POST'?submitted.promise:
+  path.endsWith('/next')?{workflow:{id:'next',params:[]}}:{tasks:[]};
+p.comfyui.selectedId='old';p.comfyui.detail={id:'old',params:[]};
+const pending=p.submitTask();await p.selectWorkflow('next');
+submitted.resolve({task:{id:'accepted-old'}});await pending;
+assert.equal(p.comfyui.detail.id,'next');assert.equal(p.comfyui.selectedId,'next');
+assert.equal(p.comfyui.submitting,false);
+""")
 
     def test_workflow_detail_ignores_old_success_failure_clear_and_removed_scheme(self):
         self.run_case(r"""

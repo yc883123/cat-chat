@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
-from naiba.core.contracts import TERMINAL_RUN_EVENT_TYPES
+from naiba.core.contracts import JOB_RESUMED_FROM_KEY, JOB_RESUMED_INTO_KEY, TERMINAL_RUN_EVENT_TYPES
 from naiba.core.messages import MetadataKeys
 from naiba.core.paths import normalized_path_key
 
@@ -3876,6 +3876,107 @@ class ChatStorage:
                 ),
             )
         return self.get_background_task(task_id) or {}
+
+    @_retry_transient_write
+    def create_resumed_job(
+        self,
+        source_id: str,
+        message: str,
+        snapshot: dict[str, Any],
+        checkpoint: dict[str, Any],
+        *,
+        owner: str,
+        submission_guard: Callable[[sqlite3.Connection], None] | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Register one continuation and its source link atomically, before execution.
+
+        A legacy child carrying _resumed_from is also authoritative even when
+        the old process died before marking its source. Ambiguous/missing links
+        are not permission to create another execution.
+        """
+        now = int(time.time() * 1000)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            source = db.execute("SELECT * FROM background_tasks WHERE id = ?", (source_id,)).fetchone()
+            if source is None or str(source["owner_session_id"] or source["conversation_id"]) != owner:
+                raise ValueError("恢复源任务不存在或无权访问")
+
+            def children(row: sqlite3.Row) -> list[sqlite3.Row]:
+                return db.execute(
+                    "SELECT * FROM background_tasks WHERE conversation_id = ? "
+                    "AND COALESCE(NULLIF(owner_session_id, ''), conversation_id) = ? AND kind = ? "
+                    "AND json_extract(CASE WHEN json_valid(snapshot) THEN snapshot ELSE '{}' END, ?) = ? "
+                    "ORDER BY created_at DESC, id",
+                    (row["conversation_id"], row["owner_session_id"] or row["conversation_id"], row["kind"],
+                     f"$.params.{JOB_RESUMED_FROM_KEY}", row["id"]),
+                ).fetchall()
+
+            source_snapshot = json.loads(source["snapshot"] or "{}")
+            source_params = source_snapshot.get("params") or {}
+            previous_id = str(source_params.get(JOB_RESUMED_FROM_KEY) or "")
+            if previous_id:
+                previous = db.execute("SELECT * FROM background_tasks WHERE id = ?", (previous_id,)).fetchone()
+                if previous is not None and len(children(previous)) > 1:
+                    raise ValueError("同一恢复源已有多个接续任务，结果未知；请先核对，未重复提交")
+
+            result = json.loads(source["result"] or "{}")
+            result = result if isinstance(result, dict) else {}
+            linked_id = str(result.get(JOB_RESUMED_INTO_KEY) or "")
+            candidates = children(source)
+            if len(candidates) > 1:
+                raise ValueError("恢复源已有多个接续任务，结果未知；请先核对，未重复提交")
+            if linked_id and (not candidates or str(candidates[0]["id"]) != linked_id):
+                raise ValueError("已登记的接续任务缺失或关联不一致，未重复提交")
+            if candidates:
+                child = candidates[0]
+                # Repair only a proven legacy lineage, never a checkpoint match.
+                if not linked_id:
+                    result[JOB_RESUMED_INTO_KEY] = str(child["id"])
+                    db.execute("UPDATE background_tasks SET result = ?, updated_at = ? WHERE id = ?",
+                               (json.dumps(result, ensure_ascii=False), now, source_id))
+                return self._task_dict(child), False
+
+            if source["status"] not in {"interrupted", "failed", "cancelled"}:
+                raise ValueError("源任务尚未结束或已成功完成，无法恢复")
+            job_spec = source_snapshot.get("job_spec") or {}
+            if not job_spec.get("resumable"):
+                raise ValueError("该任务未声明可恢复")
+            if source["status"] == "interrupted" and source["cancel_requested"]:
+                raise ValueError("任务在中断前已取消，未恢复")
+            if submission_guard is not None:
+                submission_guard(db)
+            parent_id = str(source["parent_job_id"] or "")
+            if parent_id:
+                parent = db.execute("SELECT status, cancel_requested FROM background_tasks WHERE id = ?", (parent_id,)).fetchone()
+                if parent and (parent["cancel_requested"] or parent["status"] in {"stopping", "cancelling", "cancelled"}):
+                    raise ValueError("父任务已取消，不再创建新任务")
+            if not parent_id and not source["detached"]:
+                active = db.execute(
+                    "SELECT id FROM background_tasks WHERE conversation_id = ? "
+                    f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} "
+                    "AND COALESCE(parent_job_id, '') = '' AND detached = 0 LIMIT 1",
+                    (source["conversation_id"],),
+                ).fetchone()
+                if active:
+                    raise RuntimeError(f"ACTIVE_RUN:{active['id']}")
+            task_id = uuid.uuid4().hex
+            frozen = dict(snapshot)
+            frozen["params"] = {**(snapshot.get("params") or {}), JOB_RESUMED_FROM_KEY: source_id}
+            db.execute(
+                "INSERT INTO background_tasks("
+                "id, conversation_id, kind, interaction_mode, agent_id, agent_name, status, message, "
+                "snapshot, detail, created_at, updated_at, parent_job_id, owner_session_id, detached, "
+                "origin_run_id, checkpoint, current_step) "
+                "VALUES (?, ?, ?, ?, '', 'Job', 'queued', ?, ?, '{}', ?, ?, ?, ?, ?, ?, ?, '已入队')",
+                (task_id, source["conversation_id"], source["kind"], source["interaction_mode"], message,
+                 json.dumps(frozen, ensure_ascii=False), now, now, parent_id, owner,
+                 source["detached"], source["origin_run_id"], json.dumps(checkpoint, ensure_ascii=False)),
+            )
+            result[JOB_RESUMED_INTO_KEY] = task_id
+            db.execute("UPDATE background_tasks SET result = ?, updated_at = ? WHERE id = ?",
+                       (json.dumps(result, ensure_ascii=False), now, source_id))
+            row = db.execute("SELECT * FROM background_tasks WHERE id = ?", (task_id,)).fetchone()
+            return self._task_dict(row), True
 
     def get_run_snapshot(self, run_id: str) -> dict[str, Any] | None:
         with self._connect() as db:

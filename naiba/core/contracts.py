@@ -34,6 +34,29 @@ WRITER_SETUP_SNAPSHOT_KEY = "setup_snapshot"
 # state; current_task_id remains available for polling and recovery.
 WRITER_PIPELINE_STOPPING = "stopping"
 
+# Durable Job continuation identity. The child snapshot and source result are
+# written in the same SQLite transaction; checkpoints never identify a job.
+JOB_RESUMED_FROM_KEY = "_resumed_from"
+JOB_RESUMED_INTO_KEY = "resumed_into"
+# A submitted request without a durable handle is unknown, never safe to replay.
+JOB_SUBMISSION_PENDING_KEY = "submission_pending"
+JOB_SUBMISSION_GUARD_KEY = "submission_guard_version"
+# ComfyUI checkpoints persist each segment's submitting/unknown state.
+COMFYUI_SUBMISSIONS_KEY = "submissions"
+
+
+class CompactionResult(TypedDict, total=False):
+    compacted: bool
+    reason: str
+    error: str  # Bounded, credential-redacted provider/storage diagnosis.
+    region_messages: int
+    freed_est: int
+    summary: str
+    marker_message_id: str
+    attempts: list[dict[str, Any]]
+    context_tokens_before: int
+    context_tokens_after: int  # Effective replay history, never prior billed usage.
+
 # Labeler settings patch is an atomic per-provider update; it is mutually
 # exclusive with the legacy full-replacement provider_limits request.
 LABELER_PROVIDER_LIMITS_PATCH_KEY = "provider_limits_patch"
@@ -298,6 +321,8 @@ RUN_CONTEXT_KEYS: tuple[str, ...] = (
     # callable(messages, trace_start, limit, budget, used) -> {"history", "limit", "budget"}。
     # skills/agent 在步与步之间调用；返回 history 为空 = 本步不整理，照常发请求。
     "compact_context",
+    # 整理完成后，下一次完整请求组装好时推送一次包含 system/schema 的占用估算。
+    "context_estimate_pending",
     "model_key", "context_limit", "context_limit_source",
 )
 
@@ -326,6 +351,7 @@ def default_run_context() -> dict[str, Any]:
         "mark_interjections_consumed": None,
         # 自动整理入口（run/chat 只给非 aux 的 Run 置位）：缺省 None = 循环内不整理。
         "compact_context": None,
+        "context_estimate_pending": False,
         "model_key": "",
         "context_limit": 0,
         "context_limit_source": "unknown",
@@ -521,6 +547,7 @@ class RunContext(TypedDict, total=False):
     context_reset: dict[str, Any]    # reset_context 的本轮重置请求 → 消息 metadata.session_start
     turn_index: int                  # 本轮是第几个用户轮次（1 起）→ 图片批标签「第N轮装载」
     compact_context: Any             # Agent 循环内自动整理入口（callable；缺省 None = 本步不整理）
+    context_estimate_pending: bool   # 下一次正式请求前推送整理后的完整输入估算
     model_key: str                   # 本轮模型键（供实时用量事件标记）
     context_limit: int                # 本轮有效窗口（profile 或类型回退）
     context_limit_source: str         # 窗口来源（profile / local_default / unknown）
@@ -607,6 +634,9 @@ class EventPayload(TypedDict, total=False):
     region_messages: int
     freed_est: int
     attempts: list[dict[str, Any]]
+    context_tokens: int
+    model_key: str
+    context_limit_source: str
     # 存量形态（v24 前的 cancelled/error 事件会带，新契约不再发射；前端仍容忍重放旧事件流）。
     partial_message: dict[str, Any]
     # 工具流
@@ -716,8 +746,8 @@ EVENT_PAYLOAD_KEYS: dict[str, frozenset[str] | None] = {
     "cancelled": frozenset({"message"}),
     "run_failed": frozenset({"error"}),
     "context_full": frozenset({"limit", "used", "budget"}),
-    # 自动整理：action=hint / started / compacted / failed；region_messages/freed_est 为摘要信息。
-    "compaction": frozenset({"action", "region_messages", "freed_est", "used", "limit", "message", "reason", "attempts"}),
+    # 自动整理：action=hint / started / compacted / estimated / failed；estimated 为完整请求估算。
+    "compaction": frozenset({"action", "region_messages", "freed_est", "used", "limit", "message", "reason", "attempts", "error", "context_tokens", "model_key", "context_limit_source"}),
     # done **不带** `message`：终态消息由前端收尾时重载会话（GET /api/conversations/<id>）
     # 拿到，事件里带着它等于把整份消息（含 metadata.trace，实测最长 318KB）写进 run_events
     # 再被终态瘦身删掉。这里只放"只有事件能给的即时动作"字段。

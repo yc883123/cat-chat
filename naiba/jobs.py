@@ -20,9 +20,11 @@ ComfyUI 生成任务使用专用 Worker（见 ``_run_comfyui``）。
 """
 from __future__ import annotations
 
-from naiba.core.contracts import AppContext, SUBAGENT_OUTCOME_KEY
+from naiba.core.contracts import (
+    AppContext, JOB_RESUMED_FROM_KEY, JOB_RESUMED_INTO_KEY,
+    JOB_SUBMISSION_GUARD_KEY, JOB_SUBMISSION_PENDING_KEY, SUBAGENT_OUTCOME_KEY,
+)
 
-import hashlib
 import json
 import logging
 import queue
@@ -372,7 +374,7 @@ class JobRegistry:
             )
 
     # ---- 统一接口 ----
-    def start(self, spec: JobSpec, owner: str | None = None) -> str:
+    def start(self, spec: JobSpec, owner: str | None = None, *, resume_from: str = "") -> str:
         owner = owner or spec.owner_session_id or spec.conversation_id
         submission_guard = None
         if spec.kind == "subagent":
@@ -408,26 +410,38 @@ class JobRegistry:
             "params": spec.params,
             "label": spec.label,
         }
-        run = self.app.storage.create_run(
-            spec.conversation_id,
-            spec.label or f"Job({spec.kind})",
-            {"id": "", "name": "Job", "system_prompt": "", "skill_ids": []},
-            snapshot,
-            kind=spec.kind,
-            parent_job_id=spec.parent_job_id or "",
-            owner_session_id=owner,
-            detached=bool(spec.detached),
-            origin_run_id=str(spec.origin_run_id or ""),
-            **({"submission_guard": submission_guard} if submission_guard is not None else {}),
-        )
+        if resume_from:
+            run, created = self.app.storage.create_resumed_job(
+                resume_from, spec.label or f"Job({spec.kind})", snapshot, spec.checkpoint or {},
+                owner=owner, submission_guard=submission_guard,
+            )
+            if not created:
+                return str(run["id"])
+        else:
+            run = self.app.storage.create_run(
+                spec.conversation_id,
+                spec.label or f"Job({spec.kind})",
+                {"id": "", "name": "Job", "system_prompt": "", "skill_ids": []},
+                snapshot,
+                kind=spec.kind,
+                parent_job_id=spec.parent_job_id or "",
+                owner_session_id=owner,
+                detached=bool(spec.detached),
+                origin_run_id=str(spec.origin_run_id or ""),
+                **({"submission_guard": submission_guard} if submission_guard is not None else {}),
+            )
         job_id = str(run["id"])
+        initial_checkpoint = dict(spec.checkpoint or {})
+        if not resume_from and spec.kind in {"check", "http_poll", "comfyui"}:
+            initial_checkpoint[JOB_SUBMISSION_GUARD_KEY] = 1
+            spec.checkpoint = initial_checkpoint
         self.app.storage.update_job(
             job_id,
             status="queued",
             progress=0,
             attempt=0,
             current_step="已入队",
-            checkpoint=spec.checkpoint or {},
+            checkpoint=initial_checkpoint,
         )
         self._emit(job_id, {"type": "job_status", "status": "queued", "kind": spec.kind})
         cancel = threading.Event()
@@ -575,6 +589,8 @@ class JobRegistry:
         if not job.get("checkpoint"):
             return None
         checkpoint = dict(job["checkpoint"])
+        if checkpoint.get(JOB_SUBMISSION_PENDING_KEY):
+            raise ValueError("上次外部提交结果未知，请先核对外部任务；未重复提交")
         if extra_checkpoint:
             checkpoint.update(extra_checkpoint)
         # Job parameters live in the durable run snapshot.  Do not rely on
@@ -588,7 +604,7 @@ class JobRegistry:
             persisted_params = dict(job.get("result", {}).get("params", {})) if isinstance(job.get("result"), dict) else {}
         persisted_params = dict(persisted_params)
         # 记录来源 Job：resume/retry 产生的新 Job 可追溯“由谁恢复”，跨对话查询也能核对。
-        persisted_params["_resumed_from"] = job_id
+        persisted_params[JOB_RESUMED_FROM_KEY] = job_id
         # 任务名绝不能取 current_step：那是**进度文字**（「完成 8/10」「提交第 3/10 段」），
         # 而 background_tasks.message 直接顶在任务面板的标题位。旧实现把它当 label 写进去，
         # 于是同一组里并排两条行变成「ComfyUI 批量生成」与「完成 8/10」——用户看到的是一句
@@ -618,9 +634,11 @@ class JobRegistry:
             owner_session_id=job["owner_session_id"],
             resumable=True,
             checkpoint=checkpoint,
+            detached=bool(job.get("detached")),
+            origin_run_id=str(job.get("origin_run_id") or ""),
         )
         try:
-            new_id = self.start(spec, owner=job["owner_session_id"])
+            new_id = self.start(spec, owner=job["owner_session_id"], resume_from=job_id)
         except TaskCancelled as exc:
             # 父任务已取消：显式 resume/retry 也不应复活用户取消掉的工作。
             raise ValueError(str(exc)) from exc
@@ -655,13 +673,11 @@ class JobRegistry:
     def resume_interrupted(self) -> list[str]:
         """Resume durable, explicitly resumable jobs interrupted by restart.
 
-        幂等 + 去重（历史事故防线）：恢复后必须把**源 Job** 标记为「已由某新 Job 接续」，
-        否则它下一轮启动仍是 interrupted、会被再恢复一次，Job 数随重启次数成倍增长
-        （1→2→4→8…，实测曾把同一批 8 段生成放大成每对话 13 份）。
-        另外，checkpoint 完全相同的中断 Job 视为同一批任务的重复副本，只恢复最新的一条。
+        Only durable source/child identity establishes a continuation. Equal
+        checkpoints can belong to independent jobs, even in one conversation.
+        Child creation, checkpoint and source marking commit before execution.
         """
         resumed: list[str] = []
-        seen_signatures: set[str] = set()
         # list_background_tasks 按 created_at DESC 返回（新→旧），每组第一条即最新。
         for job in self.app.storage.list_background_tasks("", active_only=False, limit=200):
             if str(job.get("status") or "") != "interrupted":
@@ -678,11 +694,9 @@ class JobRegistry:
             # Only deterministic workers can safely resume automatically.
             if str(job.get("kind") or "") not in {"comfyui", "check", "http_poll"}:
                 continue
-            signature = self._resume_signature(job)
-            if signature in seen_signatures:
-                self._mark_superseded(job_id, reason="同一批中断任务已由较新的 Job 接续，未重复恢复")
+            if (job.get("checkpoint") or {}).get(JOB_SUBMISSION_PENDING_KEY):
+                self.app.storage.update_job(job_id, error="上次外部提交结果未知，请先核对外部任务；未重复提交")
                 continue
-            seen_signatures.add(signature)
             try:
                 new_id = self.resume(job_id, owner=str(job.get("owner_session_id") or "") or None)
             except TaskCancelled:
@@ -695,7 +709,6 @@ class JobRegistry:
                 continue
             if new_id:
                 resumed.append(new_id)
-                self._mark_superseded(job_id, new_id=new_id)
         return resumed
 
     @staticmethod
@@ -706,14 +719,7 @@ class JobRegistry:
         让同一批任务被反复「复活」。显式 retry()/resume() 不受此标记影响。
         """
         result = job.get("result") if isinstance(job.get("result"), dict) else {}
-        return bool(str(result.get("resumed_into") or "") or str(result.get("resume_skipped") or ""))
-
-    @staticmethod
-    def _resume_signature(job: dict[str, Any]) -> str:
-        """同一批任务的指纹：checkpoint 相同即视为重复副本。"""
-        checkpoint = job.get("checkpoint") if isinstance(job.get("checkpoint"), dict) else {}
-        payload = json.dumps(checkpoint, ensure_ascii=False, sort_keys=True)
-        return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+        return bool(str(result.get(JOB_RESUMED_INTO_KEY) or "") or str(result.get("resume_skipped") or ""))
 
     def _mark_superseded(self, job_id: str, new_id: str = "", reason: str = "") -> None:
         """给中断 Job 打上持久标记，使它不再被后续启动重复恢复。
@@ -727,7 +733,7 @@ class JobRegistry:
         result = job.get("result") if isinstance(job.get("result"), dict) else {}
         result = dict(result)
         if new_id:
-            result["resumed_into"] = new_id
+            result[JOB_RESUMED_INTO_KEY] = new_id
         else:
             result["resume_skipped"] = reason or "同一批中断任务已由较新的 Job 接续"
         if reason:
@@ -983,6 +989,31 @@ class JobRegistry:
         except Exception:  # noqa: BLE001
             logger.debug("逐帧进度写入失败：job=%s", job_id, exc_info=True)
 
+    def _begin_job_submission(self, job_id: str, spec: JobSpec, checkpoint: dict[str, Any], index: int = 0) -> bool:
+        """Persist the unknown-result window before any external side effect."""
+        if checkpoint.get(JOB_SUBMISSION_PENDING_KEY) or (
+            spec.params.get(JOB_RESUMED_FROM_KEY) and checkpoint.get(JOB_SUBMISSION_GUARD_KEY) != 1
+        ):
+            checkpoint[JOB_SUBMISSION_PENDING_KEY] = {"index": index, "state": "unknown"}
+            self.app.storage.update_job(job_id, checkpoint=checkpoint)
+            self._finish(job_id, "failed", error="上次外部提交结果未知，请先核对外部任务；未重复提交")
+            return False
+        checkpoint[JOB_SUBMISSION_GUARD_KEY] = 1
+        checkpoint[JOB_SUBMISSION_PENDING_KEY] = {"index": index, "state": "submitting"}
+        if self.app.storage.update_job(job_id, checkpoint=checkpoint) is None:
+            return False
+        return True
+
+    def _save_job_submission(self, job_id: str, checkpoint: dict[str, Any]) -> None:
+        checkpoint.pop(JOB_SUBMISSION_PENDING_KEY, None)
+        self.app.storage.update_job(job_id, checkpoint=checkpoint)
+
+    def _record_comfyui_rejection(self, job_id: str, checkpoint: dict[str, Any], reason: str) -> None:
+        # Validation/auth rejection proves non-acceptance. A timeout, 5xx or a
+        # malformed success reply cannot establish whether execution started.
+        if re.match(r"^HTTP (400|401|403|404|405|413|415|422|429)\b", reason):
+            self._save_job_submission(job_id, checkpoint)
+
     def _run_check(self, job_id: str, spec: JobSpec, cancel: threading.Event) -> None:
         """通用 HTTP 提交 + 轮询检查 Worker（持续检查/唤醒）。
 
@@ -998,13 +1029,25 @@ class JobRegistry:
         submit = params.get("submit") or {}
         poll = params.get("poll") or {}
         attempt = 0
-        self._set_status(job_id, "running", current_step="提交任务", attempt=attempt)
-        handle = self._submit(check, submit)
-        if handle is None:
-            self._finish(job_id, "failed", error="Job 提交失败")
+        checkpoint = dict(spec.checkpoint or {})
+        if checkpoint.get(JOB_SUBMISSION_PENDING_KEY):
+            self._finish(job_id, "failed", error="上次外部提交结果未知，请先核对外部任务；未重复提交")
             return
-        self.app.storage.update_job(job_id, checkpoint={"handle": handle})
-        self._emit(job_id, {"type": "job_check", "phase": "submitted", "handle": handle, "attempt": attempt})
+        handle = checkpoint.get("handle")
+        self._set_status(job_id, "running", current_step="继续检查任务" if handle is not None else "提交任务", attempt=attempt)
+        if handle is None:
+            if cancel.is_set():
+                self._finish(job_id, "cancelled", error="用户取消")
+                return
+            if not self._begin_job_submission(job_id, spec, checkpoint):
+                return
+            handle = self._submit(check, submit)
+            if handle is None:
+                self._finish(job_id, "failed", error="Job 提交结果未知，请先核对外部任务；未自动重试")
+                return
+            checkpoint["handle"] = handle
+            self._save_job_submission(job_id, checkpoint)
+            self._emit(job_id, {"type": "job_check", "phase": "submitted", "handle": handle, "attempt": attempt})
         deadline = time.monotonic() + check.timeout_seconds
         backoff = 0.0
         while True:
@@ -1096,6 +1139,9 @@ class JobRegistry:
         workflow = params.get("workflow") or {}
         shots = int(params.get("shots") or 1)
         checkpoint = dict(spec.checkpoint or {})
+        if checkpoint.get(JOB_SUBMISSION_PENDING_KEY):
+            self._finish(job_id, "failed", error="上次外部提交结果未知，请先核对外部任务；未重复提交")
+            return
         completed_shots = checkpoint.get("completed_shots", [])
         prompt_ids = checkpoint.get("prompt_ids", [])
 
@@ -1111,8 +1157,9 @@ class JobRegistry:
             self._run_comfyui_batch(job_id, spec, cancel, comfy_url, workflows)
             return
 
+        checkpoint.update(completed_shots=completed_shots, prompt_ids=prompt_ids)
         self._set_status(job_id, "running", current_step=f"开始生成 {shots} 段", progress=0,
-                         checkpoint={"completed_shots": completed_shots, "prompt_ids": prompt_ids})
+                         checkpoint=checkpoint)
         errors: list[str] = []
         for index in range(len(completed_shots), shots):
             if cancel.is_set():
@@ -1122,17 +1169,21 @@ class JobRegistry:
             self.app.storage.update_job(job_id, current_step=f"提交第 {index + 1}/{shots} 段",
                                         progress=round(index / shots * 100, 1))
             self._emit(job_id, {"type": "job_check", "phase": "submit_shot", "shot": index + 1, "total": shots})
-            prompt_id, submit_reason = self._comfyui_submit(comfy_url, workflow, index)
+            prompt_id = str(prompt_ids[index]) if index < len(prompt_ids) else ""
             if not prompt_id:
-                reason = f"第 {index + 1} 段提交失败：{submit_reason}" if submit_reason else f"第 {index + 1} 段提交失败（工作流或节点错误）"
-                errors.append(reason)
-                self._emit(job_id, {"type": "job_check", "phase": "shot_failed", "shot": index + 1, "reason": reason})
-                # 单镜头失败记录原因，不自动跳过；依赖 checkpoint 供后续恢复
-                self._finish(job_id, "failed", error=reason,
-                             result={"completed_shots": completed_shots, "prompt_ids": prompt_ids, "errors": errors})
-                return
-            prompt_ids.append(prompt_id)
-            self.app.storage.update_job(job_id, checkpoint={"completed_shots": completed_shots, "prompt_ids": prompt_ids})
+                if not self._begin_job_submission(job_id, spec, checkpoint, index):
+                    return
+                prompt_id, submit_reason = self._comfyui_submit(comfy_url, workflow, index)
+                if not prompt_id:
+                    reason = f"第 {index + 1} 段提交失败：{submit_reason}" if submit_reason else f"第 {index + 1} 段提交失败（工作流或节点错误）"
+                    errors.append(reason)
+                    self._record_comfyui_rejection(job_id, checkpoint, submit_reason)
+                    self._emit(job_id, {"type": "job_check", "phase": "shot_failed", "shot": index + 1, "reason": reason})
+                    self._finish(job_id, "failed", error=reason,
+                                 result={"completed_shots": completed_shots, "prompt_ids": prompt_ids, "errors": errors})
+                    return
+                prompt_ids.append(prompt_id)
+                self._save_job_submission(job_id, checkpoint)
             # 2. 轮询历史
             ok, files, reason = self._comfyui_wait_history(comfy_url, prompt_id, cancel, job_id, index, shots)
             if cancel.is_set():
@@ -1149,7 +1200,7 @@ class JobRegistry:
                 job_id,
                 progress=round((index + 1) / shots * 100, 1),
                 current_step=f"第 {index + 1}/{shots} 段完成",
-                checkpoint={"completed_shots": completed_shots, "prompt_ids": prompt_ids},
+                checkpoint=checkpoint,
             )
             self._emit(job_id, {"type": "job_check", "phase": "shot_done", "shot": index + 1, "files": files})
         self._finish(
@@ -1167,12 +1218,17 @@ class JobRegistry:
     ) -> None:
         """Fire all prompts first, then poll them as one durable batch."""
         checkpoint = dict(spec.checkpoint or {})
+        if checkpoint.get(JOB_SUBMISSION_PENDING_KEY):
+            self._finish(job_id, "failed", error="上次外部提交结果未知，请先核对外部任务；未重复提交")
+            return
         submitted = list(checkpoint.get("submitted") or [])
         completed = list(checkpoint.get("completed") or [])
         errors: list[dict[str, Any]] = list(checkpoint.get("errors") or [])
+        resubmits = dict(checkpoint.get("resubmits") or {})
+        checkpoint.update(submitted=submitted, completed=completed, errors=errors, resubmits=resubmits)
         total = len(workflows)
         self._set_status(job_id, "running", current_step=f"提交 {total} 个工作流", progress=0,
-                         checkpoint={"submitted": submitted, "completed": completed, "errors": errors})
+                         checkpoint=checkpoint)
 
         # Submit only work not present in the checkpoint, making resume safe.
         for index in range(len(submitted), total):
@@ -1180,19 +1236,23 @@ class JobRegistry:
                 self._finish(job_id, "cancelled", error="用户取消",
                              result={"prompt_ids": submitted, "completed": completed, "errors": errors})
                 return
+            if not self._begin_job_submission(job_id, spec, checkpoint, index):
+                return
             prompt_id, submit_reason = self._comfyui_submit(comfy_url, workflows[index], index)
             if not prompt_id:
                 reason_text = f"提交失败：{submit_reason}" if submit_reason else "提交失败"
                 errors.append({"index": index, "error": reason_text})
+                self._record_comfyui_rejection(job_id, checkpoint, submit_reason)
                 self._finish(job_id, "failed", error=f"第 {index + 1} 段{reason_text}",
                              result={"prompt_ids": submitted, "completed": completed, "errors": errors})
                 return
             submitted.append(prompt_id)
+            self._save_job_submission(job_id, checkpoint)
             self.app.storage.update_job(
                 job_id,
                 progress=round((index + 1) / max(total, 1) * 30, 1),
                 current_step=f"已提交 {index + 1}/{total}",
-                checkpoint={"submitted": submitted, "completed": completed, "errors": errors},
+                checkpoint=checkpoint,
             )
             self._emit(job_id, {"type": "job_check", "phase": "batch_submitted", "index": index, "prompt_id": prompt_id, "total": total})
 
@@ -1202,7 +1262,6 @@ class JobRegistry:
         # 已失败的镜头同样算完成：否则恢复后会重新轮询，把同一处错误反复计入 errors。
         done_indexes.update(int(item.get("index")) for item in errors if isinstance(item, dict) and str(item.get("index", "")).isdigit())
         # 每个镜头「丢失后重提交」的次数，持久化在 checkpoint，重启不会把预算清零。
-        resubmits = dict(checkpoint.get("resubmits") or {})
         max_resubmit = max(0, int(spec.params.get("max_resubmit", 1) or 0))
         deadline = time.monotonic() + float(spec.params.get("wait_timeout", 7200) or 7200)
         while len(done_indexes) < total:
@@ -1230,6 +1289,8 @@ class JobRegistry:
                     done_indexes.add(index)
                     self._emit(job_id, {"type": "job_check", "phase": "batch_failed", "index": index, "error": reason[6:]})
                     continue
+                if reason and reason.startswith("UNKNOWN:"):
+                    continue
                 if queue_ids is None or prompt_id in queue_ids:
                     # 仍在排队/执行中；队列查询失败时保守处理，不判定丢失。
                     continue
@@ -1238,19 +1299,21 @@ class JobRegistry:
                 # 任务面板就长期挂着「运行中 · 完成 5/8」且无法推进——这里改为可恢复处理。
                 used = int(resubmits.get(str(index), 0) or 0)
                 if used < max_resubmit and index < len(workflows):
+                    if not self._begin_job_submission(job_id, spec, checkpoint, index):
+                        return
                     new_prompt_id, resubmit_reason = self._comfyui_submit(comfy_url, workflows[index], index)
                     if new_prompt_id:
                         resubmits[str(index)] = used + 1
                         submitted[index] = new_prompt_id
-                        self.app.storage.update_job(
-                            job_id,
-                            checkpoint={"submitted": submitted, "completed": completed,
-                                        "errors": errors, "resubmits": resubmits},
-                        )
+                        self._save_job_submission(job_id, checkpoint)
                         self._emit(job_id, {"type": "job_check", "phase": "batch_resubmit",
                                             "index": index, "prompt_id": new_prompt_id, "total": total})
                         continue
                     logger.error("ComfyUI 丢失重提交失败：job=%s index=%s %s", job_id, index, resubmit_reason)
+                    self._record_comfyui_rejection(job_id, checkpoint, resubmit_reason)
+                    self._finish(job_id, "failed", error=f"ComfyUI 重提交结果未知：{resubmit_reason}；请先核对外部任务",
+                                 result={"prompt_ids": submitted, "completed": completed, "errors": errors})
+                    return
                 errors.append({
                     "index": index,
                     "prompt_id": prompt_id,
@@ -1261,7 +1324,7 @@ class JobRegistry:
             progress = 30 + (len(done_indexes) / max(total, 1) * 70)
             self.app.storage.update_job(
                 job_id, progress=round(progress, 1), current_step=f"完成 {len(done_indexes)}/{total}",
-                checkpoint={"submitted": submitted, "completed": completed, "errors": errors, "resubmits": resubmits},
+                checkpoint=checkpoint,
             )
             if len(done_indexes) < total:
                 time.sleep(1.0 if total <= 4 else 3.0)
@@ -1291,7 +1354,7 @@ class JobRegistry:
                 return False, [], ""
             return False, [], f"ERROR:HTTP {exc.code}"
         except Exception:
-            return False, [], ""
+            return False, [], "UNKNOWN:ComfyUI 历史查询失败"
 
     def _comfyui_queue_ids(self, base: str) -> set[str] | None:
         """当前 ComfyUI 队列中 pending/running 的 prompt_id 集合；查询失败返回 None。"""

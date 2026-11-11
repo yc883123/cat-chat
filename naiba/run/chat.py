@@ -25,6 +25,7 @@ from naiba.llm.local_probe import probe_local_context_window  # noqa: F401 (兼�
 from naiba.llm.profiles import resolve_profile_with_override
 from naiba.skills.policy import normalize_skill_policy
 from naiba.core.exceptions import TaskCancelled
+from naiba.core.compaction import summary_error_detail
 from naiba.vision.runtime import VisionBudget
 from naiba.core.attachments import (
     _image_intent,
@@ -794,7 +795,10 @@ class ConversationRunMixin:
             except Exception as exc:  # noqa: BLE001 - 整理失败保留当前内容（fail-open）
                 if cancel_event.is_set():
                     raise TaskCancelled("任务已取消")
-                event({"type": "status", "message": f"自动整理上下文未完成（{exc}），本轮按原样继续"})
+                detail = summary_error_detail(exc, profile)
+                event({"type": "compaction", "action": "failed",
+                       "message": f"自动整理上下文未完成（{detail}），本轮按原样继续",
+                       "reason": type(exc).__name__, "error": detail})
             if compaction_info.get("rebuilt"):
                 frozen_conversation = self.app.storage.get_conversation(conversation_id) or {}
                 run["conversation_messages"] = _frozen_history_for_run(run, snapshot, frozen_conversation)
@@ -993,6 +997,7 @@ class ConversationRunMixin:
                 "conversation_id": conversation_id,
                 "owner_session_id": conversation_id,
                 "depth": 0,
+                "context_estimate_pending": bool(compaction_info.get("rebuilt")),
                 "allowed_tools": list(allowed_tools),
                 "job_registry": getattr(self.app, "jobs", None),
                 "executor": executor,
@@ -1488,7 +1493,6 @@ class ConversationRunMixin:
             return {}
         if run.get("_compaction_attempted"):
             return {}
-        run["_compaction_attempted"] = True
         history = [item for item in messages[1:] if isinstance(item, dict)]
         try:
             result = self._maybe_compact_context(
@@ -1507,10 +1511,11 @@ class ConversationRunMixin:
         except Exception as exc:  # noqa: BLE001 - 整理失败不应丢弃当前轮轨迹
             if cancel_event.is_set():
                 raise TaskCancelled("任务已取消")
+            detail = summary_error_detail(exc, profile)
             event({
                 "type": "compaction", "action": "failed",
-                "message": f"上下文整理没有完成（{type(exc).__name__}），本轮将沿用原上下文继续。",
-                "reason": type(exc).__name__,
+                "message": f"上下文整理没有完成（{detail}），本轮将沿用原上下文继续。",
+                "reason": type(exc).__name__, "error": detail,
             })
             return {}
         if not result.get("rebuilt"):
@@ -1590,8 +1595,12 @@ class ConversationRunMixin:
             return {}
         if mode == compaction_mod.MODE_REMIND:
             return {"hint": True, "used": used, "limit": limit}
+        # 轮首与工具循环共用本轮标记：失败也算一次尝试，不能在本轮再次花费。
+        if run.get("_compaction_attempted"):
+            return {}
         if cancel_event.is_set():
             raise TaskCancelled("任务已取消")
+        run["_compaction_attempted"] = True
         event({"type": "compaction", "action": "started", "message": "正在整理较早的对话，当前轮会继续…"})
         result = compaction_mod.compact_conversation(
             self.app, conversation_id=conversation_id, rows=rows, settings=settings,
@@ -1600,17 +1609,28 @@ class ConversationRunMixin:
             source="auto", limit=limit, used=used, cancel_event=cancel_event,
         )
         if result.get("compacted"):
-            event({
+            payload = {
                 "type": "compaction", "action": "compacted",
                 "region_messages": int(result.get("region_messages") or 0),
                 "freed_est": int(result.get("freed_est") or 0),
                 "used": used, "limit": limit,
-            })
+                "model_key": model_key,
+                "context_limit_source": (
+                    str(profile.get("context_window_source") or "unknown")
+                    if int(profile.get("context_window") or 0)
+                    else ("local_default" if str(profile.get("kind") or "").lower() == "local" else "unknown")
+                ),
+            }
+            # 此处只有持久历史；完整 system/schema 到 Agent 组装完正式请求才可估算。
+            event(payload)
             return {"rebuilt": True}
+        detail = str(result.get("error") or "").strip()
         event({
             "type": "compaction", "action": "failed",
-            "message": "上下文整理没有完成，本轮将沿用原上下文继续。",
+            "message": (f"上下文整理没有完成（{detail}），本轮将沿用原上下文继续。" if detail
+                        else "上下文整理没有完成，本轮将沿用原上下文继续。"),
             "reason": str(result.get("reason") or "unknown"),
+            "error": detail,
             # 每次尝试的输入/输出规模与失败类别：旁路诊断（只进事件流，不进模型请求）。
             "attempts": [
                 item for item in (result.get("attempts") or []) if isinstance(item, dict)

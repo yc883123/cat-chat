@@ -28,6 +28,7 @@ from naiba.comfyui import (
 )
 from naiba.comfyui import stepmeter
 from naiba.comfyui.store import ComfyUIStoreError, now_ms
+from naiba.core.contracts import COMFYUI_SUBMISSIONS_KEY
 from naiba.core.media_types import media_kind_of
 from naiba.storage.media import is_uploads_path
 
@@ -498,7 +499,8 @@ class ComfyUIJobManager:
         # 与 tasks() 返回同一套精简字段：详情轮询会直接替换列表里的行，
         # 两边形状不一致会让卡片标题在「任务」和工作流名之间来回闪。
         row = self._slim(task)
-        row["can_retry"] = str(task.get("status") or "") in {"failed", "cancelled", "interrupted"}
+        row["can_retry"] = (str(task.get("status") or "") in {"failed", "cancelled", "interrupted"}
+                            and not (task.get("checkpoint") or {}).get(COMFYUI_SUBMISSIONS_KEY))
         row["can_cancel"] = str(task.get("status") or "") in COMFYUI_ACTIVE_STATUSES
         return row
 
@@ -538,22 +540,12 @@ class ComfyUIJobManager:
             return existing
         if str(task.get("status") or "") in COMFYUI_ACTIVE_STATUSES:
             raise ComfyUITaskError("任务还在执行，请先取消或等待结束")
-        previous_status = str(task.get("status") or "")
         checkpoint = dict(task.get("checkpoint") or {})
+        if checkpoint.get(COMFYUI_SUBMISSIONS_KEY):
+            raise ComfyUITaskError("上次生成请求是否已受理尚未确认，已保留记录；请先在 ComfyUI 核对，不能直接重试重复生成")
         checkpoint["errors"] = []
-        # 取消即作废旧提交：被取消任务的未完成段不再认旧 prompt_id——ComfyUI
-        # 把用户中断也以 error 落史，收养逻辑会拿旧中断顶账（runner 不收养
-        # error 是另一道防线）。failed/interrupted 保留凭证：服务重启判
-        # interrupted 后某段可能已在远端成功，靠收养恢复产物、不重复出片。
-        if previous_status == "cancelled":
-            done_indexes = {
-                int(item.get("index")) for item in checkpoint.get("completed") or []
-                if isinstance(item, dict) and str(item.get("index", "")).lstrip("-").isdigit()
-            }
-            checkpoint["prompt_ids"] = [
-                pid if index in done_indexes else ""
-                for index, pid in enumerate(checkpoint.get("prompt_ids") or [])
-            ]
+        # 取消不证明远端已经停止。所有旧凭证都保留，由 runner 核对历史与队列；
+        # 只有确认失败或已不在远端的段才重提，成功段只补收集产物。
         shots = int((task.get("input") or {}).get("shots") or 1)
         done = len(checkpoint.get("completed") or [])
         if done >= shots:
@@ -602,6 +594,9 @@ class ComfyUIJobManager:
         for task_id in targets:
             task = self.store.get_task(task_id)
             if task is None:
+                continue
+            if (task.get("checkpoint") or {}).get(COMFYUI_SUBMISSIONS_KEY):
+                failed.append({"id": task_id, "reason": "生成请求是否已受理尚未确认，保留任务记录用于核对"})
                 continue
             if ((task.get("checkpoint") or {}).get("cancellation") or {}).get("state") == "pending_remote":
                 failed.append({"id": task_id, "reason": "远端停止尚未确认，保留任务记录用于对账"})

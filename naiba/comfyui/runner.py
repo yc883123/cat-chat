@@ -22,6 +22,7 @@ from naiba.comfyui import stepmeter
 from naiba.comfyui.params import apply_overrides, media_kind_of_field
 from naiba.comfyui.schema import NodeSchemaProvider, input_is_optional
 from naiba.comfyui.store import now_ms
+from naiba.core.contracts import COMFYUI_SUBMISSIONS_KEY
 
 POLL_INTERVAL_SECONDS = 1.5
 
@@ -66,38 +67,42 @@ class ComfyUIRunner:
         （保留已下载的产物）；排队中的任务直接本地终态化。
         """
         task_id = str(task_id or "").strip()
-        task = self.store.get_task(task_id)
-        if task is None:
-            return False
-        if str(task.get("status") or "") in {"completed", "failed", "cancelled", "interrupted"}:
-            return False
-        cancel_event = None
         with self._registry_lock:
+            task = self.store.get_task(task_id)
+            if task is None or str(task.get("status") or "") in {"completed", "failed", "cancelled", "interrupted"}:
+                return False
             cancel_event = self._cancel_events.get(task_id)
-            if task_id in self._queue:
-                with self._condition:
+            if cancel_event is not None:
+                cancel_event.set()
+            with self._condition:
+                if task_id in self._queue:
                     self._queue.remove(task_id)
                     self._delivering.discard(task_id)
-        # 两步取消：先请求中断正在执行的段，再把未完成的 prompt 从 ComfyUI 队列移除。
+            if cancel_event is None:
+                checkpoint = task.get("checkpoint") or {}
+                shots = int((task.get("input") or {}).get("shots") or 0)
+                counts = self._progress_counts(checkpoint, shots)
+                self._finish_terminal(task_id, "cancelled", "任务已取消", counts)
+        # 全局 interrupt 只能在队列确认当前运行项属于本任务时调用。
         checkpoint = task.get("checkpoint") or {}
         prompt_ids = [str(pid) for pid in (checkpoint.get("prompt_ids") or []) if pid]
         done_ids = {str(item.get("prompt_id") or "") for item in (checkpoint.get("completed") or [])
                     if isinstance(item, dict)}
         pending = [pid for pid in prompt_ids if pid and pid not in done_ids]
         base = self._task_base(task)
-        if cancel_event is not None:
-            cancel_event.set()
         if pending:
-            client.interrupt(base)
-            client.delete_queue_items(base, pending)
-        if cancel_event is not None:
-            cancel_event.set()
-            return True
-        shots = int((task.get("input") or {}).get("shots") or 0)
-        counts = self._progress_counts(checkpoint, shots)
-        detail = f"已取消，完成 {counts['done']}/{shots} 段" if counts["done"] else "任务已取消"
-        self._finish_terminal(task_id, "cancelled", detail, counts)
+            self._cancel_prompts(base, pending)
         return True
+
+    @staticmethod
+    def _cancel_prompts(base: str, prompt_ids: list[str]) -> None:
+        # 删除只命中明确的凭证；查询失败时绝不盲目中断其他用户的运行。
+        client.delete_queue_items(base, prompt_ids)
+        snapshot = client.queue_snapshot(base)
+        targets = set(prompt_ids)
+        if snapshot is not None and snapshot[1] and snapshot[1].issubset(targets):
+            client.interrupt(base)
+
     def shutdown(self, timeout: float = 5.0) -> None:
         with self._condition:
             self._shutdown = True
@@ -147,9 +152,18 @@ class ComfyUIRunner:
         return self._base_url()
 
     def _run_task(self, task_id: str) -> None:
-        task = self.store.get_task(task_id)
-        if not task or task.get("status") != "queued":
-            return
+        # 读取排队态、发布运行态与登记取消信号不能被取消操作穿插。
+        with self._registry_lock:
+            task = self.store.get_task(task_id)
+            if not task or task.get("status") != "queued" or self._shutdown:
+                return
+            cancel_event = threading.Event()
+            self._cancel_events[task_id] = cancel_event
+            try:
+                self.store.update_task(task_id, status="running", started_at=now_ms(), detail="")
+            except Exception:
+                self._cancel_events.pop(task_id, None)
+                raise
         input_data = task.get("input") or {}
         shots = max(1, min(int(input_data.get("shots") or 1), MAX_SHOTS))
         prompt = input_data.get("prompt") if isinstance(input_data.get("prompt"), dict) else {}
@@ -164,9 +178,6 @@ class ComfyUIRunner:
         # 重新进入 _run_task，从快照引用重新读取并按需重新上传。
         media_upload_cache: dict[str, str] = {}
         base = self._task_base(task)
-        cancel_event = threading.Event()
-        with self._registry_lock:
-            self._cancel_events[task_id] = cancel_event
         try:
             # checkpoint 从任务现状续起：新任务是空集；重试任务保留 completed，
             # 由 jobs 层清掉 errors 后把任务放回队列。
@@ -179,10 +190,7 @@ class ComfyUIRunner:
             resubmits: dict[str, int] = dict(checkpoint.get("resubmits") or {})
             checkpoint.update(prompt_ids=prompt_ids, completed=completed,
                               errors=errors, resubmits=resubmits)
-            self.store.update_task(
-                task_id, status="running", started_at=now_ms(), detail="",
-                checkpoint=checkpoint,
-            )
+            self.store.update_task(task_id, checkpoint=checkpoint)
             self.store.append_event(task_id, {
                 "type": "task_started", "message": f"开始生成 {shots} 段", "comfy_url": base,
             })
@@ -194,75 +202,34 @@ class ComfyUIRunner:
                 return
             done_indexes = {int(item.get("index")) for item in completed
                             if str(item.get("index", "")).lstrip("-").isdigit()}
-            # 恢复收养：上次已提交但未确认完成的段，先查历史——已完成的直接收产物，
-            # 不重复提交（P4：已完成工作不重复提交）。
-            for index, prompt_id in enumerate(list(prompt_ids)):
-                if not prompt_id or index in done_indexes:
-                    continue
-                adopted = self._adopt_submitted(
-                    base, task_id, index, prompt_id, completed,
-                )
-                if adopted:
-                    done_indexes.add(index)
-                    checkpoint.update(prompt_ids=prompt_ids, completed=completed,
-                                      errors=errors, resubmits=resubmits)
-                    self.store.update_task(
-                        task_id, checkpoint=checkpoint,
-                        progress=self._progress_counts(checkpoint, shots),
-                    )
+            if checkpoint.get(COMFYUI_SUBMISSIONS_KEY):
+                raise RuntimeError("上次生成请求是否已受理尚未确认，已保留记录；请在 ComfyUI 核对后再处理，未重复生成")
             for index in range(shots):
                 if cancel_event.is_set():
                     break
                 if index in done_indexes:
                     continue
-                workflow = apply_overrides(prompt, overrides, randomize_seeds=True)
-                self._remove_unselected_optional_media(workflow, media_inputs, base, media_skip)
-                media_error = self._apply_media(
-                    base, workflow, media_inputs, media_upload_cache,
-                )
-                if media_error:
-                    message = f"第 {index + 1} 段媒体输入处理失败：{media_error}"
-                    errors.append({"index": index, "error": message})
-                    checkpoint.update(errors=errors)
-                    self.store.update_task(
-                        task_id, checkpoint=checkpoint,
-                        progress=self._progress_counts(checkpoint, shots),
-                        detail=message,
-                    )
-                    self.store.append_event(task_id, {
-                        "type": "shot_failed", "index": index, "error": message,
-                    })
-                    self._fail_task(task_id, message)
-                    return
-                prompt_id, reason = client.submit(base, workflow)
-                if not prompt_id:
-                    message = f"第 {index + 1} 段提交失败：{reason}" if reason \
-                        else f"第 {index + 1} 段提交失败（工作流或节点错误）"
-                    errors.append({"index": index, "error": message})
-                    checkpoint.update(errors=errors)
-                    self.store.update_task(
-                        task_id, checkpoint=checkpoint,
-                        progress=self._progress_counts(checkpoint, shots),
-                        detail=message,
-                    )
-                    self.store.append_event(task_id, {
-                        "type": "shot_failed", "index": index, "error": message,
-                    })
-                    self._fail_task(task_id, message)
-                    return
-                while len(prompt_ids) <= index:
-                    prompt_ids.append("")
-                prompt_ids[index] = prompt_id
-                checkpoint.update(prompt_ids=prompt_ids)
-                self.store.update_task(task_id, checkpoint=checkpoint)
-                self.store.append_event(task_id, {
-                    "type": "shot_submitted", "index": index, "prompt_id": prompt_id,
-                })
+                prompt_id = prompt_ids[index] if index < len(prompt_ids) else ""
+                if not prompt_id or not self._resume_submitted(base, prompt_id):
+                    workflow = apply_overrides(prompt, overrides, randomize_seeds=True)
+                    self._remove_unselected_optional_media(workflow, media_inputs, base, media_skip)
+                    media_error = self._apply_media(base, workflow, media_inputs, media_upload_cache)
+                    if cancel_event.is_set():
+                        break
+                    if media_error:
+                        raise RuntimeError(f"第 {index + 1} 段媒体输入处理失败：{media_error}")
+                    prompt_id, reason = self._submit_shot(base, task_id, index, workflow, checkpoint, cancel_event)
+                    if cancel_event.is_set():
+                        break
+                    if not prompt_id:
+                        raise RuntimeError(f"第 {index + 1} 段提交失败：{reason or '工作流或节点错误'}")
+                    prompt_ids = checkpoint["prompt_ids"]
                 ok, files, fail_reason = self._wait_shot(
                     base, task_id, index, prompt_id, cancel_event, resubmits,
                     checkpoint, prompt, overrides, media_inputs, media_upload_cache,
                     media_skip,
                 )
+                prompt_id = checkpoint["prompt_ids"][index]
                 if cancel_event.is_set():
                     break
                 if not ok:
@@ -293,6 +260,8 @@ class ComfyUIRunner:
             counts = self._progress_counts(checkpoint, shots)
             if cancel_event.is_set():
                 detail = f"已取消，完成 {counts['done']}/{shots} 段" if counts["done"] else "任务已取消"
+                if checkpoint.get(COMFYUI_SUBMISSIONS_KEY):
+                    detail += "；生成请求是否已受理尚未确认，请在 ComfyUI 核对，不能直接重试"
                 self._finish_terminal(task_id, "cancelled", detail, counts, checkpoint)
                 self.store.append_event(task_id, {"type": "error", "message": "任务已取消"})
                 return
@@ -309,7 +278,13 @@ class ComfyUIRunner:
             self.store.append_event(task_id, {"type": "task_done", "status": status})
         except Exception as exc:  # noqa: BLE001 - 兜底终态
             traceback.print_exc()
-            self._fail_task(task_id, str(exc) or "造梦机任务执行失败")
+            if cancel_event.is_set():
+                current = self.store.get_task(task_id) or {}
+                saved = current.get("checkpoint") or {}
+                self._finish_terminal(task_id, "cancelled", str(exc) or "任务已取消",
+                                      self._progress_counts(saved, shots))
+            else:
+                self._fail_task(task_id, str(exc) or "造梦机任务执行失败")
         finally:
             cancel_event.set()
             with self._registry_lock:
@@ -490,44 +465,77 @@ class ComfyUIRunner:
             node["inputs"][field_name] = reference
         return ""
 
-    def _adopt_submitted(
-        self,
-        base: str,
-        task_id: str,
-        index: int,
-        prompt_id: str,
-        completed: list[dict[str, Any]],
-    ) -> bool:
-        """已提交未确认的段：查历史只收养成功产物；查不到/失败/中断一律 False。
-
-        历史 error 不收养（ComfyUI 把用户中断也以 error 落史）：收养成失败会
-        把上一轮的中断顶成真实失败、把段标成已处理跳过重提，任务原地判死。
-        失败段交回正常提交逻辑重跑，真实错误重跑时会当场再报，信息不丢。
-        """
+    @staticmethod
+    def _resume_submitted(base: str, prompt_id: str) -> bool:
+        """True 接回旧执行；只有明确失败或两次历史与队列均无记录才可重提。"""
         try:
             entry = client.history_entry(base, prompt_id)
-        except Exception:  # noqa: BLE001 - 查不到按未完成处理，交给后续提交逻辑
-            return False
-        if entry is None:
-            return False
-        status = client.entry_status(entry)
-        if status in {"error", "failed"}:
-            return False
-        items = client.output_items(entry) if (status in {"success", "completed"}
-                                               or entry.get("outputs")) else []
-        if not items:
-            return False
+            had_history = entry is not None
+            status = client.entry_status(entry) if entry is not None else ""
+            if status in {"success", "completed"}:
+                return True
+            if status in {"error", "failed"}:
+                return False
+            snapshot = client.queue_snapshot(base)
+            if snapshot is None:
+                raise RuntimeError("队列读取失败")
+            if prompt_id in snapshot[0]:
+                return True
+            # 任务可能刚从队列移入历史，再读取一次避免误判丢失。
+            entry = client.history_entry(base, prompt_id)
+            if entry is None:
+                if had_history:
+                    raise RuntimeError("历史记录未确认终态后消失")
+                return False
+            status = client.entry_status(entry)
+            if status in {"success", "completed"}:
+                return True
+            if status in {"error", "failed"}:
+                return False
+            raise RuntimeError("历史尚未报告终态")
+        except Exception as exc:
+            raise RuntimeError(f"无法确认原生成 {prompt_id} 的状态，已保留凭证且未重复提交：{exc}") from exc
+
+    def _submit_shot(self, base: str, task_id: str, index: int, workflow: dict[str, Any],
+                     checkpoint: dict[str, Any], cancel_event: threading.Event) -> tuple[str, str]:
+        # 先持久占位再发请求：响应丢失/进程退出不能被后续重试误当成尚未提交。
+        with self._registry_lock:
+            if cancel_event.is_set():
+                return "", "用户取消"
+            submissions = checkpoint.setdefault(COMFYUI_SUBMISSIONS_KEY, {})
+            submissions[str(index)] = "submitting"
+            self.store.update_task(task_id, checkpoint=checkpoint)
+        if cancel_event.is_set():
+            submissions.pop(str(index), None)
+            self.store.update_task(task_id, checkpoint=checkpoint)
+            return "", "用户取消"
         try:
-            files = self._save_outputs(task_id, index, base, items)
-        except Exception as exc:  # noqa: BLE001 - 收养时落盘失败按未完成处理
-            traceback.print_exc()
-            return False
-        completed.append({"index": index, "prompt_id": prompt_id, "files": files,
-                          "recovered": True})
-        self.store.append_event(task_id, {
-            "type": "shot_done", "index": index, "files": files, "recovered": True,
-        })
-        return True
+            prompt_id, reason = client.submit(base, workflow)
+        except Exception as exc:
+            prompt_id, reason = "", str(exc) or type(exc).__name__
+        if prompt_id:
+            prompt_ids = checkpoint.setdefault("prompt_ids", [])
+            while len(prompt_ids) <= index:
+                prompt_ids.append("")
+            prompt_ids[index] = prompt_id
+            submissions.pop(str(index), None)
+        elif getattr(reason, "definite", False):
+            submissions.pop(str(index), None)
+        else:
+            submissions[str(index)] = "unknown"
+            reason = f"{reason or '未收到提交凭证'}；生成请求是否已受理尚未确认，请先在 ComfyUI 核对，不能直接重试"
+        try:
+            self.store.update_task(task_id, checkpoint=checkpoint)
+        except Exception as exc:
+            # 占位还在磁盘，后续重试会拒绝；把已知 ID 写进错误，尽力停止该请求。
+            if prompt_id:
+                self._cancel_prompts(base, [prompt_id])
+            raise RuntimeError(f"保存生成凭证失败（prompt_id={prompt_id or '未知'}）；已保留提交占位，不会自动重提：{exc}") from exc
+        if prompt_id:
+            self.store.append_event(task_id, {"type": "shot_submitted", "index": index, "prompt_id": prompt_id})
+            if cancel_event.is_set():
+                self._cancel_prompts(base, [prompt_id])
+        return prompt_id, str(reason)
 
     def _wait_shot(
         self,
@@ -553,8 +561,8 @@ class ComfyUIRunner:
                 return False, [], f"第 {index + 1} 段轮询超时（单段上限 {SHOT_TIMEOUT_SECONDS // 60} 分钟）"
             try:
                 entry = client.history_entry(base, prompt_id)
-            except Exception:  # noqa: BLE001 - 网络抖动按「暂时查不到」继续轮询
-                entry = None
+            except Exception as exc:
+                return False, [], f"无法读取原生成 {prompt_id} 的历史，已保留凭证且未重复提交：{exc}"
             if entry is not None:
                 status = client.entry_status(entry)
                 if status in {"error", "failed"}:
@@ -581,7 +589,12 @@ class ComfyUIRunner:
                     pass
                 cancel_event.wait(POLL_INTERVAL_SECONDS)
                 continue
-            # 历史无 + 队列无：ComfyUI 重启或清队列导致丢失。有界重提交一次。
+            # 查询队列期间可能刚结束；再核对历史后才允许有界重提。
+            try:
+                if self._resume_submitted(base, prompt_id):
+                    continue
+            except RuntimeError as exc:
+                return False, [], str(exc)
             used = int(resubmits.get(str(index), 0) or 0)
             if used < MAX_RESUBMIT:
                 workflow = apply_overrides(prompt, overrides, randomize_seeds=True)
@@ -589,16 +602,16 @@ class ComfyUIRunner:
                 media_error = self._apply_media(
                     base, workflow, media_inputs, media_upload_cache,
                 )
+                if cancel_event.is_set():
+                    return False, [], "用户取消"
                 if media_error:
                     return False, [], f"第 {index + 1} 段媒体输入处理失败：{media_error}"
-                new_prompt_id, _reason = client.submit(base, workflow)
+                new_prompt_id, reason = self._submit_shot(base, task_id, index, workflow, checkpoint, cancel_event)
+                if cancel_event.is_set():
+                    return False, [], "用户取消"
                 if new_prompt_id:
                     resubmits[str(index)] = used + 1
-                    prompt_ids = list(checkpoint.get("prompt_ids") or [])
-                    while len(prompt_ids) <= index:
-                        prompt_ids.append("")
-                    prompt_ids[index] = new_prompt_id
-                    checkpoint.update(prompt_ids=prompt_ids)
+                    checkpoint["resubmits"] = resubmits
                     self.store.update_task(task_id, checkpoint=checkpoint)
                     self.store.append_event(task_id, {
                         "type": "shot_lost", "index": index,
@@ -606,6 +619,7 @@ class ComfyUIRunner:
                     })
                     prompt_id = new_prompt_id
                     continue
+                return False, [], str(reason)
             return False, [], f"第 {index + 1} 段已被 ComfyUI 丢弃（服务重启或队列被清空）"
 
     def _save_outputs(self, task_id: str, index: int, base: str,

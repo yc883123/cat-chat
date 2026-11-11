@@ -112,6 +112,7 @@ async function checkViewport(browser, vp) {
     await checkNoScriptError();
 
     // 首次直接点击快捷入口，不能只有切档、没有初始化填单。
+    await page.locator('#comfyuiRunSection summary[aria-label="更多生成操作"]').click();
     await page.locator('#comfyuiOpenBatch').click();
     await page.locator('#comfyuiBatchBody [data-batch-select="workflow"]').waitFor({ state: 'visible' });
     assert.equal(await paneButton('batch').getAttribute('aria-pressed'), 'true');
@@ -129,16 +130,39 @@ async function checkViewport(browser, vp) {
     assert.equal(await page.locator('.comfyui-results-col').isVisible(), true);
     assert.equal(await page.locator('#comfyuiBatch').isVisible(), false);
     assert.equal(await page.locator('#comfyuiOutputGrid video').count(), 24);
-    assert.equal(await page.locator('#comfyuiOutputGrid video').evaluateAll(nodes => nodes.every(node => node.preload === 'none')), true);
-    await page.evaluate(() => { window.__comfyuiOldVideo = document.querySelector('#comfyuiOutputGrid video'); });
+    // 可见卡片会读取元数据作为封面；未进入预览范围的卡片仍不得发出视频请求。
+    // 宽屏可能容得下全部 24 张，按实际滚动区域判断，不能假设所有视口都存在屏外卡片。
+    const checkLazyVideos = async () => {
+      await page.waitForFunction(() => Array.from(document.querySelectorAll('#comfyuiOutputGrid video')).some(video => video.preload === 'metadata'));
+      const videos = await page.locator('#comfyuiOutputGrid video').evaluateAll(nodes => {
+        const grid = document.querySelector('#comfyuiOutputGrid').getBoundingClientRect();
+        return nodes.map(video => ({
+          src: video.src, preload: video.preload,
+          farBelow: video.getBoundingClientRect().top > Math.min(grid.bottom, innerHeight) + 240,
+        }));
+      });
+      assert.ok(videos.every(video => ['none', 'metadata'].includes(video.preload)), '视频预览只按需读取元数据');
+      const farVideos = videos.filter(video => video.farBelow);
+      if (vp.width < 560) assert.ok(farVideos.length > 0, '手机夹具必须包含未滚动到的远处视频');
+      assert.ok(farVideos.every(video => video.preload === 'none'), '远离视区的视频不得提前预载');
+      const requested = new Set(mediaRequests);
+      assert.ok(videos.filter(video => video.preload === 'none').every(video => !requested.has(video.src)), '屏外未预载视频不得发起媒体请求');
+    };
+    await checkLazyVideos();
+    await page.evaluate(() => { window.__comfyuiOldVideos = Array.from(document.querySelectorAll('#comfyuiOutputGrid video')); });
     outputTasks.unshift({
       id: 'cf-video-smoke-new', workflow_name: '新增视频结果', status: 'completed',
       result: { outputs: ['new.mp4'] }, progress: { done: 1, total: 1 },
     });
     await page.waitForFunction(() => document.querySelector('#comfyuiOutputGrid figure')?.dataset.outputKey.startsWith('cf-video-smoke-new'), null, { timeout: 12000 });
-    assert.equal(await page.evaluate(() => document.querySelectorAll('#comfyuiOutputGrid video')[1] === window.__comfyuiOldVideo), true, '插入新结果必须保留旧视频 DOM');
+    assert.equal(await page.evaluate(() => Array.from(document.querySelectorAll('#comfyuiOutputGrid video')).slice(1).every((video, index) => video === window.__comfyuiOldVideos[index])), true, '插入新结果必须保留全部仍在展示的旧视频 DOM');
     assert.equal(await page.locator('#comfyuiOutputGrid video').count(), 24, '结果仍遵守24个展示上限');
-    assert.deepEqual(mediaRequests, [], '未点击播放时不得自动请求24段视频');
+    await checkLazyVideos();
+    const lastVideo = page.locator('#comfyuiOutputGrid video').last();
+    if (await lastVideo.getAttribute('preload') === 'none') {
+      await lastVideo.scrollIntoViewIfNeeded();
+      await page.waitForFunction(() => Array.from(document.querySelectorAll('#comfyuiOutputGrid video')).at(-1)?.preload === 'metadata');
+    }
     await checkNoScriptError();
     await paneButton('run').click();
     assert.equal(await page.locator('.comfyui-run-col').isVisible(), true);
@@ -154,6 +178,8 @@ async function checkViewport(browser, vp) {
     await page.locator('[data-batch-select="port-node"]').first().selectOption('1|image');
     await page.locator('[data-batch-port-check]').first().check();
     await page.locator('[data-batch-port-check]').nth(1).check();
+    const mediaNames = () => page.locator('.cbm-mname').evaluateAll(nodes => nodes.map(node =>
+      Array.from(node.childNodes).filter(child => child.nodeType === Node.TEXT_NODE).map(child => child.textContent).join('').trim()));
     const uploadTile = async ordinal => {
       const transfer = await page.evaluateHandle(() => {
         const data = new DataTransfer();
@@ -169,12 +195,12 @@ async function checkViewport(browser, vp) {
     await uploadTile(0);
     await uploadTile(1);
     await page.locator('[data-batch-port-check]').first().uncheck();
-    assert.deepEqual(await page.locator('.cbm-mname').allTextContents(), ['ui-2.png✕'], '禁用第一个口只能移除该口文件');
+    assert.deepEqual(await mediaNames(), ['ui-2.png'], '禁用第一个口只能移除该口文件');
     await uploadTile(0);
-    assert.deepEqual(await page.locator('.cbm-mname').allTextContents(), ['ui-3.png✕'], '前口禁用后仍可上传到当前第一个已选口');
+    assert.deepEqual(await mediaNames(), ['ui-3.png'], '前口禁用后仍可上传到当前第一个已选口');
     await page.locator('[data-batch-action="port-up"]').nth(1).click();
     assert.equal(await page.locator('[data-batch-select="port-node"]').first().inputValue(), '2|image');
-    assert.deepEqual(await page.locator('.cbm-mname').allTextContents(), ['ui-3.png✕'], '排序后文件必须跟随原素材口');
+    assert.deepEqual(await mediaNames(), ['ui-3.png'], '排序后文件必须跟随原素材口');
     await page.locator('[data-batch-item="prompt"]').first().fill('用于验证提交与返回轮询的提示词');
     await page.locator('[data-batch-action="submit"]').click();
     await page.locator('.cbm-card .cbm-badge.run').waitFor({ state: 'visible' });
@@ -207,7 +233,7 @@ async function checkViewport(browser, vp) {
     await page.locator('.cbm-card .cbm-badge.done').waitFor({ state: 'visible', timeout: 5000 });
     assert.ok(batchDetailRequests > beforeReturnRequests, '返回运行批次必须立即重新读取服务端状态');
     await checkNoScriptError();
-    console.log(`通过 ${vp.width}×${vp.height}：导航、首次进入批量、下游标签、提交及返回轮询、24段视频零预载及轮询保留DOM`);
+    console.log(`通过 ${vp.width}×${vp.height}：导航、首次进入批量、下游标签、提交及返回轮询、视频按视区懒载及轮询保留DOM`);
   } catch (error) {
     console.error('批量区状态：', await page.locator('#comfyuiBatchBody').innerText(), errors);
     await page.screenshot({ path: path.join(__dirname, `comfyui_navigation_failed_${vp.width}.png`) });

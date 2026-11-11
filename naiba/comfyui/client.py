@@ -185,7 +185,7 @@ def queue_snapshot(base: str) -> tuple[set[str], set[str]] | None:
     ids: set[str] = set()
     running: set[str] = set()
     for key in ("queue_running", "queue_pending"):
-        rows = data.get(key) or []
+        rows = data.get(key)
         if not isinstance(rows, list):
             return None
         for item in rows:
@@ -194,6 +194,8 @@ def queue_snapshot(base: str) -> tuple[set[str], set[str]] | None:
                 ids.add(str(item[1]))
                 if key == "queue_running":
                     running.add(str(item[1]))
+            else:
+                return None
     return ids, running
 
 
@@ -210,8 +212,12 @@ def history_entry(base: str, prompt_id: str) -> dict[str, Any] | None:
     """
     with _DIRECT_OPENER.open(f"{normalize_base_url(base)}/history/{prompt_id}", timeout=30) as resp:
         history = json.loads(resp.read(200000).decode("utf-8", errors="replace"))
-    entry = history.get(prompt_id) if isinstance(history, dict) else None
-    return entry if isinstance(entry, dict) else None
+    if not isinstance(history, dict):
+        raise OSError("ComfyUI 历史响应格式无效")
+    entry = history.get(prompt_id)
+    if entry is not None and not isinstance(entry, dict):
+        raise OSError("ComfyUI 历史条目格式无效")
+    return entry
 
 
 def entry_status(entry: dict[str, Any]) -> str:

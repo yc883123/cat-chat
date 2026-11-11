@@ -258,6 +258,8 @@ async function mcpPayload() {
   // ── ⑦ 顶栏 MCP 圆点落到新分页 ────────────────────────────────────────────
   await page.unroute('**/api/mcp');
   await closeSettings();
+  // 共用隔离服务可能记住工作台视图；聊天顶栏入口从「对话」页开始验收。
+  await page.click('#openChatMode');
   await page.click('#mcpStatus');
   await page.waitForSelector('#settingsDialog[open]', { timeout: 10000 });
   await sleep(500);

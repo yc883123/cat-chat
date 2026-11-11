@@ -234,7 +234,8 @@ class SuperAgentService:
             raise RuntimeError("任务正在运行或停止中；请先取消再删除")
         if thread.status not in self._ARCHIVABLE_STATUSES:
             raise RuntimeError(f"当前状态 {thread.status} 不能删除")
-        result = self.store.update_thread(thread_id, owner_id=owner_id, status="archived", expected_version=expected_version)
+        result = self.store.update_thread(thread_id, owner_id=owner_id, status="archived",
+                                         expected_version=thread.version if expected_version is None else expected_version)
         self.emit_event(owner_id, thread_id, "task_archived",
                         payload={"request_id": request_id, "previous_status": thread.status},
                         idempotency_key=f"archive:{request_id}")

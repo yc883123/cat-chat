@@ -1138,7 +1138,6 @@ class SkillAgent:
         context_extra_tokens = 0
         context_watermark = trace_start
         context_history_end = trace_start
-        compacted_trace_prefix: list[dict[str, Any]] = []
         # 轮首闸门算出的 limit/budget 与这里同源（同一 profile/options/system），直接复用。
         context_limit = limit
         context_budget = budget
@@ -1228,7 +1227,7 @@ class SkillAgent:
             # 把本轮已累积的模型消息（工具调用/结果/推理）写入 trace，供“已中止”消息携带，
             # 让中止后的 AI 也能精确重放这轮轨迹。
             if isinstance(run_context, dict):
-                run_context["trace_messages"] = [*compacted_trace_prefix, *messages[trace_start:]]
+                run_context["trace_messages"] = messages[trace_start:]
             raise TaskCancelled("任务已取消")
 
         while True:
@@ -1246,7 +1245,7 @@ class SkillAgent:
                 logger.warning("Agent 步数达到上限 %s，已停止本轮", step_limit)
                 event({"type": "run_failed", "error": message})
                 if isinstance(run_context, dict):
-                    run_context["trace_messages"] = [*compacted_trace_prefix, *messages[trace_start:]]
+                    run_context["trace_messages"] = messages[trace_start:]
                 return message, runs, reasonings, self._summarize_usage(usages)
             # 循环内上下文复查：轮首闸门只看了一眼「历史 + 本轮提问」，循环里的工具结果
             # 还在不断加长请求体。越界就**优雅收尾**而不是发出注定失败的请求——与轮首
@@ -1262,8 +1261,8 @@ class SkillAgent:
                     messages, trace_start, context_limit, context_budget, context_used,
                 )
                 if isinstance(compacted, dict) and compacted.get("history") is not None:
+                    # 压缩只替换已落库的历史；本轮轨迹仍完整留在尾部，收尾直接切片保存一次。
                     in_flight = messages[trace_start:]
-                    compacted_trace_prefix.extend(in_flight)
                     messages[:] = [messages[0], *compacted["history"], *in_flight]
                     context_history_end = 1 + len(compacted["history"])
                     trace_start = context_history_end
@@ -1281,6 +1280,8 @@ class SkillAgent:
                     context_limit = int(compacted.get("limit") or context_limit)
                     context_budget = int(compacted.get("budget") or context_budget)
                     context_used = context_base_tokens + context_extra_tokens
+                    if isinstance(run_context, dict):
+                        run_context["context_estimate_pending"] = True
             if context_used > context_budget:
                 event({
                     "type": "context_full",
@@ -1295,7 +1296,7 @@ class SkillAgent:
                 )
                 content = "\n\n".join([*continued_parts, _CONTEXT_LOOP_NOTICE]).strip()
                 if isinstance(run_context, dict):
-                    run_context["trace_messages"] = [*compacted_trace_prefix, *messages[trace_start:]]
+                    run_context["trace_messages"] = messages[trace_start:]
                 return content, runs, reasonings, self._summarize_usage(usages)
             step += 1
             # 每步开头先把已「引导」的插话取进本轮 messages（旧实现挂载位，语义不变）：
@@ -1305,6 +1306,21 @@ class SkillAgent:
             try:
                 if _cache_debug_enabled():
                     _debug_message_digest(messages, f"step-{step}-request", event)
+                if isinstance(run_context, dict) and run_context.get("context_estimate_pending"):
+                    # 仅整理之后推送一次；此时 system、会话化工具 schema、尾部技能/插话
+                    # 与本轮未落库轨迹都已进入真实请求，不能用纯历史 token 冒充整份占用。
+                    request_tokens = self._request_fixed_tokens(options, system) + sum(
+                        self._replay_footprint_tokens(item)
+                        for item in messages[1:]
+                        if isinstance(item, dict) and item.get("role") in {"user", "assistant", "tool"}
+                    )
+                    run_context["context_estimate_pending"] = False
+                    event({
+                        "type": "compaction", "action": "estimated",
+                        "context_tokens": request_tokens, "limit": context_limit,
+                        "model_key": str(run_context.get("model_key") or ""),
+                        "context_limit_source": str(run_context.get("context_limit_source") or "unknown"),
+                    })
                 request_t0 = time.perf_counter()
                 raw = self.model_complete(profile, messages, options, event)
                 request_ms = round((time.perf_counter() - request_t0) * 1000, 1)
@@ -1399,7 +1415,7 @@ class SkillAgent:
                         "attempts": parse_error_count,
                     }
                     messages.append(assistant_message(truncated_answer))
-                    run_context["trace_messages"] = [*compacted_trace_prefix, *messages[trace_start:]]
+                    run_context["trace_messages"] = messages[trace_start:]
                 return (
                     truncated_answer,
 
@@ -1478,7 +1494,7 @@ class SkillAgent:
                 if isinstance(run_context, dict):
                     run_context["truncation"] = dict(truncation_state)
                     messages.append(assistant_message(content))
-                    run_context["trace_messages"] = [*compacted_trace_prefix, *messages[trace_start:]]
+                    run_context["trace_messages"] = messages[trace_start:]
                     if _cache_debug_enabled():
                         _debug_message_digest(messages[trace_start:], "trace-persist", event)
                     logger.info(
@@ -1569,7 +1585,6 @@ class SkillAgent:
                     return self._finish_with_unexecuted_fence(
                         fence_marker, raw, event, runs, reasonings, usages,
                         run_context, messages, trace_start, assistant_message,
-                        compacted_trace_prefix,
                     )
                 # 原始 run（tool/arguments/result 原文/success/reason）只供宿主收尾
                 # （附件提取、file_changes、step 图片注入）；模型与前端均以
@@ -1706,7 +1721,7 @@ class SkillAgent:
                     event({"type": "reasoning", "content": reasoning})
                 messages.append(assistant_message(content))
                 if isinstance(run_context, dict):
-                    run_context["trace_messages"] = [*compacted_trace_prefix, *messages[trace_start:]]
+                    run_context["trace_messages"] = messages[trace_start:]
                 if _cache_debug_enabled():
                     _debug_message_digest(messages[trace_start:], "trace-persist-reset", event)
                 logger.info("[context_reset] 本轮收尾，交接文档=%s", (reset_info or {}).get("handoff_path"))
@@ -1921,7 +1936,6 @@ class SkillAgent:
         messages: list[dict[str, Any]],
         trace_start: int,
         build_message: Callable[..., dict[str, Any]],
-        compacted_trace_prefix: list[dict[str, Any]],
     ) -> tuple[str, list[dict[str, Any]], list[str], dict[str, Any]]:
         """围栏动作未执行时的收尾：以原文为正文，附加一行「未执行」说明。
 
@@ -1951,7 +1965,7 @@ class SkillAgent:
                 "artifact_refs": [],
             }
             messages.append(build_message(answer))
-            run_context["trace_messages"] = [*compacted_trace_prefix, *messages[trace_start:]]
+            run_context["trace_messages"] = messages[trace_start:]
         return answer, runs, reasonings, self._summarize_usage(usages)
 
 
@@ -2029,13 +2043,15 @@ class SkillAgent:
         output_reserve = configured_output or min(8192, max(1024, limit // 8))
         # 固定成本 = 系统提示 + 原生工具 schema。工具 schema 与系统提示一样每轮原样重发
         # （20+ 个工具可达数万 token），过去完全没进预算——这是闸门系统性低估的主因之一。
-        fixed_tokens = (
-            cls._estimate_content_tokens(system_prompt)
-            + cls._estimate_serialized_tokens(options.get("tools"))
-            + 512
-        )
+        fixed_tokens = cls._request_fixed_tokens(options, system_prompt)
         history_budget = max(256, limit - output_reserve - fixed_tokens)
         return limit, history_budget
+
+    @classmethod
+    def _request_fixed_tokens(cls, options: dict[str, Any], system_prompt: str) -> int:
+        """Shared input overhead for the budget and post-compaction display; excludes output reserve."""
+        return (cls._estimate_content_tokens(system_prompt)
+                + cls._estimate_serialized_tokens(options.get("tools")) + 512)
 
     @classmethod
     def _estimate_serialized_tokens(cls, value: Any) -> int:

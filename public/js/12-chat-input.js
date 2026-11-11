@@ -1158,14 +1158,33 @@ function handleCompactionEvent(event, { setActivity, row }) {
     setActivity(event.message || '正在整理较早的对话，当前轮会继续…');
     return false;
   }
-  if (action === 'compacted' || action === 'failed') {
-    clearCompactionIndicator(row);
+  if (action === 'compacted' || action === 'failed' || action === 'estimated') {
+    if (action !== 'estimated') clearCompactionIndicator(row);
     if (action === 'failed') {
       const message = event.message || '上下文整理没有完成，本轮将沿用原上下文继续。';
       setActivity(message);
       toast(message);
       return false;
     }
+    const contextTokens = Number(event.context_tokens);
+    if (event.context_tokens !== undefined && Number.isFinite(contextTokens) && contextTokens >= 0) {
+      // 整理已改变下一次请求的上下文；保留真实计费统计，只更新这一份估算占用。
+      const previous = state.contextUsage || {};
+      setContextUsage({
+        ...previous,
+        context_tokens: contextTokens,
+        context_limit: Number(event.limit || previous.context_limit || 0),
+        context_limit_source: String(event.context_limit_source || previous.context_limit_source || 'unknown'),
+        model_key: String(event.model_key || previous.model_key || ''),
+        context_estimated: true,
+        context_pending: false,
+      });
+    } else if (action === 'compacted') {
+      // 请求尚未组装完成：清掉失效的占用，保留真实计费，等完整估算或真实 usage。
+      setContextUsage({ ...(state.contextUsage || {}), context_tokens: null,
+        context_estimated: false, context_pending: true });
+    }
+    if (action === 'estimated') return false;
     setActivity('上下文已整理，正在继续本轮…');
     const region = Number(event.region_messages || 0);
     toast(region

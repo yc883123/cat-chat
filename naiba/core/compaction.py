@@ -29,9 +29,11 @@ import re
 import time
 from typing import Any
 
+from naiba.core.contracts import CompactionResult
 from naiba.core.exceptions import TaskCancelled
 from naiba.core.history import build_model_history, local_brain
 from naiba.core.messages import MetadataKeys
+from naiba.core.redaction import redact_execution_text
 
 MODE_AUTO = "auto"
 MODE_REMIND = "remind"
@@ -381,10 +383,22 @@ def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
     for message in messages:
         if not isinstance(message, dict):
             continue
-        total += estimate_text_tokens(message.get("content"))
+        content = message.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") in {"image", "image_url", "input_image"}:
+                    total += IMAGE_ESTIMATE_TOKENS
+                else:
+                    total += estimate_text_tokens(part.get("text"))
+        else:
+            total += estimate_text_tokens(content)
+        total += estimate_text_tokens(message.get("reasoning_content"))
         for call in message.get("tool_calls") or []:
             if isinstance(call, dict) and isinstance(call.get("function"), dict):
                 total += estimate_text_tokens(call["function"].get("arguments"))
+                total += estimate_text_tokens(call["function"].get("name"))
     return total
 
 
@@ -427,7 +441,7 @@ def _failure_category(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-def shrink_boundary(rows: list[dict[str, Any]], end: int) -> int:
+def shrink_boundary(rows: list[dict[str, Any]], end: int, *, minimum_end: int = 0) -> int:
     """把被整理区间的终点向前挪到「中点附近某个完整轮次」的末尾，返回新终点下标。
 
     总结请求报输入超窗口时的恢复手段：新区间终点**之前的**消息交给模型总结，
@@ -442,9 +456,50 @@ def shrink_boundary(rows: list[dict[str, Any]], end: int) -> int:
     candidates = [index - 1 for index in user_indices if index > 0]
     target = end - max(MIN_REGION_MESSAGES, (end + 1) // 2)
     for candidate in sorted(candidates, key=lambda index: abs(index - target)):
-        if candidate < end and candidate + 1 >= MIN_REGION_MESSAGES:
+        if minimum_end <= candidate < end and candidate + 1 >= MIN_REGION_MESSAGES:
             return candidate
     return -1
+
+
+def _minimum_marker_boundary(rows: list[dict[str, Any]]) -> int:
+    """A new marker must replace/follow the latest reset that wins replay."""
+    boundary = 0
+    for index, row in enumerate(rows):
+        metadata = row.get("metadata") or {}
+        if metadata.get(MetadataKeys.SESSION_START):
+            boundary = index + 1  # The divider itself ignores compaction metadata.
+            continue
+        marker = metadata.get(MetadataKeys.COMPACTION)
+        if isinstance(marker, dict) and str(marker.get("summary") or "").strip():
+            boundary = index
+    return boundary
+
+
+def summary_error_detail(exc: BaseException, profile: dict[str, Any]) -> str:
+    """Keep the provider's useful reason without exposing request credentials."""
+    text = str(exc)
+    def mask_values(value: Any) -> None:
+        nonlocal text
+        if not isinstance(value, dict):
+            return
+        for key, item in value.items():
+            if re.search(r"(?i)(api.?key|token|secret|password|authorization)", str(key)) and isinstance(item, str) and item:
+                text = text.replace(item, "[已隐藏]")
+            elif isinstance(item, dict):
+                mask_values(item)
+    mask_values(profile)
+    return redact_execution_text(text).strip()[:1200] or type(exc).__name__
+
+
+def _reset_summary_diagnostics(app: Any) -> None:
+    # ModelRuntime exposes these as thread-local properties. A failed complete()
+    # does not publish new values, so it must not inherit the prior normal reply.
+    models = getattr(app, "models", None)
+    for name, empty in (("last_usage", {}), ("last_finish_reason", "")):
+        try:
+            setattr(models, name, empty)
+        except (AttributeError, TypeError):
+            pass
 
 
 def build_region_history(
@@ -518,7 +573,7 @@ def compact_conversation(
     used: int = 0,
     cancel_event: Any = None,
     force: bool = False,
-) -> dict[str, Any]:
+) -> CompactionResult:
     """整理一次：隐藏总结请求 → 校验 → 写标记。
 
     返回 ``{compacted, reason, region_messages, freed_est, summary, attempts}``。
@@ -531,13 +586,16 @@ def compact_conversation(
     - 每次尝试的输入/输出规模与失败类别记进 ``attempts``（旁路诊断，不进模型请求）。
     """
     boundary = retain_boundary(rows, int(settings.get("retain_turns") or 3))
-    if boundary < 0:
+    minimum_boundary = _minimum_marker_boundary(rows)
+    if boundary < minimum_boundary:
         return {"compacted": False, "reason": "region_too_small"}
     region_rows = rows[: boundary + 1]
     if len(region_rows) < MIN_REGION_MESSAGES:
         return {"compacted": False, "reason": "region_too_small"}
-    if not force and estimate_rows_tokens(region_rows) < MIN_REGION_TOKENS:
-        return {"compacted": False, "reason": "region_too_small"}
+    history_before = build_region_history(
+        app, rows, profile=profile, pdf_tools=pdf_tools, video_tools=video_tools,
+    )
+    context_tokens_before = estimate_messages_tokens(history_before)
     # 输出预算**独立**于正常回复：摘要请求不挂工具、不流式，max_tokens 只来自
     # auto_compaction 设置（summary_max_tokens，经 effective_summary_budget 抬到有效下限），
     # 不继承本轮对话的输出上限。
@@ -558,34 +616,48 @@ def compact_conversation(
     while True:
         if cancelled():
             raise TaskCancelled("任务已取消")
-        current_tokens = estimate_rows_tokens(current_rows)
         region_history = build_region_history(
             app, current_rows, profile=profile, pdf_tools=pdf_tools, video_tools=video_tools,
         )
         if not region_history:
             return {"compacted": False, "reason": "region_empty", "attempts": attempts}
+        current_tokens = estimate_messages_tokens(region_history)
+        if not force and not attempts and current_tokens < MIN_REGION_TOKENS:
+            return {"compacted": False, "reason": "region_too_small", "attempts": attempts}
         messages = build_summary_messages(region_history)
         input_tokens = estimate_messages_tokens(messages)
+        _reset_summary_diagnostics(app)
         try:
             raw = app.models.complete(profile, messages, options)
         except Exception as exc:  # noqa: BLE001 - 总结失败不阻断本轮对话
             if _is_cancellation(exc, cancel_event):
                 raise TaskCancelled("任务已取消") from exc
             category = _failure_category(exc)
+            detail = summary_error_detail(exc, profile)
             attempts.append({
                 "region_messages": len(current_rows),
                 "input_tokens": input_tokens,
                 "output_tokens": _last_output_tokens(app),
                 "reason": category,
+                "error": detail,
             })
             if category == "context_overflow" and len(attempts) < MAX_SUMMARY_ATTEMPTS:
-                new_end = shrink_boundary(rows, len(current_rows) - 1)
-                if new_end >= 0:
-                    current_rows = rows[: new_end + 1]
-                    continue  # 输入确实变小了，允许这一次有界恢复
+                new_end = shrink_boundary(rows, len(current_rows) - 1, minimum_end=minimum_boundary)
+                while new_end >= minimum_boundary:
+                    next_rows = rows[: new_end + 1]
+                    next_history = build_region_history(
+                        app, next_rows, profile=profile, pdf_tools=pdf_tools, video_tools=video_tools,
+                    )
+                    if next_history and estimate_messages_tokens(build_summary_messages(next_history)) < input_tokens:
+                        current_rows = next_rows
+                        break
+                    new_end = shrink_boundary(rows, new_end, minimum_end=minimum_boundary)
+                if new_end >= minimum_boundary:
+                    continue
             return {
                 "compacted": False,
                 "reason": f"summary_failed:{type(exc).__name__}",
+                "error": detail,
                 "attempts": attempts,
             }
         # 撞输出上限：模型明确报 finish_reason=length 时，正文一定不完整——不管它
@@ -609,8 +681,21 @@ def compact_conversation(
             })
             # 校验失败不重试：同一输入、同一提示重发不会得到不同结果。
             return {"compacted": False, "reason": reason, "attempts": attempts}
-        summary_tokens = estimate_text_tokens(summary)
-        freed_est = current_tokens - summary_tokens
+        marker_index = len(current_rows) - 1
+        marker_row_id = str(current_rows[-1].get("id") or "")
+        if not marker_row_id:
+            return {"compacted": False, "reason": "missing_marker_row", "attempts": attempts}
+        candidate_rows = list(rows)
+        candidate_rows[marker_index] = {
+            **rows[marker_index],
+            "metadata": {**(rows[marker_index].get("metadata") or {}),
+                         MetadataKeys.COMPACTION: {"summary": summary}},
+        }
+        history_after = build_region_history(
+            app, candidate_rows, profile=profile, pdf_tools=pdf_tools, video_tools=video_tools,
+        )
+        context_tokens_after = estimate_messages_tokens(history_after)
+        freed_est = context_tokens_before - context_tokens_after
         if freed_est <= 0:
             # 摘要没比原文短：写了也没释放空间，还白白让前缀失效。
             attempts.append({
@@ -620,14 +705,13 @@ def compact_conversation(
                 "reason": "freed_too_small",
             })
             return {"compacted": False, "reason": "freed_too_small", "attempts": attempts}
-        marker_row_id = str(current_rows[-1].get("id") or "")
-        if not marker_row_id:
-            return {"compacted": False, "reason": "missing_marker_row", "attempts": attempts}
         payload = marker_payload(
             summary, source=source, model_key=model_key, model_name=model_name,
             region_messages=len(current_rows), region_tokens=current_tokens,
             freed_est=freed_est, limit=limit, used=used,
         )
+        if cancelled():
+            raise TaskCancelled("任务已取消")
         try:
             if not app.storage.merge_message_metadata(
                 conversation_id, marker_row_id, {MetadataKeys.COMPACTION: payload},
@@ -635,8 +719,9 @@ def compact_conversation(
                 return {
                     "compacted": False, "reason": "marker_write_failed", "attempts": attempts,
                 }
-        except Exception:  # noqa: BLE001 - 存储异常按整理失败处理，不动对话
-            return {"compacted": False, "reason": "marker_write_failed", "attempts": attempts}
+        except Exception as exc:  # noqa: BLE001 - 存储异常按整理失败处理，不动对话
+            return {"compacted": False, "reason": "marker_write_failed", "attempts": attempts,
+                    "error": summary_error_detail(exc, profile)}
         attempts.append({
             "region_messages": len(current_rows),
             "input_tokens": input_tokens,
@@ -647,6 +732,8 @@ def compact_conversation(
             "compacted": True,
             "region_messages": len(current_rows),
             "freed_est": freed_est,
+            "context_tokens_before": context_tokens_before,
+            "context_tokens_after": context_tokens_after,
             "summary": summary,
             "marker_message_id": marker_row_id,
             "attempts": attempts,

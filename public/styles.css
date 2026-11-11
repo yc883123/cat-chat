@@ -1877,12 +1877,14 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .provider-card:hover, .provider-card:focus-visible { border-color: var(--accent); box-shadow: var(--shadow-1); outline: none; }
 .provider-card.is-default { border-color: var(--accent); background: var(--accent-soft); }
 .provider-card-name { padding-right: 22px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 600; }
-.provider-card-foot { display: flex; align-items: center; gap: 6px; margin-top: auto; }
+.provider-card-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: auto; min-width: 0; }
 .provider-card-tag { padding: 2px 7px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 11px; }
 .provider-card-badge { padding: 2px 7px; border-radius: 999px; background: var(--accent-solid); color: #fff; font-size: 11px; }
 .provider-card-delete { position: absolute; top: 8px; right: 8px; width: 24px; height: 24px; display: grid; place-items: center; border: 0; border-radius: var(--r-xs); background: transparent; color: var(--muted); padding: 0; cursor: pointer; }
 .provider-card-delete:hover { background: var(--danger-soft); color: var(--danger); }
 .provider-card-delete svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.provider-card-copy { flex: none; margin-left: auto; min-height: 28px; padding: 3px 8px; border: 1px solid var(--line); border-radius: var(--r-xs); background: var(--surface); color: var(--muted); font-size: 12px; cursor: pointer; }
+.provider-card-copy:hover, .provider-card-copy:focus-visible { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .provider-card-add { place-content: center; justify-items: center; gap: 7px; border-style: dashed; background: transparent; color: var(--muted); }
 .provider-card-add:hover { border-color: var(--accent); color: var(--accent); }
 .provider-card-add svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }

@@ -655,6 +655,7 @@ function providerCardMarkup(provider) {
       <span class="provider-card-foot">
         <span class="provider-card-tag">${format}</span>
         ${provider.is_default ? '<span class="provider-card-badge" title="各功能页的默认 API 预选，不代表当前会话">默认</span>' : ''}
+        <button class="provider-card-copy" type="button" data-provider-copy="${id}" title="复制 ${name}" aria-label="复制 ${name}">复制</button>
       </span>
     </div>`;
 }
@@ -785,8 +786,50 @@ export function openProviderCard(providerId) {
   showProviderForm(provider);
 }
 
+let providerFormGeneration = 0;
+let providerCopyId = '';
+
+function nextProviderCopyName(name) {
+  const original = String(name || '').trim() || '供应商';
+  const match = original.match(/^(.*\D)(\d+)$/u);
+  const base = match ? match[1] : original;
+  let number = match ? BigInt(match[2]) + 1n : 1n;
+  const used = new Set(providerProfiles().map((provider) => String(provider.name || '').trim()));
+  while (used.has(`${base}${number}`)) number += 1n;
+  return `${base}${number}`;
+}
+
+export function copyProvider(providerId) {
+  const source = providerProfiles().find((provider) => provider.id === providerId);
+  if (!source) return;
+  // 只取可编辑配置：不带源身份、密钥、默认标记、价格或探测缓存。
+  const copy = { name: nextProviderCopyName(source.name) };
+  for (const field of [
+    'kind', 'base_url', 'request_format', 'model', 'preset_id', 'local_backend',
+    'service_manager', 'service_manager_url', 'max_output_tokens', 'temperature',
+    'reasoning_effort', 'supports_images_explicit',
+  ]) {
+    if (source[field] !== undefined) copy[field] = source[field];
+  }
+  if (!source.context_window_source || ['provider_config', 'local_config'].includes(source.context_window_source)) {
+    copy.context_window = source.context_window || source.context_size;
+  }
+  showProviderForm(copy, { isNew: true });
+  // 保存时使用独立身份；即使手改成同名、同 Key，也不会命中原卡的无 id 去重。
+  // 远端 HTTP 没有 randomUUID 时沿用项目的时间戳 + 随机串回退。
+  providerCopyId = globalThis.crypto?.randomUUID?.()
+    || `provider-copy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  $('#providerDialogSubtitle').textContent = copy.kind === 'local'
+    ? '配置已复制，API Key 按需填写；保存后创建独立供应商。'
+    : '配置已复制，请填写自己的 API Key；保存后创建独立供应商。';
+  $('#providerApiKey').focus();
+}
+
 export function showProviderForm(provider = {}, { isNew = false } = {}) {
+  ++providerFormGeneration;
+  providerCopyId = '';
   ++providerModelCheckGeneration;
+  clearTimeout(providerModelCheckTimer);
   $('#providerId').value = provider.id || '';
   $('#providerName').value = provider.name || '';
   $('#providerBaseUrl').value = provider.base_url || '';
@@ -806,6 +849,9 @@ export function showProviderForm(provider = {}, { isNew = false } = {}) {
   $('#providerFormat').value = provider.request_format || 'openai_chat';
   $('#providerApiKey').value = '';
   $('#providerApiKey').type = 'password';
+  $('#providerApiKey').placeholder = isNew
+    ? (inferredKind === 'local' ? '本地服务不需要时可留空' : '填写新供应商的 API Key')
+    : '留空则保留当前 API Key';
   $('#toggleProviderKey').textContent = '显示';
   $('#toggleProviderKey').title = '显示 API Key';
   $('#providerKeyStatus').textContent = provider.has_api_key ? '已配置' : '未配置';
@@ -1078,6 +1124,9 @@ let providerSaveInFlight = false;
 export async function saveProvider(event) {
   event.preventDefault();
   if (providerSaveInFlight) return;
+  const generation = providerFormGeneration;
+  const copyId = providerCopyId;
+  const isCurrent = () => generation === providerFormGeneration;
   const button = $('#saveProvider');
   const label = button?.textContent || '保存设置';
   providerSaveInFlight = true;
@@ -1098,33 +1147,36 @@ export async function saveProvider(event) {
         const matched = (result.models || []).find((item) => String(item.id || '') === values.model);
         if (matched?.context_window && !values.context_window) {
           values.context_window = Number(matched.context_window);
-          $('#providerContextWindow').value = values.context_window;
+          if (isCurrent()) $('#providerContextWindow').value = values.context_window;
         }
         if (matched?.max_output_tokens && !values.max_output_tokens) {
           values.max_output_tokens = Number(matched.max_output_tokens);
-          $('#providerMaxOutputTokens').value = values.max_output_tokens;
+          if (isCurrent()) $('#providerMaxOutputTokens').value = values.max_output_tokens;
         }
       } catch (_) {
         // Capability metadata is optional; the provider may supply defaults.
       }
     }
+    if (!isCurrent()) return; // 预探测期间关闭/换卡，尚未提交的草稿就此取消。
+    if (copyId && !values.id) values.id = copyId;
     const saved = await api('/api/providers', { method: 'POST', body: values });
     // 先落"结果"，再刷新：`syncSavedProvider` 的第一步是把卡片并进本地 bootstrap
     // （必须成功，否则关窗后列表里看不到新卡片），后面的 populateModels /
     // populateVisionSettings 只是顺手刷新——旧实现里它们抛错会连 toast 与关窗一起
     // 跳过，用户看到的同样是"点了没反应"。刷新失败只写控制台，不影响保存结论。
-    $('#providerId').value = saved.id;
+    if (isCurrent()) $('#providerId').value = saved.id;
     try {
       syncSavedProvider(saved);
     } catch (refreshError) {
       console.error('[providers] 供应商已保存，但刷新列表失败', refreshError);
     }
-    cancelProviderEdit();
+    if (isCurrent()) cancelProviderEdit();
+    else renderProviders();
     toast('API 供应商已保存');
   } catch (error) {
     // 弹窗可能已被"另一次并发的保存"关掉：那时把错误写进 #providerError 等于丢进
     // 看不见的地方（体感仍是"没反应"）。弹窗还在就原地提示，已关就 toast 出来。
-    if ($('#providerDialog')?.open) $('#providerError').textContent = error.message;
+    if (isCurrent() && $('#providerDialog')?.open) $('#providerError').textContent = error.message;
     else toast(`保存失败：${error.message}`);
   } finally {
     providerSaveInFlight = false;
@@ -1145,6 +1197,8 @@ export function addProvider() {
 
 // 关闭设置弹层并复位编辑态；Esc、右上角关闭按钮、取消、保存成功四条路径都走这里。
 export function cancelProviderEdit() {
+  ++providerFormGeneration;
+  providerCopyId = '';
   ++providerModelCheckGeneration;
   clearTimeout(providerModelCheckTimer);
   state.providerEditing = false;
@@ -1192,11 +1246,14 @@ export function providerTestSummary(result) {
 }
 
 export async function testProvider() {
+  const generation = providerFormGeneration;
   $('#providerError').textContent = '正在测试连接…';
   try {
     const result = await api('/api/providers/test', { method: 'POST', body: providerFormValue() });
+    if (generation !== providerFormGeneration) return;
     $('#providerError').textContent = providerTestSummary(result);
   } catch (error) {
+    if (generation !== providerFormGeneration) return;
     $('#providerError').textContent = `模型目录可能可访问，但推理服务不可用：${error.message}`;
   }
 }
@@ -1204,6 +1261,9 @@ export async function testProvider() {
 export async function toggleProviderKey() {
   const input = $('#providerApiKey');
   const button = $('#toggleProviderKey');
+  const generation = providerFormGeneration;
+  const providerId = $('#providerId').value;
+  const isCurrent = () => generation === providerFormGeneration && $('#providerId').value === providerId;
   if (input.type === 'text') {
     input.type = 'password';
     button.textContent = '显示';
@@ -1211,15 +1271,16 @@ export async function toggleProviderKey() {
     return;
   }
   try {
-    if (!input.value && $('#providerId').value) {
-      const result = await api(`/api/providers/${$('#providerId').value}/secret`);
+    if (!input.value && providerId) {
+      const result = await api(`/api/providers/${encodeURIComponent(providerId)}/secret`);
+      if (!isCurrent() || input.value) return;
       input.value = result.api_key || '';
     }
     input.type = 'text';
     button.textContent = '隐藏';
     button.title = '隐藏 API Key';
   } catch (error) {
-    $('#providerError').textContent = error.message;
+    if (isCurrent()) $('#providerError').textContent = error.message;
   }
 }
 

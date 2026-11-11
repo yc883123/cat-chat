@@ -383,11 +383,26 @@ class AdapterTests(unittest.TestCase):
         self.assertTrue(created)
         self.adapter._process(message, record)
 
+    def _wait_for_adapter(self, timeout=30.0):
+        """等真实处理线程完成；拒绝状态先落库，不能代替后续发送完成。"""
+        deadline = time.monotonic() + timeout
+        while True:
+            with self.adapter._threads_lock:
+                workers = list(self.adapter._threads.values())
+            if not workers:
+                return
+            for worker in workers:
+                worker.join(timeout=max(0.0, deadline - time.monotonic()))
+            self.assertEqual(
+                [worker.name for worker in workers if worker.is_alive()], [],
+                "OneBot 消息处理线程未在期限内完成",
+            )
+
     def test_unauthorized_user_is_rejected_without_run(self):
         self._bind()
         event = self._event(user_id="99999")
         self.adapter.handle_event(event)
-        time.sleep(0.4)
+        self._wait_for_adapter()
         self.assertEqual(self.app.runs.submitted, [])
         self.assertEqual(self.sender.sent_texts(), ["这个 QQ 号还没有被允许使用 Cat Chat。"])
         record = self.store.lookup_message("10000", "m1")
@@ -399,7 +414,7 @@ class AdapterTests(unittest.TestCase):
         event["message_type"] = "group"
         event["group_id"] = 777
         self.adapter.handle_event(event)
-        time.sleep(0.4)
+        self._wait_for_adapter()
         self.assertEqual(self.app.runs.submitted, [])
         self.assertEqual(self.sender.sent_texts(), ["群聊暂未开放，请私聊使用。"])
 
@@ -410,10 +425,13 @@ class AdapterTests(unittest.TestCase):
         event["message_type"] = "group"
         event["group_id"] = 777
         self.adapter.handle_event(event)
-        time.sleep(0.4)
+        self._wait_for_adapter()
         self.assertEqual(self.app.runs.submitted, [])
         # 群里没 @ 的消息不该刷屏回告。
         self.assertEqual(self.sender.sent_texts(), [])
+        record = self.store.lookup_message("10000", "m1")
+        self.assertEqual(record["status"], channel_store.MESSAGE_REJECTED)
+        self.assertEqual(record["detail"], "group_not_triggered")
 
     def test_group_mention_reaches_model(self):
         self.app.config.data["onebot"].update({"allow_groups": True, "allowed_group_ids": ["777"]})
@@ -423,11 +441,12 @@ class AdapterTests(unittest.TestCase):
         event["group_id"] = 777
         event["message"] = [{"type": "at", "data": {"qq": "10000"}}] + event["message"]
         self.adapter.handle_event(event)
-        deadline = time.time() + 5
-        while time.time() < deadline and not self.app.runs.submitted:
-            time.sleep(0.05)
+        self._wait_for_adapter()
         self.assertEqual(len(self.app.runs.submitted), 1)
         self.assertEqual(self.app.runs.submitted[0]["message"], "在吗")
+        self.assertEqual(self.sender.sent_texts(), ["这是完整回复。"])
+        self.assertEqual(self.store.lookup_message("10000", "m1")["status"],
+                         channel_store.MESSAGE_REPLIED)
 
     def test_group_from_unauthorized_user_is_refused(self):
         self.app.config.data["onebot"].update({"allow_groups": True, "allowed_group_ids": ["777"]})
@@ -436,7 +455,7 @@ class AdapterTests(unittest.TestCase):
         event["group_id"] = 777
         event["message"] = [{"type": "at", "data": {"qq": "10000"}}] + event["message"]
         self.adapter.handle_event(event)
-        time.sleep(0.4)
+        self._wait_for_adapter()
         self.assertEqual(self.app.runs.submitted, [])
         self.assertIn("不是被允许", self.sender.sent_texts()[0])
 
@@ -461,7 +480,7 @@ class AdapterTests(unittest.TestCase):
     def test_unbound_user_gets_hint_not_auto_binding(self):
         event = self._event()
         self.adapter.handle_event(event)
-        time.sleep(0.4)
+        self._wait_for_adapter()
         self.assertEqual(self.app.runs.submitted, [])
         self.assertEqual(self.store.list_bindings(), [])
         self.assertIn("尚未绑定", self.sender.sent_texts()[0])
@@ -471,8 +490,11 @@ class AdapterTests(unittest.TestCase):
         event = self._event()
         self.adapter.handle_event(event)
         self.adapter.handle_event(event)
-        time.sleep(0.6)
+        self._wait_for_adapter()
         self.assertEqual(len(self.app.runs.submitted), 1)
+        self.assertEqual(self.sender.sent_texts(), ["这是完整回复。"])
+        self.assertEqual(self.store.lookup_message("10000", "m1")["status"],
+                         channel_store.MESSAGE_REPLIED)
 
     def test_private_message_submits_run_and_delivers_full_reply(self):
         self._bind()
@@ -689,9 +711,7 @@ class AdapterTests(unittest.TestCase):
         )
         result = self.adapter.recover_pending()
         self.assertGreaterEqual(result["recovered"], 1)
-        deadline = time.time() + 3
-        while time.time() < deadline and not self.sender.sent_texts():
-            time.sleep(0.05)
+        self._wait_for_adapter()
         self.assertIn("重启前生成的回复", self.sender.sent_texts())
 
     def test_interrupted_before_submit_is_marked_failed(self):

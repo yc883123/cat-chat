@@ -11,6 +11,7 @@
 边界：不连模型、不跑 runner；任务记录用 StudioStore 直接造。
 """
 
+import copy
 import sys
 import tempfile
 import unittest
@@ -223,12 +224,39 @@ class ScriptStoreTests(unittest.TestCase):
 
     def test_reorder_rejects_incomplete_order(self):
         self.store.apply_script(self.book["id"], task_id="st-1", text=SCRIPT_OK, from_chapter=1)
+        manifest_path = self.store._book_dir(self.book["id"]) / "book.json"
+        before = manifest_path.read_bytes()
         with self.assertRaises(NovelServiceError):
             self.store.reorder_script(self.book["id"], [1])
         with self.assertRaises(NovelServiceError):
             self.store.reorder_script(self.book["id"], [1, 1])
         with self.assertRaises(NovelServiceError):
             self.store.reorder_script(self.book["id"], [])
+        self.assertEqual(manifest_path.read_bytes(), before)
+
+    def test_reorder_survives_reopen_and_preserves_old_versions_and_extra_fields(self):
+        bid = self.book["id"]
+        for no in (1, 2, 3):
+            self.store.apply_script(bid, task_id=f"sc-{no}", text=f"唯一场次正文 {no}", from_chapter=no)
+        manifest = self.store._load_manifest(bid)
+        for row in manifest["script"]:
+            row["extension"] = {"marker": f"来源 {row['from_chapter']}"}
+        self.store._sync_latest_script_version(manifest)
+        self.store._write_json(self.store._book_dir(bid) / "book.json", manifest)
+        older = copy.deepcopy(manifest["script_versions"][:-1])
+        expected = [{**manifest["script"][index], "i": pos}
+                    for pos, index in enumerate((2, 0, 1), start=1)]
+        result = self.store.reorder_script(bid, [3, 1, 2])
+        self.assertEqual(result["script"], expected)
+        reopened = NovelStore(Path(self.tmp.name))
+        self.assertEqual(reopened.list_script(bid)["script"], expected)
+        current = reopened.get_book(bid)["book"]
+        self.assertEqual(current["script"], expected)
+        self.assertEqual(current["script_versions"][-1]["script"], expected)
+        self.assertEqual(current["script_versions"][:-1], older)
+        self.assertEqual(len(current["script_versions"]), 3)
+        self.assertEqual(reopened.stage_material(bid, [1, 2, 3])["manifest"]["script"], expected)
+        self.assertEqual(reopened.preflight_chapters(bid)["manifest"]["script"], expected)
 
     def test_script_revision_conflict(self):
         current = self.store.get_book(self.book["id"])["book"]["revision"]

@@ -6,7 +6,7 @@ import { $, agentAvatarEmoji, agentAvatarSrc, api, draggedFileCache, emptyStateE
 import { markdown } from "./02-markdown.js";
 import { scanMarkdownBlocks } from "./02b-markdown-stream.js";
 import { activityMarkup, closeImageLightbox, fileChangesSummaryMarkup, fileUrl, folderIndexMarkup, mediaKind, mediaMarkup, mediaProductsMarkup, mediaTruncatedNotice, reasoningMarkup, remainingAttachments, skillMarkup, sourcesMarkup, toolMarkup, truncationNotice, updateContextComposerLock, updateContextUsage, updateSendButtonState, uploadedFileMarkup, usageMarkup } from "./03-media.js";
-import { openConversation, syncCurrentConversation } from "./08-conversations.js";
+import { beginConversationNavigation, conversationOpenGeneration, isConversationOpenCurrent, openConversation, renderSidebar, syncCurrentConversation } from "./08-conversations.js";
 import { attachmentChips, folderChips, folderChipsFromIndexes, folderIndexMetadata, renderPendingFiles } from "./10-upload.js";
 import { hideChoiceButtons, sendMessage, showChoiceButtons } from "./12-chat-input.js";
 import { hideSkillPopup, renderInputMirror, renderUserContent, resizeTextarea, updateSkillPopup } from "./13-skill-refs.js";
@@ -341,7 +341,7 @@ export function cancelActiveEdit() {
   restoreInlineComposer({ restoreDraft: true });
   row?.classList.remove('is-editing');
   applyEditingState(null);
-  if (state.conversationId) openConversation(state.conversationId);
+  if (state.conversationId) void openConversation(state.conversationId, { expectedGeneration: conversationOpenGeneration() }).catch(error => toast(error.message));
 }
 
 // 底部「发送」按钮在编辑态下的回调：不发新消息，改为确认上面的编辑框。
@@ -513,16 +513,29 @@ export async function resendFromUserMessage(userMessageId, text, { successText =
   }
   const conversationId = state.conversationId;
   if (!userMessageId || !conversationId) return false;
+  const generation = beginConversationNavigation(conversationId);
+  let restoredFiles = knownAttachments.map(file => ({ ...file }));
+  const restoreDraft = () => {
+    const input = $('#messageInput');
+    const existing = String(input.value || '');
+    input.value = existing && existing.trim() !== content ? `${existing}\n\n${content}` : content;
+    const files = [...state.pendingFiles, ...restoredFiles];
+    state.pendingFiles = files.filter((file, index) => files.findIndex(other => other.path === file.path && other.name === file.name) === index);
+    renderPendingFiles();
+    resizeTextarea();
+    renderInputMirror();
+    updateSkillPopup();
+    notifyComposerChanged(input);
+  };
   try {
     const result = await api('/api/messages/edit', {
       method: 'POST',
       body: { conversation_id: conversationId, message_id: userMessageId },
     });
-    toast(successText);
     // 恢复原消息的附件，供重发使用。字段口径与「分支」一致（含 thumb_path）：
     // 缺 thumb_path 时渲染层会退化成推导 `<path>_thumb.webp`，一旦缩略图不在同目录就 404。
     const restoredAttachments = Array.isArray(attachmentsOverride) ? attachmentsOverride : (result.attachments || []);
-    state.pendingFiles = [
+    restoredFiles = [
       ...restoredAttachments.map((f) => ({
         name: f.name,
         path: f.path,
@@ -532,9 +545,17 @@ export async function resendFromUserMessage(userMessageId, text, { successText =
       // 文件夹只恢复"占位 + 统计"：索引会在发送那一刻由后端重扫，不必在这里再取一次。
       ...folderChipsFromIndexes(knownFolders.length ? knownFolders : (result.folder_indexes || [])),
     ];
-    renderPendingFiles();
     // 截断后重新渲染会话（被截断的消息已从历史消失）
-    await openConversation(conversationId);
+    let opened;
+    try { opened = await openConversation(conversationId, { expectedGeneration: generation }); }
+    catch (error) { restoreDraft(); toast(`${errorPrefix}后重新加载失败：${error.message}，内容已保留，尚未发送`); return false; }
+    if (!opened) {
+      restoreDraft();
+      toast('已切到别的会话，编辑内容和附件已保留在输入区，尚未发送');
+      return false;
+    }
+    state.pendingFiles = restoredFiles;
+    renderPendingFiles();
     // 填入内容并重发（纯附件轮次 text 为空，sendChatMessage 只靠 pendingFiles 放行）
     const input = $('#messageInput');
     input.value = content;
@@ -542,11 +563,13 @@ export async function resendFromUserMessage(userMessageId, text, { successText =
     renderInputMirror();
     updateSkillPopup();
     notifyComposerChanged(input);
+    toast(successText);
     await sendMessage();
     return true;
   } catch (error) {
+    restoreDraft();
     toast(`${errorPrefix}失败：${error.message}`);
-    if (state.conversationId) openConversation(state.conversationId);
+    if (isConversationOpenCurrent(generation, conversationId)) void openConversation(conversationId, { expectedGeneration: generation }).catch(() => {});
     return false;
   }
 }
@@ -679,6 +702,7 @@ export async function branchMessage(row) {
     toast('分支失败：消息或会话不存在');
     return;
   }
+  const generation = beginConversationNavigation(sourceId);
   // 选择必须在 API 调用之前：取消 = 不产生新会话（否则会留下一个用户没打算要的分支）。
   const sourceConversation = state.conversations.find((c) => c.id === sourceId);
   const sourceAgentName = String(
@@ -700,7 +724,11 @@ export async function branchMessage(row) {
     if (index >= 0) state.conversations[index] = { ...state.conversations[index], ...newConversation };
     else state.conversations.unshift(newConversation);
     // 切到新会话（复用 openConversation 的完整装载逻辑）
-    await openConversation(newConversation.id);
+    if (!await openConversation(newConversation.id, { expectedGeneration: generation })) {
+      renderSidebar();
+      toast('分支会话已创建，可从会话列表打开');
+      return;
+    }
     // 预填分支消息内容（原样，含 /ref），并恢复其附件为待上传（走现有输入逻辑）
     hideSkillPopup();
     const input = $('#messageInput');

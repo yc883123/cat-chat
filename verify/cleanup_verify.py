@@ -62,6 +62,10 @@ KEEP = {
     # 织书台（原创写作）前端冒烟：第五页接入、三阶段、模板/导入导出、手机三档（隔离实例）
     "writer_ui_smoke.cjs", "_serve_writer_draft_ui.py", "writer_draft_offline_test.cjs",
     "writer_novel_import_smoke.cjs", "novel_writer_mobile_smoke.cjs",
+    "body_draft_offline_test.cjs", "body_draft_workbench_test.cjs", "body_draft_smoke.cjs",
+    "conversation_race_offline_test.cjs", "conversation_navigation_inflight_test.cjs",
+    "model_selection_race_offline_test.cjs", "conversation_model_smoke.cjs",
+    "novel_integrity_smoke.cjs", "_serve_novel_integrity.py",
     # Agent 说明弹层 + 工作区路径/未注册分组提示冒烟（§六 已登记；Python 自编排 + Node 检查）
     "agent_help_popover.py", "agent_help_popover.cjs",
     # 应用内更换图标冒烟（§六 已登记；Python 自编排 + Node 检查 + 进程级重启解析）

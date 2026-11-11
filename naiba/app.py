@@ -49,6 +49,7 @@ from naiba.llm.provider_presets import apply_preset_values, provider_preset_key_
 from naiba.llm.runtime import ModelRuntime
 from naiba.mcp import MCPRegistry
 from naiba.paths import PathContext, default_path_context
+from naiba.core.contracts import NEW_CONVERSATION_DEFAULT_FIELDS
 from naiba.plans import PlanManager
 from naiba.run.manager import ConversationRunManager
 from naiba.search import WebSearchRuntime
@@ -1647,7 +1648,7 @@ class NaibaChatApp:
         # 「更新代理」是独立的 scoped 覆盖项：单独注入，不覆盖全局策略。
         self.updater.configure_proxy(self.config.data.get("update_proxy"))
         model_key = str(body.get("model_key") or body.get("default_model_key") or "").strip()
-        if model_key:
+        if model_key and not any(key in body for key in NEW_CONVERSATION_DEFAULT_FIELDS):
             self.config.set_default_model_key(model_key)
             settings = self.config.public()
         self.executor.command_timeout = int(self.config.data.get("command_timeout", 120))

@@ -823,7 +823,9 @@ export function populateModels() {
   updateUnloadModelButton();
   renderKvmemControl();
   void refreshKvmemStatus({ quiet: true });
-  void populateComposerModels();
+  const conversation = state.conversations.find(item => item.id === state.conversationId);
+  if (conversation) applyConversationModel(conversation);
+  else void populateComposerModels();
 }
 
 export function selectedProvider() {
@@ -838,6 +840,80 @@ const COMPOSER_MODEL_REFRESH = '__refresh_composer_models__';
 // 下拉框最后一次有效选择（'' = 未选择）：刷新前记下，强制重拉目录后还原。
 let composerModelLastChoice = '';
 let composerModelRefreshBusy = false;
+let modelSelectionGeneration = 0;
+let composerCatalogGeneration = 0;
+const modelSaveQueues = new Map();
+const modelSaveGenerations = new Map();
+const modelSaveChoices = new Map();
+const catalogGenerations = new Map();
+const catalogRequests = new Map();
+export function pendingConversationModelSave(id) { return modelSaveQueues.get(id); }
+export function conversationModelGeneration(id) { return modelSaveGenerations.get(id) || 0; }
+export function mergeConversationModelSelection(conversation, generation) {
+  const id = conversation.id;
+  return conversationModelGeneration(id) !== generation && modelSaveChoices.has(id)
+    ? { ...conversation, ...modelSaveChoices.get(id) } : conversation;
+}
+
+function queueConversationModelSave(id, values) {
+  if (!id) return Promise.resolve(null);
+  const generation = (modelSaveGenerations.get(id) || 0) + 1;
+  modelSaveGenerations.set(id, generation);
+  modelSaveChoices.set(id, values);
+  const previous = modelSaveQueues.get(id) || Promise.resolve();
+  const pending = previous.catch(() => {}).then(() => api(`/api/conversations/${id}/settings`, {
+    method: 'POST', body: values,
+  })).then(updated => {
+    if (modelSaveGenerations.get(id) === generation) {
+      const index = state.conversations.findIndex(item => item.id === id);
+      if (index >= 0) state.conversations[index] = { ...state.conversations[index], ...updated };
+    }
+    return updated;
+  }).catch(error => {
+    if (modelSaveGenerations.get(id) === generation) modelSaveChoices.delete(id);
+    throw error;
+  }).finally(() => { if (modelSaveQueues.get(id) === pending) modelSaveQueues.delete(id); });
+  modelSaveQueues.set(id, pending);
+  return pending;
+}
+
+export async function loadModelCatalog(providerKey, { force = false, values = null } = {}) {
+  if (!force && catalogRequests.has(providerKey)) return catalogRequests.get(providerKey);
+  if (!force && (state.providerModelCatalogs[providerKey] || []).length) return state.providerModelCatalogs[providerKey];
+  const generation = (catalogGenerations.get(providerKey) || 0) + 1;
+  catalogGenerations.set(providerKey, generation);
+  const pending = api('/api/providers/models', { method: 'POST', body: values || { model_key: providerKey } }).then(result => {
+    if (catalogGenerations.get(providerKey) !== generation) return catalogRequests.get(providerKey) || state.providerModelCatalogs[providerKey] || [];
+    state.providerModelCatalogs[providerKey] = Array.isArray(result.models) ? result.models : [];
+    return state.providerModelCatalogs[providerKey];
+  }).catch(error => {
+    if (catalogGenerations.get(providerKey) !== generation) return catalogRequests.get(providerKey) || state.providerModelCatalogs[providerKey] || [];
+    throw error;
+  }).finally(() => { if (catalogRequests.get(providerKey) === pending) catalogRequests.delete(providerKey); });
+  catalogRequests.set(providerKey, pending);
+  return pending;
+}
+
+export function newConversationDefault() {
+  const settings = state.bootstrap?.settings || {};
+  const model_key = String(settings.new_conversation_model_key || '');
+  const model_name = String(settings.new_conversation_model_name || '');
+  const profile = (state.bootstrap?.model_profiles || state.bootstrap?.providers || []).find(p => p.model_key === model_key);
+  const catalog = state.providerModelCatalogs[model_key];
+  const valid = Boolean(model_key && model_name && profile && Array.isArray(catalog) && catalog.some(m => m.id === model_name));
+  return { model_key, model_name, profile, valid, configured: Boolean(model_key || model_name) };
+}
+
+export async function resolveNewConversationModel(explicit = null) {
+  if (explicit?.model_key && explicit?.model_name) return { model_key: explicit.model_key, model_name: explicit.model_name };
+  const fallback = { model_key: $('#modelSelect')?.value || '', model_name: composerModelChoice() };
+  const initial = newConversationDefault();
+  if (initial.profile && initial.model_name && !Array.isArray(state.providerModelCatalogs[initial.model_key])) {
+    try { await loadModelCatalog(initial.model_key); } catch (_) { return fallback; }
+  }
+  const current = newConversationDefault();
+  return current.valid ? { model_key: current.model_key, model_name: current.model_name } : fallback;
+}
 // 输入区模型「可搜索下拉」浮层的状态（原生 select 仍是唯一值来源，这里只是它的投影）。
 export const composerPickerState = { open: false, activeIndex: -1, items: [] };
 
@@ -911,6 +987,7 @@ export function composerModelIsValidated() {
 }
 
 export async function populateComposerModels(preferredModel = null, { force = false } = {}) {
+  const generation = ++composerCatalogGeneration;
   const provider = selectedProvider();
   const providerKey = String(provider?.model_key || '');
   // 记下发请求时的会话：目录返回后会话可能已经切走。两个会话共用同一 API 时，
@@ -930,18 +1007,19 @@ export async function populateComposerModels(preferredModel = null, { force = fa
   // 检查模型」，模型后来上架了也刷不出来。force = 用户点了「↻ 重新检测模型」。
   if (!force && (state.providerModelCatalogs[providerKey] || []).length) return;
   try {
-    const result = await api('/api/providers/models', { method: 'POST', body: { model_key: providerKey } });
-    state.providerModelCatalogs[providerKey] = Array.isArray(result.models) ? result.models : [];
+    await loadModelCatalog(providerKey, { force });
     // 目录本身只写缓存；仅当「API 未变 且 会话未变」时才重绘，且选中项一律按
     // 当前下拉框的实际值重算，不再回填旧请求的 preferredModel。
     if ($('#modelSelect')?.value !== providerKey) return;
     if (state.conversationId !== conversationId) return;
+    if (generation !== composerCatalogGeneration) return;
     renderComposerModels(selectedProvider(), composerModelChoice());
     if (force) {
       const count = state.providerModelCatalogs[providerKey].length;
       toast(count ? `已重新检测到 ${count} 个模型` : '该 API 当前没有可用模型');
     }
   } catch (error) {
+    if (generation !== composerCatalogGeneration || state.conversationId !== conversationId || $('#modelSelect')?.value !== providerKey) return;
     // 用户主动点「重新检测模型」时必须出声，不能只藏在控制台里。
     if (force) toast(`无法获取模型目录：${error.message}`);
     else console.debug('[naiba] 获取 API 模型目录失败:', error.message);
@@ -949,12 +1027,10 @@ export async function populateComposerModels(preferredModel = null, { force = fa
 }
 
 async function persistConversationModelName(modelName) {
-  if (!state.conversationId) return;
-  const updated = await api(`/api/conversations/${state.conversationId}/settings`, {
-    method: 'POST', body: { model_name: modelName },
-  });
-  const index = state.conversations.findIndex((item) => item.id === state.conversationId);
-  if (index >= 0) state.conversations[index] = { ...state.conversations[index], ...updated };
+  const id = state.conversationId;
+  const modelKey = String(selectedProvider()?.model_key || '');
+  if (!modelKey) throw new Error('请先选择有效的 API');
+  return queueConversationModelSave(id, { model_key: modelKey, model_name: modelName });
 }
 
 // 「↻ 重新检测模型」：强制重拉目录（绕过缓存），完成后还原刷新前的选择。
@@ -983,15 +1059,23 @@ export async function saveComposerModelSelection() {
     return;
   }
   composerModelLastChoice = composerModelChoice();
+  const id = state.conversationId;
+  const generation = ++modelSelectionGeneration;
+  const choice = composerModelChoice();
+  const key = $('#modelSelect')?.value;
+  const pending = persistConversationModelName(composerModelChoice());
+  const saveGeneration = conversationModelGeneration(id);
+  const stillSelected = () => state.conversationId === id && $('#modelSelect')?.value === key
+    && composerModelChoice() === choice && conversationModelGeneration(id) === saveGeneration;
   try {
-    await persistConversationModelName(composerModelChoice());
+    await pending;
   } catch (error) {
-    toast(`保存模型失败：${error.message}`);
+    if (stillSelected()) toast(`保存模型失败：${error.message}`);
   }
   // 自动换肤：只有走到这里才是「用户主动换了具体模型」——初始化、目录刷新、
   // 会话恢复都在别处（renderComposerModels / applyConversationModel）赋值，
   // 不经过本函数，因此不会误触发。识别不出家族时内部直接返回，皮肤保持不动。
-  await applyModelSkinFor(composerModelChoice());
+  if (generation === modelSelectionGeneration && state.conversationId === id) await applyModelSkinFor(composerModelChoice());
 }
 
 // ---- 输入区模型「可搜索下拉」 -------------------------------------------------
@@ -1259,46 +1343,46 @@ export async function unloadConfiguredProviderModel() {
 
 export async function saveModelSelection() {
   const value = $('#modelSelect').value;
-  const result = await api('/api/settings', { method: 'POST', body: { model_key: value } });
-  Object.assign(state.bootstrap.settings, result.settings);
-  state.bootstrap.default_model_key = result.default_model_key || value;
-  if (state.conversationId) {
-    try {
-      const updated = await api(`/api/conversations/${state.conversationId}/settings`, {
-        method: 'POST',
-        body: { model_key: value, model_name: '' },
-      });
-      const index = state.conversations.findIndex((item) => item.id === state.conversationId);
-      if (index >= 0) state.conversations[index] = { ...state.conversations[index], ...updated };
-    } catch (error) {
-      console.debug('[naiba] 保存对话模型失败:', error.message);
-    }
-  }
+  const id = state.conversationId;
+  const generation = ++modelSelectionGeneration;
+  if (!selectedProvider()) { toast('请选择有效的 API'); return; }
+  const pending = queueConversationModelSave(id, { model_key: value, model_name: '' });
+  const saveGeneration = conversationModelGeneration(id);
   updateUnloadModelButton();
   renderKvmemControl();
   void refreshKvmemStatus({ quiet: true });
   // 切换 API 后清空会话模型，等待新 API 的检测目录填充下拉。
-  await populateComposerModels('');
-  toast('API 已切换');
+  const catalog = populateComposerModels('');
+  try {
+    await Promise.all([pending, catalog]);
+    if (generation === modelSelectionGeneration && state.conversationId === id) toast('API 已切换');
+  } catch (error) {
+    if (state.conversationId === id && $('#modelSelect')?.value === value
+      && conversationModelGeneration(id) === saveGeneration) toast(`保存 API 失败：${error.message}，请重试`);
+  }
 }
 
-// 根据对话已保存的 API 与模型名恢复选择；未绑定或已删除时回退到全局默认。
+// 历史绑定只读恢复；缺失或已删除的绑定不能冒充全局默认。
 export function applyConversationModel(conversation) {
+  ++modelSelectionGeneration;
   const select = $('#modelSelect');
   if (!select) return;
-  const target = String(conversation?.model_key || '');
-  if (target && [...select.options].some((o) => o.value === target)) {
-    select.value = target;
-    updateUnloadModelButton();
-    void populateComposerModels(String(conversation?.model_name || ''));
-    return;
+  select.querySelectorAll('[data-missing-binding]').forEach(option => option.remove());
+  const profiles = state.bootstrap?.model_profiles || state.bootstrap?.providers || [];
+  let target = String(conversation?.model_key || '');
+  if (!target && conversation?.provider_id) {
+    const matches = profiles.filter(p => String(p.id) === String(conversation.provider_id));
+    if (matches.length === 1) target = matches[0].model_key;
   }
-  const fallback = String(state.bootstrap.default_model_key || '');
-  if (fallback && [...select.options].some((o) => o.value === fallback)) {
-    select.value = fallback;
-  } else if (select.options.length) {
-    select.selectedIndex = 0;
+  if (!target || !profiles.some(p => p.model_key === target)) {
+    const missing = document.createElement('option');
+    missing.value = target;
+    missing.textContent = target ? `已删除的 API：${target}（请重新选择）` : '未设置 API（请选择）';
+    missing.dataset.missingBinding = 'true';
+    select.prepend(missing);
   }
+  select.value = target;
+  select.title = target && !profiles.some(p => p.model_key === target) ? '历史 API 已失效，请重新选择' : '当前会话的 API';
   updateUnloadModelButton();
   void populateComposerModels(String(conversation?.model_name || ''));
 }

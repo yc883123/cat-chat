@@ -17,6 +17,45 @@
 import { $, api, applyModelSkinFor, state, toast } from "./01-core.js";
 import { onStudioPageChange, setStudioPage } from "./22-studio.js";
 import { bindWorkbenchDialogReturn, bindWorkbenchMenu, watchWorkbenchSize, workbenchWidth } from "./22a-workbench-ui.js";
+import { bindBodyDraftLifecycle, bodyDraftMatches, chooseBodyDraft, createBodyDraftPanel, createBodyDraftSession } from "./22b-body-drafts.js";
+
+const novelBodyPanel = createBodyDraftPanel({ module: "novel", host: "#studioPageNovel", statusHost: "#novelManuscriptEdit", open: openNovelBodyDraft });
+const novelBodyDrafts = createBodyDraftSession({ onStatus: (status) => novelBodyPanel.status(status) });
+let novelBodyContext = null;
+let novelBodyDirty = false;
+
+function novelDraftContext(source) {
+  return { module: "novel", bookId: novel.bookId, chapterNo: novel.chapterNo,
+    sourceId: String(source?.id || ""), sourceLabel: source ? manuscriptLabel(source) : "来源已删除",
+    baseRevision: novel.chapter?.revision, baseContent: source ? manuscriptBody(source) : undefined,
+    sourceExists: Boolean(source && source.kind !== "broken") };
+}
+
+function captureNovelBody() {
+  if (!novel.editingManuscriptId || !novelBodyContext || !novelBodyDirty) return null;
+  return novelBodyDrafts.capture(novelBodyContext, novel.editDraft);
+}
+
+async function preserveNovelBody() {
+  captureNovelBody();
+  if (await novelBodyDrafts.flush()) return true;
+  toast("正文尚未暂存，请先保存或复制；当前编辑已保留。");
+  return false;
+}
+
+async function openNovelBodyDraft(row) {
+  if (row.bookId !== novel.bookId) return;
+  if (!novel.chapters.some((chapter) => Number(chapter.i) === Number(row.chapterNo))) {
+    if (await chooseBodyDraft(row, { canContinue: false, reason: "来源章节已删除，仍可复制或保留草稿。" }) === "discard") {
+      await novelBodyDrafts.remove(row);
+      await novelBodyPanel.refresh(novelBodyDrafts, novel.bookId);
+    }
+    return;
+  }
+  setStage("split");
+  setPane("editor");
+  await openChapter(row.chapterNo, { bodyDraft: row });
+}
 
 // 与服务端一致的上限（前端只做提前提示，服务端仍逐项校验）。
 const MAX_FILE_BYTES = 60 * 1024 * 1024;
@@ -69,6 +108,7 @@ const novel = {
   // 编辑态：`0` 未编辑；否则是「基于哪份稿件」的稿件 ID。
   editingManuscriptId: "",
   editDraft: "",
+  editToken: 0,
   aiTargetId: "",
   // 导入态：暂存里等勾选的章节。
   staged: null,
@@ -2234,7 +2274,8 @@ async function applyStageResult() {
 
 // ---- 单章 AI 改编 ----
 
-function openAiEditor(manuscriptId) {
+async function openAiEditor(manuscriptId) {
+  if (!await preserveNovelBody()) return;
   novel.aiTargetId = String(manuscriptId || "");
   novel.editingManuscriptId = "";
   renderEditor();
@@ -2857,13 +2898,15 @@ async function refreshChapterIndex() {
 }
 
 async function openBook(bookId) {
+  if (!await preserveNovelBody()) return false;
   const token = ++novel.bookToken;
+  const editToken = novel.editToken;
   novel.chapterToken += 1;
   novel.taskToken += 1;
   stopTaskPolling();
   try {
     const payload = await api(`/api/novel/books/${encodeURIComponent(bookId)}`);
-    if (token !== novel.bookToken) return;
+    if (token !== novel.bookToken || novel.editToken !== editToken) return;
     novel.bookId = bookId;
     novel.selectedVersions = { elements: 0, outline: 0, script: 0 };
     try { localStorage.setItem(LAST_BOOK_KEY, bookId); } catch (_error) { /* storage may be unavailable */ }
@@ -2881,6 +2924,7 @@ async function openBook(bookId) {
     novel.chapterRosters.clear();
     novel.chapterRostersInflight.clear();
     novel.editingManuscriptId = "";
+    novelBodyContext = null;
     novel.aiTargetId = "";
     for (const data of Object.values(novel.stageStates)) {
       data.activeTaskId = "";
@@ -2910,6 +2954,7 @@ async function openBook(bookId) {
       (novel.broken.length ? `有 ${novel.broken.length} 章读取失败（数据异常），需要重新导入或删除。` : "") +
       (legacy.length ? `其中 ${legacy.length} 章的原文在升级前没有单独保存，已标为「升级前保存的正文」。` : ""));
     renderAll();
+    void novelBodyPanel.refresh(novelBodyDrafts, bookId);
     if (novel.chapters.length) await openChapter(novel.chapters[0].i);
     if (novel.stage !== "split") void refreshStageTasks().then(() => refreshPreviewBudget());
   } catch (error) {
@@ -2919,19 +2964,21 @@ async function openBook(bookId) {
   }
 }
 
-async function openChapter(chapterNo) {
+async function openChapter(chapterNo, { bodyDraft = null } = {}) {
   if (!novel.bookId) return;
-  if (novel.editingManuscriptId && novel.editDraft !== manuscriptBody(
-    manuscriptRows().find((row) => row.id === novel.editingManuscriptId)
-  )) {
-    if (!window.confirm("这一章有还没保存的修改，切换后修改会丢失。要继续吗？")) return;
-  }
+  if (!await preserveNovelBody()) return false;
   const token = ++novel.chapterToken;
+  const editToken = novel.editToken;
+  const bookId = novel.bookId;
   try {
     const payload = await api(
       `/api/novel/books/${encodeURIComponent(novel.bookId)}/chapters/${chapterNo}`
     );
-    if (token !== novel.chapterToken) return;
+    let recovered = bodyDraft;
+    try {
+      if (!recovered) recovered = (await novelBodyDrafts.list("novel", bookId, chapterNo))[0] || null;
+    } catch (_error) { novelBodyPanel.status("error"); }
+    if (token !== novel.chapterToken || novel.bookId !== bookId || novel.editToken !== editToken) return;
     novel.chapterNo = chapterNo;
     novel.chapter = payload;
     // 基础稿件的正文随单章接口回来，直接写进缓存。
@@ -2948,9 +2995,17 @@ async function openChapter(chapterNo) {
     }
     novel.editingManuscriptId = "";
     novel.editDraft = "";
+    novelBodyContext = null;
     novel.aiTargetId = "";
     setSaveState("已读取", `已打开第 ${chapterNo} 章（${payload.len} 字，${(payload.manuscripts || []).length} 份稿件）。`);
     renderAll();
+    if (recovered) {
+      const source = manuscriptRows().find((row) => row.id === recovered.sourceId)
+        || manuscriptRows().find((row) => row.id === baseId);
+      if (source) await beginEdit(source.id, { bodyDraft: recovered });
+      else if (await chooseBodyDraft(recovered, { canContinue: false, reason: "来源稿件已不可读取，仍可复制或保留草稿。" }) === "discard") await novelBodyDrafts.remove(recovered);
+    }
+    void novelBodyPanel.refresh(novelBodyDrafts, bookId);
     if (novel.pane === "chapters") setPane("editor");
     if (novel.stage !== "split") void refreshPreviewBudget();
   } catch (error) {
@@ -2961,6 +3016,7 @@ async function openChapter(chapterNo) {
 
 async function importFile(file) {
   if (!file) return;
+  if (!await preserveNovelBody()) return;
   if (file.size > MAX_FILE_BYTES) {
     toast(`文件太大（${(file.size / 1024 / 1024).toFixed(1)} MB），上限 60 MB`);
     return;
@@ -3033,23 +3089,32 @@ async function saveManuscriptEdit() {
   }
   const titleInput = $("#novelChapterTitle");
   const title = String(titleInput?.value || "").trim();
+  const snapshot = { bookId: novel.bookId, chapterNo: novel.chapterNo,
+    bookToken: novel.bookToken, chapterToken: novel.chapterToken,
+    sourceId: novel.editingManuscriptId, editToken: novel.editToken, content };
+  const savedBodyDraft = captureNovelBody();
   setBusy(true);
   setSaveState("正在保存", `正在保存第 ${novel.chapter.i} 章的改编稿…`);
   try {
     const payload = await api(
-      `/api/novel/books/${encodeURIComponent(novel.bookId)}/chapters/${novel.chapter.i}`,
+      `/api/novel/books/${encodeURIComponent(snapshot.bookId)}/chapters/${snapshot.chapterNo}`,
       {
         method: "PATCH",
         body: {
           title,
           content,
           revision: novel.chapter.revision,
-          base_manuscript_id: novel.editingManuscriptId,
+          base_manuscript_id: snapshot.sourceId,
         },
       }
     );
+    if (novel.bookId !== snapshot.bookId || novel.bookToken !== snapshot.bookToken
+      || novel.chapterToken !== snapshot.chapterToken || novel.chapterNo !== snapshot.chapterNo) {
+      void novelBodyDrafts.remove(savedBodyDraft).catch(() => novelBodyPanel.status("error"));
+      return;
+    }
     const chapter = payload.chapter;
-    const chapterNo = novel.chapter.i;
+    const chapterNo = snapshot.chapterNo;
     // 索引里的标题/字数要跟着更新，否则左侧列表还是旧值。
     const row = novel.chapters.find((item) => item.i === chapterNo);
     if (row) {
@@ -3063,13 +3128,24 @@ async function saveManuscriptEdit() {
     const savedNote = created
       ? `${created.label} 已保存到作品（${created.len} 字）。原文与其它稿件都没有改动。`
       : "内容没有改动，没有新增稿件卡片。";
+    if (novel.editToken !== snapshot.editToken || novel.editDraft !== snapshot.content) {
+      novel.chapter = chapter;
+      captureNovelBody();
+      setSaveState("有未保存修改", "提交的正文已保存；保存期间的新输入仍在编辑区和本地草稿中。");
+      void novelBodyPanel.refresh(novelBodyDrafts, novel.bookId);
+      return;
+    }
     novel.editingManuscriptId = "";
     novel.editDraft = "";
+    novelBodyContext = null;
+    renderEditor();
+    await novelBodyDrafts.remove(savedBodyDraft);
     // 重新读一次章节（稿件清单与正文以服务端为准），再把「已保存」写回去：
     // openChapter 会把状态改成「已读取」，不能让它盖掉保存结果。
     await openChapter(chapterNo);
     // 左栏的章节索引单独来自作品详情：标题改了要重读一次，否则列表还显示旧标题。
     await refreshChapterIndex();
+    void novelBodyPanel.refresh(novelBodyDrafts, novel.bookId);
     setSaveState("已保存", savedNote);
     toast(created ? `${created.label} 已保存` : "内容没有改动，没有新增稿件");
   } catch (error) {
@@ -3301,15 +3377,44 @@ function markDirty(event) {
   if (!novel.editingManuscriptId) return;
   // 草稿保留在内存里，收起阅读区或切稿都不会丢；保存时以草稿为准。
   novel.editDraft = String(event?.target?.value ?? novel.editDraft ?? "");
+  novel.editToken += 1;
+  novelBodyDirty = true;
+  captureNovelBody();
   renderManuscriptEditor();
 }
 
-function beginEdit(manuscriptId) {
+async function beginEdit(manuscriptId, { bodyDraft = null } = {}) {
+  if (!await preserveNovelBody()) return false;
   const source = manuscriptRows().find((row) => row.id === manuscriptId);
   if (!source) return;
+  const bookId = novel.bookId;
+  const token = novel.chapterToken;
+  const editToken = novel.editToken;
+  await ensureManuscriptBody(source);
+  let recovered = bodyDraft;
+  try {
+    if (!recovered) recovered = (await novelBodyDrafts.list("novel", bookId, novel.chapterNo))
+      .find((row) => row.sourceId === String(source.id)) || null;
+  } catch (_error) { novelBodyPanel.status("error"); }
+  if (novel.bookId !== bookId || novel.chapterToken !== token || novel.editToken !== editToken) return false;
+  const base = novelDraftContext(source);
+  if (recovered && !bodyDraftMatches(recovered, base)) {
+    const choice = await chooseBodyDraft(recovered, { canContinue: base.sourceExists });
+    if (novel.bookId !== bookId || novel.chapterToken !== token || novel.editToken !== editToken) return false;
+    if (choice === "discard") await novelBodyDrafts.remove(recovered);
+    if (choice !== "continue") recovered = null;
+  }
   novel.editingManuscriptId = String(manuscriptId);
   novel.aiTargetId = "";
-  novel.editDraft = manuscriptBody(source);
+  novelBodyContext = base;
+  novelBodyDirty = Boolean(recovered);
+  novel.editDraft = recovered ? recovered.content : manuscriptBody(source);
+  novel.editToken += 1;
+  if (recovered) {
+    const next = captureNovelBody();
+    if (next?.key !== recovered.key) await novelBodyDrafts.remove(recovered);
+    novelBodyPanel.status("restored");
+  }
   novel.expanded.add(String(manuscriptId));
   renderEditor();
   const body = $("#novelChapterBody");
@@ -3325,8 +3430,13 @@ async function cancelEdit() {
     manuscriptRows().find((row) => row.id === novel.editingManuscriptId)
   );
   if (changed && !window.confirm("这次修改还没保存，取消后不会创建新稿件。要继续吗？")) return;
+  const editToken = novel.editToken;
+  const discarded = captureNovelBody();
+  if (discarded && !await novelBodyDrafts.remove(discarded)) return;
+  if (novel.editToken !== editToken) return;
   novel.editingManuscriptId = "";
   novel.editDraft = "";
+  novelBodyContext = null;
   renderEditor();
 }
 
@@ -3385,6 +3495,7 @@ function restoreLimits() {
 
 export function bindNovelEvents() {
   if (novel.initialized) return;
+  bindBodyDraftLifecycle(novelBodyDrafts, captureNovelBody);
   prepareStagePanels();
   restoreLimits();
   restoreStoryboardSystem();
@@ -3833,6 +3944,8 @@ export function bindNovelEvents() {
   // 功能页切换：进入本页时按服务端校准一次（页面刷新后也能恢复上次作品）。
   onStudioPageChange((next, detail) => {
     if (detail?.closed || next !== "novel") {
+      captureNovelBody();
+      void novelBodyDrafts.flush();
       // 切走就停轮询：页面隐藏后继续轮询只是白耗请求。
       stopTaskPolling();
       return;

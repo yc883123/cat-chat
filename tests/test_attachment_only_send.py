@@ -120,6 +120,10 @@ class SubmitChatAttachmentOnlyTests(unittest.TestCase):
             paths=SimpleNamespace(data_dir=root / "data"),
         )
         self.manager = ConversationRunManager(app)
+        app.config.upsert_model_profile({
+            "id": "submit-fixture", "kind": "online", "name": "提交夹具",
+            "base_url": "http://127.0.0.1:9/v1", "model": "test-model",
+        })
         self.conversation = self.storage.create_conversation(model_name="test-model")
 
     def tearDown(self):

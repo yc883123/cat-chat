@@ -58,6 +58,10 @@ class TrustedChatSourceTests(unittest.TestCase):
             super_agent_domain=SimpleNamespace(runtime=SimpleNamespace(
                 supervised=SimpleNamespace(human_input=human_input))))
         self.manager = ConversationRunManager(self.app)
+        self.app.config.upsert_model_profile({
+            "id": "submit-fixture", "kind": "online", "name": "提交夹具",
+            "base_url": "http://127.0.0.1:9/v1", "model": "fixture",
+        })
 
     def submit(self, **kwargs):
         body = {"conversation_id": self.cid, "message": "验证原目标"}

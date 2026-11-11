@@ -47,6 +47,7 @@ async function run(browser, viewport, sourceKind, source, lostResponse) {
     const studio = await import('/js/22-studio.js');
     studio.openStudioView(); studio.setStudioPage('writer');
   });
+  await page.locator('#writerBookMenuBtn').click();
   await page.locator('#writerNovelContinueBtn').click();
   await page.locator('#writerNovelImportNext').waitFor({ state: 'visible' });
   await page.waitForFunction(() => !document.querySelector('#writerNovelImportNext').disabled);

@@ -816,61 +816,61 @@ class NovelStore:
 
         正文与基础稿件完全一致时不新增记录（内容未改变不重复建卡）。
         """
-        manifest = self._load_manifest(book_id)
-        if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
-            raise LookupError("章节不存在")
-        book_dir = self._book_dir(book_id)
-        index = self._load_chapter_index(book_dir, chapter_no)
-        if expected_revision is not None:
-            if isinstance(expected_revision, bool):
-                raise NovelServiceError("revision 必须是整数")
-            try:
-                expected = int(expected_revision)
-            except (TypeError, ValueError):
-                raise NovelServiceError("revision 必须是整数") from None
-            actual = int(index.get("revision") or 0)
-            if expected != actual:
-                raise NovelConflictError(
-                    f"这一章已被修改过（你看到的是第 {expected} 版，现在是第 {actual} 版），请重新读取后再改"
-                )
-        next_title = str(index.get("title") or "")
-        if title is not None:
-            next_title = str(title).strip()
-            if not next_title:
-                raise NovelServiceError("章节标题不能为空")
-            if len(next_title) > TITLE_MAX:
-                raise NovelServiceError(f"章节标题不能超过 {TITLE_MAX} 字符")
-        created: dict[str, Any] | None = None
-        if content is not None:
-            if not isinstance(content, str):
-                raise NovelServiceError("章节正文必须是文本")
-            if not content.strip():
-                raise NovelServiceError("章节正文不能为空")
-            created = self.save_manuscript(
-                book_id, chapter_no, content=content, kind=manuscripts.KIND_MANUAL,
-                source_manuscript_id=base_manuscript_id, task_id=task_id,
-                user_request=user_request, bump_manifest=False,
-            )["manuscript"]
-        # 标题变更或新增稿件后重读索引（save_manuscript 已经写过一次文件）。
-        index = self._load_chapter_index(book_dir, chapter_no)
-        index["title"] = next_title
-        index["revision"] = int(index.get("revision") or 0) + 1
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
+                raise LookupError("章节不存在")
+            book_dir = self._book_dir(book_id)
+            index = self._load_chapter_index(book_dir, chapter_no)
+            if expected_revision is not None:
+                if isinstance(expected_revision, bool):
+                    raise NovelServiceError("revision 必须是整数")
+                try:
+                    expected = int(expected_revision)
+                except (TypeError, ValueError):
+                    raise NovelServiceError("revision 必须是整数") from None
+                actual = int(index.get("revision") or 0)
+                if expected != actual:
+                    raise NovelConflictError(
+                        f"这一章已被修改过（你看到的是第 {expected} 版，现在是第 {actual} 版），请重新读取后再改"
+                    )
+            next_title = str(index.get("title") or "")
+            if title is not None:
+                next_title = str(title).strip()
+                if not next_title:
+                    raise NovelServiceError("章节标题不能为空")
+                if len(next_title) > TITLE_MAX:
+                    raise NovelServiceError(f"章节标题不能超过 {TITLE_MAX} 字符")
+            created: dict[str, Any] | None = None
+            if content is not None:
+                if not isinstance(content, str):
+                    raise NovelServiceError("章节正文必须是文本")
+                if not content.strip():
+                    raise NovelServiceError("章节正文不能为空")
+                created = self.save_manuscript(
+                    book_id, chapter_no, content=content, kind=manuscripts.KIND_MANUAL,
+                    source_manuscript_id=base_manuscript_id, task_id=task_id,
+                    user_request=user_request, bump_manifest=False,
+                )["manuscript"]
+            # 标题变更或新增稿件后重读索引（save_manuscript 已经写过一次文件）。
+            index = self._load_chapter_index(book_dir, chapter_no)
+            index["title"] = next_title
+            index["revision"] = int(index.get("revision") or 0) + 1
             self._write_json(self._chapter_path(book_dir, chapter_no), index)
             self._bump_manifest(book_dir, manifest)
-        result = {
-            "i": chapter_no,
-            "title": next_title,
-            "len": int(index.get("len") or 0),
-            "revision": int(index["revision"]),
-            "manuscripts": self._chapter_manuscripts(book_dir, index),
-            "created_manuscript": created,
-        }
-        base_id = self._resolve_manuscript_id(index, "")
-        base = self._load_manuscript(book_dir, chapter_no, base_id) if base_id else None
-        result["base_manuscript_id"] = base_id
-        result["content"] = str(base.get("content") if base else "")
-        return result
+            result = {
+                "i": chapter_no,
+                "title": next_title,
+                "len": int(index.get("len") or 0),
+                "revision": int(index["revision"]),
+                "manuscripts": self._chapter_manuscripts(book_dir, index),
+                "created_manuscript": created,
+            }
+            base_id = self._resolve_manuscript_id(index, "")
+            base = self._load_manuscript(book_dir, chapter_no, base_id) if base_id else None
+            result["base_manuscript_id"] = base_id
+            result["content"] = str(base.get("content") if base else "")
+            return result
 
     def save_manuscript(self, book_id: str, chapter_no: int, *,
                         content: Any, kind: str = manuscripts.KIND_MANUAL,
@@ -883,59 +883,59 @@ class NovelStore:
         内容与来源稿件逐字相同 → 不新增记录，直接返回来源稿件（前端不会出现
         重复卡片，重复点保存也不会叠加）。
         """
-        manifest = self._load_manifest(book_id)
-        if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
-            raise LookupError("章节不存在")
-        if kind not in manuscripts.ADAPTED_KINDS:
-            raise NovelServiceError("只能新增人工改编稿或 AI 改编稿")
-        if not isinstance(content, str) or not content.strip():
-            raise NovelServiceError("改编稿正文不能为空")
-        book_dir = self._book_dir(book_id)
-        index = self._load_chapter_index(book_dir, chapter_no)
-        if expected_revision is not None and expected_revision != "":
-            if isinstance(expected_revision, bool):
-                raise NovelServiceError("revision 必须是整数")
-            try:
-                expected = int(expected_revision)
-            except (TypeError, ValueError):
-                raise NovelServiceError("revision 必须是整数") from None
-            if expected != int(index.get("revision") or 0):
-                raise NovelConflictError(
-                    f"这一章已被修改过（你看到的是第 {expected} 版，现在是第 {int(index.get('revision') or 0)} 版），"
-                    "请重新读取后再保存"
-                )
-        source_id = self._resolve_manuscript_id(index, source_manuscript_id)
-        # 重复保存 / 重复点按钮：与同来源稿件逐字相同就不再建新记录。
-        for existing_id in index.get("manuscript_ids") or []:
-            try:
-                existing = self._load_manuscript(book_dir, chapter_no, str(existing_id))
-            except (LookupError, NovelServiceError):
-                continue
-            if str(existing.get("source_manuscript_id") or "") == source_id and existing["content"] == content:
-                return {"manuscript": existing, "duplicate": True, "book": self._public_manifest(manifest)}
-        no = self._next_adapted_no(book_dir, index)
-        record = manuscripts.build(
-            chapter_no=chapter_no, kind=kind, content=content, no=no,
-            source_manuscript_id=source_id, task_id=task_id,
-            user_request=user_request, label=label,
-        )
-        delta = len(content.encode("utf-8"))
-        self._check_book_capacity(book_dir, extra_bytes=delta)
-        index.setdefault("manuscript_ids", []).append(record["id"])
-        index["next_adapted_no"] = no + 1
-        index["len"] = len(content)
-        index["revision"] = int(index.get("revision") or 0) + 1
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            if chapter_no not in {int(n) for n in manifest.get("chapter_ids") or []}:
+                raise LookupError("章节不存在")
+            if kind not in manuscripts.ADAPTED_KINDS:
+                raise NovelServiceError("只能新增人工改编稿或 AI 改编稿")
+            if not isinstance(content, str) or not content.strip():
+                raise NovelServiceError("改编稿正文不能为空")
+            book_dir = self._book_dir(book_id)
+            index = self._load_chapter_index(book_dir, chapter_no)
+            if expected_revision is not None and expected_revision != "":
+                if isinstance(expected_revision, bool):
+                    raise NovelServiceError("revision 必须是整数")
+                try:
+                    expected = int(expected_revision)
+                except (TypeError, ValueError):
+                    raise NovelServiceError("revision 必须是整数") from None
+                if expected != int(index.get("revision") or 0):
+                    raise NovelConflictError(
+                        f"这一章已被修改过（你看到的是第 {expected} 版，现在是第 {int(index.get('revision') or 0)} 版），"
+                        "请重新读取后再保存"
+                    )
+            source_id = self._resolve_manuscript_id(index, source_manuscript_id)
+            # 重复保存 / 重复点按钮：与同来源稿件逐字相同就不再建新记录。
+            for existing_id in index.get("manuscript_ids") or []:
+                try:
+                    existing = self._load_manuscript(book_dir, chapter_no, str(existing_id))
+                except (LookupError, NovelServiceError):
+                    continue
+                if str(existing.get("source_manuscript_id") or "") == source_id and existing["content"] == content:
+                    return {"manuscript": existing, "duplicate": True, "book": self._public_manifest(manifest)}
+            no = self._next_adapted_no(book_dir, index)
+            record = manuscripts.build(
+                chapter_no=chapter_no, kind=kind, content=content, no=no,
+                source_manuscript_id=source_id, task_id=task_id,
+                user_request=user_request, label=label,
+            )
+            delta = len(content.encode("utf-8"))
+            self._check_book_capacity(book_dir, extra_bytes=delta)
+            index.setdefault("manuscript_ids", []).append(record["id"])
+            index["next_adapted_no"] = no + 1
+            index["len"] = len(content)
+            index["revision"] = int(index.get("revision") or 0) + 1
             self._write_json(self._manuscript_path(book_dir, chapter_no, record["id"]), record)
             self._write_json(self._chapter_path(book_dir, chapter_no), index)
             if bump_manifest:
                 self._bump_manifest(book_dir, manifest)
-        return {
-            "manuscript": manuscripts.public(record),
-            "duplicate": False,
-            "revision": int(index["revision"]),
-            "book": self._public_manifest(manifest) if bump_manifest else None,
-        }
+            return {
+                "manuscript": manuscripts.public(record),
+                "duplicate": False,
+                "revision": int(index["revision"]),
+                "book": self._public_manifest(manifest) if bump_manifest else None,
+            }
 
     def delete_manuscript(self, book_id: str, chapter_no: int, manuscript_id: str) -> dict[str, Any]:
         """删一份稿件。删掉该章最后一份稿件 = 移除这一章（至少保留一章）。"""
@@ -984,14 +984,14 @@ class NovelStore:
 
     def delete_chapter(self, book_id: str, chapter_no: int) -> dict[str, Any]:
         """删章节：先删稿件与索引再更新清单；中断留下的孤儿章节下次保存时忽略。"""
-        manifest = self._load_manifest(book_id)
-        ids = [int(n) for n in manifest.get("chapter_ids") or []]
-        if chapter_no not in ids:
-            raise LookupError("章节不存在")
-        if len(ids) <= 1:
-            raise NovelServiceError("作品至少要保留一章；要整本删除请删作品")
-        book_dir = self._book_dir(book_id)
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            ids = [int(n) for n in manifest.get("chapter_ids") or []]
+            if chapter_no not in ids:
+                raise LookupError("章节不存在")
+            if len(ids) <= 1:
+                raise NovelServiceError("作品至少要保留一章；要整本删除请删作品")
+            book_dir = self._book_dir(book_id)
             shutil.rmtree(self._manuscript_dir(book_dir, chapter_no), ignore_errors=True)
             try:
                 self._chapter_path(book_dir, chapter_no).unlink(missing_ok=True)
@@ -999,7 +999,7 @@ class NovelStore:
                 raise NovelServiceError(f"删除章节失败：{exc}") from exc
             manifest["chapter_ids"] = [n for n in ids if n != chapter_no]
             self._bump_manifest(book_dir, manifest)
-        return {"ok": True, "chapter_count": len(manifest["chapter_ids"])}
+            return {"ok": True, "chapter_count": len(manifest["chapter_ids"])}
 
     def delete_book(self, book_id: str) -> dict[str, Any]:
         """删作品：作用范围严格限定为该作品目录，不波及其它作品。"""
@@ -1064,78 +1064,78 @@ class NovelStore:
         拆分只按列表项前缀归并，识别不了就整段留在 `raw` 里——**不猜、不编**，
         用户在界面上看到的就是模型写的东西。
         """
-        manifest = self._check_apply_revision(book_id, expected_revision)
-        book_dir = self._book_dir(book_id)
-        text = str(raw or "")
-        if not text.strip():
-            raise NovelServiceError("要素结果为空，没有可写回的内容")
-        self._reject_duplicate_task(manifest.get("elements_versions"), task_id)
-        buckets = _split_elements(text)
-        versions = manifest.get("elements_versions") if isinstance(manifest.get("elements_versions"), list) else []
-        if not versions and str((manifest.get("elements") or {}).get("raw") or "").strip():
-            previous = manifest["elements"]
-            versions = [{
-                "id": _new_version_id("el"),
-                "version": 1, "raw": str(previous.get("raw") or ""),
-                "updated_at": int(previous.get("updated_at") or 0),
-                "task_id": str(previous.get("task_id") or ""),
-            }]
-        versions = self._ensure_version_ids(versions, "el")
-        version = max((int(row.get("version") or 0) for row in versions if isinstance(row, dict)), default=0) + 1
-        entry = {"id": _new_version_id("el"), "version": version, "raw": text,
-                 "updated_at": _now_ms(), "task_id": str(task_id or "")}
-        entry["chapter_ids"] = list(chapter_ids or [])
-        entry["manuscripts"] = self._manuscript_refs(manuscripts_by_chapter)
-        versions.append(entry)
-        manifest["elements_versions"] = versions
-        manifest["elements"] = {
-            "characters": buckets["characters"],
-            "scenes": buckets["scenes"],
-            "props": buckets["props"],
-            "raw": text,
-            "updated_at": _now_ms(),
-            "task_id": str(task_id or ""),
-            "version": version,
-            "version_id": entry["id"],
-        }
         with self._lock:
+            manifest = self._check_apply_revision(book_id, expected_revision)
+            book_dir = self._book_dir(book_id)
+            text = str(raw or "")
+            if not text.strip():
+                raise NovelServiceError("要素结果为空，没有可写回的内容")
+            self._reject_duplicate_task(manifest.get("elements_versions"), task_id)
+            buckets = _split_elements(text)
+            versions = manifest.get("elements_versions") if isinstance(manifest.get("elements_versions"), list) else []
+            if not versions and str((manifest.get("elements") or {}).get("raw") or "").strip():
+                previous = manifest["elements"]
+                versions = [{
+                    "id": _new_version_id("el"),
+                    "version": 1, "raw": str(previous.get("raw") or ""),
+                    "updated_at": int(previous.get("updated_at") or 0),
+                    "task_id": str(previous.get("task_id") or ""),
+                }]
+            versions = self._ensure_version_ids(versions, "el")
+            version = max((int(row.get("version") or 0) for row in versions if isinstance(row, dict)), default=0) + 1
+            entry = {"id": _new_version_id("el"), "version": version, "raw": text,
+                     "updated_at": _now_ms(), "task_id": str(task_id or "")}
+            entry["chapter_ids"] = list(chapter_ids or [])
+            entry["manuscripts"] = self._manuscript_refs(manuscripts_by_chapter)
+            versions.append(entry)
+            manifest["elements_versions"] = versions
+            manifest["elements"] = {
+                "characters": buckets["characters"],
+                "scenes": buckets["scenes"],
+                "props": buckets["props"],
+                "raw": text,
+                "updated_at": _now_ms(),
+                "task_id": str(task_id or ""),
+                "version": version,
+                "version_id": entry["id"],
+            }
             self._bump_manifest(book_dir, manifest)
-        return self._public_manifest(manifest)
+            return self._public_manifest(manifest)
 
     def apply_outline(self, book_id: str, *, task_id: str, text: str,
                       expected_revision: Any = None, chapter_ids: list[int] | None = None,
                       manuscripts_by_chapter: dict[int, str] | None = None) -> dict[str, Any]:
         """大纲写回（三幕结构整段留存，阶段三按它生成场次）。"""
-        manifest = self._check_apply_revision(book_id, expected_revision)
-        book_dir = self._book_dir(book_id)
-        body = str(text or "")
-        if not body.strip():
-            raise NovelServiceError("大纲结果为空，没有可写回的内容")
-        self._reject_duplicate_task(manifest.get("outline_versions"), task_id)
-        versions = manifest.get("outline_versions") if isinstance(manifest.get("outline_versions"), list) else []
-        if not versions and str(manifest.get("outline") or "").strip():
-            versions = [{
-                "id": _new_version_id("ol"),
-                "version": 1, "text": str(manifest.get("outline") or ""),
-                "updated_at": int(manifest.get("outline_updated_at") or 0),
-                "task_id": str(manifest.get("outline_task_id") or ""),
-            }]
-        versions = self._ensure_version_ids(versions, "ol")
-        version = max((int(row.get("version") or 0) for row in versions if isinstance(row, dict)), default=0) + 1
-        entry = {"id": _new_version_id("ol"), "version": version, "text": body,
-                 "updated_at": _now_ms(), "task_id": str(task_id or ""),
-                 "chapter_ids": list(chapter_ids or []),
-                 "manuscripts": self._manuscript_refs(manuscripts_by_chapter)}
-        versions.append(entry)
-        manifest["outline_versions"] = versions
-        manifest["outline"] = body
-        manifest["outline_version"] = version
-        manifest["outline_version_id"] = entry["id"]
-        manifest["outline_task_id"] = str(task_id or "")
-        manifest["outline_updated_at"] = _now_ms()
         with self._lock:
+            manifest = self._check_apply_revision(book_id, expected_revision)
+            book_dir = self._book_dir(book_id)
+            body = str(text or "")
+            if not body.strip():
+                raise NovelServiceError("大纲结果为空，没有可写回的内容")
+            self._reject_duplicate_task(manifest.get("outline_versions"), task_id)
+            versions = manifest.get("outline_versions") if isinstance(manifest.get("outline_versions"), list) else []
+            if not versions and str(manifest.get("outline") or "").strip():
+                versions = [{
+                    "id": _new_version_id("ol"),
+                    "version": 1, "text": str(manifest.get("outline") or ""),
+                    "updated_at": int(manifest.get("outline_updated_at") or 0),
+                    "task_id": str(manifest.get("outline_task_id") or ""),
+                }]
+            versions = self._ensure_version_ids(versions, "ol")
+            version = max((int(row.get("version") or 0) for row in versions if isinstance(row, dict)), default=0) + 1
+            entry = {"id": _new_version_id("ol"), "version": version, "text": body,
+                     "updated_at": _now_ms(), "task_id": str(task_id or ""),
+                     "chapter_ids": list(chapter_ids or []),
+                     "manuscripts": self._manuscript_refs(manuscripts_by_chapter)}
+            versions.append(entry)
+            manifest["outline_versions"] = versions
+            manifest["outline"] = body
+            manifest["outline_version"] = version
+            manifest["outline_version_id"] = entry["id"]
+            manifest["outline_task_id"] = str(task_id or "")
+            manifest["outline_updated_at"] = _now_ms()
             self._bump_manifest(book_dir, manifest)
-        return self._public_manifest(manifest)
+            return self._public_manifest(manifest)
 
     def apply_script(self, book_id: str, *, task_id: str, text: str,
                      from_chapter: int = 0, chapter_ids: list[int] | None = None,
@@ -1146,52 +1146,52 @@ class NovelStore:
         解析失败时 `scene` 留空、`parsed=False`，前端明示「未能识别场次结构，
         已按整段保存」——**绝不臆造场次切分**（《阶段三》§五 P1）。
         """
-        manifest = self._check_apply_revision(book_id, expected_revision)
-        book_dir = self._book_dir(book_id)
-        body = str(text or "")
-        if not body.strip():
-            raise NovelServiceError("剧本结果为空，没有可写回的内容")
-        versions = manifest.get("script_versions") if isinstance(manifest.get("script_versions"), list) else []
-        self._reject_duplicate_task(versions, task_id)
-        source_chapters = sorted({int(value) for value in (chapter_ids or [])})
-        if not source_chapters and from_chapter:
-            source_chapters = [int(from_chapter)]
-        primary_chapter = source_chapters[0] if source_chapters else int(from_chapter or 0)
-        previous_task_id = str(manifest.get("script_task_id") or "")
-        previous_updated_at = int(manifest.get("script_updated_at") or 0)
-        scenes, parsed = prompts.parse_scenes(body, from_chapter=primary_chapter)
-        if not parsed:
-            scenes = [{"scene": "", "content": body, "from_chapter": primary_chapter}]
-        existing = manifest.get("script") if isinstance(manifest.get("script"), list) else []
-        replacement_chapters = set(source_chapters)
-        kept = [row for row in existing if int(row.get("from_chapter") or 0) not in replacement_chapters] if replacement_chapters else []
-        merged = kept + scenes
-        manifest["script"] = [
-            {**row, "i": index}
-            for index, row in enumerate(merged, start=1)
-        ]
-        manifest["script_task_id"] = str(task_id or "")
-        manifest["script_updated_at"] = _now_ms()
-        manifest["script_parsed"] = bool(parsed)
-        if not versions and existing:
-            versions = [{"id": _new_version_id("sc"), "version": 1, "script": existing,
-                         "updated_at": previous_updated_at, "task_id": previous_task_id,
-                         "chapter_ids": []}]
-        versions = self._ensure_version_ids(versions, "sc")
-        version = max((int(row.get("version") or 0) for row in versions if isinstance(row, dict)), default=0) + 1
-        entry = {"id": _new_version_id("sc"), "version": version, "script": manifest["script"],
-                 "updated_at": _now_ms(), "task_id": str(task_id or ""),
-                 "chapter_ids": source_chapters,
-                 "manuscripts": self._manuscript_refs(manuscripts_by_chapter)}
-        versions.append(entry)
-        manifest["script_versions"] = versions
-        manifest["script_version"] = version
-        manifest["script_version_id"] = entry["id"]
         with self._lock:
+            manifest = self._check_apply_revision(book_id, expected_revision)
+            book_dir = self._book_dir(book_id)
+            body = str(text or "")
+            if not body.strip():
+                raise NovelServiceError("剧本结果为空，没有可写回的内容")
+            versions = manifest.get("script_versions") if isinstance(manifest.get("script_versions"), list) else []
+            self._reject_duplicate_task(versions, task_id)
+            source_chapters = sorted({int(value) for value in (chapter_ids or [])})
+            if not source_chapters and from_chapter:
+                source_chapters = [int(from_chapter)]
+            primary_chapter = source_chapters[0] if source_chapters else int(from_chapter or 0)
+            previous_task_id = str(manifest.get("script_task_id") or "")
+            previous_updated_at = int(manifest.get("script_updated_at") or 0)
+            scenes, parsed = prompts.parse_scenes(body, from_chapter=primary_chapter)
+            if not parsed:
+                scenes = [{"scene": "", "content": body, "from_chapter": primary_chapter}]
+            existing = manifest.get("script") if isinstance(manifest.get("script"), list) else []
+            replacement_chapters = set(source_chapters)
+            kept = [row for row in existing if int(row.get("from_chapter") or 0) not in replacement_chapters] if replacement_chapters else []
+            merged = kept + scenes
+            manifest["script"] = [
+                {**row, "i": index}
+                for index, row in enumerate(merged, start=1)
+            ]
+            manifest["script_task_id"] = str(task_id or "")
+            manifest["script_updated_at"] = _now_ms()
+            manifest["script_parsed"] = bool(parsed)
+            if not versions and existing:
+                versions = [{"id": _new_version_id("sc"), "version": 1, "script": existing,
+                             "updated_at": previous_updated_at, "task_id": previous_task_id,
+                             "chapter_ids": []}]
+            versions = self._ensure_version_ids(versions, "sc")
+            version = max((int(row.get("version") or 0) for row in versions if isinstance(row, dict)), default=0) + 1
+            entry = {"id": _new_version_id("sc"), "version": version, "script": manifest["script"],
+                     "updated_at": _now_ms(), "task_id": str(task_id or ""),
+                     "chapter_ids": source_chapters,
+                     "manuscripts": self._manuscript_refs(manuscripts_by_chapter)}
+            versions.append(entry)
+            manifest["script_versions"] = versions
+            manifest["script_version"] = version
+            manifest["script_version_id"] = entry["id"]
             self._bump_manifest(book_dir, manifest)
-        result = self._public_manifest(manifest)
-        result["script_parsed"] = bool(parsed)
-        return result
+            result = self._public_manifest(manifest)
+            result["script_parsed"] = bool(parsed)
+            return result
 
     @staticmethod
     def _ensure_version_ids(versions: list[Any], prefix: str) -> list[Any]:
@@ -1266,64 +1266,65 @@ class NovelStore:
     def update_scene(self, book_id: str, scene_no: int, *,
                      scene: Any = None, content: Any = None,
                      expected_revision: Any = None) -> dict[str, Any]:
-        manifest = self._check_apply_revision(book_id, expected_revision)
-        book_dir = self._book_dir(book_id)
-        rows = manifest.get("script") if isinstance(manifest.get("script"), list) else []
-        index = self._scene_index(rows, scene_no)
-        row = dict(rows[index])
-        if scene is not None:
-            row["scene"] = str(scene).strip()
-        if content is not None:
-            if not isinstance(content, str):
-                raise NovelServiceError("场次正文必须是文本")
-            row["content"] = content
-        if not str(row.get("scene") or "").strip() and not str(row.get("content") or "").strip():
-            raise NovelServiceError("场景行与正文不能同时为空")
-        rows[index] = row
-        manifest["script"] = rows
-        self._sync_latest_script_version(manifest)
         with self._lock:
+            manifest = self._check_apply_revision(book_id, expected_revision)
+            book_dir = self._book_dir(book_id)
+            rows = manifest.get("script") if isinstance(manifest.get("script"), list) else []
+            index = self._scene_index(rows, scene_no)
+            row = dict(rows[index])
+            if scene is not None:
+                row["scene"] = str(scene).strip()
+            if content is not None:
+                if not isinstance(content, str):
+                    raise NovelServiceError("场次正文必须是文本")
+                row["content"] = content
+            if not str(row.get("scene") or "").strip() and not str(row.get("content") or "").strip():
+                raise NovelServiceError("场景行与正文不能同时为空")
+            rows[index] = row
+            manifest["script"] = rows
+            self._sync_latest_script_version(manifest)
             self._bump_manifest(book_dir, manifest)
-        return {"scene": row, "revision": int(manifest.get("revision") or 0)}
+            return {"scene": row, "revision": int(manifest.get("revision") or 0)}
 
     def delete_scene(self, book_id: str, scene_no: int) -> dict[str, Any]:
-        manifest = self._load_manifest(book_id)
-        book_dir = self._book_dir(book_id)
-        rows = manifest.get("script") if isinstance(manifest.get("script"), list) else []
-        index = self._scene_index(rows, scene_no)
-        rows.pop(index)
-        # 重排编号：i 从 1 连续，避免删掉中间一条后编号出现空洞。
-        manifest["script"] = [{**row, "i": pos} for pos, row in enumerate(rows, start=1)]
-        self._sync_latest_script_version(manifest)
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            book_dir = self._book_dir(book_id)
+            rows = manifest.get("script") if isinstance(manifest.get("script"), list) else []
+            index = self._scene_index(rows, scene_no)
+            rows.pop(index)
+            # 重排编号：i 从 1 连续，避免删掉中间一条后编号出现空洞。
+            manifest["script"] = [{**row, "i": pos} for pos, row in enumerate(rows, start=1)]
+            self._sync_latest_script_version(manifest)
             self._bump_manifest(book_dir, manifest)
-        return {"ok": True, "count": len(manifest["script"])}
+            return {"ok": True, "count": len(manifest["script"])}
 
     def reorder_script(self, book_id: str, order: Any) -> dict[str, Any]:
         """按给定顺序重排场次：只改顺序，**保留 `from_chapter` 来源**。"""
-        manifest = self._load_manifest(book_id)
-        book_dir = self._book_dir(book_id)
-        rows = manifest.get("script") if isinstance(manifest.get("script"), list) else []
-        if not rows:
-            raise NovelServiceError("这个作品还没有剧本场次")
-        if not isinstance(order, list) or not order:
-            raise NovelServiceError("order 必须是非空的场次号数组")
-        wanted: list[int] = []
-        for raw in order:
-            if isinstance(raw, bool) or not isinstance(raw, int):
-                raise NovelServiceError("场次号必须是整数")
-            wanted.append(raw)
-        current = [int(row.get("i") or 0) for row in rows]
-        if sorted(wanted) != sorted(current):
-            raise NovelServiceError("order 必须恰好包含现有全部场次号，且不能重复")
-        by_no = {int(row.get("i") or 0): row for row in rows}
-        manifest["script"] = [
-            {**by_no[no], "i": pos}
-            for pos, no in enumerate(wanted, start=1)
-        ]
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            book_dir = self._book_dir(book_id)
+            rows = manifest.get("script") if isinstance(manifest.get("script"), list) else []
+            if not rows:
+                raise NovelServiceError("这个作品还没有剧本场次")
+            if not isinstance(order, list) or not order:
+                raise NovelServiceError("order 必须是非空的场次号数组")
+            wanted: list[int] = []
+            for raw in order:
+                if isinstance(raw, bool) or not isinstance(raw, int):
+                    raise NovelServiceError("场次号必须是整数")
+                wanted.append(raw)
+            current = [int(row.get("i") or 0) for row in rows]
+            if sorted(wanted) != sorted(current):
+                raise NovelServiceError("order 必须恰好包含现有全部场次号，且不能重复")
+            by_no = {int(row.get("i") or 0): row for row in rows}
+            manifest["script"] = [
+                {**by_no[no], "i": pos}
+                for pos, no in enumerate(wanted, start=1)
+            ]
+            self._sync_latest_script_version(manifest)
             self._bump_manifest(book_dir, manifest)
-        return {"script": manifest["script"], "revision": int(manifest.get("revision") or 0)}
+            return {"script": manifest["script"], "revision": int(manifest.get("revision") or 0)}
 
     @staticmethod
     def _scene_index(rows: list[Any], scene_no: int) -> int:
@@ -1340,19 +1341,19 @@ class NovelStore:
         摘要按**具体稿件**记录：用改编稿生成的摘要不会顶掉原文的摘要
         （键 = `章号@稿件 ID`），否则换回原文时会拿改编稿的摘要当前文。
         """
-        manifest = self._load_manifest(book_id)
-        book_dir = self._book_dir(book_id)
-        merged = dict(manifest.get("summaries") or {})
-        for key, value in (summaries or {}).items():
-            text = str(value or "").strip()
-            if text:
-                merged[str(key)] = text
-        if merged == (manifest.get("summaries") or {}):
-            return self._public_manifest(manifest)
-        manifest["summaries"] = merged
         with self._lock:
+            manifest = self._load_manifest(book_id)
+            book_dir = self._book_dir(book_id)
+            merged = dict(manifest.get("summaries") or {})
+            for key, value in (summaries or {}).items():
+                text = str(value or "").strip()
+                if text:
+                    merged[str(key)] = text
+            if merged == (manifest.get("summaries") or {}):
+                return self._public_manifest(manifest)
+            manifest["summaries"] = merged
             self._bump_manifest(book_dir, manifest)
-        return self._public_manifest(manifest)
+            return self._public_manifest(manifest)
 
     # ---- 记录管理与批量删除 ----
 

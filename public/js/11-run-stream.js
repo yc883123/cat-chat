@@ -6,8 +6,8 @@ import { $, api, escapeHtml, notifyComposerChanged, state, toast } from "./01-co
 import { pendingContextWarning, showContextWarning } from "./03-media.js";
 import { messageElement, scrollToBottom, setStickToBottom } from "./04-messages.js";
 import { loadTasks, scheduleTaskSync } from "./06-tasks-plans.js";
-import { createConversation, loadConversations, openConversation, renderSidebar } from "./08-conversations.js";
-import { composerModelChoice, composerModelIsValidated, selectedProvider } from "./07-models-agents.js";
+import { conversationOpenGeneration, isConversationOpenCurrent, createConversation, loadConversations, openConversation, renderSidebar } from "./08-conversations.js";
+import { composerModelChoice, composerModelIsValidated, pendingConversationModelSave, selectedProvider } from "./07-models-agents.js";
 import { attachmentChips, folderChips, folderIndexMetadata, missingAttachmentPaths, renderPendingFiles } from "./10-upload.js";
 import { beginChoiceSubmit, closeQuickMessagePanel, commitChoiceSubmit, handleChatEvent, rollbackChoiceSubmit, setBusy } from "./12-chat-input.js";
 import { collapseComposerIfExpanded, hideSkillPopup, parseSkillReferences, renderInputMirror, resizeTextarea, stripSkillReferences } from "./13-skill-refs.js";
@@ -389,6 +389,7 @@ export async function consumeRunStream(response, row, conversationId, runId, con
 }
 
 export async function finishRunSubscription(conversationId, controller) {
+  const openGeneration = conversationOpenGeneration();
   if (state.abortController === controller) {
     stopRunWatchdog();
     clearElapsedStatus();
@@ -417,15 +418,15 @@ export async function finishRunSubscription(conversationId, controller) {
   } catch (error) {
     console.debug('[naiba] 终态任务同步失败，不阻断对话重载:', error?.message || error);
   }
-  if (state.conversationId === conversationId && !state.abortController) {
+  if (isConversationOpenCurrent(openGeneration, conversationId) && !state.abortController) {
     try {
       await loadConversations();
     } catch (error) {
       console.debug('[naiba] 终态会话列表同步失败，继续重载当前会话:', error?.message || error);
     }
-    if (state.conversationId === conversationId) {
+    if (isConversationOpenCurrent(openGeneration, conversationId)) {
       try {
-        await openConversation(conversationId);
+        await openConversation(conversationId, { expectedGeneration: openGeneration });
       } catch (error) {
         console.debug('[naiba] 终态会话重载失败:', error?.message || error);
       }
@@ -470,7 +471,7 @@ export function runStreamFailureText(error) {
 export async function resumeRun(run, options = {}) {
   const conversationId = String(run?.conversation_id || '');
   const runId = String(run?.id || '');
-  if (!runId || conversationId !== state.conversationId) return;
+  if (!runId || !isConversationOpenCurrent(conversationOpenGeneration(), conversationId)) return;
   if (state.cancelRequested || state.cancelledRunIds.has(runId)) return;
   const sameRun = state.chatRunId === runId && state.runConversationId === conversationId;
   detachRunConnection();
@@ -490,6 +491,7 @@ export async function resumeRun(run, options = {}) {
     let reconnectScheduled = false;
     try {
       const response = await fetchRunEvents(runId, controller);
+      if (!isRunGenerationActive(generation, controller) || state.conversationId !== conversationId) return;
       if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
         throw new Error(payload.error || `HTTP ${response.status}`);
@@ -518,11 +520,11 @@ export async function resumeRun(run, options = {}) {
   })();
 }
 
-export async function resumeConversationRun(conversationId) {
-  if (!conversationId || conversationId !== state.conversationId || state.abortController || state.cancelRequested) return;
+export async function resumeConversationRun(conversationId, { openGeneration = conversationOpenGeneration() } = {}) {
+  if (!conversationId || !isConversationOpenCurrent(openGeneration, conversationId) || state.abortController || state.cancelRequested) return;
   try {
     const result = await api(`/api/runs?conversation_id=${encodeURIComponent(conversationId)}&active_only=1`);
-    if (conversationId !== state.conversationId || state.abortController || state.cancelRequested) return;
+    if (!isConversationOpenCurrent(openGeneration, conversationId) || state.abortController || state.cancelRequested) return;
     // 只认顶层对话 Run：后台子 Job（parent_job_id 非空）不该让整条会话进入
     // 「运行中」，否则一个卡住的子任务会挡住全部救援入口（后端已过滤，此处防御）。
     const run = (result.runs || []).find(
@@ -561,7 +563,14 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
     toast('请先在设置中检查模型，并在会话底部选择检测到的模型');
     return;
   }
-  if (!state.conversationId) await createConversation();
+  if (!state.conversationId && !await createConversation()) return;
+  const selectionConversation = state.conversationId;
+  const selectionOpenGeneration = conversationOpenGeneration();
+  while (pendingConversationModelSave(selectionConversation)) {
+    try { await pendingConversationModelSave(selectionConversation); }
+    catch (error) { toast(`模型设置尚未保存：${error.message}`); return; }
+    if (!isConversationOpenCurrent(selectionOpenGeneration, selectionConversation)) return;
+  }
   if (state.chatRunId || state.abortController) {
     // 运行中：改走**插话队列**（入队后由用户决定何时「引导」），而不是把消息丢掉。
     // 不合并 text 而是把按钮附带的那段传下去：sendRunInterjection 会自己与输入框内容
@@ -612,6 +621,7 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
   const referencedIds = parseSkillReferences(text).map((tok) => tok.skill.id);
   const messageText = stripSkillReferences(text);
   const conversationId = state.conversationId;
+  const openGeneration = conversationOpenGeneration();
   // 提交被拒时要原样还回去的完整草稿（含文件夹 chip）：只还 attachments 会静默吞掉文件夹。
   const pendingSnapshot = state.pendingFiles.map((item) => ({ ...item }));
   state.pendingFiles = [];
@@ -691,8 +701,9 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}));
       if (response.status === 409 && payload.active_run_id) {
+        if (!isConversationOpenCurrent(openGeneration, conversationId)) return;
         detachRunSubscription();
-        if (state.conversationId === conversationId) await openConversation(conversationId);
+        if (!await openConversation(conversationId, { expectedGeneration: openGeneration })) return;
         restoreRejectedSubmit();
         toast('当前对话已有 Run，已恢复其进度');
         return;
@@ -704,7 +715,7 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
     requestAccepted = true;
     await consumeRunStream(response, row, conversationId, state.chatRunId, controller, runGeneration);
   } catch (error) {
-    if (error.name !== 'AbortError' && state.conversationId === conversationId) {
+    if (error.name !== 'AbortError' && isConversationOpenCurrent(openGeneration, conversationId)) {
       if (requestAccepted) {
         // 流已受理、中途断线（手机切后台杀连接是最常见诱因）：后端 Run 还在跑，
         // 绝不能按「提交被拒」把草稿回填——那会让用户以为没发出去再发一次（撞 ACTIVE_RUN），
@@ -718,8 +729,7 @@ export async function sendChatMessage(textOverride = '', { skipContextWarning = 
           // 还没拿到 runId：resumeConversationRun 要求 abortController 为空，
           // 先按「换流」口径解绑本代连接再走活动 Run 查询兜底（同 409 分支的顺序）。
           detachRunSubscription();
-          await openConversation(conversationId);
-          await resumeConversationRun(conversationId);
+          await openConversation(conversationId, { expectedGeneration: openGeneration });
         }
       } else {
         row.querySelector('.answer-content').innerHTML = `<p>请求失败：${escapeHtml(error.message)}</p>`;

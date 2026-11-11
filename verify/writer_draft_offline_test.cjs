@@ -5,6 +5,15 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', '27-writer.js'), 'utf8')
   .replace(/^import .*;\r?\n/gm, '').replace(/^export /gm, '');
+const bodySource = fs.readFileSync(path.join(__dirname, '..', 'public/js/22b-body-drafts.js'), 'utf8')
+  .replace(/^export /gm, '');
+function installBodyDrafts(context) {
+  vm.runInContext(bodySource + `
+    const actualBodySession = createBodyDraftSession;
+    createBodyDraftSession = (options) => actualBodySession({ ...options, backend: createMemoryDraftBackend() });
+    createBodyDraftPanel = () => ({ status() {}, async refresh() {} });
+  `, context);
+}
 
 function harness({ failure = '', hook = null, fits = true, dirty = true } = {}) {
   const calls = [], messages = [];
@@ -49,6 +58,7 @@ function harness({ failure = '', hook = null, fits = true, dirty = true } = {}) 
     document: { querySelectorAll: () => [] }, window: { confirm: () => true },
     setTimeout, clearTimeout, localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
   });
+  installBodyDrafts(context);
   vm.runInContext(source + `\n
     for (const name of []) {} // Keep execution strictly offline; no event binding/bootstrap.
     renderAll = renderDraft = renderPlan = renderBookSummary = renderChapters = renderPipeline = renderPageState = () => {};
@@ -170,6 +180,7 @@ const previews = (h) => h.calls.filter((row) => row.key.endsWith('/preview'));
           saveLocalFile: (...args) => { downloads.push(args); return mode; },
           localFileUrl: (file) => file, toast() {},
         });
+        installBodyDrafts(context);
         vm.runInContext(source + `\nsetSaveState = (...args) => globalThis.states.push(args);
           writer.bookId = 'book-a'; globalThis.subject = { exportBook };`, context);
         context.states = states;

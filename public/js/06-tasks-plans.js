@@ -5,7 +5,7 @@
 import { $, $$, api, escapeHtml, state, toast } from "./01-core.js";
 import { markdown } from "./02-markdown.js";
 import { fileUrl } from "./03-media.js";
-import { renderRunTasks, renderSidebar, syncCurrentConversation } from "./08-conversations.js";
+import { conversationOpenGeneration, isConversationOpenCurrent, renderRunTasks, renderSidebar, syncCurrentConversation } from "./08-conversations.js";
 import { RUN_RECONNECT_COOLDOWN, clearElapsedStatus, resumeRun, setConnectionState, stopRunWatchdog } from "./11-run-stream.js";
 import { cancelCurrentRun, closePermissionModeMenu, setBusy } from "./12-chat-input.js";
 export const activeTaskStatuses = new Set(['queued', 'running', 'waiting', 'stopping', 'cancelling']);
@@ -103,9 +103,10 @@ export async function maybeRecoverRunFromPoll() {
   if (state.runReconnectAt && Date.now() < state.runReconnectAt) return; // 冷却中
   state.runRecovering = true;
   const conversationId = state.conversationId;
+  const openGeneration = conversationOpenGeneration();
   try {
     const result = await api(`/api/runs?conversation_id=${encodeURIComponent(conversationId)}&active_only=1`);
-    if (state.conversationId !== conversationId || state.abortController) return;
+    if (!isConversationOpenCurrent(openGeneration, conversationId) || state.abortController) return;
     // 只认顶层对话 Run（与 /api/runs 的口径一致）：后台子 Job 不占用会话运行位。
     const run = (result.runs || []).find(
       (item) => !String(item.parent_job_id || '').trim()
@@ -130,6 +131,7 @@ export async function maybeRecoverRunFromPoll() {
       }
     }
   } catch (error) {
+    if (!isConversationOpenCurrent(openGeneration, conversationId)) return;
     // 服务仍不可达：保持等待，冷却窗口由 enterReconnectCoolDown 控制
     console.debug('[naiba] 轮询兜底恢复流失败:', error.message);
     if (!state.runReconnectAt) {

@@ -129,10 +129,14 @@ def preview_source(novel: Any, body: dict[str, Any]) -> dict[str, Any]:
                                "chapters": chapters})
         changed = 0
         for row, source in zip(chapters, sources):
-            original = next((option for option in source["manuscripts"] if option["kind"] == "original"), None)
-            if source_kind == "manuscript" and original:
+            if source_kind == "manuscript":
+                originals = [option for option in source["manuscripts"] if option["kind"] == "original"]
+                if len(originals) != 1:
+                    # 损坏原文在候选列表中标为 broken；缺失或不唯一也不能算作零差异。
+                    changed = -1
+                    break
                 try:
-                    record = novel._load_manuscript(book_dir, int(row["i"]), original["id"])
+                    record = novel._load_manuscript(book_dir, int(row["i"]), originals[0]["id"])
                     changed += str(record.get("content") or "") != str(row.get("content") or "")
                 except (LookupError, NovelServiceError, OSError):
                     # 原文损坏不替代用户所选的可读改编稿，差异数量标记未知。

@@ -8,7 +8,7 @@ import { setContextUsage, toolMediaMarkup, updateContextComposerLock, updateCont
 import { fillContextResetSeed, getStreamingProseSegment, messageElement, moveBottomProseInline, refreshFirstTurnCard, replaceWithMessage, scheduleStreamingMarkdown, scrollToBottom } from "./04-messages.js";
 import { loadTasks, renderPermissionModeSwitch } from "./06-tasks-plans.js";
 import { updateUnloadModelButton } from "./07-models-agents.js";
-import { createConversation, openConversation, renderSidebar } from "./08-conversations.js";
+import { conversationOpenGeneration, isConversationOpenCurrent, createConversation, openConversation, renderSidebar } from "./08-conversations.js";
 import { uploadFiles, renderPendingFiles } from "./10-upload.js";
 import { SKILL_INSTALL_PRESET, clearElapsedStatus, clearRunReconnectTimers, clearVisionProgress, collapseToolReasoningBlock, createStreamingReasoningBlock, detachRunConnection, sendChatMessage, setConnectionState, settleReconnectStatus, showElapsedStatus, stopRunWatchdog } from "./11-run-stream.js";
 import { insertTextAtCursor, renderInputMirror, resizeTextarea, updateSkillPopup } from "./13-skill-refs.js";
@@ -20,7 +20,7 @@ export async function startSkillInstall() {
     toast('请先等待当前任务结束或停止后再安装 Skill');
     return;
   }
-  if (!state.conversationId) await createConversation();
+  if (!state.conversationId && !await createConversation()) return;
   const cid = state.conversationId;
   try {
     const result = await api(`/api/conversations/${cid}/tools`, {
@@ -341,7 +341,7 @@ export async function startSkillEdit(skill = null) {
     toast('请先等待当前任务结束或停止后再编辑 Skill');
     return;
   }
-  if (!state.conversationId) await createConversation();
+  if (!state.conversationId && !await createConversation()) return;
   const cid = state.conversationId;
   try {
     const result = await api(`/api/conversations/${cid}/tools`, {
@@ -490,7 +490,7 @@ export function closePermissionModeMenu() {
 export async function setReasoningEffort(effort) {
   if (!REASONING_LABELS[effort]) return;
   if (state.chatRunId || state.abortController) return;
-  if (!state.conversationId) await createConversation();
+  if (!state.conversationId && !await createConversation()) return;
   if (!state.conversationId) return;
   const previous = state.reasoningEffort || 'auto';
   const previousEnabled = Boolean(state.deepReasoningEnabled);
@@ -529,7 +529,7 @@ export async function handlePasteImage(event) {
   }
   if (!imageFiles.length) return;
   event.preventDefault();
-  if (!state.conversationId) await createConversation();
+  if (!state.conversationId && !await createConversation()) return;
   await uploadFiles(imageFiles);
   toast('已粘贴图片，可发送');
 }
@@ -631,7 +631,7 @@ async function applyNativeClipboardPaste() {
   if (!payload) return { handled: false, message: '' };
   if (payload.ok === false) return { handled: true, message: payload.error || '读取系统剪贴板失败' };
   if (payload.kind === 'image') {
-    if (!state.conversationId) await createConversation();
+    if (!state.conversationId && !await createConversation()) return;
     await uploadFiles([pngFileFromBase64(payload.base64, payload.name)]);
     return { handled: true, message: '已粘贴图片并上传' };
   }
@@ -1851,6 +1851,7 @@ export function setBusy(busy) {
 }
 
 export async function cancelCurrentRun() {
+  const openGeneration = conversationOpenGeneration();
   if (state.cancelRequested) return;
   const runId = String(state.chatRunId || '');
   const conversationId = String(state.runConversationId || state.conversationId || '');
@@ -1898,7 +1899,7 @@ export async function cancelCurrentRun() {
     }
     if (!terminalConfirmed) throw new Error('服务端尚未确认任务已停止');
     await loadTasks();
-    if (state.conversationId === conversationId) await openConversation(conversationId);
+    if (isConversationOpenCurrent(openGeneration, conversationId)) await openConversation(conversationId, { expectedGeneration: openGeneration });
   } catch (error) {
     console.debug('[naiba] cancel chat failed:', error.message);
     failureMessage = error.message;

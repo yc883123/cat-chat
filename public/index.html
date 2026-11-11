@@ -2814,6 +2814,20 @@
         </section>
         <section data-settings-panel="models" hidden>
           <div class="settings-panel-head"><h3>API 供应商</h3><p>配置在线或本地模型服务；点开卡片可编辑模型、密钥与生成参数。</p></div>
+          <div class="settings-card new-conversation-default" id="newConversationDefault">
+            <h4>新对话默认模型</h4>
+            <p class="hint">只用于新建对话，不改变历史对话。未设置或已失效时沿用输入区的选择；保存后，该 API 也作为各功能页的默认预选。</p>
+            <div class="new-conversation-default-fields">
+              <label>默认 API<select id="newConversationDefaultApi" aria-label="新对话默认 API"></select></label>
+              <label>默认模型<select id="newConversationDefaultModel" aria-label="新对话默认模型"></select></label>
+            </div>
+            <div class="new-conversation-default-actions">
+              <button type="button" class="control-button" id="newConversationDefaultCheck">检查模型</button>
+              <button type="button" class="control-button primary" id="newConversationDefaultSave">保存默认</button>
+              <button type="button" class="control-button" id="newConversationDefaultClear">清除默认</button>
+            </div>
+            <p class="hint" id="newConversationDefaultStatus" role="status" aria-live="polite"></p>
+          </div>
           <div class="provider-scope-tabs" role="tablist" aria-label="API 供应商类型">
             <button class="active" data-provider-kind="online" type="button" role="tab">在线 API</button>
             <button data-provider-kind="local" type="button" role="tab">本地 API</button>
@@ -3424,6 +3438,7 @@
             <button class="control-button" id="loadProviderModels" type="button">检查模型</button>
           </span>
           <input id="providerModelCustom" hidden placeholder="输入模型名称，例如 gpt-5-mini">
+          <small class="hint">档案自身的默认模型，供未单独指定模型的功能使用。新建对话的默认请在 API 供应商页单独设置。</small>
         </label>
         <label class="provider-field" id="providerContextField">上下文窗口 Tokens（可选）
           <input id="providerContextWindow" type="number" min="1" max="1048576" step="1" placeholder="留空则使用供应商默认值">

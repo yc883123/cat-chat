@@ -1338,7 +1338,7 @@ export function bindEvents() {
   // 托盘「任务完成」卡片点开后的回跳：launcher.evaluate_js 派发该事件（见 open_main_window）。
   window.addEventListener('naiba:open-conversation', (event) => {
     const id = String(event.detail?.conversationId || '');
-    if (id && id !== state.conversationId) void openConversation(id);
+    if (id) void openConversation(id).catch(error => toast(`打开会话失败：${error.message}`));
   });
   appearanceReset?.addEventListener('click', async () => {
     try {

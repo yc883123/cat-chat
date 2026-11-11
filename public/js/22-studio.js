@@ -8,7 +8,7 @@
 
 import { $, api, applyModelSkinFor, copyText, localFileUrl, setAppView, state, toast } from "./01-core.js";
 import { populateComposerModels } from "./07-models-agents.js";
-import { openConversation, renderSidebar } from "./08-conversations.js";
+import { beginConversationNavigation, isConversationOpenCurrent, loadConversations, openConversation, renderSidebar } from "./08-conversations.js";
 import { applyFilePanelOpenClass, closeSidebar, filePanelState, openSidebar, setLeftSidebarCollapsed, sidebarDesktop } from "./14-file-panel.js";
 import { statusLabel as workbenchStatusLabel, syncWorkbenchHeader, watchWorkbenchSize } from "./22a-workbench-ui.js";
 
@@ -2371,6 +2371,7 @@ async function confirmStudioHandoff() {
   const agentId = studio.agentPicked;
   if (!agentId) { toast("先在列表里选中一个 Agent"); return; }
   const handoffNote = String($("#studioHandoffNote")?.value || "").trim();
+  const generation = beginConversationNavigation(state.conversationId);
   const confirmBtn = $("#studioHandoffConfirm");
   if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = "正在创建会话…"; }
   studio.handoffInFlight = true;
@@ -2386,11 +2387,20 @@ async function confirmStudioHandoff() {
       return;
     }
     $("#studioAgentDialog")?.close();
+    if (!isConversationOpenCurrent(generation)) {
+      await loadConversations();
+      toast("交接会话已创建，可从会话列表打开");
+      return;
+    }
     // 交接成功回对话：与「对话」按钮走同一条切换路径（恢复侧栏、停止前端轮询）。
     closeStudioView();
     void populateComposerModels();
     try {
-      await openConversation(conversationId);
+      if (!await openConversation(conversationId, { expectedGeneration: generation })) {
+        await loadConversations();
+        toast("交接会话已创建，可从会话列表打开");
+        return;
+      }
     } catch (openError) {
       // 打开新会话失败 ≠ 交接失败：记录返回的会话 id 并提示手动打开，绝不再提交交接。
       console.warn("[naiba] 交接会话打开失败，已保留会话 id：", conversationId, openError);

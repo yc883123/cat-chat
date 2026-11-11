@@ -15,6 +15,8 @@ from naiba.core.contracts import (
     MCP_START_TIMEOUT_MS_DEFAULT,
     MCP_START_TIMEOUT_MS_MAX,
     MCP_START_TIMEOUT_MS_MIN,
+    NEW_CONVERSATION_DEFAULT_FIELDS,
+    NewConversationDefaultSettings,
 )
 from naiba.core.paths import path_within
 from naiba.paths import PathContext
@@ -558,6 +560,9 @@ def default_config() -> dict[str, Any]:
             "{task_list}"
         ),
         "provider_id": "",
+        # 新对话默认独立存储；未设置时由聊天输入区提供初始选择。
+        "new_conversation_model_key": "",
+        "new_conversation_model_name": "",
         # Deprecated compatibility fields. They are retained for old config
         # files but are never used to build model requests.
         "temperature": 0.7,
@@ -2719,11 +2724,15 @@ class ConfigStore:
             "usage_dash",
             "studio",
             "onebot",
+            *NEW_CONVERSATION_DEFAULT_FIELDS,
         }
         with self.lock:
+            new_default = self._validated_new_conversation_default(values)
             for key in allowed:
                 if key in values:
-                    if key == "host":
+                    if key in NEW_CONVERSATION_DEFAULT_FIELDS:
+                        continue  # 成对校验后，与共用默认一起提交。
+                    elif key == "host":
                         host = str(values[key] or "").strip()
                         if host not in {"127.0.0.1", "0.0.0.0"}:
                             raise ValueError("host 只能是 127.0.0.1 或 0.0.0.0")
@@ -3223,7 +3232,22 @@ class ConfigStore:
                         self.data[key] = str(values[key] or "")[:2000]
                     else:
                         self.data[key] = values[key]
-            self.save()
+            previous_default = None
+            if new_default is not None:
+                previous_default = {
+                    key: self.data.get(key, "")
+                    for key in (*NEW_CONVERSATION_DEFAULT_FIELDS, "default_model_key", "provider_id")
+                }
+                self.data.update(new_default)
+                if new_default["new_conversation_model_key"]:
+                    self.data["default_model_key"] = new_default["new_conversation_model_key"]
+                    self.data["provider_id"] = new_default["new_conversation_model_key"].partition(":")[2]
+            try:
+                self.save()
+            except Exception:
+                if previous_default is not None:
+                    self.data.update(previous_default)
+                raise
             result = self.public()
             # Keep the legacy response field for older clients that still
             # validate context_size. It is excluded from bootstrap settings
@@ -3231,6 +3255,43 @@ class ConfigStore:
             if "context_size" in values:
                 result["context_size"] = self.data["context_size"]
             return result
+
+    def _validated_new_conversation_default(self, values: dict[str, Any]) -> NewConversationDefaultSettings | None:
+        if not any(key in values for key in NEW_CONVERSATION_DEFAULT_FIELDS):
+            return None
+        if not all(key in values for key in NEW_CONVERSATION_DEFAULT_FIELDS):
+            raise ValueError("新对话默认 API 和具体模型必须一起保存")
+        key, name = (values[field] for field in NEW_CONVERSATION_DEFAULT_FIELDS)
+        if not isinstance(key, str) or not isinstance(name, str):
+            raise ValueError("新对话默认 API 和具体模型必须是文本")
+        key, name = key.strip(), name.strip()
+        if bool(key) != bool(name):
+            raise ValueError("新对话默认 API 和具体模型必须同时填写或同时清空")
+        if len(key) > 256 or len(name) > 256:
+            raise ValueError("新对话默认 API 和具体模型最长 256 字符")
+        if key:
+            profile = self.profile(key)
+            key = f"{profile['kind']}:{profile['id']}"
+        retained_default = key or self.default_model_key()
+        for legacy in ("model_key", "default_model_key"):
+            if values.get(legacy) and self._normalize_model_key(values[legacy]) != retained_default:
+                raise ValueError("新对话默认不能同时指定另一个默认 API")
+        return {"new_conversation_model_key": key, "new_conversation_model_name": name}
+
+    def resolve_conversation_model_key(self, model_key: str = "", provider_id: str = "") -> str:
+        """解析发送时的实际档案；旧 provider_id 只能唯一匹配，不能猜 online 前缀。"""
+        with self.lock:
+            key = self._normalize_model_key(model_key)
+            old_id = str(provider_id or "").strip()
+            if not key and old_id:
+                matches = [item for item in self.data.get("providers", [])
+                           if str(item.get("id") or "") == old_id
+                           and item.get("kind") in VALID_MODEL_KINDS]
+                if len(matches) != 1:
+                    raise ValueError("历史会话的 API 档案已失效或无法唯一确认，请重新选择 API 和模型")
+                key = f"{matches[0]['kind']}:{old_id}"
+            profile = self.profile(key)
+            return f"{profile['kind']}:{profile['id']}"
 
     def upsert_mcp_server(self, values: dict[str, Any]) -> dict[str, Any]:
         """新增或整体替换一条 MCP 服务配置（同 id 覆盖）。

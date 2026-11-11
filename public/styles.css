@@ -7177,6 +7177,8 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
 #studioPageNovel .novel-stage-panel[hidden], #studioPageWriter .writer-stage-panel[hidden] { display: none; }
 .wb-book-stage-body { min-height: 0; flex: 1 1 auto; overflow: auto; display: flex; flex-direction: column; gap: 16px; padding-right: 3px; }
 .wb-book-stage-body > * { flex-shrink: 0; }
+/* 场次区按内容占高，滚动交给阶段主体；flex-basis:0 会把列表挤成零高度。 */
+.wb-book-stage-body > .novel-scene-block { flex: 0 0 auto; }
 :is(#studioPageNovel, #studioPageWriter) .wb-book-action-dock { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 0 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; margin-top: 10px; background: var(--surface); }
 :is(#studioPageNovel, #studioPageWriter) .wb-book-action-hint { flex: 1 0 100%; color: var(--muted); font-size: var(--wb-fs-meta, 12px); line-height: 1.5; }
 .wb-book-action-dock > .wb-book-menu { margin: 0; }
@@ -7461,3 +7463,11 @@ body[data-app-view="super-agent"] #sidebarWorkspaceTree { display: none; }
   .super-agent-controls > summary, .super-agent-activity > summary { padding: 10px 0; }
 }
 /* wb-super-agent:end */
+/* Explicit default for newly created conversations. */
+.new-conversation-default { margin-bottom: 18px; min-width: 0; }
+.new-conversation-default-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.new-conversation-default-fields label { min-width: 0; }
+.new-conversation-default-fields select { width: 100%; min-width: 0; max-width: 100%; }
+.new-conversation-default-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+#newConversationDefaultStatus { overflow-wrap: anywhere; }
+@media (max-width: 600px) { .new-conversation-default-fields { grid-template-columns: minmax(0, 1fr); } }

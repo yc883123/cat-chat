@@ -30,6 +30,7 @@ from naiba.core.contracts import (
     WRITER_CHAPTER_STATES_KEY,
     WRITER_PREVIOUS_CHAPTER_KEY,
     WRITER_SETUP_SNAPSHOT_KEY,
+    WRITER_PIPELINE_STOPPING,
 )
 from naiba.writer import prompts
 from naiba.writer.store import (
@@ -99,6 +100,13 @@ class WriterPipelineManager:
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        # Guarded by the store lock. Reserve before publishing a running step
+        # with no task ID; True means its unique submit caller has claimed it.
+        self._submissions: dict[tuple[str, str, int, int], bool] = {}
+        # A deleted/replaced book cannot retain current_task_id. The Studio
+        # task's immutable input.writer is its durable ownership record; keep
+        # retrying cancellation here while this manager remains alive.
+        self._pending_stops: dict[str, tuple[str, dict[str, Any]]] = {}
 
     # ---- 生命周期 ----
 
@@ -117,7 +125,7 @@ class WriterPipelineManager:
             thread.join(timeout=3.0)
 
     def recover(self) -> int:
-        """启动收敛：running 的流水线标 interrupted（不自动续跑，实施计划 §7.3）。"""
+        """启动收敛：进行中/停止待确认的流水线标 interrupted，不自动续跑。"""
         return self.store.recover_pipelines()
 
     def _loop(self) -> None:
@@ -194,7 +202,7 @@ class WriterPipelineManager:
                 from naiba.writer.store import WriterStore
                 WriterStore._check_revision(manifest, base_revision)
             current = manifest.get("active_pipeline")
-            if isinstance(current, dict) and str(current.get("status") or "") == "running":
+            if isinstance(current, dict) and str(current.get("status") or "") in ("running", WRITER_PIPELINE_STOPPING):
                 raise WriterPipelineError("这部作品已有正在进行的生成，请先取消或等它结束")
             setup_version_id = str(setup_version_id or "").strip() or str(
                 manifest.get("current_setup_version_id") or "")
@@ -355,6 +363,7 @@ class WriterPipelineManager:
                 "updated_at": int(time.time() * 1000),
             }
             self.store._save_manifest(self.store._book_dir(book_id), {**manifest, "active_pipeline": pipeline})
+            self._submissions[self._step_key(book_id, pipeline)] = False
         self._submit_step(book_id, pipeline)
         # 返回落盘后的权威记录（_submit_step 已把 current_task_id 写回）。
         updated = self.store.get_active_pipeline(book_id)
@@ -391,33 +400,31 @@ class WriterPipelineManager:
     # ---- 取消 / 重试 ----
 
     def cancel_pipeline(self, book_id: str) -> dict[str, Any]:
-        """取消：先把流水线标 cancelled，再取消当前 Studio 任务（实施计划 §7.3）。
+        """同锁读取当前任务并阻止推进，锁外取消，任务终态才确认停止。"""
+        with self.store._lock:
+            pipeline = self.store.get_active_pipeline(book_id)
+            if not isinstance(pipeline, dict):
+                raise WriterPipelineError("这部作品没有进行中的生成")
+            if str(pipeline.get("status") or "") != "running":
+                raise WriterPipelineError("当前生成已结束或正在停止，无需重复取消")
+            task_id = str(pipeline.get("current_task_id") or "")
+            submitting = self._step_key(book_id, pipeline) in self._submissions
 
-        迟到的任务结果由 tick 的 running 判定挡住：流水线已非 running，不写回、
-        不提交下一步。
-        """
-        manifest = self.store._load_manifest(book_id)
-        pipeline = manifest.get("active_pipeline")
-        if not isinstance(pipeline, dict):
-            raise WriterPipelineError("这部作品没有进行中的生成")
-        if str(pipeline.get("status") or "") != "running":
-            raise WriterPipelineError("当前生成已结束，无需取消")
-        task_id = str(pipeline.get("current_task_id") or "")
+            def _cancel(record: dict[str, Any]) -> None:
+                if record.get("status") != "running":
+                    raise WriterPipelineError("当前生成已结束，无需取消")
+                record["status"] = WRITER_PIPELINE_STOPPING if task_id or submitting else "cancelled"
+                record["error"] = "停止尚未确认；已阻止后续步骤" if task_id or submitting else "用户取消"
 
-        def _cancel(record: dict[str, Any]) -> None:
-            record["status"] = "cancelled"
-            record["error"] = "用户取消"
-
-        updated = self.store.update_pipeline(book_id, str(pipeline["id"]), _cancel,
-                                             expected_attempt=int(pipeline.get("attempt") or 0))
-        if updated is None:
-            raise WriterPipelineError("流水线状态已变化，请刷新后重试")
+            updated = self.store.update_pipeline(book_id, str(pipeline["id"]), _cancel,
+                                                 expected_attempt=int(pipeline.get("attempt") or 0))
+            if updated is None:
+                raise WriterPipelineError("流水线状态已变化，请刷新后重试")
         if task_id:
-            try:
-                self.app.studio.jobs.cancel(task_id)
-            except Exception:  # noqa: BLE001 - 任务取消失败不影响流水线终态
-                traceback.print_exc()
-        return updated
+            self._request_stop(book_id, updated, task_id)
+        with self.store._lock:
+            fresh = self._matching_pipeline(book_id, updated)
+            return fresh if fresh is not None else updated
 
     def retry_pipeline(self, book_id: str, *, rebase: bool = False) -> dict[str, Any]:
         """失败步重试：attempt+1 重提当前步；conflict 状态需 `rebase=True` 显式换基。"""
@@ -427,8 +434,8 @@ class WriterPipelineManager:
             if not isinstance(pipeline, dict):
                 raise WriterPipelineError("这部作品没有可重试的生成")
             status = str(pipeline.get("status") or "")
-            if status == "running":
-                raise WriterPipelineError("当前生成还在进行中")
+            if status in ("running", WRITER_PIPELINE_STOPPING):
+                raise WriterPipelineError("当前生成还在进行中或停止尚未确认")
             if status == "conflict" and not rebase:
                 raise WriterPipelineError(
                     "作品或章节已被修改（版本冲突）；请重新读取作品后，勾选「基于当前版本重新生成」再试"
@@ -479,8 +486,11 @@ class WriterPipelineManager:
                 expected_attempt=int(pipeline.get("attempt") or 0))
             if updated is None:
                 raise WriterPipelineError("流水线状态已变化，请刷新后重试")
+            self._submissions[self._step_key(book_id, updated)] = False
         self._submit_step(book_id, updated)
-        return updated
+        with self.store._lock:
+            fresh = self._matching_pipeline(book_id, updated)
+            return fresh if fresh is not None else updated
 
     # ---- 查询 ----
 
@@ -499,14 +509,92 @@ class WriterPipelineManager:
 
     # ---- 推进核心 ----
 
+    @staticmethod
+    def _step_key(book_id: str, pipeline: dict[str, Any]) -> tuple[str, str, int, int]:
+        return (book_id, str(pipeline.get("id") or ""), int(pipeline.get("attempt") or 0),
+                int(pipeline.get("step_index") or 0))
+
+    def _matching_pipeline(self, book_id: str, pipeline: dict[str, Any]) -> dict[str, Any] | None:
+        """Caller holds the store lock; an obsolete snapshot never owns a newer step."""
+        try:
+            current = self.store.get_active_pipeline(book_id)
+        except LookupError:
+            return None
+        if current is None or self._step_key(book_id, current) != self._step_key(book_id, pipeline):
+            return None
+        return current
+
+    def _request_stop(self, book_id: str, pipeline: dict[str, Any], task_id: str) -> None:
+        """Cancel outside the store lock and check task state instead of its boolean reply."""
+        with self.store._lock:
+            self._pending_stops[task_id] = (book_id, dict(pipeline))
+        error = ""
+        try:
+            self.app.studio.jobs.cancel(task_id)
+        except Exception as exc:  # noqa: BLE001 - Keep the handle for the next poll.
+            error = str(exc)[:300]
+        task = self._task(task_id)
+        terminal = task is not None and str(task.get("status") or "") in {
+            "done", "failed", "cancelled", "interrupted",
+        }
+        with self.store._lock:
+            if terminal:
+                self._pending_stops.pop(task_id, None)
+            current = self._matching_pipeline(book_id, pipeline)
+            if current is None or current.get("status") != WRITER_PIPELINE_STOPPING:
+                return
+            if str(current.get("current_task_id") or "") != task_id:
+                return
+
+            def _settle(record: dict[str, Any]) -> None:
+                if terminal and self._step_key(book_id, record) not in self._submissions:
+                    record["status"] = "cancelled"
+                    record["error"] = "用户取消；当前任务已结束"
+                else:
+                    record["error"] = "停止尚未确认；已阻止后续步骤" + (f"：{error}" if error else "")
+
+            self.store.update_pipeline(book_id, str(current["id"]), _settle,
+                                       expected_attempt=int(current.get("attempt") or 0))
+
+    def _settle_aborted_submission(self, book_id: str, pipeline: dict[str, Any]) -> None:
+        """Only the submit owner can prove an empty task ID means nothing was submitted."""
+        with self.store._lock:
+            current = self._matching_pipeline(book_id, pipeline)
+            if current is None or current.get("status") != WRITER_PIPELINE_STOPPING:
+                return
+            task_id = str(current.get("current_task_id") or "")
+            if not task_id and self._step_key(book_id, current) not in self._submissions:
+                def _settle(record: dict[str, Any]) -> None:
+                    record["status"] = "cancelled"
+                    record["error"] = "用户取消；未提交新任务"
+                self.store.update_pipeline(book_id, str(current["id"]), _settle,
+                                           expected_attempt=int(current.get("attempt") or 0))
+                return
+        if task_id:
+            self._request_stop(book_id, current, task_id)
+
     def tick(self) -> None:
         """扫全部活动流水线：任务终态则推进；一次 tick 处理完当前所有可推进项。"""
+        with self.store._lock:
+            pending = list(self._pending_stops.items())
+        for task_id, (book_id, pipeline) in pending:
+            try:
+                self._request_stop(book_id, pipeline, task_id)
+            except Exception:  # noqa: BLE001 - Preserve the handle if writing its status fails.
+                traceback.print_exc()
         for row in self.store.iter_active_pipelines():
             book_id = str(row.get("book_id") or "")
             pipeline = dict(row.get("pipeline") or {})
-            if not book_id or str(pipeline.get("status") or "") != "running":
+            if not book_id:
                 continue
             try:
+                if pipeline.get("status") == WRITER_PIPELINE_STOPPING:
+                    task_id = str(pipeline.get("current_task_id") or "")
+                    if task_id:
+                        self._request_stop(book_id, pipeline, task_id)
+                    continue
+                if pipeline.get("status") != "running":
+                    continue
                 self._advance(book_id, pipeline)
             except WriterConflictError as exc:
                 self._fail(book_id, pipeline, str(exc), override_status="conflict")
@@ -517,6 +605,13 @@ class WriterPipelineManager:
                 self._fail(book_id, pipeline, f"推进失败：{exc}")
 
     def _advance(self, book_id: str, pipeline: dict[str, Any]) -> None:
+        with self.store._lock:
+            current = self._matching_pipeline(book_id, pipeline)
+            if current is None or current.get("status") != "running":
+                return
+            pipeline = current
+            if self._step_key(book_id, pipeline) in self._submissions:
+                return
         task_id = str(pipeline.get("current_task_id") or "")
         if not task_id:
             # 没有 current_task_id 却在 running：提交丢失（如重启竞态），如实失败。
@@ -605,6 +700,10 @@ class WriterPipelineManager:
 
         def _mutate(record: dict[str, Any]) -> None:
             if str(record.get("status") or "") != "running":
+                return
+            if self._step_key(book_id, record) != self._step_key(book_id, pipeline):
+                return
+            if str(record.get("current_task_id") or "") != str(pipeline.get("current_task_id") or ""):
                 return
             record["status"] = status
             record["error"] = str(error or "")[:500]
@@ -731,11 +830,15 @@ class WriterPipelineManager:
         if task_id and task_id not in completed:
             completed.append(task_id)
         next_index = step_index + 1
+        applied = False
 
         def _mutate(record: dict[str, Any]) -> None:
+            nonlocal applied
             # ---- 条件 4：锁内确认仍是本 attempt 的活动流水线，且来源版本未漂移 ----
-            if str(record.get("status") or "") != "running":
-                raise WriterPipelineError("流水线已不在进行中（可能刚被取消），结果不写回")
+            if (str(record.get("status") or "") != "running"
+                    or int(record.get("step_index") or 0) != step_index
+                    or str(record.get("current_task_id") or "") != task_id):
+                return
             if int(record.get("attempt") or 0) != attempt:
                 raise WriterPipelineError("流水线 attempt 已变化，旧尝试的结果不能写回")
             manifest = self.store._load_manifest(book_id)
@@ -778,10 +881,14 @@ class WriterPipelineManager:
             if step in ("segs", "draft") and record.get("chapter_revision") is not None:
                 chapter = self.store._load_chapter_index(self.store._book_dir(book_id), chapter_no)
                 record["chapter_revision"] = int(chapter.get("revision") or 0)
+            applied = True
 
-        updated = self.store.update_pipeline(book_id, pipeline_id, _mutate, expected_attempt=attempt)
-        if updated is None:
-            return
+        with self.store._lock:
+            updated = self.store.update_pipeline(book_id, pipeline_id, _mutate, expected_attempt=attempt)
+            if updated is None or not applied:
+                return
+            if str(updated.get("status") or "") == "running":
+                self._submissions[self._step_key(book_id, updated)] = False
         if str(updated.get("status") or "") == "running":
             self._submit_step(book_id, updated)
 
@@ -973,6 +1080,38 @@ class WriterPipelineManager:
         return int(snapshot.get("from_no") or 1) + offset
 
     def _submit_step(self, book_id: str, pipeline: dict[str, Any]) -> str:
+        """Claim the reserved step once, and clean up even if preparation or persistence fails."""
+        key = self._step_key(book_id, pipeline)
+        with self.store._lock:
+            current = self._matching_pipeline(book_id, pipeline)
+            if current is None or current.get("status") != "running":
+                if self._submissions.get(key) is True:
+                    return ""  # Another submit caller still owns the in-flight handle.
+                self._submissions.pop(key, None)
+                skipped = True
+            else:
+                skipped = False
+                if current.get("current_task_id") or self._submissions.get(key) is True:
+                    return str(current.get("current_task_id") or "")
+                self._submissions[key] = True
+                pipeline = current
+        if skipped:
+            self._settle_aborted_submission(book_id, pipeline)
+            return ""
+        try:
+            return self._submit_step_task(book_id, pipeline)
+        except Exception as exc:
+            try:
+                self._fail(book_id, pipeline, f"提交失败：{exc}")
+            except (LookupError, WriterStoreError, OSError):
+                pass
+            raise
+        finally:
+            with self.store._lock:
+                self._submissions.pop(key, None)
+            self._settle_aborted_submission(book_id, pipeline)
+
+    def _submit_step_task(self, book_id: str, pipeline: dict[str, Any]) -> str:
         """为当前步提交一个 Studio 任务；任务 input.writer 固化归属（实施计划 §7.1）。"""
         snapshot = pipeline.get("request_snapshot") if isinstance(pipeline.get("request_snapshot"), dict) else {}
         steps = [str(s) for s in pipeline.get("steps") or []]
@@ -1223,10 +1362,26 @@ class WriterPipelineManager:
         }
         if chunked is not None:
             input_data["chunked"] = chunked
+        # This is the submission admission point. Cancellation before it
+        # creates no task; cancellation after it owns the returned task.
+        with self.store._lock:
+            current = self._matching_pipeline(book_id, pipeline)
+            if current is None or current.get("status") != "running" or current.get("current_task_id"):
+                return ""
         task = self.app.studio.jobs.submit(input_data)
+        task_id = str(task["id"])
+        accepted = False
 
         def _persist(record: dict[str, Any]) -> None:
-            record["current_task_id"] = str(task["id"])
+            nonlocal accepted
+            if self._step_key(book_id, record) != self._step_key(book_id, pipeline) or record.get("current_task_id"):
+                return
+            # Keep late handles even in stopping/failed records; they must be
+            # visible and cannot authorize another pipeline step.
+            record["current_task_id"] = task_id
+            accepted = record.get("status") == "running"
+            if not accepted:
+                return
             if pending_step_update is not None:
                 # 逐章批量：本步写哪章、它的基线与前章衔接，必须和任务归属
                 # 同锁落盘，否则 _advance 的归属校验会拿旧章号误判不一致。
@@ -1238,9 +1393,18 @@ class WriterPipelineManager:
             if pending_state_version is not None:
                 record["state_source_version_id"] = pending_state_version
 
-        self.store.update_pipeline(
-            book_id, str(pipeline.get("id") or ""),
-            _persist,
-            expected_attempt=int(pipeline.get("attempt") or 0),
-        )
-        return str(task["id"])
+        try:
+            self.store.update_pipeline(
+                book_id, str(pipeline.get("id") or ""),
+                _persist,
+                expected_attempt=int(pipeline.get("attempt") or 0),
+            )
+        except Exception:
+            # Setting a local flag in mutate is not proof that its disk write
+            # succeeded. Cancel the returned task before propagating failure.
+            accepted = False
+            raise
+        finally:
+            if not accepted:
+                self._request_stop(book_id, pipeline, task_id)
+        return task_id

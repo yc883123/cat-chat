@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from naiba.core.contracts import WRITER_SETUP_SNAPSHOT_KEY
+from naiba.novel import manuscripts
 from naiba.novel.service import NovelStore
 from naiba.writer.service import WriterService
 from naiba.writer.store import WriterStoreError
@@ -107,6 +108,44 @@ class NovelContinuationTests(unittest.TestCase):
             self.assertEqual(chapter["content"], f"第{no}章分叉后的改编正文。")
             self.assertEqual(chapter["source"]["source_manuscript_id"], chosen[str(no)])
         self.assertEqual(result["book"]["continuation"]["coverage"]["divergent_chapters"], 3)
+
+    def test_missing_corrupt_or_ambiguous_original_makes_comparison_unknown(self):
+        chosen = {}
+        originals = {}
+        for no in range(1, 4):
+            chapter = self.novel.get_chapter(self.source["id"], no)
+            originals[no] = chapter["base_manuscript_id"]
+            chosen[str(no)] = self.novel.save_manuscript(
+                self.source["id"], no, content=chapter["content"],
+            )["manuscript"]["id"]
+        book_dir = self.novel._book_dir(self.source["id"])
+        index_path = self.novel._chapter_path(book_dir, 2)
+        original_path = self.novel._manuscript_path(book_dir, 2, originals[2])
+        index_before, original_before = index_path.read_bytes(), original_path.read_bytes()
+        selected = {**self.selection, "source_kind": "manuscript", "manuscripts_by_chapter": chosen}
+        _, complete = self.preview(**selected)
+        self.assertEqual(complete["coverage"]["divergent_chapters"], 0)
+        for damage in ("missing", "corrupt", "ambiguous"):
+            with self.subTest(damage=damage):
+                index_path.write_bytes(index_before)
+                original_path.write_bytes(original_before)
+                if damage == "missing":
+                    self.novel.delete_manuscript(self.source["id"], 2, originals[2])
+                elif damage == "corrupt":
+                    original_path.write_text("{损坏的 JSON", encoding="utf-8")
+                else:
+                    additional = manuscripts.build(chapter_no=2, kind=manuscripts.KIND_ORIGINAL,
+                                                   content="另一份无法确认的原文", no=0)
+                    self.novel._write_json(self.novel._manuscript_path(book_dir, 2, additional["id"]), additional)
+                    index = self.novel._load_chapter_index(book_dir, 2)
+                    index["manuscript_ids"].append(additional["id"])
+                    self.novel._write_json(index_path, index)
+                before = fingerprints(self.novel.root())
+                _, preview = self.preview(**selected)
+                self.assertEqual(preview["coverage"]["comparison"], "unknown")
+                self.assertIsNone(preview["coverage"]["divergent_chapters"])
+                self.assertEqual({str(row["no"]): row["manuscript_id"] for row in preview["selected_chapters"]}, chosen)
+                self.assertEqual(fingerprints(self.novel.root()), before)
 
     def test_cutoff_imports_only_prefix_then_creates_cutoff_plus_one(self):
         _, result = self.commit(end_chapter_no=2)

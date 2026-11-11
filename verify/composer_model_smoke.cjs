@@ -15,6 +15,7 @@ const BASE = process.env.NAIBA_SMOKE_BASE || 'http://127.0.0.1:8799';
 const PROVIDER_A = process.env.NAIBA_SMOKE_PROVIDER_A || 'online:smoke-a';
 const PROVIDER_B = process.env.NAIBA_SMOKE_PROVIDER_B || 'online:smoke-b';
 const BOUND_MODEL = process.env.NAIBA_SMOKE_BOUND_MODEL || 'smoke-pro';
+const CONVERSATION_ID = process.env.NAIBA_SMOKE_CONVERSATION_ID || '';
 const REFRESH_VALUE = '__refresh_composer_models__';
 const CATALOG = [
   { id: 'smoke-flash', name: 'smoke-flash' },   // 故意把非预期模型排第一（复刻供应商返回顺序）
@@ -37,7 +38,16 @@ function check(label, ok, detail = '') {
   const browser = await chromium.launch({ channel: 'msedge', headless: true });
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   const pageErrors = [];
+  const assertPageHealthy = () => {
+    if (pageErrors.length) throw new Error(`页面错误：${pageErrors.join(' | ')}`);
+  };
+  await page.addInitScript(() => localStorage.setItem('naibaOnboardingDismissed', '1'));
   page.on('pageerror', (err) => pageErrors.push(`pageerror: ${err.message}`));
+  page.on('requestfailed', (request) => {
+    if (request.failure()?.errorText !== 'net::ERR_ABORTED') {
+      pageErrors.push(`requestfailed: ${request.url()} ${request.failure()?.errorText}`);
+    }
+  });
   page.on('console', (msg) => {
     if (msg.type() !== 'error') return;
     // 本冒烟故意注入一次 502 目录故障（验证「刷新失败要出声」），浏览器随之打印的
@@ -80,6 +90,7 @@ function check(label, ok, detail = '') {
     const end = Date.now() + timeout;
     let last = null;
     while (Date.now() < end) {
+      assertPageHealthy();
       last = await fn();
       if (last) return last;
       await page.waitForTimeout(step);
@@ -101,9 +112,10 @@ function check(label, ok, detail = '') {
       + ` model=${JSON.stringify(info.modelValue)} options=${JSON.stringify(info.options)}`);
   }
   const conversationModelName = () => page.evaluate(async () => {
-    const payload = await fetch('/api/conversations').then((r) => r.json());
-    return payload.conversations && payload.conversations.length
-      ? String(payload.conversations[0].model_name || '') : null;
+    const { state } = await import('/js/01-core.js');
+    if (!state.conversationId) return null;
+    const payload = await fetch(`/api/conversations/${state.conversationId}`).then((r) => r.json());
+    return String(payload.model_name || '');
   });
   // 切顶栏 API 并等到本次切换彻底落地（见文件头「同步口径」）。
   async function switchApi(value) {
@@ -118,8 +130,15 @@ function check(label, ok, detail = '') {
   }
 
   try {
-    await page.goto(`${BASE}/`, { waitUntil: 'load', timeout: 20000 });
+    await page.goto(`${BASE}/`, { waitUntil: 'networkidle', timeout: 20000 });
+    await page.evaluate(async () => { await import(document.querySelector('script[src*="/js/main.js"]').src); });
+    await page.evaluate(() => document.querySelector('#openChatMode').click());
+    if (CONVERSATION_ID) await page.evaluate(async id => {
+      const { openConversation } = await import('/js/08-conversations.js');
+      await openConversation(id);
+    }, CONVERSATION_ID);
     await page.waitForSelector('#composerModelSelect', { timeout: 20000 });
+    assertPageHealthy();
 
     // ---- ① 目录就绪后的默认选中：会话已保存的模型，而不是目录第一项 ----
     const loaded = await waitFor(async () => {

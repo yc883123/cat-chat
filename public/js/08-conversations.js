@@ -5,19 +5,36 @@
 import { $, api, escapeHtml, saveSidebarPrefs, state, toast } from "./01-core.js";
 import { renderMessages, revealMessage } from "./04-messages.js";
 import { activeTaskStatuses, loadTasks, renderPermissionModeSwitch, taskDisplayTitle, taskKindLabel, taskStatusLabel } from "./06-tasks-plans.js";
-import { applyConversationAgent, applyConversationModel, composerModelChoice } from "./07-models-agents.js";
+import { applyConversationAgent, applyConversationModel, conversationModelGeneration, mergeConversationModelSelection, pendingConversationModelSave, resolveNewConversationModel } from "./07-models-agents.js";
 import { readAsDataUrl } from "./10-upload.js";
 import { detachRunSubscription, resumeConversationRun } from "./11-run-stream.js";
 import { closePermissionModeMenu, closeQuickMessagePanel, hideChoiceButtons, updateDeepReasoningButton } from "./12-chat-input.js";
 import { prefillPresetSkillsInComposer } from "./13-skill-refs.js";
 import { clearFileRefCache, hideFilePopup } from "./16-file-refs.js";
 import { closeFilePanel, closeSidebar } from "./14-file-panel.js";
+
+let openGeneration = 0;
+let openTargetId = '';
+export function conversationOpenGeneration() { return openGeneration; }
+export function beginConversationNavigation(id = '') {
+  openTargetId = String(id);
+  return ++openGeneration;
+}
+export function isConversationOpenCurrent(generation, id = null) {
+  return generation === openGeneration && (id === null || (
+    state.conversationId === id && (!openTargetId || openTargetId === id)
+  ));
+}
+
 export async function loadConversations() {
+  const generation = conversationOpenGeneration();
+  const modelGenerations = new Map(state.conversations.map(item => [item.id, conversationModelGeneration(item.id)]));
   const result = await api('/api/conversations');
-  state.conversations = result.conversations;
+  if (!isConversationOpenCurrent(generation)) return;
+  state.conversations = result.conversations.map(item => mergeConversationModelSelection(item, modelGenerations.get(item.id) || 0));
   renderSidebar();
   if (!state.conversationId && state.conversations.length) {
-    await openConversation(state.conversations[0].id);
+    await openConversation(state.conversations[0].id, { expectedGeneration: generation });
   } else if (!state.conversations.length) {
     state.firstTurnInfo = null;
     renderMessages([]);
@@ -463,8 +480,7 @@ export function syncSearchModeUi() {
 async function openSearchHit(conversationId, messageId) {
   if (!conversationId || !messageId) return;
   try {
-    if (conversationId !== state.conversationId) await openConversation(conversationId);
-    else renderSidebar();   // 同一会话：只把「当前会话」的命中标记刷新一下
+    if (!await openConversation(conversationId)) return;
     const located = revealMessage(messageId);
     if (!located) toast('这条消息已不在该对话中（可能刚被删除）');
     else closeSidebar();    // 手机端顺手收起抽屉；桌面端本就是空操作
@@ -1067,6 +1083,7 @@ export async function deleteWorkspace(name) {
 }
 
 export async function createConversation(workspaceGroup = '', workspaceDir = '', prefillSkills = false) {
+  const generation = beginConversationNavigation('__new__');
   detachRunSubscription();
   hideChoiceButtons();
   const knownAgentIds = new Set((state.bootstrap?.agents || []).map((a) => String(a.id)));
@@ -1078,6 +1095,9 @@ export async function createConversation(workspaceGroup = '', workspaceDir = '',
     || (knownAgentIds.has(defaultAgentId) && defaultAgentId)
     || (state.bootstrap?.agents?.[0]?.id) || ''
   );
+  const model = await resolveNewConversationModel();
+  if (!isConversationOpenCurrent(generation)) return false;
+  if (!model.model_key) { toast('请先选择新对话使用的 API'); return false; }
   const conversation = await api('/api/conversations', {
     method: 'POST',
     body: {
@@ -1086,13 +1106,21 @@ export async function createConversation(workspaceGroup = '', workspaceDir = '',
       web_search_enabled: false,
       deep_reasoning_enabled: false,
       agent_id: nextAgentId,
-      model_key: $('#modelSelect')?.value || '',
-      model_name: composerModelChoice(),
+      model_key: model.model_key,
+      model_name: model.model_name,
       // 新建对话继承当前全局工作区目录；若在某工作区内新建则覆盖为该工作区目录并绑定分组。
       workspace_dir: workspaceDir || state.bootstrap?.settings?.workspace_dir || '',
       workspace_group: workspaceGroup || '',
     },
   });
+  state.conversations.unshift(conversation);
+  if (!isConversationOpenCurrent(generation)) { renderSidebar(); return false; }
+  // 等待创建期间，仍可在旧会话里开始生成；新视图提交前再清理旧订阅。
+  if (state.runConversationId && state.runConversationId !== conversation.id) {
+    detachRunSubscription();
+    hideChoiceButtons();
+  }
+  openTargetId = conversation.id;
   state.conversationId = conversation.id;
   if (conversation.workspace_dir) {
     state.workspaceDir = conversation.workspace_dir;
@@ -1100,10 +1128,8 @@ export async function createConversation(workspaceGroup = '', workspaceDir = '',
   // 新会话没有首轮上下文：清掉上一个会话残留的 firstTurnInfo，否则首轮上下文
   // 折叠卡会错误地出现在新会话页面（该卡数据契约上只属于 openConversation 装载的会话）。
   state.firstTurnInfo = null;
-  state.conversations.unshift(conversation);
   // 辅助对话靠这条广播跟随当前主对话（21 监听；08 不 import 21，避免循环依赖）。
   // 必须放在会话数据入 state 之后：辅助面板要按 id 在 state.conversations 里查父会话标题。
-  document.dispatchEvent(new CustomEvent('naiba:conversation-changed', { detail: { id: conversation.id } }));
   state.expandedGroups.add(currentConversationWorkspaceGroup());
   renderComposerWorkspace();
   sidebarScrollToActive = true;
@@ -1116,12 +1142,17 @@ export async function createConversation(workspaceGroup = '', workspaceDir = '',
   updateDeepReasoningButton();
   renderMessages([]);
   renderPermissionModeSwitch();
+  state.conversationSnapshot = conversationSnapshot(conversation);
+  document.dispatchEvent(new CustomEvent('naiba:conversation-changed', { detail: { id: conversation.id } }));
   closeSidebar();
   if (prefillSkills) prefillPresetSkillsInComposer(conversation);
   $('#messageInput').focus();
+  return true;
 }
 
-export async function openConversation(id) {
+export async function openConversation(id, { expectedGeneration = null } = {}) {
+  if (expectedGeneration !== null && !isConversationOpenCurrent(expectedGeneration)) return false;
+  const generation = beginConversationNavigation(id);
   if (id !== state.conversationId) {
     detachRunSubscription();
     hideChoiceButtons();
@@ -1137,28 +1168,44 @@ export async function openConversation(id) {
     // 审批模式上拉框挂在 body 上，切换会话同样要收起，避免浮层残留
     closePermissionModeMenu();
   }
-  const conversation = await api(`/api/conversations/${id}`);
+  let conversation, firstTurn;
+  try {
+    const pending = pendingConversationModelSave(id);
+    if (pending) await pending.catch(() => {});
+    if (!isConversationOpenCurrent(generation)) return false;
+    const modelGeneration = conversationModelGeneration(id);
+    [conversation, firstTurn] = await Promise.all([
+      api(`/api/conversations/${id}`),
+      api(`/api/conversations/${id}/first_turn`).catch(() => null),
+    ]);
+    conversation = mergeConversationModelSelection(conversation, modelGeneration);
+  } catch (error) {
+    if (!isConversationOpenCurrent(generation)) return false;
+    throw error;
+  }
+  if (!isConversationOpenCurrent(generation)) return false;
+  // Both reads have completed. Commit the whole view without an asynchronous gap.
+  // 请求在途时旧视图仍可开始生成，不能把它的订阅带入目标会话。
+  if (state.runConversationId && state.runConversationId !== id) {
+    detachRunSubscription();
+    hideChoiceButtons();
+  }
   state.conversationId = id;
   if (conversation.workspace_dir) {
     state.workspaceDir = conversation.workspace_dir;
   }
-  state.expandedGroups.add(currentConversationWorkspaceGroup());
-  renderComposerWorkspace();
   const index = state.conversations.findIndex((item) => item.id === id);
   if (index >= 0) state.conversations[index] = { ...state.conversations[index], ...conversation };
+  else state.conversations.unshift(conversation);
+  state.expandedGroups.add(currentConversationWorkspaceGroup());
+  renderComposerWorkspace();
   // 辅助对话靠这条广播跟随当前主对话（21 监听；08 不 import 21，避免循环依赖）。
   // 放在会话数据入 state 之后：辅助面板要按 id 查父会话标题。
-  document.dispatchEvent(new CustomEvent('naiba:conversation-changed', { detail: { id } }));
   state.conversationSnapshot = conversationSnapshot(conversation);
   console.log('[naiba] openConversation', id.slice(0, 8), '服务器返回消息数=', (conversation.messages || []).length);
   // 首轮上下文（系统提示词 + 工具集）折叠卡：单独拉取，失败静默（老会话无此数据）。
-  try {
-    const firstTurn = await api(`/api/conversations/${id}/first_turn`);
-    const hasSystem = firstTurn && typeof firstTurn === 'object' && Boolean(firstTurn.system || firstTurn.prompt);
-    state.firstTurnInfo = hasSystem ? firstTurn : null;
-  } catch (_) {
-    state.firstTurnInfo = null;
-  }
+  const hasSystem = firstTurn && typeof firstTurn === 'object' && Boolean(firstTurn.system || firstTurn.prompt);
+  state.firstTurnInfo = hasSystem ? firstTurn : null;
   // 若打开的会话处于“最新 5 条”预览之外，自动展开该工作区的全部会话以便其在侧栏可见。
   const visGroup = currentConversationWorkspaceGroup();
   if (visGroup) {
@@ -1177,8 +1224,11 @@ export async function openConversation(id) {
   state.deepReasoningEnabled = Boolean(Number(conversation.deep_reasoning_enabled || 0));
   state.reasoningEffort = conversation.reasoning_effort || (state.deepReasoningEnabled ? 'medium' : 'auto');
   updateDeepReasoningButton();
-  await resumeConversationRun(id);
+  document.dispatchEvent(new CustomEvent('naiba:conversation-changed', { detail: { id } }));
+  await resumeConversationRun(id, { openGeneration: generation });
+  if (!isConversationOpenCurrent(generation, id)) return false;
   closeSidebar();
+  return true;
 }
 
 export function conversationSnapshot(conversation) {
@@ -1192,9 +1242,10 @@ export async function syncCurrentConversation() {
   if (document.visibilityState === 'hidden') return;
   state.syncInFlight = true;
   const id = state.conversationId;
+  const generation = conversationOpenGeneration();
   try {
     const conversation = await api(`/api/conversations/${id}`);
-    if (state.conversationId !== id || state.abortController) return;
+    if (!isConversationOpenCurrent(generation, id) || state.abortController) return;
     const snapshot = conversationSnapshot(conversation);
     if (snapshot === state.conversationSnapshot) return;
     const index = state.conversations.findIndex((item) => item.id === id);
@@ -1897,16 +1948,18 @@ export async function deleteConversation(id) {
   }
   const conversation = state.conversations.find((item) => item.id === id);
   if (!confirm(`删除对话"${conversation?.title || '新对话'}"？`)) return;
-  await api(`/api/conversations/${id}`, { method: 'DELETE' });
   const wasCurrent = state.conversationId === id;
+  const generation = wasCurrent ? beginConversationNavigation(id) : conversationOpenGeneration();
+  await api(`/api/conversations/${id}`, { method: 'DELETE' });
+  const stillCurrent = wasCurrent && isConversationOpenCurrent(generation, id);
   state.conversations = state.conversations.filter((item) => item.id !== id);
-  if (wasCurrent) state.conversationId = '';
+  if (stillCurrent) state.conversationId = '';
   renderSidebar();
   // 删除非当前会话：只刷新侧栏。绝不能重新加载当前会话视图，否则会把正在流式
   // 输出的消息行挤出 DOM（renderMessages 重建列表），导致流式输出消失、要等 run
   // 结束重新渲染才重现。当前会话的流式输出必须保持原样继续。
-  if (!wasCurrent) return;
-  if (state.conversations.length) await openConversation(state.conversations[0].id);
+  if (!stillCurrent) return;
+  if (state.conversations.length) await openConversation(state.conversations[0].id, { expectedGeneration: generation });
   else {
     // 最后一个会话被删除：清掉其 firstTurnInfo 残留，避免空视图错误展示首轮上下文条
     state.firstTurnInfo = null;

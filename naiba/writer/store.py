@@ -39,7 +39,9 @@ from pathlib import Path
 from typing import Any
 
 from naiba.core.fsutil import atomic_write_bytes, atomic_write_json
-from naiba.core.contracts import WriterChapterBaseline, WriterExportResult, WriterPreviousChapter
+from naiba.core.contracts import (
+    WRITER_PIPELINE_STOPPING, WriterChapterBaseline, WriterExportResult, WriterPreviousChapter,
+)
 
 # 作品清单版本：首版为 1。
 SCHEMA_VERSION = 1
@@ -73,8 +75,8 @@ SIDE_MAX = 99
 CHAR_TEXT_MAX = 200
 CHAR_LONG_MAX = 1_000
 
-# 流水线状态：running 推进中；done/failed/cancelled/interrupted/conflict 为终态。
-PIPELINE_STATUSES = ("running", "done", "failed", "cancelled", "interrupted", "conflict")
+# stopping 已阻止推进，但仍等任务终态；其余五项为终态。
+PIPELINE_STATUSES = ("running", WRITER_PIPELINE_STOPPING, "done", "failed", "cancelled", "interrupted", "conflict")
 
 # ---- 章末状态（跨章连贯性修复计划 §三.B） ----
 # 状态按「来源正文版本」关联：状态记录里固化 source_version_id + 内容指纹，
@@ -1775,7 +1777,7 @@ class WriterStore:
             return True
 
     def iter_active_pipelines(self) -> list[dict[str, Any]]:
-        """扫描全部作品，返回仍在 running 的活动流水线（含 book_id）。"""
+        """扫描全部作品，返回推进中或尚待确认停止的流水线（含 book_id）。"""
         rows: list[dict[str, Any]] = []
         if not self._root.exists():
             return rows
@@ -1787,12 +1789,12 @@ class WriterStore:
             except (LookupError, WriterStoreError):
                 continue
             pipeline = manifest.get("active_pipeline")
-            if isinstance(pipeline, dict) and str(pipeline.get("status") or "") == "running":
+            if isinstance(pipeline, dict) and str(pipeline.get("status") or "") in ("running", WRITER_PIPELINE_STOPPING):
                 rows.append({"book_id": str(manifest.get("id") or ""), "pipeline": dict(pipeline)})
         return rows
 
     def recover_pipelines(self) -> int:
-        """启动收敛：running 的活动流水线标为 interrupted（保留已完成步骤，不自动续跑）。"""
+        """启动收敛：活动流水线标为 interrupted（保留任务号/已完成步骤，不自动续跑）。"""
         recovered = 0
         if not self._root.exists():
             return 0
@@ -1804,9 +1806,11 @@ class WriterStore:
             except (LookupError, WriterStoreError):
                 continue
             pipeline = manifest.get("active_pipeline")
-            if isinstance(pipeline, dict) and str(pipeline.get("status") or "") == "running":
+            if isinstance(pipeline, dict) and str(pipeline.get("status") or "") in ("running", WRITER_PIPELINE_STOPPING):
+                was_stopping = pipeline.get("status") == WRITER_PIPELINE_STOPPING
                 pipeline["status"] = "interrupted"
-                pipeline["error"] = pipeline.get("error") or "服务重启，流水线已中断"
+                pipeline["error"] = ("服务重启，流水线已中断；停止结果尚未确认" if was_stopping
+                                     else pipeline.get("error") or "服务重启，流水线已中断")
                 pipeline["updated_at"] = _now_ms()
                 manifest["active_pipeline"] = pipeline
                 with self._lock:

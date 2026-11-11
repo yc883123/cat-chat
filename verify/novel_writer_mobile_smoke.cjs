@@ -106,6 +106,7 @@ async function fixture(page) {
     const page = await browser.newPage({viewport:{width:393,height:852}});
     const errors=[];page.on('pageerror',error=>errors.push(error.message));
     await fixture(page);await page.goto(BASE,{waitUntil:'domcontentloaded'});
+    await page.evaluate(async()=>{await import(document.querySelector('script[src*="/js/main.js"]').src)});
     await page.waitForFunction(()=>document.querySelector('#openStudio'));
     await page.evaluate(async()=>{
       const studio=await import('/js/22-studio.js');studio.openStudioView();studio.setStudioPage('novel');

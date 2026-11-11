@@ -29,6 +29,10 @@ WRITER_CHAPTER_STATES_KEY = "chapter_states"
 # Imported continuations freeze their effective setup, including any summary
 # restored from the manifest, so retry cannot drift after setup edits/deletion.
 WRITER_SETUP_SNAPSHOT_KEY = "setup_snapshot"
+# Cancellation blocks further pipeline steps immediately. This nonterminal
+# status persists until the submitted Studio task actually reaches a terminal
+# state; current_task_id remains available for polling and recovery.
+WRITER_PIPELINE_STOPPING = "stopping"
 
 # Labeler settings patch is an atomic per-provider update; it is mutually
 # exclusive with the legacy full-replacement provider_limits request.
@@ -404,6 +408,18 @@ MCP_START_TIMEOUT_MS_MAX = 600000
 MCP_STATE_CONFIG_KEYS: tuple[str, ...] = ("command", "args", "env_keys", "start_timeout_ms")
 
 
+class NewConversationDefaultSettings(TypedDict):
+    """设置页显式保存的新对话默认；两项成对写入，空串表示未设置。"""
+
+    new_conversation_model_key: str
+    new_conversation_model_name: str
+
+
+NEW_CONVERSATION_DEFAULT_FIELDS = (
+    "new_conversation_model_key", "new_conversation_model_name",
+)
+
+
 @runtime_checkable
 class ConfigView(Protocol):
     """运行时对 config 的最小访问面（构建时校验；成员 ⊆ ConfigStore 实际面）。"""
@@ -412,6 +428,7 @@ class ConfigView(Protocol):
     lock: Any
 
     def profile(self, model_key: str) -> dict[str, Any]: ...
+    def resolve_conversation_model_key(self, model_key: str = "", provider_id: str = "") -> str: ...
     def resolve_data_dir(self, raw: str | None = None) -> Any: ...
     def resolve_workspace_dir(self, raw: str | None = None) -> Any: ...
     def resolve_managed_skills_dir(self, raw: str | None = None) -> Any: ...

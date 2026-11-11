@@ -44,7 +44,8 @@ class ComposerModelFollowMarkupTests(unittest.TestCase):
     def test_submit_and_new_conversation_send_raw_choice(self) -> None:
         self.assertIn("model_name: composerModelChoice()", self._stream())
         conversations = (ROOT / "public/js/08-conversations.js").read_text(encoding="utf-8")
-        self.assertIn("model_name: composerModelChoice()", conversations)
+        self.assertIn("resolveNewConversationModel()", conversations)
+        self.assertIn("model_name: model.model_name", conversations)
 
     def test_catalog_cache_needs_models_not_a_lookup(self) -> None:
         """空目录（供应商 200 但没模型）不算已缓存，否则本页会永久卡在「请先在设置中检查模型」。"""

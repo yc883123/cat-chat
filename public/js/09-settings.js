@@ -3,7 +3,7 @@
 // ============================================================
 
 import { $, $$, agentAvatarEmoji, agentAvatarSrc, api, applyAppearance, applyChatBackground, CHAT_FONT_PICKS, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, isFontInstalled, isModelSkin, localFileUrl, MODEL_SKINS, modelSkinImageUrl, refreshChatBackgroundImageStatus, saveAppearance, state, toast } from "./01-core.js";
-import { applyConversationAgent, populateComposerModels, populateModels, renderAgents, updateUnloadModelButton } from "./07-models-agents.js";
+import { applyConversationAgent, loadModelCatalog, newConversationDefault, populateComposerModels, populateModels, renderAgents, updateUnloadModelButton } from "./07-models-agents.js";
 import { closeAgentPromptPresetPanel, currentAgentFixedSkillIds, renderAgentPromptPresetList } from "./08-conversations.js";
 import { skillList } from "./13-skill-refs.js";
 import { playDoneSound } from "./20-sound.js";
@@ -654,12 +654,13 @@ function providerCardMarkup(provider) {
       </span>
       <span class="provider-card-foot">
         <span class="provider-card-tag">${format}</span>
-        ${provider.is_default ? '<span class="provider-card-badge">当前</span>' : ''}
+        ${provider.is_default ? '<span class="provider-card-badge" title="各功能页的默认 API 预选，不代表当前会话">默认</span>' : ''}
       </span>
     </div>`;
 }
 
 export function renderProviders() {
+  renderNewConversationDefault();
   const providers = providerProfiles().filter((provider) => (provider.kind || 'online') === state.providerKindTab);
   $$('[data-provider-kind]').forEach((button) => {
     const active = button.dataset.providerKind === state.providerKindTab;
@@ -676,6 +677,108 @@ export function renderProviders() {
     </button>`;
 }
 
+let newDefaultGeneration = 0;
+let newDefaultDirty = false;
+let newDefaultSaving = false;
+
+function renderDefaultModelOptions(preferred = '') {
+  const apiSelect = $('#newConversationDefaultApi');
+  const select = $('#newConversationDefaultModel');
+  if (!apiSelect || !select) return;
+  const models = state.providerModelCatalogs[apiSelect.value] || [];
+  select.replaceChildren(new Option(apiSelect.value ? '请选择模型' : '未设置', ''));
+  if (preferred && !models.some(item => item.id === preferred)) select.append(new Option(`已保存：${preferred}（需要检查）`, preferred));
+  models.forEach(item => select.append(new Option(item.name || item.id, item.id)));
+  select.value = preferred;
+  select.disabled = newDefaultSaving || !apiSelect.value;
+}
+
+function renderDefaultStatus() {
+  const status = $('#newConversationDefaultStatus');
+  if (!status) return;
+  const saved = newConversationDefault();
+  status.textContent = !saved.configured ? '未设置：新对话沿用输入区的选择。'
+    : saved.valid ? `已保存：${saved.profile.name || saved.model_key} / ${saved.model_name}`
+      : '已保存的默认已失效或尚未通过模型目录检查，新对话将沿用输入区的选择。';
+}
+
+async function checkNewDefaultModels({ force = false, preferred = null } = {}) {
+  const key = $('#newConversationDefaultApi')?.value || '';
+  const desired = preferred === null ? ($('#newConversationDefaultModel')?.value || '') : preferred;
+  const generation = ++newDefaultGeneration;
+  renderDefaultModelOptions(desired);
+  if (!key || !providerProfiles().some(p => p.model_key === key)) { renderDefaultStatus(); return; }
+  try {
+    await loadModelCatalog(key, { force });
+    if (generation !== newDefaultGeneration || $('#newConversationDefaultApi')?.value !== key) return;
+    // 用户在目录请求期间选了模型，就保留新选择。
+    renderDefaultModelOptions($('#newConversationDefaultModel')?.value || '');
+    renderDefaultStatus();
+  } catch (error) {
+    if (generation === newDefaultGeneration) $('#newConversationDefaultStatus').textContent = `无法检查模型：${error.message}。已保存的默认未改动。`;
+  }
+}
+
+export function renderNewConversationDefault({ reset = false } = {}) {
+  const panel = $('#newConversationDefault');
+  const select = $('#newConversationDefaultApi');
+  if (!panel || !select) return;
+  if (!panel.dataset.bound) {
+    panel.dataset.bound = 'true';
+    select.addEventListener('change', () => { newDefaultDirty = true; void checkNewDefaultModels({ preferred: '' }); });
+    $('#newConversationDefaultModel').addEventListener('change', () => { newDefaultDirty = true; });
+    $('#newConversationDefaultCheck').addEventListener('click', () => { void checkNewDefaultModels({ force: true }); });
+    $('#newConversationDefaultSave').addEventListener('click', () => { void saveNewConversationDefault(false); });
+    $('#newConversationDefaultClear').addEventListener('click', () => { void saveNewConversationDefault(true); });
+  }
+  if (reset) newDefaultDirty = false;
+  if (newDefaultDirty || newDefaultSaving) { renderDefaultStatus(); return; }
+  const saved = newConversationDefault();
+  const profiles = providerProfiles();
+  select.replaceChildren(new Option('未设置', ''));
+  profiles.forEach(p => select.append(new Option(p.name || p.model_key, p.model_key)));
+  if (saved.model_key && !profiles.some(p => p.model_key === saved.model_key)) select.append(new Option(`已删除：${saved.model_key}`, saved.model_key));
+  select.value = saved.model_key;
+  renderDefaultModelOptions(saved.model_name);
+  renderDefaultStatus();
+  if (saved.profile && !Array.isArray(state.providerModelCatalogs[saved.model_key])) void checkNewDefaultModels({ preferred: saved.model_name });
+}
+
+export async function saveNewConversationDefault(clear = false) {
+  if (newDefaultSaving) return;
+  const model_key = clear ? '' : $('#newConversationDefaultApi').value;
+  const model_name = clear ? '' : $('#newConversationDefaultModel').value;
+  const status = $('#newConversationDefaultStatus');
+  if (Boolean(model_key) !== Boolean(model_name)) { status.textContent = '请同时选择 API 和具体模型，或使用「清除默认」。'; return; }
+  if (model_key && (!providerProfiles().some(p => p.model_key === model_key)
+    || !(state.providerModelCatalogs[model_key] || []).some(m => m.id === model_name))) {
+    status.textContent = '默认已失效，请检查模型并重新选择。'; return;
+  }
+  newDefaultSaving = true;
+  ++newDefaultGeneration;
+  const controls = [...$('#newConversationDefault').querySelectorAll('button, select')];
+  controls.forEach(control => { control.disabled = true; });
+  try {
+    const result = await api('/api/settings', { method: 'POST', body: {
+      new_conversation_model_key: model_key, new_conversation_model_name: model_name,
+    } });
+    Object.assign(state.bootstrap.settings, result.settings);
+    state.bootstrap.default_model_key = result.default_model_key;
+    for (const list of [state.bootstrap.model_profiles, state.bootstrap.providers]) {
+      for (const profile of list || []) profile.is_default = profile.model_key === result.default_model_key;
+    }
+    newDefaultDirty = false;
+    toast(clear ? '已清除新对话默认' : '新对话默认已保存');
+  } catch (error) {
+    newDefaultDirty = false;
+    toast(`默认保存失败：${error.message}`);
+  } finally {
+    newDefaultSaving = false;
+    controls.forEach(control => { control.disabled = false; });
+    renderProviders();
+  }
+}
+
 export function openProviderCard(providerId) {
   const provider = providerProfiles().find((item) => item.id === providerId);
   if (!provider) return;
@@ -683,6 +786,7 @@ export function openProviderCard(providerId) {
 }
 
 export function showProviderForm(provider = {}, { isNew = false } = {}) {
+  ++providerModelCheckGeneration;
   $('#providerId').value = provider.id || '';
   $('#providerName').value = provider.name || '';
   $('#providerBaseUrl').value = provider.base_url || '';
@@ -893,9 +997,14 @@ export function providerFormValue() {
   };
 }
 
+let providerModelCheckGeneration = 0;
 export async function loadProviderModels({ automatic = false } = {}) {
   if (!state.providerEditing) return;
   const values = providerFormValue();
+  const generation = ++providerModelCheckGeneration;
+  const snapshot = JSON.stringify(values);
+  const current = () => state.providerEditing && generation === providerModelCheckGeneration
+    && JSON.stringify(providerFormValue()) === snapshot;
   const localFormat = ['lm_studio', 'ollama', 'llama_cpp', 'unsloth'].includes(values.request_format);
   if (!values.base_url || (!values.api_key && !values.id && !localFormat)) {
     if (!automatic) $('#providerError').textContent = '请先填写 API URL 和 API Key';
@@ -903,27 +1012,38 @@ export async function loadProviderModels({ automatic = false } = {}) {
   }
   const button = $('#loadProviderModels');
   const providerKey = `${values.kind === 'local' ? 'local' : 'online'}:${String(values.id || '').trim()}`;
-  if (values.id) delete state.providerModelCatalogs[providerKey];
+  const saved = providerProfiles().find(profile => profile.model_key === providerKey);
+  const catalogUrl = value => String(value || '').trim().replace(/\/+$/, '');
+  const catalogFormat = value => String(value || 'openai_chat').trim().toLowerCase();
+  // 目录只取决于 URL、请求格式与密钥。空密钥表示保留已保存值；保存值已脱敏，
+  // 填写密钥时无法确认是否相同。未保存的连接检查只回显表单，不能污染会话或新对话默认目录。
+  const sharedCatalog = Boolean(saved && !String(values.api_key || '').trim()
+    && catalogUrl(values.base_url) === catalogUrl(saved.base_url)
+    && catalogFormat(values.request_format) === catalogFormat(saved.request_format));
   button.disabled = true;
   button.textContent = '检查中…';
   if (!automatic) $('#providerError').textContent = '正在获取可用模型…';
   try {
-    const result = await api('/api/providers/models', { method: 'POST', body: values });
-    if (!result.models?.length) throw new Error('接口没有返回可用模型，请检查供应商配置');
-    if (values.id) state.providerModelCatalogs[providerKey] = result.models;
-    const current = $('#providerModel').value;
-    setProviderModelOptions(result.models, current && current !== '__custom__' ? current : '');
+    const models = sharedCatalog ? await loadModelCatalog(providerKey, { force: true })
+      : (await api('/api/providers/models', { method: 'POST', body: values })).models;
+    if (!current()) return;
+    if (!models?.length) throw new Error('接口没有返回可用模型，请检查供应商配置');
+    const selected = $('#providerModel').value;
+    setProviderModelOptions(models, selected && selected !== '__custom__' ? selected : '');
     applyProviderModelCapabilities();
     $('#providerError').textContent = '模型目录可访问；请继续点击“测试连接”验证实际推理。';
-    if ($('#modelSelect')?.value === providerKey) void populateComposerModels();
-    toast(`已找到 ${result.models.length} 个模型`);
+    if (sharedCatalog && $('#modelSelect')?.value === providerKey) void populateComposerModels();
+    toast(`已找到 ${models.length} 个模型`);
+    renderDefaultStatus();
   } catch (error) {
-    if (values.id) delete state.providerModelCatalogs[providerKey];
+    if (!current()) return;
     $('#providerError').textContent = `模型检查失败：${error.message}`;
     if (!$('#providerModel').value) setProviderModelOptions([], '');
   } finally {
-    button.disabled = false;
-    button.textContent = '检查模型';
+    if (generation === providerModelCheckGeneration) {
+      button.disabled = false;
+      button.textContent = '检查模型';
+    }
   }
 }
 
@@ -1025,6 +1145,7 @@ export function addProvider() {
 
 // 关闭设置弹层并复位编辑态；Esc、右上角关闭按钮、取消、保存成功四条路径都走这里。
 export function cancelProviderEdit() {
+  ++providerModelCheckGeneration;
   clearTimeout(providerModelCheckTimer);
   state.providerEditing = false;
   const dialog = $('#providerDialog');

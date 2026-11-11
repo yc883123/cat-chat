@@ -367,14 +367,16 @@ class ConversationRunMixin:
             plan_id = ""
             web_search_enabled = bool(conversation.get("web_search_enabled", 0))
             model_key = str(body.get("model_key") or conversation.get("model_key") or "")
-            if not model_key and conversation.get("provider_id"):
-                model_key = f"online:{conversation['provider_id']}"
             raw_model_name = body.get("model_name", conversation.get("model_name") or "")
             if not isinstance(raw_model_name, str):
                 raise ValueError("model_name 必须是文本")
             model_name = raw_model_name.strip()[:256]
             if not model_name:
                 raise ValueError("请先在会话底部选择模型；可用模型来自设置页的模型检查结果")
+            # 先确认真实档案，再固化会话与 Run；空 key 不得在运行时随全局默认漂移。
+            model_key = self.app.config.resolve_conversation_model_key(
+                model_key, str(conversation.get("provider_id") or "")
+            )
             if not task_model_override and (
                 model_key != str(conversation.get("model_key") or "")
                 or model_name != str(conversation.get("model_name") or "")
@@ -742,7 +744,7 @@ class ConversationRunMixin:
             effective = dependency_message_content(effective, snapshot.get(MetadataKeys.DEPENDENCY_SOURCE))
             model_key = str(snapshot.get("model_key") or "")
             if not model_key and snapshot.get("provider_id"):
-                model_key = f"online:{snapshot['provider_id']}"
+                model_key = self.app.config.resolve_conversation_model_key("", str(snapshot["provider_id"]))
             # 先解析当前模型 profile（含 supports_images 能力），再交给视觉路由判断。
             # 顺序错误会导致 prepare_history 因 profile 未定义而整体被跳过（视觉失效）。
             model_name = str(snapshot.get("model_name") or "").strip()

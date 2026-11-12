@@ -9,20 +9,80 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 4.4.1-beta
-  RELEASE_TAG: v4.4.1-beta
+  RELEASE_VERSION: 4.4.2-beta
+  RELEASE_TAG: v4.4.2-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-4.4.1-beta-windows-x64
+  PACKAGE_NAME: cat-chat-4.4.2-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-4.4.1-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-4.4.2-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
   cancel-in-progress: true
 
 jobs:
+  # 全量单测约 800s，占整轮 16 分钟里的 13 分钟（Build executable 只有 64s），所以只拆测试：
+  # 按 .github/test-shards.json 的实测配平分四片并行，构建与发布等四片全绿再跑。
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: true
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up validated Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "26.4.0"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: .github/workflows/release.yml
+
+      - name: Install build dependencies
+        run: |
+          # 与 release 作业同一份锁定版本：测试会导入 pywebview / PyInstaller 相关模块，
+          # 少装任何一个都会让某一片整片 ImportError。
+          python -m pip install --disable-pip-version-check --upgrade "pyinstaller==6.22.3" "pywebview==6.2.1" "pystray==0.19.5" "mcp==2.1.1" "pymupdf==1.28.2" "av==18.1.0" "python-multipart==0.0.32" "websockets==15.0.1"
+          python -m pip install --disable-pip-version-check --upgrade --force-reinstall --no-cache-dir "pillow==13.0.0"
+          python -c "from PIL import Image; print('Pillow', Image.__version__)"
+
+      - name: Run tests (shard ${{ matrix.shard }})
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
+        run: |
+          if (-not (Test-Path "tests")) {
+            throw "tests directory not found; refusing to publish without unit tests."
+          }
+          # 分片清单是静态文件（按本机实测耗时配平）；新增或改名测试模块必须先登记，否则
+          # 它会静默漏跑——这里的比对就是那道闸门。
+          $shards = Get-Content -Raw .github/test-shards.json | ConvertFrom-Json
+          $assigned = @($shards | ForEach-Object { $_ }) | Sort-Object
+          $all = Get-ChildItem tests -Filter "test_*.py" | ForEach-Object { $_.BaseName } | Sort-Object
+          $diff = Compare-Object $all $assigned
+          if ($diff) {
+            throw "分片清单与 tests/ 不一致，请更新 .github/test-shards.json：$($diff | Out-String)"
+          }
+          $mine = @($shards[${{ matrix.shard }}])
+          Write-Host "shard ${{ matrix.shard }}: $($mine.Count) modules"
+          # discover 会把 tests/ 加进 sys.path，个别用例按裸名导入同目录桩（tool_testkit），
+          # 显式列模块名时要自己补上，否则那几片会整片 ImportError。
+          $env:PYTHONPATH = (Join-Path $PWD "tests")
+          python -u -X faulthandler -m unittest $(($mine | ForEach-Object { "tests.$_" })) -v
+          exit $LASTEXITCODE
+
   release:
+    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,20 +117,6 @@ jobs:
           python -m pip install --disable-pip-version-check --upgrade "pyinstaller==6.22.3" "pywebview==6.2.1" "pystray==0.19.5" "mcp==2.1.1" "pymupdf==1.28.2" "av==18.1.0" "python-multipart==0.0.32" "websockets==15.0.1"
           python -m pip install --disable-pip-version-check --upgrade --force-reinstall --no-cache-dir "pillow==13.0.0"
           python -c "from PIL import Image; print('Pillow', Image.__version__)"
-
-      - name: Run tests
-        timeout-minutes: 25
-        shell: pwsh
-        env:
-          PYTHONUTF8: "1"
-          PYTHONIOENCODING: utf-8
-        run: |
-          if (-not (Test-Path "tests")) {
-            throw "tests directory not found; refusing to publish without unit tests."
-          }
-          # 全量发现会覆盖前置专项用例，CI 只运行一次，避免重复消耗数分钟。
-          python -u -X faulthandler -m unittest discover -s tests -v
-          exit $LASTEXITCODE
 
       - name: Build executable
         shell: pwsh
@@ -133,11 +179,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 4.4.1 Beta release
+      - name: Publish 4.4.2 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 4.4.1 Beta
+          name: Cat Chat 4.4.2 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -147,7 +193,7 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 4.4.1 Beta：工作台系统提示词与多 Skill 连续生成
+            Cat Chat 4.4.2 Beta：工作台系统提示词与多 Skill 连续生成
             提词库分成「模板生成 / Skill 生成」两页，手写系统提示词在两页共用并一直生效；两页各有自己的草稿，来回切不会互相覆盖。
             Skill 生成页可多选：所选 Skill 的完整主文和你的手写规则一起进入系统设定，模板正文仍按本次要求发送；选 Skill 不会把它塞进系统词输入框。
             Skill 的参考文档按需读取，只读、不执行脚本，读到的内容留在本次对话里；Skill 之后被更新或删除，已有对话继续用当时的快照，新生成才用新内容或提示缺失。
@@ -157,6 +203,8 @@ jobs:
             造梦机只有「剧本 → 提示词」转换加了系统提示词；整批按点击时的配置执行，之后再改表单不影响已提交的任务，迟到的旧结果也不会覆盖新配置。
             贴签匠修复「选了 Skill 之后手写系统提示词没有一起发出去」的问题，选择与清空互不覆盖。
             修复部分 Windows 账户下选 Skill 生成被判成「Skill 主文不在所属根目录内」：同一目录的长名和 8.3 短名（如 `RUNNER~1`）拼法不同时按真实路径比较，不再误拒。
+            修复长用户名环境下 Skill 文档工具（读取、列目录、搜索）把合法参考文档判成「不在本次冻结 Skill 文档内」的问题：同一目录的两种拼法按真实路径匹配，越界路径仍拒绝。
+            修复同一张上传图片的长名与 8.3 短名两种拼法在「仍被引用」判定里对不上的问题，避免工作台带图任务还在用的图片被缓存清理删掉。
             内置模板整理：修正 h3-004-cinematic-i2v 里虚构的数据库调用、清理 vs-037-daily0621 的推广与下载残留，澄清 H3 / K2 / PromptRelay 摘要；581 条索引与四份正文分片的编号集合严格一致。
-            验证：本地全量 4734 项测试通过（1 项因 Windows 无符号链接权限跳过），静态检查、JavaScript 语法与文档编码通过，桌面及 320/375/393px 隔离浏览器验收完成；模型全部使用本地替身，未做真实付费生成与 ComfyUI 出图验收。
-            Cat Chat 4.4.1 Beta Windows build。保留现有数据位置、更新协议以及双名称 exe 和 zip 资产。
+            验证：本地全量 4737 项测试通过，静态检查、JavaScript 语法与文档编码通过；模型全部使用本地替身，未做真实付费生成与 ComfyUI 出图验收。
+            Cat Chat 4.4.2 Beta Windows build。保留现有数据位置、更新协议以及双名称 exe 和 zip 资产。

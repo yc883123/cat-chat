@@ -55,19 +55,39 @@ _COPY_MIN_HITS = 3
 
 
 class ReleaseTestExecutionPolicyTests(unittest.TestCase):
-    def test_test_step_runs_once_with_explicit_deadline_and_utf8(self):
+    """测试步骤的执行策略：分片并行、每条用例只跑一次、失败即停、UTF-8 输出。"""
+
+    def _test_step(self) -> str:
         workflow = WORKFLOW.read_text(encoding="utf-8")
-        step = workflow.split("      - name: Run tests", 1)[1].split("      - name:", 1)[0]
-        self.assertIn("timeout-minutes: 25", step)
+        return workflow.split("name: Run tests (shard", 1)[1].split("- name:", 1)[0]
+
+    def test_each_test_runs_once_in_a_shard_with_explicit_deadline_and_utf8(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        step = self._test_step()
+        self.assertIn("timeout-minutes: 20", workflow)
         self.assertIn('PYTHONUTF8: "1"', step)
         self.assertIn("PYTHONIOENCODING: utf-8", step)
-        self.assertEqual(step.count("-m unittest discover -s tests -v"), 1)
-        self.assertNotIn("-m unittest tests.test_", step)
-        self.assertIn("CI 只运行一次", step)
-        self.assertNotIn("$attempts", step)
-        self.assertNotIn("retrying once", step)
+        # 分片清单是唯一真源：不再用 discover（会让每片都跑全量），也不留注释掉的旧命令。
+        self.assertNotIn("unittest discover", step)
+        self.assertIn('.github/test-shards.json', step)
+        self.assertIn("tests.$_", step)
+        self.assertIn("Compare-Object", step)
         self.assertIn("exit $LASTEXITCODE", step)
         self.assertIn("refusing to publish without unit tests", step)
+        self.assertNotIn("$attempts", step)
+        self.assertNotIn("retrying once", step)
+        self.assertIn("    needs: test", workflow, "构建/发布必须等测试分片全绿")
+
+    def test_shard_list_covers_every_test_module_exactly_once(self):
+        """清单漏一个模块，CI 就会静默跳过它；与 workflow 里的 Compare-Object 互为正反。"""
+        import json
+
+        shards = json.loads((WORKFLOW.parents[1] / "test-shards.json").read_text(encoding="utf-8"))
+        flat = [stem for shard in shards for stem in shard]
+        self.assertEqual(len(flat), len(set(flat)), "同一模块出现在多个分片里")
+        modules = sorted(path.stem for path in (ROOT / "tests").glob("test_*.py"))
+        self.assertEqual(modules, sorted(flat))
+        self.assertEqual(4, len(shards))
 
 
 def release_display(version: str) -> str:
@@ -127,7 +147,12 @@ def scan_structure(text: str) -> list[str]:
             continue  # 块一直延伸到文件末尾，没有结束行需要检查
         terminator = lines[cursor]
         depth = _indent(terminator)
-        if depth not in (base, base - 2):
+        allowed = (base, base - 2)
+        # 多作业工作流里，一个作业的最后一步常以 `run: |` 结尾，紧接的下一行是同级作业键
+        # （缩进 2，形如 `release:`）。那不是"块内丢缩进"，只有丢缩进的内容行（句子）在
+        # 缩进 2 上才算问题，映射键按 YAML 本就该在这里。
+        job_key = depth == 2 and terminator.rstrip().endswith(":")
+        if depth not in allowed and not job_key:
             problems.append(
                 f"第 {index + 1} 行的 `|` 块被第 {cursor + 1} 行（缩进 {depth}）截断——"
                 f"结束行只能是兄弟键（缩进 {base}）或同级列表项（缩进 {base - 2}）；"

@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 4.4.3-beta
-  RELEASE_TAG: v4.4.3-beta
+  RELEASE_VERSION: 4.4.4-beta
+  RELEASE_TAG: v4.4.4-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-4.4.3-beta-windows-x64
+  PACKAGE_NAME: cat-chat-4.4.4-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-4.4.3-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-4.4.4-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -179,11 +179,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 4.4.3 Beta release
+      - name: Publish 4.4.4 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 4.4.3 Beta
+          name: Cat Chat 4.4.4 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -193,17 +193,8 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 4.4.3 Beta：对话侧栏批量归档与删除
-            对话侧栏新增「批量管理」：点标题行的方框图标进入，勾选多个对话后一次归档、取消归档或删除；再点一次或按 Esc 退出（搜索框里的 Esc 仍是清关键词）。
-            勾选只算当前列表里列出来的对话：换搜索词、收起分组、切换筛选后不在列表里的自动取消，删不到看不见的会话；工作区分组和「已收藏」里的同一会话按一个算。
-            删除前会列出前 5 个标题确认，还有多少个一并说明；还在回复或有后台任务在跑的对话跳过不删并保持勾选，停掉后再点一次即可。
-            删掉的是当前打开的对话时，自动切到当前筛选下还列得出来的下一个；只剩已归档会话也不会停在空白页。
-            批量模式下「全文」搜索置灰并提示只能按标题搜；归档按 100 个一批、删除按 20 个一批顺序提交，状态行显示「正在删除 20/87」这样的进度。
-            某一批请求失败时这一批全部保持勾选、后面的批次不再发，可以直接重试；删除对已经不存在的对话算成功，重发不会报一堆错。
-            贴签匠并发打标的开关、槽位数和监督员现在按存档保存：再次打开页面自动恢复上次的配置，改动后自动保存，不会和供应商额度互相覆盖。
-            修复贴签匠读取 Skill 参考脚本时把 scripts/__pycache__ 里的编译缓存当文本读、导致整批打标报「参考脚本无法读取」的问题：现在跳过编译缓存，报错也会带上具体文件名。
-            升级后内置贴签匠 Skill 的摘要会变一次（参考脚本清单里去掉了缓存文件），属于预期。
-            修复提词库三处界面问题：结果卡「⋯」菜单被卡片裁得只剩「对话」两个字（现在向右展开）；历史产出的时钟图标被按钮内边距压成半个（恢复 16px）；Skill 列表条目一多就被压扁、文字互相重叠（改为条目保持行高、列表整体滚动）。
-            提词库的「继续追问」在换模板或换来源时自动收起，重新点开一条完成的结果再出现。
-            验证：本地全量 4762 项测试通过，静态检查、JavaScript 语法与文档编码通过；批量管理在隔离实例上跑过桌面与 375px 浏览器冒烟，模型与供应商均为本地替身，未做真实付费生成。
-            Cat Chat 4.4.3 Beta Windows build。保留现有数据位置、更新协议以及双名称 exe 和 zip 资产。
+            Cat Chat 4.4.4 Beta：局域网访问下的提词库生成修复
+            修复手机或其他设备用局域网地址（http，非安全上下文）打开时，提词库点「生成」直接报「crypto.randomUUID is not a function」的问题：请求标识改用带退化的生成函数——安全上下文仍用原生 UUID，普通 http 下退回 getRandomValues（再退时间戳加随机串），生成与连续追问都能正常提交。
+            提到这件事的边界：局域网 http 打开时浏览器不提供 crypto.randomUUID，这是浏览器限制，不是配置问题；本次只让请求标识不再依赖它，其他功能行为不变。
+            验证：本地全量 4763 项测试通过（含「前端不得直接调用 crypto.randomUUID」的守门），静态检查、JavaScript 语法与文档编码通过；提词库在删掉 randomUUID 的浏览器上下文里实测生成请求仍能发出，模型与供应商均为本地替身，未做真实付费生成。
+            Cat Chat 4.4.4 Beta Windows build。保留现有数据位置、更新协议以及双名称 exe 和 zip 资产。

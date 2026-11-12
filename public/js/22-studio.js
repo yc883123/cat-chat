@@ -261,6 +261,8 @@ function setPromptSource(source, { persist = true, reconcile = true, restoreSele
   renderImagePreview();
   renderResultPanel(draft.lastResult || { status: "", input: {} });
   setResultMode(draft.resultMode || "result");
+  // 换来源先收起追问面板：上一条结果属于另一个来源，别让「沿用本次规则」指向它。
+  collapseStudioFollowup();
   if (persist) void saveStudioPrefs({ prompt_source: next });
   void syncStudioModel();
   if (restoreSelection && next === "template" && !studio.meta && (studio.itemId || studio.customId)) {
@@ -955,6 +957,7 @@ async function selectStudioEntry(kind, id) {
   if (taskToken !== studio.taskToken) return;
   renderStudioDetail();
   applyPromptSourceUi();
+  collapseStudioFollowup();
   setStudioPane("form");
   saveStudioSelection();
   await renderStudioList();
@@ -2092,11 +2095,25 @@ function updateReasoningChip() {
   else if (studio.reasoningText) hint.textContent = `思考中…（${studio.reasoningText.length} 字）`;
 }
 
+// 追问面板跟着「当前这条结果」走：换模板或换来源时收起（用户明确要求的收口），
+// 重新点开一条完成的结果再出现。面板里的规则本来就取自结果自己的快照，不取当前表单。
+function collapseStudioFollowup() {
+  const panel = $("#studioFollowup");
+  if (panel) panel.hidden = true;
+}
+
+function syncFollowupVisibility() {
+  const panel = $("#studioFollowup");
+  if (!panel) return;
+  const task = studio.lastResult;
+  panel.hidden = studio.resultMode === "history" || task?.status !== "done";
+}
+
 function renderResultPanel(task) {
   studio.lastResult = task;
   renderContentThread($("#studioThreadContext"), task);
   const input = task.input || {};
-  $("#studioFollowup").hidden = task.status !== "done" || studio.resultMode === "history";
+  syncFollowupVisibility();
   $("#studioThreadSummary").textContent = `${input.prompt_source === "skill" ? `Skill ${(input.skill_ids || []).length} 个` : "模板生成"} · ${input.model_name || "原任务模型"} · 追问沿用本次规则`;
   $("#studioFollowupImageCount").textContent = studio.followupImages.length ? `已选 ${studio.followupImages.length} 张` : "";
   const panel = $("#studioResultStream");
@@ -2325,7 +2342,7 @@ function setResultMode(mode) {
   if (body) body.hidden = history;
   if (copyBtn) copyBtn.hidden = history || !String(stream?.textContent || "").trim();
   if (actions) actions.hidden = history;
-  $("#studioFollowup").hidden = history || studio.lastResult?.status !== "done";
+  syncFollowupVisibility();
   $("#studioThreadContext").hidden = history || !$("#studioThreadContext").childElementCount;
   if (meta) meta.hidden = history;
   if (backBtn) backBtn.hidden = !history;

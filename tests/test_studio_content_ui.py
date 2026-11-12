@@ -235,5 +235,33 @@ assert.notEqual(f.p.studio.activeTaskId,'late');assert.equal(f.p.studio.open,fal
 """)
 
 
+class StudioWorkbenchLayoutGuardTests(unittest.TestCase):
+    """提词库三处界面修复 + 追问面板收口的静态守门（运行时由 verify 探针/冒烟覆盖）。"""
+
+    def setUp(self):
+        self.source = (ROOT / "public/js/22-studio.js").read_text(encoding="utf-8")
+        self.css = (ROOT / "public/styles.css").read_text(encoding="utf-8")
+
+    def test_followup_collapses_on_template_or_source_switch(self):
+        self.assertIn("function collapseStudioFollowup()", self.source)
+        select = self.source[self.source.index("async function selectStudioEntry"):
+                              self.source.index("async function loadCatalogEntry")]
+        self.assertIn("collapseStudioFollowup()", select, "换模板后要收起追问面板")
+        prompt = self.source[self.source.index("function setPromptSource"):
+                             self.source.index("function renderSkillHistory")]
+        self.assertIn("collapseStudioFollowup()", prompt, "换来源后要收起追问面板")
+        render = self.source[self.source.index("function renderResultPanel"):
+                             self.source.index("async function refreshTasks")]
+        self.assertIn("syncFollowupVisibility()", render, "结果面板仍按任务状态开合")
+
+    def test_icon_button_and_long_skill_list_keep_their_geometry(self):
+        # 34px 图标按钮减去文字按钮的 24px 内边距 ⇒ 16px 图标被压成 8px（时钟只剩半个）。
+        self.assertIn(":is(.studio-view, .super-agent-view) .studio-icon-button { padding: 0; }", self.css)
+        # 列布局 + max-height 会把 Skill 条目压到 19px，nowrap 文字互相重叠。
+        self.assertIn(".content-skill-options > * { flex: none; }", self.css)
+        # 结果卡的 ⋯ 菜单右对齐会伸到卡片外，被 overflow:hidden 裁掉。
+        self.assertIn("#studioPageLibrary .studio-result-menu .wb-media-menu-panel { left: 0; right: auto; }", self.css)
+
+
 if __name__ == "__main__":
     unittest.main()

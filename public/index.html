@@ -56,6 +56,10 @@
             <!-- 双横线 + 两个圆钮（sliders）：点开「分组与排序」面板 -->
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16M4 16h16"></path><circle cx="14.5" cy="8" r="2.4"></circle><circle cx="9" cy="16" r="2.4"></circle></svg>
           </button>
+          <button class="icon-button" id="workspaceBatchToggle" title="批量管理" aria-label="批量管理" aria-pressed="false">
+            <!-- 方框勾选 + 两条横线：进入批量勾选模式（再点一次等于「完成」） -->
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5l1.6 1.6L8.6 5M4 15.5l1.6 1.6L8.6 14"></path><path d="M12 7h8M12 16h8"></path></svg>
+          </button>
           <button class="icon-button" id="addWorkspace" title="新建工作区" aria-label="新建工作区">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
           </button>
@@ -71,6 +75,17 @@
         <input class="workspace-search-input" id="workspaceSearchInput" type="text" placeholder="搜索对话" autocomplete="off">
       </div>
       <nav class="conversation-list" id="sidebarWorkspaceTree" aria-label="工作区"></nav>
+      <!-- 批量管理：状态行（全选 / 计数 / 完成）在搜索行下面，操作栏在列表下面。
+           分两处放是因为最窄 170px 时标题行放不下五个控件；删除离全选远一点也少误触。 -->
+      <div class="workspace-batch-status" id="workspaceBatchStatus" hidden>
+        <button type="button" class="workspace-batch-all" id="workspaceBatchAll" role="checkbox" aria-checked="false">全选</button>
+        <span class="workspace-batch-count" id="workspaceBatchCount">已选 0 个</span>
+        <button type="button" class="workspace-batch-done" id="workspaceBatchDone">完成</button>
+      </div>
+      <div class="workspace-batch-actions" id="workspaceBatchActions" hidden>
+        <button type="button" id="workspaceBatchArchive">归档</button>
+        <button type="button" id="workspaceBatchDelete" class="is-danger">删除</button>
+      </div>
       <!-- 工作台态的功能分页导航：左侧栏负责在各功能页之间切换。
            当前「提词库」+「打标器」，后续新功能各加一项（不在顶栏再堆分页按钮）。 -->
       <div class="sidebar-studio-nav" id="sidebarStudioNav" hidden>

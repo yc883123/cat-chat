@@ -84,6 +84,17 @@ export const SIDE_CONV_LIMIT = 5; // 每个展开工作区默认显示的最新�
 // 「已收藏」是跨工作区的特殊分组（放在侧栏最下方，与工作区分组互不干扰）。
 export const SIDE_FAVORITES_GROUP = '__favorites__';
 
+// ---- 批量管理（归档 / 删除）----
+// 状态放模块内（与 sidebarShowAll 同一种放法）：勾选不能存在 DOM 上——列表是虚拟滚动，
+// 滚动/搜索都会整段重写 innerHTML。已选集合每次重建行模型后按「还列着的对话」收拢，
+// 所以换搜索词、收起分组之后删不到看不见的对话。
+const BATCH_ARCHIVE_CHUNK = 100; // 归档每批上限（= contracts.CONVERSATION_BATCH_MAX_IDS）
+const BATCH_DELETE_CHUNK = 20; // 删除要级联清消息和事件，分小批进度才动
+let sidebarBatchMode = false;
+let sidebarBatchBusy = false;
+let sidebarBatchProgress = '';
+const sidebarBatchSelected = new Set();
+
 export function sidebarMetricsNow() {
   if (sidebarMetrics) return sidebarMetrics;
   const holder = document.createElement('div');
@@ -133,7 +144,7 @@ export function sidebarRowHtml(row) {
         <span class="workspace-caret"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M5 3.5 L11 8 L5 12.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
         <span class="workspace-group-name">${escapeHtml(row.label)}</span>
         <span class="workspace-count">${row.count}</span>
-        ${row.isUngrouped || row.isFavorites ? '' : `<button class="workspace-delete" data-action="delete-workspace" data-workspace-name="${escapeHtml(row.wsName)}" title="删除工作区" aria-label="删除工作区">×</button>`}
+        ${row.isUngrouped || row.isFavorites || sidebarBatchMode ? '' : `<button class="workspace-delete" data-action="delete-workspace" data-workspace-name="${escapeHtml(row.wsName)}" title="删除工作区" aria-label="删除工作区">×</button>`}
       </div>
     </div>`;
   }
@@ -165,15 +176,20 @@ export function sidebarRowHtml(row) {
   const archived = Number(c.archived || 0) === 1;
   const isRunActive = state.activeConversationRunIds?.has(String(c.id))
     || String(state.runConversationId || '') === String(c.id) && Boolean(state.chatRunId || state.abortController);
-  return `<div class="conversation-item ${c.id === state.conversationId ? 'active' : ''}${archived ? ' is-archived' : ''}" data-conversation-id="${c.id}" data-group="${escapeHtml(row.wsName || '')}"${row.flat && state.workspaceSort === 'manual' ? ' draggable="true"' : ''}>
-    <button class="conversation-star ${favorite ? 'is-favorite' : ''}" data-action="toggle-favorite" title="${favorite ? '取消收藏' : '收藏会话'}" aria-label="${escapeHtml(c.title)} ${favorite ? '取消收藏' : '收藏'}" aria-pressed="${favorite}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.6l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.8l5.9-.9z"></path></svg></button>
-    ${branchBadge}
+  // 批量模式：星标换成勾选框（同 26×26，行高不变），分支入口 / 「⋯」/ 拖拽都收起来，
+  // 只留标题、回复中转圈、归档标和时间——看得到「哪些删不了」就够了。
+  const batch = sidebarBatchMode;
+  const selected = batch && sidebarBatchSelected.has(String(c.id));
+  const batchCheck = `<button class="conversation-check" data-action="toggle-batch-select" role="checkbox" aria-checked="${selected}" title="${selected ? '取消选择' : '选择'}" aria-label="${escapeHtml(c.title)} ${selected ? '取消选择' : '选择'}"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.6" y="1.6" width="12.8" height="12.8" rx="3"></rect><path class="check-mark" d="M4.6 8.3l2.2 2.2 4.6-4.8"></path></svg></button>`;
+  return `<div class="conversation-item ${c.id === state.conversationId ? 'active' : ''}${archived ? ' is-archived' : ''}${batch ? ' is-batch' : ''}${selected ? ' is-batch-selected' : ''}" data-conversation-id="${c.id}" data-group="${escapeHtml(row.wsName || '')}"${!batch && row.flat && state.workspaceSort === 'manual' ? ' draggable="true"' : ''}>
+    ${batch ? batchCheck : `<button class="conversation-star ${favorite ? 'is-favorite' : ''}" data-action="toggle-favorite" title="${favorite ? '取消收藏' : '收藏会话'}" aria-label="${escapeHtml(c.title)} ${favorite ? '取消收藏' : '收藏'}" aria-pressed="${favorite}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.6l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.8l5.9-.9z"></path></svg></button>`}
+    ${batch ? '' : branchBadge}
     ${isRunActive ? '<span class="conversation-run-status" role="img" aria-label="正在回复"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5a6.5 6.5 0 1 0 6.5 6.5"/><path d="M8 4v4l2.5 1.5"/></svg></span>' : ''}
     <button class="conversation-open" title="${escapeHtml(c.title)}">${escapeHtml(c.title)}</button>
-    ${branchCountBadge}
+    ${batch ? '' : branchCountBadge}
     ${archived ? '<span class="archived-tag">已归档</span>' : ''}
     <span class="conversation-time">${escapeHtml(formatRelativeTime(c.updated_at))}</span>
-    <button class="conversation-more" data-action="open-conversation-menu" title="更多操作" aria-label="${escapeHtml(c.title)} 的更多操作" aria-haspopup="menu">⋯</button>
+    ${batch ? '' : `<button class="conversation-more" data-action="open-conversation-menu" title="更多操作" aria-label="${escapeHtml(c.title)} 的更多操作" aria-haspopup="menu">⋯</button>`}
   </div>`;
 }
 
@@ -198,8 +214,10 @@ export function renderSidebarWindow(targetScrollTop, { force = false } = {}) {
   if (sidebarShowsSearchResults()) return;
   if (!sidebarRowCache.length) {
     // 顶栏「新会话」按钮已移除（每个工作区分组自带「＋ 新会话」）；这里保留一个兜底入口，
-    // 否则"一条会话都没有"时侧栏没有任何新建入口。
-    tree.innerHTML = '<div class="workspace-empty">暂无对话<button class="workspace-new-chat" data-action="new-chat" type="button"><span class="nc-plus" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"><path d="M8 2.5 V13.5 M2.5 8 H13.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span><span class="nc-label">新建会话</span></button></div>';
+    // 否则"一条会话都没有"时侧栏没有任何新建入口。批量模式不放新建入口（会打断勾选）。
+    tree.innerHTML = sidebarBatchMode
+      ? '<div class="workspace-empty">暂无对话</div>'
+      : '<div class="workspace-empty">暂无对话<button class="workspace-new-chat" data-action="new-chat" type="button"><span class="nc-plus" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"><path d="M8 2.5 V13.5 M2.5 8 H13.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span><span class="nc-label">新建会话</span></button></div>';
     resetSidebarWindowRange();
     return;
   }
@@ -310,7 +328,7 @@ export function renderSidebar() {
     if (search) {
       list = list.filter((c) => String(c.title || '').toLowerCase().includes(search));
     }
-    rows.push({ type: 'newchat', wsName: '', dir: '' });
+    if (!sidebarBatchMode) rows.push({ type: 'newchat', wsName: '', dir: '' });
     for (const c of list) rows.push({ type: 'item', c, wsName: '', flat: true });
   } else for (const wsName of orderedNames) {
     const isUngrouped = wsName === '';
@@ -325,7 +343,7 @@ export function renderSidebar() {
     const isExp = state.expandedGroups.has(wsName);
     rows.push({ type: 'header', wsName, label, dir, isUngrouped, isExp, count: list.length });
     if (isExp) {
-      rows.push({ type: 'newchat', wsName, dir });
+      if (!sidebarBatchMode) rows.push({ type: 'newchat', wsName, dir });
       const showAll = sidebarShowAll.has(wsName);
       const limit = SIDE_CONV_LIMIT;
       const shown = showAll || list.length <= limit ? list : list.slice(0, limit);
@@ -354,6 +372,13 @@ export function renderSidebar() {
     }
   }
 
+  // 批量模式：勾选只对「还列着的」对话有效——折叠分组里的、被搜索词滤掉的都不算，
+  // 所以每次重建行模型后把已选集合收拢一次，删不到看不见的对话。
+  if (sidebarBatchMode) {
+    const listed = new Set();
+    for (const row of rows) if (row.type === 'item') listed.add(String(row.c.id));
+    for (const id of [...sidebarBatchSelected]) if (!listed.has(id)) sidebarBatchSelected.delete(id);
+  }
   const { offsets, totalH } = computeSidebarOffsets(rows);
   sidebarRowCache = rows; sidebarOffsetCache = offsets; sidebarTotalH = totalH;
   let st = tree.scrollTop;
@@ -365,6 +390,7 @@ export function renderSidebar() {
   // 不再在窗口算完后单独赋值——避免高度突变时窗口与滚动状态错位。
   // force：行缓存刚重建，即使区间索引相同也必须重绘（内容可能已变）。
   renderSidebarWindow(st, { force: true });
+  syncSidebarBatchBars();
 }
 
 // ---- 侧栏「全文」搜索：结果替换会话树区域渲染 ----
@@ -454,7 +480,8 @@ export async function runFullTextSearch() {
 
 // 模式切换（标题｜全文）：默认标题模式，行为与升级前逐字节一致（本地过滤，不发请求）。
 export function setWorkspaceSearchMode(mode) {
-  const next = mode === 'full' ? 'full' : 'title';
+  // 全文结果会整棵替换会话树，勾选无处置身：批量管理期间只允许标题模式。
+  const next = sidebarBatchMode || mode !== 'full' ? 'title' : 'full';
   state.workspaceSearchMode = next;
   state.searchResults = null;
   state.searchQuery = '';
@@ -472,6 +499,11 @@ export function syncSearchModeUi() {
   fullButton?.classList.toggle('active', full);
   titleButton?.setAttribute('aria-pressed', String(!full));
   fullButton?.setAttribute('aria-pressed', String(full));
+  // 「全文」在批量管理期间置灰：结果列表不是会话树，勾选无处附着。
+  if (fullButton) {
+    fullButton.disabled = sidebarBatchMode;
+    fullButton.title = sidebarBatchMode ? '批量管理时只能按标题搜' : '按消息正文全文检索（含历史会话）';
+  }
   const input = $('#workspaceSearchInput');
   if (input) input.placeholder = full ? '搜索消息正文' : '搜索对话';
 }
@@ -583,6 +615,15 @@ export async function onComposerWorkspaceChange(event) {
 }
 
 export async function onSidebarTreeClick(event) {
+  // 批量模式：点行上任何位置都是勾选/取消，不打开对话。分组标题不在 .conversation-item
+  // 里，展开/收起照常落到下面的 data-action 分支。
+  if (sidebarBatchMode) {
+    const batchItem = event.target.closest('.conversation-item');
+    if (batchItem) {
+      toggleSidebarBatchSelection(batchItem.dataset.conversationId || '');
+      return;
+    }
+  }
   // 全文搜索命中项：先切会话，再按 message_id 定位并高亮。放在最前面——它不是
   // .conversation-item，落到下面的分支会被无声忽略。
   const hit = event.target.closest('[data-search-hit]');
@@ -768,6 +809,243 @@ export async function toggleConversationArchive(id) {
     conversation.archived = next ? 0 : 1;
     renderSidebar();
     toast(`归档失败：${error.message}`);
+  }
+}
+
+// ---- 批量管理：进入 / 退出 / 勾选 / 执行 ----
+// 入口在侧栏标题行（批量管理 ⇄ 完成）；勾选只算行模型里列出来的会话，
+// 归档/删除都等服务端回包后再改界面（不做乐观更新：删错了没有回收站）。
+export function sidebarBatchActive() { return sidebarBatchMode; }
+export function sidebarBatchRunning() { return sidebarBatchBusy; }
+
+// 行模型里列出来的对话 id（去重、保持侧栏顺序）：滚动离开屏幕的仍算，
+// 折叠分组里的、没展开的、被搜索词滤掉的不算。
+function listedSidebarBatchIds() {
+  const ids = [];
+  const seen = new Set();
+  for (const row of sidebarRowCache) {
+    if (row.type !== 'item') continue;
+    const id = String(row.c.id);
+    if (!seen.has(id)) { seen.add(id); ids.push(id); }
+  }
+  return ids;
+}
+
+function selectedSidebarBatchIds() {
+  const listed = new Set(listedSidebarBatchIds());
+  return [...sidebarBatchSelected].filter((id) => listed.has(id));
+}
+
+function syncSidebarBatchBars() {
+  const toggle = $('#workspaceBatchToggle');
+  toggle?.classList.toggle('active', sidebarBatchMode);
+  toggle?.setAttribute('aria-pressed', String(sidebarBatchMode));
+  const status = $('#workspaceBatchStatus');
+  const actions = $('#workspaceBatchActions');
+  if (status) status.hidden = !sidebarBatchMode;
+  if (actions) actions.hidden = !sidebarBatchMode;
+  if (!sidebarBatchMode) return;
+  const listed = listedSidebarBatchIds();
+  const selected = selectedSidebarBatchIds();
+  const all = $('#workspaceBatchAll');
+  if (all) {
+    // 全选三态：全中 true、部分 mixed、没选 false。执行中与空列表都点不动。
+    const allChecked = listed.length > 0 && selected.length === listed.length;
+    all.setAttribute('aria-checked', allChecked ? 'true' : (selected.length ? 'mixed' : 'false'));
+    all.disabled = sidebarBatchBusy || listed.length === 0;
+  }
+  const count = $('#workspaceBatchCount');
+  if (count) count.textContent = sidebarBatchProgress || `已选 ${selected.length} 个`;
+  const done = $('#workspaceBatchDone');
+  if (done) done.disabled = sidebarBatchBusy;
+  const archiveButton = $('#workspaceBatchArchive');
+  if (archiveButton) {
+    const picked = selected.map((id) => state.conversations.find((c) => c.id === id)).filter(Boolean);
+    const allArchived = picked.length > 0 && picked.length === selected.length
+      && picked.every((c) => Number(c.archived || 0) === 1);
+    archiveButton.textContent = allArchived ? '取消归档' : '归档';
+    archiveButton.disabled = sidebarBatchBusy || selected.length === 0;
+  }
+  const deleteButton = $('#workspaceBatchDelete');
+  if (deleteButton) deleteButton.disabled = sidebarBatchBusy || selected.length === 0;
+}
+
+export function enterSidebarBatchMode() {
+  if (sidebarBatchMode) return;
+  closeConversationMenu();
+  closeSidebarViewMenu();
+  closeBranchChainPanel();
+  sidebarBatchSelected.clear();
+  sidebarBatchBusy = false;
+  sidebarBatchProgress = '';
+  sidebarBatchMode = true;
+  // 全文结果列表替换整棵会话树，勾选无处置身：切回标题模式，关键词保留。
+  if (state.workspaceSearchMode === 'full') setWorkspaceSearchMode('title');
+  syncSearchModeUi();
+  renderSidebar();
+}
+
+export function exitSidebarBatchMode() {
+  if (!sidebarBatchMode) return;
+  sidebarBatchMode = false;
+  sidebarBatchSelected.clear();
+  sidebarBatchBusy = false;
+  sidebarBatchProgress = '';
+  syncSearchModeUi();
+  renderSidebar();
+}
+
+export function toggleSidebarBatchMode() {
+  if (sidebarBatchMode) exitSidebarBatchMode();
+  else enterSidebarBatchMode();
+}
+
+export function toggleSidebarBatchSelection(id) {
+  if (!sidebarBatchMode || sidebarBatchBusy) return;
+  const key = String(id || '');
+  if (!key) return;
+  if (sidebarBatchSelected.has(key)) sidebarBatchSelected.delete(key);
+  else sidebarBatchSelected.add(key);
+  renderSidebar();
+}
+
+export function toggleSidebarBatchSelectAll() {
+  if (!sidebarBatchMode || sidebarBatchBusy) return;
+  const listed = listedSidebarBatchIds();
+  const selected = new Set(selectedSidebarBatchIds());
+  const allChecked = listed.length > 0 && selected.size === listed.length;
+  for (const id of listed) {
+    if (allChecked) sidebarBatchSelected.delete(id);
+    else sidebarBatchSelected.add(id);
+  }
+  renderSidebar();
+}
+
+// 一批一批顺序发：删除要级联清消息和事件，分小批进度才动。某一批请求失败时这一批
+// 全部算没完成、后面的批次不再发（再点一次即可，删除对已不存在的会话算成功）。
+async function submitSidebarBatch(action, ids, chunkSize) {
+  const succeeded = [];
+  const failed = [];
+  let requestError = '';
+  const verb = action === 'delete' ? '删除' : (action === 'archive' ? '归档' : '取消归档');
+  for (let start = 0; start < ids.length; start += chunkSize) {
+    if (!sidebarBatchMode) break; // 退出后不再发新批次；已发出的照常收结果
+    const chunk = ids.slice(start, start + chunkSize);
+    sidebarBatchProgress = `正在${verb} ${Math.min(start + chunk.length, ids.length)}/${ids.length}`;
+    syncSidebarBatchBars();
+    try {
+      const result = await api('/api/conversations/batch', {
+        method: 'POST',
+        body: { action, ids: chunk },
+      });
+      succeeded.push(...(Array.isArray(result.succeeded) ? result.succeeded : []));
+      failed.push(...(Array.isArray(result.failed) ? result.failed : []));
+    } catch (error) {
+      requestError = error.message;
+      for (const id of chunk) failed.push({ id, code: 'request_failed', error: error.message });
+      break;
+    }
+  }
+  sidebarBatchProgress = '';
+  return { succeeded, failed, requestError };
+}
+
+export async function runSidebarBatchArchive() {
+  if (!sidebarBatchMode || sidebarBatchBusy) return;
+  const ids = selectedSidebarBatchIds();
+  if (!ids.length) return;
+  const picked = ids.map((id) => state.conversations.find((c) => c.id === id)).filter(Boolean);
+  const allArchived = picked.length === ids.length
+    && picked.every((c) => Number(c.archived || 0) === 1);
+  const action = allArchived ? 'unarchive' : 'archive';
+  const verb = action === 'archive' ? '归档' : '取消归档';
+  sidebarBatchBusy = true;
+  sidebarBatchProgress = '';
+  syncSidebarBatchBars();
+  let outcome;
+  try {
+    outcome = await submitSidebarBatch(action, ids, BATCH_ARCHIVE_CHUNK);
+  } finally {
+    sidebarBatchBusy = false;
+  }
+  const succeeded = new Set(outcome.succeeded.map(String));
+  const missing = new Set(outcome.failed.filter((item) => item.code === 'missing').map((item) => String(item.id)));
+  const archivedValue = action === 'archive' ? 1 : 0;
+  for (const conversation of state.conversations) {
+    if (succeeded.has(String(conversation.id))) conversation.archived = archivedValue;
+  }
+  if (missing.size) state.conversations = state.conversations.filter((c) => !missing.has(String(c.id)));
+  for (const id of [...succeeded, ...missing]) sidebarBatchSelected.delete(id);
+  renderSidebar();
+  const okCount = succeeded.size;
+  if (outcome.requestError) {
+    toast(`${verb}失败：${outcome.requestError}${okCount ? `（前面已${verb} ${okCount} 个）` : ''}`);
+  } else if (!outcome.failed.length) {
+    toast(action === 'archive'
+      ? `已归档 ${okCount} 个，可在「筛选会话」里找回`
+      : `已取消归档 ${okCount} 个`);
+  } else {
+    toast(`已${verb} ${okCount} 个，${outcome.failed.length} 个没成功：${outcome.failed[0].error}`);
+  }
+}
+
+export async function runSidebarBatchDelete() {
+  if (!sidebarBatchMode || sidebarBatchBusy) return;
+  const ids = selectedSidebarBatchIds();
+  if (!ids.length) return;
+  const titles = ids.map((id) => state.conversations.find((c) => c.id === id)?.title || '新对话');
+  const listedOrder = listedSidebarBatchIds();
+  const head = titles.slice(0, 5).map((title) => `· ${title}`).join('\n');
+  const more = titles.length > 5 ? `\n还有 ${titles.length - 5} 个` : '';
+  if (!confirm(`删除选中的 ${ids.length} 个对话？里面的消息会一起删掉，删了找不回来。\n\n${head}${more}`)) return;
+  const currentId = String(state.conversationId || '');
+  const deletingCurrent = ids.includes(currentId);
+  // 与单删同一套打开代次校验：切换前先记下代次，删除期间用户自己点了别的会话就不抢视图。
+  const generation = deletingCurrent ? beginConversationNavigation(currentId) : conversationOpenGeneration();
+  sidebarBatchBusy = true;
+  sidebarBatchProgress = '';
+  syncSidebarBatchBars();
+  let outcome;
+  try {
+    outcome = await submitSidebarBatch('delete', ids, BATCH_DELETE_CHUNK);
+  } finally {
+    sidebarBatchBusy = false;
+  }
+  const succeeded = new Set(outcome.succeeded.map(String));
+  if (succeeded.size) {
+    state.conversations = state.conversations.filter((c) => !succeeded.has(String(c.id)));
+  }
+  for (const id of succeeded) sidebarBatchSelected.delete(id);
+  renderSidebar();
+  const currentGone = deletingCurrent && succeeded.has(currentId);
+  if (currentGone && isConversationOpenCurrent(generation, currentId)) {
+    state.conversationId = '';
+    // 优先切到「当前筛选下还列得出来的第一个」——单删固定切 state.conversations[0]，
+    // 批量删完剩下的大多是被筛选藏起来的已归档会话，那个位置可能就是空白视图。
+    const stillExists = (id) => state.conversations.some((c) => String(c.id) === id);
+    const next = listedOrder.find((id) => id !== currentId && stillExists(id)) || '';
+    if (next) {
+      try {
+        await openConversation(next, { expectedGeneration: generation });
+      } catch (error) {
+        toast(`打开会话失败：${error.message}`);
+      }
+    } else {
+      state.firstTurnInfo = null;
+      renderMessages([]);
+      renderPermissionModeSwitch();
+    }
+  }
+  const okCount = succeeded.size;
+  const busyCount = outcome.failed.filter((item) => item.code === 'busy').length;
+  if (outcome.requestError) {
+    toast(`删除失败：${outcome.requestError}${okCount ? `（前面已删除 ${okCount} 个）` : ''}`);
+  } else if (!outcome.failed.length) {
+    toast(`已删除 ${okCount} 个`);
+  } else if (busyCount === outcome.failed.length) {
+    toast(`已删除 ${okCount} 个，${busyCount} 个还在回复或有任务在跑，没删`);
+  } else {
+    toast(`已删除 ${okCount} 个，${outcome.failed.length} 个没成功：${outcome.failed[0].error}`);
   }
 }
 

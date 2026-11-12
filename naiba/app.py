@@ -49,7 +49,11 @@ from naiba.llm.provider_presets import apply_preset_values, provider_preset_key_
 from naiba.llm.runtime import ModelRuntime
 from naiba.mcp import MCPRegistry
 from naiba.paths import PathContext, default_path_context
-from naiba.core.contracts import NEW_CONVERSATION_DEFAULT_FIELDS
+from naiba.core.contracts import (
+    CONVERSATION_BATCH_ACTIONS,
+    CONVERSATION_BATCH_MAX_IDS,
+    NEW_CONVERSATION_DEFAULT_FIELDS,
+)
 from naiba.plans import PlanManager
 from naiba.run.manager import ConversationRunManager
 from naiba.search import WebSearchRuntime
@@ -1416,6 +1420,73 @@ class NaibaChatApp:
             return {"error": "order 必须是会话 id 字符串数组"}, HTTPStatus.BAD_REQUEST
         written = self.storage.set_conversation_sort_order(order)
         return {"written": written}, HTTPStatus.OK
+
+    def api_batch_conversations(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """侧栏批量管理：一次归档 / 取消归档 / 删除多个对话。
+
+        ``ids`` 去重后 1..``CONVERSATION_BATCH_MAX_IDS`` 个，动作只认契约登记的三个。
+        只处理主对话：辅助对话记 ``not_main``（它由辅助标签页自己管，批量入口不该替它收尾）。
+        部分失败仍回 200，逐项说明（与拆书匠批量删除同一形状，界面保留失败选择）。
+        删除对已经不存在的 id 算成功——重发不会报一堆错，也不会把「已删」重复计入失败。
+        """
+        action = body.get("action")
+        if action not in CONVERSATION_BATCH_ACTIONS:
+            return {"error": "action 必须是 archive、unarchive 或 delete"}, HTTPStatus.BAD_REQUEST
+        raw_ids = body.get("ids")
+        if not isinstance(raw_ids, list) or any(not isinstance(item, str) for item in raw_ids):
+            return {"error": "ids 必须是对话 id 字符串数组"}, HTTPStatus.BAD_REQUEST
+        ids: list[str] = []
+        seen: set[str] = set()
+        for item in raw_ids:
+            conversation_id = item.strip()
+            if conversation_id and conversation_id not in seen:
+                seen.add(conversation_id)
+                ids.append(conversation_id)
+        if not ids:
+            return {"error": "ids 不能为空"}, HTTPStatus.BAD_REQUEST
+        if len(ids) > CONVERSATION_BATCH_MAX_IDS:
+            return {
+                "error": f"一次最多处理 {CONVERSATION_BATCH_MAX_IDS} 个对话",
+            }, HTTPStatus.BAD_REQUEST
+
+        succeeded: list[str] = []
+        failed: list[dict[str, str]] = []
+        if action == "delete":
+            for conversation_id in ids:
+                code = self.storage.delete_conversation_if_idle(conversation_id)
+                if code in ("deleted", "missing"):
+                    succeeded.append(conversation_id)
+                elif code == "busy":
+                    failed.append({
+                        "id": conversation_id,
+                        "code": "busy",
+                        "error": "还在回复或有任务在跑",
+                    })
+                else:
+                    failed.append({
+                        "id": conversation_id,
+                        "code": "not_main",
+                        "error": "辅助对话不参与批量删除",
+                    })
+            return {"action": action, "succeeded": succeeded, "failed": failed}, HTTPStatus.OK
+
+        changed = set(self.storage.set_conversations_archived(ids, action == "archive"))
+        for conversation_id in ids:
+            if conversation_id in changed:
+                succeeded.append(conversation_id)
+                continue
+            conversation = self.storage.get_conversation(
+                conversation_id, include_messages=False, include_trace=False
+            )
+            if conversation is None:
+                failed.append({"id": conversation_id, "code": "missing", "error": "对话不存在"})
+            else:
+                failed.append({
+                    "id": conversation_id,
+                    "code": "not_main",
+                    "error": "辅助对话不参与批量归档",
+                })
+        return {"action": action, "succeeded": succeeded, "failed": failed}, HTTPStatus.OK
 
     def api_provider_presets(self) -> dict[str, Any]:
         """供应商预设表（设置弹层与首启引导共用，名单唯一来源在 llm/provider_presets.py）。"""

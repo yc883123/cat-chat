@@ -348,6 +348,29 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .workspace-header-actions .icon-button { width: 28px; height: 28px; font-size: 15px; color: var(--sidebar-muted); }
 .workspace-header-actions .icon-button:hover { color: var(--sidebar-text); background: var(--sidebar-hover); }
 .workspace-header-actions .icon-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+/* 最窄 170px 时标题行放不下五个控件：先让「工作区」三个字收缩省略，图标不换行不溢出。 */
+.workspace-title { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-header-actions { flex: none; }
+.workspace-header-actions .icon-button.active { color: var(--sidebar-text); background: var(--sidebar-active); }
+/* ---- 批量管理：状态行 / 操作栏 ----
+   两栏都是 flex/grid 布局，会盖掉 UA 对 [hidden] 的 display:none，必须各自显式补规则。 */
+.workspace-batch-status { display: flex; align-items: center; gap: 6px; padding: 2px 10px 6px 8px; color: var(--sidebar-muted); font-size: 11.5px; }
+.workspace-batch-status[hidden] { display: none; }
+.workspace-batch-all, .workspace-batch-done { flex: none; border: 0; background: none; padding: 3px 2px; border-radius: var(--r-xs); font-size: 11.5px; cursor: pointer; }
+.workspace-batch-all { color: var(--sidebar-muted); }
+.workspace-batch-all[aria-checked="true"]::before { content: "☑ "; }
+.workspace-batch-all[aria-checked="mixed"]::before { content: "▣ "; }
+.workspace-batch-all:hover { color: var(--sidebar-text); }
+.workspace-batch-done { color: var(--accent); font-weight: 600; }
+.workspace-batch-done:hover { text-decoration: underline; }
+.workspace-batch-all:disabled, .workspace-batch-done:disabled { opacity: .5; cursor: default; text-decoration: none; }
+.workspace-batch-count { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-batch-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 6px 10px 10px; }
+.workspace-batch-actions[hidden] { display: none; }
+.workspace-batch-actions button { min-width: 0; min-height: 32px; border: 1px solid var(--sidebar-line); border-radius: var(--r-md); background: var(--sidebar-hover); color: var(--sidebar-text); font-size: 12.5px; cursor: pointer; }
+.workspace-batch-actions button:hover:not(:disabled) { background: var(--sidebar-active); }
+.workspace-batch-actions button:disabled { opacity: .5; cursor: default; }
+.workspace-batch-actions button.is-danger { color: var(--danger); }
 /* 侧栏搜索：模式切换（标题｜全文）与输入框同一行；输入框自适应剩余宽度。 */
 .workspace-search-row { display: flex; align-items: center; gap: 6px; margin: 0 14px 6px; }
 .workspace-search-row[hidden] { display: none; }
@@ -1609,6 +1632,16 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .conversation-star:hover { color: var(--warning); }
 .conversation-star.is-favorite { color: var(--warning); opacity: 1; }
 .conversation-star.is-favorite svg { fill: currentColor; }
+/* 批量模式下的勾选框：与星标同规格 26×26（行高是虚拟列表缓存的，不能变），
+   用 button + role="checkbox" 而不是 <label> 包 <input>（§九.169 的全局 label input 造型）。 */
+.conversation-check { width: 26px; height: 26px; flex: none; display: grid; place-items: center; padding: 0; border: 0; background: transparent; color: var(--sidebar-muted); cursor: pointer; }
+.conversation-check svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.conversation-check .check-mark { opacity: 0; }
+.conversation-check[aria-checked="true"] { color: var(--accent); }
+.conversation-check[aria-checked="true"] svg rect { fill: currentColor; }
+.conversation-check[aria-checked="true"] .check-mark { opacity: 1; stroke: var(--sidebar); }
+.conversation-item.is-batch { cursor: pointer; }
+.conversation-item.is-batch-selected { background: var(--sidebar-active); }
 .conversation-more { width: 24px; height: 26px; opacity: 0; font-size: 15px; line-height: 1; }
 .conversation-more:hover { color: var(--accent); }
 .conversation-open { border: 0; background: none; color: inherit; padding: 6px 0; text-align: left; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
@@ -2475,6 +2508,8 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
   .message-row.user .message-body { max-width: 88%; }
   .message-row { min-width: 0; width: 100%; }
   .conversation-star, .conversation-more { opacity: 1; }
+  /* 批量管理操作栏在手机上按 44px 点按尺寸（桌面 32px 就够）。 */
+  .workspace-batch-actions button { min-height: 44px; }
   .composer-wrap { padding: 7px 10px max(8px, env(safe-area-inset-bottom)); overflow-x: hidden; }
   .composer { min-width: 0; width: 100%; }
   .composer-input { min-width: 0; }
@@ -3579,6 +3614,11 @@ body[data-studio="on"] .studio-view { display: flex; }
 body[data-studio="on"] #sidebarWorkspaceHeader,
 body[data-studio="on"] #workspaceSearchRow,
 body[data-studio="on"] #sidebarWorkspaceTree { display: none; }
+/* 批量管理的两条栏同样属于「对话视图专用」，工作台 / 任务总管态一起让位。 */
+body[data-studio="on"] #workspaceBatchStatus,
+body[data-studio="on"] #workspaceBatchActions,
+body[data-app-view="super-agent"] #workspaceBatchStatus,
+body[data-app-view="super-agent"] #workspaceBatchActions { display: none; }
 .sidebar-studio-nav { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px 12px; }
 .sidebar-studio-nav[hidden] { display: none; }
 /* 工作台态会话树让位后，由分页导航吃掉中间全部高度：

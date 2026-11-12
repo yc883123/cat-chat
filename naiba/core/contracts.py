@@ -812,5 +812,26 @@ EVENT_PAYLOAD_KEYS: dict[str, frozenset[str] | None] = {
 }
 
 
+# ---- 对话侧栏批量管理（归档 / 删除）----
+# 动作名、单次上限与逐项失败码。前端按这里登记的口径分批提交（归档 100 / 删除 20），
+# 路由 `POST /api/conversations/batch` 复用同一集合校验。
+CONVERSATION_BATCH_ACTIONS: tuple[str, ...] = ("archive", "unarchive", "delete")
+CONVERSATION_BATCH_MAX_IDS = 100
+CONVERSATION_BATCH_FAILURE_CODES: tuple[str, ...] = ("not_main", "missing", "busy")
+
+
+class ConversationBatchFailure(TypedDict):
+    id: str
+    code: str
+    error: str
+
+
+class ConversationBatchResult(TypedDict):
+    action: str
+    # 删除对「已经不存在的会话」算成功（重复提交不报错）。
+    succeeded: list[str]
+    failed: list[ConversationBatchFailure]
+
+
 # 已迁往 naiba.core.messages（收官线 ③；保留 re-export 兼容，既有导入零改动）。
 from naiba.core.messages import MESSAGE_METADATA_KEYS, MetadataKeys  # noqa: E402,F401

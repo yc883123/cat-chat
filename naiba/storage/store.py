@@ -2675,6 +2675,42 @@ class ChatStorage:
         return self.get_conversation(conversation_id, include_messages=False)
 
     @_retry_transient_write
+    def set_conversations_archived(self, ids: list[str], archived: bool) -> list[str]:
+        """批量改归档标记，**不动 ``updated_at``**（与单条归档同一约束）。
+
+        只处理主对话：辅助对话、不存在的 id 不进结果。列表页一次能勾到上百个会话，
+        逐个 ``set_conversation_archived`` 会开上百个事务；这里一个 ``BEGIN IMMEDIATE``
+        里先查出真正存在的主对话，再用一条 ``UPDATE`` 改完。返回实际改到的 id。
+        """
+        unique: list[str] = []
+        seen: set[str] = set()
+        for raw in ids or []:
+            conversation_id = str(raw).strip()
+            if conversation_id and conversation_id not in seen:
+                seen.add(conversation_id)
+                unique.append(conversation_id)
+        if not unique:
+            return []
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            placeholders = ",".join("?" for _ in unique)
+            existing = [
+                str(row["id"])
+                for row in db.execute(
+                    f"SELECT id FROM conversations WHERE id IN ({placeholders}) "
+                    "AND conv_kind = 'main'",
+                    unique,
+                ).fetchall()
+            ]
+            if existing:
+                marks = ",".join("?" for _ in existing)
+                db.execute(
+                    f"UPDATE conversations SET archived = ? WHERE id IN ({marks})",
+                    (1 if bool(archived) else 0, *existing),
+                )
+        return existing
+
+    @_retry_transient_write
     def set_conversation_sort_order(self, ordered_ids: list[str]) -> int:
         """按给定顺序整体重排手动排序位（1..N），返回实际写入的行数。
 
@@ -3012,6 +3048,39 @@ class ChatStorage:
         with self._connect() as db:
             cursor = db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
         return cursor.rowcount > 0
+
+    @_retry_transient_write
+    def delete_conversation_if_idle(self, conversation_id: str) -> str:
+        """批量删除的逐个入口：只在会话空闲时删除，返回判定结果。
+
+        返回 ``deleted`` / ``missing`` / ``not_main`` / ``busy``。判定与删除在同一个
+        ``BEGIN IMMEDIATE`` 事务里完成：``create_chat_run`` 建新回复也走
+        ``BEGIN IMMEDIATE``，两边必然排队——要么新回复先建好任务记录，这里看到
+        ``busy`` 跳过；要么这里先删掉，那边收到「对话不存在」。不会删掉一个刚开始
+        回复的会话。
+
+        「有任务」按 ``ACTIVE_TASK_STATUSES`` 全量判定（含子任务与分离式任务），
+        与清空消息的口径一致；删除会级联清掉该会话的全部任务记录，只看顶层回复不够。
+        单个会话一个事务：某个失败不连累已经删掉的。
+        """
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT conv_kind FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+            if row is None:
+                return "missing"
+            if str(row["conv_kind"] or "main") != "main":
+                return "not_main"
+            active = db.execute(
+                "SELECT id FROM background_tasks WHERE conversation_id = ? "
+                f"AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} LIMIT 1",
+                (conversation_id,),
+            ).fetchone()
+            if active is not None:
+                return "busy"
+            db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        return "deleted"
 
     def delete_expired_aux_conversations(self, ttl_days: int = 7) -> int:
         """清扫过期辅助对话（辅助对话不做长期留存，7 天兜底，见 计划-辅助对话.md §3.5）。

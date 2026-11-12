@@ -1084,6 +1084,8 @@ export const emptyStateElement = $('#emptyState');
 // 改按钮、hidden 和 data-studio，避免 chat/studio/super-agent 三套状态漂移。
 export function setAppView(view) {
   const next = ['chat', 'studio', 'super-agent'].includes(view) ? view : 'chat';
+  // 离开对话视图先收口对话侧栏的临时状态（批量管理的勾选）。
+  if (next !== 'chat') appViewLeaveChat?.();
   state.appView = next;
   document.body.dataset.appView = next;
   document.body.dataset.studio = next === 'studio' ? 'on' : 'off';
@@ -1341,6 +1343,14 @@ let clipboardPasteDriver = null;
 
 export function setClipboardPasteDriver(driver) {
   clipboardPasteDriver = driver || null;
+}
+
+// 离开对话视图时的收口回调由组合根注入（同一个防成环口径）：批量管理属于对话侧栏，
+// 切到工作台 / 任务总管时必须退出，不能让勾选状态挂在一个看不见的列表上。
+let appViewLeaveChat = null;
+
+export function setAppViewLeaveChat(handler) {
+  appViewLeaveChat = typeof handler === 'function' ? handler : null;
 }
 
 /** 回填「粘贴」文案。等待期间菜单可能已经关了/换成别的模式，每一处都要重新确认。 */

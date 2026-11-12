@@ -234,6 +234,7 @@
   "test_regenerate_reply",
   "test_release_workflow",
   "test_show_media",
+  "test_sidebar_batch",
   "test_sidebar_favorites",
   "test_sidebar_view_prefs",
   "test_skill_prompts",

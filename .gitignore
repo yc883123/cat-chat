@@ -236,6 +236,10 @@ verify/*
 !verify/auto_compaction_e2e.cjs
 !verify/_serve_tmp.py
 !verify/run_freeze_smoke.py
+# 对话侧栏批量管理（2026-11-12 入库）：隔离实例播种多工作区/收藏/归档/带任务会话，
+# 桌面与 375px 各跑一遍 verify/sidebar_batch_smoke.cjs。
+!verify/_serve_sidebar_batch.py
+!verify/sidebar_batch_smoke.cjs
 # 工作台（Studio）资产转换与冒烟（2026-10-22 入库）：
 # 转换器可复现地生成 public/studio/ 只读预设；UI 冒烟用隔离实例断言三区视图/追问必选 Agent；
 # live 检查真连模型生成（含 4 万字长正文条目）发版前跑一遍。

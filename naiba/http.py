@@ -1285,6 +1285,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             # 手动排序落库：精确匹配必须放在上面的 endswith 链之后也安全——
             # "reorder" 不与任何 endswith 后缀冲突；但为了可读性仍紧邻 settings 放置。
             self._json(*self.app.api_reorder_conversations(body))
+        elif path == "/api/conversations/batch":
+            # 侧栏批量管理（归档 / 取消归档 / 删除）：精确匹配，别让上面的 endswith 链吃掉。
+            self._json(*self.app.api_batch_conversations(body))
         elif path == "/api/workspaces":
             self._json(*self.app.api_upsert_workspace(body))
         elif path == "/api/workspaces/delete":

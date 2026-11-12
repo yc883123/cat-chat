@@ -421,8 +421,8 @@ def default_appearance() -> dict[str, Any]:
 def normalize_studio_prefs(value: Any) -> dict[str, Any]:
     """工作台偏好归一化（配置加载与运行时更新共用）。
 
-    只保留「恢复上次选择」与「收藏」两类状态；手改配置里的非法枚举、缺键、重复
-    收藏都在这里收敛。条目定位只用「来源类型 + 稳定 ID」，不存模板正文/用户输入。
+    收藏与条目定位保持稳定 ID；生成默认值只由提词库前端明确提交，
+    服务端执行任务不读取这里的默认规则。
     """
     merged = dict(value) if isinstance(value, dict) else {}
     # 功能页：只认侧栏里真实存在的页；非法/缺失一律回「模块库」。
@@ -481,8 +481,17 @@ def normalize_studio_prefs(value: Any) -> dict[str, Any]:
         titles.append({"kind": kind, "id": item_id, "title": title})
         if len(titles) >= STUDIO_PREF_MAX_TITLES:
             break
+    skill_ids = list(dict.fromkeys(str(item).strip() for item in merged.get("skill_ids", [])
+                                   if isinstance(item, str) and item.strip())) \
+        if isinstance(merged.get("skill_ids"), list) else []
+    system_prompt = str(merged.get("system_prompt") or "")
+    if len(system_prompt) > 100000:
+        raise ValueError("系统提示词不能超过 100000 字，请精简后保存")
     return {"last_selection": normalized_selection, "favorites": favorites, "titles": titles,
-            "page": normalized_page, "view": normalized_view}
+            "page": normalized_page, "view": normalized_view,
+            "system_prompt": system_prompt,
+            "prompt_source": "skill" if merged.get("prompt_source") == "skill" else "template",
+            "skill_ids": skill_ids}
 
 
 def validate_skills_dir(resolved: Path, *, app_dir: Path, public_dir: Path, data_dir: Path) -> None:
@@ -2943,11 +2952,25 @@ class ConfigStore:
                         incoming = values[key]
                         if not isinstance(incoming, dict):
                             raise ValueError("studio 必须是对象")
-                        unknown = set(incoming) - {"last_selection", "favorites", "titles", "page", "view"}
+                        unknown = set(incoming) - {"last_selection", "favorites", "titles", "page", "view", "system_prompt", "prompt_source", "skill_ids"}
                         if unknown:
                             names = ", ".join(sorted(map(str, unknown)))
                             raise ValueError(f"studio 包含不支持的字段：{names}")
                         current = normalize_studio_prefs(self.data.get("studio"))
+                        if "system_prompt" in incoming:
+                            prompt = incoming["system_prompt"]
+                            if not isinstance(prompt, str) or len(prompt) > 100000:
+                                raise ValueError("系统提示词必须是文本，且不超过 100000 字")
+                            current["system_prompt"] = prompt
+                        if "prompt_source" in incoming:
+                            if incoming["prompt_source"] not in ("template", "skill"):
+                                raise ValueError("生成来源必须是 template 或 skill")
+                            current["prompt_source"] = incoming["prompt_source"]
+                        if "skill_ids" in incoming:
+                            ids = incoming["skill_ids"]
+                            if not isinstance(ids, list) or any(not isinstance(item, str) or not item.strip() for item in ids):
+                                raise ValueError("skill_ids 必须是非空 Skill ID 的数组")
+                            current["skill_ids"] = list(dict.fromkeys(item.strip() for item in ids))
                         if "page" in incoming:
                             page_value = str(incoming["page"] or "").strip()
                             if page_value not in STUDIO_PAGE_VIEWS:

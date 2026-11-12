@@ -20,6 +20,7 @@ export function buildBatchConvertRequest(detail, mapping, item, convert, fixed =
   const body = {
     model_key: convert.provider,
     model_name: convert.model,
+    system_prompt: String(convert.system_prompt || ""),
     user_request: `剧本：\n${String(item.script || "").trim()}`,
   };
 

@@ -132,10 +132,10 @@ def prompt_updates() -> list[dict]:
     """应用自己的改写规则；官方链接仅记录格式依据，不复制整份第三方指南。"""
     return [
         {"id": "h3-007-h3-i2va", "title": "MiniMax H3 基础视频 · 文生与首尾帧", "module": "h3",
-         "body": H3_BASE_PROMPT, "summary": "T2VA / I2VA / FL2VA / L2VA 四种基础模式；普通参考图自动改走 Ref2VA 六字段，不提问。",
+         "body": H3_BASE_PROMPT, "summary": "依据官方指南整理的基础模式模板：T2VA / I2VA / FL2VA / L2VA；普通参考图改走 Ref2VA。未包含完整官方参考与示例，可选完整 Skill。",
          "tags": ["MiniMax", "H3", "T2VA", "I2VA", "FL2VA", "L2VA"], "source": f"{H3_REFERENCE_ROOT}/base-en.txt"},
         {"id": "h3-014-h3-ref2va", "title": "MiniMax H3 参考生成与视频编辑", "module": "h3",
-         "body": H3_REFERENCE_PROMPT, "summary": "Ref2VA 六字段：参考生成、关键帧补全、视频编辑/续写和音频引用；只分析实际收到的素材，不索要未发送的视频音频。",
+         "body": H3_REFERENCE_PROMPT, "summary": "依据官方指南整理的 Ref2VA 六字段模板，覆盖参考生成、编辑/续写与音频引用；未包含完整官方参考与示例，可选完整 Skill。",
          "tags": ["MiniMax", "H3", "Ref2VA", "参考生成", "视频编辑"], "source": f"{H3_REFERENCE_ROOT}/ref-en.txt"},
         {"id": "vi-004-cmd-reverse", "title": "图片反推 · 可见画面提示词", "module": "vi",
          "body": IMAGE_REVERSE_PROMPT, "summary": "依据实际图片提取主体、构图、色彩和光影，不把文字概念扩写伪装成看图。",
@@ -667,6 +667,9 @@ def cross_check(items: list[dict], bodies: dict[str, str]) -> dict[str, list[str
     missing = [iid for iid in all_iter(items) if not bodies.get(iid, "").strip()]
     if missing:
         problems["missing_bodies"] = sorted(missing)
+    orphan = set(bodies) - set(all_iter(items))
+    if orphan:
+        problems["unindexed_bodies"] = sorted(orphan)
     bad_module = [it["id"] for it in items if it["module"] not in MODULES_ALLOWED]
     bad_type = [it["id"] for it in items if it["type"] not in TYPES_ALLOWED]
     if bad_module:
@@ -714,6 +717,54 @@ def write_json(path: Path, payload: object) -> int:
     return path.stat().st_size
 
 
+def apply_catalog_cleanup(items: list[dict], bodies: dict[str, str]) -> None:
+    """只整理已核实的内置条目；全量构建和增量刷新使用相同规则。"""
+    by_id = {item["id"]: item for item in items}
+    cinematic_id = "h3-004-cinematic-i2v"
+    old = "自动调用行业顶尖创意数据库进行最优补全"
+    new = "依据用户已给信息及通用创作知识补全，不声称调用未提供的数据库"
+    if cinematic_id in bodies:
+        body = bodies[cinematic_id]
+        if old not in body and new not in body:
+            raise ValueError(f"{cinematic_id} 的已核实句子已变化，请重新检查")
+        bodies[cinematic_id] = body.replace(old, new)
+    daily_id = "vs-037-daily0621"
+    if daily_id in bodies:
+        body = bodies[daily_id]
+        if "点击下方链接" in body:
+            body, count = re.subn(r"^[^\n]*点击下方链接[^\n]*注册[^\n]*\n.*?(?=^画面风格：)",
+                                  "", body, flags=re.MULTILINE | re.DOTALL)
+            if count != 1:
+                raise ValueError(f"{daily_id} 的推广块边界已变化，请重新检查")
+        bodies[daily_id] = body
+    updates = {
+        cinematic_id: ("unavailable_database_reference", None),
+        daily_id: ("promotion_download_residue", "图像提示词示例合集，保留画面描述与风格示范，已清理推广、下载说明和空链接。"),
+        "vs-101-k2-engine": ("dependency_scope_summary", "K2 人像提示词 SFW 规则与词库；用于生成文本提示词。正文提到的外置 NSFW 扩展库未包含。"),
+        "h3-005-ltx-relay": ("dependency_scope_summary", "生成 LTX2.3 双框架 PromptRelay 格式文本；后续运行视频需另配 ComfyUI-PromptRelay 节点，本模板不执行节点。"),
+    }
+    for item_id, (reason, summary) in updates.items():
+        item = by_id.get(item_id)
+        if item is None:
+            continue
+        body = bodies[item_id]
+        item["chars"] = len(body)
+        item["snippet"] = body[:SNIPPET_N]
+        item["source_sha1"] = source_sha1(body)
+        item["cleaned"] = list(dict.fromkeys([*(item.get("cleaned") or []), reason]))
+        if summary:
+            item["summary"] = summary
+
+
+def catalog_cleanup_report(items: list[dict]) -> dict:
+    ids = {"h3-004-cinematic-i2v", "vs-037-daily0621", "vs-101-k2-engine", "h3-005-ltx-relay"}
+    return {
+        "note": "只整理已核实的两条正文及依赖范围摘要，保留示例分类与其他正文；不改用户自定义库。",
+        "items": [{key: item[key] for key in ("id", "source", "source_sha1", "cleaned", "chars")}
+                  for item in items if item["id"] in ids],
+    }
+
+
 def apply_prompt_updates(items: list[dict], bodies: dict[str, str]) -> int:
     """原位更新目标条目，保留旧 ID、顺序和所有无关条目；返回新增条数。"""
     existing = {item["id"]: item for item in items}
@@ -736,6 +787,7 @@ def apply_prompt_updates(items: list[dict], bodies: dict[str, str]) -> int:
             items.append(replacement)
             added += 1
         bodies[update["id"]] = update["body"]
+    apply_catalog_cleanup(items, bodies)
     return added
 
 
@@ -748,7 +800,15 @@ def refresh_prompts(out_dir: Path) -> dict:
     added = apply_prompt_updates(items, prompt_bodies)
     bodies = dict(prompt_bodies)
     for tag in ("script", "game", "style"):
-        bodies.update(read_json(out_dir / f"bodies_{tag}.json"))
+        shard = read_json(out_dir / f"bodies_{tag}.json")
+        if set(bodies) & set(shard):
+            raise ValueError(f"正文分片有重复 ID：{tag}")
+        bodies.update(shard)
+    for tag in ("prompt", "script", "game", "style"):
+        shard = prompt_bodies if tag == "prompt" else read_json(out_dir / f"bodies_{tag}.json")
+        expected = {item["id"] for item in items if BODIES_TAG_BY_MODULE[item["module"]] == tag}
+        if set(shard) != expected:
+            raise ValueError(f"{tag} 正文与索引 ID 集合不相等")
     problems = cross_check(items, bodies)
     if problems:
         raise SystemExit(f"提示词修正后契约不符：{problems}")
@@ -759,6 +819,8 @@ def refresh_prompts(out_dir: Path) -> dict:
     for key in ("input", "expected_plan"):
         counts[key] = int(counts.get(key, len(items) - added)) + added
     counts["output_index"] = len(items)
+    report["catalog_cleanup"] = catalog_cleanup_report(items)
+    report["catalog_integrity"] = {"index_body_ids_equal": True, "shards": 4, "count": len(items)}
     report["prompt_updates"] = {
         "ids": [update["id"] for update in prompt_updates()],
         "reference_commit": H3_REFERENCE_COMMIT,
@@ -844,7 +906,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="工作台预设资产转换器")
     parser.add_argument("--sources-dir", help="完整构建必需；旧四套JSON的源目录")
     parser.add_argument("--append-manju", action="store_true", help="幂等增补已存在catalog，只写漫剧相关三份JSON")
-    parser.add_argument("--refresh-prompts", action="store_true", help="幂等刷新 H3 与图片反推提示词，不需旧来源目录")
+    parser.add_argument("--refresh-prompts", action="store_true", help="幂等刷新内置规则及已核实模板清理，不需旧来源目录")
     parser.add_argument("--manju-dir", help="漫剧包根目录，默认仓库 skills/ai-manju-skills")
     parser.add_argument("--out-dir", default="public/studio")
     parser.add_argument("--report-md", help="可选：完整构建额外写Markdown报告；增补模式不写文档")

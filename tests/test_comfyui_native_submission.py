@@ -257,8 +257,11 @@ class NativeSubmissionTests(unittest.TestCase):
                                                      "model_snapshot": identity}), profile)
 
     def test_studio_prepare_reuses_api_validation_and_preserves_errors(self):
+        self.app.config.profile = lambda key: {"kind": "online", "model": "model",
+                                               "base_url": "https://fixture.invalid/v1"}
         service = StudioService(self.app, mock.Mock(), mock.Mock())
         prepared = service.prepare_generation({"model_name": "model", "user_request": "hello"})
+        self.assertEqual(prepared["model_snapshot"]["model_name"], "model")
         self.assertEqual(prepared["content"], "hello")
         with self.assertRaises(ValueError):
             service.prepare_generation({"model_name": "model", "vars": []})

@@ -291,6 +291,10 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"></path></svg>
           </button>
           <strong class="studio-brand">提词库</strong>
+          <div class="wb-media-tabs studio-source-tabs" id="studioSourceTabs" role="group" aria-label="提词库生成方式">
+            <button class="studio-pane-btn active" type="button" data-studio-source="template" aria-pressed="true">模板生成</button>
+            <button class="studio-pane-btn" type="button" data-studio-source="skill" aria-pressed="false">Skill 生成</button>
+          </div>
           <div class="studio-topbar-tools">
             <label class="studio-search">
               <input id="studioSearch" type="search" placeholder="搜索模板" aria-label="搜索模板">
@@ -318,8 +322,15 @@
             <div class="studio-library">
               <div class="studio-cats" id="studioCats" role="group" aria-label="工作台分类"></div>
               <div class="studio-list" id="studioList" role="list" aria-label="模板列表"></div>
+              <div class="studio-skill-history" id="studioSkillHistory" hidden aria-label="Skill 最近生成记录"></div>
             </div>
             <div class="studio-detail" id="studioDetail">
+              <details class="studio-system-prompt" open>
+                <summary>系统提示词 <small>两个分页共用</small></summary>
+                <textarea id="studioSystemPrompt" rows="4" placeholder="持续生效的规则，可留空。选择 Skill 后，两者共同生效。" aria-label="提词库系统提示词"></textarea>
+                <div class="studio-system-actions"><button class="control-button tiny" id="studioSystemSave" type="button">保存默认值</button><button class="control-button tiny" id="studioSystemClear" type="button">清空</button><small id="studioSystemStatus" role="status"></small></div>
+              </details>
+              <div id="studioSkillConfig" hidden><strong>选择 Skill</strong><div id="studioSkillPicker"></div></div>
               <div class="studio-detail-head">
                 <div class="studio-title-row">
                   <h2 id="studioDetailTitle"></h2>
@@ -381,7 +392,7 @@
               <div class="studio-actions">
                 <button class="primary-button" id="studioGenerate" type="button">生成</button>
                 <button class="control-button" id="studioSendStoryboard" type="button"
-                        title="把这条模板的正文作为拆书匠「分镜生图」的系统提示词（写法）">发送到分镜生图</button>
+                        title="把这条模板正文带入拆书匠「分镜生图」的模板写法">发送到分镜生图</button>
                 <button class="control-button" id="studioLocateEntry" type="button" hidden>在模板库中定位</button>
                 <button class="control-button" id="studioCustomSave" type="button" hidden>保存修改</button>
                 <button class="control-button" id="studioCustomDelete" type="button" hidden>删除</button>
@@ -416,7 +427,7 @@
                 <button class="control-button" id="studioCancelTask" type="button" hidden>取消</button>
                 <button class="control-button" id="studioRetryTask" type="button" hidden>重试</button>
                 <button class="control-button" id="studioLocateResult" type="button" hidden>定位</button>
-                <button class="control-button" id="studioHandoff" type="button" hidden>追问</button>
+                <details class="wb-media-menu studio-result-menu"><summary aria-label="结果操作">⋯</summary><div class="wb-media-menu-panel"><button class="control-button" id="studioHandoff" type="button" hidden>发送到对话</button></div></details>
                 <!-- 历史产出：图标按钮（只留图案），与两枚文字按钮同高同行 -->
                 <button class="control-button studio-icon-button" id="studioOpenHistory" type="button"
                         title="历史产出" aria-label="历史产出">
@@ -427,6 +438,7 @@
               <div class="studio-history" id="studioHistoryList" hidden aria-label="历史产出"></div>
               <!-- 生成结果正文 + 左上角的一键复制（透明浮层）：按钮与正文是兄弟节点，
                    所以复制到的永远是结果原文，不会把按钮文字带进去。 -->
+              <div class="studio-thread-context" id="studioThreadContext" hidden></div>
               <div class="studio-result-body">
                 <button class="studio-copy-button" id="studioCopyResult" type="button" hidden
                         aria-label="复制生成结果" title="复制生成结果">
@@ -434,6 +446,11 @@
                   <span>复制</span>
                 </button>
                 <div class="studio-result-stream" id="studioResultStream" aria-live="polite"></div>
+              </div>
+              <div class="studio-followup" id="studioFollowup" hidden>
+                <small id="studioThreadSummary"></small>
+                <label>继续追问<textarea id="studioFollowupText" rows="3" placeholder="沿用本次系统提示词、Skill 和历史继续生成" aria-label="继续追问"></textarea></label>
+                <div class="studio-system-actions"><button class="control-button tiny" id="studioFollowupImages" type="button">添加图片</button><small id="studioFollowupImageCount"></small><button class="primary-button" id="studioFollowupSend" type="button">追问</button></div>
               </div>
             </div>
           </div>
@@ -562,11 +579,10 @@
               </div>
               </div>
 
-              <!-- 自定义打标页：规则来源二选一——选了 Skill 就走对话模块同款链路
-                   （SkillAgent 工具循环，模型可按需 read_file 读参考文件，产出再经打标器
-                   既有解析管线）；没选 Skill 就用手输提示词走普通单轮打标。 -->
+              <!-- 自定义打标：Skill 与手写系统词共同生效；选择 Skill 后使用
+                   SkillAgent 文档读取与工具循环，输出仍走既有解析管线。 -->
               <div class="labeler-page-body" data-labeler-page-body="custom" hidden>
-                <label class="labeler-prompt-field labeler-system-prompt-field">系统提示词（没选 Skill 时，这段话就是打标规则）
+                <label class="labeler-prompt-field labeler-system-prompt-field">系统提示词（与所选 Skill 共同生效）
                   <textarea id="labelerCustomSystemPrompt" rows="10"
                             placeholder="把打标规则写成一段完整的提示词：要描述什么、忽略什么、输出什么格式、用什么语言……"></textarea>
                 </label>
@@ -576,7 +592,7 @@
                   </label>
                   <span class="labeler-skill-actions">
                     <button class="control-button tiny" id="labelerSkillClear" type="button"
-                            title="清空手输提示词，并停用已选的 Skill（回到手输规则）">清空提示词</button>
+                            title="仅清空手写系统提示词，保留已选 Skill">清空提示词</button>
                   </span>
                 </div>
                 <p class="labeler-skill-note" id="labelerSkillNote" role="status"></p>
@@ -966,6 +982,7 @@
               <button class="control-button wb-book-aside" id="novelAsideBtn" type="button" aria-controls="novelColumns" aria-expanded="false">查看说明</button>
               <button class="control-button wb-book-more" id="novelMoreBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="novelMoreMenu" aria-label="更多作品操作">⋯</button>
               <div class="wb-book-menu" id="novelMoreMenu" role="menu" popover hidden>
+              <button class="control-button" id="novelSystemPromptBtn" type="button" role="menuitem">作品系统提示词</button>
               <button class="control-button novel-manage-entry" id="novelManageBtn" type="button"
                       role="menuitem" title="集中管理原文、改编稿、要素、大纲、剧本与生成记录">管理记录</button>
               <button class="control-button" id="novelExportBtn" type="button"
@@ -1133,12 +1150,16 @@
                       <label>人物设定版本<select data-context-elements aria-label="剧本使用的人物设定版本"></select></label>
                       <label>改编大纲版本<select data-context-outline aria-label="剧本使用的改编大纲版本"></select></label>
                     </div>
-                    <!-- 分镜生图专用（阶段四）：写法（系统提示词）可编辑，改了立即保存。
-                         逐场结果在下面单独一块，主操作区之后。其余阶段都不显示。 -->
+                    <!-- 分镜生成来源按作品保存；作品系统提示词在页头独立编辑。 -->
                     <div class="novel-storyboard-block" data-novel-context="storyboard" hidden>
+                      <div class="wb-media-tabs" role="group" aria-label="分镜生成方式">
+                        <button class="studio-pane-btn active" type="button" data-novel-prompt-source="template" aria-pressed="true">模板</button>
+                        <button class="studio-pane-btn" type="button" data-novel-prompt-source="skill" aria-pressed="false">Skill</button>
+                      </div>
+                      <div id="novelStoryboardTemplatePanel">
                       <label class="novel-field">
-                        <span class="novel-storyboard-system-label">出图提示词写法（系统提示词）
-                          <small>留空用内置分镜写法；可以手动编辑，也可以在提词库选中模板后点「发送到分镜生图」导入，改了立即保存</small>
+                        <span class="novel-storyboard-system-label">分镜模板 / 写法
+                          <small>留空用内置分镜写法；可手动编辑，或从提词库发送模板。</small>
                         </span>
                         <textarea data-novel-control="novelStoryboardSystem" rows="7" spellcheck="false"
                                   placeholder="留空 = 内置分镜写法：每场转成一条出图提示词，写清地点景物、人物外观与动作、景别构图、光线氛围，不写台词字幕。&#10;也可以在这里粘贴你自己的模板要求。"></textarea>
@@ -1147,6 +1168,9 @@
                         <button class="control-button tiny" data-novel-control="novelStoryboardReset" type="button" hidden
                                 title="清空自定义写法，恢复内置分镜写法">恢复默认写法</button>
                       </div>
+                      </div>
+                      <div id="novelStoryboardSkillPanel" hidden><div id="novelStoryboardSkillPicker"></div></div>
+                      <div class="novel-editor-actions"><button class="control-button tiny" id="novelStoryboardConfigSave" type="button">保存分镜设置</button><small id="novelStoryboardConfigStatus" role="status"></small></div>
                     </div>
                     <label class="novel-field">补充要求（可选）
                       <textarea id="novelStageNote" rows="2" maxlength="800"
@@ -1345,6 +1369,7 @@
               <button class="control-button wb-book-aside" id="writerAsideBtn" type="button" aria-controls="writerColumns" aria-expanded="false">查看说明</button>
               <button class="control-button wb-book-more" id="writerMoreBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="writerMoreMenu" aria-label="更多作品操作">⋯</button>
               <div class="wb-book-menu" id="writerMoreMenu" role="menu" popover hidden>
+              <button class="control-button" id="writerSystemPromptBtn" type="button" role="menuitem">作品系统提示词</button>
               <button class="control-button writer-manage-entry" id="writerManageBtn" type="button"
                       role="menuitem" title="集中管理设定、大纲、章节正文与生成记录">管理记录</button>
               <button class="control-button" id="writerExportBtn" type="button"
@@ -2377,11 +2402,11 @@
     </div>
   </dialog>
 
-  <!-- 工作台「继续追问」的必选 Agent 框：初始无选中项，「继续」不可用；
+  <!-- 工作台「发送到对话」的必选 Agent 框：初始无选中项；
        取消/关闭只回工作台，不创建会话（唯一跨域口是 /api/studio/handoff）。 -->
   <dialog id="studioAgentDialog" class="panel-dialog studio-agent-dialog">
     <div class="dialog-toolbar">
-      <div><h2>继续追问 · 选择 Agent</h2><p>新的普通对话会绑定这个 Agent，之后在这里继续聊</p></div>
+      <div><h2>发送到对话 · 选择 Agent</h2><p>新对话会绑定所选 Agent，并带上这次生成结果。</p></div>
       <button class="icon-button" data-close="studioAgentDialog" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
     </div>
     <div class="studio-agent-body">

@@ -491,8 +491,8 @@ function applySelectedSkill() {
   const name = String(select.selectedOptions?.[0]?.textContent || id);
   labeler.skillPick = { id, name };
   setSkillNote(
-    `已选 Skill「${name}」：提交后走对话同款链路打标（模型按 Skill 规则工作、可自行读取其参考文件，`
-    + `不做任何截断），每张图可能多轮工具调用，耗时与费用高于普通打标；输出形式与语言由 Skill 决定。`,
+    `已选 Skill「${name}」：与手写系统提示词共同生效，模型可读取参考文件，`
+    + `不做截断。每张图可能多轮工具调用，耗时与费用高于普通打标；输出形式与语言由 Skill 决定。`,
   );
   syncCustomEngineUi();
 }
@@ -500,10 +500,7 @@ function applySelectedSkill() {
 function clearSystemPrompt() {
   const textarea = $("#labelerCustomSystemPrompt");
   if (textarea) textarea.value = "";
-  const select = $("#labelerSkillSelect");
-  if (select) select.value = "";
-  labeler.skillPick = null;
-  setSkillNote("已清空手输提示词，并停用已选 Skill（回到普通手输打标）。");
+  setSkillNote(labeler.skillPick?.id ? "已清空手写系统提示词，所选 Skill 继续生效。" : "已清空手写系统提示词。");
   syncCustomEngineUi();
 }
 
@@ -1061,19 +1058,17 @@ function collectConfig() {
     write_txt: Boolean($("#labelerWriteTxtPreset")?.checked),
   };
   if (currentLabelerPage() === "custom") {
-    // 自定义档：规则来源二选一——选了 Skill 走对话链路（engine=chat + skill_id，
-    // 输出形式/语言/手输提示词都不参与）；没选 Skill 就是手输提示词（键在 = 自定义档），
-    // 输出形式/语言默认「以提示词为准」（auto）= 不追加规则；预设固定 general 只做噪声清理。
+    // Skill 与手写系统词共同生效；未选 Skill 时使用普通打标链路。
+    // 输出形式/语言默认「以提示词为准」（auto）= 不追加规则。
     config.output_mode = $("#labelerCustomOutputMode")?.value || "auto";
     config.language = $("#labelerCustomLanguage")?.value || "auto";
     config.preset = "general";
     config.custom_prompt = "";
     config.write_txt = Boolean($("#labelerWriteTxtCustom")?.checked);
+    config.system_prompt = String($("#labelerCustomSystemPrompt")?.value || "").trim();
     if (labeler.skillPick?.id) {
       config.engine = "chat";
       config.skill_id = labeler.skillPick.id;
-    } else {
-      config.system_prompt = String($("#labelerCustomSystemPrompt")?.value || "").trim();
     }
     if ($("#labelerConcurrencyEnabled")?.checked) {
       const workers = collectWorkerRefs();

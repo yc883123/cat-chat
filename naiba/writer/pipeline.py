@@ -31,6 +31,8 @@ from naiba.core.contracts import (
     WRITER_PREVIOUS_CHAPTER_KEY,
     WRITER_SETUP_SNAPSHOT_KEY,
     WRITER_PIPELINE_STOPPING,
+    WORK_GLOBAL_SYSTEM_PROMPT_KEY,
+    WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY,
 )
 from naiba.writer import prompts
 from naiba.writer.store import (
@@ -327,6 +329,8 @@ class WriterPipelineManager:
                 "extra_note": str(extra_note or "")[:500],
                 "allow_drop": bool(allow_drop),
                 "book_title": book_title,
+                WORK_GLOBAL_SYSTEM_PROMPT_KEY: str(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_KEY) or ""),
+                WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY: int(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY) or 0),
             }
             if isinstance(manifest.get("continuation"), dict) and isinstance(setup, dict):
                 # 旧设定或空设定的摘要可能来自清单补值，版本号不能冻结这部分内容。
@@ -456,6 +460,8 @@ class WriterPipelineManager:
                     record["base_revision"] = int(manifest.get("revision") or 0)
                     snapshot = dict(record.get("request_snapshot") or {})
                     snapshot["book_title"] = str(manifest.get("title") or "未命名作品")
+                    snapshot[WORK_GLOBAL_SYSTEM_PROMPT_KEY] = str(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_KEY) or "")
+                    snapshot[WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY] = int(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY) or 0)
                     for field in ("setup", "outline"):
                         vid = str(manifest.get(f"current_{field}_version_id") or "")
                         snapshot[f"{field}_version_id"] = vid
@@ -1111,8 +1117,8 @@ class WriterPipelineManager:
                 self._submissions.pop(key, None)
             self._settle_aborted_submission(book_id, pipeline)
 
-    def _submit_step_task(self, book_id: str, pipeline: dict[str, Any]) -> str:
-        """为当前步提交一个 Studio 任务；任务 input.writer 固化归属（实施计划 §7.1）。"""
+    def prepare_step_input(self, book_id: str, pipeline: dict[str, Any]) -> dict[str, Any]:
+        """只读组装当前步；正式提交和预览使用完全相同的输入与预算。"""
         snapshot = pipeline.get("request_snapshot") if isinstance(pipeline.get("request_snapshot"), dict) else {}
         steps = [str(s) for s in pipeline.get("steps") or []]
         step_index = int(pipeline.get("step_index") or 0)
@@ -1129,7 +1135,7 @@ class WriterPipelineManager:
         book_title = str(snapshot.get("book_title") or "未命名作品")
         extra_note = str(snapshot.get("extra_note") or "")
         chapter_no = int(snapshot.get("chapter_no") or 0)
-        system_text = prompts.step_system(step)
+        system_text = prompts.step_system(step, snapshot.get(WORK_GLOBAL_SYSTEM_PROMPT_KEY, ""))
         chunked: dict[str, Any] | None = None
         if step == "outline_text":
             setup = self._accumulated_setup(book_id, pipeline)
@@ -1340,6 +1346,15 @@ class WriterPipelineManager:
                 if kind == "chapter_all":
                     suffix = f"（批量 {step_index + 1}/{len(steps)}）"
                 task_title = f"《{book_title}》· 第{chapter_no}章{suffix or ''}{label}".replace("  ", " ")
+        context_window = 0
+        try:
+            profile = next((row for row in self.app.config.model_profiles()
+                            if str(row.get("model_key") or "") == str(snapshot.get("model_key") or "")), {})
+            context_window = int(profile.get("context_window") or 0)
+        except (AttributeError, TypeError, ValueError):
+            pass
+        budget = prompts.budget_report(content=content, system=system_text, slots=[],
+                                       context_window=context_window)
         input_data: dict[str, Any] = {
             "content": content,
             "model_key": str(snapshot.get("model_key") or ""),
@@ -1358,10 +1373,24 @@ class WriterPipelineManager:
                 "base_revision": int(pipeline.get("base_revision") or 0),
                 "chapter_revision": pipeline.get("chapter_revision"),
                 "source_version_ids": dict(pipeline.get("source_version_ids") or {}),
+                WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY: int(snapshot.get(WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY) or 0),
             },
         }
         if chunked is not None:
             input_data["chunked"] = chunked
+        return {"input": input_data, "budget": budget,
+                "step_update": pending_step_update, "chapter_revision": pending_chapter_revision,
+                "state_version": pending_state_version}
+
+    def _submit_step_task(self, book_id: str, pipeline: dict[str, Any]) -> str:
+        prepared = self.prepare_step_input(book_id, pipeline)
+        input_data = prepared["input"]
+        budget = prepared["budget"]
+        if budget["fits"] is False:
+            raise WriterPipelineError("本次输入超出模型可用上下文：" + "；".join(budget["suggestions"]))
+        pending_step_update = prepared["step_update"]
+        pending_chapter_revision = prepared["chapter_revision"]
+        pending_state_version = prepared["state_version"]
         # This is the submission admission point. Cancellation before it
         # creates no task; cancellation after it owns the returned task.
         with self.store._lock:

@@ -3697,7 +3697,8 @@ const batch = {
   converting: new Set(),    // 转换中的原条目对象；删行或重排不会把忙碌态移给其他条目
   missingItems: new Set(),  // 自检没过的条目（schemeId:itemIndex），标红拦提交
   blockedMessage: "",
-  convert: { template: "", provider: "", model: "" },
+  convert: { template: "", provider: "", model: "", system_prompt: "" },
+  convertAllBusy: false,
   templateRows: null,       // {custom:[], catalog:[]}；一次拉取后随每次重绘同步重建选项
   templateLoading: null,
 };
@@ -4102,7 +4103,8 @@ function batchConvertBarMarkup() {
       ${profiles.map((profile) => `<option value="${escapeText(String(profile?.model_key || ""))}"${String(profile?.model_key || "") === batch.convert.provider ? " selected" : ""}>${escapeText(String(profile?.name || profile?.model_key || ""))}</option>`).join("")}
     </select>
     <select data-batch-field="convertModel" aria-label="转换用的模型"><option>${batch.convert.provider ? "加载模型中…" : "请先选择供应商"}</option></select>
-    <button type="button" class="cbm-btn" data-batch-action="convert-all">全部转换</button>
+    <button type="button" class="cbm-btn" data-batch-action="convert-all" ${batch.convertAllBusy ? "disabled" : ""}>全部转换</button>
+    <details class="cbm-convert-system"><summary>系统提示词</summary><textarea data-batch-field="convertSystemPrompt" rows="4" aria-label="转换系统提示词" placeholder="仅用于本批剧本转换，可留空">${escapeText(batch.convert.system_prompt || "")}</textarea></details>
     <span class="cbm-convert-note">填了剧本、提示词空着的条目会逐条转换，写完可手改；转换走模型，可能产生费用。自动口径：普通参考图用参考六字段，首尾帧用基础三字段。</span>
   </div>`;
 }
@@ -4768,6 +4770,10 @@ function onBatchChange(event) {
     ensureBatchDraft().unload_after = target.checked;
     return;
   }
+  if (target.matches('[data-batch-field="convertSystemPrompt"]')) {
+    batch.convert.system_prompt = String(target.value || "");
+    return;
+  }
   if (target.matches('[data-batch-field="convertTemplate"]')) {
     batch.convert.template = String(target.value || "");
     return;
@@ -4884,6 +4890,10 @@ function changeBatchMediaPorts(scheme, change) {
 
 function onBatchInput(event) {
   const target = event.target;
+  if (target.matches('[data-batch-field="convertSystemPrompt"]')) {
+    batch.convert.system_prompt = String(target.value || "");
+    return;
+  }
   const scheme = batchSchemeOf(target.dataset.scheme || "");
   if (target.matches("[data-batch-fixed]")) {
     if (scheme) batchSetFixedValue(scheme, target);
@@ -5156,7 +5166,7 @@ function splitBatchPromptSegments(text) {
   return first && second ? [first, second] : null;
 }
 
-async function batchConvert(scheme, itemIndex, silent = false) {
+async function batchConvert(scheme, itemIndex, silent = false, convert = { ...batch.convert }) {
   const item = scheme.items[itemIndex];
   const script = String(item?.script || "").trim();
   const promptExtra = activeExtraPoints(scheme).find((point) => point.kind === "prompt");
@@ -5166,7 +5176,7 @@ async function batchConvert(scheme, itemIndex, silent = false) {
           && (!promptExtra || itemExtraValue(item, prompt2Key).trim()))) return true;
   const key = batchItemReference(scheme, itemIndex);
   if (batch.converting.has(key)) return true;
-  if (!batch.convert.provider || !batch.convert.model) {
+  if (!convert.provider || !convert.model) {
     if (!silent) toast("转换前先在「剧本 → 提示词」一栏选好供应商和模型");
     return false;
   }
@@ -5177,7 +5187,7 @@ async function batchConvert(scheme, itemIndex, silent = false) {
     const snapshot = batchConversionSnapshot(scheme, item);
     const current = () => batchSchemeOf(scheme.id) === scheme && scheme.detail === detail
       && scheme.items.includes(item) && batchConversionSnapshot(scheme, item) === snapshot;
-    const body = buildBatchConvertRequest(scheme.detail, scheme.mapping, item, batch.convert, scheme.fixed);
+    const body = buildBatchConvertRequest(scheme.detail, scheme.mapping, item, convert, scheme.fixed);
     const created = await api("/api/studio/generate", { method: "POST", body });
     const taskId = String(created?.task?.id || "");
     if (!taskId) throw new Error(created?.error || "转换任务创建失败");
@@ -5210,6 +5220,9 @@ async function batchConvert(scheme, itemIndex, silent = false) {
 }
 
 async function batchConvertAll() {
+  if (batch.convertAllBusy) return;
+  const convert = { ...batch.convert };
+  const settingsSnapshot = JSON.stringify(convert);
   const draft = ensureBatchDraft();
   const targets = [];
   draft.schemes.forEach((scheme) => {
@@ -5227,14 +5240,18 @@ async function batchConvertAll() {
   if (!targets.length) { toast("没有要转换的条目：先填剧本，或已全部转换过"); return; }
   if (!batch.convert.provider || !batch.convert.model) { toast("先在「剧本 → 提示词」一栏选好供应商和模型"); return; }
   batch.blockedMessage = "";
-  for (const [scheme, item] of targets) {
-    if (batchSchemeOf(scheme.id) !== scheme) return;
-    const itemIndex = scheme.items.indexOf(item);
-    if (itemIndex < 0) continue;
-    const ok = await batchConvert(scheme, itemIndex, true);
-    if (!ok) return;
-  }
-  toast("转换完成；提示词可以逐条手改");
+  batch.convertAllBusy = true;
+  try {
+    for (const [scheme, item] of targets) {
+      if (batch.draft !== draft || batchSchemeOf(scheme.id) !== scheme) return;
+      if (JSON.stringify(batch.convert) !== settingsSnapshot) { toast("转换设置已修改，后续条目已停止；重新点击全部转换使用新设置"); return; }
+      const itemIndex = scheme.items.indexOf(item);
+      if (itemIndex < 0) continue;
+      const ok = await batchConvert(scheme, itemIndex, true, convert);
+      if (!ok) return;
+    }
+    toast("转换完成；提示词可以逐条手改");
+  } finally { batch.convertAllBusy = false; renderBatch(); }
 }
 
 async function batchWaitStudioTask(taskId, current = () => true) {
@@ -5391,7 +5408,7 @@ async function submitBatch() {
   try {
     const payload = await api("/api/comfyui/batches", {
       method: "POST",
-      body: { title: draft.title, unload_after: draft.unload_after, schemes },
+      body: { title: draft.title, unload_after: draft.unload_after, schemes, convert: { ...batch.convert } },
     });
     batch.runId = String(payload.batch?.id || "");
     batch.runData = payload.batch || null;
@@ -6219,6 +6236,7 @@ async function editCurrentBatch(batchIdOverride = "") {
   const draft = await batchDraftFromDetail(detail);
   if (!current()) { stale(); return; }
   batch.draft = draft;
+  batch.convert = { template: "", provider: "", model: "", system_prompt: "", ...(detail.convert || {}) };
   batch.draftSourceId = batchId;
   batch.runId = batchId;
   batch.runData = detail;

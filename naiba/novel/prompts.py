@@ -57,7 +57,7 @@ OUTPUT_RESERVE_TOKENS = 4096
 ADAPT_CHUNK_LIMIT = 20
 # 上一轮已生成的改编稿带进下一轮的结尾字数（保持前后块衔接）。
 CONTINUITY_TAIL_CHARS = 500
-# 4B-1 图谱反哺：已保存要素的实体进系统提示词（不是用户消息，不污染正文语气）。
+# 图谱参考：已保存要素作为 user 素材，与作品 system 规则分开。
 KG_ENTITY_LIMIT = 20
 KG_LINE_CHARS = 80
 KG_SLOT_CHARS = 1200
@@ -633,19 +633,32 @@ def parse_storyboard(text: str) -> tuple[list[dict[str, Any]], bool]:
     return rows, True
 
 
+def compose_stage_system(global_system_prompt: str, stage_system: str = "") -> str:
+    """作品规则与必要执行约定；预检、提交共用，空规则不改旧输入。"""
+    return "\n\n".join(part for part in (str(global_system_prompt or ""), stage_system) if part.strip())
+
+
+def add_reference_material(built: dict[str, Any], reference: str) -> None:
+    """图谱是参考素材；分块每轮也带同一份参考。"""
+    if not reference:
+        return
+    built["content"] = f"{reference}\n\n{built['content']}"
+    chunked = built.get("chunked")
+    if isinstance(chunked, dict):
+        chunked["prefix"] = f"{reference}\n\n{chunked.get('prefix') or ''}"
+
+
 def build_storyboard_content(*, book_title: str, scenes: list[dict[str, Any]],
                              scene_ids: list[int] | None = None,
                              extra_note: str = "",
-                             system_prompt: str = "") -> dict[str, Any]:
+                             system_prompt: str = "", prompt_source: str = "template") -> dict[str, Any]:
     """组装分镜生成的 content：逐场给正文，模型逐场回出图提示词。
 
     `scene_ids` 缺省 = 全部场次（取已保存剧本的最新场次）；给了不存在的场次号
     直接报错，不静默跳过。
 
-    写法（系统提示词）与正文分离：`system_prompt` 非空时作为**用户自定义写法**
-    （通常来自提词库模板或手动编辑）进系统消息；为空时用内置分镜写法。两者都
-    放系统消息，正文里只保留按场拆分所必需的输出格式要求——模板怎么换，
-    「【第 N 场】」的解析契约都不受影响。
+    新请求的分镜模板作为 user 内容；Skill 模式不包含内置或手写模板。
+    输出格式独立保留，保证两种来源都沿用相同的场次解析契约。
     """
     rows = [row for row in (scenes or []) if isinstance(row, dict)]
     if not rows:
@@ -658,15 +671,17 @@ def build_storyboard_content(*, book_title: str, scenes: list[dict[str, Any]],
         if no not in known:
             raise PromptError(f"场次不存在：{no}")
     warnings: list[str] = []
-    user_system = str(system_prompt or "").strip()
+    if prompt_source not in ("template", "skill"):
+        raise PromptError("prompt_source 必须是 template 或 skill")
+    user_system = str(system_prompt or "")
     if len(user_system) > STORYBOARD_SYSTEM_CHARS:
-        warnings.append(
-            f"自定义写法超出 {STORYBOARD_SYSTEM_CHARS} 字上限，已省略后 "
-            f"{len(user_system) - STORYBOARD_SYSTEM_CHARS} 字"
-        )
-        user_system = user_system[:STORYBOARD_SYSTEM_CHARS]
-    system = user_system if user_system else _STORYBOARD_INSTRUCTION
+        raise PromptError(f"分镜模板不能超过 {STORYBOARD_SYSTEM_CHARS} 字符")
+    if prompt_source == "skill" and user_system.strip():
+        raise PromptError("Skill 模式不能同时提交分镜模板")
+    system = "按所选场次生成分镜提示词，必须保留场次身份并遵守本次输入中的输出格式。"
     parts = [f"作品：《{book_title}》", _STORYBOARD_FORMAT_NOTE]
+    if prompt_source == "template":
+        parts.append("【分镜模板 / 写法】\n" + (user_system if user_system.strip() else _STORYBOARD_INSTRUCTION))
     stats: list[dict[str, Any]] = []
     blocks: list[str] = []
     for no in wanted:

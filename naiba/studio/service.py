@@ -9,8 +9,19 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import Any
+
+from naiba.core.contracts import (
+    STUDIO_SYSTEM_PROMPT_KEY, STUDIO_PROMPT_SOURCE_KEY, STUDIO_SKILL_IDS_KEY,
+    STUDIO_SKILL_SNAPSHOT_KEY, STUDIO_THREAD_ID_KEY, STUDIO_PARENT_TASK_ID_KEY,
+    STUDIO_HISTORY_MESSAGES_KEY, STUDIO_TRACE_MESSAGES_KEY,
+)
+from naiba.studio.content import ContentSnapshots, normalize_prompt_source
+from naiba.studio.conversation import public_task
+from naiba.studio.skill_adapter import check_context
 
 from naiba.llm.profiles import resolve_profile_with_override
 from naiba.studio.catalog import CatalogError, StudioCatalog
@@ -19,7 +30,7 @@ from naiba.studio.handoff import HandoffAdapter, compose_handoff_message
 from naiba.studio.images import StudioImageError, validate_image_refs
 from naiba.studio.jobs import StudioJobManager
 from naiba.studio.runner import StudioRunner
-from naiba.studio.store import StudioStore
+from naiba.studio.store import StudioStore, StudioConflictError
 
 VAR_PATTERN = re.compile(r"\{\{([^{}]*)\}\}")
 VAR_PLACEHOLDER_DISPLAY = re.compile(r"\{\{([^{}]*)\}\}")
@@ -137,8 +148,48 @@ class StudioService:
 
     # ---- 生成任务 ----
 
+    def freeze_content_input(self, input_data: dict[str, Any]) -> dict[str, Any]:
+        """Server-only normalization for Studio/Novel before budget and job submit.
+
+        Existing internal ``system`` remains supported. A frozen Skill input can
+        be passed again unchanged; it never reloads current Skill files.
+        """
+        data = ContentSnapshots(self.app.paths.data_dir).normalize_and_freeze(
+            input_data, getattr(self.app, "catalog", None),
+        )
+        if (not input_data.get(STUDIO_SKILL_SNAPSHOT_KEY)
+                and "model_snapshot" not in data and str(data.get("model_name") or "").strip()):
+            # New internal callers (including Novel) share the same identity
+            # freeze. Existing frozen Skills and legacy retries never acquire
+            # a different profile merely by being read or submitted again.
+            profile = dict(self.app.config.profile(str(data.get("model_key") or "")))
+            data["model_snapshot"] = {
+                "model_key": str(data.get("model_key") or ""),
+                "model_name": str(data.get("model_name") or ""),
+                "provider_id": str(profile.get("provider_id") or profile.get("provider") or ""),
+                "kind": str(profile.get("kind") or ""),
+                "base_url_hash": hashlib.sha256(json.dumps(str(profile.get("base_url") or ""),
+                    ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
+            }
+        return data
+
+    @staticmethod
+    def _request_key(body: dict[str, Any], *, required: bool = False) -> str:
+        raw = body.get("request_key", "")
+        if not isinstance(raw, str) or len(raw) > 200 or any(ord(c) < 32 for c in raw):
+            raise ValueError("request_key 必须是长度不超过 200 的文本")
+        key = raw.strip()
+        if required and not key:
+            raise ValueError("追问必须携带 request_key")
+        return key
+
     def prepare_generation(self, body: dict[str, Any]) -> dict[str, Any]:
         body = body if isinstance(body, dict) else {}
+        if any(key in body for key in (STUDIO_SKILL_SNAPSHOT_KEY, STUDIO_HISTORY_MESSAGES_KEY,
+                                      STUDIO_TRACE_MESSAGES_KEY, STUDIO_THREAD_ID_KEY,
+                                      STUDIO_PARENT_TASK_ID_KEY, "system", "system_prompt_override", "model_snapshot")):
+            raise ValueError("不能提交服务端冻结字段")
+        prompt_source, skill_ids = normalize_prompt_source(body)
         model_key = str(body.get("model_key") or "").strip()
         model_name = str(body.get("model_name") or "").strip()[:256]
         if not model_key:
@@ -209,22 +260,55 @@ class StudioService:
             "vars": {str(k): str(v) for k, v in (vars_raw or {}).items()},
             "unresolved_vars": unresolved,
             "images": images,
+            STUDIO_SYSTEM_PROMPT_KEY: body.get(STUDIO_SYSTEM_PROMPT_KEY, ""),
+            STUDIO_PROMPT_SOURCE_KEY: prompt_source,
+            STUDIO_SKILL_IDS_KEY: skill_ids,
         }
         if not model_name:
             raise ValueError("请选择模型；可用模型来自设置页的模型检查结果")
-        if isinstance(body.get("model_snapshot"), dict):
-            input_data["model_snapshot"] = dict(body["model_snapshot"])
+        input_data = self.freeze_content_input(input_data)
+        if prompt_source == "skill":
+            input_data["origin_label"] = "Skill"
+        if prompt_source == "skill":
+            view = ContentSnapshots(self.app.paths.data_dir).view(input_data[STUDIO_SKILL_SNAPSHOT_KEY])
+            profile = dict(self.app.config.profile(model_key))
+            options = dict(self.app.config.runtime_guard_options() or {})
+            options["tools"] = view.registry().schemas()
+            check_context(profile, options, input_data.get("system", ""),
+                          [{"role": "user", "content": content}])
         return input_data
 
     def api_generate(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         try:
             input_data = self.prepare_generation(body)
-            task = self.jobs.submit(input_data)
+            task = self.jobs.submit(input_data, request_key=self._request_key(body))
         except LookupError as exc:
             return {"error": str(exc)}, 404
+        except StudioConflictError as exc:
+            return {"error": str(exc)}, 409
         except ValueError as exc:
             return {"error": str(exc)}, 400
-        return {"task": task, "unresolved_vars": input_data["unresolved_vars"]}, 201
+        return {"task": public_task(task), "unresolved_vars": input_data["unresolved_vars"]}, 201
+
+    def api_task_followup(self, task_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        if not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
+        if set(body) - {"user_request", "images", "request_key"}:
+            return {"error": "追问只能提交 user_request、images 和 request_key；新配置请新建生成"}, 400
+        try:
+            text = body.get("user_request", "")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("请填写追问内容")
+            key = self._request_key(body, required=True)
+            images = validate_image_refs(self.app.paths.data_dir, body.get("images"))
+            task = self.jobs.followup(task_id, text.strip(), images, request_key=key)
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+        except StudioConflictError as exc:
+            return {"error": str(exc)}, 409
+        except ValueError as exc:
+            return {"error": str(exc)}, 400
+        return {"task": public_task(task)}, 201
 
     def api_vision(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         """图片反推：优先用当前参数里选中的模型，识别不了再用视觉配置兜底。
@@ -351,6 +435,10 @@ class StudioService:
                 for k in ("id", "status", "detail", "title", "created_at", "updated_at",
                           "result", "result_partial", "error", "handoff", "usage")
             }
+            item[STUDIO_PROMPT_SOURCE_KEY] = input_data.get(STUDIO_PROMPT_SOURCE_KEY, "template")
+            item[STUDIO_SKILL_IDS_KEY] = list(input_data.get(STUDIO_SKILL_IDS_KEY) or [])
+            item[STUDIO_THREAD_ID_KEY] = row.get(STUDIO_THREAD_ID_KEY) or row.get("id")
+            item[STUDIO_PARENT_TASK_ID_KEY] = row.get(STUDIO_PARENT_TASK_ID_KEY) or ""
             # 顶层有值就用顶层（将来真落库时不用再改这里），否则从 input 取。
             item["module"] = row.get("module") or input_data.get("module") or ""
             item["origin_label"] = row.get("origin_label") or input_data.get("origin_label") or ""
@@ -379,7 +467,7 @@ class StudioService:
         task = self.jobs.task(task_id)
         if not task:
             return {"error": "任务不存在"}, 404
-        return {"task": task}, 200
+        return {"task": public_task(task)}, 200
 
     def api_tasks_delete(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         """批量删除历史产出（编辑模式多选删除）。
@@ -438,9 +526,11 @@ class StudioService:
             task = self.jobs.retry(task_id)
         except LookupError:
             return {"error": "任务不存在"}, 404
+        except StudioConflictError as exc:
+            return {"error": str(exc)}, 409
         except ValueError as exc:
             return {"error": str(exc)}, 400
-        return {"task": task}, 201
+        return {"task": public_task(task)}, 201
 
     # ---- 交接 ----
 
@@ -494,7 +584,7 @@ class StudioService:
         return {
             "conversation_id": handoff_conversation_id,
             "run_id": str((result.get("run") or {}).get("id") or ""),
-            "task": updated or {},
+            "task": public_task(updated or {}),
         }, 201
 
     # ---- 结尾：组合根重启恢复调用 ----

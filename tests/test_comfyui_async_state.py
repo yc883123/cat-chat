@@ -53,6 +53,23 @@ class ComfyuiAsyncStateTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_convert_all_freezes_settings_and_stops_after_manual_change(self):
+        self.run_case(r"""
+const {scheme,item}=fixture();
+scheme.items.push({...item,name:'条目2',files:{...item.files}});
+p.batch.convert.system_prompt='点击时规则';
+const pending=defer(),sent=[];
+context.api=async(path,options)=>{sent.push(JSON.parse(JSON.stringify(options.body)));return {task:{id:'local'}};};
+p.setWait(()=>pending.promise);
+const first=p.batchConvertAll();await flush();
+await p.batchConvertAll();assert.equal(sent.length,1,'全部转换忙碌期间不重复创建');
+p.batch.convert.system_prompt='后来的新规则';pending.resolve('旧规则结果');await first;
+assert.equal(sent.length,1);assert.equal(sent[0].system_prompt,'点击时规则');
+assert.equal(item.prompt,'');assert.equal(scheme.items[1].prompt,'');
+assert.equal(p.batch.convertAllBusy,false);
+assert.equal(p.batch.convert.system_prompt,'后来的新规则');
+""")
+
     def test_single_workflow_ignores_stale_success_failure_and_same_id_reselection(self):
         self.run_case(r"""
 for(const oldFails of [false,true]){

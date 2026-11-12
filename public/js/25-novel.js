@@ -16,6 +16,8 @@
 
 import { $, api, applyModelSkinFor, state, toast } from "./01-core.js";
 import { onStudioPageChange, setStudioPage } from "./22-studio.js";
+import { createContentSkillPicker } from "./22c-content-skills.js";
+import { bindWorkSystemPrompt } from "./22d-work-prompt.js";
 import { bindWorkbenchDialogReturn, bindWorkbenchMenu, watchWorkbenchSize, workbenchWidth } from "./22a-workbench-ui.js";
 import { bindBodyDraftLifecycle, bodyDraftMatches, chooseBodyDraft, createBodyDraftPanel, createBodyDraftSession } from "./22b-body-drafts.js";
 
@@ -149,8 +151,15 @@ const novel = {
   bodyChars: 3000,
   maxChapters: 6,
   limits: { min: 3000, max: 15000, step: 500, chaptersMin: 1, chaptersMax: 20, chaptersDefault: 6 },
-  // 分镜生图的写法（系统提示词）：空 = 内置分镜写法；非空 = 手动编辑或提词库导入的模板。
+  // 模板和 Skill 选择按作品隔离；未启用一侧的草稿也保留。
   storyboardSystem: "",
+  storyboardSource: "template",
+  storyboardSkillIds: [],
+  storyboardRevision: 0,
+  storyboardDirty: false,
+  storyboardGeneration: 0,
+  storyboardSaving: false,
+  storyboardStatus: "",
   // 逐章稿件选择：`<章号>` → 稿件 ID；空值表示该章用基础稿件（原文）。
   manuscriptChoice: new Map(),
   // 剧本阶段：当前正在编辑的场次号（0 = 未在编辑）。
@@ -305,6 +314,8 @@ const STAGE_PANEL_CONTROL_IDS = [
   "novelSceneHead", "novelSceneBody", "novelSceneSave", "novelSceneCancel", "novelScriptVersion",
   "novelStoryboardNote", "novelStoryboardList", "novelStoryboardAll", "novelStoryboardSend",
   "novelStoryboardSystem", "novelStoryboardReset",
+  "novelStoryboardTemplatePanel", "novelStoryboardSkillPanel", "novelStoryboardSkillPicker",
+  "novelStoryboardConfigSave", "novelStoryboardConfigStatus",
 ];
 
 function activateStagePanel(stage) {
@@ -1226,6 +1237,7 @@ function renderStagePanel() {
   if (systemBox && document.activeElement !== systemBox) systemBox.value = novel.storyboardSystem;
   const resetBtn = $("#novelStoryboardReset");
   if (resetBtn) resetBtn.hidden = !novel.storyboardSystem;
+  renderStoryboardPromptConfig();
   applyStageCollapse();
 }
 
@@ -1405,9 +1417,11 @@ function renderPlan() {
     const kgCount = Number(budget?.kg_entities || 0);
     const lines = [
       `按剧本里已保存的 ${scenes.length} 场生成，每场一条出图提示词。`,
-      novel.storyboardSystem
-        ? `使用自定义写法（约 ${fmtChars(novel.storyboardSystem.length)} 字），生成时作为系统提示词发送。`
-        : "使用内置分镜写法；要换模板，到提词库选中后点「发送到分镜生图」，或直接在分镜面板里编辑。",
+      novel.storyboardSource === "skill"
+        ? `使用已选的 ${novel.storyboardSkillIds.length} 个 Skill，作品系统提示词共同生效。`
+        : (novel.storyboardSystem
+          ? `使用自定义写法（约 ${fmtChars(novel.storyboardSystem.length)} 字），作为本次输入发送。`
+          : "使用内置分镜写法；要换模板，到提词库选中后点「发送到分镜生图」，或直接在分镜面板里编辑。"),
       budget ? `这次发送的场次正文与说明约 ${fmtChars(budget.chars)} 字。` : "",
       kgCount
         ? `已加入已保存要素里的 ${kgCount} 条设定参考，帮助人物与场景在这组图里保持一致。`
@@ -2045,7 +2059,9 @@ async function pollActiveTask() {
 
 /** 提交前预检：把右栏说明刷新成真实输入（不建任务、不计费）。 */
 async function refreshPreviewBudget() {
+  const token = ++novel.budgetToken;
   const stage = novel.stage;
+  const bookId = novel.bookId;
   if (!novel.bookId || stage === "split") {
     novel.budget = null;
     refreshPreview();
@@ -2058,7 +2074,6 @@ async function refreshPreviewBudget() {
     refreshPreview();
     return;
   }
-  const token = ++novel.budgetToken;
   const model = readStageModel();
   try {
     const payload = await api("/api/novel/stage/preview", {
@@ -2067,7 +2082,7 @@ async function refreshPreviewBudget() {
         book_id: novel.bookId,
         stage,
         ...(stage === "storyboard"
-          ? { scene_ids: [], system_prompt: novel.storyboardSystem }
+          ? { scene_ids: [], ...storyboardRequest() }
           : {
               chapter_ids: picked,
               manuscripts: manuscriptsPayload(),
@@ -2080,11 +2095,11 @@ async function refreshPreviewBudget() {
         model_key: model.model_key,
       },
     });
-    if (token !== novel.budgetToken) return;
+    if (token !== novel.budgetToken || bookId !== novel.bookId || stage !== novel.stage) return;
     novel.budget = payload.budget || null;
     novel.stageWarnings = Array.isArray(payload.warnings) ? payload.warnings : [];
   } catch (error) {
-    if (token !== novel.budgetToken) return;
+    if (token !== novel.budgetToken || bookId !== novel.bookId || stage !== novel.stage) return;
     novel.budget = null;
     novel.stageWarnings = [String(error?.message || error)];
   }
@@ -2104,7 +2119,14 @@ async function generateStage({ confirmLarge = false } = {}) {
   if (!novel.bookId) return;
   const stage = novel.stage;
   const stageData = stageState(stage);
+  if (stageData.busy || novel.storyboardSaving) return;
   const isStoryboard = stage === "storyboard";
+  if (isStoryboard && novel.storyboardSource === "skill" && !novel.storyboardSkillIds.length) {
+    toast("至少选择一个 Skill");
+    return;
+  }
+  const bookId = novel.bookId;
+  const bookToken = novel.bookToken;
   // 分镜生图的素材是已保存剧本场次，不勾选章节。
   const picked = [...novel.picked].sort((a, b) => a - b);
   if (!isStoryboard) {
@@ -2122,31 +2144,29 @@ async function generateStage({ confirmLarge = false } = {}) {
     toast("先在设置里检查模型，再回来选择");
     return;
   }
+  const requestBody = {
+    book_id: bookId, stage,
+    ...(isStoryboard ? { scene_ids: [], ...storyboardRequest() } : {
+      chapter_ids: picked, manuscripts: manuscriptsPayload(), body_chars: novel.bodyChars,
+      max_chapters: novel.maxChapters,
+      elements_version: novel.selectedVersions.elements || undefined,
+      outline_version: novel.selectedVersions.outline || undefined,
+    }),
+    extra_note: String($("#novelStageNote")?.value || ""),
+    model_key: model.model_key, model_name: model.model_name,
+    confirm_large: confirmLarge ? 1 : undefined,
+  };
   stageData.busy = true;
   stageData.warnings = [];
   renderStagePanel();
   try {
+    if (isStoryboard && !await saveStoryboardConfig()) return;
+    if (bookId !== novel.bookId || bookToken !== novel.bookToken) return;
     const payload = await api("/api/novel/stage", {
       method: "POST",
-      body: {
-        book_id: novel.bookId,
-        stage,
-        ...(isStoryboard
-          ? { scene_ids: [], system_prompt: novel.storyboardSystem }
-          : {
-              chapter_ids: picked,
-              manuscripts: manuscriptsPayload(),
-              body_chars: novel.bodyChars,
-              max_chapters: novel.maxChapters,
-              elements_version: novel.selectedVersions.elements || undefined,
-              outline_version: novel.selectedVersions.outline || undefined,
-            }),
-        extra_note: String($("#novelStageNote")?.value || ""),
-        model_key: model.model_key,
-        model_name: model.model_name,
-        confirm_large: confirmLarge ? 1 : undefined,
-      },
+      body: requestBody,
     });
+    if (bookId !== novel.bookId || bookToken !== novel.bookToken) return;
     stageData.activeTaskId = payload.task?.id || "";
     stageData.viewTaskId = "";
     stageData.streamText = "";
@@ -2172,6 +2192,7 @@ async function generateStage({ confirmLarge = false } = {}) {
     scheduleTaskPolling();
   } catch (error) {
     // 容量未知且输入很大：服务端要求确认，问过用户再提交。
+    if (bookId !== novel.bookId || bookToken !== novel.bookToken) return;
     const message = String(error?.message || error || "");
     if (String(error?.code || "") === "needs_confirm" || message.includes("请确认后再提交")) {
       if (window.confirm(`${message}\n\n确认继续提交吗？`)) {
@@ -2182,8 +2203,10 @@ async function generateStage({ confirmLarge = false } = {}) {
     }
     fail("提交生成失败", error);
   } finally {
-    stageData.busy = false;
-    renderStagePanel();
+    if (bookId === novel.bookId && bookToken === novel.bookToken) {
+      stageData.busy = false;
+      renderStagePanel();
+    }
   }
 }
 
@@ -2911,6 +2934,7 @@ async function openBook(bookId) {
     novel.selectedVersions = { elements: 0, outline: 0, script: 0 };
     try { localStorage.setItem(LAST_BOOK_KEY, bookId); } catch (_error) { /* storage may be unavailable */ }
     novel.book = payload.book;
+    restoreStoryboardConfig(payload.book);
     novel.chapters = payload.chapters || [];
     novel.broken = payload.broken || [];
     novel.staged = null;
@@ -3461,17 +3485,127 @@ function saveLimits() {
   } catch (_error) { /* storage may be unavailable */ }
 }
 
-function saveStoryboardSystem() {
-  try {
-    localStorage.setItem(STORYBOARD_SYSTEM_KEY, novel.storyboardSystem || "");
-  } catch (_error) { /* storage may be unavailable */ }
+let storyboardPicker = null;
+let storyboardPickerHost = null;
+const storyboardDrafts = new Map();
+
+function storyboardConfig() {
+  return { prompt_source: novel.storyboardSource, template_draft: novel.storyboardSystem,
+    skill_ids: [...novel.storyboardSkillIds], revision: novel.storyboardRevision };
 }
 
-function restoreStoryboardSystem() {
+function storyboardRequest() {
+  return novel.storyboardSource === "skill"
+    ? { prompt_source: "skill", skill_ids: [...novel.storyboardSkillIds] }
+    : { prompt_source: "template", system_prompt: novel.storyboardSystem };
+}
+
+function saveStoryboardSystem() {
+  novel.storyboardDirty = true;
+  novel.storyboardGeneration += 1;
+  novel.storyboardStatus = "未保存";
+  const config = storyboardConfig();
+  storyboardDrafts.set(novel.bookId, config);
+  if (novel.bookId) {
+    try { localStorage.setItem(`${STORYBOARD_SYSTEM_KEY}:${novel.bookId}`, JSON.stringify(config)); }
+    catch (_error) { novel.storyboardStatus = "本地暂存失败，请保存分镜设置"; }
+  }
+  renderStoryboardPromptConfig();
+}
+
+function restoreStoryboardConfig(book) {
+  const saved = book?.storyboard_prompt_config;
+  let draft = storyboardDrafts.get(book?.id || "");
+  if (!draft && book?.id) {
+    try { draft = JSON.parse(localStorage.getItem(`${STORYBOARD_SYSTEM_KEY}:${book.id}`) || "null"); }
+    catch (_error) { /* an invalid local draft never replaces the server config */ }
+  }
+  let legacy = "";
+  if (!saved && !draft) {
+    try { legacy = String(localStorage.getItem(STORYBOARD_SYSTEM_KEY) || ""); } catch (_error) { /* optional legacy draft */ }
+  }
+  const config = draft || saved || { prompt_source: "template", template_draft: legacy, skill_ids: [], revision: 0 };
+  novel.storyboardSource = config.prompt_source === "skill" ? "skill" : "template";
+  novel.storyboardSystem = String(config.template_draft || "");
+  novel.storyboardSkillIds = Array.isArray(config.skill_ids) ? [...config.skill_ids] : [];
+  novel.storyboardRevision = Number(saved?.revision ?? config.revision ?? 0);
+  novel.storyboardDirty = Boolean(draft || (!saved && legacy));
+  novel.storyboardStatus = draft ? "已恢复未保存草稿，请核对后保存" : (saved ? "已保存" : (legacy ? "旧模板草稿，尚未保存到此作品" : "尚未保存"));
+  novel.storyboardGeneration += 1;
+  novel.storyboardSaving = false;
+}
+
+function renderStoryboardPromptConfig() {
+  const host = $("#novelStoryboardSkillPicker");
+  if (novel.stage === "storyboard" && host && storyboardPickerHost !== host) {
+    storyboardPicker?.destroy();
+    storyboardPickerHost = host;
+    storyboardPicker = createContentSkillPicker(host, {
+      selected: novel.storyboardSkillIds,
+      onChange(ids) {
+        novel.storyboardSkillIds = [...ids];
+        saveStoryboardSystem();
+        void refreshPreviewBudget();
+      },
+    });
+  }
+  if (storyboardPicker && JSON.stringify(storyboardPicker.getSelected()) !== JSON.stringify(novel.storyboardSkillIds)) {
+    storyboardPicker.setSelected(novel.storyboardSkillIds);
+  }
+  document.querySelectorAll("#novelStagePanel [data-novel-prompt-source]").forEach((button) => {
+    const active = button.dataset.novelPromptSource === novel.storyboardSource;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  const template = $("#novelStoryboardTemplatePanel");
+  const skill = $("#novelStoryboardSkillPanel");
+  if (template) template.hidden = novel.storyboardSource !== "template";
+  if (skill) skill.hidden = novel.storyboardSource !== "skill";
+  const status = $("#novelStoryboardConfigStatus");
+  if (status) status.textContent = novel.storyboardStatus;
+  const save = $("#novelStoryboardConfigSave");
+  if (save) save.disabled = !novel.bookId || novel.storyboardSaving;
+}
+
+async function saveStoryboardConfig() {
+  if (!novel.bookId || novel.storyboardSaving) return false;
+  const bookId = novel.bookId;
+  const bookToken = novel.bookToken;
+  const generation = novel.storyboardGeneration;
+  const config = storyboardConfig();
+  if (!novel.storyboardDirty && novel.book?.storyboard_prompt_config) return true;
+  novel.storyboardSaving = true;
+  novel.storyboardStatus = "正在保存…";
+  renderStoryboardPromptConfig();
   try {
-    novel.storyboardSystem = String(localStorage.getItem(STORYBOARD_SYSTEM_KEY) || "");
-  } catch (_error) {
-    novel.storyboardSystem = "";
+    const payload = await api(`/api/novel/books/${encodeURIComponent(bookId)}/storyboard-prompt`, {
+      method: "PATCH", body: config,
+    });
+    if (novel.bookId !== bookId || novel.bookToken !== bookToken) return false;
+    const saved = payload.book?.storyboard_prompt_config;
+    novel.book.storyboard_prompt_config = saved;
+    novel.storyboardRevision = Number(saved?.revision || 0);
+    if (generation === novel.storyboardGeneration) {
+      novel.storyboardDirty = false;
+      novel.storyboardStatus = "已保存";
+      storyboardDrafts.delete(bookId);
+      try { localStorage.removeItem(`${STORYBOARD_SYSTEM_KEY}:${bookId}`); } catch (_error) { /* server save succeeded */ }
+      return true;
+    }
+    saveStoryboardSystem();
+    novel.storyboardStatus = "已保存提交时的设置，新增修改尚未保存";
+    return false;
+  } catch (error) {
+    if (novel.bookId === bookId && novel.bookToken === bookToken) {
+      novel.storyboardStatus = `${String(error?.message || error)}（草稿保留）`;
+      toast(novel.storyboardStatus);
+    }
+    return false;
+  } finally {
+    if (novel.bookId === bookId && novel.bookToken === bookToken) {
+      novel.storyboardSaving = false;
+      renderStoryboardPromptConfig();
+    }
   }
 }
 
@@ -3498,7 +3632,7 @@ export function bindNovelEvents() {
   bindBodyDraftLifecycle(novelBodyDrafts, captureNovelBody);
   prepareStagePanels();
   restoreLimits();
-  restoreStoryboardSystem();
+  restoreStoryboardConfig(null);
   novel.initialized = true;
 
   window.addEventListener("naiba-open-domain", (event) => {
@@ -3673,6 +3807,18 @@ export function bindNovelEvents() {
     }
     if (event.target.closest("#novelStoryboardAll")) {
       toggleStoryboardAll();
+      return;
+    }
+    if (event.target.closest("#novelStoryboardConfigSave")) {
+      void saveStoryboardConfig();
+      return;
+    }
+    const promptSource = event.target.closest("[data-novel-prompt-source]");
+    if (promptSource) {
+      novel.storyboardSource = promptSource.dataset.novelPromptSource === "skill" ? "skill" : "template";
+      saveStoryboardSystem();
+      renderStagePanel();
+      void refreshPreviewBudget();
       return;
     }
     if (event.target.closest("#novelStoryboardReset")) {
@@ -3907,8 +4053,8 @@ export function bindNovelEvents() {
 
   $("#novelChapterBody")?.addEventListener("input", markDirty);
 
-  // 分镜生图的写法（系统提示词）：输入即保存（与滑条同口径）；预检跟着刷新，
-  // 右栏的实际输入字数才能反映模板长度。
+  // 分镜模板输入先暂存当前作品草稿；保存按钮或生成时才写入作品。
+  // 预检跟着刷新，右栏按实际活动来源计算输入。
   $("#novelEditorBody")?.addEventListener("input", (event) => {
     if (event.target.id !== "novelStoryboardSystem") return;
     novel.storyboardSystem = String(event.target.value || "");
@@ -3924,6 +4070,7 @@ export function bindNovelEvents() {
     const text = String(event.detail?.text || "").trim();
     if (!text) return;
     novel.storyboardSystem = text;
+    novel.storyboardSource = "template";
     saveStoryboardSystem();
     setStudioPage("novel");
     setStage("storyboard");
@@ -3935,6 +4082,13 @@ export function bindNovelEvents() {
   watchWorkbenchSize($("#studioPageNovel"), applyPaneAccessibility);
   bindWorkbenchMenu($("#novelBookMenuBtn"), $("#novelBookMenu"));
   bindWorkbenchMenu($("#novelMoreBtn"), $("#novelMoreMenu"));
+  bindWorkSystemPrompt({ module: "novel", getBook: () => novel.book,
+    onSaved: (book) => {
+      if (!novel.book || novel.bookId !== book?.id) return;
+      novel.book.global_system_prompt = book.global_system_prompt;
+      novel.book.global_system_prompt_revision = book.global_system_prompt_revision;
+      void refreshPreviewBudget();
+    } });
   $("#novelAsideBtn")?.addEventListener("click", () => setPane(novel.pane === "preview" ? "editor" : "preview"));
   $("#novelAsideClose")?.addEventListener("click", () => {
     setPane("editor");

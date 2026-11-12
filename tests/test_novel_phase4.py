@@ -387,7 +387,7 @@ class Phase4ServiceTests(unittest.TestCase):
         self.assertEqual(input_data["novel"]["stage"], "storyboard")
         self.assertEqual(input_data["novel"]["scene_ids"], [1, 2])
         self.assertEqual(len(input_data["novel"]["scene_snapshot"]), 2)
-        self.assertIn("【全书设定参考", input_data["system"])
+        self.assertIn("【全书设定参考", input_data["content"])
         self.assertIn("【第 1 场】INT. 老宅书房 - 夜", input_data["content"])
         self.assertNotIn("chunked", input_data)
         # 预检与提交同口径：budget 带实体数（人物+场景+道具共 3 条）。
@@ -428,14 +428,15 @@ class Phase4ServiceTests(unittest.TestCase):
         self.assertEqual(rows, [])
 
     def test_storyboard_system_prompt_custom_vs_builtin(self):
-        """自定义写法（模板）进系统消息，正文只留格式要求；留空用内置写法。"""
+        """新模板任务的写法进入 user，system 只保留必要执行约定。"""
         self._save_script()
         template = "你是 H3 出图提示词写手：每场一条，画面描述按镜头语言组织。"
         built = prompts.build_storyboard_content(
             book_title="书", scenes=[{"i": 1, "scene": "INT. A - 夜", "content": "内容"}],
             system_prompt=template,
         )
-        self.assertEqual(built["system"], template)
+        self.assertIn(template, built["content"])
+        self.assertNotIn(template, built["system"])
         self.assertTrue(built["system_custom"])
         self.assertIn("输出格式", built["content"])
         self.assertIn("【第 1 场】INT. A - 夜", built["content"])
@@ -443,19 +444,19 @@ class Phase4ServiceTests(unittest.TestCase):
         default = prompts.build_storyboard_content(
             book_title="书", scenes=[{"i": 1, "scene": "INT. A - 夜", "content": "内容"}],
         )
-        self.assertIn("你是分镜师", default["system"])
+        self.assertIn("你是分镜师", default["content"])
+        self.assertNotIn("你是分镜师", default["system"])
         self.assertFalse(default["system_custom"])
         self.assertIn("输出格式", default["content"])
 
-    def test_storyboard_system_prompt_is_clipped(self):
+    def test_storyboard_template_over_limit_is_rejected(self):
         self._save_script()
         big = "很" * (prompts.STORYBOARD_SYSTEM_CHARS + 300)
-        built = prompts.build_storyboard_content(
-            book_title="书", scenes=[{"i": 1, "scene": "INT. A - 夜", "content": "内容"}],
-            system_prompt=big,
-        )
-        self.assertEqual(len(built["system"]), prompts.STORYBOARD_SYSTEM_CHARS)
-        self.assertTrue(any("已省略后 300 字" in row for row in built["warnings"]))
+        with self.assertRaisesRegex(prompts.PromptError, "不能超过"):
+            prompts.build_storyboard_content(
+                book_title="书", scenes=[{"i": 1, "scene": "INT. A - 夜", "content": "内容"}],
+                system_prompt=big,
+            )
 
     def test_storyboard_submit_with_template_system_prompt(self):
         self._save_script()
@@ -468,16 +469,16 @@ class Phase4ServiceTests(unittest.TestCase):
         })
         self.assertEqual(status, 201)
         input_data = payload["task"]["input"]
-        # 自定义写法在前、图谱反哺参考在后，同走系统消息。
-        self.assertTrue(input_data["system"].startswith(template))
-        self.assertIn("【全书设定参考", input_data["system"])
+        self.assertIn(template, input_data["content"])
+        self.assertNotIn(template, input_data["system"])
+        self.assertIn("【全书设定参考", input_data["content"])
         self.assertTrue(payload["sources"]["system_custom"])
         preview, _ = self.service.api_stage_preview({
             "book_id": self.book_id, "stage": "storyboard",
             "system_prompt": template, "model_key": "online:probe",
         })
         self.assertTrue(preview["sources"]["system_custom"])
-        self.assertGreater(preview["budget"]["system_chars"], len(template))
+        self.assertEqual(preview["budget"]["system_chars"], len(input_data["system"]))
 
     # ---- 4A 改编分块 ----
 
@@ -522,7 +523,7 @@ class Phase4ServiceTests(unittest.TestCase):
 
     # ---- 4B-1 图谱注入 ----
 
-    def test_elements_injected_as_system_for_stages(self):
+    def test_elements_injected_as_reference_material_for_stages(self):
         self._save_elements()
         for stage in ("elements", "outline", "script"):
             payload, status = self.service.api_stage({
@@ -531,10 +532,175 @@ class Phase4ServiceTests(unittest.TestCase):
             })
             self.assertEqual(status, 201)
             input_data = payload["task"]["input"]
-            self.assertIn("【全书设定参考", input_data["system"])
-            self.assertIn("沈砚", input_data["system"])
+            self.assertIn("【全书设定参考", input_data["content"])
+            self.assertIn("沈砚", input_data["content"])
+            self.assertNotIn("沈砚", input_data.get("system", ""))
             self.assertGreater(payload["budget"]["kg_entities"], 0)
             self.assertIn("kg_entities", payload["sources"])
+
+    def test_global_prompt_all_stages_and_independent_config_save(self):
+        self._save_script()
+        self._save_elements()
+        before = self.service.store.get_book(self.book_id)["book"]["revision"]
+        response, status = self.service.api_save_system_prompt(self.book_id, {
+            "global_system_prompt": "全书固定规则", "global_system_prompt_revision": 0})
+        self.assertEqual(status, 200, response)
+        self.assertEqual(response["book"]["revision"], before)
+        for stage in ("elements", "outline", "script", "adapt", "storyboard"):
+            with self.subTest(stage=stage):
+                request = {"book_id": self.book_id, "stage": stage, "chapter_ids": [1],
+                           "model_key": "online:probe", "model_name": "probe-default"}
+                preview, status = self.service.api_stage_preview(request)
+                self.assertEqual(status, 200, preview)
+                result, status = self.service.api_stage(request)
+                self.assertEqual(status, 201, result)
+                data = result["task"]["input"]
+                self.assertEqual(data["system"].count("全书固定规则"), 1)
+                self.assertNotIn("全书固定规则", data["content"])
+                self.assertEqual(preview["budget"]["estimated_tokens"], result["budget"]["estimated_tokens"])
+                self.assertEqual(data["novel"]["global_system_prompt_revision"], 1)
+        before = self.service.store.get_book(self.book_id)["book"]["revision"]
+        config = {"prompt_source": "skill", "template_draft": "模板草稿", "skill_ids": ["a", "b", "a"], "revision": 0}
+        result, status = self.service.api_save_storyboard_prompt_config(self.book_id, config)
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["book"]["revision"], before)
+        self.assertEqual(result["book"]["storyboard_prompt_config"]["skill_ids"], ["a", "b"])
+        self.assertEqual(self.service.api_save_storyboard_prompt_config(self.book_id, config)[1], 409)
+        self.assertEqual(self.service.api_save_system_prompt(self.book_id, {
+            "global_system_prompt": "旧窗口", "global_system_prompt_revision": 0})[1], 409)
+
+    def test_storyboard_skill_snapshots_and_both_history_sources(self):
+        from naiba.studio.content import ContentSnapshots
+        self._save_script()
+        self._save_elements()
+        rows = []
+        for name in ("first", "second"):
+            root = self.root / name
+            root.mkdir()
+            (root / "SKILL.md").write_text(f"{name}完整主文，阅读references/guide.md", encoding="utf-8")
+            (root / "references").mkdir()
+            (root / "references" / "guide.md").write_text(f"{name}专用参考", encoding="utf-8")
+            rows.append({"id": name, "name": name, "root": str(root), "path": str(root / "SKILL.md")})
+        catalog = type("Catalog", (), {"scan": lambda _self: rows})()
+        snapshots = ContentSnapshots(self.root)
+        self.app.studio.freeze_content_input = lambda data: snapshots.normalize_and_freeze(data, catalog)
+        self.service.api_save_system_prompt(self.book_id, {
+            "global_system_prompt": "全书固定规则", "global_system_prompt_revision": 0})
+        body = {"book_id": self.book_id, "stage": "storyboard", "scene_ids": [2],
+                "model_key": "online:probe", "model_name": "probe-default"}
+        template, status = self.service.api_stage({**body, "prompt_source": "template", "system_prompt": "独有模板规则"})
+        self.assertEqual(status, 201, template)
+        request = {**body, "prompt_source": "skill", "skill_ids": ["second", "first", "second"]}
+        preview, code = self.service.api_stage_preview(request)
+        self.assertEqual(code, 200, preview)
+        skill, status = self.service.api_stage(request)
+        self.assertEqual(status, 201, skill)
+        data = skill["task"]["input"]
+        self.assertEqual(data["module"], "novel")
+        self.assertEqual(data["novel"]["scene_ids"], [2])
+        self.assertEqual(data["skill_ids"], ["second", "first"])
+        for part in ("全书固定规则", "first完整主文", "second完整主文"):
+            self.assertIn(part, data["system"])
+        for part in ("独有模板规则", "你是分镜师"):
+            self.assertNotIn(part, data["content"] + data["system"])
+        self.assertIn("【第 2 场】", data["content"])
+        self.assertIn("【全书设定参考", data["content"])
+        self.assertEqual(preview["budget"]["estimated_tokens"], skill["budget"]["estimated_tokens"])
+        # Both source tasks retain their independent immutable input/history.
+        self.assertNotEqual(template["task"]["id"], skill["task"]["id"])
+        self.assertIn("独有模板规则", self.app.studio.jobs.tasks[template["task"]["id"]]["input"]["content"])
+        (self.root / "first" / "SKILL.md").write_text("更新后的主文", encoding="utf-8")
+        frozen = snapshots.normalize_and_freeze(data, catalog)
+        self.assertEqual(frozen["system"], data["system"])
+        current, status = self.service.api_stage(request)
+        self.assertEqual(status, 201, current)
+        self.assertIn("更新后的主文", current["task"]["input"]["system"])
+
+    def test_real_studio_skill_loop_reads_both_documents_and_retries_original(self):
+        import json
+        import re
+        from naiba.skills.catalog import SkillCatalog
+        from naiba.studio.service import StudioService
+        from tests.test_studio import _write_min_catalog
+        self._save_script()
+        self._save_elements()
+        self.app.paths.public_dir = self.root / "public"
+        _write_min_catalog(self.app.paths.public_dir / "studio")
+        skill_root = self.root / "skills"
+        for name in ("one", "two"):
+            folder = skill_root / name
+            (folder / "references").mkdir(parents=True)
+            (folder / "SKILL.md").write_text(f"---\nname: {name}\n---\n{name}主文。阅读references/same.md。", encoding="utf-8")
+            (folder / "references" / "same.md").write_text(f"{name}独立文档", encoding="utf-8")
+        self.app.catalog = SkillCatalog([skill_root])
+        self.app.config.profile = lambda key: {"kind": "online", "name": "offline", "model": "probe", "context_window": 120000}
+        self.app.config.runtime_guard_options = lambda: {"max_steps": 40}
+        captured = []
+        models = _RoundModels([])
+        def complete(_models, profile, messages, options, event):
+            captured.append(messages)
+            self.assertEqual({row["name"] for row in options["tools"]}, {"read_file", "list_directory", "search_files"})
+            roots = re.findall(r'<skill name="([^"]+)" root="([^"]+)">', messages[0]["content"])
+            history = "\n".join(str(message.get("content")) for message in messages[1:])
+            for name, root in roots:
+                if f"{name}独立文档" not in history:
+                    return json.dumps({"type": "tool", "tool": "read_file", "arguments": {"path": str(Path(root) / "references" / "same.md")}})
+            answer = "【第 2 场】EXT. 长桥 - 黄昏\n林晚与沈砚的双人远景。"
+            event({"type": "delta", "content": answer})
+            return answer
+        from types import MethodType
+        models.complete = MethodType(complete, models)
+        self.app.models = models
+        studio = StudioService(self.app, lambda **kw: {}, lambda **kw: {})
+        self.app.studio = studio
+        studio._runner.submit = lambda task_id: None
+        self.addCleanup(studio.shutdown)
+        ids = [row["id"] for row in self.app.catalog.scan()]
+        self.service.api_save_system_prompt(self.book_id, {
+            "global_system_prompt": "作品固定规则", "global_system_prompt_revision": 0})
+        response, status = self.service.api_stage({
+            "book_id": self.book_id, "stage": "storyboard", "scene_ids": [2],
+            "prompt_source": "skill", "skill_ids": ids, "model_key": "online:probe", "model_name": "probe"})
+        self.assertEqual(status, 201, response)
+        task_id = response["task"]["id"]
+        studio._runner._run_task(task_id)
+        task = studio.jobs.task(task_id)
+        self.assertEqual(task["status"], "done", task.get("error"))
+        rows, parsed = prompts.parse_storyboard(task["result"])
+        self.assertTrue(parsed)
+        self.assertEqual([row["scene_no"] for row in rows], [2])
+        self.assertIn("作品固定规则", captured[-1][0]["content"])
+        self.assertEqual(len(captured), 3)
+        self.assertEqual(task["usage"]["requests"], 3)
+        self.assertEqual(task["input"]["module"], "novel")
+        self.service.api_save_system_prompt(self.book_id, {
+            "global_system_prompt": "新规则", "global_system_prompt_revision": 1})
+        import shutil
+        shutil.rmtree(skill_root)
+        studio._store.update_task(task_id, status="failed", error="模拟可重试失败")
+        retried = studio.jobs.retry(task_id)
+        studio._runner._run_task(retried["id"])
+        current = studio.jobs.task(retried["id"])
+        self.assertEqual(current["status"], "done", current.get("error"))
+        self.assertEqual(current["input"]["system"], task["input"]["system"])
+        self.assertEqual(current["input"]["novel"], task["input"]["novel"])
+
+    def test_storyboard_source_validation_rejects_mixed_and_empty(self):
+        self._save_script()
+        base = {"book_id": self.book_id, "stage": "storyboard", "model_name": "probe"}
+        for extra in ({"prompt_source": "skill", "skill_ids": []},
+                      {"prompt_source": "skill", "skill_ids": ["a"], "system_prompt": "模板"},
+                      {"prompt_source": "skill", "skill_ids": ["a"], "template_draft": "隐藏模板"},
+                      {"prompt_source": "skill", "skill_ids": ["a"], "item_id": "模板选择"},
+                      {"prompt_source": "template", "skill_ids": ["a"]},
+                      {"prompt_source": "unknown"}, {"skill_ids": "a"}):
+            with self.subTest(extra=extra):
+                result, status = self.service.api_stage({**base, **extra})
+                self.assertEqual(status, 400, result)
+        result, status = self.service.api_stage({**base, "stage": "outline", "chapter_ids": [1],
+                                                "prompt_source": "skill", "skill_ids": ["a"]})
+        self.assertEqual(status, 400, result)
+        self.assertEqual(self.app.studio.jobs.submitted, [])
 
     def test_no_elements_no_system(self):
         payload, status = self.service.api_stage({

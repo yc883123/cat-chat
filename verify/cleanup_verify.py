@@ -39,6 +39,7 @@ KEEP = {
     "_serve_super_agent_v1_ui.py", "super_agent_v1_ui_smoke.cjs", "super_agent_feedback_smoke.cjs",
     "super_agent_runtime_smoke.cjs",
     # 浏览器冒烟
+    "_serve_workbench_content.py",
     "browser_smoke.cjs", "topbar_smoke.cjs", "pending_files_smoke.cjs",
     "chat_composer_layout_smoke.cjs",
     "comfyui_navigation_smoke.cjs",

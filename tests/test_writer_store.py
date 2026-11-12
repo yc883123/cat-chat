@@ -38,6 +38,35 @@ class WriterStoreTestCase(unittest.TestCase):
 
 
 class BookCrudTests(WriterStoreTestCase):
+    def test_system_prompt_revision_is_independent_and_preserved(self):
+        book = self._book()
+        stale = self.store._load_manifest(book["id"])
+        saved = self.store.save_system_prompt(book["id"], text="全书规则\n  保留空格", expected_revision=0)
+        self.assertEqual(saved["revision"], book["revision"])
+        self.assertEqual(saved["global_system_prompt_revision"], 1)
+        # Late content writers may carry an older manifest; prompt must survive.
+        self.store._save_manifest(self.store._book_dir(book["id"]), stale)
+        current = self.store.get_book(book["id"])["book"]
+        self.assertEqual(current["global_system_prompt"], "全书规则\n  保留空格")
+        with self.assertRaises(WriterConflictError):
+            self.store.save_system_prompt(book["id"], text="旧窗口", expected_revision=0)
+        cleared = self.store.save_system_prompt(book["id"], text="", expected_revision=1)
+        self.assertEqual(cleared["global_system_prompt"], "")
+        self.assertEqual(cleared["revision"], book["revision"])
+        self.assertEqual(self._book()["global_system_prompt"], "")
+
+    def test_system_prompt_save_reads_and_writes_under_lock(self):
+        book = self._book()
+        original = self.store._load_manifest
+        def checked(*args, **kwargs):
+            self.assertTrue(self.store._lock._is_owned())
+            return original(*args, **kwargs)
+        self.store._load_manifest = checked
+        self.store.save_system_prompt(book["id"], text="规则", expected_revision=0)
+        for invalid in (None, True, "0", 0.1):
+            with self.assertRaises(WriterStoreError):
+                self.store.save_system_prompt(book["id"], text="规则", expected_revision=invalid)
+
     def test_create_book_returns_safe_id(self):
         book = self._book()
         self.assertRegex(book["id"], BOOK_ID_PATTERN)

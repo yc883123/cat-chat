@@ -14,7 +14,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from naiba.core.contracts import WRITER_CHAPTER_BASELINE_KEY
+from naiba.core.contracts import (
+    WRITER_CHAPTER_BASELINE_KEY, WORK_GLOBAL_SYSTEM_PROMPT_KEY,
+    WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY,
+)
 from naiba.writer import coherence
 from naiba.writer import prompts
 from naiba.writer.pipeline import WriterPipelineManager, WriterPipelineError
@@ -121,6 +124,22 @@ class WriterService:
                 )
                 return payload, 200
             return {"error": "没有可修改的内容"}, 400
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+        except WriterConflictError as exc:
+            return {"error": str(exc)}, 409
+        except WriterStoreError as exc:
+            return {"error": str(exc)}, 400
+
+    def api_save_system_prompt(self, book_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        if not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
+        try:
+            book = self.store.save_system_prompt(
+                book_id, text=body.get(WORK_GLOBAL_SYSTEM_PROMPT_KEY),
+                expected_revision=body.get(WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY),
+            )
+            return {"book": book}, 200
         except LookupError as exc:
             return {"error": str(exc)}, 404
         except WriterConflictError as exc:
@@ -297,8 +316,10 @@ class WriterService:
                     extra_note=str(body.get("extra_note") or ""), previous_chapter=previous,
                     chapter_states=self.store.chapter_context_states(book_id, chapter_no),
                 )
+                preview_step = "segs" if kind in ("chapter_segs", "segs") else "draft"
+                system = prompts.step_system(preview_step, book["book"].get(WORK_GLOBAL_SYSTEM_PROMPT_KEY, ""))
                 budget = prompts.budget_report(
-                    content=built["content"], slots=built["slots"],
+                    content=built["content"], slots=built["slots"], system=system,
                     context_window=self._context_window(str(body.get("model_key") or "")),
                 )
                 return {
@@ -306,8 +327,28 @@ class WriterService:
                     "chapter": chapter_view,
                     "content": built["content"], "slots": built["slots"],
                     "budget": budget,
-                    "system": prompts.step_system("draft"),
+                    "system": system,
                 }, 200
+            if kind in ("outline", "outline_text", "outline_all", "outline_review", "split", "state", "state_rebuild"):
+                first_step = {"outline_all": "outline_text", "state_rebuild": "state"}.get(kind, kind)
+                snapshot = dict(body)
+                snapshot.update({
+                    "book_title": book["book"].get("title", ""),
+                    "setup_version_id": setup_version_id,
+                    "part_no": max(1, self._int_or(body.get("part_no"), 1)),
+                    "from_no": max(1, self._int_or(body.get("from_no"), 1)),
+                    "want_count": max(1, self._int_or(body.get("want_count"), prompts.SPLIT_STEP_CHAPTERS)),
+                    WORK_GLOBAL_SYSTEM_PROMPT_KEY: book["book"].get(WORK_GLOBAL_SYSTEM_PROMPT_KEY, ""),
+                    WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY: book["book"].get(WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY, 0),
+                })
+                prepared = self.pipeline.prepare_step_input(book_id, {
+                    "kind": kind, "steps": [first_step], "step_index": 0,
+                    "request_snapshot": snapshot,
+                })
+                data = prepared["input"]
+                slots = [{"key": "stage", "label": "当前阶段素材", "included": True, "chars": len(data["content"])}]
+                return {"kind": kind, "content": data["content"], "system": data["system"],
+                        "budget": {**prepared["budget"], "included": slots}, "slots": slots}, 200
             step = kind if kind in prompts.SETUP_STEPS else ""
             if not step:
                 return {"error": f"未知的预览类型：{kind or '（空）'}"}, 400
@@ -318,8 +359,9 @@ class WriterService:
                 chapter_count=self._int_or(body.get("chapter_count"), 10),
                 extra_note=str(body.get("extra_note") or ""),
             )
+            system = prompts.step_system(step, book["book"].get(WORK_GLOBAL_SYSTEM_PROMPT_KEY, ""))
             budget = prompts.budget_report(
-                content=content, slots=[{
+                content=content, system=system, slots=[{
                     "key": "idea", "label": "创作提示词与当前设定", "included": True,
                     "chars": len(content),
                 }],
@@ -327,7 +369,7 @@ class WriterService:
             )
             return {
                 "kind": step, "content": content,
-                "system": prompts.step_system(step),
+                "system": system,
                 "budget": budget,
                 "slots": budget["included"],
             }, 200

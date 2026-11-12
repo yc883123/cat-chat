@@ -9,7 +9,10 @@ import shutil
 import uuid
 from typing import Any
 
-from naiba.core.contracts import WriterContinuationSummary, WriterNovelChapterSource
+from naiba.core.contracts import (
+    WriterContinuationSummary, WriterNovelChapterSource,
+    WORK_GLOBAL_SYSTEM_PROMPT_KEY, WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY,
+)
 from naiba.writer.store import (
     BOOK_ID_PATTERN, CHAPTER_CONTENT_MAX_CHARS, SCHEMA_VERSION, TITLE_MAX,
     WriterConflictError, WriterStoreError, _now_ms, new_version_id, normalize_setup,
@@ -233,6 +236,7 @@ def create_continuation(store: Any, preview: dict[str, Any], summary: dict[str, 
                         "new_chapter_no": preview["new_chapter_no"],
                         "fingerprint": preview["fingerprint"], "coverage": preview["coverage"]}
         manifest = {"schema_version": SCHEMA_VERSION, "revision": 1, "id": book_id,
+                    WORK_GLOBAL_SYSTEM_PROMPT_KEY: "", WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY: 0,
                     "title": book_title, "chapter_ids": [], "setup_versions": [], "outline_versions": [],
                     "current_setup_version_id": "", "current_outline_version_id": "", "active_pipeline": None,
                     "created_at": now, "updated_at": now, "continuation": continuation,

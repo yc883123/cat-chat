@@ -105,13 +105,48 @@ class CommittedCatalogContractTests(unittest.TestCase):
         for item in items:
             tag = {"script": "script", "game": "game", "style": "style"}.get(item["module"], "prompt")
             tags.setdefault(tag, []).append(item)
+        all_body_ids = set()
         for tag, rows in tags.items():
             bodies = json.loads((self.public / f"bodies_{tag}.json").read_text(encoding="utf-8"))
+            self.assertEqual(set(bodies), {item["id"] for item in rows}, f"{tag} 分片含漏项或额外正文")
+            self.assertFalse(all_body_ids & set(bodies), f"{tag} 与其他正文分片重复")
+            all_body_ids.update(bodies)
             for item in rows:
                 body = bodies.get(item["id"])
                 self.assertTrue(body, f"{item['id']} 正文缺失")
                 self.assertEqual(len(body), item["chars"], item["id"])
                 self.assertEqual(body[:700], item["snippet"], item["id"])
+        self.assertEqual(set(ids), all_body_ids)
+
+    def test_catalog_cleanup_is_targeted_and_rebuildable(self):
+        from verify.studio_catalog_build import apply_catalog_cleanup, cross_check, new_item
+        index = json.loads((self.public / "catalog_index.json").read_text(encoding="utf-8"))
+        by_id = {item["id"]: item for item in index["items"]}
+        bodies = json.loads((self.public / "bodies_prompt.json").read_text(encoding="utf-8"))
+        self.assertNotIn("创意数据库", bodies["h3-004-cinematic-i2v"])
+        self.assertIn("用户已给信息及通用创作知识", bodies["h3-004-cinematic-i2v"])
+        daily = bodies["vs-037-daily0621"]
+        self.assertNotIn("领取1000RH币", daily)
+        self.assertNotIn("下载链接", daily)
+        self.assertNotIn("更多详情见飞书链接", daily)
+        self.assertIn("露台蓝调黄昏治愈人像摄影", daily)
+        self.assertEqual(by_id["vs-037-daily0621"]["type"], "example")
+        self.assertIn("未包含", by_id["vs-101-k2-engine"]["summary"])
+        self.assertIn("不执行节点", by_id["h3-005-ltx-relay"]["summary"])
+        for item_id in ("h3-007-h3-i2va", "h3-014-h3-ref2va"):
+            self.assertIn("未包含完整官方", by_id[item_id]["summary"])
+        # Simulate original inputs including the verified residue. Only the
+        # exact known block is removed; adjacent examples retain every byte.
+        daily_id = "vs-037-daily0621"
+        source = "画面风格：前一例。\n\n点击下方链接注册，领取1000RH币\n下载链接\n链接：\n\n画面风格：后一例。"
+        item = new_item(item_id=daily_id, title="示例", module="vs", item_type="example",
+                        summary="示例", tags=[], body=source, source="fixture")
+        raw = {daily_id: source}
+        apply_catalog_cleanup([item], raw)
+        self.assertEqual(raw[daily_id], "画面风格：前一例。\n\n画面风格：后一例。")
+        self.assertEqual(item["chars"], len(raw[daily_id]))
+        raw["unindexed"] = "正文孤项"
+        self.assertEqual(cross_check([item], raw)["unindexed_bodies"], ["unindexed"])
 
     def test_builtin_data_is_not_user_editable_shape(self):
         index = json.loads((self.public / "catalog_index.json").read_text(encoding="utf-8"))
@@ -346,7 +381,8 @@ class StudioPrefsConfigTests(unittest.TestCase):
         # page 是打标器接入时新增的工作台功能页偏好，默认「提词库」（3.7.4 前叫「模块库」，内部标识仍为 library）。
         # view 是「上次停在对话还是工作台」：默认对话（不记住的话，在工作台里关掉程序
         # 重开永远跳回对话，用户会以为状态没保存）。
-        defaults = {"last_selection": None, "favorites": [], "titles": [], "page": "library", "view": "chat"}
+        defaults = {"last_selection": None, "favorites": [], "titles": [], "page": "library", "view": "chat",
+                    "system_prompt": "", "prompt_source": "template", "skill_ids": []}
         self.assertEqual(self._store().data["studio"], defaults)
         legacy = self._store({"appearance": {"theme": "dark"}})
         self.assertEqual(legacy.data["studio"], defaults)

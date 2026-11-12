@@ -104,6 +104,19 @@ class ComfyUIBatchesTests(unittest.TestCase):
         self.assertEqual(first["input"]["label"], "验收批次 · 条目一")
         self.assertEqual(self.enqueue.call_count, 2)
 
+    def test_convert_settings_survive_restore_without_entering_graph(self):
+        convert = {"template": "catalog:h3-007-h3-i2va", "provider": "online:test",
+                   "model": "fake", "system_prompt": "本批统一规则"}
+        batch = self.batches.create(self.body(convert=convert))
+        convert["system_prompt"] = "已修改"
+        restored = self.batches.get(batch["id"], with_schemes=True)
+        self.assertEqual(restored["convert"]["system_prompt"], "本批统一规则")
+        task = self.store.get_task(batch["items"][0]["task_id"])
+        self.assertNotIn("convert", task["input"])
+        self.assertNotIn("system_prompt", task["input"])
+        with self.assertRaises(ComfyUIBatchError):
+            self.batches.create(self.body(convert={"system_prompt": "x" * 100001}))
+
     def test_request_keys_are_batch_scoped_and_unique(self):
         batch = self.batches.create(self.body(schemes=[dict(self.scheme, items=[
             self._item("条目一"), self._item("条目二")])]))

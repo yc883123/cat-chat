@@ -724,6 +724,8 @@ class SkillAgent:
         max_steps: int | None = None,
         tool_registry: Any = None,
         run_context: RunContext | None = None,
+        *,
+        system_prompt_override: str | None = None,
     ) -> tuple[str, list[dict[str, Any]], list[str], dict[str, Any]]:
         if cancel_event and cancel_event.is_set():
             raise TaskCancelled("任务已取消")
@@ -799,6 +801,7 @@ class SkillAgent:
             max_steps,
             tool_registry,
             run_context,
+            system_prompt_override=system_prompt_override,
         )
 
     def _run_active(
@@ -816,6 +819,8 @@ class SkillAgent:
         max_steps: int | None = None,
         tool_registry: Any = None,
         run_context: RunContext | None = None,
+        *,
+        system_prompt_override: str | None = None,
     ) -> tuple[str, list[dict[str, Any]], list[str], dict[str, Any]]:
 
         skill_prompts = []
@@ -1059,6 +1064,12 @@ class SkillAgent:
         # mcp__ 工具时自然得知，避免连接状态变化破坏前缀缓存。
         if skill_prompts:
             system += "\n\n" + SKILL_PROMPT_HEADER + "\n\n".join(skill_prompts)
+        # A trusted task adapter may supply its already-frozen full system text.
+        # Never read this override from user options or the shared RunContext.
+        if system_prompt_override is not None:
+            if not isinstance(system_prompt_override, str):
+                raise ValueError("system_prompt_override 必须是文本")
+            system = system_prompt_override
         # 完整系统提示词带出（trace 只记增量、不含 system）：首轮上下文落盘
         # （first_turn）与后续展示需要这份完整原文。
         if isinstance(run_context, dict):
@@ -1231,6 +1242,10 @@ class SkillAgent:
             raise TaskCancelled("任务已取消")
 
         while True:
+            # Keep completed tool rounds available even if the next model call
+            # raises (task-local adapters persist this on failure/cancellation).
+            if isinstance(run_context, dict):
+                run_context["trace_messages"] = messages[trace_start:]
             if cancel_event and cancel_event.is_set():
                 abort_run()
             if step_limit and step >= step_limit:

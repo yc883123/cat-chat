@@ -41,6 +41,7 @@ from typing import Any
 from naiba.core.fsutil import atomic_write_bytes, atomic_write_json
 from naiba.core.contracts import (
     WRITER_PIPELINE_STOPPING, WriterChapterBaseline, WriterExportResult, WriterPreviousChapter,
+    WORK_GLOBAL_SYSTEM_PROMPT_KEY, WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY,
 )
 
 # 作品清单版本：首版为 1。
@@ -610,9 +611,36 @@ class WriterStore:
             raise WriterStoreError("作品清单缺少章节列表")
         return manifest
 
-    def _save_manifest(self, book_dir: Path, manifest: dict[str, Any]) -> None:
-        manifest["updated_at"] = _now_ms()
-        self._write_json(book_dir / "book.json", manifest)
+    def _save_manifest(self, book_dir: Path, manifest: dict[str, Any], *,
+                       save_system_prompt: bool = False) -> None:
+        # Some older content writers prepare their manifest before taking the
+        # lock. They must never overwrite an independently saved prompt.
+        with self._lock:
+            if not save_system_prompt and (book_dir / "book.json").exists():
+                current = self._read_json(book_dir / "book.json", what="作品清单")
+                for key, default in ((WORK_GLOBAL_SYSTEM_PROMPT_KEY, ""),
+                                     (WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY, 0)):
+                    manifest[key] = current.get(key, default)
+            manifest["updated_at"] = _now_ms()
+            self._write_json(book_dir / "book.json", manifest)
+
+    def save_system_prompt(self, book_id: str, *, text: Any,
+                           expected_revision: Any) -> dict[str, Any]:
+        if not isinstance(text, str):
+            raise WriterStoreError("作品系统提示词必须是文本")
+        if len(text) > 100_000:
+            raise WriterStoreError("作品系统提示词不能超过 100000 字符")
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise WriterStoreError("global_system_prompt_revision 必须是非负整数")
+        with self._lock:
+            manifest = self._load_manifest(book_id)
+            actual = int(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY) or 0)
+            if expected_revision != actual:
+                raise WriterConflictError("作品系统提示词已在另一窗口修改；草稿已保留，请重新打开后再保存")
+            manifest[WORK_GLOBAL_SYSTEM_PROMPT_KEY] = text
+            manifest[WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY] = actual + 1
+            self._save_manifest(self._book_dir(book_id), manifest, save_system_prompt=True)
+            return self._public_manifest(manifest)
 
     def _bump_manifest(self, book_dir: Path, manifest: dict[str, Any]) -> None:
         manifest["revision"] = int(manifest.get("revision") or 0) + 1
@@ -662,6 +690,8 @@ class WriterStore:
             "id": str(manifest.get("id") or ""),
             "title": str(manifest.get("title") or ""),
             "revision": int(manifest.get("revision") or 0),
+            WORK_GLOBAL_SYSTEM_PROMPT_KEY: str(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_KEY) or ""),
+            WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY: int(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY) or 0),
             "schema_version": int(manifest.get("schema_version") or 0),
             "chapter_count": len([n for n in manifest.get("chapter_ids") or []]),
             "current_setup_version_id": str(manifest.get("current_setup_version_id") or ""),
@@ -704,6 +734,8 @@ class WriterStore:
                 "revision": 1,
                 "id": book_id,
                 "title": book_title,
+                WORK_GLOBAL_SYSTEM_PROMPT_KEY: "",
+                WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY: 0,
                 "current_setup_version_id": "",
                 "current_outline_version_id": "",
                 "setup_versions": [],

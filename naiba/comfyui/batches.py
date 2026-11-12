@@ -34,6 +34,7 @@ from naiba.comfyui import COMFYUI_BATCH_PREFIX, MAX_SHOTS
 from naiba.comfyui import client
 from naiba.comfyui.jobs import ComfyUITaskError, _running_step
 from naiba.comfyui.store import _store_lock, now_ms
+from naiba.core.contracts import COMFYUI_BATCH_CONVERT_KEY
 
 # 批次历史上限（跑批视图 + 历史下拉够用；更早的批次靠任务记录本身留存）。
 MAX_BATCHES = 50
@@ -239,6 +240,15 @@ class ComfyUIBatchManager:
         body = body if isinstance(body, dict) else {}
         title = str(body.get("title") or "").strip()[:120] or "未命名批次"
         unload_after = bool(body.get("unload_after"))
+        raw_convert = body.get(COMFYUI_BATCH_CONVERT_KEY) or {}
+        if not isinstance(raw_convert, dict):
+            raise ComfyUIBatchError("转换设置必须是对象")
+        convert = {}
+        for key in ("template", "provider", "model", "system_prompt"):
+            value = raw_convert.get(key, "")
+            if not isinstance(value, str) or len(value) > (100000 if key == "system_prompt" else 1000):
+                raise ComfyUIBatchError("转换设置格式或长度无效")
+            convert[key] = value
         schemes = body.get("schemes")
         if not isinstance(schemes, list) or not schemes:
             raise ComfyUIBatchError("批次至少要有一个方案")
@@ -307,6 +317,7 @@ class ComfyUIBatchManager:
             "title": title,
             "created_at": now_ms(),
             "unload_after": unload_after,
+            COMFYUI_BATCH_CONVERT_KEY: convert,
             "items": items,
         }
         try:

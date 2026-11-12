@@ -1039,6 +1039,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             # 设定集文件夹导入：几十个 .md 的全文 JSON，比照造梦机放宽到 16 MB。
             self._json(*self.app.writer.api_import_settings(
                 path[len("/api/writer/books/"):-len("/import-settings")], body))
+        elif path.startswith("/api/studio/tasks/") and path.endswith("/followup"):
+            self._json(*self.app.studio.api_task_followup(path.split("/")[-2], body))
         elif path.startswith("/api/studio/tasks/") and path.endswith("/cancel"):
             self._json(*self.app.studio.api_task_cancel(path.split("/")[-2]))
         elif path.startswith("/api/studio/tasks/") and path.endswith("/retry"):
@@ -1757,6 +1759,16 @@ class RequestHandler(BaseHTTPRequestHandler):
             # PATCH /api/skills/{skill_id}/override：别名/备注覆盖层（Skills 管理页改版）。
             skill_id = path[len("/api/skills/"):-len("/override")]
             self._json(*self.app.api_skill_override(skill_id, body))
+            return
+        for module in ("writer", "novel"):
+            prefix = f"/api/{module}/books/"
+            if path.startswith(prefix) and path.endswith("/system-prompt"):
+                service = self.app.writer if module == "writer" else self.app.novel
+                self._json(*service.api_save_system_prompt(path[len(prefix):-len("/system-prompt")], body))
+                return
+        if path.startswith("/api/novel/books/") and path.endswith("/storyboard-prompt"):
+            self._json(*self.app.novel.api_save_storyboard_prompt_config(
+                path[len("/api/novel/books/"):-len("/storyboard-prompt")], body))
             return
         if path.startswith("/api/studio/custom/"):
             self._json(*self.app.studio.api_custom_update(path.rsplit("/", 1)[-1], body))

@@ -146,6 +146,39 @@ class SetupChainTests(PipelineTestCase):
         # 「请先在『设定 → 故事创意』里写一句话…」）——这里按真实使用先存一版。
         self.store.save_setup(self.book_id, content={"idea": "一句话创意"}, kind="manual")
 
+    def test_system_prompt_freezes_across_steps_retry_and_rebase(self):
+        self.store.save_system_prompt(self.book_id, text="最初作品规则", expected_revision=0)
+        self.start()
+        self.assertIn("最初作品规则", self.app.studio.jobs.submitted[-1]["system"])
+        baseline = self.current_pipeline()["base_revision"]
+        self.store.save_system_prompt(self.book_id, text="修改后的规则", expected_revision=1)
+        self.assertEqual(self.store.get_book(self.book_id)["book"]["revision"], baseline)
+        task_id = self.current_pipeline()["current_task_id"]
+        self.app.studio.jobs.finish(task_id, '{"channel":"male","cat":"玄幻"}')
+        self.tick()
+        self.assertEqual(self.current_pipeline()["status"], "running")
+        self.assertIn("最初作品规则", self.app.studio.jobs.submitted[-1]["system"])
+        self.manager.cancel_pipeline(self.book_id)
+        self.manager.retry_pipeline(self.book_id)
+        self.assertNotIn("修改后的规则", self.app.studio.jobs.submitted[-1]["system"])
+        self.manager.cancel_pipeline(self.book_id)
+        self.manager.retry_pipeline(self.book_id, rebase=True)
+        self.assertIn("修改后的规则", self.app.studio.jobs.submitted[-1]["system"])
+        self.assertEqual(self.current_pipeline()["request_snapshot"]["global_system_prompt_revision"], 2)
+
+    def test_legacy_pipeline_retry_does_not_load_current_prompt(self):
+        self.start()
+        self.manager.cancel_pipeline(self.book_id)
+        with self.store._lock:
+            current = self.store._load_manifest(self.book_id)
+            snapshot = current["active_pipeline"]["request_snapshot"]
+            snapshot.pop("global_system_prompt", None)
+            snapshot.pop("global_system_prompt_revision", None)
+            self.store._save_manifest(self.store._book_dir(self.book_id), current)
+        self.store.save_system_prompt(self.book_id, text="后来的作品规则", expected_revision=0)
+        self.manager.retry_pipeline(self.book_id)
+        self.assertNotIn("后来的作品规则", self.app.studio.jobs.submitted[-1]["system"])
+
     def test_empty_idea_refused_before_queue(self):
         """空创意的设定链在排队前拒绝，不白烧 token 换占位结果（真实反馈的回归锁）。"""
         fresh = self.store.create_book(title="没有创意")
@@ -411,6 +444,24 @@ class ChapterPipelineTests(PipelineTestCase):
         self.store.save_setup(self.book_id, content={"idea": "一句话创意"}, kind="manual")
         rows = [{"no": i, "title": f"第{i}章", "beat": f"梗概{i}", "hook": "钩"} for i in range(1, chapters + 1)]
         self.store.save_outline(self.book_id, chapters=rows, kind="generated", sync=True)
+
+    def test_segmented_and_state_steps_keep_same_frozen_prompt(self):
+        self._prepare_outline()
+        self.store.save_system_prompt(self.book_id, text="固定全书风格", expected_revision=0)
+        self.start(kind="chapter_segs", chapter_no=2)
+        self.assertIn("固定全书风格", self.app.studio.jobs.submitted[-1]["system"])
+        self.app.studio.jobs.finish(self.current_pipeline()["current_task_id"], '["第一段要点","第二段要点"]')
+        self.store.save_system_prompt(self.book_id, text="新风格", expected_revision=1)
+        self.tick()
+        data = self.app.studio.jobs.submitted[-1]
+        self.assertIn("chunked", data)
+        self.assertIn("固定全书风格", data["system"])
+        self.assertNotIn("新风格", data["system"])
+        self.app.studio.jobs.finish(self.current_pipeline()["current_task_id"], "完整新正文")
+        self.tick()
+        data = self.app.studio.jobs.submitted[-1]
+        self.assertEqual(data["writer"]["step"], "state")
+        self.assertIn("固定全书风格", data["system"])
 
     def test_whole_chapter_writes_generated_version(self):
         self._prepare_outline()

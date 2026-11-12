@@ -22,12 +22,18 @@ from naiba.core.contracts import (
     STUDIO_TERMINAL_TASK_EVENT_TYPES,
     STUDIO_TASK_EVENT_TYPES,
     STUDIO_TASK_STATUSES,
+    STUDIO_THREAD_ID_KEY, STUDIO_PARENT_TASK_ID_KEY, STUDIO_TRACE_MESSAGES_KEY,
+    STUDIO_SKILL_SNAPSHOT_KEY,
 )
 from naiba.core.fsutil import atomic_write_json
 
 
 class StudioStoreError(ValueError):
     """任务数据非法。"""
+
+
+class StudioConflictError(StudioStoreError):
+    """A running thread or idempotency receipt conflicts with this submission."""
 
 
 def now_ms() -> int:
@@ -57,18 +63,46 @@ class StudioStore:
 
     # ---- 路径 ----
 
+    @staticmethod
+    def _validate_id(task_id: str) -> str:
+        if not isinstance(task_id, str) or not task_id or not all(c.isascii() and (c.isalnum() or c in "-_") for c in task_id):
+            raise StudioStoreError("任务 ID 非法")
+        return task_id
+
     def _record_path(self, task_id: str) -> Path:
-        return self._dir / f"{task_id}.json"
+        return self._dir / f"{self._validate_id(task_id)}.json"
 
     def _events_path(self, task_id: str) -> Path:
-        return self._dir / f"{task_id}.events.jsonl"
+        return self._dir / f"{self._validate_id(task_id)}.events.jsonl"
 
     def new_task_id(self) -> str:
         return f"st-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:12]}"
 
     def _write_json(self, path: Path, payload: dict) -> None:
-        # fsutil：替换被占用（本服务轮询读/杀软握着句柄）时短暂重试，见模块注释。
+        # Store the full Skill system once; callers continue seeing input.system.
+        from naiba.studio.content import ContentSnapshots
+        data = payload.get("input") or {}
+        snapshot = data.get(STUDIO_SKILL_SNAPSHOT_KEY)
+        if isinstance(snapshot, dict) and "system" in data:
+            snapshots = ContentSnapshots(self._dir.parent.parent)
+            digest = snapshots.save_system(data["system"])
+            if digest != snapshot.get("system_hash"):
+                raise StudioStoreError("Skill 系统提示词快照不匹配")
+            payload = {**payload, "input": {k: v for k, v in data.items() if k != "system"}}
         atomic_write_json(path, payload)
+
+    def _hydrate(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from naiba.studio.content import ContentSnapshots
+        data = payload.get("input")
+        snapshot = data.get(STUDIO_SKILL_SNAPSHOT_KEY) if isinstance(data, dict) else None
+        if isinstance(snapshot, dict) and "system" not in data:
+            # Missing/corrupt snapshots stay listable and deletable; execution
+            # validates the reference and fails explicitly rather than falling back.
+            try:
+                data["system"] = ContentSnapshots(self._dir.parent.parent).read_system(snapshot.get("system_hash"))
+            except ValueError:
+                pass
+        return payload
 
     # ---- 任务记录 ----
 
@@ -84,23 +118,41 @@ class StudioStore:
 
     def create_task(self, input_data: dict[str, Any], *, request_key: str = "",
                     owner_id: str = "", source_task_id: str = "",
-                    submission_policy: dict[str, Any] | None = None) -> dict[str, Any]:
+                    submission_policy: dict[str, Any] | None = None,
+                    thread_id: str = "", parent_task_id: str = "") -> dict[str, Any]:
         # The receipt and native execution fact have one atomic persistence point.
         frozen = json.loads(json.dumps(input_data, ensure_ascii=False, allow_nan=False))
         policy = json.loads(json.dumps(submission_policy or {}, allow_nan=False))
+        fingerprint = {"input": frozen, "source_task_id": source_task_id, "submission_policy": policy}
+        if thread_id or parent_task_id:
+            fingerprint.update({STUDIO_THREAD_ID_KEY: thread_id, STUDIO_PARENT_TASK_ID_KEY: parent_task_id})
         digest = hashlib.sha256(json.dumps(
-            {"input": frozen, "source_task_id": source_task_id, "submission_policy": policy},
-            sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+            fingerprint, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False,
         ).encode("utf-8")).hexdigest()
         with self._lock:
             existing = self.lookup_request(request_key, owner_id=owner_id)
             if existing:
                 if existing.get("payload_hash") != digest:
-                    raise StudioStoreError("request_key 已绑定不同的生成输入")
+                    raise StudioConflictError("request_key 已绑定不同的生成输入")
                 return existing
+            if thread_id:
+                self._validate_id(thread_id)
+                for path in self._dir.glob("st-*.json"):
+                    other = self.get_task(path.stem)
+                    if other and str(other.get(STUDIO_THREAD_ID_KEY) or other["id"]) == thread_id and other.get("status") in {"queued", "running"}:
+                        raise StudioConflictError("此对话链已有任务运行中，请等待结束后再追问或重试")
+            if parent_task_id:
+                parent = self.get_task(parent_task_id)
+                if parent is None:
+                    # A retry already carries its complete frozen history; the
+                    # original parent may have been deleted in the meantime.
+                    if not source_task_id:
+                        raise LookupError("源任务不存在")
+                elif not source_task_id and parent.get("status") != "done":
+                    raise StudioConflictError("源任务尚未完成")
             return self._create_task(frozen, request_key=request_key, payload_hash=digest,
                                      owner_id=owner_id, source_task_id=source_task_id,
-                                     submission_policy=policy)
+                                     submission_policy=policy, thread_id=thread_id, parent_task_id=parent_task_id)
 
     def _create_task(self, input_data: dict[str, Any], **receipt: Any) -> dict[str, Any]:
         """登记 queued 任务（输入实在落盘，避免服务器重启后无法重试）。"""
@@ -108,6 +160,9 @@ class StudioStore:
         record = {
             **receipt,
             "id": task_id,
+            STUDIO_THREAD_ID_KEY: receipt.get(STUDIO_THREAD_ID_KEY) or task_id,
+            STUDIO_PARENT_TASK_ID_KEY: receipt.get(STUDIO_PARENT_TASK_ID_KEY) or "",
+            STUDIO_TRACE_MESSAGES_KEY: [],
             "status": "queued",
             "detail": "",
             "input": input_data,
@@ -135,11 +190,20 @@ class StudioStore:
         try:
             with self._lock:
                 payload = json.loads(self._record_path(task_id).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeError, ValueError):
             return None
         if not isinstance(payload, dict):
             return None
-        return self._sanitize(payload)
+        return self._hydrate(self._sanitize(payload))
+
+    def claim_task(self, task_id: str) -> bool:
+        """Atomically move queued to running; a queued cancellation wins the race."""
+        with self._lock:
+            current = self.get_task(task_id)
+            if current is None or current.get("status") != "queued":
+                return False
+            self.update_task(task_id, status="running", started_at=now_ms(), detail="")
+            return True
 
     def update_task(self, task_id: str, **fields: Any) -> dict[str, Any] | None:
         with self._lock:
@@ -147,7 +211,8 @@ class StudioStore:
             if current is None:
                 return None
             for key in ("status", "detail", "result", "result_partial", "reasoning", "error",
-                        "usage", "performance", "finish_reason", "handoff", "started_at", "finished_at"):
+                        "usage", "performance", "finish_reason", "handoff", "started_at", "finished_at",
+                        STUDIO_TRACE_MESSAGES_KEY):
                 if key in fields:
                     current[key] = fields[key]
             current["updated_at"] = now_ms()
@@ -285,7 +350,7 @@ class StudioStore:
                         continue
                     if not isinstance(payload, dict) or not str(payload.get("id") or "").startswith("st-"):
                         continue
-                    payload = self._sanitize(payload)
+                    payload = self._hydrate(self._sanitize(payload))
                     if active_only and payload["status"] not in {"queued", "running"}:
                         continue
                     if wanted or excluded or excluded_many:
@@ -341,10 +406,11 @@ class StudioStore:
                         continue
                     if isinstance(payload, dict):
                         records.append(payload)
-        keys = referenced_upload_paths(records)
-        with self._lock:
+            keys = referenced_upload_paths(records)
+            # Publish under the same lock as the scan. A new task must either
+            # be included here or invalidate this cache after publication.
             self._ref_cache = (now, set(keys))
-        return set(keys)
+            return set(keys)
 
     def invalidate_reference_cache(self) -> None:
         """任务新增/改写后立刻失效（创建任务时调用，避免刚提交的图被旧缓存误判）。"""

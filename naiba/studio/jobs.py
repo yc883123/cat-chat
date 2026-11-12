@@ -9,6 +9,12 @@ from __future__ import annotations
 
 from typing import Any
 
+import copy
+
+from naiba.core.contracts import (STUDIO_THREAD_ID_KEY, STUDIO_PARENT_TASK_ID_KEY,
+                                  STUDIO_HISTORY_MESSAGES_KEY, STUDIO_SKILL_SNAPSHOT_KEY)
+from naiba.studio.conversation import completed_history
+from naiba.studio.content import ContentSnapshots
 from naiba.core.exceptions import TaskCancelled
 from naiba.studio.runner import StudioRunner
 from naiba.studio.store import StudioStore, now_ms
@@ -29,7 +35,7 @@ class StudioJobManager:
     def recover_interrupted(self) -> int:
         """启动收敛：遗留 running/queued 无人看管 → interrupted（保留 partial，可重试）。"""
         recovered = 0
-        for task in self.store.list_tasks(active_only=True):
+        for task in self.store.list_tasks(active_only=True, limit=100000):
             task_id = str(task.get("id") or "")
             if not task_id:
                 continue
@@ -83,7 +89,8 @@ class StudioJobManager:
 
     def submit(self, input_data: dict[str, Any], *, request_key: str = "",
                owner_id: str = "", source_task_id: str = "",
-               submission_policy: dict[str, Any] | None = None) -> dict[str, Any]:
+               submission_policy: dict[str, Any] | None = None,
+               thread_id: str = "", parent_task_id: str = "") -> dict[str, Any]:
         if not isinstance(input_data, dict):
             raise StudioTaskError("生成输入非法")
         content = str(input_data.get("content") or "")
@@ -94,9 +101,33 @@ class StudioJobManager:
         task = self.store.create_task(
             input_data, request_key=request_key, owner_id=owner_id,
             source_task_id=source_task_id, submission_policy=submission_policy,
+            thread_id=thread_id, parent_task_id=parent_task_id,
         )
         self.runner.submit(task["id"])
         return task
+
+    def followup(self, task_id: str, content: str, images: list[dict[str, Any]], *,
+                 request_key: str) -> dict[str, Any]:
+        source = self.store.get_task(task_id)
+        if source is None:
+            raise LookupError("任务不存在")
+        input_data = copy.deepcopy(source.get("input") or {})
+        if input_data.get("module") in {"novel", "writer"} or source.get("owner_id"):
+            raise StudioTaskError("此任务不支持提词库追问")
+        if input_data.get("chunked"):
+            raise StudioTaskError("分块任务不能在提词库追问")
+        history = completed_history(source)
+        if input_data.get(STUDIO_SKILL_SNAPSHOT_KEY):
+            ContentSnapshots(self.app.paths.data_dir).normalize_and_freeze(input_data, None)
+        input_data[STUDIO_HISTORY_MESSAGES_KEY] = history
+        input_data["content"] = content
+        input_data["user_request"] = content
+        input_data["images"] = copy.deepcopy(images)
+        return self.submit(
+            input_data, request_key=request_key,
+            thread_id=str(source.get(STUDIO_THREAD_ID_KEY) or task_id), parent_task_id=task_id,
+            submission_policy=source.get("submission_policy") or {},
+        )
 
     def cancel(self, task_id: str) -> bool:
         return self.runner.cancel(task_id, reason="用户取消")
@@ -143,9 +174,13 @@ class StudioJobManager:
         if submission_policy is not None and submission_policy != frozen_policy:
             raise StudioTaskError("重试不能改变原任务的提交策略")
         submission_policy = frozen_policy
+        if input_data.get(STUDIO_SKILL_SNAPSHOT_KEY):
+            ContentSnapshots(self.app.paths.data_dir).normalize_and_freeze(input_data, None)
         task = self.store.create_task(
             input_data, request_key=request_key, owner_id=owner_id,
             source_task_id=source_task_id, submission_policy=submission_policy,
+            thread_id=str(source.get(STUDIO_THREAD_ID_KEY) or task_id),
+            parent_task_id=str(source.get(STUDIO_PARENT_TASK_ID_KEY) or ""),
         )
         self.runner.submit(task["id"])
         return task

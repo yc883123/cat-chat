@@ -69,6 +69,14 @@ class NovelContinuationTests(unittest.TestCase):
         self.assertEqual(fingerprints(self.novel.root()), before)
         self.assertEqual(self.store.list_books()["books"], [])
 
+    def test_continuation_starts_with_empty_work_prompt(self):
+        self.novel.save_system_prompt(self.source["id"], text="仅用于原书改编的规则", expected_revision=0)
+        _, result = self.commit()
+        book = result["book"]
+        self.assertEqual(book["global_system_prompt"], "")
+        self.assertEqual(book["global_system_prompt_revision"], 0)
+        self.assertEqual(self.novel.get_book(self.source["id"])["book"]["global_system_prompt"], "仅用于原书改编的规则")
+
     def test_original_copy_is_read_only_and_new_chapter_after_end(self):
         before = fingerprints(self.novel.root())
         _, payload = self.commit()

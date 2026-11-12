@@ -19,7 +19,11 @@ import time
 import traceback
 from typing import Any
 
+from naiba.core.contracts import (STUDIO_PROMPT_SOURCE_KEY, STUDIO_TRACE_MESSAGES_KEY,
+                                  STUDIO_HISTORY_MESSAGES_KEY, STUDIO_SYSTEM_PROMPT_KEY)
 from naiba.core.exceptions import TaskCancelled
+from naiba.studio.conversation import model_history
+from naiba.studio.skill_adapter import ContentSkillAdapter, check_context
 from naiba.llm.profiles import resolve_profile_with_override
 from naiba.studio.store import now_ms
 
@@ -179,24 +183,24 @@ class StudioRunner:
     def cancel(self, task_id: str, *, reason: str = "") -> bool:
         """取消：运行中的经 cancel_event 让底层请求中断；排队中的直接终态化。"""
         with self._registry_lock:
+            task = self.store.get_task(task_id)
+            if not task or task.get("status") not in {"queued", "running"}:
+                return False
             cancel_event = self._cancel_events.get(task_id)
-        if cancel_event is not None:
-            cancel_event.set()
-            return True
-        task = self.store.get_task(task_id)
-        if not task:
+            if cancel_event is not None:
+                cancel_event.set()
+                return True
+            if task["status"] == "queued":
+                with self._condition:
+                    if task_id in self._queue:
+                        self._queue.remove(task_id)
+                        self._delivering.discard(task_id)
+                self._finish_terminal(
+                    task_id, "cancelled", {"type": "cancelled"},
+                    result_partial="", detail=reason or "任务已取消",
+                )
+                return True
             return False
-        if task["status"] == "queued":
-            with self._condition:
-                if task_id in self._queue:
-                    self._queue.remove(task_id)
-                    self._delivering.discard(task_id)
-            self._finish_terminal(
-                task_id, "cancelled", {"type": "cancelled"},
-                result_partial="", detail=reason or "任务已取消",
-            )
-            return True
-        return False
 
     def shutdown(self, timeout: float = 5.0) -> None:
         with self._condition:
@@ -246,30 +250,37 @@ class StudioRunner:
             return
         cancel_event = threading.Event()
         with self._registry_lock:
+            if not self.store.claim_task(task_id):
+                return
             self._cancel_events[task_id] = cancel_event
             if self._shutdown:
                 cancel_event.set()
         buffer = _DeltaBuffer(self._make_emitter(task_id))
         # 分块任务的用量跨轮累加；单轮任务与旧行为一致（用 last_usage）。
         usage_sink: dict[str, Any] = {}
+        trace_sink: list[dict[str, Any]] = []
         try:
             if cancel_event.is_set():
                 raise TaskCancelled("任务已取消")
-            self.store.update_task(task_id, status="running", started_at=now_ms(), detail="")
             self.store.append_event(task_id, {"type": "status", "message": "生成任务开始执行"})
             input_data = dict(task.get("input") or {})
             identity = (task.get("submission_policy") or {}).get("model_identity")
             if isinstance(identity, dict):
                 input_data["model_snapshot"] = identity
             with _TaskProgress(buffer, cancel_event) as progress:
-                content = self._complete(input_data, progress.forward, cancel_event, usage_sink)
+                content = self._complete(input_data, progress.forward, cancel_event, usage_sink, trace_sink)
             if cancel_event.is_set():
                 raise TaskCancelled("任务已取消")
             buffer.flush()
-            result_partial = ""
-            self._finish_terminal(task_id, "done", {"type": "done"}, result=content,
-                                  usage_override=dict(usage_sink) if usage_sink else None)
-            _ = result_partial
+            # The last cancellation check and done persistence share the
+            # cancellation registry lock. A confirmed cancel cannot be followed
+            # by done, and a finished task no longer accepts cancellation.
+            with self._registry_lock:
+                if cancel_event.is_set():
+                    raise TaskCancelled("任务已取消")
+                self._finish_terminal(task_id, "done", {"type": "done"}, result=content,
+                                      usage_override=dict(usage_sink) if usage_sink else None,
+                                      trace_messages=trace_sink)
         except Exception as exc:
             buffer.flush()
             traceback.print_exc()
@@ -279,13 +290,15 @@ class StudioRunner:
                 self._finish_terminal(
                     task_id, "cancelled", {"type": "cancelled"},
                     result_partial=self.store.partial_from_events(task_id),
-                    detail="任务已取消",
+                    detail="任务已取消", trace_messages=trace_sink,
+                    usage_override=dict(usage_sink),
                 )
             else:
                 self._finish_terminal(
                     task_id, "failed", {"type": "error", "message": str(exc)},
                     result_partial=self.store.partial_from_events(task_id),
-                    error=str(exc),
+                    error=str(exc), trace_messages=trace_sink,
+                    usage_override=dict(usage_sink),
                 )
         finally:
             # 让本任务还在途的回调（status_provider / 迭代器）立即抛 TaskCancelled，
@@ -334,44 +347,25 @@ class StudioRunner:
     def _complete(
         self, input_data: dict[str, Any], status_provider: Any, cancel_event: threading.Event,
         usage_sink: dict[str, Any] | None = None,
+        trace_sink: list[dict[str, Any]] | None = None,
     ) -> str:
+        if input_data.get(STUDIO_PROMPT_SOURCE_KEY) == "skill":
+            profile = self._resolve_profile(input_data)
+            history = model_history(input_data, profile, self.app.paths.data_dir)
+            options = {**(self.app.config.runtime_guard_options() or {}), "stream": True,
+                       "cancel_event": cancel_event, "lock_label": "工作台生成"}
+            return ContentSkillAdapter(self.app).run(
+                input_data, profile, history, options, status_provider,
+                usage_sink if usage_sink is not None else {},
+                trace_sink if trace_sink is not None else [],
+            )
         chunked = input_data.get("chunked")
         if isinstance(chunked, dict) and isinstance(chunked.get("blocks"), list) and chunked.get("blocks"):
             return self._complete_chunked(input_data, chunked, status_provider, cancel_event, usage_sink)
         profile = self._resolve_profile(input_data)
         system_message = _system_message(input_data)
-        images = [ref for ref in (input_data.get("images") or []) if isinstance(ref, dict)]
-        if images:
-            # 带图生成：结构化多模态消息（图号与图片依次配对），不把路径拼成提示文本。
-            # 能力门槛只认**显式声明**：冻结版实测 tedsres / grok 被推断成不支持，
-            # 实际都能正确识别图1/图2；反过来也有推断支持、端点只收 text 的情况。
-            # 推断值不能当硬闸门，显式 False 才拦，其余交给端点并把真实错误带回来。
-            explicit = profile.get("supports_images_explicit")
-            if explicit is None and "supports_images_explicit" not in profile:
-                inferred = profile.get("supports_images")
-                if isinstance(inferred, bool):
-                    explicit = inferred
-            if explicit is False:
-                raise RuntimeError(
-                    "当前模型不支持图片输入：请换一个支持视觉的模型，"
-                    "或先用「识别图片」把描述写进输入后再生成"
-                )
-            from naiba.vision.images import encode_image_file
-
-            parts: list[dict[str, Any]] = []
-            for index, ref in enumerate(images, 1):
-                part = encode_image_file(str(ref.get("path") or ""))
-                if part is None:
-                    raise RuntimeError(
-                        f"图{index}无法读取（文件可能已被清理）：请重新上传后再生成"
-                    )
-                label = str(ref.get("name") or "").strip() or f"图{index}"
-                parts.append({"type": "text", "text": f"\n\n图{index}（{label}）："})
-                parts.append(part)
-            parts.append({"type": "text", "text": "\n\n" + str(input_data.get("content") or "")})
-            messages = [*system_message, {"role": "user", "content": parts}]
-        else:
-            messages = [*system_message, {"role": "user", "content": str(input_data.get("content") or "")}]
+        data_dir = getattr(getattr(self.app, "paths", None), "data_dir", None)
+        messages = [*system_message, *model_history(input_data, profile, data_dir)]
         options = {
             "stream": True,
             "cancel_event": cancel_event,
@@ -379,7 +373,15 @@ class StudioRunner:
             **(self.app.config.runtime_guard_options() or {}),
             **({"raw_content_sink": input_data["_raw_content_sink"]} if callable(input_data.get("_raw_content_sink")) else {}),
         }
+        if input_data.get(STUDIO_HISTORY_MESSAGES_KEY) or input_data.get(STUDIO_SYSTEM_PROMPT_KEY):
+            check_context(profile, options, str(input_data.get("system") or ""), messages[len(system_message):])
         content = self.app.models.complete(profile, messages, options, status_provider)
+        if trace_sink is not None:
+            message = {"role": "assistant", "content": str(content or "")}
+            reasoning = getattr(self.app.models, "last_reasoning", "")
+            if reasoning:
+                message["reasoning_content"] = reasoning
+            trace_sink[:] = [message]
         if usage_sink is not None:
             _merge_usage(usage_sink, getattr(self.app.models, "last_usage", {}))
         return content
@@ -438,8 +440,9 @@ class StudioRunner:
         self, task_id: str, status: str, terminal_payload: dict[str, Any], *,
         result: str = "", result_partial: str = "", detail: str = "", error: str = "",
         usage_override: dict[str, Any] | None = None,
+        trace_messages: list[dict[str, Any]] | None = None,
     ) -> None:
-        usage: dict[str, Any] = {}
+        usage: dict[str, Any] = dict(usage_override or {})
         reasoning: list[str] = []
         performance: dict[str, Any] = {}
         finish_reason = ""
@@ -471,4 +474,5 @@ class StudioRunner:
             performance=performance,
             finish_reason=finish_reason,
             finished_at=now_ms(),
+            **{STUDIO_TRACE_MESSAGES_KEY: trace_messages or []},
         )

@@ -35,12 +35,14 @@ const item = { script: '尾帧落在图1的构图', duration: '6', files: {
   '0': { path: 'uploads/second.png', name: '第二张', thumb_path: 'uploads/second_thumb.webp' },
   '1': { path: 'uploads/first.png', name: '第一张' },
 } };
-const convert = { template: '', provider: 'online:test', model: 'local-vision' };
+const convert = { template: '', provider: 'online:test', model: 'local-vision', system_prompt: '只使用中文，保持人物一致' };
 let body = build(detail, mapping, item, convert);
 assert.equal(body.item_id, 'h3-007-h3-i2va');
 assert.equal(body.custom_id, undefined);
 assert.equal(body.model_key, convert.provider);
 assert.equal(body.model_name, convert.model);
+assert.equal(body.system_prompt, convert.system_prompt);
+assert.ok(!body.user_request.includes(convert.system_prompt));
 assert.deepEqual(body.images.map(image => image.path), ['uploads/second.png', 'uploads/first.png']);
 assert.equal(body.images[0].thumb_path, 'uploads/second_thumb.webp');
 assert.match(body.user_request, /目标时长：6 秒/);

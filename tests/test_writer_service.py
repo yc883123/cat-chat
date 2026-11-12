@@ -93,6 +93,44 @@ class ServiceTestCase(unittest.TestCase):
 
     # ---- 作品 ----
 
+    def test_prompt_save_is_independent_and_preview_matches_submission(self):
+        before = self.service.store.get_book(self.book_id)["book"]["revision"]
+        saved, status = self.service.api_save_system_prompt(self.book_id, {
+            "global_system_prompt": "固定作品规则", "global_system_prompt_revision": 0})
+        self.assertEqual(status, 200)
+        self.assertEqual(saved["book"]["revision"], before)
+        self.assertEqual(self.service.api_save_system_prompt(self.book_id, {
+            "global_system_prompt": "旧窗口", "global_system_prompt_revision": 0})[1], 409)
+        self.service.store.save_outline(self.book_id, parts=[{"no": 1, "title": "第一部", "text": "全篇大纲"}])
+        for kind in ("genre", "outline", "outline_text", "split", "chapter", "chapter_segs"):
+            with self.subTest(kind=kind):
+                body = {"book_id": self.book_id, "kind": kind, "chapter_no": 1,
+                        "model_key": "online:probe", "model_name": "probe", "part_no": 1,
+                        "want_count": 10}
+                preview, status = self.service.api_preview(body)
+                self.assertEqual(status, 200, preview)
+                self.assertIn("固定作品规则", preview["system"])
+                actual = {**body, "kind": "setup_step", "step": kind} if kind == "genre" else body
+                result, status = self.service.api_start_pipeline(self.book_id, actual)
+                self.assertEqual(status, 201, result)
+                data = self.app.studio.jobs.submitted[-1]
+                self.assertEqual(preview["system"], data["system"])
+                self.assertEqual(preview["content"], data["content"])
+                self.assertEqual(preview["budget"]["chars"], len(data["content"]) + len(data["system"]))
+                self.service.api_cancel_pipeline(self.book_id)
+
+    def test_prompt_budget_blocks_real_submission(self):
+        self.service.api_save_system_prompt(self.book_id, {
+            "global_system_prompt": "规则" * 10000, "global_system_prompt_revision": 0})
+        self.app.config.model_profiles = lambda: [{"model_key": "tiny", "context_window": 4096}]
+        preview, status = self.service.api_preview({"book_id": self.book_id, "kind": "genre", "model_key": "tiny"})
+        self.assertEqual(status, 200)
+        self.assertFalse(preview["budget"]["fits"])
+        result, status = self.service.api_start_pipeline(self.book_id, {
+            "kind": "setup_step", "step": "genre", "model_key": "tiny", "model_name": "tiny"})
+        self.assertEqual(status, 400, result)
+        self.assertEqual(self.app.studio.jobs.submitted, [])
+
     def test_book_crud_status_codes(self):
         payload, status = self.service.api_create_book({"title": "新书"})
         self.assertEqual(status, 201)

@@ -442,11 +442,11 @@
  "products": {
   "catalog_index.json": {
    "items": 581,
-   "bytes": 802360
+   "bytes": 802664
   },
   "bodies_prompt.json": {
    "items": 87,
-   "bytes": 789642
+   "bytes": 788951
   },
   "bodies_script.json": {
    "items": 74,
@@ -844,5 +844,54 @@
   ],
   "reference_commit": "199b7d0e1fd95e7b3eafa8c15eca692534142427",
   "note": "保留已有 ID；基础模式和参考编辑独立；图片反推只提取实际可见事实。"
+ },
+ "catalog_cleanup": {
+  "note": "只整理已核实的两条正文及依赖范围摘要，保留示例分类与其他正文；不改用户自定义库。",
+  "items": [
+   {
+    "id": "vs-037-daily0621",
+    "source": "26-06-21整理提示词+预览图.docx",
+    "source_sha1": "1fb8f90c41583449410efe7c38f97daba0bca16a",
+    "cleaned": [
+     "external_links",
+     "edge_words",
+     "dedupe_inner",
+     "promotion_download_residue"
+    ],
+    "chars": 11698
+   },
+   {
+    "id": "h3-004-cinematic-i2v",
+    "source": "28-电影级叙事图生视频提示词.txt",
+    "source_sha1": "408e8abfaa1f0288231a75f3a46c70bf36822802",
+    "cleaned": [
+     "unavailable_database_reference"
+    ],
+    "chars": 1791
+   },
+   {
+    "id": "h3-005-ltx-relay",
+    "source": "31-1-LTX2.3逻辑控制PromptRelay-提示词工程.txt",
+    "source_sha1": "6e583d8eb115df7bcd3e053e72b30101a0dfe6fe",
+    "cleaned": [
+     "dependency_scope_summary"
+    ],
+    "chars": 5690
+   },
+   {
+    "id": "vs-101-k2-engine",
+    "source": "K2人像提示词引擎.md",
+    "source_sha1": "75915d86e55385e367b9b7be44c806c398b4ad18",
+    "cleaned": [
+     "dependency_scope_summary"
+    ],
+    "chars": 19671
+   }
+  ]
+ },
+ "catalog_integrity": {
+  "index_body_ids_equal": true,
+  "shards": 4,
+  "count": 581
  }
 }

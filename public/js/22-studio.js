@@ -1,8 +1,8 @@
 // ============================================================
 // 22-studio.js —— 工作台（Studio，_studio_plan_v2.md）
 // 独立生成域：目录检索（预设 559 条 + 自定义）→ 填变量/自由输入 → 生成（Studio 自有
-// 异步任务，/api/studio/*）→ 结果留在工作台 → 「继续追问」经必选 Agent 框交接普通对话。
-// 不直接编排会话创建/聊天 Run/事件流，仅调 handoff API（单一跨域口）。
+// 异步任务，/api/studio/*）→ 结果留在工作台 → 原任务配置与历史连续追问。
+// 「发送到对话」仍经必选 Agent 框调用 handoff API。
 // 应用级视图：入口在侧栏「对话 / 工作台」模式切换，不再是顶栏会话按钮。
 // ============================================================
 
@@ -10,7 +10,8 @@ import { $, api, applyModelSkinFor, copyText, localFileUrl, setAppView, state, t
 import { populateComposerModels } from "./07-models-agents.js";
 import { beginConversationNavigation, isConversationOpenCurrent, loadConversations, openConversation, renderSidebar } from "./08-conversations.js";
 import { applyFilePanelOpenClass, closeSidebar, filePanelState, openSidebar, setLeftSidebarCollapsed, sidebarDesktop } from "./14-file-panel.js";
-import { statusLabel as workbenchStatusLabel, syncWorkbenchHeader, watchWorkbenchSize } from "./22a-workbench-ui.js";
+import { statusLabel as workbenchStatusLabel, syncWorkbenchHeader, watchWorkbenchSize, bindWorkbenchDetails } from "./22a-workbench-ui.js";
+import { createContentSkillPicker, renderContentThread, getContentFollowup, prepareContentFollowup, clearContentFollowup } from "./22c-content-skills.js";
 
 // ---- 模块清单（目录条目 module -> 显示名；顺序即分类顺序） ----
 const MODULE_TABS = [
@@ -61,6 +62,26 @@ const studio = {
   // 功能页（侧栏分页导航）：library = 模块库，labeler = 打标器。
   // 与 pane（手机三档）是两套互不相干的维度，不能混用。
   page: "library",
+  promptSource: "template",
+  generationInitialized: false,
+  sourceDrafts: {},
+  skillIds: [],
+  skillPicker: null,
+  submitBusy: false,
+  retryBusy: false,
+  followupBusy: false,
+  followupImages: [],
+  imageTarget: "generation",
+  imageOwner: null,
+  imageGeneration: 0,
+  sourceToken: 0,
+  viewToken: 0,
+  refreshToken: 0,
+  tasksToken: 0,
+  modelToken: 0,
+  modelLoading: false,
+  modelOptionsKey: "",
+  detailLoading: false,
   summary: null,
   module: "",
   query: "",
@@ -127,6 +148,9 @@ function studioPrefs() {
     // 上次停在对话还是工作台：退出再打开要回到原处（在工作台造梦机里关掉程序，
     // 重开却跳回对话会显得「没记住」）。
     view: view === "studio" ? "studio" : "chat",
+    system_prompt: String(prefs?.system_prompt || ""),
+    prompt_source: prefs?.prompt_source === "skill" ? "skill" : "template",
+    skill_ids: Array.isArray(prefs?.skill_ids) ? prefs.skill_ids : [],
   };
 }
 
@@ -136,14 +160,148 @@ function applyStudioPrefs(saved) {
   state.bootstrap.settings.studio = saved;
 }
 
-async function saveStudioPrefs(patch) {
-  try {
-    const result = await api("/api/settings", { method: "POST", body: { studio: patch } });
-    const saved = result?.settings?.studio;
-    applyStudioPrefs(saved || { ...studioPrefs(), ...patch });
-  } catch (error) {
-    toast(`工作台偏好保存失败：${error.message}`);
+let studioPrefsQueue = Promise.resolve();
+function saveStudioPrefs(patch) {
+  const save = async () => {
+    try {
+      const result = await api("/api/settings", { method: "POST", body: { studio: patch } });
+      const saved = result?.settings?.studio;
+      applyStudioPrefs(saved || { ...studioPrefs(), ...patch });
+      return true;
+    } catch (error) {
+      toast(`工作台偏好保存失败：${error.message}`);
+      return false;
+    }
+  };
+  studioPrefsQueue = studioPrefsQueue.then(save, save);
+  return studioPrefsQueue;
+}
+
+function initGenerationSettings() {
+  if (studio.generationInitialized) return;
+  studio.generationInitialized = true;
+  const prefs = studioPrefs();
+  studio.promptSource = prefs.prompt_source;
+  studio.skillIds = [...prefs.skill_ids];
+  $("#studioSystemPrompt").value = prefs.system_prompt;
+  studio.skillPicker = createContentSkillPicker($("#studioSkillPicker"), {
+    selected: studio.skillIds,
+    onChange(ids) { studio.skillIds = ids; void saveStudioPrefs({ skill_ids: ids }); },
+  });
+  applyPromptSourceUi();
+}
+
+function applyPromptSourceUi() {
+  const skill = studio.promptSource === "skill";
+  $("#studioPageLibrary").dataset.promptSource = studio.promptSource;
+  document.querySelectorAll("[data-studio-source]").forEach((button) => {
+    const active = button.dataset.studioSource === studio.promptSource;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  for (const selector of ["#studioCats", "#studioList", "#studioDetail .studio-detail-head", "#studioVarsForm", "#studioBodyPreviewWrap"]) {
+    const element = $(selector);
+    if (element) element.hidden = skill;
   }
+  $("#studioSkillConfig").hidden = !skill;
+  $("#studioSkillHistory").hidden = !skill;
+  $(".studio-topbar-tools").hidden = skill;
+  $("#studioPanes [data-studio-pane='list']").textContent = skill ? "记录" : "模板";
+  if (skill) {
+    for (const selector of ["#studioSendStoryboard", "#studioLocateEntry", "#studioCustomSave", "#studioCustomDelete", "#studioCustomExport"]) $(selector).hidden = true;
+    $("#studioUserRequest").placeholder = "描述本次要生成的内容，所选 Skill 的规则会共同生效";
+  }
+  renderSkillHistory();
+}
+
+function rememberSourceDraft() {
+  studio.sourceDrafts[studio.promptSource] = {
+    request: $("#studioUserRequest")?.value || "", images: studio.images.map((image) => ({ ...image })),
+    providerKey: studio.providerKey, modelName: studio.modelName,
+    templateBody: studio.promptSource === "template" && studio.kind === "custom" ? studioBodyText() : studio.body,
+    bodyEdited: Boolean(studio.bodyEdited),
+    visionSummary: studio.visionSummary,
+    activeTaskId: studio.activeTaskId, lastResult: studio.lastResult,
+    streamText: studio.streamText, reasoningText: studio.reasoningText,
+    eventCursor: studio.eventCursor, resultMode: studio.resultMode,
+    followup: $("#studioFollowupText")?.value || "", followupImages: studio.followupImages,
+  };
+}
+
+function setPromptSource(source, { persist = true, reconcile = true, restoreSelection = true } = {}) {
+  const next = source === "skill" ? "skill" : "template";
+  if (next === studio.promptSource) return;
+  rememberSourceDraft();
+  stopStudioPolling();
+  discardStudioImageDialog();
+  studio.sourceToken += 1;
+  studio.refreshToken += 1;
+  studio.taskToken += 1;
+  studio.detailToken += 1;
+  studio.listToken += 1;
+  studio.modelToken += 1;
+  studio.detailLoading = false;
+  studio.promptSource = next;
+  const draft = studio.sourceDrafts[next] || {};
+  $("#studioUserRequest").value = draft.request || "";
+  $("#studioFollowupText").value = draft.followup || "";
+  studio.images = (draft.images || []).map((image) => ({ ...image }));
+  studio.followupImages = (draft.followupImages || []).map((image) => ({ ...image }));
+  studio.visionSummary = draft.visionSummary || null;
+  if (next === "template" && typeof draft.templateBody === "string") studio.body = draft.templateBody;
+  studio.providerKey = draft.providerKey || "";
+  studio.modelName = draft.modelName || "";
+  studio.activeTaskId = draft.activeTaskId || "";
+  studio.streamText = draft.streamText || "";
+  studio.reasoningText = draft.reasoningText || "";
+  studio.eventCursor = draft.eventCursor || 0;
+  renderStudioDetail();
+  studio.bodyEdited = next === "template" && Boolean(draft.bodyEdited);
+  applyPromptSourceUi();
+  renderImagePreview();
+  renderResultPanel(draft.lastResult || { status: "", input: {} });
+  setResultMode(draft.resultMode || "result");
+  if (persist) void saveStudioPrefs({ prompt_source: next });
+  void syncStudioModel();
+  if (restoreSelection && next === "template" && !studio.meta && (studio.itemId || studio.customId)) {
+    void selectStudioEntry(studio.kind, studio.itemId || studio.customId);
+  }
+  if (reconcile) void reconcileActiveTask();
+}
+
+function renderSkillHistory() {
+  const container = $("#studioSkillHistory");
+  if (!container) return;
+  container.replaceChildren();
+  const heading = document.createElement("strong");
+  heading.textContent = "最近生成";
+  container.append(heading);
+  const tasks = studio.tasks.filter((task) => (task.prompt_source || task.input?.prompt_source) === "skill");
+  for (const task of tasks) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "content-skill-history-row";
+    button.dataset.studioTask = task.id;
+    button.classList.toggle("active", task.id === studio.activeTaskId);
+    const title = document.createElement("span");
+    title.textContent = taskTitle(task);
+    title.title = title.textContent;
+    const status = document.createElement("small");
+    status.textContent = `${taskStatusLabel(task.status)} · ${formatTaskRelative(task.created_at)}`;
+    button.append(title, status);
+    container.append(button);
+  }
+  if (!tasks.length) {
+    const empty = document.createElement("p");
+    empty.textContent = "还没有 Skill 生成记录";
+    container.append(empty);
+  }
+}
+
+async function saveGenerationDefaults() {
+  const value = $("#studioSystemPrompt").value;
+  const success = await saveStudioPrefs({ system_prompt: value });
+  if ($("#studioSystemPrompt").value === value) $("#studioSystemStatus").textContent = success ? "已保存，新生成生效" : "保存失败，草稿已保留";
 }
 
 function isFavoriteRef(kind, id) {
@@ -232,9 +390,11 @@ async function restoreStudioSelection() {
   studio.customId = kind === "custom" ? String(saved.id || "") : "";
   renderStudioCategories();
   const token = ++studio.detailToken;
+  studio.detailLoading = true;
   if (kind === "builtin") await loadCatalogEntry(token);
   else await loadCustomEntry(token);
   if (token !== studio.detailToken) return false;
+  studio.detailLoading = false;
   if (!studio.meta) {
     studio.kind = studio.module === "custom" ? "custom" : "free";
     studio.itemId = "";
@@ -328,6 +488,15 @@ export function setStudioPage(page, { persist = true } = {}) {
   studio.page = next;
   applyStudioPageUi();
   if (changed) {
+    studio.viewToken += 1;
+    studio.refreshToken += 1;
+    studio.taskToken += 1;
+    studio.detailToken += 1;
+    studio.detailLoading = false;
+    studio.modelToken += 1;
+    studio.modelLoading = false;
+    stopStudioPolling();
+    discardStudioImageDialog();
     emitStudioPage(next, { refresh: false });
   }
   if (persist) void saveStudioPrefs({ page: next });
@@ -378,6 +547,14 @@ export function openStudioView() {
 export function closeStudioView() {
   if (!studio.open) return;
   studio.open = false;
+  studio.viewToken += 1;
+  studio.refreshToken += 1;
+  studio.taskToken += 1;
+  studio.detailToken += 1;
+  studio.detailLoading = false;
+  studio.modelToken += 1;
+  studio.modelLoading = false;
+  discardStudioImageDialog();
   setAppView("chat");
   syncModeUi();
   stopStudioPolling();
@@ -439,8 +616,12 @@ async function refreshStudio() {
     emitStudioPage("labeler", { refresh: true });
     return;
   }
+  initGenerationSettings();
+  const refreshToken = ++studio.refreshToken;
+  const current = () => refreshToken === studio.refreshToken;
   // 离开期间任务可能已经结束：重进时以服务端最新状态为准，不拿可能过期的快照决定订阅。
   await reconcileActiveTask();
+  if (!current()) return;
   if (!studio.catalogLoaded) {
     try {
       const { catalog } = await api("/api/studio/catalog");
@@ -452,15 +633,19 @@ async function refreshStudio() {
   }
   // 自定义条目计数要真实：先取一次（本地只读接口），不把未加载伪装成 0。
   await loadCustomItems();
+  if (!current()) return;
   renderStudioCategories();
   // 上次选中的条目：只在还没有选中条目时恢复（重进工作台不覆盖当前选择）。
   // 条目已删除/不可读时 restoreStudioSelection 会回安全空态并清掉失效偏好。
-  if (!studio.meta) await restoreStudioSelection();
+  if (studio.promptSource === "template" && !studio.meta && !studio.detailLoading) await restoreStudioSelection();
+  if (!current()) return;
   // 只在还没有选中条目时重画一次默认态（「自由输入」）；已有选择时不重写，避免
   // 把正在编辑的自定义正文/变量草稿冲掉。
   if (!studio.meta) renderStudioDetail();
   await Promise.all([renderStudioList(), refreshTasks()]);
+  if (!current()) return;
   renderImagePreview();
+  applyPromptSourceUi();
   syncStudioModel();
 }
 
@@ -473,7 +658,7 @@ function setStudioPane(pane) {
   studio.pane = next;
   const view = $("#studioView");
   if (view) view.dataset.pane = next;
-  document.querySelectorAll(".studio-pane-btn").forEach((btn) => {
+  document.querySelectorAll("[data-studio-pane]").forEach((btn) => {
     const active = btn.dataset.studioPane === next;
     btn.classList.toggle("active", active);
     btn.setAttribute("aria-pressed", String(active));
@@ -745,7 +930,12 @@ function studioListRow({ kind, id, title, summary, tags, extra, genre, chars, ha
 }
 
 async function selectStudioEntry(kind, id) {
+  if (studio.promptSource !== "template") setPromptSource("template", { reconcile: false, restoreSelection: false });
+  studio.taskToken += 1;
+  studio.refreshToken += 1;
   const token = ++studio.detailToken;
+  const taskToken = studio.taskToken;
+  studio.detailLoading = true;
   studio.kind = kind;
   studio.meta = null;
   studio.body = "";
@@ -761,7 +951,10 @@ async function selectStudioEntry(kind, id) {
     await loadCustomEntry(token);
   }
   if (token !== studio.detailToken) return;
+  studio.detailLoading = false;
+  if (taskToken !== studio.taskToken) return;
   renderStudioDetail();
+  applyPromptSourceUi();
   setStudioPane("form");
   saveStudioSelection();
   await renderStudioList();
@@ -921,6 +1114,7 @@ function renderStudioDetail() {
 // ============================================================
 
 async function syncStudioModel() {
+  const token = ++studio.modelToken;
   const providerSelect = $("#studioProviderSelect");
   const modelSelect = $("#studioModelSelect");
   if (!providerSelect || !modelSelect) return;
@@ -945,6 +1139,10 @@ async function syncStudioModel() {
   const key = providerSelect.value;
   studio.providerKey = key;
   if (!key) {
+    studio.modelLoading = false;
+    studio.modelOptionsKey = "";
+    studio.modelName = "";
+    modelSelect.disabled = false;
     modelSelect.replaceChildren();
     const opt = document.createElement("option");
     opt.value = "";
@@ -952,19 +1150,32 @@ async function syncStudioModel() {
     modelSelect.append(opt);
     return;
   }
-  if (studio.modelName && [...modelSelect.options].some((o) => o.value === studio.modelName)) {
+  if (studio.modelOptionsKey === key && !studio.modelLoading
+      && studio.modelName && [...modelSelect.options].some((o) => o.value === studio.modelName)) {
     modelSelect.value = studio.modelName;
+    modelSelect.disabled = false;
     return;
   }
+  studio.modelLoading = true;
+  modelSelect.disabled = true;
+  modelSelect.replaceChildren();
   let models = studio.providerModelsCache.get(key);
   if (!models) {
     try {
       ({ models } = await api("/api/providers/models", { method: "POST", body: { model_key: key } }));
+      if (token !== studio.modelToken || providerSelect.value !== key) return;
       studio.providerModelsCache.set(key, models || []);
     } catch (error) {
-      studio.providerModelsCache.set(key, []);
+      if (token !== studio.modelToken || providerSelect.value !== key) return;
+      // Failed catalogs must remain retryable and must not expose old options.
+      models = [];
+      toast(`模型目录读取失败：${error.message}`);
     }
   }
+  if (token !== studio.modelToken || providerSelect.value !== key) return;
+  studio.modelLoading = false;
+  studio.modelOptionsKey = key;
+  modelSelect.disabled = false;
   try {
     modelSelect.replaceChildren();
     (models || []).forEach((entry) => {
@@ -978,9 +1189,10 @@ async function syncStudioModel() {
     });
     if (studio.modelName && [...modelSelect.options].some((o) => o.value === studio.modelName)) {
       modelSelect.value = studio.modelName;
-    } else if (modelSelect.options.length > 1) {
-      modelSelect.value = modelSelect.options[1].value; // 第 0 项是「请重新检测」占位提示（07 同口径），跳过
+    } else if (modelSelect.options.length) {
+      modelSelect.value = modelSelect.options[0].value;
     }
+    studio.modelName = modelSelect.value || "";
   } catch (error) {
     modelSelect.replaceChildren();
     const opt = document.createElement("option");
@@ -1193,17 +1405,37 @@ function removeStudioImage(index) {
   renderImagePreview();
 }
 
-function openStudioImageDialog() {
-  studio.imageQueue = studio.images.map((image, index) => imageEntryFromRef(image, index));
+function discardStudioImageDialog() {
+  studio.imageGeneration += 1;
+  studio.imageOwner = null;
+  studio.imageQueue = [];
+  studio.imageUploading = false;
+  const dialog = $("#studioImageDialog");
+  if (dialog?.open) dialog.close();
+}
+
+function studioImageOwnerCurrent() {
+  const owner = studio.imageOwner;
+  return Boolean(owner && owner.sourceToken === studio.sourceToken && owner.viewToken === studio.viewToken
+    && owner.source === studio.promptSource && (owner.target !== "followup" || owner.taskId === studio.activeTaskId));
+}
+
+function openStudioImageDialog(target = "generation") {
+  discardStudioImageDialog();
+  studio.imageTarget = target;
+  studio.imageOwner = { source: studio.promptSource, sourceToken: studio.sourceToken,
+    viewToken: studio.viewToken, target, taskId: studio.activeTaskId };
+  studio.imageQueue = (target === "followup" ? studio.followupImages : studio.images).map((image, index) => imageEntryFromRef(image, index));
   renderImageQueue();
   const dialog = $("#studioImageDialog");
   if (dialog && typeof dialog.showModal === "function") dialog.showModal();
 }
 
 function updateStudioImageConfirm() {
+  studio.imageUploading = studio.imageQueue.some((entry) => entry.status === "uploading");
   const button = $("#studioImageConfirm");
   if (!button) return;
-  button.disabled = studio.imageQueue.some((entry) => entry.status === "uploading");
+  button.disabled = studio.imageUploading;
 }
 
 function renderImageQueue() {
@@ -1250,6 +1482,8 @@ function renderImageQueue() {
 }
 
 async function addStudioImageFiles(files) {
+  if (!studioImageOwnerCurrent()) return;
+  const generation = studio.imageGeneration;
   const list = [...(files || [])];
   if (!list.length) return;
   const room = STUDIO_IMAGE_MAX - studio.imageQueue.length;
@@ -1293,10 +1527,18 @@ async function addStudioImageFiles(files) {
   studio.imageQueue.push(...entries);
   renderImageQueue();
   // 串行上传：最多 6 张，逐张进度/失败状态更清楚，也不打满连接。
-  for (const entry of entries) await uploadStudioImage(entry);
+  for (const entry of entries) {
+    if (generation !== studio.imageGeneration || !studioImageOwnerCurrent()) return;
+    if (studio.imageQueue.includes(entry)) await uploadStudioImage(entry);
+  }
 }
 
 function uploadStudioImage(entry) {
+  if (!studioImageOwnerCurrent() || !studio.imageQueue.includes(entry)) return Promise.resolve();
+  const generation = studio.imageGeneration;
+  const attempt = entry.uploadAttempt = (entry.uploadAttempt || 0) + 1;
+  const current = () => generation === studio.imageGeneration && entry.uploadAttempt === attempt
+    && studioImageOwnerCurrent() && studio.imageQueue.includes(entry);
   if (!entry?.file) {
     toast("这张图片需要重新选择后才能上传");
     return Promise.resolve();
@@ -1310,12 +1552,13 @@ function uploadStudioImage(entry) {
     xhr.open("POST", "/api/uploads");
     if (state.token) xhr.setRequestHeader("Authorization", `Bearer ${state.token}`);
     xhr.upload.onprogress = (event) => {
-      if (!event.lengthComputable) return;
+      if (!event.lengthComputable || !current()) return;
       entry.progress = Math.round((event.loaded / event.total) * 100);
       const row = document.querySelector(`[data-studio-image-key="${entry.key}"] small`);
       if (row && entry.status === "uploading") row.textContent = `上传中 ${entry.progress}%`;
     };
     xhr.onload = () => {
+      if (!current()) { resolve(); return; }
       let payload = {};
       try { payload = JSON.parse(xhr.responseText || "{}"); } catch (_) { /* 非 JSON 错误体 */ }
       if (xhr.status >= 200 && xhr.status < 300 && payload.path) {
@@ -1333,12 +1576,14 @@ function uploadStudioImage(entry) {
       resolve();
     };
     xhr.onerror = () => {
+      if (!current()) { resolve(); return; }
       entry.status = "error";
       entry.error = "网络错误";
       renderImageQueue();
       resolve();
     };
     xhr.onabort = () => {
+      if (!current()) { resolve(); return; }
       entry.status = "error";
       entry.error = "上传已取消";
       renderImageQueue();
@@ -1351,19 +1596,27 @@ function uploadStudioImage(entry) {
 }
 
 function confirmStudioImages() {
+  if (!studioImageOwnerCurrent()) { discardStudioImageDialog(); return; }
   if (studio.imageQueue.some((entry) => entry.status === "uploading")) {
     toast("还有图片正在上传，请稍候");
     return;
   }
   const done = studio.imageQueue.filter((entry) => entry.status === "done" && entry.path);
-  studio.images = done.map((entry) => ({
+  const images = done.map((entry) => ({
     path: entry.path,
     thumb_path: entry.thumb_path || "",
     name: entry.name || "",
   }));
-  renderImagePreview();
-  $("#studioImageDialog")?.close();
-  setStudioPane("form");
+  if (studio.imageTarget === "followup") {
+    studio.followupImages = images;
+    $("#studioFollowupImageCount").textContent = images.length ? `已选 ${images.length} 张` : "";
+  } else {
+    studio.images = images;
+    renderImagePreview();
+  }
+  const target = studio.imageTarget;
+  discardStudioImageDialog();
+  setStudioPane(target === "followup" ? "result" : "form");
 }
 
 function visionFailureDetails(result) {
@@ -1377,6 +1630,8 @@ function studioImageKey(images) {
 
 function studioVisionContext() {
   return {
+    sourceToken: studio.sourceToken,
+    viewToken: studio.viewToken,
     detailToken: studio.detailToken,
     templateKey: JSON.stringify([studio.kind, studio.itemId, studio.customId]),
     modelKey: $("#studioProviderSelect")?.value || "",
@@ -1415,7 +1670,8 @@ async function analyzeStudioImages() {
     });
     const current = studioVisionContext();
     // 图片、模板及模型共同确定本次识别用途；旧响应不能写入新选择或抢回视图。
-    if (requestContext.open !== current.open || requestContext.page !== current.page) return;
+    if (requestContext.open !== current.open || requestContext.page !== current.page
+        || requestContext.sourceToken !== current.sourceToken || requestContext.viewToken !== current.viewToken) return;
     if (imageKey !== current.imageKey) {
       toast("参考图片已更换，本次识别结果未写入；请重新识别当前图片");
       return;
@@ -1450,6 +1706,9 @@ async function analyzeStudioImages() {
     if (note) parts.push(note);
     toast(parts.join("；"));
   } catch (error) {
+    const current = studioVisionContext();
+    if (requestContext.open !== current.open || requestContext.page !== current.page
+        || requestContext.sourceToken !== current.sourceToken || requestContext.viewToken !== current.viewToken) return;
     const details = visionFailureDetails(error?.payload);
     toast(`图片识别失败：${error.message}${details ? `（${details}）` : ""}`);
   } finally {
@@ -1474,6 +1733,10 @@ function appendVisionResult(text) {
 // ============================================================
 
 async function submitGenerate() {
+  if (studio.submitBusy) return;
+  if (studio.detailLoading || studio.modelLoading || studio.imageUploading) { toast("来源、模型或素材还在加载，请稍候"); return; }
+  const skillMode = studio.promptSource === "skill";
+  if (skillMode && !studio.skillIds.length) { toast("请选择至少一个 Skill"); return; }
   const userRequest = String($("#studioUserRequest")?.value || "").trim();
   const vars = { ...studio.varValues };
   // P1：用户正看着历史产出时，提交后留在历史列表，只把新任务同步进去——
@@ -1482,7 +1745,10 @@ async function submitGenerate() {
   if (studio.kind === "builtin" && !studio.itemId && !userRequest) { toast("请选择条目或先写你的需求"); return; }
   const payload = {
     user_request: userRequest,
-    vars,
+    system_prompt: $("#studioSystemPrompt")?.value || "",
+    prompt_source: studio.promptSource,
+    request_key: crypto.randomUUID(),
+    vars: skillMode ? {} : vars,
     model_key: $("#studioProviderSelect")?.value || "",
     model_name: $("#studioModelSelect")?.value || "",
   };
@@ -1494,10 +1760,11 @@ async function submitGenerate() {
       name: image.name || "",
     }));
   }
-  if (studio.kind === "builtin" && studio.itemId) payload.item_id = studio.itemId;
-  if (studio.kind === "custom" && studio.customId) payload.custom_id = studio.customId;
-  if (!userRequest && !(studio.meta && studio.images.length)) { toast("先写你的需求再生成"); focusStudioInput(); return; }
-  if (studio.kind === "builtin") {
+  if (skillMode) payload.skill_ids = [...studio.skillIds];
+  if (!skillMode && studio.kind === "builtin" && studio.itemId) payload.item_id = studio.itemId;
+  if (!skillMode && studio.kind === "custom" && studio.customId) payload.custom_id = studio.customId;
+  if (!userRequest && !((skillMode || studio.meta) && studio.images.length)) { toast("先写你的需求再生成"); focusStudioInput(); return; }
+  if (!skillMode && studio.kind === "builtin") {
     const declared = (studio.meta?.vars || []).map((v) => v.key);
     const unfilled = declared.filter((k) => !String(vars[k] ?? "").trim());
     if (unfilled.length && !userRequest) {
@@ -1506,13 +1773,23 @@ async function submitGenerate() {
       if (!okless) return;
     }
   }
+  studio.submitBusy = true;
+  $("#studioGenerate").disabled = true;
+  const source = studio.promptSource;
+  const viewToken = studio.viewToken;
+  studio.refreshToken += 1;
+  stopStudioPolling();
+  const token = ++studio.taskToken;
   try {
-    // 创建新任务即作废其它任务详情请求：之前点开的历史任务 A 即使晚到也不得接管轮询。
-    studio.taskToken += 1;
     const { task, unresolved_vars } = await api("/api/studio/generate", { method: "POST", body: payload });
+    if (studio.promptSource !== source || token !== studio.taskToken || viewToken !== studio.viewToken) {
+      void refreshTasks();
+      return;
+    }
     if (Array.isArray(unresolved_vars) && unresolved_vars.length) {
       toast(`有 ${unresolved_vars.length} 个占位符没法识别，已原样保留：${unresolved_vars.slice(0, 3).join("、")}`);
     }
+    discardStudioImageDialog();
     studio.activeTaskId = task.id;
     studio.eventCursor = 0;
     studio.streamText = "";
@@ -1526,10 +1803,58 @@ async function submitGenerate() {
     // P1：提交后如果用户正看着历史产出，同步重绘（不清空输入、不切换视图之外的状态）。
     await refreshTasks({ syncHistory: true });
   } catch (error) {
-    // 提交失败留在参数档，不丢输入。
+    if (studio.promptSource !== source || token !== studio.taskToken || viewToken !== studio.viewToken) return;
     toast(`创建生成任务失败：${error.message}`);
     setStudioPane("form");
+  } finally {
+    studio.submitBusy = false;
+    $("#studioGenerate").disabled = false;
   }
+}
+
+async function submitFollowup() {
+  const sourceTask = studio.lastResult;
+  if (studio.followupBusy || sourceTask?.status !== "done") return;
+  if (studio.imageUploading) { toast("素材还在加载，请稍候"); return; }
+  const field = $("#studioFollowupText");
+  const text = field.value.trim();
+  if (!text) { toast("先写追问内容"); field.focus(); return; }
+  const source = studio.promptSource;
+  const viewToken = studio.viewToken;
+  const images = studio.followupImages.map((image) => ({ ...image }));
+  let request;
+  try { request = prepareContentFollowup(sourceTask.id, text, images); }
+  catch (error) { toast(`追问请求保存失败，尚未发送：${error.message}`); return; }
+  studio.refreshToken += 1;
+  stopStudioPolling();
+  const token = ++studio.taskToken;
+  studio.followupBusy = true;
+  $("#studioFollowupSend").disabled = true;
+  try {
+    const { task } = await api(`/api/studio/tasks/${sourceTask.id}/followup`, { method: "POST", body: request });
+    if (source !== studio.promptSource || token !== studio.taskToken || viewToken !== studio.viewToken) {
+      // The current view did not consume this receipt. Keep its key so returning
+      // to that parent and retrying retrieves this child instead of creating one.
+      void refreshTasks();
+      return;
+    }
+    try { clearContentFollowup(sourceTask.id, request.request_key); }
+    catch (error) { toast(`追问已提交，请求记录清理失败：${error.message}`); }
+    if (field.value.trim() === text) field.value = "";
+    if (studioImageKey(studio.followupImages) === studioImageKey(images)) studio.followupImages = [];
+    discardStudioImageDialog();
+    studio.activeTaskId = task.id;
+    studio.eventCursor = 0;
+    studio.streamText = "";
+    studio.reasoningText = "";
+    renderResultPanel(task);
+    setResultMode("result");
+    startStudioPolling();
+    await refreshTasks();
+  } catch (error) {
+    if (source === studio.promptSource && token === studio.taskToken && viewToken === studio.viewToken) toast(`追问失败：${error.message}；重试将沿用同一请求标识`);
+  }
+  finally { studio.followupBusy = false; $("#studioFollowupSend").disabled = false; }
 }
 
 async function cancelStudioTask() {
@@ -1544,11 +1869,20 @@ async function cancelStudioTask() {
 
 async function retryStudioTask(taskId) {
   const target = taskId || studio.activeTaskId;
-  if (!target) return;
+  if (!target || studio.retryBusy) return;
+  studio.retryBusy = true;
+  const source = studio.promptSource;
+  const viewToken = studio.viewToken;
+  const token = ++studio.taskToken;
+  studio.refreshToken += 1;
+  stopStudioPolling();
   try {
-    // 重试会生成新任务 id：同样立即作废旧详情请求，避免迟到的旧任务接管。
-    studio.taskToken += 1;
     const { task } = await api(`/api/studio/tasks/${target}/retry`, { method: "POST", body: {} });
+    if (token !== studio.taskToken || source !== studio.promptSource || viewToken !== studio.viewToken) {
+      void refreshTasks();
+      return;
+    }
+    discardStudioImageDialog();
     studio.activeTaskId = task.id;
     studio.eventCursor = 0;
     studio.streamText = "";
@@ -1558,10 +1892,10 @@ async function retryStudioTask(taskId) {
     setStudioPane("result");
     startStudioPolling();
     await refreshTasks({ syncHistory: true });
-    toast("已重新排队");
+    if (token === studio.taskToken && source === studio.promptSource && viewToken === studio.viewToken) toast("已重新排队");
   } catch (error) {
-    toast(`重试失败：${error.message}`);
-  }
+    if (token === studio.taskToken && source === studio.promptSource && viewToken === studio.viewToken) toast(`重试失败：${error.message}`);
+  } finally { studio.retryBusy = false; }
 }
 
 function stopStudioPolling() {
@@ -1760,6 +2094,11 @@ function updateReasoningChip() {
 
 function renderResultPanel(task) {
   studio.lastResult = task;
+  renderContentThread($("#studioThreadContext"), task);
+  const input = task.input || {};
+  $("#studioFollowup").hidden = task.status !== "done" || studio.resultMode === "history";
+  $("#studioThreadSummary").textContent = `${input.prompt_source === "skill" ? `Skill ${(input.skill_ids || []).length} 个` : "模板生成"} · ${input.model_name || "原任务模型"} · 追问沿用本次规则`;
+  $("#studioFollowupImageCount").textContent = studio.followupImages.length ? `已选 ${studio.followupImages.length} 张` : "";
   const panel = $("#studioResultStream");
   const hint = $("#studioTaskHint");
   if (!panel) return;
@@ -1822,13 +2161,17 @@ function renderResultPanel(task) {
 // ============================================================
 
 async function refreshTasks({ syncHistory = false } = {}) {
+  const token = ++studio.tasksToken;
   try {
     const { tasks } = await api(STUDIO_TASKS_URL);
+    if (token !== studio.tasksToken) return;
     studio.tasks = Array.isArray(tasks) ? tasks : [];
+    renderSkillHistory();
     studio.tasksLoaded = true;
     studio.tasksError = "";
-    if (studio.historyState === "error") studio.historyState = "ready";
+    if (["error", "loading"].includes(studio.historyState)) studio.historyState = "ready";
   } catch (error) {
+    if (token !== studio.tasksToken) return;
     studio.tasksError = String(error.message || error);
   }
   renderRecentTasks();
@@ -1982,6 +2325,8 @@ function setResultMode(mode) {
   if (body) body.hidden = history;
   if (copyBtn) copyBtn.hidden = history || !String(stream?.textContent || "").trim();
   if (actions) actions.hidden = history;
+  $("#studioFollowup").hidden = history || studio.lastResult?.status !== "done";
+  $("#studioThreadContext").hidden = history || !$("#studioThreadContext").childElementCount;
   if (meta) meta.hidden = history;
   if (backBtn) backBtn.hidden = !history;
   if (range) {
@@ -2197,18 +2542,22 @@ async function openHistoryList() {
   setStudioPane("result");
   if (!sidebarDesktop()) closeSidebar();
   const token = ++studio.historyToken;
+  const tasksToken = ++studio.tasksToken;
+  studio.refreshToken += 1;
+  studio.taskToken += 1;
   // 已有缓存时不先清空列表（避免闪空）；只有首次读取才显示「正在读取」。
   studio.historyState = studio.tasksLoaded ? "ready" : "loading";
   renderHistoryList();
   try {
     const { tasks } = await api(STUDIO_TASKS_URL);
-    if (token !== studio.historyToken) return;
+    if (token !== studio.historyToken || tasksToken !== studio.tasksToken) return;
     studio.tasks = Array.isArray(tasks) ? tasks : [];
+    renderSkillHistory();
     studio.tasksLoaded = true;
     studio.tasksError = "";
     studio.historyState = "ready";
   } catch (error) {
-    if (token !== studio.historyToken) return;
+    if (token !== studio.historyToken || tasksToken !== studio.tasksToken) return;
     studio.tasksError = String(error.message || error);
     studio.historyState = "error";
   }
@@ -2217,10 +2566,31 @@ async function openHistoryList() {
 }
 
 async function pickStudioTask(taskId) {
-  const token = ++studio.taskToken;
+  let token = ++studio.taskToken;
+  const viewToken = studio.viewToken;
+  studio.refreshToken += 1;
+  stopStudioPolling();
+  discardStudioImageDialog();
   try {
     const { task } = await api(`/api/studio/tasks/${taskId}`);
-    if (token !== studio.taskToken) return; // 快速切 A→B：A 的迟到响应不覆盖 B
+    if (token !== studio.taskToken || viewToken !== studio.viewToken) return;
+    discardStudioImageDialog();
+    const source = task.input?.prompt_source === "skill" ? "skill" : "template";
+    if (source !== studio.promptSource) {
+      // Source changes are synchronous. No awaited work may acquire a fresh
+      // token and impersonate a selection the user made later.
+      setPromptSource(source, { reconcile: false, restoreSelection: false });
+      token = studio.taskToken;
+    }
+    studio.followupImages = [];
+    $("#studioFollowupText").value = "";
+    try {
+      const pending = getContentFollowup(taskId);
+      if (pending) {
+        $("#studioFollowupText").value = pending.user_request;
+        studio.followupImages = pending.images.map((image) => ({ ...image }));
+      }
+    } catch (error) { toast(`追问草稿读取失败：${error.message}`); }
     studio.activeTaskId = taskId;
     studio.eventCursor = 0;
     studio.streamText = "";
@@ -2251,6 +2621,11 @@ function selectorEscape(value) {
 }
 
 async function locateStudioEntry(kind, id, module, { revealList = false } = {}) {
+  if (studio.promptSource !== "template") setPromptSource("template", { reconcile: false, restoreSelection: false });
+  const sourceToken = studio.sourceToken;
+  const viewToken = studio.viewToken;
+  let taskToken = ++studio.taskToken;
+  const current = () => sourceToken === studio.sourceToken && viewToken === studio.viewToken && taskToken === studio.taskToken;
   const targetKind = kind === "custom" ? "custom" : "builtin";
   const targetId = String(id || "");
   if (!targetId) {
@@ -2283,7 +2658,9 @@ async function locateStudioEntry(kind, id, module, { revealList = false } = {}) 
   setResultMode("result");
   renderStudioCategories();
   if (targetKind === "custom") await loadCustomItems();
+  if (!current()) return;
   await renderStudioList();
+  if (!current()) return;
   const selector = `#studioList [data-studio-pick="${selectorEscape(targetId)}"][data-studio-kind="${targetKind}"]`;
   let row = document.querySelector(selector);
   if (!row) {
@@ -2292,7 +2669,10 @@ async function locateStudioEntry(kind, id, module, { revealList = false } = {}) 
   }
   // 定位不是只闪一下坐标：真正选中目标，详情/参数随之加载，列表行保持 active。
   if (!sameSelection) {
-    await selectStudioEntry(targetKind, targetId);
+    const selection = selectStudioEntry(targetKind, targetId);
+    taskToken = studio.taskToken;
+    await selection;
+    if (!current()) return;
     row = document.querySelector(selector);
     if (!row) return;
   }
@@ -2317,7 +2697,7 @@ function locateCurrentStudioEntry() {
   void locateStudioEntry(kind, id, studio.meta.module, { revealList: true });
 }
 
-/** 把当前模板正文发到拆书匠「分镜生图」，作为它的系统提示词（写法）。
+/** 把当前模板正文发到拆书匠「分镜生图」，作为模板写法。
  * 跨模块不 import：走 document 自定义事件，25-novel.js 自己接（与造梦机分镜队列同套路）。
  * 自定义模板正在编辑时以编辑框里的现值为准——发过去的就是用户眼前这份。 */
 function sendModuleToStoryboard() {
@@ -2326,7 +2706,7 @@ function sendModuleToStoryboard() {
     return;
   }
   const editor = $("#studioBodyEditor");
-  const text = String(studio.body || editor?.value || "").trim();
+  const text = studioBodyText().trim();
   if (!text) {
     toast("这条模板还没有正文；先选一条有内容的模板");
     return;
@@ -2450,6 +2830,19 @@ async function confirmStudioHandoff() {
 
 export function bindStudioEvents() {
   watchWorkbenchSize($("#studioPageLibrary"));
+  bindWorkbenchDetails($("#studioPageLibrary"));
+  $("#studioSourceTabs")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-studio-source]");
+    if (button) { initGenerationSettings(); void setPromptSource(button.dataset.studioSource); }
+  });
+  $("#studioSystemSave")?.addEventListener("click", () => void saveGenerationDefaults());
+  $("#studioSystemClear")?.addEventListener("click", () => { $("#studioSystemPrompt").value = ""; $("#studioSystemStatus").textContent = "已清空，保存后作为默认值"; });
+  $("#studioSystemPrompt")?.addEventListener("input", () => { $("#studioSystemStatus").textContent = "未保存的默认值，本次生成会使用当前内容"; });
+  $("#studioFollowupSend")?.addEventListener("click", () => void submitFollowup());
+  $("#studioFollowupImages")?.addEventListener("click", () => openStudioImageDialog("followup"));
+  $("#studioFollowupText")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); void submitFollowup(); }
+  });
   $("#studioRuleEditorSave")?.addEventListener("click", () => void saveStudioRuleEditor());
   const cancelRule = () => { const callback = ruleEditorReturn?.onCancel; ruleEditorReturn = null; $("#studioRuleEditorDialog").close(); callback?.(); };
   $("#studioRuleEditorCancel")?.addEventListener("click", cancelRule);
@@ -2633,8 +3026,8 @@ function bindStudioImageDialogEvents() {
   });
   $("#studioImageConfirm")?.addEventListener("click", confirmStudioImages);
   dialog.addEventListener("close", () => {
-    // 取消/关闭丢弃未确认的编辑副本；已确认的图片在 studio.images 里不受影响。
-    studio.imageQueue = [];
+    // A close event from a previous dialog may arrive after another has opened.
+    if (!dialog.open) discardStudioImageDialog();
   });
 }
 

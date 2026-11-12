@@ -13,6 +13,7 @@
 import { $, api, applyModelSkinFor, localFileUrl, state, toast } from "./01-core.js";
 import { isPywebview, saveLocalFile } from "./03-media.js";
 import { onStudioPageChange, setStudioPage } from "./22-studio.js";
+import { bindWorkSystemPrompt } from "./22d-work-prompt.js";
 import { bindWriterNovelContinuation } from "./27a-writer-continuation.js";
 import { bindWorkbenchDialogReturn, bindWorkbenchMenu, watchWorkbenchSize, workbenchWidth } from "./22a-workbench-ui.js";
 import { bindBodyDraftLifecycle, bodyDraftMatches, chooseBodyDraft, createBodyDraftPanel, createBodyDraftSession } from "./22b-body-drafts.js";
@@ -1631,6 +1632,11 @@ async function refreshPlan({ kind: actualKind = "", model: actualModel = null, e
         model_key: model.model_key,
         char_count: writer.charCount,
         side_count: writer.sideCount,
+        ...(stage === "outline" ? {
+          part_no: Number(writer.partNo || 1),
+          part_title: String($("#writerPartTitle")?.value || "").trim(),
+          target_chars: 8000,
+        } : {}),
         extra_note: extraNote ?? String(
           stage === "setup" ? $("#writerSetupNote")?.value || ""
             : stage === "outline" ? $("#writerOutlineNote")?.value || ""
@@ -4164,6 +4170,13 @@ export function bindWriterEvents() {
   watchWorkbenchSize($("#studioPageWriter"), applyPaneAccessibility);
   bindWorkbenchMenu($("#writerBookMenuBtn"), $("#writerBookMenu"));
   bindWorkbenchMenu($("#writerMoreBtn"), $("#writerMoreMenu"));
+  bindWorkSystemPrompt({ module: "writer", getBook: () => writer.book,
+    onSaved: (book) => {
+      if (!writer.book || writer.bookId !== book?.id) return;
+      writer.book.global_system_prompt = book.global_system_prompt;
+      writer.book.global_system_prompt_revision = book.global_system_prompt_revision;
+      void refreshPlan();
+    } });
   for (const id of ["writerBooksDialog", "writerImportDialog", "writerNovelImportDialog"]) {
     bindWorkbenchDialogReturn($(`#${id}`), $("#writerBookMenuBtn"));
   }

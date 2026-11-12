@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from naiba.core.contracts import STUDIO_HISTORY_MESSAGES_KEY
 from naiba.storage.media import is_uploads_path
 
 # 与视觉编码层（naiba/vision/images.py::IMAGE_MEDIA_TYPES）保持可解码格式的交集。
@@ -116,7 +117,11 @@ def referenced_upload_paths(task_records: list[dict[str, Any]]) -> set[str]:
         input_data = record.get("input") if isinstance(record, dict) else None
         if not isinstance(input_data, dict):
             continue
-        for ref in input_data.get("images") or []:
+        refs = list(input_data.get("images") or [])
+        for message in input_data.get(STUDIO_HISTORY_MESSAGES_KEY) or []:
+            if isinstance(message, dict):
+                refs.extend(message.get("images") or [])
+        for ref in refs:
             if not isinstance(ref, dict):
                 continue
             for field in ("path", "thumb_path"):

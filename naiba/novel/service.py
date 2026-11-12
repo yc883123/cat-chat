@@ -43,6 +43,10 @@ from pathlib import Path
 from typing import Any
 
 from naiba.core import novel_split
+from naiba.core.contracts import (
+    WORK_GLOBAL_SYSTEM_PROMPT_KEY, WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY,
+    STORYBOARD_PROMPT_CONFIG_KEY, STUDIO_PROMPT_SOURCE_KEY, STUDIO_SKILL_IDS_KEY,
+)
 from naiba.novel import manuscripts, prompts
 from naiba.novel import migration
 from naiba.tools.providers.novel import NovelError, read_text_auto
@@ -386,6 +390,9 @@ class NovelStore:
             "id": str(manifest.get("id") or ""),
             "title": str(manifest.get("title") or ""),
             "revision": int(manifest.get("revision") or 0),
+            WORK_GLOBAL_SYSTEM_PROMPT_KEY: str(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_KEY) or ""),
+            WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY: int(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY) or 0),
+            STORYBOARD_PROMPT_CONFIG_KEY: copy.deepcopy(manifest.get(STORYBOARD_PROMPT_CONFIG_KEY)),
             "schema_version": int(manifest.get("schema_version") or 0),
             "chapter_count": len(chapter_ids),
             "created_at": int(manifest.get("created_at") or 0),
@@ -709,6 +716,8 @@ class NovelStore:
                 "revision": 1,
                 "id": book_id,
                 "title": book_title,
+                WORK_GLOBAL_SYSTEM_PROMPT_KEY: "",
+                WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY: 0,
                 "source": {
                     "name": str(meta.get("name") or ""),
                     "encoding": str(meta.get("encoding") or ""),
@@ -763,6 +772,58 @@ class NovelStore:
             "broken": broken,
             "location": str(book_dir),
         }
+
+    def save_system_prompt(self, book_id: str, *, text: Any,
+                           expected_revision: Any) -> dict[str, Any]:
+        if not isinstance(text, str):
+            raise NovelServiceError("作品系统提示词必须是文本")
+        if len(text) > 100_000:
+            raise NovelServiceError("作品系统提示词不能超过 100000 字符")
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise NovelServiceError("global_system_prompt_revision 必须是非负整数")
+        with self._lock:
+            manifest = self._load_manifest(book_id)
+            actual = int(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY) or 0)
+            if expected_revision != actual:
+                raise NovelConflictError("作品系统提示词已在另一窗口修改；草稿已保留，请重新打开后再保存")
+            manifest[WORK_GLOBAL_SYSTEM_PROMPT_KEY] = text
+            manifest[WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY] = actual + 1
+            manifest["updated_at"] = _now_ms()
+            self._write_json(self._book_dir(book_id) / "book.json", manifest)
+            return self._public_manifest(manifest)
+
+    def save_storyboard_prompt_config(self, book_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        config = self.normalize_storyboard_prompt_config(body)
+        expected = body.get("revision")
+        if type(expected) is not int or expected < 0:
+            raise NovelServiceError("分镜配置 revision 必须是非负整数")
+        with self._lock:
+            manifest = self._load_manifest(book_id)
+            previous = manifest.get(STORYBOARD_PROMPT_CONFIG_KEY) or {}
+            actual = int(previous.get("revision") or 0)
+            if expected != actual:
+                raise NovelConflictError("分镜配置已在另一窗口修改；草稿已保留，请重新打开作品后再保存")
+            manifest[STORYBOARD_PROMPT_CONFIG_KEY] = {**config, "revision": actual + 1}
+            manifest["updated_at"] = _now_ms()
+            self._write_json(self._book_dir(book_id) / "book.json", manifest)
+            return self._public_manifest(manifest)
+
+    @staticmethod
+    def normalize_storyboard_prompt_config(body: dict[str, Any]) -> dict[str, Any]:
+        source = body.get(STUDIO_PROMPT_SOURCE_KEY, "template")
+        if source not in ("template", "skill"):
+            raise NovelServiceError("prompt_source 必须是 template 或 skill")
+        draft = body.get("template_draft", "")
+        if not isinstance(draft, str):
+            raise NovelServiceError("分镜模板草稿必须是文本")
+        if len(draft) > prompts.STORYBOARD_SYSTEM_CHARS:
+            raise NovelServiceError(f"分镜模板不能超过 {prompts.STORYBOARD_SYSTEM_CHARS} 字符")
+        raw_ids = body.get(STUDIO_SKILL_IDS_KEY, [])
+        if not isinstance(raw_ids, list) or any(not isinstance(item, str) or not item.strip() for item in raw_ids):
+            raise NovelServiceError("skill_ids 必须是非空 Skill ID 数组")
+        ids = list(dict.fromkeys(item.strip() for item in raw_ids))
+        return {STUDIO_PROMPT_SOURCE_KEY: source, "template_draft": draft,
+                STUDIO_SKILL_IDS_KEY: ids}
 
     def get_chapter(self, book_id: str, chapter_no: int) -> dict[str, Any]:
         """单章索引 + 稿件清单 + **基础稿件的正文**（两段式的第二段）。
@@ -1691,6 +1752,33 @@ class NovelService:
 
     # ---- API：章节与稿件 ----
 
+    def api_save_system_prompt(self, book_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        if not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
+        try:
+            book = self.store.save_system_prompt(
+                book_id, text=body.get(WORK_GLOBAL_SYSTEM_PROMPT_KEY),
+                expected_revision=body.get(WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY))
+            return {"book": book}, 200
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+        except NovelConflictError as exc:
+            return {"error": str(exc)}, 409
+        except NovelServiceError as exc:
+            return {"error": str(exc)}, 400
+
+    def api_save_storyboard_prompt_config(self, book_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        if not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
+        try:
+            return {"book": self.store.save_storyboard_prompt_config(book_id, body)}, 200
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+        except NovelConflictError as exc:
+            return {"error": str(exc)}, 409
+        except NovelServiceError as exc:
+            return {"error": str(exc)}, 400
+
     def api_get_chapter(self, book_id: str, chapter_no: Any) -> tuple[dict[str, Any], int]:
         try:
             return self.store.get_chapter(book_id, self._chapter_no(chapter_no)), 200
@@ -1813,6 +1901,9 @@ class NovelService:
     def _build_stage(self, body: dict[str, Any]) -> dict[str, Any]:
         """组装一次阶段生成的输入（预检与正式提交共用）。"""
         stage = str(body.get("stage") or "").strip()
+        if stage != prompts.STORYBOARD_STAGE and (
+                body.get(STUDIO_PROMPT_SOURCE_KEY) == "skill" or body.get(STUDIO_SKILL_IDS_KEY)):
+            raise NovelServiceError("只有分镜阶段支持 Skill 来源")
         if stage not in prompts.ALL_STAGES:
             raise NovelServiceError(f"未知阶段：{stage or '（空）'}")
         book_id = str(body.get("book_id") or "").strip()
@@ -1850,7 +1941,7 @@ class NovelService:
         if selected_elements:
             characters = _split_elements(str(selected_elements.get("raw") or ""))["characters"]
         manuscript_ids = {int(row["i"]): str(row.get("manuscript_id") or "") for row in material["chapters"]}
-        # 图谱反哺（4B-1）：已保存要素的实体进系统提示词，保持人物与设定一致。
+        # 已保存要素作为参考素材，保持人物与设定一致。
         kg_buckets = self._kg_elements(manifest, selected_elements)
         kg = prompts.build_kg_context(kg_buckets)
         built = prompts.build_stage_content(
@@ -1866,11 +1957,12 @@ class NovelService:
             max_chapters=max_chapters,
             manuscript_ids=manuscript_ids,
         )
-        built["system"] = kg
+        prompts.add_reference_material(built, kg)
+        built["system"] = prompts.compose_stage_system(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_KEY, ""))
         budget = prompts.budget_report(
             content=built["content"], chapters=built["chapters"], warnings=built["warnings"],
             body_limit=body_limit, max_chapters=max_chapters, context_window=context_window,
-            system=kg, kg_count=len(prompts.kg_entities(kg_buckets)),
+            system=built["system"], kg_count=len(prompts.kg_entities(kg_buckets)),
         )
         prepared = {
             "stage": stage,
@@ -1934,11 +2026,12 @@ class NovelService:
                 user_request=extra_note,
                 body_limit=body_limit,
             )
-        built["system"] = kg
+        prompts.add_reference_material(built, kg)
+        built["system"] = prompts.compose_stage_system(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_KEY, ""))
         budget = prompts.budget_report(
             content=built["content"], chapters=built["chapters"], warnings=built["warnings"],
             body_limit=body_limit, max_chapters=max_chapters, context_window=context_window,
-            system=kg, kg_count=len(prompts.kg_entities(kg_buckets)),
+            system=built["system"], kg_count=len(prompts.kg_entities(kg_buckets)),
             overhead_chars=overhead_chars,
         )
         manuscript_ids = {chapter_no: str(row.get("manuscript_id") or "")}
@@ -1965,9 +2058,9 @@ class NovelService:
                           extra_note: str, context_window: int) -> dict[str, Any]:
         """分镜生图（4C）：把已保存剧本的最新场次逐场转成出图提示词。
 
-        吃的是剧本场次而不是章节素材；不写回作品——生成结果直接发给造梦机出图。
-        `system_prompt` 是用户自定义写法（提词库模板或手动编辑），空 = 内置分镜写法；
-        图谱反哺（KG）作为参考段拼在写法之后，同走系统消息。
+        吃的是剧本场次；结果保存在独立 Studio 任务，再发给造梦机出图。
+        `system_prompt` 兼容旧请求的模板草稿入口；新模板任务把它移入 user。
+        Skill 模式共享 Studio 的完整主文/文档快照，图谱仍作为参考素材。
         """
         # 公开清单视图就够用：场次、书名与要素都在里面，不必翻 store 私有层。
         manifest = self.store.get_book(book_id)["book"]
@@ -1981,17 +2074,44 @@ class NovelService:
             if not isinstance(raw_ids, list):
                 raise NovelServiceError("scene_ids 必须是场次号数组")
             scene_ids = [self._scene_no(raw) for raw in raw_ids]
+        source = body.get(STUDIO_PROMPT_SOURCE_KEY, "template")
+        if source == "skill" and any(body.get(key) for key in (
+                "system_prompt", "template_draft", "item_id", "custom_id", "source_body", "vars")):
+            raise NovelServiceError("Skill 模式不能同时提交分镜模板")
+        config = self.store.normalize_storyboard_prompt_config({
+            STUDIO_PROMPT_SOURCE_KEY: source,
+            "template_draft": body.get("system_prompt", ""),
+            STUDIO_SKILL_IDS_KEY: body.get(STUDIO_SKILL_IDS_KEY, []),
+        })
+        ids = config[STUDIO_SKILL_IDS_KEY]
+        if source == "template" and ids:
+            raise NovelServiceError("模板模式不能同时提交 Skill")
+        if source == "skill" and not ids:
+            raise NovelServiceError("Skill 模式至少选择一个 Skill")
         built = prompts.build_storyboard_content(
             book_title=str(manifest.get("title") or "未命名作品"),
             scenes=scenes, scene_ids=scene_ids, extra_note=extra_note,
-            system_prompt=str(body.get("system_prompt") or ""),
+            system_prompt=config["template_draft"], prompt_source=source,
         )
         kg_buckets = self._kg_elements(manifest, None)
-        kg = prompts.build_kg_context(kg_buckets)
-        system_text = str(built.get("system") or "")
-        if kg:
-            built["system"] = f"{system_text}\n\n{kg}" if system_text else kg
-            system_text = built["system"]
+        prompts.add_reference_material(built, prompts.build_kg_context(kg_buckets))
+        system_text = prompts.compose_stage_system(
+            manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_KEY, ""), built["system"])
+        content_input = {
+            "content": built["content"], "system": system_text,
+            "model_key": str(body.get("model_key") or ""),
+            "model_name": str(body.get("model_name") or ""),
+            STUDIO_PROMPT_SOURCE_KEY: source,
+        }
+        if source == "skill":
+            content_input[STUDIO_SKILL_IDS_KEY] = ids
+            try:
+                content_input = self.app.studio.freeze_content_input(content_input)
+            except (ValueError, LookupError) as exc:
+                raise NovelServiceError(str(exc)) from exc
+            system_text = str(content_input.get("system") or "")
+        built["system"] = system_text
+        built["content_input"] = content_input
         budget = prompts.budget_report(
             content=built["content"], chapters=[], warnings=built["warnings"],
             body_limit=prompts.BODY_SLOT_CHARS, max_chapters=1,
@@ -2151,12 +2271,14 @@ class NovelService:
             "max_chapters": prepared["limits"]["max_chapters"],
             "chapter_snapshot": prepared["chapters"],
             "sources": prepared["sources"],
+            WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY: int(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY) or 0),
         }
         if stage == prompts.STORYBOARD_STAGE:
             # 分镜生图：场次选择与快照进任务，重试按同一批场次重放。
             novel_payload["scene_ids"] = list(prepared["built"].get("scene_ids") or [])
             novel_payload["scene_snapshot"] = prepared.get("scene_snapshot") or []
         input_data = {
+            **built.get("content_input", {}),
             "content": built["content"],
             "model_key": str(body.get("model_key") or ""),
             "model_name": model_name,

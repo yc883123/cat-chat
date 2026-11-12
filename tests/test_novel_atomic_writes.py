@@ -82,6 +82,30 @@ class AtomicNovelWriteTests(ManuscriptTestCase):
             self.store._lock = original_lock
         return results, errors
 
+    def test_prompt_saves_do_not_bump_body_revision_and_same_revision_conflicts(self):
+        book = self._create()
+        bid = book["id"]
+        results, errors = self.interleave(
+            lambda: self.store.save_system_prompt(bid, text="第一窗口", expected_revision=0),
+            lambda: self.store.save_system_prompt(bid, text="第二窗口", expected_revision=0),
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(next(iter(errors.values())), NovelConflictError)
+        current = self.store.get_book(bid)["book"]
+        self.assertEqual(current["revision"], book["revision"])
+        self.assertEqual(current["global_system_prompt_revision"], 1)
+        _, errors = self.interleave(
+            lambda: self.store.save_storyboard_prompt_config(bid, {
+                "prompt_source": "skill", "template_draft": "保留模板", "skill_ids": ["a", "b", "a"], "revision": 0}),
+            lambda: self.store.save_system_prompt(bid, text="独立规则", expected_revision=1),
+        )
+        self.assertEqual(errors, {})
+        current = self.store.get_book(bid)["book"]
+        self.assertEqual(current["storyboard_prompt_config"]["skill_ids"], ["a", "b"])
+        self.assertEqual(current["global_system_prompt"], "独立规则")
+        self.assertEqual(current["revision"], book["revision"])
+
     def test_two_saves_without_revision_both_survive_with_distinct_numbers(self):
         book = self._create()
         bid = book["id"]

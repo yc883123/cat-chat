@@ -41,16 +41,25 @@ class LabelerSkillLifecycleTests(unittest.TestCase):
         self.run_case(r"""
 select.handlers.change();
 assert.equal(p.labeler.skillPick.id,'skill-a');assert.equal(prompt.value,'original');
-assert.equal(output.hidden,true);assert.equal(calls,0);assert.match(note.textContent,/对话同款链路/);
+assert.equal(output.hidden,true);assert.equal(calls,0);assert.match(note.textContent,/共同生效/);
 select.value='skill-b';select.selectedOptions=[{textContent:'Skill B'}];select.handlers.change();
 assert.equal(p.labeler.skillPick.id,'skill-b');assert.equal(prompt.value,'original');assert.equal(calls,0);
 """)
 
-    def test_clear_resets_skill_and_prompt_without_pending_write(self):
+    def test_clear_only_resets_prompt_and_keeps_skill(self):
         self.run_case(r"""
 select.handlers.change();p.clearSystemPrompt();
-assert.equal(prompt.value,'');assert.equal(select.value,'');assert.equal(p.labeler.skillPick,null);
-assert.equal(output.hidden,false);assert.equal(calls,0);
+assert.equal(prompt.value,'');assert.equal(select.value,'skill-a');assert.equal(p.labeler.skillPick.id,'skill-a');
+assert.equal(output.hidden,true);assert.equal(calls,0);
+""")
+
+    def test_config_submits_manual_rules_and_skill_together(self):
+        self.run_case(r"""
+select.handlers.change();
+const config=p.collectConfig();
+assert.equal(config.system_prompt,'original');assert.equal(config.skill_id,'skill-a');assert.equal(config.engine,'chat');
+select.value='';select.handlers.change();
+assert.equal(p.collectConfig().system_prompt,'original');assert.equal(p.collectConfig().skill_id,undefined);
 """)
 
     def test_manual_input_and_page_changes_preserve_user_content(self):

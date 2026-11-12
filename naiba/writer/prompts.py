@@ -437,10 +437,11 @@ STEP_SYSTEM = {
 }
 
 
-def step_system(step: str) -> str:
+def step_system(step: str, global_system_prompt: str = "") -> str:
     if step not in STEP_SYSTEM:
         raise PromptError(f"未知步骤：{step}")
-    return STEP_SYSTEM[step]
+    global_text = str(global_system_prompt or "")
+    return "\n\n".join(part for part in (global_text, STEP_SYSTEM[step]) if part.strip())
 
 
 # ---- 设定各步的用户提示词（预检与正式提交共用） ----
@@ -933,7 +934,8 @@ def build_draft_context(setup: dict[str, Any], chapter: dict[str, Any], *,
 
 
 def budget_report(*, content: str, slots: list[dict[str, Any]],
-                  context_window: int, extra_items: dict[str, int] | None = None) -> dict[str, Any]:
+                  context_window: int, extra_items: dict[str, int] | None = None,
+                  system: str = "") -> dict[str, Any]:
     """输入预算：included / omitted / estimated_tokens / context_known / fits。
 
     已知容量不足在排队前阻止；容量未知且输入很大时要求用户确认（不伪造模型上限）。
@@ -943,7 +945,7 @@ def budget_report(*, content: str, slots: list[dict[str, Any]],
          "reason": str(slot.get("reason") or "")}
         for slot in slots if not slot.get("included")
     ]
-    chars = len(content)
+    chars = len(content) + len(system)
     if extra_items:
         chars += sum(int(value) for value in extra_items.values())
     estimated_tokens = int(chars * TOKENS_PER_CHAR) + 1
@@ -967,6 +969,7 @@ def budget_report(*, content: str, slots: list[dict[str, Any]],
         "fits": fits,
         "suggestions": suggestions,
         "chars": chars,
+        "system_chars": len(system),
     }
 
 

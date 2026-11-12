@@ -7124,6 +7124,56 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
   #studioPageLibrary .studio-row-delete { right: 48px; }
   #studioPageLibrary .studio-model-row { grid-template-columns: minmax(0, 1fr); }
 }
+/* 内容生成：沿用工作台分页与16px表单间距。 */
+#studioView [hidden]:is(.studio-source-tabs, .studio-topbar-tools),
+#studioPageLibrary [hidden]:is(#studioSkillConfig, #studioSkillHistory, #studioCats, #studioList, #studioVarsForm, .studio-detail-head, #studioBodyPreviewWrap, .studio-followup, .studio-thread-context) { display: none !important; }
+.studio-source-tabs { flex: none; flex-wrap: wrap; }
+.studio-system-prompt { flex: none; min-width: 0; border-bottom: 1px solid var(--line); padding-bottom: 12px; }
+.studio-system-prompt summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
+.studio-system-prompt small, .studio-system-actions small, .studio-followup > small { color: var(--muted); font-weight: 400; overflow-wrap: anywhere; }
+.studio-system-prompt textarea, .studio-followup textarea { display: block; width: 100%; min-width: 0; resize: vertical; padding: 10px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); color: var(--text); }
+.studio-system-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.studio-system-actions .primary-button { margin-left: auto; }
+.content-skill-picker { display: flex; flex-direction: column; min-width: 0; gap: 8px; margin-top: 8px; }
+.content-skill-picker > input { width: 100%; min-width: 0; min-height: 36px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); color: var(--text); }
+.content-skill-selected { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.content-skill-chip { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; min-width: 0; padding: 5px 9px; border: 1px solid var(--violet-line); border-radius: var(--r-md); background: var(--accent-soft); color: var(--text); cursor: pointer; }
+.content-skill-chip > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.content-skill-options { display: flex; flex-direction: column; max-height: 180px; overflow-y: auto; min-width: 0; border: 1px solid var(--line); border-radius: var(--r-md); }
+.content-skill-option { text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--text); padding: 9px 10px; cursor: pointer; }
+.content-skill-option:hover { background: var(--accent-soft); }
+.content-skill-options p, .content-skill-picker > small { padding: 4px 8px; color: var(--muted); overflow-wrap: anywhere; }
+.content-skill-picker > button { align-self: flex-start; }
+#studioSkillHistory { display: flex; flex-direction: column; gap: 8px; padding: 16px; overflow-y: auto; }
+.content-skill-history-row { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 10px; text-align: left; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); color: var(--text); cursor: pointer; }
+.content-skill-history-row > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.content-skill-history-row > small { color: var(--muted); }
+.content-skill-history-row.active { border-color: var(--violet-line); background: var(--accent-soft); }
+.studio-followup { flex: none; min-width: 0; padding: 12px 16px; border-top: 1px solid var(--line); background: var(--surface); }
+.studio-followup > label { display: block; margin-top: 8px; }
+.studio-followup textarea { max-height: 160px; }
+.studio-thread-context { flex: none; max-height: 160px; overflow: auto; padding: 0 16px; }
+.studio-thread-context summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.studio-thread-context pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+#studioPageLibrary .studio-result-body { min-height: 100px; }
+#studioPageLibrary[data-prompt-source="skill"] #studioTaskHistory { display: none; }
+#studioPageLibrary .studio-result-menu { margin: 0; }
+#novelStoryboardTemplatePanel, #novelStoryboardSkillPanel { min-width: 0; margin-top: 12px; }
+#novelStoryboardTemplatePanel[hidden], #novelStoryboardSkillPanel[hidden] { display: none !important; }
+#novelStoryboardConfigStatus { overflow-wrap: anywhere; }
+.work-system-prompt-dialog { min-width: 0; width: min(680px, calc(100vw - 24px)); max-width: calc(100vw - 24px); }
+.work-system-prompt-dialog :is(form, label, .writer-dialog-form) { min-width: 0; }
+.work-system-prompt-dialog textarea { box-sizing: border-box; width: 100%; min-width: 0; max-height: 55vh; resize: vertical; }
+.cbm-convert-system { width: 100%; min-width: 0; }
+.cbm-convert-system summary { cursor: pointer; }
+.cbm-convert-system textarea { box-sizing: border-box; width: 100%; min-width: 0; padding: 10px; background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: var(--r-md); resize: vertical; }
+@media (max-width: 760px) {
+  .studio-source-tabs { flex: 1; }
+  .studio-topbar { flex-wrap: wrap; }
+  .studio-followup { padding: 10px 12px; }
+  .studio-followup textarea { max-height: 100px; }
+  .studio-thread-context { max-height: 95px; }
+}
 /* wb-foundation:end */
 
 /* wb-books:start */

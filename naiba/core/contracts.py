@@ -34,6 +34,40 @@ WRITER_SETUP_SNAPSHOT_KEY = "setup_snapshot"
 # state; current_task_id remains available for polling and recovery.
 WRITER_PIPELINE_STOPPING = "stopping"
 
+# Workbench generation rules are explicit per request; saved defaults are never
+# applied by the task runner. Followups and retries reuse the frozen input.
+STUDIO_SYSTEM_PROMPT_KEY = "system_prompt"
+WORK_GLOBAL_SYSTEM_PROMPT_KEY = "global_system_prompt"
+WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY = "global_system_prompt_revision"
+STORYBOARD_PROMPT_CONFIG_KEY = "storyboard_prompt_config"
+STUDIO_PROMPT_SOURCE_KEY = "prompt_source"
+STUDIO_SKILL_IDS_KEY = "skill_ids"
+STUDIO_SKILL_SNAPSHOT_KEY = "skill_snapshot"
+STUDIO_THREAD_ID_KEY = "thread_id"
+STUDIO_PARENT_TASK_ID_KEY = "parent_task_id"
+STUDIO_HISTORY_MESSAGES_KEY = "history_messages"
+STUDIO_TRACE_MESSAGES_KEY = "trace_messages"
+
+
+class WorkbenchPromptConfig(TypedDict, total=False):
+    system_prompt: str
+    global_system_prompt: str
+    global_system_prompt_revision: int
+    prompt_source: Literal["template", "skill"]
+    skill_ids: list[str]
+    skill_snapshot: dict[str, Any]
+    thread_id: str
+    parent_task_id: str
+    history_messages: list[dict[str, Any]]
+    trace_messages: list[dict[str, Any]]
+
+
+class StoryboardPromptConfig(TypedDict, total=False):
+    prompt_source: Literal["template", "skill"]
+    template_draft: str  # Stored template draft; generation accepts system_prompt for compatibility.
+    skill_ids: list[str]
+    revision: int
+
 # Durable Job continuation identity. The child snapshot and source result are
 # written in the same SQLite transaction; checkpoints never identify a job.
 JOB_RESUMED_FROM_KEY = "_resumed_from"
@@ -43,6 +77,8 @@ JOB_SUBMISSION_PENDING_KEY = "submission_pending"
 JOB_SUBMISSION_GUARD_KEY = "submission_guard_version"
 # ComfyUI checkpoints persist each segment's submitting/unknown state.
 COMFYUI_SUBMISSIONS_KEY = "submissions"
+# Editing metadata only: this does not change a ComfyUI graph or execution.
+COMFYUI_BATCH_CONVERT_KEY = "convert"
 
 
 class CompactionResult(TypedDict, total=False):

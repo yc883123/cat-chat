@@ -7097,6 +7097,9 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
   border-radius: var(--r-md);
 }
 :is(.studio-view, .super-agent-view) :is(.primary-button, .control-button.primary) { min-height: var(--wb-ctl-h-lg); }
+/* 只放图案的按钮不能继承文字按钮的左右内边距：34px 宽减去 24px padding 后
+   会把 16px 的图标压成 8px 宽（历史产出的时钟就是这么变成半个的）。 */
+:is(.studio-view, .super-agent-view) .studio-icon-button { padding: 0; }
 :is(.studio-view, .super-agent-view) :is(.control-button.danger, .control-button.is-danger, .labeler-wipe-btn) { color: var(--st-bad-fg); }
 :is(.studio-view, .super-agent-view) :is(input:not([type="checkbox"]):not([type="radio"]):not([type="file"]), select) {
   min-height: var(--wb-ctl-h); min-width: 0; max-width: 100%; font-size: var(--wb-fs-body);
@@ -7180,6 +7183,9 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
 .content-skill-chip { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; min-width: 0; padding: 5px 9px; border: 1px solid var(--violet-line); border-radius: var(--r-md); background: var(--accent-soft); color: var(--text); cursor: pointer; }
 .content-skill-chip > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .content-skill-options { display: flex; flex-direction: column; max-height: 180px; overflow-y: auto; min-width: 0; border: 1px solid var(--line); border-radius: var(--r-md); }
+/* 列布局 + max-height 时子项默认会被压扁（flex-shrink:1）：Skill 一多每行就缩到 19px，
+   nowrap 的文字互相重叠。条目保持自身高度，由容器滚动。 */
+.content-skill-options > * { flex: none; }
 .content-skill-option { text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--text); padding: 9px 10px; cursor: pointer; }
 .content-skill-option:hover { background: var(--accent-soft); }
 .content-skill-options p, .content-skill-picker > small { padding: 4px 8px; color: var(--muted); overflow-wrap: anywhere; }
@@ -7328,6 +7334,9 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
 }
 .wb-media-menu-panel.is-up { top: auto; bottom: calc(100% + 4px); }
 .wb-media-menu:not([open]) > .wb-media-menu-panel { display: none; }
+/* 结果卡的「⋯」在收窄后的结果栏里靠左：菜单按右对齐会伸到卡片外、被 .studio-result 的
+   overflow:hidden 裁掉（用户只看到「对话」两个字）。这里改成向右展开。 */
+#studioPageLibrary .studio-result-menu .wb-media-menu-panel { left: 0; right: auto; }
 .wb-media-menu-panel .control-button { width: 100%; justify-content: flex-start; white-space: normal; text-align: left; }
 
 #studioPageLabeler .labeler-columns { grid-template-columns: minmax(210px, 240px) minmax(0, 1fr) minmax(0, 1fr); gap: 0; padding: 0; }

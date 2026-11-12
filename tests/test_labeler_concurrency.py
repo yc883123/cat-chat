@@ -369,12 +369,21 @@ class ConcurrencyConfigTests(unittest.TestCase):
                 workers=_workers(1),
                 supervisor={"model_key": "online:judge", "model_name": "judge-model"}),
         })
+        # 等任务落到终态再改快照：runner 收尾会重写同一份记录，抢在它前面改写会被覆盖回去
+        # （2026-11-12 本机全量跑偶发：改完又被写回当前版本 ⇒ 不抛错，用例假红）。
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            current = store.get_task(task["id"])
+            if current and str(current.get("status") or "") not in {"queued", "running"}:
+                break
+            time.sleep(0.02)
         # 人为改坏快照里的策略版本，模拟老任务换了监督标准。
         record = store.get_task(task["id"])
         record["input"]["config"]["supervisor_version"] = "v0"
         store._write_json(store._record_path(task["id"]), record)
-        with self.assertRaises(LabelerTaskError):
+        with self.assertRaises(LabelerTaskError) as raised:
             jobs.continue_task(task["id"], mode="unfinished", confirm_uncertain=True)
+        self.assertIn("监督策略版本", str(raised.exception), "必须因为版本过期而拒绝，而不是别的分支")
 
 
 class SupervisionContractTests(unittest.TestCase):

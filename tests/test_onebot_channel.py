@@ -791,7 +791,9 @@ class WebSocketAuthTests(unittest.TestCase):
     """反向 WebSocket 的路径与口令校验（本地假 NapCat，不访问真实 QQ）。"""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        # Windows 上服务线程可能比 stop() 晚一步释放 data/channels/qq.db，
+        # 目录清理失败不该把断言已经通过的用例判红（4.4.3 CI 实测 WinError 32）。
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.root = Path(self.tmp.name)
         self.addCleanup(self.tmp.cleanup)
 

@@ -8,7 +8,7 @@ import os
 import re
 import threading
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 logger = logging.getLogger("naiba.skill_runtime")
 
@@ -25,6 +25,32 @@ SKILL_POLICY_MODES = {"auto", "pinned", "exclusive"}
 # and re-breaks DeepSeek's token-prefix cache every turn — a conversation is
 # blocked with a user-visible notice once it reaches this bound.
 
+
+
+# 编译缓存（``__pycache__/*.pyc``）不是 Skill 资产：它是二进制，既不能当正文，
+# 也不能当参考脚本按 UTF-8 读——监督员读不出来会整单拒绝（远端 4.4.2 反馈）。
+_CACHE_DIR_NAME = "__pycache__"
+
+
+def _is_cache_path(rel: Path) -> bool:
+    return any(part == _CACHE_DIR_NAME for part in rel.parts)
+
+
+def _iter_script_files(scripts_dir: Path) -> Iterator[Path]:
+    """逐个产出 scripts/ 下的真实文件，跳过编译器缓存与符号链接。"""
+    for item in sorted(scripts_dir.rglob("*")):
+        try:
+            if not item.is_file() or item.is_symlink():
+                continue
+            # 目录名兜住 __pycache__，后缀兜住被拷到别处的散落 .pyc/.pyo：
+            # 它们都是二进制，监督员按 UTF-8 读会失败。
+            if item.suffix.lower() in {".pyc", ".pyo"}:
+                continue
+            if _is_cache_path(item.relative_to(scripts_dir)):
+                continue
+            yield item
+        except (OSError, ValueError):
+            continue
 
 
 def _strip_frontmatter(text: str) -> str:
@@ -252,7 +278,8 @@ class SkillCatalog:
                 if skill_id in self.hidden_ids:
                     continue
                 scripts_dir = skill_file.parent / "scripts"
-                script_count = sum(1 for item in scripts_dir.rglob("*") if item.is_file()) if scripts_dir.exists() else 0
+                script_count = (sum(1 for _ in _iter_script_files(scripts_dir))
+                                if scripts_dir.is_dir() else 0)
                 providers = id_providers.setdefault(skill_id, [])
                 directory_key = str(directory)
                 if directory_key not in providers:
@@ -359,7 +386,7 @@ class SkillCatalog:
                 # 不下钻：点目录、agents/（UI 元数据）、scripts/（只报名单）。
                 dir_names[:] = sorted(
                     d for d in dir_names
-                    if not d.startswith(".") and d not in {"agents", "scripts"}
+                    if not d.startswith(".") and d not in {"agents", "scripts", _CACHE_DIR_NAME}
                     and not (here / d).is_symlink()
                 )
                 if here == root and "SKILL.md" in file_names:
@@ -369,12 +396,12 @@ class SkillCatalog:
         except OSError:
             pass
         # scripts/ 在上面被剪枝（正文绝不入包），这里单独收一份相对路径名单。
+        # __pycache__ 是解释器缓存，不是参考脚本：监督员会按 UTF-8 逐个读取名单里的
+        # 文件，把 .pyc 收进来会直接抛 UnicodeError，导致整单无法开始。
         scripts_dir = root / "scripts"
         if scripts_dir.is_dir():
-            for script_path in sorted(scripts_dir.rglob("*")):
+            for script_path in _iter_script_files(scripts_dir):
                 try:
-                    if not script_path.is_file() or script_path.is_symlink():
-                        continue
                     script_names.append(script_path.resolve().relative_to(root).as_posix())
                 except (OSError, ValueError):
                     continue

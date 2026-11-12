@@ -75,7 +75,11 @@ def freeze_supervision_rules(app: Any, config: dict[str, Any]) -> str:
                 path.relative_to(root)
                 content = path.read_text(encoding="utf-8")
             except (OSError, UnicodeError, ValueError) as exc:
-                raise ValueError("Skill 参考脚本无法完整读取，不能完整监督") from exc
+                # 带上具体文件：用户看到名字才能自己把它移走或另存为 UTF-8。
+                raise ValueError(
+                    f"Skill 参考脚本无法完整读取：{name}；"
+                    "请把它移出 scripts/ 或另存为 UTF-8，否则不能完整监督"
+                ) from exc
             scripts.append({"path": str(name), "content": content})
         rules["skill_scripts"] = scripts
     text = json.dumps(rules, ensure_ascii=False, sort_keys=True)

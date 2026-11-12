@@ -25,6 +25,66 @@ from tests.test_labeler_concurrency import (
 )
 
 
+class SkillScriptCacheFreezeTests(unittest.TestCase):
+    """Skill 里的 ``__pycache__`` 不能让监督规则冻结失败（4.4.2 远端反馈）。"""
+
+    def test_pycache_scripts_do_not_break_rules_freeze(self):
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        from naiba.labeler.supervisor import freeze_supervision_rules
+        from naiba.skills.catalog import SkillCatalog
+
+        workspace = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=str(workspace)) as tmp:
+            root = Path(tmp) / "skills"
+            skill_dir = root / "demo"
+            (skill_dir / "scripts" / "__pycache__").mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: demo\n---\n\n只描述画面里真实可见的内容。", encoding="utf-8")
+            (skill_dir / "scripts" / "run.py").write_text("print('ok')\n", encoding="utf-8")
+            (skill_dir / "scripts" / "__pycache__" / "run.cpython-312.pyc").write_bytes(
+                b"U\r\r\n\x00\x00\x00\x00")
+            catalog = SkillCatalog([root])
+            item = catalog.scan()[0]
+            rules = freeze_supervision_rules(
+                SimpleNamespace(catalog=catalog),
+                {"engine": "chat", "skill_id": item["id"], "system_prompt": "",
+                 "preset": "general", "output_mode": "keywords", "language": "zh"},
+            )
+            payload = json.loads(rules)
+            self.assertEqual([row["path"] for row in payload["skill_scripts"]],
+                             ["scripts/run.py"])
+            self.assertEqual(payload["skill_scripts"][0]["content"], "print('ok')\n")
+
+
+    def test_unreadable_script_reports_the_offending_file(self):
+        """读不了的参考脚本要报出文件名，用户才知道该挪哪个。"""
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        from naiba.labeler.supervisor import freeze_supervision_rules
+        from naiba.skills.catalog import SkillCatalog
+
+        workspace = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=str(workspace)) as tmp:
+            root = Path(tmp) / "skills"
+            skill_dir = root / "demo"
+            (skill_dir / "scripts").mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: demo\n---\n\n只描述画面里真实可见的内容。", encoding="utf-8")
+            (skill_dir / "scripts" / "notes.bin").write_bytes(b"\xff\xfe\x00gbk-ish")
+            catalog = SkillCatalog([root])
+            item = catalog.scan()[0]
+            with self.assertRaises(ValueError) as caught:
+                freeze_supervision_rules(
+                    SimpleNamespace(catalog=catalog),
+                    {"engine": "chat", "skill_id": item["id"], "system_prompt": "",
+                     "preset": "general", "output_mode": "keywords", "language": "zh"},
+                )
+            self.assertIn("scripts/notes.bin", str(caught.exception))
+
+
 class SupervisionIntegrityTests(unittest.TestCase):
     setUp = concurrent_fixtures.ConcurrentRunnerTests.setUp
     _jobs = concurrent_fixtures.ConcurrentRunnerTests._jobs

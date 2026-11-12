@@ -55,6 +55,12 @@ class SkillCatalogBundleTests(unittest.TestCase):
         (skill_dir / "references" / "extra.md").write_text("# 补充\nEXTRA-细则。", encoding="utf-8")
         (skill_dir / "scripts" / "run.py").write_text("print('hi')\n", encoding="utf-8")
         (skill_dir / "scripts" / "sub" / "helper.py").write_text("x = 1\n", encoding="utf-8")
+        # 解释器缓存不是参考脚本：监督员按 UTF-8 逐个读名单，.pyc 会让整单失败。
+        (skill_dir / "scripts" / "__pycache__").mkdir()
+        (skill_dir / "scripts" / "__pycache__" / "run.cpython-312.pyc").write_bytes(
+            b"U\r\r\n\x00\x00\x00\x00\xe3\x00\x00\x00")
+        # 散落在 scripts/ 里的编译产物同样不能当参考脚本。
+        (skill_dir / "scripts" / "legacy.pyc").write_bytes(b"U\r\r\n\x00\x00\x00\x00")
         (skill_dir / "assets" / "flow.json").write_text('{"a":\x00b}', encoding="utf-8")  # 合法后缀的二进制
         (skill_dir / "agents" / "openai.yaml").write_text("display_name: 演示\n", encoding="utf-8")
         (skill_dir / ".hidden" ).mkdir()
@@ -82,7 +88,10 @@ class SkillCatalogBundleTests(unittest.TestCase):
             self.assertNotIn("display_name", bundle)
             self.assertNotIn(".hidden", bundle)
             # 名单与跳过清单：脚本全报（含子目录），二进制资产跳过并注明原因。
+            # __pycache__ 里的 .pyc 既不进正文也不进名单（否则监督员读它必失败）。
             self.assertEqual(payload["script_names"], ["scripts/run.py", "scripts/sub/helper.py"])
+            self.assertFalse(any("__pycache__" in name for name in payload["script_names"]))
+            self.assertEqual(catalog.scan()[0]["script_count"], 2)
             skipped = {row["path"]: row["reason"] for row in payload["skipped"]}
             self.assertEqual(skipped.get("assets/flow.json"), "binary")
             files = {row["path"]: row["chars"] for row in payload["files"]}

@@ -79,13 +79,24 @@ class ReleaseTestExecutionPolicyTests(unittest.TestCase):
         self.assertIn("    needs: test", workflow, "构建/发布必须等测试分片全绿")
 
     def test_shard_list_covers_every_test_module_exactly_once(self):
-        """清单漏一个模块，CI 就会静默跳过它；与 workflow 里的 Compare-Object 互为正反。"""
+        """清单漏一个模块，CI 就会静默跳过它；与 workflow 里的 Compare-Object 互为正反。
+
+        只比对**已入库**的模块：CI 检出里只有入库文件，本地未 add 的 WIP 测试文件不该让这条
+        红（同一工作树可能还有别的会话在写新用例）。
+        """
         import json
+        import subprocess
 
         shards = json.loads((WORKFLOW.parents[1] / "test-shards.json").read_text(encoding="utf-8"))
         flat = [stem for shard in shards for stem in shard]
         self.assertEqual(len(flat), len(set(flat)), "同一模块出现在多个分片里")
-        modules = sorted(path.stem for path in (ROOT / "tests").glob("test_*.py"))
+        try:
+            listed = subprocess.run(["git", "ls-files", "tests/test_*.py"], cwd=ROOT,
+                                    capture_output=True, text=True, encoding="utf-8",
+                                    errors="replace", check=True).stdout
+        except (OSError, subprocess.CalledProcessError) as exc:
+            self.skipTest(f"不是 git 仓库或 git 不可用：{exc}")
+        modules = sorted(Path(line).stem for line in listed.splitlines() if line.strip())
         self.assertEqual(modules, sorted(flat))
         self.assertEqual(4, len(shards))
 

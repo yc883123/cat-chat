@@ -6,7 +6,7 @@
 // 应用级视图：入口在侧栏「对话 / 工作台」模式切换，不再是顶栏会话按钮。
 // ============================================================
 
-import { $, api, applyModelSkinFor, copyText, localFileUrl, setAppView, state, toast } from "./01-core.js";
+import { $, api, applyModelSkinFor, copyText, localFileUrl, randomUuid, setAppView, state, toast } from "./01-core.js";
 import { populateComposerModels } from "./07-models-agents.js";
 import { beginConversationNavigation, isConversationOpenCurrent, loadConversations, openConversation, renderSidebar } from "./08-conversations.js";
 import { applyFilePanelOpenClass, closeSidebar, filePanelState, openSidebar, setLeftSidebarCollapsed, sidebarDesktop } from "./14-file-panel.js";
@@ -1750,7 +1750,7 @@ async function submitGenerate() {
     user_request: userRequest,
     system_prompt: $("#studioSystemPrompt")?.value || "",
     prompt_source: studio.promptSource,
-    request_key: crypto.randomUUID(),
+    request_key: randomUuid(),
     vars: skillMode ? {} : vars,
     model_key: $("#studioProviderSelect")?.value || "",
     model_name: $("#studioModelSelect")?.value || "",

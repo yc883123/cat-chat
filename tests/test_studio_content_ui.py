@@ -31,7 +31,7 @@ function fixture(store=storage()) {
   const $=selector=>{if(!nodes.has(selector))nodes.set(selector,element(selector.includes('Select')?'select':'div'));return nodes.get(selector);};
   class XHR {constructor(){this.upload={};xhr.push(this);}open(){}setRequestHeader(){}send(){}done(path){this.status=200;this.responseText=JSON.stringify({path,name:'image.png'});this.onload();}}
   const context=vm.createContext({console,Map,Set,Promise,JSON,URLSearchParams,sessionStorage:store,
-    crypto:{randomUUID:()=>`key-${++seq}`},$: $,api:(url,options)=>{const response=deferred();requests.push({url,options,...response});return response.promise;},
+    crypto:{randomUUID:()=>`key-${++seq}`},randomUuid:()=>`key-${++seq}`,$: $,api:(url,options)=>{const response=deferred();requests.push({url,options,...response});return response.promise;},
     state:{bootstrap:{settings:{studio:{}},model_profiles:[{model_key:'p1'},{model_key:'p2'}],default_model_key:'p1'}},
     toast:message=>toasts.push(message),localFileUrl:path=>path,applyModelSkinFor:()=>{},
     document:{createElement:element,querySelector:()=>null,querySelectorAll:()=>[],body:element(),dispatchEvent(){}},
@@ -261,6 +261,18 @@ class StudioWorkbenchLayoutGuardTests(unittest.TestCase):
         self.assertIn(".content-skill-options > * { flex: none; }", self.css)
         # 结果卡的 ⋯ 菜单右对齐会伸到卡片外，被 overflow:hidden 裁掉。
         self.assertIn("#studioPageLibrary .studio-result-menu .wb-media-menu-panel { left: 0; right: auto; }", self.css)
+
+    def test_request_keys_do_not_require_secure_context(self):
+        """局域网 http 不是安全上下文，`crypto.randomUUID` 不存在；请求标识必须走 randomUuid()。"""
+        for path in sorted((ROOT / "public/js").glob("*.js")):
+            source = path.read_text(encoding="utf-8")
+            self.assertNotIn(
+                "crypto.randomUUID(", source,
+                f"{path.name} 直接用 crypto.randomUUID()：手机用 http 访问会抛 TypeError",
+            )
+        core = (ROOT / "public/js/01-core.js").read_text(encoding="utf-8")
+        self.assertIn("export function randomUuid()", core)
+        self.assertIn("getRandomValues", core)
 
 
 if __name__ == "__main__":

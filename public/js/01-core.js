@@ -1545,6 +1545,23 @@ export function escapeHtml(value) {
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#039;');
 }
+
+// 请求标识（提词库生成/追问的 request_key 等）需要唯一，但不要求密码学强度。
+// 局域网用 http 打开时不在安全上下文，`crypto.randomUUID` 直接不存在（手机实测
+// 「一点生成就报 crypto.randomUUID is not a function」）；`getRandomValues` 在
+// 非安全上下文仍可用，再退到时间戳 + 随机串。
+export function randomUuid() {
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID();
+  if (typeof cryptoApi?.getRandomValues === 'function') {
+    const bytes = cryptoApi.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+}
 export function restoreSafeHtml(escaped) {
   if (!String(escaped || '').includes('&lt;')) return String(escaped || '');
   const colors = new Set(['black','silver','gray','white','maroon','red','purple','fuchsia','green','lime','olive','yellow','navy','blue','teal','aqua','orange','aliceblue','transparent']);

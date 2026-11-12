@@ -1,5 +1,5 @@
 // 内容生成共享 Skill 多选；只选文档，权限由服务端任务快照限定。
-import { api } from "./01-core.js";
+import { api, randomUuid } from "./01-core.js";
 
 // A request receipt survives network failures and page reloads in this tab.
 // Keep it until the server confirms acceptance; identical retries reuse the key.
@@ -24,7 +24,7 @@ export function prepareContentFollowup(taskId, text, images) {
   if (existing) {
     return { user_request: text, images: refs, request_key: existing.request_key };
   }
-  const request = { user_request: text, images: refs, request_key: crypto.randomUUID() };
+  const request = { user_request: text, images: refs, request_key: randomUuid() };
   sessionStorage.setItem(FOLLOWUP_RECEIPTS_KEY, JSON.stringify([
     ...rows, { task_id: taskId, ...request },
   ]));

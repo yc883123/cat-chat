@@ -287,14 +287,19 @@ class SnapshotView:
             root = str(directory / digest / "files")
             self._rows.append({"id": payload["id"], "name": payload["name"], "root": root,
                                "path": str(Path(root) / payload["main"]), "source": payload["source"]})
-            self._aliases.append((self._key(root), self._key(root)))
-            self._aliases.append((self._key(payload["source_root"]), self._key(root)))
+            # 每个来源都按词法拼法和真实路径各登记一次：同一目录可能既是 8.3 短名
+            # （`RUNNER~1`）又是长名，两条路径落到同一份快照，不能因拼法被判越界。
+            # 目标侧只登记快照根的词法拼法，文档键就是用这个拼法建的。
+            destination = self._key(root)
+            for source in (root, payload["source_root"]):
+                for alias in {self._key(source), self._key(os.path.realpath(source))}:
+                    self._aliases.append((alias, destination))
             for relative, text in payload["documents"].items():
                 self._documents[self._key(str(Path(root) / relative))] = text
 
     @staticmethod
     def _key(path: str) -> str:
-        # Use lexical normalization only. No filesystem symlink resolution on tool paths.
+        # 词法归一；同一目录的两种拼法（8.3 短名 / 长名）由 _path 在失败后按真实路径再比一次。
         return os.path.normcase(os.path.abspath(path)).replace("\\", "/")
 
     def scan(self) -> list[dict[str, Any]]:
@@ -309,11 +314,21 @@ class SnapshotView:
             if len(self._rows) != 1:
                 raise ValueError("多个 Skill 请使用所属 root 的完整文档路径")
             raw = str(Path(self._rows[0]["root"]) / raw)
-        key = self._key(raw)
+        # 先按词法键比；失败后再按真实路径比一次（同一目录的 8.3 短名与长名拼法不同时，
+        # 词法键对不上）。读取仍只从内存快照取文本，解析出的路径不落盘点，越界目标解析后
+        # 同样匹配不到别名。
+        mapped = self._alias(self._key(raw))
+        if mapped is None:
+            mapped = self._alias(self._key(os.path.realpath(raw)))
+        if mapped is not None:
+            return mapped
+        raise ValueError("路径不在本次冻结 Skill 文档内，已拒绝")
+
+    def _alias(self, key: str) -> str | None:
         for alias, target in sorted(self._aliases, key=lambda pair: -len(pair[0])):
             if key == alias or key.startswith(alias + "/"):
                 return target + key[len(alias):]
-        raise ValueError("路径不在本次冻结 Skill 文档内，已拒绝")
+        return None
 
     def read_skill_content(self, path: str) -> str:
         key = self._path(str(path))

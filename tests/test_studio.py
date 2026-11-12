@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 ROOT = Path(__file__).resolve().parents[1]
 
 from naiba.core.exceptions import TaskCancelled  # noqa: E402
-from naiba.core.paths import normalized_path_key  # noqa: E402
+from naiba.core.paths import resolved_path_key  # noqa: E402
 from naiba.config import ConfigStore  # noqa: E402
 from naiba.studio.catalog import CatalogError, StudioCatalog  # noqa: E402
 from naiba.studio.custom import CustomStore  # noqa: E402
@@ -358,8 +358,8 @@ class StudioImageValidationTests(unittest.TestCase):
             "images": [{"path": str(self.png_a), "thumb_path": str(self.png_b), "name": "a"}],
         })
         keys = store.referenced_upload_paths()
-        self.assertIn(normalized_path_key(self.png_a), keys)
-        self.assertIn(normalized_path_key(self.png_b), keys)
+        self.assertIn(resolved_path_key(self.png_a), keys)
+        self.assertIn(resolved_path_key(self.png_b), keys)
 
 
 class StudioPrefsConfigTests(unittest.TestCase):

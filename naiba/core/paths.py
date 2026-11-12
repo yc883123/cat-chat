@@ -41,6 +41,23 @@ def normalized_path_key(value: Any) -> str:
         return ""
 
 
+def resolved_path_key(value: Any) -> str:
+    """路径比较键：真实路径 + 大小写归一，把同一目录的两种拼法归成一个键。
+
+    Windows 上同一目录可能既是 8.3 短名（用户名里的 ``RUNNER~1`` 这类写法）又是长名：写侧经过
+    ``resolve()``、读侧来自目录扫描时，词法键会各算一份，让「仍被引用」的文件被当成无引用删掉。
+    凡是要在**两种写法之间**做同一性判定的引用保护，两侧都用本函数；一般的缓存键仍用
+    ``normalized_path_key``（不触盘）。路径不存在时 ``realpath`` 退化为词法归一，判定不抛异常。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return os.path.normcase(os.path.abspath(os.path.realpath(os.path.expanduser(text))))
+    except (OSError, ValueError):
+        return normalized_path_key(text)
+
+
 def path_within_any(path: Path, roots: Iterable[Path]) -> bool:
     """``path`` 是否位于任一 ``root`` 内（多允许根的统一判定入口）。"""
     return any(path_within(path, root) for root in roots)

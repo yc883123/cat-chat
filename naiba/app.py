@@ -42,7 +42,7 @@ from naiba.core.conv_files import (
     browse_workspace_tree,
     folder_index,
 )
-from naiba.core.paths import normalized_path_key, path_within
+from naiba.core.paths import normalized_path_key, path_within, resolved_path_key
 from naiba.core.usage_stats import cost_for, tokens_from_summary
 from naiba.jobs import JobRegistry
 from naiba.llm.provider_presets import apply_preset_values, provider_preset_key_url, provider_presets_payload
@@ -2857,7 +2857,9 @@ class NaibaChatApp:
         studio = getattr(self, "studio", None)
         if studio is not None:
             try:
-                if normalized_path_key(target) in studio.referenced_upload_paths():
+                # Studio 的键走真实路径：记录里的图片写入时已 resolve()，扫描到的 target 可能是
+                # 8.3 短名，词法键会让同一文件两种写法对不上（与 naiba/studio/images.py 同口径）。
+                if resolved_path_key(target) in studio.referenced_upload_paths():
                     return True
             except (OSError, ValueError):
                 return True  # 判定不了时宁可保留

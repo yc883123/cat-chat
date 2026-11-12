@@ -109,8 +109,12 @@ def validate_image_refs(data_dir: Path, refs: Any, *, max_images: int = MAX_IMAG
 
 
 def referenced_upload_paths(task_records: list[dict[str, Any]]) -> set[str]:
-    """任务记录里引用的图片路径（主图 + 缩略图），供缓存清理做引用保护。"""
-    from naiba.core.paths import normalized_path_key
+    """任务记录里引用的图片路径（主图 + 缩略图），供缓存清理做引用保护。
+
+    键用 ``resolved_path_key``：写入侧（``validate_image_refs``）已 ``resolve()`` 成长名，
+    清理侧扫描目录拿到的可能是 8.3 短名，词法键会让同一文件的两种写法对不上。
+    """
+    from naiba.core.paths import resolved_path_key
 
     keys: set[str] = set()
     for record in task_records:
@@ -128,7 +132,7 @@ def referenced_upload_paths(task_records: list[dict[str, Any]]) -> set[str]:
                 text = str(ref.get(field) or "").strip()
                 if not text:
                     continue
-                key = normalized_path_key(Path(text).expanduser())
+                key = resolved_path_key(Path(text).expanduser())
                 if key:
                     keys.add(key)
     return keys

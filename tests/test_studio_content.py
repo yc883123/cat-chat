@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
-from naiba.core.paths import normalized_path_key
+from naiba.core.paths import resolved_path_key
 from naiba.skills.agent import SkillAgent
 from naiba.skills.catalog import SkillCatalog
 from naiba.studio.content import ContentSnapshots, READ_TOOLS, compose_system_prompt
@@ -33,6 +33,22 @@ def _short_path(path: str) -> str | None:
         return buffer.value or None
     except (AttributeError, OSError):
         return None
+
+
+def _junction(link: Path, target: Path) -> bool:
+    """Create a directory junction (``link`` -> ``target``) when this machine allows it.
+
+    联接和 8.3 短名一样，让同一个目录带上第二种拼法，用来在没启用 8.3 的卷上复现
+    「同一文件两种写法」的判定。不需要管理员权限。
+    """
+    import subprocess
+
+    try:
+        done = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                              capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0 and link.exists()
 
 
 class OfflineConfig:
@@ -193,6 +209,37 @@ class StudioContentTests(unittest.TestCase):
         frozen = view.scan()[0]
         self.assertIn("长名规则", view.read_skill_content(frozen["path"]))
         self.assertIn("长名参考", view.read_skill_content(str(Path(frozen["root"]) / "references" / "same.md")))
+
+    @unittest.skipUnless(os.name == "nt", "只有 Windows 支持目录联接")
+    def test_tool_path_accepts_another_spelling_of_the_same_folder(self):
+        """同一目录的另一种拼法（联接 / 8.3 短名）读冻结文档不能判「不在冻结范围内」，越界仍拒绝。"""
+        alias = self.root / "one-alias"
+        if not _junction(alias, self.skill_dir / "one"):
+            self.skipTest("当前环境不能创建目录联接")
+        self.addCleanup(lambda: os.rmdir(alias) if alias.is_dir() else None)
+        task = self.start(prompt_source="skill", skill_ids=[self.ids["one"]])
+        view = ContentSnapshots(self.app.paths.data_dir).view(task["input"]["skill_snapshot"])
+        ok, message = view.execute("read_file", {"path": str(alias / "references" / "same.md")})
+        self.assertTrue(ok, message)
+        self.assertIn("one私有参考文档", message)
+        outside = self.root / "outside-skill.txt"
+        outside.write_text("越界内容", encoding="utf-8")
+        ok, message = view.execute("read_file", {"path": str(outside)})
+        self.assertFalse(ok)
+        self.assertIn("不在本次冻结", message)
+
+    @unittest.skipUnless(os.name == "nt", "只有 Windows 支持目录联接")
+    def test_referenced_uploads_unify_two_spellings_of_one_file(self):
+        """引用保护键要认同一文件的两种拼法，否则清理侧会把还在用的图片当无引用删掉。"""
+        image = _write_png(self.app.paths.data_dir / "uploads" / "spell.png")
+        alias = self.root / "uploads-alias"
+        if not _junction(alias, image.parent):
+            self.skipTest("当前环境不能创建目录联接")
+        self.addCleanup(lambda: os.rmdir(alias) if alias.is_dir() else None)
+        self.finish(self.start(images=[{"path": str(image), "name": "拼法"}]))
+        refs = self.service.referenced_upload_paths()
+        self.assertIn(resolved_path_key(image), refs)
+        self.assertIn(resolved_path_key(alias / image.name), refs)
 
     def test_full_skill_snapshot_shared_ordered_and_fail_closed(self):
         long_text = "完整主文，不截断。" * 9000
@@ -370,7 +417,7 @@ class StudioContentTests(unittest.TestCase):
         self.assertFalse(reader.is_alive())
         self.assertFalse(writer.is_alive())
         self.assertEqual(failures, [])
-        self.assertIn(normalized_path_key(image), store.referenced_upload_paths())
+        self.assertIn(resolved_path_key(image), store.referenced_upload_paths())
 
     def test_followup_images_survive_early_delete_without_base64_on_disk(self):
         image = _write_png(self.app.paths.data_dir / "uploads" / "first.png")
@@ -381,8 +428,8 @@ class StudioContentTests(unittest.TestCase):
         self.assertEqual(first_message, self.models.calls[1][0][1])
         self.service.jobs.delete([first["id"]])
         refs = self.service.referenced_upload_paths()
-        self.assertIn(normalized_path_key(image), refs)
-        self.assertIn(normalized_path_key(thumb), refs)
+        self.assertIn(resolved_path_key(image), refs)
+        self.assertIn(resolved_path_key(thumb), refs)
         third = self.finish(self.follow(second, "image3"))
         self.assertEqual(first_message, self.models.calls[-1][0][1])
         serialized = self.service._store._record_path(third["id"]).read_text(encoding="utf-8")

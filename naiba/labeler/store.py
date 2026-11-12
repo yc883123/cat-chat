@@ -28,6 +28,7 @@ from naiba.labeler import (
     LABELER_RESUMABLE_STATUSES,
     LABELER_TASK_STATUSES,
 )
+from naiba.labeler.gate import MAX_WORKERS
 
 # 缓存引用保护要覆盖的状态：活跃 + 还能「继续未完成/重试」的。
 PROTECTED_STATUSES: tuple[str, ...] = tuple(
@@ -35,6 +36,31 @@ PROTECTED_STATUSES: tuple[str, ...] = tuple(
 )
 # 任务 ID → 输出目录名：只允许生成器产出的形状，防止任何路径逃逸。
 _SAFE_TASK_ID_RE = re.compile(r"^tg-[0-9]{8}-[0-9a-f]{12}$")
+
+
+def _clean_model_ref(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {"model_key": "", "model_name": ""}
+    return {
+        "model_key": str(raw.get("model_key") or "").strip(),
+        "model_name": str(raw.get("model_name") or "").strip(),
+    }
+
+
+def _clean_concurrency(raw: Any) -> dict[str, Any]:
+    """宽松清洗保存的并发配置；未保存过（空对象）保持空，不阻断读取。"""
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    workers_raw = raw.get("workers")
+    workers = (
+        [_clean_model_ref(row) for row in workers_raw[:MAX_WORKERS]]
+        if isinstance(workers_raw, list) else []
+    )
+    return {
+        "enabled": bool(raw.get("enabled")),
+        "workers": workers,
+        "supervisor": _clean_model_ref(raw.get("supervisor")),
+    }
 
 
 class LabelerStoreError(ValueError):
@@ -112,20 +138,20 @@ class LabelerStore:
             except OSError:
                 pass
 
-    # ---- 设置（供应商并发上限） ----
+    # ---- 设置（供应商并发上限 + 并发打标配置） ----
 
     def read_settings(self) -> dict[str, Any]:
-        """读贴签匠自己的设置（目前只有供应商并发上限）。
+        """读贴签匠自己的设置（供应商并发上限 + 保存的并发配置）。
 
-        文件缺失/损坏都按空设置处理：并发上限是保守配额，不是数据事实，
+        文件缺失/损坏都按空设置处理：这些设置是便利项，不是数据事实，
         读不到时走默认值比让整个功能不可用更安全。
         """
         try:
             payload = json.loads(self._settings_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            return {"provider_limits": {}}
+            return {"provider_limits": {}, "concurrency": {}}
         if not isinstance(payload, dict):
-            return {"provider_limits": {}}
+            return {"provider_limits": {}, "concurrency": {}}
         limits = payload.get("provider_limits")
         clean: dict[str, int] = {}
         if isinstance(limits, dict):
@@ -136,20 +162,36 @@ class LabelerStore:
                     continue
                 if str(key).strip() and number > 0:
                     clean[str(key).strip()] = number
-        return {"provider_limits": clean}
+        return {
+            "provider_limits": clean,
+            "concurrency": _clean_concurrency(payload.get("concurrency")),
+        }
 
     def write_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """整份写回设置（调用方已做字段校验），返回规范化后的内容。"""
+        """写回设置（调用方已做字段校验），返回规范化后的内容。
+
+        ``provider_limits`` 仍是整份替换语义；未提交的字段沿用磁盘现值，
+        避免并发配置与额度保存互相覆盖。
+        """
+        payload = payload if isinstance(payload, dict) else {}
         limits: dict[str, int] = {}
-        raw = (payload or {}).get("provider_limits")
-        if isinstance(raw, dict):
-            for key, value in raw.items():
-                key = str(key or "").strip()
-                if not key:
-                    continue
-                limits[key] = int(value)
-        clean = {"provider_limits": limits}
+        if "provider_limits" in payload:
+            raw = payload.get("provider_limits")
+            if isinstance(raw, dict):
+                for key, value in raw.items():
+                    key = str(key or "").strip()
+                    if not key:
+                        continue
+                    limits[key] = int(value)
         with self._lock:
+            current = self.read_settings()
+            clean = {
+                "provider_limits": limits if "provider_limits" in payload
+                                  else current["provider_limits"],
+                "concurrency": _clean_concurrency(payload["concurrency"])
+                               if "concurrency" in payload
+                               else current.get("concurrency") or {},
+            }
             self._write_json(self._settings_path, clean)
         return clean
 
@@ -160,6 +202,11 @@ class LabelerStore:
             merged = dict(current.get("provider_limits") or {})
             merged.update(limits)
             return self.write_settings({"provider_limits": merged})
+
+    def patch_concurrency(self, config: dict[str, Any]) -> dict[str, Any]:
+        """整份保存并发打标配置；读、改、写共用锁，不碰供应商额度。"""
+        with self._lock:
+            return self.write_settings({"concurrency": config})
 
     # ---- 任务记录 ----
 

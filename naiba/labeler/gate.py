@@ -25,6 +25,56 @@ MAX_PROVIDER_CONCURRENCY = 9
 SUPERVISOR_MAX_CONCURRENCY = 4
 # 自定义档最多 9 个打标员槽位（计划 §2）。
 MAX_WORKERS = 9
+# 模型标识/显示名的保守上限：设置文件是便利项，不接受无界文本。
+MAX_MODEL_REF_CHARS = 200
+
+
+def validate_concurrency_config(raw: Any) -> dict[str, Any]:
+    """校验并归一化保存的并发打标配置（开关 + 打标员槽位 + 监督员）。
+
+    只做结构与类型校验，不校验供应商档案是否存在：档案被删后旧配置仍可保留，
+    前端恢复时按「请先在设置中添加模型」兜底，不因缺档案拒绝保存。
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError("concurrency 必须是对象")
+    unknown = set(raw) - {"enabled", "workers", "supervisor"}
+    if unknown:
+        raise ValueError("concurrency 含未知字段")
+    if not isinstance(raw.get("enabled"), bool):
+        raise ValueError("concurrency.enabled 必须是布尔值")
+
+    def clean_ref(row: Any, label: str) -> dict[str, str]:
+        if not isinstance(row, dict):
+            raise ValueError(f"{label}必须是对象")
+        if set(row) - {"model_key", "model_name"}:
+            raise ValueError(f"{label}含未知字段")
+        values: dict[str, str] = {}
+        for field in ("model_key", "model_name"):
+            value = row.get(field, "")
+            if not isinstance(value, str):
+                raise ValueError(f"{label}的 {field} 必须是字符串")
+            value = value.strip()
+            if len(value) > MAX_MODEL_REF_CHARS:
+                raise ValueError(f"{label}的 {field} 过长")
+            values[field] = value
+        return values
+
+    workers_raw = raw.get("workers")
+    if not isinstance(workers_raw, list):
+        raise ValueError("concurrency.workers 必须是数组")
+    if not 1 <= len(workers_raw) <= MAX_WORKERS:
+        raise ValueError(f"concurrency.workers 必须是 1 到 {MAX_WORKERS} 个槽位")
+    workers = [
+        clean_ref(row, f"第 {index + 1} 个打标员槽位")
+        for index, row in enumerate(workers_raw)
+    ]
+    return {
+        "enabled": raw["enabled"],
+        "workers": workers,
+        "supervisor": clean_ref(raw.get("supervisor") or {}, "监督员"),
+    }
 
 
 def validate_provider_limits(raw: Any) -> dict[str, int]:

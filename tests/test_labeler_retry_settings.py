@@ -115,6 +115,87 @@ class LabelerSettingsPatchTests(unittest.TestCase):
                          {"online:existing": 3})
 
 
+class LabelerConcurrencySettingsTests(unittest.TestCase):
+    """并发打标配置（开关 + 槽位 + 监督员）随贴签匠设置持久化。"""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        app = concurrent_fixtures._StubApp(Path(temporary.name))
+        self.service = LabelerService(app)
+        self.addCleanup(self.service.shutdown)
+        self.service.store.write_settings({"provider_limits": {"online:existing": 3}})
+
+    def _config(self, **overrides):
+        config = {
+            "enabled": True,
+            "workers": [
+                {"model_key": "online:a", "model_name": "gpt-x"},
+                {"model_key": "online:b", "model_name": "claude-y"},
+            ],
+            "supervisor": {"model_key": "online:a", "model_name": "gpt-x"},
+        }
+        config.update(overrides)
+        return config
+
+    def test_save_and_read_back_concurrency_config(self):
+        config = self._config()
+        payload, status = self.service.api_update_settings({"concurrency": config})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["concurrency"], config)
+        read, status = self.service.api_settings()
+        self.assertEqual(status, 200)
+        self.assertEqual(read["concurrency"], config)
+
+    def test_saving_concurrency_keeps_provider_limits_and_vice_versa(self):
+        config = self._config()
+        self.service.api_update_settings({"concurrency": config})
+        payload, status = self.service.api_update_settings(
+            {"provider_limits_patch": {"online:a": 2}})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["provider_limits"], {"online:existing": 3, "online:a": 2})
+        self.assertEqual(payload["concurrency"], config)
+        self.assertEqual(self.service.store.read_settings()["concurrency"], config)
+
+    def test_empty_slots_are_allowed_so_half_configured_layouts_survive(self):
+        config = self._config(workers=[{"model_key": "", "model_name": ""}])
+        payload, status = self.service.api_update_settings({"concurrency": config})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["concurrency"]["workers"], [{"model_key": "", "model_name": ""}])
+
+    def test_invalid_concurrency_is_rejected_without_touching_saved_config(self):
+        saved = self._config(enabled=False)
+        self.service.api_update_settings({"concurrency": saved})
+        requests = [
+            [], "x", {"enabled": "yes"}, {"workers": [{"model_key": "a", "model_name": "b"}]},
+            {"enabled": True, "workers": []},
+            {"enabled": True, "workers": [{"model_key": "a", "model_name": "b"}] * 10},
+            {"enabled": True, "workers": ["x"]},
+            {"enabled": True, "workers": [{"model_key": 1, "model_name": "b"}]},
+            {"enabled": True, "workers": [{"model_key": "a", "model_name": "b"}],
+             "supervisor": "x"},
+            {"enabled": True, "workers": [{"model_key": "a", "model_name": "b"}],
+             "supervisor": {"model_key": "", "model_name": "", "extra": 1}},
+            {"enabled": True, "workers": [{"model_key": "a", "model_name": "b"}],
+             "unknown": True},
+        ]
+        for value in requests:
+            with self.subTest(value=value):
+                _, status = self.service.api_update_settings({"concurrency": value})
+                self.assertEqual(status, 400)
+                self.assertEqual(self.service.store.read_settings()["concurrency"], saved)
+
+    def test_concurrency_and_provider_limits_cannot_mix_in_one_request(self):
+        _, status = self.service.api_update_settings({
+            "concurrency": self._config(),
+            "provider_limits_patch": {"online:a": 2},
+        })
+        self.assertEqual(status, 400)
+        self.assertEqual(self.service.store.read_settings()["concurrency"], {})
+        self.assertEqual(self.service.store.read_settings()["provider_limits"],
+                         {"online:existing": 3})
+
+
 class LabelerSkillRetryTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

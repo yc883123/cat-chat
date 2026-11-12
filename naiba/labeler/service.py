@@ -10,7 +10,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from naiba.core.contracts import LABELER_PROVIDER_LIMITS_PATCH_KEY
+from naiba.core.contracts import (
+    LABELER_CONCURRENCY_SETTINGS_KEY,
+    LABELER_PROVIDER_LIMITS_PATCH_KEY,
+)
 from naiba.labeler.db import LabelerDB, LabelerDBError
 from naiba.labeler.export import LabelerExportError, open_export_dir, open_managed_dir, write_export
 from naiba.labeler.gate import (
@@ -19,6 +22,7 @@ from naiba.labeler.gate import (
     MAX_WORKERS,
     MIN_PROVIDER_CONCURRENCY,
     SUPERVISOR_MAX_CONCURRENCY,
+    validate_concurrency_config,
     validate_provider_limits,
 )
 from naiba.labeler.images import (
@@ -198,6 +202,7 @@ class LabelerService:
         settings = self.store.read_settings()
         return {
             "provider_limits": settings.get("provider_limits") or {},
+            "concurrency": settings.get("concurrency") or {},
             "default_provider_limit": DEFAULT_PROVIDER_CONCURRENCY,
             "min_provider_limit": MIN_PROVIDER_CONCURRENCY,
             "max_provider_limit": MAX_PROVIDER_CONCURRENCY,
@@ -206,12 +211,26 @@ class LabelerService:
         }, 200
 
     def api_update_settings(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
-        """原子合并档案额度；保留旧客户端整份替换入口，两种写法不可混用。"""
+        """原子保存一类设置：供应商额度、或并发打标配置，二者不可混发。"""
         if not isinstance(body, dict):
             return {"error": "请求体必须是对象"}, 400
-        allowed = {"provider_limits", LABELER_PROVIDER_LIMITS_PATCH_KEY}
+        allowed = {
+            "provider_limits",
+            LABELER_PROVIDER_LIMITS_PATCH_KEY,
+            LABELER_CONCURRENCY_SETTINGS_KEY,
+        }
         if set(body) - allowed or len(set(body) & allowed) != 1:
-            return {"error": "请只提交 provider_limits 或 provider_limits_patch"}, 400
+            return {"error": "请只提交 provider_limits、provider_limits_patch 或 concurrency 之一"}, 400
+        if LABELER_CONCURRENCY_SETTINGS_KEY in body:
+            try:
+                config = validate_concurrency_config(body[LABELER_CONCURRENCY_SETTINGS_KEY])
+            except ValueError as exc:
+                return {"error": str(exc)}, 400
+            try:
+                saved = self.store.patch_concurrency(config)
+            except OSError as exc:
+                return {"error": f"并发配置保存失败：{exc}"}, 500
+            return {"ok": True, **saved}, 200
         is_patch = LABELER_PROVIDER_LIMITS_PATCH_KEY in body
         raw = body[LABELER_PROVIDER_LIMITS_PATCH_KEY if is_patch else "provider_limits"]
         if not isinstance(raw, dict) or (is_patch and not raw):

@@ -96,6 +96,9 @@ class CompactionResult(TypedDict, total=False):
 # Labeler settings patch is an atomic per-provider update; it is mutually
 # exclusive with the legacy full-replacement provider_limits request.
 LABELER_PROVIDER_LIMITS_PATCH_KEY = "provider_limits_patch"
+# Saved concurrency defaults (enabled + worker slots + supervisor), so the
+# custom labeling page reopens with the user's last setup instead of empty slots.
+LABELER_CONCURRENCY_SETTINGS_KEY = "concurrency"
 # Internal-only task snapshot, never accepted as client-supplied rules.
 LABELER_SUPERVISION_RULES_KEY = "supervision_rules"
 # Exact TXT approved by the supervisor; None means no audited TXT exists.
@@ -108,6 +111,7 @@ LABELER_UNKNOWN_WORKER_SLOT = -1
 class LabelerSettingsUpdate(TypedDict, total=False):
     provider_limits: dict[str, int]
     provider_limits_patch: dict[str, int]
+    concurrency: dict[str, Any]
 
 
 class LabelerSupervisionCandidate(TypedDict, total=False):

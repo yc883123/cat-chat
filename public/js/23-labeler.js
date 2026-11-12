@@ -108,6 +108,10 @@ const labeler = {
   providerSettingsToken: 0,
   providerLimitSaves: new Map(),
   providerLimitPending: new Map(),
+  // 并发配置保存：用户改过槽位/监督员/开关后防抖整份写回 settings.json，
+  // 下次进页面按保存值恢复（concurrencyDirty 区分「恢复渲染」与「用户改动」）。
+  concurrencyDirty: false,
+  concurrencySaveTimer: null,
 };
 
 // ============================================================
@@ -641,6 +645,8 @@ async function renderWorkerSlots() {
   if (token !== labeler.slotsToken) return;
   updateConcurrencySummary();
   renderProviderLimitRows();
+  // 模型列表是异步补选的：用户改过配置就再延长一次防抖，把自动选中的最终值写回。
+  if (labeler.concurrencyDirty || labeler.concurrencySaveTimer) scheduleConcurrencySave();
 }
 
 async function renderSupervisorSelects() {
@@ -670,6 +676,7 @@ async function renderSupervisorSelects() {
   );
   updateConcurrencySummary();
   renderProviderLimitRows();
+  if (labeler.concurrencyDirty || labeler.concurrencySaveTimer) scheduleConcurrencySave();
 }
 
 function syncConcurrencyUi() {
@@ -703,11 +710,73 @@ async function ensureLabelerSettings() {
     labeler.providerLimits = payload.provider_limits || {};
     labeler.providerLimitDefault = Number(payload.default_provider_limit || DEFAULT_PROVIDER_LIMIT);
     labeler.providerLimitMax = Number(payload.max_provider_limit || 9);
+    applySavedConcurrency(payload.concurrency);
   } catch (error) {
     if (token !== labeler.providerSettingsToken) return;
     setHint(`并发设置读取失败：${error.message}`, true);
   }
   renderProviderLimitRows();
+}
+
+// 用服务端保存的并发配置恢复槽位（供应商/模型被删时由下拉框占位兜底，
+// 不在这里校验档案是否存在）。恢复过程不触发保存。
+function applySavedConcurrency(saved) {
+  const row = saved && typeof saved === "object" ? saved : {};
+  const workers = Array.isArray(row.workers) ? row.workers : [];
+  const restored = workers.slice(0, MAX_WORKERS).map((worker) => ({
+    providerKey: String(worker?.model_key || ""),
+    modelName: String(worker?.model_name || ""),
+  }));
+  if (restored.length) labeler.workers = restored;
+  const supervisor = row.supervisor && typeof row.supervisor === "object" ? row.supervisor : {};
+  const supervisorKey = String(supervisor.model_key || "");
+  const supervisorModel = String(supervisor.model_name || "");
+  if (supervisorKey || supervisorModel) {
+    labeler.supervisor = { providerKey: supervisorKey, modelName: supervisorModel };
+  }
+  const toggle = $("#labelerConcurrencyEnabled");
+  if (toggle) toggle.checked = Boolean(row.enabled);
+  syncConcurrencyUi();
+}
+
+function concurrencySnapshot() {
+  return {
+    enabled: Boolean($("#labelerConcurrencyEnabled")?.checked),
+    workers: labeler.workers.map((worker) => ({
+      model_key: String(worker.providerKey || ""),
+      model_name: String(worker.modelName || ""),
+    })),
+    supervisor: {
+      model_key: String(labeler.supervisor.providerKey || ""),
+      model_name: String(labeler.supervisor.modelName || ""),
+    },
+  };
+}
+
+async function saveConcurrencySettings() {
+  if (!labeler.workers.length) return;
+  try {
+    await api("/api/labeler/settings", {
+      method: "POST", body: { concurrency: concurrencySnapshot() },
+    });
+    setHint("并发配置已保存");
+  } catch (error) {
+    setHint(`并发配置保存失败：${error.message}`, true);
+  }
+}
+
+// 用户改动槽位/监督员/开关后延迟整份保存：切换供应商会连发多次渲染，
+// 防抖只落最终状态；恢复过程不置脏，避免进页面就写一次。
+function scheduleConcurrencySave() {
+  if (!labeler.initialized) return;
+  labeler.concurrencyDirty = true;
+  if (labeler.concurrencySaveTimer) clearTimeout(labeler.concurrencySaveTimer);
+  labeler.concurrencySaveTimer = setTimeout(() => {
+    labeler.concurrencySaveTimer = null;
+    if (!labeler.concurrencyDirty) return;
+    labeler.concurrencyDirty = false;
+    void saveConcurrencySettings();
+  }, 400);
 }
 
 function usedProviderKeys() {
@@ -2369,6 +2438,7 @@ export function bindLabelerEvents() {
   // ---- 并发打标接线：开关 / 槽位增删 / 供应商切换 / 并发上限保存 ----
   $("#labelerConcurrencyEnabled")?.addEventListener("change", () => {
     syncConcurrencyUi();
+    scheduleConcurrencySave();
   });
   $("#labelerWorkerAdd")?.addEventListener("click", () => {
     if (labeler.workers.length >= MAX_WORKERS) {
@@ -2378,6 +2448,7 @@ export function bindLabelerEvents() {
     const seed = labeler.workers[labeler.workers.length - 1] || {};
     labeler.workers.push({ providerKey: seed.providerKey || "", modelName: "" });
     void renderWorkerSlots();
+    scheduleConcurrencySave();
   });
   $("#labelerWorkerSlots")?.addEventListener("change", (event) => {
     const providerSelect = event.target.closest("[data-worker-provider]");
@@ -2388,6 +2459,7 @@ export function bindLabelerEvents() {
       worker.providerKey = providerSelect.value;
       worker.modelName = "";
       void renderWorkerSlots();
+      scheduleConcurrencySave();
       return;
     }
     const modelSelect = event.target.closest("[data-worker-model]");
@@ -2398,6 +2470,7 @@ export function bindLabelerEvents() {
       worker.modelName = modelSelect.value;
       updateConcurrencySummary();
       updateCostNote();
+      scheduleConcurrencySave();
     }
   });
   $("#labelerWorkerSlots")?.addEventListener("click", (event) => {
@@ -2409,15 +2482,18 @@ export function bindLabelerEvents() {
     }
     labeler.workers.splice(Number(remove.dataset.workerRemove), 1);
     void renderWorkerSlots();
+    scheduleConcurrencySave();
   });
   $("#labelerSupervisorProvider")?.addEventListener("change", () => {
     labeler.supervisor.providerKey = String($("#labelerSupervisorProvider")?.value || "");
     labeler.supervisor.modelName = "";
     void renderSupervisorSelects();
+    scheduleConcurrencySave();
   });
   $("#labelerSupervisorModel")?.addEventListener("change", () => {
     labeler.supervisor.modelName = String($("#labelerSupervisorModel")?.value || "");
     updateConcurrencySummary();
+    scheduleConcurrencySave();
   });
   $("#labelerProviderLimitRows")?.addEventListener("change", (event) => {
     const input = event.target.closest("[data-limit-key]");

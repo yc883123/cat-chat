@@ -248,6 +248,14 @@ class CustomPageUiContractTests(unittest.TestCase):
         self.assertIn('<option value="auto" selected>以提示词为准</option>', self.html)
         self.assertGreaterEqual(self.html.count('<option value="auto" selected>以提示词为准</option>'), 2)
 
+    def test_concurrency_slots_are_saved_and_restored(self):
+        # 2026-11-12：并发槽位/监督员/开关改动后防抖写回设置，进页面自动带出。
+        self.assertIn("function applySavedConcurrency(", self.js)
+        self.assertIn("applySavedConcurrency(payload.concurrency);", self.js)
+        self.assertIn("function scheduleConcurrencySave(", self.js)
+        self.assertIn("body: { concurrency: concurrencySnapshot() }", self.js)
+        self.assertIn("自动保存", self.html)
+
     def test_skill_load_controls_in_html(self):
         # 选中即应用（用户 2026-11-07 拍板）：Skill 完整目录不灌提示词框，
         # 载入按钮全删，提示词框是纯手输区；只留「清空提示词」做重置。

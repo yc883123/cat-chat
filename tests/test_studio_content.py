@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -19,6 +20,19 @@ from naiba.studio.content import ContentSnapshots, READ_TOOLS, compose_system_pr
 from naiba.studio.service import StudioService
 from naiba.studio.store import StudioConflictError
 from tests.test_studio import _write_min_catalog, _write_png
+
+
+def _short_path(path: str) -> str | None:
+    """Return the 8.3 spelling of ``path`` when this volume has one."""
+    try:
+        import ctypes
+
+        buffer = ctypes.create_unicode_buffer(32768)
+        if not ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, 32768):
+            return None
+        return buffer.value or None
+    except (AttributeError, OSError):
+        return None
 
 
 class OfflineConfig:
@@ -158,6 +172,27 @@ class StudioContentTests(unittest.TestCase):
             with self.subTest(fields=fields):
                 payload, status = self.service.api_generate(self.body(**fields))
                 self.assertEqual(status, 400, payload)
+
+    @unittest.skipUnless(os.name == "nt", "只有 Windows 存在 8.3 短名")
+    def test_short_name_root_still_owns_its_main(self):
+        """catalog 报 8.3 短名、解析后的根是长名（CI 的 RUNNER~1），不能判成「Skill 主文不在所属根目录内」。"""
+        folder = self.root / "contentskillone"
+        (folder / "references").mkdir(parents=True)
+        (folder / "SKILL.md").write_text("---\nname: 长名\n---\n长名规则。", encoding="utf-8")
+        (folder / "references" / "same.md").write_text("长名参考。", encoding="utf-8")
+        row = next(item for item in SkillCatalog([self.root]).scan()
+                   if Path(item["root"]).name == "contentskillone")
+        short_root, short_main = _short_path(row["root"]), _short_path(row["path"])
+        if not short_root or not short_main or os.path.normcase(short_root) == os.path.normcase(row["root"]):
+            self.skipTest("该卷未启用 8.3 短名")
+
+        self.app.catalog = SimpleNamespace(scan=lambda: [dict(row, root=short_root, path=short_main)])
+        snapshots = ContentSnapshots(self.app.paths.data_dir)
+        snapshot = snapshots.freeze(self.app.catalog, [row["id"]])
+        view = snapshots.view(snapshot)
+        frozen = view.scan()[0]
+        self.assertIn("长名规则", view.read_skill_content(frozen["path"]))
+        self.assertIn("长名参考", view.read_skill_content(str(Path(frozen["root"]) / "references" / "same.md")))
 
     def test_full_skill_snapshot_shared_ordered_and_fail_closed(self):
         long_text = "完整主文，不截断。" * 9000

@@ -84,12 +84,35 @@ def _linked(path: Path) -> bool:
     return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
 
 
+def _relative_to(path: Path, root: Path) -> Path:
+    """Locate ``path`` under ``root`` even when Windows spells one folder twice.
+
+    The Skill catalog reports the root it scanned, which may be the 8.3 short
+    name (a ``RUNNER~1`` style segment) while the resolved root uses the long
+    user name. A plain ``relative_to`` compares strings, so it would call a file
+    outside its own directory; fall back to the real path and compare
+    case-insensitively instead.
+    """
+    try:
+        return path.relative_to(root)
+    except ValueError:
+        pass
+    real_path = os.path.realpath(path)
+    real_root = os.path.realpath(root)
+    if os.path.normcase(real_path) == os.path.normcase(real_root):
+        return Path(".")
+    relative = os.path.relpath(real_path, real_root)
+    if os.path.isabs(relative) or relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        raise ValueError(f"{path} 不在 {root} 内")
+    return Path(relative)
+
+
 def _document(path: Path, root: Path) -> str:
     try:
-        relative = path.relative_to(root)
+        relative = _relative_to(path, root)
         if any(_linked(root.joinpath(*relative.parts[:i])) for i in range(1, len(relative.parts) + 1)):
             raise ValueError("不允许链接文档")
-        path.resolve(strict=True).relative_to(root)
+        _relative_to(path.resolve(strict=True), root)
         with path.open("rb") as handle:
             raw = handle.read(MAX_DOCUMENT_BYTES + 1)
         if len(raw) > MAX_DOCUMENT_BYTES:
@@ -124,7 +147,7 @@ class ContentSnapshots:
                 raise ValueError(f"Skill 根目录无法读取：{row.get('name') or skill_id}") from exc
             main = Path(row["path"]).expanduser()
             try:
-                main_rel = main.relative_to(root).as_posix()
+                main_rel = _relative_to(main, root).as_posix()
             except ValueError as exc:
                 raise ValueError("Skill 主文不在所属根目录内") from exc
             if main.suffix.lower() not in DOCUMENT_SUFFIXES:
@@ -140,8 +163,8 @@ class ContentSnapshots:
                                   and not _linked(here / d))
                 for name in sorted(files):
                     path = here / name
-                    rel = path.relative_to(root).as_posix()
-                    if rel == main_rel or name.startswith(".") or _linked(path):
+                    rel = _relative_to(path, root).as_posix()
+                    if os.path.normcase(rel) == os.path.normcase(main_rel) or name.startswith(".") or _linked(path):
                         continue
                     if path.suffix.lower() not in DOCUMENT_SUFFIXES:
                         continue

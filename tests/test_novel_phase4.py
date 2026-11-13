@@ -362,6 +362,119 @@ class Phase4ServiceTests(unittest.TestCase):
 
     # ---- 4C 分镜生图 ----
 
+    def test_script_sources_match_selected_characters_and_prior_summaries(self):
+        self.service.store.apply_elements(
+            self.book_id, task_id="scene-only", raw="## 场景\n· 老宅书房：旧宅里的书房，是保存关键密信的地方",
+        )
+        self._save_elements()
+        self.service.store.update_summaries(self.book_id, {"3": "未来章节的摘要"})
+        first, status = self.service.api_stage({
+            "book_id": self.book_id, "stage": "script", "chapter_ids": [1],
+            "elements_version": 1, "model_key": "online:probe", "model_name": "probe-default",
+        })
+        self.assertEqual(status, 201, first)
+        self.assertFalse(first["sources"]["uses_characters"])
+        self.assertFalse(first["sources"]["has_summaries"])
+        self.assertNotIn("【人物设定", first["task"]["input"]["content"])
+        self.assertNotIn("【前文摘要", first["task"]["input"]["content"])
+        self.assertIn("· 场景：老宅书房", first["task"]["input"]["content"])
+
+        self.service.store.update_summaries(self.book_id, {"1": "沈砚在老宅发现信件。"})
+        second, status = self.service.api_stage({
+            "book_id": self.book_id, "stage": "script", "chapter_ids": [2],
+            "elements_version": 2, "model_key": "online:probe", "model_name": "probe-default",
+        })
+        self.assertEqual(status, 201, second)
+        self.assertTrue(second["sources"]["uses_characters"])
+        self.assertTrue(second["sources"]["has_summaries"])
+        self.assertIn("【人物设定", second["task"]["input"]["content"])
+        self.assertIn("第 1 章摘要：沈砚在老宅发现信件。", second["task"]["input"]["content"])
+        preview, status = self.service.api_stage_preview({
+            "book_id": self.book_id, "stage": "script", "chapter_ids": [1],
+            "elements_version": 1, "model_key": "online:probe",
+        })
+        self.assertEqual(status, 200, preview)
+        self.assertFalse(preview["sources"]["uses_characters"])
+        self.assertFalse(preview["sources"]["has_summaries"])
+
+    def test_saved_historical_script_connects_import_versions_and_storyboard(self):
+        from types import SimpleNamespace
+
+        task_store = StudioStore(self.root)
+        self.app.studio.jobs = SimpleNamespace(
+            submit=task_store.create_task, task=task_store.get_task,
+        )
+        imported, status = self.service.api_import(
+            filename="接续验收.txt", data="第1章 雨夜来客\n沈砚推门，翻看油灯下的信件。\n".encode("utf-8"),
+        )
+        self.assertEqual(status, 200, imported)
+        created, status = self.service.api_create_book({
+            "import_id": imported["import_id"], "picked": [1], "title": "接续验收",
+        })
+        self.assertEqual(status, 201, created)
+        book_id = created["book"]["id"]
+
+        def submit(stage, **selection):
+            payload, code = self.service.api_stage({
+                "book_id": book_id, "stage": stage, "chapter_ids": [1],
+                "model_key": "online:probe", "model_name": "probe-default", **selection,
+            })
+            self.assertEqual(code, 201, payload)
+            return payload
+
+        def finish_and_save(stage, text):
+            payload = submit(stage)
+            task = task_store.update_task(payload["task"]["id"], status="done", result=text)
+            saved, code = self.service.api_apply(book_id, {
+                "stage": stage, "task_id": task["id"], "text": task["result"],
+                "revision": payload["book_revision"],
+            })
+            self.assertEqual(code, 200, saved)
+            return saved["book"]
+
+        finish_and_save("elements", "## 人物\n· 沈砚：旧版书生")
+        finish_and_save("elements", "## 人物\n· 陆行：新版行商")
+        finish_and_save("outline", "## 第一幕 建置\n旧版大纲：沈砚在老宅发现密信。")
+        finish_and_save("outline", "## 第一幕 建置\n新版大纲：陆行到市集买货。")
+        historical = submit("script", elements_version=1, outline_version=1)
+        frozen = historical["task"]["input"]
+        self.assertEqual(frozen["novel"]["elements_version"], 1)
+        self.assertEqual(frozen["novel"]["outline_version"], 1)
+        self.assertTrue(frozen["novel"]["sources"]["uses_characters"])
+        self.assertTrue(frozen["novel"]["sources"]["uses_outline"])
+        self.assertIn("沈砚：旧版书生", frozen["content"])
+        self.assertIn("旧版大纲：沈砚在老宅发现密信。", frozen["content"])
+        self.assertNotIn("陆行", frozen["content"])
+        script_text = "INT. 老宅书房 - 夜\n沈砚推门翻看信件。\n\nEXT. 长桥 - 黄昏\n沈砚穿过长桥。"
+        task_store.update_task(historical["task"]["id"], status="done", result=script_text)
+        newer = submit("script", elements_version=2, outline_version=2)
+
+        # 重开后从真实任务存储读取旧任务；保存不能依赖前端仍有 active 指针。
+        reopened_store = StudioStore(self.root)
+        self.app.studio.jobs = SimpleNamespace(
+            submit=reopened_store.create_task, task=reopened_store.get_task,
+        )
+        reopened = NovelService(self.app)
+        old_task = reopened_store.get_task(historical["task"]["id"])
+        saved, status = reopened.api_apply(book_id, {
+            "stage": "script", "task_id": old_task["id"], "text": old_task["result"],
+            "revision": newer["book_revision"],
+        })
+        self.assertEqual(status, 200, saved)
+        self.assertEqual(len(saved["book"]["script"]), 2)
+        self.assertEqual(saved["book"]["script_versions"][-1]["task_id"], old_task["id"])
+        self.assertEqual(reopened_store.get_task(newer["task"]["id"])["status"], "queued")
+        storyboard, status = reopened.api_stage({
+            "book_id": book_id, "stage": "storyboard",
+            "model_key": "online:probe", "model_name": "probe-default",
+        })
+        self.assertEqual(status, 201, storyboard)
+        storyboard_input = storyboard["task"]["input"]
+        self.assertEqual(storyboard_input["novel"]["scene_ids"], [1, 2])
+        self.assertEqual(storyboard_input["novel"]["chapter_ids"], [])
+        self.assertIn("沈砚推门翻看信件。", storyboard_input["content"])
+        self.assertIn("沈砚穿过长桥。", storyboard_input["content"])
+
     def test_storyboard_requires_saved_scenes(self):
         payload, status = self.service.api_stage({
             "book_id": self.book_id, "stage": "storyboard",
@@ -369,6 +482,161 @@ class Phase4ServiceTests(unittest.TestCase):
         })
         self.assertEqual(status, 400)
         self.assertIn("剧本场次", payload["error"])
+
+    def test_storyboard_preview_and_submit_select_saved_script_version(self):
+        self._save_script()
+        self.service.store.apply_script(
+            self.book_id, task_id="st-script-new",
+            text="INT. 新稿场景 - 日\n新版独有正文。",
+        )
+        base = {"book_id": self.book_id, "stage": "storyboard",
+                "model_key": "online:probe", "model_name": "probe-default"}
+        preview, status = self.service.api_stage_preview({**base, "script_version": "1"})
+        self.assertEqual(status, 200, preview)
+        self.assertEqual(preview["sources"]["script_version"], 1)
+        self.assertEqual(preview["sources"]["scene_ids"], [1, 2])
+        selected, status = self.service.api_stage({**base, "script_version": 1})
+        self.assertEqual(status, 201, selected)
+        self.assertEqual(selected["sources"], preview["sources"])
+        self.assertEqual(selected["budget"], preview["budget"])
+        frozen = selected["task"]["input"]
+        self.assertEqual(frozen["novel"]["script_version"], 1)
+        self.assertEqual(frozen["novel"]["sources"]["script_version"], 1)
+        self.assertEqual(frozen["novel"]["scene_ids"], [1, 2])
+        self.assertIn("沈砚推门而入", frozen["content"])
+        self.assertNotIn("新版独有正文", frozen["content"])
+        for options in ({}, {"script_version": None}, {"script_version": ""}):
+            with self.subTest(options=options):
+                preview, status = self.service.api_stage_preview({**base, **options})
+                self.assertEqual(status, 200, preview)
+                self.assertEqual(preview["sources"]["script_version"], 2)
+                self.assertEqual(preview["sources"]["scene_ids"], [1])
+                current, status = self.service.api_stage({**base, **options})
+                self.assertEqual(status, 201, current)
+                self.assertEqual(current["task"]["input"]["novel"]["script_version"], 2)
+                self.assertIn("新版独有正文", current["task"]["input"]["content"])
+                self.assertNotIn("沈砚推门而入", current["task"]["input"]["content"])
+        # 场次号只属于所选版本；当前版没有第 2 场时不能借用历史版的同号场次。
+        for version, expected in ((1, 200), (2, 400)):
+            result, status = self.service.api_stage_preview({
+                **base, "script_version": version, "scene_ids": [2]})
+            self.assertEqual(status, expected, result)
+            if expected == 400:
+                self.assertIn("场次不存在", result["error"])
+
+    def test_storyboard_rejects_invalid_deleted_and_empty_script_versions(self):
+        self._save_script()
+        book = self.service.store.apply_script(
+            self.book_id, task_id="st-script-new", text="INT. 新稿场景 - 日\n新版正文。")
+        old_id = book["script_versions"][0]["id"]
+        base = {"book_id": self.book_id, "stage": "storyboard",
+                "model_key": "online:probe", "model_name": "probe-default"}
+        for value in (0, -1, 99, True, False, 1.5, 1.0, "bad", "1.0", [], {}):
+            for action in (self.service.api_stage_preview, self.service.api_stage):
+                with self.subTest(value=value, action=action.__name__):
+                    result, status = action({**base, "script_version": value})
+                    self.assertEqual(status, 400, result)
+                    self.assertIn("script_version", result["error"])
+        self.assertEqual(self.app.studio.jobs.submitted, [])
+        # 当前版本的场次删空后，历史版仍可生成，选空版要明确指出版号。
+        self.service.store.delete_scene(self.book_id, 1)
+        result, status = self.service.api_stage_preview({**base, "script_version": 2})
+        self.assertEqual(status, 400, result)
+        self.assertIn("所选剧本第 2 版没有场次", result["error"])
+        result, status = self.service.api_stage_preview({**base, "script_version": 1})
+        self.assertEqual(status, 200, result)
+        deleted = self.service.store.delete_records(self.book_id, [{"type": "script", "id": old_id}])
+        self.assertTrue(deleted["ok"], deleted)
+        for action in (self.service.api_stage_preview, self.service.api_stage):
+            result, status = action({**base, "script_version": 1})
+            self.assertEqual(status, 400, result)
+            self.assertIn("script_version 指定的版本不存在", result["error"])
+        self.assertEqual(self.app.studio.jobs.submitted, [])
+
+    def test_storyboard_legacy_script_version_is_readonly_and_preserved_on_save(self):
+        self._save_script()
+        legacy = self.service.store._load_manifest(self.book_id)
+        legacy.pop("script_versions")
+        path = self.service.store._book_dir(self.book_id) / "book.json"
+        base = {"book_id": self.book_id, "stage": "storyboard",
+                "model_key": "online:probe", "model_name": "probe-default"}
+        for stored_version, effective in ((None, 1), (0, 1), (7, 7)):
+            with self.subTest(stored_version=stored_version):
+                if stored_version is None:
+                    legacy.pop("script_version", None)
+                else:
+                    legacy["script_version"] = stored_version
+                self.service.store._write_json(path, legacy)
+                before = path.read_bytes()
+                public = self.service.store.get_book(self.book_id)["book"]
+                self.assertEqual(public["script_version"], effective)
+                self.assertEqual(public["script_versions"], [])
+                for options in ({}, {"script_version": None}, {"script_version": ""},
+                                {"script_version": effective}):
+                    preview, status = self.service.api_stage_preview({**base, **options})
+                    self.assertEqual(status, 200, preview)
+                    self.assertEqual(preview["sources"]["script_version"], effective)
+                    self.assertEqual(preview["sources"]["scene_ids"], [1, 2])
+                self.assertEqual(path.read_bytes(), before)
+                saved = self.service.store.apply_script(
+                    self.book_id, task_id=f"st-after-legacy-{effective}",
+                    text="INT. 新稿场景 - 日\n追加的新稿正文。")
+                self.assertEqual([row["version"] for row in saved["script_versions"]],
+                                 [effective, effective + 1])
+                self.assertIn("沈砚推门而入", saved["script_versions"][0]["script"][0]["content"])
+
+    def test_storyboard_explicit_empty_versions_does_not_revive_stale_script(self):
+        self._save_script()
+        manifest = self.service.store._load_manifest(self.book_id)
+        manifest["script_versions"] = []
+        path = self.service.store._book_dir(self.book_id) / "book.json"
+        self.service.store._write_json(path, manifest)
+        before = path.read_bytes()
+        public = self.service.store.get_book(self.book_id)["book"]
+        self.assertEqual(public["script_version"], 0)
+        base = {"book_id": self.book_id, "stage": "storyboard",
+                "model_key": "online:probe", "model_name": "probe-default"}
+        for options in ({}, {"script_version": 1}):
+            for action in (self.service.api_stage_preview, self.service.api_stage):
+                result, status = action({**base, **options})
+                self.assertEqual(status, 400, result)
+        self.assertEqual(self.app.studio.jobs.submitted, [])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_storyboard_real_retry_keeps_selected_version_after_source_changes(self):
+        from types import SimpleNamespace
+        from naiba.studio.jobs import StudioJobManager
+        self._save_script()
+        store = StudioStore(self.root)
+        scheduled = []
+        jobs = StudioJobManager(self.app, store, SimpleNamespace(submit=scheduled.append))
+        self.app.studio.jobs = jobs
+        response, status = self.service.api_stage({
+            "book_id": self.book_id, "stage": "storyboard", "script_version": 1,
+            "model_key": "online:probe", "model_name": "probe-default"})
+        self.assertEqual(status, 201, response)
+        task = response["task"]
+        original_input = store.get_task(task["id"])["input"]
+        current = self.service.store.apply_script(
+            self.book_id, task_id="st-source-new", text="INT. 新稿场景 - 日\n重试不能用的新正文。")
+        self.service.store.update_scene(self.book_id, 1, content="重试不能用的修改正文。")
+        deleted = self.service.store.delete_records(self.book_id, [
+            {"type": "script", "id": current["script_versions"][0]["id"]}])
+        self.assertTrue(deleted["ok"], deleted)
+        self.assertEqual([row["version"] for row in deleted["book"]["script_versions"]], [2])
+        store.update_task(task["id"], status="failed", error="模拟可重试失败")
+        retried = jobs.retry(task["id"])
+        self.assertNotEqual(retried["id"], task["id"])
+        self.assertEqual(scheduled, [task["id"], retried["id"]])
+        self.assertEqual(retried["source_task_id"], task["id"])
+        # 从真正持久化的新任务读取，而不是只检查原来的提交字典。
+        reopened = StudioStore(self.root).get_task(retried["id"])
+        self.assertEqual(reopened["input"]["content"], original_input["content"])
+        self.assertEqual(reopened["input"]["novel"], original_input["novel"])
+        self.assertEqual(reopened["input"]["novel"]["script_version"], 1)
+        self.assertEqual(reopened["input"]["novel"]["sources"]["script_version"], 1)
+        self.assertIn("沈砚推门而入", reopened["input"]["content"])
+        self.assertNotIn("重试不能用", reopened["input"]["content"])
 
     def test_storyboard_submit_carries_scenes_and_system(self):
         self._save_script()

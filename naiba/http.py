@@ -30,6 +30,12 @@ import naiba.net as net_io
 from naiba.app import NaibaChatApp
 from naiba.config import tool_catalog_entries, tool_group_entries, tool_preset_entries
 from naiba.core.choices import backfill_turn_choice_groups
+from naiba.core.contracts import (
+    COMFYUI_HISTORY_CURSOR_KEY,
+    COMFYUI_HISTORY_IDS_KEY,
+    COMFYUI_HISTORY_PAGE_SIZE_KEY,
+    COMFYUI_HISTORY_SCOPE_KEY,
+)
 from naiba.core.conv_files import (
     ConvFilePreviewError,
     FolderConfirmRequired,
@@ -773,8 +779,12 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/comfyui/workflows":
             self._json(*self.app.comfyui.api_workflows())
         elif path == "/api/comfyui/batches":
-            # 造梦机批量生成：批次列表（历史下拉）。
-            self._json(*self.app.comfyui.api_batches())
+            query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            self._json(*self.app.comfyui.api_batches(
+                page_size=query.get(COMFYUI_HISTORY_PAGE_SIZE_KEY, [None])[0],
+                cursor=query.get(COMFYUI_HISTORY_CURSOR_KEY, [None])[0],
+                ids=query.get(COMFYUI_HISTORY_IDS_KEY, [None])[0],
+            ))
         elif path.startswith("/api/comfyui/batches/"):
             # 造梦机批量生成：批次详情（逐条目 join 任务状态与产物计数）。
             # with_schemes=1 才带可编辑快照（「编辑这一批」用）；轮询不带。
@@ -785,8 +795,14 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path.startswith("/api/comfyui/workflows/"):
             self._json(*self.app.comfyui.api_workflow(path.rsplit("/", 1)[-1]))
         elif path == "/api/comfyui/tasks":
-            query = urllib.parse.parse_qs(parsed.query)
-            self._json(*self.app.comfyui.api_tasks(str(query.get("active_only", [""])[0])))
+            query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            self._json(*self.app.comfyui.api_tasks(
+                str(query.get("active_only", [""])[0]),
+                page_size=query.get(COMFYUI_HISTORY_PAGE_SIZE_KEY, [None])[0],
+                cursor=query.get(COMFYUI_HISTORY_CURSOR_KEY, [None])[0],
+                scope=query.get(COMFYUI_HISTORY_SCOPE_KEY, ["all"])[0],
+                ids=query.get(COMFYUI_HISTORY_IDS_KEY, [None])[0],
+            ))
         elif path.startswith("/api/comfyui/tasks/") and path.endswith("/rerun-snapshot"):
             # 完成态单次任务的只读再次生成快照（不返回 checkpoint/事件/产物目标）。
             self._json(*self.app.comfyui.api_task_rerun_snapshot(path.split("/")[-2]))
@@ -855,6 +871,13 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._json({"error": "访问口令无效"}, HTTPStatus.UNAUTHORIZED)
                 return
             self._novel_import_upload()
+            return
+        # 织书台直接上传 TXT 小说续写：不先创建拆书匠作品。
+        if path == "/api/writer/novel-import/txt" and self.headers.get("Content-Type", "").lower().startswith("multipart/form-data"):
+            if not self._authorized(parsed):
+                self._json({"error": "访问口令无效"}, HTTPStatus.UNAUTHORIZED)
+                return
+            self._writer_novel_txt_upload()
             return
         # 织书台导入启元存档：JSON 进内存后由 writer 域解析预览（上限 20 MiB）。
         if path == "/api/writer/import" and self.headers.get("Content-Type", "").lower().startswith("multipart/form-data"):
@@ -2356,6 +2379,17 @@ class RequestHandler(BaseHTTPRequestHandler):
         self._json(*self.app.novel.api_import(
             filename=filename, data=data, max_len=fields.get("max_len"),
         ))
+
+    def _writer_novel_txt_upload(self) -> None:
+        """TXT 原文进独立续写暂存；与小说拆章器共用 60 MiB 上限。"""
+        from naiba.core.novel_split import MAX_FILE_BYTES
+
+        parsed = self._read_multipart_small(MAX_FILE_BYTES)
+        if parsed is None:
+            return
+        fields, data = parsed
+        filename = str(fields.get("filename") or fields.get("name") or "未命名.txt")
+        self._json(*self.app.writer.api_stage_novel_txt(filename=filename, data=data))
 
     def _writer_import_upload(self) -> None:
         """织书台导入启元存档：multipart 小体积进内存 → writer 域解析预览。"""

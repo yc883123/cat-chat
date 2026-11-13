@@ -11,8 +11,18 @@ import { attachmentThumbUrl, collectMediaPreviewItems, isPywebview, mediaKind, s
 import { currentStudioPage, isStudioOpen, onStudioPageChange, setStudioPage } from "./22-studio.js";
 import { bindWorkbenchDetails, watchWorkbenchSize } from "./22a-workbench-ui.js";
 import { BATCH_H3_BASE_TEMPLATE, BATCH_H3_REFERENCE_TEMPLATE, buildBatchConvertRequest } from "./24a-comfyui-convert.js";
+import { createHistoryViewport } from "./24b-comfyui-history.js";
 const POLL_MS = 1200;
 const REFRESH_MS = 5000;
+const HISTORY_PAGE_SIZE = 20;
+
+function newHistoryState() {
+  return { initialized: false, cursor: "", hasMore: false, error: "", request: null,
+    epoch: 0, sequence: 0, rowSequences: new Map(), removed: new Set(), refreshingIds: false };
+}
+
+const historyViews = new Map();
+const histories = { tasks: newHistoryState(), batches: newHistoryState() };
 
 const comfyui = {
   workflows: [],
@@ -21,6 +31,8 @@ const comfyui = {
   detailRequest: 0,
   detailLoading: false,
   tasks: [],
+  activeTasks: [],
+  activeRequest: 0,
   activeTaskId: "",
   eventSeq: 0,
   pollTimer: null,
@@ -409,6 +421,10 @@ export function bindComfyuiEvents() {
   }
   $("#comfyuiTaskList")?.addEventListener("click", onTaskListClick);
   $("#comfyuiOutputGrid")?.addEventListener("click", onOutputGridClick);
+  $("#studioPageComfyui")?.addEventListener("click", (event) => {
+    const button = event.target.closest?.("[data-comfyui-history-more]");
+    if (button) void loadHistoryPage(button.dataset.comfyuiHistoryMore, true);
+  });
   $("#comfyuiPanes")?.addEventListener("click", onPaneClick);
   // 批量生成档：填单与跑批渲染进 #comfyuiBatchBody；结果页批次详情渲染进
   // #comfyuiBatchDetail。两个宿主共用同一套容器级委托。
@@ -494,6 +510,7 @@ function setComfyuiPane(pane) {
   } else {
     stopBatchPolling();
   }
+  refreshHistoryViews();
 }
 
 // 结果页两档（单次 / 批量）共用一个页签：由页面根上的 data-results-segment 驱动
@@ -516,6 +533,7 @@ function setComfyuiResultsSegment(seg) {
   } else if (!batchPaneVisible()) {
     stopBatchPolling();
   }
+  refreshHistoryViews();
 }
 
 // 批量条目也是普通任务（会进 /api/comfyui/tasks），但结果页按来源分档：
@@ -834,6 +852,7 @@ function defaultVisibleKeys(slots) {
 const VISIBLE_MEDIA_V2_PREFIX = "comfyui.visibleMediaV2:";
 
 function visibleSetKnowsMedia() {
+  if (comfyui.rerun) return true;
   const id = String(comfyui.detail?.id || "");
   try {
     return localStorage.getItem(VISIBLE_MEDIA_V2_PREFIX + id) === "1";
@@ -895,19 +914,15 @@ function renderParamForm() {
   reset.className = "control-button tiny";
   reset.dataset.comfyuiResetParams = "1";
   reset.textContent = "默认";
-  reset.title = "把填过的参数还原成工作流里原本的值；「编辑」保存的显示项与顺序不受影响";
+  reset.title = comfyui.rerun
+    ? "还原成原任务快照里的参数值，保留当前显示项与顺序"
+    : "把填过的参数还原成工作流里原本的值，保留高级参数设置的显示项与顺序";
   const edit = document.createElement("button");
   edit.type = "button";
   edit.className = "control-button tiny";
   edit.dataset.comfyuiEditParams = "1";
   edit.textContent = "设置高级参数";
   edit.title = "选择要在主表单显示的参数，并调整它们的先后顺序";
-  if (comfyui.rerun) {
-    // 再次生成只读原任务快照：显示集属于工作流库，不能在快照表单里修改。
-    edit.disabled = true;
-    edit.style.display = "none";
-    edit.title = "再次生成使用原任务快照，不修改工作流库";
-  }
   actions.append(reset, edit);
   head.append(heading, actions);
   form.append(head);
@@ -1051,14 +1066,26 @@ function updateDraftHint() {
 
 // ---- 编辑参数 ----
 
+function captureParamDrafts() {
+  for (const slot of comfyui.detail?.params || []) {
+    if (slot.control === "media" || MEDIA_FIELD_TYPES.has(slot.field_type)) continue;
+    const key = slotKey(slot);
+    const input = document.querySelector(`[data-comfyui-slot="${CSS.escape(key)}"]`);
+    if (input) rememberDraft(key, input.value);
+  }
+}
+
 function openParamsDialog() {
   if (!comfyui.detail) return;
-  if (comfyui.rerun) {
-    toast("再次生成使用原任务快照，不修改工作流库的显示参数");
-    return;
-  }
   const dialog = $("#comfyuiParamsDialog");
   if (!dialog) return;
+  if (comfyui.rerun) captureParamDrafts();
+  const hint = $("#comfyuiParamsHint");
+  if (hint) hint.textContent = comfyui.rerun
+    ? "选择本次再次生成要显示的参数，用 ⠿ 或 ↑↓ 调整顺序。隐藏参数仍保留原快照或本次已修改的值；这些显示设置只用于本次再次生成。"
+    : "没勾选的参数不会出现在主表单，也不会被改动——生成时按工作流里原本的值执行。拖动行首的 ⠿ 可以调整先后顺序（也可以用行尾的 ↑↓），勾选结果和顺序都按这份工作流保存，下次打开还是这个样子。";
+  const save = $("#comfyuiParamsSave");
+  if (save) save.textContent = comfyui.rerun ? "应用" : "保存";
   renderParamsPicker();
   const search = $("#comfyuiParamsSearch");
   if (search) {
@@ -1198,10 +1225,6 @@ function bindParamsPickerDrag() {
 
 async function saveParamsConfig() {
   if (!comfyui.detail) return;
-  if (comfyui.rerun) {
-    toast("再次生成使用原任务快照，不修改工作流库的显示参数");
-    return;
-  }
   const picker = $("#comfyuiParamsPicker");
   if (!picker) return;
   const visible = [];
@@ -1213,6 +1236,14 @@ async function saveParamsConfig() {
     const row = { node_id: nodeId, field_name: rest.join("|") };
     order.push(row);
     if (box.checked) visible.push(row);
+  }
+  if (comfyui.rerun) {
+    captureParamDrafts();
+    comfyui.detail = { ...comfyui.detail, visible_params: visible, param_order: order };
+    closeParamsDialog();
+    renderParamForm();
+    toast("已应用到本次再次生成的参数显示与顺序");
+    return;
   }
   const button = $("#comfyuiParamsSave");
   if (button) button.disabled = true;
@@ -1942,7 +1973,7 @@ function renderSlot(slot) {
   input.dataset.comfyuiSlot = key;
   if (type === "seed") {
     input.placeholder = "留空 = 每次随机；填数字 = 固定种子";
-    input.value = savedDraft(key) ?? "";
+    input.value = savedDraft(key) ?? (comfyui.rerun?.originalOverrides?.get(key) ?? "");
   } else {
     input.value = initialFieldValue(slot, key);
   }
@@ -2718,11 +2749,22 @@ function collectOverrides() {
   const overrides = [];
   for (const slot of comfyui.detail?.params || []) {
     const key = `${slot.node_id}|${slot.field_name}`;
-    // 只收主表单里渲染出来的输入：隐藏参数没有输入框，自然不会提交覆盖值，
-    // 生成时按工作流里原本的值执行。
+    if (slot.control === "media" || MEDIA_FIELD_TYPES.has(slot.field_type)) continue;
+    // 普通工作流只提交可见输入；再次生成隐藏字段仍保留草稿或原任务覆盖值。
     const input = document.querySelector(`[data-comfyui-slot="${CSS.escape(key)}"]`);
-    if (!input) continue;
-    const text = String(input.value ?? "").trim();
+    let value = input?.value;
+    if (!input) {
+      if (!comfyui.rerun) continue;
+      value = savedDraft(key);
+      if (value === undefined) {
+        if (comfyui.rerun.originalOverrides?.has(key)) {
+          overrides.push({ node_id: slot.node_id, field_name: slot.field_name,
+            value: comfyui.rerun.originalOverrides.get(key) });
+        }
+        continue;
+      }
+    }
+    const text = String(value ?? "").trim();
     if (slot.field_type === "seed") {
       if (text) overrides.push({ node_id: slot.node_id, field_name: slot.field_name, value: text });
       continue;
@@ -2947,6 +2989,7 @@ async function openRerunSnapshot(taskId) {
       createdAt: Number(snapshot.created_at) || 0,
       finishedAt: Number(snapshot.finished_at) || 0,
       unavailable: built.unavailable,
+      originalOverrides: new Map(snapshot.overrides.map((row) => [slotKey(row), row.value])),
     };
     comfyui.detailLoading = false;
     setRerunSaveAsHidden(true);
@@ -3025,7 +3068,6 @@ async function submitTask() {
     }
     comfyui.activeTaskId = String(payload.task?.id || "");
     comfyui.eventSeq = 0;
-    comfyui.tasks = [];
     renderTasks();
     await refreshTasks();
     startPolling();
@@ -3041,23 +3083,216 @@ async function submitTask() {
   }
 }
 
-async function refreshTasks(silent = false) {
+function historyRows(kind) {
+  return kind === "tasks" ? comfyui.tasks : batch.histories;
+}
+
+function historyOrder(left, right) {
+  const time = Number(right.created_at || 0) - Number(left.created_at || 0);
+  if (time) return time;
+  const a = String(left.id || ""), b = String(right.id || "");
+  return a === b ? 0 : a < b ? 1 : -1;
+}
+
+function mergeHistoryRows(kind, incoming, sequence = ++histories[kind].sequence) {
+  const history = histories[kind];
+  const rows = new Map(historyRows(kind).map((row) => [String(row.id), row]));
+  for (const row of incoming || []) {
+    if (!row?.id || history.removed.has(String(row.id))) continue;
+    if (kind === "tasks" && isBatchTaskRow(row)) continue;
+    const old = rows.get(String(row.id));
+    if ((history.rowSequences.get(String(row.id)) || 0) > sequence) continue;
+    if (Number(old?.updated_at) > Number(row.updated_at)) continue;
+    rows.set(String(row.id), row);
+    history.rowSequences.set(String(row.id), sequence);
+  }
+  for (const id of history.removed) rows.delete(id);
+  const ordered = [...rows.values()].sort(historyOrder);
+  if (kind === "tasks") comfyui.tasks = ordered;
+  else batch.histories = ordered;
+}
+
+function forgetHistoryRows(kind, ids) {
+  const history = histories[kind];
+  if (!ids.length) return;
+  ids.forEach((id) => history.removed.add(String(id)));
+  if (kind === "tasks") {
+    comfyui.activeTasks = comfyui.activeTasks.filter((row) => !history.removed.has(String(row.id)));
+  }
+  // 删除后作废已在路上的旧页，游标仍能从已删除记录的位置继续。
+  history.epoch += 1;
+  history.request = null;
+  mergeHistoryRows(kind, []);
+  renderHistory(kind);
+}
+
+function renderHistory(kind) {
+  if (kind === "tasks") { renderTasks(); void renderLatestOutputs(); }
+  else renderBatchHistoryList();
+  renderHistoryFooters();
+}
+
+function historyVisible(kind) {
+  return comfyuiPageVisible() && comfyuiPaneName() === "tasks"
+    && comfyui.resultsSegment === (kind === "tasks" ? "single" : "batch")
+    && (kind !== "batches" || !batch.resultsDetailId);
+}
+
+function refreshHistoryViews() {
+  for (const viewport of historyViews.values()) viewport.refresh();
+  if (historyVisible("tasks")) {
+    document.querySelectorAll("#comfyuiOutputGrid .comfyui-output").forEach(batchPreviewVideoPreload);
+  }
+}
+
+function historyViewport(selector, options) {
+  if (!historyViews.has(selector)) {
+    const host = $(selector);
+    if (!host) return null;
+    historyViews.set(selector, createHistoryViewport(host, {
+      ...options,
+      onDispose: (node) => batchPreviewObserver?.unobserve(node),
+    }));
+  }
+  return historyViews.get(selector);
+}
+
+function loadMoreHistory(kind) {
+  const history = histories[kind];
+  if (!historyVisible(kind) || !history.initialized || !history.hasMore || history.error) return;
+  void loadHistoryPage(kind, true);
+}
+
+function renderHistoryFooters() {
+  for (const [id, kind, label] of [
+    ["comfyuiTaskHistoryFooter", "tasks", "条任务"],
+    ["comfyuiOutputHistoryFooter", "tasks", "条任务的产物"],
+    ["comfyuiBatchHistoryFooter", "batches", "个批次"],
+  ]) {
+    const host = document.getElementById(id);
+    if (!host) continue;
+    const history = histories[kind];
+    const loading = Boolean(history.request && (history.request.more || !history.initialized));
+    const note = history.error ? `加载失败：${history.error}`
+      : `${history.hasMore ? "已加载" : history.initialized ? "已加载全部" : "正在读取"} ${historyRows(kind).length} ${label}`;
+    host.querySelector("span").textContent = note;
+    const button = host.querySelector("button");
+    button.hidden = history.initialized && !history.hasMore && !history.error;
+    button.disabled = loading;
+    button.textContent = loading ? "加载中…" : history.error ? "重试加载" : "加载更早记录";
+  }
+}
+
+async function loadHistoryPage(kind, more = false) {
+  const history = histories[kind];
+  if (!history) return;
+  if (history.request) return history.request.promise;
+  if (history.error) more = Boolean(history.errorMore);
+  if (more && history.initialized && !history.hasMore) return;
+  const request = { epoch: history.epoch, sequence: ++history.sequence, more, promise: null };
+  history.request = request;
+  history.error = "";
+  renderHistoryFooters();
+  const current = () => history.request === request && history.epoch === request.epoch;
+  const oldRows = historyRows(kind);
+  const oldIds = new Set(oldRows.map((row) => String(row.id)));
+  const oldHead = oldRows[0];
+  request.promise = (async () => {
+    try {
+      let cursor = more && history.initialized ? history.cursor : "";
+      let payload;
+      const incoming = [];
+      do {
+        const query = new URLSearchParams({ page_size: String(HISTORY_PAGE_SIZE) });
+        if (kind === "tasks") query.set("scope", "single");
+        if (cursor) query.set("cursor", cursor);
+        payload = await api(`/api/comfyui/${kind}?${query}`);
+        if (!current()) return;
+        const rows = Array.isArray(payload[kind]) ? payload[kind] : [];
+        incoming.push(...rows);
+        // 轮询期间新增超过一页时接回旧首页边界，不能留下无法滚到的空档。
+        const caughtUp = !oldHead || rows.some((row) => oldIds.has(String(row.id)))
+          || (rows.length && historyOrder(rows.at(-1), oldHead) >= 0);
+        const next = String(payload.next_cursor || "");
+        if (more || !history.initialized || caughtUp || !payload.has_more || !next || next === cursor) break;
+        cursor = next;
+      } while (current());
+      if (!current()) return;
+      if (more || !history.initialized || !oldHead) {
+        history.cursor = String(payload.next_cursor || "");
+        history.hasMore = Boolean(payload.has_more && history.cursor);
+      }
+      history.initialized = true;
+      mergeHistoryRows(kind, incoming, request.sequence);
+      renderHistory(kind);
+    } catch (error) {
+      if (!current()) return;
+      history.error = error.message || "请求失败";
+      history.errorMore = more;
+    } finally {
+      if (current()) {
+        history.request = null;
+        renderHistoryFooters();
+        refreshHistoryViews();
+      }
+    }
+  })();
+  return request.promise;
+}
+
+async function refreshVisibleHistory(kind) {
+  const history = histories[kind];
+  if (!historyVisible(kind) || history.refreshingIds) return;
+  const selectors = kind === "tasks" ? ["#comfyuiTaskList", "#comfyuiOutputGrid"] : ["#comfyuiBatchList"];
+  const ids = new Set();
+  for (const selector of selectors) {
+    for (const key of historyViews.get(selector)?.visibleKeys() || []) {
+      ids.add(kind === "tasks" && selector.endsWith("OutputGrid") ? String(key).split("\u0000")[0] : String(key));
+    }
+  }
+  if (!ids.size) return;
+  const epoch = history.epoch;
+  const sequence = ++history.sequence;
+  history.refreshingIds = true;
   try {
-    const payload = await api("/api/comfyui/tasks");
-    const previous = comfyui.tasks.find((row) => row.id === comfyui.activeTaskId);
-    comfyui.tasks = payload.tasks || [];
-    const active = comfyui.tasks.find((row) => isTaskActive(row));
+    const requested = [...ids].slice(0, 100);
+    const payload = await api(`/api/comfyui/${kind}?${new URLSearchParams({ ids: requested.join(",") })}`);
+    if (epoch !== history.epoch) return;
+    mergeHistoryRows(kind, (payload[kind] || []).filter((row) => ids.has(String(row.id))), sequence);
+    const missing = (payload.missing_ids || []).filter((id) => ids.has(String(id)));
+    if (missing.length) forgetHistoryRows(kind, missing);
+    else renderHistory(kind);
+  } catch (_) { /* 定点校准失败保留旧卡片，下一轮重试。 */ }
+  finally { history.refreshingIds = false; }
+}
+
+async function refreshTasks(silent = false) {
+  await Promise.all([loadHistoryPage("tasks"), refreshActiveTasks(silent), refreshVisibleHistory("tasks")]);
+}
+
+async function refreshActiveTasks(silent = false) {
+  const request = ++comfyui.activeRequest;
+  const sequence = ++histories.tasks.sequence;
+  try {
+    const payload = await api("/api/comfyui/tasks?active_only=1");
+    if (request !== comfyui.activeRequest) return;
+    const previous = [...comfyui.tasks, ...comfyui.activeTasks].find((row) => row.id === comfyui.activeTaskId);
+    comfyui.activeTasks = (payload.tasks || []).filter((row) => {
+      const latest = comfyui.tasks.find((entry) => entry.id === row.id);
+      return isTaskActive(row) && !histories.tasks.removed.has(String(row.id))
+        && !(latest && !isTaskActive(latest) && ((histories.tasks.rowSequences.get(String(row.id)) || 0) > sequence
+          || Number(latest.updated_at) > Number(row.updated_at)));
+    });
+    mergeHistoryRows("tasks", comfyui.activeTasks.filter((row) => !isBatchTaskRow(row)), sequence);
+    const active = comfyui.activeTasks.find((row) => row.status === "running") || comfyui.activeTasks[0];
     if (active) {
       comfyui.activeTaskId = String(active.id);
       if (String(previous?.status || "") !== String(active.status)) comfyui.eventSeq = 0;
       startPolling();
-    } else if (!isTaskActiveById(comfyui.activeTaskId)) {
-      stopPolling();
-    }
-    renderTasks();
-    await renderLatestOutputs();
+    } else if (!isTaskActiveById(comfyui.activeTaskId)) stopPolling();
+    renderHistory("tasks");
   } catch (error) {
-    if (!silent) toast(`读取任务列表失败：${error.message}`);
+    if (!silent) toast(`读取活动任务失败：${error.message}`);
   }
 }
 
@@ -3067,7 +3302,7 @@ function isTaskActive(row) {
 
 function isTaskActiveById(id) {
   if (!id) return false;
-  const row = comfyui.tasks.find((item) => item.id === id);
+  const row = [...comfyui.tasks, ...comfyui.activeTasks].find((item) => item.id === id);
   return row ? isTaskActive(row) : false;
 }
 
@@ -3093,16 +3328,22 @@ async function pollActiveTask() {
     stopPolling();
     return;
   }
+  const taskId = comfyui.activeTaskId;
+  const epoch = histories.tasks.epoch;
+  const current = () => comfyui.activeTaskId === taskId && epoch === histories.tasks.epoch;
   try {
     const payload = await api(
-      `/api/comfyui/tasks/${encodeURIComponent(comfyui.activeTaskId)}/events?after=${comfyui.eventSeq}`);
+      `/api/comfyui/tasks/${encodeURIComponent(taskId)}/events?after=${comfyui.eventSeq}`);
+    if (!current()) return;
     const events = payload.events || [];
     if (events.length) comfyui.eventSeq = Number(payload.last_seq || comfyui.eventSeq);
-    const taskPayload = await api(`/api/comfyui/tasks/${encodeURIComponent(comfyui.activeTaskId)}`);
+    const taskPayload = await api(`/api/comfyui/tasks/${encodeURIComponent(taskId)}`);
+    if (!current()) return;
     const task = taskPayload.task || {};
-    const index = comfyui.tasks.findIndex((row) => row.id === task.id);
-    if (index >= 0) comfyui.tasks[index] = task;
-    else comfyui.tasks.unshift(task);
+    comfyui.activeRequest += 1;
+    comfyui.activeTasks = comfyui.activeTasks.filter((row) => row.id !== taskId);
+    if (isTaskActive(task)) comfyui.activeTasks.push(task);
+    mergeHistoryRows("tasks", [task]);
     renderTasks();
     await renderLatestOutputs();
     if (!isTaskActive(task)) {
@@ -3148,7 +3389,7 @@ function normalizeStep(step) {
 
 function activeComfyStep() {
   let best = null;
-  for (const row of comfyui.tasks || []) {
+  for (const row of [...comfyui.tasks, ...comfyui.activeTasks]) {
     if (String(row.status || "") !== "running") continue;
     const step = normalizeStep(row.step);
     if (step && (!best || step.updatedAt >= best.updatedAt)) best = step;
@@ -3187,48 +3428,23 @@ function renderTasks() {
   const list = $("#comfyuiTaskList");
   if (!list) return;
   updateStepMeter();
-  // 批量条目去了结果页「批量」档的批次列表，这里只留单次任务。
-  const rows = comfyui.tasks.filter((row) => !isBatchTaskRow(row)).slice(0, 12);
-  if (!rows.length) {
-    if (!list.dataset.empty) {
-      list.textContent = "";
-      list.dataset.empty = "1";
-      const empty = document.createElement("p");
-      empty.className = "comfyui-empty";
-      empty.textContent = "还没有任务。选好工作流和参数后点「开始生成」。";
-      list.append(empty);
-    }
-    return;
-  }
-  delete list.dataset.empty;
-  const existing = new Map();
-  for (const node of Array.from(list.children)) {
-    if (node.dataset?.taskId) existing.set(node.dataset.taskId, node);
-    else node.remove(); // 空态占位
-  }
-  const wanted = [];
-  for (const row of rows) {
-    const id = String(row.id || "");
-    const fingerprint = taskFingerprint(row);
-    let card = existing.get(id);
-    if (!card || card.dataset.fingerprint !== fingerprint) {
-      // 先摘掉旧卡片再放新的：map 引用被替换后旧节点不再被任何清理步骤覆盖。
-      card?.remove();
-      card = renderTaskCard(row);
-      card.dataset.taskId = id;
-      card.dataset.fingerprint = fingerprint;
-      existing.set(id, card);
-    }
-    wanted.push(id);
-  }
-  const wantedSet = new Set(wanted);
-  for (const [id, node] of existing) {
-    if (!wantedSet.has(id)) node.remove();
-  }
-  // 只在顺序真的变化时才重排：无变化轮询不触碰 DOM。
-  const currentOrder = Array.from(list.children).map((node) => node.dataset.taskId || "");
-  if (currentOrder.join("|") !== wanted.join("|")) {
-    for (const id of wanted) list.append(existing.get(id));
+  const rows = comfyui.tasks.filter((row) => !isBatchTaskRow(row));
+  historyViewport("#comfyuiTaskList", {
+    key: (row) => row.id, fingerprint: taskFingerprint, render: renderTaskCard,
+    estimateHeight: 112, isVisible: () => historyVisible("tasks"),
+    onNearEnd: () => loadMoreHistory("tasks"),
+  })?.setItems(rows);
+  renderHistoryEmpty(list, rows.length, "还没有任务。选好工作流和参数后点「开始生成」。");
+}
+
+function renderHistoryEmpty(host, length, text) {
+  const existing = host.querySelector(":scope > .comfyui-empty");
+  if (length) { existing?.remove(); return; }
+  if (!existing) {
+    const empty = document.createElement("p");
+    empty.className = "comfyui-empty";
+    empty.textContent = text;
+    host.append(empty);
   }
 }
 
@@ -3413,6 +3629,7 @@ async function deleteTaskFlow(taskId, button) {
       toast(`没有删成：${failed[0]?.reason || "任务没能停下来"}`);
     } else {
       toast(active ? "已取消并删除这条任务" : "已删除这条任务");
+      if (payload.deleted === 1) forgetHistoryRows("tasks", [id]);
     }
     if (comfyui.activeTaskId === id) {
       comfyui.activeTaskId = "";
@@ -3469,6 +3686,8 @@ async function clearFinishedTasks() {
     if (payload.skipped?.length) parts.push(`${payload.skipped.length} 条正在执行，已跳过`);
     const failed = Array.isArray(payload.failed) ? payload.failed : [];
     if (failed.length) parts.push(`${failed.length} 条删除失败：${failed[0]?.reason || ""}`);
+    const kept = new Set([...(payload.skipped || []).map(String), ...failed.map((row) => String(row.id))]);
+    forgetHistoryRows("tasks", comfyui.tasks.filter((row) => !isTaskActive(row) && !kept.has(String(row.id))).map((row) => row.id));
     toast(parts.join("；"));
     await refreshTasks();
   } catch (error) {
@@ -3482,7 +3701,7 @@ async function renderLatestOutputs() {
   const grid = $("#comfyuiOutputGrid");
   if (!grid) return;
   // 每个产物各自记着它的任务 id：不同任务的产物用各自的文件地址，
-  // 同一任务的多张图逐项全展示（上限沿用 24 张）。
+  // 同一任务的多张图都可访问，实际媒体节点只保留当前视区附近。
   const items = [];
   for (const row of comfyui.tasks) {
     if (isBatchTaskRow(row)) continue; // 批量产物在「批量」档按批次看
@@ -3492,7 +3711,6 @@ async function renderLatestOutputs() {
       ? row.output_files
       : outputs.map((name) => ({ name, path: "" }));
     for (const file of files) {
-      if (items.length >= 24) break;
       const name = String(file?.name || "");
       if (!row.id || !name) continue;
       items.push({ taskId: String(row.id), name, path: String(file?.path || "") });
@@ -3504,48 +3722,21 @@ async function renderLatestOutputs() {
     const key = `${item.taskId}\u0000${item.name}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    wanted.push({ key, item });
+    wanted.push({ key, ...item });
   }
-  if (!wanted.length) {
-    if (!grid.dataset.empty) {
-      grid.textContent = "";
-      grid.dataset.empty = "1";
-      const empty = document.createElement("p");
-      empty.className = "comfyui-empty";
-      empty.textContent = "还没有生成结果。提交任务后，出好的图会出现在这里。";
-      grid.append(empty);
-    }
-    return;
-  }
-  delete grid.dataset.empty;
-  const existing = new Map();
-  for (const node of Array.from(grid.children)) {
-    if (node.dataset?.outputKey) existing.set(node.dataset.outputKey, node);
-    else node.remove(); // 空态占位
-  }
-  for (const { key, item } of wanted) {
-    if (!existing.has(key)) {
+  historyViewport("#comfyuiOutputGrid", {
+    key: (item) => item.key, fingerprint: (item) => `${item.key}\u0000${item.path}`,
+    render: (item) => {
       const card = renderOutputCard(item.taskId, item.name, item.path);
-      card.dataset.outputKey = key;
-      existing.set(key, card);
-    }
-    // 视频卡进入视野才读元数据，首帧当封面；逐卡观察，新卡在后续轮询里补挂。
-    batchPreviewVideoPreload(existing.get(key));
-  }
-  for (const [key, node] of existing) {
-    if (!seen.has(key)) node.remove();
-  }
-  // 只在产物集合或顺序变化时才重排：无变化轮询不触碰媒体元素（图片不重载）。
-  const wantedOrder = wanted.map((entry) => entry.key);
-  const currentOrder = Array.from(grid.children).map((node) => node.dataset.outputKey || "");
-  if (currentOrder.join("|") !== wantedOrder.join("|")) {
-    let next = grid.firstElementChild;
-    for (const key of wantedOrder) {
-      const node = existing.get(key);
-      if (node !== next) grid.insertBefore(node, next);
-      next = node.nextElementSibling;
-    }
-  }
+      card.dataset.outputKey = item.key;
+      return card;
+    },
+    estimateHeight: 190,
+    columns: (host) => Math.max(1, getComputedStyle(host).gridTemplateColumns.split(" ").filter(Boolean).length),
+    isVisible: () => historyVisible("tasks"), onMount: batchPreviewVideoPreload,
+    onNearEnd: () => loadMoreHistory("tasks"),
+  })?.setItems(wanted);
+  renderHistoryEmpty(grid, wanted.length, "还没有生成结果。提交任务后，出好的图会出现在这里。");
 }
 
 // paint 由 CSS 的 .comfyui-output-save svg 单点声明（同 .file-action 口径）。
@@ -3577,7 +3768,7 @@ function renderOutputCard(taskId, name, path) {
     const img = document.createElement("img");
     // 造梦机产物没有侧车缩略图（attachmentThumbUrl 会推导 <stem>_thumb.webp 而
     // 404 破图），直接用原图地址，靠 loading=lazy 控制加载压力。
-    img.src = url;
+    img.dataset.comfyuiLazySrc = url;
     img.alt = name;
     img.loading = "lazy";
     img.dataset.largeUrl = url;
@@ -3688,6 +3879,7 @@ const batch = {
   draft: null,              // { title, unload_after, schemes: [scheme] }
   draftSourceId: "",        // 当前填单是从哪一批回填的（同一批再点编辑不用重复拉）
   runId: "",                // 跑批视图正在看的批次 id
+  runFromHistory: false,    // 历史详情只属于结果页；返回批量生成时恢复原填单
   runData: null,            // 该批次的详情（轮询刷新）
   runSignature: "",         // 上一次渲染用的条目状态摘要；轮询没变化就不重绘，别打断视频播放
   runTimer: null,
@@ -5453,6 +5645,7 @@ async function submitBatch() {
       body: { title: draft.title, unload_after: draft.unload_after, schemes, convert: { ...batch.convert } },
     });
     batch.runId = String(payload.batch?.id || "");
+    batch.runFromHistory = false;
     batch.runData = payload.batch || null;
     batch.runSignature = batchRunSignature(batch.runData);
     // 这一批就是当前填单提交出来的：再点「编辑这一批」不用重新拉快照。
@@ -5651,9 +5844,16 @@ function batchRunCardMarkup(item) {
 // 完成态卡片的预览：用单次结果同一张产物卡（renderOutputCard），图片能开灯箱、
 // 视频有播放器、音频能直接播；这样批量卡片和单次结果的媒体展示不会再分叉。
 function batchPreviewVideoPreload(host) {
-  const load = (target) => target.querySelectorAll?.("video").forEach((video) => {
-    if (video.preload === "none") video.preload = "metadata";
-  });
+  const load = (target) => {
+    if (target.dataset?.batchPreviewTask && !target.firstElementChild) mountBatchPreview(target);
+    target.querySelectorAll?.("img[data-comfyui-lazy-src]").forEach((img) => {
+      img.src = img.dataset.comfyuiLazySrc;
+      delete img.dataset.comfyuiLazySrc;
+    });
+    target.querySelectorAll?.("video").forEach((video) => {
+      if (video.preload === "none") video.preload = "metadata";
+    });
+  };
   if (typeof IntersectionObserver === "undefined") { load(host); return; }
   if (!batchPreviewObserver) {
     batchPreviewObserver = new IntersectionObserver((entries) => {
@@ -5669,6 +5869,11 @@ function batchPreviewVideoPreload(host) {
 
 function mountBatchItemPreviews() {
   document.querySelectorAll("#comfyuiBatchBody [data-batch-preview-task], #comfyuiBatchDetail [data-batch-preview-task]").forEach((host) => {
+    batchPreviewVideoPreload(host);
+  });
+}
+
+function mountBatchPreview(host) {
     const taskId = String(host.dataset.batchPreviewTask || "");
     const name = String(host.dataset.batchPreviewName || "");
     host.textContent = "";
@@ -5676,7 +5881,6 @@ function mountBatchItemPreviews() {
     host.append(renderOutputCard(taskId, name, ""));
     // 单次结果为了省带宽用 preload=none；批量卡片只预览第一条，等卡片进入
     // 视野再读元数据，按竖屏/横屏的真实比例显示，也不并发拉整批视频。
-    batchPreviewVideoPreload(host);
     const video = host.querySelector("video");
     if (!video) return;
     // 视频中间给一个真正的播放入口：点一下就开始，不要求用户去点控制条。
@@ -5693,7 +5897,6 @@ function mountBatchItemPreviews() {
     });
     video.addEventListener("play", () => play.remove(), { once: true });
     figure.append(play);
-  });
 }
 
 // 条目「打开文件夹」：定位这一条自己的产物目录（不是产物根目录，也不展开产物列表）。
@@ -5839,11 +6042,7 @@ function stopBatchPolling() {
 }
 
 async function loadBatchHistories() {
-  try {
-    const payload = await api("/api/comfyui/batches");
-    batch.histories = (payload.batches || []).slice(0, 50);
-    renderBatchHistoryList();
-  } catch (_) { /* 历史读不到不挡填单 */ }
+  await Promise.all([loadHistoryPage("batches"), refreshVisibleHistory("batches")]);
 }
 
 // ---- 批次列表（结果页「批量」档） ----
@@ -5867,11 +6066,21 @@ function batchHistoryBadge(row) {
 function renderBatchHistoryList() {
   const host = $("#comfyuiBatchList");
   if (!host) return;
-  if (!batch.histories.length) {
-    host.innerHTML = '<p class="comfyui-empty">还没有批次。到「批量生成」提交一批，这里就会留下记录。</p>';
-    return;
-  }
-  host.innerHTML = batch.histories.map((row) => {
+  historyViewport("#comfyuiBatchList", {
+    key: (row) => row.id,
+    fingerprint: (row) => JSON.stringify([row.title, row.created_at, row.item_count, row.done_count, batchHistoryBadge(row)]),
+    render: (row) => {
+      const template = document.createElement("template");
+      template.innerHTML = batchHistoryRowMarkup(row);
+      return template.content.firstElementChild;
+    },
+    estimateHeight: 108, isVisible: () => historyVisible("batches"),
+    onNearEnd: () => loadMoreHistory("batches"),
+  })?.setItems(batch.histories);
+  renderHistoryEmpty(host, batch.histories.length, "还没有批次。到「批量生成」提交一批，这里就会留下记录。");
+}
+
+function batchHistoryRowMarkup(row) {
     const [cls, label] = batchHistoryBadge(row);
     const total = Number(row.item_count ?? 0) || 0;
     const percent = total ? Math.min(100, Math.round(((Number(row.done_count ?? 0) || 0) / total) * 100)) : 0;
@@ -5885,7 +6094,6 @@ function renderBatchHistoryList() {
       </button>
       <button type="button" class="comfyui-batch-row-edit" data-batch-edit="${id}" title="回到填单区修改这一批的内容">编辑</button>
     </div>`;
-  }).join("");
 }
 
 // 从批次列表进详情：留在结果区「批量」档，不切回批量生成填单页。
@@ -5893,6 +6101,7 @@ function renderBatchHistoryList() {
 function openBatchHistory(id) {
   if (!id) return;
   batch.runId = String(id);
+  batch.runFromHistory = true;
   batch.runData = null;
   batch.runSignature = "";
   batch.view = "run";
@@ -6423,6 +6632,7 @@ async function deleteCurrentBatch() {
     if (payload.ok !== true || result.failed.length || result.skipped.length) {
       throw new Error(result.failed[0]?.reason || "批次未完整删除，请刷新后确认");
     }
+    forgetHistoryRows("batches", [batchId]);
     if (batch.runId === batchId && batch.view === "run") {
       stopBatchPolling();
       batch.runId = "";
@@ -6475,6 +6685,11 @@ async function retryBatchItem(taskId) {
 }
 
 function enterBatchPane() {
+  // 看历史不会回填草稿；即使先退到批次列表或绕经其他页签，也不能把历史结果带进填单区。
+  if (batch.runFromHistory) {
+    batch.view = "draft";
+    stopBatchPolling();
+  }
   ensureBatchDraft();
   void loadBatchHistories();
   void batchLoadCustomTemplates();

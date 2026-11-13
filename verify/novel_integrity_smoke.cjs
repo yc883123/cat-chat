@@ -59,6 +59,9 @@ async function unknown(context, page, source, width) {
   await page.locator('#writerBookMenuBtn').click();
   await page.locator('#writerNovelContinueBtn').click();
   await page.waitForFunction(() => !document.querySelector('#writerNovelImportNext').disabled);
+  await page.locator('[data-writer-source-mode="book"]').click();
+  await page.waitForFunction(() => !document.querySelector('#writerNovelSourceBook')?.disabled
+    && document.querySelector('#writerNovelSourceBook')?.options.length > 1);
   await page.locator('#writerNovelSourceBook').selectOption(source.id);
   await page.locator('#writerNovelImportNext').click();
   await page.locator('input[name="writerNovelSourceKind"][value="manuscript"]').check();

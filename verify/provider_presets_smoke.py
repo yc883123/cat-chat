@@ -15,17 +15,19 @@
 from __future__ import annotations
 
 import os
-import shutil
+import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PORT = int(os.environ.get("NAIBA_PRESET_SMOKE_PORT", "8796"))
+with socket.socket() as port_probe:
+    port_probe.bind(("127.0.0.1", 0))
+    PORT = int(os.environ.get("NAIBA_PRESET_SMOKE_PORT") or port_probe.getsockname()[1])
 BASE = f"http://127.0.0.1:{PORT}"
-TMP_ROOT = ROOT / "verify" / "_tmp_preset_smoke"
 
 
 def wait_health(deadline: float = 60.0) -> bool:
@@ -41,16 +43,15 @@ def wait_health(deadline: float = 60.0) -> bool:
 
 
 def main() -> int:
-    shutil.rmtree(TMP_ROOT, ignore_errors=True)
-    TMP_ROOT.mkdir(parents=True, exist_ok=True)
+    tmp_root = Path(tempfile.mkdtemp(prefix="_tmp_preset_smoke_", dir=ROOT / "verify"))
     env = dict(os.environ)
     env.update({
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUTF8": "1",
         "NAIBA_TMP_PORT": str(PORT),
-        "NAIBA_TMP_ROOT": str(TMP_ROOT),
+        "NAIBA_TMP_ROOT": str(tmp_root),
     })
-    log_path = ROOT / "verify" / "provider_presets_smoke_server.log"
+    log_path = tmp_root / "server.log"
     server: subprocess.Popen | None = None
     code = 1
     with log_path.open("w", encoding="utf-8") as log:
@@ -65,8 +66,12 @@ def main() -> int:
             node_env = dict(os.environ)
             node_env.update({
                 "NAIBA_SMOKE_BASE": BASE,
-                "NAIBA_SMOKE_SHOTS": str(ROOT / "verify"),
-                "NODE_PATH": str(ROOT / "node_modules"),
+                "NAIBA_SMOKE_SHOTS": str(tmp_root),
+                "NODE_PATH": os.pathsep.join(filter(None, [
+                    str(ROOT / "node_modules"),
+                    str(Path.home() / "node_modules"),
+                    os.environ.get("NODE_PATH", ""),
+                ])),
             })
             node = subprocess.run(  # noqa: S603 - 固定 argv
                 ["node", str(ROOT / "verify" / "provider_presets_smoke.cjs")],
@@ -81,12 +86,7 @@ def main() -> int:
                 except subprocess.TimeoutExpired:
                     server.kill()
                     server.wait(timeout=10)
-            shutil.rmtree(TMP_ROOT, ignore_errors=True)
-            # 沙箱的批量删除护栏（>50 项/轮，§九.66）偶尔会挡下这次收尾删除；
-            # 不影响正确性——下一轮 main() 开头会先重建全新根，这里只是如实报出。
-            left = TMP_ROOT.exists()
-            tail = "已清理" if not left else "仍残留（被沙箱删除护栏挡下，下轮启动会先重建）"
-            print(f"隔离实例已退出（exit={server.returncode if server else 'n/a'}），临时目录 {TMP_ROOT.name} {tail}")
+            print(f"隔离实例已退出（exit={server.returncode if server else 'n/a'}）；日志、截图和隔离数据保留在 {tmp_root}")
     return code
 
 

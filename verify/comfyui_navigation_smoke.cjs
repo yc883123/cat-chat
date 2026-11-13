@@ -33,6 +33,23 @@ async function checkViewport(browser, vp) {
   let batchDetailRequests = 0;
   let batchItemStatus = 'running';
   let mediaUploads = 0;
+  let holdNextHistory = false;
+  let heldHistoryReady = null;
+  let releaseHistory = null;
+  const historyEditRequests = [];
+  const historyBatch = (id, title) => ({
+    id, title, item_count: 1, done_count: 1,
+    items: [{ index: 1, name: '历史条目', task_id: `${id}-task`, status: 'completed', done: 1, total: 1, outputs: [] }],
+    schemes: [{
+      workflow_id: workflow.id, workflow_name: workflow.name,
+      mapping: { prompt_slot: { node_id: '3', field_name: 'text' }, media_ports: [
+        { node_id: '1', field_name: 'image', checked: false },
+        { node_id: '2', field_name: 'image', checked: false },
+      ] },
+      items: [{ name: '历史条目', prompt: '历史批次里的提示词', shots: 1, media_inputs: [] }],
+    }],
+  });
+  const histories = [historyBatch('cfb-history-single', '唯一历史批次')];
   const runBatch = () => ({
     id: 'cfb-navigation-smoke', title: '浏览器提交回归',
     items: [{ index: 1, name: '回归条目', task_id: 'cf-navigation-item', status: batchItemStatus, done: batchItemStatus === 'completed' ? 1 : 0, total: 1, outputs: [] }],
@@ -46,6 +63,7 @@ async function checkViewport(browser, vp) {
     if (/\/files\/.*\.mp4|\/api\/file\?/.test(request.url())) mediaRequests.push(request.url());
   });
   page.on('pageerror', error => errors.push(error.message));
+  page.on('dialog', dialog => dialog.accept());
   page.on('console', message => {
     if (message.type() === 'error' && !message.text().includes('Failed to load resource')) errors.push(message.text());
   });
@@ -64,7 +82,7 @@ async function checkViewport(browser, vp) {
     body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l1sAAAAASUVORK5CYII=', 'base64'),
   }));
   await page.route('**/api/comfyui/**', route => {
-    const pathname = new URL(route.request().url()).pathname;
+    const url = new URL(route.request().url()), pathname = url.pathname;
     if (pathname.includes('/files/')) return route.fulfill({ status: 200, contentType: 'video/mp4', body: '' });
     if (pathname === '/api/comfyui/media') {
       mediaUploads += 1;
@@ -80,13 +98,29 @@ async function checkViewport(browser, vp) {
       batchDetailRequests += 1;
       return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ batch: runBatch() }) });
     }
+    const history = histories.find(row => pathname === `/api/comfyui/batches/${row.id}`);
+    if (history) {
+      const body = JSON.stringify({ batch: history });
+      if (url.searchParams.get('with_schemes') === '1') historyEditRequests.push(history.id);
+      else if (holdNextHistory) {
+        holdNextHistory = false;
+        return new Promise(resolve => {
+          releaseHistory = async () => {
+            await route.fulfill({ status: 200, contentType: 'application/json', body });
+            resolve();
+          };
+          heldHistoryReady();
+        });
+      }
+      return route.fulfill({ status: 200, contentType: 'application/json', body });
+    }
     const responses = {
       '/api/comfyui/health': { ok: true, url: 'http://127.0.0.1:8188', devices: [] },
       '/api/comfyui/models': { models: [], loras: [] },
       '/api/comfyui/workflows': { workflows: [workflow] },
       [`/api/comfyui/workflows/${workflow.id}`]: { workflow },
       '/api/comfyui/tasks': { tasks: outputTasks },
-      '/api/comfyui/batches': { batches: [] },
+      '/api/comfyui/batches': { batches: histories },
     };
     assert.ok(Object.hasOwn(responses, pathname), `未预期的 ComfyUI 请求：${pathname}`);
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(responses[pathname]) });
@@ -126,7 +160,73 @@ async function checkViewport(browser, vp) {
     assert.equal(await page.locator('[data-batch-select="port-node"]').first().inputValue(), '2|image');
     await checkNoScriptError();
 
+    // 浏览历史只在结果区看产物，返回生成页仍应是原来的工作流填单。
+    const draftPrompt = '浏览历史之前尚未提交的提示词';
+    await page.locator('[data-batch-field="title"]').fill('尚未提交的草稿');
+    await page.locator('[data-batch-item="prompt"]').first().fill(draftPrompt);
+    const historyList = () => page.locator('#comfyuiBatchList [data-batch-open]');
+    const showHistoryList = async () => {
+      await paneButton('tasks').click();
+      await page.locator('[data-comfyui-results-seg="batch"]').click();
+      const back = page.locator('#comfyuiBatchDetail [data-batch-action="back-to-batch-list"]');
+      if (await back.isVisible()) await back.click();
+      await historyList().first().waitFor({ state: 'visible' });
+      await checkNoScriptError();
+    };
+    const openHistory = async (id = histories[0].id) => {
+      await showHistoryList();
+      await page.locator(`#comfyuiBatchList [data-batch-open="${id}"]`).click();
+      await page.locator('#comfyuiBatchDetail .cbm-run-title').waitFor({ state: 'visible' });
+      await checkNoScriptError();
+    };
+    const checkDraft = async () => {
+      await checkNoScriptError();
+      assert.equal(await page.locator('#comfyuiBatchBody [data-batch-select="workflow"]').isVisible(), true,
+        '返回批量生成必须显示工作流参数区');
+      assert.equal(await page.locator('#comfyuiBatchBody [data-batch-select="workflow"]').inputValue(), workflow.id);
+      assert.equal(await page.locator('#comfyuiBatchBody [data-batch-select="port-node"]').first().inputValue(), '2|image', '历史详情不得改写原素材映射');
+      assert.equal(await page.locator('#comfyuiBatchBody [data-batch-item="prompt"]').first().inputValue(), draftPrompt, '历史详情不得隐式回填覆盖提示词');
+      assert.equal(await page.locator('#comfyuiBatchBody [data-batch-field="title"]').inputValue(), '尚未提交的草稿');
+      assert.equal(await page.locator('#comfyuiBatchBody .cbm-run-head').count(), 0, '批量填单不得残留历史产物视图');
+      await checkNoScriptError();
+    };
+    await showHistoryList();
+    assert.equal(await historyList().count(), 1, '先复现仅有一批历史记录的情况');
+    await page.locator('#comfyuiBatchList [data-batch-open="cfb-history-single"]').click();
+    await page.locator('#comfyuiBatchDetail .cbm-run-title').waitFor({ state: 'visible' });
+    await checkNoScriptError();
+    await paneButton('batch').click();
+    await checkDraft();
+
+    histories.push(historyBatch('cfb-history-second', '另一份历史批次'));
+    await openHistory('cfb-history-second');
+    await page.locator('#comfyuiBatchDetail [data-batch-action="back-to-batch-list"]').click();
+    await historyList().first().waitFor({ state: 'visible' });
+    assert.equal(await historyList().count(), 2, '多批历史同样不能污染填单');
+    await paneButton('batch').click();
+    await checkDraft();
+    for (const intermediate of ['run', 'workflows']) {
+      await openHistory();
+      await paneButton(intermediate).click();
+      await paneButton('batch').click();
+      await checkDraft();
+    }
+
+    // 已经离开详情的旧轮询回包，不能把新输入覆盖成历史结果。
+    await showHistoryList();
+    holdNextHistory = true;
+    const historyHeld = new Promise(resolve => { heldHistoryReady = resolve; });
+    await page.locator('#comfyuiBatchList [data-batch-open="cfb-history-single"]').click();
+    await historyHeld;
+    await paneButton('batch').click();
+    await checkDraft();
+    await releaseHistory();
+    await page.waitForTimeout(100);
+    await checkDraft();
+    assert.deepEqual(historyEditRequests, [], '没有点编辑时不得请求历史回填快照');
+
     await paneButton('tasks').click();
+    await page.locator('[data-comfyui-results-seg="single"]').click();
     assert.equal(await page.locator('.comfyui-results-col').isVisible(), true);
     assert.equal(await page.locator('#comfyuiBatch').isVisible(), false);
     assert.equal(await page.locator('#comfyuiOutputGrid video').count(), 24);
@@ -149,19 +249,28 @@ async function checkViewport(browser, vp) {
       assert.ok(videos.filter(video => video.preload === 'none').every(video => !requested.has(video.src)), '屏外未预载视频不得发起媒体请求');
     };
     await checkLazyVideos();
-    await page.evaluate(() => { window.__comfyuiOldVideos = Array.from(document.querySelectorAll('#comfyuiOutputGrid video')); });
+    await page.evaluate(() => {
+      window.__comfyuiOldVideos = new Map(Array.from(document.querySelectorAll('#comfyuiOutputGrid video'))
+        .map(video => [video.closest('[data-output-key]').dataset.outputKey, video]));
+    });
     outputTasks.unshift({
       id: 'cf-video-smoke-new', workflow_name: '新增视频结果', status: 'completed',
       result: { outputs: ['new.mp4'] }, progress: { done: 1, total: 1 },
     });
     await page.waitForFunction(() => document.querySelector('#comfyuiOutputGrid figure')?.dataset.outputKey.startsWith('cf-video-smoke-new'), null, { timeout: 12000 });
-    assert.equal(await page.evaluate(() => Array.from(document.querySelectorAll('#comfyuiOutputGrid video')).slice(1).every((video, index) => video === window.__comfyuiOldVideos[index])), true, '插入新结果必须保留全部仍在展示的旧视频 DOM');
-    assert.equal(await page.locator('#comfyuiOutputGrid video').count(), 24, '结果仍遵守24个展示上限');
+    const retained = await page.evaluate(() => Array.from(document.querySelectorAll('#comfyuiOutputGrid video'))
+      .filter(video => window.__comfyuiOldVideos.has(video.closest('[data-output-key]').dataset.outputKey))
+      .map(video => video === window.__comfyuiOldVideos.get(video.closest('[data-output-key]').dataset.outputKey)));
+    assert.ok(retained.length > 0 && retained.every(Boolean), '插入新结果必须保留当前虚拟窗口交集里的旧视频 DOM');
+    const mountedVideos = await page.locator('#comfyuiOutputGrid video').count();
+    assert.ok(mountedVideos > 0 && mountedVideos <= outputTasks.length, '虚拟窗口只挂载当前结果范围内的有界媒体');
     await checkLazyVideos();
     const lastVideo = page.locator('#comfyuiOutputGrid video').last();
     if (await lastVideo.getAttribute('preload') === 'none') {
+      const outputKey = await lastVideo.evaluate(video => video.closest('[data-output-key]').dataset.outputKey);
       await lastVideo.scrollIntoViewIfNeeded();
-      await page.waitForFunction(() => Array.from(document.querySelectorAll('#comfyuiOutputGrid video')).at(-1)?.preload === 'metadata');
+      await page.waitForFunction(key => Array.from(document.querySelectorAll('#comfyuiOutputGrid video'))
+        .find(video => video.closest('[data-output-key]').dataset.outputKey === key)?.preload === 'metadata', outputKey);
     }
     await checkNoScriptError();
     await paneButton('run').click();
@@ -203,7 +312,7 @@ async function checkViewport(browser, vp) {
     assert.deepEqual(await mediaNames(), ['ui-3.png'], '排序后文件必须跟随原素材口');
     await page.locator('[data-batch-item="prompt"]').first().fill('用于验证提交与返回轮询的提示词');
     await page.locator('[data-batch-action="submit"]').click();
-    await page.locator('.cbm-card .cbm-badge.run').waitFor({ state: 'visible' });
+    await page.locator('#comfyuiBatchBody .cbm-card .cbm-badge.run').waitFor({ state: 'visible' });
     assert.equal(batchSubmissions.length, 1, '一次点击只提交一个批次');
     assert.equal(batchSubmissions[0].schemes[0].workflow_id, workflow.id);
     assert.equal(batchSubmissions[0].schemes[0].items[0].prompt, '用于验证提交与返回轮询的提示词');
@@ -214,7 +323,7 @@ async function checkViewport(browser, vp) {
     await page.waitForTimeout(2400);
     assert.equal(batchDetailRequests, closedCount, '关闭工作台必须停止批次请求');
     await page.evaluate(async () => (await import('/js/22-studio.js')).openStudioView());
-    await page.waitForFunction(() => Boolean(document.querySelector('.cbm-card .cbm-badge.run')));
+    await page.waitForFunction(() => Boolean(document.querySelector('#comfyuiBatchBody .cbm-card .cbm-badge.run')));
     await page.waitForTimeout(100);
     assert.ok(batchDetailRequests > closedCount, '重开工作台必须恢复当前批次');
     await page.evaluate(async () => (await import('/js/22-studio.js')).setStudioPage('library'));
@@ -230,10 +339,19 @@ async function checkViewport(browser, vp) {
     const beforeReturnRequests = batchDetailRequests;
     batchItemStatus = 'completed';
     await paneButton('batch').click();
-    await page.locator('.cbm-card .cbm-badge.done').waitFor({ state: 'visible', timeout: 5000 });
+    await page.locator('#comfyuiBatchBody .cbm-card .cbm-badge.done').waitFor({ state: 'visible', timeout: 5000 });
     assert.ok(batchDetailRequests > beforeReturnRequests, '返回运行批次必须立即重新读取服务端状态');
     await checkNoScriptError();
-    console.log(`通过 ${vp.width}×${vp.height}：导航、首次进入批量、下游标签、提交及返回轮询、视频按视区懒载及轮询保留DOM`);
+    // 显式编辑才用历史快照替换填单，原有回填入口仍可使用。
+    await openHistory();
+    await page.locator('#comfyuiBatchDetail [data-batch-action="edit-batch"]').click();
+    await page.waitForFunction(() => document.querySelector('#studioPageComfyui').dataset.comfyuiPane === 'batch'
+      && document.querySelector('#comfyuiBatchBody [data-batch-item="prompt"]')?.value === '历史批次里的提示词');
+    assert.equal(await page.locator('#comfyuiBatchBody [data-batch-field="title"]').inputValue(), histories[0].title);
+    assert.equal(await page.locator('#comfyuiBatchBody [data-batch-select="port-node"]').first().inputValue(), '1|image');
+    assert.deepEqual(historyEditRequests, [histories[0].id], '只有显式编辑才读取回填快照');
+    await checkNoScriptError();
+    console.log(`通过 ${vp.width}×${vp.height}：导航、历史结果与填单隔离及迟到回包、显式编辑、下游标签、提交及返回轮询、视频懒载与DOM保留`);
   } catch (error) {
     console.error('批量区状态：', await page.locator('#comfyuiBatchBody').innerText(), errors);
     await page.screenshot({ path: path.join(__dirname, `comfyui_navigation_failed_${vp.width}.png`) });

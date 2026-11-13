@@ -738,10 +738,19 @@ class StageTaskFlowGuardTests(unittest.TestCase):
                          "查看不需要重挂轮询；轮询始终认 activeTaskId")
         panel = js[js.index("function renderStagePanel("):]
         panel = panel[: panel.index("function applyStageCollapse(")]
-        self.assertIn("const viewingHistory = Boolean(viewTask && (!activeTask || viewTask.id !== activeTask.id));", panel)
+        self.assertIn("const viewingHistory = Boolean(viewTask && activeTask && viewTask.id !== activeTask.id);", panel)
         self.assertIn("novelStageBackToActive", panel, "要有返回当前任务入口")
-        self.assertIn("apply.hidden = isStoryboard || viewingHistory", panel,
-                      "历史任务的结果不得触发写回")
+        self.assertNotIn("apply.hidden = isStoryboard || viewingHistory", panel,
+                         "历史已完成结果也应能保存为新版本")
+        apply = js[js.index("async function applyStageResult()"):]
+        apply = apply[: apply.index("// ---- 单章 AI 改编")]
+        self.assertIn("row.id === stageData.viewTaskId", apply, "保存认当前展示的任务")
+        self.assertIn("const taskSource = task?.novel || task?.input?.novel;", apply,
+                      "详情将作品来源放在 input.novel，不能只认清单提升后的顶层字段")
+        self.assertIn('taskSource?.book_id !== bookId || taskSource?.stage !== stage', apply,
+                      "两种任务 DTO 都必须核对当前作品和阶段")
+        self.assertIn("if (stageData.activeTaskId === taskId)", apply,
+                      "保存历史任务不能清掉另一个当前任务")
 
     def test_storyboard_block_follows_the_displayed_task(self):
         """分镜结果盒与分镜块必须看同一条任务：历史任务的提示词也要能勾选发送。"""

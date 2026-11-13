@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 4.4.5-beta
-  RELEASE_TAG: v4.4.5-beta
+  RELEASE_VERSION: 4.4.6-beta
+  RELEASE_TAG: v4.4.6-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-4.4.5-beta-windows-x64
+  PACKAGE_NAME: cat-chat-4.4.6-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-4.4.5-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-4.4.6-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -179,11 +179,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 4.4.5 Beta release
+      - name: Publish 4.4.6 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 4.4.5 Beta
+          name: Cat Chat 4.4.6 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -193,10 +193,16 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 4.4.5 Beta：提词库新增古手梨花 Skill 合集预设
-            提词库新增 15 条古手梨花 Skill 合集预设：K2 二次元 / 人像基础 / 人像反差 / 仙宫 4 条，MOSS 二次元 / 人像 2 条，瑶光人像 1 条，图片分镜 2 条，H3 单图擦边 / 动漫 PV / 漫画分镜 / 战斗分镜 / 真人漫画分镜 / 完整打戏 6 条。
-            按模板分支拆条：图像引擎保留作者原文作为系统提示词；H3 与分镜流程把 references 规则合并成单文件，读到引用时直接使用文末同名章节，不需要外部文件。
-            ANIMA 引擎未纳入：标签库含大量可直接出裸体的词条，按仓库「NSFW 不入库」红线排除；h3-prompt-writing 与内置 Skill 和预设重复，也未重复收录。
-            边界：合集未附许可证，公开再分发前需作者授权；h3-edge-i2v 缺原主模板，只保留工作流与快速复核规则；案例图片、视频与 scripts 脚本未内置。
-            验证：本地全量 4772 项测试通过（含原字节指纹、单文件引用闭合、增补幂等与坏源失败测试），静态检查、JavaScript 语法与文档编码通过；桌面与 375px 浏览器冒烟通过。模型与供应商均为本地替身，未做真实付费生成。
-            Cat Chat 4.4.5 Beta Windows build。保留现有数据位置、更新协议以及双名称 exe 和 zip 资产。
+            Cat Chat 4.4.6 Beta：造梦机历史分页、拆书匠分镜选版与织书台 TXT 续写
+            造梦机单次和批量历史支持连续分页，历史记录可访问数量不再封顶；列表只渲染当前窗口，图片和视频进入可视范围后再加载，减少长历史的页面开销。每批生成条目的业务限制不变。
+            查看历史批次后返回批量生成，恢复原来的工作流参数草稿；只有明确点击编辑批次才回填历史参数。刷新、删除和新提交保持已加载历史，迟到回包不会恢复已删除记录。
+            再次生成快照开放「设置高级参数」，可调整本次显示项和顺序；隐藏字段保留原覆盖或已修改值，「默认」恢复快照参数，清空固定种子后按随机提交，原工作流设置不被改写。
+            拆书匠大纲可选择已保存版本接续，默认仍按本批素材生成；兼容只有单份大纲的旧作品，预检不改旧稿，保存追加新版本并保留旧内容。
+            拆书匠要素、大纲、剧本的当前或历史已完成任务可另存新版本，已保存任务防止重复写入；历史结果保存不干扰正在运行的任务，完成正文优先读取持久结果，修复任务详情来源字段导致保存按钮不可用的问题。
+            剧本生成说明随人物设定和大纲选版即时更新，实际引用与预算由预检确认；切换输入清除旧预算，修复重复版本标签与部分记录状态显示。
+            分镜新增剧本版本选择，单版也显示所用版号，沿用剧本页选择；场次数、预检和实际生成统一使用所选版本。任务冻结版号及正文，源版本后来修改或删除也不改变重试输入；修复切版和任务详情迟到回包造成的显示倒退。
+            织书台支持直接上传 TXT 续写，也可选择拆书匠原文或逐章改编稿；确认人物、关系、剧情现状和后续大纲后，在选定末章后创建新章，导入旧章保持只读。支持 UTF-8 与 GB18030，重复提交沿用请求标识避免重复建书。
+            首次配置供应商时可自动检测并选择模型，也可手动填写；修改连接或返回后，旧检测结果不会覆盖当前选择。新增、编辑或删除 API 配置后，工作台与任务总管的模型列表即时刷新，并保留有效选择和草稿。
+            源码维护工具新增缓存诊断包，生成脱敏报告；配套测试使用本地假服务，不读取真实配置或调用付费接口。
+            验证：本地全量 4830 项测试通过（1 项按环境跳过），静态与文档检查通过；造梦机、拆书匠、织书台、首启模型选择均完成桌面和 375px Playwright 验收。生成验证使用隔离数据和本地替身，未执行真实付费模型或 ComfyUI 生成。
+            Cat Chat 4.4.6 Beta Windows build。保留现有数据位置、更新协议以及双名称 exe 和 zip 资产。

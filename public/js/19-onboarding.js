@@ -1,5 +1,5 @@
 // ============================================================
-// 19-onboarding.js —— 首启引导向导：还没有可用供应商时，选模板 → 粘 Key → 开聊
+// 19-onboarding.js —— 首启引导向导：选模板 → 填连接信息 → 检测并选择模型 → 开聊
 //
 // 触发条件：设置里**一个可用供应商都没有**（既没有本地后端，也没有配过 Key 的在线
 // API）。已经能聊的用户永远看不到这个弹层；误跳过了也不亏——设置 → 模型 →「添加 API」
@@ -20,6 +20,41 @@ const ONBOARDING_VISIBLE_PRESETS = 6;
 
 // 向导自己的选中项：不写进 state.providerPresetId，免得和设置弹层的表单来源互相污染。
 let selectedPresetId = '';
+let modelCheckGeneration = 0;
+let modelCheckTimer;
+let connectionTestGeneration = 0;
+let onboardingGeneration = 0;
+let saveInFlight = false;
+
+function invalidateOnboardingChecks() {
+  clearTimeout(modelCheckTimer);
+  ++modelCheckGeneration;
+  ++connectionTestGeneration;
+  $('#onboardingLoadModels').disabled = false;
+  $('#onboardingLoadModels').textContent = '检测模型';
+  $('#onboardingTest').disabled = false;
+  $('#onboardingTest').textContent = '测试连接';
+}
+
+function setOnboardingModels(models = [], selected = '') {
+  const select = $('#onboardingModel');
+  const ids = [...new Set(models.map(model => String(typeof model === 'string' ? model : model?.id || '').trim()).filter(Boolean))];
+  select.replaceChildren(new Option(ids.length ? '请选择模型' : '检测后选择模型', ''));
+  for (const id of ids) select.add(new Option(id, id));
+  select.add(new Option('手动填写模型名称…', '__custom__'));
+  select.value = selected === '__custom__' || ids.includes(selected) ? selected : ids[0] || '';
+  $('#onboardingModelCustomField').hidden = select.value !== '__custom__';
+}
+
+export function changeOnboardingModel() {
+  ++connectionTestGeneration;
+  $('#onboardingTest').disabled = false;
+  $('#onboardingTest').textContent = '测试连接';
+  $('#onboardingError').textContent = '';
+  const custom = $('#onboardingModel').value === '__custom__';
+  $('#onboardingModelCustomField').hidden = !custom;
+  if (custom) $('#onboardingModelCustom').focus();
+}
 
 function onboardingDismissed() {
   try {
@@ -43,6 +78,8 @@ function setOnboardingStep(step) {
 }
 
 export function resetOnboarding() {
+  ++onboardingGeneration;
+  invalidateOnboardingChecks();
   selectedPresetId = '';
   renderProviderPresetGrid('onboardingPresetGrid');
   $('#onboardingPresetMore').textContent = providerPresetMoreText(ONBOARDING_VISIBLE_PRESETS);
@@ -54,7 +91,9 @@ export function resetOnboarding() {
   $('#onboardingKeyField').hidden = false;
   $('#onboardingApiKey').value = '';
   $('#onboardingModelField').hidden = true;
-  $('#onboardingModel').value = '';
+  setOnboardingModels();
+  $('#onboardingModelCustom').value = '';
+  $('#onboardingModelStatus').textContent = '';
   $('#onboardingError').textContent = '';
   $('#onboardingBack').hidden = true;
   $('#onboardingTest').hidden = true;
@@ -63,10 +102,12 @@ export function resetOnboarding() {
   setOnboardingStep(1);
 }
 
-// 选模板 → 进第 2 步：本地后端要地址不要 Key，在线大厂只要 Key，自定义要地址+Key+模型名。
+// 模板仅提供连接信息，模型必须来自实际目录或用户手填。
 export function selectOnboardingPreset(presetId) {
   const preset = providerPresetById(presetId);
   if (!preset) return;
+  ++onboardingGeneration;
+  invalidateOnboardingChecks();
   selectedPresetId = preset.id;
   markProviderPresetCards('onboardingPresetGrid', preset.id);
   const local = preset.kind === 'local';
@@ -74,17 +115,17 @@ export function selectOnboardingPreset(presetId) {
   const custom = preset.id === 'custom';
   $('#onboardingKeyRow').hidden = false;
   $('#onboardingRecap').textContent = local
-    ? `已选 ${preset.name}（${url || '本机地址'}）：本地服务免 Key，确认地址与模型名后保存即可。`
-    : `已选 ${preset.name}（${url}）${preset.model ? `，默认使用模型 ${preset.model}` : ''}。`
-      + '保存后可在设置里换模型，换 GPT / Codex 系模型时请求格式和 URL 要一起改（见上方说明）。';
+    ? `已选 ${preset.name}（${url || '本机地址'}）：本地服务免 Key，确认地址后检测并选择模型。`
+    : `已选 ${preset.name}（${url}）。填好 API Key 后会自动检测模型，可在下方选择。`;
   fillProviderPresetGuide($('#onboardingGuide'), preset, { fallback: '' });
   $('#onboardingUrlField').hidden = !(local || custom);
   $('#onboardingBaseUrl').value = url;
   $('#onboardingKeyField').hidden = !preset.key_required;
   $('#onboardingApiKey').value = '';
-  // 模板自带推荐模型就不用让用户再选；自定义/本地没有推荐值，必须自己填（后端校验非空）。
-  $('#onboardingModelField').hidden = Boolean(preset.model);
-  $('#onboardingModel').value = preset.model || '';
+  $('#onboardingModelField').hidden = false;
+  $('#onboardingModelCustom').value = '';
+  setOnboardingModels();
+  $('#onboardingModelStatus').textContent = '填好连接信息后自动检测，也可点击「检测模型」或手动填写。';
   $('#onboardingError').textContent = '';
   $('#onboardingBack').hidden = false;
   $('#onboardingTest').hidden = false;
@@ -93,6 +134,7 @@ export function selectOnboardingPreset(presetId) {
   // 在线大厂直接落在 Key 输入框；本地/自定义先确认地址。
   if (preset.key_required && !custom) $('#onboardingApiKey').focus();
   else $('#onboardingBaseUrl').focus();
+  if (!preset.key_required) scheduleOnboardingModelCheck();
 }
 
 function onboardingPayload() {
@@ -103,24 +145,82 @@ function onboardingPayload() {
     preset_id: preset.id,
     name: preset.name,
     kind,
-    base_url: ($('#onboardingBaseUrl').value || preset.base_url || '').trim(),
+    base_url: $('#onboardingBaseUrl').value.trim(),
     request_format: preset.request_format,
     local_backend: kind === 'local' ? preset.request_format : undefined,
-    model: ($('#onboardingModel').value || preset.model || '').trim(),
+    model: ($('#onboardingModel').value === '__custom__'
+      ? $('#onboardingModelCustom').value : $('#onboardingModel').value).trim(),
     api_key: $('#onboardingApiKey').value.trim(),
     reasoning_effort: 'auto',
   };
 }
 
 // 保存前的本地校验：把「保存后才知道错」变成当场一句话（服务端仍会再校验一次）。
-function validateOnboarding(values, preset) {
+function validateOnboarding(values, preset, { requireModel = true } = {}) {
   if (!values.base_url) return '请先填写 API URL';
   if (preset.key_required && !values.api_key) return '请先粘贴 API Key';
-  if (!values.model) return '请先填写模型名称（本地服务可先填一个已下载的模型，保存后在设置里点「检查模型」）';
+  if (requireModel && !values.model) return '请先检测并选择模型，或手动填写模型名称';
   return '';
 }
 
+function connectionSnapshot(values) {
+  const { model, ...connection } = values || {};
+  return JSON.stringify(connection);
+}
+
+export function scheduleOnboardingModelCheck() {
+  invalidateOnboardingChecks();
+  // 连接一变，旧目录立即失效；用户明确手填的草稿保留。
+  setOnboardingModels([], $('#onboardingModel').value === '__custom__' ? '__custom__' : '');
+  $('#onboardingError').textContent = '';
+  const preset = providerPresetById(selectedPresetId);
+  const values = preset ? onboardingPayload() : null;
+  const problem = values ? validateOnboarding(values, preset, { requireModel: false }) : '';
+  $('#onboardingModelStatus').textContent = problem || '等待检测模型…';
+  if (!values || problem) return;
+  modelCheckTimer = setTimeout(() => { loadOnboardingModels(); }, 350);
+}
+
+export async function loadOnboardingModels() {
+  clearTimeout(modelCheckTimer);
+  const preset = providerPresetById(selectedPresetId);
+  const values = preset ? onboardingPayload() : null;
+  const problem = values ? validateOnboarding(values, preset, { requireModel: false }) : '请先选择一个供应商模板';
+  if (problem) {
+    $('#onboardingModelStatus').textContent = problem;
+    return;
+  }
+  const generation = ++modelCheckGeneration;
+  const snapshot = connectionSnapshot(values);
+  const current = () => generation === modelCheckGeneration && $('#onboardingDialog').open
+    && snapshot === connectionSnapshot(onboardingPayload());
+  const button = $('#onboardingLoadModels');
+  button.disabled = true;
+  button.textContent = '检测中…';
+  $('#onboardingModelStatus').textContent = '正在获取可用模型…';
+  try {
+    const result = await api('/api/providers/models', { method: 'POST', body: values });
+    if (!current()) return;
+    const models = Array.isArray(result.models) ? result.models : [];
+    const previous = $('#onboardingModel').value;
+    setOnboardingModels(models, previous);
+    if ($('#onboardingModel').value !== previous) changeOnboardingModel();
+    const count = $('#onboardingModel').options.length - 2;
+    $('#onboardingModelStatus').textContent = count
+      ? `检测到 ${count} 个模型，可切换选择，也可手动填写。`
+      : '接口未返回模型，请重试或手动填写模型名称。';
+  } catch (error) {
+    if (current()) $('#onboardingModelStatus').textContent = `模型检测失败：${error.message}。可重试或手动填写模型名称。`;
+  } finally {
+    if (current()) {
+      button.disabled = false;
+      button.textContent = '检测模型';
+    }
+  }
+}
+
 export async function testOnboardingConnection() {
+  if ($('#onboardingTest').disabled) return;
   const preset = providerPresetById(selectedPresetId);
   const values = preset ? onboardingPayload() : null;
   const problem = values ? validateOnboarding(values, preset) : '请先选择一个供应商模板';
@@ -129,22 +229,29 @@ export async function testOnboardingConnection() {
     return;
   }
   const button = $('#onboardingTest');
+  const generation = ++connectionTestGeneration;
+  const snapshot = JSON.stringify(values);
+  const current = () => generation === connectionTestGeneration && $('#onboardingDialog').open
+    && snapshot === JSON.stringify(onboardingPayload());
   const label = button.textContent;
   button.disabled = true;
   button.textContent = '测试中…';
   $('#onboardingError').textContent = '正在测试连接…';
   try {
     const result = await api('/api/providers/test', { method: 'POST', body: values });
-    $('#onboardingError').textContent = providerTestSummary(result);
+    if (current()) $('#onboardingError').textContent = providerTestSummary(result);
   } catch (error) {
-    $('#onboardingError').textContent = `连接失败：${error.message}`;
+    if (current()) $('#onboardingError').textContent = `连接失败：${error.message}`;
   } finally {
-    button.disabled = false;
-    button.textContent = label;
+    if (generation === connectionTestGeneration) {
+      button.disabled = false;
+      button.textContent = label;
+    }
   }
 }
 
 export async function saveOnboardingProvider() {
+  if (saveInFlight) return;
   const preset = providerPresetById(selectedPresetId);
   const values = preset ? onboardingPayload() : null;
   if (!values) {
@@ -157,17 +264,21 @@ export async function saveOnboardingProvider() {
     return;
   }
   const button = $('#onboardingSave');
+  const generation = onboardingGeneration;
+  saveInFlight = true;
   button.disabled = true;
   button.textContent = '保存中…';
   try {
     const saved = await api('/api/providers', { method: 'POST', body: values });
     syncSavedProvider(saved);
     // 关窗即记「看过引导」（close 事件里统一写），这里只提示结果。
-    $('#onboardingDialog').close();
+    if (generation === onboardingGeneration) $('#onboardingDialog').close();
     toast(`已添加「${saved.name || preset.name}」，开始聊天吧`);
   } catch (error) {
-    $('#onboardingError').textContent = error.message;
+    if (generation === onboardingGeneration) $('#onboardingError').textContent = error.message;
+    else toast(`保存失败：${error.message}`);
   } finally {
+    saveInFlight = false;
     button.disabled = false;
     button.textContent = '保存并开始';
   }

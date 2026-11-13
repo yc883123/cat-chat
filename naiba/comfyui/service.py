@@ -21,16 +21,20 @@ from typing import Any
 
 from naiba.comfyui import (
     COMFYUI_ACTIVE_STATUSES,
+    COMFYUI_BATCH_PREFIX,
     COMFYUI_RESUMABLE_STATUSES,
+    COMFYUI_TASK_PREFIX,
     PARAMS_SCHEMA_VERSION,
 )
 from naiba.comfyui import client
 from naiba.comfyui.batches import ComfyUIBatchError, ComfyUIBatchManager
 from naiba.comfyui.jobs import ComfyUIJobManager, ComfyUITaskError
+from naiba.comfyui.history import history_record_missing, parse_history_ids
 from naiba.comfyui.params import enrich_slots, scan_params
 from naiba.comfyui.runner import ComfyUIRunner
 from naiba.comfyui.schema import NodeSchemaProvider
 from naiba.comfyui.store import ComfyUIStore, ComfyUIStoreError
+from naiba.core.contracts import COMFYUI_HISTORY_MISSING_IDS_KEY
 
 # 工作流 JSON 上限（对齐聊天域 _load_comfyui_workflow 的 20 MB 文件上限）。
 WORKFLOW_MAX_BYTES = 20 * 1024 * 1024
@@ -96,7 +100,7 @@ class ComfyUIService:
 
         protected = (*COMFYUI_ACTIVE_STATUSES, *COMFYUI_RESUMABLE_STATUSES)
         keys: set[str] = set()
-        for task in self.store.list_tasks(limit=5000):
+        for task in self.store.iter_tasks():
             if str(task.get("status") or "") not in protected:
                 continue
             input_data = task.get("input") if isinstance(task.get("input"), dict) else {}
@@ -452,8 +456,33 @@ class ComfyUIService:
 
     # ---- 任务 ----
 
-    def api_tasks(self, active_only: str = "") -> tuple[dict[str, Any], int]:
-        rows = self.jobs.tasks(active_only=str(active_only or "") in ("1", "true"))
+    def api_tasks(self, active_only: str = "", *, page_size: Any = None,
+                  cursor: Any = None, scope: str = "all", ids: Any = None) -> tuple[dict[str, Any], int]:
+        active = str(active_only or "") in ("1", "true")
+        try:
+            if scope not in {"all", "single"}:
+                raise ValueError("scope 必须是 single 或 all")
+            if ids is not None:
+                if page_size is not None or cursor is not None:
+                    raise ValueError("ids 不能与 page_size 或 cursor 一起使用")
+                requested = parse_history_ids(ids, COMFYUI_TASK_PREFIX)
+                rows, missing = [], []
+                for task_id in requested:
+                    row = self.jobs.task(task_id)
+                    if row is None:
+                        if history_record_missing(self.store.task_record_path(task_id)):
+                            missing.append(task_id)
+                    elif ((scope != "single" or not row["batch_id"])
+                          and (not active or row["status"] in COMFYUI_ACTIVE_STATUSES)):
+                        rows.append(row)
+                return {"tasks": rows, "count": len(rows), COMFYUI_HISTORY_MISSING_IDS_KEY: missing}, 200
+            if page_size is not None or cursor is not None:
+                page = self.jobs.task_page(page_size, cursor, scope=scope, active_only=active)
+                rows = page.pop("rows")
+                return {"tasks": rows, **page}, 200
+            rows = self.jobs.tasks(active_only=active, scope=scope)
+        except ValueError as exc:
+            return {"error": str(exc)}, 400
         return {"tasks": rows}, 200
 
     def api_task(self, task_id: str) -> tuple[dict[str, Any], int]:
@@ -558,7 +587,24 @@ class ComfyUIService:
             return {"error": f"批量提交失败：{exc}"}, 500
         return {"ok": True, "batch": self.batches.get(str(batch.get("id") or "")) or batch}, 201
 
-    def api_batches(self) -> tuple[dict[str, Any], int]:
+    def api_batches(self, *, page_size: Any = None, cursor: Any = None,
+                    ids: Any = None) -> tuple[dict[str, Any], int]:
+        if ids is not None:
+            try:
+                if page_size is not None or cursor is not None:
+                    raise ValueError("ids 不能与 page_size 或 cursor 一起使用")
+                requested = parse_history_ids(ids, COMFYUI_BATCH_PREFIX)
+                rows, missing = self.batches.summaries_by_ids(requested)
+            except ValueError as exc:
+                return {"error": str(exc)}, 400
+            return {"batches": rows, "count": len(rows), COMFYUI_HISTORY_MISSING_IDS_KEY: missing}, 200
+        if page_size is not None or cursor is not None:
+            try:
+                page = self.batches.page(page_size, cursor)
+            except ValueError as exc:
+                return {"error": str(exc)}, 400
+            rows = page.pop("rows")
+            return {"batches": rows, **page}, 200
         rows = self.batches.list()
         return {"batches": rows, "count": len(rows)}, 200
 

@@ -44,6 +44,10 @@ STUDIO_SYSTEM_PROMPT_KEY = "system_prompt"
 WORK_GLOBAL_SYSTEM_PROMPT_KEY = "global_system_prompt"
 WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY = "global_system_prompt_revision"
 STORYBOARD_PROMPT_CONFIG_KEY = "storyboard_prompt_config"
+# Storyboard requests select one saved script version; omitted/null/empty means
+# current. Resolved version and scene text are frozen in the Studio input, with
+# the same version recorded in novel.sources for previews and task provenance.
+NOVEL_SCRIPT_VERSION_KEY = "script_version"
 STUDIO_PROMPT_SOURCE_KEY = "prompt_source"
 STUDIO_SKILL_IDS_KEY = "skill_ids"
 STUDIO_SKILL_SNAPSHOT_KEY = "skill_snapshot"
@@ -83,6 +87,24 @@ JOB_SUBMISSION_GUARD_KEY = "submission_guard_version"
 COMFYUI_SUBMISSIONS_KEY = "submissions"
 # Editing metadata only: this does not change a ComfyUI graph or execution.
 COMFYUI_BATCH_CONVERT_KEY = "convert"
+# History pagination limits each response, never the retained history. Cursors
+# order by immutable (created_at, id) and belong to their list/filter scope.
+COMFYUI_HISTORY_PAGE_SIZE_KEY = "page_size"
+COMFYUI_HISTORY_CURSOR_KEY = "cursor"
+COMFYUI_HISTORY_SCOPE_KEY = "scope"
+COMFYUI_HISTORY_NEXT_CURSOR_KEY = "next_cursor"
+COMFYUI_HISTORY_HAS_MORE_KEY = "has_more"
+COMFYUI_HISTORY_IDS_KEY = "ids"
+COMFYUI_HISTORY_MISSING_IDS_KEY = "missing_ids"
+
+
+class ComfyUIHistoryPage(TypedDict, total=False):
+    tasks: list[dict[str, Any]]
+    batches: list[dict[str, Any]]
+    count: int  # Number of records in this page, not a retained-history limit.
+    next_cursor: str  # Empty on the last page.
+    has_more: bool
+    missing_ids: list[str]  # Explicitly absent IDs in a bounded lookup request.
 
 
 class CompactionResult(TypedDict, total=False):
@@ -136,12 +158,26 @@ class LabelerAttemptUsageCarrier(Protocol):
 
 
 class WriterNovelChapterSource(TypedDict):
-    """Immutable provenance for a read-only chapter copied from NovelStore."""
+    """Immutable provenance for a read-only chapter from NovelStore or TXT."""
     source_book_id: str
     source_manuscript_id: str
     source_chapter_no: int
     imported_at: int
-    source_kind: Literal["original", "manuscript"]
+    source_kind: Literal["original", "manuscript", "txt"]
+    source_import_id: NotRequired[str]
+    source_filename: NotRequired[str]
+
+
+class WriterNovelTxtPreview(TypedDict):
+    """TXT staging adds no NovelStore book; JSON preview/commit use import_id."""
+    source_kind: Literal["txt"]
+    import_id: str
+    source_import_id: str
+    source_filename: str
+    encoding: str
+    split_level: str
+    split_level_label: str
+    max_file_bytes: int
 
 
 class WriterContinuationSummary(TypedDict):

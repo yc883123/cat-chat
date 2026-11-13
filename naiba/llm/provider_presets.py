@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""供应商预设表：主流供应商「只填 API Key」的连接模板（纯数据 + 纯函数，零项目依赖）。
+"""供应商预设表：主流供应商的连接模板（纯数据 + 纯函数，零项目依赖）。
 
 一张预设 = 一个主流模型供应商的连接模板：名称 / API URL / 请求格式 / 推荐模型 /
-Key 申请入口全部预填，用户只需粘贴 API Key 即可开始对话；「自定义」预设保留
+Key 申请入口预填，首启导航粘贴 API Key 后检测并选择模型；「自定义」预设保留
 全字段手填路径（含各种 OpenAI 兼容中转）。前端（设置弹层与首启引导）经
 ``GET /api/provider-presets`` 取这份表，不在第二处复制名单；``POST /api/providers``
 接受可选 ``preset_id``，服务端按本表回填连接字段（用户显式提交的值优先），
@@ -196,8 +196,8 @@ PROVIDER_PRESETS: tuple[dict[str, Any], ...] = (
             "（10 元 / 50 元 / 200 元，最低 10 元起，充一次就能试）；③ 到控制台「令牌」页点「添加令牌」——分组要选对："
             "分组决定这个 Key 能调哪些模型，要调 Gemini 就选 Gemini 分组，选错会报模型不存在/无权限；"
             "建好后复制 sk- 开头的字符串粘到下方 API Key 栏。\n"
-            "模板默认填 gemini-3.8-flash（请求格式「OpenAI 兼容」、URL 不带 /v1）。"
-            "换模型请在保存后到设置里改，并按模型把两处一起改：\n"
+            "填好 API Key 后检测并选择模型；模板请求格式为「OpenAI 兼容」、URL 不带 /v1。"
+            "模型需要其他请求格式时，到设置里同时调整请求格式与 URL：\n"
             "· Gemini / Claude / Kimi 等普通对话模型：格式保持「OpenAI 兼容」，URL 不带 /v1；\n"
             "· GPT-5 / Codex 系：格式改成「Codex /v1/responses」，URL 末尾补 /v1。\n"
             "注意：该站按 max_tokens 预扣费，余额不足时请求会被拒绝（报 403）——"
@@ -217,7 +217,7 @@ PROVIDER_PRESETS: tuple[dict[str, Any], ...] = (
         "key_url": "",
         "hint": (
             "自定义端点：适用于各种 OpenAI 兼容中转、公司内网或私有服务——"
-            "需要自己填好 API URL、请求格式和模型名。不知道填什么时，"
+            "填好 API URL 和 Key 后检测并选择模型，也可手填；其他请求格式可在设置里调整。不知道填什么时，"
             "可以先在上方选一个现成预设。"
         ),
     },
@@ -235,7 +235,7 @@ PROVIDER_PRESETS: tuple[dict[str, Any], ...] = (
         "hint": (
             "本机 Ollama（免 Key）：① 先在本机安装并启动 Ollama；"
             "② 确认服务地址是 http://127.0.0.1:11434/v1（默认值，一般不用改）；"
-            "③ API Key 留空即可，保存后点「检查模型」拉取本机已下载的模型。"
+            "③ API Key 留空即可，检测并选择本机已下载的模型，再保存。"
         ),
     },
     {
@@ -251,7 +251,7 @@ PROVIDER_PRESETS: tuple[dict[str, Any], ...] = (
         "hint": (
             "本机 LM Studio（免 Key）：① 打开 LM Studio 的 Developer → Local Server 页面"
             "并启动服务、加载模型；② 确认地址是 http://127.0.0.1:1234/v1；"
-            "③ API Key 留空，保存后点「检查模型」。"
+            "③ API Key 留空，检测并选择模型后保存。"
         ),
     },
     {
@@ -267,7 +267,7 @@ PROVIDER_PRESETS: tuple[dict[str, Any], ...] = (
         "hint": (
             "本机 llama.cpp（免 Key）：① 用 llama-server 启动服务；"
             "② 确认地址是 http://127.0.0.1:8080/v1；"
-            "③ API Key 留空，保存后点「检查模型」。"
+            "③ API Key 留空，检测并选择模型后保存。"
         ),
     },
     {
@@ -297,7 +297,7 @@ PROVIDER_PRESETS: tuple[dict[str, Any], ...] = (
         "hint": (
             "本机 Unsloth（Key 可先留空）：① 启动 Unsloth 桌面版或 unsloth studio；"
             "② 地址通常是 http://127.0.0.1:8000 或 http://127.0.0.1:8888；"
-            "③ 保存后点「检查模型」（需要 Key 时在 Unsloth Settings → API 里创建）。"
+            "③ 检测并选择模型后保存（需要 Key 时在 Unsloth Settings → API 里创建）。"
         ),
     },
 )

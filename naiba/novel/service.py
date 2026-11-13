@@ -45,7 +45,8 @@ from typing import Any
 from naiba.core import novel_split
 from naiba.core.contracts import (
     WORK_GLOBAL_SYSTEM_PROMPT_KEY, WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY,
-    STORYBOARD_PROMPT_CONFIG_KEY, STUDIO_PROMPT_SOURCE_KEY, STUDIO_SKILL_IDS_KEY,
+    STORYBOARD_PROMPT_CONFIG_KEY, NOVEL_SCRIPT_VERSION_KEY,
+    STUDIO_PROMPT_SOURCE_KEY, STUDIO_SKILL_IDS_KEY,
 )
 from naiba.novel import manuscripts, prompts
 from naiba.novel import migration
@@ -149,6 +150,37 @@ def _split_elements(text: str) -> dict[str, list[str]]:
 
 def _new_version_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
+
+
+def _effective_outline_version(manifest: dict[str, Any]) -> int:
+    """只读解析大纲版号；无版本数组的非空单份旧稿才兼容为第 1 版。"""
+    if "outline_versions" in manifest:
+        versions = manifest.get("outline_versions")
+        rows = versions if isinstance(versions, list) else []
+        return max((int(row.get("version") or 0) for row in rows if isinstance(row, dict)), default=0)
+    if not str(manifest.get("outline") or "").strip():
+        return 0
+    try:
+        version = int(manifest.get("outline_version") or 0)
+    except (TypeError, ValueError):
+        version = 0
+    return version if version > 0 else 1
+
+
+def _effective_script_version(manifest: dict[str, Any]) -> int:
+    """公共视图与分镜共用版号；只有未建版本数组的单份旧剧本可以合成版本。"""
+    if "script_versions" in manifest:
+        versions = manifest.get("script_versions")
+        rows = versions if isinstance(versions, list) else []
+        return max((int(row.get("version") or 0) for row in rows if isinstance(row, dict)), default=0)
+    script = manifest.get("script")
+    if not isinstance(script, list) or not script:
+        return 0
+    try:
+        version = int(manifest.get(NOVEL_SCRIPT_VERSION_KEY) or 0)
+    except (TypeError, ValueError):
+        version = 0
+    return version if version > 0 else 1
 
 
 class NovelStore:
@@ -428,7 +460,7 @@ class NovelStore:
             },
             "elements_versions": [dict(row) for row in element_versions if isinstance(row, dict)] if include_versions else [],
             "outline": str(manifest.get("outline") or ""),
-            "outline_version": int(manifest.get("outline_version") or (len(outline_versions) or 1 if manifest.get("outline") else 0)),
+            "outline_version": _effective_outline_version(manifest),
             "outline_versions": [dict(row) for row in outline_versions if isinstance(row, dict)] if include_versions else [],
             "outline_task_id": str(manifest.get("outline_task_id") or ""),
             "outline_updated_at": int(manifest.get("outline_updated_at") or 0),
@@ -436,7 +468,7 @@ class NovelStore:
             # 阶段三成果：剧本场次。
             "script": list(script),
             "script_versions": [dict(row) for row in (manifest.get("script_versions") or []) if isinstance(row, dict)] if include_versions else [],
-            "script_version": int(manifest.get("script_version") or 0),
+            NOVEL_SCRIPT_VERSION_KEY: _effective_script_version(manifest),
         }
 
     # ---- 章节索引与稿件 ----
@@ -1214,6 +1246,7 @@ class NovelStore:
             if not body.strip():
                 raise NovelServiceError("剧本结果为空，没有可写回的内容")
             versions = manifest.get("script_versions") if isinstance(manifest.get("script_versions"), list) else []
+            legacy_version = _effective_script_version(manifest) if "script_versions" not in manifest else 0
             self._reject_duplicate_task(versions, task_id)
             source_chapters = sorted({int(value) for value in (chapter_ids or [])})
             if not source_chapters and from_chapter:
@@ -1235,8 +1268,8 @@ class NovelStore:
             manifest["script_task_id"] = str(task_id or "")
             manifest["script_updated_at"] = _now_ms()
             manifest["script_parsed"] = bool(parsed)
-            if not versions and existing:
-                versions = [{"id": _new_version_id("sc"), "version": 1, "script": existing,
+            if legacy_version and existing:
+                versions = [{"id": _new_version_id("sc"), "version": legacy_version, "script": existing,
                              "updated_at": previous_updated_at, "task_id": previous_task_id,
                              "chapter_ids": []}]
             versions = self._ensure_version_ids(versions, "sc")
@@ -1933,10 +1966,33 @@ class NovelService:
         elements = manifest.get("elements") if isinstance(manifest.get("elements"), dict) else {}
         element_versions = manifest.get("elements_versions") if isinstance(manifest.get("elements_versions"), list) else []
         outline_versions = manifest.get("outline_versions") if isinstance(manifest.get("outline_versions"), list) else []
+        current_outline_version = _effective_outline_version(manifest)
         elements_version = self._selected_version(body, "elements_version", element_versions, elements.get("version", 0))
-        outline_version = self._selected_version(body, "outline_version", outline_versions, manifest.get("outline_version", 0))
+        outline_version = self._selected_version(body, "outline_version", outline_versions, current_outline_version)
         selected_elements = next((row for row in element_versions if int(row.get("version") or 0) == elements_version), None)
         selected_outline = next((row for row in outline_versions if int(row.get("version") or 0) == outline_version), None)
+        # 大纲接续（2026-11-13）：只在用户显式选了旧版本时生效；默认不接续，
+        # 现有「按本批素材重写」的行为不变。
+        continue_outline = ""
+        continue_outline_version = 0
+        selected_continue = None
+        if stage == "outline":
+            raw_continue = body.get("continue_outline_version")
+            if raw_continue not in (None, "", 0, "0"):
+                # 与公共视图及普通版本选择共用版号；单份旧稿只按其有效版号回退正文。
+                continue_outline_version = self._selected_version(
+                    {"continue_outline_version": raw_continue}, "continue_outline_version",
+                    outline_versions, current_outline_version,
+                )
+                selected_continue = next(
+                    (row for row in outline_versions
+                     if isinstance(row, dict) and int(row.get("version") or 0) == continue_outline_version),
+                    None,
+                )
+                continue_outline = (str(selected_continue.get("text") or "") if selected_continue
+                                    else str(manifest.get("outline") or ""))
+                if not continue_outline.strip():
+                    raise NovelServiceError("要接续的大纲版本没有正文，请换一版或改回「不接续」")
         characters = list(elements.get("characters") or [])
         if selected_elements:
             characters = _split_elements(str(selected_elements.get("raw") or ""))["characters"]
@@ -1956,6 +2012,7 @@ class NovelService:
             body_limit=body_limit,
             max_chapters=max_chapters,
             manuscript_ids=manuscript_ids,
+            continue_outline=continue_outline,
         )
         prompts.add_reference_material(built, kg)
         built["system"] = prompts.compose_stage_system(manifest.get(WORK_GLOBAL_SYSTEM_PROMPT_KEY, ""))
@@ -1978,9 +2035,15 @@ class NovelService:
             "elements_version": elements_version,
             "outline_version": outline_version,
             "sources": self._source_rows(manifest, material, elements_version, outline_version,
-                                         selected_elements, selected_outline, stage),
+                                         selected_elements, selected_outline, stage,
+                                         characters=characters),
         }
         prepared["sources"]["kg_entities"] = int(budget.get("kg_entities") or 0)
+        prepared["sources"]["continues_outline"] = bool(continue_outline.strip())
+        prepared["sources"]["continue_outline_version"] = int(continue_outline_version or 0)
+        prepared["sources"]["continue_outline_label"] = (
+            _version_label(selected_continue) if selected_continue else ""
+        )
         return prepared
 
     def _build_adapt(self, *, book_id: str, body: dict[str, Any],
@@ -2056,7 +2119,7 @@ class NovelService:
 
     def _build_storyboard(self, *, book_id: str, body: dict[str, Any],
                           extra_note: str, context_window: int) -> dict[str, Any]:
-        """分镜生图（4C）：把已保存剧本的最新场次逐场转成出图提示词。
+        """分镜生图（4C）：把选定保存版本的场次逐场转成出图提示词。
 
         吃的是剧本场次；结果保存在独立 Studio 任务，再发给造梦机出图。
         `system_prompt` 兼容旧请求的模板草稿入口；新模板任务把它移入 user。
@@ -2064,8 +2127,28 @@ class NovelService:
         """
         # 公开清单视图就够用：场次、书名与要素都在里面，不必翻 store 私有层。
         manifest = self.store.get_book(book_id)["book"]
-        scenes = manifest.get("script") if isinstance(manifest.get("script"), list) else []
+        versions = manifest.get("script_versions") or []
+        current_version = int(manifest.get(NOVEL_SCRIPT_VERSION_KEY) or 0)
+        raw_version = body.get(NOVEL_SCRIPT_VERSION_KEY)
+        if raw_version is not None and raw_version != "":
+            if isinstance(raw_version, bool) or not isinstance(raw_version, (int, str)):
+                raise NovelServiceError(f"{NOVEL_SCRIPT_VERSION_KEY} 必须是正整数")
+        script_version = self._selected_version(
+            body, NOVEL_SCRIPT_VERSION_KEY, versions, current_version)
+        selected = next((row for row in versions if isinstance(row, dict)
+                         and int(row.get("version") or 0) == script_version), None)
+        if selected is not None:
+            scenes = selected.get("script") if isinstance(selected.get("script"), list) else []
+        elif not versions and current_version > 0 and script_version == current_version:
+            # 公共 DTO 仅对缺失版本数组的旧稿返回有效版号；显式空数组的版号为 0。
+            scenes = manifest.get("script") if isinstance(manifest.get("script"), list) else []
+        else:
+            scenes = []
+            if script_version > 0:
+                raise NovelServiceError(f"{NOVEL_SCRIPT_VERSION_KEY} 指定的版本不存在")
         if not scenes:
+            if selected is not None:
+                raise NovelServiceError(f"所选剧本第 {script_version} 版没有场次；请选择有场次的剧本版本")
             raise NovelServiceError("这个作品还没有剧本场次；请先在剧本阶段生成并保存场次，再来生成分镜")
         raw_ids = body.get("scene_ids")
         if raw_ids is None or raw_ids == "":
@@ -2135,6 +2218,7 @@ class NovelService:
             "elements_label": "",
             "outline_version": 0,
             "outline_label": "",
+            NOVEL_SCRIPT_VERSION_KEY: script_version,
             "system_custom": bool(built.get("system_custom")),
         }
         sources["kg_entities"] = int(budget.get("kg_entities") or 0)
@@ -2152,6 +2236,7 @@ class NovelService:
             "elements_version": 0,
             "outline_version": 0,
             "sources": sources,
+            NOVEL_SCRIPT_VERSION_KEY: script_version,
             "scene_snapshot": snapshot,
         }
 
@@ -2174,7 +2259,7 @@ class NovelService:
                      elements_version: int, outline_version: int,
                      selected_elements: dict[str, Any] | None,
                      selected_outline: dict[str, Any] | None,
-                     stage: str) -> dict[str, Any]:
+                     stage: str, *, characters: list[str] | None = None) -> dict[str, Any]:
         """本次实际引用了什么（右栏与任务快照共用）。"""
         rows = []
         for row in material["chapters"]:
@@ -2185,9 +2270,11 @@ class NovelService:
                 "manuscript_label": str(row.get("manuscript_label") or ""),
                 "manuscript_kind": str(row.get("manuscript_kind") or ""),
             })
-        elements = manifest.get("elements") if isinstance(manifest.get("elements"), dict) else {}
         outline_text = str(selected_outline.get("text") if selected_outline else manifest.get("outline") or "")
-        character_text = str(selected_elements.get("raw") if selected_elements else elements.get("raw") or "")
+        manuscript_ids = {int(row["i"]): str(row.get("manuscript_id") or "") for row in material["chapters"]}
+        summary_chain = prompts.build_summary_chain(
+            manifest.get("summaries") or {}, material["chapter_ids"], manuscript_ids,
+        ) if stage in ("elements", "outline", "script") else ""
         return {
             "chapters": rows,
             "elements_version": int(elements_version or 0),
@@ -2195,8 +2282,8 @@ class NovelService:
             "outline_version": int(outline_version or 0),
             "outline_label": _version_label(selected_outline) if selected_outline else "",
             "uses_outline": stage == "script" and bool(outline_text.strip()),
-            "uses_characters": stage == "script" and bool(character_text.strip()),
-            "has_summaries": bool(manifest.get("summaries")),
+            "uses_characters": stage == "script" and any(str(row).strip() for row in (characters or [])),
+            "has_summaries": bool(summary_chain),
         }
 
     def _context_window(self, model_key: str) -> int:
@@ -2275,6 +2362,7 @@ class NovelService:
         }
         if stage == prompts.STORYBOARD_STAGE:
             # 分镜生图：场次选择与快照进任务，重试按同一批场次重放。
+            novel_payload[NOVEL_SCRIPT_VERSION_KEY] = prepared[NOVEL_SCRIPT_VERSION_KEY]
             novel_payload["scene_ids"] = list(prepared["built"].get("scene_ids") or [])
             novel_payload["scene_snapshot"] = prepared.get("scene_snapshot") or []
         input_data = {

@@ -43,6 +43,9 @@ KEEP = {
     "browser_smoke.cjs", "topbar_smoke.cjs", "pending_files_smoke.cjs",
     "chat_composer_layout_smoke.cjs",
     "comfyui_navigation_smoke.cjs",
+    "comfyui_history_smoke.cjs", "_serve_comfyui_history.py",
+    "novel_outline_continue_smoke.cjs", "_serve_novel_outline_continue.py",
+    "novel_storyboard_versions_smoke.cjs", "_serve_novel_storyboard_versions.py",
     "comfyui_preview_delete_smoke.cjs",
     "onebot_settings_smoke.cjs",
     "_serve_concurrency_guards.py", "concurrency_guards_smoke.cjs",
@@ -147,6 +150,8 @@ KEEP = {
     # 媒体附卡改动（计划 2026-10-21）的真实供应商预热对照探针（只读）：隔离实例 + 固定语料，
     # 用正式版供应商自身用量台账结算 base（HEAD 归档）vs new 的命中率中位数
     "probe_media_cache.py",
+    # 可转发的 Windows 缓存诊断包（独立目录，含离线假服务验收）。
+    "claude-cache-diagnostic",
     # 「运行中并发改会话」冒烟：真实服务 + 可暂停假后端，钉住 run 的"冻结快照自足"契约
     # （改 `create_chat_run` 不再固化整段会话之前必须先跑通它）
     "run_freeze_smoke.py",
@@ -228,7 +233,7 @@ if not TMP.is_dir():
     sys.exit(0)
 
 files = [p for p in TMP.iterdir() if p.is_file()]
-dirs = [p for p in TMP.iterdir() if p.is_dir() and p.name != "_archive"]
+dirs = [p for p in TMP.iterdir() if p.is_dir() and p.name != "_archive" and p.name not in KEEP]
 del_files = [p for p in files if p.name not in KEEP]
 del_scripts = [p for p in del_files if p.suffix.lower() in SCRIPT_EXT]
 del_other = [p for p in del_files if p.suffix.lower() not in SCRIPT_EXT]

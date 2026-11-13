@@ -38,6 +38,9 @@ BODY_SLOT_STEP = 500
 # 要素槽 / 大纲槽：分槽限额，防止要素把大纲的位置挤掉。
 ELEMENTS_SLOT_CHARS = 800
 OUTLINE_SLOT_CHARS = 1200
+# 大纲接续槽：上一版大纲整段带进来做「已写到哪」的基准。三幕大纲常在 1000–3000 字，
+# 留 4000 够用；超了按截断明示，不静默丢内容。
+CONTINUE_OUTLINE_SLOT_CHARS = 4000
 # 摘要链：带前几章、每章摘要取首尾多少字。
 SUMMARY_PREV_CHAPTERS = 3
 SUMMARY_HEAD_CHARS = 120
@@ -247,6 +250,14 @@ _OUTLINE_INSTRUCTION = """你是影视改编的编剧。请只依据下面给出
 4. 不要编造素材里没有的人物、地点、事件。
 5. 不要写分镜、不要写台词。"""
 
+# 接续模式：上一版大纲已写到的幕原样保留，只用本批素材补它标着「未覆盖」的幕。
+# 用户拍板：同一幕新旧都有内容时以旧版为准，只补缺，不让新素材改写已写好的幕。
+_OUTLINE_CONTINUE_RULES = """接续要求（这一份不是从零重写）：
+1. 上面那版大纲里已经写了具体内容的幕，原样保留：不改写、不换人物、不调整顺序、不删要点。
+2. 只补那版里标着「（本批素材未覆盖，需补后续章节）」的幕，用本批素材把它写实。
+3. 本批素材也没覆盖到的幕，继续写「（本批素材未覆盖，需补后续章节）」，不要编造。
+4. 输出仍是完整三幕大纲，三幕标题齐全；已保留的幕可以与要点数要求（3–7 条）不一致。"""
+
 _SCRIPT_INSTRUCTION = """你是专业编剧。把下面给出的原作章节改编为标准电影剧本（screenplay）。
 
 格式要求（必须严格遵守，否则无法拆成场次）：
@@ -340,6 +351,7 @@ def build_stage_content(
     body_limit: int = BODY_SLOT_CHARS,
     max_chapters: int = MAX_CHAPTERS_PER_CALL,
     manuscript_ids: dict[int, str] | None = None,
+    continue_outline: str = "",
 ) -> dict[str, Any]:
     """组装一次阶段生成的 content。
 
@@ -373,6 +385,16 @@ def build_stage_content(
             parts.append(f"【人物设定（称谓必须与此一致，不得改名）】\n{roles_slot}")
             if roles_dropped:
                 notes.append(f"人物设定超出 {ELEMENTS_SLOT_CHARS} 字上限，已省略后 {roles_dropped} 字")
+    if stage == "outline" and str(continue_outline or "").strip():
+        # 接续：旧版大纲是「已写到哪」的基准，必须与接续规则相邻，不能拆到两处。
+        slot, dropped = _clip(str(continue_outline).strip(), CONTINUE_OUTLINE_SLOT_CHARS)
+        parts.append(f"【上一版大纲（已写到的内容必须保留）】\n{slot}")
+        parts.append(_OUTLINE_CONTINUE_RULES)
+        if dropped:
+            notes.append(
+                f"上一版大纲超出 {CONTINUE_OUTLINE_SLOT_CHARS} 字上限，已省略后 {dropped} 字；"
+                "被截掉的幕可能被当成未覆盖，建议先精简旧版再接续"
+            )
     if chain:
         parts.append(f"【前文摘要（供维持跨章一致性，不是本批素材）】\n{chain}")
     parts.append(f"【本批原作素材】\n{body}")

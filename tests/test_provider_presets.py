@@ -391,6 +391,7 @@ class FrontendWiringTests(unittest.TestCase):
             "onboardingStepPreset", "onboardingStepKey", "onboardingPresetGrid", "onboardingPresetMore",
             "onboardingRecap", "onboardingGuide", "onboardingGuideText", "onboardingKeyUrl",
             "onboardingUrlField", "onboardingBaseUrl", "onboardingApiKey", "onboardingModel",
+            "onboardingLoadModels", "onboardingModelStatus", "onboardingModelCustom", "onboardingModelCustomField",
             "onboardingBack", "onboardingSkip", "onboardingTest", "onboardingSave", "onboardingError",
         ):
             with self.subTest(element_id=element_id):
@@ -444,8 +445,10 @@ class FrontendWiringTests(unittest.TestCase):
         # 跳过状态记 localStorage，且名单拿不到时不弹空窗。
         self.assertIn("naibaOnboardingDismissed", onboarding)
         self.assertIn("localStorage.setItem(ONBOARDING_DISMISS_KEY", onboarding)
-        # 向导里模型名是模板带的、输入框隐藏——必须提前说清「保存后到设置里换模型」。
-        self.assertIn("保存后可在设置里换模型", onboarding)
+        # 模型必须来自检测目录或用户输入，不能用隐藏的模板值替用户决定。
+        self.assertIn("export async function loadOnboardingModels(", onboarding)
+        self.assertIn("'/api/providers/models'", onboarding)
+        self.assertNotIn("preset.model", onboarding)
         self.assertLess(onboarding.index("await loadProviderPresets()"), onboarding.index("dialog.showModal()"))
 
     def test_bindings_delegate_and_close_remembers(self):

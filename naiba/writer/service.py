@@ -479,16 +479,28 @@ class WriterService:
 
     # ---- 导入 ----
 
+    def api_stage_novel_txt(self, *, filename: str, data: bytes) -> tuple[dict[str, Any], int]:
+        """上传已有小说只做 TXT 暂存预检，不创建拆书匠作品。"""
+        from naiba.writer.novel_import import stage_txt_source
+
+        try:
+            preview = stage_txt_source(self.store, filename=filename, data=data)
+            preview.pop("_chapters", None)
+            return preview, 200
+        except (WriterStoreError, LookupError) as exc:
+            return {"error": str(exc), "ready": False}, 400
+
     def api_preview_novel_import(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
-        """只读预检拆书匠来源；未选稿时仅返回候选索引。"""
+        """只读预检 TXT 或拆书匠来源；未选稿时仅返回候选索引。"""
         from naiba.novel.service import NovelServiceError
-        from naiba.writer.novel_import import preview_source
+        from naiba.writer.novel_import import _validate_source_selection, preview_source, preview_txt_source
 
         if not isinstance(body, dict):
             return {"error": "请求体必须是对象"}, 400
         try:
-            novel = self.app.novel.store
-            preview = preview_source(novel, body)
+            _validate_source_selection(body)
+            preview = (preview_txt_source(self.store, body) if body.get("source_kind") == "txt"
+                       else preview_source(self.app.novel.store, body))
             preview.pop("_chapters", None)
             return preview, 200
         except LookupError as exc:
@@ -499,7 +511,9 @@ class WriterService:
     def api_import_novel(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         """确认选稿和四项现状后新建作品；同一请求重试不会重复导入。"""
         from naiba.novel.service import NovelServiceError
-        from naiba.writer.novel_import import create_continuation, find_existing, preview_source, request_identity
+        from naiba.writer.novel_import import (
+            create_continuation, find_existing, preview_source, preview_txt_source, request_identity,
+        )
 
         if not isinstance(body, dict):
             return {"error": "请求体必须是对象"}, 400
@@ -508,7 +522,8 @@ class WriterService:
             existing = find_existing(self.store, key, request_hash)
             if existing is not None:
                 return existing, 200
-            preview = preview_source(self.app.novel.store, body)
+            preview = (preview_txt_source(self.store, body) if body.get("source_kind") == "txt"
+                       else preview_source(self.app.novel.store, body))
             if not preview.get("ready"):
                 return {"error": "所选章节尚未全部通过稿件预检", "issues": preview.get("issues", [])}, 400
             if preview["fingerprint"] != body.get("fingerprint"):

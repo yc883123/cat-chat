@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -463,6 +464,248 @@ class NovelContinuationTests(unittest.TestCase):
         self.assertEqual(preview["coverage"]["recent_characters"], 2)
         self.assertIsNone(preview["coverage"]["relations"])
         self.assertEqual(preview["coverage"]["plot_status"], "needs_confirmation")
+
+
+class TxtContinuationTests(unittest.TestCase):
+    """直接上传 TXT 不依赖 NovelStore，仍走同一确认/只读/快照流程。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.app = _App(self.root)
+        self.service = WriterService(self.app)
+        self.store = self.service.store
+        self.bodies = ["沈砚回到旧船。\r\n\r\n老周正在甲板。", "照片背面是一个日期。", "他们向北出发。"]
+        self.text = "\r\n".join(f"第{no}章 标题{no}\r\n{body}" for no, body in enumerate(self.bodies, 1))
+
+    def stage(self, *, text=None, encoding="utf-8", filename="直接续写.txt"):
+        data = (self.text if text is None else text).encode(encoding)
+        payload, status = self.service.api_stage_novel_txt(filename=filename, data=data)
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["ready"], payload)
+        self.assertNotIn("_chapters", payload)
+        return payload
+
+    def commit_body(self, preview, **changes):
+        return {"source_kind": "txt", "import_id": preview["import_id"],
+                "end_chapter_no": preview["end_chapter_no"], "fingerprint": preview["fingerprint"],
+                "request_key": "txt-continuation-request", "summary": copy.deepcopy(SUMMARY),
+                "confirmed": True, **changes}
+
+    def test_upload_only_stages_txt_and_returns_honest_preview(self):
+        staged = self.stage(filename="原始小说.txt")
+        self.assertFalse(hasattr(self.app, "novel"))
+        self.assertFalse((self.root / "studio" / "novel").exists())
+        self.assertEqual(self.store.list_books()["books"], [])
+        self.assertEqual(staged["source_kind"], "txt")
+        self.assertEqual(staged["source_book_id"], "")
+        self.assertEqual(staged["source_import_id"], staged["import_id"])
+        self.assertEqual(staged["source_filename"], "原始小说.txt")
+        self.assertEqual(staged["title"], "原始小说")
+        self.assertEqual(staged["max_file_bytes"], 60 * 1024 * 1024)
+        self.assertEqual(staged["split_level"], "heading")
+        self.assertIn("标题", staged["split_level_label"])
+        self.assertEqual([row["no"] for row in staged["chapter_sources"]], [1, 2, 3])
+        self.assertEqual(staged["last_chapter"]["excerpt"], self.bodies[2])
+        for key in ("characters", "recent_characters", "relations", "divergent_chapters"):
+            self.assertIsNone(staged["coverage"][key])
+        self.assertEqual(staged["coverage"]["comparison"], "not_applicable")
+        self.assertIn("未自动提取", staged["coverage"]["note"])
+        staged_bytes = self.store._import_dir(staged["import_id"]) / "source.txt"
+        self.assertEqual(staged_bytes.read_bytes(), self.text.encode("utf-8"))
+        self.assertNotIn("老周正在甲板", json.dumps(staged, ensure_ascii=False))
+
+    def test_utf8_bom_and_gb18030_keep_chinese_and_inner_crlf(self):
+        for encoding in ("utf-8-sig", "gb18030"):
+            with self.subTest(encoding=encoding):
+                preview = self.stage(encoding=encoding)
+                self.assertEqual(preview["encoding"], encoding)
+                result, status = self.service.api_import_novel(self.commit_body(
+                    preview, request_key="txt-encoding-" + encoding))
+                self.assertEqual(status, 201, result)
+                bid = result["book"]["id"]
+                self.assertEqual([self.store.get_chapter(bid, no)["content"] for no in range(1, 4)], self.bodies)
+
+    def test_long_natural_chapter_remains_one_and_excerpt_is_explicit(self):
+        content = "完整正文。" * 1800
+        preview = self.stage(text="第一章 长章\n" + content + "\n第二章 末章\n" + content)
+        self.assertEqual(preview["chapter_count"], 2)
+        self.assertEqual(preview["new_chapter_no"], 3)
+        self.assertTrue(preview["last_chapter"]["truncated"])
+        self.assertEqual(preview["last_chapter"]["total_chars"], len(content))
+        self.assertEqual(preview["last_chapter"]["excerpt"], content[-1500:])
+        result, status = self.service.api_import_novel(self.commit_body(preview))
+        self.assertEqual(status, 201, result)
+        self.assertEqual(self.store.get_chapter(result["book"]["id"], 1)["content"], content)
+
+    def test_fallback_is_disclosed_and_full_content_is_copied(self):
+        content = "这是没有章节标题的整段小说。\n\n下一段保持原文。"
+        preview = self.stage(text=content)
+        self.assertEqual(preview["split_level"], "len")
+        self.assertIn("没有识别到任何标题", preview["split_level_label"])
+        result, status = self.service.api_import_novel(self.commit_body(preview))
+        self.assertEqual(status, 201, result)
+        self.assertEqual(self.store.get_chapter(result["book"]["id"], 1)["content"], content)
+
+    def test_9999_chapters_keep_all_candidates_and_offer_valid_default_cutoff(self):
+        text = "\n".join(f"第{no}章 标题\n正文{no}。" for no in range(1, 10000))
+        staged = self.stage(text=text)
+        self.assertEqual(len(staged["chapter_sources"]), 9999)
+        self.assertEqual(staged["end_chapter_no"], 9998)
+        self.assertEqual(staged["new_chapter_no"], 9999)
+        self.assertEqual(len(staged["selected_chapters"]), 9998)
+        self.assertIn("原文件共 9999 章", staged["coverage"]["note"])
+        self.assertIn("末章仍可调整", staged["coverage"]["note"])
+        selection = {"source_kind": "txt", "import_id": staged["import_id"]}
+        rejected, status = self.service.api_preview_novel_import({**selection, "end_chapter_no": 9999})
+        self.assertEqual(status, 400, rejected)
+        shortened, status = self.service.api_preview_novel_import({**selection, "end_chapter_no": 2})
+        self.assertEqual(status, 200, shortened)
+        self.assertEqual(shortened["end_chapter_no"], 2)
+        self.assertEqual(len(shortened["chapter_sources"]), 9999)
+        created, status = self.service.api_import_novel(self.commit_body(shortened))
+        self.assertEqual(status, 201, created)
+        self.assertEqual([row["no"] for row in self.store.get_book(created["book"]["id"])["chapters"]], [1, 2, 3])
+
+    def test_replacement_decoding_reports_warning_without_hiding_changed_text(self):
+        payload, status = self.service.api_stage_novel_txt(
+            filename="编码异常.txt", data="第一章 开始\n正常正文".encode("utf-8") + b"\xff")
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["encoding"], "utf-8(replace)")
+        self.assertIn("替换无效字节", payload["coverage"]["note"])
+        self.assertIn("\ufffd", payload["last_chapter"]["excerpt"])
+
+    def test_cutoff_creates_read_only_prefix_and_next_empty_chapter(self):
+        staged = self.stage()
+        preview, status = self.service.api_preview_novel_import({
+            "source_kind": "txt", "import_id": staged["import_id"], "end_chapter_no": 2})
+        self.assertEqual(status, 200, preview)
+        self.assertEqual(len(preview["chapter_sources"]), 3)
+        self.assertEqual(len(preview["selected_chapters"]), 2)
+        self.assertEqual(preview["chapter_count"], 2)
+        self.assertNotEqual(preview["fingerprint"], staged["fingerprint"])
+        result, status = self.service.api_import_novel(self.commit_body(preview))
+        self.assertEqual(status, 201, result)
+        bid = result["book"]["id"]
+        self.assertEqual([row["no"] for row in self.store.get_book(bid)["chapters"]], [1, 2, 3])
+        continuation = result["book"]["continuation"]
+        self.assertEqual(continuation["source_filename"], "直接续写.txt")
+        self.assertEqual(continuation["source_import_id"], staged["import_id"])
+        for no in (1, 2):
+            chapter = self.store.get_chapter(bid, no)
+            self.assertTrue(chapter["read_only"])
+            self.assertEqual(chapter["content"], self.bodies[no - 1])
+            self.assertEqual(chapter["source"], {"source_book_id": "", "source_manuscript_id": "",
+                             "source_kind": "txt", "source_chapter_no": no,
+                             "source_import_id": staged["import_id"], "source_filename": "直接续写.txt",
+                             "imported_at": continuation["imported_at"]})
+            with self.assertRaisesRegex(WriterStoreError, "只读"):
+                self.store.save_chapter_version(bid, no, content="禁止覆盖")
+        new = self.store.get_chapter(bid, 3)
+        self.assertFalse(new["read_only"])
+        self.assertEqual(new["content"], "")
+        self.assertEqual(new["beat"], SUMMARY["next_outline"])
+
+    def test_confirmed_context_reaches_real_next_chapter_pipeline(self):
+        staged = self.stage()
+        result, status = self.service.api_import_novel(self.commit_body(staged))
+        self.assertEqual(status, 201, result)
+        bid = result["book"]["id"]
+        preview, status = self.service.api_preview({"book_id": bid, "kind": "chapter", "chapter_no": 4})
+        self.assertEqual(status, 200, preview)
+        for value in SUMMARY.values():
+            self.assertIn(value, preview["content"])
+        started, status = self.service.api_start_pipeline(bid, {
+            "kind": "chapter", "chapter_no": 4, "model_key": "online:probe", "model_name": "probe"})
+        self.assertEqual(status, 201, started)
+        pipeline = started["pipeline"]
+        self.assertEqual(pipeline["request_snapshot"][WRITER_SETUP_SNAPSHOT_KEY]["continuation_summary"], SUMMARY)
+        self.assertIn(self.bodies[2], pipeline["request_snapshot"]["previous_chapter"]["excerpt"])
+        task = self.app.studio.jobs.tasks[pipeline["current_task_id"]]
+        for value in SUMMARY.values():
+            self.assertIn(value, task["input"]["content"])
+
+    def test_lost_response_retry_survives_restart_and_expired_stage(self):
+        staged = self.stage()
+        body = self.commit_body(staged)
+        first, status = self.service.api_import_novel(body)
+        self.assertEqual(status, 201, first)
+        shutil.rmtree(self.store._import_dir(staged["import_id"]))
+        restarted = WriterService(self.app)
+        duplicate, status = restarted.api_import_novel(body)
+        self.assertEqual(status, 200, duplicate)
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(duplicate["book"]["id"], first["book"]["id"])
+        for changed in ({"summary": {**SUMMARY, "plot_state": "变更现状"}},
+                        {"import_id": "wi-20261113-000000000000"}):
+            conflict, status = restarted.api_import_novel({**body, **changed})
+            self.assertEqual(status, 409, conflict)
+        self.assertEqual(len(restarted.store.list_books()["books"]), 1)
+
+    def test_changed_staged_content_requires_new_fingerprint(self):
+        staged = self.stage()
+        path = self.store._import_dir(staged["import_id"]) / "source.txt"
+        path.write_bytes(self.text.replace("向北出发", "向南出发").encode("utf-8"))
+        result, status = self.service.api_import_novel(self.commit_body(staged))
+        self.assertEqual(status, 409, result)
+        self.assertEqual(self.store.list_books()["books"], [])
+
+    def test_manual_confirmations_are_required_after_upload(self):
+        staged = self.stage()
+        for changed in ({"confirmed": False}, {"summary": {}},
+                        {"summary": {**SUMMARY, "relations_state": ""}},
+                        {"summary": {**SUMMARY, "plot_state": "超" * 2001}}):
+            result, status = self.service.api_import_novel(self.commit_body(staged, **changed))
+            self.assertEqual(status, 400, result)
+        self.assertEqual(self.store.list_books()["books"], [])
+
+    def test_invalid_source_types_ids_cutoffs_and_archive_stage_are_rejected(self):
+        staged = self.stage()
+        base = {"source_kind": "txt", "import_id": staged["import_id"]}
+        for changed in ({"book_id": "wb-20261113-000000000000"},
+                        {"manuscripts_by_chapter": {"1": "ms-fake"}},
+                        {"source_kind": "original"}, {"source_kind": "bad"},
+                        {"import_id": "../outside"}, {"import_id": ""},
+                        {"end_chapter_no": True}, {"end_chapter_no": "2"},
+                        {"end_chapter_no": 0}, {"end_chapter_no": 4}):
+            with self.subTest(changed=changed):
+                result, status = self.service.api_preview_novel_import({**base, **changed})
+                self.assertEqual(status, 400, result)
+        missing, status = self.service.api_preview_novel_import({**base, "import_id": "wi-20261113-000000000000"})
+        self.assertEqual(status, 404, missing)
+        folder = self.store._import_dir(staged["import_id"])
+        self.store._write_json(folder / "meta.json", {"import_id": staged["import_id"], "source_kind": "archive"})
+        invalid, status = self.service.api_preview_novel_import(base)
+        self.assertEqual(status, 400, invalid)
+        self.assertEqual(self.store.list_books()["books"], [])
+
+    def test_blank_binary_non_txt_and_oversize_uploads_leave_no_stage(self):
+        for filename, data in (("source.json", b"{}"), ("source.txt", b""),
+                               ("source.txt", b" \r\n\t"), ("source.txt", b"abc\x00def")):
+            with self.subTest(filename=filename, data=data):
+                result, status = self.service.api_stage_novel_txt(filename=filename, data=data)
+                self.assertEqual(status, 400, result)
+        with mock.patch("naiba.core.novel_split.MAX_FILE_BYTES", 8):
+            result, status = self.service.api_stage_novel_txt(filename="large.txt", data=b"x" * 9)
+            self.assertEqual(status, 400, result)
+            self.assertIn("未被截断", result["error"])
+        self.assertEqual(list(self.store._imports.glob("wi-*")), [])
+        self.assertEqual(self.store.list_books()["books"], [])
+
+    def test_upload_and_commit_disk_failures_cleanup_only_own_staging(self):
+        staged = self.stage()
+        before = fingerprints(self.store._imports)
+        with mock.patch("naiba.writer.novel_import.atomic_write_bytes", side_effect=OSError("模拟写入失败")):
+            with self.assertRaises(OSError):
+                self.service.api_stage_novel_txt(filename="failed.txt", data=b"body")
+        self.assertEqual(fingerprints(self.store._imports), before)
+        with mock.patch.object(self.store, "_check_book_capacity", side_effect=WriterStoreError("容量不足")):
+            result, status = self.service.api_import_novel(self.commit_body(staged))
+            self.assertEqual(status, 400, result)
+        self.assertEqual(fingerprints(self.store._imports), before)
+        self.assertEqual(self.store.list_books()["books"], [])
+        self.assertEqual(list(self.store._root.glob(".*.tmp")), [])
 
 
 if __name__ == "__main__":

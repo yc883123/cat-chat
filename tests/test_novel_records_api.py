@@ -430,5 +430,186 @@ class BudgetClampTests(unittest.TestCase):
         self.assertIsNone(report["fits"])
 
 
+class OutlineContinueTests(ServiceTestCase):
+    """大纲接续（2026-11-13）：显式选旧版才带槽，默认行为不变。"""
+
+    def _outline(self, text="## 第一幕 建置\n- 旧版要点甲"):
+        return self.service.store.apply_outline(self.book_id, task_id="ol-seed", text=text)
+
+    def _submit_outline(self, **overrides):
+        body = {
+            "book_id": self.book_id, "stage": "outline", "chapter_ids": [1, 2],
+            "model_key": "online:probe", "model_name": "probe-default",
+        }
+        body.update(overrides)
+        return self.service.api_stage(body)
+
+    def _legacy_outline(self, text="## 第一幕 建置\n- 单份旧稿要点", version=None, **extra):
+        path = self.service.store._book_dir(self.book_id) / "book.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest.pop("outline_versions", None)
+        manifest.pop("outline_version", None)
+        manifest["outline"] = text
+        if version is not None:
+            manifest["outline_version"] = version
+        manifest.update(extra)
+        self.service.store._write_json(path, manifest)
+        return path
+
+    def _preview_outline(self, **overrides):
+        body = {"book_id": self.book_id, "stage": "outline", "chapter_ids": [2, 3],
+                "model_key": "online:probe", "model_name": "probe-default"}
+        body.update(overrides)
+        return self.service.api_stage_preview(body)
+
+    def test_legacy_single_outline_missing_or_zero_version_supports_both_selections(self):
+        for version in (None, 0):
+            with self.subTest(version=version):
+                path = self._legacy_outline(version=version)
+                before = path.read_bytes()
+                preview, status = self._preview_outline(outline_version=1, continue_outline_version=1)
+                self.assertEqual(status, 200, preview)
+                self.assertEqual(path.read_bytes(), before, "预检不得补写版本或改动清单")
+                self.assertEqual(preview["sources"]["outline_version"], 1)
+                self.assertEqual(preview["sources"]["continue_outline_version"], 1)
+                self.assertTrue(preview["sources"]["continues_outline"])
+                self.assertEqual(self.service.store.get_book(self.book_id)["book"]["outline_version"], 1)
+                payload, status = self._submit_outline(outline_version=1, continue_outline_version=1)
+                self.assertEqual(status, 201, payload)
+                frozen = self.app.studio.jobs.submitted[-1]
+                self.assertIn("单份旧稿要点", frozen["content"])
+                self.assertIn("接续要求", frozen["content"])
+                self.assertEqual(frozen["novel"]["sources"]["continue_outline_version"], 1)
+                self.assertNotIn("outline_versions", json.loads(path.read_text(encoding="utf-8")))
+
+    def test_legacy_explicit_outline_version_is_not_reset(self):
+        self._legacy_outline(version=7)
+        self.assertEqual(self.service.store.get_book(self.book_id)["book"]["outline_version"], 7)
+        preview, status = self._preview_outline(outline_version=7, continue_outline_version=7)
+        self.assertEqual(status, 200, preview)
+        payload, status = self._submit_outline(outline_version=7, continue_outline_version=7)
+        self.assertEqual(status, 201, payload)
+        self.assertEqual(payload["sources"]["continue_outline_version"], 7)
+        before = len(self.app.studio.jobs.submitted)
+        for request in (self._preview_outline, self._submit_outline):
+            rejected, status = request(continue_outline_version=1)
+            self.assertEqual(status, 400, rejected)
+            self.assertIn("不存在", rejected["error"])
+        self.assertEqual(len(self.app.studio.jobs.submitted), before)
+
+    def test_outline_version_gaps_keep_the_selected_older_text(self):
+        self._legacy_outline(outline_versions=[
+            {"id": "ol-old", "version": 2, "text": "第二版独有旧稿", "task_id": "old"},
+            {"id": "ol-latest", "version": 8, "text": "第八版独有新稿", "task_id": "latest"},
+        ])
+        self.assertEqual(self.service.store.get_book(self.book_id)["book"]["outline_version"], 8)
+        preview, status = self._preview_outline(outline_version=2, continue_outline_version=2)
+        self.assertEqual(status, 200, preview)
+        payload, status = self._submit_outline(outline_version=2, continue_outline_version=2)
+        self.assertEqual(status, 201, payload)
+        self.assertEqual(payload["sources"]["continue_outline_version"], 2)
+        content = self.app.studio.jobs.submitted[-1]["content"]
+        self.assertIn("第二版独有旧稿", content)
+        self.assertNotIn("第八版独有新稿", content)
+
+    def test_empty_or_missing_legacy_outline_never_queues(self):
+        for text, versions in (("", "missing"), ("   ", "missing"),
+                               ("残留缓存不应复活", []), ("残留缓存不应复活", None)):
+            with self.subTest(text=text, versions=versions):
+                extra = {} if versions == "missing" else {"outline_versions": versions}
+                path = self._legacy_outline(text=text, **extra)
+                before = path.read_bytes()
+                self.assertEqual(self.service.store.get_book(self.book_id)["book"]["outline_version"], 0)
+                for request in (self._preview_outline, self._submit_outline):
+                    rejected, status = request(continue_outline_version=1)
+                    self.assertEqual(status, 400, rejected)
+                self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self.app.studio.jobs.submitted, [])
+
+    def test_selected_empty_outline_does_not_fall_back_to_latest(self):
+        self._legacy_outline(outline_versions=[
+            {"id": "ol-empty", "version": 1, "text": ""},
+            {"id": "ol-new", "version": 3, "text": "不得替代空版本的最新稿"},
+        ])
+        for request in (self._preview_outline, self._submit_outline):
+            rejected, status = request(continue_outline_version=1)
+            self.assertEqual(status, 400, rejected)
+            self.assertIn("没有正文", rejected["error"])
+        self.assertEqual(self.app.studio.jobs.submitted, [])
+
+    def test_legacy_outline_save_preserves_old_text_and_adds_second_version(self):
+        old = "## 第一幕 建置\n- 单份旧稿逐字保留。"
+        self._legacy_outline(text=old)
+        payload, status = self._submit_outline(outline_version=1, continue_outline_version=1)
+        self.assertEqual(status, 201, payload)
+        task_id = payload["task"]["id"]
+        new = old + "\n## 第二幕 对抗\n- 新增情节。\n## 第三幕 结局\n- 完整结局。"
+        self.app.studio.jobs.finish(task_id, new)
+        saved, status = self.service.api_apply(self.book_id, {
+            "stage": "outline", "task_id": task_id, "text": new,
+            "revision": payload["book_revision"],
+        })
+        self.assertEqual(status, 200, saved)
+        self.assertEqual([row["version"] for row in saved["book"]["outline_versions"]], [1, 2])
+        self.assertEqual(saved["book"]["outline_versions"][0]["text"], old)
+        self.assertEqual(saved["book"]["outline_versions"][1]["text"], new)
+        self.assertEqual(saved["book"]["outline_versions"][1]["task_id"], task_id)
+
+    def test_legacy_continue_retry_uses_frozen_old_text_after_book_changes(self):
+        from naiba.studio.jobs import StudioJobManager
+        from naiba.studio.store import StudioStore
+
+        class Runner:
+            def submit(self, task_id):
+                pass
+
+        backing = StudioStore(self.root)
+        self.app.studio.jobs = StudioJobManager(self.app, backing, Runner())
+        self._legacy_outline(text="原任务冻结的单份旧大纲")
+        payload, status = self._submit_outline(continue_outline_version=1)
+        self.assertEqual(status, 201, payload)
+        task_id = payload["task"]["id"]
+        original = backing.get_task(task_id)["input"]
+        backing.update_task(task_id, status="failed", error="本地替身中断")
+        self.service.store.apply_outline(self.book_id, task_id="later-change", text="作品后来换成的新大纲")
+        retried = self.app.studio.jobs.retry(task_id)
+        self.assertEqual(retried["input"]["content"], original["content"])
+        self.assertEqual(retried["input"]["novel"]["sources"], original["novel"]["sources"])
+        self.assertNotIn("作品后来换成的新大纲", retried["input"]["content"])
+
+    def test_continue_version_puts_old_outline_in_content(self):
+        self._outline()
+        payload, status = self._submit_outline(continue_outline_version=1)
+        self.assertEqual(status, 201, payload)
+        content = self.app.studio.jobs.submitted[-1]["content"]
+        self.assertIn("旧版要点甲", content)
+        self.assertIn("接续要求", content)
+        self.assertTrue(payload["sources"]["continues_outline"])
+        self.assertEqual(payload["sources"]["continue_outline_version"], 1)
+        self.assertTrue(payload["sources"]["continue_outline_label"])
+
+    def test_default_submission_does_not_continue(self):
+        self._outline()
+        payload, status = self._submit_outline()
+        self.assertEqual(status, 201, payload)
+        content = self.app.studio.jobs.submitted[-1]["content"]
+        self.assertNotIn("旧版要点甲", content)
+        self.assertFalse(payload["sources"]["continues_outline"])
+
+    def test_unknown_continue_version_is_rejected(self):
+        self._outline()
+        payload, status = self._submit_outline(continue_outline_version=9)
+        self.assertEqual(status, 400, payload)
+        self.assertIn("不存在", payload["error"])
+        self.assertEqual(self.app.studio.jobs.submitted, [], "校验失败不能排队")
+
+    def test_continue_is_ignored_for_elements_stage(self):
+        self._outline()
+        payload, status = self._submit(continue_outline_version=1)
+        self.assertEqual(status, 201, payload)
+        content = self.app.studio.jobs.submitted[-1]["content"]
+        self.assertNotIn("旧版要点甲", content)
+
+
 if __name__ == "__main__":
     unittest.main()

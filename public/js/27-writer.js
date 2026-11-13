@@ -1309,7 +1309,9 @@ function renderDraft() {
     sourceNote.hidden = !imported && !writer.book?.continuation;
     const source = chapter?.source;
     sourceNote.textContent = imported
-      ? `导入正文只读 · 拆书匠${source?.source_kind === "original" ? "原文" : "改编稿"} · 来源第 ${source?.source_chapter_no || chapter.no} 章。请在目录中选择新章节进行写作。`
+      ? `导入正文只读 · ${source?.source_kind === "txt"
+        ? `TXT 原文${source.source_filename ? `「${source.source_filename}」` : ""}`
+        : `拆书匠${source?.source_kind === "original" ? "原文" : "改编稿"}`} · 来源第 ${source?.source_chapter_no || chapter.no} 章。请在目录中选择新章节进行写作。`
       : writer.book?.continuation ? "新章使用导入时确认的人物、关系、剧情现状和后续大纲；生成失败可在当前作品重试。" : "";
   }
   const meta = $("#writerDraftMeta");

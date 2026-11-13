@@ -213,6 +213,12 @@ dsh-vision-router/
 # 便于其他合作者直接调用；新增可复用脚本时在此补一行 ! 放行。
 # 测试临时目录也落在 verify/ 下（见维护说明 §九.4），已被上面的规则覆盖。
 verify/*
+!verify/claude-cache-diagnostic/
+verify/claude-cache-diagnostic/*
+!verify/claude-cache-diagnostic/cache-diagnostic.ps1
+!verify/claude-cache-diagnostic/START.cmd
+!verify/claude-cache-diagnostic/README.md
+!verify/claude-cache-diagnostic/test_cache_diagnostic.py
 !verify/_check_tool_cards_compact.cjs
 !verify/_check_turn_rail.cjs
 !verify/_dedup_write_audit.py
@@ -286,6 +292,12 @@ verify/*
 !verify/browser_smoke.cjs
 !verify/chat_composer_layout_smoke.cjs
 !verify/comfyui_navigation_smoke.cjs
+!verify/comfyui_history_smoke.cjs
+!verify/_serve_comfyui_history.py
+!verify/novel_outline_continue_smoke.cjs
+!verify/_serve_novel_outline_continue.py
+!verify/novel_storyboard_versions_smoke.cjs
+!verify/_serve_novel_storyboard_versions.py
 !verify/comfyui_preview_delete_smoke.cjs
 !verify/skills_ui_smoke.cjs
 !verify/chat_font_smoke.cjs

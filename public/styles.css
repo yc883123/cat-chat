@@ -1946,7 +1946,7 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .provider-preset-guide .provider-preset-key { justify-self: end; }
 .provider-preset-key[hidden] { display: none; }
 /* 首启引导向导：还没有任何可用供应商时的「选模板 → 粘 Key → 开聊」两步流程。 */
-.onboarding-dialog { width: min(660px, calc(100vw - 30px)); max-height: min(780px, calc(100dvh - 30px)); }
+.onboarding-dialog { width: min(660px, calc(100vw - 30px)); max-height: min(780px, calc(100dvh - 30px)); background: var(--surface); }
 .onboarding-body { display: flex; flex-direction: column; gap: 12px; padding-bottom: 16px; max-height: inherit; overflow: auto; }
 .onboarding-body > *:not(.dialog-toolbar) { margin-inline: 18px; }
 .onboarding-steps { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
@@ -1958,7 +1958,14 @@ label input:focus, label select:focus, label textarea:focus { outline: 2px solid
 .onboarding-recap { margin: 0; color: var(--text); font-size: 12.5px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
 #onboardingKeyRow { display: grid; gap: 10px; }
 #onboardingKeyRow[hidden] { display: none; }
-.onboarding-actions { justify-content: flex-end; }
+.onboarding-model-field { display: grid; gap: 6px; min-width: 0; }
+.onboarding-model-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.onboarding-model-heading label { margin: 0; }
+#onboardingModel { width: 100%; min-width: 0; height: 40px; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius); color: var(--text); background: var(--surface); }
+#onboardingModel:focus { outline: 2px solid rgba(var(--brand-500-rgb), .15); border-color: var(--accent); }
+#onboardingModelStatus { margin: 0; overflow-wrap: anywhere; }
+#onboardingModelField[hidden], #onboardingModelCustomField[hidden] { display: none; }
+.onboarding-actions { justify-content: flex-end; flex-wrap: wrap; }
 #onboardingSkip { margin-right: auto; }
 .provider-current { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 9px; align-items: end; }
 .provider-current .control-button, .provider-current .danger-button { height: 40px; }
@@ -4905,6 +4912,14 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .comfyui-batch-history-head strong { font-size: 13px; }
 .comfyui-batch-history-head small { font-size: 11px; color: var(--muted); }
 .comfyui-batch-list { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 12px 12px; display: flex; flex-direction: column; gap: 8px; align-content: start; }
+.comfyui-history-footer { flex: none; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px; padding: 6px 12px; border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); }
+.comfyui-history-footer span { min-width: 0; overflow-wrap: anywhere; }
+.comfyui-history-footer button { min-height: 36px; }
+.comfyui-history-footer button[hidden] { display: none; }
+.comfyui-task-list > *, .comfyui-batch-list > * { flex-shrink: 0; }
+.comfyui-task-list, .comfyui-batch-list, .comfyui-output-grid { overflow-anchor: none; }
+.comfyui-history-spacer { min-height: 0; border: 0; margin: 0; padding: 0; }
+.comfyui-output-grid > .comfyui-empty { grid-column: 1 / -1; }
 .comfyui-batch-row { display: block; width: 100%; text-align: left; font: inherit; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); padding: 9px 11px; cursor: pointer; }
 .comfyui-batch-row:hover, .comfyui-batch-row:focus-visible { border-color: var(--violet-line); }
 .comfyui-batch-row-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -5416,6 +5431,8 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .novel-stage-context select { width: 100%; }
 .novel-version-tools select { width: auto; padding: 4px 7px; font-size: 11px; }
 .novel-version-tools { display: flex; align-items: center; gap: 7px; }
+/* 版本下拉已显示完整标签时右侧小字会隐藏，显式关掉以免被上面的 flex/display 规则盖过。 */
+.novel-version-tools small[hidden] { display: none; }
 /* 两级选择：供应商 + 模型双列 1fr 1fr，按钮在主操作区；窄屏自动换行，不挤压下拉。 */
 .novel-stage-model { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
 .novel-stage-model .novel-field { flex: 1 1 0; min-width: 120px; }
@@ -6281,6 +6298,10 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
   flex: 1; min-height: 120px; max-height: 34vh; overflow-y: auto;
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px;
   padding: 2px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2);
+  /* 手机弹窗给表单定了 100% 高，列表高度因此变成确定值；默认 auto 行按卡片的最小
+     内容高度（卡片里的三行都 overflow:hidden，最小贡献接近 0）定尺，只会均摊出
+     ~40px，卡片文字上下被裁。行高必须按内容定，超高交给列表自己滚。 */
+  grid-auto-rows: max-content; align-content: start;
 }
 .writer-tpl-card {
   display: grid; gap: 3px; padding: 8px 9px; text-align: left;
@@ -6366,6 +6387,8 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
   }
   .writer-manage-form { height: 100%; padding: 10px 10px 12px; }
   .writer-manage-list { max-height: none; }
+  /* 全屏弹窗里列表用满剩余高度；34vh 在竖屏手机上只露四张卡，下半屏全空着。 */
+  .writer-tpl-list { max-height: none; }
 }
 
 /* 拆书匠 / 织书台：收缩约束贯穿网格和列表，长标题只在文本列内省略。

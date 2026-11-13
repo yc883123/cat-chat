@@ -33,10 +33,11 @@ from typing import Any
 from naiba.comfyui import COMFYUI_BATCH_PREFIX, MAX_SHOTS
 from naiba.comfyui import client
 from naiba.comfyui.jobs import ComfyUITaskError, _running_step
+from naiba.comfyui.history import HistoryIndex, history_page, history_record_missing
 from naiba.comfyui.store import _store_lock, now_ms
 from naiba.core.contracts import COMFYUI_BATCH_CONVERT_KEY
 
-# 批次历史上限（跑批视图 + 历史下拉够用；更早的批次靠任务记录本身留存）。
+# Default response size for legacy callers; older batch files remain available.
 MAX_BATCHES = 50
 # 方案数与总条目数上限（总条目对齐单任务 shots ≤ 200 的口径）。
 MAX_SCHEMES = 50
@@ -209,6 +210,7 @@ class ComfyUIBatchManager:
         self.jobs = jobs
         self._dir = Path(app.paths.data_dir) / "comfyui" / "batches"
         self._lock = _store_lock(self._dir)
+        self._history_index = HistoryIndex(self._dir, COMFYUI_BATCH_PREFIX, self._lock)
 
     # ---- 路径 ----
 
@@ -537,7 +539,7 @@ class ComfyUIBatchManager:
     def _rollback(self, batch_id: str) -> None:
         """事务回滚：删掉本批次已建的全部任务记录（hold 创建的任务未入队）。"""
         prefix = f"{batch_id}-"
-        for task in self.store.list_tasks(limit=500):
+        for task in self.store.iter_tasks():
             if not str(task.get("request_key") or "").startswith(prefix):
                 continue
             task_id = str(task.get("id") or "")
@@ -549,6 +551,25 @@ class ComfyUIBatchManager:
             self.store.delete_task(task_id)
 
     # ---- 查询 ----
+
+    def page(self, page_size: Any = None, cursor: Any = "") -> dict[str, Any]:
+        page = history_page(self._history_index, page_size, cursor, scope="batches",
+                            load=self._read_record)
+        # Joining live state can read hundreds of task records per batch. Only
+        # the requested page is joined; even the lookahead batch stays metadata.
+        page["rows"] = [self._with_task_state(record, slim=True) for record in page["rows"]]
+        return page
+
+    def summaries_by_ids(self, ids: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+        rows, missing = [], []
+        for batch_id in ids:
+            record = self._read_record(batch_id)
+            if record is None:
+                if history_record_missing(self.batch_path(batch_id)):
+                    missing.append(batch_id)
+            else:
+                rows.append(self._with_task_state(record, slim=True))
+        return rows, missing
 
     def list(self, limit: int = MAX_BATCHES) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []

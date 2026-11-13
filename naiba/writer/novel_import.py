@@ -1,4 +1,4 @@
-"""从拆书匠只读取料，为末章后的新章创建独立写作副本。"""
+"""从拆书匠或上传 TXT 只读取料，为末章后的新章创建独立写作副本。"""
 from __future__ import annotations
 
 import hashlib
@@ -7,15 +7,18 @@ import os
 import re
 import shutil
 import uuid
+from pathlib import Path
 from typing import Any
 
+from naiba.core import novel_split
+from naiba.core.fsutil import atomic_write_bytes
 from naiba.core.contracts import (
     WriterContinuationSummary, WriterNovelChapterSource,
     WORK_GLOBAL_SYSTEM_PROMPT_KEY, WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY,
 )
 from naiba.writer.store import (
     BOOK_ID_PATTERN, CHAPTER_CONTENT_MAX_CHARS, SCHEMA_VERSION, TITLE_MAX,
-    WriterConflictError, WriterStoreError, _now_ms, new_version_id, normalize_setup,
+    WriterConflictError, WriterStoreError, _now_ms, clean_title, new_version_id, normalize_setup,
 )
 
 SUMMARY_KEYS = ("characters_state", "relations_state", "plot_state", "next_outline")
@@ -43,10 +46,129 @@ def _digest(value: Any) -> str:
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def _validate_source_selection(body: dict[str, Any]) -> None:
+    source_kind = str(body.get("source_kind") or "").strip()
+    if source_kind not in ("", "original", "manuscript", "txt"):
+        raise WriterStoreError("来源类型必须是上传 TXT、原文或指定改编稿")
+    if source_kind == "txt":
+        if body.get("book_id") or body.get("manuscripts_by_chapter"):
+            raise WriterStoreError("TXT 来源不能同时指定拆书匠作品或稿件")
+        if not str(body.get("import_id") or "").strip():
+            raise WriterStoreError("请先上传要续写的 TXT 小说")
+    elif body.get("import_id"):
+        raise WriterStoreError("上传 TXT 的来源类型必须是 txt")
+
+
+def stage_txt_source(store: Any, *, filename: str, data: bytes) -> dict[str, Any]:
+    """只保存独立 TXT 暂存；确认后才创建织书台作品。"""
+    name = Path(str(filename or "").replace("\\", "/")).name.strip()
+    if not name.lower().endswith(".txt"):
+        raise WriterStoreError("请选择 TXT 小说文件")
+    if len(name) > 255 or re.search(r"[\x00-\x1f\x7f]", name):
+        raise WriterStoreError("TXT 文件名无效或超过 255 字符")
+    if not isinstance(data, bytes) or not data:
+        raise WriterStoreError("TXT 文件是空的")
+    if len(data) > novel_split.MAX_FILE_BYTES:
+        raise WriterStoreError("TXT 文件超过 60 MiB 上限，原内容未被截断")
+    with store._lock:
+        import_id = store._new_import_id()
+        folder = store._import_dir(import_id)
+        folder.mkdir(parents=True, exist_ok=False)
+        try:
+            atomic_write_bytes(folder / "source.txt", data)
+            store._write_json(folder / "meta.json", {
+                "source_kind": "txt", "import_id": import_id, "name": name,
+                "bytes": len(data), "created_at": _now_ms(),
+            })
+            return preview_txt_source(store, {"source_kind": "txt", "import_id": import_id})
+        except Exception:
+            shutil.rmtree(folder, ignore_errors=True)
+            raise
+
+
+def preview_txt_source(store: Any, body: dict[str, Any]) -> dict[str, Any]:
+    """重新读取受管 TXT；预览和提交使用相同解析与正文指纹。"""
+    from naiba.novel.service import LEVEL_LABELS
+    from naiba.tools.providers.novel import NovelError, read_text_auto
+
+    _validate_source_selection(body)
+    if body.get("source_kind") != "txt":
+        raise WriterStoreError("上传 TXT 的来源类型必须是 txt")
+    import_id = str(body.get("import_id") or "").strip()
+    with store._lock:
+        folder = store._import_dir(import_id)
+        meta = store._read_json(folder / "meta.json", what="TXT 导入暂存")
+        if meta.get("source_kind") != "txt" or meta.get("import_id") != import_id:
+            raise WriterStoreError("此导入暂存不是 TXT 小说，请重新上传")
+        source_path = folder / "source.txt"
+        if not source_path.is_file():
+            raise LookupError("TXT 导入暂存已失效，请重新上传")
+        try:
+            text, encoding = read_text_auto(source_path)
+        except NovelError as exc:
+            raise WriterStoreError(str(exc)) from exc
+        if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text):
+            raise WriterStoreError("TXT 含二进制控制字符，请上传纯文本小说")
+        # 延用自然章节，不按喂模型的 6000 字默认值拆碎普通长章。
+        split = novel_split.split_chapters(text, CHAPTER_CONTENT_MAX_CHARS)
+        if not split:
+            raise WriterStoreError("TXT 中没有可导入的正文")
+        end = body.get("end_chapter_no")
+        if end is None or end == "":
+            # 上传先保留完整候选，给出一个可创建下一章的默认范围。
+            end = min(len(split), 9998)
+        if isinstance(end, bool) or not isinstance(end, int) or not 1 <= end <= len(split):
+            raise WriterStoreError("末章必须是上传 TXT 中实际存在的章号")
+        if end >= 9999:
+            raise WriterStoreError("最多导入前 9998 章，请缩小截止范围后再续写")
+        chapters = []
+        for no, row in enumerate(split[:end], start=1):
+            content = str(row["body"])
+            if not content.strip() or len(content) > CHAPTER_CONTENT_MAX_CHARS:
+                raise WriterStoreError(f"第 {no} 章正文为空或超过单章 {CHAPTER_CONTENT_MAX_CHARS} 字上限")
+            chapters.append({"i": no, "title": str(row["title"]), "content": content,
+                             "manuscript_id": "", "manuscript_kind": "txt",
+                             "manuscript_label": "上传 TXT 原文", "manuscript_no": 0})
+        name = str(meta.get("name") or "未命名.txt")
+        title = clean_title(Path(name).stem)
+        level = novel_split.detect_level(text, CHAPTER_CONTENT_MAX_CHARS)
+        coverage = {"imported_chapters": end, "recent_chapters": min(20, end),
+                    "characters": None, "recent_characters": None, "relations": None,
+                    "plot_status": "needs_confirmation", "comparison": "not_applicable",
+                    "divergent_chapters": None,
+                    "note": "来源为上传 TXT 原文；未自动提取人物或关系，人物、关系、剧情现状与后续大纲均需人工确认。"}
+        if len(split) > 9998:
+            coverage["note"] += f"原文件共 {len(split)} 章，本次最多选前 9998 章，末章仍可调整。"
+        if encoding == "utf-8(replace)":
+            coverage["note"] += "原文件编码无法完整识别，已用 UTF-8 替换无效字节；请核对末章或重新上传 UTF-8 文本。"
+        last = chapters[-1]
+        last_content = last["content"]
+        return {
+            "ready": True, "source_kind": "txt", "source_book_id": "",
+            "import_id": import_id, "source_import_id": import_id, "source_filename": name,
+            "name": name, "title": title, "encoding": encoding,
+            "split_level": level, "split_level_label": LEVEL_LABELS.get(level, ""),
+            "max_file_bytes": novel_split.MAX_FILE_BYTES,
+            "chapter_count": end, "end_chapter_no": end, "new_chapter_no": end + 1,
+            "chapter_sources": [{"no": no, "title": str(row["title"])}
+                                for no, row in enumerate(split, start=1)],
+            "selected_chapters": [{"no": row["i"], "title": row["title"],
+                                   "manuscript_id": "", "manuscript_kind": "txt",
+                                   "manuscript_label": "上传 TXT 原文", "version": 0} for row in chapters],
+            "fingerprint": _digest({"import_id": import_id, "name": name, "encoding": encoding,
+                                    "source_kind": "txt", "chapters": chapters}),
+            "coverage": coverage, "issues": [], "_chapters": chapters,
+            "last_chapter": {"no": last["i"], "title": last["title"],
+                             "excerpt": last_content[-1500:], "total_chars": len(last_content),
+                             "truncated": len(last_content) > 1500},
+        }
+
+
 def preview_source(novel: Any, body: dict[str, Any]) -> dict[str, Any]:
     """取一个锁内只读快照；未选稿时只给候选，不默认挑任何改编版本。"""
     from naiba.novel.service import NovelServiceError
 
+    _validate_source_selection(body)
     book_id = str(body.get("book_id") or "").strip()
     if not book_id:
         raise WriterStoreError("请选择拆书匠作品")
@@ -179,6 +301,7 @@ def preview_source(novel: Any, body: dict[str, Any]) -> dict[str, Any]:
 
 
 def request_identity(body: dict[str, Any]) -> tuple[str, str, dict[str, str]]:
+    _validate_source_selection(body)
     if body.get("confirmed") is not True:
         raise WriterStoreError("请人工确认四项摘要后再导入")
     key = str(body.get("request_key") or "").strip()
@@ -190,6 +313,8 @@ def request_identity(body: dict[str, Any]) -> tuple[str, str, dict[str, str]]:
         raise WriterStoreError("请先预检所选稿件，再确认导入")
     identity = {key: body.get(key) for key in
                 ("book_id", "source_kind", "end_chapter_no", "manuscripts_by_chapter", "title", "fingerprint")}
+    if body.get("source_kind") == "txt":
+        identity["import_id"] = body.get("import_id")
     identity["summary"] = summary
     return key, _digest(identity), summary
 
@@ -235,6 +360,9 @@ def create_continuation(store: Any, preview: dict[str, Any], summary: dict[str, 
                         "end_chapter_no": preview["end_chapter_no"],
                         "new_chapter_no": preview["new_chapter_no"],
                         "fingerprint": preview["fingerprint"], "coverage": preview["coverage"]}
+        if preview["source_kind"] == "txt":
+            continuation.update(source_import_id=preview["source_import_id"],
+                                source_filename=preview["source_filename"])
         manifest = {"schema_version": SCHEMA_VERSION, "revision": 1, "id": book_id,
                     WORK_GLOBAL_SYSTEM_PROMPT_KEY: "", WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY: 0,
                     "title": book_title, "chapter_ids": [], "setup_versions": [], "outline_versions": [],
@@ -260,10 +388,14 @@ def create_continuation(store: Any, preview: dict[str, Any], summary: dict[str, 
                 source: WriterNovelChapterSource = {"source_book_id": preview["source_book_id"],
                           "source_manuscript_id": row["manuscript_id"], "source_chapter_no": no,
                           "source_kind": preview["source_kind"], "imported_at": now}
+                if preview["source_kind"] == "txt":
+                    source.update(source_import_id=preview["source_import_id"],
+                                  source_filename=preview["source_filename"])
                 vid = new_version_id("cv")
                 record = {"id": vid, "version": 1, "no": no, "kind": "novel_import", "updated_at": now,
                           "task_id": "", "source_setup_version_id": setup_id, "source_outline_version_id": outline_id,
-                          "finish_reason": "", "note": "拆书匠所选稿件只读副本", "content": content,
+                          "finish_reason": "", "note": ("上传 TXT 原文只读副本" if preview["source_kind"] == "txt"
+                                                        else "拆书匠所选稿件只读副本"), "content": content,
                           "len": len(content), "read_only": True, "source": source}
                 store._write_json(store._chapter_version_path(staging, no, vid), record)
                 metadata = {key: record[key] for key in ("id", "version", "kind", "updated_at", "task_id", "len", "finish_reason", "read_only", "source")}

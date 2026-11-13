@@ -874,10 +874,12 @@
                   </details>
                 </div>
                 <div class="comfyui-task-list" id="comfyuiTaskList" aria-label="任务列表"></div>
+                <div class="comfyui-history-footer" id="comfyuiTaskHistoryFooter"><span role="status"></span><button type="button" class="control-button tiny" data-comfyui-history-more="tasks">加载更早记录</button></div>
               </div>
               <div class="comfyui-outputs" id="comfyuiOutputsSection" aria-label="产物">
                 <div class="comfyui-outputs-head"><strong>生成结果</strong></div>
                 <div class="comfyui-output-grid" id="comfyuiOutputGrid" aria-label="生成结果"></div>
+                <div class="comfyui-history-footer" id="comfyuiOutputHistoryFooter"><span role="status"></span><button type="button" class="control-button tiny" data-comfyui-history-more="tasks">加载更早记录</button></div>
               </div>
               <div class="comfyui-batch-history" id="comfyuiBatchListSection">
                 <div class="comfyui-batch-history-head">
@@ -885,6 +887,7 @@
                   <small>批量生成的每一批都留在这里，进行中的实时刷新；点一批看逐条产物、重试或删除，点「编辑」回到填单区改内容</small>
                 </div>
                 <div class="comfyui-batch-list" id="comfyuiBatchList" aria-label="批次列表"></div>
+                <div class="comfyui-history-footer" id="comfyuiBatchHistoryFooter"><span role="status"></span><button type="button" class="control-button tiny" data-comfyui-history-more="batches">加载更早记录</button></div>
               </div>
               <!-- 批次详情：从批次列表点开时留在结果区，不切回批量生成填单页。 -->
               <div class="comfyui-batch-detail" id="comfyuiBatchDetail" aria-label="批次详情"></div>
@@ -912,7 +915,7 @@
           <dialog class="comfyui-import-dialog comfyui-params-dialog" id="comfyuiParamsDialog" aria-label="选择主表单参数">
             <form method="dialog" class="comfyui-import-form">
               <h3>选择要在主表单显示的参数</h3>
-              <p class="comfyui-import-reminder">没勾选的参数不会出现在主表单，也不会被改动——生成时按工作流里原本的值执行。拖动行首的 ⠿ 可以调整先后顺序（也可以用行尾的 ↑↓），勾选结果和顺序都按这份工作流保存，下次打开还是这个样子。</p>
+              <p class="comfyui-import-reminder" id="comfyuiParamsHint">没勾选的参数不会出现在主表单，也不会被改动——生成时按工作流里原本的值执行。拖动行首的 ⠿ 可以调整先后顺序（也可以用行尾的 ↑↓），勾选结果和顺序都按这份工作流保存，下次打开还是这个样子。</p>
               <label class="comfyui-params-search">搜索参数（节点号 / 节点名 / 字段都行）
                 <input id="comfyuiParamsSearch" type="text" placeholder="例：时长、seed、放大图片" autocomplete="off">
               </label>
@@ -1162,12 +1165,19 @@
                   </section>
                   <section class="novel-stage-group">
                     <div class="novel-group-head"><strong>生成设置</strong><small>版本、要求与模型</small></div>
+                    <div class="novel-stage-context" data-novel-context="outline" hidden>
+                      <label>接续已有大纲<select data-outline-continue aria-label="大纲接续的已有版本"></select></label>
+                    </div>
                     <div class="novel-stage-context" data-novel-context="script" hidden>
                       <label>人物设定版本<select data-context-elements aria-label="剧本使用的人物设定版本"></select></label>
                       <label>改编大纲版本<select data-context-outline aria-label="剧本使用的改编大纲版本"></select></label>
                     </div>
                     <!-- 分镜生成来源按作品保存；作品系统提示词在页头独立编辑。 -->
                     <div class="novel-storyboard-block" data-novel-context="storyboard" hidden>
+                      <label class="novel-field">剧本版本
+                        <select id="novelStoryboardScriptVersion" data-context-script aria-label="分镜使用的剧本版本"></select>
+                      </label>
+                      <p class="novel-note" data-context-script-notice role="status" hidden></p>
                       <div class="wb-media-tabs" role="group" aria-label="分镜生成方式">
                         <button class="studio-pane-btn active" type="button" data-novel-prompt-source="template" aria-pressed="true">模板</button>
                         <button class="studio-pane-btn" type="button" data-novel-prompt-source="skill" aria-pressed="false">Skill</button>
@@ -1233,6 +1243,7 @@
                       </span>
                     </div>
                     <p class="novel-note" id="novelStageTaskNote"></p>
+                    <p class="novel-note" id="novelStageTaskSources" role="status" hidden></p>
                     <pre class="novel-stage-result" id="novelStageResult" aria-live="polite"></pre>
                   </div>
                   <div class="novel-task-history" id="novelTaskHistory" aria-label="本阶段生成任务"></div>
@@ -1379,7 +1390,7 @@
               <button class="control-button" id="writerImportBtn" type="button"
                       role="menuitem" title="导入启元的「作品存档.json」，先预览再入库">导入存档</button>
               <button class="control-button" id="writerNovelContinueBtn" type="button"
-                      role="menuitem" title="明确选拆书匠稿件，在末章后创建新章">从已有小说续写</button>
+                      role="menuitem" title="直接导入 TXT 或选择拆书匠作品，在末章后创建新章">从已有小说续写</button>
             </div>
             <div class="writer-page-actions">
               <button class="control-button wb-book-aside" id="writerAsideBtn" type="button" aria-controls="writerColumns" aria-expanded="false">查看说明</button>
@@ -3530,13 +3541,13 @@
   <dialog id="onboardingDialog" class="onboarding-dialog">
     <div class="onboarding-body">
       <div class="dialog-toolbar">
-        <div><h2>欢迎使用 Cat Chat</h2><p id="onboardingSubtitle">先添加一个模型供应商——选好供应商后只需粘贴 API Key。</p></div>
+        <div><h2>欢迎使用 Cat Chat</h2><p id="onboardingSubtitle">先选供应商，填入 API Key 后检测并选择模型。</p></div>
         <button class="icon-button" type="button" data-close="onboardingDialog" title="关闭" aria-label="关闭"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
       </div>
       <div class="onboarding-steps">
         <span class="onboarding-step is-active" id="onboardingStepPreset">1 选供应商</span>
         <span class="onboarding-step-sep" aria-hidden="true">——</span>
-        <span class="onboarding-step" id="onboardingStepKey">2 粘贴 Key 开聊</span>
+        <span class="onboarding-step" id="onboardingStepKey">2 配置连接与模型</span>
       </div>
       <div class="onboarding-preset-grid" id="onboardingPresetGrid" role="group" aria-label="供应商模板"></div>
       <p class="hint onboarding-preset-more" id="onboardingPresetMore"></p>
@@ -3548,7 +3559,12 @@
         </div>
         <label class="provider-field" id="onboardingUrlField" hidden>API URL<input id="onboardingBaseUrl" placeholder="https://api.openai.com/v1"></label>
         <label class="provider-field" id="onboardingKeyField">API Key<input id="onboardingApiKey" type="password" autocomplete="new-password" placeholder="粘贴 sk- 开头的 Key"></label>
-        <label class="provider-field" id="onboardingModelField" hidden>模型名称<input id="onboardingModel" placeholder="模型名称，保存后也可在设置里改"></label>
+        <div id="onboardingModelField" class="onboarding-model-field" hidden>
+          <div class="onboarding-model-heading"><label for="onboardingModel">选择模型</label><button type="button" class="control-button" id="onboardingLoadModels">检测模型</button></div>
+          <select id="onboardingModel" aria-describedby="onboardingModelStatus"><option value="">检测后选择模型</option><option value="__custom__">手动填写模型名称…</option></select>
+          <p class="hint" id="onboardingModelStatus" role="status" aria-live="polite"></p>
+        </div>
+        <label class="provider-field" id="onboardingModelCustomField" hidden>模型名称<input id="onboardingModelCustom" placeholder="输入供应商提供的模型名称" autocomplete="off"></label>
       </div>
       <p class="form-error" id="onboardingError"></p>
       <div class="form-actions onboarding-actions">

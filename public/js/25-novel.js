@@ -170,8 +170,14 @@ const novel = {
   booksToken: 0,
   taskToken: 0,
   selectedVersions: { elements: 0, outline: 0, script: 0 },
+  scriptSelectionNotice: "",
+  // 大纲接续：0 = 不接续（按本批素材重写）。接续时把该版大纲正文作为参考槽带进提示词，
+  // 只补旧版标着「未覆盖」的幕；与剧本阶段选的大纲版本各自独立。
+  continueOutlineVersion: 0,
   // 预览数据（服务端预检结果），右栏说明直接用它，不在前端重算。
   budget: null,
+  // 预检的引用详情（人物/大纲版本、接续版本等）。它在响应顶层，不在 budget 里。
+  previewSources: null,
   budgetToken: 0,
   // 管理记录面板状态。
   manage: {
@@ -234,7 +240,7 @@ const STAGE_PLAN_COPY = {
   elements: "根据本次选择的章节稿件整理人物、场景和道具，不要求事先有大纲。",
   outline: "可以直接根据章节稿件生成三幕大纲，不强制先生成要素。",
   script: "没有保存要素或大纲也能直接生成剧本；有保存内容时按这里明确选择的版本加入人物设定和改编大纲。",
-  storyboard: "把剧本里已保存的最新场次逐场转成出图提示词，每场一条；生成后勾选需要的场次，发送到造梦机逐条出图。分镜提示词不写回作品。",
+  storyboard: "把所选剧本版本的场次逐场转成出图提示词，每场一条；生成后勾选需要的场次，发送到造梦机逐条出图。分镜提示词不写回作品。",
 };
 
 // ============================================================
@@ -305,14 +311,14 @@ function activeTaskSlot() {
 const STAGE_PANEL_CONTROL_IDS = [
   "novelStageMeta", "novelStageNote", "novelStageProvider", "novelStageModel",
   "novelStageGenerate", "novelStageWarning", "novelStageTask", "novelStageTaskState",
-  "novelStageBackToActive", "novelStageCancel", "novelStageRetry", "novelStageApply", "novelStageTaskNote",
+  "novelStageBackToActive", "novelStageCancel", "novelStageRetry", "novelStageApply", "novelStageTaskNote", "novelStageTaskSources",
   "novelStageResult", "novelStageSaved", "novelStageSavedAt", "novelStageSavedBody", "novelStageVersion",
   "novelTaskHistory", "novelPickManuscripts", "novelBodyChars", "novelBodyCharsValue",
   "novelMaxChapters", "novelMaxChaptersValue",
   "novelSceneBlock", "novelSceneCount", "novelSceneNote", "novelSceneList", "novelSceneEdit",
   "novelSceneHead", "novelSceneBody", "novelSceneSave", "novelSceneCancel", "novelScriptVersion",
   "novelStoryboardNote", "novelStoryboardList", "novelStoryboardAll", "novelStoryboardSend",
-  "novelStoryboardSystem", "novelStoryboardReset",
+  "novelStoryboardSystem", "novelStoryboardReset", "novelStoryboardScriptVersion",
   "novelStoryboardTemplatePanel", "novelStoryboardSkillPanel", "novelStoryboardSkillPicker",
   "novelStoryboardConfigSave", "novelStoryboardConfigStatus",
 ];
@@ -414,15 +420,22 @@ function renderChapters() {
       ? "没有匹配的章节。换个关键词试试。"
       : "还没有章节。打开页头作品菜单，选择「导入 TXT 新建作品」。";
   }
-  const note = $("#novelChapterNote");
-  if (note) {
-    const scenes = Array.isArray(novel.book?.script) ? novel.book.script.length : 0;
-    note.hidden = novel.stage !== "storyboard";
-    note.textContent = note.hidden
-      ? ""
-      : `分镜生图按剧本里已保存的 ${scenes} 场生成，章节不参与勾选；要改场次请到「剧本」阶段。`;
-  }
+  renderChapterSourceNote();
   updatePickedCount();
+}
+
+function renderChapterSourceNote() {
+  const note = $("#novelChapterNote");
+  if (!note) return;
+  note.hidden = novel.stage !== "storyboard";
+  if (note.hidden) {
+    note.textContent = "";
+    return;
+  }
+  const source = selectedScriptSource();
+  note.textContent = source.version
+    ? `分镜生图按所选剧本第 ${source.version} 版的 ${source.scenes.length} 场生成，章节不参与勾选；要改场次请到「剧本」阶段。`
+    : "分镜生图需要先保存剧本，章节不参与勾选；先到「剧本」阶段生成并保存场次。";
 }
 
 function stagedRow(row) {
@@ -897,6 +910,74 @@ function versionLabel(row) {
   return `第 ${row.version} 版 · ${versionStamp(row)}${chapters.length ? ` · 第 ${chapters.join("、")} 章` : " · 来源未记录"}`;
 }
 
+function contextVersionRows(stage) {
+  const rows = novel.book?.[`${stage}_versions`] || [];
+  if (stage === "script") {
+    const versions = (Array.isArray(rows) ? rows : [])
+      .filter((row) => Number.isInteger(Number(row?.version)) && Number(row.version) > 0)
+      .slice().sort((a, b) => Number(a.version) - Number(b.version));
+    if (versions.length) return versions;
+    // 公共 DTO 的有效版号区分旧版单稿与显式清空的版本列表。
+    const version = Number(novel.book?.script_version || 0);
+    return version > 0 && Array.isArray(novel.book?.script) && novel.book.script.length
+      ? [{ version, script: novel.book.script, updated_at: novel.book.script_updated_at }]
+      : [];
+  }
+  if (rows.length) return rows;
+  if (stage === "elements" && novel.book?.elements?.raw) {
+    return [{ ...novel.book.elements, version: novel.book.elements.version || 1 }];
+  }
+  if (stage === "outline" && novel.book?.outline) {
+    return [{ version: novel.book.outline_version || 1, updated_at: novel.book.outline_updated_at }];
+  }
+  return [];
+}
+
+function selectedScriptSource() {
+  const rows = contextVersionRows("script");
+  const current = Number(novel.book?.script_version || 0);
+  const latest = rows.find((row) => Number(row.version) === current) || rows.at(-1) || null;
+  const row = rows.find((item) => Number(item.version) === Number(novel.selectedVersions.script)) || latest;
+  const version = Number(row?.version || 0);
+  // 场次编辑直接更新当前剧本；最新版本不能读尚未刷新的版本行副本。
+  const scenes = row && row === latest && Array.isArray(novel.book?.script)
+    ? novel.book.script : (Array.isArray(row?.script) ? row.script : []);
+  return { rows, row, version, latestVersion: Number(latest?.version || 0), scenes };
+}
+
+function storyboardTaskSourceText(task) {
+  if (!task) return "";
+  const input = task.input?.novel;
+  const sources = input?.sources || task.novel?.sources || {};
+  const version = Number(sources.script_version || input?.script_version || task.novel?.script_version || 0);
+  const count = sources.scene_count != null ? Number(sources.scene_count)
+    : (Array.isArray(input?.scene_snapshot) ? input.scene_snapshot.length : null);
+  if (!version && !task.input && !task._novelDetailLoaded) {
+    return task._novelDetailError ? "剧本来源读取失败，请重新打开该任务。" : "正在读取任务的剧本来源。";
+  }
+  return `${version > 0 ? `剧本第 ${version} 版` : "未记录剧本版号"}${Number.isInteger(count) && count >= 0 ? ` · ${count} 场` : ""}。`;
+}
+
+function selectedContextVersion(stage) {
+  const rows = contextVersionRows(stage);
+  return rows.find((row) => Number(row.version) === novel.selectedVersions[stage]) || rows.at(-1) || null;
+}
+
+function stageTaskSaved(stage, taskId) {
+  if (!taskId) return false;
+  return (novel.book?.[`${stage}_versions`] || []).some((row) => row.task_id === taskId)
+    || (stage === "elements" ? novel.book?.elements?.task_id : novel.book?.[`${stage}_task_id`]) === taskId;
+}
+
+function stageTaskText(stageData, task) {
+  // 终态以完整落盘结果为准，最后一页流事件可能尚未取完。
+  if (TERMINAL_TASK_STATUSES.has(String(task?.status || ""))) {
+    return String(task?.result || task?.result_partial || "");
+  }
+  return String((task?.id === stageData.activeTaskId ? stageData.streamText : "")
+    || task?.result || task?.result_partial || "");
+}
+
 function selectedStageVersion(stage) {
   const versions = stage === "elements" ? novel.book?.elements_versions : novel.book?.outline_versions;
   const selectedNumber = novel.selectedVersions[stage];
@@ -906,9 +987,17 @@ function selectedStageVersion(stage) {
 function reconcileSelectedVersions() {
   for (const stage of ["elements", "outline", "script"]) {
     const selected = Number(novel.selectedVersions[stage] || 0);
-    const rows = novel.book?.[`${stage}_versions`] || [];
+    const rows = stage === "script" ? contextVersionRows(stage) : (novel.book?.[`${stage}_versions`] || []);
     if (selected && !rows.some((row) => Number(row.version) === selected)) {
       novel.selectedVersions[stage] = 0;
+      if (stage === "script") {
+        const fallback = selectedScriptSource().version;
+        novel.scriptSelectionNotice = `所选剧本第 ${selected} 版已删除，${fallback ? `已切换到第 ${fallback} 版，请确认后再生成。` : "已无可用剧本，请先保存剧本。"}`;
+        novel.budgetToken += 1;
+        novel.budget = null;
+        novel.previewSources = null;
+        novel.stageWarnings = [];
+      }
     }
   }
 }
@@ -1061,6 +1150,7 @@ function renderStagePanel() {
   const stage = novel.stage;
   const stageData = stageState(stage);
   const isStoryboard = stage === "storyboard";
+  renderChapterSourceNote();
   renderLimits();
   renderPickManuscripts();
   // 分镜生图不吃章节素材：正文上限滑条对它没有意义，整块让位。
@@ -1069,7 +1159,8 @@ function renderStagePanel() {
   // 素材勾选状态：用左栏已勾的章节；导入暂存态不允许生成。
   // 分镜生图看的是剧本场次数，不是勾选章节。
   const picked = [...novel.picked].sort((a, b) => a - b);
-  const sceneCount = Array.isArray(novel.book?.script) ? novel.book.script.length : 0;
+  const scriptSource = selectedScriptSource();
+  const sceneCount = scriptSource.scenes.length;
   const overLimit = picked.length > novel.maxChapters;
   const ready = isStoryboard
     ? Boolean(novel.bookId) && sceneCount > 0 && !novel.staged
@@ -1079,21 +1170,34 @@ function renderStagePanel() {
     meta.replaceChildren(
       metaItem("作品", novel.book ? bookTitleLabel(novel.book.title) : "未打开"),
       ...(isStoryboard
-        ? [metaItem("剧本场次", sceneCount ? `${sceneCount} 场` : "还没有场次")]
+        ? [metaItem("剧本版本", scriptSource.version ? `第 ${scriptSource.version} 版` : "尚未保存"),
+           metaItem("剧本场次", sceneCount ? `${sceneCount} 场` : "还没有场次")]
         : [metaItem("素材章节", picked.length ? `${picked.length} 章` : "未选择"),
            metaItem("上限", `最多 ${novel.maxChapters} 章`)]),
     );
   }
   document.querySelectorAll("#novelStagePanel [data-novel-context]").forEach((section) => {
     section.hidden = section.dataset.novelContext !== stage || !novel.book;
-    const elements = novel.book?.elements_versions || [];
-    const outlines = novel.book?.outline_versions || [];
-    const legacyElements = novel.book?.elements?.raw ? [{ version: novel.book.elements.version || 1 }] : [];
-    const legacyOutline = novel.book?.outline ? [{ version: novel.book.outline_version || 1 }] : [];
-    const elementRows = elements.length ? elements : legacyElements;
-    const outlineRows = outlines.length ? outlines : legacyOutline;
+    const elementRows = contextVersionRows("elements");
+    const outlineRows = contextVersionRows("outline");
     const elementSelect = section.querySelector("[data-context-elements]");
     const outlineSelect = section.querySelector("[data-context-outline]");
+    const scriptSelect = section.querySelector("[data-context-script]");
+    if (scriptSelect) {
+      scriptSelect.replaceChildren(...scriptSource.rows.map((row) => {
+        const scenes = Number(row.version) === scriptSource.latestVersion && Array.isArray(novel.book?.script)
+          ? novel.book.script : (Array.isArray(row.script) ? row.script : []);
+        return new Option(`${versionLabel(row)} · ${scenes.length} 场`, String(row.version));
+      }));
+      if (!scriptSource.rows.length) scriptSelect.append(new Option("尚无已保存剧本", ""));
+      scriptSelect.disabled = !scriptSource.rows.length;
+      scriptSelect.value = scriptSource.version ? String(scriptSource.version) : "";
+    }
+    const scriptNotice = section.querySelector("[data-context-script-notice]");
+    if (scriptNotice) {
+      scriptNotice.textContent = novel.scriptSelectionNotice;
+      scriptNotice.hidden = !novel.scriptSelectionNotice;
+    }
     if (elementSelect) {
       elementSelect.replaceChildren(...elementRows.map((row) => new Option(versionLabel(row), String(row.version))));
       if (!elementRows.length) elementSelect.append(new Option("尚无已保存要素", ""));
@@ -1105,6 +1209,18 @@ function renderStagePanel() {
       if (!outlineRows.length) outlineSelect.append(new Option("尚无已保存大纲", ""));
       outlineSelect.disabled = !outlineRows.length;
       outlineSelect.value = String(novel.selectedVersions.outline || outlineRows.at(-1)?.version || "");
+    }
+    const continueSelect = section.querySelector("[data-outline-continue]");
+    if (continueSelect) {
+      // 「不接续」永远是第一项且默认选中：不选旧版就是原来的整段重写。
+      continueSelect.replaceChildren(
+        new Option("不接续（按本批素材重写）", ""),
+        ...outlineRows.map((row) => new Option(versionLabel(row), String(row.version))),
+      );
+      const known = outlineRows.some((row) => Number(row.version) === Number(novel.continueOutlineVersion));
+      if (!known) novel.continueOutlineVersion = 0;
+      continueSelect.value = novel.continueOutlineVersion ? String(novel.continueOutlineVersion) : "";
+      continueSelect.disabled = !outlineRows.length;
     }
   });
   const generate = $("#novelStageGenerate");
@@ -1127,7 +1243,9 @@ function renderStagePanel() {
     if (liveStageTask) lines.push("本阶段已有生成任务在跑（见下方任务盒），等它完成或取消后再点生成。");
     if (novel.staged) lines.push("先把导入的章节保存为作品，再生成。");
     else if (!novel.bookId) lines.push("先打开或保存一个作品。");
-    else if (isStoryboard && !sceneCount) lines.push("这个作品还没有剧本场次；先到「剧本」阶段生成并保存场次。");
+    else if (isStoryboard && !sceneCount) lines.push(scriptSource.version
+      ? `所选剧本第 ${scriptSource.version} 版没有场次，请选择其他版本或先保存剧本。`
+      : "这个作品还没有已保存剧本；先到「剧本」阶段生成并保存场次。");
     else if (!isStoryboard && !picked.length) lines.push("在左侧勾选至少一章作为素材。");
     else if (!novel.stageModelName) lines.push("还没有可用模型，请到设置里检查模型。");
     else if (!isStoryboard && overLimit) {
@@ -1138,16 +1256,29 @@ function renderStagePanel() {
   }
 
   // 任务区：进行中显示进度与取消；完成显示结果与写回；失败显示原因与重试。
-  // 查看历史任务只换「展示对象」，轮询/取消/写回始终认 activeTaskId（反馈③）。
+  // 轮询/取消始终认 activeTaskId；保存只认当前展示的已完成任务。
   const taskBox = $("#novelStageTask");
   const savedBox = $("#novelStageSaved");
   const activeTask = novel.tasks.find((row) => row.id === stageData.activeTaskId) || null;
   const viewTask = stageData.viewTaskId
     ? (novel.tasks.find((row) => row.id === stageData.viewTaskId) || null)
     : null;
-  const viewingHistory = Boolean(viewTask && (!activeTask || viewTask.id !== activeTask.id));
+  const viewingHistory = Boolean(viewTask && activeTask && viewTask.id !== activeTask.id);
   const task = viewTask || activeTask;
+  const viewingOtherTask = Boolean(task && task.id !== activeTask?.id);
   if (taskBox) taskBox.hidden = !task;
+  const sourceNote = $("#novelStageTaskSources");
+  if (sourceNote) {
+    sourceNote.hidden = !isStoryboard || !task;
+    sourceNote.textContent = isStoryboard && task ? `任务来源：${storyboardTaskSourceText(task)}` : "";
+  }
+  if (isStoryboard) {
+    for (const sourceTask of new Set([task, activeTask])) {
+      if (sourceTask && !sourceTask.input && !sourceTask._novelDetailLoaded && !sourceTask._novelDetailError) {
+        void loadStageTaskDetail(sourceTask.id);
+      }
+    }
+  }
   if (task) {
     const stateEl = $("#novelStageTaskState");
     const status = String(task.status || "");
@@ -1184,24 +1315,23 @@ function renderStagePanel() {
       if (status === "interrupted") bits.push("服务重启让任务中断了，可以重试。");
       note.textContent = bits.join(" ");
     }
-    const body = viewingHistory
-      ? String(task.result || task.result_partial || "")
-      : String(stageData.streamText || task.result || task.result_partial || "");
+    const body = stageTaskText(stageData, task);
     const result = $("#novelStageResult");
     if (result) result.textContent = body;
     const back = $("#novelStageBackToActive");
-    if (back) back.hidden = !viewingHistory;
+    if (back) back.hidden = !viewingHistory || !activeTask;
     const cancel = $("#novelStageCancel");
-    if (cancel) cancel.hidden = viewingHistory || TERMINAL_TASK_STATUSES.has(status);
+    if (cancel) cancel.hidden = viewingOtherTask || TERMINAL_TASK_STATUSES.has(status);
     const retry = $("#novelStageRetry");
-    if (retry) retry.hidden = viewingHistory || !["failed", "cancelled", "interrupted"].includes(status);
+    if (retry) retry.hidden = viewingOtherTask || !["failed", "cancelled", "interrupted"].includes(status);
     const apply = $("#novelStageApply");
-    // 只有「展示的是当前任务、已完成且结果非空」才能写回：写回是覆盖动作，不能拿空结果
-    // 覆盖已有成果；历史任务的结果要保存请重新生成或在管理记录里对照。
+    // 当前与历史的完整结果都可以另存版本，保存历史不能改变正在执行的任务。
     // 分镜提示词不写回作品（结果直接发给造梦机），所以这一阶段不出现写回按钮。
     if (apply) {
-      apply.hidden = isStoryboard || viewingHistory || !(status === "done" && body.trim());
-      apply.textContent = stage === "script" ? "保存为新剧本版本" : `保存为新${stageLabel(stage)}版本`;
+      const saved = stageTaskSaved(stage, task.id);
+      apply.hidden = isStoryboard || !(status === "done" && body.trim());
+      apply.disabled = Boolean(stageData.applyingTaskId) || saved;
+      apply.textContent = saved ? "已保存到作品" : (stage === "script" ? "保存为新剧本版本" : `保存为新${stageLabel(stage)}版本`);
       apply.title = "保存会新增一个版本并保留旧版；后续阶段可选择使用哪个版本。";
     }
   } else {
@@ -1217,17 +1347,25 @@ function renderStagePanel() {
   if (saved) {
     const versionSelect = $("#novelStageVersion");
     const versions = stage === "elements" ? (novel.book?.elements_versions || []) : (novel.book?.outline_versions || []);
+    // 下拉的选项本身就是完整版本标签，右侧小字只在「下拉藏起来（只有一个版本）」时补位，
+    // 否则同一串「第 X 版 · 时间 · 章节」会在标题行出现两遍（2026-11-13 反馈）。
+    let showSavedAt = true;
     if (versionSelect) {
       const currentNumber = stage === "elements" ? novel.book?.elements?.version : novel.book?.outline_version;
       const rows = versions.length ? versions : [{ version: currentNumber || 1 }];
       versionSelect.replaceChildren(...rows.map((row) => new Option(versionLabel(row), String(row.version))));
       versionSelect.value = String(novel.selectedVersions[stage] || rows.at(-1).version);
-      versionSelect.hidden = rows.length < 2;
+      showSavedAt = rows.length < 2;
+      versionSelect.hidden = showSavedAt;
     }
     const savedBody = $("#novelStageSavedBody");
     if (savedBody) savedBody.textContent = saved;
     const savedAt = $("#novelStageSavedAt");
-    if (savedAt) savedAt.textContent = stageSavedAt(stage);
+    if (savedAt) {
+      const atText = showSavedAt ? stageSavedAt(stage) : "";
+      savedAt.textContent = atText;
+      savedAt.hidden = !atText;
+    }
   }
   renderSceneBlock(stage === "script");
   renderStoryboard(stageData, storyboardDisplayTask(stageData));
@@ -1382,10 +1520,17 @@ function renderPlan() {
         "AI 润色固定只改这一份稿件，不会转成整本改编。",
       ]);
     } else if (novel.stage === "storyboard") {
-      const scenes = Array.isArray(novel.book?.script) ? novel.book.script.length : 0;
-      push("本次素材", scenes
-        ? [`分镜生图不读章节勾选，按剧本里已保存的 ${scenes} 场生成。`]
-        : ["剧本里还没有已保存的场次；先到「剧本」阶段生成并保存。"]);
+      const source = selectedScriptSource();
+      push("本次素材", source.version
+        ? [`分镜生图不读章节勾选，使用已选剧本第 ${source.version} 版，共 ${source.scenes.length} 场。`]
+        : ["还没有已保存剧本；先到「剧本」阶段生成并保存。"]);
+      const data = stageState("storyboard");
+      const task = storyboardDisplayTask(data);
+      if (task) push("当前查看的任务来源", [storyboardTaskSourceText(task)]);
+      const running = novel.tasks.find((row) => row.id === data.activeTaskId);
+      if (running && running.id !== task?.id && !TERMINAL_TASK_STATUSES.has(String(running.status || ""))) {
+        push("运行中的任务来源", [storyboardTaskSourceText(running)]);
+      }
     } else if (picked.length) {
       push("本次素材（逐章）", picked.map((chapterNo) => {
         const chapter = novel.chapters.find((item) => item.i === chapterNo);
@@ -1399,12 +1544,25 @@ function renderPlan() {
       push("本次素材", ["还没有勾选章节。"]);
     }
     if (novel.stage === "script") {
-      const sources = novel.budget?.sources || {};
+      const sources = novel.previewSources;
+      const elements = selectedContextVersion("elements");
+      const outline = selectedContextVersion("outline");
       push("引用详情", [
-        sources.uses_characters ? `人物设定：${sources.elements_label || "已保存的版本"}` : "人物设定：未使用。",
-        sources.uses_outline ? `改编大纲：${sources.outline_label || "已保存的版本"}` : "改编大纲：未使用，直接根据章节改编。",
-        sources.has_summaries ? "会引用已保存的前文摘要（只在本批之前的章节）。" : "没有可用的前文摘要。",
+        !sources && elements ? `人物设定：已选择「${versionLabel(elements)}」，待预检。`
+          : (sources?.uses_characters ? `人物设定：${sources.elements_label || "已保存的版本"}` : "人物设定：未使用。"),
+        !sources && outline ? `改编大纲：已选择「${versionLabel(outline)}」，待预检。`
+          : (sources?.uses_outline ? `改编大纲：${sources.outline_label || "已保存的版本"}` : "改编大纲：未使用，直接根据章节改编。"),
+        !sources ? "前文摘要与实际引用内容待预检确认。"
+          : (sources.has_summaries ? "会引用已保存的前文摘要（只在本批之前的章节）。" : "没有可用的前文摘要。"),
       ]);
+    } else if (novel.stage === "outline") {
+      const sources = novel.previewSources;
+      const selected = contextVersionRows("outline").find((row) => Number(row.version) === novel.continueOutlineVersion);
+      const label = sources?.continue_outline_label || (selected ? versionLabel(selected) : "");
+      const continues = sources ? sources.continues_outline : Boolean(selected);
+      push("接续", [continues
+        ? `接续「${label}」：那一版已经写到具体内容的幕原样保留，只补它标着「未覆盖」的幕。`
+        : "不接续：按本批素材整段重写三幕。"]);
     }
   }
 
@@ -1412,10 +1570,10 @@ function renderPlan() {
   const budget = novel.budget;
   if (novel.stage === "storyboard") {
     // 分镜生图没有「每章上限」概念，说明按场次口径来写。
-    const scenes = Array.isArray(novel.book?.script) ? novel.book.script : [];
+    const source = selectedScriptSource();
     const kgCount = Number(budget?.kg_entities || 0);
     const lines = [
-      `按剧本里已保存的 ${scenes.length} 场生成，每场一条出图提示词。`,
+      source.version ? `按所选剧本第 ${source.version} 版的 ${source.scenes.length} 场生成，每场一条出图提示词。` : "先保存剧本再生成分镜提示词。",
       novel.storyboardSource === "skill"
         ? `使用已选的 ${novel.storyboardSkillIds.length} 个 Skill，作品系统提示词共同生效。`
         : (novel.storyboardSystem
@@ -1518,15 +1676,16 @@ function renderSceneBlock(visible) {
   if (!block) return;
   block.hidden = !visible;
   if (!visible) return;
-  const versions = Array.isArray(novel.book?.script_versions) ? novel.book.script_versions : [];
-  const latestVersion = Number(novel.book?.script_version || versions.at(-1)?.version || 0);
-  const selectedVersion = novel.selectedVersions.script || latestVersion;
+  const source = selectedScriptSource();
+  const versions = source.rows;
+  const latestVersion = source.latestVersion;
+  const selectedVersion = source.version;
   const historical = selectedVersion !== latestVersion;
-  const versionRow = versions.find((row) => Number(row.version) === selectedVersion);
-  const rows = historical ? (versionRow?.script || []) : (Array.isArray(novel.book?.script) ? novel.book.script : []);
+  const versionRow = source.row;
+  const rows = source.scenes;
   const versionSelect = $("#novelScriptVersion");
   if (versionSelect) {
-    const options = versions.length ? versions : (rows.length ? [{ version: latestVersion || 1 }] : []);
+    const options = versions;
     versionSelect.replaceChildren(...options.map((row) => new Option(versionLabel(row), String(row.version))));
     versionSelect.hidden = options.length < 2;
     if (options.length) versionSelect.value = String(selectedVersion || options.at(-1).version);
@@ -1595,11 +1754,9 @@ function sceneRow(row) {
 function renderSceneEdit() {
   const box = $("#novelSceneEdit");
   if (!box) return;
-  const latestVersion = Number(novel.book?.script_version || novel.book?.script_versions?.at(-1)?.version || 0);
-  const historical = Number(novel.selectedVersions.script || latestVersion) !== latestVersion;
-  const rows = historical
-    ? (novel.book?.script_versions?.find((item) => Number(item.version) === novel.selectedVersions.script)?.script || [])
-    : (Array.isArray(novel.book?.script) ? novel.book.script : []);
+  const source = selectedScriptSource();
+  const historical = source.version !== source.latestVersion;
+  const rows = source.scenes;
   const row = rows.find((item) => Number(item.i) === novel.sceneEditing);
   box.hidden = historical || !row;
   if (!row) return;
@@ -1756,7 +1913,8 @@ function renderStoryboard(stageData, task) {
   const send = $("#novelStoryboardSend");
   const all = $("#novelStoryboardAll");
   if (!note || !list || !send || !all) return;
-  const scenes = Array.isArray(novel.book?.script) ? novel.book.script : [];
+  const source = selectedScriptSource();
+  const scenes = source.scenes;
   const status = String(task?.status || "");
   const setNoteOnly = (text) => {
     note.textContent = text;
@@ -1783,11 +1941,12 @@ function renderStoryboard(stageData, task) {
     return;
   }
   if (!scenes.length) {
-    setNoteOnly("这个作品还没有剧本场次。先到「剧本」阶段生成并保存场次，再回来生成分镜。");
+    setNoteOnly(source.version ? `所选剧本第 ${source.version} 版没有场次，请切换版本。`
+      : "这个作品还没有已保存剧本。先到「剧本」阶段生成并保存场次，再回来生成分镜。");
     return;
   }
   setNoteOnly(!task
-    ? `共 ${scenes.length} 场。点「生成分镜提示词」，模型会把每一场转成一条出图提示词。`
+    ? `剧本第 ${source.version} 版，共 ${scenes.length} 场。点「生成分镜提示词」，模型会把每一场转成一条出图提示词。`
     : "生成完成后，这里会按场列出提示词。");
 }
 
@@ -1953,17 +2112,63 @@ function stopTaskPolling() {
   }
 }
 
+const stageTaskDetailRequests = new Map();
+
+async function loadStageTaskDetail(taskId) {
+  const token = novel.taskToken;
+  const bookId = novel.bookId;
+  const key = `${token}:${taskId}`;
+  if (stageTaskDetailRequests.has(key)) return stageTaskDetailRequests.get(key);
+  const request = (async () => {
+    try {
+      const { task } = await api(`/api/studio/tasks/${encodeURIComponent(taskId)}`);
+      if (token !== novel.taskToken || bookId !== novel.bookId) return;
+      const index = novel.tasks.findIndex((row) => row.id === taskId);
+      if (index < 0) return;
+      const detailSource = task?.input?.novel || task?.novel;
+      const current = novel.tasks[index];
+      const currentSource = current.input?.novel || current.novel;
+      if (task?.id !== taskId || detailSource?.book_id !== bookId
+          || (currentSource?.stage && detailSource.stage !== currentSource.stage)) {
+        throw new Error("任务来源与当前作品不一致");
+      }
+      // 来源补读只补冻结输入，迟到详情不能覆盖轮询已经读到的终态与结果。
+      novel.tasks[index] = { ...current, ...(task.input ? { input: task.input } : {}),
+        novel: { ...current.novel, ...task.novel },
+        _novelDetailLoaded: true, _novelDetailError: false };
+    } catch (_error) {
+      if (token !== novel.taskToken || bookId !== novel.bookId) return;
+      const row = novel.tasks.find((item) => item.id === taskId);
+      if (row) row._novelDetailError = true;
+    } finally {
+      stageTaskDetailRequests.delete(key);
+    }
+    if (token !== novel.taskToken || bookId !== novel.bookId) return;
+    renderStagePanel();
+    refreshPreview();
+  })();
+  stageTaskDetailRequests.set(key, request);
+  return request;
+}
+
 async function refreshStageTasks() {
+  const token = novel.taskToken;
+  const bookId = novel.bookId;
   try {
     const { tasks } = await api(STAGE_TASKS_URL);
-    novel.tasks = Array.isArray(tasks) ? tasks : [];
+    if (token !== novel.taskToken || bookId !== novel.bookId) return;
+    // 摘要列表没有冻结输入；刷新列表时保留已读到的详情。
+    const previous = new Map(novel.tasks.map((task) => [task.id, task]));
+    novel.tasks = (Array.isArray(tasks) ? tasks : []).map((task) => ({ ...previous.get(task.id), ...task }));
   } catch (error) {
+    if (token !== novel.taskToken || bookId !== novel.bookId) return;
     // 读不到任务列表不该挡住生成面板的其它操作，只如实提示。
     fail("读取拆书匠任务失败", error);
     return;
   }
   reattachLiveTasks();
   renderStagePanel();
+  refreshPreview();
   scheduleTaskPolling();
 }
 
@@ -2008,13 +2213,14 @@ async function pollActiveTask() {
     const { task } = await api(`/api/studio/tasks/${encodeURIComponent(slot.activeTaskId)}`);
     if (token !== novel.taskToken) return;
     const index = novel.tasks.findIndex((row) => row.id === task.id);
-    if (index >= 0) novel.tasks[index] = { ...novel.tasks[index], ...task };
-    else novel.tasks.unshift(task);
+    if (index >= 0) novel.tasks[index] = { ...novel.tasks[index], ...task, _novelDetailLoaded: true, _novelDetailError: false };
+    else novel.tasks.unshift({ ...task, _novelDetailLoaded: true });
     // 增量事件只取正文片段，不重复拉全量结果。
     try {
       const events = await api(
         `/api/studio/tasks/${encodeURIComponent(slot.activeTaskId)}/events?after=${slot.taskCursor}`
       );
+      if (token !== novel.taskToken) return;
       for (const row of events.events || []) {
         if (row.type === "delta" && row.content) {
           const chunk = String(row.content);
@@ -2032,8 +2238,10 @@ async function pollActiveTask() {
     } catch (_error) {
       // 事件流读不到时退回用任务记录里的 result_partial，不影响终态判断。
     }
+    if (token !== novel.taskToken) return;
     if (novel.stage === "split") renderAiEditor();
     else renderStagePanel();
+    refreshPreview();
   } catch (error) {
     if (token === novel.taskToken) fail("读取任务状态失败", error);
   } finally {
@@ -2051,18 +2259,20 @@ async function refreshPreviewBudget() {
   const token = ++novel.budgetToken;
   const stage = novel.stage;
   const bookId = novel.bookId;
+  // 输入一变就撤下旧预检；没有选章或新请求尚未返回都不能沿用旧提示。
+  novel.budget = null;
+  novel.previewSources = null;
+  novel.stageWarnings = [];
+  refreshPreview();
   if (!novel.bookId || stage === "split") {
-    novel.budget = null;
-    refreshPreview();
     return;
   }
   // 分镜生图吃剧本场次，不要求勾选章节。
   const picked = [...novel.picked].sort((a, b) => a - b);
   if (stage !== "storyboard" && !picked.length) {
-    novel.budget = null;
-    refreshPreview();
     return;
   }
+  if (stage === "storyboard" && !selectedScriptSource().scenes.length) return;
   const model = readStageModel();
   try {
     const payload = await api("/api/novel/stage/preview", {
@@ -2079,6 +2289,8 @@ async function refreshPreviewBudget() {
               max_chapters: novel.maxChapters,
               elements_version: novel.selectedVersions.elements || undefined,
               outline_version: novel.selectedVersions.outline || undefined,
+              ...(stage === "outline" && novel.continueOutlineVersion
+                ? { continue_outline_version: novel.continueOutlineVersion } : {}),
             }),
         extra_note: String($("#novelStageNote")?.value || ""),
         model_key: model.model_key,
@@ -2086,10 +2298,12 @@ async function refreshPreviewBudget() {
     });
     if (token !== novel.budgetToken || bookId !== novel.bookId || stage !== novel.stage) return;
     novel.budget = payload.budget || null;
+    novel.previewSources = payload.sources || null;
     novel.stageWarnings = Array.isArray(payload.warnings) ? payload.warnings : [];
   } catch (error) {
     if (token !== novel.budgetToken || bookId !== novel.bookId || stage !== novel.stage) return;
     novel.budget = null;
+    novel.previewSources = null;
     novel.stageWarnings = [String(error?.message || error)];
   }
   refreshPreview();
@@ -2110,12 +2324,17 @@ async function generateStage({ confirmLarge = false } = {}) {
   const stageData = stageState(stage);
   if (stageData.busy || novel.storyboardSaving) return;
   const isStoryboard = stage === "storyboard";
+  if (isStoryboard && !selectedScriptSource().scenes.length) {
+    toast("先选择有场次的剧本版本");
+    return;
+  }
   if (isStoryboard && novel.storyboardSource === "skill" && !novel.storyboardSkillIds.length) {
     toast("至少选择一个 Skill");
     return;
   }
   const bookId = novel.bookId;
   const bookToken = novel.bookToken;
+  const budgetToken = novel.budgetToken;
   // 分镜生图的素材是已保存剧本场次，不勾选章节。
   const picked = [...novel.picked].sort((a, b) => a - b);
   if (!isStoryboard) {
@@ -2140,6 +2359,8 @@ async function generateStage({ confirmLarge = false } = {}) {
       max_chapters: novel.maxChapters,
       elements_version: novel.selectedVersions.elements || undefined,
       outline_version: novel.selectedVersions.outline || undefined,
+      ...(stage === "outline" && novel.continueOutlineVersion
+        ? { continue_outline_version: novel.continueOutlineVersion } : {}),
     }),
     extra_note: String($("#novelStageNote")?.value || ""),
     model_key: model.model_key, model_name: model.model_name,
@@ -2171,7 +2392,10 @@ async function generateStage({ confirmLarge = false } = {}) {
     stageData.rowsForTaskId = "";
     // 新任务提交后展开结果区：上一轮用户收起来过，也不该挡住这次的新结果。
     novel.collapsed.delete(`${stage}:task`);
-    novel.budget = payload.budget || novel.budget;
+    if (stage === novel.stage && budgetToken === novel.budgetToken) {
+      novel.budget = payload.budget || novel.budget;
+      if (payload.sources) novel.previewSources = payload.sources;
+    }
     if (novel.book && Number.isInteger(Number(payload.book_revision))) {
       novel.book.revision = Number(payload.book_revision);
     }
@@ -2247,9 +2471,20 @@ async function applyStageResult() {
     return;
   }
   const stageData = stageState(stage);
-  if (!stageData.activeTaskId || !novel.bookId) return;
-  const task = novel.tasks.find((row) => row.id === stageData.activeTaskId);
-  const text = String(stageData.streamText || task?.result || task?.result_partial || "");
+  const bookId = novel.bookId;
+  const bookToken = novel.bookToken;
+  if (!bookId || stageData.applyingTaskId) return;
+  const task = novel.tasks.find((row) => row.id === stageData.viewTaskId)
+    || novel.tasks.find((row) => row.id === stageData.activeTaskId);
+  // 清单将来源提升到顶层；提交/详情仍把它放在冻结的 input 内。
+  const taskSource = task?.novel || task?.input?.novel;
+  if (!task || task.status !== "done" || taskSource?.book_id !== bookId || taskSource?.stage !== stage) return;
+  const taskId = task.id;
+  if (stageTaskSaved(stage, taskId)) {
+    toast("这个任务的结果已保存到作品");
+    return;
+  }
+  const text = stageTaskText(stageData, task);
   if (!text.trim()) {
     toast("这个任务没有结果可写回");
     return;
@@ -2257,30 +2492,44 @@ async function applyStageResult() {
   const label = stageLabel(stage);
   const destination = stage === "script" ? "场次列表" : "作品资料";
   if (!window.confirm(`把这次的${label}保存为${destination}的新版本吗？已有版本会保留。`)) return;
+  stageData.applyingTaskId = taskId;
+  renderStagePanel();
   try {
-    const payload = await api(`/api/novel/books/${encodeURIComponent(novel.bookId)}/apply`, {
+    const payload = await api(`/api/novel/books/${encodeURIComponent(bookId)}/apply`, {
       method: "POST",
       body: {
         stage,
-        task_id: stageData.activeTaskId,
+        task_id: taskId,
         text,
         revision: novel.book?.revision,
       },
     });
+    if (bookId !== novel.bookId || bookToken !== novel.bookToken) return;
     novel.book = payload.book;
-    stageData.activeTaskId = "";
-    stageData.viewTaskId = "";
-    stageData.streamText = "";
-    stageData.taskCursor = 0;
+    if (stageData.activeTaskId === taskId) {
+      stageData.activeTaskId = "";
+      stageData.streamText = "";
+      stageData.taskCursor = 0;
+    }
+    if (stageData.viewTaskId === taskId) stageData.viewTaskId = "";
+    // 新保存的结果立即成为本阶段展示及后续阶段默认引用的版本。
+    novel.selectedVersions[stage] = 0;
     novel.sceneEditing = 0;
     // 刚保存的新版本要让用户看见：如果之前收起了「已保存版本」，这里重新展开。
     novel.collapsed.delete(`${stage}:saved`);
     setSaveState("已保存", `${label}已写回作品。`);
     renderAll();
+    void refreshPreviewBudget();
     toast(`${label}已保存到作品`);
   } catch (error) {
+    if (bookId !== novel.bookId || bookToken !== novel.bookToken) return;
     // 409 = 任务/阶段不符或作品已被改过；如实提示，不覆盖。
     fail(`写回${label}失败`, error);
+  } finally {
+    if (bookId === novel.bookId && bookToken === novel.bookToken) {
+      stageData.applyingTaskId = "";
+      renderStagePanel();
+    }
   }
 }
 
@@ -2580,8 +2829,15 @@ function renderManage() {
       if (!selectable) {
         const tag = document.createElement("em");
         tag.className = "novel-manage-locked";
-        tag.textContent = row.chapter_no ? "章节仅此一份" : "执行中";
-        tag.title = row.chapter_no ? "这一章只剩最后一份稿件，批量删除不能移除章节；要移除章节请在章节上单独删除" : "";
+        // 「执行中」只属于还在排队/运行的任务；记录行不可选只可能是缺 ID，
+        // 不能再笼统写成「执行中」（大纲/要素只剩一版时会被误读成删不掉）。
+        const running = row.type === "task";
+        tag.textContent = running ? "执行中" : (row.chapter_no ? "章节仅此一份" : "缺少记录 ID");
+        tag.title = running
+          ? "任务还在排队或运行，结束后才能删除"
+          : (row.chapter_no
+            ? "这一章只剩最后一份稿件，批量删除不能移除章节；要移除章节请在章节上单独删除"
+            : "这条记录缺少 ID，无法删除；请刷新记录后再试");
         copy.append(tag);
       }
       wrap.append(box, copy);
@@ -2815,6 +3071,7 @@ async function deleteManageSelection() {
     if (novel.chapterNo) await openChapter(novel.chapterNo);
     else renderAll();
     if (novel.bookId !== bookId) return;
+    if (novel.stage === "storyboard") void refreshPreviewBudget();
     if (failed.size) {
       const summary = `删除${succeeded.size ? "部分成功" : "失败"} ${succeeded.size} / ${keys.length}，${failed.size} 条失败；失败项保留勾选，可核对原因后重试。`;
       if (errorEl) errorEl.textContent = [summary, ...warnings].join("\n");
@@ -2844,6 +3101,7 @@ function setStage(stage) {
   stageState(next).warnings = [];
   novel.stageWarnings = [];
   novel.budget = null;
+  novel.previewSources = null;
   document.querySelectorAll("#novelStages [data-novel-stage]").forEach((btn) => {
     const active = btn.dataset.novelStage === next;
     btn.classList.toggle("active", active);
@@ -2915,12 +3173,19 @@ async function openBook(bookId) {
   const editToken = novel.editToken;
   novel.chapterToken += 1;
   novel.taskToken += 1;
+  novel.budgetToken += 1;
+  novel.budget = null;
+  novel.previewSources = null;
+  novel.stageWarnings = [];
   stopTaskPolling();
   try {
     const payload = await api(`/api/novel/books/${encodeURIComponent(bookId)}`);
     if (token !== novel.bookToken || novel.editToken !== editToken) return;
     novel.bookId = bookId;
     novel.selectedVersions = { elements: 0, outline: 0, script: 0 };
+    novel.scriptSelectionNotice = "";
+    novel.sceneEditing = 0;
+    novel.continueOutlineVersion = 0;
     try { localStorage.setItem(LAST_BOOK_KEY, bookId); } catch (_error) { /* storage may be unavailable */ }
     novel.book = payload.book;
     restoreStoryboardConfig(payload.book);
@@ -2942,6 +3207,7 @@ async function openBook(bookId) {
     for (const data of Object.values(novel.stageStates)) {
       data.activeTaskId = "";
       data.viewTaskId = "";
+      data.applyingTaskId = "";
       data.streamText = "";
       data.taskCursor = 0;
       data.warnings = [];
@@ -3484,9 +3750,10 @@ function storyboardConfig() {
 }
 
 function storyboardRequest() {
-  return novel.storyboardSource === "skill"
+  const prompt = novel.storyboardSource === "skill"
     ? { prompt_source: "skill", skill_ids: [...novel.storyboardSkillIds] }
     : { prompt_source: "template", system_prompt: novel.storyboardSystem };
+  return { ...prompt, script_version: selectedScriptSource().version };
 }
 
 function saveStoryboardSystem() {
@@ -3841,10 +4108,12 @@ export function bindNovelEvents() {
     // 查看 = 只换「展示对象」（viewTaskId），绝不挪 activeTaskId：
     // 运行中任务的进度盒、轮询、取消/写回都不能被查看动作顶掉（2026-11-04 反馈③）。
     data.viewTaskId = task.id === data.activeTaskId ? "" : task.id;
+    if (task._novelDetailError) task._novelDetailError = false;
     // 点「查看」就是想看这条任务的结果：之前收起过的状态不能挡住它，
     // 否则面板以收起态出现、只剩标题条，看起来像打不开（实测复现）。
     novel.collapsed.delete(`${novel.stage}:task`);
     renderStagePanel();
+    refreshPreview();
   });
 
   async function deleteStageTask(taskId) {
@@ -3878,9 +4147,13 @@ export function bindNovelEvents() {
     const target = event.target;
     if (target.matches("[data-context-elements]")) novel.selectedVersions.elements = Number(target.value) || 0;
     else if (target.matches("[data-context-outline]")) novel.selectedVersions.outline = Number(target.value) || 0;
+    else if (target.matches("[data-outline-continue]")) novel.continueOutlineVersion = Number(target.value) || 0;
     else if (target.id === "novelStageVersion") novel.selectedVersions[novel.stage] = Number(target.value) || 0;
-    else if (target.id === "novelScriptVersion") novel.selectedVersions.script = Number(target.value) || 0;
-    else if (target.matches("[data-novel-pick-manuscript]")) {
+    else if (target.id === "novelScriptVersion" || target.matches("[data-context-script]")) {
+      novel.selectedVersions.script = Number(target.value) || 0;
+      novel.scriptSelectionNotice = "";
+      novel.sceneEditing = 0;
+    } else if (target.matches("[data-novel-pick-manuscript]")) {
       const chapterNo = Number(target.dataset.novelPickManuscript);
       const value = String(target.value || "");
       if (value) novel.manuscriptChoice.set(chapterNo, value);
@@ -3989,6 +4262,7 @@ export function bindNovelEvents() {
       data.viewTaskId = "";
       novel.collapsed.delete(`${novel.stage}:task`);
       renderStagePanel();
+      refreshPreview();
     });
     panel.querySelector('[data-novel-control="novelStageCancel"]')?.addEventListener("click", () => void cancelStageTask());
     panel.querySelector('[data-novel-control="novelStageRetry"]')?.addEventListener("click", () => void retryStageTask());

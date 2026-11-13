@@ -402,6 +402,65 @@ class ComfyUIBatchesTests(unittest.TestCase):
         ids = [row["id"] for row in self.batches.list()]
         self.assertEqual(ids, [second["id"], first["id"]])
 
+    def _history_record(self, index):
+        batch_id = f"cfb-history-{index:04d}"
+        items = []
+        for item_no in range(2):
+            task_id = f"cf-batch-history-{index:04d}-{item_no}"
+            self.store._write_json(self.store.task_record_path(task_id), {
+                "id": task_id, "status": "completed", "created_at": index,
+                "input": {"batch_id": batch_id, "shots": 1},
+                "checkpoint": {"completed": [0], "errors": []},
+            })
+            items.append({"index": item_no + 1, "name": f"item {item_no}", "task_id": task_id})
+        self.store._write_json(self.batches.batch_path(batch_id), {
+            "id": batch_id, "title": f"history {index}", "created_at": index // 3, "items": items,
+        })
+        return batch_id
+
+    def test_batch_history_pages_reach_beyond_fifty_and_join_only_current_page(self):
+        ids = [self._history_record(index) for index in range(67)]
+        expected = sorted(ids, key=lambda key: (int(key.rsplit("-", 1)[-1]) // 3, key), reverse=True)
+        self.assertEqual(len(self.batches.list()), 50, "老调用仍返回原默认页")
+        with mock.patch.object(self.store, "get_task", wraps=self.store.get_task) as reads:
+            page = self.batches.page(13)
+        self.assertEqual(reads.call_count, 26, "只join当前页，前瞻批次也不能join任务")
+        seen = [row["id"] for row in page["rows"]]
+        self.assertEqual(seen, expected[:13])
+        self.batches.batch_path(seen[-1]).unlink()
+        while page["has_more"]:
+            page = self.batches.page(13, page["next_cursor"])
+            seen.extend(row["id"] for row in page["rows"])
+        self.assertEqual(seen, expected)
+        self.assertEqual(len(set(seen)), 67)
+        self.assertEqual(page["next_cursor"], "")
+
+    def test_batch_index_detects_external_creation_deletion_and_does_not_cache_snapshots(self):
+        ids = [self._history_record(index) for index in range(12)]
+        self.batches.page(3)
+        original = Path.read_text
+        with mock.patch.object(Path, "read_text", autospec=True, side_effect=original) as reads:
+            self.batches.page(3)
+        self.assertEqual(reads.call_count, 10, "重读只取4份批次主记录和当前页6份任务，不解析全部历史")
+        summaries = self.batches._history_index.summaries()
+        self.assertTrue(all(set(row) == {"id", "created_at"} for row in summaries))
+        self.store._write_json(self.batches.batch_path("cfb-history-external"), {
+            "id": "cfb-history-external", "created_at": 900, "items": [],
+        })
+        other = ComfyUIBatchManager(self.app, self.store, self.jobs)
+        self.assertEqual(self.batches.page(1)["rows"][0]["id"], "cfb-history-external")
+        other.batch_path("cfb-history-external").unlink()
+        self.assertEqual(self.batches.page(1)["rows"][0]["id"], ids[-1])
+        self.assertEqual(other.page(1)["rows"][0]["id"], ids[-1])
+        with mock.patch.object(self.batches._history_index, "summaries",
+                               side_effect=AssertionError("定点刷新不能扫描历史目录")):
+            rows, missing = self.batches.summaries_by_ids([ids[0], "cfb-gone"])
+        self.assertEqual([row["id"] for row in rows], [ids[0]])
+        self.assertEqual(missing, ["cfb-gone"])
+        self.store.update_task(rows[0]["items"][0]["task_id"], status="running")
+        rows, _ = self.batches.summaries_by_ids([ids[0]])
+        self.assertEqual(rows[0]["items"][0]["status"], "running", "列表摘要必须重新联读当前任务状态")
+
     def test_editable_snapshot_is_stored_and_only_returned_on_request(self):
         # 「编辑这一批」不靠任务状态反推：提交时把映射 / 固定参数 / 条目字段
         # 原样存进批次记录；跑批轮询和列表都不带，避免每 2 秒重复传正文。

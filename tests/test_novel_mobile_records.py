@@ -28,6 +28,7 @@ class NovelRecordFeedbackTests(unittest.TestCase):
 
         functions = "\n".join(declaration(name) for name in (
             "deleteManageSelection", "reconcileSelectedVersions", "exportBook",
+            "contextVersionRows", "selectedScriptSource",
         ))
         runner = r"""
 const assert = require('node:assert/strict');
@@ -104,8 +105,11 @@ function fixture(keys = ['outline:o1', 'outline:o2']) {
   assert.match(f.calls[0][1],/第 158 章：正文损坏\n第 163 章：稿件缺失/);
 
   f=fixture();f.novel.book={outline_versions:[{version:4}],script_versions:[]};
+  f.novel.budgetToken=3;f.novel.budget={chars:80};f.novel.previewSources={script_version:2};
   f.novel.selectedVersions={elements:0,outline:4,script:2};f.ctx.reconcileSelectedVersions();
   assert.equal(f.novel.selectedVersions.outline,4);assert.equal(f.novel.selectedVersions.script,0);
+  assert.equal(f.novel.budgetToken,4);assert.equal(f.novel.budget,null);assert.equal(f.novel.previewSources,null);
+  assert.match(f.novel.scriptSelectionNotice,/第 2 版已删除/);
   f=fixture(['outline:o1']);f.ctx.api=async()=>({succeeded:[{type:'outline',id:'o1',warning:'旧正文文件清理失败'}]});
   await f.ctx.deleteManageSelection();assert.equal(f.novel.manage.selected.size,0);
   assert.match(f.error.textContent,/记录已删除，清理提醒：\n旧正文文件清理失败/);

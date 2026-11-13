@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from naiba.comfyui import (
     COMFYUI_ACTIVE_STATUSES,
@@ -31,12 +31,13 @@ from naiba.comfyui import (
     COMFYUI_WORKFLOW_PREFIX,
 )
 from naiba.labeler.store import now_ms
+from naiba.comfyui.history import HistoryIndex, history_page
 
 # 缓存引用保护要覆盖的状态（本期造梦机不引用 uploads，P5 图片输入接入后生效）。
 PROTECTED_STATUSES: tuple[str, ...] = tuple(
     dict.fromkeys((*COMFYUI_ACTIVE_STATUSES, *COMFYUI_RESUMABLE_STATUSES))
 )
-# 任务历史上限（与工作台 60 条口径一致；批量删除清更早的）。
+# Legacy callers request the most recent page; records are never pruned by count.
 MAX_TASKS = 60
 
 
@@ -64,6 +65,7 @@ class ComfyUIStore:
         self._tasks_dir = root / "tasks"
         self._outputs_dir = root / "outputs"
         self._lock = _store_lock(self._tasks_dir)
+        self._history_index = HistoryIndex(self._tasks_dir, COMFYUI_TASK_PREFIX, self._lock, tasks=True)
 
     # ---- 路径 ----
 
@@ -300,7 +302,37 @@ class ComfyUIStore:
             self._write_json(self.task_record_path(task_id), current)
         return current
 
-    def list_tasks(self, active_only: bool = False, limit: int = MAX_TASKS) -> list[dict[str, Any]]:
+    def task_page(self, page_size: Any = None, cursor: Any = "", *,
+                  scope: str = "all", active_only: bool = False) -> dict[str, Any]:
+        if scope not in {"all", "single"}:
+            raise ValueError("scope 必须是 single 或 all")
+
+        def include(summary: dict[str, Any]) -> bool:
+            return ((scope != "single" or not summary["batch"])
+                    and (not active_only or summary["status"] in COMFYUI_ACTIVE_STATUSES))
+
+        def still_include(task: dict[str, Any]) -> bool:
+            source = task.get("input")
+            return ((scope != "single" or not (isinstance(source, dict) and source.get("batch_id")))
+                    and (not active_only or task["status"] in COMFYUI_ACTIVE_STATUSES))
+
+        return history_page(self._history_index, page_size, cursor,
+                            scope=f"tasks:{scope}:{int(active_only)}", load=self.get_task,
+                            include=include, still_include=still_include)
+
+    def iter_tasks(self, active_only: bool = False) -> Iterator[dict[str, Any]]:
+        """Internal whole-history traversal, independent of UI pagination."""
+        for summary in self._history_index.summaries():
+            if active_only and summary["status"] not in COMFYUI_ACTIVE_STATUSES:
+                continue
+            task = self.get_task(summary["id"])
+            if task is not None and (not active_only or task["status"] in COMFYUI_ACTIVE_STATUSES):
+                yield task
+
+    def list_tasks(self, active_only: bool = False, limit: int | None = MAX_TASKS,
+                   scope: str = "all") -> list[dict[str, Any]]:
+        if scope not in {"all", "single"}:
+            raise ValueError("scope 必须是 single 或 all")
         rows: list[dict[str, Any]] = []
         if not self._tasks_dir.exists():
             return rows
@@ -317,8 +349,11 @@ class ComfyUIStore:
             payload = self._sanitize(payload)
             if active_only and payload["status"] not in COMFYUI_ACTIVE_STATUSES:
                 continue
+            source = payload.get("input")
+            if scope == "single" and isinstance(source, dict) and source.get("batch_id"):
+                continue
             rows.append(payload)
-            if len(rows) >= limit:
+            if limit is not None and len(rows) >= limit:
                 break
         return rows
 

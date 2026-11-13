@@ -108,6 +108,45 @@ class PromptSlotTests(unittest.TestCase):
             )
 
 
+class OutlineContinueTests(unittest.TestCase):
+    """大纲接续（2026-11-13）：旧版做基准、只补未覆盖的幕；默认不接续。"""
+
+    def test_continue_slot_and_rules_are_included(self):
+        built = prompts.build_stage_content(
+            stage="outline", book_title="书", chapters=_chapters(1), chapter_ids=[1],
+            summaries={}, continue_outline="## 第一幕 建置\n- 旧版要点甲",
+        )
+        content = built["content"]
+        self.assertIn("【上一版大纲（已写到的内容必须保留）】", content)
+        self.assertIn("旧版要点甲", content)
+        self.assertIn("原样保留", content)
+        self.assertEqual(built["warnings"], [])
+
+    def test_default_submission_has_no_continue_slot(self):
+        built = prompts.build_stage_content(
+            stage="outline", book_title="书", chapters=_chapters(1), chapter_ids=[1],
+            summaries={},
+        )
+        self.assertNotIn("上一版大纲", built["content"])
+        self.assertNotIn("接续要求", built["content"])
+
+    def test_continue_only_applies_to_outline(self):
+        built = prompts.build_stage_content(
+            stage="elements", book_title="书", chapters=_chapters(1), chapter_ids=[1],
+            summaries={}, continue_outline="## 第一幕 建置\n- 不该出现",
+        )
+        self.assertNotIn("不该出现", built["content"])
+
+    def test_continue_slot_truncates_with_warning(self):
+        long_text = "甲" * (prompts.CONTINUE_OUTLINE_SLOT_CHARS + 120)
+        built = prompts.build_stage_content(
+            stage="outline", book_title="书", chapters=_chapters(1), chapter_ids=[1],
+            summaries={}, continue_outline=long_text,
+        )
+        self.assertTrue(any("上一版大纲超出" in w for w in built["warnings"]), built["warnings"])
+        self.assertIn("120", " ".join(built["warnings"]), "必须说明省略了多少字")
+
+
 class SummaryChainTests(unittest.TestCase):
     def test_summary_keeps_head_and_tail(self):
         text = "头" * 200 + "中" * 500 + "尾" * 400

@@ -16,7 +16,7 @@ const defer=()=>{let resolve,reject;const promise=new Promise((r,j)=>{resolve=r;
 const flush=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
 const timers=new Map(),messages=[],root={dataset:{comfyuiPane:'batch'}};
 let timer=0,page='comfyui',open=true;
-const context=vm.createContext({console,FormData,File,buildBatchConvertRequest,BATCH_H3_REFERENCE_TEMPLATE,
+const context=vm.createContext({console,FormData,File,URLSearchParams,buildBatchConvertRequest,BATCH_H3_REFERENCE_TEMPLATE,
   setTimeout:fn=>{timers.set(++timer,fn);return timer;},clearTimeout:id=>timers.delete(id),
   setInterval:fn=>{timers.set(++timer,fn);return timer;},clearInterval:id=>timers.delete(id),
   document:{querySelector:()=>null,querySelectorAll:()=>[]},
@@ -26,7 +26,9 @@ const context=vm.createContext({console,FormData,File,buildBatchConvertRequest,B
 const source=fs.readFileSync('public/js/24-comfyui.js','utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
 vm.runInContext(source+`
   renderBatch=()=>{};loadBatchHistories=async()=>{};renderWorkflowList=()=>{};renderParamForm=()=>{};
+  renderHistory=()=>{};renderHistoryFooters=()=>{};refreshHistoryViews=()=>{};
   globalThis.p={batch,startBatchPolling,stopBatchPolling,batchConvert,batchConvertAll,
+    histories,loadHistoryPage,mergeHistoryRows,forgetHistoryRows,refreshActiveTasks,
     comfyui,selectWorkflow,submitTask,openRerunSnapshot,dropRerunDraft,
     changeBatchMediaPorts,onBatchChange,onBatchClick,submitBatch,batchUploadTiles,loadBatchWorkflowDetail,
     setWait(fn){batchWaitStudioTask=fn;}};
@@ -52,6 +54,107 @@ class ComfyuiAsyncStateTests(unittest.TestCase):
             cwd=ROOT, text=True, encoding="utf-8", capture_output=True, timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_submitting_task_preserves_loaded_history_and_tail_cursor(self):
+        self.run_case(r"""
+vm.runInContext('renderTasks=()=>{};setComfyuiPane=()=>{};startPolling=()=>{};',context);
+const history=p.histories.tasks;
+Object.assign(history,{initialized:true,cursor:'older-page',hasMore:true});
+const oldRows=Array.from({length:40},(_,i)=>({id:`old-${i}`,created_at:100-i,status:'completed'}));
+p.comfyui.tasks=[...oldRows];
+p.comfyui.detail={id:'workflow',params:[]};p.comfyui.selectedId='workflow';
+const fresh={id:'fresh',created_at:200,status:'completed'};
+context.api=async(url,options)=>{
+  if(options?.method==='POST')return {task:fresh};
+  const query=new URL('http://local'+url).searchParams;
+  if(query.has('active_only'))return {tasks:[]};
+  if(query.has('cursor'))return {tasks:[{id:'old-40',created_at:60,status:'completed'}],has_more:false,next_cursor:''};
+  return {tasks:[fresh,...oldRows.slice(0,19)],has_more:true,next_cursor:'first-page-tail'};
+};
+await p.submitTask();
+assert.ok(messages.some(message=>message.startsWith('已提交')),messages.join(';'));
+assert.equal(p.comfyui.tasks.length,41,'提交不能清掉已经分页加载的旧任务');
+assert.equal(history.cursor,'older-page');
+await p.loadHistoryPage('tasks',true);
+assert.equal(p.comfyui.tasks.map(row=>row.id).join(','),['fresh',...oldRows.map(row=>row.id),'old-40'].join(','));
+""")
+
+    def test_empty_initialized_history_can_grow_to_multiple_pages(self):
+        self.run_case(r"""
+for(const kind of ['tasks','batches']){
+  const history=p.histories[kind];
+  Object.assign(history,{initialized:true,cursor:'',hasMore:false});
+  context.api=async url=>{
+    const cursor=new URL('http://local'+url).searchParams.get('cursor');
+    return cursor
+      ? {[kind]:[{id:'old',created_at:1}],has_more:false,next_cursor:''}
+      : {[kind]:[{id:'new',created_at:2}],has_more:true,next_cursor:'next-page'};
+  };
+  await p.loadHistoryPage(kind);
+  assert.equal(history.hasMore,true,`${kind}: 空历史增长后必须恢复继续加载入口`);
+  assert.equal(history.cursor,'next-page');
+  await p.loadHistoryPage(kind,true);
+  const rows=kind==='tasks'?p.comfyui.tasks:p.batch.histories;
+  assert.equal(rows.map(row=>row.id).join(','),'new,old');
+  assert.equal(history.hasMore,false);
+}
+""")
+
+    def test_history_refresh_catches_new_pages_without_losing_old_cursor(self):
+        self.run_case(r"""
+const history=p.histories.tasks;
+Object.assign(history,{initialized:true,cursor:'older-page',hasMore:true});
+p.comfyui.tasks=[{id:'old',created_at:100,status:'completed'}];
+const requests=[];
+context.api=async url=>{
+  const cursor=new URL('http://local'+url).searchParams.get('cursor')||'';
+  requests.push(cursor);
+  if(cursor==='')return {tasks:[{id:'newest',created_at:400}],has_more:true,next_cursor:'new-page-2'};
+  if(cursor==='new-page-2')return {tasks:[{id:'middle',created_at:300}],has_more:true,next_cursor:'new-page-3'};
+  return {tasks:[{id:'new',created_at:200},{id:'old',created_at:100,status:'completed'}],has_more:true,next_cursor:'different'};
+};
+await p.loadHistoryPage('tasks');
+assert.deepEqual(requests,['','new-page-2','new-page-3']);
+assert.equal(p.comfyui.tasks.map(row=>row.id).join(','),'newest,middle,new,old');
+assert.equal(history.cursor,'older-page','刷新只补头部，不能跳过已加载末尾之后的历史');
+assert.equal(history.hasMore,true);
+""")
+
+    def test_history_delete_invalidates_late_page_and_can_continue(self):
+        self.run_case(r"""
+const history=p.histories.tasks;
+Object.assign(history,{initialized:true,cursor:'next',hasMore:true});
+p.comfyui.tasks=[{id:'keep',created_at:3},{id:'deleted',created_at:2}];
+p.comfyui.activeTasks=[{id:'deleted',status:'running'},{id:'active',status:'queued'}];
+const pending=defer();context.api=()=>pending.promise;
+const load=p.loadHistoryPage('tasks',true);
+p.forgetHistoryRows('tasks',['deleted']);
+assert.equal(p.comfyui.activeTasks.map(row=>row.id).join(','),'active');
+pending.resolve({tasks:[{id:'deleted',created_at:2},{id:'old',created_at:1}],has_more:false,next_cursor:''});
+await load;
+assert.equal(p.comfyui.tasks.map(row=>row.id).join(','),'keep');
+assert.equal(history.cursor,'next');
+context.api=async()=>({tasks:[{id:'old',created_at:1}],has_more:false,next_cursor:''});
+await p.loadHistoryPage('tasks',true);
+assert.equal(p.comfyui.tasks.map(row=>row.id).join(','),'keep,old');
+assert.equal(history.hasMore,false);
+""")
+
+    def test_old_history_and_active_responses_do_not_restore_running_state(self):
+        self.run_case(r"""
+const pending=defer();context.api=()=>pending.promise;
+const refresh=p.refreshActiveTasks();
+p.mergeHistoryRows('tasks',[{id:'task',created_at:1,updated_at:9,status:'completed'}]);
+pending.resolve({tasks:[{id:'task',created_at:1,updated_at:8,status:'running'}]});
+await refresh;
+assert.equal(p.comfyui.tasks[0].status,'completed');
+assert.equal(p.comfyui.activeTasks.length,0);
+p.mergeHistoryRows('tasks',[{id:'task',created_at:1,updated_at:7,status:'queued'}]);
+assert.equal(p.comfyui.tasks[0].status,'completed');
+p.mergeHistoryRows('batches',[{id:'batch',title:'新状态'}],8);
+p.mergeHistoryRows('batches',[{id:'batch',title:'旧状态'}],7);
+assert.equal(p.batch.histories[0].title,'新状态');
+""")
 
     def test_convert_all_freezes_settings_and_stops_after_manual_change(self):
         self.run_case(r"""

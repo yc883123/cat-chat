@@ -61,7 +61,16 @@ const BOOK = {
     { version: 1, raw: '## 人物\\n· 旧版人物', updated_at: 1750000400000, task_id: 'old-elements', chapter_ids: [1] },
     { version: 2, raw: '## 人物\\n· 沈砚：书生', updated_at: 1750000500000, task_id: 'new-elements', chapter_ids: [1, 2] },
   ],
-  outline: '', outline_versions: [],
+  // 大纲保留两个版本，验证接续选择及剧本引用切换。
+  // 单份 outline 字段仍留空——已保存区域由写回接口补，不在这里造。
+  outline: '', outline_versions: [
+    { id: 'ol-000000000001', version: 1,
+      text: '## 第一幕 建置\n- 旧版要点甲\n## 第二幕 对抗\n- 旧版要点乙\n## 第三幕 结局\n（本批素材未覆盖，需补后续章节）',
+      updated_at: 1750000400000, task_id: 'old-outline', chapter_ids: [1] },
+    { id: 'ol-000000000002', version: 2,
+      text: '## 第一幕 建置\n- 新版要点\n## 第二幕 对抗\n- 新版冲突\n## 第三幕 结局\n（本批素材未覆盖，需补后续章节）',
+      updated_at: 1750000500000, task_id: 'new-outline', chapter_ids: [1, 2] },
+  ],
   script_version: 2,
   script: [
     { i: 1, scene: 'INT. 新场景 - 夜', content: '新版场次。', from_chapter: 1 },
@@ -85,6 +94,7 @@ const CHAPTER_BODY = {
 
 // ---- 阶段二：要素 / 大纲 ----
 const STAGE_TASK_ID = 'st-novel-0001';
+const SCRIPT_TASK_ID = 'st-novel-script-current';
 const STAGE_ELEMENTS_TEXT = '## 人物\n· 沈砚：书生，谨慎\n· 老周：船夫\n## 场景\n· 长桥：第1章\n## 道具\n· 无名信：推动调查';
 const STAGE_TASK = {
   id: STAGE_TASK_ID, status: 'done', detail: '', error: '',
@@ -98,6 +108,15 @@ const STAGE_TASK = {
     novel: { book_id: BOOK_ID, stage: 'elements', chapter_ids: [1, 2] },
   },
 };
+const SCRIPT_RESULT = '【第 1 场】INT. 新场景 - 夜\n沈砚推门进来。\n\n【第 2 场】EXT. 长桥 - 清晨\n雾还没散。';
+const SCRIPT_HISTORY_TASKS = [1440, 375].map((width, index) => ({
+  ...STAGE_TASK,
+  id: `st-novel-history-${width}`,
+  title: `《长夜灯》· 历史剧本 ${width}`,
+  result: `${SCRIPT_RESULT}\n历史版本 ${width}`,
+  novel: { book_id: BOOK_ID, stage: 'script', chapter_ids: [1, 2] },
+  created_at: 1750000320000 + index,
+}));
 // 单章 AI 润色的任务：结果直接是终态，用来验证「结果就地显示、按钮变保存改编稿」。
 const ADAPT_TASK = {
   id: 'st-novel-adapt1', status: 'done', detail: '', error: '',
@@ -123,7 +142,15 @@ const LIBRARY_TASK = {
   input: { content: 'x', module: 'global', origin_label: '文生图' },
 };
 
+// 单任务详情中的来源在冻结 input 里；只有清单接口提升这些元数据。
+// 完整真实提交形状由 _serve_novel_outline_continue.py 的独立 HTTP 流程覆盖。
+function detailTask(task) {
+  const { novel, module, title, origin_label, ...record } = task;
+  return { ...record, input: { ...task.input, novel, module, title, origin_label } };
+}
+
 const results = [];
+let smokePageForFailure = null;
 function check(name, ok, detail = '') {
   results.push({ name, ok: !!ok, detail });
   if (!ok) console.error(`FAIL ${name} ${detail}`);
@@ -134,6 +161,7 @@ async function main() {
   const browser = await chromium.launch({ channel: 'msedge', headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await context.newPage();
+  smokePageForFailure = page;
 
   const errors = [];
   page.on('pageerror', (error) => errors.push(`pageerror: ${error.message}`));
@@ -180,10 +208,15 @@ async function main() {
     { i: 1, scene: 'INT. 新场景 - 夜', content: '新版场次。', from_chapter: 1 },
   ];
   let stageWarnings = [];
-  let stageTaskState = { ...STAGE_TASK, status: 'queued', result: '', result_partial: '' };
+  // 真实服务提交前没有这条任务；每次新提交也不能复用另一阶段的任务 ID。
+  let stageTaskState = null;
+  const submittedStageTasks = new Map();
+  let stageTaskTemplate = STAGE_TASK;
+  let holdStageCompletion = false;
   let stageTaskPolls = 0;
   const studioTaskQueries = [];
   let previewSubmit = null;
+  let previewGate = null;
   let recordsDelete = null;
   let tasksDelete = null;
   let revealCalled = false;
@@ -203,7 +236,7 @@ async function main() {
       if (url.searchParams.get('module') === 'novel') {
         return route.fulfill({
           status: 200, contentType: 'application/json',
-          body: JSON.stringify({ tasks: [ADAPT_TASK, stageTaskState] }),
+          body: JSON.stringify({ tasks: [ADAPT_TASK, ...submittedStageTasks.values(), ...SCRIPT_HISTORY_TASKS] }),
         });
       }
       if (url.searchParams.get('exclude_module') === 'novel') {
@@ -214,7 +247,7 @@ async function main() {
       }
       return route.fulfill({
         status: 200, contentType: 'application/json',
-        body: JSON.stringify({ tasks: [LIBRARY_TASK, stageTaskState] }),
+        body: JSON.stringify({ tasks: [LIBRARY_TASK, ...submittedStageTasks.values()] }),
       });
     },
   );
@@ -227,32 +260,52 @@ async function main() {
       if (request.method() !== 'GET') return route.fallback();
       const url = new URL(request.url());
       if (url.pathname.endsWith('/events')) {
+        const shortScriptDelta = stageTaskTemplate.novel?.stage === 'script'
+          && url.pathname.endsWith(`${SCRIPT_TASK_ID}/events`)
+          && Number(url.searchParams.get('after') || 0) === 0;
         return route.fulfill({
           status: 200, contentType: 'application/json',
-          body: JSON.stringify({ events: [], next: 0, terminal: stageTaskState.status === 'done' }),
+          body: JSON.stringify({
+            events: shortScriptDelta ? [{ type: 'delta', seq: 1, content: SCRIPT_RESULT.slice(0, 16) }] : [],
+            next: shortScriptDelta ? 1 : Number(url.searchParams.get('after') || 0),
+            terminal: stageTaskState?.status === 'done',
+          }),
         });
       }
       if (url.pathname.endsWith('st-novel-adapt1')) {
         return route.fulfill({
           status: 200, contentType: 'application/json',
-          body: JSON.stringify({ task: ADAPT_TASK }),
+          body: JSON.stringify({ task: detailTask(ADAPT_TASK) }),
         });
       }
       if (url.pathname.endsWith('st-novel-story1')) {
         return route.fulfill({
           status: 200, contentType: 'application/json',
-          body: JSON.stringify({ task: STORYBOARD_TASK }),
+          body: JSON.stringify({ task: detailTask(STORYBOARD_TASK) }),
+        });
+      }
+      const history = SCRIPT_HISTORY_TASKS.find((task) => url.pathname.endsWith(task.id));
+      if (history) return route.fulfill({
+        status: 200, contentType: 'application/json', body: JSON.stringify({ task: detailTask(history) }),
+      });
+      const taskId = url.pathname.split('/').at(-1);
+      if (taskId !== stageTaskState?.id) {
+        const task = submittedStageTasks.get(taskId);
+        return route.fulfill({
+          status: task ? 200 : 404, contentType: 'application/json',
+          body: JSON.stringify(task ? { task: detailTask(task) } : { error: '任务未创建' }),
         });
       }
       stageTaskPolls += 1;
-      if (stageTaskPolls >= 3) {
-        stageTaskState = { ...STAGE_TASK, status: 'done', result: STAGE_ELEMENTS_TEXT };
+      if (!holdStageCompletion && stageTaskPolls >= 3) {
+        stageTaskState = { ...stageTaskTemplate, status: 'done' };
       } else {
-        stageTaskState = { ...STAGE_TASK, status: 'running', result: '', result_partial: '正在整理人物…' };
+        stageTaskState = { ...stageTaskTemplate, status: 'running', result: '', result_partial: '正在生成当前任务…' };
       }
+      submittedStageTasks.set(stageTaskState.id, stageTaskState);
       return route.fulfill({
         status: 200, contentType: 'application/json',
-        body: JSON.stringify({ task: stageTaskState }),
+        body: JSON.stringify({ task: detailTask(stageTaskState) }),
       });
     },
   );
@@ -286,6 +339,10 @@ async function main() {
     }
     if (path === '/api/comfyui/tasks') {
       return json({ tasks: [] });
+    }
+    // 批量生成页进页会拉批次历史；空列表即可，否则 console.error 会污染末尾断言。
+    if (path === '/api/comfyui/batches') {
+      return json({ batches: [] });
     }
     if (path === '/api/comfyui/models') {
       return json({ models: [], loras: [], unets: [], clips: [], vaes: [], controlnets: [] });
@@ -358,11 +415,16 @@ async function main() {
     // 提交前预检：返回真实形态的预算报告（界面只用它渲染，不自己算）。
     if (path === '/api/novel/stage/preview' && method === 'POST') {
       previewSubmit = JSON.parse(request.postData() || '{}');
+      const held = previewGate;
+      previewGate = null;
       const bodyChars = Number(previewSubmit.body_chars || 3000);
-      return json({
+      const elementsVersion = Number(previewSubmit.elements_version || BOOK.elements_versions.at(-1)?.version || 0);
+      const outlineVersion = Number(previewSubmit.outline_version || BOOK.outline_versions.at(-1)?.version || 0);
+      const isScript = previewSubmit.stage === 'script';
+      const reply = {
         stage: previewSubmit.stage,
         limits: { body_chars: bodyChars, max_chapters: Number(previewSubmit.max_chapters || 6) },
-        warnings: stageWarnings,
+        warnings: [...stageWarnings],
         chapters: (previewSubmit.chapter_ids || []).map((no) => ({
           i: no, title: CHAPTERS[no - 1]?.title || `第${no}章`,
           manuscript_id: (previewSubmit.manuscripts || {})[String(no)] || '',
@@ -371,8 +433,14 @@ async function main() {
           total_chars: 8000, used_chars: Math.min(8000, bodyChars),
           dropped_chars: Math.max(0, 8000 - bodyChars),
         })),
-        sources: { chapters: [], elements_version: 0, outline_version: 0,
-          uses_outline: false, uses_characters: false, has_summaries: false },
+        sources: { chapters: [], elements_version: elementsVersion, outline_version: outlineVersion,
+          elements_label: elementsVersion ? `第 ${elementsVersion} 版` : '',
+          outline_label: outlineVersion ? `第 ${outlineVersion} 版` : '',
+          uses_outline: isScript && outlineVersion > 0,
+          uses_characters: isScript && elementsVersion > 0, has_summaries: false,
+          continues_outline: Boolean(previewSubmit.continue_outline_version),
+          continue_outline_version: Number(previewSubmit.continue_outline_version || 0),
+          continue_outline_label: previewSubmit.continue_outline_version ? '第 1 版' : '' },
         budget: {
           chars: 9000, total_source_chars: 8000 * (previewSubmit.chapter_ids || []).length,
           used_chars: Math.min(8000, bodyChars) * (previewSubmit.chapter_ids || []).length,
@@ -384,7 +452,12 @@ async function main() {
           chapter_count: (previewSubmit.chapter_ids || []).length,
           kg_entities: 2, system_chars: 120, overhead_chars: 0,
         },
-      });
+      };
+      if (held) {
+        held.started();
+        await held.wait;
+      }
+      return json(reply);
     }
     // 管理记录清单
     if (path === `/api/novel/books/${BOOK_ID}/records` && method === 'GET') {
@@ -434,11 +507,27 @@ async function main() {
           sources: { kg_entities: 2, scene_count: 1, chapters: [] },
         }, 201);
       }
-      return json({ task: { ...STAGE_TASK, status: 'queued', result: '', result_partial: '' }, warnings: stageWarnings, book_revision: BOOK.revision }, 201);
+      stageTaskTemplate = {
+        ...STAGE_TASK,
+        id: stageSubmit.stage === 'script' ? SCRIPT_TASK_ID : STAGE_TASK_ID,
+        title: `《长夜灯》· ${stageSubmit.stage === 'script' ? '剧本' : '要素'}`,
+        result: stageSubmit.stage === 'script' ? SCRIPT_RESULT : STAGE_ELEMENTS_TEXT,
+        novel: { book_id: BOOK_ID, stage: stageSubmit.stage, chapter_ids: stageSubmit.chapter_ids || [] },
+      };
+      stageTaskPolls = 0;
+      stageTaskState = { ...stageTaskTemplate, status: 'queued', result: '', result_partial: '' };
+      submittedStageTasks.set(stageTaskState.id, stageTaskState);
+      return json({ task: stageTaskState, warnings: stageWarnings, book_revision: BOOK.revision }, 201);
+    }
+    // 分镜写法保存：生成前会先 PATCH 草稿，返回的 revision 供后续提交携带。
+    // 写入 BOOK 常量，切页重拉作品时配置才不会丢。
+    if (path === `/api/novel/books/${BOOK_ID}/storyboard-prompt` && method === 'PATCH') {
+      const body = JSON.parse(request.postData() || '{}');
+      BOOK.storyboard_prompt_config = { ...body, revision: Number(body.revision || 0) + 1 };
+      return json({ book: BOOK });
     }
     // 阶段二：写回（记录请求体）。要素与剧本各自返回对应结构。
-    if (path === `/api/novel/books/${BOOK_ID}/apply` && method === 'POST') {
-      applySubmit = JSON.parse(request.postData() || '{}');
+    if (path === `/api/novel/books/${BOOK_ID}/apply` && method === 'POST') {      applySubmit = JSON.parse(request.postData() || '{}');
       const nextRevision = (BOOK.revision || 0) + 1;
       if (applySubmit.stage === 'script') {
         const nextScript = [
@@ -452,7 +541,7 @@ async function main() {
             elements: BOOK.elements, outline: BOOK.outline, summaries: {},
             script: nextScript,
             script_version: 3,
-            script_versions: [...BOOK.script_versions, { version: 3, script: nextScript, updated_at: 1750000600000, task_id: 'new-script-2', chapter_ids: [1, 2] }],
+            script_versions: [...BOOK.script_versions, { version: 3, script: nextScript, updated_at: 1750000600000, task_id: applySubmit.task_id, chapter_ids: [1, 2] }],
             script_parsed: true,
           },
         });
@@ -582,7 +671,7 @@ async function main() {
 
   // ---- 1. 进入工作台并切到创作场 ----
   // 入口与 studio_ui_smoke 一致：侧栏的 #openStudio（顶栏已无此按钮）。
-  await page.click('#openStudio');
+  if (!await page.locator('#studioView').isVisible()) await page.click('#openStudio');
   await page.waitForTimeout(1400);
   const novelTab = page.locator('#studioPages [data-studio-page="novel"]');
   check('侧栏有创作场分页', (await novelTab.count()) === 1);
@@ -748,6 +837,9 @@ async function main() {
   await page.waitForTimeout(200);
 
   // ---- 6. 导出（点按钮开菜单，选一项才下载） ----
+  // 导出已收进「更多作品操作」popover，先打开外层菜单按钮。
+  await page.locator('#novelMoreBtn').click();
+  await page.waitForTimeout(200);
   await page.locator('#novelExportBtn').click();
   await page.waitForTimeout(200);
   check('导出菜单打开', await page.locator('#novelExportMenu').isVisible());
@@ -759,6 +851,9 @@ async function main() {
     download ? await download.suggestedFilename() : '无下载事件');
 
   // ---- 7. 作品列表与删除确认 ----
+  // 「切换作品…」在作品菜单 popover 里，先打开标题旁的下拉。
+  await page.locator('#novelBookMenuBtn').click();
+  await page.waitForTimeout(200);
   await page.locator('#novelBooksBtn').click();
   await page.waitForTimeout(400);
   check('作品列表弹窗打开', await page.locator('#novelBooksDialog').isVisible());
@@ -861,11 +956,26 @@ async function main() {
   check('要素版本选项包含时间和来源章节',
     elementVersionLabels.some((label) => label.includes('2025-06-15') && label.includes('第 1 章')),
     JSON.stringify(elementVersionLabels));
+  // 版本下拉自己已经是完整标签，右侧小字不能再重复一遍（2026-11-13 反馈：同一行出现两遍）。
+  check('版本下拉可见时右侧不重复版本标签',
+    await page.locator('#novelStageSavedAt').isHidden(), await page.locator('#novelStageSavedAt').innerText());
+  if (SHOT_DIR) {
+    await page.locator('#novelStageSaved').screenshot({ path: `${SHOT_DIR}/novel_elements_saved.png` });
+  }
   await page.locator('#novelStageVersion').selectOption('1');
   check('切换要素版本后显示对应正文',
     (await page.locator('#novelStageSavedBody').innerText()).includes('旧版人物'),
     await page.locator('#novelStageSavedBody').innerText());
   check('保存后无活动任务时任务历史仍显示', await page.locator('#novelTaskHistory').isVisible());
+  await page.locator(`#novelTaskHistory [data-novel-task="${STAGE_TASK_ID}"]`).click();
+  check('仅有一条完成任务时查看仍显示已完成',
+    (await page.locator('#novelStageTaskState').innerText()) === '已完成'
+      && await page.locator('#novelStageBackToActive').isHidden(),
+    await page.locator('#novelStageTaskState').innerText());
+  check('已经保存的完成任务不重复提供保存入口',
+    await page.locator('#novelStageApply').isVisible()
+      && await page.locator('#novelStageApply').isDisabled()
+      && (await page.locator('#novelStageApply').innerText()) === '已保存到作品');
 
   // 已保存版本可反复折叠：标题即开关，收起后正文不占高度，再点回来。
   await page.locator('#novelStagePanel [data-novel-collapse="saved"]').click();
@@ -919,7 +1029,28 @@ async function main() {
   check('大纲阶段仍显示生成入口', await page.locator('#novelStageGenerate').isVisible());
   check('大纲使用独立生成面板', await page.locator('[data-stage-panel="outline"]#novelStagePanel').count() === 1);
   check('要素结果框与大纲结果框分离', await page.locator('[data-stage-panel="outline"] #novelStageResult').count() === 1);
-  check('大纲不依赖要素版本', await page.locator('[data-stage-panel="outline"] [data-novel-context="outline"]').count() === 0);
+  check('大纲不显示剧本的人物/大纲版本选择',
+    await page.locator('#novelStagePanel [data-context-outline]').isHidden()
+    && await page.locator('#novelStagePanel [data-context-elements]').isHidden());
+  check('大纲阶段有接续下拉', await page.locator('#novelStagePanel [data-outline-continue]').isVisible());
+  check('接续默认不接续', (await page.locator('#novelStagePanel [data-outline-continue]').inputValue()) === '',
+    await page.locator('#novelStagePanel [data-outline-continue]').inputValue());
+  check('接续下拉列出已保存大纲版本',
+    (await page.locator('#novelStagePanel [data-outline-continue] option').count()) === BOOK.outline_versions.length + 1,
+    String(await page.locator('#novelStagePanel [data-outline-continue] option').count()));
+  await page.locator('#novelStagePanel [data-outline-continue]').selectOption('1');
+  await page.waitForTimeout(700);
+  check('接续版本进入预检请求',
+    previewSubmit && Number(previewSubmit.continue_outline_version) === 1,
+    JSON.stringify(previewSubmit && previewSubmit.continue_outline_version));
+  check('右栏说明接续的是哪一版',
+    (await page.locator('#novelPlanBody').innerText()).includes('接续「'),
+    await page.locator('#novelPlanBody').innerText());
+  await page.locator('#novelStagePanel [data-outline-continue]').selectOption('');
+  await page.waitForTimeout(400);
+  check('改回不接续后预检不再带版本',
+    previewSubmit && !previewSubmit.continue_outline_version,
+    JSON.stringify(previewSubmit && previewSubmit.continue_outline_version));
 
   // ---- 7d. 阶段三：剧本场次 ----
   await page.locator('#novelStages [data-novel-stage="script"]').click();
@@ -930,12 +1061,115 @@ async function main() {
     await page.locator('[data-stage-panel="script"] [data-novel-context="script"] [data-context-elements]').count() === 1
     && await page.locator('[data-stage-panel="script"] [data-novel-context="script"] [data-context-outline]').count() === 1);
 
+  // 说明与当前表单同步：没有章节也显示已选引用，旧预检不能覆盖新选择。
+  const originalPicked = await page.locator('#novelChapterList [data-novel-pick]:checked')
+    .evaluateAll((rows) => rows.map((row) => row.dataset.novelPick));
+  const originalElementsVersion = await page.locator('#novelStagePanel [data-context-elements]').inputValue();
+  const originalOutlineVersion = await page.locator('#novelStagePanel [data-context-outline]').inputValue();
+  const showNovelPane = async (pane) => {
+    if (await page.locator('#novelPanes').isVisible()) {
+      await page.locator(`#novelPanes [data-novel-pane="${pane}"]`).click();
+    }
+  };
+  const planText = () => page.locator('#novelPlanBody').textContent();
+  for (const width of [1440, 375]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.waitForTimeout(250);
+    await showNovelPane('chapters');
+    const picked = await page.locator('#novelChapterList [data-novel-pick]:checked')
+      .evaluateAll((rows) => rows.map((row) => row.dataset.novelPick));
+    for (const no of picked) await page.locator(`#novelChapterList [data-novel-pick="${no}"]`).uncheck();
+    await showNovelPane('editor');
+    await page.locator('#novelStagePanel [data-context-elements]').selectOption('1');
+    await page.locator('#novelStagePanel [data-context-outline]').selectOption('1');
+    let plan = await planText();
+    check(`${width}px 未勾章节时说明跟随人物和大纲选择`,
+      /人物设定：[^\n]*第 1 版/.test(plan) && /改编大纲：[^\n]*第 1 版/.test(plan)
+      && plan.includes('已选择') && plan.includes('还没有勾选章节'), plan);
+    await page.locator('#novelStagePanel [data-context-outline]').selectOption('2');
+    plan = await planText();
+    check(`${width}px 未勾章节时更换大纲即时更新`, /改编大纲：[^\n]*第 2 版/.test(plan), plan);
+    await page.locator('#novelStagePanel [data-context-outline]').selectOption('1');
+
+    const oldWarning = `${width}px预检回归专用旧提示`;
+    stageWarnings = [oldWarning];
+    await showNovelPane('chapters');
+    await page.locator('#novelChapterList [data-novel-pick="1"]').check();
+    await page.waitForFunction((warning) => document.querySelector('#novelPlanBody')?.textContent.includes(warning), oldWarning);
+    plan = await planText();
+    check(`${width}px 勾章后显示服务端实际引用版本`,
+      plan.includes('人物设定：第 1 版') && plan.includes('改编大纲：第 1 版') && plan.includes('发送正文'), plan);
+
+    stageWarnings = [];
+    let releasePreview;
+    let markStarted;
+    const started = new Promise((resolve) => { markStarted = resolve; });
+    previewGate = {
+      wait: new Promise((resolve) => { releasePreview = resolve; }),
+      started: markStarted,
+    };
+    await showNovelPane('editor');
+    await page.locator('#novelStagePanel [data-context-elements]').selectOption('2');
+    await started;
+    plan = await planText();
+    check(`${width}px 等待新预检时立即显示新人物版本并清旧预算提示`,
+      /人物设定：[^\n]*第 2 版/.test(plan) && plan.includes('已选择')
+      && !plan.includes('发送正文') && !plan.includes('预检回归专用旧提示'), plan);
+    await showNovelPane('chapters');
+    await page.locator('#novelChapterList [data-novel-pick="1"]').uncheck();
+    const lateReply = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/novel/stage/preview');
+    releasePreview();
+    await lateReply;
+    await page.waitForTimeout(100);
+    await showNovelPane('preview');
+    plan = await planText();
+    check(`${width}px 清空章节后迟到预检不恢复旧引用预算`,
+      plan.includes('还没有勾选章节') && /人物设定：[^\n]*第 2 版/.test(plan)
+      && !plan.includes('发送正文') && !plan.includes('预检回归专用旧提示'), plan);
+    if (SHOT_DIR) await page.screenshot({ path: `${SHOT_DIR}/novel_script_references_${width}.png`, fullPage: false });
+  }
+  await showNovelPane('editor');
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForTimeout(250);
+  await page.locator('#novelStagePanel [data-context-elements]').selectOption(originalElementsVersion);
+  await page.locator('#novelStagePanel [data-context-outline]').selectOption(originalOutlineVersion);
+  for (const no of originalPicked) await page.locator(`#novelChapterList [data-novel-pick="${no}"]`).check();
+  await page.waitForTimeout(200);
+
   // 生成剧本（复用阶段二的提交契约，stage=script）
+  holdStageCompletion = true;
   await page.locator('#novelStageGenerate').click();
   await page.waitForTimeout(900);
   check('剧本提交带 stage=script', stageSubmit && stageSubmit.stage === 'script',
     JSON.stringify(stageSubmit));
-  await page.waitForTimeout(4200);
+  await page.waitForFunction(() => document.querySelector('#novelStageTaskState')?.textContent === '生成中');
+  for (const width of [1440, 375]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.waitForTimeout(250);
+    await showNovelPane('editor');
+    const history = SCRIPT_HISTORY_TASKS.find((task) => task.id.endsWith(String(width)));
+    await page.locator(`#novelTaskHistory [data-novel-task="${history.id}"]`).click();
+    check(`${width}px 历史剧本有保存入口`, await page.locator('#novelStageApply').isVisible());
+    page.once('dialog', (dialog) => dialog.accept());
+    await page.locator('#novelStageApply').click();
+    await page.waitForTimeout(300);
+    check(`${width}px 保存历史只提交正在查看的剧本`,
+      applySubmit?.stage === 'script' && applySubmit?.task_id === history.id && applySubmit?.text === history.result,
+      JSON.stringify(applySubmit));
+    check(`${width}px 历史剧本保存后显示场次且当前任务继续`,
+      (await page.locator('#novelSceneList .novel-scene-row').count()) === 2
+      && (await page.locator('#novelStageTaskState').innerText()) === '生成中'
+      && await page.locator('#novelStageCancel').isVisible(),
+      await page.locator('#novelStageTaskState').innerText());
+  }
+  await showNovelPane('editor');
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForTimeout(250);
+  holdStageCompletion = false;
+  await page.waitForFunction(() => document.querySelector('#novelStageTaskState')?.textContent === '已完成');
+  check('完成剧本显示完整终态结果而非未取全的增量',
+    (await page.locator('#novelStageResult').innerText()) === SCRIPT_RESULT,
+    await page.locator('#novelStageResult').innerText());
 
   // 任务结果可反复折叠：收起后正文不占高度，再点回来（轮询只更新内容，不改折叠态）。
   await page.locator('#novelStagePanel [data-novel-collapse="task"]').click();
@@ -979,8 +1213,15 @@ async function main() {
   page.once('dialog', (dialog) => dialog.accept());
   await page.locator('#novelStageApply').click();
   await page.waitForTimeout(800);
+  check('保存当前剧本使用完整终态正文', applySubmit?.task_id === SCRIPT_TASK_ID && applySubmit?.text === SCRIPT_RESULT,
+    JSON.stringify(applySubmit));
   check('剧本写回成功', (await page.locator('#novelSceneList .novel-scene-row').count()) === 2,
     await page.locator('#novelSceneCount').innerText());
+  await page.locator(`#novelTaskHistory [data-novel-task="${SCRIPT_TASK_ID}"]`).click();
+  check('无另一个当前任务时查看完成剧本不标历史',
+    (await page.locator('#novelStageTaskState').innerText()) === '已完成'
+      && await page.locator('#novelStageBackToActive').isHidden(),
+    await page.locator('#novelStageTaskState').innerText());
   check('场次显示来源章节',
     (await page.locator('#novelSceneList').innerText()).includes('第 1 章'),
     await page.locator('#novelSceneList').innerText());
@@ -1062,14 +1303,14 @@ async function main() {
     () => document.querySelectorAll('#novelStoryboardList .novel-storyboard-row').length >= 2,
     null, { timeout: 6000 },
   );
-  check('分镜结果逐场显示', (await page.locator('.novel-storyboard-row').count()) === 2);
+  check('分镜结果逐场显示', (await page.locator('#novelStoryboardList .novel-storyboard-row').count()) === 2);
   check('逐场行带场景行文本',
-    (await page.locator('.novel-storyboard-row').first().innerText()).includes('INT. 新场景 - 夜'));
-  check('默认全部勾选', (await page.locator('[data-novel-storyboard-row]:checked').count()) === 2);
+    (await page.locator('#novelStoryboardList .novel-storyboard-row').first().innerText()).includes('INT. 新场景 - 夜'));
+  check('默认全部勾选', (await page.locator('#novelStoryboardList [data-novel-storyboard-row]:checked').count()) === 2);
   check('发送按钮带条数',
     (await page.locator('#novelStoryboardSend').innerText()).includes('（2 条）'));
   // 取消勾选第二场：按钮条数同步；再全选回来。
-  await page.locator('[data-novel-storyboard-row]').nth(1).uncheck();
+  await page.locator('#novelStoryboardList [data-novel-storyboard-row]').nth(1).uncheck();
   await page.waitForTimeout(150);
   check('取消勾选后条数同步',
     (await page.locator('#novelStoryboardSend').innerText()).includes('（1 条）'));
@@ -1081,26 +1322,13 @@ async function main() {
   await page.locator('#novelStoryboardSend').click();
   await page.waitForTimeout(700);
   check('发送后切到造梦机页', await page.locator('#studioPageComfyui').isVisible());
-  check('分镜队列条出现', await page.locator('#comfyuiStoryboard').isVisible());
-  check('队列条带两条提示词',
-    (await page.locator('.comfyui-storyboard-item').count()) === 2);
-  check('队列条带场次说明',
-    (await page.locator('.comfyui-storyboard-item').first().innerText()).includes('第 1 场'));
-  // 选工作流后填入：正向提示词框拿到第一条的内容。
-  await page.locator('.comfyui-workflow-card .comfyui-workflow-title').first().click();
-  await page.waitForTimeout(500);
-  const promptArea = page.locator('[data-comfyui-slot="6|text"]');
-  check('工作流参数表单出现正向提示词框', (await promptArea.count()) === 1);
-  await page.locator('.comfyui-storyboard-item .control-button').first().click();
-  await page.waitForTimeout(250);
-  check('填入把提示词写进正向提示词框',
-    (await promptArea.inputValue()).includes('昏暗的老宅书房'),
-    await promptArea.inputValue());
-  check('填过后条目标记已填',
-    (await page.locator('.comfyui-storyboard-item.filled').count()) === 1);
-  await page.locator('#comfyuiStoryboardClear').click();
-  await page.waitForTimeout(200);
-  check('清空后队列条隐藏', await page.locator('#comfyuiStoryboard').isHidden());
+  // 交接现在落到批量生成页的「从分镜队列导入」，不再有独立队列条。
+  await page.locator('#comfyuiPanes [data-comfyui-pane="batch"]').click();
+  await page.waitForTimeout(400);
+  const importStoryboardBtn = page.locator('[data-batch-action="import-storyboard"]');
+  check('造梦机批量页带两条分镜队列',
+    (await importStoryboardBtn.innerText()).includes('（2 条）'),
+    await importStoryboardBtn.innerText());
   // 回创作场：写法还在，可一键恢复默认。
   await page.locator('#studioPages [data-studio-page="novel"]').click();
   await page.waitForTimeout(600);
@@ -1112,7 +1340,9 @@ async function main() {
   check('恢复默认写法清空编辑框', (await page.locator('#novelStoryboardSystem').inputValue()) === '');
   check('清空后恢复按钮隐藏', await page.locator('#novelStoryboardReset').isHidden());
 
-  // 导出菜单
+  // 导出菜单（同样在「更多作品操作」popover 里）
+  await page.locator('#novelMoreBtn').click();
+  await page.waitForTimeout(200);
   await page.locator('#novelExportBtn').click();
   await page.waitForTimeout(200);
   check('导出菜单打开', await page.locator('#novelExportMenu').isVisible());
@@ -1132,7 +1362,10 @@ async function main() {
   check('切回拆章阶段', !(await page.locator('#novelStagePanel').isVisible()));
 
   // ---- 7e. 管理记录 ----
-  check('阶段栏最右侧有管理记录入口', await page.locator('#novelManageBtn').isVisible());
+  // 入口收进「更多作品操作」popover，先展开菜单再断言。
+  await page.locator('#novelMoreBtn').click();
+  await page.waitForTimeout(200);
+  check('更多菜单里有管理记录入口', await page.locator('#novelManageBtn').isVisible());
   await page.locator('#novelManageBtn').click();
   await page.waitForTimeout(700);
   check('管理记录面板打开', await page.locator('#novelManageDialog').isVisible());
@@ -1251,13 +1484,16 @@ async function main() {
     document.documentElement.scrollWidth - document.documentElement.clientWidth);
   check('竖屏无横向溢出', portraitOverflow <= 1, `溢出 ${portraitOverflow}px`);
 
-  // ---- 10. 手机横屏：三栏同时可见 ----
+  // ---- 10. 手机横屏：按工作区实际宽度分档 ----
   await page.setViewportSize({ width: 844, height: 390 });
   await page.waitForTimeout(400);
   const landscape = await page.evaluate(() => {
     const pick = (sel) => getComputedStyle(document.querySelector(sel)).display;
     const columns = document.querySelector('#novelColumns');
     return {
+      width: document.querySelector('#studioPageNovel').getBoundingClientRect().width,
+      size: document.querySelector('#studioPageNovel').dataset.wbSize,
+      pane: columns?.dataset.novelPane,
       columns: columns ? getComputedStyle(columns).gridTemplateColumns : '',
       chapters: pick('.novel-chapters'),
       editor: pick('.novel-editor'),
@@ -1266,12 +1502,17 @@ async function main() {
       overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
     };
   });
-  check('横屏三栏同时可见',
-    landscape.chapters !== 'none' && landscape.editor !== 'none' && landscape.preview !== 'none',
+  const expectedLandscapeSize = landscape.width <= 760 ? 'narrow' : landscape.width < 1000 ? 'medium' : 'wide';
+  check('横屏按实际工作区宽度选择布局', landscape.size === expectedLandscapeSize, JSON.stringify(landscape));
+  check('横屏窄工作区保留分档控件', landscape.panesVisible === (expectedLandscapeSize === 'narrow'), JSON.stringify(landscape));
+  const visibleLandscapePanels = ['chapters', 'editor', 'preview'].filter((pane) => landscape[pane] !== 'none');
+  check('横屏可见面板符合当前布局档位',
+    expectedLandscapeSize === 'narrow'
+      ? visibleLandscapePanels.length === 1 && visibleLandscapePanels[0] === landscape.pane
+      : expectedLandscapeSize === 'wide'
+        ? visibleLandscapePanels.length === 3
+        : visibleLandscapePanels.includes('chapters') && visibleLandscapePanels.includes('editor'),
     JSON.stringify(landscape));
-  check('横屏隐藏分档控件', landscape.panesVisible === false, JSON.stringify(landscape));
-  check('横屏三栏宽度符合约定',
-    /170px/.test(landscape.columns) && /198px/.test(landscape.columns), landscape.columns);
   check('横屏无横向溢出', landscape.overflow <= 1, `溢出 ${landscape.overflow}px`);
   if (SHOT_DIR) {
     await page.screenshot({ path: `${SHOT_DIR}/novel_landscape_844.png`, fullPage: false });
@@ -1320,7 +1561,10 @@ async function main() {
   process.exit(failed.length ? 1 : 0);
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
+  if (SHOT_DIR && smokePageForFailure && !smokePageForFailure.isClosed()) {
+    await smokePageForFailure.screenshot({ path: `${SHOT_DIR}/novel_failure.png`, fullPage: false }).catch(() => {});
+  }
   console.error('冒烟脚本异常：', error);
   process.exit(2);
 });

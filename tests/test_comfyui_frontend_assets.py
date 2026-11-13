@@ -247,8 +247,8 @@ const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
 const nodes=new Map(),requests=[],toasts=[];
 const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,open:false,dataset:{},textContent:'',innerHTML:'',options:[],children:[],classList:{add(){},remove(){},toggle(){}},setAttribute(){},removeAttribute(){},addEventListener(){},append(){},closest(){return null},querySelector(){return null},querySelectorAll(){return []}});
 const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
-const context=vm.createContext({console,setTimeout,clearTimeout,URL,document:{createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
-const values={$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[{model_key:'prov',name:'P',model:'m1'}]}},api:async(path,options)=>{requests.push({path,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});
+const context=vm.createContext({console,setTimeout,clearTimeout,URL,URLSearchParams,document:{getElementById:()=>null,createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
+const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[{model_key:'prov',name:'P',model:'m1'}]}},api:async(path,options)=>{requests.push({path,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});
   if(path==='/api/comfyui/batches')return {batch:{id:'cfb-x1'}};
   return {};}};
 async function make(name,sourceText,exportsLine){
@@ -433,7 +433,6 @@ assert.equal(b.items[0].files['0'].path,'/managed/a.png');
         self.assertIn("comfyui-rerun-banner", js)
         self.assertIn("rerunMediaProblems", js)
         self.assertIn("再次生成使用原任务快照，不新增或修改工作流库条目", js)
-        self.assertIn("再次生成使用原任务快照，不修改工作流库的显示参数", js)
 
     @unittest.skipUnless(shutil.which("node"), "Node required for frontend logic")
     def test_rerun_completed_task_prefill_submit_and_clear(self):
@@ -472,7 +471,7 @@ const snapshot={source_task_id:'done',workflow_id:'cw-1',workflow_name:'原任�
   media_skip:[{node_id:'9',field_name:'audio'}],
   shots:3,unload_after:true,created_at:1000,finished_at:2000};
 const context=vm.createContext({console,setTimeout,clearTimeout,setInterval,clearInterval,URL,Date,document:documentStub,window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
-const values={$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[],media_exts:{exts:{}}}},localFileUrl:path=>path,attachmentThumbUrl:record=>record.thumb_path||record.path,mediaKind:()=> 'image',saveLocalFile:()=>false,api:async(path,options)=>{
+const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[],media_exts:{exts:{}}}},localFileUrl:path=>path,attachmentThumbUrl:record=>record.thumb_path||record.path,mediaKind:()=> 'image',saveLocalFile:()=>false,api:async(path,options)=>{
   const method=String(options?.method||'GET').toUpperCase();
   requests.push({path,method,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});
   if(path==='/api/comfyui/tasks/done/rerun-snapshot')return {snapshot};
@@ -531,7 +530,9 @@ assert.equal($('#comfyuiSaveCurrentAs').hidden,true);
 const editButton=form.children.find(child=>String(child.className).includes('comfyui-param-heading-row'))?.children
   .find(child=>String(child.className).includes('comfyui-param-heading-actions'))?.children
   .find(child=>child.textContent==='设置高级参数');
-assert.equal(editButton?.style.display,'none');
+assert.ok(editButton,'再次生成仍应提供设置高级参数入口');
+assert.equal(editButton.disabled,false);
+assert.notEqual(editButton.style.display,'none');
 
 // 3) 失效媒体未处理：前端拦住提交，不发 rerun 请求。
 slotValues['5|text']='用户改正文';slotValues['6|steps']='12';
@@ -588,6 +589,156 @@ assert.equal($('#studioPageComfyui').dataset.resultsSegment,'single');
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node required for frontend logic")
+    def test_rerun_advanced_params_preserve_hidden_values_without_saving_workflow(self):
+        # 快照中的显示/排序只在本次生效；隐藏参数不能丢原覆盖、用户草稿或媒体。
+        script = r'''
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync('public/js/24-comfyui.js','utf8')
+  .replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
+(async()=>{
+const nodes=new Map(),requests=[],writes=[],messages=[];
+function makeNode(tag='div'){
+  let text='',value='';
+  const node={tagName:tag.toUpperCase(),children:[],parentElement:null,dataset:{},style:{},
+    className:'',type:'',checked:false,disabled:false,hidden:false,open:false,
+    classList:{add(){},remove(){},toggle(){}},addEventListener(){},focus(){},
+    append(...children){for(const child of children){child.remove?.();child.parentElement=this;this.children.push(child);}},
+    insertBefore(child,before){child.remove?.();child.parentElement=this;
+      const at=this.children.indexOf(before);this.children.splice(at<0?this.children.length:at,0,child);},
+    remove(){if(this.parentElement){const siblings=this.parentElement.children;
+      const at=siblings.indexOf(this);if(at>=0)siblings.splice(at,1);this.parentElement=null;}},
+    setAttribute(name,next){this[name]=String(next);},removeAttribute(name){delete this[name];},
+    showModal(){this.open=true;},close(){this.open=false;},
+    querySelectorAll(selector){const out=[];for(const child of this.children){
+      if(matches(child,selector))out.push(child);out.push(...child.querySelectorAll(selector));}return out;},
+    querySelector(selector){return this.querySelectorAll(selector)[0]||null;}};
+  Object.defineProperties(node,{
+    textContent:{get(){return text+this.children.map(child=>child.textContent).join('');},
+      set(next){text=String(next??'');for(const child of this.children)child.parentElement=null;this.children=[];}},
+    value:{get(){return value;},set(next){value=String(next??'');}},
+    previousElementSibling:{get(){return this.parentElement?.children[this.parentElement.children.indexOf(this)-1]||null;}},
+    nextElementSibling:{get(){return this.parentElement?.children[this.parentElement.children.indexOf(this)+1]||null;}},
+  });return node;
+}
+function matches(node,selector){
+  if(selector==='input[type=checkbox]')return node.tagName==='INPUT'&&node.type==='checkbox';
+  if(selector.startsWith('.'))return node.className.split(' ').includes(selector.slice(1));
+  const attr=selector.match(/^\[data-([a-z-]+)(?:="([^"]*)")?\]$/);
+  if(attr){const key=attr[1].replace(/-([a-z])/g,(_,letter)=>letter.toUpperCase());
+    return Object.hasOwn(node.dataset,key)&&(attr[2]===undefined||node.dataset[key]===attr[2]);}
+  return node.tagName===selector.toUpperCase();
+}
+const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key);};
+const form=$('#comfyuiParamForm');
+const documentStub={createElement:makeNode,querySelector:selector=>form.querySelector(selector),
+  querySelectorAll:selector=>form.querySelectorAll(selector),getElementById:()=>null,activeElement:null};
+const original={source_task_id:'done',workflow_id:'cw-frozen',workflow_name:'快照',
+  prompt:{'1':{inputs:{text:'库默认'}},'2':{inputs:{steps:6}},'3':{inputs:{seed:99}},
+    '4':{inputs:{unused:'未改原值'}},'5':{inputs:{enabled:false}},
+    '8':{inputs:{image:'original.png'}},'9':{inputs:{audio:''}}},
+  params:[{node_id:'1',field_name:'text',field_type:'text',control:'multiline',role:'positive_prompt',default:'库默认',label:'正文'},
+    {node_id:'2',field_name:'steps',field_type:'number',default:6,label:'步数'},
+    {node_id:'3',field_name:'seed',field_type:'seed',default:99,label:'种子'},
+    {node_id:'4',field_name:'unused',field_type:'text',default:'未改原值',label:'备用'},
+    {node_id:'5',field_name:'enabled',field_type:'bool',default:false,label:'开关'},
+    {node_id:'8',field_name:'image',field_type:'image',control:'media',default:'original.png',label:'图片'},
+    {node_id:'9',field_name:'audio',field_type:'audio',control:'media',default:'',label:'音频'}],
+  overrides:[{node_id:'1',field_name:'text',value:'冻结正文'},
+    {node_id:'2',field_name:'steps',value:12},{node_id:'3',field_name:'seed',value:'9007199254740993'},
+    {node_id:'5',field_name:'enabled',value:false}],
+  media_inputs:[{node_id:'8',field_name:'image',path:'/managed/original.png',media:'image',available:true}],
+  media_skip:[{node_id:'9',field_name:'audio'}],shots:1,unload_after:false};
+const before=JSON.stringify(original);
+const context=vm.createContext({console,URL,URLSearchParams,setTimeout,clearTimeout,setInterval,clearInterval,
+  makeNode,$,document:documentStub,CSS:{escape:value=>String(value)},
+  localStorage:{getItem:()=>null,setItem:(key,value)=>writes.push({key,value})},
+  state:{},toast:message=>messages.push(message),api:async(path,options)=>{
+    requests.push({path,method:options?.method||'GET',body:options?.body});
+    if(path.endsWith('/rerun-snapshot'))return {snapshot:original};
+    return {visible_params:options?.body?.visible,param_order:options?.body?.order};
+  }});
+vm.runInContext(source+[
+  'renderWorkflowList=()=>{};',
+  'setComfyuiPane=pane=>{$("#studioPageComfyui").dataset.comfyuiPane=pane;};',
+  'renderMediaGroup=(kind,slots)=>{const node=makeNode();node.dataset.mediaKeys=slots.map(slotKey).join(",");return node;};',
+  'globalThis.p={comfyui,openRerunSnapshot,openParamsDialog,saveParamsConfig,movePickerRow,',
+  'renderParamForm,renderSlot,resetParamValues,collectOverrides,collectMediaInputs,collectMediaSkips,visibleKeySet};',
+].join('\n'),context);
+const p=context.p;
+const input=key=>form.querySelector('[data-comfyui-slot="'+key+'"]');
+const boxes=()=>$('#comfyuiParamsPicker').querySelectorAll('input[type=checkbox]');
+const box=key=>boxes().find(item=>item.dataset.paramKey===key);
+const override=key=>p.collectOverrides().find(row=>row.node_id+'|'+row.field_name===key);
+
+await p.openRerunSnapshot('done');
+assert.equal(input('3|seed').value,'9007199254740993','原固定种子须原样回填，不能改为随机或丢精度');
+input('1|text').value='用户新正文'; // 故意不发 input/change，覆盖候选控件直接改值的路径。
+p.openParamsDialog();
+assert.equal($('#comfyuiParamsDialog').open,true,'快照高级设置必须能打开');
+assert.equal($('#comfyuiParamsSave').textContent,'应用');
+assert.ok($('#comfyuiParamsHint').textContent.includes('本次再次生成'));
+assert.equal(boxes().length,7,'完整冻结参数清单都可勾选');
+assert.equal(box('4|unused').checked,false);
+box('4|unused').checked=true;
+box('1|text').checked=false;
+box('8|image').checked=false;
+box('9|audio').checked=false;
+const seedRow=box('3|seed').parentElement;
+while(seedRow.previousElementSibling)p.movePickerRow(seedRow,'up');
+await p.saveParamsConfig();
+assert.equal($('#comfyuiParamsDialog').open,false);
+assert.equal(p.comfyui.detail.param_order[0].node_id,'3','上下移须应用到快照参数顺序');
+assert.equal(form.querySelector('[data-param-key]').dataset.paramKey,'3|seed');
+assert.equal(input('1|text'),null,'取消勾选后真正隐藏');
+assert.equal(input('4|unused').value,'未改原值','新勾选槽位可编辑');
+assert.equal(override('1|text').value,'用户新正文','隐藏前的DOM改值须保存成草稿');
+assert.equal(p.visibleKeySet().has('8|image'),false,'隐藏媒体不能被旧显示集兼容分支补回');
+assert.equal(form.querySelector('[data-media-keys]'),null);
+assert.equal(p.collectMediaInputs()[0].path,'/managed/original.png');
+assert.equal(p.collectMediaSkips()[0].node_id,'9');
+assert.equal(writes.length,0,'本次快照设置不得写原工作流的本地显示标记');
+assert.equal(requests.filter(row=>row.method==='POST').length,0,'本次快照设置不能写工作流params接口');
+
+// 隐藏固定种子前显式留空：隐藏草稿仍应代表随机，而不是补回原固定覆盖。
+input('3|seed').value='';input('4|unused').value='备用草稿';
+p.openParamsDialog();box('3|seed').checked=false;box('4|unused').checked=false;
+await p.saveParamsConfig();
+assert.equal(override('3|seed'),undefined,'空种子隐藏后仍为随机');
+assert.equal(override('4|unused').value,'备用草稿','无原覆盖的参数也须保留本次隐藏草稿');
+
+// 默认只还原值；隐藏后的原数值和布尔覆盖必须保持原类型。
+const configured=JSON.stringify({visible:p.comfyui.detail.visible_params,order:p.comfyui.detail.param_order});
+p.resetParamValues();
+assert.equal(JSON.stringify({visible:p.comfyui.detail.visible_params,order:p.comfyui.detail.param_order}),configured);
+assert.equal(override('1|text').value,'冻结正文');
+assert.equal(override('3|seed').value,'9007199254740993');
+assert.equal(override('4|unused'),undefined,'未覆盖且清空草稿的隐藏项不应被附加覆盖');
+p.openParamsDialog();box('2|steps').checked=false;box('5|enabled').checked=false;
+await p.saveParamsConfig();p.resetParamValues();
+assert.equal(override('2|steps').value,12);
+assert.equal(override('5|enabled').value,false);
+assert.equal(JSON.stringify(original),before,'本次设置不能改写原任务快照');
+assert.equal(writes.length,0);
+
+// 普通工作流继续按工作流持久化，隐藏参数不提交，seed默认仍随机。
+p.comfyui.rerun=null;p.comfyui.drafts.clear();
+p.comfyui.detail={id:'cw-normal',name:'普通',params:original.params,prompt:original.prompt,
+  visible_params:[{node_id:'1',field_name:'text'}]};p.comfyui.selectedId='cw-normal';
+p.renderParamForm();p.openParamsDialog();
+assert.equal($('#comfyuiParamsSave').textContent,'保存');
+assert.ok($('#comfyuiParamsHint').textContent.includes('按这份工作流保存'));
+await p.saveParamsConfig();
+assert.equal(requests.filter(row=>row.method==='POST'&&row.path==='/api/comfyui/workflows/cw-normal/params').length,1);
+assert.equal(writes.length,1);
+assert.equal(override('2|steps'),undefined,'普通工作流隐藏参数仍不可带覆盖');
+assert.equal(p.renderSlot(original.params[2]).querySelector('[data-comfyui-slot]').value,'');
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+        result = subprocess.run(["node", "-e", script], cwd=ROOT, capture_output=True,
+                                text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node required for frontend logic")
     def test_single_and_batch_media_skip_and_elapsed_contract(self):
         # 单次与批量同一套三态：原文件非空沿用、空值 optional 自动跳过、⊘ 手动
         # 强制跳过（最高优先级，不受必填声明限制）；耗时只用持久时间。
@@ -598,8 +749,8 @@ const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
 const nodes=new Map(),requests=[],toasts=[];
 const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,open:false,dataset:{},textContent:'',innerHTML:'',options:[],children:[],className:'',classList:{add(){},remove(){},toggle(){},contains(){return false}},setAttribute(name,value){this[name]=String(value);},removeAttribute(){},addEventListener(){},append(...items){this.children.push(...items);},closest(){return null},querySelector(){return null},querySelectorAll(){return []},style:{}});
 const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
-const context=vm.createContext({console,setTimeout,clearTimeout,setInterval,clearInterval,URL,Date,document:{createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
-const values={$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},localFileUrl:path=>path,attachmentThumbUrl:record=>record.path,mediaKind:()=> 'image',saveLocalFile:()=>false,api:async(path,options)=>{
+const context=vm.createContext({console,setTimeout,clearTimeout,setInterval,clearInterval,URL,URLSearchParams,Date,document:{getElementById:()=>null,createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
+const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},localFileUrl:path=>path,attachmentThumbUrl:record=>record.path,mediaKind:()=> 'image',saveLocalFile:()=>false,api:async(path,options)=>{
   const method=String(options?.method||'GET').toUpperCase();
   requests.push({path,method,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});
   if(path==='/api/comfyui/tasks'&&method==='POST')return {task:{id:'ct-single'}};
@@ -724,8 +875,8 @@ const nodes=new Map(),requests=[],toasts=[];
 const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,open:false,dataset:{},textContent:'',innerHTML:'',options:[],children:[],classList:{add(){},remove(){},toggle(){},contains(){return false}},setAttribute(){},removeAttribute(){},addEventListener(){},append(){},closest(){return null},querySelector(){return null},querySelectorAll(){return []},style:{}});
 const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
 let failSubmit=false;
-const context=vm.createContext({console,setTimeout,clearTimeout,setInterval,clearInterval,URL,document:{createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
-const values={$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},api:async(path,options)=>{
+const context=vm.createContext({console,setTimeout,clearTimeout,setInterval,clearInterval,URL,URLSearchParams,document:{getElementById:()=>null,createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
+const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:message=>toasts.push(String(message)),state:{providerModelCatalogs:{},bootstrap:{model_profiles:[]}},api:async(path,options)=>{
   const method=String(options?.method||'GET').toUpperCase();
   requests.push({path,method,body:options?.body?JSON.parse(JSON.stringify(options.body)):null});
   if(path==='/api/comfyui/tasks'&&method==='POST'){
@@ -872,7 +1023,7 @@ assert.equal(toggle.checked,false,'成功后复位，不受批量草稿影响');
         self.assertIn("输出协议：这份工作流要把提示词分两处注入", convert_js)
         self.assertIn("prompt2Point", convert_js)
         # 结果页产物卡的视频封面：进入视野才读首帧，三条挂载点全接同一个升级观察器。
-        self.assertIn("batchPreviewVideoPreload(existing.get(key))", js)
+        self.assertIn("onMount: batchPreviewVideoPreload", js)
         self.assertIn("batchPreviewVideoPreload(host);", js)
         # 拆书匠分镜交接落到批量档：「从分镜队列导入」直接可见；单次档不再接分镜队列。
         handoff = js[js.index("function onStoryboardHandoff("):js.index("const batch = {")]
@@ -909,10 +1060,10 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
 const source=fs.readFileSync('public/js/24-comfyui.js','utf8');
 (async()=>{
 const nodes=new Map();
-const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,dataset:{},textContent:'',innerHTML:'',children:[],classList:{add(){},remove(){},toggle(){}},setAttribute(){},append(){},closest(){return null},querySelector(){return null},querySelectorAll(){return []}});
+const makeNode=()=>({value:'',checked:false,disabled:false,hidden:false,dataset:{},textContent:'',innerHTML:'',children:[],classList:{add(){},remove(){},toggle(){}},setAttribute(){},append(node){this.children.push(node)},closest(){return null},querySelector(){return null},querySelectorAll(){return []}});
 const $=key=>{if(!nodes.has(key))nodes.set(key,makeNode());return nodes.get(key)};
-const context=vm.createContext({console,setTimeout,clearTimeout,URL,document:{createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
-const values={$,toast:()=>{},state:{},localFileUrl:path=>path,api:async()=>({})};
+const context=vm.createContext({console,setTimeout,clearTimeout,URL,URLSearchParams,document:{getElementById:()=>null,createElement:()=>makeNode(),querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},activeElement:null,body:{append(){}},addEventListener(){}},window:{addEventListener(){}},localStorage:{setItem(){},getItem:()=>null},CSS:{escape:value=>String(value)}});
+const values={createHistoryViewport:()=>({setItems(){},refresh(){},visibleKeys(){return []}}),$,toast:()=>{},state:{},localFileUrl:path=>path,api:async()=>({})};
 async function make(name,sourceText,exportsLine){
   const byMod=new Map();
   for(const match of sourceText.matchAll(/^import \{([^}]+)\} from "([^"]+)"/gm)){
@@ -926,8 +1077,8 @@ async function make(name,sourceText,exportsLine){
   await mod.evaluate();
   return mod.namespace;
 }
-const m=await make('comfy',source,'\nexport {batch,batchHistoryBadge,renderBatchHistoryList,batchRunCardMarkup,batchRunMarkup,batchRunSignature,batchSchemeFromRestore,batchSchemeFromLegacy,isBatchTaskRow,batchItemIsBlank};');
-const {batch,batchHistoryBadge,renderBatchHistoryList,batchRunCardMarkup,batchRunMarkup,batchRunSignature,batchSchemeFromRestore,batchSchemeFromLegacy,isBatchTaskRow,batchItemIsBlank}=m;
+const m=await make('comfy',source,'\nexport {batch,batchHistoryBadge,renderBatchHistoryList,batchHistoryRowMarkup,batchRunCardMarkup,batchRunMarkup,batchRunSignature,batchSchemeFromRestore,batchSchemeFromLegacy,isBatchTaskRow,batchItemIsBlank};');
+const {batch,batchHistoryBadge,renderBatchHistoryList,batchHistoryRowMarkup,batchRunCardMarkup,batchRunMarkup,batchRunSignature,batchSchemeFromRestore,batchSchemeFromLegacy,isBatchTaskRow,batchItemIsBlank}=m;
 // 空行口径：默认名 + 什么都没填才算空；改过名、填过字、挂过素材、调过条数都不算。
 assert.equal(batchItemIsBlank({name:'条目 1',script:'',prompt:'',duration:'',resolution:'',shots:1,files:{}}),true);
 assert.equal(batchItemIsBlank({name:'条目 2',prompt:'提示词',shots:1,files:{}}),false);
@@ -952,8 +1103,7 @@ batch.histories=[
   {id:'cfb-a0',title:'短剧第2集',done_count:3,item_count:6,created_at:0,items:[{status:'running'},{status:'completed'},{status:'completed'}]},
   {id:'cfb-a1',title:'短剧第1集',done_count:6,item_count:6,created_at:new Date('2026-11-06T13:05:00').getTime(),items:[{status:'completed'}]},
   {id:'cfb-a2',title:'短剧第3集',done_count:2,item_count:6,created_at:0,items:[{status:'failed'},{status:'failed'},{status:'completed'}]}];
-renderBatchHistoryList();
-const html=$('#comfyuiBatchList').innerHTML;
+const html=batch.histories.map(batchHistoryRowMarkup).join('');
 assert.ok(html.includes('data-batch-open="cfb-a1"')&&html.includes('短剧第1集'));
 assert.ok(html.includes('data-batch-edit="cfb-a1"')&&html.includes('回到填单区修改这一批'));
 assert.ok(html.includes('cbm-badge done')&&html.includes('6 条全部完成'));
@@ -961,7 +1111,7 @@ assert.ok(html.includes('is-failed')&&html.includes('cbm-badge fail'));
 assert.ok(html.includes('正在生成'));
 batch.histories=[];
 renderBatchHistoryList();
-assert.ok($('#comfyuiBatchList').innerHTML.includes('还没有批次'));
+assert.ok($('#comfyuiBatchList').children.some(node=>node.textContent.includes('还没有批次')));
 const running=batchRunCardMarkup({index:1,name:'条目 1',status:'running',done:1,total:3,task_id:'ct-9',outputs:[]});
 assert.ok(running.includes('data-batch-action="cancel-item"')&&running.includes('data-task-id="ct-9"'));
 assert.ok(!running.includes('open-task-outputs'));

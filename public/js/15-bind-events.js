@@ -16,7 +16,7 @@ import { commitSkillSelection, hideSkillPopup, insertSkillRefAtCursor, moveSkill
 import { activateFileTab, activeFileTab, applyFilePanelOpenClass, cancelFileEdit, closeFilePanel, closeSidebar, convFileRawUrl, filePanelState, filePanelUsable, fileVersionToken, loadFileTab, openFilePanel, openSidebar, removeFileTab, reopenFilePanel, restoreLeftSidebarCollapse, saveFileTab, setLeftSidebarCollapsed, sidebarDesktop, startFileEdit, updateFileTabsButton } from "./14-file-panel.js";
 import { handleFilePopupClick, handleFilePopupKey, positionFilePopup, updateFilePopup } from "./16-file-refs.js";
 import { guideAllInterjections, sendRunInterjection } from "./18-interjections.js";
-import { dismissOnboarding, resetOnboarding, saveOnboardingProvider, selectOnboardingPreset, testOnboardingConnection } from "./19-onboarding.js";
+import { changeOnboardingModel, dismissOnboarding, loadOnboardingModels, resetOnboarding, saveOnboardingProvider, scheduleOnboardingModelCheck, selectOnboardingPreset, testOnboardingConnection } from "./19-onboarding.js";
 // 辅助对话 import 追加在 import 块末尾：守门测试（test_turn_rail / test_context_menu）
 // 按 import 区的**行号**断言 01-core / 04-messages 的位置，插在前面会把它们推后而报红。
 import { bindAuxChatEvents, restoreAuxChats, restoreDockGroup } from "./21-aux-chat.js";
@@ -2203,7 +2203,7 @@ export function bindEvents() {
   $('#providerPresetKeyUrl').addEventListener('click', (event) => {
     openProviderPresetKeyUrl(event.currentTarget.dataset.presetId).catch((error) => toast(`打开注册页失败：${error.message}`));
   });
-  // 首启引导：选模板 → 填 Key → 测试/保存；「重新选择」回第 1 步；任何关闭路径都记「不再打扰」。
+  // 首启引导：填连接信息后检测模型，选好模型再测试/保存。
   $('#onboardingPresetGrid').addEventListener('click', (event) => {
     const card = event.target.closest('[data-provider-preset]');
     if (card) selectOnboardingPreset(card.dataset.providerPreset);
@@ -2212,6 +2212,11 @@ export function bindEvents() {
     openProviderPresetKeyUrl(event.currentTarget.dataset.presetId).catch((error) => toast(`打开注册页失败：${error.message}`));
   });
   $('#onboardingBack').addEventListener('click', resetOnboarding);
+  $('#onboardingBaseUrl').addEventListener('input', scheduleOnboardingModelCheck);
+  $('#onboardingApiKey').addEventListener('input', scheduleOnboardingModelCheck);
+  $('#onboardingLoadModels').addEventListener('click', () => { loadOnboardingModels(); });
+  $('#onboardingModel').addEventListener('change', changeOnboardingModel);
+  $('#onboardingModelCustom').addEventListener('input', changeOnboardingModel);
   $('#onboardingSkip').addEventListener('click', () => $('#onboardingDialog').close());
   $('#onboardingTest').addEventListener('click', () => { testOnboardingConnection(); });
   $('#onboardingSave').addEventListener('click', () => { saveOnboardingProvider(); });

@@ -167,7 +167,13 @@ async function fixture(page) {
         await page.locator('#writerManageClose').click();
         await page.locator('#writerBookMenuBtn').click();
         await page.locator('#writerNovelContinueBtn').click();
+        await page.waitForSelector('#writerNovelTxtFile');
+        assert.equal(await page.locator('#writerNovelTxtFile').getAttribute('type'),'file','默认 TXT 页应提供文件选择入口');
+        assert.deepEqual(errors,[],'默认 TXT 续写页脚本错误');
+        await geometry(page,'#writerNovelImportDialog',`续写向导 ${width}/${theme}/TXT`);scans++;
+        await page.locator('[data-writer-source-mode="book"]').click();
         await page.waitForSelector('#writerNovelSourceBook option[value="'+NID+'"]',{state:'attached'});
+        assert.deepEqual(errors,[],'切换拆书匠来源后脚本错误');
         await geometry(page,'#writerNovelImportDialog',`续写向导 ${width}/${theme}/1`);scans++;
         await page.locator('#writerNovelSourceBook').selectOption(NID);
         await page.locator('#writerNovelImportNext').click();

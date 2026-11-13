@@ -655,6 +655,68 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(self.store.get_task(task["id"]))
         self.assertFalse(out_dir.exists())
 
+    def _history_task(self, index, *, batch=False, status="completed", created_at=None):
+        task_id = f"cf-history-{index:04d}"
+        record = {"id": task_id, "status": status,
+                  "created_at": index // 3 if created_at is None else created_at,
+                  "input": {"workflow_id": "cw-history", "prompt": {"large": "x" * 4000},
+                            "batch_id": "cfb-history" if batch else "", "shots": 1}}
+        self.store._write_json(self.store.task_record_path(task_id), record)
+        return task_id
+
+    def test_history_pages_are_unbounded_filter_before_paging_and_survive_deleted_cursor(self):
+        singles = [self._history_task(index) for index in range(75)]
+        for index in range(75, 225):
+            self._history_task(index, batch=True)
+        expected = sorted(singles, key=lambda key: (int(key.rsplit("-", 1)[-1]) // 3, key), reverse=True)
+        page = self.store.task_page(17, scope="single")
+        seen = [row["id"] for row in page["rows"]]
+        self.assertEqual(seen, expected[:17], "混合批量条目不能挤掉单次任务")
+        # Cursor records need not exist, and updating an old task's file mtime
+        # must not move it across the immutable creation-order cursor.
+        self.store.delete_task(seen[-1])
+        self.store.update_task(singles[0], status="running", detail="changed much later")
+        while page["has_more"]:
+            page = self.store.task_page(17, page["next_cursor"], scope="single")
+            seen.extend(row["id"] for row in page["rows"])
+        self.assertEqual(seen, expected)
+        self.assertEqual(page["next_cursor"], "")
+        self.assertEqual(len(set(seen)), 75)
+        all_ids, cursor = [], ""
+        while True:
+            page = self.store.task_page(19, cursor)
+            all_ids.extend(row["id"] for row in page["rows"])
+            if not page["has_more"]:
+                break
+            cursor = page["next_cursor"]
+        self.assertEqual(len(all_ids), 224)
+        self.assertEqual(len(set(all_ids)), 224)
+
+    def test_history_summary_cache_reuses_unchanged_json_and_detects_other_writers(self):
+        ids = [self._history_task(index) for index in range(40)]
+        self.store.task_page(3)
+        original = Path.read_text
+        with mock.patch.object(Path, "read_text", autospec=True, side_effect=original) as reads:
+            page = self.store.task_page(3)
+        self.assertLessEqual(reads.call_count, 4, "重复读页只解析当前页和一条前瞻，不解析全部快照")
+        self.assertTrue(page["has_more"])
+        cached = self.store._history_index.summaries()
+        self.assertTrue(all(set(row) == {"id", "created_at", "status", "batch"} for row in cached))
+        other = ComfyUIStore(self.dir)
+        other.update_task(ids[0], status="running")
+        active = self.store.task_page(10, active_only=True)
+        self.assertEqual([row["id"] for row in active["rows"]], [ids[0]])
+        external = {"id": "cf-history-external", "status": "completed", "created_at": 900,
+                    "input": {"shots": 1}}
+        # Simulate a different process that knows nothing about this cache.
+        other.task_record_path(external["id"]).write_text(json.dumps(external), encoding="utf-8")
+        self.assertEqual(self.store.task_page(1)["rows"][0]["id"], external["id"])
+        other.delete_task(external["id"])
+        self.assertNotEqual(self.store.task_page(1)["rows"][0]["id"], external["id"])
+        restarted = ComfyUIStore(self.dir)
+        self.assertEqual([row["id"] for row in restarted.task_page(3)["rows"]],
+                         [row["id"] for row in self.store.task_page(3)["rows"]])
+
 
 class _FakeComfy:
     """假 ComfyUI：可控的提交成功/失败、历史状态、队列、下载字节。"""
@@ -1606,6 +1668,98 @@ class ServiceApiTests(unittest.TestCase):
     def tearDown(self):
         self.service.shutdown()
         self.tmp.cleanup()
+
+    def test_history_page_api_validates_queries_and_keeps_legacy_response(self):
+        store = self.service.store
+        for index in range(85):
+            record = {"id": f"cf-api-history-{index}", "status": "completed", "created_at": index,
+                      "input": {"shots": 1, "workflow_name": "history"}}
+            store._write_json(store.task_record_path(record["id"]), record)
+        legacy, code = self.service.api_tasks()
+        self.assertEqual(code, 200)
+        self.assertEqual(len(legacy["tasks"]), 60)
+        self.assertNotIn("next_cursor", legacy)
+        first, code = self.service.api_tasks(page_size="20", cursor="", scope="single")
+        self.assertEqual(code, 200)
+        self.assertEqual(first["count"], 20)
+        self.assertTrue(first["has_more"])
+        self.assertTrue(first["next_cursor"])
+        self.assertNotIn("input", first["tasks"][0], "页清单不能携带工作流快照")
+        second, code = self.service.api_tasks(page_size="20", cursor=first["next_cursor"], scope="single")
+        self.assertEqual(code, 200)
+        self.assertFalse({row["id"] for row in first["tasks"]} & {row["id"] for row in second["tasks"]})
+        for fields in ({"page_size": value} for value in ["", "0", "-1", "101", "2.5", "wrong", True]):
+            self.assertEqual(self.service.api_tasks(**fields)[1], 400, fields)
+            self.assertEqual(self.service.api_batches(**fields)[1], 400, fields)
+        for cursor in ["%bad", "W10", "x" * 2049]:
+            self.assertEqual(self.service.api_tasks(cursor=cursor)[1], 400)
+            self.assertEqual(self.service.api_batches(cursor=cursor)[1], 400)
+        self.assertEqual(self.service.api_tasks(page_size=20, scope="other")[1], 400)
+        self.assertEqual(self.service.api_tasks(scope="")[1], 400)
+        self.assertEqual(self.service.api_tasks(cursor=first["next_cursor"], scope="all")[1], 400)
+        self.assertEqual(self.service.api_batches(cursor=first["next_cursor"])[1], 400)
+
+    def test_history_targeted_refresh_reads_only_requested_records_and_reports_missing(self):
+        task = self.service.store.create_task({"shots": 1})
+        task_id = task["id"]
+        with mock.patch.object(self.service.store._history_index, "summaries",
+                               side_effect=AssertionError("定点刷新不扫描目录")):
+            body, code = self.service.api_tasks(ids=f"{task_id},cf-missing,{task_id}")
+        self.assertEqual(code, 200)
+        self.assertEqual(body["count"], 1)
+        self.assertEqual([row["id"] for row in body["tasks"]], [task_id])
+        self.assertEqual(body["missing_ids"], ["cf-missing"])
+        self.service.store.delete_task(task_id)
+        body, code = self.service.api_tasks(ids=task_id)
+        self.assertEqual(code, 200)
+        self.assertEqual(body["missing_ids"], [task_id])
+        for ids in ["", "../bad", "cf-a,", "cf-a,,cf-b", "cf-a/../../x", "cf-a," * 100 + "cf-z"]:
+            self.assertEqual(self.service.api_tasks(ids=ids)[1], 400, ids)
+        self.assertEqual(self.service.api_tasks(ids="cf-a", page_size=20)[1], 400)
+        self.assertEqual(self.service.api_tasks(ids="cf-a", cursor="")[1], 400)
+        self.assertEqual(self.service.api_batches(ids="cfb-a", page_size=20)[1], 400)
+        self.assertEqual(self.service.api_batches(ids="cf-a")[1], 400)
+
+    def test_targeted_refresh_does_not_report_temporarily_unreadable_records_as_deleted(self):
+        store = self.service.store
+        task_id = store.create_task({"shots": 1})["id"]
+        with mock.patch.object(store, "get_task", return_value=None):
+            body, code = self.service.api_tasks(ids=task_id)
+        self.assertEqual(code, 200)
+        self.assertEqual(body["tasks"], [])
+        self.assertEqual(body["missing_ids"], [], "读取失败不能永久隐藏仍存在的任务")
+        store.task_record_path(task_id).write_text("{broken", encoding="utf-8")
+        self.assertEqual(self.service.api_tasks(ids=task_id)[0]["missing_ids"], [])
+        batch_id = "cfb-unreadable-history"
+        path = self.service.batches.batch_path(batch_id)
+        store._write_json(path, {"id": batch_id, "created_at": 1, "items": []})
+        with mock.patch.object(self.service.batches, "_read_record", return_value=None):
+            body, code = self.service.api_batches(ids=batch_id)
+        self.assertEqual(code, 200)
+        self.assertEqual(body["batches"], [])
+        self.assertEqual(body["missing_ids"], [], "读取失败不能永久隐藏仍存在的批次")
+        path.write_text("{broken", encoding="utf-8")
+        self.assertEqual(self.service.api_batches(ids=batch_id)[0]["missing_ids"], [])
+        with mock.patch.object(Path, "stat", side_effect=PermissionError("temporary sharing conflict")):
+            self.assertEqual(self.service.api_batches(ids=batch_id)[0]["missing_ids"], [])
+        store.task_record_path(task_id).unlink()
+        path.unlink()
+        self.assertEqual(self.service.api_tasks(ids=task_id)[0]["missing_ids"], [task_id])
+        self.assertEqual(self.service.api_batches(ids=batch_id)[0]["missing_ids"], [batch_id])
+
+    def test_active_refresh_and_internal_protection_do_not_inherit_history_page_limit(self):
+        store = self.service.store
+        for index in range(72):
+            record = {"id": f"cf-active-history-{index}", "status": "running", "created_at": index,
+                      "input": {"shots": 1, "media_inputs": [{"path": str(self.dir / f"input-{index}.png")}],
+                                "workflow_id": "cw-protected"}}
+            store._write_json(store.task_record_path(record["id"]), record)
+        with mock.patch.object(store, "list_tasks", side_effect=AssertionError("全局操作不能使用UI清单上限")):
+            active, code = self.service.api_tasks("1")
+            self.assertEqual(code, 200)
+            self.assertEqual(len(active["tasks"]), 72)
+            self.assertEqual(len(self.service.referenced_upload_paths()), 72)
+            self.assertFalse(self.service.jobs.delete_workflow("cw-protected")[0])
 
     def test_import_from_json_string_and_detail(self):
         payload, status = self.service.api_workflow_create({

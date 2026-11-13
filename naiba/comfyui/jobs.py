@@ -69,7 +69,7 @@ class ComfyUIJobManager:
     def recover_interrupted(self) -> int:
         """启动时遗留 queued/running → interrupted；任务详情里说明可重试续跑。"""
         recovered = 0
-        for task in self.store.list_tasks(active_only=True, limit=5000):
+        for task in self.store.iter_tasks(active_only=True):
             task_id = str(task.get("id") or "")
             if not task_id:
                 continue
@@ -488,9 +488,21 @@ class ComfyUIJobManager:
 
     # ---- 查询 ----
 
-    def tasks(self, active_only: bool = False, limit: int = 60) -> list[dict[str, Any]]:
+    def tasks(self, active_only: bool = False, limit: int = 60,
+              scope: str = "all") -> list[dict[str, Any]]:
+        if scope not in {"all", "single"}:
+            raise ValueError("scope 必须是 single 或 all")
+        if active_only:
+            return [self._slim(task) for task in self.store.iter_tasks(active_only=True)
+                    if scope != "single" or not (task.get("input") or {}).get("batch_id")]
         return [self._slim(task) for task in self.store.list_tasks(active_only=active_only,
-                                                                   limit=limit)]
+                                                                 limit=limit, scope=scope)]
+
+    def task_page(self, page_size: Any = None, cursor: Any = "", *,
+                  scope: str = "all", active_only: bool = False) -> dict[str, Any]:
+        page = self.store.task_page(page_size, cursor, scope=scope, active_only=active_only)
+        page["rows"] = [self._slim(task) for task in page["rows"]]
+        return page
 
     def task(self, task_id: str) -> dict[str, Any] | None:
         task = self.store.get_task(task_id)
@@ -584,7 +596,7 @@ class ComfyUIJobManager:
         else:
             # 未指定 id = 清全部：执行中的在循环里跳过并回报。
             targets = []
-            for task in self.store.list_tasks(limit=5000):
+            for task in self.store.iter_tasks():
                 if exclude_batch and str((task.get("input") or {}).get("batch_id") or ""):
                     continue
                 targets.append(str(task.get("id") or ""))
@@ -645,7 +657,7 @@ class ComfyUIJobManager:
 
     def delete_workflow(self, workflow_id: str) -> tuple[bool, str]:
         """删除工作流；被排队/执行中的任务引用时拒绝（历史任务用快照，不受影响）。"""
-        for task in self.store.list_tasks(active_only=True, limit=5000):
+        for task in self.store.iter_tasks(active_only=True):
             input_data = task.get("input") or {}
             if str(input_data.get("workflow_id") or "") == str(workflow_id):
                 return False, "有正在排队或执行中的任务还在用这份工作流，请先取消它们再删除"

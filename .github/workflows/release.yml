@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 4.4.4-beta
-  RELEASE_TAG: v4.4.4-beta
+  RELEASE_VERSION: 4.4.5-beta
+  RELEASE_TAG: v4.4.5-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-4.4.4-beta-windows-x64
+  PACKAGE_NAME: cat-chat-4.4.5-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-4.4.4-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-4.4.5-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -179,11 +179,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 4.4.4 Beta release
+      - name: Publish 4.4.5 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 4.4.4 Beta
+          name: Cat Chat 4.4.5 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -193,8 +193,10 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 4.4.4 Beta：局域网访问下的提词库生成修复
-            修复手机或其他设备用局域网地址（http，非安全上下文）打开时，提词库点「生成」直接报「crypto.randomUUID is not a function」的问题：请求标识改用带退化的生成函数——安全上下文仍用原生 UUID，普通 http 下退回 getRandomValues（再退时间戳加随机串），生成与连续追问都能正常提交。
-            提到这件事的边界：局域网 http 打开时浏览器不提供 crypto.randomUUID，这是浏览器限制，不是配置问题；本次只让请求标识不再依赖它，其他功能行为不变。
-            验证：本地全量 4763 项测试通过（含「前端不得直接调用 crypto.randomUUID」的守门），静态检查、JavaScript 语法与文档编码通过；提词库在删掉 randomUUID 的浏览器上下文里实测生成请求仍能发出，模型与供应商均为本地替身，未做真实付费生成。
-            Cat Chat 4.4.4 Beta Windows build。保留现有数据位置、更新协议以及双名称 exe 和 zip 资产。
+            Cat Chat 4.4.5 Beta：提词库新增古手梨花 Skill 合集预设
+            提词库新增 15 条古手梨花 Skill 合集预设：K2 二次元 / 人像基础 / 人像反差 / 仙宫 4 条，MOSS 二次元 / 人像 2 条，瑶光人像 1 条，图片分镜 2 条，H3 单图擦边 / 动漫 PV / 漫画分镜 / 战斗分镜 / 真人漫画分镜 / 完整打戏 6 条。
+            按模板分支拆条：图像引擎保留作者原文作为系统提示词；H3 与分镜流程把 references 规则合并成单文件，读到引用时直接使用文末同名章节，不需要外部文件。
+            ANIMA 引擎未纳入：标签库含大量可直接出裸体的词条，按仓库「NSFW 不入库」红线排除；h3-prompt-writing 与内置 Skill 和预设重复，也未重复收录。
+            边界：合集未附许可证，公开再分发前需作者授权；h3-edge-i2v 缺原主模板，只保留工作流与快速复核规则；案例图片、视频与 scripts 脚本未内置。
+            验证：本地全量 4772 项测试通过（含原字节指纹、单文件引用闭合、增补幂等与坏源失败测试），静态检查、JavaScript 语法与文档编码通过；桌面与 375px 浏览器冒烟通过。模型与供应商均为本地替身，未做真实付费生成。
+            Cat Chat 4.4.5 Beta Windows build。保留现有数据位置、更新协议以及双名称 exe 和 zip 资产。

@@ -1,29 +1,30 @@
-# Cat Chat 4.4.4 Beta
+# Cat Chat 4.4.5 Beta
 
 <p align="center">
   <img src="docs/cat-chat-logo.png" alt="Cat Chat" width="520">
 </p>
 
-Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。4.4.4 Beta 修复局域网（手机用 http 打开）时提词库点「生成」报 crypto.randomUUID 不存在的问题：请求标识改用带退化的生成函数，普通 http 下同样能生成与追问。
+Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。4.4.5 Beta 给提词库加上古手梨花 Skill 合集的 15 条预设：K2、MOSS、瑶光图像引擎与 H3、漫画分镜流程都能直接选；引擎按分支拆条，长流程模板已把参考规则合并成单文件。
 
 > Cat Chat 原名 Naiba Chat。显示名自 2.7.6 Beta 起为 Cat Chat；GitHub 仓库自 2.8.0 Beta 起更名为 `cat-chat`（旧地址自动跳转）。更新资产仍使用 `naiba-chat.exe` 与原有清单协议，既有数据位置不变，无需重新配置或搬迁数据。
 
 > 历史版本说明见 [CHANGELOG.md](CHANGELOG.md)。
 
-## 4.4.4 Beta 主要能力
-- 修复局域网（手机用 http 打开）时提词库点「生成」报 crypto.randomUUID 不存在的问题。
-- 请求标识改用带退化的生成函数：安全上下文用原生 UUID，普通 http 下同样能生成与追问。
+## 4.4.5 Beta 主要能力
+- 提词库新增古手梨花 Skill 合集 15 条预设：K2×4、MOSS×2、瑶光、图片分镜×2、H3 与漫画分镜×6。
+- 图像引擎按分支拆条，H3/分镜流程把参考规则合并成单文件，选中即可直接生成。
+- ANIMA 因标签库含裸露词条按「NSFW 不入库」排除；H3 通用提示词与内置重复未重复收录。
 
 ## 开始使用
 
 ### 使用 Windows 版本
 
-1. 下载 `cat-chat-4.4.4-beta-windows-x64.zip`。
+1. 下载 `cat-chat-4.4.5-beta-windows-x64.zip`。
 2. 解压到一个可写目录。
 3. 运行 `cat-chat.exe`。
 4. 在设置中添加在线 API 或本地模型服务。
 
-> 归档里也提供旧名 `naiba-chat-4.4.4-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
+> 归档里也提供旧名 `naiba-chat-4.4.5-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
 
 首次运行会创建本地数据目录。升级时请直接替换程序文件，不要删除原有 `data` 目录和配置文件。
 
@@ -129,14 +130,14 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 - `naiba-chat.exe` —— **自动更新链路唯一使用的资产，永久保留此文件名**
 - `naiba-chat-update.json` —— 更新清单，其中 `repository` 字段永久写 `yc883123/naiba-chat`
 - `cat-chat.exe` —— 与 `naiba-chat.exe` 是同一文件，SHA-256 完全相同
-- `cat-chat-4.4.4-beta-windows-x64.zip`
-- `naiba-chat-4.4.4-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
+- `cat-chat-4.4.5-beta-windows-x64.zip`
+- `naiba-chat-4.4.5-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
 
 更新器会验证清单中的仓库、提交、文件名和 SHA-256。下载文件还必须是有效的 Windows 可执行文件；任何一项不一致都会终止安装。**自动更新始终读取 `naiba-chat.exe` 与清单里的旧仓库名**（GitHub 对旧仓库地址做长期重定向），这是已发布客户端逐字校验的协议，仓库改名后也不改值。
 
 ## Beta 说明
 
-这是 4.4.4 Beta，适合实际使用和反馈，但仍有以下边界：
+这是 4.4.5 Beta，适合实际使用和反馈，但仍有以下边界：
 
 - 不内置 ComfyUI、模型权重或第三方生成服务，需用户自行安装和配置。
 - 不同模型的工具调用质量差异较大，小型模型可能无法稳定完成长链任务。
@@ -150,7 +151,7 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 ```powershell
 Get-ChildItem public\js\*.js | ForEach-Object { node --check $_.FullName }
 python -m unittest discover -s tests -q
-$env:NAIBA_BUILD_VERSION = "4.4.4-beta"
+$env:NAIBA_BUILD_VERSION = "4.4.5-beta"
 python -m PyInstaller --noconfirm --clean naiba-chat.spec
 ```
 

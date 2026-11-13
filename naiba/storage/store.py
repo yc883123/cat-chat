@@ -2401,14 +2401,23 @@ class ChatStorage:
                     inherited_first_turn, now, now,
                 ),
             )
+            copied_message_ids: dict[str, str] = {}
             for m in branch_rows[:branch_idx]:
+                copied_id = uuid.uuid4().hex
+                copied_message_ids[str(m["id"])] = copied_id
+                copied_metadata = json.loads(m["metadata"] or "{}")
+                view = copied_metadata.get(MetadataKeys.TRACE_VIEW)
+                if isinstance(view, dict):
+                    view_user_id = str(view.get("source_user_message_id") or "")
+                    if view_user_id in copied_message_ids:
+                        copied_metadata[MetadataKeys.TRACE_VIEW] = {**view, "source_user_message_id": copied_message_ids[view_user_id]}
                 # trace_hash 一并复制：v23 起 trace 在 message_traces 表（内容寻址），
                 # 分支只带引用、共享同一份 blob，零复制成本。漏掉它 = 分支历史失去 trace
                 # 权威回放，重放退回 message 兜底路径，前缀缓存从分支点起与源会话分叉。
                 db.execute(
                     "INSERT INTO messages(id, conversation_id, role, content, metadata, trace_hash, created_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (uuid.uuid4().hex, new_id, m["role"], m["content"], m["metadata"],
+                    (copied_id, new_id, m["role"], m["content"], json.dumps(copied_metadata, ensure_ascii=False),
                      str(m["trace_hash"] or ""), m["created_at"]),
                 )
             branch_meta = json.loads(branch_rows[branch_idx]["metadata"] or "{}")
@@ -2898,26 +2907,32 @@ class ChatStorage:
 
     @_retry_transient_write
     def clear_compaction_marker(self, message_id: str) -> bool:
-        """撤销一条「自动整理」标记（只摘 compaction 键，消息与其余 metadata 保留）。
+        """撤销目标及后续整理描述，避免仍通过依赖摘要覆盖刚恢复的原文。
 
         撤销后旧消息全部回到模型上下文；代价是下一轮的前缀缓存从整理前位置重预热。
         """
         now = int(time.time() * 1000)
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             row = db.execute(
-                "SELECT conversation_id, metadata FROM messages WHERE id = ?", (message_id,)
+                "SELECT rowid AS sort_rowid, created_at, conversation_id, metadata FROM messages WHERE id = ?", (message_id,)
             ).fetchone()
             if not row:
                 return False
             metadata = json.loads(row["metadata"] or "{}")
-            if not isinstance(metadata, dict) or MetadataKeys.COMPACTION not in metadata:
+            if not isinstance(metadata, dict) or not any(key in metadata for key in (MetadataKeys.COMPACTION, MetadataKeys.TRACE_VIEW)):
                 return False
-            # 与 clear_session_start 同口径：json_remove 只删自己的键，不整块写回。
+            if db.execute(
+                f"SELECT 1 FROM background_tasks WHERE conversation_id = ? AND status IN {_status_in_clause(ACTIVE_TASK_STATUSES)} LIMIT 1",
+                (row["conversation_id"],),
+            ).fetchone():
+                raise ValueError("当前会话仍在运行，请先停止再撤销整理")
+            # 后续摘要可能包含目标摘要的内容；保守作废全部后续描述，原轨迹及其余metadata不动。
             db.execute(
                 "UPDATE messages SET metadata = "
-                f"json_remove(COALESCE(NULLIF(metadata, ''), '{{}}'), '$.{MetadataKeys.COMPACTION}') "
-                "WHERE id = ?",
-                (message_id,),
+                f"json_remove(COALESCE(NULLIF(metadata, ''), '{{}}'), '$.{MetadataKeys.COMPACTION}', '$.{MetadataKeys.TRACE_VIEW}') "
+                "WHERE conversation_id = ? AND (created_at > ? OR (created_at = ? AND rowid >= ?))",
+                (row["conversation_id"], row["created_at"], row["created_at"], row["sort_rowid"]),
             )
             db.execute(
                 "UPDATE conversations SET updated_at = ? WHERE id = ?",
@@ -4073,6 +4088,56 @@ class ChatStorage:
                 (json.dumps(merged, ensure_ascii=False), int(time.time() * 1000), run_id),
             )
         return merged
+
+    @_retry_transient_write
+    def save_context_checkpoint(self, run_id: str, trace: list[dict[str, Any]], view: dict[str, Any], *, require_active: bool = False) -> None:
+        """追加不可变轨迹段并原子发布索引/视图，不每步重写整份长轨迹。"""
+        from naiba.core.contracts import CHAT_CONTEXT_CHECKPOINT_KEY
+        from naiba.core.trace_view import trace_fingerprint
+        if view.get("trace_sha256") != trace_fingerprint(trace):
+            raise ValueError("整理视图与原始轨迹不一致")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT snapshot, status, cancel_requested FROM background_tasks WHERE id = ?", (run_id,)).fetchone()
+            if not row:
+                raise ValueError("上下文所属运行不存在")
+            if require_active and (row["cancel_requested"] or row["status"] not in {"queued", "running", "waiting"}):
+                from naiba.core.exceptions import TaskCancelled
+                raise TaskCancelled("任务已取消或结束，不再发布迟到摘要")
+            snapshot = json.loads(row[0] or "{}")
+            previous = snapshot.get(CHAT_CONTEXT_CHECKPOINT_KEY) or {}
+            count = int(previous.get("trace_count") or 0)
+            hashes = list(previous.get("trace_segments") or [])
+            previous_view = previous.get("trace_view") or {}
+            if count > len(trace) or previous_view.get("trace_sha256") != trace_fingerprint(trace[:count]):
+                count, hashes = 0, []
+            segment = _split_trace_payload({"trace": trace[count:]})
+            if segment:
+                db.execute("INSERT OR IGNORE INTO message_traces(trace_hash, data) VALUES (?, ?)", segment)
+                hashes.append(segment[0])
+            checkpoint = {"trace_count": len(trace), "trace_segments": hashes, "trace_view": view}
+            db.execute(
+                "UPDATE background_tasks SET snapshot = json_set(COALESCE(NULLIF(snapshot, ''), '{}'), ?, json(?)) WHERE id = ?",
+                (f"$.{CHAT_CONTEXT_CHECKPOINT_KEY}", json.dumps(checkpoint, ensure_ascii=False), run_id),
+            )
+
+    def get_context_checkpoint(self, run_id: str) -> dict[str, Any]:
+        from naiba.core.contracts import CHAT_CONTEXT_CHECKPOINT_KEY
+        snapshot = self.get_run_snapshot(run_id) or {}
+        checkpoint = snapshot.get(CHAT_CONTEXT_CHECKPOINT_KEY) or {}
+        if not checkpoint:
+            return {}
+        trace: list[dict[str, Any]] = []
+        with self._connect() as db:
+            cache: dict[str, str] = {}
+            for digest in checkpoint.get("trace_segments") or []:
+                segment = _hydrate_trace(db, str(digest), cache)
+                if segment is None:
+                    raise ValueError("上下文检查点原始轨迹缺失")
+                trace.extend(segment)
+        if len(trace) != int(checkpoint.get("trace_count") or 0):
+            raise ValueError("上下文检查点原始轨迹数量不一致")
+        return {"trace": trace, "trace_view": checkpoint.get("trace_view")}
 
     def first_chat_run_snapshot(self, conversation_id: str) -> dict[str, Any] | None:
         """该会话最早的 chat run 快照（首轮固化的 first_turn 上下文来源）。"""

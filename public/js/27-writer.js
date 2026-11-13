@@ -15,6 +15,7 @@ import { loadModelCatalog } from "./07-models-agents.js";
 import { isPywebview, saveLocalFile } from "./03-media.js";
 import { onStudioPageChange, setStudioPage } from "./22-studio.js";
 import { bindWorkSystemPrompt } from "./22d-work-prompt.js";
+import { hasResultArtifact, resultArtifactText, renderResultArtifact } from "./22e-result-artifact.js";
 import { bindWriterNovelContinuation } from "./27a-writer-continuation.js";
 import { bindWorkbenchDialogReturn, bindWorkbenchMenu, watchWorkbenchSize, workbenchWidth } from "./22a-workbench-ui.js";
 import { bindBodyDraftLifecycle, bodyDraftMatches, chooseBodyDraft, createBodyDraftPanel, createBodyDraftSession } from "./22b-body-drafts.js";
@@ -1663,6 +1664,23 @@ function sameDraftEdit(snapshot) {
     && String($("#writerDraftContent")?.value || "") === snapshot.content;
 }
 
+const pipelineArtifactRequests = new Map();
+async function loadPipelineArtifact(taskId) {
+  const bookId = writer.bookId;
+  const token = writer.pollToken;
+  const key = `${bookId}:${token}:${taskId}`;
+  if (pipelineArtifactRequests.has(key)) return;
+  pipelineArtifactRequests.set(key, true);
+  try {
+    const { task } = await api(`/api/studio/tasks/${encodeURIComponent(taskId)}`);
+    if (writer.bookId !== bookId || writer.pollToken !== token || writer.pipeline?.current_task_id !== taskId) return;
+    writer.pipelineTask = task;
+    renderPipeline();
+  } catch (error) {
+    if (writer.bookId === bookId && writer.pollToken === token) toast(`读取 TXT 状态失败：${error.message}`);
+  } finally { pipelineArtifactRequests.delete(key); }
+}
+
 function renderPipeline() {
   for (const id of ["writerSetupGenerate", "writerOutlineGenerate", "writerOutlineGenerateAll", "writerSplitStart", "writerSplitContinue",
     "writerDraftGenerate", "writerDraftSegs", "writerDraftContinue", "writerDraftRewrite", "writerDraftRebuildState"]) {
@@ -1681,6 +1699,9 @@ function renderPipeline() {
   const pipeline = writer.pipeline;
   block.hidden = !pipeline;
   if (!pipeline) return;
+  if (pipeline.current_task_id && writer.pipelineTask?.id !== pipeline.current_task_id) {
+    void loadPipelineArtifact(pipeline.current_task_id);
+  }
   const steps = Array.isArray(pipeline.steps) ? pipeline.steps : [];
   const stepIndex = Number(pipeline.step_index || 0);
   const total = steps.length;
@@ -1717,13 +1738,30 @@ function renderPipeline() {
   }
   const stream = $("#writerPipelineStream");
   if (stream) {
-    const text = writer.streamText || writer.pipelineTask?.result_partial || "";
+    const text = hasResultArtifact(writer.pipelineTask) ? resultArtifactText(writer.pipelineTask, writer.streamText)
+      : writer.streamText || writer.pipelineTask?.result_partial || "";
     stream.hidden = !text;
     if (text) {
       // 只展示尾部：长正文从头滚没有意义，最新内容才是用户要盯的。
       stream.textContent = text.length > 2000 ? `……${text.slice(-2000)}` : text;
       stream.scrollTop = stream.scrollHeight;
     }
+    const bookId = writer.bookId;
+    const token = writer.pollToken;
+    const taskId = writer.pipelineTask?.id;
+    renderResultArtifact(stream, writer.pipelineTask, { scope: `${bookId}:${pipeline.id}:${pipeline.attempt}:${pipeline.step_index}`,
+      isCurrent: () => writer.bookId === bookId && writer.pollToken === token && writer.pipelineTask?.id === taskId,
+      onResume: pipeline.current_task_id === taskId && ["failed", "cancelled", "interrupted"].includes(pipeline.status)
+        ? async (sourceTaskId, requestKey, current) => {
+          // The artifact control owns this request's busy state. A shared
+          // writer.busy flag would outlive navigation into another book.
+          const payload = await api(`/api/writer/books/${encodeURIComponent(bookId)}/pipeline/resume`, {
+            method: "POST", body: { task_id: sourceTaskId, request_key: requestKey },
+          });
+          if (!current()) return;
+          beginPipelineWatch(payload.pipeline);
+          toast("已继续原步骤，保留已确认 TXT 内容");
+        } : null });
   }
   const error = $("#writerPipelineError");
   if (error) {
@@ -3693,6 +3731,7 @@ async function loadManageTasks() {
   renderManage();
 }
 
+let writerRecordPreviewGeneration = 0;
 async function openManageRecord(key) {
   const [type, ...rest] = key.split(":");
   const head = $("#writerManagePreviewHead");
@@ -3700,18 +3739,28 @@ async function openManageRecord(key) {
   const body = $("#writerManagePreviewBody");
   const box = $("#writerManagePreview");
   if (!box || !body) return;
+  const generation = ++writerRecordPreviewGeneration;
+  const recordBook = writer.bookId;
+  const isCurrentRecord = () => writerRecordPreviewGeneration === generation && writer.bookId === recordBook;
   try {
     if (type === "task") {
       const taskId = rest.join(":");
+      const bookId = writer.bookId;
+      const token = writer.manage.token;
       const { task } = await api(`/api/studio/tasks/${encodeURIComponent(taskId)}`);
+      if (writer.bookId !== bookId || writer.manage.token !== token || !isCurrentRecord()) return;
       if (head) head.textContent = String(task.title || "生成记录");
       if (meta) meta.textContent = `${TASK_STATUS_LABELS[String(task.status || "")] || task.status} · ${fmtTime(task.created_at)}`;
-      body.textContent = String(task.result || task.result_partial || task.error || "（没有内容）");
+      body.textContent = resultArtifactText(task) || task.result_artifact?.error || task.error || "（没有内容）";
+      renderResultArtifact(body, task, { scope: `${bookId}:manage:${taskId}`,
+        isCurrent: () => isCurrentRecord() && writer.manage.token === token && !box.hidden });
     } else if (type === "chapter") {
+      renderResultArtifact(body, null);
       writer.manage.expandedChapter = writer.manage.expandedChapter === Number(rest[0]) ? 0 : Number(rest[0]);
       renderManage();
       return;
     } else if (type === "chapterver") {
+      renderResultArtifact(body, null);
       const chapterNo = Number(rest[0]);
       const payload = await api(
         `/api/writer/books/${encodeURIComponent(writer.bookId)}/chapters/${chapterNo}`,
@@ -3720,6 +3769,7 @@ async function openManageRecord(key) {
       if (meta) meta.textContent = `${fmtChars(String(payload.content || "").length)} 字（当前版本内容）`;
       body.textContent = String(payload.content || "（这一版不是当前版本；设为当前后可在此查看全文）");
     } else {
+      renderResultArtifact(body, null);
       // setup / outline 版本：预览当前生效版本的完整内容（旧版本内容没有读取接口，
       // 切为当前后即可预览——版本内容本身不会丢）。
       if (type === "version" && rest[0] !== String(writer.book?.current_setup_version_id || "")
@@ -3743,6 +3793,7 @@ async function openManageRecord(key) {
           .join("\n") || "（大纲是空的）";
       }
     }
+    if (!isCurrentRecord()) return;
     box.hidden = false;
   } catch (error) {
     fail("读取记录失败", error);

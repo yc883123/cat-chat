@@ -19,6 +19,7 @@ import { loadModelCatalog } from "./07-models-agents.js";
 import { onStudioPageChange, setStudioPage } from "./22-studio.js";
 import { createContentSkillPicker } from "./22c-content-skills.js";
 import { bindWorkSystemPrompt } from "./22d-work-prompt.js";
+import { hasResultArtifact, resultArtifactReady, resultArtifactText, renderResultArtifact } from "./22e-result-artifact.js";
 import { bindWorkbenchDialogReturn, bindWorkbenchMenu, watchWorkbenchSize, workbenchWidth } from "./22a-workbench-ui.js";
 import { bindBodyDraftLifecycle, bodyDraftMatches, chooseBodyDraft, createBodyDraftPanel, createBodyDraftSession } from "./22b-body-drafts.js";
 
@@ -804,10 +805,12 @@ function renderAiEditor() {
   const task = novel.tasks.find((row) => row.id === slot.activeTaskId);
   const status = String(task?.status || "");
   // 生成过程与终稿都就地显示：先看到稿子，再决定是否「保存改编稿」进作品。
-  const draft = String(slot.streamText || task?.result || "");
+  if (hasResultArtifact(task) && !task._novelArtifactLoaded && !task._novelDetailError) void loadStageTaskDetail(task.id);
+  const draft = hasResultArtifact(task) ? resultArtifactText(task, slot.streamText) : String(slot.streamText || task?.result || "");
   if (result) {
     result.textContent = draft;
     result.hidden = !draft.trim();
+    renderNovelResultArtifact(result, task, "adapt");
   }
   const bits = [];
   if (source) bits.push("AI 会根据这份稿件和你的要求生成新稿，原文会保留。");
@@ -830,7 +833,7 @@ function renderAiEditor() {
   }
   const submit = $("#novelAiSubmit");
   if (submit) {
-    const ready = status === "done" && draft.trim();
+    const ready = status === "done" && resultArtifactReady(task) && draft.trim();
     submit.textContent = ready ? "保存改编稿" : "开始改编";
     submit.disabled = novel.busy || (!ready && (!novel.aiModelName || !String($("#novelAiRequest")?.value || "").trim()));
   }
@@ -969,7 +972,38 @@ function stageTaskSaved(stage, taskId) {
     || (stage === "elements" ? novel.book?.elements?.task_id : novel.book?.[`${stage}_task_id`]) === taskId;
 }
 
+function renderNovelResultArtifact(anchor, task, stage) {
+  const bookId = novel.bookId;
+  const bookToken = novel.bookToken;
+  const chapterNo = novel.chapterNo;
+  const isCurrent = () => novel.bookId === bookId && novel.bookToken === bookToken
+    && (stage === "adapt" ? novel.chapterNo === chapterNo && novel.adaptTask.activeTaskId === task?.id
+      : novel.stage === stage && storyboardDisplayTask(stageState(stage))?.id === task?.id);
+  renderResultArtifact(anchor, task, { scope: `${bookId}:${chapterNo}:${stage}`, isCurrent,
+    onResume: async (taskId, requestKey, current) => {
+      const { task: resumed } = await api(`/api/studio/tasks/${encodeURIComponent(taskId)}/resume-result`, {
+        method: "POST", body: { request_key: requestKey },
+      });
+      if (!current() || !resumed?.id) return;
+      const source = resumed.input?.novel || resumed.novel;
+      if (source?.book_id !== bookId || source.stage !== stage) throw new Error("接续任务来源不符");
+      const slot = stage === "adapt" ? novel.adaptTask : stageState(stage);
+      slot.activeTaskId = resumed.id;
+      slot.viewTaskId = "";
+      slot.streamText = "";
+      slot.taskCursor = 0;
+      slot.rowsForTaskId = "";
+      novel.tasks = [resumed, ...novel.tasks.filter(row => row.id !== resumed.id)];
+      if (stage === "adapt") renderAiEditor();
+      else renderStagePanel();
+      scheduleTaskPolling();
+      toast("已按原冻结来源继续，已落盘片段保留");
+    } });
+}
+
 function stageTaskText(stageData, task) {
+  if (hasResultArtifact(task)) return resultArtifactText(task,
+    task?.id === stageData.activeTaskId ? stageData.streamText : "");
   // 终态以完整落盘结果为准，最后一页流事件可能尚未取完。
   if (TERMINAL_TASK_STATUSES.has(String(task?.status || ""))) {
     return String(task?.result || task?.result_partial || "");
@@ -1272,9 +1306,11 @@ function renderStagePanel() {
     sourceNote.hidden = !isStoryboard || !task;
     sourceNote.textContent = isStoryboard && task ? `任务来源：${storyboardTaskSourceText(task)}` : "";
   }
-  if (isStoryboard) {
+  if (isStoryboard || hasResultArtifact(task)) {
     for (const sourceTask of new Set([task, activeTask])) {
-      if (sourceTask && !sourceTask.input && !sourceTask._novelDetailLoaded && !sourceTask._novelDetailError) {
+      if (sourceTask && !sourceTask._novelDetailError
+          && ((!sourceTask.input && !sourceTask._novelDetailLoaded)
+            || (hasResultArtifact(sourceTask) && !sourceTask._novelArtifactLoaded))) {
         void loadStageTaskDetail(sourceTask.id);
       }
     }
@@ -1317,7 +1353,10 @@ function renderStagePanel() {
     }
     const body = stageTaskText(stageData, task);
     const result = $("#novelStageResult");
-    if (result) result.textContent = body;
+    if (result) {
+      result.textContent = body;
+      renderNovelResultArtifact(result, task, stage);
+    }
     const back = $("#novelStageBackToActive");
     if (back) back.hidden = !viewingHistory || !activeTask;
     const cancel = $("#novelStageCancel");
@@ -1329,7 +1368,7 @@ function renderStagePanel() {
     // 分镜提示词不写回作品（结果直接发给造梦机），所以这一阶段不出现写回按钮。
     if (apply) {
       const saved = stageTaskSaved(stage, task.id);
-      apply.hidden = isStoryboard || !(status === "done" && body.trim());
+      apply.hidden = isStoryboard || !(status === "done" && resultArtifactReady(task) && body.trim());
       apply.disabled = Boolean(stageData.applyingTaskId) || saved;
       apply.textContent = saved ? "已保存到作品" : (stage === "script" ? "保存为新剧本版本" : `保存为新${stageLabel(stage)}版本`);
       apply.title = "保存会新增一个版本并保留旧版；后续阶段可选择使用哪个版本。";
@@ -1876,10 +1915,12 @@ function storyboardDisplayTask(stageData) {
 /** 任务完成后把结果解析成逐场行（每个任务只解析一次，轮询重画不重算）。 */
 function syncStoryboardRows(stageData, task) {
   if (!task || String(task.status || "") !== "done") return;
+  if (!resultArtifactReady(task)) return;
   if (stageData.rowsForTaskId === task.id) return;
   // 查看历史任务时 streamText 可能还是当前任务在流的正文；终态任务优先读它自己的结果。
   const live = stageData.activeTaskId === task.id ? String(stageData.streamText || "") : "";
-  const text = String(task.result || task.result_partial || live || "");
+  const text = hasResultArtifact(task) ? resultArtifactText(task) : String(task.result || task.result_partial || live || "");
+  if (!text.trim()) return;
   const { rows, parsed } = parseStoryboardClient(text);
   stageData.rows = rows;
   stageData.parsed = parsed;
@@ -1923,7 +1964,7 @@ function renderStoryboard(stageData, task) {
     all.hidden = true;
   };
   // 已完成任务优先：提示词就在任务结果里，作品场次列表缺失也不能挡住发送。
-  if (task && status === "done") {
+  if (task && status === "done" && resultArtifactReady(task)) {
     syncStoryboardRows(stageData, task);
     if (!stageData.parsed) {
       setNoteOnly("没能识别出「【第 N 场】」的场次结构，上面是模型原文，没有强行拆分。可以点「重试」再生成一次。");
@@ -2133,8 +2174,11 @@ async function loadStageTaskDetail(taskId) {
         throw new Error("任务来源与当前作品不一致");
       }
       // 来源补读只补冻结输入，迟到详情不能覆盖轮询已经读到的终态与结果。
+      if (hasResultArtifact(task) && Number(task.updated_at || 0) < Number(current.updated_at || 0)) return;
       novel.tasks[index] = { ...current, ...(task.input ? { input: task.input } : {}),
-        novel: { ...current.novel, ...task.novel },
+        novel: { ...current.novel, ...task.novel, ...detailSource },
+        ...(hasResultArtifact(task) ? { result: task.result, result_partial: task.result_partial,
+          result_artifact: task.result_artifact, _novelArtifactLoaded: true } : {}),
         _novelDetailLoaded: true, _novelDetailError: false };
     } catch (_error) {
       if (token !== novel.taskToken || bookId !== novel.bookId) return;
@@ -2144,7 +2188,8 @@ async function loadStageTaskDetail(taskId) {
       stageTaskDetailRequests.delete(key);
     }
     if (token !== novel.taskToken || bookId !== novel.bookId) return;
-    renderStagePanel();
+    if (novel.stage === "split") renderAiEditor();
+    else renderStagePanel();
     refreshPreview();
   })();
   stageTaskDetailRequests.set(key, request);
@@ -2159,7 +2204,20 @@ async function refreshStageTasks() {
     if (token !== novel.taskToken || bookId !== novel.bookId) return;
     // 摘要列表没有冻结输入；刷新列表时保留已读到的详情。
     const previous = new Map(novel.tasks.map((task) => [task.id, task]));
-    novel.tasks = (Array.isArray(tasks) ? tasks : []).map((task) => ({ ...previous.get(task.id), ...task }));
+    novel.tasks = (Array.isArray(tasks) ? tasks : []).map((task) => {
+      const before = previous.get(task.id);
+      const merged = { ...before, ...task };
+      if (hasResultArtifact(task)) {
+        const same = before?._novelArtifactLoaded && before.updated_at === task.updated_at
+          && before.result_artifact?.sha256 === task.result_artifact?.sha256
+          && before.result_artifact?.status === task.result_artifact?.status;
+        merged.result = same ? before.result : "";
+        merged.result_partial = same ? before.result_partial : "";
+        merged._novelArtifactLoaded = Boolean(same);
+        merged._novelDetailError = false;
+      }
+      return merged;
+    });
   } catch (error) {
     if (token !== novel.taskToken || bookId !== novel.bookId) return;
     // 读不到任务列表不该挡住生成面板的其它操作，只如实提示。
@@ -2478,7 +2536,7 @@ async function applyStageResult() {
     || novel.tasks.find((row) => row.id === stageData.activeTaskId);
   // 清单将来源提升到顶层；提交/详情仍把它放在冻结的 input 内。
   const taskSource = task?.novel || task?.input?.novel;
-  if (!task || task.status !== "done" || taskSource?.book_id !== bookId || taskSource?.stage !== stage) return;
+  if (!task || task.status !== "done" || !resultArtifactReady(task) || taskSource?.book_id !== bookId || taskSource?.stage !== stage) return;
   const taskId = task.id;
   if (stageTaskSaved(stage, taskId)) {
     toast("这个任务的结果已保存到作品");
@@ -2547,7 +2605,8 @@ async function submitAiAdapt() {
   const slot = novel.adaptTask;
   const task = novel.tasks.find((row) => row.id === slot.activeTaskId);
   const ready = String(task?.status || "") === "done"
-    && String(slot.streamText || task?.result || "").trim();
+    && resultArtifactReady(task)
+    && (hasResultArtifact(task) ? resultArtifactText(task) : String(slot.streamText || task?.result || "")).trim();
   const model = readAiModel();
   if (ready) {
     await saveAiResult();
@@ -2605,7 +2664,11 @@ async function saveAiResult() {
   const slot = novel.adaptTask;
   if (!slot.activeTaskId || !novel.bookId || !novel.chapter) return;
   const task = novel.tasks.find((row) => row.id === slot.activeTaskId);
-  const text = String(slot.streamText || task?.result || task?.result_partial || "");
+  const bookId = novel.bookId;
+  const bookToken = novel.bookToken;
+  const chapterNo = novel.chapterNo;
+  if (!task || task.status !== "done" || !resultArtifactReady(task)) return;
+  const text = hasResultArtifact(task) ? resultArtifactText(task) : String(slot.streamText || task?.result || task?.result_partial || "");
   if (!text.trim()) {
     toast("这个任务没有结果可保存");
     return;
@@ -2625,6 +2688,8 @@ async function saveAiResult() {
         },
       }
     );
+    if (novel.bookId !== bookId || novel.bookToken !== bookToken || novel.chapterNo !== chapterNo
+        || slot.activeTaskId !== task.id) return;
     const manuscript = payload.manuscript;
     novel.manuscriptBodies.set(manuscript.id, String(manuscript.content || ""));
     slot.activeTaskId = "";
@@ -2876,10 +2941,16 @@ function manageVersionText(row) {
     .join("\n\n");
 }
 
+let novelRecordPreviewGeneration = 0;
 async function openManageRecord(row) {
   const box = $("#novelManagePreview");
   const body = $("#novelManagePreviewBody");
   if (!box || !body || !row) return;
+  const generation = ++novelRecordPreviewGeneration;
+  const bookId = novel.bookId;
+  const bookToken = novel.bookToken;
+  const current = () => novelRecordPreviewGeneration === generation
+    && novel.bookId === bookId && novel.bookToken === bookToken;
   const head = $("#novelManagePreviewHead");
   const meta = $("#novelManagePreviewMeta");
   if (head) head.textContent = manageRowLabel(row);
@@ -2888,7 +2959,17 @@ async function openManageRecord(row) {
   body.textContent = "正在读取…";
   let text = "";
   if (row.type === "task") {
-    text = String(row.result || row.result_partial || "").trim();
+    let task = row;
+    try {
+      if (hasResultArtifact(row)) task = (await api(`/api/studio/tasks/${encodeURIComponent(row.id)}`)).task;
+    } catch (error) {
+      if (current()) body.textContent = `读取 TXT 结果失败：${error.message}`;
+      return;
+    }
+    if (!current()) return;
+    text = resultArtifactText(task);
+    renderResultArtifact(body, task, { scope: `${bookId}:manage:${row.id}`,
+      isCurrent: () => current() && !box.hidden });
     if (!text) {
       const status = String(row.status || "");
       text = status === "queued" || status === "running"
@@ -2896,11 +2977,13 @@ async function openManageRecord(row) {
         : "这条任务没有留下结果正文。";
     }
   } else if (row.chapter_no) {
+    renderResultArtifact(body, null);
     text = await ensureManuscriptBody(row);
   } else {
+    renderResultArtifact(body, null);
     text = manageVersionText(row);
   }
-  body.textContent = String(text || "").trim() || "这条记录没有可显示的内容。";
+  if (current()) body.textContent = String(text || "").trim() || "这条记录没有可显示的内容。";
 }
 
 async function loadManageRecords(rethrow = false) {

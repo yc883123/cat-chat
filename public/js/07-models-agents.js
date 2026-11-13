@@ -5,7 +5,7 @@
 import { $, api, applyModelSkinFor, state, toast } from "./01-core.js";
 
 const KVMEM_STATUS_LABELS = { stopped: '未运行', starting: '启动中', stopping: '停止中', ready: '就绪', running: '运行中', failed: '异常', port_mismatch: '端口不一致', model_missing: '缺少模型', error: '不可达', unknown: '未知' };
-let kvmemState = { providerId: '', payload: null, busy: false };
+let kvmemState = { providerId: '', payload: null, busy: false, request: 0 };
 
 function currentKvmemProvider() {
   const key = String($('#modelSelect')?.value || '');
@@ -19,9 +19,14 @@ export function renderKvmemControl() {
   const root = $('#kvmemControl');
   const provider = currentKvmemProvider();
   if (!root) return;
+  const providerId = String(provider?.id || '');
+  if (kvmemState.providerId !== providerId) {
+    kvmemState.providerId = providerId;
+    kvmemState.payload = null;
+    kvmemState.request += 1;
+  }
   root.hidden = !provider;
   if (!provider) { $('#kvmemPopover')?.setAttribute('hidden', ''); return; }
-  kvmemState.providerId = provider.id;
   const status = kvmemState.payload?.status || 'unknown';
   $('#kvmemStatusLabel').textContent = `KVMem · ${kvmemLabel(status)}`;
   $('#kvmemStatusDot').dataset.status = status;
@@ -36,11 +41,17 @@ export function renderKvmemControl() {
 
 export async function refreshKvmemStatus({ quiet = false } = {}) {
   const provider = currentKvmemProvider();
-  if (!provider) { renderKvmemControl(); return null; }
+  renderKvmemControl();
+  if (!provider) return null;
+  const request = ++kvmemState.request;
+  const current = () => request === kvmemState.request
+    && String(currentKvmemProvider()?.id || '') === String(provider.id);
   try {
     const payload = await api(`/api/providers/${encodeURIComponent(provider.id)}/kvmem/status`);
-    kvmemState.payload = payload; kvmemState.providerId = provider.id; renderKvmemControl(); return payload;
+    if (!current()) return null;
+    kvmemState.payload = payload; renderKvmemControl(); return payload;
   } catch (error) {
+    if (!current()) return null;
     kvmemState.payload = { status: 'error', error: error.message }; renderKvmemControl();
     if (!quiet) toast(`KVMem 状态读取失败：${error.message}`);
     return kvmemState.payload;
@@ -50,6 +61,7 @@ export async function refreshKvmemStatus({ quiet = false } = {}) {
 async function kvmemAction(action) {
   const provider = currentKvmemProvider(); if (!provider || kvmemState.busy) return;
   const current = await refreshKvmemStatus({ quiet: true });
+  if (!current || String(currentKvmemProvider()?.id || '') !== String(provider.id)) return;
   if (action === 'start') {
     const summary = `${current?.backend || '未知后端'} / ${current?.model || '未知模型'} / 端口 ${current?.actual_port || '—'}`;
     if (!confirm(`将通过 KVMem 控制台启动托管服务：\\n${summary}\\n\\n继续吗？`)) return;
@@ -831,7 +843,7 @@ export function populateModels() {
 export function selectedProvider() {
   const value = $('#modelSelect')?.value || '';
   if (!value) return null;
-  const profiles = state.bootstrap.model_profiles || state.bootstrap.providers || [];
+  const profiles = state.bootstrap?.model_profiles || state.bootstrap?.providers || [];
   return profiles.find((p) => p.model_key === value) || null;
 }
 
@@ -1392,6 +1404,8 @@ export function applyConversationModel(conversation) {
   select.value = target;
   select.title = target && !profiles.some(p => p.model_key === target) ? '历史 API 已失效，请重新选择' : '当前会话的 API';
   updateUnloadModelButton();
+  renderKvmemControl();
+  void refreshKvmemStatus({ quiet: true });
   void populateComposerModels(String(conversation?.model_name || ''));
 }
 

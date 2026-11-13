@@ -298,6 +298,10 @@ class _Config:
     def model_profiles(self):
         return [{"model_key": "online:probe", "model": "probe-default", "context_window": 0}]
 
+    def profile(self, key):
+        return {"kind": "online", "provider_id": "probe", "model": "probe-default",
+                "base_url": "https://fixture.invalid/v1", "request_format": "openai_chat"}
+
 
 class _Paths:
     def __init__(self, data_dir):
@@ -403,6 +407,8 @@ class Phase4ServiceTests(unittest.TestCase):
         task_store = StudioStore(self.root)
         self.app.studio.jobs = SimpleNamespace(
             submit=task_store.create_task, task=task_store.get_task,
+            result_text=lambda task_id, require_final=True: task_store.artifacts.read(
+                task_store.get_task(task_id), require_final=require_final)[0],
         )
         imported, status = self.service.api_import(
             filename="接续验收.txt", data="第1章 雨夜来客\n沈砚推门，翻看油灯下的信件。\n".encode("utf-8"),
@@ -422,9 +428,15 @@ class Phase4ServiceTests(unittest.TestCase):
             self.assertEqual(code, 201, payload)
             return payload
 
+        def finish_artifact(task_id, text):
+            task = task_store.get_task(task_id)
+            receipt = task_store.artifacts.write_segment(task, 1, 1, text)
+            task_store.artifacts.complete_block(task, 1, receipt, finish_reason="tool_calls")
+            return task_store.update_task(task_id, status="done", result="浏览器旧缓存不能替代TXT")
+
         def finish_and_save(stage, text):
             payload = submit(stage)
-            task = task_store.update_task(payload["task"]["id"], status="done", result=text)
+            task = finish_artifact(payload["task"]["id"], text)
             saved, code = self.service.api_apply(book_id, {
                 "stage": stage, "task_id": task["id"], "text": task["result"],
                 "revision": payload["book_revision"],
@@ -446,13 +458,15 @@ class Phase4ServiceTests(unittest.TestCase):
         self.assertIn("旧版大纲：沈砚在老宅发现密信。", frozen["content"])
         self.assertNotIn("陆行", frozen["content"])
         script_text = "INT. 老宅书房 - 夜\n沈砚推门翻看信件。\n\nEXT. 长桥 - 黄昏\n沈砚穿过长桥。"
-        task_store.update_task(historical["task"]["id"], status="done", result=script_text)
+        finish_artifact(historical["task"]["id"], script_text)
         newer = submit("script", elements_version=2, outline_version=2)
 
         # 重开后从真实任务存储读取旧任务；保存不能依赖前端仍有 active 指针。
         reopened_store = StudioStore(self.root)
         self.app.studio.jobs = SimpleNamespace(
             submit=reopened_store.create_task, task=reopened_store.get_task,
+            result_text=lambda task_id, require_final=True: reopened_store.artifacts.read(
+                reopened_store.get_task(task_id), require_final=require_final)[0],
         )
         reopened = NovelService(self.app)
         old_task = reopened_store.get_task(historical["task"]["id"])
@@ -885,11 +899,13 @@ class Phase4ServiceTests(unittest.TestCase):
         self.assertIn("更新后的主文", current["task"]["input"]["system"])
 
     def test_real_studio_skill_loop_reads_both_documents_and_retries_original(self):
+        import copy
         import json
         import re
         from naiba.skills.catalog import SkillCatalog
         from naiba.studio.service import StudioService
         from tests.test_studio import _write_min_catalog
+        from tests.studio_result_fixture import complete_result_reply, write_result_reply
         self._save_script()
         self._save_elements()
         self.app.paths.public_dir = self.root / "public"
@@ -906,16 +922,21 @@ class Phase4ServiceTests(unittest.TestCase):
         captured = []
         models = _RoundModels([])
         def complete(_models, profile, messages, options, event):
-            captured.append(messages)
-            self.assertEqual({row["name"] for row in options["tools"]}, {"read_file", "list_directory", "search_files"})
+            captured.append(copy.deepcopy(messages))
+            _models.last_usage = {"input_tokens": 2, "output_tokens": 3}
+            _models.last_finish_reason = "tool_calls"
+            self.assertEqual({row["name"] for row in options["tools"]},
+                             {"read_file", "list_directory", "search_files", "write_result_txt", "complete_result_txt"})
+            confirmed = complete_result_reply(messages)
+            if confirmed:
+                return confirmed
             roots = re.findall(r'<skill name="([^"]+)" root="([^"]+)">', messages[0]["content"])
             history = "\n".join(str(message.get("content")) for message in messages[1:])
             for name, root in roots:
                 if f"{name}独立文档" not in history:
                     return json.dumps({"type": "tool", "tool": "read_file", "arguments": {"path": str(Path(root) / "references" / "same.md")}})
             answer = "【第 2 场】EXT. 长桥 - 黄昏\n林晚与沈砚的双人远景。"
-            event({"type": "delta", "content": answer})
-            return answer
+            return write_result_reply(answer)
         from types import MethodType
         models.complete = MethodType(complete, models)
         self.app.models = models
@@ -938,8 +959,9 @@ class Phase4ServiceTests(unittest.TestCase):
         self.assertTrue(parsed)
         self.assertEqual([row["scene_no"] for row in rows], [2])
         self.assertIn("作品固定规则", captured[-1][0]["content"])
-        self.assertEqual(len(captured), 3)
-        self.assertEqual(task["usage"]["requests"], 3)
+        self.assertEqual(len(captured), 4)
+        self.assertEqual(task["usage"]["requests"], 4)
+        self.assertEqual(task["result_artifact"]["status"], "final")
         self.assertEqual(task["input"]["module"], "novel")
         self.service.api_save_system_prompt(self.book_id, {
             "global_system_prompt": "新规则", "global_system_prompt_revision": 1})
@@ -952,6 +974,9 @@ class Phase4ServiceTests(unittest.TestCase):
         self.assertEqual(current["status"], "done", current.get("error"))
         self.assertEqual(current["input"]["system"], task["input"]["system"])
         self.assertEqual(current["input"]["novel"], task["input"]["novel"])
+        self.assertEqual(len(captured), 8)
+        self.assertIn("one独立文档", str(captured[-1]))
+        self.assertIn("two独立文档", str(captured[-1]))
 
     def test_storyboard_source_validation_rejects_mixed_and_empty(self):
         self._save_script()

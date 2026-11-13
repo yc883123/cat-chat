@@ -84,6 +84,12 @@ class _Config:
             "context_window": self.window,
         }]
 
+    def profile(self, model_key):
+        if model_key != "online:probe":
+            raise LookupError("未知测试模型")
+        return {**self.model_profiles()[0], "provider_id": "probe", "kind": "online",
+                "base_url": "http://fixture.invalid/v1", "request_format": "openai"}
+
 
 class _Paths:
     def __init__(self, data_dir):

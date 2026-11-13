@@ -6,9 +6,13 @@ controller API，不扫描端口、不猜 PID、不终止外部进程。
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from naiba import net as net_io
@@ -16,6 +20,10 @@ from naiba import net as net_io
 DEFAULT_MANAGER_URL = "http://127.0.0.1:18199"
 DEFAULT_INFERENCE_URL = "http://127.0.0.1:18200/v1"
 REQUEST_TIMEOUT = 3.0
+FALLBACK_PARAMETER_KEYS = ("Backend", "Model", "Worker", "Gpu")
+LAST_START_FILENAME = "last-start.json"
+# 状态轮询和启动请求来自不同 HTTP 线程；原子替换不能代替读改写锁。
+_LAST_START_LOCK = threading.RLock()
 
 
 class KVMemError(RuntimeError):
@@ -57,6 +65,62 @@ def _nested(data: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def last_start_path(data_dir: Any) -> Path:
+    return Path(data_dir) / "kvmem" / LAST_START_FILENAME
+
+
+def _pick_parameters(parameters: Any) -> dict[str, str]:
+    if not isinstance(parameters, dict):
+        return {}
+    return {key: str(parameters[key]).strip() for key in FALLBACK_PARAMETER_KEYS
+            if parameters.get(key) is not None and str(parameters[key]).strip()}
+
+
+def read_last_start(path: Any) -> dict[str, dict[str, str]]:
+    """兼容旧的按控制台索引；损坏缓存不能阻止控制台操作。"""
+    with _LAST_START_LOCK:
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {str(url): picked for url, parameters in data.items()
+                if (picked := _pick_parameters(parameters)).get("Model")}
+
+
+def write_last_start(path: Any, manager_url: str, parameters: Any) -> None:
+    """只缓存公开启动字段；完整读改写串行，写失败不影响启动。"""
+    picked = _pick_parameters(parameters)
+    if not manager_url or not picked.get("Model"):
+        return
+    target = Path(path)
+    temporary: str | None = None
+    with _LAST_START_LOCK:
+        try:
+            data = read_last_start(target)
+            if data.get(str(manager_url)) == picked:
+                return
+            data[str(manager_url)] = picked
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent,
+                                             prefix="last-start-", suffix=".tmp", delete=False) as handle:
+                temporary = handle.name
+                json.dump(data, handle, ensure_ascii=False, indent=1)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+            temporary = None
+        except OSError:
+            pass
+        finally:
+            if temporary:
+                try:
+                    Path(temporary).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+
 class KVMemClient:
     def __init__(self, manager_url: str, inference_url: str, *, timeout: float = REQUEST_TIMEOUT):
         self.manager_url = validate_manager_url(manager_url)
@@ -65,6 +129,7 @@ class KVMemClient:
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("KVMem 推理地址必须是 http/https URL")
         self.timeout = max(0.5, min(float(timeout), 10.0))
+        self.last_draft_parameters: dict[str, str] = {}
 
     def _request(self, path: str, *, method: str = "GET", token: str = "", body: dict[str, Any] | None = None) -> dict[str, Any]:
         url = f"{self.manager_url}{path}"
@@ -121,6 +186,8 @@ class KVMemClient:
         info = self._request("/api/launcher/info")
         if not self._protocol_ok(info):
             raise KVMemError("KVMem 控制台协议版本不兼容")
+        draft = info.get("draft")
+        self.last_draft_parameters = _pick_parameters(draft.get("parameters") if isinstance(draft, dict) else None)
         return info
 
     def status(self) -> dict[str, Any]:
@@ -160,7 +227,7 @@ class KVMemClient:
             payload["error"] = "KVMem 实际推理端口与 Cat Chat 配置不一致"
         return payload
 
-    def start(self) -> dict[str, Any]:
+    def start(self, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
         info = self.info()
         token = self._token(info)
         if not token:
@@ -170,11 +237,30 @@ class KVMemClient:
         params = draft.get("parameters") if draft else None
         if not isinstance(params, dict):
             raise KVMemError("KVMem 控制台没有可用的启动配置")
+        self.fill_missing_parameters(params, fallback)
         if not str(params.get("Model") or "").strip():
-            raise KVMemError("KVMem 尚未选择模型，请先在控制台选择模型后再启动")
+            raise KVMemError("KVMem 尚未选择模型，请先在控制台选择模型后再启动；成功启动后 Cat Chat 会记住它")
         result = self._request("/api/launcher/start", method="POST", token=token, body=draft)
+        self.last_draft_parameters = _pick_parameters(params)
         return {"ok": True, "accepted": True,
                 "message": _text(_nested(result, "message", "status"), 240) or "已请求 KVMem 启动"}
+
+    @staticmethod
+    def fill_missing_parameters(params: dict[str, Any], fallback: dict[str, Any] | None) -> None:
+        cached = _pick_parameters(fallback)
+        backend = str(params.get("Backend") or "").strip()
+        cached_backend = cached.get("Backend", "")
+        # 不把另一后端的模型/worker 填进当前控制台的新选择；未知归属也不猜。
+        if backend and backend.casefold() != cached_backend.casefold():
+            return
+        if not backend and not cached_backend:
+            return
+        current_model = str(params.get("Model") or "").strip()
+        if current_model and current_model != cached.get("Model"):
+            return
+        for key, value in cached.items():
+            if params.get(key) is None or not str(params[key]).strip():
+                params[key] = value
 
     def stop(self) -> dict[str, Any]:
         info = self.info()

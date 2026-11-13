@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import re
 import time
+import copy
 from typing import Any
 
 from naiba.core.contracts import CompactionResult
@@ -75,6 +76,8 @@ _REFUSAL_ROLE_RE = re.compile(r"作为(?:一个)?(?:AI|人工智能|语言模型
 # 摘要请求最多发几次：1 次正常尝试 + 最多 2 次「区间实际收窄后」的恢复。
 # 只有「明确报输入超窗口、且区间真的变小了」才允许进入下一次；其余失败一次终止。
 MAX_SUMMARY_ATTEMPTS = 3
+MAX_RUN_SUMMARY_ATTEMPTS = 12
+MIN_COMPACTION_GROWTH_TOKENS = 1200
 
 # 区间下限：太小不值得花一次请求，也不该重置前缀缓存。
 MIN_REGION_MESSAGES = 2
@@ -213,7 +216,7 @@ def latest_real_input_tokens(rows: list[dict[str, Any]]) -> int:
         if not isinstance(row, dict):
             continue
         metadata = row.get("metadata") or {}
-        if metadata.get(MetadataKeys.COMPACTION) or metadata.get(MetadataKeys.SESSION_START):
+        if metadata.get(MetadataKeys.COMPACTION) or metadata.get(MetadataKeys.TRACE_VIEW) or metadata.get(MetadataKeys.SESSION_START):
             return 0
         if str(row.get("role") or "") == "session":  # 遗留形态：独立的分割线行
             return 0
@@ -258,7 +261,7 @@ SUMMARIZE_INSTRUCTION = """你现在负责给这段对话做一次交接：把�
 - 用简洁中文；技术名词、路径、命令、代码片段保持原样。"""
 
 
-def build_summary_messages(region_history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_summary_messages(region_history: list[dict[str, Any]], *, target_chars: int = 0) -> list[dict[str, Any]]:
     """总结请求的消息：被整理区间的模型视图（含旧摘要）+ 固定指令。
 
     图片一律降级成文字标记：总结只需要事实与路径，不必让模型重看历史图（省一次
@@ -290,7 +293,13 @@ def build_summary_messages(region_history: list[dict[str, Any]]) -> list[dict[st
             if item.get(key):
                 message[key] = item[key]
         messages.append(message)
-    messages.append({"role": "user", "content": SUMMARIZE_INSTRUCTION})
+    instruction = SUMMARIZE_INSTRUCTION
+    if target_chars:
+        instruction += (
+            f"\n正文目标约 {target_chars} 个中文字符；优先保留约束、已执行事实和下一步，"
+            "不要逐条复制命令输出。必须完整收尾，不要为了凑长度遗漏任务边界。"
+        )
+    messages.append({"role": "user", "content": instruction})
     return messages
 
 
@@ -329,6 +338,127 @@ def effective_summary_budget(settings: dict[str, Any], profile: dict[str, Any] |
     if ceiling > 0:
         budget = min(budget, ceiling)
     return budget
+
+
+def summary_profile(profile: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """隐藏摘要独立选择确有 wire 效果的低开销档；不修改用户档案。"""
+    from naiba.llm.thinking import resolve_thinking, thinking_payload
+    selected = copy.deepcopy(profile)
+    preset = resolve_thinking(selected)
+    effort = "auto"
+    payload: dict[str, Any] = {}
+    for candidate in ("off", "low"):
+        wire = thinking_payload(preset, candidate, strict=False)
+        if wire:
+            effort, payload = candidate, wire
+            break
+    # 没有可控字段时保留原策略，诊断明确标为不可控。
+    if payload:
+        selected["reasoning_effort"] = effort
+    return selected, {"thinking_effort": effort, "thinking_controlled": bool(payload),
+                      "thinking_parameter_type": str(preset.get("format") or "none"),
+                      "declared_output_ceiling": int(preset.get("max_output_ceiling") or 0)}
+
+
+def request_summary(
+    app: Any, history: list[dict[str, Any]], *, profile: dict[str, Any],
+    settings: dict[str, Any], cancel_event: Any = None, attempt_limit: int = MAX_SUMMARY_ATTEMPTS,
+    on_started: Any = None,
+) -> dict[str, Any]:
+    """有界生成完整摘要；最多一次截断恢复，残稿不进入下一次请求。"""
+    selected, thinking = summary_profile(profile)
+    target = 3500
+    attempts: list[dict[str, Any]] = []
+    recovered = False
+    ceiling = effective_summary_budget(settings, selected)
+    declared = thinking["declared_output_ceiling"]
+    if declared > 0:
+        ceiling = min(ceiling, declared)
+    while len(attempts) < min(MAX_SUMMARY_ATTEMPTS, max(0, int(attempt_limit))):
+        if cancel_event is not None and cancel_event.is_set():
+            raise TaskCancelled("任务已取消")
+        messages = build_summary_messages(history, target_chars=target)
+        estimated = estimate_messages_tokens(messages)
+        budget = ceiling
+        configured_limit = int(selected.get("context_window") or 0)
+        if configured_limit > 0:
+            budget = min(budget, configured_limit - estimated - SUMMARY_OUTPUT_SLACK)
+        if budget <= 0:
+            return {"summary": "", "reason": "summary_window_insufficient", "attempts": attempts}
+        options: dict[str, Any] = {"stream": False, "max_tokens": budget}
+        if cancel_event is not None:
+            options["cancel_event"] = cancel_event
+        attempt: dict[str, Any] = {
+            "input_tokens": estimated, "request_output_tokens": budget,
+            "target_chars": target, "attempt": len(attempts) + 1, **thinking,
+        }
+        _reset_summary_diagnostics(app)
+        if callable(on_started):
+            on_started()
+        started = time.monotonic()
+        try:
+            raw = app.models.complete(selected, messages, options)
+        except Exception as exc:
+            if _is_cancellation(exc, cancel_event):
+                raise TaskCancelled("任务已取消") from exc
+            attempt.update(reason=_failure_category(exc), error=summary_error_detail(exc, profile))
+            usage = getattr(app.models, "last_usage", {}) or {}
+            for key in ("input_tokens", "output_tokens", "reasoning_tokens"):
+                if usage.get(key) is not None:
+                    attempt["actual_input_tokens" if key == "input_tokens" else key] = usage[key]
+            attempt["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+            attempts.append(attempt)
+            return {"summary": "", "reason": f"summary_failed:{type(exc).__name__}",
+                    "category": attempt["reason"], "error": attempt["error"], "attempts": attempts}
+        if cancel_event is not None and cancel_event.is_set():
+            raise TaskCancelled("任务已取消")
+        summary = clean_summary(raw)
+        finish = _last_finish_reason(app)
+        usage = getattr(app.models, "last_usage", {}) or {}
+        attempt.update({"finish_reason": finish, "summary_chars": len(summary),
+                        "elapsed_ms": round((time.monotonic() - started) * 1000)})
+        # 缺失的真实用量保持未知，不以 0 冒充接口实测。
+        for source, destination in (("input_tokens", "actual_input_tokens"),
+                                    ("output_tokens", "output_tokens"),
+                                    ("reasoning_tokens", "reasoning_tokens")):
+            if usage.get(source) is not None:
+                attempt[destination] = usage[source]
+        ok, reason = validate_summary(summary)
+        if finish == "length":
+            ok, reason = False, "summary_truncated"
+            attempt["truncation_source"] = "finish_reason"
+        elif reason == "summary_truncated":
+            attempt["truncation_source"] = "shape"
+        attempt["reason"] = "accepted" if ok else reason
+        attempts.append(attempt)
+        if ok:
+            return {"summary": summary, "attempts": attempts}
+        if reason != "summary_truncated" or recovered:
+            return {"summary": "", "reason": reason, "attempts": attempts}
+        recovered = True
+        target = 1800
+        # 正数用户限制不可越过；提高仅发生在未配置输出限制且声明允许时。
+        if not int(profile.get("max_output_tokens") or 0):
+            ceiling = min(16384, declared or 16384, max(ceiling, ceiling * 2))
+    return {"summary": "", "reason": "summary_truncated", "attempts": attempts}
+
+
+def failure_message(reason: str) -> str:
+    if reason == "summary_truncated":
+        detail = "摘要达到输出上限或没有完整收尾"
+    elif reason in {"region_too_small", "region_empty"}:
+        detail = "当前没有可整理的完整片段"
+    elif reason == "freed_too_small":
+        detail = "摘要没有缩短有效上下文"
+    elif reason == "marker_write_failed":
+        detail = "保存整理结果失败"
+    elif reason == "summary_window_insufficient":
+        detail = "摘要请求没有足够的窗口空间"
+    elif "Error" in reason or reason.startswith("summary_failed"):
+        detail = "模型服务请求失败，请检查连接或接口错误"
+    else:
+        detail = "摘要未通过完整性校验"
+    return f"上下文整理未完成：{detail}。已保留原上下文；空间足够时继续。"
 
 
 # 摘要收尾判据：合格交接材料不会以一个悬空的项目符号收尾。
@@ -396,9 +526,10 @@ def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
             total += estimate_text_tokens(content)
         total += estimate_text_tokens(message.get("reasoning_content"))
         for call in message.get("tool_calls") or []:
-            if isinstance(call, dict) and isinstance(call.get("function"), dict):
-                total += estimate_text_tokens(call["function"].get("arguments"))
-                total += estimate_text_tokens(call["function"].get("name"))
+            if isinstance(call, dict):
+                function = call["function"] if isinstance(call.get("function"), dict) else call
+                total += estimate_text_tokens(function.get("arguments"))
+                total += estimate_text_tokens(function.get("name") or function.get("tool"))
     return total
 
 
@@ -573,6 +704,7 @@ def compact_conversation(
     used: int = 0,
     cancel_event: Any = None,
     force: bool = False,
+    on_started: Any = None,
 ) -> CompactionResult:
     """整理一次：隐藏总结请求 → 校验 → 写标记。
 
@@ -582,7 +714,7 @@ def compact_conversation(
     恢复规则（严格有界，见 MAX_SUMMARY_ATTEMPTS）：
     - 只有「明确报输入超窗口」的失败才允许重试，且每次重试前必须先把被总结区间
       真实收窄（shrink_boundary），输入没变就不重发——同一输入重试只会再花一次钱；
-    - 校验失败、其他运行时失败、写标记失败都一次终止，不重试；
+    - 输出截断最多一次变更目标长度/预算的恢复；其他校验失败、运行时失败、写入失败均终止；
     - 每次尝试的输入/输出规模与失败类别记进 ``attempts``（旁路诊断，不进模型请求）。
     """
     boundary = retain_boundary(rows, int(settings.get("retain_turns") or 3))
@@ -596,16 +728,6 @@ def compact_conversation(
         app, rows, profile=profile, pdf_tools=pdf_tools, video_tools=video_tools,
     )
     context_tokens_before = estimate_messages_tokens(history_before)
-    # 输出预算**独立**于正常回复：摘要请求不挂工具、不流式，max_tokens 只来自
-    # auto_compaction 设置（summary_max_tokens，经 effective_summary_budget 抬到有效下限），
-    # 不继承本轮对话的输出上限。
-    options: dict[str, Any] = {
-        "stream": False,
-        "max_tokens": effective_summary_budget(settings, profile),
-    }
-    if cancel_event is not None:
-        options["cancel_event"] = cancel_event
-
     def cancelled() -> bool:
         return cancel_event is not None and cancel_event.is_set()
 
@@ -624,63 +746,27 @@ def compact_conversation(
         current_tokens = estimate_messages_tokens(region_history)
         if not force and not attempts and current_tokens < MIN_REGION_TOKENS:
             return {"compacted": False, "reason": "region_too_small", "attempts": attempts}
-        messages = build_summary_messages(region_history)
-        input_tokens = estimate_messages_tokens(messages)
-        _reset_summary_diagnostics(app)
-        try:
-            raw = app.models.complete(profile, messages, options)
-        except Exception as exc:  # noqa: BLE001 - 总结失败不阻断本轮对话
-            if _is_cancellation(exc, cancel_event):
-                raise TaskCancelled("任务已取消") from exc
-            category = _failure_category(exc)
-            detail = summary_error_detail(exc, profile)
-            attempts.append({
-                "region_messages": len(current_rows),
-                "input_tokens": input_tokens,
-                "output_tokens": _last_output_tokens(app),
-                "reason": category,
-                "error": detail,
-            })
-            if category == "context_overflow" and len(attempts) < MAX_SUMMARY_ATTEMPTS:
+        generated = request_summary(
+            app, region_history, profile=profile, settings=settings, cancel_event=cancel_event,
+            attempt_limit=MAX_SUMMARY_ATTEMPTS - len(attempts), on_started=on_started,
+        )
+        attempts.extend({**item, "region_messages": len(current_rows)} for item in generated.get("attempts") or [])
+        summary = str(generated.get("summary") or "")
+        if not summary:
+            if generated.get("category") == "context_overflow" or generated.get("reason") == "summary_window_insufficient":
                 new_end = shrink_boundary(rows, len(current_rows) - 1, minimum_end=minimum_boundary)
-                while new_end >= minimum_boundary:
-                    next_rows = rows[: new_end + 1]
-                    next_history = build_region_history(
-                        app, next_rows, profile=profile, pdf_tools=pdf_tools, video_tools=video_tools,
-                    )
-                    if next_history and estimate_messages_tokens(build_summary_messages(next_history)) < input_tokens:
+                while new_end >= minimum_boundary and len(attempts) < MAX_SUMMARY_ATTEMPTS:
+                    next_rows = rows[:new_end + 1]
+                    next_history = build_region_history(app, next_rows, profile=profile,
+                                                        pdf_tools=pdf_tools, video_tools=video_tools)
+                    if next_history and estimate_messages_tokens(next_history) < current_tokens:
                         current_rows = next_rows
                         break
                     new_end = shrink_boundary(rows, new_end, minimum_end=minimum_boundary)
-                if new_end >= minimum_boundary:
+                if new_end >= minimum_boundary and len(attempts) < MAX_SUMMARY_ATTEMPTS:
                     continue
-            return {
-                "compacted": False,
-                "reason": f"summary_failed:{type(exc).__name__}",
-                "error": detail,
-                "attempts": attempts,
-            }
-        # 撞输出上限：模型明确报 finish_reason=length 时，正文一定不完整——不管它
-        # 碰巧怎么收尾都不该定稿。这是比正文尾部形态更硬的证据，先判它。
-        if _last_finish_reason(app) == "length":
-            attempts.append({
-                "region_messages": len(current_rows),
-                "input_tokens": input_tokens,
-                "output_tokens": _last_output_tokens(app),
-                "reason": "summary_truncated",
-            })
-            return {"compacted": False, "reason": "summary_truncated", "attempts": attempts}
-        summary = clean_summary(raw)
-        ok, reason = validate_summary(summary, max_chars=MAX_SUMMARY_CHARS)
-        if not ok:
-            attempts.append({
-                "region_messages": len(current_rows),
-                "input_tokens": input_tokens,
-                "output_tokens": _last_output_tokens(app),
-                "reason": reason,
-            })
-            # 校验失败不重试：同一输入、同一提示重发不会得到不同结果。
-            return {"compacted": False, "reason": reason, "attempts": attempts}
+            return {"compacted": False, "reason": generated.get("reason") or "summary_failed",
+                    "error": generated.get("error") or "", "attempts": attempts}
         marker_index = len(current_rows) - 1
         marker_row_id = str(current_rows[-1].get("id") or "")
         if not marker_row_id:
@@ -698,12 +784,8 @@ def compact_conversation(
         freed_est = context_tokens_before - context_tokens_after
         if freed_est <= 0:
             # 摘要没比原文短：写了也没释放空间，还白白让前缀失效。
-            attempts.append({
-                "region_messages": len(current_rows),
-                "input_tokens": input_tokens,
-                "output_tokens": _last_output_tokens(app),
-                "reason": "freed_too_small",
-            })
+            if attempts:
+                attempts[-1]["reason"] = "freed_too_small"
             return {"compacted": False, "reason": "freed_too_small", "attempts": attempts}
         payload = marker_payload(
             summary, source=source, model_key=model_key, model_name=model_name,
@@ -722,12 +804,6 @@ def compact_conversation(
         except Exception as exc:  # noqa: BLE001 - 存储异常按整理失败处理，不动对话
             return {"compacted": False, "reason": "marker_write_failed", "attempts": attempts,
                     "error": summary_error_detail(exc, profile)}
-        attempts.append({
-            "region_messages": len(current_rows),
-            "input_tokens": input_tokens,
-            "output_tokens": _last_output_tokens(app),
-            "reason": "accepted",
-        })
         return {
             "compacted": True,
             "region_messages": len(current_rows),

@@ -171,9 +171,11 @@ class WriterService:
         if not isinstance(body, dict):
             return {"error": "请求体必须是对象"}, 400
         try:
-            payload = self.store.save_chapter_version(
+            from naiba.writer.drafts import save as save_manual_draft
+            payload = save_manual_draft(
+                self.store,
                 book_id, self._chapter_no(chapter_no),
-                content=body.get("content"), kind="manual", task_id="",
+                content=body.get("content"),
                 expected_revision=body.get("revision"),
             )
             return payload, (200 if payload.get("duplicate") else 201)
@@ -446,6 +448,22 @@ class WriterService:
             return {"error": str(exc)}, 400
         except WriterPipelineError as exc:
             return {"error": str(exc)}, 409
+
+    def api_resume_pipeline(self, book_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        if not isinstance(body, dict):
+            return {"error": "请求体必须是对象"}, 400
+        try:
+            pipeline = self.pipeline.resume_pipeline(
+                book_id, source_task_id=str(body.get("task_id") or ""),
+                request_key=str(body.get("request_key") or ""),
+            )
+            return {"pipeline": pipeline}, 200
+        except LookupError as exc:
+            return {"error": str(exc)}, 404
+        except (WriterConflictError, WriterPipelineError) as exc:
+            return {"error": str(exc)}, 409
+        except (WriterStoreError, ValueError, OSError) as exc:
+            return {"error": str(exc)}, 400
 
     # ---- 只读连贯性检查（跨章连贯性修复计划 §三.C） ----
 

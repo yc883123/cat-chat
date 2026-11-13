@@ -1860,13 +1860,33 @@ class NovelService:
             return {"error": "请求体必须是对象"}, 400
         kind = str(body.get("kind") or manuscripts.KIND_MANUAL).strip()
         try:
+            content = body.get("content")
+            source_id = body.get("source_manuscript_id")
+            task_id = str(body.get("task_id") or "")
+            user_request = str(body.get("user_request") or "")
+            if kind == manuscripts.KIND_AI and task_id:
+                task = self.app.studio.jobs.task(task_id)
+                if task is None:
+                    raise LookupError("AI 来源任务不存在，不能使用浏览器缓存正文代替")
+                if self._uses_result_artifact(task):
+                    frozen = (task.get("input") or {}).get("novel") or {}
+                    chapter = self._chapter_no(chapter_no)
+                    if (frozen.get("book_id") != book_id or frozen.get("stage") != prompts.ADAPT_STAGE
+                            or list(frozen.get("chapter_ids") or []) != [chapter]):
+                        raise NovelConflictError("AI 任务不属于当前作品、阶段或章节，不能保存")
+                    if task.get("status") != "done":
+                        raise NovelConflictError("任务尚未完整完成，不能保存正文")
+                    content = self._result_artifact_text(task_id)
+                    source_id = (frozen.get("manuscripts") or {}).get(str(chapter)) or ""
+                    user_request = str((task.get("input") or {}).get("user_request") or "")
+                    task_id = self._logical_result_id(task)
             payload = self.store.save_manuscript(
                 book_id, self._chapter_no(chapter_no),
-                content=body.get("content"),
+                content=content,
                 kind=kind,
-                source_manuscript_id=body.get("source_manuscript_id"),
-                task_id=str(body.get("task_id") or ""),
-                user_request=str(body.get("user_request") or ""),
+                source_manuscript_id=source_id,
+                task_id=task_id,
+                user_request=user_request,
                 label=str(body.get("label") or ""),
                 expected_revision=body.get("revision"),
             )
@@ -2478,8 +2498,6 @@ class NovelService:
             return {"error": "分镜提示词不写回作品；请在结果里勾选后发送到造梦机"}, 400
         if not task_id:
             return {"error": "缺少 task_id：写回必须指明是哪个任务的结果"}, 400
-        if not isinstance(text, str):
-            return {"error": "text 必须是文本"}, 400
         try:
             task = self.app.studio.jobs.task(task_id)
         except Exception:  # noqa: BLE001 - 任务存储异常按「查不到」处理
@@ -2494,6 +2512,14 @@ class NovelService:
             return {"error": f"任务阶段不符：任务是「{novel_input.get('stage')}」，请求是「{stage}」"}, 409
         if str(task.get("status") or "") != "done":
             return {"error": "任务还没完成，不能写回结果"}, 409
+        if self._uses_result_artifact(task):
+            try:
+                text = self._result_artifact_text(task_id)
+            except NovelServiceError as exc:
+                return {"error": str(exc)}, 409
+            task_id = self._logical_result_id(task)
+        elif not isinstance(text, str):
+            return {"error": "text 必须是文本"}, 400
         chapter_ids = novel_input.get("chapter_ids") or []
         manuscripts_map = novel_input.get("manuscripts") if isinstance(novel_input.get("manuscripts"), dict) else {}
         by_chapter = {int(key): str(value) for key, value in manuscripts_map.items() if str(key).isdigit()}
@@ -2535,6 +2561,23 @@ class NovelService:
             return {"error": str(exc)}, 409
         except NovelServiceError as exc:
             return {"error": str(exc)}, 400
+
+    @staticmethod
+    def _uses_result_artifact(task: dict[str, Any]) -> bool:
+        from naiba.studio.artifacts import has_result_contract
+        return has_result_contract(task)
+
+    @staticmethod
+    def _logical_result_id(task: dict[str, Any]) -> str:
+        from naiba.core.contracts import STUDIO_LOGICAL_GENERATION_ID_KEY
+        return str(task.get(STUDIO_LOGICAL_GENERATION_ID_KEY)
+                   or (task.get("input") or {}).get(STUDIO_LOGICAL_GENERATION_ID_KEY) or task["id"])
+
+    def _result_artifact_text(self, task_id: str) -> str:
+        try:
+            return self.app.studio.jobs.result_text(task_id, require_final=True)
+        except (ValueError, OSError) as exc:
+            raise NovelServiceError(f"任务 TXT 结果不可用：{exc}") from exc
 
     # ---- API：记录管理与批量删除 ----
 

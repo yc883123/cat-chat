@@ -33,6 +33,11 @@ WRITER_SETUP_SNAPSHOT_KEY = "setup_snapshot"
 # status persists until the submitted Studio task actually reaches a terminal
 # state; current_task_id remains available for polling and recovery.
 WRITER_PIPELINE_STOPPING = "stopping"
+# Durable writeback and resume identities belong to a logical generation, not
+# the replacement Studio execution ID. Manual drafts never share AI artifacts.
+WRITER_COMPLETED_GENERATIONS_KEY = "completed_generation_ids"
+WRITER_RESULT_RESUME_KEY = "result_resume"
+WRITER_MANUAL_DRAFT_KEY = "manual_draft"
 
 # Frontend-only provider-change subscription; listeners receive affected model_key
 # strings after bootstrap is updated and shared catalogs/in-flight reads expire.
@@ -55,6 +60,33 @@ STUDIO_THREAD_ID_KEY = "thread_id"
 STUDIO_PARENT_TASK_ID_KEY = "parent_task_id"
 STUDIO_HISTORY_MESSAGES_KEY = "history_messages"
 STUDIO_TRACE_MESSAGES_KEY = "trace_messages"
+# Task-local, versioned TXT output. These values are assigned by the server
+# before queuing; a missing manifest never falls back to a model final reply.
+STUDIO_OUTPUT_CONTRACT_VERSION_KEY = "output_contract_version"
+STUDIO_RESULT_ARTIFACT_KEY = "result_artifact"
+STUDIO_LOGICAL_GENERATION_ID_KEY = "logical_generation_id"
+STUDIO_RESUMED_FROM_KEY = "result_resumed_from"
+STUDIO_RESUMED_INTO_KEY = "result_resumed_into"
+STUDIO_OUTPUT_CONTRACT_VERSION = 1
+
+
+class StudioResultArtifact(TypedDict, total=False):
+    schema_version: int
+    status: Literal["partial", "final", "invalid"]
+    chars: int  # Unicode characters, counted by the server.
+    segments: int
+    sha256: str  # Exact UTF-8 bytes, including original newlines/whitespace.
+    blocks: int
+    completed_blocks: int
+    error: str
+
+
+class StudioResultOutput(TypedDict, total=False):
+    output_contract_version: int
+    logical_generation_id: str
+    result_artifact: StudioResultArtifact
+    result_resumed_from: str
+    result_resumed_into: str
 
 
 class WorkbenchPromptConfig(TypedDict, total=False):
@@ -118,6 +150,10 @@ class CompactionResult(TypedDict, total=False):
     attempts: list[dict[str, Any]]
     context_tokens_before: int
     context_tokens_after: int  # Effective replay history, never prior billed usage.
+
+
+# 原始当前轮轨迹与已接受投影在同一个运行快照提交中关联；重启仅恢复记录，不重放工具。
+CHAT_CONTEXT_CHECKPOINT_KEY = "context_checkpoint"
 
 # Labeler settings patch is an atomic per-provider update; it is mutually
 # exclusive with the legacy full-replacement provider_limits request.
@@ -401,6 +437,7 @@ RUN_CONTEXT_KEYS: tuple[str, ...] = (
     # callable(messages, trace_start, limit, budget, used) -> {"history", "limit", "budget"}。
     # skills/agent 在步与步之间调用；返回 history 为空 = 本步不整理，照常发请求。
     "compact_context",
+    "trace_view", "trace_checkpoint", "tool_loop_complete", "model_view_transform",
     # 整理完成后，下一次完整请求组装好时推送一次包含 system/schema 的占用估算。
     "context_estimate_pending",
     "model_key", "context_limit", "context_limit_source",
@@ -431,6 +468,10 @@ def default_run_context() -> dict[str, Any]:
         "mark_interjections_consumed": None,
         # 自动整理入口（run/chat 只给非 aux 的 Run 置位）：缺省 None = 循环内不整理。
         "compact_context": None,
+        "trace_view": None,
+        "trace_checkpoint": None,
+        "tool_loop_complete": None,
+        "model_view_transform": None,
         "context_estimate_pending": False,
         "model_key": "",
         "context_limit": 0,
@@ -627,6 +668,10 @@ class RunContext(TypedDict, total=False):
     context_reset: dict[str, Any]    # reset_context 的本轮重置请求 → 消息 metadata.session_start
     turn_index: int                  # 本轮是第几个用户轮次（1 起）→ 图片批标签「第N轮装载」
     compact_context: Any             # Agent 循环内自动整理入口（callable；缺省 None = 本步不整理）
+    trace_view: dict[str, Any] | None # 原始执行轨迹的版本化模型投影，缺省重放完整轨迹
+    trace_checkpoint: Any            # 整理后持久化原轨迹追加段与投影的可信回调
+    tool_loop_complete: Any          # 可信任务适配器的工具组完成钩子，返回正文或 None
+    model_view_transform: Any        # 可信任务适配器的下一请求视图变换，不修改原始 trace
     context_estimate_pending: bool   # 下一次正式请求前推送整理后的完整输入估算
     model_key: str                   # 本轮模型键（供实时用量事件标记）
     context_limit: int                # 本轮有效窗口（profile 或类型回退）

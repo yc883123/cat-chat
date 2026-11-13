@@ -23,6 +23,7 @@ import copy
 import threading
 import time
 import traceback
+from contextlib import nullcontext
 from typing import Any
 
 from naiba.core.contracts import (
@@ -33,6 +34,8 @@ from naiba.core.contracts import (
     WRITER_PIPELINE_STOPPING,
     WORK_GLOBAL_SYSTEM_PROMPT_KEY,
     WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY,
+    WRITER_COMPLETED_GENERATIONS_KEY,
+    WRITER_RESULT_RESUME_KEY,
 )
 from naiba.writer import prompts
 from naiba.writer.store import (
@@ -498,6 +501,105 @@ class WriterPipelineManager:
             fresh = self._matching_pipeline(book_id, updated)
             return fresh if fresh is not None else updated
 
+    def resume_pipeline(self, book_id: str, *, source_task_id: str = "",
+                        request_key: str = "") -> dict[str, Any]:
+        """Claim a new execution for the same frozen attempt/step, then schedule outside the book lock."""
+        with self.store._lock:
+            manifest = self.store._load_manifest(book_id)
+            pipeline = manifest.get("active_pipeline")
+            if not isinstance(pipeline, dict):
+                raise WriterPipelineError("这部作品没有可恢复的生成")
+            current_id = str(pipeline.get("current_task_id") or "")
+            source_task_id = str(source_task_id or current_id)
+            source = self._task(source_task_id)
+            if not source or not self._artifact_task(source):
+                raise WriterPipelineError("此任务没有可恢复的 TXT 产物，请选择重新生成")
+            owner = self._writer_input(source)
+            if (owner.get("book_id") != book_id
+                    or owner.get("pipeline_id") != pipeline.get("id")):
+                raise WriterPipelineError("恢复任务不属于当前作品或流水线")
+            logical_id = self._logical_id(source)
+            if logical_id in (pipeline.get(WRITER_COMPLETED_GENERATIONS_KEY) or []):
+                return dict(pipeline)  # The recoverable writeback already committed all effects.
+            previous = pipeline.get(WRITER_RESULT_RESUME_KEY) or {}
+            if pipeline.get("status") == "running":
+                if (previous.get("source_task_id") == source_task_id
+                        and current_id in (source_task_id, previous.get("child_task_id"))):
+                    return dict(pipeline)
+                raise WriterPipelineError("当前生成仍在进行，请等待结束或先停止")
+            if pipeline.get("status") not in {"failed", "interrupted", "cancelled"}:
+                raise WriterPipelineError("当前状态不能继续 TXT；版本冲突时请显式基于当前版本重新生成")
+            step_index = int(pipeline.get("step_index") or 0)
+            steps = pipeline.get("steps") or []
+            step = steps[step_index] if step_index < len(steps) else ""
+            snapshot = pipeline.get("request_snapshot") or {}
+            if (source_task_id != current_id or owner.get("attempt") != pipeline.get("attempt")
+                    or owner.get("step") != step
+                    or owner.get("chapter_no", 0) != snapshot.get("chapter_no", 0)
+                    or ("step_index" in owner and owner["step_index"] != step_index)):
+                raise WriterPipelineError("当前步骤或尝试已变化，不能恢复旧任务")
+            if int(pipeline.get("base_revision") or 0) != int(manifest.get("revision") or 0):
+                raise WriterConflictError("生成来源已变化，请基于当前版本重新生成，不能拼接旧 TXT")
+            chapter_revision = pipeline.get("chapter_revision")
+            if step in {"draft", "segs"} and chapter_revision is not None:
+                index = self.store._load_chapter_index(self.store._book_dir(book_id), int(snapshot.get("chapter_no") or 0))
+                if int(index.get("revision") or 0) != int(chapter_revision):
+                    raise WriterConflictError("章节已变化，请基于当前版本重新生成")
+            if str(source.get("status") or "") in {"queued", "running"}:
+                raise WriterPipelineError("原任务尚未停止，暂时不能恢复")
+            key = self._step_key(book_id, pipeline)
+            if key in self._submissions:
+                return dict(pipeline)
+            request_key = str((previous.get("request_key") if previous.get("source_task_id") == source_task_id else "") or request_key
+                              or f"writer-resume:{book_id}:{pipeline['id']}:{pipeline.get('attempt')}:{step_index}:{source_task_id}")
+            resume = {"source_task_id": source_task_id, "request_key": request_key,
+                      "logical_generation_id": logical_id, "phase": "preparing", "child_task_id": ""}
+
+            def claim(record: dict[str, Any]) -> None:
+                record.update(status="running", error="")
+                record[WRITER_RESULT_RESUME_KEY] = resume
+
+            pipeline = self.store.update_pipeline(book_id, str(pipeline["id"]), claim,
+                                                  expected_attempt=int(pipeline.get("attempt") or 0))
+            if pipeline is None:
+                raise WriterPipelineError("流水线状态已变化，请刷新后重试")
+            self._submissions[key] = True
+        child_id = ""
+        accepted = False
+        try:
+            child = self.app.studio.jobs.prepare_resume(
+                source_task_id, request_key=request_key,
+                owner_id=str(source.get("owner_id") or ""), allow_writer=True,
+            )
+            child_id = str(child["id"])
+            with self.store._lock:
+                current = self._matching_pipeline(book_id, pipeline)
+                if (current is not None and current.get("status") == "running"
+                        and self._step_key(book_id, current) == key
+                        and current.get("current_task_id") == source_task_id
+                        and (current.get(WRITER_RESULT_RESUME_KEY) or {}).get("request_key") == request_key):
+                    def bind(record: dict[str, Any]) -> None:
+                        record["current_task_id"] = child_id
+                        record[WRITER_RESULT_RESUME_KEY] = {**resume, "phase": "ready", "child_task_id": child_id}
+                    updated = self.store.update_pipeline(book_id, str(current["id"]), bind,
+                                                         expected_attempt=int(pipeline.get("attempt") or 0))
+                    accepted = updated is not None
+                    if updated is not None:
+                        pipeline = updated
+        except Exception as exc:
+            self._fail(book_id, pipeline, f"恢复未完成：{exc}")
+            raise
+        finally:
+            with self.store._lock:
+                self._submissions.pop(key, None)
+            if child_id and not accepted:
+                self.app.studio.jobs.cancel(child_id)
+            self._settle_aborted_submission(book_id, pipeline)
+        if accepted:
+            self.app.studio.jobs.runner.submit(child_id)
+            self._wake.set()
+        return self.store.get_active_pipeline(book_id) or pipeline
+
     # ---- 查询 ----
 
     def get_pipeline(self, book_id: str) -> dict[str, Any]:
@@ -641,6 +743,7 @@ class WriterPipelineManager:
             or str(writer_input.get("pipeline_id") or "") != str(pipeline.get("id") or "")
             or int(writer_input.get("attempt") or -1) != int(pipeline.get("attempt") or 0)
             or str(writer_input.get("step") or "") != step
+            or ("step_index" in writer_input and writer_input["step_index"] != step_index)
             or int(writer_input.get("chapter_no") or 0) != int(snapshot.get("chapter_no") or 0)
         )
         if mismatch:
@@ -670,7 +773,21 @@ class WriterPipelineManager:
             self._finish_step(book_id, pipeline, task_id, output=None)
             return
         # 条件 3：输出非空 + 结构化解析 + 截断判定（解析失败 → 停链，保留任务原始结果）。
-        result = str(task.get("result") or "")
+        try:
+            reader = getattr(self.app.studio.jobs, "result_text", None)
+            if callable(reader):
+                result = reader(task_id, require_final=True)
+            elif self._artifact_task(task):
+                raise WriterPipelineError("TXT 结果读取接口不可用，不能回退旧正文")
+            else:
+                result = str(task.get("result") or "")
+        except (ValueError, OSError) as exc:
+            if step == "state":
+                self._finish_step(book_id, pipeline, task_id, output=None,
+                                  state_error=f"状态 TXT 结果不可用：{exc}")
+            else:
+                self._fail(book_id, pipeline, f"TXT 结果不可用：{exc}")
+            return
         finish_reason = str(task.get("finish_reason") or "")
         if step == "state":
             try:
@@ -693,6 +810,17 @@ class WriterPipelineManager:
         input_data = task.get("input") if isinstance(task.get("input"), dict) else {}
         writer = input_data.get("writer")
         return writer if isinstance(writer, dict) else {}
+
+    @staticmethod
+    def _artifact_task(task: dict[str, Any]) -> bool:
+        from naiba.studio.artifacts import has_result_contract
+        return has_result_contract(task)
+
+    @staticmethod
+    def _logical_id(task: dict[str, Any]) -> str:
+        from naiba.core.contracts import STUDIO_LOGICAL_GENERATION_ID_KEY
+        return str(task.get(STUDIO_LOGICAL_GENERATION_ID_KEY)
+                   or (task.get("input") or {}).get(STUDIO_LOGICAL_GENERATION_ID_KEY) or task.get("id") or "")
 
     def _task(self, task_id: str) -> dict[str, Any] | None:
         try:
@@ -826,6 +954,8 @@ class WriterPipelineManager:
         流水线自身的写回会推进作品 revision，因此写完后把 base_revision 刷新为
         写回后的权威值——别人的并发修改在下一次条件校验中被发现。
         """
+        task = self._task(task_id) or {}
+        logical_id = self._logical_id(task) or task_id
         pipeline_id = str(pipeline.get("id") or "")
         attempt = int(pipeline.get("attempt") or 0)
         snapshot = pipeline.get("request_snapshot") if isinstance(pipeline.get("request_snapshot"), dict) else {}
@@ -864,17 +994,21 @@ class WriterPipelineManager:
             if output is not None:
                 if step in ("genre", "title", "blurb", "world", "chars", "outline",
                             "outline_text", "outline_review", "split"):
-                    self._apply_setup_or_outline_step(book_id, record, step, output, task_id)
+                    self._apply_setup_or_outline_step(book_id, record, step, output, logical_id)
                 elif step == "segs":
                     outputs = dict(record.get("step_outputs") or {})
                     outputs["segs"] = [str(p) for p in output]
                     record["step_outputs"] = outputs
                 elif step == "draft":
-                    self._apply_draft_step(book_id, record, output, task_id)
+                    self._apply_draft_step(book_id, record, output, logical_id)
             if step == "state":
-                self._apply_state_step(book_id, record, output, state_error, task_id)
+                self._apply_state_step(book_id, record, output, state_error, logical_id)
             # ---- 记录完成并前进 ----
             record["completed_task_ids"] = completed
+            generations = list(record.get(WRITER_COMPLETED_GENERATIONS_KEY) or [])
+            if logical_id and logical_id not in generations:
+                generations.append(logical_id)
+            record[WRITER_COMPLETED_GENERATIONS_KEY] = generations
             record["current_task_id"] = ""
             if next_index >= len(record.get("steps") or []):
                 record["status"] = "done"
@@ -889,7 +1023,8 @@ class WriterPipelineManager:
                 record["chapter_revision"] = int(chapter.get("revision") or 0)
             applied = True
 
-        with self.store._lock:
+        transaction = self.store.writeback_transaction(book_id) if self._artifact_task(task) else nullcontext()
+        with self.store._lock, transaction:
             updated = self.store.update_pipeline(book_id, pipeline_id, _mutate, expected_attempt=attempt)
             if updated is None or not applied:
                 return
@@ -1369,6 +1504,7 @@ class WriterPipelineManager:
                 "pipeline_id": str(pipeline.get("id") or ""),
                 "attempt": int(pipeline.get("attempt") or 0),
                 "step": step,
+                "step_index": step_index,
                 "chapter_no": chapter_no,
                 "base_revision": int(pipeline.get("base_revision") or 0),
                 "chapter_revision": pipeline.get("chapter_revision"),

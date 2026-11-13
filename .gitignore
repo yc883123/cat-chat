@@ -240,6 +240,12 @@ verify/claude-cache-diagnostic/*
 !verify/_serve_recipe_ui.py
 !verify/auto_compaction_e2e.py
 !verify/auto_compaction_e2e.cjs
+!verify/compaction_faults_e2e.py
+!verify/compaction_faults_e2e.cjs
+!verify/_serve_workbench_txt.py
+!verify/workbench_txt_smoke.cjs
+!verify/_serve_clear_kvmem.py
+!verify/clear_kvmem_smoke.cjs
 !verify/_serve_tmp.py
 !verify/run_freeze_smoke.py
 # 对话侧栏批量管理（2026-11-12 入库）：隔离实例播种多工作区/收藏/归档/带任务会话，

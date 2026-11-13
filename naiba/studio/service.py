@@ -9,8 +9,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from typing import Any
 
@@ -18,6 +16,8 @@ from naiba.core.contracts import (
     STUDIO_SYSTEM_PROMPT_KEY, STUDIO_PROMPT_SOURCE_KEY, STUDIO_SKILL_IDS_KEY,
     STUDIO_SKILL_SNAPSHOT_KEY, STUDIO_THREAD_ID_KEY, STUDIO_PARENT_TASK_ID_KEY,
     STUDIO_HISTORY_MESSAGES_KEY, STUDIO_TRACE_MESSAGES_KEY,
+    STUDIO_RESULT_ARTIFACT_KEY, STUDIO_OUTPUT_CONTRACT_VERSION_KEY,
+    STUDIO_LOGICAL_GENERATION_ID_KEY, STUDIO_RESUMED_FROM_KEY, STUDIO_RESUMED_INTO_KEY,
 )
 from naiba.studio.content import ContentSnapshots, normalize_prompt_source
 from naiba.studio.conversation import public_task
@@ -29,6 +29,7 @@ from naiba.studio.custom import CustomStore
 from naiba.studio.handoff import HandoffAdapter, compose_handoff_message
 from naiba.studio.images import StudioImageError, validate_image_refs
 from naiba.studio.jobs import StudioJobManager
+from naiba.studio.model_identity import configured_identity
 from naiba.studio.runner import StudioRunner
 from naiba.studio.store import StudioStore, StudioConflictError
 
@@ -163,14 +164,7 @@ class StudioService:
             # freeze. Existing frozen Skills and legacy retries never acquire
             # a different profile merely by being read or submitted again.
             profile = dict(self.app.config.profile(str(data.get("model_key") or "")))
-            data["model_snapshot"] = {
-                "model_key": str(data.get("model_key") or ""),
-                "model_name": str(data.get("model_name") or ""),
-                "provider_id": str(profile.get("provider_id") or profile.get("provider") or ""),
-                "kind": str(profile.get("kind") or ""),
-                "base_url_hash": hashlib.sha256(json.dumps(str(profile.get("base_url") or ""),
-                    ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
-            }
+            data["model_snapshot"] = configured_identity(data, profile)
         return data
 
     @staticmethod
@@ -439,6 +433,10 @@ class StudioService:
             item[STUDIO_SKILL_IDS_KEY] = list(input_data.get(STUDIO_SKILL_IDS_KEY) or [])
             item[STUDIO_THREAD_ID_KEY] = row.get(STUDIO_THREAD_ID_KEY) or row.get("id")
             item[STUDIO_PARENT_TASK_ID_KEY] = row.get(STUDIO_PARENT_TASK_ID_KEY) or ""
+            for key in (STUDIO_RESULT_ARTIFACT_KEY, STUDIO_OUTPUT_CONTRACT_VERSION_KEY,
+                        STUDIO_LOGICAL_GENERATION_ID_KEY, STUDIO_RESUMED_FROM_KEY, STUDIO_RESUMED_INTO_KEY):
+                if key in row:
+                    item[key] = row[key]
             # 顶层有值就用顶层（将来真落库时不用再改这里），否则从 input 取。
             item["module"] = row.get("module") or input_data.get("module") or ""
             item["origin_label"] = row.get("origin_label") or input_data.get("origin_label") or ""
@@ -468,6 +466,24 @@ class StudioService:
         if not task:
             return {"error": "任务不存在"}, 404
         return {"task": public_task(task)}, 200
+
+    def api_task_artifact(self, task_id: str) -> tuple[dict[str, Any], int]:
+        try:
+            return self.jobs.result_artifact(task_id), 200
+        except LookupError:
+            return {"error": "任务不存在"}, 404
+        except ValueError as exc:
+            return {"error": str(exc), "code": "result_artifact_invalid"}, 409
+
+    def api_task_resume(self, task_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        try:
+            key = str((body or {}).get("request_key") or "")
+            task = self.jobs.resume_result(task_id, request_key=key)
+            return {"task": public_task(task)}, 201
+        except LookupError:
+            return {"error": "任务不存在"}, 404
+        except ValueError as exc:
+            return {"error": str(exc)}, 409
 
     def api_tasks_delete(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
         """批量删除历史产出（编辑模式多选删除）。
@@ -563,6 +579,10 @@ class StudioService:
             "source_body": input_data.get("source_body") or "",
             "result": str(task.get("result") or ""),
         }
+        try:
+            record["result"] = self.jobs.result_text(task_id)
+        except ValueError as exc:
+            return {"error": str(exc)}, 409
         model_key = str(input_data.get("model_key") or "")
         model_name = str(input_data.get("model_name") or "")
         try:
@@ -602,7 +622,7 @@ class StudioService:
             "vars": input_data.get("vars") or {},
             "user_request": input_data.get("user_request") or "",
             "source_body": input_data.get("source_body") or "",
-            "result": task.get("result") or task.get("result_partial") or "",
+            "result": self.jobs.result_text(task_id, require_final=False),
         }, note=note)
 
 

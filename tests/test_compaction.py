@@ -443,7 +443,7 @@ class CompactionCompactConversationTests(unittest.TestCase):
         self.app = _FakeApp(reply=GOOD_SUMMARY)
         self.settings = compaction.resolve_settings({"retain_turns": 1})
         self.profile = {"kind": "online", "model": "probe-default",
-                        "model_key": "online:probe-te", "context_window": 8000}
+                        "model_key": "online:probe-te", "context_window": 128000}
 
     def _rows(self, turns=6):
         filler = "这是一段较长的历史正文，用来模拟真实长会话里的大段工具输出与讨论。" * 20
@@ -467,7 +467,7 @@ class CompactionCompactConversationTests(unittest.TestCase):
         self.assertTrue(result["compacted"], result)
         self.assertEqual(len(self.app.models.calls), 1, "只发一次总结请求")
         call = self.app.models.calls[0]
-        self.assertIs(call["profile"], self.profile, "必须用本轮实际选中的同一 profile")
+        self.assertEqual({key: call["profile"].get(key) for key in self.profile}, self.profile, "隐藏摘要保留当前模型身份，档案复制后单独调整思考")
         self.assertNotIn("tools", call["options"], "总结请求不得挂工具")
         self.assertFalse(call["options"]["stream"], "总结请求不流式")
 
@@ -498,7 +498,7 @@ class CompactionCompactConversationTests(unittest.TestCase):
         self.app.models.last_finish_reason = "length"
         self.app.models.raises = RuntimeError("HTTP 502 upstream timed out")
         result = self._compact()
-        self.assertEqual(result["attempts"][0]["output_tokens"], 0)
+        self.assertNotIn("output_tokens", result["attempts"][0], "未知用量不能伪装为实测0")
         self.assertEqual(self.app.models.last_finish_reason, "")
         self.assertEqual(result["error"], "HTTP 502 upstream timed out")
 
@@ -563,7 +563,8 @@ class CompactionCompactConversationTests(unittest.TestCase):
         self.assertFalse(result["compacted"], "finish_reason=length 时不得写标记")
         self.assertEqual(result["reason"], "summary_truncated")
         self.assertEqual(self.app.storage.calls, [], "不得写任何标记")
-        self.assertEqual(len(self.app.models.calls), 1, "截断不重试：同一输入重发只会再花一次钱")
+        self.assertEqual(len(self.app.models.calls), 2, "截断最多一次变更策略的恢复")
+        self.assertNotEqual(self.app.models.calls[0]["messages"], self.app.models.calls[1]["messages"])
 
     def test_normal_finish_reason_still_compacts(self):
         """对照组：终止原因正常时同一份摘要照常定稿（新判据不得误杀）。"""
@@ -697,7 +698,7 @@ class CompactionRecoveryTests(unittest.TestCase):
     def setUp(self):
         self.settings = compaction.resolve_settings({"retain_turns": 1})
         self.profile = {"kind": "online", "model": "probe-default",
-                        "model_key": "online:probe-te", "context_window": 8000}
+                        "model_key": "online:probe-te", "context_window": 128000}
 
     def _rows(self, turns=6):
         filler = "这是一段较长的历史正文，用来模拟真实长会话里的大段工具输出与讨论。" * 20
@@ -813,7 +814,7 @@ class CompactionRecoveryTests(unittest.TestCase):
         result = self._compact(app)
         for item in result["attempts"]:
             self.assertIn("input_tokens", item)
-            self.assertIn("output_tokens", item)
+            self.assertIn("request_output_tokens", item)
             self.assertIn("region_messages", item)
             self.assertGreater(item["input_tokens"], 0)
 
@@ -1212,7 +1213,7 @@ class CompactionHookTests(unittest.TestCase):
         payload = next(call.args[0] for call in event.call_args_list
                        if call.args[0].get("action") == "failed")
         self.assertEqual(payload["reason"], "marker_write_failed")
-        self.assertIn("本轮将沿用原上下文继续", payload["message"])
+        self.assertIn("已保留原上下文", payload["message"])
         # 尝试诊断是旁路数据：只进事件流，绝不进会话消息或后续请求。
         self.assertIsInstance(payload.get("attempts"), list)
         for message in self.mixin.app.models.complete.call_args[0][1]:
@@ -1228,7 +1229,7 @@ class CompactionHookTests(unittest.TestCase):
         self.assertTrue(result.get("rebuilt"), result)
         # 关键：用本轮同一个 profile 对象发请求，不换模型。
         call = self.mixin.app.models.complete.call_args
-        self.assertIs(call[0][0], profile, "必须用本轮实际选中的同一个 profile")
+        self.assertEqual({key: call[0][0].get(key) for key in profile}, profile, "不修改原档案或切换模型")
         self.assertNotIn("tools", call[0][2], "总结请求不得挂工具")
         self.mixin.app.storage.merge_message_metadata.assert_called_once()
 

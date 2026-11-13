@@ -114,7 +114,7 @@ export function sessionDividerElement(message) {
 // 聊天记录一条不删，点「撤销整理」可让它们重新进入上下文。
 // 摘要由本地抽取生成（不调用任何模型），卡内可展开查看原文。
 export function compactionCardElement(message) {
-  const info = (message.metadata || {}).compaction || {};
+  const info = (message.metadata || {}).compaction || (message.metadata || {}).trace_view || {};
   const at = Number(info.at || message.created_at || 0);
   const time = at ? new Date(at).toLocaleString('zh-CN', { hour12: false }) : '';
   const summary = String(info.summary || '');
@@ -145,7 +145,7 @@ export function compactionCardElement(message) {
 // 该消息下方是否要跟一张整理卡（与「新会话」分割线互不冲突：两种标记可以同时存在）。
 export function compactionAfter(message) {
   if (!message || message.role === 'session') return null;
-  const info = (message.metadata || {}).compaction;
+  const info = (message.metadata || {}).compaction || (message.metadata || {}).trace_view;
   if (!info || typeof info !== 'object' || !String(info.summary || '').trim()) return null;
   return compactionCardElement(message);
 }
@@ -938,11 +938,11 @@ export async function cancelSessionStart(messageId) {
 // 代价讲清楚：下一轮前缀缓存会从整理前的位置重建一次。
 export async function cancelCompaction(messageId) {
   if (!messageId) return;
-  if (!window.confirm('撤销这次整理？\n\n被整理的旧消息会重新进入模型上下文；下一轮对话会重建一次缓存。')) return;
+  if (!window.confirm('撤销这次及后续整理？\n\n为避免后续摘要继续覆盖旧内容，本条及后续整理会一起撤销；完整记录重新进入模型上下文，下一轮会重建一次缓存。')) return;
   try {
     await api(`/api/compaction/${encodeURIComponent(messageId)}`, { method: 'DELETE' });
     await syncCurrentConversation();
-    toast('已撤销整理，旧消息重新进入上下文');
+    toast('已撤销本条及后续整理，完整记录重新进入上下文');
   } catch (error) {
     toast(`撤销失败：${error.message}`);
   }

@@ -538,6 +538,7 @@ class TruncationCauseTests(unittest.TestCase):
             last_finish_reason = "length"
 
             def complete(self, profile, messages, options, event):  # noqa: D102
+                self.calls = getattr(self, "calls", 0) + 1
                 return "写了一半的正文"
 
         runtime = _StubRuntime()
@@ -561,7 +562,8 @@ class TruncationCauseTests(unittest.TestCase):
         truncation = run_context.get("truncation") or {}
         self.assertTrue(truncation.get("truncated"))
         self.assertEqual(truncation.get("cause"), "context")
-        self.assertTrue(truncation.get("continued"), "续写一次的既有行为不变")
+        self.assertFalse(truncation.get("continued"), "已知真实占用超过预算时不得继续原样请求")
+        self.assertEqual(runtime.calls, 1)
 
 
 class TruncationNoticeSourceTests(unittest.TestCase):

@@ -4865,6 +4865,13 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .comfyui-shots-field { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
 .comfyui-shots-field input { width: 72px; min-height: 30px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); color: var(--text); padding: 4px 8px; }
 .comfyui-tasks { flex: none; max-height: 46%; display: flex; flex-direction: column; border-bottom: 1px solid var(--line); }
+.comfyui-clear-bar { display: flex; align-items: center; flex-wrap: wrap; flex-shrink: 0; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.comfyui-clear-bar[hidden] { display: none; }
+.comfyui-clear-count { font-size: 12px; font-weight: 600; }
+.comfyui-clear-note { flex: 1 1 180px; font-size: 11px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
+.comfyui-task-select { display: flex; align-items: center; gap: 6px; min-height: 44px; margin: -6px 0 -4px; font-size: 12px; color: var(--muted); cursor: pointer; }
+.comfyui-task-select input[type="checkbox"] { display: inline-block; width: 18px; height: 18px; min-height: 0; margin: 0; padding: 0; cursor: pointer; }
+.comfyui-task-card.is-selected { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--violet-line); }
 .comfyui-task-list { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px; display: flex; flex-direction: column; gap: 8px; }
 .comfyui-task-card { border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2); padding: 8px 10px; display: grid; gap: 4px; }
 /* 标题必须能收缩：flex 子项默认 min-width:auto，长工作流名会把状态标签挤出卡片
@@ -7595,3 +7602,11 @@ body[data-app-view="super-agent"] #sidebarWorkspaceTree { display: none; }
 .new-conversation-default-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 #newConversationDefaultStatus { overflow-wrap: anywhere; }
 @media (max-width: 600px) { .new-conversation-default-fields { grid-template-columns: minmax(0, 1fr); } }
+
+/* Verified result files share one compact, wrapping action row. */
+.wb-result-artifact { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; padding: 10px 0; }
+.wb-result-artifact[hidden] { display: none; }
+.wb-result-artifact > span { flex: 1 1 180px; min-width: 0; overflow-wrap: anywhere; color: var(--muted); font-size: 12px; }
+.wb-result-preview { box-sizing: border-box; width: min(900px, calc(100vw - 24px)); max-width: calc(100vw - 24px); max-height: calc(100dvh - 24px); border: 1px solid var(--line); border-radius: 14px; padding: 16px; background: var(--surface); color: var(--text); }
+.wb-result-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 65dvh; overflow: auto; font: inherit; }
+@media (max-width: 600px) { .wb-result-artifact button { min-height: 44px; } }

@@ -527,7 +527,9 @@ class ResultVisibilityUITests(unittest.TestCase):
         js = self._read("public/js/25-novel.js")
         editor = js[js.index("function renderAiEditor("):]
         editor = editor[: editor.index("\nfunction renderEditor(")]
-        self.assertIn('const draft = String(slot.streamText || task?.result || "")', editor)
+        self.assertIn('const draft = hasResultArtifact(task) ? resultArtifactText(task, slot.streamText)', editor)
+        self.assertIn(': String(slot.streamText || task?.result || "")', editor)
+        self.assertIn('resultArtifactReady(task)', editor)
         self.assertIn('result.textContent = draft', editor, "结果要写进面板里的结果区")
         self.assertIn('result.hidden = !draft.trim()', editor)
         # 以前把说明写进「手动编辑」面板的 note 里，润色面板自己什么都没有。

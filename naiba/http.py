@@ -818,6 +818,26 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._serve_comfyui_task_file(task_id, name)
         elif path.startswith("/api/comfyui/tasks/"):
             self._json(*self.app.comfyui.api_task(path.rsplit("/", 1)[-1]))
+        elif path.startswith("/api/studio/tasks/") and path.endswith("/artifact"):
+            task_id = path.split("/")[-2]
+            payload, status = self.app.studio.api_task_artifact(task_id)
+            query = urllib.parse.parse_qs(parsed.query)
+            if status == 200 and query.get("download", [""])[0] == "1":
+                data = payload["text"].encode("utf-8")
+                suffix = "" if payload["artifact"]["status"] == "final" else "-partial"
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Content-Disposition", content_disposition_attachment(f"{task_id}{suffix}.txt"))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    self.close_connection = True
+            else:
+                self._json(payload, status)
         elif path.startswith("/api/studio/tasks/") and path.endswith("/events"):
             task_id = path.split("/")[-2]
             query = urllib.parse.parse_qs(parsed.query)
@@ -1034,6 +1054,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path.startswith("/api/writer/books/") and path.endswith("/pipeline/retry"):
             self._json(*self.app.writer.api_retry_pipeline(
                 path[len("/api/writer/books/"):-len("/pipeline/retry")], body))
+        elif path.startswith("/api/writer/books/") and path.endswith("/pipeline/resume"):
+            self._json(*self.app.writer.api_resume_pipeline(
+                path[len("/api/writer/books/"):-len("/pipeline/resume")], body))
         elif path.startswith("/api/writer/books/") and path.endswith("/continuity/run"):
             # 只读连贯性检查：只写报告文件，不碰章节正文与版本。
             self._json(*self.app.writer.api_run_continuity_check(
@@ -1068,6 +1091,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._json(*self.app.studio.api_task_cancel(path.split("/")[-2]))
         elif path.startswith("/api/studio/tasks/") and path.endswith("/retry"):
             self._json(*self.app.studio.api_task_retry(path.split("/")[-2]))
+        elif path.startswith("/api/studio/tasks/") and path.endswith("/resume-result"):
+            self._json(*self.app.studio.api_task_resume(path.split("/")[-2], body))
         elif path == "/api/labeler/tasks":
             # 打标批次：受管 image_refs + 白名单 config（服务端会重新校验图片与模型）。
             self._json(*self.app.labeler.api_submit(body))

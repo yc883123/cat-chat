@@ -93,6 +93,7 @@ function harness() {
     selectedProvider: () => state.bootstrap.model_profiles.find(row => row.model_key === elements['#modelSelect'].value),
     composerModelChoice: () => elements['#composerModelSelect'].value,
     populateComposerModels: async preferred => { elements['#composerModelSelect'].value = preferred; },
+    refreshKvmemStatus: async () => null,
     applyModelSkinFor: async () => {}, resolveNewConversationModel: async () => ({ model_key: 'p', model_name: 'M1' }),
     COMPOSER_MODEL_REFRESH: '__refresh_composer_models__',
     fetchRunEvents: () => new Promise(() => {}), createRunRow: () => ({ isConnected: true }),

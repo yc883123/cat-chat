@@ -1056,6 +1056,7 @@ class ConversationRunMixin:
                 ),
             }
             if conv_kind != "aux":
+                run_context["trace_checkpoint"] = lambda trace, view: self.app.storage.save_context_checkpoint(run_id, trace, view)
                 run_context["compact_context"] = lambda messages, trace_start, limit, budget, used: self._compact_agent_context(
                     run=run, snapshot=snapshot, conversation_id=conversation_id,
                     conv_kind=conv_kind, frozen_conversation=frozen_conversation,
@@ -1220,6 +1221,7 @@ class ConversationRunMixin:
                 "plan_status": plan_status,
                 "skill_policy": dict(snapshot.get("skill_policy") or {"mode": "auto", "skill_ids": []}),
                 "trace": (run_context or {}).get("trace_messages") or [],
+                **({MetadataKeys.TRACE_VIEW: run_context["trace_view"]} if (run_context or {}).get("trace_view") else {}),
                 **({"error": sink.failure_message} if sink.failure_message else {}),
             }
             if attachments_truncated:
@@ -1307,6 +1309,7 @@ class ConversationRunMixin:
             aborted_message = self._persist_aborted_message(
                 run_id, conversation_id, skills,
                 trace=(run_context or {}).get("trace_messages") or [],
+                trace_view=(run_context or {}).get("trace_view"),
             )
             if aborted_message:
                 usage_message_id = str(aborted_message.get("id") or "")
@@ -1333,6 +1336,7 @@ class ConversationRunMixin:
                 run_id, conversation_id, skills,
                 trace=(run_context or {}).get("trace_messages") or [],
                 error=error_message,
+                trace_view=(run_context or {}).get("trace_view"),
             )
             if partial_message:
                 usage_message_id = str(partial_message.get("id") or "")
@@ -1491,8 +1495,6 @@ class ConversationRunMixin:
             return {}
         if mode != compaction_mod.MODE_AUTO:
             return {}
-        if run.get("_compaction_attempted"):
-            return {}
         history = [item for item in messages[1:] if isinstance(item, dict)]
         try:
             result = self._maybe_compact_context(
@@ -1519,7 +1521,11 @@ class ConversationRunMixin:
             })
             return {}
         if not result.get("rebuilt"):
-            return {}
+            return self._compact_current_trace(
+                run=run, messages=messages, trace_start=trace_start, profile=profile,
+                settings=settings, limit=limit, budget=budget, used=effective_used,
+                event=event, cancel_event=cancel_event, model_key=model_key,
+            )
         fresh = self.app.storage.get_conversation(conversation_id) or {}
         run["conversation_messages"] = _frozen_history_for_run(run, snapshot, fresh)
         rebuilt_history = build_model_history(
@@ -1530,6 +1536,110 @@ class ConversationRunMixin:
             **self.app.config.image_encode_cache_options(),
         )
         return {"history": rebuilt_history, "limit": limit, "budget": budget}
+
+    def _compact_current_trace(
+        self, *, run: dict[str, Any], messages: list[dict[str, Any]], trace_start: int,
+        profile: dict[str, Any], settings: dict[str, Any], limit: int, budget: int,
+        used: int, event: Any, cancel_event: threading.Event, model_key: str,
+    ) -> dict[str, Any]:
+        """只替换已闭合的较早工具组；当前用户/技能/插话与最近两组保持原样。"""
+        from naiba.core import compaction as compaction_mod
+        from naiba.core.history import compaction_replay_message
+        from naiba.core.trace_view import (complete_tool_boundaries, trace_fingerprint, source_user_fingerprint,
+                                          is_tool_result_message, is_summary_message)
+        from contextlib import nullcontext
+
+        trace = messages[trace_start:]
+        boundaries = complete_tool_boundaries(trace)
+        if len(boundaries) <= 2:
+            return {}
+        end = boundaries[-3]
+        protected = 0
+        for index, item in enumerate(trace[:end]):
+            if (item.get("role") in {"user", "system"}
+                    and not is_tool_result_message(item) and not is_summary_message(item)):
+                protected = index + 1
+        region = trace[protected:end]
+        tokens = compaction_mod.estimate_messages_tokens(region)
+        if tokens < compaction_mod.MIN_REGION_TOKENS:
+            return {}
+        signature = trace_fingerprint(region)
+        raw_tokens = compaction_mod.estimate_messages_tokens(list(getattr(messages, "trace", trace)))
+        previous_success = int(run.get("_trace_compaction_success_tokens") or 0)
+        if previous_success and raw_tokens - previous_success < compaction_mod.MIN_COMPACTION_GROWTH_TOKENS:
+            return {}
+        previous = run.get("_trace_compaction_attempt") or {}
+        calls = int(run.get("_summary_calls") or 0)
+        if calls >= compaction_mod.MAX_RUN_SUMMARY_ATTEMPTS:
+            return {}
+        if previous.get("signature") == signature:
+            return {}
+        if previous and tokens - int(previous.get("tokens") or 0) < compaction_mod.MIN_COMPACTION_GROWTH_TOKENS:
+            return {}
+        started = False
+        def on_started() -> None:
+            nonlocal started
+            if not started:
+                event({"type": "compaction", "action": "started", "message": "正在整理较早的对话和本轮工具记录，当前轮会继续…"})
+                started = True
+        generated = compaction_mod.request_summary(
+            self.app, region, profile=profile, settings=settings, cancel_event=cancel_event,
+            attempt_limit=min(compaction_mod.MAX_SUMMARY_ATTEMPTS, compaction_mod.MAX_RUN_SUMMARY_ATTEMPTS - calls),
+            on_started=on_started,
+        )
+        attempts = generated.get("attempts") or []
+        run["_summary_calls"] = calls + len(attempts)
+        if attempts:
+            run["_trace_compaction_attempt"] = {"signature": signature, "tokens": tokens}
+        summary = str(generated.get("summary") or "")
+        if not summary:
+            if started:
+                event({"type": "compaction", "action": "failed", "reason": str(generated.get("reason") or "unknown"),
+                       "error": generated.get("error") or "", "attempts": attempts,
+                       "message": compaction_mod.failure_message(str(generated.get("reason") or ""))})
+            return {}
+        projected = [*trace[:protected], compaction_replay_message(summary), *trace[end:]]
+        before = compaction_mod.estimate_messages_tokens(trace)
+        after = compaction_mod.estimate_messages_tokens(projected)
+        if before <= after:
+            event({"type": "compaction", "action": "failed", "reason": "freed_too_small",
+                   "message": compaction_mod.failure_message("freed_too_small"), "attempts": attempts})
+            return {}
+        raw_trace = list(getattr(messages, "trace", trace))
+        user_rows = [row for row in run.get("conversation_messages") or [] if row.get("role") == "user"]
+        descriptor = {
+            "version": 1, "source_run_id": str(run.get("id") or ""),
+            "summary": summary, "generator": "model-summary", "region_messages": end - protected,
+            "freed_est": before - after, "model_key": model_key,
+            "source_user_message_id": str(user_rows[-1].get("id") or "") if user_rows else "",
+            "source_user_sha256": source_user_fingerprint(user_rows[-1]) if user_rows else "",
+            "trace_sha256": trace_fingerprint(raw_trace),
+            "generation": int(getattr(messages, "generation", 0)) + 1,
+            "ranges": [{"through": len(raw_trace), "kept_groups": 2}], "messages": projected,
+        }
+        try:
+            with getattr(self, "_submit_lock", nullcontext()):
+                if cancel_event.is_set():
+                    raise TaskCancelled("任务已取消")
+                if run.get("id"):
+                    self.app.storage.save_context_checkpoint(str(run["id"]), raw_trace, descriptor, require_active=True)
+        except TaskCancelled:
+            raise
+        except Exception as exc:
+            event({"type": "compaction", "action": "failed", "reason": "marker_write_failed",
+                   "message": compaction_mod.failure_message("marker_write_failed"),
+                   "error": summary_error_detail(exc, profile), "attempts": attempts})
+            return {}
+        run["_trace_compaction_attempt"] = {}
+        run["_trace_compaction_success_tokens"] = raw_tokens
+        event({"type": "compaction", "action": "compacted", "region_messages": end - protected,
+               "freed_est": before - after, "used": used, "limit": limit, "model_key": model_key})
+        trace_info = {"summary": summary, "generator": "model-summary", "model_key": model_key,
+                      "source_user_message_id": descriptor["source_user_message_id"],
+                      "source_user_sha256": descriptor["source_user_sha256"],
+                      "region_messages": end - protected, "freed_est": before - after}
+        return {"history": messages[1:trace_start], "trace": projected, "trace_info": trace_info,
+                "limit": limit, "budget": budget}
 
     def _maybe_compact_context(
         self, *, run: dict[str, Any], snapshot: dict[str, Any], conversation_id: str,
@@ -1600,14 +1710,20 @@ class ConversationRunMixin:
             return {}
         if cancel_event.is_set():
             raise TaskCancelled("任务已取消")
-        run["_compaction_attempted"] = True
-        event({"type": "compaction", "action": "started", "message": "正在整理较早的对话，当前轮会继续…"})
+        started = False
+        def on_started() -> None:
+            nonlocal started
+            if not started:
+                run["_compaction_attempted"] = True
+                event({"type": "compaction", "action": "started", "message": "正在整理较早的对话，当前轮会继续…"})
+                started = True
         result = compaction_mod.compact_conversation(
             self.app, conversation_id=conversation_id, rows=rows, settings=settings,
             profile=profile, model_key=model_key, model_name=model_name,
             pdf_tools=pdf_tools, video_tools=video_tools,
-            source="auto", limit=limit, used=used, cancel_event=cancel_event,
+            source="auto", limit=limit, used=used, cancel_event=cancel_event, on_started=on_started,
         )
+        run["_summary_calls"] = int(run.get("_summary_calls") or 0) + len(result.get("attempts") or [])
         if result.get("compacted"):
             payload = {
                 "type": "compaction", "action": "compacted",
@@ -1625,10 +1741,11 @@ class ConversationRunMixin:
             event(payload)
             return {"rebuilt": True}
         detail = str(result.get("error") or "").strip()
+        if not started:
+            return {}
         event({
             "type": "compaction", "action": "failed",
-            "message": (f"上下文整理没有完成（{detail}），本轮将沿用原上下文继续。" if detail
-                        else "上下文整理没有完成，本轮将沿用原上下文继续。"),
+            "message": compaction_mod.failure_message(str(result.get("reason") or "")) + (f"（{detail}）" if detail else ""),
             "reason": str(result.get("reason") or "unknown"),
             "error": detail,
             # 每次尝试的输入/输出规模与失败类别：旁路诊断（只进事件流，不进模型请求）。
@@ -1718,6 +1835,7 @@ class ConversationRunMixin:
         conversation_id: str,
         skills: list[dict[str, Any]],
         trace: list[dict[str, Any]] | None = None,
+        trace_view: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """取消时把本次已累积(reasoning/部分回复/工具)重建为一条\"已中止\"assistant 消息并入库。
 
@@ -1740,6 +1858,10 @@ class ConversationRunMixin:
                     return None
         except Exception:
             pass
+        if trace is None:
+            reader = getattr(self.app.storage, "get_context_checkpoint", None)
+            checkpoint = reader(run_id) if callable(reader) else {}
+            trace, trace_view = checkpoint.get("trace"), checkpoint.get("trace_view")
         reasoning, tool_runs, content, activity = self._rebuild_partial_run(run_id, events)
         if not content:
             content = "（已中止）"
@@ -1755,6 +1877,7 @@ class ConversationRunMixin:
             "skills": skills,
             "activity": activity,
             "trace": trace or [],
+            **({MetadataKeys.TRACE_VIEW: trace_view} if trace_view else {}),
             "attachments": attachments,
         }
         # 中止轮次也带 usage：圆环要显示「最近一次真实请求」的占用。不带的话前端只能
@@ -1995,6 +2118,7 @@ class ConversationRunMixin:
         trace: list[dict[str, Any]] | None = None,
         error: str = "",
         placeholder: str = "（本次回答未完成）",
+        trace_view: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """运行异常（如 HTTP 500）时把本次已累积内容重建为一条 partial assistant 消息并入库。
 
@@ -2020,6 +2144,10 @@ class ConversationRunMixin:
                     return None
         except Exception:
             pass
+        if trace is None:
+            reader = getattr(self.app.storage, "get_context_checkpoint", None)
+            checkpoint = reader(run_id) if callable(reader) else {}
+            trace, trace_view = checkpoint.get("trace"), checkpoint.get("trace_view")
         reasoning, tool_runs, content, activity = self._rebuild_partial_run(run_id, events)
         if not content:
             content = placeholder
@@ -2034,6 +2162,7 @@ class ConversationRunMixin:
             "skills": skills,
             "activity": activity,
             "trace": trace or [],
+            **({MetadataKeys.TRACE_VIEW: trace_view} if trace_view else {}),
             "error": error,
             "attachments": attachments,
         }

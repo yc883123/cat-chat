@@ -869,9 +869,16 @@
                     <div class="wb-media-menu-panel">
                     <button class="control-button tiny" id="comfyuiFreeModels" type="button" title="让 ComfyUI 卸载已加载的模型，释放显存与内存；正在执行的任务不受影响，会在任务结束后卸载">释放模型</button>
                     <button class="control-button tiny" id="comfyuiOpenOutputs" type="button" title="在运行 Cat Chat 的电脑上打开产物文件夹">产物</button>
-                    <button class="control-button tiny" id="comfyuiClearTasks" type="button" title="删除已结束的任务和它们的产物">清除</button>
+                    <button class="control-button tiny" id="comfyuiClearTasks" type="button" title="勾选已结束的单次任务后删除">清除</button>
                     </div>
                   </details>
+                </div>
+                <div class="comfyui-clear-bar" id="comfyuiClearBar" hidden>
+                  <span class="comfyui-clear-count" role="status">已选 0 条</span>
+                  <small class="comfyui-clear-note">全选仅包含已加载的已结束单次任务；未加载记录不受影响。</small>
+                  <button class="control-button tiny" id="comfyuiClearSelectAll" type="button">全选已加载</button>
+                  <button class="control-button tiny" id="comfyuiClearDelete" type="button" disabled>删除所选</button>
+                  <button class="control-button tiny" id="comfyuiClearCancel" type="button">取消</button>
                 </div>
                 <div class="comfyui-task-list" id="comfyuiTaskList" aria-label="任务列表"></div>
                 <div class="comfyui-history-footer" id="comfyuiTaskHistoryFooter"><span role="status"></span><button type="button" class="control-button tiny" data-comfyui-history-more="tasks">加载更早记录</button></div>

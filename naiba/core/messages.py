@@ -47,6 +47,7 @@ MESSAGE_METADATA_KEYS: tuple[str, ...] = (
     # 自动压缩上下文的整理标记（写在被整理区间最后一条消息上）：重放时此前的历史
     # 替换为一条固定格式的摘要消息（摘要原文存在标记里）；聊天记录与该消息本身不动。
     "compaction",
+    "trace_view",
     # 插话（interjection）：运行中用户排队的新指令，落库为 role=user 消息，未被
     # interjection_consumed 标记前不进模型上下文（见 core.history.build_model_history）。
     "interjection",
@@ -97,6 +98,7 @@ class MetadataKeys:
     # {"at","source","summary","region_messages",...}。重放端遇它清空此前历史、
     # 以摘要消息开场；撤销 = json_remove 该键（见 storage.clear_compaction_marker）。
     COMPACTION = "compaction"
+    TRACE_VIEW = "trace_view"
     # 本地大脑的「图片已降级」旗标（`{"names": [...]}`）：由 run/chat 在本地图片总量上限
     # 生效那轮写入，之后 build_model_history（仅 local brain）回放同样的占位文本。
     # **只在 kind=local 时读写**——切到在线模型即恢复原图（前缀断一次，可接受）。

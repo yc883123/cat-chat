@@ -1599,6 +1599,10 @@ class NaibaChatApp:
             profile, client = self._kvmem_client(provider_id)
             status = client.readiness(str(profile.get("model") or ""))
             status["provider_id"] = str(profile.get("id") or provider_id)
+            if status.get("status") in {"ready", "running"}:
+                from naiba.kvmem import last_start_path, write_last_start
+                write_last_start(last_start_path(self.paths.data_dir), client.manager_url,
+                                 client.last_draft_parameters)
             return status, HTTPStatus.OK
         except Exception as exc:  # noqa: BLE001 - adapter returns only safe text
             return {"ok": False, "status": "error", "error": str(exc)}, HTTPStatus.BAD_REQUEST
@@ -1623,10 +1627,15 @@ class NaibaChatApp:
             before = client.status()
             if before.get("status") in {"ready", "running"}:
                 return {**before, "accepted": False, "message": "KVMem 服务已经在运行"}, HTTPStatus.OK
-            result = client.start()
+            from naiba.kvmem import last_start_path, read_last_start, write_last_start
+            cache_path = last_start_path(self.paths.data_dir)
+            cached = read_last_start(cache_path).get(client.manager_url)
+            result = client.start(fallback=cached)
+            write_last_start(cache_path, client.manager_url, client.last_draft_parameters)
             result["status"] = "starting"
             result["summary"] = {
-                "backend": before.get("backend"), "model": before.get("model"),
+                "backend": client.last_draft_parameters.get("Backend") or before.get("backend"),
+                "model": client.last_draft_parameters.get("Model") or before.get("model"),
                 "engine_summary": before.get("engine_summary"), "actual_port": before.get("actual_port"),
             }
             return result, HTTPStatus.ACCEPTED

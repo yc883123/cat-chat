@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 from urllib.parse import urlsplit
 
-from naiba.kvmem import KVMemClient, KVMemError, validate_manager_url
+from naiba.kvmem import (KVMemClient, KVMemError, last_start_path, read_last_start,
+                         validate_manager_url, write_last_start)
 
 
 class _Controller(BaseHTTPRequestHandler):
@@ -130,6 +136,108 @@ class KVMemTests(unittest.TestCase):
             self.assertNotIn("不可达", message)
         finally:
             _Controller.fail_start_reason = original
+
+    def test_start_restores_cached_model_after_controller_loses_selection(self):
+        original = _Controller.draft
+        _Controller.draft = {**original, "parameters": {"Model": "", "Backend": "ninfer", "Gpu": 0}}
+        try:
+            client = KVMemClient(self.url, "http://127.0.0.1:18200/v1")
+            client.start(fallback={"Model": "remembered.gguf", "Backend": "ninfer", "Gpu": "1", "Worker": "w"})
+            body = json.loads([body for method, path, _headers, body in _Controller.calls
+                               if method == "POST" and path.endswith("/start")][-1])
+            self.assertEqual(body["parameters"], {"Model": "remembered.gguf", "Backend": "ninfer", "Gpu": 0, "Worker": "w"})
+            self.assertEqual(client.last_draft_parameters["Model"], "remembered.gguf")
+            self.assertEqual(client.last_draft_parameters["Gpu"], "0")
+            client.stop()
+        finally:
+            _Controller.draft = original
+
+    def test_cache_does_not_mix_backend_or_another_selected_model(self):
+        for parameters in ({"Backend": "ninfer", "Model": ""},
+                           {"Backend": "polystrata", "Model": "new-model"}):
+            original = dict(parameters)
+            KVMemClient.fill_missing_parameters(parameters,
+                {"Backend": "polystrata", "Model": "old-model", "Worker": "old-worker"})
+            self.assertEqual(parameters, original)
+
+    def test_cache_roundtrip_filters_secrets_and_handles_invalid_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = last_start_path(temporary)
+            write_last_start(target, self.url, {"Backend": "ninfer", "Model": ""})
+            self.assertFalse(target.exists())
+            write_last_start(target, self.url, {"Backend": "ninfer", "Model": "m.gguf", "Gpu": 0,
+                                                "token": "secret", "Extra": "private"})
+            self.assertEqual(read_last_start(target), {self.url: {"Backend": "ninfer", "Model": "m.gguf", "Gpu": "0"}})
+            before = target.stat().st_mtime_ns
+            write_last_start(target, self.url, {"Backend": "ninfer", "Model": "m.gguf", "Gpu": 0})
+            self.assertEqual(before, target.stat().st_mtime_ns)
+            target.write_bytes(b'\xff')
+            self.assertEqual(read_last_start(target), {})
+            target.write_text("[]", encoding="utf-8")
+            self.assertEqual(read_last_start(target), {})
+
+    def test_cache_concurrent_manager_updates_are_not_lost(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = last_start_path(temporary)
+            original_read = read_last_start
+            barrier = threading.Barrier(12)
+            errors = []
+
+            def slow_read(path):
+                snapshot = original_read(path)
+                time.sleep(0.01)
+                return snapshot
+
+            def write(index):
+                try:
+                    barrier.wait(timeout=5)
+                    write_last_start(target, f"http://127.0.0.1:{19000 + index}",
+                                     {"Backend": "ninfer", "Model": f"model-{index}"})
+                except BaseException as exc:
+                    errors.append(repr(exc))
+
+            with mock.patch("naiba.kvmem.read_last_start", side_effect=slow_read):
+                threads = [threading.Thread(target=write, args=(index,)) for index in range(12)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=8)
+                self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(errors, [])
+            self.assertEqual(len(read_last_start(target)), 12)
+            self.assertEqual(list(target.parent.glob("*.tmp")), [])
+
+    def test_cache_write_failure_is_nonfatal_and_removes_own_temporary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = last_start_path(temporary)
+            with mock.patch("naiba.kvmem.os.replace", side_effect=PermissionError("locked")):
+                write_last_start(target, self.url, {"Backend": "ninfer", "Model": "m.gguf"})
+            self.assertEqual(read_last_start(target), {})
+            self.assertEqual(list(target.parent.glob("*.tmp")), [])
+
+    def test_app_remembers_running_parameters_then_restarts_from_empty_draft(self):
+        from naiba.app import NaibaChatApp
+        original, state = _Controller.draft, _Controller.state
+        with tempfile.TemporaryDirectory() as temporary:
+            client = KVMemClient(self.url, "http://127.0.0.1:18200/v1")
+            client.last_draft_parameters = {"Backend": "ninfer", "Model": "remembered.gguf"}
+            app = SimpleNamespace(paths=SimpleNamespace(data_dir=Path(temporary)),
+                                  _kvmem_client=lambda _key: ({"id": "fixture"}, client))
+            with mock.patch.object(client, "readiness", return_value={"status": "ready"}):
+                payload, code = NaibaChatApp.api_kvmem_status(app, "fixture")
+            self.assertEqual(code, 200)
+            self.assertEqual(payload["provider_id"], "fixture")
+            self.assertEqual(read_last_start(last_start_path(temporary))[self.url]["Model"], "remembered.gguf")
+            _Controller.state = "stopped"
+            _Controller.draft = {"schema_version": 1, "parameters": {"Backend": "ninfer", "Model": ""}}
+            try:
+                payload, code = NaibaChatApp.api_kvmem_start(app, "fixture", {"confirm": True})
+                self.assertEqual(code, 202, payload)
+                self.assertEqual(payload["summary"]["model"], "remembered.gguf")
+                self.assertEqual(payload["status"], "starting")
+                self.assertNotIn("temporary-secret", json.dumps(payload))
+            finally:
+                _Controller.draft, _Controller.state = original, state
 
 
 if __name__ == "__main__":

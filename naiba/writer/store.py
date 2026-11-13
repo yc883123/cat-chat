@@ -27,12 +27,14 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
 import re
 import shutil
 import threading
+from contextlib import contextmanager
 import time
 import uuid
 from pathlib import Path
@@ -455,13 +457,20 @@ def normalize_outline_chapters(raw: Any, *, min_chapters: int = 1,
     return rows
 
 
+_WRITER_LOCKS: dict[str, Any] = {}
+_WRITER_LOCKS_GUARD = threading.Lock()
+
+
 class WriterStore:
     """作品、章节与版本的落盘（线程锁串行化写路径；读为单章独立小文件）。"""
 
     def __init__(self, data_dir: Path):
         self._root = Path(data_dir) / "studio" / "writer"
         self._imports = self._root / "_imports"
-        self._lock = threading.RLock()
+        with _WRITER_LOCKS_GUARD:
+            key = os.path.normcase(str(self._root.resolve()))
+            self._lock = _WRITER_LOCKS.setdefault(key, threading.RLock())
+        self._transaction: tuple[Path, dict[Path, dict[str, Any]]] | None = None
 
     # ---- 路径与安全 ----
 
@@ -559,22 +568,35 @@ class WriterStore:
 
     # ---- 原子读写 ----
 
-    @staticmethod
-    def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
         """同目录临时文件 + 原子替换（撞上被占用的目标短暂重试）；失败不覆盖已有内容。"""
-        atomic_write_json(path, payload)
+        with self._lock:
+            if self._transaction is not None:
+                root, writes = self._transaction
+                resolved = path.resolve()
+                if not resolved.is_relative_to(root):
+                    raise WriterStoreError("事务不能写入其他作品")
+                writes[resolved] = copy.deepcopy(payload)
+                return
+            atomic_write_json(path, payload)
 
-    @staticmethod
-    def _read_json(path: Path, *, what: str) -> dict[str, Any]:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError as exc:
-            raise LookupError(f"{what}不存在") from exc
-        except (UnicodeDecodeError, json.JSONDecodeError, OSError) as exc:
-            raise WriterStoreError(f"{what}文件损坏：{path.name}") from exc
-        if not isinstance(payload, dict):
-            raise WriterStoreError(f"{what}文件损坏：{path.name}")
-        return payload
+    def _read_json(self, path: Path, *, what: str) -> dict[str, Any]:
+        # Readers outside the transaction owner must wait for commit/abort;
+        # otherwise a shared store could expose a staged version that rolls back.
+        with self._lock:
+            if self._transaction is not None:
+                pending = self._transaction[1].get(path.resolve())
+                if pending is not None:
+                    return copy.deepcopy(pending)
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError as exc:
+                raise LookupError(f"{what}不存在") from exc
+            except (UnicodeDecodeError, json.JSONDecodeError, OSError) as exc:
+                raise WriterStoreError(f"{what}文件损坏：{path.name}") from exc
+            if not isinstance(payload, dict):
+                raise WriterStoreError(f"{what}文件损坏：{path.name}")
+            return payload
 
     @staticmethod
     def _dir_bytes(path: Path) -> int:
@@ -599,9 +621,42 @@ class WriterStore:
 
     # ---- 清单 ----
 
+    @contextmanager
+    def writeback_transaction(self, book_id: str):
+        """Stage version, revision and pipeline writes in one recoverable commit."""
+        from naiba.writer import writeback
+        with self._lock:
+            root = self._book_dir(book_id)
+            if self._transaction is not None:
+                if self._transaction[0] != root:
+                    raise WriterStoreError("事务不能跨作品")
+                yield
+                return
+            try:
+                writeback.recover(root)
+            except (OSError, ValueError) as exc:
+                raise WriterStoreError(f"写回恢复失败：{exc}") from exc
+            writes: dict[Path, dict[str, Any]] = {}
+            self._transaction = (root, writes)
+            try:
+                yield
+            except BaseException:
+                self._transaction = None
+                raise
+            else:
+                self._transaction = None
+                writeback.commit(root, writes)
+
     def _load_manifest(self, book_id: str) -> dict[str, Any]:
+        from naiba.writer import writeback
         book_dir = self._book_dir(book_id)
-        manifest = self._read_json(book_dir / "book.json", what="作品清单")
+        with self._lock:
+            if self._transaction is None:
+                try:
+                    writeback.recover(book_dir)
+                except (OSError, ValueError) as exc:
+                    raise WriterStoreError(f"写回恢复失败：{exc}") from exc
+            manifest = self._read_json(book_dir / "book.json", what="作品清单")
         version = manifest.get("schema_version")
         if version != SCHEMA_VERSION:
             raise WriterStoreError(f"作品数据版本不支持：{version}（当前支持 {SCHEMA_VERSION}）")
@@ -1411,7 +1466,8 @@ class WriterStore:
                              source_outline_version_id: str = "",
                              finish_reason: str = "", note: str = "",
                              expected_revision: Any = None,
-                             manifest: dict[str, Any] | None = None) -> dict[str, Any]:
+                             manifest: dict[str, Any] | None = None,
+                             manual_draft: dict[str, Any] | None = None) -> dict[str, Any]:
         """新增一份正文版本并切换当前指针；与旧当前版本逐字相同则不重复建版本。
 
         幂等：同一 `task_id` 已写过版本时直接返回既有版本（重复写回/崩溃恢复安全）。
@@ -1472,6 +1528,11 @@ class WriterStore:
                 "note": str(note or ""),
                 "content": content, "len": len(content),
             }
+            if manual_draft is not None:
+                from naiba.core.contracts import WRITER_MANUAL_DRAFT_KEY
+                record[WRITER_MANUAL_DRAFT_KEY] = {
+                    key: manual_draft[key] for key in ("id", "revision", "chars", "sha256")
+                }
             self._write_json(self._chapter_version_path(book_dir, chapter_no, vid), record)
             versions.append({"id": vid, "version": version_no, "kind": str(kind or "manual"),
                              "updated_at": record["updated_at"], "task_id": str(task_id or ""),

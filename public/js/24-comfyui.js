@@ -52,6 +52,10 @@ const comfyui = {
   mediaGroupsCollapsed: {}, // 媒体分组卡折叠状态 {kind: true}；只存内存，不落盘、不进 visible_params
   storyboardQueue: [],    // 拆书匠「分镜生图」发来的提示词；只存内存，刷新即清
   resultsSegment: "single", // 结果页两档：single = 单次任务+产物；batch = 批次列表
+  clearMode: false,
+  clearSelection: new Set(),
+  clearEpoch: 0,
+  clearRequest: null, // 与模式生命周期分离：切页不会解除仍在执行的删除请求。
 };
 
 // ============================================================
@@ -362,6 +366,7 @@ export function bindComfyuiEvents() {
     } else {
       // 离开造梦机页：再次生成草稿不跨页面保留。
       if (comfyui.rerun || comfyui.rerunLoading) dropRerunDraft();
+      exitClearMode();
       stopPolling();
       stopBackgroundRefresh();
       stopBatchPolling();
@@ -378,7 +383,10 @@ export function bindComfyuiEvents() {
   $("#comfyuiImportConfirm")?.addEventListener("click", () => void confirmImport());
   $("#comfyuiImportFile")?.addEventListener("change", onImportFile);
   $("#comfyuiSubmit")?.addEventListener("click", () => void submitTask());
-  $("#comfyuiClearTasks")?.addEventListener("click", () => void clearFinishedTasks());
+  $("#comfyuiClearTasks")?.addEventListener("click", enterClearMode);
+  $("#comfyuiClearSelectAll")?.addEventListener("click", toggleClearSelectAll);
+  $("#comfyuiClearDelete")?.addEventListener("click", () => void deleteSelectedTasks());
+  $("#comfyuiClearCancel")?.addEventListener("click", exitClearMode);
   $("#comfyuiFreeModels")?.addEventListener("click", () => void freeModels());
   $("#comfyuiOpenOutputs")?.addEventListener("click", () => void openOutputsFolder());
   $("#comfyuiParamsSave")?.addEventListener("click", () => void saveParamsConfig());
@@ -420,6 +428,7 @@ export function bindComfyuiEvents() {
     });
   }
   $("#comfyuiTaskList")?.addEventListener("click", onTaskListClick);
+  $("#comfyuiTaskList")?.addEventListener("change", onTaskClearToggle);
   $("#comfyuiOutputGrid")?.addEventListener("click", onOutputGridClick);
   $("#studioPageComfyui")?.addEventListener("click", (event) => {
     const button = event.target.closest?.("[data-comfyui-history-more]");
@@ -492,6 +501,7 @@ function onPaneClick(event) {
 function setComfyuiPane(pane) {
   const root = $("#studioPageComfyui");
   if (!root) return;
+  if (pane !== "tasks") exitClearMode();
   // 离开生成表单就丢弃再次生成草稿；旧任务快照不跨档位复用到别的表单。
   if (pane !== "run" && (comfyui.rerun || comfyui.rerunLoading)) dropRerunDraft();
   root.dataset.comfyuiPane = pane;
@@ -517,6 +527,7 @@ function setComfyuiPane(pane) {
 // CSS 显隐，与 data-comfyui-pane 同一套口径。
 function setComfyuiResultsSegment(seg) {
   comfyui.resultsSegment = seg === "batch" ? "batch" : "single";
+  if (comfyui.resultsSegment === "batch") exitClearMode();
   const root = $("#studioPageComfyui");
   if (root) root.dataset.resultsSegment = comfyui.resultsSegment;
   document.querySelectorAll("#comfyuiResultsSeg [data-comfyui-results-seg]").forEach((node) => {
@@ -3364,6 +3375,8 @@ function taskFingerprint(row) {
     (row.result?.outputs || []).length,
     Number(row.created_at || 0), Number(row.finished_at || 0),
     Boolean(row.can_retry), Boolean(row.can_cancel),
+    comfyui.clearMode ? (comfyui.clearSelection.has(String(row.id)) ? "selected" : "clear") : "idle",
+    Boolean(comfyui.clearRequest),
     comfyui.deleting.has(String(row.id || "")) ? "deleting" : "",
   ]);
 }
@@ -3428,6 +3441,11 @@ function renderTasks() {
   const list = $("#comfyuiTaskList");
   if (!list) return;
   updateStepMeter();
+  if (comfyui.clearMode) {
+    const allowed = new Set(clearableTaskIds());
+    for (const id of comfyui.clearSelection) if (!allowed.has(id)) comfyui.clearSelection.delete(id);
+  }
+  renderClearBar();
   const rows = comfyui.tasks.filter((row) => !isBatchTaskRow(row));
   historyViewport("#comfyuiTaskList", {
     key: (row) => row.id, fingerprint: taskFingerprint, render: renderTaskCard,
@@ -3452,6 +3470,21 @@ function renderTaskCard(row) {
   const card = document.createElement("div");
   card.className = `comfyui-task-card status-${row.status}`;
   card.dataset.taskId = row.id;
+  if (comfyui.clearMode && !isTaskActive(row)) {
+    const selected = comfyui.clearSelection.has(String(row.id));
+    card.classList.toggle("is-selected", selected);
+    const label = document.createElement("label");
+    label.className = "comfyui-task-select";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.dataset.comfyuiTaskCheck = row.id;
+    box.checked = selected;
+    box.disabled = Boolean(comfyui.clearRequest) || comfyui.deleting.has(String(row.id));
+    const text = document.createElement("span");
+    text.textContent = "选择这条任务";
+    label.append(box, text);
+    card.append(label);
+  }
   const head = document.createElement("div");
   head.className = "comfyui-task-head";
   const name = document.createElement("strong");
@@ -3512,6 +3545,7 @@ function renderTaskCard(row) {
     remove.textContent = "删除";
   }
   actions.append(remove);
+  if (comfyui.clearRequest) for (const button of actions.querySelectorAll("button")) button.disabled = true;
   card.append(actions);
   return card;
 }
@@ -3567,6 +3601,7 @@ function taskMetaText(row) {
 }
 
 async function onTaskListClick(event) {
+  if (comfyui.clearRequest) return;
   const cancel = event.target.closest("[data-comfyui-cancel]");
   if (cancel) {
     try {
@@ -3606,7 +3641,7 @@ async function onTaskListClick(event) {
 
 async function deleteTaskFlow(taskId, button) {
   const id = String(taskId || "");
-  if (!id || comfyui.deleting.has(id)) return;
+  if (!id || comfyui.deleting.has(id) || comfyui.clearRequest) return;
   const row = comfyui.tasks.find((item) => String(item.id) === id);
   const active = row ? isTaskActive(row) : false;
   const confirmText = active
@@ -3674,25 +3709,119 @@ async function openOutputsFolder() {
   }
 }
 
-async function clearFinishedTasks() {
-  if (!window.confirm("删除全部已结束的单次任务和它们的产物文件？批量产物请到「批量」档里按批次删。")) return;
-  try {
-    // exclude_batch：单次档看不见批量条目，就不能在这里把它们一起删掉。
-    const payload = await api("/api/comfyui/tasks", {
-      method: "DELETE",
-      body: { exclude_batch: true },
-    });
-    const parts = [`已删除 ${payload.deleted || 0} 条任务`];
-    if (payload.skipped?.length) parts.push(`${payload.skipped.length} 条正在执行，已跳过`);
-    const failed = Array.isArray(payload.failed) ? payload.failed : [];
-    if (failed.length) parts.push(`${failed.length} 条删除失败：${failed[0]?.reason || ""}`);
-    const kept = new Set([...(payload.skipped || []).map(String), ...failed.map((row) => String(row.id))]);
-    forgetHistoryRows("tasks", comfyui.tasks.filter((row) => !isTaskActive(row) && !kept.has(String(row.id))).map((row) => row.id));
-    toast(parts.join("；"));
-    await refreshTasks();
-  } catch (error) {
-    toast(`删除失败：${error.message}`);
+function clearableTaskIds() {
+  return [...new Set(comfyui.tasks.filter(row => !isBatchTaskRow(row) && !isTaskActive(row)
+    && !comfyui.deleting.has(String(row.id))).map(row => String(row.id || "")).filter(Boolean))];
+}
+
+function renderClearBar() {
+  const bar = $("#comfyuiClearBar");
+  if (!bar) return;
+  bar.hidden = !comfyui.clearMode;
+  if (!comfyui.clearMode) return;
+  const ids = clearableTaskIds();
+  const selected = ids.filter(id => comfyui.clearSelection.has(id)).length;
+  const busy = Boolean(comfyui.clearRequest);
+  bar.querySelector(".comfyui-clear-count").textContent = `已选 ${selected} / ${ids.length} 条`;
+  const all = $("#comfyuiClearSelectAll");
+  all.textContent = ids.length && selected === ids.length ? "取消全选" : "全选已加载";
+  all.disabled = busy || !ids.length;
+  const remove = $("#comfyuiClearDelete");
+  remove.disabled = busy || !selected || Boolean(comfyui.deleting.size);
+  remove.textContent = busy ? "正在删除…" : selected ? `删除所选（${selected}）` : "删除所选";
+}
+
+function enterClearMode() {
+  if (comfyui.clearMode) return;
+  if (!clearableTaskIds().length) { toast("没有可清除的任务；执行中的任务请先取消"); return; }
+  comfyui.clearEpoch += 1;
+  comfyui.clearMode = true;
+  comfyui.clearSelection = new Set();
+  $("#comfyuiTasksSection details.comfyui-tasks-actions")?.removeAttribute("open");
+  renderTasks();
+}
+
+function exitClearMode() {
+  if (!comfyui.clearMode && !comfyui.clearSelection.size) return;
+  comfyui.clearEpoch += 1;
+  comfyui.clearMode = false;
+  comfyui.clearSelection = new Set();
+  // 在途请求仍持锁；退出只改变本次界面，不撤销已经确认的删除。
+  renderTasks();
+}
+
+function toggleClearSelectAll() {
+  if (!comfyui.clearMode || comfyui.clearRequest) return;
+  const ids = clearableTaskIds();
+  const all = ids.length && ids.every(id => comfyui.clearSelection.has(id));
+  comfyui.clearSelection = new Set(all ? [] : ids);
+  renderTasks();
+}
+
+function onTaskClearToggle(event) {
+  const box = event.target.closest?.("[data-comfyui-task-check]");
+  if (!box || !comfyui.clearMode) return;
+  const id = String(box.dataset.comfyuiTaskCheck || "");
+  if (comfyui.clearRequest || !clearableTaskIds().includes(id)) {
+    box.checked = comfyui.clearSelection.has(id);
+    return;
   }
+  if (box.checked) comfyui.clearSelection.add(id);
+  else comfyui.clearSelection.delete(id);
+  box.closest(".comfyui-task-card")?.classList.toggle("is-selected", box.checked);
+  renderClearBar();
+}
+
+async function deleteSelectedTasks() {
+  if (!comfyui.clearMode || comfyui.clearRequest || comfyui.deleting.size) return;
+  const allowed = new Set(clearableTaskIds());
+  const ids = [...comfyui.clearSelection].filter(id => allowed.has(id));
+  if (!ids.length || !window.confirm(`删除所选的 ${ids.length} 条单次任务和它们的产物文件？未勾选和批量任务不受影响。`)) return;
+  const request = { epoch: comfyui.clearEpoch };
+  comfyui.clearRequest = request;
+  const current = () => comfyui.clearMode && comfyui.clearEpoch === request.epoch;
+  let deleted = 0;
+  let skipped = 0;
+  const failed = [];
+  const confirmed = new Set();
+  let error = "";
+  renderTasks();
+  try {
+    // 后端每次最多处理 200 个指定 ID；只提交确认时的固定选择快照。
+    for (let offset = 0; offset < ids.length; offset += 200) {
+      const chunk = ids.slice(offset, offset + 200);
+      const payload = await api("/api/comfyui/tasks", {
+        method: "DELETE", body: { task_ids: chunk, cancel_active: false, exclude_batch: true },
+      });
+      deleted += Number(payload.deleted || 0);
+      skipped += Array.isArray(payload.skipped) ? payload.skipped.length : 0;
+      failed.push(...(Array.isArray(payload.failed) ? payload.failed : []));
+      // deleted 只是总数，不能由此猜哪条删成；用已有定点接口确认缺失身份。
+      for (let start = 0; start < chunk.length; start += 100) {
+        const checked = chunk.slice(start, start + 100);
+        const lookup = await api(`/api/comfyui/tasks?${new URLSearchParams({ ids: checked.join(",") })}`);
+        const wanted = new Set(checked);
+        const missing = (lookup.missing_ids || []).map(String).filter(id => wanted.has(id));
+        for (const id of missing) confirmed.add(id);
+        if (missing.length) forgetHistoryRows("tasks", missing);
+      }
+    }
+  } catch (reason) {
+    error = reason.message || String(reason);
+  } finally {
+    if (comfyui.clearRequest === request) comfyui.clearRequest = null;
+    if (current()) {
+      for (const id of confirmed) comfyui.clearSelection.delete(id);
+    }
+    renderTasks();
+  }
+  const parts = [`已删除 ${deleted} 条任务`];
+  if (skipped) parts.push(`${skipped} 条执行中已跳过`);
+  if (failed.length) parts.push(`${failed.length} 条失败：${failed[0]?.reason || "请重试"}`);
+  if (error) parts.push(`部分状态待核对：${error}`);
+  toast(parts.join("；"));
+  await refreshTasks();
+  if (current() && !clearableTaskIds().length) exitClearMode();
 }
 
 // ---- 产物 ----

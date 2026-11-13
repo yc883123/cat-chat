@@ -36,6 +36,10 @@ class CompactionRunAttemptTests(unittest.TestCase):
                              return_value={"compacted": False, "reason": "bad_summary"})
         self.addCleanup(compact.stop)
         self.compact = compact.start()
+        def requested(*args, **kwargs):
+            kwargs["on_started"]()
+            return self.compact.return_value
+        self.compact.side_effect = requested
 
     def start(self, **overrides):
         kwargs = dict(run=self.run, snapshot={"allowed_tools": []}, conversation_id="c1", conv_kind="main",
@@ -64,7 +68,10 @@ class CompactionRunAttemptTests(unittest.TestCase):
         self.assertEqual([e["action"] for e in self.events], ["started", "failed"])
 
     def test_exception_attempt_remains_consumed_for_this_run(self):
-        self.compact.side_effect = RuntimeError("failed")
+        def failed(*args, **kwargs):
+            kwargs["on_started"]()
+            raise RuntimeError("failed")
+        self.compact.side_effect = failed
         with self.assertRaisesRegex(RuntimeError, "failed"):
             self.start()
         self.assertEqual(self.loop(), {})

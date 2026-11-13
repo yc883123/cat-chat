@@ -583,6 +583,7 @@ def build_model_history(
     set_image_encode_cache_limit_mb(image_encode_cache_mb)
     history: list[dict[str, Any]] = []
     replay_seq = 0
+    source_users: dict[str, str] = {}
     for item in conversation_messages:
         metadata = item.get("metadata") or {}
         # 「新会话开始」边界：从这里重算上下文（此前的消息一条都不进模型请求，
@@ -594,6 +595,7 @@ def build_model_history(
         # 一次总结请求都白花不出去。
         if metadata.get(MetadataKeys.SESSION_START):
             history = []
+            source_users = {}
             continue
         # 自动压缩上下文（2026-10-26 计划）：整理标记出现在**被整理区间最后一条消息**上。
         # 遇到它：此前历史（含本条）替换为一条固定格式的摘要消息，后续消息照常追加。
@@ -613,6 +615,8 @@ def build_model_history(
             continue
         content = str(item.get("content") or "")
         if item.get("role") == "user":
+            from naiba.core.trace_view import source_user_fingerprint
+            source_users[str(item.get("id") or "")] = source_user_fingerprint(item)
             content = supervised_message_content(content, metadata.get(MetadataKeys.SUPERVISED_SOURCE))
             content = dependency_message_content(content, metadata.get(MetadataKeys.DEPENDENCY_SOURCE))
         previous_uploads = (item.get("metadata") or {}).get(MetadataKeys.ATTACHMENTS) or []
@@ -699,6 +703,10 @@ def build_model_history(
         # 才追加 message，保证存量会话不丢答复、也不重复。
         if item.get("role") == "assistant":
             trace = (item.get("metadata") or {}).get(MetadataKeys.TRACE) or []
+            if trace:
+                from naiba.core.trace_view import replay_trace
+                trace = replay_trace(trace, (item.get("metadata") or {}).get(MetadataKeys.TRACE_VIEW),
+                                     source_run_id=str(metadata.get(MetadataKeys.RUN_ID) or ""), source_users=source_users)
             if trace:
                 # 整轮软闸门：一条 assistant 消息重放的整条 trace 算一个轮次
                 # （实测平均 9.92 条模型消息、其中 2.87 条带思考）。

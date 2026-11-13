@@ -264,7 +264,7 @@ def run() -> int:
         env = dict(os.environ)
         env.update({"NAIBA_SMOKE_BASE": BASE, "NAIBA_COMPACTION_CONVERSATIONS": json.dumps(conversation_ids),
                     "NAIBA_SMOKE_OUTPUT": str(root), "NAIBA_COMPACTION_TITLE": TITLE,
-                    "NODE_PATH": str(Path.home() / "node_modules")})
+                    "NODE_PATH": os.environ.get("NODE_PATH") or str(Path.home() / "node_modules")})
         import subprocess
         proc = subprocess.run(["node", str(ROOT / "verify" / "auto_compaction_e2e.cjs")],
                               cwd=str(ROOT), env=env, check=False)

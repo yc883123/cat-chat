@@ -12,20 +12,20 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import threading
 import time
 import traceback
 from typing import Any
 
 from naiba.core.contracts import (STUDIO_PROMPT_SOURCE_KEY, STUDIO_TRACE_MESSAGES_KEY,
-                                  STUDIO_HISTORY_MESSAGES_KEY, STUDIO_SYSTEM_PROMPT_KEY)
+                                  STUDIO_HISTORY_MESSAGES_KEY, STUDIO_SYSTEM_PROMPT_KEY,
+                                  STUDIO_OUTPUT_CONTRACT_VERSION_KEY, STUDIO_RESULT_ARTIFACT_KEY)
 from naiba.core.exceptions import TaskCancelled
 from naiba.studio.conversation import model_history
 from naiba.studio.skill_adapter import ContentSkillAdapter, check_context
 from naiba.llm.profiles import resolve_profile_with_override
 from naiba.studio.store import now_ms
+from naiba.studio.model_identity import configured_identity
 
 FLUSH_CHARS = 4096
 FLUSH_SECONDS = 0.1
@@ -264,6 +264,7 @@ class StudioRunner:
                 raise TaskCancelled("任务已取消")
             self.store.append_event(task_id, {"type": "status", "message": "生成任务开始执行"})
             input_data = dict(task.get("input") or {})
+            input_data["_result_task_id"] = task_id
             identity = (task.get("submission_policy") or {}).get("model_identity")
             if isinstance(identity, dict):
                 input_data["model_snapshot"] = identity
@@ -279,14 +280,14 @@ class StudioRunner:
                 if cancel_event.is_set():
                     raise TaskCancelled("任务已取消")
                 self._finish_terminal(task_id, "done", {"type": "done"}, result=content,
-                                      usage_override=dict(usage_sink) if usage_sink else None,
+                                      usage_override=dict(usage_sink) if usage_sink or input_data.get(STUDIO_OUTPUT_CONTRACT_VERSION_KEY) else None,
                                       trace_messages=trace_sink)
         except Exception as exc:
             buffer.flush()
             traceback.print_exc()
             # llm 层的取消是 RuntimeError("任务已取消")（HTTP 取消按钮/取消等待各点统一口径），
             # 与 TaskCancelled 同义——两条都按 cancelled 收尾，partial 保留。
-            if "任务已取消" in str(exc) or isinstance(exc, TaskCancelled):  # pragma: no cover - 见上
+            if cancel_event.is_set() or "任务已取消" in str(exc) or isinstance(exc, TaskCancelled):  # pragma: no cover - 见上
                 self._finish_terminal(
                     task_id, "cancelled", {"type": "cancelled"},
                     result_partial=self.store.partial_from_events(task_id),
@@ -326,16 +327,7 @@ class StudioRunner:
         snapshot = input_data.get("model_snapshot")
         if isinstance(snapshot, dict):
             # Credentials are never copied into snapshots; compare only frozen identity fields.
-            identity = {
-                "model_key": str(input_data.get("model_key") or ""),
-                "model_name": str(input_data.get("model_name") or ""),
-                "provider_id": str(profile.get("provider_id") or profile.get("provider") or ""),
-                "kind": str(profile.get("kind") or ""),
-                "base_url_hash": hashlib.sha256(json.dumps(
-                    str(profile.get("base_url") or ""), sort_keys=True, ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")).hexdigest(),
-            }
+            identity = configured_identity(input_data, profile)
             for key, value in snapshot.items():
                 if key == "key":
                     continue
@@ -349,6 +341,10 @@ class StudioRunner:
         usage_sink: dict[str, Any] | None = None,
         trace_sink: list[dict[str, Any]] | None = None,
     ) -> str:
+        if input_data.get(STUDIO_OUTPUT_CONTRACT_VERSION_KEY):
+            return self._complete_artifact(input_data, status_provider, cancel_event,
+                                           usage_sink if usage_sink is not None else {},
+                                           trace_sink if trace_sink is not None else [])
         if input_data.get(STUDIO_PROMPT_SOURCE_KEY) == "skill":
             profile = self._resolve_profile(input_data)
             history = model_history(input_data, profile, self.app.paths.data_dir)
@@ -385,6 +381,63 @@ class StudioRunner:
         if usage_sink is not None:
             _merge_usage(usage_sink, getattr(self.app.models, "last_usage", {}))
         return content
+
+    def _complete_artifact(self, input_data: dict[str, Any], event: Any,
+                           cancel: threading.Event, usage_sink: dict[str, Any],
+                           trace_sink: list[dict[str, Any]]) -> str:
+        from naiba.studio.artifacts import ResultArtifactError
+        from naiba.studio.content import ContentSnapshots, _digest
+        from naiba.studio.result_tools import TxtToolContext, run_result_agent
+        from naiba.core.contracts import STUDIO_SKILL_SNAPSHOT_KEY, STUDIO_SKILL_IDS_KEY
+
+        task = self.store.get_task(str(input_data.get("_result_task_id") or ""))
+        if task is None:
+            raise ResultArtifactError("TXT任务记录不存在")
+        manifest = self.store.artifacts.manifest(task)
+        if manifest["status"] == "final":
+            # A crash after final publication never incurs another model call.
+            return self.store.artifacts.read(task)[0]
+        profile = self._resolve_profile(input_data)
+        options = {**(self.app.config.runtime_guard_options() or {}), "stream": True,
+                   "cancel_event": cancel, "lock_label": "工作台TXT生成"}
+        view = None
+        system = str(input_data.get("system") or "")
+        if input_data.get(STUDIO_PROMPT_SOURCE_KEY) == "skill":
+            snapshot = input_data.get(STUDIO_SKILL_SNAPSHOT_KEY)
+            view = ContentSnapshots(self.app.paths.data_dir).view(snapshot)
+            if ([row["id"] for row in view.scan()] != list(input_data.get(STUDIO_SKILL_IDS_KEY) or [])
+                    or snapshot.get("system_hash") != _digest(system)):
+                raise ResultArtifactError("Skill冻结输入损坏，不能生成TXT")
+        chunked = input_data.get("chunked") or {}
+        blocks = [str(row) for row in chunked.get("blocks") or [] if str(row)] if isinstance(chunked, dict) else []
+        for number, block_state in enumerate(manifest["blocks"], 1):
+            if block_state.get("final"):
+                continue
+            if cancel.is_set():
+                raise TaskCancelled("任务已取消")
+            event({"type": "status", "message": f"正在生成TXT第{number}/{len(manifest['blocks'])}块"})
+            local = dict(input_data)
+            if blocks:
+                content_parts = []
+                if number > 1:
+                    previous = self.store.artifacts._block_bytes(task["id"], number - 1,
+                        self.store.artifacts.manifest(task)["blocks"][number - 2]).decode("utf-8")
+                    tail_chars = max(0, min(12000, int(chunked.get("continuity_chars") or 0)))
+                    if tail_chars and previous:
+                        content_parts.append(str(chunked.get("continuity_label") or "前块末尾") + "\n" + previous[-tail_chars:])
+                    event({"type": "delta", "content": "\n\n"})
+                prefix = str(chunked.get("prefix") or "")
+                content_parts.append(f"{prefix}\n\n{blocks[number - 1]}" if prefix else blocks[number - 1])
+                local["content"] = "\n\n".join(content_parts)
+            history = model_history(local, profile, self.app.paths.data_dir)
+            context = TxtToolContext(self.store, task, number, cancel, event)
+            block_usage: dict[str, Any] = {}
+            try:
+                run_result_agent(self.app, context, profile, history, options, system,
+                                 event, block_usage, trace_sink, view=view)
+            finally:
+                _merge_usage(usage_sink, block_usage)
+        return self.store.artifacts.read(task)[0]
 
     def _complete_chunked(
         self, input_data: dict[str, Any], chunked: dict[str, Any], status_provider: Any,
@@ -442,6 +495,21 @@ class StudioRunner:
         usage_override: dict[str, Any] | None = None,
         trace_messages: list[dict[str, Any]] | None = None,
     ) -> None:
+        current_task = self.store.get_task(task_id)
+        if current_task and current_task.get(STUDIO_OUTPUT_CONTRACT_VERSION_KEY):
+            try:
+                text, artifact = self.store.artifacts.read(current_task, require_final=status == "done")
+                if status == "done":
+                    result = text
+                else:
+                    result_partial = text
+                self.store.update_task(task_id, **{STUDIO_RESULT_ARTIFACT_KEY: artifact})
+            except ValueError as exc:
+                if status == "done":
+                    raise
+                result_partial = ""
+                self.store.update_task(task_id, **{STUDIO_RESULT_ARTIFACT_KEY: {"schema_version": 1,
+                    "status": "invalid", "error": str(exc)}})
         usage: dict[str, Any] = dict(usage_override or {})
         reasoning: list[str] = []
         performance: dict[str, Any] = {}
@@ -453,11 +521,15 @@ class StudioRunner:
                 return
             # 串行队列保证此刻读 last_* 是本任务自己的读数（P0 并发边界）。
             # 分块任务传 usage_override（跨轮累加值），单轮任务继续读 last_usage。
-            usage = dict(usage_override) if usage_override else dict(getattr(self.app.models, "last_usage", {}) or {})
+            usage = dict(usage_override) if usage_override is not None else dict(getattr(self.app.models, "last_usage", {}) or {})
             reasoning_text = str(getattr(self.app.models, "last_reasoning", "") or "")
             reasoning = [reasoning_text] if reasoning_text else []
             performance = dict(getattr(self.app.models, "last_diagnostics", {}) or {})
             finish_reason = str(getattr(self.app.models, "last_finish_reason", "") or "")
+            if current_task and current_task.get(STUDIO_OUTPUT_CONTRACT_VERSION_KEY) and not usage:
+                # Recovering a verified final file did not call the model. Its
+                # accounting and diagnostics must not inherit another task.
+                reasoning, performance, finish_reason = [], {}, "stop"
             if usage:
                 # 用量事件先于终态落库，前端在 done 前可见费用汇总。
                 self.store.append_event(task_id, {"type": "usage", "usage": usage})

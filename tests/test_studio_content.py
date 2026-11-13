@@ -351,12 +351,16 @@ class StudioContentTests(unittest.TestCase):
         self.assertEqual(listed[0]["thread_id"], first["id"])
 
     def test_novel_uses_same_adapter_without_module_switch(self):
+        from tests.studio_result_fixture import complete_result_reply, write_result_reply
+        self.models.behavior = lambda messages, options, event: complete_result_reply(messages) or write_result_reply("TXT剧本正文")
         data = self.service.freeze_content_input({"content": "【第 1 场】正文", "system": "作品规则\n\n阶段格式约定",
             "prompt_source": "skill", "skill_ids": [self.ids["one"], self.ids["two"]],
             "module": "novel", "model_key": "online:fixture", "model_name": "fixture", "novel": {"book_id": "book"}})
         task = self.finish(self.service.jobs.submit(data))
         self.assertEqual(task["input"]["module"], "novel")
-        self.assertEqual(self.models.calls[0][0][0]["content"], data["system"])
+        self.assertTrue(self.models.calls[0][0][0]["content"].startswith(data["system"]))
+        self.assertIn("宿主 TXT 输出协议", self.models.calls[0][0][0]["content"])
+        self.assertEqual(task["result"], "TXT剧本正文")
         self.assertEqual(self.models.calls[0][0][-1]["content"], "【第 1 场】正文")
         self.assertEqual(self.service.api_task_followup(task["id"], {"user_request": "继续", "request_key": "novel"})[1], 400)
 

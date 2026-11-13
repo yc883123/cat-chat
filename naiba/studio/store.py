@@ -24,6 +24,9 @@ from naiba.core.contracts import (
     STUDIO_TASK_STATUSES,
     STUDIO_THREAD_ID_KEY, STUDIO_PARENT_TASK_ID_KEY, STUDIO_TRACE_MESSAGES_KEY,
     STUDIO_SKILL_SNAPSHOT_KEY,
+    STUDIO_OUTPUT_CONTRACT_VERSION_KEY, STUDIO_OUTPUT_CONTRACT_VERSION,
+    STUDIO_RESULT_ARTIFACT_KEY, STUDIO_LOGICAL_GENERATION_ID_KEY,
+    STUDIO_RESUMED_FROM_KEY, STUDIO_RESUMED_INTO_KEY,
 )
 from naiba.core.fsutil import atomic_write_json
 
@@ -57,6 +60,8 @@ class StudioStore:
     def __init__(self, data_dir: Path):
         self._dir = Path(data_dir) / "studio" / "tasks"
         self._lock = _store_lock(self._dir)
+        from naiba.studio.artifacts import ResultArtifacts
+        self.artifacts = ResultArtifacts(Path(data_dir), self._lock)
         # 引用保护缓存：(单调时间, 路径键集合)。清理器对每个候选文件都会问一次
         # 「这个文件还被 Studio 任务引用吗」，不能每次都重读全部任务 JSON。
         self._ref_cache: tuple[float, set[str]] | None = None
@@ -122,6 +127,8 @@ class StudioStore:
                     thread_id: str = "", parent_task_id: str = "") -> dict[str, Any]:
         # The receipt and native execution fact have one atomic persistence point.
         frozen = json.loads(json.dumps(input_data, ensure_ascii=False, allow_nan=False))
+        if frozen.get("module") in {"novel", "writer"}:
+            frozen[STUDIO_OUTPUT_CONTRACT_VERSION_KEY] = STUDIO_OUTPUT_CONTRACT_VERSION
         policy = json.loads(json.dumps(submission_policy or {}, allow_nan=False))
         fingerprint = {"input": frozen, "source_task_id": source_task_id, "submission_policy": policy}
         if thread_id or parent_task_id:
@@ -180,6 +187,12 @@ class StudioStore:
             "finished_at": None,
         }
         with self._lock:
+            if input_data.get(STUDIO_OUTPUT_CONTRACT_VERSION_KEY):
+                record[STUDIO_OUTPUT_CONTRACT_VERSION_KEY] = STUDIO_OUTPUT_CONTRACT_VERSION
+                record[STUDIO_LOGICAL_GENERATION_ID_KEY] = task_id
+                record[STUDIO_RESULT_ARTIFACT_KEY] = {"schema_version": 1, "status": "partial", "chars": 0, "segments": 0}
+                self.artifacts.create(record)
+                record[STUDIO_RESULT_ARTIFACT_KEY] = self.artifacts.read(record, require_final=False)[1]
             self._dir.mkdir(parents=True, exist_ok=True)
             self._write_json(self._record_path(task_id), record)
             self._events_path(task_id).touch(exist_ok=True)
@@ -213,6 +226,10 @@ class StudioStore:
             for key in ("status", "detail", "result", "result_partial", "reasoning", "error",
                         "usage", "performance", "finish_reason", "handoff", "started_at", "finished_at",
                         STUDIO_TRACE_MESSAGES_KEY):
+                if key in fields:
+                    current[key] = fields[key]
+            for key in (STUDIO_RESULT_ARTIFACT_KEY, STUDIO_LOGICAL_GENERATION_ID_KEY,
+                        STUDIO_RESUMED_FROM_KEY, STUDIO_RESUMED_INTO_KEY):
                 if key in fields:
                     current[key] = fields[key]
             current["updated_at"] = now_ms()

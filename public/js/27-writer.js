@@ -7,10 +7,11 @@
 // - 生成推进由服务端流水线负责（0.5s 轮询驱动）；前端只发命令、展示流水线与
 //   任务事件，不持有「下一步必须执行」的状态——刷新/迟到响应都不会重复生成。
 // - 版本不可变：AI 写回、人工保存、恢复旧版本都产生新版本并切换指针。
-// - 只从 01-core / 22-studio 取公共能力，22 不反向 import 本文件，无循环依赖。
+// - 从 01-core / 07-models-agents / 22-studio 取公共能力，22 不反向 import 本文件，无循环依赖。
 // ============================================================
 
-import { $, api, applyModelSkinFor, localFileUrl, state, toast } from "./01-core.js";
+import { $, api, applyModelSkinFor, localFileUrl, onProvidersChanged, state, toast } from "./01-core.js";
+import { loadModelCatalog } from "./07-models-agents.js";
 import { isPywebview, saveLocalFile } from "./03-media.js";
 import { onStudioPageChange, setStudioPage } from "./22-studio.js";
 import { bindWorkSystemPrompt } from "./22d-work-prompt.js";
@@ -220,8 +221,6 @@ const writer = {
   outlineProviderKey: "", outlineModelName: "",
   chapterProviderKey: "", chapterModelName: "",
   draftProviderKey: "", draftModelName: "",
-  providerModelsCache: new Map(),
-  providerModelInflight: new Map(),
   // 设定表单编辑态：套用模板 / 手改后为 true，保存或放弃后复位。
   setupDirty: false,
   // 批次三：题材树 / 标签多选 / 参考作品 / 角色分区。
@@ -360,102 +359,82 @@ function providerRows() {
 function fillProviderSelect(select, previousKey) {
   if (!select) return "";
   const rows = providerRows();
-  select.replaceChildren(...rows.map((row) => {
-    const option = document.createElement("option");
-    option.value = row.key;
-    option.textContent = row.label;
-    return option;
-  }));
-  if (!rows.length) {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = "请先在设置中添加模型";
-    select.append(option);
+  const deleted = previousKey && !rows.some((row) => row.key === previousKey);
+  if (deleted) select.dataset.providerDeleted = "true";
+  select.replaceChildren(...rows.map((row) => new Option(row.label, row.key)));
+  if (!rows.length || select.dataset.providerDeleted === "true") {
+    select.prepend(new Option(deleted || select.dataset.providerDeleted === "true"
+      ? "供应商已删除，请重新选择" : "请先在设置中添加模型", ""));
+    select.value = "";
     return "";
   }
-  const preferred = [
-    previousKey,
-    $("#modelSelect")?.value || "",
-    state.bootstrap?.default_model_key || "",
-  ].find((key) => key && rows.some((row) => row.key === key));
+  const preferred = [previousKey, $("#modelSelect")?.value || "", state.bootstrap?.default_model_key || ""]
+    .find((key) => key && rows.some((row) => row.key === key));
   select.value = preferred || rows[0].key;
   return select.value;
 }
 
-/** 按当前供应商拉完整模型目录，填进模型下拉。 */
-async function fillModelSelect(select, providerKey) {
-  if (!select) return "";
+// 每个阶段独立换代；共享目录请求不阻塞后续刷新。
+const modelSelectionGenerations = new Map();
+const clearedModelSelections = new Set();
+const pendingModelNames = new Map();
+async function fillModelSelect(select, providerKey, providerField, modelField) {
+  const generation = (modelSelectionGenerations.get(modelField) || 0) + 1;
+  modelSelectionGenerations.set(modelField, generation);
+  const previous = writer[modelField] || pendingModelNames.get(modelField) || "";
+  pendingModelNames.set(modelField, previous);
+  writer[modelField] = "";
+  if (!select) return false;
+  const show = (label) => {
+    select.replaceChildren(new Option(label, ""));
+    select.disabled = true;
+  };
   if (!providerKey) {
-    select.replaceChildren(new Option("请先在设置中添加模型", ""));
-    return "";
+    pendingModelNames.delete(modelField);
+    show(providerRows().length ? "请先选择供应商" : "请先在设置中添加模型");
+    return false;
   }
-  let models = writer.providerModelsCache.get(providerKey);
-  if (!models) {
-    const inflight = writer.providerModelInflight.get(providerKey);
-    if (inflight) {
-      models = await inflight;
-    } else {
-      const task = (async () => {
-        try {
-          const payload = await api("/api/providers/models", {
-            method: "POST",
-            body: { model_key: providerKey },
-          });
-          return Array.isArray(payload?.models) ? payload.models : [];
-        } catch (error) {
-          return [];
-        }
-      })();
-      writer.providerModelInflight.set(providerKey, task);
-      try {
-        models = await task;
-      } finally {
-        writer.providerModelInflight.delete(providerKey);
-      }
-      writer.providerModelsCache.set(providerKey, models);
-    }
+  show("正在读取模型目录…");
+  let models = [], failed = false;
+  try {
+    models = await loadModelCatalog(providerKey);
+  } catch (_error) {
+    failed = true;
   }
-  const names = [];
-  for (const entry of models) {
-    const id = typeof entry === "object"
-      ? String(entry?.id ?? entry?.model ?? entry?.name ?? "")
-      : String(entry ?? "");
-    const clean = id.trim();
-    if (clean && !names.includes(clean)) names.push(clean);
-  }
-  if (!names.length) {
-    // 目录读不到：回退到这张卡片上配置的模型名（用户自己填的，能直接用）。
-    const configured = String(
-      (state.bootstrap?.model_profiles || []).find((row) => row.model_key === providerKey)?.model || ""
-    ).trim();
+  if (modelSelectionGenerations.get(modelField) !== generation || writer[providerField] !== providerKey) return false;
+  if (!providerRows().some((row) => row.key === providerKey)) return false;
+  const names = [...new Set((Array.isArray(models) ? models : []).map((entry) =>
+    String(typeof entry === "object" ? entry?.id ?? entry?.model ?? entry?.name ?? "" : entry ?? "").trim()).filter(Boolean))];
+  if (failed && !names.length) {
+    const configured = String((state.bootstrap?.model_profiles || state.bootstrap?.providers || [])
+      .find((row) => row.model_key === providerKey)?.model || "").trim();
     if (configured) names.push(configured);
   }
-  const previous = select.value;
+  if (previous && !names.includes(previous)) clearedModelSelections.add(modelField);
+  const choice = names.includes(previous) ? previous : clearedModelSelections.has(modelField) ? "" : names[0] || "";
   select.replaceChildren(...names.map((name) => new Option(name, name)));
-  if (!names.length) {
-    select.replaceChildren(new Option("模型目录读取失败，请到设置里检查", ""));
-    return "";
-  }
-  select.value = names.includes(previous) ? previous : names[0];
-  return select.value;
+  if (!choice) select.prepend(new Option(names.length ? "原模型已不可用，请重新选择"
+    : failed ? "模型目录读取失败，请到设置里检查" : "供应商暂无可用模型", ""));
+  select.value = choice;
+  select.disabled = !names.length;
+  writer[modelField] = choice;
+  pendingModelNames.delete(modelField);
+  return true;
 }
 
-let providerChain = Promise.resolve();
-function fillProviderModels() {
-  providerChain = providerChain.then(async () => {
-    const pairs = [
-      ["writerSetupProvider", "writerSetupModel", "setupProviderKey", "setupModelName"],
-      ["writerOutlineProvider", "writerOutlineModel", "outlineProviderKey", "outlineModelName"],
-      ["writerChapterProvider", "writerChapterModel", "chapterProviderKey", "chapterModelName"],
-      ["writerDraftProvider", "writerDraftModel", "draftProviderKey", "draftModelName"],
-    ];
-    for (const [providerId, modelId, providerField, modelField] of pairs) {
-      const providerSelect = $(`#${providerId}`);
-      writer[providerField] = fillProviderSelect(providerSelect, writer[providerField]);
-      writer[modelField] = await fillModelSelect($(`#${modelId}`), writer[providerField]);
-    }
-  }).catch(() => {});
-  return providerChain;
+const providerModelPairs = [
+  ["writerSetupProvider", "writerSetupModel", "setupProviderKey", "setupModelName"],
+  ["writerOutlineProvider", "writerOutlineModel", "outlineProviderKey", "outlineModelName"],
+  ["writerChapterProvider", "writerChapterModel", "chapterProviderKey", "chapterModelName"],
+  ["writerDraftProvider", "writerDraftModel", "draftProviderKey", "draftModelName"],
+];
+function fillProviderModels(providerKeys = null) {
+  return Promise.all(providerModelPairs.map(([providerId, modelId, providerField, modelField]) => {
+    const previousKey = writer[providerField];
+    writer[providerField] = fillProviderSelect($(`#${providerId}`), previousKey);
+    if (Array.isArray(providerKeys) && previousKey === writer[providerField] && !providerKeys.includes(previousKey)) return null;
+    return fillModelSelect($(`#${modelId}`), writer[providerField], providerField, modelField);
+  })).catch((error) => fail("刷新织书台模型失败", error));
 }
 
 function readModel(providerField, modelField) {
@@ -4032,6 +4011,9 @@ export function bindWriterEvents() {
   prepareEditorLayout();
   restoreLimits();
   writer.initialized = true;
+  onProvidersChanged((providerKeys) => {
+    if (writer.initialized) void fillProviderModels(providerKeys);
+  });
   setPane(writer.pane);
   bindWriterNovelContinuation({
     beforeOpen: () => {
@@ -4388,20 +4370,22 @@ export function bindWriterEvents() {
   });
 
   // ---- 模型选择 ----
-  for (const [providerId, modelId, providerField, modelField] of [
-    ["writerSetupProvider", "writerSetupModel", "setupProviderKey", "setupModelName"],
-    ["writerOutlineProvider", "writerOutlineModel", "outlineProviderKey", "outlineModelName"],
-    ["writerChapterProvider", "writerChapterModel", "chapterProviderKey", "chapterModelName"],
-    ["writerDraftProvider", "writerDraftModel", "draftProviderKey", "draftModelName"],
-  ]) {
-    $(`#${providerId}`)?.addEventListener("change", async (event) => {
+  for (const [providerId, modelId, providerField, modelField] of providerModelPairs) {
+    $(`#${providerId}`)?.addEventListener("change", (event) => {
+      delete event.target.dataset.providerDeleted;
       writer[providerField] = String(event.target.value || "");
       writer[modelField] = "";
-      writer[modelField] = await fillModelSelect($(`#${modelId}`), writer[providerField]);
-      void refreshPlan();
+      clearedModelSelections.delete(modelField);
+      pendingModelNames.delete(modelField);
+      void fillModelSelect($(`#${modelId}`), writer[providerField], providerField, modelField)
+        .then((current) => { if (current) void refreshPlan(); })
+        .catch((error) => fail("读取织书台模型失败", error));
     });
     $(`#${modelId}`)?.addEventListener("change", (event) => {
       writer[modelField] = String(event.target.value || "");
+      modelSelectionGenerations.set(modelField, (modelSelectionGenerations.get(modelField) || 0) + 1);
+      pendingModelNames.delete(modelField);
+      clearedModelSelections.delete(modelField);
       // 换模型也跟随皮肤（与主对话同一条规则：只在自动模式下生效）。
       void applyModelSkinFor(writer[modelField]);
       void refreshPlan();

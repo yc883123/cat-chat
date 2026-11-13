@@ -6,8 +6,8 @@
 // 应用级视图：入口在侧栏「对话 / 工作台」模式切换，不再是顶栏会话按钮。
 // ============================================================
 
-import { $, api, applyModelSkinFor, copyText, localFileUrl, randomUuid, setAppView, state, toast } from "./01-core.js";
-import { populateComposerModels } from "./07-models-agents.js";
+import { $, api, applyModelSkinFor, copyText, localFileUrl, onProvidersChanged, randomUuid, setAppView, state, toast } from "./01-core.js";
+import { loadModelCatalog, populateComposerModels } from "./07-models-agents.js";
 import { beginConversationNavigation, isConversationOpenCurrent, loadConversations, openConversation, renderSidebar } from "./08-conversations.js";
 import { applyFilePanelOpenClass, closeSidebar, filePanelState, openSidebar, setLeftSidebarCollapsed, sidebarDesktop } from "./14-file-panel.js";
 import { statusLabel as workbenchStatusLabel, syncWorkbenchHeader, watchWorkbenchSize, bindWorkbenchDetails } from "./22a-workbench-ui.js";
@@ -57,7 +57,6 @@ const STUDIO_IMAGE_ACCEPT_ATTR = "image/png,image/jpeg,image/webp,image/gif";
 const STUDIO_LOCATE_HIGHLIGHT_MS = 1800;
 
 const studio = {
-  providerModelsCache: new Map(),
   open: false,
   // 功能页（侧栏分页导航）：library = 模块库，labeler = 打标器。
   // 与 pane（手机三档）是两套互不相干的维度，不能混用。
@@ -1122,24 +1121,17 @@ async function syncStudioModel() {
   const modelSelect = $("#studioModelSelect");
   if (!providerSelect || !modelSelect) return;
   const profiles = state.bootstrap?.model_profiles || state.bootstrap?.providers || [];
-  if (!providerSelect.options.length) {
-    providerSelect.replaceChildren();
-    profiles.forEach((p) => {
-      const opt = document.createElement("option");
-      opt.value = p.model_key;
-      opt.textContent = p.name || p.model_key;
-      providerSelect.append(opt);
-    });
-    if (profiles.length) {
-      providerSelect.value = $("#modelSelect")?.value || state.bootstrap?.default_model_key || profiles[0].model_key;
-    }
-  } else {
-    providerSelect.value = $("#modelSelect")?.value || providerSelect.value;
-  }
-  if (studio.providerKey && profiles.some((p) => p.model_key === studio.providerKey)) {
-    providerSelect.value = studio.providerKey;
-  }
-  const key = providerSelect.value;
+  const key = [studio.providerKey, providerSelect.value, $("#modelSelect")?.value,
+    state.bootstrap?.default_model_key, profiles[0]?.model_key]
+    .find((value) => value && profiles.some((profile) => profile.model_key === value)) || "";
+  providerSelect.replaceChildren(...profiles.map((profile) => {
+    const option = document.createElement("option");
+    option.value = profile.model_key;
+    option.textContent = profile.name || profile.model_key;
+    return option;
+  }));
+  providerSelect.value = key;
+  if (studio.providerKey !== key) studio.modelName = "";
   studio.providerKey = key;
   if (!key) {
     studio.modelLoading = false;
@@ -1153,27 +1145,16 @@ async function syncStudioModel() {
     modelSelect.append(opt);
     return;
   }
-  if (studio.modelOptionsKey === key && !studio.modelLoading
-      && studio.modelName && [...modelSelect.options].some((o) => o.value === studio.modelName)) {
-    modelSelect.value = studio.modelName;
-    modelSelect.disabled = false;
-    return;
-  }
   studio.modelLoading = true;
   modelSelect.disabled = true;
   modelSelect.replaceChildren();
-  let models = studio.providerModelsCache.get(key);
-  if (!models) {
-    try {
-      ({ models } = await api("/api/providers/models", { method: "POST", body: { model_key: key } }));
-      if (token !== studio.modelToken || providerSelect.value !== key) return;
-      studio.providerModelsCache.set(key, models || []);
-    } catch (error) {
-      if (token !== studio.modelToken || providerSelect.value !== key) return;
-      // Failed catalogs must remain retryable and must not expose old options.
-      models = [];
-      toast(`模型目录读取失败：${error.message}`);
-    }
+  let models = [];
+  try {
+    models = await loadModelCatalog(key);
+  } catch (error) {
+    if (token !== studio.modelToken || providerSelect.value !== key) return;
+    // Failed catalogs must remain retryable and must not expose old options.
+    toast(`模型目录读取失败：${error.message}`);
   }
   if (token !== studio.modelToken || providerSelect.value !== key) return;
   studio.modelLoading = false;
@@ -2846,6 +2827,10 @@ async function confirmStudioHandoff() {
 // ============================================================
 
 export function bindStudioEvents() {
+  onProvidersChanged(() => {
+    if (!studio.generationInitialized) return;
+    void syncStudioModel().catch((error) => toast(`工作台模型刷新失败：${error.message}`));
+  });
   watchWorkbenchSize($("#studioPageLibrary"));
   bindWorkbenchDetails($("#studioPageLibrary"));
   $("#studioSourceTabs")?.addEventListener("click", (event) => {

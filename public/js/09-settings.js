@@ -2,8 +2,8 @@
 // 09-settings.js —— 拆分自 public/app.js 第 3115-4672 行（阶段 5.1 按域拆分，跨文件引用零改动）
 // ============================================================
 
-import { $, $$, agentAvatarEmoji, agentAvatarSrc, api, applyAppearance, applyChatBackground, CHAT_FONT_PICKS, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, isFontInstalled, isModelSkin, localFileUrl, MODEL_SKINS, modelSkinImageUrl, refreshChatBackgroundImageStatus, saveAppearance, state, toast } from "./01-core.js";
-import { applyConversationAgent, loadModelCatalog, newConversationDefault, populateComposerModels, populateModels, renderAgents, updateUnloadModelButton } from "./07-models-agents.js";
+import { $, $$, agentAvatarEmoji, agentAvatarSrc, api, applyAppearance, applyChatBackground, CHAT_FONT_PICKS, chatBackgroundCrop, chatBackgroundCropScale, chatBackgroundCropScaleLimits, chatBackgroundImageAspect, escapeHtml, isFontInstalled, isModelSkin, localFileUrl, MODEL_SKINS, modelSkinImageUrl, notifyProvidersChanged, refreshChatBackgroundImageStatus, saveAppearance, state, toast } from "./01-core.js";
+import { applyConversationAgent, invalidateModelCatalogs, loadModelCatalog, newConversationDefault, populateComposerModels, populateModels, renderAgents, updateUnloadModelButton } from "./07-models-agents.js";
 import { closeAgentPromptPresetPanel, currentAgentFixedSkillIds, renderAgentPromptPresetList } from "./08-conversations.js";
 import { skillList } from "./13-skill-refs.js";
 import { playDoneSound } from "./20-sound.js";
@@ -1103,12 +1103,16 @@ export function scheduleProviderModelCheck() {
 // 设置弹层与首启向导共用：两处都保存 API，刷新动作必须一致（少刷一处就会出现
 // 「刚加完供应商但模型下拉里没有它」）。
 export function syncSavedProvider(saved) {
+  const previous = providerProfiles().find(item => item.id === saved.id);
+  const providerKeys = [...new Set([previous?.model_key, saved.model_key].filter(Boolean))];
   ['providers', 'model_profiles'].forEach((key) => {
     const list = state.bootstrap[key] || (state.bootstrap[key] = []);
     const index = list.findIndex((item) => item.id === saved.id);
     if (index >= 0) list[index] = saved;
     else list.push(saved);
   });
+  invalidateModelCatalogs(providerKeys);
+  notifyProvidersChanged(providerKeys);
   const visionSelect = $('#visionProvider');
   if (visionSelect) delete visionSelect.dataset.populated;
   populateVisionSettings();
@@ -1216,6 +1220,11 @@ export async function deleteProvider(providerId) {
     await api(`/api/providers/${encodeURIComponent(providerId)}`, { method: 'DELETE' });
     const data = await api('/api/bootstrap');
     state.bootstrap = { ...state.bootstrap, ...data };
+    const providerKeys = [provider.model_key].filter(Boolean);
+    invalidateModelCatalogs(providerKeys);
+    notifyProvidersChanged(providerKeys);
+    const visionSelect = $('#visionProvider');
+    if (visionSelect) delete visionSelect.dataset.populated;
     if ($('#providerId').value === providerId) {
       cancelProviderEdit();
     } else {

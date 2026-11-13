@@ -877,6 +877,14 @@ function queueConversationModelSave(id, values) {
   return pending;
 }
 
+export function invalidateModelCatalogs(providerKeys) {
+  for (const key of providerKeys) {
+    catalogGenerations.set(key, (catalogGenerations.get(key) || 0) + 1);
+    catalogRequests.delete(key);
+    delete state.providerModelCatalogs[key];
+  }
+}
+
 export async function loadModelCatalog(providerKey, { force = false, values = null } = {}) {
   if (!force && catalogRequests.has(providerKey)) return catalogRequests.get(providerKey);
   if (!force && (state.providerModelCatalogs[providerKey] || []).length) return state.providerModelCatalogs[providerKey];

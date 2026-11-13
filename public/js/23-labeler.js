@@ -6,7 +6,8 @@
 // 与聊天域零耦合；只调 /api/labeler/*（含打标专用上传）。
 // ============================================================
 
-import { $, $$, api, applyModelSkinFor, state, toast, triggerDownload } from "./01-core.js";
+import { $, $$, api, applyModelSkinFor, onProvidersChanged, state, toast, triggerDownload } from "./01-core.js";
+import { loadModelCatalog } from "./07-models-agents.js";
 import { fileUrl, isPywebview } from "./03-media.js";
 import { currentStudioPage, onStudioPageChange } from "./22-studio.js";
 import { bindWorkbenchDetails, watchWorkbenchSize, workbenchWidth } from "./22a-workbench-ui.js";
@@ -52,7 +53,7 @@ const labeler = {
   presetId: "",
   providerKey: "",
   modelName: "",
-  providerModelsCache: new Map(),
+  modelToken: 0,
   // 待上传/已上传图片：status = pending | uploading | uploaded | failed
   selected: [],
   uploadToken: 0,
@@ -282,35 +283,26 @@ async function ensureModels() {
   const providerSelect = $("#labelerProviderSelect");
   if (!providerSelect) return;
   const profiles = state.bootstrap?.model_profiles || state.bootstrap?.providers || [];
-  if (providerSelect.options.length === 0) {
-    providerSelect.replaceChildren(...profiles.map((profile) => {
-      const option = document.createElement("option");
-      option.value = profile.model_key;
-      option.textContent = profile.name || profile.model_key;
-      return option;
-    }));
-    const preferred = state.bootstrap?.default_model_key || profiles[0]?.model_key || "";
-    providerSelect.value = labeler.providerKey && profiles.some((p) => p.model_key === labeler.providerKey)
-      ? labeler.providerKey
-      : preferred;
-  }
-  labeler.providerKey = providerSelect.value;
+  const preferred = [labeler.providerKey, providerSelect.value, state.bootstrap?.default_model_key]
+    .find((value) => value && profiles.some((profile) => profile.model_key === value)) || "";
+  const key = fillSelect(providerSelect, profiles.map((profile) => ({
+    value: profile.model_key, label: profile.name || profile.model_key,
+  })), preferred, "请先在设置中添加模型");
+  if (labeler.providerKey !== key) labeler.modelName = "";
+  labeler.providerKey = key;
+  updateCostNote();
   await loadModelOptions();
 }
 
 async function modelOptionsFor(providerKey, { isCurrent = () => true } = {}) {
   const key = String(providerKey || "");
   if (!key) return [];
-  if (labeler.providerModelsCache.has(key)) return labeler.providerModelsCache.get(key);
-  let models = [];
   try {
-    const payload = await api("/api/providers/models", { method: "POST", body: { model_key: key } });
-    models = payload.models || [];
-    if (isCurrent()) labeler.providerModelsCache.set(key, models);
+    return await loadModelCatalog(key);
   } catch (error) {
     if (isCurrent()) setHint(`模型目录读取失败：${error.message}`, true);
+    return [];
   }
-  return models;
 }
 
 function fillSelect(select, rows, preferred, placeholder = "") {
@@ -337,39 +329,26 @@ function fillSelect(select, rows, preferred, placeholder = "") {
 async function loadModelOptions() {
   const modelSelect = $("#labelerModelSelect");
   if (!modelSelect) return;
+  const token = ++labeler.modelToken;
   const providerKey = String(labeler.providerKey || "");
+  const isCurrent = () => token === labeler.modelToken && providerKey === labeler.providerKey;
   if (!providerKey) {
-    modelSelect.replaceChildren();
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = "请先在设置中添加模型";
-    modelSelect.append(option);
+    labeler.modelName = "";
+    modelSelect.disabled = false;
+    fillSelect(modelSelect, [], "", "请先在设置中添加模型");
     return;
   }
-  if (labeler.modelName && [...modelSelect.options].some((o) => o.value === labeler.modelName)) {
-    modelSelect.value = labeler.modelName;
-    return;
-  }
-  const models = await modelOptionsFor(providerKey);
-  modelSelect.replaceChildren();
-  if (!models.length) {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = "请先在设置中检查模型";
-    modelSelect.append(option);
-    return;
-  }
-  modelSelect.append(...models.map((model) => {
-    const option = document.createElement("option");
-    option.value = String(model.id || model.name || "");
-    option.textContent = String(model.name || model.id || "");
-    return option;
-  }));
-  const preferred = labeler.modelName && models.some((m) => String(m.id) === labeler.modelName)
-    ? labeler.modelName
-    : String(models[0]?.id || "");
-  modelSelect.value = preferred;
-  labeler.modelName = preferred;
+  modelSelect.disabled = true;
+  fillSelect(modelSelect, [], "", "读取模型中…");
+  const models = await modelOptionsFor(providerKey, { isCurrent });
+  if (!isCurrent()) return;
+  modelSelect.disabled = false;
+  labeler.modelName = fillSelect(
+    modelSelect,
+    models.map((model) => ({ value: model.id || model.name, label: model.name || model.id })),
+    labeler.modelName,
+    "请先在设置中检查模型",
+  );
 }
 
 let labelerActivation = null;
@@ -604,7 +583,9 @@ async function renderWorkerSlots() {
     const providerSelect = document.createElement("select");
     providerSelect.dataset.workerProvider = String(index);
     providerSelect.setAttribute("aria-label", `打标员 ${index + 1} 供应商`);
-    fillSelect(providerSelect, profiles, worker.providerKey, "请先在设置中添加模型");
+    const key = fillSelect(providerSelect, profiles, worker.providerKey, "请先在设置中添加模型");
+    if (worker.providerKey !== key) worker.modelName = "";
+    worker.providerKey = key;
     providerLabelNode.append(providerSelect);
     const modelLabelNode = document.createElement("label");
     modelLabelNode.append("模型");
@@ -626,22 +607,24 @@ async function renderWorkerSlots() {
     return row;
   });
   wrap.replaceChildren(...rows);
-  for (const [index, worker] of labeler.workers.entries()) {
+  await Promise.all(labeler.workers.map(async (worker, index) => {
     const key = String(worker.providerKey || "");
     const row = wrap.querySelector(`[data-worker-slot="${index}"]`);
     const modelSelect = row?.querySelector("[data-worker-model]");
-    if (!modelSelect) continue;
-    const models = await modelOptionsFor(key);
-    if (token !== labeler.slotsToken) return;
-    if (String(worker.providerKey || "") !== key) continue;
-    const pick = fillSelect(
+    if (!modelSelect) return;
+    const isCurrent = () => token === labeler.slotsToken
+      && labeler.workers[index] === worker && String(worker.providerKey || "") === key;
+    modelSelect.disabled = true;
+    const models = await modelOptionsFor(key, { isCurrent });
+    if (!isCurrent()) return;
+    modelSelect.disabled = false;
+    worker.modelName = fillSelect(
       modelSelect,
       models.map((model) => ({ value: model.id || model.name, label: model.name || model.id })),
       worker.modelName,
       "请先在设置中检查模型",
     );
-    if (!worker.modelName) worker.modelName = pick;
-  }
+  }));
   if (token !== labeler.slotsToken) return;
   updateConcurrencySummary();
   renderProviderLimitRows();
@@ -658,8 +641,11 @@ async function renderSupervisorSelects() {
     value: profile.model_key,
     label: profile.name || profile.model_key,
   }));
+  const previousKey = labeler.supervisor.providerKey;
   labeler.supervisor.providerKey = fillSelect(
-    providerSelect, profiles, labeler.supervisor.providerKey, "请先在设置中添加模型");
+    providerSelect, profiles, previousKey, "请先在设置中添加模型");
+  if (labeler.supervisor.providerKey !== previousKey) labeler.supervisor.modelName = "";
+  modelSelect.disabled = true;
   const status = document.createElement("option");
   status.value = "";
   status.textContent = "读取模型中…";
@@ -668,6 +654,7 @@ async function renderSupervisorSelects() {
   const isCurrent = () => token === labeler.supervisorToken && key === labeler.supervisor.providerKey;
   const models = await modelOptionsFor(key, { isCurrent });
   if (!isCurrent()) return;
+  modelSelect.disabled = false;
   labeler.supervisor.modelName = fillSelect(
     modelSelect,
     models.map((model) => ({ value: model.id || model.name, label: model.name || model.id })),
@@ -2336,6 +2323,13 @@ async function openExportFolder() {
 // ============================================================
 
 export function bindLabelerEvents() {
+  onProvidersChanged(() => {
+    if (!labeler.initialized) return;
+    // 只刷新模型控件：不能重读 settings 覆盖尚未保存的槽位或并发额度。
+    void Promise.all([
+      ensureModels(), renderWorkerSlots(), renderSupervisorSelects(),
+    ]).catch((error) => setHint(`贴签匠模型刷新失败：${error.message}`, true));
+  });
   watchWorkbenchSize($("#studioPageLabeler"), () => {}, { wide: 1120, narrow: 720 });
   bindWorkbenchDetails($("#studioPageLabeler"));
   const dropzone = $("#labelerDropzone");

@@ -32,10 +32,13 @@ let apiImpl=async()=>({});
 const context=vm.createContext({
   console,$:key=>elements[key]||null,$$:()=>[],
   api:(url,opts)=>apiImpl(url,opts),
-  state:{},onStudioPageChange(){},currentStudioPage:()=>'',setTimeout,clearTimeout,setInterval,clearInterval,
+  state:{providerModelCatalogs:{}},onProvidersChanged(){},onStudioPageChange(){},currentStudioPage:()=>'',setTimeout,clearTimeout,setInterval,clearInterval,
   document:{addEventListener(){},createElement:tag=>node(tag),createTextNode:text=>({textContent:text})},
   window:{addEventListener(){},matchMedia:()=>({matches:false})},
 });
+const catalogSource=fs.readFileSync('public/js/07-models-agents.js','utf8');
+const catalogFunction=name=>{const start=catalogSource.search(new RegExp('^export (?:async )?function '+name+'\\(', 'm'));return catalogSource.slice(start,catalogSource.indexOf('\n}',start)+2).replace(/^export /,'');};
+vm.runInContext('const catalogGenerations=new Map(),catalogRequests=new Map();\n'+catalogFunction('invalidateModelCatalogs')+'\n'+catalogFunction('loadModelCatalog'),context);
 const source=fs.readFileSync('public/js/23-labeler.js','utf8')
   .replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
 vm.runInContext(source+'\nglobalThis.p={labeler,renderResultBody,pollTask,loadTaskItems,loadTaskResults,loadNextAnnotations,renderTask,'

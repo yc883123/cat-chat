@@ -188,6 +188,24 @@ export const state = {
   // closed select; user choices made afterwards must still be preserved.
   updateAutoSelectLatest: false,
 };
+// API 配置更新后通知已挂载的模型选择器；不触碰各工作台草稿。
+const providersChangedHooks = new Set();
+export function onProvidersChanged(hook) {
+  providersChangedHooks.add(hook);
+  return () => providersChangedHooks.delete(hook);
+}
+
+export function notifyProvidersChanged(providerKeys) {
+  const keys = [...new Set(providerKeys.filter(Boolean))];
+  for (const hook of providersChangedHooks) {
+    try {
+      Promise.resolve(hook(keys)).catch(error => console.warn('API 列表刷新失败：', error));
+    } catch (error) {
+      console.warn('API 列表刷新失败：', error);
+    }
+  }
+}
+
 export const draggedFileCache = new Map();
 
 // ---- 外观主题 ----

@@ -34,6 +34,10 @@ WRITER_SETUP_SNAPSHOT_KEY = "setup_snapshot"
 # state; current_task_id remains available for polling and recovery.
 WRITER_PIPELINE_STOPPING = "stopping"
 
+# Frontend-only provider-change subscription; listeners receive affected model_key
+# strings after bootstrap is updated and shared catalogs/in-flight reads expire.
+FRONTEND_PROVIDERS_CHANGED_HOOK = "onProvidersChanged"
+
 # Workbench generation rules are explicit per request; saved defaults are never
 # applied by the task runner. Followups and retries reuse the frozen input.
 STUDIO_SYSTEM_PROMPT_KEY = "system_prompt"

@@ -1,11 +1,12 @@
 // ============================================================
 // 24-comfyui.js —— 造梦机（工作台第三个功能页）
-// 只 import 01-core / 03-media / 22-studio；轮询经 onStudioPageChange 暂停/恢复
+// 模型目录共用 07-models-agents；轮询经 onStudioPageChange 暂停/恢复
 // （离开页面就停，回来由服务端状态校准，与打标器同一套约定）。
 // 与聊天域零耦合：只调 /api/comfyui/*。
 // ============================================================
 
-import { $, api, localFileUrl, state, toast } from "./01-core.js";
+import { $, api, localFileUrl, onProvidersChanged, state, toast } from "./01-core.js";
+import { loadModelCatalog } from "./07-models-agents.js";
 import { attachmentThumbUrl, collectMediaPreviewItems, isPywebview, mediaKind, saveLocalFile } from "./03-media.js";
 import { currentStudioPage, isStudioOpen, onStudioPageChange, setStudioPage } from "./22-studio.js";
 import { bindWorkbenchDetails, watchWorkbenchSize } from "./22a-workbench-ui.js";
@@ -288,7 +289,14 @@ async function confirmSaveAs() {
   }
 }
 
+let unsubscribeBatchProviders = null;
+let batchConvertModelRequest = 0;
+
 export function bindComfyuiEvents() {
+  unsubscribeBatchProviders?.();
+  unsubscribeBatchProviders = onProvidersChanged((providerKeys) => {
+    void refreshBatchConvertProviders(providerKeys).catch((error) => toast(`刷新转换供应商失败：${error.message}`));
+  });
   watchWorkbenchSize($("#studioPageComfyui"), () => {});
   bindWorkbenchDetails($("#studioPageComfyui"));
   $("#comfyuiSaveCurrentAs")?.addEventListener("click", openSaveAsDialog);
@@ -4015,7 +4023,8 @@ function renderBatch() {
     return;
   }
   // 转换条是条件渲染的：重绘后补模板与模型下拉（选中值存在 batch.convert 里）。
-  if (batch.convert.provider) void batchLoadConvertModels();
+  batchRenderConvertProviders();
+  void batchLoadConvertModels();
   void batchLoadCustomTemplates();
   updateStepMeter();
 }
@@ -4926,7 +4935,8 @@ function onBatchInput(event) {
     else if (!bar) {
       // 输入时只补转换条，保留正在编辑的 textarea 与光标。
       host?.querySelector(".cbm-batch-head")?.insertAdjacentHTML("afterend", batchConvertBarMarkup());
-      if (batch.convert.provider) void batchLoadConvertModels();
+      batchRenderConvertProviders();
+      void batchLoadConvertModels();
       void batchLoadCustomTemplates();
     }
   }
@@ -5050,36 +5060,68 @@ async function batchUploadTiles(pairs) {
 
 // ---- 剧本转换（POST /api/studio/generate + 轮询既有任务）----
 
-async function batchLoadConvertModels() {
+function batchRenderConvertProviders() {
+  const select = document.querySelector('[data-batch-field="convertProvider"]');
+  if (!select) return;
+  const profiles = state.bootstrap?.model_profiles || state.bootstrap?.providers || [];
+  const entries = profiles.filter((profile) => profile?.model_key);
+  if (!entries.some((profile) => String(profile.model_key) === batch.convert.provider)) {
+    batch.convert.provider = "";
+    batch.convert.model = "";
+  }
+  select.replaceChildren(new Option(entries.length ? "请选择供应商…" : "未配置供应商，请先到设置中添加", ""),
+    ...entries.map((profile) => new Option(String(profile.name || profile.model_key), String(profile.model_key))));
+  select.value = batch.convert.provider;
+  select.disabled = !entries.length;
+}
+
+async function refreshBatchConvertProviders(providerKeys) {
+  const select = document.querySelector('[data-batch-field="convertProvider"]');
+  if (!select) {
+    ++batchConvertModelRequest;
+    return;
+  }
+  const previous = batch.convert.provider;
+  batchRenderConvertProviders();
+  if (previous !== batch.convert.provider || providerKeys.includes(previous)) await batchLoadConvertModels();
+}
+
+async function batchLoadConvertModels({ force = false } = {}) {
+  const requestId = ++batchConvertModelRequest;
   const select = document.querySelector('[data-batch-field="convertModel"]');
   if (!select) return;
   const providerKey = batch.convert.provider;
+  const current = () => requestId === batchConvertModelRequest && batch.convert.provider === providerKey
+    && select.isConnected && document.querySelector('[data-batch-field="convertModel"]') === select
+    && document.querySelector('[data-batch-field="convertProvider"]')?.value === providerKey;
   if (!providerKey) {
+    batch.convert.model = "";
     select.replaceChildren(new Option("请先选择供应商", ""));
     select.disabled = true;
     return;
   }
   select.replaceChildren(new Option("加载模型中…", ""));
   select.disabled = true;
-  if (!(state.providerModelCatalogs[providerKey] || []).length) {
-    try {
-      const result = await api("/api/providers/models", { method: "POST", body: { model_key: providerKey } });
-      if (result?.error) throw new Error(result.error);
-      state.providerModelCatalogs[providerKey] = Array.isArray(result?.models) ? result.models : [];
-    } catch (_) {
-      state.providerModelCatalogs[providerKey] = [];
-    }
+  try {
+    await loadModelCatalog(providerKey, { force });
+    if (!current()) return;
+    const models = state.providerModelCatalogs[providerKey] || [];
+    const entries = models.map((entry) => {
+      const id = String((typeof entry === "object" ? (entry?.id ?? entry?.model ?? entry?.name) : entry) || "").trim();
+      return { id, name: String(entry?.name || id) };
+    }).filter((entry, index, rows) => entry.id && rows.findIndex((row) => row.id === entry.id) === index);
+    if (!entries.some((entry) => entry.id === batch.convert.model)) batch.convert.model = "";
+    select.replaceChildren(new Option(entries.length ? "请选择模型…" : "该供应商暂无可用模型", ""),
+      ...entries.map((entry) => new Option(entry.name, entry.id)));
+    select.disabled = !entries.length;
+    select.value = batch.convert.model;
+  } catch (error) {
+    if (!current()) return;
+    batch.convert.model = "";
+    select.replaceChildren(new Option("模型目录读取失败，请重新选择供应商", ""));
+    select.disabled = true;
+    toast(`转换模型目录读取失败：${error.message}`);
   }
-  if (batch.convert.provider !== providerKey || !select.isConnected) return;
-  const models = state.providerModelCatalogs[providerKey] || [];
-  const validIds = models.map((entry) => String(typeof entry === "object" ? (entry.id ?? entry.model ?? entry.name) : entry));
-  if (!validIds.includes(batch.convert.model)) batch.convert.model = "";
-  select.replaceChildren(new Option("请选择模型…", ""), ...models.map((entry) => {
-    const id = typeof entry === "object" ? (entry.id ?? entry.model ?? entry.name) : entry;
-    return new Option(entry?.name || id, id);
-  }));
-  select.disabled = !models.length;
-  select.value = batch.convert.model;
 }
 
 // 提词库内置模板按模块分组；值加 catalog: 前缀，请求里还原成 item_id。

@@ -20,7 +20,7 @@ const elements={'#labelerCustomSystemPrompt':prompt,'#labelerSkillSelect':select
   '#labelerWriteTxtPreset':writePreset,'#labelerWriteTxtCustom':writeCustom};
 let pageListener,calls=0;
 const context=vm.createContext({console,$:key=>elements[key]||null,$$:()=>[],api:async()=>{calls++;throw new Error('unexpected request');},
-  state:{},onStudioPageChange:fn=>{pageListener=fn;},setTimeout,clearTimeout,setInterval,clearInterval,
+  state:{},onProvidersChanged(){},onStudioPageChange:fn=>{pageListener=fn;},setTimeout,clearTimeout,setInterval,clearInterval,
   document:{addEventListener(){}},window:{addEventListener(){}}});
 const shared=fs.readFileSync('public/js/22a-workbench-ui.js','utf8').replace(/^export /gm,'');
 vm.runInContext(shared,context);

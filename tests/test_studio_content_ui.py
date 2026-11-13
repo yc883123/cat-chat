@@ -40,6 +40,11 @@ function fixture(store=storage()) {
     workbenchStatusLabel:value=>value, syncWorkbenchHeader(){},filePanelState:{open:false},setAppView(){},renderSidebar(){},
     sidebarDesktop:()=>true,closeSidebar(){},openSidebar(){},applyFilePanelOpenClass(){},
   });
+  const catalogSource=fs.readFileSync('public/js/07-models-agents.js','utf8');
+  const catalogFunction=name=>{const start=catalogSource.search(new RegExp('^export (?:async )?function '+name+'\\(', 'm'));return catalogSource.slice(start,catalogSource.indexOf('\n}',start)+2).replace(/^export /,'');};
+  vm.runInContext('const catalogGenerations=new Map(),catalogRequests=new Map();\n'+catalogFunction('invalidateModelCatalogs')+'\n'+catalogFunction('loadModelCatalog'),context);
+  context.state.providerModelCatalogs={};
+  context.onProvidersChanged=()=>{};
   vm.runInContext(sharedSource+'\n'+studioSource+`
     const actualSyncStudioModel=syncStudioModel;
     const actualReconcile=reconcileActiveTask;

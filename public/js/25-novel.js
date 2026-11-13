@@ -6,7 +6,7 @@
 // - 两段式：列表与详情只拿索引；单章正文与单份稿件正文都按需请求。
 // - 阶段一是文件处理，不创建 Studio 任务；要素/大纲/剧本与单章 AI 改编走 Studio 队列。
 // - 与聊天域零耦合：只调 /api/novel/*。
-// - 只从 01-core / 22-studio 取公共能力，22 不反向 import 本文件，无循环依赖。
+// - 从 01-core / 07-models-agents / 22-studio 取公共能力，22 不反向 import 本文件，无循环依赖。
 //
 // 原文与改编稿（《创作场原文改编与记录管理整改计划》§3）：
 // - 保存编辑结果时**新增一份改编稿**，原文与其它稿件逐字保留。
@@ -14,7 +14,8 @@
 // - 卡片展开状态按稿件 ID 记录，轮询或切阶段返回都不会把它强行撑开。
 // ============================================================
 
-import { $, api, applyModelSkinFor, state, toast } from "./01-core.js";
+import { $, api, applyModelSkinFor, onProvidersChanged, state, toast } from "./01-core.js";
+import { loadModelCatalog } from "./07-models-agents.js";
 import { onStudioPageChange, setStudioPage } from "./22-studio.js";
 import { createContentSkillPicker } from "./22c-content-skills.js";
 import { bindWorkSystemPrompt } from "./22d-work-prompt.js";
@@ -143,8 +144,6 @@ const novel = {
   // 模型选择（与提词库同口径）：先选供应商，再按供应商拉完整模型目录。
   stageProviderKey: "",
   stageModelName: "",
-  stageModelsCache: new Map(),
-  stageModelInflight: new Map(),
   aiProviderKey: "",
   aiModelName: "",
   // 生成参数（用户可调，按用户保存）。
@@ -1844,99 +1843,89 @@ function providerRows() {
 function fillProviderSelect(select, previousKey) {
   if (!select) return "";
   const rows = providerRows();
-  select.replaceChildren(...rows.map((row) => {
-    const option = document.createElement("option");
-    option.value = row.key;
-    option.textContent = row.label;
-    return option;
-  }));
-  if (!rows.length) {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = "请先在设置中添加模型";
-    select.append(option);
+  const deleted = previousKey && !rows.some((row) => row.key === previousKey);
+  if (deleted) select.dataset.providerDeleted = "true";
+  select.replaceChildren(...rows.map((row) => new Option(row.label, row.key)));
+  if (!rows.length || select.dataset.providerDeleted === "true") {
+    select.prepend(new Option(deleted || select.dataset.providerDeleted === "true"
+      ? "供应商已删除，请重新选择" : "请先在设置中添加模型", ""));
+    select.value = "";
     return "";
   }
-  const preferred = [
-    previousKey,
-    $("#modelSelect")?.value || "",
-    state.bootstrap?.default_model_key || "",
-  ].find((key) => key && rows.some((row) => row.key === key));
+  const preferred = [previousKey, $("#modelSelect")?.value || "", state.bootstrap?.default_model_key || ""]
+    .find((key) => key && rows.some((row) => row.key === key));
   select.value = preferred || rows[0].key;
   return select.value;
 }
 
-/** 按当前供应商拉完整模型目录，填进模型下拉。 */
-async function fillModelSelect(select, providerKey) {
-  if (!select) return "";
-  if (!providerKey) {
-    select.replaceChildren(new Option("请先在设置中添加模型", ""));
-    return "";
-  }
-  let models = novel.stageModelsCache.get(providerKey);
-  if (!models) {
-    const inflight = novel.stageModelInflight.get(providerKey);
-    if (inflight) {
-      models = await inflight;
-    } else {
-      const task = (async () => {
-        try {
-          const payload = await api("/api/providers/models", {
-            method: "POST",
-            body: { model_key: providerKey },
-          });
-          return Array.isArray(payload?.models) ? payload.models : [];
-        } catch (error) {
-          return [];
-        }
-      })();
-      novel.stageModelInflight.set(providerKey, task);
-      try {
-        models = await task;
-      } finally {
-        novel.stageModelInflight.delete(providerKey);
-      }
-      novel.stageModelsCache.set(providerKey, models);
-    }
-  }
-  const names = [];
-  for (const entry of models) {
-    const id = typeof entry === "object"
-      ? String(entry?.id ?? entry?.model ?? entry?.name ?? "")
-      : String(entry ?? "");
-    const clean = id.trim();
-    if (clean && !names.includes(clean)) names.push(clean);
-  }
-  if (!names.length) {
-    // 目录读不到：回退到这张卡片上配置的模型名（用户自己填的，能直接用）。
-    const profile = providerRows().find((row) => row.key === providerKey);
-    const configured = String(
-      (state.bootstrap?.model_profiles || []).find((row) => row.model_key === providerKey)?.model
-      || profile?.label || ""
-    ).trim();
-    if (configured) names.push(configured);
-  }
-  const previous = select.value;
-  select.replaceChildren(...names.map((name) => new Option(name, name)));
-  if (!names.length) {
-    select.replaceChildren(new Option("模型目录读取失败，请到设置里检查", ""));
-    return "";
-  }
-  select.value = names.includes(previous) ? previous : names[0];
-  return select.value;
+// 每个选择槽独立换代；刷新不排队，也不让旧请求覆盖新选择。
+const modelSelectionGenerations = new Map();
+const clearedModelSelections = new Set();
+const pendingModelNames = new Map();
+function stageModelSelects() {
+  return [...document.querySelectorAll('[data-novel-control="novelStageModel"]')];
 }
 
-let stageModelsChain = Promise.resolve();
-function fillStageModels() {
-  stageModelsChain = stageModelsChain.then(async () => {
-    const stageSelect = $("#novelStageProvider");
-    novel.stageProviderKey = fillProviderSelect(stageSelect, novel.stageProviderKey);
-    novel.stageModelName = await fillModelSelect($("#novelStageModel"), novel.stageProviderKey);
-    const aiSelect = $("#novelAiProvider");
-    novel.aiProviderKey = fillProviderSelect(aiSelect, novel.aiProviderKey || novel.stageProviderKey);
-    novel.aiModelName = await fillModelSelect($("#novelAiModel"), novel.aiProviderKey);
-  }).catch(() => {});
-  return stageModelsChain;
+async function fillModelSelect(selects, providerKey, providerField, modelField) {
+  const generation = (modelSelectionGenerations.get(modelField) || 0) + 1;
+  modelSelectionGenerations.set(modelField, generation);
+  const previous = novel[modelField] || pendingModelNames.get(modelField) || "";
+  pendingModelNames.set(modelField, previous);
+  novel[modelField] = "";
+  const show = (label) => {
+    for (const select of selects) {
+      select.replaceChildren(new Option(label, ""));
+      select.disabled = true;
+    }
+  };
+  if (!providerKey) {
+    pendingModelNames.delete(modelField);
+    show(providerRows().length ? "请先选择供应商" : "请先在设置中添加模型");
+    return false;
+  }
+  show("正在读取模型目录…");
+  let models = [], failed = false;
+  try {
+    models = await loadModelCatalog(providerKey);
+  } catch (_error) {
+    failed = true;
+  }
+  if (modelSelectionGenerations.get(modelField) !== generation || novel[providerField] !== providerKey) return false;
+  if (!providerRows().some((row) => row.key === providerKey)) return false;
+  const names = [...new Set((Array.isArray(models) ? models : []).map((entry) =>
+    String(typeof entry === "object" ? entry?.id ?? entry?.model ?? entry?.name ?? "" : entry ?? "").trim()).filter(Boolean))];
+  if (failed && !names.length) {
+    const configured = String((state.bootstrap?.model_profiles || state.bootstrap?.providers || [])
+      .find((row) => row.model_key === providerKey)?.model || "").trim();
+    if (configured) names.push(configured);
+  }
+  if (previous && !names.includes(previous)) clearedModelSelections.add(modelField);
+  const choice = names.includes(previous) ? previous : clearedModelSelections.has(modelField) ? "" : names[0] || "";
+  for (const select of selects) {
+    select.replaceChildren(...names.map((name) => new Option(name, name)));
+    if (!choice) select.prepend(new Option(names.length ? "原模型已不可用，请重新选择"
+      : failed ? "模型目录读取失败，请到设置里检查" : "供应商暂无可用模型", ""));
+    select.value = choice;
+    select.disabled = !names.length;
+  }
+  novel[modelField] = choice;
+  pendingModelNames.delete(modelField);
+  return true;
+}
+
+function fillStageModels(providerKeys = null) {
+  const previousStage = novel.stageProviderKey, previousAi = novel.aiProviderKey;
+  const stageProviders = [...document.querySelectorAll('[data-novel-control="novelStageProvider"]')];
+  for (const select of stageProviders) fillProviderSelect(select, novel.stageProviderKey);
+  novel.stageProviderKey = stageProviders[0]?.value || "";
+  novel.aiProviderKey = fillProviderSelect($("#novelAiProvider"), novel.aiProviderKey || novel.stageProviderKey);
+  const changed = (key, previous) => !Array.isArray(providerKeys) || key !== previous || providerKeys.includes(key);
+  return Promise.all([
+    changed(novel.stageProviderKey, previousStage)
+      ? fillModelSelect(stageModelSelects(), novel.stageProviderKey, "stageProviderKey", "stageModelName") : null,
+    changed(novel.aiProviderKey, previousAi)
+      ? fillModelSelect([$("#novelAiModel")].filter(Boolean), novel.aiProviderKey, "aiProviderKey", "aiModelName") : null,
+  ]).catch((error) => fail("刷新拆书匠模型失败", error));
 }
 
 function readStageModel() {
@@ -3634,6 +3623,9 @@ export function bindNovelEvents() {
   restoreLimits();
   restoreStoryboardConfig(null);
   novel.initialized = true;
+  onProvidersChanged((providerKeys) => {
+    if (novel.initialized) void fillStageModels(providerKeys);
+  });
 
   window.addEventListener("naiba-open-domain", (event) => {
     if (event.detail?.domain !== "novel") return;
@@ -3661,14 +3653,21 @@ export function bindNovelEvents() {
     renderEditor();
   });
   $("#novelAiSubmit")?.addEventListener("click", () => void submitAiAdapt());
-  $("#novelAiProvider")?.addEventListener("change", async (event) => {
+  $("#novelAiProvider")?.addEventListener("change", (event) => {
+    delete event.target.dataset.providerDeleted;
     novel.aiProviderKey = String(event.target.value || "");
     novel.aiModelName = "";
-    novel.aiModelName = await fillModelSelect($("#novelAiModel"), novel.aiProviderKey);
-    renderAiEditor();
+    clearedModelSelections.delete("aiModelName");
+    pendingModelNames.delete("aiModelName");
+    void fillModelSelect([$("#novelAiModel")].filter(Boolean), novel.aiProviderKey, "aiProviderKey", "aiModelName")
+      .then((current) => { if (current) renderAiEditor(); })
+      .catch((error) => fail("读取拆书匠模型失败", error));
   });
   $("#novelAiModel")?.addEventListener("change", (event) => {
     novel.aiModelName = String(event.target.value || "");
+    modelSelectionGenerations.set("aiModelName", (modelSelectionGenerations.get("aiModelName") || 0) + 1);
+    pendingModelNames.delete("aiModelName");
+    clearedModelSelections.delete("aiModelName");
     // 创作场换模型也跟随皮肤（与主对话同一条规则：只在自动模式下生效，
     // 识别不出家族时保持当前皮肤）。下同。
     void applyModelSkinFor(novel.aiModelName);
@@ -3994,15 +3993,28 @@ export function bindNovelEvents() {
     panel.querySelector('[data-novel-control="novelStageCancel"]')?.addEventListener("click", () => void cancelStageTask());
     panel.querySelector('[data-novel-control="novelStageRetry"]')?.addEventListener("click", () => void retryStageTask());
     panel.querySelector('[data-novel-control="novelStageApply"]')?.addEventListener("click", () => void applyStageResult());
-    panel.querySelector('[data-novel-control="novelStageProvider"]')?.addEventListener("change", async (event) => {
+    panel.querySelector('[data-novel-control="novelStageProvider"]')?.addEventListener("change", (event) => {
       novel.stageProviderKey = String(event.target.value || "");
       novel.stageModelName = "";
-      novel.stageModelName = await fillModelSelect($("#novelStageModel"), novel.stageProviderKey);
-      renderStagePanel();
-      void refreshPreviewBudget();
+      clearedModelSelections.delete("stageModelName");
+      pendingModelNames.delete("stageModelName");
+      for (const select of document.querySelectorAll('[data-novel-control="novelStageProvider"]')) {
+        delete select.dataset.providerDeleted;
+        select.value = novel.stageProviderKey;
+      }
+      void fillModelSelect(stageModelSelects(), novel.stageProviderKey, "stageProviderKey", "stageModelName")
+        .then((current) => {
+          if (!current) return;
+          renderStagePanel();
+          void refreshPreviewBudget();
+        }).catch((error) => fail("读取拆书匠模型失败", error));
     });
     panel.querySelector('[data-novel-control="novelStageModel"]')?.addEventListener("change", (event) => {
       novel.stageModelName = String(event.target.value || "");
+      modelSelectionGenerations.set("stageModelName", (modelSelectionGenerations.get("stageModelName") || 0) + 1);
+      pendingModelNames.delete("stageModelName");
+      clearedModelSelections.delete("stageModelName");
+      for (const select of stageModelSelects()) select.value = novel.stageModelName;
       void applyModelSkinFor(novel.stageModelName);
       renderStagePanel();
       void refreshPreviewBudget();

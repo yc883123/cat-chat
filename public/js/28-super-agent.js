@@ -2,7 +2,8 @@
 // 28-super-agent.js —— 任务总管控制面
 // ============================================================
 
-import { $, api, copyText, escapeHtml, localFileUrl, setAppView, state, toast } from "./01-core.js";
+import { $, api, copyText, escapeHtml, localFileUrl, onProvidersChanged, setAppView, state, toast } from "./01-core.js";
+import { loadModelCatalog } from "./07-models-agents.js";
 import { closeSidebar, openSidebar, setLeftSidebarCollapsed, sidebarDesktop } from "./14-file-panel.js";
 import { closeStudioView, openStudioView, setStudioPage } from "./22-studio.js";
 import { openConversation } from "./08-conversations.js";
@@ -14,7 +15,8 @@ const viewState = {
   listRequest: 0, detailRequest: 0, syncedThreadId: "",
 };
 
-const createModelState = { requestId: 0, loading: false, submitting: false };
+const createModelState = { requestId: 0, loading: false, submitting: false, providerKey: "", preferred: "" };
+let unsubscribeCreateProviders = null;
 const CREATE_MODEL_HINT = "模型来自全局供应商设置，默认使用全局默认模型，没有独立 API 设置。";
 const createState = { resourceToken: 0, bookToken: 0, loading: false, bookLoading: false, books: [], book: null, chapters: [], parts: [], conversations: [], jobs: [], fingerprint: "", requestId: "" };
 const mixedDraft = [];
@@ -789,32 +791,56 @@ function renderCreateModelSummary() {
 async function loadCreateModels(providerKey, preferred = "", { force = false } = {}) {
   const select = $("#superAgentCreateModel");
   const requestId = ++createModelState.requestId;
+  createModelState.providerKey = providerKey;
+  createModelState.preferred = preferred;
   const hint = $("#superAgentCreateModelHint");
+  const current = () => requestId === createModelState.requestId
+    && $("#superAgentCreateProvider")?.value === providerKey
+    && $("#superAgentCreateModel") === select && select?.isConnected
+    && $("#superAgentCreateDialog")?.open;
   if (hint) hint.textContent = CREATE_MODEL_HINT;
   createModelState.loading = false;
   renderCreateModels(providerKey, preferred);
+  renderCreateModelSummary();
   if (!select || !providerKey) return;
-  if (!force && (state.providerModelCatalogs[providerKey] || []).length) return;
   createModelState.loading = true;
   select.disabled = true;
-  select.replaceChildren(new Option("正在读取模型目录…", ""));
+  // /api/providers/models 的缓存与在途请求统一由 loadModelCatalog 管理。
+  if (force || !Array.isArray(state.providerModelCatalogs[providerKey])) {
+    select.replaceChildren(new Option("正在读取模型目录…", ""));
+    renderCreateModelSummary();
+  }
   try {
-    const result = await api("/api/providers/models", { method: "POST", body: { model_key: providerKey } });
-    if (result?.error) throw new Error(result.error);
-    if (requestId !== createModelState.requestId) return;
-    state.providerModelCatalogs[providerKey] = Array.isArray(result?.models) ? result.models : [];
+    await loadModelCatalog(providerKey, { force });
+    if (requestId !== createModelState.requestId || !current()) return;
     renderCreateModels(providerKey, preferred);
-    if (!select.value && !state.providerModelCatalogs[providerKey].length && hint) {
+    renderCreateModelSummary();
+    if (!select.value && !state.providerModelCatalogs[providerKey]?.length && hint) {
       hint.textContent = "该供应商暂无可用模型，请先在设置中检查配置，再点重新检测模型。";
     }
   } catch (error) {
-    if (requestId !== createModelState.requestId) return;
-    delete state.providerModelCatalogs[providerKey];
-    renderCreateModels(providerKey);
+    if (requestId !== createModelState.requestId || !current()) return;
+    select.replaceChildren(new Option("模型目录读取失败，请重新检测", ""));
+    select.disabled = true;
+    renderCreateModelSummary();
     if (hint) hint.textContent = `模型目录读取失败：${error.message}。请检查配置后重新检测模型。`;
   } finally {
     if (requestId === createModelState.requestId) createModelState.loading = false;
   }
+}
+
+async function refreshCreateProviders(providerKeys) {
+  if (!$("#superAgentCreateDialog")?.open) {
+    ++createModelState.requestId;
+    createModelState.loading = false;
+    return;
+  }
+  const previous = $("#superAgentCreateProvider")?.value || "";
+  const preferred = $("#superAgentCreateModel")?.value
+    || (createModelState.providerKey === previous ? createModelState.preferred : "");
+  const providerKey = renderCreateProviders(previous);
+  if (providerKey === previous && !providerKeys.includes(providerKey)) return;
+  await loadCreateModels(providerKey, providerKey === previous ? preferred : createPreferredModel(providerKey));
 }
 
 function renderCreateMode() {
@@ -966,11 +992,14 @@ async function openCreateDomainDialog(prefill = {}) {
   if (!dialog || typeof dialog.showModal !== "function") return;
   // Failed submissions keep their request ID while the payload is unchanged.
   clearCreateError();
-  const providerKey = renderCreateProviders($("#superAgentCreateProvider")?.value || "");
-  void loadCreateModels(providerKey, createPreferredModel(providerKey));
+  const previousProvider = $("#superAgentCreateProvider")?.value || "";
+  const previousModel = $("#superAgentCreateModel")?.value
+    || (createModelState.providerKey === previousProvider ? createModelState.preferred : "");
+  const providerKey = renderCreateProviders(previousProvider);
+  if (!dialog.open) dialog.showModal();
+  void loadCreateModels(providerKey, providerKey === previousProvider ? previousModel : createPreferredModel(providerKey));
   if (["writer", "novel", "chat", "job", "subagent"].includes(prefill.domain)) $("#superAgentCreateDomain").value = prefill.domain;
   else if (prefill.conversationId) $("#superAgentCreateDomain").value = "chat";
-  if (!dialog.open) dialog.showModal();
   await loadCreateResources(prefill);
 }
 
@@ -1237,6 +1266,16 @@ async function resolveApproval(status, approvalId) {
 }
 
 export function bindSuperAgentEvents() {
+  unsubscribeCreateProviders?.();
+  unsubscribeCreateProviders = onProvidersChanged((providerKeys) => {
+    void refreshCreateProviders(providerKeys).catch((error) => {
+      if ($("#superAgentCreateDialog")?.open) createError(`刷新供应商失败：${error.message}`);
+    });
+  });
+  $("#superAgentCreateDialog")?.addEventListener("close", () => {
+    ++createModelState.requestId;
+    createModelState.loading = false;
+  });
   $("#superAgentOpenSidebar")?.addEventListener("click", showTaskNavigation);
   $("#superAgentToggleInfo")?.addEventListener("click", () => setTaskInfoOpen($("#superAgentView").dataset.infoOpen !== "true"));
   $("#superAgentCloseInfo")?.addEventListener("click", () => { setTaskInfoOpen(false); $("#superAgentToggleInfo")?.focus(); });
@@ -1331,7 +1370,10 @@ export function bindSuperAgentEvents() {
   });
   $("#superAgentCreateModel")?.addEventListener("change", () => { clearCreateError(); renderCreateModelSummary(); });
   $("#superAgentCreateModelRefresh")?.addEventListener("click", () => {
-    void loadCreateModels(String($("#superAgentCreateProvider")?.value || ""), "", { force: true });
+    const providerKey = String($("#superAgentCreateProvider")?.value || "");
+    const preferred = $("#superAgentCreateModel")?.value
+      || (createModelState.providerKey === providerKey ? createModelState.preferred : "");
+    void loadCreateModels(providerKey, preferred, { force: true });
   });
   $("#superAgentCreateForm")?.addEventListener("input", clearCreateError);
   $("#openTaskManager")?.addEventListener("click", () => { $("#tasksDialog")?.close(); void openSuperAgentView(); });

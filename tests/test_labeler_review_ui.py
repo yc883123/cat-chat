@@ -45,7 +45,7 @@ p.labeler.supervisor={providerKey:'B',modelName:''};await p.renderSupervisorSele
 elements['#labelerTaskHint'].textContent='最新操作提示';fail(Error('旧目录错误'));await a;
 assert.equal(elements['#labelerTaskHint'].textContent,'最新操作提示');
 assert.equal(p.labeler.supervisor.modelName,'b');
-assert.equal(p.labeler.providerModelsCache.has('A'),false,'失败不能被永久缓存为空目录');
+assert.equal(context.state.providerModelCatalogs.A,undefined,'失败不能被永久缓存为空目录');
 apiImpl=async()=>({models:[{id:'a-recovered'}]});
 p.labeler.supervisor={providerKey:'A',modelName:''};await p.renderSupervisorSelects();
 assert.equal(p.labeler.supervisor.modelName,'a-recovered');
@@ -57,10 +57,11 @@ elements['#labelerSupervisorProvider']=node('select');elements['#labelerSupervis
 context.state.bootstrap={model_profiles:[{model_key:'A'}]};
 const replies=[];apiImpl=()=>new Promise(resolve=>replies.push(resolve));
 p.labeler.supervisor={providerKey:'A',modelName:''};const first=p.renderSupervisorSelects();
+context.invalidateModelCatalogs(['A']);
 const second=p.renderSupervisorSelects();replies[1]({models:[{id:'new'}]});await second;
 replies[0]({models:[{id:'old'}]});await first;
 assert.equal(p.labeler.supervisor.modelName,'new');
-assert.equal(p.labeler.providerModelsCache.get('A')[0].id,'new','旧代次也不能污染下次重绘的目录缓存');
+assert.equal(context.state.providerModelCatalogs.A[0].id,'new','旧代次也不能污染下次重绘的目录缓存');
 """)
 
     def test_provider_limits_patch_isolated_keys_and_late_full_response(self):

@@ -7,9 +7,11 @@
 用法（解释器纪律见《项目维护说明（修改代码前必读）.md》）：
     .venv/Scripts/python.exe verify\\studio_catalog_build.py --sources-dir <目录> [--out-dir public\\studio]
     .venv/Scripts/python.exe verify\\studio_catalog_build.py --append-manju [--out-dir public\\studio]
+    .venv/Scripts/python.exe verify\\studio_catalog_build.py --append-gslh [--out-dir public\\studio]
 
-漫剧始终读取仓库 skills/ai-manju-skills；--manju-dir 可指定包根目录做离线校验。
-增补只写索引、script正文与JSON报告；Markdown报告仅完整构建显式 --report-md 时生成。
+漫剧始终读取仓库 skills/ai-manju-skills；古手梨花合集读取 presets/gushoulihua-skills。
+--manju-dir / --gslh-dir 可指定包根目录做离线校验。增补只写索引、对应正文分片与JSON报告；
+Markdown报告仅完整构建显式 --report-md 时生成。
 
 sources 目录约定文件名（`--sources-dir` 由运行者传语义路径，本脚本不内嵌真实路径）：
 - qiyuan_prompt_library_index.json / qiyuan_prompt_library_bodies.json   提示词主库 63
@@ -46,6 +48,8 @@ EXPECTED_TOTAL = BASE_EXPECTED_TOTAL + 21
 MANJU_SOURCE = "ai-manju-skills"
 MANJU_REPOSITORY = "https://github.com/zhanghao123vip/ai-manju-skills"
 MANJU_COMMIT = "77fb32a53a00ca7f455cba6a74ec1b05e1a63fb4"
+GSLH_SOURCE = "gushoulihua-skills"
+GSLH_COLLECTION = "是古手梨花sama-提示词Skill 合集"
 
 # 手工修正的提示词在转换器中维护，完整重建和增量刷新共用，避免旧来源把修复覆盖。
 H3_REFERENCE_COMMIT = "199b7d0e1fd95e7b3eafa8c15eca692534142427"
@@ -161,6 +165,18 @@ SENSITIVE_EXEMPT: dict[str, dict[str, str]] = {
     "vs-101-k2-engine": {
         "露点": "K2 SFW 版：正文自述「本文件为 SFW 版，不收录露骨内容」，NSFW 仅作为分级判定说明与外置扩展库登记",
         "nsfw": "K2 SFW 版：NSFW 仅是 SFW/NSFW 判定分叉的说明词，正文不含露骨内容",
+    },
+    "vs-202-gslh-k2-portrait": {
+        "露点": "K2 人像 SFW 版：露点只出现在 SFW/越界判定表，正文明确不输出越界内容",
+    },
+    "vs-203-gslh-k2-contrast": {
+        "露点": "K2 人像反差 SFW 版：露点是唯一硬边界说明，正文明确越界时改为安全替代",
+    },
+    "h3-201-gslh-edge-i2v": {
+        "露点": "单图首帧擦边短剧：露点是明确禁止项与交付检查项，正文不含露点内容",
+    },
+    "h3-202-gslh-pv-anime": {
+        "露点": "动漫 PV 模板：露点是尺度检查项，模板要求始终保持不能露点",
     },
 }
 
@@ -514,6 +530,377 @@ def manju_family(source_dir: Path | None = None):
              "license": "MIT", "groups": dict(Counter(group for _, _, group, _ in MANJU_PRESETS)),
              "audit": audits}
     return items, bodies, [], stats, []
+
+
+# ---- 古手梨花 Skill 合集：按模板分支拆条（--append-gslh 幂等增补） ----
+
+GSLH_SINGLE_FILE_NOTE = (
+    "> 单文件版：原文引用的 `references/...` 规则已按原路径合并到本条末尾，"
+    "读到引用时直接使用末尾同名章节，不需要读取外部文件。"
+    "原文提到的 `scripts/` 脚本与图片、视频素材未随预设内置，相关检查请按正文规则人工核对。"
+)
+
+GSLH_EDGE_NOTE = (
+    "> 单文件版：本合集未附原「MiniMax H3 擦擦导演台图生视频提示词模板.md」；"
+    "以下工作流与末尾《H3 擦擦导演台快速复核规则》是完整可执行依据，"
+    "读到引用时直接使用末尾同名章节，不需要读取外部文件。"
+)
+
+GSLH_PRESETS = (
+    {
+        "id": "vs-201-gslh-k2-anime",
+        "title": "K2 · 二次元插画引擎（SFW）",
+        "summary": "K2 二次元自然语言插画引擎：按核心执行器与主题语义词库组装 SFW 二次元提示词，默认英文自然语言。",
+        "module": "vs", "genre": "提示词引擎",
+        "tags": ("K2", "Krea2", "二次元", "提示词引擎", "古手梨花"),
+        "mode": "template",
+        "files": ("k2-prompt-engine/references/K2二次元提示词引擎_SFW版.md",),
+    },
+    {
+        "id": "vs-202-gslh-k2-portrait",
+        "title": "K2 · 人像摄影引擎（SFW 基础版）",
+        "summary": "K2 人像摄影基础版：中文自然语言写人像写真提示词，按段落配额组装、从词库取词并执行九项自检。",
+        "module": "vs", "genre": "提示词引擎",
+        "tags": ("K2", "Krea2", "人像", "摄影", "提示词引擎", "古手梨花"),
+        "mode": "template",
+        "files": ("k2-prompt-engine/references/K2人像提示词引擎（SFW版）.md",),
+    },
+    {
+        "id": "vs-203-gslh-k2-contrast",
+        "title": "K2 · 人像反差特化（SFW）",
+        "summary": "K2 人像反差特化版：同一角色在同一张图内并置清纯/魅惑、日常/盛装等反差，硬边界为不露点。",
+        "module": "vs", "genre": "提示词引擎",
+        "tags": ("K2", "Krea2", "人像", "反差", "提示词引擎", "古手梨花"),
+        "mode": "template",
+        "files": ("k2-prompt-engine/references/K2人像提示词引擎·反差特化版（SFW）.md",),
+    },
+    {
+        "id": "vs-204-gslh-k2-palace",
+        "title": "K2 · 仙宫场景引擎（SFW）",
+        "summary": "K2 东方仙宫专用引擎：覆盖天庭、瑶池、星宫、月宫等神界场景与人物叙事，输出中文自然语言提示词。",
+        "module": "vs", "genre": "提示词引擎",
+        "tags": ("K2", "Krea2", "仙宫", "国风", "场景", "提示词引擎", "古手梨花"),
+        "mode": "template",
+        "files": ("k2-prompt-engine/references/K2仙宫专用场景提示词引擎.md",),
+    },
+    {
+        "id": "vs-205-gslh-moss-anime",
+        "title": "MOSS · 二次元提示词模板（SFW）",
+        "summary": "MOSS 二次元 SFW 写词模板：按规则直接输出正向提示词，默认英文，覆盖角色、日常、动作、场景、海报与漫画。",
+        "module": "vs", "genre": "提示词引擎",
+        "tags": ("MOSS", "二次元", "提示词引擎", "古手梨花"),
+        "mode": "template",
+        "files": ("moss-prompt-engine/references/MOSS二次元提示词模板_sfw版.md",),
+    },
+    {
+        "id": "vs-206-gslh-moss-portrait",
+        "title": "MOSS · 人像摄影模板（SFW v3.0）",
+        "summary": "MOSS 真人摄影 SFW v3.0：完整 17 章写词规范，覆盖日常随拍、棚拍、商业时装、古典人像与双人互动。",
+        "module": "vs", "genre": "提示词引擎",
+        "tags": ("MOSS", "人像", "摄影", "提示词引擎", "古手梨花"),
+        "mode": "template",
+        "files": ("moss-prompt-engine/references/MOSS人像提示词模板_sfw版.md",),
+    },
+    {
+        "id": "vs-207-gslh-yaoguang",
+        "title": "瑶光 · Z-image 人像提示词引擎（v5.0）",
+        "summary": "瑶光 Z-image 人像引擎：A 摄影写真 / B 艺术创作 / C 日常快照三分支，全中文自然语言与九条风格还原规则。",
+        "module": "vs", "genre": "提示词引擎",
+        "tags": ("瑶光", "Z-image", "人像", "提示词引擎", "古手梨花"),
+        "mode": "skill",
+        "files": ("zimage-prompt-engine/SKILL.md", "zimage-prompt-engine/references/瑶光提示词模板_v5.0.md"),
+    },
+    {
+        "id": "vs-211-gslh-img-sb-fight",
+        "title": "图片分镜 · 动漫战斗",
+        "summary": "把漫画、已有分镜或文字打戏整理成一条多格战斗分镜生图提示词，并检查成图、给出局部返修提示。",
+        "module": "vs", "genre": "图片分镜",
+        "tags": ("图片分镜", "战斗", "分镜", "古手梨花"),
+        "mode": "skill",
+        "files": (
+            "img-storyboard-fight/SKILL.md",
+            "img-storyboard-fight/references/gpt-image-2.5.md",
+            "img-storyboard-fight/references/handoff.md",
+            "img-storyboard-fight/references/output-contract.md",
+            "img-storyboard-fight/references/storyboard-design.md",
+            "img-storyboard-fight/references/visual-direction.md",
+        ),
+    },
+    {
+        "id": "vs-212-gslh-img-sb-narrative",
+        "title": "图片分镜 · 叙事文戏",
+        "summary": "把日常、恋爱、对话、悬疑等非战斗剧情整理成多格分镜生图提示词，支持动漫与现实两种模式并保留完整台词。",
+        "module": "vs", "genre": "图片分镜",
+        "tags": ("图片分镜", "叙事", "文戏", "分镜", "古手梨花"),
+        "mode": "skill",
+        "files": (
+            "img-storyboard-narrative/SKILL.md",
+            "img-storyboard-narrative/references/anime-mode.md",
+            "img-storyboard-narrative/references/live-action-mode.md",
+            "img-storyboard-narrative/references/narrative-design.md",
+            "img-storyboard-narrative/references/output-contract.md",
+            "img-storyboard-narrative/references/review-handoff.md",
+        ),
+    },
+    {
+        "id": "h3-201-gslh-edge-i2v",
+        "title": "H3 · 单图首帧擦边短剧（I2VA）",
+        "summary": "把一张成年女性图作为 0.00 秒首帧，反推 5–15 秒强诱惑但不露点的 I2VA 短剧提示词。",
+        "module": "h3", "genre": "视频提示词",
+        "tags": ("H3", "I2VA", "首帧", "擦边", "古手梨花"),
+        "mode": "skill",
+        "files": ("h3-edge-i2v/SKILL.md", "h3-edge-i2v/references/template-rules.md"),
+    },
+    {
+        "id": "h3-202-gslh-pv-anime",
+        "title": "H3 · 动漫 PV",
+        "summary": "基于参考图与导演式模板生成动漫 PV 图生视频提示词，覆盖闪切、战斗、史诗叙事与成人魅力展示。",
+        "module": "h3", "genre": "视频提示词",
+        "tags": ("H3", "PV", "动漫", "图生视频", "古手梨花"),
+        "mode": "skill",
+        "files": ("h3-pv-anime/SKILL.md", "h3-pv-anime/references/动漫PV模板.md"),
+    },
+    {
+        "id": "h3-203-gslh-sb-manga",
+        "title": "H3 · 漫画视频分镜（Ref2VA）",
+        "summary": "把漫画页拆成可独立生成的 H3 Ref2VA 视频单元，保留完整对白、动作节拍与剧情因果。",
+        "module": "h3", "genre": "视频分镜",
+        "tags": ("H3", "Ref2VA", "漫画", "分镜", "古手梨花"),
+        "mode": "skill",
+        "files": (
+            "h3-storyboard-manga/SKILL.md",
+            "h3-storyboard-manga/references/continuity.md",
+            "h3-storyboard-manga/references/dialogue-voice.md",
+            "h3-storyboard-manga/references/output-contract.md",
+            "h3-storyboard-manga/references/panel-analysis.md",
+            "h3-storyboard-manga/references/segmentation-validation.md",
+        ),
+    },
+    {
+        "id": "h3-204-gslh-sb-fight",
+        "title": "H3 · 动漫战斗分镜（Ref2VA）",
+        "summary": "把漫画或战斗分镜拆成 H3 Ref2VA 打戏单元，强调完整攻防因果、高冲击动作与不拖沓时长。",
+        "module": "h3", "genre": "视频分镜",
+        "tags": ("H3", "Ref2VA", "战斗", "分镜", "古手梨花"),
+        "mode": "skill",
+        "files": (
+            "h3-storyboard-fight/SKILL.md",
+            "h3-storyboard-fight/references/continuity.md",
+            "h3-storyboard-fight/references/dialogue-voice.md",
+            "h3-storyboard-fight/references/fight-direction.md",
+            "h3-storyboard-fight/references/output-contract.md",
+            "h3-storyboard-fight/references/panel-analysis.md",
+            "h3-storyboard-fight/references/performance-execution.md",
+            "h3-storyboard-fight/references/segmentation-validation.md",
+            "h3-storyboard-fight/references/shot-continuity.md",
+            "img-storyboard-fight/references/handoff.md",
+        ),
+    },
+    {
+        "id": "h3-205-gslh-sb-live-manga",
+        "title": "H3 · 真人漫画分镜（Ref2VA）",
+        "summary": "把漫画页改编为真人成片 H3 Ref2VA 提示词，支持真人角色替换、装备继承与实景环境转换。",
+        "module": "h3", "genre": "视频分镜",
+        "tags": ("H3", "Ref2VA", "真人", "漫画", "分镜", "古手梨花"),
+        "mode": "skill",
+        "files": (
+            "h3-storyboard-live-manga/SKILL.md",
+            "h3-storyboard-live-manga/references/adaptation.md",
+            "h3-storyboard-live-manga/references/continuity.md",
+            "h3-storyboard-live-manga/references/dialogue-voice.md",
+            "h3-storyboard-live-manga/references/output-contract.md",
+            "h3-storyboard-live-manga/references/validation.md",
+        ),
+    },
+    {
+        "id": "h3-206-gslh-full-fight",
+        "title": "H3 · 完整动漫打戏",
+        "summary": "从人物与场景参考或剧本制作完整 H3 动漫打戏：确认配置、逐段剧本、关键画面提示词与六字段视频提示词。",
+        "module": "h3", "genre": "视频提示词",
+        "tags": ("H3", "打戏", "2D", "分镜", "古手梨花"),
+        "mode": "skill",
+        "files": (
+            "h3-full-fight/SKILL.md",
+            "h3-full-fight/references/keyframe-2d.md",
+            "h3-full-fight/references/script.md",
+            "h3-full-fight/references/techniques.md",
+            "h3-full-fight/references/video-prompt.md",
+        ),
+    },
+)
+
+
+def _gslh_require(ok: bool, context: str) -> None:
+    if not ok:
+        raise SystemExit(context)
+
+
+def _gslh_root(source_dir: Path | None) -> Path:
+    if source_dir is not None:
+        return Path(source_dir)
+    return Path(__file__).resolve().parents[1] / "presets" / GSLH_SOURCE
+
+
+def _gslh_manifest(root: Path) -> dict:
+    manifest = read_json(root / "source.json")
+    _gslh_require(isinstance(manifest, dict), "gslh source.json 必须是对象")
+    _gslh_require(manifest.get("collection") == GSLH_COLLECTION, "gslh source.json 合集名不符")
+    rows = manifest.get("files")
+    _gslh_require(isinstance(rows, list) and rows, "gslh source.json files 必须为非空数组")
+    mapping: dict[str, dict] = {}
+    for row in rows:
+        _gslh_require(isinstance(row, dict), "gslh source.json 文件记录必须是对象")
+        path = str(row.get("path") or "")
+        _gslh_require(bool(path) and not path.startswith(("/", "\\")) and ".." not in path.split("/"),
+                      f"gslh 路径非法：{path}")
+        _gslh_require(path not in mapping, f"gslh 清单路径重复：{path}")
+        mapping[path] = row
+    required = {path for preset in GSLH_PRESETS for path in preset["files"]}
+    _gslh_require(set(mapping) == required,
+                  f"gslh 清单与预设不一致：多 {sorted(set(mapping) - required)} 缺 {sorted(required - set(mapping))}")
+    actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()} - {"source.json"}
+    _gslh_require(actual == required, f"gslh 目录与清单不一致：多 {sorted(actual - required)} 缺 {sorted(required - actual)}")
+    for path, row in mapping.items():
+        data = (root / path).read_bytes()
+        _gslh_require(len(data) == int(row.get("bytes") or -1), f"gslh 文件字节数不符：{path}")
+        _gslh_require(hashlib.sha256(data).hexdigest() == row.get("sha256"), f"gslh 文件哈希不符：{path}")
+    return mapping
+
+
+def _gslh_text(root: Path, path: str) -> str:
+    try:
+        text = (root / path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SystemExit(f"gslh 原文不可读：{path}：{exc}")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _gslh_strip_frontmatter(text: str, label: str) -> str:
+    match = re.match(r"\A---\n.*?\n---\n", text, re.S)
+    _gslh_require(bool(match), f"{label} frontmatter 异常")
+    return text[match.end():].lstrip("\n")
+
+
+def _gslh_rewrite(text: str, preset_id: str) -> tuple[str, list[str]]:
+    rules: list[str] = []
+
+    def sub(pattern: str, replacement: str, expected: int, label: str) -> None:
+        nonlocal text
+        text, count = re.subn(pattern, replacement, text, flags=re.S | re.M)
+        _gslh_require(count == expected, f"{preset_id}/{label} 命中 {count}，预期 {expected}")
+        rules.append(label)
+
+    if preset_id == "h3-201-gslh-edge-i2v":
+        sub(re.escape("开始创作前，完整读取 [MiniMax H3 擦擦导演台图生视频提示词模板](references/MiniMax-H3-擦擦导演台图生视频提示词模板.md)。"
+                      "它是故事反推、尺度边界、动作设计、位移、运镜、台词、音频和交付格式的唯一详细依据。"),
+            "本合集未附原主模板文件；以下工作流与文末《H3 擦擦导演台快速复核规则》共同构成完整可执行规范，直接按本文执行。",
+            1, "missing_main_template")
+        sub(re.escape("[template-rules.md](references/template-rules.md) 只用于交付前快速复核，不能代替完整模板。"),
+            "文末《H3 擦擦导演台快速复核规则》用于交付前逐项检查。", 1, "rules_link")
+        sub(re.escape("输出前按 [template-rules.md](references/template-rules.md) 逐项检查"),
+            "输出前按文末《H3 擦擦导演台快速复核规则》逐项检查", 1, "rules_check")
+    elif preset_id == "h3-206-gslh-full-fight":
+        sub(re.escape("先记录用户选择，再按下方“出图模式与能力判定”核对当前环境及可调用能力，确定直出模式或提示词模式。"
+                      "只要用户要求仅交付提示词，就不调用生图工具；不把提示词冒充成已生成的图片。"),
+            "本预设只交付可复制的图片提示词；用户要求对话内直接生成图片时，说明本预设不含生图执行能力并按提示词模式交付，"
+            "不把提示词冒充成已生成的图片。", 1, "imagegen_confirmation")
+        sub(r"## 出图模式与能力判定\n.*?(?=\n## 输入与目标)",
+            "## 出图模式与能力判定\n\n本预设只交付可复制的图片提示词与 H3 视频提示词，不在对话内调用生图工具；"
+            "用户提供成图后按对应阶段实际检查并返修。用户要求直接出图时，如实说明本预设不含生图执行能力，并按提示词模式交付；"
+            "不要声称已经生成或查看过未提供的图片。\n", 1, "imagegen_section")
+        sub(r"需要查看完整单段材料、理解多张关键图的时序职责或对照实际生成效果时，读取 \[《断绝》B2 实际生成案例\]"
+            r"\(references/cases/duanjue-b2\.md\)。.*?不推广为所有任务的固定规则。",
+            "需要参考完整单段材料时，可按原合集随附的《断绝》B2 案例页核对；本预设未内置该案例的图片、视频与案例文本，"
+            "不把案例中的首帧衔接、定格、静音等特殊要求推广为通用规则。", 1, "case_reference")
+    elif preset_id == "vs-207-gslh-yaoguang":
+        sub(re.escape("基于 `references/瑶光提示词模板_v5.0.md`（约 440 行）生成"),
+            "基于文末《瑶光提示词模板 v5.0》生成", 1, "template_intro")
+        sub(re.escape("1. 完整读取 `references/瑶光提示词模板_v5.0.md` 全文（一次读完，禁止只读摘要）。"),
+            "1. 先通读文末《瑶光提示词模板 v5.0》全文（禁止只读摘要）。", 1, "template_read")
+        sub(re.escape("- 模板文件已内置在 references/；若主源更新，把同名文件重新复制覆盖到 references/ 即可（可让 Codex 代做）。"),
+            "- 模板全文在文末；若主源更新，重新植入同名模板即可。", 1, "template_note")
+    elif preset_id == "h3-204-gslh-sb-fight":
+        sub(re.escape("../img-storyboard-fight/references/handoff.md"),
+            "img-storyboard-fight/references/handoff.md", 1, "cross_skill_link")
+    return text, rules
+
+
+def _gslh_check_body(body: str, preset_id: str) -> None:
+    _gslh_require(bool(body.strip()) and not body.lstrip().startswith("---"),
+                  f"{preset_id} 正文为空或残留 frontmatter")
+    _gslh_require("\r" not in body, f"{preset_id} 正文残留 CRLF")
+    refs = set(re.findall(r"(?<![\w./-])((?:[\w-]+/)?references/[^\s)\]`\"'>]+?\.md)", body))
+    appendix = set(re.findall(r"(?m)^## 附：(.+)$", body))
+    dangling = sorted(ref for ref in refs
+                      if not any(ref == path or path.endswith("/" + ref) for path in appendix))
+    _gslh_require(not dangling, f"{preset_id} 仍有未合并的参考文档：{dangling}")
+
+
+def _gslh_body(preset: dict, root: Path, mapping: dict) -> tuple[str, list[str], list[dict]]:
+    files = list(preset["files"])
+    cleaned: list[str] = []
+    if preset["mode"] == "template":
+        body = _gslh_text(root, files[0]).strip() + "\n"
+        rules: list[str] = []
+    else:
+        raw = (root / files[0]).read_bytes()
+        if b"\r\n" in raw or b"\r" in raw.replace(b"\r\n", b""):
+            cleaned.append("crlf_normalize")
+        text = _gslh_text(root, files[0])
+        skill = _gslh_strip_frontmatter(text, preset["id"])
+        skill, rules = _gslh_rewrite(skill, preset["id"])
+        parts = []
+        for path in files[1:]:
+            parts.append(f"## 附：{path}\n\n{_gslh_text(root, path).strip()}")
+        note = GSLH_EDGE_NOTE if preset["id"] == "h3-201-gslh-edge-i2v" else GSLH_SINGLE_FILE_NOTE
+        body = note + "\n\n" + skill.strip() + "\n\n---\n\n" + "\n\n".join(parts) + "\n"
+        cleaned.append("frontmatter")
+        cleaned.append("single_file_refs")
+    _gslh_check_body(body, preset["id"])
+    audit = [{"path": path, "sha256": mapping[path]["sha256"], "bytes": mapping[path]["bytes"]}
+             for path in files]
+    return body, cleaned + rules, audit
+
+
+def gslh_family(source_dir: Path | None = None):
+    root = _gslh_root(source_dir)
+    mapping = _gslh_manifest(root)
+    items, bodies, rejects, descriptive, audits = [], {}, [], [], []
+    for order, preset in enumerate(GSLH_PRESETS, 1):
+        body, cleaned, audit = _gslh_body(preset, root, mapping)
+        hits, handled = match_sensitive(body, preset["id"])
+        if handled:
+            descriptive.append({"id": preset["id"], "source": GSLH_SOURCE, "markers": sorted(handled)})
+        if hits:
+            rejects.append({"id": preset["id"], "source": GSLH_SOURCE, "reason": [], "sensitive": hits})
+            continue
+        item = new_item(
+            item_id=preset["id"], title=preset["title"], module=preset["module"],
+            item_type="template", summary=preset["summary"], tags=list(preset["tags"]),
+            body=body, source=f"{GSLH_COLLECTION} / {'、'.join(preset['files'])}",
+            genre=preset["genre"], cleaned=cleaned,
+        )
+        item["has_vars"] = bool(item["vars"])
+        item["order"] = order
+        items.append(item)
+        bodies[preset["id"]] = body
+        audits.append({"id": preset["id"], "files": audit, "rules": cleaned,
+                       "output_sha1": item["source_sha1"]})
+    stats = {
+        "collection": GSLH_COLLECTION,
+        "author": "B站-是古手梨花sama",
+        "license": str(read_json(root / "source.json").get("license") or ""),
+        "input": len(GSLH_PRESETS),
+        "output": len(items),
+        "expected": len(GSLH_PRESETS),
+        "dupes": 0,
+        "rejected": len(rejects),
+        "files": len(mapping),
+        "rejected_ids": [row["id"] for row in rejects],
+        "excluded": list(read_json(root / "source.json").get("excluded") or []),
+        "audit": audits,
+    }
+    return items, bodies, rejects, stats, descriptive
 
 
 # ---- 家族 3：游戏原画 24 ----
@@ -899,6 +1286,71 @@ def append_manju(out_dir: Path, source_dir: Path | None = None) -> dict:
     return index
 
 
+def append_gslh(out_dir: Path, source_dir: Path | None = None) -> dict:
+    """幂等增补古手梨花合集预设；只写索引、prompt正文与JSON报告，校验先于写入。"""
+    gslh_items, gslh_bodies, rejects, stats, descriptive = gslh_family(source_dir)
+    _gslh_require(not rejects, f"gslh 预设被拒收：{json.dumps(rejects, ensure_ascii=False)}")
+    index = read_json(out_dir / "catalog_index.json")
+    prompt_bodies = read_json(out_dir / "bodies_prompt.json")
+    report = read_json(out_dir / "conversion_report.json")
+    _gslh_require(isinstance(index, dict) and isinstance(prompt_bodies, dict) and isinstance(report, dict),
+                  "已有索引/正文/报告必须是对象")
+    family_ids = set(gslh_bodies)
+    old_items = index.get("items")
+    _gslh_require(isinstance(old_items, list), "已有 items 不是列表")
+    kept = [it for it in old_items if it["id"] not in family_ids]
+    next_order = {module: max((int(it.get("order", 0)) for it in kept if it["module"] == module), default=0)
+                  for module in {preset["module"] for preset in GSLH_PRESETS}}
+    for item in gslh_items:
+        next_order[item["module"]] += 1
+        item["order"] = next_order[item["module"]]
+    items = kept + gslh_items
+    merged_bodies = {**prompt_bodies, **gslh_bodies}
+    for tag in sorted(set(BODIES_TAG_BY_MODULE[it["module"]] for it in items) - {"prompt"}):
+        shard = read_json(out_dir / f"bodies_{tag}.json")
+        _gslh_require(isinstance(shard, dict), f"bodies_{tag}.json 不是对象")
+        merged_bodies.update(shard)
+    problems = cross_check(items, merged_bodies)
+    _gslh_require(not problems, f"增补后契约不符：{problems}")
+    calculated = build_index(items)
+    for key in ("ok", "count", "chars", "modules", "types", "items"):
+        index[key] = calculated[key]
+    previous = (report.get("sources") or {}).get(GSLH_SOURCE, {})
+    index.setdefault("sources", {})[GSLH_SOURCE] = stats
+    report.setdefault("sources", {})[GSLH_SOURCE] = stats
+    counts = report.setdefault("counts", {})
+    counts["expected_plan"] = (int(counts.get("expected_plan", BASE_EXPECTED_TOTAL))
+                               - int(previous.get("expected", 0)) + stats["expected"])
+    counts["input"] = int(counts.get("input", len(kept))) - int(previous.get("input", 0)) + stats["input"]
+    counts["output_index"] = len(items)
+    report["catalog_cleanup"] = catalog_cleanup_report(items)
+    report["catalog_integrity"] = {"index_body_ids_equal": True, "shards": 4, "count": len(items)}
+    report["gslh_conversion"] = {
+        "source": f"presets/{GSLH_SOURCE}",
+        "author": stats["author"],
+        "license": stats["license"],
+        "input": stats["input"], "output": stats["output"], "files": stats["files"],
+        "note": "按 SKILL.md 的路由拆成独立模板分支；引擎类保留原文作为正文，流程类把 references 规则合并为单文件并在开头说明。",
+        "excluded": stats["excluded"],
+        "audit": stats["audit"],
+    }
+    existing_desc = report.setdefault("descriptive_mentions", [])
+    known = {(row.get("id"), row.get("source")) for row in existing_desc}
+    for row in descriptive:
+        if (row["id"], row["source"]) not in known:
+            existing_desc.append(row)
+    products = report.setdefault("products", {})
+    prompt_output = {**prompt_bodies, **gslh_bodies}
+    products["catalog_index.json"] = {**products.get("catalog_index.json", {}), "items": len(items),
+                                      "bytes": len(json.dumps(index, ensure_ascii=False, indent=1).encode("utf-8"))}
+    products["bodies_prompt.json"] = {**products.get("bodies_prompt.json", {}), "items": len(prompt_output),
+                                      "bytes": len(json.dumps(prompt_output, ensure_ascii=False, indent=1).encode("utf-8"))}
+    write_json(out_dir / "catalog_index.json", index)
+    write_json(out_dir / "bodies_prompt.json", prompt_output)
+    write_json(out_dir / "conversion_report.json", report)
+    return index
+
+
 def main() -> None:
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
@@ -906,8 +1358,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="工作台预设资产转换器")
     parser.add_argument("--sources-dir", help="完整构建必需；旧四套JSON的源目录")
     parser.add_argument("--append-manju", action="store_true", help="幂等增补已存在catalog，只写漫剧相关三份JSON")
+    parser.add_argument("--append-gslh", action="store_true", help="幂等增补古手梨花合集预设，只写索引、prompt正文与JSON报告")
     parser.add_argument("--refresh-prompts", action="store_true", help="幂等刷新内置规则及已核实模板清理，不需旧来源目录")
     parser.add_argument("--manju-dir", help="漫剧包根目录，默认仓库 skills/ai-manju-skills")
+    parser.add_argument("--gslh-dir", help="古手梨花合集包根目录，默认仓库 presets/gushoulihua-skills")
     parser.add_argument("--out-dir", default="public/studio")
     parser.add_argument("--report-md", help="可选：完整构建额外写Markdown报告；增补模式不写文档")
     args = parser.parse_args()
@@ -923,16 +1377,24 @@ def main() -> None:
     manju_dir = Path(args.manju_dir) if args.manju_dir else None
     if manju_dir is not None and not manju_dir.is_absolute():
         manju_dir = here / manju_dir
+    gslh_dir = Path(args.gslh_dir) if args.gslh_dir else None
+    if gslh_dir is not None and not gslh_dir.is_absolute():
+        gslh_dir = here / gslh_dir
     if args.append_manju:
         index = append_manju(out_dir, manju_dir)
         print(f"manju 21 条；catalog {index['count']} 条；script {index['modules']['script']} 条 -> {out_dir}")
         return
+    if args.append_gslh:
+        index = append_gslh(out_dir, gslh_dir)
+        print(f"gslh 15 条；catalog {index['count']} 条；vs {index['modules']['vs']} 条；h3 {index['modules']['h3']} 条 -> {out_dir}")
+        return
     if not args.sources_dir:
-        parser.error("完整构建需要 --sources-dir；增补已有索引使用 --append-manju")
+        parser.error("完整构建需要 --sources-dir；增补已有索引使用 --append-manju 或 --append-gslh")
     source_dir = Path(args.sources_dir)
     if not source_dir.is_absolute():
         source_dir = here / source_dir
     manju_items, manju_bodies, manju_rejects, manju_stats, manju_desc = manju_family(manju_dir)
+    gslh_items, gslh_bodies, gslh_rejects, gslh_stats, gslh_desc = gslh_family(gslh_dir)
 
     prompt_items, prompt_bodies, prompt_rejects, prompt_stats, prompt_desc = prompt_family(source_dir)
     script_items, script_bodies, script_rejects, script_stats, script_desc = script_family(source_dir)
@@ -941,17 +1403,19 @@ def main() -> None:
 
     for item in manju_items:
         item["order"] += max((it["order"] for it in script_items), default=0)
-    items = prompt_items + script_items + manju_items + game_items + style_items
-    bodies = {**prompt_bodies, **script_bodies, **manju_bodies, **game_bodies, **style_bodies}
+    for item in gslh_items:
+        item["order"] += max((it["order"] for it in prompt_items), default=0)
+    items = prompt_items + gslh_items + script_items + manju_items + game_items + style_items
+    bodies = {**prompt_bodies, **gslh_bodies, **script_bodies, **manju_bodies, **game_bodies, **style_bodies}
     added_prompts = apply_prompt_updates(items, bodies)
-    rejects = prompt_rejects + script_rejects + manju_rejects + game_rejects + style_rejects
+    rejects = prompt_rejects + gslh_rejects + script_rejects + manju_rejects + game_rejects + style_rejects
 
     problems = cross_check(items, bodies)
     if problems:
         raise SystemExit(f"契约校验失败：{json.dumps(problems, ensure_ascii=False)}")
 
     index = build_index(items)
-    descriptive_mentions = prompt_desc + script_desc + manju_desc + game_desc + style_desc
+    descriptive_mentions = prompt_desc + gslh_desc + script_desc + manju_desc + game_desc + style_desc
     index["sources"] = {
         "qiyuan_assets.prompt_library": omit_key(prompt_stats["qiyuan_assets.prompt_library"], "source"),
         "chat_studio_extra": omit_key(prompt_stats["chat_studio_extra"], "source"),
@@ -959,6 +1423,7 @@ def main() -> None:
         "qiyuan_assets.game_prompt_templates": game_stats,
         "qiyuan_assets.style_libs": style_stats,
         MANJU_SOURCE: manju_stats,
+        GSLH_SOURCE: gslh_stats,
     }
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -973,7 +1438,7 @@ def main() -> None:
         f"{pack}_index.json" and read_json(source_dir / f"{pack}_index.json").get("count") or (len(read_json(source_dir / f"{pack}_index.json").get("items") or []))
         for pack in ("qiyuan_prompt_library", "chat_extra")
     )
-    input_total += script_stats["input"] + manju_stats["input"] + game_stats["input"] + style_stats["input"] + added_prompts
+    input_total += script_stats["input"] + manju_stats["input"] + gslh_stats["input"] + game_stats["input"] + style_stats["input"] + added_prompts
     sensitive_rejects = [r for r in rejects if r.get("sensitive")]
     empty_rejects = [r for r in rejects if "空正文" in (r.get("reason") or [])]
     dupe_rejects = [r for r in rejects if "重复ID" in (r.get("reason") or [])]
@@ -981,7 +1446,7 @@ def main() -> None:
     report = OrderedDict([
         ("generated_at", BUILD_STAMP),
         ("counts", {
-            "expected_plan": EXPECTED_TOTAL + added_prompts,
+            "expected_plan": EXPECTED_TOTAL + added_prompts + gslh_stats["expected"],
             "input": input_total,
             "output_index": len(items),
             "rejected": len(rejects),
@@ -990,6 +1455,15 @@ def main() -> None:
             "dupes": len(dupe_rejects),
         }),
         ("sources", index["sources"]),
+        ("gslh_conversion", {
+            "source": f"presets/{GSLH_SOURCE}",
+            "author": gslh_stats["author"],
+            "license": gslh_stats["license"],
+            "input": gslh_stats["input"], "output": gslh_stats["output"], "files": gslh_stats["files"],
+            "note": "按 SKILL.md 的路由拆成独立模板分支；引擎类保留原文作为正文，流程类把 references 规则合并为单文件并在开头说明。",
+            "excluded": gslh_stats["excluded"],
+            "audit": gslh_stats["audit"],
+        }),
         ("descriptive_mentions", [
             {"id": row["id"], "source": row["source"], "markers": row["markers"]}
             for row in descriptive_mentions

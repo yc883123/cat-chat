@@ -18,6 +18,7 @@
   "test_core_fsutil",
   "test_file_action_bridge",
   "test_folder_index",
+  "test_gslh_presets",
   "test_http_disconnect",
   "test_interject_direct_send",
   "test_interjection_edit_actions",

@@ -1,34 +1,33 @@
-# Cat Chat 4.4.7 Beta
+# Cat Chat 4.4.8 Beta
 
 <p align="center">
   <img src="docs/cat-chat-logo.png" alt="Cat Chat" width="520">
 </p>
 
-Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。4.4.7 Beta 完善长工具任务的上下文整理、拆书匠与织书台的 TXT 结果和中断接续，并修复造梦机单次清除与 KVMem 启动状态。
+Cat Chat 是运行在 Windows 本机的通用 AI 自动化工作台。它把模型、内置工具、后台任务、Skill、MCP、视觉工具和文件产物统一到一个对话界面中。4.4.8 Beta 把贴签匠并发打标的监督员收窄为只检查最终 TXT 是否写完：不再评判标签和描述，也不再保留人工检查态，逐图结果只有成功或失败。
 
 > Cat Chat 原名 Naiba Chat。显示名自 2.7.6 Beta 起为 Cat Chat；GitHub 仓库自 2.8.0 Beta 起更名为 `cat-chat`（旧地址自动跳转）。更新资产仍使用 `naiba-chat.exe` 与原有清单协议，既有数据位置不变，无需重新配置或搬迁数据。
 
 > 历史版本说明见 [CHANGELOG.md](CHANGELOG.md)。
 
-## 4.4.7 Beta 主要能力
+## 4.4.8 Beta 主要能力
+- 贴签匠并发打标的监督员只检查最终 TXT 是否写完，不再判断标签、描述或画面内容，也不改写结果。
+- 没开启「写入本地 TXT」或 TXT 由标注回填时不调用监督员，省掉这次请求；提交前的费用提示同步说明。
+- 判定没写完时退回原打标员重做，最多 2 次；仍不完整、监督输出无法解析或 TXT 超容量一律记失败。
+- 去掉「需人工检查」：逐图结果只有成功或失败，进度与结果卡不再出现人工检查项；历史项按失败显示。
+- 老批次照常继续，已通过的结果继续复用，不需要重建批次。
 
-- 首轮长工具任务可多次整理较早的完整工具组，保留完整轨迹；支持摘要截断恢复、刷新、下一轮与撤销。
-- 修复整理期间取消、插话及终态竞态，用户文本中的内部标签示例不再被误吞。
-- 拆书匠与织书台完整结果以 TXT 分段持久保存，可查看、下载；部分、损坏和缺失来源阻止误保存。
-- 中断后接续已确认分段并核对模型身份；织书台恢复任务重新调度，重复保存不重复写回，人工正文保留原字节。
-- 造梦机单次清除支持勾选和全选全部已加载终态记录，按最多 200 条分批删除，切页与迟到回包保持状态一致。
-- KVMem 隔离供应商和请求状态，启动参数缓存加锁原子写入，不存访问密钥、不跨后端或已选模型补值。
 
 ## 开始使用
 
 ### 使用 Windows 版本
 
-1. 下载 `cat-chat-4.4.7-beta-windows-x64.zip`。
+1. 下载 `cat-chat-4.4.8-beta-windows-x64.zip`。
 2. 解压到一个可写目录。
 3. 运行 `cat-chat.exe`。
 4. 在设置中添加在线 API 或本地模型服务。
 
-> 归档里也提供旧名 `naiba-chat-4.4.7-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
+> 归档里也提供旧名 `naiba-chat-4.4.8-beta-windows-x64.zip`（内含 `naiba-chat.exe`）——**两者内容等价，只是包内 exe 的文件名不同**，任选其一即可。安装后的文件名由你首次解压的那个决定，之后自动更新会一直沿用，不会中途改名。
 
 首次运行会创建本地数据目录。升级时请直接替换程序文件，不要删除原有 `data` 目录和配置文件。
 
@@ -134,14 +133,14 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 - `naiba-chat.exe` —— **自动更新链路唯一使用的资产，永久保留此文件名**
 - `naiba-chat-update.json` —— 更新清单，其中 `repository` 字段永久写 `yc883123/naiba-chat`
 - `cat-chat.exe` —— 与 `naiba-chat.exe` 是同一文件，SHA-256 完全相同
-- `cat-chat-4.4.7-beta-windows-x64.zip`
-- `naiba-chat-4.4.7-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
+- `cat-chat-4.4.8-beta-windows-x64.zip`
+- `naiba-chat-4.4.8-beta-windows-x64.zip` —— 与上一个内容等价，仅包内 exe 名不同
 
 更新器会验证清单中的仓库、提交、文件名和 SHA-256。下载文件还必须是有效的 Windows 可执行文件；任何一项不一致都会终止安装。**自动更新始终读取 `naiba-chat.exe` 与清单里的旧仓库名**（GitHub 对旧仓库地址做长期重定向），这是已发布客户端逐字校验的协议，仓库改名后也不改值。
 
 ## Beta 说明
 
-这是 4.4.7 Beta，适合实际使用和反馈，但仍有以下边界：
+这是 4.4.8 Beta，适合实际使用和反馈，但仍有以下边界：
 
 - 不内置 ComfyUI、模型权重或第三方生成服务，需用户自行安装和配置。
 - 不同模型的工具调用质量差异较大，小型模型可能无法稳定完成长链任务。
@@ -155,7 +154,7 @@ ComfyUI HTTP API:  http://127.0.0.1:8188
 ```powershell
 Get-ChildItem public\js\*.js | ForEach-Object { node --check $_.FullName }
 python -m unittest discover -s tests -q
-$env:NAIBA_BUILD_VERSION = "4.4.7-beta"
+$env:NAIBA_BUILD_VERSION = "4.4.8-beta"
 python -m PyInstaller --noconfirm --clean naiba-chat.spec
 ```
 

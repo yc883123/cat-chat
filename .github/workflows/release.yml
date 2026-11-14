@@ -9,13 +9,13 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: 4.4.7-beta
-  RELEASE_TAG: v4.4.7-beta
+  RELEASE_VERSION: 4.4.8-beta
+  RELEASE_TAG: v4.4.8-beta
   # 新名包（给人直接下载）：包内是 `cat-chat.exe`。
-  PACKAGE_NAME: cat-chat-4.4.7-beta-windows-x64
+  PACKAGE_NAME: cat-chat-4.4.8-beta-windows-x64
   # 旧名包：只为兼容既存文档 / 教程 / 口耳相传的旧下载链接，内容与 `PACKAGE_NAME` 等价，
   # **仅包内 exe 名不同**。更新器从不消费 zip，所以它不参与自动更新链路。
-  LEGACY_PACKAGE_NAME: naiba-chat-4.4.7-beta-windows-x64
+  LEGACY_PACKAGE_NAME: naiba-chat-4.4.8-beta-windows-x64
 
 concurrency:
   group: naiba-chat-release
@@ -179,11 +179,11 @@ jobs:
             Compress-Archive -Path "$packageDir\*" -DestinationPath "dist\$($pair.Name).zip" -Force
           }
 
-      - name: Publish 4.4.7 Beta release
+      - name: Publish 4.4.8 Beta release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Cat Chat 4.4.7 Beta
+          name: Cat Chat 4.4.8 Beta
           prerelease: false
           make_latest: true
           files: |
@@ -193,12 +193,10 @@ jobs:
             dist/${{ env.LEGACY_PACKAGE_NAME }}.zip
             naiba-chat-update.json
           body: |
-            Cat Chat 4.4.7 Beta：上下文整理、工作台 TXT 结果与清除启停修复
-            自动整理支持首轮长工具任务多次压缩较早的完整工具组；摘要按实际剩余窗口生成，截断时最多恢复一次。完整执行轨迹独立保留，整理后的模型视图可用于刷新、下一轮和分支重放，撤销同步处理依赖整理并保留原记录。
-            修复整理期间的取消、插话与终态重排竞态，保留已完成工具结果及最新用户指令；用户正文里的摘要或工具结果标签不再被误识别为内部控制标记。
-            拆书匠与织书台生成结果改为持久 TXT 分段落盘与完成校验，可查看、下载完整文件；部分结果、损坏文件和缺失来源明确标记并阻止误保存，不再用浏览器缓存冒充完成正文。模型工作视图有界裁剪，完整工具轨迹仍保留。
-            工作台中断接续沿用已确认分段与逻辑生成标识，恢复前核对模型身份；织书台专属接续重新接入任务调度，保存版本、修订和流水线完成登记可恢复，重复请求不重复写回。人工正文按原字节保存，保留空白、CRLF 和 emoji。
-            造梦机单次任务「清除」支持勾选与全选全部已加载的终态记录，每批最多删除 200 条；仅确认服务端已不存在的记录才移出列表。活动任务、未加载历史与批量任务不纳入单次清除范围，切页及迟到回包不再破坏选择或并发锁。
-            KVMem 按供应商和请求代次隔离状态，修复切换时旧回包覆盖；启动缓存只保留后端、模型、工作进程和 GPU 参数，不存访问密钥，读改写加锁并原子落盘，损坏缓存安全降级且不跨后端或已选模型补值。
-            验证：本地全量运行 4902 项测试，6 项按环境跳过，其余通过；静态检查及桌面和 375px 手机 Playwright 验收通过。生成与故障恢复使用隔离数据和本地替身，未做真实 Basalt 模型或 KVMem 大模型停启验收。
-            Cat Chat 4.4.7 Beta Windows build。保留现有数据位置、更新协议以及双名称 exe 和 zip 资产。
+            Cat Chat 4.4.8 Beta：贴签匠监督员只检查 TXT 是否写完
+            并发打标的监督员改为只检查最终 TXT 有没有写完：看结尾是否停在半句、段落/编号/列表是否缺后续、括号引号是否闭合；不再判断标签、描述或画面内容，也不再改写结果。
+            没开启「写入本地 TXT」，或 TXT 是模型没调用工具、由标注回填的，不再调用监督员，直接采纳并省掉这次请求；提交前的费用提示同步说明。
+            监督员判定没写完时退回原打标员重做，最多 2 次；仍不完整、监督输出无法解析、TXT 超容量或 TXT 写不出来，一律记失败并保留原因，不再进入人工检查。
+            逐图结果只有成功或失败，进度、批次摘要和结果卡不再出现「需人工检查」；历史批次里已有的该项按失败显示和计数。老批次照常继续，已通过结果继续复用，不需要重建批次。
+            验证：本地全量运行 4908 项测试，全部通过；静态检查、JavaScript 语法与文档编码通过，桌面和 375px 手机 Playwright 验收通过（贴签匠结果页与基础页面）。生成与检查使用隔离数据和本地替身，未做真实供应商付费探针。
+            Cat Chat 4.4.8 Beta Windows build。保留现有数据位置、更新协议以及双名称 exe 和 zip 资产。

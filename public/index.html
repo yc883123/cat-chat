@@ -641,21 +641,21 @@
                   </div>
                 </div>
 
-                <!-- 并发打标：每张图只由一个打标员标注，再由监督员审核；
-                     不通过退回原打标员重做（最多 2 次），仍不通过转人工检查。 -->
+                <!-- 并发打标：每张图只由一个打标员标注；监督员只检查最终 TXT
+                     有没有写完，没写完退回原打标员重做（最多 2 次），仍不完整就记失败。 -->
                 <div class="labeler-concurrency" id="labelerConcurrencyBlock">
                   <div class="labeler-trigger-field">
                     <span>并发打标</span>
-                    <div class="labeler-trigger-line" title="开启后可选最多 9 个打标员槽位并指定 1 个监督员；每张图只由一个打标员标注，监督通过才算完成">
+                    <div class="labeler-trigger-line" title="开启后可选最多 9 个打标员槽位并指定 1 个监督员；监督员只检查最终 TXT 是否写完，不评价标签或描述">
                       <label class="labeler-trigger-switch">
                         <input id="labelerConcurrencyEnabled" type="checkbox">
                         <span>多打标员 + 监督员</span>
                       </label>
-                      <span class="labeler-concurrency-note">每张图只分配一个打标员；监督退回最多重做 2 次</span>
+                      <span class="labeler-concurrency-note">每张图只分配一个打标员；监督员只看 TXT 写完没有，最多重做 2 次</span>
                     </div>
                   </div>
                   <div class="labeler-concurrency-body" id="labelerConcurrencyBody" hidden>
-                    <p class="labeler-limits-note">打标员槽位、监督员与并发开关会自动保存，下次进入自动带出。</p>
+                    <p class="labeler-limits-note">打标员槽位、监督员与并发开关会自动保存，下次进入自动带出。监督员只检查最终 TXT 有没有写完；未开启「写入本地 TXT」时不会调用。</p>
                     <div class="labeler-field-row labeler-supervisor-row">
                       <label>监督员模型配置
                         <select id="labelerSupervisorProvider" aria-label="监督员模型配置"></select>

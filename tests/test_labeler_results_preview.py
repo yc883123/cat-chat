@@ -102,10 +102,10 @@ apiImpl=async(url)=>{
 """)
 
     def test_poll_refreshes_last_running_image_to_terminal(self):
-        """最后运行态必须变为成功、失败或人工检查，不能只更新批次状态。"""
+        """最后运行态必须变为成功或失败，不能只更新批次状态。"""
         self.run_case(r"""
 (async()=>{
-for(const terminal of ['succeeded','failed','human_check']){
+for(const terminal of ['succeeded','failed']){
   seed();p.labeler.items=[{item_id:'i1',name:'a.png',state:'running',annotation_id:null}];
   p.labeler.annotations=[];p.labeler.annotationTotal=0;p.renderResultBody();
   let finish;
@@ -115,7 +115,6 @@ for(const terminal of ['succeeded','failed','human_check']){
       return new Promise(resolve=>{finish=()=>resolve({total:1,items:[{
         item_id:'i1',name:'a.png',state:terminal,annotation_id:terminal==='succeeded'?1:null,
         error:terminal==='failed'?'供应商拒绝':'',
-        candidate:terminal==='human_check'?{description:'待检查候选'}:null,
       }]});});
     }
     if(url.includes('/annotations'))return{annotations:[{id:1,tags:['cat'],description:'完成正文'}],total:1};
@@ -128,7 +127,7 @@ for(const terminal of ['succeeded','failed','human_check']){
   assert.equal(p.labeler.items[0].state,terminal);
   assert.equal(p.labeler.items[0].annotation_id,terminal==='succeeded'?1:null);
   const texts=card().children.map(x=>x.textContent).join('|');
-  assert.ok(texts.includes(terminal==='succeeded'?'完成正文':terminal==='failed'?'供应商拒绝':'待检查候选'));
+  assert.ok(texts.includes(terminal==='succeeded'?'完成正文':'供应商拒绝'));
   assert.equal(p.labeler.pollTimer,null);
 }
 })().catch(err=>{console.error(err);process.exit(1);});

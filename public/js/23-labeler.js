@@ -36,13 +36,12 @@ const TERMINAL_BATCH_STATUSES = new Set(["done", "failed", "cancelled", "interru
 const ITEM_STATE_LABELS = {
   queued: "待处理",
   running: "处理中",
-  supervising: "监督中",
+  supervising: "检查中",
   revising: "退回重做",
   succeeded: "已完成",
   failed: "失败",
   cancelled: "已取消",
   uncertain: "结果不确定",
-  human_check: "需人工检查",
 };
 const MAX_WORKERS = 9;
 const DEFAULT_PROVIDER_LIMIT = 3;
@@ -227,9 +226,13 @@ function updateCostNote() {
   if (concurrent) {
     const maxLabel = uploaded * 3;
     const maxReview = uploaded * 3;
+    const writeTxt = Boolean($("#labelerWriteTxtCustom")?.checked);
     node.textContent = `本批 ${uploaded} 张、${refs.length || "若干"} 个打标员槽位：`
-      + `最多 ${uploaded} 次打标请求（每张最多返工 2 次，合计最多 ${maxLabel} 次），`
-      + `最多 ${maxReview} 次监督请求。费用由各供应商按实际用量计，单价无法事先预估；`
+      + `最多 ${uploaded} 次打标请求（TXT 没写完最多重做 2 次，合计最多 ${maxLabel} 次）。`
+      + (writeTxt
+        ? `监督员只检查 TXT 是否写完，最多 ${maxReview} 次检查请求。`
+        : "未开启「写入本地 TXT」，不调用监督员。")
+      + "费用由各供应商按实际用量计，单价无法事先预估；"
       + "Skill 可能多轮工具调用，请求数不等于模型调用轮数。"
       + localNote;
     return;
@@ -1566,7 +1569,6 @@ function renderBatches() {
     const bits = [`${Number(progress.done || 0)}/${Number(progress.total || 0)} 完成`];
     if (Number(progress.failed || 0)) bits.push(`失败 ${progress.failed}`);
     if (Number(progress.uncertain || 0)) bits.push(`不确定 ${progress.uncertain}`);
-    if (Number(progress.human_check || 0)) bits.push(`待人工 ${progress.human_check}`);
     // 批次历史显示用户能看懂的生成模式名，不暴露 face_lora 这类内部 ID；
     // 自定义打标的任务没有预设，显示成「自定义」。
     const preset = labeler.presets.find((row2) => row2.id === task.preset);
@@ -1708,8 +1710,7 @@ function renderTask(task) {
   const failed = Number(progress.failed || 0);
   const uncertain = Number(progress.uncertain || 0);
   const cancelled = Number(progress.cancelled || 0);
-  const humanCheck = Number(progress.human_check || 0);
-  const finished = done + failed + uncertain + cancelled + humanCheck;
+  const finished = done + failed + uncertain + cancelled;
   const box = $("#labelerQueueStatus");
   if (box) box.hidden = false;
   const label = $("#labelerProgressLabel");
@@ -1723,7 +1724,6 @@ function renderTask(task) {
     const bits = [];
     if (task.detail) bits.push(String(task.detail));
     if (cancelled) bits.push(`已取消 ${cancelled} 张`);
-    if (humanCheck) bits.push(`需人工检查 ${humanCheck} 张（未计入完成）`);
     if (task.usage && Object.keys(task.usage).length) {
       const tokens = Number(task.usage.total_tokens || 0);
       bits.push(tokens ? `累计 ${tokens} tokens（供应商读数）` : "已记录供应商用量");
@@ -2003,7 +2003,7 @@ function renderImageResults(body) {
     else if (item.state === "queued" && concurrentTask) label = "待分配";
     else if (item.state === "succeeded" && concurrentTask) label = "通过";
     state.textContent = label;
-    if (["failed", "uncertain", "human_check"].includes(item.state)) state.classList.add("failed");
+    if (["failed", "uncertain"].includes(item.state)) state.classList.add("failed");
     head.append(name, state);
     card.append(head);
     const meta = reviewMetaLine(item);
@@ -2016,19 +2016,6 @@ function renderImageResults(body) {
       desc.className = "labeler-anno-desc";
       desc.textContent = annotation.description;
       card.append(desc);
-    }
-    if (item.state === "human_check" && item.candidate) {
-      // 未通过监督的候选只能作为证据展示：明确标注「未通过审核」，
-      // 不混进标签/描述的正常样式，避免被当成已完成结果。
-      const candidate = document.createElement("p");
-      candidate.className = "labeler-anno-candidate";
-      const parts = ["候选（未通过审核，仅供参考）"];
-      const tags = (item.candidate.tags || []).join("，");
-      if (tags) parts.push(`标签：${tags}`);
-      const text = String(item.candidate.description || "");
-      if (text) parts.push(`描述：${text}`);
-      candidate.textContent = parts.join("｜");
-      card.append(candidate);
     }
     if (item.txt_state) card.append(txtStatusRow(item));
     if (item.error) {
@@ -2078,34 +2065,32 @@ function reviewMetaLine(item) {
   if (item.supervisor_decision === "reused") {
     bits.push("复用已通过结果");
   } else if (item.supervisor_decision === "approve") {
-    bits.push(`监督通过${Number(item.supervisor_attempts || 0) ? `（退回 ${item.supervisor_attempts} 次后）` : ""}`);
+    bits.push(`TXT 检查通过${Number(item.supervisor_attempts || 0) ? `（退回 ${item.supervisor_attempts} 次后）` : ""}`);
   } else if (item.supervisor_decision === "revise") {
-    bits.push(`监督退回重做 ${Number(item.supervisor_attempts || 0)} 次`);
-  } else if (item.state === "human_check") {
-    bits.push("需人工检查");
+    bits.push(`TXT 没写完，退回重做 ${Number(item.supervisor_attempts || 0)} 次`);
+  } else if (item.supervisor_decision === "skipped") {
+    bits.push("TXT 无需检查");
   } else if (item.state === "supervising") {
-    bits.push("监督中");
+    bits.push("检查中");
   } else if (item.state === "revising") {
     bits.push("退回重做中");
   }
   const reason = String(item.supervisor_reason || "").trim();
-  if (reason && ["revise", "human_check"].includes(String(item.supervisor_decision || ""))) {
+  if (reason && item.supervisor_decision === "revise") {
     bits.push(reason);
   }
   if (!bits.length) return null;
   const node = document.createElement("p");
   node.className = "labeler-anno-meta";
   const badge = document.createElement("span");
-  const decision = String(item.supervisor_decision || (item.state === "human_check" ? "human_check" : ""));
+  const decision = String(item.supervisor_decision || "");
   badge.className = "labeler-anno-review " + (
     decision === "approve" || decision === "reused" ? "approve"
-      : decision === "revise" || item.state === "revising" ? "revise"
-        : decision === "human_check" ? "human_check" : "");
-  badge.textContent = item.state === "human_check"
-    ? "需人工检查"
-    : item.supervisor_decision === "reused" ? "复用"
-      : item.supervisor_decision === "approve" ? "监督通过"
-        : item.supervisor_decision === "revise" ? "已退回" : "并发";
+      : decision === "revise" || item.state === "revising" ? "revise" : "");
+  badge.textContent = decision === "reused" ? "复用"
+    : decision === "approve" ? "TXT 完整"
+      : decision === "revise" ? "已退回"
+        : decision === "skipped" ? "无需检查" : "并发";
   node.append(badge, document.createTextNode(bits.join(" · ")));
   return node;
 }

@@ -35,13 +35,20 @@ from naiba.labeler.presets import filter_tags, get_preset, normalize_tag
 from naiba.labeler.store import now_ms
 from naiba.labeler.supervisor import (
     SupervisionFormatError,
+    SupervisionParseError,
     build_supervision_messages,
     build_supervision_prompt,
     parse_verdict,
     revise_note,
     freeze_supervision_rules,
 )
-from naiba.labeler.txt_output import TXT_TOOL_NAME, TxtToolContext, build_txt_targets
+from naiba.labeler.txt_output import (
+    TXT_STATE_FAILED,
+    TXT_STATE_WRITTEN,
+    TXT_TOOL_NAME,
+    TxtToolContext,
+    build_txt_targets,
+)
 
 # 已验证可用的并发档位。P0-a 只通过了离线契约；在线小样本未执行前不开放 >1。
 # 多并发走「自定义打标 → 并发打标」开关（按打标员槽位定并发），不受这里限制。
@@ -544,7 +551,48 @@ class LabelerRunner:
             label_usage = aggregate_usage(label_usage, usage)
             total_usage = aggregate_usage(total_usage, usage)
 
-            # ---- 监督：先落阶段，再送审；等待期间取消也按实际结果收敛 ----
+            # ---- 交付物：先把这一轮的 TXT 定下来，再决定送不送检 ----
+            candidate = dict(annotation)
+            if writer is not None:
+                candidate["txt_content"] = writer.candidate_text()
+                if not writer.wrote or writer.state == TXT_STATE_FAILED:
+                    failure = ("最终 TXT 写入失败，没有可交付的文本"
+                               if writer.state == TXT_STATE_FAILED
+                               else "最终 TXT 未生成，没有可交付的文本")
+                    self.db.fail_item(
+                        task_id, item_id, error=failure, category="txt_failed",
+                        usage=total_usage,
+                        meta={**worker_meta, "phase": "failed",
+                              "supervisor_attempts": revisions,
+                              "supervisor_usage": supervisor_usage},
+                        candidate=candidate,
+                    )
+                    self.store.append_event(task_id, {
+                        "type": "image_failed", "item_id": item_id,
+                        "name": item.get("name") or "", "error": failure,
+                        "category": "txt_failed",
+                    })
+                    return total_usage
+
+            # 没开写入 TXT，或 TXT 是模型没调工具、由标注回填的：天然完整，
+            # 没有可检查的东西，直接采纳，不产生监督请求。
+            if writer is None or writer.state != TXT_STATE_WRITTEN:
+                if writer is not None:
+                    annotation[LABELER_APPROVED_TXT_KEY] = writer.candidate_text()
+                self._commit_item_success(
+                    task_id=task_id, item=item, item_id=item_id, annotation=annotation,
+                    usage=total_usage, fingerprint=fingerprint,
+                    meta={**worker_meta, "phase": "approved",
+                          "supervisor_decision": "skipped",
+                          "supervisor_attempts": revisions,
+                          "supervisor_reason": "",
+                          "supervisor_usage": supervisor_usage},
+                    writer=writer, cancel_event=cancel_event, candidate=candidate,
+                    finish_reason=finish_reason,
+                )
+                return total_usage
+
+            # ---- 检查：只判断 TXT 有没有写完；等待期间取消也按实际结果收敛 ----
             self.db.set_phase(
                 task_id, item_id, "supervising", state="supervising",
                 supervisor_attempts=revisions, supervisor_usage=supervisor_usage,
@@ -554,35 +602,49 @@ class LabelerRunner:
                 "name": item.get("name") or "",
             })
             try:
-                candidate = dict(annotation)
-                if writer is not None:
-                    candidate["txt_content"] = writer.candidate_text()
-                    if not writer.wrote or writer.state == "failed":
-                        raise SupervisionFormatError("最终 TXT 未完整生成，不能批准")
                 verdict, verdict_usage = self._supervise_with_retry(
-                    task_id=task_id, item=item, config=config,
                     annotation=candidate, supervisor_profile=supervisor_profile,
-                    supervisor_ref=supervisor_ref, worker_slot=worker_slot,
-                    worker_model=str(worker_ref.get("model_name") or ""),
-                    cancel_event=cancel_event, gate=gate,
+                    supervisor_ref=supervisor_ref, cancel_event=cancel_event, gate=gate,
                     timeout_seconds=timeout_seconds,
                 )
+            except SupervisionParseError as exc:
+                failed_usage = dict(getattr(exc, "supervisor_usage", {}) or {})
+                total_usage = aggregate_usage(total_usage, failed_usage)
+                supervisor_usage = aggregate_usage(supervisor_usage, failed_usage)
+                if writer is not None:
+                    writer.reset()
+                reason = f"检查结果无法解析：{exc}"
+                if not self._settle_unapproved(
+                    task_id, item_id, candidate=candidate, cancel_event=cancel_event,
+                    reason=reason, usage=total_usage, category="supervision_format",
+                    meta={**worker_meta, "supervisor_attempts": revisions,
+                          "supervisor_usage": supervisor_usage, "phase": "failed"},
+                ):
+                    return total_usage
+                self.store.append_event(task_id, {
+                    "type": "image_failed", "item_id": item_id,
+                    "name": item.get("name") or "", "error": reason[:500],
+                    "category": "supervision_format",
+                })
+                return total_usage
             except SupervisionFormatError as exc:
                 failed_usage = dict(getattr(exc, "supervisor_usage", {}) or {})
                 total_usage = aggregate_usage(total_usage, failed_usage)
                 supervisor_usage = aggregate_usage(supervisor_usage, failed_usage)
                 if writer is not None:
                     writer.reset()
+                reason = f"TXT 检查未通过：{exc}"
                 if not self._settle_unapproved(
                     task_id, item_id, candidate=candidate, cancel_event=cancel_event,
-                    reason=f"监督结果无法解析：{exc}", usage=total_usage,
+                    reason=reason, usage=total_usage, category="supervision_format",
                     meta={**worker_meta, "supervisor_attempts": revisions,
-                          "supervisor_usage": supervisor_usage},
+                          "supervisor_usage": supervisor_usage, "phase": "failed"},
                 ):
                     return total_usage
                 self.store.append_event(task_id, {
-                    "type": "image_human_check", "item_id": item_id,
-                    "name": item.get("name") or "", "reason": str(exc)[:500],
+                    "type": "image_failed", "item_id": item_id,
+                    "name": item.get("name") or "", "error": reason[:500],
+                    "category": "supervision_format",
                 })
                 return total_usage
             except Exception as exc:  # noqa: BLE001 - 监督调用失败
@@ -600,17 +662,17 @@ class LabelerRunner:
                 if writer is not None:
                     writer.reset()
                 if not self._settle_unapproved(
-                    task_id, item_id, reason=f"监督失败：{exc}", cancel_event=cancel_event,
+                    task_id, item_id, reason=f"TXT 检查失败：{exc}", cancel_event=cancel_event,
                     category=f"supervisor_{category}", usage=merged,
                     meta={**worker_meta, "supervisor_attempts": revisions,
-                          "supervisor_usage": supervisor_usage},
+                          "supervisor_usage": supervisor_usage, "phase": "failed"},
                     candidate=candidate,
                 ):
                     return merged
                 self.store.append_event(task_id, {
                     "type": "image_failed", "item_id": item_id,
                     "name": item.get("name") or "",
-                    "error": f"监督失败：{str(exc)[:400]}",
+                    "error": f"TXT 检查失败：{str(exc)[:400]}",
                     "category": f"supervisor_{category}",
                 })
                 return merged
@@ -624,55 +686,38 @@ class LabelerRunner:
                 supervisor_usage=supervisor_usage,
             )
             if decision == "approve":
-                if writer is not None:
-                    annotation[LABELER_APPROVED_TXT_KEY] = writer.candidate_text()
-                approved_meta = {
-                        **worker_meta, "phase": "approved",
-                        "supervisor_decision": "approve",
-                        "supervisor_attempts": revisions,
-                        "supervisor_reason": reason,
-                        "supervisor_usage": supervisor_usage,
-                    }
-                try:
-                    committed = self._commit_approved(task_id, item_id, annotation, total_usage,
-                                                      fingerprint, approved_meta, writer, cancel_event)
-                except Exception as exc:
-                    if not self._settle_unapproved(task_id, item_id, reason=f"批准产物发布失败：{exc}",
-                                      category="publish_failed", usage=total_usage,
-                                      meta=approved_meta, candidate=candidate, cancel_event=cancel_event):
-                        return total_usage
-                    self.store.append_event(task_id, {"type": "image_failed", "item_id": item_id,
-                                                       "error": "批准产物发布失败", "category": "publish_failed"})
-                    return total_usage
-                if not committed:
-                    return total_usage
-                if total_usage:
-                    self.store.append_event(task_id, {"type": "usage", "usage": total_usage})
-                self.store.append_event(task_id, {
-                    "type": "image_done", "item_id": item_id,
-                    "name": item.get("name") or "",
-                    "tags": len(annotation.get("tags") or []),
-                    "finish_reason": finish_reason,
-                    "txt_state": writer.state if writer is not None else "",
-                })
+                annotation[LABELER_APPROVED_TXT_KEY] = writer.candidate_text()
+                self._commit_item_success(
+                    task_id=task_id, item=item, item_id=item_id, annotation=annotation,
+                    usage=total_usage, fingerprint=fingerprint,
+                    meta={**worker_meta, "phase": "approved",
+                          "supervisor_decision": "approve",
+                          "supervisor_attempts": revisions,
+                          "supervisor_reason": reason,
+                          "supervisor_usage": supervisor_usage},
+                    writer=writer, cancel_event=cancel_event, candidate=candidate,
+                    finish_reason=finish_reason,
+                )
                 return total_usage
-            # ---- 退回：超过上限转人工检查；否则原打标员重做 ----
+            # ---- 没写完：退回原打标员重做；到上限就失败 ----
             if revisions >= MAX_REVISIONS:
                 if writer is not None:
                     writer.reset()
-                note = "监督连续退回，已达重做上限（3 次打标尝试）"
+                note = "TXT 连续 3 次没写完，已达重做上限"
                 if reason:
                     note += f"：{reason}"
                 if not self._settle_unapproved(
-                    task_id, item_id, candidate=candidate, reason=note, cancel_event=cancel_event,
-                    usage=total_usage,
+                    task_id, item_id, candidate=candidate, reason=note,
+                    usage=total_usage, cancel_event=cancel_event,
+                    category="supervision_revise",
                     meta={**worker_meta, "supervisor_attempts": revisions,
-                          "supervisor_usage": supervisor_usage},
+                          "supervisor_usage": supervisor_usage, "phase": "failed"},
                 ):
                     return total_usage
                 self.store.append_event(task_id, {
-                    "type": "image_human_check", "item_id": item_id,
-                    "name": item.get("name") or "", "reason": note[:500],
+                    "type": "image_failed", "item_id": item_id,
+                    "name": item.get("name") or "", "error": note[:500],
+                    "category": "supervision_revise",
                 })
                 return total_usage
             revisions += 1
@@ -691,24 +736,61 @@ class LabelerRunner:
             if note:
                 current_prompt = (
                     label_prompt
-                    + "\n\n上一轮监督退回意见（请按此重做，仍按原规则输出）：" + note
+                    + "\n\n上一轮检查意见（TXT 没写完，请重新完整写入）：" + note
                 )
 
     def _settle_unapproved(self, task_id: str, item_id: str, *, candidate: dict[str, Any],
                            reason: str, usage: dict[str, Any], meta: dict[str, Any],
-                           cancel_event: threading.Event, category: str = "") -> bool:
+                           cancel_event: threading.Event,
+                           category: str = "supervision_failed") -> bool:
+        """未通过或无法检查的项一律记失败：保留候选证据，不写标注库、不发布 TXT。"""
         # 所有迟到裁定都服从已受理取消，不只保护 approve 分支。
         with self._registry_lock:
             if cancel_event.is_set():
                 self.db.cancel_item(task_id, item_id, usage=usage,
                                     supervisor_usage=meta.get("supervisor_usage"))
                 return False
-            if category:
-                self.db.fail_item(task_id, item_id, error=reason, category=category,
-                                  usage=usage, meta=meta, candidate=candidate)
-            else:
-                self.db.human_check_item(task_id, item_id, candidate=candidate,
-                                         reason=reason, usage=usage, meta=meta)
+            self.db.fail_item(task_id, item_id, error=reason, category=category,
+                              usage=usage, meta={**meta, "supervisor_reason": reason},
+                              candidate=candidate)
+        return True
+
+    def _commit_item_success(self, *, task_id: str, item: dict[str, Any], item_id: str,
+                             annotation: dict[str, Any], usage: dict[str, Any],
+                             fingerprint: str, meta: dict[str, Any], writer: Any,
+                             cancel_event: threading.Event,
+                             candidate: dict[str, Any] | None = None,
+                             finish_reason: str = "") -> bool:
+        """提交成功标注并发布 TXT；返回 False 表示已按取消/失败收尾。
+
+        ``candidate`` 只在发布失败时作为证据保留。检查通过、无需检查（没有 TXT）
+        两条成功路径共用这里，保证事件与用量口径一致。
+        """
+        try:
+            committed = self._commit_approved(task_id, item_id, annotation, usage,
+                                              fingerprint, meta, writer, cancel_event)
+        except Exception as exc:
+            if not self._settle_unapproved(
+                task_id, item_id, candidate=candidate or {},
+                reason=f"批准产物发布失败：{exc}", usage=usage, meta=meta,
+                cancel_event=cancel_event, category="publish_failed",
+            ):
+                return False
+            self.store.append_event(task_id, {"type": "image_failed", "item_id": item_id,
+                                              "error": "批准产物发布失败",
+                                              "category": "publish_failed"})
+            return False
+        if not committed:
+            return False
+        if usage:
+            self.store.append_event(task_id, {"type": "usage", "usage": usage})
+        self.store.append_event(task_id, {
+            "type": "image_done", "item_id": item_id,
+            "name": item.get("name") or "",
+            "tags": len(annotation.get("tags") or []),
+            "finish_reason": finish_reason,
+            "txt_state": writer.state if writer is not None else "",
+        })
         return True
 
     def _commit_approved(self, task_id: str, item_id: str, annotation: dict[str, Any],
@@ -733,14 +815,13 @@ class LabelerRunner:
                 raise
         return True
 
-    def _supervise_with_retry(self, *, task_id: str, item: dict[str, Any],
-                              config: dict[str, Any], annotation: dict[str, Any],
+    def _supervise_with_retry(self, *, annotation: dict[str, Any],
                               supervisor_profile: dict[str, Any],
-                              supervisor_ref: dict[str, str], worker_slot: int,
-                              worker_model: str, cancel_event: threading.Event,
+                              supervisor_ref: dict[str, str],
+                              cancel_event: threading.Event,
                               gate: ProviderGate,
                               timeout_seconds: int) -> tuple[dict[str, Any], dict[str, Any]]:
-        """把监督调用投递到独立有界队列并等待结果；瞬时错误有限退避重试。"""
+        """把 TXT 检查调用投递到独立有界队列并等待结果；瞬时错误有限退避重试。"""
         pool = getattr(self, "_supervisor_pool", None)
         last_exc: BaseException | None = None
         total_usage: dict[str, Any] = {}
@@ -750,10 +831,8 @@ class LabelerRunner:
                 cancelled.supervisor_usage = dict(total_usage)
                 raise cancelled
             request = lambda: self._supervisor_request(  # noqa: E731 - 单次投递
-                task_id=task_id, item=item, config=config, annotation=annotation,
-                supervisor_profile=supervisor_profile, supervisor_ref=supervisor_ref,
-                worker_slot=worker_slot, worker_model=worker_model,
-                cancel_event=cancel_event, gate=gate,
+                annotation=annotation, supervisor_profile=supervisor_profile,
+                supervisor_ref=supervisor_ref, cancel_event=cancel_event, gate=gate,
                 timeout_seconds=timeout_seconds,
             )
             future = pool.submit(request) if pool is not None else None
@@ -787,20 +866,15 @@ class LabelerRunner:
             return verdict, total_usage
         raise last_exc or RuntimeError("监督调用失败")
 
-    def _supervisor_request(self, *, task_id: str, item: dict[str, Any],
-                            config: dict[str, Any], annotation: dict[str, Any],
+    def _supervisor_request(self, *, annotation: dict[str, Any],
                             supervisor_profile: dict[str, Any],
-                            supervisor_ref: dict[str, str], worker_slot: int,
-                            worker_model: str, cancel_event: threading.Event,
+                            supervisor_ref: dict[str, str],
+                            cancel_event: threading.Event,
                             gate: ProviderGate,
                             timeout_seconds: int) -> tuple[str, dict[str, Any]]:
-        """在线程内发起一次监督请求并**当场**读用量（runtime 读数是线程局部的）。"""
-        prompt = build_supervision_prompt(
-            config, annotation, slot_index=worker_slot, worker_model=worker_model,
-        )
-        messages, error = build_supervision_messages(item["path"], prompt)
-        if error:
-            raise ValueError(error)
+        """在线程内发起一次 TXT 完整性检查请求并**当场**读用量（runtime 读数是线程局部的）。"""
+        prompt = build_supervision_prompt(annotation)
+        messages = build_supervision_messages(prompt)
         options = {
             "stream": True,
             "cancel_event": cancel_event,
@@ -1217,7 +1291,6 @@ class LabelerRunner:
             "failed": int(counts.get("failed") or 0),
             "uncertain": int(counts.get("uncertain") or 0),
             "cancelled": int(counts.get("cancelled") or 0),
-            "human_check": int(counts.get("human_check") or 0),
         }
 
     def _finish_from_counts(self, task_id: str, counts: dict[str, int],
@@ -1226,18 +1299,16 @@ class LabelerRunner:
         done = int(counts.get("done") or 0)
         failed = int(counts.get("failed") or 0) + int(counts.get("uncertain") or 0)
         cancelled = int(counts.get("cancelled") or 0)
-        human_check = int(counts.get("human_check") or 0)
         progress = self._progress_from_counts(counts)
         result = {"annotation_ids": annotation_ids}
-        if cancelled and done == 0 and failed == 0 and human_check == 0:
+        if cancelled and done == 0 and failed == 0:
             self._finish_task_terminal(
                 task_id, "cancelled", {"type": "cancelled"}, detail="任务已取消",
                 progress=progress, result=result, usage=usage,
             )
             return
-        if total and done == 0 and failed + cancelled + human_check == total:
-            # 全部没有通过：监督退回/人工检查不是「失败」，但也不能报完成。
-            message = "全部图片未通过监督审核" if human_check and not failed else "全部图片打标失败"
+        if total and done == 0 and failed + cancelled == total:
+            message = "全部图片打标失败"
             self._finish_task_terminal(
                 task_id, "failed", {"type": "error", "message": message},
                 error=message, progress=progress, result=result, usage=usage,
@@ -1246,13 +1317,8 @@ class LabelerRunner:
         detail = ""
         if cancelled:
             detail = f"已取消，完成 {done} 张"
-        elif failed or human_check:
-            bits = [f"完成 {done} 张"]
-            if failed:
-                bits.append(f"失败或结果不确定 {failed} 张")
-            if human_check:
-                bits.append(f"需人工检查 {human_check} 张")
-            detail = "，".join(bits)
+        elif failed:
+            detail = f"完成 {done} 张，失败或结果不确定 {failed} 张"
         self._finish_task_terminal(
             task_id, "done", {"type": "done"}, detail=detail,
             progress=progress, result=result, usage=usage,

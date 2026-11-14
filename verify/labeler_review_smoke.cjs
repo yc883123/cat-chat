@@ -23,23 +23,23 @@ async function run(browser, viewport) {
   let retryCount = 0;
   let lateModelSeen = false;
   let settingsHeld = false;
-  const item = (human = false) => ({
-    item_id: human ? 'human-item' : 'review-item', name: 'review.png',
-    relative_path: 'review.png', state: human ? 'human_check' : terminal ? 'succeeded' : 'running',
-    annotation_id: !human && terminal ? 1 : null,
+  const item = (failed = false) => ({
+    item_id: failed ? 'failed-item' : 'review-item', name: 'review.png',
+    relative_path: 'review.png', state: failed ? 'failed' : terminal ? 'succeeded' : 'running',
+    annotation_id: !failed && terminal ? 1 : null,
+    error: failed ? 'TXT 连续 3 次没写完，已达重做上限' : '',
     worker_model_name: 'original-author-model', worker_slot: -1,
-    supervisor_decision: human ? 'human_check' : terminal ? 'reused' : '',
-    candidate: human ? { tags: ['candidate'], description: '待检查' } : null,
+    supervisor_decision: failed ? '' : terminal ? 'reused' : '',
   });
   const task = (id = 'review-task') => {
-    const human = id === 'human-task';
-    return { id, label: human ? '人工检查批次' : '终态刷新批次',
-      status: human ? 'failed' : terminal ? 'done' : 'running',
+    const failed = id === 'failed-task';
+    return { id, label: failed ? '失败批次' : '终态刷新批次',
+      status: failed ? 'failed' : terminal ? 'done' : 'running',
       concurrency_enabled: true, worker_count: 2,
-      progress: { total: 1, done: !human && terminal ? 1 : 0, human_check: human ? 1 : 0 },
-      can_continue: human, can_retry_failed: false,
-      items: !human && !terminal ? [item()] : [], items_total: 1,
-      input: { config: { write_txt: false } },
+      progress: { total: 1, done: !failed && terminal ? 1 : 0, failed: failed ? 1 : 0 },
+      can_continue: failed, can_retry_failed: false,
+      items: !failed && !terminal ? [item()] : [], items_total: 1,
+      input: { config: { write_txt: true } },
     };
   };
   const check = () => assert.deepEqual(errors, [], '页面不能出现脚本或请求错误');
@@ -55,7 +55,7 @@ async function run(browser, viewport) {
     const pathname = new URL(response.url()).pathname;
     // 首次重试故意失败，用来验证按钮可恢复；其余 HTTP 错误一律不放过。
     if (response.status() >= 400 && !pathname.endsWith('/favicon.ico')
-        && !(pathname === '/api/labeler/tasks/human-task/retry' && response.status() === 409)) {
+        && !(pathname === '/api/labeler/tasks/failed-task/retry' && response.status() === 409)) {
       errors.push(`HTTP ${response.status()} ${pathname}`);
     }
   });
@@ -69,6 +69,8 @@ async function run(browser, viewport) {
   await page.route('**/api/labeler/settings', async route => {
     if (route.request().method() !== 'POST') return route.continue();
     const body = route.request().postDataJSON();
+    // 并发开关/槽位会自动保存（另一种合法 POST），与本用例的额度断言无关。
+    if (Object.hasOwn(body, 'concurrency')) return route.continue();
     assert.deepEqual(Object.keys(body), ['provider_limits_patch']);
     assert.equal(Object.keys(body.provider_limits_patch).length, 1);
     const response = await route.fetch(); // 真服务执行锁内补丁。
@@ -82,7 +84,7 @@ async function run(browser, viewport) {
   await page.route('**/api/labeler/tasks**', async route => {
     const url = new URL(route.request().url());
     if (url.pathname === '/api/labeler/tasks') {
-      return route.fulfill({ json: { tasks: [task(), task('human-task')] } });
+      return route.fulfill({ json: { tasks: [task(), task('failed-task')] } });
     }
     if (url.pathname.endsWith('/retry')) {
       assert.deepEqual(route.request().postDataJSON(), { mode: 'unfinished', confirm_uncertain: false });
@@ -95,7 +97,7 @@ async function run(browser, viewport) {
     if (url.pathname.endsWith('/items')) {
       const offset = Number(url.searchParams.get('offset'));
       itemOffsets.push({ id, offset });
-      return route.fulfill({ json: { items: offset === 0 ? [item(id === 'human-task')] : [], total: 1 } });
+      return route.fulfill({ json: { items: offset === 0 ? [item(id === 'failed-task')] : [], total: 1 } });
     }
     return route.fulfill({ json: { task: task(id) } });
   });
@@ -106,6 +108,12 @@ async function run(browser, viewport) {
   try {
     const reset = await page.request.post(`${BASE}/api/labeler/settings`, { data: { provider_limits: {} } });
     assert.equal(reset.ok(), true, '每个视口使用独立的初始额度状态');
+    // 并发配置会自动保存；每个视口从空配置起步，避免上一个视口的监督员选择串进来。
+    const resetConcurrency = await page.request.post(`${BASE}/api/labeler/settings`, {
+      data: { concurrency: { enabled: false, workers: [{ model_key: '', model_name: '' }],
+        supervisor: { model_key: '', model_name: '' } } },
+    });
+    assert.equal(resetConcurrency.ok(), true);
     await page.goto(BASE, { waitUntil: 'load' });
     await page.waitForTimeout(600); // 等待服务端保存的顶层视图恢复完成。
     const openSidebar = page.locator('button[aria-label="打开导航"]:visible').first();
@@ -160,7 +168,7 @@ async function run(browser, viewport) {
     check();
 
     await selectPane('queue');
-    await page.click('[data-labeler-task="human-task"]');
+    await page.click('[data-labeler-task="failed-task"]');
     await selectPane('config');
     await page.locator('#labelerContinue').waitFor({ state: 'visible' });
     assert.equal(await page.locator('#labelerRetryModelFailed').isVisible(), false);

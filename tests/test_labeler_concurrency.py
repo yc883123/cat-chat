@@ -50,8 +50,8 @@ from naiba.labeler.supervisor import (  # noqa: E402
     build_supervision_prompt,
     parse_verdict,
     revise_note,
-    rule_summary,
 )
+from naiba.labeler.txt_output import TXT_TOOL_NAME  # noqa: E402
 
 
 def _write_png(path: Path, color=(20, 120, 200), size=(16, 16)) -> Path:
@@ -136,7 +136,7 @@ class _ConcurrencyModels:
 
     def complete(self, profile, messages, options, status=None):
         text = _message_text(messages)
-        kind = "supervisor" if "你是图片标注审核员" in text else "label"
+        kind = "supervisor" if "TXT 交付检查员" in text else "label"
         key = str(profile.get("model_key") or "")
         with self.lock:
             self.inflight += 1
@@ -177,14 +177,28 @@ def _image_name(text: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def _candidate(text: str) -> dict[str, Any]:
-    match = re.search(r"候选标注：\n(\{.*?\})\n", text, re.S)
-    if not match:
-        return {}
-    try:
-        return json.loads(match.group(1))
-    except json.JSONDecodeError:
-        return {}
+def _txt_body(text: str) -> str:
+    """从检查提示词里取出待检查的 TXT 原文。"""
+    match = re.search(r"--- TXT 开始 ---\n(.*?)\n--- TXT 结束 ---", text, re.S)
+    return match.group(1) if match else ""
+
+
+def _write_txt_label(contents: list[str], tags: list[str] | None = None):
+    """每次打标尝试先用工具写 TXT，再返回标注 JSON（每轮两次模型调用）。"""
+    tags = tags or ["cat"]
+
+    def label(text, options, index):
+        attempt = index // 2
+        if index % 2:
+            tag = tags[min(attempt, len(tags) - 1)]
+            return json.dumps({"tags": [{"tag": tag, "confidence": 0.9}],
+                               "description": f"描述 {tag}"}, ensure_ascii=False)
+        content = contents[min(attempt, len(contents) - 1)]
+        return json.dumps({"type": "tool", "tool": TXT_TOOL_NAME, "arguments": {
+            "item": _image_name(text), "mode": "write", "content": content}},
+            ensure_ascii=False)
+
+    return label
 
 
 def _base_config(*, workers: list[dict[str, str]], supervisor: dict[str, str],
@@ -401,7 +415,8 @@ class SupervisionContractTests(unittest.TestCase):
         )
         self.assertEqual(verdict["decision"], "revise")
         self.assertEqual(verdict["tags"], ["rain", "umbrella"])
-        self.assertIn("雨中街道", revise_note(verdict))
+        # 退回意见只带理由：检查员不再改写标签/描述。
+        self.assertEqual(revise_note(verdict), "漏了雨伞")
 
     def test_invalid_json_or_unknown_decision_rejected(self):
         for text in ("", "不是 JSON", '{"decision":"maybe"}'):
@@ -414,17 +429,18 @@ class SupervisionContractTests(unittest.TestCase):
         self.assertEqual(verdict["tags"], [])
         self.assertEqual(verdict["description"], "")
 
-    def test_rule_summary_from_prompt_and_skill(self):
-        self.assertTrue(rule_summary({"system_prompt": "只描述动物。"}).startswith("只描述动物。"))
-        self.assertEqual(rule_summary({}), "")
-        skill = rule_summary({"skill_id": "anime-tag", "skill_revision": "abc123"})
-        self.assertIn("anime-tag", skill)
-        self.assertIn("abc123", skill)
+    def test_supervision_prompt_only_checks_txt_completeness(self):
+        prompt = build_supervision_prompt({"txt_content": "第一段。\n第二段停在"})
+        self.assertIn("TXT 交付检查员", prompt)
+        self.assertIn("有没有写完", prompt)
+        self.assertIn("第一段。\n第二段停在", prompt)
+        with self.assertRaises(SupervisionFormatError):
+            build_supervision_prompt({})
 
-    def test_supervision_messages_need_readable_image(self):
-        messages, error = build_supervision_messages("", "x")
-        self.assertEqual(messages, [])
-        self.assertIn("图片无法读取", error)
+    def test_supervision_messages_are_text_only(self):
+        messages = build_supervision_messages("检查这段")
+        self.assertEqual(len(messages), 1)
+        self.assertIn("检查这段", _message_text(messages))
 
 
 class ProviderGateTests(unittest.TestCase):
@@ -537,7 +553,8 @@ class ConcurrentRunnerTests(unittest.TestCase):
         counts = self.db.counts(task["id"])
         self.assertEqual(counts["done"], 2)
         self.assertEqual(len(models.calls_of("label")), 2)
-        self.assertEqual(len(models.calls_of("supervisor")), 2)
+        # 未开启写入本地 TXT：没有可检查的 TXT，不调用监督员。
+        self.assertEqual(len(models.calls_of("supervisor")), 0)
 
     def test_nine_slots_peak_equals_slots(self):
         barrier = threading.Barrier(9, timeout=8)
@@ -565,14 +582,14 @@ class ConcurrentRunnerTests(unittest.TestCase):
 
         def supervise(text, options, index):
             barrier.wait()
-            return '{"decision":"approve","reason":"通过"}'
+            return '{"decision":"approve","reason":"写完了"}'
 
         models = _ConcurrencyModels(
-            label=lambda text, options, index: '{"tags":[{"tag":"cat","confidence":0.9}],"description":""}',
+            label=_write_txt_label(["完整描述"]),
             supervisor=supervise,
         )
         app = _StubApp(self.data_dir, models=models)
-        _, task = self._submit(app, self._images(3), workers=_workers(3))
+        _, task = self._submit(app, self._images(3), workers=_workers(3), write_txt=True)
         state = self._wait(task["id"])
         self.assertEqual(state["status"], "done")
         self.assertEqual(len(models.calls_of("supervisor")), 3)
@@ -589,13 +606,8 @@ class ConcurrentRunnerTests(unittest.TestCase):
             )
 
         def supervise(text, options, index):
-            candidate = _candidate(text)
             time.sleep(0.01)
-            return json.dumps(
-                {"decision": "approve", "reason": "ok",
-                 "description": candidate.get("description", "")},
-                ensure_ascii=False,
-            )
+            return '{"decision":"approve","reason":"写完"}'
 
         models = _ConcurrencyModels(label=label, supervisor=supervise)
         app = _StubApp(self.data_dir, models=models)
@@ -623,21 +635,16 @@ class ConcurrentRunnerTests(unittest.TestCase):
 
     def test_revise_once_then_approve(self):
         def supervise(text, options, index):
-            candidate = _candidate(text)
-            if "umbrella" in (candidate.get("tags") or []):
-                return '{"decision":"approve","reason":"改好了"}'
-            return '{"decision":"revise","reason":"缺少雨伞","tags":["umbrella"]}'
+            if "完整描述" in _txt_body(text):
+                return '{"decision":"approve","reason":"写完了"}'
+            return '{"decision":"revise","reason":"结尾停在半句"}'
 
         models = _ConcurrencyModels(
-            label=lambda text, options, index: (
-                '{"tags":[{"tag":"umbrella","confidence":0.9}],"description":"雨中街道"}'
-                if "上一轮监督退回意见" in text
-                else '{"tags":[{"tag":"street","confidence":0.9}],"description":"街道"}'
-            ),
+            label=_write_txt_label(["街道描述写到一半", "完整描述"], tags=["street", "umbrella"]),
             supervisor=supervise,
         )
         app = _StubApp(self.data_dir, models=models)
-        _, task = self._submit(app, self._images(1), workers=_workers(1))
+        _, task = self._submit(app, self._images(1), workers=_workers(1), write_txt=True)
         state = self._wait(task["id"])
         self.assertEqual(state["status"], "done")
         row = self.db.list_items(task["id"])[0]
@@ -646,7 +653,7 @@ class ConcurrentRunnerTests(unittest.TestCase):
         self.assertEqual(row["supervisor_attempts"], 1)
         annotation = self.db.annotations(task_id=task["id"], limit=10)[0]
         self.assertEqual(annotation["tags"], ["umbrella"])
-        self.assertEqual(len(models.calls_of("label")), 2)
+        self.assertEqual(len(models.calls_of("label")), 4)
 
     def test_second_revision_then_approve(self):
         counter = {"n": 0}
@@ -654,54 +661,60 @@ class ConcurrentRunnerTests(unittest.TestCase):
         def supervise(text, options, index):
             counter["n"] += 1
             if counter["n"] <= MAX_REVISIONS:
-                return '{"decision":"revise","reason":"再改"}'
-            return '{"decision":"approve","reason":"通过"}'
+                return '{"decision":"revise","reason":"还没写完"}'
+            return '{"decision":"approve","reason":"写完"}'
 
-        models = _ConcurrencyModels(supervisor=supervise)
+        models = _ConcurrencyModels(
+            label=_write_txt_label(["一", "二", "三"]), supervisor=supervise)
         app = _StubApp(self.data_dir, models=models)
-        _, task = self._submit(app, self._images(1), workers=_workers(1))
+        _, task = self._submit(app, self._images(1), workers=_workers(1), write_txt=True)
         state = self._wait(task["id"])
         self.assertEqual(state["status"], "done")
         row = self.db.list_items(task["id"])[0]
         self.assertEqual(row["supervisor_attempts"], MAX_REVISIONS)
-        self.assertEqual(len(models.calls_of("label")), MAX_REVISIONS + 1)
+        self.assertEqual(len(models.calls_of("label")), (MAX_REVISIONS + 1) * 2)
 
-    def test_revision_exhausted_goes_human_check_without_annotation(self):
+    def test_revision_exhausted_marks_item_failed(self):
         models = _ConcurrencyModels(
-            supervisor=lambda text, options, index: '{"decision":"revise","reason":"一直不合格"}',
+            label=_write_txt_label(["一直没写完"]),
+            supervisor=lambda text, options, index: '{"decision":"revise","reason":"一直没写完"}',
         )
         app = _StubApp(self.data_dir, models=models)
-        _, task = self._submit(app, self._images(1), workers=_workers(1))
+        _, task = self._submit(app, self._images(1), workers=_workers(1), write_txt=True)
         state = self._wait(task["id"])
-        # 全部未通过监督：任务不能报「完成」。
+        # 全部未通过检查：任务不能报「完成」。
         self.assertEqual(state["status"], "failed")
         row = self.db.list_items(task["id"])[0]
-        self.assertEqual(row["state"], "human_check")
+        self.assertEqual(row["state"], "failed")
+        self.assertEqual(row["error_category"], "supervision_revise")
         self.assertIsNone(row["annotation_id"])
         self.assertEqual(row["supervisor_attempts"], MAX_REVISIONS)
-        self.assertTrue(row["candidate"].get("tags"))
+        self.assertEqual(row["candidate"].get("txt_content"), "一直没写完")
         self.assertEqual(self.db.annotations(task_id=task["id"], limit=10), [])
         self.assertEqual(self.db.counts(task["id"])["done"], 0)
 
-    def test_unparseable_supervisor_output_goes_human_check(self):
+    def test_unparseable_supervisor_output_marks_item_failed(self):
         models = _ConcurrencyModels(
+            label=_write_txt_label(["完整描述"]),
             supervisor=lambda text, options, index: "我觉得还可以",
         )
         app = _StubApp(self.data_dir, models=models)
-        _, task = self._submit(app, self._images(1), workers=_workers(1))
+        _, task = self._submit(app, self._images(1), workers=_workers(1), write_txt=True)
         state = self._wait(task["id"])
         self.assertEqual(state["status"], "failed")
         row = self.db.list_items(task["id"])[0]
-        self.assertEqual(row["state"], "human_check")
+        self.assertEqual(row["state"], "failed")
+        self.assertEqual(row["error_category"], "supervision_format")
         self.assertIn("无法解析", row["supervisor_reason"])
 
     def test_supervisor_auth_failure_marks_item_failed(self):
         def supervise(text, options, index):
             raise RuntimeError("401 unauthorized: invalid api key")
 
-        models = _ConcurrencyModels(supervisor=supervise)
+        models = _ConcurrencyModels(
+            label=_write_txt_label(["完整描述"]), supervisor=supervise)
         app = _StubApp(self.data_dir, models=models)
-        _, task = self._submit(app, self._images(1), workers=_workers(1))
+        _, task = self._submit(app, self._images(1), workers=_workers(1), write_txt=True)
         state = self._wait(task["id"])
         row = self.db.list_items(task["id"])[0]
         self.assertEqual(row["state"], "failed")
@@ -722,7 +735,7 @@ class ConcurrentRunnerTests(unittest.TestCase):
 
     def test_provider_limit_caps_label_and_supervisor_combined(self):
         self.store.write_settings({"provider_limits": {"online:worker0": 1}})
-        models = _ConcurrencyModels()
+        models = _ConcurrencyModels(label=_write_txt_label(["完整描述"]))
         app = _StubApp(self.data_dir, models=models)
         # 两个槽位同一档案，监督员也用同一档案：峰值仍然只能是 1。
         workers = [
@@ -730,7 +743,7 @@ class ConcurrentRunnerTests(unittest.TestCase):
             {"model_key": "online:worker0", "model_name": "m1"},
         ]
         _, task = self._submit(
-            app, self._images(4), workers=workers,
+            app, self._images(4), workers=workers, write_txt=True,
             supervisor={"model_key": "online:worker0", "model_name": "judge"},
         )
         state = self._wait(task["id"])
@@ -782,21 +795,22 @@ class ConcurrentRunnerTests(unittest.TestCase):
         self.assertEqual(counts["uncertain"], 2)
         self.assertIn("uncertain", LABELER_ITEM_STATES)
 
-    def test_human_check_is_resumable_via_continue(self):
+    def test_failed_item_is_resumable_via_continue(self):
         models = _ConcurrencyModels(
-            supervisor=lambda text, options, index: '{"decision":"revise","reason":"不合格"}',
+            label=_write_txt_label(["没写完"]),
+            supervisor=lambda text, options, index: '{"decision":"revise","reason":"没写完"}',
         )
         app = _StubApp(self.data_dir, models=models)
-        jobs, task = self._submit(app, self._images(1), workers=_workers(1))
+        jobs, task = self._submit(app, self._images(1), workers=_workers(1), write_txt=True)
         self._wait(task["id"])
-        self.assertEqual(self.db.list_items(task["id"])[0]["state"], "human_check")
+        self.assertEqual(self.db.list_items(task["id"])[0]["state"], "failed")
         new_task = jobs.continue_task(task["id"], mode="unfinished", confirm_uncertain=False)
         self.assertEqual(self.db.counts(new_task["id"])["total"], 1)
 
     def test_public_items_expose_supervisor_fields(self):
-        models = _ConcurrencyModels()
+        models = _ConcurrencyModels(label=_write_txt_label(["完整描述"]))
         app = _StubApp(self.data_dir, models=models)
-        jobs, task = self._submit(app, self._images(1), workers=_workers(1))
+        jobs, task = self._submit(app, self._images(1), workers=_workers(1), write_txt=True)
         self._wait(task["id"])
         payload = jobs.task_items(task["id"])
         item = payload["items"][0]
@@ -869,15 +883,15 @@ class ConcurrencyUiContractTests(unittest.TestCase):
         self.assertIn("concurrencyRow.hidden = enabled", self.js)
         self.assertIn("labeler.workers.length >= MAX_WORKERS", self.js)
 
-    def test_review_and_human_check_rendering(self):
-        self.assertIn("supervising: \"监督中\"", self.js)
+    def test_review_rendering(self):
+        self.assertIn("supervising: \"检查中\"", self.js)
         self.assertIn("revising: \"退回重做\"", self.js)
-        self.assertIn("human_check: \"需人工检查\"", self.js)
+        self.assertNotIn("human_check", self.js)
         self.assertIn("function reviewMetaLine(", self.js)
-        self.assertIn("监督通过", self.js)
-        self.assertIn("候选（未通过审核，仅供参考）", self.js)
-        self.assertIn("需人工检查", self.js)
-        self.assertIn("item.candidate", self.js)
+        self.assertIn("TXT 检查通过", self.js)
+        self.assertIn("TXT 无需检查", self.js)
+        self.assertNotIn("需人工检查", self.js)
+        self.assertNotIn("未通过审核", self.js)
 
     def test_settings_api_and_routes(self):
         self.assertIn('path == "/api/labeler/settings"', self.http_py)
@@ -890,7 +904,6 @@ class ConcurrencyUiContractTests(unittest.TestCase):
         self.assertIn(".labeler-concurrency-body[hidden] { display: none; }", self.css)
         self.assertIn("#labelerMainModelRow[hidden], #labelerConcurrencyRow[hidden] { display: none; }", self.css)
         self.assertIn(".labeler-worker-slot", self.css)
-        self.assertIn(".labeler-anno-candidate", self.css)
 
 
 if __name__ == "__main__":

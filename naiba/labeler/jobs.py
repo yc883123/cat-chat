@@ -787,7 +787,6 @@ class LabelerJobManager:
             "failed": int(counts.get("failed") or 0),
             "uncertain": int(counts.get("uncertain") or 0),
             "cancelled": int(counts.get("cancelled") or 0),
-            "human_check": int(counts.get("human_check") or 0),
         }
 
     @staticmethod
@@ -799,7 +798,6 @@ class LabelerJobManager:
             or int(counts.get("uncertain") or 0)
             or int(counts.get("queued") or 0)
             or int(counts.get("running") or 0)
-            or int(counts.get("human_check") or 0)
             or str(task.get("status") or "") in LABELER_RESUMABLE_STATUSES
         )
 

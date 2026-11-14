@@ -20,18 +20,17 @@ LABELER_ACTIVE_STATUSES: tuple[str, ...] = ("queued", "running")
 LABELER_RESUMABLE_STATUSES: tuple[str, ...] = ("interrupted", "failed", "cancelled")
 
 # 逐图状态：uncertain = 模型请求已发出、但结果未落库就中断（可能已计费）。
-# 并发监督档新增三态：supervising（已出候选、等监督裁定）、revising（退回原
-# 打标员重做）、human_check（监督未通过或无法裁定，保留候选证据等人工处理）。
-# 只有 succeeded 代表「监督通过」，才写标注库、可被复用。
+# 并发档新增两态：supervising（TXT 已写出、等完整性检查）、revising（TXT 没写完，
+# 退回原打标员重做）。逐图结果只有两种：succeeded（已写入）或 failed。
 LABELER_ITEM_STATES: tuple[str, ...] = (
     "queued", "running", "succeeded", "failed", "cancelled", "uncertain",
-    "supervising", "revising", "human_check",
+    "supervising", "revising",
 )
 
 # 事件类型：只用于展示与增量轮询，恢复一律以 SQLite 为准。
 LABELER_EVENT_TYPES: tuple[str, ...] = (
     "status", "image_done", "image_failed", "usage", "done", "cancelled", "error",
-    "image_supervising", "image_revised", "image_human_check",
+    "image_supervising", "image_revised",
 )
 LABELER_TERMINAL_EVENT_TYPES: tuple[str, ...] = ("done", "cancelled", "error")
 

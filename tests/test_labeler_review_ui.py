@@ -106,7 +106,7 @@ assert.equal(p.labeler.providerLimits.A,1);
     def test_continue_visibility_uses_server_capability(self):
         self.run_case(r"""
 for(const id of ['#labelerContinue','#labelerRetryModelFailed']){elements[id]=node('button');elements[id].hidden=true;}
-p.renderTask({status:'done',can_continue:true,can_retry_failed:false,progress:{total:1,human_check:1}});
+p.renderTask({status:'done',can_continue:true,can_retry_failed:false,progress:{total:1,failed:1}});
 assert.equal(elements['#labelerContinue'].hidden,false);
 assert.equal(elements['#labelerContinue'].disabled,false);
 assert.equal(elements['#labelerRetryModelFailed'].hidden,true);
@@ -117,7 +117,7 @@ assert.equal(elements['#labelerContinue'].hidden,true);
     def test_continue_failure_reenables_button_and_double_click_is_blocked(self):
         self.run_case(r"""
 elements['#labelerContinue']=node('button');elements['#labelerTaskHint']=node();
-p.labeler.taskId='task';p.labeler.task={id:'task',status:'done',can_continue:true,progress:{human_check:1}};
+p.labeler.taskId='task';p.labeler.task={id:'task',status:'done',can_continue:true,progress:{failed:1}};
 let reject;let calls=0;apiImpl=()=>{calls++;return new Promise((resolve,fail)=>{reject=fail;});};
 const first=p.retryTask('unfinished');await p.retryTask('unfinished');
 assert.equal(calls,1);assert.equal(elements['#labelerContinue'].disabled,true);

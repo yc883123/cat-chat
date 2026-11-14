@@ -6,8 +6,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from naiba.core.contracts import (LABELER_APPROVED_TXT_KEY, LABELER_UNKNOWN_WORKER_SLOT,
-                                  LABELER_SUPERVISION_RULES_KEY)
+from naiba.core.contracts import LABELER_APPROVED_TXT_KEY, LABELER_UNKNOWN_WORKER_SLOT
 from naiba.core.exceptions import TaskCancelled
 from naiba.labeler.db import LabelerDB
 from naiba.labeler.engines.chat import ChatSkillEngine
@@ -21,7 +20,7 @@ from tests import test_labeler_concurrency as concurrent_fixtures
 from tests.test_labeler import _StubModels
 from tests.test_labeler_concurrency import (
     _ConcurrencyModels, _StubApp, _workers,
-    _candidate, _image_name, _message_text,
+    _image_name, _message_text, _txt_body, _write_txt_label,
 )
 
 
@@ -105,7 +104,7 @@ class SupervisionIntegrityTests(unittest.TestCase):
         seen = []
 
         def supervise(text, options, index):
-            seen.append(_candidate(text))
+            seen.append(_txt_body(text))
             return '{"decision":"approve","reason":"ok"}'
 
         models = _ConcurrencyModels(label=self.tool_label, supervisor=supervise)
@@ -113,8 +112,7 @@ class SupervisionIntegrityTests(unittest.TestCase):
         images = self._images(1)
         _, task = self._submit(app, images, workers=_workers(1), write_txt=True)
         self.assertEqual(self._wait(task["id"])["status"], "done")
-        self.assertEqual(seen[0]["tags"], ["cat"])
-        self.assertEqual(seen[0]["txt_content"], "dog\nairplane")
+        self.assertEqual(seen, ["dog\nairplane"])
         row = self.db.list_items(task["id"])[0]
         self.assertEqual((self.store.outputs_dir(task["id"]) / row["txt_path"]).read_text(encoding="utf-8"), "dog\nairplane")
         annotation = self.db.annotations(task_id=task["id"])[0]
@@ -134,7 +132,7 @@ class SupervisionIntegrityTests(unittest.TestCase):
             self.assertTrue(options["cancel_event"].wait(5))
             raise TaskCancelled("任务已取消")
 
-        models = _ConcurrencyModels(supervisor=supervise)
+        models = _ConcurrencyModels(label=self.tool_label, supervisor=supervise)
         app = _StubApp(self.data_dir, models=models)
         jobs, task = self._submit(app, self._images(1), workers=_workers(1), write_txt=True)
         self.assertTrue(entered.wait(5))
@@ -155,7 +153,7 @@ class SupervisionIntegrityTests(unittest.TestCase):
                     entered.set()
                     self.assertTrue(release.wait(5))
                     return result
-                models = _ConcurrencyModels(supervisor=lambda *_: reply)
+                models = _ConcurrencyModels(label=self.tool_label, supervisor=lambda *_: reply)
                 app = _StubApp(self.data_dir, models=models)
                 with patch.object(LabelerRunner, "_supervisor_request", held):
                     jobs, task = self._submit(app, self._images(1), workers=_workers(1), write_txt=True)
@@ -180,7 +178,7 @@ class SupervisionIntegrityTests(unittest.TestCase):
             self.assertTrue(release.wait(5))
             return result
 
-        models = _ConcurrencyModels()
+        models = _ConcurrencyModels(label=self.tool_label)
         app = _StubApp(self.data_dir, models=models)
         with patch.object(LabelerRunner, "_supervisor_request", held):
             jobs, task = self._submit(app, self._images(1), workers=_workers(1), write_txt=True)
@@ -197,12 +195,13 @@ class SupervisionIntegrityTests(unittest.TestCase):
         _, task = self._submit(app, self._images(1), workers=_workers(1), write_txt=True)
         self.assertEqual(self._wait(task["id"])["status"], "failed")
         row = self.db.list_items(task["id"])[0]
-        self.assertEqual(row["state"], "human_check")
+        self.assertEqual(row["state"], "failed")
+        self.assertEqual(row["error_category"], "supervision_format")
         self.assertEqual(row["candidate"]["txt_content"], "dog\nairplane")
         self.assertEqual(row["txt_state"], "")
         self.assertEqual(list(self.store.outputs_dir(task["id"]).rglob("*.txt")), [])
 
-    def test_oversized_txt_is_explicit_human_check_not_truncated_approval(self):
+    def test_oversized_txt_marks_item_failed_not_truncated_approval(self):
         def label(text, options, index):
             if index < 4:
                 return json.dumps({"type": "tool", "tool": TXT_TOOL_NAME, "arguments": {
@@ -215,15 +214,18 @@ class SupervisionIntegrityTests(unittest.TestCase):
         _, task = self._submit(_StubApp(self.data_dir, models=models), self._images(1), workers=_workers(1), write_txt=True)
         self.assertEqual(self._wait(task["id"])["status"], "failed")
         row = self.db.list_items(task["id"])[0]
-        self.assertEqual(row["state"], "human_check")
+        self.assertEqual(row["state"], "failed")
+        self.assertEqual(row["error_category"], "supervision_format")
         self.assertEqual(len(row["candidate"]["txt_content"]), 64000)
         self.assertIn(str(MAX_SUPERVISION_TXT_CHARS), row["supervisor_reason"])
         self.assertEqual(models.counters["supervisor"], 0)
         self.assertEqual(list(self.store.outputs_dir(task["id"]).rglob("*.txt")), [])
 
     def test_format_failure_accounts_supervisor_tokens(self):
-        models = _ConcurrencyModels(supervisor=lambda *_: "not JSON")
-        _, task = self._submit(_StubApp(self.data_dir, models=models), self._images(1), workers=_workers(1))
+        models = _ConcurrencyModels(
+            label=self.tool_label, supervisor=lambda *_: "not JSON")
+        _, task = self._submit(_StubApp(self.data_dir, models=models), self._images(1),
+                               workers=_workers(1), write_txt=True)
         final = self._wait(task["id"])
         row = self.db.list_items(task["id"])[0]
         self.assertEqual(final["usage"]["total_tokens"], models.total_tokens())
@@ -254,8 +256,9 @@ class SupervisionIntegrityTests(unittest.TestCase):
         failed.supervisor_usage = {"total_tokens": 19}
         with patch.object(runner, "_supervisor_request", side_effect=failed) as request:
             with self.assertRaises(TaskCancelled) as raised:
-                runner._supervise_with_retry(task_id="probe", item={}, config={}, annotation={},
-                    supervisor_profile={}, supervisor_ref={}, worker_slot=0, worker_model="m",
+                runner._supervise_with_retry(
+                    annotation={"txt_content": "猫"},
+                    supervisor_profile={}, supervisor_ref={},
                     cancel_event=BoundaryCancel(), gate=ProviderGate(), timeout_seconds=30)
         self.assertEqual(request.call_count, 1)
         self.assertEqual(raised.exception.supervisor_usage, {"total_tokens": 19})
@@ -264,11 +267,10 @@ class SupervisionIntegrityTests(unittest.TestCase):
         runtime = ModelRuntime()
         app = _StubApp(self.data_dir, models=runtime)
         runner = self._jobs(app).runner
-        image = self._images(1)[0]
-        kwargs = dict(task_id="probe", item={"path": str(image)},
-            config={LABELER_SUPERVISION_RULES_KEY: "只描述主体"}, annotation={"tags": ["cat"]},
+        kwargs = dict(
+            annotation={"txt_content": "猫"},
             supervisor_profile=app.config.profile("online:judge"),
-            supervisor_ref={"model_key": "online:judge"}, worker_slot=0, worker_model="m",
+            supervisor_ref={"model_key": "online:judge"},
             cancel_event=threading.Event(), gate=ProviderGate(), timeout_seconds=30)
         with patch.object(runtime, "_complete_online", side_effect=[
             ('{"decision":"approve"}', "", "", {"total_tokens": 19}), RuntimeError("connection failed")]):
@@ -285,9 +287,10 @@ class SupervisionIntegrityTests(unittest.TestCase):
                         raise RuntimeError("429 rate limit")
                     return final_reply
 
-                models = _ConcurrencyModels(supervisor=supervise)
+                models = _ConcurrencyModels(
+                    label=_write_txt_label(["完整描述"]), supervisor=supervise)
                 _, task = self._submit(_StubApp(self.data_dir, models=models), self._images(1), workers=_workers(1),
-                                       system_prompt="规则：" + final_reply)
+                                       write_txt=True, system_prompt="规则：" + final_reply)
                 final = self._wait(task["id"])
                 row = self.db.list_items(task["id"])[0]
                 self.assertEqual(final["usage"]["total_tokens"], models.total_tokens())
@@ -312,8 +315,6 @@ class SupervisionIntegrityTests(unittest.TestCase):
                 self.assertEqual(final["usage"]["total_tokens"], models.total_tokens())
                 self.assertEqual(row["usage"]["total_tokens"], models.total_tokens())
                 self.assertEqual(final["status"], "done" if error.startswith("429") else "failed")
-                if error.startswith("429"):
-                    self.assertEqual(final["usage"]["total_tokens"], 1011)
 
     def test_cancel_while_acquiring_next_label_slot_cannot_borrow_last_image_usage(self):
         original = ProviderGate.acquire
@@ -329,7 +330,7 @@ class SupervisionIntegrityTests(unittest.TestCase):
             _, task = self._submit(_StubApp(self.data_dir, models=models), self._images(2), workers=_workers(1))
             final = self._wait(task["id"])
         self.assertEqual(final["usage"]["total_tokens"], models.total_tokens())
-        self.assertEqual(models.total_tokens(), 1002)
+        self.assertEqual(models.total_tokens(), 1)
         cancelled = next(row for row in self.db.list_items(task["id"]) if row["state"] == "cancelled")
         self.assertEqual(cancelled["usage"], {})
 
@@ -367,7 +368,7 @@ class SupervisionIntegrityTests(unittest.TestCase):
         self.assertEqual(self.db.list_items(repeated["id"])[0]["worker_slot"], LABELER_UNKNOWN_WORKER_SLOT)
 
     def test_missing_approved_txt_is_not_reconstructed_from_caption_cache(self):
-        models = _ConcurrencyModels()
+        models = _ConcurrencyModels(label=_write_txt_label(["完整描述"]))
         app = _StubApp(self.data_dir, models=models)
         images = self._images(1)
         _, task = self._submit(app, images, workers=_workers(1), write_txt=True)
@@ -377,7 +378,8 @@ class SupervisionIntegrityTests(unittest.TestCase):
         calls = dict(models.counters)
         _, repeated = self._submit(app, images, workers=_workers(1), write_txt=True)
         self.assertEqual(self._wait(repeated["id"])["status"], "done")
-        self.assertEqual(models.counters["label"], calls["label"] + 1)
+        # 缺少已审核 TXT 时不能拿标注文本凑数：重新打标并重新检查。
+        self.assertEqual(models.counters["label"], calls["label"] + 2)
         self.assertEqual(models.counters["supervisor"], calls["supervisor"] + 1)
 
     def test_old_database_gets_nullable_approved_txt_without_losing_rows(self):
@@ -416,14 +418,12 @@ class SkillReviewRulesTests(unittest.TestCase):
         self.assertEqual(fixture.db.list_items(task["id"])[0]["usage"]["total_tokens"], 34)
         self.assertEqual(fixture.db.annotations(task_id=task["id"]), [])
 
-    def test_actual_skill_and_extra_rules_reach_both_labeler_and_supervisor(self):
+    def test_skill_and_extra_rules_reach_labeler_without_supervisor_call(self):
         fixture = serial_fixtures.LabelerChatEngineTests("test_chat_engine_json_output_keeps_tags")
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
 
         def answer(profile, messages, options, status):
-            if "你是图片标注审核员" in _message_text(messages):
-                return '{"decision":"approve","reason":"ok"}'
             return '{"tags":["cat"],"description":"一只猫"}'
 
         fixture.app.models = _StubModels(answer)
@@ -434,14 +434,12 @@ class SkillReviewRulesTests(unittest.TestCase):
         task = fixture.jobs.submit({"image_refs": [{"path": str(path), "name": path.name, "relative_path": "d/" + path.name}], "config": config})
         self.assertEqual(fixture._wait(task["id"])["status"], "done")
         calls = fixture.app.models.calls
-        self.assertEqual(len(calls), 2)
-        for call in calls:
-            text = _message_text(call["messages"])
-            self.assertIn("观察图片并输出", text)
-            self.assertIn("忽略背景文字，仅保留主体体态", text)
-            self.assertIn("只描述主体", text)
-        self.assertIn("风格参考：简洁", _message_text(calls[-1]["messages"]))
-        self.assertIsNone(calls[-1]["options"].get("tools"))
+        # 没有开启写入本地 TXT：规则只进打标员，不调用监督员。
+        self.assertEqual(len(calls), 1)
+        text = _message_text(calls[0]["messages"])
+        self.assertIn("观察图片并输出", text)
+        self.assertIn("忽略背景文字，仅保留主体体态", text)
+        self.assertIn("只描述主体", text)
 
     def test_changed_skill_before_or_during_labeling_never_reaches_supervisor(self):
         for when in ("queued", "labeling"):

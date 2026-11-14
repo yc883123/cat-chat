@@ -316,7 +316,7 @@ class LabelerDB:
                        error='', error_category=''
                  WHERE task_id=? AND item_id=?
                    AND state IN ('queued','running','supervising','revising','failed',
-                                 'cancelled','uncertain')
+                                 'cancelled','uncertain','human_check')
                 """,
                 (str(phase or "labeling"), max(0, int(worker_slot or 0)),
                  str(worker_model_key or ""), str(worker_model_name or ""),
@@ -328,7 +328,7 @@ class LabelerDB:
                   state: str = "", supervisor_decision: str = "",
                   supervisor_reason: str = "", supervisor_attempts: int | None = None,
                   supervisor_usage: dict[str, Any] | None = None) -> None:
-        """推进单图的阶段（labeling/supervising/revising/human_check/approved）。
+        """推进单图的阶段（labeling/supervising/revising/approved）。
 
         只改阶段与监督字段，不动标注关联与用量；调用方负责最终终态提交。
         """
@@ -457,48 +457,6 @@ class LabelerDB:
         return annotation_id, reused
 
     @_retry_transient
-    def human_check_item(
-        self,
-        task_id: str,
-        item_id: str,
-        *,
-        candidate: dict[str, Any],
-        reason: str,
-        usage: dict[str, Any],
-        meta: dict[str, Any] | None = None,
-    ) -> None:
-        """监督未通过/无法裁定：保留候选证据，但不写标注库、不可复用。
-
-        ``annotation_id`` 保持为空是硬边界：导出、标注库查询与结果复用都只认
-        这条关联，人工检查项因此不会被误当成「已审核成功」。
-        """
-        meta = meta or {}
-        with self._connect() as db:
-            db.execute(
-                """
-                UPDATE task_items
-                   SET state='human_check', annotation_id=NULL, phase='human_check',
-                       worker_slot=?, worker_model_key=?, worker_model_name=?,
-                       supervisor_decision='human_check', supervisor_attempts=?,
-                       supervisor_reason=?, supervisor_usage_json=?,
-                       candidate_json=?, usage_json=?, error='', error_category='',
-                       finished_at=?
-                 WHERE task_id=? AND item_id=?
-                """,
-                (
-                    max(0, int(meta.get("worker_slot") or 0)),
-                    str(meta.get("worker_model_key") or ""),
-                    str(meta.get("worker_model_name") or ""),
-                    max(0, int(meta.get("supervisor_attempts") or 0)),
-                    str(reason or "")[:_MAX_REASON_CHARS],
-                    _dumps(meta.get("supervisor_usage") or {}),
-                    _dumps(candidate or {}),
-                    _dumps(usage or {}),
-                    now_ms(), task_id, item_id,
-                ),
-            )
-
-    @_retry_transient
     def fail_item(self, task_id: str, item_id: str, *, error: str, category: str,
                   usage: dict[str, Any] | None = None,
                   meta: dict[str, Any] | None = None,
@@ -624,14 +582,14 @@ class LabelerDB:
         return {
             "total": total,
             "done": by_state.get("succeeded", 0),
-            "failed": by_state.get("failed", 0),
+            # 旧版本留下的 human_check 行按失败口径计：人工检查出口已取消。
+            "failed": by_state.get("failed", 0) + by_state.get("human_check", 0),
             "uncertain": by_state.get("uncertain", 0),
             "cancelled": by_state.get("cancelled", 0),
             "queued": by_state.get("queued", 0),
             "running": by_state.get("running", 0),
             "supervising": by_state.get("supervising", 0),
             "revising": by_state.get("revising", 0),
-            "human_check": by_state.get("human_check", 0),
         }
 
     # ---- 复用与查询 ----
@@ -757,7 +715,7 @@ class LabelerDB:
             "size": int(row["size"] or 0),
             "mtime_ns": int(row["mtime_ns"] or 0),
             "original_sha256": str(row["original_sha256"] or ""),
-            "state": str(row["state"]),
+            "state": "failed" if str(row["state"]) == "human_check" else str(row["state"]),
             "attempt_count": int(row["attempt_count"] or 0),
             "error_category": str(row["error_category"] or ""),
             "error": str(row["error"] or ""),

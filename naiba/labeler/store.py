@@ -222,7 +222,7 @@ class LabelerStore:
             "detail": "",
             "input": input_data,
             "progress": {"done": 0, "total": total, "failed": 0, "uncertain": 0,
-                         "cancelled": 0, "human_check": 0},
+                         "cancelled": 0},
             "result": {"annotation_ids": []},
             "error": "",
             "usage": {},
@@ -309,7 +309,7 @@ class LabelerStore:
         payload.setdefault("module", LABELER_MODULE)
         payload.setdefault("origin_label", LABELER_ORIGIN_LABEL)
         payload.setdefault("progress", {"done": 0, "total": 0, "failed": 0, "uncertain": 0,
-                                        "cancelled": 0, "human_check": 0})
+                                        "cancelled": 0})
         payload.setdefault("result", {"annotation_ids": []})
         return payload
 

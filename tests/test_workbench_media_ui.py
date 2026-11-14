@@ -19,7 +19,7 @@ function node(tag='div') {
 }
 const elements={};
 const ctx=vm.createContext({console,document:{createElement:node,querySelectorAll:()=>[]},
-  $:s=>elements[s]||null,$$:()=>[],window:{},state:{},
+  $:s=>elements[s]||null,$$:()=>[],window:{},state:{},localFileUrl:path=>path,
   localStorage:{getItem(){return null},setItem(){}},setTimeout,clearTimeout,setInterval,clearInterval});
 function load(file,expose){
   const src=fs.readFileSync('public/js/'+file,'utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
@@ -132,7 +132,7 @@ ctx.attachmentThumbUrl=record=>record.path;
 const params=['image','audio','video','image','audio','video','image'].map((media,index)=>({
   node_id:String(index+1),field_name:media,field_type:media,media,default:'None',media_optional:false,
 }));
-const shortNames={image:'图',audio:'音',video:'视频'},fullNames={image:'图片',audio:'音频',video:'视频'};
+const shortNames={image:'图',audio:'音',video:'视频'};
 const cases=[
   {name:'混排',order:[0,1,2,3],numbers:[1,1,1,2]},
   {name:'重排',order:[3,2,0,1],numbers:[1,1,2,1]},
@@ -158,10 +158,10 @@ for(const test of cases){
   const expectedNumbers=test.numbers.map((number,index)=>number?`${shortNames[params[test.order[index]].media]} ${number}`:'—');
   const mapping=ctx.p.batchPortsMarkup(scheme),html=ctx.p.batchItemsMarkup(scheme,0);
   assert.deepEqual([...mapping.matchAll(/<span class="cbm-no">([^<]+)<\/span>/g)].map(match=>match[1]),expectedNumbers,test.name+' 配置编号');
-  assert.deepEqual([...html.matchAll(/<th>((?:图|音|视频) \d+)（/g)].map(match=>match[1]),
+  assert.deepEqual([...html.matchAll(/<th title="[^"]*">((?:图|音|视频) \d+)<\/th>/g)].map(match=>match[1]),
     expectedNumbers.filter(number=>number!=='—'),test.name+' 表头编号');
   const expectedLabels=test.numbers.flatMap((number,index)=>number?[
-    `${fullNames[params[test.order[index]].media]} ${number} · ${params[test.order[index]].node_id}`]:[]);
+    `${shortNames[params[test.order[index]].media]} ${number}`]:[]);
   const rows=[...html.matchAll(/<tr>([\s\S]*?)<\/tr>/g)].map(match=>match[1]).filter(row=>row.includes('data-batch-item="name"'));
   assert.equal(rows.length,3);
   rows.forEach((row,rowIndex)=>{

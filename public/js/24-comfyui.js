@@ -4696,7 +4696,8 @@ function batchItemsMarkup(scheme, schemeIndex) {
     const slot = batchSlotByAddress(scheme.detail, port);
     const kind = slot?.media || "image";
     const kindNames = { image: "图", video: "视频", audio: "音" };
-    return `<th>${kindNames[kind]} ${portNumbers[portIndex]}（${escapeText(batchSlotAddressText(scheme.detail, slot))}）</th>`;
+    // 表头只留编号；节点地址统一收在表下的「每个参数接到工作流的哪里」。
+    return `<th title="${escapeAttribute(batchSlotAddressText(scheme.detail, slot))}">${kindNames[kind]} ${portNumbers[portIndex]}</th>`;
   }).join("");
   // 指认列跟在同类主列后面：第二段提示词接提示词，第二时长接时长，其余排条数前。
   const extras = activeExtraPoints(scheme);
@@ -4711,8 +4712,44 @@ function batchItemsMarkup(scheme, schemeIndex) {
   return `<div class="cbm-items-wrap"><div class="cbm-mobile-tools"><button type="button" class="cbm-btn" data-batch-action="clear-prompts" data-scheme="${scheme.id}">清空本方案提示词</button></div><table class="cbm-items">
     <thead><tr><th>名称</th>${portHeaders}<th>剧本</th><th>提示词<button type="button" class="cbm-th-clear" data-batch-action="clear-prompts" data-scheme="${scheme.id}" title="清空这个方案所有条目的提示词（含指认出的第二段），剧本栏不动">清空</button></th>${extrasMarkup("prompt")}<th>时长</th>${extrasMarkup("duration")}<th>分辨率</th>${extrasMarkup("resolution")}${extrasMarkup("spare")}<th>条数</th><th>操作</th></tr></thead>
     <tbody>${rows || `<tr><td colspan="${columnCount}" class="cbm-hint">还没有条目。</td></tr>`}</tbody>
-    <tfoot><tr><td colspan="${columnCount}"><button type="button" class="cbm-add-item" data-batch-action="add-item" data-scheme="${scheme.id}">＋ 添加一条</button></td></tr></tfoot>
-  </table></div>`;
+  </table></div>
+  <div class="cbm-add-row"><button type="button" class="cbm-add-item" data-batch-action="add-item" data-scheme="${scheme.id}">＋ 添加一条</button></div>
+  ${batchConnectionsMarkup(scheme)}`;
+}
+
+// 与单次生成末尾同一个折叠块：表格里只留「图 1 / 音 1 / 提示词」，
+// 完整节点地址、字段和下游端口都收在这里，按需展开。
+function batchConnectionsMarkup(scheme) {
+  const detail = scheme.detail;
+  if (!detail) return "";
+  const rows = [];
+  const push = (label, slot) => {
+    const row = batchSlotByAddress(detail, slot);
+    if (row) rows.push([label, batchSlotAddressText(detail, row)]);
+  };
+  const ports = (scheme.mapping?.media_ports || []).filter((port) => port.checked);
+  const numbers = batchMediaPortNumbers(detail, ports);
+  const kindNames = { image: "图", video: "视频", audio: "音" };
+  ports.forEach((port, index) => {
+    const kind = batchSlotByAddress(detail, port)?.media || "image";
+    push(`${kindNames[kind]} ${numbers[index]}`, port);
+  });
+  const extras = activeExtraPoints(scheme);
+  push("剧本/提示词写进", scheme.mapping?.prompt_slot);
+  extras.filter((point) => point.kind === "prompt")
+    .forEach((point) => push(EXTRA_KIND_LABELS[point.kind], point.slot));
+  push("时长写进", scheme.mapping?.duration_slot);
+  extras.filter((point) => point.kind === "duration")
+    .forEach((point) => push(EXTRA_KIND_LABELS[point.kind], point.slot));
+  push("分辨率写进", scheme.mapping?.resolution_slot);
+  extras.filter((point) => point.kind === "resolution" || point.kind === "spare")
+    .forEach((point) => push(EXTRA_KIND_LABELS[point.kind] || "备用槽", point.slot));
+  if (!rows.length) return "";
+  return `<details class="cbm-connections">
+    <summary>每个参数接到工作流的哪里</summary>
+    <dl>${rows.map(([label, address]) =>
+      `<dt>${escapeText(label)}</dt><dd>${escapeText(address)}</dd>`).join("")}</dl>
+  </details>`;
 }
 
 // 批量单元格里的 JSON 摘要：紧凑按钮打开同一个弹窗，不把整串 JSON 摊进表格。
@@ -4847,31 +4884,39 @@ function batchItemRowMarkup(scheme, item, itemIndex, ports, portNumbers = batchM
   const tiles = ports.map((port, portIndex) => {
     const slot = batchSlotByAddress(scheme.detail, port);
     const kind = slot?.media || "image";
-    const cellLabel = escapeAttribute(`${{ image: "图片", video: "视频", audio: "音频" }[kind] || "素材"} ${portNumbers[portIndex]} · ${slot?.node_id || ""}`);
+    // 窄屏字段标签也只用编号；完整地址在表下的「每个参数接到工作流的哪里」。
+    const cellLabel = `${{ image: "图", video: "视频", audio: "音" }[kind] || "素材"} ${portNumbers[portIndex]}`;
     const record = item.files[String(portIndex)];
     const skipped = itemSkipsPort(item, port);
     const skipLabel = skipped ? "取消跳过，恢复此前状态" : "跳过这个输入";
     const skipButton = `<button type="button" class="cbm-tile-skip${skipped ? " active" : ""}" data-batch-action="toggle-skip" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" title="${skipLabel}" aria-label="${skipLabel}">⊘</button>`;
     if (skipped) {
-      // 跳过态不再画媒体缩略图：一个 ⊘ 开关 + 说明 +（有文件时）清除入口，
-      // 避免「紫色媒体块里一个 ⊘、旁边又一个 ⊘」的双图标歧义。
+      // 跳过态同样压成小格：媒体图不再画，只留 ⊘ 和状态；原选择放悬停提示。
       const subText = record
         ? `原选择：${record.name}`
         : mediaSlotOriginalNonEmpty(slot)
           ? `恢复后沿用：${slot.default}` : "本次不提交这个素材口";
-      return `<td data-label="${cellLabel}"><span class="cbm-mtile is-skipped cbm-skip-tile" data-batch-tile data-batch-skipped="1" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" data-kind="${kind}" title="已跳过这个输入；点 ⊘ 恢复">
+      return `<td data-label="${escapeAttribute(cellLabel)}"><span class="cbm-mtile cbm-skip-tile" data-batch-tile data-batch-skipped="1" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" data-kind="${kind}" title="${escapeAttribute(`已跳过这个输入；${subText}`)}">
         ${skipButton}
-        <span class="cbm-skip-text"><span class="cbm-skip-title">已跳过这个输入</span><span class="cbm-skip-sub" title="${escapeText(subText)}">${escapeText(subText)}</span></span>
-        ${record ? `<button type="button" class="cbm-tile-clear" data-batch-action="clear-file" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" aria-label="清除这个文件">✕</button>` : ""}
+        <span class="cbm-skip-title">已跳过</span>
+        ${record ? `<button type="button" class="cbm-tile-clear" data-batch-action="clear-file" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" title="清除这个文件" aria-label="清除这个文件">✕</button>` : ""}
       </span></td>`;
     }
     if (record) {
+      const recordName = String(record.name || "");
+      // 缩略图点击走 03-media 的灯箱委托；文件名只做悬停提示，不占版面。
+      const previewUrl = kind === "image" ? localFileUrl(record.path) : "";
       const thumb = kind === "image"
-        ? `<img src="${escapeText(attachmentThumbUrl(record))}" alt="" loading="lazy">`
+        ? `<img src="${escapeText(attachmentThumbUrl(record))}" alt="${escapeAttribute(recordName)}" loading="lazy" data-large-url="${escapeAttribute(previewUrl)}">`
         : `<span class="cbm-tile-ico">${kind === "video" ? "▶" : "♪"}</span>`;
-      return `<td data-label="${cellLabel}"><span class="cbm-mtile" data-batch-tile data-batch-skipped="" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" data-kind="${kind}" title="点选 / 拖拽可换；⊘ 跳过这个输入">
-        <span class="cbm-thumb ${kind}">${thumb}</span>
-        <span class="cbm-mname">${escapeText(record.name || "")}<span class="cbm-tile-actions"><button type="button" class="cbm-tile-clear" data-batch-action="clear-file" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" aria-label="清除这个文件">✕</button>${skipButton}</span></span>
+      const tileTitle = `${recordName ? `${recordName}｜` : ""}点选 / 拖拽可换；⊘ 跳过这个输入`;
+      return `<td data-label="${escapeAttribute(cellLabel)}"><span class="cbm-mtile" data-batch-tile data-batch-skipped="" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" data-kind="${kind}" title="${escapeAttribute(tileTitle)}">
+        <span class="cbm-thumb ${kind}" title="${escapeAttribute(recordName)}">${thumb}</span>
+        ${skipButton}
+        <span class="cbm-tile-actions">
+          <button type="button" class="cbm-tile-replace" data-batch-action="replace-file" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" title="替换这个文件" aria-label="替换这个文件">⇄</button>
+          <button type="button" class="cbm-tile-clear" data-batch-action="clear-file" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" title="清除这个文件" aria-label="清除这个文件">✕</button>
+        </span>
       </span></td>`;
     }
     // 没选新文件：原文件非空沿用（即使 optional）；空值且确认 optional 自动跳过；
@@ -4880,8 +4925,10 @@ function batchItemRowMarkup(scheme, item, itemIndex, ports, portNumbers = batchM
     const autoSkip = !keptOriginal && slot?.media_optional === true;
     const required = !keptOriginal && slot?.media_optional === false;
     const labelText = keptOriginal ? "沿用原文件"
-      : autoSkip ? "留空 · 自动跳过" : required ? "必填 · 点选/拖入" : "点选/拖入";
-    return `<td data-label="${cellLabel}"><span class="cbm-empty-slot${required && missing ? " is-missing" : ""}${keptOriginal ? " is-kept" : ""}" data-batch-tile data-batch-skipped="" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" data-kind="${kind}" title="点选 / 拖入换素材；⊘ 跳过这个输入"><span class="cbm-slot-label">${labelText}</span>${skipButton}</span></td>`;
+      : autoSkip ? "留空跳过" : required ? "必填" : "点选/拖入";
+    const emptyTitle = `${keptOriginal ? "沿用原文件"
+      : autoSkip ? "留空 · 自动跳过" : required ? "必填 · 点选/拖入" : "点选/拖入"}；点选 / 拖入换素材；⊘ 跳过这个输入`;
+    return `<td data-label="${escapeAttribute(cellLabel)}"><span class="cbm-empty-slot${required && missing ? " is-missing" : ""}${keptOriginal ? " is-kept" : ""}" data-batch-tile data-batch-skipped="" data-scheme="${scheme.id}" data-item="${itemIndex}" data-port="${portIndex}" data-kind="${kind}" title="${escapeAttribute(emptyTitle)}"><span class="cbm-slot-label">${labelText}</span>${skipButton}</span></td>`;
   }).join("");
   const promptSlot = batchSlotByAddress(scheme.detail, scheme.mapping?.prompt_slot);
   const promptValue = String(item.prompt || "").trim() || batchSlotSavedValue(scheme.detail, promptSlot);
@@ -4944,6 +4991,19 @@ function onBatchClick(event) {
   if (jsonButton) { openBatchJsonEditor(jsonButton); return; }
   const target = event.target.closest("[data-batch-action]");
   const tile = event.target.closest("[data-batch-tile]");
+  if (tile && event.target.closest(".cbm-thumb")) {
+    // 点缩略图看大图：图片走 03-media 的 document 灯箱；音视频在这里开浮层。
+    // 不能落到下面的点选分支，否则同一击会既开预览又弹文件框。
+    if (tile.dataset.batchSkipped !== "1") {
+      const kind = tile.dataset.kind || "image";
+      if (kind !== "image") {
+        const scheme = batchSchemeOf(tile.dataset.scheme || "");
+        const record = scheme?.items[Number(tile.dataset.item)]?.files?.[String(tile.dataset.port)];
+        if (record?.path) openMediaPreviewOverlay(localFileUrl(record.path), kind, tile);
+      }
+    }
+    return;
+  }
   if (!target && tile) {
     // 已跳过的素材格不响应点选（避免误触又弹文件框）；点 ⊘ 恢复后再选。
     if (tile.dataset.batchSkipped === "1") return;
@@ -5028,6 +5088,9 @@ function onBatchClick(event) {
     if (index >= 0 && index < ports.length && next >= 0 && next < ports.length) {
       changeBatchMediaPorts(scheme, () => { [ports[index], ports[next]] = [ports[next], ports[index]]; });
     }
+  } else if (action === "replace-file" && tile) {
+    event.stopPropagation();
+    batchPickFile(tile);
   } else if (action === "clear-file" && scheme && itemIndex >= 0) {
     event.stopPropagation();
     const item = scheme.items[itemIndex];

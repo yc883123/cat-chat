@@ -4661,7 +4661,8 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 }
 .comfyui-media-tile.audio .thumb { height: 40px; }
 .comfyui-media-tile .thumb img, .comfyui-media-tile .thumb video {
-  width: 100%; height: 100%; object-fit: cover; display: block;
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: contain; display: block; background: #0b0e14;
 }
 .comfyui-media-tile .thumb .ph-icon { color: var(--muted); }
 .comfyui-media-tile .thumb .ph-icon svg { width: 22px; height: 22px; }
@@ -6972,6 +6973,17 @@ span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); 
 
 /* 条目表 */
 .cbm-items-wrap { overflow-x: auto; border-top: 1px solid var(--line); }
+/* 横向滚动条原来长在表格最底部：内容一多就要先把页滚到底才够得着。
+   非手机布局下让表区自己滚（表头吸顶），横向滚动条始终贴在可见表区底边。 */
+#studioPageComfyui:not([data-wb-size="narrow"]) .cbm-items-wrap {
+  overflow: auto;
+  max-height: min(58dvh, 560px);
+}
+#studioPageComfyui:not([data-wb-size="narrow"]) .cbm-items thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
 .cbm-items { border-collapse: collapse; width: 100%; min-width: 960px; font-size: 13px; }
 .cbm-items th { font-weight: 500; color: var(--muted); text-align: left; padding: 8px 10px; background: var(--surface-inset); border-bottom: 1px solid var(--line); white-space: nowrap; }
 .cbm-th-clear { margin-left: 6px; padding: 0 6px; font: inherit; font-size: 11px; line-height: 17px; color: var(--muted); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-sm); cursor: pointer; }
@@ -6986,35 +6998,55 @@ span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); 
 .cbm-row-act .cbm-btn { margin: 1px 0; }
 .cbm-add-item { border: 1px dashed var(--line-strong); background: transparent; color: var(--muted); border-radius: var(--r-md); padding: 7px 14px; font-size: 13px; width: 100%; cursor: pointer; }
 .cbm-add-item:hover { color: var(--violet-deep); border-color: var(--violet-line); }
-.cbm-mtile { display: inline-flex; align-items: center; gap: 7px; min-width: 128px; cursor: pointer; }
-.cbm-thumb { width: 34px; height: 34px; flex: none; border-radius: var(--r-sm); display: flex; align-items: center; justify-content: center; color: #fff; overflow: hidden; }
-.cbm-thumb.image { background: linear-gradient(135deg, #8E7BFF, #5A47C4); }
+/* 「添加一条」留在表区外面：表区限高自滚后，新增条目不该埋在滚动区底部。 */
+.cbm-add-row { padding: 8px 10px; }
+/* 条目素材口：与单次生成同款小卡（112×64），缩略图为主。
+   上传名只在悬停提示里出现；悬停出 ⇄ 替换 / ✕ 清除，⊘ 常显。 */
+.cbm-mtile {
+  position: relative; display: block; width: 112px; height: 64px;
+  border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  background: var(--surface-inset); overflow: hidden; cursor: pointer;
+}
+.cbm-mtile:hover { border-color: var(--violet-line); }
+.cbm-thumb { position: absolute; inset: 0; display: block; color: #fff; overflow: hidden; background: var(--surface-inset); }
+.cbm-thumb.image { background: #0b0e14; }
 .cbm-thumb.audio { background: linear-gradient(135deg, #34C4B4, #1F8F9E); }
 .cbm-thumb.video { background: linear-gradient(135deg, #E8A05F, #D0724A); }
-.cbm-thumb img { width: 100%; height: 100%; object-fit: cover; }
-.cbm-tile-ico { font-size: 13px; }
-.cbm-mname { display: flex; flex-direction: column; line-height: 1.25; font-size: 12px; min-width: 0; }
-.cbm-tile-clear { border: none; background: transparent; color: var(--muted); font-size: 11px; padding: 0; text-align: left; cursor: pointer; width: fit-content; }
-.cbm-tile-clear:hover { color: var(--danger); }
-/* 条目素材口三态：沿用原文件 / 已选文件 / 手动 ⊘ 强制跳过。 */
-.cbm-tile-actions { display: inline-flex; align-items: center; gap: 6px; margin-top: 2px; }
-.cbm-tile-skip {
-  border: 1px solid var(--line-strong); border-radius: var(--r-sm); background: var(--surface);
-  color: var(--muted); font-size: 12px; line-height: 1; padding: 2px 6px; cursor: pointer;
+/* 小格高度是固定的：img 撑满格位，整张图装进去（contain），四周留黑边，不裁画面。
+   父级不能用 grid（auto 行高会让 100% 落空，图片按原比例从顶部溢出来）。 */
+.cbm-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; cursor: zoom-in; }
+.cbm-tile-ico { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 20px; }
+.cbm-tile-actions { position: absolute; top: 27px; right: 3px; z-index: 2; display: none; gap: 4px; }
+.cbm-mtile:hover .cbm-tile-actions, .cbm-mtile:focus-within .cbm-tile-actions { display: flex; }
+.cbm-tile-actions button, .cbm-tile-skip {
+  width: 20px; height: 20px; padding: 0; border: 1px solid rgba(255, 255, 255, .18);
+  border-radius: 5px; background: rgba(17, 21, 34, .85); color: #fff;
+  font-size: 11px; line-height: 1; cursor: pointer;
 }
-.cbm-tile-skip:hover, .cbm-tile-skip:focus-visible { color: var(--warning); border-color: var(--warning); }
-.cbm-tile-skip.active { background: var(--warning-soft, var(--surface-2)); color: var(--warning); border-color: var(--warning); }
-/* 跳过态是一个紧凑警告条，不再画媒体缩略图：只留一个 ⊘ 开关和说明。 */
-.cbm-skip-tile { padding: 5px 8px; border: 1px dashed var(--warning); border-radius: var(--r-md); background: var(--warning-soft); cursor: default; }
-.cbm-skip-text { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
-.cbm-skip-title { font-size: 12px; font-weight: 600; color: var(--warning); }
-.cbm-skip-sub { font-size: 11px; color: var(--muted); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.cbm-mtile.is-skipped { opacity: .8; }
-.cbm-empty-slot { display: flex; align-items: center; justify-content: center; gap: 6px; min-width: 128px; border: 1px dashed var(--line-strong); border-radius: var(--r-md); color: var(--muted); font-size: 12px; padding: 8px 10px; cursor: pointer; }
+.cbm-tile-actions button:hover, .cbm-tile-skip:hover,
+.cbm-tile-skip:focus-visible { background: var(--accent-solid); border-color: var(--accent-solid); }
+.cbm-tile-skip { position: absolute; top: 3px; right: 3px; z-index: 2; }
+.cbm-tile-skip.active { background: var(--warning); border-color: var(--warning); }
+/* 跳过态同样压成小格：媒体图不画，原选择放悬停提示。 */
+.cbm-skip-tile { display: flex; align-items: center; justify-content: center; padding: 0 6px; border-style: dashed; border-color: var(--warning); background: var(--warning-soft); cursor: default; }
+.cbm-skip-title { font-size: 11.5px; font-weight: 600; line-height: 1.3; text-align: center; color: var(--warning); padding: 0 22px; }
+.cbm-skip-tile .cbm-tile-clear { position: absolute; left: 3px; bottom: 3px; z-index: 2; width: 20px; height: 20px; padding: 0; border: 1px solid rgba(255, 255, 255, .18); border-radius: 5px; background: rgba(17, 21, 34, .85); color: #fff; font-size: 11px; line-height: 1; }
+.cbm-skip-tile .cbm-tile-clear:hover { background: var(--danger); border-color: var(--danger); }
+.cbm-empty-slot { position: relative; display: flex; align-items: center; justify-content: center; gap: 6px; width: 112px; min-height: 64px; border: 1px dashed var(--line-strong); border-radius: var(--r-md); color: var(--muted); font-size: 11.5px; line-height: 1.35; text-align: center; padding: 6px 24px 6px 8px; cursor: pointer; }
 .cbm-empty-slot.is-missing { border-color: var(--danger); color: var(--danger); }
 /* 工作流原文件非空：占位格改成实底 + 正常文字，提示「沿用原文件」。 */
 .cbm-empty-slot.is-kept { border-style: solid; border-color: var(--line); color: var(--text); background: var(--surface-2); }
-.cbm-slot-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cbm-slot-label { min-width: 0; overflow-wrap: anywhere; }
+/* 触屏没有悬停：替换/清除入口常显；点缩略图仍是看大图。 */
+@media (hover: none) {
+  .cbm-tile-actions { display: flex; }
+}
+/* 与单次生成末尾同一个折叠块：表格只留编号，完整节点地址收在这里。 */
+.cbm-connections { padding: 4px 14px 12px; border-top: 1px solid var(--line); }
+.cbm-connections > summary { min-height: 32px; display: flex; align-items: center; cursor: pointer; font-size: 12.5px; color: var(--muted); }
+.cbm-connections dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 14px; margin: 6px 0 0; }
+.cbm-connections dt { font-size: 12.5px; color: var(--text); }
+.cbm-connections dd { margin: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 #comfyuiBatchBody [data-batch-tile].dragover,
 #comfyuiBatchDetail [data-batch-tile].dragover { outline: 2px solid var(--accent); outline-offset: 1px; }
 
@@ -7477,20 +7509,26 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
 .cbm-mobile-tools { display: none; }
 #studioPageComfyui .cbm-btn { min-height: 32px; font-size: 13px; }
 #studioPageComfyui :is(.cbm-map-slot select, .cbm-extra-kind, .cbm-extra-slot, .cbm-fixed-detail input, .cbm-fixed-detail select, .cbm-items .cbm-name, .cbm-items .cbm-script, .cbm-items input[type="number"], .cbm-items select, .cbm-convert-bar select) { font-size: 13px; }
-#studioPageComfyui[data-wb-size="narrow"] :is(.cbm-items, .cbm-items tbody, .cbm-items tfoot) { display: block; min-width: 0; width: 100%; }
+#studioPageComfyui[data-wb-size="narrow"] :is(.cbm-items, .cbm-items tbody) { display: block; min-width: 0; width: 100%; }
 #studioPageComfyui[data-wb-size="narrow"] .cbm-items thead { display: none; }
 #studioPageComfyui[data-wb-size="narrow"] .cbm-items tbody > tr { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 12px; border-bottom: 1px solid var(--line); }
 #studioPageComfyui[data-wb-size="narrow"] .cbm-items td { display: block; min-width: 0; padding: 0; border: 0; }
 #studioPageComfyui[data-wb-size="narrow"] .cbm-items td[data-label]::before { content: attr(data-label); display: block; margin-bottom: 4px; font-size: 12px; color: var(--muted); }
 #studioPageComfyui[data-wb-size="narrow"] .cbm-items :is(.cbm-script, .cbm-extra-prompt, .cbm-name, select) { width: 100%; min-width: 0; max-width: 100%; }
-#studioPageComfyui[data-wb-size="narrow"] .cbm-items tfoot tr { display: block; padding: 12px; }
+#studioPageComfyui[data-wb-size="narrow"] .cbm-add-row { padding: 12px; }
+#studioPageComfyui[data-wb-size="narrow"] .cbm-connections dl { grid-template-columns: minmax(0, 1fr); }
+#studioPageComfyui[data-wb-size="narrow"] .cbm-connections dd { margin-bottom: 6px; }
 #studioPageComfyui[data-wb-size="narrow"] .cbm-mobile-tools { display: flex; padding: 8px 12px; justify-content: flex-end; }
 #studioPageComfyui[data-wb-size="narrow"] .cbm-row-act :is(button, .cbm-convert-hint) { display: inline-flex; margin: 3px; }
 #studioPageComfyui[data-wb-size="narrow"] .cbm-mapping { grid-template-columns: minmax(0, 1fr); }
 #studioPageComfyui[data-wb-size="narrow"] .cbm-media-slot { display: grid; grid-template-columns: 14px 30px minmax(0, 1fr) 40px 40px; gap: 6px; }
 #studioPageComfyui[data-wb-size="narrow"] .cbm-media-slot .cbm-nodesel { width: 100%; min-width: 0; max-width: none; }
 #studioPageComfyui[data-wb-size="narrow"] .cbm-media-slot .cbm-kw { grid-column: 3 / -1; grid-row: 2; margin-left: 0; }
-#studioPageComfyui[data-wb-size="narrow"] :is(.cbm-move, .cbm-tile-skip, .cbm-tile-clear) { min-width: 40px; }
+#studioPageComfyui[data-wb-size="narrow"] .cbm-move { min-width: 40px; }
+#studioPageComfyui[data-wb-size="narrow"] .cbm-tile-skip,
+#studioPageComfyui[data-wb-size="narrow"] .cbm-tile-actions button,
+#studioPageComfyui[data-wb-size="narrow"] .cbm-skip-tile .cbm-tile-clear { width: 32px; height: 32px; font-size: 14px; }
+#studioPageComfyui[data-wb-size="narrow"] .cbm-tile-actions { display: flex; top: 3px; right: auto; left: 3px; }
 #studioPageComfyui[data-wb-size="narrow"] .cbm-extra-row { flex-wrap: wrap; }
 #studioPageComfyui[data-wb-size="narrow"] .cbm-extra-row > select { min-width: 0; max-width: 100%; }
 #studioPageComfyui[data-wb-size="narrow"] .cbm-scheme-head > select { flex: 1 1 160px; min-width: min(160px, 100%); max-width: 100%; }

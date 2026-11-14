@@ -50,6 +50,28 @@ class ComfyUIFrontendAssets(unittest.TestCase):
         self.assertIn(".comfyui-draft-hint", css)
         self.assertIn("max-width: 100vw; height: 100dvh", css)
 
+    def test_batch_items_table_scrolls_with_visible_horizontal_bar(self):
+        # 横向滚动条不能长在表格最底部（内容一多就要先滚到页底才够得着）：
+        # 非手机布局下表区自己滚并限高，横向条贴可见表区底边；表头吸顶。
+        css = (ROOT / "public/styles.css").read_text(encoding="utf-8")
+        wrap = re.search(
+            r'#studioPageComfyui:not\(\[data-wb-size="narrow"\]\)\s+\.cbm-items-wrap\s*\{([^}]+)\}',
+            css)
+        self.assertIsNotNone(wrap, "非窄屏 cbm-items-wrap 需要独立的滚动区规则")
+        self.assertRegex(wrap.group(1), r"overflow:\s*auto")
+        self.assertRegex(wrap.group(1), r"max-height:")
+        head = re.search(
+            r'#studioPageComfyui:not\(\[data-wb-size="narrow"\]\)\s+\.cbm-items thead th\s*\{([^}]+)\}',
+            css)
+        self.assertIsNotNone(head, "表区自滚后表头必须吸顶，否则滚动时看不到列名")
+        self.assertRegex(head.group(1), r"position:\s*sticky")
+        self.assertRegex(head.group(1), r"top:\s*0")
+        self.assertIn(".cbm-connections", css)
+        self.assertIn(".cbm-add-row", css)
+        # 缩略图整张装进小格（contain），批量与单次同一口径，四周留黑边不裁画面。
+        self.assertRegex(css, r"\.cbm-thumb img\s*\{[^}]*object-fit:\s*contain")
+        self.assertRegex(css, r"\.comfyui-media-tile \.thumb img[^{]*\{[^}]*object-fit:\s*contain")
+
     def test_shared_workflow_import_dialog_has_no_hidden_view_ancestor(self):
         class DialogParents(HTMLParser):
             def __init__(self):
@@ -830,6 +852,19 @@ assert.ok(markup.includes('留空 · 自动跳过'));
 assert.ok(markup.includes('已跳过这个输入'));
 assert.ok(markup.includes('cbm-tile-skip active'));
 assert.ok(markup.includes('data-batch-action="toggle-skip"'));
+// 素材列压成小卡：表头只留编号，完整地址收进表下的折叠块；文件名只做悬停提示。
+assert.ok(markup.includes('>图 1</th>'),'表头只留「图 1」');
+assert.ok(!markup.includes('（8 · 固定图）'),'表头不再重复节点地址');
+assert.ok(markup.includes('class="cbm-connections"'),'需要「每个参数接到工作流的哪里」折叠块');
+assert.ok(markup.includes('每个参数接到工作流的哪里'));
+assert.ok(markup.includes('8 · 固定图'),'折叠块里保留完整节点地址');
+assert.ok(markup.includes('title="b.png"'),'文件名只作为悬停提示');
+assert.ok(!markup.includes('cbm-mname'),'素材格不再平铺文件名');
+assert.ok(!markup.includes('>b.png<'),'文件名不得作为可见文本渲染');
+assert.ok(markup.includes('data-large-url="/managed/b.png"'),'缩略图点击可看大图');
+assert.ok(markup.includes('data-batch-action="replace-file"'),'悬停 ⇄ 是换文件入口');
+assert.ok(markup.includes('class="cbm-add-row"'),'「添加一条」在表区滚动框外面');
+assert.ok(!markup.includes('<tfoot'),'表区自滚后不再用表尾放新增按钮');
 // 必填口没有文件，但手动 ⊘ 了：前端不能把它标成缺项。
 batch.recheckMissing();
 assert.equal(batch.missingItems.size,0,'手动跳过应绕过必填检查');

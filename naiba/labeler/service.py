@@ -31,6 +31,7 @@ from naiba.labeler.images import (
     MAX_IMAGE_BYTES,
     MAX_UPLOAD_BYTES,
     LabelerImageError,
+    validate_resume_refs,
     verify_image_bytes,
 )
 from naiba.labeler.jobs import LabelerJobManager, LabelerTaskError
@@ -447,6 +448,33 @@ class LabelerService:
             "skipped_succeeded": int(task.get("skipped_succeeded") or 0),
             "skipped_uncertain": int(task.get("skipped_uncertain") or 0),
         }, 201
+
+    def api_resume_candidate(self, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """「开始打标」前找上次没跑完的同一批图片（只读，不建任务）。"""
+        body = body if isinstance(body, dict) else {}
+        try:
+            # 只做受管路径与元数据校验：这里不解码图片，真正的提交仍走完整校验。
+            refs = validate_resume_refs(Path(self.app.paths.data_dir), body.get("image_refs"))
+        except LabelerImageError as exc:
+            return {"error": str(exc)}, 400
+        return self.jobs.resume_candidate(refs), 200
+
+    def api_resume(self, task_id: str, body: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        """接着上次批次继续：同一任务重置未成功项后重新入队，不新建批次。"""
+        body = body if isinstance(body, dict) else {}
+        confirm = bool(body.get("confirm_uncertain"))
+        try:
+            task = self.jobs.resume_task(task_id, confirm_uncertain=confirm)
+        except LookupError:
+            return {"error": "任务不存在"}, 404
+        except LabelerTaskError as exc:
+            return {"error": str(exc)}, 400
+        except LabelerDBError as exc:
+            return {"error": str(exc)}, 503
+        return {
+            "task": task,
+            "skipped_succeeded": int(task.get("skipped_succeeded") or 0),
+        }, 200
 
     # ---- 标注库 ----
 

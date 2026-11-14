@@ -1143,6 +1143,22 @@ function collectConfig() {
   return config;
 }
 
+// 接管一个刚提交/刚续跑的批次：清掉上一批的结果缓存，按服务端详情重画。
+function adoptLabelerTask(task) {
+  labeler.taskId = String(task?.id || "");
+  labeler.task = task;
+  labeler.items = task?.items || [];
+  labeler.imageResultLimit = 100;
+  labeler.annotations = [];
+  labeler.annotationTotal = 0;
+  labeler.tagMatches = [];
+  labeler.tags = [];
+  labeler.sentences = [];
+  labeler.txtFiles = new Map();
+  setResultTab("images");
+  renderTask(task);
+}
+
 async function startTask() {
   const uploaded = labeler.selected.filter((row) => row.status === "uploaded" && row.path);
   if (!uploaded.length) {
@@ -1199,32 +1215,76 @@ async function startTask() {
   setHint("正在提交批次…");
   const startBtn = $("#labelerStart");
   if (startBtn) startBtn.disabled = true;
+  const imageRefs = uploaded.map((row) => ({
+    path: row.path,
+    thumb_path: row.thumb_path || "",
+    name: row.name,
+    relative_path: row.relative_path,
+    cache_size: row.cacheSize,
+    original_sha256: row.original_sha256 || "",
+  }));
   try {
+    // 重新拖入同一文件夹后缓存路径会变：先按原图身份找上次没跑完的批次，
+    // 命中就确认是否接着跑（沿用上次的模型与参数，已成功的图不重复调用）。
+    let resumeTaskId = "";
+    let resumeUncertain = false;
+    try {
+      const candidate = await api("/api/labeler/tasks/resume-candidate", {
+        method: "POST",
+        body: { image_refs: imageRefs },
+      });
+      const previous = candidate?.task;
+      if (previous?.id) {
+        const done = Number(previous.progress?.done || 0);
+        const total = Number(previous.progress?.total || 0);
+        const pending = Number(candidate.pending || 0);
+        const uncertain = Number(candidate.uncertain_count || 0);
+        const lines = [
+          `找到上次没跑完的批次「${previous.label || previous.id}」：已完成 ${done}/${total} 张。`,
+          `接着上次继续吗？会用上次的模型和参数，只处理剩下的 ${pending} 张。`,
+        ];
+        if (uncertain) {
+          lines.push(`其中 ${uncertain} 张结果不确定，重打可能产生第二次费用。`);
+        }
+        if (window.confirm(lines.join("\n"))) {
+          resumeTaskId = String(previous.id);
+          resumeUncertain = uncertain > 0;
+        }
+      } else if (candidate?.blocked_reason) {
+        toast(candidate.blocked_reason);
+      }
+    } catch {
+      // 查旧批次失败不拦新批次：下面照常提交。
+    }
+    if (resumeTaskId) {
+      let payload;
+      try {
+        payload = await api(`/api/labeler/tasks/${encodeURIComponent(resumeTaskId)}/resume`, {
+          method: "POST",
+          body: { confirm_uncertain: resumeUncertain },
+        });
+      } catch (error) {
+        setHint(`继续失败：${error.message}`, true);
+        return;
+      }
+      const task = payload.task || {};
+      adoptLabelerTask(task);
+      await refreshBatches();
+      startPolling();
+      const width = workbenchWidth($("#studioPageLabeler"));
+      if (width > 0 && width < 1120) setLabelerPane("results");
+      setHint(`已接着上次批次继续，跳过 ${Number(payload.skipped_succeeded || 0)} 张已完成`);
+      return;
+    }
     const payload = await api("/api/labeler/tasks", {
       method: "POST",
       body: {
-        image_refs: uploaded.map((row) => ({
-          path: row.path,
-          thumb_path: row.thumb_path || "",
-          name: row.name,
-          relative_path: row.relative_path,
-          cache_size: row.cacheSize,
-          original_sha256: row.original_sha256 || "",
-        })),
+        image_refs: imageRefs,
         config,
       },
     });
     const task = payload.task || {};
-    labeler.taskId = String(task.id || "");
-    labeler.task = task;
-    labeler.items = task.items || [];
-    labeler.annotations = [];
-    labeler.tagMatches = [];
-    labeler.tags = [];
-    labeler.sentences = [];
-    labeler.txtFiles = new Map();
-    setResultTab("images");
-    renderTask(task);
+    adoptLabelerTask(task);
     await refreshBatches();
     startPolling();
     const width = workbenchWidth($("#studioPageLabeler"));

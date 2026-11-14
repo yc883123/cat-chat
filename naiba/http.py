@@ -1096,6 +1096,12 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/labeler/tasks":
             # 打标批次：受管 image_refs + 白名单 config（服务端会重新校验图片与模型）。
             self._json(*self.app.labeler.api_submit(body))
+        elif path == "/api/labeler/tasks/resume-candidate":
+            # 「开始打标」前找上次没跑完的同一批图片；只读，不建任务。
+            self._json(*self.app.labeler.api_resume_candidate(body))
+        elif path.startswith("/api/labeler/tasks/") and path.endswith("/resume"):
+            # 接着上次批次继续：沿用旧快照，已成功的图不重复调用。
+            self._json(*self.app.labeler.api_resume(path.split("/")[-2], body))
         elif path == "/api/labeler/settings":
             # 供应商档案并发上限：整数 1–9，未知档案拒绝。
             self._json(*self.app.labeler.api_update_settings(body))

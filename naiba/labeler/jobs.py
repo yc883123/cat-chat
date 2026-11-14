@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -385,6 +386,22 @@ def config_fingerprint(config: dict[str, Any]) -> str:
     return "cfg-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:24]
 
 
+def _resume_identity(row: dict[str, Any]) -> tuple[str, str]:
+    """续跑匹配身份：相对路径 + 原图哈希（老数据没哈希时退回大小）。
+
+    重新拖同一个文件夹时缓存路径和 mtime 都会变，但相对路径与原图字节不变；
+    用路径 + 哈希才认得出「还是上次那批图」。路径也进身份，避免两个不同
+    文件夹里碰巧有同内容的图被误续上。
+    """
+    relative = str(row.get("relative_path") or "").replace("\\", "/").strip()
+    if not relative:
+        relative = str(row.get("name") or "").strip()
+    digest = str(row.get("original_sha256") or "").strip().lower()
+    if digest:
+        return relative, f"sha256:{digest}"
+    return relative, f"size:{int(row.get('size') or 0)}"
+
+
 class LabelerJobManager:
     def __init__(self, app: Any, store: Any, db: Any, runner: Any):
         self.app = app
@@ -635,6 +652,130 @@ class LabelerJobManager:
         task["skipped_succeeded"] = skipped_succeeded
         task["skipped_uncertain"] = skipped_uncertain
         return task
+
+    # ---- 接着上次批次（2026-11-14）----
+
+    def resume_candidate(self, refs: list[dict[str, Any]]) -> dict[str, Any]:
+        """「开始打标」前找上次没跑完的同一批图片。
+
+        只认逐图项完全一致（相对路径 + 原图哈希）且还有未完成项的批次。
+        重新拖同一个文件夹后缓存路径会变，标注库按路径找不到旧结果；这里
+        按原图身份认出同一批，让前端先确认是否接着上次跑。
+        """
+        wanted = Counter(_resume_identity(ref) for ref in refs)
+        if not wanted:
+            return {"task": None}
+        for task in self.store.list_tasks(limit=60):
+            task_id = str(task.get("id") or "")
+            if not task_id or str(task.get("status") or "") in LABELER_ACTIVE_STATUSES:
+                continue
+            input_data = task.get("input") if isinstance(task.get("input"), dict) else {}
+            stored_refs = input_data.get("image_refs") or []
+            if len(stored_refs) != len(refs):
+                continue
+            counts = self.db.counts(task_id)
+            total = int(counts.get("total") or 0)
+            done = int(counts.get("done") or 0)
+            if total != len(refs) or done >= total:
+                continue
+            items = self.db.list_items(task_id, limit=10000)
+            if Counter(_resume_identity(item) for item in items) != wanted:
+                continue
+            config = input_data.get("config") if isinstance(input_data.get("config"), dict) else {}
+            blocked = self._resume_block_reason(config)
+            if blocked:
+                # 命中的就是用户刚才那批，规则变了要明确说清，不能悄悄新建。
+                return {"task": None, "blocked_reason": blocked}
+            slim = self._slim(task)
+            slim["progress"] = self._progress(counts)
+            slim["counts"] = counts
+            slim["uncertain_count"] = int(counts.get("uncertain") or 0)
+            return {
+                "task": slim,
+                "skipped_succeeded": done,
+                "pending": total - done,
+                "uncertain_count": int(counts.get("uncertain") or 0)
+                                  + int(counts.get("running") or 0),
+            }
+        return {"task": None}
+
+    def resume_task(self, task_id: str, *, confirm_uncertain: bool = False) -> dict[str, Any]:
+        """「接着上次批次」：不新建任务，把未成功项重置后在原批次里继续。
+
+        已成功的图片不重复调用；沿用任务里保存的模型与参数快照。
+        """
+        task = self.store.get_task(task_id)
+        if task is None:
+            raise LookupError("任务不存在")
+        if str(task.get("status") or "") in LABELER_ACTIVE_STATUSES:
+            raise LabelerTaskError("任务还在执行，请先取消或等待结束")
+        input_data = task.get("input") if isinstance(task.get("input"), dict) else {}
+        config = dict(input_data.get("config") or {})
+        blocked = self._resume_block_reason(config)
+        if blocked:
+            raise LabelerTaskError(blocked)
+        counts = self.db.counts(task_id)
+        total = int(counts.get("total") or 0)
+        done = int(counts.get("done") or 0)
+        if total <= 0:
+            raise LabelerTaskError("这个批次没有图片，无法继续")
+        if done >= total:
+            raise LabelerTaskError("这个批次已经全部完成，没有要接着打的图片")
+        uncertain = int(counts.get("uncertain") or 0) + int(counts.get("running") or 0)
+        if uncertain and not confirm_uncertain:
+            raise LabelerTaskError(
+                f"有 {uncertain} 张图片的结果不确定：请求可能已经发出并被计费，"
+                "但结果没来得及落库。继续会重新打标这些图片，可能产生第二次费用。"
+            )
+        pending = [item for item in self.db.list_items(task_id, limit=10000)
+                   if str(item.get("state") or "") != "succeeded"]
+        missing = [str(item.get("name") or item.get("relative_path") or "未命名图片")
+                   for item in pending
+                   if not Path(str(item.get("path") or "")).is_file()]
+        if missing:
+            raise LabelerTaskError(
+                f"有 {len(missing)} 张图的缓存已不在（{missing[0]}），无法接着跑；"
+                "请重新拖入文件夹后新建批次"
+            )
+        reset = self.db.reset_items_for_resume(task_id)
+        if reset <= 0:
+            raise LabelerTaskError("这个批次没有可继续的图片")
+        self.store.update_task(task_id, status="queued", detail="", error="", finished_at=None)
+        try:
+            self.store.append_event(task_id, {"type": "status", "message": "接着上次的批次继续"})
+        except Exception:  # noqa: BLE001 - 事件日志失败不影响续跑
+            pass
+        self.runner.submit(task_id)
+        detail = self.task(task_id) or task
+        detail["resumed"] = True
+        detail["skipped_succeeded"] = done
+        detail["skipped_uncertain"] = 0
+        return detail
+
+    def _resume_block_reason(self, config: dict[str, Any]) -> str:
+        """同批次续跑沿用旧快照：规则或模型配置变了就说清原因，不悄悄换标准。"""
+        skill_revision = str(config.get("skill_revision") or "")
+        if str(config.get("engine") or "") == "chat" and skill_revision:
+            if _skill_revision(self.app, str(config.get("skill_id") or "")) != skill_revision:
+                return "这批用的 Skill 已经改过；沿用旧规则会得到不同结果，请按当前设置新建批次"
+        if config.get("concurrency_enabled"):
+            rules = str(config.get(LABELER_SUPERVISION_RULES_KEY) or "")
+            if str(config.get("supervisor_version") or "") != SUPERVISION_PROMPT_VERSION or not rules:
+                return "这批的监督策略版本已过期；请按当前设置新建批次"
+            refs = list(config.get("workers") or []) + [config.get("supervisor") or {}]
+        else:
+            refs = [config]
+        for row in refs:
+            if not isinstance(row, dict):
+                return "这批的模型配置不完整；请按当前设置新建批次"
+            try:
+                resolve_profile_with_override(
+                    self.app.config, str(row.get("model_key") or ""),
+                    str(row.get("model_name") or ""),
+                )
+            except (ValueError, KeyError) as exc:
+                return f"上次用的模型配置不可用：{exc}；请按当前设置新建批次"
+        return ""
 
     # ---- 内部 ----
 

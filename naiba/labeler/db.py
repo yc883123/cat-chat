@@ -266,6 +266,30 @@ class LabelerDB:
     def pending_items(self, task_id: str) -> list[dict[str, Any]]:
         return self.list_items(task_id, states=("queued",), limit=10000)
 
+    @_retry_transient
+    def reset_items_for_resume(self, task_id: str) -> int:
+        """「接着上次批次」：把没成功的逐图项重置回排队，已成功的一项不动。
+
+        同一任务续跑（不新建批次）时用：失败原因、重试次数、监督证据与
+        上一轮的 TXT 状态都清掉，避免界面继续显示旧结论；``usage_json``
+        保留（可能已计费），任务累计用量仍从任务记录累加。
+        """
+        with self._connect() as db:
+            cursor = db.execute(
+                """
+                UPDATE task_items SET
+                    state='queued', error='', error_category='', attempt_count=0,
+                    annotation_id=NULL, started_at=NULL, finished_at=NULL,
+                    phase='', worker_slot=0, worker_model_key='', worker_model_name='',
+                    supervisor_decision='', supervisor_attempts=0, supervisor_reason='',
+                    supervisor_usage_json='{}', candidate_json='{}',
+                    txt_path='', txt_state='', txt_chars=0
+                  WHERE task_id=? AND state<>'succeeded'
+                """,
+                (task_id,),
+            )
+            return int(cursor.rowcount or 0)
+
     def get_item(self, task_id: str, item_id: str) -> dict[str, Any] | None:
         """按任务 + 项 ID 取一行（TXT 内容/状态接口用，不扫全表）。"""
         with self._connect() as db:

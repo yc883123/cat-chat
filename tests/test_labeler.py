@@ -802,6 +802,99 @@ class LabelerRunnerTests(unittest.TestCase):
         self.assertEqual(self.db.counts(new_task["id"])["total"], 1)
         self.assertEqual(self.db.list_items(new_task["id"])[0]["name"], self.images[0].name)
 
+    def test_resume_candidate_matches_reuploaded_folder(self):
+        """重新拖入同一文件夹后，按原图身份认出上次批次，续跑跳过已成功的图。"""
+        calls = {"n": 0}
+
+        def behavior(profile, messages, options, status):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("401 unauthorized: invalid api key")
+            return '{"tags":[{"tag":"cat","confidence":0.9}],"description":""}'
+
+        app = self._make_app(_StubModels(behavior))
+        images = self.images[:2]
+        digests = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in images}
+        refs = [
+            {"path": str(path), "name": path.name, "relative_path": f"d/{path.name}",
+             "original_sha256": digests[path]}
+            for path in images
+        ]
+        jobs = self._jobs(app)
+        task = jobs.submit({"image_refs": refs, "config": _base_config(retry_limit=0)})
+        first = self._wait(task["id"])
+        self.assertEqual(first["status"], "done")
+        self.assertIn("失败", str(first.get("detail") or ""))
+        counts = self.db.counts(task["id"])
+        self.assertEqual((counts["done"], counts["failed"]), (1, 1))
+        # 模拟重新拖入同一文件夹：字节一样，缓存路径和文件名都变了。
+        reuploads = []
+        for path in images:
+            copy = path.with_name(f"naiba_chat_new_{path.name}")
+            copy.write_bytes(path.read_bytes())
+            reuploads.append(copy)
+        new_refs = validate_image_refs(self.data_dir, [
+            {"path": str(path), "name": path.name, "relative_path": f"d/{images[index].name}",
+             "original_sha256": digests[images[index]]}
+            for index, path in enumerate(reuploads)
+        ])
+        candidate = jobs.resume_candidate(new_refs)
+        self.assertEqual(candidate["task"]["id"], task["id"])
+        self.assertEqual(candidate["skipped_succeeded"], 1)
+        self.assertEqual(candidate["pending"], 1)
+        resumed = jobs.resume_task(task["id"])
+        self.assertEqual(resumed["id"], task["id"], "续跑不新建批次")
+        self.assertTrue(resumed["resumed"])
+        state = self._wait(task["id"])
+        self.assertEqual(state["status"], "done")
+        self.assertEqual(self.db.counts(task["id"])["done"], 2)
+        self.assertEqual(calls["n"], 3, "已成功的那张不重复调用")
+        self.assertEqual(len(self.store.list_tasks(limit=10)), 1, "批次列表不多一条")
+
+    def test_resume_candidate_rejects_other_folder(self):
+        app = self._make_app()
+        images = self.images[:1]
+        digest = hashlib.sha256(images[0].read_bytes()).hexdigest()
+        jobs, task = self._submit(app, images=images)
+        self._wait(task["id"])
+        # 同一张图放到别的相对路径下：不算同一批，避免误续。
+        refs = validate_image_refs(self.data_dir, [{
+            "path": str(images[0]), "name": images[0].name,
+            "relative_path": "other/a0.png", "original_sha256": digest,
+        }])
+        self.assertIsNone(jobs.resume_candidate(refs)["task"])
+
+    def test_resume_uncertain_requires_confirm(self):
+        app = self._make_app()
+        _, task = self._submit(app, images=self.images[:2])
+        self._wait(task["id"])
+        items = self.db.list_items(task["id"])
+        # 真实的中断现场：请求发出、结果没落库，所以没有标注行。
+        with self.db._connect() as db:
+            db.execute("UPDATE task_items SET state='uncertain', annotation_id=NULL "
+                       "WHERE task_id=? AND ordinal=1", (task["id"],))
+            db.execute("DELETE FROM annotations WHERE item_id=?", (items[1]["item_id"],))
+        self.store.update_task(task["id"], status="interrupted")
+        jobs = self._jobs(app)
+        calls_before = len(app.models.calls)
+        with self.assertRaises(LabelerTaskError):
+            jobs.resume_task(task["id"])
+        self.assertEqual(self.store.get_task(task["id"])["status"], "interrupted",
+                         "未确认时不能动任务状态")
+        resumed = jobs.resume_task(task["id"], confirm_uncertain=True)
+        self.assertEqual(resumed["id"], task["id"])
+        state = self._wait(task["id"])
+        self.assertEqual(state["status"], "done")
+        self.assertEqual(self.db.counts(task["id"])["done"], 2)
+        self.assertEqual(len(app.models.calls), calls_before + 1, "只重打不确定的那一张")
+
+    def test_resume_refuses_completed_task(self):
+        app = self._make_app()
+        jobs, task = self._submit(app, images=self.images[:1])
+        self._wait(task["id"])
+        with self.assertRaises(LabelerTaskError):
+            jobs.resume_task(task["id"])
+
     def test_usage_accumulator_ignores_non_numeric(self):
         merged = aggregate_usage({"total_tokens": 3}, {"total_tokens": 2, "model": "x"})
         self.assertEqual(merged["total_tokens"], 5)
@@ -2577,6 +2670,64 @@ class LabelerTxtServiceTests(unittest.TestCase):
         result = self.service.jobs.delete_tasks([state["id"]])
         self.assertEqual(result["deleted"], 1)
         self.assertFalse(outputs.exists())
+
+
+class LabelerResumeServiceTests(unittest.TestCase):
+    """「开始打标」接着上次批次：候选查找与续跑接口。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name)
+        self.uploads = self.data_dir / "uploads"
+        self.image = _write_png(self.uploads / "d" / "a0.png")
+        self.app = _StubApp(self.data_dir)
+        self.service = LabelerService(self.app)
+        self.addCleanup(self.service.shutdown)
+
+    def _wait(self, task_id, timeout=10.0):
+        deadline = time.time() + timeout
+        state = None
+        while time.time() < deadline:
+            state = self.service.store.get_task(task_id)
+            if state and state.get("status") in {"done", "failed", "cancelled", "interrupted"}:
+                return state
+            time.sleep(0.02)
+        return state
+
+    def test_candidate_then_resume_endpoint(self):
+        calls = {"n": 0}
+
+        def behavior(profile, messages, options, status):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("401 unauthorized: invalid api key")
+            return '{"tags":[{"tag":"cat","confidence":0.9}],"description":""}'
+
+        self.app.models.behavior = behavior
+        digest = hashlib.sha256(self.image.read_bytes()).hexdigest()
+        ref = {"path": str(self.image), "name": self.image.name,
+               "relative_path": "d/a0.png", "original_sha256": digest}
+        task = self.service.jobs.submit({"image_refs": [ref], "config": _base_config(retry_limit=0)})
+        first = self._wait(task["id"])
+        self.assertEqual(self.service.db.counts(task["id"])["failed"], 1)
+        # 重新拖入同一文件夹：内容一样，缓存文件换了名字。
+        copy = self.image.with_name("naiba_chat_new_a0.png")
+        copy.write_bytes(self.image.read_bytes())
+        new_ref = {"path": str(copy), "name": copy.name,
+                   "relative_path": "d/a0.png", "original_sha256": digest}
+        payload, status = self.service.api_resume_candidate({"image_refs": [new_ref]})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["task"]["id"], task["id"])
+        payload, status = self.service.api_resume(task["id"], {"confirm_uncertain": False})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["task"]["id"], task["id"])
+        self.assertEqual(payload["skipped_succeeded"], 0)
+        self.assertEqual(self._wait(task["id"])["status"], "done")
+        self.assertEqual(self.service.db.counts(task["id"])["done"], 1)
+        self.assertEqual(len(self.service.store.list_tasks(limit=10)), 1)
+        self.assertGreaterEqual(calls["n"], 2, "失败的那张重新调用了一次")
+        self.assertEqual(first["id"], task["id"])
 
 
 if __name__ == "__main__":

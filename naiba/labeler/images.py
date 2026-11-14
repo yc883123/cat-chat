@@ -180,3 +180,51 @@ def stable_item_id(task_id: str, path_key: str, content_version_value: str) -> s
         f"{task_id}\0{path_key}\0{content_version_value}".encode("utf-8")
     ).hexdigest()
     return f"it-{digest[:20]}"
+
+
+def validate_resume_refs(data_dir: Path, refs: Any) -> list[dict[str, Any]]:
+    """续跑匹配用的轻量引用校验：只认受管 uploads 里的真实文件，不解码图片。
+
+    这个接口只读、不写盘也不建任务；真正的提交仍走 ``validate_image_refs``
+    的完整解码校验。避免「开始打标」为了找上次批次把整批图再解码一遍。
+    """
+    if refs is None:
+        return []
+    if not isinstance(refs, list):
+        raise LabelerImageError("image_refs 必须是数组")
+    if not refs:
+        raise LabelerImageError("请先选择要打标的图片")
+    if len(refs) > MAX_BATCH_IMAGES:
+        raise LabelerImageError(
+            f"每批最多 {MAX_BATCH_IMAGES} 张图片，请拆成多批后重试（本次 {len(refs)} 张）"
+        )
+    out: list[dict[str, Any]] = []
+    for index, ref in enumerate(refs, 1):
+        label = f"图{index}"
+        if not isinstance(ref, dict):
+            raise LabelerImageError(f"{label}引用结构非法")
+        raw_path = str(ref.get("path") or "").strip()
+        if not raw_path:
+            raise LabelerImageError(f"{label}缺少文件路径")
+        try:
+            path = Path(raw_path).expanduser().resolve()
+        except (OSError, ValueError) as exc:
+            raise LabelerImageError(f"{label}路径无效：{exc}") from exc
+        if not is_uploads_path(data_dir, path):
+            raise LabelerImageError(f"{label}不在受管上传目录内，已拒绝")
+        try:
+            stat = path.stat()
+        except OSError:
+            raise LabelerImageError(f"{label}缓存文件不存在") from None
+        if not path.is_file() or stat.st_size <= 0:
+            raise LabelerImageError(f"{label}缓存文件不存在")
+        name = str(ref.get("name") or path.name).strip()[:NAME_MAX] or path.name
+        relative = _clean_relative_path(ref.get("relative_path")) or name
+        out.append({
+            "path": str(path),
+            "name": name,
+            "relative_path": relative[:RELATIVE_PATH_MAX],
+            "original_sha256": normalize_digest(ref.get("original_sha256")),
+            "size": int(stat.st_size),
+        })
+    return out

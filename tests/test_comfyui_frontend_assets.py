@@ -1021,6 +1021,11 @@ assert.equal(toggle.checked,false,'成功后复位，不受批量草稿影响');
         # 批量完成态与单次结果共用同一张产物卡：视频能播、竖屏按比例显示。
         self.assertIn("function mountBatchItemPreviews()", js)
         self.assertIn("data-batch-preview-task", js)
+        # 一条任务多段产物：整条列表都交给挂载函数，不能只画 outputs[0]。
+        self.assertIn("data-batch-preview-outputs", js)
+        self.assertIn('JSON.parse(host.dataset.batchPreviewOutputs || "[]")', js)
+        self.assertIn('host.classList.toggle("is-gallery", gallery)', js)
+        self.assertIn(".cbm-card-preview.is-gallery", css)
         self.assertIn('batchHost.addEventListener("click", onOutputGridClick)', js)
         self.assertIn('for (const selector of ["#comfyuiBatchBody", "#comfyuiBatchDetail"])', js)
         self.assertIn("function batchRunSignature(", js)

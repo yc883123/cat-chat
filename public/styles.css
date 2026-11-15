@@ -7099,6 +7099,23 @@ span.sa-thumb.kind-doc { background: linear-gradient(135deg, #9AA6C4, #6D7BA6); 
 .cbm-card-preview .comfyui-output audio { width: 100%; }
 .cbm-card-preview .comfyui-output figcaption { display: none; }
 .cbm-preview-play { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 46px; height: 46px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 50%; background: rgba(10, 10, 24, .62); color: #fff; font-size: 18px; line-height: 1; cursor: pointer; z-index: 1; }
+/* 一条任务出了多段产物：全部铺进网格，一张不少；单产物仍走上面的居中大图口径。
+   轨道固定 104px：一个条目 2 张还是 3 张，缩略图大小一致，不留拉伸出来的空格子。 */
+.cbm-card-preview.is-gallery {
+  display: grid; grid-template-columns: repeat(auto-fill, 104px);
+  gap: 6px; padding: 6px; justify-content: start; align-items: start;
+}
+.cbm-card-preview.is-gallery .comfyui-output { width: 100%; min-width: 0; }
+.cbm-card-preview.is-gallery .comfyui-output img,
+.cbm-card-preview.is-gallery .comfyui-output video {
+  width: 100%; height: 140px; max-height: 140px; object-fit: contain;
+  cursor: zoom-in;
+}
+.cbm-card-preview.is-gallery .comfyui-output video {
+  min-height: 0; cursor: default; border-radius: 6px; background: #000;
+}
+.cbm-card-preview.is-gallery .comfyui-output-preview { display: none; }
+.cbm-card-preview.is-gallery .cbm-preview-play { width: 34px; height: 34px; font-size: 14px; }
 .cbm-preview-play:hover, .cbm-preview-play:focus-visible { background: rgba(10, 10, 24, .82); }
 .cbm-card-foot { padding: 8px 12px; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 38px; }
 .cbm-card-foot .cbm-err { color: var(--danger); flex: 1; min-width: 0; }

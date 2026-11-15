@@ -5975,10 +5975,12 @@ function batchRunCardMarkup(item) {
   const taskRef = String(item.task_id || "");
   // 完成态预览不再自己画缩略图：挂一个占位，渲染后塞单次结果同款产物卡，
   // 图片/视频/音频的尺寸、灯箱和播放器全部与单次结果一致。
+  // 一条任务可能有多段产物（多张图 / 多段视频）：整条列表都交给挂载函数，
+  // 不能只留 outputs[0]，否则「3 个产物」的卡片永远只看得见一张。
   let preview = "";
   if (status === "completed") {
     preview = first
-      ? `<div class="cbm-card-preview" data-batch-preview-task="${escapeAttribute(taskRef)}" data-batch-preview-name="${escapeAttribute(first)}" data-comfyui-preview-key="${escapeAttribute(JSON.stringify([taskRef, String(first)]))}" data-comfyui-preview-url="${escapeAttribute(outputFileUrl(taskRef, first))}" data-comfyui-preview-kind="${escapeAttribute(mediaKind(first, first))}" data-comfyui-preview-name="${escapeAttribute(first)}"></div>`
+      ? `<div class="cbm-card-preview" data-batch-preview-task="${escapeAttribute(taskRef)}" data-batch-preview-name="${escapeAttribute(first)}" data-batch-preview-outputs="${escapeAttribute(JSON.stringify(outputs.map(String)))}" data-comfyui-preview-key="${escapeAttribute(JSON.stringify([taskRef, String(first)]))}" data-comfyui-preview-url="${escapeAttribute(outputFileUrl(taskRef, first))}" data-comfyui-preview-kind="${escapeAttribute(mediaKind(first, first))}" data-comfyui-preview-name="${escapeAttribute(first)}"></div>`
       : '<div class="cbm-card-thumb skel"><span class="cbm-card-skel-text">已完成，没有产物</span></div>';
   } else {
     let thumb;
@@ -6042,8 +6044,11 @@ function batchPreviewVideoPreload(host) {
       img.src = img.dataset.comfyuiLazySrc;
       delete img.dataset.comfyuiLazySrc;
     });
+    // 多产物卡片里视频可能好几段：不预读元数据（一次批量会并发几十个 Range），
+    // 保留 preload=none，等用户点中间的播放入口再真正拉流。
+    const gallery = target.classList?.contains("is-gallery");
     target.querySelectorAll?.("video").forEach((video) => {
-      if (video.preload === "none") video.preload = "metadata";
+      if (!gallery && video.preload === "none") video.preload = "metadata";
     });
   };
   if (typeof IntersectionObserver === "undefined") { load(host); return; }
@@ -6067,28 +6072,39 @@ function mountBatchItemPreviews() {
 
 function mountBatchPreview(host) {
     const taskId = String(host.dataset.batchPreviewTask || "");
-    const name = String(host.dataset.batchPreviewName || "");
+    const fallback = String(host.dataset.batchPreviewName || "");
+    let outputs = [];
+    try {
+      const parsed = JSON.parse(host.dataset.batchPreviewOutputs || "[]");
+      if (Array.isArray(parsed)) outputs = parsed.map((item) => String(item || "")).filter(Boolean);
+    } catch {
+      outputs = [];
+    }
+    if (!outputs.length && fallback) outputs = [fallback];
     host.textContent = "";
-    if (!taskId || !name) return;
-    host.append(renderOutputCard(taskId, name, ""));
-    // 单次结果为了省带宽用 preload=none；批量卡片只预览第一条，等卡片进入
-    // 视野再读元数据，按竖屏/横屏的真实比例显示，也不并发拉整批视频。
-    const video = host.querySelector("video");
-    if (!video) return;
-    // 视频中间给一个真正的播放入口：点一下就开始，不要求用户去点控制条。
-    const figure = host.querySelector(".comfyui-output") || host;
-    const play = document.createElement("button");
-    play.type = "button";
-    play.className = "cbm-preview-play";
-    play.setAttribute("aria-label", "播放视频");
-    play.textContent = "▶";
-    play.addEventListener("click", (event) => {
-      event.stopPropagation();
-      play.remove();
-      void video.play();
-    });
-    video.addEventListener("play", () => play.remove(), { once: true });
-    figure.append(play);
+    if (!taskId || !outputs.length) return;
+    // 多个产物全部铺成网格；只有一个产物时保持原来的大图/播放器口径。
+    const gallery = outputs.length > 1;
+    host.classList.toggle("is-gallery", gallery);
+    for (const outputName of outputs) {
+      const figure = renderOutputCard(taskId, outputName, "");
+      host.append(figure);
+      const video = figure.querySelector("video");
+      if (!video) continue;
+      // 视频中间给一个真正的播放入口：点一下就开始，不要求用户去点控制条。
+      const play = document.createElement("button");
+      play.type = "button";
+      play.className = "cbm-preview-play";
+      play.setAttribute("aria-label", "播放视频");
+      play.textContent = "▶";
+      play.addEventListener("click", (event) => {
+        event.stopPropagation();
+        play.remove();
+        void video.play();
+      });
+      video.addEventListener("play", () => play.remove(), { once: true });
+      figure.append(play);
+    }
 }
 
 // 条目「打开文件夹」：定位这一条自己的产物目录（不是产物根目录，也不展开产物列表）。

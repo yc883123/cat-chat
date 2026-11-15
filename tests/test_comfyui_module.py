@@ -2222,6 +2222,176 @@ class ServiceApiTests(unittest.TestCase):
         )
 
 
+class TaskOutputsOpenRouteTests(unittest.TestCase):
+    """/outputs/open 是两段固定后缀，路由必须把路径里的任务 id 传下去。
+
+    以前按 /cancel 的写法取 ``split("/")[-2]``，拿到的是 "outputs"，
+    真实任务也会被当成「任务记录不存在或已被删除」。
+    """
+
+    def test_route_forwards_the_task_id_not_the_outputs_segment(self):
+        from naiba.http import AppHTTPServer, RequestHandler
+        from types import SimpleNamespace
+
+        seen: list[str] = []
+
+        class _Comfy:
+            def api_reveal_task_outputs(_self, task_id):
+                seen.append(task_id)
+                return {"ok": True, "path": "x"}, 200
+
+        app = SimpleNamespace(
+            config=SimpleNamespace(data={"access_token": "token"}),
+            comfyui=_Comfy(),
+        )
+        server = AppHTTPServer(("127.0.0.1", 0), RequestHandler, app)
+        server.daemon_threads = True
+        thread = threading.Thread(
+            target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        thread.start()
+
+        def stop() -> None:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+        self.addCleanup(stop)
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_address[1]}"
+            "/api/comfyui/tasks/cf-20261115-abc123/outputs/open",
+            data=b"{}", headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(seen, ["cf-20261115-abc123"])
+
+
+class FolderOpenForegroundTests(unittest.TestCase):
+    """打开产物目录后把 Explorer 窗口带到前台（Windows 前台锁的规避）。
+
+    真实的前台锁行为靠真桌面复现（打开时已有 Explorer 窗口，新窗口只在
+    任务栏闪一下）；这里守两件能确定的事：从「打开前后的窗口差异」里认出
+    这一次的窗口，以及 AttachThreadInput 失败时注入 ALT 再抢一次。
+    """
+
+    def test_picks_the_newly_opened_window(self):
+        from naiba.core import shell_open
+
+        before = {1: "旧的 - 文件资源管理器"}
+        windows = [
+            before,
+            before,
+            {1: "旧的 - 文件资源管理器", 2: "multi - 文件资源管理器"},
+        ]
+        with mock.patch.object(shell_open, "_explorer_windows", side_effect=windows):
+            self.assertEqual(
+                shell_open._wait_for_opened_window(before, "multi", timeout=1.0), 2)
+
+    def test_falls_back_to_window_that_changed_title(self):
+        from naiba.core import shell_open
+
+        # Windows 11 可以在已有窗口里开新标签页：句柄不变，标题换成新目录。
+        before = {1: "旧的 - 文件资源管理器"}
+        calls = {"n": 0}
+
+        def windows():
+            calls["n"] += 1
+            return before if calls["n"] == 1 else {1: "multi - 文件资源管理器"}
+
+        with mock.patch.object(shell_open, "_explorer_windows", side_effect=windows):
+            self.assertEqual(
+                shell_open._wait_for_opened_window(before, "multi", timeout=0.2), 1)
+
+    def test_returns_zero_when_nothing_matches(self):
+        from naiba.core import shell_open
+
+        before = {1: "旧的 - 文件资源管理器"}
+        with mock.patch.object(shell_open, "_explorer_windows", return_value=before):
+            self.assertEqual(
+                shell_open._wait_for_opened_window(before, "multi", timeout=0), 0)
+
+    def test_activation_injects_alt_when_foreground_is_another_process(self):
+        import ctypes
+        from naiba.core import shell_open
+
+        class _FakeUser32:
+            def __init__(self):
+                self.foreground = 9
+                self.unlocked = False
+                self.key_events = []
+                self.GetForegroundWindow = mock.Mock(side_effect=lambda: self.foreground)
+                self.ShowWindow = mock.Mock()
+                self.BringWindowToTop = mock.Mock()
+                self.GetWindowThreadProcessId = mock.Mock(return_value=222)
+                self.AttachThreadInput = mock.Mock(return_value=1)
+                self.SetForegroundWindow = mock.Mock(side_effect=self._set_foreground)
+                self.keybd_event = mock.Mock(side_effect=self._press_alt)
+                self.SwitchToThisWindow = mock.Mock()
+
+            def _set_foreground(self, hwnd):
+                # 前台锁：只有注入过输入事件才允许切前台（模拟 Win11 实测行为）。
+                if not self.unlocked:
+                    return 0
+                self.foreground = hwnd
+                return 1
+
+            def _press_alt(self, vk, _scan, flags, _extra):
+                self.key_events.append((vk, flags))
+                self.unlocked = True
+
+        fake = _FakeUser32()
+        fake_k32 = mock.Mock()
+        fake_k32.GetCurrentThreadId.return_value = 111
+        with mock.patch.object(shell_open, "_user32", return_value=fake), \
+                mock.patch.object(ctypes.windll, "kernel32", fake_k32, create=True):
+            self.assertTrue(shell_open._activate_window(42))
+        self.assertEqual(fake.foreground, 42)
+        self.assertEqual(fake.SetForegroundWindow.call_count, 2)
+        self.assertEqual(fake.key_events, [(shell_open._VK_MENU, 0),
+                                           (shell_open._VK_MENU, shell_open._KEYEVENTF_KEYUP)])
+
+    def test_activation_returns_early_when_window_is_already_foreground(self):
+        from naiba.core import shell_open
+
+        fake = mock.Mock()
+        fake.GetForegroundWindow.return_value = 42
+        with mock.patch.object(shell_open, "_user32", return_value=fake):
+            self.assertTrue(shell_open._activate_window(42))
+        fake.SetForegroundWindow.assert_not_called()
+        fake.keybd_event.assert_not_called()
+
+    def test_activation_failure_is_swallowed(self):
+        from naiba.core import shell_open
+
+        with mock.patch.object(shell_open, "_wait_for_opened_window", return_value=42), \
+                mock.patch.object(shell_open, "_activate_window",
+                                  side_effect=OSError("前台激活失败")):
+            shell_open._activate_opened_explorer({}, "multi")  # 不应抛异常
+
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows 文件管理器专用")
+    def test_open_folder_snapshots_windows_then_activates(self):
+        from naiba.core import shell_open
+
+        seen: dict = {}
+        done = threading.Event()
+
+        def activate(before, name):
+            seen["before"] = before
+            seen["name"] = name
+            done.set()
+
+        with mock.patch.object(shell_open, "_explorer_windows",
+                               return_value={7: "旧的 - 文件资源管理器"}), \
+                mock.patch.object(shell_open.os, "startfile", create=True) as startfile, \
+                mock.patch.object(shell_open, "_activate_opened_explorer",
+                                  side_effect=activate):
+            shell_open.open_folder(Path("C:/tmp/multi"))
+        self.assertTrue(done.wait(2), "激活线程没有启动")
+        startfile.assert_called_once_with(str(Path("C:/tmp/multi")))
+        self.assertEqual(seen["before"], {7: "旧的 - 文件资源管理器"})
+        self.assertEqual(seen["name"], "multi")
+
+
 class MediaGroupCardTests(unittest.TestCase):
     """造梦机媒体输入「按类型分组卡片 + 拖拽」（2026-10-26 计划 §5 自动化）。
 

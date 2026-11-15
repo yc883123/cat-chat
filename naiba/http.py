@@ -1163,7 +1163,10 @@ class RequestHandler(BaseHTTPRequestHandler):
                     HTTPStatus.FORBIDDEN,
                 )
             else:
-                self._json(*self.app.comfyui.api_reveal_task_outputs(path.split("/")[-2]))
+                # 固定两段后缀（/outputs/open）不能像 /cancel 那样取 [-2]，
+                # 否则拿到的是 "outputs"，任务永远查不到。
+                task_id = path[len("/api/comfyui/tasks/"):-len("/outputs/open")].strip("/")
+                self._json(*self.app.comfyui.api_reveal_task_outputs(task_id))
         elif path == "/api/comfyui/free":
             # 造梦机：请求 ComfyUI 卸载模型释放显存/内存（不打断执行中的任务）。
             self._json(*self.app.comfyui.api_free_models())

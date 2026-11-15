@@ -34,8 +34,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
-import sys
 import threading
 import time
 import uuid
@@ -43,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from naiba.core import novel_split
+from naiba.core.shell_open import open_folder
 from naiba.core.contracts import (
     WORK_GLOBAL_SYSTEM_PROMPT_KEY, WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY,
     STORYBOARD_PROMPT_CONFIG_KEY, NOVEL_SCRIPT_VERSION_KEY,
@@ -2753,12 +2752,7 @@ class NovelService:
         target = self.store.root().resolve()
         try:
             target.mkdir(parents=True, exist_ok=True)
-            if sys.platform.startswith("win"):
-                os.startfile(str(target))  # type: ignore[attr-defined]  # 仅 Windows 有
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", str(target)])
-            else:
-                subprocess.Popen(["xdg-open", str(target)])
+            open_folder(target)
         except OSError as exc:
             return {"error": f"无法打开保存位置：{exc}"}, 500
         return {"ok": True, "path": str(target)}, 200

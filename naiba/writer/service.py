@@ -9,8 +9,6 @@ HTTP 层只做转发与错误映射（照 `naiba/novel/service.py` 的口径）�
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +16,7 @@ from naiba.core.contracts import (
     WRITER_CHAPTER_BASELINE_KEY, WORK_GLOBAL_SYSTEM_PROMPT_KEY,
     WORK_GLOBAL_SYSTEM_PROMPT_REVISION_KEY,
 )
+from naiba.core.shell_open import open_folder
 from naiba.writer import coherence
 from naiba.writer import prompts
 from naiba.writer.pipeline import WriterPipelineManager, WriterPipelineError
@@ -736,12 +735,7 @@ class WriterService:
         target = self.store.root().resolve()
         try:
             target.mkdir(parents=True, exist_ok=True)
-            if sys.platform.startswith("win"):
-                os.startfile(str(target))  # type: ignore[attr-defined]  # 仅 Windows 有
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", str(target)])
-            else:
-                subprocess.Popen(["xdg-open", str(target)])
+            open_folder(target)
         except OSError as exc:
             return {"error": f"无法打开保存位置：{exc}"}, 500
         return {"ok": True, "path": str(target)}, 200

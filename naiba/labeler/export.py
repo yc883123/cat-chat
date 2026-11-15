@@ -20,15 +20,13 @@ import csv
 import hashlib
 import io
 import json
-import os
 import re
-import subprocess
-import sys
 import time
 import zipfile
 from pathlib import Path
 from typing import Any
 
+from naiba.core.shell_open import open_folder
 from naiba.labeler.originals import normalize_digest, original_path
 
 FORMATS = ("json", "csv", "txt", "captions", "lora")
@@ -39,12 +37,7 @@ _PACKAGE_EXT_RE = re.compile(r"^\.[a-z0-9]{2,8}$")
 
 def _open_folder(target: Path) -> None:
     """用系统文件管理器打开目录（单拆出来便于测试打桩）。"""
-    if sys.platform.startswith("win"):
-        os.startfile(str(target))  # type: ignore[attr-defined]  # 仅 Windows 有
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", str(target)])
-    else:
-        subprocess.Popen(["xdg-open", str(target)])
+    open_folder(target)
 
 
 def open_managed_dir(directory: Path) -> str:

@@ -10,10 +10,7 @@ import copy
 import hashlib
 import json
 import math
-import os
 import re
-import subprocess
-import sys
 import time
 import urllib.parse
 from pathlib import Path
@@ -35,6 +32,7 @@ from naiba.comfyui.runner import ComfyUIRunner
 from naiba.comfyui.schema import NodeSchemaProvider
 from naiba.comfyui.store import ComfyUIStore, ComfyUIStoreError
 from naiba.core.contracts import COMFYUI_HISTORY_MISSING_IDS_KEY
+from naiba.core.shell_open import open_folder
 
 # 工作流 JSON 上限（对齐聊天域 _load_comfyui_workflow 的 20 MB 文件上限）。
 WORKFLOW_MAX_BYTES = 20 * 1024 * 1024
@@ -63,13 +61,8 @@ def normalize_api_workflow(value: Any) -> dict[str, Any]:
 
 
 def _open_folder(target: Path) -> None:
-    """用系统文件管理器打开目录（单拆出来便于测试打桩，与打标器同实现）。"""
-    if sys.platform.startswith("win"):
-        os.startfile(str(target))  # type: ignore[attr-defined]  # 仅 Windows 有
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", str(target)])
-    else:
-        subprocess.Popen(["xdg-open", str(target)])
+    """用系统文件管理器打开目录（单拆出来便于测试打桩）。"""
+    open_folder(target)
 
 
 class ComfyUIService:

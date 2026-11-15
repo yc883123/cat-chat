@@ -46,7 +46,7 @@ const STUDIO_TASKS_URL = "/api/studio/tasks?exclude_modules=novel,writer";
 // 标题区最近任务捷径固定最多 3 条；完整列表走侧栏「历史产出」。
 const RECENT_TASK_LIMIT = 3;
 // 列表接口自身最多返回 60 条；这是展示范围提示，不是分页参数。
-const HISTORY_RANGE_HINT = "最近任务，最多显示 60 条";
+const HISTORY_RANGE_HINT = "本页最近任务，最多显示 60 条";
 
 // 参考图片：与聊天输入区的待发送附件完全独立（Studio 自己的附件状态）。
 const STUDIO_IMAGE_MAX = 6;
@@ -260,6 +260,8 @@ function setPromptSource(source, { persist = true, reconcile = true, restoreSele
   renderImagePreview();
   renderResultPanel(draft.lastResult || { status: "", input: {} });
   setResultMode(draft.resultMode || "result");
+  // 最近任务 / 历史产出按分页来源过滤；同一模式在两页都成立时 setResultMode 不会重画历史列表。
+  if (studio.resultMode === "history") renderHistoryList();
   // 换来源先收起追问面板：上一条结果属于另一个来源，别让「沿用本次规则」指向它。
   collapseStudioFollowup();
   if (persist) void saveStudioPrefs({ prompt_source: next });
@@ -277,7 +279,7 @@ function renderSkillHistory() {
   const heading = document.createElement("strong");
   heading.textContent = "最近生成";
   container.append(heading);
-  const tasks = studio.tasks.filter((task) => (task.prompt_source || task.input?.prompt_source) === "skill");
+  const tasks = (studio.tasks || []).filter((task) => taskPromptSource(task) === "skill");
   for (const task of tasks) {
     const button = document.createElement("button");
     button.type = "button";
@@ -2135,6 +2137,7 @@ function renderResultPanel(task) {
   if (cancelBtn) cancelBtn.hidden = !running;
   if (retryBtn) retryBtn.hidden = !["failed", "cancelled", "interrupted"].includes(task.status);
   if (handoffBtn) handoffBtn.hidden = task.status !== "done" || !task.result;
+  syncResultMenu();
   if (locateBtn) {
     const input = task.input || {};
     locateBtn.hidden = !(input.item_id || input.custom_id);
@@ -2152,6 +2155,18 @@ function renderResultPanel(task) {
     const chip = $("#studioHandoffChip");
     if (chip) chip.textContent = "已交接";
   }
+}
+
+// 「⋯」当前只有「发送到对话」一项：它在失败/取消/进行中都会被隐藏，菜单就只剩一个
+// 空的白框，展开后正好盖住下面的失败原因（用户看到「点了什么都看不见」）。
+// 没有可点项时把整枚菜单收掉并合上；将来加条目时这里按实际可见项判断，不用改调用方。
+function syncResultMenu() {
+  const menu = document.querySelector(".studio-result-menu");
+  if (!menu) return;
+  const items = Array.from(menu.querySelectorAll(".wb-media-menu-panel .control-button"));
+  const hasItems = items.some((item) => !item.hidden);
+  menu.hidden = !hasItems;
+  if (!hasItems) menu.open = false;
 }
 
 // ============================================================
@@ -2176,6 +2191,18 @@ async function refreshTasks({ syncHistory = false } = {}) {
   // 后台轮询/任务完成只更新标题区捷径与缓存，不覆盖用户正在浏览的历史列表；
   // 只有显式刷新（进入工作台、提交、重试）才同步列表。
   if (syncHistory && studio.resultMode === "history") renderHistoryList();
+}
+
+// 任务来源：列表接口把 prompt_source 提升到顶层，单任务仍在 input 里；旧任务按模板处理。
+function taskPromptSource(task) {
+  const source = task?.prompt_source || task?.input?.prompt_source;
+  return source === "skill" ? "skill" : "template";
+}
+
+// 结果栏（最近任务 / 历史产出）只列当前分页的来源：点条目不会再把人从模板页带到 Skill 页。
+// 两页各自保留草稿、当前结果和追问，列表跟着分页走，「点哪条就在哪页看」才成立。
+function currentSourceTasks() {
+  return (studio.tasks || []).filter((task) => taskPromptSource(task) === studio.promptSource);
 }
 
 function taskTitle(task) {
@@ -2258,7 +2285,7 @@ function renderRecentTasks() {
     wrap.hidden = true;
     return;
   }
-  const recent = [...(studio.tasks || [])]
+  const recent = [...currentSourceTasks()]
     .sort((a, b) => Number(b.created_at || 0) - Number(a.created_at || 0))
     .slice(0, RECENT_TASK_LIMIT);
   if (!recent.length) {
@@ -2350,17 +2377,17 @@ function renderHistoryList() {
     wrap.replaceChildren(historyNotice("正在读取历史产出…"));
     return;
   }
-  const tasks = studio.tasks || [];
+  const tasks = currentSourceTasks();
   const nodes = [];
   if (studio.historyState === "error") {
-    nodes.push(historyErrorPanel());
+    nodes.push(historyErrorPanel(tasks.length));
     if (!tasks.length) {
       wrap.replaceChildren(...nodes);
       return;
     }
   }
   if (!tasks.length) {
-    nodes.push(emptyListPanel("还没有历史产出", "回到参数档写下你的需求，生成结果会留在这里。"));
+    nodes.push(emptyListPanel("本页还没有历史产出", "回到参数档写下你的需求，生成结果会留在这里。"));
     wrap.replaceChildren(...nodes);
     return;
   }
@@ -2375,13 +2402,13 @@ function historyNotice(text) {
   return p;
 }
 
-function historyErrorPanel() {
+function historyErrorPanel(taskCount) {
   const panel = document.createElement("div");
   panel.className = "studio-history-error";
   const strong = document.createElement("strong");
   strong.textContent = "历史产出一时读取失败";
   const detail = document.createElement("small");
-  detail.textContent = studio.tasks.length
+  detail.textContent = taskCount
     ? `${studio.tasksError || "请求失败"}。下面显示的是上次读取的结果，可能不是最新。`
     : (studio.tasksError || "请求失败。");
   const retry = document.createElement("button");
@@ -2444,7 +2471,8 @@ function historyRowContent(task, active) {
 // ---- 历史产出编辑模式（多选删除）----
 
 function selectableHistoryTasks() {
-  return (studio.tasks || []).filter(
+  // 只在本页列出的条目里全选/勾选：另一分页的任务不显示，也不能被这里的「全选」带走。
+  return currentSourceTasks().filter(
     (task) => !["queued", "running"].includes(String(task.status || "")),
   );
 }
@@ -2573,7 +2601,7 @@ async function pickStudioTask(taskId) {
     const { task } = await api(`/api/studio/tasks/${taskId}`);
     if (token !== studio.taskToken || viewToken !== studio.viewToken) return;
     discardStudioImageDialog();
-    const source = task.input?.prompt_source === "skill" ? "skill" : "template";
+    const source = taskPromptSource(task);
     if (source !== studio.promptSource) {
       // Source changes are synchronous. No awaited work may acquire a fresh
       // token and impersonate a selection the user made later.

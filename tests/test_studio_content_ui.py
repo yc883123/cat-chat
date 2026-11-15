@@ -29,12 +29,14 @@ function storage() {const data=new Map();return {getItem:k=>data.get(k)||null,se
 function fixture(store=storage()) {
   const nodes=new Map(),requests=[],toasts=[],renders=[],panes=[],xhr=[];let seq=0;
   const $=selector=>{if(!nodes.has(selector))nodes.set(selector,element(selector.includes('Select')?'select':'div'));return nodes.get(selector);};
+  // 结果区「⋯」菜单：真实 DOM 里是 details + 一个可能被隐藏的「发送到对话」按钮。
+  const menu=element('details');menu.querySelectorAll=()=>[$('#studioHandoff')];
   class XHR {constructor(){this.upload={};xhr.push(this);}open(){}setRequestHeader(){}send(){}done(path){this.status=200;this.responseText=JSON.stringify({path,name:'image.png'});this.onload();}}
   const context=vm.createContext({console,Map,Set,Promise,JSON,URLSearchParams,sessionStorage:store,
     crypto:{randomUUID:()=>`key-${++seq}`},randomUuid:()=>`key-${++seq}`,$: $,api:(url,options)=>{const response=deferred();requests.push({url,options,...response});return response.promise;},
     state:{bootstrap:{settings:{studio:{}},model_profiles:[{model_key:'p1'},{model_key:'p2'}],default_model_key:'p1'}},
     toast:message=>toasts.push(message),localFileUrl:path=>path,applyModelSkinFor:()=>{},
-    document:{createElement:element,querySelector:()=>null,querySelectorAll:()=>[],body:element(),dispatchEvent(){}},
+    document:{createElement:element,createDocumentFragment:()=>element('fragment'),querySelector:selector=>selector==='.studio-result-menu'?menu:null,querySelectorAll:()=>[],body:element(),dispatchEvent(){}},
     window:{setTimeout(){},addEventListener(){},confirm:()=>true},setTimeout:()=>1,setInterval:()=>1,clearInterval(){},
     XMLHttpRequest:XHR,FormData:class{append(){}},Event:class{constructor(type){this.type=type;}},
     workbenchStatusLabel:value=>value, syncWorkbenchHeader(){},filePanelState:{open:false},setAppView(){},renderSidebar(){},
@@ -51,6 +53,9 @@ function fixture(store=storage()) {
     const actualRefreshTasks=refreshTasks;
     const actualImageRender=renderImageQueue;
     const actualSetResultMode=setResultMode;
+    const actualRecentTasks=renderRecentTasks;
+    const actualHistoryList=renderHistoryList;
+    const actualSelectableHistoryTasks=selectableHistoryTasks;
     renderStudioDetail=()=>{};applyPromptSourceUi=()=>{};renderImagePreview=()=>{};
     renderStudioCategories=()=>{};renderStudioList=async()=>{};saveStudioSelection=()=>{};
     renderSkillHistory=()=>{};renderRecentTasks=()=>{};renderHistoryList=()=>{};
@@ -66,6 +71,7 @@ function fixture(store=storage()) {
       prepareContentFollowup,getContentFollowup,clearContentFollowup,createContentSkillPicker,
       restoreStudioSelection,refreshStudio,closeStudioView,setStudioPage,renderContentThread,openHistoryList,
       model:actualSyncStudioModel,refreshTasks:actualRefreshTasks,
+      recent:actualRecentTasks,history:actualHistoryList,selectable:actualSelectableHistoryTasks,syncMenu:syncResultMenu,
       useReconcile(){reconcileActiveTask=actualReconcile;},useModels(){syncStudioModel=actualSyncStudioModel;},
       useImageRender(){renderImageQueue=actualImageRender;},
     };
@@ -77,7 +83,7 @@ function fixture(store=storage()) {
   $('#studioModelSelect').append(Object.assign(element('option'),{value:'m1'}));
   $('#studioModelSelect').value='m1';
   $('#studioUserRequest').value='需求';
-  return {p,context,$,requests,toasts,renders,panes,xhr,store};
+  return {p,context,$,requests,toasts,renders,panes,xhr,store,menu};
 }
 const task=(id,source='template',status='done')=>({id,status,result:id+'正文',input:{prompt_source:source,model_name:'m1'}});
 """
@@ -239,6 +245,37 @@ const submit=f.p.submitGenerate();f.p.closeStudioView();f.requests[2].resolve({t
 assert.notEqual(f.p.studio.activeTaskId,'late');assert.equal(f.p.studio.open,false);
 """)
 
+    def test_result_lists_only_show_tasks_from_the_current_page_source(self):
+        self.run_js(r"""
+const f=fixture();
+const t1=Object.assign(task('t1','template'),{created_at:3});
+const s1=Object.assign(task('s1','skill'),{created_at:2});
+const t2=Object.assign(task('t2','template'),{created_at:1});
+// 旧任务没有来源字段时按模板归到模板页。
+const legacy=Object.assign({id:'old',status:'done',result:'旧正文',input:{}},{created_at:0});
+Object.assign(f.p.studio,{tasks:[t1,s1,t2,legacy],promptSource:'template',resultMode:'result',activeTaskId:''});
+const ids=()=>f.$('#studioTaskHistory').children.filter(n=>n.dataset&&n.dataset.studioTask).map(n=>n.dataset.studioTask);
+f.p.recent();assert.deepEqual(ids(),['t1','t2','old'],'模板页只列模板来源（含旧任务）');
+f.p.studio.promptSource='skill';f.p.recent();assert.deepEqual(ids(),['s1'],'Skill 页只列 Skill 来源');
+f.p.studio.resultMode='history';f.p.studio.promptSource='template';f.p.history();
+assert.deepEqual(f.$('#studioHistoryList').children.filter(n=>n.dataset&&n.dataset.studioTask).map(n=>n.dataset.studioTask),['t1','t2','old']);
+assert.deepEqual(f.p.selectable().map(row=>row.id),['t1','t2','old'],'全选不能带上另一分页的任务');
+f.p.studio.promptSource='skill';f.p.history();
+assert.deepEqual(f.$('#studioHistoryList').children.filter(n=>n.dataset&&n.dataset.studioTask).map(n=>n.dataset.studioTask),['s1']);
+assert.deepEqual(f.p.selectable().map(row=>row.id),['s1']);
+""")
+
+    def test_result_menu_hides_when_its_only_action_is_unavailable(self):
+        self.run_js(r"""
+const f=fixture();
+f.$('#studioHandoff').hidden=false;f.menu.open=true;f.p.syncMenu();
+assert.equal(f.menu.hidden,false);assert.equal(f.menu.open,true,'有可点项时菜单保持原状');
+f.$('#studioHandoff').hidden=true;f.p.syncMenu();
+assert.equal(f.menu.hidden,true);assert.equal(f.menu.open,false,'失败任务的空菜单要收起并合上，不能留白框盖住失败原因');
+f.$('#studioHandoff').hidden=false;f.p.syncMenu();
+assert.equal(f.menu.hidden,false,'新任务完成后菜单恢复可用');
+""")
+
 
 class StudioWorkbenchLayoutGuardTests(unittest.TestCase):
     """提词库三处界面修复 + 追问面板收口的静态守门（运行时由 verify 探针/冒烟覆盖）。"""
@@ -258,6 +295,15 @@ class StudioWorkbenchLayoutGuardTests(unittest.TestCase):
         render = self.source[self.source.index("function renderResultPanel"):
                              self.source.index("async function refreshTasks")]
         self.assertIn("syncFollowupVisibility()", render, "结果面板仍按任务状态开合")
+
+    def test_result_menu_is_hidden_when_no_action_is_visible(self):
+        render = self.source[self.source.index("function renderResultPanel"):
+                              self.source.index("async function refreshTasks")]
+        self.assertIn("syncResultMenu();", render, "结果面板每次重画都要重新决定「⋯」是否保留")
+        sync = self.source[self.source.index("function syncResultMenu"):]
+        self.assertIn("menu.open = false", sync, "没有可点项时要合上，别留一个空面板")
+        self.assertIn(".studio-result-menu[hidden] { display: none; }", self.css,
+                      ".wb-media-menu 的 display:block 会盖过 [hidden] 默认样式，必须显式隐藏")
 
     def test_icon_button_and_long_skill_list_keep_their_geometry(self):
         # 34px 图标按钮减去文字按钮的 24px 内边距 ⇒ 16px 图标被压成 8px（时钟只剩半个）。

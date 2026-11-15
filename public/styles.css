@@ -4370,6 +4370,9 @@ html[data-chat-bg="on"] .studio-view { background: transparent; }
 .studio-task-row:hover .studio-task-open { color: var(--accent); }
 .studio-result-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px var(--s-4); border-bottom: 1px solid var(--line); }
 .studio-result-actions[hidden] { display: none; }
+/* 结果菜单没有任何可见项时（失败/取消/进行中都没有「发送到对话」）整枚收掉。
+   必须显式写：.wb-media-menu 自带 display:block，会盖过 [hidden] 的浏览器默认样式。 */
+.studio-result-menu[hidden] { display: none; }
 /* 历史产出入口：只留图案，与左右两枚文字按钮同高（min-height 34px 来自 .control-button）。 */
 .studio-icon-button {
   display: inline-flex; align-items: center; justify-content: center;

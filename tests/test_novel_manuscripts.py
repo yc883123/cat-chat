@@ -566,7 +566,7 @@ class CreativeFieldLayoutUITests(unittest.TestCase):
 
     def test_page_head_holds_global_actions_with_same_ids(self):
         page = self._page()
-        head = page[page.index('class="novel-page-head"'):]
+        head = page[page.index('class="novel-page-head '):]
         head = head[: head.index('class="novel-stagebar"')]
         self.assertNotIn("novel-breadcrumb", head, "上方已有工作台标识、下方有标题，中间不再放面包屑")
         self.assertIn('id="novelPageState"', head, "页面头要显示当前作品与阶段")
@@ -574,7 +574,7 @@ class CreativeFieldLayoutUITests(unittest.TestCase):
                       "novelExportBtn", "novelExportMenu"):
             self.assertIn(f'id="{ident}"', head, f"{ident} 应搬到页面头")
         # 导出菜单跟按钮一起进 .novel-page-actions，菜单才有正确的定位基准。
-        actions = head[head.index('class="novel-page-actions"'):]
+        actions = head[head.index('class="novel-page-actions '):]
         self.assertIn('id="novelExportMenu"', actions)
         self.assertNotIn('id="novelImportBtn"', page[page.index('class="novel-toolbar"'):][:400],
                          "左栏工具栏只是保留容器，按钮已经搬走")

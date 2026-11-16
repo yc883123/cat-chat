@@ -58,7 +58,8 @@ class _FakeJobs:
     def get(self, job_id: str, owner: str | None = None):
         return self._job
 
-    def wait(self, job_id: str, timeout: float, owner: str | None = None):
+    def wait(self, job_id: str, timeout: float, owner: str | None = None, *,
+             cancel_event=None):
         self.waited.append((job_id, timeout))
         return self._job
 

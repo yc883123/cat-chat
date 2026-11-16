@@ -296,7 +296,8 @@
              绝对铺满本容器的最底层（z-index 0），真实内容整体抬到 z-index 1，
              所以皮肤不会挡住任何控件。配色皮肤下这一层不显示。 -->
         <div class="studio-skin-layer" aria-hidden="true"></div>
-        <header class="studio-topbar">
+        <header class="studio-topbar wb-resource-header">
+          <div class="wb-header-main">
           <!-- 桌面端侧栏收起时，对话顶栏（#expandSidebar 所在）整体退场；
                这里补一个同款展开按钮，保证工作台里仍能回到侧栏选「对话」。 -->
           <button class="icon-button sidebar-expand-btn" id="studioExpandSidebar" type="button" title="展开侧栏" aria-label="展开侧栏">
@@ -310,15 +311,24 @@
             <button class="studio-pane-btn active" type="button" data-studio-source="template" aria-pressed="true">模板生成</button>
             <button class="studio-pane-btn" type="button" data-studio-source="skill" aria-pressed="false">Skill 生成</button>
           </div>
+          </div>
+          <button class="wb-resource-monitor" id="workbenchResourceMonitor" type="button" aria-haspopup="dialog" aria-controls="resourceMonitorDialog" aria-label="查看本机资源监控">
+            <span>RAM <b data-resource-summary="memory"><span data-resource-full>不可用</span><span data-resource-compact>不可用</span></b><progress data-resource-bar="memory" max="100" aria-label="内存占用" hidden></progress></span>
+            <span>VRAM <b data-resource-summary="gpu"><span data-resource-full>不可用</span><span data-resource-compact>不可用</span></b><progress data-resource-bar="gpu" max="100" aria-label="显存最高占用" hidden></progress></span>
+          </button>
+          <div class="wb-header-actions">
           <div class="studio-topbar-tools">
             <label class="studio-search">
               <input id="studioSearch" type="search" placeholder="搜索模板" aria-label="搜索模板">
             </label>
             <button class="control-button" id="studioCustomImport" type="button" title="把 .txt / .md / .json 导入为自定义条目（在「我的」里查看与管理）">导入</button>
           </div>
-          <!-- 提取 ComfyUI 进度条：生成中才出现的顶栏全局单条（定点更新）。
-               是顶栏自己的直接子元素、自带贴右 margin：搜索/导入是模块库页专属工具，
-               其他功能页顶栏右侧本来是空的，条落进去正好贴右缘。 -->
+          <details class="wb-media-menu wb-resource-menu" data-wb-menu>
+            <summary id="libraryMoreTrigger" aria-label="提词库更多操作" title="更多操作">⋯</summary>
+            <div class="wb-media-menu-panel"><button class="control-button" type="button" data-resource-details data-resource-opener="libraryMoreTrigger">资源监控</button></div>
+          </details>
+          </div>
+          <!-- 共享生成进度独占尾行，避免挤压搜索、阶段与资源摘要。 -->
           <div class="comfyui-step-meter" id="comfyuiStepMeter" hidden aria-live="off">
             <span class="comfyui-step-meter-track"><i class="comfyui-step-meter-fill"></i></span>
             <span class="comfyui-step-meter-label"><span class="comfyui-step-meter-pct">0%</span><span class="comfyui-step-meter-detail"></span></span>
@@ -475,7 +485,8 @@
              左（批次与队列）、中（拖放与参数）、右（按图 / 按标签 / 句子库）三栏。
              页面结构在这里定稿；交互与渲染由 public/js/23-labeler.js 接管。 -->
         <div class="studio-page-view" id="studioPageLabeler" data-studio-page-view="labeler" data-labeler-page="preset" hidden>
-          <header class="labeler-panes wb-page-head" id="labelerPanes" data-wb-page-header aria-label="贴签匠导航">
+          <header class="labeler-panes wb-page-head wb-resource-header" id="labelerPanes" data-wb-page-header aria-label="贴签匠导航">
+            <div class="wb-header-main">
             <h1>贴签匠</h1>
             <div class="wb-media-tabs" role="group" aria-label="打标方式">
             <button class="studio-pane-btn labeler-page-btn active" type="button" aria-pressed="true" data-labeler-page-tab="preset">预设打标</button>
@@ -485,6 +496,13 @@
             <button class="studio-pane-btn labeler-pane-btn" type="button" aria-pressed="false" data-labeler-pane="queue">批次</button>
             <button class="studio-pane-btn labeler-pane-btn active" type="button" aria-pressed="true" data-labeler-pane="config">设置</button>
             <button class="studio-pane-btn labeler-pane-btn" type="button" aria-pressed="false" data-labeler-pane="results">结果</button>
+            </div>
+            </div>
+            <div class="wb-header-actions">
+              <details class="wb-media-menu wb-resource-menu" data-wb-menu>
+                <summary id="labelerMoreTrigger" aria-label="贴签匠更多操作" title="更多操作">⋯</summary>
+                <div class="wb-media-menu-panel"><button class="control-button" type="button" data-resource-details data-resource-opener="labelerMoreTrigger">资源监控</button></div>
+              </details>
             </div>
           </header>
           <div class="labeler-columns" id="labelerColumns">
@@ -800,7 +818,8 @@
              三栏：左（工作流库 + 导入）、中（连接状态 / 参数表单 / 提交）、右（任务与产物结果）。
              页面结构在这里定稿；交互与渲染由 public/js/24-comfyui.js 接管。 -->
         <div class="studio-page-view" id="studioPageComfyui" data-studio-page-view="comfyui" data-comfyui-pane="run" data-results-segment="single" data-batch-detail="0" hidden>
-          <header class="comfyui-panes wb-page-head" data-wb-page-header>
+          <header class="comfyui-panes wb-page-head wb-resource-header" data-wb-page-header>
+            <div class="wb-header-main">
             <h1>造梦机</h1>
           <div class="wb-media-tabs" id="comfyuiPanes" role="group" aria-label="造梦机分档">
             <button class="studio-pane-btn comfyui-pane-btn" type="button" aria-pressed="false" data-comfyui-pane="workflows">工作流</button>
@@ -808,16 +827,20 @@
             <button class="studio-pane-btn comfyui-pane-btn" type="button" aria-pressed="false" data-comfyui-pane="batch">批量生成</button>
             <button class="studio-pane-btn comfyui-pane-btn" type="button" aria-pressed="false" data-comfyui-pane="tasks">结果</button>
           </div>
+            </div>
+            <div class="wb-header-actions">
             <div class="comfyui-statusbar" id="comfyuiStatusbar">
               <i class="status-mark" id="comfyuiStatusDot" title="ComfyUI 连接状态"></i>
               <span class="comfyui-status-text" id="comfyuiStatusText">ComfyUI 未连接</span>
-              <details class="wb-media-menu">
-                <summary aria-label="ComfyUI 连接设置" title="连接设置">⋯</summary>
+              <details class="wb-media-menu" data-wb-menu>
+                <summary id="comfyuiMoreTrigger" aria-label="造梦机更多操作" title="更多操作">⋯</summary>
                 <div class="wb-media-menu-panel">
+                  <button class="control-button" type="button" data-resource-details data-resource-opener="comfyuiMoreTrigger">资源监控</button>
                   <button class="control-button tiny" id="comfyuiEditUrl" type="button">改地址</button>
                   <button class="control-button tiny" id="comfyuiTestConn" type="button">测试连接</button>
                 </div>
               </details>
+            </div>
             </div>
           </header>
           <div class="comfyui-columns" id="comfyuiColumns">
@@ -993,7 +1016,8 @@
                工具栏搬到这儿，原有 id 全部保留，事件绑定不变；导出菜单跟着按钮进
                .novel-page-actions，以这个容器为定位基准，不再依赖左栏。
                不再放「工作台 / 拆书匠」面包屑：上方工作台标识与下方标题已经说明了位置。 -->
-          <header class="novel-page-head" data-wb-page-header>
+          <header class="novel-page-head wb-resource-header" data-wb-page-header>
+            <div class="wb-header-main">
             <div class="novel-page-title-row">
               <h2>拆书匠</h2>
               <button class="wb-book-switch" id="novelBookMenuBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="novelBookMenu" title="切换作品或导入 TXT">
@@ -1004,10 +1028,12 @@
               <button class="control-button" id="novelBooksBtn" type="button" role="menuitem" title="打开已保存的作品列表">切换作品…</button>
               <button class="control-button" id="novelImportBtn" type="button" role="menuitem" title="导入一本 TXT 小说并自动拆章">导入 TXT 新建作品</button>
             </div>
-            <div class="novel-page-actions">
+            </div>
+            <div class="novel-page-actions wb-header-actions">
               <button class="control-button wb-book-aside" id="novelAsideBtn" type="button" aria-controls="novelColumns" aria-expanded="false">查看说明</button>
               <button class="control-button wb-book-more" id="novelMoreBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="novelMoreMenu" aria-label="更多作品操作">⋯</button>
               <div class="wb-book-menu" id="novelMoreMenu" role="menu" popover hidden>
+              <button class="control-button" type="button" role="menuitem" data-resource-details data-resource-opener="novelMoreBtn">资源监控</button>
               <button class="control-button" id="novelSystemPromptBtn" type="button" role="menuitem">作品系统提示词</button>
               <button class="control-button novel-manage-entry" id="novelManageBtn" type="button"
                       role="menuitem" title="集中管理原文、改编稿、要素、大纲、剧本与生成记录">管理记录</button>
@@ -1383,7 +1409,8 @@
              三栏：左=作品与目录、中=阶段工作区、右=说明与状态。
              不放面包屑：上方工作台标识与下方标题已经说明了位置（与拆书匠同一拍板）。 -->
         <div class="studio-page-view" id="studioPageWriter" data-studio-page-view="writer" hidden>
-          <header class="writer-page-head" data-wb-page-header>
+          <header class="writer-page-head wb-resource-header" data-wb-page-header>
+            <div class="wb-header-main">
             <div class="writer-page-title-row">
               <h2>织书台</h2>
               <button class="wb-book-switch" id="writerBookMenuBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="writerBookMenu" title="切换、新建或导入作品">
@@ -1399,10 +1426,12 @@
               <button class="control-button" id="writerNovelContinueBtn" type="button"
                       role="menuitem" title="直接导入 TXT 或选择拆书匠作品，在末章后创建新章">从已有小说续写</button>
             </div>
-            <div class="writer-page-actions">
+            </div>
+            <div class="writer-page-actions wb-header-actions">
               <button class="control-button wb-book-aside" id="writerAsideBtn" type="button" aria-controls="writerColumns" aria-expanded="false">查看说明</button>
               <button class="control-button wb-book-more" id="writerMoreBtn" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="writerMoreMenu" aria-label="更多作品操作">⋯</button>
               <div class="wb-book-menu" id="writerMoreMenu" role="menu" popover hidden>
+              <button class="control-button" type="button" role="menuitem" data-resource-details data-resource-opener="writerMoreBtn">资源监控</button>
               <button class="control-button" id="writerSystemPromptBtn" type="button" role="menuitem">作品系统提示词</button>
               <button class="control-button writer-manage-entry" id="writerManageBtn" type="button"
                       role="menuitem" title="集中管理设定、大纲、章节正文与生成记录">管理记录</button>
@@ -2433,6 +2462,29 @@
         <button class="control-button" type="button" data-close="starterPromptDialog">取消</button>
         <button class="primary-button" id="saveStarterPrompt" type="button">保存</button>
       </div>
+    </div>
+  </dialog>
+
+  <!-- 五个工作台共用一份宿主资源监控。 -->
+  <dialog id="resourceMonitorDialog" class="resource-monitor-dialog" aria-labelledby="resourceMonitorTitle" aria-describedby="resourceMonitorSource">
+    <div class="dialog-toolbar">
+      <div><h2 id="resourceMonitorTitle">资源监控</h2><p id="resourceMonitorSource">运行 Cat Chat 的主机资源，每 3 秒刷新</p></div>
+      <button class="icon-button" id="resourceMonitorClose" type="button" autofocus title="关闭" aria-label="关闭资源监控"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+    </div>
+    <div class="resource-monitor-body">
+      <p class="resource-monitor-status" id="resourceMonitorStatus" role="status">资源数据尚未读取</p>
+      <section class="resource-monitor-card" aria-labelledby="resourceMemoryTitle">
+        <h3 id="resourceMemoryTitle">内存 RAM</h3>
+        <p id="resourceMemoryValue">不可用</p>
+        <progress id="resourceMemoryBar" max="100" aria-label="内存占用" hidden></progress>
+        <p class="resource-monitor-note" id="resourceMemoryReason"></p>
+      </section>
+      <section class="resource-monitor-card" aria-labelledby="resourceGpuTitle">
+        <h3 id="resourceGpuTitle">显存 VRAM</h3>
+        <p class="resource-monitor-note" id="resourceGpuReason">不可用</p>
+        <div id="resourceGpuList"></div>
+      </section>
+      <p class="resource-monitor-note" id="resourceMonitorSample">尚无有效采样</p>
     </div>
   </dialog>
 

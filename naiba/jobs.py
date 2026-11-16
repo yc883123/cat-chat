@@ -350,6 +350,14 @@ class JobRegistry:
         # 异步产物写回：Job 在工具返回之后才产出的媒体挂回发起它的助手消息
         # （comfyui_batch wait=false / run_in_background 的主路径；写回失败不影响终态）。
         self._write_back_media(job_id)
+        # 已登记等待的轻量唤醒：只置事件，协调器自己读持久状态再决定派发。
+        # 这里**不能**同步调用模型或创建新 Run（存储/条件锁之外也不做重活）。
+        waiter = getattr(self.app, "job_waits", None)
+        if waiter is not None:
+            try:
+                waiter.wake(job_id)
+            except Exception:  # noqa: BLE001 - 唤醒失败不得影响 Job 终态
+                logger.exception("等待协调器唤醒失败：job=%s", job_id)
         condition = self._condition(job_id)
         with condition:
             condition.notify_all()
@@ -471,6 +479,17 @@ class JobRegistry:
             jobs = [j for j in jobs if j.get("owner_session_id") == owner]
         return [self._snapshot(j) for j in jobs]
 
+    def children(self, parent_job_id: str, *, active_only: bool = False) -> list[dict[str, Any]]:
+        """按父 ID 取**完整**子任务集合（不走列表默认前 N 条）。
+
+        等待登记必须看到全部子任务：只依赖 ``list()`` 的 50 条窗口会漏项，
+        导致「已登记」的集合里少一个任务，交接后永远等不齐。
+        """
+        if not parent_job_id:
+            return []
+        rows = self.app.storage.list_child_jobs(parent_job_id, active_only=active_only)
+        return [self._snapshot(row) for row in rows]
+
     def read(self, job_id: str, cursor: int = 0, owner: str | None = None) -> dict[str, Any]:
         if not self.get(job_id, owner):
             return {"events": [], "cursor": cursor}
@@ -478,12 +497,20 @@ class JobRegistry:
         new_cursor = events[-1]["sequence"] if events else cursor
         return {"events": events, "cursor": new_cursor}
 
-    def wait(self, job_id: str, timeout: float, owner: str | None = None) -> dict[str, Any] | None:
+    def wait(self, job_id: str, timeout: float, owner: str | None = None, *,
+             cancel_event: threading.Event | None = None) -> dict[str, Any] | None:
+        """等待 Job 终态或到期；``cancel_event`` 置位时抛 ``TaskCancelled``。
+
+        取消**只停止等待方**，不在这里取消目标 Job：跨会话只读等待不会取得目标任务的
+        取消权；本轮子任务的取消仍由原有父子级联决定。
+        """
         job = self.get(job_id, owner)
         if not job:
             raise LookupError("Job 不存在或无权访问")
         deadline = time.monotonic() + max(0.0, timeout)
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise TaskCancelled("等待已停止")
             job = self.get(job_id, owner)
             if job and job["status"] in JOB_TERMINAL:
                 return job
@@ -491,8 +518,11 @@ class JobRegistry:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
+            # 分片等待：用 1 秒上限同时兼顾「Job 终态唤醒」与「取消信号及时退出」。
             with condition:
-                condition.wait(timeout=min(remaining, 1.0))
+                condition.wait(timeout=min(remaining, 0.2 if cancel_event is not None else 1.0))
+        if cancel_event is not None and cancel_event.is_set():
+            raise TaskCancelled("等待已停止")
         return self.get(job_id, owner)
 
     def cancel(self, job_id: str, owner: str | None = None, reason: str | None = None) -> dict[str, Any] | None:

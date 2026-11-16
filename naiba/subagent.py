@@ -11,14 +11,17 @@
 """
 from __future__ import annotations
 
-from naiba.core.contracts import (AppContext, RunContext, SUPER_AGENT_BINDING_KEY,
+from naiba.core.contracts import (AppContext, JOB_WAIT_OUTCOME_KEY, JOB_WAIT_SHORT_WAIT_SECONDS,
+                                  RUN_ORIGIN_USER, RunContext, SUPER_AGENT_BINDING_KEY,
                                   SUPER_AGENT_DEPENDENCY_KEY, SUBAGENT_OUTCOME_KEY)
 
+import copy
 import traceback
+import time
 from pathlib import Path
 from typing import Any, Callable
 
-from naiba.jobs import JobRegistry, JobSpec
+from naiba.jobs import JOB_ACTIVE, JobRegistry, JobSpec
 from naiba.core.history import build_model_history, local_brain
 from naiba.core.tool_results import model_visible_run
 from naiba.core.messages import dependency_message_content
@@ -553,39 +556,118 @@ def job_tool_handler_factory(app: AppContext) -> dict[str, Callable[..., tuple[b
 
     def job_wait(arguments, active_skills, run_context: RunContext | None = None):
         # 只读操作：允许跨对话/跨会话等待 Job 结果。
-        job_id = str((arguments or {}).get("job_id") or "")
+        # ``notify_on_completion=true``：仅普通主对话顶层 Run，可为本会话拥有的真实 Job
+        # 登记「后台完成后自动回复」；普通只读查询行为保持不变。
+        args = arguments or {}
+        ctx = run_context or {}
+        slot = ctx.get("tool_call_slot") if isinstance(ctx.get("tool_call_slot"), dict) else {}
+        job_id = str(args.get("job_id") or "")
         if not job_id:
             return False, "缺少 job_id"
         if not jobs.get(job_id):
             return False, _missing_message(job_id)
-        timeout = int((arguments or {}).get("timeout", 600) or 600)
+        timeout, timeout_error = _parse_wait_timeout(args.get("timeout", 600))
+        if timeout_error:
+            return False, timeout_error
+        notify = args.get("notify_on_completion", False)
+        if not isinstance(notify, bool):
+            return False, "notify_on_completion 必须是 JSON 布尔值（true / false）"
+        cancel_event = ctx.get("cancel_event")
+
+        def record(kind: str, *, waited: bool = False, wait_id: str = "", reason: str = "") -> None:
+            # 宿主控制信息：只写结构化分类，不从工具正文推断，也不让模型自报字段获得豁免。
+            slot[JOB_WAIT_OUTCOME_KEY] = {
+                "kind": kind, "waited": bool(waited), "wait_id": wait_id, "reason": reason,
+            }
+
+        if notify:
+            targets, target_error = _notify_targets(ctx, jobs, job_id)
+            if target_error:
+                record("failed", reason=target_error)
+                return False, target_error
+            states = _target_states(jobs, targets)
+            if all(state["terminal"] for state in states):
+                # 已经全部终态：当场返回真实结果，不创建无用续答。
+                record("completed")
+                return True, _jobs_result_text(jobs, targets)
+            coordinator = getattr(app, "job_waits", None)
+            if coordinator is None:
+                record("failed", reason="等待登记不可用")
+                return False, "当前环境无法登记后台通知；可继续用 job_wait 同步等待。"
+            getter = getattr(app.storage, "get_run_snapshot", None)
+            origin = getter(str(ctx.get("run_id") or "")) if callable(getter) else {}
+            snapshot = job_wait_execution_snapshot(origin)
+            # 只补 RunContext 已有的真实字段；model_name / Agent 必须来自原 Run，
+            # 不能从此刻会话或配置猜测。白名单不复制 profile、Key 或运行期对象。
+            for key in ("model_key", "allowed_tools", "workspace_dir", "conv_kind", "skill_policy"):
+                if key not in snapshot and key in ctx:
+                    snapshot[key] = copy.deepcopy(ctx[key])
+            wait_record, note = coordinator.register(
+                conversation_id=str(ctx.get("conversation_id") or ""),
+                origin_run_id=str(ctx.get("run_id") or ""),
+                target_job_ids=targets,
+                snapshot=snapshot,
+            )
+            if wait_record is None:
+                record("failed", reason=note)
+                return False, f"未能登记自动回复：{note}。可继续用 job_wait 同步等待。"
+            wait_id = str(wait_record.get("id") or "")
+            short_wait = min(JOB_WAIT_SHORT_WAIT_SECONDS, timeout)
+            try:
+                _wait_for_targets(jobs, targets, short_wait, cancel_event)
+            except TaskCancelled:
+                raise
+            states = _target_states(jobs, targets)
+            if all(state["terminal"] for state in states):
+                # 短等期间就完成了：撤掉刚登记的等待，直接当场回答。
+                coordinator.cancel_wait(wait_id, "等待在交接前完成")
+                record("completed")
+                return True, _jobs_result_text(jobs, targets)
+            record("handoff", wait_id=wait_id)
+            slot["message"] = "已登记，后台任务结束后会在这里回复。"
+            return True, (
+                "已登记后台等待：本次先等了 "
+                f"{short_wait:.0f} 秒，任务仍在运行。"
+                f"目标 Job：{'、'.join(targets)}。"
+                "任务结束后程序会在这里自动回复一次结果，本轮不需要继续等待；"
+                "不要重复创建同一任务，也不要口头承诺未经登记的通知。"
+            )
+
+        waited = timeout > 0
         try:
-            job = jobs.wait(job_id, timeout)
+            job = jobs.wait(job_id, timeout, cancel_event=cancel_event)
         except LookupError:
             return False, _missing_message(job_id)
+        except TaskCancelled:
+            raise
         if not job:
             return False, _missing_message(job_id)
         status = str(job.get("status") or "")
         progress = float(job.get("progress") or 0)
         step = str(job.get("current_step") or "")
         if status == "completed":
+            record("completed", waited=waited)
             return True, f"Job 已完成：{json_dumps(job.get('result', {}))[:2000]}"
         if status in {"queued", "running", "waiting", "stopping", "cancelling"}:
             # 「本次等待到期、任务仍在运行」是**正常快照**，不是失败：旧实现把它和真正的
             # 失败统一成「Job 结束（running）」，模型据此认定任务失败并重复提交付费生成
             # （计划 2026-10-22 §3.3）。这里返回运行中并给出下一步，不取消任务。
+            record("pending_timeout", waited=waited)
             return True, (
                 f"本次等待到期，Job 仍在运行：status={status}, progress={progress:.0f}%, "
                 f"step={step}。可稍后再调用 job_wait / job_status 继续收集；不要重复创建同一任务。"
             )
         if status == "interrupted":
+            record("interrupted", waited=waited)
             return False, (
                 f"Job 已中断（{job.get('error') or '如服务曾重启'}），不会自动续跑；"
                 "可只读查看其输出，需要时由用户决定是否重新发起。"
             )
         if status == "cancelled":
+            record("cancelled", waited=waited)
             return False, f"Job 已被取消：{job.get('error') or '用户取消'}"
         # failed：真正的失败，与「等待到期」区分开。
+        record("failed", waited=waited)
         return False, f"Job 已失败：{job.get('error') or '原因未记录'}"
 
     def job_kill(arguments, active_skills, run_context: RunContext | None = None):
@@ -625,3 +707,126 @@ def json_dumps(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False)
     except (TypeError, ValueError):
         return str(value)
+
+
+# ---- job_wait 的宿主侧校验与分类（计划 2026-11-16 §3.1 / §4.1）----
+def job_wait_execution_snapshot(value: Any) -> dict[str, Any]:
+    """只保留原 Run 已冻结的执行字段，不复制凭证、历史或运行期上下文。"""
+    if not isinstance(value, dict):
+        return {}
+    keys = (
+        "model_key", "model_name", "provider_id", "agent", "skill_policy",
+        "allowed_tools", "workspace_dir", "conv_kind", "interaction_mode",
+        "stream_enabled", "chat_supports_images", "generation_options",
+        "web_search_enabled", "deep_reasoning_enabled", "reasoning_effort", "permission_mode",
+    )
+    return {key: copy.deepcopy(value[key]) for key in keys if key in value}
+
+
+def _parse_wait_timeout(value: Any) -> tuple[int, str]:
+    """严格解析 timeout：拒绝零/负数/非法值，不再用 ``or 600`` 把 0 暗改成 600。"""
+    if isinstance(value, bool):
+        return 0, "timeout 必须是正整数秒（0 与负数不合法）"
+    if isinstance(value, float):
+        if not value.is_integer():
+            return 0, "timeout 必须是整数秒"
+        value = int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text.isdigit():
+            return 0, "timeout 必须是正整数秒"
+        value = int(text)
+    if not isinstance(value, int):
+        return 0, "timeout 必须是正整数秒"
+    if value <= 0:
+        return 0, "timeout 必须大于 0；等待到期用任务自身的状态判断，不要传 0"
+    if value > 86400:
+        return 0, "timeout 不能超过 86400 秒"
+    return value, ""
+
+
+def _target_states(jobs: JobRegistry, target_job_ids: list[str]) -> list[dict[str, Any]]:
+    states: list[dict[str, Any]] = []
+    for job_id in target_job_ids:
+        job = jobs.get(job_id)
+        status = str((job or {}).get("status") or "")
+        # 记录被清理/不存在：无法核实，不再无限等它（与协调器的口径一致）。
+        terminal = job is None or status in {"completed", "failed", "cancelled", "interrupted"}
+        states.append({"id": job_id, "status": status or "missing", "terminal": terminal, "job": job})
+    return states
+
+
+def _wait_for_targets(
+    jobs: JobRegistry, targets: list[str], seconds: float, cancel_event: Any
+) -> None:
+    """短等一轮：所有目标终态或到期即返回；取消信号命中抛 TaskCancelled。"""
+    deadline = time.monotonic() + max(0.0, float(seconds))
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            from naiba.core.exceptions import TaskCancelled
+
+            raise TaskCancelled("等待已停止")
+        if all(state["terminal"] for state in _target_states(jobs, targets)):
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.2, remaining))
+
+
+def _notify_targets(
+    ctx: dict[str, Any], jobs: JobRegistry, job_id: str
+) -> tuple[list[str], str]:
+    """校验能否登记自动回复，并收集完整目标集合（明确等待的 Job + 本 Run 活动子 Job）。"""
+    conversation_id = str(ctx.get("conversation_id") or "")
+    owner = str(ctx.get("owner_session_id") or conversation_id)
+    run_id = str(ctx.get("run_id") or ctx.get("job_id") or "")
+    if not conversation_id or not run_id:
+        return [], "无法确定当前对话或运行，不能登记自动回复"
+    depth = ctx.get("depth")
+    if isinstance(depth, int) and depth > 0:
+        return [], "子 Agent 不能登记后台自动回复；可继续用 job_wait 同步等待"
+    if str(ctx.get("conv_kind") or "main") != "main":
+        return [], "辅助对话不能登记后台自动回复；可继续用只读查询查看结果"
+    origin = str(ctx.get("run_origin") or RUN_ORIGIN_USER)
+    if origin != RUN_ORIGIN_USER:
+        # 监督续办/依赖串联/等待续答由各自的调度负责，不能再叠一层普通通知。
+        return [], "本轮的后续由程序已有的续办机制负责，不能重复登记自动回复"
+    job = jobs.get(job_id)
+    if not job:
+        return [], "Job 不存在或无法访问"
+    stored_owner = str(job.get("owner_session_id") or "")
+    if (str(job.get("conversation_id") or "") != conversation_id
+            or (stored_owner and stored_owner != owner)):
+        return [], "该 Job 不属于当前会话，不能登记自动回复；可继续用只读查询查看结果"
+    targets = {job_id}
+    for child in jobs.children(run_id, active_only=True):
+        if bool(child.get("detached")):
+            continue
+        child_id = str(child.get("id") or "")
+        if child_id and str(child.get("status") or "") in JOB_ACTIVE:
+            targets.add(child_id)
+    return sorted(targets), ""
+
+
+def _jobs_result_text(jobs: JobRegistry, targets: list[str]) -> str:
+    """同步出口的汇总：逐目标给出真实终态（不要求固定结果字段）。"""
+    lines: list[str] = []
+    for state in _target_states(jobs, targets):
+        job = state["job"]
+        if job is None:
+            lines.append(f"Job {state['id']}：无法核实（记录已被清理或不存在）")
+            continue
+        job_id = state["id"]
+        status = state["status"]
+        if status == "completed":
+            lines.append(f"Job {job_id} 已完成：{json_dumps(job.get('result', {}))[:2000]}")
+        elif status == "failed":
+            lines.append(f"Job {job_id} 已失败：{job.get('error') or '原因未记录'}")
+        elif status == "cancelled":
+            lines.append(f"Job {job_id} 已取消：{job.get('error') or '用户取消'}")
+        elif status == "interrupted":
+            lines.append(f"Job {job_id} 已中断：{job.get('error') or '如服务曾重启'}")
+        else:
+            lines.append(f"Job {job_id}：status={status}")
+    return "\n".join(lines)

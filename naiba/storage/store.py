@@ -16,7 +16,11 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
-from naiba.core.contracts import JOB_RESUMED_FROM_KEY, JOB_RESUMED_INTO_KEY, TERMINAL_RUN_EVENT_TYPES
+from naiba.core.contracts import (
+    JOB_RESUMED_FROM_KEY, JOB_RESUMED_INTO_KEY, JOB_WAIT_ACTIVE_STATUSES,
+    JOB_WAIT_DEADLINE_SECONDS, JOB_WAIT_MAX_ACTIVE_GLOBAL, JOB_WAIT_MAX_TARGETS,
+    JOB_WAIT_STATUSES, TERMINAL_RUN_EVENT_TYPES,
+)
 from naiba.core.messages import MetadataKeys
 from naiba.core.paths import normalized_path_key
 
@@ -28,7 +32,7 @@ _METADATA_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 # 当前数据库 schema 版本（user_version）。每次新增迁移 +1。
-CURRENT_SCHEMA_VERSION = 31
+CURRENT_SCHEMA_VERSION = 32
 
 # 自该版本起存在"数据改写型"迁移（v14 起），执行前自动备份整库。
 FIRST_DATA_WRITING_MIGRATION = 14
@@ -1050,6 +1054,41 @@ def _migrate_to_v31(db: sqlite3.Connection) -> None:
     )""")
 
 
+def _migrate_to_v32(db: sqlite3.Connection) -> None:
+    """普通等待（job_wait notify_on_completion）的持久记录。
+
+    独立成表而不是塞进 ``background_tasks``：启动清理会把 in-flight 任务统一改成
+    ``interrupted``，等待记录不是任务，不能被那条批量更新误伤。
+    """
+    db.execute("""CREATE TABLE IF NOT EXISTS job_waits (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        origin_run_id TEXT NOT NULL,
+        origin_message_id TEXT NOT NULL DEFAULT '',
+        target_job_ids TEXT NOT NULL DEFAULT '[]',
+        human_epoch INTEGER NOT NULL DEFAULT 0,
+        snapshot TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'registered',
+        reason TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        deadline_at INTEGER NOT NULL DEFAULT 0,
+        dispatch_key TEXT NOT NULL DEFAULT '',
+        resume_run_id TEXT NOT NULL DEFAULT '',
+        result_message_id TEXT NOT NULL DEFAULT ''
+    )""")
+    # 每条会话最多一条有效等待（含已派发但未收口）：部分唯一索引即数据库级裁决，
+    # 不靠内存锁；并发登记/派发时第二次写入直接被 SQLite 拒绝。
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_job_waits_active_conversation "
+        "ON job_waits(conversation_id) "
+        "WHERE status IN ('registered','waiting','ready','dispatched')"
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS idx_job_waits_status ON job_waits(status, updated_at)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_job_waits_origin ON job_waits(origin_run_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_job_waits_resume ON job_waits(resume_run_id)")
+
+
 # 目标版本 -> 迁移函数。新增版本时在此追加并提升 CURRENT_SCHEMA_VERSION。
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
@@ -1083,6 +1122,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     29: _migrate_to_v29,
     30: _migrate_to_v30,
     31: _migrate_to_v31,
+    32: _migrate_to_v32,
 }
 
 
@@ -3746,6 +3786,7 @@ class ChatStorage:
         supervised_context: dict[str, Any] | None = None,
         dependency_context: dict[str, Any] | None = None,
         submission_guard: Callable[[sqlite3.Connection], None] | None = None,
+        job_wait_dispatch: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Atomically append the user message and create its owning run.
 
@@ -3777,6 +3818,11 @@ class ChatStorage:
             metadata[MetadataKeys.DEPENDENCY_SOURCE] = dict(dependency_context)
         if folder_indexes:
             metadata[MetadataKeys.FOLDER_INDEXES] = folder_indexes
+        # 等待续答：来源标记进消息 metadata（前端据此显示「后台任务结果」，
+        # 不把程序派发的输入伪装成用户刚发的新消息）。
+        if job_wait_dispatch is not None:
+            source = job_wait_dispatch.get("source")
+            metadata[MetadataKeys.JOB_WAIT_SOURCE] = dict(source) if isinstance(source, dict) else {}
         if str(display_message or "").strip():
             # 气泡展示原样（含 /ref 蓝色），而 content 存模型看到的剥离版本。
             metadata["display_content"] = str(display_message)
@@ -3826,11 +3872,41 @@ class ChatStorage:
                 if active:
                     raise RuntimeError(f"ACTIVE_RUN:{active['id']}")
             conversation = db.execute(
-                "SELECT title_customized FROM conversations WHERE id = ?",
+                "SELECT title_customized, archived FROM conversations WHERE id = ?",
                 (conversation_id,),
             ).fetchone()
             if not conversation:
                 raise LookupError("对话不存在")
+            # 等待续答的授权与本事务一起裁决：等待行状态、人工代次与运行位必须在
+            # **插入消息和 Run 的同一个事务里**复核，只在派发前读一次会留下竞态。
+            if job_wait_dispatch is not None:
+                wait_id = str(job_wait_dispatch.get("wait_id") or "")
+                wait_row = db.execute(
+                    "SELECT * FROM job_waits WHERE id = ? AND conversation_id = ?",
+                    (wait_id, conversation_id),
+                ).fetchone()
+                if wait_row is None:
+                    raise RuntimeError("等待记录不存在")
+                if int(conversation["archived"] or 0):
+                    raise RuntimeError("会话已归档，不再派发结果回复")
+                if str(wait_row["status"]) != "ready":
+                    raise RuntimeError("等待尚未就绪或已处理")
+                if str(wait_row["resume_run_id"] or ""):
+                    raise RuntimeError("等待已派发过结果回复")
+                epoch = db.execute(
+                    "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role = 'user'",
+                    (conversation_id,),
+                ).fetchone()[0]
+                if int(epoch or 0) != int(wait_row["human_epoch"] or 0):
+                    raise RuntimeError("会话已有新的人工输入，旧等待不得抢占")
+                db.execute(
+                    "UPDATE job_waits SET status='dispatched', resume_run_id=?, "
+                    "dispatch_key=?, updated_at=? WHERE id=? AND status='ready' AND resume_run_id=''",
+                    (run_id, str(job_wait_dispatch.get("dispatch_key") or ""), now, wait_id),
+                )
+                if db.execute("SELECT changes()").fetchone()[0] != 1:
+                    raise RuntimeError("等待派发状态已变化")
+                self._sync_job_wait_message(db, wait_id)
             db.execute(
                 "INSERT INTO messages(id, conversation_id, role, content, metadata, created_at) "
                 "VALUES (?, ?, 'user', ?, ?, ?)",
@@ -4647,6 +4723,290 @@ class ChatStorage:
 "parent_job_id, owner_session_id, progress, current_step, attempt, checkpoint, result, "
 "detached, origin_run_id "
                 f"FROM background_tasks {where} ORDER BY created_at DESC LIMIT ?",
+                parameters,
+            ).fetchall()
+        return [self._task_dict(row) for row in rows]
+
+    # ---- 普通等待（job_wait notify_on_completion） ----
+    @staticmethod
+    def _job_wait_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        result = dict(row)
+        try:
+            result["target_job_ids"] = [
+                str(item) for item in json.loads(result.get("target_job_ids") or "[]")
+            ]
+        except (json.JSONDecodeError, TypeError):
+            result["target_job_ids"] = []
+        try:
+            snapshot = json.loads(result.get("snapshot") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            snapshot = {}
+        result["snapshot"] = snapshot if isinstance(snapshot, dict) else {}
+        result["human_epoch"] = int(result.get("human_epoch") or 0)
+        result["deadline_at"] = int(result.get("deadline_at") or 0)
+        for key in ("created_at", "updated_at"):
+            result[key] = int(result.get(key) or 0)
+        for key in ("origin_message_id", "reason", "dispatch_key", "resume_run_id", "result_message_id"):
+            result[key] = str(result.get(key) or "")
+        return result
+
+    def _sync_job_wait_message(self, db: sqlite3.Connection, wait_id: str) -> None:
+        """在状态更新的同一事务内投影卡片；只写 job_wait 键，保留共享 metadata。"""
+        wait = self._job_wait_dict(db.execute(
+            "SELECT * FROM job_waits WHERE id = ?", (wait_id,)
+        ).fetchone())
+        if not wait or not wait["origin_message_id"]:
+            return
+        payload = {
+            "wait_id": wait["id"],
+            "targets": wait["target_job_ids"],
+            "state": wait["status"],
+            "reason": wait["reason"],
+            "origin_message_id": wait["origin_message_id"],
+            "resume_run_id": wait["resume_run_id"],
+            "result_message_id": wait["result_message_id"],
+        }
+        cursor = db.execute(
+            "UPDATE messages SET metadata = json_set(COALESCE(NULLIF(metadata, ''), '{}'), "
+            "?, json(?)) WHERE id = ? AND conversation_id = ?",
+            (f"$.{MetadataKeys.JOB_WAIT}", json.dumps(payload, ensure_ascii=False),
+             wait["origin_message_id"], wait["conversation_id"]),
+        )
+        if cursor.rowcount:
+            db.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (wait["updated_at"], wait["conversation_id"]),
+            )
+
+    def get_job_wait(self, wait_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM job_waits WHERE id = ?", (wait_id,)).fetchone()
+        return self._job_wait_dict(row)
+
+    def get_active_job_wait(self, conversation_id: str) -> dict[str, Any] | None:
+        marks = _status_in_clause(JOB_WAIT_ACTIVE_STATUSES)
+        with self._connect() as db:
+            row = db.execute(
+                f"SELECT * FROM job_waits WHERE conversation_id = ? AND status IN {marks} LIMIT 1",
+                (conversation_id,),
+            ).fetchone()
+        return self._job_wait_dict(row)
+
+    def get_job_wait_by_origin(self, run_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM job_waits WHERE origin_run_id = ? ORDER BY created_at DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+        return self._job_wait_dict(row)
+
+    def get_job_wait_by_resume_run(self, run_id: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM job_waits WHERE resume_run_id = ? ORDER BY created_at DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+        return self._job_wait_dict(row)
+
+    @_retry_transient_write
+    def prepare_job_wait_continue(
+        self, wait_id: str, *, human_epoch: int, deadline_at: int
+    ) -> bool:
+        """用户点「继续查看结果」：把暂停/到期的等待重置为 ready 并刷新人工代次。"""
+        with self._connect() as db:
+            try:
+                cursor = db.execute(
+                    "UPDATE job_waits SET status='ready', reason='', resume_run_id='', "
+                    "dispatch_key='', human_epoch=?, deadline_at=?, updated_at=? "
+                    "WHERE id=? AND status IN ('needs_attention','expired')",
+                    (int(human_epoch), int(deadline_at), int(time.time() * 1000), wait_id),
+                )
+            except sqlite3.IntegrityError:
+                # 该会话已有一条新的有效等待：继续旧等待会撞部分唯一索引，按冲突处理。
+                return False
+            if cursor.rowcount:
+                self._sync_job_wait_message(db, wait_id)
+            return cursor.rowcount > 0
+
+    def list_job_waits(self, statuses: Iterable[str] = (), limit: int = 500) -> list[dict[str, Any]]:
+        conditions = ""
+        parameters: list[Any] = []
+        wanted = tuple(str(item) for item in statuses if str(item) in JOB_WAIT_STATUSES)
+        if wanted:
+            conditions = f"WHERE status IN {_status_in_clause(wanted)}"
+        parameters.append(max(1, min(int(limit), 2000)))
+        with self._connect() as db:
+            rows = db.execute(
+                f"SELECT * FROM job_waits {conditions} ORDER BY created_at ASC LIMIT ?",
+                parameters,
+            ).fetchall()
+        return [self._job_wait_dict(row) for row in rows if row is not None]
+
+    def count_active_job_waits(self) -> int:
+        marks = _status_in_clause(JOB_WAIT_ACTIVE_STATUSES)
+        with self._connect() as db:
+            row = db.execute(f"SELECT COUNT(*) FROM job_waits WHERE status IN {marks}").fetchone()
+        return int(row[0] or 0) if row else 0
+
+    def count_user_messages(self, conversation_id: str) -> int:
+        """人工接管代次：用户消息条数。派发续答必须与登记时**同事务**比对它。"""
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role = 'user'",
+                (conversation_id,),
+            ).fetchone()
+        return int(row[0] or 0) if row else 0
+
+    @_retry_transient_write
+    def create_job_wait(
+        self,
+        *,
+        conversation_id: str,
+        origin_run_id: str,
+        target_job_ids: list[str],
+        snapshot: dict[str, Any],
+        deadline_at: int = 0,
+    ) -> tuple[dict[str, Any] | None, str]:
+        """登记一条等待；返回 ``(record, 复用标记)``。
+
+        复用标记空串表示新建；``"reuse"`` 表示同来源、同目标的已有等待（调用方直接沿用），
+        其它非空文本是拒绝原因。上限与"每会话一条"都在事务内裁决。
+        """
+        targets = sorted({str(item) for item in target_job_ids if str(item)})
+        if not targets:
+            return None, "没有可等待的后台任务"
+        if len(targets) > JOB_WAIT_MAX_TARGETS:
+            return None, f"目标任务过多（{len(targets)} 个，上限 {JOB_WAIT_MAX_TARGETS}）"
+        now = int(time.time() * 1000)
+        deadline = int(deadline_at or 0) or (now + JOB_WAIT_DEADLINE_SECONDS * 1000)
+        wait_id = uuid.uuid4().hex
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            conversation = db.execute(
+                "SELECT id, archived FROM conversations WHERE id = ?", (conversation_id,)
+            ).fetchone()
+            if conversation is None:
+                return None, "关联会话不存在"
+            if int(conversation["archived"] or 0):
+                return None, "关联会话已归档"
+            if db.execute("SELECT 1 FROM job_waits WHERE id = ?", (wait_id,)).fetchone():
+                return None, "等待登记冲突，请重试"
+            marks = _status_in_clause(JOB_WAIT_ACTIVE_STATUSES)
+            existing = db.execute(
+                f"SELECT * FROM job_waits WHERE conversation_id = ? AND status IN {marks} LIMIT 1",
+                (conversation_id,),
+            ).fetchone()
+            if existing is not None:
+                current = self._job_wait_dict(existing) or {}
+                if (current.get("origin_run_id") == origin_run_id
+                        and sorted(current.get("target_job_ids") or []) == targets):
+                    return current, "reuse"
+                return None, "该会话已有一条等待；停止旧的等待后再登记"
+            active_total = db.execute(
+                f"SELECT COUNT(*) FROM job_waits WHERE status IN {marks}"
+            ).fetchone()[0]
+            if int(active_total or 0) >= JOB_WAIT_MAX_ACTIVE_GLOBAL:
+                return None, f"全局等待数已达上限（{JOB_WAIT_MAX_ACTIVE_GLOBAL}）"
+            epoch = db.execute(
+                "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role = 'user'",
+                (conversation_id,),
+            ).fetchone()[0]
+            db.execute(
+                "INSERT INTO job_waits(id, conversation_id, origin_run_id, target_job_ids, "
+                "human_epoch, snapshot, status, created_at, updated_at, deadline_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'registered', ?, ?, ?)",
+                (
+                    wait_id, conversation_id, origin_run_id,
+                    json.dumps(targets, ensure_ascii=False), int(epoch or 0),
+                    json.dumps(snapshot, ensure_ascii=False), now, now, deadline,
+                ),
+            )
+        return self.get_job_wait(wait_id), ""
+
+    @_retry_transient_write
+    def update_job_wait(
+        self,
+        wait_id: str,
+        *,
+        status: str | None = None,
+        reason: str | None = None,
+        origin_message_id: str | None = None,
+        resume_run_id: str | None = None,
+        result_message_id: str | None = None,
+        dispatch_key: str | None = None,
+        expected_statuses: Iterable[str] = (),
+    ) -> bool:
+        values: dict[str, Any] = {"updated_at": int(time.time() * 1000)}
+        if status is not None:
+            if status not in JOB_WAIT_STATUSES:
+                raise ValueError("非法的等待状态")
+            values["status"] = status
+        if reason is not None:
+            values["reason"] = reason[:2000]
+        if origin_message_id is not None:
+            values["origin_message_id"] = origin_message_id
+        if resume_run_id is not None:
+            values["resume_run_id"] = resume_run_id
+        if result_message_id is not None:
+            values["result_message_id"] = result_message_id
+        if dispatch_key is not None:
+            values["dispatch_key"] = dispatch_key
+        assignments = ", ".join(f"{key} = ?" for key in values)
+        expected = tuple(str(item) for item in expected_statuses if str(item) in JOB_WAIT_STATUSES)
+        where = "id = ?"
+        if expected:
+            where += f" AND status IN {_status_in_clause(expected)}"
+        with self._connect() as db:
+            cursor = db.execute(
+                f"UPDATE job_waits SET {assignments} WHERE {where}",
+                (*values.values(), wait_id),
+            )
+            if cursor.rowcount:
+                self._sync_job_wait_message(db, wait_id)
+            return cursor.rowcount > 0
+
+    @_retry_transient_write
+    def pause_job_waits_after_restart(self) -> int:
+        """服务重启：未完成的等待一律暂停，保留记录供用户「继续查看结果」。
+
+        ``dispatched`` 的续答 Run 本身已被启动清理标成 interrupted；这里同样收口，
+        绝不凭旧记录再次派发。返回改写行数。
+        """
+        now = int(time.time() * 1000)
+        marks = _status_in_clause(("registered", "waiting", "ready", "dispatched"))
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            wait_ids = [row[0] for row in db.execute(
+                f"SELECT id FROM job_waits WHERE status IN {marks}"
+            ).fetchall()]
+            cursor = db.execute(
+                "UPDATE job_waits SET status='needs_attention', "
+                "reason=CASE WHEN reason='' THEN ? ELSE reason END, updated_at=? "
+                f"WHERE status IN {marks}",
+                ("服务重启，自动回复已暂停；可点「继续查看结果」", now),
+            )
+            for wait_id in wait_ids:
+                self._sync_job_wait_message(db, wait_id)
+            return int(cursor.rowcount or 0)
+
+    def list_child_jobs(self, parent_job_id: str, active_only: bool = False) -> list[dict[str, Any]]:
+        """按父 ID 取**完整**子任务集合（不受列表默认 50/200 条窗口限制）。"""
+        if not parent_job_id:
+            return []
+        conditions = ["parent_job_id = ?"]
+        parameters: list[Any] = [parent_job_id]
+        if active_only:
+            conditions.append(f"status IN {_status_in_clause(ACTIVE_TASK_STATUSES)}")
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT id, conversation_id, kind, interaction_mode, input_message_id, plan_id, "
+                "agent_id, agent_name, status, message, detail, error, "
+                "cancel_requested, created_at, started_at, updated_at, finished_at, "
+                "parent_job_id, owner_session_id, progress, current_step, attempt, checkpoint, result, "
+                "detached, origin_run_id "
+                f"FROM background_tasks WHERE {' AND '.join(conditions)} ORDER BY created_at ASC",
                 parameters,
             ).fetchall()
         return [self._task_dict(row) for row in rows]

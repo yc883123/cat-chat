@@ -162,8 +162,11 @@ export function syncWorkbenchHeader(page) {
   const expand = document.getElementById("studioExpandSidebar");
   const mobile = document.getElementById("studioOpenSidebar");
   // 移动原节点，既保留 ID 与事件，也保证切页前后只有一个导航入口。
-  if (mobile && mobile.parentElement !== target) target.prepend(mobile);
-  if (expand && expand.parentElement !== target) target.prepend(expand);
+  const main = target.querySelector(".wb-header-main") || target;
+  if (mobile && mobile.parentElement !== main) main.prepend(mobile);
+  if (expand && expand.parentElement !== main) main.prepend(expand);
+  const monitor = document.getElementById("workbenchResourceMonitor");
+  if (monitor && monitor.parentElement !== target) target.append(monitor);
   const meter = document.getElementById("comfyuiStepMeter");
   if (meter && meter.parentElement !== target) target.append(meter);
   home.hidden = target !== home;

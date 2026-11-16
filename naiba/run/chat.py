@@ -8,14 +8,20 @@ _persist_failed_message（事件重建与取消幂等持久化）/recover_interr
 
 from __future__ import annotations
 
-from naiba.core.contracts import MetadataKeys, RunContext, SUPER_AGENT_BASELINE_KEY
-from naiba.core.messages import dependency_message_content, supervised_message_content
+from naiba.core.contracts import (
+    MetadataKeys, RUN_ORIGIN_DEPENDENCY, RUN_ORIGIN_JOB_WAIT, RUN_ORIGIN_KEY,
+    RUN_ORIGIN_SUPERVISED, RUN_ORIGIN_USER, RunContext, SUPER_AGENT_BASELINE_KEY,
+)
+from naiba.core.messages import (
+    dependency_message_content, job_wait_message_content, supervised_message_content,
+)
 
 import json
 import logging
 import threading
 import time
 import traceback
+import uuid
 from typing import Any
 
 from naiba.plans import CraftToolExecutor, ReadOnlyToolExecutor
@@ -304,6 +310,10 @@ class ConversationRunMixin:
         dependency_context: dict[str, Any] | None = None,
         task_model_override: bool = False,
         configuration_fingerprint: dict[str, Any] | None = None,
+        internal_resume: bool = False,
+        allowed_tools_limit: list[str] | None = None,
+        job_wait_dispatch: dict[str, Any] | None = None,
+        workspace_dir_override: str = "",
     ) -> dict[str, Any]:
         conversation_id = str(body.get("conversation_id") or "")
         message = str(body.get("message") or "").strip()
@@ -340,7 +350,10 @@ class ConversationRunMixin:
 
         with self._submit_lock:
             if supervised_context is None and dependency_context is None:
-                self._supervised_human_input(conversation_id)
+                if not internal_resume:
+                    # 普通人工输入：先推进人工接管代次（监督 + 普通等待）。
+                    self._supervised_human_input(conversation_id)
+                    self._job_wait_human_input(conversation_id)
             conversation = self.app.storage.get_conversation(conversation_id, include_trace=False)
             if not conversation:
                 raise LookupError("对话不存在")
@@ -419,6 +432,11 @@ class ConversationRunMixin:
             allowed_tools = self._resolve_allowed_tools(
                 mode, agent, web_search_enabled, model_key, enabled_tool_ids, conv_kind
             )
+            if allowed_tools_limit is not None:
+                # 等待续答只汇报既有结果：在**来源 Run 已授权工具**之上再交一次结果读取工具集，
+                # 不允许 shell / 生成 / 写文件 / 子 Agent。
+                permitted = {str(item) for item in allowed_tools_limit}
+                allowed_tools = [tool for tool in allowed_tools if tool in permitted]
             catalog_getter = getattr(getattr(self.app, "catalog", None), "scan", None)
             catalog = catalog_getter() if callable(catalog_getter) else []
             available_ids = {
@@ -474,10 +492,14 @@ class ConversationRunMixin:
                 "conv_kind": conv_kind,
                 # Freeze the conversation workspace into the run snapshot so
                 # concurrent conversations cannot change each other's roots.
+                # 等待续答可按来源 Run 的冻结工作区覆盖（计划 2026-11-16 §4.4）。
                 "workspace_dir": str(
-                    self.app.config.resolve_workspace_dir(str(conversation.get("workspace_dir") or ""))
-                    if str(conversation.get("workspace_dir") or "").strip()
-                    else self.app.config.resolve_workspace_dir()
+                    workspace_dir_override
+                    or (
+                        self.app.config.resolve_workspace_dir(str(conversation.get("workspace_dir") or ""))
+                        if str(conversation.get("workspace_dir") or "").strip()
+                        else self.app.config.resolve_workspace_dir()
+                    )
                 ),
                 "web_search_enabled": web_search_enabled,
                 "deep_reasoning_enabled": bool(conversation.get("deep_reasoning_enabled", 0)),
@@ -490,7 +512,26 @@ class ConversationRunMixin:
                 # 首轮标记（与 skill 冻结集同判据）：_run_chat 拼好最终 prompt 后写回
                 # first_turn（系统提示词 + 工具集），供前端会话顶部折叠卡展示。
                 "is_first_turn": not (conversation.get("messages") or []),
+                # 本轮来源：普通用户 / 监督续办 / 依赖续办 / 等待续答。普通等待登记只认
+                # 第一种，避免与既有续办机制双重派发。
+                RUN_ORIGIN_KEY: (
+                    RUN_ORIGIN_JOB_WAIT if job_wait_dispatch is not None
+                    else RUN_ORIGIN_SUPERVISED if supervised_context is not None
+                    else RUN_ORIGIN_DEPENDENCY if dependency_context is not None
+                    else RUN_ORIGIN_USER
+                ),
             }
+            if job_wait_dispatch is not None:
+                from naiba.subagent import job_wait_execution_snapshot
+
+                frozen = job_wait_execution_snapshot(job_wait_dispatch.get("snapshot"))
+                # 工具已按当前会话决议，再与来源授权及只读集相交；其余执行字段
+                # 沿用原 Run，不能被当前模型选择、Agent 编辑或生成设置覆盖。
+                frozen.pop("allowed_tools", None)
+                snapshot.update(frozen)
+                agent = snapshot["agent"]
+                source = job_wait_dispatch.get("source")
+                snapshot[MetadataKeys.JOB_WAIT_SOURCE] = dict(source) if isinstance(source, dict) else {}
             if execution_key:
                 from naiba.core.contracts import SUPER_AGENT_EXECUTION_KEY
                 snapshot[SUPER_AGENT_EXECUTION_KEY] = execution_key
@@ -536,6 +577,7 @@ class ConversationRunMixin:
                     supervised_context=supervised_context,
                     dependency_context=dependency_context,
                     submission_guard=submission_guard if configuration_fingerprint else None,
+                    job_wait_dispatch=job_wait_dispatch,
                 )
             except RuntimeError as exc:
                 active_error = self._active_error(exc)
@@ -544,6 +586,96 @@ class ConversationRunMixin:
                 raise
             self._start(run, self._run_chat)
             return run
+
+    def _notify_job_wait_finished(self, run_id: str, message_id: str, status: str) -> None:
+        """Run 终态后推进等待状态机（失败绝不打断 Run 自身收尾）。"""
+        coordinator = getattr(self.app, "job_waits", None)
+        hook = getattr(coordinator, "on_run_finished", None)
+        if not callable(hook):
+            return
+        try:
+            hook(run_id, message_id, status)
+        except Exception:  # noqa: BLE001 - 等待收尾不是 Run 的失败条件
+            logger.exception("等待状态推进失败：run=%s", run_id)
+
+    def dispatch_job_wait(self, wait_id: str) -> dict[str, Any]:
+        """派发一次「后台任务结果」续答（计划 2026-11-16 §4.3）。
+
+        事务级防重复在 ``create_chat_run(job_wait_dispatch=...)`` 里：等待行状态、人工代次、
+        会话运行位与消息/Run 的插入共享同一个事务。本方法只负责核对配置并把结果正文交进去。
+        """
+        from naiba.run.job_waits import JOB_WAIT_RESULT_TOOLS, build_resume_message
+
+        wait = self.app.storage.get_job_wait(wait_id)
+        if not wait:
+            raise LookupError("等待记录不存在")
+        conversation_id = str(wait.get("conversation_id") or "")
+        conversation = self.app.storage.get_conversation(conversation_id, include_trace=False)
+        if not conversation:
+            raise LookupError("关联会话已删除")
+        if int(conversation.get("archived") or 0):
+            raise RuntimeError("会话已归档，不再派发结果回复")
+        from naiba.subagent import job_wait_execution_snapshot
+
+        snapshot = job_wait_execution_snapshot(wait.get("snapshot"))
+        # 兼容旧等待只存了部分字段的记录：仅回读原 Run，绝不从当前会话补模型或 Agent。
+        origin = self.app.storage.get_run_snapshot(str(wait.get("origin_run_id") or ""))
+        snapshot.update(job_wait_execution_snapshot(origin))
+        model_key = str(snapshot.get("model_key") or "").strip()
+        model_name = str(snapshot.get("model_name") or "").strip()
+        agent = snapshot.get("agent")
+        if (not model_key or not model_name or not isinstance(agent, dict)
+                or "system_prompt" not in agent or "skill_ids" not in agent
+                or not all(key in snapshot for key in ("skill_policy", "workspace_dir", "allowed_tools"))):
+            raise RuntimeError("原 Run 执行快照不完整，未派发结果回复；请重新确认配置")
+        try:
+            resolved = self.app.config.resolve_conversation_model_key(
+                model_key, str(snapshot.get("provider_id") or "")
+            )
+        except Exception as exc:  # noqa: BLE001 - 配置被删/无效即暂停，不猜替代配置
+            raise RuntimeError(f"原模型配置不可用：{exc}") from exc
+        if resolved != model_key:
+            raise RuntimeError("原模型配置已删除或不可用")
+        jobs: list[dict[str, Any]] = []
+        missing: list[str] = []
+        for target in wait.get("target_job_ids") or []:
+            job = self.app.jobs.get(str(target))
+            if job is None:
+                missing.append(str(target))
+            else:
+                jobs.append(job)
+        source = {
+            "wait_id": wait_id,
+            "origin_run_id": str(wait.get("origin_run_id") or ""),
+            "origin_message_id": str(wait.get("origin_message_id") or ""),
+            "targets": list(wait.get("target_job_ids") or []),
+            "missing": missing,
+        }
+        body = {
+            "conversation_id": conversation_id,
+            "message": build_resume_message(wait, jobs, missing),
+            # 气泡只显示固定来源说明：完整结果摘要是给模型的载荷，不铺在用户消息里。
+            "display_message": "已登记等待的后台任务已结束，下面是结果汇报。",
+            "attachments": [],
+            "model_key": model_key,
+            "model_name": model_name,
+        }
+        # submit_chat 先决议当前工具，再与「来源 Run 已授权 ∩ 结果读取集」取交集。
+        origin_tools = {str(item) for item in (snapshot.get("allowed_tools") or [])}
+        allowed_limit = [tool for tool in JOB_WAIT_RESULT_TOOLS if tool in origin_tools]
+        return self.submit_chat(
+            body,
+            task_model_override=True,
+            internal_resume=True,
+            allowed_tools_limit=allowed_limit,
+            workspace_dir_override=str(snapshot.get("workspace_dir") or ""),
+            job_wait_dispatch={
+                "wait_id": wait_id,
+                "dispatch_key": f"{wait_id}:{uuid.uuid4().hex}",
+                "source": source,
+                "snapshot": snapshot,
+            },
+        )
 
     def submit_plan(self, plan_id: str, web_search_enabled: bool = False) -> dict[str, Any]:
         with self._submit_lock:
@@ -743,6 +875,8 @@ class ConversationRunMixin:
             )
             effective = supervised_message_content(effective, snapshot.get(MetadataKeys.SUPERVISED_SOURCE))
             effective = dependency_message_content(effective, snapshot.get(MetadataKeys.DEPENDENCY_SOURCE))
+            # 等待续答的输入是程序收集的任务结果：与历史重放同一个边界说明，避免被当成新授权。
+            effective = job_wait_message_content(effective, snapshot.get(MetadataKeys.JOB_WAIT_SOURCE))
             model_key = str(snapshot.get("model_key") or "")
             if not model_key and snapshot.get("provider_id"):
                 model_key = self.app.config.resolve_conversation_model_key("", str(snapshot["provider_id"]))
@@ -924,6 +1058,12 @@ class ConversationRunMixin:
                            "用 pdf_zoom_region 局部放大后再次 vision_analyze。").strip()
             # 视频理解策略：条件同 PDF——会话固化工具集含 extract_frames 才注入
             # （probe_video 是它的前置，同一套抽取参数下两者必然同进同出）。
+            if "job_wait" in allowed_tools:
+                # 固定指引，只按工具是否可用注入：不拼 Job ID/计时/任务数量，保持共享前缀稳定。
+                prompt = (prompt + "\n\n后台任务结果：用户要求“等它跑完/完成后把结果告诉我”时，"
+                           "调用 job_wait 并传 notify_on_completion=true，由程序登记并在任务结束后自动回复；"
+                           "只是查看进度用普通 job_wait / job_status。没有登记成功时不要声称会自动回来。"
+                           "登记成功后本轮会自动结束，不要重复创建同一个任务。").strip()
             if video_tools_enabled:
                 prompt = (prompt + "\n\n视频工具按用户目标分流：用户只要求展示/播放一个已指名的视频文件"
                            "（如‘看看 01-09.mp4’），且本会话有 show_media 时，只调用 show_media 出媒体卡，"
@@ -960,8 +1100,7 @@ class ConversationRunMixin:
                                    "目录里有什么仍用 list_directory；不要为了满足展示请求去扫描目录。"
                                    "工具拒绝（越界、非媒体、超限、意图不符）就如实说明原因，不要绕道用"
                                    "别的工具伪造展示。").strip()
-            # 历史检索指引：只在会话固化工具集含长会话工具时注入，且逐条按"确实有这个工具"拼，
-            # 避免让模型去调一个不在本会话工具集里的工具（与 web_search/PDF 同口径）。
+            # 历史检索指引：只在会话固化工具集含长会话工具时注入，且逐条按"确实有这个工具"拼，            # 避免让模型去调一个不在本会话工具集里的工具（与 web_search/PDF 同口径）。
             history_rules: list[str] = []
             if "recall_history" in allowed_tools:
                 history_rules.append(
@@ -1042,6 +1181,9 @@ class ConversationRunMixin:
                 "confirmation_ui": True,
                 "execution_guard": execution_guard,
                 "model_key": model_key,
+                # RunContext 只带登记授权面；完整执行配置从持久化原 Run 快照读取。
+                "conv_kind": conv_kind,
+                "run_origin": str(snapshot.get(RUN_ORIGIN_KEY) or RUN_ORIGIN_USER),
                 "context_limit": max(
                     0, int(profile.get("context_window") or fallback_context_window(profile)),
                 ),
@@ -1260,6 +1402,12 @@ class ConversationRunMixin:
                     finished=True,
                 )
                 followup = None
+            # 等待收尾：原回复已落盘（或本轮是续答 Run）→ 推进等待状态。必须在消息保存
+            # 之后调用：协调器要拿到 message_id 才能把状态卡写回原回复。
+            self._notify_job_wait_finished(
+                run_id, str(saved.get("id") or ""),
+                "failed" if sink.failure_message else "completed",
+            )
             if choice_groups:
                 # 事件带来源消息 id：前端以「会话 + 来源消息」为键保存临时选择，
                 # 缺了它 choice 与随后的 done 会被当成两个来源，面板在两事件之间被重建。
@@ -1316,6 +1464,9 @@ class ConversationRunMixin:
             self.app.storage.update_background_task(
                 run_id, status="cancelled", detail={"message": "任务已取消"}, finished=True
             )
+            self._notify_job_wait_finished(
+                run_id, str((aborted_message or {}).get("id") or ""), "cancelled"
+            )
             # 与 done 同口径：事件**不带** `aborted_message`（整份消息与 messages 表重复，
             # 写进 run_events 再被终态瘦身删掉）。`aborted_message` 本身仍是本地变量，
             # 只用于给用量台账带 message_id；完整消息由前端收尾重载会话拿到。
@@ -1355,6 +1506,9 @@ class ConversationRunMixin:
                 detail={"message": "任务执行失败"},
                 error=error_message,
                 finished=True,
+            )
+            self._notify_job_wait_finished(
+                run_id, str((partial_message or {}).get("id") or ""), "failed"
             )
             # 同 cancelled/done：`partial_message` 只留在本地（给用量台账带 message_id），
             # 不进事件载荷——error 的这份副本此前连瘦身都没覆盖过，会永久留在 run_events 里。

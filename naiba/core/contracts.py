@@ -18,6 +18,33 @@ from typing import Any, Callable, Literal, NotRequired, Protocol, TypedDict, run
 
 import threading  # noqa: F401  (供 run_context 键类型引用；协议成员注解用)
 
+# Host-only resource snapshot served to desktop and LAN clients; unavailable
+# measurements stay null rather than masquerading as zero usage.
+class ResourceMemory(TypedDict):
+    available: bool
+    total_bytes: int | None
+    used_bytes: int | None
+    percent: float | None
+
+
+class ResourceGpu(TypedDict):
+    index: int
+    name: str
+    total_bytes: int
+    used_bytes: int
+    percent: float
+
+
+class SystemResourceSnapshot(TypedDict):
+    source: Literal["host"]
+    sampled_at: int
+    memory: ResourceMemory
+    gpus: list[ResourceGpu]
+    gpu_available: bool
+    error: NotRequired[str]
+    reason: NotRequired[str]
+
+
 # Writer request_snapshot fields. Full baseline stays server-side; only its tail
 # enters a continuation task. Previous chapter always means current pointer,
 # never the newest historical candidate. Rebase replaces both atomically.
@@ -262,6 +289,31 @@ SUPER_AGENT_BINDING_KEY = "_super_agent_binding"
 SUBAGENT_OUTCOME_KEY = "execution_outcome"
 SUPER_AGENT_BASELINE_KEY = "_super_agent_baseline"
 SUPER_AGENT_DEPENDENCY_KEY = "_super_agent_dependency_source"
+# ---- 普通等待（job_wait notify_on_completion）----
+# 单次工具调用的宿主控制槽：工具在其中登记**可信**等待结果分类（不是模型正文推断）。
+# 值：{"kind": "completed|pending_timeout|failed|cancelled|interrupted|handoff",
+#      "waited": bool, "wait_id": str, "reason": str}
+JOB_WAIT_OUTCOME_KEY = "job_wait_outcome"
+# 按调用序号隔离的槽位表（Agent 循环在 `_call_context` 写入；并行工具各占一格）。
+JOB_WAIT_CALL_SLOTS_KEY = "_job_wait_call_slots"
+# 本轮 Run 的来源类型（普通用户 / 监督续办 / 依赖续办 / 等待续答）：决定能否登记普通等待
+# 与是否为续答结果轮。
+RUN_ORIGIN_KEY = "run_origin"
+RUN_ORIGIN_USER = "user"
+RUN_ORIGIN_SUPERVISED = "supervised"
+RUN_ORIGIN_DEPENDENCY = "dependency"
+RUN_ORIGIN_JOB_WAIT = "job_wait"
+# 等待表状态（storage + 协调器共用；前端直接展示 needs_attention 的原因）。
+JOB_WAIT_STATUSES = (
+    "registered", "waiting", "ready", "dispatched", "completed",
+    "cancelled", "expired", "needs_attention",
+)
+JOB_WAIT_ACTIVE_STATUSES = ("registered", "waiting", "ready", "dispatched")
+JOB_WAIT_MAX_TARGETS = 100
+JOB_WAIT_MAX_ACTIVE_GLOBAL = 100
+JOB_WAIT_DEADLINE_SECONDS = 24 * 60 * 60
+JOB_WAIT_SHORT_WAIT_SECONDS = 30
+JOB_WAIT_OUTPUT_LIMIT_CHARS = 6000
 SUPER_AGENT_SUPERVISION_KEY = "supervision"
 SUPERVISED_EXECUTOR = "supervised_chat"
 SUPERVISED_DEFAULT_CONTINUATIONS = 3
@@ -441,6 +493,10 @@ RUN_CONTEXT_KEYS: tuple[str, ...] = (
     # 整理完成后，下一次完整请求组装好时推送一次包含 system/schema 的占用估算。
     "context_estimate_pending",
     "model_key", "context_limit", "context_limit_source",
+    # 普通等待（job_wait notify_on_completion，计划 2026-11-16）：
+    # conv_kind / run_origin —— 登记授权面（辅助对话、监督/依赖续办不得登记）；
+    # job_wait_handoff —— 交接事实（wait_id/targets），Agent 循环据此走专用出口。
+    "conv_kind", "run_origin", "job_wait_handoff",
 )
 
 # 运行期保持 dict 形态（零行为变化）；"带默认值/校验"经由工厂与校验函数落地，
@@ -516,6 +572,10 @@ def default_run_context() -> dict[str, Any]:
         # reset_context 工具的本轮重置请求（{"at","source","handoff_path","note","tasks"}）：
         # 空 dict = 本轮没有重置请求；收尾路径据此把分割线写进 assistant 消息 metadata。
         "context_reset": {},
+        # 普通等待授权面与交接事实（缺省 = 普通用户 Run、没有交接）。
+        "conv_kind": "main",
+        "run_origin": "user",
+        "job_wait_handoff": {},
     }
 
 
@@ -598,6 +658,8 @@ class AppContext(Protocol):
     runs: Any
     tasks: Any
     jobs: Any
+    job_waits: Any
+    system_resources: Any
     studio: Any
     comfyui: Any
     plans: Any
@@ -676,6 +738,12 @@ class RunContext(TypedDict, total=False):
     model_key: str                   # 本轮模型键（供实时用量事件标记）
     context_limit: int                # 本轮有效窗口（profile 或类型回退）
     context_limit_source: str         # 窗口来源（profile / local_default / unknown）
+    # ---- 普通等待（job_wait notify_on_completion）----
+    conv_kind: str                   # main / aux（辅助对话不得登记自动回复）
+    run_origin: str                  # user / supervised / dependency / job_wait
+    # 交接事实（仅本次 Run 内有效）：{"wait_id": str, "targets": list[str]}
+    # 由 job_wait 处理器在登记成功后写入；Agent 循环据此走专用交接出口。
+    job_wait_handoff: dict[str, Any]
 
 
 class EventType(str, Enum):

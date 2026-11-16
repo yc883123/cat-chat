@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from naiba.core.contracts import RunContext
+from naiba.core.contracts import JOB_WAIT_CALL_SLOTS_KEY, JOB_WAIT_OUTCOME_KEY, RunContext
 from naiba.core.messages import MetadataKeys
 from naiba.core.trace_view import TraceMessages, publish_trace
 
@@ -633,7 +633,19 @@ def _call_context(run_context: RunContext | None, event: EventCallback, seq: int
     """派生一次工具调用专用的 run_context：``event_sink`` 按调用隔离，其余顶层写入回落共享上下文。"""
     if not isinstance(run_context, dict):
         return run_context
-    return _CallRunContext(run_context, _seq_event_sink(event, seq))
+    ctx = _CallRunContext(run_context, _seq_event_sink(event, seq))
+    # 单次调用的宿主控制槽：工具把**可信**结果分类写在这里（如 job_wait 的
+    # completed/pending_timeout/handoff），Agent 循环按调用序号读取后即消费。
+    # 不能用共享的 Run 级布尔标记：并行工具会互相覆盖；也不能从工具正文推断。
+    slot: dict[str, Any] = {}
+    slots = run_context.get(JOB_WAIT_CALL_SLOTS_KEY)
+    if not isinstance(slots, dict):
+        slots = {}
+        run_context[JOB_WAIT_CALL_SLOTS_KEY] = slots
+    slots[seq] = slot
+    # 槽位只留在本次派生视图里：工具写进去不会回落到共享上下文的同名键。
+    dict.__setitem__(ctx, "tool_call_slot", slot)
+    return ctx
 
 
 class SkillAgent:
@@ -1700,6 +1712,16 @@ class SkillAgent:
                             _call_context(run_context, event, call_index),
                             call_source,
                         )
+                    # 宿主控制槽（按调用序号隔离、消费即清除）：工具写入的是结构化结果类型，
+                    # 不从 result 正文推断，也不接受模型自报字段。
+                    call_slot: dict[str, Any] = {}
+                    if isinstance(run_context, dict):
+                        slots = run_context.get(JOB_WAIT_CALL_SLOTS_KEY)
+                        if isinstance(slots, dict):
+                            candidate = slots.pop(call_index, None)
+                            if isinstance(candidate, dict):
+                                call_slot = candidate
+                    wait_outcome = call_slot.get(JOB_WAIT_OUTCOME_KEY)
                     # 围栏来源动作被拒/无确认 UI：不当成工具失败回灌模型，直接以原文收尾
                     # （计划 2026-10-01 §3.4/§3.5）。
                     fence_marker = _fence_outcome_marker(result)
@@ -1734,6 +1756,20 @@ class SkillAgent:
                     step_runs.append(run)
                     event({"type": "tool_result", **display_tool_run(run), "seq": call_index})
 
+                    # 专用交接出口：job_wait 已成功登记「后台完成后自动回复」。当前 Run 必须
+                    # 正常收尾（保存工具结果/助手消息、释放运行位），不能当成工具失败，也不能
+                    # 落进下面的重复失败/无进展熔断。正文由程序生成固定、真实的提示。
+                    if isinstance(wait_outcome, dict) and wait_outcome.get("kind") == "handoff":
+                        record_tool_group(action, normalized_calls[:len(step_runs)], step_runs)
+                        handoff_content = str(
+                            wait_outcome.get("message") or "已登记，后台任务结束后会在这里回复。"
+                        )
+                        if isinstance(run_context, dict):
+                            run_context["job_wait_handoff"] = dict(wait_outcome)
+                        messages.append(assistant_message(handoff_content))
+                        publish_trace(run_context, messages, trace_start)
+                        return handoff_content, runs, reasonings, self._summarize_usage(usages)
+
                     if not success and key == repeat_key:
                         repeat_count += 1
                     else:
@@ -1746,6 +1782,15 @@ class SkillAgent:
                         return f"工具 {tool} 连续失败且重复，已停止执行。", runs, reasonings, self._summarize_usage(usages)
 
                     signature_source = f"{key}\n{success}\n{result}"
+                    if (isinstance(wait_outcome, dict)
+                            and wait_outcome.get("kind") == "pending_timeout"
+                            and wait_outcome.get("waited")):
+                        # 「本次等待确实进入等待并用完期限、任务仍在运行」是正常快照：不累计
+                        # 无进展次数，并清掉与上一次普通工具的重复序列关联——否则三次同状态
+                        # 快照会被当成"任务没有进展"熔断（计划 2026-11-16 §3.1）。
+                        no_progress_signature = ""
+                        no_progress_count = 0
+                        continue
                     signature = hashlib.sha256(signature_source.encode("utf-8", errors="replace")).hexdigest()
                     if success and signature == no_progress_signature:
                         no_progress_count += 1

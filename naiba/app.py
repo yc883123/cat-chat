@@ -78,6 +78,7 @@ from naiba.storage.media_collect import MediaCollector
 from naiba.storage.job_media import JobMediaWriter
 from naiba.storage.store import ChatStorage
 from naiba.subagent import run_subagent_agent
+from naiba.system_resources import SystemResources
 from naiba.tools.executor import ToolExecutor
 from naiba.tools.registry import build_tool_registry
 from naiba.updater import UpdateManager
@@ -270,6 +271,7 @@ class NaibaChatApp:
         self._paths = paths or default_path_context()
         # 公开访问别名（同对象引用：rebind_data_dir 会就地更新字段）
         self.paths = self._paths
+        self.system_resources = SystemResources()
         # 冻结版首次启动：从 EXE 相邻旧目录迁移配置与数据到 %LOCALAPPDATA%\NaibaChat。
         initial_data_dir = self._paths.data_dir.resolve()
         self.data_migration = migrate_legacy_data(self._paths)
@@ -461,6 +463,10 @@ class NaibaChatApp:
             VideoToolProvider(core_tool_context, lambda: self._paths.data_dir)
         )
         self.jobs = JobRegistry(self)
+        # 普通等待协调器：登记的后台等待在服务存活期间自动回复一次；重启一律暂停。
+        from naiba.run.job_waits import JobWaitCoordinator
+
+        self.job_waits = JobWaitCoordinator(self)
         # MCP 生命周期：工具发现后注册到统一工具表，断开/注销时清理
         self.mcp.on_tools_discovered = self.tool_registry.register_mcp_tools
         self.mcp.on_tools_deregistered = self.tool_registry.deregister_mcp_tools
@@ -508,6 +514,14 @@ class NaibaChatApp:
         # jobs that explicitly opted into resume are safely re-created from
         # their durable checkpoint and persisted parameters.
         self.jobs.resume_interrupted()
+        # 普通等待不随服务重启恢复自动派发：保留记录与目标，交给用户点「继续查看结果」。
+        try:
+            paused = self.storage.pause_job_waits_after_restart()
+            if paused:
+                logger.info("已暂停 %s 条后台等待（服务重启）", paused)
+        except Exception:  # noqa: BLE001 - 等待恢复失败不影响启动
+            logger.exception("后台等待恢复失败")
+        # 协调器线程按需启动（第一次登记等待时），没有等待的实例不留后台空转。
         # 重启清理只把 in-flight 的对话 Run 标成 interrupted；已经流式输出过的正文只存在
         # 事件流里，不重建就会表现为「那条回复凭空消失，刷新/重启都不回来」。这里把它
         # 落库成一条带「未完成」标记的 partial 消息（失败不影响启动）。
@@ -601,6 +615,13 @@ class NaibaChatApp:
             self.onebot.stop()
         except Exception:  # noqa: BLE001 - 收尾不互相阻断
             logger.exception("QQ 渠道收尾失败")
+        # 先停等待协调器并等它的检查线程退出，再收 Run/Job：协调器不再派发新 Run。
+        try:
+            coordinator = getattr(self, "job_waits", None)
+            if coordinator is not None:
+                coordinator.stop()
+        except Exception:  # noqa: BLE001 - 收尾不互相阻断
+            logger.exception("等待协调器收尾失败")
         self.super_agent_domain.runtime.shutdown()
         self.runs.shutdown()
         self.plans.shutdown()
@@ -896,6 +917,9 @@ class NaibaChatApp:
         return {"configured": configured, "resolved": resolved}
 
     # ---- 数据与迁移（PLAN7 §数据与迁移） ----
+    def api_system_resources(self) -> dict[str, Any]:
+        return self.system_resources.get()
+
     def migration_health(self) -> dict[str, Any]:
         """返回数据库版本、健康状态、已应用迁移与备份位置。"""
         integrity = self.storage.check_integrity()

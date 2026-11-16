@@ -137,7 +137,11 @@ def _comfyui_batch_handler(
     )
     job_id = app.jobs.start(spec, owner=owner)
     if bool(values.get("wait")):
-        snapshot = app.jobs.wait(job_id, float(spec.params["wait_timeout"]), owner=owner)
+        # 同步等待同样要响应本轮停止：取消只中断等待，不取消已提交的生成 Job。
+        snapshot = app.jobs.wait(
+            job_id, float(spec.params["wait_timeout"]), owner=owner,
+            cancel_event=ctx.get("cancel_event"),
+        )
         return True, json.dumps(snapshot or {"id": job_id}, ensure_ascii=False)
     return True, json.dumps({"job_id": job_id, "status": "queued", "total": len(workflows)}, ensure_ascii=False)
 

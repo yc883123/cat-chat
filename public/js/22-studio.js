@@ -12,6 +12,7 @@ import { beginConversationNavigation, isConversationOpenCurrent, loadConversatio
 import { applyFilePanelOpenClass, closeSidebar, filePanelState, openSidebar, setLeftSidebarCollapsed, sidebarDesktop } from "./14-file-panel.js";
 import { statusLabel as workbenchStatusLabel, syncWorkbenchHeader, watchWorkbenchSize, bindWorkbenchDetails } from "./22a-workbench-ui.js";
 import { createContentSkillPicker, renderContentThread, getContentFollowup, prepareContentFollowup, clearContentFollowup } from "./22c-content-skills.js";
+import { createResourceMonitor } from "./22f-resource-monitor.js";
 
 // ---- 模块清单（目录条目 module -> 显示名；顺序即分类顺序） ----
 const MODULE_TABS = [
@@ -2854,7 +2855,16 @@ async function confirmStudioHandoff() {
 // 事件接线（组合根 bind-events 调用一次）
 // ============================================================
 
+let resourceMonitor = null;
+export function initStudio() {
+  if (resourceMonitor) return;
+  resourceMonitor = createResourceMonitor({ root: $("#studioView"), dialog: $("#resourceMonitorDialog"), request: api });
+  // 提词库页头在分页容器之外，需单独覆盖其轻量 details 菜单。
+  bindWorkbenchDetails($("#studioView > .studio-topbar"));
+}
+
 export function bindStudioEvents() {
+  initStudio();
   onProvidersChanged(() => {
     if (!studio.generationInitialized) return;
     void syncStudioModel().catch((error) => toast(`工作台模型刷新失败：${error.message}`));

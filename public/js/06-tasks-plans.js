@@ -93,14 +93,22 @@ export async function syncActiveConversationRuns() {
 
 // 轮询兜底恢复流：仅在处于"等待恢复/重连冷却已过"且前端无活动流时，
 // 探测后端是否仍有当前对话的活跃 Run，若有则 resumeRun 拉回流。
-// 只会在 runReconnectAt（>0 表示要恢复）且冷却已过时查询，避免每个轮询周期都打 /api/runs。
+// 另有一条自动发现：后台等待派发的新 Run 不经过用户发送，前端没有流可续，
+// 但 syncActiveConversationRuns 已经同步到「这条会话有活跃 Run」——命中即接管，
+// 不能只依赖 checkRunEligible 这个重连开关，否则看到的状态卡永远不会变成结果回复。
 export async function maybeRecoverRunFromPoll() {
   if (state.cancelRequested) return;
   if (state.abortController) return; // 已有活动流，无需兜底
   if (state.runRecovering) return;
-  if (!state.checkRunEligible) return; // 未进入"等恢复"状态就不查询
+  const recovering = Boolean(state.checkRunEligible);
+  const discovering = Boolean(
+    !state.chatRunId
+    && state.conversationId
+    && state.activeConversationRunIds?.has?.(state.conversationId),
+  );
+  if (!recovering && !discovering) return; // 既不在等恢复，也没有待发现的后台 Run
   if (!state.conversationId) return;
-  if (state.runReconnectAt && Date.now() < state.runReconnectAt) return; // 冷却中
+  if (recovering && state.runReconnectAt && Date.now() < state.runReconnectAt) return; // 冷却中
   state.runRecovering = true;
   const conversationId = state.conversationId;
   const openGeneration = conversationOpenGeneration();
@@ -117,8 +125,8 @@ export async function maybeRecoverRunFromPoll() {
       state.checkRunEligible = false;
       await resumeRun(run);
     }
-    // 后端已无活跃 Run：说明任务其实已完成，静默回到就绪，避免无限查询。
-    else {
+    // 后端已无活跃 Run：恢复等待静默回到就绪；后台发现只是没有可接管的流。
+    else if (recovering) {
       state.checkRunEligible = false;
       setConnectionState('connected');
       if (state.chatRunId) {

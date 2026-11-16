@@ -122,8 +122,10 @@ class WorkbenchScopeTests(unittest.TestCase):
 
     def test_shared_header_moves_existing_nodes_not_duplicates(self):
         source = (ROOT / "public/js/22a-workbench-ui.js").read_text(encoding="utf-8")
-        self.assertIn("target.prepend(mobile)", source)
-        self.assertIn("target.prepend(expand)", source)
+        self.assertIn('const main = target.querySelector(".wb-header-main") || target', source)
+        self.assertIn("main.prepend(mobile)", source)
+        self.assertIn("main.prepend(expand)", source)
+        self.assertIn("target.append(monitor)", source)
         self.assertNotIn("cloneNode", source)
 
 

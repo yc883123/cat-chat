@@ -948,14 +948,27 @@ def build_job_tool_specs() -> list[ToolSpec]:
         ToolSpec(
             name="job_wait",
             description=(
-                "阻塞等待 Job 完成，返回最终快照。"
-                "只读操作：跨对话/跨会话也可等待。"
+                "阻塞等待 Job 完成，返回最终快照；只读，跨对话可用。"
+                "需要任务结束后自动把结果回复到对话里时传 notify_on_completion=true。"
+                "普通查看状态不要传 true。"
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "job_id": _string("Job ID"),
-                    "timeout": {"type": "integer", "default": 600},
+                    "timeout": {
+                        "type": "integer",
+                        "default": 600,
+                        "description": "正整数秒；等待到期任务仍在运行会返回运行中快照，不视为失败。",
+                    },
+                    "notify_on_completion": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": (
+                            "true=登记后台等待并在任务结束后自动回复一次结果（仅普通主对话、"
+                            "本会话自己的 Job）；false=只做同步查询。"
+                        ),
+                    },
                 },
                 "required": ["job_id"],
             },

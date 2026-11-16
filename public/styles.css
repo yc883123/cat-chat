@@ -6169,6 +6169,12 @@ details.comfyui-saveas-group > summary { font-size: 11.5px; color: var(--muted);
 .super-agent-create-group legend { font-size: 12px; padding: 0 6px; color: var(--muted); }
 .super-agent-supervision-fields { display: grid; gap: 10px; min-width: 0; }
 .supervised-message-source { margin-bottom: 8px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+/* 后台等待状态卡（job_wait notify_on_completion）：紧跟在回复正文之后，动作与状态同层。 */
+.job-wait-card { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0 2px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-2); color: var(--muted); font-size: 12px; line-height: 1.5; }
+.job-wait-card[data-state="needs_attention"], .job-wait-card[data-state="expired"] { border-color: color-mix(in srgb, var(--danger, #d33) 35%, var(--line)); }
+.job-wait-label { min-width: 0; overflow-wrap: anywhere; }
+.job-wait-card button { padding: 2px 8px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); color: var(--muted); font-size: 11px; cursor: pointer; }
+.job-wait-card button:hover { color: var(--text); border-color: var(--muted); }
 .super-agent-supervision[hidden] { display: none; }
 .super-agent-supervision { border-bottom: 1px solid var(--line); }
 .super-agent-supervision .super-agent-section-title { align-items: flex-start; flex-wrap: wrap; }
@@ -7557,6 +7563,86 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
 #studioPageLabeler[data-wb-size="narrow"] .wb-page-head,
 #studioPageComfyui[data-wb-size="narrow"] .wb-page-head { padding: 8px 12px; gap: 8px; }
 /* wb-media:end */
+
+/* 共享资源摘要占独立中列，两翼等宽；阶段与生成进度另起行，均参与正常布局。 */
+.studio-view { min-width: 0; container: resource-workbench / inline-size; }
+#studioView .wb-resource-header {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center; gap: 8px 12px;
+}
+#studioView .wb-resource-header > .wb-header-main {
+  grid-column: 1; grid-row: 1; display: flex; flex-wrap: wrap; align-items: center;
+  gap: 8px; min-width: 0;
+}
+#studioView .wb-resource-header > .wb-header-main > :is(#studioExpandSidebar, #studioOpenSidebar) { flex: none; margin: 0; }
+#studioView .wb-header-main > h1 { margin: 0; font-size: 20px; line-height: 1.2; white-space: nowrap; }
+#studioView .wb-header-main > :is(.novel-page-title-row, .writer-page-title-row) { flex: 1; min-width: 0; }
+#studioView .wb-resource-header > .wb-header-actions {
+  grid-column: 3; grid-row: 1; display: flex; flex-wrap: wrap; justify-content: flex-end;
+  align-items: center; gap: 8px; min-width: 0; margin: 0;
+}
+#studioView .wb-header-actions .studio-topbar-tools { flex: 1; order: initial; margin: 0; }
+#studioView .wb-header-actions .studio-search { min-width: 0; flex: 1; }
+#studioView .wb-header-actions .studio-search input { width: 100%; }
+#studioView .wb-header-actions .comfyui-statusbar { width: 100%; min-width: 0; margin: 0; padding: 0; }
+#studioView .wb-header-actions .comfyui-status-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#studioView .wb-resource-header > :is(.novel-stagebar, .writer-stagebar) { grid-column: 1 / -1; grid-row: 2; width: 100%; }
+#studioView .wb-resource-header > .comfyui-step-meter { grid-column: 1 / -1; justify-self: end; max-width: 100%; margin: 0; }
+#studioView .wb-resource-monitor {
+  grid-column: 2; grid-row: 1; justify-self: center; display: flex; align-items: center; gap: 12px;
+  min-width: 0; min-height: 32px; padding: 5px 10px; border: 1px solid var(--line);
+  border-radius: var(--r-full); background: var(--surface-2); color: var(--muted);
+  font-size: 12px; line-height: 1.4; font-variant-numeric: tabular-nums; white-space: nowrap; cursor: pointer;
+}
+#studioView .wb-resource-monitor b { color: var(--text); font-weight: 600; }
+#studioView .wb-resource-monitor [data-resource-compact] { display: none; }
+#studioView .wb-resource-monitor progress { display: block; width: 100%; height: 3px; margin-top: 3px; accent-color: var(--accent); }
+.resource-monitor-dialog progress { width: 100%; height: 5px; accent-color: var(--accent); }
+:is(.resource-monitor-dialog, #workbenchResourceMonitor) progress[hidden] { display: none; }
+#studioView .wb-resource-monitor:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#studioView .wb-header-main .wb-media-tabs { flex-wrap: wrap; max-width: 100%; }
+#studioView .wb-header-main .wb-media-tabs .studio-pane-btn { min-width: 0; }
+#studioView .wb-resource-menu { margin-left: auto; }
+.resource-monitor-dialog { width: min(520px, calc(100vw - 24px)); max-height: calc(100dvh - 32px); background: var(--surface); }
+.resource-monitor-dialog .dialog-toolbar { gap: 12px; }
+.resource-monitor-dialog .dialog-toolbar > div { min-width: 0; }
+.resource-monitor-dialog .dialog-toolbar p { overflow-wrap: anywhere; }
+.resource-monitor-body { padding: 16px; overflow: auto; }
+.resource-monitor-status { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+.resource-monitor-card { padding: 12px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: var(--r-md); min-width: 0; }
+.resource-monitor-card h3 { margin: 0 0 8px; font-size: 14px; }
+.resource-monitor-card p { margin: 6px 0 0; font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.resource-monitor-note { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.resource-monitor-note:empty { display: none; }
+.resource-monitor-gpu { padding-top: 8px; }
+.resource-monitor-gpu + .resource-monitor-gpu { margin-top: 10px; border-top: 1px solid var(--line); }
+.resource-monitor-gpu strong { font-size: 13px; overflow-wrap: anywhere; }
+@container resource-workbench (max-width: 1100px) {
+  #studioView .wb-resource-monitor [data-resource-full] { display: none; }
+  #studioView .wb-resource-monitor [data-resource-compact] { display: inline; }
+}
+@container resource-workbench (max-width: 900px) {
+  #studioView .wb-resource-header { column-gap: 8px; }
+  #studioView .wb-resource-monitor { padding-inline: 6px; gap: 8px; font-size: 12px; }
+  #studioView .wb-header-main > .studio-source-tabs,
+  #studioView .wb-header-main > .wb-media-tabs { flex-basis: 100%; }
+}
+@media (max-width: 760px) {
+  #studioView .wb-resource-header { grid-template-columns: minmax(0, 1fr) auto; }
+  #studioView .wb-resource-monitor { display: none; }
+  #studioView .wb-resource-header > .wb-header-actions { grid-column: 2; }
+  #studioView .studio-topbar > .wb-header-actions { display: contents; }
+  #studioView .studio-topbar .studio-topbar-tools { grid-column: 1 / -1; grid-row: 2; }
+  #studioView .studio-topbar .wb-resource-menu { grid-column: 2; grid-row: 1; }
+  #studioView .wb-header-main > :is(.studio-source-tabs, #comfyuiPanes) { flex-basis: 100%; }
+  #studioView .wb-header-main .labeler-view-tabs { display: flex; flex-basis: 100%; margin: 0; }
+  #studioView .wb-header-actions .comfyui-statusbar { justify-content: flex-end; }
+  #studioView .wb-header-actions .comfyui-status-text { max-width: 72px; }
+  #studioView .wb-header-actions :is(.wb-book-more, .wb-media-menu > summary) { min-width: 40px; min-height: 40px; }
+  .resource-monitor-dialog { position: fixed; inset: auto 0 0; margin: 0; width: 100%; max-width: 100%; max-height: 85dvh; border-radius: var(--r-xl) var(--r-xl) 0 0; padding-bottom: env(safe-area-inset-bottom); }
+  .resource-monitor-dialog .icon-button { min-width: 40px; min-height: 40px; }
+  .resource-monitor-body { max-height: calc(85dvh - 100px); }
+}
 
 /* wb-super-agent:start */
 /* 任务列表沿用应用侧栏；侧栏不继承白底工作区的文字语义。 */

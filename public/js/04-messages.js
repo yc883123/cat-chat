@@ -167,6 +167,46 @@ export function replaceWithMessage(target, message, temporary = false) {
   return element;
 }
 
+// 后台等待状态卡：挂在原助手回复下方。只展示真实状态与可执行动作，
+// 不用「任务已完成」替代自动回复是否真的派发过。
+export function jobWaitMarkup(wait) {
+  if (!wait || typeof wait !== 'object' || !wait.wait_id) return '';
+  const id = escapeHtml(String(wait.wait_id));
+  const state = String(wait.state || '');
+  const reason = escapeHtml(String(wait.reason || ''));
+  let label = '';
+  let actions = '';
+  if (state === 'waiting' || state === 'registered' || state === 'ready' || state === 'dispatched') {
+    label = state === 'dispatched' ? '后台任务已结束，正在回复结果' : '等待后台任务完成，完成后回复';
+    actions = `<button data-job-wait-stop="${id}" title="只取消自动回复；后台任务本身仍在任务面板里，可在那里停止">停止等待</button>`;
+  } else if (state === 'completed') {
+    label = '后台任务已结束，结果见后续回复';
+  } else if (state === 'cancelled') {
+    label = reason ? `已停止等待：${reason}` : '已停止等待';
+  } else if (state === 'expired' || state === 'needs_attention') {
+    label = reason ? `自动回复已暂停：${reason}` : '自动回复已暂停';
+    actions = `<button data-job-wait-continue="${id}" title="只重新核对已有任务结果，不会重新生成或重新执行">继续查看结果</button>`;
+  } else {
+    return '';
+  }
+  return `<div class="job-wait-card" data-job-wait="${id}" data-state="${escapeHtml(state)}">`
+    + `<span class="job-wait-label">${label}</span>${actions}</div>`;
+}
+
+export async function jobWaitAction(waitId, action) {
+  if (!waitId) return;
+  try {
+    await api(`/api/job-waits/${encodeURIComponent(waitId)}/${action === 'continue' ? 'continue' : 'cancel'}`, {
+      method: 'POST',
+      body: {},
+    });
+    toast(action === 'continue' ? '已重新核对任务结果' : '已停止等待');
+    await syncCurrentConversation();
+  } catch (error) {
+    toast(`操作失败：${error.message}`);
+  }
+}
+
 export function messageElement(message, temporary = false) {
   if (message.role === 'session') return sessionDividerElement(message);
   const row = document.createElement('article');
@@ -185,6 +225,11 @@ export function messageElement(message, temporary = false) {
     const supervisedLabel = supervised && typeof supervised === 'object' && supervised.thread_id
       ? `<div class="supervised-message-source" data-supervised-thread="${escapeHtml(supervised.thread_id)}">任务总管 · 自动续办 · 第 ${Math.max(1, Number(supervised.round) || 1)} 轮</div>`
       : '';
+    // 后台任务结果：程序派发的输入，不是用户刚发的新消息——显式标来源。
+    const waitSource = metadata.job_wait_source;
+    const waitSourceLabel = waitSource && typeof waitSource === 'object'
+      ? `<div class="supervised-message-source" data-job-wait-source="${escapeHtml(String(waitSource.wait_id || ''))}">后台任务结果 · 自动回复</div>`
+      : '';
     // 「编辑」（破坏性：截断这条提问及其之后）在前，「分支」（非破坏性）居中，「删除」最后——
     // 编辑最常用，删除破坏性最强（因此排在末尾，且带分级确认框）。
     const actions = message.id
@@ -194,7 +239,7 @@ export function messageElement(message, temporary = false) {
         + '<button data-delete-message title="删除这条提问（可只删这一条，或连同 AI 回复整轮删除；10 秒内可撤销）">删除</button>'
         + '</div>'
       : '';
-    row.innerHTML = `<div class="message-body">${supervisedLabel}${renderUserContent(metadata.display_content || message.content)}${uploadedFileMarkup(metadata.attachments)}${folderIndexMarkup(metadata.folder_indexes)}${actions}</div>`;
+    row.innerHTML = `<div class="message-body">${supervisedLabel}${waitSourceLabel}${renderUserContent(metadata.display_content || message.content)}${uploadedFileMarkup(metadata.attachments)}${folderIndexMarkup(metadata.folder_indexes)}${actions}</div>`;
   } else {
     const abortedBadge = metadata.aborted
       ? '<span class="aborted-badge">已中止</span>'
@@ -242,6 +287,7 @@ export function messageElement(message, temporary = false) {
           ${temporary ? '<div class="run-activity activity">正在准备</div>' : ''}
           <div class="answer-content" data-raw="" ${hideBottomContent ? 'style="display:none"' : ''}>${temporary ? '' : abortedBadge + markdown(message.content)}</div>
           ${temporary ? '' : truncationNotice(metadata.truncated)}
+          ${temporary ? '' : jobWaitMarkup(metadata.job_wait)}
           ${temporary ? '' : sourcesMarkup(metadata.sources)}
           ${mediaMarkup(bottomAttachments)}
           ${bottomAttachments.length ? mediaTruncatedNotice(metadata.attachments_truncated) : ''}

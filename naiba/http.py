@@ -251,7 +251,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/") and not self._authorized(parsed):
             self._json({"error": "访问口令无效"}, HTTPStatus.UNAUTHORIZED)
             return
-        if path == "/api/storage/stats":
+        if path == "/api/system/resources":
+            self._json(self.app.api_system_resources())
+        elif path == "/api/storage/stats":
             self._json(self.app.storage.storage_usage())
         elif path == "/api/usage/stats":
             query = urllib.parse.parse_qs(parsed.query)
@@ -954,6 +956,25 @@ class RequestHandler(BaseHTTPRequestHandler):
                     {"error": f"数据库压缩失败：{exc}"},
                     HTTPStatus.CONFLICT,
                 )
+        elif path.startswith("/api/job-waits/") and path.endswith("/cancel"):
+            # 停止等待只撤销「自动回复」；实际后台任务仍由任务面板的「停止任务」取消。
+            wait_id = path[len("/api/job-waits/"):-len("/cancel")].strip("/")
+            record = self.app.job_waits.cancel_wait(
+                wait_id, reason=str(body.get("reason") or "用户停止等待")
+            )
+            if record is None:
+                self._json({"error": "等待记录不存在"}, HTTPStatus.NOT_FOUND)
+            else:
+                self._json({"wait": record})
+        elif path.startswith("/api/job-waits/") and path.endswith("/continue"):
+            # 继续查看结果只重新核对已有 Job 并派发一次只读结果汇报，不重新生成任何东西。
+            wait_id = path[len("/api/job-waits/"):-len("/continue")].strip("/")
+            record, error = self.app.job_waits.continue_wait(wait_id)
+            if record is None:
+                status = HTTPStatus.NOT_FOUND if "不存在" in error else HTTPStatus.CONFLICT
+                self._json({"error": error}, status)
+            else:
+                self._json({"wait": record})
         elif path == "/api/conversations":
             self._json(*self.app.api_create_conversation(body))
         elif path == "/api/studio/generate":

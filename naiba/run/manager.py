@@ -139,6 +139,21 @@ class ConversationRunManager(ConversationRunMixin):
             # stale automatic decision after a swallowed database error.
             hook(conversation_id)
 
+    def _job_wait_human_input(self, conversation_id: str) -> None:
+        """人工输入撤销旧的后台等待（普通等待与监督续办互不覆盖）。
+
+        与监督钩子同一时点：在记录新指令之前撤销。撤销失败保留等待（协调器派发时
+        还会在事务内比对人工代次），不会因为这里抛错挡住用户发言。
+        """
+        coordinator = getattr(self.app, "job_waits", None)
+        hook = getattr(coordinator, "human_input", None)
+        if not callable(hook):
+            return
+        try:
+            hook(conversation_id)
+        except Exception:  # noqa: BLE001 - 撤销等待不得阻断用户消息提交
+            logger.exception("撤销后台等待失败：conv=%s", conversation_id)
+
     def _resolve_allowed_tools(
         self,
         mode: str,
@@ -594,6 +609,7 @@ class ConversationRunManager(ConversationRunMixin):
             raise ValueError("attachments 必须是数组")
         with self.supervised_submission_guard(conversation_id):
             self._supervised_human_input(conversation_id)
+            self._job_wait_human_input(conversation_id)
             saved = self.app.storage.add_run_interjection(
                 conversation_id, run_id, message, attachments
             )
@@ -607,6 +623,7 @@ class ConversationRunManager(ConversationRunMixin):
             raise ValueError("conversation_id、run_id 和 message_id 不能为空")
         with self.supervised_submission_guard(conversation_id):
             self._supervised_human_input(conversation_id)
+            self._job_wait_human_input(conversation_id)
             saved = self.app.storage.guide_run_interjection(conversation_id, run_id, message_id)
         with self._lock:
             executor = self._executors.get(run_id)
@@ -632,6 +649,7 @@ class ConversationRunManager(ConversationRunMixin):
             raise ValueError("conversation_id、run_id、message_id 和 message 不能为空")
         with self.supervised_submission_guard(conversation_id):
             self._supervised_human_input(conversation_id)
+            self._job_wait_human_input(conversation_id)
             saved = self.app.storage.edit_run_interjection(conversation_id, run_id, message_id, message)
         return {"message": saved, "run_id": run_id}
 

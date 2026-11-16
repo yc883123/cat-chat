@@ -7520,6 +7520,11 @@ html[data-theme="dark"] :is(.studio-view, .super-agent-view, .super-agent-thread
 #studioPageComfyui[data-wb-size="narrow"] #comfyuiPanes { order: 8; flex-basis: 100%; }
 #studioPageComfyui[data-wb-size="medium"] #comfyuiPanes .comfyui-pane-btn,
 #studioPageComfyui[data-wb-size="narrow"] #comfyuiPanes .comfyui-pane-btn { flex: 1; padding-inline: 6px; }
+/* 手机窄档：页头首列被状态列挤到装不下四档按钮，flex:1+min-width:0 会把按钮压到
+   比文字还窄，文字溢出互相叠字（2026-11-17）。给按钮和标签条都兜住内容下限：首列够宽
+   时四档照旧平铺占满，不够时标签条整体按内容宽溢出到右侧空白，保持单行不叠字。 */
+#studioPageComfyui[data-wb-size="narrow"] #comfyuiPanes { min-width: max-content; }
+#studioPageComfyui[data-wb-size="narrow"] #comfyuiPanes .comfyui-pane-btn { min-width: max-content; }
 #studioPageComfyui[data-wb-size="narrow"] .comfyui-statusbar { flex: 0 1 110px; }
 #studioPageComfyui[data-wb-size="narrow"] .comfyui-param-heading-row { flex-wrap: wrap; }
 #studioPageComfyui[data-wb-size="narrow"] .comfyui-param-heading-actions { width: 100%; justify-content: flex-end; }

@@ -184,19 +184,30 @@ def _txt_body(text: str) -> str:
 
 
 def _write_txt_label(contents: list[str], tags: list[str] | None = None):
-    """每次打标尝试先用工具写 TXT，再返回标注 JSON（每轮两次模型调用）。"""
+    """每次打标尝试先用工具写 TXT，再返回标注 JSON（每轮两次模型调用）。
+
+    按**条目名**计数（第 0 次调用写 TXT、第 1 次回 JSON，逐轮交替）。不能用全局调用
+    序号的奇偶：多线程下全局序号与「该条目的第几次调用」不对应，CI 慢机器上一张图的
+    首调拿到奇数号就会跳过 TXT 写入、触发回填路径，监督员并发测试随之假红（4.4.12
+    连续两轮 CI 实测）。
+    """
     tags = tags or ["cat"]
+    counters: dict[str, int] = {}
+    lock = threading.Lock()
 
     def label(text, options, index):
-        attempt = index // 2
-        if index % 2:
-            tag = tags[min(attempt, len(tags) - 1)]
-            return json.dumps({"tags": [{"tag": tag, "confidence": 0.9}],
-                               "description": f"描述 {tag}"}, ensure_ascii=False)
-        content = contents[min(attempt, len(contents) - 1)]
-        return json.dumps({"type": "tool", "tool": TXT_TOOL_NAME, "arguments": {
-            "item": _image_name(text), "mode": "write", "content": content}},
-            ensure_ascii=False)
+        name = _image_name(text) or "?"
+        with lock:
+            attempt = counters.get(name, 0)
+            counters[name] = attempt + 1
+        if attempt % 2 == 0:
+            content = contents[min(attempt // 2, len(contents) - 1)]
+            return json.dumps({"type": "tool", "tool": TXT_TOOL_NAME, "arguments": {
+                "item": name, "mode": "write", "content": content}},
+                ensure_ascii=False)
+        tag = tags[min(attempt // 2, len(tags) - 1)]
+        return json.dumps({"tags": [{"tag": tag, "confidence": 0.9}],
+                           "description": f"描述 {tag}"}, ensure_ascii=False)
 
     return label
 

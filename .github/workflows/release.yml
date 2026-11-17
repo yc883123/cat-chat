@@ -197,5 +197,6 @@ jobs:
             提词库导入创作资料 41 条，按每条用途归入现有分类；小说正文创作使用新增的「小说写作」模块，与影视剧本区分并共用剧本正文分片。模块枚举登记进契约 STUDIO_CATALOG_MODULES，收藏与自定义档沿用同一枚举。
             提词库同时收录 MOSS 提示词套件 4 条（视觉小说 3 条、视频 1 条），原件按字节校验保存，来源与指纹登记在 source.json。
             修复 Skill 根目录链接检查误伤：只有 Skill 根自身是联接才拒绝，父级挂联接（CI runner / 本机自检 harness 的 TEMP 都可能挂在联接下）不再导致 Skill 无法冻结；补根自身拒绝与父级放行两个守门测试。
+            修复贴签匠并发测试桩的线程竞态：打标桩改为按条目名计数决定写 TXT 还是回 JSON，消除 CI 慢机器上监督员并发测试的确定性假红（仅测试侧修复，产品行为不变）。
             验证：本地全量运行 4995 项测试通过，并跑通 GitHub runner 短路径条件自检；守门 test_creative_presets、test_moss_presets、test_studio_content 全绿。
             Cat Chat 4.4.12 Beta Windows build。保留现有数据位置、更新协议以及双名称 exe 和 zip 资产。
